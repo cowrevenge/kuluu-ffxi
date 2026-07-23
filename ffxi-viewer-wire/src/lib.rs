@@ -217,10 +217,24 @@ impl Entity {
         )
     }
 
+    /// A server-side door NPC. Doors classify to `EntityKind::Other` but are
+    /// interactable: retail sends a Talk (0x01A, action 0x00) on the door's
+    /// act_index and the door's onTrigger lua drives open/confirm/zone-change.
+    /// LSB gates doors on `look.size == 0x02`
+    /// (vendor/server/src/map/packets/c2s/0x01a_action.cpp:212); size 3/4 decode
+    /// to `Transport` (elevators/airships), which stay non-interactable.
+    pub fn is_door(&self) -> bool {
+        matches!(self.look, Some(EntityLook::Door { .. }))
+    }
+
     /// Selectable by click / `<t>`. Dead players stay selectable so a healer can
-    /// target them to Raise; dead mobs/NPCs do not.
+    /// target them to Raise; dead mobs/NPCs do not. `Other` entities are not
+    /// selectable except doors, whose Talk interaction is the retail door flow.
     pub fn is_targetable(&self) -> bool {
-        if matches!(self.kind, EntityKind::Other) || !self.status_selectable() {
+        if !self.status_selectable() {
+            return false;
+        }
+        if matches!(self.kind, EntityKind::Other) && !self.is_door() {
             return false;
         }
         !self.is_dead() || matches!(self.kind, EntityKind::Pc)
@@ -1199,9 +1213,30 @@ mod tests {
 
         let other = Entity {
             kind: EntityKind::Other,
+            look: None,
             ..base.clone()
         };
         assert!(!other.is_targetable());
+
+        let door = Entity {
+            kind: EntityKind::Other,
+            look: Some(EntityLook::Door { size: 2 }),
+            ..base.clone()
+        };
+        assert!(
+            door.is_targetable() && door.is_cycle_candidate(),
+            "doors (Other + Door look) are interactable targets"
+        );
+
+        let transport = Entity {
+            kind: EntityKind::Other,
+            look: Some(EntityLook::Transport { size: 3 }),
+            ..base.clone()
+        };
+        assert!(
+            !transport.is_targetable(),
+            "transports/elevators stay non-targetable"
+        );
 
         let npc_unknown_hp = Entity {
             kind: EntityKind::Npc,

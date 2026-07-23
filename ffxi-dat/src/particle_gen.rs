@@ -56,7 +56,7 @@ pub enum ParticleBlend {
     Subtract,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct ParticleGeneratorDef {
     pub frames_per_emission: f32,
     pub particles_per_emission: u32,

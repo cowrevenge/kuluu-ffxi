@@ -501,10 +501,22 @@ fn rebuild_mesh(g: &LiveGenerator, rot: Quat, mesh: &mut Mesh) {
         } else {
             1.0
         };
+        // Fixed-orientation zone sheets carry raw FFXI-frame geometry; apply the
+        // generator's FFXI->Bevy basis (the same flip on origin/velocity, matching
+        // dat_mzb.rs to_bevy) so a falling water sheet hangs down into the basin
+        // instead of standing up above the emitter (kuluu-czc6). Camera billboards
+        // orient in Bevy already; actor-local generators integrate in the actor frame.
+        let world_basis = g.orientation.is_some() && !g.actor_local;
         let base = positions.len() as u32;
         for (tp, uv) in tpl.positions.iter().zip(&tpl.uvs) {
             let local = Vec3::new(tp.x * sx, tp.y * sy, tp.z * sz);
-            positions.push((world + rot * local).to_array());
+            let oriented = rot * local;
+            let oriented = if world_basis {
+                oriented * g.vel_basis
+            } else {
+                oriented
+            };
+            positions.push((world + oriented).to_array());
             uvs.push([uv[0] + g.tex_translate.x, uv[1] + g.tex_translate.y]);
             colors.push([rgb.x, rgb.y, rgb.z, vert_a]);
         }
@@ -765,6 +777,70 @@ mod tests {
         let mut mesh = empty_mesh();
         rebuild_mesh(&g, Quat::IDENTITY, &mut mesh);
         assert!(count(&mesh) > 0, "empty rebuild must not be zero-length");
+    }
+
+    // kuluu-czc6: a fixed-orientation zone sheet (e.g. the Lower Jeuno fountain
+    // "sibj" cascade) carries raw FFXI-frame geometry extending local +Y (FFXI
+    // down). rebuild_mesh must flip it through the generator's mzb->bevy vel_basis
+    // so the sheet hangs DOWN from the emitter (Bevy -Y), not up above it. A camera
+    // billboard (orientation None) must NOT be flipped — it orients in Bevy already.
+    fn sheet_gen(orientation: Option<Quat>) -> LiveGenerator {
+        let mut d = def(100.0, 1.0, 1);
+        d.camera_billboard = orientation.is_none();
+        d.init_scale = [1.0, 1.0, 1.0];
+        let mut g = live(d, 5.0);
+        // Flat quad extending local +Y (FFXI down), like the sibj water sheet.
+        g.template.positions = vec![
+            Vec3::new(-1.0, 0.0, 0.0),
+            Vec3::new(1.0, 0.0, 0.0),
+            Vec3::new(0.0, 4.0, 0.0),
+        ];
+        g.template.uvs = vec![[0.0, 0.0]; 3];
+        g.template.indices = vec![0, 1, 2];
+        g.origin = Vec3::new(0.0, 10.0, 0.0);
+        g.orientation = orientation;
+        g.actor_local = false;
+        g.vel_basis = Vec3::new(1.0, -1.0, -1.0);
+        emit(&mut g, 100.0);
+        g
+    }
+
+    fn max_sheet_y(mesh: &Mesh) -> f32 {
+        let Some(bevy::mesh::VertexAttributeValues::Float32x3(pos)) =
+            mesh.attribute(Mesh::ATTRIBUTE_POSITION)
+        else {
+            panic!("no positions");
+        };
+        // Ignore the far-below hidden primitive push_hidden_primitive leaves when needed.
+        pos.iter()
+            .map(|p| p[1])
+            .filter(|y| *y > -1.0e6)
+            .fold(f32::MIN, f32::max)
+    }
+
+    #[test]
+    fn fixed_orientation_sheet_hangs_below_emitter() {
+        let g = sheet_gen(Some(Quat::IDENTITY));
+        let mut mesh = empty_mesh();
+        rebuild_mesh(&g, Quat::IDENTITY, &mut mesh);
+        // Local +Y (0..4) flipped through vel_basis -> Bevy -Y, so every sheet vertex
+        // sits at or below the emit origin (y=10); none stand above it.
+        assert!(
+            max_sheet_y(&mesh) <= 10.0 + 1.0e-4,
+            "fixed sheet vertices must not rise above the emitter (kuluu-czc6)"
+        );
+    }
+
+    #[test]
+    fn camera_billboard_sheet_not_flipped() {
+        let g = sheet_gen(None);
+        let mut mesh = empty_mesh();
+        rebuild_mesh(&g, Quat::IDENTITY, &mut mesh);
+        // Billboard: no basis flip, so the same +Y geometry rises above the emitter.
+        assert!(
+            max_sheet_y(&mesh) > 10.0 + 1.0,
+            "camera billboards must keep their unflipped local frame"
+        );
     }
 
     #[test]

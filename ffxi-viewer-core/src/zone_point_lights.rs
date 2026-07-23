@@ -426,14 +426,13 @@ fn sync_faithful_zone_light_entities(
         commands.entity(e).try_despawn();
     }
     for (i, l) in store.lights.iter().enumerate() {
-        if l.is_character {
-            continue;
-        }
-
         let peak = l.color.max_element().max(1e-3);
         let hue = l.color / peak;
         let base_intensity = FAITHFUL_LIGHT_INTENSITY * peak;
         let glow_mat = mats.add(glow_material(hue, glow.tex.clone()));
+        // Every zone light is a real Bevy PointLight so clustered forward lighting
+        // (zone_ffxi.wgsl) illuminates the whole zone with no pop-in. Character-
+        // named lights (`c*`) still light, but get no visible glow billboard.
         let light = commands
             .spawn((
                 FaithfulZoneLight {
@@ -456,15 +455,17 @@ fn sync_faithful_zone_light_entities(
                 Visibility::default(),
             ))
             .id();
-        commands.spawn((
-            GlowBillboard,
-            Mesh3d(glow.quad.clone()),
-            MeshMaterial3d(glow_mat),
-            Transform::default(),
-            bevy::light::NotShadowCaster,
-            bevy::light::NotShadowReceiver,
-            ChildOf(light),
-        ));
+        if !l.is_character {
+            commands.spawn((
+                GlowBillboard,
+                Mesh3d(glow.quad.clone()),
+                MeshMaterial3d(glow_mat),
+                Transform::default(),
+                bevy::light::NotShadowCaster,
+                bevy::light::NotShadowReceiver,
+                ChildOf(light),
+            ));
+        }
     }
 }
 

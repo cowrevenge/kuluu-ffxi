@@ -459,12 +459,14 @@ impl Plugin for FfxiMaterialPlugin {
 mod tests {
     use super::*;
 
-    // Both WGSL shaders hard-code the point-light array length and loop bound as
-    // a literal; WGSL can't import the Rust const, so pin the mirror here.
+    // The uniform's point arrays are an ABI contract: both shaders declare the
+    // FfxiLighting mirror, so both must size the arrays at MAX_POINT_LIGHTS (WGSL
+    // can't import the Rust const). The skinned shader still loops the custom
+    // per-actor feed; the zone shader now lights via Bevy clustered forward, so
+    // it declares the arrays (layout) but no longer loops them.
     #[test]
     fn point_light_slots_match_shader() {
         let want_array = format!("array<vec4<f32>, {MAX_POINT_LIGHTS}>");
-        let want_loop = format!("i < {MAX_POINT_LIGHTS}u");
         for (name, src) in [
             ("skinned_ffxi.wgsl", include_str!("skinned_ffxi.wgsl")),
             ("zone_ffxi.wgsl", include_str!("zone_ffxi.wgsl")),
@@ -473,11 +475,11 @@ mod tests {
                 src.contains(&want_array),
                 "{name} must declare point arrays as {want_array} (MAX_POINT_LIGHTS)"
             );
-            assert!(
-                src.contains(&want_loop),
-                "{name} must loop `{want_loop}` over the point-light slots"
-            );
         }
+        assert!(
+            include_str!("skinned_ffxi.wgsl").contains(&format!("i < {MAX_POINT_LIGHTS}u")),
+            "skinned_ffxi.wgsl must loop `i < {MAX_POINT_LIGHTS}u` over the per-actor point slots"
+        );
     }
 
     #[test]

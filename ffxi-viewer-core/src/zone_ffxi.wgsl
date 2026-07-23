@@ -19,8 +19,22 @@
     view_transformations::{position_world_to_clip, position_world_to_view},
     mesh_view_bindings as view_bindings,
     mesh_view_types,
+    clustered_forward as clustering,
     shadows,
 }
+
+// FFXI point-light falloff, applied to Bevy's clustered point lights (the
+// FaithfulZoneLight PointLights). Mirrors zone_point_lights.rs: peak factor
+// 1/const at the base, quad term K/range². Kept in lockstep with
+// SCENE_LIGHT_CONST_ATTEN / SCENE_LIGHT_FALLOFF_K there.
+const FFXI_POINT_CONST_ATTEN: f32 = 1.0;
+const FFXI_POINT_FALLOFF_K: f32 = 3.0;
+// Bevy encodes clusterable color as `color·(intensity/4π)` (light.rs:1295 +
+// :534). Our FaithfulZoneLight intensity is FAITHFUL_LIGHT_INTENSITY·peak·gate
+// (zone_point_lights.rs), so multiplying by 4π/FAITHFUL_LIGHT_INTENSITY recovers
+// the FFXI-native colour magnitude (~peak·gate) the vertex-lit model expects.
+// 25000 = FAITHFUL_LIGHT_INTENSITY.
+const FFXI_CLUSTER_COLOR_SCALE: f32 = 12.566370614 / 25000.0;
 
 // Distance fog. FFXI fades distant terrain/water into the horizon backdrop
 // (the weather-DAT `fog_landscape` colour, also painted as ClearColor). Bevy
@@ -94,38 +108,58 @@ fn vertex(v: Vertex) -> VertexOutput {
     return out;
 }
 
-// Pure scene light (ambient sky fill + 2 directional + 4 point), no vertex
-// colour folded in — the caller multiplies by vertex colour, matching how
-// skinned_ffxi.wgsl::scene_irradiance works. Point slots with `point_color.w`
-// (range) <= 0 are empty and skipped. v1 zone lighting feeds only ambient +
-// the two directionals; the point loop is here for a later per-zone feed.
-fn scene_irradiance(n: vec3<f32>, p: vec3<f32>, sun_scale: f32) -> vec3<f32> {
+// Every FFXI zone point light (braziers/lamps) is a real Bevy PointLight, so
+// Bevy's clustered forward lighting bins them spatially and this loops only the
+// lights whose cluster covers the fragment — efficient even in the ~250-light
+// zones, and free of the pop-in a nearest-N-to-viewer feed causes. FFXI falloff
+// (not Bevy PBR) is applied so the look/brightness match the vertex-lit model.
+fn clustered_point_irradiance(n: vec3<f32>, p: vec3<f32>, frag_coord: vec2<f32>) -> vec3<f32> {
+    var rgb = vec3<f32>(0.0);
+    let view_z = dot(
+        vec4<f32>(
+            view_bindings::view.view_from_world[0].z,
+            view_bindings::view.view_from_world[1].z,
+            view_bindings::view.view_from_world[2].z,
+            view_bindings::view.view_from_world[3].z,
+        ),
+        vec4<f32>(p, 1.0),
+    );
+    let is_ortho = view_bindings::view.clip_from_view[3].w == 1.0;
+    let cluster_index = clustering::view_fragment_cluster_index(frag_coord, view_z, is_ortho);
+    let ranges = clustering::unpack_clusterable_object_index_ranges(cluster_index);
+    for (var i = ranges.first_point_light_index_offset;
+            i < ranges.first_spot_light_index_offset; i = i + 1u) {
+        let light_id = clustering::get_clusterable_object_id(i);
+        let lo = view_bindings::clustered_lights.data[light_id];
+        let inv_sq_range = lo.color_inverse_square_range.w;
+        if (inv_sq_range <= 0.0) { continue; }
+        let range = inverseSqrt(inv_sq_range);
+        let to_light = lo.position_radius.xyz - p;
+        let dist = length(to_light);
+        if (dist > range) { continue; }
+        let color = lo.color_inverse_square_range.rgb * FFXI_CLUSTER_COLOR_SCALE;
+        // Match zone_point_lights.rs: quad = K/range², const term, windowed to 0
+        // at the range edge (no hard cutoff seam).
+        let denom = FFXI_POINT_CONST_ATTEN + FFXI_POINT_FALLOFF_K * inv_sq_range * dist * dist;
+        let inv = select(0.0, 1.0 / denom, denom > 0.0);
+        let t = dist / range;
+        let window = 1.0 - t * t;
+        let nl = max(dot(n, to_light / max(dist, 1e-5)), 0.0);
+        rgb += nl * inv * window * window * color;
+    }
+    return rgb;
+}
+
+// Pure scene light (ambient sky fill + 2 directional + clustered point lights),
+// no vertex colour folded in — the caller multiplies by vertex colour, matching
+// skinned_ffxi.wgsl::scene_irradiance.
+fn scene_irradiance(n: vec3<f32>, p: vec3<f32>, sun_scale: f32, frag_coord: vec2<f32>) -> vec3<f32> {
     var rgb = lighting.ambient.rgb;
     let nl0 = max(dot(n, -lighting.dir0_dir.xyz), 0.0);
     rgb += sun_scale * nl0 * lighting.dir0_color.rgb * lighting.dir0_color.w;
     let nl1 = max(dot(n, -lighting.dir1_dir.xyz), 0.0);
     rgb += nl1 * lighting.dir1_color.rgb * lighting.dir1_color.w;
-    // 16 = MAX_POINT_LIGHTS (skinned_ffxi_material.rs); empty slots have range 0.
-    for (var i = 0u; i < 16u; i = i + 1u) {
-        let range = lighting.point_color[i].w;
-        if (range > 0.0) {
-            let to_light = lighting.point_pos[i].xyz - p;
-            let dist = length(to_light);
-            if (dist <= range) {
-                let a = lighting.point_atten[i].xyz; // (const, linear, quad)
-                let denom = a.x + a.y * dist + a.z * dist * dist;
-                let inv_sq = select(1.0 / denom, 0.0, denom <= 0.0);
-                // Windowed so the contribution reaches exactly 0 at the range
-                // edge; a light leaving the 4-slot set was already dark there,
-                // so the swap is invisible (no pop-in) and wide ranges are free.
-                let t = dist / range;
-                let window = (1.0 - t * t);
-                let dist_factor = inv_sq * window * window;
-                let nl = max(dot(n, to_light / max(dist, 1e-5)), 0.0);
-                rgb += nl * dist_factor * lighting.point_color[i].rgb;
-            }
-        }
-    }
+    rgb += clustered_point_irradiance(n, p, frag_coord);
     return rgb;
 }
 
@@ -193,7 +227,7 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     let sun = sun_shadow_factor(in.world_position, n, in.clip_position.xy);
     // XIM's `2 * vertexColor * texel`, with vertexColor modulating the scene
     // light. Vertex colour is overbright (can exceed 1) — do NOT clamp it.
-    let lit = scene_irradiance(n, in.world_position, sun) * in.color.rgb;
+    let lit = scene_irradiance(n, in.world_position, sun, in.clip_position.xy) * in.color.rgb;
     // research/xim ParticleGeneratorParser.kt:431-434: ToD color.rgb is a setter folded
     // over the lit texel; color multiplier (.w) scales the emitted alpha.
     let rgb = 2.0 * lit * texel.rgb * tint.rgb;

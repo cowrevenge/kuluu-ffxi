@@ -322,31 +322,104 @@ struct FaithfulZoneLight {
     glow_mat: Handle<StandardMaterial>,
 }
 
+// Marks the camera-facing additive glow quad; a child of the light entity, so it
+// inherits the (culling-free) light position and is billboarded/sized per frame.
+#[derive(Component)]
+struct GlowBillboard;
+
 // The Bevy PointLight is range-culled, so from beyond `range` a lamp shows no
-// source. A small emissive sphere at the bulb position renders regardless of
-// distance (frustum-only), reading as a bright point from afar. Radius is a
-// small bulb scale so it hugs the fixture; the emissive is pushed well above 1.0
-// so it clips bright (and bloom, when on, halos it), and its hue matches the
-// light. The material is NOT `unlit` — Bevy's unlit path outputs base_color only
-// and drops the emissive term (renders as a black ball); a lit material with a
-// black base_color shows no diffuse but still adds the emissive glow.
-const FAITHFUL_LIGHT_GLOW_RADIUS: f32 = 0.1;
-const FAITHFUL_LIGHT_GLOW_EMISSIVE: f32 = 8.0;
+// source. A camera-facing additive glow billboard renders regardless of distance
+// (frustum-only) and — scaled to a constant apparent size — stays visible from
+// afar without ballooning up close, unlike a fixed-world-size sphere. Additive +
+// a soft radial falloff reads as a light halo, not a solid object, so a small
+// offset from the fixture is far less jarring than the hard ball a mesh gave.
+const FAITHFUL_LIGHT_GLOW_INTENSITY: f32 = 3.0;
+// World size per unit camera distance → constant on-screen size (radians·2),
+// clamped so it neither vanishes far nor swallows the fixture up close.
+const GLOW_ANGULAR_SIZE: f32 = 0.05;
+const GLOW_MIN_WORLD_SIZE: f32 = 0.3;
+const GLOW_MAX_WORLD_SIZE: f32 = 3.0;
+// Radial-gradient glow sprite resolution.
+const GLOW_TEX_SIZE: u32 = 64;
+
+#[derive(Resource)]
+struct GlowAssets {
+    quad: Handle<Mesh>,
+    tex: Handle<Image>,
+}
+
+fn radial_glow_image() -> Image {
+    use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
+    let n = GLOW_TEX_SIZE;
+    let c = (n as f32 - 1.0) * 0.5;
+    let mut data = vec![0u8; (n * n * 4) as usize];
+    for y in 0..n {
+        for x in 0..n {
+            let dx = (x as f32 - c) / c;
+            let dy = (y as f32 - c) / c;
+            let r = (dx * dx + dy * dy).sqrt().min(1.0);
+            // Bright core, quadratic falloff to a transparent edge; rgb white so
+            // the material's base_color carries the tint.
+            let a = (1.0 - r) * (1.0 - r);
+            let i = ((y * n + x) * 4) as usize;
+            data[i] = 255;
+            data[i + 1] = 255;
+            data[i + 2] = 255;
+            data[i + 3] = (a * 255.0) as u8;
+        }
+    }
+    Image::new(
+        Extent3d {
+            width: n,
+            height: n,
+            depth_or_array_layers: 1,
+        },
+        TextureDimension::D2,
+        data,
+        TextureFormat::Rgba8UnormSrgb,
+        bevy::asset::RenderAssetUsages::default(),
+    )
+}
+
+fn init_glow_assets(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut images: ResMut<Assets<Image>>,
+) {
+    commands.insert_resource(GlowAssets {
+        quad: meshes.add(Rectangle::new(1.0, 1.0).mesh()),
+        tex: images.add(radial_glow_image()),
+    });
+}
+
+fn glow_material(hue: Vec3, tex: Handle<Image>) -> StandardMaterial {
+    let i = FAITHFUL_LIGHT_GLOW_INTENSITY;
+    StandardMaterial {
+        base_color: Color::from(LinearRgba::new(hue.x * i, hue.y * i, hue.z * i, 1.0)),
+        base_color_texture: Some(tex),
+        unlit: true,
+        alpha_mode: AlphaMode::Add,
+        cull_mode: None,
+        ..default()
+    }
+}
 
 fn sync_faithful_zone_light_entities(
     mut commands: Commands,
     store: Res<ZonePointLights>,
     existing: Query<Entity, With<FaithfulZoneLight>>,
-    mut meshes: ResMut<Assets<Mesh>>,
+    glow: Option<Res<GlowAssets>>,
     mut mats: ResMut<Assets<StandardMaterial>>,
 ) {
     if !store.is_changed() {
         return;
     }
+    let Some(glow) = glow else {
+        return;
+    };
     for e in &existing {
         commands.entity(e).try_despawn();
     }
-    let glow_mesh = meshes.add(Sphere::new(FAITHFUL_LIGHT_GLOW_RADIUS).mesh().uv(12, 8));
     for (i, l) in store.lights.iter().enumerate() {
         if l.is_character {
             continue;
@@ -355,44 +428,66 @@ fn sync_faithful_zone_light_entities(
         let peak = l.color.max_element().max(1e-3);
         let hue = l.color / peak;
         let base_intensity = FAITHFUL_LIGHT_INTENSITY * peak;
-        let glow_mat = mats.add(StandardMaterial {
-            base_color: Color::BLACK,
-            emissive: LinearRgba::rgb(
-                hue.x * FAITHFUL_LIGHT_GLOW_EMISSIVE,
-                hue.y * FAITHFUL_LIGHT_GLOW_EMISSIVE,
-                hue.z * FAITHFUL_LIGHT_GLOW_EMISSIVE,
-            ),
-            ..default()
-        });
+        let glow_mat = mats.add(glow_material(hue, glow.tex.clone()));
+        let light = commands
+            .spawn((
+                FaithfulZoneLight {
+                    base_intensity,
+                    base_range: l.range,
+                    flicker_seed: i as f32,
+                    hue,
+                    glow_mat: glow_mat.clone(),
+                },
+                InGameEntity,
+                PointLight {
+                    color: Color::srgb(hue.x, hue.y, hue.z),
+                    intensity: base_intensity,
+                    range: l.range * ZONE_LIGHT_REACH_SCALE,
+                    radius: 0.05,
+                    shadow_maps_enabled: false,
+                    ..default()
+                },
+                Transform::from_translation(l.world_pos),
+                Visibility::default(),
+            ))
+            .id();
         commands.spawn((
-            FaithfulZoneLight {
-                base_intensity,
-                base_range: l.range,
-                flicker_seed: i as f32,
-                hue,
-                glow_mat: glow_mat.clone(),
-            },
-            InGameEntity,
-            PointLight {
-                color: Color::srgb(hue.x, hue.y, hue.z),
-                intensity: base_intensity,
-                range: l.range * ZONE_LIGHT_REACH_SCALE,
-                radius: 0.05,
-                shadow_maps_enabled: false,
-                ..default()
-            },
-            Mesh3d(glow_mesh.clone()),
+            GlowBillboard,
+            Mesh3d(glow.quad.clone()),
             MeshMaterial3d(glow_mat),
+            Transform::default(),
             bevy::light::NotShadowCaster,
             bevy::light::NotShadowReceiver,
-            Transform::from_translation(l.world_pos),
+            ChildOf(light),
         ));
+    }
+}
+
+// Camera-facing + constant-apparent-size: orient each glow quad's +Z normal at
+// the camera and scale it with distance so it stays visible from afar without
+// growing huge up close. The light position itself is not range-culled, so this
+// is what makes a distant lamp readable while illumination still honours range.
+fn billboard_glows(
+    cameras: Query<&GlobalTransform, With<Camera3d>>,
+    mut q: Query<(&GlobalTransform, &mut Transform), With<GlowBillboard>>,
+) {
+    let Some(cam) = cameras.iter().next() else {
+        return;
+    };
+    let cam_pos = cam.translation();
+    for (gt, mut tf) in &mut q {
+        let to_cam = cam_pos - gt.translation();
+        let dist = to_cam.length().max(1e-3);
+        tf.rotation = Quat::from_rotation_arc(Vec3::Z, to_cam / dist);
+        let size = (dist * GLOW_ANGULAR_SIZE).clamp(GLOW_MIN_WORLD_SIZE, GLOW_MAX_WORLD_SIZE);
+        tf.scale = Vec3::splat(size);
     }
 }
 
 // Faithful Generator lights are real Bevy point lights (they light StandardMaterial
 // props and feed clustered lighting); gate their intensity by the same dusk/dawn
-// ramp as the custom-material feed so towns light up only at night.
+// ramp as the custom-material feed so towns light up only at night. The glow
+// billboard (a child) inherits the light's Visibility and tint.
 fn animate_faithful_zone_lights(
     vana_clock: Res<crate::vana_time::VanaClock>,
     zone_lighting: Option<Res<crate::weather::ZoneDirectionalLighting>>,
@@ -425,9 +520,9 @@ fn animate_faithful_zone_lights(
         };
         pl.range = l.base_range * ZONE_LIGHT_REACH_SCALE;
 
-        // Extinguish the glow sphere in daylight / when disabled rather than
-        // leaving a black dot; scale its emissive by the same night+flicker so a
-        // distant lamp brightens and wavers in step with the light it marks.
+        // Hide the whole light (glow child inherits) in daylight / when disabled;
+        // scale the glow tint by the same night+flicker so a distant lamp
+        // brightens and wavers in step with the light it marks.
         let want = if lit {
             Visibility::Inherited
         } else {
@@ -438,8 +533,9 @@ fn animate_faithful_zone_lights(
         }
         if lit {
             if let Some(mut m) = mats.get_mut(&l.glow_mat) {
-                let e = FAITHFUL_LIGHT_GLOW_EMISSIVE * night * flick;
-                m.emissive = LinearRgba::rgb(l.hue.x * e, l.hue.y * e, l.hue.z * e);
+                let g = FAITHFUL_LIGHT_GLOW_INTENSITY * night * flick;
+                m.base_color =
+                    Color::from(LinearRgba::new(l.hue.x * g, l.hue.y * g, l.hue.z * g, 1.0));
             }
         }
     }
@@ -451,6 +547,7 @@ impl Plugin for ZonePointLightsPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<ZonePointLights>()
             .init_resource::<ActiveSceneLights>()
+            .add_systems(Startup, init_glow_assets)
             .add_systems(
                 Update,
                 (
@@ -460,7 +557,8 @@ impl Plugin for ZonePointLightsPlugin {
                     build_active_scene_lights,
                 )
                     .chain(),
-            );
+            )
+            .add_systems(Update, billboard_glows);
     }
 }
 

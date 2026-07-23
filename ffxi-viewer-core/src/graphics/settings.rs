@@ -229,6 +229,7 @@ pub enum GraphicsField {
     LightIntensity,
     LightRange,
     LightFlicker,
+    LightCount,
 
     CharacterLighting,
 
@@ -265,6 +266,7 @@ impl GraphicsField {
             GraphicsField::LightIntensity => "  Emitter Intensity",
             GraphicsField::LightRange => "  Emitter Range",
             GraphicsField::LightFlicker => "  Flicker",
+            GraphicsField::LightCount => "  Active Lights",
             GraphicsField::CharacterLighting => "Shading",
             GraphicsField::CharacterShadowReceive => "Model Shadow Receiving",
             GraphicsField::CharacterShadowCast => "Model Shadow Casting",
@@ -285,6 +287,7 @@ impl GraphicsField {
                 | GraphicsField::LightIntensity
                 | GraphicsField::LightRange
                 | GraphicsField::LightFlicker
+                | GraphicsField::LightCount
         )
     }
 }
@@ -330,6 +333,9 @@ pub struct GraphicsSettings {
     #[serde(default = "default_light_flicker")]
     pub light_flicker: bool,
 
+    #[serde(default = "default_dynamic_light_count")]
+    pub dynamic_light_count: u32,
+
     #[serde(default)]
     pub character_render_path: CharacterRenderPath,
 
@@ -359,6 +365,12 @@ pub const DEFAULT_LIGHT_THRESHOLD: f32 = 1.15;
 pub const DEFAULT_LIGHT_INTENSITY: f32 = 25_000.0;
 pub const DEFAULT_LIGHT_RANGE: f32 = 8.0;
 pub const DEFAULT_LIGHT_FLICKER: bool = true;
+// How many dynamic point lights illuminate zone/actor surfaces at once (the
+// nearest N to the viewer/actor). The old fixed cap was 4; more lights let a
+// wider spread of lamps light their surroundings before you reach them. Capped
+// by MAX_POINT_LIGHTS (the shader array length).
+pub const DEFAULT_DYNAMIC_LIGHT_COUNT: u32 = 8;
+pub const DYNAMIC_LIGHT_COUNT_SLOTS: &[u32] = &[4, 8, 12, 16];
 
 // Lower f-stop = wider aperture = stronger background blur. f/2.8 is a tasteful
 // cinematic default once the user opts into DoF.
@@ -380,6 +392,9 @@ fn default_light_range() -> f32 {
 }
 fn default_light_flicker() -> bool {
     DEFAULT_LIGHT_FLICKER
+}
+fn default_dynamic_light_count() -> u32 {
+    DEFAULT_DYNAMIC_LIGHT_COUNT
 }
 fn default_faithful_shadow_receive() -> bool {
     true
@@ -486,6 +501,7 @@ impl GraphicsSettings {
                 light_intensity: DEFAULT_LIGHT_INTENSITY,
                 light_range: DEFAULT_LIGHT_RANGE,
                 light_flicker: DEFAULT_LIGHT_FLICKER,
+                dynamic_light_count: DEFAULT_DYNAMIC_LIGHT_COUNT,
                 character_render_path: CharacterRenderPath::FfxiFaithful,
                 realistic_character_lighting: false,
                 faithful_shadow_receive: true,
@@ -515,6 +531,7 @@ impl GraphicsSettings {
                 light_intensity: DEFAULT_LIGHT_INTENSITY,
                 light_range: DEFAULT_LIGHT_RANGE,
                 light_flicker: DEFAULT_LIGHT_FLICKER,
+                dynamic_light_count: DEFAULT_DYNAMIC_LIGHT_COUNT,
                 character_render_path: CharacterRenderPath::FfxiFaithful,
                 realistic_character_lighting: false,
                 faithful_shadow_receive: true,
@@ -544,6 +561,7 @@ impl GraphicsSettings {
                 light_intensity: DEFAULT_LIGHT_INTENSITY,
                 light_range: DEFAULT_LIGHT_RANGE,
                 light_flicker: DEFAULT_LIGHT_FLICKER,
+                dynamic_light_count: DEFAULT_DYNAMIC_LIGHT_COUNT,
                 character_render_path: CharacterRenderPath::FfxiFaithful,
                 realistic_character_lighting: false,
                 faithful_shadow_receive: true,
@@ -577,6 +595,7 @@ impl GraphicsSettings {
                 light_intensity: DEFAULT_LIGHT_INTENSITY,
                 light_range: DEFAULT_LIGHT_RANGE,
                 light_flicker: DEFAULT_LIGHT_FLICKER,
+                dynamic_light_count: DEFAULT_DYNAMIC_LIGHT_COUNT,
                 character_render_path: CharacterRenderPath::FfxiFaithful,
                 realistic_character_lighting: false,
                 faithful_shadow_receive: true,
@@ -644,6 +663,7 @@ impl GraphicsSettings {
             GraphicsField::LightIntensity => format!("{:.0}", self.light_intensity),
             GraphicsField::LightRange => format!("{:.0}m", self.light_range),
             GraphicsField::LightFlicker => bool_label(self.light_flicker).into(),
+            GraphicsField::LightCount => format!("{}", self.dynamic_light_count),
 
             GraphicsField::CharacterLighting => if self.realistic_character_lighting {
                 "Realistic"
@@ -773,6 +793,10 @@ impl GraphicsSettings {
             }
             GraphicsField::LightFlicker => {
                 self.light_flicker = !self.light_flicker;
+            }
+            GraphicsField::LightCount => {
+                self.dynamic_light_count =
+                    cycle_slot_u32(self.dynamic_light_count, DYNAMIC_LIGHT_COUNT_SLOTS, delta);
             }
             GraphicsField::CharacterLighting => {
                 self.realistic_character_lighting = !self.realistic_character_lighting;
@@ -950,6 +974,7 @@ pub const GRAPHICS_FIELDS: &[GraphicsField] = &[
     GraphicsField::LightIntensity,
     GraphicsField::LightRange,
     GraphicsField::LightFlicker,
+    GraphicsField::LightCount,
     GraphicsField::CharacterLighting,
     GraphicsField::CharacterShadowReceive,
     GraphicsField::CharacterShadowCast,
@@ -1742,8 +1767,8 @@ mod tests {
             .copied()
             .filter(|f| f.is_advanced())
             .collect();
-        // The 4 light tuning knobs.
-        assert_eq!(advanced.len(), 4, "advanced set drifted: {advanced:?}");
+        // The 5 dynamic-light tuning knobs (threshold/intensity/range/flicker/count).
+        assert_eq!(advanced.len(), 5, "advanced set drifted: {advanced:?}");
         // Every advanced field is an indented child row ("  …"); no basic field is.
         for &f in GRAPHICS_FIELDS {
             assert_eq!(

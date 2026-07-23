@@ -524,6 +524,7 @@ fn update_zone_material_point_lights(
     active: Option<Res<crate::zone_point_lights::ActiveSceneLights>>,
     q_self: Query<&GlobalTransform, With<crate::components::IsSelf>>,
     q_cam: Query<&GlobalTransform, With<Camera3d>>,
+    settings: Res<crate::graphics_settings::GraphicsSettings>,
     mut global: ResMut<ZoneGlobalLighting>,
     mut selected: Local<Vec<Vec3>>,
 ) {
@@ -543,6 +544,7 @@ fn update_zone_material_point_lights(
         crate::zone_point_lights::sticky_nearest_point_light_arrays(
             focus,
             &active.lights,
+            settings.dynamic_light_count as usize,
             &mut selected,
         );
 

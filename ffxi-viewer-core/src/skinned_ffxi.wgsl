@@ -44,12 +44,12 @@ struct FfxiLighting {
     dir0_color: vec4<f32>,
     dir1_dir: vec4<f32>,
     dir1_color: vec4<f32>,
-    point_pos: array<vec4<f32>, 4>,
-    point_color: array<vec4<f32>, 4>,
+    point_pos: array<vec4<f32>, 16>,
+    point_color: array<vec4<f32>, 16>,
     // Per-point attenuation coefficients `(const, linear, quad)` in xyz (w
     // unused). XIM's `1/(c + l·d + q·d²)` falloff; actors get `const = 0.5`
     // (the FFXI "point-lights affect actors less" dampen, GLDrawer.kt:285-290).
-    point_atten: array<vec4<f32>, 4>,
+    point_atten: array<vec4<f32>, 16>,
     // x = elapsed seconds, y = wind strength, z/w reserved.
     time_params: vec4<f32>,
 };
@@ -137,7 +137,8 @@ fn scene_irradiance(n: vec3<f32>, p: vec3<f32>, wrap: f32, sun_scale: f32) -> ve
     rgb += sun_scale * nl0 * lighting.dir0_color.rgb * lighting.dir0_color.w;
     let nl1 = max((dot(n, -lighting.dir1_dir.xyz) + wrap) / (1.0 + wrap), 0.0);
     rgb += nl1 * lighting.dir1_color.rgb * lighting.dir1_color.w;
-    for (var i = 0u; i < 4u; i = i + 1u) {
+    // 16 = MAX_POINT_LIGHTS (skinned_ffxi_material.rs); empty slots have range 0.
+    for (var i = 0u; i < 16u; i = i + 1u) {
         // `.w` of the color carries the light's range; <= 0 means an empty slot.
         let range = lighting.point_color[i].w;
         if (range > 0.0) {

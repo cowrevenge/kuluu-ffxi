@@ -2354,9 +2354,9 @@ pub fn update_ffxi_render_actor_lighting(
         dir1_dir,
         dir1_color,
 
-        point_pos: [Vec4::ZERO; 4],
-        point_color: [Vec4::ZERO; 4],
-        point_atten: [Vec4::ZERO; 4],
+        point_pos: [Vec4::ZERO; crate::skinned_ffxi_material::MAX_POINT_LIGHTS],
+        point_color: [Vec4::ZERO; crate::skinned_ffxi_material::MAX_POINT_LIGHTS],
+        point_atten: [Vec4::ZERO; crate::skinned_ffxi_material::MAX_POINT_LIGHTS],
         time_params: Vec4::ZERO,
     };
 
@@ -2374,16 +2374,22 @@ pub fn update_ffxi_render_actor_lighting(
 
 pub fn update_ffxi_actor_point_lights(
     active: Res<crate::zone_point_lights::ActiveSceneLights>,
+    settings: Res<crate::graphics_settings::GraphicsSettings>,
     q_actors: Query<(&FfxiRenderActor, &GlobalTransform)>,
     mut materials: ResMut<Assets<FfxiSkinnedMaterial>>,
 ) {
     if active.lights.is_empty() {
         return;
     }
+    let count = settings.dynamic_light_count as usize;
 
     for (actor, gt) in &q_actors {
         let (point_pos, point_color, point_atten) =
-            crate::zone_point_lights::nearest_point_light_arrays(gt.translation(), &active.lights);
+            crate::zone_point_lights::nearest_point_light_arrays(
+                gt.translation(),
+                &active.lights,
+                count,
+            );
 
         for h in &actor.materials {
             if let Some(m) = materials.get_mut_untracked(h) {

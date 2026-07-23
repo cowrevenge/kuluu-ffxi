@@ -1688,9 +1688,9 @@ pub fn update_ffxi_lighting_system(
         dir1_dir,
         dir1_color,
 
-        point_pos: [Vec4::ZERO; 4],
-        point_color: [Vec4::ZERO; 4],
-        point_atten: [Vec4::ZERO; 4],
+        point_pos: [Vec4::ZERO; crate::skinned_ffxi_material::MAX_POINT_LIGHTS],
+        point_color: [Vec4::ZERO; crate::skinned_ffxi_material::MAX_POINT_LIGHTS],
+        point_atten: [Vec4::ZERO; crate::skinned_ffxi_material::MAX_POINT_LIGHTS],
         time_params: Vec4::ZERO,
     };
 

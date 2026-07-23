@@ -22,6 +22,14 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 pub const MAX_JOINTS: usize = 128;
 
+/// Point-light slots in `FfxiLightingUniform`, shared by the zone and skinned
+/// shaders. Both `zone_ffxi.wgsl` and `skinned_ffxi.wgsl` hard-code this as the
+/// array length and loop bound; `point_light_slots_match_shader` guards the
+/// mirror. The active count (how many slots the nearest-N pickers fill) is the
+/// runtime `GraphicsSettings::dynamic_light_count`, capped here; empty slots
+/// carry range 0 and the shaders skip them.
+pub const MAX_POINT_LIGHTS: usize = 16;
+
 const ATTR_ID_BASE: u64 = 0x4646_5849_0000_0000;
 
 pub const ATTR_POSITION0: MeshVertexAttribute =
@@ -55,11 +63,11 @@ pub struct FfxiLightingUniform {
     pub dir0_color: Vec4,
     pub dir1_dir: Vec4,
     pub dir1_color: Vec4,
-    pub point_pos: [Vec4; 4],
+    pub point_pos: [Vec4; MAX_POINT_LIGHTS],
 
-    pub point_color: [Vec4; 4],
+    pub point_color: [Vec4; MAX_POINT_LIGHTS],
 
-    pub point_atten: [Vec4; 4],
+    pub point_atten: [Vec4; MAX_POINT_LIGHTS],
 
     /// Shared per-frame animation parameters, written once per frame into the
     /// single persistent lighting buffer (see `ZoneGlobalLighting`):
@@ -77,9 +85,9 @@ impl Default for FfxiLightingUniform {
             dir0_color: Vec4::new(0.6, 0.6, 0.6, 1.0),
             dir1_dir: Vec4::ZERO,
             dir1_color: Vec4::ZERO,
-            point_pos: [Vec4::ZERO; 4],
-            point_color: [Vec4::ZERO; 4],
-            point_atten: [Vec4::ZERO; 4],
+            point_pos: [Vec4::ZERO; MAX_POINT_LIGHTS],
+            point_color: [Vec4::ZERO; MAX_POINT_LIGHTS],
+            point_atten: [Vec4::ZERO; MAX_POINT_LIGHTS],
             time_params: Vec4::ZERO,
         }
     }
@@ -450,6 +458,27 @@ impl Plugin for FfxiMaterialPlugin {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Both WGSL shaders hard-code the point-light array length and loop bound as
+    // a literal; WGSL can't import the Rust const, so pin the mirror here.
+    #[test]
+    fn point_light_slots_match_shader() {
+        let want_array = format!("array<vec4<f32>, {MAX_POINT_LIGHTS}>");
+        let want_loop = format!("i < {MAX_POINT_LIGHTS}u");
+        for (name, src) in [
+            ("skinned_ffxi.wgsl", include_str!("skinned_ffxi.wgsl")),
+            ("zone_ffxi.wgsl", include_str!("zone_ffxi.wgsl")),
+        ] {
+            assert!(
+                src.contains(&want_array),
+                "{name} must declare point arrays as {want_array} (MAX_POINT_LIGHTS)"
+            );
+            assert!(
+                src.contains(&want_loop),
+                "{name} must loop `{want_loop}` over the point-light slots"
+            );
+        }
+    }
 
     #[test]
     fn t_factor_half_color_is_neutral() {

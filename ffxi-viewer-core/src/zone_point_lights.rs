@@ -165,15 +165,23 @@ pub fn build_active_scene_lights(
     }
 }
 
-/// Pack up to four selected lights into the `(point_pos, point_color,
-/// point_atten)` arrays of `FfxiLightingUniform`. `point_color.w` carries range
-/// (the shader treats slots with range <= 0 as empty); `point_atten` is
-/// `(const, linear, quad, _)`.
-fn pack_point_light_arrays(selected: &[ZonePointLight]) -> ([Vec4; 4], [Vec4; 4], [Vec4; 4]) {
-    let mut point_pos = [Vec4::ZERO; 4];
-    let mut point_color = [Vec4::ZERO; 4];
-    let mut point_atten = [Vec4::ZERO; 4];
-    for (slot, l) in selected.iter().take(4).enumerate() {
+use crate::skinned_ffxi_material::MAX_POINT_LIGHTS;
+
+pub type PointLightArrays = (
+    [Vec4; MAX_POINT_LIGHTS],
+    [Vec4; MAX_POINT_LIGHTS],
+    [Vec4; MAX_POINT_LIGHTS],
+);
+
+/// Pack the selected lights into the `(point_pos, point_color, point_atten)`
+/// arrays of `FfxiLightingUniform`. `point_color.w` carries range (the shader
+/// treats slots with range <= 0 as empty); `point_atten` is
+/// `(const, linear, quad, _)`. Excess beyond `MAX_POINT_LIGHTS` is dropped.
+fn pack_point_light_arrays(selected: &[ZonePointLight]) -> PointLightArrays {
+    let mut point_pos = [Vec4::ZERO; MAX_POINT_LIGHTS];
+    let mut point_color = [Vec4::ZERO; MAX_POINT_LIGHTS];
+    let mut point_atten = [Vec4::ZERO; MAX_POINT_LIGHTS];
+    for (slot, l) in selected.iter().take(MAX_POINT_LIGHTS).enumerate() {
         point_pos[slot] = l.world_pos.extend(0.0);
         point_color[slot] = l.color.extend(l.range);
         point_atten[slot] = Vec4::new(SCENE_LIGHT_CONST_ATTEN, 0.0, l.attenuation, 0.0);
@@ -181,29 +189,24 @@ fn pack_point_light_arrays(selected: &[ZonePointLight]) -> ([Vec4; 4], [Vec4; 4]
     (point_pos, point_color, point_atten)
 }
 
-/// Pick the four nearest in-range lights to `pos` and pack them. Used by the
-/// per-actor feed, where popping is invisible (actors are small and moving).
+/// Pick the `count` nearest in-range lights to `pos` and pack them (`count`
+/// clamped to `MAX_POINT_LIGHTS`). Used by the per-actor feed, where popping is
+/// invisible (actors are small and moving).
 pub fn nearest_point_light_arrays(
     pos: Vec3,
     lights: &[ZonePointLight],
-) -> ([Vec4; 4], [Vec4; 4], [Vec4; 4]) {
-    let mut best: [(f32, usize); 4] = [(f32::INFINITY, usize::MAX); 4];
-    for (i, l) in lights.iter().enumerate() {
-        let d2 = pos.distance_squared(l.world_pos);
-        if d2 > l.range * l.range || d2 >= best[3].0 {
-            continue;
-        }
-        best[3] = (d2, i);
-        let mut j = 3;
-        while j > 0 && best[j].0 < best[j - 1].0 {
-            best.swap(j, j - 1);
-            j -= 1;
-        }
-    }
-    let selected: Vec<ZonePointLight> = best
+    count: usize,
+) -> PointLightArrays {
+    let mut in_range: Vec<(f32, ZonePointLight)> = lights
         .iter()
-        .filter(|(_, idx)| *idx != usize::MAX)
-        .map(|(_, idx)| lights[*idx])
+        .filter(|l| pos.distance_squared(l.world_pos) <= l.range * l.range)
+        .map(|l| (pos.distance_squared(l.world_pos), *l))
+        .collect();
+    in_range.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let selected: Vec<ZonePointLight> = in_range
+        .into_iter()
+        .take(count.min(MAX_POINT_LIGHTS))
+        .map(|(_, l)| l)
         .collect();
     pack_point_light_arrays(&selected)
 }
@@ -223,12 +226,14 @@ const ZONE_LIGHT_KEEP_FACTOR: f32 = 1.35;
 pub fn sticky_nearest_point_light_arrays(
     pos: Vec3,
     lights: &[ZonePointLight],
+    count: usize,
     selected: &mut Vec<Vec3>,
-) -> ([Vec4; 4], [Vec4; 4], [Vec4; 4]) {
-    let mut chosen: Vec<ZonePointLight> = Vec::with_capacity(4);
+) -> PointLightArrays {
+    let cap = count.min(MAX_POINT_LIGHTS);
+    let mut chosen: Vec<ZonePointLight> = Vec::with_capacity(cap);
 
     for keep_pos in selected.iter() {
-        if chosen.len() >= 4 {
+        if chosen.len() >= cap {
             break;
         }
         if let Some(l) = lights.iter().find(|l| l.world_pos == *keep_pos) {
@@ -249,7 +254,7 @@ pub fn sticky_nearest_point_light_arrays(
         .collect();
     newcomers.sort_by(|a, b| a.0.total_cmp(&b.0));
     for (_, l) in newcomers {
-        if chosen.len() >= 4 {
+        if chosen.len() >= cap {
             break;
         }
         chosen.push(l);
@@ -636,9 +641,9 @@ mod tests {
             light(Vec3::new(9.0, 0.0, 0.0), 10.0),
             light(Vec3::new(3.0, 0.0, 0.0), 10.0),
         ];
-        let (pos, color, atten) = nearest_point_light_arrays(Vec3::ZERO, &lights);
+        let (pos, color, atten) = nearest_point_light_arrays(Vec3::ZERO, &lights, 4);
 
-        let xs: Vec<f32> = pos.iter().map(|p| p.x).collect();
+        let xs: Vec<f32> = pos.iter().take(4).map(|p| p.x).collect();
         assert_eq!(
             xs,
             vec![1.0, 2.0, 3.0, 5.0],
@@ -663,7 +668,7 @@ mod tests {
             light(Vec3::new(20.0, 0.0, 0.0), 5.0),
             light(Vec3::new(2.0, 0.0, 0.0), 5.0),
         ];
-        let (_, color, _) = nearest_point_light_arrays(Vec3::ZERO, &lights);
+        let (_, color, _) = nearest_point_light_arrays(Vec3::ZERO, &lights, 4);
         assert_eq!(color[0].w, 5.0, "the in-range light fills slot 0");
         assert_eq!(
             color[1].w, 0.0,
@@ -676,7 +681,7 @@ mod tests {
         let lights = [light(Vec3::ZERO, 10.0)];
         let mut selected = vec![Vec3::ZERO];
         let (_, color, _) =
-            sticky_nearest_point_light_arrays(Vec3::new(12.0, 0.0, 0.0), &lights, &mut selected);
+            sticky_nearest_point_light_arrays(Vec3::new(12.0, 0.0, 0.0), &lights, 4, &mut selected);
         assert_eq!(
             color[0].w, 10.0,
             "past range (10) but inside keep band (13.5), an already-selected light stays"
@@ -689,7 +694,7 @@ mod tests {
         let lights = [light(Vec3::ZERO, 10.0)];
         let mut selected = vec![Vec3::ZERO];
         let (_, color, _) =
-            sticky_nearest_point_light_arrays(Vec3::new(15.0, 0.0, 0.0), &lights, &mut selected);
+            sticky_nearest_point_light_arrays(Vec3::new(15.0, 0.0, 0.0), &lights, 4, &mut selected);
         assert_eq!(
             color[0].w, 0.0,
             "beyond the keep band (13.5) the light drops"
@@ -702,12 +707,12 @@ mod tests {
         let lights = [light(Vec3::ZERO, 10.0)];
         let mut selected = Vec::new();
         let (_, color, _) =
-            sticky_nearest_point_light_arrays(Vec3::new(12.0, 0.0, 0.0), &lights, &mut selected);
+            sticky_nearest_point_light_arrays(Vec3::new(12.0, 0.0, 0.0), &lights, 4, &mut selected);
         assert_eq!(color[0].w, 0.0, "a fresh light past range does not enter");
         assert!(selected.is_empty());
 
         let (_, color, _) =
-            sticky_nearest_point_light_arrays(Vec3::new(5.0, 0.0, 0.0), &lights, &mut selected);
+            sticky_nearest_point_light_arrays(Vec3::new(5.0, 0.0, 0.0), &lights, 4, &mut selected);
         assert_eq!(color[0].w, 10.0, "within range it enters");
         assert_eq!(selected, vec![Vec3::ZERO]);
     }

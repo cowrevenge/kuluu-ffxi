@@ -2,7 +2,8 @@ use bevy::asset::RenderAssetUsages;
 use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
 
-use ffxi_dat::particle_gen::{KeyFrameTrack, ParticleGeneratorDef};
+use ffxi_dat::particle_gen::{KeyFrameTrack, ParticleGeneratorDef, ParticleMeshKind};
+use ffxi_dat::sprite_sheet::ParticleSpriteSheet;
 
 use crate::camera::OperatorCamera;
 use crate::components::InGameEntity;
@@ -26,6 +27,7 @@ impl ParticleSimulator {
     }
 }
 
+#[derive(Clone)]
 struct SpriteTemplate {
     positions: Vec<Vec3>,
     uvs: Vec<[f32; 2]>,
@@ -36,6 +38,10 @@ struct SpriteTemplate {
 struct LiveGenerator {
     def: ParticleGeneratorDef,
     template: SpriteTemplate,
+    // SpriteSheet (0x0E) flipbook frames; empty for a StaticMesh (0x0B) generator. When
+    // non-empty each particle picks a frame by life progress in rebuild_mesh (research/xim
+    // Particle.kt:72 spriteSheetIndex advanced over life).
+    sprite_frames: Vec<SpriteTemplate>,
     scale_x: Option<KeyFrameTrack>,
     scale_y: Option<KeyFrameTrack>,
     alpha: Option<KeyFrameTrack>,
@@ -100,18 +106,9 @@ pub fn spawn_particle_generators(
         let Some(def) = assets.particle_defs.get(&ev.stage.stage.id).copied() else {
             continue;
         };
-        let Some(d3m) = assets.d3ms.get(&def.mesh_id) else {
+        let Some((template, sprite_frames, tex)) = resolve_mesh(assets, &def, &mut images) else {
             continue;
         };
-        let Some(template) = sprite_template(d3m) else {
-            continue;
-        };
-
-        let tex = d3m.texture_name[8..12]
-            .try_into()
-            .ok()
-            .and_then(|name: [u8; 4]| assets.images.get(&name))
-            .map(|t| images.add(decoded_texture_to_image(t)));
         let blend = match def.blend {
             ffxi_dat::particle_gen::ParticleBlend::Additive => D3mBlendMode::Additive,
             ffxi_dat::particle_gen::ParticleBlend::Blend => D3mBlendMode::Blended,
@@ -153,6 +150,7 @@ pub fn spawn_particle_generators(
             scale_y: resolve(def.scale_y_track),
             alpha: resolve(def.alpha_track),
             template,
+            sprite_frames,
             def,
             origin: actor_xf.translation + Vec3::Y * def.base_position[1],
             particles: Vec::new(),
@@ -189,18 +187,10 @@ pub fn spawn_actor_auto_run_particles(
                 continue;
             }
             let def = *def;
-            let Some(d3m) = fx.assets.d3ms.get(&def.mesh_id) else {
+            let Some((template, sprite_frames, tex)) = resolve_mesh(&fx.assets, &def, &mut images)
+            else {
                 continue;
             };
-            let Some(template) = sprite_template(d3m) else {
-                continue;
-            };
-
-            let tex = d3m.texture_name[8..12]
-                .try_into()
-                .ok()
-                .and_then(|tex_name: [u8; 4]| fx.assets.images.get(&tex_name))
-                .map(|t| images.add(decoded_texture_to_image(t)));
             let blend = match def.blend {
                 ffxi_dat::particle_gen::ParticleBlend::Additive => D3mBlendMode::Additive,
                 ffxi_dat::particle_gen::ParticleBlend::Blend => D3mBlendMode::Blended,
@@ -238,6 +228,7 @@ pub fn spawn_actor_auto_run_particles(
                 scale_y: resolve(def.scale_y_track),
                 alpha: resolve(def.alpha_track),
                 template,
+                sprite_frames,
                 origin: Vec3::from_array(def.base_position),
                 particles: Vec::new(),
                 emit_accum: 0.0,
@@ -271,16 +262,10 @@ pub fn spawn_zone_particle_generator(
     sim: &mut ParticleSimulator,
     commands: &mut Commands,
 ) -> Option<Entity> {
-    // Zone sprays link either a D3M billboard or an MMB mesh by DatId (e.g. Bastok
-    // "abuk", Port Windurst "rivsea"); the MMB texture resolves by internal name.
-    let (template, tex) = if let Some(d3m) = assets.d3ms.get(&def.mesh_id) {
-        let template = sprite_template(d3m)?;
-        let tex = d3m.texture_name[8..12]
-            .try_into()
-            .ok()
-            .and_then(|name: [u8; 4]| assets.images.get(&name))
-            .map(|t| images.add(decoded_texture_to_image(t)));
-        (template, tex)
+    // Zone sprays link a D3M billboard, an MMB mesh, or a SpriteSheet by DatId (e.g. Bastok
+    // "abuk", Port Windurst "rivsea"); the MMB/SpriteSheet texture resolves by internal name.
+    let (template, sprite_frames, tex) = if let Some(triple) = resolve_mesh(assets, &def, images) {
+        triple
     } else {
         let mmb = assets.mmbs.get(&def.mesh_id)?;
         let template = mmb_sprite_template(mmb)?;
@@ -288,7 +273,7 @@ pub fn spawn_zone_particle_generator(
             .images_by_name
             .get(&mmb.texture_name)
             .map(|t| images.add(decoded_texture_to_image(t)));
-        (template, tex)
+        (template, Vec::new(), tex)
     };
     let blend = match def.blend {
         ffxi_dat::particle_gen::ParticleBlend::Additive => D3mBlendMode::Additive,
@@ -320,6 +305,7 @@ pub fn spawn_zone_particle_generator(
         scale_y: resolve(def.scale_y_track),
         alpha: resolve(def.alpha_track),
         template,
+        sprite_frames,
         origin,
         particles: Vec::new(),
         emit_accum: 0.0,
@@ -473,6 +459,9 @@ fn rebuild_mesh(g: &LiveGenerator, rot: Quat, mesh: &mut Mesh) {
 
     for p in &g.particles {
         let progress = (p.age_frames / p.life_frames).clamp(0.0, 1.0);
+        // A SpriteSheet particle flipbooks its frames over life (research/xim Particle.kt:72
+        // spriteSheetIndex); a StaticMesh particle keeps its single template.
+        let tpl = flipbook_frame(g, progress);
         let sx = g
             .scale_x
             .as_ref()
@@ -500,8 +489,8 @@ fn rebuild_mesh(g: &LiveGenerator, rot: Quat, mesh: &mut Mesh) {
         // Additive/subtract ignore the alpha channel, so the alpha curve modulates brightness;
         // alpha-blended particles keep full-brightness colour and use the alpha channel.
         let (rgb, vert_a) = match g.def.blend {
-            ffxi_dat::particle_gen::ParticleBlend::Blend => (g.template.brightness * p.rgb, alpha),
-            _ => (g.template.brightness * p.rgb * alpha, 1.0),
+            ffxi_dat::particle_gen::ParticleBlend::Blend => (tpl.brightness * p.rgb, alpha),
+            _ => (tpl.brightness * p.rgb * alpha, 1.0),
         };
         let world = g.origin + p.pos;
 
@@ -513,13 +502,13 @@ fn rebuild_mesh(g: &LiveGenerator, rot: Quat, mesh: &mut Mesh) {
             1.0
         };
         let base = positions.len() as u32;
-        for (tp, uv) in g.template.positions.iter().zip(&g.template.uvs) {
+        for (tp, uv) in tpl.positions.iter().zip(&tpl.uvs) {
             let local = Vec3::new(tp.x * sx, tp.y * sy, tp.z * sz);
             positions.push((world + rot * local).to_array());
             uvs.push([uv[0] + g.tex_translate.x, uv[1] + g.tex_translate.y]);
             colors.push([rgb.x, rgb.y, rgb.z, vert_a]);
         }
-        indices.extend(g.template.indices.iter().map(|&idx| base + idx));
+        indices.extend(tpl.indices.iter().map(|&idx| base + idx));
     }
 
     if positions.is_empty() {
@@ -573,6 +562,70 @@ fn sprite_template(d3m: &ffxi_dat::d3m::D3m) -> Option<SpriteTemplate> {
     })
 }
 
+// Resolve a generator's mesh_id to (frame-0 template, flipbook frames, texture). A StaticMesh
+// (0x0B) def binds a D3M and has no flipbook frames; a SpriteSheet (0x0E) def binds a 0x21
+// sheet whose texture resolves by internal name via images_by_name. Returns None when the
+// referenced mesh isn't present (leaving zone callers to fall back to an MMB mesh).
+fn resolve_mesh(
+    assets: &ActionAssets,
+    def: &ParticleGeneratorDef,
+    images: &mut Assets<Image>,
+) -> Option<(SpriteTemplate, Vec<SpriteTemplate>, Option<Handle<Image>>)> {
+    match def.mesh_kind {
+        ParticleMeshKind::StaticMesh => {
+            let d3m = assets.d3ms.get(&def.mesh_id)?;
+            let template = sprite_template(d3m)?;
+            let tex = d3m.texture_name[8..12]
+                .try_into()
+                .ok()
+                .and_then(|name: [u8; 4]| assets.images.get(&name))
+                .map(|t| images.add(decoded_texture_to_image(t)));
+            Some((template, Vec::new(), tex))
+        }
+        ParticleMeshKind::SpriteSheet => {
+            let ss = assets.sprite_sheets.get(&def.mesh_id)?;
+            let frames = sprite_sheet_templates(ss);
+            let first = frames.first().cloned()?;
+            let tex = assets
+                .images_by_name
+                .get(&ss.category)
+                .map(|t| images.add(decoded_texture_to_image(t)));
+            Some((first, frames, tex))
+        }
+    }
+}
+
+fn sprite_sheet_templates(ss: &ParticleSpriteSheet) -> Vec<SpriteTemplate> {
+    ss.frames
+        .iter()
+        .filter_map(|f| {
+            if f.positions.is_empty() {
+                return None;
+            }
+            let c = f.colors[0];
+            Some(SpriteTemplate {
+                positions: f.positions.iter().map(|p| Vec3::from_array(*p)).collect(),
+                uvs: f.uvs.clone(),
+                indices: (0..f.positions.len() as u32).collect(),
+                // FFXI vertex colors are 2x-overbright (see d3m.rs color parse); the venom-cloud
+                // tint is then modulated by the generator's init_color in rebuild_mesh.
+                brightness: Vec3::new(c[0] as f32, c[1] as f32, c[2] as f32) / 128.0,
+            })
+        })
+        .collect()
+}
+
+// research/xim Particle.kt:72 — the spriteSheetIndex advances the flipbook across the
+// particle's lifetime. StaticMesh particles carry no frames and use the single template.
+fn flipbook_frame(g: &LiveGenerator, progress: f32) -> &SpriteTemplate {
+    if g.sprite_frames.is_empty() {
+        return &g.template;
+    }
+    let n = g.sprite_frames.len();
+    let idx = ((progress * n as f32) as usize).min(n - 1);
+    &g.sprite_frames[idx]
+}
+
 fn mmb_sprite_template(mmb: &MmbSpriteMesh) -> Option<SpriteTemplate> {
     if mmb.positions.is_empty() || mmb.indices.is_empty() {
         return None;
@@ -611,6 +664,7 @@ mod tests {
             particles_per_emission: ppe,
             emission_variance: 0.0,
             mesh_id: *b"gr  ",
+            mesh_kind: ffxi_dat::particle_gen::ParticleMeshKind::StaticMesh,
             base_position: [0.0, 0.5, 0.0],
             max_life_frames: life,
             camera_billboard: true,
@@ -640,6 +694,7 @@ mod tests {
                 indices: vec![0, 1, 2],
                 brightness: Vec3::ONE,
             },
+            sprite_frames: Vec::new(),
             scale_x: None,
             scale_y: None,
             alpha: None,

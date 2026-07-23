@@ -15,7 +15,22 @@ use crate::{DatError, Result};
 // allocationOffset = cfg>>0xD; the block is size_words*4 bytes; a 0 opcode/size terminates.
 // Only section 2 (particle initializers) is needed for the visible stream.
 const HEADER_LEN: usize = 0x80;
-const PARTICLE_LINKED_DATA: u8 = 0x0B;
+// research/xim ParticleGeneratorSettings.kt:187 — the StandardParticleSetup linked_data_type
+// (setup byte payload+29) selects the particle's mesh source: 0x0B StaticMesh (a D3M billboard),
+// 0x0E SpriteSheet (a 0x21 flipbook quad). 0x57 Null / 0x47 PointLight and any other value are
+// non-visual particle types and are rejected (parse returns None).
+const LINKED_DATA_STATIC_MESH: u8 = 0x0B;
+const LINKED_DATA_SPRITE_SHEET: u8 = 0x0E;
+
+// research/xim ParticleGeneratorSettings.kt:187 (mesh source) + Particle.kt:72 (per-particle
+// spriteSheetIndex flipbook cursor advanced over life). StaticMesh binds a D3M; SpriteSheet binds
+// a 0x21 sprite-sheet whose frames flipbook across the particle's lifetime.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ParticleMeshKind {
+    #[default]
+    StaticMesh,
+    SpriteSheet,
+}
 // research/xim ParticleGeneratorParser.kt:68-70 (genFlags at body[0x69]);
 // continuous singleton + auto-run-at-model-ready semantics: Actor.kt:724-734.
 const GEN_FLAG_CONTINUOUS: u8 = 0x04;
@@ -48,6 +63,7 @@ pub struct ParticleGeneratorDef {
     pub emission_variance: f32,
 
     pub mesh_id: [u8; 4],
+    pub mesh_kind: ParticleMeshKind,
     pub base_position: [f32; 3],
     pub max_life_frames: f32,
     pub camera_billboard: bool,
@@ -106,6 +122,7 @@ impl ParticleGeneratorDef {
         let mut cursor = sec2_raw - 0x10;
 
         let mut mesh_id = [0u8; 4];
+        let mut mesh_kind = ParticleMeshKind::StaticMesh;
         let mut base_position = [0.0f32; 3];
         let mut max_life_frames = 0.0f32;
         let mut camera_billboard = false;
@@ -148,7 +165,11 @@ impl ParticleGeneratorDef {
                         f32_le(body, payload + 20),
                         f32_le(body, payload + 24),
                     ];
-                    is_particle = body[payload + 29] == PARTICLE_LINKED_DATA;
+                    (is_particle, mesh_kind) = match body[payload + 29] {
+                        LINKED_DATA_STATIC_MESH => (true, ParticleMeshKind::StaticMesh),
+                        LINKED_DATA_SPRITE_SHEET => (true, ParticleMeshKind::SpriteSheet),
+                        _ => (false, ParticleMeshKind::StaticMesh),
+                    };
                     max_life_frames = u16_le(body, payload + 30) as f32;
                 }
                 0x02 if payload + 12 <= body.len() => {
@@ -278,6 +299,7 @@ impl ParticleGeneratorDef {
             particles_per_emission,
             emission_variance,
             mesh_id,
+            mesh_kind,
             base_position,
             max_life_frames,
             camera_billboard,
@@ -416,7 +438,7 @@ mod tests {
         // base position y at payload+20
         setup[4 + 20..4 + 24].copy_from_slice(&0.2f32.to_le_bytes());
         // linked-data type at payload+29 = particle; max life u16 at payload+30
-        setup[4 + 29] = PARTICLE_LINKED_DATA;
+        setup[4 + 29] = LINKED_DATA_STATIC_MESH;
         setup[4 + 30..4 + 32].copy_from_slice(&36u16.to_le_bytes());
 
         let mut sec2 = setup;
@@ -463,7 +485,7 @@ mod tests {
         // Minimal particle setup in section 2, terminated, then a section-3 stream at
         // body[0x78] with TextureCoordinateUpdater 0x27/0x28 and VelocityAccelerator 0x03.
         let mut setup = op(0x01, 12, &[]);
-        setup[4 + 29] = PARTICLE_LINKED_DATA;
+        setup[4 + 29] = LINKED_DATA_STATIC_MESH;
         let mut body = build(&setup, 1, 1);
         body.extend_from_slice(&[0u8; 4]); // terminate section 2
         let sec3_body_index = body.len();
@@ -494,7 +516,7 @@ mod tests {
     #[test]
     fn no_section3_leaves_defaults() {
         let mut setup = op(0x01, 12, &[]);
-        setup[4 + 29] = PARTICLE_LINKED_DATA;
+        setup[4 + 29] = LINKED_DATA_STATIC_MESH;
         let body = build(&setup, 1, 1);
         let def = ParticleGeneratorDef::parse(&body).unwrap().unwrap();
         assert_eq!(def.uv_scroll, [0.0, 0.0]);
@@ -504,7 +526,7 @@ mod tests {
     #[test]
     fn gen_flags_decode_auto_run_and_continuous() {
         let mut setup = op(0x01, 12, &[]);
-        setup[4 + 29] = PARTICLE_LINKED_DATA;
+        setup[4 + 29] = LINKED_DATA_STATIC_MESH;
         let mut body = build(&setup, 1, 1);
         body[0x69] = GEN_FLAG_AUTO_RUN | GEN_FLAG_CONTINUOUS;
         let def = ParticleGeneratorDef::parse(&body).unwrap().unwrap();
@@ -524,13 +546,43 @@ mod tests {
         setup[4 + 29] = 0x47; // point light, not particle
         let body = build(&setup, 1, 1);
         assert!(ParticleGeneratorDef::parse(&body).unwrap().is_none());
+
+        // 0x57 Null particle type is likewise non-visual and rejected.
+        let mut setup = op(0x01, 12, &[]);
+        setup[4 + 29] = 0x57;
+        let body = build(&setup, 1, 1);
+        assert!(ParticleGeneratorDef::parse(&body).unwrap().is_none());
+    }
+
+    // Regression pin (Poison's venom cloud): a 0x0E SpriteSheet generator used to be dropped
+    // because only 0x0B was accepted. It must now parse to Some with mesh_kind == SpriteSheet.
+    #[test]
+    fn sprite_sheet_setup_parses_with_mesh_kind() {
+        let mut setup = op(0x01, 12, &[]);
+        setup[4 + 8..4 + 12].copy_from_slice(b"fir ");
+        setup[4 + 29] = LINKED_DATA_SPRITE_SHEET;
+        setup[4 + 30..4 + 32].copy_from_slice(&24u16.to_le_bytes());
+        let body = build(&setup, 1, 1);
+        let def = ParticleGeneratorDef::parse(&body).unwrap().unwrap();
+        assert_eq!(def.mesh_kind, ParticleMeshKind::SpriteSheet);
+        assert_eq!(def.mesh_id, *b"fir ");
+        assert_eq!(def.max_life_frames, 24.0);
+    }
+
+    #[test]
+    fn static_mesh_setup_reports_static_mesh_kind() {
+        let mut setup = op(0x01, 12, &[]);
+        setup[4 + 29] = LINKED_DATA_STATIC_MESH;
+        let body = build(&setup, 1, 1);
+        let def = ParticleGeneratorDef::parse(&body).unwrap().unwrap();
+        assert_eq!(def.mesh_kind, ParticleMeshKind::StaticMesh);
     }
 
     #[test]
     fn singleton_when_max_life_zero() {
         let mut setup = op(0x01, 12, &[]);
         setup[4 + 8..4 + 12].copy_from_slice(b"sea0");
-        setup[4 + 29] = PARTICLE_LINKED_DATA;
+        setup[4 + 29] = LINKED_DATA_STATIC_MESH;
         // max life left at 0
         let body = build(&setup, 1, 1);
         let def = ParticleGeneratorDef::parse(&body).unwrap().unwrap();

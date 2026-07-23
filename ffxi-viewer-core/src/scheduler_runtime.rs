@@ -128,6 +128,10 @@ pub struct ActionAssets {
     pub d3ms: HashMap<[u8; 4], ffxi_dat::d3m::D3m>,
     #[cfg(not(target_arch = "wasm32"))]
     pub mmbs: HashMap<[u8; 4], MmbSpriteMesh>,
+    // SpriteSheet (0x0E) particle meshes, keyed by the 0x21 chunk DatId a generator's
+    // mesh_id references (e.g. Poison's `fir ` → 0x21 `fir`).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub sprite_sheets: HashMap<[u8; 4], ffxi_dat::sprite_sheet::ParticleSpriteSheet>,
     pub seps: HashMap<[u8; 4], Sep>,
     pub animations: Vec<ffxi_dat::skel_anim::SkeletonAnimation>,
     #[cfg(not(target_arch = "wasm32"))]
@@ -206,6 +210,12 @@ pub fn parse_action_bytes(bytes: &[u8]) -> (Vec<Scheduler>, ActionAssets) {
             ChunkKind::Mmb => {
                 if let Some(mesh) = mmb_sprite_mesh(c.data) {
                     assets.mmbs.insert(c.name, mesh);
+                }
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            ChunkKind::SpriteSheet => {
+                if let Some(ss) = ffxi_dat::sprite_sheet::ParticleSpriteSheet::parse(c.data) {
+                    assets.sprite_sheets.insert(c.name, ss);
                 }
             }
             ChunkKind::Sep => {
@@ -833,5 +843,69 @@ mod tests {
         assert!(assets.seps.is_empty());
         #[cfg(not(target_arch = "wasm32"))]
         assert!(assets.d3ms.is_empty());
+    }
+
+    // End-to-end against the installed retail DATs (skips without them): Poison's completion
+    // effect (file 3020, 'veno') carries a 0x0E SpriteSheet particle cloud backed by a 0x21
+    // 'fir' sheet. The fir0/fir1/fir2 generators must parse as SpriteSheet defs whose mesh_id
+    // resolves to a retained sprite sheet — the regression that dropped every 0x0E generator so
+    // only the neutral pk00/pk01 smoke survived. Cure (file 2801) must be unaffected: its
+    // static-mesh (0x0B) particle defs still parse.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn real_dat_poison_renders_sprite_sheet_particles_cure_unaffected() {
+        use ffxi_dat::particle_gen::ParticleMeshKind;
+
+        const POISON_FILE: u32 = 3020;
+        const CURE_FILE: u32 = 2801;
+
+        let Ok(root) = ffxi_dat::DatRoot::from_env_or_default() else {
+            return;
+        };
+        let Ok(loc) = root.resolve(POISON_FILE) else {
+            return;
+        };
+        let Ok(bytes) = std::fs::read(loc.path_under(root.root())) else {
+            return;
+        };
+        let (_scheds, assets) = parse_action_bytes(&bytes);
+
+        assert!(
+            !assets.sprite_sheets.is_empty(),
+            "poison DAT carries at least one 0x21 sprite sheet"
+        );
+        for name in [b"fir0", b"fir1", b"fir2"] {
+            let def = assets
+                .particle_defs
+                .get(name)
+                .unwrap_or_else(|| panic!("{} generator present", String::from_utf8_lossy(name)));
+            assert_eq!(
+                def.mesh_kind,
+                ParticleMeshKind::SpriteSheet,
+                "{} is a SpriteSheet particle",
+                String::from_utf8_lossy(name)
+            );
+            assert!(
+                assets.sprite_sheets.contains_key(&def.mesh_id),
+                "{}'s mesh {} resolves to a retained sprite sheet",
+                String::from_utf8_lossy(name),
+                String::from_utf8_lossy(&def.mesh_id),
+            );
+        }
+
+        let Ok(cure_loc) = root.resolve(CURE_FILE) else {
+            return;
+        };
+        let Ok(cure_bytes) = std::fs::read(cure_loc.path_under(root.root())) else {
+            return;
+        };
+        let (_s, cure_assets) = parse_action_bytes(&cure_bytes);
+        assert!(
+            cure_assets
+                .particle_defs
+                .values()
+                .any(|d| d.mesh_kind == ParticleMeshKind::StaticMesh),
+            "cure still parses its static-mesh particle generators"
+        );
     }
 }

@@ -100,6 +100,94 @@ fn parse_frames(b: &[u8]) -> Option<Vec<UvRect>> {
     parse_frames_offsets(b).map(|(frames, _)| frames)
 }
 
+// A single flipbook frame's full quad geometry (positions + UVs + per-vertex colors),
+// as a triangle-list (6 verts per quad). Unlike UvRect this retains the actual quad mesh
+// so a SpriteSheet (0x0E) particle can be rebuilt frame-by-frame instead of only knowing
+// the UV bounding rect.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SpriteFrame {
+    pub positions: Vec<[f32; 3]>,
+    pub uvs: Vec<[f32; 2]>,
+    pub colors: Vec<[u8; 4]>,
+}
+
+// A 0x21 sprite sheet parsed for particle use: every mesh's full quad geometry plus the
+// two texture-name tokens (category/id) that resolve the backing Img chunk.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ParticleSpriteSheet {
+    pub frames: Vec<SpriteFrame>,
+    pub category: String,
+    pub id: String,
+}
+
+impl ParticleSpriteSheet {
+    pub fn parse(b: &[u8]) -> Option<Self> {
+        let frames = parse_particle_frames(b)?;
+        if frames.is_empty() {
+            return None;
+        }
+        let (category, id) = texture_tokens(b);
+        Some(Self {
+            frames,
+            category,
+            id,
+        })
+    }
+}
+
+// Same mesh walk as parse_frames_offsets (research/xim SpriteSheetSection.kt:44-79), but
+// retains each vertex's { vec3 pos, rgba u8x4, f32 u, f32 v } instead of collapsing to a
+// UV bounding rect.
+fn parse_particle_frames(b: &[u8]) -> Option<Vec<SpriteFrame>> {
+    if b.len() < 24 {
+        return None;
+    }
+    let unk_flag = rd_u16(b, 0);
+    let num_mesh = rd_u16(b, 2) as usize;
+    let lens_flare = b[4] == 1;
+    let norm_flag = b[7];
+    let uv_scale = if unk_flag == 1 && norm_flag == 0 {
+        1.0 / 256.0
+    } else {
+        1.0
+    };
+
+    let mut frames = Vec::with_capacity(num_mesh);
+    let mut p = 24usize;
+    for _ in 0..num_mesh {
+        if p + 4 > b.len() {
+            return None;
+        }
+        let num_quads = b[p + 2] as usize;
+        p += 4;
+        if lens_flare {
+            if p + 16 > b.len() {
+                return None;
+            }
+            p += 16;
+        }
+        let num_verts = 6 * num_quads;
+        let mut positions = Vec::with_capacity(num_verts);
+        let mut uvs = Vec::with_capacity(num_verts);
+        let mut colors = Vec::with_capacity(num_verts);
+        for _ in 0..num_verts {
+            if p + 24 > b.len() {
+                return None;
+            }
+            positions.push([rd_f32(b, p), rd_f32(b, p + 4), rd_f32(b, p + 8)]);
+            colors.push([b[p + 12], b[p + 13], b[p + 14], b[p + 15]]);
+            uvs.push([rd_f32(b, p + 16) * uv_scale, rd_f32(b, p + 20) * uv_scale]);
+            p += 24;
+        }
+        frames.push(SpriteFrame {
+            positions,
+            uvs,
+            colors,
+        });
+    }
+    Some(frames)
+}
+
 fn texture_tokens(b: &[u8]) -> (String, String) {
     let trim = |s: &[u8]| {
         String::from_utf8_lossy(s)
@@ -299,5 +387,48 @@ mod tests {
         b.extend(mesh(1, None, (0.0, 0.0, 1.0, 1.0)));
         let (_frames, offsets) = parse_frames_offsets(&b).unwrap();
         assert!(offsets.is_empty());
+    }
+
+    // A single-quad mesh with distinct per-vertex positions/uvs so the particle parser's
+    // full-geometry retention (not just a UV bounding rect) can be asserted.
+    fn geom_mesh(verts: &[([f32; 3], [f32; 2])]) -> Vec<u8> {
+        assert_eq!(verts.len() % 6, 0, "verts are 6-per-quad triangle lists");
+        let mut m = vec![0u8; 4];
+        m[0..2].copy_from_slice(&1u16.to_le_bytes());
+        m[2] = (verts.len() / 6) as u8;
+        for (pos, uv) in verts {
+            for c in pos {
+                m.extend_from_slice(&c.to_le_bytes());
+            }
+            m.extend_from_slice(&[10, 20, 30, 40]);
+            m.extend_from_slice(&uv[0].to_le_bytes());
+            m.extend_from_slice(&uv[1].to_le_bytes());
+        }
+        m
+    }
+
+    #[test]
+    fn particle_sheet_retains_per_frame_quad_geometry() {
+        let f0: Vec<_> = (0..6)
+            .map(|i| ([i as f32, i as f32 + 1.0, 0.0], [i as f32 * 0.1, 0.2]))
+            .collect();
+        let f1: Vec<_> = (0..6)
+            .map(|i| ([-(i as f32), 0.0, 5.0], [0.5, i as f32 * 0.1]))
+            .collect();
+        let mut b = header(2, false, "fir", "fir");
+        b.extend(geom_mesh(&f0));
+        b.extend(geom_mesh(&f1));
+
+        let ss = ParticleSpriteSheet::parse(&b).expect("particle sheet parses");
+        assert_eq!(ss.category, "fir");
+        assert_eq!(ss.frames.len(), 2);
+        // Full geometry retained (6 verts/quad), not a single bounding rect.
+        assert_eq!(ss.frames[0].positions.len(), 6);
+        assert_eq!(ss.frames[0].uvs.len(), 6);
+        assert_eq!(ss.frames[0].colors.len(), 6);
+        assert_eq!(ss.frames[0].positions[3], [3.0, 4.0, 0.0]);
+        assert!((ss.frames[0].uvs[2][0] - 0.2).abs() < 1e-6);
+        assert_eq!(ss.frames[1].positions[1], [-1.0, 0.0, 5.0]);
+        assert_eq!(ss.frames[0].colors[0], [10, 20, 30, 40]);
     }
 }

@@ -159,10 +159,11 @@ impl ChatKind {
         match self {
             ChatKind::Battle => matches!(c, ChatChannel::Battle),
             ChatKind::Debug => matches!(c, ChatChannel::System | ChatChannel::Debug),
-            ChatKind::Social => !matches!(
-                c,
-                ChatChannel::Battle | ChatChannel::System | ChatChannel::Debug
-            ),
+            // Retail's main Log window shows system messages (home-point-set
+            // confirmations, "obtained" lines, announcements) alongside social
+            // chat — only battle spam and our internal Debug channel are siloed.
+            // System still also appears in its own tab (the Debug arm above).
+            ChatKind::Social => !matches!(c, ChatChannel::Battle | ChatChannel::Debug),
         }
     }
 }
@@ -944,6 +945,17 @@ mod tests {
     #[test]
     fn empty_text_still_renders_sender_layout() {
         assert_eq!(format_chat_line(ChatChannel::Say, "Daisy", ""), "Daisy : ");
+    }
+
+    #[test]
+    fn social_tab_shows_system_messages() {
+        // Home-point-set confirmations and other system lines (kind 6/7/29)
+        // must appear in the main Chat log, like retail — not only the System tab.
+        assert!(ChatKind::Social.accepts(ChatChannel::System));
+        assert!(ChatKind::Debug.accepts(ChatChannel::System));
+        // Battle spam and the internal Debug channel stay out of the main log.
+        assert!(!ChatKind::Social.accepts(ChatChannel::Battle));
+        assert!(!ChatKind::Social.accepts(ChatChannel::Debug));
     }
 
     #[test]

@@ -740,12 +740,19 @@ pub fn build_zone_mmb_spawns(
         if c.kind != ChunkKind::Generator as u8 {
             continue;
         }
-        // The weat/<type>/ cloud-canopy generators (cld1/cld2) share the water
-        // signature below (nonzero uv_scroll + singleton) but are camera-relative
-        // sky, owned by zone_clouds.rs. Taking them here spawns the cloud dome as
-        // a static translucent sheet at the zone origin, draped over all geometry
-        // (kuluu-nfrp). Exclude them by the same names zone_clouds renders.
-        if crate::zone_clouds::CLOUD_CANOPY_GENERATOR_NAMES.contains(&c.name) {
+        // research/xim EnvironmentManager.updateWeatherEffects + Particle.kt:232-258:
+        // the weat/<type>/ sky generators (cloud canopies cld1/cld2 and per-weather
+        // variants like ~4cl) set the follow_camera config bit (0x0004) — they are
+        // camera-relative sky registered through EffectManager, NOT world geometry.
+        // They share the water signature below (singleton + uv_scroll), so a
+        // name-based skip missed variants and spawned the cloud dome as a static
+        // sheet draped over the zone (kuluu-nfrp). Reject any camera-follow
+        // generator; real water (sea1/sea2, izu*) is world-anchored (follow=false).
+        let follows_camera = ffxi_dat::generator::Generator::parse_cloud_generator(c.name, c.data)
+            .ok()
+            .flatten()
+            .is_some_and(|d| d.follow_camera);
+        if follows_camera {
             continue;
         }
         let Ok(Some(ms)) = ffxi_dat::generator::Generator::parse_model_spawn(c.data) else {

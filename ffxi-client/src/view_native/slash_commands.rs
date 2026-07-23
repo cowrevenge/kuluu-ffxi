@@ -1005,6 +1005,9 @@ pub enum SlashOutcome {
 
     OpenMenu(MenuKind),
 
+    /// Dev-only (the `/widescan` command is gated to debug builds); the
+    /// retail-faithful path is the Map screen's Wide Scan submenu.
+    #[cfg(debug_assertions)]
     Widescan,
 
     NavInfo,

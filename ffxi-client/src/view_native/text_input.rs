@@ -2041,6 +2041,7 @@ fn apply_slash_outcome(
         SlashOutcome::CopyToasts { n } => {
             apply_copy_toasts(n, scene_state);
         }
+        #[cfg(debug_assertions)]
         SlashOutcome::Widescan => {
             let _ = cmd_tx.try_send(AgentCommand::WidescanRequest);
             let rows = ffxi_viewer_core::hud::map_screen::widescan_rows(&scene_state.snapshot);

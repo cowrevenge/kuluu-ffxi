@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use bevy::light::FogVolume;
 use bevy::picking::Pickable;
 use bevy::prelude::*;
-use ffxi_viewer_wire::{EntityKind, Vec3 as WireVec3};
+use ffxi_viewer_wire::{EntityKind, EntityLook, Vec3 as WireVec3};
 
 use crate::components::{IsSelf, LookComp, MorphIn, Nameplate, WorldEntity};
 use crate::graphics_settings::GraphicsSettings;
@@ -291,6 +291,16 @@ pub fn sync_entities_system(
                 } else {
                     Pickable::default()
                 };
+                // Doors/transports have no client model — their visual is the
+                // zone/MMB geometry — so the placeholder orb would render as a
+                // floating sphere over them (kuluu-nf56). Suppress the orb mesh
+                // but keep the entity (and its Visibility node): it stays
+                // mouse-pickable via the transparent EntityHitbox child spawned
+                // in picking.rs.
+                let suppress_orb = matches!(
+                    wire.look,
+                    Some(EntityLook::Door { .. } | EntityLook::Transport { .. })
+                );
                 let mut spawn = commands.spawn((
                     crate::components::InGameEntity,
                     WorldEntity {
@@ -299,14 +309,16 @@ pub fn sync_entities_system(
                         kind: wire.kind,
                     },
                     pickable,
-                    Mesh3d(pick_mesh(&mesh, wire.kind)),
-                    MeshMaterial3d(mat),
                     Transform {
                         translation: world_pos,
                         rotation: heading_to_quat(wire.heading),
                         ..default()
                     },
+                    Visibility::default(),
                 ));
+                if !suppress_orb {
+                    spawn.insert((Mesh3d(pick_mesh(&mesh, wire.kind)), MeshMaterial3d(mat)));
+                }
                 if is_self {
                     spawn.insert(IsSelf);
                 }

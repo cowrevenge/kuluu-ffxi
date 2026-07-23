@@ -4693,6 +4693,8 @@ fn decode_chat_std(data: &[u8]) -> Option<ChatLine> {
         trim_nul_string(&data[4..PREFIX])
     };
     let text = decode_chat_text(&data[PREFIX..]);
+    let raw_sender = trim_nul_string(&data[4..PREFIX]);
+    tracing::debug!(target: "chat_diag", kind, raw_sender = %raw_sender, text = %text, "0x017 chat decoded");
     Some(ChatLine {
         channel: ChatChannel::from_chat_kind(kind),
         sender,

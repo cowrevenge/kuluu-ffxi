@@ -323,12 +323,15 @@ struct FaithfulZoneLight {
 }
 
 // The Bevy PointLight is range-culled, so from beyond `range` a lamp shows no
-// source. A small unlit emissive sphere at the bulb position renders regardless
-// of distance (frustum-only), reading as a bright point from afar. Radius is a
-// lamp-bulb scale; the emissive term is pushed above 1.0 so bloom (when on) halos
-// it, and its hue matches the light so tint is consistent up close and far.
-const FAITHFUL_LIGHT_GLOW_RADIUS: f32 = 0.22;
-const FAITHFUL_LIGHT_GLOW_EMISSIVE: f32 = 6.0;
+// source. A small emissive sphere at the bulb position renders regardless of
+// distance (frustum-only), reading as a bright point from afar. Radius is a
+// small bulb scale so it hugs the fixture; the emissive is pushed well above 1.0
+// so it clips bright (and bloom, when on, halos it), and its hue matches the
+// light. The material is NOT `unlit` — Bevy's unlit path outputs base_color only
+// and drops the emissive term (renders as a black ball); a lit material with a
+// black base_color shows no diffuse but still adds the emissive glow.
+const FAITHFUL_LIGHT_GLOW_RADIUS: f32 = 0.1;
+const FAITHFUL_LIGHT_GLOW_EMISSIVE: f32 = 8.0;
 
 fn sync_faithful_zone_light_entities(
     mut commands: Commands,
@@ -359,7 +362,6 @@ fn sync_faithful_zone_light_entities(
                 hue.y * FAITHFUL_LIGHT_GLOW_EMISSIVE,
                 hue.z * FAITHFUL_LIGHT_GLOW_EMISSIVE,
             ),
-            unlit: true,
             ..default()
         });
         commands.spawn((

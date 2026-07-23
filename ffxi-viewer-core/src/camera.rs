@@ -210,6 +210,10 @@ pub fn build_operator_camera(
     let mut camera = commands.spawn((
         crate::components::InGameEntity,
         OperatorCamera,
+        // Required for mesh picking under require_markers=true (kuluu-k929); the
+        // render-scale path re-targets this same camera, so one marker covers
+        // both native and off-screen scale.
+        bevy::picking::mesh_picking::MeshPickingCamera,
         bevy::camera::visibility::RenderLayers::from_layers(&[0, WORLD_GIZMO_LAYER]),
         Camera3d::default(),
         Hdr,

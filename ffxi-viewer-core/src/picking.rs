@@ -40,7 +40,20 @@ impl Default for WorldPickingEnabled {
 
 impl Plugin for PickingPlugin {
     fn build(&self, app: &mut App) {
+        // Opt-in picking: only entities with a Pickable marker are hit
+        // candidates (entity roots + hitbox cuboids). Without this, Bevy's
+        // default require_markers=false treats every visible Mesh3d — MZB zone
+        // floor, MMB props, water, skinned actor bodies — as a blocking hit, so
+        // nearer geometry swallows the ray and entity hitboxes never receive
+        // Over/Click (kuluu-k929). Inserted after the plugin so it wins over the
+        // plugin's init_resource; the OperatorCamera carries MeshPickingCamera
+        // (camera.rs), mandatory once markers are required
+        // (bevy_picking mesh_picking/mod.rs early-returns for unmarked cameras).
         app.add_plugins(MeshPickingPlugin)
+            .insert_resource(bevy::picking::mesh_picking::MeshPickingSettings {
+                require_markers: true,
+                ..default()
+            })
             .init_resource::<HoveredEntity>()
             .init_resource::<PickBridgePointer>()
             .init_resource::<WorldPickingEnabled>()

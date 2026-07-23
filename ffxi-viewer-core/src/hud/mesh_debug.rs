@@ -145,5 +145,10 @@ pub fn update_mesh_debug_hud(
 }
 
 pub fn mesh_debug_bundle(info: MmbDebugInfo) -> (Pickable, MmbDebugInfo) {
-    (Pickable::default(), info)
+    // IGNORE, not default(): this bundle is attached to every MMB submesh
+    // unconditionally, and a blocking Pickable::default() here made MMB props
+    // swallow the world-picking ray so entity hitboxes behind them were never
+    // hit (kuluu-k929). The off-by-default mesh-debug hover loses MMB hover as a
+    // result; it would need its own MeshRayCast to survive opt-in picking.
+    (Pickable::IGNORE, info)
 }

@@ -318,12 +318,24 @@ struct FaithfulZoneLight {
     base_intensity: f32,
     base_range: f32,
     flicker_seed: f32,
+    hue: Vec3,
+    glow_mat: Handle<StandardMaterial>,
 }
+
+// The Bevy PointLight is range-culled, so from beyond `range` a lamp shows no
+// source. A small unlit emissive sphere at the bulb position renders regardless
+// of distance (frustum-only), reading as a bright point from afar. Radius is a
+// lamp-bulb scale; the emissive term is pushed above 1.0 so bloom (when on) halos
+// it, and its hue matches the light so tint is consistent up close and far.
+const FAITHFUL_LIGHT_GLOW_RADIUS: f32 = 0.22;
+const FAITHFUL_LIGHT_GLOW_EMISSIVE: f32 = 6.0;
 
 fn sync_faithful_zone_light_entities(
     mut commands: Commands,
     store: Res<ZonePointLights>,
     existing: Query<Entity, With<FaithfulZoneLight>>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut mats: ResMut<Assets<StandardMaterial>>,
 ) {
     if !store.is_changed() {
         return;
@@ -331,6 +343,7 @@ fn sync_faithful_zone_light_entities(
     for e in &existing {
         commands.entity(e).try_despawn();
     }
+    let glow_mesh = meshes.add(Sphere::new(FAITHFUL_LIGHT_GLOW_RADIUS).mesh().uv(12, 8));
     for (i, l) in store.lights.iter().enumerate() {
         if l.is_character {
             continue;
@@ -339,11 +352,23 @@ fn sync_faithful_zone_light_entities(
         let peak = l.color.max_element().max(1e-3);
         let hue = l.color / peak;
         let base_intensity = FAITHFUL_LIGHT_INTENSITY * peak;
+        let glow_mat = mats.add(StandardMaterial {
+            base_color: Color::BLACK,
+            emissive: LinearRgba::rgb(
+                hue.x * FAITHFUL_LIGHT_GLOW_EMISSIVE,
+                hue.y * FAITHFUL_LIGHT_GLOW_EMISSIVE,
+                hue.z * FAITHFUL_LIGHT_GLOW_EMISSIVE,
+            ),
+            unlit: true,
+            ..default()
+        });
         commands.spawn((
             FaithfulZoneLight {
                 base_intensity,
                 base_range: l.range,
                 flicker_seed: i as f32,
+                hue,
+                glow_mat: glow_mat.clone(),
             },
             InGameEntity,
             PointLight {
@@ -354,6 +379,10 @@ fn sync_faithful_zone_light_entities(
                 shadow_maps_enabled: false,
                 ..default()
             },
+            Mesh3d(glow_mesh.clone()),
+            MeshMaterial3d(glow_mat),
+            bevy::light::NotShadowCaster,
+            bevy::light::NotShadowReceiver,
             Transform::from_translation(l.world_pos),
         ));
     }
@@ -367,7 +396,8 @@ fn animate_faithful_zone_lights(
     zone_lighting: Option<Res<crate::weather::ZoneDirectionalLighting>>,
     time: Res<bevy::time::Time>,
     settings: Res<crate::graphics_settings::GraphicsSettings>,
-    mut q: Query<(&FaithfulZoneLight, &mut PointLight)>,
+    mut mats: ResMut<Assets<StandardMaterial>>,
+    mut q: Query<(&FaithfulZoneLight, &mut PointLight, &mut Visibility)>,
 ) {
     let sky = crate::sun_moon::vana_sky_from_clock(&vana_clock);
     let (indoors, day_sun_k) = zone_lighting
@@ -379,7 +409,8 @@ fn animate_faithful_zone_lights(
     let t = time.elapsed_secs_wrapped();
     let flicker_on = settings.light_flicker;
     let faithful_on = settings.dynamic_lights.faithful_enabled();
-    for (l, mut pl) in &mut q {
+    let lit = faithful_on && night > LAMP_OFF_EPSILON;
+    for (l, mut pl, mut vis) in &mut q {
         let flick = if flicker_on {
             lamp_flicker(t, l.flicker_seed)
         } else {
@@ -391,6 +422,24 @@ fn animate_faithful_zone_lights(
             0.0
         };
         pl.range = l.base_range * ZONE_LIGHT_REACH_SCALE;
+
+        // Extinguish the glow sphere in daylight / when disabled rather than
+        // leaving a black dot; scale its emissive by the same night+flicker so a
+        // distant lamp brightens and wavers in step with the light it marks.
+        let want = if lit {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        };
+        if *vis != want {
+            *vis = want;
+        }
+        if lit {
+            if let Some(mut m) = mats.get_mut(&l.glow_mat) {
+                let e = FAITHFUL_LIGHT_GLOW_EMISSIVE * night * flick;
+                m.emissive = LinearRgba::rgb(l.hue.x * e, l.hue.y * e, l.hue.z * e);
+            }
+        }
     }
 }
 

@@ -318,7 +318,28 @@ impl LobbyClient {
         if handle.chars.is_empty() {
             bail!("no characters found for account");
         }
-        handle.select(char_id, char_name, key3).await
+        // The 0x07 view-select packet must carry the character's exact name:
+        // LSB validates `WHERE charid = ? AND charname = ?` and drops the
+        // connection on any mismatch. Resolve the authoritative name from the
+        // chr_info2 slots rather than trusting the caller (which passes ""
+        // when selecting by id).
+        let name = match handle.chars().iter().find(|c| c.char_id == char_id) {
+            Some(slot) => slot.name.clone(),
+            None => {
+                if char_name.is_empty() {
+                    bail!(
+                        "char id {char_id} not present on account (have: {:?})",
+                        handle
+                            .chars()
+                            .iter()
+                            .map(|c| (c.char_id, c.name.as_str()))
+                            .collect::<Vec<_>>()
+                    );
+                }
+                char_name.to_owned()
+            }
+        };
+        handle.select(char_id, &name, key3).await
     }
 
     pub async fn handshake_by_name(

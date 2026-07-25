@@ -245,7 +245,7 @@ pub fn sync_entities_system(
         if !is_self
             && matches!(
                 wire.kind,
-                EntityKind::Mob | EntityKind::Pc | EntityKind::Pet
+                EntityKind::Mob | EntityKind::Pc | EntityKind::Pet | EntityKind::Npc
             )
         {
             prediction.observe(wire.id, world_pos, wire.heading);
@@ -275,7 +275,11 @@ pub fn sync_entities_system(
                         // Rotation is owned by self_visual_yaw_system: the
                         // movement heading snaps (about-face, first step) but
                         // the rendered body should whip around, not teleport.
-                    } else if matches!(wire.kind, EntityKind::Npc | EntityKind::Other) {
+                    } else if matches!(wire.kind, EntityKind::Other) {
+                        // Doors/transports and other non-actor entities keep the
+                        // simple visual lerp; pathed NPCs are dead-reckoned by
+                        // predict_entities_system alongside mobs/PCs/pets so the
+                        // two systems never fight over the same Transform.
                         let smoothed = apply_visual_smoothing(t.translation, world_pos);
                         t.translation = Vec3::new(smoothed.x, t.translation.y, smoothed.z);
                         t.rotation = heading_to_quat(wire.heading);

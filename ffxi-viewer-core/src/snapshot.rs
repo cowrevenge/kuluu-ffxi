@@ -76,6 +76,19 @@ pub struct EventLog {
 
 const EVENT_LOG_CAP: usize = 64;
 
+impl EventLog {
+    // `pushed_total` is the global index every consumer's drain cursor is expressed in, so it
+    // must advance for events the ring has already dropped. Pushing straight into `recent`
+    // makes a reader skip the event entirely.
+    pub fn push(&mut self, ev: ViewerEvent) {
+        if self.recent.len() >= EVENT_LOG_CAP {
+            self.recent.pop_front();
+        }
+        self.recent.push_back(ev);
+        self.pushed_total += 1;
+    }
+}
+
 #[derive(Message, Debug, Clone)]
 pub struct ToastEvent {
     pub line: ChatLine,
@@ -139,11 +152,7 @@ pub fn ingest_system<
     }
 
     for ev in source.drain_events() {
-        if events.recent.len() >= EVENT_LOG_CAP {
-            events.recent.pop_front();
-        }
-        events.recent.push_back(ev);
-        events.pushed_total += 1;
+        events.push(ev);
     }
 }
 

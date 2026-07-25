@@ -120,23 +120,43 @@ impl DatRoot {
     }
 }
 
-/// Open the retail install for gated tests: `FFXI_DAT_PATH` if set, else the
-/// default install resolved relative to the crate (works regardless of the test
-/// CWD, unlike [`DatRoot::from_env_or_default`]'s relative path). `None` when no
-/// install is present so tests self-skip.
-#[cfg(test)]
-pub(crate) fn open_test_install() -> Option<DatRoot> {
-    if let Ok(root) = DatRoot::from_env() {
-        return Some(root);
+/// Test-support entry point, `pub` only so real-DAT guards in sibling crates can
+/// share it. Opens `FFXI_DAT_PATH` if set and usable, else the default install
+/// resolved relative to the crate (works regardless of the test CWD, unlike
+/// [`DatRoot::from_env_or_default`]'s relative path). `None` — with a printed
+/// reason, so a vacuous pass is never mistaken for a real one — when no install
+/// is present.
+#[doc(hidden)]
+pub fn open_test_install() -> Option<DatRoot> {
+    match DatRoot::from_env() {
+        Ok(root) => return Some(root),
+        Err(DatError::EnvMissing) => {}
+        // A stale FFXI_DAT_PATH in a shell must not turn every real-DAT test into a silent
+        // skip, so say so and still try the vendored install.
+        Err(e) => eprintln!(
+            "real-DAT guard: FFXI_DAT_PATH unusable ({e}); trying the vendored install instead"
+        ),
     }
     let default = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("..")
         .join(DEFAULT_INSTALL_DIR);
-    default
-        .join("VTABLE.DAT")
-        .exists()
-        .then(|| DatRoot::open(default).ok())
-        .flatten()
+    if !default.join("VTABLE.DAT").exists() {
+        eprintln!(
+            "SKIP (real-DAT guard): no retail install — FFXI_DAT_PATH unset and {} has no VTABLE.DAT",
+            default.display()
+        );
+        return None;
+    }
+    match DatRoot::open(&default) {
+        Ok(root) => Some(root),
+        Err(e) => {
+            eprintln!(
+                "SKIP (real-DAT guard): {} is not a usable install: {e}",
+                default.display()
+            );
+            None
+        }
+    }
 }
 
 fn appid_paths(root: &Path, i: u8) -> (String, PathBuf, PathBuf) {

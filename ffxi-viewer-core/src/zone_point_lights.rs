@@ -211,59 +211,6 @@ pub fn nearest_point_light_arrays(
     pack_point_light_arrays(&selected)
 }
 
-// A light stays selected until it leaves this multiple of its range, but only
-// enters within 1.0× — the gap is the hysteresis band that stops lights from
-// flipping in/out of the four-slot set as the viewer crosses a boundary.
-const ZONE_LIGHT_KEEP_FACTOR: f32 = 1.35;
-
-/// Like [`nearest_point_light_arrays`] but with hysteresis for the zone-surface
-/// feed: lights already in `selected` are kept while still within their (scaled)
-/// keep range, and only the remaining slots are filled by the nearest newcomers.
-/// `selected` is the caller's persisted set of chosen world positions, updated
-/// in place. This keeps the global four-slot set stable as the viewer moves so
-/// surfaces don't pop on/off — the affordable stand-in for true fading, which
-/// would need per-frame all-material uploads (see update_zone_material_lighting).
-pub fn sticky_nearest_point_light_arrays(
-    pos: Vec3,
-    lights: &[ZonePointLight],
-    count: usize,
-    selected: &mut Vec<Vec3>,
-) -> PointLightArrays {
-    let cap = count.min(MAX_POINT_LIGHTS);
-    let mut chosen: Vec<ZonePointLight> = Vec::with_capacity(cap);
-
-    for keep_pos in selected.iter() {
-        if chosen.len() >= cap {
-            break;
-        }
-        if let Some(l) = lights.iter().find(|l| l.world_pos == *keep_pos) {
-            let keep = l.range * ZONE_LIGHT_KEEP_FACTOR;
-            if pos.distance_squared(l.world_pos) <= keep * keep {
-                chosen.push(*l);
-            }
-        }
-    }
-
-    let mut newcomers: Vec<(f32, ZonePointLight)> = lights
-        .iter()
-        .filter(|l| {
-            pos.distance_squared(l.world_pos) <= l.range * l.range
-                && !chosen.iter().any(|c| c.world_pos == l.world_pos)
-        })
-        .map(|l| (pos.distance_squared(l.world_pos), *l))
-        .collect();
-    newcomers.sort_by(|a, b| a.0.total_cmp(&b.0));
-    for (_, l) in newcomers {
-        if chosen.len() >= cap {
-            break;
-        }
-        chosen.push(l);
-    }
-
-    *selected = chosen.iter().map(|l| l.world_pos).collect();
-    pack_point_light_arrays(&chosen)
-}
-
 fn load_zone_point_lights(scene_state: Res<SceneState>, mut store: ResMut<ZonePointLights>) {
     let current = crate::snapshot::effective_zone_file_id(&scene_state.snapshot);
     if current == store.file_id {
@@ -541,46 +488,5 @@ mod tests {
             color[1].w, 0.0,
             "empty slot stays zero (shader skips range <= 0)"
         );
-    }
-
-    #[test]
-    fn sticky_keeps_selected_light_inside_keep_band() {
-        let lights = [light(Vec3::ZERO, 10.0)];
-        let mut selected = vec![Vec3::ZERO];
-        let (_, color, _) =
-            sticky_nearest_point_light_arrays(Vec3::new(12.0, 0.0, 0.0), &lights, 4, &mut selected);
-        assert_eq!(
-            color[0].w, 10.0,
-            "past range (10) but inside keep band (13.5), an already-selected light stays"
-        );
-        assert_eq!(selected, vec![Vec3::ZERO]);
-    }
-
-    #[test]
-    fn sticky_drops_light_past_keep_band() {
-        let lights = [light(Vec3::ZERO, 10.0)];
-        let mut selected = vec![Vec3::ZERO];
-        let (_, color, _) =
-            sticky_nearest_point_light_arrays(Vec3::new(15.0, 0.0, 0.0), &lights, 4, &mut selected);
-        assert_eq!(
-            color[0].w, 0.0,
-            "beyond the keep band (13.5) the light drops"
-        );
-        assert!(selected.is_empty());
-    }
-
-    #[test]
-    fn sticky_newcomer_only_enters_within_range() {
-        let lights = [light(Vec3::ZERO, 10.0)];
-        let mut selected = Vec::new();
-        let (_, color, _) =
-            sticky_nearest_point_light_arrays(Vec3::new(12.0, 0.0, 0.0), &lights, 4, &mut selected);
-        assert_eq!(color[0].w, 0.0, "a fresh light past range does not enter");
-        assert!(selected.is_empty());
-
-        let (_, color, _) =
-            sticky_nearest_point_light_arrays(Vec3::new(5.0, 0.0, 0.0), &lights, 4, &mut selected);
-        assert_eq!(color[0].w, 10.0, "within range it enters");
-        assert_eq!(selected, vec![Vec3::ZERO]);
     }
 }

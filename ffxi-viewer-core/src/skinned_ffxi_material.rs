@@ -26,7 +26,7 @@ pub const MAX_JOINTS: usize = 128;
 /// shaders. Both `zone_ffxi.wgsl` and `skinned_ffxi.wgsl` hard-code this as the
 /// array length and loop bound; `point_light_slots_match_shader` guards the
 /// mirror. The active count (how many slots the nearest-N pickers fill) is the
-/// runtime `GraphicsSettings::dynamic_light_count`, capped here; empty slots
+/// runtime `GraphicsSettings::model_light_count`, capped here; empty slots
 /// carry range 0 and the shaders skip them.
 pub const MAX_POINT_LIGHTS: usize = 16;
 

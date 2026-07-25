@@ -271,7 +271,7 @@ const GRAPHICS_ENTRIES: &[&str] = &[
     "  Emitter Intensity",
     "  Emitter Range",
     "  Flicker",
-    "  Active Lights",
+    "  Lights per Model",
     "Shading",
     "Model Shadow Receiving",
     "Model Shadow Casting",

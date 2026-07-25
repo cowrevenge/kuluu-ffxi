@@ -508,50 +508,11 @@ fn update_zone_material_lighting(
     global.0.dir1_color = dir1_color;
 }
 
-// Feeds the shader's four point-light slots GLOBALLY: the four lights nearest
-// the viewer go to every zone material identically via the shared lighting
-// buffer. Per-submesh selection is impossible here because instanced MMB
-// placements SHARE one cached FfxiZoneMaterial handle (dat_mmb.rs keys it by
-// file_id/chunk_idx/sub_index) — writing position-dependent data into a shared
-// material makes co-located submeshes fight every frame and flicker as
-// streaming overlays reshuffle query order. A single global set sidesteps
-// that, and the range cutoff in nearest_point_light_arrays keeps far geometry
-// dark.
-fn update_zone_material_point_lights(
-    // Optional: minimal apps (e.g. the zone-render-headless example) use
-    // FfxiZoneMaterialPlugin without ZonePointLightsPlugin, so the resource
-    // may not exist. No lights -> nothing to feed the material.
-    active: Option<Res<crate::zone_point_lights::ActiveSceneLights>>,
-    q_self: Query<&GlobalTransform, With<crate::components::IsSelf>>,
-    q_cam: Query<&GlobalTransform, With<Camera3d>>,
-    settings: Res<crate::graphics_settings::GraphicsSettings>,
-    mut global: ResMut<ZoneGlobalLighting>,
-    mut selected: Local<Vec<Vec3>>,
-) {
-    let Some(active) = active else {
-        return;
-    };
-    let Some(focus) = q_self
-        .iter()
-        .next()
-        .or_else(|| q_cam.iter().next())
-        .map(|t| t.translation())
-    else {
-        return;
-    };
-
-    let (point_pos, point_color, point_atten) =
-        crate::zone_point_lights::sticky_nearest_point_light_arrays(
-            focus,
-            &active.lights,
-            settings.dynamic_light_count as usize,
-            &mut selected,
-        );
-
-    global.0.point_pos = point_pos;
-    global.0.point_color = point_color;
-    global.0.point_atten = point_atten;
-}
+// Zone surfaces take their point lighting from Bevy's clustered forward binning
+// (zone_ffxi.wgsl::clustered_point_irradiance), not from the uniform's
+// point_pos/color/atten slots — those stay zeroed here and are read only by
+// skinned_ffxi.wgsl, which shares the struct layout. Clustering replaced a
+// nearest-N global feed that popped lights on and off as the viewer moved.
 
 /// Writes the shared per-frame animation params (`FfxiLightingUniform::
 /// time_params`) into the single persistent lighting buffer: `x` = elapsed
@@ -574,12 +535,7 @@ impl Plugin for FfxiZoneMaterialPlugin {
             // update_zone_material_lighting reads the resource unconditionally.
             .init_resource::<crate::weather::ZoneDirectionalLighting>()
             .add_systems(Update, update_zone_material_lighting)
-            .add_systems(Update, update_zone_material_time)
-            .add_systems(
-                Update,
-                update_zone_material_point_lights
-                    .after(crate::zone_point_lights::build_active_scene_lights),
-            );
+            .add_systems(Update, update_zone_material_time);
         if let Some(render_app) = app.get_sub_app_mut(RenderApp) {
             render_app.add_systems(ExtractSchedule, upload_zone_material_buffers);
         }

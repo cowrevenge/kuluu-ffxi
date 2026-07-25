@@ -2381,7 +2381,7 @@ pub fn update_ffxi_actor_point_lights(
     if active.lights.is_empty() {
         return;
     }
-    let count = settings.dynamic_light_count as usize;
+    let count = settings.model_light_count as usize;
 
     for (actor, gt) in &q_actors {
         let (point_pos, point_color, point_atten) =

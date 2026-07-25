@@ -488,12 +488,91 @@ pub struct SfxEvent {
     pub se_id: u32,
 
     pub volume: f32,
+
+    // World-space emitter. `None` is a 2D cue (UI, system, weather stinger) that mixes dry.
+    pub emitter: Option<Vec3>,
 }
 
 impl SfxEvent {
     pub fn new(se_id: u32) -> Self {
-        Self { se_id, volume: 1.0 }
+        Self {
+            se_id,
+            volume: 1.0,
+            emitter: None,
+        }
     }
+
+    pub fn at(se_id: u32, emitter: Vec3) -> Self {
+        Self {
+            emitter: Some(emitter),
+            ..Self::new(se_id)
+        }
+    }
+}
+
+// Client tuning: retail SE DATs ship no falloff curve, so the near field is ours. Sized to hold
+// a melee exchange dry — the player and whatever it is trading blows with stand a few yalms
+// apart, and their swing/impact SE must not wobble as the two shuffle.
+pub const SFX_DRY_RADIUS_YALMS: f32 = 8.0;
+
+// LSB stops streaming an entity to a client past this radius, so past it there is no entity in
+// our world model to have made the sound.
+pub const SFX_CUTOFF_YALMS: f32 = ffxi_proto::entity_stream::ENTITY_RENDER_DISTANCE_YALMS;
+
+// Amplitude follows a point source's 1/r pressure law outside the dry radius, windowed
+// linearly to exactly zero at the cutoff so culling a far emitter can never click.
+//
+// Sole authority for SE loudness — do NOT also set `PlaybackSettings::with_spatial(true)`.
+// That routes through rodio's Spatial (rodio-0.22.2 src/source/spatial.rs:56-67), whose per-ear
+// gain is `(1/dist_sq).min(1)` times a pan term anti-correlated with azimuth, i.e. a second
+// distance law stacked on this one. Stereo placement, if it is ever wanted, has to come from
+// the pan term alone with the emitter expressed relative to the camera.
+pub fn sfx_attenuation(listener: Vec3, emitter: Vec3) -> f32 {
+    let dist = listener.distance(emitter);
+    if dist <= SFX_DRY_RADIUS_YALMS {
+        return 1.0;
+    }
+    if dist >= SFX_CUTOFF_YALMS {
+        return 0.0;
+    }
+    let pressure = SFX_DRY_RADIUS_YALMS / dist;
+    let window = 1.0 - (dist - SFX_DRY_RADIUS_YALMS) / (SFX_CUTOFF_YALMS - SFX_DRY_RADIUS_YALMS);
+    pressure * window
+}
+
+// Distance is measured from the PLAYER, never the chase camera. LSB's streaming radius — the
+// bound SFX_CUTOFF_YALMS is — is itself measured player-to-entity
+// (vendor/server/src/map/zone_entities.cpp:155), and a camera-anchored distance would swing SE
+// loudness with the mouse wheel and silence on-screen emitters at full pullback. The camera is
+// still the correct ear for left/right placement, but this function carries no pan term (see
+// `sfx_attenuation`), so nothing here reads it. Falls back to the camera where there is no
+// player at all — model viewer, launcher backdrop, pre-spawn frames.
+pub fn sfx_listener_pos(player: Option<Vec3>, camera: Option<Vec3>) -> Option<Vec3> {
+    player.or(camera)
+}
+
+// The debug toast is the only surface where SE distance mixing is observable at runtime —
+// without the distance and gain, a world emitter is indistinguishable from a 2D UI beep.
+pub fn sfx_debug_line(ev: &SfxEvent, listener: Option<Vec3>, volume: f32) -> String {
+    match (ev.emitter, listener) {
+        (Some(emitter), Some(listener)) => format!(
+            "✦ SFX #{} {:.0}y vol {:.2}",
+            ev.se_id,
+            listener.distance(emitter),
+            volume
+        ),
+        _ => format!("✦ SFX #{}", ev.se_id),
+    }
+}
+
+// A world emitter with no listener yet (the self actor spawns a frame later) mixes dry rather
+// than silent.
+pub fn sfx_mix_volume(ev: &SfxEvent, listener: Option<Vec3>) -> f32 {
+    let attenuation = match (ev.emitter, listener) {
+        (Some(emitter), Some(listener)) => sfx_attenuation(listener, emitter),
+        _ => 1.0,
+    };
+    (ev.volume * attenuation).clamp(0.0, 1.0)
 }
 
 #[derive(Resource, Default, Debug)]
@@ -516,6 +595,8 @@ pub fn play_sfx_system(
     mut events: MessageReader<SfxEvent>,
     slots: Res<BgmSlots>,
     mute: Res<AudioMuteState>,
+    listener_player: Query<&Transform, With<crate::components::IsSelf>>,
+    listener_camera: Query<&GlobalTransform, With<crate::camera::OperatorCamera>>,
     mut cache: ResMut<SfxCache>,
     mut pcm_assets: ResMut<Assets<PcmAudio>>,
     mut commands: Commands,
@@ -540,7 +621,15 @@ pub fn play_sfx_system(
         }
         return;
     };
+    let listener_pos = sfx_listener_pos(
+        listener_player.iter().next().map(|xf| xf.translation),
+        listener_camera.iter().next().map(|xf| xf.translation()),
+    );
     for ev in events.read() {
+        let volume = sfx_mix_volume(ev, listener_pos);
+        if volume <= 0.0 {
+            continue;
+        }
         let handle = if let Some(h) = cache.cached.get(&ev.se_id) {
             h.clone()
         } else {
@@ -567,8 +656,7 @@ pub fn play_sfx_system(
         commands.spawn((
             InGameEntity,
             AudioPlayer(handle),
-            PlaybackSettings::DESPAWN
-                .with_volume(bevy::audio::Volume::Linear(ev.volume.clamp(0.0, 1.0))),
+            PlaybackSettings::DESPAWN.with_volume(bevy::audio::Volume::Linear(volume)),
         ));
 
         let now = std::time::Instant::now();
@@ -578,9 +666,10 @@ pub fn play_sfx_system(
                 && now.saturating_duration_since(t) < std::time::Duration::from_millis(250)
         );
         if !dup {
-            toasts.write(crate::snapshot::ToastEvent::debug(format!(
-                "✦ SFX #{}",
-                ev.se_id
+            toasts.write(crate::snapshot::ToastEvent::debug(sfx_debug_line(
+                ev,
+                listener_pos,
+                volume,
             )));
             *last_chat = Some((ev.se_id, now));
         }
@@ -1142,15 +1231,14 @@ mod tests {
 
         {
             let mut events = app.world_mut().resource_mut::<EventLog>();
-            events.recent.push_back(ViewerEvent::MusicChanged {
+            events.push(ViewerEvent::MusicChanged {
                 slot: 2,
                 track_id: 99,
             });
-            events.recent.push_back(ViewerEvent::MusicVolumeChanged {
+            events.push(ViewerEvent::MusicVolumeChanged {
                 slot: 2,
                 volume: 64,
             });
-            events.pushed_total = 2;
         }
         app.update();
 
@@ -1168,26 +1256,24 @@ mod tests {
 
         {
             let mut events = app.world_mut().resource_mut::<EventLog>();
-            events.recent.push_back(ViewerEvent::MusicChanged {
+            events.push(ViewerEvent::MusicChanged {
                 slot: 5,
                 track_id: 204,
             });
-            events.pushed_total = 1;
         }
         app.update();
         assert_eq!(app.world().resource::<BgmSlots>().tracks[5], Some(204));
 
         {
             let mut events = app.world_mut().resource_mut::<EventLog>();
-            events.recent.push_back(ViewerEvent::ZoneChanged {
+            events.push(ViewerEvent::ZoneChanged {
                 from: Some(1),
                 to: 241,
             });
-            events.recent.push_back(ViewerEvent::MusicChanged {
+            events.push(ViewerEvent::MusicChanged {
                 slot: 0,
                 track_id: 151,
             });
-            events.pushed_total = 3;
         }
         app.update();
 
@@ -1212,11 +1298,10 @@ mod tests {
 
         {
             let mut events = app.world_mut().resource_mut::<EventLog>();
-            events.recent.push_back(ViewerEvent::MusicChanged {
+            events.push(ViewerEvent::MusicChanged {
                 slot: 0,
                 track_id: 10,
             });
-            events.pushed_total = 1;
         }
         app.update();
         assert_eq!(app.world().resource::<BgmSlots>().tracks[0], Some(10));
@@ -1224,11 +1309,10 @@ mod tests {
         {
             let mut events = app.world_mut().resource_mut::<EventLog>();
             events.recent.pop_front();
-            events.recent.push_back(ViewerEvent::MusicChanged {
+            events.push(ViewerEvent::MusicChanged {
                 slot: 1,
                 track_id: 20,
             });
-            events.pushed_total = 2;
         }
         app.update();
 
@@ -1256,18 +1340,14 @@ mod tests {
             .add_systems(Update, fire_system_sfx_events);
 
         let mut events = app.world_mut().resource_mut::<EventLog>();
-        events.recent.push_back(ViewerEvent::ZoneChanged {
+        events.push(ViewerEvent::ZoneChanged {
             from: None,
             to: 100,
         });
-        events.recent.push_back(ViewerEvent::LowHp { pct: 15 });
+        events.push(ViewerEvent::LowHp { pct: 15 });
 
-        events
-            .recent
-            .push_back(ViewerEvent::Reconnected { downtime_ms: 500 });
-        events
-            .recent
-            .push_back(ViewerEvent::EngagedBy { entity_id: 42 });
+        events.push(ViewerEvent::Reconnected { downtime_ms: 500 });
+        events.push(ViewerEvent::EngagedBy { entity_id: 42 });
 
         app.update();
 
@@ -1371,9 +1451,187 @@ mod tests {
     }
 
     #[test]
+    fn sfx_debug_line_reports_distance_only_for_world_emitters() {
+        let listener = Vec3::new(100.0, -8.0, -250.0);
+        let world = SfxEvent::at(42, listener + Vec3::X * 12.0);
+        let line = sfx_debug_line(
+            &world,
+            Some(listener),
+            sfx_mix_volume(&world, Some(listener)),
+        );
+        assert!(line.contains("#42"), "{line}");
+        assert!(line.contains("12y"), "{line}");
+        assert!(line.contains("vol 0.60"), "{line}");
+
+        let ui = SfxEvent::new(42);
+        assert_eq!(
+            sfx_debug_line(&ui, Some(listener), sfx_mix_volume(&ui, Some(listener))),
+            "✦ SFX #42"
+        );
+    }
+
+    #[test]
+    fn sfx_is_dry_inside_the_near_field_and_silent_past_the_cutoff() {
+        let listener = Vec3::new(100.0, -8.0, -250.0);
+
+        assert_eq!(sfx_attenuation(listener, listener), 1.0);
+        assert_eq!(
+            sfx_attenuation(listener, listener + Vec3::X * SFX_DRY_RADIUS_YALMS),
+            1.0,
+            "a melee exchange must mix dry rather than wobble as the two actors shuffle"
+        );
+        assert_eq!(
+            sfx_attenuation(listener, listener + Vec3::Z * SFX_CUTOFF_YALMS),
+            0.0,
+            "the cull must reach exactly zero at the cutoff so it cannot click"
+        );
+        assert_eq!(
+            sfx_attenuation(listener, listener + Vec3::Z * (SFX_CUTOFF_YALMS * 10.0)),
+            0.0
+        );
+    }
+
+    #[test]
+    fn sfx_attenuation_falls_monotonically_across_the_rolloff() {
+        let listener = Vec3::ZERO;
+        let steps = 64;
+        let mut prev = 1.0_f32;
+        for i in 0..=steps {
+            let d = SFX_DRY_RADIUS_YALMS
+                + (SFX_CUTOFF_YALMS - SFX_DRY_RADIUS_YALMS) * (i as f32 / steps as f32);
+            let gain = sfx_attenuation(listener, Vec3::X * d);
+            assert!(gain <= prev, "gain rose from {prev} to {gain} at {d} yalms");
+            assert!((0.0..=1.0).contains(&gain), "gain {gain} out of range");
+            prev = gain;
+        }
+        assert_eq!(prev, 0.0);
+    }
+
+    #[test]
+    fn a_2d_cue_keeps_its_caller_volume_and_a_far_emitter_is_culled() {
+        let listener = Vec3::new(-40.0, 3.0, 12.0);
+
+        let ui = SfxEvent::new(7001);
+        assert_eq!(ui.emitter, None);
+        assert_eq!(
+            sfx_mix_volume(&ui, Some(listener)),
+            1.0,
+            "UI/system cues must keep their exact 2D mix"
+        );
+        assert_eq!(sfx_mix_volume(&ui, None), 1.0);
+
+        let near = SfxEvent::at(7001, listener + Vec3::X);
+        assert_eq!(sfx_mix_volume(&near, Some(listener)), 1.0);
+
+        let far = SfxEvent::at(7001, listener + Vec3::X * SFX_CUTOFF_YALMS);
+        assert_eq!(
+            sfx_mix_volume(&far, Some(listener)),
+            0.0,
+            "a swing past the cutoff must be culled, not mixed at full volume"
+        );
+
+        let mid = SfxEvent::at(7001, listener + Vec3::X * SFX_DRY_RADIUS_YALMS * 1.5);
+        let mid_volume = sfx_mix_volume(&mid, Some(listener));
+        assert!(
+            mid_volume > 0.0 && mid_volume < 1.0,
+            "mid-range emitter mixed at {mid_volume}"
+        );
+    }
+
+    #[test]
+    fn the_player_outranks_the_camera_as_the_attenuation_listener() {
+        let player = Vec3::new(100.0, -8.0, -250.0);
+        let camera = player - Vec3::Z * crate::camera::ChaseCamera::DIST_MAX;
+
+        assert_eq!(sfx_listener_pos(Some(player), Some(camera)), Some(player));
+        assert_eq!(sfx_listener_pos(None, Some(camera)), Some(camera));
+        assert_eq!(sfx_listener_pos(Some(player), None), Some(player));
+        assert_eq!(sfx_listener_pos(None, None), None);
+
+        // A mob just inside LSB's streaming radius, straight in front of the player and plainly
+        // on screen. Measured from the fully pulled-back camera it is past the cutoff.
+        let mob = player + Vec3::Z * (SFX_CUTOFF_YALMS - 1.0);
+        let swing = SfxEvent::at(7001, mob);
+        assert!(
+            sfx_mix_volume(&swing, sfx_listener_pos(Some(player), Some(camera))) > 0.0,
+            "an on-screen mob's swing must not be silenced by how far the camera is pulled back"
+        );
+        assert_eq!(sfx_mix_volume(&swing, Some(camera)), 0.0);
+    }
+
+    fn spawned_sfx_volumes(app: &mut App) -> Vec<f32> {
+        let world = app.world_mut();
+        let mut q = world.query::<(&AudioPlayer<PcmAudio>, &PlaybackSettings)>();
+        q.iter(world)
+            .map(|(_, settings)| settings.volume.to_linear())
+            .collect()
+    }
+
+    // The bead's headline failure: a distant mob's swing reached the mixer at full volume.
+    // The camera sits a full pullback behind the player, so this also pins that the cull is
+    // measured from the player — from the camera the near emitter would itself be culled.
+    #[test]
+    fn play_sfx_culls_a_distant_emitter_with_real_install() {
+        const REAL_SE_ID: u32 = 1;
+
+        let Some(root) = ffxi_dat::archive::open_test_install() else {
+            return;
+        };
+        let install = root.root().to_path_buf();
+
+        let mut app = App::new();
+        app.add_plugins(bevy::MinimalPlugins);
+        app.add_plugins(bevy::asset::AssetPlugin::default());
+        app.init_asset::<PcmAudio>();
+        app.add_message::<SfxEvent>()
+            .add_message::<crate::snapshot::ToastEvent>()
+            .insert_resource(BgmSlots {
+                install_root: Some(install),
+                ..Default::default()
+            })
+            .init_resource::<AudioMuteState>()
+            .init_resource::<SfxCache>()
+            .add_systems(Update, play_sfx_system);
+
+        let player = Vec3::new(12.0, 1.0, -30.0);
+        let camera = player - Vec3::Z * crate::camera::ChaseCamera::DIST_MAX;
+        app.world_mut().spawn((
+            crate::components::IsSelf,
+            Transform::from_translation(player),
+        ));
+        app.world_mut().spawn((
+            crate::camera::OperatorCamera,
+            Transform::from_translation(camera),
+            GlobalTransform::from_translation(camera),
+        ));
+
+        // Dead ahead of the player, inside the streaming radius but past it from the camera.
+        let near = player + Vec3::Z * (SFX_CUTOFF_YALMS - crate::camera::ChaseCamera::DIST_MAX);
+        app.world_mut()
+            .write_message(SfxEvent::at(REAL_SE_ID, near));
+        app.world_mut().write_message(SfxEvent::at(
+            REAL_SE_ID,
+            player + Vec3::Z * SFX_CUTOFF_YALMS,
+        ));
+        app.update();
+
+        let volumes = spawned_sfx_volumes(&mut app);
+        assert_eq!(
+            volumes.len(),
+            1,
+            "exactly the on-screen emitter may reach the mixer, got {volumes:?}"
+        );
+        assert!(
+            volumes[0] > 0.0 && volumes[0] < 1.0,
+            "the surviving emitter is mid-rolloff from the player, got {volumes:?}"
+        );
+    }
+
+    #[test]
     fn bgm_pipeline_end_to_end_with_real_install() {
-        let Ok(install) = std::env::var("FFXI_DAT_PATH") else {
-            eprintln!("skipping: FFXI_DAT_PATH not set");
+        const ZONE_DAY_TRACK: u16 = 101;
+
+        let Some(root) = ffxi_dat::archive::open_test_install() else {
             return;
         };
 
@@ -1384,7 +1642,7 @@ mod tests {
         app.init_asset::<PcmAudio>();
 
         let slots = BgmSlots {
-            install_root: Some(std::path::PathBuf::from(install)),
+            install_root: Some(root.root().to_path_buf()),
             ..Default::default()
         };
         app.insert_resource(slots)
@@ -1392,21 +1650,22 @@ mod tests {
             .init_resource::<BgmPlaybackState>()
             .init_resource::<AudioMuteState>()
             .init_resource::<crate::snapshot::SceneState>()
+            .add_message::<crate::snapshot::ToastEvent>()
             .add_systems(
                 Update,
                 (drain_music_events_system, apply_bgm_system).chain(),
             );
 
         let mut events = app.world_mut().resource_mut::<EventLog>();
-        events.recent.push_back(ViewerEvent::MusicChanged {
+        events.push(ViewerEvent::MusicChanged {
             slot: 0,
-            track_id: 101,
+            track_id: ZONE_DAY_TRACK,
         });
 
         app.update();
 
         let slots_after = app.world().resource::<BgmSlots>();
-        assert_eq!(slots_after.active, Some((0, 101)));
+        assert_eq!(slots_after.active, Some((0, ZONE_DAY_TRACK)));
         assert!(
             slots_after.active_entity.is_some(),
             "apply_bgm_system should have spawned an AudioPlayer entity"

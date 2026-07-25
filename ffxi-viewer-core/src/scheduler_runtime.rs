@@ -39,6 +39,17 @@ pub fn particle_origin_entity(
     }
 }
 
+// ffxi-dat/src/action.rs::resolve_stage_to_se yields `on_caster` straight from the stage kind:
+// a 0x0A/0x53 SoundOnCaster emits at the source actor, a 0x0B SoundOnTarget at the primary
+// target. `None` falls back to the caster so an untracked target never silences the SE.
+pub fn sound_origin_entity(on_caster: bool, caster: Entity, target: Option<Entity>) -> Entity {
+    if on_caster {
+        caster
+    } else {
+        target.unwrap_or(caster)
+    }
+}
+
 // research/xim poc/MainTool.kt:250 — ROM/0/0.DAT is loaded as XIM's `GlobalDirectory`, the
 // system-effect resource dir every routine falls back to (the cast aura `ner1` and its `stbk`
 // stop live there, not in the caster's DAT). `DatRoot::resolve(0)` yields exactly that file.
@@ -582,6 +593,12 @@ pub fn dispatch_sound_stages(
     q_actors: Query<&ActionAssets>,
     q_children: Query<&Children>,
     q_render: Query<&crate::ffxi_actor_render::FfxiRenderActor>,
+    q_target: Query<&ActionTarget>,
+    // `Transform`, not `GlobalTransform`, for the same reason spawn_particle_generators reads
+    // it: world entities are roots, and a frame-0 stage fires on the insert frame, before
+    // PostUpdate has propagated anything — a `GlobalTransform` read there is Ok-but-identity,
+    // which would place the emitter at the world origin and get it culled to silence.
+    q_transform: Query<&Transform>,
     global: Option<Res<GlobalEffectDir>>,
     mut sfx_writer: MessageWriter<crate::audio::SfxEvent>,
 ) {
@@ -602,13 +619,18 @@ pub fn dispatch_sound_stages(
             actor_assets,
             global.as_ref().map(|g| &g.assets),
         ];
-        let Some((se_id, _on_caster)) = tiers.into_iter().flatten().find_map(|a| {
+        let Some((se_id, on_caster)) = tiers.into_iter().flatten().find_map(|a| {
             ffxi_dat::action::resolve_stage_to_se(&ev.stage.stage.id, kind, &a.generators, &a.seps)
         }) else {
             continue;
         };
 
-        sfx_writer.write(crate::audio::SfxEvent::new(se_id));
+        let target = q_target.get(ev.actor).ok().and_then(|t| t.0);
+        let origin = sound_origin_entity(on_caster, ev.actor, target);
+        sfx_writer.write(match q_transform.get(origin) {
+            Ok(xf) => crate::audio::SfxEvent::at(se_id, xf.translation),
+            Err(_) => crate::audio::SfxEvent::new(se_id),
+        });
     }
 }
 
@@ -1438,6 +1460,169 @@ mod tests {
         }
     }
 
+    // A 0x0B SoundOnTarget is the victim's impact, a 0x53 SoundOnCaster the attacker's whoosh;
+    // resolve_stage_to_se hands the flag over and the dispatcher must mix them from different
+    // world positions.
+    #[test]
+    fn sound_origin_entity_routes_by_on_caster_flag() {
+        let caster = Entity::from_raw_u32(1).unwrap();
+        let target = Entity::from_raw_u32(2).unwrap();
+
+        assert_eq!(sound_origin_entity(true, caster, Some(target)), caster);
+        assert_eq!(sound_origin_entity(true, caster, None), caster);
+        assert_eq!(sound_origin_entity(false, caster, Some(target)), target);
+        assert_eq!(
+            sound_origin_entity(false, caster, None),
+            caster,
+            "an untracked target falls back to the caster instead of silencing the SE"
+        );
+    }
+
+    // The flag the dispatcher routes on comes straight from the stage kind, so a parser change
+    // that stopped distinguishing the two opcodes would silently collapse both to the caster.
+    #[test]
+    fn resolve_stage_to_se_reports_on_caster_from_the_stage_kind() {
+        let seps = HashMap::from([(*b"se01", Sep::parse(*b"se01", &[0u8; 12]).unwrap())]);
+        let generators = HashMap::new();
+
+        assert_eq!(
+            ffxi_dat::action::resolve_stage_to_se(
+                b"se01",
+                StageKind::SoundOnCaster,
+                &generators,
+                &seps
+            ),
+            Some((0, true))
+        );
+        assert_eq!(
+            ffxi_dat::action::resolve_stage_to_se(
+                b"se01",
+                StageKind::SoundOnTarget,
+                &generators,
+                &seps
+            ),
+            Some((0, false))
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[derive(Resource, Default)]
+    struct CapturedSfx(Vec<crate::audio::SfxEvent>);
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn capture_sfx(
+        mut reader: MessageReader<crate::audio::SfxEvent>,
+        mut out: ResMut<CapturedSfx>,
+    ) {
+        out.0.extend(reader.read().copied());
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn sep_assets(stage_id: [u8; 4], se_id: u32) -> ActionAssets {
+        let mut body = [0u8; 12];
+        body[8..12].copy_from_slice(&se_id.to_le_bytes());
+        ActionAssets {
+            seps: HashMap::from([(stage_id, Sep::parse(stage_id, &body).unwrap())]),
+            ..Default::default()
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn run_sound_stage(
+        kind: StageKind,
+        stage_id: [u8; 4],
+        assets: ActionAssets,
+        caster_pos: Option<Vec3>,
+        target: Option<Vec3>,
+    ) -> Vec<crate::audio::SfxEvent> {
+        let mut app = App::new();
+        app.add_message::<SchedulerStageEvent>()
+            .add_message::<crate::audio::SfxEvent>()
+            .init_resource::<CapturedSfx>()
+            .add_systems(Update, (dispatch_sound_stages, capture_sfx).chain());
+
+        let target_entity =
+            target.map(|p| app.world_mut().spawn(Transform::from_translation(p)).id());
+        let mut caster = app.world_mut().spawn((assets, ActionTarget(target_entity)));
+        if let Some(p) = caster_pos {
+            caster.insert(Transform::from_translation(p));
+        }
+        let caster = caster.id();
+
+        app.world_mut().write_message(SchedulerStageEvent {
+            actor: caster,
+            stage: stage(0, kind, 0, stage_id),
+            scheduler: *b"test",
+        });
+        app.update();
+        std::mem::take(&mut app.world_mut().resource_mut::<CapturedSfx>().0)
+    }
+
+    // The whole point of the spatial SE path: a 0x0B impact has to mix from where the victim is
+    // standing, not from the attacker, and neither may fall back to a 2D cue.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn dispatch_sound_stages_emits_each_stage_kind_from_its_own_actor() {
+        const STAGE_ID: [u8; 4] = *b"se01";
+        const SE_ID: u32 = 4242;
+        let caster_pos = Vec3::new(10.0, 2.0, -40.0);
+        let target_pos = Vec3::new(-25.0, 6.0, 120.0);
+
+        for (kind, expected) in [
+            (StageKind::SoundOnTarget, target_pos),
+            (StageKind::SoundOnCaster, caster_pos),
+        ] {
+            let got = run_sound_stage(
+                kind,
+                STAGE_ID,
+                sep_assets(STAGE_ID, SE_ID),
+                Some(caster_pos),
+                Some(target_pos),
+            );
+            assert_eq!(got.len(), 1, "{kind:?} produced {got:?}");
+            assert_eq!(got[0].se_id, SE_ID, "{kind:?}");
+            assert_eq!(
+                got[0].emitter,
+                Some(expected),
+                "{kind:?} must mix from {expected:?}"
+            );
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn dispatch_sound_stages_falls_back_to_the_caster_and_then_to_a_dry_cue() {
+        const STAGE_ID: [u8; 4] = *b"se01";
+        const SE_ID: u32 = 4242;
+        let caster_pos = Vec3::new(10.0, 2.0, -40.0);
+
+        let untracked_target = run_sound_stage(
+            StageKind::SoundOnTarget,
+            STAGE_ID,
+            sep_assets(STAGE_ID, SE_ID),
+            Some(caster_pos),
+            None,
+        );
+        assert_eq!(
+            untracked_target.first().map(|e| e.emitter),
+            Some(Some(caster_pos)),
+            "an untracked target falls back to the caster, not to silence"
+        );
+
+        let unpositioned = run_sound_stage(
+            StageKind::SoundOnCaster,
+            STAGE_ID,
+            sep_assets(STAGE_ID, SE_ID),
+            None,
+            None,
+        );
+        assert_eq!(
+            unpositioned.first().map(|e| e.emitter),
+            Some(None),
+            "an actor with no transform yet mixes dry rather than from the world origin"
+        );
+    }
+
     fn stage(frame: u32, kind: StageKind, raw_type: u8, id: [u8; 4]) -> TimedStage {
         TimedStage {
             frame,
@@ -1550,7 +1735,7 @@ mod tests {
         const TGT0_LAST_FRAME: u32 = 200;
         const TGT0_SECS: f32 = 3.333;
 
-        let Ok(root) = ffxi_dat::DatRoot::from_env_or_default() else {
+        let Some(root) = ffxi_dat::archive::open_test_install() else {
             return;
         };
         let Ok(loc) = root.resolve(CURE_FILE) else {
@@ -1616,7 +1801,7 @@ mod tests {
     /// the two defects that made emotes play the wrong clip 5s late.
     #[test]
     fn real_dat_bow_routine_fires_bow_clip_at_frame_zero() {
-        let Ok(root) = ffxi_dat::DatRoot::from_env_or_default() else {
+        let Some(root) = ffxi_dat::archive::open_test_install() else {
             return;
         };
         let Ok(dll) = ffxi_dat::main_dll::MainDll::load(root.root()) else {
@@ -1736,7 +1921,7 @@ mod tests {
         const POISON_FILE: u32 = 3020;
         const CURE_FILE: u32 = 2801;
 
-        let Ok(root) = ffxi_dat::DatRoot::from_env_or_default() else {
+        let Some(root) = ffxi_dat::archive::open_test_install() else {
             return;
         };
         let Ok(loc) = root.resolve(POISON_FILE) else {
@@ -1795,7 +1980,7 @@ mod tests {
     fn real_dat_poison_sheet_name_indexes_its_backing_img() {
         const POISON_FILE: u32 = 3020;
 
-        let Ok(root) = ffxi_dat::DatRoot::from_env_or_default() else {
+        let Some(root) = ffxi_dat::archive::open_test_install() else {
             return;
         };
         let Ok(loc) = root.resolve(POISON_FILE) else {
@@ -1830,7 +2015,7 @@ mod tests {
 
     #[cfg(not(target_arch = "wasm32"))]
     fn read_dat(file_id: u32) -> Option<Vec<u8>> {
-        let root = ffxi_dat::DatRoot::from_env_or_default().ok()?;
+        let root = ffxi_dat::archive::open_test_install()?;
         let loc = root.resolve(file_id).ok()?;
         std::fs::read(loc.path_under(root.root())).ok()
     }
@@ -2174,14 +2359,14 @@ mod tests {
     const HUME_M_MAIN_WEAPON_FILE: u32 = 8392;
 
     fn routines_in_file(file_id: u32) -> Option<Vec<Scheduler>> {
-        let root = ffxi_dat::DatRoot::from_env_or_default().ok()?;
+        let root = ffxi_dat::archive::open_test_install()?;
         let loc = root.resolve(file_id).ok()?;
         let bytes = std::fs::read(loc.path_under(root.root())).ok()?;
         Some(ffxi_dat::resource_dir::ResourceDir::from_bytes(bytes).collect_schedulers())
     }
 
     fn global_effect_dir() -> Option<(Vec<Scheduler>, ActionAssets)> {
-        let root = ffxi_dat::DatRoot::from_env_or_default().ok()?;
+        let root = ffxi_dat::archive::open_test_install()?;
         let loc = root.resolve(GLOBAL_EFFECT_DIR_FILE_ID).ok()?;
         let bytes = std::fs::read(loc.path_under(root.root())).ok()?;
         Some(parse_action_bytes(&bytes))

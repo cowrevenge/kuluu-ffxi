@@ -6,6 +6,7 @@ pub mod cast_time;
 pub mod checksum;
 pub mod decode;
 pub mod emote_names;
+pub mod entity_stream;
 pub mod equip_info;
 pub mod framing;
 pub mod item_flags;

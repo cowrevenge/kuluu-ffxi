@@ -1081,6 +1081,7 @@ mod tests {
                 max_loops: 0,
                 transition_in: 0,
                 transition_out: 0,
+                random_group: None,
             },
         }
     }

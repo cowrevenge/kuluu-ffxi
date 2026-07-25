@@ -41,6 +41,10 @@ pub fn cast_suffix(spell_id: u32) -> Option<&'static str> {
 const MAGIC_CAST_PREFIX: [u8; 2] = *b"ca";
 const MAGIC_INTERRUPT_PREFIX: [u8; 2] = *b"sp";
 
+// vendor/server/src/map/enums/action/category.h:35,39 — `action.cmd_no`, 4 bits.
+pub const CATEGORY_MAGIC_FINISH: u8 = 4;
+pub const CATEGORY_MAGIC_START: u8 = 8;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MagicRoutine {
     pub id: [u8; 4],

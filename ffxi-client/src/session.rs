@@ -1650,13 +1650,75 @@ fn datagram_header_id(next_sub_sync: u16) -> u16 {
 }
 
 /// Reactor-local model of the self player's in-flight action (see
-/// `keepalive_loop`). `has_bar` is true only for spells, which get a cast bar;
-/// instant JA/WS/ranged set only the `lock_until` re-issue gate.
+/// `keepalive_loop`). `bar` is Some only for spells; instant JA/WS/ranged set
+/// only the `lock_until` re-issue gate.
 struct CastInFlight {
-    started_at: std::time::Instant,
     lock_until: std::time::Instant,
+    bar: Option<CastBar>,
+}
+
+/// Armed at send but not started: the bar waits for the server's own
+/// BATTLE2 MagicStart so it cannot lead the cast pose and the "starts casting"
+/// line by a round trip.
+struct CastBar {
+    name: String,
     total_ms: u32,
-    has_bar: bool,
+    started_at: Option<std::time::Instant>,
+}
+
+/// Drives the self cast bar from the server's own BATTLE2 action packets.
+///
+/// vendor/server/src/map/ai/states/magic_state.cpp:127 pushes the MagicStart
+/// action_t from the `CMagicState` constructor, i.e. synchronously inside the
+/// 0x1A action handler (player_controller.cpp:50-59 → ai_container.cpp:225-234),
+/// so this packet is the server's cast-start instant and carries the same cast
+/// pose and "starts casting" line. An interrupt reuses the MagicStart category
+/// with an "sp*" FourCC (vendor/server/src/map/action/interrupts.cpp:268-284).
+fn apply_self_battle2_to_cast(
+    header: &Battle2Header,
+    cast_in_flight: &mut Option<CastInFlight>,
+    event_tx: &broadcast::Sender<AgentEvent>,
+) {
+    let now = std::time::Instant::now();
+    let mut clear = false;
+    if let Some(c) = cast_in_flight.as_mut() {
+        if let Some(bar) = c.bar.as_mut() {
+            let started = bar.started_at.is_some();
+            let end = |interrupted: bool| {
+                if started {
+                    let _ = event_tx.send(AgentEvent::SelfCastEnded { interrupted });
+                }
+            };
+            match header.action_kind {
+                ffxi_proto::magic::CATEGORY_MAGIC_START => {
+                    let routine = ffxi_proto::magic::magic_start_routine(header.action_id);
+                    if routine.is_some_and(|r| r.interrupt) {
+                        end(true);
+                        clear = true;
+                    } else if !started {
+                        bar.started_at = Some(now);
+                        let _ = event_tx.send(AgentEvent::SelfCastStarted {
+                            name: bar.name.clone(),
+                            total_ms: bar.total_ms,
+                        });
+                        // The gate was armed a round trip ago; without this the bar
+                        // would be cut short by exactly that round trip.
+                        c.lock_until = c
+                            .lock_until
+                            .max(now + std::time::Duration::from_millis(u64::from(bar.total_ms)));
+                    }
+                }
+                ffxi_proto::magic::CATEGORY_MAGIC_FINISH => {
+                    end(false);
+                    clear = true;
+                }
+                _ => {}
+            }
+        }
+    }
+    if clear {
+        *cast_in_flight = None;
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1814,9 +1876,11 @@ async fn keepalive_loop(
                         let _ = event_tx.send(AgentEvent::PositionChanged { pos: self_pos });
                         if moved {
                             if let Some(c) = &cast_in_flight {
-                                if c.has_bar {
-                                    let _ = event_tx
-                                        .send(AgentEvent::SelfCastEnded { interrupted: true });
+                                if let Some(bar) = &c.bar {
+                                    if bar.started_at.is_some() {
+                                        let _ = event_tx
+                                            .send(AgentEvent::SelfCastEnded { interrupted: true });
+                                    }
                                     cast_in_flight = None;
                                 }
                             }
@@ -2226,26 +2290,20 @@ async fn keepalive_loop(
                                     }
                                 }
                             }
-                            // Optimistically arm the cast lock/bar; the reactor
-                            // tick advances and clears it (movement interrupts a
-                            // spell in the Move arm).
+                            // The re-issue gate is optimistic (it guards our own
+                            // send), but the bar it carries only starts when the
+                            // server echoes MagicStart — see start_self_cast_bar.
                             if let Some(lock_ms) = kind.action_lock_ms(dat_cast_ms) {
-                                let (has_bar, total_ms) = match kind.cast_bar(dat_cast_ms) {
-                                    Some((name, total)) => {
-                                        let _ = event_tx.send(AgentEvent::SelfCastStarted {
-                                            name,
-                                            total_ms: total,
-                                        });
-                                        (true, total)
-                                    }
-                                    None => (false, 0),
-                                };
                                 cast_in_flight = Some(CastInFlight {
-                                    started_at: now,
                                     lock_until: now
                                         + std::time::Duration::from_millis(u64::from(lock_ms)),
-                                    total_ms,
-                                    has_bar,
+                                    bar: kind.cast_bar(dat_cast_ms).map(|(name, total_ms)| {
+                                        CastBar {
+                                            name,
+                                            total_ms,
+                                            started_at: None,
+                                        }
+                                    }),
                                 });
                             }
                         }
@@ -2849,14 +2907,15 @@ async fn keepalive_loop(
                 // Advance the cast bar and clear the action lock when it expires.
                 if let Some(c) = &cast_in_flight {
                     let now = std::time::Instant::now();
-                    if c.has_bar {
-                        let elapsed = c.started_at.elapsed().as_millis() as u32;
+                    let started = c.bar.as_ref().and_then(|b| b.started_at.map(|t| (b, t)));
+                    if let Some((bar, started_at)) = started {
+                        let elapsed = started_at.elapsed().as_millis() as u32;
                         let _ = event_tx.send(AgentEvent::SelfCastProgress {
-                            elapsed_ms: elapsed.min(c.total_ms),
+                            elapsed_ms: elapsed.min(bar.total_ms),
                         });
                     }
                     if now >= c.lock_until {
-                        if c.has_bar {
+                        if started.is_some() {
                             let _ = event_tx
                                 .send(AgentEvent::SelfCastEnded { interrupted: false });
                         }
@@ -3349,6 +3408,18 @@ async fn keepalive_loop(
                                 &mut mog,
                                 None,
                             );
+
+                            if sub.opcode == ffxi_proto::map::s2c::BATTLE2 {
+                                if let Some(h) = decode_battle2_header(sub.data) {
+                                    if h.actor_id == self_char_id {
+                                        apply_self_battle2_to_cast(
+                                            &h,
+                                            &mut cast_in_flight,
+                                            &event_tx,
+                                        );
+                                    }
+                                }
+                            }
 
                             if sub.opcode == ffxi_proto::map::s2c::CHAR_PC {
                                 if let Ok(head) = decode::PosHead::decode(sub.data) {
@@ -6306,6 +6377,107 @@ mod tests {
             "placeholder must expose the masked index and params: {}",
             line.text
         );
+    }
+
+    fn armed_cast(total_ms: u32) -> Option<CastInFlight> {
+        Some(CastInFlight {
+            lock_until: std::time::Instant::now() + std::time::Duration::from_millis(5_000),
+            bar: Some(CastBar {
+                name: "Poison".into(),
+                total_ms,
+                started_at: None,
+            }),
+        })
+    }
+
+    fn battle2_self(action_kind: u8, cmd_arg: u32) -> Battle2Header {
+        let mut w = BattleBitWriter::new(8);
+        w.write(0xCAFEu64, 32);
+        w.write(0, 6);
+        w.write(0, 4);
+        w.write(u64::from(action_kind), 4);
+        w.write(u64::from(cmd_arg), 32);
+        w.write(0, 32);
+        w.write(0, 32);
+        decode_battle2_header(&w.into_bytes()).expect("header decodes")
+    }
+
+    /// The bar is armed at send but unstarted; it only starts when the server's
+    /// own MagicStart arrives (vendor/server/src/map/ai/states/magic_state.cpp:127),
+    /// so it cannot lead the cast pose and the "starts casting" line by a round trip.
+    /// The FourCCs are the literal LSB constants (vendor/server/src/map/enums/four_cc.h:40).
+    #[test]
+    fn self_cast_bar_starts_on_magic_start_not_on_send() {
+        const CABK: u32 = 0x6B626163;
+        const SPBK: u32 = 0x6B627073;
+        const POISON_CAST_MS: u32 = 1000;
+
+        let (tx, mut rx) = broadcast::channel(8);
+        let mut cast = armed_cast(POISON_CAST_MS);
+        assert!(
+            rx.try_recv().is_err(),
+            "arming the gate must not announce a cast"
+        );
+
+        apply_self_battle2_to_cast(
+            &battle2_self(ffxi_proto::magic::CATEGORY_MAGIC_START, CABK),
+            &mut cast,
+            &tx,
+        );
+        match rx.try_recv().expect("MagicStart starts the bar") {
+            AgentEvent::SelfCastStarted { name, total_ms } => {
+                assert_eq!(name, "Poison");
+                assert_eq!(total_ms, POISON_CAST_MS);
+            }
+            other => panic!("expected SelfCastStarted, got {other:?}"),
+        }
+        assert!(rx.try_recv().is_err(), "exactly one start event");
+
+        apply_self_battle2_to_cast(
+            &battle2_self(ffxi_proto::magic::CATEGORY_MAGIC_START, CABK),
+            &mut cast,
+            &tx,
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "a repeat MagicStart re-starts nothing"
+        );
+
+        apply_self_battle2_to_cast(
+            &battle2_self(ffxi_proto::magic::CATEGORY_MAGIC_START, SPBK),
+            &mut cast,
+            &tx,
+        );
+        assert!(matches!(
+            rx.try_recv().expect("interrupt ends the bar"),
+            AgentEvent::SelfCastEnded { interrupted: true }
+        ));
+        assert!(cast.is_none(), "an interrupt clears the in-flight action");
+    }
+
+    /// MagicFinish ends the bar instead of leaving it to the optimistic lock timer.
+    #[test]
+    fn self_cast_bar_ends_on_magic_finish() {
+        const CAWH: u32 = 0x68776163;
+
+        let (tx, mut rx) = broadcast::channel(8);
+        let mut cast = armed_cast(1000);
+        apply_self_battle2_to_cast(
+            &battle2_self(ffxi_proto::magic::CATEGORY_MAGIC_START, CAWH),
+            &mut cast,
+            &tx,
+        );
+        let _started = rx.try_recv().expect("start");
+        apply_self_battle2_to_cast(
+            &battle2_self(ffxi_proto::magic::CATEGORY_MAGIC_FINISH, 0),
+            &mut cast,
+            &tx,
+        );
+        assert!(matches!(
+            rx.try_recv().expect("finish ends the bar"),
+            AgentEvent::SelfCastEnded { interrupted: false }
+        ));
+        assert!(cast.is_none());
     }
 
     /// A 0x02A buffered during the zone-in flood must replay as a chat line

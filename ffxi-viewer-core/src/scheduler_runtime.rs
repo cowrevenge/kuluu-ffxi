@@ -675,8 +675,15 @@ fn actor_render_routines<'a>(
 // The routine the caster's cast-start effects were flattened from, so an interrupt can stop the
 // generators it spawned. research/xim Actor.kt:263-266 startCasting enqueues the whole model
 // routine, not just its Motion stage.
+// `posed` latches once the caster is observed in the looping cast pose. Cast routines with no
+// Motion stage (retail `caso`/`calg`/`cage`) never set it, so the heuristic teardown below must
+// not read "not posing" as "cast over" — for those the 0x2D stops and the interrupt signal are
+// the only correct ends.
 #[derive(Component, Debug, Clone, Copy)]
-pub struct CastRoutine(pub [u8; 4]);
+pub struct CastRoutine {
+    pub routine: [u8; 4],
+    pub posed: bool,
+}
 
 // research/xim Actor.kt:263-266 — a cast start runs the caster's full `ca<suffix>` model routine
 // (the `ner1` aura, its sounds, its sub-routines). Only the magic-start category is routed here:
@@ -688,6 +695,8 @@ pub fn dispatch_cast_routine_started(
     q_children: Query<&Children>,
     q_render: Query<&crate::ffxi_actor_render::FfxiRenderActor>,
     global: Option<Res<GlobalEffectDir>>,
+    q_cast: Query<&CastRoutine>,
+    mut sim: ResMut<crate::particle_sim::ParticleSimulator>,
     mut spell_suffix: Local<crate::ffxi_actor_render::SpellSuffixCache>,
     mut commands: Commands,
     mut last_seen: Local<u64>,
@@ -714,11 +723,25 @@ pub fn dispatch_cast_routine_started(
         let Some(&actor_entity) = tracked.by_id.get(&actor_id) else {
             continue;
         };
-        let suffix = spell_suffix.suffix(action_id);
-        let Some((routine, _looping)) =
-            crate::ffxi_actor_render::action_routine(action_kind, suffix)
-        else {
+        // cmd_arg is the routine FourCC, not a spell id (magic_state.cpp:101); an "sp*" FourCC is
+        // an interrupt on the same category (interrupts.cpp:268-284) and must tear the cast down.
+        let magic = ffxi_proto::magic::magic_start_routine(action_id);
+        if magic.is_some_and(|m| m.interrupt) {
+            if let Ok(cast) = q_cast.get(actor_entity) {
+                sim.stop_routine(actor_entity, cast.routine);
+            }
+            commands.entity(actor_entity).remove::<CastRoutine>();
             continue;
+        }
+        let routine = match magic {
+            Some(m) => ffxi_dat::datid::DatId::from_name(&m.id),
+            None => {
+                let suffix = spell_suffix.suffix(action_id);
+                match crate::ffxi_actor_render::action_routine(action_kind, suffix) {
+                    Some((routine, _looping)) => routine,
+                    None => continue,
+                }
+            }
         };
         let Some(actor_routines) = actor_render_routines(actor_entity, &q_children, &q_render)
         else {
@@ -735,31 +758,38 @@ pub fn dispatch_cast_routine_started(
         commands
             .entity(actor_entity)
             .try_insert(active)
-            .try_insert(CastRoutine(name))
+            .try_insert(CastRoutine {
+                routine: name,
+                posed: false,
+            })
             .try_insert(ActionTarget(
                 target_id.and_then(|id| tracked.by_id.get(&id).copied()),
             ));
     }
 }
 
-// Belt-and-braces stop for the cases retail's 0x2D StopParticle stages cannot reach: an
-// interrupted cast never runs the spell DAT's `main`, and an observed caster's interrupt carries
-// no wire signal — both end the cast pose, which is what this watches.
+// Belt-and-braces stop for the case retail's 0x2D StopParticle stages cannot reach: an
+// interrupted cast never runs the spell DAT's `main`. Only a cast that was OBSERVED posing and
+// then stopped counts as ended — see CastRoutine::posed.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn stop_cast_effects_when_cast_ends(
-    q_cast: Query<(Entity, &CastRoutine, &Children)>,
+    mut q_cast: Query<(Entity, &mut CastRoutine, &Children)>,
     q_render: Query<&crate::ffxi_actor_render::FfxiRenderActor>,
     mut sim: ResMut<crate::particle_sim::ParticleSimulator>,
     mut commands: Commands,
 ) {
-    for (entity, cast, children) in &q_cast {
+    for (entity, mut cast, children) in &mut q_cast {
         let Some(actor) = children.iter().find_map(|c| q_render.get(c).ok()) else {
             continue;
         };
         if actor.cast_posing() {
+            cast.posed = true;
             continue;
         }
-        sim.stop_routine(entity, cast.0);
+        if !cast.posed {
+            continue;
+        }
+        sim.stop_routine(entity, cast.routine);
         commands.entity(entity).remove::<CastRoutine>();
     }
 }

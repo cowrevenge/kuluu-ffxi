@@ -33,6 +33,33 @@ pub fn cast_suffix(spell_id: u32) -> Option<&'static str> {
     skill_to_suffix(SPELL_MAGIC_SKILL[i].1)
 }
 
+// vendor/server/src/map/ai/states/magic_state.cpp:101 packs the spell's FourCC — not its id —
+// into BATTLE2 cmd_arg for ActionCategory::MagicStart; the spell id rides in the first result's
+// `param` (:109). vendor/server/src/map/action/interrupts.cpp:268-284 reuses the SAME category
+// for an interrupt, distinguished only by the FourCC. vendor/server/src/map/enums/four_cc.h:39-54
+// names both families: casts are "ca"+suffix, interrupts "sp"+suffix.
+const MAGIC_CAST_PREFIX: [u8; 2] = *b"ca";
+const MAGIC_INTERRUPT_PREFIX: [u8; 2] = *b"sp";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MagicRoutine {
+    pub id: [u8; 4],
+    pub interrupt: bool,
+}
+
+pub fn magic_start_routine(cmd_arg: u32) -> Option<MagicRoutine> {
+    let id = cmd_arg.to_le_bytes();
+    let interrupt = match [id[0], id[1]] {
+        MAGIC_CAST_PREFIX => false,
+        MAGIC_INTERRUPT_PREFIX => true,
+        _ => return None,
+    };
+    id[2..]
+        .iter()
+        .all(|b| b.is_ascii_lowercase())
+        .then_some(MagicRoutine { id, interrupt })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -47,6 +74,32 @@ mod tests {
     #[test]
     fn unknown_spell_is_none() {
         assert_eq!(cast_suffix(0xFFFF), None);
+    }
+
+    // vendor/server/src/map/enums/four_cc.h:40,39,44,47,48 — the literal constants LSB sends.
+    #[test]
+    fn magic_start_fourcc_decodes_to_its_routine_dat_id() {
+        let black = magic_start_routine(0x6B626163).unwrap();
+        assert_eq!(&black.id, b"cabk");
+        assert!(!black.interrupt);
+
+        assert_eq!(&magic_start_routine(0x68776163).unwrap().id, b"cawh");
+        assert_eq!(&magic_start_routine(0x6D736163).unwrap().id, b"casm");
+
+        let interrupted = magic_start_routine(0x6B627073).unwrap();
+        assert_eq!(&interrupted.id, b"spbk");
+        assert!(interrupted.interrupt);
+
+        assert!(magic_start_routine(0x68777073).unwrap().interrupt);
+    }
+
+    // A spell id in cmd_arg would decode as garbage; reject it so the caller can tell the
+    // FourCC convention from a stale/other-category payload instead of resolving a junk DatId.
+    #[test]
+    fn non_magic_fourcc_is_rejected() {
+        assert_eq!(magic_start_routine(220), None);
+        assert_eq!(magic_start_routine(0x306B7461), None);
+        assert_eq!(magic_start_routine(0), None);
     }
 
     #[test]

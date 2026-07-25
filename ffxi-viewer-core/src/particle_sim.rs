@@ -414,11 +414,20 @@ fn advance_generator(g: &mut LiveGenerator, frames: f32) {
     // predecessor expires.
     g.particles.retain(|p| p.age_frames < p.life_frames);
 
+    // Particles emitted below were born during this tick, so the ageing pass must not charge them
+    // the whole frame: at 30 fps retail that error is invisible, but one long frame (the blocking
+    // action-DAT read) would otherwise age a freshly emitted short-life particle past its life and
+    // sweep it before it ever renders.
+    let pre_emit_len = g.particles.len();
+
     // research/xim: a maxLifeSpan of 0 marks a singleton — emit one particle once.
     let singleton = g.def.is_singleton();
     let emitting = !g.stopped && (g.auto_run || g.age_frames <= g.emit_window_frames.max(1.0));
     if singleton {
-        if emitting && g.particles.is_empty() && g.age_frames <= frames {
+        // `age_frames <= frames` already pins this to the first tick, so the emit window must not
+        // gate it: a long frame (the blocking action-DAT read precedes these) makes age_frames
+        // exceed a dur=0 stage's 1-frame window on that very tick and the singleton never fires.
+        if !g.stopped && g.particles.is_empty() && g.age_frames <= frames {
             emit(g, g.emit_window_frames.max(g.def.max_life_frames).max(1.0));
         }
     } else if emitting {
@@ -449,7 +458,7 @@ fn advance_generator(g: &mut LiveGenerator, frames: f32) {
         .def
         .accel
         .map(|a| Vec3::from_array(a) * g.vel_basis * frames);
-    for p in &mut g.particles {
+    for p in g.particles.iter_mut().take(pre_emit_len) {
         p.age_frames += frames;
         if let Some(a) = accel {
             p.vel += a;
@@ -964,6 +973,40 @@ mod tests {
             sim.generators[0].particles.is_empty(),
             "live particles finish their lifetime and none replace them"
         );
+    }
+
+    // The cast aura's own generators sit on dur=0 Particle stages (global-dir `ner1`: gn1s dur=0;
+    // `eis3`: ge3s/ge31 dur=0), giving a 1-frame emit window, and the frame that spawns them
+    // carries a blocking action-DAT read. A singleton must still fire on its first tick however
+    // long that frame ran, or the aura never appears at all.
+    #[test]
+    fn singleton_emits_on_a_first_frame_longer_than_its_emit_window() {
+        const SINGLETON_LIFE: f32 = 0.0;
+        const ZERO_DURATION_WINDOW: f32 = 0.0;
+        const LONG_FRAME: f32 = 9.0;
+
+        let mut g = live(def(SINGLETON_LIFE, 1.0, 1), ZERO_DURATION_WINDOW);
+        assert!(g.def.is_singleton());
+        advance(&mut g, LONG_FRAME);
+        assert_eq!(
+            g.particles.len(),
+            1,
+            "a long spawn frame must not swallow the singleton's only emission"
+        );
+
+        advance(&mut g, LONG_FRAME);
+        assert!(
+            g.particles.is_empty(),
+            "it lives out its window and is not re-emitted"
+        );
+    }
+
+    #[test]
+    fn stopped_singleton_never_emits() {
+        let mut g = live(def(0.0, 1.0, 1), 0.0);
+        g.stopped = true;
+        advance(&mut g, 9.0);
+        assert!(g.particles.is_empty());
     }
 
     #[test]

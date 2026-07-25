@@ -79,10 +79,19 @@ impl DatRoot {
         if let Some(root) = env::var_os("FFXI_DAT_PATH") {
             return Self::open(PathBuf::from(root));
         }
-        let fallback = PathBuf::from(DEFAULT_INSTALL_DIR);
-        if !fallback.join("VTABLE.DAT").exists() {
-            return Err(DatError::EnvMissing);
-        }
+        // DEFAULT_INSTALL_DIR is workspace-relative, but cargo runs each test binary with cwd set
+        // to its own package root, so the cwd probe alone silently misses under `cargo test` and
+        // every real-DAT guard vacuously skips. Fall back to the workspace root resolved from this
+        // crate's manifest dir (absent in a shipped binary, which is why cwd is still tried first).
+        let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR")).parent();
+        let fallback = [
+            Some(PathBuf::from(DEFAULT_INSTALL_DIR)),
+            workspace_root.map(|w| w.join(DEFAULT_INSTALL_DIR)),
+        ]
+        .into_iter()
+        .flatten()
+        .find(|p| p.join("VTABLE.DAT").exists())
+        .ok_or(DatError::EnvMissing)?;
         Self::open(fallback)
     }
 

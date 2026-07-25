@@ -2222,10 +2222,27 @@ pub fn dispatch_action_overlay(
             continue;
         };
 
-        let cast_suffix = (action_kind == MAGIC_START_CATEGORY)
-            .then(|| spell_suffix.suffix(action_id))
+        // An interrupt arrives on the cast-start category carrying an "sp*" FourCC
+        // (vendor/server/src/map/action/interrupts.cpp:268-284); treating it as a start would
+        // re-arm the looping pose for CAST_TIMEOUT_FRAMES instead of dropping it.
+        let magic = (action_kind == MAGIC_START_CATEGORY)
+            .then(|| ffxi_proto::magic::magic_start_routine(action_id))
             .flatten();
-        match action_routine(action_kind, cast_suffix) {
+        if magic.is_some_and(|m| m.interrupt) {
+            if actor.action.map(|a| a.cast_pose).unwrap_or(false) {
+                actor.action = None;
+            }
+            continue;
+        }
+        let cast_routine_id = magic.map(|m| DatId::from_name(&m.id));
+        let cast_suffix = match (action_kind == MAGIC_START_CATEGORY, cast_routine_id) {
+            (true, None) => spell_suffix.suffix(action_id),
+            _ => None,
+        };
+        match cast_routine_id
+            .map(|id| (id, true))
+            .or_else(|| action_routine(action_kind, cast_suffix))
+        {
             None => {
                 if actor.action.map(|a| a.looping).unwrap_or(false) {
                     actor.action = None;

@@ -3780,12 +3780,14 @@ pub fn decode_battle2_header(data: &[u8]) -> Option<Battle2Header> {
     let _res_sum = br.read(4)?;
     let action_kind = br.read(4)? as u8;
     let action_id = br.read(32)? as u32;
-    let _info = br.read(32)?;
-    let primary_target_id = if trg_sum > 0 {
-        Some(br.read(32)? as u32)
-    } else {
-        None
-    };
+    // LSB rounds the packet to a 4-byte size (basic.h:118), so a target carrying no results can
+    // end the body before these trailing reads. Degrade to "no target" rather than dropping the
+    // whole action — the sibling decode_battle2_action tolerates the same short payload.
+    let primary_target_id = br
+        .read(32)
+        .filter(|_| trg_sum > 0)
+        .and_then(|_info| br.read(32))
+        .map(|id| id as u32);
     Some(Battle2Header {
         actor_id,
         action_id,

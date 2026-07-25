@@ -33,7 +33,11 @@ pub enum StageKind {
 
     SubRoutine,
 
+    BlockingSubRoutine,
+
     StopParticle,
+
+    DamageCallback,
 
     Unknown,
 }
@@ -58,9 +62,14 @@ impl StageKind {
             // research/xim EffectRoutineParser.kt:253-258 — StopParticleGeneratorRoutine, id =
             // the generator DatId to stop (ROM/0/0.DAT `stbk` stops the cast aura's gn10..gn13).
             0x2D => Self::StopParticle,
-            // research/xim EffectRoutineParser.kt:270-274 — LinkedEffectRoutine(blocking), the
-            // same sub-routine call as 0x03 (a spell DAT's `main` links the caster's `shbk`).
-            0x3B | 0x3C => Self::SubRoutine,
+            // research/xim EffectRoutineParser.kt:219-222 — DamageCallbackRoutine, the stage the
+            // damage/battle-message callback is invoked on (EffectRoutineInstance.kt:956-959).
+            // Every spell routine tail-calls a `mdam` sub-routine that holds exactly this stage.
+            0x2B => Self::DamageCallback,
+            // research/xim EffectRoutineParser.kt:270-274 — LinkedEffectRoutine with
+            // `blocking = true`: the same sub-routine call as 0x03, except the parent stalls
+            // until the child finishes (EffectRoutineInstance.kt:400 `blockers += newSequences`).
+            0x3B | 0x3C => Self::BlockingSubRoutine,
             0x53 => Self::SoundOnCaster,
             _ => Self::Unknown,
         }
@@ -309,9 +318,9 @@ mod tests {
         body.extend_from_slice(&0u32.to_le_bytes());
 
         let s = Scheduler::parse(*b"main", &body).unwrap();
-        assert_eq!(s.stages[0].stage.kind, StageKind::SubRoutine);
+        assert_eq!(s.stages[0].stage.kind, StageKind::BlockingSubRoutine);
         assert_eq!(&s.stages[0].stage.id, b"shbk");
-        assert_eq!(s.stages[1].stage.kind, StageKind::SubRoutine);
+        assert_eq!(s.stages[1].stage.kind, StageKind::BlockingSubRoutine);
         assert_eq!(&s.stages[1].stage.id, b"wash");
         assert_eq!(s.stages[2].stage.kind, StageKind::StopParticle);
         assert_eq!(&s.stages[2].stage.id, b"gn13");
@@ -347,7 +356,7 @@ mod tests {
             .iter()
             .find(|t| t.stage.raw_type == 0x3C)
             .expect("main links a caster routine with 0x3C");
-        assert_eq!(link.stage.kind, StageKind::SubRoutine);
+        assert_eq!(link.stage.kind, StageKind::BlockingSubRoutine);
         assert_eq!(&link.stage.id, b"shbk");
 
         let Some(global) = read(GLOBAL_EFFECT_DIR_FILE) else {
@@ -370,6 +379,55 @@ mod tests {
                 String::from_utf8_lossy(gen_id)
             );
         }
+    }
+
+    // research/xim EffectRoutineParser.kt:219-222 (0x2B DamageCallbackRoutine) and :270-274
+    // (0x3B/0x3C LinkedEffectRoutine with blocking = true, unlike the 0x03 link).
+    #[test]
+    fn damage_callback_and_blocking_subroutine_opcodes() {
+        assert_eq!(StageKind::from_stage(0x2B, 3), StageKind::DamageCallback);
+        assert_eq!(
+            StageKind::from_stage(0x3C, 4),
+            StageKind::BlockingSubRoutine
+        );
+        assert_eq!(
+            StageKind::from_stage(0x3B, 4),
+            StageKind::BlockingSubRoutine
+        );
+        assert_eq!(StageKind::from_stage(0x03, 3), StageKind::SubRoutine);
+        assert_ne!(
+            StageKind::from_stage(0x3C, 4),
+            StageKind::from_stage(0x03, 3)
+        );
+    }
+
+    // Retail-byte guard (skips without an install): the global effect dir's `mdam` routine —
+    // the sub-routine every spell's target routine tail-calls — IS the damage callback, a
+    // single 0x2B stage. It decoded as Unknown before kuluu-k6tz.
+    #[test]
+    fn real_dat_global_mdam_routine_is_a_damage_callback() {
+        const GLOBAL_EFFECT_DIR_FILE: u32 = 0;
+
+        let Ok(root) = crate::DatRoot::from_env_or_default() else {
+            return;
+        };
+        let Ok(loc) = root.resolve(GLOBAL_EFFECT_DIR_FILE) else {
+            return;
+        };
+        let Ok(bytes) = std::fs::read(loc.path_under(root.root())) else {
+            return;
+        };
+        let mdam = crate::resource_dir::ResourceDir::from_bytes(bytes)
+            .collect_schedulers()
+            .into_iter()
+            .find(|s| &s.name == b"mdam")
+            .expect("global effect dir has the mdam routine");
+        assert!(
+            mdam.stages
+                .iter()
+                .any(|t| t.stage.kind == StageKind::DamageCallback),
+            "mdam holds the 0x2B damage callback"
+        );
     }
 
     #[test]

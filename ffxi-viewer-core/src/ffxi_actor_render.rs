@@ -1916,7 +1916,7 @@ pub fn tick_live_ffxi_actors(
     time: Res<Time>,
     state: Res<crate::snapshot::SceneState>,
     motion: Res<combat_stance::EntityMotion>,
-    rest: Res<combat_stance::RestStance>,
+    mut rest: ResMut<combat_stance::RestStance>,
     walk_mode: Res<combat_stance::WalkMode>,
     self_move: Res<combat_stance::SelfMoveIntent>,
     mut materials: ResMut<Assets<FfxiSkinnedMaterial>>,
@@ -2160,6 +2160,10 @@ pub fn tick_live_ffxi_actors(
         }
 
         advance_actor_pose(&mut actor, elapsed_frames, &mut materials, look);
+
+        if is_self {
+            rest.observe_exit_clip(matches!(actor.rest_phase, RestPlayback::Stopping { .. }));
+        }
     }
 }
 

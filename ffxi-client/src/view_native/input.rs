@@ -639,12 +639,20 @@ pub fn dispatch_movement_system(
                     mode: crate::state::HealMode::Off,
                 });
             }
-            rest_stance.kind = RestKind::None;
-        } else {
-            autorun.phantom_forward = false;
-            autorun.strafe_held_since = None;
-            return;
+            rest_stance.begin_exit();
         }
+        autorun.phantom_forward = false;
+        autorun.strafe_held_since = None;
+        return;
+    }
+
+    // The stand-up clip runs before the character moves (retail's cost for
+    // breaking a rest); movement only starts if the keys are still held when it
+    // ends, so this gate reads `pressed` state fresh on the frame it lifts.
+    if rest_stance.exit_blocks_movement(time.delta_secs()) {
+        autorun.phantom_forward = false;
+        autorun.strafe_held_since = None;
+        return;
     }
 
     let backward_just_pressed = bindings.just_pressed(Action::MoveBackward, &keys);

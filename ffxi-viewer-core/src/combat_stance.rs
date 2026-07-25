@@ -99,9 +99,33 @@ pub fn heal_anim_for_skel(skel_file_id: u32) -> Option<Arc<Mo2Animation>> {
     loaded
 }
 
-#[derive(Resource, Default, Debug, Clone, Copy, Eq, PartialEq)]
+#[derive(Resource, Default, Debug, Clone, Copy, PartialEq)]
 pub struct RestStance {
     pub kind: RestKind,
+    pub exit: RestExit,
+}
+
+/// Retail charges you for standing up: cancelling a rest plays the stand-up
+/// clip first, and the character only starts moving if the movement keys are
+/// still held when it finishes. Movement stays suppressed for the whole phase
+/// instead of sliding out from under the animation.
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
+pub enum RestExit {
+    #[default]
+    Idle,
+
+    Pending {
+        grace: f32,
+    },
+
+    Playing,
+}
+
+impl RestExit {
+    /// A self actor with no rest clips — missing DATs, or the actor not spawned
+    /// yet — never reaches `Playing`, so the bridge from the input cancel to the
+    /// pose machine's Out phase has to expire on its own.
+    pub const HANDOFF_SECS: f32 = 0.25;
 }
 
 #[derive(Debug, Default, Clone, Copy, Eq, PartialEq)]
@@ -117,6 +141,37 @@ pub enum RestKind {
 impl RestStance {
     pub fn is_resting(&self) -> bool {
         !matches!(self.kind, RestKind::None)
+    }
+
+    pub fn begin_exit(&mut self) {
+        self.kind = RestKind::None;
+        self.exit = RestExit::Pending {
+            grace: RestExit::HANDOFF_SECS,
+        };
+    }
+
+    pub fn exit_blocks_movement(&mut self, dt: f32) -> bool {
+        match &mut self.exit {
+            RestExit::Idle => false,
+            RestExit::Playing => true,
+            RestExit::Pending { grace } => {
+                *grace -= dt;
+                if *grace <= 0.0 {
+                    self.exit = RestExit::Idle;
+                    false
+                } else {
+                    true
+                }
+            }
+        }
+    }
+
+    pub fn observe_exit_clip(&mut self, playing: bool) {
+        self.exit = match (self.exit, playing) {
+            (_, true) => RestExit::Playing,
+            (RestExit::Playing, false) => RestExit::Idle,
+            (other, false) => other,
+        };
     }
 }
 
@@ -531,7 +586,7 @@ pub fn predict_entities_system(
     for (world, mut transform) in &mut q {
         if !matches!(
             world.kind,
-            EntityKind::Mob | EntityKind::Pc | EntityKind::Pet
+            EntityKind::Mob | EntityKind::Pc | EntityKind::Pet | EntityKind::Npc
         ) {
             continue;
         }
@@ -877,6 +932,57 @@ mod tests {
         assert!(s.is_resting());
         s.kind = RestKind::None;
         assert!(!s.is_resting());
+    }
+
+    #[test]
+    fn rest_exit_blocks_movement_until_the_stand_up_clip_ends() {
+        let mut s = RestStance {
+            kind: RestKind::Heal,
+            ..Default::default()
+        };
+        s.begin_exit();
+        assert_eq!(s.kind, RestKind::None, "the stance is released immediately");
+
+        let dt = 1.0 / 30.0;
+        assert!(s.exit_blocks_movement(dt), "pending bridge holds movement");
+
+        s.observe_exit_clip(true);
+        for _ in 0..60 {
+            assert!(
+                s.exit_blocks_movement(dt),
+                "the Out clip outlasts the pending grace"
+            );
+        }
+
+        s.observe_exit_clip(false);
+        assert!(!s.exit_blocks_movement(dt), "movement resumes once it ends");
+    }
+
+    #[test]
+    fn rest_exit_pending_expires_without_a_stand_up_clip() {
+        let mut s = RestStance::default();
+        s.begin_exit();
+        let dt = 1.0 / 30.0;
+        let mut ticks = 0;
+        while s.exit_blocks_movement(dt) {
+            ticks += 1;
+            assert!(ticks < 1000, "pending must not block movement forever");
+        }
+        assert!(
+            (ticks as f32) * dt >= RestExit::HANDOFF_SECS - dt,
+            "the grace should run out roughly at HANDOFF_SECS, not instantly"
+        );
+        assert_eq!(s.exit, RestExit::Idle);
+    }
+
+    #[test]
+    fn resting_again_clears_a_finished_exit() {
+        let mut s = RestStance::default();
+        s.begin_exit();
+        s.observe_exit_clip(true);
+        s.kind = RestKind::Heal;
+        s.observe_exit_clip(false);
+        assert!(!s.exit_blocks_movement(1.0 / 30.0));
     }
 
     #[test]

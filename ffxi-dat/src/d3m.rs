@@ -109,6 +109,23 @@ impl D3m {
             .trim_end()
             .to_string()
     }
+
+    // research/xim ParticleMeshSection.kt:76-82 — a mesh links its texture by the raw 16-byte
+    // qualified name, resolved as (namespace, local) then local-only.
+    pub fn texture_name_tokens(&self) -> (String, String) {
+        crate::texture::split_qualified_name(&self.texture_name)
+    }
+
+    // The legacy texture key: the raw padded bytes at NAMESPACE_LEN..+4, correct only when they
+    // happen to equal the backing Img chunk's 4-byte DatId. `pou` yields `pou ` and never
+    // matches chunk `pou1`; `kumori` yields `kumo` and matches only by truncation.
+    pub fn texture_dat_id(&self) -> [u8; 4] {
+        let local = &self.texture_name[crate::texture::NAMESPACE_LEN..];
+        let mut id = [0u8; 4];
+        let n = id.len().min(local.len());
+        id[..n].copy_from_slice(&local[..n]);
+        id
+    }
 }
 
 #[inline]

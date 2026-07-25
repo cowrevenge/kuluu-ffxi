@@ -46,6 +46,8 @@ fn token(raw: &[u8]) -> String {
     s.trim().to_string()
 }
 
+pub const NAMESPACE_LEN: usize = imginfo::TOKEN_LEN;
+
 // research/xim DatResource.kt:312-315 — a fully qualified 16-char texture name splits into
 // a namespace (bytes 0..8) and a local name (bytes 8..16).
 pub fn split_qualified_name(raw16: &[u8]) -> (String, String) {
@@ -56,10 +58,13 @@ pub fn split_qualified_name(raw16: &[u8]) -> (String, String) {
 }
 
 pub fn extract_texture_tokens(body: &[u8]) -> Option<(String, String)> {
-    if body.len() < imginfo::NAME_END || body[0] != imginfo::FLG_DXT {
+    if body.len() < imginfo::NAME_END || !imginfo::NAMED_HEADER_FLAGS.contains(&body[0]) {
         return None;
     }
-    Some(split_qualified_name(&body[1..imginfo::NAME_END]))
+    let (namespace, local) = split_qualified_name(&body[1..imginfo::NAME_END]);
+    // A blank local token is not a name: keyed into the name maps it would collide with every
+    // other blank-named chunk and with every mesh that names no texture at all.
+    (!local.is_empty()).then_some((namespace, local))
 }
 
 pub fn extract_texture_name(body: &[u8]) -> Option<String> {
@@ -68,7 +73,22 @@ pub fn extract_texture_name(body: &[u8]) -> Option<String> {
 
 mod imginfo {
 
-    pub(super) const FLG_DXT: u8 = 0xA1;
+    pub const FLG_DXT: u8 = 0xA1;
+
+    pub(super) const FLG_PALETTE: u8 = 0x91;
+
+    // research/xim TextureSection.kt:60-72 — 0xB1 repeats 0x91's palettised layout with one
+    // extra header word, which is why its palette/pixel offsets sit 4 bytes later.
+    pub(super) const FLG_PALETTE_EXT: u8 = 0xB1;
+
+    // research/xim TextureSection.kt:28-33 rejects every other type byte outright, so these are
+    // the only three known to carry a qualified 0x10-char name straight after the flag.
+    pub(super) const NAMED_HEADER_FLAGS: [u8; 3] = [FLG_DXT, FLG_PALETTE, FLG_PALETTE_EXT];
+
+    // research/xim TextureSection.kt:28-33 rejects these two type bytes, so their name field is
+    // unvouched-for and they stay out of NAMED_HEADER_FLAGS even though decode_texture reads
+    // them with FLG_PALETTE's layout.
+    pub(super) const FLG_PALETTE_UNVERIFIED: [u8; 2] = [0x01, 0x81];
 
     pub(super) const NAME_END: usize = 0x11;
 
@@ -80,12 +100,32 @@ mod imginfo {
 
     pub(super) const DIMS_END: usize = 0x1D;
 
-    pub(super) const MAGIC_OFF: usize = 0x39;
+    // Every type byte shares this header: 0xA1 puts its DXT fourcc here, the palettised kinds
+    // their palette.
+    pub(super) const HEADER_END: usize = 0x39;
+
+    pub(super) const MAGIC_OFF: usize = HEADER_END;
 
     pub(super) const MAGIC_END: usize = 0x3D;
 
     pub(super) const HEADER_SIZE: usize = 0x45;
+
+    pub(super) const PALETTE_OFF: usize = HEADER_END;
+
+    // 256 BGRA entries.
+    pub(super) const PALETTE_LEN: usize = 0x400;
+
+    pub(super) const PIXELS_OFF: usize = PALETTE_OFF + PALETTE_LEN;
+
+    // research/xim TextureSection.kt:74 — 0xB1 reads one extra header word before the payload.
+    pub(super) const EXT_HEADER_WORD: usize = 4;
+
+    pub(super) const PALETTE_OFF_EXT: usize = PALETTE_OFF + EXT_HEADER_WORD;
+
+    pub(super) const PIXELS_OFF_EXT: usize = PALETTE_OFF_EXT + PALETTE_LEN;
 }
+
+pub use imginfo::FLG_DXT;
 
 #[derive(Debug, thiserror::Error)]
 pub enum TextureError {
@@ -118,9 +158,13 @@ pub fn decode_texture(body: &[u8]) -> std::result::Result<DecodedTexture, Textur
     }
     match body[0] {
         imginfo::FLG_DXT => decode_imginfo_a1(body),
-        0x01 | 0x81 | 0x91 => decode_palettized(body, 0x39, 0x439),
-        0xB1 => decode_palettized(body, 0x3D, 0x43D),
-
+        imginfo::FLG_PALETTE => decode_palettized(body, imginfo::PALETTE_OFF, imginfo::PIXELS_OFF),
+        imginfo::FLG_PALETTE_EXT => {
+            decode_palettized(body, imginfo::PALETTE_OFF_EXT, imginfo::PIXELS_OFF_EXT)
+        }
+        flag if imginfo::FLG_PALETTE_UNVERIFIED.contains(&flag) => {
+            decode_palettized(body, imginfo::PALETTE_OFF, imginfo::PIXELS_OFF)
+        }
         _ => Err(TextureError::NoMagic),
     }
 }
@@ -440,8 +484,12 @@ pub(crate) mod tests {
     pub(crate) const QUALIFIED_FIR: &[u8; 16] = b"venom1  fir     ";
 
     pub(crate) fn img_body_named(raw16: &[u8; 16]) -> Vec<u8> {
+        img_body_named_with_flag(imginfo::FLG_DXT, raw16)
+    }
+
+    fn img_body_named_with_flag(flag: u8, raw16: &[u8; 16]) -> Vec<u8> {
         let mut body = vec![0u8; imginfo::NAME_END];
-        body[0] = imginfo::FLG_DXT;
+        body[0] = flag;
         body[1..imginfo::NAME_END].copy_from_slice(raw16);
         body
     }
@@ -454,6 +502,41 @@ pub(crate) mod tests {
             Some(("venom1".to_string(), "fir".to_string()))
         );
         assert_eq!(extract_texture_name(&body).as_deref(), Some("fir"));
+    }
+
+    // research/xim TextureSection.kt:28-33 — a palettised Img names itself exactly like a DXT
+    // one, so it has to enter the name-keyed maps too or it can never be linked by name.
+    #[test]
+    fn extract_texture_tokens_accepts_every_named_header_flag() {
+        for flag in imginfo::NAMED_HEADER_FLAGS {
+            let body = img_body_named_with_flag(flag, QUALIFIED_FIR);
+            assert_eq!(
+                extract_texture_tokens(&body),
+                Some(("venom1".to_string(), "fir".to_string())),
+                "flag {flag:#04x}"
+            );
+        }
+    }
+
+    // research/xim TextureSection.kt:28-33 rejects these two, so their name field is untrusted
+    // and they must not enter the name-keyed maps even though decode_texture handles them.
+    #[test]
+    fn extract_texture_tokens_rejects_the_unverified_palette_flags() {
+        for flag in imginfo::FLG_PALETTE_UNVERIFIED {
+            let body = img_body_named_with_flag(flag, QUALIFIED_FIR);
+            assert_eq!(extract_texture_tokens(&body), None, "flag {flag:#04x}");
+            assert!(!imginfo::NAMED_HEADER_FLAGS.contains(&flag));
+        }
+    }
+
+    #[test]
+    fn extract_texture_tokens_rejects_a_blank_local_name() {
+        for flag in imginfo::NAMED_HEADER_FLAGS {
+            let body = img_body_named_with_flag(flag, b"                ");
+            assert_eq!(extract_texture_tokens(&body), None, "flag {flag:#04x}");
+            let body = img_body_named_with_flag(flag, b"venom1          ");
+            assert_eq!(extract_texture_tokens(&body), None, "flag {flag:#04x}");
+        }
     }
 
     #[test]

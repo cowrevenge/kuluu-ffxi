@@ -664,10 +664,8 @@ fn sprite_template(d3m: &ffxi_dat::d3m::D3m) -> Option<SpriteTemplate> {
     })
 }
 
-// Resolve a generator's mesh_id to (frame-0 template, flipbook frames, texture). A StaticMesh
-// (0x0B) def binds a D3M and has no flipbook frames; a SpriteSheet (0x0E) def binds a 0x21
-// sheet whose texture resolves by qualified name with a local-name fallback. Returns None when
-// the referenced mesh isn't present (leaving zone callers to fall back to an MMB mesh).
+// None when the referenced mesh isn't present, which leaves zone callers to fall back to an
+// MMB mesh.
 fn resolve_mesh(
     assets: &ActionAssets,
     def: &ParticleGeneratorDef,
@@ -677,10 +675,20 @@ fn resolve_mesh(
         ParticleMeshKind::StaticMesh => {
             let d3m = assets.d3ms.get(&def.mesh_id)?;
             let template = sprite_template(d3m)?;
-            let tex = d3m.texture_name[8..12]
-                .try_into()
-                .ok()
-                .and_then(|name: [u8; 4]| assets.images.get(&name))
+            let (namespace, local) = d3m.texture_name_tokens();
+            // research/xim DatResource.kt:488-493 — qualified (namespace, local) match, then
+            // local-only. The truncated DatId stays as a last tier: a few meshes name a
+            // texture whose local token outruns the Img chunk id (`kumori` vs `kumo`) and
+            // resolve only that way.
+            let by_name = (!local.is_empty()).then(|| {
+                assets
+                    .images_by_qualified_name
+                    .get(&(namespace, local.clone()))
+                    .or_else(|| assets.images_by_name.get(&local))
+            });
+            let tex = by_name
+                .flatten()
+                .or_else(|| assets.images.get(&d3m.texture_dat_id()))
                 .map(|t| images.add(decoded_texture_to_image(t)));
             Some((template, Vec::new(), tex))
         }
@@ -1250,6 +1258,199 @@ mod tests {
         #[test]
         fn sprite_sheet_texture_does_not_resolve_by_namespace_alone() {
             assert!(resolved_texture(&sheet_assets(false, false, true)).is_none());
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    mod static_mesh_texture {
+        use super::*;
+        use ffxi_dat::texture::{DecodedTexture, TexFormat};
+
+        const MESH_ID: [u8; 4] = *b"pou1";
+        // ROM/97/59.DAT (`ele_ice`): the d3m names texture `pou`, whose backing Img chunk id is
+        // `pou1`, so the truncated-DatId key and the name key disagree.
+        const QUALIFIED: &[u8; 16] = b"ele_ice pou     ";
+        const NAMESPACE: &str = "ele_ice";
+        const LOCAL: &str = "pou";
+        const IMG_DAT_ID: [u8; 4] = *b"pou1";
+
+        fn one_pixel() -> DecodedTexture {
+            DecodedTexture {
+                width: 1,
+                height: 1,
+                format_tag: TexFormat::Bgra32,
+                rgba: vec![255, 255, 255, 255],
+            }
+        }
+
+        fn mesh_assets(qualified: bool, local: bool, dat_id: bool) -> ActionAssets {
+            let mut assets = ActionAssets::default();
+            let mut texture_name = [0u8; 16];
+            texture_name.copy_from_slice(QUALIFIED);
+            assets.d3ms.insert(
+                MESH_ID,
+                ffxi_dat::d3m::D3m {
+                    name: MESH_ID,
+                    num_triangles: 1,
+                    texture_name,
+                    vertices: vec![
+                        ffxi_dat::d3m::D3mVertex {
+                            pos: [0.0; 3],
+                            normal: [0.0, 1.0, 0.0],
+                            color: [1.0; 4],
+                            uv: [0.0, 0.0],
+                        };
+                        3
+                    ],
+                },
+            );
+            if qualified {
+                assets
+                    .images_by_qualified_name
+                    .insert((NAMESPACE.to_string(), LOCAL.to_string()), one_pixel());
+            }
+            if local {
+                assets.images_by_name.insert(LOCAL.to_string(), one_pixel());
+            }
+            if dat_id {
+                assets.images.insert(IMG_DAT_ID, one_pixel());
+            }
+            assets
+        }
+
+        fn mesh_def() -> ParticleGeneratorDef {
+            let mut d = def(30.0, 1.0, 1);
+            d.mesh_id = MESH_ID;
+            d.mesh_kind = ffxi_dat::particle_gen::ParticleMeshKind::StaticMesh;
+            d
+        }
+
+        fn resolved_texture(assets: &ActionAssets) -> Option<Handle<Image>> {
+            let mut images = Assets::<Image>::default();
+            resolve_mesh(assets, &mesh_def(), &mut images)
+                .expect("static mesh resolves")
+                .2
+        }
+
+        // research/xim DatResource.kt:488-493 — qualified (namespace, local) match first.
+        #[test]
+        fn static_mesh_texture_resolves_by_qualified_name() {
+            assert!(resolved_texture(&mesh_assets(true, false, false)).is_some());
+        }
+
+        #[test]
+        fn static_mesh_texture_falls_back_to_local_name() {
+            assert!(resolved_texture(&mesh_assets(false, true, false)).is_some());
+        }
+
+        // The bug: `pou` truncated to the 4-byte key `pou ` never matched the `pou1` chunk id,
+        // so the ice mesh drew untextured even though its Img was loaded.
+        #[test]
+        fn static_mesh_texture_does_not_need_the_name_to_equal_the_chunk_dat_id() {
+            assert!(resolved_texture(&mesh_assets(false, false, true)).is_none());
+            assert!(resolved_texture(&mesh_assets(true, false, true)).is_some());
+        }
+
+        // ROM file 173 (`cld1`/`clo1`, `kumori`) only ever resolves through the truncated id.
+        #[test]
+        fn static_mesh_texture_keeps_the_dat_id_as_a_last_tier() {
+            let mut assets = mesh_assets(false, false, false);
+            let mut texture_name = [0u8; 16];
+            texture_name.copy_from_slice(b"cld1    kumori  ");
+            assets.d3ms.get_mut(&MESH_ID).unwrap().texture_name = texture_name;
+            assets.images.insert(*b"kumo", one_pixel());
+            assert!(resolved_texture(&assets).is_some());
+        }
+
+        #[test]
+        fn static_mesh_texture_is_none_when_no_tier_matches() {
+            assert!(resolved_texture(&mesh_assets(false, false, false)).is_none());
+        }
+
+        // A mesh that names no texture must not claim the blank key: 44 d3ms in this install
+        // carry an all-blank qualified name, and a single blank-keyed Img would give every one
+        // of them the same wrong texture.
+        #[test]
+        fn static_mesh_texture_ignores_the_name_tiers_when_the_name_is_blank() {
+            let mut assets = mesh_assets(false, false, false);
+            assets.d3ms.get_mut(&MESH_ID).unwrap().texture_name = [b' '; 16];
+            assets
+                .images_by_qualified_name
+                .insert((String::new(), String::new()), one_pixel());
+            assets.images_by_name.insert(String::new(), one_pixel());
+
+            assert!(resolved_texture(&assets).is_none());
+        }
+
+        fn retail_assets(file_id: u32) -> Option<ActionAssets> {
+            let root = ffxi_dat::archive::open_test_install()?;
+            let loc = match root.resolve(file_id) {
+                Ok(loc) => loc,
+                Err(err) => {
+                    eprintln!("skipping: file {file_id} is not in this install ({err})");
+                    return None;
+                }
+            };
+            let path = loc.path_under(root.root());
+            let bytes = match std::fs::read(&path) {
+                Ok(bytes) => bytes,
+                Err(err) => {
+                    eprintln!("skipping: {} unreadable ({err})", path.display());
+                    return None;
+                }
+            };
+            Some(crate::scheduler_runtime::parse_action_bytes(&bytes).1)
+        }
+
+        fn texture_for(assets: &ActionAssets, def: &ParticleGeneratorDef) -> Option<Handle<Image>> {
+            let mut images = Assets::<Image>::default();
+            resolve_mesh(assets, def, &mut images)
+                .expect("mesh resolves")
+                .2
+        }
+
+        // ROM/97/59.DAT `ele_ice`: the d3m names texture `pou` while the Img chunk id is `pou1`,
+        // so the truncated-DatId key left the ice mesh untextured.
+        #[test]
+        fn real_dat_static_mesh_resolves_a_texture_its_chunk_id_does_not_name() {
+            const ELE_ICE_FILE_ID: u32 = 1309;
+            let Some(assets) = retail_assets(ELE_ICE_FILE_ID) else {
+                return;
+            };
+            let d3m = assets.d3ms.get(&MESH_ID).expect("ele_ice ships a pou1 d3m");
+            assert_eq!(
+                d3m.texture_name_tokens(),
+                (NAMESPACE.to_string(), LOCAL.to_string())
+            );
+            assert!(!assets.images.contains_key(&d3m.texture_dat_id()));
+
+            let mut def = mesh_def();
+            def.mesh_id = MESH_ID;
+            assert!(texture_for(&assets, &def).is_some());
+        }
+
+        // ROM3/0/0.DAT: sheet `lf01` is backed by a palettised 0xB1 Img, which never entered the
+        // name-keyed maps while extract_texture_tokens accepted 0xA1 alone. The sheet tier has no
+        // DatId fallback, so the leaf drew untextured.
+        #[test]
+        fn real_dat_sprite_sheet_resolves_a_palettised_texture() {
+            const ENVIRONMENT_FILE_ID: u32 = 101;
+            const LEAF_SHEET_ID: [u8; 4] = *b"lf01";
+            let Some(assets) = retail_assets(ENVIRONMENT_FILE_ID) else {
+                return;
+            };
+            let sheet = assets
+                .sprite_sheets
+                .get(&LEAF_SHEET_ID)
+                .expect("environment dat ships an lf01 sheet");
+            assert!(assets
+                .images_by_qualified_name
+                .contains_key(&(sheet.category.clone(), sheet.id.clone())));
+
+            let mut def = mesh_def();
+            def.mesh_id = LEAF_SHEET_ID;
+            def.mesh_kind = ffxi_dat::particle_gen::ParticleMeshKind::SpriteSheet;
+            assert!(texture_for(&assets, &def).is_some());
         }
     }
 }

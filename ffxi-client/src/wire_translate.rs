@@ -71,6 +71,8 @@ pub fn state_to_snapshot(s: &SessionState) -> wire::SceneSnapshot {
             }),
         }),
 
+        self_server_status: s.self_server_status,
+
         self_casting: s.self_casting.as_ref().map(|c| wire::SelfCasting {
             name: c.name.clone(),
             elapsed_ms: c.elapsed_ms,

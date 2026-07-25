@@ -849,6 +849,7 @@ fn event_kind_label(ev: &AgentEvent) -> &'static str {
         AgentEvent::FishingCast { .. } => "fishing_cast",
         AgentEvent::FishHooked { .. } => "fish_hooked",
         AgentEvent::FishingServerPhase { .. } => "fishing_server_phase",
+        AgentEvent::SelfServerStatus { .. } => "self_server_status",
         AgentEvent::FishingPhaseChanged { .. } => "fishing_phase_changed",
         AgentEvent::FishingProgress { .. } => "fishing_progress",
         AgentEvent::FishingEnded => "fishing_ended",

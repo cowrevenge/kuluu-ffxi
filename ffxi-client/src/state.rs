@@ -388,6 +388,12 @@ pub struct SessionState {
     #[serde(default)]
     pub self_fishing: Option<SelfFishing>,
 
+    /// The server's animation byte for self, from 0x037 CHAR_STATUS. Self never
+    /// appears in the CHAR_PC stream that carries `Entity::animation` for other
+    /// players, so this is the only authority for our own rest state.
+    #[serde(default)]
+    pub self_server_status: u8,
+
     /// Projection of the reactor's in-flight cast/action for the Enhanced cast
     /// bar. The reactor's `CastInFlight` is the authoritative owner; this is the
     /// serializable view it republishes each tick (mirrors `self_fishing`).
@@ -984,6 +990,7 @@ impl SessionState {
                 self.current_weather = None;
                 self.check_result = None;
                 self.self_casting = None;
+                self.self_server_status = 0;
 
                 // Wide-scan is per-zone (server rebuilds it from the new zone's
                 // entities); drop stale entries/track on any zone change or
@@ -1531,6 +1538,11 @@ impl SessionState {
                 self.shop = None;
                 changed
             }
+            AgentEvent::SelfServerStatus { status } => {
+                let changed = self.self_server_status != *status;
+                self.self_server_status = *status;
+                changed
+            }
             // Machine inputs (consumed by the reactor, not the rendered projection).
             AgentEvent::FishingCast { .. }
             | AgentEvent::FishingServerPhase { .. }
@@ -1937,6 +1949,14 @@ pub enum AgentEvent {
     /// reactor machine's published view.
     FishingServerPhase {
         phase: Option<u8>,
+    },
+
+    /// The whole 0x037 animation byte for self (`ANIMATION_*` in
+    /// vendor/server/src/map/entities/baseentity.h). The server owns this — it
+    /// starts and ends resting on its own (damage, status effects) — so the
+    /// renderer reconciles its optimistic local stance against it.
+    SelfServerStatus {
+        status: u8,
     },
 
     /// The reactor fishing machine's view phase (0..=6, see `ffxi_actor`'s `fishing_clip`),

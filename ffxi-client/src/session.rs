@@ -1069,6 +1069,9 @@ fn handle_sub_packet(
                     let _ = event_tx.send(AgentEvent::FishingServerPhase {
                         phase: decode::animation::fishing_phase(cs.server_status),
                     });
+                    let _ = event_tx.send(AgentEvent::SelfServerStatus {
+                        status: cs.server_status,
+                    });
                 }
             }
         }

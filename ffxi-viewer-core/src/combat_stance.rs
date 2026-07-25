@@ -175,6 +175,50 @@ impl RestStance {
     }
 }
 
+/// Retail's rest is server-owned: it starts and ends on the server's terms
+/// (damage, status effects, zoning), and the answer comes back as the 0x037
+/// animation byte. The local stance is an optimistic prediction, so it gets
+/// this long to be confirmed — the 0x0E8 camp leaves on the client's 200 ms
+/// datagram cadence and the server's reply rides the following update — before
+/// the server byte wins.
+pub const SELF_REST_ACK_SECS: f32 = 1.0;
+
+pub fn reconcile_rest_kind(local: RestKind, server_status: u8) -> Option<RestKind> {
+    let server_healing = server_status == ffxi_proto::decode::animation::HEALING;
+    match (local, server_healing) {
+        (RestKind::Heal, false) => Some(RestKind::None),
+        // Sitting never appears here: /sit is a client-side pose that sends no
+        // packet, so a 0 byte must not stand the player up.
+        (k, true) if k != RestKind::Heal => Some(RestKind::Heal),
+        _ => None,
+    }
+}
+
+pub fn reconcile_self_rest_stance_system(
+    time: Res<Time>,
+    state: Res<SceneState>,
+    mut rest: ResMut<RestStance>,
+    mut prev_local: Local<RestKind>,
+    mut ack_grace: Local<f32>,
+) {
+    if *prev_local != rest.kind {
+        *prev_local = rest.kind;
+        *ack_grace = SELF_REST_ACK_SECS;
+        return;
+    }
+    if *ack_grace > 0.0 {
+        *ack_grace -= time.delta_secs();
+        return;
+    }
+    if !matches!(state.snapshot.stage, ffxi_viewer_wire::Stage::InZone) {
+        return;
+    }
+    if let Some(next) = reconcile_rest_kind(rest.kind, state.snapshot.self_server_status) {
+        rest.kind = next;
+        *prev_local = next;
+    }
+}
+
 #[derive(Resource, Default, Debug, Clone, Copy, Eq, PartialEq)]
 pub struct WalkMode {
     pub walking: bool,
@@ -932,6 +976,44 @@ mod tests {
         assert!(s.is_resting());
         s.kind = RestKind::None;
         assert!(!s.is_resting());
+    }
+
+    #[test]
+    fn reconcile_adopts_the_server_rest_state() {
+        use ffxi_proto::decode::animation;
+
+        assert_eq!(
+            reconcile_rest_kind(RestKind::Heal, animation::NONE),
+            Some(RestKind::None),
+            "the server ended the rest (damage, effect wearing) — stand up"
+        );
+        assert_eq!(
+            reconcile_rest_kind(RestKind::None, animation::HEALING),
+            Some(RestKind::Heal),
+            "the server has us resting — adopt it"
+        );
+        assert_eq!(
+            reconcile_rest_kind(RestKind::Heal, animation::HEALING),
+            None,
+            "agreement needs no correction"
+        );
+        assert_eq!(reconcile_rest_kind(RestKind::None, animation::NONE), None);
+    }
+
+    #[test]
+    fn reconcile_never_stands_up_a_client_side_sit() {
+        use ffxi_proto::decode::animation;
+
+        assert_eq!(
+            reconcile_rest_kind(RestKind::Sit, animation::NONE),
+            None,
+            "/sit sends no packet, so a 0 byte must not cancel it"
+        );
+        assert_eq!(
+            reconcile_rest_kind(RestKind::Sit, animation::HEALING),
+            Some(RestKind::Heal),
+            "a server-side rest still wins over the local sit"
+        );
     }
 
     #[test]

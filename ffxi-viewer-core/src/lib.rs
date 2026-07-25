@@ -352,6 +352,13 @@ impl<S: SceneSource + Resource + Component<Mutability = bevy::ecs::component::Mu
         #[cfg(not(target_arch = "wasm32"))]
         app.add_systems(
             Update,
+            combat_stance::reconcile_self_rest_stance_system
+                .before(ffxi_actor_render::tick_live_ffxi_actors),
+        );
+
+        #[cfg(not(target_arch = "wasm32"))]
+        app.add_systems(
+            Update,
             ffxi_actor_render::dispatch_action_overlay
                 .before(ffxi_actor_render::tick_live_ffxi_actors),
         );

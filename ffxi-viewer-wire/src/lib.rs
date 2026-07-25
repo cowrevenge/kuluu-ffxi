@@ -2,13 +2,15 @@
 
 use serde::{Deserialize, Serialize};
 
+// v8: SceneSnapshot.self_server_status (0x037 animation byte for self — the server's
+// authoritative rest state, which CHAR_PC only carries for other players).
 // v7: ViewerEvent::ActionStarted.{resolution, animation} (BATTLE2 first-result hit type +
 // swing slot, for the melee reaction/swing routines).
 // v6: ViewerEvent::ActionStarted.target_id (BATTLE2 primary target, for DAT attachType placement).
 // v5: InventoryItem.charges_remaining + next_use_vana_ts (item recast/charges).
 // v4: SceneSnapshot.delivery_box (dedicated delivery screen) + ViewerCommand::DeliveryBox
 // (postcard frames are not self-describing, so any shape change bumps this).
-pub const PROTOCOL_VERSION: u32 = 7;
+pub const PROTOCOL_VERSION: u32 = 8;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 pub struct Vec3 {
@@ -447,6 +449,13 @@ pub struct SceneSnapshot {
     /// the mini-game HUD.
     #[serde(default)]
     pub self_fishing: Option<SelfFishing>,
+
+    /// The server's animation byte for self, from 0x037 CHAR_STATUS
+    /// (`vendor/server/src/map/packets/char_status.cpp:221` — `PChar->animation`).
+    /// Authoritative for the rest stance: CHAR_PC carries `Entity::animation` for
+    /// other players, but self's own state only arrives here.
+    #[serde(default)]
+    pub self_server_status: u8,
 
     /// Self casting/action state, present while an issued spell/ability is in
     /// flight. Drives the Enhanced cast bar. Optimistic on send, reconciled by
@@ -1134,6 +1143,7 @@ mod tests {
             bazaar: Vec::new(),
             play_time_s: 0,
             self_fishing: None,
+            self_server_status: 0,
             self_casting: None,
             myroom: Some(MyRoom {
                 model: 257,

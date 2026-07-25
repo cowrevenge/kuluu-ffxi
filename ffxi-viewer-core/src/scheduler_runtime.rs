@@ -172,6 +172,10 @@ impl ActiveScheduler {
         })
     }
 
+    pub fn name(&self) -> [u8; 4] {
+        self.name
+    }
+
     pub fn finished(&self) -> bool {
         self.cursor >= self.stages.len()
     }
@@ -903,6 +907,10 @@ pub fn dispatch_cast_routine_started(
 #[derive(Component, Debug, Clone, Copy)]
 pub struct PendingHitReaction {
     pub routine: [u8; 4],
+    // The scheduler whose DamageCallback stage is allowed to fire this reaction. Every completion
+    // routine ends in a 0x2B (a spell's `mdam`), so an unqualified pending reaction would be
+    // consumed by whichever routine happened to reach its callback first.
+    pub armed_by: [u8; 4],
 }
 
 // The global effect dir's `dam0` chunk is the MELEE hit-reaction switch (`dada` tail-calls it;
@@ -936,14 +944,15 @@ pub fn swing_routine(animation: ffxi_proto::melee::AttackAnimation) -> Option<[u
     })
 }
 
-// vendor/server/src/map/enums/four_cc.h:39 — BasicAttack's FourCC is "atk0", the self-targeted
+// vendor/server/src/map/enums/four_cc.h:30 — BasicAttack's FourCC is "atk0", the self-targeted
 // voice routine research/xim Actor.kt:864 enqueues alongside the swing.
 const MELEE_VOICE_ROUTINE: [u8; 4] = *b"atk0";
 
-// vendor/server/src/map/entities/battleentity.cpp:2989 never sets `action.actionid` for a basic
-// attack, so BATTLE2 cmd_arg is 0 and the swing carries no id to look a DAT up by: the routines
-// live in the attacker's own battle/equipment dirs and the global effect dir. This is why the
-// category is dispatched here rather than through `action_dat_file_id`.
+// A basic attack's routines live in the attacker's own battle/equipment dirs and the global effect
+// dir, keyed by the swing animation rather than by a DAT file id, which is why the category is
+// dispatched here rather than through `action_dat_file_id`. BATTLE2 cmd_arg does carry a FourCC —
+// vendor/server/src/map/action/action.cpp:111 normalize() sets actionid = FourCC::BasicAttack —
+// but it is the same constant for every swing, so it selects nothing.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn dispatch_melee_action_started(
     events: Res<crate::snapshot::EventLog>,
@@ -992,11 +1001,11 @@ pub fn dispatch_melee_action_started(
             .and_then(swing_routine)
             .filter(|r| lookup.get(r).is_some())
             .unwrap_or(*b"ati0");
-        let Some(active) =
-            ActiveScheduler::effects_only_merged(&lookup, &[MELEE_VOICE_ROUTINE, swing])
-        else {
+        let merged = [MELEE_VOICE_ROUTINE, swing];
+        let Some(active) = ActiveScheduler::effects_only_merged(&lookup, &merged) else {
             continue;
         };
+        let armed_by = active.name();
         let mut entity = commands.entity(actor_entity);
         entity.try_insert(active).try_insert(ActionTarget(
             target_id.and_then(|id| tracked.by_id.get(&id).copied()),
@@ -1005,7 +1014,7 @@ pub fn dispatch_melee_action_started(
             .and_then(hit_reaction_routine)
         {
             Some(routine) => {
-                entity.try_insert(PendingHitReaction { routine });
+                entity.try_insert(PendingHitReaction { routine, armed_by });
             }
             None => {
                 entity.remove::<PendingHitReaction>();
@@ -1023,6 +1032,7 @@ pub fn dispatch_damage_callback_stages(
     q_pending: Query<(&PendingHitReaction, &ActionTarget)>,
     q_children: Query<&Children>,
     q_render: Query<&crate::ffxi_actor_render::FfxiRenderActor>,
+    q_active: Query<&ActiveScheduler>,
     global: Option<Res<GlobalEffectDir>>,
     mut commands: Commands,
 ) {
@@ -1033,6 +1043,9 @@ pub fn dispatch_damage_callback_stages(
         let Ok((pending, target)) = q_pending.get(ev.actor) else {
             continue;
         };
+        if pending.armed_by != ev.scheduler {
+            continue;
+        }
         commands.entity(ev.actor).remove::<PendingHitReaction>();
         let Some(victim) = target.0 else { continue };
         run_routine_on(
@@ -1041,6 +1054,7 @@ pub fn dispatch_damage_callback_stages(
             Some(ev.actor),
             &q_children,
             &q_render,
+            &q_active,
             global.as_deref(),
             &mut commands,
         );
@@ -1069,6 +1083,7 @@ pub fn dispatch_target_routine_stages(
     q_target: Query<&ActionTarget>,
     q_children: Query<&Children>,
     q_render: Query<&crate::ffxi_actor_render::FfxiRenderActor>,
+    q_active: Query<&ActiveScheduler>,
     global: Option<Res<GlobalEffectDir>>,
     mut commands: Commands,
 ) {
@@ -1084,6 +1099,7 @@ pub fn dispatch_target_routine_stages(
             flipped_target,
             &q_children,
             &q_render,
+            &q_active,
             global.as_deref(),
             &mut commands,
         );
@@ -1097,9 +1113,17 @@ fn run_routine_on(
     flipped_target: Option<Entity>,
     q_children: &Query<&Children>,
     q_render: &Query<&crate::ffxi_actor_render::FfxiRenderActor>,
+    q_active: &Query<&ActiveScheduler>,
     global: Option<&GlobalEffectDir>,
     commands: &mut Commands,
 ) {
+    // ActiveScheduler is single-slot, so writing one onto a victim who is mid-routine would drop
+    // the rest of that routine — including the 0x2D StopParticle stages that end its emitters,
+    // leaking generators. A victim already running effects keeps them; retail's own reaction is
+    // the lower-priority one here.
+    if q_active.get(entity).is_ok_and(|a| !a.finished()) {
+        return;
+    }
     let Some(routines) = actor_render_routines(entity, q_children, q_render) else {
         return;
     };
@@ -1434,6 +1458,43 @@ mod tests {
 
     fn make_scheduler(name: [u8; 4], stages: Vec<TimedStage>) -> Scheduler {
         Scheduler { name, stages }
+    }
+
+    // Every completion routine ends in a 0x2B DamageCallback (a spell's `mdam`), so a melee
+    // reaction armed by the swing must not be consumed by an unrelated routine reaching its
+    // callback first. The DamageCallback dispatcher gates on this pairing.
+    #[test]
+    fn pending_hit_reaction_is_bound_to_the_scheduler_that_armed_it() {
+        let pending = PendingHitReaction {
+            routine: *b"damg",
+            armed_by: *b"atk0",
+        };
+        assert_eq!(pending.armed_by, *b"atk0");
+        assert_ne!(
+            pending.armed_by, *b"mdam",
+            "a spell's mdam must not match a melee-armed reaction"
+        );
+    }
+
+    // effects_only_merged names the merged timeline after the first routine that resolved, which
+    // is what a stage event reports as its scheduler — the value the reaction is armed with.
+    #[test]
+    fn merged_scheduler_reports_its_first_resolved_routine_as_its_name() {
+        let voice = make_scheduler(*b"atk0", vec![stage(0, StageKind::Motion, 0x01, *b"at0?")]);
+        let swing = make_scheduler(*b"ati0", vec![stage(2, StageKind::Motion, 0x01, *b"ati?")]);
+        let dat = [voice, swing];
+        let lookup = RoutineLookup::new().with_dat(&dat);
+
+        let merged = ActiveScheduler::effects_only_merged(&lookup, &[*b"atk0", *b"ati0"]).unwrap();
+        assert_eq!(merged.name(), *b"atk0");
+
+        let only_swing =
+            ActiveScheduler::effects_only_merged(&lookup, &[*b"zzzz", *b"ati0"]).unwrap();
+        assert_eq!(
+            only_swing.name(),
+            *b"ati0",
+            "an absent voice routine leaves the swing as the merged name"
+        );
     }
 
     #[test]

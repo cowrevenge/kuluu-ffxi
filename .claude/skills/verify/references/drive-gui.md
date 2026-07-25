@@ -112,6 +112,25 @@ a movement test.
 - **Agent-socket `move` persists server-side** (position survives relaunch); it is not a client-only hack. It also doesn't guarantee nearby NPCs stream in — prefer walking the last stretch for entity-visual checks.
 - **GM drive char**: `Verilamp` (gmlevel 5) on the local throwaway `verilight` account (password `TestPass!1234`, the provisioning-doc example — not a secret); `!zone`/`!settime` work as socket chat. Fresh `create-char` chars have gmlevel 0 and the server silently ignores `!zone`. There is no `!settime`; use `!addtime <offset_in_seconds>` (LSB `scripts/commands/addtime.lua`, permission 5) — it resets-then-adds an earth-clock offset that indirectly drives Vana'diel time, so the same offset issued later in the session (after real time has elapsed) lands at a later Vana'diel time than the first call. `!setweather NONE` (permission 1) clears overcast/rain so directional shadows are actually visible — cloudy weather flattens lighting enough to hide cast shadows.
 - **Known intermittent**: `slab_allocator Use-after-free` burst at zone-in can black out all zone geometry for the whole session (kuluu-172i); relaunch once before diagnosing rendering changes.
+- **`AgentCommand` fields are exact — a wrong key is dropped SILENTLY** (2026-07-25).
+  `chat` takes `{"cmd":"chat","kind":0,"text":"!hp 9999"}`. Sending `message`
+  instead of `text` deserializes to nothing, the socket accepts the line, no
+  error appears in the client log or the map log, and the command simply never
+  happens. This burned a whole session: every GM setup command looked like a
+  server-side permission problem (`!changejob`/`!addallspells`/`!hp` all "not
+  working") when the payload was malformed. **Confirm a GM command actually
+  landed** — re-`snapshot` and check the value moved — before concluding the
+  server rejected it. The variant names come from `AgentCommand` in
+  `ffxi-client/src/state.rs`; read the enum rather than guessing field names.
+- **The agent socket file can vanish from `$TMPDIR` mid-run** (2026-07-25).
+  The client logs `ffxi agent socket listening path=…/ffxi-agent-<pid>.sock`
+  and keeps the listener, but the path disappears from disk (observed taking
+  out live *and* previously-working sockets in the same run), so every later
+  connect fails `FileNotFoundError` while the process is healthy. Re-resolve
+  from the log (`grep -ao "/var/folders[^ ]*ffxi-agent-[0-9]*\.sock"`) rather
+  than trusting `$TMPDIR/ffxi-agent.pid`, which also goes stale across the
+  cargo-wrapper→binary re-exec. If it is gone entirely, keystroke driving
+  needs no socket. Root cause not yet understood — worth its own bead.
 - **`nc -U` hangs the harness**: BSD `nc` (macOS) has no `-q`/idle-timeout that reliably closes after one command; `nc -U -w N <sock>` still blocks past N waiting on the socket, gets backgrounded by the harness, and — worse — the abandoned connection holds the agent socket's single-peer slot open so every subsequent send silently no-ops (`agent socket peer connected` never logs again) until you kill the stray `nc`. Use a one-shot Python `socket.socket(AF_UNIX, SOCK_STREAM)` with `settimeout()` + explicit `close()` instead of shelling out to `nc`.
 - **`screencapture -l <window_id>` can return a stale cached frame for an occluded/background window** — HUD clock and other live state won't advance across captures even though the process is healthy and ticking. Bring the target frontmost first (`osascript … set frontmost of process "ffxi-client" to true`) and give it a beat before each capture, not just once at the start.
 - **Agent-socket `move` can get clamped back onto the navmesh's nearest valid vertex** if the requested `(x,z)` at a fixed `x` isn't on a connected walkable surface (e.g. repeatedly increasing `z` while holding `x` constant can render the *same* spot every time — position telemetry echoes the requested coordinates, but the rendered transform snaps back). If teleporting through a gate/tunnel appears stuck, vary `x` as well as `z` rather than assuming the socket is broken.

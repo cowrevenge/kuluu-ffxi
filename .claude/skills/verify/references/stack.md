@@ -36,10 +36,22 @@ docker exec server-database-1 mariadb -uxiadmin -ppassword xidb -e "..."
   0.0.0.0 hits a lima forwarding race. Check with `docker port server-map-1`.
 - **Ghost sessions after killing a client** — the next lobby login times out
   (`lobby lpkt_next_login (view): server did not respond within 20s`). The map
-  server holds the char for 2–5 min; wait for its `cleanupSessions` log line,
-  then `docker exec server-database-1 mariadb -uxiadmin -ppassword xidb -e
-  "DELETE FROM accounts_sessions;"` and retry. Prefer clean `disconnect` (MCP
-  tool / client exit) over `kill` to avoid this entirely.
+  server holds the char for 2–5 min. Prefer a clean `disconnect` (MCP tool /
+  client exit) over `kill` to avoid this entirely; back-to-back relaunches
+  otherwise land in a lockout loop costing ~2 min per retry.
+
+  Either wait for the server's own `cleanupSessions` log line, or clear the one
+  stale row for the character you are driving:
+
+  ```bash
+  docker exec server-database-1 mariadb -uxiadmin -ppassword xidb \
+    -e "DELETE FROM accounts_sessions WHERE charid=<charid>;"
+  ```
+
+  Get `<charid>` from `SELECT charid FROM chars WHERE charname='<name>';`
+  (Verilamp is 17455719 on this machine's dev DB). Keep the `WHERE` — other
+  sessions on this stack are not yours to drop, and a whole-table delete is a
+  destructive action that needs the user's say-so.
 - **Zone changes silently ignored for a manually provisioned fresh char** —
   see SKILL.md §Character strategy. Not an env problem; don't restart the
   stack over it.

@@ -134,7 +134,7 @@ bevy = { workspace = true, optional = true, features = [
 # the workspace [patch.crates-io] git pin (upstream's Bevy 0.19 migration PR,
 # which keeps the 0.21.0 crate version); see kuluu-u11r.
 # `default-features = false` strips the debug overlay we don't need.
-bevy_framepace = { version = "0.21", optional = true, default-features = false }
+bevy_framepace = { version = "0.22", optional = true, default-features = false }
 # System clipboard. Used by `/copy` to push recent system-toast lines to
 # the OS clipboard. Optional + gated on `native-window` because the
 # headless/relay binary has no GUI session and no clipboard to write to.

@@ -5,6 +5,13 @@ updates:
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
+    ignore:
+      # glam must track bevy_math's pin (Bevy 0.19 -> glam ^0.32). A minor bump
+      # duplicates the crate and Mat4 stops unifying across ffxi-actor/bevy.
+      - dependency-name: glam
+        update-types:
+          - version-update:semver-minor
+          - version-update:semver-major
 
   - package-ecosystem: github-actions
     directory: "/"

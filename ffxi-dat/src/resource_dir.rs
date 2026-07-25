@@ -70,11 +70,16 @@ impl ResourceDir {
     pub fn collect_schedulers(&self) -> Vec<Scheduler> {
         let root = self.tree();
         let mut out = Vec::new();
-        collect(&root, ChunkKind::Scheduler as u8, &mut |node| {
-            if let Ok(s) = Scheduler::parse(node.chunk.name, node.chunk.data) {
-                out.push(s);
-            }
-        });
+        collect_in_dir(
+            &root,
+            crate::scheduler::NO_LOCAL_DIR,
+            ChunkKind::Scheduler as u8,
+            &mut |dir, node| {
+                if let Ok(s) = Scheduler::parse_in_dir(dir, node.chunk.name, node.chunk.data) {
+                    out.push(s);
+                }
+            },
+        );
         out
     }
 
@@ -98,6 +103,27 @@ fn collect<'a>(node: &ChunkNode<'a>, kind: u8, visit: &mut dyn FnMut(&ChunkNode<
     }
     for child in &node.children {
         collect(child, kind, visit);
+    }
+}
+
+// Visits each matching chunk together with the name of the nearest enclosing Directory (0x01)
+// chunk — XIM's `localDir`, the first scope a routine's ids resolve against.
+pub fn collect_in_dir<'a>(
+    node: &ChunkNode<'a>,
+    dir: [u8; 4],
+    kind: u8,
+    visit: &mut dyn FnMut([u8; 4], &ChunkNode<'a>),
+) {
+    if node.chunk.kind == kind {
+        visit(dir, node);
+    }
+    let child_dir = if node.chunk.kind == ChunkKind::Rmp as u8 {
+        node.chunk.name
+    } else {
+        dir
+    };
+    for child in &node.children {
+        collect_in_dir(child, child_dir, kind, visit);
     }
 }
 
@@ -246,6 +272,29 @@ mod tests {
         let cib = dir.first_cib().expect("cib");
         assert_eq!(cib.motion_index, 2);
         assert_eq!(cib.motion_option, 1);
+    }
+
+    // research/xim EffectRoutineInstance.kt:418-431 — a routine's ids resolve against the chunk
+    // directory it lives in first. Retail reuses generator names across directories (ROM/0/0.DAT
+    // has several `g010`), so the directory has to travel with the parsed stages.
+    #[test]
+    fn scheduler_stages_carry_their_enclosing_directory() {
+        let mut dat = synth_chunk(b"file", ChunkKind::Rmp as u8, &[]);
+        dat.extend(synth_chunk(b"hit1", ChunkKind::Rmp as u8, &[]));
+        dat.extend(synth_chunk(
+            b"hit1",
+            ChunkKind::Scheduler as u8,
+            &synth_scheduler_body(b"at0?"),
+        ));
+        dat.extend(synth_chunk(b"end\0", ChunkKind::Terminate as u8, &[]));
+        dat.extend(synth_chunk(b"end\0", ChunkKind::Terminate as u8, &[]));
+
+        let scheds = ResourceDir::from_bytes(dat).collect_schedulers();
+        assert_eq!(scheds.len(), 1);
+        assert!(!scheds[0].stages.is_empty());
+        for t in &scheds[0].stages {
+            assert_eq!(&t.stage.local_dir, b"hit1");
+        }
     }
 
     #[test]

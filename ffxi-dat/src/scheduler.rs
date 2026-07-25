@@ -65,6 +65,14 @@ pub struct SchedulerStage {
     // one of them per activation (`vatk`'s four atk1..atk4 grunts). Members of the same block
     // share a group index; `None` is an ordinary unconditional stage.
     pub random_group: Option<u16>,
+
+    // research/xim EffectRoutineInstance.kt:418-431 findResource — a stage's ids resolve against
+    // `resource.localDir`, the chunk directory the routine itself lives in, BEFORE any wider
+    // scope. Retail relies on that: ROM/0/0.DAT holds four generators named `g010` in four
+    // different directories, and only the one beside the routine that names it is meant. Carried
+    // on the stage because a flatten merges many routines into one timeline. All-zero when the
+    // routine was parsed without directory context.
+    pub local_dir: [u8; 4],
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -145,8 +153,14 @@ pub struct TimedStage {
     pub stage: SchedulerStage,
 }
 
+pub const NO_LOCAL_DIR: [u8; 4] = [0; 4];
+
 impl Scheduler {
     pub fn parse(name: [u8; 4], body: &[u8]) -> Result<Self> {
+        Self::parse_in_dir(NO_LOCAL_DIR, name, body)
+    }
+
+    pub fn parse_in_dir(local_dir: [u8; 4], name: [u8; 4], body: &[u8]) -> Result<Self> {
         if body.len() < SCHEDULER_HEADER_LEN {
             return Err(DatError::TruncatedChunk {
                 offset: 0,
@@ -209,6 +223,7 @@ impl Scheduler {
                         transition_in,
                         transition_out,
                         random_group: open_group,
+                        local_dir,
                     },
                 });
                 // A random block's children are collected into the 0x3D marker rather than
@@ -662,6 +677,35 @@ mod tests {
             .map(|t| t.stage.id)
             .collect();
         assert_eq!(branches, vec![*b"ldam", *b"sway", *b"gurd", *b"pary"]);
+    }
+
+    // Retail-byte guard (skips without an install). `dam0` is the MELEE hit-reaction switch
+    // (`dada` tail-calls it; `daml` above is the ranged `ldad` chain). Its `context.hitTypeFlag`
+    // cases dispatch, in ActionResolution order (vendor/server/src/map/enums/action/resolution.h),
+    // Hit -> damh|damg, Miss -> sway, Guard -> gurd, Parry -> pary, Block -> gur1 — the only
+    // authority for the Block branch, which `daml` does not carry. The `sb00`..`sb09` additional
+    // effects and the `cnt0` counter switch on a different variable and precede all of them.
+    #[test]
+    fn real_dat_dam0_switches_hit_type_to_melee_reaction_routines() {
+        let Some(scheds) = global_effect_schedulers() else {
+            return;
+        };
+        let dam0 = scheds
+            .iter()
+            .find(|s| &s.name == b"dam0")
+            .expect("global effect dir has the dam0 melee hit switch");
+        assert!(dam0.has_control_flow(), "dam0 is a conditional switch");
+        let branches: Vec<[u8; 4]> = dam0
+            .stages
+            .iter()
+            .filter(|t| t.stage.kind == StageKind::SubRoutineOnTarget)
+            .map(|t| t.stage.id)
+            .skip_while(|id| id.starts_with(b"sb") || id == b"cnt0")
+            .collect();
+        assert_eq!(
+            branches,
+            vec![*b"damh", *b"damg", *b"sway", *b"gurd", *b"pary", *b"gur1"]
+        );
     }
 
     // Retail-byte guard: the global `ldam` (ActionResolution::Hit) routine is where the impact

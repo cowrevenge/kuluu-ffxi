@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 
 use bevy::prelude::*;
-use ffxi_dat::chunk::walk;
 use ffxi_dat::generator::Generator;
 use ffxi_dat::kind::ChunkKind;
 use ffxi_dat::scheduler::{Scheduler, StageKind, TimedStage};
@@ -267,7 +266,26 @@ pub struct ActionAssets {
     pub images_by_qualified_name: HashMap<(String, String), ffxi_dat::texture::DecodedTexture>,
     pub emitters: HashMap<[u8; 4], ffxi_dat::generator::ParticleEmitter>,
     pub particle_defs: HashMap<[u8; 4], ffxi_dat::particle_gen::ParticleGeneratorDef>,
+    // The same defs keyed by (containing directory, name). ROM/0/0.DAT defines four different
+    // generators called `g010`, one per effect directory; the flat map keeps only the last.
+    pub particle_defs_by_dir:
+        HashMap<([u8; 4], [u8; 4]), ffxi_dat::particle_gen::ParticleGeneratorDef>,
     pub keyframes: HashMap<[u8; 4], ffxi_dat::particle_gen::KeyFrameTrack>,
+}
+
+impl ActionAssets {
+    // research/xim EffectRoutineInstance.kt:418-431 — `resource.localDir` first, wider scopes
+    // after. `local_dir` is the directory of the routine the stage was authored in, carried on
+    // the stage because flattening merges routines from several directories into one timeline.
+    pub fn particle_def(
+        &self,
+        local_dir: [u8; 4],
+        id: &[u8; 4],
+    ) -> Option<&ffxi_dat::particle_gen::ParticleGeneratorDef> {
+        self.particle_defs_by_dir
+            .get(&(local_dir, *id))
+            .or_else(|| self.particle_defs.get(id))
+    }
 }
 
 const MAX_SUBROUTINE_DEPTH: usize = 6;
@@ -367,16 +385,41 @@ pub fn assets_holding<'a>(
         .or_else(|| global.filter(|a| has(a)))
 }
 
+// A routine and the generators it names share a chunk directory, and those names are only unique
+// within it, so the walk carries the enclosing directory alongside each chunk.
+fn walk_with_dirs(bytes: &[u8], visit: &mut dyn FnMut([u8; 4], &ffxi_dat::chunk::Chunk<'_>)) {
+    fn rec<'a>(
+        node: &ffxi_dat::chunk::ChunkNode<'a>,
+        dir: [u8; 4],
+        visit: &mut dyn FnMut([u8; 4], &ffxi_dat::chunk::Chunk<'a>),
+    ) {
+        let dir = if node.chunk.kind == ChunkKind::Rmp as u8 {
+            node.chunk.name
+        } else {
+            visit(dir, &node.chunk);
+            dir
+        };
+        for child in &node.children {
+            rec(child, dir, visit);
+        }
+    }
+    rec(
+        &ffxi_dat::chunk::walk_tree(bytes),
+        ffxi_dat::scheduler::NO_LOCAL_DIR,
+        visit,
+    );
+}
+
 pub fn parse_action_bytes(bytes: &[u8]) -> (Vec<Scheduler>, ActionAssets) {
     let mut schedulers = Vec::new();
     let mut assets = ActionAssets::default();
-    for c in walk(bytes).flatten() {
+    walk_with_dirs(bytes, &mut |dir, c| {
         let Some(kind) = ChunkKind::from_u8(c.kind) else {
-            continue;
+            return;
         };
         match kind {
             ChunkKind::Scheduler => {
-                if let Ok(s) = Scheduler::parse(c.name, c.data) {
+                if let Ok(s) = Scheduler::parse_in_dir(dir, c.name, c.data) {
                     schedulers.push(s);
                 }
             }
@@ -389,6 +432,7 @@ pub fn parse_action_bytes(bytes: &[u8]) -> (Vec<Scheduler>, ActionAssets) {
                 }
                 if let Ok(Some(d)) = ffxi_dat::particle_gen::ParticleGeneratorDef::parse(c.data) {
                     assets.particle_defs.insert(c.name, d);
+                    assets.particle_defs_by_dir.insert((dir, c.name), d);
                 }
             }
             ChunkKind::KeyFrame => {
@@ -440,7 +484,7 @@ pub fn parse_action_bytes(bytes: &[u8]) -> (Vec<Scheduler>, ActionAssets) {
             }
             _ => {}
         }
-    }
+    });
     (schedulers, assets)
 }
 
@@ -861,21 +905,20 @@ pub struct PendingHitReaction {
     pub routine: [u8; 4],
 }
 
-// The global effect dir's `daml` chunk is a four-case switch on `context.hitTypeFlag`
-// (research/xim EffectRoutineInstance.kt:691) whose branch ids are, in resolution order,
-// `ldam`/`sway`/`gurd`/`pary` — byte-for-byte the ActionResolution values in
-// vendor/server/src/map/enums/action/resolution.h. We cannot evaluate the DAT conditionals, so
-// the branch is picked here from the server's resolution instead.
+// The global effect dir's `dam0` chunk is the MELEE hit-reaction switch (`dada` tail-calls it;
+// the ranged chain `ldad` uses `daml` instead). Its cases select on `context.hitTypeFlag`
+// (research/xim EffectRoutineInstance.kt:691) and their branch order is byte-for-byte the
+// ActionResolution values in vendor/server/src/map/enums/action/resolution.h.
+// research/xim leaves the `damh`-vs-`damg` selector (var 0x3B) unhandled
+// (EffectRoutineInstance.kt:689-701 warns and defaults to 0), which is the `damg` branch.
 pub fn hit_reaction_routine(resolution: ffxi_proto::melee::ActionResolution) -> Option<[u8; 4]> {
     use ffxi_proto::melee::ActionResolution;
     Some(match resolution {
-        ActionResolution::Hit => *b"ldam",
+        ActionResolution::Hit => *b"damg",
         ActionResolution::Miss => *b"sway",
         ActionResolution::Guard => *b"gurd",
         ActionResolution::Parry => *b"pary",
-        // `daml` has no Block case; retail routes it through the 0x5A AttackBlockedRoutine
-        // opcode we do not yet interpret.
-        ActionResolution::Block => return None,
+        ActionResolution::Block => *b"gur1",
     })
 }
 
@@ -995,6 +1038,7 @@ pub fn dispatch_damage_callback_stages(
         run_routine_on(
             victim,
             &pending.routine,
+            Some(ev.actor),
             &q_children,
             &q_render,
             global.as_deref(),
@@ -1003,9 +1047,22 @@ pub fn dispatch_damage_callback_stages(
     }
 }
 
-// research/xim EffectRoutineParser.kt:136-140 — a 0x09 link runs its child with the primary
-// target as source, so the child's ids resolve against the TARGET's resource dirs (the victim's
-// own `sdam` impact and `vdam` grunt, not the attacker's).
+// research/xim EffectRoutineParser.kt:136-140 + EffectRoutineInstance.kt:387-394 — a 0x09 link
+// runs its child ON the primary target, under a context flipped by `cloneWithOverrideTarget`:
+// the parent becomes the child's target. Resource lookup follows that flip
+// (EffectRoutineInstance.kt:418-431,592-604 searchAssociatedDir), which is the only reason the
+// melee hit chain resolves at all — the victim's `damg` links `chit` back onto the ATTACKER, so
+// `ef h` is found in the attacker's equipped-weapon DAT and its `hit1` sparks, being
+// AttachType::TargetActor, land on the victim again.
+// Returns (entity the child runs on, the child's flipped target). A routine with no target of
+// its own keeps its child where it is and never flips a context onto itself.
+pub fn target_link_context(actor: Entity, target: Option<Entity>) -> (Entity, Option<Entity>) {
+    match target {
+        Some(t) if t != actor => (t, Some(actor)),
+        _ => (actor, None),
+    }
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 pub fn dispatch_target_routine_stages(
     mut events: MessageReader<SchedulerStageEvent>,
@@ -1019,16 +1076,12 @@ pub fn dispatch_target_routine_stages(
         if ev.stage.stage.kind != StageKind::SubRoutineOnTarget {
             continue;
         }
-        // A routine already running ON the victim (`ldam` linking `chit`) has no target of its
-        // own; its child stays where it is.
-        let victim = q_target
-            .get(ev.actor)
-            .ok()
-            .and_then(|t| t.0)
-            .unwrap_or(ev.actor);
+        let (host, flipped_target) =
+            target_link_context(ev.actor, q_target.get(ev.actor).ok().and_then(|t| t.0));
         run_routine_on(
-            victim,
+            host,
             &ev.stage.stage.id,
+            flipped_target,
             &q_children,
             &q_render,
             global.as_deref(),
@@ -1041,6 +1094,7 @@ pub fn dispatch_target_routine_stages(
 fn run_routine_on(
     entity: Entity,
     routine: &[u8; 4],
+    flipped_target: Option<Entity>,
     q_children: &Query<&Children>,
     q_render: &Query<&crate::ffxi_actor_render::FfxiRenderActor>,
     global: Option<&GlobalEffectDir>,
@@ -1056,7 +1110,11 @@ fn run_routine_on(
     let Some(active) = ActiveScheduler::from_routine(&lookup, routine) else {
         return;
     };
-    commands.entity(entity).try_insert(active);
+    let mut entity = commands.entity(entity);
+    entity.try_insert(active);
+    if let Some(target) = flipped_target {
+        entity.try_insert(ActionTarget(Some(target)));
+    }
 }
 
 // Belt-and-braces stop for the case retail's 0x2D StopParticle stages cannot reach: an
@@ -1369,6 +1427,7 @@ mod tests {
                 transition_in: 0,
                 transition_out: 0,
                 random_group: None,
+                local_dir: ffxi_dat::scheduler::NO_LOCAL_DIR,
             },
         }
     }
@@ -1993,8 +2052,9 @@ mod tests {
     }
 
     // vendor/server/src/map/enums/action/resolution.h ordering, pinned to the branch order the
-    // retail `daml` chunk dispatches in (ffxi_dat guard
-    // real_dat_daml_switches_hit_type_to_reaction_routines).
+    // retail MELEE `dam0` chunk dispatches in (ffxi_dat guard
+    // real_dat_dam0_switches_hit_type_to_melee_reaction_routines). `ldam` is the RANGED chain's
+    // Hit branch (`ldad` -> `daml`) and links `lhit` -> eflg/selg, which no melee weapon DAT has.
     #[test]
     fn hit_reaction_routines_follow_lsb_resolution_order() {
         use ffxi_proto::melee::ActionResolution;
@@ -2011,12 +2071,171 @@ mod tests {
         assert_eq!(
             order,
             vec![
-                Some(*b"ldam"),
+                Some(*b"damg"),
                 Some(*b"sway"),
                 Some(*b"gurd"),
                 Some(*b"pary"),
-                None,
+                Some(*b"gur1"),
             ]
+        );
+    }
+
+    // research/xim EffectRoutineInstance.kt:387-394 — createChild for a 0x09 link builds
+    // `ActorAssociation(target, context.cloneWithOverrideTarget(actor.id))`: the child runs on the
+    // target and its own target is the parent. Without the flip the melee chain dead-ends on the
+    // victim and the weapon's `ef h` sparks are never reached.
+    #[test]
+    fn target_link_flips_the_context_onto_the_parent() {
+        let attacker = Entity::from_raw_u32(1).unwrap();
+        let victim = Entity::from_raw_u32(2).unwrap();
+        assert_eq!(
+            target_link_context(attacker, Some(victim)),
+            (victim, Some(attacker))
+        );
+        assert_eq!(
+            target_link_context(victim, Some(attacker)),
+            (attacker, Some(victim))
+        );
+        assert_eq!(target_link_context(victim, None), (victim, None));
+        assert_eq!(
+            target_link_context(victim, Some(victim)),
+            (victim, None),
+            "a self-targeted link must not make an actor its own target"
+        );
+    }
+
+    // ROM/32/13.DAT — the HumeM weapon-motion base whose `ati0`/`atk0` the melee dispatcher runs.
+    const HUME_M_WEAPON_MOTION_FILE: u32 = 9672;
+    // ROM/27/82.DAT `hm_s` — the HumeM skeleton, which carries the reaction routines
+    // (`damg`/`chit`/`sway`/`gurd`/`pary`).
+    const HUME_M_SKELETON_FILE: u32 = 7072;
+    // look_resolver::PC_MODEL_IDS[HumeM][main-hand] base — main-hand weapon model 0.
+    const HUME_M_MAIN_WEAPON_FILE: u32 = 8392;
+
+    fn routines_in_file(file_id: u32) -> Option<Vec<Scheduler>> {
+        let root = ffxi_dat::DatRoot::from_env_or_default().ok()?;
+        let loc = root.resolve(file_id).ok()?;
+        let bytes = std::fs::read(loc.path_under(root.root())).ok()?;
+        Some(ffxi_dat::resource_dir::ResourceDir::from_bytes(bytes).collect_schedulers())
+    }
+
+    fn global_effect_dir() -> Option<(Vec<Scheduler>, ActionAssets)> {
+        let root = ffxi_dat::DatRoot::from_env_or_default().ok()?;
+        let loc = root.resolve(GLOBAL_EFFECT_DIR_FILE_ID).ok()?;
+        let bytes = std::fs::read(loc.path_under(root.root())).ok()?;
+        Some(parse_action_bytes(&bytes))
+    }
+
+    // Retail-DAT guard (self-skips without an install) for the whole hit-spark chain. `chit`
+    // lives in the victim's skeleton but is reached through the 0x09 flip back onto the ATTACKER,
+    // which is why it resolves `ef h` in the equipped-weapon DAT; `ef h` links global `hit1`,
+    // whose generators are AttachType::TargetActor and therefore land on the victim again
+    // (research/xim ParticleGeneratorAttachment.kt:64-111). Every tier must be present for a
+    // single spark to appear, so this pins all three at once.
+    #[test]
+    fn melee_hit_chain_flattens_to_target_attached_sparks() {
+        let (Some(skeleton), Some(weapon), Some((global_scheds, global_assets))) = (
+            routines_in_file(HUME_M_SKELETON_FILE),
+            routines_in_file(HUME_M_MAIN_WEAPON_FILE),
+            global_effect_dir(),
+        ) else {
+            return;
+        };
+        let lookup = RoutineLookup::new()
+            .with_dat(&skeleton)
+            .with_dat(&weapon)
+            .with_dat(&global_scheds);
+
+        let active = ActiveScheduler::from_routine(&lookup, b"chit")
+            .expect("the hit-flash routine flattens across skeleton -> weapon -> global");
+        let sparks: Vec<([u8; 4], [u8; 4])> = active
+            .stages
+            .iter()
+            .filter(|t| t.stage.kind == StageKind::Particle)
+            .map(|t| (t.stage.local_dir, t.stage.id))
+            .collect();
+        assert!(
+            !sparks.is_empty(),
+            "chit -> ef h -> hit1 must reach the spark generators, got {:?}",
+            active.stages
+        );
+
+        // The reason the lookup has to be directory-scoped at all: ROM/0/0.DAT defines `g010`
+        // several times over, and the flat by-name map keeps whichever the walk saw last.
+        let g010_dirs = global_assets
+            .particle_defs_by_dir
+            .keys()
+            .filter(|(_, name)| name == b"g010")
+            .count();
+        assert!(
+            g010_dirs > 1,
+            "expected duplicate `g010` generators across directories, found {g010_dirs}"
+        );
+
+        let attacker = Entity::from_raw_u32(1).unwrap();
+        let victim = Entity::from_raw_u32(2).unwrap();
+        for (local_dir, id) in &sparks {
+            assert_eq!(
+                local_dir, b"hit1",
+                "the spark generators are authored in the `hit1` directory"
+            );
+            let def = global_assets
+                .particle_def(*local_dir, id)
+                .unwrap_or_else(|| panic!("global dir defines {}", String::from_utf8_lossy(id)));
+            assert_eq!(
+                particle_origin_entity(def.attach_type, attacker, Some(victim)),
+                victim,
+                "{} spawns on the victim, not the swinger",
+                String::from_utf8_lossy(id)
+            );
+        }
+    }
+
+    // The victim's reaction routine must survive the same flatten: `damg` keeps its 0x09 `chit`
+    // link as a stage (so the runtime can flip it) rather than inlining it onto the victim.
+    #[test]
+    fn real_dat_damg_keeps_the_hit_flash_as_a_target_link() {
+        let (Some(skeleton), Some((global_scheds, _))) =
+            (routines_in_file(HUME_M_SKELETON_FILE), global_effect_dir())
+        else {
+            return;
+        };
+        let lookup = RoutineLookup::new()
+            .with_dat(&skeleton)
+            .with_dat(&global_scheds);
+        let active =
+            ActiveScheduler::from_routine(&lookup, b"damg").expect("the skeleton has `damg`");
+        assert!(
+            active.stages.iter().any(|t| {
+                t.stage.kind == StageKind::SubRoutineOnTarget && &t.stage.id == b"chit"
+            }),
+            "got {:?}",
+            active.stages
+        );
+    }
+
+    // The swing routine the melee dispatcher merges must still reach the 0x2B damage callback —
+    // that is the frame the reaction (and therefore the spark chain) is handed off on.
+    #[test]
+    fn real_dat_swing_reaches_the_damage_callback() {
+        let (Some(motion), Some((global_scheds, _))) = (
+            routines_in_file(HUME_M_WEAPON_MOTION_FILE),
+            global_effect_dir(),
+        ) else {
+            return;
+        };
+        let lookup = RoutineLookup::new()
+            .with_dat(&motion)
+            .with_dat(&global_scheds);
+        let active = ActiveScheduler::effects_only_merged(&lookup, &[*b"atk0", *b"ati0"])
+            .expect("the swing flattens");
+        assert!(
+            active
+                .stages
+                .iter()
+                .any(|t| t.stage.kind == StageKind::DamageCallback),
+            "got {:?}",
+            active.stages
         );
     }
 

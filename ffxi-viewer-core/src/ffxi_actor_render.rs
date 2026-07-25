@@ -2760,6 +2760,7 @@ mod pose_resolution_tests {
                             transition_in: 0,
                             transition_out: 0,
                             random_group: None,
+                            local_dir: ffxi_dat::scheduler::NO_LOCAL_DIR,
                         },
                     }],
                 },
@@ -2828,6 +2829,35 @@ mod pose_resolution_tests {
             Some("mb0?".to_string()),
             "the cast pose clip is still resolved from the caster's own routine"
         );
+    }
+
+    // Retail-DAT guard (skips without an install). The melee hit chain resolves `ef h` (the hit
+    // spark) and `se h`/`skaz` (the impact/whoosh) out of the EQUIPPED WEAPON's DAT, and `chit`
+    // out of the skeleton — research/xim EffectRoutineInstance.kt:592-604 searchAssociatedDir
+    // walks every one of the actor's animation directories. load_pc drops an equipment file whose
+    // `collect_skel_meshes()` is empty, so a weapon that stops contributing meshes would silently
+    // take the whole spark chain with it.
+    #[test]
+    fn equipped_weapon_routines_reach_the_actor_lookup() {
+        // look_resolver::PC_MODEL_IDS[HumeM][main-hand] base — main-hand weapon model 0.
+        const HUME_M_MAIN_WEAPON_FILE: u32 = 8392;
+
+        if DatRoot::from_env_or_default().is_err() {
+            return;
+        }
+        let mut equipment = vec![HUME_M_MAIN_WEAPON_FILE];
+        equipment.extend(
+            (1u16..=5)
+                .filter_map(|slot| crate::look_resolver::resolve_equipment_slot(slot << 12, 1)),
+        );
+        let actor = load_pc(1, &equipment, Some(HUME_M_MAIN_WEAPON_FILE), None)
+            .expect("load Hume M with a main-hand weapon");
+        for id in ["ef h", "se h", "skaz", "chit"] {
+            assert!(
+                actor.routines.contains_key(&DatId::from_str(id)),
+                "actor routine lookup is missing `{id}`"
+            );
+        }
     }
 
     #[test]

@@ -146,12 +146,13 @@ pub fn spawn_particle_generators(
         };
         // A cast routine's generators ship in the global effect dir, never in the caster's own
         // ActionAssets, so the def resolves against whichever tier actually holds it.
+        let local_dir = ev.stage.stage.local_dir;
         let Some(assets) = assets_holding(local_assets, global.as_ref().map(|g| &g.assets), |a| {
-            a.particle_defs.contains_key(&ev.stage.stage.id)
+            a.particle_def(local_dir, &ev.stage.stage.id).is_some()
         }) else {
             continue;
         };
-        let Some(def) = assets.particle_defs.get(&ev.stage.stage.id).copied() else {
+        let Some(def) = assets.particle_def(local_dir, &ev.stage.stage.id).copied() else {
             continue;
         };
         let Some((template, sprite_frames, tex)) = resolve_mesh(assets, &def, &mut images) else {

@@ -1455,6 +1455,7 @@ fn advance_actor_pose(
         .fishing_phase
         .and_then(actor_state::fishing_clip);
 
+    let mut one_shot_rest = false;
     let (selected_id, is_idle) = if let Some(id) = action_id {
         (id, false)
     } else if let Some(id) = engage_overlay {
@@ -1469,7 +1470,15 @@ fn advance_actor_pose(
             elapsed_frames,
         );
         match rest_id {
-            Some(rest_id) => (rest_id, true),
+            Some(rest_id) => {
+                // Only the middle phase loops. The In/Out clips are one-shots that
+                // hold their last frame: looping them replays the kneel from frame 0
+                // whenever the phase timer outlives the clip, which reads as a dip
+                // back toward the ground just as the character finishes standing up.
+                let looping = matches!(actor.rest_phase, RestPlayback::Looping { .. });
+                one_shot_rest = !looping;
+                (rest_id, looping)
+            }
             None => {
                 let s = actor_state::selected_animation(&actor.inputs);
                 (s.id, s.idle)
@@ -1530,7 +1539,7 @@ fn advance_actor_pose(
                 loop_duration: None,
                 num_loops: action
                     .and_then(|a| a.num_loops)
-                    .or(one_shot_fishing.then_some(1)),
+                    .or((one_shot_fishing || one_shot_rest).then_some(1)),
                 low_priority: false,
             };
             for clip in &matches {
@@ -2738,6 +2747,32 @@ mod pose_resolution_tests {
         assert_eq!(step(&mut phase, RestKind::None).as_deref(), Some("rx2?"));
         assert_eq!(step(&mut phase, RestKind::None), None);
         assert_eq!(step(&mut phase, RestKind::None), None);
+    }
+
+    #[test]
+    fn only_the_middle_rest_phase_loops() {
+        let anims = vec![synth_anim(b"rx00", 4), synth_anim(b"rx20", 4)];
+        let mut phase = RestPlayback::Inactive;
+        let looping = |phase: &mut RestPlayback, desired| {
+            advance_rest_phase(phase, desired, &anims, 1.0)
+                .map(|_| matches!(phase, RestPlayback::Looping { .. }))
+        };
+
+        assert_eq!(
+            looping(&mut phase, RestKind::Kneel),
+            Some(false),
+            "the kneel-down must play once, not loop back to standing"
+        );
+        for _ in 0..4 {
+            looping(&mut phase, RestKind::Kneel);
+        }
+        assert_eq!(looping(&mut phase, RestKind::Kneel), Some(true));
+
+        assert_eq!(
+            looping(&mut phase, RestKind::None),
+            Some(false),
+            "the stand-up must play once, not replay the kneel from frame 0"
+        );
     }
 
     fn synth_routines(pairs: &[(&[u8; 4], &[u8; 4])]) -> HashMap<DatId, Scheduler> {

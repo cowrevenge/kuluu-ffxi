@@ -180,7 +180,7 @@ pub async fn run(
             let (char_id, handoff) = match &cfg.char_selection {
                 CharSelection::Id(cid) => {
                     let handoff = lobby
-                        .handshake(&auth_session, *cid, "", 0, key3)
+                        .handshake(&auth_session, *cid, 0, key3)
                         .await
                         .context("lobby handshake")?;
                     (*cid, handoff)
@@ -1912,12 +1912,13 @@ async fn keepalive_loop(
                                     let _ = event_tx.send(AgentEvent::EventDialog { dialog });
                                 }
                                 crate::event_dialog::Advance::Ended { end_para } => {
-                                    let payload = build_subpacket_event_end(sub_seq, u, a, current_zone_id, n, end_para);
-                                    sub_seq = sub_seq.wrapping_add(1);
-                                    if let Err(e) = map.send_encrypted(&payload, datagram_header_id(sub_seq), server_last_seq).await {
-                                        tracing::warn!(error = %e, "EVENT_END (vm) send failed");
+                                    if take_pending_event_end(&mut pending_event_end, u, n) {
+                                        let payload = build_subpacket_event_end(sub_seq, u, a, current_zone_id, n, end_para);
+                                        sub_seq = sub_seq.wrapping_add(1);
+                                        if let Err(e) = map.send_encrypted(&payload, datagram_header_id(sub_seq), server_last_seq).await {
+                                            tracing::warn!(error = %e, "EVENT_END (vm) send failed");
+                                        }
                                     }
-                                    pending_event_end.retain(|(uid, _, en)| !(*uid == u && *en == n));
                                     let _ = event_tx.send(AgentEvent::EventEnded);
                                 }
                             }
@@ -2069,12 +2070,13 @@ async fn keepalive_loop(
                                     let _ = event_tx.send(AgentEvent::EventDialog { dialog });
                                 }
                                 crate::event_dialog::Advance::Ended { end_para } => {
-                                    let payload = build_subpacket_event_end(sub_seq, u, a, current_zone_id, n, end_para);
-                                    sub_seq = sub_seq.wrapping_add(1);
-                                    if let Err(e) = map.send_encrypted(&payload, datagram_header_id(sub_seq), server_last_seq).await {
-                                        tracing::warn!(error = %e, "EVENT_END (vm choice) send failed");
+                                    if take_pending_event_end(&mut pending_event_end, u, n) {
+                                        let payload = build_subpacket_event_end(sub_seq, u, a, current_zone_id, n, end_para);
+                                        sub_seq = sub_seq.wrapping_add(1);
+                                        if let Err(e) = map.send_encrypted(&payload, datagram_header_id(sub_seq), server_last_seq).await {
+                                            tracing::warn!(error = %e, "EVENT_END (vm choice) send failed");
+                                        }
                                     }
-                                    pending_event_end.retain(|(uid, _, en)| !(*uid == u && *en == n));
                                     let _ = event_tx.send(AgentEvent::EventEnded);
                                 }
                             }
@@ -2095,9 +2097,7 @@ async fn keepalive_loop(
                                 tracing::warn!(error = %e, "EVENT_END (choice) send failed");
                             }
 
-                            pending_event_end.retain(|(uid, _, en)| {
-                                !(*uid == event_id && *en == event_num)
-                            });
+                            take_pending_event_end(&mut pending_event_end, event_id, event_num);
                             let _ = event_tx.send(AgentEvent::EventEnded);
                         }
                     }
@@ -3047,22 +3047,40 @@ async fn keepalive_loop(
                     tracing::info!("sent 0x01A SendResRdy (post zone-in spawn request)");
                 }
 
-                if (!user_driven_events || watchdog_fires || walked_away)
-                    && !pending_event_end.is_empty()
-                {
-                    for (unique_no, act_index, event_num) in pending_event_end.drain(..) {
-                        payload.extend(build_subpacket_event_end(
-                            sub_seq,
-                            unique_no,
-                            act_index,
-                            current_zone_id,
-                            event_num,
-                            0,
-                        ));
-                        sub_seq = sub_seq.wrapping_add(1);
+                if let Some(flush) = flush_pending_event_end(
+                    EventEndFlushInputs {
+                        user_driven: user_driven_events,
+                        watchdog_fires,
+                        walked_away,
+                    },
+                    &mut pending_event_end,
+                    dialog_session.active_end(),
+                    current_zone_id,
+                    sub_seq,
+                ) {
+                    payload.extend(flush.payload);
+                    sub_seq = flush.next_sub_seq;
+                    for _ in 0..flush.released {
                         let _ = event_tx.send(AgentEvent::EventEnded);
                     }
-                    if watchdog_fires {
+                    if flush.clear_dialog {
+                        dialog_session.clear();
+                    }
+                    if walked_away {
+                        tracing::info!(
+                            moved_yalms = walk_dist.unwrap_or(0.0),
+                            "released pinned event: player walked away from dialog"
+                        );
+                        let _ = event_tx.send(AgentEvent::ChatLine {
+                            line: ChatLine {
+                                channel: ChatChannel::System,
+                                sender: "<client>".into(),
+                                text: "Released the pinned event (you walked away from it)."
+                                    .into(),
+                                server_ts: 0,
+                            },
+                        });
+                    } else if watchdog_fires {
                         tracing::warn!(
                             grace_secs = PENDING_EVENT_END_GRACE.as_secs(),
                             "auto-flushed pending EVENT_END (watchdog grace expired)"
@@ -3074,11 +3092,6 @@ async fn keepalive_loop(
                                 PENDING_EVENT_END_GRACE.as_secs()
                             ),
                         });
-                    } else if walked_away {
-                        tracing::info!(
-                            moved_yalms = walk_dist.unwrap_or(0.0),
-                            "released pinned event: player walked away from dialog"
-                        );
                     }
                     pending_event_end_since = None;
                     pending_event_end_anchor = None;
@@ -5664,6 +5677,86 @@ fn should_release_on_walkaway(user_driven: bool, walk_dist: Option<f32>) -> bool
     user_driven && walk_dist.is_some_and(|d| d > EVENT_WALKAWAY_YALMS)
 }
 
+/// Keepalive-tick state the pending-EVENT_END release reads. Named fields, not
+/// positional `bool`s: a swapped pair here silently inverts the release policy.
+struct EventEndFlushInputs {
+    user_driven: bool,
+    watchdog_fires: bool,
+    walked_away: bool,
+}
+
+/// What the tick owes the rest of the loop once the pinned events are drained.
+struct EventEndFlush {
+    payload: Vec<u8>,
+    next_sub_seq: u16,
+    released: usize,
+    clear_dialog: bool,
+}
+
+/// Drain the events still owed a 0x05B and build their subpackets, or `None`
+/// when this tick must leave them pinned.
+///
+/// Retail never times a dialog out, so the grace timer exists only to unpin an
+/// event with nothing on screen; with a frame the player is still reading, the
+/// escape hatches are walking away and /endevent.
+///
+/// The drained 0x05B ends the event server-side, so only the walk-away path —
+/// where the player abandoned the frame — clears the VM session that owns it.
+/// Every other path (notably `!user_driven`: agent_io, agent_socket, ffxi-mcp,
+/// headless) keeps the session alive so the consumer can still walk the dialog
+/// tree locally; [`take_pending_event_end`] is what stops that walk from
+/// sending a second EVENT_END.
+fn flush_pending_event_end(
+    inputs: EventEndFlushInputs,
+    pending_event_end: &mut Vec<(u32, u16, u16)>,
+    active_dialog: Option<(u32, u16, u16)>,
+    event_zone: u16,
+    sub_seq: u16,
+) -> Option<EventEndFlush> {
+    let dialog_open = active_dialog.is_some();
+    let flush =
+        !inputs.user_driven || inputs.walked_away || (inputs.watchdog_fires && !dialog_open);
+    if !flush || pending_event_end.is_empty() {
+        return None;
+    }
+    let mut out = EventEndFlush {
+        payload: Vec::new(),
+        next_sub_seq: sub_seq,
+        released: 0,
+        clear_dialog: false,
+    };
+    for pinned in pending_event_end.drain(..) {
+        let (unique_no, act_index, event_id) = pinned;
+        out.payload.extend(build_subpacket_event_end(
+            out.next_sub_seq,
+            unique_no,
+            act_index,
+            event_zone,
+            event_id,
+            0,
+        ));
+        out.next_sub_seq = out.next_sub_seq.wrapping_add(1);
+        out.released += 1;
+        out.clear_dialog |= inputs.walked_away && active_dialog == Some(pinned);
+    }
+    Some(out)
+}
+
+/// `pending_event_end` is the set of events the server still owes us a 0x05B
+/// for, so taking the entry is the authorization to send one. A VM session that
+/// outlived the keepalive auto-release must end locally without resending: LSB
+/// drops an EVENT_END whose EventPara no longer matches `currentEvent`
+/// (vendor/server/src/map/packets/c2s/validation.cpp:58-77).
+fn take_pending_event_end(
+    pending_event_end: &mut Vec<(u32, u16, u16)>,
+    unique_no: u32,
+    event_id: u16,
+) -> bool {
+    let before = pending_event_end.len();
+    pending_event_end.retain(|(uid, _, en)| !(*uid == unique_no && *en == event_id));
+    before != pending_event_end.len()
+}
+
 fn should_break_flood(self_pos_seeded: bool) -> bool {
     self_pos_seeded
 }
@@ -6062,6 +6155,135 @@ mod tests {
             true,
             Some(EVENT_WALKAWAY_YALMS + 0.1)
         ));
+    }
+
+    const PINNED_EVENT: (u32, u16, u16) = (0x0100_02FF, 7, 0x0123);
+    const FLUSH_ZONE: u16 = 230;
+    const FLUSH_SEQ: u16 = 0x0044;
+
+    fn flush_inputs(
+        user_driven: bool,
+        watchdog_fires: bool,
+        walked_away: bool,
+    ) -> EventEndFlushInputs {
+        EventEndFlushInputs {
+            user_driven,
+            watchdog_fires,
+            walked_away,
+        }
+    }
+
+    #[test]
+    fn grace_watchdog_spares_a_dialog_the_player_is_reading() {
+        const USER: bool = true;
+        const WATCHDOG: bool = true;
+        const WALKED: bool = true;
+        let open = Some(PINNED_EVENT);
+
+        let flushes = |inputs: EventEndFlushInputs, active: Option<(u32, u16, u16)>| {
+            let mut pending = vec![PINNED_EVENT];
+            flush_pending_event_end(inputs, &mut pending, active, FLUSH_ZONE, FLUSH_SEQ).is_some()
+        };
+
+        assert!(!flushes(flush_inputs(USER, WATCHDOG, !WALKED), open));
+        assert!(!flushes(flush_inputs(USER, !WATCHDOG, !WALKED), open));
+        assert!(!flushes(flush_inputs(USER, !WATCHDOG, !WALKED), None));
+
+        assert!(flushes(flush_inputs(USER, WATCHDOG, !WALKED), None));
+        assert!(flushes(flush_inputs(USER, WATCHDOG, WALKED), open));
+        assert!(flushes(flush_inputs(USER, !WATCHDOG, WALKED), open));
+
+        for active in [None, open] {
+            for watchdog in [false, true] {
+                assert!(flushes(flush_inputs(!USER, watchdog, !WALKED), active));
+            }
+        }
+
+        let mut empty = Vec::new();
+        assert!(flush_pending_event_end(
+            flush_inputs(!USER, WATCHDOG, !WALKED),
+            &mut empty,
+            None,
+            FLUSH_ZONE,
+            FLUSH_SEQ
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn agent_mode_auto_release_keeps_the_vm_dialog_walkable() {
+        let mut pending = vec![PINNED_EVENT];
+        let flush = flush_pending_event_end(
+            flush_inputs(false, false, false),
+            &mut pending,
+            Some(PINNED_EVENT),
+            FLUSH_ZONE,
+            FLUSH_SEQ,
+        )
+        .expect("a non-user-driven session auto-releases the pinned event");
+
+        assert!(
+            !flush.clear_dialog,
+            "agent/headless dialog must survive the auto-release so frames 2..N still play"
+        );
+        assert_eq!(flush.released, 1);
+        assert_eq!(flush.next_sub_seq, FLUSH_SEQ.wrapping_add(1));
+        assert!(pending.is_empty());
+
+        let (unique_no, act_index, event_id) = PINNED_EVENT;
+        let expected =
+            build_subpacket_event_end(FLUSH_SEQ, unique_no, act_index, FLUSH_ZONE, event_id, 0);
+        assert_eq!(flush.payload, expected);
+
+        assert!(
+            !take_pending_event_end(&mut pending, unique_no, event_id),
+            "the surviving VM session must not resend the 0x05B the flush already sent"
+        );
+    }
+
+    #[test]
+    fn walking_away_clears_the_vm_dialog_it_released() {
+        let mut pending = vec![PINNED_EVENT];
+        let flush = flush_pending_event_end(
+            flush_inputs(true, false, true),
+            &mut pending,
+            Some(PINNED_EVENT),
+            FLUSH_ZONE,
+            FLUSH_SEQ,
+        )
+        .expect("walking away releases the pinned event");
+        assert!(flush.clear_dialog);
+
+        let other = (PINNED_EVENT.0 ^ 0xFF, PINNED_EVENT.1, PINNED_EVENT.2);
+        let mut pending = vec![PINNED_EVENT];
+        let flush = flush_pending_event_end(
+            flush_inputs(true, false, true),
+            &mut pending,
+            Some(other),
+            FLUSH_ZONE,
+            FLUSH_SEQ,
+        )
+        .expect("walking away releases the pinned event");
+        assert!(
+            !flush.clear_dialog,
+            "a dialog the flush did not release must keep running"
+        );
+    }
+
+    #[test]
+    fn a_pinned_event_is_owed_exactly_one_event_end() {
+        let (unique_no, act_index, event_id) = PINNED_EVENT;
+        let mut pending = vec![PINNED_EVENT];
+        assert!(take_pending_event_end(&mut pending, unique_no, event_id));
+        assert!(!take_pending_event_end(&mut pending, unique_no, event_id));
+
+        let mut pending = vec![PINNED_EVENT];
+        assert!(!take_pending_event_end(
+            &mut pending,
+            unique_no,
+            event_id ^ 0xFF
+        ));
+        assert_eq!(pending, vec![(unique_no, act_index, event_id)]);
     }
 
     #[test]

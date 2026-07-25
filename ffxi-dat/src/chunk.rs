@@ -46,6 +46,7 @@ impl<'a> Iterator for ChunkWalker<'a> {
 
         let header_off = self.cursor;
         let Some(header) = self.bytes.get(header_off..header_off + 16) else {
+            self.cursor = self.bytes.len();
             return Some(Err(DatError::TruncatedChunk {
                 offset: header_off,
                 needed: 16,
@@ -186,6 +187,30 @@ mod tests {
         assert_eq!(chunks[1].data.len(), 16);
         assert_eq!(&chunks[1].data[..8], &[0xAB; 8]);
         assert_eq!(&chunks[1].data[8..16], &[0u8; 8]);
+    }
+
+    #[test]
+    fn a_tail_shorter_than_a_header_yields_one_error_then_ends() {
+        let mut buf = synth_chunk(b"selp", 1, &[0u8; 16]);
+        buf.extend_from_slice(&[0u8; 4]);
+
+        let items: Vec<_> = walk(&buf).take(8).collect();
+        assert_eq!(items.len(), 2);
+        assert!(items[0].is_ok());
+        assert!(matches!(
+            items[1],
+            Err(DatError::TruncatedChunk {
+                offset: 32,
+                needed: 16,
+                available: 4
+            })
+        ));
+    }
+
+    #[test]
+    fn a_buffer_that_is_only_a_short_tail_terminates_under_flatten() {
+        let buf = [0u8; 4];
+        assert_eq!(walk(&buf).flatten().take(8).count(), 0);
     }
 
     #[test]

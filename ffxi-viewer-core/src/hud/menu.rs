@@ -518,6 +518,34 @@ pub struct MenuRowActivated {
 /// reuses it so the pane widths can't drift.
 pub const MENU_PANE_WIDTH: f32 = 220.0;
 
+/// Wider pane for the Graphics menu: its rows are `label:<16>[value]` pairs
+/// (longest: `> Texture Filtering:[Aniso 16x]`, 31 chars) that overflow the
+/// 220px command column at 14px and used to wrap, doubling row heights and
+/// pushing the pane past the window bottom.
+pub const GRAPHICS_PANE_WIDTH: f32 = 320.0;
+
+fn pane_width_for(kind: MenuKind) -> f32 {
+    match kind {
+        MenuKind::Graphics => GRAPHICS_PANE_WIDTH,
+        _ => MENU_PANE_WIDTH,
+    }
+}
+
+/// Single-line rows: a wrapped row silently occupies two lines, which breaks
+/// the `DYNAMIC_VISIBLE_ROWS` viewport math (22 logical rows must be 22 drawn
+/// lines). Truncate instead of wrapping if a row ever outgrows its pane.
+fn text_nowrap() -> TextLayout {
+    TextLayout {
+        linebreak: LineBreak::NoWrap,
+        ..default()
+    }
+}
+
+/// Marker for the framed pane column so `update_main_menu` can retarget its
+/// width per menu kind.
+#[derive(Component)]
+pub struct MainMenuPane;
+
 pub fn spawn_main_menu(mut commands: Commands) {
     commands
         .spawn((
@@ -537,25 +565,29 @@ pub fn spawn_main_menu(mut commands: Commands) {
 fn spawn_pane_column(parent: &mut ChildSpawnerCommands) {
     let (mut node, bg, border) = style::window_frame();
     node.width = Val::Px(MENU_PANE_WIDTH);
-    parent.spawn((node, bg, border)).with_children(|c| {
-        c.spawn((
-            MainMenuTitle,
-            Text::new(""),
-            style::text_font(14.0),
-            TextColor(theme::TITLE),
-        ));
-
-        for slot in 0..MAX_ENTRY_COUNT {
+    parent
+        .spawn((MainMenuPane, node, bg, border))
+        .with_children(|c| {
             c.spawn((
-                MainMenuRow { slot },
-                Button,
+                MainMenuTitle,
                 Text::new(""),
+                text_nowrap(),
                 style::text_font(14.0),
-                TextColor(theme::TEXT),
-                BackgroundColor(Color::NONE),
+                TextColor(theme::TITLE),
             ));
-        }
-    });
+
+            for slot in 0..MAX_ENTRY_COUNT {
+                c.spawn((
+                    MainMenuRow { slot },
+                    Button,
+                    Text::new(""),
+                    text_nowrap(),
+                    style::text_font(14.0),
+                    TextColor(theme::TEXT),
+                    BackgroundColor(Color::NONE),
+                ));
+            }
+        });
 }
 
 pub fn refresh_dynamic_menu_rows(
@@ -977,7 +1009,8 @@ pub fn update_main_menu(
 
     scene: Res<crate::snapshot::SceneState>,
     dynamic: Res<DynamicMenu>,
-    mut menu_q: Query<&mut Node, (With<MainMenu>, Without<MainMenuRow>)>,
+    mut menu_q: Query<&mut Node, (With<MainMenu>, Without<MainMenuRow>, Without<MainMenuPane>)>,
+    mut pane_q: Query<&mut Node, (With<MainMenuPane>, Without<MainMenuRow>)>,
     mut row_q: Query<
         (
             &MainMenuRow,
@@ -1019,6 +1052,12 @@ pub fn update_main_menu(
     }
     if node.display != Display::Flex {
         node.display = Display::Flex;
+    }
+    let want_width = Val::Px(pane_width_for(top_kind));
+    for mut pane_node in pane_q.iter_mut() {
+        if pane_node.width != want_width {
+            pane_node.width = want_width;
+        }
     }
 
     let view = current_view(stack);
@@ -1316,6 +1355,52 @@ mod tests {
             .collect();
         rows.sort_by_key(|(slot, _)| *slot);
         rows
+    }
+
+    #[test]
+    fn graphics_menu_widens_the_pane_and_rows_stay_single_line() {
+        // Regression: Graphics rows (`label:<16>[value]`) used to wrap inside
+        // the 220px command column, doubling row heights and pushing the pane
+        // past the window bottom.
+        let mut app = root_menu_app(0);
+        let pane_width = |app: &mut App| {
+            let mut q = app.world_mut().query::<(&MainMenuPane, &Node)>();
+            q.iter(app.world())
+                .map(|(_, node)| node.width)
+                .next()
+                .expect("pane exists")
+        };
+        assert_eq!(pane_width(&mut app), Val::Px(MENU_PANE_WIDTH));
+
+        // Push Graphics on top: the pane retargets to the wide width.
+        let mut stack = MenuStack::root();
+        stack.push(MenuKind::Graphics);
+        app.insert_resource(InputMode::Menu(stack));
+        app.update();
+        assert_eq!(pane_width(&mut app), Val::Px(GRAPHICS_PANE_WIDTH));
+
+        // Back on the root, it narrows again.
+        app.insert_resource(InputMode::Menu(MenuStack::root()));
+        app.update();
+        assert_eq!(pane_width(&mut app), Val::Px(MENU_PANE_WIDTH));
+
+        // Rows and title must never wrap: a wrapped row breaks the
+        // DYNAMIC_VISIBLE_ROWS viewport math.
+        let mut q = app
+            .world_mut()
+            .query_filtered::<&TextLayout, With<MainMenuRow>>();
+        let mut count = 0;
+        for layout in q.iter(app.world()) {
+            assert_eq!(layout.linebreak, LineBreak::NoWrap);
+            count += 1;
+        }
+        assert_eq!(count, MAX_ENTRY_COUNT, "every row carries NoWrap");
+        let mut q = app
+            .world_mut()
+            .query_filtered::<&TextLayout, With<MainMenuTitle>>();
+        assert!(q
+            .iter(app.world())
+            .all(|l| l.linebreak == LineBreak::NoWrap));
     }
 
     #[test]

@@ -32,8 +32,15 @@ fn main() -> ExitCode {
     println!("  node_count         {}", header.node_count);
     println!("  version            {}", header.version);
     println!("  key_index          {}", header.key_index);
-    println!("  grid_width         {}", header.grid_width);
-    println!("  grid_height        {}", header.grid_height);
+    println!("  zone_blocks_x      {}", header.zone_blocks_x);
+    println!("  zone_blocks_z      {}", header.zone_blocks_z);
+    println!("  block_width        {}", header.block_width);
+    println!("  block_length       {}", header.block_length);
+    println!(
+        "  grid cells         {}x{}",
+        header.grid_cells_x(),
+        header.grid_cells_z()
+    );
     println!("  mesh_table_offset  0x{:08x}", header.mesh_table_offset);
     println!("  quadtree_offset    0x{:08x}", header.quadtree_offset);
     println!("  maplist_offset     0x{:08x}", header.maplist_offset);

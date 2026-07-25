@@ -91,12 +91,14 @@ fn main() -> ExitCode {
         }
     };
     println!(
-        "header      grid={}x{} (×10 cells = {}x{}={} cells)  mesh_table=0x{:X}",
-        header.grid_width,
-        header.grid_height,
-        header.grid_width as usize * 10,
-        header.grid_height as usize * 10,
-        (header.grid_width as usize * 10) * (header.grid_height as usize * 10),
+        "header      blocks={}x{} block_size={}x{} -> {}x{}={} cells  mesh_table=0x{:X}",
+        header.zone_blocks_x,
+        header.zone_blocks_z,
+        header.block_width,
+        header.block_length,
+        header.grid_cells_x(),
+        header.grid_cells_z(),
+        header.grid_cells_x() * header.grid_cells_z(),
         header.mesh_table_offset,
     );
 

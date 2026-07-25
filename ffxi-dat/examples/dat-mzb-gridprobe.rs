@@ -25,8 +25,8 @@ fn main() {
     println!(
         "file {file_id}: body={} mesh_table=0x{mt:X} grid={}x{}",
         plain.len(),
-        header.grid_width,
-        header.grid_height
+        header.grid_cells_x(),
+        header.grid_cells_z()
     );
     println!(
         "header[0x0C..0x10] = zoneBlocksX={} zoneBlocksZ={} blockWidth={} blockLength={}",
@@ -55,8 +55,8 @@ fn main() {
         return;
     }
 
-    let gw = header.grid_width as usize * 10;
-    let gh = header.grid_height as usize * 10;
+    let gw = header.grid_cells_x();
+    let gh = header.grid_cells_z();
     let mut nonzero = 0usize;
     let mut oob = 0usize;
     let mut first = Vec::new();

@@ -901,6 +901,42 @@ mod tests {
         assert!(placements.is_empty(), "grid_width=0 → no placements");
     }
 
+    // Port Jeuno (DAT 346) ships 80-unit zone blocks, so its placement grid is
+    // 20 sub-blocks per block, not the 10 every other zone uses. Hardcoding 10
+    // made every cell lookup read the wrong stride, parse_placements returned
+    // empty, and the whole zone fell back to unplaced (identity) geometry — no
+    // collision under the player anywhere in the zone.
+    #[test]
+    fn placements_grid_stride_follows_block_width() {
+        let mut body = synth_mzb_with_placement();
+        body[0x0E] = 80;
+        body[0x0F] = 80;
+
+        let h = MzbHeader::parse(&body).unwrap();
+        assert_eq!(h.grid_cells_x(), 20);
+        assert_eq!(h.grid_cells_z(), 20);
+
+        // Move the only cell pointer from (0,0) to row 1, which sits at index 20
+        // under the correct stride and index 10 under the old hardcoded one.
+        let grid = 0x80usize;
+        body[grid..grid + 4].copy_from_slice(&0u32.to_le_bytes());
+        let row = 1usize;
+        let cell = grid + row * h.grid_cells_x() * 4;
+        body[cell..cell + 4].copy_from_slice(&0x210u32.to_le_bytes());
+
+        let placements = parse_placements(&body, &h).unwrap();
+        assert!(
+            placements
+                .iter()
+                .any(|p| p.grid_x == 0 && p.grid_y == 1 && p.geometry_offset == 0x40),
+            "row-1 cell must be reached at stride 20, got {:?}",
+            placements
+                .iter()
+                .map(|p| (p.grid_x, p.grid_y))
+                .collect::<Vec<_>>()
+        );
+    }
+
     #[test]
     fn placement_flip_winding_on_negative_det() {
         let mut body = synth_mzb_with_placement();

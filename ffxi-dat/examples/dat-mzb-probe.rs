@@ -100,7 +100,10 @@ fn main() -> ExitCode {
     );
     println!(
         "            grid={}x{}  mesh_table_offset=0x{:X}  quadtree_offset=0x{:X}",
-        header.grid_width, header.grid_height, header.mesh_table_offset, header.quadtree_offset
+        header.grid_cells_x(),
+        header.grid_cells_z(),
+        header.mesh_table_offset,
+        header.quadtree_offset
     );
     println!(
         "            maplist_offset=0x{:X}  maplist_count={}",

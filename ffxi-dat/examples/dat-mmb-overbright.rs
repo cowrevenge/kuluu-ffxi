@@ -36,19 +36,19 @@ fn main() -> ExitCode {
         if c.kind != 0x2E {
             continue;
         }
-        let name = String::from_utf8_lossy(&c.name)
-            .trim_end_matches(['\0', ' '])
-            .to_ascii_lowercase();
+        let Ok(decrypted) = mmb::decrypt(c.data) else {
+            continue;
+        };
+        let Ok(header) = MmbHeader::parse(&decrypted) else {
+            continue;
+        };
+        // Chunk names are only 4 chars; the placement-matchable model name
+        // (e.g. `wi_k_ramp`) lives in MMB header bytes 16..32.
+        let name = header.zone_mesh_name().to_ascii_lowercase();
         if let Some(f) = &filter {
             if !name.contains(f.as_str()) {
                 continue;
             }
-        }
-        let Ok(decrypted) = mmb::decrypt(c.data) else {
-            continue;
-        };
-        if MmbHeader::parse(&decrypted).is_err() {
-            continue;
         }
         let models = mmb::parse_models(&decrypted);
         scanned += 1;

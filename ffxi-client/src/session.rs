@@ -984,6 +984,8 @@ fn handle_sub_packet(
                     action_id: h.action_id,
                     action_kind: h.action_kind,
                     target_id: h.primary_target_id,
+                    resolution: h.resolution,
+                    animation: h.animation,
                 });
             }
             for line in decode_battle2_action(sub.data, name_cache, kind_cache) {
@@ -3842,6 +3844,12 @@ pub struct Battle2Header {
     pub action_id: u32,
     pub action_kind: u8,
     pub primary_target_id: Option<u32>,
+
+    // 0x028_battle2.cpp:71-73 — the first result's resolution(3) and animation(12). A basic
+    // attack never sets `action.actionid` (battleentity.cpp:2989), so cmd_arg is 0 and these
+    // are the only per-swing data: which arm swung and whether it landed.
+    pub resolution: u8,
+    pub animation: u16,
 }
 
 pub fn decode_battle2_header(data: &[u8]) -> Option<Battle2Header> {
@@ -3851,19 +3859,25 @@ pub fn decode_battle2_header(data: &[u8]) -> Option<Battle2Header> {
     let _res_sum = br.read(4)?;
     let action_kind = br.read(4)? as u8;
     let action_id = br.read(32)? as u32;
+    let _info = br.read(32);
     // LSB rounds the packet to a 4-byte size (basic.h:118), so a target carrying no results can
     // end the body before these trailing reads. Degrade to "no target" rather than dropping the
     // whole action — the sibling decode_battle2_action tolerates the same short payload.
-    let primary_target_id = br
-        .read(32)
-        .filter(|_| trg_sum > 0)
-        .and_then(|_info| br.read(32))
-        .map(|id| id as u32);
+    let primary_target_id = br.read(32).filter(|_| trg_sum > 0).map(|id| id as u32);
+    let mut resolution = 0;
+    let mut animation = 0;
+    if primary_target_id.is_some() && br.read(4).is_some_and(|count| count > 0) {
+        resolution = br.read(3).unwrap_or(0) as u8;
+        let _kind = br.read(2);
+        animation = br.read(12).unwrap_or(0) as u16;
+    }
     Some(Battle2Header {
         actor_id,
         action_id,
         action_kind,
         primary_target_id,
+        resolution,
+        animation,
     })
 }
 
@@ -7157,6 +7171,64 @@ mod tests {
         w.write(0, 32);
         let h = decode_battle2_header(&w.into_bytes()).unwrap();
         assert_eq!(h.primary_target_id, None);
+    }
+
+    // vendor/server/src/map/packets/s2c/0x028_battle2.cpp:71-73 — resolution(3), kind(2),
+    // animation(12) open every result block. A basic attack never sets `action.actionid`
+    // (vendor/server/src/map/entities/battleentity.cpp:2989), so these bits are the ONLY
+    // per-swing data: an off-by-one here picks the wrong swing routine and the wrong hit
+    // reaction, i.e. the wrong sound or none.
+    #[test]
+    fn battle2_basic_attack_reports_resolution_and_swing_animation() {
+        const PARRY: u64 = 3;
+        const LEFT_ATTACK: u64 = 1;
+        let mut w = BattleBitWriter::new(8);
+        w.write(0xCAFEu64, 32);
+        w.write(1, 6);
+        w.write(1, 4);
+        w.write(ffxi_proto::melee::CATEGORY_BASIC_ATTACK as u64, 4);
+        w.write(0, 32);
+        w.write(0, 32);
+        w.write(0xBEEFu64, 32);
+        w.write(1, 4);
+        w.write(PARRY, 3);
+        w.write(0, 2);
+        w.write(LEFT_ATTACK, 12);
+        w.write(0, 32);
+        w.write(0, 32);
+
+        let h = decode_battle2_header(&w.into_bytes()).unwrap();
+        assert_eq!(h.action_kind, ffxi_proto::melee::CATEGORY_BASIC_ATTACK);
+        assert_eq!(h.action_id, 0, "a basic attack carries no cmd_arg");
+        assert_eq!(h.primary_target_id, Some(0xBEEF));
+        assert_eq!(
+            ffxi_proto::melee::ActionResolution::from_wire(h.resolution),
+            Some(ffxi_proto::melee::ActionResolution::Parry)
+        );
+        assert_eq!(
+            ffxi_proto::melee::AttackAnimation::from_wire(h.animation),
+            Some(ffxi_proto::melee::AttackAnimation::LeftAttack)
+        );
+    }
+
+    // A target that carries no result blocks must not read the packet tail as a resolution.
+    #[test]
+    fn battle2_target_without_results_reports_no_resolution() {
+        let mut w = BattleBitWriter::new(8);
+        w.write(0xCAFEu64, 32);
+        w.write(1, 6);
+        w.write(0, 4);
+        w.write(ffxi_proto::melee::CATEGORY_BASIC_ATTACK as u64, 4);
+        w.write(0, 32);
+        w.write(0, 32);
+        w.write(0xBEEFu64, 32);
+        w.write(0, 4);
+        w.write(0xFFFF_FFFFu64, 32);
+        w.write(0xFFFF_FFFFu64, 32);
+
+        let h = decode_battle2_header(&w.into_bytes()).unwrap();
+        assert_eq!(h.resolution, 0);
+        assert_eq!(h.animation, 0);
     }
 
     #[test]

@@ -130,6 +130,34 @@ fn derive_animation_sets(
     )
 }
 
+// research/xim EffectRoutineInstance.kt:592-604 searchAssociatedDir — a sound id in a routine
+// resolves against every one of the actor's resource dirs. For a PC that is where the whole
+// melee sound set lives: `skaz`/`shit` in the equipped weapon's DAT, `atk1..atk4`/`dam1..dam4`
+// in the FACE model DAT. Only Sep and Generator chunks are collected; the Img/D3M/MMB decode
+// that `parse_action_bytes` also does is the actor loader's expensive tail and is not needed to
+// turn a stage id into an se_id (ffxi_dat::action::resolve_stage_to_se).
+fn collect_sound_assets(dirs: &[&[ResourceDir]]) -> crate::scheduler_runtime::ActionAssets {
+    let mut assets = crate::scheduler_runtime::ActionAssets::default();
+    for dir in dirs.iter().flat_map(|d| d.iter()) {
+        for c in ffxi_dat::chunk::walk(dir.bytes()).flatten() {
+            match ffxi_dat::kind::ChunkKind::from_u8(c.kind) {
+                Some(ffxi_dat::kind::ChunkKind::Sep) => {
+                    if let Ok(sep) = ffxi_dat::sep::Sep::parse(c.name, c.data) {
+                        assets.seps.entry(c.name).or_insert(sep);
+                    }
+                }
+                Some(ffxi_dat::kind::ChunkKind::Generator) => {
+                    if let Ok(Some(g)) = ffxi_dat::generator::Generator::parse(c.name, c.data) {
+                        assets.generators.entry(c.name).or_insert(g);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    assets
+}
+
 // Everything CPU-heavy about turning a LoadedActor into spawnable pieces —
 // vertex conversion, mip-chain generation, bind pose — happens here so the
 // loader task pays it, not the render main thread.
@@ -519,7 +547,7 @@ pub fn load_pc(
         animations,
         battle_clips,
         routines,
-        action_assets: Arc::default(),
+        action_assets: Arc::new(collect_sound_assets(&[&anim_dirs, &battle_dirs])),
     })
 }
 
@@ -700,6 +728,7 @@ pub struct FfxiRenderActor {
     battle_clips: Arc<Vec<SkeletonAnimation>>,
 
     routines: Arc<HashMap<DatId, Scheduler>>,
+    action_assets: Arc<crate::scheduler_runtime::ActionAssets>,
     coordinator: SkeletonAnimationCoordinator,
     materials: Vec<Handle<FfxiSkinnedMaterial>>,
 
@@ -736,6 +765,14 @@ impl FfxiRenderActor {
 
     pub(crate) fn routines(&self) -> &HashMap<DatId, Scheduler> {
         &self.routines
+    }
+
+    // The SEP/generator tier a sound stage resolves against when the running routine's own DAT
+    // does not hold it: a PC's grunt SEPs ship in the FACE model DAT and the weapon's swing
+    // whoosh in the equipped weapon's DAT (research/xim EffectRoutineInstance.kt:592-604
+    // searchAssociatedDir over `actor.getAllAnimationDirectories()`).
+    pub(crate) fn action_assets(&self) -> &crate::scheduler_runtime::ActionAssets {
+        &self.action_assets
     }
 
     pub(crate) fn cast_posing(&self) -> bool {
@@ -1064,6 +1101,7 @@ fn make_render_actor(
         animations: loaded.all_animations(),
         battle_clips: loaded.all_battle_clips(),
         routines: loaded.all_routines(),
+        action_assets: Arc::clone(&loaded.action_assets),
         coordinator: SkeletonAnimationCoordinator::new(),
         materials,
         inputs: ActorAnimInputs::default(),

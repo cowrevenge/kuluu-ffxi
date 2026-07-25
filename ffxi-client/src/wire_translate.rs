@@ -316,11 +316,15 @@ pub fn event_to_viewer_event(ev: AgentEvent) -> Option<wire::ViewerEvent> {
             action_id,
             action_kind,
             target_id,
+            resolution,
+            animation,
         } => Some(wire::ViewerEvent::ActionStarted {
             actor_id,
             action_id,
             action_kind,
             target_id,
+            resolution,
+            animation,
         }),
         AgentEvent::EntityEmoted {
             actor_id,
@@ -570,6 +574,8 @@ mod tests {
                 action_id: 220,
                 action_kind: 4,
                 target_id,
+                resolution: 0,
+                animation: 0,
             });
             assert!(matches!(
                 mapped,

@@ -543,4 +543,226 @@ mod tests {
         let s = Scheduler::parse(*b"trun", &body).unwrap();
         assert_eq!(s.stages.len(), 0);
     }
+
+    // research/xim EffectRoutineParser.kt:41-57 — the effect list starts where the section-2
+    // offset at body +0x14 says it does. Routines with a populated control-flow section put it
+    // at raw 0x3C (body 0x2C); the old fixed 64-byte start read past it and found nothing.
+    #[test]
+    fn section_table_start_beats_fixed_64_byte_header() {
+        let mut body = vec![0u8; SCHEDULER_HEADER_LEN];
+        const SEC2_RAW: u32 = 0x3C;
+        let sec2_body = SEC2_RAW as usize - CHUNK_HEADER_LEN;
+        body[SECTION2_SLOT..SECTION2_SLOT + 4].copy_from_slice(&SEC2_RAW.to_le_bytes());
+        body[sec2_body..sec2_body + 4].copy_from_slice(&[0x57, 0x03, 0, 0]);
+        body[sec2_body + 4..sec2_body + 6].copy_from_slice(&0u16.to_le_bytes());
+        body[sec2_body + 6..sec2_body + 8].copy_from_slice(&0u16.to_le_bytes());
+        body[sec2_body + 8..sec2_body + 12].copy_from_slice(b"skaz");
+
+        let s = Scheduler::parse(*b"ati0", &body).unwrap();
+        assert_eq!(s.stages.len(), 1);
+        assert_eq!(&s.stages[0].stage.id, b"skaz");
+        assert!(
+            body[SCHEDULER_HEADER_LEN..].iter().all(|&b| b == 0),
+            "nothing lives at the fixed 64-byte start — the table is the only way in"
+        );
+    }
+
+    // research/xim EffectRoutineParser.kt:136-140 (0x09 useTarget) and :371-375 (0x57). Both were
+    // dropped as Unknown, which is what muted every melee routine's linked sound.
+    #[test]
+    fn opcode_57_and_09_are_subroutine_links() {
+        assert_eq!(StageKind::from_stage(0x57, 3), StageKind::SubRoutine);
+        assert_eq!(
+            StageKind::from_stage(0x09, 3),
+            StageKind::SubRoutineOnTarget
+        );
+        assert_ne!(
+            StageKind::from_stage(0x09, 3),
+            StageKind::from_stage(0x57, 3),
+            "a target-linked child resolves its ids against the victim, not the caster"
+        );
+    }
+
+    // research/xim EffectRoutineParser.kt:65 — the stage length is `unkCombo & 0x1F` dwords, so
+    // the high bits of the u16 must not be read as length.
+    #[test]
+    fn stage_length_masks_the_high_combo_bits() {
+        let mut body = vec![0u8; SCHEDULER_HEADER_LEN];
+        body.extend_from_slice(&[0x57, 0x03, 0xE0, 0]);
+        body.extend_from_slice(&0u16.to_le_bytes());
+        body.extend_from_slice(&0u16.to_le_bytes());
+        body.extend_from_slice(b"vatk");
+        body.extend_from_slice(&[0x57, 0x03, 0xE0, 0]);
+        body.extend_from_slice(&0u16.to_le_bytes());
+        body.extend_from_slice(&0u16.to_le_bytes());
+        body.extend_from_slice(b"skaz");
+
+        let s = Scheduler::parse(*b"atk0", &body).unwrap();
+        assert_eq!(s.stages.len(), 2);
+        assert_eq!(&s.stages[1].stage.id, b"skaz");
+    }
+
+    // research/xim EffectRoutineParser.kt:275-285,553-559 — 0x3D opens a block whose children
+    // are alternatives, not siblings; retail runs exactly one per activation.
+    #[test]
+    fn random_block_tags_its_children_with_one_group() {
+        let mut body = vec![0u8; SCHEDULER_HEADER_LEN];
+        body.extend_from_slice(&[RANDOM_BLOCK_OPEN, 0x02, 0, 0, 0, 0, 0, 0]);
+        for id in [b"atk1", b"atk2"] {
+            body.extend_from_slice(&[0x0A, 0x03, 0, 0]);
+            body.extend_from_slice(&7u16.to_le_bytes());
+            body.extend_from_slice(&0u16.to_le_bytes());
+            body.extend_from_slice(id);
+        }
+        body.extend_from_slice(&[RANDOM_BLOCK_CLOSE, 0x02, 0, 0, 0, 0, 0, 0]);
+        body.extend_from_slice(&[0x57, 0x03, 0, 0]);
+        body.extend_from_slice(&0u16.to_le_bytes());
+        body.extend_from_slice(&0u16.to_le_bytes());
+        body.extend_from_slice(b"skaz");
+
+        let s = Scheduler::parse(*b"vatk", &body).unwrap();
+        let grouped: Vec<_> = s
+            .stages
+            .iter()
+            .filter(|t| t.stage.random_group == Some(0))
+            .map(|t| t.stage.id)
+            .collect();
+        assert_eq!(grouped, vec![*b"atk1", *b"atk2"]);
+        let after = s
+            .stages
+            .iter()
+            .find(|t| &t.stage.id == b"skaz")
+            .expect("the stage after the block survives");
+        assert_eq!(after.stage.random_group, None);
+        assert_eq!(
+            after.frame, 0,
+            "an alternative's delay must not advance the parent timeline"
+        );
+    }
+
+    // Retail-byte guard (skips without an install). `daml` in the global effect dir is the hit
+    // reaction switch: four `context.hitTypeFlag` cases (research/xim
+    // EffectRoutineInstance.kt:691) whose branch order pins ActionResolution
+    // Hit/Miss/Guard/Parry (vendor/server/src/map/enums/action/resolution.h) against the DAT.
+    // Parsed to ZERO stages before the section table was read.
+    #[test]
+    fn real_dat_daml_switches_hit_type_to_reaction_routines() {
+        let Some(scheds) = global_effect_schedulers() else {
+            return;
+        };
+        let daml = scheds
+            .iter()
+            .find(|s| &s.name == b"daml")
+            .expect("global effect dir has the daml hit-type switch");
+        assert!(daml.has_control_flow(), "daml is a conditional switch");
+        let branches: Vec<[u8; 4]> = daml
+            .stages
+            .iter()
+            .filter(|t| t.stage.kind == StageKind::SubRoutineOnTarget)
+            .map(|t| t.stage.id)
+            .collect();
+        assert_eq!(branches, vec![*b"ldam", *b"sway", *b"gurd", *b"pary"]);
+    }
+
+    // Retail-byte guard: the global `ldam` (ActionResolution::Hit) routine is where the impact
+    // sound and the victim's hurt grunt live, both behind opcode 0x57.
+    #[test]
+    fn real_dat_ldam_links_impact_and_hurt_sounds() {
+        let Some(scheds) = global_effect_schedulers() else {
+            return;
+        };
+        let ldam = scheds
+            .iter()
+            .find(|s| &s.name == b"ldam")
+            .expect("global effect dir has the ldam hit reaction");
+        let links: Vec<[u8; 4]> = ldam
+            .stages
+            .iter()
+            .filter(|t| t.stage.kind == StageKind::SubRoutine)
+            .map(|t| t.stage.id)
+            .collect();
+        assert!(links.contains(b"sdam"), "impact sound, got {links:?}");
+        assert!(links.contains(b"vdam"), "hurt grunt, got {links:?}");
+        assert!(
+            ldam.stages
+                .iter()
+                .any(|t| t.stage.kind == StageKind::SubRoutineOnTarget && &t.stage.id == b"chit"),
+            "the hit flash runs on the victim"
+        );
+    }
+
+    // Retail-byte guard on ROM/32/13.DAT (HumeM weapon-motion base): the main-hand swing links
+    // the weapon's `skaz` whoosh and the `dada` damage routine. Both were Unknown before.
+    #[test]
+    fn real_dat_ati0_links_swing_sound_and_damage_routine() {
+        const HUME_M_WEAPON_MOTION_FILE: u32 = 9672;
+        let Some(scheds) = schedulers_in_file(HUME_M_WEAPON_MOTION_FILE) else {
+            return;
+        };
+        let ati0 = scheds
+            .iter()
+            .find(|s| &s.name == b"ati0")
+            .expect("weapon-motion DAT has the main-hand swing");
+        let link = |id: &[u8; 4]| ati0.stages.iter().find(|t| &t.stage.id == id);
+        let skaz = link(b"skaz").expect("ati0 links the swing whoosh");
+        assert_eq!(skaz.stage.kind, StageKind::SubRoutine);
+        assert_eq!(skaz.stage.raw_type, 0x57);
+        let dada = link(b"dada").expect("ati0 links the damage routine");
+        assert_eq!(dada.stage.kind, StageKind::SubRoutine);
+        assert!(
+            skaz.frame < dada.frame,
+            "the whoosh leads the impact: {} then {}",
+            skaz.frame,
+            dada.frame
+        );
+        let atk0 = scheds
+            .iter()
+            .find(|s| &s.name == b"atk0")
+            .expect("weapon-motion DAT has the voice routine");
+        assert!(
+            atk0.stages
+                .iter()
+                .any(|t| t.stage.kind == StageKind::SubRoutine && &t.stage.id == b"vatk"),
+            "atk0 links the attack grunt"
+        );
+    }
+
+    // Retail-byte guard on ROM/27/87.DAT (HumeM face 0): `vatk` is a random block of four
+    // grunts. Retail plays ONE; without the block they would all fire at frame 0 together.
+    #[test]
+    fn real_dat_vatk_random_block_holds_the_four_grunts() {
+        const HUME_M_FACE_FILE: u32 = 7080;
+        let Some(scheds) = schedulers_in_file(HUME_M_FACE_FILE) else {
+            return;
+        };
+        let vatk = scheds
+            .iter()
+            .find(|s| &s.name == b"vatk")
+            .expect("face DAT has the attack voice routine");
+        let mut grouped: Vec<[u8; 4]> = vatk
+            .stages
+            .iter()
+            .filter(|t| t.stage.random_group == Some(0) && t.stage.kind == StageKind::SoundOnCaster)
+            .map(|t| t.stage.id)
+            .collect();
+        grouped.sort();
+        assert_eq!(grouped, vec![*b"atk1", *b"atk2", *b"atk3", *b"atk4"]);
+        assert!(
+            vatk.stages
+                .iter()
+                .all(|t| t.stage.random_group.is_some() || t.stage.kind == StageKind::Unknown),
+            "every sound in vatk is an alternative, not an unconditional stage"
+        );
+    }
+
+    fn schedulers_in_file(file_id: u32) -> Option<Vec<Scheduler>> {
+        let root = crate::DatRoot::from_env_or_default().ok()?;
+        let loc = root.resolve(file_id).ok()?;
+        let bytes = std::fs::read(loc.path_under(root.root())).ok()?;
+        Some(crate::resource_dir::ResourceDir::from_bytes(bytes).collect_schedulers())
+    }
+
+    fn global_effect_schedulers() -> Option<Vec<Scheduler>> {
+        schedulers_in_file(0)
+    }
 }

@@ -12,6 +12,10 @@ pub struct ResourceDir {
 }
 
 impl ResourceDir {
+    pub fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
     pub fn from_bytes(bytes: Vec<u8>) -> Self {
         ResourceDir { bytes }
     }

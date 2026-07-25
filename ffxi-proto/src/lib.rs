@@ -17,6 +17,7 @@ pub mod login;
 pub mod magic;
 pub mod map;
 pub mod md5;
+pub mod melee;
 pub mod msg_action_modifier;
 pub mod msg_area;
 pub mod msg_basic;

@@ -133,10 +133,37 @@ impl ActiveScheduler {
         Self::flatten(lookup, name, MotionStages::Suppress)
     }
 
+    // research/xim Actor.kt:864-903 — one swing enqueues TWO routines on the attacker: the
+    // self-targeted voice routine (`atk0`) and the weapon swing (`ati0`/`bti0`/…). A single-slot
+    // ActiveScheduler component cannot hold two, so their timelines are merged.
+    pub fn effects_only_merged(lookup: &RoutineLookup, names: &[[u8; 4]]) -> Option<Self> {
+        let first = *names.iter().find(|n| lookup.get(n).is_some())?;
+        let mut stages = Vec::new();
+        for name in names {
+            let mut path = Vec::new();
+            flatten_routine(
+                lookup,
+                name,
+                0,
+                MotionStages::Suppress,
+                &mut path,
+                &mut stages,
+            );
+        }
+        stages.sort_by_key(|t| t.frame);
+        Some(Self {
+            stages,
+            elapsed: 0.0,
+            cursor: 0,
+            name: first,
+        })
+    }
+
     fn flatten(lookup: &RoutineLookup, name: &[u8; 4], motion: MotionStages) -> Option<Self> {
         lookup.get(name)?;
         let mut stages = Vec::new();
-        flatten_routine(lookup, name, 0, 0, motion, &mut stages);
+        let mut path = Vec::new();
+        flatten_routine(lookup, name, 0, motion, &mut path, &mut stages);
         stages.sort_by_key(|t| t.frame);
         Some(Self {
             stages,
@@ -243,27 +270,79 @@ pub struct ActionAssets {
     pub keyframes: HashMap<[u8; 4], ffxi_dat::particle_gen::KeyFrameTrack>,
 }
 
-const MAX_SUBROUTINE_DEPTH: u8 = 6;
+const MAX_SUBROUTINE_DEPTH: usize = 6;
+
+// research/xim EffectRoutineParser.kt:275-285 — a random block runs exactly one of its children
+// per activation, and which one is not authored in the DAT. A process-local LCG (the same shape
+// as weather_fx::lcg_next) keeps the choice varying without pulling in an rng dependency.
+static RANDOM_PICK_STATE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+fn next_random_pick(len: usize) -> usize {
+    use std::sync::atomic::Ordering;
+    let next = RANDOM_PICK_STATE
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |s| {
+            Some(
+                s.wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407),
+            )
+        })
+        .unwrap_or(1);
+    if len == 0 {
+        0
+    } else {
+        ((next >> 33) as usize) % len
+    }
+}
 
 fn flatten_routine(
     lookup: &RoutineLookup,
     name: &[u8; 4],
     base_frame: u32,
-    depth: u8,
     motion: MotionStages,
+    path: &mut Vec<[u8; 4]>,
     out: &mut Vec<TimedStage>,
 ) {
-    if depth > MAX_SUBROUTINE_DEPTH {
+    if path.len() > MAX_SUBROUTINE_DEPTH || path.contains(name) {
         return;
     }
     let Some(s) = lookup.get(name) else {
         return;
     };
+    let mut chosen: HashMap<u16, usize> = HashMap::new();
+    let mut seen_in_group: HashMap<u16, usize> = HashMap::new();
     for t in &s.stages {
+        if let Some(g) = t.stage.random_group {
+            *seen_in_group.entry(g).or_insert(0) += 1;
+        }
+    }
+    for (&g, &count) in &seen_in_group {
+        chosen.insert(g, next_random_pick(count));
+    }
+    let mut index_in_group: HashMap<u16, usize> = HashMap::new();
+
+    path.push(*name);
+    for t in &s.stages {
+        if let Some(g) = t.stage.random_group {
+            let i = index_in_group.entry(g).or_insert(0);
+            let is_pick = chosen.get(&g) == Some(i);
+            *i += 1;
+            if !is_pick {
+                continue;
+            }
+        }
         let frame = base_frame + t.frame;
         match t.stage.kind {
             StageKind::SubRoutine | StageKind::BlockingSubRoutine => {
-                flatten_routine(lookup, &t.stage.id, frame, depth + 1, motion, out)
+                // A control-flow routine is a switch we cannot evaluate (`dada` tail-calls
+                // `dam0`, ten mutually exclusive additional-effect branches); inlining it would
+                // run every branch. Callers that know the condition dispatch the branch itself.
+                if lookup
+                    .get(&t.stage.id)
+                    .is_some_and(|c| c.has_control_flow())
+                {
+                    continue;
+                }
+                flatten_routine(lookup, &t.stage.id, frame, motion, path, out)
             }
             StageKind::Motion if motion == MotionStages::Suppress => {}
             _ => out.push(TimedStage {
@@ -272,6 +351,7 @@ fn flatten_routine(
             }),
         }
     }
+    path.pop();
 }
 
 // A generator and the mesh/sheet/texture it references always ship in the same DAT, so a stage
@@ -452,6 +532,8 @@ pub(crate) fn poll_global_effect_dir(
 pub fn dispatch_sound_stages(
     mut events: MessageReader<SchedulerStageEvent>,
     q_actors: Query<&ActionAssets>,
+    q_children: Query<&Children>,
+    q_render: Query<&crate::ffxi_actor_render::FfxiRenderActor>,
     global: Option<Res<GlobalEffectDir>>,
     mut sfx_writer: MessageWriter<crate::audio::SfxEvent>,
 ) {
@@ -460,28 +542,21 @@ pub fn dispatch_sound_stages(
         if !matches!(kind, StageKind::SoundOnCaster | StageKind::SoundOnTarget) {
             continue;
         }
-        let Some(assets) = assets_holding(
+        // research/xim EffectRoutineInstance.kt:418-431,592-604 — routine DAT, then the actor's
+        // own resource dirs (weapon `skaz`, face `atk1..4`), then the global dir.
+        let actor_assets = q_children
+            .get(ev.actor)
+            .ok()
+            .and_then(|c| c.iter().find_map(|child| q_render.get(child).ok()))
+            .map(|a| a.action_assets());
+        let tiers = [
             q_actors.get(ev.actor).ok(),
+            actor_assets,
             global.as_ref().map(|g| &g.assets),
-            |a| {
-                ffxi_dat::action::resolve_stage_to_se(
-                    &ev.stage.stage.id,
-                    kind,
-                    &a.generators,
-                    &a.seps,
-                )
-                .is_some()
-            },
-        ) else {
-            continue;
-        };
-
-        let Some((se_id, _on_caster)) = ffxi_dat::action::resolve_stage_to_se(
-            &ev.stage.stage.id,
-            kind,
-            &assets.generators,
-            &assets.seps,
-        ) else {
+        ];
+        let Some((se_id, _on_caster)) = tiers.into_iter().flatten().find_map(|a| {
+            ffxi_dat::action::resolve_stage_to_se(&ev.stage.stage.id, kind, &a.generators, &a.seps)
+        }) else {
             continue;
         };
 
@@ -609,6 +684,7 @@ pub fn dispatch_action_started(
             action_id,
             action_kind,
             target_id,
+            ..
         } = *ev
         else {
             continue;
@@ -720,6 +796,7 @@ pub fn dispatch_cast_routine_started(
             action_id,
             action_kind,
             target_id,
+            ..
         } = *ev
         else {
             continue;
@@ -773,6 +850,213 @@ pub fn dispatch_cast_routine_started(
                 target_id.and_then(|id| tracked.by_id.get(&id).copied()),
             ));
     }
+}
+
+// The victim reaction the attacker's routine will hand off at its 0x2B DamageCallback stage.
+// Held on the attacker between the swing dispatch and that stage so the flinch, the impact SE
+// and the hurt grunt land on the frame retail invokes the damage callback, not on packet
+// arrival (research/xim EffectRoutineInstance.kt:956-959).
+#[derive(Component, Debug, Clone, Copy)]
+pub struct PendingHitReaction {
+    pub routine: [u8; 4],
+}
+
+// The global effect dir's `daml` chunk is a four-case switch on `context.hitTypeFlag`
+// (research/xim EffectRoutineInstance.kt:691) whose branch ids are, in resolution order,
+// `ldam`/`sway`/`gurd`/`pary` — byte-for-byte the ActionResolution values in
+// vendor/server/src/map/enums/action/resolution.h. We cannot evaluate the DAT conditionals, so
+// the branch is picked here from the server's resolution instead.
+pub fn hit_reaction_routine(resolution: ffxi_proto::melee::ActionResolution) -> Option<[u8; 4]> {
+    use ffxi_proto::melee::ActionResolution;
+    Some(match resolution {
+        ActionResolution::Hit => *b"ldam",
+        ActionResolution::Miss => *b"sway",
+        ActionResolution::Guard => *b"gurd",
+        ActionResolution::Parry => *b"pary",
+        // `daml` has no Block case; retail routes it through the 0x5A AttackBlockedRoutine
+        // opcode we do not yet interpret.
+        ActionResolution::Block => return None,
+    })
+}
+
+// research/xim Actor.kt:864-903 — the swing routine is chosen by which limb struck.
+// Direction-of-movement variants (atf0/atb0/atl0/atr0) are not selected here; that needs the
+// attacker's locomotion state at swing time.
+pub fn swing_routine(animation: ffxi_proto::melee::AttackAnimation) -> Option<[u8; 4]> {
+    use ffxi_proto::melee::AttackAnimation;
+    Some(match animation {
+        AttackAnimation::RightAttack => *b"ati0",
+        AttackAnimation::LeftAttack => *b"bti0",
+        AttackAnimation::RightKick => *b"cti0",
+        AttackAnimation::LeftKick => *b"dti0",
+        AttackAnimation::Throw => return None,
+    })
+}
+
+// vendor/server/src/map/enums/four_cc.h:39 — BasicAttack's FourCC is "atk0", the self-targeted
+// voice routine research/xim Actor.kt:864 enqueues alongside the swing.
+const MELEE_VOICE_ROUTINE: [u8; 4] = *b"atk0";
+
+// vendor/server/src/map/entities/battleentity.cpp:2989 never sets `action.actionid` for a basic
+// attack, so BATTLE2 cmd_arg is 0 and the swing carries no id to look a DAT up by: the routines
+// live in the attacker's own battle/equipment dirs and the global effect dir. This is why the
+// category is dispatched here rather than through `action_dat_file_id`.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn dispatch_melee_action_started(
+    events: Res<crate::snapshot::EventLog>,
+    tracked: Res<crate::scene::TrackedEntities>,
+    q_children: Query<&Children>,
+    q_render: Query<&crate::ffxi_actor_render::FfxiRenderActor>,
+    global: Option<Res<GlobalEffectDir>>,
+    mut commands: Commands,
+    mut last_seen: Local<u64>,
+) {
+    let new_count =
+        (events.pushed_total.saturating_sub(*last_seen)).min(events.recent.len() as u64) as usize;
+    *last_seen = events.pushed_total;
+    if new_count == 0 {
+        return;
+    }
+    for ev in events.recent.iter().rev().take(new_count).rev() {
+        let ffxi_viewer_wire::ViewerEvent::ActionStarted {
+            actor_id,
+            action_kind,
+            target_id,
+            resolution,
+            animation,
+            ..
+        } = *ev
+        else {
+            continue;
+        };
+        if action_kind != ffxi_proto::melee::CATEGORY_BASIC_ATTACK {
+            continue;
+        }
+        let Some(&actor_entity) = tracked.by_id.get(&actor_id) else {
+            continue;
+        };
+        let Some(actor_routines) = actor_render_routines(actor_entity, &q_children, &q_render)
+        else {
+            continue;
+        };
+        let mut lookup = RoutineLookup::new().with_actor(actor_routines);
+        if let Some(g) = global.as_ref() {
+            lookup = lookup.with_dat(&g.schedulers);
+        }
+        // An off-hand/kick routine is absent from some weapon-motion DATs; the main-hand swing
+        // is the only routine every armed race base is known to carry.
+        let swing = ffxi_proto::melee::AttackAnimation::from_wire(animation)
+            .and_then(swing_routine)
+            .filter(|r| lookup.get(r).is_some())
+            .unwrap_or(*b"ati0");
+        let Some(active) =
+            ActiveScheduler::effects_only_merged(&lookup, &[MELEE_VOICE_ROUTINE, swing])
+        else {
+            continue;
+        };
+        let mut entity = commands.entity(actor_entity);
+        entity.try_insert(active).try_insert(ActionTarget(
+            target_id.and_then(|id| tracked.by_id.get(&id).copied()),
+        ));
+        match ffxi_proto::melee::ActionResolution::from_wire(resolution)
+            .and_then(hit_reaction_routine)
+        {
+            Some(routine) => {
+                entity.try_insert(PendingHitReaction { routine });
+            }
+            None => {
+                entity.remove::<PendingHitReaction>();
+            }
+        }
+    }
+}
+
+// research/xim EffectRoutineInstance.kt:956-959 — the 0x2B stage is where retail hands control
+// to the damage callback. That is the frame the victim's reaction routine starts, so the flinch
+// and impact SE line up with the swing instead of with packet arrival.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn dispatch_damage_callback_stages(
+    mut events: MessageReader<SchedulerStageEvent>,
+    q_pending: Query<(&PendingHitReaction, &ActionTarget)>,
+    q_children: Query<&Children>,
+    q_render: Query<&crate::ffxi_actor_render::FfxiRenderActor>,
+    global: Option<Res<GlobalEffectDir>>,
+    mut commands: Commands,
+) {
+    for ev in events.read() {
+        if ev.stage.stage.kind != StageKind::DamageCallback {
+            continue;
+        }
+        let Ok((pending, target)) = q_pending.get(ev.actor) else {
+            continue;
+        };
+        commands.entity(ev.actor).remove::<PendingHitReaction>();
+        let Some(victim) = target.0 else { continue };
+        run_routine_on(
+            victim,
+            &pending.routine,
+            &q_children,
+            &q_render,
+            global.as_deref(),
+            &mut commands,
+        );
+    }
+}
+
+// research/xim EffectRoutineParser.kt:136-140 — a 0x09 link runs its child with the primary
+// target as source, so the child's ids resolve against the TARGET's resource dirs (the victim's
+// own `sdam` impact and `vdam` grunt, not the attacker's).
+#[cfg(not(target_arch = "wasm32"))]
+pub fn dispatch_target_routine_stages(
+    mut events: MessageReader<SchedulerStageEvent>,
+    q_target: Query<&ActionTarget>,
+    q_children: Query<&Children>,
+    q_render: Query<&crate::ffxi_actor_render::FfxiRenderActor>,
+    global: Option<Res<GlobalEffectDir>>,
+    mut commands: Commands,
+) {
+    for ev in events.read() {
+        if ev.stage.stage.kind != StageKind::SubRoutineOnTarget {
+            continue;
+        }
+        // A routine already running ON the victim (`ldam` linking `chit`) has no target of its
+        // own; its child stays where it is.
+        let victim = q_target
+            .get(ev.actor)
+            .ok()
+            .and_then(|t| t.0)
+            .unwrap_or(ev.actor);
+        run_routine_on(
+            victim,
+            &ev.stage.stage.id,
+            &q_children,
+            &q_render,
+            global.as_deref(),
+            &mut commands,
+        );
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn run_routine_on(
+    entity: Entity,
+    routine: &[u8; 4],
+    q_children: &Query<&Children>,
+    q_render: &Query<&crate::ffxi_actor_render::FfxiRenderActor>,
+    global: Option<&GlobalEffectDir>,
+    commands: &mut Commands,
+) {
+    let Some(routines) = actor_render_routines(entity, q_children, q_render) else {
+        return;
+    };
+    let mut lookup = RoutineLookup::new().with_actor(routines);
+    if let Some(g) = global {
+        lookup = lookup.with_dat(&g.schedulers);
+    }
+    let Some(active) = ActiveScheduler::from_routine(&lookup, routine) else {
+        return;
+    };
+    commands.entity(entity).try_insert(active);
 }
 
 // Belt-and-braces stop for the case retail's 0x2D StopParticle stages cannot reach: an
@@ -996,6 +1280,7 @@ impl Plugin for SchedulerRuntimePlugin {
                     poll_global_effect_dir,
                     dispatch_action_started,
                     dispatch_cast_routine_started,
+                    dispatch_melee_action_started,
                     dispatch_entity_emoted,
                     // Chained between the routine inserters and the stage consumers so a
                     // routine's frame-0 stages fire on the frame it is inserted, and every
@@ -1009,6 +1294,8 @@ impl Plugin for SchedulerRuntimePlugin {
                     crate::particle_sim::sync_particle_meshes,
                     dispatch_sound_stages,
                     dispatch_motion_stages,
+                    dispatch_damage_callback_stages,
+                    dispatch_target_routine_stages,
                 )
                     .chain()
                     // The overlay and this chain both drain EventLog with private cursors; the
@@ -1541,5 +1828,207 @@ mod tests {
             .is_empty(),
             "without the global tier the aura sub-routines resolve to nothing — the original bug"
         );
+    }
+
+    fn tagged_stage(
+        frame: u32,
+        kind: StageKind,
+        raw_type: u8,
+        id: [u8; 4],
+        random_group: Option<u16>,
+    ) -> TimedStage {
+        let mut t = stage(frame, kind, raw_type, id);
+        t.stage.random_group = random_group;
+        t
+    }
+
+    // The whole point of the melee path: `ati0` (weapon-motion DAT) links `skaz` with 0x57, and
+    // `skaz` resolves in the EQUIPPED WEAPON's DAT — three tiers away from the routine that
+    // named it. Flattening must carry the link across and keep the frame the whoosh is authored
+    // at (research/xim EffectRoutineParser.kt:371-375).
+    #[test]
+    fn melee_swing_flattens_to_the_weapon_swing_sound() {
+        const SKAZ_FRAME: u32 = 34;
+        let weapon_motion = vec![
+            make_scheduler(
+                *b"ati0",
+                vec![
+                    stage(0, StageKind::Motion, 0x05, *b"at0?"),
+                    stage(SKAZ_FRAME, StageKind::SubRoutine, 0x57, *b"skaz"),
+                ],
+            ),
+            make_scheduler(
+                *b"atk0",
+                vec![stage(0, StageKind::SubRoutine, 0x57, *b"vatk")],
+            ),
+        ];
+        let weapon_item = vec![make_scheduler(
+            *b"skaz",
+            vec![stage(0, StageKind::SoundOnCaster, 0x0A, *b"skaz")],
+        )];
+        let face = vec![make_scheduler(
+            *b"vatk",
+            vec![tagged_stage(
+                0,
+                StageKind::SoundOnCaster,
+                0x0A,
+                *b"atk1",
+                Some(0),
+            )],
+        )];
+        let lookup = RoutineLookup::new()
+            .with_dat(&weapon_motion)
+            .with_dat(&weapon_item)
+            .with_dat(&face);
+
+        let active = ActiveScheduler::effects_only_merged(&lookup, &[*b"atk0", *b"ati0"])
+            .expect("the swing flattens");
+        let whoosh = active
+            .stages
+            .iter()
+            .find(|t| &t.stage.id == b"skaz" && t.stage.kind == StageKind::SoundOnCaster)
+            .expect("the weapon swing sound survives the 0x57 link");
+        assert_eq!(whoosh.frame, SKAZ_FRAME);
+        assert!(
+            active
+                .stages
+                .iter()
+                .any(|t| &t.stage.id == b"atk1" && t.stage.kind == StageKind::SoundOnCaster),
+            "the merged voice routine contributes its grunt"
+        );
+        assert!(
+            active
+                .stages
+                .iter()
+                .all(|t| t.stage.kind != StageKind::Motion),
+            "the body clip stays with dispatch_action_overlay — running both double-fires it"
+        );
+    }
+
+    // research/xim EffectRoutineParser.kt:275-285 — one alternative per activation. Four
+    // simultaneous `vatk` grunts is the regression this guards.
+    #[test]
+    fn random_block_contributes_exactly_one_member() {
+        let dat = vec![make_scheduler(
+            *b"vatk",
+            (0..4)
+                .map(|i| {
+                    tagged_stage(
+                        0,
+                        StageKind::SoundOnCaster,
+                        0x0A,
+                        [b'a', b't', b'k', b'1' + i as u8],
+                        Some(0),
+                    )
+                })
+                .collect(),
+        )];
+        let lookup = RoutineLookup::new().with_dat(&dat);
+        for _ in 0..16 {
+            let active = ActiveScheduler::from_routine(&lookup, b"vatk").expect("flattens");
+            assert_eq!(active.stages.len(), 1, "exactly one grunt per swing");
+            assert!(active.stages[0].stage.id.starts_with(b"atk"));
+        }
+    }
+
+    // `dada` tail-calls `dam0`, ten mutually exclusive additional-effect branches keyed on a
+    // condition we do not evaluate (research/xim EffectRoutineParser.kt:408-427). Inlining it
+    // would fire every branch at once.
+    #[test]
+    fn control_flow_switch_is_not_inlined() {
+        let mut switch = make_scheduler(
+            *b"dam0",
+            vec![
+                stage(0, StageKind::SubRoutineOnTarget, 0x09, *b"sb00"),
+                stage(0, StageKind::SubRoutineOnTarget, 0x09, *b"sb01"),
+            ],
+        );
+        switch
+            .stages
+            .push(stage(0, StageKind::Unknown, 0x6B, *b"    "));
+        let dat = vec![
+            make_scheduler(
+                *b"dada",
+                vec![
+                    stage(0, StageKind::DamageCallback, 0x2B, *b"    "),
+                    stage(0, StageKind::SubRoutine, 0x03, *b"dam0"),
+                ],
+            ),
+            switch,
+        ];
+        let lookup = RoutineLookup::new().with_dat(&dat);
+        let active = ActiveScheduler::from_routine(&lookup, b"dada").expect("flattens");
+        assert!(
+            active.stages.iter().all(|t| !t.stage.id.starts_with(b"sb")),
+            "no branch of an unevaluated switch is taken"
+        );
+        assert!(
+            active
+                .stages
+                .iter()
+                .any(|t| t.stage.kind == StageKind::DamageCallback),
+            "the damage callback still reaches the runtime"
+        );
+    }
+
+    // A 0x09 link stays a stage rather than being inlined, so the runtime can start it on the
+    // VICTIM and resolve the victim's own `sdam`/`vdam` (EffectRoutineParser.kt:136-140).
+    #[test]
+    fn target_link_is_not_flattened_into_the_caster_timeline() {
+        let dat = vec![
+            make_scheduler(
+                *b"dcnt",
+                vec![stage(0, StageKind::SubRoutineOnTarget, 0x09, *b"damg")],
+            ),
+            make_scheduler(
+                *b"damg",
+                vec![stage(0, StageKind::SoundOnCaster, 0x0A, *b"sdam")],
+            ),
+        ];
+        let lookup = RoutineLookup::new().with_dat(&dat);
+        let active = ActiveScheduler::from_routine(&lookup, b"dcnt").expect("flattens");
+        assert_eq!(active.stages.len(), 1);
+        assert_eq!(active.stages[0].stage.kind, StageKind::SubRoutineOnTarget);
+        assert_eq!(&active.stages[0].stage.id, b"damg");
+    }
+
+    // vendor/server/src/map/enums/action/resolution.h ordering, pinned to the branch order the
+    // retail `daml` chunk dispatches in (ffxi_dat guard
+    // real_dat_daml_switches_hit_type_to_reaction_routines).
+    #[test]
+    fn hit_reaction_routines_follow_lsb_resolution_order() {
+        use ffxi_proto::melee::ActionResolution;
+        let order: Vec<Option<[u8; 4]>> = [
+            ActionResolution::Hit,
+            ActionResolution::Miss,
+            ActionResolution::Guard,
+            ActionResolution::Parry,
+            ActionResolution::Block,
+        ]
+        .into_iter()
+        .map(hit_reaction_routine)
+        .collect();
+        assert_eq!(
+            order,
+            vec![
+                Some(*b"ldam"),
+                Some(*b"sway"),
+                Some(*b"gurd"),
+                Some(*b"pary"),
+                None,
+            ]
+        );
+    }
+
+    // vendor/server/src/map/attack.h:52-59 AttackAnimation -> the limb routine
+    // research/xim Actor.kt:864-903 enqueues.
+    #[test]
+    fn swing_routines_follow_lsb_attack_animation_order() {
+        use ffxi_proto::melee::AttackAnimation;
+        assert_eq!(swing_routine(AttackAnimation::RightAttack), Some(*b"ati0"));
+        assert_eq!(swing_routine(AttackAnimation::LeftAttack), Some(*b"bti0"));
+        assert_eq!(swing_routine(AttackAnimation::RightKick), Some(*b"cti0"));
+        assert_eq!(swing_routine(AttackAnimation::LeftKick), Some(*b"dti0"));
+        assert_eq!(swing_routine(AttackAnimation::Throw), None);
     }
 }

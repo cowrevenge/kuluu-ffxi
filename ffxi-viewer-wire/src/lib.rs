@@ -2,11 +2,13 @@
 
 use serde::{Deserialize, Serialize};
 
+// v7: ViewerEvent::ActionStarted.{resolution, animation} (BATTLE2 first-result hit type +
+// swing slot, for the melee reaction/swing routines).
 // v6: ViewerEvent::ActionStarted.target_id (BATTLE2 primary target, for DAT attachType placement).
 // v5: InventoryItem.charges_remaining + next_use_vana_ts (item recast/charges).
 // v4: SceneSnapshot.delivery_box (dedicated delivery screen) + ViewerCommand::DeliveryBox
 // (postcard frames are not self-describing, so any shape change bumps this).
-pub const PROTOCOL_VERSION: u32 = 6;
+pub const PROTOCOL_VERSION: u32 = 7;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 pub struct Vec3 {
@@ -890,6 +892,10 @@ pub enum ViewerEvent {
         action_id: u32,
         action_kind: u8,
         target_id: Option<u32>,
+        /// First result's `resolution` (vendor/server enums/action/resolution.h) and
+        /// `animation` (attack.h AttackAnimation for a basic attack).
+        resolution: u8,
+        animation: u16,
     },
 
     /// One-shot emote broadcast (s2c 0x05A MOTIONMES): `emote_id` is the wire

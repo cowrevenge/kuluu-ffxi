@@ -576,8 +576,8 @@ fn sprite_template(d3m: &ffxi_dat::d3m::D3m) -> Option<SpriteTemplate> {
 
 // Resolve a generator's mesh_id to (frame-0 template, flipbook frames, texture). A StaticMesh
 // (0x0B) def binds a D3M and has no flipbook frames; a SpriteSheet (0x0E) def binds a 0x21
-// sheet whose texture resolves by internal name via images_by_name. Returns None when the
-// referenced mesh isn't present (leaving zone callers to fall back to an MMB mesh).
+// sheet whose texture resolves by qualified name with a local-name fallback. Returns None when
+// the referenced mesh isn't present (leaving zone callers to fall back to an MMB mesh).
 fn resolve_mesh(
     assets: &ActionAssets,
     def: &ParticleGeneratorDef,
@@ -598,9 +598,12 @@ fn resolve_mesh(
             let ss = assets.sprite_sheets.get(&def.mesh_id)?;
             let frames = sprite_sheet_templates(ss);
             let first = frames.first().cloned()?;
+            // research/xim DatResource.kt:483-493 — try the qualified (namespace, local) pair
+            // first, then fall back to a local-name-only match.
             let tex = assets
-                .images_by_name
-                .get(&ss.category)
+                .images_by_qualified_name
+                .get(&(ss.category.clone(), ss.id.clone()))
+                .or_else(|| assets.images_by_name.get(&ss.id))
                 .map(|t| images.add(decoded_texture_to_image(t)));
             Some((first, frames, tex))
         }
@@ -968,5 +971,87 @@ mod tests {
         assert_eq!(g.particles.len(), 1);
         advance(&mut g, 5.0); // past life
         assert!(g.particles.is_empty());
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    mod sheet_texture {
+        use super::*;
+        use ffxi_dat::sprite_sheet::{ParticleSpriteSheet, SpriteFrame};
+        use ffxi_dat::texture::{DecodedTexture, TexFormat};
+
+        const SHEET_ID: [u8; 4] = *b"fir ";
+        const CATEGORY: &str = "venom1";
+        const LOCAL: &str = "fir";
+
+        fn one_pixel() -> DecodedTexture {
+            DecodedTexture {
+                width: 1,
+                height: 1,
+                format_tag: TexFormat::Bgra32,
+                rgba: vec![255, 255, 255, 255],
+            }
+        }
+
+        fn sheet_assets(qualified: bool, local: bool, namespace_only: bool) -> ActionAssets {
+            let mut assets = ActionAssets::default();
+            assets.sprite_sheets.insert(
+                SHEET_ID,
+                ParticleSpriteSheet {
+                    frames: vec![SpriteFrame {
+                        positions: vec![[0.0; 3]; 3],
+                        uvs: vec![[0.0, 0.0]; 3],
+                        colors: vec![[128, 128, 128, 128]; 3],
+                    }],
+                    category: CATEGORY.to_string(),
+                    id: LOCAL.to_string(),
+                },
+            );
+            if qualified {
+                assets
+                    .images_by_qualified_name
+                    .insert((CATEGORY.to_string(), LOCAL.to_string()), one_pixel());
+            }
+            if local {
+                assets.images_by_name.insert(LOCAL.to_string(), one_pixel());
+            }
+            if namespace_only {
+                assets
+                    .images_by_name
+                    .insert(CATEGORY.to_string(), one_pixel());
+            }
+            assets
+        }
+
+        fn sheet_def() -> ParticleGeneratorDef {
+            let mut d = def(30.0, 1.0, 1);
+            d.mesh_id = SHEET_ID;
+            d.mesh_kind = ffxi_dat::particle_gen::ParticleMeshKind::SpriteSheet;
+            d
+        }
+
+        fn resolved_texture(assets: &ActionAssets) -> Option<Handle<Image>> {
+            let mut images = Assets::<Image>::default();
+            resolve_mesh(assets, &sheet_def(), &mut images)
+                .expect("sheet mesh resolves")
+                .2
+        }
+
+        // research/xim DatResource.kt:483-493 — qualified (namespace, local) match first.
+        #[test]
+        fn sprite_sheet_texture_resolves_by_qualified_name() {
+            assert!(resolved_texture(&sheet_assets(true, false, false)).is_some());
+        }
+
+        #[test]
+        fn sprite_sheet_texture_falls_back_to_local_name() {
+            assert!(resolved_texture(&sheet_assets(false, true, false)).is_some());
+        }
+
+        // The kuluu-7jpq regression: the Img was only ever looked up under the sheet's
+        // NAMESPACE token, which is not how any tier resolves, so the cloud drew untextured.
+        #[test]
+        fn sprite_sheet_texture_does_not_resolve_by_namespace_alone() {
+            assert!(resolved_texture(&sheet_assets(false, false, true)).is_none());
+        }
     }
 }

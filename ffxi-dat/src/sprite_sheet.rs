@@ -189,12 +189,7 @@ fn parse_particle_frames(b: &[u8]) -> Option<Vec<SpriteFrame>> {
 }
 
 fn texture_tokens(b: &[u8]) -> (String, String) {
-    let trim = |s: &[u8]| {
-        String::from_utf8_lossy(s)
-            .trim_end_matches([' ', '\0'])
-            .to_string()
-    };
-    (trim(&b[8..16]), trim(&b[16..24]))
+    crate::texture::split_qualified_name(&b[8..24])
 }
 
 // Locate the retail moon sprite sheet (12 phase frames, texture "moon"/"moonshap")
@@ -354,6 +349,26 @@ mod tests {
             m.extend(quad(u0, v0, u1, v1));
         }
         m
+    }
+
+    // Emitter/matcher coupling guard: the 0x21 sheet's name field and the 0xA1 Img's name
+    // field are the SAME 16 bytes in retail (verified against ROM/11/93.DAT, file 3020), so
+    // both sides must split them identically or the sheet's texture lookup silently misses.
+    #[test]
+    fn sheet_and_img_split_the_same_qualified_name() {
+        let raw = crate::texture::tests::QUALIFIED_FIR;
+        let mut sheet = vec![0u8; 24];
+        sheet[2..4].copy_from_slice(&1u16.to_le_bytes());
+        sheet[7] = 1;
+        sheet[8..24].copy_from_slice(raw);
+        sheet.extend(mesh(1, None, (0.0, 0.0, 1.0, 1.0)));
+
+        let parsed = ParticleSpriteSheet::parse(&sheet).unwrap();
+        let img = crate::texture::tests::img_body_named(raw);
+        assert_eq!(
+            (parsed.category, parsed.id),
+            crate::texture::extract_texture_tokens(&img).unwrap()
+        );
     }
 
     #[test]

@@ -31,12 +31,7 @@ pub struct DecodedTexture {
     pub rgba: Vec<u8>,
 }
 
-pub fn extract_texture_name(body: &[u8]) -> Option<String> {
-    if body.len() < imginfo::NAME_END || body[0] != imginfo::FLG_DXT {
-        return None;
-    }
-
-    let raw = &body[9..imginfo::NAME_END];
+fn token(raw: &[u8]) -> String {
     let s: String = raw
         .iter()
         .map(|&b| {
@@ -48,7 +43,27 @@ pub fn extract_texture_name(body: &[u8]) -> Option<String> {
         })
         .take_while(|&c| c != '\0')
         .collect();
-    Some(s.trim().to_string())
+    s.trim().to_string()
+}
+
+// research/xim DatResource.kt:312-315 — a fully qualified 16-char texture name splits into
+// a namespace (bytes 0..8) and a local name (bytes 8..16).
+pub fn split_qualified_name(raw16: &[u8]) -> (String, String) {
+    (
+        token(&raw16[..imginfo::TOKEN_LEN.min(raw16.len())]),
+        token(&raw16[imginfo::TOKEN_LEN.min(raw16.len())..]),
+    )
+}
+
+pub fn extract_texture_tokens(body: &[u8]) -> Option<(String, String)> {
+    if body.len() < imginfo::NAME_END || body[0] != imginfo::FLG_DXT {
+        return None;
+    }
+    Some(split_qualified_name(&body[1..imginfo::NAME_END]))
+}
+
+pub fn extract_texture_name(body: &[u8]) -> Option<String> {
+    extract_texture_tokens(body).map(|(_, id)| id)
 }
 
 mod imginfo {
@@ -56,6 +71,8 @@ mod imginfo {
     pub(super) const FLG_DXT: u8 = 0xA1;
 
     pub(super) const NAME_END: usize = 0x11;
+
+    pub(super) const TOKEN_LEN: usize = 8;
 
     pub(super) const WIDTH_OFF: usize = 0x15;
 
@@ -415,8 +432,41 @@ pub fn decode_argb_raw(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+
+    // File 3020 (Poison) carries the 16 bytes `venom1  fir     ` in both its 0xA1 Img and its
+    // 0x21 sprite sheet. research/xim DatResource.kt:312-315 splits that into namespace/local.
+    pub(crate) const QUALIFIED_FIR: &[u8; 16] = b"venom1  fir     ";
+
+    pub(crate) fn img_body_named(raw16: &[u8; 16]) -> Vec<u8> {
+        let mut body = vec![0u8; imginfo::NAME_END];
+        body[0] = imginfo::FLG_DXT;
+        body[1..imginfo::NAME_END].copy_from_slice(raw16);
+        body
+    }
+
+    #[test]
+    fn extract_texture_name_is_the_local_token() {
+        let body = img_body_named(QUALIFIED_FIR);
+        assert_eq!(
+            extract_texture_tokens(&body),
+            Some(("venom1".to_string(), "fir".to_string()))
+        );
+        assert_eq!(extract_texture_name(&body).as_deref(), Some("fir"));
+    }
+
+    #[test]
+    fn split_qualified_name_trims_both_tokens() {
+        assert_eq!(
+            split_qualified_name(QUALIFIED_FIR),
+            ("venom1".to_string(), "fir".to_string())
+        );
+        assert_eq!(
+            split_qualified_name(b"moon    moonshap"),
+            ("moon".to_string(), "moonshap".to_string())
+        );
+    }
 
     #[test]
     fn detects_dxt3_magic() {

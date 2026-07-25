@@ -140,6 +140,10 @@ pub struct ActionAssets {
     // MMB model's texture_name references — distinct from the Img chunk's DatId.
     #[cfg(not(target_arch = "wasm32"))]
     pub images_by_name: HashMap<String, ffxi_dat::texture::DecodedTexture>,
+    // Img chunks keyed by their fully qualified (namespace, local) name pair — the tier a
+    // 0x21 sprite sheet's own 16-byte name field resolves against.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub images_by_qualified_name: HashMap<(String, String), ffxi_dat::texture::DecodedTexture>,
     pub emitters: HashMap<[u8; 4], ffxi_dat::generator::ParticleEmitter>,
     pub particle_defs: HashMap<[u8; 4], ffxi_dat::particle_gen::ParticleGeneratorDef>,
     pub keyframes: HashMap<[u8; 4], ffxi_dat::particle_gen::KeyFrameTrack>,
@@ -232,8 +236,12 @@ pub fn parse_action_bytes(bytes: &[u8]) -> (Vec<Scheduler>, ActionAssets) {
             #[cfg(not(target_arch = "wasm32"))]
             ChunkKind::Img => {
                 if let Ok(tex) = ffxi_dat::texture::decode_texture(c.data) {
-                    if let Some(name) = ffxi_dat::texture::extract_texture_name(c.data) {
-                        assets.images_by_name.insert(name, tex.clone());
+                    if let Some((category, id)) = ffxi_dat::texture::extract_texture_tokens(c.data)
+                    {
+                        assets
+                            .images_by_qualified_name
+                            .insert((category, id.clone()), tex.clone());
+                        assets.images_by_name.insert(id, tex.clone());
                     }
                     assets.images.insert(c.name, tex);
                 }
@@ -906,6 +914,48 @@ mod tests {
                 .values()
                 .any(|d| d.mesh_kind == ParticleMeshKind::StaticMesh),
             "cure still parses its static-mesh particle generators"
+        );
+    }
+
+    // Retail-DAT coupling guard (skips without an install): Poison's 0x21 'fir' sheet names its
+    // backing Img with the qualified pair ("venom1", "fir"). Looking the Img up by the sheet's
+    // namespace token alone misses, which is what rendered the venom cloud as an untextured
+    // quad (kuluu-7jpq). research/xim DatResource.kt:483-493 matches qualified, then local.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn real_dat_poison_sheet_name_indexes_its_backing_img() {
+        const POISON_FILE: u32 = 3020;
+
+        let Ok(root) = ffxi_dat::DatRoot::from_env_or_default() else {
+            return;
+        };
+        let Ok(loc) = root.resolve(POISON_FILE) else {
+            return;
+        };
+        let Ok(bytes) = std::fs::read(loc.path_under(root.root())) else {
+            return;
+        };
+        let (_scheds, assets) = parse_action_bytes(&bytes);
+
+        let sheet = assets
+            .sprite_sheets
+            .values()
+            .find(|s| s.id == "fir")
+            .expect("poison DAT carries the 'fir' sprite sheet");
+        assert_eq!(sheet.category, "venom1");
+        assert!(
+            assets
+                .images_by_qualified_name
+                .contains_key(&(sheet.category.clone(), sheet.id.clone())),
+            "the sheet's qualified name indexes an Img chunk"
+        );
+        assert!(
+            assets.images_by_name.contains_key(&sheet.id),
+            "the local-name fallback tier also indexes it"
+        );
+        assert!(
+            !assets.images_by_name.contains_key(&sheet.category),
+            "the namespace token is NOT a local-name key — the original miss"
         );
     }
 }

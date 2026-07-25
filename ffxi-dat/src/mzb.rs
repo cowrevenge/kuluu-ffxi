@@ -82,19 +82,41 @@ pub fn decrypt(data: &[u8]) -> Result<Vec<u8>> {
     Ok(buf)
 }
 
+/// World units spanned by one placement-grid sub-block. A zone block is divided
+/// into `block_width / MZB_SUB_BLOCK_SIZE` sub-blocks per axis
+/// (research/xim ZoneDefParser.kt: `subBlocksX = blockWidth / 4`). Most zones
+/// ship 40-unit blocks (10 sub-blocks); Port Jeuno ships 80 (20).
+pub const MZB_SUB_BLOCK_SIZE: u32 = 4;
+
 #[derive(Debug, Clone, Copy)]
 pub struct MzbHeader {
     pub decode_length: u32,
     pub node_count: u32,
     pub version: u8,
     pub key_index: u8,
-    pub grid_width: u8,
-    pub grid_height: u8,
+    pub zone_blocks_x: u8,
+    pub zone_blocks_z: u8,
+
+    pub block_width: u8,
+    pub block_length: u8,
 
     pub mesh_table_offset: u32,
     pub quadtree_offset: u32,
     pub maplist_offset: u32,
     pub maplist_count: u32,
+}
+
+impl MzbHeader {
+    /// Placement-grid cell counts: zone blocks × sub-blocks per block.
+    pub fn grid_cells_x(&self) -> usize {
+        (self.zone_blocks_x as usize)
+            .saturating_mul((self.block_width as u32 / MZB_SUB_BLOCK_SIZE) as usize)
+    }
+
+    pub fn grid_cells_z(&self) -> usize {
+        (self.zone_blocks_z as usize)
+            .saturating_mul((self.block_length as u32 / MZB_SUB_BLOCK_SIZE) as usize)
+    }
 }
 
 impl MzbHeader {
@@ -129,8 +151,10 @@ impl MzbHeader {
             probe += 4;
         };
 
-        let grid_width = body[0x0C];
-        let grid_height = body[0x0D];
+        let zone_blocks_x = body[0x0C];
+        let zone_blocks_z = body[0x0D];
+        let block_width = body[0x0E];
+        let block_length = body[0x0F];
         let quadtree_offset = u32::from_le_bytes([body[0x10], body[0x11], body[0x12], body[0x13]]);
         let maplist_offset = u32::from_le_bytes([body[0x14], body[0x15], body[0x16], body[0x17]]);
         let maplist_count = u32::from_le_bytes([body[0x18], body[0x19], body[0x1A], body[0x1B]]);
@@ -140,8 +164,10 @@ impl MzbHeader {
             node_count,
             version,
             key_index,
-            grid_width,
-            grid_height,
+            zone_blocks_x,
+            zone_blocks_z,
+            block_width,
+            block_length,
             mesh_table_offset,
             quadtree_offset,
             maplist_offset,
@@ -387,8 +413,8 @@ pub fn parse_placements(body: &[u8], header: &MzbHeader) -> Result<Vec<MzbPlacem
         return Ok(Vec::new());
     }
 
-    let gw = (header.grid_width as usize).saturating_mul(10);
-    let gh = (header.grid_height as usize).saturating_mul(10);
+    let gw = header.grid_cells_x();
+    let gh = header.grid_cells_z();
     if gw == 0 || gh == 0 {
         return Ok(Vec::new());
     }
@@ -798,6 +824,8 @@ mod tests {
         buf[8..12].copy_from_slice(&0x20u32.to_le_bytes());
         buf[0x0C] = 1;
         buf[0x0D] = 1;
+        buf[0x0E] = 40;
+        buf[0x0F] = 40;
 
         buf[0x20..0x24].copy_from_slice(&1u32.to_le_bytes());
         buf[0x24..0x28].copy_from_slice(&0x40u32.to_le_bytes());
@@ -834,8 +862,10 @@ mod tests {
     fn placements_decode_one_cell() {
         let body = synth_mzb_with_placement();
         let h = MzbHeader::parse(&body).unwrap();
-        assert_eq!(h.grid_width, 1);
-        assert_eq!(h.grid_height, 1);
+        assert_eq!(h.zone_blocks_x, 1);
+        assert_eq!(h.zone_blocks_z, 1);
+        assert_eq!(h.grid_cells_x(), 10);
+        assert_eq!(h.grid_cells_z(), 10);
 
         let placements = parse_placements(&body, &h).unwrap();
         assert_eq!(

@@ -206,13 +206,25 @@ impl LobbyHandle {
         Ok(self)
     }
 
-    pub async fn select(
+    pub async fn select(self, char_id: u32, char_name: &str, key3: [u8; 20]) -> Result<MapHandoff> {
+        let req_select = build_view_select(char_id, char_name, &self.session_hash);
+        self.send_view_select(char_id, req_select, key3).await
+    }
+
+    /// Select by id alone. The 0x07's name is resolved from this handle's own
+    /// chr_info2 slots, so no caller can put a name on the wire that LSB will
+    /// reject (see [`build_view_select_by_id`]).
+    pub async fn select_by_id(self, char_id: u32, key3: [u8; 20]) -> Result<MapHandoff> {
+        let req_select = build_view_select_by_id(&self.chars, char_id, &self.session_hash)?;
+        self.send_view_select(char_id, req_select, key3).await
+    }
+
+    async fn send_view_select(
         mut self,
         char_id: u32,
-        char_name: &str,
+        req_select: Vec<u8>,
         key3: [u8; 20],
     ) -> Result<MapHandoff> {
-        let req_select = build_view_select(char_id, char_name, &self.session_hash);
         self.view.write_all(&req_select).await?;
         self.view.flush().await?;
         tracing::info!(char_id, "lobby: 0x07 select sent");
@@ -249,6 +261,29 @@ impl LobbyHandle {
         );
         Ok(handoff)
     }
+}
+
+/// Build the 0x07 view-select for `char_id`, taking the name from the account's
+/// own chr_info2 slots. LSB looks the selection up with
+/// `WHERE charid = ? AND charname = ?` and closes the socket on a mismatch
+/// (vendor/server/src/login/view_session.cpp:62-75), so an id the account does
+/// not own fails here rather than on the wire — there is no caller-supplied
+/// name to fall back to.
+fn build_view_select_by_id(
+    chars: &[CharSlot],
+    char_id: u32,
+    session_hash: &[u8; 16],
+) -> Result<Vec<u8>> {
+    let Some(slot) = chars.iter().find(|c| c.char_id == char_id) else {
+        bail!(
+            "char id {char_id} not present on account (have: {:?})",
+            chars
+                .iter()
+                .map(|c| (c.char_id, c.name.as_str()))
+                .collect::<Vec<_>>()
+        );
+    };
+    Ok(build_view_select(char_id, &slot.name, session_hash))
 }
 
 impl LobbyClient {
@@ -310,7 +345,6 @@ impl LobbyClient {
         &self,
         auth: &AuthSession,
         char_id: u32,
-        char_name: &str,
         _search_server_ip: u32,
         key3: [u8; 20],
     ) -> Result<MapHandoff> {
@@ -318,28 +352,7 @@ impl LobbyClient {
         if handle.chars.is_empty() {
             bail!("no characters found for account");
         }
-        // The 0x07 view-select packet must carry the character's exact name:
-        // LSB validates `WHERE charid = ? AND charname = ?` and drops the
-        // connection on any mismatch. Resolve the authoritative name from the
-        // chr_info2 slots rather than trusting the caller (which passes ""
-        // when selecting by id).
-        let name = match handle.chars().iter().find(|c| c.char_id == char_id) {
-            Some(slot) => slot.name.clone(),
-            None => {
-                if char_name.is_empty() {
-                    bail!(
-                        "char id {char_id} not present on account (have: {:?})",
-                        handle
-                            .chars()
-                            .iter()
-                            .map(|c| (c.char_id, c.name.as_str()))
-                            .collect::<Vec<_>>()
-                    );
-                }
-                char_name.to_owned()
-            }
-        };
-        handle.select(char_id, &name, key3).await
+        handle.select_by_id(char_id, key3).await
     }
 
     pub async fn handshake_by_name(
@@ -444,19 +457,29 @@ fn build_data_a2(key3: &[u8; 20]) -> Vec<u8> {
     buf
 }
 
+/// vendor/server/src/login/view_session.cpp:56-58 reads the selected char id at
+/// buffer offset 28 and copies `PacketNameLength - 1` name bytes from offset 36
+/// (`PacketNameLength = 16`, vendor/server/src/common/utils.h:71).
+const VIEW_SELECT_PACKET_SIZE: u32 = 0x44;
+const VIEW_SELECT_CHAR_ID_OFFSET: usize = 28;
+const VIEW_SELECT_WORLD_CHAR_ID_OFFSET: usize = 32;
+const VIEW_SELECT_NAME_OFFSET: usize = 36;
+const VIEW_SELECT_NAME_LEN: usize = 15;
+
 fn build_view_select(char_id: u32, char_name: &str, session_hash: &[u8; 16]) -> Vec<u8> {
-    let packet_size = 0x44u32;
-    let mut buf = vec![0u8; packet_size as usize];
-    buf[0..4].copy_from_slice(&packet_size.to_le_bytes());
+    let mut buf = vec![0u8; VIEW_SELECT_PACKET_SIZE as usize];
+    buf[0..4].copy_from_slice(&VIEW_SELECT_PACKET_SIZE.to_le_bytes());
     buf[4..8].copy_from_slice(&IXFF_TERMINATOR.to_le_bytes());
     buf[8..12].copy_from_slice(&VIEW_CMD_SELECT.to_le_bytes());
     buf[12..28].copy_from_slice(session_hash);
-    buf[28..32].copy_from_slice(&char_id.to_le_bytes());
+    buf[VIEW_SELECT_CHAR_ID_OFFSET..VIEW_SELECT_CHAR_ID_OFFSET + 4]
+        .copy_from_slice(&char_id.to_le_bytes());
 
-    buf[32..36].copy_from_slice(&(char_id & 0xFFFF).to_le_bytes());
+    buf[VIEW_SELECT_WORLD_CHAR_ID_OFFSET..VIEW_SELECT_WORLD_CHAR_ID_OFFSET + 4]
+        .copy_from_slice(&(char_id & 0xFFFF).to_le_bytes());
     let name_bytes = char_name.as_bytes();
-    let n = name_bytes.len().min(15);
-    buf[36..36 + n].copy_from_slice(&name_bytes[..n]);
+    let n = name_bytes.len().min(VIEW_SELECT_NAME_LEN);
+    buf[VIEW_SELECT_NAME_OFFSET..VIEW_SELECT_NAME_OFFSET + n].copy_from_slice(&name_bytes[..n]);
     buf
 }
 
@@ -600,6 +623,15 @@ async fn read_data_charlist(stream: &mut TcpStream) -> Result<CharList> {
     Ok(CharList { characters: chars })
 }
 
+/// Offsets into the lpkt_chr_info2 body (the packet past its 4-byte size
+/// field): the slot count sits at the end of the ixff header, then one
+/// `chr_info2_sub2` record per populated slot.
+const CHR_INFO2_COUNT_OFFSET: usize = 24;
+const CHR_INFO2_SLOTS_OFFSET: usize = 28;
+const CHR_INFO2_SLOT_SIZE: usize = 140;
+const CHR_INFO2_SLOT_NAME_OFFSET: usize = 12;
+const CHR_INFO2_SLOT_NAME_LEN: usize = 16;
+
 async fn parse_view_chr_info2(stream: &mut TcpStream) -> Result<Vec<CharSlot>> {
     tracing::debug!("lobby: waiting for chr_info2 packet on view socket");
     let mut size_bytes = [0u8; 4];
@@ -617,13 +649,16 @@ async fn parse_view_chr_info2(stream: &mut TcpStream) -> Result<Vec<CharSlot>> {
         .await
         .context("reading lpkt_chr_info2 body")?;
 
-    if rest.len() < 28 {
+    if rest.len() < CHR_INFO2_SLOTS_OFFSET {
         bail!("chr_info2 body too short ({})", rest.len());
     }
-    let count = u32::from_le_bytes(rest[24..28].try_into().unwrap()) as usize;
+    let count = u32::from_le_bytes(
+        rest[CHR_INFO2_COUNT_OFFSET..CHR_INFO2_COUNT_OFFSET + 4]
+            .try_into()
+            .unwrap(),
+    ) as usize;
 
-    const SUB2_SIZE: usize = 140;
-    let needed = 28 + count * SUB2_SIZE;
+    let needed = CHR_INFO2_SLOTS_OFFSET + count * CHR_INFO2_SLOT_SIZE;
     if rest.len() < needed {
         bail!(
             "chr_info2 body short: have {} bytes, need {} for {} slot(s)",
@@ -634,7 +669,7 @@ async fn parse_view_chr_info2(stream: &mut TcpStream) -> Result<Vec<CharSlot>> {
     }
 
     if tracing::enabled!(tracing::Level::TRACE) {
-        let total = 28 + count * SUB2_SIZE;
+        let total = needed;
         let hex: String = rest[..rest.len().min(total)]
             .chunks(16)
             .enumerate()
@@ -649,11 +684,15 @@ async fn parse_view_chr_info2(stream: &mut TcpStream) -> Result<Vec<CharSlot>> {
     }
     let mut slots = Vec::with_capacity(count);
     for i in 0..count {
-        let off = 28 + i * SUB2_SIZE;
+        let off = CHR_INFO2_SLOTS_OFFSET + i * CHR_INFO2_SLOT_SIZE;
         let char_id = u32::from_le_bytes(rest[off..off + 4].try_into().unwrap());
         let status = u16::from_le_bytes(rest[off + 8..off + 10].try_into().unwrap());
-        let name_bytes = &rest[off + 12..off + 28];
-        let nul = name_bytes.iter().position(|&b| b == 0).unwrap_or(16);
+        let name_bytes = &rest[off + CHR_INFO2_SLOT_NAME_OFFSET
+            ..off + CHR_INFO2_SLOT_NAME_OFFSET + CHR_INFO2_SLOT_NAME_LEN];
+        let nul = name_bytes
+            .iter()
+            .position(|&b| b == 0)
+            .unwrap_or(CHR_INFO2_SLOT_NAME_LEN);
         let name = String::from_utf8_lossy(&name_bytes[..nul]).into_owned();
 
         let tc = off + 44;
@@ -702,6 +741,16 @@ async fn parse_view_chr_info2(stream: &mut TcpStream) -> Result<Vec<CharSlot>> {
     Ok(slots)
 }
 
+/// Field offsets of the 0x0B lpkt_next_login the view socket answers the select
+/// with: a 28-byte packet_t header then ffxi_id, ffxi_id_world,
+/// character_name[16], server_id, server_ip, server_port
+/// (vendor/server/src/login/login_packets.h:68-82).
+const NEXT_LOGIN_CHAR_ID_OFFSET: usize = 28;
+const NEXT_LOGIN_NAME_OFFSET: usize = 36;
+const NEXT_LOGIN_NAME_LEN: usize = 16;
+const NEXT_LOGIN_SERVER_IP_OFFSET: usize = 56;
+const NEXT_LOGIN_SERVER_PORT_OFFSET: usize = 60;
+
 async fn read_lpkt_next_login(
     stream: &mut TcpStream,
     char_id: u32,
@@ -730,17 +779,32 @@ async fn read_lpkt_next_login(
         bail!("lpkt_next_login: unexpected command {cmd:#x}");
     }
 
-    let resp_char_id = u32::from_le_bytes(buf[28..32].try_into().unwrap());
+    let resp_char_id = u32::from_le_bytes(
+        buf[NEXT_LOGIN_CHAR_ID_OFFSET..NEXT_LOGIN_CHAR_ID_OFFSET + 4]
+            .try_into()
+            .unwrap(),
+    );
     if resp_char_id != char_id {
         bail!("lpkt_next_login char_id {resp_char_id:#x} != requested {char_id:#x}");
     }
 
-    let name_bytes = &buf[36..52];
-    let nul = name_bytes.iter().position(|&b| b == 0).unwrap_or(16);
+    let name_bytes = &buf[NEXT_LOGIN_NAME_OFFSET..NEXT_LOGIN_NAME_OFFSET + NEXT_LOGIN_NAME_LEN];
+    let nul = name_bytes
+        .iter()
+        .position(|&b| b == 0)
+        .unwrap_or(NEXT_LOGIN_NAME_LEN);
     let character_name = String::from_utf8_lossy(&name_bytes[..nul]).into_owned();
 
-    let server_ip = u32::from_le_bytes(buf[56..60].try_into().unwrap());
-    let server_port = u32::from_le_bytes(buf[60..64].try_into().unwrap()) as u16;
+    let server_ip = u32::from_le_bytes(
+        buf[NEXT_LOGIN_SERVER_IP_OFFSET..NEXT_LOGIN_SERVER_IP_OFFSET + 4]
+            .try_into()
+            .unwrap(),
+    );
+    let server_port = u32::from_le_bytes(
+        buf[NEXT_LOGIN_SERVER_PORT_OFFSET..NEXT_LOGIN_SERVER_PORT_OFFSET + 4]
+            .try_into()
+            .unwrap(),
+    ) as u16;
 
     Ok(MapHandoff {
         char_id,
@@ -749,4 +813,221 @@ async fn read_lpkt_next_login(
         server_port,
         session_key_seed: *key3,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::net::TcpListener;
+
+    const ROSTER_CHAR_ID: u32 = 0x0100_1234;
+    const ROSTER_CHAR_NAME: &str = "Bravo";
+    const SESSION_HASH: [u8; 16] = [0x5A; 16];
+    const KEY3: [u8; 20] = [0x11; 20];
+    const HANDOFF_SERVER_IP: u32 = 0x0100_007F;
+    const HANDOFF_SERVER_PORT: u16 = 54230;
+    const DATA_ACK_SELECT: [u8; 5] = [0x02, 0, 0, 0, 0];
+
+    fn slot(char_id: u32, name: &str) -> CharSlot {
+        CharSlot {
+            char_id,
+            name: name.to_owned(),
+            status: 0,
+            race: 0,
+            face: 0,
+            head: 0,
+            body: 0,
+            hands: 0,
+            legs: 0,
+            feet: 0,
+            main: 0,
+            sub: 0,
+            ranged: 0,
+            zone_id: 0,
+        }
+    }
+
+    fn select_name(packet: &[u8]) -> String {
+        let field =
+            &packet[VIEW_SELECT_NAME_OFFSET..VIEW_SELECT_NAME_OFFSET + VIEW_SELECT_NAME_LEN];
+        let nul = field
+            .iter()
+            .position(|&b| b == 0)
+            .unwrap_or(VIEW_SELECT_NAME_LEN);
+        String::from_utf8_lossy(&field[..nul]).into_owned()
+    }
+
+    fn select_char_id(packet: &[u8]) -> u32 {
+        u32::from_le_bytes(
+            packet[VIEW_SELECT_CHAR_ID_OFFSET..VIEW_SELECT_CHAR_ID_OFFSET + 4]
+                .try_into()
+                .unwrap(),
+        )
+    }
+
+    fn chr_info2_packet(slots: &[CharSlot]) -> Vec<u8> {
+        let body_len = CHR_INFO2_SLOTS_OFFSET + slots.len() * CHR_INFO2_SLOT_SIZE;
+        let mut buf = vec![0u8; 4 + body_len];
+        let size = buf.len() as u32;
+        buf[0..4].copy_from_slice(&size.to_le_bytes());
+        let body = &mut buf[4..];
+        body[CHR_INFO2_COUNT_OFFSET..CHR_INFO2_COUNT_OFFSET + 4]
+            .copy_from_slice(&(slots.len() as u32).to_le_bytes());
+        for (i, s) in slots.iter().enumerate() {
+            let off = CHR_INFO2_SLOTS_OFFSET + i * CHR_INFO2_SLOT_SIZE;
+            body[off..off + 4].copy_from_slice(&s.char_id.to_le_bytes());
+            let name = s.name.as_bytes();
+            let n = name.len().min(CHR_INFO2_SLOT_NAME_LEN - 1);
+            let name_off = off + CHR_INFO2_SLOT_NAME_OFFSET;
+            body[name_off..name_off + n].copy_from_slice(&name[..n]);
+        }
+        buf
+    }
+
+    fn charlist_packet(count: u8) -> Vec<u8> {
+        let mut buf = vec![0u8; DATA_CHARLIST_SIZE];
+        buf[0] = 0x03;
+        buf[1] = count;
+        buf
+    }
+
+    fn next_login_packet(char_id: u32, name: &str) -> Vec<u8> {
+        let mut buf = vec![0u8; NEXT_LOGIN_PACKET_SIZE as usize];
+        buf[0..4].copy_from_slice(&NEXT_LOGIN_PACKET_SIZE.to_le_bytes());
+        buf[4..8].copy_from_slice(&IXFF_TERMINATOR.to_le_bytes());
+        buf[8..12].copy_from_slice(&VIEW_RESP_NEXT_LOGIN.to_le_bytes());
+        buf[NEXT_LOGIN_CHAR_ID_OFFSET..NEXT_LOGIN_CHAR_ID_OFFSET + 4]
+            .copy_from_slice(&char_id.to_le_bytes());
+        let name_bytes = name.as_bytes();
+        let n = name_bytes.len().min(NEXT_LOGIN_NAME_LEN - 1);
+        buf[NEXT_LOGIN_NAME_OFFSET..NEXT_LOGIN_NAME_OFFSET + n].copy_from_slice(&name_bytes[..n]);
+        buf[NEXT_LOGIN_SERVER_IP_OFFSET..NEXT_LOGIN_SERVER_IP_OFFSET + 4]
+            .copy_from_slice(&HANDOFF_SERVER_IP.to_le_bytes());
+        buf[NEXT_LOGIN_SERVER_PORT_OFFSET..NEXT_LOGIN_SERVER_PORT_OFFSET + 4]
+            .copy_from_slice(&(HANDOFF_SERVER_PORT as u32).to_le_bytes());
+        buf
+    }
+
+    /// The lobby exchange `handshake` drives, down to the 0x07 select it hands
+    /// back for inspection. `None` when the client hung up before selecting.
+    async fn fake_lobby(
+        view: TcpListener,
+        data: TcpListener,
+        roster: Vec<CharSlot>,
+    ) -> Option<Vec<u8>> {
+        let (mut view, _) = view.accept().await.ok()?;
+        let (mut data, _) = data.accept().await.ok()?;
+
+        let mut register = [0u8; IXFF_HEADER_SIZE];
+        view.read_exact(&mut register).await.ok()?;
+        let mut req_charlist = [0u8; IXFF_HEADER_SIZE];
+        data.read_exact(&mut req_charlist).await.ok()?;
+
+        data.write_all(&charlist_packet(roster.len() as u8))
+            .await
+            .ok()?;
+        view.write_all(&chr_info2_packet(&roster)).await.ok()?;
+
+        let mut select = vec![0u8; VIEW_SELECT_PACKET_SIZE as usize];
+        view.read_exact(&mut select).await.ok()?;
+
+        data.write_all(&DATA_ACK_SELECT).await.ok()?;
+        let mut req_handoff = [0u8; IXFF_HEADER_SIZE];
+        data.read_exact(&mut req_handoff).await.ok()?;
+        view.write_all(&next_login_packet(
+            select_char_id(&select),
+            ROSTER_CHAR_NAME,
+        ))
+        .await
+        .ok()?;
+
+        Some(select)
+    }
+
+    /// The regression kuluu-3nd2 fixed: `CharSelection::Id` has no name to pass
+    /// (session.rs calls `handshake` with the id alone), and LSB closes the
+    /// socket when the 0x07's name doesn't match the id
+    /// (vendor/server/src/login/view_session.cpp:62-75).
+    #[tokio::test]
+    async fn handshake_by_id_puts_the_roster_name_on_the_wire() {
+        let view = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let data = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let view_port = view.local_addr().unwrap().port();
+        let data_port = data.local_addr().unwrap().port();
+
+        let roster = vec![
+            slot(ROSTER_CHAR_ID ^ 0xFF, "Alpha"),
+            slot(ROSTER_CHAR_ID, ROSTER_CHAR_NAME),
+        ];
+        let server = tokio::spawn(fake_lobby(view, data, roster));
+
+        let auth = AuthSession {
+            account_id: 42,
+            session_hash: SESSION_HASH,
+        };
+        let handoff = LobbyClient::new("127.0.0.1", data_port, view_port)
+            .handshake(&auth, ROSTER_CHAR_ID, 0, KEY3)
+            .await
+            .expect("handshake");
+        assert_eq!(handoff.char_id, ROSTER_CHAR_ID);
+        assert_eq!(handoff.server_port, HANDOFF_SERVER_PORT);
+
+        let select = server
+            .await
+            .unwrap()
+            .expect("the 0x07 select the client sent");
+        assert_eq!(select_char_id(&select), ROSTER_CHAR_ID);
+        assert_eq!(select_name(&select), ROSTER_CHAR_NAME);
+    }
+
+    #[tokio::test]
+    async fn handshake_fails_before_the_wire_when_the_account_lacks_the_id() {
+        let view = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let data = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let view_port = view.local_addr().unwrap().port();
+        let data_port = data.local_addr().unwrap().port();
+
+        let roster = vec![slot(ROSTER_CHAR_ID, ROSTER_CHAR_NAME)];
+        let server = tokio::spawn(fake_lobby(view, data, roster));
+
+        let auth = AuthSession {
+            account_id: 42,
+            session_hash: SESSION_HASH,
+        };
+        let err = LobbyClient::new("127.0.0.1", data_port, view_port)
+            .handshake(&auth, ROSTER_CHAR_ID ^ 0xFF, 0, KEY3)
+            .await
+            .expect_err("an id the account does not own must not reach the 0x07");
+        let err = err.to_string();
+        assert!(err.contains(&(ROSTER_CHAR_ID ^ 0xFF).to_string()), "{err}");
+        assert!(err.contains(ROSTER_CHAR_NAME), "{err}");
+        assert!(
+            server.await.unwrap().is_none(),
+            "no 0x07 may reach the server for an id the account does not own"
+        );
+    }
+
+    #[test]
+    fn view_select_carries_the_roster_name_where_lsb_reads_it() {
+        let chars = [slot(1, "Alpha"), slot(ROSTER_CHAR_ID, ROSTER_CHAR_NAME)];
+        let packet = build_view_select_by_id(&chars, ROSTER_CHAR_ID, &SESSION_HASH).unwrap();
+
+        assert_eq!(packet.len(), VIEW_SELECT_PACKET_SIZE as usize);
+        assert_eq!(select_char_id(&packet), ROSTER_CHAR_ID);
+        assert_eq!(select_name(&packet), ROSTER_CHAR_NAME);
+    }
+
+    #[test]
+    fn an_unknown_id_reports_the_account_roster() {
+        let chars = [slot(1, "Alpha"), slot(2, "Bravo")];
+        let err = build_view_select_by_id(&chars, 9, &SESSION_HASH)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains('9'), "{err}");
+        for c in &chars {
+            assert!(err.contains(&c.char_id.to_string()), "{err}");
+            assert!(err.contains(&c.name), "{err}");
+        }
+        assert!(build_view_select_by_id(&[], 9, &SESSION_HASH).is_err());
+    }
 }

@@ -1,6 +1,46 @@
 use crate::{DatError, Result};
 
+// The effect list of a routine whose control-flow section (section 1) is empty. Kept as the
+// fallback for chunks whose section table reads implausibly — see `effect_section_start`.
 pub const SCHEDULER_HEADER_LEN: usize = 64;
+
+// research/xim EffectRoutineParser.kt:41-57 — after four zero dwords the routine header holds
+// three u32 section offsets (section 1 = control-flow setup, 2 = the effect list, 3 = trailer),
+// each measured from the CHUNK header, which begins `CHUNK_HEADER_LEN` before `body`.
+const SECTION_TABLE_OFFSET: usize = 0x10;
+const SECTION2_SLOT: usize = SECTION_TABLE_OFFSET + 4;
+const CHUNK_HEADER_LEN: usize = 0x10;
+// Three section offsets plus `totalDelay` (EffectRoutineParser.kt:46-50).
+const SECTION_TABLE_LEN: usize = 0x10;
+
+// research/xim EffectRoutineParser.kt:65 — `numInputs = (unkCombo and 0x1F) - 1`, counted from
+// the dword that carries the opcode, so the stage spans `unkCombo & 0x1F` dwords in total.
+const STAGE_LENGTH_MASK: u16 = 0x1F;
+
+// research/xim EffectRoutineParser.kt:81,96-98 / :275-285.
+const END_ROUTINE_OPCODE: u8 = 0x00;
+const RANDOM_BLOCK_OPEN: u8 = 0x3D;
+const RANDOM_BLOCK_CLOSE: u8 = 0x3E;
+
+fn effect_section_start(body: &[u8]) -> usize {
+    let Some(raw) = body
+        .get(SECTION2_SLOT..SECTION2_SLOT + 4)
+        .and_then(|b| b.try_into().ok())
+        .map(u32::from_le_bytes)
+    else {
+        return SCHEDULER_HEADER_LEN;
+    };
+    let raw = raw as usize;
+    let start = raw.saturating_sub(CHUNK_HEADER_LEN);
+    // The effect list can never begin inside the header that describes it, and a truncated
+    // chunk must not send the cursor past the end of the body.
+    let first_body_offset = SECTION_TABLE_OFFSET + SECTION_TABLE_LEN;
+    if raw >= CHUNK_HEADER_LEN + first_body_offset && start < body.len() {
+        start
+    } else {
+        SCHEDULER_HEADER_LEN
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SchedulerStage {
@@ -19,6 +59,12 @@ pub struct SchedulerStage {
     pub max_loops: u16,
     pub transition_in: u16,
     pub transition_out: u16,
+
+    // research/xim EffectRoutineParser.kt:275-285,553-559 — stages between a 0x3D and its 0x3E
+    // are children of one RandomChildRoutine, not siblings on the timeline: retail runs exactly
+    // one of them per activation (`vatk`'s four atk1..atk4 grunts). Members of the same block
+    // share a group index; `None` is an ordinary unconditional stage.
+    pub random_group: Option<u16>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -32,6 +78,11 @@ pub enum StageKind {
     Particle,
 
     SubRoutine,
+
+    // research/xim EffectRoutineParser.kt:136-140 — LinkedEffectRoutine(useTarget = true): the
+    // child sequence's source actor is the primary target, so it resolves its ids against the
+    // TARGET's resource dirs (the victim's own hit grunt / flinch), not the caster's.
+    SubRoutineOnTarget,
 
     BlockingSubRoutine,
 
@@ -56,6 +107,8 @@ impl StageKind {
             0x02 => Self::Particle,
             0x03 => Self::SubRoutine,
             0x05 => Self::Motion,
+            // research/xim EffectRoutineParser.kt:136-140.
+            0x09 => Self::SubRoutineOnTarget,
             0x0A if length_words == SOUND_EMITTER_LENGTH_WORDS => Self::SoundOnCaster,
             0x0A => Self::SubRoutine,
             0x0B => Self::SoundOnTarget,
@@ -71,6 +124,10 @@ impl StageKind {
             // until the child finishes (EffectRoutineInstance.kt:400 `blockers += newSequences`).
             0x3B | 0x3C => Self::BlockingSubRoutine,
             0x53 => Self::SoundOnCaster,
+            // research/xim EffectRoutineParser.kt:371-375 — a plain LinkedEffectRoutine, the
+            // form every melee routine uses (`ati0` links the weapon's `skaz` whoosh, `atk0`
+            // the race/face `vatk` grunt).
+            0x57 => Self::SubRoutine,
             _ => Self::Unknown,
         }
     }
@@ -98,12 +155,17 @@ impl Scheduler {
             });
         }
         let mut stages = Vec::new();
-        let mut cursor = SCHEDULER_HEADER_LEN;
+        let mut cursor = effect_section_start(body);
         let mut running_frame: u32 = 0;
+        let mut open_group: Option<u16> = None;
+        let mut next_group: u16 = 0;
 
         while cursor + 4 <= body.len() {
             let raw_type = body[cursor];
-            let length_words = body[cursor + 1] as usize;
+            // research/xim EffectRoutineParser.kt:63-68 — opcode(8), unkCombo(16), unk0(8); the
+            // stage spans `(unkCombo & 0x1F)` dwords including the opcode dword itself.
+            let length_words = (u16::from_le_bytes([body[cursor + 1], body[cursor + 2]])
+                & STAGE_LENGTH_MASK) as usize;
             let stage_bytes = length_words.saturating_mul(4);
             if stage_bytes < 4 || cursor + stage_bytes > body.len() {
                 break;
@@ -146,11 +208,30 @@ impl Scheduler {
                         max_loops,
                         transition_in,
                         transition_out,
+                        random_group: open_group,
                     },
                 });
-                running_frame = running_frame.saturating_add(delay as u32);
+                // A random block's children are collected into the 0x3D marker rather than
+                // appended to the parent timeline (EffectRoutineParser.kt:553-559), so only
+                // the marker's own delay advances the parent clock.
+                if open_group.is_none() {
+                    running_frame = running_frame.saturating_add(delay as u32);
+                }
+            }
+            match raw_type {
+                RANDOM_BLOCK_OPEN => {
+                    open_group = Some(next_group);
+                    next_group = next_group.saturating_add(1);
+                }
+                RANDOM_BLOCK_CLOSE => open_group = None,
+                _ => {}
             }
             cursor += stage_bytes;
+            // EffectRoutineParser.kt:81 — opcode 0x00 ends the section; section 3 follows it in
+            // the same chunk and would otherwise be misread as more effect stages.
+            if raw_type == END_ROUTINE_OPCODE {
+                break;
+            }
         }
         Ok(Self { name, stages })
     }
@@ -446,7 +527,9 @@ mod tests {
     fn truncated_stage_stops_scan_without_panic() {
         let mut body = vec![0u8; SCHEDULER_HEADER_LEN];
 
-        body.extend_from_slice(&[0x05, 99, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        // STAGE_LENGTH_MASK words is the longest stage the encoding can express (124 bytes),
+        // far past this 12-byte tail.
+        body.extend_from_slice(&[0x05, STAGE_LENGTH_MASK as u8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
         let s = Scheduler::parse(*b"trun", &body).unwrap();
         assert_eq!(s.stages.len(), 0);
     }

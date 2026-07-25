@@ -236,6 +236,16 @@ impl Scheduler {
         Ok(Self { name, stages })
     }
 
+    // research/xim EffectRoutineParser.kt:408-427 — 0x64/0x67 ControlFlowBranch, 0x69/0x6A
+    // ControlFlowBlock, 0x6B ControlFlowCondition. A routine built out of these is a switch
+    // (`daml` picks one hit reaction, `dam0` one additional effect), so inlining it whole would
+    // run every branch at once. We do not evaluate the conditions; callers pick the branch.
+    pub fn has_control_flow(&self) -> bool {
+        self.stages
+            .iter()
+            .any(|t| matches!(t.stage.raw_type, 0x64 | 0x67 | 0x69 | 0x6A | 0x6B))
+    }
+
     pub fn sound_events(&self) -> impl Iterator<Item = SoundEvent> + '_ {
         self.stages.iter().filter_map(|t| match t.stage.kind {
             StageKind::SoundOnCaster => Some(SoundEvent {

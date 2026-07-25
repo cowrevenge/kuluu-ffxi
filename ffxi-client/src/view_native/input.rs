@@ -411,14 +411,7 @@ pub fn handle_input_system(
         rest_stance.kind = next;
     }
     if bindings.just_pressed(Action::Heal, &keys) {
-        use ffxi_viewer_core::combat_stance::RestKind;
-        let (next_kind, wire_mode) = match rest_stance.kind {
-            RestKind::Heal => (RestKind::None, crate::state::HealMode::Off),
-
-            _ => (RestKind::Heal, crate::state::HealMode::On),
-        };
-        let _ = cmd_tx.0.try_send(AgentCommand::Heal { mode: wire_mode });
-        rest_stance.kind = next_kind;
+        toggle_heal(&mut rest_stance, &cmd_tx);
     }
 
     if bindings.just_pressed(Action::ToggleLockOn, &keys) {
@@ -432,18 +425,26 @@ pub fn handle_input_system(
                     .find(|e| e.id == id)
                     .and_then(|e| e.name.clone())
                     .unwrap_or_else(|| format!("#{id:08X}"));
-                format!("lock-on: {name}")
+                Some(format!("lock-on: {name}"))
             }
-            LockOnToggle::Cleared => "lock-on cleared".into(),
-            LockOnToggle::NoTarget => "lock-on: no target".into(),
+            LockOnToggle::Cleared => Some("lock-on cleared".into()),
+            // Retail's lock key is contextual: with nothing targeted (and no
+            // lock to release) it toggles resting instead
+            // (research/xim MainTool.kt::handleKeyEvents).
+            LockOnToggle::NoTarget => {
+                toggle_heal(&mut rest_stance, &cmd_tx);
+                None
+            }
         };
-        state.push_local_toast(ffxi_viewer_wire::ChatLine {
-            channel: ffxi_viewer_wire::ChatChannel::Debug,
-            sender: "client".into(),
-            text: toast,
-            server_ts: 0,
-            local_seq: 0,
-        });
+        if let Some(text) = toast {
+            state.push_local_toast(ffxi_viewer_wire::ChatLine {
+                channel: ffxi_viewer_wire::ChatChannel::Debug,
+                sender: "client".into(),
+                text,
+                server_ts: 0,
+                local_seq: 0,
+            });
+        }
     }
 
     if let Some(id) = lock_on.target_id {
@@ -452,6 +453,17 @@ pub fn handle_input_system(
             lock_on.target_id = None;
         }
     }
+}
+
+fn toggle_heal(rest_stance: &mut ffxi_viewer_core::combat_stance::RestStance, cmd_tx: &CommandTx) {
+    use ffxi_viewer_core::combat_stance::RestKind;
+    let (next_kind, wire_mode) = match rest_stance.kind {
+        RestKind::Heal => (RestKind::None, crate::state::HealMode::Off),
+
+        _ => (RestKind::Heal, crate::state::HealMode::On),
+    };
+    let _ = cmd_tx.0.try_send(AgentCommand::Heal { mode: wire_mode });
+    rest_stance.kind = next_kind;
 }
 
 pub fn dispatch_target_change_system(
@@ -1232,6 +1244,36 @@ const TAB_SAMPLE_HEIGHTS: [f32; 5] = [0.0, 0.5, 1.0, 1.5, 2.0];
 mod tests {
     use super::*;
     use ffxi_viewer_wire::{Entity as WireEntity, EntityKind, Vec3 as WireVec3};
+
+    #[test]
+    fn heal_toggle_alternates_stance_and_wire_mode() {
+        use crate::state::HealMode;
+        use ffxi_viewer_core::combat_stance::{RestKind, RestStance};
+
+        let (tx, mut rx) = mpsc::channel(4);
+        let cmd_tx = CommandTx(tx);
+        let mut stance = RestStance::default();
+
+        toggle_heal(&mut stance, &cmd_tx);
+        assert_eq!(stance.kind, RestKind::Heal);
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(AgentCommand::Heal { mode: HealMode::On })
+        ));
+
+        toggle_heal(&mut stance, &cmd_tx);
+        assert_eq!(stance.kind, RestKind::None);
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(AgentCommand::Heal {
+                mode: HealMode::Off
+            })
+        ));
+
+        stance.kind = RestKind::Sit;
+        toggle_heal(&mut stance, &cmd_tx);
+        assert_eq!(stance.kind, RestKind::Heal);
+    }
 
     #[test]
     fn forward_allowance_caps_at_contact() {

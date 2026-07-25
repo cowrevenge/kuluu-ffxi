@@ -57,7 +57,10 @@ pub struct LoadActorRequest {
 #[derive(Component, Debug, Clone, Copy)]
 pub struct FfxiRenderRoot(pub Entity);
 
-pub const FRAME_RATE: f32 = 30.0;
+// The skeleton domain ticks at half the routine clock (research/xim poc/ActorManager.kt:59-62);
+// every `half_frames()`/`* 0.5` conversion in this module is that same 2:1 bridge.
+pub const FRAME_RATE: f32 =
+    crate::scheduler_runtime::ROUTINE_FPS / crate::scheduler_runtime::SKELETON_FRAME_DIVISOR;
 
 pub const LOCOMOTION_XFADE_IN: f32 = 9.0;
 
@@ -1268,8 +1271,7 @@ fn routine_motion_clip(routines: &HashMap<DatId, Scheduler>, routine: DatId) -> 
         .map(|t| DatId::from_name(&t.stage.id))
 }
 
-// vendor/server/src/map/utils/battleutils.cpp action categories: 8 = magic cast start.
-pub(crate) const MAGIC_START_CATEGORY: u8 = 8;
+pub(crate) use ffxi_proto::magic::CATEGORY_MAGIC_START as MAGIC_START_CATEGORY;
 
 pub(crate) fn action_routine(action_kind: u8, cast_suffix: Option<&str>) -> Option<(DatId, bool)> {
     Some(match action_kind {

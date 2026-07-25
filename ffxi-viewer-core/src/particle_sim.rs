@@ -9,7 +9,7 @@ use crate::camera::OperatorCamera;
 use crate::components::InGameEntity;
 use crate::dat_d3m::{d3m_material, decoded_texture_to_image, D3mBlendMode};
 use crate::scheduler_runtime::{
-    assets_holding, ActionAssets, GlobalEffectDir, MmbSpriteMesh, SchedulerStageEvent, FFXI_FPS,
+    assets_holding, ActionAssets, GlobalEffectDir, MmbSpriteMesh, SchedulerStageEvent, ROUTINE_FPS,
 };
 use ffxi_dat::scheduler::StageKind;
 
@@ -400,7 +400,7 @@ pub fn stop_generators_for_despawned_owners(
 }
 
 pub fn tick_particle_simulator(time: Res<Time>, mut sim: ResMut<ParticleSimulator>) {
-    let frames = time.delta_secs() * FFXI_FPS;
+    let frames = time.delta_secs() * ROUTINE_FPS;
     for g in &mut sim.generators {
         advance_generator(g, frames);
     }
@@ -826,6 +826,31 @@ mod tests {
     // Drive the emission math directly (no Bevy world), one tick's worth of frames per call.
     fn advance(g: &mut LiveGenerator, frames: f32) {
         advance_generator(g, frames);
+    }
+
+    // A generator stage's duration is authored in 60 fps frames (research/xim util/Fps.kt:9),
+    // so a 30-frame emit window is half a second of wall time, not a whole one.
+    #[test]
+    fn emit_window_is_duration_frames_at_60fps() {
+        const WINDOW_FRAMES: f32 = 30.0;
+        const TICK_SECS: f32 = 1.0 / 120.0;
+
+        let mut g = live(def(600.0, 1.0, 1), WINDOW_FRAMES);
+        let run_for = |g: &mut LiveGenerator, secs: f32| {
+            let mut t = 0.0;
+            while t < secs {
+                advance(g, TICK_SECS * ROUTINE_FPS);
+                t += TICK_SECS;
+            }
+            g.particles.len()
+        };
+        let after_window = run_for(&mut g, 0.55);
+        let half_second_later = run_for(&mut g, 0.5);
+        assert!(after_window > 0, "the generator emitted inside its window");
+        assert_eq!(
+            after_window, half_second_later,
+            "emission stops half a second in, not a whole one"
+        );
     }
 
     #[test]

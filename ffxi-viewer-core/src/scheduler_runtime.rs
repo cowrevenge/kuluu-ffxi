@@ -7,7 +7,14 @@ use ffxi_dat::kind::ChunkKind;
 use ffxi_dat::scheduler::{Scheduler, StageKind, TimedStage};
 use ffxi_dat::sep::Sep;
 
-pub const FFXI_FPS: f32 = 30.0;
+// research/xim util/Fps.kt:9 — `internalFps = 60.0` is the clock every effect routine and
+// particle generator is authored against (poc/MainTool.kt:118 feeds the raw elapsed frames to
+// EffectManager). Only the skeleton domain is halved: poc/ActorManager.kt:59-62 "In game,
+// skeletal animations are only updated every other frame" — see SKELETON_FRAME_DIVISOR.
+pub const ROUTINE_FPS: f32 = 60.0;
+
+// research/xim poc/ActorManager.kt:59-62 — `elapsedFrames / 2f` into updateAnimation.
+pub const SKELETON_FRAME_DIVISOR: f32 = 2.0;
 
 const POST_FINISH_TTL_SECS: f32 = 2.0;
 
@@ -144,7 +151,7 @@ impl ActiveScheduler {
     }
 
     pub fn current_frame(&self) -> u32 {
-        (self.elapsed * FFXI_FPS) as u32
+        (self.elapsed * ROUTINE_FPS) as u32
     }
 
     pub fn last_frame(&self) -> u32 {
@@ -187,7 +194,7 @@ pub fn tick_active_schedulers(
         }
 
         if sched.finished() {
-            let finish_secs = sched.last_frame() as f32 / FFXI_FPS;
+            let finish_secs = sched.last_frame() as f32 / ROUTINE_FPS;
             if sched.elapsed >= finish_secs + POST_FINISH_TTL_SECS {
                 commands.entity(entity).remove::<ActiveScheduler>();
             }
@@ -255,7 +262,7 @@ fn flatten_routine(
     for t in &s.stages {
         let frame = base_frame + t.frame;
         match t.stage.kind {
-            StageKind::SubRoutine => {
+            StageKind::SubRoutine | StageKind::BlockingSubRoutine => {
                 flatten_routine(lookup, &t.stage.id, frame, depth + 1, motion, out)
             }
             StageKind::Motion if motion == MotionStages::Suppress => {}
@@ -974,8 +981,10 @@ pub struct SchedulerRuntimePlugin;
 
 impl Plugin for SchedulerRuntimePlugin {
     fn build(&self, app: &mut App) {
-        app.add_message::<SchedulerStageEvent>()
-            .add_systems(Update, tick_active_schedulers);
+        app.add_message::<SchedulerStageEvent>();
+
+        #[cfg(target_arch = "wasm32")]
+        app.add_systems(Update, tick_active_schedulers);
 
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -988,6 +997,10 @@ impl Plugin for SchedulerRuntimePlugin {
                     dispatch_action_started,
                     dispatch_cast_routine_started,
                     dispatch_entity_emoted,
+                    // Chained between the routine inserters and the stage consumers so a
+                    // routine's frame-0 stages fire on the frame it is inserted, and every
+                    // stage is consumed the same frame it is written.
+                    tick_active_schedulers,
                     crate::particle_sim::spawn_actor_auto_run_particles,
                     crate::particle_sim::spawn_particle_generators,
                     dispatch_stop_particle_stages,
@@ -1081,9 +1094,75 @@ mod tests {
         let sched = make_scheduler(*b"main", vec![]);
         let mut a = ActiveScheduler::from_scheduler(&sched);
         a.elapsed = 0.5;
-        assert_eq!(a.current_frame(), 15);
-        a.elapsed = 1.0;
         assert_eq!(a.current_frame(), 30);
+        a.elapsed = 1.0;
+        assert_eq!(a.current_frame(), 60);
+    }
+
+    // research/xim util/Fps.kt:9 `internalFps = 60.0` is the clock effect routines and particle
+    // generators are authored against; poc/ActorManager.kt:59-62 halves it — and only it — for
+    // skeletal animation. Neither constant may be "fixed" without the other.
+    #[test]
+    fn routine_clock_is_double_the_skeleton_clock() {
+        assert_eq!(ROUTINE_FPS, 60.0);
+        assert_eq!(crate::ffxi_actor_render::FRAME_RATE, 30.0);
+        assert_eq!(
+            ROUTINE_FPS,
+            SKELETON_FRAME_DIVISOR * crate::ffxi_actor_render::FRAME_RATE
+        );
+    }
+
+    // A stage authored 60 frames after its predecessor lands one second later, not two.
+    #[test]
+    fn stage_delay_60_fires_after_one_second() {
+        const DELAY_FRAMES: u32 = 60;
+        let sched = make_scheduler(
+            *b"main",
+            vec![
+                stage(0, StageKind::SoundOnCaster, 0x53, *b"snd0"),
+                stage(DELAY_FRAMES, StageKind::SoundOnCaster, 0x53, *b"snd1"),
+            ],
+        );
+        let mut a = ActiveScheduler::from_scheduler(&sched);
+
+        a.elapsed = 0.9;
+        assert_eq!(a.current_frame(), 54);
+        assert!(a.current_frame() < DELAY_FRAMES);
+
+        a.elapsed = 1.05;
+        assert!(a.current_frame() >= DELAY_FRAMES);
+    }
+
+    // Retail-byte fixture (skips without an install): Cure's effect DAT (file 2801 = 0xAF1)
+    // runs its target routine `tgt0` out to frame 200 — 3.33 s of wall time at the authored
+    // 60 fps, and the shape probed for kuluu-k6tz.
+    #[test]
+    fn real_dat_cure_target_routine_completes_in_retail_wall_time() {
+        const CURE_FILE: u32 = 2801;
+        const TGT0_LAST_FRAME: u32 = 200;
+        const TGT0_SECS: f32 = 3.333;
+
+        let Ok(root) = ffxi_dat::DatRoot::from_env_or_default() else {
+            return;
+        };
+        let Ok(loc) = root.resolve(CURE_FILE) else {
+            return;
+        };
+        let Ok(bytes) = std::fs::read(loc.path_under(root.root())) else {
+            return;
+        };
+        let (schedulers, _) = parse_action_bytes(&bytes);
+        let tgt0 = schedulers
+            .iter()
+            .find(|s| &s.name == b"tgt0")
+            .expect("cure DAT has a tgt0 routine");
+        let last = tgt0.stages.last().expect("tgt0 has stages").frame;
+        assert_eq!(last, TGT0_LAST_FRAME);
+        let secs = last as f32 / ROUTINE_FPS;
+        assert!(
+            (secs - TGT0_SECS).abs() < 0.1,
+            "cure tgt0 runs {secs}s, retail authors {TGT0_SECS}s"
+        );
     }
 
     #[test]

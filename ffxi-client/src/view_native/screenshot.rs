@@ -34,3 +34,20 @@ pub fn process_screenshot_requests(
         )));
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::next_default_path;
+
+    #[test]
+    fn default_paths_never_repeat() {
+        let first = next_default_path();
+        let second = next_default_path();
+        assert_ne!(first, second);
+        for path in [&first, &second] {
+            let name = path.file_name().unwrap().to_str().unwrap();
+            assert!(name.starts_with("screenshot-"), "{name}");
+            assert!(name.ends_with(".png"), "{name}");
+        }
+    }
+}

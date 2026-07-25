@@ -1531,16 +1531,12 @@ fn apply_slash_outcome(
             slash_writers.debug_heights.write(DebugHeightsRequest);
         }
         SlashOutcome::Screenshot { path } => {
-            static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-            let resolved = path.unwrap_or_else(|| {
-                let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                format!("screenshot-{n}.png")
-            });
+            let resolved = path
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(super::screenshot::next_default_path);
             slash_writers
                 .screenshot
-                .write(super::screenshot::ScreenshotRequest {
-                    path: std::path::PathBuf::from(&resolved),
-                });
+                .write(super::screenshot::ScreenshotRequest { path: resolved });
         }
         SlashOutcome::PlayBgm { track_id } => {
             slash_writers

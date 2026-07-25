@@ -978,11 +978,12 @@ fn handle_sub_packet(
         }
         op if op == s2c::SHOP_OPEN => {}
         op if op == s2c::BATTLE2 => {
-            if let Some((actor_id, action_id, action_kind)) = decode_battle2_header(sub.data) {
+            if let Some(h) = decode_battle2_header(sub.data) {
                 let _ = event_tx.send(AgentEvent::ActionStarted {
-                    actor_id,
-                    action_id,
-                    action_kind,
+                    actor_id: h.actor_id,
+                    action_id: h.action_id,
+                    action_kind: h.action_kind,
+                    target_id: h.primary_target_id,
                 });
             }
             for line in decode_battle2_action(sub.data, name_cache, kind_cache) {
@@ -3760,14 +3761,37 @@ impl<'a> BattleBitReader<'a> {
     }
 }
 
-pub fn decode_battle2_header(data: &[u8]) -> Option<(u32, u32, u8)> {
+// vendor/server/src/map/packets/s2c/0x028_battle2.cpp:41-58 — header packs actorId(32),
+// trg_sum(6), res_sum(4), cmd_no(4), cmd_arg(32), info(32), then per target actorId(32) +
+// resultCount(4). Only the first target is read: walking the rest requires re-walking the
+// variable-length result blocks, and XIM likewise attaches to `context.primaryTargetId`
+// (ParticleGeneratorAttachment.kt:75).
+pub struct Battle2Header {
+    pub actor_id: u32,
+    pub action_id: u32,
+    pub action_kind: u8,
+    pub primary_target_id: Option<u32>,
+}
+
+pub fn decode_battle2_header(data: &[u8]) -> Option<Battle2Header> {
     let mut br = BattleBitReader::new(data, 8);
     let actor_id = br.read(32)? as u32;
-    let _trg_sum = br.read(6)?;
+    let trg_sum = br.read(6)?;
     let _res_sum = br.read(4)?;
     let action_kind = br.read(4)? as u8;
     let action_id = br.read(32)? as u32;
-    Some((actor_id, action_id, action_kind))
+    let _info = br.read(32)?;
+    let primary_target_id = if trg_sum > 0 {
+        Some(br.read(32)? as u32)
+    } else {
+        None
+    };
+    Some(Battle2Header {
+        actor_id,
+        action_id,
+        action_kind,
+        primary_target_id,
+    })
 }
 
 fn decode_battle2_action(
@@ -6923,6 +6947,42 @@ mod tests {
             let used = self.pos.div_ceil(8);
             self.data[..used].to_vec()
         }
+    }
+
+    // vendor/server/src/map/packets/s2c/0x028_battle2.cpp:41-58 — an off-by-one-field read here
+    // silently hands the recast timer ("Action info") back as an entity id.
+    #[test]
+    fn battle2_header_reports_primary_target() {
+        let mut w = BattleBitWriter::new(8);
+        w.write(0xCAFEu64, 32);
+        w.write(1, 6);
+        w.write(0, 4);
+        w.write(8, 4);
+        w.write(220, 32);
+        w.write(0xFFFF, 32);
+        w.write(0xBEEFu64, 32);
+        w.write(0, 4);
+        // The reader widens a 32-bit read to a 64-bit fetch, so the tail needs slack; a real
+        // packet always carries the target's result blocks here.
+        w.write(0, 32);
+        w.write(0, 32);
+
+        let h = decode_battle2_header(&w.into_bytes()).unwrap();
+        assert_eq!(h.actor_id, 0xCAFE);
+        assert_eq!(h.action_kind, 8);
+        assert_eq!(h.action_id, 220);
+        assert_eq!(h.primary_target_id, Some(0xBEEF));
+
+        let mut w = BattleBitWriter::new(8);
+        w.write(0xCAFEu64, 32);
+        w.write(0, 6);
+        w.write(0, 4);
+        w.write(8, 4);
+        w.write(220, 32);
+        w.write(0xFFFF, 32);
+        w.write(0, 32);
+        let h = decode_battle2_header(&w.into_bytes()).unwrap();
+        assert_eq!(h.primary_target_id, None);
     }
 
     #[test]

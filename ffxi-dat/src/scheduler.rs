@@ -33,6 +33,8 @@ pub enum StageKind {
 
     SubRoutine,
 
+    StopParticle,
+
     Unknown,
 }
 
@@ -53,6 +55,12 @@ impl StageKind {
             0x0A if length_words == SOUND_EMITTER_LENGTH_WORDS => Self::SoundOnCaster,
             0x0A => Self::SubRoutine,
             0x0B => Self::SoundOnTarget,
+            // research/xim EffectRoutineParser.kt:253-258 — StopParticleGeneratorRoutine, id =
+            // the generator DatId to stop (ROM/0/0.DAT `stbk` stops the cast aura's gn10..gn13).
+            0x2D => Self::StopParticle,
+            // research/xim EffectRoutineParser.kt:270-274 — LinkedEffectRoutine(blocking), the
+            // same sub-routine call as 0x03 (a spell DAT's `main` links the caster's `shbk`).
+            0x3B | 0x3C => Self::SubRoutine,
             0x53 => Self::SoundOnCaster,
             _ => Self::Unknown,
         }
@@ -279,6 +287,89 @@ mod tests {
         let s = Scheduler::parse(*b"em00", &body).unwrap();
         assert_eq!(s.stages[0].frame, 0);
         assert_eq!(s.stages[0].stage.duration_frames, 152);
+    }
+
+    #[test]
+    fn opcode_3c_is_blocking_subroutine_and_2d_is_stop_particle() {
+        let mut body = vec![0u8; SCHEDULER_HEADER_LEN];
+        body.extend_from_slice(&[0x3C, 0x04, 0, 0]);
+        body.extend_from_slice(&0u16.to_le_bytes());
+        body.extend_from_slice(&0u16.to_le_bytes());
+        body.extend_from_slice(b"shbk");
+        body.extend_from_slice(&0u32.to_le_bytes());
+        body.extend_from_slice(&[0x3B, 0x04, 0, 0]);
+        body.extend_from_slice(&0u16.to_le_bytes());
+        body.extend_from_slice(&0u16.to_le_bytes());
+        body.extend_from_slice(b"wash");
+        body.extend_from_slice(&0u32.to_le_bytes());
+        body.extend_from_slice(&[0x2D, 0x04, 0, 0]);
+        body.extend_from_slice(&0u16.to_le_bytes());
+        body.extend_from_slice(&0u16.to_le_bytes());
+        body.extend_from_slice(b"gn13");
+        body.extend_from_slice(&0u32.to_le_bytes());
+
+        let s = Scheduler::parse(*b"main", &body).unwrap();
+        assert_eq!(s.stages[0].stage.kind, StageKind::SubRoutine);
+        assert_eq!(&s.stages[0].stage.id, b"shbk");
+        assert_eq!(s.stages[1].stage.kind, StageKind::SubRoutine);
+        assert_eq!(&s.stages[1].stage.id, b"wash");
+        assert_eq!(s.stages[2].stage.kind, StageKind::StopParticle);
+        assert_eq!(&s.stages[2].stage.id, b"gn13");
+    }
+
+    // Retail-byte guard (skips without an install): Poison's effect DAT links the caster's
+    // cast-complete routine with 0x3C, and the global system-effect dir stops the cast aura's
+    // four generators with 0x2D. Both were dropped as Unknown before kuluu-ky8c.
+    #[test]
+    fn real_dat_spell_main_links_caster_finish_routine() {
+        const POISON_FILE: u32 = 3020;
+        const GLOBAL_EFFECT_DIR_FILE: u32 = 0;
+
+        let Ok(root) = crate::DatRoot::from_env_or_default() else {
+            return;
+        };
+        let read = |id: u32| -> Option<Vec<u8>> {
+            let loc = root.resolve(id).ok()?;
+            std::fs::read(loc.path_under(root.root())).ok()
+        };
+        let Some(poison) = read(POISON_FILE) else {
+            return;
+        };
+        let scheds = |bytes: &[u8]| -> Vec<Scheduler> {
+            crate::resource_dir::ResourceDir::from_bytes(bytes.to_vec()).collect_schedulers()
+        };
+        let main = scheds(&poison)
+            .into_iter()
+            .find(|s| &s.name == b"main")
+            .expect("poison DAT has a main routine");
+        let link = main
+            .stages
+            .iter()
+            .find(|t| t.stage.raw_type == 0x3C)
+            .expect("main links a caster routine with 0x3C");
+        assert_eq!(link.stage.kind, StageKind::SubRoutine);
+        assert_eq!(&link.stage.id, b"shbk");
+
+        let Some(global) = read(GLOBAL_EFFECT_DIR_FILE) else {
+            return;
+        };
+        let stbk = scheds(&global)
+            .into_iter()
+            .find(|s| &s.name == b"stbk")
+            .expect("global effect dir has the stbk stop routine");
+        let stopped: Vec<[u8; 4]> = stbk
+            .stages
+            .iter()
+            .filter(|t| t.stage.kind == StageKind::StopParticle)
+            .map(|t| t.stage.id)
+            .collect();
+        for gen_id in [b"gn10", b"gn11", b"gn12", b"gn13"] {
+            assert!(
+                stopped.contains(gen_id),
+                "stbk stops {}",
+                String::from_utf8_lossy(gen_id)
+            );
+        }
     }
 
     #[test]

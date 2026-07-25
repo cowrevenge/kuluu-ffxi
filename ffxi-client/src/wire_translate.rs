@@ -315,10 +315,12 @@ pub fn event_to_viewer_event(ev: AgentEvent) -> Option<wire::ViewerEvent> {
             actor_id,
             action_id,
             action_kind,
+            target_id,
         } => Some(wire::ViewerEvent::ActionStarted {
             actor_id,
             action_id,
             action_kind,
+            target_id,
         }),
         AgentEvent::EntityEmoted {
             actor_id,
@@ -559,6 +561,22 @@ pub fn reconnect_to_wire(r: &ReconnectInfo) -> wire::ReconnectInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn action_started_carries_target_id() {
+        for target_id in [Some(0xBEEFu32), None] {
+            let mapped = event_to_viewer_event(AgentEvent::ActionStarted {
+                actor_id: 0xCAFE,
+                action_id: 220,
+                action_kind: 4,
+                target_id,
+            });
+            assert!(matches!(
+                mapped,
+                Some(wire::ViewerEvent::ActionStarted { target_id: t, .. }) if t == target_id
+            ));
+        }
+    }
 
     /// Every populated container crosses the wire (sorted by id, real
     /// capacities), not just the main bag — the Mog House storage UI reads them.

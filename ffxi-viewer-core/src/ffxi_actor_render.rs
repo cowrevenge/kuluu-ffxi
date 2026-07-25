@@ -731,6 +731,14 @@ impl FfxiRenderActor {
         &self.materials
     }
 
+    pub(crate) fn routines(&self) -> &HashMap<DatId, Scheduler> {
+        &self.routines
+    }
+
+    pub(crate) fn cast_posing(&self) -> bool {
+        self.action.is_some_and(|a| a.cast_pose)
+    }
+
     pub fn begin_completion_motion(&mut self, clip_id: DatId, motion: CompletionMotion) {
         // research/xim EffectRoutineInterpolatedEffects.kt:49 — a skill's body motion is
         // resolved against `listOf(localDir) + actor.getAllAnimationDirectories()`: the
@@ -1261,9 +1269,9 @@ fn routine_motion_clip(routines: &HashMap<DatId, Scheduler>, routine: DatId) -> 
 }
 
 // vendor/server/src/map/utils/battleutils.cpp action categories: 8 = magic cast start.
-const MAGIC_START_CATEGORY: u8 = 8;
+pub(crate) const MAGIC_START_CATEGORY: u8 = 8;
 
-fn action_routine(action_kind: u8, cast_suffix: Option<&str>) -> Option<(DatId, bool)> {
+pub(crate) fn action_routine(action_kind: u8, cast_suffix: Option<&str>) -> Option<(DatId, bool)> {
     Some(match action_kind {
         1 => (DatId::from_str("ati0"), false),
 
@@ -2169,7 +2177,7 @@ pub struct SpellSuffixCache {
 }
 
 impl SpellSuffixCache {
-    fn suffix(&mut self, spell_id: u32) -> Option<&'static str> {
+    pub(crate) fn suffix(&mut self, spell_id: u32) -> Option<&'static str> {
         if !self.loaded {
             self.loaded = true;
             if let Ok(root) = DatRoot::from_env_or_default() {
@@ -2201,6 +2209,7 @@ pub fn dispatch_action_overlay(
             actor_id,
             action_id,
             action_kind,
+            ..
         } = *ev
         else {
             continue;
@@ -2723,6 +2732,39 @@ mod pose_resolution_tests {
         assert_eq!(
             routine_motion_clip(&routines, DatId::from_str("cawh")),
             None
+        );
+    }
+
+    // Retail-DAT guard (skips without an install): the cast-start effects now run through the
+    // scheduler with Motion stages suppressed (kuluu-ky8c), so the overlay must remain the sole
+    // owner of the looping cast pose — HumeM's `cabk` still yields its mb0? clip here.
+    #[test]
+    fn cast_overlay_still_owns_the_looping_pose() {
+        const HUME_M_SKELETON_FILE: u32 = 7072;
+
+        let (routine, looping) =
+            action_routine(MAGIC_START_CATEGORY, Some("bk")).expect("black magic poses");
+        assert_eq!(routine.as_str(), "cabk");
+        assert!(looping, "the cast pose loops until the cast resolves");
+
+        let Ok(root) = DatRoot::from_env_or_default() else {
+            return;
+        };
+        let Ok(loc) = root.resolve(HUME_M_SKELETON_FILE) else {
+            return;
+        };
+        let Ok(bytes) = std::fs::read(loc.path_under(root.root())) else {
+            return;
+        };
+        let (schedulers, _) = crate::scheduler_runtime::parse_action_bytes(&bytes);
+        let routines: HashMap<DatId, Scheduler> = schedulers
+            .into_iter()
+            .map(|s| (DatId::from_name(&s.name), s))
+            .collect();
+        assert_eq!(
+            routine_motion_clip(&routines, routine).map(|d| d.as_str()),
+            Some("mb0?".to_string()),
+            "the cast pose clip is still resolved from the caster's own routine"
         );
     }
 

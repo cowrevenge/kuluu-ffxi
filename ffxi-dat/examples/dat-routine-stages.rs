@@ -34,9 +34,10 @@ fn main() -> ExitCode {
         println!("routine {}", String::from_utf8_lossy(&sched.name));
         for t in &sched.stages {
             println!(
-                "   frame {:>4} kind={:?} id={} dur={} loops={:?}",
+                "   frame {:>4} kind={:?} op=0x{:02X} id={} dur={} loops={:?}",
                 t.frame,
                 t.stage.kind,
+                t.stage.raw_type,
                 String::from_utf8_lossy(&t.stage.id),
                 t.stage.duration_frames,
                 t.stage.max_loops,

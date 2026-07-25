@@ -1752,6 +1752,7 @@ pub enum AgentEvent {
         actor_id: u32,
         action_id: u32,
         action_kind: u8,
+        target_id: Option<u32>,
     },
 
     /// The self player began casting a spell (optimistic, on send). Drives the

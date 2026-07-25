@@ -8,7 +8,9 @@ use ffxi_dat::sprite_sheet::ParticleSpriteSheet;
 use crate::camera::OperatorCamera;
 use crate::components::InGameEntity;
 use crate::dat_d3m::{d3m_material, decoded_texture_to_image, D3mBlendMode};
-use crate::scheduler_runtime::{ActionAssets, MmbSpriteMesh, SchedulerStageEvent, FFXI_FPS};
+use crate::scheduler_runtime::{
+    assets_holding, ActionAssets, GlobalEffectDir, MmbSpriteMesh, SchedulerStageEvent, FFXI_FPS,
+};
 use ffxi_dat::scheduler::StageKind;
 
 // CPU particle simulation. research/xim ParticleGenerator + Particle: a Particle stage (0x02)
@@ -25,6 +27,40 @@ impl ParticleSimulator {
     pub fn drain_entities(&mut self) -> Vec<Entity> {
         self.generators.drain(..).map(|g| g.entity).collect()
     }
+
+    // research/xim EffectRoutineParser.kt:253-258 StopParticleGeneratorRoutine — emission ceases
+    // but the already-live particles play out their lifetime.
+    pub fn stop_generator(&mut self, owner: Entity, gen_id: [u8; 4]) {
+        self.stop_where(|o| o.owner == owner && o.gen_id == gen_id);
+    }
+
+    pub fn stop_routine(&mut self, owner: Entity, routine: [u8; 4]) {
+        self.stop_where(|o| o.owner == owner && o.routine == routine);
+    }
+
+    // A caster that despawns mid-cast (zone-out, death, out of range) never ends its cast pose,
+    // so the aura's authored emit window would keep emitting at its last position without this.
+    pub fn stop_generators_of_dead_owners(&mut self, alive: impl Fn(Entity) -> bool) {
+        self.stop_where(|o| !alive(o.owner));
+    }
+
+    fn stop_where(&mut self, pred: impl Fn(&RoutineOrigin) -> bool) {
+        for g in &mut self.generators {
+            if g.origin_routine.is_some_and(|o| pred(&o)) {
+                g.stopped = true;
+            }
+        }
+    }
+}
+
+// Routine-spawned generators are addressable so a later StopParticle stage (or an interrupted
+// cast) can end them: `owner` is the tracked entity the routine ran on, `gen_id` the generator
+// chunk id, `routine` the top-level routine the stage was flattened from.
+#[derive(Clone, Copy)]
+struct RoutineOrigin {
+    owner: Entity,
+    gen_id: [u8; 4],
+    routine: [u8; 4],
 }
 
 #[derive(Clone)]
@@ -68,6 +104,8 @@ struct LiveGenerator {
     // in the DAT frame (ONE); world-space zone generators build positions directly in
     // Bevy space, so velocity gets the same mzb->bevy basis (x,-y,-z) as the origin.
     vel_basis: Vec3,
+    origin_routine: Option<RoutineOrigin>,
+    stopped: bool,
 }
 
 // Auto-run particle generators embedded in an actor DAT (research/xim
@@ -89,7 +127,10 @@ struct Particle {
 
 pub fn spawn_particle_generators(
     mut events: MessageReader<SchedulerStageEvent>,
-    q_actors: Query<(&Transform, &ActionAssets)>,
+    q_actors: Query<(&Transform, Option<&ActionAssets>)>,
+    q_action_target: Query<&crate::scheduler_runtime::ActionTarget>,
+    q_xf: Query<&Transform>,
+    global: Option<Res<GlobalEffectDir>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut mats: ResMut<Assets<StandardMaterial>>,
     mut images: ResMut<Assets<Image>>,
@@ -100,7 +141,14 @@ pub fn spawn_particle_generators(
         if ev.stage.stage.kind != StageKind::Particle {
             continue;
         }
-        let Ok((actor_xf, assets)) = q_actors.get(ev.actor) else {
+        let Ok((actor_xf, local_assets)) = q_actors.get(ev.actor) else {
+            continue;
+        };
+        // A cast routine's generators ship in the global effect dir, never in the caster's own
+        // ActionAssets, so the def resolves against whichever tier actually holds it.
+        let Some(assets) = assets_holding(local_assets, global.as_ref().map(|g| &g.assets), |a| {
+            a.particle_defs.contains_key(&ev.stage.stage.id)
+        }) else {
             continue;
         };
         let Some(def) = assets.particle_defs.get(&ev.stage.stage.id).copied() else {
@@ -108,6 +156,16 @@ pub fn spawn_particle_generators(
         };
         let Some((template, sprite_frames, tex)) = resolve_mesh(assets, &def, &mut images) else {
             continue;
+        };
+        let origin_entity = crate::scheduler_runtime::particle_origin_entity(
+            def.attach_type,
+            ev.actor,
+            q_action_target.get(ev.actor).ok().and_then(|t| t.0),
+        );
+        let origin_xf = if origin_entity == ev.actor {
+            actor_xf
+        } else {
+            q_xf.get(origin_entity).unwrap_or(actor_xf)
         };
         let blend = match def.blend {
             ffxi_dat::particle_gen::ParticleBlend::Additive => D3mBlendMode::Additive,
@@ -152,7 +210,7 @@ pub fn spawn_particle_generators(
             template,
             sprite_frames,
             def,
-            origin: actor_xf.translation + Vec3::Y * def.base_position[1],
+            origin: origin_xf.translation + Vec3::Y * def.base_position[1],
             particles: Vec::new(),
             emit_accum: 0.0,
             age_frames: 0.0,
@@ -164,6 +222,12 @@ pub fn spawn_particle_generators(
             actor_local: false,
             tex_translate: Vec2::ZERO,
             vel_basis: Vec3::ONE,
+            origin_routine: Some(RoutineOrigin {
+                owner: ev.actor,
+                gen_id: ev.stage.stage.id,
+                routine: ev.scheduler,
+            }),
+            stopped: false,
         });
     }
 }
@@ -242,6 +306,8 @@ pub fn spawn_actor_auto_run_particles(
                 actor_local: true,
                 tex_translate: Vec2::ZERO,
                 vel_basis: Vec3::ONE,
+                origin_routine: None,
+                stopped: false,
                 def,
             });
         }
@@ -319,78 +385,91 @@ pub fn spawn_zone_particle_generator(
         actor_local: false,
         tex_translate: Vec2::ZERO,
         vel_basis: Vec3::new(1.0, -1.0, -1.0),
+        origin_routine: None,
+        stopped: false,
         def,
     });
     Some(entity)
 }
 
+pub fn stop_generators_for_despawned_owners(
+    q_alive: Query<()>,
+    mut sim: ResMut<ParticleSimulator>,
+) {
+    sim.stop_generators_of_dead_owners(|e| q_alive.get(e).is_ok());
+}
+
 pub fn tick_particle_simulator(time: Res<Time>, mut sim: ResMut<ParticleSimulator>) {
     let frames = time.delta_secs() * FFXI_FPS;
     for g in &mut sim.generators {
-        g.age_frames += frames;
+        advance_generator(g, frames);
+    }
+}
 
-        // research/xim ParticleGenerator.kt:66 — completed particles are swept
-        // before emission, so a continuous singleton re-emits the same tick its
-        // predecessor expires.
-        g.particles.retain(|p| p.age_frames < p.life_frames);
+fn advance_generator(g: &mut LiveGenerator, frames: f32) {
+    g.age_frames += frames;
 
-        // research/xim: a maxLifeSpan of 0 marks a singleton — emit one particle once.
-        let singleton = g.def.is_singleton();
-        let emitting = g.auto_run || g.age_frames <= g.emit_window_frames.max(1.0);
-        if singleton {
-            if g.particles.is_empty() && g.age_frames <= frames {
-                emit(g, g.emit_window_frames.max(g.def.max_life_frames).max(1.0));
+    // research/xim ParticleGenerator.kt:66 — completed particles are swept
+    // before emission, so a continuous singleton re-emits the same tick its
+    // predecessor expires.
+    g.particles.retain(|p| p.age_frames < p.life_frames);
+
+    // research/xim: a maxLifeSpan of 0 marks a singleton — emit one particle once.
+    let singleton = g.def.is_singleton();
+    let emitting = !g.stopped && (g.auto_run || g.age_frames <= g.emit_window_frames.max(1.0));
+    if singleton {
+        if emitting && g.particles.is_empty() && g.age_frames <= frames {
+            emit(g, g.emit_window_frames.max(g.def.max_life_frames).max(1.0));
+        }
+    } else if emitting {
+        g.emit_accum += frames;
+        while g.emit_accum >= g.def.frames_per_emission {
+            // research/xim ParticleGenerator.kt:80 — a continuous-singleton
+            // generator holds one live particle and re-emits the moment it
+            // expires (the accumulator stays primed, capped to one period).
+            if g.def.continuous && !g.particles.is_empty() {
+                g.emit_accum = g.def.frames_per_emission;
+                break;
             }
-        } else if emitting {
-            g.emit_accum += frames;
-            while g.emit_accum >= g.def.frames_per_emission {
-                // research/xim ParticleGenerator.kt:80 — a continuous-singleton
-                // generator holds one live particle and re-emits the moment it
-                // expires (the accumulator stays primed, capped to one period).
-                if g.def.continuous && !g.particles.is_empty() {
-                    g.emit_accum = g.def.frames_per_emission;
+            g.emit_accum -= g.def.frames_per_emission;
+            for _ in 0..g.def.particles_per_emission {
+                emit(g, g.def.max_life_frames);
+                if g.def.continuous {
                     break;
                 }
-                g.emit_accum -= g.def.frames_per_emission;
-                for _ in 0..g.def.particles_per_emission {
-                    emit(g, g.def.max_life_frames);
-                    if g.def.continuous {
-                        break;
-                    }
-                }
             }
         }
+    }
 
-        // research/xim ParticleUpdaters TextureCoordinateUpdater: scroll velocity is
-        // per-generator (frames of life advance the shared UV offset), not per-particle.
-        g.tex_translate += Vec2::from_array(g.def.uv_scroll) * frames;
+    // research/xim ParticleUpdaters TextureCoordinateUpdater: scroll velocity is
+    // per-generator (frames of life advance the shared UV offset), not per-particle.
+    g.tex_translate += Vec2::from_array(g.def.uv_scroll) * frames;
 
-        let accel = g
-            .def
-            .accel
-            .map(|a| Vec3::from_array(a) * g.vel_basis * frames);
-        for p in &mut g.particles {
-            p.age_frames += frames;
-            if let Some(a) = accel {
-                p.vel += a;
-            }
-            p.pos += p.vel * frames;
+    let accel = g
+        .def
+        .accel
+        .map(|a| Vec3::from_array(a) * g.vel_basis * frames);
+    for p in &mut g.particles {
+        p.age_frames += frames;
+        if let Some(a) = accel {
+            p.vel += a;
         }
-        g.particles.retain(|p| p.age_frames < p.life_frames);
+        p.pos += p.vel * frames;
+    }
+    g.particles.retain(|p| p.age_frames < p.life_frames);
 
-        // A continuous generator re-emits "the moment its particle expires"
-        // (research/xim ParticleGenerator.kt:80). The aging above can push the lone
-        // particle past its life within this same tick, after the pre-emit sweep
-        // already ran — replace it now so the mesh is never empty at render and the
-        // body does not blink out for a frame.
-        if g.def.continuous && g.particles.is_empty() && continuous_active(g) {
-            emit(g, g.def.max_life_frames);
-        }
+    // A continuous generator re-emits "the moment its particle expires"
+    // (research/xim ParticleGenerator.kt:80). The aging above can push the lone
+    // particle past its life within this same tick, after the pre-emit sweep
+    // already ran — replace it now so the mesh is never empty at render and the
+    // body does not blink out for a frame.
+    if g.def.continuous && g.particles.is_empty() && continuous_active(g) {
+        emit(g, g.def.max_life_frames);
     }
 }
 
 fn continuous_active(g: &LiveGenerator) -> bool {
-    g.auto_run || g.age_frames <= g.emit_window_frames.max(1.0)
+    !g.stopped && (g.auto_run || g.age_frames <= g.emit_window_frames.max(1.0))
 }
 
 fn emit(g: &mut LiveGenerator, life_frames: f32) {
@@ -434,8 +513,9 @@ pub fn sync_particle_meshes(
         if let Some(mut mesh) = meshes.get_mut(&g.mesh) {
             rebuild_mesh(g, rot, &mut mesh);
         }
-        let done =
-            !g.auto_run && g.particles.is_empty() && g.age_frames > g.emit_window_frames.max(1.0);
+        let window_over =
+            g.stopped || (!g.auto_run && g.age_frames > g.emit_window_frames.max(1.0));
+        let done = window_over && g.particles.is_empty();
         if done {
             reap.push((i, true));
         }
@@ -685,6 +765,10 @@ mod tests {
             camera_billboard: true,
             continuous: false,
             auto_run: false,
+            attach_type: ffxi_dat::particle_gen::AttachType::SourceActor,
+            attach_joint_source: 0,
+            attach_joint_target: 0,
+            attach_source_oriented: false,
             init_scale: [0.1, 0.1, 1.0],
             init_color: [0.2, 0.2, 0.6, 0.5],
             init_velocity: [0.0, 0.01, 0.0],
@@ -725,43 +809,14 @@ mod tests {
             actor_local: false,
             tex_translate: Vec2::ZERO,
             vel_basis: Vec3::ONE,
+            origin_routine: None,
+            stopped: false,
         }
     }
 
-    // Drive the emission math directly (no Bevy world): one frame's worth of advance per call.
-    // Mirrors tick_particle_simulator's per-generator body.
+    // Drive the emission math directly (no Bevy world), one tick's worth of frames per call.
     fn advance(g: &mut LiveGenerator, frames: f32) {
-        g.age_frames += frames;
-        g.particles.retain(|p| p.age_frames < p.life_frames);
-        if g.def.is_singleton() {
-            if g.particles.is_empty() && g.age_frames <= frames {
-                let l = g.emit_window_frames.max(g.def.max_life_frames).max(1.0);
-                emit(g, l);
-            }
-        } else if g.auto_run || g.age_frames <= g.emit_window_frames.max(1.0) {
-            g.emit_accum += frames;
-            while g.emit_accum >= g.def.frames_per_emission {
-                if g.def.continuous && !g.particles.is_empty() {
-                    g.emit_accum = g.def.frames_per_emission;
-                    break;
-                }
-                g.emit_accum -= g.def.frames_per_emission;
-                for _ in 0..g.def.particles_per_emission {
-                    emit(g, g.def.max_life_frames);
-                    if g.def.continuous {
-                        break;
-                    }
-                }
-            }
-        }
-        for p in &mut g.particles {
-            p.age_frames += frames;
-            p.pos += p.vel * frames;
-        }
-        g.particles.retain(|p| p.age_frames < p.life_frames);
-        if g.def.continuous && g.particles.is_empty() && continuous_active(g) {
-            emit(g, g.def.max_life_frames);
-        }
+        advance_generator(g, frames);
     }
 
     #[test]
@@ -864,6 +919,80 @@ mod tests {
         }
         // window 3 -> ~3 emitted, each lives 2 frames, all expired by frame 10.
         assert!(g.particles.is_empty());
+    }
+
+    // research/xim EffectRoutineParser.kt:253-258 StopParticleGeneratorRoutine: the cast aura's
+    // authored emit window is 1800 frames (60 s), so retail's 0x2D stop is what ends it at the
+    // end of the cast — emission ceases at once, live particles still play out their life.
+    #[test]
+    fn stopped_generator_ceases_emission_but_keeps_live_particles() {
+        const LIFE_FRAMES: f32 = 10.0;
+        const LONG_WINDOW_FRAMES: f32 = 1800.0;
+
+        let mut sim = ParticleSimulator::default();
+        let owner = Entity::from_raw_u32(7).unwrap();
+        let mut g = live(def(LIFE_FRAMES, 1.0, 1), LONG_WINDOW_FRAMES);
+        g.origin_routine = Some(RoutineOrigin {
+            owner,
+            gen_id: *b"gn10",
+            routine: *b"cabk",
+        });
+        sim.generators.push(g);
+
+        for _ in 0..5 {
+            advance_generator(&mut sim.generators[0], 1.0);
+        }
+        let live_at_stop = sim.generators[0].particles.len();
+        assert!(live_at_stop > 0, "generator emits inside its window");
+
+        sim.stop_generator(owner, *b"gn10");
+        advance_generator(&mut sim.generators[0], 1.0);
+        assert_eq!(
+            sim.generators[0].particles.len(),
+            live_at_stop,
+            "a stopped generator emits nothing new"
+        );
+        assert!(
+            sim.generators[0].particles[0].age_frames > 0.0,
+            "already-live particles keep ageing"
+        );
+
+        for _ in 0..LIFE_FRAMES as u32 {
+            advance_generator(&mut sim.generators[0], 1.0);
+        }
+        assert!(
+            sim.generators[0].particles.is_empty(),
+            "live particles finish their lifetime and none replace them"
+        );
+    }
+
+    #[test]
+    fn stop_routine_ends_every_generator_the_routine_spawned() {
+        let mut sim = ParticleSimulator::default();
+        let owner = Entity::from_raw_u32(7).unwrap();
+        let other = Entity::from_raw_u32(8).unwrap();
+        for (o, gen_id) in [(owner, b"gn10"), (owner, b"gn11"), (other, b"gn12")] {
+            let mut g = live(def(4.0, 1.0, 1), 600.0);
+            g.origin_routine = Some(RoutineOrigin {
+                owner: o,
+                gen_id: *gen_id,
+                routine: *b"cabk",
+            });
+            sim.generators.push(g);
+        }
+        sim.generators.push(live(def(4.0, 1.0, 1), 600.0));
+
+        sim.stop_routine(owner, *b"cabk");
+        let stopped: Vec<bool> = sim.generators.iter().map(|g| g.stopped).collect();
+        assert_eq!(stopped, vec![true, true, false, false]);
+
+        sim.stop_generators_of_dead_owners(|e| e == owner);
+        let stopped: Vec<bool> = sim.generators.iter().map(|g| g.stopped).collect();
+        assert_eq!(
+            stopped,
+            vec![true, true, true, false],
+            "a despawned caster's aura stops; a zone/auto-run generator is untouched"
+        );
     }
 
     #[test]

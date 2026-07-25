@@ -6,6 +6,8 @@ use crate::{DatError, Result};
 // particle emitter. The generator header and four section-offset words sit in the chunk body
 // (which already excludes the 16-byte chunk header, so a ByteReader `sectionStart + X` maps to
 // body index `X - 0x10`):
+//   body[0x00] u16  attachFlags           (XIM reads these two via offsetFromDataStart, i.e. body
+//   body[0x02] u16  additionalAttachFlags  index 0 — ParticleGeneratorParser.kt:21-33)
 //   body[0x64] u16  emissionVariance
 //   body[0x66] u16  framesPerEmission - 1
 //   body[0x68] u8   particlesPerEmission
@@ -31,6 +33,56 @@ pub enum ParticleMeshKind {
     StaticMesh,
     SpriteSheet,
 }
+// research/xim ParticleGeneratorSettings.kt:154 `enum class AttachType(val flag: Int)` — which
+// actor (and whose facing) a generator's emission origin is bound to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AttachType {
+    #[default]
+    None,
+    SourceActor,
+    TargetActor,
+    SourceToTargetBasis,
+    TargetActorSourceFacing,
+    SourceActorTargetFacing,
+    TargetToSourceBasis,
+    SourceActorWeapon,
+    ZoneActorA,
+    ZoneActorB,
+    ZoneActorC,
+    Sun,
+    Moon,
+}
+
+impl AttachType {
+    pub fn from_flag(flag: u16) -> Option<Self> {
+        Some(match flag {
+            0x0 => Self::None,
+            0x1 => Self::SourceActor,
+            0x2 => Self::TargetActor,
+            0x3 => Self::SourceToTargetBasis,
+            0x4 => Self::TargetActorSourceFacing,
+            0x5 => Self::SourceActorTargetFacing,
+            0x6 => Self::TargetToSourceBasis,
+            0x9 => Self::SourceActorWeapon,
+            0xA => Self::ZoneActorA,
+            0xB => Self::ZoneActorB,
+            0xC => Self::ZoneActorC,
+            0xE => Self::Sun,
+            0xF => Self::Moon,
+            _ => return None,
+        })
+    }
+}
+
+// research/xim ParticleGeneratorParser.kt:23-33 — attachFlags bit layout, then
+// additionalAttachFlags bit 0x0001 = attachSourceOriented.
+const ATTACH_TYPE_MASK: u16 = 0x000F;
+const ATTACH_JOINT0_MASK: u16 = 0x03F0;
+const ATTACH_JOINT0_SHIFT: u32 = 4;
+const ATTACH_JOINT1_MASK: u16 = 0xFC00;
+const ATTACH_JOINT1_SHIFT: u32 = 10;
+const ATTACH_SOURCE_ORIENTED: u16 = 0x0001;
+
 // research/xim ParticleGeneratorParser.kt:68-70 (genFlags at body[0x69]);
 // continuous singleton + auto-run-at-model-ready semantics: Actor.kt:724-734.
 const GEN_FLAG_CONTINUOUS: u8 = 0x04;
@@ -71,6 +123,11 @@ pub struct ParticleGeneratorDef {
     pub continuous: bool,
     pub auto_run: bool,
 
+    pub attach_type: AttachType,
+    pub attach_joint_source: u8,
+    pub attach_joint_target: u8,
+    pub attach_source_oriented: bool,
+
     pub init_scale: [f32; 3],
     pub init_color: [f32; 4],
     pub init_velocity: [f32; 3],
@@ -106,6 +163,16 @@ impl ParticleGeneratorDef {
                 available: body.len(),
             });
         }
+
+        let attach_flags = u16_le(body, 0x00);
+        let additional_attach = u16_le(body, 0x02);
+        let attach_type =
+            AttachType::from_flag(attach_flags & ATTACH_TYPE_MASK).unwrap_or_default();
+        let attach_joint_source =
+            ((attach_flags & ATTACH_JOINT0_MASK) >> ATTACH_JOINT0_SHIFT) as u8;
+        let attach_joint_target =
+            ((attach_flags & ATTACH_JOINT1_MASK) >> ATTACH_JOINT1_SHIFT) as u8;
+        let attach_source_oriented = additional_attach & ATTACH_SOURCE_ORIENTED != 0;
 
         let frames_per_emission = u16_le(body, 0x66) as f32 + 1.0;
         let particles_per_emission = (body[0x68] as u32).max(1);
@@ -305,6 +372,10 @@ impl ParticleGeneratorDef {
             camera_billboard,
             continuous,
             auto_run,
+            attach_type,
+            attach_joint_source,
+            attach_joint_target,
+            attach_source_oriented,
             init_scale,
             init_color,
             init_velocity,
@@ -412,7 +483,19 @@ mod tests {
     // Build a generator body matching the real layout: header at 0x64, section-2 offset word at
     // body[0x74] (value = body_index + 0x10), then the initializer opcode stream.
     fn build(sec2: &[u8], frames_per_em: u16, ppe: u8) -> Vec<u8> {
+        build_attached(sec2, frames_per_em, ppe, 0, 0)
+    }
+
+    fn build_attached(
+        sec2: &[u8],
+        frames_per_em: u16,
+        ppe: u8,
+        attach_flags: u16,
+        additional_attach: u16,
+    ) -> Vec<u8> {
         let mut body = vec![0u8; HEADER_LEN];
+        body[0x00..0x02].copy_from_slice(&attach_flags.to_le_bytes());
+        body[0x02..0x04].copy_from_slice(&additional_attach.to_le_bytes());
         body[0x66..0x68].copy_from_slice(&(frames_per_em - 1).to_le_bytes());
         body[0x68] = ppe;
         let sec2_body_index = HEADER_LEN;
@@ -587,6 +670,74 @@ mod tests {
         let body = build(&setup, 1, 1);
         let def = ParticleGeneratorDef::parse(&body).unwrap().unwrap();
         assert!(def.is_singleton());
+    }
+
+    // Pins the XIM attachFlags bit layout (ParticleGeneratorParser.kt:23-33) against the
+    // ground-truth word 0x5402 read out of Poison's effect DAT (file 3020).
+    #[test]
+    fn attach_flags_split_type_and_joints() {
+        let mut setup = op(0x01, 12, &[]);
+        setup[4 + 29] = LINKED_DATA_STATIC_MESH;
+
+        let body = build_attached(&setup, 1, 1, 0x5402, ATTACH_SOURCE_ORIENTED);
+        let def = ParticleGeneratorDef::parse(&body).unwrap().unwrap();
+        assert_eq!(def.attach_type, AttachType::TargetActor);
+        assert_eq!(def.attach_joint_source, 0);
+        assert_eq!(def.attach_joint_target, 21);
+        assert!(def.attach_source_oriented);
+
+        let body = build_attached(&setup, 1, 1, 0x5402, 0);
+        let def = ParticleGeneratorDef::parse(&body).unwrap().unwrap();
+        assert!(!def.attach_source_oriented);
+
+        // Joint 0 lives in bits 4..10, joint 1 in bits 10..16, type in the low nibble.
+        let body = build_attached(&setup, 1, 1, 0x0409 | (7 << ATTACH_JOINT0_SHIFT), 0);
+        let def = ParticleGeneratorDef::parse(&body).unwrap().unwrap();
+        assert_eq!(def.attach_type, AttachType::SourceActorWeapon);
+        assert_eq!(def.attach_joint_source, 7);
+        assert_eq!(def.attach_joint_target, 1);
+
+        // 0x7 / 0x8 / 0xD are not AttachType flags; XIM warns and falls back to None.
+        for unknown in [0x7u16, 0x8, 0xD] {
+            assert_eq!(AttachType::from_flag(unknown), None);
+            let body = build_attached(&setup, 1, 1, unknown, 0);
+            let def = ParticleGeneratorDef::parse(&body).unwrap().unwrap();
+            assert_eq!(def.attach_type, AttachType::None);
+        }
+    }
+
+    // Real-DAT guard: every generator in Poison's completion-effect file attaches to the
+    // target actor at joint 21, which is what makes the venom cloud land on the victim.
+    #[test]
+    fn real_dat_poison_generators_attach_to_target() {
+        const POISON_EFFECT_FILE_ID: u32 = 3020;
+        let Ok(root) = crate::DatRoot::from_env_or_default() else {
+            return;
+        };
+        let Ok(loc) = root.resolve(POISON_EFFECT_FILE_ID) else {
+            return;
+        };
+        let Ok(bytes) = std::fs::read(loc.path_under(root.root())) else {
+            return;
+        };
+        let mut seen = 0;
+        for c in crate::chunk::walk(&bytes).flatten() {
+            if crate::kind::ChunkKind::from_u8(c.kind) != Some(crate::kind::ChunkKind::Generator) {
+                continue;
+            }
+            let Ok(Some(def)) = ParticleGeneratorDef::parse(c.data) else {
+                continue;
+            };
+            seen += 1;
+            assert_eq!(
+                def.attach_type,
+                AttachType::TargetActor,
+                "generator {}",
+                String::from_utf8_lossy(&c.name)
+            );
+            assert_eq!(def.attach_joint_target, 21);
+        }
+        assert!(seen > 0, "no particle generators parsed from file 3020");
     }
 
     #[test]

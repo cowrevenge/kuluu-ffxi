@@ -11,6 +11,83 @@ pub const FFXI_FPS: f32 = 30.0;
 
 const POST_FINISH_TTL_SECS: f32 = 2.0;
 
+// The entity the currently-running routine is aimed at. Written in the same commands chain as
+// `ActiveScheduler` by every routine dispatcher, so it can never outlive the routine that set it.
+#[derive(Component, Debug, Clone, Copy, Default)]
+pub struct ActionTarget(pub Option<Entity>);
+
+// research/xim ParticleGeneratorAttachment.kt:64-111 — Target*/TargetToSourceBasis read the
+// primary target's position, every other attach type the source actor's. `None` falls back to
+// the caster so an untracked target never drops the routine.
+pub fn particle_origin_entity(
+    attach: ffxi_dat::particle_gen::AttachType,
+    caster: Entity,
+    target: Option<Entity>,
+) -> Entity {
+    use ffxi_dat::particle_gen::AttachType;
+    match attach {
+        AttachType::TargetActor
+        | AttachType::TargetActorSourceFacing
+        | AttachType::TargetToSourceBasis => target.unwrap_or(caster),
+        _ => caster,
+    }
+}
+
+// research/xim poc/MainTool.kt:250 — ROM/0/0.DAT is loaded as XIM's `GlobalDirectory`, the
+// system-effect resource dir every routine falls back to (the cast aura `ner1` and its `stbk`
+// stop live there, not in the caster's DAT). `DatRoot::resolve(0)` yields exactly that file.
+pub const GLOBAL_EFFECT_DIR_FILE_ID: u32 = 0;
+
+#[derive(Resource, Default)]
+pub struct GlobalEffectDir {
+    pub schedulers: Vec<Scheduler>,
+    pub assets: ActionAssets,
+}
+
+// research/xim EffectRoutineInstance.kt:418-431 findResource — a routine id resolves against the
+// routine's own DAT, then the actor's own dirs, then the global dir.
+pub enum RoutineSource<'a> {
+    Dat(&'a [Scheduler]),
+    Actor(&'a HashMap<ffxi_dat::datid::DatId, Scheduler>),
+}
+
+#[derive(Default)]
+pub struct RoutineLookup<'a> {
+    tiers: Vec<RoutineSource<'a>>,
+}
+
+impl<'a> RoutineLookup<'a> {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_dat(mut self, schedulers: &'a [Scheduler]) -> Self {
+        self.tiers.push(RoutineSource::Dat(schedulers));
+        self
+    }
+
+    pub fn with_actor(mut self, routines: &'a HashMap<ffxi_dat::datid::DatId, Scheduler>) -> Self {
+        self.tiers.push(RoutineSource::Actor(routines));
+        self
+    }
+
+    pub fn get(&self, name: &[u8; 4]) -> Option<&'a Scheduler> {
+        self.tiers.iter().find_map(|tier| match tier {
+            RoutineSource::Dat(list) => list.iter().find(|s| &s.name == name),
+            RoutineSource::Actor(map) => map.get(&ffxi_dat::datid::DatId::from_name(name)),
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MotionStages {
+    Play,
+
+    // The caster's looping cast pose is owned by ffxi_actor_render::dispatch_action_overlay; a
+    // cast routine's own Motion stage would replace it with a one-shot.
+    Suppress,
+}
+
 #[derive(Component, Debug, Clone)]
 pub struct ActiveScheduler {
     pub stages: Vec<TimedStage>,
@@ -38,11 +115,21 @@ impl ActiveScheduler {
     // (id = sub-scheduler name) — e.g. Cure's main calls tgt0, which holds the particle
     // spawns. Inline them at their call frame into one flat timeline.
     pub fn from_main(schedulers: &[Scheduler], name: &[u8; 4]) -> Option<Self> {
-        if !schedulers.iter().any(|s| &s.name == name) {
-            return None;
-        }
+        Self::from_routine(&RoutineLookup::new().with_dat(schedulers), name)
+    }
+
+    pub fn from_routine(lookup: &RoutineLookup, name: &[u8; 4]) -> Option<Self> {
+        Self::flatten(lookup, name, MotionStages::Play)
+    }
+
+    pub fn effects_only(lookup: &RoutineLookup, name: &[u8; 4]) -> Option<Self> {
+        Self::flatten(lookup, name, MotionStages::Suppress)
+    }
+
+    fn flatten(lookup: &RoutineLookup, name: &[u8; 4], motion: MotionStages) -> Option<Self> {
+        lookup.get(name)?;
         let mut stages = Vec::new();
-        flatten_routine(schedulers, name, 0, 0, &mut stages);
+        flatten_routine(lookup, name, 0, 0, motion, &mut stages);
         stages.sort_by_key(|t| t.frame);
         Some(Self {
             stages,
@@ -149,30 +236,48 @@ pub struct ActionAssets {
     pub keyframes: HashMap<[u8; 4], ffxi_dat::particle_gen::KeyFrameTrack>,
 }
 
+const MAX_SUBROUTINE_DEPTH: u8 = 6;
+
 fn flatten_routine(
-    schedulers: &[Scheduler],
+    lookup: &RoutineLookup,
     name: &[u8; 4],
     base_frame: u32,
     depth: u8,
+    motion: MotionStages,
     out: &mut Vec<TimedStage>,
 ) {
-    if depth > 6 {
+    if depth > MAX_SUBROUTINE_DEPTH {
         return;
     }
-    let Some(s) = schedulers.iter().find(|s| &s.name == name) else {
+    let Some(s) = lookup.get(name) else {
         return;
     };
     for t in &s.stages {
         let frame = base_frame + t.frame;
-        if t.stage.kind == StageKind::SubRoutine {
-            flatten_routine(schedulers, &t.stage.id, frame, depth + 1, out);
-        } else {
-            out.push(TimedStage {
+        match t.stage.kind {
+            StageKind::SubRoutine => {
+                flatten_routine(lookup, &t.stage.id, frame, depth + 1, motion, out)
+            }
+            StageKind::Motion if motion == MotionStages::Suppress => {}
+            _ => out.push(TimedStage {
                 frame,
                 stage: t.stage,
-            });
+            }),
         }
     }
+}
+
+// A generator and the mesh/sheet/texture it references always ship in the same DAT, so a stage
+// resolves against whichever single ActionAssets actually holds it — the routine's own (on the
+// tracked entity) or the global effect dir's.
+pub fn assets_holding<'a>(
+    local: Option<&'a ActionAssets>,
+    global: Option<&'a ActionAssets>,
+    has: impl Fn(&ActionAssets) -> bool,
+) -> Option<&'a ActionAssets> {
+    local
+        .filter(|a| has(a))
+        .or_else(|| global.filter(|a| has(a)))
 }
 
 pub fn parse_action_bytes(bytes: &[u8]) -> (Vec<Scheduler>, ActionAssets) {
@@ -301,9 +406,46 @@ fn mmb_sprite_mesh(data: &[u8]) -> Option<MmbSpriteMesh> {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+#[derive(Resource)]
+pub(crate) struct GlobalEffectDirTask(bevy::tasks::Task<(Vec<Scheduler>, ActionAssets)>);
+
+// ROM/0/0.DAT is ~540 KB of ~1000 chunks including many Img decodes; parsing it on the render
+// thread reproduces the actor-load hitch, so it loads once off-thread and every lookup falls
+// back to the pre-global behaviour until it lands.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn load_global_effect_dir(mut commands: Commands) {
+    let task = bevy::tasks::AsyncComputeTaskPool::get().spawn(async move {
+        let bytes = ffxi_dat::DatRoot::from_env_or_default()
+            .ok()
+            .and_then(|root| {
+                let loc = root.resolve(GLOBAL_EFFECT_DIR_FILE_ID).ok()?;
+                std::fs::read(loc.path_under(root.root())).ok()
+            })
+            .unwrap_or_default();
+        parse_action_bytes(&bytes)
+    });
+    commands.insert_resource(GlobalEffectDirTask(task));
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn poll_global_effect_dir(
+    task: Option<ResMut<GlobalEffectDirTask>>,
+    mut commands: Commands,
+) {
+    use bevy::tasks::futures_lite::future;
+    let Some(mut task) = task else { return };
+    let Some((schedulers, assets)) = future::block_on(future::poll_once(&mut task.0)) else {
+        return;
+    };
+    commands.remove_resource::<GlobalEffectDirTask>();
+    commands.insert_resource(GlobalEffectDir { schedulers, assets });
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 pub fn dispatch_sound_stages(
     mut events: MessageReader<SchedulerStageEvent>,
     q_actors: Query<&ActionAssets>,
+    global: Option<Res<GlobalEffectDir>>,
     mut sfx_writer: MessageWriter<crate::audio::SfxEvent>,
 ) {
     for ev in events.read() {
@@ -311,7 +453,19 @@ pub fn dispatch_sound_stages(
         if !matches!(kind, StageKind::SoundOnCaster | StageKind::SoundOnTarget) {
             continue;
         }
-        let Ok(assets) = q_actors.get(ev.actor) else {
+        let Some(assets) = assets_holding(
+            q_actors.get(ev.actor).ok(),
+            global.as_ref().map(|g| &g.assets),
+            |a| {
+                ffxi_dat::action::resolve_stage_to_se(
+                    &ev.stage.stage.id,
+                    kind,
+                    &a.generators,
+                    &a.seps,
+                )
+                .is_some()
+            },
+        ) else {
             continue;
         };
 
@@ -333,6 +487,7 @@ pub fn dispatch_motion_stages(
     mut events: MessageReader<SchedulerStageEvent>,
     q_children: Query<&Children>,
     q_assets: Query<&ActionAssets>,
+    global: Option<Res<GlobalEffectDir>>,
     mut q_actors: Query<&mut crate::ffxi_actor_render::FfxiRenderActor>,
 ) {
     for ev in events.read() {
@@ -345,10 +500,17 @@ pub fn dispatch_motion_stages(
         // render actor is its child.
         let stage = ev.stage.stage;
         let clip = ffxi_dat::datid::DatId::from_name(&stage.id);
-        let local_clips: &[ffxi_dat::skel_anim::SkeletonAnimation] = q_assets
-            .get(ev.actor)
-            .map(|a| a.animations.as_slice())
-            .unwrap_or(&[]);
+        let local_clips: &[ffxi_dat::skel_anim::SkeletonAnimation] = assets_holding(
+            q_assets.get(ev.actor).ok(),
+            global.as_ref().map(|g| &g.assets),
+            |a| {
+                a.animations
+                    .iter()
+                    .any(|an| an.id.parameterized_match(&clip))
+            },
+        )
+        .map(|a| a.animations.as_slice())
+        .unwrap_or(&[]);
         let Ok(children) = q_children.get(ev.actor) else {
             continue;
         };
@@ -421,6 +583,9 @@ pub fn dispatch_action_started(
     events: Res<crate::snapshot::EventLog>,
     tracked: Res<crate::scene::TrackedEntities>,
     q_look: Query<&crate::components::LookComp>,
+    q_children: Query<&Children>,
+    q_render: Query<&crate::ffxi_actor_render::FfxiRenderActor>,
+    global: Option<Res<GlobalEffectDir>>,
     mut dll_cache: Local<MainDllCache>,
     mut commands: Commands,
     mut last_seen: Local<u64>,
@@ -436,6 +601,7 @@ pub fn dispatch_action_started(
             actor_id,
             action_id,
             action_kind,
+            target_id,
         } = *ev
         else {
             continue;
@@ -443,6 +609,7 @@ pub fn dispatch_action_started(
         let Some(&actor_entity) = tracked.by_id.get(&actor_id) else {
             continue;
         };
+        let target_entity = target_id.and_then(|id| tracked.by_id.get(&id).copied());
         let race = q_look.get(actor_entity).ok().and_then(|l| look_race(&l.0));
         // FFXiMain.dll is only needed for weaponskill base indices; load it lazily once.
         if action_kind == 3 && !dll_cache.loaded {
@@ -468,14 +635,145 @@ pub fn dispatch_action_started(
         };
         let (schedulers, assets) = parse_action_bytes(&bytes);
 
-        let active = ActiveScheduler::from_main(&schedulers, b"main")
+        // A spell DAT's `main` links the caster's own finish routine (0x3C `shbk`), which in turn
+        // links global-dir routines — so the flatten must span all three tiers.
+        let actor_routines = actor_render_routines(actor_entity, &q_children, &q_render);
+        let mut lookup = RoutineLookup::new().with_dat(&schedulers);
+        if let Some(r) = actor_routines {
+            lookup = lookup.with_actor(r);
+        }
+        if let Some(g) = global.as_ref() {
+            lookup = lookup.with_dat(&g.schedulers);
+        }
+
+        let active = ActiveScheduler::from_routine(&lookup, b"main")
             .or_else(|| schedulers.first().map(ActiveScheduler::from_scheduler));
         let Some(active) = active else { continue };
 
         commands
             .entity(actor_entity)
             .try_insert(active)
-            .try_insert(assets);
+            .try_insert(assets)
+            .try_insert(ActionTarget(target_entity));
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn actor_render_routines<'a>(
+    entity: Entity,
+    q_children: &'a Query<&Children>,
+    q_render: &'a Query<&crate::ffxi_actor_render::FfxiRenderActor>,
+) -> Option<&'a HashMap<ffxi_dat::datid::DatId, Scheduler>> {
+    q_children
+        .get(entity)
+        .ok()?
+        .iter()
+        .find_map(|child| q_render.get(child).ok())
+        .map(|actor| actor.routines())
+}
+
+// The routine the caster's cast-start effects were flattened from, so an interrupt can stop the
+// generators it spawned. research/xim Actor.kt:263-266 startCasting enqueues the whole model
+// routine, not just its Motion stage.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct CastRoutine(pub [u8; 4]);
+
+// research/xim Actor.kt:263-266 — a cast start runs the caster's full `ca<suffix>` model routine
+// (the `ner1` aura, its sounds, its sub-routines). Only the magic-start category is routed here:
+// the melee `ati0` routine carries its own sub-routines and would change every auto-attack swing.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn dispatch_cast_routine_started(
+    events: Res<crate::snapshot::EventLog>,
+    tracked: Res<crate::scene::TrackedEntities>,
+    q_children: Query<&Children>,
+    q_render: Query<&crate::ffxi_actor_render::FfxiRenderActor>,
+    global: Option<Res<GlobalEffectDir>>,
+    mut spell_suffix: Local<crate::ffxi_actor_render::SpellSuffixCache>,
+    mut commands: Commands,
+    mut last_seen: Local<u64>,
+) {
+    let new_count =
+        (events.pushed_total.saturating_sub(*last_seen)).min(events.recent.len() as u64) as usize;
+    *last_seen = events.pushed_total;
+    if new_count == 0 {
+        return;
+    }
+    for ev in events.recent.iter().rev().take(new_count).rev() {
+        let ffxi_viewer_wire::ViewerEvent::ActionStarted {
+            actor_id,
+            action_id,
+            action_kind,
+            target_id,
+        } = *ev
+        else {
+            continue;
+        };
+        if action_kind != crate::ffxi_actor_render::MAGIC_START_CATEGORY {
+            continue;
+        }
+        let Some(&actor_entity) = tracked.by_id.get(&actor_id) else {
+            continue;
+        };
+        let suffix = spell_suffix.suffix(action_id);
+        let Some((routine, _looping)) =
+            crate::ffxi_actor_render::action_routine(action_kind, suffix)
+        else {
+            continue;
+        };
+        let Some(actor_routines) = actor_render_routines(actor_entity, &q_children, &q_render)
+        else {
+            continue;
+        };
+        let mut lookup = RoutineLookup::new().with_actor(actor_routines);
+        if let Some(g) = global.as_ref() {
+            lookup = lookup.with_dat(&g.schedulers);
+        }
+        let name = routine.0;
+        let Some(active) = ActiveScheduler::effects_only(&lookup, &name) else {
+            continue;
+        };
+        commands
+            .entity(actor_entity)
+            .try_insert(active)
+            .try_insert(CastRoutine(name))
+            .try_insert(ActionTarget(
+                target_id.and_then(|id| tracked.by_id.get(&id).copied()),
+            ));
+    }
+}
+
+// Belt-and-braces stop for the cases retail's 0x2D StopParticle stages cannot reach: an
+// interrupted cast never runs the spell DAT's `main`, and an observed caster's interrupt carries
+// no wire signal — both end the cast pose, which is what this watches.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn stop_cast_effects_when_cast_ends(
+    q_cast: Query<(Entity, &CastRoutine, &Children)>,
+    q_render: Query<&crate::ffxi_actor_render::FfxiRenderActor>,
+    mut sim: ResMut<crate::particle_sim::ParticleSimulator>,
+    mut commands: Commands,
+) {
+    for (entity, cast, children) in &q_cast {
+        let Some(actor) = children.iter().find_map(|c| q_render.get(c).ok()) else {
+            continue;
+        };
+        if actor.cast_posing() {
+            continue;
+        }
+        sim.stop_routine(entity, cast.0);
+        commands.entity(entity).remove::<CastRoutine>();
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub fn dispatch_stop_particle_stages(
+    mut events: MessageReader<SchedulerStageEvent>,
+    mut sim: ResMut<crate::particle_sim::ParticleSimulator>,
+) {
+    for ev in events.read() {
+        if ev.stage.stage.kind != StageKind::StopParticle {
+            continue;
+        }
+        sim.stop_generator(ev.actor, ev.stage.stage.id);
     }
 }
 
@@ -557,10 +855,10 @@ pub fn dispatch_entity_emoted(
     for ev in events.recent.iter().rev().take(new_count).rev() {
         let ffxi_viewer_wire::ViewerEvent::EntityEmoted {
             actor_id,
+            target_id,
             emote_id,
             param,
             mode,
-            ..
         } = *ev
         else {
             continue;
@@ -598,7 +896,8 @@ pub fn dispatch_entity_emoted(
                     commands
                         .entity(actor_entity)
                         .try_insert(active.0)
-                        .try_insert(active.1);
+                        .try_insert(active.1)
+                        .try_insert(ActionTarget(tracked.by_id.get(&target_id).copied()));
                     continue;
                 }
             }
@@ -651,19 +950,33 @@ impl Plugin for SchedulerRuntimePlugin {
         #[cfg(not(target_arch = "wasm32"))]
         {
             app.init_resource::<crate::particle_sim::ParticleSimulator>();
+            app.add_systems(Startup, load_global_effect_dir);
             app.add_systems(
                 Update,
                 (
+                    poll_global_effect_dir,
                     dispatch_action_started,
+                    dispatch_cast_routine_started,
                     dispatch_entity_emoted,
                     crate::particle_sim::spawn_actor_auto_run_particles,
                     crate::particle_sim::spawn_particle_generators,
+                    dispatch_stop_particle_stages,
+                    crate::particle_sim::stop_generators_for_despawned_owners,
                     crate::particle_sim::tick_particle_simulator,
                     crate::particle_sim::sync_particle_meshes,
                     dispatch_sound_stages,
                     dispatch_motion_stages,
                 )
-                    .chain(),
+                    .chain()
+                    // The overlay and this chain both drain EventLog with private cursors; the
+                    // overlay's "no routine for this action" branch clears the looping action, so
+                    // it must run before a completion routine's Motion stage begins here.
+                    .after(crate::ffxi_actor_render::dispatch_action_overlay),
+            );
+            app.add_systems(
+                Update,
+                stop_cast_effects_when_cast_ends
+                    .after(crate::ffxi_actor_render::tick_live_ffxi_actors),
             );
         }
     }
@@ -673,6 +986,45 @@ impl Plugin for SchedulerRuntimePlugin {
 mod tests {
     use super::*;
     use ffxi_dat::scheduler::{SchedulerStage, StageKind};
+
+    #[test]
+    fn particle_origin_entity_routes_by_attach_type() {
+        use ffxi_dat::particle_gen::AttachType;
+        let caster = Entity::from_raw_u32(1).unwrap();
+        let target = Entity::from_raw_u32(2).unwrap();
+
+        for attach in [
+            AttachType::None,
+            AttachType::SourceActor,
+            AttachType::SourceActorWeapon,
+            AttachType::SourceActorTargetFacing,
+            AttachType::SourceToTargetBasis,
+            AttachType::Sun,
+        ] {
+            assert_eq!(
+                particle_origin_entity(attach, caster, Some(target)),
+                caster,
+                "{attach:?}"
+            );
+        }
+
+        for attach in [
+            AttachType::TargetActor,
+            AttachType::TargetActorSourceFacing,
+            AttachType::TargetToSourceBasis,
+        ] {
+            assert_eq!(
+                particle_origin_entity(attach, caster, Some(target)),
+                target,
+                "{attach:?}"
+            );
+            assert_eq!(
+                particle_origin_entity(attach, caster, None),
+                caster,
+                "{attach:?} falls back to the caster when the target is untracked"
+            );
+        }
+    }
 
     fn stage(frame: u32, kind: StageKind, raw_type: u8, id: [u8; 4]) -> TimedStage {
         TimedStage {
@@ -956,6 +1308,128 @@ mod tests {
         assert!(
             !assets.images_by_name.contains_key(&sheet.category),
             "the namespace token is NOT a local-name key — the original miss"
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn read_dat(file_id: u32) -> Option<Vec<u8>> {
+        let root = ffxi_dat::DatRoot::from_env_or_default().ok()?;
+        let loc = root.resolve(file_id).ok()?;
+        std::fs::read(loc.path_under(root.root())).ok()
+    }
+
+    // Retail-DAT guard (skips without an install): the cast aura `ner1` and its `stbk` shutdown
+    // live in ROM/0/0.DAT, XIM's GlobalDirectory (research/xim poc/MainTool.kt:250) — not in the
+    // caster's own DAT — so a DAT-root or resolver change cannot silently un-resolve them.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn real_dat_global_dir_holds_cast_aura_and_its_stop() {
+        const AURA_GENERATORS: [&[u8; 4]; 4] = [b"gn10", b"gn11", b"gn12", b"gn13"];
+
+        let Some(bytes) = read_dat(GLOBAL_EFFECT_DIR_FILE_ID) else {
+            return;
+        };
+        let (schedulers, assets) = parse_action_bytes(&bytes);
+
+        let ner1 = schedulers
+            .iter()
+            .find(|s| &s.name == b"ner1")
+            .expect("global effect dir holds the cast aura routine");
+        let spawned: Vec<[u8; 4]> = ner1
+            .stages
+            .iter()
+            .filter(|t| t.stage.kind == StageKind::Particle)
+            .map(|t| t.stage.id)
+            .collect();
+        for gen_id in AURA_GENERATORS {
+            assert!(
+                spawned.contains(gen_id),
+                "ner1 spawns {}",
+                String::from_utf8_lossy(gen_id)
+            );
+            assert!(
+                assets.particle_defs.contains_key(gen_id),
+                "the global dir also carries {}'s generator def",
+                String::from_utf8_lossy(gen_id)
+            );
+        }
+
+        let stbk = schedulers
+            .iter()
+            .find(|s| &s.name == b"stbk")
+            .expect("global effect dir holds the cast-aura stop routine");
+        let stopped: Vec<[u8; 4]> = stbk
+            .stages
+            .iter()
+            .filter(|t| t.stage.kind == StageKind::StopParticle)
+            .map(|t| t.stage.id)
+            .collect();
+        for gen_id in AURA_GENERATORS {
+            assert!(
+                stopped.contains(gen_id),
+                "stbk stops {}",
+                String::from_utf8_lossy(gen_id)
+            );
+        }
+    }
+
+    // Retail-DAT guard (skips without an install): HumeM's black-magic cast routine `cabk` is a
+    // Motion stage plus two SubRoutine calls that only resolve in the global dir, so the flatten
+    // has to span both tiers. `effects_only` drops the Motion because the caster's looping cast
+    // pose is owned by ffxi_actor_render::dispatch_action_overlay.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn cast_routine_flattens_across_actor_and_global_dirs() {
+        const HUME_M_SKELETON_FILE: u32 = 7072;
+        const CAST_ROUTINE: [u8; 4] = *b"cabk";
+
+        let (Some(actor_bytes), Some(global_bytes)) = (
+            read_dat(HUME_M_SKELETON_FILE),
+            read_dat(GLOBAL_EFFECT_DIR_FILE_ID),
+        ) else {
+            return;
+        };
+        let (actor_scheds, _) = parse_action_bytes(&actor_bytes);
+        let (global_scheds, _) = parse_action_bytes(&global_bytes);
+        let lookup = RoutineLookup::new()
+            .with_dat(&actor_scheds)
+            .with_dat(&global_scheds);
+
+        let full = ActiveScheduler::from_routine(&lookup, &CAST_ROUTINE).expect("cabk exists");
+        assert!(
+            full.stages
+                .iter()
+                .any(|t| t.stage.kind == StageKind::Motion && &t.stage.id == b"mb0?"),
+            "the full cast routine still carries the mb0? cast motion"
+        );
+
+        let effects = ActiveScheduler::effects_only(&lookup, &CAST_ROUTINE).expect("cabk exists");
+        assert!(
+            effects
+                .stages
+                .iter()
+                .all(|t| t.stage.kind != StageKind::Motion),
+            "effects_only suppresses every Motion stage"
+        );
+        let particles = effects
+            .stages
+            .iter()
+            .filter(|t| t.stage.kind == StageKind::Particle)
+            .count();
+        assert!(
+            particles >= 4,
+            "the aura's generators are inlined from the global dir, got {particles}"
+        );
+
+        assert!(
+            ActiveScheduler::effects_only(
+                &RoutineLookup::new().with_dat(&actor_scheds),
+                &CAST_ROUTINE
+            )
+            .expect("cabk exists")
+            .stages
+            .is_empty(),
+            "without the global tier the aura sub-routines resolve to nothing — the original bug"
         );
     }
 }

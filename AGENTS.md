@@ -45,15 +45,11 @@ cargo run -p ffxi-client --no-default-features -- play --headless  # JSON event-
 
 Durable work items live in [beads](https://github.com/steveyegge/beads) (`bd`), a git-backed tracker checked into `.beads/`. Install with `brew install beads`. The dependency graph is a local Dolt db (gitignored); `.beads/issues.jsonl` is the diffable, PR-reviewable export — that's the file that crosses into git, so review it like code.
 
-- `bd ready` — actionable work (open, unblocked). `bd list --status=in_progress` — active work.
-- `bd create --title=… --description=… --type=feature --priority=2` — new issue. `bd update <id> --claim`, `bd close <id>`, `bd show <id>`.
-- Priorities are `0`–`4` (0 = critical), **not** high/medium/low. Don't run `bd edit` (opens `$EDITOR`, blocks agents).
-
 Beads is the **single source of truth for all durable work** (there is no `docs/ROADMAP.md` — that scoreboard was removed as a redundant hand-kept projection of beads). The grounded parity backlog is the `roadmap`-labelled beads, each citing `file:line` evidence and carrying `vanilla`/`enhanced` plus an area label (`hud`, `combat-action`, …). Pick work with `bd ready`. MEMORY.md auto-memory sits alongside beads and is **not** replaced by it — do **not** migrate it into `bd remember`.
 
 **Commit authority (repository-profile grant).** The beads `bd prime` session protocol defaults to *conservative* — no commits without granted authority. This repository **grants standing authority to commit liberally**: group finished, uncontroversial work into clear, coherent commits as you go, without stopping to ask. This is the sanctioned override of the conservative default. Still **confirm before `git push`** (outward-facing) and before `bd dolt push` / remote sync, and never force-push or rewrite shared history. In a tree that mixes another session's edits, stage only your own hunks (`git add -p`), never `-A`.
 
-GitHub Issues are a **generated projection of beads** for contributors, not a second source of truth. `scripts/beads-github-publish.py` is the outbound publisher: each in-scope bead maps to one issue keyed by a `<!-- beads-id: <id> -->` body marker, and it keeps the issue's title/body/managed-labels (`vanilla-parity`/`enhanced`/`area:*`/`status:*`) and open/closed state in sync — closing a bead closes its issue. `.github/workflows/beads-github-publish.yml` runs it automatically on every push to `main` that touches `.beads/issues.jsonl`, publishing **all** beads (not just `roadmap`); `workflow_dispatch` remains available for manual runs (`dry_run` defaults true there). Beads edits only reach GitHub once the auto-exported `.beads/issues.jsonl` is committed and pushed. The independent, opt-in inbound path is `scripts/beads-github-sync.sh` (imports GitHub issues *into* beads, keyed on `external_ref: gh-<number>`); the two directions are not a loop, so don't round-trip the same issues through both.
+GitHub Issues are a **generated projection of beads** for contributors, not a second source of truth — see the `beads-github-sync` skill for the publisher, the workflow trigger, and the opt-in inbound path.
 
 ## Architecture
 

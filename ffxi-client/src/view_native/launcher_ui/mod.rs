@@ -7,6 +7,7 @@ pub(crate) mod char_list;
 mod char_preview;
 mod common;
 mod dat_setup;
+mod footer;
 mod graphics;
 mod login;
 mod server_edit;
@@ -815,6 +816,8 @@ pub(crate) fn register(
     char_create_preview::register(app);
 
     updater::register(app);
+
+    footer::register(app);
 
     server_version_check::register(app);
 

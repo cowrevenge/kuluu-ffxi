@@ -43,6 +43,7 @@ impl Crumb {
 }
 
 pub(super) const PANEL_BG: Color = Color::srgba(0.04, 0.04, 0.05, 0.85);
+pub(super) const PANEL_BORDER_COLOR: Color = Color::srgb(0.20, 0.20, 0.24);
 
 const PANEL_ROW_GAP: f32 = 12.0;
 const PANEL_PADDING: f32 = 24.0;
@@ -69,7 +70,7 @@ fn panel_bundle(node: Node) -> impl Bundle {
     (
         node,
         BackgroundColor(PANEL_BG),
-        BorderColor::all(Color::srgb(0.20, 0.20, 0.24)),
+        BorderColor::all(PANEL_BORDER_COLOR),
         TabGroup::default(),
     )
 }
@@ -96,7 +97,12 @@ pub(super) fn screen_root() -> impl Bundle {
         flex_direction: FlexDirection::Column,
         justify_content: JustifyContent::Center,
         align_items: AlignItems::Center,
-        padding: UiRect::all(Val::Px(SCREEN_EDGE_PADDING)),
+        padding: UiRect::new(
+            Val::Px(SCREEN_EDGE_PADDING),
+            Val::Px(SCREEN_EDGE_PADDING),
+            Val::Px(SCREEN_EDGE_PADDING),
+            Val::Px(SCREEN_EDGE_PADDING + super::footer::FOOTER_RESERVED_PX),
+        ),
         ..default()
     }
 }
@@ -149,7 +155,7 @@ pub(super) fn spawn_breadcrumb(
         })
         .insert((
             BackgroundColor(PANEL_BG),
-            BorderColor::all(Color::srgb(0.20, 0.20, 0.24)),
+            BorderColor::all(PANEL_BORDER_COLOR),
         ))
         .with_children(|chip| {
             chip.spawn(button_bundle(
@@ -388,4 +394,20 @@ pub(super) fn spawn_back_titlebar(
         NavAction::Back(LauncherState::Login),
         false,
     );
+}
+
+// Hand-rolled per-platform shell-out rather than a crate, to keep the
+// launcher's dependency surface at zero for this.
+pub(super) fn open_url(url: &str) {
+    #[cfg(target_os = "macos")]
+    let cmd = std::process::Command::new("open").arg(url).spawn();
+    #[cfg(target_os = "windows")]
+    let cmd = std::process::Command::new("cmd")
+        .args(["/C", "start", "", url])
+        .spawn();
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let cmd = std::process::Command::new("xdg-open").arg(url).spawn();
+    if let Err(e) = cmd {
+        tracing::warn!(error = %e, url, "could not open external url");
+    }
 }

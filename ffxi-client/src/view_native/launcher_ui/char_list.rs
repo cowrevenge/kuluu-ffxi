@@ -12,6 +12,10 @@ use super::common::{
 };
 use super::{CharListData, Credentials, DefaultCharName, LauncherState, SelectedChar, ServerInfo};
 
+/// Keeps the character panel off the right edge so the backdrop flythrough
+/// stays visible beside it.
+const CHAR_LIST_RIGHT_INSET_PX: f32 = 40.0;
+
 #[derive(Component)]
 pub(super) struct CharListRoot;
 
@@ -52,7 +56,12 @@ pub(super) fn spawn_char_list_ui(
                 justify_content: JustifyContent::Center,
                 align_items: AlignItems::FlexEnd,
                 row_gap: Val::Px(8.0),
-                padding: UiRect::right(Val::Px(40.0)),
+                padding: UiRect::new(
+                    Val::ZERO,
+                    Val::Px(CHAR_LIST_RIGHT_INSET_PX),
+                    Val::ZERO,
+                    Val::Px(super::footer::FOOTER_RESERVED_PX),
+                ),
                 ..default()
             },
         ))

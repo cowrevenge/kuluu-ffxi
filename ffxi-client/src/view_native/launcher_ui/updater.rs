@@ -10,7 +10,7 @@ use bevy::prelude::*;
 use bevy::ui_widgets::Activate;
 use sha2::{Digest, Sha256};
 
-use super::common::PANEL_BG;
+use super::common::{open_url, PANEL_BG};
 use super::RuntimeHandle;
 use crate::view_native::AppPhase;
 
@@ -138,20 +138,6 @@ pub(crate) fn fetch_and_verify_sha256(tag: &str, artifact_path: &Path) -> Result
         bail!("sha256 mismatch for {filename}: expected {expected}, got {actual}");
     }
     Ok(())
-}
-
-fn open_url(url: &str) {
-    #[cfg(target_os = "macos")]
-    let cmd = std::process::Command::new("open").arg(url).spawn();
-    #[cfg(target_os = "windows")]
-    let cmd = std::process::Command::new("cmd")
-        .args(["/C", "start", "", url])
-        .spawn();
-    #[cfg(all(unix, not(target_os = "macos")))]
-    let cmd = std::process::Command::new("xdg-open").arg(url).spawn();
-    if let Err(e) = cmd {
-        tracing::warn!(error = %e, url, "could not open release page");
-    }
 }
 
 fn start_update_check(

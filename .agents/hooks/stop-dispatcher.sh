@@ -12,7 +12,7 @@
 # Adding/removing/reordering a check = drop or rename a file in stop.d/;
 # no edit here. Each check is a standalone script (stdin = payload, exit
 # 0 = pass, exit 10 = fire with the reason on stdout) — independently
-# testable: `echo "$payload" | .claude/hooks/stop.d/20-commit.sh; echo $?`.
+# testable: `echo "$payload" | .agents/hooks/stop.d/20-commit.sh; echo $?`.
 
 set -uo pipefail
 

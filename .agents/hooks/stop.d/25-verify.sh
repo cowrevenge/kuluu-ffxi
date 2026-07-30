@@ -130,10 +130,10 @@ if [ -n "$thin_reason" ]; then
     esac
   fi
   sig_changed claude-verify-gate "$sig" || exit 0
-  fire "$(printf 'Verification gate: %s.\n\nChanged this session:\n%s\n\nRun the /verify skill against the live stack for these changes, then record the evidence:\n  .claude/skills/verify/scripts/record-evidence.sh --verdict pass --summary "<what was observed>" --artifact <events.jsonl|screenshot|log> [...]\nIf runtime verification genuinely does not apply, record --verdict waived --summary "<why>". Do not claim verification without artifacts.' \
+  fire "$(printf 'Verification gate: %s.\n\nChanged this session:\n%s\n\nRun the /verify skill against the live stack for these changes, then record the evidence:\n  .agents/skills/verify/scripts/record-evidence.sh --verdict pass --summary "<what was observed>" --artifact <events.jsonl|screenshot|log> [...]\nIf runtime verification genuinely does not apply, record --verdict waived --summary "<why>". Do not claim verification without artifacts.' \
     "$thin_reason" "$changed")"
 fi
 
 sig_changed claude-verify-gate "$sig" || exit 0
-fire "$(printf 'Verification gate: runtime-observable source changed this session with NO verification evidence.\n\nChanged:\n%s\n\nRun the /verify skill (headless MCP drive or GUI attach — see the surface table) and capture evidence, then record it:\n  .claude/skills/verify/scripts/record-evidence.sh --verdict pass --summary "<what was observed>" --artifact <events.jsonl|screenshot|log> [...]\nIf runtime verification genuinely does not apply to these files, record --verdict waived --summary "<why>". A waiver must postdate the last edit.' \
+fire "$(printf 'Verification gate: runtime-observable source changed this session with NO verification evidence.\n\nChanged:\n%s\n\nRun the /verify skill (headless MCP drive or GUI attach — see the surface table) and capture evidence, then record it:\n  .agents/skills/verify/scripts/record-evidence.sh --verdict pass --summary "<what was observed>" --artifact <events.jsonl|screenshot|log> [...]\nIf runtime verification genuinely does not apply to these files, record --verdict waived --summary "<why>". A waiver must postdate the last edit.' \
   "$changed")"

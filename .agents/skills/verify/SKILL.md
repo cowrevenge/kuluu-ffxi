@@ -124,12 +124,12 @@ double-send) are worth a line each even when they hold.
 
 ## Recording evidence (feeds the stop-hook gate)
 
-The stop-hook verify gate (`.claude/hooks/stop.d/25-verify.sh`) blocks session
+The stop-hook verify gate (`.agents/hooks/stop.d/25-verify.sh`) blocks session
 end when gated source (`*.rs`/`*.wgsl` outside tests/vendor) changed but no
 fresh evidence exists. After delivering the report, record the session:
 
 ```
-.claude/skills/verify/scripts/record-evidence.sh \
+.agents/skills/verify/scripts/record-evidence.sh \
   --verdict pass --summary "<what was OBSERVED, one line>" \
   --artifact artifacts/verify/events.jsonl --artifact artifacts/verify/zone.png
 ```

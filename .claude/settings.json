@@ -28,7 +28,7 @@
       {
         "hooks": [
           {
-            "command": "${CLAUDE_PROJECT_DIR}/.claude/hooks/rustfmt-on-edit.sh",
+            "command": "${CLAUDE_PROJECT_DIR}/.agents/hooks/rustfmt-on-edit.sh",
             "type": "command"
           }
         ],
@@ -37,7 +37,7 @@
       {
         "hooks": [
           {
-            "command": "${CLAUDE_PROJECT_DIR}/.claude/hooks/affected-crate-tests.sh",
+            "command": "${CLAUDE_PROJECT_DIR}/.agents/hooks/affected-crate-tests.sh",
             "type": "command"
           }
         ],
@@ -46,7 +46,7 @@
       {
         "hooks": [
           {
-            "command": "${CLAUDE_PROJECT_DIR}/.claude/hooks/readme-progress-nudge.sh",
+            "command": "${CLAUDE_PROJECT_DIR}/.agents/hooks/readme-progress-nudge.sh",
             "type": "command"
           }
         ],
@@ -57,7 +57,7 @@
       {
         "hooks": [
           {
-            "command": "${CLAUDE_PROJECT_DIR}/.claude/hooks/lsb-boundary-reminder.sh",
+            "command": "${CLAUDE_PROJECT_DIR}/.agents/hooks/lsb-boundary-reminder.sh",
             "type": "command"
           }
         ],
@@ -66,7 +66,7 @@
       {
         "hooks": [
           {
-            "command": "${CLAUDE_PROJECT_DIR}/.claude/hooks/comment-rot-reminder.sh",
+            "command": "${CLAUDE_PROJECT_DIR}/.agents/hooks/comment-rot-reminder.sh",
             "type": "command"
           }
         ],
@@ -77,15 +77,15 @@
       {
         "hooks": [
           {
-            "command": "${CLAUDE_PROJECT_DIR}/.claude/hooks/commit-nudge-start.sh",
+            "command": "${CLAUDE_PROJECT_DIR}/.agents/hooks/commit-nudge-start.sh",
             "type": "command"
           },
           {
-            "command": "${CLAUDE_PROJECT_DIR}/.claude/hooks/verify-gate-start.sh",
+            "command": "${CLAUDE_PROJECT_DIR}/.agents/hooks/verify-gate-start.sh",
             "type": "command"
           },
           {
-            "command": "${CLAUDE_PROJECT_DIR}/.claude/hooks/beads-prime-start.sh",
+            "command": "${CLAUDE_PROJECT_DIR}/.agents/hooks/beads-prime-start.sh",
             "type": "command"
           }
         ],
@@ -105,7 +105,7 @@
       {
         "hooks": [
           {
-            "command": "${CLAUDE_PROJECT_DIR}/.claude/hooks/stop-dispatcher.sh",
+            "command": "${CLAUDE_PROJECT_DIR}/.agents/hooks/stop-dispatcher.sh",
             "type": "command"
           }
         ]

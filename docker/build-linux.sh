@@ -49,6 +49,7 @@ rsync -a --delete \
     --exclude='/vendor/xi-tinkerer/' --exclude='/vendor/RZN-mapviewer/' \
     --exclude='/vendor/AltanaViewer/' \
     --exclude='/.omc/' --exclude='/.omo/' --exclude='/.claude/' \
+    --exclude='/.agents/' \
     --exclude='*.gz' --exclude='.DS_Store' --exclude='._*' \
     "$REPO/" "$STAGE/"
 

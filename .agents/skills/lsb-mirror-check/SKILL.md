@@ -140,7 +140,7 @@ Cite LSB findings in code comments at the point of the boundary:
 ```
 
 These citations are not decoration — they're consumed by the
-PreToolUse hook (`.claude/hooks/lsb-boundary-reminder.sh`) to detect
+PreToolUse hook (`.agents/hooks/lsb-boundary-reminder.sh`) to detect
 which files cross the boundary. A file that needs LSB-check but
 lacks a citation is one of the issues this skill is supposed to
 catch: surface that "missing citation" gap as a finding too.

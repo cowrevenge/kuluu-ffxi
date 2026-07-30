@@ -30,6 +30,6 @@ findings=$( { printf '%s\n' "$text" | scan_comment_rot || true; \
 cat >&2 <<MSG
 [comment] This project bans narrative code comments — they rot, restate the code, or paper over names that should be clearer. The text you're about to write adds:
 $findings
-Default to NO comment: encode the intent in names/types/asserts (block comments are discouraged too). Keep one only if it's a non-obvious WHY you can't encode, a citation to an external/vendor/protocol source, or a SAFETY justification (a magic literal wants a named const, not a comment). Doc comments (/// //!) are held to the same bar — tight and accurate, not rambling or stale. Ignore if a flag is a false positive.
+Default to NO comment: encode the intent in names/types/asserts (block comments are discouraged too). Keep one only if it's a non-obvious WHY you can't encode, a citation to an external/vendor/protocol source, or a SAFETY justification (a magic literal wants a named const, not a comment). [narrative/history] flags are prune-by-default: git log is the change history — describe the code as it IS, never how it changed. Doc comments (/// //!) are held to the same bar — tight and accurate, not rambling or stale. Ignore if a flag is a false positive.
 MSG
 exit 0

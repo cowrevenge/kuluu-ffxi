@@ -56,6 +56,9 @@ impl<'a> Iterator for ChunkWalker<'a> {
 
         let name = [header[0], header[1], header[2], header[3]];
         let value = u32::from_le_bytes([header[4], header[5], header[6], header[7]]);
+        // Retail chunk walker: 7-bit kind, 19-bit size in 16-byte units
+        // (FFXiMain .text 0x100732C0: shr 7 / and 0x7FFFF). Not 20 bits —
+        // bit 26 is is_shadow; xim's 20-bit walk is a known latent bug.
         let kind = (value & 0x7F) as u8;
         let size_units = (value >> 7) & 0x7FFFF;
         let total_bytes = (size_units as usize).saturating_mul(16);

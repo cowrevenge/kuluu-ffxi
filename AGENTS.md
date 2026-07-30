@@ -97,7 +97,7 @@ Wire decoders/encoders, coord transforms, session-state transitions, shared nume
 
 ## Conventions
 
-- **`vendor/` = build-time, used by the compiler. `research/` = read-only references** (XIM, AltanaViewer, Phoenix). Study upstream behavior and re-express it in our own code — do **not** copy source in. Both stay deinitialized unless you `git submodule update --init` them.
+- **`vendor/` = build-time, used by the compiler. `research/` = read-only references** (Phoenix, AltanaViewer, atom0s's XiEvents/XiPackets, Aamace's xim, cexi-viewer/cexi-docs, XIClient). Study upstream behavior and re-express it in our own code — do **not** copy source in. Both stay deinitialized unless you `git submodule update --init` them. The references are **not equally authoritative** — `research/README.md` ranks which to trust for what: the retail disassembly and XIClient for bit-level format questions, xim for behavior only (it has known latent bit-field bugs), cexi-docs as a verify-before-use hypothesis source.
 - **Vanilla parity is the default**; anything with no retail equivalent is Enhanced/addon (the `enhanced` label in beads), gated behind a feature flag.
 - `ffxi-viewer-core` is `#![forbid(unsafe_code)]`. The workspace allows `clippy::type_complexity` and `clippy::too_many_arguments` (Bevy system signatures).
 - Dev build-speed knobs live in `.cargo/config.toml` / `Cargo.toml` (Cranelift, `lld`, `dynamic_linking` feature). `CXXFLAGS` for the Recast C++ bridge is set per-platform by CI/docker (`.github/build-setup.yml`, `docker/build-linux.sh`), not in shared cargo config; a dev whose macOS Command Line Tools layout needs an `-isysroot` override sets it in their personal `~/.cargo/config.toml` (see the note atop `.cargo/config.toml`).

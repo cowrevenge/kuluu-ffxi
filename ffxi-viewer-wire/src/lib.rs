@@ -2,6 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 
+// v9: ViewerEvent::ActionStarted.result — optional (resolution, animation) pair (None for a
+// truncated, result-less, or non-basic-attack BATTLE2 body).
 // v8: SceneSnapshot.self_server_status (0x037 animation byte for self — the server's
 // authoritative rest state, which CHAR_PC only carries for other players).
 // v7: ViewerEvent::ActionStarted.{resolution, animation} (BATTLE2 first-result hit type +
@@ -10,7 +12,7 @@ use serde::{Deserialize, Serialize};
 // v5: InventoryItem.charges_remaining + next_use_vana_ts (item recast/charges).
 // v4: SceneSnapshot.delivery_box (dedicated delivery screen) + ViewerCommand::DeliveryBox
 // (postcard frames are not self-describing, so any shape change bumps this).
-pub const PROTOCOL_VERSION: u32 = 8;
+pub const PROTOCOL_VERSION: u32 = 9;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 pub struct Vec3 {
@@ -902,9 +904,9 @@ pub enum ViewerEvent {
         action_kind: u8,
         target_id: Option<u32>,
         /// First result's `resolution` (vendor/server enums/action/resolution.h) and
-        /// `animation` (attack.h AttackAnimation for a basic attack).
-        resolution: u8,
-        animation: u16,
+        /// `animation` (attack.h AttackAnimation) bits; only a `CATEGORY_BASIC_ATTACK` body
+        /// carries them, absent otherwise.
+        result: Option<(u8, u16)>,
     },
 
     /// One-shot emote broadcast (s2c 0x05A MOTIONMES): `emote_id` is the wire

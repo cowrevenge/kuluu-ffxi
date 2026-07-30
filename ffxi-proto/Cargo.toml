@@ -8,6 +8,7 @@ build = "build.rs"
 
 [dependencies]
 md-5.workspace = true
+serde.workspace = true
 thiserror.workspace = true
 
 [build-dependencies]

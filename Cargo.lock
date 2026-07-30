@@ -3218,6 +3218,7 @@ version = "0.4.0"
 dependencies = [
  "anyhow",
  "md-5",
+ "serde",
  "thiserror 2.0.18",
 ]
 

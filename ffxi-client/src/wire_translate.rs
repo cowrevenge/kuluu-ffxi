@@ -318,15 +318,13 @@ pub fn event_to_viewer_event(ev: AgentEvent) -> Option<wire::ViewerEvent> {
             action_id,
             action_kind,
             target_id,
-            resolution,
-            animation,
+            result,
         } => Some(wire::ViewerEvent::ActionStarted {
             actor_id,
             action_id,
             action_kind,
             target_id,
-            resolution,
-            animation,
+            result: result.map(ffxi_proto::melee::MeleeResult::to_wire),
         }),
         AgentEvent::EntityEmoted {
             actor_id,
@@ -576,12 +574,33 @@ mod tests {
                 action_id: 220,
                 action_kind: 4,
                 target_id,
-                resolution: 0,
-                animation: 0,
+                result: None,
             });
             assert!(matches!(
                 mapped,
                 Some(wire::ViewerEvent::ActionStarted { target_id: t, .. }) if t == target_id
+            ));
+        }
+    }
+
+    #[test]
+    fn action_started_keeps_absent_result_absent() {
+        let hit_right = ffxi_proto::melee::MeleeResult {
+            resolution: ffxi_proto::melee::ActionResolution::Hit,
+            animation: ffxi_proto::melee::AttackAnimation::RightAttack,
+        };
+        for result in [None, Some(hit_right)] {
+            let mapped = event_to_viewer_event(AgentEvent::ActionStarted {
+                actor_id: 0xCAFE,
+                action_id: 0,
+                action_kind: ffxi_proto::melee::CATEGORY_BASIC_ATTACK,
+                target_id: Some(0xBEEF),
+                result,
+            });
+            assert!(matches!(
+                mapped,
+                Some(wire::ViewerEvent::ActionStarted { result: r, .. })
+                    if r == result.map(ffxi_proto::melee::MeleeResult::to_wire)
             ));
         }
     }

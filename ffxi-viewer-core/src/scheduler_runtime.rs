@@ -996,8 +996,7 @@ pub fn dispatch_melee_action_started(
             actor_id,
             action_kind,
             target_id,
-            resolution,
-            animation,
+            result,
             ..
         } = *ev
         else {
@@ -1019,8 +1018,11 @@ pub fn dispatch_melee_action_started(
         }
         // An off-hand/kick routine is absent from some weapon-motion DATs; the main-hand swing
         // is the only routine every armed race base is known to carry.
-        let swing = ffxi_proto::melee::AttackAnimation::from_wire(animation)
-            .and_then(swing_routine)
+        let result = result.and_then(|(resolution, animation)| {
+            ffxi_proto::melee::MeleeResult::from_wire(resolution, animation)
+        });
+        let swing = result
+            .and_then(|r| swing_routine(r.animation))
             .filter(|r| lookup.get(r).is_some())
             .unwrap_or(*b"ati0");
         let merged = [MELEE_VOICE_ROUTINE, swing];
@@ -1032,9 +1034,7 @@ pub fn dispatch_melee_action_started(
         entity.try_insert(active).try_insert(ActionTarget(
             target_id.and_then(|id| tracked.by_id.get(&id).copied()),
         ));
-        match ffxi_proto::melee::ActionResolution::from_wire(resolution)
-            .and_then(hit_reaction_routine)
-        {
+        match result.and_then(|r| hit_reaction_routine(r.resolution)) {
             Some(routine) => {
                 entity.try_insert(PendingHitReaction { routine, armed_by });
             }

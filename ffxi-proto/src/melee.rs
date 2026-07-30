@@ -3,7 +3,7 @@ pub const CATEGORY_BASIC_ATTACK: u8 = 1;
 
 // vendor/server/src/map/enums/action/resolution.h — `result.resolution`, 3 bits in
 // vendor/server/src/map/packets/s2c/0x028_battle2.cpp:71.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ActionResolution {
     Hit,
     Miss,
@@ -23,12 +23,22 @@ impl ActionResolution {
             _ => return None,
         })
     }
+
+    pub fn to_wire(self) -> u8 {
+        match self {
+            Self::Hit => 0,
+            Self::Miss => 1,
+            Self::Guard => 2,
+            Self::Parry => 3,
+            Self::Block => 4,
+        }
+    }
 }
 
 // vendor/server/src/map/attack.h:52-59. Set from `attack.GetAnimationID()` into
 // `actionResult.animation` (vendor/server/src/map/entities/battleentity.cpp:3007) — for a basic
 // attack this is the swing slot, not a skill id.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum AttackAnimation {
     RightAttack,
     LeftAttack,
@@ -48,11 +58,55 @@ impl AttackAnimation {
             _ => return None,
         })
     }
+
+    pub fn to_wire(self) -> u16 {
+        match self {
+            Self::RightAttack => 0,
+            Self::LeftAttack => 1,
+            Self::RightKick => 2,
+            Self::LeftKick => 3,
+            Self::Throw => 4,
+        }
+    }
+}
+
+// vendor/server/src/map/packets/s2c/0x028_battle2.cpp:71-73 — one result block's
+// resolution(3)/animation(12) pair. A body that carries no result block, or that ends mid-block,
+// has no pair at all: `resolution == 0` is `Hit`, so absence must not be spelled as zero.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct MeleeResult {
+    pub resolution: ActionResolution,
+    pub animation: AttackAnimation,
+}
+
+impl MeleeResult {
+    pub fn from_wire(resolution: u8, animation: u16) -> Option<Self> {
+        Some(Self {
+            resolution: ActionResolution::from_wire(resolution)?,
+            animation: AttackAnimation::from_wire(animation)?,
+        })
+    }
+
+    pub fn to_wire(self) -> (u8, u16) {
+        (self.resolution.to_wire(), self.animation.to_wire())
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wire_roundtrips_through_melee_result() {
+        for resolution in 0..=4u8 {
+            for animation in 0..=4u16 {
+                let r = MeleeResult::from_wire(resolution, animation).expect("in-range bits");
+                assert_eq!(r.to_wire(), (resolution, animation));
+            }
+        }
+        assert_eq!(MeleeResult::from_wire(5, 0), None);
+        assert_eq!(MeleeResult::from_wire(0, 5), None);
+    }
 
     #[test]
     fn wire_values_match_lsb_enums() {

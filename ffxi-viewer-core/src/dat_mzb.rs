@@ -138,6 +138,12 @@ pub struct MzbCollisionGeometry {
 
     pub indices: Vec<u32>,
 
+    /// World-space authored face normal per triangle, parallel to
+    /// `indices.chunks(3)`. Empty means "fall back to the winding-derived
+    /// normal", which cannot distinguish a floor from a ceiling — see
+    /// [`MzbSubMesh::tri_normal`].
+    pub tri_normals: Vec<Vec3>,
+
     pub cell_index: std::collections::HashMap<(i32, i32), Vec<u32>>,
 
     /// DAT file the triangles came from. Grounding against a zone the player
@@ -192,6 +198,19 @@ pub const MZB_GRID_CELL: f32 = 8.0;
 
 pub const FLOOR_NORMAL_MIN: f32 = 0.5;
 
+/// Below this the placement matrix is singular and its inverse-transpose is all
+/// NaN, which would silently make every triangle in the placement non-grounding.
+const NORMAL_MATRIX_MIN_DET: f32 = 1e-6;
+
+/// Tallest rise [`MzbCollisionGeometry::ground_step`] will climb in one tick.
+///
+/// Sized from the rise distribution over 120 lattice walks across Lower Jeuno
+/// (`zz-ground-walk` with `KULUU_RISE_HIST`): stairs and ramps are 77% of rises
+/// and all fall under 0.5, structural jumps between separate surfaces cluster at
+/// 1.75 and above, and 0.5..1.5 is a sparse trough. This sits in that trough —
+/// double the tallest stair riser, well under the shortest storey.
+pub const MAX_GROUND_STEP_UP: f32 = 1.0;
+
 impl MzbCollisionGeometry {
     pub fn tri_count(&self) -> usize {
         self.indices.len() / 3
@@ -200,7 +219,7 @@ impl MzbCollisionGeometry {
     pub fn ground_raycast(&self, xz: Vec2, ceiling_y: f32) -> Option<f32> {
         let mut best_y: Option<f32> = None;
         self.for_each_hit_in_column(xz, |hit_y, normal| {
-            if normal.y.abs() < FLOOR_NORMAL_MIN || hit_y > ceiling_y {
+            if normal.y < FLOOR_NORMAL_MIN || hit_y > ceiling_y {
                 return;
             }
             best_y = Some(match best_y {
@@ -211,20 +230,45 @@ impl MzbCollisionGeometry {
         best_y
     }
 
-    /// Floor (near-flat normal) in this column whose height is closest to
-    /// `ref_y`. Unlike [`Self::ground_raycast`]'s one-sided `ceiling` cutoff,
-    /// "nearest" is a fixed point under grounding (a grounded entity's nearest
-    /// floor is the floor it stands on), so it doesn't oscillate when the
-    /// reference Y wobbles near a cutoff, and it picks the entity's own level in
-    /// a multi-floor building instead of the floor above.
+    /// Up-facing floor in this column whose height is closest to `ref_y`.
+    /// Unlike [`Self::ground_raycast`]'s one-sided `ceiling` cutoff, "nearest"
+    /// is a fixed point under grounding (a grounded entity's nearest floor is
+    /// the floor it stands on), so it doesn't oscillate when the reference Y
+    /// wobbles near a cutoff, and it picks the entity's own level in a
+    /// multi-floor building instead of the floor above.
+    ///
+    /// Down-facing surfaces are rejected: accepting them (`normal.y.abs()`)
+    /// makes the underside of every roof a landing surface, which is how a short
+    /// walk in Lower Jeuno used to strand the player on a ceiling (kuluu-0nnl).
     pub fn ground_nearest(&self, xz: Vec2, ref_y: f32) -> Option<f32> {
         let mut best: Option<f32> = None;
         self.for_each_hit_in_column(xz, |hit_y, normal| {
-            if normal.y.abs() < FLOOR_NORMAL_MIN {
+            if normal.y < FLOOR_NORMAL_MIN {
                 return;
             }
             best = Some(match best {
                 Some(prev) if (prev - ref_y).abs() <= (hit_y - ref_y).abs() => prev,
+                _ => hit_y,
+            });
+        });
+        best
+    }
+
+    /// [`Self::ground_nearest`] restricted to floors the walker could actually
+    /// step up onto. Unbounded downwards — descending a ledge is a fall, and
+    /// with no gravity model a downward snap is how a fall is expressed.
+    ///
+    /// This is the player-movement entry point. `ground_nearest` is for placing
+    /// an entity whose height is already known-good (other PCs, mobs, markers),
+    /// where a reference Y far below the floor must still snap up.
+    pub fn ground_step(&self, xz: Vec2, feet_y: f32, max_rise: f32) -> Option<f32> {
+        let mut best: Option<f32> = None;
+        self.for_each_hit_in_column(xz, |hit_y, normal| {
+            if normal.y < FLOOR_NORMAL_MIN || hit_y > feet_y + max_rise {
+                return;
+            }
+            best = Some(match best {
+                Some(prev) if (prev - feet_y).abs() <= (hit_y - feet_y).abs() => prev,
                 _ => hit_y,
             });
         });
@@ -268,9 +312,78 @@ impl MzbCollisionGeometry {
         let v2 = self.positions[self.indices[base + 2] as usize];
         if let Some(t) = ray_tri_intersect(orig, dir, v0, v1, v2) {
             let hit_y = orig.y + t * dir.y;
-            let normal = (v1 - v0).cross(v2 - v0).normalize_or_zero();
+            let normal = match self.tri_normals.get(tri_id) {
+                Some(n) => *n,
+                None => (v1 - v0).cross(v2 - v0).normalize_or_zero(),
+            };
             visit(hit_y, normal);
         }
+    }
+}
+
+/// Bakes placed submeshes into the geometry the player grounds on. The client
+/// and the `zz-*` collision probes both go through here, so a probe can't
+/// disagree with what the game actually walks on.
+///
+/// Every submesh contributes, regardless of mesh flag bit 0: that bit is
+/// `doesnt_block_los` (`ffxi-dat/src/mzb.rs`), a line-of-sight property that
+/// ordinary walkable street tiles set. Gating collision on it left 13% of the
+/// Lower Jeuno street columns with no floor to ground against (kuluu-0nnl).
+pub fn build_collision_geometry(
+    submeshes: &[MzbSubMesh],
+    instances: &[MzbInstance],
+    file_id: Option<u32>,
+) -> MzbCollisionGeometry {
+    let mut positions: Vec<Vec3> = Vec::new();
+    let mut indices: Vec<u32> = Vec::new();
+    let mut tri_normals: Vec<Vec3> = Vec::new();
+    let mut missing = 0usize;
+
+    for inst in instances {
+        let Some(sub) = submeshes.get(inst.submesh_idx) else {
+            continue;
+        };
+        let n_mat = Mat3::from_mat4(inst.bevy_transform.to_matrix());
+        let n_mat = if n_mat.determinant().abs() > NORMAL_MATRIX_MIN_DET {
+            n_mat.inverse().transpose()
+        } else {
+            Mat3::IDENTITY
+        };
+
+        let base = positions.len() as u32;
+        positions.extend(
+            sub.positions
+                .iter()
+                .map(|v| inst.bevy_transform.transform_point(Vec3::from_array(*v))),
+        );
+        indices.extend(sub.indices.iter().map(|i| i + base));
+        for t in 0..sub.indices.len() / 3 {
+            match sub.tri_normal.get(t) {
+                Some(n) => tri_normals.push((n_mat * Vec3::from_array(*n)).normalize_or_zero()),
+                None => {
+                    missing += 1;
+                    tri_normals.push(Vec3::ZERO);
+                }
+            }
+        }
+    }
+
+    if missing > 0 {
+        warn!(
+            ?file_id,
+            missing,
+            total_tris = indices.len() / 3,
+            "MZB triangles without an authored normal cannot be told floor-from-ceiling, \
+             so they will not ground"
+        );
+    }
+
+    MzbCollisionGeometry {
+        cell_index: build_cell_index(&positions, &indices),
+        positions,
+        indices,
+        tri_normals,
+        source_file_id: file_id,
     }
 }
 
@@ -426,6 +539,14 @@ pub struct MzbSubMesh {
 
     pub tri_material: Vec<u8>,
 
+    /// Authored face normal per triangle, mesh-local. MZB winding does not
+    /// imply facing — measured over Lower Jeuno / Port Jeuno / Windurst Woods /
+    /// West Ronfaure, the winding-derived normal is exactly antiparallel to the
+    /// authored one for 70-98% of triangles and parallel for the rest, never
+    /// anything between. So `(v1-v0).cross(v2-v0)` recovers the plane but not
+    /// which side is up, and only this can tell a floor from a ceiling.
+    pub tri_normal: Vec<[f32; 3]>,
+
     pub flags: u16,
 }
 
@@ -549,10 +670,16 @@ fn bake_submesh(m: &mzb::MzbMesh) -> MzbSubMesh {
         .flat_map(|t| [t[0], t[1], t[2]])
         .collect();
     let tri_material: Vec<u8> = m.tri_info.iter().map(|t| t.material).collect();
+    let tri_normal: Vec<[f32; 3]> = m
+        .triangle_normals
+        .iter()
+        .map(|&ni| m.normals.get(ni as usize).map_or([0.0; 3], |n| n.n))
+        .collect();
     MzbSubMesh {
         positions,
         indices,
         tri_material,
+        tri_normal,
         flags: m.flags,
     }
 }
@@ -988,19 +1115,7 @@ pub fn load_mzb(file_id: u32, chunk_idx: Option<usize>) -> Result<Vec<MzbSubMesh
         if m.vertices.is_empty() || m.triangles.is_empty() {
             continue;
         }
-        let positions: Vec<[f32; 3]> = m.vertices.iter().map(|v| v.pos).collect();
-        let indices: Vec<u32> = m
-            .triangles
-            .iter()
-            .flat_map(|t| [t[0], t[1], t[2]])
-            .collect();
-        let tri_material: Vec<u8> = m.tri_info.iter().map(|t| t.material).collect();
-        out.push(MzbSubMesh {
-            positions,
-            indices,
-            tri_material,
-            flags: m.flags,
-        });
+        out.push(bake_submesh(&m));
     }
     Ok(out)
 }
@@ -1464,8 +1579,8 @@ fn spawn_mzb_overlay(
 
     for inst in instances.iter() {
         let sub = &submeshes[inst.submesh_idx];
-        let is_collision = sub.flags & 1 == 0;
-        let (positions, indices, tri_mat) = if is_collision {
+        let blocks_los = sub.flags & 1 == 0;
+        let (positions, indices, tri_mat) = if blocks_los {
             (
                 &mut collision_positions,
                 &mut collision_indices,
@@ -1559,15 +1674,7 @@ fn spawn_mzb_overlay(
     let noncollision_verts = noncollision_positions.len();
     let noncollision_tris = noncollision_indices.len() / 3;
 
-    collision_geometry.positions = collision_positions
-        .iter()
-        .map(|p| Vec3::new(p[0], p[1], p[2]))
-        .collect();
-    collision_geometry.indices = collision_indices.clone();
-
-    collision_geometry.cell_index =
-        build_cell_index(&collision_geometry.positions, &collision_geometry.indices);
-    collision_geometry.source_file_id = Some(req.file_id);
+    **collision_geometry = build_collision_geometry(submeshes, instances, Some(req.file_id));
 
     spawn_merged(
         commands,
@@ -1850,21 +1957,31 @@ mod ground_tests {
         )
     }
 
-    fn two_floors(low: f32, high: f32) -> MzbCollisionGeometry {
+    /// `facings` is the authored normal per slab; `Vec3::Y` is a floor,
+    /// `Vec3::NEG_Y` a ceiling. MZB winding does not imply facing, so these are
+    /// independent of the vertex order in [`floor_at`].
+    fn slabs(slabs: &[(f32, Vec3)]) -> MzbCollisionGeometry {
         let mut positions = Vec::new();
         let mut indices = Vec::new();
-        for h in [low, high] {
-            let (verts, idx) = floor_at(h);
+        let mut tri_normals = Vec::new();
+        for (h, facing) in slabs {
+            let (verts, idx) = floor_at(*h);
             let base = positions.len() as u32;
             positions.extend_from_slice(&verts);
             indices.extend(idx.iter().map(|i| base + i));
+            tri_normals.extend([*facing; 2]);
         }
         MzbCollisionGeometry {
             positions,
             indices,
+            tri_normals,
             cell_index: std::collections::HashMap::new(),
             source_file_id: None,
         }
+    }
+
+    fn two_floors(low: f32, high: f32) -> MzbCollisionGeometry {
+        slabs(&[(low, Vec3::Y), (high, Vec3::Y)])
     }
 
     #[test]
@@ -1891,6 +2008,83 @@ mod ground_tests {
             geom.ground_nearest(Vec2::ZERO, 0.3).unwrap(),
             0.0,
             "near the lower floor stays low, not pulled up to the floor above"
+        );
+    }
+
+    #[test]
+    fn ground_nearest_ignores_ceilings() {
+        // The Lower Jeuno shape that stranded the player on a roof (kuluu-0nnl):
+        // street at 1.0, and the slab roofing the walkway below presenting its
+        // underside at 6.44 and its walkable top at 7.01.
+        let geom = slabs(&[
+            (1.0, Vec3::Y),
+            (6.44, Vec3::NEG_Y),
+            (7.01, Vec3::Y),
+            (9.2, Vec3::NEG_Y),
+        ]);
+        let at = |ref_y| geom.ground_nearest(Vec2::ZERO, ref_y).expect("a floor");
+        assert!(
+            (at(1.0) - 1.0).abs() < 1e-3,
+            "standing on the street stays on the street, got {}",
+            at(1.0)
+        );
+        assert!(
+            (at(6.0) - 7.01).abs() < 1e-3,
+            "a ceiling underside is not a landing surface; the slab's top is, got {}",
+            at(6.0)
+        );
+    }
+
+    #[test]
+    fn ground_nearest_rejects_a_ceiling_only_column() {
+        let geom = slabs(&[(6.44, Vec3::NEG_Y)]);
+        assert_eq!(
+            geom.ground_nearest(Vec2::ZERO, 1.0),
+            None,
+            "a column holding only a ceiling grounds nowhere, rather than snapping up to it"
+        );
+    }
+
+    #[test]
+    fn ground_step_refuses_an_out_of_reach_floor() {
+        // Lower Jeuno step 42: the street tile is missing from this column, and
+        // the only up-facing floor is the roof 6.1 above. Unbounded, that was a
+        // single snap onto the roof (kuluu-0nnl).
+        let geom = slabs(&[(7.13, Vec3::Y)]);
+        assert_eq!(
+            geom.ground_step(Vec2::ZERO, 1.0, MAX_GROUND_STEP_UP),
+            None,
+            "a floor beyond step-up range is not a landing surface"
+        );
+        assert!(
+            geom.ground_nearest(Vec2::ZERO, 1.0).is_some(),
+            "…while unbounded nearest-floor still finds it, which is the old bug"
+        );
+    }
+
+    #[test]
+    fn ground_step_climbs_a_stair_and_falls_freely() {
+        // Walking onto the next tread: this column holds only the higher step.
+        let tread = slabs(&[(0.4, Vec3::Y)]);
+        let up = tread.ground_step(Vec2::ZERO, 0.0, MAX_GROUND_STEP_UP);
+        assert!(
+            up.is_some_and(|y| (y - 0.4).abs() < 1e-3),
+            "a stair riser inside the bound still climbs, got {up:?}"
+        );
+
+        let geom = slabs(&[(0.4, Vec3::Y), (12.0, Vec3::Y)]);
+        let down = geom.ground_step(Vec2::ZERO, 12.0, MAX_GROUND_STEP_UP);
+        assert!(
+            down.is_some_and(|y| (y - 12.0).abs() < 1e-3),
+            "standing on the top floor is a fixed point, got {down:?}"
+        );
+        // Off the ledge: the upper floor is gone from this column, leaving a
+        // drop of 11.6 — far past the step-up bound, which must not clamp it.
+        let below = slabs(&[(0.4, Vec3::Y)]);
+        let fall = below.ground_step(Vec2::ZERO, 12.0, MAX_GROUND_STEP_UP);
+        assert!(
+            fall.is_some_and(|y| (y - 0.4).abs() < 1e-3),
+            "descent is unbounded — walking off a ledge falls, got {fall:?}"
         );
     }
 

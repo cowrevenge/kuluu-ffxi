@@ -1,13 +1,13 @@
 //! Walks a straight line between two ffxi (x, y) points, applying the client's
-//! per-frame grounding (`ground_nearest` seeded with the previous frame's
-//! height) and reporting every height change. Reproduces offline what the
-//! player sees when a short walk snaps them onto a roof.
+//! per-frame grounding (`ground_step` seeded with the previous frame's height)
+//! and reporting every height change, so a walk that misbehaves in game can be
+//! replayed without a live session.
 //!
 //! Usage: zz-ground-walk <zone_id> <x0> <y0> <z0> <x1> <y1> [step]
 
-use bevy::math::{Vec2, Vec3};
+use bevy::math::Vec2;
 use bevy::tasks::AsyncComputeTaskPool;
-use ffxi_viewer_core::dat_mzb::{load_mzb_placed, MzbCollisionGeometry};
+use ffxi_viewer_core::dat_mzb::{build_collision_geometry, load_mzb_placed, MAX_GROUND_STEP_UP};
 
 fn main() {
     let mut args = std::env::args().skip(1);
@@ -26,25 +26,69 @@ fn main() {
         .expect("zone -> mzb file id");
     let (submeshes, instances) = load_mzb_placed(file_id, None).expect("load_mzb_placed");
 
-    let mut positions: Vec<Vec3> = Vec::new();
-    let mut indices: Vec<u32> = Vec::new();
-    for inst in &instances {
-        let sub = &submeshes[inst.submesh_idx];
-        if sub.flags & 1 != 0 {
-            continue;
+    let geom = build_collision_geometry(&submeshes, &instances, Some(file_id));
+
+    // KULUU_RISE_HIST=cx,cy,radius,step — histogram the per-frame upward snap
+    // over a lattice of walks across an area, to separate the stair/ramp regime
+    // from pathological jumps between surfaces. Deliberately unbounded
+    // (`ground_nearest`, not `ground_step`): this is what sizes MAX_GROUND_STEP_UP,
+    // so it has to see the snaps that bound would reject.
+    if let Ok(spec) = std::env::var("KULUU_RISE_HIST") {
+        let p: Vec<f32> = spec.split(',').map(|s| s.parse().unwrap()).collect();
+        let (cx, cy, radius, gs) = (p[0], p[1], p[2], p[3]);
+        let lanes = (radius * 2.0 / gs) as i32;
+        let mut hist = [0usize; 12];
+        let mut rises: Vec<f32> = Vec::new();
+        for lane in 0..=lanes {
+            for axis in 0..2 {
+                let off = -radius + lane as f32 * gs;
+                let mut y_prev: Option<f32> = None;
+                let n = (radius * 2.0 / step) as i32;
+                for i in 0..=n {
+                    let t = -radius + i as f32 * step;
+                    let (px, py) = if axis == 0 {
+                        (cx + off, cy + t)
+                    } else {
+                        (cx + t, cy + off)
+                    };
+                    let seed = y_prev.unwrap_or(1.0);
+                    let Some(hit) = geom.ground_nearest(Vec2::new(px, -py), seed) else {
+                        continue;
+                    };
+                    if let Some(prev) = y_prev {
+                        let rise = hit - prev;
+                        if rise > 0.001 {
+                            rises.push(rise);
+                            let b = (rise / 0.25).floor().min(11.0) as usize;
+                            hist[b] += 1;
+                        }
+                    }
+                    y_prev = Some(hit);
+                }
+            }
         }
-        let base = positions.len() as u32;
-        for v in &sub.positions {
-            positions.push(inst.bevy_transform.transform_point(Vec3::from_array(*v)));
+        rises.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        println!(
+            "upward snaps over {} lattice walks: {}",
+            lanes * 2,
+            rises.len()
+        );
+        for (b, c) in hist.iter().enumerate() {
+            if *c > 0 {
+                println!(
+                    "  [{:.2}, {:.2}): {c}",
+                    b as f32 * 0.25,
+                    (b + 1) as f32 * 0.25
+                );
+            }
         }
-        indices.extend(sub.indices.iter().map(|i| i + base));
+        for q in [0.5, 0.9, 0.99, 0.999] {
+            let i = ((rises.len() as f64 - 1.0) * q) as usize;
+            println!("  p{:<5} = {:.3}", q * 100.0, rises[i]);
+        }
+        println!("  max     = {:.3}", rises.last().unwrap());
+        return;
     }
-    let geom = MzbCollisionGeometry {
-        cell_index: Default::default(),
-        positions,
-        indices,
-        source_file_id: Some(file_id),
-    };
 
     let dist = ((x1 - x0).powi(2) + (y1 - y0).powi(2)).sqrt();
     let n = (dist / step).ceil().max(1.0) as usize;
@@ -58,7 +102,7 @@ fn main() {
         let t = i as f32 / n as f32;
         let x = x0 + (x1 - x0) * t;
         let y = y0 + (y1 - y0) * t;
-        let Some(hit) = geom.ground_nearest(Vec2::new(x, -y), bevy_y) else {
+        let Some(hit) = geom.ground_step(Vec2::new(x, -y), bevy_y, MAX_GROUND_STEP_UP) else {
             println!("  step {i:4}: ffxi=({x:7.3},{y:7.3})  NO FLOOR (kept bevy_y={bevy_y:.3})");
             continue;
         };

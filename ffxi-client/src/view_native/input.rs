@@ -920,11 +920,17 @@ pub fn dispatch_movement_system(
 
     // Ground height on the MZB zone collision — the retail `.dat` floor, which
     // has the stairs and ramps the coarse LSB pathing navmesh flattens away
-    // (kuluu-oe8y). `ground_nearest` picks the floor closest to our current feet,
-    // so a small stair step climbs (nearest floor is the next step) and a
-    // stacked column (Bastok Markets' walkway over its canal) resolves to the
-    // level we're on rather than teleporting to the layer below. MZB collision
-    // is in Bevy space (bevy.x = ffxi.x, bevy.z = -ffxi.y, bevy.y = -ffxi.z).
+    // (kuluu-oe8y). `ground_step` picks the up-facing floor closest to our feet
+    // that we could climb to, so a stair step climbs (nearest floor is the next
+    // step) and a stacked column (Bastok Markets' walkway over its canal)
+    // resolves to the level we're on rather than teleporting to another layer.
+    // MZB collision is in Bevy space (bevy.x = ffxi.x, bevy.z = -ffxi.y,
+    // bevy.y = -ffxi.z).
+    //
+    // The step-up bound is what keeps a gap in the floor from launching us: with
+    // it unbounded, one tick in Lower Jeuno snapped 5.5 units onto a roof and the
+    // ratcheted reference height kept us there (kuluu-0nnl). No floor within
+    // reach means hold our height and let the server correct.
     //
     // Horizontal movement is unconstrained here: the navmesh no longer gates it
     // (it's mob-pathing only now). Client-side wall collision from MZB walls is
@@ -933,7 +939,11 @@ pub fn dispatch_movement_system(
     let final_y = y;
     let final_z = env
         .collision
-        .ground_nearest(bevy::math::Vec2::new(final_x, -final_y), -basis_pos.z)
+        .ground_step(
+            bevy::math::Vec2::new(final_x, -final_y),
+            -basis_pos.z,
+            ffxi_viewer_core::dat_mzb::MAX_GROUND_STEP_UP,
+        )
         .map(|floor_bevy_y| -floor_bevy_y)
         .unwrap_or(basis_pos.z);
 

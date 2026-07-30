@@ -5,7 +5,7 @@
 
 use bevy::math::{Vec2, Vec3};
 use bevy::tasks::AsyncComputeTaskPool;
-use ffxi_viewer_core::dat_mzb::{load_mzb_placed, MzbCollisionGeometry, FLOOR_NORMAL_MIN};
+use ffxi_viewer_core::dat_mzb::{build_collision_geometry, load_mzb_placed, FLOOR_NORMAL_MIN};
 
 fn main() {
     let mut args = std::env::args().skip(1);
@@ -58,12 +58,7 @@ fn main() {
         println!("collision AABB (bevy): min={min:?} max={max:?}");
     }
 
-    let geom = MzbCollisionGeometry {
-        cell_index: Default::default(),
-        positions,
-        indices,
-        source_file_id: Some(file_id),
-    };
+    let geom = build_collision_geometry(&submeshes, &instances, Some(file_id));
 
     // bevy.x = ffxi.x, bevy.z = -ffxi.y, bevy.y = -ffxi.z
     let bevy_xz = Vec2::new(px, -py);

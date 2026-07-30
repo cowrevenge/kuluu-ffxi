@@ -21,3 +21,12 @@
 [submodule "research/XiPackets"]
 	path = research/XiPackets
 	url = https://github.com/atom0s/XiPackets.git
+[submodule "research/cexi-viewer"]
+	path = research/cexi-viewer
+	url = https://github.com/CatsAndBoats/cexi-viewer
+[submodule "research/cexi-docs"]
+	path = research/cexi-docs
+	url = https://github.com/CatsAndBoats/cexi-docs
+[submodule "research/XIClient"]
+	path = research/XIClient
+	url = https://gitlab.com/Aenge/XIClient

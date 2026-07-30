@@ -22,6 +22,33 @@ const END_ROUTINE_OPCODE: u8 = 0x00;
 const RANDOM_BLOCK_OPEN: u8 = 0x3D;
 const RANDOM_BLOCK_CLOSE: u8 = 0x3E;
 
+// research/xim EffectRoutineParser.kt:408-427 — 0x64/0x67 ControlFlowBranch, 0x69/0x6A
+// ControlFlowBlock, 0x6B ControlFlowCondition.
+const CONTROL_FLOW_BRANCH_TRUE: u8 = 0x64;
+const CONTROL_FLOW_BRANCH_FALSE: u8 = 0x67;
+const CONTROL_FLOW_BLOCK_OPEN: u8 = 0x69;
+const CONTROL_FLOW_BLOCK_CLOSE: u8 = 0x6A;
+const CONTROL_FLOW_CONDITION: u8 = 0x6B;
+
+// research/xim EffectRoutineParser.kt:92-93 — parseSection2 reads delay(+4) and duration(+6)
+// for EVERY opcode before dispatching, so the shortest stage the encoding admits is 8 bytes.
+// Opcodes that take an id argument (+8) are 12 bytes or longer.
+const STAGE_HEADER_LEN: usize = 8;
+const STAGE_WITH_ID_LEN: usize = 12;
+const DELAY_OFFSET: usize = 4;
+const DURATION_OFFSET: usize = 6;
+const ID_OFFSET: usize = 8;
+
+// research/xim EffectRoutineParser.kt:115-130: after id(+8), a zero32(+12) and two floats
+// (+16,+20), the 0x05 motion payload carries transitionIn(+24), a zero u16(+26),
+// transitionOut(+28), maxLoop(+30).
+const MOTION_PAYLOAD_LEN: usize = 32;
+const MOTION_TRANSITION_IN_OFFSET: usize = 24;
+const MOTION_TRANSITION_OUT_OFFSET: usize = 28;
+const MOTION_MAX_LOOP_OFFSET: usize = 30;
+
+const NO_STAGE_ID: [u8; 4] = [0; 4];
+
 fn effect_section_start(body: &[u8]) -> usize {
     let Some(raw) = body
         .get(SECTION2_SLOT..SECTION2_SLOT + 4)
@@ -185,24 +212,46 @@ impl Scheduler {
                 break;
             }
 
-            if stage_bytes >= 12 && cursor + 12 <= body.len() {
-                let delay = u16::from_le_bytes([body[cursor + 4], body[cursor + 5]]);
-                let duration = u16::from_le_bytes([body[cursor + 6], body[cursor + 7]]);
-                let id = [
-                    body[cursor + 8],
-                    body[cursor + 9],
-                    body[cursor + 10],
-                    body[cursor + 11],
-                ];
-                let kind = StageKind::from_stage(raw_type, length_words);
-                // research/xim EffectRoutineParser.kt:115-130: after id(+8) and a zero32(+12)
-                // and two floats(+16,+20), the 0x05 motion payload carries transitionIn(+24),
-                // a zero u16(+26), transitionOut(+28), maxLoop(+30).
+            // research/xim EffectRoutineParser.kt:275-285 — the closer is not a member of the
+            // block it ends (`addEffectRoutine` is never called for it), so `open_group` must
+            // already be cleared when the stage below is pushed.
+            if raw_type == RANDOM_BLOCK_CLOSE {
+                open_group = None;
+            }
+
+            if stage_bytes >= STAGE_HEADER_LEN {
                 let read_u16 =
                     |off: usize| u16::from_le_bytes([body[cursor + off], body[cursor + off + 1]]);
+                // research/xim EffectRoutineParser.kt:413-418 — ControlFlowBlock is constructed
+                // with `delay = 0` whatever the bytes say.
+                let delay = match raw_type {
+                    CONTROL_FLOW_BLOCK_OPEN | CONTROL_FLOW_BLOCK_CLOSE => 0,
+                    _ => read_u16(DELAY_OFFSET),
+                };
+                let duration = read_u16(DURATION_OFFSET);
+                let has_id = stage_bytes >= STAGE_WITH_ID_LEN;
+                let id = if has_id {
+                    [
+                        body[cursor + ID_OFFSET],
+                        body[cursor + ID_OFFSET + 1],
+                        body[cursor + ID_OFFSET + 2],
+                        body[cursor + ID_OFFSET + 3],
+                    ]
+                } else {
+                    NO_STAGE_ID
+                };
+                let kind = if has_id {
+                    StageKind::from_stage(raw_type, length_words)
+                } else {
+                    StageKind::Unknown
+                };
                 let (max_loops, transition_in, transition_out) =
-                    if kind == StageKind::Motion && stage_bytes >= 32 {
-                        (read_u16(30), read_u16(24), read_u16(28))
+                    if kind == StageKind::Motion && stage_bytes >= MOTION_PAYLOAD_LEN {
+                        (
+                            read_u16(MOTION_MAX_LOOP_OFFSET),
+                            read_u16(MOTION_TRANSITION_IN_OFFSET),
+                            read_u16(MOTION_TRANSITION_OUT_OFFSET),
+                        )
                     } else {
                         (0, 0, 0)
                     };
@@ -233,13 +282,9 @@ impl Scheduler {
                     running_frame = running_frame.saturating_add(delay as u32);
                 }
             }
-            match raw_type {
-                RANDOM_BLOCK_OPEN => {
-                    open_group = Some(next_group);
-                    next_group = next_group.saturating_add(1);
-                }
-                RANDOM_BLOCK_CLOSE => open_group = None,
-                _ => {}
+            if raw_type == RANDOM_BLOCK_OPEN {
+                open_group = Some(next_group);
+                next_group = next_group.saturating_add(1);
             }
             cursor += stage_bytes;
             // EffectRoutineParser.kt:81 — opcode 0x00 ends the section; section 3 follows it in
@@ -251,14 +296,20 @@ impl Scheduler {
         Ok(Self { name, stages })
     }
 
-    // research/xim EffectRoutineParser.kt:408-427 — 0x64/0x67 ControlFlowBranch, 0x69/0x6A
-    // ControlFlowBlock, 0x6B ControlFlowCondition. A routine built out of these is a switch
-    // (`daml` picks one hit reaction, `dam0` one additional effect), so inlining it whole would
-    // run every branch at once. We do not evaluate the conditions; callers pick the branch.
+    // A routine built out of these is a switch (`daml` picks one hit reaction, `dam0` one
+    // additional effect), so inlining it whole would run every branch at once. We do not
+    // evaluate the conditions; callers pick the branch.
     pub fn has_control_flow(&self) -> bool {
-        self.stages
-            .iter()
-            .any(|t| matches!(t.stage.raw_type, 0x64 | 0x67 | 0x69 | 0x6A | 0x6B))
+        self.stages.iter().any(|t| {
+            matches!(
+                t.stage.raw_type,
+                CONTROL_FLOW_BRANCH_TRUE
+                    | CONTROL_FLOW_BRANCH_FALSE
+                    | CONTROL_FLOW_BLOCK_OPEN
+                    | CONTROL_FLOW_BLOCK_CLOSE
+                    | CONTROL_FLOW_CONDITION
+            )
+        })
     }
 
     pub fn sound_events(&self) -> impl Iterator<Item = SoundEvent> + '_ {
@@ -796,6 +847,120 @@ mod tests {
                 .iter()
                 .all(|t| t.stage.random_group.is_some() || t.stage.kind == StageKind::Unknown),
             "every sound in vatk is an alternative, not an unconditional stage"
+        );
+    }
+
+    // research/xim EffectRoutineParser.kt:132-134 AnimationLockEffect — an argument-less opcode,
+    // so the stage is 8 bytes and carries only delay/duration.
+    const ANIMATION_LOCK_OPCODE: u8 = 0x07;
+    const ARGLESS_STAGE_WORDS: u8 = (STAGE_HEADER_LEN / 4) as u8;
+
+    fn timed_stage_bytes(opcode: u8, length_words: u8, delay: u16, duration: u16) -> Vec<u8> {
+        let mut b = vec![opcode, length_words, 0, 0];
+        b.extend_from_slice(&delay.to_le_bytes());
+        b.extend_from_slice(&duration.to_le_bytes());
+        b
+    }
+
+    // research/xim EffectRoutineParser.kt:92-93 — delay is read for EVERY opcode, so an 8-byte
+    // argument-less stage still advances the routine clock for the stages after it.
+    #[test]
+    fn argless_stage_still_advances_the_routine_clock() {
+        let mut body = vec![0u8; SCHEDULER_HEADER_LEN];
+        body.extend(timed_stage_bytes(0x05, 0x03, 10, 20));
+        body.extend_from_slice(b"mot0");
+        body.extend(timed_stage_bytes(
+            ANIMATION_LOCK_OPCODE,
+            ARGLESS_STAGE_WORDS,
+            25,
+            0,
+        ));
+        body.extend(timed_stage_bytes(0x53, 0x03, 0, 1));
+        body.extend_from_slice(b"snd0");
+
+        let s = Scheduler::parse(*b"main", &body).unwrap();
+        assert_eq!(s.stages.len(), 3);
+        assert_eq!(s.stages[1].stage.raw_type, ANIMATION_LOCK_OPCODE);
+        assert_eq!(s.stages[1].frame, 10);
+        assert_eq!(s.stages[1].stage.delay_frames, 25);
+        assert_eq!(&s.stages[1].stage.id, &NO_STAGE_ID);
+        assert_eq!(
+            s.stages[2].frame, 35,
+            "the sound waits out the animation lock's delay too"
+        );
+    }
+
+    // research/xim EffectRoutineParser.kt:408-412 — ControlFlowBranch takes no argument, so a
+    // switch is built entirely out of 8-byte stages.
+    #[test]
+    fn control_flow_is_seen_through_argless_branch_opcodes() {
+        let mut body = vec![0u8; SCHEDULER_HEADER_LEN];
+        body.extend(timed_stage_bytes(
+            CONTROL_FLOW_BRANCH_TRUE,
+            ARGLESS_STAGE_WORDS,
+            0,
+            0,
+        ));
+        body.extend(timed_stage_bytes(0x09, 0x03, 0, 0));
+        body.extend_from_slice(b"ldam");
+
+        let s = Scheduler::parse(*b"daml", &body).unwrap();
+        assert!(s.has_control_flow());
+        assert_eq!(s.stages[1].stage.kind, StageKind::SubRoutineOnTarget);
+    }
+
+    // research/xim EffectRoutineParser.kt:413-418 — ControlFlowBlock is built with `delay = 0`.
+    #[test]
+    fn control_flow_block_delay_is_forced_to_zero() {
+        let mut body = vec![0u8; SCHEDULER_HEADER_LEN];
+        body.extend(timed_stage_bytes(
+            CONTROL_FLOW_BLOCK_OPEN,
+            ARGLESS_STAGE_WORDS,
+            99,
+            0,
+        ));
+        body.extend(timed_stage_bytes(0x53, 0x03, 0, 0));
+        body.extend_from_slice(b"snd0");
+
+        let s = Scheduler::parse(*b"blk0", &body).unwrap();
+        assert_eq!(s.stages[0].stage.delay_frames, 0);
+        assert_eq!(s.stages[1].frame, 0);
+    }
+
+    // research/xim EffectRoutineParser.kt:282-285 — the closer calls no `addEffectRoutine`, so it
+    // is not one of the block's alternatives. Tagged as a member it could be the pick, and the
+    // whole block would run nothing.
+    #[test]
+    fn random_block_close_is_not_a_member() {
+        let mut body = vec![0u8; SCHEDULER_HEADER_LEN];
+        body.extend(timed_stage_bytes(
+            RANDOM_BLOCK_OPEN,
+            ARGLESS_STAGE_WORDS,
+            0,
+            0,
+        ));
+        for id in [b"atk1", b"atk2"] {
+            body.extend(timed_stage_bytes(0x0A, 0x03, 7, 0));
+            body.extend_from_slice(id);
+        }
+        // Id-bearing closer: the >= 12-byte variant, distinct from the 8-byte argless form.
+        body.extend(timed_stage_bytes(RANDOM_BLOCK_CLOSE, 0x03, 0, 0));
+        body.extend_from_slice(&NO_STAGE_ID);
+
+        let s = Scheduler::parse(*b"vatk", &body).unwrap();
+        let closer = s
+            .stages
+            .iter()
+            .find(|t| t.stage.raw_type == RANDOM_BLOCK_CLOSE)
+            .expect("the closer is a stage");
+        assert_eq!(closer.stage.random_group, None);
+        assert_eq!(
+            s.stages
+                .iter()
+                .filter(|t| t.stage.random_group == Some(0))
+                .count(),
+            2,
+            "only the two alternatives belong to the block"
         );
     }
 

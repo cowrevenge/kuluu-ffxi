@@ -1726,14 +1726,15 @@ mod tests {
         assert!(a.current_frame() >= DELAY_FRAMES);
     }
 
-    // Retail-byte fixture (skips without an install): Cure's effect DAT (file 2801 = 0xAF1)
-    // runs its target routine `tgt0` out to frame 200 — 3.33 s of wall time at the authored
-    // 60 fps, and the shape probed for kuluu-k6tz.
+    // Retail-byte fixture (skips without an install): Cure's effect DAT (file 2801 = 0xAF1) runs
+    // its target routine `tgt0` out to frame 239 — 3.98 s at the authored 60 fps. That frame is
+    // the routine's own `totalDelay` header field (research/xim EffectRoutineParser.kt:46), the
+    // DAT's independent statement of its length, which the summed stage delays must reproduce.
     #[test]
     fn real_dat_cure_target_routine_completes_in_retail_wall_time() {
         const CURE_FILE: u32 = 2801;
-        const TGT0_LAST_FRAME: u32 = 200;
-        const TGT0_SECS: f32 = 3.333;
+        const TGT0_LAST_FRAME: u32 = 239;
+        const TGT0_SECS: f32 = 3.983;
 
         let Some(root) = ffxi_dat::archive::open_test_install() else {
             return;
@@ -2123,14 +2124,17 @@ mod tests {
             "the aura's generators are inlined from the global dir, got {particles}"
         );
 
-        assert!(
+        assert_eq!(
             ActiveScheduler::effects_only(
                 &RoutineLookup::new().with_dat(&actor_scheds),
                 &CAST_ROUTINE
             )
             .expect("cabk exists")
             .stages
-            .is_empty(),
+            .iter()
+            .filter(|t| t.stage.kind != StageKind::Unknown)
+            .count(),
+            0,
             "without the global tier the aura sub-routines resolve to nothing — the original bug"
         );
     }

@@ -35,10 +35,6 @@ The MCP binary lands at `target/debug/ffxi-mcp`. Integration tests locate it
 via `current_exe` walk-up; if you skip this step, `agent_session` and
 `disconnect_recovery` panic with an explicit instruction.
 
-If your working tree has the parallel-session view-3d WIP applied, the
-binary target may not compile — use `cargo build -p ffxi-mcp --bin ffxi-mcp`
-or stash the WIP first.
-
 ## 3. Unit tests
 
 ```bash

@@ -402,6 +402,8 @@ fn main() -> Result<()> {
     )?;
     println!("ffxi-proto: scraped {} c2s packet names", c2s_names.len(),);
 
+    check_map_opcodes_against_lsb(&s2c_names, &c2s_names)?;
+
     let emote_src =
         fs::read_to_string(LSB_EMOTE_H).with_context(|| format!("reading {LSB_EMOTE_H}"))?;
     let emote_entries = parse_cpp_enum_class(&emote_src, "Emote")?;
@@ -543,6 +545,71 @@ fn parse_cpp_enum_class(src: &str, enum_name: &str) -> Result<Vec<(u32, String)>
         bail!("parsed zero entries for `enum class {enum_name}` — header format may have changed");
     }
     out.sort_by_key(|(id, _)| *id);
+    Ok(out)
+}
+
+/// `src/map.rs` declares each opcode by hand so it can carry the LSB citation and
+/// field-layout prose the generated name tables have nowhere to put. The values
+/// still have to match upstream, and a hand-kept guard list only covered 40 of
+/// the 78 — so read the declarations back out and check every one (kuluu-i9k0).
+const MAP_RS: &str = "src/map.rs";
+
+fn check_map_opcodes_against_lsb(
+    s2c_names: &[(u32, String)],
+    c2s_names: &[(u32, String)],
+) -> Result<()> {
+    println!("cargo:rerun-if-changed={MAP_RS}");
+    let src = fs::read_to_string(MAP_RS).with_context(|| format!("reading {MAP_RS}"))?;
+
+    let mut checked = 0usize;
+    for (module, upstream, prefix) in [
+        ("s2c", s2c_names, "GP_SERV_COMMAND_"),
+        ("c2s", c2s_names, "GP_CLI_COMMAND_"),
+    ] {
+        let known: std::collections::HashSet<u32> = upstream.iter().map(|(id, _)| *id).collect();
+        for (name, id) in parse_module_u16_consts(&src, module)? {
+            if !known.contains(&id) {
+                bail!(
+                    "{MAP_RS} `{module}::{name} = {id:#05X}` is not in the scraped \
+                     {prefix}* enum — the opcode drifted from upstream, or the \
+                     packet was renumbered"
+                );
+            }
+            checked += 1;
+        }
+    }
+    if checked == 0 {
+        bail!("parsed zero opcode consts from {MAP_RS} — its `pub mod s2c`/`c2s` shape changed");
+    }
+    println!("ffxi-proto: checked {checked} map opcodes against the LSB enums");
+    Ok(())
+}
+
+/// Every `pub const NAME: u16 = <int>;` directly inside `pub mod <module> {`.
+fn parse_module_u16_consts(src: &str, module: &str) -> Result<Vec<(String, u32)>> {
+    let header = format!("pub mod {module} {{");
+    let start = src
+        .find(&header)
+        .with_context(|| format!("no `{header}` in {MAP_RS}"))?;
+
+    let mut depth = 0i32;
+    let mut out = Vec::new();
+    for line in src[start..].lines() {
+        if depth == 1 {
+            if let Some(rest) = line.trim().strip_prefix("pub const ") {
+                if let Some((name, value)) = rest.split_once(": u16 = ") {
+                    let value = value.trim().trim_end_matches(';').trim();
+                    if let Some(id) = parse_int_lit(value) {
+                        out.push((name.trim().to_string(), id as u32));
+                    }
+                }
+            }
+        }
+        depth += line.matches('{').count() as i32 - line.matches('}').count() as i32;
+        if depth == 0 {
+            break;
+        }
+    }
     Ok(out)
 }
 

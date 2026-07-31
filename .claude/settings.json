@@ -51,6 +51,15 @@
           }
         ],
         "matcher": "Edit|Write"
+      },
+      {
+        "hooks": [
+          {
+            "command": "${CLAUDE_PROJECT_DIR}/.agents/hooks/xim-tier-reminder.sh",
+            "type": "command"
+          }
+        ],
+        "matcher": "Read|Grep|Glob"
       }
     ],
     "PreToolUse": [

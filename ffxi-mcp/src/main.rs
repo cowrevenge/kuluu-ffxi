@@ -489,7 +489,7 @@ impl FfxiServer {
                 match rx.recv().await {
                     Ok(ev) => {
                         let kind = event_kind_label(&ev);
-                        if p.kinds.is_empty() || p.kinds.iter().any(|k| k == kind) {
+                        if p.kinds.is_empty() || p.kinds.contains(&kind) {
                             return Ok::<_, ()>(Some((kind, ev)));
                         }
                     }
@@ -793,134 +793,24 @@ fn name_misses_view(state: &SessionState) -> serde_json::Value {
     })
 }
 
-fn event_kind_label(ev: &AgentEvent) -> &'static str {
-    match ev {
-        AgentEvent::Connected { .. } => "connected",
-        AgentEvent::StageChanged { .. } => "stage_changed",
-        AgentEvent::ZoneChanged { .. } => "zone_changed",
-        AgentEvent::PositionChanged { .. } => "position_changed",
-        AgentEvent::EntityUpserted { .. } => "entity_upserted",
-        AgentEvent::EntityRemoved { .. } => "entity_removed",
-        AgentEvent::EntityPatched { .. } => "entity_patched",
-        AgentEvent::NameExtractionMiss { .. } => "name_extraction_miss",
-        AgentEvent::ChatLine { .. } => "chat_line",
-        AgentEvent::EventStart { .. } => "event_start",
-        AgentEvent::EventDialog { .. } => "event_dialog",
-        AgentEvent::ShopUpdated { .. } => "shop_updated",
-        AgentEvent::StatusIconsUpdated { .. } => "status_icons_updated",
-        AgentEvent::AbilityRecastsUpdated { .. } => "ability_recasts_updated",
-        AgentEvent::EventEnded => "event_ended",
-        AgentEvent::KeyRotated { .. } => "key_rotated",
-        AgentEvent::Disconnected { .. } => "disconnected",
-        AgentEvent::Error { .. } => "error",
-        AgentEvent::Diagnostics { .. } => "diagnostics",
-        AgentEvent::NetStats { .. } => "net_stats",
-        AgentEvent::PartyMemberUpdated { .. } => "party_member_updated",
-        AgentEvent::LowHp { .. } => "low_hp",
-        AgentEvent::PartyMemberLowHp { .. } => "party_member_low_hp",
-        AgentEvent::EngagedBy { .. } => "engaged_by",
-        AgentEvent::TellReceived { .. } => "tell_received",
-        AgentEvent::Reconnected { .. } => "reconnected",
-        AgentEvent::SceneSummary { .. } => "scene_summary",
-        AgentEvent::InventoryUpdated { .. } => "inventory_updated",
-        AgentEvent::InventoryReady => "inventory_ready",
-        AgentEvent::EquipUpdated { .. } => "equip_updated",
-        AgentEvent::EquipCleared => "equip_cleared",
-        AgentEvent::SpellsKnownUpdated { .. } => "spells_known_updated",
-        AgentEvent::CommandDataUpdated { .. } => "command_data_updated",
-        AgentEvent::ReactorGoalChanged { .. } => "reactor_goal_changed",
-        AgentEvent::HumanInControl { .. } => "human_in_control",
-        AgentEvent::HumanReleased => "human_released",
-        AgentEvent::ForcedMove { .. } => "forced_move",
-        AgentEvent::MusicChanged { .. } => "music_changed",
-        AgentEvent::MusicVolumeChanged { .. } => "music_volume_changed",
-        AgentEvent::DeathTimerUpdated { .. } => "death_timer_updated",
-        AgentEvent::WeatherUpdated { .. } => "weather_updated",
-        AgentEvent::LogoutCountdown { .. } => "logout_countdown",
-        AgentEvent::SetFps { .. } => "set_fps",
-        AgentEvent::LevelUp { .. } => "level_up",
-        AgentEvent::SkillLevelUp { .. } => "skill_level_up",
-        AgentEvent::ActionStarted { .. } => "action_started",
-        AgentEvent::EntityEmoted { .. } => "entity_emoted",
-        AgentEvent::EmoteListUpdated { .. } => "emote_list_updated",
-        AgentEvent::VanaTimeSynced { .. } => "vana_time_synced",
-        AgentEvent::KeyItemsUpdated { .. } => "key_items_updated",
-        AgentEvent::CharStatsUpdated { .. } => "char_stats_updated",
-        AgentEvent::FishingCast { .. } => "fishing_cast",
-        AgentEvent::FishHooked { .. } => "fish_hooked",
-        AgentEvent::FishingServerPhase { .. } => "fishing_server_phase",
-        AgentEvent::SelfServerStatus { .. } => "self_server_status",
-        AgentEvent::FishingPhaseChanged { .. } => "fishing_phase_changed",
-        AgentEvent::FishingProgress { .. } => "fishing_progress",
-        AgentEvent::FishingEnded => "fishing_ended",
-        AgentEvent::JobInfoUpdated { .. } => "job_info_updated",
-        AgentEvent::MogHouse2fUnlockUpdated { .. } => "mog_house_2f_unlock_updated",
-        AgentEvent::ShopSellAppraisal { .. } => "shop_sell_appraisal",
-        AgentEvent::DeliveryBoxUpdated { .. } => "delivery_box_updated",
-        AgentEvent::CheckEquipReceived { .. } => "check_equip_received",
-        AgentEvent::CheckGeneralReceived { .. } => "check_general_received",
-        AgentEvent::CheckCleared => "check_cleared",
-        AgentEvent::WidescanListStart => "widescan_list_start",
-        AgentEvent::WidescanEntryReceived { .. } => "widescan_entry_received",
-        AgentEvent::WidescanListEnd => "widescan_list_end",
-        AgentEvent::WidescanTrackUpdated { .. } => "widescan_track_updated",
-        AgentEvent::SelfCastStarted { .. } => "self_cast_started",
-        AgentEvent::SelfCastProgress { .. } => "self_cast_progress",
-        AgentEvent::SelfCastEnded { .. } => "self_cast_ended",
-    }
+/// `AgentEvent` and `AgentCommand` are internally tagged (`state.rs`:1655 and
+/// :2021), so serde already owns the wire name of every variant. Reading the tag
+/// back keeps the agent-facing stream and the JSON payload from ever disagreeing;
+/// the hand-written tables these replaced had drifted on one arm
+/// (`DeliveryTake` reported `delivery_box`).
+fn serde_tag<T: serde::Serialize>(value: &T, tag: &str) -> String {
+    serde_json::to_value(value)
+        .ok()
+        .and_then(|v| v.get(tag).and_then(|t| t.as_str()).map(str::to_owned))
+        .unwrap_or_else(|| "unknown".to_owned())
 }
 
-fn cmd_kind_label(cmd: &AgentCommand) -> &'static str {
-    use ffxi_client::state::AgentCommand::*;
-    match cmd {
-        Move { .. } => "move",
-        StopMove => "stop_move",
-        Chat { .. } => "chat",
-        Tell { .. } => "tell",
-        Action { .. } => "action",
-        Emote { .. } => "emote",
-        RequestEmoteList => "request_emote_list",
-        EndEvent => "end_event",
-        EndEventChoice { .. } => "end_event_choice",
-        CustomMenuRespond { .. } => "custom_menu_respond",
-        Snapshot => "snapshot",
-        Disconnect => "disconnect",
-        Follow { .. } => "follow",
-        Engage { .. } => "engage",
-        PathTo { .. } => "path_to",
-        Cancel => "cancel",
-        RequestZoneChange { .. } => "request_zone_change",
-        MogHouseExit { .. } => "mog_house_exit",
-        ChangeJob { .. } => "change_job",
-        OpenMogMenu => "open_mog_menu",
-        MarkKeyItemsSeen { .. } => "mark_key_items_seen",
-        UseItem { .. } => "use_item",
-        Equip { .. } => "equip",
-        StackInventory { .. } => "stack_inventory",
-        MoveItem { .. } => "move_item",
-        BankWhenFull { .. } => "bank_when_full",
-        CheckTarget { .. } => "check_target",
-        CancelBuff { .. } => "cancel_buff",
-        ShopBuy { .. } => "shop_buy",
-        ReqLogout { .. } => "req_logout",
-        ReturnToHomePoint => "return_to_home_point",
-        Heal { .. } => "heal",
-        SetFps { .. } => "set_fps",
-        Fish => "fish",
-        FishingInput { .. } => "fishing_input",
-        FishingRequest { .. } => "fishing_request",
-        ShopSellReq { .. } => "shop_sell_req",
-        ShopSellConfirm => "shop_sell_confirm",
-        DeliveryBox { .. } => "delivery_box",
-        DeliveryTake { .. } => "delivery_box",
-        TextInput { .. } => "text_input",
-        DebugDrive { .. } => "debug_drive",
-        DebugHeights => "debug_heights",
-        SetTargetLock { .. } => "set_target_lock",
-        WidescanRequest => "widescan_request",
-        WidescanTrack { .. } => "widescan_track",
-        WidescanEnd => "widescan_end",
-    }
+fn event_kind_label(ev: &AgentEvent) -> String {
+    serde_tag(ev, "type")
+}
+
+fn cmd_kind_label(cmd: &AgentCommand) -> String {
+    serde_tag(cmd, "cmd")
 }
 
 async fn run_state_mirror(
@@ -1544,6 +1434,20 @@ mod tests {
         assert_eq!(
             event_kind_label(&AgentEvent::InventoryReady),
             "inventory_ready"
+        );
+    }
+
+    #[test]
+    fn delivery_commands_report_distinct_kinds() {
+        assert_eq!(
+            cmd_kind_label(&AgentCommand::DeliveryTake { slot: 3 }),
+            "delivery_take"
+        );
+        assert_eq!(
+            cmd_kind_label(&AgentCommand::DeliveryBox {
+                op: ffxi_client::state::DeliveryBoxOp::Confirm
+            }),
+            "delivery_box"
         );
     }
 

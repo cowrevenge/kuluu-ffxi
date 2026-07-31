@@ -192,6 +192,50 @@ pub(crate) struct AgentListen(pub Option<String>);
 #[derive(Resource, Default, Clone)]
 pub(crate) struct DatRootRes(pub Option<std::sync::Arc<ffxi_dat::DatRoot>>);
 
+/// Lets `insert_dat_roots` serve both the startup path (an `App` builder) and
+/// the launcher reload path (`Commands`), so the DAT-root list exists once.
+pub(crate) trait DatRootSink {
+    fn put<R: Resource>(&mut self, resource: R);
+}
+
+impl DatRootSink for App {
+    fn put<R: Resource>(&mut self, resource: R) {
+        self.insert_resource(resource);
+    }
+}
+
+impl DatRootSink for Commands<'_, '_> {
+    fn put<R: Resource>(&mut self, resource: R) {
+        self.insert_resource(resource);
+    }
+}
+
+/// Every consumer of a `DatRoot` reads it through its own resource, and each one
+/// must be re-inserted when the launcher changes the DAT path or that consumer
+/// silently keeps rendering from the previous root (kuluu-1tr2, kuluu-051).
+/// Adding a new `*DatRoot` means adding one line here and nowhere else.
+pub(crate) fn insert_dat_roots(
+    sink: &mut impl DatRootSink,
+    dat_root: Option<std::sync::Arc<ffxi_dat::DatRoot>>,
+) {
+    sink.put(ffxi_viewer_core::minimap::retail::MinimapDatRoot(
+        dat_root.clone(),
+    ));
+    sink.put(ffxi_viewer_core::hud::status_ribbon::StatusIconDatRoot(
+        dat_root.clone(),
+    ));
+    sink.put(ffxi_viewer_core::hud::item_dat_root::ItemDatRoot(
+        dat_root.clone(),
+    ));
+    sink.put(ffxi_viewer_core::moon_material::MoonDatRoot(
+        dat_root.clone(),
+    ));
+    sink.put(ffxi_viewer_core::ui_element_atlas::UiElementDatRoot(
+        dat_root.clone(),
+    ));
+    sink.put(DatRootRes(dat_root));
+}
+
 #[cfg(unix)]
 #[derive(Resource, Clone)]
 pub(crate) struct AgentPaused(pub std::sync::Arc<std::sync::atomic::AtomicBool>);
@@ -383,23 +427,8 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
         .init_resource::<text_input::CaptureMode>()
         .init_resource::<collision_bvh::ZoneCollisionBvh>()
         .insert_resource(ports)
-        .insert_resource(RelayListen(relay_listen))
-        .insert_resource(ffxi_viewer_core::minimap::retail::MinimapDatRoot(
-            dat_root.clone(),
-        ))
-        .insert_resource(ffxi_viewer_core::hud::status_ribbon::StatusIconDatRoot(
-            dat_root.clone(),
-        ))
-        .insert_resource(ffxi_viewer_core::hud::item_dat_root::ItemDatRoot(
-            dat_root.clone(),
-        ))
-        .insert_resource(ffxi_viewer_core::moon_material::MoonDatRoot(
-            dat_root.clone(),
-        ))
-        .insert_resource(ffxi_viewer_core::ui_element_atlas::UiElementDatRoot(
-            dat_root.clone(),
-        ))
-        .insert_resource(DatRootRes(dat_root));
+        .insert_resource(RelayListen(relay_listen));
+    insert_dat_roots(&mut app, dat_root);
     #[cfg(unix)]
     app.insert_resource(AgentListen(agent_listen));
 

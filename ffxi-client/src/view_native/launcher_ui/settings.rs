@@ -373,19 +373,7 @@ fn persist_and_reload(
     let app_count = root.app_summary().len();
     let arc = Arc::new(root);
 
-    commands.insert_resource(crate::view_native::DatRootRes(Some(arc.clone())));
-    commands.insert_resource(ffxi_viewer_core::minimap::retail::MinimapDatRoot(Some(
-        arc.clone(),
-    )));
-    commands.insert_resource(ffxi_viewer_core::hud::status_ribbon::StatusIconDatRoot(
-        Some(arc.clone()),
-    ));
-    commands.insert_resource(ffxi_viewer_core::hud::item_dat_root::ItemDatRoot(Some(
-        arc.clone(),
-    )));
-    commands.insert_resource(ffxi_viewer_core::ui_element_atlas::UiElementDatRoot(Some(
-        arc.clone(),
-    )));
+    crate::view_native::insert_dat_roots(commands, Some(arc.clone()));
 
     cache.entries.clear();
     last_zone.file_id = None;

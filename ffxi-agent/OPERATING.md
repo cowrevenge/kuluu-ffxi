@@ -1,114 +1,82 @@
 # Operating the FFXI agent harness
 
-Operator-facing runbook for verifying the harness end-to-end against a live
+Operator-facing runbook for driving an LLM harness against a live
 LandSandBoat-family server. The LLM-facing playbook is in `CLAUDE.md` /
-`AGENTS.md`; this doc is for the human driving the agent on a stage.
+`AGENTS.md`; this doc is for the human on the stage.
 
-## 1. Prerequisites
+Stack bring-up, surface selection, and evidence capture are **not** repeated
+here — they live in the `verify` skill (`.agents/skills/verify/`), which is
+the maintained source of truth:
 
-A running LSB stack. The dev `docker-compose` brings up:
+| Need | Read |
+|---|---|
+| Get the LSB stack up, container/port table, colima gotchas | `references/stack.md` |
+| Headless MCP drive, raw stdio, live integration tests | `references/drive-headless.md` |
+| Native window + MCP attach, screenshots, keystrokes | `references/drive-gui.md` |
 
-| Container          | Role                       | Port (host) |
-|--------------------|----------------------------|-------------|
-| `server-connect-1` | login (TCP/TLS) + lobby    | 54231 / 54001 |
-| `server-world-1`   | world / char-list          | (internal)  |
-| `server-search-1`  | auction search             | (internal)  |
-| `server-map-1`     | map (UDP / Blowfish)       | 54230       |
-| `server-database-1`| MariaDB                    | 3306        |
-
-Quick check:
-
-```bash
-docker ps --format '{{.Names}}\t{{.Status}}'
-nc -zv 127.0.0.1 54231   # auth listener should accept
-```
-
-If the stack is fresh, give it ~10 s to settle before driving traffic.
-
-## 2. Build
+## 1. Build
 
 ```bash
 cargo build -p ffxi-mcp
 ```
 
-The MCP binary lands at `target/debug/ffxi-mcp`. Integration tests locate it
-via `current_exe` walk-up; if you skip this step, `agent_session` and
-`disconnect_recovery` panic with an explicit instruction.
+The binary lands at `target/debug/ffxi-mcp`. Integration tests locate it by
+walking up from `current_exe` (`tests/common/mcp_client.rs:36`), so skipping
+this step makes `agent_session` / `disconnect_recovery` panic with an explicit
+build instruction. Note `.mcp.json` invokes `cargo run --release` instead —
+harness runs and test runs use different profiles, so build both if you're
+alternating.
 
-## 3. Unit tests
+## 2. Tests
+
+Unit tests come with the normal gate; don't hand-roll per-crate invocations:
 
 ```bash
-cargo test -p ffxi-proto                 # 18 protocol tests
-cargo test -p ffxi-client --lib          # 48 client lib tests
-cargo test -p ffxi-mcp                   # 5 notifier-filter tests
+scripts/checks.sh test
 ```
 
-The `--lib` filter on `ffxi-client` skips the binary target — useful while
-the parallel session has `src/main.rs` mid-refactor.
-
-## 4. Integration tests (live LSB stack)
-
-All live tests skip cleanly when no server reachable on `SERVER_HOST:AUTH_PORT`
-(defaults `127.0.0.1:54231`).
-
-### `play_lifecycle` — auth → lobby → map → InZone → disconnect
+Live integration tests self-skip when nothing is reachable on
+`SERVER_HOST:AUTH_PORT` (defaults `127.0.0.1:54231`). Each is a whole-layer
+proof, so run the one that matches the layer you suspect:
 
 ```bash
-cargo test -p ffxi-client --lib --test play_lifecycle -- --nocapture
+cargo test -p ffxi-client --test play_lifecycle    -- --nocapture
+cargo test -p ffxi-client --test zone_change       -- --nocapture
+cargo test -p ffxi-client --test agent_session     -- --nocapture
+cargo test -p ffxi-client --test action_dispatch   -- --nocapture
+cargo test -p ffxi-client --test delivery_box_live -- --nocapture
 ```
 
-~3 s wall time. Validates the bare session actor without supervisor/MCP
-wrapping. Use this first when diagnosing whether failures are in the
-session layer or above it.
+- **`play_lifecycle`** — auth → lobby → map → InZone → disconnect, on the bare
+  session actor with no supervisor/MCP wrapping. Use it first to decide whether
+  a failure is in the session layer or above it.
+- **`zone_change`** — GM `!zone N` → reconnect → re-zone-in. Requires
+  `gmlevel ≥ 1`, which the fixture sets. Validates Blowfish key rotation across
+  the transition.
+- **`agent_session`** — the transport-conformance floor. Drives `ffxi-mcp` over
+  JSON-RPC stdio: `initialize` → `tools/list` → `resources/list` →
+  `resources/subscribe scene://current` → wait-for-InZone → read
+  `scene://current` → `tools/call snapshot` → expect
+  `notifications/resources/updated` → `tools/call disconnect`. Does **not**
+  exercise aggro detection, party packets, `/tell`, `RequestZoneChange`, or any
+  reactor goal.
 
-### `zone_change` — `!zone N` → reconnect → re-zone-in
+`disconnect_recovery` is destructive and opt-in — it restarts the map-server
+container mid-session, which disrupts anything else sharing the stack:
 
 ```bash
-cargo test -p ffxi-client --lib --test zone_change -- --nocapture
+RESTART_MAP_SERVER=1 cargo test -p ffxi-client --test disconnect_recovery -- --nocapture
 ```
 
-Exercises the GM `!zone` command (requires `gmlevel ≥ 1`, which the fixture
-sets). Validates Blowfish key rotation on zone transition.
+It restarts `server-map-1` (override with `MAP_SERVER_CONTAINER`), asserts the
+supervisor notices within 30 s and is back InZone within 60 s, then prints
+`reconnect_downtime_ms=…`. See §5 for why the budget is what it is.
 
-### `agent_session` — full MCP-driven session
+## 3. Driving an LLM harness manually
 
-```bash
-cargo test -p ffxi-client --lib --test agent_session -- --nocapture
-```
-
-~3.5 s wall time. Drives `ffxi-mcp` over JSON-RPC stdio:
-`initialize` → `tools/list` → `resources/list` → `resources/subscribe scene://current`
-→ wait-for-InZone → read `scene://current` → `tools/call snapshot` → expect
-`notifications/resources/updated` → `tools/call disconnect`.
-
-This is the **transport conformance** floor. Does NOT exercise:
-
-- BtTargetID / aggro detection (no mobs in scene)
-- Party packets (solo)
-- `/tell` (no recipient)
-- `RequestZoneChange` (no zoneline traversal)
-- Reactor goals (`Follow` / `Engage` / `PathTo` never issued)
-
-### `disconnect_recovery` — destructive, opt-in
+Two ways in. **Standalone** — `ffxi-mcp` owns its own session:
 
 ```bash
-RESTART_MAP_SERVER=1 cargo test -p ffxi-client --lib --test disconnect_recovery \
-    -- --nocapture
-```
-
-Drives `docker restart -t 0 server-map-1` mid-session and asserts the
-supervisor recovers. **Affects other tests using the same stack** — run
-serialized.
-
-**Currently failing** against committed behavior — see §8.
-
-## 5. Driving an LLM harness manually
-
-Set credentials, point an MCP-capable harness at the binary, drive the
-session interactively.
-
-```bash
-# Use real credentials, not the EphemeralChar fixture.
 export FFXI_USER='your_account'
 export FFXI_PASS='your_password'
 export FFXI_CHAR_ID=12345678        # u32 from chars.charid
@@ -117,21 +85,28 @@ export FFXI_SERVER=127.0.0.1
 export RUST_LOG=info,ffxi_client=info,ffxi_mcp=debug
 ```
 
-Then:
+**Attach** — a native `ffxi-client` window owns the session and the harness
+joins it over a unix socket, so you can watch what the LLM is doing:
+
+```bash
+cargo run -p ffxi-client -- --agent-listen auto play
+```
+
+That writes `$TMPDIR/ffxi-agent.pid` with the socket path; the `ffxi-attach`
+server in `.mcp.json` sets `FFXI_ATTACH=auto` to resolve it
+(`ffxi-mcp/src/attach.rs:10`). Recipe and gotchas: `drive-gui.md`.
+
+Then point a harness at the binary:
 
 * **Claude Code**: `cd ffxi-agent && claude` (auto-discovers `.mcp.json`).
 * **OpenCode**: `cd ffxi-agent && opencode` (same `.mcp.json`).
-* **MCP Inspector** (UI for poking at the server):
-  `npx @modelcontextprotocol/inspector ./target/debug/ffxi-mcp`
+* **MCP Inspector**: `npx @modelcontextprotocol/inspector ./target/debug/ffxi-mcp` —
+  fastest way to confirm tools/resources surface correctly without an LLM.
 
-The inspector is the fastest way to confirm tools/resources surface
-correctly without involving an LLM.
+### 3a. Harness compatibility
 
-### 5a. Harness compatibility matrix
-
-All supported harnesses speak MCP over stdio with the same `.mcp.json`.
-None require special transport flags or wrapper scripts — the binary
-target is identical regardless of who's driving.
+All supported harnesses speak MCP over stdio with the same `.mcp.json`; no
+special transport flags or wrapper scripts.
 
 | Harness         | Config file        | Transport | Env interpolation | Auto-discovery | Notifications |
 |-----------------|--------------------|-----------|-------------------|----------------|---------------|
@@ -142,117 +117,70 @@ target is identical regardless of who's driving.
 
 Cross-harness invariants:
 
-- Tool surface — 13 tools, same shape (`follow`, `engage`, `path_to`,
-  `cancel`, `chat`, `tell`, `request_zone_change`, `end_event`,
-  `snapshot`, `cast`, `weaponskill`, `job_ability`, `use_item`,
-  `bank_when_full`, `disconnect`).
+- Tool surface — movement (`follow`, `engage`, `path_to`, `walk`, `cancel`),
+  actions (`cast`, `weaponskill`, `job_ability`, `use_item`, `bank_when_full`),
+  social (`chat`, `tell`), flow (`request_zone_change`, `end_event`,
+  `raise_menu`, `tractor_menu`, `homepoint_menu`, `wait_for_event`), and
+  session (`snapshot`, `debug_heights`, `read_resource`, `disconnect`).
+  `ffxi-mcp/src/main.rs` is the list that counts — `tools/list` in the
+  Inspector is the cheapest way to confirm what a given build exposes.
 - Resource surface — 5 resources (`scene://current`, `party://members`,
   `diagnostics://session`, `goal://current`, `inventory://current`).
-- Notifications — `notifications/resources/updated` fires on the
-  `AgentEvent`s gated in `ffxi-mcp/src/main.rs::uris_for_event`.
-- Working directory — start the harness from `ffxi-agent/` so the
-  `.mcp.json` resolves; that file points to `../Cargo.toml -p ffxi-mcp`,
-  which compiles the MCP binary against the workspace at the repo root.
-  `cargo test -p ffxi-client` etc. run from the repo root, not `ffxi-agent/`.
+  `read_resource` re-exposes all five as a tool for clients without
+  `resources/read`.
+- Notifications — `notifications/resources/updated` fires on the `AgentEvent`s
+  gated in `ffxi-mcp/src/main.rs::uris_for_event`.
+- Working directory — start the harness from `ffxi-agent/` so `.mcp.json`
+  resolves; it points at `../Cargo.toml -p ffxi-mcp`, compiling against the
+  workspace root. `cargo test -p ffxi-client` etc. run from the repo root.
 
-Per-harness gotchas that have been observed:
+Observed gotchas:
 
-- **OpenCode** may surface env-interpolation errors if your shell
-  doesn't export the referenced variables before the harness launches.
-  Confirm with `env | grep FFXI_` before starting.
-- **MCP Inspector** doesn't auto-discover `.mcp.json`; pass the binary
-  path directly, and set env vars in your shell first.
-- **All three** assume one MCP server per harness — running two
-  harnesses against the same Phoenix container with the same `FFXI_USER`
-  produces "char already logged in" errors from the lobby.
+- **OpenCode** may surface env-interpolation errors if your shell doesn't
+  export the referenced variables before launch. Check with `env | grep FFXI_`.
+- **MCP Inspector** doesn't auto-discover `.mcp.json` — pass the binary path
+  and set env vars in your shell first.
+- **All three** assume one MCP server per harness. Two harnesses against the
+  same stack with the same `FFXI_USER` produce "char already logged in" from
+  the lobby.
 
-## 5b. Watching the agent — native viewer HUD
+## 4. Verification scenarios
 
-The `ffxi-client` binary opens a Bevy-windowed 3D scene of the FFXI world
-plus an operator HUD that mirrors what the harness is currently driving.
-Useful when an LLM is on the wheel and you want a glanceable picture of
-what it's deciding.
-
-```bash
-cargo run -p ffxi-client --bin ffxi-client -- play
-```
-
-(Direct mode — pass `--user`, `--password`, `--char` to skip the launcher.
-Without them, the windowed launcher prompts.)
-
-What's painted:
-
-| Region | What it shows | When it changes |
-|---|---|---|
-| Top stage bar | Auth/zoning stage, character, zone | Stage transitions |
-| Top-left **agent HUD** | Current reactor goal, color-coded state pill, last-reconnect age | Every `ReactorGoalChanged`; recon clock counts up continuously |
-| Top-right **LLM badge** | Pulse dot, latency sparkline (last 32), p50/p99, paired/solo count | Every `LlmDecision` (notification fired or tool dispatched) |
-| Right-side roster | Party HP/MP/TP per member | Party packets (`0x0DD` / `0x0DF`) |
-| Bottom-left chat | Recent chat lines | Every `ChatLine` |
-
-Reading the LLM badge:
-
-* **Cyan ◉ (bright)** — the harness dispatched a tool within the last
-  200 ms in response to a notification we fired. Healthy round-trip.
-* **Cyan ●** — same as above, fading over ~2 s.
-* **White ●** — tool dispatched without a preceding notification. The
-  LLM is acting on its own initiative (e.g. periodic re-poll), not
-  reacting to a `notifications/resources/updated`.
-* **Gray ●** — no decision in the last 600 ms, log is settling.
-* **Dark ●/○** — log empty or stale.
-
-The sparkline is window-max scaled to the visible 32-sample slice, so a
-single big outlier compresses the rest. Read p50/p99 for absolute
-numbers.
-
-If the agent HUD shows `[IDLE]` when you expect it to be working, the
-LLM has either not issued a goal yet or sent `cancel`. The reactor
-still keepalives but won't auto-attack/follow/path.
-
-## 6. Stage 7 verification scenarios
-
-### 6a. Autonomous goal — 60-minute farming loop
+### 4a. Autonomous goal — 60-minute farming loop
 
 Goal definition for the LLM (paste into the harness's first message):
 
 > Farm crawler cocoons in West Sarutabaruta for 60 minutes; bank to mog
 > house when inventory hits 30/30.
 
-Mid-run validation: ~30 minutes in, force a disconnect:
+Mid-run, force a disconnect:
 
 ```bash
 docker restart -t 0 server-map-1
 ```
 
-The supervisor must reconnect and resume the persisted goal from
-`~/.config/ffxi-mcp/goal.json` (or `$FFXI_MCP_GOAL_PATH`).
-
-Watch for:
+The supervisor must reconnect and resume the persisted goal from the user
+config dir (`kuluu/goal.json`, override with `FFXI_MCP_GOAL_PATH`). Watch for:
 
 * `INFO ffxi_client::supervisor: supervisor.attempt.start attempt=2 replaying_goal=true`
 * `INFO ffxi_client::supervisor: supervisor.reconnected attempt=2 downtime_ms=…`
 
-### 6b. Co-play goal — agent-as-healer
+### 4b. Co-play goal — agent-as-healer
 
-Run a second character (a melee) under your manual control, in the same
-party as the agent. Goal for the LLM:
+Run a second character (a melee) under manual control, partied with the agent:
 
 > Follow the party leader; cure them when their HP drops below 75%; cure
 > on `/tell @cure`. Do not engage mobs.
 
 Validation:
 
-* Issue `/tell @cure` from the leader; agent's first reaction should appear
-  in the party's chat log within ~1.5 s.
-* Pull mob aggro onto the agent; agent should emit an `EngagedBy` event
-  and the harness should re-prioritise.
-* Walk away from the agent; reactor's `Follow` should keep stepping
-  toward you until in-range.
+* `/tell @cure` from the leader → agent's reaction in party chat within ~1.5 s.
+* Pull aggro onto the agent → `EngagedBy` event, harness re-prioritises.
+* Walk away → reactor's `Follow` keeps stepping until back in range.
 
-## 7. Reading the latency instrumentation
+## 5. Reading the latency instrumentation
 
-Tracing events fire at three layers, each at the appropriate level so the
-defaults don't flood:
+Tracing events fire at three layers, each at a level that keeps defaults quiet:
 
 | Event                          | Level | Fields                                        |
 |--------------------------------|-------|-----------------------------------------------|
@@ -269,57 +197,37 @@ To profile reactor ticks:
 RUST_LOG=info,ffxi_client::reactor=trace cargo run -p ffxi-mcp …
 ```
 
-For aggregation into p50/p95/p99, pipe through `jq` (events are
-key=value, not JSON; convert with `tracing-subscriber` JSON formatter
-if you need machine parsing — out of scope here).
+Events are key=value, not JSON; switch to the `tracing-subscriber` JSON
+formatter if you need machine parsing.
 
-Plan budgets for reference:
+Budgets:
 
 * Reactor decisions ≤ 250 ms p99
 * MCP tool dispatch ≤ 50 ms p99 (excluding LLM time)
-* Reconnect downtime ≤ 8 s p95 on transient drops — see §8
+* Reconnect downtime ≤ 8 s p95 on transient drops; ≤ 90 s on a hard crash
 
-## 8. Known gaps
+That last split is forced by the UDP floor. `net_health::MAP_SILENCE_TIMEOUT`
+declares a disconnect after 60 s without any inbound server packet
+(`ffxi-client/src/net_health.rs:4`, enforced at `session.rs:3517`) — UDP gives
+no socket-level "connection lost" signal, so silence detection is the only
+mechanism. On a hard map-server crash expect ~60 s to notice, ~5–10 s to
+re-auth and re-zone, ≥ 65 s total. Lowering the threshold (15 s = 15 missed
+1 Hz keepalives) would trade robustness against short server stalls for faster
+recovery; we kept 60 s and moved the target instead, which is why
+`disconnect_recovery` asserts a 60 s recovery ceiling rather than 30 s.
 
-### Hard-crash recovery is bounded by 60 s UDP-silence detection
+## 6. Live-calibration caveats
 
-`session.rs:606` declares disconnect after 60 s without any inbound server
-packet. UDP gives no socket-level "connection lost" signal, so this is the
-only mechanism. On a hard map-server crash (`docker restart`), expect:
+Dating from Stage 7 and not re-confirmed against a live run since — treat as
+"unproven", not "broken":
 
-* ~60 s for the supervisor to notice
-* ~5–10 s for re-auth + re-zone
-* total ≥ 65 s recovery
-
-The plan target (≤ 8 s p95) was achievable only if we had TCP keepalive on
-a separate channel — we don't. Two paths to reconcile:
-
-1. Lower the silence threshold (e.g. to 15 s = 15 missed 1 Hz keepalives).
-   Trades robustness against short server stalls for faster recovery.
-2. Keep the 60 s threshold and update the plan target to acknowledge the
-   UDP floor: ≤ 8 s p95 *transient*, ≤ 90 s p95 *hard crash*.
-
-`tests/disconnect_recovery.rs` asserts the 30 s budget and currently fails
-loudly so this gap stays visible.
-
-### Live-calibration caveats (also in `CLAUDE.md`)
-
-* **Heading math** (`reactor::heading_toward`) — internally consistent
-  (n=0/e=64/s=128/w=192) but may need a constant offset to match server
-  expectations. Test by issuing `move` north and watching the character
-  in another client.
-* **`RequestZoneChange`** — packet builder unit-tested; server-side
-  acceptance not yet observed in a live run.
-* **Party-packet decode** (`0x0DD` / `0x0DF`) — schema-checked but real
-  party traffic has not exercised the merge logic.
-* **BtTargetID offset** — `body[40..44]` per `Phoenix/src/.../char_update.cpp:187`,
-  but unvalidated against live aggro packets.
-* **`/tell` layout** — `unknown00` / `unknown01` fields modelled per
-  `Phoenix/src/map/packets/c2s/0x0b6_chat_name.h`; first real-server use
-  will validate.
-
-### Parallel-session WIP
-
-`ffxi-client/src/main.rs` may be mid-refactor by the parallel 3D dashboard
-session. If `cargo test -p ffxi-client` fails on the bin target with a
-`view3d::run` arity mismatch, use `--lib --test <name>` to skip the bin.
+* **Heading math** (`reactor::heading_toward`) — n=0/e=64/s=128/w=192, pinned
+  by `heading_toward_pins_cardinal_quarters`, but the unit test can't rule out
+  a constant offset versus what the server expects. Test by issuing `move`
+  north and watching the character in another client.
+* **`RequestZoneChange`** — packet builder unit-tested; server-side acceptance
+  not observed in a live run.
+* **BtTargetID offset** — `body[40..44]` per
+  `Phoenix/src/.../char_update.cpp:187`, feeding the reactor's `n_id`.
+* **`/tell` layout** — `unknown00` / `unknown01` modelled per
+  `Phoenix/src/map/packets/c2s/0x0b6_chat_name.h`.

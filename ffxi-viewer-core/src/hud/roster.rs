@@ -47,7 +47,7 @@ pub fn spawn_roster_panel(mut commands: Commands) {
 
             bottom: Val::Px(28.0 + 90.0 + 8.0),
             right: Val::Px(8.0),
-            width: Val::Px(220.0),
+            width: Val::Px(style::PANEL_WIDTH_PX),
             padding: UiRect::axes(Val::Px(8.0), Val::Px(6.0)),
             border: UiRect::all(Val::Px(1.0)),
             flex_direction: FlexDirection::Column,

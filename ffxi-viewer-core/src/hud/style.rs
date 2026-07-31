@@ -10,6 +10,10 @@ use bevy::prelude::*;
 /// the other pop-up windows (target-action / quick-action at 20, trade at 25).
 pub const WINDOW_Z: i32 = 20;
 
+/// Retail stacks the self, target, and party panels in one right-hand column, so
+/// their widths are a shared contract, not three independent tunings.
+pub const PANEL_WIDTH_PX: f32 = 220.0;
+
 /// Our "blue" window theme: a translucent navy frame with a light steel-blue
 /// edge, pale-blue title text, near-white body text, and a golden cursor
 /// highlight on the focused row/slot. These are deliberate tunings (retail

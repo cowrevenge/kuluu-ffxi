@@ -212,10 +212,10 @@ PR. The backlog lives in beads (`bd ready` in a clone, or browse the mirrored
 GitHub issues); a feature that has no equivalent in the official FFXI client is
 **Enhanced / addon** and must be gated behind a feature flag.
 
-The vanilla menu / target-interaction gaps (target-action contextual menu,
-trade window, item detail panel, status/profile panel, main-menu "Commands"
-ordering, NPC range gate, door zone-transition flow) are specced in
-[`docs/vanilla-menu-parity-plan.md`](docs/vanilla-menu-parity-plan.md).
+Remaining vanilla menu / target-interaction gaps are tracked as `hud`- and
+`world-interaction`-labelled beads (`bd list --label=hud`); the retail behavior
+they're measured against is recorded under
+[`.agents/skills/retail-observe/references/`](.agents/skills/retail-observe/references/).
 
 For protocol questions, `play --headless` emits a JSON event stream that's easy
 to inspect. For rendering work, the default `play` GUI window is the fast

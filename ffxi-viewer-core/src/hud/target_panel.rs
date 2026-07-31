@@ -35,8 +35,6 @@ pub struct SwingPulse {
 
 const PULSE_DECAY_SECS: f32 = 0.25;
 
-const PANEL_WIDTH_PX: f32 = 220.0;
-
 const HP_BAR_WIDTH_PX: f32 = 100.0;
 const HP_BAR_HEIGHT_PX: f32 = 6.0;
 
@@ -50,7 +48,7 @@ pub fn spawn_target_panel(mut commands: Commands) {
 
                 bottom: Val::Px(28.0 + 90.0 + 8.0),
                 right: Val::Px(8.0),
-                width: Val::Px(PANEL_WIDTH_PX),
+                width: Val::Px(style::PANEL_WIDTH_PX),
                 padding: UiRect::axes(Val::Px(8.0), Val::Px(4.0)),
                 border: UiRect::all(Val::Px(1.0)),
                 flex_direction: FlexDirection::Column,

@@ -132,6 +132,16 @@ chat) is usually readable straight off the full screenshot.
   changes): arrows/tab for menus, `enter` confirm, `esc` cancel, `wasd`
   movement, `-`/numpad for camera. `hxi.sh key w 2.0` holds W for 2s —
   that's how you walk.
+- **Chase-camera zoom is `,` and `.`** — `hxi.sh key comma` / `key period`
+  (43/47). There is no scroll-wheel or drag path: this script posts only
+  move/left/right click events, so the wheel-zoom and right-drag-orbit a human
+  would use are not drivable. Hold to zoom continuously (`key period 1.5`).
+  Chase cam itself is a Config toggle, not a key — Commands → Config →
+  Mouse/Camera → `Camera View: Chase Cam` (see `artifacts/retail/mousecam_crop.png`),
+  and menu keys must be OCR-verified one at a time as below.
+- For a clean geometry/collision shot, `key 107` (Scroll Lock) hides the whole
+  HUD first — otherwise chat and menus sit on top of exactly what you're
+  comparing.
 - **`hxi.sh key` accepts raw macOS keycodes as numbers** (unmapped names pass
   through): `key 44` = `/` (opens chat entry), `key 107` = Scroll Lock (retail
   toggles full-UI hide — HUD windows vanish, nameplates persist), `key 105` =

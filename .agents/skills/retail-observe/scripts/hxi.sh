@@ -149,6 +149,9 @@ keycode() {  # macOS virtual keycodes (US layout); numeric passes through
     o) echo 31;; u) echo 32;; i) echo 34;; p) echo 35;;
     enter|return) echo 36;; l) echo 37;; j) echo 38;; k) echo 40;;
     n) echo 45;; m) echo 46;; tab) echo 48;; space) echo 49;;
+    # Retail's chase-camera zoom. There is no scroll-wheel path — this script
+    # posts no scroll events — so these are the only way to zoom.
+    comma|zoomin) echo 43;; period|zoomout) echo 47;;
     backspace) echo 51;; esc|escape) echo 53;;
     f1) echo 122;; f2) echo 120;; f3) echo 99;; f4) echo 118;; f5) echo 96;;
     f6) echo 97;; f7) echo 98;; f8) echo 100;; f9) echo 101;; f10) echo 109;;

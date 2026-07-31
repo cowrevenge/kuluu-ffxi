@@ -12,6 +12,7 @@ use bevy::math::{Mat3, Mat4, Vec3};
 use ffxi_dat::chunk::walk;
 use ffxi_dat::mzb;
 use ffxi_dat::{ChunkKind, DatRoot};
+use ffxi_viewer_core::camera::ChaseCamera;
 
 struct Tri {
     v: [Vec3; 3],
@@ -257,16 +258,25 @@ fn main() {
         let p: Vec<f32> = spec.split(',').map(|s| s.parse().unwrap()).collect();
         const THIRD_PERSON_ANCHOR: f32 = 2.3 * 0.55;
         let anchor = Vec3::new(p[0], -p[2] + THIRD_PERSON_ANCHOR, -p[1]);
-        let wanted = p[3];
-        println!("\nanchor bevy={anchor:?}  wanted={wanted}");
+        // The zoom level the player has dialled in; the radius the camera
+        // actually reaches is ChaseCamera's, not this — pitching grows it.
+        let zoom = p[3];
+        println!("\nanchor bevy={anchor:?}  zoom={zoom}");
         println!(
-            "  {:>5} {:>6}  {:>8} {:>9} {:>8}",
-            "yaw", "pitch", "hit_t", "hit_y", "n.y"
+            "  {:>5} {:>6} {:>7}  {:>8} {:>9} {:>8}",
+            "yaw", "pitch", "radius", "hit_t", "eye_y", "n.y"
         );
+        const PITCH_STEPS: usize = 4;
         for yaw_i in 0..24 {
             let yaw = yaw_i as f32 * std::f32::consts::TAU / 24.0;
-            for pitch_i in [0, 2, 4, 6] {
-                let pitch = pitch_i as f32 * 0.15;
+            for pitch_i in 0..=PITCH_STEPS {
+                let chase = ChaseCamera {
+                    yaw,
+                    pitch: ChaseCamera::PITCH_MAX * pitch_i as f32 / PITCH_STEPS as f32,
+                    distance: zoom,
+                    ..Default::default()
+                };
+                let (pitch, wanted) = (chase.pitch, chase.orbit_radius());
                 let (cos_p, sin_p) = (pitch.cos(), pitch.sin());
                 let dir = Vec3::new(yaw.sin() * cos_p, sin_p, yaw.cos() * cos_p);
                 let mut best: Option<(f32, &Tri)> = None;
@@ -279,17 +289,18 @@ fn main() {
                 }
                 match best {
                     Some((hit_t, t)) => println!(
-                        "  {:>5.0} {:>6.2}  {hit_t:>8.3} {:>9.3} {:>8.3}",
+                        "  {:>5.0} {:>6.2} {wanted:>7.3}  {hit_t:>8.3} {:>9.3} {:>8.3}",
                         yaw.to_degrees(),
                         pitch,
                         (anchor + dir * hit_t).y,
                         t.authored_n.y
                     ),
                     None => println!(
-                        "  {:>5.0} {:>6.2}  {:>8} (camera flies free to {wanted})",
+                        "  {:>5.0} {:>6.2} {wanted:>7.3}  {:>8} {:>9.3}  free flight",
                         yaw.to_degrees(),
                         pitch,
-                        "MISS"
+                        "MISS",
+                        (anchor + dir * wanted).y
                     ),
                 }
             }

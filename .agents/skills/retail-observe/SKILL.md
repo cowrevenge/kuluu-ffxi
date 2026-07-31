@@ -132,13 +132,24 @@ chat) is usually readable straight off the full screenshot.
   changes): arrows/tab for menus, `enter` confirm, `esc` cancel, `wasd`
   movement, `-`/numpad for camera. `hxi.sh key w 2.0` holds W for 2s —
   that's how you walk.
-- **Chase-camera zoom is `,` and `.`** — `hxi.sh key comma` / `key period`
-  (43/47). There is no scroll-wheel or drag path: this script posts only
-  move/left/right click events, so the wheel-zoom and right-drag-orbit a human
-  would use are not drivable. Hold to zoom continuously (`key period 1.5`).
-  Chase cam itself is a Config toggle, not a key — Commands → Config →
-  Mouse/Camera → `Camera View: Chase Cam` (see `artifacts/retail/mousecam_crop.png`),
-  and menu keys must be OCR-verified one at a time as below.
+- **Chase-camera zoom is `,` = OUT and `.` = IN** — `hxi.sh key comma` /
+  `key period` (43/47). Hold to run to the stop (`key comma 4.0`); confirm you
+  are AT the stop by holding again and diffing the two captures, because a
+  partial hold looks like a clamp. Chase cam itself is a Config toggle, not a
+  key — Commands → Config → Mouse/Camera → `Camera View: Chase Cam` (see
+  `artifacts/retail/mousecam_crop.png`), and menu keys must be OCR-verified one
+  at a time as below.
+- **Camera height is numpad 8 / 2** (keycodes 91/84) — and it is a *height*,
+  not an orbit: retail adds to the eye's world Y and leaves the horizontal
+  offset alone, so the character shrinks as you raise it. Also runs to a stop.
+- **Neither mouse drag moves the camera** in the observed config — `hxi.sh drag`
+  with `left` and `right` both changed nothing across the full viewport. Use
+  the keys; don't conclude the drag is broken.
+- **Main menu is `-` (keycode 27), and Log Out is on page TWO** — left/right
+  switch pages (the `◀ ▶` arrows flanking the highlighted entry), Log Out is
+  the 12th entry on page 2, and its confirm dialog defaults to **No**, so press
+  Left before Enter. Logout then runs a ~20s countdown; kneeling/healing does
+  not block it.
 - For a clean geometry/collision shot, `key 107` (Scroll Lock) hides the whole
   HUD first — otherwise chat and menus sit on top of exactly what you're
   comparing.
@@ -222,6 +233,7 @@ here: read the returned captures yourself before citing them for parity.
 | Symptom | Cause → fix |
 |---|---|
 | `no visible VM window` | VM headless/minimized/other Space → `hxi.sh show`, else reopen in Parallels Desktop |
+| VM `running` but NO guest window exists at all, and `show` / Window → Windows 11 both do nothing | Coherence with zero guest windows open — there is nothing to raise, and launching a guest app stub silently no-ops. Open the VM console instead: `open "/Volumes/Sidecar/Windows 11.pvm"`. That window is owned by **`Parallels Desktop`**, named `Windows 11`, so every subcommand needs `HXI_OWNER_RE='Parallels Desktop\|[.]exe$\|^Windows 11$'`. In this mode the game window lives INSIDE the console window: `capture` grabs the whole guest desktop (crop the viewport before reading), `ocr` matches desktop clutter like the Ashita console, and click coordinates are console-relative |
 | Black or empty capture | Terminal lacks **Screen Recording** permission (System Settings → Privacy & Security); or the host display is asleep — hxi.sh now runs `caffeinate -u -t 2` before each capture, and for long sessions keep `caffeinate -d -u` running |
 | `no visible VM window` in Coherence | Coherence windows are owned by the VM name (e.g. `Windows 11`), not `prl_vm_app`/`.exe` — owner regex now includes `^Windows 11$`; override via `HXI_OWNER_RE` if the VM is renamed |
 | Session vanished between runs | Windows Update auto-restarted the VM (watch for "We've got an update for you" — dismiss with **Another time**); relaunch launcher + login afterwards |

@@ -78,13 +78,36 @@ pub struct ChaseCamera {
 impl ChaseCamera {
     pub const PITCH_MIN: f32 = -0.30;
 
-    pub const PITCH_MAX: f32 = 1.40;
+    /// Retail has no pitch clamp, because retail has no pitch: tilting adds to
+    /// the eye's world Y (`CurrentEyePosition.y += offset`,
+    /// research/XIClient/.../World/Camera/CameraManager.cpp:527-529) and leaves
+    /// the horizontal offset alone. What bounds the tilt is
+    /// [`Self::MIN_XZ_STANDOFF`] against [`Self::DIST_MAX`], and for a polar eye
+    /// that is `acos(3/6)` — exactly 60°, against the 80° an uncited 1.40 used
+    /// to allow.
+    ///
+    /// The 20° is load-bearing for camera collision, not feel. At 80° the eye
+    /// sits 1.0 yalm horizontally from the anchor, so the anchor→eye segment is
+    /// short and near-vertical — it threads the unauthored gap in the Lower
+    /// Jeuno ceiling instead of hitting its underside (kuluu-64fh). At 60° the
+    /// segment can never be nearer than 3 horizontally and stays oblique.
+    pub const PITCH_MAX: f32 = std::f32::consts::FRAC_PI_3;
 
     pub const FP_PITCH_MIN: f32 = -std::f32::consts::FRAC_PI_2 + 0.05;
 
     pub const FP_PITCH_MAX: f32 = std::f32::consts::FRAC_PI_2 - 0.05;
 
-    pub const DIST_MIN: f32 = 2.0;
+    /// CameraManager.cpp:830-836 pushes an unobstructed eye back out whenever
+    /// the 3D eye→target distance drops below 3.
+    pub const DIST_MIN: f32 = 3.0;
+
+    /// The same file:837-846 applies a second, independent floor to the
+    /// *horizontal* separation — `(eye - target).MagnitudeXZ() < 3` is pushed
+    /// straight back out in XZ, leaving the eye's Y untouched. It shares
+    /// retail's literal with [`Self::DIST_MIN`] but is a different constraint:
+    /// this one is what makes a tilted retail camera swing wide rather than
+    /// climb over its target.
+    pub const MIN_XZ_STANDOFF: f32 = 3.0;
 
     /// Retail's chase camera works in a much tighter band than a modern MMO's.
     /// Three independent references put the nominal radius at 6, and none of
@@ -105,6 +128,19 @@ impl ChaseCamera {
     pub const DIST_MAX: f32 = 6.0;
 
     pub const KEYBOARD_ZOOM_RATE: f32 = 10.0;
+
+    /// Retail tilts by lifting the eye's Y, not by orbiting it, so its
+    /// horizontal separation never shrinks as you look down — the eye→target
+    /// distance grows instead, and CameraManager.cpp:822 eases it back toward
+    /// [`Self::DIST_MAX`]. A polar eye reproduces that reachable envelope by
+    /// growing its radius on demand rather than trading horizontal for
+    /// vertical.
+    pub fn orbit_radius(&self) -> f32 {
+        let cos_p = self.pitch.cos().abs().max(f32::EPSILON);
+        self.distance
+            .max(Self::MIN_XZ_STANDOFF / cos_p)
+            .clamp(Self::DIST_MIN, Self::DIST_MAX)
+    }
 }
 
 impl Default for ChaseCamera {
@@ -304,7 +340,8 @@ pub fn chase_camera_system(
 
     let anchor_y = third_person_anchor_y(baked);
     let anchor = self_t.translation + Vec3::Y * anchor_y;
-    let desired = anchor + yaw_dir * (chase.distance * cos_p) + Vec3::Y * (chase.distance * sin_p);
+    let radius = chase.orbit_radius();
+    let desired = anchor + yaw_dir * (radius * cos_p) + Vec3::Y * (radius * sin_p);
 
     cam_t.translation = cam_t.translation.lerp(desired, chase.smoothing);
     cam_t.look_at(anchor, Vec3::Y);
@@ -418,6 +455,46 @@ mod tests {
         chase.pitch = 1.5;
         toggle_camera_mode(&mut mode, &mut chase);
         assert_eq!(chase.pitch, ChaseCamera::PITCH_MAX);
+    }
+
+    #[test]
+    fn pitch_max_is_the_standoff_expressed_as_an_angle() {
+        let derived = (ChaseCamera::MIN_XZ_STANDOFF / ChaseCamera::DIST_MAX).acos();
+        assert!(
+            (ChaseCamera::PITCH_MAX - derived).abs() < 1e-6,
+            "PITCH_MAX {} must stay the angle at which a DIST_MAX orbit still \
+             clears MIN_XZ_STANDOFF horizontally ({derived})",
+            ChaseCamera::PITCH_MAX
+        );
+    }
+
+    #[test]
+    fn orbit_never_trades_retails_horizontal_standoff_for_height() {
+        let mut worst = f32::INFINITY;
+        for d in 0..=30 {
+            for p in 0..=30 {
+                let chase = ChaseCamera {
+                    distance: ChaseCamera::DIST_MIN
+                        + (ChaseCamera::DIST_MAX - ChaseCamera::DIST_MIN) * d as f32 / 30.0,
+                    pitch: ChaseCamera::PITCH_MIN
+                        + (ChaseCamera::PITCH_MAX - ChaseCamera::PITCH_MIN) * p as f32 / 30.0,
+                    ..Default::default()
+                };
+                let r = chase.orbit_radius();
+                assert!(
+                    r <= ChaseCamera::DIST_MAX + 1e-5,
+                    "radius {r} escaped DIST_MAX at pitch {}",
+                    chase.pitch
+                );
+                worst = worst.min(r * chase.pitch.cos());
+            }
+        }
+        assert!(
+            worst >= ChaseCamera::MIN_XZ_STANDOFF - 1e-5,
+            "closest horizontal approach {worst} broke retail's {} standoff — \
+             this is what let the camera thread the Lower Jeuno ceiling gap",
+            ChaseCamera::MIN_XZ_STANDOFF
+        );
     }
 
     #[test]

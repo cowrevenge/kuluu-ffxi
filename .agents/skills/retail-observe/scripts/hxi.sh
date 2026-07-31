@@ -16,6 +16,8 @@
 #   hxi.sh type <text>             type a string (login fields, chat)
 #   hxi.sh [--bg] click <x> <y> [right|double]   click at WINDOW-RELATIVE POINTS
 #   hxi.sh [--bg] move <x> <y>     move mouse (hover) at window-relative points
+#   hxi.sh [--bg] drag <x1> <y1> <x2> <y2> [left|right] [steps]   press-move-release;
+#       right-drag is retail's camera orbit (yaw + pitch), undrivable by any key
 #   hxi.sh ocr                     capture + Vision OCR: TEXT<TAB>x<TAB>y (window points)
 #   hxi.sh [--bg] click-text <regex> [right|double]   OCR the window, click the
 #       matched text's center. Self-verifying: refuses outright if an elevation/
@@ -149,9 +151,10 @@ keycode() {  # macOS virtual keycodes (US layout); numeric passes through
     o) echo 31;; u) echo 32;; i) echo 34;; p) echo 35;;
     enter|return) echo 36;; l) echo 37;; j) echo 38;; k) echo 40;;
     n) echo 45;; m) echo 46;; tab) echo 48;; space) echo 49;;
-    # Retail's chase-camera zoom. There is no scroll-wheel path — this script
-    # posts no scroll events — so these are the only way to zoom.
-    comma|zoomin) echo 43;; period|zoomout) echo 47;;
+    # Retail's chase-camera zoom, direction confirmed by observation
+    # (references/camera-jeuno-roof.md): `,` pulls the camera out, `.` pushes
+    # it in. Hold to run to the stop.
+    comma|zoomout) echo 43;; period|zoomin) echo 47;;
     backspace) echo 51;; esc|escape) echo 53;;
     f1) echo 122;; f2) echo 120;; f3) echo 99;; f4) echo 118;; f5) echo 96;;
     f6) echo 97;; f7) echo 98;; f8) echo 100;; f9) echo 101;; f10) echo 109;;
@@ -271,6 +274,30 @@ case "$cmd" in
     tx=$(cut -f2 <<<"$hit"); ty=$(cut -f3 <<<"$hit")
     printf 'click-text: "%s" at %s,%s (window points)\n' "$(cut -f1 <<<"$hit")" "$tx" "$ty"
     exec "$0" ${BG:+--bg} click "$tx" "$ty" "$kind"
+    ;;
+
+  drag)
+    x1=${1:?usage: hxi.sh [--bg] drag <x1> <y1> <x2> <y2> [left|right] [steps]}
+    y1=${2:?}; x2=${3:?}; y2=${4:?}; kind=${5:-right}; steps=${6:-20}
+    need_window
+    osascript -l JavaScript -e "
+      ObjC.import('CoreGraphics');
+      $(post_prelude)
+      const right = '$kind' === 'right';
+      const btn  = right ? \$.kCGMouseButtonRight : \$.kCGMouseButtonLeft;
+      const down = right ? \$.kCGEventRightMouseDown : \$.kCGEventLeftMouseDown;
+      const up   = right ? \$.kCGEventRightMouseUp   : \$.kCGEventLeftMouseUp;
+      const drag = right ? \$.kCGEventRightMouseDragged : \$.kCGEventLeftMouseDragged;
+      function at(t, x, y) { POST(\$.CGEventCreateMouseEvent(\$(), t, {x: x, y: y}, btn)); }
+      const ox = $WX, oy = $WY, n = $steps;
+      at(\$.kCGEventMouseMoved, ox + $x1, oy + $y1); delay(0.05);
+      at(down, ox + $x1, oy + $y1); delay(0.08);
+      for (let i = 1; i <= n; i++) {
+        at(drag, ox + $x1 + ($x2 - $x1) * i / n, oy + $y1 + ($y2 - $y1) * i / n);
+        delay(0.02);
+      }
+      delay(0.08);
+      at(up, ox + $x2, oy + $y2);" || die "drag post failed (Accessibility permission?)"
     ;;
 
   click|move)

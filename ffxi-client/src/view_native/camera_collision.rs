@@ -111,7 +111,10 @@ pub fn clamp_chase_camera_to_collision(
     let sin_p = chase.pitch.sin();
     let dir = Vec3::new(chase.yaw.sin() * cos_p, sin_p, chase.yaw.cos() * cos_p);
 
-    let wanted = chase.distance;
+    // Not `chase.distance` — `chase_camera_system` places the eye at
+    // `orbit_radius()`, which grows past it to hold the horizontal standoff.
+    // Ray the distance the camera actually travels or the far end goes unswept.
+    let wanted = chase.orbit_radius();
 
     let mut hit_t = wanted;
     let mut hit_any = false;
@@ -268,7 +271,7 @@ pub fn draw_camera_collision_debug(
     let cos_p = chase.pitch.cos();
     let sin_p = chase.pitch.sin();
     let dir = Vec3::new(chase.yaw.sin() * cos_p, sin_p, chase.yaw.cos() * cos_p);
-    let wanted_end = anchor + dir * chase.distance;
+    let wanted_end = anchor + dir * chase.orbit_radius();
 
     let effective_end = cam_q.single().map(|t| t.translation).unwrap_or(wanted_end);
 
@@ -295,6 +298,23 @@ mod tests {
         // inside the character model.
         assert_eq!(clamped_camera_distance(0.0, 6.0), CAMERA_MIN_DISTANCE);
         assert_eq!(clamped_camera_distance(0.3, 6.0), CAMERA_MIN_DISTANCE);
+    }
+
+    #[test]
+    fn collision_sweeps_the_distance_the_camera_actually_travels() {
+        let chase = ChaseCamera {
+            distance: ChaseCamera::DIST_MIN,
+            pitch: ChaseCamera::PITCH_MAX,
+            ..Default::default()
+        };
+        assert!(
+            chase.orbit_radius() > chase.distance + 0.5,
+            "a pitched close camera swings out well past chase.distance \
+             ({} vs {}) — sweeping chase.distance here would leave the far end \
+             of the eye's travel unswept, which is how it left the building",
+            chase.orbit_radius(),
+            chase.distance
+        );
     }
 
     #[test]

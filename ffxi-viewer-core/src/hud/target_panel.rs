@@ -43,11 +43,11 @@ pub fn spawn_target_panel(mut commands: Commands) {
         .spawn((
             crate::components::InGameEntity,
             TargetPanel,
+            crate::hud::panel_column::ColumnPanel::TARGET,
             Node {
                 position_type: PositionType::Absolute,
 
-                bottom: Val::Px(28.0 + 90.0 + 8.0),
-                right: Val::Px(8.0),
+                right: Val::Px(style::PANEL_COLUMN_RIGHT_PX),
                 width: Val::Px(style::PANEL_WIDTH_PX),
                 padding: UiRect::axes(Val::Px(8.0), Val::Px(4.0)),
                 border: UiRect::all(Val::Px(1.0)),
@@ -210,17 +210,6 @@ pub fn update_target_panel_system(
 
     if panel_node.display == Display::None {
         panel_node.display = Display::Flex;
-    }
-
-    let party_len = snap.party.len();
-    let roster_h = if party_len > 1 {
-        6.0 + 40.0 * party_len as f32 + 8.0
-    } else {
-        0.0
-    };
-    let want_bottom = Val::Px(28.0 + 90.0 + 8.0 + roster_h);
-    if panel_node.bottom != want_bottom {
-        panel_node.bottom = want_bottom;
     }
 
     let self_engaged_on_target = snap

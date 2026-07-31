@@ -36,11 +36,12 @@ pub fn spawn_self_hud(mut commands: Commands) {
         .spawn((
             crate::components::InGameEntity,
             SelfHudPanel,
+            crate::hud::panel_column::ColumnPanel::SELF_HUD,
             Node {
                 position_type: PositionType::Absolute,
 
-                bottom: Val::Px(28.0),
-                right: Val::Px(8.0),
+                bottom: Val::Px(style::PANEL_COLUMN_BOTTOM_PX),
+                right: Val::Px(style::PANEL_COLUMN_RIGHT_PX),
                 width: Val::Px(style::PANEL_WIDTH_PX),
                 padding: UiRect::axes(Val::Px(8.0), Val::Px(4.0)),
                 border: UiRect::all(Val::Px(1.0)),

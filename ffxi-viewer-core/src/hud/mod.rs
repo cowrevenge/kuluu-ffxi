@@ -26,6 +26,7 @@ pub mod menu_help_bar;
 pub mod mesh_debug;
 pub mod network_status;
 pub mod overlay;
+pub mod panel_column;
 pub mod quick_action;
 pub mod roster;
 pub mod self_fishing;
@@ -260,6 +261,13 @@ impl Plugin for HudPlugin {
         app.add_systems(
             Update,
             menu::refresh_dynamic_menu_rows.before(menu::update_main_menu),
+        );
+
+        app.add_systems(
+            Update,
+            panel_column::layout_panel_column_system
+                .after(roster::update_roster_panel_system)
+                .after(target_panel::update_target_panel_system),
         );
 
         app.add_systems(

@@ -11,8 +11,14 @@ use bevy::prelude::*;
 pub const WINDOW_Z: i32 = 20;
 
 /// Retail stacks the self, target, and party panels in one right-hand column, so
-/// their widths are a shared contract, not three independent tunings.
+/// their width, inset, and gap are a shared contract, not independent tunings.
+/// `hud::panel_column` owns the stacking; panels never position themselves
+/// relative to each other.
 pub const PANEL_WIDTH_PX: f32 = 220.0;
+pub const PANEL_COLUMN_RIGHT_PX: f32 = 8.0;
+/// Clearance under the column, leaving the chat stack's top edge visible.
+pub const PANEL_COLUMN_BOTTOM_PX: f32 = 28.0;
+pub const PANEL_COLUMN_GAP_PX: f32 = 8.0;
 
 /// Our "blue" window theme: a translucent navy frame with a light steel-blue
 /// edge, pale-blue title text, near-white body text, and a golden cursor

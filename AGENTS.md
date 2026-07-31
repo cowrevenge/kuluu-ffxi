@@ -4,7 +4,7 @@ Guidance for AI coding agents working in this repository. `CLAUDE.md` is a symli
 
 ## What this is
 
-Kuluu is a faithful, open-source FINAL FANTASY XI **client** rebuilt in Rust + Bevy. It speaks the FFXI wire protocol to community-run private servers (LandSandBoat / Phoenix), **not** retail. It is **not a server**, and it **ships no game assets** — geometry/textures/audio/animation come from a user-provided retail install read at runtime from `FFXI_DAT_PATH` (default `vendor/game-files/SquareEnix/FINAL FANTASY XI`). Tables derived from LSB/POLUtils are baked in as compile-time constants, never as game content. The single source of truth for all durable work — including the grounded parity backlog — is beads (`bd ready`, label `roadmap`; see the Issue tracking section).
+Kuluu is a faithful, open-source FINAL FANTASY XI **client** rebuilt in Rust + Bevy. It speaks the FFXI wire protocol to community-run private servers (LandSandBoat / Phoenix), **not** retail. It is **not a server**, and it **ships no game assets** — geometry/textures/audio/animation come from a user-provided retail install read at runtime from `FFXI_DAT_PATH` (default `vendor/game-files/SquareEnix/FINAL FANTASY XI`). Tables derived from LSB/POLUtils are baked in as compile-time constants, never as game content.
 
 ## Build, test, lint
 
@@ -39,43 +39,24 @@ cargo run -p ffxi-client -- play                          # native window (defau
 cargo run -p ffxi-client --no-default-features -- play --headless  # JSON event-stream agent session, no Bevy
 ```
 
-`cargo xtask game [path|--copy|--download]` detects/validates/symlinks a retail install into `vendor/game-files/`. Client subcommands: `play`, `model-viewer`, `provision`, `create-char`.
+`cargo xtask game [path|--copy|--download]` detects/validates/symlinks a retail install into `vendor/game-files/`.
 
 ## Issue tracking (beads)
 
-Durable work items live in [beads](https://github.com/steveyegge/beads) (`bd`), a git-backed tracker checked into `.beads/`. Install with `brew install beads`. The dependency graph is a local Dolt db (gitignored); `.beads/issues.jsonl` is the diffable, PR-reviewable export — that's the file that crosses into git, so review it like code.
+`.beads/issues.jsonl` is the diffable, PR-reviewable export — that's the file that crosses into git, so review it like code.
 
-Beads is the **single source of truth for all durable work** (there is no `docs/ROADMAP.md` — that scoreboard was removed as a redundant hand-kept projection of beads). The grounded parity backlog is the `roadmap`-labelled beads, each citing `file:line` evidence and carrying `vanilla`/`enhanced` plus an area label (`hud`, `combat-action`, …). Pick work with `bd ready`. MEMORY.md auto-memory sits alongside beads and is **not** replaced by it — do **not** migrate it into `bd remember`.
+There is no `docs/ROADMAP.md` — that scoreboard was removed as a redundant hand-kept projection of beads. The grounded parity backlog is the `roadmap`-labelled beads, each citing `file:line` evidence and carrying `vanilla`/`enhanced` plus an area label (`hud`, `combat-action`, …). MEMORY.md auto-memory sits alongside beads and is **not** replaced by it — do **not** migrate it into `bd remember`.
 
 **Commit authority (repository-profile grant).** The beads `bd prime` session protocol defaults to *conservative* — no commits without granted authority. This repository **grants standing authority to commit liberally**: group finished, uncontroversial work into clear, coherent commits as you go, without stopping to ask. This is the sanctioned override of the conservative default. Still **confirm before `git push`** (outward-facing) and before `bd dolt push` / remote sync, and never force-push or rewrite shared history. In a tree that mixes another session's edits, stage only your own hunks (`git add -p`), never `-A`.
 
 GitHub Issues are a **generated projection of beads** for contributors, not a second source of truth — see the `beads-github-sync` skill for the publisher, the workflow trigger, and the opt-in inbound path.
 
-## Harness configuration (`.agents/` canonical, `.claude/` = adapter)
+## Harness configuration
 
-Agent-facing config lives in **`.agents/`**, harness-neutral, mirroring the
-`CLAUDE.md → AGENTS.md` symlink pattern:
-
-- `.agents/skills/` — [agentskills.io](https://agentskills.io/specification)
-  standard layout. pi discovers it natively at the project level; Claude
-  Code follows the `.claude/skills` symlink.
-- `.agents/agents/` — subagent definitions (Markdown + frontmatter),
-  symlinked from `.claude/agents`.
-- `.agents/hooks/` — standalone shell scripts speaking the Claude Code hook
-  wire protocol: a JSON payload on stdin (`session_id`, `transcript_path`,
-  `tool_name`, `stop_hook_active`, …), decisions via exit code / stdout
-  JSON. Registration lives in `.claude/settings.json`, but the scripts
-  themselves are harness-agnostic — any harness with an equivalent event
-  surface (pi extensions expose `session_start`, `tool_call`,
-  `agent_settled`) can bridge them. Each `stop.d/` check is independently
-  testable: `echo "$payload" | .agents/hooks/stop.d/20-commit.sh; echo $?`
-  (exit 0 = pass, exit 10 = fire with the reason on stdout).
-
-`.claude/` keeps only Claude-specific wiring: `settings.json` (permissions
-+ hook registration) and the two symlinks. Per-user/runtime state
-(`settings.local.json`, `.bandwidth/`, `worktrees/`) stays gitignored
-there. New agent-facing content goes under `.agents/`; reference the
-`.agents/...` path in docs and hook messages, not the symlink.
+New agent-facing content (skills, subagents, hooks) goes under `.agents/`;
+`.claude/` holds only Claude-specific wiring plus symlinks. Reference the
+`.agents/...` path in docs and hook messages, not the symlink. Layout and
+hook wire protocol: `.agents/AGENTS.md`.
 
 ## Architecture
 

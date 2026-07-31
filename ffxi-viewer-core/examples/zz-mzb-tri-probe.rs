@@ -153,6 +153,53 @@ fn main() {
         return;
     }
 
+    // KULUU_CAMSWEEP=x,y,z,distance — sweep the chase-camera orbit at an ffxi
+    // position and report, per direction, what the anchor->camera ray hits. This
+    // is the query clamp_chase_camera_to_collision makes every frame.
+    if let Ok(spec) = std::env::var("KULUU_CAMSWEEP") {
+        let p: Vec<f32> = spec.split(',').map(|s| s.parse().unwrap()).collect();
+        const THIRD_PERSON_ANCHOR: f32 = 2.3 * 0.55;
+        let anchor = Vec3::new(p[0], -p[2] + THIRD_PERSON_ANCHOR, -p[1]);
+        let wanted = p[3];
+        println!("\nanchor bevy={anchor:?}  wanted={wanted}");
+        println!(
+            "  {:>5} {:>6}  {:>8} {:>9} {:>8}",
+            "yaw", "pitch", "hit_t", "hit_y", "n.y"
+        );
+        for yaw_i in 0..24 {
+            let yaw = yaw_i as f32 * std::f32::consts::TAU / 24.0;
+            for pitch_i in [0, 2, 4, 6] {
+                let pitch = pitch_i as f32 * 0.15;
+                let (cos_p, sin_p) = (pitch.cos(), pitch.sin());
+                let dir = Vec3::new(yaw.sin() * cos_p, sin_p, yaw.cos() * cos_p);
+                let mut best: Option<(f32, &Tri)> = None;
+                for t in &tris {
+                    if let Some(hit) = ray_tri(anchor, dir, t.v[0], t.v[1], t.v[2]) {
+                        if hit < wanted && best.is_none_or(|(b, _)| hit < b) {
+                            best = Some((hit, t));
+                        }
+                    }
+                }
+                match best {
+                    Some((hit_t, t)) => println!(
+                        "  {:>5.0} {:>6.2}  {hit_t:>8.3} {:>9.3} {:>8.3}",
+                        yaw.to_degrees(),
+                        pitch,
+                        (anchor + dir * hit_t).y,
+                        t.authored_n.y
+                    ),
+                    None => println!(
+                        "  {:>5.0} {:>6.2}  {:>8} (camera flies free to {wanted})",
+                        yaw.to_degrees(),
+                        pitch,
+                        "MISS"
+                    ),
+                }
+            }
+        }
+        return;
+    }
+
     for pair in args[1..].chunks_exact(2) {
         let (x, y): (f32, f32) = (pair[0].parse().unwrap(), pair[1].parse().unwrap());
         let orig = Vec3::new(x, 1000.0, -y);

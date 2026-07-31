@@ -399,3 +399,68 @@ fn patch_leaf_offsets(nodes: &mut [BvhNode], idx: usize, offset: &mut u32) {
         patch_leaf_offsets(nodes, r, offset);
     }
 }
+
+#[cfg(test)]
+mod bvh_tests {
+    use super::*;
+    use ffxi_viewer_core::dat_mzb::{build_collision_geometry, load_mzb_placed};
+
+    /// The chase camera pulls in on the first `ray_cast` hit between the player
+    /// anchor and the camera, so a traversal that misses a surface brute force
+    /// finds is a camera that clips through it. Sweeps the orbit around a Lower
+    /// Jeuno spot with a roof slab beside it. Skips without a retail DAT.
+    #[test]
+    fn zone_bvh_ray_cast_agrees_with_brute_force() {
+        if std::env::var("FFXI_DAT_PATH").is_err() {
+            eprintln!("FFXI_DAT_PATH unset; skipping");
+            return;
+        }
+        bevy::tasks::AsyncComputeTaskPool::get_or_init(bevy::tasks::TaskPool::new);
+        let (submeshes, instances) = load_mzb_placed(345, None).expect("load DAT 345");
+        let geom = build_collision_geometry(&submeshes, &instances, Some(345));
+        let tris: Vec<[Vec3; 3]> = geom
+            .indices
+            .chunks_exact(3)
+            .map(|t| {
+                [
+                    geom.positions[t[0] as usize],
+                    geom.positions[t[1] as usize],
+                    geom.positions[t[2] as usize],
+                ]
+            })
+            .collect();
+        assert!(tris.len() > 40_000, "zone 345 collision unexpectedly small");
+        let bvh = CollisionBvh::from_world_triangles(tris);
+
+        // ffxi (18.06, 40.93, -1.00) -> bevy, plus the third-person anchor rise.
+        let anchor = Vec3::new(18.06, 1.0 + 2.3 * 0.55, -40.93);
+        let wanted = 15.0;
+
+        let mut mismatches = Vec::new();
+        for yaw_i in 0..72 {
+            let yaw = yaw_i as f32 * std::f32::consts::TAU / 72.0;
+            for pitch_i in -3..=6 {
+                let pitch = pitch_i as f32 * 0.15;
+                let (cos_p, sin_p) = (pitch.cos(), pitch.sin());
+                let dir = Vec3::new(yaw.sin() * cos_p, sin_p, yaw.cos() * cos_p);
+                let fast = bvh.ray_cast(anchor, dir, wanted);
+                let brute = bvh.ray_cast_brute_force(anchor, dir, wanted);
+                let agree = match (fast, brute) {
+                    (None, None) => true,
+                    (Some(a), Some(b)) => (a - b).abs() < 1e-3,
+                    _ => false,
+                };
+                if !agree {
+                    mismatches.push((yaw, pitch, fast, brute));
+                }
+            }
+        }
+        assert!(
+            mismatches.is_empty(),
+            "BVH traversal disagreed with brute force on {} of 720 camera rays; \
+             first: {:?}",
+            mismatches.len(),
+            mismatches.first()
+        );
+    }
+}

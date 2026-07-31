@@ -40,7 +40,14 @@ the higher tier:
    questions (field widths, masks, flags) are settled here, nowhere else.
 2. **`XIClient/`** — disassembly-grounded; the best community reference for
    **bit-level format accuracy** (field widths, in-memory-only bits). No
-   license: read-only.
+   license: read-only. Its value is not only field widths: it carries retail's
+   runtime *policies* named and intact, so prefer it over XIM whenever the
+   question is "what exactly does retail do here", not just "what does the
+   struct look like". `World/Zone/Terrain/` is the worked example — retail's
+   ray queries are one template over the MZB collision grid, specialised by
+   policy (`BacksideCullingPolicy` for movement, `DoubleSidedSkipPolicy` for
+   the chase camera), which settles floor-vs-ceiling and camera-skip questions
+   that XIM only approximates.
 3. **`Phoenix/`** — server-side divergence signal for wire-protocol
    questions (LSB under `vendor/` stays authoritative for runtime).
 4. **`cexi-docs/`** — community format docs (DAT, animation, zone mesh,
@@ -58,6 +65,17 @@ the higher tier:
    retail uses 19; harmless on retail data only because bit 26
    (`is_shadow`) is always clear). Confirm any XIM-derived mask or width
    against XIClient or the disassembly.
+
+   The drift is wider than bit widths. Aamace's own guidance is to stay
+   skeptical of XIM wherever an effect is subtle in-game, because XIM
+   reproduces what is *observable*, not what the client computes. So a
+   detail XIM omits is weak evidence that retail omits it. Worked example:
+   XIM's chase camera skips triangles by a `hitWall` material bit
+   (`type & 0x40`), which reads as the whole rule; XIClient shows retail
+   also gates that skip on the mesh header flags and takes the bit from the
+   triangle's third vertex index (`Flags != 0 && VertexIndex3 & 0x4000`).
+   XIM was right about the shape and wrong about the predicate — the usual
+   failure mode. Use XIM to find *where* to look, then read XIClient.
 
 ## XIM
 

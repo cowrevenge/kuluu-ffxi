@@ -46,8 +46,6 @@ pub mod animation {
     }
 }
 
-use crate::framing::SubPacket;
-
 #[derive(Debug, Clone, Copy)]
 pub struct PosHead {
     pub unique_no: u32,
@@ -965,10 +963,6 @@ impl SystemMessage {
     }
 }
 
-pub fn decode_system_message(sub: &SubPacket<'_>) -> Result<SystemMessage, DecodeError> {
-    SystemMessage::decode(sub.data)
-}
-
 // vendor/server/src/map/packets/s2c/0x057_weather.h:32-37 (StartTime u32, WeatherNumber, WeatherOffsetTime u16)
 #[derive(Debug, Clone, Copy)]
 pub struct WeatherPacket {
@@ -990,10 +984,6 @@ impl WeatherPacket {
             offset_time: u16::from_le_bytes(body[6..8].try_into().unwrap()),
         })
     }
-}
-
-pub fn decode_weather(sub: &SubPacket<'_>) -> Result<WeatherPacket, DecodeError> {
-    WeatherPacket::decode(sub.data)
 }
 
 /// s2c 0x055 GP_SERV_COMMAND_SCENARIOITEM (key items). One packet carries a
@@ -1057,10 +1047,6 @@ impl ScenarioItem {
     }
 }
 
-pub fn decode_scenario_item(sub: &SubPacket<'_>) -> Result<ScenarioItem, DecodeError> {
-    ScenarioItem::decode(sub.data)
-}
-
 /// s2c 0x02A GP_SERV_COMMAND_TALKNUMWORK — a zone-dialog message (LSB lua
 /// `messageSpecial`) with up to 4 numeric parameters substituted into the
 /// zone's dialog DAT entry `MesNum`.
@@ -1121,10 +1107,6 @@ impl TalkNumWork {
             .unwrap_or(Self::NAME_LEN);
         (end > 0).then(|| String::from_utf8_lossy(&self.name[..end]).into_owned())
     }
-}
-
-pub fn decode_talk_num_work(sub: &SubPacket<'_>) -> Result<TalkNumWork, DecodeError> {
-    TalkNumWork::decode(sub.data)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1207,10 +1189,6 @@ impl ForcedMove {
             raw_mode,
         })
     }
-}
-
-pub fn decode_forced_move(sub: &SubPacket<'_>) -> Result<ForcedMove, DecodeError> {
-    ForcedMove::decode(sub.data)
 }
 
 /// One s2c 0x0F4 wide-scan (tracking) list entry.
@@ -1597,18 +1575,6 @@ impl PartyAttrs {
         };
         Ok((attrs, extra))
     }
-}
-
-pub fn decode_pos_head(sub: &SubPacket<'_>) -> Result<PosHead, DecodeError> {
-    PosHead::decode(sub.data)
-}
-
-pub fn decode_logout(sub: &SubPacket<'_>) -> Result<ServerLogout, DecodeError> {
-    ServerLogout::decode(sub.data)
-}
-
-pub fn decode_login(sub: &SubPacket<'_>) -> Result<ServerLogin, DecodeError> {
-    ServerLogin::decode(sub.data)
 }
 
 fn read_name_slot(slot: &[u8]) -> Option<String> {

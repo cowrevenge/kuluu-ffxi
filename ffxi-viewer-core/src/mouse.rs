@@ -287,9 +287,10 @@ mod tests {
         .add_systems(Update, mouse_camera_system);
         app.update();
         let d = app.world().resource::<ChaseCamera>().distance;
+        let from_rest = ChaseCamera::default().distance - 3.0 * WHEEL_ZOOM_STEP;
         assert!(
-            (d - (18.0 - 3.0 * WHEEL_ZOOM_STEP)).abs() < 1e-6,
-            "distance {d} should equal 18.0 - 3*WHEEL_ZOOM_STEP"
+            (d - from_rest).abs() < 1e-6,
+            "distance {d} should equal the resting distance - 3*WHEEL_ZOOM_STEP ({from_rest})"
         );
 
         let mut app = test_app();
@@ -312,7 +313,11 @@ mod tests {
         .insert_resource(ChaseCamera::default())
         .add_systems(Update, mouse_camera_system);
         app.update();
-        assert_eq!(app.world().resource::<ChaseCamera>().distance, 18.0);
+        assert_eq!(
+            app.world().resource::<ChaseCamera>().distance,
+            ChaseCamera::default().distance,
+            "first-person swallows the wheel; chase distance is left untouched"
+        );
     }
 
     fn test_app() -> App {

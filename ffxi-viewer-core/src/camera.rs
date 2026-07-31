@@ -86,7 +86,23 @@ impl ChaseCamera {
 
     pub const DIST_MIN: f32 = 2.0;
 
-    pub const DIST_MAX: f32 = 20.0;
+    /// Retail's chase camera works in a much tighter band than a modern MMO's.
+    /// Three independent references put the nominal radius at 6, and none of
+    /// them admits anything like a 20-yalm pull-back:
+    ///
+    /// - research/XIClient/.../World/Camera/CameraManager.cpp:506 normalises the
+    ///   orbit rate against it — `angle = 6.0f / eyeToTargetDistance * angle`.
+    /// - Same file:822, the camera-follow easing changes regime above 6.
+    /// - research/xim/.../camera/PolarCamera.kt:24 `maximumRadius = 6f`.
+    ///
+    /// The resting distance is nearer still: CameraManager.cpp:95 places the
+    /// default eye at `{-3, 0, 0}` behind the actor, and :404 falls back to -4.
+    ///
+    /// This is load-bearing for camera collision, not just feel. Zone collision
+    /// is authored coarsely — Lower Jeuno has ceiling over x=15.7 and none over
+    /// x=17.7 — so a camera allowed 20 yalms out and ~19 up exits the building
+    /// through gaps retail's camera never reaches (kuluu-64fh).
+    pub const DIST_MAX: f32 = 6.0;
 
     pub const KEYBOARD_ZOOM_RATE: f32 = 10.0;
 }
@@ -97,7 +113,9 @@ impl Default for ChaseCamera {
             yaw: 0.0,
 
             pitch: 0.15,
-            distance: 18.0,
+            // Rests fully zoomed out, as XIM does (`previousRadius = radiusMax`,
+            // PolarCamera.kt:46). Was 18.0, which is now past DIST_MAX.
+            distance: Self::DIST_MAX,
             smoothing: 0.18,
             synced_initial: false,
         }
@@ -130,7 +148,9 @@ impl Default for CameraTransition {
             from_dist: 0.0,
             to_dist: 0.0,
             target_mode: CameraMode::Chase,
-            saved_chase_dist: 18.0,
+            // What a first-person toggle restores to before the player has zoomed;
+            // same value as the resting chase distance.
+            saved_chase_dist: ChaseCamera::DIST_MAX,
         }
     }
 }

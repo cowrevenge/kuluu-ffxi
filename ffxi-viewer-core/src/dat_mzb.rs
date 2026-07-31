@@ -144,6 +144,13 @@ pub struct MzbCollisionGeometry {
     /// [`MzbSubMesh::tri_normal`].
     pub tri_normals: Vec<Vec3>,
 
+    /// Per triangle, parallel to `indices.chunks(3)`: retail's
+    /// `DoubleSidedSkipPolicy` verdict. Only [`Self::camera_triangles`] reads it
+    /// — grounding deliberately does not, because retail's movement query uses
+    /// `BacksideCullingPolicy`, which skips nothing. Empty means "skip nothing",
+    /// matching the `tri_normals` fallback convention.
+    pub camera_skip: Vec<bool>,
+
     pub cell_index: std::collections::HashMap<(i32, i32), Vec<u32>>,
 
     /// DAT file the triangles came from. Grounding against a zone the player
@@ -275,6 +282,37 @@ impl MzbCollisionGeometry {
         best
     }
 
+    /// World triangles retail's chase camera sees — everything except the
+    /// `DoubleSidedSkipPolicy` skip set. The camera BVH and every camera probe
+    /// must come through here or they disagree with the game.
+    ///
+    /// Filtering happens here, before the BVH is built, because `CollisionBvh`
+    /// reorders its triangle copy by leaf order: no per-triangle array can be
+    /// mapped back once it has, so the skip cannot be applied afterwards.
+    pub fn camera_triangles(&self) -> Vec<[Vec3; 3]> {
+        let desynced = !self.camera_skip.is_empty() && self.camera_skip.len() != self.tri_count();
+        if desynced {
+            warn!(
+                camera_skip = self.camera_skip.len(),
+                tri_count = self.tri_count(),
+                "camera_skip desynced from the triangle list; skipping by a stale index would \
+                 drop the wrong surfaces, so nothing is skipped"
+            );
+        }
+        self.indices
+            .chunks_exact(3)
+            .enumerate()
+            .filter(|(i, _)| desynced || !self.camera_skip.get(*i).copied().unwrap_or(false))
+            .map(|(_, t)| {
+                [
+                    self.positions[t[0] as usize],
+                    self.positions[t[1] as usize],
+                    self.positions[t[2] as usize],
+                ]
+            })
+            .collect()
+    }
+
     pub fn ground_raycast_all(&self, xz: Vec2) -> Vec<(f32, Vec3)> {
         let mut hits: Vec<(f32, Vec3)> = Vec::new();
         self.for_each_hit_in_column(xz, |hit_y, normal| hits.push((hit_y, normal)));
@@ -337,6 +375,7 @@ pub fn build_collision_geometry(
     let mut positions: Vec<Vec3> = Vec::new();
     let mut indices: Vec<u32> = Vec::new();
     let mut tri_normals: Vec<Vec3> = Vec::new();
+    let mut camera_skip: Vec<bool> = Vec::new();
     let mut missing = 0usize;
 
     for inst in instances {
@@ -365,6 +404,10 @@ pub fn build_collision_geometry(
                     tri_normals.push(Vec3::ZERO);
                 }
             }
+            camera_skip.push(mzb::double_sided_skip(
+                sub.flags,
+                sub.tri_camera_transparent.get(t).copied().unwrap_or(false),
+            ));
         }
     }
 
@@ -383,6 +426,7 @@ pub fn build_collision_geometry(
         positions,
         indices,
         tri_normals,
+        camera_skip,
         source_file_id: file_id,
     }
 }
@@ -547,6 +591,10 @@ pub struct MzbSubMesh {
     /// which side is up, and only this can tell a floor from a ceiling.
     pub tri_normal: Vec<[f32; 3]>,
 
+    /// Raw per-triangle camera-transparent bit, kept uncombined with [`Self::flags`]
+    /// so probes can inspect both inputs to `double_sided_skip` independently.
+    pub tri_camera_transparent: Vec<bool>,
+
     pub flags: u16,
 }
 
@@ -675,11 +723,14 @@ fn bake_submesh(m: &mzb::MzbMesh) -> MzbSubMesh {
         .iter()
         .map(|&ni| m.normals.get(ni as usize).map_or([0.0; 3], |n| n.n))
         .collect();
+    let tri_camera_transparent: Vec<bool> =
+        m.tri_info.iter().map(|t| t.camera_transparent).collect();
     MzbSubMesh {
         positions,
         indices,
         tri_material,
         tri_normal,
+        tri_camera_transparent,
         flags: m.flags,
     }
 }
@@ -1975,6 +2026,7 @@ mod ground_tests {
             positions,
             indices,
             tri_normals,
+            camera_skip: Vec::new(),
             cell_index: std::collections::HashMap::new(),
             source_file_id: None,
         }
@@ -1982,6 +2034,59 @@ mod ground_tests {
 
     fn two_floors(low: f32, high: f32) -> MzbCollisionGeometry {
         slabs(&[(low, Vec3::Y), (high, Vec3::Y)])
+    }
+
+    /// Two instances of one submesh: `camera_skip` must be per *placed* triangle,
+    /// so the submesh's pattern repeats once per instance and stays aligned with
+    /// `indices.chunks(3)`.
+    #[test]
+    fn camera_skip_is_per_placed_triangle() {
+        let sub = |flags: u16, transparent: [bool; 2]| MzbSubMesh {
+            positions: floor_at(0.0)
+                .0
+                .to_vec()
+                .iter()
+                .map(|v| v.to_array())
+                .collect(),
+            indices: floor_at(0.0).1.to_vec(),
+            tri_material: vec![0; 2],
+            tri_normal: vec![[0.0, 1.0, 0.0]; 2],
+            tri_camera_transparent: transparent.to_vec(),
+            flags,
+        };
+        // Submesh 0 is camera-transparent on its second triangle; submesh 1 has
+        // the bit set but flags == 0, so the mesh gate must veto it.
+        let submeshes = vec![sub(1, [false, true]), sub(0, [true, true])];
+        let instances = vec![
+            MzbInstance {
+                submesh_idx: 0,
+                bevy_transform: Transform::IDENTITY,
+                water_height_bevy: None,
+            },
+            MzbInstance {
+                submesh_idx: 0,
+                bevy_transform: Transform::from_xyz(50.0, 0.0, 0.0),
+                water_height_bevy: None,
+            },
+            MzbInstance {
+                submesh_idx: 1,
+                bevy_transform: Transform::from_xyz(100.0, 0.0, 0.0),
+                water_height_bevy: None,
+            },
+        ];
+        let geom = build_collision_geometry(&submeshes, &instances, None);
+
+        assert_eq!(geom.camera_skip.len(), geom.tri_count());
+        assert_eq!(
+            geom.camera_skip,
+            vec![false, true, false, true, false, false],
+            "the submesh pattern repeats per instance, and flags == 0 vetoes"
+        );
+        assert_eq!(
+            geom.camera_triangles().len(),
+            geom.tri_count() - 2,
+            "camera_triangles drops exactly the skipped ones"
+        );
     }
 
     #[test]

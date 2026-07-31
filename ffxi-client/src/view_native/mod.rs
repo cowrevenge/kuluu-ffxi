@@ -734,8 +734,10 @@ fn despawn_ingame_entities(
     }
 
     tracked.by_id.clear();
-    collision.positions.clear();
-    collision.indices.clear();
+    // Whole-resource reset, not a field-by-field clear: the parallel per-triangle
+    // arrays and `cell_index` must go together, or a stale cell index will hand
+    // `visit_tri` triangle ids that no longer exist. Matches the zone-change path.
+    *collision = MzbCollisionGeometry::default();
     last_zone.file_id = None;
     last_atmo.file_id = None;
 

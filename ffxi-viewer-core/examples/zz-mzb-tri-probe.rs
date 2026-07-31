@@ -1,9 +1,12 @@
 //! Reports every MZB triangle in a vertical column with all per-triangle
 //! attributes ffxi-dat parses, so a collision predicate can be designed from
 //! data rather than guessed: authored normal (vs the winding-derived one),
-//! is_invalid, is_barrier, material, mesh flag bit 0, placement determinant.
+//! is_invalid, camera-transparent bit, material, raw mesh flags, placement
+//! determinant.
 //!
 //! Usage: zz-mzb-tri-probe <zone_id> <x> <y> [<x2> <y2> ...]
+//! Set KULUU_DAT_FILE_ID to probe a DAT the zone table doesn't reach (Mog House
+//! interiors, whose file id depends on the myroom model rather than the zone).
 
 use bevy::math::{Mat3, Mat4, Vec3};
 use ffxi_dat::chunk::walk;
@@ -15,9 +18,9 @@ struct Tri {
     authored_n: Vec3,
     geom_n: Vec3,
     invalid: bool,
-    barrier: bool,
+    camera_transparent: bool,
     material: u8,
-    mesh_flag0: bool,
+    mesh_flags: u16,
     det_neg: bool,
 }
 
@@ -25,8 +28,11 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let zone_id: u16 = args[0].parse().expect("zone id");
 
-    let file_id = ffxi_dat::zone_dat::effective_zone_dat_file_id(Some(zone_id), None)
-        .expect("zone -> mzb file id");
+    let file_id = match std::env::var("KULUU_DAT_FILE_ID") {
+        Ok(s) => s.parse().expect("KULUU_DAT_FILE_ID"),
+        Err(_) => ffxi_dat::zone_dat::effective_zone_dat_file_id(Some(zone_id), None)
+            .expect("zone -> mzb file id"),
+    };
     let root = DatRoot::from_env_or_default().expect("DatRoot");
     let path = root
         .resolve(file_id)
@@ -77,9 +83,9 @@ fn main() {
                 authored_n: authored,
                 geom_n: (v[1] - v[0]).cross(v[2] - v[0]).normalize_or_zero(),
                 invalid: info.is_invalid,
-                barrier: info.is_barrier,
+                camera_transparent: info.camera_transparent,
                 material: info.material,
-                mesh_flag0: m.flags & 1 != 0,
+                mesh_flags: m.flags,
                 det_neg: p.flip_winding,
             });
         }
@@ -87,7 +93,7 @@ fn main() {
     println!("zone {zone_id} (DAT {file_id}): {} triangles", tris.len());
 
     let (mut anti, mut agree, mut other, mut degen) = (0, 0, 0, 0);
-    let (mut n_inval, mut n_barrier, mut n_flag0) = (0, 0, 0);
+    let (mut n_inval, mut n_cam_transparent, mut n_flag0) = (0, 0, 0);
     for t in &tris {
         let d = t.authored_n.dot(t.geom_n);
         if t.geom_n == Vec3::ZERO || t.authored_n == Vec3::ZERO {
@@ -100,14 +106,105 @@ fn main() {
             other += 1;
         }
         n_inval += t.invalid as usize;
-        n_barrier += t.barrier as usize;
-        n_flag0 += t.mesh_flag0 as usize;
+        n_cam_transparent += t.camera_transparent as usize;
+        n_flag0 += (t.mesh_flags & 1 != 0) as usize;
     }
     println!(
         "  authored vs winding-derived normal: antiparallel={anti} parallel={agree} \
          neither={other} degenerate={degen}"
     );
-    println!("  is_invalid={n_inval}  is_barrier={n_barrier}  mesh_flag0={n_flag0}");
+    println!(
+        "  is_invalid={n_inval}  camera_transparent_bit={n_cam_transparent}  mesh_flag0={n_flag0}"
+    );
+
+    // KULUU_MESHFLAGS — sizes the retail camera-skip predicate before we ship it
+    // (kuluu-eg5g). M1: is `flags != 0` (what CollisionQuery.hpp tests) actually
+    // distinguishable from `flags & 1` (what doesnt_block_los uses) on real data?
+    // M2: what does the skip set contain — the camera has no ground clamp, so
+    // up-facing floors in it mean the camera can sink under terrain. M3: is the
+    // skipped count per unique mesh or per placed world triangle?
+    if std::env::var("KULUU_MESHFLAGS").is_ok() {
+        let mut per_mesh: std::collections::BTreeMap<u16, usize> = Default::default();
+        let mut seen_offsets = std::collections::HashSet::new();
+        for p in &placements {
+            if !seen_offsets.insert(p.geometry_offset) {
+                continue;
+            }
+            if let Ok(m) = mzb::parse_mesh_at(&plain, p.geometry_offset as usize) {
+                *per_mesh.entry(m.flags).or_default() += 1;
+            }
+        }
+        println!("\nM1 unique-mesh flags histogram (raw u16):");
+        for (flags, count) in &per_mesh {
+            println!("  flags=0x{flags:04X}  meshes={count}");
+        }
+        let m_nonzero: usize = per_mesh
+            .iter()
+            .filter(|(f, _)| **f != 0)
+            .map(|(_, c)| c)
+            .sum();
+        let m_bit0: usize = per_mesh
+            .iter()
+            .filter(|(f, _)| **f & 1 != 0)
+            .map(|(_, c)| c)
+            .sum();
+        println!(
+            "  meshes flags!=0: {m_nonzero}   meshes flags&1: {m_bit0}   {}",
+            if m_nonzero == m_bit0 {
+                "IDENTICAL on this zone"
+            } else {
+                "*** DIFFER — `!= 0` and `& 1` are different predicates ***"
+            }
+        );
+
+        let (mut skip_floor, mut skip_wall, mut skip_ceil) = (0usize, 0usize, 0usize);
+        let mut skipped = 0usize;
+        for t in &tris {
+            if !(t.mesh_flags != 0 && t.camera_transparent) {
+                continue;
+            }
+            skipped += 1;
+            if t.authored_n.y >= 0.5 {
+                skip_floor += 1;
+            } else if t.authored_n.y <= -0.5 {
+                skip_ceil += 1;
+            } else {
+                skip_wall += 1;
+            }
+        }
+        println!("\nM2 camera skip set (flags != 0 && camera_transparent), world triangles:");
+        println!(
+            "  skipped={skipped} of {} ({:.2}%)  retained={}",
+            tris.len(),
+            100.0 * skipped as f32 / tris.len().max(1) as f32,
+            tris.len() - skipped
+        );
+        println!(
+            "  up-facing FLOOR={skip_floor}  wall={skip_wall}  down-facing ceiling={skip_ceil}"
+        );
+        if skip_floor > 0 {
+            println!("  ^ floors in the skip set: camera can sink under terrain there");
+        }
+
+        let mesh_level_transparent: usize = {
+            let mut n = 0;
+            let mut seen = std::collections::HashSet::new();
+            for p in &placements {
+                if !seen.insert(p.geometry_offset) {
+                    continue;
+                }
+                if let Ok(m) = mzb::parse_mesh_at(&plain, p.geometry_offset as usize) {
+                    n += m.tri_info.iter().filter(|t| t.camera_transparent).count();
+                }
+            }
+            n
+        };
+        println!(
+            "\nM3 camera_transparent bit: {mesh_level_transparent} per unique mesh, \
+             {n_cam_transparent} per placed world triangle"
+        );
+        return;
+    }
 
     // KULUU_COVERAGE=cx,cy,radius,step — per-column comparison of the retired
     // grounding predicate (|n.y| over flag0-clear submeshes) against the current
@@ -126,7 +223,7 @@ fn main() {
                     if ray_tri(orig, Vec3::NEG_Y, t.v[0], t.v[1], t.v[2]).is_none() {
                         continue;
                     }
-                    old_has |= !t.mesh_flag0 && t.geom_n.y.abs() >= 0.5;
+                    old_has |= (t.mesh_flags & 1 == 0) && t.geom_n.y.abs() >= 0.5;
                     new_has |= t.authored_n.y >= 0.5;
                 }
                 match (old_has, new_has) {
@@ -227,9 +324,9 @@ fn main() {
                 t.authored_n.y,
                 t.geom_n.y,
                 t.invalid,
-                t.barrier,
+                t.camera_transparent,
                 t.material,
-                t.mesh_flag0,
+                t.mesh_flags & 1 != 0,
                 t.det_neg
             );
         }

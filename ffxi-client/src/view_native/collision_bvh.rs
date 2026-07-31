@@ -361,18 +361,12 @@ pub fn build_zone_collision_bvh_system(
         zone_bvh.0 = None;
         return;
     }
-    let mut tris: Vec<[Vec3; 3]> = Vec::with_capacity(geom.indices.len() / 3);
-    for tri in geom.indices.chunks_exact(3) {
-        tris.push([
-            geom.positions[tri[0] as usize],
-            geom.positions[tri[1] as usize],
-            geom.positions[tri[2] as usize],
-        ]);
-    }
+    let tris = geom.camera_triangles();
     let tri_count = tris.len();
     let bvh = CollisionBvh::from_world_triangles(tris);
     debug!(
         triangles = tri_count,
+        skipped = geom.tri_count() - tri_count,
         nodes = bvh.nodes.len(),
         "built zone-level MZB collision BVH"
     );
@@ -418,17 +412,8 @@ mod bvh_tests {
         bevy::tasks::AsyncComputeTaskPool::get_or_init(bevy::tasks::TaskPool::new);
         let (submeshes, instances) = load_mzb_placed(345, None).expect("load DAT 345");
         let geom = build_collision_geometry(&submeshes, &instances, Some(345));
-        let tris: Vec<[Vec3; 3]> = geom
-            .indices
-            .chunks_exact(3)
-            .map(|t| {
-                [
-                    geom.positions[t[0] as usize],
-                    geom.positions[t[1] as usize],
-                    geom.positions[t[2] as usize],
-                ]
-            })
-            .collect();
+        // Same entry point the system uses, so the two can't drift.
+        let tris = geom.camera_triangles();
         assert!(tris.len() > 40_000, "zone 345 collision unexpectedly small");
         let bvh = CollisionBvh::from_world_triangles(tris);
 
@@ -461,6 +446,27 @@ mod bvh_tests {
              first: {:?}",
             mismatches.len(),
             mismatches.first()
+        );
+    }
+
+    /// The camera BVH is built from the filtered set, so its triangle count must
+    /// be short by exactly the skip set — a filter applied to the wrong list, or
+    /// applied after `CollisionBvh::build` reorders, shows up here.
+    #[test]
+    fn zone_camera_bvh_drops_the_skip_set() {
+        if std::env::var("FFXI_DAT_PATH").is_err() {
+            eprintln!("FFXI_DAT_PATH unset; skipping");
+            return;
+        }
+        bevy::tasks::AsyncComputeTaskPool::get_or_init(bevy::tasks::TaskPool::new);
+        let (submeshes, instances) = load_mzb_placed(345, None).expect("load DAT 345");
+        let geom = build_collision_geometry(&submeshes, &instances, Some(345));
+
+        let skipped = geom.camera_skip.iter().filter(|s| **s).count();
+        assert!(skipped > 0, "zone 345 has a nonempty skip set");
+        assert_eq!(
+            CollisionBvh::from_world_triangles(geom.camera_triangles()).tri_count(),
+            geom.tri_count() - skipped
         );
     }
 }

@@ -192,7 +192,38 @@ pub struct MzbTriangleInfo {
 
     pub is_invalid: bool,
 
-    pub is_barrier: bool,
+    /// Third index word's `0x4000`. Feeds [`double_sided_skip`] — the chase
+    /// camera and line-of-sight pass through, movement does not.
+    pub camera_transparent: bool,
+}
+
+/// Third index word: `triangle->VertexIndex3 & 0x4000` in
+/// research/XIClient/src/XIClient/include/World/Zone/Terrain/CollisionQuery.hpp
+/// `DoubleSidedSkipPolicy::SkipTriangle`.
+const TRI_CAMERA_TRANSPARENT: u16 = 0x4000;
+
+/// Second index word, same bit position. research/cexi-docs/zone/collision.md:204
+/// claims player movement keys off it, but it measures 0 across Lower Jeuno,
+/// Port Jeuno, Southern San d'Oria and West Ronfaure — if it gated blocking,
+/// nothing in those zones would block. Parsed, unused, semantics unresolved.
+const TRI_SECOND_WORD_FLAG: u16 = 0x4000;
+
+/// research/XIClient/src/XIClient/include/World/Zone/Terrain/CollisionQuery.hpp
+/// `DoubleSidedSkipPolicy::SkipTriangle`:
+/// `header->Flags != 0 && (triangle->VertexIndex3 & 0x4000) != 0`.
+///
+/// The whole `u16` is tested, not bit 0. Measured over Lower Jeuno, Port Jeuno,
+/// Southern San d'Oria, West Ronfaure and two Mog House DATs, `flags` only ever
+/// holds 0x0000 or 0x0001, so `!= 0` and `& 1` are indistinguishable on retail
+/// data — this keeps the authoritative form. (In those same zones every
+/// camera-transparent triangle already sits in a `flags != 0` mesh, so the mesh
+/// gate never excludes anything; it is kept because retail tests it.)
+///
+/// Movement uses `BacksideCullingPolicy`, whose `SkipTriangle` is
+/// unconditionally false — grounding must never consult this.
+/// Corroborated: research/cexi-docs/zone/collision.md:201-209.
+pub fn double_sided_skip(mesh_flags: u16, camera_transparent: bool) -> bool {
+    mesh_flags != 0 && camera_transparent
 }
 
 #[derive(Debug, Clone)]
@@ -346,14 +377,14 @@ fn parse_one_mesh(body: &[u8], pos: usize) -> Result<MzbMesh> {
         let m2 = ((v2_raw >> 15) & 1) as u8;
         let m3 = ((n0_raw >> 15) & 1) as u8;
         let material = m0 | (m1 << 1) | (m2 << 2) | (m3 << 3);
-        let is_invalid = (v1_raw & 0x4000) != 0;
-        let is_barrier = (v2_raw & 0x4000) != 0;
+        let is_invalid = (v1_raw & TRI_SECOND_WORD_FLAG) != 0;
+        let camera_transparent = (v2_raw & TRI_CAMERA_TRANSPARENT) != 0;
         triangles.push([v0, v1, v2]);
         triangle_normals.push(n0);
         tri_info.push(MzbTriangleInfo {
             material,
             is_invalid,
-            is_barrier,
+            camera_transparent,
         });
     }
 
@@ -755,7 +786,7 @@ mod tests {
         assert_eq!(m.triangle_normals[0], 0);
         assert_eq!(m.tri_info[0].material, 0b0001, "material from v0 top bit");
         assert!(m.tri_info[0].is_invalid, "is_invalid from v1 bit 14");
-        assert!(!m.tri_info[0].is_barrier);
+        assert!(!m.tri_info[0].camera_transparent);
 
         assert_eq!(m.triangles[1], [0, 2, 3]);
         assert_eq!(
@@ -763,7 +794,24 @@ mod tests {
             "material composed from v2 + n0 top bits"
         );
         assert!(!m.tri_info[1].is_invalid);
-        assert!(m.tri_info[1].is_barrier, "is_barrier from v2 bit 14");
+        assert!(
+            m.tri_info[1].camera_transparent,
+            "camera_transparent from v2 bit 14"
+        );
+    }
+
+    #[test]
+    fn double_sided_skip_tests_the_whole_flags_word() {
+        assert!(!double_sided_skip(0, true), "flags == 0 never skips");
+        assert!(!double_sided_skip(1, false), "bit clear never skips");
+        assert!(double_sided_skip(1, true));
+        // The guard that matters: retail tests `Flags != 0`, not `Flags & 1`.
+        // `doesnt_block_los` right next door uses `& 1`, so this pins the two
+        // apart against a well-meaning "unification".
+        assert!(
+            double_sided_skip(2, true),
+            "any nonzero flags value gates the skip, not just bit 0"
+        );
     }
 
     #[test]

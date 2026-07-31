@@ -17,6 +17,16 @@ use super::collision_bvh::{CollisionBvh, ZoneCollisionBvh};
 /// frame, so outside a Mog House it stays gated on the explicit source setting.
 /// The BVH-build gate ([`super::collision_bvh::build_collision_bvh_system`]) and
 /// the camera raycast MUST use this same predicate or they disagree on coverage.
+///
+/// The gap is real and still open: `mh_391_doorway_is_a_gap_in_mzb_collision`
+/// finds MZB walls on 23 of 24 headings from the spawn anchor and nothing at all
+/// on the 24th. So this is not made redundant by kuluu-0nnl putting every MZB
+/// submesh into the collision set — MMB placements are a separate set entirely.
+///
+/// Note the two camera sources now differ in *policy*, not just coverage: MZB
+/// triangles are filtered by retail's `DoubleSidedSkipPolicy`
+/// ([`ffxi_dat::mzb::double_sided_skip`]) while MMB models carry no
+/// `CollisionMeshHeader.Flags` and are raycast whole.
 pub fn camera_collides_with_mmb(source: CameraCollisionSource, in_mog_house: bool) -> bool {
     source.uses_mmb() || in_mog_house
 }

@@ -78,9 +78,11 @@ mod tests {
     }
 
     fn spawn_panel(app: &mut App, slot: ColumnPanel, height: f32, display: Display) -> Entity {
-        let mut computed = ComputedNode::default();
-        computed.size = Vec2::new(style::PANEL_WIDTH_PX, height);
-        computed.inverse_scale_factor = 1.0;
+        let computed = ComputedNode {
+            size: Vec2::new(style::PANEL_WIDTH_PX, height),
+            inverse_scale_factor: 1.0,
+            ..default()
+        };
         app.world_mut()
             .spawn((
                 slot,

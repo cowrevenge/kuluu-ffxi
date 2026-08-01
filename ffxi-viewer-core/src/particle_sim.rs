@@ -182,6 +182,9 @@ struct LiveGenerator {
     vel_basis: Vec3,
     origin_routine: Option<RoutineOrigin>,
     stopped: bool,
+    // Key of the last BUILT mesh (spawn writes `empty_mesh`, hence `MeshKey::Empty`), so
+    // quantization error is bounded by one quantum and never accumulates across skipped frames.
+    built_key: MeshKey,
 }
 
 // Auto-run particle generators embedded in an actor DAT (research/xim
@@ -306,6 +309,7 @@ pub fn spawn_particle_generators(
                 routine: ev.scheduler,
             }),
             stopped: false,
+            built_key: MeshKey::Empty,
         });
     }
 }
@@ -387,6 +391,7 @@ pub fn spawn_actor_auto_run_particles(
                 vel_basis: Vec3::ONE,
                 origin_routine: None,
                 stopped: false,
+                built_key: MeshKey::Empty,
                 def,
             });
         }
@@ -468,6 +473,7 @@ pub fn spawn_zone_particle_generator(
         vel_basis: Vec3::new(1.0, -1.0, -1.0),
         origin_routine: None,
         stopped: false,
+        built_key: MeshKey::Empty,
         def,
     });
     Some(entity)
@@ -585,7 +591,7 @@ pub fn sync_particle_meshes(
     // (index, despawn-needed); indices ascending so the reverse sweep below can
     // swap_remove safely.
     let mut reap: Vec<(usize, bool)> = Vec::new();
-    for (i, g) in sim.generators.iter().enumerate() {
+    for (i, g) in sim.generators.iter_mut().enumerate() {
         // The mesh entity despawns with its actor (auto-run generators are
         // children of the actor root); reap the simulator entry when it's gone.
         let Ok(entity_xf) = q_mesh_xf.get(g.entity) else {
@@ -600,8 +606,15 @@ pub fn sync_particle_meshes(
             (None, true) => entity_xf.rotation().inverse() * cam_rot,
             (None, false) => cam_rot,
         };
-        if let Some(mut mesh) = meshes.get_mut(&g.mesh) {
-            rebuild_mesh(g, rot, &mut mesh);
+        // The tracked get_mut marks the mesh Modified and forces a full GPU re-upload, so it
+        // only runs when the rebuilt vertex output would differ from the last built mesh
+        // (kuluu-b5nt).
+        let key = mesh_key(g, rot);
+        if needs_rebuild(&g.built_key, &key) {
+            if let Some(mut mesh) = meshes.get_mut(&g.mesh) {
+                rebuild_mesh(g, rot, &mut mesh);
+                g.built_key = key;
+            }
         }
         let window_over =
             g.stopped || (!g.auto_run && g.age_frames > g.emit_window_frames.max(1.0));
@@ -619,6 +632,134 @@ pub fn sync_particle_meshes(
     }
 }
 
+struct ParticleDraw {
+    flipbook_frame: usize,
+    scale: Vec2,
+    rgb: Vec3,
+    vert_alpha: f32,
+    world: Vec3,
+}
+
+fn particle_draw(g: &LiveGenerator, p: &Particle) -> ParticleDraw {
+    let progress = (p.age_frames / p.life_frames).clamp(0.0, 1.0);
+    // A SpriteSheet particle flipbooks its frames over life (research/xim Particle.kt:72
+    // spriteSheetIndex); a StaticMesh particle keeps its single template.
+    let flipbook_frame = flipbook_index(g, progress);
+    let tpl = flipbook_template(g, flipbook_frame);
+    let sx = g
+        .scale_x
+        .as_ref()
+        .map(|t| t.sample_from(progress, Some(p.scale.x)))
+        .unwrap_or(p.scale.x);
+    let sy = g
+        .scale_y
+        .as_ref()
+        .map(|t| t.sample_from(progress, Some(p.scale.y)))
+        .unwrap_or(p.scale.y);
+    // Additive blend ignores alpha, so the alpha track drives brightness. With
+    // no track, a transient spray fades linearly to nothing over life; a
+    // continuous generator (one particle re-emitted on expiry — the steady
+    // crystal body) holds full opacity, or each re-emit cycle would fade the
+    // single particle out and strobe the whole model transparent.
+    let alpha = g
+        .alpha
+        .as_ref()
+        .map(|t| t.sample_from(progress, Some(g.def.init_color[3])))
+        .unwrap_or(if g.def.continuous {
+            1.0
+        } else {
+            1.0 - progress
+        });
+    let (stage_rgb, stage_alpha) = d3m_stage_chain(
+        tpl.brightness,
+        tpl.vert_alpha,
+        p.rgb,
+        tfactor_alpha(&g.def, g.draw_path, alpha),
+        ignores_texture_alpha(&g.def, g.draw_path),
+    );
+    // Additive/subtract ignore the alpha channel, so the alpha curve modulates brightness;
+    // alpha-blended particles keep full-brightness colour and use the alpha channel. That
+    // fold is a brightness proxy rather than a blend factor, so it takes the raw life curve
+    // instead of the saturating stage-1 alpha.
+    let (rgb, vert_alpha) = match g.def.blend {
+        ffxi_dat::particle_gen::ParticleBlend::Blend => (stage_rgb, stage_alpha),
+        _ => (stage_rgb * alpha, 1.0),
+    };
+    ParticleDraw {
+        flipbook_frame,
+        scale: Vec2::new(sx, sy),
+        rgb,
+        vert_alpha,
+        world: g.origin + p.pos,
+    }
+}
+
+// One step is invisible on screen: 1/1024 world unit is sub-pixel at any playable camera
+// distance, and the same step on a quat component (~0.11 deg) or a UV offset (sub-texel on
+// retail sprite sheets) moves a vertex/texel by less than that.
+const MESH_KEY_SPATIAL_QUANTUM: f32 = 1.0 / 1024.0;
+// One 8-bit render-target step; a smaller colour delta cannot change the drawn pixel.
+const MESH_KEY_COLOR_QUANTUM: f32 = 1.0 / 256.0;
+
+// Quantized snapshot of every dynamic input rebuild_mesh consumes (via particle_draw, plus the
+// billboard rotation and UV scroll it reads directly). Zero live particles rebuild to the same
+// hidden primitive whatever those inputs are, hence the input-free Empty variant.
+#[derive(PartialEq, Eq, Debug)]
+enum MeshKey {
+    Empty,
+    Live {
+        rot: [i32; 4],
+        uv_scroll: [i32; 2],
+        particles: Vec<ParticleKey>,
+    },
+}
+
+#[derive(PartialEq, Eq, Debug)]
+struct ParticleKey {
+    world: [i32; 3],
+    flipbook_frame: usize,
+    scale: [i32; 2],
+    color: [i32; 4],
+}
+
+fn quantized(v: f32, quantum: f32) -> i32 {
+    (v / quantum).round() as i32
+}
+
+fn mesh_key(g: &LiveGenerator, rot: Quat) -> MeshKey {
+    if g.particles.is_empty() {
+        return MeshKey::Empty;
+    }
+    let spatial = |v: f32| quantized(v, MESH_KEY_SPATIAL_QUANTUM);
+    let color = |v: f32| quantized(v, MESH_KEY_COLOR_QUANTUM);
+    MeshKey::Live {
+        rot: rot.to_array().map(spatial),
+        uv_scroll: [spatial(g.tex_translate.x), spatial(g.tex_translate.y)],
+        particles: g
+            .particles
+            .iter()
+            .map(|p| {
+                let draw = particle_draw(g, p);
+                ParticleKey {
+                    world: draw.world.to_array().map(spatial),
+                    flipbook_frame: draw.flipbook_frame,
+                    scale: [spatial(draw.scale.x), spatial(draw.scale.y)],
+                    color: [
+                        color(draw.rgb.x),
+                        color(draw.rgb.y),
+                        color(draw.rgb.z),
+                        color(draw.vert_alpha),
+                    ],
+                }
+            })
+            .collect(),
+    }
+}
+
+fn needs_rebuild(built: &MeshKey, next: &MeshKey) -> bool {
+    built != next
+}
+
 fn rebuild_mesh(g: &LiveGenerator, rot: Quat, mesh: &mut Mesh) {
     let verts_per = g.template.positions.len();
     let n = g.particles.len();
@@ -626,53 +767,10 @@ fn rebuild_mesh(g: &LiveGenerator, rot: Quat, mesh: &mut Mesh) {
     let mut uvs = Vec::with_capacity(n * verts_per);
     let mut colors = Vec::with_capacity(n * verts_per);
     let mut indices = Vec::with_capacity(n * g.template.indices.len());
-    let ignore_texture_alpha = ignores_texture_alpha(&g.def, g.draw_path);
 
     for p in &g.particles {
-        let progress = (p.age_frames / p.life_frames).clamp(0.0, 1.0);
-        // A SpriteSheet particle flipbooks its frames over life (research/xim Particle.kt:72
-        // spriteSheetIndex); a StaticMesh particle keeps its single template.
-        let tpl = flipbook_frame(g, progress);
-        let sx = g
-            .scale_x
-            .as_ref()
-            .map(|t| t.sample_from(progress, Some(p.scale.x)))
-            .unwrap_or(p.scale.x);
-        let sy = g
-            .scale_y
-            .as_ref()
-            .map(|t| t.sample_from(progress, Some(p.scale.y)))
-            .unwrap_or(p.scale.y);
-        // Additive blend ignores alpha, so the alpha track drives brightness. With
-        // no track, a transient spray fades linearly to nothing over life; a
-        // continuous generator (one particle re-emitted on expiry — the steady
-        // crystal body) holds full opacity, or each re-emit cycle would fade the
-        // single particle out and strobe the whole model transparent.
-        let alpha = g
-            .alpha
-            .as_ref()
-            .map(|t| t.sample_from(progress, Some(g.def.init_color[3])))
-            .unwrap_or(if g.def.continuous {
-                1.0
-            } else {
-                1.0 - progress
-            });
-        let (stage_rgb, stage_alpha) = d3m_stage_chain(
-            tpl.brightness,
-            tpl.vert_alpha,
-            p.rgb,
-            tfactor_alpha(&g.def, g.draw_path, alpha),
-            ignore_texture_alpha,
-        );
-        // Additive/subtract ignore the alpha channel, so the alpha curve modulates brightness;
-        // alpha-blended particles keep full-brightness colour and use the alpha channel. That
-        // fold is a brightness proxy rather than a blend factor, so it takes the raw life curve
-        // instead of the saturating stage-1 alpha.
-        let (rgb, vert_a) = match g.def.blend {
-            ffxi_dat::particle_gen::ParticleBlend::Blend => (stage_rgb, stage_alpha),
-            _ => (stage_rgb * alpha, 1.0),
-        };
-        let world = g.origin + p.pos;
+        let draw = particle_draw(g, p);
+        let tpl = flipbook_template(g, draw.flipbook_frame);
 
         // Billboard sprites are flat (z unused); a fixed-orientation 3D particle
         // mesh keeps its DAT depth axis scaled by the untracked init z-scale.
@@ -689,16 +787,16 @@ fn rebuild_mesh(g: &LiveGenerator, rot: Quat, mesh: &mut Mesh) {
         let world_basis = g.orientation.is_some() && !g.actor_local;
         let base = positions.len() as u32;
         for (tp, uv) in tpl.positions.iter().zip(&tpl.uvs) {
-            let local = Vec3::new(tp.x * sx, tp.y * sy, tp.z * sz);
+            let local = Vec3::new(tp.x * draw.scale.x, tp.y * draw.scale.y, tp.z * sz);
             let oriented = rot * local;
             let oriented = if world_basis {
                 oriented * g.vel_basis
             } else {
                 oriented
             };
-            positions.push((world + oriented).to_array());
+            positions.push((draw.world + oriented).to_array());
             uvs.push([uv[0] + g.tex_translate.x, uv[1] + g.tex_translate.y]);
-            colors.push([rgb.x, rgb.y, rgb.z, vert_a]);
+            colors.push([draw.rgb.x, draw.rgb.y, draw.rgb.z, draw.vert_alpha]);
         }
         indices.extend(tpl.indices.iter().map(|&idx| base + idx));
     }
@@ -823,13 +921,16 @@ fn sprite_sheet_templates(ss: &ParticleSpriteSheet) -> Vec<SpriteTemplate> {
 
 // research/xim Particle.kt:72 — the spriteSheetIndex advances the flipbook across the
 // particle's lifetime. StaticMesh particles carry no frames and use the single template.
-fn flipbook_frame(g: &LiveGenerator, progress: f32) -> &SpriteTemplate {
-    if g.sprite_frames.is_empty() {
-        return &g.template;
-    }
+fn flipbook_index(g: &LiveGenerator, progress: f32) -> usize {
     let n = g.sprite_frames.len();
-    let idx = ((progress * n as f32) as usize).min(n - 1);
-    &g.sprite_frames[idx]
+    if n == 0 {
+        return 0;
+    }
+    ((progress * n as f32) as usize).min(n - 1)
+}
+
+fn flipbook_template(g: &LiveGenerator, idx: usize) -> &SpriteTemplate {
+    g.sprite_frames.get(idx).unwrap_or(&g.template)
 }
 
 fn mmb_sprite_template(mmb: &MmbSpriteMesh) -> Option<SpriteTemplate> {
@@ -927,6 +1028,7 @@ mod tests {
             vel_basis: Vec3::ONE,
             origin_routine: None,
             stopped: false,
+            built_key: MeshKey::Empty,
         }
     }
 
@@ -1128,6 +1230,84 @@ mod tests {
         let mut mesh = empty_mesh();
         rebuild_mesh(&g, Quat::IDENTITY, &mut mesh);
         assert!(count(&mesh) > 0, "empty rebuild must not be zero-length");
+    }
+
+    // kuluu-b5nt: rebuild_mesh only fires when its quantized inputs differ from the last BUILT
+    // mesh, so a tracked get_mut (AssetEvent::Modified, a full GPU re-upload) stops scaling
+    // with fps.
+    mod rebuild_skip {
+        use super::*;
+
+        fn one_particle_gen() -> LiveGenerator {
+            let mut g = live(def(100.0, 1.0, 1), 100.0);
+            g.particles.push(Particle {
+                pos: Vec3::new(1.0, 2.0, 3.0),
+                vel: Vec3::ZERO,
+                age_frames: 50.0,
+                life_frames: 100.0,
+                rgb: Vec3::ONE,
+                scale: Vec2::ONE,
+            });
+            g
+        }
+
+        #[test]
+        fn idle_generator_never_rebuilds_whatever_the_camera_does() {
+            let mut g = live(def(100.0, 1.0, 1), 100.0);
+            assert!(g.particles.is_empty());
+            g.tex_translate = Vec2::new(3.7, -1.2);
+            for rot in [
+                Quat::IDENTITY,
+                Quat::from_rotation_y(1.3),
+                Quat::from_rotation_x(-0.4),
+            ] {
+                assert!(!needs_rebuild(&g.built_key, &mesh_key(&g, rot)));
+            }
+        }
+
+        #[test]
+        fn sub_quantum_motion_skips() {
+            let mut g = one_particle_gen();
+            let built = mesh_key(&g, Quat::IDENTITY);
+            g.particles[0].pos.x += MESH_KEY_SPATIAL_QUANTUM * 0.25;
+            assert!(!needs_rebuild(&built, &mesh_key(&g, Quat::IDENTITY)));
+        }
+
+        #[test]
+        fn super_quantum_motion_rebuilds() {
+            let mut g = one_particle_gen();
+            let built = mesh_key(&g, Quat::IDENTITY);
+            g.particles[0].pos.x += MESH_KEY_SPATIAL_QUANTUM * 2.0;
+            assert!(needs_rebuild(&built, &mesh_key(&g, Quat::IDENTITY)));
+        }
+
+        // Ageing feeds the untracked additive life curve through tfactor_alpha and the D3m
+        // stage chain into the key's colour, so an alpha change alone dirties the mesh.
+        #[test]
+        fn alpha_stage_change_rebuilds() {
+            let mut g = one_particle_gen();
+            let built = mesh_key(&g, Quat::IDENTITY);
+            g.particles[0].age_frames = 90.0;
+            assert!(needs_rebuild(&built, &mesh_key(&g, Quat::IDENTITY)));
+        }
+
+        #[test]
+        fn camera_rotation_rebuilds_a_live_billboard() {
+            let g = one_particle_gen();
+            let built = mesh_key(&g, Quat::IDENTITY);
+            assert!(needs_rebuild(
+                &built,
+                &mesh_key(&g, Quat::from_rotation_y(0.5))
+            ));
+        }
+
+        #[test]
+        fn uv_scroll_change_rebuilds() {
+            let mut g = one_particle_gen();
+            let built = mesh_key(&g, Quat::IDENTITY);
+            g.tex_translate.x += MESH_KEY_SPATIAL_QUANTUM * 2.0;
+            assert!(needs_rebuild(&built, &mesh_key(&g, Quat::IDENTITY)));
+        }
     }
 
     // kuluu-czc6: a fixed-orientation zone sheet (e.g. the Lower Jeuno fountain

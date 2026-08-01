@@ -15,7 +15,7 @@
 // When the zone ships an lf0x lens-flare sprite sheet (flare_params.y), the chain is
 // data-driven: each element is an additive textured quad placed along the
 // sun→screen-centre axis at sun*(1-offset)+opposite*offset, sized viewport/32
-// (research/xim ZoneDrawer.kt:233-236). Without a sheet it falls back to three
+// (research/xim ZoneDrawer.kt:231-236). Without a sheet it falls back to three
 // analytic elements keyed off the same axis: a halo bloom, a chain of ghost discs,
 // and a horizontal anamorphic streak.
 

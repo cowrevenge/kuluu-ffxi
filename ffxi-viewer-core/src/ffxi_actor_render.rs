@@ -285,22 +285,34 @@ fn prep_key(subject: &ActorSubject, q: crate::zone_texture::TextureQuality) -> A
 
 const ACTOR_PREP_CACHE_CAP: usize = 48;
 
+struct ActorPrepEntry {
+    prepared: Arc<PreparedActor>,
+    // Filled on first spawn: every later spawn of this look reuses the same
+    // Mesh assets, so Bevy's batcher can group their draws (same pipeline +
+    // material + mesh) instead of encoding one draw per fresh Mesh handle.
+    mesh_handles: Vec<Handle<Mesh>>,
+}
+
 #[derive(Default)]
 struct ActorPrepCache {
-    map: HashMap<ActorPrepKey, Arc<PreparedActor>>,
+    map: HashMap<ActorPrepKey, ActorPrepEntry>,
     order: std::collections::VecDeque<ActorPrepKey>,
 }
 
 impl ActorPrepCache {
     fn get_and_promote(&mut self, key: &ActorPrepKey) -> Option<Arc<PreparedActor>> {
-        let hit = self.map.get(key).cloned()?;
+        let hit = Arc::clone(&self.map.get(key)?.prepared);
         self.order.retain(|k| k != key);
         self.order.push_back(key.clone());
         Some(hit)
     }
 
     fn insert(&mut self, key: ActorPrepKey, prepared: Arc<PreparedActor>) {
-        if self.map.insert(key.clone(), prepared).is_none() {
+        let entry = ActorPrepEntry {
+            prepared,
+            mesh_handles: Vec::new(),
+        };
+        if self.map.insert(key.clone(), entry).is_none() {
             self.order.push_back(key);
         }
         while self.map.len() > ACTOR_PREP_CACHE_CAP {
@@ -310,6 +322,27 @@ impl ActorPrepCache {
             self.map.remove(&evict);
         }
     }
+
+    fn mesh_handles(
+        &mut self,
+        key: &ActorPrepKey,
+        meshes: &mut Assets<Mesh>,
+    ) -> Option<Vec<Handle<Mesh>>> {
+        let entry = self.map.get_mut(key)?;
+        if entry.mesh_handles.is_empty() {
+            entry.mesh_handles = add_part_meshes(&entry.prepared.parts, meshes);
+        }
+        Some(entry.mesh_handles.clone())
+    }
+}
+
+fn add_part_meshes(parts: &PreparedParts, meshes: &mut Assets<Mesh>) -> Vec<Handle<Mesh>> {
+    parts
+        .skel_built
+        .iter()
+        .chain(parts.d3m_built.iter())
+        .map(|b| meshes.add(b.mesh.clone()))
+        .collect()
 }
 
 fn read_dat(root: &DatRoot, file_id: u32) -> Option<Vec<u8>> {
@@ -944,6 +977,7 @@ pub fn spawn_loaded_actor(
     q: crate::zone_texture::TextureQuality,
 ) -> Entity {
     let parts = prepare_actor_parts(loaded, facing_dir, scale, q);
+    let mesh_handles = add_part_meshes(&parts, meshes);
     let skin_slot = registry.alloc_skin();
     registry.skin_mut(skin_slot).joints = parts.bind_joints.clone();
 
@@ -962,7 +996,7 @@ pub fn spawn_loaded_actor(
 
     let instance_slots = build_actor_children(
         commands,
-        meshes,
+        &mesh_handles,
         materials,
         material_cache,
         registry,
@@ -1008,7 +1042,7 @@ pub(crate) struct FfxiActorMeshChild;
 #[allow(clippy::too_many_arguments)]
 fn build_actor_children(
     commands: &mut Commands,
-    meshes: &mut Assets<Mesh>,
+    mesh_handles: &[Handle<Mesh>],
     materials: &mut Assets<FfxiSkinnedMaterial>,
     material_cache: &mut FfxiSkinnedMaterialCache,
     registry: &mut FfxiSkinRegistry,
@@ -1048,7 +1082,12 @@ fn build_actor_children(
 
     let mut instance_slots = Vec::new();
 
-    for built in parts.skel_built.iter().chain(parts.d3m_built.iter()) {
+    for (built, mesh_handle) in parts
+        .skel_built
+        .iter()
+        .chain(parts.d3m_built.iter())
+        .zip(mesh_handles)
+    {
         let untextured = is_blank_texture(&built.texture_name);
         let tex_handle = if untextured {
             None
@@ -1066,7 +1105,7 @@ fn build_actor_children(
         instance_slots.push(instance_slot);
 
         commands.spawn((
-            Mesh3d(meshes.add(built.mesh.clone())),
+            Mesh3d(mesh_handle.clone()),
             MeshMaterial3d(mat),
             MeshTag(instance_slot),
             FfxiInstanceSlot(instance_slot),
@@ -1171,7 +1210,7 @@ fn make_render_actor(
 #[allow(clippy::too_many_arguments)]
 pub fn spawn_live_actor(
     commands: &mut Commands,
-    meshes: &mut Assets<Mesh>,
+    mesh_handles: &[Handle<Mesh>],
     materials: &mut Assets<FfxiSkinnedMaterial>,
     material_cache: &mut FfxiSkinnedMaterialCache,
     registry: &mut FfxiSkinRegistry,
@@ -1202,7 +1241,7 @@ pub fn spawn_live_actor(
 
     let instance_slots = build_actor_children(
         commands,
-        meshes,
+        mesh_handles,
         materials,
         material_cache,
         registry,
@@ -1802,7 +1841,7 @@ const ACTOR_SPAWNS_PER_FRAME: usize = 2;
 pub struct ActorLoadInFlight {
     tasks: HashMap<u32, Task<Result<PreparedActor, String>>>,
     keys: HashMap<u32, ActorPrepKey>,
-    ready: std::collections::VecDeque<(u32, Arc<PreparedActor>)>,
+    ready: std::collections::VecDeque<(u32, Option<ActorPrepKey>, Arc<PreparedActor>)>,
     cache: ActorPrepCache,
 }
 
@@ -1824,8 +1863,10 @@ pub fn kick_load_actor_tasks(
         if let Some(prepared) = in_flight.cache.get_and_promote(&key) {
             in_flight.tasks.remove(&req.entity_id);
             in_flight.keys.remove(&req.entity_id);
-            in_flight.ready.retain(|(id, _)| *id != req.entity_id);
-            in_flight.ready.push_back((req.entity_id, prepared));
+            in_flight.ready.retain(|(id, _, _)| *id != req.entity_id);
+            in_flight
+                .ready
+                .push_back((req.entity_id, Some(key), prepared));
             continue;
         }
         let subject = req.subject.clone();
@@ -1845,7 +1886,7 @@ pub fn kick_load_actor_tasks(
         // Newest look wins: replacing the entry drops any stale in-flight load.
         in_flight.tasks.insert(req.entity_id, task);
         in_flight.keys.insert(req.entity_id, key);
-        in_flight.ready.retain(|(id, _)| *id != req.entity_id);
+        in_flight.ready.retain(|(id, _, _)| *id != req.entity_id);
     }
 }
 
@@ -1885,11 +1926,11 @@ pub fn poll_load_actor_tasks(
         match prepared {
             Ok(p) => {
                 let p = Arc::new(p);
-                if let Some(key) = key {
-                    in_flight.cache.insert(key, Arc::clone(&p));
+                if let Some(key) = &key {
+                    in_flight.cache.insert(key.clone(), Arc::clone(&p));
                 }
-                in_flight.ready.retain(|(id, _)| *id != entity_id);
-                in_flight.ready.push_back((entity_id, p));
+                in_flight.ready.retain(|(id, _, _)| *id != entity_id);
+                in_flight.ready.push_back((entity_id, key, p));
             }
             Err(e) => {
                 warn!("ffxi actor load failed (entity {entity_id}): {e}");
@@ -1897,7 +1938,7 @@ pub fn poll_load_actor_tasks(
         }
     }
     for _ in 0..ACTOR_SPAWNS_PER_FRAME {
-        let Some((entity_id, prepared)) = in_flight.ready.pop_front() else {
+        let Some((entity_id, key, prepared)) = in_flight.ready.pop_front() else {
             break;
         };
         // The wire entity may have despawned (or been re-tracked) while the load
@@ -1910,9 +1951,14 @@ pub fn poll_load_actor_tasks(
             commands.entity(*old_root).try_despawn();
         }
 
+        let mesh_handles = key
+            .as_ref()
+            .and_then(|k| in_flight.cache.mesh_handles(k, &mut meshes))
+            .unwrap_or_else(|| add_part_meshes(&prepared.parts, &mut meshes));
+
         let root = spawn_live_actor(
             &mut commands,
-            &mut meshes,
+            &mesh_handles,
             &mut materials,
             &mut material_cache,
             &mut registry,
@@ -2654,6 +2700,80 @@ pub fn inputs_for_pose(state: PoseState, engaged: bool) -> ActorAnimInputs {
     }
 
     inputs
+}
+
+#[cfg(test)]
+mod mesh_dedup_tests {
+    use super::*;
+
+    fn synth_prepared(n_parts: usize) -> Arc<PreparedActor> {
+        let skeleton = Skeleton {
+            id: DatId::from_str("0000"),
+            joints: Vec::new(),
+            references: Vec::new(),
+            bounding_boxes: Vec::new(),
+        };
+        let loaded = LoadedActor {
+            skeleton: Arc::new(skeleton),
+            skel_meshes: Vec::new(),
+            effect_meshes: Vec::new(),
+            textures: Vec::new(),
+            animations: Arc::new(Vec::new()),
+            battle_clips: Arc::new(Vec::new()),
+            routines: Arc::new(HashMap::new()),
+            action_assets: Arc::new(crate::scheduler_runtime::ActionAssets::default()),
+        };
+        let skel_built = (0..n_parts)
+            .map(|_| BuiltGroup {
+                mesh: Mesh::new(
+                    PrimitiveTopology::TriangleList,
+                    RenderAssetUsages::default(),
+                ),
+                texture_name: String::new(),
+                tint: Vec4::ONE,
+            })
+            .collect();
+        Arc::new(PreparedActor {
+            loaded,
+            parts: PreparedParts {
+                images: Vec::new(),
+                skel_built,
+                d3m_built: Vec::new(),
+                bind_joints: FfxiJointMatrices::default(),
+            },
+        })
+    }
+
+    fn npc_key(file_id: u32) -> ActorPrepKey {
+        ActorPrepKey::Npc {
+            file_id,
+            mipmaps: false,
+            anisotropy: 1,
+        }
+    }
+
+    #[test]
+    fn cached_look_reuses_the_same_mesh_handles() {
+        let mut meshes = Assets::<Mesh>::default();
+        let mut cache = ActorPrepCache::default();
+        let key = npc_key(1);
+        cache.insert(key.clone(), synth_prepared(2));
+
+        let first = cache.mesh_handles(&key, &mut meshes).expect("cached entry");
+        let second = cache.mesh_handles(&key, &mut meshes).expect("cached entry");
+        assert_eq!(first, second, "same look must reuse the same Mesh assets");
+        assert_eq!(first.len(), 2);
+        assert_eq!(
+            meshes.iter().count(),
+            2,
+            "a re-spawn must not add new Mesh assets"
+        );
+
+        assert!(
+            cache.mesh_handles(&npc_key(2), &mut meshes).is_none(),
+            "an uncached look builds fresh handles at the call site"
+        );
+    }
 }
 
 #[cfg(test)]

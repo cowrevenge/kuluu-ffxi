@@ -379,12 +379,19 @@ impl Generator {
 // that the linked name resolves to an MMB zone-mesh, which the caller checks via
 // resolve_mmb_indices. research/xim ParticleGeneratorParser sec1 0x01
 // StandardParticleSetup: linked model name (8 bytes) at payload+8, base_position
-// at payload+16, linked_type at payload+29; 0x16 carries the RGBA tint (alpha <
-// 255 = translucent water); section-3 0x27/0x28 carry the per-layer UV-scroll.
+// at payload+16, linked_type at payload+29; 0x16 carries the RGBA tint
+// (0x80-identity — alpha < 0x80 = translucent water, see MODEL_TINT_IDENTITY);
+// section-3 0x27/0x28 carry the per-layer UV-scroll.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ModelSpawnDef {
     pub model_name: [u8; 8],
     pub base_position: [f32; 3],
+    // research/xim ParticleGeneratorParser.kt:170,176 — section-1 0x09
+    // RotationInitializer / 0x0F ScaleInitializer, each a Vector3f. The broad
+    // sea sheets are tiny tiles (lowsea AABB ±1.4) blown up by the generator
+    // scale (e.g. 500³), so dropping these renders the sea as a speck.
+    pub rotation: [f32; 3],
+    pub scale: [f32; 3],
     pub tint: [f32; 4],
     pub uv_scroll: [f32; 2],
 }
@@ -399,6 +406,13 @@ impl ModelSpawnDef {
         std::str::from_utf8(&self.model_name[..end]).unwrap_or("")
     }
 }
+
+// FFXI effect colors are 0x80-identity, not 0xFF: research/xim
+// MeshBuffers.kt:41 `ByteColor.half = (0x80,0x80,0x80,0x80)` is "opaque
+// neutral" (alpha25/50/75 = 0x20/0x40/0x60), matching the /128 vertex-colour
+// convention. Every static generator ships 0x80 tints (sun/moon/stars), so a
+// /255 scale rendered all model-spawn sheets at half brightness and opacity.
+const MODEL_TINT_IDENTITY: f32 = 128.0;
 
 impl Generator {
     // The linked model / billboard class. 0x0B covers both a full MMB zone-mesh
@@ -424,6 +438,8 @@ impl Generator {
         let mut is_model = false;
         let mut model_name = [0u8; 8];
         let mut base_position = [0.0f32; 3];
+        let mut rotation = [0.0f32; 3];
+        let mut scale = [1.0f32; 3];
         let mut tint = [1.0f32; 4];
 
         while cursor + 4 <= body.len() {
@@ -450,12 +466,26 @@ impl Generator {
                     ];
                     is_model = body[payload + 29] == Self::LINKED_DATA_MODEL;
                 }
+                0x09 if payload + 12 <= body.len() => {
+                    rotation = [
+                        f32_le(body, payload),
+                        f32_le(body, payload + 4),
+                        f32_le(body, payload + 8),
+                    ];
+                }
+                0x0F if payload + 12 <= body.len() => {
+                    scale = [
+                        f32_le(body, payload),
+                        f32_le(body, payload + 4),
+                        f32_le(body, payload + 8),
+                    ];
+                }
                 0x16 if payload + 4 <= body.len() => {
                     tint = [
-                        body[payload] as f32 / 255.0,
-                        body[payload + 1] as f32 / 255.0,
-                        body[payload + 2] as f32 / 255.0,
-                        body[payload + 3] as f32 / 255.0,
+                        body[payload] as f32 / MODEL_TINT_IDENTITY,
+                        body[payload + 1] as f32 / MODEL_TINT_IDENTITY,
+                        body[payload + 2] as f32 / MODEL_TINT_IDENTITY,
+                        body[payload + 3] as f32 / MODEL_TINT_IDENTITY,
                     ];
                 }
                 _ => {}
@@ -499,6 +529,8 @@ impl Generator {
         Ok(Some(ModelSpawnDef {
             model_name,
             base_position,
+            rotation,
+            scale,
             tint,
             uv_scroll,
         }))
@@ -703,10 +735,12 @@ mod tests {
     #[test]
     fn parses_model_spawn_water() {
         // 0x01 setup: 8-byte model name, base position, linked_type 0x0B; then a
-        // 0x16 tint (alpha 0x80); then section-3 0x27/0x28 UV-scroll. Layout tuned
-        // so the creation walk (cursor 0x80) and sec3 walk (cursor 0xB0) don't
-        // overlap: c1 (36 bytes) + tint (8) + terminator (4) = 0x80..0xB0.
+        // 0x16 tint (alpha 0x80), 0x09 rotation, 0x0F scale; then section-3
+        // 0x27/0x28 UV-scroll. Layout tuned so the creation walk (cursor 0x80)
+        // and sec3 walk don't overlap: c1 (36 bytes) + tint (8) + rot (16) +
+        // scale (16) + terminator (4) = 0x80..0xD0, so sec3 starts at 0xD0.
         let mut body = make_body();
+        body[0x78..0x7C].copy_from_slice(&(0xD0u32 + 16).to_le_bytes());
         let mut c1 = vec![0u8; 36];
         c1[0] = 0x01;
         c1[1] = 0x09; // size_words 9 -> 36 bytes
@@ -720,6 +754,18 @@ mod tests {
         tint[1] = 0x02;
         tint[4..8].copy_from_slice(&[0x58, 0x58, 0x58, 0x80]);
         body.extend_from_slice(&tint);
+        let mut rot = vec![0u8; 16];
+        rot[0] = 0x09;
+        rot[1] = 0x04;
+        rot[8..12].copy_from_slice(&0.5236f32.to_le_bytes());
+        body.extend_from_slice(&rot);
+        let mut scl = vec![0u8; 16];
+        scl[0] = 0x0F;
+        scl[1] = 0x04;
+        scl[4..8].copy_from_slice(&500.0f32.to_le_bytes());
+        scl[8..12].copy_from_slice(&500.0f32.to_le_bytes());
+        scl[12..16].copy_from_slice(&500.0f32.to_le_bytes());
+        body.extend_from_slice(&scl);
         body.extend_from_slice(&[0u8; 4]); // terminate creation section, pad to 0xB0
         let mut cu = vec![0u8; 8];
         cu[0] = 0x27;
@@ -736,7 +782,11 @@ mod tests {
         assert_eq!(m.model_name_str(), "sea1");
         assert!((m.base_position[0] - -17.0).abs() < 1e-6);
         assert!((m.base_position[2] - 166.0).abs() < 1e-6);
-        assert!((m.tint[3] - 128.0 / 255.0).abs() < 1e-6);
+        // 0x80 is the identity tint (research/xim MeshBuffers.kt ByteColor.half).
+        assert!((m.tint[3] - 1.0).abs() < 1e-6);
+        assert!((m.rotation[1] - 0.5236).abs() < 1e-6);
+        assert!((m.scale[0] - 500.0).abs() < 1e-6);
+        assert!((m.scale[2] - 500.0).abs() < 1e-6);
         assert!((m.uv_scroll[0] - 0.0006).abs() < 1e-9);
         assert!((m.uv_scroll[1] - 0.0004).abs() < 1e-9);
     }

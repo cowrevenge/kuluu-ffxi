@@ -981,8 +981,11 @@ pub fn build_zone_mmb_spawns(
             continue;
         };
         let b = ms.base_position;
-        // Same basis as object placements: to_bevy * (FFXI model-local -> world).
-        // A pre-flipped translation would move the origin correctly but leave the
+        // Same basis as object placements: to_bevy * (FFXI model-local -> world),
+        // with the generator's 0x0F scale / 0x09 rotation applied — the sea
+        // sheets are tiny tiles (lowsea AABB ±1.4) the generator blows up 500×,
+        // so a translation-only transform renders the sea as a speck. A
+        // pre-flipped translation would move the origin correctly but leave the
         // model geometry unflipped (mirrored/sunk out of view).
         let to_bevy = Mat4::from_cols(
             Vec4::new(1.0, 0.0, 0.0, 0.0),
@@ -990,7 +993,17 @@ pub fn build_zone_mmb_spawns(
             Vec4::new(0.0, 0.0, -1.0, 0.0),
             Vec4::new(0.0, 0.0, 0.0, 1.0),
         );
-        let bevy_transform = to_bevy * Mat4::from_translation(Vec3::new(b[0], b[1], b[2]));
+        let m_ffxi = Mat4::from_scale_rotation_translation(
+            Vec3::from_array(ms.scale),
+            Quat::from_euler(
+                EulerRot::XYZ,
+                ms.rotation[0],
+                ms.rotation[1],
+                ms.rotation[2],
+            ),
+            Vec3::new(b[0], b[1], b[2]),
+        );
+        let bevy_transform = to_bevy * m_ffxi;
         out.push(ZoneMmbSpawn {
             chunk_idx,
             bevy_transform,

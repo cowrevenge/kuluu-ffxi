@@ -24,9 +24,10 @@ const HEADER_LEN: usize = 0x80;
 const LINKED_DATA_STATIC_MESH: u8 = 0x0B;
 const LINKED_DATA_SPRITE_SHEET: u8 = 0x0E;
 
-// research/xim ParticleGeneratorSettings.kt:187 (mesh source) + Particle.kt:72 (per-particle
-// spriteSheetIndex flipbook cursor advanced over life). StaticMesh binds a D3M; SpriteSheet binds
-// a 0x21 sprite-sheet whose frames flipbook across the particle's lifetime.
+// research/xim ParticleGeneratorSettings.kt:187 (mesh source) + Particle.kt:72 (the per-particle
+// spriteSheetIndex cursor) + ParticleUpdaters.kt:196-211 (SpriteSheetFrameUpdater advances it over
+// life). StaticMesh binds a D3M; SpriteSheet binds a 0x21 sprite-sheet whose frames flipbook
+// across the particle's lifetime.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ParticleMeshKind {
     #[default]
@@ -644,8 +645,8 @@ mod tests {
 
     // The celestial opcodes live in the section-3 updater stream (body[0x78]), NOT the
     // section-2 initializer stream, where 0x4E/0x4F mean FixedPointPositionVarianceSetup and
-    // 0x45 means ParentPositionCopyConfig (research/xim ParticleGeneratorParser.kt:247-249,
-    // 295 vs 444,454-455). Reading them from the wrong stream silently yields None on every
+    // 0x45 means ParentPositionCopyConfig (research/xim ParticleGeneratorParser.kt:248-249,
+    // 239 vs 444, 454-455). Reading them from the wrong stream silently yields None on every
     // real DAT, which is what left the moon on hand-tuned fallback tints.
     #[test]
     fn celestial_updaters_come_from_section3_only() {

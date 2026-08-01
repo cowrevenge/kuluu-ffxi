@@ -41,23 +41,37 @@
 }
 #endif
 
-// Mirror of `FfxiJointMatrices` in skinned_ffxi_material.rs. 128 = MAX_JOINTS.
-struct FfxiJoints {
-    matrices: array<mat4x4<f32>, 128>,
+// Mirror of `FfxiLightingUniform` in skinned_ffxi_material.rs — declared only
+// because `FfxiSkin` embeds it (this pass reads joints, never lighting).
+struct FfxiLighting {
+    ambient: vec4<f32>,
+    dir0_dir: vec4<f32>,
+    dir0_color: vec4<f32>,
+    dir1_dir: vec4<f32>,
+    dir1_color: vec4<f32>,
+    point_pos: array<vec4<f32>, 16>,
+    point_color: array<vec4<f32>, 16>,
+    point_atten: array<vec4<f32>, 16>,
+    time_params: vec4<f32>,
 };
 
-// Mirror of `FfxiSkinnedFlags`. `flags.x` = has_texture (1.0 / 0.0).
-struct FfxiSkinnedFlags {
+// Mirror of `FfxiSkin` in skinned_ffxi_material.rs. 128 = MAX_JOINTS.
+struct FfxiSkin {
+    joints: array<mat4x4<f32>, 128>,
+    lighting: FfxiLighting,
+};
+
+// Mirror of `FfxiInstance`. `flags.x` = has_texture (1.0 / 0.0).
+struct FfxiInstance {
     flags: vec4<f32>,
     tint: vec4<f32>,
+    skin_slot: u32,
 };
 
-// Only the bindings this pass needs (the lighting uniform at binding 0 is part
-// of the bind-group layout but unused here, so it is simply not declared).
+@group(#{MATERIAL_BIND_GROUP}) @binding(0) var<storage, read> skins: array<FfxiSkin>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(1) var base_tex: texture_2d<f32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(2) var base_samp: sampler;
-@group(#{MATERIAL_BIND_GROUP}) @binding(3) var<uniform> joints: FfxiJoints;
-@group(#{MATERIAL_BIND_GROUP}) @binding(4) var<uniform> material_flags: FfxiSkinnedFlags;
+@group(#{MATERIAL_BIND_GROUP}) @binding(3) var<storage, read> instances: array<FfxiInstance>;
 
 struct Vertex {
     @builtin(instance_index) instance_index: u32,
@@ -75,6 +89,7 @@ struct Vertex {
 struct PrepassVertexOutput {
     @builtin(position) clip_position: vec4<f32>,
     @location(0) uv: vec2<f32>,
+    @location(1) @interpolate(flat) inst_idx: u32,
 #ifdef NORMAL_PREPASS_OR_DEFERRED_PREPASS
     @location(2) world_normal: vec3<f32>,
 #endif
@@ -93,9 +108,11 @@ fn vertex(v: Vertex) -> PrepassVertexOutput {
 
     // Same FFXI dual-position/dual-normal skin as the lit shader. The position
     // is NOT weighted on position0 (FFXI's asymmetry); the normal IS weighted.
+    let inst = mesh_functions::get_tag(v.instance_index);
+    let si = instances[inst].skin_slot;
     let w = v.joint_weight;
-    let m0 = joints.matrices[v.joint0];
-    let m1 = joints.matrices[v.joint1];
+    let m0 = skins[si].joints[v.joint0];
+    let m1 = skins[si].joints[v.joint1];
     let model_pos = m0 * vec4<f32>(v.position0, w)
                   + m1 * vec4<f32>(v.position1, 1.0 - w);
 
@@ -108,6 +125,7 @@ fn vertex(v: Vertex) -> PrepassVertexOutput {
     out.clip_position.z = min(out.clip_position.z, 1.0); // clamp to avoid clipping
 #endif
     out.uv = v.uv;
+    out.inst_idx = inst;
 
 #ifdef NORMAL_PREPASS_OR_DEFERRED_PREPASS
     let model_norm = w * (m0 * vec4<f32>(v.normal0, 0.0)).xyz
@@ -129,8 +147,8 @@ fn vertex(v: Vertex) -> PrepassVertexOutput {
 // Cut-out alpha test so transparent texels (hair edges, fabric fringe) don't
 // write solid depth/normals or cast solid-block shadows. Mirrors the lit
 // fragment's discard threshold (69/255). Untextured C/CS meshes never discard.
-fn prepass_alpha_discard(uv: vec2<f32>) {
-    let has_texture = material_flags.flags.x > 0.5;
+fn prepass_alpha_discard(uv: vec2<f32>, inst_idx: u32) {
+    let has_texture = instances[inst_idx].flags.x > 0.5;
     if (has_texture) {
         let texel = textureSample(base_tex, base_samp, uv);
         if (texel.a < 69.0 / 255.0) {
@@ -167,7 +185,7 @@ struct FragmentOutput {
 
 @fragment
 fn fragment(in: PrepassVertexOutput) -> FragmentOutput {
-    prepass_alpha_discard(in.uv);
+    prepass_alpha_discard(in.uv, in.inst_idx);
     var out: FragmentOutput;
 #ifdef NORMAL_PREPASS
     out.normal = vec4(normalize(in.world_normal) * 0.5 + vec3(0.5), 1.0);
@@ -191,7 +209,7 @@ struct PrepassFragmentOutput {
 
 @fragment
 fn fragment(in: PrepassVertexOutput) -> PrepassFragmentOutput {
-    prepass_alpha_discard(in.uv);
+    prepass_alpha_discard(in.uv, in.inst_idx);
     var out: PrepassFragmentOutput;
     out.frag_depth = in.unclipped_depth;
     return out;
@@ -199,7 +217,7 @@ fn fragment(in: PrepassVertexOutput) -> PrepassFragmentOutput {
 #else
 @fragment
 fn fragment(in: PrepassVertexOutput) {
-    prepass_alpha_discard(in.uv);
+    prepass_alpha_discard(in.uv, in.inst_idx);
 }
 #endif
 #endif // PREPASS_FRAGMENT

@@ -3,7 +3,7 @@ use ffxi_viewer_core::ffxi_actor_render::{
     inputs_for_pose, load_npc, load_pc, spawn_loaded_actor, tick_ffxi_render_actors,
     FfxiRenderActor, PoseState,
 };
-use ffxi_viewer_core::skinned_ffxi_material::FfxiMaterialPlugin;
+use ffxi_viewer_core::skinned_ffxi_material::{FfxiMaterialPlugin, FfxiSkinRegistry};
 use std::env;
 
 #[derive(Resource, Clone)]
@@ -115,6 +115,7 @@ fn spawn_subject(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<ffxi_viewer_core::skinned_ffxi_material::FfxiSkinnedMaterial>>,
+    mut registry: ResMut<FfxiSkinRegistry>,
     mut images: ResMut<Assets<Image>>,
     subject: Res<Subject>,
 ) {
@@ -133,6 +134,7 @@ fn spawn_subject(
                 &mut commands,
                 &mut meshes,
                 &mut materials,
+                &mut registry,
                 &mut images,
                 &loaded,
                 Vec3::ZERO,

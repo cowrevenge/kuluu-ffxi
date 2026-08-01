@@ -4,7 +4,7 @@ use bevy::prelude::*;
 
 use crate::ffxi_actor_render::FfxiRenderActor;
 use crate::scene::Target;
-use crate::skinned_ffxi_material::FfxiSkinnedMaterial;
+use crate::skinned_ffxi_material::FfxiSkinRegistry;
 
 const STROBE_DURATION: f32 = 2.1;
 
@@ -29,12 +29,12 @@ pub fn target_strobe_system(
     target: Res<Target>,
     mut state: ResMut<StrobeState>,
     q_actors: Query<&FfxiRenderActor>,
-    mut materials: ResMut<Assets<FfxiSkinnedMaterial>>,
+    mut registry: ResMut<FfxiSkinRegistry>,
 ) {
     let cur = target.id;
     if state.last_target != cur {
         if let Some(old) = state.active.take() {
-            set_actor_highlight(old, 0.0, &q_actors, &mut materials);
+            set_actor_highlight(old, 0.0, &q_actors, &mut registry);
         }
         state.last_target = cur;
         state.active = cur;
@@ -47,7 +47,7 @@ pub fn target_strobe_system(
 
     state.elapsed += time.delta_secs();
     if state.elapsed >= STROBE_DURATION {
-        set_actor_highlight(id, 0.0, &q_actors, &mut materials);
+        set_actor_highlight(id, 0.0, &q_actors, &mut registry);
         state.active = None;
         return;
     }
@@ -56,7 +56,7 @@ pub fn target_strobe_system(
         id,
         strobe_intensity(state.elapsed),
         &q_actors,
-        &mut materials,
+        &mut registry,
     );
 }
 
@@ -64,16 +64,14 @@ fn set_actor_highlight(
     world_id: u32,
     value: f32,
     q_actors: &Query<&FfxiRenderActor>,
-    materials: &mut Assets<FfxiSkinnedMaterial>,
+    registry: &mut FfxiSkinRegistry,
 ) {
     for actor in q_actors {
         if actor.world_id != world_id {
             continue;
         }
-        for handle in actor.material_handles() {
-            if let Some(mut m) = materials.get_mut(handle) {
-                m.material_flags.flags.w = value;
-            }
+        for &slot in actor.instance_slots() {
+            registry.instance_mut(slot).flags.w = value;
         }
         break;
     }

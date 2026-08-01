@@ -5,7 +5,9 @@ use ffxi_viewer_core::ffxi_actor_render::{
     inputs_for_pose, load_npc, load_pc, spawn_loaded_actor, tick_ffxi_render_actors,
     FfxiRenderActor, PoseState, FRAME_RATE,
 };
-use ffxi_viewer_core::skinned_ffxi_material::{FfxiMaterialPlugin, FfxiSkinnedMaterial};
+use ffxi_viewer_core::skinned_ffxi_material::{
+    FfxiMaterialPlugin, FfxiSkinRegistry, FfxiSkinnedMaterial,
+};
 use std::env;
 
 #[derive(Clone)]
@@ -263,6 +265,7 @@ fn spawn_subject(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<FfxiSkinnedMaterial>>,
+    mut registry: ResMut<FfxiSkinRegistry>,
     mut images: ResMut<Assets<Image>>,
     params: Res<Params>,
 ) {
@@ -288,6 +291,7 @@ fn spawn_subject(
                 &mut commands,
                 &mut meshes,
                 &mut materials,
+                &mut registry,
                 &mut images,
                 &loaded,
                 Vec3::ZERO,
@@ -335,20 +339,13 @@ fn set_inputs(params: Res<Params>, mut q: Query<&mut FfxiRenderActor>) {
     }
 }
 
-fn apply_realistic_flag(params: Res<Params>, mut materials: ResMut<Assets<FfxiSkinnedMaterial>>) {
+fn apply_realistic_flag(params: Res<Params>, mut registry: ResMut<FfxiSkinRegistry>) {
     let realistic = if params.realistic { 1.0 } else { 0.0 };
     let receive = if params.shadowtest { 1.0 } else { 0.0 };
-    let ids: Vec<_> = materials.ids().collect();
-    for id in ids {
-        if let Some(mut m) = materials.get_mut(id) {
-            if m.material_flags.flags.y != realistic {
-                m.material_flags.flags.y = realistic;
-            }
-            if m.material_flags.flags.z != receive {
-                m.material_flags.flags.z = receive;
-            }
-        }
-    }
+    registry.for_each_instance_mut(|inst| {
+        inst.flags.y = realistic;
+        inst.flags.z = receive;
+    });
 }
 
 fn capture(

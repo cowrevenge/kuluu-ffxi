@@ -1,6 +1,7 @@
 #![cfg(not(target_arch = "wasm32"))]
 
 use bevy::asset::embedded_asset;
+use bevy::ecs::lifecycle::Remove;
 use bevy::ecs::system::lifetimeless::SRes;
 use bevy::ecs::system::SystemParamItem;
 use bevy::mesh::{Mesh, MeshVertexAttribute, MeshVertexBufferLayoutRef, VertexFormat};
@@ -17,8 +18,7 @@ use bevy::render::renderer::{RenderDevice, RenderQueue};
 use bevy::render::texture::{FallbackImage, GpuImage};
 use bevy::render::{Extract, ExtractSchedule, RenderApp};
 use bevy::shader::ShaderRef;
-use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::collections::BTreeSet;
 
 pub const MAX_JOINTS: usize = 128;
 
@@ -142,84 +142,237 @@ pub fn t_factor_tint(t_factor: [u8; 4]) -> Vec4 {
     )
 }
 
-#[derive(Clone, Debug, PartialEq, ShaderType)]
-pub struct FfxiSkinnedFlags {
-    pub flags: Vec4,
-    // Per-mesh t_factor modulation color (skel_mesh RenderProperties), neutral = 1.0.
-    pub tint: Vec4,
+/// One per-actor record in the shared `skins` storage buffer (binding 0),
+/// indexed by `FfxiInstance::skin_slot`. Mirrored as `FfxiSkin` in both WGSL
+/// modules; `storage_structs_match_shader` guards the mirror.
+#[derive(Clone, Debug, Default, ShaderType)]
+pub struct FfxiSkin {
+    pub joints: FfxiJointMatrices,
+    pub lighting: FfxiLightingUniform,
 }
 
-impl Default for FfxiSkinnedFlags {
+/// One per-submesh record in the shared `instances` storage buffer (binding 3),
+/// indexed per draw via `MeshTag`. `flags.x` = has_texture, `.y` = realistic
+/// lighting, `.z` = receive shadows, `.w` = target-strobe highlight; `tint` =
+/// per-mesh t_factor modulation.
+#[derive(Clone, Debug, ShaderType)]
+pub struct FfxiInstance {
+    pub flags: Vec4,
+    pub tint: Vec4,
+    pub skin_slot: u32,
+}
+
+impl Default for FfxiInstance {
     fn default() -> Self {
         Self {
             flags: Vec4::new(1.0, 0.0, 0.0, 0.0),
             tint: Vec4::ONE,
+            skin_slot: 0,
         }
     }
 }
 
-static NEXT_INSTANCE_ID: AtomicU64 = AtomicU64::new(1);
+// Initial slot capacities cover the measured populated-Jeuno crowd (~100 PCs x
+// ~8 submeshes, 2026-07-31) without a growth realloc; growth doubles and bumps
+// `buffer_generation` so stale bind groups are rebuilt.
+pub const INITIAL_SKIN_SLOTS: usize = 128;
+pub const INITIAL_INSTANCE_SLOTS: usize = 1024;
+const SLOT_GROWTH_FACTOR: usize = 2;
 
+/// Actor-root marker carrying the actor's slot in the shared skins array.
+/// Freed by observer when the entity despawns.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct FfxiSkinSlot(pub u32);
+
+/// Submesh-child marker carrying the mesh's slot in the shared instances
+/// array (also written as its `MeshTag`). Freed by observer on despawn.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct FfxiInstanceSlot(pub u32);
+
+/// Main-world slab of every live actor's joints/lighting and every submesh's
+/// flags/tint, uploaded to two shared storage buffers with 2 `write_buffer`
+/// calls per frame (replacing ~2 per actor). Slots are recycled lowest-first
+/// so the uploaded high-water region tracks the live count.
+#[derive(Resource)]
+pub struct FfxiSkinRegistry {
+    skins: Vec<FfxiSkin>,
+    instances: Vec<FfxiInstance>,
+    free_skins: BTreeSet<u32>,
+    free_instances: BTreeSet<u32>,
+    skin_high_water: u32,
+    instance_high_water: u32,
+    buffer_generation: u64,
+}
+
+impl Default for FfxiSkinRegistry {
+    fn default() -> Self {
+        Self {
+            skins: vec![FfxiSkin::default(); INITIAL_SKIN_SLOTS],
+            instances: vec![FfxiInstance::default(); INITIAL_INSTANCE_SLOTS],
+            free_skins: BTreeSet::new(),
+            free_instances: BTreeSet::new(),
+            skin_high_water: 0,
+            instance_high_water: 0,
+            buffer_generation: 0,
+        }
+    }
+}
+
+impl FfxiSkinRegistry {
+    pub fn alloc_skin(&mut self) -> u32 {
+        let slot = match self.free_skins.pop_first() {
+            Some(s) => s,
+            None => {
+                let s = self.skin_high_water;
+                if s as usize >= self.skins.len() {
+                    let new_len = self.skins.len() * SLOT_GROWTH_FACTOR;
+                    self.skins.resize(new_len, FfxiSkin::default());
+                    self.buffer_generation += 1;
+                }
+                self.skin_high_water += 1;
+                s
+            }
+        };
+        self.skins[slot as usize] = FfxiSkin::default();
+        slot
+    }
+
+    pub fn free_skin(&mut self, slot: u32) {
+        if slot >= self.skin_high_water || !self.free_skins.insert(slot) {
+            return;
+        }
+        while self.skin_high_water > 0 && self.free_skins.remove(&(self.skin_high_water - 1)) {
+            self.skin_high_water -= 1;
+        }
+    }
+
+    pub fn skin_mut(&mut self, slot: u32) -> &mut FfxiSkin {
+        &mut self.skins[slot as usize]
+    }
+
+    pub fn alloc_instance(&mut self, record: FfxiInstance) -> u32 {
+        let slot = match self.free_instances.pop_first() {
+            Some(s) => s,
+            None => {
+                let s = self.instance_high_water;
+                if s as usize >= self.instances.len() {
+                    let new_len = self.instances.len() * SLOT_GROWTH_FACTOR;
+                    self.instances.resize(new_len, FfxiInstance::default());
+                    self.buffer_generation += 1;
+                }
+                self.instance_high_water += 1;
+                s
+            }
+        };
+        self.instances[slot as usize] = record;
+        slot
+    }
+
+    pub fn free_instance(&mut self, slot: u32) {
+        if slot >= self.instance_high_water || !self.free_instances.insert(slot) {
+            return;
+        }
+        while self.instance_high_water > 0
+            && self.free_instances.remove(&(self.instance_high_water - 1))
+        {
+            self.instance_high_water -= 1;
+        }
+    }
+
+    pub fn instance_mut(&mut self, slot: u32) -> &mut FfxiInstance {
+        &mut self.instances[slot as usize]
+    }
+
+    pub fn for_each_instance_mut(&mut self, mut f: impl FnMut(&mut FfxiInstance)) {
+        let free = &self.free_instances;
+        for (i, inst) in self.instances[..self.instance_high_water as usize]
+            .iter_mut()
+            .enumerate()
+        {
+            if !free.contains(&(i as u32)) {
+                f(inst);
+            }
+        }
+    }
+
+    pub fn live_skins(&self) -> usize {
+        self.skin_high_water as usize - self.free_skins.len()
+    }
+
+    pub fn live_instances(&self) -> usize {
+        self.instance_high_water as usize - self.free_instances.len()
+    }
+
+    pub fn skin_capacity(&self) -> usize {
+        self.skins.len()
+    }
+
+    pub fn instance_capacity(&self) -> usize {
+        self.instances.len()
+    }
+
+    pub fn buffer_generation(&self) -> u64 {
+        self.buffer_generation
+    }
+
+    fn skins_used(&self) -> &[FfxiSkin] {
+        &self.skins[..self.skin_high_water as usize]
+    }
+
+    fn instances_used(&self) -> &[FfxiInstance] {
+        &self.instances[..self.instance_high_water as usize]
+    }
+}
+
+pub fn free_skin_slot_on_remove(
+    trigger: On<Remove, FfxiSkinSlot>,
+    q: Query<&FfxiSkinSlot>,
+    mut registry: ResMut<FfxiSkinRegistry>,
+) {
+    if let Ok(slot) = q.get(trigger.event().event_target()) {
+        registry.free_skin(slot.0);
+    }
+}
+
+pub fn free_instance_slot_on_remove(
+    trigger: On<Remove, FfxiInstanceSlot>,
+    q: Query<&FfxiInstanceSlot>,
+    mut registry: ResMut<FfxiSkinRegistry>,
+) {
+    if let Ok(slot) = q.get(trigger.event().event_target()) {
+        registry.free_instance(slot.0);
+    }
+}
+
+/// All per-actor/per-submesh state lives in `FfxiSkinRegistry` and reaches the
+/// shader through the shared storage buffers, so materials never churn.
 #[derive(Asset, TypePath, Clone, Debug)]
 pub struct FfxiSkinnedMaterial {
-    pub lighting: FfxiLightingUniform,
     pub base_color_texture: Option<Handle<Image>>,
-    pub joints: FfxiJointMatrices,
-    pub material_flags: FfxiSkinnedFlags,
-    // All of one actor's sub-mesh materials share this id (the actor root entity
-    // bits). joints + lighting are identical across them, so they share one set of
-    // persistent GPU buffers uploaded ONCE per actor per frame.
-    pub skin_id: u64,
-    // Unique per material; keys its per-submesh flags buffer (has_texture differs).
-    // Per-frame data lives in persistent buffers refreshed via write_buffer, so
-    // mutating these fields never marks the asset Modified and the bind group is
-    // built once instead of recreated every frame.
-    pub instance_id: u64,
 }
 
-impl FfxiSkinnedMaterial {
-    pub fn new(
-        skin_id: u64,
-        lighting: FfxiLightingUniform,
-        base_color_texture: Option<Handle<Image>>,
-        joints: FfxiJointMatrices,
-        material_flags: FfxiSkinnedFlags,
-    ) -> Self {
-        Self {
-            lighting,
-            base_color_texture,
-            joints,
-            material_flags,
-            skin_id,
-            instance_id: NEXT_INSTANCE_ID.fetch_add(1, Ordering::Relaxed),
-        }
-    }
-}
-
-struct SkinBuffers {
-    joints: Buffer,
-    lighting: Buffer,
-}
-
-struct FlagsBuffer {
-    buffer: Buffer,
-    last: FfxiSkinnedFlags,
-}
-
-/// Render-world owner of the persistent material uniform buffers, written every
-/// frame by [`upload_ffxi_material_buffers`] and referenced by bind groups built
-/// once. `skin` (joints binding 3 + lighting binding 0) is shared per actor and
-/// uploaded once each; `flags` (binding 4) is per material (has_texture differs).
+/// Render-world owner of the two shared storage buffers every
+/// `FfxiSkinnedMaterial` bind group references. Rewritten in full each frame
+/// by [`upload_ffxi_shared_buffers`] (2 `write_buffer` calls total).
 #[derive(Resource, Default)]
-pub struct FfxiMaterialBuffers {
-    skin: HashMap<u64, SkinBuffers>,
-    flags: HashMap<u64, FlagsBuffer>,
+pub struct FfxiSharedBuffers {
+    skins: Option<Buffer>,
+    instances: Option<Buffer>,
+    skin_capacity: usize,
+    instance_capacity: usize,
+    scratch: Vec<u8>,
+}
+
+impl FfxiSharedBuffers {
+    fn bind_buffers(&self) -> Option<(&Buffer, &Buffer)> {
+        Some((self.skins.as_ref()?, self.instances.as_ref()?))
+    }
 }
 
 impl AsBindGroup for FfxiSkinnedMaterial {
     type Data = ();
     type Param = (
-        SRes<FfxiMaterialBuffers>,
+        SRes<FfxiSharedBuffers>,
         SRes<RenderAssets<GpuImage>>,
         SRes<FallbackImage>,
     );
@@ -238,13 +391,8 @@ impl AsBindGroup for FfxiSkinnedMaterial {
         _force_no_bindless: bool,
     ) -> Result<UnpreparedBindGroup, AsBindGroupError> {
         let (buffers, images, fallback) = param;
-        let skin = buffers
-            .skin
-            .get(&self.skin_id)
-            .ok_or(AsBindGroupError::RetryNextUpdate)?;
-        let flags = buffers
-            .flags
-            .get(&self.instance_id)
+        let (skins, instances) = buffers
+            .bind_buffers()
             .ok_or(AsBindGroupError::RetryNextUpdate)?;
         let image = match &self.base_color_texture {
             Some(handle) => images
@@ -254,7 +402,7 @@ impl AsBindGroup for FfxiSkinnedMaterial {
         };
         Ok(UnpreparedBindGroup {
             bindings: BindingResources(vec![
-                (0, OwnedBindingResource::Buffer(skin.lighting.clone())),
+                (0, OwnedBindingResource::Buffer(skins.clone())),
                 (
                     1,
                     OwnedBindingResource::TextureView(
@@ -269,8 +417,7 @@ impl AsBindGroup for FfxiSkinnedMaterial {
                         image.sampler.clone(),
                     ),
                 ),
-                (3, OwnedBindingResource::Buffer(skin.joints.clone())),
-                (4, OwnedBindingResource::Buffer(flags.buffer.clone())),
+                (3, OwnedBindingResource::Buffer(instances.clone())),
             ]),
         })
     }
@@ -279,18 +426,18 @@ impl AsBindGroup for FfxiSkinnedMaterial {
         _render_device: &RenderDevice,
         _force_no_bindless: bool,
     ) -> Vec<BindGroupLayoutEntry> {
-        let uniform = |binding: u32, min: std::num::NonZeroU64| BindGroupLayoutEntry {
+        let storage = |binding: u32, min: std::num::NonZeroU64| BindGroupLayoutEntry {
             binding,
             visibility: ShaderStages::VERTEX_FRAGMENT,
             ty: BindingType::Buffer {
-                ty: BufferBindingType::Uniform,
+                ty: BufferBindingType::Storage { read_only: true },
                 has_dynamic_offset: false,
                 min_binding_size: Some(min),
             },
             count: None,
         };
         vec![
-            uniform(0, FfxiLightingUniform::min_size()),
+            storage(0, FfxiSkin::min_size()),
             BindGroupLayoutEntry {
                 binding: 1,
                 visibility: ShaderStages::VERTEX_FRAGMENT,
@@ -307,8 +454,7 @@ impl AsBindGroup for FfxiSkinnedMaterial {
                 ty: BindingType::Sampler(SamplerBindingType::Filtering),
                 count: None,
             },
-            uniform(3, FfxiJointMatrices::min_size()),
-            uniform(4, FfxiSkinnedFlags::min_size()),
+            storage(3, FfxiInstance::min_size()),
         ]
     }
 }
@@ -377,67 +523,71 @@ pub(crate) fn write_uniform<T: ShaderType + encase::internal::WriteInto>(
     queue.write_buffer(buffer, 0, &data.into_inner());
 }
 
-/// Refreshes every material's persistent uniform buffers from the CPU-side asset
-/// fields each frame (write_buffer, not realloc), so the material asset is never
-/// marked Modified by animation/lighting and its bind group is built only once.
-fn upload_ffxi_material_buffers(
-    materials: Extract<Res<Assets<FfxiSkinnedMaterial>>>,
+// wgpu keeps a replaced Buffer alive while any bind group references it, so a
+// growth realloc silently freezes animation instead of crashing unless every
+// material's bind group is rebuilt against the new buffer — this remark pass
+// is that rebuild trigger (Modified -> re-prepare).
+fn remark_materials_on_buffer_growth(
+    registry: Res<FfxiSkinRegistry>,
+    mut materials: ResMut<Assets<FfxiSkinnedMaterial>>,
+    mut last_generation: Local<u64>,
+) {
+    if *last_generation == registry.buffer_generation() {
+        return;
+    }
+    *last_generation = registry.buffer_generation();
+    let ids: Vec<AssetId<FfxiSkinnedMaterial>> = materials.ids().collect();
+    for id in ids {
+        let _ = materials.get_mut(id);
+    }
+}
+
+fn upload_ffxi_shared_buffers(
+    registry: Extract<Res<FfxiSkinRegistry>>,
     device: Res<RenderDevice>,
     queue: Res<RenderQueue>,
-    mut cache: ResMut<FfxiMaterialBuffers>,
+    mut buffers: ResMut<FfxiSharedBuffers>,
 ) {
-    let uniform_buffer = |label: &'static str, size: std::num::NonZeroU64| {
-        device.create_buffer(&BufferDescriptor {
-            label: Some(label),
-            size: size.get(),
-            usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
+    if buffers.skins.is_none() || buffers.skin_capacity != registry.skin_capacity() {
+        buffers.skin_capacity = registry.skin_capacity();
+        buffers.skins = Some(device.create_buffer(&BufferDescriptor {
+            label: Some("ffxi_shared_skins"),
+            size: FfxiSkin::min_size().get() * buffers.skin_capacity as u64,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
             mapped_at_creation: false,
-        })
-    };
-
-    let mut live_skins: HashSet<u64> = HashSet::new();
-    let mut uploaded_skins: HashSet<u64> = HashSet::new();
-    let mut live_flags: HashSet<u64> = HashSet::with_capacity(materials.len());
-    for (_id, mat) in materials.iter() {
-        let skin = cache
-            .skin
-            .entry(mat.skin_id)
-            .or_insert_with(|| SkinBuffers {
-                joints: uniform_buffer("ffxi_skin_joints", FfxiJointMatrices::min_size()),
-                lighting: uniform_buffer("ffxi_skin_lighting", FfxiLightingUniform::min_size()),
-            });
-        live_skins.insert(mat.skin_id);
-        // joints + lighting are identical across an actor's sub-meshes, so upload
-        // the shared buffers once per actor per frame, not once per material.
-        if uploaded_skins.insert(mat.skin_id) {
-            write_uniform(&queue, &skin.joints, &mat.joints);
-            write_uniform(&queue, &skin.lighting, &mat.lighting);
-        }
-
-        // material_flags only changes when a graphics setting is toggled, so write
-        // it on first sight and on change, not every frame — this is the bulk of the
-        // per-frame write_buffer/staging churn the actor count otherwise multiplies.
-        match cache.flags.entry(mat.instance_id) {
-            std::collections::hash_map::Entry::Occupied(mut e) => {
-                let fb = e.get_mut();
-                if fb.last != mat.material_flags {
-                    write_uniform(&queue, &fb.buffer, &mat.material_flags);
-                    fb.last = mat.material_flags.clone();
-                }
-            }
-            std::collections::hash_map::Entry::Vacant(e) => {
-                let buffer = uniform_buffer("ffxi_mat_flags", FfxiSkinnedFlags::min_size());
-                write_uniform(&queue, &buffer, &mat.material_flags);
-                e.insert(FlagsBuffer {
-                    buffer,
-                    last: mat.material_flags.clone(),
-                });
-            }
-        }
-        live_flags.insert(mat.instance_id);
+        }));
     }
-    cache.skin.retain(|id, _| live_skins.contains(id));
-    cache.flags.retain(|id, _| live_flags.contains(id));
+    if buffers.instances.is_none() || buffers.instance_capacity != registry.instance_capacity() {
+        buffers.instance_capacity = registry.instance_capacity();
+        buffers.instances = Some(device.create_buffer(&BufferDescriptor {
+            label: Some("ffxi_shared_instances"),
+            size: FfxiInstance::min_size().get() * buffers.instance_capacity as u64,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        }));
+    }
+
+    let mut scratch = std::mem::take(&mut buffers.scratch);
+
+    let skins = registry.skins_used();
+    if !skins.is_empty() {
+        scratch.clear();
+        let mut sb = encase::StorageBuffer::new(scratch);
+        sb.write(skins).expect("encode ffxi shared skins");
+        scratch = sb.into_inner();
+        queue.write_buffer(buffers.skins.as_ref().unwrap(), 0, &scratch);
+    }
+
+    let instances = registry.instances_used();
+    if !instances.is_empty() {
+        scratch.clear();
+        let mut sb = encase::StorageBuffer::new(scratch);
+        sb.write(instances).expect("encode ffxi shared instances");
+        scratch = sb.into_inner();
+        queue.write_buffer(buffers.instances.as_ref().unwrap(), 0, &scratch);
+    }
+
+    buffers.scratch = scratch;
 }
 
 pub struct FfxiMaterialPlugin;
@@ -447,10 +597,14 @@ impl Plugin for FfxiMaterialPlugin {
         embedded_asset!(app, "skinned_ffxi.wgsl");
         embedded_asset!(app, "skinned_ffxi_prepass.wgsl");
         app.add_plugins(MaterialPlugin::<FfxiSkinnedMaterial>::default());
+        app.init_resource::<FfxiSkinRegistry>();
+        app.add_observer(free_skin_slot_on_remove);
+        app.add_observer(free_instance_slot_on_remove);
+        app.add_systems(PostUpdate, remark_materials_on_buffer_growth);
         if let Some(render_app) = app.get_sub_app_mut(RenderApp) {
             render_app
-                .init_resource::<FfxiMaterialBuffers>()
-                .add_systems(ExtractSchedule, upload_ffxi_material_buffers);
+                .init_resource::<FfxiSharedBuffers>()
+                .add_systems(ExtractSchedule, upload_ffxi_shared_buffers);
         }
     }
 }
@@ -482,6 +636,50 @@ mod tests {
         );
     }
 
+    // The storage structs are an ABI contract with both WGSL modules: same
+    // struct names, same joint-array length, same read-only storage bindings.
+    #[test]
+    fn storage_structs_match_shader() {
+        let want_joints = format!("array<mat4x4<f32>, {MAX_JOINTS}>");
+        for (name, src) in [
+            ("skinned_ffxi.wgsl", include_str!("skinned_ffxi.wgsl")),
+            (
+                "skinned_ffxi_prepass.wgsl",
+                include_str!("skinned_ffxi_prepass.wgsl"),
+            ),
+        ] {
+            assert!(
+                src.contains(&want_joints),
+                "{name} must declare joints as {want_joints} (MAX_JOINTS)"
+            );
+            assert!(
+                src.contains("var<storage, read> skins: array<FfxiSkin>"),
+                "{name} must bind the shared skins storage array"
+            );
+            assert!(
+                src.contains("var<storage, read> instances: array<FfxiInstance>"),
+                "{name} must bind the shared instances storage array"
+            );
+            assert!(
+                src.contains("mesh_functions::get_tag"),
+                "{name} must resolve its instance slot via MeshTag (get_tag)"
+            );
+        }
+    }
+
+    // min_size feeds both the bind-group layout validation and the GPU buffer
+    // stride; a layout drift here would misindex every actor on the GPU.
+    #[test]
+    fn shared_buffer_layouts_are_stable() {
+        assert_eq!(FfxiLightingUniform::min_size().get(), 864);
+        assert_eq!(
+            FfxiJointMatrices::min_size().get(),
+            (MAX_JOINTS * 64) as u64
+        );
+        assert_eq!(FfxiSkin::min_size().get(), 9056);
+        assert_eq!(FfxiInstance::min_size().get(), 48);
+    }
+
     #[test]
     fn t_factor_half_color_is_neutral() {
         assert_eq!(t_factor_tint([0x80, 0x80, 0x80, 0x80]), Vec4::ONE);
@@ -489,5 +687,85 @@ mod tests {
             t_factor_tint([0x00, 0x40, 0x80, 0xFF]),
             Vec4::new(0.0, 0.5, 1.0, 255.0 / T_FACTOR_NEUTRAL)
         );
+    }
+
+    #[test]
+    fn slot_allocator_reuses_lowest_and_tracks_high_water() {
+        let mut reg = FfxiSkinRegistry::default();
+        let a = reg.alloc_skin();
+        let b = reg.alloc_skin();
+        let c = reg.alloc_skin();
+        assert_eq!((a, b, c), (0, 1, 2));
+        assert_eq!(reg.live_skins(), 3);
+
+        reg.free_skin(a);
+        reg.free_skin(b);
+        assert_eq!(reg.live_skins(), 1);
+        assert_eq!(reg.alloc_skin(), a, "lowest freed slot is reused first");
+        assert_eq!(reg.alloc_skin(), b);
+
+        reg.free_skin(c);
+        reg.free_skin(b);
+        reg.free_skin(a);
+        assert_eq!(reg.live_skins(), 0);
+        assert_eq!(
+            reg.skin_high_water, 0,
+            "trailing frees shrink the uploaded high-water region"
+        );
+
+        reg.free_skin(a);
+        assert_eq!(reg.live_skins(), 0, "double free is a no-op");
+    }
+
+    #[test]
+    fn growth_bumps_buffer_generation() {
+        let mut reg = FfxiSkinRegistry::default();
+        let gen0 = reg.buffer_generation();
+        for _ in 0..INITIAL_SKIN_SLOTS {
+            reg.alloc_skin();
+        }
+        assert_eq!(reg.buffer_generation(), gen0);
+        reg.alloc_skin();
+        assert_eq!(reg.buffer_generation(), gen0 + 1);
+        assert_eq!(reg.skin_capacity(), INITIAL_SKIN_SLOTS * SLOT_GROWTH_FACTOR);
+
+        for _ in 0..INITIAL_INSTANCE_SLOTS + 1 {
+            reg.alloc_instance(FfxiInstance::default());
+        }
+        assert_eq!(reg.buffer_generation(), gen0 + 2);
+    }
+
+    #[test]
+    fn slots_are_freed_on_despawn() {
+        let mut app = App::new();
+        app.init_resource::<FfxiSkinRegistry>();
+        app.add_observer(free_skin_slot_on_remove);
+        app.add_observer(free_instance_slot_on_remove);
+
+        let (skin, inst) = {
+            let mut reg = app.world_mut().resource_mut::<FfxiSkinRegistry>();
+            (
+                reg.alloc_skin(),
+                reg.alloc_instance(FfxiInstance::default()),
+            )
+        };
+        let e = app
+            .world_mut()
+            .spawn((FfxiSkinSlot(skin), FfxiInstanceSlot(inst)))
+            .id();
+        {
+            let reg = app.world().resource::<FfxiSkinRegistry>();
+            assert_eq!((reg.live_skins(), reg.live_instances()), (1, 1));
+        }
+
+        app.world_mut().entity_mut(e).despawn();
+
+        let mut reg = app.world_mut().resource_mut::<FfxiSkinRegistry>();
+        assert_eq!(
+            (reg.live_skins(), reg.live_instances()),
+            (0, 0),
+            "despawn must return both slots to the registry"
+        );
+        assert_eq!(reg.alloc_skin(), skin, "freed slot is reusable");
     }
 }

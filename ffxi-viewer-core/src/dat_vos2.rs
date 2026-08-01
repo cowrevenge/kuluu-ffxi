@@ -6,7 +6,7 @@ use std::sync::OnceLock;
 use bevy::asset::RenderAssetUsages;
 use bevy::image::Image;
 use bevy::mesh::skinning::{SkinnedMesh, SkinnedMeshInverseBindposes};
-use bevy::mesh::{Indices, PrimitiveTopology};
+use bevy::mesh::{Indices, MeshTag, PrimitiveTopology};
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use ffxi_dat::bone::{self, Skeleton};
@@ -20,9 +20,9 @@ use crate::skeleton_instance::{
     eval_bind_pose, eval_pose, pc_pivot_rotation, pc_pivot_translation, FfxiActor,
 };
 use crate::skinned_ffxi_material::{
-    FfxiJointMatrices, FfxiLightingUniform, FfxiSkinnedFlags, FfxiSkinnedMaterial, ATTR_COLOR,
-    ATTR_JOINT0, ATTR_JOINT1, ATTR_JOINT_WEIGHT, ATTR_NORMAL0, ATTR_NORMAL1, ATTR_POSITION0,
-    ATTR_POSITION1,
+    FfxiInstance, FfxiInstanceSlot, FfxiLightingUniform, FfxiSkinRegistry, FfxiSkinSlot,
+    FfxiSkinnedMaterial, ATTR_COLOR, ATTR_JOINT0, ATTR_JOINT1, ATTR_JOINT_WEIGHT, ATTR_NORMAL0,
+    ATTR_NORMAL1, ATTR_POSITION0, ATTR_POSITION1,
 };
 
 #[derive(Component, Debug)]
@@ -1253,16 +1253,17 @@ fn spawn_ffxi_actor(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<FfxiSkinnedMaterial>,
+    registry: &mut FfxiSkinRegistry,
     images: &mut Assets<Image>,
     parent: Entity,
     loaded: &LoadedVos2,
     skeleton: &std::sync::Arc<Skeleton>,
-    existing: Option<Entity>,
+    existing: Option<(Entity, u32)>,
     is_pc: bool,
 
     _min_local_y: f32,
-) -> (Entity, Vec<Handle<FfxiSkinnedMaterial>>) {
-    let pivot = match existing {
+) -> (Entity, u32, Vec<u32>) {
+    let (pivot, skin_slot) = match existing {
         Some(p) => p,
         None => {
             let rotation = if is_pc {
@@ -1271,7 +1272,8 @@ fn spawn_ffxi_actor(
                 Quat::from_rotation_x(std::f32::consts::PI)
             };
             let translation = pc_pivot_translation();
-            commands
+            let skin_slot = registry.alloc_skin();
+            let pivot = commands
                 .spawn((
                     Transform {
                         translation,
@@ -1280,14 +1282,18 @@ fn spawn_ffxi_actor(
                     },
                     GlobalTransform::default(),
                     Visibility::default(),
+                    FfxiSkinSlot(skin_slot),
                     ChildOf(parent),
                 ))
-                .id()
+                .id();
+            (pivot, skin_slot)
         }
     };
 
-    let mut bind_joints = FfxiJointMatrices::default();
-    bind_joints.set_from(&eval_bind_pose(skeleton));
+    registry
+        .skin_mut(skin_slot)
+        .joints
+        .set_from(&eval_bind_pose(skeleton));
 
     let mut by_name: std::collections::HashMap<String, Handle<Image>> =
         std::collections::HashMap::with_capacity(loaded.textures.len());
@@ -1305,7 +1311,7 @@ fn spawn_ffxi_actor(
     let (vd, mirrored) = build_ffxi_vertex_data(&loaded.mesh, skeleton.bones.len());
     let n = loaded.mesh.vertices.len();
     let total = vd.position0.len();
-    let mut out_materials = Vec::new();
+    let mut out_slots = Vec::new();
 
     for group in &loaded.mesh.groups {
         if group.triangles.is_empty() {
@@ -1368,25 +1374,29 @@ fn spawn_ffxi_actor(
         mesh.insert_attribute(ATTR_COLOR, vd.color.clone());
         mesh.insert_indices(Indices::U32(indices));
 
-        let mat = materials.add(FfxiSkinnedMaterial::new(
-            pivot.to_bits(),
-            FfxiLightingUniform::default(),
-            tex_handle,
-            bind_joints.clone(),
-            FfxiSkinnedFlags::default(),
-        ));
-        out_materials.push(mat.clone());
+        let has_texture = if tex_handle.is_some() { 1.0 } else { 0.0 };
+        let mat = materials.add(FfxiSkinnedMaterial {
+            base_color_texture: tex_handle,
+        });
+        let instance_slot = registry.alloc_instance(FfxiInstance {
+            flags: Vec4::new(has_texture, 0.0, 0.0, 0.0),
+            tint: Vec4::ONE,
+            skin_slot,
+        });
+        out_slots.push(instance_slot);
 
         commands.spawn((
             Vos2Overlay,
             Mesh3d(meshes.add(mesh)),
             MeshMaterial3d(mat),
+            MeshTag(instance_slot),
+            FfxiInstanceSlot(instance_slot),
             Transform::default(),
             ChildOf(pivot),
         ));
     }
 
-    (pivot, out_materials)
+    (pivot, skin_slot, out_slots)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1395,6 +1405,7 @@ pub fn process_load_vos2_requests_ffxi(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<FfxiSkinnedMaterial>>,
+    mut registry: ResMut<FfxiSkinRegistry>,
     mut images: ResMut<Assets<Image>>,
     settings: Res<GraphicsSettings>,
     tracked: Res<TrackedEntities>,
@@ -1412,7 +1423,7 @@ pub fn process_load_vos2_requests_ffxi(
         std::collections::HashMap::new();
     let mut despawned: std::collections::HashSet<u32> = std::collections::HashSet::new();
 
-    type ActorAcc = (Entity, f32, f32, Vec<Handle<FfxiSkinnedMaterial>>);
+    type ActorAcc = (Entity, u32, f32, f32, Vec<u32>);
     let mut actor_state: std::collections::HashMap<u32, ActorAcc> =
         std::collections::HashMap::new();
 
@@ -1454,23 +1465,24 @@ pub fn process_load_vos2_requests_ffxi(
 
         let existing = actor_state
             .get(&req.entity_id)
-            .map(|(p, _, _, _)| *p)
-            .or_else(|| q_actor.get(bevy_e).ok().map(|a| a.pivot));
-        let (cur_min, cur_max, mut mats_acc) = actor_state
+            .map(|(p, s, _, _, _)| (*p, *s))
+            .or_else(|| q_actor.get(bevy_e).ok().map(|a| (a.pivot, a.skin_slot)));
+        let (cur_min, cur_max, mut slots_acc) = actor_state
             .get(&req.entity_id)
-            .map(|(_, mn, mx, m)| (*mn, *mx, m.clone()))
+            .map(|(_, _, mn, mx, s)| (*mn, *mx, s.clone()))
             .or_else(|| {
                 q_actor
                     .get(bevy_e)
                     .ok()
-                    .map(|a| (a.min_local_y, a.max_local_y, a.materials.clone()))
+                    .map(|a| (a.min_local_y, a.max_local_y, a.instance_slots.clone()))
             })
             .unwrap_or((f32::INFINITY, f32::NEG_INFINITY, Vec::new()));
 
-        let (pivot, new_mats) = spawn_ffxi_actor(
+        let (pivot, skin_slot, new_slots) = spawn_ffxi_actor(
             &mut commands,
             &mut meshes,
             &mut materials,
+            &mut registry,
             &mut images,
             bevy_e,
             loaded,
@@ -1479,7 +1491,7 @@ pub fn process_load_vos2_requests_ffxi(
             is_pc,
             slot_min,
         );
-        mats_acc.extend(new_mats);
+        slots_acc.extend(new_slots);
 
         let actor_min = cur_min.min(slot_min);
         let actor_max = cur_max.max(slot_max);
@@ -1488,7 +1500,7 @@ pub fn process_load_vos2_requests_ffxi(
         }
         actor_state.insert(
             req.entity_id,
-            (pivot, actor_min, actor_max, mats_acc.clone()),
+            (pivot, skin_slot, actor_min, actor_max, slots_acc.clone()),
         );
 
         let actor_height = (actor_max - actor_min).max(0.1);
@@ -1497,7 +1509,8 @@ pub fn process_load_vos2_requests_ffxi(
 
             dat_id: raw_dat_id_for_skeleton(skeleton),
             pivot,
-            materials: mats_acc,
+            skin_slot,
+            instance_slots: slots_acc,
             min_local_y: actor_min,
             max_local_y: actor_max,
         });
@@ -1593,7 +1606,7 @@ pub fn tick_ffxi_actors(
     mut blends: ResMut<crate::combat_stance::AnimationBlends>,
     clip_override: Option<Res<crate::combat_stance::ModelViewerClipOverride>>,
     settings: Res<GraphicsSettings>,
-    mut materials: ResMut<Assets<FfxiSkinnedMaterial>>,
+    mut registry: ResMut<FfxiSkinRegistry>,
     q_actors: Query<(&crate::components::WorldEntity, &FfxiActor)>,
 ) {
     if settings.character_path() != CharacterRenderPath::FfxiFaithful {
@@ -1625,11 +1638,7 @@ pub fn tick_ffxi_actors(
         );
 
         let mats = eval_pose(&actor.skeleton, &pose);
-        for h in &actor.materials {
-            if let Some(mut m) = materials.get_mut(h) {
-                m.joints.set_from(&mats);
-            }
-        }
+        registry.skin_mut(actor.skin_slot).joints.set_from(&mats);
     }
 }
 
@@ -1651,7 +1660,7 @@ pub fn update_ffxi_lighting_system(
         ),
     >,
     q_actors: Query<&FfxiActor>,
-    mut materials: ResMut<Assets<FfxiSkinnedMaterial>>,
+    mut registry: ResMut<FfxiSkinRegistry>,
 ) {
     if settings.character_path() != CharacterRenderPath::FfxiFaithful {
         return;
@@ -1695,11 +1704,7 @@ pub fn update_ffxi_lighting_system(
     };
 
     for actor in &q_actors {
-        for h in &actor.materials {
-            if let Some(mut m) = materials.get_mut(h) {
-                m.lighting = lighting.clone();
-            }
-        }
+        registry.skin_mut(actor.skin_slot).lighting = lighting.clone();
     }
 }
 

@@ -54,28 +54,29 @@ struct FfxiLighting {
     time_params: vec4<f32>,
 };
 
-// Mirror of `FfxiJointMatrices` in skinned_ffxi_material.rs. 128 = MAX_JOINTS.
-struct FfxiJoints {
-    matrices: array<mat4x4<f32>, 128>,
+// Mirror of `FfxiSkin` in skinned_ffxi_material.rs. 128 = MAX_JOINTS. One
+// record per live actor in the shared storage buffer, selected via the
+// per-submesh instance record's skin_slot.
+struct FfxiSkin {
+    joints: array<mat4x4<f32>, 128>,
+    lighting: FfxiLighting,
 };
 
-// Mirror of `FfxiSkinnedFlags`. `flags.x` = has_texture (1.0 / 0.0),
+// Mirror of `FfxiInstance`. `flags.x` = has_texture (1.0 / 0.0),
 // `flags.y` = realistic lighting, `flags.z` = receive_shadows, `flags.w` =
 // target-highlight glow added on top of the lit color (0 = no highlight).
 // `tint` = per-mesh t_factor modulation (XIM GLDrawer.kt:329-331 uEffectColor),
-// neutral at 1.0.
-struct FfxiSkinnedFlags {
+// neutral at 1.0. One record per submesh, indexed by MeshTag (get_tag).
+struct FfxiInstance {
     flags: vec4<f32>,
     tint: vec4<f32>,
+    skin_slot: u32,
 };
 
-@group(#{MATERIAL_BIND_GROUP}) @binding(0) var<uniform> lighting: FfxiLighting;
+@group(#{MATERIAL_BIND_GROUP}) @binding(0) var<storage, read> skins: array<FfxiSkin>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(1) var base_tex: texture_2d<f32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(2) var base_samp: sampler;
-// Per-actor bone world-pose matrices uploaded inline as a uniform (see the
-// `FfxiJointMatrices` doc for why this is a uniform, not a storage buffer).
-@group(#{MATERIAL_BIND_GROUP}) @binding(3) var<uniform> joints: FfxiJoints;
-@group(#{MATERIAL_BIND_GROUP}) @binding(4) var<uniform> material_flags: FfxiSkinnedFlags;
+@group(#{MATERIAL_BIND_GROUP}) @binding(3) var<storage, read> instances: array<FfxiInstance>;
 
 struct Vertex {
     @builtin(instance_index) instance_index: u32,
@@ -96,15 +97,19 @@ struct VertexOutput {
     @location(1) world_normal: vec3<f32>,
     @location(2) world_position: vec3<f32>,
     @location(3) color: vec4<f32>,
+    @location(4) @interpolate(flat) inst_idx: u32,
 };
 
 @vertex
 fn vertex(v: Vertex) -> VertexOutput {
     var out: VertexOutput;
 
+    let inst = mesh_functions::get_tag(v.instance_index);
+    let si = instances[inst].skin_slot;
+
     let w = v.joint_weight;
-    let m0 = joints.matrices[v.joint0];
-    let m1 = joints.matrices[v.joint1];
+    let m0 = skins[si].joints[v.joint0];
+    let m1 = skins[si].joints[v.joint1];
 
     // FFXI faithful dual-position skinning (see header).
     let model_pos = m0 * vec4<f32>(v.position0, w)
@@ -122,39 +127,41 @@ fn vertex(v: Vertex) -> VertexOutput {
     out.world_normal = normalize(mesh_functions::mesh_normal_local_to_world(model_norm, v.instance_index));
     out.uv = v.uv;
     out.color = v.color;
+    out.inst_idx = inst;
     return out;
 }
 
 // Scene irradiance at a surface: ambient sky fill + 2 directional (sun/moon)
-// + 4 point lights, all sourced from the live zone lighting uniform. `wrap`
+// + 4 point lights, all sourced from the actor's lighting record in the shared
+// skins storage array (indexed, not copied — the record is ~52 vec4s). `wrap`
 // softens the N·L terminator (0 = hard Lambert). `sun_scale` attenuates ONLY
 // the primary directional (sun/dir0) term so a cast-shadow factor can darken
 // the sun contribution while leaving the moon/ambient/point fill intact (1.0 =
 // fully lit). Shared by both shading models below.
-fn scene_irradiance(n: vec3<f32>, p: vec3<f32>, wrap: f32, sun_scale: f32) -> vec3<f32> {
-    var rgb = lighting.ambient.rgb;
-    let nl0 = max((dot(n, -lighting.dir0_dir.xyz) + wrap) / (1.0 + wrap), 0.0);
-    rgb += sun_scale * nl0 * lighting.dir0_color.rgb * lighting.dir0_color.w;
-    let nl1 = max((dot(n, -lighting.dir1_dir.xyz) + wrap) / (1.0 + wrap), 0.0);
-    rgb += nl1 * lighting.dir1_color.rgb * lighting.dir1_color.w;
+fn scene_irradiance(si: u32, n: vec3<f32>, p: vec3<f32>, wrap: f32, sun_scale: f32) -> vec3<f32> {
+    var rgb = skins[si].lighting.ambient.rgb;
+    let nl0 = max((dot(n, -skins[si].lighting.dir0_dir.xyz) + wrap) / (1.0 + wrap), 0.0);
+    rgb += sun_scale * nl0 * skins[si].lighting.dir0_color.rgb * skins[si].lighting.dir0_color.w;
+    let nl1 = max((dot(n, -skins[si].lighting.dir1_dir.xyz) + wrap) / (1.0 + wrap), 0.0);
+    rgb += nl1 * skins[si].lighting.dir1_color.rgb * skins[si].lighting.dir1_color.w;
     // 16 = MAX_POINT_LIGHTS (skinned_ffxi_material.rs); empty slots have range 0.
     for (var i = 0u; i < 16u; i = i + 1u) {
         // `.w` of the color carries the light's range; <= 0 means an empty slot.
-        let range = lighting.point_color[i].w;
+        let range = skins[si].lighting.point_color[i].w;
         if (range > 0.0) {
             // XIM's `pointLightCalc` (ShaderConstants.kt:186-198): diffuse N·L,
             // `1/(c + l·d + q·d²)` falloff, hard-cut past `range`. Vertex color
             // and the FFXI 2x/texel compositing are applied by the caller, so —
             // unlike XIM, which folds vertexColor into every light term — this
             // returns pure light (matching how the dir0/dir1 terms above work).
-            let to_light = lighting.point_pos[i].xyz - p;
+            let to_light = skins[si].lighting.point_pos[i].xyz - p;
             let dist = length(to_light);
             if (dist <= range) {
-                let a = lighting.point_atten[i].xyz; // (const, linear, quad)
+                let a = skins[si].lighting.point_atten[i].xyz; // (const, linear, quad)
                 let denom = a.x + a.y * dist + a.z * dist * dist;
                 let dist_factor = select(1.0 / denom, 0.0, denom <= 0.0);
                 let nl = max(dot(n, to_light / max(dist, 1e-5)), 0.0);
-                rgb += nl * dist_factor * lighting.point_color[i].rgb;
+                rgb += nl * dist_factor * skins[si].lighting.point_color[i].rgb;
             }
         }
     }
@@ -207,18 +214,20 @@ fn apply_distance_fog(color: vec4<f32>, world_pos: vec3<f32>) -> vec4<f32> {
 
 @fragment
 fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
+    let rec = instances[in.inst_idx];
+    let si = rec.skin_slot;
     // Untextured FFXI meshes (C/CS ops) carry a null TextureLink: treat the
     // texel as white opaque and skip the alpha-test so the vertex color shows.
-    let has_texture = material_flags.flags.x > 0.5;
+    let has_texture = rec.flags.x > 0.5;
     // flags.y selects the realistic (Bevy-scene-driven) lighting model.
-    let realistic = material_flags.flags.y > 0.5;
+    let realistic = rec.flags.y > 0.5;
     // flags.z gates directional cast-shadow / self-shadow RECEIVE (the
     // "Model Shadow Receiving" graphics setting). When off, both branches light the
     // model with no shadow attenuation (sun term at full strength).
-    let receive_shadows = material_flags.flags.z > 0.5;
+    let receive_shadows = rec.flags.z > 0.5;
     // flags.w is the target-strobe glow: an additive highlight pulsed onto the
     // currently-selected actor (driven by target_strobe.rs). 0 for everything else.
-    let highlight = vec3<f32>(max(material_flags.flags.w, 0.0));
+    let highlight = vec3<f32>(max(rec.flags.w, 0.0));
     var texel = vec4<f32>(1.0);
     if (has_texture) {
         texel = textureSample(base_tex, base_samp, in.uv);
@@ -258,8 +267,8 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
         // change; this is the tunable approximation.)
         let EXPOSURE = 1.7;
         let AMBIENT_FLOOR = 0.10;
-        let albedo = texel.rgb * in.color.rgb * material_flags.tint.rgb;
-        let irr = scene_irradiance(n, in.world_position, 0.3, sun);
+        let albedo = texel.rgb * in.color.rgb * rec.tint.rgb;
+        let irr = scene_irradiance(si, n, in.world_position, 0.3, sun);
         let rgb = albedo * (irr * EXPOSURE + vec3<f32>(AMBIENT_FLOOR));
         // Opaque output (AlphaMode::Mask already discarded cut-out texels). A
         // sub-1 alpha here would let the preview camera composite the character
@@ -288,8 +297,8 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
         let sun = sun_shadow_factor(in.world_position, n, in.clip_position.xy);
         sun_scale = mix(FAITHFUL_SHADOW_FLOOR, 1.0, sun);
     }
-    let lit = scene_irradiance(n, in.world_position, 0.0, sun_scale) * in.color.rgb;
-    let rgb = 2.0 * lit * texel.rgb * material_flags.tint.rgb;
+    let lit = scene_irradiance(si, n, in.world_position, 0.0, sun_scale) * in.color.rgb;
+    let rgb = 2.0 * lit * texel.rgb * rec.tint.rgb;
     // Opaque output (AlphaMode::Mask already discarded cut-out texels). A sub-1
     // alpha here would let the preview camera composite the character see-
     // through over the launcher backdrop. The depth-only cast-shadow / prepass

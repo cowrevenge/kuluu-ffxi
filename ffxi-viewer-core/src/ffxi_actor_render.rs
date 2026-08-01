@@ -5,7 +5,7 @@ use std::fs;
 use std::sync::Arc;
 
 use bevy::asset::RenderAssetUsages;
-use bevy::mesh::{Indices, PrimitiveTopology, VertexAttributeValues};
+use bevy::mesh::{Indices, MeshTag, PrimitiveTopology, VertexAttributeValues};
 use bevy::prelude::*;
 use bevy::tasks::futures_lite::future;
 use bevy::tasks::{AsyncComputeTaskPool, Task};
@@ -29,9 +29,9 @@ use ffxi_dat::{walk_tree, ChunkKind, ChunkNode, DatRoot};
 use crate::combat_stance;
 use crate::dat_vos2::skeleton_file_id_for_race;
 use crate::skinned_ffxi_material::{
-    FfxiJointMatrices, FfxiLightingUniform, FfxiSkinnedFlags, FfxiSkinnedMaterial, ATTR_COLOR,
-    ATTR_JOINT0, ATTR_JOINT1, ATTR_JOINT_WEIGHT, ATTR_NORMAL0, ATTR_NORMAL1, ATTR_POSITION0,
-    ATTR_POSITION1,
+    FfxiInstance, FfxiInstanceSlot, FfxiJointMatrices, FfxiLightingUniform, FfxiSkinRegistry,
+    FfxiSkinSlot, FfxiSkinnedMaterial, ATTR_COLOR, ATTR_JOINT0, ATTR_JOINT1, ATTR_JOINT_WEIGHT,
+    ATTR_NORMAL0, ATTR_NORMAL1, ATTR_POSITION0, ATTR_POSITION1,
 };
 
 #[derive(Debug, Clone)]
@@ -730,7 +730,8 @@ pub struct FfxiRenderActor {
     routines: Arc<HashMap<DatId, Scheduler>>,
     action_assets: Arc<crate::scheduler_runtime::ActionAssets>,
     coordinator: SkeletonAnimationCoordinator,
-    materials: Vec<Handle<FfxiSkinnedMaterial>>,
+    skin_slot: u32,
+    instance_slots: Vec<u32>,
 
     pub inputs: ActorAnimInputs,
 
@@ -759,8 +760,12 @@ pub struct FfxiRenderActor {
 }
 
 impl FfxiRenderActor {
-    pub fn material_handles(&self) -> &[Handle<FfxiSkinnedMaterial>] {
-        &self.materials
+    pub fn skin_slot(&self) -> u32 {
+        self.skin_slot
+    }
+
+    pub fn instance_slots(&self) -> &[u32] {
+        &self.instance_slots
     }
 
     pub(crate) fn routines(&self) -> &HashMap<DatId, Scheduler> {
@@ -924,10 +929,12 @@ impl LoadedActor {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn spawn_loaded_actor(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<FfxiSkinnedMaterial>,
+    registry: &mut FfxiSkinRegistry,
     images: &mut Assets<Image>,
     loaded: &LoadedActor,
     world_pos: Vec3,
@@ -935,6 +942,10 @@ pub fn spawn_loaded_actor(
     scale: f32,
     q: crate::zone_texture::TextureQuality,
 ) -> Entity {
+    let parts = prepare_actor_parts(loaded, facing_dir, scale, q);
+    let skin_slot = registry.alloc_skin();
+    registry.skin_mut(skin_slot).joints = parts.bind_joints.clone();
+
     let actor_root = commands
         .spawn((
             Transform {
@@ -944,17 +955,18 @@ pub fn spawn_loaded_actor(
             },
             GlobalTransform::default(),
             Visibility::default(),
+            FfxiSkinSlot(skin_slot),
         ))
         .id();
 
-    let parts = prepare_actor_parts(loaded, facing_dir, scale, q);
-    let material_handles = build_actor_children(
-        commands, meshes, materials, images, loaded, &parts, actor_root,
+    let instance_slots = build_actor_children(
+        commands, meshes, materials, registry, images, loaded, &parts, actor_root, skin_slot,
     );
 
     commands.entity(actor_root).insert(make_render_actor(
         loaded,
-        material_handles,
+        skin_slot,
+        instance_slots,
         0,
         facing_dir,
         scale,
@@ -980,19 +992,21 @@ fn insert_auto_run_effects(commands: &mut Commands, actor_root: Entity, loaded: 
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 #[derive(Component)]
 pub(crate) struct FfxiActorMeshChild;
 
+#[allow(clippy::too_many_arguments)]
 fn build_actor_children(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<FfxiSkinnedMaterial>,
+    registry: &mut FfxiSkinRegistry,
     images: &mut Assets<Image>,
     loaded: &LoadedActor,
     parts: &PreparedParts,
     actor_root: Entity,
-) -> Vec<Handle<FfxiSkinnedMaterial>> {
+    skin_slot: u32,
+) -> Vec<u32> {
     let mut by_full: std::collections::HashMap<String, Handle<Image>> =
         std::collections::HashMap::with_capacity(loaded.textures.len());
     let mut by_local: std::collections::HashMap<String, Handle<Image>> =
@@ -1021,7 +1035,7 @@ fn build_actor_children(
             .cloned()
     };
 
-    let mut material_handles = Vec::new();
+    let mut instance_slots = Vec::new();
 
     for built in parts.skel_built.iter().chain(parts.d3m_built.iter()) {
         let untextured = is_blank_texture(&built.texture_name);
@@ -1032,28 +1046,28 @@ fn build_actor_children(
         };
         let has_texture = if tex_handle.is_some() { 1.0 } else { 0.0 };
 
-        let mat = materials.add(FfxiSkinnedMaterial::new(
-            actor_root.to_bits(),
-            FfxiLightingUniform::default(),
-            tex_handle,
-            parts.bind_joints.clone(),
-            FfxiSkinnedFlags {
-                flags: Vec4::new(has_texture, 0.0, 0.0, 0.0),
-                tint: built.tint,
-            },
-        ));
-        material_handles.push(mat.clone());
+        let mat = materials.add(FfxiSkinnedMaterial {
+            base_color_texture: tex_handle,
+        });
+        let instance_slot = registry.alloc_instance(FfxiInstance {
+            flags: Vec4::new(has_texture, 0.0, 0.0, 0.0),
+            tint: built.tint,
+            skin_slot,
+        });
+        instance_slots.push(instance_slot);
 
         commands.spawn((
             Mesh3d(meshes.add(built.mesh.clone())),
             MeshMaterial3d(mat),
+            MeshTag(instance_slot),
+            FfxiInstanceSlot(instance_slot),
             Transform::default(),
             FfxiActorMeshChild,
             ChildOf(actor_root),
         ));
     }
 
-    material_handles
+    instance_slots
 }
 
 // Cost/benefit tuning, not a derived value: at 50m (50° vFOV) a character's
@@ -1109,7 +1123,8 @@ pub(crate) fn apply_character_shadow_cast(
 
 fn make_render_actor(
     loaded: &LoadedActor,
-    materials: Vec<Handle<FfxiSkinnedMaterial>>,
+    skin_slot: u32,
+    instance_slots: Vec<u32>,
     world_id: u32,
     facing_dir: f32,
     scale: f32,
@@ -1125,7 +1140,8 @@ fn make_render_actor(
         routines: loaded.all_routines(),
         action_assets: Arc::clone(&loaded.action_assets),
         coordinator: SkeletonAnimationCoordinator::new(),
-        materials,
+        skin_slot,
+        instance_slots,
         inputs: ActorAnimInputs::default(),
         world_id,
         facing_dir,
@@ -1148,6 +1164,7 @@ pub fn spawn_live_actor(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<FfxiSkinnedMaterial>,
+    registry: &mut FfxiSkinRegistry,
     images: &mut Assets<Image>,
     prepared: &PreparedActor,
     wire_entity: Entity,
@@ -1155,6 +1172,9 @@ pub fn spawn_live_actor(
     scale: f32,
 ) -> Entity {
     let facing_dir = 0.0;
+
+    let skin_slot = registry.alloc_skin();
+    registry.skin_mut(skin_slot).joints = prepared.parts.bind_joints.clone();
 
     let actor_root = commands
         .spawn((
@@ -1165,23 +1185,27 @@ pub fn spawn_live_actor(
             },
             GlobalTransform::default(),
             Visibility::default(),
+            FfxiSkinSlot(skin_slot),
             ChildOf(wire_entity),
         ))
         .id();
 
-    let material_handles = build_actor_children(
+    let instance_slots = build_actor_children(
         commands,
         meshes,
         materials,
+        registry,
         images,
         &prepared.loaded,
         &prepared.parts,
         actor_root,
+        skin_slot,
     );
 
     commands.entity(actor_root).insert(make_render_actor(
         &prepared.loaded,
-        material_handles,
+        skin_slot,
+        instance_slots,
         world_id,
         facing_dir,
         scale,
@@ -1207,12 +1231,12 @@ fn decoded_texture_to_image(t: &DecodedTexture, q: crate::zone_texture::TextureQ
 
 pub fn tick_ffxi_render_actors(
     time: Res<Time>,
-    mut materials: ResMut<Assets<FfxiSkinnedMaterial>>,
+    mut registry: ResMut<FfxiSkinRegistry>,
     mut q_actors: Query<&mut FfxiRenderActor>,
 ) {
     let elapsed_frames = time.delta_secs() * FRAME_RATE;
     for mut actor in &mut q_actors {
-        advance_actor_pose(&mut actor, elapsed_frames, &mut materials, None);
+        advance_actor_pose(&mut actor, elapsed_frames, &mut registry, None);
     }
 }
 
@@ -1441,7 +1465,7 @@ fn advance_engage(
 fn advance_actor_pose(
     actor: &mut FfxiRenderActor,
     elapsed_frames: f32,
-    materials: &mut Assets<FfxiSkinnedMaterial>,
+    registry: &mut FfxiSkinRegistry,
 
     look: Option<(Mat4, Vec3)>,
 ) {
@@ -1622,11 +1646,7 @@ fn advance_actor_pose(
         apply_head_look(&mut pose, neck, &actor.head_subtree, actor.head_rot);
     }
 
-    for handle in &actor.materials {
-        if let Some(m) = materials.get_mut_untracked(handle) {
-            m.joints.set_from(&pose);
-        }
-    }
+    registry.skin_mut(actor.skin_slot).joints.set_from(&pose);
 }
 
 // Measured from the real skeletons (examples/zz-head-axis, all races): in pose
@@ -1822,6 +1842,7 @@ pub fn poll_load_actor_tasks(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<FfxiSkinnedMaterial>>,
+    mut registry: ResMut<FfxiSkinRegistry>,
     mut std_materials: ResMut<Assets<StandardMaterial>>,
     mut images: ResMut<Assets<Image>>,
     tracked: Res<crate::scene::TrackedEntities>,
@@ -1881,6 +1902,7 @@ pub fn poll_load_actor_tasks(
             &mut commands,
             &mut meshes,
             &mut materials,
+            &mut registry,
             &mut images,
             &prepared,
             wire_entity,
@@ -2017,7 +2039,7 @@ pub fn tick_live_ffxi_actors(
     mut rest: ResMut<combat_stance::RestStance>,
     walk_mode: Res<combat_stance::WalkMode>,
     self_move: Res<combat_stance::SelfMoveIntent>,
-    mut materials: ResMut<Assets<FfxiSkinnedMaterial>>,
+    mut registry: ResMut<FfxiSkinRegistry>,
     target: Res<crate::scene::Target>,
     mut q_actors: Query<(&mut FfxiRenderActor, &GlobalTransform)>,
 
@@ -2145,7 +2167,7 @@ pub fn tick_live_ffxi_actors(
             actor.engage = EngageMachine::NotEngaged;
             actor.coordinator.clear();
             actor.current_clip = None;
-            advance_actor_pose(&mut actor, elapsed_frames, &mut materials, None);
+            advance_actor_pose(&mut actor, elapsed_frames, &mut registry, None);
             continue;
         }
 
@@ -2257,7 +2279,7 @@ pub fn tick_live_ffxi_actors(
             }
         }
 
-        advance_actor_pose(&mut actor, elapsed_frames, &mut materials, look);
+        advance_actor_pose(&mut actor, elapsed_frames, &mut registry, look);
 
         if is_self {
             rest.observe_exit_clip(matches!(actor.rest_phase, RestPlayback::Stopping { .. }));
@@ -2391,7 +2413,7 @@ pub fn update_ffxi_render_actor_lighting(
         ),
     >,
     q_actors: Query<&FfxiRenderActor>,
-    mut materials: ResMut<Assets<FfxiSkinnedMaterial>>,
+    mut registry: ResMut<FfxiSkinRegistry>,
 ) {
     const AMBIENT_REF_LUX: f32 = 1000.0;
     const DIR_REF_LUX: f32 = 12000.0;
@@ -2489,13 +2511,11 @@ pub fn update_ffxi_render_actor_lighting(
     };
 
     for actor in &q_actors {
-        for h in &actor.materials {
-            if let Some(m) = materials.get_mut_untracked(h) {
-                m.lighting = lighting.clone();
-
-                m.material_flags.flags.y = realistic;
-                m.material_flags.flags.z = receive;
-            }
+        registry.skin_mut(actor.skin_slot).lighting = lighting.clone();
+        for &slot in &actor.instance_slots {
+            let inst = registry.instance_mut(slot);
+            inst.flags.y = realistic;
+            inst.flags.z = receive;
         }
     }
 }
@@ -2504,7 +2524,7 @@ pub fn update_ffxi_actor_point_lights(
     active: Res<crate::zone_point_lights::ActiveSceneLights>,
     settings: Res<crate::graphics_settings::GraphicsSettings>,
     q_actors: Query<(&FfxiRenderActor, &GlobalTransform)>,
-    mut materials: ResMut<Assets<FfxiSkinnedMaterial>>,
+    mut registry: ResMut<FfxiSkinRegistry>,
 ) {
     if active.lights.is_empty() {
         return;
@@ -2519,13 +2539,10 @@ pub fn update_ffxi_actor_point_lights(
                 count,
             );
 
-        for h in &actor.materials {
-            if let Some(m) = materials.get_mut_untracked(h) {
-                m.lighting.point_pos = point_pos;
-                m.lighting.point_color = point_color;
-                m.lighting.point_atten = point_atten;
-            }
-        }
+        let lighting = &mut registry.skin_mut(actor.skin_slot).lighting;
+        lighting.point_pos = point_pos;
+        lighting.point_color = point_color;
+        lighting.point_atten = point_atten;
     }
 }
 

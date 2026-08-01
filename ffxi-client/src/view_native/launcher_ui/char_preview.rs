@@ -8,7 +8,9 @@ use ffxi_viewer_core::ffxi_actor_render::{
     inputs_for_pose, load_pc, spawn_loaded_actor, FfxiRenderActor, LoadedActor, PoseState,
 };
 use ffxi_viewer_core::look_resolver::{resolve_equipment_slot, resolve_face};
-use ffxi_viewer_core::skinned_ffxi_material::{FfxiLightingUniform, FfxiSkinnedMaterial};
+use ffxi_viewer_core::skinned_ffxi_material::{
+    FfxiLightingUniform, FfxiSkinRegistry, FfxiSkinnedMaterial,
+};
 
 use super::{char_list::CharCursor, CharListData};
 use crate::view_native::launcher_backdrop::PREVIEW_RENDER_LAYER;
@@ -222,6 +224,7 @@ pub(super) fn poll_pending_preview(
     settings: Res<ffxi_viewer_core::GraphicsSettings>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<FfxiSkinnedMaterial>>,
+    mut registry: ResMut<FfxiSkinRegistry>,
     mut images: ResMut<Assets<Image>>,
 ) {
     let ready = match pending.task.as_mut() {
@@ -255,6 +258,7 @@ pub(super) fn poll_pending_preview(
         &mut commands,
         &mut meshes,
         &mut materials,
+        &mut registry,
         &mut images,
         &loaded,
         Vec3::ZERO,
@@ -287,20 +291,14 @@ pub(super) fn drive_preview_pose(mut q: Query<&mut FfxiRenderActor, With<CharPre
 }
 
 pub(super) fn relight_preview_actor(
-    q_root: Query<&Children, With<CharPreviewActorRoot>>,
-    q_mat: Query<&MeshMaterial3d<FfxiSkinnedMaterial>>,
-    mut materials: ResMut<Assets<FfxiSkinnedMaterial>>,
+    q_actors: Query<&FfxiRenderActor, With<CharPreviewActorRoot>>,
+    mut registry: ResMut<FfxiSkinRegistry>,
 ) {
     let lighting = FfxiLightingUniform::default();
-    for children in &q_root {
-        for child in children.iter() {
-            if let Ok(mat_handle) = q_mat.get(child) {
-                if let Some(mut mat) = materials.get_mut(&mat_handle.0) {
-                    mat.lighting = lighting.clone();
-
-                    mat.material_flags.flags.y = 0.0;
-                }
-            }
+    for actor in &q_actors {
+        registry.skin_mut(actor.skin_slot()).lighting = lighting.clone();
+        for &slot in actor.instance_slots() {
+            registry.instance_mut(slot).flags.y = 0.0;
         }
     }
 }

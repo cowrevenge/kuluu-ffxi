@@ -5,8 +5,6 @@ use std::sync::Arc;
 use bevy::prelude::*;
 use ffxi_dat::bone::{BoneLocal, Skeleton};
 
-use crate::skinned_ffxi_material::FfxiSkinnedMaterial;
-
 #[derive(Component)]
 pub struct FfxiActor {
     pub skeleton: Arc<Skeleton>,
@@ -15,7 +13,9 @@ pub struct FfxiActor {
 
     pub pivot: Entity,
 
-    pub materials: Vec<Handle<FfxiSkinnedMaterial>>,
+    pub skin_slot: u32,
+
+    pub instance_slots: Vec<u32>,
 
     pub min_local_y: f32,
 

@@ -395,7 +395,11 @@ pub(crate) fn build_subpacket_chat(sync: u16, kind: u8, text: &str) -> Vec<u8> {
     let size_words = (total / 4) as u16;
 
     let mut buf = vec![0u8; total];
-    buf[0..4].copy_from_slice(&build_subpacket_header(0x0B5, size_words, sync));
+    buf[0..4].copy_from_slice(&build_subpacket_header(
+        ffxi_proto::map::c2s::CHAT,
+        size_words,
+        sync,
+    ));
     buf[4] = kind;
 
     buf[6..6 + str_len].copy_from_slice(&str_bytes[..str_len]);

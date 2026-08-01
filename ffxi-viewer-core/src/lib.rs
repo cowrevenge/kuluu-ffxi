@@ -317,6 +317,13 @@ impl<S: SceneSource + Resource + Component<Mutability = bevy::ecs::component::Mu
 
         #[cfg(not(target_arch = "wasm32"))]
         app.add_systems(
+            PostUpdate,
+            ffxi_actor_render::update_actor_mesh_aabbs
+                .in_set(bevy::camera::visibility::VisibilitySystems::CalculateBounds),
+        );
+
+        #[cfg(not(target_arch = "wasm32"))]
+        app.add_systems(
             Update,
             ffxi_actor_render::update_ffxi_actor_point_lights
                 .after(ffxi_actor_render::update_ffxi_render_actor_lighting)

@@ -5,6 +5,8 @@ use std::fs;
 use std::sync::Arc;
 
 use bevy::asset::RenderAssetUsages;
+use bevy::camera::primitives::Aabb;
+use bevy::camera::visibility::NoAutoAabb;
 use bevy::mesh::{Indices, MeshTag, PrimitiveTopology, VertexAttributeValues};
 use bevy::prelude::*;
 use bevy::tasks::futures_lite::future;
@@ -212,6 +214,7 @@ fn prepare_actor_parts(
                 tint: crate::skinned_ffxi_material::t_factor_tint(
                     buffer.render_properties.t_factor,
                 ),
+                joint_aabbs: skel_joint_bounds(buffer, joint_count),
             });
         }
     }
@@ -225,6 +228,7 @@ fn prepare_actor_parts(
             mesh: build_d3m_mesh(d3m),
             texture_name: d3m.texture_name_str(),
             tint: Vec4::ONE,
+            joint_aabbs: d3m_joint_bounds(d3m),
         });
     }
 
@@ -616,6 +620,8 @@ struct BuiltGroup {
     // (SkeletonMeshSection.kt:216); translucency/glow comes from the particle
     // stream, never the static mesh.
     tint: Vec4,
+
+    joint_aabbs: Arc<[JointLocalAabb]>,
 }
 
 fn clamp_joint(idx: u16, joint_count: usize) -> u32 {
@@ -625,6 +631,102 @@ fn clamp_joint(idx: u16, joint_count: usize) -> u32 {
     } else {
         0
     }
+}
+
+// Influences below JOINT_WEIGHT_EPS are skipped (the weight-pre-scaled p0/p1
+// cannot be divided by ~0); a skipped term shifts the skinned position by at
+// most EPS * the actor's extent, which ACTOR_AABB_MARGIN absorbs.
+const JOINT_WEIGHT_EPS: f32 = 1e-4;
+const ACTOR_AABB_MARGIN: f32 = 0.05;
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct JointLocalAabb {
+    joint: u32,
+    min: Vec3,
+    max: Vec3,
+}
+
+#[derive(Default)]
+struct JointBoundsAccum(HashMap<u32, (Vec3, Vec3)>);
+
+impl JointBoundsAccum {
+    fn add(&mut self, joint: u32, p: Vec3) {
+        let e = self
+            .0
+            .entry(joint)
+            .or_insert((Vec3::splat(f32::INFINITY), Vec3::splat(f32::NEG_INFINITY)));
+        e.0 = e.0.min(p);
+        e.1 = e.1.max(p);
+    }
+
+    fn finish(self) -> Arc<[JointLocalAabb]> {
+        let mut boxes: Vec<JointLocalAabb> = self
+            .0
+            .into_iter()
+            .map(|(joint, (min, max))| JointLocalAabb { joint, min, max })
+            .collect();
+        boxes.sort_by_key(|b| b.joint);
+        boxes.into()
+    }
+}
+
+// Re-expresses bevy_mesh-0.19.0/src/skinning.rs:120-171 (SkinnedMeshBounds::
+// from_mesh) for the FFXI dual-influence stream: p0/p1 are joint-local
+// positions pre-scaled by their weight (skinned_ffxi.wgsl header), so the
+// weight divides back out to recover the unweighted point each joint box must
+// bound. The skinned position is a convex combination of the two
+// joint-transformed points, so the union of transformed boxes bounds every pose.
+fn skel_joint_bounds(buffer: &MeshBuffer, joint_count: usize) -> Arc<[JointLocalAabb]> {
+    let mut accum = JointBoundsAccum::default();
+    for v in &buffer.vertices {
+        let w0 = v.joint0_weight;
+        let w1 = 1.0 - w0;
+        if w0 > JOINT_WEIGHT_EPS {
+            accum.add(
+                clamp_joint(v.joint_index0, joint_count),
+                Vec3::from(v.p0) / w0,
+            );
+        }
+        if w1 > JOINT_WEIGHT_EPS {
+            accum.add(
+                clamp_joint(v.joint_index1, joint_count),
+                Vec3::from(v.p1) / w1,
+            );
+        }
+    }
+    accum.finish()
+}
+
+fn d3m_joint_bounds(d3m: &D3m) -> Arc<[JointLocalAabb]> {
+    let mut accum = JointBoundsAccum::default();
+    for v in &d3m.vertices {
+        accum.add(0, Vec3::from(v.pos));
+    }
+    accum.finish()
+}
+
+fn entity_aabb_from_joints(
+    joints: &FfxiJointMatrices,
+    joint_aabbs: &[JointLocalAabb],
+) -> Option<Aabb> {
+    let mut lo = Vec3::splat(f32::INFINITY);
+    let mut hi = Vec3::splat(f32::NEG_INFINITY);
+    let mut any = false;
+    for b in joint_aabbs {
+        let Some(m) = joints.matrices.get(b.joint as usize) else {
+            continue;
+        };
+        let center = m.transform_point3((b.min + b.max) * 0.5);
+        let half = (b.max - b.min) * 0.5;
+        let extent = m.x_axis.truncate().abs() * half.x
+            + m.y_axis.truncate().abs() * half.y
+            + m.z_axis.truncate().abs() * half.z;
+        lo = lo.min(center - extent);
+        hi = hi.max(center + extent);
+        any = true;
+    }
+    let margin = Vec3::splat(ACTOR_AABB_MARGIN);
+    any.then(|| Aabb::from_min_max(lo - margin, hi + margin))
 }
 
 fn build_mesh(buffer: &MeshBuffer, joint_count: usize) -> Mesh {
@@ -1045,6 +1147,12 @@ fn insert_auto_run_effects(commands: &mut Commands, actor_root: Entity, loaded: 
 #[derive(Component)]
 pub(crate) struct FfxiActorMeshChild;
 
+#[derive(Component)]
+pub(crate) struct ActorMeshJointBounds {
+    skin_slot: u32,
+    joint_aabbs: Arc<[JointLocalAabb]>,
+}
+
 #[allow(clippy::too_many_arguments)]
 fn build_actor_children(
     commands: &mut Commands,
@@ -1110,15 +1218,27 @@ fn build_actor_children(
         });
         instance_slots.push(instance_slot);
 
-        commands.spawn((
-            Mesh3d(mesh_handle.clone()),
-            MeshMaterial3d(mat),
-            MeshTag(instance_slot),
-            FfxiInstanceSlot(instance_slot),
-            Transform::default(),
-            FfxiActorMeshChild,
-            ChildOf(actor_root),
-        ));
+        let child = commands
+            .spawn((
+                Mesh3d(mesh_handle.clone()),
+                MeshMaterial3d(mat),
+                MeshTag(instance_slot),
+                FfxiInstanceSlot(instance_slot),
+                Transform::default(),
+                FfxiActorMeshChild,
+                ChildOf(actor_root),
+            ))
+            .id();
+        if let Some(aabb) = entity_aabb_from_joints(&parts.bind_joints, &built.joint_aabbs) {
+            commands.entity(child).insert((
+                aabb,
+                ActorMeshJointBounds {
+                    skin_slot,
+                    joint_aabbs: Arc::clone(&built.joint_aabbs),
+                },
+                NoAutoAabb,
+            ));
+        }
     }
 
     instance_slots
@@ -1173,6 +1293,23 @@ pub(crate) fn apply_character_shadow_cast(
             }
         }
     }
+}
+
+// Mirrors bevy_camera-0.19.0/src/visibility/mod.rs:594-625
+// (update_skinned_mesh_bounds), which cannot see the MeshTag/storage-buffer
+// skinning path; registered in VisibilitySystems::CalculateBounds so
+// CheckVisibility frustum-culls posed actors instead of drawing every submesh.
+pub(crate) fn update_actor_mesh_aabbs(
+    registry: Res<FfxiSkinRegistry>,
+    mut q: Query<(&mut Aabb, &ActorMeshJointBounds)>,
+) {
+    q.par_iter_mut().for_each(|(mut aabb, bounds)| {
+        if let Some(next) =
+            entity_aabb_from_joints(&registry.skin(bounds.skin_slot).joints, &bounds.joint_aabbs)
+        {
+            *aabb = next;
+        }
+    });
 }
 
 fn make_render_actor(
@@ -2808,6 +2945,7 @@ mod mesh_dedup_tests {
                 ),
                 texture_name: String::new(),
                 tint: Vec4::ONE,
+                joint_aabbs: Vec::new().into(),
             })
             .collect();
         Arc::new(PreparedActor {
@@ -3257,5 +3395,179 @@ mod pose_resolution_tests {
             ids.contains(&"at00".to_string()) && ids.contains(&"at01".to_string()),
             "swing resolves to at00+at01 (got {ids:?})"
         );
+    }
+}
+
+#[cfg(test)]
+mod actor_bounds_tests {
+    use super::*;
+    use ffxi_dat::skel_mesh::{RenderProperties, SkinVertex};
+
+    fn synth_vertex(q0: Vec3, q1: Vec3, w: f32, j0: u16, j1: u16) -> SkinVertex {
+        SkinVertex {
+            p0: (q0 * w).to_array(),
+            p1: (q1 * (1.0 - w)).to_array(),
+            n0: [0.0; 3],
+            n1: [0.0; 3],
+            u: 0.0,
+            v: 0.0,
+            joint0_weight: w,
+            joint1_weight: 1.0 - w,
+            joint_index0: j0,
+            joint_index1: j1,
+            color: [255; 4],
+        }
+    }
+
+    fn synth_buffer(samples: &[(Vec3, Vec3, f32, u16, u16)]) -> MeshBuffer {
+        MeshBuffer {
+            mesh_type: MeshType::Mesh,
+            texture_name: String::new(),
+            render_properties: RenderProperties::default(),
+            vertices: samples
+                .iter()
+                .map(|&(q0, q1, w, j0, j1)| synth_vertex(q0, q1, w, j0, j1))
+                .collect(),
+        }
+    }
+
+    const SAMPLES: [(Vec3, Vec3, f32, u16, u16); 4] = [
+        (
+            Vec3::new(0.1, 0.5, -0.2),
+            Vec3::new(0.3, -0.1, 0.4),
+            0.75,
+            0,
+            1,
+        ),
+        (
+            Vec3::new(-0.4, 0.2, 0.6),
+            Vec3::new(0.0, 0.9, -0.3),
+            0.5,
+            1,
+            2,
+        ),
+        (Vec3::new(0.2, -0.6, 0.1), Vec3::ZERO, 1.0, 2, 0),
+        (
+            Vec3::new(0.05, 0.0, 0.35),
+            Vec3::new(-0.25, 0.15, 0.0),
+            0.25,
+            0,
+            2,
+        ),
+    ];
+
+    #[test]
+    fn built_meshes_have_no_builtin_position_attribute() {
+        let mesh = build_mesh(&synth_buffer(&SAMPLES), 3);
+        assert!(
+            mesh.attribute(Mesh::ATTRIBUTE_POSITION).is_none(),
+            "actor meshes must not gain ATTRIBUTE_POSITION: calculate_bounds would \
+             start writing bind-space Aabbs and silently flip the culling semantics \
+             the manual joint-bounds path owns"
+        );
+        assert!(mesh.attribute(ATTR_POSITION0).is_some());
+    }
+
+    #[test]
+    fn skinned_positions_lie_inside_joint_bound_union() {
+        let bounds = skel_joint_bounds(&synth_buffer(&SAMPLES), 3);
+
+        let mut joints = FfxiJointMatrices::default();
+        joints.matrices[0] = Mat4::from_scale_rotation_translation(
+            Vec3::splat(1.2),
+            Quat::from_rotation_y(0.7),
+            Vec3::new(0.3, 1.1, -0.2),
+        );
+        joints.matrices[1] =
+            Mat4::from_rotation_translation(Quat::from_rotation_x(-0.4), Vec3::new(-0.5, 0.8, 0.6));
+        joints.matrices[2] =
+            Mat4::from_rotation_translation(Quat::from_rotation_z(1.9), Vec3::new(0.0, 0.4, 1.3));
+
+        let aabb = entity_aabb_from_joints(&joints, &bounds).expect("bounds from skinned verts");
+        let lo = Vec3::from(aabb.min());
+        let hi = Vec3::from(aabb.max());
+        for &(q0, q1, w, j0, j1) in &SAMPLES {
+            let m0 = joints.matrices[j0 as usize];
+            let m1 = joints.matrices[j1 as usize];
+            let p = (m0 * (q0 * w).extend(w) + m1 * (q1 * (1.0 - w)).extend(1.0 - w)).truncate();
+            assert!(
+                p.cmpge(lo).all() && p.cmple(hi).all(),
+                "skinned position {p} escapes the joint-bound union [{lo}, {hi}]"
+            );
+        }
+    }
+
+    #[test]
+    fn actor_children_spawn_with_manual_aabbs() {
+        let mut world = World::new();
+        let mut meshes = Assets::<Mesh>::default();
+        let mut materials = Assets::<FfxiSkinnedMaterial>::default();
+        let mut cache = FfxiSkinnedMaterialCache::default();
+        let mut registry = FfxiSkinRegistry::default();
+        let mut images = Assets::<Image>::default();
+
+        let loaded = LoadedActor {
+            skeleton: Arc::new(Skeleton {
+                id: DatId::from_str("0000"),
+                joints: Vec::new(),
+                references: Vec::new(),
+                bounding_boxes: Vec::new(),
+            }),
+            skel_meshes: Vec::new(),
+            effect_meshes: Vec::new(),
+            textures: Vec::new(),
+            animations: Arc::new(Vec::new()),
+            battle_clips: Arc::new(Vec::new()),
+            routines: Arc::new(HashMap::new()),
+            action_assets: Arc::new(crate::scheduler_runtime::ActionAssets::default()),
+        };
+        let buffer = synth_buffer(&SAMPLES);
+        let parts = PreparedParts {
+            images: Vec::new(),
+            skel_built: vec![BuiltGroup {
+                mesh: build_mesh(&buffer, 3),
+                texture_name: String::new(),
+                tint: Vec4::ONE,
+                joint_aabbs: skel_joint_bounds(&buffer, 3),
+            }],
+            d3m_built: Vec::new(),
+            bind_joints: FfxiJointMatrices::default(),
+        };
+        let mesh_handles = add_part_meshes(&parts, &mut meshes);
+        let skin_slot = registry.alloc_skin();
+
+        let mut state: bevy::ecs::system::SystemState<Commands> =
+            bevy::ecs::system::SystemState::new(&mut world);
+        let mut commands = state.get_mut(&mut world).expect("commands param");
+        let root = commands.spawn_empty().id();
+        build_actor_children(
+            &mut commands,
+            &mesh_handles,
+            &mut materials,
+            &mut cache,
+            &mut registry,
+            &mut images,
+            &loaded,
+            &parts,
+            root,
+            skin_slot,
+        );
+        state.apply(&mut world);
+
+        let mut q = world.query_filtered::<(Option<&Aabb>, Option<&ActorMeshJointBounds>), With<FfxiActorMeshChild>>();
+        let children: Vec<_> = q.iter(&world).collect();
+        assert!(!children.is_empty(), "spawn must produce submesh children");
+        for (aabb, bounds) in children {
+            assert!(
+                aabb.is_some(),
+                "actor submesh children must carry an Aabb or every submesh is drawn \
+                 in the main pass, prepass, and each shadow cascade regardless of frustum"
+            );
+            assert!(
+                bounds.is_some(),
+                "actor submesh children must carry ActorMeshJointBounds so \
+                 update_actor_mesh_aabbs keeps the Aabb tracking the pose"
+            );
+        }
     }
 }

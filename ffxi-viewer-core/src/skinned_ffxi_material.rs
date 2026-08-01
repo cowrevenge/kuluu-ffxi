@@ -246,6 +246,10 @@ impl FfxiSkinRegistry {
         }
     }
 
+    pub fn skin(&self, slot: u32) -> &FfxiSkin {
+        &self.skins[slot as usize]
+    }
+
     pub fn skin_mut(&mut self, slot: u32) -> &mut FfxiSkin {
         &mut self.skins[slot as usize]
     }

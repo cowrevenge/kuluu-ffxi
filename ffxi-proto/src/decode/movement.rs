@@ -54,7 +54,7 @@ pub struct ForcedMove {
 }
 
 impl ForcedMove {
-    pub const SIZE: usize = 24;
+    pub(crate) const SIZE: usize = 24;
 
     pub fn decode(body: &[u8]) -> Result<Self, DecodeError> {
         if body.len() < Self::SIZE {

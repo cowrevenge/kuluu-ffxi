@@ -19,7 +19,7 @@ pub struct WidescanEntry {
 }
 
 impl WidescanEntry {
-    pub const SIZE: usize = 24;
+    pub(crate) const SIZE: usize = 24;
 
     /// Type occupies 3 bits of the packed u32 (0x0f4_tracking_list.h Type:3).
     const TYPE_MASK: u32 = 0x07;
@@ -60,7 +60,7 @@ pub struct WidescanPos {
 }
 
 impl WidescanPos {
-    pub const SIZE: usize = 17;
+    pub(crate) const SIZE: usize = 17;
 
     pub fn decode(body: &[u8]) -> Result<Self, DecodeError> {
         if body.len() < Self::SIZE {
@@ -87,7 +87,7 @@ pub struct WidescanState {
 }
 
 impl WidescanState {
-    pub const SIZE: usize = 1;
+    pub(crate) const SIZE: usize = 1;
 
     pub fn decode(body: &[u8]) -> Result<Self, DecodeError> {
         if body.len() < Self::SIZE {

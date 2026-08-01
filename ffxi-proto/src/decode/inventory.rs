@@ -9,7 +9,7 @@ impl ItemMax {
     /// One capacity per LSB CONTAINER_ID (LOC_INVENTORY..=LOC_RECYCLEBIN),
     /// vendor/server/src/map/item_container.h:32-49.
     pub const CONTAINER_COUNT: usize = 18;
-    pub const SIZE: usize = 96;
+    pub(crate) const SIZE: usize = 96;
     pub fn decode(body: &[u8]) -> Result<Self, DecodeError> {
         if body.len() < Self::SIZE {
             return Err(DecodeError::Truncated(Self::SIZE, body.len()));
@@ -50,7 +50,7 @@ pub struct ItemSame {
 }
 
 impl ItemSame {
-    pub const SIZE: usize = 8;
+    pub(crate) const SIZE: usize = 8;
     pub fn decode(body: &[u8]) -> Result<Self, DecodeError> {
         if body.len() < Self::SIZE {
             return Err(DecodeError::Truncated(Self::SIZE, body.len()));
@@ -77,7 +77,7 @@ pub struct ItemNum {
 }
 
 impl ItemNum {
-    pub const SIZE: usize = 8;
+    pub(crate) const SIZE: usize = 8;
     pub fn decode(body: &[u8]) -> Result<Self, DecodeError> {
         if body.len() < Self::SIZE {
             return Err(DecodeError::Truncated(Self::SIZE, body.len()));
@@ -102,7 +102,7 @@ pub struct ItemList {
 }
 
 impl ItemList {
-    pub const SIZE: usize = 12;
+    pub(crate) const SIZE: usize = 12;
     pub fn decode(body: &[u8]) -> Result<Self, DecodeError> {
         if body.len() < Self::SIZE {
             return Err(DecodeError::Truncated(Self::SIZE, body.len()));
@@ -147,16 +147,16 @@ pub struct ChargeInfo {
 /// vendor/server/src/map/packets/s2c/0x020_item_attr.cpp:47-82.
 mod extdata {
     use core::ops::Range;
-    pub const HEADER_CHARGED: u8 = 0x01;
-    pub const OFF_HEADER: usize = 0;
-    pub const OFF_CHARGES: usize = 1;
-    pub const OFF_FLAGS_HI: usize = 3;
-    pub const NEXT_USE: Range<usize> = 4..8;
-    pub const FLAG_READY: u8 = 0x40;
+    pub(crate) const HEADER_CHARGED: u8 = 0x01;
+    pub(crate) const OFF_HEADER: usize = 0;
+    pub(crate) const OFF_CHARGES: usize = 1;
+    pub(crate) const OFF_FLAGS_HI: usize = 3;
+    pub(crate) const NEXT_USE: Range<usize> = 4..8;
+    pub(crate) const FLAG_READY: u8 = 0x40;
 }
 
 impl ItemAttr {
-    pub const SIZE: usize = 37;
+    pub(crate) const SIZE: usize = 37;
     pub fn decode(body: &[u8]) -> Result<Self, DecodeError> {
         if body.len() < Self::SIZE {
             return Err(DecodeError::Truncated(Self::SIZE, body.len()));
@@ -200,7 +200,7 @@ pub struct EquipList {
 }
 
 impl EquipList {
-    pub const SIZE: usize = 4;
+    pub(crate) const SIZE: usize = 4;
     pub fn decode(body: &[u8]) -> Result<Self, DecodeError> {
         if body.len() < Self::SIZE {
             return Err(DecodeError::Truncated(Self::SIZE, body.len()));

@@ -8,7 +8,7 @@ pub struct SystemMessage {
 }
 
 impl SystemMessage {
-    pub const SIZE: usize = 12;
+    pub(crate) const SIZE: usize = 12;
 
     pub fn decode(body: &[u8]) -> Result<Self, DecodeError> {
         if body.len() < Self::SIZE {
@@ -38,7 +38,7 @@ pub struct TalkNumWork {
 }
 
 impl TalkNumWork {
-    pub const NUM_COUNT: usize = 4;
+    pub(crate) const NUM_COUNT: usize = 4;
     pub const NAME_LEN: usize = 32;
     pub const SIZE: usize = 4 + Self::NUM_COUNT * 4 + 2 + 2 + 1 + 1 + Self::NAME_LEN;
     /// Added to MesNum when the sender is a PC and ShowName is false — the

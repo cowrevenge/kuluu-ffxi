@@ -5,12 +5,12 @@ pub struct MagicData<'a> {
     pub bitmap: &'a [u8; MAGIC_DATA_SIZE],
 }
 
-pub const MAGIC_DATA_SIZE: usize = 128;
+pub(crate) const MAGIC_DATA_SIZE: usize = 128;
 
 impl<'a> MagicData<'a> {
-    pub const SIZE: usize = MAGIC_DATA_SIZE;
+    pub(crate) const SIZE: usize = MAGIC_DATA_SIZE;
 
-    pub const SPELL_ID_LIMIT: usize = Self::SIZE * 8;
+    pub(crate) const SPELL_ID_LIMIT: usize = Self::SIZE * 8;
     pub fn decode(body: &'a [u8]) -> Result<Self, DecodeError> {
         if body.len() < Self::SIZE {
             return Err(DecodeError::Truncated(Self::SIZE, body.len()));
@@ -40,7 +40,7 @@ pub struct CommandData<'a> {
 }
 
 impl<'a> CommandData<'a> {
-    pub const SIZE: usize = 64 + 64 + 64 + 32;
+    pub(crate) const SIZE: usize = 64 + 64 + 64 + 32;
     pub fn decode(body: &'a [u8]) -> Result<Self, DecodeError> {
         if body.len() < Self::SIZE {
             return Err(DecodeError::Truncated(Self::SIZE, body.len()));

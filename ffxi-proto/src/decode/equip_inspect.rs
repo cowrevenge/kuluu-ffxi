@@ -7,9 +7,9 @@ use super::*;
 // Offsets are into the subpacket body (4-byte GP_SERV_HEADER stripped).
 
 // vendor/server/src/map/packets/s2c/0x0c9_equip_inspect_general.cpp:33
-pub const EQUIP_INSPECT_OPTION_GENERAL: u8 = 0x01;
+pub(crate) const EQUIP_INSPECT_OPTION_GENERAL: u8 = 0x01;
 // vendor/server/src/map/packets/s2c/0x0c9_equip_inspect_equipment.cpp:37
-pub const EQUIP_INSPECT_OPTION_EQUIPMENT: u8 = 0x03;
+pub(crate) const EQUIP_INSPECT_OPTION_EQUIPMENT: u8 = 0x03;
 
 const EQUIP_INSPECT_OPTION_FLAG_OFFSET: usize = 6;
 
@@ -56,7 +56,7 @@ pub struct EquipInspectGeneral {
 }
 
 impl EquipInspectGeneral {
-    pub const LS_NAME_LEN: usize = 16;
+    pub(crate) const LS_NAME_LEN: usize = 16;
     const UNIQUE_NO_OFFSET: usize = 0;
     const ACT_INDEX_OFFSET: usize = 4;
     const LS_ITEM_NO_OFFSET: usize = 10;
@@ -67,7 +67,7 @@ impl EquipInspectGeneral {
     const MJOB_OFFSET: usize = 34;
     const MLVL_OFFSET: usize = 35;
     const MFLAGS_OFFSET: usize = 36;
-    pub const SIZE: usize = Self::MFLAGS_OFFSET + 1;
+    pub(crate) const SIZE: usize = Self::MFLAGS_OFFSET + 1;
 
     pub fn decode(body: &[u8]) -> Result<Self, DecodeError> {
         if body.len() < Self::SIZE {
@@ -117,7 +117,7 @@ pub struct EquipInspectEquipment {
 }
 
 impl EquipInspectEquipment {
-    pub const MAX_ITEMS: usize = 8;
+    pub(crate) const MAX_ITEMS: usize = 8;
     // SAVE_EQUIP_KIND_END, 0x0c9_equip_inspect_equipment.h:46
     pub const SLOT_COUNT: usize = 16;
     const UNIQUE_NO_OFFSET: usize = 0;
@@ -125,7 +125,7 @@ impl EquipInspectEquipment {
     const EQUIP_COUNT_OFFSET: usize = 7;
     const ITEMS_OFFSET: usize = 8;
     // sizeof checkitem_t: ItemNo u16 + EquipKind u8 + padding03 u8 + Data[24]
-    pub const ITEM_STRIDE: usize = 28;
+    pub(crate) const ITEM_STRIDE: usize = 28;
     const ITEM_NO_OFFSET: usize = 0;
     const ITEM_EQUIP_KIND_OFFSET: usize = 2;
 

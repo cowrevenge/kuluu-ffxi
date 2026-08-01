@@ -27,7 +27,7 @@ pub struct FishPacket {
 }
 
 impl FishPacket {
-    pub const SIZE: usize = 20;
+    pub(crate) const SIZE: usize = 20;
 
     pub fn decode(body: &[u8]) -> Result<Self, DecodeError> {
         if body.len() < Self::SIZE {

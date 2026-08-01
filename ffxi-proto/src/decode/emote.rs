@@ -21,17 +21,17 @@ pub struct MotionMes {
 }
 
 impl MotionMes {
-    pub const CAS_UNIQUE_NO_OFFSET: usize = 0;
-    pub const TAR_UNIQUE_NO_OFFSET: usize = 4;
-    pub const CAS_ACT_INDEX_OFFSET: usize = 8;
-    pub const TAR_ACT_INDEX_OFFSET: usize = 10;
-    pub const MES_NUM_OFFSET: usize = 12;
-    pub const PARAM_OFFSET: usize = 14;
-    pub const MODE_OFFSET: usize = 18;
-    pub const FAITH_UNIQUE_NO_OFFSET: usize = 20;
-    pub const FAITH_ACT_INDEX_OFFSET: usize = 40;
-    pub const FAITH_COUNT: usize = 5;
-    pub const MIN_LEN: usize = 52;
+    pub(crate) const CAS_UNIQUE_NO_OFFSET: usize = 0;
+    pub(crate) const TAR_UNIQUE_NO_OFFSET: usize = 4;
+    pub(crate) const CAS_ACT_INDEX_OFFSET: usize = 8;
+    pub(crate) const TAR_ACT_INDEX_OFFSET: usize = 10;
+    pub(crate) const MES_NUM_OFFSET: usize = 12;
+    pub(crate) const PARAM_OFFSET: usize = 14;
+    pub(crate) const MODE_OFFSET: usize = 18;
+    pub(crate) const FAITH_UNIQUE_NO_OFFSET: usize = 20;
+    pub(crate) const FAITH_ACT_INDEX_OFFSET: usize = 40;
+    pub(crate) const FAITH_COUNT: usize = 5;
+    pub(crate) const MIN_LEN: usize = 52;
 
     pub fn decode(body: &[u8]) -> Result<Self, DecodeError> {
         if body.len() < Self::MIN_LEN {
@@ -74,9 +74,9 @@ pub struct EmoteList {
 }
 
 impl EmoteList {
-    pub const JOB_BITS_OFFSET: usize = 0;
-    pub const CHAIR_BITS_OFFSET: usize = 4;
-    pub const MIN_LEN: usize = 6;
+    pub(crate) const JOB_BITS_OFFSET: usize = 0;
+    pub(crate) const CHAIR_BITS_OFFSET: usize = 4;
+    pub(crate) const MIN_LEN: usize = 6;
 
     pub fn decode(body: &[u8]) -> Result<Self, DecodeError> {
         if body.len() < Self::MIN_LEN {

@@ -33,9 +33,9 @@ pub struct PbxResult {
 
 impl PbxResult {
     /// setSize(0x14) minus the 4-byte subpacket header (0x04b_pbx_result.cpp:31).
-    pub const SHORT_SIZE: usize = 16;
+    pub(crate) const SHORT_SIZE: usize = 16;
     /// setSize(0x58) minus the header (0x04b_pbx_result.cpp:67).
-    pub const FULL_SIZE: usize = 84;
+    pub(crate) const FULL_SIZE: usize = 84;
 
     pub fn decode(body: &[u8]) -> Result<Self, DecodeError> {
         if body.len() < Self::SHORT_SIZE {

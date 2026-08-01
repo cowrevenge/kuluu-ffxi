@@ -23,15 +23,15 @@ pub struct CharStatus {
 }
 
 impl CharStatus {
-    pub const UNIQUE_NO_OFFSET: usize = 0x20;
-    pub const FLAGS0_OFFSET: usize = 0x24;
-    pub const SPEED_OFFSET: usize = 0x28;
-    pub const SERVER_STATUS_OFFSET: usize = 0x2C;
-    pub const DEAD_COUNTER1_OFFSET: usize = 0x38;
-    pub const DEAD_COUNTER2_OFFSET: usize = 0x3C;
-    pub const FISHING_TIMER_OFFSET: usize = 0x46;
-    pub const SPEED_MASK: u16 = 0x0FFF;
-    pub const MIN_LEN: usize = Self::DEAD_COUNTER2_OFFSET + 4;
+    pub(crate) const UNIQUE_NO_OFFSET: usize = 0x20;
+    pub(crate) const FLAGS0_OFFSET: usize = 0x24;
+    pub(crate) const SPEED_OFFSET: usize = 0x28;
+    pub(crate) const SERVER_STATUS_OFFSET: usize = 0x2C;
+    pub(crate) const DEAD_COUNTER1_OFFSET: usize = 0x38;
+    pub(crate) const DEAD_COUNTER2_OFFSET: usize = 0x3C;
+    pub(crate) const FISHING_TIMER_OFFSET: usize = 0x46;
+    pub(crate) const SPEED_MASK: u16 = 0x0FFF;
+    pub(crate) const MIN_LEN: usize = Self::DEAD_COUNTER2_OFFSET + 4;
 
     pub fn decode(body: &[u8]) -> Result<Self, DecodeError> {
         let need = Self::MIN_LEN;
@@ -157,14 +157,14 @@ impl JobInfo {
     /// MAX_JOBTYPE, vendor/server/src/map/entities/battleentity.h (JOBTYPE 1=WAR..23=MON).
     pub const MAX_JOBTYPE: usize = 24;
 
-    pub const MJOB_NO_OFFSET: usize = 0x04;
-    pub const SJOB_NO_OFFSET: usize = 0x07;
-    pub const UNLOCKED_OFFSET: usize = 0x08;
-    pub const HP_MAX_OFFSET: usize = 0x38;
-    pub const MP_MAX_OFFSET: usize = 0x3C;
-    pub const SJOBFLG_OFFSET: usize = 0x40;
-    pub const JOB_LEVELS_OFFSET: usize = 0x44;
-    pub const MIN_LEN: usize = Self::JOB_LEVELS_OFFSET + Self::MAX_JOBTYPE;
+    pub(crate) const MJOB_NO_OFFSET: usize = 0x04;
+    pub(crate) const SJOB_NO_OFFSET: usize = 0x07;
+    pub(crate) const UNLOCKED_OFFSET: usize = 0x08;
+    pub(crate) const HP_MAX_OFFSET: usize = 0x38;
+    pub(crate) const MP_MAX_OFFSET: usize = 0x3C;
+    pub(crate) const SJOBFLG_OFFSET: usize = 0x40;
+    pub(crate) const JOB_LEVELS_OFFSET: usize = 0x44;
+    pub(crate) const MIN_LEN: usize = Self::JOB_LEVELS_OFFSET + Self::MAX_JOBTYPE;
 
     pub fn decode(body: &[u8]) -> Result<Self, DecodeError> {
         if body.len() < Self::MIN_LEN {

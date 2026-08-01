@@ -33,9 +33,9 @@ pub struct PosHead {
 }
 
 impl PosHead {
-    pub const SIZE: usize = 40;
+    pub(crate) const SIZE: usize = 40;
 
-    pub const SIZE_WITH_BT_TARGET: usize = 44;
+    pub(crate) const SIZE_WITH_BT_TARGET: usize = 44;
 
     pub fn decode(body: &[u8]) -> Result<Self, DecodeError> {
         if body.len() < Self::SIZE {
@@ -82,7 +82,7 @@ impl PosHead {
         Ok((head, head.bt_target_id))
     }
 
-    pub const UPDATE_DESPAWN: u8 = 0x20;
+    pub(crate) const UPDATE_DESPAWN: u8 = 0x20;
 
     pub fn is_entity_despawn(opcode: u16, body: &[u8]) -> bool {
         use crate::map::s2c;
@@ -159,7 +159,7 @@ pub enum LookData {
 }
 
 impl LookData {
-    pub const LOOK_BODY_OFFSET: usize = 0x2C;
+    pub(crate) const LOOK_BODY_OFFSET: usize = 0x2C;
 
     pub fn decode_char_npc(body: &[u8]) -> Option<Self> {
         let off = Self::LOOK_BODY_OFFSET;
@@ -247,9 +247,9 @@ pub struct NpcState {
 }
 
 impl NpcState {
-    pub const ANIMATION_OFFSET: usize = 0x1B;
-    pub const STATUS_OFFSET: usize = 0x1C;
-    pub const ANIMATIONSUB_OFFSET: usize = 0x26;
+    pub(crate) const ANIMATION_OFFSET: usize = 0x1B;
+    pub(crate) const STATUS_OFFSET: usize = 0x1C;
+    pub(crate) const ANIMATIONSUB_OFFSET: usize = 0x26;
 
     /// Decode the appearance-state bytes from a `CHAR_NPC` (0x0E) body. Returns
     /// `None` if the body is too short to reach `animationsub` (the furthest of
@@ -378,9 +378,9 @@ pub struct CharSync {
 
 impl CharSync {
     pub const SUB_TYPE: u8 = 0x02;
-    pub const SIZE: usize = 8;
+    pub(crate) const SIZE: usize = 8;
 
-    pub const MH_2F_UNLOCKED_OFFSET: usize = 0x23;
+    pub(crate) const MH_2F_UNLOCKED_OFFSET: usize = 0x23;
 
     pub fn decode(body: &[u8]) -> Result<Self, DecodeError> {
         if body.len() < Self::SIZE {
@@ -405,7 +405,7 @@ pub struct EntitySetName {
 impl EntitySetName {
     pub const SUB_TYPE: u8 = 0x03;
 
-    pub const SIZE: usize = 0x14;
+    pub(crate) const SIZE: usize = 0x14;
 
     pub fn decode(body: &[u8]) -> Result<Self, DecodeError> {
         if body.len() < Self::SIZE {
@@ -434,9 +434,9 @@ pub struct PetSync {
 }
 
 impl PetSync {
-    pub const DESPAWN_SIZE: usize = 8;
+    pub(crate) const DESPAWN_SIZE: usize = 8;
 
-    pub const FULL_HEADER_SIZE: usize = 0x14;
+    pub(crate) const FULL_HEADER_SIZE: usize = 0x14;
 
     pub fn decode(body: &[u8]) -> Result<Self, DecodeError> {
         if body.len() < Self::DESPAWN_SIZE {

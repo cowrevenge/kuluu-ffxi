@@ -19,7 +19,7 @@ impl ServerLoginMyroom {
     pub const LOGIN_STATE_GAME: u32 = 2;
 
     /// MyroomMapNumber sentinel "not in a Mog House" (0x00a_login.cpp non-MH branch).
-    pub const MYROOM_NONE: u16 = 0x01FF;
+    pub(crate) const MYROOM_NONE: u16 = 0x01FF;
 
     /// MyroomSubMapNumber value while on the MH second floor (0x00a_login.cpp MH branch).
     pub const SUB_MAP_2F: u8 = 0x02;
@@ -27,14 +27,14 @@ impl ServerLoginMyroom {
     /// LSB reuses LoginState MYROOM + this MyroomMapNumber for ZONE_FERETORY
     /// (Monstrosity), which is not a Mog House server-side
     /// (0x00a_login.cpp:234-239 sets it with no m_moghouseID).
-    pub const MYROOM_FERETORY: u16 = 0x02D9;
+    pub(crate) const MYROOM_FERETORY: u16 = 0x02D9;
 
-    pub const LOGIN_STATE_OFFSET: usize = 0x7C;
-    pub const SUB_MAP_NUMBER_OFFSET: usize = 0xA4;
-    pub const MAP_NUMBER_OFFSET: usize = 0xA6;
-    pub const EXIT_BIT_OFFSET: usize = 0xAA;
-    pub const MOG_ZONE_FLAG_OFFSET: usize = 0xAB;
-    pub const MIN_LEN: usize = Self::MOG_ZONE_FLAG_OFFSET + 1;
+    pub(crate) const LOGIN_STATE_OFFSET: usize = 0x7C;
+    pub(crate) const SUB_MAP_NUMBER_OFFSET: usize = 0xA4;
+    pub(crate) const MAP_NUMBER_OFFSET: usize = 0xA6;
+    pub(crate) const EXIT_BIT_OFFSET: usize = 0xAA;
+    pub(crate) const MOG_ZONE_FLAG_OFFSET: usize = 0xAB;
+    pub(crate) const MIN_LEN: usize = Self::MOG_ZONE_FLAG_OFFSET + 1;
 
     fn decode(body: &[u8]) -> Option<Self> {
         if body.len() < Self::MIN_LEN {
@@ -103,23 +103,23 @@ pub struct ZoneInEvent {
 }
 
 impl ServerLogin {
-    pub const SIZE: usize = 48;
+    pub(crate) const SIZE: usize = 48;
 
-    pub const MUSIC_NUM_OFFSET: usize = 0x52;
-    pub const MUSIC_NUM_SIZE: usize = 5 * 2;
+    pub(crate) const MUSIC_NUM_OFFSET: usize = 0x52;
+    pub(crate) const MUSIC_NUM_SIZE: usize = 5 * 2;
 
-    pub const GAME_TIME_OFFSET: usize = 0x38;
+    pub(crate) const GAME_TIME_OFFSET: usize = 0x38;
 
-    pub const EVENT_NUM_OFFSET: usize = 0x5E;
-    pub const EVENT_PARA_OFFSET: usize = 0x60;
-    pub const EVENT_MODE_OFFSET: usize = 0x62;
+    pub(crate) const EVENT_NUM_OFFSET: usize = 0x5E;
+    pub(crate) const EVENT_PARA_OFFSET: usize = 0x60;
+    pub(crate) const EVENT_MODE_OFFSET: usize = 0x62;
 
     /// `PosHead.server_status` while a zone-in event is pending — the packet's
     /// event fields are only written then, and event id 0 is a real cutscene
     /// (Bastok Markets intro), so presence keys off the status byte
     /// (0x00a_login.cpp:191, ANIMATION_EVENT in
     /// vendor/server/src/map/entities/baseentity.h:66).
-    pub const SERVER_STATUS_EVENT: u8 = 4;
+    pub(crate) const SERVER_STATUS_EVENT: u8 = 4;
 
     pub fn decode(body: &[u8]) -> Result<Self, DecodeError> {
         if body.len() < Self::SIZE {
@@ -191,7 +191,7 @@ pub struct ServerLogout {
 }
 
 impl ServerLogout {
-    pub const SIZE: usize = 24;
+    pub(crate) const SIZE: usize = 24;
 
     pub fn decode(body: &[u8]) -> Result<Self, DecodeError> {
         if body.len() < Self::SIZE {

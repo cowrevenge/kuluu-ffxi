@@ -9,7 +9,7 @@ pub struct WeatherPacket {
 }
 
 impl WeatherPacket {
-    pub const SIZE: usize = 8;
+    pub(crate) const SIZE: usize = 8;
 
     pub fn decode(body: &[u8]) -> Result<Self, DecodeError> {
         if body.len() < Self::SIZE {

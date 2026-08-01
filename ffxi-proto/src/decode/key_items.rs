@@ -15,7 +15,7 @@ pub struct ScenarioItem {
 impl ScenarioItem {
     pub const WORDS: usize = 16;
     pub const BITS_PER_TABLE: usize = Self::WORDS * 32;
-    pub const SIZE: usize = Self::WORDS * 4 * 2 + 4;
+    pub(crate) const SIZE: usize = Self::WORDS * 4 * 2 + 4;
     /// vendor/server/src/common/mmo.h:237-246 — keyitems_t holds 8 tables of
     /// 512 bits (global key-item id = table * 512 + bit).
     pub const TABLE_COUNT: usize = 8;

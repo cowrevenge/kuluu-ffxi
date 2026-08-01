@@ -79,13 +79,7 @@ impl PosHead {
 
     pub fn decode_char_npc(body: &[u8]) -> Result<(Self, u32), DecodeError> {
         let head = Self::decode(body)?;
-
-        let claim_id = if body.len() >= Self::SIZE_WITH_BT_TARGET {
-            u32::from_le_bytes(body[40..44].try_into().unwrap())
-        } else {
-            0
-        };
-        Ok((head, claim_id))
+        Ok((head, head.bt_target_id))
     }
 
     pub const UPDATE_DESPAWN: u8 = 0x20;
@@ -131,16 +125,7 @@ impl PosHead {
         } else {
             return None;
         };
-        let n = slot.iter().position(|&b| b == 0).unwrap_or(slot.len());
-
-        if n < 3 {
-            return None;
-        }
-        let name_bytes = &slot[..n];
-        if !name_bytes.iter().all(|&b| (0x20..=0x7E).contains(&b)) {
-            return None;
-        }
-        Some(String::from_utf8_lossy(name_bytes).into_owned())
+        read_name_slot(slot)
     }
 }
 

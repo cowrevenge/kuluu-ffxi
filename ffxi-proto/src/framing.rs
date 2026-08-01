@@ -5,6 +5,13 @@ pub const MD5_TRAILER_SIZE: usize = 16;
 
 pub const MIN_FRAME_SIZE: usize = FFXI_HEADER_SIZE + 4 + MD5_TRAILER_SIZE;
 
+pub const SUBPACKET_OPCODE_MASK: u16 = 0x1FF;
+pub const SUBPACKET_SIZE_WORDS_SHIFT: u32 = 9;
+
+pub fn subpacket_header_word(opcode: u16, size_words: u16) -> u16 {
+    opcode | (size_words << SUBPACKET_SIZE_WORDS_SHIFT)
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Header {
     pub id_and_size: u16,
@@ -48,7 +55,7 @@ impl Header {
     }
 
     pub fn opcode(&self) -> u16 {
-        self.id_and_size & 0x1FF
+        self.id_and_size & SUBPACKET_OPCODE_MASK
     }
 }
 
@@ -259,5 +266,19 @@ mod tests {
         let mut walker = walk_sub_packets(&payload);
         let first = walker.next().unwrap();
         assert!(matches!(first, Err(WalkError::Truncated { .. })));
+    }
+
+    #[test]
+    fn subpacket_header_word_round_trips_through_header_opcode() {
+        for (opcode, size_words) in [(0x00Au16, 19u16), (0x1FFu16, 0x7Fu16), (0x000u16, 0u16)] {
+            let word = subpacket_header_word(opcode, size_words);
+            assert_eq!(word & SUBPACKET_OPCODE_MASK, opcode);
+            assert_eq!(word >> SUBPACKET_SIZE_WORDS_SHIFT, size_words);
+            let h = Header {
+                id_and_size: word,
+                ..Header::default()
+            };
+            assert_eq!(h.opcode(), opcode);
+        }
     }
 }

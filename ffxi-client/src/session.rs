@@ -3593,7 +3593,7 @@ pub async fn run_event_folder(
 }
 
 fn build_subpacket_header(opcode: u16, size_words: u16, sync: u16) -> [u8; 4] {
-    let id_and_size = opcode | (size_words << 9);
+    let id_and_size = framing::subpacket_header_word(opcode, size_words);
     let mut h = [0u8; 4];
     h[0..2].copy_from_slice(&id_and_size.to_le_bytes());
     h[2..4].copy_from_slice(&sync.to_le_bytes());

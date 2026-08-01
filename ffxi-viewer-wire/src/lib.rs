@@ -228,7 +228,7 @@ impl Entity {
     /// interactable: retail sends a Talk (0x01A, action 0x00) on the door's
     /// act_index and the door's onTrigger lua drives open/confirm/zone-change.
     /// LSB gates doors on `look.size == 0x02`
-    /// (vendor/server/src/map/packets/c2s/0x01a_action.cpp:212); size 3/4 decode
+    /// (vendor/server/src/map/packets/c2s/0x01a_action.cpp:213); size 3/4 decode
     /// to `Transport` (elevators/airships), which stay non-interactable.
     pub fn is_door(&self) -> bool {
         matches!(self.look, Some(EntityLook::Door { .. }))
@@ -662,12 +662,15 @@ pub struct InventoryItem {
     #[serde(default)]
     pub locked: bool,
     /// Current charges of a charged (usable/enchanted) item; `None` for
-    /// non-charged items. From item extdata (0x020_item_attr.cpp:50).
+    /// non-charged items. From item extdata
+    /// (vendor/server/src/map/items/exdata/timer_info.h:31-32, memcpy'd at
+    /// 0x020_item_attr.cpp:43).
     #[serde(default)]
     pub charges_remaining: Option<u8>,
     /// Absolute Vana'diel next-use timestamp (Earth seconds since the vanadiel
-    /// epoch); 0 when ready, `None` for non-charged items
-    /// (0x020_item_attr.cpp:63-68).
+    /// epoch), `None` for non-charged items. Not zeroed on the ready path — LSB
+    /// only writes it on cooldown (0x020_item_attr.cpp:57-68) — so gate on
+    /// `ts > now`, not `ts == 0`.
     #[serde(default)]
     pub next_use_vana_ts: Option<u32>,
 }

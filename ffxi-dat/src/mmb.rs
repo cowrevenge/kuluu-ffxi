@@ -362,7 +362,7 @@ fn is_ascii_variant(b: &[u8]) -> bool {
 ///   `polygonOffset(zBias * -1, 1)` (GLDrawer.kt:219, :363).
 /// - depth write: disabled for blended meshes (GLDrawer.kt:198-201, :332-342).
 /// - discard threshold: 0.375 when the zone-mesh *name* starts with `_`
-///   (ZoneMeshSection.kt:118) — i.e. the name-prefix heuristic in
+///   (ZoneMeshSection.kt:119) — i.e. the name-prefix heuristic in
 ///   `dat_mmb.rs::submesh_alpha_mode` is retail-faithful, not a guess.
 ///
 /// NOTE: `vertexBlendEnabled` is NOT in this word. It is the section-level

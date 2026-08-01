@@ -122,6 +122,8 @@ pub struct LoadMmbRequest {
     pub world_transform: Option<Mat4>,
 
     pub water: Option<GenWater>,
+
+    pub lod: Option<crate::dat_mzb::ZoneMeshLod>,
 }
 
 // Animates one generator water sheet's UV scroll. Each sheet owns its material
@@ -172,6 +174,8 @@ impl Plugin for DatOverlayPlugin {
             .init_resource::<crate::dat_mzb::LastAutoLoadedZone>()
             .init_resource::<crate::dat_mzb::DrawDistance>()
             .init_resource::<crate::dat_mzb::MzbCollisionGeometry>()
+            .init_resource::<crate::dat_mzb::ZoneAreaMap>()
+            .init_resource::<crate::dat_mzb::ZoneChunkLightMap>()
             .init_resource::<crate::dat_mzb::LoadMzbInFlight>()
             .init_resource::<crate::dat_mzb::ZoneGeomCache>()
             .init_resource::<crate::dat_mzb::PendingWaterSpawns>()
@@ -196,6 +200,7 @@ impl Plugin for DatOverlayPlugin {
                 Update,
                 (
                     crate::dat_mzb::cull_entities_by_distance,
+                    crate::dat_mzb::select_zone_mmb_lod,
                     crate::dat_mzb::apply_zone_geom_visibility,
                     crate::dat_mzb::scroll_water_uv,
                     scroll_gen_water_uv,
@@ -610,6 +615,9 @@ pub fn process_load_mmb_requests(
                         if is_zone_spawn {
                             e.insert(crate::dat_mzb::AutoMzbOverlay);
                         }
+                        if let Some(lod) = req.lod {
+                            e.insert(lod);
+                        }
                         e.id()
                     }
                 };
@@ -951,6 +959,7 @@ mod tests {
             entity_id: None,
             world_transform: Some(Mat4::from_translation(pos)),
             water: None,
+            lod: None,
         }
     }
 
@@ -962,6 +971,7 @@ mod tests {
             entity_id: Some(7),
             world_transform: None,
             water: None,
+            lod: None,
         }
     }
 

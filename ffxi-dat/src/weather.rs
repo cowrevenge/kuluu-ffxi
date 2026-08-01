@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use crate::{
     chunk::{self, ChunkNode},
     kind::ChunkKind,
+    mzb::AreaResourceId,
     DatError, Result,
 };
 
@@ -286,6 +287,10 @@ impl WeatherSet {
     }
 }
 
+/// One area's environment: the per-weather-type record sets keyed by the
+/// `weat/<type>` DatId subdirectory.
+pub type WeatherSetsByType = HashMap<WeatherTypeId, WeatherSet>;
+
 // research/xim EnvironmentManager.kt:509-515 getAreaEnvironmentDirectories keys
 // the per-weather environment sets by the weather DatId subdirectory under the
 // zone root's `weat` directory; each carries its own per-hour 0x2F record set and
@@ -293,16 +298,40 @@ impl WeatherSet {
 // sort+dedup collapse that loses the weather-type/indoor distinction.
 #[derive(Debug, Clone, Default)]
 pub struct ZoneWeatherSets {
-    pub by_type: HashMap<WeatherTypeId, WeatherSet>,
+    pub by_type: WeatherSetsByType,
 
     // Flat fallback for zones with no `weat` subtree (records harvested by a
     // plain chunk walk + nonblack retain).
     pub flat: Vec<WeatherRecord>,
+
+    /// Per-area environments, keyed by the [`AreaResourceId`] the zone's MZB
+    /// placements bind to (XiArea.cpp:26-38: each area loads its own container,
+    /// found in the zone container under its FourCC). Sibling directories of
+    /// `weat` under the zone root — `ev01`, `ev02`, `subl` — hold the same
+    /// `<type>/<hhmm>` record shape as `weat` itself, and are where retail gets
+    /// the darker, sunless fog and diffuse lights it draws building interiors
+    /// with (ZoneRenderer.cpp:1133-1152).
+    pub by_area: HashMap<AreaResourceId, WeatherSetsByType>,
 }
 
 impl ZoneWeatherSets {
     pub fn is_empty(&self) -> bool {
         self.by_type.is_empty() && self.flat.is_empty()
+    }
+
+    /// The environment retail draws with for `area`.
+    ///
+    /// XiArea.cpp:432-445 (`FindAreaByFourCCAndGetFog`, and the identical
+    /// ambient/diffuse-light accessors): a zero FourCC uses the zone's own area,
+    /// and so does a FourCC that matches no loaded area — `FindAreaByFourCC`
+    /// returns the zone on a miss (XiArea.cpp:880-892). Zones do ship
+    /// placements naming an area with no container (`ent4`, `ex02`), so the
+    /// miss path is load-bearing, not defensive.
+    pub fn area_by_type(&self, area: AreaResourceId) -> &WeatherSetsByType {
+        if area == 0 {
+            return &self.by_type;
+        }
+        self.by_area.get(&area).unwrap_or(&self.by_type)
     }
 }
 
@@ -311,15 +340,17 @@ const INDO_DIR: WeatherTypeId = *b"indo";
 
 pub fn collect_zone_weather_sets(dat_bytes: &[u8]) -> ZoneWeatherSets {
     let tree = chunk::walk_tree(dat_bytes);
-    let mut by_type: HashMap<WeatherTypeId, WeatherSet> = HashMap::new();
+    let mut by_type: WeatherSetsByType = HashMap::new();
+    let mut by_area: HashMap<AreaResourceId, WeatherSetsByType> = HashMap::new();
 
     // The `weat` directory sits under the zone root dir (e.g. f_ro/weat), not at
-    // the file's top level, so we search the whole dir tree for it. The separate
-    // `ev01` event-environment subtree is intentionally skipped: those records
-    // are event-scoped overrides, not the ambient per-weather sets we sample.
-    find_weat_dirs(&tree, &mut by_type);
+    // the file's top level, so we search the whole dir tree for it.
+    find_weat_dirs(&tree, &mut by_type, &mut by_area);
 
-    for set in by_type.values_mut() {
+    for set in by_type
+        .values_mut()
+        .chain(by_area.values_mut().flat_map(|a| a.values_mut()))
+    {
         set.outdoor.sort_by_key(|r| r.time_minutes);
         set.outdoor.dedup_by_key(|r| r.time_minutes);
         set.indoor.sort_by_key(|r| r.time_minutes);
@@ -332,23 +363,54 @@ pub fn collect_zone_weather_sets(dat_bytes: &[u8]) -> ZoneWeatherSets {
         Vec::new()
     };
 
-    ZoneWeatherSets { by_type, flat }
+    ZoneWeatherSets {
+        by_type,
+        flat,
+        by_area,
+    }
 }
 
-fn find_weat_dirs(node: &ChunkNode, by_type: &mut HashMap<WeatherTypeId, WeatherSet>) {
+fn find_weat_dirs(
+    node: &ChunkNode,
+    by_type: &mut WeatherSetsByType,
+    by_area: &mut HashMap<AreaResourceId, WeatherSetsByType>,
+) {
+    // A dir holding `weat` is a zone root, so its *other* dir children are the
+    // area containers retail resolves by FourCC (XiArea.cpp:32-38). Keying off
+    // the `weat` sibling instead of the record shape keeps `weat/suny` — itself
+    // a dir of dirs of 0x2F records, via `indo`/`lf01` — from registering as an
+    // area of its own.
+    let is_zone_root = node
+        .children
+        .iter()
+        .any(|c| c.chunk.kind == 0x01 && c.chunk.name == WEAT_DIR);
+
     for child in &node.children {
         if child.chunk.kind != 0x01 {
             continue;
         }
         if child.chunk.name == WEAT_DIR {
             harvest_weat_dir(child, by_type);
-        } else {
-            find_weat_dirs(child, by_type);
+            continue;
         }
+        if is_zone_root {
+            let mut area: WeatherSetsByType = HashMap::new();
+            harvest_weat_dir(child, &mut area);
+            area.retain(|_, set| !set.is_empty());
+            if !area.is_empty() {
+                by_area
+                    .entry(crate::mzb::area_resource_id_from_dir_name(
+                        &child.chunk.name,
+                    ))
+                    .or_default()
+                    .extend(area);
+            }
+        }
+        find_weat_dirs(child, by_type, by_area);
     }
 }
 
-fn harvest_weat_dir(weat: &ChunkNode, by_type: &mut HashMap<WeatherTypeId, WeatherSet>) {
+fn harvest_weat_dir(weat: &ChunkNode, by_type: &mut WeatherSetsByType) {
     for type_node in &weat.children {
         if type_node.chunk.kind != 0x01 {
             continue;
@@ -477,6 +539,144 @@ fn lerp_records(a: &WeatherRecord, b: &WeatherRecord, t: f32, time_minutes: u32)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const CHUNK_HEADER_LEN: usize = 16;
+    const CHUNK_UNIT: usize = 16;
+    const DIR_KIND: u8 = 0x01;
+    const DIR_END_KIND: u8 = 0x00;
+
+    fn chunk(name: &[u8; 4], kind: u8, body: &[u8]) -> Vec<u8> {
+        let total = CHUNK_HEADER_LEN + body.len();
+        assert_eq!(total % CHUNK_UNIT, 0);
+        let mut out = name.to_vec();
+        out.extend_from_slice(
+            &((kind as u32) | (((total / CHUNK_UNIT) as u32) << 7)).to_le_bytes(),
+        );
+        out.extend_from_slice(&[0u8; 8]);
+        out.extend_from_slice(body);
+        out
+    }
+
+    fn dir(name: &[u8; 4], children: Vec<u8>) -> Vec<u8> {
+        let mut out = chunk(name, DIR_KIND, &[]);
+        out.extend_from_slice(&children);
+        out.extend_from_slice(&chunk(b"end ", DIR_END_KIND, &[]));
+        out
+    }
+
+    fn weather_chunk(time: &[u8; 4], fog_r: u8) -> Vec<u8> {
+        let mut body = [0u8; WEATHER_DATA_SIZE];
+        body[56] = fog_r;
+        chunk(time, ChunkKind::Weather as u8, &body)
+    }
+
+    fn zone_root_with_area() -> Vec<u8> {
+        let zone_weat = dir(
+            b"weat",
+            dir(
+                b"suny",
+                [
+                    weather_chunk(b"0000", 0x10),
+                    dir(b"indo", weather_chunk(b"0000", 0x11)),
+                ]
+                .concat(),
+            ),
+        );
+        let ev01 = dir(b"ev01", dir(b"suny", weather_chunk(b"0000", 0x20)));
+        dir(b"t_sa", [zone_weat, ev01].concat())
+    }
+
+    #[test]
+    fn area_container_beside_weat_becomes_its_own_environment() {
+        let sets = collect_zone_weather_sets(&zone_root_with_area());
+        let ev01 = crate::mzb::area_resource_id_from_dir_name(b"ev01");
+
+        assert_eq!(
+            sets.by_type[b"suny"].outdoor[0].fog_landscape[0],
+            0x10 as f32 / 255.0
+        );
+        assert_eq!(
+            sets.by_type[b"suny"].indoor[0].fog_landscape[0],
+            0x11 as f32 / 255.0
+        );
+        assert_eq!(
+            sets.by_area[&ev01][b"suny"].outdoor[0].fog_landscape[0],
+            0x20 as f32 / 255.0
+        );
+    }
+
+    #[test]
+    fn weather_type_subdirs_do_not_register_as_areas() {
+        // `weat/suny` is itself a directory of directories of 0x2F records (its
+        // `indo` child), so only the `weat` sibling rule keeps it out of by_area.
+        let sets = collect_zone_weather_sets(&zone_root_with_area());
+        let suny = crate::mzb::area_resource_id_from_dir_name(b"suny");
+        assert!(
+            !sets.by_area.contains_key(&suny),
+            "{:?}",
+            sets.by_area.keys()
+        );
+        assert_eq!(sets.by_area.len(), 1);
+    }
+
+    #[test]
+    fn unknown_and_zero_areas_fall_back_to_the_zone_environment() {
+        // XiArea.cpp:434-444: fourCC 0 short-circuits to the zone's own area, and
+        // FindAreaByFourCC returns the zone on a miss — zones ship placements
+        // naming areas with no container (`ent4`, `ex02`).
+        let sets = collect_zone_weather_sets(&zone_root_with_area());
+        let missing = crate::mzb::area_resource_id_from_dir_name(b"ent4");
+
+        assert_eq!(
+            sets.area_by_type(0)[b"suny"].outdoor[0].fog_landscape[0],
+            0x10 as f32 / 255.0
+        );
+        assert_eq!(
+            sets.area_by_type(missing)[b"suny"].outdoor[0].fog_landscape[0],
+            0x10 as f32 / 255.0
+        );
+        assert_eq!(
+            sets.area_by_type(crate::mzb::area_resource_id_from_dir_name(b"ev01"))[b"suny"].outdoor
+                [0]
+            .fog_landscape[0],
+            0x20 as f32 / 255.0
+        );
+    }
+
+    /// Southern San d'Oria: `t_sa/weat` plus the `ev01`/`ev02` interior areas its
+    /// placements bind to. Pins the shipped layout the sibling rule reads, so a
+    /// harvest that quietly stopped finding areas fails here and not only in a
+    /// screenshot.
+    #[test]
+    fn real_zone_dat_area_environments_differ_from_the_zone_when_install_present() {
+        const SOUTHERN_SAN_DORIA: u16 = 230;
+        let Some(root) = crate::archive::open_test_install() else {
+            eprintln!("skipping: no FFXI install");
+            return;
+        };
+        let file_id =
+            crate::zone_dat::effective_zone_dat_file_id(Some(SOUTHERN_SAN_DORIA), None).unwrap();
+        let loc = root.resolve(file_id).unwrap();
+        let bytes = std::fs::read(loc.path_under(root.root())).unwrap();
+        let sets = collect_zone_weather_sets(&bytes);
+
+        let zone_fog = sets.by_type[b"suny"].outdoor[0].fog_landscape;
+        for area in [b"ev01", b"ev02"] {
+            let id = crate::mzb::area_resource_id_from_dir_name(area);
+            let by_type = sets.by_area.get(&id).unwrap_or_else(|| {
+                panic!(
+                    "zone {SOUTHERN_SAN_DORIA} lost area {:?}",
+                    area.escape_ascii()
+                )
+            });
+            assert_ne!(
+                by_type[b"suny"].outdoor[0].fog_landscape,
+                zone_fog,
+                "area {:?} collapsed onto the zone environment",
+                area.escape_ascii()
+            );
+        }
+    }
 
     #[test]
     fn time_name_parses_hhmm_to_minutes() {

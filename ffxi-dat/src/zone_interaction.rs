@@ -28,6 +28,10 @@ const ELEVATOR_TOP_OFFSET: usize = 0x36;
 /// (ZoneInteractionSection.kt:89-90).
 const ELEVATOR_Y_SCALE: f32 = 256.0;
 
+/// Retail scales a rect's local space by `1/size` and accepts the result on
+/// `[-0.5, 0.5]` — see [`ZoneInteraction::contains`].
+const UNIT_BOX_HALF_EXTENT: f32 = 0.5;
+
 /// Mog House residence zone-line tag prefixes, the emitter side of the contract LSB
 /// matches at vendor/server/src/map/packets/c2s/0x05e_maprect.cpp:74-75
 /// ("zmr* classic cities; zms* WoTG [S] + Adoulin").
@@ -82,6 +86,33 @@ impl ZoneInteraction {
         self.is_zone_line()
             && (self.source_id.starts_with(MOG_HOUSE_PREFIX_CLASSIC)
                 || self.source_id.starts_with(MOG_HOUSE_PREFIX_WOTG))
+    }
+
+    /// The sub-area (building interior) this rect activates, `None` when it is not
+    /// a sub-area trigger. `RidManager::InitSubModels`
+    /// (research/XIClient/src/XIClient/source/World/Zone/Triggers/RidManager.cpp:611-647)
+    /// keeps the `m`-prefixed rects whose dest fourcc is non-zero;
+    /// research/cexi-docs/zone/subareas.md:65 names `param` as the id, which the
+    /// retail install confirms — see [`crate::sub_area`].
+    pub fn sub_area_id(&self) -> Option<u32> {
+        (self.is_sub_area() && self.dest_id.is_some() && self.param != 0).then_some(self.param)
+    }
+
+    /// Point-in-box in FFXI zone space. `RidManager::Add`
+    /// (RidManager.cpp:100-122) builds the rect's inverse as
+    /// `T(-position) · RotateY(-orientation.y) · S(1/size)` and the hit checks
+    /// accept the transformed point on `[-0.5, 0.5]` — so only the yaw of
+    /// [`ZoneInteraction::orientation`] shapes the box, and [`ZoneInteraction::size`]
+    /// is its full extent.
+    pub fn contains(&self, p: [f32; 3]) -> bool {
+        let (dx, dy, dz) = (
+            p[0] - self.position[0],
+            p[1] - self.position[1],
+            p[2] - self.position[2],
+        );
+        let (sin, cos) = self.orientation[1].sin_cos();
+        let local = [dx * cos - dz * sin, dy, dx * sin + dz * cos];
+        (0..3).all(|i| (local[i] / self.size[i]).abs() <= UNIT_BOX_HALF_EXTENT)
     }
 
     /// The RectID c2s 0x05E carries and the primary key of LSB zonelines.sql:

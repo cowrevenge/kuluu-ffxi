@@ -10,14 +10,14 @@ pub const SCHEDULER_HEADER_LEN: usize = 64;
 const SECTION_TABLE_OFFSET: usize = 0x10;
 const SECTION2_SLOT: usize = SECTION_TABLE_OFFSET + 4;
 const CHUNK_HEADER_LEN: usize = 0x10;
-// Three section offsets plus `totalDelay` (EffectRoutineParser.kt:46-50).
+// Three section offsets plus `totalDelay` (EffectRoutineParser.kt:43-46).
 const SECTION_TABLE_LEN: usize = 0x10;
 
-// research/xim EffectRoutineParser.kt:65 — `numInputs = (unkCombo and 0x1F) - 1`, counted from
+// research/xim EffectRoutineParser.kt:64 — `numInputs = (unkCombo and 0x1F) - 1`, counted from
 // the dword that carries the opcode, so the stage spans `unkCombo & 0x1F` dwords in total.
 const STAGE_LENGTH_MASK: u16 = 0x1F;
 
-// research/xim EffectRoutineParser.kt:81,96-98 / :275-285.
+// research/xim EffectRoutineParser.kt:79,96-98 / :275-285.
 const END_ROUTINE_OPCODE: u8 = 0x00;
 const RANDOM_BLOCK_OPEN: u8 = 0x3D;
 const RANDOM_BLOCK_CLOSE: u8 = 0x3E;
@@ -147,7 +147,7 @@ impl StageKind {
             0x0A if length_words == SOUND_EMITTER_LENGTH_WORDS => Self::SoundOnCaster,
             0x0A => Self::SubRoutine,
             0x0B => Self::SoundOnTarget,
-            // research/xim EffectRoutineParser.kt:253-258 — StopParticleGeneratorRoutine, id =
+            // research/xim EffectRoutineParser.kt:253-257 — StopParticleGeneratorRoutine, id =
             // the generator DatId to stop (ROM/0/0.DAT `stbk` stops the cast aura's gn10..gn13).
             0x2D => Self::StopParticle,
             // research/xim EffectRoutineParser.kt:219-222 — DamageCallbackRoutine, the stage the
@@ -287,7 +287,7 @@ impl Scheduler {
                 next_group = next_group.saturating_add(1);
             }
             cursor += stage_bytes;
-            // EffectRoutineParser.kt:81 — opcode 0x00 ends the section; section 3 follows it in
+            // EffectRoutineParser.kt:79 — opcode 0x00 ends the section; section 3 follows it in
             // the same chunk and would otherwise be misread as more effect stages.
             if raw_type == END_ROUTINE_OPCODE {
                 break;
@@ -649,7 +649,7 @@ mod tests {
         );
     }
 
-    // research/xim EffectRoutineParser.kt:65 — the stage length is `unkCombo & 0x1F` dwords, so
+    // research/xim EffectRoutineParser.kt:64 — the stage length is `unkCombo & 0x1F` dwords, so
     // the high bits of the u16 must not be read as length.
     #[test]
     fn stage_length_masks_the_high_combo_bits() {

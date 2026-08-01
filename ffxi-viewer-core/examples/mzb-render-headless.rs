@@ -64,6 +64,8 @@ fn main() {
         .add_message::<LoadMmbRequest>()
         .init_resource::<DrawDistance>()
         .init_resource::<MzbCollisionGeometry>()
+        .init_resource::<ffxi_viewer_core::dat_mzb::ZoneAreaMap>()
+        .init_resource::<ffxi_viewer_core::dat_mzb::ZoneChunkLightMap>()
         .init_resource::<LoadMzbInFlight>()
         .init_resource::<ZoneGeomCache>()
         .init_resource::<SceneState>()

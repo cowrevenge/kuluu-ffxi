@@ -41,8 +41,8 @@ pub struct ZoneGlobalLighting(pub FfxiLightingUniform);
 /// xim references:
 /// - ZoneMeshSection.kt:120-123 — blended zone meshes render at
 ///   `ZBiasLevel.High` (1), opaque at `Normal` (0).
-/// - GLDrawer.kt:198-201 — blended meshes disable depth write and apply
-///   `glPolygonOffset(zBias * -1, 1)` to pull decals over the base terrain.
+/// - GLDrawer.kt:198-201 — blended meshes disable depth write; GLDrawer.kt:216-219
+///   applies `glPolygonOffset(zBias * -1, 1)` to pull decals over the base terrain.
 /// - Bit `0x2000` CLEAR enables back-face culling.
 /// - GLDrawer.kt:186 — front face is `CW` (D3D-era winding), flipped to `CCW`
 ///   when the instance is mirrored (`scale.x * scale.y * scale.z < 0`).
@@ -436,7 +436,7 @@ fn update_zone_material_lighting(
     // floored night terrain to ~0.56 and washed the darkness out.)
     const AMBIENT_FLOOR: f32 = 0.12;
 
-    // research/xim EnvironmentSection.kt:163-164: the 0x2F landscape ambient is
+    // research/xim EnvironmentSection.kt:130-131,168: the 0x2F landscape ambient is
     // the authoritative per-hour base (dark at night). Use it directly when the
     // zone ships records; the GlobalAmbientLight amb_k/COLOR_BIAS path is the
     // no-DAT fallback (it re-derives from the atmosphere seed and inflates).

@@ -1,7 +1,7 @@
 #![cfg(not(target_arch = "wasm32"))]
 
 use bevy::prelude::*;
-use ffxi_dat::{chunk::walk, generator::Generator, kind::ChunkKind, DatRoot};
+use ffxi_dat::{chunk::walk, generator::Generator, kind::ChunkKind, mzb, DatRoot};
 use ffxi_viewer_wire::Vec3 as WireVec3;
 
 use crate::components::InGameEntity;
@@ -80,8 +80,18 @@ pub fn lamp_flicker(t: f32, seed: f32) -> f32 {
 // emitter reads like a colour~1 Generator light.
 const EMITTER_MIN_INTENSITY: f32 = 1.0;
 
+/// No Generator chunk defines this light, so no MZB chunk can bind it. Zone
+/// FourCCs are never 0 (`LightID == 0` is retail's empty pool slot,
+/// ZoneRenderer.cpp:260).
+pub const UNAUTHORED_LIGHT_ID: mzb::LightId = 0;
+
 #[derive(Debug, Clone, Copy)]
 pub struct ZonePointLight {
+    /// FourCC of the Generator chunk that defines this light — the `LightID` an
+    /// MZB chunk binding names. [`UNAUTHORED_LIGHT_ID`] for the `/lights`
+    /// emitters, which no zone authors.
+    pub light_id: mzb::LightId,
+
     pub world_pos: Vec3,
 
     pub color: Vec3,
@@ -102,7 +112,8 @@ pub struct ZonePointLights {
 /// Per-frame merge of every dynamic point light that the FFXI custom materials
 /// (zone geometry + skinned actors) consume: the faithful Generator lights and
 /// the `/lights` over-bright vertex emitters, expressed in the shared shader
-/// convention so one nearest-N picker serves both consumers.
+/// convention. The faithful lights come first and keep their `light_id`, so a
+/// chunk's authored binding resolves against this list.
 #[derive(Resource, Default)]
 pub struct ActiveSceneLights {
     pub lights: Vec<ZonePointLight>,
@@ -141,6 +152,7 @@ pub fn build_active_scene_lights(
             1.0
         };
         active.lights.push(ZonePointLight {
+            light_id: l.light_id,
             world_pos: l.world_pos,
             color: l.color * night * flick,
             range,
@@ -156,6 +168,7 @@ pub fn build_active_scene_lights(
         let mag = pl.intensity / FAITHFUL_LIGHT_INTENSITY * night;
         let range = pl.range.max(1e-3) * ZONE_LIGHT_REACH_SCALE;
         active.lights.push(ZonePointLight {
+            light_id: UNAUTHORED_LIGHT_ID,
             world_pos: gt.translation(),
             color: Vec3::new(lin.red, lin.green, lin.blue) * mag,
             range,
@@ -189,11 +202,35 @@ fn pack_point_light_arrays(selected: &[ZonePointLight]) -> PointLightArrays {
     (point_pos, point_color, point_atten)
 }
 
+/// The chunk's authored light slots as indices into `lights`, in binding order.
+///
+/// Retail's chunk binding names a `LightID`, and a slot whose light the zone
+/// never defines is left disabled (ZoneRenderer.cpp:299-300 `managedLight ==
+/// nullptr`), so an unmatched FourCC drops out rather than shifting the rest.
+/// Never yields more than [`mzb::LIGHT_REFERENCE_COUNT`] — retail's four D3D
+/// slots — however many slots the shader uniform carries.
+pub fn authored_point_light_indices(
+    lights: &[ZonePointLight],
+    authored: &[Option<mzb::LightId>; mzb::LIGHT_REFERENCE_COUNT],
+) -> Vec<u32> {
+    authored
+        .iter()
+        .flatten()
+        .filter(|id| **id != UNAUTHORED_LIGHT_ID)
+        .filter_map(|id| {
+            lights
+                .iter()
+                .position(|l| l.light_id == *id)
+                .map(|i| i as u32)
+        })
+        .collect()
+}
+
 /// Pick the `count` nearest in-range lights to `pos` (`count` clamped to
-/// `MAX_POINT_LIGHTS`), as indices into `lights`. Used by the per-actor feed,
-/// where popping is invisible (actors are small and moving); the caller may
-/// cache the selection while the light set and the actor hold still, repacking
-/// live colors per frame via [`point_light_arrays_for`].
+/// `MAX_POINT_LIGHTS`), as indices into `lights`. The fallback for zones that
+/// ship no authored binding table, and for the `/lights` emitters no zone
+/// authors; the caller may cache the selection while the light set and the actor
+/// hold still, repacking live colors per frame via [`point_light_arrays_for`].
 pub fn nearest_point_light_indices(pos: Vec3, lights: &[ZonePointLight], count: usize) -> Vec<u32> {
     let mut in_range: Vec<(f32, u32)> = lights
         .iter()
@@ -263,6 +300,7 @@ fn load_zone_point_lights(scene_state: Res<SceneState>, mut store: ResMut<ZonePo
         };
         let world_pos = mzb_to_bevy(bp);
         store.lights.push(ZonePointLight {
+            light_id: u32::from_le_bytes(c.name),
             world_pos,
             color: Vec3::new(pl.color[0], pl.color[1], pl.color[2]),
             range: pl.range,
@@ -398,12 +436,91 @@ mod tests {
 
     fn light(pos: Vec3, range: f32) -> ZonePointLight {
         ZonePointLight {
+            light_id: UNAUTHORED_LIGHT_ID,
             world_pos: pos,
             color: Vec3::splat(1.0),
             range,
             attenuation: 0.25,
             is_character: false,
         }
+    }
+
+    fn authored_light(id: &[u8; 4], pos: Vec3) -> ZonePointLight {
+        ZonePointLight {
+            light_id: u32::from_le_bytes(*id),
+            ..light(pos, 10.0)
+        }
+    }
+
+    fn slots(ids: &[Option<&[u8; 4]>]) -> [Option<mzb::LightId>; mzb::LIGHT_REFERENCE_COUNT] {
+        let mut out = [None; mzb::LIGHT_REFERENCE_COUNT];
+        for (slot, id) in ids.iter().enumerate() {
+            out[slot] = id.map(|id| u32::from_le_bytes(*id));
+        }
+        out
+    }
+
+    // The binding is by LightID and static per chunk, so the far light stays in
+    // and the near unbound one stays out — the property the distance pick cannot
+    // have.
+    #[test]
+    fn authored_pick_takes_the_chunk_s_lights_not_the_nearest() {
+        let lights = [
+            authored_light(b"li12", Vec3::new(90.0, 0.0, 0.0)),
+            authored_light(b"lt01", Vec3::new(1.0, 0.0, 0.0)),
+            authored_light(b"l421", Vec3::new(40.0, 0.0, 0.0)),
+        ];
+        let picked = authored_point_light_indices(&lights, &slots(&[Some(b"l421"), Some(b"li12")]));
+        assert_eq!(picked, vec![2, 0], "binding order, not distance order");
+        assert_eq!(
+            nearest_point_light_indices(Vec3::ZERO, &lights, 4),
+            vec![1],
+            "the distance pick would have taken the unbound lamp instead"
+        );
+    }
+
+    #[test]
+    fn authored_slot_whose_light_the_zone_never_defines_drops_out() {
+        let lights = [authored_light(b"lt01", Vec3::ZERO)];
+        assert_eq!(
+            authored_point_light_indices(&lights, &slots(&[Some(b"lt09"), Some(b"lt01")])),
+            vec![0],
+            "no Generator defines lt09, so retail leaves that slot disabled"
+        );
+        assert!(authored_point_light_indices(&lights, &slots(&[])).is_empty());
+    }
+
+    // `/lights` emitters carry UNAUTHORED_LIGHT_ID; a chunk binding must never
+    // resolve onto one.
+    #[test]
+    fn emitters_are_never_bound_by_a_chunk() {
+        let lights = [light(Vec3::ZERO, 10.0)];
+        let mut all_slots = [Some(UNAUTHORED_LIGHT_ID); mzb::LIGHT_REFERENCE_COUNT];
+        all_slots[0] = None;
+        assert!(authored_point_light_indices(&lights, &all_slots).is_empty());
+    }
+
+    // kuluu-2dzl: the uniform carries MAX_POINT_LIGHTS slots, retail's chunk
+    // binding four. The authored feed must fit without truncation.
+    #[test]
+    fn authored_slots_fit_the_shader_uniform() {
+        const { assert!(mzb::LIGHT_REFERENCE_COUNT <= MAX_POINT_LIGHTS) };
+        let lights: Vec<ZonePointLight> = [b"li12", b"lt01", b"l421", b"lmb0"]
+            .iter()
+            .map(|id| authored_light(id, Vec3::ZERO))
+            .collect();
+        let picked = authored_point_light_indices(
+            &lights,
+            &slots(&[Some(b"li12"), Some(b"lt01"), Some(b"l421"), Some(b"lmb0")]),
+        );
+        assert_eq!(picked.len(), mzb::LIGHT_REFERENCE_COUNT);
+        let (_, color, _) = point_light_arrays_for(&lights, &picked);
+        assert!(
+            color[..mzb::LIGHT_REFERENCE_COUNT]
+                .iter()
+                .all(|c| c.w > 0.0),
+            "every authored slot reaches the shader"
+        );
     }
 
     #[test]

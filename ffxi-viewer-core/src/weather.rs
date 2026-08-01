@@ -4,10 +4,12 @@ use std::fs;
 use bevy::light::FogVolume;
 use bevy::pbr::{DistanceFog, FogFalloff};
 use bevy::prelude::*;
+use ffxi_dat::mzb::AreaResourceId;
 #[cfg(not(target_arch = "wasm32"))]
 use ffxi_dat::weather::collect_zone_weather_sets;
 use ffxi_dat::weather::{
-    sample_weather, weather_type_id, WeatherRecord, WeatherTypeId, ZoneWeatherSets,
+    sample_weather, weather_type_id, WeatherRecord, WeatherSetsByType, WeatherTypeId,
+    ZoneWeatherSets,
 };
 #[cfg(not(target_arch = "wasm32"))]
 use ffxi_dat::DatRoot;
@@ -31,12 +33,29 @@ pub struct ZoneWeather {
     // we only re-select on change.
     selected: Option<(WeatherTypeId, bool)>,
 
+    /// Area the player stands in, 0 for the zone-wide environment
+    /// (`ffxi_dat::mzb::AreaResourceId`).
+    pub area: AreaResourceId,
+
+    // `records` for `area`. Identical to `records` while the player is in the
+    // zone-wide environment or an area the DAT ships no container for.
+    area_records: Vec<WeatherRecord>,
+    area_selected: Option<(WeatherTypeId, bool, AreaResourceId)>,
+
     pub file_id: Option<u32>,
 
     // research/xim EnvironmentManager.kt:399-451: one interpolated env source per
     // frame; skybox/lighting/sun_moon all read this instead of independently
     // re-sampling (was the skybox/lighting drift).
     pub current: Option<WeatherRecord>,
+
+    /// The record retail draws the *actor's* distance fog from — its own area's,
+    /// not the zone's (SkeletalMeshActor.cpp:2749
+    /// `FindAreaByFourCCAndGetFog(..., VirtActor88())`). Everything else on this
+    /// resource stays zone-wide: the sky dome, the celestial arc and the far
+    /// color are set from the zone's weather condition (XiArea.cpp:126-136
+    /// `ApplyWeatherCondition` -> `SetFarColor`), not from the block underfoot.
+    pub area_current: Option<WeatherRecord>,
 }
 
 // Fallback chain shared by the 0x2F record selection and the celestial/particle consumers
@@ -68,14 +87,20 @@ fn weather_type_fourcc(weather: Option<Weather>) -> WeatherTypeId {
     weather_type_id(weather.unwrap_or(Weather::None) as u16)
 }
 
-// Pick the set for the requested weather type, falling back across the base sky
-// families that actually ship before giving up.
-fn select_records(sets: &ZoneWeatherSets, want: WeatherTypeId, indoor: bool) -> Vec<WeatherRecord> {
+// Pick the set for the requested weather type in `area`, falling back across the
+// base sky families that actually ship before giving up.
+fn select_records(
+    sets: &ZoneWeatherSets,
+    want: WeatherTypeId,
+    indoor: bool,
+    area: AreaResourceId,
+) -> Vec<WeatherRecord> {
     if !sets.flat.is_empty() {
         return sets.flat.clone();
     }
+    let by_type: &WeatherSetsByType = sets.area_by_type(area);
     let pick = |id: &WeatherTypeId| {
-        sets.by_type.get(id).map(|set| {
+        by_type.get(id).map(|set| {
             let chosen = if indoor && !set.indoor.is_empty() {
                 &set.indoor
             } else {
@@ -86,7 +111,7 @@ fn select_records(sets: &ZoneWeatherSets, want: WeatherTypeId, indoor: bool) -> 
     };
     weather_type_preference(want)
         .find_map(|id| pick(&id))
-        .or_else(|| sets.by_type.values().next().map(|s| s.outdoor.clone()))
+        .or_else(|| by_type.values().next().map(|s| s.outdoor.clone()))
         .unwrap_or_default()
 }
 
@@ -131,7 +156,10 @@ impl Plugin for WeatherPlugin {
         // unset, which is every consumer's existing no-records fallback
         // (kuluu-ehye).
         #[cfg(not(target_arch = "wasm32"))]
-        app.add_systems(Update, load_zone_weather.before(WeatherSampleSet));
+        app.add_systems(
+            Update,
+            (load_zone_weather, resolve_zone_area).before(WeatherSampleSet),
+        );
 
         // kuluu-f1hk: remember the app's pre-weather backdrop so the fog
         // horizon painted by apply_zone_weather can be undone when no weather
@@ -165,6 +193,9 @@ pub fn sample_zone_weather(
         zone_weather.records.clear();
         zone_weather.selected = None;
         zone_weather.current = None;
+        zone_weather.area_records.clear();
+        zone_weather.area_selected = None;
+        zone_weather.area_current = None;
         return;
     }
 
@@ -176,17 +207,59 @@ pub fn sample_zone_weather(
     // active set reloads on CurrentWeather change as well as zone change.
     let want = weather_type_fourcc(current_weather.0);
     if zone_weather.selected != Some((want, indoor)) {
-        zone_weather.records = select_records(&zone_weather.sets, want, indoor);
+        zone_weather.records = select_records(&zone_weather.sets, want, indoor, ZONE_WIDE_AREA);
         zone_weather.selected = Some((want, indoor));
+    }
+    let area = zone_weather.area;
+    if zone_weather.area_selected != Some((want, indoor, area)) {
+        zone_weather.area_records = select_records(&zone_weather.sets, want, indoor, area);
+        zone_weather.area_selected = Some((want, indoor, area));
     }
 
     if zone_weather.records.is_empty() {
         zone_weather.current = None;
+        zone_weather.area_current = None;
         return;
     }
     let sky = crate::sun_moon::vana_sky_from_clock(&vana_clock);
     let time_minutes = (sky.hour * 60.0).rem_euclid(1440.0) as u32;
     zone_weather.current = sample_weather(&zone_weather.records, time_minutes);
+    zone_weather.area_current =
+        sample_weather(&zone_weather.area_records, time_minutes).or(zone_weather.current);
+}
+
+/// `AreaResourceId` 0 — retail's "no area", which routes every environment
+/// accessor to the zone's own `XiArea` (XiArea.cpp:377, :434).
+pub const ZONE_WIDE_AREA: AreaResourceId = 0;
+
+/// Tracks the area the player is standing in, the way retail tracks it from the
+/// ground query each frame (CollidableActor.cpp:218-228). Consumed by the
+/// distance fog; see [`ZoneWeather::area_current`].
+#[cfg(not(target_arch = "wasm32"))]
+pub fn resolve_zone_area(
+    mut zone_weather: ResMut<ZoneWeather>,
+    area_map: Res<crate::dat_mzb::ZoneAreaMap>,
+    self_q: Query<&GlobalTransform, With<crate::components::IsSelf>>,
+) {
+    let area = self_q
+        .single()
+        .ok()
+        .and_then(|t| area_map.area_at(t.translation()))
+        .unwrap_or(ZONE_WIDE_AREA);
+    if area == zone_weather.area {
+        return;
+    }
+    let label = crate::dat_mzb::area_id_label(&area);
+    if area == ZONE_WIDE_AREA || zone_weather.sets.by_area.contains_key(&area) {
+        debug!(area = label, "zone area changed; distance fog follows it");
+    } else {
+        info!(
+            area = label,
+            "placements name an area the zone DAT ships no environment for; \
+             distance fog stays on the zone-wide records"
+        );
+    }
+    zone_weather.area = area;
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -203,6 +276,9 @@ pub fn load_zone_weather(
     zone_weather.sets = ZoneWeatherSets::default();
     zone_weather.records.clear();
     zone_weather.selected = None;
+    zone_weather.area_records.clear();
+    zone_weather.area_selected = None;
+    zone_weather.area = ZONE_WIDE_AREA;
 
     let Some(file_id) = current else { return };
 
@@ -376,6 +452,10 @@ pub fn apply_zone_weather(
     let Some(rec) = zone_weather.current else {
         return;
     };
+    // SkeletalMeshActor.cpp:2749 — the fog an actor is drawn through comes from
+    // the actor's own area. Falls back to `rec` when the player is in the
+    // zone-wide environment, so a zone with no areas is byte-identical.
+    let fog_rec = zone_weather.area_current.unwrap_or(rec);
 
     if let Some((mut fog, mut fog_tf)) = fog_q.iter_mut().next() {
         // Keep the camera inside the volume in XZ so the ground haze never
@@ -386,7 +466,7 @@ pub fn apply_zone_weather(
             fog_tf.translation.x = c.x;
             fog_tf.translation.z = c.z;
         }
-        let [r, g, b, _a] = rec.fog_landscape;
+        let [r, g, b, _a] = fog_rec.fog_landscape;
         fog.fog_color = Color::srgb(r, g, b);
         // Tint the in-scattered light with the zone fog palette so the volume
         // reads as the zone's atmosphere rather than a neutral gray wall.
@@ -402,7 +482,7 @@ pub fn apply_zone_weather(
         // renders black instead of fog-colored. Cap density so the light term
         // survives (R ~= 1470 for the 2000x800x2000 volume) and let the haze
         // scale gently with the zone's DAT fog range.
-        let dist = rec.max_fog_dist_landscape.max(50.0);
+        let dist = fog_rec.max_fog_dist_landscape.max(50.0);
         fog.density_factor = (0.9 / dist).clamp(0.0008, 0.0018);
         // Recover the bounding-radius attenuation (~e^-1.3 at ground density)
         // so the haze reads as lit fog, not soot.
@@ -423,9 +503,12 @@ pub fn apply_zone_weather(
     ambient.brightness =
         500.0 * rec.diffuse_mul_landscape.clamp(0.4, 1.5) * active.modifier.ambient_brightness_mul;
 
-    // The matching ClearColor backdrop is written above by the unconditional
-    // zone_clear_color pass (kuluu-f1hk).
-    let [fr, fg, fb, _] = rec.fog_landscape;
+    // The ClearColor backdrop is written above by the unconditional
+    // zone_clear_color pass (kuluu-f1hk) and stays on the *zone* record: retail's
+    // far color is set by the weather condition (XiArea.cpp:126-136), not by the
+    // block the actor stands on, so an interior's black fog must not paint the
+    // horizon the player can still see out of the doorway.
+    let [fr, fg, fb, _] = fog_rec.fog_landscape;
     let fog_color = Color::srgb(fr, fg, fb);
 
     // DistanceFog is the authoritative DAT distance fog in BOTH modes. The
@@ -440,7 +523,7 @@ pub fn apply_zone_weather(
             (fg * 1.06).min(1.0),
             (fb * 1.02).min(1.0),
         );
-        let visibility = rec.max_fog_dist_landscape.max(80.0);
+        let visibility = fog_rec.max_fog_dist_landscape.max(80.0);
         let want = DistanceFog {
             color: fog_color,
             directional_light_color: inscatter,
@@ -535,5 +618,65 @@ mod tests {
     #[test]
     fn default_clear_color_matches_bevy_stock_until_captured() {
         assert_eq!(DefaultClearColor::default().0, ClearColor::default().0);
+    }
+
+    fn set_with_fog_r(fog_r: f32) -> ffxi_dat::weather::WeatherSet {
+        ffxi_dat::weather::WeatherSet {
+            outdoor: vec![rec_with_fog([fog_r, 0.0, 0.0, 1.0])],
+            indoor: Vec::new(),
+        }
+    }
+
+    fn zone_and_area_sets() -> ZoneWeatherSets {
+        const ZONE_FOG_R: f32 = 0.5;
+        const AREA_FOG_R: f32 = 0.1;
+        let mut sets = ZoneWeatherSets::default();
+        sets.by_type.insert(*b"suny", set_with_fog_r(ZONE_FOG_R));
+        sets.by_area.insert(
+            ffxi_dat::mzb::area_resource_id_from_dir_name(b"ev01"),
+            [(*b"suny", set_with_fog_r(AREA_FOG_R))]
+                .into_iter()
+                .collect(),
+        );
+        sets
+    }
+
+    // ZoneRenderer.cpp:1133-1152 — a block bound to an area is drawn with *that*
+    // area's fog and lights, not the zone's; the interiors that carry one ship a
+    // darker, sunless environment.
+    #[test]
+    fn area_records_replace_the_zone_environment() {
+        let sets = zone_and_area_sets();
+        let ev01 = ffxi_dat::mzb::area_resource_id_from_dir_name(b"ev01");
+
+        let zone = select_records(&sets, *b"suny", false, ZONE_WIDE_AREA);
+        let area = select_records(&sets, *b"suny", false, ev01);
+        assert_eq!(zone[0].fog_landscape[0], 0.5);
+        assert_eq!(area[0].fog_landscape[0], 0.1);
+    }
+
+    // XiArea.cpp:880-892 — FindAreaByFourCC answers the zone when nothing matches,
+    // and zones do ship placements naming an area with no container (`ent4`).
+    #[test]
+    fn area_with_no_container_falls_back_to_the_zone_environment() {
+        let sets = zone_and_area_sets();
+        let missing = ffxi_dat::mzb::area_resource_id_from_dir_name(b"ent4");
+        let got = select_records(&sets, *b"suny", false, missing);
+        assert_eq!(got[0].fog_landscape[0], 0.5);
+    }
+
+    // The weather-type ladder stays inside the resolved area: one XiArea owns one
+    // WeatherCondition, so a type the area does not author must not silently
+    // reach back into the zone's set.
+    #[test]
+    fn weather_type_fallback_stays_within_the_resolved_area() {
+        let mut sets = zone_and_area_sets();
+        let ev02 = ffxi_dat::mzb::area_resource_id_from_dir_name(b"ev02");
+        sets.by_area.insert(
+            ev02,
+            [(*b"dark", set_with_fog_r(0.9))].into_iter().collect(),
+        );
+        let got = select_records(&sets, *b"suny", false, ev02);
+        assert_eq!(got[0].fog_landscape[0], 0.9);
     }
 }

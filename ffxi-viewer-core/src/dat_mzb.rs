@@ -10,7 +10,8 @@ use bevy::prelude::*;
 use bevy::tasks::futures_lite::future;
 use bevy::tasks::{AsyncComputeTaskPool, Task};
 use ffxi_dat::mmb::MmbHeader;
-use ffxi_dat::{mmb, mzb, walk, ChunkKind, DatRoot};
+use ffxi_dat::mzb::AreaResourceId;
+use ffxi_dat::{mmb, mzb, sub_area, walk, ChunkKind, DatRoot};
 
 use crate::components::{IsSelf, WorldEntity};
 use crate::snapshot::SceneState;
@@ -166,7 +167,7 @@ pub struct LoadedZoneGeom {
     pub submeshes: Arc<Vec<MzbSubMesh>>,
     pub instances: Arc<Vec<MzbInstance>>,
 
-    pub mmb_spawns: Result<Vec<ZoneMmbSpawn>, String>,
+    pub mmb_spawns: Result<ZoneMmbBuild, String>,
 }
 
 #[derive(Resource, Default)]
@@ -804,12 +805,177 @@ pub struct ZoneMmbSpawn {
     // Set for generator-driven water sheets (sea1/sea2): translucent tint +
     // per-layer UV-scroll. None for ordinary object-placed models.
     pub water: Option<crate::dat_mmb::GenWater>,
+
+    // None when the placement resolved to a single mesh for all three LOD bands
+    // (the majority), which needs no per-frame variant pick.
+    pub lod: Option<ZoneMeshLod>,
+}
+
+/// World-space (Bevy frame) footprint of one area-bound placement.
+#[derive(Debug, Clone, Copy)]
+pub struct ZoneAreaBox {
+    pub area_id: AreaResourceId,
+    pub min: Vec3,
+    pub max: Vec3,
+}
+
+impl ZoneAreaBox {
+    /// The block is "under the actor" when its footprint covers them and their
+    /// feet sit inside its height, slackened by [`AREA_FOOT_SLACK`].
+    ///
+    /// Two block shapes carry an area and both have to answer yes: a room shell,
+    /// which encloses the actor outright, and a floor slab, whose top *is* the
+    /// surface the actor stands on and so coincides with their feet.
+    fn holds(&self, p: Vec3) -> bool {
+        block_holds(self.min, self.max, p)
+    }
+
+    fn footprint(&self) -> f32 {
+        block_footprint(self.min, self.max)
+    }
+}
+
+fn block_holds(min: Vec3, max: Vec3, p: Vec3) -> bool {
+    p.x >= min.x
+        && p.x <= max.x
+        && p.z >= min.z
+        && p.z <= max.z
+        && p.y >= min.y - AREA_FOOT_SLACK
+        && p.y <= max.y + AREA_FOOT_SLACK
+}
+
+/// Ground area the block covers. The tie-break between overlapping boxes is
+/// horizontal, not volumetric: zones ship area-bound sheets with no thickness at
+/// all (Al'Taieu's `ev02` planes), and a zero-volume box would otherwise outrank
+/// every real interior it crosses.
+fn block_footprint(min: Vec3, max: Vec3) -> f32 {
+    (max.x - min.x).max(0.0) * (max.z - min.z).max(0.0)
+}
+
+/// Vertical slack on [`ZoneAreaBox::holds`]. An area box is the *render* mesh's
+/// bounds while the player's Y comes from the MZB *collision* surface, so a floor
+/// slab's top lands near — not exactly at — the feet standing on it. Sized by
+/// [`MAX_GROUND_STEP_UP`]: a gap the walker would step over is still one floor.
+const AREA_FOOT_SLACK: f32 = MAX_GROUND_STEP_UP;
+
+/// One chunk's authored light binding with the footprint it lights.
+///
+/// Retail resolves `LightReferences[4]` once at load and holds the four D3D
+/// slots for the whole chunk (ZoneRenderer.cpp:284-313), so the set is a
+/// property of the geometry, never of the camera.
+#[derive(Debug, Clone, Copy)]
+pub struct ZoneChunkLightBox {
+    pub min: Vec3,
+    pub max: Vec3,
+    pub lights: [Option<mzb::LightId>; mzb::LIGHT_REFERENCE_COUNT],
+}
+
+#[derive(Clone)]
+pub struct ZoneMmbBuild {
+    pub spawns: Vec<ZoneMmbSpawn>,
+    pub area_boxes: Vec<ZoneAreaBox>,
+    pub light_boxes: Vec<ZoneChunkLightBox>,
+}
+
+/// Which [`AreaResourceId`] each point of the zone belongs to.
+///
+/// Retail asks the collision map for the FourCC of the block under the actor and
+/// draws that actor's fog and ambient from the matching `XiArea`
+/// (CollidableActor.cpp:218-228, SkeletalMeshActor.cpp:2743-2749). Our MZB
+/// collision section carries no area id — only the render placements do
+/// (ZoneBlockFormat.h:99) — so the block is found by its own bounds instead.
+/// The areas that differ from the zone environment are building interiors and
+/// the blocks that floor them, so [`ZoneAreaBox::holds`] answers the same
+/// question the ground query does.
+#[derive(Resource, Default)]
+pub struct ZoneAreaMap {
+    pub boxes: Vec<ZoneAreaBox>,
+
+    /// DAT file the boxes came from, so a stale zone's interiors can't keep
+    /// tinting the new one (same reason [`MzbCollisionGeometry::source_file_id`]
+    /// exists).
+    pub source_file_id: Option<u32>,
+}
+
+impl ZoneAreaMap {
+    /// The area at `p`, or `None` for the zone-wide environment.
+    ///
+    /// Innermost wins: areas nest (a room inside a building shell), and retail's
+    /// per-block answer is the most specific block holding the actor.
+    pub fn area_at(&self, p: Vec3) -> Option<AreaResourceId> {
+        self.boxes
+            .iter()
+            .filter(|b| b.holds(p))
+            .min_by(|a, b| {
+                a.footprint()
+                    .partial_cmp(&b.footprint())
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .map(|b| b.area_id)
+    }
+}
+
+/// Which lights each point of the zone is authored to receive.
+///
+/// Retail binds a chunk's `LightReferences[4]` into D3D light slots 2-5 once at
+/// load (research/XIClient/src/XIClient/source/Rendering/ZoneRenderer.cpp:284-313,
+/// :339-353) and every model drawn over that chunk keeps those slots, so the
+/// point lights on an actor are the ones its chunk authors — not the ones that
+/// happen to be nearest. `boxes` is empty for a zone that ships no light-binding
+/// table, which is the only case the nearest-N pick still answers.
+#[derive(Resource, Default)]
+pub struct ZoneChunkLightMap {
+    pub boxes: Vec<ZoneChunkLightBox>,
+
+    /// DAT file the boxes came from, so a stale zone cannot keep lighting the
+    /// new one (same reason [`ZoneAreaMap::source_file_id`] exists).
+    pub source_file_id: Option<u32>,
+}
+
+impl ZoneChunkLightMap {
+    pub fn is_authored(&self) -> bool {
+        !self.boxes.is_empty()
+    }
+
+    /// The authored lights of the chunk at `p`, innermost chunk first — the same
+    /// most-specific-block answer [`ZoneAreaMap::area_at`] gives.
+    pub fn lights_at(&self, p: Vec3) -> Option<[Option<mzb::LightId>; mzb::LIGHT_REFERENCE_COUNT]> {
+        self.boxes
+            .iter()
+            .filter(|b| block_holds(b.min, b.max, p))
+            .min_by(|a, b| {
+                block_footprint(a.min, a.max)
+                    .partial_cmp(&block_footprint(b.min, b.max))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .map(|b| b.lights)
+    }
+}
+
+/// The per-frame mesh-variant pick retail makes in `RenderChunk2`
+/// (research/XIClient/src/XIClient/source/Rendering/ZoneRenderer.cpp:1085-1094).
+/// One placement spawns one entity per *distinct* mesh in its
+/// [`mzb::MmbLodSet`]; `level_mask` says which distance bands that entity serves.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct ZoneMeshLod {
+    pub thresholds: mzb::MmbLodThresholds,
+    pub level_mask: u8,
+    pub uses_lod_rendering: bool,
+}
+
+impl ZoneMeshLod {
+    pub fn is_drawn_at(&self, camera_dist_sq: f32) -> bool {
+        if self.uses_lod_rendering && mzb::beyond_lod_far_cull(camera_dist_sq, self.thresholds) {
+            return false;
+        }
+        self.thresholds.select(camera_dist_sq).mask() & self.level_mask != 0
+    }
 }
 
 pub fn build_zone_mmb_spawns(
     file_id: u32,
     chunk_idx: Option<usize>,
-) -> Result<Vec<ZoneMmbSpawn>, String> {
+) -> Result<ZoneMmbBuild, String> {
     let root =
         DatRoot::from_env_or_default().map_err(|e| format!("DatRoot::from_env_or_default: {e}"))?;
     let location = root
@@ -826,7 +992,8 @@ pub fn build_zone_mmb_spawns(
         .filter(|(_, c)| c.kind == ChunkKind::Mmb as u8)
         .map(|(idx, c)| (idx, c.data))
         .collect();
-    let parsed: Vec<Option<(usize, String)>> = pool.scope(|s| {
+    type ParsedMmb = (usize, String, Option<([f32; 3], [f32; 3])>);
+    let parsed: Vec<Option<ParsedMmb>> = pool.scope(|s| {
         for (idx, data) in &mmb_chunk_refs {
             let idx = *idx;
             let data = *data;
@@ -834,15 +1001,17 @@ pub fn build_zone_mmb_spawns(
                 let dec = mmb::decrypt(data).ok()?;
                 let hdr = MmbHeader::parse(&dec).ok()?;
 
-                Some((idx, hdr.zone_mesh_name()))
+                Some((idx, hdr.zone_mesh_name(), hdr.local_bounds()))
             });
         }
     });
     let mut mmb_names: Vec<String> = Vec::with_capacity(parsed.len());
     let mut mmb_indices: Vec<usize> = Vec::with_capacity(parsed.len());
+    let mut mmb_bounds: Vec<Option<([f32; 3], [f32; 3])>> = Vec::with_capacity(parsed.len());
     for entry in parsed.into_iter().flatten() {
         mmb_indices.push(entry.0);
         mmb_names.push(entry.1);
+        mmb_bounds.push(entry.2);
     }
 
     use std::collections::HashMap;
@@ -894,17 +1063,67 @@ pub fn build_zone_mmb_spawns(
     let placements = mzb::parse_mmb_placements(&plain, &header)
         .map_err(|e| format!("MZB parse_mmb_placements: {e}"))?;
 
-    let mut rr_cursor: HashMap<&str, usize> = HashMap::new();
+    // The auto-load path never swaps an interior in, so every shell stays up —
+    // retail's "not inside a building" state. `/subarea` is the manual way in.
+    const ACTIVE_SUB_AREA: Option<u32> = None;
+    let drawn_flags = mzb::drawn_placements(&placements, ACTIVE_SUB_AREA);
+
+    let sub_areas = match sub_area::from_dat(&bytes) {
+        Ok(s) => s,
+        Err(e) => {
+            warn!("MZB {file_id}: sub-area section unreadable ({e}); no interiors offered");
+            Vec::new()
+        }
+    };
+    if !sub_areas.is_empty() {
+        info!(
+            "MZB {file_id}: {} sub-area interior(s) declared but not loaded — ids {:?} (`/subarea`)",
+            sub_areas.len(),
+            sub_areas.iter().map(|s| s.id).collect::<Vec<_>>()
+        );
+    }
+    let undeclared = sub_area::undeclared_placeholder_links(&sub_areas, &placements);
+    if !undeclared.is_empty() {
+        warn!(
+            "MZB {file_id}: placement sub-area links {undeclared:?} have no trigger rect; \
+             retail could never swap those shells either"
+        );
+    }
+
+    let mut rr_cursor: HashMap<String, usize> = HashMap::new();
+    let mut gated = 0usize;
+    let mut unresolved = 0usize;
+    let mut lod_families = 0usize;
     let mut out = Vec::with_capacity(placements.len());
-    for p in &placements {
+    let mut area_boxes: Vec<ZoneAreaBox> = Vec::new();
+    let light_bindings = mzb::parse_light_bindings(&plain, &header);
+    let mut light_boxes: Vec<ZoneChunkLightBox> = Vec::new();
+    for (p, &drawn) in placements.iter().zip(drawn_flags.iter()) {
         let id = p.id_str().trim_end_matches('\0').trim_end();
-        let Some(matches) = name_to_locals.get(id) else {
-            continue;
-        };
-        let cursor = rr_cursor.entry(id).or_insert(0);
-        let local_idx = matches[*cursor % matches.len()];
-        *cursor += 1;
-        let chunk_idx = mmb_indices[local_idx];
+
+        // Retail's BlockManager.GetByName answers one mesh per name; duplicate
+        // zone_mesh_names inside one zone file are an ambiguity only this client
+        // has, and successive placements take successive duplicates. Only the
+        // placement's own name advances that cursor, so the LOD sibling lookups
+        // cannot shuffle which duplicate a later placement gets. Advance it even
+        // for gated placements: retail resolves every chunk's mesh LOD before
+        // SetRenderTypes classifies it (ZoneRenderer.cpp:406 ResolveMeshReference ->
+        // InitializeMeshLOD :100-143, then :572).
+        let mut base_pick: Option<Option<usize>> = None;
+        let lod_set = mzb::resolve_mmb_lod_set_with(id, |name| {
+            if name == id {
+                if base_pick.is_none() {
+                    base_pick = Some(name_to_locals.get(name).map(|locals| {
+                        let cursor = rr_cursor.entry(name.to_string()).or_insert(0);
+                        let local = locals[*cursor % locals.len()];
+                        *cursor += 1;
+                        local
+                    }));
+                }
+                return base_pick.flatten();
+            }
+            name_to_locals.get(name).and_then(|l| l.first().copied())
+        });
 
         let m_ffxi = Mat4::from_scale_rotation_translation(
             Vec3::new(p.scale[0], p.scale[1], p.scale[2]),
@@ -919,11 +1138,75 @@ pub fn build_zone_mmb_spawns(
             Vec4::new(0.0, 0.0, 0.0, 1.0),
         );
         let bevy_transform = to_bevy * m_ffxi;
-        out.push(ZoneMmbSpawn {
-            chunk_idx,
-            bevy_transform,
-            water: None,
-        });
+
+        // Built before the render gate: retail binds every positioned block to
+        // its area (ZoneRenderer.cpp:710-718) and the interiors that carry one
+        // are `_`-keyed blocks the *second* draw pass owns, so a gate-filtered
+        // list would drop exactly the areas we need.
+        let area_id = p.effective_area_resource_id();
+        if area_id != 0 {
+            if let Some(bounds) = lod_set
+                .distinct_indices()
+                .first()
+                .and_then(|&local| mmb_bounds[local])
+            {
+                let (min, max) = world_bounds_from_local(bevy_transform, bounds.0, bounds.1);
+                area_boxes.push(ZoneAreaBox { area_id, min, max });
+            }
+        }
+
+        if !drawn {
+            gated += 1;
+            continue;
+        }
+        let variants = lod_set.distinct_indices();
+        if variants.is_empty() {
+            unresolved += 1;
+            continue;
+        }
+
+        let chunk_lights = mzb::resolve_chunk_lights(&p.light_references, &light_bindings);
+        if chunk_lights.iter().any(Option::is_some) {
+            if let Some(bounds) = variants.first().and_then(|&local| mmb_bounds[local]) {
+                let (min, max) = world_bounds_from_local(bevy_transform, bounds.0, bounds.1);
+                light_boxes.push(ZoneChunkLightBox {
+                    min,
+                    max,
+                    lights: chunk_lights,
+                });
+            }
+        }
+
+        let uses_lod_rendering = p.uses_lod_rendering();
+        if variants.len() > 1 {
+            lod_families += 1;
+        }
+        // A placement whose three bands all land on one mesh and that carries no
+        // far cull has nothing to decide per frame, so it stays a plain always-on
+        // spawn rather than paying for a distance query.
+        let needs_lod_component = variants.len() > 1 || uses_lod_rendering;
+        for local in variants {
+            out.push(ZoneMmbSpawn {
+                chunk_idx: mmb_indices[local],
+                bevy_transform,
+                water: None,
+                lod: needs_lod_component.then(|| ZoneMeshLod {
+                    thresholds: p.lod_thresholds(),
+                    level_mask: lod_set.level_mask(local),
+                    uses_lod_rendering,
+                }),
+            });
+        }
+    }
+
+    if gated > 0 || unresolved > 0 {
+        info!(
+            "MZB {file_id}: RenderType gate skipped {gated}/{} placements (zone-line stand-ins, \
+             event geometry, sub-area placeholders), {unresolved} resolved to no mesh block; \
+             {} spawned across {lod_families} multi-LOD families",
+            placements.len(),
+            out.len()
+        );
     }
 
     // Generator-driven water sheets: FFXI instances the broad canal/harbor water
@@ -1009,30 +1292,7 @@ pub fn build_zone_mmb_spawns(
             .and_then(|c| mmb::decrypt(c.data).ok())
             .and_then(|d| MmbHeader::parse(&d).ok().and_then(|h| h.local_bounds()))
             .unwrap_or(([0.0; 3], [0.0; 3]));
-        let mut world_min = Vec3::splat(f32::INFINITY);
-        let mut world_max = Vec3::splat(f32::NEG_INFINITY);
-        for corner in 0..8 {
-            let p = Vec3::new(
-                if corner & 1 == 0 {
-                    local_min[0]
-                } else {
-                    local_max[0]
-                },
-                if corner & 2 == 0 {
-                    local_min[1]
-                } else {
-                    local_max[1]
-                },
-                if corner & 4 == 0 {
-                    local_min[2]
-                } else {
-                    local_max[2]
-                },
-            );
-            let w = bevy_transform.transform_point3(p);
-            world_min = world_min.min(w);
-            world_max = world_max.max(w);
-        }
+        let (world_min, world_max) = world_bounds_from_local(bevy_transform, local_min, local_max);
         out.push(ZoneMmbSpawn {
             chunk_idx,
             bevy_transform,
@@ -1042,6 +1302,8 @@ pub fn build_zone_mmb_spawns(
                 world_min,
                 world_max,
             }),
+            // Generator sheets carry no placement record, so no LOD triple.
+            lod: None,
         });
     }
 
@@ -1181,7 +1443,152 @@ pub fn build_zone_mmb_spawns(
         }
     }
 
-    Ok(out)
+    if !area_boxes.is_empty() {
+        let ids = mzb::area_resource_ids(&placements);
+        info!(
+            file_id,
+            "MZB: {} placements bound to {} area(s) {:?} — per-area fog/diffuse lighting",
+            area_boxes.len(),
+            ids.len(),
+            ids.iter().map(area_id_label).collect::<Vec<_>>(),
+        );
+    }
+
+    log_light_binding_coverage(file_id, &chunks, &light_bindings, &light_boxes);
+
+    Ok(ZoneMmbBuild {
+        spawns: out,
+        area_boxes,
+        light_boxes,
+    })
+}
+
+/// The authored bindings only light a chunk if the zone also ships the Generator
+/// chunk that defines the light, and a zone can ship neither. Both gaps are
+/// silent at the pixel level, so they are reported at load.
+fn log_light_binding_coverage(
+    file_id: u32,
+    chunks: &[ffxi_dat::chunk::Chunk<'_>],
+    light_bindings: &[mzb::LightId],
+    light_boxes: &[ZoneChunkLightBox],
+) {
+    if light_bindings.is_empty() {
+        info!(
+            file_id,
+            "MZB: no authored light-binding table — chunk point lighting falls back to the \
+             nearest-N pick"
+        );
+        return;
+    }
+    let defined: std::collections::HashSet<mzb::LightId> = chunks
+        .iter()
+        .filter(|c| ChunkKind::from_u8(c.kind) == Some(ChunkKind::Generator))
+        .filter(|c| {
+            matches!(
+                ffxi_dat::generator::Generator::parse_point_light(c.data),
+                Ok(Some(_))
+            )
+        })
+        .map(|c| u32::from_le_bytes(c.name))
+        .collect();
+    let missing: Vec<String> = light_bindings
+        .iter()
+        .filter(|id| !defined.contains(id))
+        .map(light_id_label)
+        .collect();
+    info!(
+        file_id,
+        "MZB: {} authored light(s) bound to {} chunk(s) — static per-chunk light slots",
+        light_bindings.len(),
+        light_boxes.len(),
+    );
+    if !missing.is_empty() {
+        warn!(
+            file_id,
+            "MZB: {} authored light(s) have no point-light Generator chunk {:?} — the chunks \
+             binding them light with fewer slots than retail",
+            missing.len(),
+            missing,
+        );
+    }
+}
+
+/// FourCC of a [`mzb::LightId`] as authored, for logs.
+pub fn light_id_label(id: &mzb::LightId) -> String {
+    id.to_le_bytes()
+        .iter()
+        .map(|&b| if b.is_ascii_graphic() { b as char } else { '.' })
+        .collect()
+}
+
+/// FourCC of an [`AreaResourceId`] as authored, for logs.
+pub fn area_id_label(id: &AreaResourceId) -> String {
+    id.to_le_bytes()
+        .iter()
+        .map(|&b| if b.is_ascii_graphic() { b as char } else { '.' })
+        .collect()
+}
+
+fn world_bounds_from_local(
+    transform: Mat4,
+    local_min: [f32; 3],
+    local_max: [f32; 3],
+) -> (Vec3, Vec3) {
+    let mut world_min = Vec3::splat(f32::INFINITY);
+    let mut world_max = Vec3::splat(f32::NEG_INFINITY);
+    for corner in 0..8 {
+        let p = Vec3::new(
+            if corner & 1 == 0 {
+                local_min[0]
+            } else {
+                local_max[0]
+            },
+            if corner & 2 == 0 {
+                local_min[1]
+            } else {
+                local_max[1]
+            },
+            if corner & 4 == 0 {
+                local_min[2]
+            } else {
+                local_max[2]
+            },
+        );
+        let w = transform.transform_point3(p);
+        world_min = world_min.min(w);
+        world_max = world_max.max(w);
+    }
+    (world_min, world_max)
+}
+
+/// One entry of [`zone_sub_areas`]: a building interior the zone can swap in,
+/// paired with whether its DAT is actually present in this install.
+#[derive(Debug, Clone)]
+pub struct ZoneSubArea {
+    pub sub_area: sub_area::SubArea,
+    pub resolves: bool,
+}
+
+/// The sub-areas declared by the zone DAT `file_id`, ascending by id.
+///
+/// A declared sub-area whose interior DAT is missing stays in the list with
+/// `resolves == false` rather than being dropped, so a gap reads as a gap.
+pub fn zone_sub_areas(file_id: u32) -> Result<Vec<ZoneSubArea>, String> {
+    let root =
+        DatRoot::from_env_or_default().map_err(|e| format!("DatRoot::from_env_or_default: {e}"))?;
+    let location = root
+        .resolve(file_id)
+        .map_err(|e| format!("resolve({file_id}): {e}"))?;
+    let path = location.path_under(root.root());
+    let bytes = fs::read(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
+    Ok(sub_area::from_dat(&bytes)
+        .map_err(|e| format!("sub-area parse of file {file_id}: {e}"))?
+        .into_iter()
+        .map(|s| ZoneSubArea {
+            resolves: root.resolve(s.file_id).is_ok(),
+            sub_area: s,
+        })
+        .collect())
 }
 
 pub fn load_mzb(file_id: u32, chunk_idx: Option<usize>) -> Result<Vec<MzbSubMesh>, String> {
@@ -1241,6 +1648,8 @@ pub fn kick_load_mzb_tasks(
     mut toasts: MessageWriter<crate::snapshot::ToastEvent>,
     draw: Res<DrawDistance>,
     mut collision_geometry: ResMut<MzbCollisionGeometry>,
+    mut area_map: ResMut<ZoneAreaMap>,
+    mut chunk_light_map: ResMut<ZoneChunkLightMap>,
     mut load_mmb_tx: MessageWriter<crate::dat_mmb::LoadMmbRequest>,
     mut pending_water: ResMut<PendingWaterSpawns>,
     mut in_flight: ResMut<LoadMzbInFlight>,
@@ -1257,6 +1666,8 @@ pub fn kick_load_mzb_tasks(
                 &mut materials,
                 &mut toasts,
                 &mut collision_geometry,
+                &mut area_map,
+                &mut chunk_light_map,
                 &mut load_mmb_tx,
                 &mut pending_water,
                 init_vis,
@@ -1302,6 +1713,8 @@ pub fn poll_load_mzb_tasks(
     mut toasts: MessageWriter<crate::snapshot::ToastEvent>,
     draw: Res<DrawDistance>,
     mut collision_geometry: ResMut<MzbCollisionGeometry>,
+    mut area_map: ResMut<ZoneAreaMap>,
+    mut chunk_light_map: ResMut<ZoneChunkLightMap>,
     mut load_mmb_tx: MessageWriter<crate::dat_mmb::LoadMmbRequest>,
     mut pending_water: ResMut<PendingWaterSpawns>,
     mut in_flight: ResMut<LoadMzbInFlight>,
@@ -1333,6 +1746,8 @@ pub fn poll_load_mzb_tasks(
                 &mut materials,
                 &mut toasts,
                 &mut collision_geometry,
+                &mut area_map,
+                &mut chunk_light_map,
                 &mut load_mmb_tx,
                 &mut pending_water,
                 init_vis,
@@ -1632,12 +2047,42 @@ fn spawn_mzb_overlay(
     materials: &mut ResMut<Assets<StandardMaterial>>,
     toasts: &mut MessageWriter<crate::snapshot::ToastEvent>,
     collision_geometry: &mut ResMut<MzbCollisionGeometry>,
+    area_map: &mut ResMut<ZoneAreaMap>,
+    chunk_light_map: &mut ResMut<ZoneChunkLightMap>,
     load_mmb_tx: &mut MessageWriter<crate::dat_mmb::LoadMmbRequest>,
     pending_water: &mut PendingWaterSpawns,
     init_vis: (Visibility, Visibility),
     _from_cache: bool,
 ) {
     let (init_collision_vis, init_noncollision_vis) = init_vis;
+
+    // Ahead of the no-geometry bail below: the areas describe where the player
+    // stands, which is a question the fog answers even for a zone whose
+    // collision section is empty.
+    if let Ok(build) = &geom.mmb_spawns {
+        area_map.boxes = build
+            .area_boxes
+            .iter()
+            .map(|b| ZoneAreaBox {
+                area_id: b.area_id,
+                min: b.min + req.world_pos,
+                max: b.max + req.world_pos,
+            })
+            .collect();
+        area_map.source_file_id = Some(req.file_id);
+
+        chunk_light_map.boxes = build
+            .light_boxes
+            .iter()
+            .map(|b| ZoneChunkLightBox {
+                min: b.min + req.world_pos,
+                max: b.max + req.world_pos,
+                lights: b.lights,
+            })
+            .collect();
+        chunk_light_map.source_file_id = Some(req.file_id);
+    }
+
     let submeshes: &[MzbSubMesh] = geom.submeshes.as_slice();
     let instances: &[MzbInstance] = geom.instances.as_slice();
     if submeshes.is_empty() || instances.is_empty() {
@@ -1838,8 +2283,9 @@ fn spawn_mzb_overlay(
     let sheets: Vec<(Vec3, Vec3)> = geom
         .mmb_spawns
         .as_ref()
-        .map(|spawns| {
-            spawns
+        .map(|build| {
+            build
+                .spawns
                 .iter()
                 .filter_map(|s| s.water.map(|w| (w.world_min, w.world_max)))
                 .collect()
@@ -1907,10 +2353,10 @@ fn spawn_mzb_overlay(
     }
 
     match &geom.mmb_spawns {
-        Ok(spawns) => {
-            let n = spawns.len();
+        Ok(build) => {
+            let n = build.spawns.len();
             let offset = Mat4::from_translation(req.world_pos);
-            for s in spawns {
+            for s in &build.spawns {
                 load_mmb_tx.write(crate::dat_mmb::LoadMmbRequest {
                     file_id: req.file_id,
                     chunk_idx: s.chunk_idx,
@@ -1918,6 +2364,7 @@ fn spawn_mzb_overlay(
                     entity_id: None,
                     world_transform: Some(offset * s.bevy_transform),
                     water: s.water,
+                    lod: s.lod,
                 });
             }
             push_system_msg(
@@ -1954,6 +2401,7 @@ pub fn auto_load_zone_geometry_system(
     mut mmb_in_flight: ResMut<crate::dat_mmb::MmbLoadInFlight>,
     mut pending_water: ResMut<PendingWaterSpawns>,
     mut collision_geometry: ResMut<MzbCollisionGeometry>,
+    mut area_map: ResMut<ZoneAreaMap>,
 ) {
     let current = crate::snapshot::effective_zone_file_id(&scene_state.snapshot);
     if current == last.file_id {
@@ -1972,6 +2420,9 @@ pub fn auto_load_zone_geometry_system(
     // nearest-floor snap then resolved that stuck Y to the MH model's roof.
     if collision_geometry.source_file_id != current {
         *collision_geometry = MzbCollisionGeometry::default();
+    }
+    if area_map.source_file_id != current {
+        *area_map = ZoneAreaMap::default();
     }
 
     if !mzb_in_flight.tasks.is_empty() {
@@ -2017,6 +2468,32 @@ pub fn auto_load_zone_geometry_system(
                 &mut toasts,
                 format!("auto-load: no DAT mapping for zone {zone_id} (Phase 11b table pending)"),
             );
+        }
+    }
+}
+
+/// research/XIClient/src/XIClient/source/Rendering/ZoneRenderer.cpp:1071-1094 —
+/// `RenderChunk2` measures from the camera eye to the placement translation, culls
+/// on the squared Lod far distance when the chunk is flagged `UsesLodRendering`,
+/// and then hands the device whichever of the h/m/l variants the squared distance
+/// falls into.
+pub fn select_zone_mmb_lod(
+    camera_q: Query<&GlobalTransform, With<crate::camera::OperatorCamera>>,
+    mut lod_q: Query<(&GlobalTransform, &ZoneMeshLod, &mut Visibility)>,
+) {
+    let Ok(camera_t) = camera_q.single() else {
+        return;
+    };
+    let eye = camera_t.translation();
+
+    for (chunk_t, lod, mut vis) in lod_q.iter_mut() {
+        let want = if lod.is_drawn_at(chunk_t.translation().distance_squared(eye)) {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        };
+        if *vis != want {
+            *vis = want;
         }
     }
 }
@@ -2295,6 +2772,254 @@ mod ground_tests {
             geom.ground_nearest(Vec2::ZERO, -50.0).unwrap(),
             0.0,
             "a pathing entity sent a flat reference Y far below ground still snaps up"
+        );
+    }
+}
+
+#[cfg(test)]
+mod lod_tests {
+    use super::*;
+
+    fn thresholds(near: f32, mid: f32, far: f32) -> mzb::MmbLodThresholds {
+        mzb::MmbPlacement {
+            id: [0u8; 16],
+            trans: [0.0; 3],
+            rot: [0.0; 3],
+            scale: [1.0; 3],
+            block_id: 0,
+            lod_near: near,
+            lod_mid: mid,
+            lod_far: far,
+            special_effects: 0,
+            area_resource_id: 0,
+            sub_area_link: 0,
+            light_references: [0; 4],
+        }
+        .lod_thresholds()
+    }
+
+    const ALL_BANDS: u8 = mzb::MmbLodLevel::High.mask()
+        | mzb::MmbLodLevel::Medium.mask()
+        | mzb::MmbLodLevel::Low.mask();
+
+    fn lod(level: mzb::MmbLodLevel, uses_lod_rendering: bool) -> ZoneMeshLod {
+        ZoneMeshLod {
+            thresholds: thresholds(10.0, 100.0, 1000.0),
+            level_mask: level.mask(),
+            uses_lod_rendering,
+        }
+    }
+
+    // The three spawned variants of one placement partition the distance line, so
+    // exactly one is ever drawn.
+    #[test]
+    fn exactly_one_variant_is_drawn_at_any_distance() {
+        let variants = [
+            lod(mzb::MmbLodLevel::High, false),
+            lod(mzb::MmbLodLevel::Medium, false),
+            lod(mzb::MmbLodLevel::Low, false),
+        ];
+        for dist in [0.0f32, 9.9, 10.0, 10.1, 99.9, 100.0, 100.1, 5_000.0] {
+            let drawn = variants
+                .iter()
+                .filter(|v| v.is_drawn_at(dist * dist))
+                .count();
+            assert_eq!(drawn, 1, "distance {dist}");
+        }
+
+        assert!(variants[0].is_drawn_at(10.0 * 10.0));
+        assert!(variants[1].is_drawn_at(100.0 * 100.0));
+        assert!(variants[2].is_drawn_at(100.1 * 100.1));
+    }
+
+    // A placement whose bands collapse onto one mesh serves every band.
+    #[test]
+    fn a_single_mesh_serving_all_bands_is_always_drawn() {
+        let all = ZoneMeshLod {
+            thresholds: thresholds(10.0, 100.0, 1000.0),
+            level_mask: ALL_BANDS,
+            uses_lod_rendering: false,
+        };
+        for dist in [0.0f32, 50.0, 500.0, 100_000.0] {
+            assert!(all.is_drawn_at(dist * dist));
+        }
+    }
+
+    // ZoneRenderer.cpp:1057-1064 — the far cull only applies to chunks that opted
+    // into LOD rendering, and it outranks the band pick.
+    #[test]
+    fn the_far_cull_applies_only_to_lod_flagged_chunks() {
+        // (10, 100, 40): retail authors far *inside* mid, so the low mesh's own
+        // band starts past a cull that has already removed the chunk.
+        let mut prop = lod(mzb::MmbLodLevel::Low, true);
+        prop.thresholds = thresholds(10.0, 100.0, 40.0);
+        prop.level_mask = ALL_BANDS;
+        assert!(prop.is_drawn_at(39.0 * 39.0));
+        assert!(!prop.is_drawn_at(41.0 * 41.0));
+
+        prop.uses_lod_rendering = false;
+        assert!(prop.is_drawn_at(41.0 * 41.0));
+    }
+}
+
+#[cfg(test)]
+mod area_map_tests {
+    use super::*;
+
+    fn area_box(name: &[u8; 4], min: Vec3, max: Vec3) -> ZoneAreaBox {
+        ZoneAreaBox {
+            area_id: mzb::area_resource_id_from_dir_name(name),
+            min,
+            max,
+        }
+    }
+
+    fn map(boxes: Vec<ZoneAreaBox>) -> ZoneAreaMap {
+        ZoneAreaMap {
+            boxes,
+            source_file_id: None,
+        }
+    }
+
+    #[test]
+    fn a_point_outside_every_area_is_the_zone_wide_environment() {
+        let m = map(vec![area_box(b"ev01", Vec3::ZERO, Vec3::splat(10.0))]);
+        assert_eq!(m.area_at(Vec3::new(-1.0, 5.0, 5.0)), None);
+        assert_eq!(m.area_at(Vec3::new(5.0, 5.0, 11.0)), None);
+        assert_eq!(map(Vec::new()).area_at(Vec3::ZERO), None);
+    }
+
+    // The block an actor stands *on* is a slab whose top is their feet, so the
+    // Y window has to reach past the bounds in both directions — the alternative
+    // is an interior whose floor never claims the player standing on it.
+    #[test]
+    fn feet_resting_on_a_slab_resolve_to_its_area() {
+        const SLAB_TOP: f32 = 4.0;
+        let m = map(vec![area_box(
+            b"ev01",
+            Vec3::new(0.0, 3.0, 0.0),
+            Vec3::new(10.0, SLAB_TOP, 10.0),
+        )]);
+        let ev01 = Some(mzb::area_resource_id_from_dir_name(b"ev01"));
+        assert_eq!(m.area_at(Vec3::new(5.0, SLAB_TOP, 5.0)), ev01);
+        assert_eq!(
+            m.area_at(Vec3::new(5.0, SLAB_TOP + AREA_FOOT_SLACK * 0.5, 5.0)),
+            ev01
+        );
+        // A storey up is a different floor, not this one.
+        assert_eq!(
+            m.area_at(Vec3::new(5.0, SLAB_TOP + AREA_FOOT_SLACK + 1.0, 5.0)),
+            None
+        );
+    }
+
+    #[test]
+    fn a_point_inside_one_area_resolves_to_it() {
+        let m = map(vec![area_box(b"ev01", Vec3::ZERO, Vec3::splat(10.0))]);
+        assert_eq!(
+            m.area_at(Vec3::splat(5.0)),
+            Some(mzb::area_resource_id_from_dir_name(b"ev01"))
+        );
+    }
+
+    // A thickness-free sheet is not "more specific" than the room it crosses:
+    // the tie-break has to be horizontal or Al'Taieu's zero-volume `ev02` planes
+    // outrank every interior they pass through.
+    #[test]
+    fn a_flat_sheet_does_not_outrank_the_interior_it_crosses() {
+        let m = map(vec![
+            area_box(b"ev01", Vec3::splat(40.0), Vec3::splat(50.0)),
+            area_box(
+                b"ev02",
+                Vec3::new(-500.0, 45.0, -500.0),
+                Vec3::new(500.0, 45.0, 500.0),
+            ),
+        ]);
+        assert_eq!(
+            m.area_at(Vec3::splat(45.0)),
+            Some(mzb::area_resource_id_from_dir_name(b"ev01"))
+        );
+    }
+
+    // Areas nest — a room inside a building shell — and retail's per-block answer
+    // is the block the actor is actually standing in, so the tighter box wins.
+    #[test]
+    fn nested_areas_resolve_to_the_innermost() {
+        let m = map(vec![
+            area_box(b"ev01", Vec3::ZERO, Vec3::splat(100.0)),
+            area_box(b"ev02", Vec3::splat(40.0), Vec3::splat(50.0)),
+        ]);
+        assert_eq!(
+            m.area_at(Vec3::splat(45.0)),
+            Some(mzb::area_resource_id_from_dir_name(b"ev02"))
+        );
+        assert_eq!(
+            m.area_at(Vec3::splat(60.0)),
+            Some(mzb::area_resource_id_from_dir_name(b"ev01"))
+        );
+    }
+
+    fn light_box(ids: &[&[u8; 4]], min: Vec3, max: Vec3) -> ZoneChunkLightBox {
+        let mut lights = [None; mzb::LIGHT_REFERENCE_COUNT];
+        for (slot, id) in ids.iter().enumerate() {
+            lights[slot] = Some(u32::from_le_bytes(**id));
+        }
+        ZoneChunkLightBox { min, max, lights }
+    }
+
+    fn light_map(boxes: Vec<ZoneChunkLightBox>) -> ZoneChunkLightMap {
+        ZoneChunkLightMap {
+            boxes,
+            source_file_id: None,
+        }
+    }
+
+    #[test]
+    fn a_zone_with_no_binding_table_is_not_authored() {
+        let m = light_map(Vec::new());
+        assert!(!m.is_authored());
+        assert_eq!(m.lights_at(Vec3::ZERO), None);
+    }
+
+    #[test]
+    fn a_point_over_a_chunk_takes_that_chunk_s_authored_lights() {
+        let m = light_map(vec![light_box(
+            &[b"li12", b"l421"],
+            Vec3::ZERO,
+            Vec3::splat(10.0),
+        )]);
+        assert!(m.is_authored());
+        assert_eq!(
+            m.lights_at(Vec3::splat(5.0)),
+            Some([
+                Some(u32::from_le_bytes(*b"li12")),
+                Some(u32::from_le_bytes(*b"l421")),
+                None,
+                None
+            ])
+        );
+        assert_eq!(
+            m.lights_at(Vec3::new(50.0, 5.0, 5.0)),
+            None,
+            "off every chunk that binds a light, nothing is bound"
+        );
+    }
+
+    // Same most-specific-block rule as the area map: the chunk an actor stands on
+    // is the tightest one holding them, not the terrain slab underneath it.
+    #[test]
+    fn overlapping_chunks_bind_the_innermost_lights() {
+        let m = light_map(vec![
+            light_box(&[b"li12"], Vec3::ZERO, Vec3::splat(100.0)),
+            light_box(&[b"lt01"], Vec3::splat(40.0), Vec3::splat(50.0)),
+        ]);
+        assert_eq!(
+            m.lights_at(Vec3::splat(45.0)).unwrap()[0],
+            Some(u32::from_le_bytes(*b"lt01"))
+        );
+        assert_eq!(
+            m.lights_at(Vec3::splat(60.0)).unwrap()[0],
+            Some(u32::from_le_bytes(*b"li12"))
         );
     }
 }

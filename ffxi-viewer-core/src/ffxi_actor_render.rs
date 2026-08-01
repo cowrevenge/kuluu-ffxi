@@ -2642,7 +2642,7 @@ pub fn update_ffxi_render_actor_lighting(
     // clamping the model directional to 1.0 cropped that punch and flattened the form.
     const MODEL_DIR_MAX: f32 = 1.5;
 
-    // research/xim EnvironmentSection.kt:144-148: actors are lit by the model block's
+    // research/xim EnvironmentSection.kt:134-136,168: actors are lit by the model block's
     // entity ambient. When the zone ships 0x2F records, use that authored ambient
     // directly — the data already carries the day/night level and a ~2.4:1 sun:ambient
     // ratio, so scaling it by GlobalAmbientLight (amb_k) and the dark-fallback
@@ -2749,6 +2749,7 @@ const POINT_LIGHT_RESELECT_EPSILON: f32 = 0.25;
 // selected slot (zone reload, /lights emitters) forces a re-pick.
 struct ActorPointLightSelection {
     eval_pos: Vec3,
+    authored: bool,
     count: usize,
     lights_len: usize,
     indices: Vec<u32>,
@@ -2759,10 +2760,12 @@ impl ActorPointLightSelection {
     fn valid_for(
         &self,
         pos: Vec3,
+        authored: bool,
         count: usize,
         lights: &[crate::zone_point_lights::ZonePointLight],
     ) -> bool {
-        self.count == count
+        self.authored == authored
+            && self.count == count
             && self.lights_len == lights.len()
             && self.eval_pos.distance_squared(pos)
                 <= POINT_LIGHT_RESELECT_EPSILON * POINT_LIGHT_RESELECT_EPSILON
@@ -2777,6 +2780,7 @@ impl ActorPointLightSelection {
 pub fn update_ffxi_actor_point_lights(
     active: Res<crate::zone_point_lights::ActiveSceneLights>,
     settings: Res<crate::graphics_settings::GraphicsSettings>,
+    chunk_lights: Res<crate::dat_mzb::ZoneChunkLightMap>,
     mut q_actors: Query<(&mut FfxiRenderActor, &GlobalTransform)>,
     mut registry: ResMut<FfxiSkinRegistry>,
 ) {
@@ -2784,22 +2788,41 @@ pub fn update_ffxi_actor_point_lights(
         return;
     }
     let count = settings.model_light_count as usize;
+    // The zone's own bindings are the point lights retail leaves in D3D slots
+    // 2-5 while it draws a model over that chunk (ZoneRenderer.cpp:284-313, :339-353;
+    // ModelPartInstance.cpp:270-280 only rebinds slots 0-1), so they light the
+    // actor. `/lights` is the explicitly non-vanilla path: its emitters are ours,
+    // no chunk names them, so that mode keeps the nearest-N pick.
+    let authored = chunk_lights.is_authored() && !settings.dynamic_lights.emitters_enabled();
 
     for (mut actor, gt) in &mut q_actors {
         let pos = gt.translation();
         let cached_valid = actor
             .point_light_selection
             .as_ref()
-            .is_some_and(|sel| sel.valid_for(pos, count, &active.lights));
+            .is_some_and(|sel| sel.valid_for(pos, authored, count, &active.lights))
+            && !chunk_lights.is_changed();
         if !cached_valid {
-            let indices =
-                crate::zone_point_lights::nearest_point_light_indices(pos, &active.lights, count);
+            let indices = match chunk_lights.lights_at(pos).filter(|_| authored) {
+                Some(slots) => {
+                    crate::zone_point_lights::authored_point_light_indices(&active.lights, &slots)
+                }
+                // A chunk that binds no light leaves its slots disabled; only a
+                // zone with no binding table at all falls back to a distance pick.
+                None if authored => Vec::new(),
+                None => crate::zone_point_lights::nearest_point_light_indices(
+                    pos,
+                    &active.lights,
+                    count,
+                ),
+            };
             let positions = indices
                 .iter()
                 .map(|&i| active.lights[i as usize].world_pos)
                 .collect();
             actor.point_light_selection = Some(ActorPointLightSelection {
                 eval_pos: pos,
+                authored,
                 count,
                 lights_len: active.lights.len(),
                 indices,

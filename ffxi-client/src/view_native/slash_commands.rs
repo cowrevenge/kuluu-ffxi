@@ -811,6 +811,12 @@ const COMMANDS: &[(&str, &[Command])] = &[
                 handler: |c| parse_load_mzb(c.rest, c.self_pos),
             },
             Command {
+                aliases: &["subarea", "subareas"],
+                usage: "[<sub_area_id>|here]",
+                summary: "list this zone's building interiors, or load one as an overlay (debug)",
+                handler: |c| parse_sub_area(c.rest, c.self_pos),
+            },
+            Command {
                 aliases: &["fps"],
                 usage: "<max>",
                 summary: "set target frame rate",
@@ -1026,6 +1032,11 @@ pub enum SlashOutcome {
         file_id: u32,
         chunk_idx: Option<usize>,
         world_pos: WireVec3,
+    },
+
+    SubArea {
+        op: SubAreaOp,
+        self_pos: WireVec3,
     },
 
     SetDrawDistance(DrawDistanceOp),
@@ -2962,6 +2973,41 @@ fn parse_load_mzb(rest: &str, self_pos: WireVec3) -> SlashOutcome {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubAreaOp {
+    List,
+    Load(u32),
+    /// Whichever sub-area's trigger volume holds the player right now.
+    Here,
+}
+
+fn parse_sub_area(rest: &str, self_pos: WireVec3) -> SlashOutcome {
+    let arg = rest.trim();
+    let op = match arg {
+        "" => SubAreaOp::List,
+        "here" => SubAreaOp::Here,
+        _ => match parse_u32_auto_radix(arg) {
+            Some(id) => SubAreaOp::Load(id),
+            None => {
+                return SlashOutcome::SystemMessage(format!(
+                    "/subarea: bad sub-area id `{arg}` — usage `/subarea [<sub_area_id>|here]`"
+                ))
+            }
+        },
+    };
+    SlashOutcome::SubArea { op, self_pos }
+}
+
+/// Sub-area ids are quoted in hex by every upstream reference
+/// (research/cexi-docs/zone/subareas.md), so `/subarea 0x1CE` has to work as well
+/// as `/subarea 462`.
+fn parse_u32_auto_radix(s: &str) -> Option<u32> {
+    match s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+        Some(hex) => u32::from_str_radix(hex, 16).ok(),
+        None => s.parse().ok(),
+    }
+}
+
 fn parse_navmesh(rest: &str) -> SlashOutcome {
     match rest.trim().to_ascii_lowercase().as_str() {
         "" => SlashOutcome::ToggleNavmesh(None),
@@ -3867,6 +3913,53 @@ mod tests {
         ));
 
         for s in ["/load_mzb", "/load_mzb foo", "/load_mzb 7368 bar"] {
+            assert!(
+                matches!(
+                    parse_slash_t(s, &empty_entities(), origin(), None, None),
+                    SlashOutcome::SystemMessage(_)
+                ),
+                "expected SystemMessage for {s}",
+            );
+        }
+    }
+
+    #[test]
+    fn subarea_takes_decimal_or_hex_ids() {
+        let pos = WireVec3 {
+            x: 1.0,
+            y: 2.0,
+            z: 3.0,
+        };
+
+        match parse_slash_t("/subarea", &empty_entities(), pos, None, None) {
+            SlashOutcome::SubArea {
+                op: SubAreaOp::List,
+                self_pos,
+            } => assert_eq!(self_pos, pos),
+            other => panic!("expected SubArea List, got {other:?}"),
+        }
+
+        // 0x1CE is the Lower Jeuno food-shop interior in
+        // research/cexi-docs/zone/subareas.md:123.
+        for s in ["/subarea 462", "/subarea 0x1CE", "/subareas 0x1ce"] {
+            match parse_slash_t(s, &empty_entities(), pos, None, None) {
+                SlashOutcome::SubArea {
+                    op: SubAreaOp::Load(id),
+                    ..
+                } => assert_eq!(id, 0x1CE, "{s}"),
+                other => panic!("expected SubArea Load for {s}, got {other:?}"),
+            }
+        }
+
+        assert!(matches!(
+            parse_slash_t("/subarea here", &empty_entities(), pos, None, None),
+            SlashOutcome::SubArea {
+                op: SubAreaOp::Here,
+                ..
+            }
+        ));
+
+        for s in ["/subarea foo", "/subarea 0xzz", "/subarea -1"] {
             assert!(
                 matches!(
                     parse_slash_t(s, &empty_entities(), origin(), None, None),

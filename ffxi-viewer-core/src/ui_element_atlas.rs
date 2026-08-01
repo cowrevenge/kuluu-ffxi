@@ -77,7 +77,7 @@ impl UiElementAtlas {
 }
 
 // HorizonXI/US ships "menu    framesus" where the JP client uses
-// "menu    frames  "; XIM aliases the two (UiResourceManager.kt:53-55).
+// "menu    frames  "; XIM aliases the two (UiResourceManager.kt:60-62).
 fn resolve_sprite(bytes: &[u8], group: &str, index: usize) -> Option<UiSprite> {
     ui_sprite(bytes, group, index).or_else(|| {
         if group == FRAMES_JP {

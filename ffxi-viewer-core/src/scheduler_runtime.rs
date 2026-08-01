@@ -1116,7 +1116,7 @@ pub fn dispatch_cast_routine_started(
         let Some(&actor_entity) = tracked.by_id.get(&actor_id) else {
             continue;
         };
-        // cmd_arg is the routine FourCC, not a spell id (magic_state.cpp:101); an "sp*" FourCC is
+        // cmd_arg is the routine FourCC, not a spell id (magic_state.cpp:102); an "sp*" FourCC is
         // an interrupt on the same category (interrupts.cpp:268-284) and must tear the cast down.
         let magic = ffxi_proto::magic::magic_start_routine(action_id);
         if magic.is_some_and(|m| m.interrupt) {
@@ -1206,7 +1206,7 @@ pub fn swing_routine(animation: ffxi_proto::melee::AttackAnimation) -> Option<[u
 }
 
 // vendor/server/src/map/enums/four_cc.h:30 — BasicAttack's FourCC is "atk0", the self-targeted
-// voice routine research/xim Actor.kt:864 enqueues alongside the swing.
+// voice routine research/xim Actor.kt:866 enqueues alongside the swing.
 const MELEE_VOICE_ROUTINE: [u8; 4] = *b"atk0";
 
 // A basic attack's routines live in the attacker's own battle/equipment dirs and the global effect

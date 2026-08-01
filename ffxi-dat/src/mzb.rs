@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use crate::{DatError, Result};
 
 use crate::mmb::keys::KEY_TABLE;
@@ -44,7 +46,7 @@ const HDR_COLLISION_FLAGS: usize = 0x1D;
 pub const MZB_HEADER_LEN: usize = 0x20;
 
 /// Low 24 bits of the two packed header dwords; the top byte is the format
-/// version / decrypt-table index respectively (ZoneBlockFormat.h:47-65).
+/// version / decrypt-table index respectively (ZoneBlockFormat.h:48-66).
 const HDR_COUNT_MASK: u32 = 0x00FF_FFFF;
 
 /// research/XIClient/src/XIClient/source/Resource/Derived/ZoneBlockResource.cpp:12
@@ -52,12 +54,12 @@ const HDR_COUNT_MASK: u32 = 0x00FF_FFFF;
 /// the pass-1 XOR at all.
 const ENCRYPTED_MIN_VERSION: u8 = 27;
 
-/// ZoneBlockResource.cpp:24 — "the first 8 bytes are never encrypted", so the
+/// ZoneBlockResource.cpp:25 — "the first 8 bytes are never encrypted", so the
 /// pass-1 region is `[8, 8 + encryptedByteCount)`.
 const ENCRYPTED_REGION_START: usize = 8;
 
 /// Pass 2 XORs the name of every placement record.
-/// research/cexi-docs/zone/format.md:103 — 0x64-byte records start at 0x20.
+/// research/cexi-docs/zone/format.md:101-103 — 0x64-byte records start at 0x20.
 pub const PLACEMENT_RECORD_LEN: usize = 0x64;
 const PLACEMENT_NAME_LEN: usize = 16;
 const PLACEMENT_NAME_XOR: u8 = 0x55;
@@ -704,11 +706,28 @@ const PL_BLOCK_ID: usize = 0x34;
 const PL_LOD_NEAR: usize = 0x38;
 const PL_LOD_MID: usize = 0x3C;
 const PL_LOD_FAR: usize = 0x40;
+const PL_SPECIAL_EFFECTS: usize = 0x46;
 const PL_AREA_RESOURCE_ID: usize = 0x4C;
 const PL_SUB_AREA_LINK: usize = 0x50;
 const PL_LIGHT_REFERENCES: usize = 0x54;
-/// ZoneBlockFormat.h:11 — `LIGHT_REFERENCE_COUNT`.
-const LIGHT_REFERENCE_COUNT: usize = 4;
+/// ZoneBlockFormat.h:11 — `LIGHT_REFERENCE_COUNT`. Retail binds these four into
+/// D3D light slots 2-5 (ZoneRenderer.cpp:339-353 `SetLightIndices`).
+pub const LIGHT_REFERENCE_COUNT: usize = 4;
+
+/// FourCC naming an `XiArea`, stored little-endian at placement offset 0x4C
+/// (ZoneBlockFormat.h:99) and resolved by `XiArea::FindAreaByFourCC`
+/// (XiArea.cpp:880-893). `0` means "no area": retail's `FindAreaByFourCCAndGet*`
+/// accessors short-circuit to the zone-wide environment (XiArea.cpp:377,
+/// :434, :284).
+pub type AreaResourceId = u32;
+
+/// The [`AreaResourceId`] a 4-byte DAT directory name denotes. Retail reaches an
+/// area's own environment container by searching the zone container for this
+/// FourCC (`SearchCurrentContainer(Rmp, fourCC)`, XiArea.cpp:32-38), so the
+/// placement field and the directory name are the same bytes.
+pub fn area_resource_id_from_dir_name(name: &[u8; 4]) -> AreaResourceId {
+    u32::from_le_bytes(*name)
+}
 
 #[derive(Debug, Clone, Copy)]
 pub struct MmbPlacement {
@@ -718,24 +737,32 @@ pub struct MmbPlacement {
     pub rot: [f32; 3],
     pub scale: [f32; 3],
 
-    /// FourCC. A non-zero `BlockID` makes retail classify the chunk RenderType 0,
-    /// which is never drawn by the normal pass (ZoneRenderer.cpp:619-641).
+    /// FourCC. A non-zero `BlockID` makes retail classify the chunk
+    /// [`MmbRenderType::Keyed`], which the normal pass never draws
+    /// (ZoneRenderer.cpp:619-641); see [`drawn_placements`] for the second pass
+    /// that puts the `_`/`@` families back on screen.
     pub block_id: u32,
 
-    /// Squared against the camera distance to pick the high/mid/low mesh variant
-    /// (ZoneRenderer.cpp:492-504, :1087-1094). `lod_far` is also the draw
-    /// distance past which the chunk stops being drawn at all.
+    /// Squared and compared against the squared camera distance to pick the
+    /// high/mid/low mesh variant — see [`MmbLodThresholds`].
     pub lod_near: f32,
     pub lod_mid: f32,
     pub lod_far: f32,
 
+    /// ZoneBlockFormat.h:94 — `SpecialEffects`, the third of the four flag
+    /// bytes packed after the LOD triple (:92-95). Bit 0 is
+    /// [`MmbPlacement::uses_lod_rendering`].
+    pub special_effects: u8,
+
     /// FourCC of the area this chunk belongs to; drives per-area fog and the
-    /// weather diffuse lights (ZoneRenderer.cpp:515).
-    pub area_resource_id: u32,
+    /// weather diffuse lights (ZoneRenderer.cpp:514, :1133-1152). Read it through
+    /// [`MmbPlacement::effective_area_resource_id`] — retail clears it for
+    /// blocks outside the `_`/unkeyed families.
+    pub area_resource_id: AreaResourceId,
 
     /// The sub-area (building interior) whose geometry replaces this placeholder,
     /// 0 when there is none. Retail hides the chunk while that sub-area is the
-    /// active collision map — RenderType 1 (ZoneRenderer.cpp:637-638,
+    /// active collision map — RenderType 1 (ZoneRenderer.cpp:635-636,
     /// research/cexi-docs/zone/subareas.md:76-84).
     pub sub_area_link: u32,
 
@@ -744,6 +771,16 @@ pub struct MmbPlacement {
     /// (ZoneRenderer.cpp:518-523).
     pub light_references: [u32; LIGHT_REFERENCE_COUNT],
 }
+
+/// ZoneLayoutData.cpp:56-59, :85-86 — retail tests `(unsigned char)BlockID`, i.e.
+/// the first character of the little-endian FourCC.
+const BLOCK_ID_UNDERSCORE_GROUP: u8 = b'_';
+const BLOCK_ID_AT_GROUP: u8 = b'@';
+
+/// ZoneLayoutData.cpp:88-104 — `UnderscoreAtStruct::Subchunks` is a fixed array of
+/// four; placements past the fourth in a FourCC group are counted but never stored,
+/// so they are never drawn.
+pub const UNDERSCORE_AT_GROUP_MAX_SUBCHUNKS: usize = 4;
 
 impl MmbPlacement {
     pub fn id_str(&self) -> &str {
@@ -754,6 +791,350 @@ impl MmbPlacement {
             .unwrap_or(self.id.len());
         std::str::from_utf8(&self.id[..end]).unwrap_or("")
     }
+
+    /// True when this placement joins an `UnderscoreAtStruct` group, which retail
+    /// draws in its own pass at the tail of `RenderSubStruct`
+    /// (ZoneRenderer.cpp:2703, :2240-2269) regardless of `RenderType`.
+    pub fn in_underscore_at_group(&self) -> bool {
+        let first = self.block_id.to_le_bytes()[0];
+        self.block_id != 0 && (first == BLOCK_ID_UNDERSCORE_GROUP || first == BLOCK_ID_AT_GROUP)
+    }
+
+    /// ZoneBlockFormat.h:109-111 — `PositionedMeshBlockData::UsesLodRendering`.
+    pub fn uses_lod_rendering(&self) -> bool {
+        self.special_effects & SPECIAL_EFFECTS_LOD_RENDERING != 0
+    }
+
+    pub fn lod_thresholds(&self) -> MmbLodThresholds {
+        MmbLodThresholds::from_placement(self)
+    }
+
+    /// The [`AreaResourceId`] this placement is actually bound to.
+    ///
+    /// ZoneLayoutData.cpp:135-159 (`BuildAreaResourceIDList`) — retail *zeroes*
+    /// `AreaResourceID` in place on any block whose `BlockID` is both non-zero
+    /// and not in the `_` family, so those blocks fall back to the zone-wide
+    /// environment even though the record carries an id.
+    pub fn effective_area_resource_id(&self) -> AreaResourceId {
+        if self.area_resource_id == 0 {
+            return 0;
+        }
+        let first = self.block_id.to_le_bytes()[0];
+        if self.block_id == 0 || first == BLOCK_ID_UNDERSCORE_GROUP {
+            self.area_resource_id
+        } else {
+            0
+        }
+    }
+}
+
+/// Distinct [`AreaResourceId`]s a zone's placements bind to, in first-seen order
+/// — retail's `ZoneLayoutData::AreaResourceIDList` (ZoneLayoutData.cpp:116-168),
+/// one `XiArea` per entry (ZoneRenderer.cpp:702-704).
+pub fn area_resource_ids(placements: &[MmbPlacement]) -> Vec<AreaResourceId> {
+    let mut out: Vec<AreaResourceId> = Vec::new();
+    for p in placements {
+        let id = p.effective_area_resource_id();
+        if id != 0 && !out.contains(&id) {
+            out.push(id);
+        }
+    }
+    out
+}
+
+/// ZoneBlockFormat.h:110 — `SpecialEffects & 0x01`.
+const SPECIAL_EFFECTS_LOD_RENDERING: u8 = 0x01;
+
+/// ZoneRenderer.cpp:1085-1094 — which of the three mesh variants
+/// `RenderChunk2` hands to the device for one frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum MmbLodLevel {
+    High = 0,
+    Medium = 1,
+    Low = 2,
+}
+
+impl MmbLodLevel {
+    pub const fn mask(self) -> u8 {
+        1 << self as u8
+    }
+}
+
+/// ZoneRenderer.cpp:492-504 — retail squares the three `Lod*Distance` floats once
+/// while building the `PositionedMeshBlock` and compares them against the squared
+/// camera distance, so no square root is taken per chunk per frame. Comparing our
+/// linear distance against the raw floats would put every switch at the wrong
+/// range.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MmbLodThresholds {
+    pub near_sq: f32,
+    pub mid_sq: f32,
+    pub far_sq: f32,
+}
+
+impl MmbLodThresholds {
+    pub fn from_placement(p: &MmbPlacement) -> Self {
+        let near_sq = p.lod_near * p.lod_near;
+        Self {
+            near_sq,
+            // ZoneRenderer.cpp:499-502 — an authored mid *below* near collapses onto
+            // near, emptying the medium band rather than inverting the comparison.
+            mid_sq: if p.lod_near > p.lod_mid {
+                near_sq
+            } else {
+                p.lod_mid * p.lod_mid
+            },
+            far_sq: p.lod_far * p.lod_far,
+        }
+    }
+
+    /// ZoneRenderer.cpp:1085-1094. `camera_dist_sq` is measured from the camera eye
+    /// to the placement translation (ZoneRenderer.cpp:1073-1075), not from the player.
+    pub fn select(&self, camera_dist_sq: f32) -> MmbLodLevel {
+        if camera_dist_sq <= self.mid_sq {
+            if camera_dist_sq <= self.near_sq {
+                MmbLodLevel::High
+            } else {
+                MmbLodLevel::Medium
+            }
+        } else {
+            MmbLodLevel::Low
+        }
+    }
+}
+
+/// XiArea.cpp:803-812 — `GetAnotherSomething(false)`, the per-zone scale retail
+/// multiplies `FarThresholdSquared` by, is 1.0 before the registry graphics-config
+/// draw-distance multipliers this client does not model.
+pub const ZONE_LOD_FAR_SCALE: f32 = 1.0;
+
+/// ZoneRenderer.cpp:1030-1036, :1057-1064, :1071-1079 — the authored Lod far
+/// distance doubles as the draw-distance cull, but only for chunks flagged
+/// [`MmbPlacement::uses_lod_rendering`]; every other chunk is culled by the global
+/// draw distance instead, which is why the placements authored with `lod_far == 0`
+/// do not vanish.
+pub fn beyond_lod_far_cull(camera_dist_sq: f32, thresholds: MmbLodThresholds) -> bool {
+    camera_dist_sq > ZONE_LOD_FAR_SCALE * thresholds.far_sq
+}
+
+/// ZoneRenderer.cpp:81-144 `InitializeMeshLOD` — a placement whose mesh name ends in
+/// one of these swaps that last character to reach its siblings.
+const MMB_LOD_SUFFIX_HIGH: u8 = b'h';
+const MMB_LOD_SUFFIX_MEDIUM: u8 = b'm';
+const MMB_LOD_SUFFIX_LOW: u8 = b'l';
+
+/// The three mesh-block indices one placement can draw, as
+/// `InitializeMeshLOD` leaves them. `None` means retail would have a null pointer
+/// there and skip the draw entirely (ZoneRenderer.cpp:1096-1097).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct MmbLodSet {
+    pub high: Option<usize>,
+    pub medium: Option<usize>,
+    pub low: Option<usize>,
+}
+
+impl MmbLodSet {
+    pub fn get(&self, level: MmbLodLevel) -> Option<usize> {
+        match level {
+            MmbLodLevel::High => self.high,
+            MmbLodLevel::Medium => self.medium,
+            MmbLodLevel::Low => self.low,
+        }
+    }
+
+    /// Which levels resolve to `index`, as an [`MmbLodLevel::mask`] bitmask.
+    pub fn level_mask(&self, index: usize) -> u8 {
+        let mut mask = 0;
+        for level in [MmbLodLevel::High, MmbLodLevel::Medium, MmbLodLevel::Low] {
+            if self.get(level) == Some(index) {
+                mask |= level.mask();
+            }
+        }
+        mask
+    }
+
+    pub fn distinct_indices(&self) -> Vec<usize> {
+        let mut out: Vec<usize> = Vec::with_capacity(3);
+        for i in [self.high, self.medium, self.low].into_iter().flatten() {
+            if !out.contains(&i) {
+                out.push(i);
+            }
+        }
+        out
+    }
+}
+
+/// ZoneRenderer.cpp:81-144 `InitializeMeshLOD`, re-expressed over a caller-supplied
+/// name lookup so a consumer that resolves duplicate mesh names its own way keeps
+/// doing so. The order matters: a found `m` sibling overwrites all three slots,
+/// while `h` and `l` overwrite only their own slot and backfill the empty ones.
+pub fn resolve_mmb_lod_set_with<F>(placement_id: &str, mut lookup: F) -> MmbLodSet
+where
+    F: FnMut(&str) -> Option<usize>,
+{
+    let id = placement_id.trim_end();
+    let base = lookup(id);
+    let mut set = MmbLodSet {
+        high: base,
+        medium: base,
+        low: base,
+    };
+
+    // ZoneRenderer.cpp:93-96 — `nameLength` is the index of the last character
+    // above ' ', so a blank or single-character name returns before any sibling
+    // lookup (:105-106).
+    if id.len() < 2 {
+        return set;
+    }
+    let last = id.as_bytes()[id.len() - 1];
+    if !matches!(
+        last,
+        MMB_LOD_SUFFIX_HIGH | MMB_LOD_SUFFIX_MEDIUM | MMB_LOD_SUFFIX_LOW
+    ) {
+        return set;
+    }
+
+    let mut sibling = |suffix: u8| -> Option<usize> {
+        let mut bytes = id.as_bytes().to_vec();
+        *bytes.last_mut()? = suffix;
+        lookup(&String::from_utf8(bytes).ok()?)
+    };
+
+    if let Some(m) = sibling(MMB_LOD_SUFFIX_MEDIUM) {
+        set = MmbLodSet {
+            high: Some(m),
+            medium: Some(m),
+            low: Some(m),
+        };
+    }
+    if let Some(h) = sibling(MMB_LOD_SUFFIX_HIGH) {
+        set.high = Some(h);
+        set.medium = set.medium.or(Some(h));
+        set.low = set.low.or(Some(h));
+    }
+    if let Some(l) = sibling(MMB_LOD_SUFFIX_LOW) {
+        set.low = Some(l);
+        set.high = set.high.or(Some(l));
+        set.medium = set.medium.or(Some(l));
+    }
+    set
+}
+
+/// [`resolve_mmb_lod_set_with`] over the same name table [`resolve_mmb_index`] reads.
+/// Siblings resolve by exact (or zone-prefixed) name only: retail's
+/// `BlockManager.GetByName` is a name equality test, so the trailing-substring
+/// ladder `resolve_mmb_indices` falls back on — a Kuluu affordance for placement ids
+/// no MMB header spells out — must not be allowed to bind an unrelated mesh as a
+/// LOD variant.
+pub fn resolve_mmb_lod_set(
+    placement_id: &str,
+    zone_prefix: &str,
+    mmb_asset_names: &[String],
+) -> MmbLodSet {
+    let id = placement_id.trim_end();
+    resolve_mmb_lod_set_with(placement_id, |name| {
+        if name == id {
+            resolve_mmb_index(name, zone_prefix, mmb_asset_names)
+        } else {
+            resolve_mmb_index_exact(name, zone_prefix, mmb_asset_names)
+        }
+    })
+}
+
+fn resolve_mmb_index_exact(
+    name: &str,
+    zone_prefix: &str,
+    mmb_asset_names: &[String],
+) -> Option<usize> {
+    let exact = mmb_asset_names
+        .iter()
+        .position(|n| n.trim_end() == name.trim_end());
+    if exact.is_some() {
+        return exact;
+    }
+    let mut prefixed = String::with_capacity(zone_prefix.len() + name.len());
+    prefixed.push_str(zone_prefix);
+    prefixed.push_str(name.trim_end());
+    mmb_asset_names
+        .iter()
+        .position(|n| n.trim_end() == prefixed)
+}
+
+/// research/XIClient/src/XIClient/source/Rendering/ZoneRenderer.cpp:619-641
+/// — `ZoneRenderer::SetRenderTypes`. The static zone pass draws a chunk only when
+/// `RenderType > 1` (ZoneRenderer.cpp:990 quadtree leaf, :2662 flat block list).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum MmbRenderType {
+    /// `BlockID != 0` — a FourCC-keyed chunk (doors `_*`, elevators `@*`, and the
+    /// other RID/sub-model families). Retail hands these to the trigger/sub-model
+    /// renderer, so the static pass skips them (ZoneRenderer.cpp:632-633,
+    /// ZoneLayoutData.cpp:55-65).
+    Keyed = 0,
+    /// The chunk is the exterior placeholder for the sub-area that is currently
+    /// active, so the interior DAT is standing in for it
+    /// (ZoneRenderer.cpp:635-636).
+    SuppressedPlaceholder = 1,
+    /// Ordinary static zone geometry (ZoneRenderer.cpp:629).
+    Static = 2,
+}
+
+/// ZoneRenderer.cpp:990, :2662 — `RenderType > 1`.
+const MMB_RENDER_TYPE_DRAW_MIN: u8 = 2;
+
+impl MmbRenderType {
+    /// `active_sub_area` is the sub-area currently swapped in, `None` when the
+    /// player is in the open zone. Retail keeps it as `CollisionManager::field_4`,
+    /// sentinel `-1` for "none" (ZoneRenderer.cpp:172, :666), which no placement's
+    /// `sub_area_link` can equal.
+    pub fn classify(p: &MmbPlacement, active_sub_area: Option<u32>) -> Self {
+        let mut rt = MmbRenderType::Static;
+        if p.block_id != 0 {
+            rt = MmbRenderType::Keyed;
+        }
+        // `sub_area_link == 0` is "not a placeholder", never a sub-area id
+        // (research/cexi-docs/zone/subareas.md:76-84), so a zero here must not
+        // sweep out every ordinary chunk the way retail's `-1` sentinel cannot.
+        if active_sub_area.is_some_and(|a| a != 0 && p.sub_area_link == a) {
+            rt = MmbRenderType::SuppressedPlaceholder;
+        }
+        rt
+    }
+
+    pub fn is_drawn(self) -> bool {
+        self as u8 >= MMB_RENDER_TYPE_DRAW_MIN
+    }
+}
+
+/// Per-placement visibility for one MZB, parallel to `placements`.
+///
+/// Retail reaches a placement through one of two passes, so neither alone is the
+/// answer: the static pass keeps `RenderType > 1` (ZoneRenderer.cpp:990, :2662),
+/// and `DrawUnderscoreAtStructs` (ZoneRenderer.cpp:2703) then draws the first
+/// [`UNDERSCORE_AT_GROUP_MAX_SUBCHUNKS`] members of every `_`/`@` FourCC group
+/// without consulting `RenderType`. What is left invisible is therefore the
+/// RenderType 0/1 chunks owned by some *other* subsystem — zone-line entrance
+/// stand-ins (`en00`, `ent1`), event geometry (`ice1`, `cv10`) and the sub-area
+/// placeholders.
+pub fn drawn_placements(placements: &[MmbPlacement], active_sub_area: Option<u32>) -> Vec<bool> {
+    let mut drawn: Vec<bool> = placements
+        .iter()
+        .map(|p| MmbRenderType::classify(p, active_sub_area).is_drawn())
+        .collect();
+
+    let mut group_seen: HashMap<u32, usize> = HashMap::new();
+    for (i, p) in placements.iter().enumerate() {
+        if !p.in_underscore_at_group() {
+            continue;
+        }
+        let seen = group_seen.entry(p.block_id).or_insert(0);
+        if *seen < UNDERSCORE_AT_GROUP_MAX_SUBCHUNKS {
+            drawn[i] = true;
+        }
+        *seen += 1;
+    }
+    drawn
 }
 
 pub fn parse_mmb_placements(body: &[u8], header: &MzbHeader) -> Result<Vec<MmbPlacement>> {
@@ -797,12 +1178,94 @@ pub fn parse_mmb_placements(body: &[u8], header: &MzbHeader) -> Result<Vec<MmbPl
             lod_near: f(PL_LOD_NEAR),
             lod_mid: f(PL_LOD_MID),
             lod_far: f(PL_LOD_FAR),
+            special_effects: rec[PL_SPECIAL_EFFECTS],
             area_resource_id: d(PL_AREA_RESOURCE_ID),
             sub_area_link: d(PL_SUB_AREA_LINK),
             light_references,
         });
     }
     Ok(out)
+}
+
+/// research/XIClient/src/XIClient/include/Resource/Derived/ZoneBlockFormat.h:139-143
+/// — `LightBindingEntry` is `{ int LightID; ManagedLight* Light; char more[68]; }`.
+/// Only `LightID` is authored; the rest is runtime state retail fills in place
+/// after load, and it measures zero in the shipped files.
+const LIGHT_BINDING_ENTRY_LEN: usize = 0x4C;
+
+/// ZoneRenderer.cpp:257-268 (`SetupLightBindings`) walks the table for
+/// `sizeof(LightPool) / sizeof(LightPool[0])` entries — ZoneRenderer.h:91 sizes
+/// `LightPool` at 256.
+const LIGHT_BINDING_TABLE_MAX: usize = 256;
+
+/// ZoneRenderer.cpp:305 — `(managedLight->LightID & 0xFF) == 99` drops the
+/// binding. 99 is ASCII `c`, the first character of the little-endian FourCC and
+/// the prefix of the character-light Generator names.
+const LIGHT_ID_CHARACTER_PREFIX: u8 = b'c';
+
+/// FourCC of a light-emitting Generator chunk (`LightID` in
+/// Rendering/Light/ManagedLight.h:6), little-endian like every other DAT FourCC.
+pub type LightId = u32;
+
+/// The zone's authored light table: `LightID`s in binding order, so a
+/// placement's 1-based [`MmbPlacement::light_references`] index it directly.
+/// Empty when the file ships no lighting section (ZoneRenderer.cpp:383 gates on
+/// `LightingOffset != 0 && GetFormatVersion() >= 18`).
+///
+/// Retail reads a fixed [`LIGHT_BINDING_TABLE_MAX`] entries; we stop at the end
+/// of the decrypted body instead, which is the same table for every shipped file
+/// (measured: DAT 233 fills 251 of the 256 and the tail is zeroed).
+pub fn parse_light_bindings(body: &[u8], header: &MzbHeader) -> Vec<LightId> {
+    if !header.has_light_bindings() {
+        return Vec::new();
+    }
+    let base = header.lighting_offset as usize;
+    let mut out = Vec::new();
+    for i in 0..LIGHT_BINDING_TABLE_MAX {
+        let off = base.saturating_add(i * LIGHT_BINDING_ENTRY_LEN);
+        if off + LIGHT_BINDING_ENTRY_LEN > body.len() {
+            break;
+        }
+        out.push(u32::from_le_bytes([
+            body[off],
+            body[off + 1],
+            body[off + 2],
+            body[off + 3],
+        ]));
+    }
+    while out.last() == Some(&0) {
+        out.pop();
+    }
+    out
+}
+
+/// The lights retail binds into one chunk's four D3D slots
+/// (ZoneRenderer.cpp:284-313 `UpdateBlockLightSettings`): slot `i` takes
+/// `lightBindings[LightReferences[i] - 1]`, and a slot is left dark when
+///
+/// - the reference is 0 (`LightEnable(.., false)`),
+/// - it points past the table (no `ManagedLight` was ever allocated), or
+/// - the bound `LightID`'s low byte is 99 — the character-light prefix.
+///
+/// Static per chunk, so the set never changes with the camera.
+pub fn resolve_chunk_lights(
+    light_references: &[u32; LIGHT_REFERENCE_COUNT],
+    bindings: &[LightId],
+) -> [Option<LightId>; LIGHT_REFERENCE_COUNT] {
+    let mut out = [None; LIGHT_REFERENCE_COUNT];
+    for (slot, &reference) in light_references.iter().enumerate() {
+        let Some(index) = (reference as usize).checked_sub(1) else {
+            continue;
+        };
+        let Some(&light_id) = bindings.get(index) else {
+            continue;
+        };
+        if light_id == 0 || light_id.to_le_bytes()[0] == LIGHT_ID_CHARACTER_PREFIX {
+            continue;
+        }
+        out[slot] = Some(light_id);
+    }
+    out
 }
 
 pub fn resolve_mmb_index(
@@ -1342,6 +1805,7 @@ mod tests {
         put_f32(&mut body, PL_LOD_NEAR, 10.0);
         put_f32(&mut body, PL_LOD_MID, 20.0);
         put_f32(&mut body, PL_LOD_FAR, 30.0);
+        body[rec + PL_SPECIAL_EFFECTS] = SPECIAL_EFFECTS_LOD_RENDERING | 0x04;
         put_u32(&mut body, PL_AREA_RESOURCE_ID, 0x1234_5678);
         put_u32(&mut body, PL_SUB_AREA_LINK, 0x1CE);
         for k in 0..LIGHT_REFERENCE_COUNT {
@@ -1363,6 +1827,8 @@ mod tests {
         assert_eq!(p.scale[0], 5.0);
         assert_eq!(p.block_id, 0xAABB_CCDD);
         assert_eq!((p.lod_near, p.lod_mid, p.lod_far), (10.0, 20.0, 30.0));
+        assert_eq!(p.special_effects, SPECIAL_EFFECTS_LOD_RENDERING | 0x04);
+        assert!(p.uses_lod_rendering());
         assert_eq!(p.area_resource_id, 0x1234_5678);
         assert_eq!(p.sub_area_link, 0x1CE);
         assert_eq!(p.light_references, [1, 2, 3, 4]);
@@ -1379,6 +1845,120 @@ mod tests {
         assert_eq!(
             p[0].block_id, 0xAABB_CCDD,
             "everything below 0x54 is version-independent"
+        );
+    }
+
+    fn synth_light_binding_body(version: u8, light_ids: &[&[u8; 4]]) -> Vec<u8> {
+        let table_at = MZB_HEADER_LEN + PLACEMENT_RECORD_LEN;
+        let entries = light_ids.len().max(LIGHT_BINDING_TABLE_MAX);
+        let mut body = vec![0u8; table_at + entries * LIGHT_BINDING_ENTRY_LEN];
+        let size_and_version = (body.len() as u32) | ((version as u32) << 24);
+        body[0..4].copy_from_slice(&size_and_version.to_le_bytes());
+        body[4..8].copy_from_slice(&1u32.to_le_bytes());
+        body[HDR_LIGHTING_OFFSET..HDR_LIGHTING_OFFSET + 4]
+            .copy_from_slice(&(table_at as u32).to_le_bytes());
+        for (i, id) in light_ids.iter().enumerate() {
+            let off = table_at + i * LIGHT_BINDING_ENTRY_LEN;
+            body[off..off + 4].copy_from_slice(*id);
+        }
+        body
+    }
+
+    #[test]
+    fn light_binding_table_reads_ids_at_the_entry_stride() {
+        let body = synth_light_binding_body(27, &[b"li12", b"l421", b"lmb0"]);
+        let h = MzbHeader::parse(&body).unwrap();
+        assert!(h.has_light_bindings());
+        assert_eq!(
+            parse_light_bindings(&body, &h),
+            vec![
+                u32::from_le_bytes(*b"li12"),
+                u32::from_le_bytes(*b"l421"),
+                u32::from_le_bytes(*b"lmb0"),
+            ],
+            "one LightID per 0x4C-byte LightBindingEntry, zero tail dropped"
+        );
+    }
+
+    #[test]
+    fn light_binding_table_needs_offset_and_version_18() {
+        let mut body = synth_light_binding_body(LIGHT_BINDING_MIN_VERSION - 1, &[b"li12"]);
+        let old = MzbHeader::parse(&body).unwrap();
+        assert!(parse_light_bindings(&body, &old).is_empty());
+
+        body[3] = LIGHT_BINDING_MIN_VERSION;
+        let modern = MzbHeader::parse(&body).unwrap();
+        assert_eq!(parse_light_bindings(&body, &modern).len(), 1);
+
+        body[HDR_LIGHTING_OFFSET..HDR_LIGHTING_OFFSET + 4].copy_from_slice(&0u32.to_le_bytes());
+        let no_section = MzbHeader::parse(&body).unwrap();
+        assert!(parse_light_bindings(&body, &no_section).is_empty());
+    }
+
+    // ZoneRenderer.cpp:257-268 walks exactly LightPool-many entries; a file long
+    // enough to hold more must not grow the table past the pool.
+    #[test]
+    fn light_binding_table_stops_at_the_light_pool_size() {
+        let ids = vec![b"li12"; LIGHT_BINDING_TABLE_MAX + 8];
+        let body = synth_light_binding_body(27, &ids);
+        let h = MzbHeader::parse(&body).unwrap();
+        assert_eq!(
+            parse_light_bindings(&body, &h).len(),
+            LIGHT_BINDING_TABLE_MAX
+        );
+    }
+
+    #[test]
+    fn chunk_light_references_are_one_based_table_indices() {
+        let bindings = [
+            u32::from_le_bytes(*b"li12"),
+            u32::from_le_bytes(*b"l421"),
+            u32::from_le_bytes(*b"lmb0"),
+        ];
+        assert_eq!(
+            resolve_chunk_lights(&[3, 1, 0, 2], &bindings),
+            [
+                Some(bindings[2]),
+                Some(bindings[0]),
+                None,
+                Some(bindings[1])
+            ],
+            "slot i takes bindings[refs[i] - 1]; reference 0 leaves the slot dark"
+        );
+    }
+
+    #[test]
+    fn chunk_light_reference_past_the_table_stays_dark() {
+        let bindings = [u32::from_le_bytes(*b"li12")];
+        assert_eq!(
+            resolve_chunk_lights(&[2, 99, 1, 0], &bindings),
+            [None, None, Some(bindings[0]), None],
+            "no ManagedLight was allocated for an entry the table never had"
+        );
+    }
+
+    #[test]
+    fn chunk_light_binding_to_an_empty_entry_stays_dark() {
+        let bindings = [0, u32::from_le_bytes(*b"li12")];
+        assert_eq!(
+            resolve_chunk_lights(&[1, 2, 0, 0], &bindings),
+            [None, Some(bindings[1]), None, None],
+            "LightID 0 is an unallocated pool slot (ZoneRenderer.cpp:260)"
+        );
+    }
+
+    // ZoneRenderer.cpp:305 — `(LightID & 0xFF) == 99`, i.e. the `c` prefix the
+    // character lights carry (DAT 101 ships `c001` next to its `lt0*` lamps).
+    #[test]
+    fn character_light_ids_are_never_bound_to_a_chunk() {
+        let bindings = [
+            u32::from_le_bytes(*b"c001"),
+            u32::from_le_bytes(*b"lt01"),
+            u32::from_le_bytes(*b"cccc"),
+        ];
+        assert_eq!(
+            resolve_chunk_lights(&[1, 2, 3, 0], &bindings),
+            [None, Some(bindings[1]), None, None]
         );
     }
 
@@ -1430,5 +2010,448 @@ mod tests {
         body.truncate(body.len() - 1);
         let h = MzbHeader::parse(&body).unwrap();
         assert!(parse_mmb_placements(&body, &h).is_err());
+    }
+
+    fn placement(block_id: u32, sub_area_link: u32) -> MmbPlacement {
+        MmbPlacement {
+            id: [0u8; PLACEMENT_NAME_LEN],
+            trans: [0.0; 3],
+            rot: [0.0; 3],
+            scale: [1.0; 3],
+            block_id,
+            lod_near: 0.0,
+            lod_mid: 0.0,
+            lod_far: 0.0,
+            special_effects: 0,
+            area_resource_id: 0,
+            sub_area_link,
+            light_references: [0u32; LIGHT_REFERENCE_COUNT],
+        }
+    }
+
+    fn fourcc(s: &[u8; 4]) -> u32 {
+        u32::from_le_bytes(*s)
+    }
+
+    fn area_placement(block_id: u32, area: &[u8; 4]) -> MmbPlacement {
+        let mut p = placement(block_id, 0);
+        p.area_resource_id = fourcc(area);
+        p
+    }
+
+    // ZoneLayoutData.cpp:139 — `BlockID == 0 || (char)BlockID == '_'`.
+    #[test]
+    fn area_binding_survives_only_unkeyed_and_underscore_blocks() {
+        assert_eq!(
+            area_placement(0, b"ev01").effective_area_resource_id(),
+            fourcc(b"ev01")
+        );
+        assert_eq!(
+            area_placement(fourcc(b"_6e1"), b"ev01").effective_area_resource_id(),
+            fourcc(b"ev01")
+        );
+        // ZoneLayoutData.cpp:158 — retail zeroes the field on any other keyed
+        // block, so it draws with the zone-wide environment.
+        assert_eq!(
+            area_placement(fourcc(b"@abc"), b"ev01").effective_area_resource_id(),
+            0
+        );
+        assert_eq!(
+            area_placement(fourcc(b"sea1"), b"ev01").effective_area_resource_id(),
+            0
+        );
+        assert_eq!(placement(0, 0).effective_area_resource_id(), 0);
+    }
+
+    // ZoneLayoutData.cpp:141-153 — one entry per distinct surviving FourCC, in
+    // placement order; retail allocates one XiArea per entry.
+    #[test]
+    fn area_resource_id_list_is_deduped_in_placement_order() {
+        let placements = [
+            area_placement(0, b"ev02"),
+            area_placement(fourcc(b"sea1"), b"ev09"),
+            area_placement(0, b"ev01"),
+            area_placement(fourcc(b"_6e1"), b"ev02"),
+            placement(0, 0),
+        ];
+        assert_eq!(
+            area_resource_ids(&placements),
+            vec![fourcc(b"ev02"), fourcc(b"ev01")]
+        );
+    }
+
+    #[test]
+    fn area_resource_id_reads_a_dat_directory_name_as_the_placement_field() {
+        assert_eq!(
+            area_resource_id_from_dir_name(b"ev01"),
+            area_placement(0, b"ev01").effective_area_resource_id()
+        );
+    }
+
+    fn lod_placement(near: f32, mid: f32, far: f32) -> MmbPlacement {
+        let mut p = placement(0, 0);
+        p.lod_near = near;
+        p.lod_mid = mid;
+        p.lod_far = far;
+        p
+    }
+
+    // ZoneRenderer.cpp:492-504 — the comparison space is squared distance, so the
+    // authored (10, 100, 1000) triple that dominates retail's zones switches at
+    // 100 / 10 000 / 1 000 000, not at 10 / 100 / 1000.
+    #[test]
+    fn lod_thresholds_are_squared_distances() {
+        let t = lod_placement(10.0, 100.0, 1000.0).lod_thresholds();
+        assert_eq!(
+            t,
+            MmbLodThresholds {
+                near_sq: 100.0,
+                mid_sq: 10_000.0,
+                far_sq: 1_000_000.0,
+            }
+        );
+    }
+
+    // ZoneRenderer.cpp:499-502. Retail zones ship this inversion in bulk (e.g. the
+    // (25, 0, 60) triple), and the clamp is what keeps it from selecting Medium for
+    // everything closer than near.
+    #[test]
+    fn mid_below_near_collapses_onto_near() {
+        let t = lod_placement(25.0, 0.0, 60.0).lod_thresholds();
+        assert_eq!(t.mid_sq, t.near_sq);
+        assert_eq!(t.near_sq, 625.0);
+
+        assert_eq!(t.select(624.0), MmbLodLevel::High);
+        assert_eq!(t.select(625.0), MmbLodLevel::High);
+        assert_eq!(t.select(626.0), MmbLodLevel::Low);
+    }
+
+    // ZoneRenderer.cpp:1085-1094 — both comparisons are `<=`, so a chunk sitting
+    // exactly on a threshold takes the *more* detailed variant.
+    #[test]
+    fn lod_band_edges_are_inclusive() {
+        let t = lod_placement(10.0, 100.0, 1000.0).lod_thresholds();
+        assert_eq!(t.select(0.0), MmbLodLevel::High);
+        assert_eq!(t.select(100.0), MmbLodLevel::High);
+        assert_eq!(t.select(100.1), MmbLodLevel::Medium);
+        assert_eq!(t.select(10_000.0), MmbLodLevel::Medium);
+        assert_eq!(t.select(10_000.1), MmbLodLevel::Low);
+    }
+
+    // ZoneRenderer.cpp:1057-1064 — `FarThresholdSquared` is the draw-distance cull
+    // only for chunks flagged UsesLodRendering; the ~10k retail placements authored
+    // with far == 0 clear the flag and fall through to the global draw distance,
+    // so reading far as an unconditional cull would erase them.
+    #[test]
+    fn far_threshold_culls_only_lod_flagged_chunks() {
+        let mut p = lod_placement(10.0, 100.0, 0.0);
+        assert!(!p.uses_lod_rendering());
+
+        p.special_effects = SPECIAL_EFFECTS_LOD_RENDERING;
+        assert!(p.uses_lod_rendering());
+        let t = p.lod_thresholds();
+        assert!(beyond_lod_far_cull(0.1, t));
+        assert!(!beyond_lod_far_cull(0.0, t));
+
+        let near_prop = lod_placement(10.0, 100.0, 40.0).lod_thresholds();
+        assert!(!beyond_lod_far_cull(1_600.0, near_prop));
+        assert!(beyond_lod_far_cull(1_600.1, near_prop));
+    }
+
+    fn names(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    // ZoneRenderer.cpp:108-143 — the sibling names are the placement name with its
+    // last character swapped for h / m / l.
+    #[test]
+    fn lod_set_binds_the_h_m_l_siblings() {
+        let n = names(&["roofh", "roofm", "roofl"]);
+        assert_eq!(
+            resolve_mmb_lod_set("roofl", "", &n),
+            MmbLodSet {
+                high: Some(0),
+                medium: Some(1),
+                low: Some(2),
+            }
+        );
+    }
+
+    // ZoneRenderer.cpp:117-121 — a found `m` sibling overwrites all three slots,
+    // unlike `h`/`l` which only backfill the empty ones.
+    #[test]
+    fn medium_sibling_overwrites_every_slot() {
+        let n = names(&["roofm"]);
+        assert_eq!(
+            resolve_mmb_lod_set("roofh", "", &n),
+            MmbLodSet {
+                high: Some(0),
+                medium: Some(0),
+                low: Some(0),
+            }
+        );
+    }
+
+    // ZoneRenderer.cpp:125-143 — with no `m` sibling the medium slot keeps whatever
+    // the base name resolved to, so a two-variant family draws the low mesh in the
+    // medium band.
+    #[test]
+    fn missing_medium_sibling_leaves_the_base_mesh_in_the_medium_band() {
+        let n = names(&["roofh", "roofl"]);
+        assert_eq!(
+            resolve_mmb_lod_set("roofl", "", &n),
+            MmbLodSet {
+                high: Some(0),
+                medium: Some(1),
+                low: Some(1),
+            }
+        );
+    }
+
+    // ZoneRenderer.cpp:100-106 — a name that does not end in h/m/l, and a name too
+    // short to have a swappable last character, never take the sibling path.
+    #[test]
+    fn lod_suffix_rule_is_a_blind_last_character_swap() {
+        let n = names(&["wall", "walm", "walh"]);
+        assert_eq!(
+            resolve_mmb_lod_set("wall", "", &n),
+            MmbLodSet {
+                high: Some(2),
+                medium: Some(1),
+                low: Some(0),
+            },
+            "retail swaps the last character blind: any name ending in l is a family",
+        );
+
+        let n = names(&["door", "doom", "dooh"]);
+        assert_eq!(
+            resolve_mmb_lod_set("door", "", &n),
+            MmbLodSet {
+                high: Some(0),
+                medium: Some(0),
+                low: Some(0),
+            }
+        );
+
+        let n = names(&["h", "m", "l"]);
+        assert_eq!(
+            resolve_mmb_lod_set("h", "", &n),
+            MmbLodSet {
+                high: Some(0),
+                medium: Some(0),
+                low: Some(0),
+            },
+            "nameLength <= 0 returns before any sibling lookup",
+        );
+    }
+
+    // Retail's BlockManager.GetByName is an exact name compare; the trailing-substring
+    // ladder resolve_mmb_indices adds must not invent a sibling out of an unrelated
+    // mesh whose name merely ends the same way.
+    #[test]
+    fn siblings_do_not_bind_through_the_fuzzy_name_ladder() {
+        let n = names(&["roofh", "towerroofm"]);
+        assert_eq!(
+            resolve_mmb_index("roofm", "", &n),
+            Some(1),
+            "the fuzzy ladder does bind roofm to towerroofm by trailing substring",
+        );
+        assert_eq!(
+            resolve_mmb_lod_set("roofh", "", &n),
+            MmbLodSet {
+                high: Some(0),
+                medium: Some(0),
+                low: Some(0),
+            }
+        );
+    }
+
+    #[test]
+    fn lod_set_reports_distinct_meshes_and_their_bands() {
+        let set = MmbLodSet {
+            high: Some(7),
+            medium: Some(9),
+            low: Some(9),
+        };
+        assert_eq!(set.distinct_indices(), vec![7, 9]);
+        assert_eq!(set.level_mask(7), MmbLodLevel::High.mask());
+        assert_eq!(
+            set.level_mask(9),
+            MmbLodLevel::Medium.mask() | MmbLodLevel::Low.mask()
+        );
+        assert_eq!(set.level_mask(4), 0);
+    }
+
+    /// Northern San d'Oria — measured to resolve 183 multi-variant placements, so
+    /// the sibling rule is exercised against shipped data rather than only synthetic
+    /// names. (Its southern neighbour ships none at all.)
+    const LOD_FAMILY_ZONE_ID: u16 = 231;
+
+    // Retail zones actually ship the sibling families this rule depends on; without
+    // it every "…l"-named placement renders its low mesh at point-blank range.
+    #[test]
+    fn retail_zone_has_resolvable_lod_families() {
+        let Some(root) = crate::archive::open_test_install() else {
+            eprintln!("skipping: no FFXI install");
+            return;
+        };
+        let file_id = crate::zone_dat::zone_id_to_mzb_file_id(LOD_FAMILY_ZONE_ID).unwrap();
+        let bytes = std::fs::read(root.resolve(file_id).unwrap().path_under(root.root())).unwrap();
+        let chunks: Vec<_> = crate::walk(&bytes).filter_map(Result::ok).collect();
+
+        let mut mmb_names: Vec<String> = Vec::new();
+        for c in &chunks {
+            if c.kind != crate::ChunkKind::Mmb as u8 {
+                continue;
+            }
+            let Ok(dec) = crate::mmb::decrypt(c.data) else {
+                continue;
+            };
+            let Ok(h) = crate::mmb::MmbHeader::parse(&dec) else {
+                continue;
+            };
+            mmb_names.push(h.zone_mesh_name());
+        }
+        let prefix = infer_zone_prefix(&mmb_names);
+
+        let mzb = chunks
+            .iter()
+            .find(|c| c.kind == crate::ChunkKind::Mzb as u8)
+            .unwrap();
+        let plain = decrypt(mzb.data).unwrap();
+        let header = MzbHeader::parse(&plain).unwrap();
+        let placements = parse_mmb_placements(&plain, &header).unwrap();
+
+        let multi = placements
+            .iter()
+            .filter(|p| {
+                resolve_mmb_lod_set(p.id_str().trim_end(), &prefix, &mmb_names)
+                    .distinct_indices()
+                    .len()
+                    > 1
+            })
+            .count();
+        assert!(
+            multi > 0,
+            "no placement in zone {LOD_FAMILY_ZONE_ID} resolved more than one LOD mesh"
+        );
+    }
+
+    #[test]
+    fn set_render_types_matches_retail() {
+        const SUB_AREA: u32 = 0x1CE;
+        let plain = placement(0, 0);
+        assert_eq!(MmbRenderType::classify(&plain, None), MmbRenderType::Static);
+        assert!(MmbRenderType::classify(&plain, None).is_drawn());
+
+        let keyed = placement(fourcc(b"en00"), 0);
+        assert_eq!(MmbRenderType::classify(&keyed, None), MmbRenderType::Keyed);
+        assert!(!MmbRenderType::classify(&keyed, None).is_drawn());
+
+        let placeholder = placement(0, SUB_AREA);
+        assert_eq!(
+            MmbRenderType::classify(&placeholder, None),
+            MmbRenderType::Static,
+        );
+        assert_eq!(
+            MmbRenderType::classify(&placeholder, Some(SUB_AREA + 1)),
+            MmbRenderType::Static,
+        );
+        assert_eq!(
+            MmbRenderType::classify(&placeholder, Some(SUB_AREA)),
+            MmbRenderType::SuppressedPlaceholder,
+        );
+        assert!(!MmbRenderType::classify(&placeholder, Some(SUB_AREA)).is_drawn());
+
+        // ZoneRenderer.cpp:631-638 tests BlockID first and the sub-area second, so
+        // the sub-area verdict wins when both hold.
+        let both = placement(fourcc(b"en00"), SUB_AREA);
+        assert_eq!(
+            MmbRenderType::classify(&both, Some(SUB_AREA)),
+            MmbRenderType::SuppressedPlaceholder,
+        );
+    }
+
+    #[test]
+    fn a_zero_sub_area_link_never_matches_an_active_sub_area() {
+        let p = placement(0, 0);
+        assert_eq!(MmbRenderType::classify(&p, Some(0)), MmbRenderType::Static);
+    }
+
+    #[test]
+    fn underscore_and_at_groups_survive_the_gate() {
+        let placements = [
+            placement(0, 0),
+            placement(fourcc(b"_6e0"), 0),
+            placement(fourcc(b"@ab1"), 0),
+            placement(fourcc(b"ent0"), 0),
+        ];
+        assert_eq!(
+            drawn_placements(&placements, None),
+            vec![true, true, true, false],
+        );
+    }
+
+    #[test]
+    fn underscore_group_draws_only_its_first_four_subchunks() {
+        let door = fourcc(b"_6e0");
+        let placements: Vec<MmbPlacement> = (0..UNDERSCORE_AT_GROUP_MAX_SUBCHUNKS + 2)
+            .map(|_| placement(door, 0))
+            .collect();
+        let drawn = drawn_placements(&placements, None);
+        assert_eq!(
+            drawn.iter().filter(|d| **d).count(),
+            UNDERSCORE_AT_GROUP_MAX_SUBCHUNKS,
+        );
+        assert!(drawn[..UNDERSCORE_AT_GROUP_MAX_SUBCHUNKS]
+            .iter()
+            .all(|d| *d));
+        assert!(!drawn[UNDERSCORE_AT_GROUP_MAX_SUBCHUNKS..]
+            .iter()
+            .any(|d| *d));
+    }
+
+    #[test]
+    fn a_suppressed_placeholder_that_is_also_a_door_still_draws() {
+        const SUB_AREA: u32 = 0x1CE;
+        let placements = [placement(fourcc(b"_6e0"), SUB_AREA)];
+        assert_eq!(
+            MmbRenderType::classify(&placements[0], Some(SUB_AREA)),
+            MmbRenderType::SuppressedPlaceholder,
+        );
+        assert_eq!(drawn_placements(&placements, Some(SUB_AREA)), vec![true]);
+    }
+
+    /// Lower Jeuno's 82 RenderType-0 chunks are 68 door leaves (`_6e*`) plus 14
+    /// zone-line entrance stand-ins (`ent0`..`entd`, meshes `eml0`..`emlc`).
+    const RENDER_TYPE_GATE_ZONE_ID: u16 = 230;
+    const RENDER_TYPE_GATE_ZONE_HIDDEN: usize = 14;
+
+    #[test]
+    fn retail_zone_gates_zone_line_standins_but_keeps_doors() {
+        let Some(root) = crate::archive::open_test_install() else {
+            eprintln!("skipping: no FFXI install");
+            return;
+        };
+        let body = zone_mzb_body(&root, RENDER_TYPE_GATE_ZONE_ID);
+        let h = MzbHeader::parse(&body).unwrap();
+        let placements = parse_mmb_placements(&body, &h).unwrap();
+        let drawn = drawn_placements(&placements, None);
+
+        let hidden: Vec<&MmbPlacement> = placements
+            .iter()
+            .zip(&drawn)
+            .filter(|(_, d)| !**d)
+            .map(|(p, _)| p)
+            .collect();
+        assert_eq!(hidden.len(), RENDER_TYPE_GATE_ZONE_HIDDEN);
+        for p in &hidden {
+            assert_ne!(p.block_id, 0, "{}", p.id_str());
+            assert!(!p.in_underscore_at_group(), "{}", p.id_str());
+        }
+        assert!(placements
+            .iter()
+            .zip(&drawn)
+            .any(|(p, d)| p.in_underscore_at_group() && *d));
     }
 }

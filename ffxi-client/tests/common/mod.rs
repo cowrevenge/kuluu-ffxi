@@ -12,22 +12,67 @@ pub const DEFAULT_DB_URL: &str = "mysql://xiadmin:password@127.0.0.1:3306/xidb";
 
 const FIXTURE_PASSWORD: &str = "TestPass!1234";
 
-const CHAR_TABLES: &[&str] = &[
-    // Populated by LSB's `char_insert` trigger on `chars`; must be cleaned
-    // explicitly or the next MAX(charid)+1 insert hits a 1062 duplicate.
+// vendor/server/sql/triggers.sql `char_insert` (BEFORE INSERT ON chars).
+// A leftover row in any of these makes the next COALESCE(MAX(charid),…)+1
+// insert fail 1062 from inside the trigger, reported against `chars`.
+const TRIGGER_CHILD_TABLES: &[&str] = &[
+    "char_equip",
+    "char_exp",
     "char_history",
     "char_inventory",
-    "char_storage",
-    "char_profile",
-    "char_unlocks",
-    "char_points",
     "char_jobs",
-    "char_flags",
-    "char_exp",
-    "char_stats",
-    "char_look",
-    "chars",
+    "char_pet",
+    "char_points",
+    "char_profile",
+    "char_storage",
+    "char_unlocks",
 ];
+
+// Rows this fixture inserts on top of the trigger's. `char_flags` appears in
+// neither trigger in vendor/server/sql/triggers.sql, so only this list frees it.
+const FIXTURE_CHILD_TABLES: &[&str] = &["char_flags", "char_look", "char_stats"];
+
+fn char_child_tables() -> impl Iterator<Item = &'static str> {
+    TRIGGER_CHILD_TABLES
+        .iter()
+        .chain(FIXTURE_CHILD_TABLES)
+        .copied()
+}
+
+// Fixture-owned name shape, emitted by `create` and matched by the tombstone
+// sweep. Nothing else in xidb may look like this.
+const FIXTURE_ACCOUNT_PREFIX: &str = "it_";
+const FIXTURE_CHARNAME_PREFIX: &str = "It";
+const FIXTURE_SUFFIX_HEX_DIGITS: usize = 6;
+
+// vendor/server/settings/default/map.lua:18 `MAX_TIME_LASTUPDATE = 60`: a map
+// session — and the charid it pins — outlives the client's last packet by this
+// many seconds (vendor/server/src/map/map_session_container.cpp:222). While it
+// is resident, LSB answers the lobby's CharZone by refreshing that session
+// instead of creating the pending session a fresh login needs
+// (vendor/server/src/map/ipc_client.cpp:196), so the new client's 0x00A is
+// dropped (map_networking.cpp:270) and it never zones in. The fixture therefore
+// parks its account as a tombstone rather than deleting it, so neither
+// MAX(accounts.id)+1 nor COALESCE(MAX(chars.charid),…)+1 can hand the same ids
+// to the next test while its session may still be resident.
+const LSB_MAX_TIME_LASTUPDATE_SECS: u32 = 60;
+// The tombstone has to outlive the session's *last packet*, not the account's
+// creation, so it carries a budget for the longest a live test runs.
+const FIXTURE_SESSION_BUDGET_SECS: u32 = 300;
+const TOMBSTONE_TTL_SECS: u32 = LSB_MAX_TIME_LASTUPDATE_SECS + FIXTURE_SESSION_BUDGET_SECS;
+
+fn fixture_name_suffix(nanos: u128) -> String {
+    let mask = (1u128 << (4 * FIXTURE_SUFFIX_HEX_DIGITS)) - 1;
+    format!(
+        "{:0width$x}",
+        nanos & mask,
+        width = FIXTURE_SUFFIX_HEX_DIGITS
+    )
+}
+
+fn fixture_login_pattern() -> String {
+    format!("^{FIXTURE_ACCOUNT_PREFIX}[0-9a-f]{{{FIXTURE_SUFFIX_HEX_DIGITS}}}$")
+}
 
 pub struct EphemeralChar {
     pub username: String,
@@ -42,14 +87,15 @@ impl EphemeralChar {
     pub async fn create(server_host: &str, auth_port: u16) -> Result<Self> {
         let db_url = std::env::var("TEST_DB_URL").unwrap_or_else(|_| DEFAULT_DB_URL.to_string());
 
-        let suffix: u32 = (std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0)
-            & 0xFFFFFF) as u32;
+        let suffix = fixture_name_suffix(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0),
+        );
 
-        let username = format!("it_{suffix:06x}");
-        let charname = format!("It{suffix:06x}");
+        let username = format!("{FIXTURE_ACCOUNT_PREFIX}{suffix}");
+        let charname = format!("{FIXTURE_CHARNAME_PREFIX}{suffix}");
 
         let password = FIXTURE_PASSWORD.to_string();
 
@@ -81,6 +127,13 @@ impl EphemeralChar {
 
         const MJOB: u8 = 1;
 
+        sweep_expired_tombstones(&mut conn)
+            .await
+            .context("sweeping expired fixture accounts before provisioning")?;
+        sweep_orphaned_child_rows(&mut conn)
+            .await
+            .context("sweeping orphaned char_* rows before provisioning")?;
+
         let charid = run_inserts(
             &mut conn, accid, &charname, POS_ZONE, NATION, GMLEVEL, FACE, RACE, SIZE, MJOB,
         )
@@ -99,28 +152,19 @@ impl EphemeralChar {
         })
     }
 
+    // Frees only the session row; the account (and the char + child rows it
+    // cascades to) is left as the id-reuse tombstone that
+    // `sweep_expired_tombstones` retires once TOMBSTONE_TTL_SECS have passed.
     pub async fn cleanup(&self) -> Result<()> {
         let mut conn = self.pool.get_conn().await.context("DB conn for cleanup")?;
 
-        for table in CHAR_TABLES.iter().rev() {
-            let stmt = format!("DELETE FROM {table} WHERE charid = ?");
-            stmt.with((self.charid,))
-                .ignore(&mut conn)
-                .await
-                .with_context(|| format!("DELETE FROM {table}"))?;
-        }
-
+        // Must go: LSB refuses the next login for an accid that still has a
+        // session row (vendor/server/src/login/data_session.cpp:427).
         "DELETE FROM accounts_sessions WHERE accid = ?"
             .with((self.accid,))
             .ignore(&mut conn)
             .await
             .context("DELETE FROM accounts_sessions")?;
-
-        "DELETE FROM accounts WHERE id = ?"
-            .with((self.accid,))
-            .ignore(&mut conn)
-            .await
-            .context("DELETE FROM accounts")?;
 
         Ok(())
     }
@@ -191,16 +235,74 @@ async fn run_inserts(
             .with_context(|| format!("INSERT INTO {table}"))?;
     }
 
-    "DELETE FROM char_inventory WHERE charid = ?"
-        .with((charid,))
-        .ignore(&mut *conn)
-        .await
-        .context("DELETE FROM char_inventory (pre-insert)")?;
-    "INSERT INTO char_inventory(charid) VALUES (?)"
-        .with((charid,))
-        .ignore(&mut *conn)
-        .await
-        .context("INSERT INTO char_inventory")?;
-
     Ok(charid)
+}
+
+// Retires tombstones whose map session cannot still be resident. Scoped by the
+// login shape this fixture emits, so a real account is never a candidate. One
+// DELETE frees the whole identity: LSB's `account_delete` trigger cascades to
+// `chars`, whose `char_delete` trigger cascades to the child tables
+// (vendor/server/sql/triggers.sql).
+async fn sweep_expired_tombstones(conn: &mut Conn) -> Result<()> {
+    "DELETE FROM accounts \
+     WHERE login REGEXP ? \
+       AND UNIX_TIMESTAMP(timecreate) < UNIX_TIMESTAMP() - ?"
+        .with((fixture_login_pattern(), TOMBSTONE_TTL_SECS))
+        .ignore(&mut *conn)
+        .await
+        .context("tombstone sweep on accounts")?;
+
+    let swept = conn.affected_rows();
+    if swept > 0 {
+        eprintln!("fixture: swept {swept} expired fixture account tombstone(s)");
+    }
+    Ok(())
+}
+
+// LSB's map server REPLACEs into char_history on save well after the client
+// drops (vendor/server/src/map/utils/charutils.cpp:7727), and a panicking test
+// never reaches cleanup() at all, so a previous run can leave child rows whose
+// `chars` row is gone. Sweeping them here is what keeps the `char_insert`
+// trigger from colliding when their charid comes back around.
+async fn sweep_orphaned_child_rows(conn: &mut Conn) -> Result<()> {
+    for table in char_child_tables() {
+        let stmt = format!(
+            "DELETE t FROM {table} AS t \
+             LEFT JOIN chars AS c ON c.charid = t.charid \
+             WHERE c.charid IS NULL"
+        );
+        conn.query_drop(&stmt)
+            .await
+            .with_context(|| format!("orphan sweep on {table}"))?;
+        let swept = conn.affected_rows();
+        if swept > 0 {
+            eprintln!("fixture: swept {swept} orphaned {table} row(s) with no chars row");
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod fixture_name_tests {
+    use super::*;
+
+    // The sweep matches names with a SQL REGEXP built from these same consts;
+    // this pins the emitter to the character class that pattern accepts.
+    #[test]
+    fn emitted_names_match_the_sweep_pattern() {
+        for nanos in [0u128, 1, 0x0f_ff_ff, u128::MAX] {
+            let suffix = fixture_name_suffix(nanos);
+            assert_eq!(suffix.len(), FIXTURE_SUFFIX_HEX_DIGITS);
+            assert!(suffix
+                .chars()
+                .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c)));
+
+            let login = format!("{FIXTURE_ACCOUNT_PREFIX}{suffix}");
+            assert!(login.starts_with(FIXTURE_ACCOUNT_PREFIX));
+            assert_eq!(
+                login.len(),
+                FIXTURE_ACCOUNT_PREFIX.len() + FIXTURE_SUFFIX_HEX_DIGITS
+            );
+        }
+    }
 }

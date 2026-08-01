@@ -41,7 +41,7 @@ use ffxi_viewer_core::{
     atmosphere::LastAtmosphereZone,
     audio::BgmSlots,
     configure_gizmo_render_layer,
-    dat_mzb::{LastAutoLoadedZone, MzbCollisionGeometry},
+    dat_mzb::{LastAutoLoadedZone, MzbCollisionGeometry, ZoneAreaMap, ZoneChunkLightMap},
     hud::zone_flash::ZoneNameResolver,
     scene::TrackedEntities,
     setup_world, setup_zone_line_assets, spawn_camera, system_cursor_icon, CursorStyle, EventLog,
@@ -801,7 +801,12 @@ fn despawn_ingame_entities(
     mut scene: ResMut<SceneState>,
     mut events: ResMut<EventLog>,
     mut tracked: ResMut<TrackedEntities>,
-    mut collision: ResMut<MzbCollisionGeometry>,
+    // Tupled to stay inside Bevy's 16-param system limit.
+    mut zone_geom: (
+        ResMut<MzbCollisionGeometry>,
+        ResMut<ZoneAreaMap>,
+        ResMut<ZoneChunkLightMap>,
+    ),
     mut last_zone: ResMut<LastAutoLoadedZone>,
     mut last_atmo: ResMut<LastAtmosphereZone>,
     mut bgm: ResMut<BgmSlots>,
@@ -826,7 +831,9 @@ fn despawn_ingame_entities(
     // Whole-resource reset, not a field-by-field clear: the parallel per-triangle
     // arrays and `cell_index` must go together, or a stale cell index will hand
     // `visit_tri` triangle ids that no longer exist. Matches the zone-change path.
-    *collision = MzbCollisionGeometry::default();
+    *zone_geom.0 = MzbCollisionGeometry::default();
+    *zone_geom.1 = ZoneAreaMap::default();
+    *zone_geom.2 = ZoneChunkLightMap::default();
     last_zone.file_id = None;
     last_atmo.file_id = None;
 
@@ -1010,6 +1017,8 @@ mod zone_teardown_tests {
         world.init_resource::<super::EventLog>();
         world.init_resource::<super::TrackedEntities>();
         world.init_resource::<super::MzbCollisionGeometry>();
+        world.init_resource::<super::ZoneAreaMap>();
+        world.init_resource::<super::ZoneChunkLightMap>();
         world.init_resource::<super::LastAutoLoadedZone>();
         world.init_resource::<super::LastAtmosphereZone>();
         world.init_resource::<super::BgmSlots>();

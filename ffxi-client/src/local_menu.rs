@@ -22,8 +22,8 @@ pub const MH_DOOR_ENTITY_ID: u32 = 0xFFFF_FF01;
 pub const MOG_MENU_ID: u32 = 0xFFFF_FF02;
 
 /// Nameplate/dialog speaker for the synthesized exit door, matching XIM's
-/// re-creation (research/xim .../assetviewer/AssetViewer.kt:669 — LSB spawns no
-/// door NPC, so there is no server-side name to echo).
+/// re-creation: research/xim/src/jsMain/kotlin/xim/poc/game/configuration/assetviewer/AssetViewer.kt:666
+/// (LSB spawns no door NPC, so there is no server-side name to echo).
 pub const MH_DOOR_NAME: &str = "Door: To Town";
 pub const MOG_MENU_NPC_NAME: &str = "Moogle";
 

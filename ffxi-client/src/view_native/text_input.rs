@@ -114,7 +114,7 @@ use crate::keybinds_store::KeybindsStateRes;
 use crate::state::{ActionKind, AgentCommand, AgentEvent, CheckKind, ReqLogoutKind};
 use crate::view_native::input::{CommandTx, SelectTargetMode};
 use crate::view_native::slash_commands::{
-    parse_slash, system_chat_line, KeybindUpdate, SlashOutcome,
+    parse_slash, system_chat_line, KeybindUpdate, SlashOutcome, SubAreaOp,
 };
 
 fn minimap_retail_desc(
@@ -1520,6 +1520,7 @@ fn apply_slash_outcome(
                 entity_id,
                 world_transform: None,
                 water: None,
+                lod: None,
             });
             let label = match entity_id {
                 Some(id) => format!("/load_mmb_on {id} {file_id} {chunk_idx}: spawning…"),
@@ -1975,6 +1976,9 @@ fn apply_slash_outcome(
                 format!("/load_mzb {file_id} ({idx_desc}): spawning…"),
             );
         }
+        SlashOutcome::SubArea { op, self_pos } => {
+            apply_sub_area(op, self_pos, scene_state, &mut slash_writers.load_mzb);
+        }
         SlashOutcome::ShopBuyRow { shop_index, qty } => match scene_state.snapshot.shop.as_ref() {
             Some(shop) => {
                 let _ = cmd_tx.try_send(AgentCommand::ShopBuy {
@@ -2079,6 +2083,113 @@ fn apply_slash_outcome(
             push_system_chat_line(scene_state, format!("[menu] opened {label}"));
         }
     }
+}
+
+/// Sub-area triggers are stored in FFXI zone space, which is the same frame the
+/// snapshot reports the player in (ffxi-dat `ZoneInteraction`), so the trigger
+/// test takes `self_pos` unconverted.
+fn apply_sub_area(
+    op: SubAreaOp,
+    self_pos: ffxi_viewer_wire::Vec3,
+    scene_state: &mut SceneState,
+    load_mzb: &mut MessageWriter<LoadMzbRequest>,
+) {
+    let Some(zone_file_id) =
+        ffxi_viewer_core::snapshot::effective_zone_file_id(&scene_state.snapshot)
+    else {
+        push_system_chat_line(
+            scene_state,
+            "/subarea: no zone DAT for the current zone".into(),
+        );
+        return;
+    };
+    let subs = match ffxi_viewer_core::dat_mzb::zone_sub_areas(zone_file_id) {
+        Ok(s) => s,
+        Err(e) => {
+            push_system_chat_line(scene_state, format!("/subarea: {e}"));
+            return;
+        }
+    };
+    if subs.is_empty() {
+        push_system_chat_line(
+            scene_state,
+            format!("/subarea: zone DAT {zone_file_id} declares no sub-areas"),
+        );
+        return;
+    }
+
+    let here = [self_pos.x, self_pos.y, self_pos.z];
+    let wanted = match op {
+        SubAreaOp::List => {
+            let mut lines = vec![format!(
+                "/subarea: zone DAT {zone_file_id} declares {} interior(s)",
+                subs.len()
+            )];
+            for s in &subs {
+                lines.push(format!(
+                    "  {:#x} -> DAT {}{} · {} trigger(s){}",
+                    s.sub_area.id,
+                    s.sub_area.file_id,
+                    if s.resolves { "" } else { " (MISSING)" },
+                    s.sub_area.triggers.len(),
+                    if s.sub_area.contains(here) {
+                        " · you are inside"
+                    } else {
+                        ""
+                    },
+                ));
+            }
+            for line in lines {
+                push_system_chat_line(scene_state, line);
+            }
+            return;
+        }
+        SubAreaOp::Here => match subs.iter().find(|s| s.sub_area.contains(here)) {
+            Some(s) => s.sub_area.id,
+            None => {
+                push_system_chat_line(
+                    scene_state,
+                    "/subarea here: no sub-area trigger holds you (you are outdoors)".into(),
+                );
+                return;
+            }
+        },
+        SubAreaOp::Load(id) => id,
+    };
+
+    let Some(s) = subs.iter().find(|s| s.sub_area.id == wanted) else {
+        push_system_chat_line(
+            scene_state,
+            format!("/subarea: zone DAT {zone_file_id} declares no sub-area {wanted:#x}"),
+        );
+        return;
+    };
+    if !s.resolves {
+        push_system_chat_line(
+            scene_state,
+            format!(
+                "/subarea {:#x}: interior DAT {} is not in this install",
+                s.sub_area.id, s.sub_area.file_id
+            ),
+        );
+        return;
+    }
+
+    // The interior's placements are already expressed in the parent zone's world
+    // space, so it spawns at the origin rather than at the player.
+    load_mzb.write(LoadMzbRequest {
+        file_id: s.sub_area.file_id,
+        chunk_idx: None,
+        world_pos: Vec3::ZERO,
+        auto_loaded: false,
+    });
+    push_system_chat_line(
+        scene_state,
+        format!(
+            "/subarea {:#x}: loading interior DAT {}…",
+            s.sub_area.id, s.sub_area.file_id
+        ),
+    );
 }
 
 fn apply_copy_toasts(n: usize, scene_state: &mut SceneState) {

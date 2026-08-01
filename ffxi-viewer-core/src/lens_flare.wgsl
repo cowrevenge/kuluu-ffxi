@@ -100,18 +100,20 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     // --- Data-driven lf0x chain (research/xim ZoneDrawer.kt:233-236). ---
     // Each lens-flare mesh is an additive textured quad placed at
     // sun*(1-offset) + opposite*offset along the sun->screen-centre axis (opposite =
-    // sun + 2*to_centre), sized from its native sprite texels. Intensity rides the
+    // sun + 2*to_centre), sized from its own quad geometry. Intensity rides the
     // raycast occlusion `visibility` instead of an analytic halo.
     if (data.flare_params.y > 0.5) {
         let count = u32(data.flare_params.x);
         let to_centre_d = centre - sun;
         let opposite = sun + to_centre_d * 2.0;
-        let scale = data.flare_params.z;
         for (var i = 0u; i < count && i < MAX_FLARE_ELEMENTS; i = i + 1u) {
             let offset = data.offsets[i].x;
             let pos = sun * (1.0 - offset) + opposite * offset;
-            // Per-element half-extent: native sprite texels * scale, in screen-UV.
-            let half = data.offsets[i].yz * scale / max(view.viewport.zw, vec2<f32>(1.0));
+            // Per-element half-extent, already in screen-UV (lens_flare.rs divides the
+            // mesh quad by LENS_FLARE_SCREEN_UNITS, retail's screen/32 draw scale). Each
+            // axis divides by its own screen dimension, so the flare stretches with the
+            // aspect ratio exactly as retail's pixel-space ortho draw does.
+            let half = data.offsets[i].yz;
             let local = (uv - pos) / half; // [-1,1] inside the quad
             // Clamp + mask rather than `continue`, so the textureSample stays in
             // uniform control flow (WGSL requires implicit-LOD sampling there).

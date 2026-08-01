@@ -59,12 +59,29 @@ pub fn vana_sky_from_clock(clock: &crate::vana_time::VanaClock) -> VanaSky {
     vana_sky_from_unix(clock.earth_unix_now())
 }
 
-// The synthetic sun direction the sun DirectionalLight and sun-attached weather
-// generators (weat/<type>/sun1, ParticleGeneratorAttachment.kt:46-52 getSunPosition)
-// share: an east->west arc over the Vana'diel day with a small fixed +z tilt.
+// The sun direction shared by the sun DirectionalLight, the lens flare, and the Sun-attached
+// weather generators. research/xim EnvironmentManager.kt:378-382 getSunPosition:
+// `Vector3f(sin a, cos a, 0)` with `a = timeOfDaySeconds * (0.5pi / 6h)` — one full turn per
+// Vana'diel day, in the XY plane, then mapped FFXI -> Bevy as (x, -y, -z).
 pub fn sun_direction(hour: f32) -> Vec3 {
-    let sun_angle = (hour / 24.0) * 2.0 * PI - PI / 2.0;
-    Vec3::new(sun_angle.cos(), sun_angle.sin(), 0.25).normalize()
+    let a = (hour / 24.0) * 2.0 * PI;
+    Vec3::new(a.sin(), -a.cos(), 0.0)
+}
+
+// Whole Vana'diel days since the epoch — the index behind both the elemental weekday and the
+// moon phase.
+pub fn vana_day_index(clock: &crate::vana_time::VanaClock) -> u64 {
+    let earth_since = (clock.earth_unix_now() - EARTH_EPOCH_UNIX as f64).max(0.0);
+    (earth_since * 25.0 / 86400.0) as u64
+}
+
+// Set while the zone DAT's own Sun/Moon-attached particle generators are live, so the
+// hand-authored disc primitives below stand down and retail's billboards are what the player
+// sees. Written by celestial_particles (native only); stays false on wasm and in zones that
+// ship no celestial set, where the procedural discs remain the fallback.
+#[derive(Resource, Default, Clone, Copy, Debug)]
+pub struct DatCelestials {
+    pub active: bool,
 }
 
 fn vana_sky_from_unix(earth_unix: f64) -> VanaSky {
@@ -416,6 +433,7 @@ pub struct SunMoonRenderCfg<'w> {
     pub sun_disc_meshes: Option<Res<'w, SunDiscMeshes>>,
     pub zone_weather: Res<'w, crate::weather::ZoneWeather>,
     pub zone_lighting: ResMut<'w, crate::weather::ZoneDirectionalLighting>,
+    pub dat_celestials: Res<'w, DatCelestials>,
 }
 
 pub fn sun_moon_system(
@@ -535,11 +553,9 @@ pub fn sun_moon_system(
     let phase_bucket = ((sky.moon_phase * 8.0).floor() as i32).rem_euclid(8) as u8;
     if let Some(prev) = *prev_phase_bucket {
         if prev != phase_bucket {
-            let earth_since = (vana_clock.earth_unix_now()
-                - crate::hud::vana_clock::EARTH_EPOCH_UNIX as f64)
-                .max(0.0);
-            let total_v_days = (earth_since * 25.0 / 86400.0) as u64;
-            let weekday = crate::hud::vana_clock::VanaWeekday::from_vana_day(total_v_days).name();
+            let weekday =
+                crate::hud::vana_clock::VanaWeekday::from_vana_day(vana_day_index(&vana_clock))
+                    .name();
             toasts.write(crate::snapshot::ToastEvent::system(format!(
                 "☾ Moon: {} ({:.0}% illuminated) — {}",
                 MOON_PHASE_NAMES[phase_bucket as usize],
@@ -784,7 +800,10 @@ pub fn sun_moon_system(
 
     let cam_pos = q_cam.single().map(|t| t.translation).unwrap_or(Vec3::ZERO);
 
-    let sun_visible = sky.sun_altitude > -0.05;
+    // The zone DAT's own Sun/Moon billboards are retail's celestial bodies; where they run,
+    // these hand-authored primitives would draw a second sun and moon on top of them.
+    let dat_celestials = render_cfg.dat_celestials.active;
+    let sun_visible = sky.sun_altitude > -0.05 && !dat_celestials;
     let sun_sprite_tex = render_cfg.sun_sprite.texture.clone();
     for (mut disc, mut vis, mut mesh3d, _) in q_sun_disc.iter_mut() {
         disc.translation = cam_pos + sun_dir * SKY_RADIUS;
@@ -824,7 +843,7 @@ pub fn sun_moon_system(
         1.0
     };
 
-    let disc_shown = moon_visible && !sky_realism.physical_moon_orbit;
+    let disc_shown = moon_visible && !sky_realism.physical_moon_orbit && !dat_celestials;
     let moon_world = cam_pos + moon_dir * SKY_RADIUS;
     let disc_count = q_moon_disc.iter().count();
     for (mut disc, mut vis) in q_moon_disc.iter_mut() {
@@ -870,10 +889,7 @@ pub fn sun_moon_system(
         .as_deref()
         .filter(|_| !freeze_celestial_mat)
     {
-        let earth_since = (vana_clock.earth_unix_now()
-            - crate::hud::vana_clock::EARTH_EPOCH_UNIX as f64)
-            .max(0.0);
-        let total_v_days = (earth_since * 25.0 / 86400.0) as u64;
+        let total_v_days = vana_day_index(&vana_clock);
         let t = celestial_moon_tint(&render_cfg.color_tables, total_v_days, sky.moon_phase);
         let rgb = Vec3::new(t[0] * 0.20, t[1] * 0.20, t[2] * 0.22);
         let id = handle.0.id();
@@ -951,10 +967,7 @@ pub fn sun_moon_system(
                 0.0
             };
 
-            let earth_since = (vana_clock.earth_unix_now()
-                - crate::hud::vana_clock::EARTH_EPOCH_UNIX as f64)
-                .max(0.0);
-            let total_v_days = (earth_since * 25.0 / 86400.0) as u64;
+            let total_v_days = vana_day_index(&vana_clock);
             let mut tint =
                 celestial_moon_tint(&render_cfg.color_tables, total_v_days, sky.moon_phase);
 
@@ -1065,6 +1078,27 @@ mod tests {
         let (hue0, k0) = diffuse_to_light([0.0, 0.0, 0.0]);
         assert_eq!(hue0, Vec3::ZERO);
         assert_eq!(k0, 0.0);
+    }
+
+    // research/xim EnvironmentManager.kt:378-382 — the arc is a unit circle in the FFXI XY
+    // plane. An earlier revision carried a +0.25 z tilt, which pushed the sun (and the
+    // lens flare and the Sun-attached weather generators, which all read this) off retail's
+    // path and out of the plane the moon shares.
+    #[test]
+    fn sun_arc_is_the_untilted_retail_circle() {
+        for hour in 0..24 {
+            let d = sun_direction(hour as f32);
+            assert!(d.z.abs() < 1e-6, "hour {hour}: retail's arc has no z tilt");
+            assert!(
+                (d.length() - 1.0).abs() < 1e-6,
+                "hour {hour}: not unit length"
+            );
+        }
+        // Midnight below, noon overhead, and the east->west swing through the horizon.
+        assert!(sun_direction(0.0).distance(Vec3::NEG_Y) < 1e-6);
+        assert!(sun_direction(12.0).distance(Vec3::Y) < 1e-6);
+        assert!(sun_direction(6.0).distance(Vec3::X) < 1e-6);
+        assert!(sun_direction(18.0).distance(Vec3::NEG_X) < 1e-6);
     }
 
     #[test]

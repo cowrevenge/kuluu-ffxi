@@ -29,11 +29,13 @@ pub struct MoonSpriteSheet {
 // A lens-flare sprite sheet (0x21 with the lens_flare flag set). Each frame carries
 // the per-mesh `offset` fraction (research/xim SpriteSheetSection.kt:52-58, the first
 // of the four floats) that places the flare element along the sun->screen-centre
-// axis at lineStart*(1-offset)+lineEnd*offset (ZoneDrawer.kt:233-236).
+// axis at lineStart*(1-offset)+lineEnd*offset (ZoneDrawer.kt:233-236), plus that mesh's
+// own quad half-extent, which is what sizes the element on screen (ZoneDrawer.kt:231).
 #[derive(Debug, Clone)]
 pub struct LensFlareSheet {
     pub frames: Vec<UvRect>,
     pub offsets: Vec<f32>,
+    pub half_extents: Vec<[f32; 2]>,
     pub texture: GraphicImage,
 }
 
@@ -47,7 +49,8 @@ fn rd_f32(b: &[u8], o: usize) -> f32 {
 // Parse the per-mesh frames and (for lens-flare sheets) per-mesh offset fractions.
 // research/xim SpriteSheetSection.kt:44-79: each mesh is { u16==1, u8 num_quads, u8,
 // [lens_flare: f32 offset + 3 discarded floats], 6*num_quads verts }.
-fn parse_frames_offsets(b: &[u8]) -> Option<(Vec<UvRect>, Vec<f32>)> {
+#[allow(clippy::type_complexity)]
+fn parse_frames_offsets(b: &[u8]) -> Option<(Vec<UvRect>, Vec<f32>, Vec<[f32; 2]>)> {
     if b.len() < 24 {
         return None;
     }
@@ -63,6 +66,7 @@ fn parse_frames_offsets(b: &[u8]) -> Option<(Vec<UvRect>, Vec<f32>)> {
 
     let mut frames = Vec::with_capacity(num_mesh);
     let mut offsets = Vec::with_capacity(if lens_flare { num_mesh } else { 0 });
+    let mut half_extents = Vec::with_capacity(num_mesh);
     let mut p = 24usize;
     for _ in 0..num_mesh {
         if p + 4 > b.len() {
@@ -79,10 +83,17 @@ fn parse_frames_offsets(b: &[u8]) -> Option<(Vec<UvRect>, Vec<f32>)> {
         }
         let num_verts = 6 * num_quads;
         let (mut u0, mut v0, mut u1, mut v1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+        let (mut x0, mut y0, mut x1, mut y1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
         for _ in 0..num_verts {
             if p + 24 > b.len() {
                 return None;
             }
+            let x = rd_f32(b, p);
+            let y = rd_f32(b, p + 4);
+            x0 = x0.min(x);
+            x1 = x1.max(x);
+            y0 = y0.min(y);
+            y1 = y1.max(y);
             let u = rd_f32(b, p + 16) * uv_scale;
             let v = rd_f32(b, p + 20) * uv_scale;
             u0 = u0.min(u);
@@ -92,12 +103,13 @@ fn parse_frames_offsets(b: &[u8]) -> Option<(Vec<UvRect>, Vec<f32>)> {
             p += 24;
         }
         frames.push(UvRect { u0, v0, u1, v1 });
+        half_extents.push([(x1 - x0) * 0.5, (y1 - y0) * 0.5]);
     }
-    Some((frames, offsets))
+    Some((frames, offsets, half_extents))
 }
 
 fn parse_frames(b: &[u8]) -> Option<Vec<UvRect>> {
-    parse_frames_offsets(b).map(|(frames, _)| frames)
+    parse_frames_offsets(b).map(|(frames, ..)| frames)
 }
 
 // A single flipbook frame's full quad geometry (positions + UVs + per-vertex colors),
@@ -255,7 +267,7 @@ pub fn extract_lens_flare_sheet(dat_bytes: &[u8]) -> Option<LensFlareSheet> {
             continue;
         }
         let (category, id) = texture_tokens(b);
-        let (frames, offsets) = parse_frames_offsets(b)?;
+        let (frames, offsets, half_extents) = parse_frames_offsets(b)?;
         if frames.is_empty() || offsets.len() != frames.len() {
             continue;
         }
@@ -263,6 +275,7 @@ pub fn extract_lens_flare_sheet(dat_bytes: &[u8]) -> Option<LensFlareSheet> {
         return Some(LensFlareSheet {
             frames,
             offsets,
+            half_extents,
             texture,
         });
     }
@@ -389,7 +402,7 @@ mod tests {
         let mut b = header(2, true, "lf0a", "flar");
         b.extend(mesh(1, Some(0.25), (0.0, 0.0, 0.5, 0.5)));
         b.extend(mesh(1, Some(1.40), (0.5, 0.5, 1.0, 1.0)));
-        let (frames, offsets) = parse_frames_offsets(&b).unwrap();
+        let (frames, offsets, _) = parse_frames_offsets(&b).unwrap();
         assert_eq!(frames.len(), 2);
         assert_eq!(offsets.len(), 2);
         assert!((offsets[0] - 0.25).abs() < 1e-6);
@@ -400,7 +413,7 @@ mod tests {
     fn non_lens_flare_has_no_offsets() {
         let mut b = header(1, false, "suns", "suny");
         b.extend(mesh(1, None, (0.0, 0.0, 1.0, 1.0)));
-        let (_frames, offsets) = parse_frames_offsets(&b).unwrap();
+        let (_frames, offsets, _) = parse_frames_offsets(&b).unwrap();
         assert!(offsets.is_empty());
     }
 

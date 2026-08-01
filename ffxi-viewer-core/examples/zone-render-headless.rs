@@ -252,6 +252,20 @@ fn main() {
             .add_plugins(SkyboxPlugin)
             .add_plugins(MoonMaterialPlugin)
             .add_plugins(LensFlarePlugin)
+            // The retail sun/moon: the zone DAT's own Sun/Moon-attached generators, drawn by
+            // the particle simulator, so the hand-authored discs stand down here exactly as
+            // they do in the client. Only the simulator's two systems are pulled in — the
+            // rest of SchedulerRuntimePlugin wants a live session's resources.
+            .init_resource::<ffxi_viewer_core::particle_sim::ParticleSimulator>()
+            .add_systems(
+                Update,
+                (
+                    ffxi_viewer_core::particle_sim::tick_particle_simulator,
+                    ffxi_viewer_core::particle_sim::sync_particle_meshes,
+                )
+                    .chain(),
+            )
+            .add_plugins(ffxi_viewer_core::celestial_particles::CelestialParticlesPlugin)
             .init_resource::<VanaSky>()
             .init_resource::<ZoneDirectionalLighting>()
             .add_systems(Startup, spawn_celestials)
@@ -457,7 +471,17 @@ fn spawn_celestials(
 // Headless mirror of weather::load_zone_weather: that system derives the zone
 // from the live SceneState snapshot, but this example has no login flow — the
 // zone comes straight from `P.file_id`, so read the same DAT bytes directly.
-fn load_weather(p: Res<P>, mut zone_weather: ResMut<ZoneWeather>) {
+fn load_weather(
+    p: Res<P>,
+    mut zone_weather: ResMut<ZoneWeather>,
+    mut scene_state: ResMut<SceneState>,
+) {
+    // The zone-DAT consumers (celestial_particles, zone_particles, moon_material) resolve
+    // their file from SceneState's zone_id, not from --file, so seed the zone whose DAT this
+    // is. Reverse scan over the public mapping; the harness names a file, the client a zone.
+    scene_state.snapshot.zone_id =
+        (0u16..=0x1FF).find(|z| ffxi_dat::zone_dat::zone_id_to_mzb_file_id(*z) == Some(p.file_id));
+
     let Ok(root) = ffxi_dat::DatRoot::from_env_or_default() else {
         return;
     };

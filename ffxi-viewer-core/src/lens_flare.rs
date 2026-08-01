@@ -12,10 +12,11 @@ use crate::sun_moon::VanaSky;
 // carry only a handful of meshes; extra slots stay inert (count gates them).
 pub const MAX_FLARE_ELEMENTS: usize = 16;
 
-// Each element renders at its native sprite-texel size times this factor (the retail
-// flares draw larger than their low-res source). The per-element generator projection
-// scale isn't parsed yet, so this is the one tunable that sets absolute flare size.
-const LENS_FLARE_SCALE: f32 = 1.5;
+// research/xim ZoneDrawer.kt:231 `scale = Vector3f(width/32, height/32, 1)` — a flare
+// mesh's local units are screen fractions of 1/32, so a quad spanning 32 units covers the
+// whole screen. Dividing the parsed quad half-extent by this yields the element's half-size
+// in screen-UV directly, which is what the shader consumes.
+const LENS_FLARE_SCREEN_UNITS: f32 = 32.0;
 
 #[derive(Clone, Debug, ShaderType)]
 pub struct LensFlareUniform {
@@ -26,12 +27,12 @@ pub struct LensFlareUniform {
     pub tint: Vec4,
 
     // x = element count, y = 1.0 when the lf0x sheet/texture is loaded (data-driven
-    // chain) else 0.0 (analytic fallback), z = LENS_FLARE_SCALE, w = sun visibility
-    // [0,1] from SunOcclusion.
+    // chain) else 0.0 (analytic fallback), z unused, w = sun visibility [0,1] from
+    // SunOcclusion.
     pub flare_params: Vec4,
 
-    // Per-element: x = offset fraction along sun->opposite; yz = native sprite
-    // half-size in texels (sized to screen in the shader); w unused.
+    // Per-element: x = offset fraction along sun->opposite; yz = half-size in screen-UV;
+    // w unused.
     pub offsets: [Vec4; MAX_FLARE_ELEMENTS],
 
     // Per-element UV sub-rect (u0,v0,u1,v1) into the lf0x texture.
@@ -233,6 +234,10 @@ fn load_lens_flare_sheet(
 
     let n = sheet.offsets.len().min(MAX_FLARE_ELEMENTS);
     let offsets: Vec<f32> = sheet.offsets[..n].to_vec();
+    let half_extents: Vec<Vec2> = sheet.half_extents[..n]
+        .iter()
+        .map(|h| Vec2::from_array(*h) / LENS_FLARE_SCREEN_UNITS)
+        .collect();
     let frames: Vec<Vec4> = sheet.frames[..n]
         .iter()
         .map(|f| Vec4::new(f.u0, f.v0, f.u1, f.v1))
@@ -258,17 +263,14 @@ fn load_lens_flare_sheet(
         frames: frames.clone(),
     };
 
-    let (tex_w, tex_h) = (sheet.texture.width as f32, sheet.texture.height as f32);
     if let Some(mut mat) = mat {
         mat.flare_tex = Some(handle);
         mat.data.flare_params.x = n as f32;
         mat.data.flare_params.y = 1.0;
-        mat.data.flare_params.z = LENS_FLARE_SCALE;
         for i in 0..n {
-            let f = frames[i];
-            let half = Vec2::new((f.z - f.x) * tex_w, (f.w - f.y) * tex_h) * 0.5;
+            let half = half_extents[i];
             mat.data.offsets[i] = Vec4::new(offsets[i], half.x, half.y, 0.0);
-            mat.data.frame_uv[i] = f;
+            mat.data.frame_uv[i] = frames[i];
         }
     }
 }

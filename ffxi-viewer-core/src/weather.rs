@@ -39,6 +39,28 @@ pub struct ZoneWeather {
     pub current: Option<WeatherRecord>,
 }
 
+// Fallback chain shared by the 0x2F record selection and the celestial/particle consumers
+// that resolve a weat/<type>/ subtree: not every zone authors every sky family.
+const WEATHER_TYPE_FALLBACKS: [WeatherTypeId; 4] = [*b"suny", *b"fine", *b"clod", *b"mist"];
+
+fn weather_type_preference(want: WeatherTypeId) -> impl Iterator<Item = WeatherTypeId> {
+    std::iter::once(want).chain(WEATHER_TYPE_FALLBACKS)
+}
+
+impl ZoneWeather {
+    // The weat/<type> subdirectory the zone's environment is actually being read from —
+    // `selected` after the same fallback `select_records` applies, so a consumer walking the
+    // DAT tree lands in the subtree whose records are live rather than one the zone omits.
+    pub fn active_weather_type(&self) -> Option<WeatherTypeId> {
+        let want = self.selected?.0;
+        Some(
+            weather_type_preference(want)
+                .find(|id| self.sets.by_type.contains_key(id))
+                .unwrap_or(want),
+        )
+    }
+}
+
 // wire::Weather shares the LSB weather.h discriminant ordering, so the variant
 // index is the LSB weather id consumed by ffxi_dat::weather::weather_type_id (the
 // authoritative weather-id -> weat/<type> subdir table).
@@ -62,11 +84,8 @@ fn select_records(sets: &ZoneWeatherSets, want: WeatherTypeId, indoor: bool) -> 
             chosen.clone()
         })
     };
-    pick(&want)
-        .or_else(|| pick(b"suny"))
-        .or_else(|| pick(b"fine"))
-        .or_else(|| pick(b"clod"))
-        .or_else(|| pick(b"mist"))
+    weather_type_preference(want)
+        .find_map(|id| pick(&id))
         .or_else(|| sets.by_type.values().next().map(|s| s.outdoor.clone()))
         .unwrap_or_default()
 }

@@ -21,11 +21,42 @@ use ffxi_dat::scheduler::StageKind;
 #[derive(Resource, Default)]
 pub struct ParticleSimulator {
     generators: Vec<LiveGenerator>,
+    clock: CelestialClock,
+}
+
+// The Vana'diel clock inputs the celestial particle opcodes read. research/xim
+// ParticleUpdaters.kt: ClockValueUpdater samples its keyframe curve at
+// EnvironmentManager.getFullDayInterpolation() (the fraction of the Vana'diel day, NOT the
+// particle's life progress); DayOfWeekColorUpdater / MoonPhaseColorUpdater /
+// MoonPhaseSpriteSheetUpdater index their tables by the elemental weekday and moon phase.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CelestialClock {
+    pub day_fraction: f32,
+    pub day_of_week: usize,
+    pub moon_phase: usize,
 }
 
 impl ParticleSimulator {
     pub fn drain_entities(&mut self) -> Vec<Entity> {
         self.generators.drain(..).map(|g| g.entity).collect()
+    }
+
+    pub fn set_celestial_clock(&mut self, clock: CelestialClock) {
+        self.clock = clock;
+    }
+
+    // research/xim ParticleGeneratorAttachment / cexi-viewer particle/runtime.js:517-524 —
+    // a Sun/Moon-attached generator's associated position is the celestial body's position
+    // offset by the camera, refreshed every frame so the sky rides with the viewer.
+    pub fn set_celestial_origins(&mut self, sun: Vec3, moon: Vec3) {
+        use ffxi_dat::particle_gen::AttachType;
+        for g in &mut self.generators {
+            g.origin = match g.def.attach_type {
+                AttachType::Sun => sun,
+                AttachType::Moon => moon,
+                _ => continue,
+            };
+        }
     }
 
     // research/xim EffectRoutineParser.kt:253-258 StopParticleGeneratorRoutine — emission ceases
@@ -126,6 +157,22 @@ fn tfactor_alpha(def: &ParticleGeneratorDef, path: D3mDrawPath, alpha: f32) -> f
     }
 }
 
+// Resolve the generator's 0x60..0x63 time-of-day colour curves against the DAT's keyframe
+// chunks. Absent on everything but the celestial billboards.
+fn resolve_tod_tracks(
+    def: &ParticleGeneratorDef,
+    assets: &ActionAssets,
+) -> [Option<KeyFrameTrack>; ffxi_dat::particle_gen::TOD_COLOR_CHANNELS] {
+    def.tod_color_tracks
+        .map(|id| id.and_then(|i| assets.keyframes.get(&i).cloned()))
+}
+
+// research/xim Particle.kt:217-218 — the day-of-week / moon-phase tints are applied with
+// Color.modulateInPlace(c, 2f), a 2x modulate.
+const CELESTIAL_MODULATE: f32 = 2.0;
+// Index of the alpha channel in the 0x60..0x63 time-of-day track array (0x63 -> 0x3F).
+const TOD_ALPHA_CHANNEL: usize = 3;
+
 fn d3m_stage_chain(
     vertex_rgb: Vec3,
     vertex_alpha: f32,
@@ -157,6 +204,10 @@ struct LiveGenerator {
     scale_x: Option<KeyFrameTrack>,
     scale_y: Option<KeyFrameTrack>,
     alpha: Option<KeyFrameTrack>,
+    // The 0x60..0x63 time-of-day RGBA curves, resolved against the DAT's keyframe chunks.
+    // Sampled at the Vana'diel day fraction, so unlike `alpha` above they do not advance
+    // with the particle's own life.
+    tod_color: [Option<KeyFrameTrack>; ffxi_dat::particle_gen::TOD_COLOR_CHANNELS],
     origin: Vec3,
     particles: Vec<Particle>,
     emit_accum: f32,
@@ -287,6 +338,7 @@ pub fn spawn_particle_generators(
             scale_x: resolve(def.scale_x_track),
             scale_y: resolve(def.scale_y_track),
             alpha: resolve(def.alpha_track),
+            tod_color: resolve_tod_tracks(&def, assets),
             template,
             draw_path: D3mDrawPath::D3m,
             sprite_frames,
@@ -373,6 +425,7 @@ pub fn spawn_actor_auto_run_particles(
                 scale_x: resolve(def.scale_x_track),
                 scale_y: resolve(def.scale_y_track),
                 alpha: resolve(def.alpha_track),
+                tod_color: resolve_tod_tracks(&def, &fx.assets),
                 template,
                 draw_path: D3mDrawPath::D3m,
                 sprite_frames,
@@ -455,6 +508,7 @@ pub fn spawn_zone_particle_generator(
         scale_x: resolve(def.scale_x_track),
         scale_y: resolve(def.scale_y_track),
         alpha: resolve(def.alpha_track),
+        tod_color: resolve_tod_tracks(&def, assets),
         template,
         draw_path,
         sprite_frames,
@@ -515,7 +569,20 @@ fn advance_generator(g: &mut LiveGenerator, frames: f32) {
         // gate it: a long frame (the blocking action-DAT read precedes these) makes age_frames
         // exceed a dur=0 stage's 1-frame window on that very tick and the singleton never fires.
         if !g.stopped && g.particles.is_empty() && g.age_frames <= frames {
-            emit(g, g.emit_window_frames.max(g.def.max_life_frames).max(1.0));
+            // research/xim ParticleInitializers.kt:130-131 — a maxLifeSpan of 0 is rewritten
+            // to POSITIVE_INFINITY, "used for 'singleton' particles, like the sea and such":
+            // the auto-run zone/weather billboards that stand as long as the zone does (the
+            // sun, the moon, the sea). A 1-frame life made those vanish on the tick after
+            // they spawned. A scheduled generator is NOT that population — its singleton
+            // plays out the stage window and is reaped with the effect, so it keeps the
+            // bounded life or a dur=0 cast aura would hang in the world forever.
+            let bounded = g.emit_window_frames.max(g.def.max_life_frames);
+            let life = if g.auto_run && bounded <= 0.0 {
+                f32::INFINITY
+            } else {
+                bounded.max(1.0)
+            };
+            emit(g, life);
         }
     } else if emitting {
         g.emit_accum += frames;
@@ -587,6 +654,8 @@ pub fn sync_particle_meshes(
     mut commands: Commands,
 ) {
     let cam_rot = cam.iter().next().map(|t| t.rotation()).unwrap_or_default();
+    let clock = sim.clock;
+    let trace_celestial = std::env::var_os("FFXI_TRACE_CELESTIAL").is_some();
 
     // (index, despawn-needed); indices ascending so the reverse sweep below can
     // swap_remove safely.
@@ -609,10 +678,32 @@ pub fn sync_particle_meshes(
         // The tracked get_mut marks the mesh Modified and forces a full GPU re-upload, so it
         // only runs when the rebuilt vertex output would differ from the last built mesh
         // (kuluu-b5nt).
-        let key = mesh_key(g, rot);
+        // The celestial billboards are the one particle population with no on-screen
+        // debug affordance — they are 900 units away and often below the horizon, so a
+        // wrong colour curve or sprite frame is indistinguishable from "not drawing".
+        if trace_celestial
+            && matches!(
+                g.def.attach_type,
+                ffxi_dat::particle_gen::AttachType::Sun | ffxi_dat::particle_gen::AttachType::Moon
+            )
+        {
+            let draw = g.particles.first().map(|p| particle_draw(g, p, &clock));
+            info!(
+                mesh = %String::from_utf8_lossy(&g.def.mesh_id),
+                verts = g.template.positions.len(),
+                live = g.particles.len(),
+                origin = ?g.origin,
+                scale = ?draw.as_ref().map(|d| d.scale),
+                rgb = ?draw.as_ref().map(|d| d.rgb),
+                frame = ?draw.as_ref().map(|d| d.flipbook_frame),
+                "{:?} billboard",
+                g.def.attach_type,
+            );
+        }
+        let key = mesh_key(g, rot, &clock);
         if needs_rebuild(&g.built_key, &key) {
             if let Some(mut mesh) = meshes.get_mut(&g.mesh) {
-                rebuild_mesh(g, rot, &mut mesh);
+                rebuild_mesh(g, rot, &clock, &mut mesh);
                 g.built_key = key;
             }
         }
@@ -640,11 +731,18 @@ struct ParticleDraw {
     world: Vec3,
 }
 
-fn particle_draw(g: &LiveGenerator, p: &Particle) -> ParticleDraw {
+fn particle_draw(g: &LiveGenerator, p: &Particle, clock: &CelestialClock) -> ParticleDraw {
     let progress = (p.age_frames / p.life_frames).clamp(0.0, 1.0);
     // A SpriteSheet particle flipbooks its frames over life (research/xim Particle.kt:72
-    // spriteSheetIndex); a StaticMesh particle keeps its single template.
-    let flipbook_frame = flipbook_index(g, progress);
+    // spriteSheetIndex), except under MoonPhaseSpriteSheetUpdater (0x45), which pins the
+    // frame to the moon phase; a StaticMesh particle keeps its single template.
+    let flipbook_frame = if g.def.moon_phase_sprite {
+        clock
+            .moon_phase
+            .min(g.sprite_frames.len().saturating_sub(1))
+    } else {
+        flipbook_index(g, progress)
+    };
     let tpl = flipbook_template(g, flipbook_frame);
     let sx = g
         .scale_x
@@ -670,10 +768,41 @@ fn particle_draw(g: &LiveGenerator, p: &Particle) -> ParticleDraw {
         } else {
             1.0 - progress
         });
+    // research/xim ParticleGeneratorParser.kt:431-434 ClockValueUpdater — 0x3C/0x3D/0x3E
+    // assign the particle's colour channel from a time-of-day curve, 0x3F multiplies alpha.
+    // This is the sun's authored dawn/noon/dusk ramp: the disc is not tinted by a formula.
+    let mut rgb = p.rgb;
+    let mut alpha = alpha;
+    for (channel, track) in g.tod_color.iter().enumerate() {
+        let Some(track) = track.as_ref().filter(|_| g.def.tod_color_driven[channel]) else {
+            continue;
+        };
+        let v = track.sample(clock.day_fraction);
+        match channel {
+            TOD_ALPHA_CHANNEL => alpha *= v,
+            _ => rgb[channel] = v,
+        }
+    }
+    // research/xim Particle.kt:217-218 getColor() — the day-of-week tint is applied first,
+    // then the moon-phase tint, each as a 2x modulate (out = min(1, out * 2 * c)).
+    for table in [
+        g.def
+            .day_of_week_color
+            .map(|t| t[clock.day_of_week % ffxi_dat::particle_gen::DAYS_OF_WEEK]),
+        g.def
+            .moon_phase_color
+            .map(|t| t[clock.moon_phase % ffxi_dat::particle_gen::MOON_PHASES]),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        rgb = (rgb * Vec3::from_slice(&table[..3]) * CELESTIAL_MODULATE).min(Vec3::ONE);
+    }
+
     let (stage_rgb, stage_alpha) = d3m_stage_chain(
         tpl.brightness,
         tpl.vert_alpha,
-        p.rgb,
+        rgb,
         tfactor_alpha(&g.def, g.draw_path, alpha),
         ignores_texture_alpha(&g.def, g.draw_path),
     );
@@ -726,7 +855,7 @@ fn quantized(v: f32, quantum: f32) -> i32 {
     (v / quantum).round() as i32
 }
 
-fn mesh_key(g: &LiveGenerator, rot: Quat) -> MeshKey {
+fn mesh_key(g: &LiveGenerator, rot: Quat, clock: &CelestialClock) -> MeshKey {
     if g.particles.is_empty() {
         return MeshKey::Empty;
     }
@@ -739,7 +868,7 @@ fn mesh_key(g: &LiveGenerator, rot: Quat) -> MeshKey {
             .particles
             .iter()
             .map(|p| {
-                let draw = particle_draw(g, p);
+                let draw = particle_draw(g, p, clock);
                 ParticleKey {
                     world: draw.world.to_array().map(spatial),
                     flipbook_frame: draw.flipbook_frame,
@@ -760,7 +889,7 @@ fn needs_rebuild(built: &MeshKey, next: &MeshKey) -> bool {
     built != next
 }
 
-fn rebuild_mesh(g: &LiveGenerator, rot: Quat, mesh: &mut Mesh) {
+fn rebuild_mesh(g: &LiveGenerator, rot: Quat, clock: &CelestialClock, mesh: &mut Mesh) {
     let verts_per = g.template.positions.len();
     let n = g.particles.len();
     let mut positions = Vec::with_capacity(n * verts_per);
@@ -769,7 +898,7 @@ fn rebuild_mesh(g: &LiveGenerator, rot: Quat, mesh: &mut Mesh) {
     let mut indices = Vec::with_capacity(n * g.template.indices.len());
 
     for p in &g.particles {
-        let draw = particle_draw(g, p);
+        let draw = particle_draw(g, p, clock);
         let tpl = flipbook_template(g, draw.flipbook_frame);
 
         // Billboard sprites are flat (z unused); a fixed-orientation 3D particle
@@ -979,6 +1108,9 @@ mod tests {
             continuous: false,
             auto_run: false,
             attach_type: ffxi_dat::particle_gen::AttachType::SourceActor,
+            tod_color_tracks: [None; ffxi_dat::particle_gen::TOD_COLOR_CHANNELS],
+            tod_color_driven: [false; ffxi_dat::particle_gen::TOD_COLOR_CHANNELS],
+            moon_phase_sprite: false,
             attach_joint_source: 0,
             attach_joint_target: 0,
             attach_source_oriented: false,
@@ -1011,6 +1143,7 @@ mod tests {
             },
             draw_path: D3mDrawPath::D3m,
             sprite_frames: Vec::new(),
+            tod_color: [None, None, None, None],
             scale_x: None,
             scale_y: None,
             alpha: None,
@@ -1137,7 +1270,7 @@ mod tests {
 
         fn vertex_colors(g: &LiveGenerator) -> Vec<[f32; 4]> {
             let mut mesh = empty_mesh();
-            rebuild_mesh(g, Quat::IDENTITY, &mut mesh);
+            rebuild_mesh(g, Quat::IDENTITY, &CelestialClock::default(), &mut mesh);
             match mesh.attribute(Mesh::ATTRIBUTE_COLOR) {
                 Some(bevy::mesh::VertexAttributeValues::Float32x4(v)) => v.clone(),
                 _ => panic!("expected Float32x4 vertex colours"),
@@ -1228,7 +1361,7 @@ mod tests {
         let g = live(def(2.0, 1.0, 1), 3.0);
         assert!(g.particles.is_empty());
         let mut mesh = empty_mesh();
-        rebuild_mesh(&g, Quat::IDENTITY, &mut mesh);
+        rebuild_mesh(&g, Quat::IDENTITY, &CelestialClock::default(), &mut mesh);
         assert!(count(&mesh) > 0, "empty rebuild must not be zero-length");
     }
 
@@ -1261,24 +1394,33 @@ mod tests {
                 Quat::from_rotation_y(1.3),
                 Quat::from_rotation_x(-0.4),
             ] {
-                assert!(!needs_rebuild(&g.built_key, &mesh_key(&g, rot)));
+                assert!(!needs_rebuild(
+                    &g.built_key,
+                    &mesh_key(&g, rot, &CelestialClock::default())
+                ));
             }
         }
 
         #[test]
         fn sub_quantum_motion_skips() {
             let mut g = one_particle_gen();
-            let built = mesh_key(&g, Quat::IDENTITY);
+            let built = mesh_key(&g, Quat::IDENTITY, &CelestialClock::default());
             g.particles[0].pos.x += MESH_KEY_SPATIAL_QUANTUM * 0.25;
-            assert!(!needs_rebuild(&built, &mesh_key(&g, Quat::IDENTITY)));
+            assert!(!needs_rebuild(
+                &built,
+                &mesh_key(&g, Quat::IDENTITY, &CelestialClock::default())
+            ));
         }
 
         #[test]
         fn super_quantum_motion_rebuilds() {
             let mut g = one_particle_gen();
-            let built = mesh_key(&g, Quat::IDENTITY);
+            let built = mesh_key(&g, Quat::IDENTITY, &CelestialClock::default());
             g.particles[0].pos.x += MESH_KEY_SPATIAL_QUANTUM * 2.0;
-            assert!(needs_rebuild(&built, &mesh_key(&g, Quat::IDENTITY)));
+            assert!(needs_rebuild(
+                &built,
+                &mesh_key(&g, Quat::IDENTITY, &CelestialClock::default())
+            ));
         }
 
         // Ageing feeds the untracked additive life curve through tfactor_alpha and the D3m
@@ -1286,27 +1428,33 @@ mod tests {
         #[test]
         fn alpha_stage_change_rebuilds() {
             let mut g = one_particle_gen();
-            let built = mesh_key(&g, Quat::IDENTITY);
+            let built = mesh_key(&g, Quat::IDENTITY, &CelestialClock::default());
             g.particles[0].age_frames = 90.0;
-            assert!(needs_rebuild(&built, &mesh_key(&g, Quat::IDENTITY)));
+            assert!(needs_rebuild(
+                &built,
+                &mesh_key(&g, Quat::IDENTITY, &CelestialClock::default())
+            ));
         }
 
         #[test]
         fn camera_rotation_rebuilds_a_live_billboard() {
             let g = one_particle_gen();
-            let built = mesh_key(&g, Quat::IDENTITY);
+            let built = mesh_key(&g, Quat::IDENTITY, &CelestialClock::default());
             assert!(needs_rebuild(
                 &built,
-                &mesh_key(&g, Quat::from_rotation_y(0.5))
+                &mesh_key(&g, Quat::from_rotation_y(0.5), &CelestialClock::default())
             ));
         }
 
         #[test]
         fn uv_scroll_change_rebuilds() {
             let mut g = one_particle_gen();
-            let built = mesh_key(&g, Quat::IDENTITY);
+            let built = mesh_key(&g, Quat::IDENTITY, &CelestialClock::default());
             g.tex_translate.x += MESH_KEY_SPATIAL_QUANTUM * 2.0;
-            assert!(needs_rebuild(&built, &mesh_key(&g, Quat::IDENTITY)));
+            assert!(needs_rebuild(
+                &built,
+                &mesh_key(&g, Quat::IDENTITY, &CelestialClock::default())
+            ));
         }
     }
 
@@ -1353,7 +1501,7 @@ mod tests {
     fn fixed_orientation_sheet_hangs_below_emitter() {
         let g = sheet_gen(Some(Quat::IDENTITY));
         let mut mesh = empty_mesh();
-        rebuild_mesh(&g, Quat::IDENTITY, &mut mesh);
+        rebuild_mesh(&g, Quat::IDENTITY, &CelestialClock::default(), &mut mesh);
         // Local +Y (0..4) flipped through vel_basis -> Bevy -Y, so every sheet vertex
         // sits at or below the emit origin (y=10); none stand above it.
         assert!(
@@ -1366,7 +1514,7 @@ mod tests {
     fn camera_billboard_sheet_not_flipped() {
         let g = sheet_gen(None);
         let mut mesh = empty_mesh();
-        rebuild_mesh(&g, Quat::IDENTITY, &mut mesh);
+        rebuild_mesh(&g, Quat::IDENTITY, &CelestialClock::default(), &mut mesh);
         // Billboard: no basis flip, so the same +Y geometry rises above the emitter.
         assert!(
             max_sheet_y(&mesh) > 10.0 + 1.0,
@@ -1465,6 +1613,35 @@ mod tests {
         );
     }
 
+    // research/xim ParticleInitializers.kt:130-131 — maxLifeSpan 0 means POSITIVE_INFINITY
+    // for the auto-run zone billboards ("the sea and such"): the sun, the moon and the sea
+    // must stand for as long as the zone does. The counterpart above pins that a SCHEDULED
+    // dur=0 singleton still expires, so the two populations cannot be collapsed.
+    #[test]
+    fn auto_run_singleton_is_the_persistent_kind() {
+        let mut g = live(def(0.0, 1.0, 1), 0.0);
+        g.auto_run = true;
+        assert!(g.def.is_singleton());
+
+        advance(&mut g, 9.0);
+        assert_eq!(g.particles.len(), 1);
+        assert!(g.particles[0].life_frames.is_infinite());
+
+        // Whatever the elapsed time, it neither expires nor re-emits.
+        for _ in 0..100 {
+            advance(&mut g, 60.0);
+        }
+        assert_eq!(
+            g.particles.len(),
+            1,
+            "the zone billboard neither expires nor duplicates"
+        );
+        // An infinite life pins life progress at 0, which is what keeps a keyframe-tracked
+        // channel on the curve's opening value instead of racing to its end.
+        let draw = particle_draw(&g, &g.particles[0], &CelestialClock::default());
+        assert!(draw.rgb.is_finite(), "infinite life must not poison the draw");
+    }
+
     #[test]
     fn stopped_singleton_never_emits() {
         let mut g = live(def(0.0, 1.0, 1), 0.0);
@@ -1523,6 +1700,144 @@ mod tests {
             !g.particles.is_empty(),
             "auto-run generators never stop emitting"
         );
+    }
+
+    // A celestial billboard: continuous singleton, additive, one live particle whose colour
+    // is what the sun/moon opcodes drive.
+    fn celestial(def: ParticleGeneratorDef) -> LiveGenerator {
+        let mut g = live(def, 1.0);
+        g.auto_run = true;
+        g.particles.push(Particle {
+            pos: Vec3::ZERO,
+            vel: Vec3::ZERO,
+            age_frames: 0.0,
+            life_frames: 1.0,
+            rgb: Vec3::from_slice(&g.def.init_color[..3]),
+            scale: Vec2::ONE,
+        });
+        g
+    }
+
+    fn ramp(from: f32, to: f32) -> KeyFrameTrack {
+        KeyFrameTrack {
+            points: vec![(0.0, from), (1.0, to)],
+        }
+    }
+
+    // research/xim ParticleGeneratorParser.kt:431-434 — the ClockValueUpdater curves are
+    // sampled at the Vana'diel day fraction, so a celestial particle's colour tracks the
+    // clock, NOT its own life progress. This is the sun's authored dawn/noon/dusk ramp;
+    // sampling it by life would freeze the disc at the curve's opening value forever, since
+    // a continuous singleton is re-emitted at progress 0 every frame.
+    #[test]
+    fn time_of_day_curves_sample_the_clock_not_particle_life() {
+        let mut def = def(1.0, 1.0, 1);
+        def.blend = ffxi_dat::particle_gen::ParticleBlend::Blend;
+        def.init_color = [1.0, 1.0, 1.0, 1.0];
+        def.tod_color_driven = [true, false, false, false];
+        let mut g = celestial(def);
+        g.tod_color[0] = Some(ramp(0.0, 1.0));
+
+        // The particle never ages (life_frames == 1, age 0), so any change here is the clock.
+        let at = |day_fraction: f32| {
+            particle_draw(
+                &g,
+                &g.particles[0],
+                &CelestialClock {
+                    day_fraction,
+                    ..Default::default()
+                },
+            )
+            .rgb
+            .x
+        };
+        let (dawn, dusk) = (at(0.25), at(0.75));
+        assert!(
+            dusk > dawn,
+            "red channel must follow the day fraction: {dawn} -> {dusk}"
+        );
+    }
+
+    // research/xim Particle.kt:217-218 — day-of-week first, then moon phase, each a 2x
+    // modulate that saturates at 1. Order matters because the modulate clamps: applying the
+    // brighter table second cannot recover what the first one crushed.
+    #[test]
+    fn celestial_tints_apply_day_of_week_then_moon_phase_at_2x() {
+        let mut def = def(1.0, 1.0, 1);
+        def.blend = ffxi_dat::particle_gen::ParticleBlend::Blend;
+        // Low enough that the D3M stage-1 2x gain does not saturate the channel and hide
+        // the tint (a 0.5 base already clamps to 1.0 untinted).
+        def.init_color = [0.2, 0.2, 0.2, 1.0];
+        // A 2x modulate makes 0.5 the identity entry, so 0.25 is the one that halves.
+        // Weekday 3 halves red, phase 6 halves it again: 0.2 * 0.5 * 0.5 = 0.05.
+        def.day_of_week_color = Some(halves_red_at(3));
+        def.moon_phase_color = Some(halves_red_at(6));
+        let g = celestial(def);
+        let clock = CelestialClock {
+            day_fraction: 0.5,
+            day_of_week: 3,
+            moon_phase: 6,
+        };
+        let untinted = celestial(blended_celestial_def());
+        let plain = particle_draw(&untinted, &untinted.particles[0], &clock)
+            .rgb
+            .x;
+        let tinted = particle_draw(&g, &g.particles[0], &clock).rgb.x;
+        assert!(
+            (tinted - plain * 0.25).abs() < 1e-5,
+            "two halving tables at 2x modulate should quarter the channel: {tinted} vs {plain}"
+        );
+    }
+
+    // A tint table that is the identity everywhere except `target`, where it halves red.
+    fn halves_red_at<const N: usize>(target: usize) -> [[f32; 4]; N] {
+        std::array::from_fn(|i| {
+            let red = if i == target { 0.25 } else { 0.5 };
+            [red, 0.5, 0.5, 1.0]
+        })
+    }
+
+    fn blended_celestial_def() -> ParticleGeneratorDef {
+        let mut def = def(1.0, 1.0, 1);
+        def.blend = ffxi_dat::particle_gen::ParticleBlend::Blend;
+        def.init_color = [0.2, 0.2, 0.2, 1.0];
+        def
+    }
+
+    // research/xim ParticleGeneratorParser.kt:444 MoonPhaseSpriteSheetUpdater — the moon's
+    // sheet frame is the phase index, so it must NOT flipbook over the particle's life the
+    // way every other sprite-sheet particle does.
+    #[test]
+    fn moon_phase_pins_the_sprite_frame() {
+        let mut def = def(1.0, 1.0, 1);
+        def.moon_phase_sprite = true;
+        let mut g = celestial(def);
+        g.sprite_frames = (0..ffxi_dat::particle_gen::MOON_PHASES)
+            .map(|_| g.template.clone())
+            .collect();
+
+        for phase in 0..ffxi_dat::particle_gen::MOON_PHASES {
+            let draw = particle_draw(
+                &g,
+                &g.particles[0],
+                &CelestialClock {
+                    moon_phase: phase,
+                    ..Default::default()
+                },
+            );
+            assert_eq!(draw.flipbook_frame, phase);
+        }
+
+        // Out-of-range phases clamp instead of indexing past the sheet.
+        let draw = particle_draw(
+            &g,
+            &g.particles[0],
+            &CelestialClock {
+                moon_phase: 99,
+                ..Default::default()
+            },
+        );
+        assert_eq!(draw.flipbook_frame, ffxi_dat::particle_gen::MOON_PHASES - 1);
     }
 
     #[test]
@@ -1588,7 +1903,7 @@ mod tests {
 
         let alpha_of = |g: &LiveGenerator| -> f32 {
             let mut mesh = empty_mesh();
-            rebuild_mesh(g, Quat::IDENTITY, &mut mesh);
+            rebuild_mesh(g, Quat::IDENTITY, &CelestialClock::default(), &mut mesh);
             match mesh.attribute(Mesh::ATTRIBUTE_COLOR).unwrap() {
                 bevy::mesh::VertexAttributeValues::Float32x4(c) => c[0][3],
                 _ => panic!("expected Float32x4 colours"),

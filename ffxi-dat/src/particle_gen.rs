@@ -94,6 +94,17 @@ const RENDER_STATE_IGNORE_TEXTURE_ALPHA: u16 = 0x1000;
 const GEN_FLAG_CONTINUOUS: u8 = 0x04;
 const GEN_FLAG_AUTO_RUN: u8 = 0x10;
 
+// Vana'diel's elemental week (research/xim EnvironmentManager.kt DayOfWeek) and the
+// 12 moon-phase buckets the 0x45/0x4F celestial opcodes index.
+pub const DAYS_OF_WEEK: usize = 8;
+pub const MOON_PHASES: usize = 12;
+// RGBA — one time-of-day keyframe track per channel (0x60 r .. 0x63 a).
+pub const TOD_COLOR_CHANNELS: usize = 4;
+
+fn rgba_u8(b: &[u8], o: usize) -> [f32; 4] {
+    std::array::from_fn(|i| b[o + i] as f32 / 255.0)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct DatId(pub [u8; 4]);
 
@@ -156,9 +167,22 @@ pub struct ParticleGeneratorDef {
 
     // research/xim ParticleUpdaters.kt:289-317 DayOfWeekColorUpdater (0x4E, 8xRGBA) and
     // MoonPhaseColorUpdater (0x4F, 12xRGBA): indexed by day-of-week / moon-phase frame and
-    // applied as a 2x modulate (Particle.kt:218). RGBA in 0..=1.
-    pub day_of_week_color: Option<[[f32; 4]; 8]>,
-    pub moon_phase_color: Option<[[f32; 4]; 12]>,
+    // applied as a 2x modulate (Particle.kt:217-218). RGBA in 0..=1.
+    pub day_of_week_color: Option<[[f32; 4]; DAYS_OF_WEEK]>,
+    pub moon_phase_color: Option<[[f32; 4]; MOON_PHASES]>,
+
+    // The time-of-day color curves: initializer 0x60..0x63 name a keyframe track per RGBA
+    // channel, and section-3 ClockValueUpdater 0x3C..0x3F sample it at the Vana'diel day
+    // fraction rather than the particle's life progress. This is how retail authors the
+    // sun's dawn/noon/dusk ramp and the moon's daytime fade — 0x3F multiplies alpha, the
+    // other three assign their channel.
+    // research/xim ParticleGeneratorParser.kt:270-274,431-434
+    pub tod_color_tracks: [Option<[u8; 4]>; TOD_COLOR_CHANNELS],
+    pub tod_color_driven: [bool; TOD_COLOR_CHANNELS],
+
+    // research/xim ParticleGeneratorParser.kt:444 MoonPhaseSpriteSheetUpdater (0x45): the
+    // sprite-sheet frame is the current moon phase, not the particle's life progress.
+    pub moon_phase_sprite: bool,
 
     // research/xim ParticleUpdaters.kt section-3 updaters (offset at body[0x78], same
     // sectionHeader+offset-0x10 convention as the setup section). TextureCoordinateUpdater
@@ -219,8 +243,8 @@ impl ParticleGeneratorDef {
         let mut blend = ParticleBlend::Additive;
         let mut blend_byte = 0u8;
         let mut ignore_texture_alpha = false;
-        let mut day_of_week_color = None;
-        let mut moon_phase_color = None;
+        let mut tod_color_tracks: [Option<[u8; 4]>; TOD_COLOR_CHANNELS] =
+            [None; TOD_COLOR_CHANNELS];
 
         while cursor + 4 <= body.len() {
             let cfg = u32_le(body, cursor);
@@ -287,40 +311,16 @@ impl ParticleGeneratorDef {
                         body[payload + 3] as f32 / 255.0,
                     ];
                 }
-                // research/xim ParticleUpdaters.kt:289-301 DayOfWeekColorUpdater: expectZero32
-                // then 8 RGBA quads (u8x4, 0..=255). payload+0 is the zero u32.
-                0x4E if payload + 4 + 32 <= body.len() => {
-                    let mut colors = [[0.0f32; 4]; 8];
-                    for (i, c) in colors.iter_mut().enumerate() {
-                        let o = payload + 4 + i * 4;
-                        *c = [
-                            body[o] as f32 / 255.0,
-                            body[o + 1] as f32 / 255.0,
-                            body[o + 2] as f32 / 255.0,
-                            body[o + 3] as f32 / 255.0,
-                        ];
-                    }
-                    day_of_week_color = Some(colors);
-                }
-                // research/xim ParticleUpdaters.kt:304-316 MoonPhaseColorUpdater: expectZero32
-                // then 12 RGBA quads.
-                0x4F if payload + 4 + 48 <= body.len() => {
-                    let mut colors = [[0.0f32; 4]; 12];
-                    for (i, c) in colors.iter_mut().enumerate() {
-                        let o = payload + 4 + i * 4;
-                        *c = [
-                            body[o] as f32 / 255.0,
-                            body[o + 1] as f32 / 255.0,
-                            body[o + 2] as f32 / 255.0,
-                            body[o + 3] as f32 / 255.0,
-                        ];
-                    }
-                    moon_phase_color = Some(colors);
-                }
                 // KeyFrameValueSetup: opcode selects the target channel; the track id is at payload+4.
                 0x27 if payload + 8 <= body.len() => scale_x_track = track_id(body, payload + 4),
                 0x28 if payload + 8 <= body.len() => scale_y_track = track_id(body, payload + 4),
                 0x2D if payload + 8 <= body.len() => alpha_track = track_id(body, payload + 4),
+                // research/xim ParticleGeneratorParser.kt:270-274 — 0x60..0x63 are the same
+                // KeyFrameValueSetup shape bound to the time-of-day color channels, read back by
+                // the section-3 ClockValueUpdater 0x3C..0x3F.
+                0x60..=0x63 if payload + 8 <= body.len() => {
+                    tod_color_tracks[(opcode - 0x60) as usize] = track_id(body, payload + 4);
+                }
                 // BlendFuncInitializer: p0 @payload+0 — high nibble bit 0x01 = opaque, else low
                 // nibble selects (0x8 additive, 0x4/0x6 alpha blend, 0x1/0x2 reverse-subtract).
                 0x1E if payload < body.len() => {
@@ -350,6 +350,10 @@ impl ParticleGeneratorDef {
         // scroll; 0x03 VelocityAccelerator gravity (Vector3f at payload+0).
         let mut uv_scroll = [0.0f32; 2];
         let mut accel = None;
+        let mut day_of_week_color = None;
+        let mut moon_phase_color = None;
+        let mut moon_phase_sprite = false;
+        let mut tod_color_driven = [false; TOD_COLOR_CHANNELS];
         let sec3_raw = u32_le(body, 0x78) as usize;
         if sec3_raw >= 0x10 && sec3_raw - 0x10 < body.len() {
             let mut cursor = sec3_raw - 0x10;
@@ -374,6 +378,23 @@ impl ParticleGeneratorDef {
                             f32_le(body, payload + 4),
                             f32_le(body, payload + 8),
                         ]);
+                    }
+                    // research/xim ParticleGeneratorParser.kt:431-434 ClockValueUpdater — these
+                    // carry no payload; they mark which 0x60..0x63 track drives its channel.
+                    0x3C..=0x3F => tod_color_driven[(opcode - 0x3C) as usize] = true,
+                    // research/xim ParticleGeneratorParser.kt:444 MoonPhaseSpriteSheetUpdater.
+                    0x45 => moon_phase_sprite = true,
+                    // research/xim ParticleUpdaters.kt:289-301 DayOfWeekColorUpdater: expectZero32
+                    // then 8 RGBA quads (u8x4, 0..=255). payload+0 is the zero u32.
+                    0x4E if payload + 4 + 4 * DAYS_OF_WEEK <= body.len() => {
+                        day_of_week_color =
+                            Some(std::array::from_fn(|i| rgba_u8(body, payload + 4 + i * 4)));
+                    }
+                    // research/xim ParticleUpdaters.kt:304-316 MoonPhaseColorUpdater: same shape,
+                    // 12 quads.
+                    0x4F if payload + 4 + 4 * MOON_PHASES <= body.len() => {
+                        moon_phase_color =
+                            Some(std::array::from_fn(|i| rgba_u8(body, payload + 4 + i * 4)));
                     }
                     _ => {}
                 }
@@ -408,6 +429,9 @@ impl ParticleGeneratorDef {
             alpha_track,
             day_of_week_color,
             moon_phase_color,
+            tod_color_tracks,
+            tod_color_driven,
+            moon_phase_sprite,
             uv_scroll,
             accel,
         }))
@@ -616,6 +640,138 @@ mod tests {
             "0x28 -> uv_scroll[1]"
         );
         assert_eq!(def.accel, Some([0.0, -0.02, 0.0]), "0x03 -> accel");
+    }
+
+    // The celestial opcodes live in the section-3 updater stream (body[0x78]), NOT the
+    // section-2 initializer stream, where 0x4E/0x4F mean FixedPointPositionVarianceSetup and
+    // 0x45 means ParentPositionCopyConfig (research/xim ParticleGeneratorParser.kt:247-249,
+    // 295 vs 444,454-455). Reading them from the wrong stream silently yields None on every
+    // real DAT, which is what left the moon on hand-tuned fallback tints.
+    #[test]
+    fn celestial_updaters_come_from_section3_only() {
+        let mut setup = op(0x01, 12, &[]);
+        setup[4 + 29] = LINKED_DATA_STATIC_MESH;
+
+        let dow = |base: u8| {
+            let mut p = vec![0u8; 4];
+            p.extend((0..DAYS_OF_WEEK as u8).flat_map(|i| [base + i, 0, 0, 255]));
+            op(0x4E, 10, &p)
+        };
+        let phase = || {
+            let mut p = vec![0u8; 4];
+            p.extend((0..MOON_PHASES as u8).flat_map(|i| [0, 0, i, 255]));
+            op(0x4F, 14, &p)
+        };
+
+        // In section 2 they must be ignored outright.
+        let mut sec2 = setup.clone();
+        sec2.extend(dow(0));
+        sec2.extend(phase());
+        sec2.extend(op(0x45, 1, &[]));
+        let def = ParticleGeneratorDef::parse(&build(&sec2, 1, 1))
+            .unwrap()
+            .unwrap();
+        assert_eq!(def.day_of_week_color, None);
+        assert_eq!(def.moon_phase_color, None);
+        assert!(!def.moon_phase_sprite);
+
+        // In section 3 they decode.
+        let mut body = build(&setup, 1, 1);
+        body.extend_from_slice(&[0u8; 4]);
+        let sec3_at = body.len();
+        body[0x78..0x7C].copy_from_slice(&((sec3_at + 0x10) as u32).to_le_bytes());
+        let mut sec3 = op(0x45, 1, &[]);
+        sec3.extend(dow(16));
+        sec3.extend(phase());
+        body.extend_from_slice(&sec3);
+
+        let def = ParticleGeneratorDef::parse(&body).unwrap().unwrap();
+        assert!(def.moon_phase_sprite, "0x45 -> moon-phase sprite frame");
+        let dow = def.day_of_week_color.expect("0x4E decodes");
+        assert!((dow[0][0] - 16.0 / 255.0).abs() < 1e-6);
+        assert!((dow[7][0] - 23.0 / 255.0).abs() < 1e-6);
+        let mp = def.moon_phase_color.expect("0x4F decodes");
+        assert!((mp[11][2] - 11.0 / 255.0).abs() < 1e-6);
+    }
+
+    // research/xim ParticleGeneratorParser.kt:270-274 — 0x60..0x63 are KeyFrameValueSetup
+    // (track id at payload+4, same shape as the 0x27/0x28/0x2D life tracks) naming the
+    // time-of-day RGBA curves; the section-3 ClockValueUpdater 0x3C..0x3F arms each channel.
+    #[test]
+    fn tod_color_tracks_pair_setup_with_updater() {
+        let mut sec2 = op(0x01, 12, &[]);
+        sec2[4 + 29] = LINKED_DATA_STATIC_MESH;
+        for (opcode, id) in [(0x60u8, b"ksr1"), (0x61, b"ksg1"), (0x62, b"ksb1")] {
+            let mut p = vec![0u8; 4];
+            p.extend_from_slice(id);
+            sec2.extend(op(opcode, 4, &p));
+        }
+        let mut body = build(&sec2, 1, 1);
+        body.extend_from_slice(&[0u8; 4]);
+        let sec3_at = body.len();
+        body[0x78..0x7C].copy_from_slice(&((sec3_at + 0x10) as u32).to_le_bytes());
+        // Arm red and blue only: an unarmed channel keeps its track but must not be applied.
+        let mut sec3 = op(0x3C, 1, &[]);
+        sec3.extend(op(0x3E, 1, &[]));
+        body.extend_from_slice(&sec3);
+
+        let def = ParticleGeneratorDef::parse(&body).unwrap().unwrap();
+        assert_eq!(
+            def.tod_color_tracks,
+            [Some(*b"ksr1"), Some(*b"ksg1"), Some(*b"ksb1"), None]
+        );
+        assert_eq!(def.tod_color_driven, [true, false, true, false]);
+    }
+
+    // Real-DAT guard for both of the above: West Ronfaure's fine-weather celestial set is the
+    // canonical shape — the sun carries three time-of-day colour curves, the moon carries a
+    // phase-indexed sprite plus both tint tables. If the section split regresses these all
+    // go quietly empty again.
+    #[test]
+    fn real_dat_west_ronfaure_celestial_generators() {
+        let Ok(root) = crate::DatRoot::from_env_or_default() else {
+            eprintln!("skipping: no DAT root");
+            return;
+        };
+        let Ok(loc) = root.resolve(201) else {
+            eprintln!("skipping: file 201 unresolvable");
+            return;
+        };
+        let Ok(bytes) = std::fs::read(loc.path_under(root.root())) else {
+            eprintln!("skipping: file 201 unreadable");
+            return;
+        };
+
+        let mut saw_sun = false;
+        let mut saw_moon = false;
+        for c in crate::chunk::walk(&bytes).flatten() {
+            if crate::kind::ChunkKind::from_u8(c.kind) != Some(crate::kind::ChunkKind::Generator) {
+                continue;
+            }
+            let Ok(Some(def)) = ParticleGeneratorDef::parse(c.data) else {
+                continue;
+            };
+            match (&c.name, def.attach_type) {
+                (b"sun1", AttachType::Sun) => {
+                    saw_sun = true;
+                    assert_eq!(
+                        def.tod_color_driven[..3],
+                        [true, true, true],
+                        "sun1 drives r/g/b from time-of-day curves"
+                    );
+                    assert!(def.tod_color_tracks[..3].iter().all(Option::is_some));
+                }
+                (b"moon", AttachType::Moon) => {
+                    saw_moon = true;
+                    assert!(def.moon_phase_sprite, "moon picks its frame by phase");
+                    assert!(def.day_of_week_color.is_some(), "moon has a 0x4E table");
+                    assert!(def.moon_phase_color.is_some(), "moon has a 0x4F table");
+                }
+                _ => {}
+            }
+        }
+        assert!(saw_sun, "file 201 defines a Sun-attached `sun1`");
+        assert!(saw_moon, "file 201 defines a Moon-attached `moon`");
     }
 
     #[test]

@@ -5,6 +5,8 @@ pub mod atmosphere;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod audio;
 pub mod camera;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod celestial_particles;
 pub mod combat_stance;
 pub mod components;
 pub mod cursor;
@@ -204,10 +206,16 @@ impl<S: SceneSource + Resource + Component<Mutability = bevy::ecs::component::Mu
         app.add_plugins(zone_particles::ZoneParticlesPlugin);
 
         #[cfg(not(target_arch = "wasm32"))]
+        app.add_plugins(celestial_particles::CelestialParticlesPlugin);
+
+        #[cfg(not(target_arch = "wasm32"))]
         app.add_plugins(zone_clouds::ZoneCloudsPlugin);
 
         app.add_plugins(debug_chat::DebugChatPlugin);
         app.init_resource::<SceneState>()
+            // Read by sun_moon_system on every platform; only celestial_particles (native)
+            // ever sets it true.
+            .init_resource::<sun_moon::DatCelestials>()
             .init_resource::<EventLog>()
             .init_resource::<TrackedEntities>()
             .init_resource::<Target>()

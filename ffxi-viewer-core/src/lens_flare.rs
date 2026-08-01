@@ -126,6 +126,7 @@ fn spawn_lens_flare(
 pub fn lens_flare_system(
     settings: Res<GraphicsSettings>,
     sky: Res<VanaSky>,
+    sheet: Res<LensFlareSheet>,
     occlusion: Res<SunOcclusion>,
     cam_q: Query<
         (&Transform, &Camera, &Projection),
@@ -145,10 +146,13 @@ pub fn lens_flare_system(
         return;
     };
 
-    // The painterly flare is the Vanilla-mode sun glare; Enhanced uses bloom.
+    // Retail's flare is the lf0x chain the zone ships; where a zone ships none, retail draws
+    // no flare at all. The analytic halo/ghost/streak has no retail counterpart, so it is an
+    // Enhanced embellishment and Vanilla stays data-driven or dark.
     let vanilla = !settings.sky_embellishments_enabled();
+    let data_driven = !sheet.frames.is_empty();
     let sun_up = sky.sun_altitude > 0.0;
-    if !vanilla || !sun_up || occlusion.visibility <= 0.0 {
+    if !sun_up || occlusion.visibility <= 0.0 || (vanilla && !data_driven) {
         *vis = Visibility::Hidden;
         return;
     }

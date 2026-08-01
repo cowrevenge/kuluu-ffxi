@@ -237,7 +237,13 @@ impl Plugin for CelestialParticlesPlugin {
                 Update,
                 (sync_celestial_particles, track_celestial_bodies)
                     .chain()
-                    .after(crate::sun_moon::sun_moon_system),
+                    .after(crate::sun_moon::sun_moon_system)
+                    // The simulator bakes each generator's colour into its mesh, so the
+                    // celestial clock and camera-relative origins have to be in place before
+                    // it runs. Unordered, frame 0 rebuilds with a Default clock — day
+                    // fraction 0, where the moon's authored alpha curve is 0 — and the
+                    // billboard bakes black.
+                    .before(crate::particle_sim::sync_particle_meshes),
             );
     }
 }

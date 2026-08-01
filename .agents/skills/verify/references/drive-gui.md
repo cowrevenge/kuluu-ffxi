@@ -11,6 +11,30 @@ The one condition you cannot escape: macOS stops rendering a **fully occluded**
 window, so *some* part of the client must stay on screen. Any sliver is enough;
 focus is not.
 
+## Hold the display awake FIRST
+
+```bash
+caffeinate -d -u -t 5400 &      # before launch, held for the whole session
+```
+
+Skipping this is the single most common way a GUI drive dies. When the host
+display sleeps or detaches, winit logs `Monitor removed <id>` and the window
+count drops to zero, which Bevy treats as a normal quit — so the client exits
+through its full teardown path with **no panic and no error**, and the log tail
+looks like a clean voluntary shutdown rather than a fault:
+
+```
+bevy_winit::system: Monitor removed 675v0
+bevy_window::system: No windows are open, exiting
+ffxi_client::view_native::exit_watchdog: teardown checkpoint stage="app.run() returned — winit loop exited cleanly"
+```
+
+Read that signature as *the display slept*, not as a client bug — it has cost
+whole verification sessions to misdiagnose. `-u` (simulate user activity) is
+needed alongside `-d`: once a monitor has actually been removed, `scripts/
+capture.sh` returns blank frames until a real wake, so an already-asleep
+display must be woken, not merely kept awake from that point on.
+
 ## Launch with the agent socket
 
 ```bash

@@ -85,3 +85,6 @@ profile.json.gz
 # only, NEVER commit. Same rationale as vendor/game-files/ above.
 /artifacts/retail/
 artifacts/
+
+# Chrome/Perfetto traces from --features trace runs — runtime artifacts
+/trace-*.json

@@ -1,4 +1,6 @@
 use std::collections::HashMap;
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::Arc;
 
 use bevy::prelude::*;
 use ffxi_dat::generator::Generator;
@@ -595,6 +597,246 @@ pub(crate) fn poll_global_effect_dir(
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+pub struct ParsedActionDat {
+    pub schedulers: Vec<Scheduler>,
+    pub assets: ActionAssets,
+}
+
+// Populated Jeuno fires several casts/WS per second and each re-visits a handful of files, so a
+// small window over the recently seen action DATs already turns repeat casts into pure hits.
+#[cfg(not(target_arch = "wasm32"))]
+const ACTION_DAT_CACHE_CAP: usize = 32;
+
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Default)]
+pub(crate) struct ActionDatLru {
+    map: HashMap<u32, Arc<ParsedActionDat>>,
+    order: std::collections::VecDeque<u32>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl ActionDatLru {
+    pub(crate) fn get_and_promote(&mut self, file_id: u32) -> Option<Arc<ParsedActionDat>> {
+        let hit = self.map.get(&file_id).cloned()?;
+        self.order.retain(|k| *k != file_id);
+        self.order.push_back(file_id);
+        Some(hit)
+    }
+
+    pub(crate) fn insert(&mut self, file_id: u32, parsed: Arc<ParsedActionDat>) {
+        if self.map.insert(file_id, parsed).is_some() {
+            self.order.retain(|k| *k != file_id);
+        }
+        self.order.push_back(file_id);
+        while self.map.len() > ACTION_DAT_CACHE_CAP {
+            let Some(evict) = self.order.pop_front() else {
+                break;
+            };
+            self.map.remove(&evict);
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+enum PendingActionDispatch {
+    Action {
+        actor_id: u32,
+        target_id: Option<u32>,
+    },
+    Emote {
+        actor_id: u32,
+        target_id: u32,
+        routine: [u8; 4],
+    },
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Resource, Default)]
+pub struct ActionDatCache {
+    lru: ActionDatLru,
+    tasks: HashMap<u32, bevy::tasks::Task<ParsedActionDat>>,
+    pending: Vec<(u32, PendingActionDispatch)>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl ActionDatCache {
+    fn request(&mut self, file_id: u32) {
+        if self.tasks.contains_key(&file_id) {
+            return;
+        }
+        let task =
+            bevy::tasks::AsyncComputeTaskPool::get().spawn(async move { load_action_dat(file_id) });
+        self.tasks.insert(file_id, task);
+    }
+
+    fn defer(&mut self, file_id: u32, dispatch: PendingActionDispatch) {
+        self.request(file_id);
+        self.pending.push((file_id, dispatch));
+    }
+}
+
+// An unresolvable/unreadable file caches as an empty parse, so a broken DAT path degrades to the
+// pre-existing "no effect" behaviour instead of re-spawning a load per cast.
+#[cfg(not(target_arch = "wasm32"))]
+fn load_action_dat(file_id: u32) -> ParsedActionDat {
+    let bytes = ffxi_dat::DatRoot::from_env_or_default()
+        .ok()
+        .and_then(|root| {
+            let loc = root.resolve(file_id).ok()?;
+            std::fs::read(loc.path_under(root.root())).ok()
+        })
+        .unwrap_or_default();
+    let (schedulers, assets) = parse_action_bytes(&bytes);
+    ParsedActionDat { schedulers, assets }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn apply_action_dispatch(
+    parsed: &ParsedActionDat,
+    actor_routines: Option<&HashMap<ffxi_dat::datid::DatId, Scheduler>>,
+    global: Option<&GlobalEffectDir>,
+    actor_entity: Entity,
+    target_entity: Option<Entity>,
+    commands: &mut Commands,
+) {
+    // A spell DAT's `main` links the caster's own finish routine (0x3C `shbk`), which in turn
+    // links global-dir routines — so the flatten must span all three tiers.
+    let mut lookup = RoutineLookup::new().with_dat(&parsed.schedulers);
+    if let Some(r) = actor_routines {
+        lookup = lookup.with_actor(r);
+    }
+    if let Some(g) = global {
+        lookup = lookup.with_dat(&g.schedulers);
+    }
+    let active = ActiveScheduler::from_routine(&lookup, b"main").or_else(|| {
+        parsed
+            .schedulers
+            .first()
+            .map(ActiveScheduler::from_scheduler)
+    });
+    let Some(active) = active else { return };
+    commands
+        .entity(actor_entity)
+        .try_insert(active)
+        .try_insert(parsed.assets.clone())
+        .try_insert(ActionTarget(target_entity));
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn apply_emote_dispatch(
+    parsed: &ParsedActionDat,
+    routine: &[u8; 4],
+    actor_entity: Entity,
+    target_entity: Option<Entity>,
+    commands: &mut Commands,
+) -> bool {
+    let Some(active) = ActiveScheduler::from_main(&parsed.schedulers, routine) else {
+        return false;
+    };
+    commands
+        .entity(actor_entity)
+        .try_insert(active)
+        .try_insert(parsed.assets.clone())
+        .try_insert(ActionTarget(target_entity));
+    true
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn actor_routines_via_mut<'a>(
+    entity: Entity,
+    q_children: &Query<&Children>,
+    q_actors: &'a Query<&mut crate::ffxi_actor_render::FfxiRenderActor>,
+) -> Option<&'a HashMap<ffxi_dat::datid::DatId, Scheduler>> {
+    q_children
+        .get(entity)
+        .ok()?
+        .iter()
+        .find_map(|child| q_actors.get(child).ok())
+        .map(|actor| actor.routines())
+}
+
+// Applies dispatches whose action-DAT parse has landed. A cache miss therefore delays the
+// completion effect by the load's frames-in-flight instead of stalling the frame it arrived on;
+// the routine's internal timeline (motion + particles + SE) shifts as one unit.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn poll_action_dat_tasks(
+    mut cache: ResMut<ActionDatCache>,
+    tracked: Res<crate::scene::TrackedEntities>,
+    q_children: Query<&Children>,
+    mut q_actors: Query<&mut crate::ffxi_actor_render::FfxiRenderActor>,
+    global: Option<Res<GlobalEffectDir>>,
+    mut commands: Commands,
+) {
+    use bevy::tasks::futures_lite::future;
+    if cache.tasks.is_empty() && cache.pending.is_empty() {
+        return;
+    }
+    let mut landed = Vec::new();
+    cache.tasks.retain(
+        |file_id, task| match future::block_on(future::poll_once(task)) {
+            Some(parsed) => {
+                landed.push((*file_id, Arc::new(parsed)));
+                false
+            }
+            None => true,
+        },
+    );
+    for (file_id, parsed) in landed {
+        cache.lru.insert(file_id, parsed);
+    }
+    if cache.pending.is_empty() {
+        return;
+    }
+    let pending = std::mem::take(&mut cache.pending);
+    for (file_id, dispatch) in pending {
+        let Some(parsed) = cache.lru.get_and_promote(file_id) else {
+            // Still in flight — or evicted before this entry drained, in which case re-request.
+            cache.defer(file_id, dispatch);
+            continue;
+        };
+        match dispatch {
+            PendingActionDispatch::Action {
+                actor_id,
+                target_id,
+            } => {
+                let Some(&actor_entity) = tracked.by_id.get(&actor_id) else {
+                    continue;
+                };
+                let target_entity = target_id.and_then(|id| tracked.by_id.get(&id).copied());
+                let actor_routines = actor_routines_via_mut(actor_entity, &q_children, &q_actors);
+                apply_action_dispatch(
+                    &parsed,
+                    actor_routines,
+                    global.as_deref(),
+                    actor_entity,
+                    target_entity,
+                    &mut commands,
+                );
+            }
+            PendingActionDispatch::Emote {
+                actor_id,
+                target_id,
+                routine,
+            } => {
+                let Some(&actor_entity) = tracked.by_id.get(&actor_id) else {
+                    continue;
+                };
+                let target_entity = tracked.by_id.get(&target_id).copied();
+                if !apply_emote_dispatch(
+                    &parsed,
+                    &routine,
+                    actor_entity,
+                    target_entity,
+                    &mut commands,
+                ) {
+                    play_local_emote_clip(&routine, actor_entity, &q_children, &mut q_actors);
+                }
+            }
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 pub fn dispatch_sound_stages(
     mut events: MessageReader<SchedulerStageEvent>,
     q_actors: Query<&ActionAssets>,
@@ -746,6 +988,7 @@ pub fn dispatch_action_started(
     q_render: Query<&crate::ffxi_actor_render::FfxiRenderActor>,
     global: Option<Res<GlobalEffectDir>>,
     mut dll_cache: Local<MainDllCache>,
+    mut cache: ResMut<ActionDatCache>,
     mut commands: Commands,
     mut last_seen: Local<u64>,
 ) {
@@ -784,37 +1027,26 @@ pub fn dispatch_action_started(
             continue;
         };
 
-        let Ok(root) = ffxi_dat::DatRoot::from_env_or_default() else {
-            continue;
-        };
-        let Ok(loc) = root.resolve(file_id) else {
-            continue;
-        };
-        let Ok(bytes) = std::fs::read(loc.path_under(root.root())) else {
-            continue;
-        };
-        let (schedulers, assets) = parse_action_bytes(&bytes);
-
-        // A spell DAT's `main` links the caster's own finish routine (0x3C `shbk`), which in turn
-        // links global-dir routines — so the flatten must span all three tiers.
-        let actor_routines = actor_render_routines(actor_entity, &q_children, &q_render);
-        let mut lookup = RoutineLookup::new().with_dat(&schedulers);
-        if let Some(r) = actor_routines {
-            lookup = lookup.with_actor(r);
+        match cache.lru.get_and_promote(file_id) {
+            Some(parsed) => {
+                let actor_routines = actor_render_routines(actor_entity, &q_children, &q_render);
+                apply_action_dispatch(
+                    &parsed,
+                    actor_routines,
+                    global.as_deref(),
+                    actor_entity,
+                    target_entity,
+                    &mut commands,
+                );
+            }
+            None => cache.defer(
+                file_id,
+                PendingActionDispatch::Action {
+                    actor_id,
+                    target_id,
+                },
+            ),
         }
-        if let Some(g) = global.as_ref() {
-            lookup = lookup.with_dat(&g.schedulers);
-        }
-
-        let active = ActiveScheduler::from_routine(&lookup, b"main")
-            .or_else(|| schedulers.first().map(ActiveScheduler::from_scheduler));
-        let Some(active) = active else { continue };
-
-        commands
-            .entity(actor_entity)
-            .try_insert(active)
-            .try_insert(assets)
-            .try_insert(ActionTarget(target_entity));
     }
 }
 
@@ -1273,6 +1505,7 @@ pub fn dispatch_entity_emoted(
     q_children: Query<&Children>,
     mut q_actors: Query<&mut crate::ffxi_actor_render::FfxiRenderActor>,
     mut dll_cache: Local<MainDllCache>,
+    mut cache: ResMut<ActionDatCache>,
     mut commands: Commands,
     mut last_seen: Local<u64>,
 ) {
@@ -1324,52 +1557,66 @@ pub fn dispatch_entity_emoted(
                 .and_then(|d| d.base_emote_index(race));
             if let Some(base) = base {
                 let file_id = base as u32 + file_offset;
-                if let Some(active) = load_emote_scheduler(file_id, &routine) {
-                    commands
-                        .entity(actor_entity)
-                        .try_insert(active.0)
-                        .try_insert(active.1)
-                        .try_insert(ActionTarget(tracked.by_id.get(&target_id).copied()));
-                    continue;
+                match cache.lru.get_and_promote(file_id) {
+                    Some(parsed) => {
+                        if apply_emote_dispatch(
+                            &parsed,
+                            &routine,
+                            actor_entity,
+                            tracked.by_id.get(&target_id).copied(),
+                            &mut commands,
+                        ) {
+                            continue;
+                        }
+                    }
+                    // The DAT-vs-local-clip decision needs the parse, so it is deferred with it.
+                    None => {
+                        cache.defer(
+                            file_id,
+                            PendingActionDispatch::Emote {
+                                actor_id,
+                                target_id,
+                                routine,
+                            },
+                        );
+                        continue;
+                    }
                 }
             }
         }
 
-        // NPC casters (lua sendEmote) and PCs whose emote DAT failed to load:
-        // play the actor's own em0N clip when it has one; silent no-op
-        // otherwise (XIM findLocalAnimationRoutine, Actor.kt:695-697).
-        let clip = ffxi_dat::datid::DatId::from_name(&routine);
-        let Ok(children) = q_children.get(actor_entity) else {
-            continue;
-        };
-        for &child in children {
-            if let Ok(mut actor) = q_actors.get_mut(child) {
-                actor.begin_completion_motion(
-                    clip,
-                    crate::ffxi_actor_render::CompletionMotion {
-                        local_clips: &[],
-                        duration_frames: 0.0,
-                        max_loops: 1,
-                        transition_in: 0,
-                        transition_out: 0,
-                    },
-                );
-            }
-        }
+        play_local_emote_clip(&routine, actor_entity, &q_children, &mut q_actors);
     }
 }
 
+// NPC casters (lua sendEmote) and PCs whose emote DAT lacks the routine:
+// play the actor's own em0N clip when it has one; silent no-op
+// otherwise (XIM findLocalAnimationRoutine, Actor.kt:695-697).
 #[cfg(not(target_arch = "wasm32"))]
-fn load_emote_scheduler(
-    file_id: u32,
+fn play_local_emote_clip(
     routine: &[u8; 4],
-) -> Option<(ActiveScheduler, ActionAssets)> {
-    let root = ffxi_dat::DatRoot::from_env_or_default().ok()?;
-    let loc = root.resolve(file_id).ok()?;
-    let bytes = std::fs::read(loc.path_under(root.root())).ok()?;
-    let (schedulers, assets) = parse_action_bytes(&bytes);
-    let active = ActiveScheduler::from_main(&schedulers, routine)?;
-    Some((active, assets))
+    actor_entity: Entity,
+    q_children: &Query<&Children>,
+    q_actors: &mut Query<&mut crate::ffxi_actor_render::FfxiRenderActor>,
+) {
+    let clip = ffxi_dat::datid::DatId::from_name(routine);
+    let Ok(children) = q_children.get(actor_entity) else {
+        return;
+    };
+    for &child in children {
+        if let Ok(mut actor) = q_actors.get_mut(child) {
+            actor.begin_completion_motion(
+                clip,
+                crate::ffxi_actor_render::CompletionMotion {
+                    local_clips: &[],
+                    duration_frames: 0.0,
+                    max_loops: 1,
+                    transition_in: 0,
+                    transition_out: 0,
+                },
+            );
+        }
+    }
 }
 
 pub struct SchedulerRuntimePlugin;
@@ -1384,6 +1631,7 @@ impl Plugin for SchedulerRuntimePlugin {
         #[cfg(not(target_arch = "wasm32"))]
         {
             app.init_resource::<crate::particle_sim::ParticleSimulator>();
+            app.init_resource::<ActionDatCache>();
             app.add_systems(Startup, load_global_effect_dir);
             app.add_systems(
                 Update,
@@ -1393,6 +1641,7 @@ impl Plugin for SchedulerRuntimePlugin {
                     dispatch_cast_routine_started,
                     dispatch_melee_action_started,
                     dispatch_entity_emoted,
+                    poll_action_dat_tasks,
                     // Chained between the routine inserters and the stage consumers so a
                     // routine's frame-0 stages fire on the frame it is inserted, and every
                     // stage is consumed the same frame it is written.
@@ -2506,5 +2755,68 @@ mod tests {
         assert_eq!(swing_routine(AttackAnimation::RightKick), Some(*b"cti0"));
         assert_eq!(swing_routine(AttackAnimation::LeftKick), Some(*b"dti0"));
         assert_eq!(swing_routine(AttackAnimation::Throw), None);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn empty_parsed() -> Arc<ParsedActionDat> {
+        Arc::new(ParsedActionDat {
+            schedulers: Vec::new(),
+            assets: ActionAssets::default(),
+        })
+    }
+
+    // The bead's acceptance criterion: repeated casts of the same spell hit the cache. A hit must
+    // also count as a use, or a spammed spell would be the first thing evicted.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn action_dat_lru_evicts_least_recently_used_not_promoted_hits() {
+        let mut lru = ActionDatLru::default();
+        for id in 0..ACTION_DAT_CACHE_CAP as u32 {
+            lru.insert(id, empty_parsed());
+        }
+        assert!(
+            lru.get_and_promote(0).is_some(),
+            "filled to cap, no eviction"
+        );
+
+        lru.insert(ACTION_DAT_CACHE_CAP as u32, empty_parsed());
+        assert!(
+            lru.get_and_promote(0).is_some(),
+            "the promoted entry survives the over-cap insert"
+        );
+        assert!(
+            lru.get_and_promote(1).is_none(),
+            "the least-recently-used entry is the one evicted"
+        );
+        assert!(lru.get_and_promote(2).is_some());
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn action_dat_lru_reinsert_refreshes_recency_without_duplicating() {
+        let mut lru = ActionDatLru::default();
+        lru.insert(7, empty_parsed());
+        for id in 100..100 + (ACTION_DAT_CACHE_CAP as u32 - 1) {
+            lru.insert(id, empty_parsed());
+        }
+        assert_eq!(lru.map.len(), ACTION_DAT_CACHE_CAP);
+
+        lru.insert(7, empty_parsed());
+        assert_eq!(
+            lru.map.len(),
+            ACTION_DAT_CACHE_CAP,
+            "re-insert does not double-count"
+        );
+
+        lru.insert(999, empty_parsed());
+        assert!(
+            lru.get_and_promote(100).is_none(),
+            "the oldest untouched entry is evicted"
+        );
+        assert!(
+            lru.get_and_promote(7).is_some(),
+            "the re-insert refreshed 7's recency"
+        );
+        assert!(lru.get_and_promote(999).is_some());
     }
 }

@@ -616,6 +616,14 @@ pub(crate) fn register(
         OnEnter(LauncherState::Login),
         decide_initial_screen.before(login::spawn_login_ui),
     );
+    app.add_systems(
+        Update,
+        async_work::poll_keyring_prefill.run_if(in_state(LauncherState::Login)),
+    );
+    app.add_systems(
+        OnExit(LauncherState::Login),
+        async_work::drop_keyring_prefill,
+    );
 
     app.add_systems(
         OnEnter(LauncherState::ServerSelect),
@@ -999,6 +1007,7 @@ fn decide_initial_screen(
     overrides: Option<Res<CliOverridesPresent>>,
     gate_done: Option<Res<DatGateDone>>,
     err: Res<LoginErrorMsg>,
+    rt: Res<RuntimeHandle>,
     mut form: ResMut<LoginForm>,
     mut server_form: ResMut<ServerSelectForm>,
     mut server_info: ResMut<ServerInfo>,
@@ -1034,15 +1043,12 @@ fn decide_initial_screen(
         form.user = prefill.account.username.clone();
         form.remember_password = prefill.account.remember_password;
         if prefill.account.remember_password {
-            if let Some(pw) = ffxi_client::secret_store::SecretStore::get(
-                ffxi_client::launcher_store::KEYRING_SERVICE,
-                &ffxi_client::launcher_store::keyring_account_key(
-                    &prefill.account.server_name,
-                    &prefill.account.username,
-                ),
-            ) {
-                form.pass = pw;
-            }
+            async_work::spawn_keyring_prefill(
+                &mut commands,
+                &rt,
+                prefill.account.server_name.clone(),
+                prefill.account.username.clone(),
+            );
         }
 
         if let Some(profile) = prefill.profile {

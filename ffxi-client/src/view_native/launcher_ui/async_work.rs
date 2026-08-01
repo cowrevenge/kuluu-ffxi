@@ -922,3 +922,54 @@ pub(super) fn despawn_char_delete_ui(
         commands.entity(e).despawn();
     }
 }
+
+#[derive(Resource)]
+pub(super) struct KeyringPrefillChan {
+    rx: oneshot::Receiver<Option<String>>,
+}
+
+// Keychain reads block for seconds on macOS (measured ~2.4s per call,
+// kuluu-7r9q), so the OnEnter(Login) prefill must not call SecretStore::get
+// inline on the main thread.
+pub(super) fn spawn_keyring_prefill(
+    commands: &mut Commands,
+    rt: &RuntimeHandle,
+    server_name: String,
+    username: String,
+) {
+    let (tx, rx) = oneshot::channel();
+    rt.0.spawn_blocking(move || {
+        let key = keyring_account_key(&server_name, &username);
+        let _ = tx.send(SecretStore::get(KEYRING_SERVICE, &key));
+    });
+    commands.insert_resource(KeyringPrefillChan { rx });
+}
+
+pub(super) fn poll_keyring_prefill(
+    mut commands: Commands,
+    chan: Option<ResMut<KeyringPrefillChan>>,
+    mut form: ResMut<LoginForm>,
+    mut dirty: ResMut<super::login::LoginUiDirty>,
+) {
+    let Some(mut chan) = chan else {
+        return;
+    };
+    match chan.rx.try_recv() {
+        Ok(Some(pw)) => {
+            if form.pass.is_empty() {
+                form.pass = pw;
+                dirty.0 = true;
+            }
+            commands.remove_resource::<KeyringPrefillChan>();
+        }
+        Ok(None) => commands.remove_resource::<KeyringPrefillChan>(),
+        Err(oneshot::error::TryRecvError::Empty) => {}
+        Err(oneshot::error::TryRecvError::Closed) => {
+            commands.remove_resource::<KeyringPrefillChan>();
+        }
+    }
+}
+
+pub(super) fn drop_keyring_prefill(mut commands: Commands) {
+    commands.remove_resource::<KeyringPrefillChan>();
+}

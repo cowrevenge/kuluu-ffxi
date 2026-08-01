@@ -18,7 +18,7 @@ use bevy::render::renderer::{RenderDevice, RenderQueue};
 use bevy::render::texture::{FallbackImage, GpuImage};
 use bevy::render::{Extract, ExtractSchedule, RenderApp};
 use bevy::shader::ShaderRef;
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 
 pub const MAX_JOINTS: usize = 128;
 
@@ -344,11 +344,64 @@ pub fn free_instance_slot_on_remove(
     }
 }
 
-/// All per-actor/per-submesh state lives in `FfxiSkinRegistry` and reaches the
+/// One material asset per distinct texture (see `FfxiSkinnedMaterialCache`);
+/// all per-actor/per-submesh state lives in `FfxiSkinRegistry` and reaches the
 /// shader through the shared storage buffers, so materials never churn.
 #[derive(Asset, TypePath, Clone, Debug)]
 pub struct FfxiSkinnedMaterial {
     pub base_color_texture: Option<Handle<Image>>,
+}
+
+/// Dedupes `FfxiSkinnedMaterial` assets by texture so every submesh drawing the
+/// same DAT texture shares one material (one bind group). `None` = the shared
+/// untextured material for blank-texture C/CS meshes.
+#[derive(Resource, Default)]
+pub struct FfxiSkinnedMaterialCache {
+    by_texture: HashMap<Option<AssetId<Image>>, Handle<FfxiSkinnedMaterial>>,
+}
+
+impl FfxiSkinnedMaterialCache {
+    pub fn get_or_create(
+        &mut self,
+        texture: Option<Handle<Image>>,
+        materials: &mut Assets<FfxiSkinnedMaterial>,
+    ) -> Handle<FfxiSkinnedMaterial> {
+        let key = texture.as_ref().map(Handle::id);
+        if let Some(h) = self.by_texture.get(&key) {
+            if materials.contains(h) {
+                return h.clone();
+            }
+        }
+        let h = materials.add(FfxiSkinnedMaterial {
+            base_color_texture: texture,
+        });
+        self.by_texture.insert(key, h.clone());
+        h
+    }
+
+    pub fn len(&self) -> usize {
+        self.by_texture.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.by_texture.is_empty()
+    }
+}
+
+// The cache holds strong handles, so an unreferenced material (and the GpuImage
+// its bind group pins) survives until pruned here after despawns.
+fn prune_ffxi_material_cache(
+    mut removed: RemovedComponents<MeshMaterial3d<FfxiSkinnedMaterial>>,
+    q_live: Query<&MeshMaterial3d<FfxiSkinnedMaterial>>,
+    mut cache: ResMut<FfxiSkinnedMaterialCache>,
+) {
+    if removed.is_empty() {
+        return;
+    }
+    removed.clear();
+    let live: std::collections::HashSet<AssetId<FfxiSkinnedMaterial>> =
+        q_live.iter().map(|m| m.0.id()).collect();
+    cache.by_texture.retain(|_, h| live.contains(&h.id()));
 }
 
 /// Render-world owner of the two shared storage buffers every
@@ -598,9 +651,13 @@ impl Plugin for FfxiMaterialPlugin {
         embedded_asset!(app, "skinned_ffxi_prepass.wgsl");
         app.add_plugins(MaterialPlugin::<FfxiSkinnedMaterial>::default());
         app.init_resource::<FfxiSkinRegistry>();
+        app.init_resource::<FfxiSkinnedMaterialCache>();
         app.add_observer(free_skin_slot_on_remove);
         app.add_observer(free_instance_slot_on_remove);
-        app.add_systems(PostUpdate, remark_materials_on_buffer_growth);
+        app.add_systems(
+            PostUpdate,
+            (remark_materials_on_buffer_growth, prune_ffxi_material_cache),
+        );
         if let Some(render_app) = app.get_sub_app_mut(RenderApp) {
             render_app
                 .init_resource::<FfxiSharedBuffers>()
@@ -733,6 +790,27 @@ mod tests {
             reg.alloc_instance(FfxiInstance::default());
         }
         assert_eq!(reg.buffer_generation(), gen0 + 2);
+    }
+
+    #[test]
+    fn material_cache_dedupes_by_texture() {
+        let mut materials = Assets::<FfxiSkinnedMaterial>::default();
+        let mut images = Assets::<Image>::default();
+        let mut cache = FfxiSkinnedMaterialCache::default();
+        let tex_a = images.add(Image::default());
+        let tex_b = images.add(Image::default());
+
+        let a1 = cache.get_or_create(Some(tex_a.clone()), &mut materials);
+        let a2 = cache.get_or_create(Some(tex_a), &mut materials);
+        let b = cache.get_or_create(Some(tex_b), &mut materials);
+        let untextured1 = cache.get_or_create(None, &mut materials);
+        let untextured2 = cache.get_or_create(None, &mut materials);
+
+        assert_eq!(a1, a2, "same texture must share one material");
+        assert_ne!(a1, b, "distinct textures get distinct materials");
+        assert_eq!(untextured1, untextured2, "one shared untextured material");
+        assert_eq!(cache.len(), 3);
+        assert_eq!(materials.len(), 3);
     }
 
     #[test]

@@ -6,7 +6,7 @@ use ffxi_viewer_core::ffxi_actor_render::{
     FfxiRenderActor, PoseState, FRAME_RATE,
 };
 use ffxi_viewer_core::skinned_ffxi_material::{
-    FfxiMaterialPlugin, FfxiSkinRegistry, FfxiSkinnedMaterial,
+    FfxiMaterialPlugin, FfxiSkinRegistry, FfxiSkinnedMaterial, FfxiSkinnedMaterialCache,
 };
 use std::env;
 
@@ -265,6 +265,7 @@ fn spawn_subject(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<FfxiSkinnedMaterial>>,
+    mut material_cache: ResMut<FfxiSkinnedMaterialCache>,
     mut registry: ResMut<FfxiSkinRegistry>,
     mut images: ResMut<Assets<Image>>,
     params: Res<Params>,
@@ -291,6 +292,7 @@ fn spawn_subject(
                 &mut commands,
                 &mut meshes,
                 &mut materials,
+                &mut material_cache,
                 &mut registry,
                 &mut images,
                 &loaded,

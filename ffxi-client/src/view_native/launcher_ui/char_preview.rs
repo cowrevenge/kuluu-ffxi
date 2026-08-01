@@ -9,7 +9,7 @@ use ffxi_viewer_core::ffxi_actor_render::{
 };
 use ffxi_viewer_core::look_resolver::{resolve_equipment_slot, resolve_face};
 use ffxi_viewer_core::skinned_ffxi_material::{
-    FfxiLightingUniform, FfxiSkinRegistry, FfxiSkinnedMaterial,
+    FfxiLightingUniform, FfxiSkinRegistry, FfxiSkinnedMaterial, FfxiSkinnedMaterialCache,
 };
 
 use super::{char_list::CharCursor, CharListData};
@@ -224,6 +224,7 @@ pub(super) fn poll_pending_preview(
     settings: Res<ffxi_viewer_core::GraphicsSettings>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<FfxiSkinnedMaterial>>,
+    mut material_cache: ResMut<FfxiSkinnedMaterialCache>,
     mut registry: ResMut<FfxiSkinRegistry>,
     mut images: ResMut<Assets<Image>>,
 ) {
@@ -258,6 +259,7 @@ pub(super) fn poll_pending_preview(
         &mut commands,
         &mut meshes,
         &mut materials,
+        &mut material_cache,
         &mut registry,
         &mut images,
         &loaded,

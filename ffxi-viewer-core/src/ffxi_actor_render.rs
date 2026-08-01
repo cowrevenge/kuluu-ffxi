@@ -30,8 +30,8 @@ use crate::combat_stance;
 use crate::dat_vos2::skeleton_file_id_for_race;
 use crate::skinned_ffxi_material::{
     FfxiInstance, FfxiInstanceSlot, FfxiJointMatrices, FfxiLightingUniform, FfxiSkinRegistry,
-    FfxiSkinSlot, FfxiSkinnedMaterial, ATTR_COLOR, ATTR_JOINT0, ATTR_JOINT1, ATTR_JOINT_WEIGHT,
-    ATTR_NORMAL0, ATTR_NORMAL1, ATTR_POSITION0, ATTR_POSITION1,
+    FfxiSkinSlot, FfxiSkinnedMaterial, FfxiSkinnedMaterialCache, ATTR_COLOR, ATTR_JOINT0,
+    ATTR_JOINT1, ATTR_JOINT_WEIGHT, ATTR_NORMAL0, ATTR_NORMAL1, ATTR_POSITION0, ATTR_POSITION1,
 };
 
 #[derive(Debug, Clone)]
@@ -934,6 +934,7 @@ pub fn spawn_loaded_actor(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<FfxiSkinnedMaterial>,
+    material_cache: &mut FfxiSkinnedMaterialCache,
     registry: &mut FfxiSkinRegistry,
     images: &mut Assets<Image>,
     loaded: &LoadedActor,
@@ -960,7 +961,16 @@ pub fn spawn_loaded_actor(
         .id();
 
     let instance_slots = build_actor_children(
-        commands, meshes, materials, registry, images, loaded, &parts, actor_root, skin_slot,
+        commands,
+        meshes,
+        materials,
+        material_cache,
+        registry,
+        images,
+        loaded,
+        &parts,
+        actor_root,
+        skin_slot,
     );
 
     commands.entity(actor_root).insert(make_render_actor(
@@ -1000,6 +1010,7 @@ fn build_actor_children(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<FfxiSkinnedMaterial>,
+    material_cache: &mut FfxiSkinnedMaterialCache,
     registry: &mut FfxiSkinRegistry,
     images: &mut Assets<Image>,
     loaded: &LoadedActor,
@@ -1046,9 +1057,7 @@ fn build_actor_children(
         };
         let has_texture = if tex_handle.is_some() { 1.0 } else { 0.0 };
 
-        let mat = materials.add(FfxiSkinnedMaterial {
-            base_color_texture: tex_handle,
-        });
+        let mat = material_cache.get_or_create(tex_handle, materials);
         let instance_slot = registry.alloc_instance(FfxiInstance {
             flags: Vec4::new(has_texture, 0.0, 0.0, 0.0),
             tint: built.tint,
@@ -1164,6 +1173,7 @@ pub fn spawn_live_actor(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<FfxiSkinnedMaterial>,
+    material_cache: &mut FfxiSkinnedMaterialCache,
     registry: &mut FfxiSkinRegistry,
     images: &mut Assets<Image>,
     prepared: &PreparedActor,
@@ -1194,6 +1204,7 @@ pub fn spawn_live_actor(
         commands,
         meshes,
         materials,
+        material_cache,
         registry,
         images,
         &prepared.loaded,
@@ -1842,6 +1853,7 @@ pub fn poll_load_actor_tasks(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<FfxiSkinnedMaterial>>,
+    mut material_cache: ResMut<FfxiSkinnedMaterialCache>,
     mut registry: ResMut<FfxiSkinRegistry>,
     mut std_materials: ResMut<Assets<StandardMaterial>>,
     mut images: ResMut<Assets<Image>>,
@@ -1902,6 +1914,7 @@ pub fn poll_load_actor_tasks(
             &mut commands,
             &mut meshes,
             &mut materials,
+            &mut material_cache,
             &mut registry,
             &mut images,
             &prepared,

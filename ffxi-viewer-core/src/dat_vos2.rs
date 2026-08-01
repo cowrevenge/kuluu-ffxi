@@ -21,8 +21,8 @@ use crate::skeleton_instance::{
 };
 use crate::skinned_ffxi_material::{
     FfxiInstance, FfxiInstanceSlot, FfxiLightingUniform, FfxiSkinRegistry, FfxiSkinSlot,
-    FfxiSkinnedMaterial, ATTR_COLOR, ATTR_JOINT0, ATTR_JOINT1, ATTR_JOINT_WEIGHT, ATTR_NORMAL0,
-    ATTR_NORMAL1, ATTR_POSITION0, ATTR_POSITION1,
+    FfxiSkinnedMaterial, FfxiSkinnedMaterialCache, ATTR_COLOR, ATTR_JOINT0, ATTR_JOINT1,
+    ATTR_JOINT_WEIGHT, ATTR_NORMAL0, ATTR_NORMAL1, ATTR_POSITION0, ATTR_POSITION1,
 };
 
 #[derive(Component, Debug)]
@@ -1253,6 +1253,7 @@ fn spawn_ffxi_actor(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<FfxiSkinnedMaterial>,
+    material_cache: &mut FfxiSkinnedMaterialCache,
     registry: &mut FfxiSkinRegistry,
     images: &mut Assets<Image>,
     parent: Entity,
@@ -1375,9 +1376,7 @@ fn spawn_ffxi_actor(
         mesh.insert_indices(Indices::U32(indices));
 
         let has_texture = if tex_handle.is_some() { 1.0 } else { 0.0 };
-        let mat = materials.add(FfxiSkinnedMaterial {
-            base_color_texture: tex_handle,
-        });
+        let mat = material_cache.get_or_create(tex_handle, materials);
         let instance_slot = registry.alloc_instance(FfxiInstance {
             flags: Vec4::new(has_texture, 0.0, 0.0, 0.0),
             tint: Vec4::ONE,
@@ -1405,6 +1404,7 @@ pub fn process_load_vos2_requests_ffxi(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<FfxiSkinnedMaterial>>,
+    mut material_cache: ResMut<FfxiSkinnedMaterialCache>,
     mut registry: ResMut<FfxiSkinRegistry>,
     mut images: ResMut<Assets<Image>>,
     settings: Res<GraphicsSettings>,
@@ -1482,6 +1482,7 @@ pub fn process_load_vos2_requests_ffxi(
             &mut commands,
             &mut meshes,
             &mut materials,
+            &mut material_cache,
             &mut registry,
             &mut images,
             bevy_e,

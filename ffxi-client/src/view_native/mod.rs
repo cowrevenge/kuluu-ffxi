@@ -17,6 +17,7 @@ pub mod model_viewer;
 pub mod nameplate_occlude;
 pub mod navmesh_overlay;
 pub mod perf_hud;
+pub mod qos;
 pub mod screenshot;
 pub mod slash_commands;
 pub mod sun_occlusion;
@@ -299,6 +300,9 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
             Some((w.parse::<u32>().ok()?, h.parse::<u32>().ok()?))
         })
         .unwrap_or((1280, 800));
+    // Before DefaultPlugins so these pools win get_or_init and TaskPoolPlugin's
+    // create_default_pools no-ops (kuluu-3q8t).
+    qos::init_task_pools_with_qos();
     let mut plugins = DefaultPlugins.set(WindowPlugin {
         primary_window: Some(Window {
             title: format!("ffxi-client — {server}"),
@@ -364,6 +368,7 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
     if let Some(render_app) = app.get_sub_app_mut(bevy::render::RenderApp) {
         use bevy::render::{Render, RenderSystems};
         render_app.init_resource::<RenderSpanStamp>();
+        render_app.add_systems(Render, qos::promote_render_thread);
         render_app.add_systems(bevy::render::ExtractSchedule, stamp_render_begin);
         render_app.add_systems(
             Render,

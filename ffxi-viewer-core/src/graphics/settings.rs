@@ -219,6 +219,7 @@ pub enum GraphicsField {
     FogStepCount,
     ViewDistance,
     VSync,
+    FrameRateCap,
     Fov,
 
     SkyStyle,
@@ -258,6 +259,7 @@ impl GraphicsField {
             GraphicsField::FogStepCount => "Fog Quality",
             GraphicsField::ViewDistance => "View Distance",
             GraphicsField::VSync => "VSync",
+            GraphicsField::FrameRateCap => "Frame Rate Cap",
             GraphicsField::Fov => "FOV",
             GraphicsField::SkyStyle => "Sky Style",
             GraphicsField::WaterStyle => "Water Style",
@@ -308,6 +310,9 @@ pub struct GraphicsSettings {
     pub fog_step_count: u32,
     pub view_distance: f32,
     pub vsync: bool,
+    /// 0 disables the cap (framepace Auto); RETAIL_FPS-adjacent slots otherwise.
+    #[serde(default)]
+    pub fps_cap: u32,
     pub fov_deg: f32,
 
     #[serde(default)]
@@ -477,6 +482,11 @@ const DOF_APERTURE_SLOTS: &[f32] = &[1.4, 2.0, 2.8, 4.0, 5.6, 8.0];
 
 // Sub-1.0 downscales the 3D buffer (perf); 1.0 is native; >1.0 supersamples (SSAA).
 // 1.0 must stay in this list — it's the default and the no-op path.
+// 30 matches retail's native cadence; 0 = Off (framepace Auto). A flat cap
+// stabilizes pacing on ProMotion panels (measured 2026-07-31: /fps 60 smoothed
+// crowd judder even with vsync headroom above 60).
+const FPS_CAP_SLOTS: &[u32] = &[0, 30, 60, 120];
+
 const RENDER_SCALE_SLOTS: &[f32] = &[0.5, 0.67, 0.75, 0.85, 1.0, 1.25, 1.5, 2.0];
 
 impl GraphicsSettings {
@@ -495,6 +505,7 @@ impl GraphicsSettings {
                 fog_step_count: 32,
                 view_distance: 500.0,
                 vsync: true,
+                fps_cap: 0,
                 fov_deg: 50.0,
                 sky_style: SkyStyle::Vanilla,
                 enhanced_water: false,
@@ -525,6 +536,7 @@ impl GraphicsSettings {
                 fog_step_count: 64,
                 view_distance: 1100.0,
                 vsync: true,
+                fps_cap: 0,
                 fov_deg: 50.0,
                 sky_style: SkyStyle::Vanilla,
                 enhanced_water: false,
@@ -555,6 +567,7 @@ impl GraphicsSettings {
                 fog_step_count: 64,
                 view_distance: 6100.0,
                 vsync: true,
+                fps_cap: 0,
                 fov_deg: 50.0,
                 sky_style: SkyStyle::Vanilla,
                 enhanced_water: false,
@@ -589,6 +602,7 @@ impl GraphicsSettings {
                 fog_step_count: 96,
                 view_distance: 6100.0,
                 vsync: true,
+                fps_cap: 0,
                 fov_deg: 50.0,
                 sky_style: SkyStyle::Vanilla,
                 enhanced_water: false,
@@ -642,6 +656,10 @@ impl GraphicsSettings {
             GraphicsField::FogStepCount => format!("{}", self.fog_step_count),
             GraphicsField::ViewDistance => format!("{:.0}m", self.view_distance),
             GraphicsField::VSync => bool_label(self.vsync).into(),
+            GraphicsField::FrameRateCap => match self.fps_cap {
+                0 => "Off".into(),
+                n => format!("{n} fps"),
+            },
             GraphicsField::Fov => format!("{:.0}°", self.fov_deg),
 
             GraphicsField::SkyStyle => self.sky_style().label().to_string(),
@@ -702,6 +720,7 @@ impl GraphicsSettings {
                 let receive = self.faithful_shadow_receive;
                 let zld = self.zone_line_display;
                 let vsync = self.vsync;
+                let fps_cap = self.fps_cap;
                 let next =
                     cycle_slot(self.preset, PRESET_CYCLE, delta).unwrap_or(QualityPreset::High);
                 *self = Self::for_preset(next);
@@ -716,6 +735,7 @@ impl GraphicsSettings {
                 self.faithful_shadow_receive = receive;
                 self.zone_line_display = zld;
                 self.vsync = vsync;
+                self.fps_cap = fps_cap;
             }
             GraphicsField::ShadowMapSize => {
                 self.shadow_map_size =
@@ -761,6 +781,9 @@ impl GraphicsSettings {
             }
             GraphicsField::VSync => {
                 self.vsync = !self.vsync;
+            }
+            GraphicsField::FrameRateCap => {
+                self.fps_cap = cycle_slot_u32(self.fps_cap, FPS_CAP_SLOTS, delta);
             }
             GraphicsField::Fov => {
                 self.fov_deg = cycle_slot_f32(self.fov_deg, FOV_SLOTS, delta);
@@ -969,6 +992,7 @@ pub const GRAPHICS_FIELDS: &[GraphicsField] = &[
     GraphicsField::FogStepCount,
     GraphicsField::ViewDistance,
     GraphicsField::VSync,
+    GraphicsField::FrameRateCap,
     GraphicsField::Fov,
     GraphicsField::SkyStyle,
     GraphicsField::WaterStyle,
@@ -1526,6 +1550,22 @@ mod tests {
         assert_eq!(SkyStyle::Enhanced.sky_realism(), SkyRealism::enhanced());
         assert!(!SkyRealism::retail().earthshine);
         assert!(SkyRealism::enhanced().earthshine);
+    }
+
+    #[test]
+    fn fps_cap_cycles_slots_and_stays_preset_orthogonal() {
+        let mut s = GraphicsSettings::default();
+        let tier = s.preset;
+        assert_eq!(s.value_label(GraphicsField::FrameRateCap), "Off");
+        s.cycle(GraphicsField::FrameRateCap, 1);
+        assert_eq!(s.fps_cap, 30);
+        assert_eq!(s.value_label(GraphicsField::FrameRateCap), "30 fps");
+        assert_eq!(s.preset, tier, "fps cap is preset-orthogonal");
+        s.cycle(GraphicsField::FrameRateCap, -1);
+        assert_eq!(s.fps_cap, 0, "cycle wraps back to Off");
+        s.fps_cap = 60;
+        s.cycle(GraphicsField::Preset, 1);
+        assert_eq!(s.fps_cap, 60, "preset cycle kept the cap");
     }
 
     #[test]

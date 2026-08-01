@@ -145,6 +145,17 @@ fn stamp_render_total(s: Res<RenderSpanStamp>) {
     }
 }
 
+fn apply_fps_cap_system(
+    settings: Res<ffxi_viewer_core::graphics_settings::GraphicsSettings>,
+    mut framepace: ResMut<bevy_framepace::FramepaceSettings>,
+) {
+    use bevy_framepace::Limiter;
+    framepace.limiter = match settings.fps_cap {
+        0 => Limiter::Auto,
+        n => Limiter::from_framerate(f64::from(n)),
+    };
+}
+
 fn gpu_timing_render_plugin() -> bevy::render::RenderPlugin {
     use bevy::render::settings::{RenderCreation, WgpuFeatures, WgpuSettings};
     let mut settings = WgpuSettings::default();
@@ -410,6 +421,17 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
     // limiter, the cause is framepace's sleep interacting with vsync, not render work.
     if std::env::var_os("FFXI_NO_FRAMEPACE").is_none() {
         app.add_plugins(bevy_framepace::FramepacePlugin);
+        // Lives client-side (not the viewer-core apply_* set) because
+        // bevy_framepace is a client dependency. /fps stays a session override
+        // on top; this re-asserts the persisted cap on any settings change.
+        app.add_systems(
+            Update,
+            apply_fps_cap_system.run_if(
+                bevy::ecs::schedule::common_conditions::resource_changed::<
+                    ffxi_viewer_core::graphics_settings::GraphicsSettings,
+                >,
+            ),
+        );
     }
 
     app.add_plugins(bevy::feathers::FeathersPlugins)

@@ -263,6 +263,7 @@ const GRAPHICS_ENTRIES: &[&str] = &[
     "Fog Quality",
     "View Distance",
     "VSync",
+    "Frame Rate Cap",
     "FOV",
     "Sky Style",
     "Water Style",

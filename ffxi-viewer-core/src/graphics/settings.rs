@@ -701,6 +701,7 @@ impl GraphicsSettings {
                 let realistic = self.realistic_character_lighting;
                 let receive = self.faithful_shadow_receive;
                 let zld = self.zone_line_display;
+                let vsync = self.vsync;
                 let next =
                     cycle_slot(self.preset, PRESET_CYCLE, delta).unwrap_or(QualityPreset::High);
                 *self = Self::for_preset(next);
@@ -714,6 +715,7 @@ impl GraphicsSettings {
                 self.realistic_character_lighting = realistic;
                 self.faithful_shadow_receive = receive;
                 self.zone_line_display = zld;
+                self.vsync = vsync;
             }
             GraphicsField::ShadowMapSize => {
                 self.shadow_map_size =
@@ -759,7 +761,6 @@ impl GraphicsSettings {
             }
             GraphicsField::VSync => {
                 self.vsync = !self.vsync;
-                self.preset = QualityPreset::Custom;
             }
             GraphicsField::Fov => {
                 self.fov_deg = cycle_slot_f32(self.fov_deg, FOV_SLOTS, delta);
@@ -1527,6 +1528,17 @@ mod tests {
         assert_eq!(SkyStyle::Enhanced.sky_realism(), SkyRealism::enhanced());
         assert!(!SkyRealism::retail().earthshine);
         assert!(SkyRealism::enhanced().earthshine);
+    }
+
+    #[test]
+    fn preset_cycle_preserves_vsync_and_vsync_keeps_preset() {
+        let mut s = GraphicsSettings::default();
+        let tier = s.preset;
+        s.cycle(GraphicsField::VSync, 1);
+        assert!(!s.vsync);
+        assert_eq!(s.preset, tier, "vsync is preset-orthogonal");
+        s.cycle(GraphicsField::Preset, 1);
+        assert!(!s.vsync, "preset cycle kept vsync off");
     }
 
     #[test]

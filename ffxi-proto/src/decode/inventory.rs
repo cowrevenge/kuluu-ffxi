@@ -212,3 +212,213 @@ impl EquipList {
         })
     }
 }
+
+#[cfg(test)]
+mod item_tests {
+    use super::*;
+
+    #[test]
+    fn item_max_decodes_legacy_and_wide_capacity() {
+        let mut buf = vec![0u8; ItemMax::SIZE];
+
+        buf[0] = 81;
+
+        buf[1] = 81;
+        let wide_off = 18 + 14 + 2;
+        buf[wide_off..wide_off + 2].copy_from_slice(&201u16.to_le_bytes());
+
+        let wide_off = 18 + 14 + 10 * 2;
+        buf[wide_off..wide_off + 2].copy_from_slice(&81u16.to_le_bytes());
+
+        let m = ItemMax::decode(&buf).unwrap();
+        assert_eq!(
+            m.capacities[1], 200,
+            "Mog Safe: wide takes precedence, +1 inverted"
+        );
+        assert_eq!(m.capacities[10], 80, "Wardrobe2: wide-only, +1 inverted");
+        assert_eq!(
+            m.capacities[17], 0,
+            "Recycle Bin: zeroed (disabled sentinel)"
+        );
+    }
+
+    /// LSB's only ItemNum2 = 0 emitter is a DISABLED container (a lapsed Mog
+    /// Locker lease keeps its legacy byte sized), so once any wide value is
+    /// present a zero must stay zero rather than fall back per-slot
+    /// (vendor/server/src/map/packets/s2c/0x01c_item_max.cpp:52-57).
+    #[test]
+    fn item_max_wide_zero_is_the_disable_sentinel_not_a_fallback() {
+        let mut buf = vec![0u8; ItemMax::SIZE];
+        buf[0] = 31;
+        buf[4] = 31; // lapsed locker: legacy still sized...
+        let wide_off = 18 + 14;
+        buf[wide_off..wide_off + 2].copy_from_slice(&31u16.to_le_bytes());
+        // ...but ItemNum2[LOC_MOGLOCKER] stays 0.
+
+        let m = ItemMax::decode(&buf).unwrap();
+        assert_eq!(m.capacities[0], 30);
+        assert_eq!(m.capacities[4], 0, "wide 0 = disabled, no legacy fallback");
+    }
+
+    #[test]
+    fn item_max_falls_back_to_legacy_only_when_wide_is_absent() {
+        let mut buf = vec![0u8; ItemMax::SIZE];
+
+        buf[0] = 81;
+        buf[4] = 21;
+
+        let m = ItemMax::decode(&buf).unwrap();
+        assert_eq!(m.capacities[0], 80, "pre-widening server: legacy decoded");
+        assert_eq!(m.capacities[4], 20, "moglocker: legacy decoded with -1");
+        assert_eq!(
+            m.capacities[1], 0,
+            "fully-disabled stays at 0, no underflow"
+        );
+    }
+
+    #[test]
+    fn item_max_truncated_errors() {
+        let buf = vec![0u8; ItemMax::SIZE - 1];
+        assert!(matches!(
+            ItemMax::decode(&buf),
+            Err(DecodeError::Truncated(96, _))
+        ));
+    }
+
+    #[test]
+    fn item_same_decodes_state_and_flags() {
+        let mut buf = vec![0u8; ItemSame::SIZE];
+        buf[0] = 0;
+        buf[4..8].copy_from_slice(&0xCAFEu32.to_le_bytes());
+        let s = ItemSame::decode(&buf).unwrap();
+        assert_eq!(s.state, ItemSameState::StillLoading);
+        assert_eq!(s.flags, 0xCAFE);
+
+        buf[0] = 1;
+        let s = ItemSame::decode(&buf).unwrap();
+        assert_eq!(s.state, ItemSameState::AllLoaded);
+    }
+
+    #[test]
+    fn item_num_decodes() {
+        let mut buf = vec![0u8; ItemNum::SIZE];
+        buf[0..4].copy_from_slice(&12345u32.to_le_bytes());
+        buf[4] = 0;
+        buf[5] = 7;
+        buf[6] = 1;
+        let n = ItemNum::decode(&buf).unwrap();
+        assert_eq!(n.quantity, 12345);
+        assert_eq!(n.category, 0);
+        assert_eq!(n.index, 7);
+        assert_eq!(n.lock_flg, 1);
+    }
+
+    #[test]
+    fn item_list_decodes() {
+        let mut buf = vec![0u8; ItemList::SIZE];
+        buf[0..4].copy_from_slice(&1u32.to_le_bytes());
+        buf[4..6].copy_from_slice(&4112u16.to_le_bytes());
+        buf[6] = 5;
+        buf[7] = 12;
+        buf[8] = 0;
+        let l = ItemList::decode(&buf).unwrap();
+        assert_eq!(l.quantity, 1);
+        assert_eq!(l.item_no, 4112);
+        assert_eq!(l.category, 5);
+        assert_eq!(l.index, 12);
+    }
+
+    #[test]
+    fn item_attr_decodes_with_extdata() {
+        let mut buf = vec![0u8; ItemAttr::SIZE];
+        buf[0..4].copy_from_slice(&1u32.to_le_bytes());
+        buf[4..8].copy_from_slice(&500_000u32.to_le_bytes());
+        buf[8..10].copy_from_slice(&8000u16.to_le_bytes());
+        buf[10] = 0;
+        buf[11] = 3;
+        buf[12] = 0;
+        for (i, b) in buf[13..37].iter_mut().enumerate() {
+            *b = i as u8;
+        }
+        let a = ItemAttr::decode(&buf).unwrap();
+        assert_eq!(a.quantity, 1);
+        assert_eq!(a.price, 500_000);
+        assert_eq!(a.item_no, 8000);
+        assert_eq!(a.category, 0);
+        assert_eq!(a.index, 3);
+        assert_eq!(a.extdata[0], 0);
+        assert_eq!(a.extdata[23], 23);
+    }
+
+    #[test]
+    fn item_attr_truncated_errors() {
+        let buf = vec![0u8; ItemAttr::SIZE - 1];
+        assert!(matches!(
+            ItemAttr::decode(&buf),
+            Err(DecodeError::Truncated(37, _))
+        ));
+    }
+
+    fn item_attr_with_extdata(ext: [u8; 24]) -> ItemAttr {
+        let mut buf = vec![0u8; ItemAttr::SIZE];
+        buf[13..37].copy_from_slice(&ext);
+        ItemAttr::decode(&buf).unwrap()
+    }
+
+    #[test]
+    fn charge_info_none_for_non_charged_header() {
+        let mut ext = [0u8; 24];
+        ext[0] = 0x00;
+        assert_eq!(item_attr_with_extdata(ext).charge_info(), None);
+    }
+
+    #[test]
+    fn charge_info_reads_charges_next_use_and_ready() {
+        // 0x020_item_attr.cpp:47-68 — header 0x01, charges at [1], ready bit
+        // 0x40 in flags-hi [3], next-use vana timestamp at [4..8].
+        let mut ext = [0u8; 24];
+        ext[0] = 0x01;
+        ext[1] = 2;
+        ext[3] = 0x90;
+        ext[4..8].copy_from_slice(&123_456u32.to_le_bytes());
+        let ci = item_attr_with_extdata(ext).charge_info().unwrap();
+        assert_eq!(ci.charges, 2);
+        assert_eq!(ci.next_use_vana_ts, 123_456);
+        assert!(!ci.ready);
+    }
+
+    #[test]
+    fn charge_info_ready_bit_set_and_zero_timestamp() {
+        let mut ext = [0u8; 24];
+        ext[0] = 0x01;
+        ext[1] = 1;
+        ext[3] = 0xC0;
+        let ci = item_attr_with_extdata(ext).charge_info().unwrap();
+        assert_eq!(ci.charges, 1);
+        assert_eq!(ci.next_use_vana_ts, 0);
+        assert!(ci.ready);
+    }
+}
+
+#[cfg(test)]
+mod equip_list_tests {
+    use super::*;
+
+    #[test]
+    fn equip_list_decodes_field_order() {
+        let buf = [0x05u8, 0x04, 0x08, 0x00];
+        let e = EquipList::decode(&buf).expect("decode");
+        assert_eq!(e.container_index, 5);
+        assert_eq!(e.equip_slot, 4);
+        assert_eq!(e.container, 8);
+    }
+
+    #[test]
+    fn equip_list_truncated_returns_err() {
+        let buf = [0u8; EquipList::SIZE - 1];
+        assert!(matches!(
+            EquipList::decode(&buf),
+            Err(DecodeError::Truncated(EquipList::SIZE, n)) if n == EquipList::SIZE - 1
+        ));
+    }
+}

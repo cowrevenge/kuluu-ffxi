@@ -53,3 +53,38 @@ impl FishPacket {
         (self.angler_sense >> 1) & 1 == 1
     }
 }
+
+#[cfg(test)]
+mod fish_packet_tests {
+    use super::*;
+
+    #[test]
+    fn fish_packet_decodes_minigame_params() {
+        let mut body = vec![0u8; FishPacket::SIZE];
+        body[0..2].copy_from_slice(&200u16.to_le_bytes()); // stamina
+        body[2..4].copy_from_slice(&5u16.to_le_bytes()); // arrow_delay
+        body[4..6].copy_from_slice(&130u16.to_le_bytes()); // regen
+        body[6..8].copy_from_slice(&3u16.to_le_bytes()); // move_frequency
+        body[8..10].copy_from_slice(&40u16.to_le_bytes()); // arrow_damage
+        body[10..12].copy_from_slice(&10u16.to_le_bytes()); // arrow_regen
+        body[12..14].copy_from_slice(&30u16.to_le_bytes()); // time
+        body[14] = 0b11; // angler_sense: both bits set
+        body[16..20].copy_from_slice(&0x0000_0064u32.to_le_bytes()); // intuition
+
+        let f = FishPacket::decode(&body).unwrap();
+        assert_eq!(f.stamina, 200);
+        assert_eq!(f.arrow_delay, 5);
+        assert_eq!(f.regen, 130);
+        assert_eq!(f.move_frequency, 3);
+        assert_eq!(f.arrow_damage, 40);
+        assert_eq!(f.arrow_regen, 10);
+        assert_eq!(f.time, 30);
+        assert_eq!(f.intuition, 100);
+        assert!(f.shows_intuition());
+
+        assert!(matches!(
+            FishPacket::decode(&[0u8; FishPacket::SIZE - 1]),
+            Err(DecodeError::Truncated(n, _)) if n == FishPacket::SIZE
+        ));
+    }
+}

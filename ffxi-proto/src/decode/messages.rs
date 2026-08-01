@@ -289,3 +289,55 @@ mod talk_num_work_tests {
         ));
     }
 }
+
+#[cfg(test)]
+mod system_message_tests {
+    use super::*;
+
+    #[test]
+    fn system_message_decodes() {
+        let mut buf = vec![0u8; SystemMessage::SIZE];
+        buf[0..4].copy_from_slice(&30u32.to_le_bytes());
+        buf[4..8].copy_from_slice(&0u32.to_le_bytes());
+        buf[8..10].copy_from_slice(&7u16.to_le_bytes());
+        let m = SystemMessage::decode(&buf).unwrap();
+        assert_eq!(m.para, 30);
+        assert_eq!(m.para2, 0);
+        assert_eq!(m.message_id, 7);
+    }
+
+    #[test]
+    fn system_message_truncated_errors() {
+        let buf = vec![0u8; SystemMessage::SIZE - 1];
+        assert!(matches!(
+            SystemMessage::decode(&buf),
+            Err(DecodeError::Truncated(12, _))
+        ));
+    }
+}
+
+#[cfg(test)]
+mod weather_packet_tests {
+    use super::*;
+
+    #[test]
+    fn weather_packet_decodes_fields() {
+        let mut buf = [0u8; WeatherPacket::SIZE];
+        buf[0..4].copy_from_slice(&0xDEAD_BEEFu32.to_le_bytes());
+        buf[4..6].copy_from_slice(&6u16.to_le_bytes());
+        buf[6..8].copy_from_slice(&0x0123u16.to_le_bytes());
+        let w = WeatherPacket::decode(&buf).unwrap();
+        assert_eq!(w.start_time, 0xDEAD_BEEF);
+        assert_eq!(w.weather_number, 6);
+        assert_eq!(w.offset_time, 0x0123);
+    }
+
+    #[test]
+    fn weather_packet_truncated_returns_err() {
+        let buf = [0u8; WeatherPacket::SIZE - 1];
+        assert!(matches!(
+            WeatherPacket::decode(&buf),
+            Err(DecodeError::Truncated(WeatherPacket::SIZE, n)) if n == WeatherPacket::SIZE - 1
+        ));
+    }
+}

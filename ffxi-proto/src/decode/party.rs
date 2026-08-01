@@ -96,3 +96,83 @@ impl PartyAttrs {
         Ok((attrs, extra))
     }
 }
+
+#[cfg(test)]
+mod party_attrs_tests {
+    use super::*;
+
+    #[test]
+    fn party_attrs_group_attr_decodes() {
+        let mut buf = vec![0u8; 36];
+        buf[0..4].copy_from_slice(&0x0001_0042u32.to_le_bytes());
+        buf[4..8].copy_from_slice(&1500u32.to_le_bytes());
+        buf[8..12].copy_from_slice(&500u32.to_le_bytes());
+        buf[12..16].copy_from_slice(&1234u32.to_le_bytes());
+        buf[16..18].copy_from_slice(&0x0042u16.to_le_bytes());
+        buf[18] = 75;
+        buf[19] = 50;
+        buf[20] = 0;
+        buf[21] = 1;
+        buf[22..24].copy_from_slice(&234u16.to_le_bytes());
+        buf[28] = 6;
+        buf[29] = 75;
+        buf[30] = 1;
+        buf[31] = 37;
+
+        let p = PartyAttrs::decode_group_attr(&buf).unwrap();
+        assert_eq!(p.unique_no, 0x0001_0042);
+        assert_eq!(p.hp, 1500);
+        assert_eq!(p.mp, 500);
+        assert_eq!(p.tp, 1234);
+        assert_eq!(p.act_index, 0x42);
+        assert_eq!(p.hpp, 75);
+        assert_eq!(p.mpp, 50);
+        assert_eq!(p.moghouse_flg, 1);
+        assert_eq!(p.zone_no, 234);
+        assert_eq!(p.mjob_no, 6);
+        assert_eq!(p.mjob_lv, 75);
+        assert_eq!(p.sjob_no, 1);
+        assert_eq!(p.sjob_lv, 37);
+    }
+
+    #[test]
+    fn party_attrs_group_list_decodes_with_name_and_leader() {
+        let mut buf = vec![0u8; 56];
+        buf[0..4].copy_from_slice(&0x0010_0001u32.to_le_bytes());
+        buf[4..8].copy_from_slice(&2000u32.to_le_bytes());
+        buf[8..12].copy_from_slice(&100u32.to_le_bytes());
+        buf[12..16].copy_from_slice(&0u32.to_le_bytes());
+
+        buf[16..20].copy_from_slice(&0x0000_0005u32.to_le_bytes());
+        buf[20..22].copy_from_slice(&0x0007u16.to_le_bytes());
+        buf[22] = 1;
+        buf[23] = 1;
+        buf[24] = 0;
+        buf[25] = 100;
+        buf[26] = 100;
+        buf[28..30].copy_from_slice(&230u16.to_le_bytes());
+        buf[30] = 1;
+        buf[31] = 75;
+        buf[36..36 + 6].copy_from_slice(b"Vanari");
+
+        let (attrs, extra) = PartyAttrs::decode_group_list(&buf).unwrap();
+        assert_eq!(attrs.unique_no, 0x0010_0001);
+        assert_eq!(attrs.hp, 2000);
+        assert_eq!(attrs.act_index, 7);
+        assert_eq!(attrs.zone_no, 230);
+        assert_eq!(attrs.moghouse_flg, 1);
+        assert_eq!(extra.member_number, 1);
+        assert!(extra.is_party_leader);
+        assert!(!extra.is_alliance_leader);
+        assert_eq!(extra.name.as_deref(), Some("Vanari"));
+    }
+
+    #[test]
+    fn party_attrs_group_list_truncated_errors() {
+        let buf = vec![0u8; 40];
+        assert!(matches!(
+            PartyAttrs::decode_group_list(&buf),
+            Err(DecodeError::Truncated(52, 40))
+        ));
+    }
+}

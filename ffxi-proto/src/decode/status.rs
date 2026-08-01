@@ -192,3 +192,224 @@ impl JobInfo {
         })
     }
 }
+
+#[cfg(test)]
+mod cli_status_tests {
+    use super::*;
+
+    #[test]
+    fn clistatus_reads_stat_block_offsets() {
+        let mut buf = vec![0u8; 84];
+        buf[0..4].copy_from_slice(&1946u32.to_le_bytes()); // hp_max
+        buf[4..8].copy_from_slice(&1295u32.to_le_bytes()); // mp_max
+        buf[8] = 5; // mjob_no (RDM)
+        buf[9] = 75; // mjob_lv
+        buf[10] = 4; // sjob_no (BLM)
+        buf[11] = 37; // sjob_lv
+        for i in 0..7 {
+            buf[16 + i * 2..18 + i * 2].copy_from_slice(&((10 + i as u16) * 5).to_le_bytes());
+            buf[30 + i * 2..32 + i * 2].copy_from_slice(&((i as i16 + 1) * 7).to_le_bytes());
+        }
+        buf[44..46].copy_from_slice(&1048u16.to_le_bytes()); // attack
+        buf[46..48].copy_from_slice(&1006u16.to_le_bytes()); // defense
+        buf[48..50].copy_from_slice(&(-15i16).to_le_bytes()); // fire resist
+        buf[81] = 119; // ilvl
+
+        let cs = CliStatus::decode(&buf).expect("decodes");
+        assert_eq!(cs.hp_max, 1946);
+        assert_eq!(cs.mp_max, 1295);
+        assert_eq!(cs.mjob_no, 5);
+        assert_eq!(cs.mjob_lv, 75);
+        assert_eq!(cs.sjob_no, 4);
+        assert_eq!(cs.sjob_lv, 37);
+        assert_eq!(cs.bp_base[0], 50, "STR base");
+        assert_eq!(cs.bp_base[6], 80, "CHR base");
+        assert_eq!(cs.bp_adj[0], 7, "STR gear delta");
+        assert_eq!(cs.attack, 1048);
+        assert_eq!(cs.defense, 1006);
+        assert_eq!(cs.def_elem[0], -15, "fire resist signed");
+        assert_eq!(cs.ilvl, 119);
+        assert!(
+            CliStatus::decode(&buf[..80]).is_err(),
+            "truncation rejected"
+        );
+    }
+}
+
+#[cfg(test)]
+mod job_info_tests {
+    use super::*;
+
+    /// Pins JobInfo to LSB's GP_MYROOM_DANCER layout
+    /// (vendor/server/src/map/packets/s2c/0x01b_job_info.h:28-45; job_lev2, not
+    /// the legacy job_lev[16] @0x0C) and MAX_JOBTYPE
+    /// (vendor/server/src/map/entities/battleentity.h:100), since the decode
+    /// tests build buffers through these same consts.
+    #[test]
+    fn job_info_offsets_match_gp_myroom_dancer_layout() {
+        assert_eq!(JobInfo::MJOB_NO_OFFSET, 0x04);
+        assert_eq!(JobInfo::SJOB_NO_OFFSET, 0x07);
+        assert_eq!(JobInfo::UNLOCKED_OFFSET, 0x08);
+        assert_eq!(JobInfo::HP_MAX_OFFSET, 0x38);
+        assert_eq!(JobInfo::MP_MAX_OFFSET, 0x3C);
+        assert_eq!(JobInfo::SJOBFLG_OFFSET, 0x40);
+        assert_eq!(JobInfo::JOB_LEVELS_OFFSET, 0x44);
+        assert_eq!(JobInfo::MAX_JOBTYPE, 24);
+    }
+
+    #[test]
+    fn job_info_decodes_synthetic_body() {
+        let mut buf = vec![0u8; 0x80];
+        buf[JobInfo::MJOB_NO_OFFSET] = 5; // RDM
+        buf[JobInfo::SJOB_NO_OFFSET] = 4; // BLM
+                                          // bit 0 = subjob feature, bits 1..6 = WAR..THF unlocked.
+        let unlocked: u32 = 0b0111_1111;
+        buf[JobInfo::UNLOCKED_OFFSET..JobInfo::UNLOCKED_OFFSET + 4]
+            .copy_from_slice(&unlocked.to_le_bytes());
+        buf[JobInfo::HP_MAX_OFFSET..JobInfo::HP_MAX_OFFSET + 4]
+            .copy_from_slice(&1946i32.to_le_bytes());
+        buf[JobInfo::MP_MAX_OFFSET..JobInfo::MP_MAX_OFFSET + 4]
+            .copy_from_slice(&1295i32.to_le_bytes());
+        buf[JobInfo::SJOBFLG_OFFSET] = 1;
+        for j in 0..JobInfo::MAX_JOBTYPE {
+            buf[JobInfo::JOB_LEVELS_OFFSET + j] = j as u8 * 3;
+        }
+        // Legacy truncated job_lev[16] @0x0C left zeroed: proves we read job_lev2.
+        let info = JobInfo::decode(&buf).unwrap();
+        assert_eq!(info.mjob_no, 5);
+        assert_eq!(info.sjob_no, 4);
+        assert_eq!(info.unlocked, unlocked);
+        assert!(info.sub_job_unlocked);
+        assert_eq!(info.hp_max, 1946);
+        assert_eq!(info.mp_max, 1295);
+        assert_eq!(info.sjobflg, 1);
+        assert_eq!(info.job_levels[1], 3, "WAR");
+        assert_eq!(
+            info.job_levels[22], 66,
+            "RUN — beyond the legacy 16-job array"
+        );
+    }
+
+    #[test]
+    fn job_info_truncated_errors() {
+        let buf = vec![0u8; JobInfo::MIN_LEN - 1];
+        assert!(matches!(
+            JobInfo::decode(&buf),
+            Err(DecodeError::Truncated(_, _))
+        ));
+    }
+
+    #[test]
+    fn job_info_without_subjob_flag() {
+        let mut buf = vec![0u8; JobInfo::MIN_LEN];
+        buf[JobInfo::UNLOCKED_OFFSET..JobInfo::UNLOCKED_OFFSET + 4]
+            .copy_from_slice(&0b0000_0110u32.to_le_bytes());
+        let info = JobInfo::decode(&buf).unwrap();
+        assert!(!info.sub_job_unlocked);
+        assert_eq!(info.sjobflg, 0);
+    }
+}
+
+#[cfg(test)]
+mod char_status_tests {
+    use super::*;
+
+    #[test]
+    fn char_status_decodes_death_counter_and_homepoint_seconds() {
+        // Full wire body: GP_SERV_SERVERSTATUS is 0x60 incl. the 4-byte sub-header, so
+        // the body (which `sub.data` exposes) is 0x5C. Sizing to that — rather than just
+        // past dead_counter2 — keeps the fields anchored if a trailing field shifts.
+        let mut body = vec![0u8; 0x5C];
+        body[CharStatus::UNIQUE_NO_OFFSET..CharStatus::UNIQUE_NO_OFFSET + 4]
+            .copy_from_slice(&0x000B_C5EBu32.to_le_bytes());
+        // Flags0 with hpp (bits 16..24) == 0 → KO'd.
+        body[CharStatus::FLAGS0_OFFSET..CharStatus::FLAGS0_OFFSET + 4]
+            .copy_from_slice(&0u32.to_le_bytes());
+        // 60 * (360 + 1800): 30 min until the forced home-point warp.
+        body[CharStatus::DEAD_COUNTER1_OFFSET..CharStatus::DEAD_COUNTER1_OFFSET + 4]
+            .copy_from_slice(&129_600u32.to_le_bytes());
+        body[CharStatus::DEAD_COUNTER2_OFFSET..CharStatus::DEAD_COUNTER2_OFFSET + 4]
+            .copy_from_slice(&0x1122_3344u32.to_le_bytes());
+        body[CharStatus::SERVER_STATUS_OFFSET] = animation::FISHING_START;
+        body[CharStatus::FISHING_TIMER_OFFSET] = 42;
+
+        let cs = CharStatus::decode(&body).unwrap();
+        assert_eq!(cs.unique_no, 0x000B_C5EB);
+        assert_eq!(cs.hpp, 0);
+        assert_eq!(cs.dead_counter1, 129_600);
+        assert_eq!(cs.dead_counter2, 0x1122_3344);
+        assert_eq!(cs.seconds_until_homepoint(), 1800);
+        assert_eq!(cs.server_status, animation::FISHING_START);
+        assert_eq!(cs.fishing_timer, 42);
+    }
+
+    #[test]
+    fn char_status_fishing_timer_zero_when_truncated_before_field() {
+        // dead_counter2 is the last guaranteed field; fishing_timer sits past it and must
+        // default to 0 rather than panic when the body stops short.
+        let body = vec![0u8; CharStatus::DEAD_COUNTER2_OFFSET + 4];
+        let cs = CharStatus::decode(&body).unwrap();
+        assert_eq!(cs.fishing_timer, 0);
+    }
+
+    #[test]
+    fn char_status_homepoint_seconds_boundaries() {
+        let secs = |dc1: u32| {
+            CharStatus {
+                unique_no: 0,
+                hpp: 0,
+                dead_counter1: dc1,
+                dead_counter2: 0,
+                server_status: 0,
+                fishing_timer: 0,
+                speed: 0,
+            }
+            .seconds_until_homepoint()
+        };
+        // Fresh death: 60 * (6min + 60min) → full 60 min remaining.
+        assert_eq!(secs(60 * (360 + 3600)), 3600);
+        // At/below the 6-min padding floor, saturate at 0 instead of wrapping.
+        assert_eq!(secs(60 * 360), 0);
+        assert_eq!(secs(0), 0);
+    }
+
+    #[test]
+    fn char_status_extracts_hpp_from_flags0() {
+        let mut body = vec![0u8; CharStatus::DEAD_COUNTER2_OFFSET + 4];
+        body[CharStatus::FLAGS0_OFFSET..CharStatus::FLAGS0_OFFSET + 4]
+            .copy_from_slice(&(75u32 << 16).to_le_bytes());
+        assert_eq!(CharStatus::decode(&body).unwrap().hpp, 75);
+    }
+
+    #[test]
+    fn char_status_truncated_returns_err() {
+        let need = CharStatus::DEAD_COUNTER2_OFFSET + 4;
+        let buf = vec![0u8; need - 1];
+        assert!(matches!(
+            CharStatus::decode(&buf),
+            Err(DecodeError::Truncated(n, have)) if n == need && have == need - 1
+        ));
+    }
+
+    #[test]
+    fn char_status_decodes_speed_and_masks_high_nibble() {
+        let mut body = vec![0u8; CharStatus::MIN_LEN];
+        body[CharStatus::SPEED_OFFSET..CharStatus::SPEED_OFFSET + 2]
+            .copy_from_slice(&0xA078u16.to_le_bytes());
+        assert_eq!(CharStatus::decode(&body).unwrap().speed, 0x078);
+    }
+
+    #[test]
+    fn char_status_base_speed_decodes() {
+        let mut body = vec![0u8; CharStatus::MIN_LEN];
+        body[CharStatus::SPEED_OFFSET..CharStatus::SPEED_OFFSET + 2]
+            .copy_from_slice(&0x0032u16.to_le_bytes());
+        assert_eq!(CharStatus::decode(&body).unwrap().speed, 50);
+    }
+
+    #[test]
+    fn char_status_bound_speed_zero_decodes() {
+        let body = vec![0u8; CharStatus::MIN_LEN];
+        assert_eq!(CharStatus::decode(&body).unwrap().speed, 0);
+    }
+}

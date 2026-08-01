@@ -209,3 +209,185 @@ impl ServerLogout {
         self.logout_state == 2
     }
 }
+
+#[cfg(test)]
+mod server_login_tests {
+    use super::*;
+
+    #[test]
+    fn server_login_decodes_zone_no() {
+        let mut buf = vec![0u8; ServerLogin::SIZE];
+        buf[0..4].copy_from_slice(&0x0123_4567u32.to_le_bytes());
+        buf[4..6].copy_from_slice(&0x00FFu16.to_le_bytes());
+        buf[44..48].copy_from_slice(&230u32.to_le_bytes());
+        let l = ServerLogin::decode(&buf).unwrap();
+        assert_eq!(l.unique_no, 0x0123_4567);
+        assert_eq!(l.act_index, 0x00FF);
+        assert_eq!(l.zone_no, 230);
+    }
+
+    #[test]
+    fn server_login_zone_in_event_keys_off_status_byte_not_event_id() {
+        let mut buf = vec![0u8; 0x100];
+        buf[44..48].copy_from_slice(&234u32.to_le_bytes());
+        buf[ServerLogin::EVENT_NUM_OFFSET..ServerLogin::EVENT_NUM_OFFSET + 2]
+            .copy_from_slice(&234u16.to_le_bytes());
+        // Bastok Markets intro cutscene is event id 0 — a zeroed EventPara must
+        // still decode as an event when the status byte says so.
+        buf[ServerLogin::EVENT_MODE_OFFSET..ServerLogin::EVENT_MODE_OFFSET + 2]
+            .copy_from_slice(&32u16.to_le_bytes());
+
+        let no_event = ServerLogin::decode(&buf).unwrap();
+        assert_eq!(no_event.zone_in_event, None);
+
+        buf[27] = ServerLogin::SERVER_STATUS_EVENT;
+        let with_event = ServerLogin::decode(&buf).unwrap();
+        assert_eq!(
+            with_event.zone_in_event,
+            Some(ZoneInEvent {
+                event_num: 234,
+                event_para: 0,
+                event_mode: 32,
+            })
+        );
+    }
+
+    #[test]
+    fn server_login_truncated_errors() {
+        let buf = vec![0u8; ServerLogin::SIZE - 1];
+        assert!(matches!(
+            ServerLogin::decode(&buf),
+            Err(DecodeError::Truncated(48, _))
+        ));
+    }
+
+    #[test]
+    fn server_login_myroom_cluster_roundtrips() {
+        let mut buf = vec![0u8; 0x100];
+        buf[44..48].copy_from_slice(&230u32.to_le_bytes());
+        buf[ServerLoginMyroom::LOGIN_STATE_OFFSET..ServerLoginMyroom::LOGIN_STATE_OFFSET + 4]
+            .copy_from_slice(&ServerLoginMyroom::LOGIN_STATE_MYROOM.to_le_bytes());
+        buf[ServerLoginMyroom::SUB_MAP_NUMBER_OFFSET] = ServerLoginMyroom::SUB_MAP_2F;
+        buf[ServerLoginMyroom::MAP_NUMBER_OFFSET..ServerLoginMyroom::MAP_NUMBER_OFFSET + 2]
+            .copy_from_slice(&617u16.to_le_bytes());
+        buf[ServerLoginMyroom::EXIT_BIT_OFFSET] = 3;
+        buf[ServerLoginMyroom::MOG_ZONE_FLAG_OFFSET] = 1;
+
+        let l = ServerLogin::decode(&buf).unwrap();
+        let myroom = l.myroom.expect("full-size body carries the cluster");
+        assert_eq!(myroom.login_state, ServerLoginMyroom::LOGIN_STATE_MYROOM);
+        assert_eq!(myroom.sub_map_number, ServerLoginMyroom::SUB_MAP_2F);
+        assert_eq!(myroom.map_number, 617);
+        assert_eq!(myroom.exit_bit, 3);
+        assert_eq!(myroom.mog_zone_flag, 1);
+        assert_eq!(myroom.myroom_model(), Some(617));
+    }
+
+    #[test]
+    fn server_login_truncated_body_yields_no_myroom() {
+        let mut buf = vec![0u8; ServerLoginMyroom::MIN_LEN - 1];
+        buf[44..48].copy_from_slice(&230u32.to_le_bytes());
+        let l = ServerLogin::decode(&buf).unwrap();
+        assert_eq!(l.zone_no, 230);
+        assert!(l.myroom.is_none());
+    }
+
+    #[test]
+    fn server_login_myroom_jeuno_model_decodes() {
+        let mut buf = vec![0u8; 0x100];
+        buf[44..48].copy_from_slice(&243u32.to_le_bytes());
+        buf[ServerLoginMyroom::LOGIN_STATE_OFFSET..ServerLoginMyroom::LOGIN_STATE_OFFSET + 4]
+            .copy_from_slice(&ServerLoginMyroom::LOGIN_STATE_MYROOM.to_le_bytes());
+        buf[ServerLoginMyroom::MAP_NUMBER_OFFSET..ServerLoginMyroom::MAP_NUMBER_OFFSET + 2]
+            .copy_from_slice(&0x0100u16.to_le_bytes());
+
+        let myroom = ServerLogin::decode(&buf).unwrap().myroom.unwrap();
+        assert_eq!(myroom.myroom_model(), Some(0x0100));
+    }
+
+    #[test]
+    fn server_login_myroom_model_gated_on_state_and_sentinel() {
+        let mut buf = vec![0u8; 0x100];
+        buf[ServerLoginMyroom::LOGIN_STATE_OFFSET..ServerLoginMyroom::LOGIN_STATE_OFFSET + 4]
+            .copy_from_slice(&ServerLoginMyroom::LOGIN_STATE_GAME.to_le_bytes());
+        buf[ServerLoginMyroom::MAP_NUMBER_OFFSET..ServerLoginMyroom::MAP_NUMBER_OFFSET + 2]
+            .copy_from_slice(&ServerLoginMyroom::MYROOM_NONE.to_le_bytes());
+        let myroom = ServerLogin::decode(&buf).unwrap().myroom.unwrap();
+        assert_eq!(myroom.login_state, ServerLoginMyroom::LOGIN_STATE_GAME);
+        assert_eq!(myroom.myroom_model(), None, "GAME state carries no model");
+
+        buf[ServerLoginMyroom::LOGIN_STATE_OFFSET..ServerLoginMyroom::LOGIN_STATE_OFFSET + 4]
+            .copy_from_slice(&ServerLoginMyroom::LOGIN_STATE_MYROOM.to_le_bytes());
+        let myroom = ServerLogin::decode(&buf).unwrap().myroom.unwrap();
+        assert_eq!(
+            myroom.myroom_model(),
+            None,
+            "MYROOM with the 0x01FF sentinel carries no model"
+        );
+
+        buf[ServerLoginMyroom::MAP_NUMBER_OFFSET..ServerLoginMyroom::MAP_NUMBER_OFFSET + 2]
+            .copy_from_slice(&ServerLoginMyroom::MYROOM_FERETORY.to_le_bytes());
+        let myroom = ServerLogin::decode(&buf).unwrap().myroom.unwrap();
+        assert_eq!(
+            myroom.myroom_model(),
+            None,
+            "Feretory MYROOM alias is not a Mog House"
+        );
+    }
+
+    /// Pins the myroom cluster to LSB's GP_SERV_COMMAND_LOGIN PacketData layout
+    /// (vendor/server/src/map/packets/s2c/0x00a_login.h:96-131; body offsets, no
+    /// sub-packet header) so an offset edit can't pass the roundtrip tests, which
+    /// build buffers through these same consts.
+    #[test]
+    fn myroom_cluster_offsets_and_sentinels_match_lsb_login_layout() {
+        assert_eq!(ServerLoginMyroom::LOGIN_STATE_OFFSET, 0x7C);
+        assert_eq!(ServerLoginMyroom::SUB_MAP_NUMBER_OFFSET, 0xA4);
+        assert_eq!(ServerLoginMyroom::MAP_NUMBER_OFFSET, 0xA6);
+        assert_eq!(ServerLoginMyroom::EXIT_BIT_OFFSET, 0xAA);
+        assert_eq!(ServerLoginMyroom::MOG_ZONE_FLAG_OFFSET, 0xAB);
+        assert_eq!(ServerLoginMyroom::LOGIN_STATE_MYROOM, 1, "SAVE_LOGIN_STATE");
+        assert_eq!(ServerLoginMyroom::LOGIN_STATE_GAME, 2, "SAVE_LOGIN_STATE");
+        assert_eq!(ServerLoginMyroom::MYROOM_NONE, 0x01FF);
+        assert_eq!(ServerLoginMyroom::SUB_MAP_2F, 0x02);
+        assert_eq!(ServerLoginMyroom::MYROOM_FERETORY, 0x02D9);
+    }
+
+    #[test]
+    fn server_login_carries_pos_head_for_spawn_seed() {
+        let mut buf = vec![0u8; ServerLogin::SIZE];
+        buf[0..4].copy_from_slice(&0x0123_4567u32.to_le_bytes());
+        buf[4..6].copy_from_slice(&0x00FFu16.to_le_bytes());
+        buf[7] = 96;
+        buf[8..12].copy_from_slice(&(-115.5f32).to_le_bytes());
+        buf[12..16].copy_from_slice(&(7.25f32).to_le_bytes());
+        buf[16..20].copy_from_slice(&(280.0f32).to_le_bytes());
+        buf[24] = 40;
+        buf[25] = 40;
+        buf[44..48].copy_from_slice(&230u32.to_le_bytes());
+        let l = ServerLogin::decode(&buf).unwrap();
+        assert_eq!(l.pos_head.x, -115.5);
+        assert_eq!(l.pos_head.z, 7.25);
+        assert_eq!(l.pos_head.y, 280.0);
+        assert_eq!(l.pos_head.dir, 96);
+        assert_eq!(l.pos_head.speed, 40);
+        assert_eq!(l.pos_head.speed_base, 40);
+    }
+}
+
+#[cfg(test)]
+mod server_logout_tests {
+    use super::*;
+
+    #[test]
+    fn server_logout_zone_change() {
+        let mut buf = vec![0u8; ServerLogout::SIZE];
+        buf[0..4].copy_from_slice(&2u32.to_le_bytes());
+        buf[4..8].copy_from_slice(&0x6F00_A8C0u32.to_le_bytes());
+        buf[8..12].copy_from_slice(&54230u32.to_le_bytes());
+        let l = ServerLogout::decode(&buf).unwrap();
+        assert!(l.is_zone_change());
+        assert_eq!(l.new_server_port, 54230);
+        assert_eq!(l.new_server_ip, 0x6F00_A8C0);
+    }
+}

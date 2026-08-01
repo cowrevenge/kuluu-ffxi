@@ -63,6 +63,14 @@ fn arr3(a: [f32; 3]) -> Vec3 {
     Vec3::new(a[0], a[1], a[2])
 }
 
+/// Reusable working buffers for [`pose_world_into`]: a per-caller scratch that
+/// removes the per-call `Vec` allocations on the hot per-actor-per-frame path.
+#[derive(Default)]
+pub struct PoseScratch {
+    jt: Vec<Option<JointTransform>>,
+    override_parent: Vec<Option<usize>>,
+}
+
 pub fn pose_world(
     skeleton: &Skeleton,
     get_anim: impl Fn(usize) -> Option<KeyFrameTransform>,
@@ -79,11 +87,58 @@ pub fn pose_world_mounted(
     parent_overrides: &[(usize, usize)],
     mount: Option<MountAttach>,
 ) -> Vec<Mat4> {
-    let n = skeleton.joints.len();
-    let mut out = vec![Mat4::IDENTITY; n];
-    let mut jt: Vec<Option<JointTransform>> = vec![None; n];
+    let mut out = Vec::new();
+    pose_world_mounted_into(
+        &mut out,
+        &mut PoseScratch::default(),
+        skeleton,
+        get_anim,
+        root,
+        parent_overrides,
+        mount,
+    );
+    out
+}
 
-    let mut override_parent: Vec<Option<usize>> = vec![None; n];
+pub fn pose_world_into(
+    out: &mut Vec<Mat4>,
+    scratch: &mut PoseScratch,
+    skeleton: &Skeleton,
+    get_anim: impl Fn(usize) -> Option<KeyFrameTransform>,
+    root: RootTransform,
+    parent_overrides: &[(usize, usize)],
+) {
+    pose_world_mounted_into(
+        out,
+        scratch,
+        skeleton,
+        get_anim,
+        root,
+        parent_overrides,
+        None,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn pose_world_mounted_into(
+    out: &mut Vec<Mat4>,
+    scratch: &mut PoseScratch,
+    skeleton: &Skeleton,
+    get_anim: impl Fn(usize) -> Option<KeyFrameTransform>,
+    root: RootTransform,
+    parent_overrides: &[(usize, usize)],
+    mount: Option<MountAttach>,
+) {
+    let n = skeleton.joints.len();
+    out.clear();
+    out.resize(n, Mat4::IDENTITY);
+    let jt = &mut scratch.jt;
+    jt.clear();
+    jt.resize(n, None);
+
+    let override_parent = &mut scratch.override_parent;
+    override_parent.clear();
+    override_parent.resize(n, None);
     for &(child, new_parent) in parent_overrides {
         if child < n {
             override_parent[child] = Some(new_parent);
@@ -140,8 +195,6 @@ pub fn pose_world_mounted(
             break;
         }
     }
-
-    out
 }
 
 fn update_joint(
@@ -613,6 +666,34 @@ mod tests {
         let world = pose_world_mounted(&s, |_| None, RootTransform::identity(), &[], None);
         let j2 = world[2].transform_point3(Vec3::ZERO);
         assert!(approx(j2, Vec3::new(4.0, 0.0, 0.0), 1e-4));
+    }
+
+    #[test]
+    fn pose_world_into_with_reused_scratch_matches_fresh() {
+        let big = skel(vec![
+            joint(None, [0.0, 0.0, 0.0]),
+            joint(Some(0), [5.0, 0.0, 0.0]),
+            joint(Some(1), [2.0, 0.0, 0.0]),
+        ]);
+        let small = skel(vec![
+            joint(None, [0.0, 0.0, 0.0]),
+            joint(Some(0), [1.0, 2.0, 3.0]),
+        ]);
+
+        let mut out = Vec::new();
+        let mut scratch = PoseScratch::default();
+        for s in [&big, &small, &big] {
+            pose_world_into(
+                &mut out,
+                &mut scratch,
+                s,
+                |_| None,
+                RootTransform::identity(),
+                &[(1, 0)],
+            );
+            let fresh = pose_world(s, |_| None, RootTransform::identity(), &[(1, 0)]);
+            assert_eq!(out, fresh, "reused scratch must not leak prior pose state");
+        }
     }
 
     #[test]

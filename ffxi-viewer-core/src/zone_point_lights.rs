@@ -189,26 +189,37 @@ fn pack_point_light_arrays(selected: &[ZonePointLight]) -> PointLightArrays {
     (point_pos, point_color, point_atten)
 }
 
-/// Pick the `count` nearest in-range lights to `pos` and pack them (`count`
-/// clamped to `MAX_POINT_LIGHTS`). Used by the per-actor feed, where popping is
-/// invisible (actors are small and moving).
+/// Pick the `count` nearest in-range lights to `pos` (`count` clamped to
+/// `MAX_POINT_LIGHTS`), as indices into `lights`. Used by the per-actor feed,
+/// where popping is invisible (actors are small and moving); the caller may
+/// cache the selection while the light set and the actor hold still, repacking
+/// live colors per frame via [`point_light_arrays_for`].
+pub fn nearest_point_light_indices(pos: Vec3, lights: &[ZonePointLight], count: usize) -> Vec<u32> {
+    let mut in_range: Vec<(f32, u32)> = lights
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| pos.distance_squared(l.world_pos) <= l.range * l.range)
+        .map(|(i, l)| (pos.distance_squared(l.world_pos), i as u32))
+        .collect();
+    in_range.sort_by(|a, b| a.0.total_cmp(&b.0));
+    in_range.truncate(count.min(MAX_POINT_LIGHTS));
+    in_range.into_iter().map(|(_, i)| i).collect()
+}
+
+pub fn point_light_arrays_for(lights: &[ZonePointLight], indices: &[u32]) -> PointLightArrays {
+    let selected: Vec<ZonePointLight> = indices
+        .iter()
+        .filter_map(|&i| lights.get(i as usize).copied())
+        .collect();
+    pack_point_light_arrays(&selected)
+}
+
 pub fn nearest_point_light_arrays(
     pos: Vec3,
     lights: &[ZonePointLight],
     count: usize,
 ) -> PointLightArrays {
-    let mut in_range: Vec<(f32, ZonePointLight)> = lights
-        .iter()
-        .filter(|l| pos.distance_squared(l.world_pos) <= l.range * l.range)
-        .map(|l| (pos.distance_squared(l.world_pos), *l))
-        .collect();
-    in_range.sort_by(|a, b| a.0.total_cmp(&b.0));
-    let selected: Vec<ZonePointLight> = in_range
-        .into_iter()
-        .take(count.min(MAX_POINT_LIGHTS))
-        .map(|(_, l)| l)
-        .collect();
-    pack_point_light_arrays(&selected)
+    point_light_arrays_for(lights, &nearest_point_light_indices(pos, lights, count))
 }
 
 fn load_zone_point_lights(scene_state: Res<SceneState>, mut store: ResMut<ZonePointLights>) {
@@ -444,6 +455,24 @@ mod tests {
                 assert!((0.7..=1.0 + 1e-5).contains(&f), "flicker {f} out of band");
             }
         }
+    }
+
+    // The per-actor feed caches the index selection and repacks live colors
+    // each frame; the split must reproduce the one-shot picker exactly.
+    #[test]
+    fn cached_indices_repack_matches_one_shot_pick() {
+        let lights = [
+            light(Vec3::new(1.0, 0.0, 0.0), 10.0),
+            light(Vec3::new(50.0, 0.0, 0.0), 10.0),
+            light(Vec3::new(2.0, 0.0, 0.0), 10.0),
+            light(Vec3::new(3.0, 0.0, 0.0), 10.0),
+        ];
+        let indices = nearest_point_light_indices(Vec3::ZERO, &lights, 2);
+        assert_eq!(indices, vec![0, 2]);
+        assert_eq!(
+            point_light_arrays_for(&lights, &indices),
+            nearest_point_light_arrays(Vec3::ZERO, &lights, 2)
+        );
     }
 
     #[test]

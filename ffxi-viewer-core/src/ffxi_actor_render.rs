@@ -13,7 +13,8 @@ use bevy::tasks::{AsyncComputeTaskPool, Task};
 use ffxi_actor::actor_state::{self, ActorAnimInputs, RestKind};
 use ffxi_actor::animation::{LoopParams, SkeletonAnimationCoordinator, TransitionParams};
 use ffxi_actor::skeleton_instance::{
-    apply_head_look, find_head_neck, neck_subtree, pose_world, RootTransform,
+    apply_head_look, find_head_neck, neck_subtree, pose_world, pose_world_into, PoseScratch,
+    RootTransform,
 };
 
 use ffxi_dat::d3m::D3m;
@@ -790,6 +791,11 @@ pub struct FfxiRenderActor {
 
     pub last_clip: Option<DatId>,
     pub last_frame: f32,
+
+    world_pose: Vec<Mat4>,
+    pose_work: PoseScratch,
+
+    point_light_selection: Option<ActorPointLightSelection>,
 }
 
 impl FfxiRenderActor {
@@ -1204,6 +1210,9 @@ fn make_render_actor(
         head_rot: Quat::IDENTITY,
         last_clip: None,
         last_frame: 0.0,
+        world_pose: Vec::new(),
+        pose_work: PoseScratch::default(),
+        point_light_selection: None,
     }
 }
 
@@ -1285,23 +1294,28 @@ pub fn tick_ffxi_render_actors(
     mut q_actors: Query<&mut FfxiRenderActor>,
 ) {
     let elapsed_frames = time.delta_secs() * FRAME_RATE;
-    for mut actor in &mut q_actors {
-        advance_actor_pose(&mut actor, elapsed_frames, &mut registry, None);
+    q_actors.par_iter_mut().for_each(|mut actor| {
+        advance_actor_pose(&mut actor, elapsed_frames, None);
+    });
+    for actor in &q_actors {
+        registry
+            .skin_mut(actor.skin_slot)
+            .joints
+            .set_from(&actor.world_pose);
     }
 }
 
-fn select_pose_clips_layered(
-    primary: &[SkeletonAnimation],
-    overlay: &[SkeletonAnimation],
+fn select_pose_clips_layered<'a>(
+    primary: &'a [SkeletonAnimation],
+    overlay: impl Iterator<Item = &'a SkeletonAnimation> + Clone,
     selected_id: DatId,
-) -> Vec<SkeletonAnimation> {
-    let collect = |id: DatId| -> Vec<SkeletonAnimation> {
+) -> Vec<&'a SkeletonAnimation> {
+    let collect = |id: DatId| -> Vec<&'a SkeletonAnimation> {
         let mut seen: std::collections::HashSet<DatId> = std::collections::HashSet::new();
         overlay
-            .iter()
+            .clone()
             .chain(primary.iter())
             .filter(|a| a.id.parameterized_match(&id) && seen.insert(a.id))
-            .cloned()
             .collect()
     };
     let m = collect(selected_id);
@@ -1512,19 +1526,45 @@ fn advance_engage(
     }
 }
 
+// Runs inside the parallel per-actor pass: it touches only the actor's own
+// fields, leaving the pose in `world_pose` for the serial registry copy.
 fn advance_actor_pose(
     actor: &mut FfxiRenderActor,
     elapsed_frames: f32,
-    registry: &mut FfxiSkinRegistry,
-
     look: Option<(Mat4, Vec3)>,
 ) {
-    let action_id = match actor.action.as_mut() {
+    let FfxiRenderActor {
+        skeleton,
+        animations,
+        battle_clips,
+        routines,
+        coordinator,
+        inputs,
+        facing_dir,
+        scale,
+        current_clip,
+        rest_phase,
+        engage,
+        action,
+        action_clips,
+        head_neck,
+        head_subtree,
+        head_rot,
+        last_clip,
+        last_frame,
+        world_pose,
+        pose_work,
+        ..
+    } = actor;
+    let animations: &[SkeletonAnimation] = animations;
+    let battle_clips: &[SkeletonAnimation] = battle_clips;
+
+    let action_id = match action.as_mut() {
         Some(act) => {
             act.remaining -= elapsed_frames;
             if act.remaining <= 0.0 {
-                actor.action = None;
-                actor.action_clips.clear();
+                *action = None;
+                action_clips.clear();
                 None
             } else {
                 Some(act.clip_id)
@@ -1533,23 +1573,16 @@ fn advance_actor_pose(
         None => None,
     };
 
-    let engage_overlay = match actor.engage {
-        EngageMachine::Drawing { .. } => {
-            routine_motion_clip(&actor.routines, DatId::from_str("in 0"))
-        }
-        EngageMachine::Sheathing { .. } => {
-            routine_motion_clip(&actor.routines, DatId::from_str("out0"))
-        }
+    let engage_overlay = match *engage {
+        EngageMachine::Drawing { .. } => routine_motion_clip(routines, DatId::from_str("in 0")),
+        EngageMachine::Sheathing { .. } => routine_motion_clip(routines, DatId::from_str("out0")),
         _ => None,
     };
 
     // research/xim Actor.kt:361 (updateFishingState) — the fishing macro-pose overrides
     // locomotion/idle/rest. fsh0 (cast/wait) and fsh1 (fighting) loop; fsh2..fsh6
     // (resolution) play once and hold (see the one-shot handling below).
-    let fishing = actor
-        .inputs
-        .fishing_phase
-        .and_then(actor_state::fishing_clip);
+    let fishing = inputs.fishing_phase.and_then(actor_state::fishing_clip);
 
     let mut one_shot_rest = false;
     let (selected_id, is_idle) = if let Some(id) = action_id {
@@ -1559,44 +1592,41 @@ fn advance_actor_pose(
     } else if let Some(fc) = fishing {
         (fc.id, fc.looping)
     } else {
-        let rest_id = advance_rest_phase(
-            &mut actor.rest_phase,
-            actor.inputs.rest,
-            &actor.animations,
-            elapsed_frames,
-        );
+        let rest_id = advance_rest_phase(rest_phase, inputs.rest, animations, elapsed_frames);
         match rest_id {
             Some(rest_id) => {
                 // Only the middle phase loops. The In/Out clips are one-shots that
                 // hold their last frame: looping them replays the kneel from frame 0
                 // whenever the phase timer outlives the clip, which reads as a dip
                 // back toward the ground just as the character finishes standing up.
-                let looping = matches!(actor.rest_phase, RestPlayback::Looping { .. });
+                let looping = matches!(rest_phase, RestPlayback::Looping { .. });
                 one_shot_rest = !looping;
                 (rest_id, looping)
             }
             None => {
-                let s = actor_state::selected_animation(&actor.inputs);
+                let s = actor_state::selected_animation(inputs);
                 (s.id, s.idle)
             }
         }
     };
 
-    let use_battle = actor.action.is_some()
-        || !matches!(actor.engage, EngageMachine::NotEngaged)
-        || actor.inputs.engage_state.is_battle_idle();
-    let overlay: &[SkeletonAnimation] = if use_battle { &actor.battle_clips } else { &[] };
+    let use_battle = action.is_some()
+        || !matches!(*engage, EngageMachine::NotEngaged)
+        || inputs.engage_state.is_battle_idle();
+    let overlay: &[SkeletonAnimation] = if use_battle { battle_clips } else { &[] };
     // Skill-DAT (localDir) clips win over the actor's own pose set, per XIM resolution order.
-    let matches: Vec<SkeletonAnimation> = if !actor.action_clips.is_empty() {
-        let mut overlaid = actor.action_clips.clone();
-        overlaid.extend_from_slice(overlay);
-        select_pose_clips_layered(&actor.animations, &overlaid, selected_id)
+    let matches: Vec<&SkeletonAnimation> = if !action_clips.is_empty() {
+        select_pose_clips_layered(
+            animations,
+            action_clips.iter().chain(overlay.iter()),
+            selected_id,
+        )
     } else {
-        select_pose_clips_layered(&actor.animations, overlay, selected_id)
+        select_pose_clips_layered(animations, overlay.iter(), selected_id)
     };
 
-    if !matches.is_empty() && actor.current_clip != Some((selected_id, use_battle)) {
-        actor.current_clip = Some((selected_id, use_battle));
+    if !matches.is_empty() && *current_clip != Some((selected_id, use_battle)) {
+        *current_clip = Some((selected_id, use_battle));
 
         let mut new_mask = 0u8;
         for clip in &matches {
@@ -1604,24 +1634,22 @@ fn advance_actor_pose(
             new_mask |= 1 << slot;
         }
 
-        let old_mask = actor.coordinator.occupied_slots();
+        let old_mask = coordinator.occupied_slots();
         for slot in 0..8usize {
             if old_mask & (1 << slot) != 0 && new_mask & (1 << slot) == 0 {
-                actor.coordinator.clear_slot(slot);
+                coordinator.clear_slot(slot);
             }
         }
 
         if is_idle {
-            for clip in &matches {
-                actor
-                    .coordinator
-                    .register_idle_animation(clip.clone(), true);
+            for &clip in &matches {
+                coordinator.register_idle_animation(clip.clone(), true);
             }
         } else {
             // research/xim EffectRoutineInterpolatedEffects.kt:50-51 — when the pose came from
             // a completion motion, honor its parsed transition + loop params; otherwise use the
             // locomotion crossfade defaults.
-            let action = actor.action.filter(|a| a.clip_id == selected_id);
+            let action = action.filter(|a| a.clip_id == selected_id);
             let tp = TransitionParams {
                 transition_in_time: action.map_or(LOCOMOTION_XFADE_IN, |a| a.transition_in),
                 transition_out_time: action.map_or(LOCOMOTION_XFADE_OUT, |a| a.transition_out),
@@ -1638,26 +1666,21 @@ fn advance_actor_pose(
                     .or((one_shot_fishing || one_shot_rest).then_some(1)),
                 low_priority: false,
             };
-            for clip in &matches {
-                actor.coordinator.register_animation(
-                    clip.clone(),
-                    loop_params,
-                    Some(tp.clone()),
-                    |_| true,
-                );
+            for &clip in &matches {
+                coordinator
+                    .register_animation(clip.clone(), loop_params, Some(tp.clone()), |_| true);
             }
         }
     }
 
-    actor.last_clip = matches
+    *last_clip = matches
         .iter()
         .max_by_key(|a| a.key_frame_sets.len())
         .map(|a| a.id);
 
-    actor.coordinator.update(elapsed_frames);
+    coordinator.update(elapsed_frames);
 
-    actor.last_frame = actor
-        .coordinator
+    *last_frame = coordinator
         .animations
         .iter()
         .flatten()
@@ -1665,23 +1688,22 @@ fn advance_actor_pose(
         .next_back()
         .unwrap_or(0.0);
 
-    let mut pose = {
-        let coordinator = &actor.coordinator;
-        pose_world(
-            &actor.skeleton,
-            |joint| coordinator.get_joint_transform(joint),
-            RootTransform {
-                facing_dir: actor.facing_dir,
-                skew: 0.0,
-                slope_oriented: false,
-                scale: Vec3::splat(actor.scale),
-            },
-            &[],
-        )
-    };
+    pose_world_into(
+        world_pose,
+        pose_work,
+        skeleton,
+        |joint| coordinator.get_joint_transform(joint),
+        RootTransform {
+            facing_dir: *facing_dir,
+            skew: 0.0,
+            slope_oriented: false,
+            scale: Vec3::splat(*scale),
+        },
+        &[],
+    );
 
-    if let Some(neck) = actor.head_neck {
-        let neck_pose = pose
+    if let Some(neck) = *head_neck {
+        let neck_pose = world_pose
             .get(neck)
             .map(|m| m.w_axis.truncate())
             .unwrap_or(Vec3::ZERO);
@@ -1692,11 +1714,9 @@ fn advance_actor_pose(
             None => Quat::IDENTITY,
         };
         let alpha = (1.0 - (-elapsed_frames / HEAD_SLEW_TAU_FRAMES).exp()).clamp(0.0, 1.0);
-        actor.head_rot = actor.head_rot.slerp(desired, alpha);
-        apply_head_look(&mut pose, neck, &actor.head_subtree, actor.head_rot);
+        *head_rot = head_rot.slerp(desired, alpha);
+        apply_head_look(world_pose, neck, head_subtree, *head_rot);
     }
-
-    registry.skin_mut(actor.skin_slot).joints.set_from(&pose);
 }
 
 // Measured from the real skeletons (examples/zz-head-axis, all races): in pose
@@ -2091,6 +2111,38 @@ fn observed_rest_kind(animation: u8) -> ffxi_actor::actor_state::RestKind {
     }
 }
 
+#[derive(Clone, Copy)]
+pub struct SnapshotActorState {
+    pos: ffxi_viewer_wire::Vec3,
+    // Head-look: facetarget is a targid (act_index), so resolve it to the world_id
+    // the position maps are keyed by. Distinct from bt_target_id (the combat-claim
+    // UniqueNo), which only turns the head mid-combat and lives in a different
+    // id-space — see vendor/server char_update.cpp Flags0.facetarget.
+    face_target: u16,
+    // Engaged combat stance is the server's animation byte (ANIMATION_ATTACK),
+    // set on every entity at engage and broadcast in the General block — see LSB
+    // CBattleEntity::OnEngage, vendor/server/src/map/entities/baseentity.h. The
+    // reactor goal only *predicts* self-engage for snappy feedback before the
+    // server echoes, and only some UIs set it, so it can't be the source of truth.
+    engaged: bool,
+    dead: bool,
+    // The server broadcasts the fsh* and /heal//sit states in the entity's
+    // animation byte (server_status), the same channel as engage. Self drives
+    // its fishing/rest pose from local state instead, so these are consulted
+    // only for observed entities.
+    fishing_phase: Option<u8>,
+    rest: ffxi_actor::actor_state::RestKind,
+}
+
+/// Per-entity lookups derived from `SceneState.snapshot.entities`, rebuilt only
+/// when the snapshot resource actually changes (its dirty flag bypasses change
+/// detection on empty poll frames, so `is_changed` is truthful).
+#[derive(Default)]
+pub struct LiveSnapshotIndex {
+    by_id: HashMap<u32, SnapshotActorState>,
+    id_by_targid: HashMap<u16, u32>,
+}
+
 pub fn tick_live_ffxi_actors(
     time: Res<Time>,
     state: Res<crate::snapshot::SceneState>,
@@ -2103,32 +2155,45 @@ pub fn tick_live_ffxi_actors(
     mut q_actors: Query<(&mut FfxiRenderActor, &GlobalTransform)>,
 
     mut prev_zone: Local<Option<Option<u16>>>,
+    mut index: Local<LiveSnapshotIndex>,
+    mut actor_world_scratch: Local<HashMap<u32, Vec3>>,
 ) {
     use ffxi_actor::actor_state::RestKind;
 
     let elapsed_frames = time.delta_secs() * FRAME_RATE;
     let self_id = state.snapshot.self_char_id;
 
-    let pos_by_id: std::collections::HashMap<u32, ffxi_viewer_wire::Vec3> = state
-        .snapshot
-        .entities
-        .iter()
-        .map(|e| (e.id, e.pos))
-        .collect();
+    if state.is_changed() {
+        index.by_id.clear();
+        index.id_by_targid.clear();
+        for e in &state.snapshot.entities {
+            index.by_id.insert(
+                e.id,
+                SnapshotActorState {
+                    pos: e.pos,
+                    face_target: e.face_target,
+                    engaged: e.animation == ffxi_proto::decode::animation::ATTACK,
+                    dead: e.hp_pct == Some(0),
+                    fishing_phase: ffxi_proto::decode::animation::fishing_phase(e.animation),
+                    rest: observed_rest_kind(e.animation),
+                },
+            );
+            index.id_by_targid.insert(e.act_index, e.id);
+        }
+    }
+    let index: &LiveSnapshotIndex = &index;
 
     // Head-look must aim at where the target is *rendered* (grounded), not its
     // raw wire Y — the server sends pathing NPCs a flat reference Y, so wire and
     // rendered Y diverge after snap_entities_to_mzb_floor_system.
-    let actor_world_by_id: std::collections::HashMap<u32, Vec3> = q_actors
-        .iter()
-        .map(|(a, gt)| (a.world_id, gt.translation()))
-        .collect();
+    actor_world_scratch.clear();
+    actor_world_scratch.extend(
+        q_actors
+            .iter()
+            .map(|(a, gt)| (a.world_id, gt.translation())),
+    );
+    let actor_world_by_id: &HashMap<u32, Vec3> = &actor_world_scratch;
 
-    // Engaged combat stance is the server's animation byte (ANIMATION_ATTACK),
-    // set on every entity at engage and broadcast in the General block — see LSB
-    // CBattleEntity::OnEngage, vendor/server/src/map/entities/baseentity.h. The
-    // reactor goal only *predicts* self-engage for snappy feedback before the
-    // server echoes, and only some UIs set it, so it can't be the source of truth.
     let self_engaged_predicted = matches!(
         state.snapshot.current_goal,
         Some(ffxi_viewer_wire::ReactorGoal::Engaged { .. })
@@ -2142,65 +2207,24 @@ pub fn tick_live_ffxi_actors(
     let zone_changed = matches!(*prev_zone, Some(p) if p != zone);
     *prev_zone = Some(zone);
 
-    let present: std::collections::HashSet<u32> =
-        state.snapshot.entities.iter().map(|e| e.id).collect();
-
-    // Head-look: facetarget is a targid (act_index), so resolve it to the world_id
-    // the position maps are keyed by. Distinct from bt_target_id (the combat-claim
-    // UniqueNo), which only turns the head mid-combat and lives in a different
-    // id-space — see vendor/server char_update.cpp Flags0.facetarget.
-    let face_target_by_id: std::collections::HashMap<u32, u16> = state
+    // Self rest pose comes from local input (RestStance), not the wire byte.
+    let self_rest_kind = match rest.kind {
+        combat_stance::RestKind::None => RestKind::None,
+        combat_stance::RestKind::Sit => RestKind::Sit,
+        combat_stance::RestKind::Heal => RestKind::Heal,
+    };
+    // Self fishing pose comes from the local mini-game machine (it knows the
+    // active reeling sub-states the server never broadcasts).
+    let self_fishing_phase = state.snapshot.self_fishing.map(|f| f.phase);
+    let self_casting = state
         .snapshot
-        .entities
-        .iter()
-        .map(|e| (e.id, e.face_target))
-        .collect();
-    let id_by_targid: std::collections::HashMap<u16, u32> = state
-        .snapshot
-        .entities
-        .iter()
-        .map(|e| (e.act_index, e.id))
-        .collect();
-
-    let engaged_by_id: std::collections::HashMap<u32, bool> = state
-        .snapshot
-        .entities
-        .iter()
-        .map(|e| (e.id, e.animation == ffxi_proto::decode::animation::ATTACK))
-        .collect();
-
-    let dead_by_id: std::collections::HashMap<u32, bool> = state
-        .snapshot
-        .entities
-        .iter()
-        .map(|e| (e.id, e.hp_pct == Some(0)))
-        .collect();
-
-    // Fishing macro-pose for observed players: the server broadcasts the fsh* state in
-    // the entity's animation byte (server_status). Self drives its pose from the local
-    // mini-game instead, so it is excluded below.
-    let fishing_phase_by_id: std::collections::HashMap<u32, Option<u8>> = state
-        .snapshot
-        .entities
-        .iter()
-        .map(|e| {
-            (
-                e.id,
-                ffxi_proto::decode::animation::fishing_phase(e.animation),
-            )
-        })
-        .collect();
-
-    // Resting pose for observed players: the server broadcasts /heal and /sit in the
-    // entity's animation byte (server_status), the same channel as engage and fishing.
-    // Self drives its own rest pose from local input (RestStance), so the wire byte is
-    // consulted only for others.
-    let rest_kind_by_id: std::collections::HashMap<u32, RestKind> = state
-        .snapshot
-        .entities
-        .iter()
-        .map(|e| (e.id, observed_rest_kind(e.animation)))
-        .collect();
+        .self_casting
+        .as_ref()
+        .is_some_and(|c| !c.interrupted);
+    let self_walking = walk_mode.walking;
+    let self_target_id = target.id;
+    let (self_move_forward, self_move_strafe, self_move_moving) =
+        (self_move.forward, self_move.strafe, self_move.moving);
 
     // Self KO is unreliable via the entity hp_pct (only updated when CHAR_PC
     // carries UPDATE_HP) and via the party row (absent/stale when solo).
@@ -2210,137 +2234,134 @@ pub fn tick_live_ffxi_actors(
             .map(|m| m.hp_pct == 0)
             .unwrap_or(false);
 
-    for (mut actor, actor_global) in &mut q_actors {
-        let world_id = actor.world_id;
-        if world_id == 0 {
-            continue;
-        }
-
-        let is_self = Some(world_id) == self_id;
-
-        if zone_changed || (!is_self && !present.contains(&world_id)) {
-            actor.inputs = ActorAnimInputs::default();
-            actor.rest_phase = RestPlayback::Inactive;
-
-            actor.action = None;
-            actor.engage = EngageMachine::NotEngaged;
-            actor.coordinator.clear();
-            actor.current_clip = None;
-            advance_actor_pose(&mut actor, elapsed_frames, &mut registry, None);
-            continue;
-        }
-
-        let sample = motion.sample(world_id).unwrap_or_default();
-
-        let engaged = engaged_by_id.get(&world_id).copied().unwrap_or(false)
-            || (is_self && self_engaged_predicted);
-        let dead = (is_self && self_dead) || dead_by_id.get(&world_id).copied().unwrap_or(false);
-
-        let rest_kind = if is_self {
-            match rest.kind {
-                combat_stance::RestKind::None => RestKind::None,
-                combat_stance::RestKind::Sit => RestKind::Sit,
-                combat_stance::RestKind::Heal => RestKind::Heal,
+    let motion = &*motion;
+    q_actors
+        .par_iter_mut()
+        .for_each(|(mut actor, actor_global)| {
+            let world_id = actor.world_id;
+            if world_id == 0 {
+                return;
             }
-        } else {
-            rest_kind_by_id
-                .get(&world_id)
-                .copied()
-                .unwrap_or(RestKind::None)
-        };
 
-        let (forward_vel, strafe_vel) = if is_self {
-            if self_reactor_driven {
+            let is_self = Some(world_id) == self_id;
+            let snap = index.by_id.get(&world_id);
+
+            if zone_changed || (!is_self && snap.is_none()) {
+                actor.inputs = ActorAnimInputs::default();
+                actor.rest_phase = RestPlayback::Inactive;
+
+                actor.action = None;
+                actor.engage = EngageMachine::NotEngaged;
+                actor.coordinator.clear();
+                actor.current_clip = None;
+                advance_actor_pose(&mut actor, elapsed_frames, None);
+                return;
+            }
+
+            let sample = motion.sample(world_id).unwrap_or_default();
+
+            let engaged =
+                snap.map(|s| s.engaged).unwrap_or(false) || (is_self && self_engaged_predicted);
+            let dead = (is_self && self_dead) || snap.map(|s| s.dead).unwrap_or(false);
+
+            let rest_kind = if is_self {
+                self_rest_kind
+            } else {
+                snap.map(|s| s.rest).unwrap_or(RestKind::None)
+            };
+
+            let (forward_vel, strafe_vel) = if is_self {
+                if self_reactor_driven {
+                    (0.0, 0.0)
+                } else {
+                    (self_move_forward, self_move_strafe)
+                }
+            } else if engaged {
+                (sample.forward_component, sample.strafe_component)
+            } else {
                 (0.0, 0.0)
+            };
+
+            let walking = if is_self {
+                self_walking
             } else {
-                (self_move.forward, self_move.strafe)
-            }
-        } else if engaged {
-            (sample.forward_component, sample.strafe_component)
-        } else {
-            (0.0, 0.0)
-        };
+                infers_walk_gait(sample.speed)
+            };
 
-        let walking = if is_self {
-            walk_mode.walking
-        } else {
-            infers_walk_gait(sample.speed)
-        };
-
-        // Self pose comes from the local mini-game machine (it knows the active reeling
-        // sub-states the server never broadcasts); others come from the wire animation byte.
-        let fishing_phase = if is_self {
-            state.snapshot.self_fishing.map(|f| f.phase)
-        } else {
-            fishing_phase_by_id.get(&world_id).copied().flatten()
-        };
-
-        let engage_state = {
-            let actor: &mut FfxiRenderActor = &mut actor;
-            advance_engage(
-                &mut actor.engage,
-                engaged,
-                &actor.routines,
-                &actor.battle_clips,
-                elapsed_frames,
-            )
-        };
-
-        actor.facing_dir = 0.0;
-        actor.inputs = ActorAnimInputs {
-            moving: if is_self && !self_reactor_driven {
-                self_move.moving
+            let fishing_phase = if is_self {
+                self_fishing_phase
             } else {
-                motion.is_moving(world_id)
-            },
-            walking,
-            forward_vel,
-            strafe_vel,
-            heading_rate: sample.heading_rate,
-            engage_state,
-            dead,
-            rest: rest_kind,
-            fishing_phase,
-            ..Default::default()
-        };
+                snap.and_then(|s| s.fishing_phase)
+            };
 
-        let look_target_id = if is_self {
-            target.id
-        } else {
-            face_target_by_id
-                .get(&world_id)
-                .copied()
-                .filter(|&t| t != 0)
-                .and_then(|targid| id_by_targid.get(&targid).copied())
-        };
-        let look = look_target_id
-            .filter(|&tid| tid != world_id)
-            .and_then(|tid| {
-                actor_world_by_id
-                    .get(&tid)
-                    .copied()
-                    .or_else(|| pos_by_id.get(&tid).map(|&w| crate::scene::ffxi_to_bevy(w)))
-            })
-            .map(|base| {
-                let world = base + Vec3::Y * TARGET_LOOK_HEIGHT;
-                (actor_global.to_matrix(), world)
-            });
+            let engage_state = {
+                let actor: &mut FfxiRenderActor = &mut actor;
+                advance_engage(
+                    &mut actor.engage,
+                    engaged,
+                    &actor.routines,
+                    &actor.battle_clips,
+                    elapsed_frames,
+                )
+            };
 
-        if is_self && actor.action.map(|a| a.cast_pose).unwrap_or(false) {
-            let casting = state
-                .snapshot
-                .self_casting
-                .as_ref()
-                .is_some_and(|c| !c.interrupted);
-            if !casting {
+            actor.facing_dir = 0.0;
+            actor.inputs = ActorAnimInputs {
+                moving: if is_self && !self_reactor_driven {
+                    self_move_moving
+                } else {
+                    motion.is_moving(world_id)
+                },
+                walking,
+                forward_vel,
+                strafe_vel,
+                heading_rate: sample.heading_rate,
+                engage_state,
+                dead,
+                rest: rest_kind,
+                fishing_phase,
+                ..Default::default()
+            };
+
+            let look_target_id = if is_self {
+                self_target_id
+            } else {
+                snap.map(|s| s.face_target)
+                    .filter(|&t| t != 0)
+                    .and_then(|targid| index.id_by_targid.get(&targid).copied())
+            };
+            let look = look_target_id
+                .filter(|&tid| tid != world_id)
+                .and_then(|tid| {
+                    actor_world_by_id.get(&tid).copied().or_else(|| {
+                        index
+                            .by_id
+                            .get(&tid)
+                            .map(|s| crate::scene::ffxi_to_bevy(s.pos))
+                    })
+                })
+                .map(|base| {
+                    let world = base + Vec3::Y * TARGET_LOOK_HEIGHT;
+                    (actor_global.to_matrix(), world)
+                });
+
+            if is_self && actor.action.map(|a| a.cast_pose).unwrap_or(false) && !self_casting {
                 actor.action = None;
                 actor.action_clips.clear();
             }
-        }
 
-        advance_actor_pose(&mut actor, elapsed_frames, &mut registry, look);
+            advance_actor_pose(&mut actor, elapsed_frames, look);
+        });
 
-        if is_self {
+    for (actor, _) in &q_actors {
+        registry
+            .skin_mut(actor.skin_slot)
+            .joints
+            .set_from(&actor.world_pose);
+    }
+
+    if let Some(self_id) = self_id {
+        if let Some((actor, _)) = q_actors.iter().find(|(a, _)| a.world_id == self_id) {
             rest.observe_exit_clip(matches!(actor.rest_phase, RestPlayback::Stopping { .. }));
         }
     }
@@ -2579,10 +2600,47 @@ pub fn update_ffxi_render_actor_lighting(
     }
 }
 
+// Re-picking nearest-N scans and sorts every scene light per actor; nearest-N
+// membership cannot visibly shift under sub-quarter-metre movement (light
+// ranges are metres), so re-selection is gated on this displacement.
+const POINT_LIGHT_RESELECT_EPSILON: f32 = 0.25;
+
+// The nearest-N *selection* for an actor, cached across frames; the packed
+// arrays are still refreshed from the live lights every frame so per-light
+// flicker/night modulation keeps animating. `positions` pins the selection to
+// the light set it was computed against: any positional drift or reorder of a
+// selected slot (zone reload, /lights emitters) forces a re-pick.
+struct ActorPointLightSelection {
+    eval_pos: Vec3,
+    count: usize,
+    lights_len: usize,
+    indices: Vec<u32>,
+    positions: Vec<Vec3>,
+}
+
+impl ActorPointLightSelection {
+    fn valid_for(
+        &self,
+        pos: Vec3,
+        count: usize,
+        lights: &[crate::zone_point_lights::ZonePointLight],
+    ) -> bool {
+        self.count == count
+            && self.lights_len == lights.len()
+            && self.eval_pos.distance_squared(pos)
+                <= POINT_LIGHT_RESELECT_EPSILON * POINT_LIGHT_RESELECT_EPSILON
+            && self
+                .indices
+                .iter()
+                .zip(&self.positions)
+                .all(|(&i, &p)| lights.get(i as usize).map(|l| l.world_pos) == Some(p))
+    }
+}
+
 pub fn update_ffxi_actor_point_lights(
     active: Res<crate::zone_point_lights::ActiveSceneLights>,
     settings: Res<crate::graphics_settings::GraphicsSettings>,
-    q_actors: Query<(&FfxiRenderActor, &GlobalTransform)>,
+    mut q_actors: Query<(&mut FfxiRenderActor, &GlobalTransform)>,
     mut registry: ResMut<FfxiSkinRegistry>,
 ) {
     if active.lights.is_empty() {
@@ -2590,13 +2648,32 @@ pub fn update_ffxi_actor_point_lights(
     }
     let count = settings.model_light_count as usize;
 
-    for (actor, gt) in &q_actors {
-        let (point_pos, point_color, point_atten) =
-            crate::zone_point_lights::nearest_point_light_arrays(
-                gt.translation(),
-                &active.lights,
+    for (mut actor, gt) in &mut q_actors {
+        let pos = gt.translation();
+        let cached_valid = actor
+            .point_light_selection
+            .as_ref()
+            .is_some_and(|sel| sel.valid_for(pos, count, &active.lights));
+        if !cached_valid {
+            let indices =
+                crate::zone_point_lights::nearest_point_light_indices(pos, &active.lights, count);
+            let positions = indices
+                .iter()
+                .map(|&i| active.lights[i as usize].world_pos)
+                .collect();
+            actor.point_light_selection = Some(ActorPointLightSelection {
+                eval_pos: pos,
                 count,
-            );
+                lights_len: active.lights.len(),
+                indices,
+                positions,
+            });
+        }
+        let Some(sel) = actor.point_light_selection.as_ref() else {
+            continue;
+        };
+        let (point_pos, point_color, point_atten) =
+            crate::zone_point_lights::point_light_arrays_for(&active.lights, &sel.indices);
 
         let lighting = &mut registry.skin_mut(actor.skin_slot).lighting;
         lighting.point_pos = point_pos;
@@ -2795,10 +2872,11 @@ mod pose_resolution_tests {
             Some(rest_id) => rest_id,
             None => actor_state::selected_animation(inputs).id,
         };
-        let mut ids: Vec<String> = select_pose_clips_layered(&animations, overlay, selected_id)
-            .iter()
-            .map(|a| a.id.as_str())
-            .collect();
+        let mut ids: Vec<String> =
+            select_pose_clips_layered(&animations, overlay.iter(), selected_id)
+                .iter()
+                .map(|a| a.id.as_str())
+                .collect();
         ids.sort();
         ids.dedup();
         ids
@@ -3171,7 +3249,7 @@ mod pose_resolution_tests {
         let swing = routine_motion_clip(&routines, DatId::from_str("ati0")).unwrap();
         let anims = actor.all_animations();
         let battle = actor.all_battle_clips();
-        let ids: Vec<String> = select_pose_clips_layered(&anims, &battle, swing)
+        let ids: Vec<String> = select_pose_clips_layered(&anims, battle.iter(), swing)
             .iter()
             .map(|a| a.id.as_str())
             .collect();

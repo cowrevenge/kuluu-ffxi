@@ -91,6 +91,9 @@ fn resolve_menu_entry(kind: MenuKind, label: &str) -> MenuDispatch {
     }
 }
 
+const EQUIP_SLOT_INDEX_MAX: u8 =
+    (ffxi_viewer_core::hud::equipment_screen::EquipmentIndex::ALL.len() - 1) as u8;
+
 pub(super) fn confirm_menu_at_cursor(
     bindings: &mut Bindings,
     stack: &mut MenuStack,
@@ -175,7 +178,7 @@ pub(super) fn confirm_menu_at_cursor(
     }
 
     if matches!(kind, MenuKind::Equipment) {
-        let slot = (cursor as u8).min(15);
+        let slot = (cursor as u8).min(EQUIP_SLOT_INDEX_MAX);
         stack.push(MenuKind::EquipSlot(slot));
         return None;
     }

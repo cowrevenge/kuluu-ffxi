@@ -752,7 +752,11 @@ fn sub_target_action_for(
             index,
             item_no,
         }),
-        _ => None,
+        A::MoveItem { .. } => None,
+        A::OpenItemAction { .. } => None,
+        A::EquipItem { .. } => None,
+        A::KeyItem { .. } => None,
+        A::Emote { .. } => None,
     }
 }
 
@@ -1673,6 +1677,8 @@ fn handle_quick_action_key(
     None
 }
 
+const CHAT_SCROLL_PAGE_ROWS: usize = 8;
+
 /// Drives the "active window" cursor (retail's Select-active-window / F key).
 /// F steps focus across the on-screen windows; within the focused window the
 /// Nav keys scroll/select and confirm/cancel act on it.
@@ -1714,12 +1720,12 @@ fn handle_passive_cursor_key(
                 return None;
             }
             if bindings.matches_logical(Action::PageUp, key) {
-                let next = chat_scroll.rows.saturating_add(8);
+                let next = chat_scroll.rows.saturating_add(CHAT_SCROLL_PAGE_ROWS);
                 chat_scroll.rows = next.min(max_back.saturating_sub(1));
                 return None;
             }
             if bindings.matches_logical(Action::PageDown, key) {
-                chat_scroll.rows = chat_scroll.rows.saturating_sub(8);
+                chat_scroll.rows = chat_scroll.rows.saturating_sub(CHAT_SCROLL_PAGE_ROWS);
                 return None;
             }
             // Left/Right cycle which chat tab the focused log shows.

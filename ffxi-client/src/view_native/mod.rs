@@ -272,6 +272,12 @@ pub struct NativeRunArgs {
     pub agent_listen: Option<String>,
 
     pub dat_root: Option<std::sync::Arc<ffxi_dat::DatRoot>>,
+
+    /// Open without taking focus (`play --unfocused`).
+    pub unfocused: bool,
+
+    /// Start muted (`play --mute`).
+    pub mute: bool,
 }
 
 pub fn run(args: NativeRunArgs) -> Result<()> {
@@ -284,6 +290,8 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
         direct_mode_autostart,
         runtime,
         relay_listen,
+        unfocused,
+        mute,
         #[cfg(unix)]
         agent_listen,
         dat_root,
@@ -322,6 +330,10 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
             // Lets gamescope surface the Steam Deck's on-screen keyboard when a
             // text field gains focus (off by default, so it never appeared).
             ime_enabled: true,
+            // winit `with_active`: an agent-launched session opens behind
+            // whatever the user is doing instead of yanking them out of a
+            // full-screen app.
+            focused: !unfocused,
             ..default()
         }),
         ..default()
@@ -342,6 +354,13 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
             plugin_group.disable::<bevy::render::pipelined_rendering::PipelinedRenderingPlugin>();
     }
     app.add_plugins(plugin_group);
+
+    if mute {
+        app.insert_resource(ffxi_viewer_core::audio::AudioMuteState {
+            bgm: true,
+            sfx: true,
+        });
+    }
 
     // Bevy 0.19's GPU-driven mesh preprocessing is a large regression on Apple integrated GPUs
     // (measured 2026-07: 12.8fps GPU path vs 34.3fps CPU path in the same scene; the GPU-path
@@ -720,7 +739,14 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
         );
 
     app.add_message::<screenshot::ScreenshotRequest>()
-        .add_systems(Update, screenshot::process_screenshot_requests);
+        .add_systems(
+            Update,
+            (
+                screenshot::trigger_screenshot_from_socket,
+                screenshot::process_screenshot_requests,
+            )
+                .chain(),
+        );
 
     app.init_resource::<ffxi_viewer_core::hud_hide::HudHidden>()
         .init_resource::<ffxi_viewer_core::hud_hide::HudHideStash>()

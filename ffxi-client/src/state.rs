@@ -2114,6 +2114,15 @@ pub enum AgentCommand {
     /// readable without a screenshot. Intercepted by the socket decoder.
     DebugHeights,
 
+    /// Capture the rendered frame to `path` (default `screenshot-<n>.png`).
+    /// Reads back the render target on the GPU, so it works with the window
+    /// occluded or unfocused and never disturbs whatever the human is doing.
+    /// Intercepted by the socket decoder.
+    Screenshot {
+        #[serde(default)]
+        path: Option<String>,
+    },
+
     Chat {
         kind: u8,
         text: String,

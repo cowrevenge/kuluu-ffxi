@@ -54,6 +54,12 @@ fn apply_debug_command(
             }
             true
         }
+        AgentCommand::Screenshot { path } => {
+            if let Ok(mut c) = ctrl.lock() {
+                c.request_screenshot(path.as_ref().map(std::path::PathBuf::from));
+            }
+            true
+        }
         _ => false,
     }
 }

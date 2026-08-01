@@ -2677,7 +2677,9 @@ async fn keepalive_loop(
                         let op = dbox.request_take(slot);
                         send_pbx(map, &op, &mut sub_seq, server_last_seq, &event_tx).await;
                     }
-                    Some(AgentCommand::DebugDrive { .. }) | Some(AgentCommand::DebugHeights) => {
+                    Some(AgentCommand::DebugDrive { .. })
+                    | Some(AgentCommand::DebugHeights)
+                    | Some(AgentCommand::Screenshot { .. }) => {
                         // GUI-only debug driving: consumed by the native input
                         // path via DebugControlHandle (the agent-socket decoder),
                         // never the network session. No-op here (headless/mcp).

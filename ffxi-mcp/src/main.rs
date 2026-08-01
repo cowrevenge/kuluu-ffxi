@@ -61,6 +61,14 @@ struct WalkParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+struct ScreenshotParams {
+    /// Where to write the PNG. Relative paths resolve against the client's
+    /// working directory. Omit for `screenshot-<n>.png`.
+    #[serde(default)]
+    path: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 struct ChatParams {
     kind: u8,
     text: String,
@@ -269,6 +277,16 @@ impl FfxiServer {
     )]
     async fn debug_heights(&self) -> Result<CallToolResult, McpError> {
         self.send(AgentCommand::DebugHeights).await
+    }
+
+    #[tool(
+        description = "Focus-less GUI capture: save the client's rendered frame to a PNG. Bevy reads back the render target on the GPU, so this works with the window occluded, unfocused, or on another Space — it needs no Screen Recording permission and never raises the window or interrupts the human. Prefer it over `screencapture`, which returns a stale cached frame for a background window. The write is async: allow ~1s before reading the file. GUI session only."
+    )]
+    async fn screenshot(
+        &self,
+        Parameters(p): Parameters<ScreenshotParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.send(AgentCommand::Screenshot { path: p.path }).await
     }
 
     #[tool(

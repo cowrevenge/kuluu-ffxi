@@ -18,6 +18,29 @@ pub fn next_default_path() -> PathBuf {
     PathBuf::from(format!("screenshot-{n}.png"))
 }
 
+/// Focus-less GUI driving (kuluu-wwwv): a socket `screenshot` command bumps the
+/// shared handle's seq; fire the request when it changes. Bevy captures by
+/// reading back the render target, so the window can stay buried and the human
+/// keeps working uninterrupted.
+pub fn trigger_screenshot_from_socket(
+    handle: Option<Res<super::DebugControlHandle>>,
+    mut last_seq: Local<u64>,
+    mut requests: MessageWriter<ScreenshotRequest>,
+) {
+    let Some(handle) = handle else {
+        return;
+    };
+    let Ok(ctrl) = handle.0.lock() else {
+        return;
+    };
+    let seq = ctrl.screenshot_seq();
+    if seq != *last_seq {
+        *last_seq = seq;
+        let path = ctrl.screenshot_path().unwrap_or_else(next_default_path);
+        requests.write(ScreenshotRequest { path });
+    }
+}
+
 pub fn process_screenshot_requests(
     mut events: MessageReader<ScreenshotRequest>,
     mut commands: Commands,

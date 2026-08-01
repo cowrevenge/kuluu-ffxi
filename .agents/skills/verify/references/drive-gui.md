@@ -1,17 +1,42 @@
-# GUI drive: native window + MCP attach
+# GUI drive: native window + agent socket
 
 For changes observable only in pixels/audio: rendering, HUD, camera, minimap,
-materials, input-driven movement. The pattern is **window renders, agent
-drives the session underneath, screenshots are the evidence**.
+materials, input-driven movement.
+
+**Drive focus-free by default.** Verification runs on the human's own desktop
+while they are using it. Everything except menu navigation can be driven and
+captured without the window being frontmost, so stealing focus is a choice you
+make deliberately for the few things that need it — not the default posture.
+The one condition you cannot escape: macOS stops rendering a **fully occluded**
+window, so *some* part of the client must stay on screen. Any sliver is enough;
+focus is not.
 
 ## Launch with the agent socket
 
-Default to the local GM drive account — **do not ask the user for
-credentials** (see SKILL.md "Character strategy"):
+```bash
+.agents/skills/verify/scripts/launch.sh /tmp/verify-client.log
+```
+
+That is the whole launch. It uses the local GM drive account, passes
+`--unfocused --mute`, waits for map traffic, and prints the agent socket path.
+Export `FFXI_VERIFY_SOUND=1` to keep audio on when the change under test is
+audio; `FFXI_VERIFY_USER`/`_PASS`/`_CHAR` override the character.
+
+It also hands focus back to whatever app was frontmost. This matters: macOS
+activates a newly launched app at the *process* level, which winit's
+`focused: false` does not suppress — so a bare launch yanks the user out of
+full-screen video even with `--unfocused`. Restoring afterwards is the only
+lever available from outside the client, because Bevy builds the winit event
+loop itself and exposes no macOS `ActivationPolicy` hook. `--unfocused` is
+still worth passing: it keeps the window from being made key, so the blip is
+shorter.
+
+Doing it by hand instead — **do not ask the user for credentials** (see
+SKILL.md "Character strategy"):
 
 ```bash
-cargo run -p ffxi-client --features native-window -- \
-  --agent-listen auto play verilight 'TestPass!1234' Verilamp
+target/debug/ffxi-client --agent-listen auto play --unfocused --mute \
+  verilight 'TestPass!1234' Verilamp
 ```
 
 `verilight`/`TestPass!1234`/`Verilamp` (gmlevel 5) is this machine's throwaway
@@ -24,122 +49,136 @@ Credentials are **positional args to `play`** — the GUI path reads no
 do); launching without them leaves the in-window launcher waiting for input
 while the log looks alive (zone geometry loads behind the launcher).
 
-`--agent-listen auto` (or `FFXI_AGENT_LISTEN=auto`) writes
-`$TMPDIR/ffxi-agent.pid` with the unix-socket path — but that file can be
-stale from a dead run; trust it only if its `pid` is alive, else glob
-`$TMPDIR/ffxi-agent-<pid>.sock` for the live process. The GUI session runs
-the full reactor, so goals work.
+`--agent-listen auto` writes `$TMPDIR/ffxi-agent.pid` with the unix-socket
+path — but that file goes stale across the cargo-wrapper→binary re-exec and
+after a dead run. Resolve the socket from the client log instead
+(`grep -ao "/var/folders[^ ]*ffxi-agent-[0-9]*\.sock" <log>`) or glob
+`$TMPDIR/ffxi-agent-*.sock` newest-first. The GUI session runs the full
+reactor, so goals work.
 
-## Attach ffxi-mcp to the running window
+Launch it with the harness's background mechanism (`run_in_background`), not a
+detached `&` subshell — a subshell-detached client gets reparented and its log
+stops growing mid-run.
+
+## What is focus-free (almost everything)
+
+| Need | Command | Notes |
+|---|---|---|
+| Session state, chat, GM `!cmds`, actions, zoning | agent socket `AgentCommand` | pure IPC, never touches the window |
+| Movement through the real `input.rs` path | `debug_drive` / MCP `walk` | kuluu-0pof; exercises heading, wall-slide, re-ground |
+| Grounding numbers | `debug_heights` / MCP `debug_heights` | logged under `tracing target: debug_heights` |
+| **Screen capture** | `scripts/capture.sh <out.png>` or MCP `screenshot` | kuluu-wwwv; GPU readback, see below |
+
+### Capture
 
 ```bash
-FFXI_ATTACH=auto target/debug/ffxi-mcp
+.agents/skills/verify/scripts/capture.sh artifacts/verify/<what>.png
 ```
 
-(`ffxi-attach` server in `ffxi-agent/.mcp.json` is the canonical config.)
-Same tool vocabulary as standalone — `path_to`, `request_zone_change`,
-`wait_for_event`, `scene://current` — but everything you do is rendered live
-in the window. This is how you set up a visual scene programmatically: walk
-the char to the right spot, trigger the zone change, spawn the state you need
-to see.
+This sends `{"cmd":"screenshot","path":...}` over the socket, firing the same
+`ScreenshotRequest` the `/screenshot` slash command does. Bevy captures by
+reading the render target back off the GPU (`copy_texture_to_buffer` +
+`map_async`), so unlike `screencapture -l <window_id>` it needs no Screen
+Recording permission, never raises the window, and cannot hand back the stale
+cached frame the window server keeps for a background window. Output is the raw
+client frame at backing resolution — no macOS title bar to crop around.
 
-## Capturing evidence
+The write is async, so the script waits for the file, then **asserts the frame
+isn't blank**. A fully occluded (or `Hide`-den) client renders nothing and the
+readback is solid black — a perfectly valid PNG of nothing, which is exactly
+the kind of silent failure that gets cited as evidence by mistake. On a blank
+frame it raises the client once, re-captures, and hands focus straight back,
+logging `FOCUS WILL BLIP` so you know the human was interrupted. Correct
+evidence beats zero disruption; a ~1s blip is cheaper than a black PNG being
+cited as proof. If it is *still* blank after raising, the console is probably
+locked — that exits 2 and no artifact from it is citable.
 
-- **In-client**: the `/screenshot [path]` slash command (alias `/ss`) saves
-  the primary window to PNG — but slash commands are typed in the window, so
-  this needs the user's hands or a scripted keystroke you don't have.
-- **External (agent-usable)**: capture the window from macOS:
+Launching unfocused makes this fallback more likely, since nothing guarantees
+the window ends up visible. Leaving the client somewhere it stays partly
+on screen (a free corner, a second display) avoids the blip entirely.
 
-  ```bash
-  osascript -e 'tell app "System Events" to get id of first window of (first process whose name contains "ffxi")' 2>/dev/null
-  screencapture -l <window_id> -x /tmp/verify-<what>.png    # -x = no sound
-  ```
+Read every PNG back with the Read tool before citing it. A guard reporting
+`lit=100%` only proves the GPU drew *something*.
 
-  Read the PNG back with the Read tool to actually look at it before citing
-  it as evidence — a black or half-loaded frame proves nothing.
-- Screen recordings for motion bugs (jank, camera): `screencapture -v` or ask
-  the user to observe; say precisely what to look for.
+### Talking to the socket
 
-## Keystrokes via System Events (menus ARE drivable)
+Use a one-shot Python `AF_UNIX` client with `settimeout()` and an explicit
+`close()`. Do **not** shell out to `nc -U`: BSD `nc` has no reliable
+idle-timeout, blocks past `-w`, gets backgrounded by the harness, and the
+abandoned connection holds the socket's single-peer slot open so every later
+send silently no-ops until you kill the stray process.
 
-The agent socket carries session-level `AgentCommand`s only, but macOS can
-inject real keystrokes, which exercises the whole input layer (dialog
-choices, menu stacks, the Items window — verified working for the Mog Menu
-storage flow):
+`AgentCommand` fields are exact and a wrong key is dropped **silently** — the
+socket accepts the line, nothing errors in the client or map log, and the
+command never happens. `chat` is `{"cmd":"chat","kind":0,"text":"!hp 9999"}`;
+sending `message` instead of `text` deserializes to nothing. Confirm a GM
+command actually landed (re-`snapshot`, check the value moved) before
+concluding the server rejected it. Variant names come from `AgentCommand` in
+`ffxi-client/src/state.rs` — read the enum rather than guessing. `ActionKind`
+is internally tagged, so a cast nests as
+`{"kind":"cast_magic","spell_id":896,…}` inside the `kind` field.
+
+## What still needs focus
+
+**Menu navigation and anything typed.** The socket carries session-level
+commands, not keystrokes, so the target-action menu, main menu, chat bar, and
+Tab-targeting need real key events through System Events — which requires the
+process frontmost:
 
 ```bash
 osascript -e 'tell application "System Events"
-    set frontmost of (first process whose name contains "ffxi") to true
-    delay 0.4
-    key code 125  -- Down (126 Up, 123 Left, 124 Right)
-    delay 0.3
-    key code 36   -- Enter
-end tell'         -- key code 53 = Escape
+    set frontmost of (first process whose unix id is <pid>) to true
+    delay 0.6
+    key code 48    -- Tab (36 Enter, 53 Esc, 125/126/123/124 arrows, 27 main menu)
+end tell'
 ```
 
-Needs Accessibility permission for the invoking terminal. Keep `delay`s
-≥0.3s; screenshot after each step and Read it — keystrokes are fire-and-
-forget.
+Resolve `<pid>` with `pgrep -f "^target/debug/ffxi-client"` — a bare
+`pgrep -f ffxi-client` also matches the harness's own shell wrapper, and the
+`osascript` then fails with "Invalid index". Needs Accessibility permission.
+Keep delays ≥0.3s, capture after each step, and Read the result — keystrokes
+are fire-and-forget.
 
-## What still needs human eyes
+Because this steals focus, batch the keystroke legs of a run together instead
+of interleaving them with focus-free work, and warn the user before you start
+taking over their keyboard.
 
-- WASD/autorun movement *feel* (wall-slide, re-ground) — a scripted
-  key-hold isn't a human hand
-- Chase-camera orbit/zoom and camera collision feel
-
-For these: set the scene up via attach (position, zone, targets), then hand
-off with exact instructions — "walk into the north wall and watch whether the
-camera clips into your head" beats "check the camera". `move` via socket
-teleports the session position but bypasses the input-layer systems, so it
-does NOT exercise input-driven bugs — don't let a socket `move` masquerade as
-a movement test.
+**Movement *feel*** (wall-slide, re-ground) and **chase-camera orbit/zoom feel**
+still need human eyes. Set the scene up over the socket, then hand off with
+exact instructions — "walk into the north wall and watch whether the camera
+clips into your head" beats "check the camera". Socket `move` teleports the
+session position and bypasses the input layer, so it does NOT exercise
+input-driven bugs; use `debug_drive` for those.
 
 ## Gotchas
 
 - macOS: the Bevy/winit loop owns the OS main thread; the window opens on the
   user's desktop — tell them before spawning it.
-- `screencapture` needs Screen Recording permission for the invoking terminal.
-- One GUI client at a time: it holds the char's session; a parallel headless
-  login with the same char will fight it (ghost-session lockout, stack.md).
+- Bevy's unfocused update mode is `reactive_low_power` at 60Hz, so a background
+  window keeps rendering and stays capturable. A **hidden** app (`Hide`, or
+  System Events `set visible to false`) does not, and un-hiding via
+  `set visible to true` often doesn't stick — use `set frontmost … to true`.
+- **Console lock kills everything visual**: if the macOS session locks
+  (`CGSSessionScreenIsLocked=1` via `Quartz.CGSessionCopyCurrentDictionary()`),
+  captures go black and System Events sees 0 windows regardless of TCC grants.
+  Check this first when captures are blank; only a human unlock fixes it.
+- Ghost sessions: prefer a clean socket `disconnect` over `kill`. The map server
+  holds a killed char for 2–5 min and the next login times out. To clear one:
+  `DELETE FROM accounts_sessions WHERE charid=<id>` (Verilamp is 17455719).
+  That table's `targid` column is also the authoritative live targid —
+  `charid & 0x7FF` is **not** it, and the server rejects actions built on it.
+- Agent-socket `chat` bypasses the client's local `/`-command parser and sends a
+  raw wire SAY. Server-side `!` GM commands work; client-side `/` commands need
+  real keystrokes.
+- Agent-socket `move` persists server-side and can be clamped back to the
+  navmesh's nearest valid vertex — position telemetry echoes what you asked for
+  while the rendered transform snaps back. Vary `x` as well as `z` if a teleport
+  looks stuck.
+- One GUI client at a time — it holds the char's session, and a parallel
+  headless login with the same char fights it.
 - **Don't run `scripts/checks.sh test` while a GUI session is live** — the
-  `agent_session` integration test logs into the same local LSB and kicks
-  the running session mid-verify. Gate first, then launch.
-
-## Session gotchas (2026-07-19)
-
-- **Console lock kills capture**: if the macOS session locks (`CGSSessionScreenIsLocked=1` via `Quartz.CGSessionCopyCurrentDictionary()`), `screencapture` returns hard errors or solid black and System Events sees 0 windows — regardless of TCC grants. Check this FIRST when captures come back black; only a human unlock fixes it.
-- **Agent-socket `chat` bypasses the client's local `/`-command parser** — it sends a raw wire SAY. Server-side `!` GM commands work through it; client-side `/` commands (e.g. `/lights`) need real keystrokes into the chat bar.
-- **Agent-socket `move` persists server-side** (position survives relaunch); it is not a client-only hack. It also doesn't guarantee nearby NPCs stream in — prefer walking the last stretch for entity-visual checks.
-- **GM drive char**: `Verilamp` (gmlevel 5) on the local throwaway `verilight` account (password `TestPass!1234`, the provisioning-doc example — not a secret); `!zone`/`!settime` work as socket chat. Fresh `create-char` chars have gmlevel 0 and the server silently ignores `!zone`. There is no `!settime`; use `!addtime <offset_in_seconds>` (LSB `scripts/commands/addtime.lua`, permission 5) — it resets-then-adds an earth-clock offset that indirectly drives Vana'diel time, so the same offset issued later in the session (after real time has elapsed) lands at a later Vana'diel time than the first call. `!setweather NONE` (permission 1) clears overcast/rain so directional shadows are actually visible — cloudy weather flattens lighting enough to hide cast shadows.
-- **Known intermittent**: `slab_allocator Use-after-free` burst at zone-in can black out all zone geometry for the whole session (kuluu-172i); relaunch once before diagnosing rendering changes.
-- **`AgentCommand` fields are exact — a wrong key is dropped SILENTLY** (2026-07-25).
-  `chat` takes `{"cmd":"chat","kind":0,"text":"!hp 9999"}`. Sending `message`
-  instead of `text` deserializes to nothing, the socket accepts the line, no
-  error appears in the client log or the map log, and the command simply never
-  happens. This burned a whole session: every GM setup command looked like a
-  server-side permission problem (`!changejob`/`!addallspells`/`!hp` all "not
-  working") when the payload was malformed. **Confirm a GM command actually
-  landed** — re-`snapshot` and check the value moved — before concluding the
-  server rejected it. The variant names come from `AgentCommand` in
-  `ffxi-client/src/state.rs`; read the enum rather than guessing field names.
-- **The agent socket file can vanish from `$TMPDIR` mid-run** (2026-07-25).
-  The client logs `ffxi agent socket listening path=…/ffxi-agent-<pid>.sock`
-  and keeps the listener, but the path disappears from disk (observed taking
-  out live *and* previously-working sockets in the same run), so every later
-  connect fails `FileNotFoundError` while the process is healthy. Re-resolve
-  from the log (`grep -ao "/var/folders[^ ]*ffxi-agent-[0-9]*\.sock"`) rather
-  than trusting `$TMPDIR/ffxi-agent.pid`, which also goes stale across the
-  cargo-wrapper→binary re-exec. If it is gone entirely, keystroke driving
-  needs no socket. Root cause not yet understood — worth its own bead.
-- **`nc -U` hangs the harness**: BSD `nc` (macOS) has no `-q`/idle-timeout that reliably closes after one command; `nc -U -w N <sock>` still blocks past N waiting on the socket, gets backgrounded by the harness, and — worse — the abandoned connection holds the agent socket's single-peer slot open so every subsequent send silently no-ops (`agent socket peer connected` never logs again) until you kill the stray `nc`. Use a one-shot Python `socket.socket(AF_UNIX, SOCK_STREAM)` with `settimeout()` + explicit `close()` instead of shelling out to `nc`.
-- **`screencapture -l <window_id>` can return a stale cached frame for an occluded/background window** — HUD clock and other live state won't advance across captures even though the process is healthy and ticking. Bring the target frontmost first (`osascript … set frontmost of process "ffxi-client" to true`) and give it a beat before each capture, not just once at the start.
-- **Agent-socket `move` can get clamped back onto the navmesh's nearest valid vertex** if the requested `(x,z)` at a fixed `x` isn't on a connected walkable surface (e.g. repeatedly increasing `z` while holding `x` constant can render the *same* spot every time — position telemetry echoes the requested coordinates, but the rendered transform snaps back). If teleporting through a gate/tunnel appears stuck, vary `x` as well as `z` rather than assuming the socket is broken.
-
-## Focus-less driving: what works, what doesn't (2026-07-20)
-
-Reading state over the socket is reliable; *driving player movement* over it is not — the GUI is a command **source**, so the socket can't reach the `input.rs` WASD movement path where re-ground/collision bugs actually live.
-
-- **Read self position (reliable)**: one-shot Python AF_UNIX client, send `{"cmd":"snapshot"}\n` (AgentCommand is internally tagged, `"cmd"`, snake_case), read ~1s, keep the last `{"type":"position_changed","pos":{"pos":{x,y,z},...}}`. The stream is mostly `net_stats` spam — filter by `type`. (Same reason `nc` hangs, above: use a bounded Python read.)
-- **`path_to` (reactor straight-line goal) did NOT move the local player** in a GUI session even with the reactor's navmesh loaded (it loads its own copy from `vendor/server/navmeshes/<Zone>.nav`, separate from the GUI's fetch-cache nav). `move`/`path_to` route through the reactor/session, **not** through `input.rs::dispatch_movement_system`, so they exercise a *different* grounding path than WASD and can't reproduce WASD-only bugs. Don't rely on them to reproduce movement/collision/re-ground issues.
-- **WASD is only drivable via real keystrokes, and that's fragile**: `osascript … keystroke`/`key down` steals focus back to the invoking terminal, key-*hold* often doesn't register as continuous movement, and multi-word slash commands (`/debug heights`) get garbled/split. When focusing, there are **two `ffxi-client` processes** — pick the one that actually owns a window (`repeat with p in (processes whose name is "ffxi-client") … if (count of windows of p) > 0`), then `AXRaise` before each keystroke burst.
-- **Gap → kuluu-0pof**: there is currently no socket/MCP path to (a) inject simulated movement input through `dispatch_movement_system` or (b) trigger `/debug heights` and read its server/nav/mzb numbers back. Until that lands, reproduce input-driven grounding bugs **offline** instead — load the real zone navmesh (`ffxi_nav_recast::fetch`) and MZB collision (`load_mzb_placed(zone_dat_id)`), walk a synthetic path carrying the height hint forward, and compare per-column (this pinned kuluu-nvqx deterministically without a live session).
+  `agent_session` integration test logs into the same LSB and kicks the running
+  session mid-verify. Gate first, then launch.
+- Known intermittent: a `slab_allocator Use-after-free` burst at zone-in can
+  black out all zone geometry for the whole session (kuluu-172i); relaunch once
+  before diagnosing a rendering change.

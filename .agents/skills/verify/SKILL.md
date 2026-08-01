@@ -21,7 +21,7 @@ work splits into four steps; each has a reference file with the exact recipes.
 2. Pick surface  → table below
 3. Drive + observe → references/drive-headless.md | references/drive-gui.md
                      (mechanical drive loops → haiku subagent, see below)
-4. Evidence      → JSON events / tracing log / screenshots, quoted in the report
+4. Evidence      → JSON events / tracing log / scripts/capture.sh screenshots
 5. Record it     → scripts/record-evidence.sh (feeds the stop-hook verify gate)
 ```
 
@@ -45,11 +45,14 @@ Two constraints shape everything:
   pathing — only runs under `ffxi-mcp` standalone (which spawns
   supervisor→reactor→session) or in the GUI. Raw stdio can still send explicit
   `AgentCommand`s like `request_zone_change`.
-- **GUI input paths (WASD movement, camera) cannot be driven remotely.** The
-  agent socket carries session-level `AgentCommand`s, not keystrokes. For those,
-  set the scene up programmatically, then either capture screenshots externally
-  or hand the window to the user for the input-driven part — say exactly which
-  observations still need their eyes.
+- **Verification runs on the human's desktop while they're using it, so drive
+  focus-free.** Session commands, real-input movement (`debug_drive`), grounding
+  readback (`debug_heights`), and screen capture (`scripts/capture.sh`) all work
+  over the agent socket with the window unfocused — the client only has to stay
+  un-occluded, because macOS stops rendering a fully hidden window. Only menu
+  navigation and typing need real keystrokes, and those steal focus; batch them
+  and warn the user first. Movement *feel* and camera feel still need their eyes
+  — say exactly which observations you're handing over.
 
 ## Delegating the drive loop (cheap models)
 

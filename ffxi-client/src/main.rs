@@ -88,6 +88,16 @@ enum Command {
 
         #[arg(long)]
         headless: bool,
+
+        /// Open the window without taking focus, so launching does not pull the
+        /// user out of a full-screen app. The window still has to stay
+        /// un-occluded for macOS to keep rendering it.
+        #[arg(long)]
+        unfocused: bool,
+
+        /// Start with BGM and sound effects muted.
+        #[arg(long)]
+        mute: bool,
     },
 
     #[cfg(feature = "native-window")]
@@ -264,6 +274,7 @@ async fn run_command_async(args: Args, auth: auth_client::AuthClient) -> Result<
             password,
             char_name,
             headless,
+            ..
         } => {
             if !headless {
                 bail!(
@@ -464,6 +475,8 @@ fn run_gui_main_thread(
         user,
         password,
         char_name,
+        unfocused,
+        mute,
         ..
     } = command
     else {
@@ -499,6 +512,8 @@ fn run_gui_main_thread(
         #[cfg(unix)]
         agent_listen,
         dat_root,
+        unfocused,
+        mute,
     })
     .context("native viewer")
 }

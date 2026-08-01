@@ -6,6 +6,7 @@
 //! driver can inject movement input and trigger `/debug heights` without OS
 //! keystrokes.
 
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -15,6 +16,8 @@ pub type SharedDebugControl = Arc<Mutex<DebugControl>>;
 pub struct DebugControl {
     drive: Option<DebugDrive>,
     heights_seq: u64,
+    screenshot: Option<PathBuf>,
+    screenshot_seq: u64,
 }
 
 #[derive(Clone, Copy)]
@@ -52,5 +55,23 @@ impl DebugControl {
 
     pub fn heights_seq(&self) -> u64 {
         self.heights_seq
+    }
+
+    /// Capture goes through Bevy's render-target readback, so it needs neither
+    /// window focus nor Screen Recording permission — unlike `screencapture`,
+    /// which reads the window-server backing store and hands back a stale frame
+    /// for an occluded window. `None` leaves the default naming to the GUI side,
+    /// which owns the counter the `/screenshot` command already uses.
+    pub fn request_screenshot(&mut self, path: Option<PathBuf>) {
+        self.screenshot = path;
+        self.screenshot_seq = self.screenshot_seq.wrapping_add(1);
+    }
+
+    pub fn screenshot_seq(&self) -> u64 {
+        self.screenshot_seq
+    }
+
+    pub fn screenshot_path(&self) -> Option<PathBuf> {
+        self.screenshot.clone()
     }
 }

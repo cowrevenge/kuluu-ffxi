@@ -1,4 +1,4 @@
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{anyhow, Context, Result};
 use ffxi_proto::{decode, framing};
 use tokio::sync::{broadcast, mpsc};
 
@@ -9,9 +9,6 @@ use crate::state::{
     AgentCommand, AgentEvent, BlowfishStatus, ChatChannel, ChatLine, Diagnostics, Entity,
     EntityKind, HealMode, InventoryUpdate, ItemSlot, Position, ShopItem, ShopState, Stage, Vec3,
 };
-
-#[allow(dead_code)]
-const _UNUSED: Option<crate::state::SessionState> = None;
 
 struct NpcNameResolver {
     root: Option<std::sync::Arc<ffxi_dat::DatRoot>>,
@@ -5616,11 +5613,6 @@ fn build_subpacket_pos(
         .unwrap_or(0);
     buf[24..28].copy_from_slice(&now.to_le_bytes());
     buf
-}
-
-#[allow(dead_code)]
-fn _hint() -> Result<()> {
-    bail!("compile guard")
 }
 
 const MOVE_EMISSION_PERIOD: std::time::Duration = std::time::Duration::from_millis(100);

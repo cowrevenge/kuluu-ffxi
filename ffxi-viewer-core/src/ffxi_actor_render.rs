@@ -1056,31 +1056,53 @@ fn build_actor_children(
     material_handles
 }
 
-// Not gated on resource_changed: it must run every frame so actor meshes spawned
-// after a settings change still get the current value via the Added query (full
-// sweeps over q_all happen only when the setting itself changes).
+// Cost/benefit tuning, not a derived value: at 50m (50° vFOV) a character's
+// ground shadow is a foreshortened ~20px smudge, but its submeshes still cost
+// full draw-call encode in every shadow cascade — a populated Jeuno at Ultra
+// measured 33fps from exactly that (kuluu-06jb). The hysteresis band keeps
+// actors at the boundary from thrashing archetype moves every frame.
+const CHARACTER_SHADOW_CAST_MAX_DISTANCE: f32 = 50.0;
+const CHARACTER_SHADOW_CAST_HYSTERESIS: f32 = 5.0;
+
+fn shadow_cast_wanted(cast_enabled: bool, currently_blocked: bool, dist_to_camera: f32) -> bool {
+    if !cast_enabled {
+        return false;
+    }
+    let threshold = if currently_blocked {
+        CHARACTER_SHADOW_CAST_MAX_DISTANCE - CHARACTER_SHADOW_CAST_HYSTERESIS
+    } else {
+        CHARACTER_SHADOW_CAST_MAX_DISTANCE + CHARACTER_SHADOW_CAST_HYSTERESIS
+    };
+    dist_to_camera < threshold
+}
+
+// Runs every frame: the camera moves, so an actor's cast/no-cast state can flip
+// without any settings change. Commands are only issued on state flips.
 pub(crate) fn apply_character_shadow_cast(
     settings: Res<crate::graphics_settings::GraphicsSettings>,
     mut commands: Commands,
-    q_added: Query<Entity, Added<FfxiActorMeshChild>>,
-    q_all: Query<Entity, With<FfxiActorMeshChild>>,
+    q_cam: Query<&GlobalTransform, With<crate::camera::OperatorCamera>>,
+    q_all: Query<
+        (Entity, &GlobalTransform, Has<bevy::light::NotShadowCaster>),
+        With<FfxiActorMeshChild>,
+    >,
 ) {
-    let cast = settings.character_shadow_cast;
-    let mut apply = |e: Entity| {
-        let mut ec = commands.entity(e);
-        if cast {
-            ec.remove::<bevy::light::NotShadowCaster>();
-        } else {
-            ec.insert(bevy::light::NotShadowCaster);
-        }
-    };
-    if settings.is_changed() {
-        for e in &q_all {
-            apply(e);
-        }
-    } else {
-        for e in &q_added {
-            apply(e);
+    let cam_pos = q_cam.iter().next().map(|t| t.translation());
+    for (e, tf, blocked) in &q_all {
+        let want_cast = cam_pos.is_some_and(|cam| {
+            shadow_cast_wanted(
+                settings.character_shadow_cast,
+                blocked,
+                tf.translation().distance(cam),
+            )
+        });
+        if want_cast == blocked {
+            let mut ec = commands.entity(e);
+            if want_cast {
+                ec.remove::<bevy::light::NotShadowCaster>();
+            } else {
+                ec.insert(bevy::light::NotShadowCaster);
+            }
         }
     }
 }
@@ -1656,6 +1678,33 @@ fn roll_free_look(from: Vec3, to: Vec3, up: Vec3) -> Quat {
         Quat::from_rotation_arc(f_yawed, t)
     };
     pitch * yaw
+}
+
+#[cfg(test)]
+mod shadow_cast_scope_tests {
+    use super::*;
+
+    const MAX: f32 = CHARACTER_SHADOW_CAST_MAX_DISTANCE;
+    const HYST: f32 = CHARACTER_SHADOW_CAST_HYSTERESIS;
+
+    #[test]
+    fn disabled_never_casts() {
+        assert!(!shadow_cast_wanted(false, false, 0.0));
+        assert!(!shadow_cast_wanted(false, true, 0.0));
+    }
+
+    #[test]
+    fn near_casts_far_does_not() {
+        assert!(shadow_cast_wanted(true, true, MAX - HYST - 1.0));
+        assert!(!shadow_cast_wanted(true, false, MAX + HYST + 1.0));
+    }
+
+    #[test]
+    fn hysteresis_band_preserves_current_state() {
+        let in_band = MAX;
+        assert!(shadow_cast_wanted(true, false, in_band));
+        assert!(!shadow_cast_wanted(true, true, in_band));
+    }
 }
 
 #[cfg(test)]

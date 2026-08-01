@@ -583,7 +583,7 @@ fn handle_sub_packet(
 ) {
     use ffxi_proto::map::s2c;
     match sub.opcode {
-        op if op == s2c::LOGIN => {
+        s2c::LOGIN => {
             let decoded = decode::ServerLogin::decode(sub.data);
             if let Err(ref e) = decoded {
                 tracing::warn!(
@@ -723,7 +723,7 @@ fn handle_sub_packet(
                 }
             }
         }
-        op if op == s2c::CHAR_PC || op == s2c::CHAR_NPC => {
+        op @ (s2c::CHAR_PC | s2c::CHAR_NPC) => {
             if let Ok(head) =
                 decode::PosHead::decode(sub.data).inspect_err(|e| warn_decode_err(sub.opcode, e))
             {
@@ -912,7 +912,7 @@ fn handle_sub_packet(
                 });
             }
         }
-        op if op == s2c::ENTITY_UPDATE1 => match sub.data.first().copied() {
+        s2c::ENTITY_UPDATE1 => match sub.data.first().copied() {
             Some(decode::EntitySetName::SUB_TYPE) => {
                 if let Ok(ent) = decode::EntitySetName::decode(sub.data)
                     .inspect_err(|e| warn_decode_err(sub.opcode, e))
@@ -945,7 +945,7 @@ fn handle_sub_packet(
             }
             _ => {}
         },
-        op if op == s2c::ENTITY_UPDATE2 => {
+        s2c::ENTITY_UPDATE2 => {
             if let Ok(pet) =
                 decode::PetSync::decode(sub.data).inspect_err(|e| warn_decode_err(sub.opcode, e))
             {
@@ -960,24 +960,24 @@ fn handle_sub_packet(
                 }
             }
         }
-        op if op == s2c::BATTLE_MESSAGE => {
+        s2c::BATTLE_MESSAGE => {
             if let Some(line) = decode_battle_message(sub.data, name_cache, kind_cache, true) {
                 let _ = event_tx.send(AgentEvent::ChatLine { line });
             }
             emit_battle_message_audio_event(sub.data, true, event_tx);
         }
-        op if op == s2c::BATTLE_MESSAGE2 => {
+        s2c::BATTLE_MESSAGE2 => {
             if let Some(line) = decode_battle_message(sub.data, name_cache, kind_cache, false) {
                 let _ = event_tx.send(AgentEvent::ChatLine { line });
             }
             emit_battle_message_audio_event(sub.data, false, event_tx);
         }
-        op if op == s2c::SHOP_LIST => {
+        s2c::SHOP_LIST => {
             if let Some(shop) = decode_shop_list(sub.data) {
                 let _ = event_tx.send(AgentEvent::ShopUpdated { shop });
             }
         }
-        op if op == s2c::SHOP_SELL => {
+        s2c::SHOP_SELL => {
             if let Some((price, item_index, count)) = decode_shop_sell(sub.data) {
                 let _ = event_tx.send(AgentEvent::ShopSellAppraisal {
                     price,
@@ -986,8 +986,8 @@ fn handle_sub_packet(
                 });
             }
         }
-        op if op == s2c::SHOP_OPEN => {}
-        op if op == s2c::BATTLE2 => {
+        s2c::SHOP_OPEN => {}
+        s2c::BATTLE2 => {
             if let Some(h) = decode_battle2_header(sub.data) {
                 let _ = event_tx.send(AgentEvent::ActionStarted {
                     actor_id: h.actor_id,
@@ -1001,7 +1001,7 @@ fn handle_sub_packet(
                 let _ = event_tx.send(AgentEvent::ChatLine { line });
             }
         }
-        op if op == s2c::MOTIONMES => {
+        s2c::MOTIONMES => {
             if let Ok(m) =
                 decode::MotionMes::decode(sub.data).inspect_err(|e| warn_decode_err(sub.opcode, e))
             {
@@ -1030,7 +1030,7 @@ fn handle_sub_packet(
                 }
             }
         }
-        op if op == s2c::EMOTE_LIST => {
+        s2c::EMOTE_LIST => {
             if let Ok(e) =
                 decode::EmoteList::decode(sub.data).inspect_err(|e| warn_decode_err(sub.opcode, e))
             {
@@ -1040,7 +1040,7 @@ fn handle_sub_packet(
                 });
             }
         }
-        op if op == s2c::MUSIC => {
+        s2c::MUSIC => {
             if sub.data.len() >= 4 {
                 let slot = u16::from_le_bytes([sub.data[0], sub.data[1]]) as u8;
                 let track_id = u16::from_le_bytes([sub.data[2], sub.data[3]]);
@@ -1048,7 +1048,7 @@ fn handle_sub_packet(
                 let _ = event_tx.send(AgentEvent::MusicChanged { slot, track_id });
             }
         }
-        op if op == s2c::MUSIC_VOLUME => {
+        s2c::MUSIC_VOLUME => {
             if sub.data.len() >= 4 {
                 let slot = u16::from_le_bytes([sub.data[0], sub.data[1]]) as u8;
                 let volume = u16::from_le_bytes([sub.data[2], sub.data[3]]) as u8;
@@ -1056,7 +1056,7 @@ fn handle_sub_packet(
                 let _ = event_tx.send(AgentEvent::MusicVolumeChanged { slot, volume });
             }
         }
-        op if op == s2c::CHAR_STATUS => {
+        s2c::CHAR_STATUS => {
             if let Ok(cs) =
                 decode::CharStatus::decode(sub.data).inspect_err(|e| warn_decode_err(sub.opcode, e))
             {
@@ -1084,14 +1084,14 @@ fn handle_sub_packet(
                 }
             }
         }
-        op if op == s2c::FISH => {
+        s2c::FISH => {
             if let Ok(f) =
                 decode::FishPacket::decode(sub.data).inspect_err(|e| warn_decode_err(sub.opcode, e))
             {
                 let _ = event_tx.send(AgentEvent::FishHooked { params: f.into() });
             }
         }
-        op if op == s2c::JOB_INFO => {
+        s2c::JOB_INFO => {
             if let Ok(ji) =
                 decode::JobInfo::decode(sub.data).inspect_err(|e| warn_decode_err(sub.opcode, e))
             {
@@ -1100,7 +1100,7 @@ fn handle_sub_packet(
                 let _ = event_tx.send(AgentEvent::JobInfoUpdated { info });
             }
         }
-        op if op == s2c::CLISTATUS => {
+        s2c::CLISTATUS => {
             if let Ok(cs) =
                 decode::CliStatus::decode(sub.data).inspect_err(|e| warn_decode_err(sub.opcode, e))
             {
@@ -1118,10 +1118,10 @@ fn handle_sub_packet(
                 });
             }
         }
-        op if op == s2c::EVENTUCOFF => {
+        s2c::EVENTUCOFF => {
             handle_eventucoff(sub.data, pending_event_end, event_tx);
         }
-        op if op == s2c::WPOS || op == s2c::WPOS2 => {
+        s2c::WPOS | s2c::WPOS2 => {
             if let Ok(fm) =
                 decode::ForcedMove::decode(sub.data).inspect_err(|e| warn_decode_err(sub.opcode, e))
             {
@@ -1145,7 +1145,7 @@ fn handle_sub_packet(
                 }
             }
         }
-        op if op == s2c::WEATHER => {
+        s2c::WEATHER => {
             if let Ok(w) = decode::WeatherPacket::decode(sub.data)
                 .inspect_err(|e| warn_decode_err(sub.opcode, e))
             {
@@ -1154,19 +1154,19 @@ fn handle_sub_packet(
                 });
             }
         }
-        op if op == s2c::MISCDATA => {
+        s2c::MISCDATA => {
             if let Some((icons, expiries)) = decode_miscdata_status_icons(sub.data) {
                 let _ = event_tx.send(AgentEvent::StatusIconsUpdated { icons, expiries });
             }
         }
-        op if op == s2c::ABIL_RECAST => {
+        s2c::ABIL_RECAST => {
             let recasts = decode_abil_recast(sub.data);
             let _ = event_tx.send(AgentEvent::AbilityRecastsUpdated { recasts });
         }
         // Wide-scan (tracking): the server frames a list with 0x0F6 ListStart, a
         // run of 0x0F4 entries, then 0x0F6 ListEnd; 0x0F5 streams the tracked
         // entity's position (vendor/server/src/map/packets/s2c/0x0f4..0x0f6*).
-        op if op == s2c::TRACKING_STATE => {
+        s2c::TRACKING_STATE => {
             if let Ok(st) = decode::WidescanState::decode(sub.data)
                 .inspect_err(|e| warn_decode_err(sub.opcode, e))
             {
@@ -1178,7 +1178,7 @@ fn handle_sub_packet(
                 }
             }
         }
-        op if op == s2c::TRACKING_LIST => {
+        s2c::TRACKING_LIST => {
             if let Ok(e) = decode::WidescanEntry::decode(sub.data)
                 .inspect_err(|e| warn_decode_err(sub.opcode, e))
             {
@@ -1187,7 +1187,7 @@ fn handle_sub_packet(
                 });
             }
         }
-        op if op == s2c::TRACKING_POS => {
+        s2c::TRACKING_POS => {
             if let Ok(p) = decode::WidescanPos::decode(sub.data)
                 .inspect_err(|e| warn_decode_err(sub.opcode, e))
             {
@@ -1196,7 +1196,7 @@ fn handle_sub_packet(
                 });
             }
         }
-        op if op == s2c::SCENARIO_ITEM => {
+        s2c::SCENARIO_ITEM => {
             if let Ok(ki) = decode::ScenarioItem::decode(sub.data)
                 .inspect_err(|e| warn_decode_err(sub.opcode, e))
             {
@@ -1214,22 +1214,22 @@ fn handle_sub_packet(
                 });
             }
         }
-        op if op == s2c::EVENT => {
+        s2c::EVENT => {
             if let Some(dialog) = decode_event_0x032(sub.data) {
                 emit_event_dialog(event_tx, &dialog, pending_event_end, name_cache);
             }
         }
-        op if op == s2c::EVENTSTR => {
+        s2c::EVENTSTR => {
             if let Some(dialog) = decode_event_0x033(sub.data) {
                 emit_event_dialog(event_tx, &dialog, pending_event_end, name_cache);
             }
         }
-        op if op == s2c::EVENTNUM => {
+        s2c::EVENTNUM => {
             if let Some(dialog) = decode_event_0x034(sub.data) {
                 emit_event_dialog(event_tx, &dialog, pending_event_end, name_cache);
             }
         }
-        op if op == s2c::MESSAGE => {
+        s2c::MESSAGE => {
             if let Some(line) = decode_std_message_examine(sub.data, name_cache) {
                 let _ = event_tx.send(AgentEvent::ChatLine { line });
             } else if let Ok(text) =
@@ -1244,7 +1244,7 @@ fn handle_sub_packet(
                 let _ = event_tx.send(AgentEvent::ChatLine { line });
             }
         }
-        op if op == s2c::EQUIP_INSPECT => match decode::EquipInspect::decode(sub.data) {
+        s2c::EQUIP_INSPECT => match decode::EquipInspect::decode(sub.data) {
             Ok(decode::EquipInspect::Equipment(eq)) => {
                 let _ = event_tx.send(AgentEvent::CheckEquipReceived {
                     target_id: eq.unique_no,
@@ -1267,7 +1267,7 @@ fn handle_sub_packet(
                 tracing::warn!(error = %e, body_len = sub.data.len(), "0x0C9 EQUIP_INSPECT decode failed");
             }
         },
-        op if op == s2c::CHAT => {
+        s2c::CHAT => {
             if let Some((title, options)) = decode_custom_menu(sub.data) {
                 // Retail renders a GMPROMPT/_CUSTOM_MENU as an interactive prompt,
                 // not a chat line (the packet's speaker is the player entity).
@@ -1285,7 +1285,7 @@ fn handle_sub_packet(
                 let _ = event_tx.send(AgentEvent::ChatLine { line });
             }
         }
-        op if op == s2c::SYSTEMMES => {
+        s2c::SYSTEMMES => {
             if let Ok(m) = decode::SystemMessage::decode(sub.data)
                 .inspect_err(|e| warn_decode_err(sub.opcode, e))
             {
@@ -1321,7 +1321,7 @@ fn handle_sub_packet(
                 let _ = event_tx.send(AgentEvent::ChatLine { line });
             }
         }
-        op if op == s2c::GROUP_LIST => {
+        s2c::GROUP_LIST => {
             if let Ok((attrs, extra)) = decode::PartyAttrs::decode_group_list(sub.data)
                 .inspect_err(|e| warn_decode_err(sub.opcode, e))
             {
@@ -1333,7 +1333,7 @@ fn handle_sub_packet(
                 });
             }
         }
-        op if op == s2c::GROUP_ATTR => {
+        s2c::GROUP_ATTR => {
             if let Ok(attrs) = decode::PartyAttrs::decode_group_attr(sub.data)
                 .inspect_err(|e| warn_decode_err(sub.opcode, e))
             {
@@ -1345,7 +1345,7 @@ fn handle_sub_packet(
                 });
             }
         }
-        op if op == s2c::ITEM_MAX => {
+        s2c::ITEM_MAX => {
             if let Ok(m) =
                 decode::ItemMax::decode(sub.data).inspect_err(|e| warn_decode_err(sub.opcode, e))
             {
@@ -1373,7 +1373,7 @@ fn handle_sub_packet(
                 });
             }
         }
-        op if op == s2c::ITEM_SAME => {
+        s2c::ITEM_SAME => {
             if let Ok(s) =
                 decode::ItemSame::decode(sub.data).inspect_err(|e| warn_decode_err(sub.opcode, e))
             {
@@ -1382,7 +1382,7 @@ fn handle_sub_packet(
                 }
             }
         }
-        op if op == s2c::ITEM_NUM => {
+        s2c::ITEM_NUM => {
             if let Ok(n) =
                 decode::ItemNum::decode(sub.data).inspect_err(|e| warn_decode_err(sub.opcode, e))
             {
@@ -1410,7 +1410,7 @@ fn handle_sub_packet(
                 });
             }
         }
-        op if op == s2c::ITEM_LIST => {
+        s2c::ITEM_LIST => {
             if let Ok(l) =
                 decode::ItemList::decode(sub.data).inspect_err(|e| warn_decode_err(sub.opcode, e))
             {
@@ -1442,7 +1442,7 @@ fn handle_sub_packet(
                 });
             }
         }
-        op if op == s2c::ITEM_ATTR => {
+        s2c::ITEM_ATTR => {
             if let Ok(a) =
                 decode::ItemAttr::decode(sub.data).inspect_err(|e| warn_decode_err(sub.opcode, e))
             {
@@ -1479,10 +1479,10 @@ fn handle_sub_packet(
                 });
             }
         }
-        op if op == s2c::EQUIP_CLEAR => {
+        s2c::EQUIP_CLEAR => {
             let _ = event_tx.send(AgentEvent::EquipCleared);
         }
-        op if op == s2c::EQUIP_LIST => {
+        s2c::EQUIP_LIST => {
             if let Ok(e) =
                 decode::EquipList::decode(sub.data).inspect_err(|e| warn_decode_err(sub.opcode, e))
             {
@@ -1493,14 +1493,14 @@ fn handle_sub_packet(
                 });
             }
         }
-        op if op == s2c::MAGIC_DATA => {
+        s2c::MAGIC_DATA => {
             if let Ok(m) =
                 decode::MagicData::decode(sub.data).inspect_err(|e| warn_decode_err(sub.opcode, e))
             {
                 let _ = event_tx.send(AgentEvent::SpellsKnownUpdated { ids: m.known_ids() });
             }
         }
-        op if op == s2c::COMMAND_DATA => {
+        s2c::COMMAND_DATA => {
             if let Ok(c) = decode::CommandData::decode(sub.data)
                 .inspect_err(|e| warn_decode_err(sub.opcode, e))
             {
@@ -4529,9 +4529,9 @@ fn decode_event_0x034(data: &[u8]) -> Option<crate::state::DialogState> {
 fn event_trigger_ids(sub: &framing::SubPacket<'_>) -> Option<(u32, u16, u16)> {
     use ffxi_proto::map::s2c;
     let dialog = match sub.opcode {
-        op if op == s2c::EVENT => decode_event_0x032(sub.data)?,
-        op if op == s2c::EVENTSTR => decode_event_0x033(sub.data)?,
-        op if op == s2c::EVENTNUM => decode_event_0x034(sub.data)?,
+        s2c::EVENT => decode_event_0x032(sub.data)?,
+        s2c::EVENTSTR => decode_event_0x033(sub.data)?,
+        s2c::EVENTNUM => decode_event_0x034(sub.data)?,
         _ => return None,
     };
     Some((dialog.npc_id, dialog.act_index, dialog.event_para))

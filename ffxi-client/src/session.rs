@@ -3602,13 +3602,21 @@ fn build_subpacket_header(opcode: u16, size_words: u16, sync: u16) -> [u8; 4] {
 
 fn build_subpacket_gameok(sync: u16) -> Vec<u8> {
     let mut buf = vec![0u8; 12];
-    buf[0..4].copy_from_slice(&build_subpacket_header(0x00C, 3, sync));
+    buf[0..4].copy_from_slice(&build_subpacket_header(
+        ffxi_proto::map::c2s::GAMEOK,
+        3,
+        sync,
+    ));
     buf
 }
 
 fn build_subpacket_zone_transition(sync: u16) -> Vec<u8> {
     let mut buf = vec![0u8; 8];
-    buf[0..4].copy_from_slice(&build_subpacket_header(0x011, 2, sync));
+    buf[0..4].copy_from_slice(&build_subpacket_header(
+        ffxi_proto::map::c2s::ZONE_TRANSITION,
+        2,
+        sync,
+    ));
 
     buf[4] = 2;
     buf
@@ -4696,7 +4704,11 @@ pub fn build_subpacket_buffcancel(sync: u16, buff_no: u16) -> Vec<u8> {
 
 pub fn build_subpacket_shop_buy(sync: u16, qty: u32, shop_no: u16, shop_index: u8) -> Vec<u8> {
     let mut buf = vec![0u8; 16];
-    buf[0..4].copy_from_slice(&build_subpacket_header(0x083, 4, sync));
+    buf[0..4].copy_from_slice(&build_subpacket_header(
+        ffxi_proto::map::c2s::SHOP_BUY,
+        4,
+        sync,
+    ));
     buf[4..8].copy_from_slice(&qty.to_le_bytes());
     buf[8..10].copy_from_slice(&shop_no.to_le_bytes());
     buf[10..12].copy_from_slice(&(shop_index as u16).to_le_bytes());
@@ -4710,7 +4722,11 @@ pub fn build_subpacket_shop_buy(sync: u16, qty: u32, shop_no: u16, shop_index: u
 // trade container, and answers with s2c 0x03D SHOP_SELL (0x084_shop_sell_req.cpp).
 pub fn build_subpacket_shop_sell_req(sync: u16, qty: u32, item_no: u16, item_index: u8) -> Vec<u8> {
     let mut buf = vec![0u8; 12];
-    buf[0..4].copy_from_slice(&build_subpacket_header(0x084, 3, sync));
+    buf[0..4].copy_from_slice(&build_subpacket_header(
+        ffxi_proto::map::c2s::SHOP_SELL_REQ,
+        3,
+        sync,
+    ));
     buf[4..8].copy_from_slice(&qty.to_le_bytes());
     buf[8..10].copy_from_slice(&item_no.to_le_bytes());
     buf[10] = item_index;
@@ -4723,7 +4739,11 @@ pub fn build_subpacket_shop_sell_req(sync: u16, qty: u32, item_no: u16, item_ind
 pub fn build_subpacket_shop_sell_set(sync: u16) -> Vec<u8> {
     const SELL_FLAG_CONFIRM: u16 = 1;
     let mut buf = vec![0u8; 8];
-    buf[0..4].copy_from_slice(&build_subpacket_header(0x085, 2, sync));
+    buf[0..4].copy_from_slice(&build_subpacket_header(
+        ffxi_proto::map::c2s::SHOP_SELL_SET,
+        2,
+        sync,
+    ));
     buf[4..6].copy_from_slice(&SELL_FLAG_CONFIRM.to_le_bytes());
     buf
 }
@@ -4956,7 +4976,11 @@ fn build_subpacket_event_end(
     choice: u32,
 ) -> Vec<u8> {
     let mut buf = vec![0u8; 20];
-    buf[0..4].copy_from_slice(&build_subpacket_header(0x05B, 5, sync));
+    buf[0..4].copy_from_slice(&build_subpacket_header(
+        ffxi_proto::map::c2s::EVENT_END,
+        5,
+        sync,
+    ));
     buf[4..8].copy_from_slice(&unique_no.to_le_bytes());
     buf[8..12].copy_from_slice(&choice.to_le_bytes());
     buf[12..14].copy_from_slice(&act_index.to_le_bytes());
@@ -5049,7 +5073,11 @@ pub fn build_subpacket_action(
     kind: &crate::state::ActionKind,
 ) -> Vec<u8> {
     let mut buf = vec![0u8; 28];
-    buf[0..4].copy_from_slice(&build_subpacket_header(0x01A, 7, sync));
+    buf[0..4].copy_from_slice(&build_subpacket_header(
+        ffxi_proto::map::c2s::ACTION,
+        7,
+        sync,
+    ));
     buf[4..8].copy_from_slice(&unique_no.to_le_bytes());
     buf[8..10].copy_from_slice(&act_index.to_le_bytes());
     buf[10..12].copy_from_slice(&kind.action_id().to_le_bytes());
@@ -5598,7 +5626,7 @@ fn build_subpacket_pos(
     face_target: u16,
 ) -> Vec<u8> {
     let mut buf = vec![0u8; 32];
-    buf[0..4].copy_from_slice(&build_subpacket_header(0x015, 8, sync));
+    buf[0..4].copy_from_slice(&build_subpacket_header(ffxi_proto::map::c2s::POS, 8, sync));
     buf[4..8].copy_from_slice(&x.to_le_bytes());
     buf[8..12].copy_from_slice(&z.to_le_bytes());
     buf[12..16].copy_from_slice(&y.to_le_bytes());

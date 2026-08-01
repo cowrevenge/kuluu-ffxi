@@ -757,7 +757,7 @@ mod tests {
         let mut rot = vec![0u8; 16];
         rot[0] = 0x09;
         rot[1] = 0x04;
-        rot[8..12].copy_from_slice(&0.5236f32.to_le_bytes());
+        rot[8..12].copy_from_slice(&std::f32::consts::FRAC_PI_6.to_le_bytes());
         body.extend_from_slice(&rot);
         let mut scl = vec![0u8; 16];
         scl[0] = 0x0F;
@@ -784,7 +784,7 @@ mod tests {
         assert!((m.base_position[2] - 166.0).abs() < 1e-6);
         // 0x80 is the identity tint (research/xim MeshBuffers.kt ByteColor.half).
         assert!((m.tint[3] - 1.0).abs() < 1e-6);
-        assert!((m.rotation[1] - 0.5236).abs() < 1e-6);
+        assert!((m.rotation[1] - std::f32::consts::FRAC_PI_6).abs() < 1e-6);
         assert!((m.scale[0] - 500.0).abs() < 1e-6);
         assert!((m.scale[2] - 500.0).abs() < 1e-6);
         assert!((m.uv_scroll[0] - 0.0006).abs() < 1e-9);

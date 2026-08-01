@@ -12,8 +12,11 @@ use crate::state::{AgentEvent, SessionState};
 use crate::wire_translate::{event_to_viewer_event, state_to_snapshot};
 
 // The session watch signals per folded packet event — far above frame rate in a
-// crowd — so the off-main-thread translator caps itself at the ~120 Hz display
-// ceiling to keep total translate work no higher than the old per-frame path.
+// crowd — so the off-main-thread translator caps itself near the 120 Hz display
+// ceiling. On slower displays this allows up to ~2x the old once-per-frame
+// translate rate (and its watch read-lock pressure on the session folder);
+// accepted because the work left the render thread, and the cap still bounds
+// folder contention (audit of kuluu-4mef).
 const TRANSLATE_MIN_PERIOD: Duration = Duration::from_millis(8);
 
 struct TranslatedSnapshot {
@@ -42,7 +45,13 @@ async fn run_translator(mut state_rx: watch::Receiver<SessionState>, mailbox: Sn
     loop {
         let started = tokio::time::Instant::now();
         let translated = translate_current(&mut state_rx);
-        *mailbox.lock().unwrap_or_else(PoisonError::into_inner) = Some(translated);
+        // Take the overwritten snapshot out before dropping it: its Vec frees
+        // must not run inside the lock the render thread polls every frame.
+        let prev = mailbox
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .replace(translated);
+        drop(prev);
         tokio::time::sleep_until(started + TRANSLATE_MIN_PERIOD).await;
         if state_rx.changed().await.is_err() {
             break;
@@ -55,6 +64,7 @@ pub struct NativeSource {
     mailbox: SnapshotMailbox,
     translator: JoinHandle<()>,
     event_rx: broadcast::Receiver<AgentEvent>,
+    warned_translator_gone: bool,
 
     pub last_rebuild_us: u64,
     pub last_entity_count: usize,
@@ -73,6 +83,7 @@ impl NativeSource {
             mailbox,
             translator,
             event_rx,
+            warned_translator_gone: false,
             last_rebuild_us: 0,
             last_entity_count: 0,
             rebuilds_total: 0,
@@ -92,7 +103,18 @@ impl SceneSource for NativeSource {
             .mailbox
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .take()?;
+            .take();
+        let Some(ready) = ready else {
+            // A dead translator (panic in state_to_snapshot, or session end)
+            // otherwise freezes the viewer on the last scene with no diagnostic.
+            if !self.warned_translator_gone && self.translator.is_finished() {
+                self.warned_translator_gone = true;
+                bevy::log::warn!(
+                    "snapshot translator exited; no further scene updates until reconnect"
+                );
+            }
+            return None;
+        };
         self.last_rebuild_us = ready.rebuild_us;
         self.last_entity_count = ready.snap.entities.len();
         self.rebuilds_total = self.rebuilds_total.wrapping_add(1);
@@ -311,5 +333,32 @@ mod tests {
 
         assert_eq!(translated.snap.entities.len(), expected.entities.len());
         assert_eq!(normalized(*translated.snap), normalized(expected));
+    }
+
+    #[test]
+    fn final_state_is_delivered_after_sender_drops() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("runtime");
+        let (state_tx, state_rx) = watch::channel(populated_state());
+        let mailbox = SnapshotMailbox::default();
+
+        rt.block_on(async {
+            let task = tokio::spawn(run_translator(state_rx, Arc::clone(&mailbox)));
+            state_tx.send_modify(|s| s.zone_id = Some(999));
+            drop(state_tx);
+            tokio::time::timeout(Duration::from_secs(5), task)
+                .await
+                .expect("translator exits after sender drop")
+                .expect("translator did not panic");
+        });
+
+        let last = mailbox
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take()
+            .expect("final snapshot published");
+        assert_eq!(last.snap.zone_id, Some(999), "last unseen state delivered");
     }
 }

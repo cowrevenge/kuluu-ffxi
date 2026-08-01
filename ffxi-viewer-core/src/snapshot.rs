@@ -127,7 +127,9 @@ pub fn ingest_system<
     mut state: ResMut<SceneState>,
     mut events: ResMut<EventLog>,
 ) {
-    state.dirty = false;
+    // Clearing through the tracked ResMut would tick SceneState every frame,
+    // poisoning is_changed()/resource_changed gating for every consumer.
+    state.bypass_change_detection().dirty = false;
 
     if let Some(snap) = source.poll_snapshot() {
         state.snapshot = *snap;
@@ -649,5 +651,50 @@ mod tests {
 
         app.update();
         assert!(!app.world().resource::<SceneState>().dirty);
+    }
+
+    #[test]
+    fn empty_poll_frame_does_not_tick_scene_state() {
+        #[derive(Resource, Default)]
+        struct TestSource {
+            next_snapshot: Option<Box<SceneSnapshot>>,
+        }
+        impl SceneSource for TestSource {
+            fn poll_snapshot(&mut self) -> Option<Box<SceneSnapshot>> {
+                self.next_snapshot.take()
+            }
+            fn drain_deltas(&mut self) -> Vec<SceneDelta> {
+                vec![]
+            }
+            fn drain_events(&mut self) -> Vec<ViewerEvent> {
+                vec![]
+            }
+        }
+        #[derive(Resource, Default)]
+        struct ChangedProbe(bool);
+        fn probe(state: Res<SceneState>, mut p: ResMut<ChangedProbe>) {
+            p.0 = state.is_changed();
+        }
+
+        let mut app = App::new();
+        app.init_resource::<TestSource>();
+        app.init_resource::<SceneState>();
+        app.init_resource::<EventLog>();
+        app.init_resource::<ChangedProbe>();
+        app.add_systems(Update, (ingest_system::<TestSource>, probe).chain());
+
+        app.world_mut().resource_mut::<TestSource>().next_snapshot =
+            Some(Box::new(SceneSnapshot::default()));
+        app.update();
+        assert!(
+            app.world().resource::<ChangedProbe>().0,
+            "snapshot arrival must tick SceneState"
+        );
+
+        app.update();
+        assert!(
+            !app.world().resource::<ChangedProbe>().0,
+            "an empty poll frame must not tick SceneState (dirty clear bypasses change detection)"
+        );
     }
 }

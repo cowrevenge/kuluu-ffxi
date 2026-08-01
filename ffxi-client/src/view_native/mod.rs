@@ -1100,7 +1100,7 @@ fn bridge_connecting(
         });
     }
 
-    commands.insert_resource(NativeSource::new(state_rx, event_rx));
+    commands.insert_resource(NativeSource::new(&runtime.0, state_rx, event_rx));
     commands.insert_resource(CommandTx(cmd_tx));
 
     commands.insert_resource(SessionEventTx(event_tx));

@@ -199,7 +199,7 @@ struct LiveGenerator {
     draw_path: D3mDrawPath,
     // SpriteSheet (0x0E) flipbook frames; empty for a StaticMesh (0x0B) generator. When
     // non-empty each particle picks a frame by life progress in rebuild_mesh (research/xim
-    // Particle.kt:72 spriteSheetIndex advanced over life).
+    // ParticleUpdaters.kt:196-211 SpriteSheetFrameUpdater).
     sprite_frames: Vec<SpriteTemplate>,
     scale_x: Option<KeyFrameTrack>,
     scale_y: Option<KeyFrameTrack>,
@@ -733,9 +733,10 @@ struct ParticleDraw {
 
 fn particle_draw(g: &LiveGenerator, p: &Particle, clock: &CelestialClock) -> ParticleDraw {
     let progress = (p.age_frames / p.life_frames).clamp(0.0, 1.0);
-    // A SpriteSheet particle flipbooks its frames over life (research/xim Particle.kt:72
-    // spriteSheetIndex), except under MoonPhaseSpriteSheetUpdater (0x45), which pins the
-    // frame to the moon phase; a StaticMesh particle keeps its single template.
+    // A SpriteSheet particle flipbooks its frames over life (research/xim
+    // ParticleUpdaters.kt:196-211), except under MoonPhaseSpriteSheetUpdater
+    // (ParticleUpdaters.kt:319-324, opcode 0x45 at ParticleGeneratorParser.kt:444), which pins
+    // the frame to the moon phase; a StaticMesh particle keeps its single template.
     let flipbook_frame = if g.def.moon_phase_sprite {
         clock
             .moon_phase
@@ -1048,8 +1049,8 @@ fn sprite_sheet_templates(ss: &ParticleSpriteSheet) -> Vec<SpriteTemplate> {
         .collect()
 }
 
-// research/xim Particle.kt:72 — the spriteSheetIndex advances the flipbook across the
-// particle's lifetime. StaticMesh particles carry no frames and use the single template.
+// research/xim ParticleUpdaters.kt:196-211 — the spriteSheetIndex advances the flipbook across
+// the particle's lifetime. StaticMesh particles carry no frames and use the single template.
 fn flipbook_index(g: &LiveGenerator, progress: f32) -> usize {
     let n = g.sprite_frames.len();
     if n == 0 {
@@ -1639,7 +1640,10 @@ mod tests {
         // An infinite life pins life progress at 0, which is what keeps a keyframe-tracked
         // channel on the curve's opening value instead of racing to its end.
         let draw = particle_draw(&g, &g.particles[0], &CelestialClock::default());
-        assert!(draw.rgb.is_finite(), "infinite life must not poison the draw");
+        assert!(
+            draw.rgb.is_finite(),
+            "infinite life must not poison the draw"
+        );
     }
 
     #[test]

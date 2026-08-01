@@ -67,14 +67,6 @@ pub struct SunSprite {
     pub frame_uv: Vec4,
 }
 
-// FFXI authors moon alpha in the top nibble (0x80 == opaque); expand to 0..=255.
-// Inlined rather than reusing zone_texture::ffxi_alpha_remap because that module
-// is compiled out on wasm.
-#[inline]
-fn alpha_remap(raw: u8) -> u8 {
-    ((raw >> 4) as f32 * 255.0 / 8.0).min(255.0) as u8
-}
-
 impl Material for MoonMaterial {
     fn fragment_shader() -> ShaderRef {
         "embedded://ffxi_viewer_core/moon.wgsl".into()
@@ -169,9 +161,7 @@ fn load_moon_sprite_sheet(
     };
 
     let mut rgba = sheet.texture.rgba;
-    for px in rgba.chunks_exact_mut(4) {
-        px[3] = alpha_remap(px[3]);
-    }
+    ffxi_dat::texture::apply_ffxi_alpha_remap(&mut rgba);
     let mut image = Image::new(
         Extent3d {
             width: sheet.texture.width,

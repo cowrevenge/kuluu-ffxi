@@ -5,15 +5,7 @@ use bevy::image::{Image, ImageAddressMode, ImageFilterMode, ImageSampler, ImageS
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use ffxi_dat::texture::DecodedTexture;
 
-/// FFXI authors texture alpha in the top nibble (the DXT "bc2/8" convention from
-/// Lotus/AltanaViewer); expand it to the full 0..=255 range. Raw alpha < 16 maps
-/// to 0 (fully transparent), so `remap(raw) == 0  <=>  raw < 16`.
-#[inline]
-pub fn ffxi_alpha_remap(raw: u8) -> u8 {
-    let bc2 = (raw >> 4) as f32;
-    let scaled = bc2 * 255.0 / 8.0;
-    scaled.min(255.0).round() as u8
-}
+pub use ffxi_dat::texture::ffxi_alpha_remap;
 
 /// Raw decoded alpha below this becomes fully transparent after [`ffxi_alpha_remap`].
 const CUTOUT_ALPHA_RAW: u8 = 16;

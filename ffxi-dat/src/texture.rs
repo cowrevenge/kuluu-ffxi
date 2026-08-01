@@ -31,6 +31,25 @@ pub struct DecodedTexture {
     pub rgba: Vec<u8>,
 }
 
+/// FFXI authors texture alpha in the top nibble (the DXT "bc2/8" convention from
+/// Lotus/AltanaViewer), so a fully opaque texel decodes as 0x80, not 0xFF. Expand it to
+/// the full range. Raw alpha < 16 maps to 0, so `ffxi_alpha_remap(raw) == 0 <=> raw < 16`.
+///
+/// Every consumer of a decoded texture's alpha has to apply this — a moon sprite whose
+/// alpha peaks at 0x88 draws at half its authored opacity otherwise.
+#[inline]
+pub fn ffxi_alpha_remap(raw: u8) -> u8 {
+    let bc2 = (raw >> 4) as f32;
+    (bc2 * 255.0 / 8.0).min(255.0).round() as u8
+}
+
+/// Apply [`ffxi_alpha_remap`] across an RGBA buffer in place.
+pub fn apply_ffxi_alpha_remap(rgba: &mut [u8]) {
+    for px in rgba.chunks_exact_mut(4) {
+        px[3] = ffxi_alpha_remap(px[3]);
+    }
+}
+
 fn token(raw: &[u8]) -> String {
     let s: String = raw
         .iter()
@@ -77,8 +96,8 @@ mod imginfo {
 
     pub(super) const FLG_PALETTE: u8 = 0x91;
 
-    // research/xim TextureSection.kt:60-72 — 0xB1 repeats 0x91's palettised layout with one
-    // extra header word, which is why its palette/pixel offsets sit 4 bytes later.
+    // research/xim TextureSection.kt:54-61, :73-79 — 0xB1 repeats 0x91's palettised layout with
+    // one extra header word, which is why its palette/pixel offsets sit 4 bytes later.
     pub(super) const FLG_PALETTE_EXT: u8 = 0xB1;
 
     // research/xim TextureSection.kt:28-33 rejects every other type byte outright, so these are
@@ -478,6 +497,33 @@ pub fn decode_argb_raw(
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    // Emitter/consumer coupling guard: zone_texture, moon_material and the particle texture
+    // path all read alpha out of the same decoded buffer, so the top-nibble expansion has to
+    // be one function. 0x80 is FFXI's "opaque" and must reach 0xFF, or an additive sprite
+    // (Bevy blends Add by src alpha) draws at half its authored strength.
+    #[test]
+    fn ffxi_alpha_remap_expands_the_top_nibble() {
+        assert_eq!(ffxi_alpha_remap(0x00), 0);
+        assert_eq!(ffxi_alpha_remap(0x0F), 0, "raw < 16 is fully transparent");
+        assert_eq!(ffxi_alpha_remap(0x80), 255, "0x80 is FFXI-opaque");
+        assert_eq!(
+            ffxi_alpha_remap(0x88),
+            255,
+            "the real moon sheet peaks at 0x88"
+        );
+        assert_eq!(ffxi_alpha_remap(0xFF), 255);
+        for raw in 0..=254u8 {
+            assert!(ffxi_alpha_remap(raw) <= ffxi_alpha_remap(raw + 1));
+        }
+    }
+
+    #[test]
+    fn apply_ffxi_alpha_remap_touches_only_alpha() {
+        let mut rgba = vec![10, 20, 30, 0x80, 40, 50, 60, 0x00];
+        apply_ffxi_alpha_remap(&mut rgba);
+        assert_eq!(rgba, vec![10, 20, 30, 255, 40, 50, 60, 0]);
+    }
 
     // File 3020 (Poison) carries the 16 bytes `venom1  fir     ` in both its 0xA1 Img and its
     // 0x21 sprite sheet. research/xim DatResource.kt:312-315 splits that into namespace/local.

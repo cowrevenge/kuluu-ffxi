@@ -45,6 +45,8 @@ pub fn d3m_to_mesh(d3m: &D3m) -> Mesh {
 pub fn decoded_texture_to_image(t: &ffxi_dat::texture::DecodedTexture) -> Image {
     use bevy::image::{ImageAddressMode, ImageSampler, ImageSamplerDescriptor};
     use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
+    let mut rgba = t.rgba.clone();
+    ffxi_dat::texture::apply_ffxi_alpha_remap(&mut rgba);
     let mut image = Image::new(
         Extent3d {
             width: t.width,
@@ -52,7 +54,7 @@ pub fn decoded_texture_to_image(t: &ffxi_dat::texture::DecodedTexture) -> Image 
             depth_or_array_layers: 1,
         },
         TextureDimension::D2,
-        t.rgba.clone(),
+        rgba,
         TextureFormat::Rgba8UnormSrgb,
         RenderAssetUsages::default(),
     );

@@ -10,15 +10,46 @@ use ffxi_viewer_wire::EntityKind;
 
 use crate::camera::{nameplate_anchor_y, CameraMode, OperatorCamera};
 use crate::components::{InGameEntity, Nameplate, WorldEntity};
-use crate::scene::BakedActor;
+use crate::scene::{BakedActor, Target};
+// Retail advances the targeted-nameplate pulse once per rendered frame.
+use crate::scheduler_runtime::RETAIL_FPS;
 use crate::snapshot::SceneState;
 
 const NAME_PX: f32 = 64.0;
 
-const QUAD_BASE_WIDTH_YALMS: f32 = 1.1;
+// research/XIClient/src/XIClient/source/Game/GameManager.cpp:798-799 — retail's clip planes
+// are fixed, so the nameplate ramp below must not read our camera's user-tunable projection.
+const RETAIL_NEAR_CLIP_YALMS: f32 = 0.1;
+const RETAIL_FAR_CLIP_YALMS: f32 = 65535.0;
 
-const MAX_QUAD_WIDTH_YALMS: f32 = 1.4;
-const MIN_QUAD_WIDTH_YALMS: f32 = 0.8;
+// research/XIClient/src/XIClient/source/Rendering/Active/CXiActorNameDraw.cpp:75
+const NDC_DEPTH_FIXED_POINT_SCALE: u32 = 4096;
+// research/XIClient/src/XIClient/source/Rendering/Active/CXiActorNameDraw.cpp:261-262 rejects
+// z >= 1.0, so the deepest drawable fixed-point depth is one step short of the scale.
+const MAX_DRAWABLE_DEPTH_FIXED: u32 = NDC_DEPTH_FIXED_POINT_SCALE - 1;
+// research/XIClient/src/XIClient/source/Rendering/Active/CXiActorNameDraw.cpp:90-91
+const FADE_START_DEPTH_FIXED: u32 = 0xFB4;
+const FADE_END_DEPTH_FIXED: u32 = 0x1004;
+// research/XIClient/src/XIClient/source/Rendering/Active/CXiActorNameDraw.cpp:72-73 — the
+// reciprocal-w gate (1/depth < 1) drops names inside one yalm of the view plane.
+const MIN_VIEW_DEPTH_YALMS: f32 = 1.0;
+
+// research/XIClient/src/XIClient/source/Rendering/Active/CXiActorNameDraw.cpp:31 — glyph units
+// to viewport fraction, applied to a pre-transformed (RHW=1) screen-space quad.
+const NAME_SCREEN_SCALE: f32 = 0.002_343_75;
+// research/XIClient/src/XIClient/source/Rendering/Active/CXiActorNameDraw.cpp:35 — one name
+// line is one glyph cell tall.
+const NAME_LINE_HEIGHT_UNITS: f32 = 8.0;
+const NAME_LINE_SCREEN_FRACTION: f32 = NAME_SCREEN_SCALE * NAME_LINE_HEIGHT_UNITS;
+
+// research/XIClient/src/XIClient/source/Rendering/Active/CXiActorNameDraw.cpp:111-112
+const TARGET_PULSE_DEGREES_PER_FRAME: u32 = 16;
+const FULL_TURN_DEGREES: u32 = 360;
+const TARGET_PULSE_AMPLITUDE: f32 = 32.0;
+const TARGET_PULSE_BIAS: f32 = 96.0;
+// research/XIClient/src/XIClient/source/Rendering/Active/CXiActorNameDraw.cpp:115 repacks
+// the product as `(scaledAlpha & 0xFFFFFF80) << 17`, i.e. a shift right by 7.
+const TARGET_PULSE_DIVISOR: f32 = 128.0;
 
 const OUTLINE_RADIUS_PX: i32 = 3;
 
@@ -53,6 +84,8 @@ pub struct NameplateBillboard {
     pub last_color: [u8; 4],
 
     pub last_hp: Option<u8>,
+
+    pub last_alpha: f32,
 }
 
 #[derive(Component)]
@@ -103,6 +136,7 @@ pub fn spawn_nameplate_billboard(
                 last_rendered: name.to_string(),
                 last_color: rgba,
                 last_hp: None,
+                last_alpha: 1.0,
             },
             BillboardAspect {
                 width: aspect.0,
@@ -155,7 +189,9 @@ pub fn format_billboard_label(base_name: &str, _hp_pct: Option<u8>, _kind: Entit
 pub fn update_nameplate_billboards_system(
     state: Res<SceneState>,
     camera_mode: Res<CameraMode>,
-    cam_q: Query<&Transform, (With<OperatorCamera>, Without<NameplateBillboard>)>,
+    time: Res<Time>,
+    target: Res<Target>,
+    cam_q: Query<(&Transform, &Projection), (With<OperatorCamera>, Without<NameplateBillboard>)>,
     world_q: Query<(&Transform, &WorldEntity, Option<&BakedActor>), Without<NameplateBillboard>>,
     mut billboards: Query<(
         Entity,
@@ -170,8 +206,17 @@ pub fn update_nameplate_billboards_system(
     font: Res<BillboardFont>,
     mut commands: Commands,
 ) {
-    let Ok(cam_t) = cam_q.single() else { return };
+    let Ok((cam_t, projection)) = cam_q.single() else {
+        return;
+    };
+    let Projection::Perspective(perspective) = projection else {
+        return;
+    };
     let cam_pos = cam_t.translation;
+    let cam_forward = Vec3::from(cam_t.forward());
+    let half_fov_tan = (perspective.fov * 0.5).tan();
+    let line_px = text_line_height_px(&font.0, NAME_PX) as f32;
+    let pulse_frame = (time.elapsed_secs() * RETAIL_FPS) as u32;
 
     let mut pos_by_id: std::collections::HashMap<u32, (Vec3, f32)> =
         std::collections::HashMap::with_capacity(world_q.iter().len());
@@ -199,26 +244,35 @@ pub fn update_nameplate_billboards_system(
         };
 
         let head_pos = entity_pos + Vec3::Y * head_y_offset;
-        let to_cam = cam_pos - head_pos;
-        let distance = to_cam.length();
-        if distance < 0.001 {
+        let view_depth = (head_pos - cam_pos).dot(cam_forward);
+        let Some(scale) = scale_for_view_depth(view_depth) else {
             *vis = Visibility::Hidden;
             continue;
-        }
-
-        let yaw = to_cam.x.atan2(to_cam.z);
-        let rotation = Quat::from_rotation_y(yaw);
+        };
 
         let aspect_ratio = aspect.width.max(1) as f32 / aspect.height.max(1) as f32;
-        let scale = distance_to_scale(distance);
-        let world_width =
-            (QUAD_BASE_WIDTH_YALMS * scale).clamp(MIN_QUAD_WIDTH_YALMS, MAX_QUAD_WIDTH_YALMS);
-        let world_height = world_width / aspect_ratio.max(0.01);
+        let plate_to_line = aspect.height.max(1) as f32 / line_px;
+        let viewport_height_yalms = 2.0 * view_depth * half_fov_tan;
+        let world_height =
+            viewport_height_yalms * NAME_LINE_SCREEN_FRACTION * plate_to_line * scale;
+        let world_width = world_height * aspect_ratio;
 
         transform.translation = head_pos;
-        transform.rotation = rotation;
+        transform.rotation = cam_t.rotation;
         transform.scale = Vec3::new(world_width, world_height, 1.0);
         *vis = Visibility::Visible;
+
+        let want_alpha = if target.id == Some(np.entity_id) {
+            target_alpha_pulse(pulse_frame)
+        } else {
+            1.0
+        };
+        if want_alpha != np.last_alpha {
+            if let Some(mut mat_data) = materials.get_mut(&mat.0) {
+                mat_data.base_color = Color::WHITE.with_alpha(want_alpha);
+                np.last_alpha = want_alpha;
+            }
+        }
 
         let engaged = matches!(np.kind, EntityKind::Mob)
             && self_char_id.is_some_and(|cid| {
@@ -255,8 +309,42 @@ pub fn update_nameplate_billboards_system(
     }
 }
 
-pub fn distance_to_scale(distance_yalms: f32) -> f32 {
-    1.0 / (1.0 + distance_yalms * 0.03)
+pub fn view_depth_to_fixed_point(view_depth_yalms: f32) -> Option<u32> {
+    if view_depth_yalms <= MIN_VIEW_DEPTH_YALMS {
+        return None;
+    }
+    let z_ndc = RETAIL_FAR_CLIP_YALMS / (RETAIL_FAR_CLIP_YALMS - RETAIL_NEAR_CLIP_YALMS)
+        * (1.0 - RETAIL_NEAR_CLIP_YALMS / view_depth_yalms);
+    if z_ndc < 0.0 {
+        return None;
+    }
+    let depth_fixed = (z_ndc * NDC_DEPTH_FIXED_POINT_SCALE as f32) as u32;
+    (depth_fixed <= MAX_DRAWABLE_DEPTH_FIXED).then_some(depth_fixed)
+}
+
+pub fn scale_for_view_depth(view_depth_yalms: f32) -> Option<f32> {
+    let depth_fixed = view_depth_to_fixed_point(view_depth_yalms)?;
+    if depth_fixed > FADE_END_DEPTH_FIXED {
+        return None;
+    }
+    if depth_fixed < FADE_START_DEPTH_FIXED {
+        return Some(1.0);
+    }
+    Some(
+        (FADE_END_DEPTH_FIXED - depth_fixed) as f32
+            / (FADE_END_DEPTH_FIXED - FADE_START_DEPTH_FIXED) as f32,
+    )
+}
+
+pub fn target_alpha_pulse(frame: u32) -> f32 {
+    let angle_deg = frame.wrapping_mul(TARGET_PULSE_DEGREES_PER_FRAME) % FULL_TURN_DEGREES;
+    ((angle_deg as f32).to_radians().sin() * TARGET_PULSE_AMPLITUDE + TARGET_PULSE_BIAS)
+        / TARGET_PULSE_DIVISOR
+}
+
+fn text_line_height_px(font: &FontArc, px: f32) -> u32 {
+    let scaled = font.as_scaled(PxScale::from(px));
+    (scaled.ascent() - scaled.descent()).ceil().max(1.0) as u32
 }
 
 fn rasterize_text_to_image(
@@ -269,8 +357,7 @@ fn rasterize_text_to_image(
     let scale = PxScale::from(px);
     let scaled = font.as_scaled(scale);
     let ascent = scaled.ascent();
-    let descent = scaled.descent();
-    let line_h = (ascent - descent).ceil().max(1.0) as u32;
+    let line_h = text_line_height_px(font, px);
 
     let mut pen_x = 0.0_f32;
     let mut max_x = 0.0_f32;
@@ -485,5 +572,116 @@ mod tests {
     fn other_plates_visible_in_both_camera_modes() {
         assert!(!self_plate_hidden(false, CameraMode::FirstPerson));
         assert!(!self_plate_hidden(false, CameraMode::Chase));
+    }
+
+    const SCALE_EPSILON: f32 = 1e-5;
+    // The deepest drawable plate: (0x1004 - 4095) / 80.
+    const SCALE_FLOOR: f32 = 0.0625;
+
+    #[test]
+    fn scale_ramp_matches_retail_depth_table() {
+        let table = [
+            (3.0_f32, 1.0_f32),
+            (5.0, 1.0),
+            (5.38, 1.0),
+            (5.5, 0.9875),
+            (10.0, 0.5625),
+            (20.0, 0.3125),
+            (50.0, 0.1625),
+            (100.0, 0.1125),
+            (500.0, SCALE_FLOOR),
+            (5000.0, SCALE_FLOOR),
+        ];
+        for (depth, want) in table {
+            let got = scale_for_view_depth(depth).expect("depth is inside the drawable range");
+            assert!(
+                (got - want).abs() < SCALE_EPSILON,
+                "depth {depth}: got {got}, want {want}"
+            );
+        }
+    }
+
+    #[test]
+    fn plateau_ends_at_the_fade_start_depth() {
+        assert_eq!(
+            view_depth_to_fixed_point(5.38),
+            Some(FADE_START_DEPTH_FIXED - 1)
+        );
+        assert_eq!(view_depth_to_fixed_point(5.4), Some(FADE_START_DEPTH_FIXED));
+        assert_eq!(scale_for_view_depth(5.38), Some(1.0));
+        assert_eq!(scale_for_view_depth(5.4), Some(1.0));
+        assert!(scale_for_view_depth(5.5).unwrap() < 1.0);
+    }
+
+    #[test]
+    fn deepest_drawable_plate_sits_on_the_floor() {
+        assert_eq!(
+            view_depth_to_fixed_point(5000.0),
+            Some(MAX_DRAWABLE_DEPTH_FIXED)
+        );
+        let floor = (FADE_END_DEPTH_FIXED - MAX_DRAWABLE_DEPTH_FIXED) as f32
+            / (FADE_END_DEPTH_FIXED - FADE_START_DEPTH_FIXED) as f32;
+        assert!((floor - SCALE_FLOOR).abs() < SCALE_EPSILON);
+    }
+
+    #[test]
+    fn plates_inside_one_yalm_of_the_view_plane_are_dropped() {
+        assert_eq!(scale_for_view_depth(1.0), None);
+        assert_eq!(scale_for_view_depth(0.5), None);
+        assert_eq!(scale_for_view_depth(-10.0), None);
+    }
+
+    #[test]
+    fn plates_past_the_far_clip_are_dropped() {
+        assert_eq!(scale_for_view_depth(1.0e6), None);
+    }
+
+    #[test]
+    fn scale_never_grows_with_depth() {
+        let mut prev = 1.0_f32;
+        for step in 2..2000 {
+            let depth = step as f32 * 0.5;
+            let Some(scale) = scale_for_view_depth(depth) else {
+                continue;
+            };
+            assert!(scale <= prev + SCALE_EPSILON, "depth {depth} scaled up");
+            assert!(
+                scale >= SCALE_FLOOR - SCALE_EPSILON,
+                "depth {depth} below floor"
+            );
+            prev = scale;
+        }
+    }
+
+    #[test]
+    fn target_alpha_pulse_breathes_between_half_and_full() {
+        let trough = (TARGET_PULSE_BIAS - TARGET_PULSE_AMPLITUDE) / TARGET_PULSE_DIVISOR;
+        let crest = (TARGET_PULSE_BIAS + TARGET_PULSE_AMPLITUDE) / TARGET_PULSE_DIVISOR;
+        for frame in 0..FULL_TURN_DEGREES {
+            let alpha = target_alpha_pulse(frame);
+            assert!((trough..=crest).contains(&alpha), "frame {frame}: {alpha}");
+        }
+        assert!(
+            (target_alpha_pulse(0) - TARGET_PULSE_BIAS / TARGET_PULSE_DIVISOR).abs()
+                < SCALE_EPSILON
+        );
+    }
+
+    #[test]
+    fn target_alpha_pulse_period_is_a_full_turn_of_frames() {
+        fn gcd(a: u32, b: u32) -> u32 {
+            if b == 0 {
+                a
+            } else {
+                gcd(b, a % b)
+            }
+        }
+        let period = FULL_TURN_DEGREES / gcd(FULL_TURN_DEGREES, TARGET_PULSE_DEGREES_PER_FRAME);
+        for frame in 0..period {
+            assert_eq!(
+                target_alpha_pulse(frame),
+                target_alpha_pulse(frame + period)
+            );
+        }
     }
 }

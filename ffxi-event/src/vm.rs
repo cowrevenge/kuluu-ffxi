@@ -3,12 +3,15 @@ use ffxi_dat::event_dat::EventBlock;
 use crate::opcode_meta::OPCODE_META;
 
 /// A message the VM asked to display: dialog string `message_id` from the zone
-/// dialog DAT ([`ffxi_dat::dmsg::StringDat`]), spoken by the entity at
-/// `speaker_index` (the event's `EntityTargetIndex[1]`).
+/// dialog DAT ([`ffxi_dat::dmsg::StringDat`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EventMessage {
     pub message_id: u32,
-    pub speaker_index: u16,
+    /// Entity whose name prefixes the line — retail's `EventMessDecodePutMoute`
+    /// name argument, `MESCASNAMEINDEX`/`MESTARNAMEINDEX`. `None` for the
+    /// speakerless message opcodes, which print through `EventMessDecodePut`
+    /// with no name (research/XiEvents/OpCodes/0x0048.md, 0x0049.md).
+    pub speaker_index: Option<u16>,
     /// The event's numeric parameters (`num[8]` from the 0x33/0x34 trigger
     /// packet), consumed by the dialog string's parameterized control codes:
     /// `{Num:N}` prints `params[N]`, `{Choice:N}[a/b/…]` selects alternative
@@ -33,8 +36,9 @@ pub struct EventChoice {
 /// tick: opcodes execute until `RetFlag`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StepResult {
-    /// A message was shown (0x1D) and the VM is blocked on MESWAIT (0x23). The
-    /// host displays it, then calls [`EventVm::dismiss_message`] + [`EventVm::step`].
+    /// A message was shown (0x1D/0x2B/0x48/0x49/0xB0) and the VM is blocked on
+    /// MESWAIT (0x23). The host displays it, then calls
+    /// [`EventVm::dismiss_message`] + [`EventVm::step`].
     AwaitMessage(EventMessage),
     /// MESWAIT reached with no fresh message (a dialog is still open).
     AwaitMessageAck,
@@ -58,6 +62,10 @@ const OP_WAIT: u8 = 0x1C;
 const OP_JUMP: u8 = 0x1A;
 const OP_RETURN: u8 = 0x1B;
 pub(crate) const OP_MESSAGE: u8 = 0x1D;
+const OP_MESSAGE_ACTOR: u8 = 0x2B;
+const OP_MESSAGE_UNNAMED: u8 = 0x48;
+const OP_MESSAGE_UNNAMED_ACTOR: u8 = 0x49;
+const OP_MESSAGE_ACTOR_PAIR: u8 = 0xB0;
 const OP_EXECEND: u8 = 0x21;
 pub(crate) const OP_MESWAIT: u8 = 0x23;
 pub(crate) const OP_QUERY: u8 = 0x24;
@@ -79,6 +87,25 @@ const MESSAGE_OPEN_AWAITING: u8 = 1;
 // CliEventMessOpenFlag = 2 is the invalid-open state MESWAIT force-cancels on
 // (XiEvents OpCodes/0x0023.md).
 const MESSAGE_OPEN_INVALID: u8 = 2;
+
+// Operand offsets from the opcode byte, per research/XiEvents/OpCodes/*.md.
+const MESSAGE_ID_OFS: usize = 1; // 0x001D, 0x0048
+const ACTOR_LOOKUP_OFS: usize = 1; // 0x002B, 0x0049
+const ACTOR_MESSAGE_ID_OFS: usize = 5; // 0x002B, 0x0049
+const ACTOR_PAIR_STALL_FLAG_OFS: usize = 1; // 0x00B0
+const ACTOR_PAIR_SPEAKER_OFS: usize = 2;
+// The listener at +6 selects the mouth-animation entity; unread until the
+// renderer models lip-sync (research/XiEvents/OpCodes/0x00B0.md).
+const ACTOR_PAIR_MESSAGE_ID_OFS: usize = 10;
+
+/// `XiEvent::GetActorIndex` reserved lookup values (research/XiEvents/Event VM
+/// Functions.md): 0x7FFFFFC0 local player, …C1–…D1 party/alliance slots,
+/// …F8 the event entity, …F9/…F0 the local player again.
+const ACTOR_LOOKUP_RESERVED: std::ops::RangeInclusive<u32> = 0x7FFF_FFC0..=0x7FFF_FFF9;
+/// A lookup with any high byte set is a literal entity server id, whose low
+/// bits are the target index — `val & 0x3FF` (same doc, default handler).
+const ACTOR_LOOKUP_SERVER_ID_MASK: u32 = 0xFF00_0000;
+const ACTOR_LOOKUP_TARGET_INDEX_MASK: u32 = 0x3FF;
 
 const WORK_LOCAL_LEN: usize = 80;
 const WORK_ZONE_LEN: usize = 96;
@@ -278,14 +305,41 @@ impl EventVm {
                     self.exec_pointer = self.jump_table[self.jump_index] as usize;
                 }
                 OP_MESSAGE => {
-                    let message_id = self.getworkofs(1, 0) as u32;
-                    self.message_open = MESSAGE_OPEN_AWAITING;
-                    self.pending_message = Some(EventMessage {
-                        message_id,
-                        speaker_index: self.speaker_index,
-                        params: self.params.clone(),
-                    });
-                    self.exec_pointer += 3;
+                    let message_id = self.getworkofs(MESSAGE_ID_OFS, 0) as u32;
+                    self.open_message(message_id, Some(self.speaker_index));
+                    self.advance(op);
+                }
+                OP_MESSAGE_ACTOR => {
+                    let speaker = self.actor_index(self.eventgetcode2(ACTOR_LOOKUP_OFS));
+                    let message_id = self.getworkofs(ACTOR_MESSAGE_ID_OFS, 0) as u32;
+                    self.open_message(message_id, Some(speaker));
+                    self.advance(op);
+                }
+                OP_MESSAGE_UNNAMED => {
+                    let message_id = self.getworkofs(MESSAGE_ID_OFS, 0) as u32;
+                    self.open_message(message_id, None);
+                    self.advance(op);
+                }
+                // 0x49 resolves an actor into MESCASNAMEINDEX/MESTARNAMEINDEX but
+                // prints through the nameless EventMessDecodePut, so the line
+                // carries no speaker (research/XiEvents/OpCodes/0x0049.md).
+                OP_MESSAGE_UNNAMED_ACTOR => {
+                    let message_id = self.getworkofs(ACTOR_MESSAGE_ID_OFS, 0) as u32;
+                    self.open_message(message_id, None);
+                    self.advance(op);
+                }
+                OP_MESSAGE_ACTOR_PAIR => {
+                    // Retail returns from the handler without advancing when this
+                    // byte is set — a hang unless it is always 0, so treat a set
+                    // byte as bytecode we cannot run
+                    // (research/XiEvents/OpCodes/0x00B0.md).
+                    if self.byte_at(ACTOR_PAIR_STALL_FLAG_OFS) != 0 {
+                        return StepResult::Unimplemented(op);
+                    }
+                    let speaker = self.actor_index(self.eventgetcode2(ACTOR_PAIR_SPEAKER_OFS));
+                    let message_id = self.getworkofs(ACTOR_PAIR_MESSAGE_ID_OFS, 0) as u32;
+                    self.open_message(message_id, Some(speaker));
+                    self.advance(op);
                 }
                 OP_MESWAIT => match self.message_open {
                     MESSAGE_OPEN_NONE => self.exec_pointer += 1,
@@ -352,6 +406,70 @@ impl EventVm {
         }
     }
 
+    fn advance(&mut self, op: u8) {
+        self.exec_pointer += OPCODE_META[op as usize].size as usize;
+    }
+
+    /// Set `CliEventMessOpenFlag` and hold the message for the MESWAIT (0x23)
+    /// that yields it — the shape every message opcode shares.
+    fn open_message(&mut self, message_id: u32, speaker_index: Option<u16>) {
+        self.message_open = MESSAGE_OPEN_AWAITING;
+        self.pending_message = Some(EventMessage {
+            message_id,
+            speaker_index,
+            params: self.params.clone(),
+        });
+    }
+
+    /// `XiEvent::GetActorIndex` (research/XiEvents/Event VM Functions.md): the
+    /// target index a baked entity lookup selects. The reserved lookups index a
+    /// host entity table (local player, party slots) this dialog-only VM does
+    /// not model, so they resolve to the event entity; retail instead drops the
+    /// whole line when a lookup fails, which is the failure mode this VM exists
+    /// to avoid.
+    fn actor_index(&self, lookup: u32) -> u16 {
+        if !ACTOR_LOOKUP_RESERVED.contains(&lookup) && lookup & ACTOR_LOOKUP_SERVER_ID_MASK != 0 {
+            return (lookup & ACTOR_LOOKUP_TARGET_INDEX_MASK) as u16;
+        }
+        self.speaker_index
+    }
+
+    fn byte_at(&self, index: usize) -> u8 {
+        self.event_data
+            .get(self.exec_pointer + index)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// `XiEvent::eventgetcode2`: little-endian u32 at `ExecPointer + index`
+    /// (research/XiEvents/Event VM Functions.md). Out-of-bounds bytes read 0 and
+    /// are counted like [`Self::eventgetcode`]'s.
+    fn eventgetcode2(&self, index: usize) -> u32 {
+        let at = self.exec_pointer + index;
+        if at + 3 >= self.event_data.len() {
+            self.count_oob_read(at);
+        }
+        u32::from_le_bytes([
+            self.byte_at(index),
+            self.byte_at(index + 1),
+            self.byte_at(index + 2),
+            self.byte_at(index + 3),
+        ])
+    }
+
+    fn count_oob_read(&self, at: usize) {
+        let seen = self.oob_reads.get();
+        self.oob_reads.set(seen.saturating_add(1));
+        if seen == 0 {
+            tracing::debug!(
+                at,
+                bytecode_len = self.event_data.len(),
+                "operand read past end of bytecode (yields 0; \
+                 further out-of-bounds reads counted, not logged)"
+            );
+        }
+    }
+
     /// `XiEvent::eventgetcode`: little-endian u16 at `ExecPointer + index`.
     /// Reads past the end of the bytecode yield 0 (retail reads unchecked
     /// memory; 0 is our deterministic stand-in) — they are counted in
@@ -359,20 +477,9 @@ impl EventVm {
     fn eventgetcode(&self, index: usize) -> u16 {
         let at = self.exec_pointer + index;
         if at + 1 >= self.event_data.len() {
-            let seen = self.oob_reads.get();
-            self.oob_reads.set(seen.saturating_add(1));
-            if seen == 0 {
-                tracing::debug!(
-                    at,
-                    bytecode_len = self.event_data.len(),
-                    "eventgetcode read past end of bytecode (yields 0; \
-                     further out-of-bounds reads counted, not logged)"
-                );
-            }
+            self.count_oob_read(at);
         }
-        let lo = self.event_data.get(at).copied().unwrap_or(0);
-        let hi = self.event_data.get(at + 1).copied().unwrap_or(0);
-        u16::from_le_bytes([lo, hi])
+        u16::from_le_bytes([self.byte_at(index), self.byte_at(index + 1)])
     }
 
     /// `XiEvent::getworkofs`: route a bytecode value to its backing store. Only
@@ -448,12 +555,7 @@ impl EventVm {
 
     /// `XiEvent::CodeIF` (0x0002): conditional branch with 11 comparison kinds.
     fn op_if(&mut self) {
-        let kind = self
-            .event_data
-            .get(self.exec_pointer + 5)
-            .copied()
-            .unwrap_or(0)
-            & 0x0F;
+        let kind = self.byte_at(5) & 0x0F;
         let target = self.eventgetcode(6) as usize;
         let v1 = self.getworkofs(1, 0);
         let v2 = self.getworkofs(3, 0);
@@ -585,7 +687,7 @@ mod tests {
             e.step(),
             StepResult::AwaitMessage(EventMessage {
                 message_id: 900,
-                speaker_index: 5,
+                speaker_index: Some(5),
                 params: vec![],
             })
         );
@@ -619,7 +721,7 @@ mod tests {
             e.step(),
             StepResult::AwaitMessage(EventMessage {
                 message_id: 900,
-                speaker_index: 5,
+                speaker_index: Some(5),
                 params: params.clone(),
             })
         );
@@ -643,7 +745,7 @@ mod tests {
             e.step(),
             StepResult::AwaitMessage(EventMessage {
                 message_id: 0,
-                speaker_index: 5,
+                speaker_index: Some(5),
                 params: vec![],
             })
         );
@@ -769,7 +871,7 @@ mod tests {
             e.step(),
             StepResult::AwaitMessage(EventMessage {
                 message_id: 55,
-                speaker_index: 5,
+                speaker_index: Some(5),
                 params: vec![],
             })
         );
@@ -817,7 +919,7 @@ mod tests {
             e.step(),
             StepResult::AwaitMessage(EventMessage {
                 message_id: 8,
-                speaker_index: 5,
+                speaker_index: Some(5),
                 params: vec![],
             })
         );
@@ -854,5 +956,141 @@ mod tests {
         e.select_choice(Some(1)); // work_zone[0] = 1, matching ref2
         assert_eq!(e.step(), StepResult::Done);
         assert_eq!(e.exec_pointer(), 19);
+    }
+
+    /// Server id of a synthetic NPC; `& 0x3FF` is its target index.
+    const NPC_SERVER_ID: u32 = 0x0100_02C5;
+    const NPC_TARGET_INDEX: u16 = 0x2C5;
+    /// `XiEvent::GetActorIndex` lookup selecting the event entity
+    /// (research/XiEvents/Event VM Functions.md).
+    const LOOKUP_EVENT_ENTITY: u32 = 0x7FFF_FFF8;
+    /// References[0] in the message tests below.
+    const MSG_ID: u32 = 900;
+    /// Operand selecting References[0] (the [`REFERENCE_FLAG`] marker).
+    const REF0: [u8; 2] = [0x00, 0x80];
+
+    /// Bytecode for one message opcode followed by MESWAIT + END.
+    fn message_program(op: u8, operands: &[u8]) -> Vec<u8> {
+        let mut data = vec![op];
+        data.extend_from_slice(operands);
+        assert_eq!(
+            data.len(),
+            OPCODE_META[op as usize].size as usize,
+            "op 0x{op:02X} operands must fill its documented size"
+        );
+        data.extend_from_slice(&[OP_MESWAIT, OP_END]);
+        data
+    }
+
+    fn await_message(op: u8, operands: &[u8], speaker_index: Option<u16>) {
+        let mut e = vm(message_program(op, operands), vec![MSG_ID]);
+        assert_eq!(
+            e.step(),
+            StepResult::AwaitMessage(EventMessage {
+                message_id: MSG_ID,
+                speaker_index,
+                params: vec![],
+            }),
+            "op 0x{op:02X} must emit a dialog frame"
+        );
+        assert_eq!(
+            e.exec_pointer(),
+            OPCODE_META[op as usize].size as usize,
+            "op 0x{op:02X} must park on the following MESWAIT"
+        );
+        e.dismiss_message();
+        assert_eq!(e.step(), StepResult::Done);
+    }
+
+    /// Sizes the message opcodes advance by, against research/XiEvents/OpCodes.
+    #[test]
+    fn message_opcode_meta_matches_xievents_docs() {
+        for (op, size) in [
+            (OP_MESSAGE, 3u8),
+            (OP_MESSAGE_ACTOR, 7),
+            (OP_MESSAGE_UNNAMED, 3),
+            (OP_MESSAGE_UNNAMED_ACTOR, 7),
+            (OP_MESSAGE_ACTOR_PAIR, 12),
+        ] {
+            let meta = OPCODE_META[op as usize];
+            assert_eq!(meta.size, size, "op 0x{op:02X} size drifted");
+            assert!(!meta.sets_ret, "op 0x{op:02X} does not set RetFlag");
+            assert!(!meta.jumps, "op 0x{op:02X} advances linearly");
+        }
+    }
+
+    /// 0x2B carries its own speaker: a raw server id resolves to its low bits.
+    #[test]
+    fn actor_message_attributes_resolved_speaker() {
+        let mut operands = NPC_SERVER_ID.to_le_bytes().to_vec();
+        operands.extend_from_slice(&REF0);
+        await_message(OP_MESSAGE_ACTOR, &operands, Some(NPC_TARGET_INDEX));
+    }
+
+    /// The event-entity lookup falls back to the VM's own speaker.
+    #[test]
+    fn actor_message_event_entity_lookup_uses_event_speaker() {
+        let mut operands = LOOKUP_EVENT_ENTITY.to_le_bytes().to_vec();
+        operands.extend_from_slice(&REF0);
+        await_message(OP_MESSAGE_ACTOR, &operands, Some(5));
+    }
+
+    /// 0x48 prints with no speaker at all.
+    #[test]
+    fn unnamed_message_has_no_speaker() {
+        await_message(OP_MESSAGE_UNNAMED, &REF0, None);
+    }
+
+    /// 0x49 resolves an actor but still prints unnamed.
+    #[test]
+    fn unnamed_actor_message_has_no_speaker() {
+        let mut operands = NPC_SERVER_ID.to_le_bytes().to_vec();
+        operands.extend_from_slice(&REF0);
+        await_message(OP_MESSAGE_UNNAMED_ACTOR, &operands, None);
+    }
+
+    /// 0xB0's first entity is the speaker; the second is the listener.
+    #[test]
+    fn actor_pair_message_attributes_first_entity() {
+        let mut operands = vec![0];
+        operands.extend_from_slice(&NPC_SERVER_ID.to_le_bytes());
+        operands.extend_from_slice(&LOOKUP_EVENT_ENTITY.to_le_bytes());
+        operands.extend_from_slice(&REF0);
+        await_message(OP_MESSAGE_ACTOR_PAIR, &operands, Some(NPC_TARGET_INDEX));
+    }
+
+    /// A set stall flag makes retail return without advancing `ExecPointer`;
+    /// stop instead of spinning (research/XiEvents/OpCodes/0x00B0.md).
+    #[test]
+    fn actor_pair_message_with_stall_flag_stops() {
+        let mut operands = vec![1];
+        operands.extend_from_slice(&NPC_SERVER_ID.to_le_bytes());
+        operands.extend_from_slice(&NPC_SERVER_ID.to_le_bytes());
+        operands.extend_from_slice(&REF0);
+        let mut e = vm(message_program(OP_MESSAGE_ACTOR_PAIR, &operands), vec![]);
+        assert_eq!(e.step(), StepResult::Unimplemented(OP_MESSAGE_ACTOR_PAIR));
+        assert_eq!(e.exec_pointer(), 0);
+    }
+
+    /// Trigger-packet parameters ride along on every message opcode.
+    #[test]
+    fn params_flow_through_every_message_opcode() {
+        let params = vec![3, 4];
+        for (op, operands) in [
+            (OP_MESSAGE, REF0.to_vec()),
+            (OP_MESSAGE_UNNAMED, REF0.to_vec()),
+            (OP_MESSAGE_ACTOR, {
+                let mut o = NPC_SERVER_ID.to_le_bytes().to_vec();
+                o.extend_from_slice(&REF0);
+                o
+            }),
+        ] {
+            let data = message_program(op, &operands);
+            let mut e = EventVm::start(&block(data, vec![MSG_ID]), 7, 5, params.clone()).unwrap();
+            let StepResult::AwaitMessage(m) = e.step() else {
+                panic!("op 0x{op:02X} produced no message");
+            };
+            assert_eq!(m.params, params, "op 0x{op:02X} dropped event params");
+        }
     }
 }

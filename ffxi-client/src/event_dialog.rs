@@ -470,7 +470,7 @@ mod tests {
             npc_name: Some("Trion".to_string()),
         };
         let frame = ffxi_event::DialogFrame {
-            speaker_index: 4,
+            speaker_index: Some(4),
             text: "{SpeakerName}: {Num:1} gil, {PlayerName}.".to_string(),
             choices: vec!["Pay {Num:1}.".to_string(), "Decline.".to_string()],
             params: vec![0, 250],

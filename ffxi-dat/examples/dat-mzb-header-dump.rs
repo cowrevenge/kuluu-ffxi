@@ -41,28 +41,39 @@ fn main() -> ExitCode {
         header.grid_cells_x(),
         header.grid_cells_z()
     );
-    println!("  mesh_table_offset  0x{:08x}", header.mesh_table_offset);
-    println!("  quadtree_offset    0x{:08x}", header.quadtree_offset);
-    println!("  maplist_offset     0x{:08x}", header.maplist_offset);
-    println!("  maplist_count      {}", header.maplist_count);
+    println!(
+        "  collision_data_off 0x{:08x}",
+        header.collision_data_offset
+    );
+    println!("  quadtree_offset    {:?}", header.quadtree_offset());
+    println!("  group_list_count   {:?}", header.group_list_count());
+    println!("  group_list_offset  0x{:08x}", header.group_list_offset);
+    println!("  lighting_offset    0x{:08x}", header.lighting_offset);
+    println!("  substructure_type  {}", header.substructure_type);
+    println!("  collision_flags    0x{:02x}", header.collision_flags);
     println!();
-    let placements_size = (header.node_count as usize) * 100;
-    let placements_end = 0x20 + placements_size;
+    let placements_size = (header.node_count as usize) * mzb::PLACEMENT_RECORD_LEN;
+    let placements_end = mzb::MZB_HEADER_LEN + placements_size;
     println!(
-        "placement table: 0x20..0x{:x}  ({} bytes, stride 100)",
-        placements_end, placements_size
+        "placement table: 0x{:x}..0x{:x}  ({} bytes, stride {})",
+        mzb::MZB_HEADER_LEN,
+        placements_end,
+        placements_size,
+        mzb::PLACEMENT_RECORD_LEN
     );
     println!(
-        "byte gap to mesh_table: {} bytes",
-        (header.mesh_table_offset as i64) - (placements_end as i64)
+        "byte gap to collision data: {} bytes",
+        (header.collision_data_offset as i64) - (placements_end as i64)
     );
+    if let Some(quadtree) = header.quadtree_offset() {
+        println!(
+            "byte gap to quadtree:   {} bytes",
+            (quadtree as i64) - (placements_end as i64)
+        );
+    }
     println!(
-        "byte gap to quadtree:   {} bytes",
-        (header.quadtree_offset as i64) - (placements_end as i64)
-    );
-    println!(
-        "byte gap to maplist:    {} bytes",
-        (header.maplist_offset as i64) - (placements_end as i64)
+        "byte gap to group list: {} bytes",
+        (header.group_list_offset as i64) - (placements_end as i64)
     );
     println!();
 

@@ -18,6 +18,8 @@ use ffxi_dat::{ChunkKind, DatRoot};
 use crate::components::InGameEntity;
 use crate::ffxi_zone_material::FfxiZoneMaterial;
 use crate::graphics_settings::GraphicsSettings;
+// research/xim ParticleUpdaters.kt: TextureCoordinateUpdater velocities are per rendered frame.
+use crate::scheduler_runtime::RETAIL_FPS;
 use crate::zone_texture::{decoded_texture_to_image, TextureQuality};
 
 // research/xim EnvironmentManager.kt:453-515 updateWeatherEffects reads weat/<type>/.
@@ -33,10 +35,6 @@ use crate::zone_texture::{decoded_texture_to_image, TextureQuality};
 // rule). Derived from SKYBOX_RADIUS so this can't drift from the dome it must sit under.
 const CLOUD_RIM_MARGIN: f32 = 100.0;
 const CLOUD_MIN_RIM: f32 = crate::skybox::SKYBOX_RADIUS - CLOUD_RIM_MARGIN;
-
-// research/xim ParticleUpdaters.kt: TextureCoordinateUpdater velocities are per frame
-// of the retail/vanilla client, which runs at 30 fps.
-const RETAIL_FPS: f32 = 30.0;
 
 // research/xim EnvironmentManager.kt:351-369 switchWeather default 3.33s cross-fade
 // between the old and new weat/<type>/ effect sets on a 0x0057 weather change.

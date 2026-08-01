@@ -21,10 +21,12 @@ fn main() {
     let plain = mzb::decrypt(chunk.data).expect("decrypt");
     let header = mzb::MzbHeader::parse(&plain).expect("header");
 
-    let mt = header.mesh_table_offset as usize;
+    let mt = header.collision_data_offset as usize;
     println!(
-        "file {file_id}: body={} mesh_table=0x{mt:X} grid={}x{}",
+        "file {file_id}: body={} version={} substructure={} collision_data=0x{mt:X} grid={}x{}",
         plain.len(),
+        header.version,
+        header.substructure_type,
         header.grid_cells_x(),
         header.grid_cells_z()
     );
@@ -32,7 +34,16 @@ fn main() {
         "header[0x0C..0x10] = zoneBlocksX={} zoneBlocksZ={} blockWidth={} blockLength={}",
         plain[0x0C], plain[0x0D], plain[0x0E], plain[0x0F]
     );
-    print!("mesh_table words:");
+    if !header.has_collision_data() {
+        let placements = mzb::parse_placements(&plain, &header).expect("placements");
+        println!(
+            "  -> no collision section (legal; retail skips the whole collision path). \
+             parse_placements returned {} entries",
+            placements.len()
+        );
+        return;
+    }
+    print!("collision_data words:");
     for k in 0..8 {
         let o = mt + k * 4;
         let v = u32::from_le_bytes([plain[o], plain[o + 1], plain[o + 2], plain[o + 3]]);

@@ -15,6 +15,11 @@ pub const ROUTINE_FPS: f32 = 60.0;
 // research/xim poc/ActorManager.kt:59-62 — `elapsedFrames / 2f` into updateAnimation.
 pub const SKELETON_FRAME_DIVISOR: f32 = 2.0;
 
+// The rate the retail/vanilla client renders at, distinct from the 60 fps routine clock above.
+// Anything authored per *rendered* frame — cloud texture-coordinate velocities, the targeted
+// nameplate pulse — advances on this one.
+pub const RETAIL_FPS: f32 = 30.0;
+
 const POST_FINISH_TTL_SECS: f32 = 2.0;
 
 // The entity the currently-running routine is aimed at. Written in the same commands chain as
@@ -253,6 +258,7 @@ pub struct MmbSpriteMesh {
     pub uvs: Vec<[f32; 2]>,
     pub indices: Vec<u32>,
     pub brightness: [f32; 3],
+    pub vert_alpha: f32,
     pub texture_name: String,
 }
 
@@ -543,10 +549,11 @@ fn mmb_sprite_mesh(data: &[u8]) -> Option<MmbSpriteMesh> {
         uvs,
         indices,
         brightness: [
-            c[0] as f32 / 128.0,
-            c[1] as f32 / 128.0,
-            c[2] as f32 / 128.0,
+            c[0] as f32 / ffxi_dat::d3m::VERTEX_COLOR_DIVISOR,
+            c[1] as f32 / ffxi_dat::d3m::VERTEX_COLOR_DIVISOR,
+            c[2] as f32 / ffxi_dat::d3m::VERTEX_COLOR_DIVISOR,
         ],
+        vert_alpha: c[3] as f32 / ffxi_dat::d3m::VERTEX_COLOR_DIVISOR,
         texture_name,
     })
 }

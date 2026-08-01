@@ -611,10 +611,28 @@ pub fn load_mzb_placed(
 ) -> Result<(Vec<MzbSubMesh>, Vec<MzbInstance>), String> {
     let (header, plain, _chunks) = load_decrypted(file_id, chunk_idx)?;
 
+    // A zero CollisionDataOffset is a legal state, not a degraded parse: the
+    // moving-vehicle zones ship no static collision at all and retail skips the
+    // whole path (ffxi-dat mzb::MzbHeader::has_collision_data).
+    if !header.has_collision_data() {
+        info!(
+            "MZB {file_id}: no collision section (substructure type {}); zone has no static collision",
+            header.substructure_type
+        );
+        return Ok((Vec::new(), Vec::new()));
+    }
+
     let placements =
         mzb::parse_placements(&plain, &header).map_err(|e| format!("MZB parse_placements: {e}"))?;
 
     if placements.is_empty() {
+        warn!(
+            "MZB {file_id}: collision section at 0x{:X} yielded no placements for a {}x{} grid; \
+             falling back to unplaced collision meshes",
+            header.collision_data_offset,
+            header.grid_cells_x(),
+            header.grid_cells_z()
+        );
         let meshes =
             mzb::parse_meshes(&plain, &header).map_err(|e| format!("MZB parse_meshes: {e}"))?;
 

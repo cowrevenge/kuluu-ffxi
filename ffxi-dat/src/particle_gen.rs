@@ -83,6 +83,12 @@ const ATTACH_JOINT1_MASK: u16 = 0xFC00;
 const ATTACH_JOINT1_SHIFT: u32 = 10;
 const ATTACH_SOURCE_ORIENTED: u16 = 0x0001;
 
+// research/xim ParticleInitializers.kt:105-116 — the StandardParticleSetup renderStateFlags u16
+// sits directly after the billboard flags. Bit 0x1000 (`ignoreTextureAlpha`) is the same bit
+// retail tests as `field_10C & 0x10000000` to pick the D3m element's texture-stage table.
+// research/XIClient/src/XIClient/source/Resource/Derived/CMoD3m.cpp:363-370
+const RENDER_STATE_IGNORE_TEXTURE_ALPHA: u16 = 0x1000;
+
 // research/xim ParticleGeneratorParser.kt:68-70 (genFlags at body[0x69]);
 // continuous singleton + auto-run-at-model-ready semantics: Actor.kt:724-734.
 const GEN_FLAG_CONTINUOUS: u8 = 0x04;
@@ -133,6 +139,15 @@ pub struct ParticleGeneratorDef {
     pub init_velocity: [f32; 3],
     pub init_rotation: [f32; 3],
     pub blend: ParticleBlend,
+    // The raw BlendFuncInitializer p0 (retail `field_16C & 0xFF`), kept alongside the collapsed
+    // `blend` because the TEXTUREFACTOR-alpha promotion is keyed on byte 0x44 exactly.
+    // research/XIClient/src/XIClient/source/Resource/Derived/CMoD3m.cpp:345-349
+    pub blend_byte: u8,
+
+    // Selects the D3m texture-stage table: set = NonZeroOneTSS (texture alpha ignored,
+    // alpha = 4*D.a*F.a), clear = NonZeroTwoTSS (alpha = 8*D.a*T.a*F.a).
+    // research/XIClient/src/XIClient/source/Resource/Derived/CMoD3m.cpp:16-104
+    pub ignore_texture_alpha: bool,
 
     // Per-particle keyframe tracks referenced by DAT-id (resolved against the action's 0x19 chunks).
     pub scale_x_track: Option<[u8; 4]>,
@@ -202,6 +217,8 @@ impl ParticleGeneratorDef {
         let mut scale_y_track = None;
         let mut alpha_track = None;
         let mut blend = ParticleBlend::Additive;
+        let mut blend_byte = 0u8;
+        let mut ignore_texture_alpha = false;
         let mut day_of_week_color = None;
         let mut moon_phase_color = None;
 
@@ -221,6 +238,8 @@ impl ParticleGeneratorDef {
                 0x01 if payload + 32 <= body.len() => {
                     let bb = u16_le(body, payload);
                     camera_billboard = bb & 0x0001 != 0 || bb & 0x00C0 == 0x00C0;
+                    let render_state = u16_le(body, payload + 2);
+                    ignore_texture_alpha = render_state & RENDER_STATE_IGNORE_TEXTURE_ALPHA != 0;
                     mesh_id = [
                         body[payload + 8],
                         body[payload + 9],
@@ -306,6 +325,7 @@ impl ParticleGeneratorDef {
                 // nibble selects (0x8 additive, 0x4/0x6 alpha blend, 0x1/0x2 reverse-subtract).
                 0x1E if payload < body.len() => {
                     let p0 = body[payload];
+                    blend_byte = p0;
                     blend = if (p0 >> 4) & 0x01 != 0 {
                         ParticleBlend::Blend
                     } else {
@@ -381,6 +401,8 @@ impl ParticleGeneratorDef {
             init_velocity,
             init_rotation,
             blend,
+            blend_byte,
+            ignore_texture_alpha,
             scale_x_track,
             scale_y_track,
             alpha_track,
@@ -650,6 +672,43 @@ mod tests {
         assert_eq!(def.mesh_kind, ParticleMeshKind::SpriteSheet);
         assert_eq!(def.mesh_id, *b"fir ");
         assert_eq!(def.max_life_frames, 24.0);
+    }
+
+    // research/xim ParticleInitializers.kt:105-116 — renderStateFlags is the u16 after the
+    // billboard flags; 0x1000 picks retail's NonZeroOneTSS element (CMoD3m.cpp:363-370).
+    #[test]
+    fn render_state_flag_selects_ignore_texture_alpha_element() {
+        let element = |render_state: u16| {
+            let mut setup = op(0x01, 12, &[]);
+            setup[4 + 2..4 + 4].copy_from_slice(&render_state.to_le_bytes());
+            setup[4 + 29] = LINKED_DATA_STATIC_MESH;
+            let body = build(&setup, 1, 1);
+            ParticleGeneratorDef::parse(&body)
+                .unwrap()
+                .unwrap()
+                .ignore_texture_alpha
+        };
+        assert!(!element(0x0000));
+        assert!(!element(0x0FFF), "only bit 0x1000 selects the element");
+        assert!(element(0x1000));
+        assert!(element(0x1200), "other render-state bits do not mask it");
+    }
+
+    // CMoD3m.cpp:345-349 keys the TEXTUREFACTOR-alpha promotion on the exact blend byte, which
+    // the ParticleBlend collapse (0x03/0x44/0x64 all -> Blend) cannot express.
+    #[test]
+    fn blend_byte_survives_the_blend_func_collapse() {
+        let parsed = |p0: u8| {
+            let mut setup = op(0x01, 12, &[]);
+            setup[4 + 29] = LINKED_DATA_STATIC_MESH;
+            setup.extend(op(0x1E, 2, &[p0, 0, 0, 0]));
+            let body = build(&setup, 1, 1);
+            let def = ParticleGeneratorDef::parse(&body).unwrap().unwrap();
+            (def.blend, def.blend_byte)
+        };
+        assert_eq!(parsed(0x44), (ParticleBlend::Blend, 0x44));
+        assert_eq!(parsed(0x64), (ParticleBlend::Blend, 0x64));
+        assert_eq!(parsed(0x48), (ParticleBlend::Additive, 0x48));
     }
 
     #[test]

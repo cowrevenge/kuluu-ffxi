@@ -1,7 +1,8 @@
 //! UI-element groups (DAT section kind 0x31) and sprite extraction.
-//! Re-expresses research/xim/.../resource/UiElementSection.kt; the menu UI DATs
-//! address sprites by (group-name, index) — e.g. the Vana'diel clock day orb is
-//! group "menu    frames  ", index 106 + element.
+//! Component records are retail menu-shape quads
+//! (research/XIClient/src/XIClient/include/UI/MenuShapeFormat.h:24-45); the menu
+//! UI DATs address sprites by (group-name, index) — e.g. the Vana'diel clock day
+//! orb is group "menu    frames  ", index 106 + element.
 
 use crate::chunk::walk;
 use crate::texture::{decode_texture, DecodedTexture};
@@ -11,7 +12,7 @@ pub const TEXTURE_KIND: u8 = 0x20;
 
 const NAME_LEN: usize = 0x10;
 
-// Component binary layout (research/xim/.../resource/UiElementSection.kt:141-203).
+// Packed QuadData layout (research/XIClient/src/XIClient/include/UI/MenuShapeFormat.h:24-45).
 mod comp {
     pub const UV_WIDTH: usize = 16;
     pub const UV_HEIGHT: usize = 18;
@@ -19,18 +20,35 @@ mod comp {
     pub const UV_OFFSET_Y: usize = 22;
     pub const FLIP_MODE: usize = 24;
     pub const COLORS: usize = 25;
-    pub const UNK7: usize = 42;
+    pub const ALPHA_BLEND_ENABLED: usize = 41;
+    pub const SOURCE_BLEND_FACTOR: usize = 42;
+    pub const DEST_BLEND_FACTOR: usize = 43;
+    pub const BLEND_OPERATION: usize = 44;
     pub const REF: usize = 45;
     pub const LEN: usize = 61;
 }
 
-// UiFlipMode (UiElementSection.kt:8-13).
+// TexCoordFlags (research/XIClient/src/XIClient/include/UI/MenuShapeFormat.h:8-12).
 const FLIP_HORIZONTAL: u8 = 1;
 const FLIP_VERTICAL: u8 = 2;
 const FLIP_BOTH: u8 = 3;
 
-// unk7 == 2 suppresses drawing (UiElementSection.kt:172-174).
-const UNK7_DRAW_DISABLED: u8 = 2;
+// research/XIClient/src/XIClient/include/UI/MenuShapeFormat.h:14-18
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum BlendFactor {
+    Texture = 0,
+    Frame = 1,
+    Zero = 2,
+}
+
+impl BlendFactor {
+    const ALL: [Self; 3] = [Self::Texture, Self::Frame, Self::Zero];
+
+    pub fn from_raw(raw: u8) -> Option<Self> {
+        Self::ALL.into_iter().find(|f| *f as u8 == raw)
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct UiElementComponent {
@@ -42,7 +60,10 @@ pub struct UiElementComponent {
     pub flip_mode: u8,
     pub colors: [[u8; 4]; 4],
     pub texture_ref: String,
-    pub draw_enabled: bool,
+    pub alpha_blend_enabled: bool,
+    pub source_blend_factor: BlendFactor,
+    pub dest_blend_factor: BlendFactor,
+    pub blend_operation: BlendFactor,
 }
 
 #[derive(Debug, Clone)]
@@ -106,7 +127,10 @@ fn parse_component(c: &[u8]) -> Option<UiElementComponent> {
         flip_mode: *c.get(comp::FLIP_MODE)?,
         colors,
         texture_ref: normalize_name(c.get(comp::REF..comp::REF + NAME_LEN)?),
-        draw_enabled: *c.get(comp::UNK7)? != UNK7_DRAW_DISABLED,
+        alpha_blend_enabled: *c.get(comp::ALPHA_BLEND_ENABLED)? != 0,
+        source_blend_factor: BlendFactor::from_raw(*c.get(comp::SOURCE_BLEND_FACTOR)?)?,
+        dest_blend_factor: BlendFactor::from_raw(*c.get(comp::DEST_BLEND_FACTOR)?)?,
+        blend_operation: BlendFactor::from_raw(*c.get(comp::BLEND_OPERATION)?)?,
     })
 }
 
@@ -206,11 +230,7 @@ pub fn crop_sprite(
 pub fn ui_sprite(dat_bytes: &[u8], group_name: &str, index: usize) -> Option<UiSprite> {
     let group = find_ui_element_group(dat_bytes, group_name)?;
     let element = group.elements.get(index)?;
-    let component = element
-        .components
-        .iter()
-        .find(|c| c.draw_enabled)
-        .or_else(|| element.components.first())?;
+    let component = element.components.first()?;
     let tex = find_texture(dat_bytes, &component.texture_ref)?;
     crop_sprite(
         &tex,
@@ -235,14 +255,19 @@ mod tests {
         out
     }
 
-    fn build_component(uv: (u16, u16, u16, u16), flip: u8, unk7: u8, ref_name: &str) -> Vec<u8> {
+    fn build_component(
+        uv: (u16, u16, u16, u16),
+        flip: u8,
+        source_blend: u8,
+        ref_name: &str,
+    ) -> Vec<u8> {
         let mut c = vec![0u8; comp::LEN];
         c[comp::UV_WIDTH..comp::UV_WIDTH + 2].copy_from_slice(&uv.2.to_le_bytes());
         c[comp::UV_HEIGHT..comp::UV_HEIGHT + 2].copy_from_slice(&uv.3.to_le_bytes());
         c[comp::UV_OFFSET_X..comp::UV_OFFSET_X + 2].copy_from_slice(&uv.0.to_le_bytes());
         c[comp::UV_OFFSET_Y..comp::UV_OFFSET_Y + 2].copy_from_slice(&uv.1.to_le_bytes());
         c[comp::FLIP_MODE] = flip;
-        c[comp::UNK7] = unk7;
+        c[comp::SOURCE_BLEND_FACTOR] = source_blend;
         c[comp::REF..comp::REF + NAME_LEN].copy_from_slice(&name16(ref_name));
         c
     }
@@ -318,15 +343,31 @@ mod tests {
             (2, 3, 4, 5)
         );
         assert_eq!(comp.texture_ref, "menu    tex0");
-        assert!(comp.draw_enabled);
+        assert_eq!(comp.source_blend_factor, BlendFactor::Texture);
     }
 
     #[test]
-    fn unk7_two_disables_draw() {
-        let c = build_component((0, 0, 1, 1), 0, UNK7_DRAW_DISABLED, "t");
+    fn parses_blend_fields() {
+        let mut c = build_component((0, 0, 1, 1), 0, BlendFactor::Zero as u8, "t");
+        c[comp::ALPHA_BLEND_ENABLED] = 1;
+        c[comp::DEST_BLEND_FACTOR] = BlendFactor::Frame as u8;
+        c[comp::BLEND_OPERATION] = BlendFactor::Frame as u8;
         let body = build_group("g", &[], &[vec![c]]);
         let g = parse_ui_element_group(&body).unwrap();
-        assert!(!g.elements[0].components[0].draw_enabled);
+        let comp = &g.elements[0].components[0];
+        assert!(comp.alpha_blend_enabled);
+        assert_eq!(comp.source_blend_factor, BlendFactor::Zero);
+        assert_eq!(comp.dest_blend_factor, BlendFactor::Frame);
+        assert_eq!(comp.blend_operation, BlendFactor::Frame);
+    }
+
+    #[test]
+    fn out_of_range_blend_factor_rejects_component() {
+        let out_of_range = BlendFactor::Zero as u8 + 1;
+        assert!(BlendFactor::from_raw(out_of_range).is_none());
+        let c = build_component((0, 0, 1, 1), 0, out_of_range, "t");
+        let body = build_group("g", &[], &[vec![c]]);
+        assert!(parse_ui_element_group(&body).is_none());
     }
 
     #[test]
@@ -435,5 +476,38 @@ mod tests {
             );
             assert_eq!(sprite.rgba.len(), 14 * 14 * 4);
         }
+    }
+
+    // Gated on a retail install (self-skips without one). Pins the +42 byte as
+    // MenuShapeFormat.h's SourceBlendFactor: every quad in the icon sheet decodes
+    // to a valid 0..2 factor, and the counts are the ones measured for kuluu-hjr6.
+    #[test]
+    fn real_dat_framesus_blend_factor_counts() {
+        const FRAMESUS_QUADS: usize = 2433;
+        const FRAMESUS_ZERO_SOURCE_QUADS: usize = 163;
+
+        let Some(root) = crate::archive::open_test_install() else {
+            return;
+        };
+        let Ok(bytes) = std::fs::read(root.root().join("ROM/119/51.DAT")) else {
+            return;
+        };
+        let Some(group) = find_ui_element_group(&bytes, "menu    framesus") else {
+            return;
+        };
+
+        let quads: Vec<&UiElementComponent> = group
+            .elements
+            .iter()
+            .flat_map(|e| e.components.iter())
+            .collect();
+        assert_eq!(quads.len(), FRAMESUS_QUADS);
+        assert_eq!(
+            quads
+                .iter()
+                .filter(|c| c.source_blend_factor == BlendFactor::Zero)
+                .count(),
+            FRAMESUS_ZERO_SOURCE_QUADS
+        );
     }
 }

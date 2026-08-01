@@ -27,12 +27,16 @@ fn main() -> ExitCode {
 
     println!("file_id={file_id} body_len={}", body.len());
     println!(
-        "maplist_offset=0x{:X} ({})  maplist_count={} (0x{:X})",
-        header.maplist_offset, header.maplist_offset, header.maplist_count, header.maplist_count
+        "group_list_offset=0x{:X} ({})  group_list_count={:?}",
+        header.group_list_offset,
+        header.group_list_offset,
+        header.group_list_count()
     );
     println!(
-        "quadtree_offset=0x{:X}  mesh_table_offset=0x{:X}",
-        header.quadtree_offset, header.mesh_table_offset
+        "quadtree_offset={:?}  lighting_offset=0x{:X}  collision_data_offset=0x{:X}",
+        header.quadtree_offset(),
+        header.lighting_offset,
+        header.collision_data_offset
     );
     println!();
 
@@ -40,9 +44,9 @@ fn main() -> ExitCode {
     hexdump(&body[..32.min(body.len())], 0);
     println!();
 
-    let off = header.maplist_offset as usize;
+    let off = header.group_list_offset as usize;
     if off >= body.len() {
-        eprintln!("maplist_offset out of range");
+        eprintln!("group_list_offset out of range");
         return ExitCode::from(1);
     }
 
@@ -51,15 +55,15 @@ fn main() -> ExitCode {
     hexdump(&body[off..end], off);
     println!();
 
-    let stride = 100usize;
+    let stride = mzb::PLACEMENT_RECORD_LEN;
     let count = header.node_count as usize;
     println!(
-        "SMZBBlock100 hypothesis: count={count}, stride={stride}, end=0x{:X}",
-        0x20 + count * stride
+        "placement table: count={count}, stride={stride}, end=0x{:X}",
+        mzb::MZB_HEADER_LEN + count * stride
     );
     println!("first 6 records (name XORed with 0x55, then float-3 trans/rot/scale):");
     for i in 0..6.min(count) {
-        let off = 0x20 + i * stride;
+        let off = mzb::MZB_HEADER_LEN + i * stride;
         if off + stride > body.len() {
             break;
         }
@@ -135,24 +139,17 @@ fn main() -> ExitCode {
     }
     println!();
 
-    println!("size-fit check for maplist_count={}:", header.maplist_count);
-    for &stride in &[12usize, 16, 24, 32, 48, 64, 76, 80, 96, 112, 128] {
-        let total = header.maplist_count as usize * stride;
-        let fits = off + total <= body.len();
+    let lighting = header.lighting_offset as usize;
+    if header.has_light_bindings() && lighting < body.len() {
+        let end = (lighting + 128).min(body.len());
+        println!("lighting section body[0x{:X}..0x{:X}]:", lighting, end);
+        hexdump(&body[lighting..end], lighting);
+    } else {
         println!(
-            "  stride={:>3}: total={:>10} bytes, end=0x{:X}, fits={}",
-            stride,
-            total,
-            off + total,
-            fits
+            "no lighting section (offset 0x{lighting:X}, version {})",
+            header.version
         );
     }
-    let count_as_bytes = header.maplist_count as usize;
-    println!(
-        "  count-as-bytes: end=0x{:X}, fits={}",
-        off + count_as_bytes,
-        off + count_as_bytes <= body.len()
-    );
 
     ExitCode::SUCCESS
 }

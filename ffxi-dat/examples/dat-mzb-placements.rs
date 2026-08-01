@@ -91,7 +91,7 @@ fn main() -> ExitCode {
         }
     };
     println!(
-        "header      blocks={}x{} block_size={}x{} -> {}x{}={} cells  mesh_table=0x{:X}",
+        "header      blocks={}x{} block_size={}x{} -> {}x{}={} cells  collision_data=0x{:X}",
         header.zone_blocks_x,
         header.zone_blocks_z,
         header.block_width,
@@ -99,7 +99,7 @@ fn main() -> ExitCode {
         header.grid_cells_x(),
         header.grid_cells_z(),
         header.grid_cells_x() * header.grid_cells_z(),
-        header.mesh_table_offset,
+        header.collision_data_offset,
     );
 
     let placements = match mzb::parse_placements(&plain, &header) {

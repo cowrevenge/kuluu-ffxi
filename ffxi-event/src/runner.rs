@@ -17,7 +17,11 @@ pub const EVENT_CANCELLED_END_PARA: u32 = 1 << 30;
 /// `choices`). `text` is already decoded from the dialog DAT.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DialogFrame {
-    pub speaker_index: u16,
+    /// Speaking entity's target index, `None` for a line the bytecode prints
+    /// with no speaker ([`ffxi_event::EventMessage::speaker_index`]).
+    ///
+    /// [`ffxi_event::EventMessage::speaker_index`]: crate::EventMessage::speaker_index
+    pub speaker_index: Option<u16>,
     pub text: String,
     pub choices: Vec<String>,
     /// Event numeric parameters from the trigger packet (0x33/0x34 `num[8]`);
@@ -114,7 +118,7 @@ impl DialogRunner {
                     self.pending = Pending::Choice;
                     let (text, choices) = choice_text(strings, c.message_id, &c.params);
                     return DialogStep::Frame(DialogFrame {
-                        speaker_index: c.speaker_index,
+                        speaker_index: Some(c.speaker_index),
                         text,
                         choices,
                         params: c.params,

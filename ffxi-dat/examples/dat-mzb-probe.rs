@@ -99,15 +99,17 @@ fn main() -> ExitCode {
         header.version, header.key_index, header.decode_length, header.node_count
     );
     println!(
-        "            grid={}x{}  mesh_table_offset=0x{:X}  quadtree_offset=0x{:X}",
+        "            grid={}x{}  collision_data_offset=0x{:X}  quadtree_offset={:?}",
         header.grid_cells_x(),
         header.grid_cells_z(),
-        header.mesh_table_offset,
-        header.quadtree_offset
+        header.collision_data_offset,
+        header.quadtree_offset()
     );
     println!(
-        "            maplist_offset=0x{:X}  maplist_count={}",
-        header.maplist_offset, header.maplist_count
+        "            group_list_offset=0x{:X}  group_list_count={:?}  lighting_offset=0x{:X}",
+        header.group_list_offset,
+        header.group_list_count(),
+        header.lighting_offset
     );
     println!();
 

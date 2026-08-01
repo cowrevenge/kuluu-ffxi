@@ -1,7 +1,5 @@
-//! Throwaway Phase-0 spike for the ui_kit plan (kuluu-hjr6): enumerate the
-//! "menu    frames  " UI-element group and report per-element component
-//! geometry, so we can identify retail window-frame parts (corners/edges/
-//! center) and record nine-slice insets as named consts.
+//! Enumerates the "menu    frames  " UI-element group and reports per-element
+//! component geometry and blend state.
 
 use ffxi_dat::ui_element::{find_ui_element_group, ui_sprite};
 
@@ -36,7 +34,7 @@ fn main() {
                     .iter()
                     .map(|c| {
                         format!(
-                            "uv({},{} {}x{}) pos{:?} flip={} tex={:?}{}",
+                            "uv({},{} {}x{}) pos{:?} flip={} tex={:?} blend={}/{:?}/{:?}/{:?}",
                             c.uv_offset_x,
                             c.uv_offset_y,
                             c.uv_width,
@@ -44,7 +42,10 @@ fn main() {
                             c.positions,
                             c.flip_mode,
                             c.texture_ref,
-                            if c.draw_enabled { "" } else { " OFF" }
+                            c.alpha_blend_enabled,
+                            c.source_blend_factor,
+                            c.dest_blend_factor,
+                            c.blend_operation,
                         )
                     })
                     .collect();

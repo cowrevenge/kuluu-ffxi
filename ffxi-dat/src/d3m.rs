@@ -6,6 +6,11 @@ pub const D3M_VERTEX_STRIDE: usize = 36;
 
 pub const D3M_VERTEX_OFFSET: usize = 0x1E;
 
+// D3m/MMB vertex colour is normalised by 128 rather than 255, folding the D3m texture-stage-0
+// MODULATE2X into the stored value.
+// research/XIClient/src/XIClient/source/Resource/Derived/CMoD3m.cpp:16-104
+pub const VERTEX_COLOR_DIVISOR: f32 = 128.0;
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct D3mVertex {
     pub pos: [f32; 3],
@@ -77,10 +82,10 @@ impl D3m {
                 body[off + 27],
             ]);
             let color = [
-                ((raw >> 16) & 0xFF) as f32 / 128.0,
-                ((raw >> 8) & 0xFF) as f32 / 128.0,
-                (raw & 0xFF) as f32 / 128.0,
-                ((raw >> 24) & 0xFF) as f32 / 128.0,
+                ((raw >> 16) & 0xFF) as f32 / VERTEX_COLOR_DIVISOR,
+                ((raw >> 8) & 0xFF) as f32 / VERTEX_COLOR_DIVISOR,
+                (raw & 0xFF) as f32 / VERTEX_COLOR_DIVISOR,
+                ((raw >> 24) & 0xFF) as f32 / VERTEX_COLOR_DIVISOR,
             ];
             let uv = [f32_le(body, off + 28), f32_le(body, off + 32)];
             vertices.push(D3mVertex {

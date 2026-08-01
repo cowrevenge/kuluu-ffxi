@@ -140,7 +140,12 @@ fn main() -> Result<()> {
     let _trace_guard = {
         use tracing_subscriber::layer::SubscriberExt;
         use tracing_subscriber::util::SubscriberInitExt;
-        let (chrome_layer, guard) = tracing_chrome::ChromeLayerBuilder::new().build();
+        // include_args: without it every ECS system span is named bare "system"
+        // and per-system attribution is impossible (learned from a 7.3GB
+        // unusable trace, 2026-07).
+        let (chrome_layer, guard) = tracing_chrome::ChromeLayerBuilder::new()
+            .include_args(true)
+            .build();
         tracing_subscriber::registry()
             .with(env_filter)
             .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))

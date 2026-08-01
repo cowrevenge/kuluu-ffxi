@@ -26,7 +26,6 @@ use std::env;
 // gradient dome, the sun/moon discs + directional lights, and the lens flare,
 // all driven by sun_moon_system exactly as ViewerCorePlugin wires them. Lets us
 // tune the daytime sun glow + warm tone deterministically at a fixed --hour.
-use bevy::core_pipeline::prepass::DepthPrepass;
 use bevy::post_process::bloom::{Bloom, BloomPrefilter};
 use ffxi_viewer_core::graphics::settings::{GraphicsSettings, SkyStyle};
 use ffxi_viewer_core::lens_flare::LensFlarePlugin;
@@ -373,10 +372,6 @@ fn setup(
                 fov: settings.fov_deg.to_radians(),
                 ..default()
             }),
-            // The Vanilla lens flare samples the depth prepass to fade behind
-            // terrain (lens_flare.wgsl #ifdef DEPTH_PREPASS); the client turns
-            // this on while the sun is up (apply_camera_prepass_system).
-            DepthPrepass,
         ));
     }
     c.insert_resource(GlobalAmbientLight {

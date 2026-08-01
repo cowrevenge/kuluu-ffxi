@@ -19,6 +19,7 @@ pub mod navmesh_overlay;
 pub mod perf_hud;
 pub mod screenshot;
 pub mod slash_commands;
+pub mod sun_occlusion;
 pub mod target_list_hud;
 pub mod text_input;
 #[allow(deprecated)]
@@ -651,6 +652,12 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
         collision_bvh::build_zone_collision_bvh_system
             .before(camera_collision::clamp_chase_camera_to_collision)
             .run_if(in_state(AppPhase::InGame).or_else(in_state(AppPhase::Launcher))),
+    );
+    app.add_systems(
+        Update,
+        sun_occlusion::update_sun_occlusion_system
+            .after(collision_bvh::build_zone_collision_bvh_system)
+            .before(ffxi_viewer_core::lens_flare::lens_flare_system),
     );
     app.add_systems(
         Update,

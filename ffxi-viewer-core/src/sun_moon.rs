@@ -19,7 +19,7 @@ pub struct MoonDisc;
 #[derive(Component)]
 pub struct MoonSphere;
 
-const SKY_RADIUS: f32 = 4000.0;
+pub const SKY_RADIUS: f32 = 4000.0;
 
 const SUN_DISC_RADIUS: f32 = 120.0;
 const MOON_DISC_RADIUS: f32 = 350.0;

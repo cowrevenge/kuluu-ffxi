@@ -1294,23 +1294,21 @@ pub fn update_depth_of_field_focus_system(
 }
 
 /// Owns the camera `DepthPrepass`, shared by every consumer that needs scene
-/// depth: Depth of Field, and the Vanilla sun flare (which samples the prepass
-/// to occlude itself behind terrain). TAA also requires it via
-/// `#[require(DepthPrepass, …)]`, so we never strip it while TAA is on. Runs
-/// every frame (not just on settings change) because the flare's need rises and
-/// falls with the sun; the `match` self-heals across the AA camera respawn.
+/// depth: Depth of Field, and TAA (which also requires it via
+/// `#[require(DepthPrepass, …)]`, so we never strip it while TAA is on). The
+/// Vanilla sun flare occludes via a CPU BVH raycast (`lens_flare::SunOcclusion`)
+/// and needs no prepass. Runs every frame (not just on settings change) so the
+/// `match` self-heals across the AA camera respawn.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn apply_camera_prepass_system(
     settings: Res<GraphicsSettings>,
-    sky: Res<crate::sun_moon::VanaSky>,
     mut commands: Commands,
     q_cam: Query<(Entity, Option<&DepthPrepass>), With<OperatorCamera>>,
 ) {
     let Ok((entity, depth)) = q_cam.single() else {
         return;
     };
-    let flare_wants = settings.sky_style == SkyStyle::Vanilla && sky.sun_altitude > 0.0;
-    let keep_depth = settings.depth_of_field || settings.wants_taa() || flare_wants;
+    let keep_depth = settings.depth_of_field || settings.wants_taa();
     // try_* so we no-op (not panic) if apply_anti_aliasing_system queued a
     // despawn+respawn of this same camera earlier in the frame.
     match (keep_depth, depth.is_some()) {
@@ -1722,9 +1720,9 @@ mod tests {
 
     #[test]
     fn presets_are_dof_and_taa_free_by_default() {
-        // Depth of Field and TAA are the settings-level prepass forcers; no
-        // preset turns either on, so the prepass is paid only at runtime (DoF,
-        // or the Vanilla sun flare while the sun is up).
+        // Depth of Field and TAA are the only prepass forcers (the Vanilla sun
+        // flare occludes via CPU raycast); no preset turns either on, so
+        // steady-state presets pay zero prepass.
         for &preset in PRESET_CYCLE {
             let s = GraphicsSettings::for_preset(preset);
             assert!(!s.depth_of_field, "{preset:?} must not auto-enable DoF");

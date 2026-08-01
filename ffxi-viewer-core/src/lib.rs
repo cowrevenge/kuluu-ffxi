@@ -397,9 +397,8 @@ impl<S: SceneSource + Resource + Component<Mutability = bevy::ecs::component::Mu
                 .run_if(resource_changed::<GraphicsSettings>),
         );
 
-        // Runs every frame (not gated on settings changes): the Vanilla sun
-        // flare needs the depth prepass only while the sun is up, so this tracks
-        // VanaSky, not just GraphicsSettings.
+        // Runs every frame (not gated on settings changes) so the DepthPrepass
+        // self-heals across the AA camera despawn/respawn.
         #[cfg(not(target_arch = "wasm32"))]
         app.add_systems(
             Update,

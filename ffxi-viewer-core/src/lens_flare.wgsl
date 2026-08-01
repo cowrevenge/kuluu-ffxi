@@ -5,8 +5,9 @@
 // (over)fill the frustum, so its UV [0,1]² maps to the screen. Unlike the old
 // CPU path, the sun's screen position is projected HERE, against the live view
 // matrix the renderer is using this frame — so the flare can't lag the camera.
-// Occlusion is sampled from the depth prepass, so the flare fades behind terrain
-// instead of shining through it.
+// Occlusion is a CPU raycast against the zone collision BVH, fed in as
+// flare_params.w (lens_flare.rs SunOcclusion), so the flare fades behind
+// terrain without needing a depth prepass.
 //
 // Additive blend: where the flare contributes nothing the fragment is black
 // (adds zero), so the quad can cover the whole screen cheaply.
@@ -20,7 +21,6 @@
 
 #import bevy_pbr::forward_io::VertexOutput
 #import bevy_pbr::mesh_view_bindings::view
-#import bevy_pbr::prepass_utils
 
 const MAX_FLARE_ELEMENTS: u32 = 16u;
 
@@ -29,7 +29,8 @@ struct LensFlareUniform {
     sun_dir_intensity: vec4<f32>,
     // rgb = flare tint, a = unused.
     tint: vec4<f32>,
-    // x = element count, y = 1.0 when the lf0x sheet is loaded (data-driven chain).
+    // x = element count, y = 1.0 when the lf0x sheet is loaded (data-driven
+    // chain), z = sprite scale, w = sun visibility [0,1] (CPU BVH raycast).
     flare_params: vec4<f32>,
     // x = per-element offset fraction along sun->opposite.
     offsets: array<vec4<f32>, 16>,
@@ -42,8 +43,8 @@ struct LensFlareUniform {
 @group(#{MATERIAL_BIND_GROUP}) @binding(2) var flare_samp: sampler;
 
 // Distance used to synthesize a world point in the sun's direction. Matched to
-// the skybox radius (sun_moon::SKY_RADIUS) so the sun's depth equals the sky's
-// depth — clear-sky pixels read as "not occluded", only real geometry occludes.
+// the skybox radius (sun_moon::SKY_RADIUS, pinned by a guard test in
+// lens_flare.rs) so the projected flare sits exactly on the sun disc.
 const SUN_SKY_RADIUS: f32 = 4000.0;
 
 fn fully_transparent() -> vec4<f32> {
@@ -59,14 +60,6 @@ fn disc(uv: vec2<f32>, centre: vec2<f32>, radius: f32, aspect: f32) -> f32 {
     d.x = d.x * aspect; // undo viewport stretch so the disc stays round
     let r = length(d);
     return 1.0 - smoothstep(0.0, radius, r);
-}
-
-// View-space Z of a clip-space point (negative in front of the camera; more
-// negative = farther). Used to compare scene vs sun depth in linear units, which
-// has uniform precision (NDC reverse-Z does not, far away).
-fn view_z(clip: vec4<f32>) -> f32 {
-    let v = view.view_from_clip * clip;
-    return v.z / v.w;
 }
 
 @fragment
@@ -89,33 +82,10 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
 
     let aspect = view.viewport.z / max(view.viewport.w, 1.0);
 
-    // --- Soft occlusion from the depth prepass (geometry in front of the sun). ---
-    var visibility = 1.0;
-#ifdef DEPTH_PREPASS
-    let sun_z = view_z(sun_clip);
-    let sun_px = sun * view.viewport.zw + view.viewport.xy;
-    let taps = array<vec2<f32>, 5>(
-        vec2<f32>(0.0, 0.0),
-        vec2<f32>(6.0, 0.0),
-        vec2<f32>(-6.0, 0.0),
-        vec2<f32>(0.0, 6.0),
-        vec2<f32>(0.0, -6.0),
-    );
-    var vis_sum = 0.0;
-    for (var i = 0; i < 5; i = i + 1) {
-        let px = sun_px + taps[i];
-        let scene_depth = bevy_pbr::prepass_utils::prepass_depth(vec4<f32>(px, 0.0, 0.0), 0u);
-        let scene_z = view_z(vec4<f32>(sun_ndc, scene_depth, 1.0));
-        // scene_z, sun_z are negative; occluded when scene sits at least ~5%
-        // nearer than the sky distance. The skybox itself (≈ sun_z) stays visible.
-        let occluded = scene_z > sun_z * 0.95;
-        vis_sum = vis_sum + select(1.0, 0.0, occluded);
-    }
-    visibility = vis_sum / 5.0;
+    let visibility = data.flare_params.w;
     if (visibility <= 0.0) {
         return fully_transparent();
     }
-#endif
 
     // Screen UV from the framebuffer coord, NOT in.uv: the quad is oversized by
     // FLARE_OVERSCAN, so its [0,1] UV spills past the frustum and would drift the
@@ -131,7 +101,7 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     // Each lens-flare mesh is an additive textured quad placed at
     // sun*(1-offset) + opposite*offset along the sun->screen-centre axis (opposite =
     // sun + 2*to_centre), sized from its native sprite texels. Intensity rides the
-    // depth-prepass occlusion `visibility` instead of an analytic halo.
+    // raycast occlusion `visibility` instead of an analytic halo.
     if (data.flare_params.y > 0.5) {
         let count = u32(data.flare_params.x);
         let to_centre_d = centre - sun;

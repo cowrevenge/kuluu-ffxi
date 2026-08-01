@@ -26,7 +26,8 @@ pub struct LensFlareUniform {
     pub tint: Vec4,
 
     // x = element count, y = 1.0 when the lf0x sheet/texture is loaded (data-driven
-    // chain) else 0.0 (analytic fallback), zw unused.
+    // chain) else 0.0 (analytic fallback), z = LENS_FLARE_SCALE, w = sun visibility
+    // [0,1] from SunOcclusion.
     pub flare_params: Vec4,
 
     // Per-element: x = offset fraction along sun->opposite; yz = native sprite
@@ -57,6 +58,20 @@ pub struct LensFlareMaterial {
     #[texture(1)]
     #[sampler(2)]
     pub flare_tex: Option<Handle<Image>>,
+}
+
+// Fraction of the sun left unoccluded by zone geometry, written by a client-side
+// raycast against its zone collision BVH (ffxi-client sun_occlusion.rs). Consumers
+// without a BVH (wasm viewer, headless example) keep the default: fully visible.
+#[derive(Resource, Clone, Copy, Debug)]
+pub struct SunOcclusion {
+    pub visibility: f32,
+}
+
+impl Default for SunOcclusion {
+    fn default() -> Self {
+        Self { visibility: 1.0 }
+    }
 }
 
 // Per-zone lf0x sheet (offsets + UV frames), loaded from the zone DAT. None where the
@@ -107,9 +122,10 @@ fn spawn_lens_flare(
 }
 
 #[allow(clippy::type_complexity)]
-fn lens_flare_system(
+pub fn lens_flare_system(
     settings: Res<GraphicsSettings>,
     sky: Res<VanaSky>,
+    occlusion: Res<SunOcclusion>,
     cam_q: Query<
         (&Transform, &Camera, &Projection),
         (With<crate::camera::OperatorCamera>, Without<LensFlareQuad>),
@@ -131,7 +147,7 @@ fn lens_flare_system(
     // The painterly flare is the Vanilla-mode sun glare; Enhanced uses bloom.
     let vanilla = !settings.sky_embellishments_enabled();
     let sun_up = sky.sun_altitude > 0.0;
-    if !vanilla || !sun_up {
+    if !vanilla || !sun_up || occlusion.visibility <= 0.0 {
         *vis = Visibility::Hidden;
         return;
     }
@@ -145,11 +161,9 @@ fn lens_flare_system(
         return;
     };
 
-    // World-space sun direction (camera-independent; same formula as
-    // sun_moon::sun_moon_system). The shader projects it against the live view
-    // matrix, so the flare can't lag the camera.
-    let sun_angle = (sky.hour / 24.0) * 2.0 * std::f32::consts::PI - std::f32::consts::FRAC_PI_2;
-    let sun_dir = Vec3::new(sun_angle.cos(), sun_angle.sin(), 0.25).normalize();
+    // World-space sun direction (camera-independent). The shader projects it
+    // against the live view matrix, so the flare can't lag the camera.
+    let sun_dir = crate::sun_moon::sun_direction(sky.hour);
 
     let elev = (sky.sun_altitude / std::f32::consts::FRAC_PI_2).clamp(0.0, 1.0);
     let intensity = 0.55 + 0.45 * elev;
@@ -169,6 +183,7 @@ fn lens_flare_system(
 
     if let Some(mut mat) = mats.get_mut(&flare_mat.0) {
         mat.data.sun_dir_intensity = sun_dir.extend(intensity);
+        mat.data.flare_params.w = occlusion.visibility;
     }
 }
 
@@ -264,6 +279,7 @@ impl Plugin for LensFlarePlugin {
     fn build(&self, app: &mut App) {
         embedded_asset!(app, "lens_flare.wgsl");
         app.init_resource::<LensFlareSheet>()
+            .init_resource::<SunOcclusion>()
             .add_plugins(MaterialPlugin::<LensFlareMaterial>::default())
             .add_systems(Startup, spawn_lens_flare)
             .add_systems(Update, load_lens_flare_sheet)
@@ -271,5 +287,21 @@ impl Plugin for LensFlarePlugin {
                 Update,
                 lens_flare_system.after(crate::sun_moon::sun_moon_system),
             );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn wgsl_sun_sky_radius_matches_sun_moon() {
+        let wgsl = include_str!("lens_flare.wgsl");
+        let expected = format!(
+            "const SUN_SKY_RADIUS: f32 = {:?};",
+            crate::sun_moon::SKY_RADIUS
+        );
+        assert!(
+            wgsl.contains(&expected),
+            "lens_flare.wgsl SUN_SKY_RADIUS drifted from sun_moon::SKY_RADIUS ({expected})"
+        );
     }
 }

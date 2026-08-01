@@ -402,44 +402,60 @@ pub fn sync_aggro_system(
 
     let self_char_id = snap.self_char_id.unwrap_or(0);
 
+    // Aggro state derives from the snapshot, so the map rebuild + material
+    // reconciliation only run on snapshot frames; the gizmo line still draws
+    // every frame from the Aggroing marker set by the last reconciliation.
+    let dirty = state.dirty;
+
     let mut claim_by_id: HashMap<u32, u32> = HashMap::new();
 
     let mut aggroing: HashMap<u32, bool> = HashMap::new();
-    for ent in &snap.entities {
-        if ent.bt_target_id as u16 == self_uid
-            && matches!(ent.kind, EntityKind::Mob | EntityKind::Pet)
-        {
-            aggroing.insert(ent.id, true);
-        }
-        if matches!(ent.kind, EntityKind::Mob) {
-            claim_by_id.insert(ent.id, ent.claim_id);
+    if dirty {
+        for ent in &snap.entities {
+            if ent.bt_target_id as u16 == self_uid
+                && matches!(ent.kind, EntityKind::Mob | EntityKind::Pet)
+            {
+                aggroing.insert(ent.id, true);
+            }
+            if matches!(ent.kind, EntityKind::Mob) {
+                claim_by_id.insert(ent.id, ent.claim_id);
+            }
         }
     }
 
     let self_pos = self_q.single().ok().map(|t| t.translation);
 
     for (e, w, t, mut m, has_aggro) in q.iter_mut() {
-        let should_aggro = aggroing.get(&w.id).copied().unwrap_or(false);
-        match (should_aggro, has_aggro.is_some()) {
-            (true, false) => {
-                commands.entity(e).try_insert(Aggroing);
-                m.0 = mats.aggro.clone();
-            }
-            (true, true) => {
-                m.0 = mats.aggro.clone();
-            }
-            (false, true) => {
-                commands.entity(e).remove::<Aggroing>();
+        let has_marker = has_aggro.is_some();
+        let should_aggro = if dirty {
+            aggroing.get(&w.id).copied().unwrap_or(false)
+        } else {
+            has_marker
+        };
+        if dirty {
+            match (should_aggro, has_marker) {
+                (true, false) => {
+                    commands.entity(e).try_insert(Aggroing);
+                    m.0 = mats.aggro.clone();
+                }
+                (true, true) => {
+                    if m.0 != mats.aggro {
+                        m.0 = mats.aggro.clone();
+                    }
+                }
+                (false, true) => {
+                    commands.entity(e).remove::<Aggroing>();
 
-                let restore = if matches!(w.kind, EntityKind::Mob) {
-                    let claim = claim_by_id.get(&w.id).copied().unwrap_or(0);
-                    pick_mob_material(&mats, claim, self_char_id, false).clone()
-                } else {
-                    pick_material(&mats, w.kind, false)
-                };
-                m.0 = restore;
+                    let restore = if matches!(w.kind, EntityKind::Mob) {
+                        let claim = claim_by_id.get(&w.id).copied().unwrap_or(0);
+                        pick_mob_material(&mats, claim, self_char_id, false).clone()
+                    } else {
+                        pick_material(&mats, w.kind, false)
+                    };
+                    m.0 = restore;
+                }
+                (false, false) => {}
             }
-            (false, false) => {}
         }
 
         if should_aggro {

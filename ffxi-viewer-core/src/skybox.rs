@@ -39,7 +39,10 @@ impl Default for SkyboxGradientMaterial {
                     Vec4::new(0.2, 0.4, 0.7, 1.0),
                 ],
 
-                cloud_params: Vec4::new(0.5, 0.0, 0.0, 0.0),
+                // Procedural FBM clouds retired in favour of the weat/<type>/
+                // mesh clouds (zone_clouds.rs); the gradient dome carries no
+                // cloud layer, so the uniform stays zero for layout compat.
+                cloud_params: Vec4::ZERO,
                 extra: Vec4::ZERO,
             },
         }
@@ -91,11 +94,14 @@ fn update_skybox(
     mut toasts: MessageWriter<crate::snapshot::ToastEvent>,
     vana_clock: Res<crate::vana_time::VanaClock>,
     mut prev_keyframe_time: Local<Option<u32>>,
+    mut last_applied: Local<Option<([Vec4; 8], [Vec4; 2])>>,
 ) {
     let cam_pos = cam_q.single().map(|t| t.translation).unwrap_or(Vec3::ZERO);
 
     let sky_mat = if let Ok((mut sky_xf, sky_mat)) = sky_q.single_mut() {
-        sky_xf.translation = cam_pos;
+        if sky_xf.translation != cam_pos {
+            sky_xf.translation = cam_pos;
+        }
         Some(sky_mat.0.clone())
     } else {
         None
@@ -144,16 +150,16 @@ fn update_skybox(
         (colors, altitudes)
     });
 
-    if let Some(handle) = sky_mat {
-        if let Some(mut mat) = mats.get_mut(&handle) {
-            if let Some((colors, altitudes)) = gradient {
+    // Tracked get_mut marks the material Modified (uniform re-encode +
+    // bind-group rebuild), so only write when the sampled gradient — which
+    // steps once per Vana'diel minute — actually changed.
+    if let (Some(handle), Some((colors, altitudes))) = (sky_mat, gradient) {
+        if *last_applied != Some((colors, altitudes)) {
+            if let Some(mut mat) = mats.get_mut(&handle) {
                 mat.data.colors = colors;
                 mat.data.altitudes_packed = altitudes;
+                *last_applied = Some((colors, altitudes));
             }
-            // Procedural FBM clouds retired in favour of the weat/<type>/ mesh
-            // clouds (zone_clouds.rs); the gradient dome carries no cloud layer.
-            mat.data.cloud_params = Vec4::ZERO;
-            mat.data.extra.x = 0.0;
         }
     }
 }

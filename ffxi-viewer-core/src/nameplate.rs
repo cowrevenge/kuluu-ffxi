@@ -89,6 +89,7 @@ pub fn update_nameplates_system(
     mut label_q: Query<(&NameplateLabel, &mut Text), Without<NameplateCoord>>,
     mut coord_q: Query<&mut Text, (With<NameplateCoord>, Without<NameplateLabel>)>,
     mut commands: Commands,
+    mut hp_by_id: Local<HashMap<u32, Option<u8>>>,
 ) {
     let Ok((camera, cam_t)) = cam_q.single() else {
         return;
@@ -104,33 +105,41 @@ pub fn update_nameplates_system(
         pos_by_id.insert(w.id, (t.translation, nameplate_anchor_y(baked)));
     }
 
-    let mut hp_by_id: HashMap<u32, Option<u8>> = HashMap::new();
-    for ent in &state.snapshot.entities {
-        hp_by_id.insert(ent.id, ent.hp_pct);
+    // HP only changes with a snapshot; screen-space repositioning below still
+    // runs every frame.
+    let dirty = state.dirty;
+    if dirty {
+        hp_by_id.clear();
+        for ent in &state.snapshot.entities {
+            hp_by_id.insert(ent.id, ent.hp_pct);
+        }
     }
 
     for (ui_entity, np, mut node, children) in &mut nameplate_q {
         match pos_by_id.get(&np.entity_id) {
             Some(&(world_pos, label_y)) => {
                 let head = world_pos + Vec3::Y * label_y;
-                match camera.world_to_viewport(&cam_global, head) {
-                    Ok(screen) => {
-                        node.left = Val::Px(screen.x * viewport_to_window - 40.0);
-                        node.top = Val::Px(screen.y * viewport_to_window - 16.0);
-                    }
-                    Err(_) => {
-                        node.left = Val::Px(-9999.0);
-                        node.top = Val::Px(-9999.0);
-                    }
+                let (want_left, want_top) = match camera.world_to_viewport(&cam_global, head) {
+                    Ok(screen) => (
+                        Val::Px(screen.x * viewport_to_window - 40.0),
+                        Val::Px(screen.y * viewport_to_window - 16.0),
+                    ),
+                    Err(_) => (Val::Px(-9999.0), Val::Px(-9999.0)),
+                };
+                if node.left != want_left || node.top != want_top {
+                    node.left = want_left;
+                    node.top = want_top;
                 }
 
                 let hp_pct = hp_by_id.get(&np.entity_id).copied().flatten();
                 let coord_str = format_coord(world_pos);
                 for child in children.iter() {
                     if let Ok((label, mut text)) = label_q.get_mut(child) {
-                        let want = format_label(&label.base_name, hp_pct, np.kind);
-                        if **text != want {
-                            **text = want;
+                        if dirty {
+                            let want = format_label(&label.base_name, hp_pct, np.kind);
+                            if **text != want {
+                                **text = want;
+                            }
                         }
                     } else if let Ok(mut text) = coord_q.get_mut(child) {
                         if **text != coord_str {

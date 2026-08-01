@@ -205,6 +205,8 @@ pub fn update_nameplate_billboards_system(
     mut images: ResMut<Assets<Image>>,
     font: Res<BillboardFont>,
     mut commands: Commands,
+    mut hp_by_id: Local<std::collections::HashMap<u32, Option<u8>>>,
+    mut claim_by_id: Local<std::collections::HashMap<u32, u32>>,
 ) {
     let Ok((cam_t, projection)) = cam_q.single() else {
         return;
@@ -225,11 +227,17 @@ pub fn update_nameplate_billboards_system(
     }
 
     let self_char_id: Option<u32> = state.snapshot.self_char_id;
-    let mut hp_by_id: std::collections::HashMap<u32, Option<u8>> = std::collections::HashMap::new();
-    let mut claim_by_id: std::collections::HashMap<u32, u32> = std::collections::HashMap::new();
-    for ent in &state.snapshot.entities {
-        hp_by_id.insert(ent.id, ent.hp_pct);
-        claim_by_id.insert(ent.id, ent.claim_id);
+    // HP/claim only change with a snapshot, and the re-raster inputs (name,
+    // color, hp) derive from them — so the texture-regen check only runs on
+    // snapshot frames. Billboard orientation/scale below stays per-frame.
+    let dirty = state.dirty;
+    if dirty {
+        hp_by_id.clear();
+        claim_by_id.clear();
+        for ent in &state.snapshot.entities {
+            hp_by_id.insert(ent.id, ent.hp_pct);
+            claim_by_id.insert(ent.id, ent.claim_id);
+        }
     }
 
     for (ui_entity, mut np, mut aspect, mut transform, mut vis, mat) in &mut billboards {
@@ -262,6 +270,9 @@ pub fn update_nameplate_billboards_system(
         transform.scale = Vec3::new(world_width, world_height, 1.0);
         *vis = Visibility::Visible;
 
+        // Pulse is time-driven (steps at RETAIL_FPS via pulse_frame, so the
+        // last_alpha guard bounds writes to 30/s) and must run on non-snapshot
+        // frames; only the snapshot-derived re-raster below is dirty-gated.
         let want_alpha = if target.id == Some(np.entity_id) {
             target_alpha_pulse(pulse_frame)
         } else {
@@ -272,6 +283,10 @@ pub fn update_nameplate_billboards_system(
                 mat_data.base_color = Color::WHITE.with_alpha(want_alpha);
                 np.last_alpha = want_alpha;
             }
+        }
+
+        if !dirty {
+            continue;
         }
 
         let engaged = matches!(np.kind, EntityKind::Mob)

@@ -407,15 +407,16 @@ pub fn track_entity_motion_system(
     state: Res<SceneState>,
     mut motion: ResMut<EntityMotion>,
     q: Query<(&WorldEntity, &Transform)>,
+    mut heading_by_id: Local<std::collections::HashMap<u32, u8>>,
 ) {
     let dt = time.delta_secs().max(1e-4);
 
-    let heading_by_id: std::collections::HashMap<u32, u8> = state
-        .snapshot
-        .entities
-        .iter()
-        .map(|e| (e.id, e.heading))
-        .collect();
+    // Headings only change with a snapshot; rebuilding the map every frame was
+    // pure per-frame churn in the crowd scene.
+    if state.dirty {
+        heading_by_id.clear();
+        heading_by_id.extend(state.snapshot.entities.iter().map(|e| (e.id, e.heading)));
+    }
     for (world, transform) in &q {
         let pos = transform.translation;
 

@@ -101,6 +101,14 @@ fn draw_navmesh_overlay(mut gizmos: Gizmos, state: Res<NavmeshState>) {
     }
 }
 
+// Below this the re-snap is invisible; writing anyway marks every crowd
+// Transform changed each frame and defeats Bevy's sparse mesh-uniform uploads.
+const GROUND_SNAP_EPSILON_YALMS: f32 = 1e-3;
+
+fn ground_snap_needed(current_y: f32, ground_y: f32) -> bool {
+    (current_y - ground_y).abs() > GROUND_SNAP_EPSILON_YALMS
+}
+
 fn snap_entities_to_mzb_floor_system(
     collision_geom: Res<ffxi_viewer_core::dat_mzb::MzbCollisionGeometry>,
     scene: Res<SceneState>,
@@ -113,7 +121,7 @@ fn snap_entities_to_mzb_floor_system(
     if collision_geom.tri_count() == 0 {
         let wire_self_y = ffxi_viewer_core::ffxi_to_bevy(scene.snapshot.self_pos.pos).y;
         for (_we, mut t, is_self) in q.iter_mut() {
-            if is_self {
+            if is_self && ground_snap_needed(t.translation.y, wire_self_y) {
                 t.translation.y = wire_self_y;
             }
         }
@@ -130,7 +138,9 @@ fn snap_entities_to_mzb_floor_system(
         if let Some(ground) = collision_geom
             .ground_nearest(Vec2::new(t.translation.x, t.translation.z), t.translation.y)
         {
-            t.translation.y = ground;
+            if ground_snap_needed(t.translation.y, ground) {
+                t.translation.y = ground;
+            }
         }
     }
 }
@@ -138,4 +148,26 @@ fn snap_entities_to_mzb_floor_system(
 #[inline]
 fn detour_to_bevy(d: [f32; 3]) -> Vec3 {
     Vec3::new(d[0], d[1], d[2])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ground_snap_skips_sub_epsilon_deltas() {
+        assert!(!ground_snap_needed(10.0, 10.0));
+        assert!(!ground_snap_needed(
+            10.0,
+            10.0 + GROUND_SNAP_EPSILON_YALMS * 0.5
+        ));
+        assert!(ground_snap_needed(
+            10.0,
+            10.0 + GROUND_SNAP_EPSILON_YALMS * 2.0
+        ));
+        assert!(ground_snap_needed(
+            10.0,
+            10.0 - GROUND_SNAP_EPSILON_YALMS * 2.0
+        ));
+    }
 }

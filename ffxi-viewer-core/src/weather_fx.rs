@@ -374,6 +374,41 @@ pub fn update_weather_modifier_system(
     }
 }
 
+// DistanceFog/FogFalloff derive no PartialEq upstream; the compare-before-write
+// guards need one so an unchanged weather fog stops re-marking the component.
+fn fog_falloff_eq(a: &FogFalloff, b: &FogFalloff) -> bool {
+    match (a, b) {
+        (FogFalloff::Linear { start, end }, FogFalloff::Linear { start: s2, end: e2 }) => {
+            start == s2 && end == e2
+        }
+        (FogFalloff::Exponential { density }, FogFalloff::Exponential { density: d2 }) => {
+            density == d2
+        }
+        (
+            FogFalloff::ExponentialSquared { density },
+            FogFalloff::ExponentialSquared { density: d2 },
+        ) => density == d2,
+        (
+            FogFalloff::Atmospheric {
+                extinction,
+                inscattering,
+            },
+            FogFalloff::Atmospheric {
+                extinction: e2,
+                inscattering: i2,
+            },
+        ) => extinction == e2 && inscattering == i2,
+        _ => false,
+    }
+}
+
+fn distance_fog_eq(a: &DistanceFog, b: &DistanceFog) -> bool {
+    a.color == b.color
+        && a.directional_light_color == b.directional_light_color
+        && a.directional_light_exponent == b.directional_light_exponent
+        && fog_falloff_eq(&a.falloff, &b.falloff)
+}
+
 pub fn apply_weather_to_ambient_and_fog_system(
     active: Res<ActiveWeatherModifier>,
     mut ambient: ResMut<GlobalAmbientLight>,
@@ -384,17 +419,25 @@ pub fn apply_weather_to_ambient_and_fog_system(
 ) {
     let base = active.base_ambient_color.to_linear();
     let tint = active.modifier.ambient_tint.to_linear();
-    ambient.color = Color::LinearRgba(LinearRgba::new(
+    let want_color = Color::LinearRgba(LinearRgba::new(
         base.red * tint.red,
         base.green * tint.green,
         base.blue * tint.blue,
         1.0,
     ));
-    ambient.brightness = active.base_ambient_brightness * active.modifier.ambient_brightness_mul;
+    let want_brightness = active.base_ambient_brightness * active.modifier.ambient_brightness_mul;
+    if ambient.color != want_color || ambient.brightness != want_brightness {
+        ambient.color = want_color;
+        ambient.brightness = want_brightness;
+    }
 
     if let (Ok(fog_slot), Ok(cam_entity)) = (q_cam.single_mut(), cam.single()) {
         match (active.modifier.fog.clone(), fog_slot) {
-            (Some(new_fog), Some(mut existing)) => *existing = new_fog,
+            (Some(new_fog), Some(mut existing)) => {
+                if !distance_fog_eq(&existing, &new_fog) {
+                    *existing = new_fog;
+                }
+            }
             (Some(new_fog), None) => {
                 commands.entity(cam_entity).insert(new_fog);
             }
@@ -435,7 +478,9 @@ pub fn apply_weather_to_sun_system(
         }
         *sun_base = Some((base, want));
     }
-    ambient.brightness *= amb_mul;
+    if amb_mul != 1.0 {
+        ambient.brightness *= amb_mul;
+    }
 }
 
 pub fn manage_weather_particles_system(
@@ -586,6 +631,28 @@ pub fn update_weather_particles_system(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn distance_fog_eq_matches_identical_and_rejects_different() {
+        let fog = |end: f32| DistanceFog {
+            color: Color::srgb(0.5, 0.5, 0.5),
+            falloff: FogFalloff::Linear { start: 10.0, end },
+            ..default()
+        };
+        assert!(distance_fog_eq(&fog(100.0), &fog(100.0)));
+        assert!(!distance_fog_eq(&fog(100.0), &fog(200.0)));
+
+        let exp = DistanceFog {
+            color: Color::srgb(0.5, 0.5, 0.5),
+            falloff: FogFalloff::Exponential { density: 0.01 },
+            ..default()
+        };
+        assert!(
+            !distance_fog_eq(&fog(100.0), &exp),
+            "different falloff variants must compare unequal"
+        );
+        assert!(distance_fog_eq(&exp, &exp.clone()));
+    }
 
     #[test]
     fn every_weather_variant_has_a_modifier() {

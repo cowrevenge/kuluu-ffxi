@@ -350,17 +350,34 @@ pub fn update_chat_panel(
 ) {
     let now = time.elapsed_secs();
 
-    let all = rendered_chat(&state);
+    // Row text derives entirely from chat content + scroll/mode/verbosity, so
+    // the per-row format/segment pass only runs when one of those changed
+    // (SceneState ticks only on real content changes since ingest_system clears
+    // `dirty` via bypass). Border + height decay stay per-frame: hover and
+    // idle-fade are per-frame inputs.
+    let refill = state.is_changed()
+        || mode.is_changed()
+        || scroll.is_changed()
+        || battle_scroll.is_changed()
+        || debug_scroll.is_changed()
+        || verbosity.is_changed();
+
+    let all = if refill {
+        rendered_chat(&state)
+    } else {
+        Vec::new()
+    };
 
     for (panel, mut border, mut node, mut decay, rel_cursor, panel_children) in &mut panel_q {
-        let filtered: Vec<&ChatLine> = all
-            .iter()
-            .copied()
-            .filter(|l| {
-                panel.kind.accepts(l.channel)
-                    && crate::snapshot::chat_line_visible(l.channel, verbosity.dev_hud)
-            })
-            .collect();
+        let filtered: Option<Vec<&ChatLine>> = refill.then(|| {
+            all.iter()
+                .copied()
+                .filter(|l| {
+                    panel.kind.accepts(l.channel)
+                        && crate::snapshot::chat_line_visible(l.channel, verbosity.dev_hud)
+                })
+                .collect()
+        });
 
         let scroll_offset = match panel.kind {
             ChatKind::Social => scroll.rows,
@@ -390,10 +407,15 @@ pub fn update_chat_panel(
             *border = BorderColor::all(want_border);
         }
 
-        let new_msg = filtered.len() > decay.prev_filtered_len;
-        decay.prev_filtered_len = filtered.len();
+        if let Some(filtered) = &filtered {
+            let new_msg = filtered.len() > decay.prev_filtered_len;
+            decay.prev_filtered_len = filtered.len();
+            if new_msg {
+                decay.last_active_secs = now;
+            }
+        }
         let interacted = rel_cursor.cursor_over() || scroll_offset != 0 || focused;
-        if new_msg || interacted {
+        if interacted {
             decay.last_active_secs = now;
         }
         let target_h = if chat_expanded {
@@ -407,6 +429,10 @@ pub fn update_chat_panel(
         if node.height != want_h {
             node.height = want_h;
         }
+
+        let Some(filtered) = filtered else {
+            continue;
+        };
 
         // Fill every pre-spawned row (newest at the bottom); the panel height +
         // overflow clip windows how many actually show, so compact reveals the

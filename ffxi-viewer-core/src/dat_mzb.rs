@@ -1004,12 +1004,43 @@ pub fn build_zone_mmb_spawns(
             Vec3::new(b[0], b[1], b[2]),
         );
         let bevy_transform = to_bevy * m_ffxi;
+        let (local_min, local_max) = chunks
+            .get(chunk_idx)
+            .and_then(|c| mmb::decrypt(c.data).ok())
+            .and_then(|d| MmbHeader::parse(&d).ok().and_then(|h| h.local_bounds()))
+            .unwrap_or(([0.0; 3], [0.0; 3]));
+        let mut world_min = Vec3::splat(f32::INFINITY);
+        let mut world_max = Vec3::splat(f32::NEG_INFINITY);
+        for corner in 0..8 {
+            let p = Vec3::new(
+                if corner & 1 == 0 {
+                    local_min[0]
+                } else {
+                    local_max[0]
+                },
+                if corner & 2 == 0 {
+                    local_min[1]
+                } else {
+                    local_max[1]
+                },
+                if corner & 4 == 0 {
+                    local_min[2]
+                } else {
+                    local_max[2]
+                },
+            );
+            let w = bevy_transform.transform_point3(p);
+            world_min = world_min.min(w);
+            world_max = world_max.max(w);
+        }
         out.push(ZoneMmbSpawn {
             chunk_idx,
             bevy_transform,
             water: Some(crate::dat_mmb::GenWater {
                 tint: Vec4::from_array(ms.tint),
                 uv_scroll: Vec2::new(ms.uv_scroll[0], ms.uv_scroll[1]),
+                world_min,
+                world_max,
             }),
         });
     }
@@ -1796,7 +1827,26 @@ fn spawn_mzb_overlay(
     // One localized footprint per water-material placement (NOT merged by height),
     // so spawn_zone_water can distance-gate each like an MMB placement. Merging the
     // whole zone's water into one mesh would make it un-streamable.
+    //
+    // Footprints already covered by a generator water sheet are dropped: the
+    // sheet IS the retail water visual there, and the placeholder plane
+    // double-drawing under it reads as a darker rectangle with hard seams.
+    // The Y window absorbs the collision-vs-visual gap (Lower Jeuno: collision
+    // water_height 24 vs sheet surface 17.5, a 6.5-unit offset) without eating
+    // genuinely separate ponds high above a sheet.
+    const GEN_SHEET_SUPPRESS_Y: f32 = 10.0;
+    let sheets: Vec<(Vec3, Vec3)> = geom
+        .mmb_spawns
+        .as_ref()
+        .map(|spawns| {
+            spawns
+                .iter()
+                .filter_map(|s| s.water.map(|w| (w.world_min, w.world_max)))
+                .collect()
+        })
+        .unwrap_or_default();
     let mut water_added = 0usize;
+    let mut water_suppressed = 0usize;
     for inst in instances.iter() {
         let Some(h_bevy) = inst.water_height_bevy else {
             continue;
@@ -1820,6 +1870,19 @@ fn spawn_mzb_overlay(
             max = max.max(Vec3::from_array(flat));
             positions.push(flat);
         }
+        let center = 0.5 * (min + max);
+        let covered = sheets.iter().any(|(smin, smax)| {
+            center.x >= smin.x
+                && center.x <= smax.x
+                && center.z >= smin.z
+                && center.z <= smax.z
+                && h_bevy >= smin.y - GEN_SHEET_SUPPRESS_Y
+                && h_bevy <= smax.y + GEN_SHEET_SUPPRESS_Y
+        });
+        if covered {
+            water_suppressed += 1;
+            continue;
+        }
         pending_water.specs.push_back(WaterSpec {
             positions,
             indices: sub.indices.clone(),
@@ -1830,14 +1893,15 @@ fn spawn_mzb_overlay(
         });
         water_added += 1;
     }
-    if water_added > 0 {
+    if water_added > 0 || water_suppressed > 0 {
         push_system_msg(
             toasts,
             format!(
-                "/load_mzb {}: {} water surface{} queued",
+                "/load_mzb {}: {} water surface{} queued ({} under generator sheets)",
                 req.file_id,
                 water_added,
                 if water_added == 1 { "" } else { "s" },
+                water_suppressed,
             ),
         );
     }

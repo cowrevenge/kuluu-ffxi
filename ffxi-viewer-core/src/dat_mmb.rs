@@ -104,6 +104,11 @@ pub struct AppliedTextureFiltering {
 pub struct GenWater {
     pub tint: Vec4,
     pub uv_scroll: Vec2,
+    /// World-space AABB of the transformed sheet (MMB header bounds × the
+    /// generator transform), used to suppress the placeholder MZB water plane
+    /// where the retail sheet already covers the surface.
+    pub world_min: Vec3,
+    pub world_max: Vec3,
 }
 
 #[derive(Message, Debug, Clone, Copy)]
@@ -135,7 +140,10 @@ pub fn scroll_gen_water_uv(
     q: Query<&GenWaterScroll>,
     mut materials: ResMut<Assets<FfxiZoneMaterial>>,
 ) {
-    let t = time.elapsed_secs();
+    // The generator's 0x27/0x28 velocity is UV per retail frame, not per second
+    // (research/xim TextureCoordinateUpdater; same convention as zone_clouds
+    // drift_clouds) — raw seconds scrolls the sea 30× too slow to perceive.
+    let t = time.elapsed_secs() * crate::scheduler_runtime::RETAIL_FPS;
     for gw in q.iter() {
         if let Some(mat) = materials.get_mut_untracked(&gw.material) {
             // fract keeps the offset small for f32 precision over long sessions;

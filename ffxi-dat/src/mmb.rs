@@ -113,6 +113,16 @@ impl<'a> MmbHeader<'a> {
         raw.trim_end().to_string()
     }
 
+    // Model-local AABB from the payload head: u32 record count, then min/max
+    // pairs per axis (x_min, x_max, y_min, y_max, z_min, z_max). Verified
+    // against zone 345: lowsea (±1.4 flat sea tile) and the tshimonowater
+    // stub (±20, zero mesh sections — the AABB is all it carries).
+    pub fn local_bounds(&self) -> Option<([f32; 3], [f32; 3])> {
+        let b = self.payload.get(4..28)?;
+        let f = |i: usize| f32::from_le_bytes(b[i * 4..i * 4 + 4].try_into().unwrap());
+        Some(([f(0), f(2), f(4)], [f(1), f(3), f(5)]))
+    }
+
     pub fn zone_mesh_name(&self) -> String {
         self.header_window[16..32]
             .iter()

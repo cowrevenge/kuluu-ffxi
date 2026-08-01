@@ -32,8 +32,6 @@ pub use equip_inspect::*;
 pub enum DecodeError {
     #[error("expected at least {0} bytes, have {1}")]
     Truncated(usize, usize),
-    #[error("opcode 0x{got:03x} does not match expected 0x{expected:03x}")]
-    OpcodeMismatch { expected: u16, got: u16 },
     #[error("unrecognized discriminant 0x{0:02x}")]
     UnknownDiscriminant(u8),
 }

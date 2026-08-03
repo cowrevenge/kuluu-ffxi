@@ -234,35 +234,44 @@ pub fn collect_weather_records(dat_bytes: &[u8]) -> Vec<WeatherRecord> {
 
 pub type WeatherTypeId = [u8; 4];
 
-// LSB weather id ordering: vendor/server/src/map/enums/weather.h:24-46 (None=0 ..
-// Darkness=19). The 4-char target is the `weat/<type>` subdir DatId; the five
-// string constants come from research/xim DatResource.kt:110-114
-// (suny/wind/rain/dust/fine), and clod/mist/thdr from the tree-weat.txt legend.
-// XIM is a server reimpl with no numeric-id table, so these rows are authored
-// from the id ordering above, not copied. Fallback for an out-of-range id is
-// `suny` (research/xim EnvironmentManager.kt:271 firstOrNull{==suny} ?: first).
+// Retail indexes this table with the raw server weather number and does not
+// bounds-check it: research/XIClient/src/XIClient/source/World/Weather/
+// WeatherCondition.cpp:9-13 (`WeatherTable1`), read by XiZone.cpp:400-403
+// `GetWeatherResourceID`. Rows are transcribed in DAT byte order; XIClient
+// writes them as reversed multi-char int literals ('enif' == b"fine").
+// The LSB id ordering (vendor/server/src/map/enums/weather.h:24-46, None=0 ..
+// Darkness=19) lines up 1:1 with the table index, so row 0 is `fine` — retail
+// has no `None` special case. Do NOT source these from
+// WeatherCondition.cpp's sibling `WeatherKeyframeLibrary.cpp`: that array is a
+// FourCC-keyed load list, is compacted before use, and its row 7 literal is a
+// typo (`sqal`, which no shipped directory uses).
 const WEATHER_TYPE_IDS: [WeatherTypeId; 20] = [
-    *b"suny", // 0  None
+    *b"fine", // 0  None
     *b"suny", // 1  Sunshine
     *b"clod", // 2  Clouds
     *b"mist", // 3  Fog
-    *b"suny", // 4  HotSpell
-    *b"suny", // 5  HeatWave
+    *b"dryw", // 4  HotSpell
+    *b"heat", // 5  HeatWave
     *b"rain", // 6  Rain
-    *b"rain", // 7  Squall
+    *b"squl", // 7  Squall
     *b"dust", // 8  DustStorm
-    *b"dust", // 9  SandStorm
+    *b"sand", // 9  SandStorm
     *b"wind", // 10 Wind
-    *b"wind", // 11 Gales
+    *b"stom", // 11 Gales
     *b"snow", // 12 Snow
-    *b"snow", // 13 Blizzards
+    *b"bliz", // 13 Blizzards
     *b"thdr", // 14 Thunder
-    *b"thdr", // 15 Thunderstorms
-    *b"fine", // 16 Auroras
-    *b"fine", // 17 StellarGlare
-    *b"fine", // 18 Gloom
-    *b"fine", // 19 Darkness
+    *b"bolt", // 15 Thunderstorms
+    *b"aura", // 16 Auroras
+    *b"ligt", // 17 StellarGlare
+    *b"fogd", // 18 Gloom
+    *b"dark", // 19 Darkness
 ];
+
+// XIClient ships a second, `1`-suffixed table selected per zone
+// (WeatherCondition.cpp:14-18, chosen by XiZone.cpp:344-350 `SetWeatherTable`).
+// Those containers really ship — ROM4/0/11.DAT and siblings carry sun1/clo1/
+// mis1/thd1/win1 as `weat/` children — but nothing here selects a table yet.
 
 pub const WEATHER_TYPE_FALLBACK: WeatherTypeId = *b"suny";
 
@@ -945,16 +954,19 @@ mod tests {
     // Pins the weather.h id ordering -> weat subdir rows.
     #[test]
     fn weather_type_id_maps_lsb_ids_to_subdirs() {
-        assert_eq!(weather_type_id(0), *b"suny"); // None
-        assert_eq!(weather_type_id(1), *b"suny"); // Sunshine
-        assert_eq!(weather_type_id(2), *b"clod"); // Clouds
-        assert_eq!(weather_type_id(3), *b"mist"); // Fog
-        assert_eq!(weather_type_id(6), *b"rain"); // Rain
-        assert_eq!(weather_type_id(8), *b"dust"); // DustStorm
-        assert_eq!(weather_type_id(10), *b"wind"); // Wind
-        assert_eq!(weather_type_id(12), *b"snow"); // Snow
-        assert_eq!(weather_type_id(14), *b"thdr"); // Thunder
-        assert_eq!(weather_type_id(19), *b"fine"); // Darkness
+        // Every row of XIClient WeatherCondition.cpp:9-13 `WeatherTable1`, in
+        // DAT byte order. All 20 are distinct: retail authors one `weat/<tag>`
+        // subtree per weather id, it does not collapse them onto a smaller set.
+        const EXPECTED: [WeatherTypeId; 20] = [
+            *b"fine", *b"suny", *b"clod", *b"mist", *b"dryw", *b"heat", *b"rain", *b"squl",
+            *b"dust", *b"sand", *b"wind", *b"stom", *b"snow", *b"bliz", *b"thdr", *b"bolt",
+            *b"aura", *b"ligt", *b"fogd", *b"dark",
+        ];
+        for (id, want) in EXPECTED.iter().enumerate() {
+            assert_eq!(weather_type_id(id as u16), *want, "weather id {id}");
+        }
+        let distinct: std::collections::BTreeSet<_> = EXPECTED.iter().collect();
+        assert_eq!(distinct.len(), EXPECTED.len());
     }
 
     #[test]

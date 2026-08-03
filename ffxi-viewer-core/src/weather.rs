@@ -9,7 +9,7 @@ use ffxi_dat::mzb::AreaResourceId;
 use ffxi_dat::weather::collect_zone_weather_sets;
 use ffxi_dat::weather::{
     sample_weather, weather_type_id, WeatherRecord, WeatherSetsByType, WeatherTypeId,
-    ZoneWeatherSets,
+    ZoneWeatherSets, WEATHER_TYPE_FALLBACK,
 };
 #[cfg(not(target_arch = "wasm32"))]
 use ffxi_dat::DatRoot;
@@ -58,12 +58,13 @@ pub struct ZoneWeather {
     pub area_current: Option<WeatherRecord>,
 }
 
-// Fallback chain shared by the 0x2F record selection and the celestial/particle consumers
+// Fallback shared by the 0x2F record selection and the celestial/particle consumers
 // that resolve a weat/<type>/ subtree: not every zone authors every sky family.
-const WEATHER_TYPE_FALLBACKS: [WeatherTypeId; 4] = [*b"suny", *b"fine", *b"clod", *b"mist"];
-
+// Retail does exactly one hop, straight to `suny`, when the requested container
+// misses — research/XIClient/src/XIClient/source/World/Weather/
+// WeatherTransition.cpp:52-54.
 fn weather_type_preference(want: WeatherTypeId) -> impl Iterator<Item = WeatherTypeId> {
-    std::iter::once(want).chain(WEATHER_TYPE_FALLBACKS)
+    std::iter::once(want).chain(std::iter::once(WEATHER_TYPE_FALLBACK))
 }
 
 impl ZoneWeather {

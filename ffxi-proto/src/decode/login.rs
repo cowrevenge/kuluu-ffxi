@@ -83,6 +83,27 @@ pub struct ServerLogin {
     pub myroom: Option<ServerLoginMyroom>,
 
     pub zone_in_event: Option<ZoneInEvent>,
+
+    /// Weather in force as the character zones in.
+    ///
+    /// The server sends 0x057 WEATHER only when the weather *changes*
+    /// (vendor/server/src/map/zone.cpp:672 is its sole construction site, a
+    /// CHAR_INZONE broadcast), so this is the only weather a zoning character
+    /// receives until the next change — which on a Vana'diel schedule can be a
+    /// long wait.
+    pub weather: Option<ZoneInWeather>,
+}
+
+/// Weather in force at zone-in, from the 0x00A weather block.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ZoneInWeather {
+    /// `WeatherNumber` — the LSB weather id, same discriminant order as 0x057.
+    pub weather_number: u16,
+    /// `WeatherNumber2` — the second weather slot. Populated during a
+    /// transition; not yet consumed, and not assumed to be the incoming side.
+    pub weather_number2: u16,
+    /// `WeatherOffsetTime`.
+    pub offset_time: u32,
 }
 
 /// Zone-in cutscene carried inside s2c 0x00A LOGIN: when `currentEvent` is
@@ -113,6 +134,15 @@ impl ServerLogin {
     pub(crate) const EVENT_NUM_OFFSET: usize = 0x5E;
     pub(crate) const EVENT_PARA_OFFSET: usize = 0x60;
     pub(crate) const EVENT_MODE_OFFSET: usize = 0x62;
+    // vendor/server/src/map/packets/s2c/0x00A_login.h:107-111 — WeatherNumber,
+    // WeatherNumber2, WeatherTime, WeatherTime2, WeatherOffsetTime, immediately
+    // after EventMode. The offset chain is pinned at both ends by constants this
+    // decoder already uses: MusicNum[5] at 0x52 runs to SubMapNumber at 0x5C,
+    // and past the weather block sit ShipStart/ShipEnd/IsMonstrosity, landing
+    // exactly on LOGIN_STATE_OFFSET 0x7C.
+    pub(crate) const WEATHER_NUMBER_OFFSET: usize = 0x64;
+    pub(crate) const WEATHER_NUMBER2_OFFSET: usize = 0x66;
+    pub(crate) const WEATHER_OFFSET_TIME_OFFSET: usize = 0x70;
 
     /// `PosHead.server_status` while a zone-in event is pending — the packet's
     /// event fields are only written then, and event id 0 is a real cutscene
@@ -169,6 +199,20 @@ impl ServerLogin {
                         .unwrap(),
                 ),
             });
+        let weather = (body.len() >= Self::WEATHER_OFFSET_TIME_OFFSET + 4).then(|| {
+            let u16_at = |off: usize| {
+                u16::from_le_bytes(body[off..off + 2].try_into().unwrap())
+            };
+            ZoneInWeather {
+                weather_number: u16_at(Self::WEATHER_NUMBER_OFFSET),
+                weather_number2: u16_at(Self::WEATHER_NUMBER2_OFFSET),
+                offset_time: u32::from_le_bytes(
+                    body[Self::WEATHER_OFFSET_TIME_OFFSET..Self::WEATHER_OFFSET_TIME_OFFSET + 4]
+                        .try_into()
+                        .unwrap(),
+                ),
+            }
+        });
         Ok(Self {
             unique_no: pos_head.unique_no,
             act_index: pos_head.act_index,
@@ -178,6 +222,7 @@ impl ServerLogin {
             music_num,
             myroom: ServerLoginMyroom::decode(body),
             zone_in_event,
+            weather,
         })
     }
 }
@@ -212,6 +257,24 @@ impl ServerLogout {
 
 #[cfg(test)]
 mod server_login_tests {
+    // The weather block sits between EventMode and ShipStart in
+    // vendor/server/src/map/packets/s2c/0x00A_login.h:107-111. Pin the offsets
+    // against the two constants that bracket it, so a future field insertion
+    // cannot silently slide weather onto the ship or event fields.
+    #[test]
+    fn zone_in_weather_offsets_sit_between_event_mode_and_login_state() {
+        use super::ServerLogin as L;
+        assert_eq!(L::WEATHER_NUMBER_OFFSET, L::EVENT_MODE_OFFSET + 2);
+        assert_eq!(L::WEATHER_NUMBER2_OFFSET, L::WEATHER_NUMBER_OFFSET + 2);
+        // WeatherTime + WeatherTime2 are the two u32s we skip.
+        assert_eq!(L::WEATHER_OFFSET_TIME_OFFSET, L::WEATHER_NUMBER2_OFFSET + 2 + 4 + 4);
+        // ShipStart u32, ShipEnd u16, IsMonstrosity u16, then LoginState.
+        assert_eq!(
+            L::WEATHER_OFFSET_TIME_OFFSET + 4 + 4 + 2 + 2,
+            super::ServerLoginMyroom::LOGIN_STATE_OFFSET
+        );
+    }
+
     use super::*;
 
     #[test]

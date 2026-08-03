@@ -646,6 +646,23 @@ fn handle_sub_packet(
                     let _ = event_tx.send(AgentEvent::VanaTimeSynced { game_time });
                 }
 
+                // 0x057 WEATHER is only broadcast on a weather *change*
+                // (vendor/server/src/map/zone.cpp:672 is its sole construction
+                // site), so without this a zoning character renders the default
+                // sky until the next change lands. Emitted after ZoneChanged,
+                // which clears current_weather.
+                if let Some(w) = login.weather {
+                    tracing::info!(
+                        weather_number = w.weather_number,
+                        weather_number2 = w.weather_number2,
+                        offset_time = w.offset_time,
+                        "0x00A LOGIN carries zone-in weather"
+                    );
+                    let _ = event_tx.send(AgentEvent::WeatherUpdated {
+                        weather_number: w.weather_number,
+                    });
+                }
+
                 if let Some(music) = login.music_num {
                     for (slot, track_id) in music.iter().enumerate() {
                         tracing::info!(slot, track_id, "LOGIN MusicNum");

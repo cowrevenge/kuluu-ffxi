@@ -9,6 +9,7 @@ pub mod datid;
 pub mod dmsg;
 pub mod event_dat;
 pub mod event_locate;
+pub mod footstep;
 pub mod ftable;
 pub mod generator;
 pub mod install_detect;

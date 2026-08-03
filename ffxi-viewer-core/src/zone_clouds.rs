@@ -12,7 +12,7 @@ use ffxi_dat::generator::{CloudGeneratorDef, Generator};
 use ffxi_dat::mmb::{self, parse_models};
 use ffxi_dat::particle_gen::KeyFrameTrack;
 use ffxi_dat::texture::{decode_texture, extract_texture_name};
-use ffxi_dat::weather::{weather_type_id, WeatherTypeId};
+use ffxi_dat::weather::{weather_type_id_or_default, WeatherTypeId, WEATHER_TYPE_FALLBACK};
 use ffxi_dat::{ChunkKind, DatRoot};
 
 use crate::components::InGameEntity;
@@ -137,7 +137,25 @@ fn ffxi_to_bevy_basis() -> Quat {
 
 // Find the `weat/<type>` directory node for the requested weather type anywhere in
 // the zone dir tree (it lives under the zone root dir, e.g. f_ro/weat/clod).
+//
+// Most zones author only a handful of the 20 weather containers — `rain` ships in
+// 16 zones against `suny`'s 130 — so an exact-match-or-nothing lookup leaves the
+// sky bare for every weather the zone does not carry. Retail searches the
+// container for the requested tag and falls back to `suny` on a miss
+// (research/XIClient/src/XIClient/source/World/Weather/WeatherTransition.cpp:52-54),
+// which is the same single hop the 0x2F record selection takes.
 fn find_weat_type<'a>(node: &'a ChunkNode<'a>, want: WeatherTypeId) -> Option<&'a ChunkNode<'a>> {
+    find_weat_type_exact(node, want).or_else(|| {
+        (want != WEATHER_TYPE_FALLBACK)
+            .then(|| find_weat_type_exact(node, WEATHER_TYPE_FALLBACK))
+            .flatten()
+    })
+}
+
+fn find_weat_type_exact<'a>(
+    node: &'a ChunkNode<'a>,
+    want: WeatherTypeId,
+) -> Option<&'a ChunkNode<'a>> {
     for child in &node.children {
         if child.chunk.kind != 0x01 {
             continue;
@@ -149,7 +167,7 @@ fn find_weat_type<'a>(node: &'a ChunkNode<'a>, want: WeatherTypeId) -> Option<&'
                 }
             }
         }
-        if let Some(found) = find_weat_type(child, want) {
+        if let Some(found) = find_weat_type_exact(child, want) {
             return Some(found);
         }
     }
@@ -377,7 +395,10 @@ fn rebuild_zone_clouds(
     mut materials: ResMut<Assets<FfxiZoneMaterial>>,
 ) {
     let file_id = crate::snapshot::effective_zone_file_id(&scene_state.snapshot);
-    let want = weather_type_id(current_weather.0.map(|w| w as u16).unwrap_or(0));
+    // No weather yet is not weather id 0 — id 0 is a real row (`fine`). Resolve the
+    // unknown case to the same container retail falls back to instead of indexing
+    // the table with a sentinel.
+    let want = weather_type_id_or_default(current_weather.0.map(|w| w as u16));
     let key = file_id.map(|f| (f, want));
     if key == state.key {
         return;
@@ -574,8 +595,8 @@ fn rebuild_zone_stars(
     };
 
     let tree = walk_tree(&bytes);
-    let want = weather_type_id(current_weather.0.map(|w| w as u16).unwrap_or(0));
-    let weat_type = match find_weat_type(&tree, want).or_else(|| find_weat_type(&tree, *b"fine")) {
+    let want = weather_type_id_or_default(current_weather.0.map(|w| w as u16));
+    let weat_type = match find_weat_type(&tree, want) {
         Some(n) => n,
         None => return,
     };

@@ -278,6 +278,15 @@ pub const WEATHER_TYPE_FALLBACK: WeatherTypeId = *b"suny";
 // Map an LSB weather id (vendor/server/src/map/enums/weather.h ordering) onto the
 // `weat/<type>` subdir DatId. wire::Weather shares this discriminant order, so the
 // viewer passes `weather as u16` straight through.
+/// The `weat/<type>` tag for a weather id we may not have received yet.
+///
+/// `None` means "the server has not told us", which is **not** weather id 0 —
+/// id 0 is a real row (`fine`). Indexing the table with 0 as an unknown-marker
+/// only looked right while the table collapsed ids 0 and 1 onto the same tag.
+pub fn weather_type_id_or_default(lsb_weather_id: Option<u16>) -> WeatherTypeId {
+    lsb_weather_id.map_or(WEATHER_TYPE_FALLBACK, weather_type_id)
+}
+
 pub fn weather_type_id(lsb_weather_id: u16) -> WeatherTypeId {
     *WEATHER_TYPE_IDS
         .get(lsb_weather_id as usize)
@@ -1009,6 +1018,18 @@ mod tests {
         }
         let distinct: std::collections::BTreeSet<_> = EXPECTED.iter().collect();
         assert_eq!(distinct.len(), EXPECTED.len());
+    }
+
+    // `None` is "no weather received", NOT weather id 0. Those were the same tag
+    // only while the table collapsed ids 0 and 1; retail row 0 is `fine`, so an
+    // unknown-marker of 0 silently starts asking for a container 72 of the 298
+    // weat-bearing zones do not ship.
+    #[test]
+    fn unknown_weather_resolves_to_the_fallback_not_row_zero() {
+        assert_eq!(weather_type_id_or_default(None), WEATHER_TYPE_FALLBACK);
+        assert_eq!(weather_type_id_or_default(Some(0)), *b"fine");
+        assert_ne!(weather_type_id_or_default(None), weather_type_id(0));
+        assert_eq!(weather_type_id_or_default(Some(6)), *b"rain");
     }
 
     #[test]

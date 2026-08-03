@@ -8,7 +8,7 @@ use ffxi_dat::mzb::AreaResourceId;
 #[cfg(not(target_arch = "wasm32"))]
 use ffxi_dat::weather::collect_zone_weather_sets;
 use ffxi_dat::weather::{
-    sample_weather, weather_type_id, WeatherRecord, WeatherSetsByType, WeatherTypeId,
+    sample_weather, weather_type_id_or_default, WeatherRecord, WeatherSetsByType, WeatherTypeId,
     ZoneWeatherSets, WEATHER_TYPE_FALLBACK,
 };
 #[cfg(not(target_arch = "wasm32"))]
@@ -85,7 +85,7 @@ impl ZoneWeather {
 // index is the LSB weather id consumed by ffxi_dat::weather::weather_type_id (the
 // authoritative weather-id -> weat/<type> subdir table).
 fn weather_type_fourcc(weather: Option<Weather>) -> WeatherTypeId {
-    weather_type_id(weather.unwrap_or(Weather::None) as u16)
+    weather_type_id_or_default(weather.map(|w| w as u16))
 }
 
 // Pick the set for the requested weather type in `area`, falling back across the

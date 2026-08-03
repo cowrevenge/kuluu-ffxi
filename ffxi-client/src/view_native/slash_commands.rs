@@ -2469,11 +2469,23 @@ fn parse_weather(rest: &str) -> SlashOutcome {
         "stellarglare" | "stellar" => Weather::StellarGlare,
         "gloom" => Weather::Gloom,
         "darkness" | "dark" => Weather::Darkness,
-        _ => {
-            return SlashOutcome::SystemMessage(format!(
-                "/weather: unknown weather `{arg}` (try a number 0..=19 or a name like `rain`)"
-            ));
-        }
+        // The four-char `weat/<tag>` DAT names, which is what the zone tree and
+        // every log line actually call these. Resolved from the id table rather
+        // than a second hand-written list, so the two cannot drift.
+        _ => match key
+            .as_bytes()
+            .try_into()
+            .ok()
+            .and_then(|tag: [u8; 4]| (0u16..=19).find(|&n| ffxi_dat::weather::weather_type_id(n) == tag))
+        {
+            Some(n) => Weather::from_lsb(n),
+            None => {
+                return SlashOutcome::SystemMessage(format!(
+                    "/weather: unknown weather `{arg}` (try a number 0..=19, a name like \
+                     `rain`, or a DAT tag like `clod`)"
+                ));
+            }
+        },
     };
     SlashOutcome::SetWeatherClient(w)
 }

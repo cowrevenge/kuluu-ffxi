@@ -1125,9 +1125,16 @@ pub fn build_zone_mmb_spawns(
             name_to_locals.get(name).and_then(|l| l.first().copied())
         });
 
+        // Retail composes Identity -> scale -> RotateX -> RotateY -> RotateZ ->
+        // translate in D3D row-vector convention (research/XIClient/src/XIClient/
+        // source/Rendering/ZoneRenderer.cpp:430-443, with Matrix4.cpp:200-204
+        // `MultiplyRight` = this*r and :508-511 `out = v*M`), which transposes to
+        // column-vector T*Rz*Ry*Rx*S — glam's *extrinsic* XYZ. The intrinsic
+        // `EulerRot::XYZ` is Rx*Ry*Rz, the reverse. Self-proven by the
+        // order-reversed inverse chain at ZoneRenderer.cpp:459-466.
         let m_ffxi = Mat4::from_scale_rotation_translation(
             Vec3::new(p.scale[0], p.scale[1], p.scale[2]),
-            Quat::from_euler(EulerRot::XYZ, p.rot[0], p.rot[1], p.rot[2]),
+            Quat::from_euler(EulerRot::XYZEx, p.rot[0], p.rot[1], p.rot[2]),
             Vec3::new(p.trans[0], p.trans[1], p.trans[2]),
         );
 
@@ -2562,6 +2569,26 @@ pub fn cull_entities_by_distance(
 
 fn push_system_msg(toasts: &mut MessageWriter<crate::snapshot::ToastEvent>, text: String) {
     toasts.write(crate::snapshot::ToastEvent::debug(text));
+}
+
+#[cfg(test)]
+mod placement_transform_tests {
+    use super::*;
+
+    #[test]
+    fn placement_euler_is_extrinsic_rz_ry_rx() {
+        let (rx, ry, rz) = (0.3_f32, -0.7, 1.1);
+        let composed = Quat::from_euler(EulerRot::XYZEx, rx, ry, rz);
+        let by_hand =
+            Quat::from_rotation_z(rz) * Quat::from_rotation_y(ry) * Quat::from_rotation_x(rx);
+        assert!(
+            composed.abs_diff_eq(by_hand, 1e-6),
+            "{composed:?} != {by_hand:?}"
+        );
+        // A placement rotated on one axis cannot tell the two orders apart, which
+        // is why the intrinsic form went unnoticed; a multi-axis one must.
+        assert!(!composed.abs_diff_eq(Quat::from_euler(EulerRot::XYZ, rx, ry, rz), 1e-3));
+    }
 }
 
 #[cfg(test)]

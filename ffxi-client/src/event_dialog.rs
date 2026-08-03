@@ -12,7 +12,7 @@ use ffxi_dat::dmsg::{
     plain_marker, StringDat, MARKER_ITEM, MARKER_KEY_ITEM, MARKER_NUM, MARKER_PLAYER_NAME,
     MARKER_SPEAKER_NAME,
 };
-use ffxi_dat::event_dat::EventDat;
+use ffxi_dat::event_dat::{EventBlockSource, EventDat};
 use ffxi_dat::DatRoot;
 use ffxi_event::{DialogRunner, DialogStep};
 
@@ -147,9 +147,21 @@ impl DialogSession {
         let Some(dat) = self.event_dat.as_ref() else {
             return undriveable(UndriveableReason::NoEventDat);
         };
-        let Some(block) = dat.block_for_actor(unique_no) else {
+        if dat.block_for_actor(unique_no).is_none() {
             return undriveable(UndriveableReason::NoBlockForActor);
+        }
+        let Some((block, source)) = dat.block_for_event(unique_no, event_id) else {
+            return undriveable(UndriveableReason::NoEventEntry);
         };
+        if source != EventBlockSource::OwnBlock {
+            tracing::info!(
+                zone,
+                unique_no = format!("0x{unique_no:08X}"),
+                event_id,
+                ?source,
+                "event id is not on the entity's own block; resolved elsewhere"
+            );
+        }
         // A 0x32 trigger carries no numeric parameters (`num[8]` arrives only
         // on the 0x33/0x34 triggers), so the VM runs with an empty params
         // array and any `{Num:N}` markers stay unresolved in the text.

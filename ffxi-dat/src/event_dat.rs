@@ -69,17 +69,38 @@ impl EventBlock {
     /// the bytecode (which may jump anywhere within `event_data`), so callers run
     /// over the whole `event_data` from this offset rather than a fixed slice.
     pub fn event_entry(&self, event_id: u16) -> Option<usize> {
+        // The placeholder is not a requestable id, so it must not reach the
+        // wildcard either — a catch-all is for ids that could have been real.
         if event_id == EVENT_ID_PLACEHOLDER {
             return None;
         }
-        let at = |id: u16| {
-            self.event_ids
-                .iter()
-                .position(|&e| e == id)
-                .and_then(|i| self.event_offsets.get(i).map(|&o| o as usize))
-        };
-        at(event_id).or_else(|| at(EVENT_ID_WILDCARD))
+        self.event_entry_exact(event_id)
+            .or_else(|| self.event_entry_exact(EVENT_ID_WILDCARD))
     }
+
+    /// [`Self::event_entry`] without the [`EVENT_ID_WILDCARD`] fallback, so a
+    /// caller searching several blocks can prefer a real entry in a later block
+    /// over an earlier block's catch-all.
+    pub fn event_entry_exact(&self, event_id: u16) -> Option<usize> {
+        if event_id == EVENT_ID_PLACEHOLDER {
+            return None;
+        }
+        self.event_ids
+            .iter()
+            .position(|&e| e == event_id)
+            .and_then(|i| self.event_offsets.get(i).map(|&o| o as usize))
+    }
+}
+
+/// Which block [`EventDat::block_for_event`] resolved an event on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EventBlockSource {
+    /// The entity the server named — the ordinary case.
+    OwnBlock,
+    /// The zone/player master block.
+    ZoneMasterBlock,
+    /// A different entity's block, which was the only one holding the id.
+    SoleOwnerElsewhere,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -115,6 +136,62 @@ impl EventDat {
 
     pub fn block_for_actor(&self, actor: u32) -> Option<&EventBlock> {
         self.blocks.iter().find(|b| b.actor == actor)
+    }
+
+    /// The block to run `event_id` on for the entity the server named.
+    ///
+    /// Normally that is the entity's own block. Servers do send pairs the DAT
+    /// disagrees with, though: talking to a conquest outpost guard yields the
+    /// *controlling* nation's event id against the guard entity that was
+    /// targeted, and the retail DAT files those two on different blocks (all
+    /// three nations' guards stand on one spot). Auto-releasing there loses the
+    /// interaction entirely, so fall back — but only when the answer is not a
+    /// guess:
+    ///
+    /// 1. the entity's own block, exact id;
+    /// 2. the zone master block, exact id;
+    /// 3. the single NPC block that owns the id, if exactly one does;
+    /// 4. a wildcard entry, own block before master.
+    ///
+    /// Step 3 is bounded deliberately: 19% of (zone, event id) pairs are owned
+    /// by more than one NPC block — one id in Northern San d'Oria has 81 owners
+    /// — so picking "the first block that has it" would silently run an
+    /// arbitrary NPC's script. Exact matches are tried everywhere before any
+    /// wildcard because a wildcard is a catch-all and must not beat real data.
+    ///
+    /// This is our recovery policy for a server/DAT mismatch, not established
+    /// retail behaviour: no tier-1/2 source for the lookup order exists
+    /// (XIClient carries no event VM), so `resolved_elsewhere` is reported to
+    /// the caller to log rather than applied silently.
+    pub fn block_for_event(
+        &self,
+        actor: u32,
+        event_id: u16,
+    ) -> Option<(&EventBlock, EventBlockSource)> {
+        let own = self.block_for_actor(actor);
+        if let Some(b) = own.filter(|b| b.event_entry_exact(event_id).is_some()) {
+            return Some((b, EventBlockSource::OwnBlock));
+        }
+        if let Some(b) = self
+            .zone_block()
+            .filter(|b| b.event_entry_exact(event_id).is_some())
+        {
+            return Some((b, EventBlockSource::ZoneMasterBlock));
+        }
+        let mut owners = self
+            .blocks
+            .iter()
+            .filter(|b| b.actor != ZONE_PLAYER_ACTOR && b.event_entry_exact(event_id).is_some());
+        if let (Some(b), None) = (owners.next(), owners.next()) {
+            return Some((b, EventBlockSource::SoleOwnerElsewhere));
+        }
+        own.filter(|b| b.event_entry(event_id).is_some())
+            .map(|b| (b, EventBlockSource::OwnBlock))
+            .or_else(|| {
+                self.zone_block()
+                    .filter(|b| b.event_entry(event_id).is_some())
+                    .map(|b| (b, EventBlockSource::ZoneMasterBlock))
+            })
     }
 
     /// The zone/player event block ([`ZONE_PLAYER_ACTOR`]), if present.
@@ -286,6 +363,63 @@ mod tests {
         )]))
         .expect("parse");
         assert_eq!(dat.zone_block(), None);
+    }
+
+    // Repro of the conquest outpost guard: the server names the guard entity it
+    // targeted but the id of the *controlling* nation's guard, and the retail DAT
+    // files those on different blocks. Zone 109 has 32763 only on Mesachedeau
+    // (0x0106D286) while the trigger arrives on Souun (0x0106D287).
+    #[test]
+    fn event_resolves_on_the_sole_owner_when_the_named_entity_lacks_it() {
+        let dat = EventDat::parse(&dat_bytes(&[
+            block_bytes(ZONE_PLAYER_ACTOR, &[(EVENT_ID_WILDCARD, 0)], &[], &[0]),
+            block_bytes(0x0106_D286, &[(32763, 0)], &[], &[0]),
+            block_bytes(0x0106_D287, &[(32761, 0)], &[], &[0]),
+        ]))
+        .expect("parse");
+
+        // The named entity owns it -> its own block, never anyone else's.
+        let (b, src) = dat.block_for_event(0x0106_D287, 32761).expect("own");
+        assert_eq!(b.actor, 0x0106_D287);
+        assert_eq!(src, EventBlockSource::OwnBlock);
+
+        // It does not -> the one block that does, and NOT the master wildcard,
+        // which would otherwise swallow it and play nothing.
+        let (b, src) = dat.block_for_event(0x0106_D287, 32763).expect("elsewhere");
+        assert_eq!(b.actor, 0x0106_D286);
+        assert_eq!(src, EventBlockSource::SoleOwnerElsewhere);
+    }
+
+    // 19% of (zone, event id) pairs are held by more than one NPC block, so the
+    // sole-owner rung must refuse to pick when ownership is ambiguous.
+    #[test]
+    fn ambiguous_event_id_never_resolves_to_an_arbitrary_block() {
+        let dat = EventDat::parse(&dat_bytes(&[
+            block_bytes(0x0100_0001, &[(43, 0)], &[], &[0]),
+            block_bytes(0x0100_0002, &[(43, 0)], &[], &[0]),
+            block_bytes(0x0100_0003, &[(7, 0)], &[], &[0]),
+        ]))
+        .expect("parse");
+        assert!(dat.block_for_event(0x0100_0003, 43).is_none());
+    }
+
+    // A real entry anywhere beats a catch-all: the master block's wildcard must
+    // not shadow the block that actually owns the id.
+    #[test]
+    fn exact_match_elsewhere_outranks_the_master_wildcard() {
+        let dat = EventDat::parse(&dat_bytes(&[
+            block_bytes(ZONE_PLAYER_ACTOR, &[(EVENT_ID_WILDCARD, 0)], &[], &[0]),
+            block_bytes(0x0100_0009, &[(500, 0)], &[], &[0]),
+            block_bytes(0x0100_000A, &[(1, 0)], &[], &[0]),
+        ]))
+        .expect("parse");
+        let (b, src) = dat.block_for_event(0x0100_000A, 500).expect("resolved");
+        assert_eq!(b.actor, 0x0100_0009);
+        assert_eq!(src, EventBlockSource::SoleOwnerElsewhere);
+
+        // With no exact owner at all, the wildcard is still the last resort.
+        let (_, src) = dat.block_for_event(0x0100_000A, 4242).expect("wildcard");
+        assert_eq!(src, EventBlockSource::ZoneMasterBlock);
     }
 
     #[test]

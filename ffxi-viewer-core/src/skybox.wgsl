@@ -56,11 +56,20 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     // direction is just (world_pos - cam_pos).
     let cam_pos = view.world_position;
     let ray = normalize(in.world_position.xyz - cam_pos);
-    // Altitude: +1 at zenith (up), -1 at nadir (down). Lotus uses
-    // dot(ray, -Y) which flips this; we use +Y for readability so
-    // skybox_altitudes[0] is the lowest band (horizon-ish) and
-    // skybox_altitudes[7] is the highest (zenith).
-    let altitude = ray.y;
+    // The DAT ring elevations are polar-angle FRACTIONS, not sines. Retail builds
+    // the dome as a lathe: `angle = elevation * (PI/2)`, ring placed at
+    // cos(angle)*radius horizontally and sin(angle)*radius vertically (XIClient
+    // World/Zone/XiZone.cpp:90-92, constant at Constants/Floats.cpp:7). A view
+    // ray's y component therefore *is* sin(angle), so the lookup parameter is the
+    // angle recovered from it, not y itself. Bracketing against raw y puts the
+    // e=0.5 ring at 30 degrees of elevation instead of 45.
+    //
+    // Retail's own ANGLE_PI_OVER_2 literal, so the inversion is exact against the
+    // geometry it is inverting rather than off by that constant's truncation.
+    const ANGLE_PI_OVER_2: f32 = 1.57075;
+    // Rays below the horizon clamp to the first ring: retail's domain starts at
+    // the horizon and the dome has no geometry beneath it.
+    let altitude = asin(clamp(ray.y, 0.0, 1.0)) / ANGLE_PI_OVER_2;
 
     // Walk altitudes to find the bracketing pair. Linear scan over
     // 8 entries; trivial on GPU.

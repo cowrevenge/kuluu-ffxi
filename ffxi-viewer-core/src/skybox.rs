@@ -34,9 +34,15 @@ impl Default for SkyboxGradientMaterial {
             data: SkyboxUniform {
                 colors: [horizon, horizon, mid, mid, mid, zenith, zenith, zenith],
 
+                // Coupled to skybox.wgsl's lookup parameter: the shader brackets
+                // against a polar-angle fraction in [0, 1] (horizon -> zenith),
+                // which is the domain every shipped 0x2F record uses. This
+                // placeholder ramp only shows before a record loads, but it has to
+                // live in that domain or the fallback gradient reads as a hard
+                // band at the horizon.
                 altitudes_packed: [
-                    Vec4::new(-1.0, -0.5, -0.2, 0.0),
-                    Vec4::new(0.2, 0.4, 0.7, 1.0),
+                    Vec4::new(0.0, 1.0 / 7.0, 2.0 / 7.0, 3.0 / 7.0),
+                    Vec4::new(4.0 / 7.0, 5.0 / 7.0, 6.0 / 7.0, 1.0),
                 ],
 
                 // Procedural FBM clouds retired in favour of the weat/<type>/

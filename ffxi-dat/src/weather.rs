@@ -738,6 +738,48 @@ mod tests {
         assert_eq!(rec.skybox_altitudes[3], 0.5);
     }
 
+    // Retail-byte guard (skips without an install). The sky dome shader reads
+    // these as polar-angle fractions spanning horizon -> zenith, so the domain is
+    // load-bearing: if a shipped record ever went negative or non-monotonic, the
+    // `asin` lookup in skybox.wgsl would bracket against garbage. Measured across
+    // the shipped zone DATs: every non-empty record pins ring 0 at exactly 0.0 and
+    // ring 7 at exactly 1.0, with no violations.
+    #[test]
+    fn real_dat_skybox_altitudes_span_zero_to_one_monotonically() {
+        let Ok(root) = crate::DatRoot::from_env_or_default() else {
+            return;
+        };
+        let mut records = 0u32;
+        for &(zone, file_id) in crate::zone_dat::ZONE_DAT_TABLE {
+            let Ok(loc) = root.resolve(file_id) else {
+                continue;
+            };
+            let Ok(bytes) = std::fs::read(loc.path_under(root.root())) else {
+                continue;
+            };
+            for set in collect_zone_weather_sets(&bytes).by_type.values() {
+                for rec in set.outdoor.iter().chain(set.indoor.iter()) {
+                    let a = rec.skybox_altitudes;
+                    if a.iter().all(|v| *v == 0.0) {
+                        continue;
+                    }
+                    records += 1;
+                    assert_eq!(a[0], 0.0, "zone {zone} ring 0 is the horizon");
+                    assert_eq!(a[7], 1.0, "zone {zone} ring 7 is the zenith");
+                    assert!(
+                        a.iter().all(|v| (0.0..=1.0).contains(v)),
+                        "zone {zone} elevation outside [0,1]: {a:?}"
+                    );
+                    assert!(
+                        a.windows(2).all(|w| w[1] >= w[0]),
+                        "zone {zone} elevations not monotonic: {a:?}"
+                    );
+                }
+            }
+        }
+        assert!(records > 1000, "expected a real corpus, saw {records}");
+    }
+
     #[test]
     fn diffuse_color_applies_bias_only_when_all_channels_below_threshold() {
         // All channels well below 0xCC/0xFF=0.8 after mul => bias applied.

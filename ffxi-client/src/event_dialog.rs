@@ -39,6 +39,37 @@ pub enum Advance {
 }
 
 /// Outcome of starting a VM-driven event.
+/// Why an event could not be driven. Collapsing these into one message hid
+/// which half of the pipeline failed: a missing string DAT, an NPC whose server
+/// id has no block, and an event id absent from the block it landed in are three
+/// different bugs with the same symptom.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UndriveableReason {
+    /// No dialog (dmsg) DAT for the zone — every event in it is undriveable.
+    NoStrings,
+    /// No event DAT for the zone.
+    NoEventDat,
+    /// The event DAT has no block for this NPC's server id.
+    NoBlockForActor,
+    /// The block exists but holds no entry for this event id (and no 0xFFFE
+    /// wildcard) — the server asked for a script this NPC does not author.
+    NoEventEntry,
+    /// The VM stopped on an opcode it cannot advance past.
+    StoppedOnOpcode,
+}
+
+impl UndriveableReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::NoStrings => "no string DAT for zone",
+            Self::NoEventDat => "no event DAT for zone",
+            Self::NoBlockForActor => "no event block for this NPC",
+            Self::NoEventEntry => "NPC block has no such event id",
+            Self::StoppedOnOpcode => "unimplemented opcode",
+        }
+    }
+}
+
 pub enum Begin {
     /// Show the first frame and wait for the player.
     Frame(DialogState),
@@ -46,9 +77,13 @@ pub enum Begin {
     /// (choreography-only or bookkeeping script) — the caller sends EVENT_END
     /// with `end_para`, same as [`Advance::Ended`].
     Ended { end_para: u32 },
-    /// The VM can't drive the event: missing DAT/strings/block, or it stopped
-    /// on unimplemented opcode `stopped_op`.
-    Undriveable { stopped_op: Option<u8> },
+    /// The VM can't drive the event. `stopped_op` is set only when the bytecode
+    /// itself hit an opcode we cannot advance past; the other reasons never
+    /// reach the VM at all.
+    Undriveable {
+        stopped_op: Option<u8>,
+        reason: UndriveableReason,
+    },
 }
 
 pub struct DialogSession {
@@ -102,22 +137,24 @@ impl DialogSession {
         npc_name: Option<String>,
     ) -> Begin {
         self.ensure_zone(zone);
-        let undriveable = Begin::Undriveable { stopped_op: None };
-        let Some(strings) = self.strings.as_ref() else {
-            return undriveable;
+        let undriveable = |reason| Begin::Undriveable {
+            stopped_op: None,
+            reason,
         };
-        let Some(block) = self
-            .event_dat
-            .as_ref()
-            .and_then(|dat| dat.block_for_actor(unique_no))
-        else {
-            return undriveable;
+        let Some(strings) = self.strings.as_ref() else {
+            return undriveable(UndriveableReason::NoStrings);
+        };
+        let Some(dat) = self.event_dat.as_ref() else {
+            return undriveable(UndriveableReason::NoEventDat);
+        };
+        let Some(block) = dat.block_for_actor(unique_no) else {
+            return undriveable(UndriveableReason::NoBlockForActor);
         };
         // A 0x32 trigger carries no numeric parameters (`num[8]` arrives only
         // on the 0x33/0x34 triggers), so the VM runs with an empty params
         // array and any `{Num:N}` markers stay unresolved in the text.
         let Some(mut runner) = DialogRunner::start(block, event_id, act_index, Vec::new()) else {
-            return undriveable;
+            return undriveable(UndriveableReason::NoEventEntry);
         };
         let step = runner.advance(None, strings);
         let active = ActiveEvent {
@@ -142,6 +179,7 @@ impl DialogSession {
                 self.clear();
                 Begin::Undriveable {
                     stopped_op: Some(op),
+                    reason: UndriveableReason::StoppedOnOpcode,
                 }
             }
         }

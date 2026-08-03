@@ -1627,12 +1627,13 @@ fn begin_server_event(
         crate::event_dialog::Begin::Ended { end_para } => {
             auto_event_end.push((unique_no, act_index, event_id, end_para));
         }
-        crate::event_dialog::Begin::Undriveable { stopped_op } => {
+        crate::event_dialog::Begin::Undriveable { stopped_op, reason } => {
             tracing::warn!(
                 zone = zone_id,
-                unique_no,
+                unique_no = format!("0x{unique_no:08X}"),
                 act_index,
                 event_id,
+                reason = reason.as_str(),
                 stopped_op = ?stopped_op.map(|op| format!("0x{op:02X}")),
                 "auto-releasing VM-undriveable event"
             );
@@ -1641,7 +1642,15 @@ fn begin_server_event(
                 line: ChatLine {
                     channel: ChatChannel::System,
                     sender: "client".into(),
-                    text: format!("[event] cutscene {event_id} auto-skipped (not yet supported)"),
+                    text: match stopped_op {
+                        Some(op) => format!(
+                            "[event] cutscene {event_id} auto-skipped (unimplemented opcode 0x{op:02X})"
+                        ),
+                        None => format!(
+                            "[event] cutscene {event_id} auto-skipped ({})",
+                            reason.as_str()
+                        ),
+                    },
                     server_ts: 0,
                 },
             });

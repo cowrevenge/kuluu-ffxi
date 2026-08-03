@@ -320,7 +320,13 @@ pub fn handle_input_system(
         return;
     }
 
-    if !select_target.active && bindings.just_pressed(Action::ClearTarget, &keys) {
+    // The engaged "Switch Target" flow is retail's sanctioned mid-fight
+    // re-target, so it plays the sub-target role here and reaches through the
+    // lock; every other targeting key below is pinned by it.
+    let target_pinned = ffxi_viewer_core::suppresses_retarget(lock_on, select_target.active);
+
+    if !select_target.active && !target_pinned && bindings.just_pressed(Action::ClearTarget, &keys)
+    {
         target.id = None;
     }
 
@@ -329,7 +335,7 @@ pub fn handle_input_system(
     let enter_acquire = bindings.just_pressed(Action::ConfirmAction, &keys)
         && target.id.is_none()
         && !ffxi_viewer_core::hud::death_prompt::is_dead(&state);
-    if tab || enter_acquire {
+    if (tab || enter_acquire) && !target_pinned {
         if let Ok((camera, cam_t)) = cam_q.single() {
             let cam_global = GlobalTransform::from(*cam_t);
 
@@ -373,7 +379,7 @@ pub fn handle_input_system(
     } else {
         None
     };
-    if let Some(slot) = party_slot {
+    if let Some(slot) = party_slot.filter(|_| !target_pinned) {
         let id = if slot == 1 {
             state.snapshot.self_char_id
         } else {
@@ -449,7 +455,10 @@ pub fn handle_input_system(
 
     if let Some(id) = lock_on.target_id {
         let still_visible = state.snapshot.entities.iter().any(|e| e.id == id);
-        if !still_visible {
+        // A lock with no main target under it would pin targeting against a
+        // target that isn't there, so a /target that drops the selection
+        // releases the lock with it.
+        if !still_visible || target.id.is_none() {
             lock_on.target_id = None;
         }
     }

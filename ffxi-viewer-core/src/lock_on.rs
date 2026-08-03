@@ -25,6 +25,15 @@ impl LockOn {
     }
 }
 
+// A held lock pins the target: it must be released before ordinary targeting
+// input can move or drop it (research/xim PlayerTargetSelector.kt:62,74,92,225
+// — clear, party-slot, tab-cycle and click-target all return early while
+// isTargetLocked(), with a sub-target carve-out at :74,:92). Losing the entity
+// and zoning still clear it; those are not player targeting input.
+pub fn suppresses_retarget(lock: &LockOn, sub_target_flow: bool) -> bool {
+    lock.is_active() && !sub_target_flow
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ToggleResult {
     Locked(u32),
@@ -90,6 +99,19 @@ mod tests {
         let mut lo = LockOn { target_id: Some(7) };
         assert_eq!(lo.toggle(None), ToggleResult::Cleared);
         assert!(!lo.is_active());
+    }
+
+    #[test]
+    fn an_active_lock_suppresses_ordinary_retargeting() {
+        let locked = LockOn { target_id: Some(7) };
+        assert!(suppresses_retarget(&locked, false));
+        assert!(!suppresses_retarget(&LockOn::default(), false));
+    }
+
+    #[test]
+    fn the_sub_target_flow_retargets_through_an_active_lock() {
+        let locked = LockOn { target_id: Some(7) };
+        assert!(!suppresses_retarget(&locked, true));
     }
 
     #[test]

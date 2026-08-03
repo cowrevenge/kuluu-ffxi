@@ -233,8 +233,12 @@ fn resolve_hit_entity_id(
     nameplate_q.get(hit).ok().map(|np| np.entity_id)
 }
 
-pub fn resolve_click_target(hit_id: Option<u32>, current_target: Option<u32>) -> ClickResolution {
-    match hit_id {
+pub fn resolve_click_target(
+    hit_id: Option<u32>,
+    current_target: Option<u32>,
+    locked: bool,
+) -> ClickResolution {
+    let resolution = match hit_id {
         Some(0) => match current_target {
             Some(_) => ClickResolution::Clear,
             None => ClickResolution::OpenContextMenu,
@@ -248,6 +252,12 @@ pub fn resolve_click_target(hit_id: Option<u32>, current_target: Option<u32>) ->
             Some(_) => ClickResolution::Clear,
             None => ClickResolution::OpenContextMenu,
         },
+    };
+    match resolution {
+        // Clicking the locked target still opens its menu — that is not a
+        // de-select, and it is the mouse route to Switch Target/Disengage.
+        ClickResolution::Set(_) | ClickResolution::Clear if locked => ClickResolution::Ignored,
+        other => other,
     }
 }
 
@@ -258,6 +268,8 @@ pub enum ClickResolution {
     Clear,
 
     OpenContextMenu,
+
+    Ignored,
 }
 
 pub fn click_to_target_system(
@@ -268,6 +280,7 @@ pub fn click_to_target_system(
     pointer: Res<crate::mouse::MousePointer>,
     scene: Res<crate::snapshot::SceneState>,
     enabled: Res<WorldPickingEnabled>,
+    lock_on: Res<crate::lock_on::LockOn>,
     mut target: ResMut<Target>,
     mut input_mode: ResMut<InputMode>,
 ) {
@@ -298,7 +311,9 @@ pub fn click_to_target_system(
                 continue;
             }
         }
-        match resolve_click_target(hit_id, target.id) {
+        let locked = crate::lock_on::suppresses_retarget(&lock_on, false);
+        match resolve_click_target(hit_id, target.id, locked) {
+            ClickResolution::Ignored => {}
             ClickResolution::Set(id) => target.id = Some(id),
             ClickResolution::Clear => target.id = None,
             ClickResolution::OpenContextMenu => {
@@ -332,7 +347,7 @@ mod tests {
     #[test]
     fn click_on_new_entity_retargets() {
         assert_eq!(
-            resolve_click_target(Some(17), Some(99)),
+            resolve_click_target(Some(17), Some(99), false),
             ClickResolution::Set(17),
         );
     }
@@ -340,7 +355,7 @@ mod tests {
     #[test]
     fn click_on_entity_with_no_target_sets_target() {
         assert_eq!(
-            resolve_click_target(Some(17), None),
+            resolve_click_target(Some(17), None, false),
             ClickResolution::Set(17),
         );
     }
@@ -348,7 +363,7 @@ mod tests {
     #[test]
     fn click_on_already_selected_opens_menu() {
         assert_eq!(
-            resolve_click_target(Some(17), Some(17)),
+            resolve_click_target(Some(17), Some(17), false),
             ClickResolution::OpenContextMenu,
         );
     }
@@ -356,7 +371,7 @@ mod tests {
     #[test]
     fn click_on_self_capsule_with_target_clears() {
         assert_eq!(
-            resolve_click_target(Some(0), Some(17)),
+            resolve_click_target(Some(0), Some(17), false),
             ClickResolution::Clear,
         );
     }
@@ -364,20 +379,47 @@ mod tests {
     #[test]
     fn click_on_self_capsule_without_target_opens_menu() {
         assert_eq!(
-            resolve_click_target(Some(0), None),
+            resolve_click_target(Some(0), None, false),
             ClickResolution::OpenContextMenu,
         );
     }
 
     #[test]
     fn click_on_empty_with_target_clears() {
-        assert_eq!(resolve_click_target(None, Some(17)), ClickResolution::Clear,);
+        assert_eq!(
+            resolve_click_target(None, Some(17), false),
+            ClickResolution::Clear,
+        );
     }
 
     #[test]
     fn click_on_empty_without_target_opens_menu() {
         assert_eq!(
-            resolve_click_target(None, None),
+            resolve_click_target(None, None, false),
+            ClickResolution::OpenContextMenu,
+        );
+    }
+
+    #[test]
+    fn locked_click_neither_retargets_nor_clears() {
+        assert_eq!(
+            resolve_click_target(Some(17), Some(99), true),
+            ClickResolution::Ignored,
+        );
+        assert_eq!(
+            resolve_click_target(None, Some(99), true),
+            ClickResolution::Ignored,
+        );
+        assert_eq!(
+            resolve_click_target(Some(0), Some(99), true),
+            ClickResolution::Ignored,
+        );
+    }
+
+    #[test]
+    fn locked_click_on_the_target_still_opens_its_menu() {
+        assert_eq!(
+            resolve_click_target(Some(17), Some(17), true),
             ClickResolution::OpenContextMenu,
         );
     }

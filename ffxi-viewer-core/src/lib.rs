@@ -98,7 +98,7 @@ pub use input_mode::{
     PassiveCursorState, QuickActionState, DIALOG_MAX_CHOICE,
 };
 pub use keybinds::{Action, Bindings, KeyBind, Modifiers, Preset};
-pub use lock_on::{LockOn, ToggleResult as LockOnToggle};
+pub use lock_on::{suppresses_retarget, LockOn, ToggleResult as LockOnToggle};
 pub use mouse::{CursorLockRequest, MousePlugin, MousePointer};
 pub use picking::{
     click_to_target_system, resolve_click_target, ClickResolution, HoveredEntity, PickingPlugin,

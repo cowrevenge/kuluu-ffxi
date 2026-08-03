@@ -397,7 +397,7 @@ impl EventVm {
                     let meta = OPCODE_META.get(op as usize).copied();
                     match meta {
                         Some(m) if m.valid && !m.jumps && !m.sets_ret && m.size > 0 => {
-                            self.exec_pointer += m.size as usize;
+                            self.exec_pointer += self.op_width(op, m.size) as usize;
                         }
                         _ => return StepResult::Unimplemented(op),
                     }
@@ -406,8 +406,18 @@ impl EventVm {
         }
     }
 
+    /// Bytes to step past `op`, honouring the sub-selector for the opcodes whose
+    /// width it decides (see [`crate::opcode_meta::sub_size`]).
+    fn op_width(&self, op: u8, fixed: u8) -> u8 {
+        self.event_data
+            .get(self.exec_pointer + 1)
+            .and_then(|&sub| crate::opcode_meta::sub_size(op, sub))
+            .unwrap_or(fixed)
+    }
+
     fn advance(&mut self, op: u8) {
-        self.exec_pointer += OPCODE_META[op as usize].size as usize;
+        let fixed = OPCODE_META[op as usize].size;
+        self.exec_pointer += self.op_width(op, fixed) as usize;
     }
 
     /// Set `CliEventMessOpenFlag` and hold the message for the MESWAIT (0x23)

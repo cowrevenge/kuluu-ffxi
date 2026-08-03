@@ -1334,3 +1334,101 @@ pub const OPCODE_META: &[OpMeta] = &[
         valid: true,
     }, // 0x00D9
 ];
+
+/// Width of a *variable*-width opcode, selected by its sub byte
+/// (`EventData[ExecPointer + 1]`).
+///
+/// [`OpMeta::size`] carries one number per opcode, so for these it holds the
+/// widest case. Advancing by that where the data encodes a narrower one walks
+/// `ExecPointer` into the middle of the next instruction and the VM then
+/// executes operand bytes as opcodes — silently, because the skip looks
+/// successful. `None` means the opcode is fixed-width, or that its width is not
+/// modelled yet and the caller should fall back to `OpMeta::size`.
+///
+/// Rules transcribed from the retail pseudo-code in atom0s/XiEvents
+/// `OpCodes/*.md`, which lists each of these with a multi-valued `OpCode Size`.
+/// Only opcodes whose dispatch is decided by the sub byte alone appear here:
+/// 0xAE, 0xB7 and 0xD8 also vary, but their width is entangled with a runtime
+/// actor lookup, so they are left to the wider VM work rather than guessed at.
+pub fn sub_size(op: u8, sub: u8) -> Option<u8> {
+    match op {
+        // 0x0046.md: sub 2 reads a work offset (4); every other path, including
+        // the render-flag-gated fall-through, advances 2.
+        OP_DEFCAMERA => Some(if sub == 2 { 4 } else { 2 }),
+        // 0x0079.md: sub 1 is lookatone with a trailing work offset (12); sub 2
+        // and the zero path are both 10.
+        OP_LOOKAT => Some(if sub == 1 { 12 } else { 10 }),
+        // 0x005C.md: the low band 0x00-0x07 sets a song id (4); the 0x80-0x87
+        // band adds a volume (6), as do 0xA0/0xA1. Any other sub returns without
+        // touching ExecPointer at all — a hang, so authored data cannot contain
+        // one; fall back rather than encode a width retail never advances by.
+        OP_MUSIC => match sub {
+            0x00..=0x07 => Some(4),
+            0x80..=0x87 | 0xA0 | 0xA1 => Some(6),
+            _ => None,
+        },
+        // 0x00C2.md: sub 1 writes a party mask (4), sub 2 a validity flag (6),
+        // anything else advances 2.
+        OP_MOGHOUSE_VISIT => Some(match sub {
+            1 => 4,
+            2 => 6,
+            _ => 2,
+        }),
+        _ => None,
+    }
+}
+
+const OP_DEFCAMERA: u8 = 0x46;
+const OP_LOOKAT: u8 = 0x79;
+const OP_MUSIC: u8 = 0x5C;
+const OP_MOGHOUSE_VISIT: u8 = 0xC2;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Widths transcribed from the retail pseudo-code in atom0s/XiEvents. Each of
+    // these opcodes has a single `OpMeta::size` holding its WIDEST case, so a
+    // regression that drops sub_size would silently advance too far and start
+    // executing operand bytes as opcodes.
+    #[test]
+    fn variable_width_opcodes_pick_their_width_from_the_sub_byte() {
+        // 0x0046.md — only sub 2 is the 4-byte work-offset form.
+        assert_eq!(sub_size(0x46, 2), Some(4));
+        for sub in [0u8, 1, 3, 0xFF] {
+            assert_eq!(sub_size(0x46, sub), Some(2), "0x46 sub {sub}");
+        }
+        // 0x0079.md — only sub 1 carries the trailing work offset.
+        assert_eq!(sub_size(0x79, 1), Some(12));
+        for sub in [0u8, 2, 9, 0xFF] {
+            assert_eq!(sub_size(0x79, sub), Some(10), "0x79 sub {sub}");
+        }
+        // 0x005C.md — two documented bands, and a hang everywhere else.
+        assert_eq!(sub_size(0x5C, 0x00), Some(4));
+        assert_eq!(sub_size(0x5C, 0x07), Some(4));
+        assert_eq!(sub_size(0x5C, 0x80), Some(6));
+        assert_eq!(sub_size(0x5C, 0x87), Some(6));
+        assert_eq!(sub_size(0x5C, 0xA1), Some(6));
+        assert_eq!(sub_size(0x5C, 0x40), None, "undocumented sub falls back");
+        // 0x00C2.md
+        assert_eq!(sub_size(0xC2, 1), Some(4));
+        assert_eq!(sub_size(0xC2, 2), Some(6));
+        assert_eq!(sub_size(0xC2, 7), Some(2));
+    }
+
+    // Every width sub_size can return must be <= the table's fixed size, which is
+    // the widest documented case. A value above it would mean the table is wrong,
+    // not the dispatch.
+    #[test]
+    fn sub_widths_never_exceed_the_tables_widest_case() {
+        for op in [0x46u8, 0x79, 0x5C, 0xC2] {
+            let fixed = OPCODE_META[op as usize].size;
+            for sub in 0..=u8::MAX {
+                if let Some(w) = sub_size(op, sub) {
+                    assert!(w <= fixed, "op {op:#04X} sub {sub}: {w} > {fixed}");
+                    assert!(w >= 2, "op {op:#04X} sub {sub}: {w} cannot advance");
+                }
+            }
+        }
+    }
+}

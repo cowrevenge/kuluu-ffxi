@@ -17,8 +17,22 @@
 //! `event_data` lives elsewhere.
 
 /// `Actornumber` for the zone/player block — events not bound to a specific
-/// entity (zone-in cutscenes, menu flows). Per XiEvents `Event DAT Structures`.
-pub const ZONE_PLAYER_ACTOR: u32 = 0x7FFF_FFFF;
+/// entity (zone-in cutscenes, menu flows).
+///
+/// XiEvents `Event DAT Structures` gives 0x7FFFFFFF here and is wrong: every
+/// retail zone ships 0x7FFFFFF0, which is also the local-player value XiEvents'
+/// own `Event VM Functions`:463-466 resolves. Byte-checked on ROM/21/39, /52
+/// and /54 — each holds exactly one block whose actor matches the 0x7F pattern,
+/// and in all three it is 0x7FFFFFF0 at block 0.
+pub const ZONE_PLAYER_ACTOR: u32 = 0x7FFF_FFF0;
+
+/// An event id the engine dispatches for *any* requested id. Rare (4 across the
+/// three zone DATs surveyed) and clusters on the master block.
+pub const EVENT_ID_WILDCARD: u16 = 0xFFFE;
+
+/// A placeholder occupying an otherwise-real entry offset. It cannot be
+/// requested by id, so an exact match on it must not resolve.
+pub const EVENT_ID_PLACEHOLDER: u16 = 0xFFFF;
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum EventDatError {
@@ -55,10 +69,16 @@ impl EventBlock {
     /// the bytecode (which may jump anywhere within `event_data`), so callers run
     /// over the whole `event_data` from this offset rather than a fixed slice.
     pub fn event_entry(&self, event_id: u16) -> Option<usize> {
-        self.event_ids
-            .iter()
-            .position(|&id| id == event_id)
-            .and_then(|i| self.event_offsets.get(i).map(|&o| o as usize))
+        if event_id == EVENT_ID_PLACEHOLDER {
+            return None;
+        }
+        let at = |id: u16| {
+            self.event_ids
+                .iter()
+                .position(|&e| e == id)
+                .and_then(|i| self.event_offsets.get(i).map(|&o| o as usize))
+        };
+        at(event_id).or_else(|| at(EVENT_ID_WILDCARD))
     }
 }
 
@@ -249,6 +269,52 @@ mod tests {
             Some(1)
         );
         assert_eq!(dat.block_for_actor(0xDEAD), None);
+    }
+
+    // The synthesised blocks above are written with our own constant, so they
+    // pass under any value. Pin the literal separately: retail ships 0x7FFFFFF0
+    // in every zone event DAT, and a block built with XiEvents' documented
+    // 0x7FFFFFFF must not resolve as the master.
+    #[test]
+    fn zone_player_actor_is_the_retail_literal() {
+        assert_eq!(ZONE_PLAYER_ACTOR, 0x7FFF_FFF0);
+        let dat = EventDat::parse(&dat_bytes(&[block_bytes(
+            0x7FFF_FFFF,
+            &[(1, 0)],
+            &[],
+            &[0x00],
+        )]))
+        .expect("parse");
+        assert_eq!(dat.zone_block(), None);
+    }
+
+    #[test]
+    fn wildcard_entry_matches_any_id_and_placeholder_matches_none() {
+        let dat = EventDat::parse(&dat_bytes(&[block_bytes(
+            ZONE_PLAYER_ACTOR,
+            &[(7, 0), (EVENT_ID_PLACEHOLDER, 2), (EVENT_ID_WILDCARD, 4)],
+            &[],
+            &[0, 1, 2, 3, 4, 5],
+        )]))
+        .expect("parse");
+        let blk = dat.zone_block().expect("master block");
+
+        assert_eq!(blk.event_entry(7), Some(0), "exact match wins");
+        assert_eq!(
+            blk.event_entry(999),
+            Some(4),
+            "unknown id falls to wildcard"
+        );
+        assert_eq!(
+            blk.event_entry(EVENT_ID_PLACEHOLDER),
+            None,
+            "a placeholder cannot be requested by id"
+        );
+
+        // Without a wildcard present, an unknown id still resolves to nothing.
+        let bare =
+            EventDat::parse(&dat_bytes(&[block_bytes(0x01, &[(7, 0)], &[], &[0])])).expect("parse");
+        assert_eq!(bare.blocks[0].event_entry(999), None);
     }
 
     #[test]

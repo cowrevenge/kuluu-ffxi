@@ -9,19 +9,30 @@ use crate::snapshot::SceneState;
 
 const EQUIP_SLOT_ORDER_LEN: usize = 8;
 
-// Transcribed from research/xim NpcTable.kt:107-114 (getNpcModelIndex);
-// the top bucket's base is flagged "Speculated" upstream.
+// FFXiMain `.text` VA 0x100C513D, quoted at
+// research/cexi-docs/reference/ffximain.md:288-300: four ranges split at 1500 /
+// 3000 / 3500, the top one computed as `(m - 3500) + 101739`.
+//
+// The 3000-range is only *registered* for 3000..=3193 — every fid for 3194..3499
+// is VTABLE=0 and no retail mob_pools row uses one — so range 3's extent looks
+// like a boundary from the data alone. Folding that hole into the split makes
+// modelid 3193 land on 101739, the same fid retail reaches at 3500, which is why
+// this read the part right and the whole wrong; every modelid above it was off by
+// the 307-slot gap. Do not re-derive these from registration extent.
+const NPC_DAT_ID_BASES: [(u32, u32); 4] = [
+    (1500, 1300),
+    (3000, 50295),
+    (3500, 96907),
+    (u32::MAX, 98239),
+];
+
 pub fn npc_dat_id(modelid: u16) -> u32 {
     let m = modelid as u32;
-    if m < 1500 {
-        m + 0x514
-    } else if m < 3000 {
-        m + 0xC477
-    } else if m < 3193 {
-        m + 0x17A8B
-    } else {
-        m + 0x180F2
-    }
+    let base = NPC_DAT_ID_BASES
+        .iter()
+        .find_map(|&(limit, base)| (m < limit).then_some(base))
+        .unwrap_or(NPC_DAT_ID_BASES[NPC_DAT_ID_BASES.len() - 1].1);
+    m + base
 }
 
 pub fn resolve_equipment_slot(slot_id: u16, race: u8) -> Option<u32> {
@@ -642,6 +653,11 @@ pub fn dispatch_look_driven_models(
         // (research/xim NpcModel.getMeshResources), so the gate must recurse
         // like load_npc's collect_skel_meshes — not just scan top-level chunks.
         if !crate::dat_vos2::dat_has_skinned_mesh(dat_id) {
+            warn!(
+                "actor dispatch (npc): no skinned mesh at dat_id={} for modelid={} \
+                 (entity_id={}) — spawns as a nameplate with no body",
+                dat_id, modelid, we.id
+            );
             continue;
         }
         debug_assert!(tracked.by_id.contains_key(&we.id));
@@ -671,17 +687,29 @@ mod tests {
         assert_eq!(npc_dat_id(0), 1300);
         assert_eq!(npc_dat_id(1500), 51795);
         assert_eq!(npc_dat_id(3000), 99907);
-        assert_eq!(npc_dat_id(3193), 101739);
+        // The disassembly's own anchor: `(m - 3500) + 101739`.
+        assert_eq!(npc_dat_id(3500), 101739);
     }
 
     #[test]
     fn npc_dat_id_bucket_boundary_off_by_one() {
         assert_eq!(npc_dat_id(1499), 1499 + 1300);
         assert_eq!(npc_dat_id(1500), 51795);
-        assert_eq!(npc_dat_id(2999), 2999 + 0xC477);
+        assert_eq!(npc_dat_id(2999), 2999 + 50295);
         assert_eq!(npc_dat_id(3000), 99907);
-        assert_eq!(npc_dat_id(3192), 3192 + 0x17A8B);
-        assert_eq!(npc_dat_id(3193), 3193 + 0x180F2);
+        assert_eq!(npc_dat_id(3499), 3499 + 96907);
+        assert_eq!(npc_dat_id(3500), 3500 + 98239);
+    }
+
+    // 3194..=3499 is a registration hole, not a range boundary: retail keeps
+    // applying the 3000-range base across it. Reading the hole as the split is
+    // what made every modelid at or above it resolve 307 slots high.
+    #[test]
+    fn npc_dat_id_spans_the_unregistered_hole_with_the_3000_range_base() {
+        for m in [3193u16, 3194, 3300, 3499] {
+            assert_eq!(npc_dat_id(m), u32::from(m) + 96907, "modelid {m}");
+        }
+        assert_ne!(npc_dat_id(3500), npc_dat_id(3499) + 1);
     }
 
     #[test]

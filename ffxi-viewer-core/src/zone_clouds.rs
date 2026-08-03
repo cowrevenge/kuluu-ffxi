@@ -437,7 +437,7 @@ fn rebuild_zone_clouds(
     };
 
     let tree = walk_tree(&bytes);
-    let weat_type = match find_weat_type(&tree, want).or_else(|| find_weat_type(&tree, *b"fine")) {
+    let weat_type = match find_weat_type(&tree, want) {
         Some(n) => n,
         None => return,
     };

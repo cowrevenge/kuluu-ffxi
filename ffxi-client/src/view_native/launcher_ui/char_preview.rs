@@ -204,10 +204,13 @@ pub(super) fn refresh_preview_on_cursor_change(
             let race = slot.race;
 
             let equipment = pc_equipment_file_ids(slot);
+            // The body slot picks the waist motion DAT, so the preview needs it
+            // separately -- `equipment` is flattened and drops slot identity.
+            let body = resolve_equipment_slot(slot.body, race);
             let char_id = slot.char_id;
 
             let task = AsyncComputeTaskPool::get()
-                .spawn(async move { load_pc(race, &equipment, None, None) });
+                .spawn(async move { load_pc(race, &equipment, body, None, None) });
             pending.task = Some((char_id, task));
         }
         _ => pending.task = None,

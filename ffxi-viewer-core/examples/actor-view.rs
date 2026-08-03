@@ -124,7 +124,7 @@ fn spawn_subject(
 ) {
     let loaded = match &*subject {
         Subject::Npc(id) => load_npc(*id),
-        Subject::Pc(race, equip) => load_pc(*race, equip, None, None),
+        Subject::Pc(race, equip) => load_pc(*race, equip, None, None, None),
     };
     match loaded {
         Ok(loaded) => {

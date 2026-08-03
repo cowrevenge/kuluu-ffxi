@@ -42,6 +42,10 @@ pub enum ActorSubject {
     Pc {
         race: u8,
         equipment: Vec<u32>,
+        /// Body slot, kept apart from `equipment` because its CIB `waist_type`
+        /// picks the waist motion DAT (SkeletalMeshActor.cpp:1659 collects it
+        /// from slot 2 specifically).
+        body: Option<u32>,
         main_weapon: Option<u32>,
         sub_weapon: Option<u32>,
     },
@@ -258,6 +262,7 @@ pub enum ActorPrepKey {
     Pc {
         race: u8,
         equipment: Vec<u32>,
+        body: Option<u32>,
         main_weapon: Option<u32>,
         sub_weapon: Option<u32>,
         mipmaps: bool,
@@ -275,11 +280,13 @@ fn prep_key(subject: &ActorSubject, q: crate::zone_texture::TextureQuality) -> A
         ActorSubject::Pc {
             race,
             equipment,
+            body,
             main_weapon,
             sub_weapon,
         } => ActorPrepKey::Pc {
             race: *race,
             equipment: equipment.clone(),
+            body: *body,
             main_weapon: *main_weapon,
             sub_weapon: *sub_weapon,
             mipmaps: q.mipmaps,
@@ -470,15 +477,25 @@ fn default_pc_equipment(race: u8) -> Vec<u32> {
     out
 }
 
+// research/XIClient/src/XIClient/source/World/Actor/SkeletalMeshActor.cpp:3175
+// and :3165 — the two companion motion DATs sit at fixed offsets from the race
+// skeleton base, indexed by a CIB byte.
+const UPPER_BODY_MOTION_OFFSET: u32 = 1;
+const WAIST_MOTION_OFFSET: u32 = 2;
+// `GetWaistDatIndex` floors waist_type at 1 before using it (:3134-3136), so an
+// unequipped or CIB-less body still resolves to the trousers waist rather than
+// colliding with the upper-body DAT.
+const WAIST_TYPE_MIN: u8 = 1;
+
 pub fn load_pc(
     race: u8,
     equipment: &[u32],
+    body: Option<u32>,
     main_weapon: Option<u32>,
 
     sub_weapon: Option<u32>,
 ) -> Result<LoadedActor, String> {
     crate::perf_probe::note_model_load();
-    let _ = sub_weapon;
     let root = DatRoot::from_env_or_default().map_err(|e| format!("DatRoot: {e}"))?;
     let skel_file_id =
         skeleton_file_id_for_race(race).ok_or_else(|| format!("unsupported race {race}"))?;
@@ -498,8 +515,37 @@ pub fn load_pc(
         collect_textures(&walk_tree(&skel_bytes), &mut textures);
     }
 
-    if let Some(bytes) = read_dat(&root, skel_file_id + 1) {
-        anim_dirs.push(ResourceDir::from_bytes(bytes));
+    // Retail loads three motion DATs around the race base, not one. Upper body is
+    // `base + is_shield + 1` (SkeletalMeshActor.cpp:3175) — a shield swaps in a
+    // variant with its own joint count. Waist/skirt is
+    // `base + max(waist_type, 1) + 2` (:3165, reached from ReadStdMotionRes at
+    // :3014), which drives the hip-hung cloth joints; without it they hold bind
+    // pose through every idle, walk, run, strafe and death.
+    //
+    // Both selectors come from equipment CIBs and neither is a fixed offset: the
+    // sub slot supplies is_shield and the body slot waist_type
+    // (SkeletalMeshActor.cpp:1659,1682 collect them per slot). Loading a fixed
+    // `+3` instead would give every robed mage trouser motion, and because
+    // `dedup_clips` is first-writer-wins, loading both candidates would silently
+    // keep whichever came first rather than the authored one.
+    let cib_byte = |file_id: Option<u32>, pick: fn(&ffxi_dat::cib::Cib) -> u8| {
+        file_id
+            .and_then(|f| read_dat(&root, f))
+            .map(ResourceDir::from_bytes)
+            .and_then(|d| d.first_cib())
+            .map(|c| pick(&c))
+            .unwrap_or(0)
+    };
+    let is_shield = cib_byte(sub_weapon, |c| c.is_shield);
+    let waist_type = cib_byte(body, |c| c.body_armour_waist).max(WAIST_TYPE_MIN);
+
+    for offset in [
+        u32::from(is_shield) + UPPER_BODY_MOTION_OFFSET,
+        u32::from(waist_type) + WAIST_MOTION_OFFSET,
+    ] {
+        if let Some(bytes) = read_dat(&root, skel_file_id + offset) {
+            anim_dirs.push(ResourceDir::from_bytes(bytes));
+        }
     }
 
     let resolved_default;
@@ -2033,9 +2079,10 @@ pub fn kick_load_actor_tasks(
                 ActorSubject::Pc {
                     race,
                     equipment,
+                    body,
                     main_weapon,
                     sub_weapon,
-                } => load_pc(race, &equipment, main_weapon, sub_weapon),
+                } => load_pc(race, &equipment, body, main_weapon, sub_weapon),
             }?;
             let parts = prepare_actor_parts(&loaded, 0.0, 1.0, quality);
             Ok(PreparedActor { loaded, parts })
@@ -3049,7 +3096,7 @@ mod pose_resolution_tests {
             return None;
         }
 
-        Some(load_pc(1, &[], None, None).expect("load Hume M"))
+        Some(load_pc(1, &[], None, None, None).expect("load Hume M"))
     }
 
     #[test]
@@ -3323,7 +3370,7 @@ mod pose_resolution_tests {
             (1u16..=5)
                 .filter_map(|slot| crate::look_resolver::resolve_equipment_slot(slot << 12, 1)),
         );
-        let actor = load_pc(1, &equipment, Some(HUME_M_MAIN_WEAPON_FILE), None)
+        let actor = load_pc(1, &equipment, None, Some(HUME_M_MAIN_WEAPON_FILE), None)
             .expect("load Hume M with a main-hand weapon");
         for id in ["ef h", "se h", "skaz", "chit"] {
             assert!(
@@ -3592,5 +3639,78 @@ mod actor_bounds_tests {
                  update_actor_mesh_aabbs keeps the Aabb tracking the pose"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod motion_dat_tests {
+    use super::*;
+    use ffxi_dat::resource_dir::ResourceDir;
+
+    fn clip_joints(root: &DatRoot, file_id: u32, prefix: &str) -> Option<Vec<u32>> {
+        let bytes = read_dat(root, file_id)?;
+        ResourceDir::from_bytes(bytes)
+            .collect_animations()
+            .iter()
+            .find(|a| a.id.as_str().starts_with(prefix))
+            .map(|a| {
+                let mut j: Vec<u32> = a.key_frame_sets.keys().copied().collect();
+                j.sort_unstable();
+                j
+            })
+    }
+
+    // Retail-byte guard (skips without an install). The three motion DATs around
+    // the race base drive disjoint joint ranges, so dropping the waist set leaves
+    // its joints in bind pose rather than degrading gracefully.
+    #[test]
+    fn real_dat_waist_motion_covers_joints_no_other_set_touches() {
+        let Ok(root) = DatRoot::from_env_or_default() else {
+            return;
+        };
+        let Some(base) = skeleton_file_id_for_race(1) else {
+            return;
+        };
+        let Some(upper) = clip_joints(&root, base + UPPER_BODY_MOTION_OFFSET, "wlk") else {
+            return;
+        };
+        let waist = clip_joints(
+            &root,
+            base + u32::from(WAIST_TYPE_MIN) + WAIST_MOTION_OFFSET,
+            "wlk",
+        )
+        .expect("waist motion DAT ships a walk clip");
+
+        assert!(!waist.is_empty(), "waist clip drives no joints");
+        assert!(
+            waist.iter().all(|j| !upper.contains(j)),
+            "waist joints {waist:?} overlap upper-body joints {upper:?}"
+        );
+    }
+
+    // The two waist variants are different sets, not duplicates -- which is why
+    // the selector has to come from the body armour's CIB instead of a fixed +3.
+    #[test]
+    fn real_dat_waist_variants_differ_for_some_race() {
+        let Ok(root) = DatRoot::from_env_or_default() else {
+            return;
+        };
+        let differs = (1u8..=8).any(|race| {
+            let Some(base) = skeleton_file_id_for_race(race) else {
+                return false;
+            };
+            let count = |off: u32| {
+                read_dat(&root, base + off)
+                    .map(|b| ResourceDir::from_bytes(b).collect_animations().len())
+                    .unwrap_or(0)
+            };
+            let a = count(WAIST_MOTION_OFFSET + 1);
+            let b = count(WAIST_MOTION_OFFSET + 2);
+            a > 0 && b > 0 && a != b
+        });
+        assert!(
+            differs,
+            "no race distinguishes the two waist variants -- selector may be moot"
+        );
     }
 }

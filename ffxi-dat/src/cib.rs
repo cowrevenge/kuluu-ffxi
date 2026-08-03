@@ -12,10 +12,20 @@ pub struct Cib {
     pub footstep_size: u8,
     pub motion_index: u8,
     pub motion_option: u8,
-    pub weapon_unknown: u8,
+
+    /// `is_shield` — read from the SUB slot's CIB. Selects the upper-body motion
+    /// DAT as `base + is_shield + 1` (research/XIClient/src/XIClient/source/
+    /// World/Actor/SkeletalMeshActor.cpp:3175), so a shield swaps in a variant
+    /// with its own joint count.
+    pub is_shield: u8,
     pub weapon_constrain: u8,
     pub unknown2: u8,
     pub weapon_unknown3: u8,
+
+    /// `waist_type` — read from the BODY slot's CIB. Selects the waist/skirt
+    /// motion DAT as `base + max(waist_type, 1) + 2` (SkeletalMeshActor.cpp:3165,
+    /// via `ReadStdMotionRes` at :3014), which is how a robe gets skirt motion
+    /// where plate legs get trousers.
     pub body_armour_waist: u8,
     pub scale: u8,
     pub unknown6: u8,
@@ -40,7 +50,7 @@ impl Cib {
             footstep_size: body[0x02],
             motion_index: body[0x03],
             motion_option: body[0x04],
-            weapon_unknown: body[0x05],
+            is_shield: body[0x05],
             weapon_constrain: body[0x06],
             unknown2: body[0x07],
             weapon_unknown3: body[0x08],

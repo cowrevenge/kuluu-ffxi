@@ -9,6 +9,12 @@ use crate::snapshot::SceneState;
 
 const EQUIP_SLOT_ORDER_LEN: usize = 8;
 
+// Slot numbering retail switches on when collecting per-slot CIB bytes
+// (research/XIClient/src/XIClient/source/World/Actor/SkeletalMeshActor.cpp:1656-1688:
+// 2 = body, 5 = feet, 6 = main, 7 = sub, 8 = ranged), matching the order of
+// `slot_models` below.
+const EQUIP_SLOT_BODY: u8 = 2;
+
 // FFXiMain `.text` VA 0x100C513D, quoted at
 // research/cexi-docs/reference/ffximain.md:288-300: four ranges split at 1500 /
 // 3000 / 3500, the top one computed as `(m - 3500) + 101739`.
@@ -618,6 +624,10 @@ pub fn dispatch_look_driven_models(
                 subject: crate::ffxi_actor_render::ActorSubject::Pc {
                     race,
                     equipment: equipment.clone(),
+                    // Slot 2 is the body (SkeletalMeshActor.cpp:1659 takes
+                    // waist_type from that slot's CIB); `equipment` above drops
+                    // slot identity, so pass it separately.
+                    body: resolve_equipment_model(EQUIP_SLOT_BODY, body, race),
 
                     main_weapon: resolve_equipment_model(6, main, race),
                     sub_weapon: resolve_equipment_model(7, sub, race),

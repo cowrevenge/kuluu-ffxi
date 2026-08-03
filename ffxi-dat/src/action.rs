@@ -71,9 +71,12 @@ pub fn resolve_stage_to_se(
 ) -> Option<(u32, bool)> {
     let direct_caster = stage_kind == StageKind::SoundOnCaster;
     let direct_target = stage_kind == StageKind::SoundOnTarget;
-    if direct_caster || direct_target {
+    // A non-positional stage carries the same sep payload; `on_caster` is moot
+    // because the dispatcher mixes it dry, so report it as caster-sited.
+    let direct_dry = stage_kind == StageKind::SoundNonPositional;
+    if direct_caster || direct_target || direct_dry {
         if let Some(sep) = seps.get(stage_id) {
-            return Some((sep.se_id, direct_caster));
+            return Some((sep.se_id, direct_caster || direct_dry));
         }
     }
 

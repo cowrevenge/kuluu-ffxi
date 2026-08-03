@@ -853,7 +853,10 @@ pub fn dispatch_sound_stages(
 ) {
     for ev in events.read() {
         let kind = ev.stage.stage.kind;
-        if !matches!(kind, StageKind::SoundOnCaster | StageKind::SoundOnTarget) {
+        if !matches!(
+            kind,
+            StageKind::SoundOnCaster | StageKind::SoundOnTarget | StageKind::SoundNonPositional
+        ) {
             continue;
         }
         // research/xim EffectRoutineInstance.kt:418-431,592-604 — routine DAT, then the actor's
@@ -874,6 +877,12 @@ pub fn dispatch_sound_stages(
             continue;
         };
 
+        // A 0x4A/0x60 stage has no world emitter: it mixes dry, like a UI or
+        // weather cue, so it must not be sited on an actor and attenuated.
+        if kind == StageKind::SoundNonPositional {
+            sfx_writer.write(crate::audio::SfxEvent::new(se_id));
+            continue;
+        }
         let target = q_target.get(ev.actor).ok().and_then(|t| t.0);
         let origin = sound_origin_entity(on_caster, ev.actor, target);
         sfx_writer.write(match q_transform.get(origin) {

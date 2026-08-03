@@ -110,6 +110,11 @@ pub enum StageKind {
 
     SoundOnCaster,
 
+    /// 0x4A (`PlayerOnly`) / 0x60 (`Global`) — a sound emitter with no world
+    /// position; it mixes dry at the listener rather than attenuating from an
+    /// actor.
+    SoundNonPositional,
+
     Particle,
 
     SubRoutine,
@@ -159,6 +164,14 @@ impl StageKind {
             // until the child finishes (EffectRoutineInstance.kt:400 `blockers += newSequences`).
             0x3B | 0x3C => Self::BlockingSubRoutine,
             0x53 => Self::SoundOnCaster,
+            // research/xim EffectRoutineParser.kt:337 (0x4A -> PlayerOnly) and :405
+            // (0x60 -> Global): the same sound-emitter payload as 0x0A/0x0B, mixed
+            // at the listener instead of at a world position. Both render dry from
+            // one client's seat, so they share a kind; `raw_type` keeps them apart
+            // for anyone who later needs the distinction. Without these arms both
+            // fall to `Unknown` and never fire — eight effect DATs in 2800-3300 have
+            // no other sound stage and are completely silent.
+            0x4A | 0x60 => Self::SoundNonPositional,
             // research/xim EffectRoutineParser.kt:371-375 — a plain LinkedEffectRoutine, the
             // form every melee routine uses (`ati0` links the weapon's `skaz` whoosh, `atk0`
             // the race/face `vatk` grunt).
@@ -415,6 +428,30 @@ mod tests {
         assert_eq!(snd.len(), 1);
         assert!(snd[0].on_caster);
         assert_eq!(snd[0].frame, 30);
+    }
+
+    // 0x4A and 0x60 carry the same emitter payload as 0x0A/0x0B but mix dry. They
+    // used to fall to `Unknown` and never fire, leaving eight effect DATs in
+    // 2800-3300 silent because they carry no other sound stage.
+    #[test]
+    fn opcodes_4a_and_60_are_non_positional_sounds() {
+        for op in [0x4Au8, 0x60] {
+            let mut body = vec![0u8; SCHEDULER_HEADER_LEN];
+            body.extend_from_slice(&[op, 0x08, 0, 0]);
+            body.extend_from_slice(&0u16.to_le_bytes());
+            body.extend_from_slice(&0u16.to_le_bytes());
+            body.extend_from_slice(b"4063");
+            body.extend(std::iter::repeat_n(0u8, 20));
+
+            let s = Scheduler::parse(*b"main", &body).unwrap();
+            assert_eq!(
+                s.stages[0].stage.kind,
+                StageKind::SoundNonPositional,
+                "opcode {op:#04X}"
+            );
+            assert_eq!(s.stages[0].stage.raw_type, op, "raw opcode is preserved");
+            assert_eq!(&s.stages[0].stage.id, b"4063");
+        }
     }
 
     // Boost's effect DAT (ROM/16/0.DAT) plays its caster sound via opcode 0x0A with
@@ -962,6 +999,43 @@ mod tests {
             2,
             "only the two alternatives belong to the block"
         );
+    }
+
+    // Retail-byte guard (skips without an install). These eight effect DATs carry
+    // no 0x0A/0x0B/0x53 stage at all — every sound they play is a 0x4A or 0x60, so
+    // before those opcodes were recognised each one was completely silent.
+    #[test]
+    fn real_dat_non_positional_only_effects_are_no_longer_silent() {
+        const SILENT_WITHOUT_4A_60: [u32; 8] = [3108, 3109, 3110, 3115, 3116, 3117, 3118, 3119];
+        let Some(_) = schedulers_in_file(0) else {
+            return;
+        };
+        for file_id in SILENT_WITHOUT_4A_60 {
+            let Some(scheds) = schedulers_in_file(file_id) else {
+                continue;
+            };
+            let kinds: Vec<StageKind> = scheds
+                .iter()
+                .flat_map(|s| s.stages.iter())
+                .map(|t| t.stage.kind)
+                .filter(|k| {
+                    matches!(
+                        k,
+                        StageKind::SoundOnCaster
+                            | StageKind::SoundOnTarget
+                            | StageKind::SoundNonPositional
+                    )
+                })
+                .collect();
+            assert!(
+                !kinds.is_empty(),
+                "file {file_id} has no sound stage of any kind"
+            );
+            assert!(
+                kinds.iter().all(|k| *k == StageKind::SoundNonPositional),
+                "file {file_id} was expected to be 0x4A/0x60-only, got {kinds:?}"
+            );
+        }
     }
 
     fn schedulers_in_file(file_id: u32) -> Option<Vec<Scheduler>> {

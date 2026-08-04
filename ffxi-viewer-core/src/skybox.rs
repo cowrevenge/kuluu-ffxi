@@ -14,6 +14,25 @@ pub const SKYBOX_RADIUS: f32 = 5500.0;
 /// Frustum headroom past the dome, so the far plane can never clip it.
 const SKY_FAR_MARGIN: f32 = 100.0;
 
+/// Transparent-phase sort depths for the camera-anchored sky layers, back to
+/// front.
+///
+/// Bevy ranks `Transparent3d` by the mesh AABB centre's view-space Z
+/// (bevy_core_pipeline core_3d/mod.rs:485-492), which increases toward the
+/// camera. A layer that rides the camera has its centre *on* it, so that rank is
+/// 0 — the nearest value there is — and it draws over every other transparent
+/// object rather than behind them. Transparent draws leave the depth buffer
+/// alone, so against sky the canopy still passed the depth test and blended over
+/// the nameplates and particles already there (kuluu-w4jf). Each layer overrides
+/// the rank with a `Material::depth_bias` (bevy_pbr material.rs:173-179 — added
+/// to the sort distance and used for nothing else); the opaque dome bounds
+/// everything visible, so a depth at its radius cannot be beaten by world
+/// geometry.
+pub const SKY_SORT_DEPTH_STARS: f32 = -SKYBOX_RADIUS;
+pub const SKY_SORT_DEPTH_CLOUDS: f32 = SKY_SORT_DEPTH_STARS + SKY_LAYER_SORT_STEP;
+
+const SKY_LAYER_SORT_STEP: f32 = 1.0;
+
 /// Camera far plane for a graphics-menu draw distance.
 ///
 /// The sky sits at fixed world radii and looks identical at every draw
@@ -124,6 +143,22 @@ mod frustum_shell_tests {
     fn the_far_plane_only_ever_grows_to_clear_the_sky() {
         assert_eq!(camera_far(6100.0), 6100.0);
         assert_eq!(camera_far(200.0), camera_far(2300.0));
+    }
+
+    // Bevy sorts Transparent3d ascending on view-space Z, so a *smaller* sort
+    // depth draws earlier. Every sky layer must therefore land at or behind the
+    // dome — no world object, all of which the opaque dome bounds, can reach
+    // that — and the star field must land behind the canopy that occludes it.
+    #[test]
+    fn every_sky_layer_sorts_behind_the_world_and_in_back_to_front_order() {
+        for depth in [SKY_SORT_DEPTH_STARS, SKY_SORT_DEPTH_CLOUDS] {
+            assert!(
+                depth <= -SKYBOX_RADIUS + SKY_LAYER_SORT_STEP,
+                "sky sort depth {depth} is nearer than the {SKYBOX_RADIUS} dome, \
+                 so world geometry can sort behind it"
+            );
+        }
+        assert!(SKY_SORT_DEPTH_STARS < SKY_SORT_DEPTH_CLOUDS);
     }
 }
 

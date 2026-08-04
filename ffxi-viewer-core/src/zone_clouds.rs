@@ -387,6 +387,7 @@ fn cloud_material(texture: Option<Handle<Image>>, fog_enabled: bool) -> FfxiZone
             ..crate::ffxi_zone_material::FfxiZoneMaterialKey::LEGACY
         },
     )
+    .with_sort_depth_bias(crate::skybox::SKY_SORT_DEPTH_CLOUDS)
 }
 
 fn read_zone_dat(file_id: u32) -> Option<Vec<u8>> {
@@ -664,6 +665,7 @@ fn rebuild_zone_stars(
         unlit: true,
         alpha_mode: AlphaMode::Add,
         fog_enabled: false,
+        depth_bias: crate::skybox::SKY_SORT_DEPTH_STARS,
         ..default()
     });
 
@@ -776,6 +778,18 @@ mod tests {
         for name in [*b"cld1", *b"cld2"] {
             assert!(CLOUD_CANOPY_GENERATOR_NAMES.contains(&name));
         }
+    }
+
+    // The canopy rides the camera, so bevy's AABB-centre depth sort ranks it at
+    // 0 — nearest — and draws it over every other transparent object, washing
+    // out any nameplate or particle seen against sky (kuluu-w4jf).
+    #[test]
+    fn canopy_material_sorts_at_the_sky_depth_not_on_the_camera() {
+        use bevy::pbr::Material;
+        assert_eq!(
+            cloud_material(None, false).depth_bias(),
+            crate::skybox::SKY_SORT_DEPTH_CLOUDS
+        );
     }
 
     // The canopy must carry the generator's own fog bit through, not a blanket

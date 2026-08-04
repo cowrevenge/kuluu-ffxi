@@ -124,6 +124,11 @@ pub struct FfxiZoneMaterial {
 
     pub alpha_mode: AlphaMode,
 
+    /// Overrides where this mesh ranks in the transparent-phase depth sort.
+    /// Only the camera-anchored sky layers need it — see
+    /// [`crate::skybox::SKY_SORT_DEPTH_CLOUDS`].
+    pub sort_depth_bias: f32,
+
     /// Render-state bits that must specialize the pipeline (cull / bias /
     /// depth write). See [`FfxiZoneMaterialKey`].
     pub render_key: FfxiZoneMaterialKey,
@@ -150,9 +155,15 @@ impl FfxiZoneMaterial {
             tint,
             uv_offset,
             alpha_mode,
+            sort_depth_bias: 0.0,
             render_key,
             instance_id: NEXT_ZONE_INSTANCE_ID.fetch_add(1, Ordering::Relaxed),
         }
+    }
+
+    pub fn with_sort_depth_bias(mut self, bias: f32) -> Self {
+        self.sort_depth_bias = bias;
+        self
     }
 }
 
@@ -352,6 +363,10 @@ impl Material for FfxiZoneMaterial {
 
     fn alpha_mode(&self) -> AlphaMode {
         self.alpha_mode
+    }
+
+    fn depth_bias(&self) -> f32 {
+        self.sort_depth_bias
     }
 
     fn enable_prepass() -> bool {

@@ -1033,6 +1033,7 @@ fn handle_sub_packet(
                     action_kind: h.action_kind,
                     target_id: h.primary_target_id,
                     result: h.first_result,
+                    animation: h.animation,
                 });
             }
             for line in decode_battle2_action(sub.data, name_cache, kind_cache) {
@@ -3961,6 +3962,12 @@ pub struct Battle2Header {
     // decode as a fabricated swing, so this stays `None`. A target-less or truncated body
     // carries no result at all.
     pub first_result: Option<ffxi_proto::melee::MeleeResult>,
+
+    // The same 12 `animation` bits, uninterpreted. For every non-attack category this is the
+    // index the caster's effect DAT is keyed by — LSB fills it from the spell's/ability's/
+    // weapon skill's own animation column (charentity.cpp:1923, 1602; magic_state.cpp), which
+    // is what the client resolves against its file table rather than the action id.
+    pub animation: Option<u16>,
 }
 
 pub fn decode_battle2_header(data: &[u8]) -> Option<Battle2Header> {
@@ -3975,14 +3982,18 @@ pub fn decode_battle2_header(data: &[u8]) -> Option<Battle2Header> {
     // end the body before these trailing reads. Degrade to "no target" rather than dropping the
     // whole action — the sibling decode_battle2_action tolerates the same short payload.
     let primary_target_id = br.read(32).filter(|_| trg_sum > 0).map(|id| id as u32);
-    let first_result = primary_target_id
-        .filter(|_| action_kind == ffxi_proto::melee::CATEGORY_BASIC_ATTACK)
+    let first = primary_target_id
         .and_then(|_| br.read(4))
         .filter(|count| *count > 0)
         .and_then(|_| {
             let resolution = br.read(3)? as u8;
             br.read(2)?;
             let animation = br.read(12)? as u16;
+            Some((resolution, animation))
+        });
+    let first_result = first
+        .filter(|_| action_kind == ffxi_proto::melee::CATEGORY_BASIC_ATTACK)
+        .and_then(|(resolution, animation)| {
             ffxi_proto::melee::MeleeResult::from_wire(resolution, animation)
         });
     Some(Battle2Header {
@@ -3991,6 +4002,7 @@ pub fn decode_battle2_header(data: &[u8]) -> Option<Battle2Header> {
         action_kind,
         primary_target_id,
         first_result,
+        animation: first.map(|(_, animation)| animation),
     })
 }
 
@@ -4279,18 +4291,85 @@ fn render_check_mob(message_num: u16, data1: u32, data2: u32, tar_name: &str) ->
     line
 }
 
-// LSB's msg_basic.h enum omits id 116 (the generic "uses <ability>" line shared by
-// no-numeric buff JAs like Boost id39 / Warcry id32; abilities.sql message1=116), so
-// ffxi_proto::msg_basic::lookup(116) is None and the self-JA battle line goes missing.
-// Retail's full mesbasic table (ROM/27/72.DAT) carries it; until that is scraped, pin
-// the wording here. vendor/server/src/map/utils/battleutils.cpp getMessage() -> message1.
+// ffxi_proto::msg_basic is scraped from the trailing comment on each msg_basic.h enumerator,
+// which fails the client two ways. Id 116 (the generic "uses <ability>" line shared by
+// no-numeric buff JAs like Boost id39 / Warcry id32; abilities.sql message1=116) has no
+// enumerator at all, so lookup(116) is None and the self-JA battle line goes missing. And
+// wherever LSB's comment writes a bare ".." instead of a named token, the scrape has no way
+// to know which value belongs there — 100/101 are what an ability with message1=0 falls back
+// to (charentity.cpp:1945), so every plain job ability logged "<player> uses ..".
+// Retail's full mesbasic table (ROM/27/72.DAT) carries the real strings; until that is
+// scraped, pin the wording here. vendor/server/src/map/enums/msg_basic.h:46-185.
+// The 420-427 Corsair roll family is deliberately absent: those need two numbers and a
+// status effect that data1/data2 alone cannot supply.
 const TEMPLATE_OVERRIDES: &[(u16, &str)] = &[
+    (
+        14,
+        "The <player>'s attack is countered by the <target>. <number> of <player>'s shadows absorbs the damage and disappears.",
+    ),
+    (
+        31,
+        "<number> of <target>'s shadows absorb the damage and disappears.",
+    ),
+    (100, "The <player> uses <ability>."),
+    (101, "The <player> uses <ability>."),
+    (
+        102,
+        "The <player> uses <ability>. <target> recovers <number> HP.",
+    ),
+    (
+        103,
+        "The <player> uses <ability>. <target> recovers <number> HP.",
+    ),
     (116, "<player> uses <ability>."),
+    (
+        136,
+        "The <player> uses <ability>. <target> is now under the <player>'s control.",
+    ),
+    (
+        137,
+        "The <player> uses <ability>. The <player> fails to charm <target>.",
+    ),
+    (
+        317,
+        "The <player> uses <ability>. <target> takes <number> points of damage.",
+    ),
+    (324, "The <player> uses <ability>, but misses <target>."),
     (565, "<target> obtains <amount> gil."),
 ];
 
 fn subject_is_tar(message_num: u16) -> bool {
     matches!(message_num, 97)
+}
+
+// The `<skill>` token is overloaded across msg_basic. These three are the skill-up lines,
+// where the id is a *combat* skill (Dagger, Evasion) carried in the message's own data1.
+// vendor/server/src/map/enums/msg_basic.h:65,74,176.
+const COMBAT_SKILL_MESSAGES: &[u16] = &[38, 53, 310];
+
+// The one `<skill>` line whose id is an ability, not a weapon skill: only ability_state and
+// petskill_state emit it, both with `param = ability id`
+// (vendor/server/src/map/ai/states/ability_state.cpp:137-140).
+const READIES_ABILITY_MESSAGE: u16 = 326;
+
+fn skill_name(message_num: u16, data1: u32, action_id: u32) -> String {
+    if COMBAT_SKILL_MESSAGES.contains(&message_num) {
+        return ffxi_proto::skill_names::lookup(data1 as u8)
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("skill #{data1}"));
+    }
+    if message_num == READIES_ABILITY_MESSAGE {
+        return ability_name(action_id);
+    }
+    ffxi_proto::tp_move_names::lookup(action_id as u16)
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("skill #{action_id}"))
+}
+
+fn ability_name(action_id: u32) -> String {
+    ffxi_proto::ability_names::lookup(action_id as u16)
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("ability #{action_id}"))
 }
 
 fn name_for_id(id: u32, name_cache: &std::collections::HashMap<u32, String>) -> String {
@@ -4411,14 +4490,14 @@ fn substitute_battle_placeholders(
     if s.contains("<number2>") {
         s = s.replace("<number2>", &data2.to_string());
     }
+    let resolved_action_id = action_id.unwrap_or(data1);
     if s.contains("<skill>") {
-        let skill = ffxi_proto::skill_names::lookup(data1 as u8)
-            .map(str::to_string)
-            .unwrap_or_else(|| format!("skill #{}", data1));
-        s = s.replace("<skill>", &skill);
+        s = s.replace(
+            "<skill>",
+            &skill_name(message_num, data1, resolved_action_id),
+        );
     }
 
-    let resolved_action_id = action_id.unwrap_or(data1);
     if s.contains("<spell>") {
         let name = ffxi_proto::spell_names::lookup(resolved_action_id as u16)
             .map(str::to_string)
@@ -4426,10 +4505,7 @@ fn substitute_battle_placeholders(
         s = s.replace("<spell>", &name);
     }
     if s.contains("<ability>") {
-        let name = ffxi_proto::ability_names::lookup(resolved_action_id as u16)
-            .map(str::to_string)
-            .unwrap_or_else(|| format!("ability #{resolved_action_id}"));
-        s = s.replace("<ability>", &name);
+        s = s.replace("<ability>", &ability_name(resolved_action_id));
     }
     if s.contains("<item>") {
         let name = ffxi_proto::item_names::lookup(resolved_action_id as u16)
@@ -6837,10 +6913,48 @@ mod tests {
         cache.insert(0xCAFEu32, "Daisy".to_string());
         let line = decode_battle_message(&data, &cache, &HashMap::new(), true).expect("decoded");
         assert!(
-            line.text.contains("Daisy readies Hand-to-Hand") && !line.text.contains("<entity>"),
-            "expected '<entity>' → Daisy, got: {}",
+            line.text.contains("Daisy readies Combo") && !line.text.contains("<entity>"),
+            "expected '<entity>' → Daisy and skill 1 → the weapon skill Combo, got: {}",
             line.text
         );
+    }
+
+    #[test]
+    fn battle2_mob_tp_move_resolves_name_not_damage() {
+        // MobSkillFinish (11) carries the skill id in cmd_arg and the damage in param, so a
+        // Goobbue's Uppercut (mob skill 584) for 160 damage must not log "skill #160".
+        let line = build_battle2_line(185, "Goobbue Farmer", "Oldman", false, true, 160, 584, 11)
+            .expect("msg 185 must resolve");
+        assert!(
+            line.text.contains("uses Uppercut") && line.text.contains("160 points"),
+            "got: {}",
+            line.text
+        );
+    }
+
+    #[test]
+    fn battle2_mob_readies_resolves_skill_from_param() {
+        // SkillStart (7) puts the skill id in param instead (mobskill_state.cpp:100-104).
+        let line = build_battle2_line(43, "Goobbue Farmer", "Oldman", false, true, 584, 0, 7)
+            .expect("msg 43 must resolve");
+        assert!(line.text.contains("readies Uppercut"), "got: {}", line.text);
+    }
+
+    #[test]
+    fn battle2_plain_job_ability_names_the_ability() {
+        // Sneak Attack (abilityId 44) has abilities.sql message1 = 0, so LSB falls back to
+        // msg 100 — whose LSB comment is "The <player> uses .." and needs the override.
+        let line = build_battle2_line(100, "Oldman", "Oldman", true, true, 0, 44, 6)
+            .expect("msg 100 must resolve via override");
+        assert_eq!(line.text, "Oldman uses Sneak Attack.", "got: {}", line.text);
+    }
+
+    #[test]
+    fn battle2_ability_start_readies_names_the_ability() {
+        // msg 326 rides AbilityStart (10), where param is an ability id, not a weapon skill.
+        let line = build_battle2_line(326, "Oldman", "Goobbue Farmer", true, false, 52, 0, 10)
+            .expect("msg 326 must resolve");
+        assert!(line.text.contains("readies Charm"), "got: {}", line.text);
     }
 
     struct BattleBitWriter {
@@ -6977,6 +7091,53 @@ mod tests {
         assert_eq!(h.action_kind, 4);
         assert_eq!(h.primary_target_id, Some(0xBEEF));
         assert_eq!(h.first_result, None);
+    }
+
+    // The same 12 bits, uninterpreted, key the caster's effect DAT for every non-attack
+    // category. Sneak Attack rides AbilityFinish (6) as cmd_arg 44 / animation 17, and it is
+    // 17 the renderer needs: 0x113C+44 is an unrelated ability's routine.
+    #[test]
+    fn battle2_header_reports_the_raw_animation_index() {
+        const SNEAK_ATTACK_ABILITY_ID: u64 = 44;
+        const SNEAK_ATTACK_ANIMATION: u64 = 17;
+
+        let mut w = BattleBitWriter::new(8);
+        w.write(0xCAFEu64, 32);
+        w.write(1, 6);
+        w.write(1, 4);
+        w.write(6, 4);
+        w.write(SNEAK_ATTACK_ABILITY_ID, 32);
+        w.write(0, 32);
+        w.write(0xBEEFu64, 32);
+        w.write(1, 4);
+        w.write(0, 3);
+        w.write(0, 2);
+        w.write(SNEAK_ATTACK_ANIMATION, 12);
+        w.write(0, 32);
+        w.write(0, 32);
+
+        let h = decode_battle2_header(&w.into_bytes()).unwrap();
+        assert_eq!(h.action_id, SNEAK_ATTACK_ABILITY_ID as u32);
+        assert_eq!(h.animation, Some(SNEAK_ATTACK_ANIMATION as u16));
+        assert_eq!(h.first_result, None, "category 6 is not a melee swing");
+    }
+
+    #[test]
+    fn battle2_animation_is_absent_without_a_result() {
+        let mut w = BattleBitWriter::new(8);
+        w.write(0xCAFEu64, 32);
+        w.write(1, 6);
+        w.write(0, 4);
+        w.write(6, 4);
+        w.write(44, 32);
+        w.write(0, 32);
+        w.write(0xBEEFu64, 32);
+        w.write(0, 4);
+        w.write(0, 32);
+        w.write(0, 32);
+
+        let h = decode_battle2_header(&w.into_bytes()).unwrap();
+        assert_eq!(h.animation, None);
     }
 
     // A target that carries no result blocks must not read the packet tail as a resolution:

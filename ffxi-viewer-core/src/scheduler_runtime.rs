@@ -956,20 +956,21 @@ pub fn dispatch_motion_stages(
 
 pub fn action_dat_file_id(
     action_id: u32,
+    animation: Option<u16>,
     action_kind: u8,
     race: Option<u8>,
     main_dll: Option<&ffxi_dat::main_dll::MainDll>,
 ) -> Option<u32> {
     // research/xim EffectDisplayer.displaySkill: the completion effect routine for a
-    // skill lives in the file-table DAT keyed by the skill's animation index. Only the
-    // "finish" action categories carry that completed skill — start categories drive the
-    // caster's cast-loop motion instead (see ffxi_actor_render::action_routine).
-    // vendor/server map/utils/battleutils action categories: 3 = weaponskill finish,
-    // 4 = magic finish, 6 = job-ability finish.
+    // skill lives in the file-table DAT keyed by the skill's animation index, which s2c 0x028
+    // carries per result. Only the "finish" action categories carry that completed skill —
+    // start categories drive the caster's cast-loop motion instead (see
+    // ffxi_actor_render::action_routine). vendor/server enums/action/category.h:
+    // 3 = weaponskill finish, 4 = magic finish, 6 = job-ability finish.
     match action_kind {
-        3 => weapon_skill_file_id(action_id, race?, main_dll?),
-        4 => ffxi_proto::action_anim::spell_file_id(action_id),
-        6 => ffxi_proto::action_anim::ability_file_id(action_id),
+        3 => weapon_skill_file_id(animation?, race?, main_dll?),
+        4 => ffxi_proto::action_anim::spell_file_id(action_id, animation),
+        6 => ffxi_proto::action_anim::ability_file_id(action_id, animation),
         _ => None,
     }
 }
@@ -977,13 +978,12 @@ pub fn action_dat_file_id(
 // research/xim AbilityTable.kt:103 — WS file id = race base (FFXiMain.dll) + per-skill index.
 // `race` is the FFXI look race byte (HumeM=1..Galka=8), which is XIM's RaceGenderConfig.index.
 fn weapon_skill_file_id(
-    weapon_skill_id: u32,
+    animation: u16,
     race: u8,
     main_dll: &ffxi_dat::main_dll::MainDll,
 ) -> Option<u32> {
-    let index = ffxi_proto::action_anim::weapon_skill_animation_index(weapon_skill_id)?;
     let base = main_dll.base_weapon_skill_index(race)?;
-    Some(base as u32 + index as u32)
+    Some(base as u32 + animation as u32)
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -1026,6 +1026,7 @@ pub fn dispatch_action_started(
             action_id,
             action_kind,
             target_id,
+            animation,
             ..
         } = *ev
         else {
@@ -1043,9 +1044,13 @@ pub fn dispatch_action_started(
                 dll_cache.dll = ffxi_dat::main_dll::MainDll::load(root.root()).ok();
             }
         }
-        let Some(file_id) =
-            action_dat_file_id(action_id, action_kind, race, dll_cache.dll.as_ref())
-        else {
+        let Some(file_id) = action_dat_file_id(
+            action_id,
+            animation,
+            action_kind,
+            race,
+            dll_cache.dll.as_ref(),
+        ) else {
             continue;
         };
 

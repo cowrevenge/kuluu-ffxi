@@ -1,6 +1,5 @@
 include!(concat!(env!("OUT_DIR"), "/spell_animation_table.rs"));
 include!(concat!(env!("OUT_DIR"), "/ability_animation_table.rs"));
-include!(concat!(env!("OUT_DIR"), "/weapon_skill_animation_table.rs"));
 
 // research/xim SpellTables.kt / AbilityTable.kt: a skill's completion animation
 // is a global file-table entry at base_offset + per-skill animation index, where
@@ -17,33 +16,26 @@ fn lookup(table: &[(u16, u16)], id: u16) -> Option<u16> {
         .map(|i| table[i].1)
 }
 
-pub fn spell_file_id(spell_id: u32) -> Option<u32> {
+// Every completion effect is `<table base> + animation index`, and s2c 0x028 carries that index
+// per result — LSB fills it straight from the action's own animation column (magic_state.cpp,
+// charentity.cpp:1602/1923). The scraped `*_ANIMATION` tables hold the same column keyed by
+// action id, and stand in only when a truncated body carried no result to read it from.
+//
+// The action id is NOT the index. research/xim AbilityTable.kt getAnimationId adds
+// `animInfo.animationId` for every branch, and the two diverge widely (Sneak Attack is ability
+// 44 / animation 17, Mighty Strikes 16 / 33) — keying by id lands on an unrelated ability's DAT.
+pub fn spell_file_id(spell_id: u32, animation: Option<u16>) -> Option<u32> {
     let id = u16::try_from(spell_id).ok()?;
     if id >= TRUST_SPELL_ID_MIN {
         return Some(TRUST_FILE_ID);
     }
-    let index = lookup(SPELL_ANIMATION, id)?;
+    let index = animation.or_else(|| lookup(SPELL_ANIMATION, id))?;
     Some(SPELL_FILE_TABLE_OFFSET + index as u32)
 }
 
-// The completion-effect DAT for a job ability is the file-table entry at
-// ABILITY_FILE_TABLE_OFFSET + abilityId — i.e. the ability id is itself the index. LSB's
-// `abilities.animation` column is the packet animation value, NOT this index: for abilities where
-// the two diverge (e.g. Boost id 39 / anim 7, Mighty Strikes 16 / 33) only `+ abilityId` lands on
-// the effect DAT that actually carries the local D3m billboard meshes; `+ animation` points at a
-// meshless or unrelated DAT. (Verified against retail DATs: 0x113C+39 = Boost's "maz" self-buff
-// aura with 4 D3m chunks; 0x113C+7 has none.)
-pub fn ability_file_id(ability_id: u32) -> Option<u32> {
-    let id = u16::try_from(ability_id).ok()?;
-    Some(ABILITY_FILE_TABLE_OFFSET + id as u32)
-}
-
-// research/xim AbilityTable.kt:103 — weapon skills add their per-skill animation index to a
-// race-dependent base read from FFXiMain.dll (see ffxi_dat::main_dll). This returns only the
-// per-skill index; the caller adds the race base.
-pub fn weapon_skill_animation_index(weapon_skill_id: u32) -> Option<u16> {
-    let id = u16::try_from(weapon_skill_id).ok()?;
-    lookup(WEAPON_SKILL_ANIMATION, id)
+pub fn ability_file_id(ability_id: u32, animation: Option<u16>) -> Option<u32> {
+    let index = animation.or_else(|| lookup(ABILITY_ANIMATION, u16::try_from(ability_id).ok()?))?;
+    Some(ABILITY_FILE_TABLE_OFFSET + index as u32)
 }
 
 #[cfg(test)]
@@ -59,30 +51,39 @@ mod tests {
     }
 
     #[test]
-    fn cure_resolves_to_offset_plus_index() {
+    fn packet_animation_wins_over_the_scraped_column() {
+        assert_eq!(
+            spell_file_id(1, Some(200)),
+            Some(SPELL_FILE_TABLE_OFFSET + 200)
+        );
+        assert_eq!(
+            ability_file_id(44, Some(17)),
+            Some(ABILITY_FILE_TABLE_OFFSET + 17)
+        );
+    }
+
+    #[test]
+    fn a_result_less_body_falls_back_to_the_scraped_column() {
         let index = lookup(SPELL_ANIMATION, 1).unwrap();
         assert_eq!(
-            spell_file_id(1),
+            spell_file_id(1, None),
             Some(SPELL_FILE_TABLE_OFFSET + index as u32)
+        );
+        // Sneak Attack: abilities.sql animation 17, not its ability id 44.
+        assert_eq!(
+            ability_file_id(44, None),
+            Some(ABILITY_FILE_TABLE_OFFSET + 17)
         );
     }
 
     #[test]
     fn trust_spells_share_one_file() {
-        assert_eq!(spell_file_id(900), Some(TRUST_FILE_ID));
+        assert_eq!(spell_file_id(900, Some(5)), Some(TRUST_FILE_ID));
     }
 
     #[test]
     fn out_of_range_is_none() {
-        assert_eq!(spell_file_id(0xF_FFFF), None);
-        assert_eq!(ability_file_id(0xF_FFFF), None);
-    }
-
-    #[test]
-    fn ability_effect_file_is_offset_plus_id_not_animation_column() {
-        // Boost (abilityId 39) must resolve to 0x113C+39 = 0x1163 (its "maz" aura DAT, which has
-        // the local billboard meshes) — NOT 0x113C+7 from the LSB animation column.
-        assert_eq!(ability_file_id(39), Some(ABILITY_FILE_TABLE_OFFSET + 39));
-        assert_eq!(ability_file_id(16), Some(ABILITY_FILE_TABLE_OFFSET + 16));
+        assert_eq!(spell_file_id(0xF_FFFF, None), None);
+        assert_eq!(ability_file_id(0xF_FFFF, None), None);
     }
 }

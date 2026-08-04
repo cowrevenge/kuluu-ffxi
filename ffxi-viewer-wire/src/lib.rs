@@ -2,6 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 
+// v12: ViewerEvent::ActionStarted.animation — the BATTLE2 first-result animation index for
+// every category, which is what keys the caster's effect DAT (the action id does not).
 // v11: ChatLine.spans (per-substitution colouring — retail renders a drop line's item name
 // green against the rest) and SceneSnapshot.treasure_pool (the 10 pool slots).
 // v10: Entity.char_flags (0x0D/0x0E Flags1-3, for retail nameplate colour + icon markers) and
@@ -16,7 +18,7 @@ use serde::{Deserialize, Serialize};
 // v5: InventoryItem.charges_remaining + next_use_vana_ts (item recast/charges).
 // v4: SceneSnapshot.delivery_box (dedicated delivery screen) + ViewerCommand::DeliveryBox
 // (postcard frames are not self-describing, so any shape change bumps this).
-pub const PROTOCOL_VERSION: u32 = 11;
+pub const PROTOCOL_VERSION: u32 = 12;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 pub struct Vec3 {
@@ -1004,6 +1006,9 @@ pub enum ViewerEvent {
         /// `animation` (attack.h AttackAnimation) bits; only a `CATEGORY_BASIC_ATTACK` body
         /// carries them, absent otherwise.
         result: Option<(u8, u16)>,
+        /// First result's raw `animation` index, for every category — the file-table key of
+        /// the caster's effect DAT. Absent on a result-less or truncated body.
+        animation: Option<u16>,
     },
 
     /// One-shot emote broadcast (s2c 0x05A MOTIONMES): `emote_id` is the wire

@@ -1908,6 +1908,7 @@ pub enum AgentEvent {
         action_kind: u8,
         target_id: Option<u32>,
         result: Option<ffxi_proto::melee::MeleeResult>,
+        animation: Option<u16>,
     },
 
     /// The self player began casting a spell (optimistic, on send). Drives the

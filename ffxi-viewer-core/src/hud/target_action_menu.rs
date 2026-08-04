@@ -9,6 +9,17 @@ const MAX_ROWS: usize = 7;
 
 const SUBMENU_ARROW: &str = "▶";
 
+/// First list index the pane shows. The row entities are spawned once and fixed at `MAX_ROWS`,
+/// so a longer list — a BST/THF's job abilities plus the pet commands a charmed pet adds —
+/// has to scroll or its tail is unreachable. Keeps the cursor centred once the list outgrows
+/// the pane, matching `hud::menu::resolve_viewport`.
+fn viewport_start(total: usize, cursor: usize) -> usize {
+    if total <= MAX_ROWS {
+        return 0;
+    }
+    cursor.saturating_sub(MAX_ROWS / 2).min(total - MAX_ROWS)
+}
+
 #[derive(Component)]
 pub struct TargetActionMenu;
 
@@ -178,6 +189,7 @@ pub fn update_target_action_menu(
     if let Some(SubAction::AbilitiesGroup(group)) = sub_active {
         let rows = crate::hud::menu::ability_group_rows(&scene.snapshot, group);
         let sub_cursor = state.sub.as_ref().map(|s| s.cursor).unwrap_or(0);
+        let start = viewport_start(rows.len(), sub_cursor);
         for (row, mut node, mut text, mut color) in row_q.iter_mut() {
             let (want, want_color) = if rows.is_empty() {
                 if row.slot == 0 {
@@ -191,8 +203,8 @@ pub fn update_target_action_menu(
                     }
                     continue;
                 }
-            } else if let Some(leaf) = rows.get(row.slot) {
-                let is_cursor = row.slot == sub_cursor;
+            } else if let Some(leaf) = rows.get(start + row.slot) {
+                let is_cursor = start + row.slot == sub_cursor;
                 let caret = style::cursor_prefix(is_cursor);
                 let now = vana_clock.earth_unix_secs_now() as u32;
                 match crate::hud::menu::action_recast_remaining(
@@ -236,13 +248,14 @@ pub fn update_target_action_menu(
         return;
     }
 
+    let start = viewport_start(entries.len(), cursor);
     for (row, mut node, mut text, mut color) in row_q.iter_mut() {
-        match entries.get(row.slot) {
+        match entries.get(start + row.slot) {
             Some(entry) => {
                 if node.display != Display::Flex {
                     node.display = Display::Flex;
                 }
-                let is_cursor = row.slot == cursor && sub_active.is_none();
+                let is_cursor = start + row.slot == cursor && sub_active.is_none();
                 let caret = style::cursor_prefix(is_cursor);
                 let want = format!("{caret}{}", entry_text(entry));
                 if **text != want {
@@ -282,12 +295,14 @@ pub fn target_action_mouse_hover_system(
     if state.sub.as_ref().and_then(|s| s.current()).is_some() {
         return;
     }
+    let start = viewport_start(limit, state.cursor);
     for (interaction, row) in &rows {
+        let idx = start + row.slot;
         if matches!(interaction, Interaction::Hovered | Interaction::Pressed)
-            && row.slot < limit
-            && state.cursor != row.slot
+            && idx < limit
+            && state.cursor != idx
         {
-            state.cursor = row.slot;
+            state.cursor = idx;
         }
     }
 }
@@ -305,9 +320,11 @@ pub fn target_action_mouse_click_system(
     if state.sub.as_ref().and_then(|s| s.current()).is_some() {
         return;
     }
+    let start = viewport_start(limit, state.cursor);
     for (interaction, row) in &rows {
-        if *interaction == Interaction::Pressed && row.slot < limit {
-            out.write(TargetActionActivated { slot: row.slot });
+        let idx = start + row.slot;
+        if *interaction == Interaction::Pressed && idx < limit {
+            out.write(TargetActionActivated { slot: idx });
         }
     }
 }
@@ -398,6 +415,34 @@ mod tests {
             .expect("chat present");
         let text = entry_text(chat);
         assert!(text.contains("(Target out of range.)"));
+    }
+
+    #[test]
+    fn short_list_never_scrolls() {
+        for cursor in 0..MAX_ROWS {
+            assert_eq!(viewport_start(MAX_ROWS, cursor), 0);
+        }
+    }
+
+    #[test]
+    fn long_list_keeps_the_cursor_on_screen() {
+        // A BST/THF with a charmed pet: more ability rows than the pane has.
+        let total = MAX_ROWS + 6;
+        for cursor in 0..total {
+            let start = viewport_start(total, cursor);
+            assert!(
+                (start..start + MAX_ROWS).contains(&cursor),
+                "cursor {cursor} fell outside the window [{start}, {})",
+                start + MAX_ROWS
+            );
+            assert!(start + MAX_ROWS <= total, "window ran past the list end");
+        }
+    }
+
+    #[test]
+    fn last_row_is_reachable() {
+        let total = MAX_ROWS + 6;
+        assert_eq!(viewport_start(total, total - 1), total - MAX_ROWS);
     }
 
     #[test]

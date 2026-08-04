@@ -325,12 +325,14 @@ pub fn event_to_viewer_event(ev: AgentEvent) -> Option<wire::ViewerEvent> {
             action_kind,
             target_id,
             result,
+            animation,
         } => Some(wire::ViewerEvent::ActionStarted {
             actor_id,
             action_id,
             action_kind,
             target_id,
             result: result.map(ffxi_proto::melee::MeleeResult::to_wire),
+            animation,
         }),
         AgentEvent::EntityEmoted {
             actor_id,
@@ -644,6 +646,7 @@ mod tests {
                 action_kind: 4,
                 target_id,
                 result: None,
+                animation: None,
             });
             assert!(matches!(
                 mapped,
@@ -665,6 +668,7 @@ mod tests {
                 action_kind: ffxi_proto::melee::CATEGORY_BASIC_ATTACK,
                 target_id: Some(0xBEEF),
                 result,
+                animation: None,
             });
             assert!(matches!(
                 mapped,

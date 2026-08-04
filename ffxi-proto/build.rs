@@ -13,6 +13,7 @@ const LSB_JOB_NAME_LUA: &str = "../vendor/server/scripts/enum/job_name.lua";
 const LSB_SPELL_LIST_SQL: &str = "../vendor/server/sql/spell_list.sql";
 const LSB_ABILITIES_SQL: &str = "../vendor/server/sql/abilities.sql";
 const LSB_WEAPON_SKILLS_SQL: &str = "../vendor/server/sql/weapon_skills.sql";
+const LSB_MOB_SKILLS_SQL: &str = "../vendor/server/sql/mob_skills.sql";
 const LSB_ITEM_BASIC_SQL: &str = "../vendor/server/sql/item_basic.sql";
 const LSB_ITEM_EQUIPMENT_SQL: &str = "../vendor/server/sql/item_equipment.sql";
 const LSB_ITEM_USABLE_SQL: &str = "../vendor/server/sql/item_usable.sql";
@@ -42,6 +43,7 @@ fn main() -> Result<()> {
     println!("cargo:rerun-if-changed={LSB_SPELL_LIST_SQL}");
     println!("cargo:rerun-if-changed={LSB_ABILITIES_SQL}");
     println!("cargo:rerun-if-changed={LSB_WEAPON_SKILLS_SQL}");
+    println!("cargo:rerun-if-changed={LSB_MOB_SKILLS_SQL}");
     println!("cargo:rerun-if-changed={LSB_ITEM_BASIC_SQL}");
     println!("cargo:rerun-if-changed={LSB_ITEM_EQUIPMENT_SQL}");
     println!("cargo:rerun-if-changed={LSB_ITEM_USABLE_SQL}");
@@ -313,16 +315,23 @@ fn main() -> Result<()> {
 
     let ws_src = fs::read_to_string(LSB_WEAPON_SKILLS_SQL)
         .with_context(|| format!("reading {LSB_WEAPON_SKILLS_SQL}"))?;
-    let ws_anim_entries = parse_u16_pair_rows(&ws_src, "weapon_skills", 6)?;
-    write_u16_u16_table(
-        &out_dir.join("weapon_skill_animation_table.rs"),
-        "WEAPON_SKILL_ANIMATION",
-        LSB_WEAPON_SKILLS_SQL,
-        &ws_anim_entries,
+
+    // One id space, two LSB tables: ids < 256 are weapon skills PCs and mobs share
+    // (weapon_skills.name), ids >= 256 are monster-only TP moves (mob_skills.mob_skill_name).
+    // mob_skills mirrors the low ids verbatim but omits some, so both are merged.
+    let mob_skill_src = fs::read_to_string(LSB_MOB_SKILLS_SQL)
+        .with_context(|| format!("reading {LSB_MOB_SKILLS_SQL}"))?;
+    let mut tp_move_entries = parse_sql_insert_rows(&mob_skill_src, "mob_skills", 0, 2)?;
+    tp_move_entries.extend(parse_sql_insert_rows(&ws_src, "weapon_skills", 0, 1)?);
+    write_u16_table(
+        &out_dir.join("tp_move_names_table.rs"),
+        "TP_MOVE_NAMES",
+        &format!("{LSB_MOB_SKILLS_SQL} + {LSB_WEAPON_SKILLS_SQL}"),
+        &tp_move_entries,
     )?;
     println!(
-        "ffxi-proto: scraped {} weapon-skill animation entries",
-        ws_anim_entries.len(),
+        "ffxi-proto: scraped {} TP-move name entries",
+        tp_move_entries.len(),
     );
 
     let item_src = fs::read_to_string(LSB_ITEM_BASIC_SQL)

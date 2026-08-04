@@ -30,6 +30,7 @@ pub mod skill_names;
 pub mod spell_names;
 pub mod status_effects;
 pub mod status_names;
+pub mod tp_move_names;
 pub mod valid_target;
 pub mod vana_time;
 pub mod zlib;

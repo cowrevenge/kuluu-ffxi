@@ -117,6 +117,11 @@ pub struct SlashWriters<'w, 's> {
     pub map_markers: ResMut<'w, ffxi_viewer_core::hud::map_screen::MapMarkers>,
 
     pub map_view: Res<'w, ffxi_viewer_core::hud::map_screen::MapView>,
+
+    pub dat_root: Res<'w, super::DatRootRes>,
+
+    /// Absent when no config dir resolved, which makes `/overlay` read-only.
+    pub overlay_store: Option<Res<'w, ffxi_client::overlay_store::OverlayStoreRes>>,
 }
 
 #[derive(SystemParam)]

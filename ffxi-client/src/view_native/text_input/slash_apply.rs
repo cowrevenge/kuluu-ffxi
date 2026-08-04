@@ -519,6 +519,102 @@ pub(super) fn apply_slash_outcome(
             };
             push_system_chat_line(scene_state, chat);
         }
+        SlashOutcome::Overlay(op) => {
+            use crate::view_native::slash_commands::OverlayOp;
+            let chat = match slash_writers.dat_root.0.as_ref() {
+                None => "/overlay: no DAT install loaded".to_string(),
+                Some(root) => {
+                    let active = root.overlays();
+                    let store = slash_writers.overlay_store.as_ref().map(|r| &r.store);
+                    // `None` from the store means no override file, so the
+                    // active list is whatever discovery found.
+                    let overridden = store.and_then(|s| s.load().ok().flatten()).is_some();
+                    let mut next: Option<Vec<std::path::PathBuf>> = None;
+                    let mut reset = false;
+                    let mut msg = match &op {
+                        OverlayOp::List => {
+                            let source = if overridden { "override" } else { "discovered" };
+                            if active.is_empty() {
+                                format!("/overlay: none active ({source})")
+                            } else {
+                                let list = active
+                                    .iter()
+                                    .enumerate()
+                                    .map(|(i, p)| format!("  {}. {}", i + 1, p.display()))
+                                    .collect::<Vec<_>>()
+                                    .join("\n");
+                                format!("/overlay: {} active ({source})\n{list}", active.len())
+                            }
+                        }
+                        OverlayOp::Add(dir) => {
+                            if !dir.is_dir() {
+                                format!("/overlay add: not a directory: {}", dir.display())
+                            } else {
+                                let mut v = active.clone();
+                                v.push(dir.clone());
+                                let n = v.len();
+                                next = Some(v);
+                                format!("/overlay: added {} ({n} active)", dir.display())
+                            }
+                        }
+                        OverlayOp::Remove(n) => match active.get(n - 1) {
+                            None => {
+                                format!("/overlay remove: no entry {n} (have {})", active.len())
+                            }
+                            Some(gone) => {
+                                let gone = gone.display().to_string();
+                                let mut v = active.clone();
+                                v.remove(n - 1);
+                                next = Some(v);
+                                format!("/overlay: removed {gone}")
+                            }
+                        },
+                        OverlayOp::Clear => {
+                            next = Some(Vec::new());
+                            "/overlay: cleared — the install's own DATs only".to_string()
+                        }
+                        OverlayOp::Reset => {
+                            reset = true;
+                            let found = ffxi_dat::archive::discover_overlays(root.root());
+                            let n = found.len();
+                            root.set_overlays(found);
+                            format!("/overlay: back to discovery ({n} found)")
+                        }
+                    };
+
+                    if let Some(v) = next {
+                        root.set_overlays(v.clone());
+                        match store {
+                            Some(s) => {
+                                if let Err(e) = s.save(&v) {
+                                    msg.push_str(&format!("\n  (not saved: {e})"));
+                                }
+                            }
+                            None => msg.push_str("\n  (not saved: no config dir)"),
+                        }
+                    }
+                    if reset {
+                        match store {
+                            Some(s) => {
+                                if let Err(e) = s.clear() {
+                                    msg.push_str(&format!("\n  (override not removed: {e})"));
+                                }
+                            }
+                            None => msg.push_str("\n  (no override file to remove)"),
+                        }
+                    }
+                    if !matches!(op, OverlayOp::List) {
+                        // Only later reads go through the new path; anything
+                        // already decoded into an asset keeps the old bytes.
+                        msg.push_str(
+                            "\n  (already-loaded DAT assets keep the old bytes until reload)",
+                        );
+                    }
+                    msg
+                }
+            };
+            push_system_chat_line(scene_state, chat);
+        }
         SlashOutcome::SetSound(op) => {
             use crate::view_native::slash_commands::SoundOp;
             let mute = &mut *slash_writers.audio_mute;

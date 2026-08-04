@@ -10,6 +10,8 @@ use ffxi_client::graphics_store;
 use ffxi_client::keybinds_store;
 #[cfg(feature = "native-window")]
 use ffxi_client::marker_store;
+#[cfg(feature = "native-window")]
+use ffxi_client::overlay_store;
 #[cfg(feature = "relay")]
 use ffxi_client::relay;
 #[cfg(feature = "native-window")]
@@ -209,8 +211,11 @@ fn main() -> Result<()> {
 fn resolve_dat_root(require_dat: bool) -> Result<Option<std::sync::Arc<ffxi_dat::DatRoot>>> {
     match ffxi_dat::DatRoot::from_env_or_default() {
         Ok(root) => {
+            #[cfg(feature = "native-window")]
+            overlay_store::apply_saved(&root);
             tracing::info!(
                 source = %root.root().display(),
+                overlays = root.overlays().len(),
                 "loaded FFXI DAT install for NPC name lookup"
             );
             Ok(Some(std::sync::Arc::new(root)))

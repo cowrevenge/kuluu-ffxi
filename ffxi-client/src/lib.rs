@@ -25,6 +25,7 @@ pub mod map_client;
 #[cfg(feature = "native-window")]
 pub mod marker_store;
 pub mod net_health;
+pub mod overlay_store;
 pub mod reactor;
 pub mod scene;
 pub mod session;

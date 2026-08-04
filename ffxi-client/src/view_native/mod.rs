@@ -476,6 +476,9 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
         .insert_resource(ports)
         .insert_resource(RelayListen(relay_listen));
     insert_dat_roots(&mut app, dat_root);
+    if let Some(store) = ffxi_client::overlay_store::default_store() {
+        app.insert_resource(ffxi_client::overlay_store::OverlayStoreRes { store });
+    }
     #[cfg(unix)]
     app.insert_resource(AgentListen(agent_listen));
 

@@ -39,7 +39,7 @@ pub mod weather;
 pub mod zone_dat;
 pub mod zone_interaction;
 
-pub use archive::{DatLocation, DatRoot};
+pub use archive::{discover_overlays, DatLocation, DatRoot};
 pub use chunk::{walk, walk_tree, Chunk, ChunkNode, ChunkWalker};
 pub use item_dat::ItemStatic;
 pub use kind::ChunkKind;

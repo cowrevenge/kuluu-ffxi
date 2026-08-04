@@ -369,6 +369,7 @@ fn persist_and_reload(
 
     let root = ffxi_dat::DatRoot::from_env_or_default()
         .map_err(|e| format!("DAT path rejected: {e}. Settings saved but assets not reloaded."))?;
+    ffxi_client::overlay_store::apply_saved(&root);
     let root_path = root.root().display().to_string();
     let app_count = root.app_summary().len();
     let arc = Arc::new(root);

@@ -775,6 +775,12 @@ const COMMANDS: &[(&str, &[Command])] = &[
         "Debug & Tooling",
         &[
             Command {
+                aliases: &["overlay"],
+                usage: "[list|add <dir>|remove <n>|clear|reset]",
+                summary: "inspect and override the DAT overlay search path",
+                handler: |c| parse_overlay(c.rest),
+            },
+            Command {
                 aliases: &["snapshot"],
                 usage: "",
                 summary: "emit a one-shot scene snapshot",
@@ -1068,6 +1074,8 @@ pub enum SlashOutcome {
 
     SetSound(SoundOp),
 
+    Overlay(OverlayOp),
+
     SetTargetFps(Option<u32>),
 
     SetCaptureMode(Option<bool>),
@@ -1141,6 +1149,23 @@ pub enum MinimapOp {
     ZoomSet(f32),
 
     ZoomReset,
+}
+
+/// `/overlay` verbs. The list is the DAT search path private servers ship their
+/// client changes in; see `ffxi_dat::discover_overlays`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OverlayOp {
+    /// Report the active list and where it came from.
+    List,
+    /// Append a directory and persist the result as an override.
+    Add(std::path::PathBuf),
+    /// Drop the 1-based entry `n` from the active list and persist.
+    Remove(usize),
+    /// Persist an empty list — the way to run a private-server install with the
+    /// server's overlays off, which is distinct from `Reset`.
+    Clear,
+    /// Forget the override and go back to what discovery finds.
+    Reset,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2005,6 +2030,37 @@ fn parse_endcutscene(rest: &str) -> SlashOutcome {
             "/endcutscene: bad CSID `{trimmed}` (expected u16)"
         )),
     }
+}
+
+fn parse_overlay(rest: &str) -> SlashOutcome {
+    let trimmed = rest.trim();
+    let (verb, arg) = match trimmed.split_once(char::is_whitespace) {
+        Some((v, a)) => (v, a.trim()),
+        None => (trimmed, ""),
+    };
+    let op = match verb.to_ascii_lowercase().as_str() {
+        "" | "list" | "status" => OverlayOp::List,
+        // A path is taken verbatim: overlay directories routinely contain
+        // spaces, so splitting further would break more than it parsed.
+        "add" if !arg.is_empty() => OverlayOp::Add(std::path::PathBuf::from(arg)),
+        "add" => return SlashOutcome::SystemMessage("/overlay add: usage `add <dir>`".into()),
+        "remove" | "rm" => match arg.parse::<usize>() {
+            Ok(n) if n >= 1 => OverlayOp::Remove(n),
+            _ => {
+                return SlashOutcome::SystemMessage(format!(
+                    "/overlay remove: want a 1-based index, got `{arg}`"
+                ))
+            }
+        },
+        "clear" | "off" => OverlayOp::Clear,
+        "reset" | "auto" => OverlayOp::Reset,
+        other => {
+            return SlashOutcome::SystemMessage(format!(
+                "/overlay: unknown `{other}` — try list|add <dir>|remove <n>|clear|reset"
+            ))
+        }
+    };
+    SlashOutcome::Overlay(op)
 }
 
 fn parse_zone_change(rest: &str) -> SlashOutcome {
@@ -5085,6 +5141,52 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    fn overlay_op(rest: &str) -> OverlayOp {
+        match parse_overlay(rest) {
+            SlashOutcome::Overlay(op) => op,
+            other => panic!("expected an overlay op for `{rest}`, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn overlay_defaults_to_listing() {
+        assert_eq!(overlay_op(""), OverlayOp::List);
+        assert_eq!(overlay_op("  "), OverlayOp::List);
+        assert_eq!(overlay_op("list"), OverlayOp::List);
+    }
+
+    // Overlay directories routinely sit under paths with spaces, so the
+    // argument is taken verbatim rather than split into words.
+    #[test]
+    fn overlay_add_keeps_a_path_with_spaces_intact() {
+        assert_eq!(
+            overlay_op("add /Users/x/Game/polplugins/DATs/xi view"),
+            OverlayOp::Add(std::path::PathBuf::from(
+                "/Users/x/Game/polplugins/DATs/xi view"
+            ))
+        );
+    }
+
+    // Clearing (run with no overlays) and resetting (go back to discovery) are
+    // different outcomes, and the display list is 1-based.
+    #[test]
+    fn overlay_clear_reset_and_remove_are_distinct() {
+        assert_eq!(overlay_op("clear"), OverlayOp::Clear);
+        assert_eq!(overlay_op("reset"), OverlayOp::Reset);
+        assert_eq!(overlay_op("remove 1"), OverlayOp::Remove(1));
+        assert_eq!(overlay_op("rm 3"), OverlayOp::Remove(3));
+    }
+
+    #[test]
+    fn overlay_rejects_bad_input_instead_of_guessing() {
+        for bad in ["add", "remove", "remove 0", "remove x", "wat"] {
+            assert!(
+                matches!(parse_overlay(bad), SlashOutcome::SystemMessage(_)),
+                "`/overlay {bad}` must explain itself, not act"
+            );
         }
     }
 

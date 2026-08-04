@@ -404,7 +404,7 @@ fn text_line_height_px(font: &FontArc, px: f32) -> u32 {
 // research/XIClient/.../CXiActorNameDraw.cpp:32-34 — an icon that is not the
 // leftmost glyph draws at 0.8 and advances the pen by 0.625; the job-master
 // tail draws at half scale and does not advance at all.
-const ICON_TRAILING_SCALE: f32 = 0.800_000_01;
+const ICON_TRAILING_SCALE: f32 = 0.8;
 const ICON_TRAILING_ADVANCE: f32 = 0.625;
 const ICON_TAIL_SCALE: f32 = 0.5;
 // CXiActorNameDraw.cpp:366-367 — the tail glyph is nudged back over the star.

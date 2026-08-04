@@ -611,12 +611,15 @@ mod char_flags_tests {
         assert_eq!(flags, CharFlags::default());
     }
 
+    /// A named bit paired with the `CharFlags` field it is supposed to light.
+    type FlagProbe = (u32, fn(&CharFlags) -> bool);
+
     /// Each named bit must light exactly its own field: a lone set bit at the
     /// documented shift, decoded, must differ from the all-clear decode in that
     /// one field only. Catches a shift that silently aliases a neighbour.
     #[test]
     fn each_flag1_bit_is_isolated() {
-        let probes: [(u32, fn(&CharFlags) -> bool); 9] = [
+        let probes: [FlagProbe; 9] = [
             (flags1::MONSTER, |f| f.monster),
             (flags1::LFG, |f| f.lfg),
             (flags1::ANONYMOUS, |f| f.anonymous),
@@ -698,7 +701,7 @@ mod char_flags_tests {
 
     #[test]
     fn flags3_singles_straddle_the_ballista_team_byte() {
-        let probes: [(u32, fn(&CharFlags) -> bool); 5] = [
+        let probes: [FlagProbe; 5] = [
             (flags3::TRUST, |f| f.trust),
             (flags3::LFG_MASTER, |f| f.lfg_master),
             (flags3::PET, |f| f.pet),

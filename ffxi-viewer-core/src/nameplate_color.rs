@@ -625,8 +625,10 @@ mod tests {
 
     #[test]
     fn blend_is_the_per_channel_mean_of_the_two_rows() {
-        let mut table = NameColorTable::default();
-        table.colors = vec![Color::BLACK; NAME_COLOR_COUNT];
+        let mut table = NameColorTable {
+            colors: vec![Color::BLACK; NAME_COLOR_COUNT],
+            ..Default::default()
+        };
         table.colors[ncol::CLAIMED_BY_PARTY] = Color::srgba(1.0, 0.0, 0.0, 1.0);
         table.colors[ncol::CLAIMED_BY_OTHER] = Color::srgba(1.0, 0.0, 1.0, 1.0);
         table.loaded = true;

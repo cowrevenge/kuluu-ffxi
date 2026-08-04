@@ -19,7 +19,9 @@
 #
 # Carve-out (kept, never flagged): SAFETY justifications, vendor/spec
 # citations, and license headers — tune them in CR_RE_ALLOWED so the two
-# hooks never drift apart.
+# hooks never drift apart. One exception rides above the carve-out: a
+# citation pinned to a `:NNN` line number (CR_RE_CITE_LINE), which rots on
+# the next submodule bump and so is flagged even though the citation is kept.
 
 # Allowed comments — stripped before flagging so the ban doesn't fight
 # the project's own conventions: `// SAFETY:` blocks (required by
@@ -32,6 +34,15 @@ CR_RE_ALLOWED='(SAFETY|#[[:space:]]*Safety|SPDX-|[Cc]opyright|\bvendor/|\bresear
 # excluded from the blanket catch-all so a clean one-line API doc isn't
 # treated as a banned narrative comment.
 CR_RE_DOC='^[[:space:]]*//[/!]'
+
+# Vendor/research citation pinned to a LINE NUMBER. The citation itself is
+# required by the LSB-boundary convention (hence CR_RE_ALLOWED keeps it) — but
+# the `:NNN` suffix silently decays the moment the submodule advances, and
+# nothing in the build catches it. A symbol anchor (function/struct/enum name)
+# survives upstream edits and is greppable; a line number is a promise the
+# submodule pin does not keep. Matched BEFORE the allow-list strip, since the
+# allow-list is what would otherwise exempt these.
+CR_RE_CITE_LINE='(vendor|research)/[A-Za-z0-9._/-]+\.(cpp|h|hpp|c|cs|lua|sql|py|rs|xml|json):[0-9]+'
 
 # Narrative / session-history / temporal — describes how the code got
 # here or a passing moment, not what is true now.
@@ -78,9 +89,18 @@ scan_comment_rot() {
   comments=$(grep -E '//' | grep -vE 'https?://' || true)
   [ -z "$comments" ] && return 1
 
+  # Line-pinned vendor citations are flagged from the FULL comment set: the
+  # allow-list below is precisely what exempts them, so this must run first.
+  local pinned
+  pinned=$(printf '%s\n' "$comments" | grep -oE "$CR_RE_CITE_LINE" | sort -u | head -4 || true)
+  if [ -n "$pinned" ]; then
+    printf '%s\n' "$pinned" | sed -E 's#^#  [citation pinned to a line number] #'
+    found=0
+  fi
+
   # Drop the allowed carve-out before flagging anything.
   flaggable=$(printf '%s\n' "$comments" | grep -vE "$CR_RE_ALLOWED" || true)
-  [ -z "$flaggable" ] && return 1
+  [ -z "$flaggable" ] && return $found
 
   matched=''
   _cr_emit() { # $1=label  $2=regex

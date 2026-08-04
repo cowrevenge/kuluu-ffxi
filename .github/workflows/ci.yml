@@ -19,12 +19,15 @@ permissions:
 jobs:
   # fmt compiles nothing — no submodules, no C++ toolchain — so it gets its own
   # seconds-long job and runs in parallel with the heavier jobs below for fast
-  # "you forgot to format" feedback.
+  # "you forgot to format" feedback. The harness-config invariants ride along:
+  # they need only git + jq, so a dedicated job would cost a checkout to save
+  # nothing. Separate steps keep the pass/fail signal per-stage.
   format:
     name: fmt
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+      - run: scripts/checks.sh harness
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt

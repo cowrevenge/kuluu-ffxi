@@ -6,9 +6,9 @@
 # cargo flags themselves, so the two can't drift: a green pre-push run uses
 # the *exact* fmt/clippy invocation CI will, and vice versa.
 #
-# Usage: scripts/checks.sh <stage>...   stage ∈ {fmt, clippy, test, build, doc}
-#   scripts/checks.sh fmt clippy              # pre-push default
-#   scripts/checks.sh fmt clippy test         # the CI gate (ci.yml runs these)
+# Usage: scripts/checks.sh <stage>...   stage ∈ {harness, fmt, clippy, test, build, doc}
+#   scripts/checks.sh harness fmt clippy      # pre-push default
+#   scripts/checks.sh harness fmt clippy test # the CI gate (ci.yml runs these)
 #   scripts/checks.sh build                   # local-only: see run_build below
 #
 # Each stage is a separate argument so callers (notably CI) can run them as
@@ -66,6 +66,69 @@ run_style() {
   fi
 }
 
+run_harness() {
+  # Invariants of the `.agents/` canonical + `.claude/` adapter split
+  # (.agents/AGENTS.md holds the mechanism→wiring table this enforces).
+  # Pure shell, no cargo — runs first in pre-push because it costs ~nothing.
+  # ffxi-agent/ is deliberately out of scope: it ships its own real .claude/
+  # tree as the runtime playbook for an agent playing the game.
+  local settings=".claude/settings.json" bad=0 link target cmd path doc
+
+  # 1. Every tracked entry under .claude/ is a symlink resolving inside
+  #    .agents/, or settings.json itself. Content never lives here.
+  while IFS= read -r link; do
+    [[ "$link" == "$settings" ]] && continue
+    if [[ ! -L "$link" ]]; then
+      echo "checks: harness — $link is tracked under .claude/ but is not a symlink" >&2
+      echo "checks:   content belongs in .agents/; .claude/ holds symlinks + settings.json" >&2
+      bad=1
+      continue
+    fi
+    target=$(cd "$(dirname "$link")" && cd "$(readlink "$(basename "$link")")" 2>/dev/null && pwd) || target=""
+    if [[ -z "$target" ]]; then
+      echo "checks: harness — $link is a broken symlink (-> $(readlink "$link"))" >&2
+      bad=1
+    elif [[ "$target" != "$PWD/.agents"* ]]; then
+      echo "checks: harness — $link escapes .agents/ (resolves to $target)" >&2
+      bad=1
+    fi
+  done < <(git ls-files .claude)
+
+  # 2. Hooks are path-registered, not directory-discovered — so every command
+  #    in settings.json must exist and be executable, and .claude/hooks/ must
+  #    stay absent (a reappeared one means someone mirrored the wrong kind).
+  if [[ -e ".claude/hooks" ]]; then
+    echo "checks: harness — .claude/hooks/ exists; hooks are registered by path in $settings, not discovered by directory" >&2
+    bad=1
+  fi
+  while IFS= read -r cmd; do
+    path="${cmd/\$\{CLAUDE_PROJECT_DIR\}\//}"
+    [[ "$path" == /* || "$path" == .agents/* || "$path" == scripts/* ]] || continue
+    if [[ ! -f "$path" ]]; then
+      echo "checks: harness — $settings registers a hook that does not exist: $path" >&2
+      bad=1
+    elif [[ ! -x "$path" ]]; then
+      echo "checks: harness — hook is not executable: $path" >&2
+      bad=1
+    fi
+  done < <(jq -r '.hooks | to_entries[].value[].hooks[]?.command // empty' "$settings" 2>/dev/null)
+
+  # 3. No tracked doc points readers at a root .claude/ path that isn't one the
+  #    harness really owns — that is exactly the drift this stage exists to kill
+  #    (AGENTS.md long claimed the hooks lived in .claude/hooks/). `~/.claude/…`
+  #    is a user-home path, not this adapter, so the regex requires a non-path
+  #    char before the dot. .agents/AGENTS.md is exempt: it defines the rule and
+  #    must be able to name the paths it forbids; rules 1-2 still cover it.
+  while IFS= read -r doc; do
+    echo "checks: harness — doc cites an untracked .claude/ path: $doc" >&2
+    bad=1
+  done < <(git grep -nE '(^|[^/a-zA-Z])\.claude/[a-z]' -- '*.md' \
+      ':!ffxi-agent/**' ':!.agents/AGENTS.md' ':!.agents/CLAUDE.md' \
+    | grep -vE '\.claude/(settings\.json|settings\.local\.json|skills|agents|worktrees)\b' || true)
+
+  return $bad
+}
+
 run_test() {
   # Integration tests that need a live LSB server self-skip when unreachable,
   # so this is safe on a network-isolated runner.
@@ -110,7 +173,7 @@ run_doc() {
 }
 
 if [[ $# -eq 0 ]]; then
-  echo "checks: no stage given (expected one or more of: fmt clippy style test build doc)" >&2
+  echo "checks: no stage given (expected one or more of: fmt clippy style harness test build doc)" >&2
   exit 2
 fi
 
@@ -119,6 +182,7 @@ for stage in "$@"; do
     fmt)    echo "checks: fmt";    run_fmt ;;
     clippy) echo "checks: clippy"; run_clippy ;;
     style)  echo "checks: style";  run_style ;;
+    harness) echo "checks: harness"; run_harness ;;
     test)   echo "checks: test";   run_test ;;
     build)  echo "checks: build";  run_build ;;
     doc)    echo "checks: doc";    run_doc ;;

@@ -2326,6 +2326,13 @@ pub fn spawn_prepared_equipped(
     if spawned > 0 {
         let actor_height = (prepared.max_mesh_y - prepared.min_mesh_y).max(0.1);
 
+        // Matches the skinned-actor path's spawn line: actor_height is what the
+        // nameplate anchor, the chase-camera anchor and the pick hitbox all size
+        // themselves from, so it needs to be observable per race/model.
+        info!(
+            "equipped actor spawn: parent={:?} race={} mesh=[{:.2}..{:.2}] actor_height={:.2}",
+            parent, prepared.race, prepared.min_mesh_y, prepared.max_mesh_y, actor_height,
+        );
         commands.entity(parent).try_insert(BakedActor {
             min_mesh_y: prepared.min_mesh_y,
             actor_height,

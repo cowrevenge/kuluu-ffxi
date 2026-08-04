@@ -15,6 +15,10 @@ pub(crate) const CELL_GAP_PX: f32 = 4.0;
 /// default) `ICON_PX` icon and a small muted label. Marker components for the
 /// frame / icon / label are supplied by the caller so each screen can drive
 /// its own update systems over the shared structure.
+///
+/// The label is absolutely positioned so an equipped item's icon draws *over*
+/// it rather than beside it — retail keeps the slot name legible under the
+/// icon (retail capture 2026-08-04, HorizonXI /check window).
 pub(crate) fn spawn_item_cell(
     p: &mut ChildSpawnerCommands,
     frame_marker: impl Bundle,
@@ -52,6 +56,10 @@ pub(crate) fn spawn_item_cell(
             Text::new(label_text),
             text_font(11.0),
             TextColor(theme::MUTED),
+            Node {
+                position_type: PositionType::Absolute,
+                ..default()
+            },
         ));
     });
 }

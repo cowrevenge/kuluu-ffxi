@@ -268,7 +268,13 @@ pub(super) fn confirm_target_action_at_cursor(
                         TargetKindLite::Pc | TargetKindLite::SelfPc
                     );
                     if is_pc {
-                        check_target.open(e.id);
+                        check_target.open(
+                            e.id,
+                            ffxi_viewer_core::hud::check_view::wares_enabled(
+                                &scene_state.snapshot,
+                                e.id,
+                            ),
+                        );
                         Some(InputMode::Check)
                     } else {
                         Some(InputMode::World)

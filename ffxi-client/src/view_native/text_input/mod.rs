@@ -370,7 +370,7 @@ pub fn text_input_system(
                     &ev.logical_key,
                     &bindings,
                     &mut slash_writers.bazaar_state,
-                    &scene_state,
+                    &mut scene_state,
                     &cmd_tx.0,
                 ) {
                     *mode = next;
@@ -674,7 +674,13 @@ fn apply_chat_action(
                         e.id == *target_id && e.kind == ffxi_viewer_wire::EntityKind::Pc
                     }) =>
                     {
-                        slash_writers.check_target.open(*target_id);
+                        slash_writers.check_target.open(
+                            *target_id,
+                            ffxi_viewer_core::hud::check_view::wares_enabled(
+                                &scene_state.snapshot,
+                                *target_id,
+                            ),
+                        );
                         Some(InputMode::Check)
                     }
                     _ => None,

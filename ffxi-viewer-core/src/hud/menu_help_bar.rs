@@ -30,6 +30,11 @@ pub struct MenuHelpPaneSwitch;
 
 const PANE_SWITCH_HINT: &str = "- : page";
 
+// Retail's bazaar window titles the bar itself, not the window
+// (retail capture 2026-08-04, HorizonXI).
+const BAZAAR_TITLE: &str = "Bazaar";
+const BAZAAR_HINT: &str = "Purchase merchandise.";
+
 pub const BAR_HEIGHT: f32 = 26.0;
 /// Retail frames the active menu title in its own boxed segment, flush left.
 const TITLE_BOX_W: f32 = 118.0;
@@ -217,6 +222,7 @@ pub fn update_menu_help_bar(
     dynamic: Res<DynamicMenu>,
     scene: Res<crate::snapshot::SceneState>,
     active_bag: Res<crate::hud::item_screen::ItemScreenContainer>,
+    check: Res<crate::hud::check_view::CheckTarget>,
     mut bar_q: Query<&mut Node, With<MenuHelpBar>>,
     mut title_q: Query<
         &mut Text,
@@ -265,6 +271,26 @@ pub fn update_menu_help_bar(
         InputMode::PassiveCursor(s) if s.focus == PassiveCursorFocus::StatusIcons => {
             (buff_bar_content(&scene.snapshot, s.status_cursor), false)
         }
+        // Retail titles the /check window with the target's name and their jobs
+        // (retail capture 2026-08-04, HorizonXI).
+        InputMode::Check => (
+            check.target_id.map(|id| BarContent {
+                title: crate::hud::check_view::target_name(&scene.snapshot, id),
+                counter: String::new(),
+                hint: crate::hud::check_view::job_ribbon(
+                    scene.snapshot.check.as_ref().filter(|c| c.target_id == id),
+                ),
+            }),
+            false,
+        ),
+        InputMode::Bazaar => (
+            Some(BarContent {
+                title: BAZAAR_TITLE.to_string(),
+                counter: String::new(),
+                hint: BAZAAR_HINT.to_string(),
+            }),
+            false,
+        ),
         _ => (None, false),
     };
 
@@ -404,7 +430,8 @@ mod tests {
         let mut app = App::new();
         app.init_resource::<InputMode>()
             .init_resource::<DynamicMenu>()
-            .init_resource::<ItemScreenContainer>();
+            .init_resource::<ItemScreenContainer>()
+            .init_resource::<crate::hud::check_view::CheckTarget>();
 
         let scene = SceneState {
             snapshot: SceneSnapshot {

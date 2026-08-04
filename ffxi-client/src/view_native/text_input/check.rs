@@ -102,23 +102,38 @@ pub(super) fn handle_bazaar_key(
     key: &Key,
     bindings: &Bindings,
     screen: &mut BazaarScreenState,
-    scene_state: &SceneState,
+    scene_state: &mut SceneState,
     cmd_tx: &Sender<AgentCommand>,
 ) -> Option<InputMode> {
-    let Some(view) = scene_state.snapshot.bazaar.as_ref() else {
+    let Some(view) = scene_state.snapshot.bazaar.clone() else {
         return Some(InputMode::Check);
     };
+
+    // Retail asks "Purchase N x for Y gil?" in chat before sending the buy.
+    if let Some(buy) = screen.pending {
+        if bindings.matches_logical(Action::NavConfirm, key) {
+            screen.pending = None;
+            let _ = cmd_tx.try_send(AgentCommand::BuyBazaarItem {
+                index: buy.index,
+                quantity: buy.quantity,
+            });
+            return None;
+        }
+        if bindings.matches_logical(Action::NavCancel, key) {
+            screen.pending = None;
+        }
+        return None;
+    }
 
     // Quantity picker for the focused stack.
     if let Some(spinner) = screen.quantity.as_mut() {
         if bindings.matches_logical(Action::NavConfirm, key) {
             let quantity = spinner.confirm();
-            screen.quantity = None;
-            if let Some(entry) = view.items.get(screen.cursor) {
-                let _ = cmd_tx.try_send(AgentCommand::BuyBazaarItem {
-                    index: entry.index,
-                    quantity,
-                });
+            if let Some(entry) = view.items.get(screen.cursor).copied() {
+                let buy = screen.stage_purchase(&entry, quantity);
+                push_purchase_prompt(scene_state, buy);
+            } else {
+                screen.quantity = None;
             }
             return None;
         }
@@ -156,15 +171,25 @@ pub(super) fn handle_bazaar_key(
     if !bindings.matches_logical(Action::NavConfirm, key) {
         return None;
     }
-    let entry = view.items.get(screen.cursor)?;
-    match BazaarScreenState::begin_quantity(entry) {
+    let entry = *view.items.get(screen.cursor)?;
+    match BazaarScreenState::begin_quantity(&entry) {
         Some(spinner) => screen.quantity = Some(spinner),
         None => {
-            let _ = cmd_tx.try_send(AgentCommand::BuyBazaarItem {
-                index: entry.index,
-                quantity: 1,
-            });
+            let buy = screen.stage_purchase(&entry, 1);
+            push_purchase_prompt(scene_state, buy);
         }
     }
     None
+}
+
+/// The retail prompt line; confirm sends the buy, cancel drops it.
+fn push_purchase_prompt(
+    scene_state: &mut SceneState,
+    buy: ffxi_viewer_core::hud::bazaar_view::PendingBuy,
+) {
+    let name = ffxi_viewer_core::hud::bazaar_view::item_name(buy.item_no, None);
+    push_system_chat_line(
+        scene_state,
+        ffxi_viewer_core::hud::bazaar_view::purchase_prompt(&name, buy.quantity, buy.total_gil),
+    );
 }

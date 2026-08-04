@@ -1,6 +1,7 @@
-//! The /check window for a PC target: retail shows the target's gear as an
-//! icon grid, not a text list, beside their name/jobs, linkshell, bazaar
-//! message, and a View Wares entry that is live only while they have a bazaar.
+//! The /check window for a PC target. Retail draws a compact window — a 4x4
+//! equipment grid over a View Wares entry — with the target's name and jobs in
+//! the top menu bar and the focused slot's item card in a panel underneath
+//! (retail capture 2026-08-04, HorizonXI).
 //!
 //! The grid layout is [`equipment_screen::EQUIP_GRID`] — the same one our own
 //! Equipment window uses, since both windows show the same 16 SAVE_EQUIP_KIND
@@ -25,12 +26,14 @@ pub struct CheckTarget {
 }
 
 impl CheckTarget {
-    pub fn open(&mut self, target_id: u32) {
+    /// Retail opens the window with the cursor already on View Wares whenever
+    /// that entry is live, so a bazaar is one keypress away.
+    pub fn open(&mut self, target_id: u32, wares_enabled: bool) {
         *self = Self {
             open: true,
             target_id: Some(target_id),
             slot: EquipmentIndex::Main as u8,
-            on_wares: false,
+            on_wares: wares_enabled,
         };
     }
 
@@ -60,13 +63,14 @@ impl CheckTarget {
 
 /// Detail lines under the focused slot's item name.
 const DETAIL_ROWS: usize = 8;
+/// Stand-in while the checked entity is not (or no longer) in the scene.
+const UNKNOWN_NAME: &str = "???";
 const GRID_COL_PX: f32 = 176.0;
-const INFO_COL_PX: f32 = 240.0;
+/// The item card sits under the window, as wide as retail's description panel.
+const CARD_PX: f32 = 300.0;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum CheckRole {
-    Name,
-    Jobs,
     Linkshell,
     Message,
     CellLabel(EquipmentIndex),
@@ -107,23 +111,21 @@ pub(crate) fn spawn_check_view(mut commands: Commands, mut images: ResMut<Assets
                 position_type: PositionType::Absolute,
                 top: Val::Percent(20.0),
                 left: Val::Percent(30.0),
-                column_gap: Val::Px(8.0),
-                flex_direction: FlexDirection::Row,
+                row_gap: Val::Px(6.0),
+                flex_direction: FlexDirection::Column,
                 align_items: AlignItems::FlexStart,
                 display: Display::None,
                 ..default()
             },
         ))
         .with_children(|root| {
-            // Left: the 4x4 slot grid with the View Wares entry beneath it.
+            // The window itself: the 4x4 slot grid over the View Wares entry.
             let (mut n, bg, bd) = framed_box();
             n.width = Val::Px(GRID_COL_PX);
             root.spawn((n, bg, bd)).with_children(|p| {
-                p.spawn((Text::new("Check"), text_font(14.0), TextColor(theme::TITLE)));
                 p.spawn(Node {
                     flex_direction: FlexDirection::Column,
                     row_gap: Val::Px(4.0),
-                    margin: UiRect::vertical(Val::Px(4.0)),
                     ..default()
                 })
                 .with_children(|grid| {
@@ -151,6 +153,7 @@ pub(crate) fn spawn_check_view(mut commands: Commands, mut images: ResMut<Assets
                     CheckWaresButton,
                     Node {
                         justify_content: JustifyContent::Center,
+                        margin: UiRect::top(Val::Px(4.0)),
                         padding: UiRect::axes(Val::Px(6.0), Val::Px(2.0)),
                         border: UiRect::all(Val::Px(1.0)),
                         ..default()
@@ -168,12 +171,12 @@ pub(crate) fn spawn_check_view(mut commands: Commands, mut images: ResMut<Assets
                 });
             });
 
-            // Right: identity, message, and the focused slot's item card.
+            // Under the window: the focused slot's item card. The target's
+            // linkshell and bazaar message ride here too — 0x0C9/0x0CA carry
+            // them and retail's window has no pane of its own for either.
             let (mut n, bg, bd) = framed_box();
-            n.width = Val::Px(INFO_COL_PX);
+            n.width = Val::Px(CARD_PX);
             root.spawn((n, bg, bd)).with_children(|p| {
-                spawn_text(p, CheckRole::Name, 14.0, theme::TITLE);
-                spawn_text(p, CheckRole::Jobs, 13.0, theme::TEXT);
                 spawn_text(p, CheckRole::Linkshell, 13.0, theme::TEXT);
                 spawn_text(p, CheckRole::Message, 13.0, theme::MUTED);
                 p.spawn(Node {
@@ -231,6 +234,16 @@ struct CheckModel<'a> {
     wares_enabled: bool,
 }
 
+/// The checked PC's name as the scene knows it; the 0x0C9/0x0CA answers carry
+/// no name the window can trust on their own.
+pub fn target_name(snap: &ffxi_viewer_wire::SceneSnapshot, target_id: u32) -> String {
+    snap.entities
+        .iter()
+        .find(|e| e.id == target_id)
+        .and_then(|e| e.name.clone())
+        .unwrap_or_else(|| UNKNOWN_NAME.to_string())
+}
+
 /// Whether View Wares is live for `target_id`. The target's own bazaar flag is
 /// the retail gate: LSB sets `Flags1.BazaarFlag` from `PChar->hasBazaar()`, i.e.
 /// from having any priced inventory slot
@@ -244,9 +257,7 @@ pub fn wares_enabled(snap: &ffxi_viewer_wire::SceneSnapshot, target_id: u32) -> 
 
 fn model<'a>(snap: &'a ffxi_viewer_wire::SceneSnapshot, target_id: u32) -> CheckModel<'a> {
     let entity = snap.entities.iter().find(|e| e.id == target_id);
-    let name = entity
-        .and_then(|e| e.name.clone())
-        .unwrap_or_else(|| "???".to_string());
+    let name = target_name(snap, target_id);
     let linkshell_color = entity.filter(|e| e.char_flags.linkshell).map(|e| {
         let [r, g, b] = e.char_flags.linkshell_color;
         Color::srgb_u8(r, g, b)
@@ -403,8 +414,6 @@ fn role_value(
     detail_rows: &[String],
 ) -> (String, Color, bool) {
     match role {
-        CheckRole::Name => (m.name.clone(), theme::TITLE, true),
-        CheckRole::Jobs => (job_ribbon(m.check), theme::TEXT, true),
         CheckRole::Linkshell => match m.check.map(|c| c.linkshell.as_str()).unwrap_or("") {
             "" => (String::new(), theme::TEXT, false),
             ls => (
@@ -424,12 +433,13 @@ fn role_value(
                 .is_some();
             let color = if slot == focused_slot && !on_wares {
                 theme::CURSOR
+            } else if filled {
+                // Retail keeps the label under the icon, dimmed so the icon reads.
+                theme::FAINT
             } else {
                 theme::MUTED
             };
-            // An occupied cell shows its icon instead: keeping the label would
-            // sit beside the icon (row flex) and push it off-centre.
-            (slot.abbr().to_string(), color, !filled)
+            (slot.abbr().to_string(), color, true)
         }
         CheckRole::DetailName => {
             let empty = format!("{}: —", focused_slot.name());
@@ -455,20 +465,20 @@ fn role_value(
     }
 }
 
-fn job_ribbon(check: Option<&ffxi_viewer_wire::CheckResult>) -> String {
+/// `Lv.75 Black Mage / Lv.37 White Mage` — retail levels both jobs and spaces
+/// the separator (retail capture 2026-08-04, HorizonXI).
+pub fn job_ribbon(check: Option<&ffxi_viewer_wire::CheckResult>) -> String {
+    let job_name = |id: u8| ffxi_proto::job_names::lookup(u16::from(id)).unwrap_or("Adventurer");
     match check {
         Some(c) if c.main_job != 0 => {
-            let job = ffxi_proto::job_names::lookup(c.main_job as u16).unwrap_or("Adventurer");
+            let main = format!("Lv.{} {}", c.main_job_lv, job_name(c.main_job));
             match c.sub_job {
-                0 => format!("Lv.{} {job}", c.main_job_lv),
-                sub => {
-                    let sub_job = ffxi_proto::job_names::lookup(sub as u16).unwrap_or("Adventurer");
-                    format!("Lv.{} {job}/{sub_job}", c.main_job_lv)
-                }
+                0 => main,
+                sub => format!("{main} / Lv.{} {}", c.sub_job_lv, job_name(sub)),
             }
         }
         // Zeroed jobs are what /anon looks like on the wire
-        // (0x0c9_equip_inspect_general.cpp:44 gates the whole block).
+        // (0x0c9_equip_inspect_general.cpp gates the whole block on isAnon).
         _ => "Lv.? —".to_string(),
     }
 }
@@ -479,7 +489,7 @@ mod tests {
 
     fn target() -> CheckTarget {
         let mut t = CheckTarget::default();
-        t.open(1);
+        t.open(1, false);
         t
     }
 
@@ -519,6 +529,38 @@ mod tests {
         t.move_focus(0, -1, true);
         assert!(!t.on_wares);
         assert_eq!(t.slot, EquipmentIndex::Waist as u8);
+    }
+
+    #[test]
+    fn a_bazaar_target_opens_with_view_wares_already_focused() {
+        let mut t = CheckTarget::default();
+        t.open(1, true);
+        assert!(t.on_wares, "retail parks the cursor on View Wares");
+        let mut t = CheckTarget::default();
+        t.open(1, false);
+        assert!(!t.on_wares, "with no bazaar the grid keeps the cursor");
+        assert_eq!(t.slot, EquipmentIndex::Main as u8);
+    }
+
+    // Scraped LSB job ids (ffxi_proto::job_names).
+    const BLACK_MAGE: u8 = 4;
+    const WHITE_MAGE: u8 = 3;
+
+    #[test]
+    fn job_ribbon_levels_both_jobs_like_retail() {
+        let mut c = ffxi_viewer_wire::CheckResult {
+            target_id: 1,
+            equipped: [None; 16],
+            main_job: BLACK_MAGE,
+            sub_job: WHITE_MAGE,
+            main_job_lv: 75,
+            sub_job_lv: 37,
+            master_lv: 0,
+            linkshell: String::new(),
+        };
+        assert_eq!(job_ribbon(Some(&c)), "Lv.75 Black Mage / Lv.37 White Mage");
+        c.sub_job = 0;
+        assert_eq!(job_ribbon(Some(&c)), "Lv.75 Black Mage");
     }
 
     #[test]

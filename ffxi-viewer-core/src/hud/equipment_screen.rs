@@ -11,9 +11,11 @@ pub const SLOT_NAMES: [&str; 16] = [
     "L.Ear", "R.Ear", "L.Ring", "R.Ring", "Back",
 ];
 
+// The labels retail prints in each equipment cell, under the icon
+// (retail capture 2026-08-04, HorizonXI /check window).
 const SLOT_ABBR: [&str; 16] = [
-    "Main", "Sub", "Rng", "Amo", "Head", "Body", "Hnds", "Legs", "Feet", "Neck", "Wst", "L.Er",
-    "R.Er", "L.Rg", "R.Rg", "Back",
+    "Main", "Sub", "Range", "Ammo", "Head", "Body", "Hands", "Legs", "Feet", "Neck", "Waist",
+    "Ear1", "Ear2", "Ring1", "Ring2", "Back",
 ];
 
 // Discriminants are the internal slot indices used by SceneSnapshot.equipped[16]
@@ -718,6 +720,8 @@ mod tests {
         assert_eq!(SLOT_NAMES.len(), 16);
         assert_eq!(SLOT_ABBR.len(), 16);
         assert_eq!(SLOT_NAMES[10], "Waist");
-        assert_eq!(SLOT_ABBR[10], "Wst");
+        assert_eq!(SLOT_ABBR[10], "Waist");
+        assert_eq!(SLOT_ABBR[11], "Ear1", "retail numbers the paired slots");
+        assert_eq!(SLOT_ABBR[13], "Ring1");
     }
 }

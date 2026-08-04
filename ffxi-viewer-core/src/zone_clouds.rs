@@ -393,7 +393,7 @@ fn cloud_material(texture: Option<Handle<Image>>, fog_enabled: bool) -> FfxiZone
 fn read_zone_dat(file_id: u32) -> Option<Vec<u8>> {
     let root = DatRoot::from_env_or_default().ok()?;
     let location = root.resolve(file_id).ok()?;
-    fs::read(location.path_under(root.root())).ok()
+    fs::read(location.path_under(&root)).ok()
 }
 
 #[allow(clippy::too_many_arguments)]

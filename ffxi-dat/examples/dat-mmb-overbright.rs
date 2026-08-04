@@ -27,7 +27,7 @@ fn main() -> ExitCode {
 
     let root = DatRoot::from_env_or_default().unwrap();
     let location = root.resolve(file_id).unwrap();
-    let bytes = fs::read(location.path_under(root.root())).unwrap();
+    let bytes = fs::read(location.path_under(&root)).unwrap();
 
     let mut overbright_models = 0usize;
     let mut scanned = 0usize;

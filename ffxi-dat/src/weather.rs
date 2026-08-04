@@ -763,7 +763,7 @@ mod tests {
         let file_id =
             crate::zone_dat::effective_zone_dat_file_id(Some(SOUTHERN_SAN_DORIA), None).unwrap();
         let loc = root.resolve(file_id).unwrap();
-        let bytes = std::fs::read(loc.path_under(root.root())).unwrap();
+        let bytes = std::fs::read(loc.path_under(&root)).unwrap();
         let sets = collect_zone_weather_sets(&bytes);
 
         let zone_fog = sets.by_type[b"suny"].outdoor[0].fog_landscape;
@@ -851,7 +851,7 @@ mod tests {
             let Ok(loc) = root.resolve(file_id) else {
                 continue;
             };
-            let Ok(bytes) = std::fs::read(loc.path_under(root.root())) else {
+            let Ok(bytes) = std::fs::read(loc.path_under(&root)) else {
                 continue;
             };
             for set in collect_zone_weather_sets(&bytes).by_type.values() {
@@ -1166,7 +1166,7 @@ mod tests {
     fn ambient_zone_dat(file_id: u32) -> Option<ZoneWeatherSets> {
         let root = crate::DatRoot::from_env_or_default().ok()?;
         let loc = root.resolve(file_id).ok()?;
-        let bytes = std::fs::read(loc.path_under(root.root())).ok()?;
+        let bytes = std::fs::read(loc.path_under(&root)).ok()?;
         Some(collect_zone_weather_sets(&bytes))
     }
 
@@ -1232,7 +1232,7 @@ mod tests {
             let Ok(loc) = root.resolve(file_id) else {
                 continue;
             };
-            let Ok(bytes) = std::fs::read(loc.path_under(root.root())) else {
+            let Ok(bytes) = std::fs::read(loc.path_under(&root)) else {
                 continue;
             };
             for (tag, set) in collect_zone_weather_sets(&bytes).by_type {

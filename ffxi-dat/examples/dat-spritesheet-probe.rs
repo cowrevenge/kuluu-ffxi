@@ -163,7 +163,7 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         };
         let loc = root.resolve(fid).unwrap();
-        let bytes = fs::read(loc.path_under(root.root())).unwrap();
+        let bytes = fs::read(loc.path_under(&root)).unwrap();
         println!("# zone {zone_id} file {fid} ({} bytes)", bytes.len());
         process(&bytes);
         return ExitCode::SUCCESS;
@@ -174,7 +174,7 @@ fn main() -> ExitCode {
         let Ok(loc) = root.resolve(file_id) else {
             continue;
         };
-        let Ok(bytes) = fs::read(loc.path_under(root.root())) else {
+        let Ok(bytes) = fs::read(loc.path_under(&root)) else {
             continue;
         };
         let mut has = false;

@@ -27,7 +27,7 @@ fn main() {
         let Ok(loc) = root.resolve(file_id) else {
             continue;
         };
-        let Ok(bytes) = fs::read(loc.path_under(root.root())) else {
+        let Ok(bytes) = fs::read(loc.path_under(&root)) else {
             continue;
         };
         let dir = ResourceDir::from_bytes(bytes.clone());

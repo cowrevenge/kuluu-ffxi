@@ -13,7 +13,7 @@ const ZONE_DATS: [u32; 2] = [202, 209];
 fn zone_bytes(file_id: u32) -> Option<Vec<u8>> {
     let root = DatRoot::from_env_or_default().ok()?;
     let location = root.resolve(file_id).ok()?;
-    std::fs::read(location.path_under(root.root())).ok()
+    std::fs::read(location.path_under(&root)).ok()
 }
 
 fn fourcc(name: &[u8; 4]) -> String {

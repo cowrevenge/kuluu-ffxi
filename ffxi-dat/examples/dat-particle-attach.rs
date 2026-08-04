@@ -42,7 +42,7 @@ fn main() -> ExitCode {
             eprintln!("{file_id}: unresolvable");
             continue;
         };
-        let Ok(bytes) = std::fs::read(loc.path_under(root.root())) else {
+        let Ok(bytes) = std::fs::read(loc.path_under(&root)) else {
             eprintln!("{file_id}: unreadable");
             continue;
         };

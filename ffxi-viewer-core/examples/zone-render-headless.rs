@@ -481,7 +481,7 @@ fn load_weather(
     let Ok(location) = root.resolve(p.file_id) else {
         return;
     };
-    let path = location.path_under(root.root());
+    let path = location.path_under(&root);
     let Ok(bytes) = std::fs::read(&path) else {
         return;
     };

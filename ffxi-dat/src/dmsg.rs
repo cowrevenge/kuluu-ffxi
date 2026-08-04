@@ -840,7 +840,7 @@ mod tests {
         let file_id = crate::zone_dat::zone_id_to_string_file_id(ZONE230_ID)
             .expect("zone 230 has a string DAT mapping");
         let loc = root.resolve(file_id).expect("string DAT resolves");
-        let bytes = std::fs::read(loc.path_under(root.root())).expect("string DAT readable");
+        let bytes = std::fs::read(loc.path_under(&root)).expect("string DAT readable");
         let dat = StringDat::parse(&bytes).expect("zone 230 dialog table parses");
         let text = dat
             .text(ZONE230_KEYITEM_OBTAINED_MAY2023)

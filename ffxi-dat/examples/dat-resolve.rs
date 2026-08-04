@@ -45,7 +45,7 @@ fn main() -> ExitCode {
         }
     };
 
-    let path = location.path_under(root.root());
+    let path = location.path_under(&root);
     println!();
     println!("file_id        {file_id}");
     println!("rom_dir        {}", location.rom_dir);

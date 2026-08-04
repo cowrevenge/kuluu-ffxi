@@ -33,7 +33,7 @@ fn main() -> ExitCode {
             return ExitCode::from(1);
         }
     };
-    let bytes = match fs::read(loc.path_under(root.root())) {
+    let bytes = match fs::read(loc.path_under(&root)) {
         Ok(b) => b,
         Err(e) => {
             eprintln!("read: {e}");

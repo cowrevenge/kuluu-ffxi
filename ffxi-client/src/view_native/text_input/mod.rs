@@ -1247,7 +1247,7 @@ fn confirm_dialog_choice(
         }
         open_storage = mog_menu_storage_choice(d, choice);
         // EVENT_END validates against the event id, which the trigger carries in
-        // EventPara (event_num is the zone) — see event_trigger_ids in session.rs.
+        // EventPara (event_num is the zone) — see event_trigger in session/mod.rs.
         let _ = cmd_tx.try_send(AgentCommand::EndEventChoice {
             event_id: d.npc_id,
             act_index: d.act_index,

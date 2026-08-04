@@ -9,7 +9,7 @@ fn main() -> ExitCode {
     let args: Vec<String> = env::args().collect();
     let file_id: u32 = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(115);
     let root = DatRoot::from_env().unwrap();
-    let path = root.resolve(file_id).unwrap().path_under(root.root());
+    let path = root.resolve(file_id).unwrap().path_under(&root);
     let bytes = fs::read(&path).unwrap();
 
     println!("file_id        {file_id}");

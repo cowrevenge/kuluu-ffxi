@@ -14,7 +14,7 @@ fn main() -> ExitCode {
 
     let root = DatRoot::from_env().expect("DatRoot::from_env");
     let loc = root.resolve(file_id).expect("resolve");
-    let bytes = fs::read(loc.path_under(root.root())).expect("read");
+    let bytes = fs::read(loc.path_under(&root)).expect("read");
     let chunks: Vec<_> = walk(&bytes).filter_map(Result::ok).collect();
     let (_, chunk) = chunks
         .iter()

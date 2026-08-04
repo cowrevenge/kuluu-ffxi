@@ -16,7 +16,7 @@ fn main() {
 
     for id in ids {
         let Ok(loc) = root.resolve(id) else { continue };
-        let Ok(bytes) = std::fs::read(loc.path_under(root.root())) else {
+        let Ok(bytes) = std::fs::read(loc.path_under(&root)) else {
             continue;
         };
         let mut generators: HashMap<String, f32> = HashMap::new();

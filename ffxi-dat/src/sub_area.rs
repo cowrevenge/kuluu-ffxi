@@ -241,7 +241,7 @@ mod tests {
         const LOWER_JEUNO: u16 = 245;
         let file_id = crate::zone_dat::zone_id_to_mzb_file_id(LOWER_JEUNO).unwrap();
         let loc = root.resolve(file_id).unwrap();
-        let bytes = std::fs::read(loc.path_under(root.root())).unwrap();
+        let bytes = std::fs::read(loc.path_under(&root)).unwrap();
 
         let subs = from_dat(&bytes).unwrap();
         assert_eq!(
@@ -256,7 +256,7 @@ mod tests {
             let loc = root
                 .resolve(s.file_id)
                 .unwrap_or_else(|e| panic!("sub-area {:#x} -> file {}: {e}", s.id, s.file_id));
-            let interior = std::fs::read(loc.path_under(root.root())).unwrap();
+            let interior = std::fs::read(loc.path_under(&root)).unwrap();
             let chunks: Vec<_> = crate::chunk::walk(&interior).flatten().collect();
             let mzb = chunks
                 .iter()
@@ -314,7 +314,7 @@ mod tests {
         const HIGH_OFFSET_ZONE: u16 = 289;
         let file_id = crate::zone_dat::zone_id_to_mzb_file_id(HIGH_OFFSET_ZONE).unwrap();
         let loc = root.resolve(file_id).unwrap();
-        let bytes = std::fs::read(loc.path_under(root.root())).unwrap();
+        let bytes = std::fs::read(loc.path_under(&root)).unwrap();
 
         let subs = from_dat(&bytes).unwrap();
         assert_eq!(
@@ -332,7 +332,7 @@ mod tests {
                 s.id
             );
             let loc = root.resolve(s.file_id).unwrap();
-            let interior = std::fs::read(loc.path_under(root.root())).unwrap();
+            let interior = std::fs::read(loc.path_under(&root)).unwrap();
             assert!(crate::chunk::walk(&interior)
                 .flatten()
                 .any(|c| crate::kind::ChunkKind::from_u8(c.kind)

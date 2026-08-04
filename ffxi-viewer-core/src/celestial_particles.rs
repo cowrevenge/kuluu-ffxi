@@ -168,7 +168,7 @@ fn sync_celestial_particles(
         .and_then(|(id, root)| {
             root.resolve(id)
                 .ok()
-                .and_then(|loc| std::fs::read(loc.path_under(root.root())).ok())
+                .and_then(|loc| std::fs::read(loc.path_under(&root)).ok())
         })
     else {
         return;

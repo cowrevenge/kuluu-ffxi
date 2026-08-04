@@ -763,7 +763,7 @@ fn load_decrypted(
     let location = root
         .resolve(file_id)
         .map_err(|e| format!("resolve({file_id}): {e}"))?;
-    let path = location.path_under(root.root());
+    let path = location.path_under(&root);
     let bytes = fs::read(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
     let chunks: Vec<_> = walk(&bytes).filter_map(Result::ok).collect();
 
@@ -981,7 +981,7 @@ pub fn build_zone_mmb_spawns(
     let location = root
         .resolve(file_id)
         .map_err(|e| format!("resolve({file_id}): {e}"))?;
-    let path = location.path_under(root.root());
+    let path = location.path_under(&root);
     let bytes = fs::read(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
     let chunks: Vec<_> = walk(&bytes).filter_map(Result::ok).collect();
 
@@ -1586,7 +1586,7 @@ pub fn zone_sub_areas(file_id: u32) -> Result<Vec<ZoneSubArea>, String> {
     let location = root
         .resolve(file_id)
         .map_err(|e| format!("resolve({file_id}): {e}"))?;
-    let path = location.path_under(root.root());
+    let path = location.path_under(&root);
     let bytes = fs::read(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
     Ok(sub_area::from_dat(&bytes)
         .map_err(|e| format!("sub-area parse of file {file_id}: {e}"))?
@@ -1604,7 +1604,7 @@ pub fn load_mzb(file_id: u32, chunk_idx: Option<usize>) -> Result<Vec<MzbSubMesh
     let location = root
         .resolve(file_id)
         .map_err(|e| format!("resolve({file_id}): {e}"))?;
-    let path = location.path_under(root.root());
+    let path = location.path_under(&root);
     let bytes = fs::read(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
     let chunks: Vec<_> = walk(&bytes).filter_map(Result::ok).collect();
 

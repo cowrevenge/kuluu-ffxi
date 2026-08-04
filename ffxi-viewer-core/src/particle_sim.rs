@@ -2373,7 +2373,7 @@ mod tests {
                     return None;
                 }
             };
-            let path = loc.path_under(root.root());
+            let path = loc.path_under(&root);
             let bytes = match std::fs::read(&path) {
                 Ok(bytes) => bytes,
                 Err(err) => {

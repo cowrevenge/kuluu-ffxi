@@ -6,7 +6,7 @@ fn main() {
         .filter_map(|a| a.parse::<u32>().ok())
     {
         let Ok(loc) = root.resolve(id) else { continue };
-        let path = loc.path_under(root.root());
+        let path = loc.path_under(&root);
         let Ok(bytes) = std::fs::read(&path) else {
             continue;
         };

@@ -173,7 +173,7 @@ mod tests {
             let Ok(loc) = root.resolve(file_id) else {
                 continue;
             };
-            let Ok(bytes) = std::fs::read(loc.path_under(root.root())) else {
+            let Ok(bytes) = std::fs::read(loc.path_under(&root)) else {
                 continue;
             };
             let tables = FootstepTables::from_tree(&crate::chunk::walk_tree(&bytes));
@@ -210,7 +210,7 @@ mod tests {
                 let Ok(loc) = root.resolve(f) else {
                     return false;
                 };
-                let Ok(bytes) = std::fs::read(loc.path_under(root.root())) else {
+                let Ok(bytes) = std::fs::read(loc.path_under(&root)) else {
                     return false;
                 };
                 let t = FootstepTables::from_tree(&crate::chunk::walk_tree(&bytes));

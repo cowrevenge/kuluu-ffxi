@@ -314,7 +314,7 @@ pub fn load_zone_weather(
     let Ok(location) = root.resolve(file_id) else {
         return;
     };
-    let path = location.path_under(root.root());
+    let path = location.path_under(&root);
     let Ok(bytes) = fs::read(&path) else { return };
     zone_weather.sets = collect_zone_weather_sets(&bytes);
 

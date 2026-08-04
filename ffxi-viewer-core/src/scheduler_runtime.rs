@@ -583,7 +583,7 @@ pub(crate) fn load_global_effect_dir(mut commands: Commands) {
             .ok()
             .and_then(|root| {
                 let loc = root.resolve(GLOBAL_EFFECT_DIR_FILE_ID).ok()?;
-                std::fs::read(loc.path_under(root.root())).ok()
+                std::fs::read(loc.path_under(&root)).ok()
             })
             .unwrap_or_default();
         parse_action_bytes(&bytes)
@@ -692,7 +692,7 @@ fn load_action_dat(file_id: u32) -> ParsedActionDat {
         .ok()
         .and_then(|root| {
             let loc = root.resolve(file_id).ok()?;
-            std::fs::read(loc.path_under(root.root())).ok()
+            std::fs::read(loc.path_under(&root)).ok()
         })
         .unwrap_or_default();
     let (schedulers, assets) = parse_action_bytes(&bytes);
@@ -2021,7 +2021,7 @@ mod tests {
         let Ok(loc) = root.resolve(CURE_FILE) else {
             return;
         };
-        let Ok(bytes) = std::fs::read(loc.path_under(root.root())) else {
+        let Ok(bytes) = std::fs::read(loc.path_under(&root)) else {
             return;
         };
         let (schedulers, _) = parse_action_bytes(&bytes);
@@ -2090,7 +2090,7 @@ mod tests {
         let base = dll.base_emote_index(1).expect("HumeM emote base") as u32;
         let (offset, routine) = emote_routine(1, 0).expect("bow is mapped");
         let loc = root.resolve(base + offset).expect("emote file resolves");
-        let bytes = std::fs::read(loc.path_under(root.root())).expect("emote DAT readable");
+        let bytes = std::fs::read(loc.path_under(&root)).expect("emote DAT readable");
         let (schedulers, assets) = parse_action_bytes(&bytes);
         let active = ActiveScheduler::from_main(&schedulers, &routine).expect("em00 exists");
         let motion = active
@@ -2207,7 +2207,7 @@ mod tests {
         let Ok(loc) = root.resolve(POISON_FILE) else {
             return;
         };
-        let Ok(bytes) = std::fs::read(loc.path_under(root.root())) else {
+        let Ok(bytes) = std::fs::read(loc.path_under(&root)) else {
             return;
         };
         let (_scheds, assets) = parse_action_bytes(&bytes);
@@ -2238,7 +2238,7 @@ mod tests {
         let Ok(cure_loc) = root.resolve(CURE_FILE) else {
             return;
         };
-        let Ok(cure_bytes) = std::fs::read(cure_loc.path_under(root.root())) else {
+        let Ok(cure_bytes) = std::fs::read(cure_loc.path_under(&root)) else {
             return;
         };
         let (_s, cure_assets) = parse_action_bytes(&cure_bytes);
@@ -2266,7 +2266,7 @@ mod tests {
         let Ok(loc) = root.resolve(POISON_FILE) else {
             return;
         };
-        let Ok(bytes) = std::fs::read(loc.path_under(root.root())) else {
+        let Ok(bytes) = std::fs::read(loc.path_under(&root)) else {
             return;
         };
         let (_scheds, assets) = parse_action_bytes(&bytes);
@@ -2297,7 +2297,7 @@ mod tests {
     fn read_dat(file_id: u32) -> Option<Vec<u8>> {
         let root = ffxi_dat::archive::open_test_install()?;
         let loc = root.resolve(file_id).ok()?;
-        std::fs::read(loc.path_under(root.root())).ok()
+        std::fs::read(loc.path_under(&root)).ok()
     }
 
     // Retail-DAT guard (skips without an install): the cast aura `ner1` and its `stbk` shutdown
@@ -2644,14 +2644,14 @@ mod tests {
     fn routines_in_file(file_id: u32) -> Option<Vec<Scheduler>> {
         let root = ffxi_dat::archive::open_test_install()?;
         let loc = root.resolve(file_id).ok()?;
-        let bytes = std::fs::read(loc.path_under(root.root())).ok()?;
+        let bytes = std::fs::read(loc.path_under(&root)).ok()?;
         Some(ffxi_dat::resource_dir::ResourceDir::from_bytes(bytes).collect_schedulers())
     }
 
     fn global_effect_dir() -> Option<(Vec<Scheduler>, ActionAssets)> {
         let root = ffxi_dat::archive::open_test_install()?;
         let loc = root.resolve(GLOBAL_EFFECT_DIR_FILE_ID).ok()?;
-        let bytes = std::fs::read(loc.path_under(root.root())).ok()?;
+        let bytes = std::fs::read(loc.path_under(&root)).ok()?;
         Some(parse_action_bytes(&bytes))
     }
 

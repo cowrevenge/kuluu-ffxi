@@ -533,7 +533,7 @@ mod tests {
         };
         let read = |id: u32| -> Option<Vec<u8>> {
             let loc = root.resolve(id).ok()?;
-            std::fs::read(loc.path_under(root.root())).ok()
+            std::fs::read(loc.path_under(&root)).ok()
         };
         let Some(poison) = read(POISON_FILE) else {
             return;
@@ -608,7 +608,7 @@ mod tests {
         let Ok(loc) = root.resolve(GLOBAL_EFFECT_DIR_FILE) else {
             return;
         };
-        let Ok(bytes) = std::fs::read(loc.path_under(root.root())) else {
+        let Ok(bytes) = std::fs::read(loc.path_under(&root)) else {
             return;
         };
         let mdam = crate::resource_dir::ResourceDir::from_bytes(bytes)
@@ -1041,7 +1041,7 @@ mod tests {
     fn schedulers_in_file(file_id: u32) -> Option<Vec<Scheduler>> {
         let root = crate::DatRoot::from_env_or_default().ok()?;
         let loc = root.resolve(file_id).ok()?;
-        let bytes = std::fs::read(loc.path_under(root.root())).ok()?;
+        let bytes = std::fs::read(loc.path_under(&root)).ok()?;
         Some(crate::resource_dir::ResourceDir::from_bytes(bytes).collect_schedulers())
     }
 

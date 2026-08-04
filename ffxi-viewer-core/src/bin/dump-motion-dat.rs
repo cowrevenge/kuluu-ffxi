@@ -21,11 +21,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let root = DatRoot::from_env_or_default()?;
     let loc = root.resolve(motion_id)?;
-    let bytes = fs::read(loc.path_under(root.root()))?;
+    let bytes = fs::read(loc.path_under(&root))?;
 
     println!(
         "motion DAT {motion_id}: {}",
-        loc.path_under(root.root()).display()
+        loc.path_under(&root).display()
     );
     let mut mo2_count = 0;
     for chunk in walk(&bytes).filter_map(Result::ok) {

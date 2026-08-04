@@ -131,7 +131,7 @@ fn scan_ids(root: &DatRoot, start: u32, end: u32, t0: &Instant) -> (IndexMap, u6
         let Ok(loc) = root.resolve(file_id) else {
             continue;
         };
-        let Ok(bytes) = fs::read(loc.path_under(root.root())) else {
+        let Ok(bytes) = fs::read(loc.path_under(root)) else {
             continue;
         };
         files_scanned += 1;

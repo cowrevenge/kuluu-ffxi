@@ -365,7 +365,7 @@ mod tests {
                 rom_dir: rom.to_string(),
                 sub_path: SubPath { dir, file },
             };
-            std::fs::read(loc.path_under(root.root()))
+            std::fs::read(loc.path_under(&root))
                 .ok()
                 .filter(|b| b.len() > 4)
                 .is_some_and(|b| crate::event_dat::EventDat::parse(&b).is_ok())
@@ -380,7 +380,7 @@ mod tests {
             let Ok(loc) = root.resolve(fid) else {
                 return false;
             };
-            std::fs::read(loc.path_under(root.root()))
+            std::fs::read(loc.path_under(&root))
                 .ok()
                 .filter(|b| b.len() > 8)
                 .is_some_and(|b| crate::dmsg::StringDat::parse(&b).is_ok())

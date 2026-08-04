@@ -12,7 +12,7 @@ fn main() {
 
     let root = DatRoot::from_env_or_default().expect("DatRoot");
     let loc = root.resolve(file_id).expect("resolve");
-    let bytes = fs::read(loc.path_under(root.root())).expect("read");
+    let bytes = fs::read(loc.path_under(&root)).expect("read");
     let chunks: Vec<_> = walk(&bytes).filter_map(Result::ok).collect();
     let chunk = chunks
         .iter()

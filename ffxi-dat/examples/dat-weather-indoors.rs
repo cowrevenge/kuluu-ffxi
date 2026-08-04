@@ -6,7 +6,7 @@ fn main() {
     for arg in std::env::args().skip(1) {
         let file_id: u32 = arg.parse().expect("file id");
         let loc = root.resolve(file_id).expect("resolve");
-        let bytes = std::fs::read(loc.path_under(root.root())).expect("read");
+        let bytes = std::fs::read(loc.path_under(&root)).expect("read");
         let sets = collect_zone_weather_sets(&bytes);
         let mut lights = 0usize;
         for c in ffxi_dat::chunk::walk(&bytes).filter_map(Result::ok) {

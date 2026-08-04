@@ -17,7 +17,7 @@ fn main() -> ExitCode {
 
     let root = DatRoot::from_env_or_default().expect("DAT root");
     let loc = root.resolve(file_id).expect("resolve");
-    let bytes = std::fs::read(loc.path_under(root.root())).expect("read");
+    let bytes = std::fs::read(loc.path_under(&root)).expect("read");
 
     let dir = ResourceDir::from_bytes(bytes.clone());
     for sm in dir.collect_skel_meshes() {

@@ -48,7 +48,7 @@ fn main() {
 fn dry_run_parse(file_id: u32, chunk_idx: usize) -> Result<(), Box<dyn std::error::Error>> {
     let root = DatRoot::from_env()?;
     let location = root.resolve(file_id)?;
-    let path = location.path_under(root.root());
+    let path = location.path_under(&root);
     let bytes = fs::read(&path)?;
     let chunks: Vec<_> = walk(&bytes).filter_map(Result::ok).collect();
     let chunk = chunks.get(chunk_idx).ok_or("chunk_idx out of range")?;
@@ -144,7 +144,7 @@ fn load_and_spawn_mmb(
         }
     };
 
-    let path = location.path_under(root.root());
+    let path = location.path_under(&root);
     let bytes = match fs::read(&path) {
         Ok(b) => b,
         Err(e) => {

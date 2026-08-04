@@ -106,7 +106,7 @@ fn load_moon_sprite_sheet(
 
     let dat_bytes = current
         .and_then(|file_id| dat_root.resolve(file_id).ok())
-        .and_then(|loc| std::fs::read(loc.path_under(dat_root.root())).ok());
+        .and_then(|loc| std::fs::read(loc.path_under(&dat_root)).ok());
 
     match dat_bytes
         .as_deref()

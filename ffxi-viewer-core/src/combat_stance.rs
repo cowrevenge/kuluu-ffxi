@@ -270,7 +270,7 @@ pub fn directional_anim_for_skel(skel_file_id: u32, prefix: &[u8; 3]) -> Option<
 pub fn load_anim_with_prefix(file_id: u32, prefix: &[u8; 3]) -> Option<Mo2Animation> {
     let root = DatRoot::from_env_or_default().ok()?;
     let loc = root.resolve(file_id).ok()?;
-    let bytes = fs::read(loc.path_under(root.root())).ok()?;
+    let bytes = fs::read(loc.path_under(&root)).ok()?;
     for chunk in walk(&bytes).filter_map(Result::ok) {
         if ChunkKind::from_u8(chunk.kind) != Some(ChunkKind::AnimMo2) {
             continue;
@@ -693,7 +693,7 @@ fn for_each_anim_chunk_in_dat(file_id: u32, mut f: impl FnMut(String, Mo2Animati
     let Ok(loc) = root.resolve(file_id) else {
         return;
     };
-    let Ok(bytes) = fs::read(loc.path_under(root.root())) else {
+    let Ok(bytes) = fs::read(loc.path_under(&root)) else {
         return;
     };
     for chunk in walk(&bytes).filter_map(Result::ok) {

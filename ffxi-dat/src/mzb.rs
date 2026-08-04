@@ -1972,7 +1972,7 @@ mod tests {
     fn zone_mzb_body(root: &crate::DatRoot, zone_id: u16) -> Vec<u8> {
         let file_id = crate::zone_dat::zone_id_to_mzb_file_id(zone_id).unwrap();
         let loc = root.resolve(file_id).unwrap();
-        let bytes = std::fs::read(loc.path_under(root.root())).unwrap();
+        let bytes = std::fs::read(loc.path_under(root)).unwrap();
         let chunks: Vec<_> = crate::walk(&bytes).filter_map(Result::ok).collect();
         let chunk = chunks
             .iter()
@@ -2296,7 +2296,7 @@ mod tests {
             return;
         };
         let file_id = crate::zone_dat::zone_id_to_mzb_file_id(LOD_FAMILY_ZONE_ID).unwrap();
-        let bytes = std::fs::read(root.resolve(file_id).unwrap().path_under(root.root())).unwrap();
+        let bytes = std::fs::read(root.resolve(file_id).unwrap().path_under(&root)).unwrap();
         let chunks: Vec<_> = crate::walk(&bytes).filter_map(Result::ok).collect();
 
         let mut mmb_names: Vec<String> = Vec::new();

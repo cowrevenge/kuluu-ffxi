@@ -52,7 +52,7 @@ fn main() -> ExitCode {
             eprintln!("{file_id}: unresolved");
             continue;
         };
-        let path = location.path_under(root.root());
+        let path = location.path_under(&root);
         let Ok(bytes) = fs::read(&path) else {
             eprintln!("{file_id}: read {} failed", path.display());
             continue;

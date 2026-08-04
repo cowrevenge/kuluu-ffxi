@@ -17,7 +17,7 @@ fn main() -> ExitCode {
         }
     };
     let loc = root.resolve(file_id).unwrap();
-    let bytes = fs::read(loc.path_under(root.root())).unwrap();
+    let bytes = fs::read(loc.path_under(&root)).unwrap();
 
     let chunks: Vec<_> = walk(&bytes).filter_map(Result::ok).collect();
     println!("file_id={file_id}  total_chunks={}", chunks.len());

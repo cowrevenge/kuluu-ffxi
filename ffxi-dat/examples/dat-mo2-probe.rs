@@ -14,7 +14,7 @@ fn main() -> ExitCode {
     let file_id: u32 = args[1].parse().unwrap();
     let root = DatRoot::from_env().unwrap();
     let location = root.resolve(file_id).unwrap();
-    let bytes = fs::read(location.path_under(root.root())).unwrap();
+    let bytes = fs::read(location.path_under(&root)).unwrap();
 
     let mut count = 0;
     for (idx, chunk) in walk(&bytes).enumerate() {

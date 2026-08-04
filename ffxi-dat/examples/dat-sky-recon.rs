@@ -52,7 +52,7 @@ fn dump_one_zone(root: &DatRoot, zone_id: u16, file_id: u32) {
         eprintln!("zone {zone_id} (file {file_id}): unresolved");
         return;
     };
-    let bytes = match fs::read(loc.path_under(root.root())) {
+    let bytes = match fs::read(loc.path_under(root)) {
         Ok(b) => b,
         Err(e) => {
             eprintln!("zone {zone_id}: read error: {e}");
@@ -99,7 +99,7 @@ fn run_survey(root: &DatRoot) -> ExitCode {
                 continue;
             }
         };
-        let bytes = match fs::read(loc.path_under(root.root())) {
+        let bytes = match fs::read(loc.path_under(root)) {
             Ok(b) => b,
             Err(_) => {
                 unreadable += 1;
@@ -175,7 +175,7 @@ fn scan_range(root: &DatRoot, lo: u32, hi: u32) {
         }
         scanned += 1;
         let Ok(loc) = root.resolve(fid) else { continue };
-        let bytes = match fs::read(loc.path_under(root.root())) {
+        let bytes = match fs::read(loc.path_under(root)) {
             Ok(b) => b,
             Err(_) => continue,
         };

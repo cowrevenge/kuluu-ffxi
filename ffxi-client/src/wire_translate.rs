@@ -16,6 +16,7 @@ pub fn state_to_snapshot(s: &SessionState) -> wire::SceneSnapshot {
         entities: s.entities.iter().map(entity_to_wire).collect(),
         party: s.party.iter().map(party_to_wire).collect(),
         chat: s.chat.iter().map(chat_to_wire).collect(),
+        chat_base_seq: s.chat_dropped,
         diagnostics: diagnostics_to_wire(&s.diagnostics),
         net_stats: net_stats_to_wire(&s.net_stats),
         current_goal: s.current_goal.as_ref().map(goal_to_wire),
@@ -958,14 +959,20 @@ mod tests {
 
         let snap = state_to_snapshot(&s);
         let m = snap.check_message.expect("inspect message on the wire");
-        assert_eq!((m.name.as_str(), m.message.as_str()), ("Aliya", "Sneak oil 2k"));
+        assert_eq!(
+            (m.name.as_str(), m.message.as_str()),
+            ("Aliya", "Sneak oil 2k")
+        );
 
         let b = snap.bazaar.expect("bazaar on the wire");
         assert_eq!(b.seller_id, 0xCAFE);
         assert_eq!(b.seller_name, "Aliya");
         assert_eq!(b.items.len(), 1);
         let row = b.items[0];
-        assert_eq!((row.index, row.item_no, row.quantity, row.price), (3, 4096, 5, 1000));
+        assert_eq!(
+            (row.index, row.item_no, row.quantity, row.price),
+            (3, 4096, 5, 1000)
+        );
         // 5% zone tax, applied by the consumer rather than stored pre-taxed.
         assert_eq!(row.total_price(2), 2100);
     }

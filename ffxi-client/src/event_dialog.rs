@@ -40,19 +40,19 @@ pub enum Advance {
 
 /// Outcome of starting a VM-driven event.
 /// Why an event could not be driven. Collapsing these into one message hid
-/// which half of the pipeline failed: a missing string DAT, an NPC whose server
-/// id has no block, and an event id absent from the block it landed in are three
-/// different bugs with the same symptom.
+/// which half of the pipeline failed: a missing string DAT and an event id no
+/// block in the zone authors are different bugs with the same symptom.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UndriveableReason {
     /// No dialog (dmsg) DAT for the zone — every event in it is undriveable.
     NoStrings,
     /// No event DAT for the zone.
     NoEventDat,
-    /// The event DAT has no block for this NPC's server id.
-    NoBlockForActor,
-    /// The block exists but holds no entry for this event id (and no 0xFFFE
-    /// wildcard) — the server asked for a script this NPC does not author.
+    /// No block in the zone authors this event id — not the entity's own, not
+    /// the zone master, and not a sole owner elsewhere (see
+    /// [`EventDat::block_for_event`]).
+    ///
+    /// [`EventDat::block_for_event`]: ffxi_dat::event_dat::EventDat::block_for_event
     NoEventEntry,
     /// The VM stopped on an opcode it cannot advance past.
     StoppedOnOpcode,
@@ -63,8 +63,7 @@ impl UndriveableReason {
         match self {
             Self::NoStrings => "no string DAT for zone",
             Self::NoEventDat => "no event DAT for zone",
-            Self::NoBlockForActor => "no event block for this NPC",
-            Self::NoEventEntry => "NPC block has no such event id",
+            Self::NoEventEntry => "no block in this zone authors that event id",
             Self::StoppedOnOpcode => "unimplemented opcode",
         }
     }
@@ -86,11 +85,29 @@ pub enum Begin {
     },
 }
 
+/// One server-dispatched event trigger, normalised across 0x32/0x33/0x34.
+pub struct EventTrigger {
+    /// Zone whose event-bytecode DAT authors the script (`EventNum`).
+    pub event_zone: u16,
+    /// Zone whose dialog DAT holds the strings. Usually the same as
+    /// `event_zone`, but 0x34 can redirect it (`EventNum2` = `eventInfo->
+    /// textTable`, vendor/server/src/map/packets/s2c/0x034_eventnum.cpp:56-64).
+    pub text_zone: u16,
+    pub unique_no: u32,
+    pub act_index: u16,
+    pub event_id: u16,
+    /// `num[8]`, the numerics behind the `{Num:N}` markers. Empty on 0x32,
+    /// which carries none.
+    pub params: Vec<i32>,
+    pub npc_name: Option<String>,
+}
+
 pub struct DialogSession {
     dat_root: Option<Arc<DatRoot>>,
     /// Logged-in character name, substituted for the `{PlayerName}` dialog marker.
     player_name: String,
-    loaded_zone: Option<u16>,
+    loaded_event_zone: Option<u16>,
+    loaded_string_zone: Option<u16>,
     event_dat: Option<EventDat>,
     strings: Option<StringDat>,
     runner: Option<DialogRunner>,
@@ -102,7 +119,8 @@ impl DialogSession {
         Self {
             dat_root,
             player_name,
-            loaded_zone: None,
+            loaded_event_zone: None,
+            loaded_string_zone: None,
             event_dat: None,
             strings: None,
             runner: None,
@@ -118,25 +136,35 @@ impl DialogSession {
             .map(|a| (a.unique_no, a.act_index, a.event_id))
     }
 
-    fn ensure_zone(&mut self, zone: u16) {
-        if self.loaded_zone == Some(zone) {
+    fn ensure_event_dat(&mut self, zone: u16) {
+        if self.loaded_event_zone == Some(zone) {
             return;
         }
-        self.loaded_zone = Some(zone);
+        self.loaded_event_zone = Some(zone);
         self.event_dat = load_event_dat(self.dat_root.as_deref(), zone);
+    }
+
+    fn ensure_strings(&mut self, zone: u16) {
+        if self.loaded_string_zone == Some(zone) {
+            return;
+        }
+        self.loaded_string_zone = Some(zone);
         self.strings = load_strings(self.dat_root.as_deref(), zone);
     }
 
-    /// Begin a VM-driven event for a 0x32 trigger.
-    pub fn begin(
-        &mut self,
-        zone: u16,
-        unique_no: u32,
-        act_index: u16,
-        event_id: u16,
-        npc_name: Option<String>,
-    ) -> Begin {
-        self.ensure_zone(zone);
+    /// Begin a VM-driven event for a server trigger.
+    pub fn begin(&mut self, trigger: EventTrigger) -> Begin {
+        let EventTrigger {
+            event_zone,
+            text_zone,
+            unique_no,
+            act_index,
+            event_id,
+            params,
+            npc_name,
+        } = trigger;
+        self.ensure_event_dat(event_zone);
+        self.ensure_strings(text_zone);
         let undriveable = |reason| Begin::Undriveable {
             stopped_op: None,
             reason,
@@ -147,25 +175,19 @@ impl DialogSession {
         let Some(dat) = self.event_dat.as_ref() else {
             return undriveable(UndriveableReason::NoEventDat);
         };
-        if dat.block_for_actor(unique_no).is_none() {
-            return undriveable(UndriveableReason::NoBlockForActor);
-        }
         let Some((block, source)) = dat.block_for_event(unique_no, event_id) else {
             return undriveable(UndriveableReason::NoEventEntry);
         };
         if source != EventBlockSource::OwnBlock {
             tracing::info!(
-                zone,
+                zone = event_zone,
                 unique_no = format!("0x{unique_no:08X}"),
                 event_id,
                 ?source,
                 "event id is not on the entity's own block; resolved elsewhere"
             );
         }
-        // A 0x32 trigger carries no numeric parameters (`num[8]` arrives only
-        // on the 0x33/0x34 triggers), so the VM runs with an empty params
-        // array and any `{Num:N}` markers stay unresolved in the text.
-        let Some(mut runner) = DialogRunner::start(block, event_id, act_index, Vec::new()) else {
+        let Some(mut runner) = DialogRunner::start(block, event_id, act_index, params) else {
             return undriveable(UndriveableReason::NoEventEntry);
         };
         let step = runner.advance(None, strings);
@@ -251,7 +273,7 @@ impl DialogSession {
     /// the zone has no available string DAT (missing FFXI_DAT_PATH, unmapped
     /// zone) or the index is out of range.
     pub fn zone_text(&mut self, zone: u16, index: usize) -> Option<String> {
-        self.ensure_zone(zone);
+        self.ensure_strings(zone);
         self.strings.as_ref()?.text(index)
     }
 }
@@ -365,8 +387,9 @@ fn substitute_param_marker(
     out
 }
 
-// The load failures below are logged once per zone: `ensure_zone` only calls
-// these when `loaded_zone` changes, and caches the (None) result (kuluu-zkuf).
+// The load failures below are logged once per zone: `ensure_event_dat` /
+// `ensure_strings` only call these when their loaded zone changes, and cache the
+// (None) result (kuluu-zkuf).
 
 fn load_event_dat(root: Option<&DatRoot>, zone: u16) -> Option<EventDat> {
     let root = root?;
@@ -377,7 +400,7 @@ fn load_event_dat(root: Option<&DatRoot>, zone: u16) -> Option<EventDat> {
         );
         return None;
     };
-    let path = loc.path_under(root.root());
+    let path = loc.path_under(root);
     let bytes = match std::fs::read(&path) {
         Ok(b) => b,
         Err(e) => {
@@ -425,7 +448,7 @@ fn load_strings(root: Option<&DatRoot>, zone: u16) -> Option<StringDat> {
             return None;
         }
     };
-    let path = loc.path_under(root.root());
+    let path = loc.path_under(root);
     let bytes = match std::fs::read(&path) {
         Ok(b) => b,
         Err(e) => {

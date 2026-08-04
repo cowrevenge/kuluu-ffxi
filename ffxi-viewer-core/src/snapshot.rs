@@ -21,7 +21,9 @@ pub struct SceneState {
 
     pub local_toasts: Vec<ChatLine>,
 
-    pub next_chat_seq: u64,
+    /// Session chat lines seen so far, in absolute history indices. Stamped onto
+    /// each local toast as the point in the server stream it follows.
+    pub server_chat_seen: u64,
 }
 
 pub const LOCAL_TOAST_CAP: usize = 256;
@@ -50,8 +52,7 @@ pub fn debug_chat_line(text: String) -> ChatLine {
 
 impl SceneState {
     pub fn push_local_toast(&mut self, mut line: ChatLine) {
-        line.local_seq = self.next_chat_seq;
-        self.next_chat_seq += 1;
+        line.local_seq = self.server_chat_seen;
         self.local_toasts.push(line);
         if self.local_toasts.len() > LOCAL_TOAST_CAP {
             let drop_n = self.local_toasts.len() - LOCAL_TOAST_CAP;
@@ -60,12 +61,8 @@ impl SceneState {
         self.dirty = true;
     }
 
-    fn stamp_new_server_chat(&mut self, prev_len: usize) {
-        let n = self.snapshot.chat.len();
-        for i in prev_len..n {
-            self.snapshot.chat[i].local_seq = self.next_chat_seq;
-            self.next_chat_seq += 1;
-        }
+    fn observe_server_chat(&mut self) {
+        self.server_chat_seen = self.snapshot.chat_base_seq + self.snapshot.chat.len() as u64;
     }
 }
 
@@ -135,23 +132,13 @@ pub fn ingest_system<
 
     if let Some(snap) = source.poll_snapshot() {
         state.snapshot = *snap;
-
-        let chat_n = state.snapshot.chat.len();
-        for i in 0..chat_n {
-            state.snapshot.chat[i].local_seq = i as u64;
-        }
-        let toast_n = state.local_toasts.len();
-        for i in 0..toast_n {
-            state.local_toasts[i].local_seq = (chat_n + i) as u64;
-        }
-        state.next_chat_seq = (chat_n + toast_n) as u64;
+        state.observe_server_chat();
         state.dirty = true;
     }
 
     for delta in source.drain_deltas() {
-        let prev_len = state.snapshot.chat.len();
         apply_delta(&mut state.snapshot, &delta);
-        state.stamp_new_server_chat(prev_len);
+        state.observe_server_chat();
         state.dirty = true;
     }
 
@@ -160,13 +147,20 @@ pub fn ingest_system<
     }
 }
 
+/// Interleave the two chat producers — session lines carried in the snapshot and
+/// renderer-local toasts — back into arrival order. They share no clock
+/// (`server_ts` is 0 on every client-authored line), so the merge runs on
+/// absolute history indices: session line `i` sits at `chat_base_seq + i`, and a
+/// toast carries the count of session lines that preceded it. Strict `<` puts a
+/// toast after every line it followed and before the next one to arrive.
 pub fn rendered_chat(state: &SceneState) -> Vec<&ChatLine> {
     let s = &state.snapshot.chat;
+    let base = state.snapshot.chat_base_seq;
     let t = &state.local_toasts;
     let mut out: Vec<&ChatLine> = Vec::with_capacity(s.len() + t.len());
     let (mut i, mut j) = (0usize, 0usize);
     while i < s.len() && j < t.len() {
-        if s[i].local_seq <= t[j].local_seq {
+        if base + (i as u64) < t[j].local_seq {
             out.push(&s[i]);
             i += 1;
         } else {
@@ -203,6 +197,7 @@ pub fn apply_delta(snap: &mut SceneSnapshot, delta: &SceneDelta) {
     if snap.chat.len() > CHAT_HISTORY_CAP {
         let drop_n = snap.chat.len() - CHAT_HISTORY_CAP;
         snap.chat.drain(0..drop_n);
+        snap.chat_base_seq += drop_n as u64;
     }
 
     if let Some(d) = &delta.diagnostics {
@@ -474,64 +469,88 @@ mod tests {
     }
 
     #[test]
-    fn rendered_chat_concatenates_server_then_toasts() {
+    fn a_toast_renders_after_the_server_lines_it_followed() {
         let mut state = SceneState::default();
-        state.snapshot.chat.push(ChatLine {
-            spans: Vec::new(),
-            channel: ChatChannel::Say,
-            sender: "Server".into(),
-            text: "echo".into(),
-            server_ts: 0,
-            local_seq: 0,
-        });
-        state.push_local_toast(ChatLine {
-            spans: Vec::new(),
-            channel: ChatChannel::System,
-            sender: "client".into(),
-            text: "/blarg".into(),
-            server_ts: 0,
-            local_seq: 0,
-        });
+        arrive_server_line(&mut state, "echo");
+        state.push_local_toast(chat_line("client", "/blarg"));
+
         let lines = rendered_chat(&state);
         assert_eq!(lines.len(), 2);
-        assert_eq!(lines[0].sender, "Server");
+        assert_eq!(lines[0].sender, "mob");
         assert_eq!(lines[1].sender, "client");
+    }
+
+    fn chat_line(sender: &str, text: &str) -> ChatLine {
+        ChatLine {
+            spans: Vec::new(),
+            channel: ChatChannel::System,
+            sender: sender.into(),
+            text: text.into(),
+            server_ts: 0,
+            local_seq: 0,
+        }
+    }
+
+    fn arrive_server_line(state: &mut SceneState, text: &str) {
+        state.snapshot.chat.push(chat_line("mob", text));
+        state.observe_server_chat();
+    }
+
+    fn rendered_texts(state: &SceneState) -> Vec<String> {
+        rendered_chat(state)
+            .iter()
+            .map(|l| l.text.clone())
+            .collect()
     }
 
     #[test]
     fn rendered_chat_interleaves_by_arrival_seq() {
         let mut state = SceneState::default();
-        state.snapshot.chat.push(ChatLine {
-            spans: Vec::new(),
-            channel: ChatChannel::Battle,
-            sender: "mob".into(),
-            text: "first".into(),
-            server_ts: 0,
-            local_seq: 0,
-        });
-        state.next_chat_seq = 1;
-        state.push_local_toast(ChatLine {
-            spans: Vec::new(),
-            channel: ChatChannel::System,
-            sender: "client".into(),
-            text: "middle".into(),
-            server_ts: 0,
-            local_seq: 0,
-        });
+        arrive_server_line(&mut state, "first");
+        state.push_local_toast(chat_line("client", "middle"));
+        arrive_server_line(&mut state, "last");
 
-        state.snapshot.chat.push(ChatLine {
-            spans: Vec::new(),
-            channel: ChatChannel::Battle,
-            sender: "mob".into(),
-            text: "last".into(),
-            server_ts: 0,
-            local_seq: state.next_chat_seq,
-        });
-        let lines = rendered_chat(&state);
+        assert_eq!(rendered_texts(&state), vec!["first", "middle", "last"]);
+    }
+
+    // The native viewer has no delta path (NativeSource::drain_deltas returns
+    // empty), so every poll replaces the whole snapshot. A merge key derived from
+    // array position is renumbered by that replacement and collapses to
+    // all-server-then-all-toasts, which puts each newly arriving line above the
+    // toast block instead of at the bottom (kuluu-zvc3).
+    #[test]
+    fn interleaving_survives_a_full_snapshot_resend() {
+        let mut state = SceneState::default();
+        arrive_server_line(&mut state, "first");
+        state.push_local_toast(chat_line("client", "middle"));
+        arrive_server_line(&mut state, "last");
+
+        state.snapshot = state.snapshot.clone();
+        state.observe_server_chat();
+        assert_eq!(rendered_texts(&state), vec!["first", "middle", "last"]);
+
+        arrive_server_line(&mut state, "newest");
         assert_eq!(
-            lines.iter().map(|l| l.text.as_str()).collect::<Vec<_>>(),
-            vec!["first", "middle", "last"]
+            rendered_texts(&state),
+            vec!["first", "middle", "last", "newest"],
+            "a line arriving after the toast must land at the bottom"
         );
+    }
+
+    // Absolute indices, not live positions: once the session evicts the oldest
+    // lines, the survivors must keep their place relative to the toasts.
+    #[test]
+    fn eviction_from_session_history_does_not_reorder_survivors() {
+        let mut state = SceneState::default();
+        arrive_server_line(&mut state, "evicted");
+        state.push_local_toast(chat_line("client", "toast"));
+        arrive_server_line(&mut state, "kept");
+
+        state.snapshot.chat.remove(0);
+        state.snapshot.chat_base_seq += 1;
+        state.observe_server_chat();
+
+        assert_eq!(rendered_texts(&state), vec!["toast", "kept"]);
     }
 
     #[test]
@@ -629,8 +648,8 @@ mod tests {
         let lines = rendered_chat(state);
         assert_eq!(
             lines.iter().map(|l| l.text.as_str()).collect::<Vec<_>>(),
-            vec!["server-a", "server-b", "/sound on"],
-            "toast re-stamped at the tail, after the new chat lines"
+            vec!["/sound on", "server-a", "server-b"],
+            "the toast preceded both lines, so it keeps its place ahead of them"
         );
     }
 

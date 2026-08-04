@@ -16,7 +16,7 @@ fn main() -> ExitCode {
 
     let root = DatRoot::from_env_or_default().unwrap();
     let loc = root.resolve(file_id).unwrap();
-    let bytes = fs::read(loc.path_under(root.root())).unwrap();
+    let bytes = fs::read(loc.path_under(&root)).unwrap();
     let chunks: Vec<_> = walk(&bytes).filter_map(Result::ok).collect();
     let chunk = match chunks.get(want_idx) {
         Some(c) if c.kind == 0x2A => c,

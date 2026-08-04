@@ -7,7 +7,7 @@ fn main() {
         .and_then(|a| a.parse().ok())
         .expect("file id");
     let loc = root.resolve(id).expect("resolve");
-    let bytes = std::fs::read(loc.path_under(root.root())).expect("read");
+    let bytes = std::fs::read(loc.path_under(&root)).expect("read");
 
     // point lights (DAT model space: x,y,z; vertical = y)
     let mut lights: Vec<[f32; 3]> = Vec::new();

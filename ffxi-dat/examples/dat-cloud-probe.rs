@@ -153,7 +153,7 @@ fn main() -> ExitCode {
     let args: Vec<String> = env::args().collect();
     let fid: u32 = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(101);
     let loc = root.resolve(fid).unwrap();
-    let bytes = fs::read(loc.path_under(root.root())).unwrap();
+    let bytes = fs::read(loc.path_under(&root)).unwrap();
     println!(
         "# file {fid} ({} bytes) — all 0x05 generators by dir path",
         bytes.len()

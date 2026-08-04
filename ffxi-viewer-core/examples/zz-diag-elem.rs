@@ -17,7 +17,7 @@ fn main() {
         .unwrap_or(1308);
     let root = DatRoot::from_env_or_default().expect("DatRoot");
     let loc = root.resolve(file_id).expect("resolve");
-    let bytes = fs::read(loc.path_under(root.root())).expect("read");
+    let bytes = fs::read(loc.path_under(&root)).expect("read");
     println!("file_id={file_id} bytes={}", bytes.len());
 
     let mut kinds = std::collections::BTreeMap::new();

@@ -23,7 +23,7 @@ fn main() -> ExitCode {
         eprintln!("{file_id}: unresolvable");
         return ExitCode::from(1);
     };
-    let Ok(bytes) = std::fs::read(loc.path_under(root.root())) else {
+    let Ok(bytes) = std::fs::read(loc.path_under(&root)) else {
         return ExitCode::from(1);
     };
     let dir = ResourceDir::from_bytes(bytes);

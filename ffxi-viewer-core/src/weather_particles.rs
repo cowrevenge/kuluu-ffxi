@@ -129,7 +129,7 @@ fn sync_weather_particles(
         .and_then(|(id, root)| {
             root.resolve(id)
                 .ok()
-                .and_then(|loc| std::fs::read(loc.path_under(root.root())).ok())
+                .and_then(|loc| std::fs::read(loc.path_under(&root)).ok())
         })
     else {
         return;
@@ -233,7 +233,7 @@ pub(crate) mod tests {
     pub(crate) fn zone_dat(file_id: u32) -> Option<Vec<u8>> {
         let root = DatRoot::from_env_or_default().ok()?;
         let loc = root.resolve(file_id).ok()?;
-        std::fs::read(loc.path_under(root.root())).ok()
+        std::fs::read(loc.path_under(&root)).ok()
     }
 
     // Every Generator chunk anywhere under weat/, whatever its weather tag — the set no other
@@ -380,7 +380,7 @@ pub(crate) mod tests {
             let Ok(loc) = root.resolve(file_id) else {
                 continue;
             };
-            let Ok(bytes) = std::fs::read(loc.path_under(root.root())) else {
+            let Ok(bytes) = std::fs::read(loc.path_under(&root)) else {
                 continue;
             };
             let tree = ffxi_dat::chunk::walk_tree(&bytes);

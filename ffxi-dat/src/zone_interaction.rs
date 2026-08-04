@@ -393,7 +393,7 @@ mod tests {
 
         let file_id = crate::zone_dat::zone_id_to_mzb_file_id(230).unwrap();
         let loc = root.resolve(file_id).unwrap();
-        let bytes = std::fs::read(loc.path_under(root.root())).unwrap();
+        let bytes = std::fs::read(loc.path_under(&root)).unwrap();
         let all = from_dat(&bytes).unwrap();
 
         let trigger = all
@@ -445,7 +445,7 @@ mod tests {
             "zone 256 uses the high-file-id branch"
         );
         let loc = root.resolve(high_file_id).unwrap();
-        let bytes = std::fs::read(loc.path_under(root.root())).unwrap();
+        let bytes = std::fs::read(loc.path_under(&root)).unwrap();
         let all = from_dat(&bytes).unwrap();
         assert!(
             all.iter()

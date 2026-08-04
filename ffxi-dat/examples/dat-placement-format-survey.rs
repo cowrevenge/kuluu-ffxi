@@ -14,7 +14,7 @@ fn main() {
         let Ok(loc) = root.resolve(file_id) else {
             continue;
         };
-        let Ok(bytes) = fs::read(loc.path_under(root.root())) else {
+        let Ok(bytes) = fs::read(loc.path_under(&root)) else {
             continue;
         };
         let chunks: Vec<_> = walk(&bytes).filter_map(Result::ok).collect();

@@ -276,7 +276,7 @@ fn load_zone_point_lights(scene_state: Res<SceneState>, mut store: ResMut<ZonePo
     let Ok(loc) = root.resolve(file_id) else {
         return;
     };
-    let path = loc.path_under(root.root());
+    let path = loc.path_under(&root);
     let Ok(bytes) = std::fs::read(&path) else {
         return;
     };

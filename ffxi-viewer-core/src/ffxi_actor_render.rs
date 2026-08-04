@@ -359,7 +359,7 @@ fn add_part_meshes(parts: &PreparedParts, meshes: &mut Assets<Mesh>) -> Vec<Hand
 
 fn read_dat(root: &DatRoot, file_id: u32) -> Option<Vec<u8>> {
     let loc = root.resolve(file_id).ok()?;
-    fs::read(loc.path_under(root.root())).ok()
+    fs::read(loc.path_under(root)).ok()
 }
 
 fn dedup_clips<'a>(dirs: impl Iterator<Item = &'a ResourceDir>) -> Vec<SkeletonAnimation> {
@@ -3345,7 +3345,7 @@ mod pose_resolution_tests {
         let Ok(loc) = root.resolve(HUME_M_SKELETON_FILE) else {
             return;
         };
-        let Ok(bytes) = std::fs::read(loc.path_under(root.root())) else {
+        let Ok(bytes) = std::fs::read(loc.path_under(&root)) else {
             return;
         };
         let (schedulers, _) = crate::scheduler_runtime::parse_action_bytes(&bytes);

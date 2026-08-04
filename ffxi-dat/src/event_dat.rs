@@ -390,6 +390,34 @@ mod tests {
         assert_eq!(src, EventBlockSource::SoleOwnerElsewhere);
     }
 
+    // Private servers renumber entities relative to the retail DAT, so the
+    // triggering entity can have no block of its own at all. Zone 109 on
+    // HorizonXI dispatches the outpost vendor's 32756 on 0x0106D291, which the
+    // DAT does not script; 0x0106D290 (Tahmasp) is the sole owner. A caller that
+    // gates on block_for_actor before this ladder loses the whole interaction.
+    #[test]
+    fn an_actor_with_no_block_of_its_own_still_resolves() {
+        let dat = EventDat::parse(&dat_bytes(&[
+            block_bytes(
+                ZONE_PLAYER_ACTOR,
+                &[(26, 0), (EVENT_ID_WILDCARD, 0)],
+                &[],
+                &[0],
+            ),
+            block_bytes(0x0106_D290, &[(32756, 0)], &[], &[0]),
+        ]))
+        .expect("parse");
+        assert_eq!(dat.block_for_actor(0x0106_D291), None, "premise");
+
+        let (b, src) = dat.block_for_event(0x0106_D291, 32756).expect("sole owner");
+        assert_eq!(b.actor, 0x0106_D290);
+        assert_eq!(src, EventBlockSource::SoleOwnerElsewhere);
+
+        let (b, src) = dat.block_for_event(0x0106_D291, 26).expect("master");
+        assert_eq!(b.actor, ZONE_PLAYER_ACTOR);
+        assert_eq!(src, EventBlockSource::ZoneMasterBlock);
+    }
+
     // 19% of (zone, event id) pairs are held by more than one NPC block, so the
     // sole-owner rung must refuse to pick when ownership is ambiguous.
     #[test]

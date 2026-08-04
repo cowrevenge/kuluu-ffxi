@@ -13,7 +13,7 @@ fn main() -> ExitCode {
     let file_id: u32 = args[1].parse().unwrap();
     let root = DatRoot::from_env_or_default().unwrap();
     let loc = root.resolve(file_id).unwrap();
-    let bytes = fs::read(loc.path_under(root.root())).unwrap();
+    let bytes = fs::read(loc.path_under(&root)).unwrap();
     println!("file_id={file_id} bytes={}", bytes.len());
     for (i, c) in walk(&bytes).filter_map(Result::ok).enumerate() {
         let name = ChunkKind::from_u8(c.kind)

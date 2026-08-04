@@ -21,7 +21,7 @@ fn main() -> ExitCode {
         let Ok(loc) = root.resolve(file_id) else {
             continue;
         };
-        let path = loc.path_under(root.root());
+        let path = loc.path_under(&root);
         let Ok(bytes) = std::fs::read(&path) else {
             continue;
         };

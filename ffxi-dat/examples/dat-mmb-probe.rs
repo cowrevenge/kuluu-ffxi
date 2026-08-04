@@ -19,7 +19,7 @@ fn main() -> ExitCode {
 
     let root = DatRoot::from_env().unwrap();
     let location = root.resolve(file_id).unwrap();
-    let path = location.path_under(root.root());
+    let path = location.path_under(&root);
     let bytes = fs::read(&path).unwrap();
 
     let chunks: Vec<_> = walk(&bytes).filter_map(Result::ok).collect();

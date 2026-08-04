@@ -404,6 +404,12 @@ pub struct SessionState {
     pub party: Vec<PartyMember>,
     pub chat: Vec<ChatLine>,
 
+    /// Lines already evicted from `chat` by [`CHAT_HISTORY_CAP`], so
+    /// `chat_dropped + i` is the absolute history index of `chat[i]`. The viewer
+    /// merges its local toasts against that index; anything derived from the
+    /// live position renumbers on every eviction (kuluu-zvc3).
+    pub chat_dropped: u64,
+
     /// The 10 treasure-pool slots, indexed by `TrophyItemIndex`. Cleared on
     /// zone change: a player's lot/pass state only lives as long as they stay
     /// in the zone and party
@@ -1056,6 +1062,17 @@ pub struct PartyMember {
 const CHAT_HISTORY_CAP: usize = 256;
 
 impl SessionState {
+    /// The one append path for chat, so `chat_dropped` cannot drift from the
+    /// evictions that make it true.
+    pub fn push_chat(&mut self, line: ChatLine) {
+        self.chat.push(line);
+        if self.chat.len() > CHAT_HISTORY_CAP {
+            let drop = self.chat.len() - CHAT_HISTORY_CAP;
+            self.chat.drain(0..drop);
+            self.chat_dropped += drop as u64;
+        }
+    }
+
     pub fn self_in_mog_house(&self) -> bool {
         if self.myroom.is_some() {
             return true;
@@ -1284,11 +1301,7 @@ impl SessionState {
                 changed
             }
             AgentEvent::ChatLine { line } => {
-                self.chat.push(line.clone());
-                if self.chat.len() > CHAT_HISTORY_CAP {
-                    let drop = self.chat.len() - CHAT_HISTORY_CAP;
-                    self.chat.drain(0..drop);
-                }
+                self.push_chat(line.clone());
                 true
             }
             AgentEvent::LogoutCountdown {
@@ -1332,17 +1345,13 @@ impl SessionState {
             }
 
             AgentEvent::Error { message } => {
-                self.chat.push(ChatLine {
+                self.push_chat(ChatLine {
                     spans: Vec::new(),
                     channel: ChatChannel::System,
                     sender: "<error>".into(),
                     text: message.clone(),
                     server_ts: 0,
                 });
-                if self.chat.len() > CHAT_HISTORY_CAP {
-                    let drop = self.chat.len() - CHAT_HISTORY_CAP;
-                    self.chat.drain(0..drop);
-                }
                 true
             }
             AgentEvent::PartyMemberUpdated { member } => {
@@ -1692,17 +1701,13 @@ impl SessionState {
                 } else {
                     "The purchase failed.".to_string()
                 };
-                self.chat.push(ChatLine {
+                self.push_chat(ChatLine {
                     spans: Vec::new(),
                     channel: ChatChannel::System,
                     sender: "<bazaar>".into(),
                     text,
                     server_ts: 0,
                 });
-                if self.chat.len() > CHAT_HISTORY_CAP {
-                    let drop = self.chat.len() - CHAT_HISTORY_CAP;
-                    self.chat.drain(0..drop);
-                }
                 true
             }
             AgentEvent::BazaarSoldToOther {
@@ -1716,17 +1721,13 @@ impl SessionState {
                     .and_then(|v| v.items.iter().find(|it| it.index == *index))
                     .and_then(|it| ffxi_proto::item_names::lookup(it.item_no))
                     .unwrap_or("an item");
-                self.chat.push(ChatLine {
+                self.push_chat(ChatLine {
                     spans: Vec::new(),
                     channel: ChatChannel::System,
                     sender: "<bazaar>".into(),
                     text: format!("{buyer} purchased {quantity}x {item}."),
                     server_ts: 0,
                 });
-                if self.chat.len() > CHAT_HISTORY_CAP {
-                    let drop = self.chat.len() - CHAT_HISTORY_CAP;
-                    self.chat.drain(0..drop);
-                }
                 true
             }
             AgentEvent::EventStart { .. } | AgentEvent::KeyRotated { .. } => false,
@@ -1745,7 +1746,7 @@ impl SessionState {
                 item_index,
                 count,
             } => {
-                self.chat.push(ChatLine {
+                self.push_chat(ChatLine {
                     spans: Vec::new(),
                     channel: ChatChannel::System,
                     sender: "<shop>".into(),
@@ -1755,10 +1756,6 @@ impl SessionState {
                     ),
                     server_ts: 0,
                 });
-                if self.chat.len() > CHAT_HISTORY_CAP {
-                    let drop = self.chat.len() - CHAT_HISTORY_CAP;
-                    self.chat.drain(0..drop);
-                }
                 true
             }
             AgentEvent::StatusIconsUpdated { icons, expiries } => {
@@ -4359,7 +4356,10 @@ mod tests {
         // A depleted slot comes back priced 0 (0x106_bazaar_buy.cpp:198).
         s.apply_event(&row(3, 0, 0));
         let view = s.bazaar.as_ref().expect("open");
-        assert_eq!(view.items.iter().map(|i| i.index).collect::<Vec<_>>(), vec![5]);
+        assert_eq!(
+            view.items.iter().map(|i| i.index).collect::<Vec<_>>(),
+            vec![5]
+        );
     }
 
     #[test]

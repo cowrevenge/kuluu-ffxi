@@ -1000,7 +1000,7 @@ fn load_mh_rects(
     let Ok(loc) = root.resolve(file_id) else {
         return Vec::new();
     };
-    let Ok(bytes) = std::fs::read(loc.path_under(root.root())) else {
+    let Ok(bytes) = std::fs::read(loc.path_under(root)) else {
         return Vec::new();
     };
     match ffxi_dat::zone_interaction::from_dat(&bytes) {

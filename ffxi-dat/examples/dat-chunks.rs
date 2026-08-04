@@ -38,7 +38,7 @@ fn main() -> ExitCode {
         }
     };
 
-    let path = location.path_under(root.root());
+    let path = location.path_under(&root);
     let bytes = match fs::read(&path) {
         Ok(b) => b,
         Err(e) => {

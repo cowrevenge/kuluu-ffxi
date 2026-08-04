@@ -14,7 +14,7 @@ fn main() -> ExitCode {
     let needles: Vec<&[u8]> = args[1..].iter().map(|s| s.as_bytes()).collect();
     let root = DatRoot::from_env_or_default().expect("dat root");
     let loc = root.resolve(file_id).expect("resolve");
-    let path = loc.path_under(root.root());
+    let path = loc.path_under(&root);
     let bytes = std::fs::read(&path).expect("read");
     for (idx, c) in walk(&bytes).filter_map(Result::ok).enumerate() {
         for needle in &needles {

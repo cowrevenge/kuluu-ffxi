@@ -221,7 +221,7 @@ fn sync_zone_sfx(
         .and_then(|(id, root)| {
             root.resolve(id)
                 .ok()
-                .and_then(|loc| std::fs::read(loc.path_under(root.root())).ok())
+                .and_then(|loc| std::fs::read(loc.path_under(&root)).ok())
         })
     else {
         return;
@@ -384,7 +384,7 @@ mod tests {
     fn zone_dat(file_id: u32) -> Option<Vec<u8>> {
         let root = DatRoot::from_env_or_default().ok()?;
         let loc = root.resolve(file_id).ok()?;
-        std::fs::read(loc.path_under(root.root())).ok()
+        std::fs::read(loc.path_under(&root)).ok()
     }
 
     fn placed(bytes: &[u8], skip_weat: bool) -> Vec<(SoundGeneratorDef, Sep)> {
@@ -539,7 +539,7 @@ mod tests {
             let Ok(loc) = root.resolve(file_id) else {
                 continue;
             };
-            let Ok(bytes) = std::fs::read(loc.path_under(root.root())) else {
+            let Ok(bytes) = std::fs::read(loc.path_under(&root)) else {
                 continue;
             };
             for (def, sep) in placed(&bytes, true) {

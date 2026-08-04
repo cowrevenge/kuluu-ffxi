@@ -27,7 +27,7 @@ fn dump_zone(root: &DatRoot, zone_id: u16) -> Result<(), Box<dyn std::error::Err
         return Ok(());
     };
     let location = root.resolve(file_id)?;
-    let path = location.path_under(root.root());
+    let path = location.path_under(root);
     let bytes = fs::read(&path)?;
     let records = collect_weather_records(&bytes);
     if records.is_empty() {

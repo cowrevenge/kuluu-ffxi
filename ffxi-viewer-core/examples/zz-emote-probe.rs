@@ -8,7 +8,7 @@ fn main() {
             println!("off {off}: unresolvable");
             continue;
         };
-        let path = loc.path_under(root.root());
+        let path = loc.path_under(&root);
         let Ok(bytes) = std::fs::read(&path) else {
             println!("off {off}: unreadable {path:?}");
             continue;

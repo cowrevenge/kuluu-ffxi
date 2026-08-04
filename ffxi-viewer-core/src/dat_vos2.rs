@@ -70,7 +70,7 @@ pub fn enumerate_vos2_chunks(file_id: u32) -> Vec<usize> {
     let Ok(loc) = root.resolve(file_id) else {
         return Vec::new();
     };
-    let Ok(bytes) = fs::read(loc.path_under(root.root())) else {
+    let Ok(bytes) = fs::read(loc.path_under(&root)) else {
         return Vec::new();
     };
 
@@ -101,7 +101,7 @@ pub fn dat_has_skinned_mesh(file_id: u32) -> bool {
     let Ok(loc) = root.resolve(file_id) else {
         return false;
     };
-    let Ok(bytes) = fs::read(loc.path_under(root.root())) else {
+    let Ok(bytes) = fs::read(loc.path_under(&root)) else {
         return false;
     };
     has_vos2_recursive(&walk_tree(&bytes))
@@ -112,7 +112,7 @@ pub fn load_vos2(file_id: u32, chunk_idx: usize) -> Result<LoadedVos2, String> {
     let location = root
         .resolve(file_id)
         .map_err(|e| format!("resolve({file_id}): {e}"))?;
-    let path = location.path_under(root.root());
+    let path = location.path_under(&root);
     let bytes = fs::read(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
 
     let tree = walk_tree(&bytes);
@@ -200,7 +200,7 @@ fn baked_skeleton_for_file(file_id: u32) -> Option<BakedSkeleton> {
 fn load_skeleton(file_id: u32) -> Option<BakedSkeleton> {
     let root = DatRoot::from_env_or_default().ok()?;
     let loc = root.resolve(file_id).ok()?;
-    let bytes = fs::read(loc.path_under(root.root())).ok()?;
+    let bytes = fs::read(loc.path_under(&root)).ok()?;
     let chunks = walk(&bytes).filter_map(Result::ok);
     let chunk = chunks
         .into_iter()
@@ -260,7 +260,7 @@ fn load_skeleton(file_id: u32) -> Option<BakedSkeleton> {
 fn load_idle_animation_for_file(file_id: u32) -> Option<ffxi_dat::anim::Mo2Animation> {
     let root = DatRoot::from_env_or_default().ok()?;
     let loc = root.resolve(file_id).ok()?;
-    let bytes = fs::read(loc.path_under(root.root())).ok()?;
+    let bytes = fs::read(loc.path_under(&root)).ok()?;
     for chunk in walk(&bytes).filter_map(Result::ok) {
         if ChunkKind::from_u8(chunk.kind) != Some(ChunkKind::AnimMo2) {
             continue;

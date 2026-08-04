@@ -964,7 +964,7 @@ mod tests {
             eprintln!("skipping: file 201 unresolvable");
             return;
         };
-        let Ok(bytes) = std::fs::read(loc.path_under(root.root())) else {
+        let Ok(bytes) = std::fs::read(loc.path_under(&root)) else {
             eprintln!("skipping: file 201 unreadable");
             return;
         };
@@ -1179,7 +1179,7 @@ mod tests {
         let Ok(loc) = root.resolve(POISON_EFFECT_FILE_ID) else {
             return;
         };
-        let Ok(bytes) = std::fs::read(loc.path_under(root.root())) else {
+        let Ok(bytes) = std::fs::read(loc.path_under(&root)) else {
             return;
         };
         let mut seen = 0;
@@ -1240,7 +1240,7 @@ mod tests {
     fn real_zone_dat(file_id: u32) -> Option<Vec<u8>> {
         let root = crate::DatRoot::from_env_or_default().ok()?;
         let loc = root.resolve(file_id).ok()?;
-        std::fs::read(loc.path_under(root.root())).ok()
+        std::fs::read(loc.path_under(&root)).ok()
     }
 
     // La Theine's rain curtain is the canonical precipitation generator: camera-following, a
@@ -1400,7 +1400,7 @@ mod tests {
             let Ok(loc) = root.resolve(file_id) else {
                 continue;
             };
-            let Ok(bytes) = std::fs::read(loc.path_under(root.root())) else {
+            let Ok(bytes) = std::fs::read(loc.path_under(&root)) else {
                 continue;
             };
             for c in crate::chunk::walk(&bytes).flatten() {

@@ -82,7 +82,7 @@ fn collect_zone(
     file_id: u32,
 ) -> Option<(String, Vec<String>, Vec<mzb::MmbPlacement>)> {
     let loc = root.resolve(file_id).ok()?;
-    let bytes = fs::read(loc.path_under(root.root())).ok()?;
+    let bytes = fs::read(loc.path_under(root)).ok()?;
     let chunks: Vec<_> = walk(&bytes).filter_map(Result::ok).collect();
     let zone_tag = chunks
         .iter()

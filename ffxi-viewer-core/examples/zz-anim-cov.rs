@@ -7,7 +7,7 @@ use std::fs;
 fn read(file_id: u32) -> Option<Vec<u8>> {
     let root = DatRoot::from_env_or_default().ok()?;
     let loc = root.resolve(file_id).ok()?;
-    fs::read(loc.path_under(root.root())).ok()
+    fs::read(loc.path_under(&root)).ok()
 }
 
 fn main() {

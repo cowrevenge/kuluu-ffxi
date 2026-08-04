@@ -93,39 +93,77 @@ impl PosHead {
                 .is_some_and(|mask| mask & Self::UPDATE_DESPAWN != 0)
     }
 
+    /// `PacketNameLength` (vendor/server/src/common/utils.h:71) — 15 chars plus
+    /// the terminator, the cap on every name LSB copies into 0x0D/0x0E.
+    const NAME_LEN: usize = 16;
+
+    /// `sendflags_t.Name` — `UPDATE_NAME`, the ordinary "a name follows" bit
+    /// (vendor/server/src/map/entities/baseentity.h:173).
+    const SEND_NAME: u8 = 0x08;
+    /// `sendflags_t.Name2` (entity_update.cpp:52). Set on every equipped-model
+    /// spawn, which is why it alone does not imply a name is present.
+    const SEND_NAME2: u8 = 0x40;
+
     pub fn try_extract_name(opcode: u16, body: &[u8]) -> Option<String> {
         use crate::map::s2c;
 
-        const NAME_FLAG: u8 = 0x08;
-        if body.len() < 7 || body[6] & NAME_FLAG == 0 {
+        let &send_flag = body.get(6)?;
+        if opcode == s2c::CHAR_PC {
+            const NAME_START: usize = 0x56;
+            if send_flag & Self::SEND_NAME == 0 {
+                return None;
+            }
+            return body.get(NAME_START..).and_then(read_name_slot);
+        }
+        if opcode != s2c::CHAR_NPC {
             return None;
         }
-        let slot: &[u8] = if opcode == s2c::CHAR_PC {
-            const NAME_START: usize = 0x56;
-            if body.len() <= NAME_START {
-                return None;
-            }
-            &body[NAME_START..]
-        } else if opcode == s2c::CHAR_NPC {
-            const STANDARD_START: usize = 0x30;
-            const RENAMED_START: usize = 0x31;
-            if body.len() <= STANDARD_START {
-                return None;
-            }
-            let start = if body[STANDARD_START] == 0x01 {
+
+        // Two layouts, and they are flagged by different bits
+        // (vendor/server/src/map/packets/entity_update.cpp:539-587).
+        //
+        // A renamed dynamic entity (targid >= 0x700) spawning with an equipment
+        // model grows the packet, memcpy's `look_t` over 0x30 and puts the name
+        // at 0x44. Its mask is a literal 0x57 — Name2|Look|HP|Status|Pos, with
+        // UPDATE_NAME *clear* — so gating on UPDATE_NAME alone drops it. Name2
+        // rides every equipped spawn though, so the real discriminator is the
+        // `ref<uint8>(0x18) = 0x01` marker plus the growth: a plain equipped
+        // spawn is `setSize(0x48)` (entity_update.cpp:463) and stops short of
+        // the name field.
+        //
+        // Every other rename writes 0x34, shifted to 0x35 for targid < 1024, and
+        // does set UPDATE_NAME. All offsets are packet-relative, so they land 4
+        // bytes lower here.
+        const LONG_NAME_MARKER: usize = 0x18 - 4;
+        const LONG_NAME_START: usize = 0x44 - 4;
+        const STANDARD_START: usize = 0x34 - 4;
+        const RENAMED_START: usize = 0x35 - 4;
+        /// Body length of a plain `setSize(0x48)` equipped spawn — anything at
+        /// or below this never carries the long name.
+        const PLAIN_EQUIPPED_BODY_LEN: usize = 0x48 - 4;
+
+        let long_name = send_flag & Self::SEND_NAME2 != 0
+            && body.get(LONG_NAME_MARKER) == Some(&0x01)
+            && body.len() > PLAIN_EQUIPPED_BODY_LEN;
+        let standard = (send_flag & Self::SEND_NAME != 0).then(|| {
+            if body.get(STANDARD_START) == Some(&0x01) {
                 RENAMED_START
             } else {
                 STANDARD_START
-            };
-            if body.len() <= start {
-                return None;
             }
-            let end = body.len().min(start + 16);
-            &body[start..end]
-        } else {
-            return None;
-        };
-        read_name_slot(slot)
+        });
+
+        // The 0x18 marker shares its offset with `loc.p.moving`, which UPDATE_POS
+        // writes first, so a moving entity can raise it by accident. Ordering
+        // rather than branching keeps a false hit costing one failed parse
+        // instead of the name.
+        [long_name.then_some(LONG_NAME_START), standard]
+            .into_iter()
+            .flatten()
+            .find_map(|start| {
+                let end = body.len().min(start + Self::NAME_LEN);
+                read_name_slot(body.get(start..end)?)
+            })
     }
 }
 
@@ -1063,6 +1101,72 @@ mod pos_head_tests {
         buf[6] = 0x01;
         buf[0x56..0x56 + 6].copy_from_slice(b"Junked");
         assert!(PosHead::try_extract_name(s2c::CHAR_PC, &buf).is_none());
+    }
+
+    /// entity_update.cpp:539-560 — a renamed dynamic entity (targid >= 0x700)
+    /// spawning with an equipment model grows to `setSize(0x56)`, gets `look_t`
+    /// memcpy'd over packet 0x30 and its name pushed to packet 0x44, flagged by
+    /// `ref<uint8>(0x18) = 0x01`. Its mask is the literal 0x57, which carries
+    /// Name2 but NOT UPDATE_NAME.
+    fn dynamic_spawn_body(name: &[u8]) -> Vec<u8> {
+        let mut buf = vec![0u8; 0x54];
+        buf[6] = 0x57;
+        buf[0x18 - 4] = 0x01;
+        buf[0x30..0x44].copy_from_slice(&[0x11u8; 0x14]);
+        buf[0x44 - 4..0x44 - 4 + name.len()].copy_from_slice(name);
+        buf
+    }
+
+    #[test]
+    fn try_extract_name_reads_the_dynamic_entity_spawn_slot() {
+        use crate::map::s2c;
+
+        let buf = dynamic_spawn_body(b"Ranger Trust\0");
+        assert_eq!(
+            PosHead::try_extract_name(s2c::CHAR_NPC, &buf).as_deref(),
+            Some("Ranger Trust"),
+            "0x57 carries Name2, not UPDATE_NAME — gating on UPDATE_NAME drops it"
+        );
+    }
+
+    #[test]
+    fn try_extract_name_dynamic_slot_needs_the_name2_flag() {
+        use crate::map::s2c;
+
+        let mut buf = dynamic_spawn_body(b"Ranger Trust\0");
+        buf[6] &= !PosHead::SEND_NAME2;
+        assert!(PosHead::try_extract_name(s2c::CHAR_NPC, &buf).is_none());
+    }
+
+    // The 0x18 marker shares its offset with loc.p.moving, so an ordinary
+    // moving entity can raise it. That must reorder the candidates, never
+    // discard the name sitting in the standard slot.
+    #[test]
+    fn try_extract_name_falls_back_when_the_long_name_marker_is_moving_data() {
+        use crate::map::s2c;
+
+        let mut buf = vec![0u8; 0x54];
+        buf[6] = 0x08 | 0x40;
+        buf[0x18 - 4] = 0x01;
+        buf[0x30..0x30 + 9].copy_from_slice(b"Sigli-Sea");
+        assert_eq!(
+            PosHead::try_extract_name(s2c::CHAR_NPC, &buf).as_deref(),
+            Some("Sigli-Sea")
+        );
+    }
+
+    // A plain equipped spawn also flies Name2 and stops at setSize(0x48), so
+    // look bytes must never be mined for a name that was never sent — this is
+    // the packet an unnamed private-server NPC arrives on.
+    #[test]
+    fn try_extract_name_ignores_look_bytes_on_a_plain_equipped_spawn() {
+        use crate::map::s2c;
+
+        let mut buf = vec![0u8; 0x48 - 4];
+        buf[6] = 0x57;
+        buf[0x18 - 4] = 0x01;
+        buf[0x30..0x44].copy_from_slice(b"ABCDEFGHIJKLMNOPQRST");
+        assert!(PosHead::try_extract_name(s2c::CHAR_NPC, &buf).is_none());
     }
 }
 

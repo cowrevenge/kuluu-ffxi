@@ -30,7 +30,7 @@ impl NpcNameTable {
     pub fn open(root: &DatRoot, zone_id: u16) -> Result<Self> {
         let file_id = NPC_LIST_FILE_ID_BASE + u32::from(zone_id);
         let location = root.resolve(file_id)?;
-        let path = location.path_under(root.root());
+        let path = location.path_under(root);
         let bytes = fs::read(&path).map_err(|source| DatError::Io {
             path: path.clone(),
             source,

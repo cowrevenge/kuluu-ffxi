@@ -3,6 +3,7 @@ use ffxi_proto::{decode, framing};
 use tokio::sync::{broadcast, mpsc};
 
 use crate::auth_client::AuthClient;
+use crate::event_dialog::EventTrigger;
 use crate::lobby_client::LobbyClient;
 use crate::map_client::{self, BootstrapArgs, MapClient};
 use crate::state::{
@@ -1705,19 +1706,20 @@ fn is_fresh_bundle(last_applied: Option<u16>, incoming: u16) -> bool {
 /// can drive it (EVENT_END goes out when the script ends), auto-release it
 /// otherwise so the char never sticks server-side InEvent (which rejects
 /// zonelines, logout, and ~100 other c2s until 0x05B lands).
-#[allow(clippy::too_many_arguments)]
 fn begin_server_event(
     dialog_session: &mut crate::event_dialog::DialogSession,
-    zone_id: u16,
-    unique_no: u32,
-    act_index: u16,
-    event_id: u16,
-    name: Option<String>,
+    trigger: EventTrigger,
     event_tx: &broadcast::Sender<AgentEvent>,
     pending_event_end: &mut Vec<(u32, u16, u16)>,
     auto_event_end: &mut Vec<(u32, u16, u16, u32)>,
 ) {
-    match dialog_session.begin(zone_id, unique_no, act_index, event_id, name) {
+    let (zone_id, unique_no, act_index, event_id) = (
+        trigger.event_zone,
+        trigger.unique_no,
+        trigger.act_index,
+        trigger.event_id,
+    );
+    match dialog_session.begin(trigger) {
         crate::event_dialog::Begin::Frame(dialog) => {
             let _ = event_tx.send(AgentEvent::EventStart {
                 event_id: dialog.event_id,
@@ -3226,11 +3228,15 @@ async fn keepalive_loop(
                     if let Some(ev) = mog.zone_in_event.take() {
                         begin_server_event(
                             &mut dialog_session,
-                            ev.event_num,
-                            self_char_id,
-                            self_act_index.unwrap_or(0),
-                            ev.event_para,
-                            None,
+                            EventTrigger {
+                                event_zone: ev.event_num,
+                                text_zone: ev.event_num,
+                                unique_no: self_char_id,
+                                act_index: self_act_index.unwrap_or(0),
+                                event_id: ev.event_para,
+                                params: Vec::new(),
+                                npc_name: None,
+                            },
                             &event_tx,
                             &mut pending_event_end,
                             &mut auto_event_end,
@@ -3555,21 +3561,17 @@ async fn keepalive_loop(
                                     | ffxi_proto::map::s2c::EVENTSTR
                                     | ffxi_proto::map::s2c::EVENTNUM
                             ) {
-                                if let Some((unique_no, act_index, event_id)) =
-                                    event_trigger_ids(&sub)
-                                {
-                                    let name = name_cache.get(&unique_no).cloned().or_else(|| {
-                                        npc_name_resolver
-                                            .lookup(unique_no)
-                                            .map(|s| s.replace('_', " "))
-                                    });
+                                if let Some(mut trigger) = event_trigger(&sub) {
+                                    let unique_no = trigger.unique_no;
+                                    trigger.npc_name =
+                                        name_cache.get(&unique_no).cloned().or_else(|| {
+                                            npc_name_resolver
+                                                .lookup(unique_no)
+                                                .map(|s| s.replace('_', " "))
+                                        });
                                     begin_server_event(
                                         &mut dialog_session,
-                                        current_zone_id,
-                                        unique_no,
-                                        act_index,
-                                        event_id,
-                                        name,
+                                        trigger,
                                         &event_tx,
                                         &mut pending_event_end,
                                         &mut auto_event_end,
@@ -4814,13 +4816,19 @@ fn decode_event_0x034(data: &[u8]) -> Option<crate::state::DialogState> {
     })
 }
 
-/// `(unique_no, act_index, event_id)` from an event-trigger packet (0x32/0x33/
-/// 0x34), reusing the raw decoders. The event id the client runs is `EventPara`
-/// (`dialog.event_para`), NOT `EventNum` — LSB sets `EventNum = PChar->getZone()`
-/// and `EventPara = eventInfo->eventId` (vendor/server/src/map/packets/s2c/
-/// 0x032_event.cpp, 0x034_eventnum.cpp). The same `EventPara` is what the server
-/// validates on the 0x05B EVENT_END (`isInEvent(EventPara)`).
-fn event_trigger_ids(sub: &framing::SubPacket<'_>) -> Option<(u32, u16, u16)> {
+/// An [`EventTrigger`] from an event-trigger packet (0x32/0x33/0x34), reusing the
+/// raw decoders. `npc_name` is left for the caller, which owns the name caches.
+///
+/// The event id the client runs is `EventPara` (`dialog.event_para`), NOT
+/// `EventNum` — LSB sets `EventNum = PChar->getZone()` and `EventPara =
+/// eventInfo->eventId` (vendor/server/src/map/packets/s2c/0x032_event.cpp,
+/// 0x034_eventnum.cpp). The same `EventPara` is what the server validates on the
+/// 0x05B EVENT_END (`isInEvent(EventPara)`).
+///
+/// `EventNum2` is the string table. 0x032 sets it to the char's zone and 0x033
+/// has no such field at all (our decoder leaves it 0), so only 0x034 can
+/// redirect it; a zero there means "same zone as the script".
+fn event_trigger(sub: &framing::SubPacket<'_>) -> Option<EventTrigger> {
     use ffxi_proto::map::s2c;
     let dialog = match sub.opcode {
         s2c::EVENT => decode_event_0x032(sub.data)?,
@@ -4828,7 +4836,19 @@ fn event_trigger_ids(sub: &framing::SubPacket<'_>) -> Option<(u32, u16, u16)> {
         s2c::EVENTNUM => decode_event_0x034(sub.data)?,
         _ => return None,
     };
-    Some((dialog.npc_id, dialog.act_index, dialog.event_para))
+    Some(EventTrigger {
+        event_zone: dialog.event_num,
+        text_zone: if dialog.event_num2 != 0 {
+            dialog.event_num2
+        } else {
+            dialog.event_num
+        },
+        unique_no: dialog.npc_id,
+        act_index: dialog.act_index,
+        event_id: dialog.event_para,
+        params: dialog.nums,
+        npc_name: None,
+    })
 }
 
 fn decode_shop_list(data: &[u8]) -> Option<ShopState> {
@@ -6641,6 +6661,62 @@ mod tests {
         assert_eq!(d.nums.len(), 8);
         assert_eq!(d.nums[0], -5);
         assert_eq!(d.nums[1], 1234);
+    }
+
+    // The conquest outpost vendor: LSB's conquest.lua:1461 calls
+    // startEvent(32756, nation, fee, 0, fee, getCP(), 0, 0, 0), packed into
+    // num[0..7] by 0x034_eventnum.cpp:44-50. Dropping those on the floor leaves
+    // every {Num:N} marker in the vendor dialog unresolved (kuluu-fldn).
+    #[test]
+    fn event_trigger_0x034_carries_params_and_the_redirected_text_table() {
+        const NATION: i32 = 1;
+        const FEE: i32 = 300;
+        const CP: i32 = 4200;
+
+        let mut data = vec![0u8; 48];
+        data[0..4].copy_from_slice(&0x0106_D291u32.to_le_bytes());
+        data[4..8].copy_from_slice(&NATION.to_le_bytes());
+        data[8..12].copy_from_slice(&FEE.to_le_bytes());
+        data[20..24].copy_from_slice(&CP.to_le_bytes());
+        data[36..38].copy_from_slice(&657u16.to_le_bytes());
+        data[38..40].copy_from_slice(&109u16.to_le_bytes());
+        data[40..42].copy_from_slice(&32756u16.to_le_bytes());
+        data[44..46].copy_from_slice(&230u16.to_le_bytes());
+
+        let sub = framing::SubPacket {
+            opcode: ffxi_proto::map::s2c::EVENTNUM,
+            sequence: 0,
+            data: &data,
+        };
+        let t = event_trigger(&sub).expect("trigger");
+        assert_eq!(t.unique_no, 0x0106_D291);
+        assert_eq!(t.act_index, 657);
+        assert_eq!(
+            t.event_id, 32756,
+            "EventPara is the script id, not EventNum"
+        );
+        assert_eq!(t.event_zone, 109);
+        assert_eq!(t.text_zone, 230, "EventNum2 redirects the string table");
+        assert_eq!(t.params[0], NATION);
+        assert_eq!(t.params[1], FEE);
+        assert_eq!(t.params[4], CP);
+    }
+
+    // 0x033 has no EventNum2 field at all, so the strings come from the zone the
+    // script lives in rather than from a zero we would otherwise resolve as
+    // zone 0.
+    #[test]
+    fn event_trigger_without_a_text_table_falls_back_to_the_event_zone() {
+        let mut data = vec![0u8; 108];
+        data[6..8].copy_from_slice(&109u16.to_le_bytes());
+        let sub = framing::SubPacket {
+            opcode: ffxi_proto::map::s2c::EVENTSTR,
+            sequence: 0,
+            data: &data,
+        };
+        let t = event_trigger(&sub).expect("trigger");
+        assert_eq!(t.event_zone, 109);
+        assert_eq!(t.text_zone, 109);
     }
 
     #[test]

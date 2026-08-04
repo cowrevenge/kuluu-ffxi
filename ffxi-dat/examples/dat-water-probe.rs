@@ -16,7 +16,7 @@ fn main() -> ExitCode {
     };
     let root = DatRoot::from_env_or_default().expect("dat root");
     let loc = root.resolve(file_id).expect("resolve");
-    let path = loc.path_under(root.root());
+    let path = loc.path_under(&root);
     let bytes = std::fs::read(&path).expect("read");
     let chunks: Vec<_> = walk(&bytes).filter_map(Result::ok).collect();
     println!(

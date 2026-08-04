@@ -2,9 +2,11 @@
 
 use serde::{Deserialize, Serialize};
 
-// v13: the retail /check window's remaining panes — CheckResult.linkshell, SceneSnapshot
+// v14: the retail /check window's remaining panes — CheckResult.linkshell, SceneSnapshot
 // .check_message (s2c 0x0CA), and SceneSnapshot.bazaar as a browsed-bazaar view (seller +
 // per-slot rows with tax) instead of the old never-populated Vec<BazaarEntry>.
+// v13: SceneSnapshot.chat_base_seq — the absolute history index of chat[0], so the viewer can
+// merge its local toasts against a key that a full-snapshot resend does not renumber.
 // v12: ViewerEvent::ActionStarted.animation — the BATTLE2 first-result animation index for
 // every category, which is what keys the caster's effect DAT (the action id does not).
 // v11: ChatLine.spans (per-substitution colouring — retail renders a drop line's item name
@@ -21,14 +23,13 @@ use serde::{Deserialize, Serialize};
 // v5: InventoryItem.charges_remaining + next_use_vana_ts (item recast/charges).
 // v4: SceneSnapshot.delivery_box (dedicated delivery screen) + ViewerCommand::DeliveryBox
 // (postcard frames are not self-describing, so any shape change bumps this).
-pub const PROTOCOL_VERSION: u32 = 13;
+pub const PROTOCOL_VERSION: u32 = 14;
 
 /// Longest countdown `SceneSnapshot::status_icon_expiries` can carry. The
 /// producer rejects anything beyond it as a corrupt 0x063 timestamp, and the HUD
 /// reserves label width for the widest string inside the same bound, so the two
 /// cannot drift into a countdown nothing has room to draw.
 pub const MAX_STATUS_TIMER_SECS: u32 = 100 * 3600;
-
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 pub struct Vec3 {
@@ -374,6 +375,9 @@ pub struct ChatLine {
     pub text: String,
     pub server_ts: u32,
 
+    /// Viewer-local merge key, meaningful only on a local toast: the number of
+    /// session chat lines that had already arrived when the toast was pushed.
+    /// Server lines key off [`SceneSnapshot::chat_base_seq`] instead.
     #[serde(default)]
     pub local_seq: u64,
 
@@ -468,6 +472,15 @@ pub struct SceneSnapshot {
     pub party: Vec<PartyMember>,
 
     pub chat: Vec<ChatLine>,
+
+    /// Absolute index of `chat[0]` in the session's whole chat history, so
+    /// `chat_base_seq + i` is a stable id for `chat[i]` that survives both a
+    /// full-snapshot resend and `CHAT_HISTORY_CAP` draining. The viewer merges
+    /// its own local toasts against this; a position-derived key cannot, because
+    /// every resend renumbers it (kuluu-zvc3).
+    #[serde(default)]
+    pub chat_base_seq: u64,
+
     pub diagnostics: Diagnostics,
 
     #[serde(default)]
@@ -1258,6 +1271,7 @@ mod tests {
                 local_seq: 0,
                 spans: Vec::new(),
             }],
+            chat_base_seq: 0,
             treasure_pool: vec![],
             diagnostics: Diagnostics {
                 stage: Some(Stage::InZone),

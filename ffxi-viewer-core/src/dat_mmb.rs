@@ -247,7 +247,7 @@ pub fn load_mmb(file_id: u32, chunk_idx: usize) -> Result<LoadedMmb, String> {
     let location = root
         .resolve(file_id)
         .map_err(|e| format!("resolve({file_id}): {e}"))?;
-    let path = location.path_under(root.root());
+    let path = location.path_under(&root);
     let bytes = fs::read(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
 
     let chunks: Vec<_> = walk(&bytes).filter_map(Result::ok).collect();

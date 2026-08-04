@@ -10,7 +10,7 @@ fn main() -> ExitCode {
     let args: Vec<String> = env::args().collect();
     let file_id: u32 = args[1].parse().unwrap();
     let root = DatRoot::from_env().unwrap();
-    let bytes = fs::read(root.resolve(file_id).unwrap().path_under(root.root())).unwrap();
+    let bytes = fs::read(root.resolve(file_id).unwrap().path_under(&root)).unwrap();
     let chunks: Vec<_> = walk(&bytes).filter_map(Result::ok).collect();
 
     let img_names: HashSet<String> = chunks

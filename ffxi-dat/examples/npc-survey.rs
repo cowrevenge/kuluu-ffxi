@@ -285,7 +285,7 @@ fn main() -> ExitCode {
             Ok(l) => l,
             Err(_) => continue,
         };
-        let path = loc.path_under(root.root());
+        let path = loc.path_under(&root);
 
         let Ok(meta) = fs::metadata(&path) else {
             continue;

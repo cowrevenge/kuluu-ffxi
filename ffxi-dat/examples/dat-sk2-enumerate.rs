@@ -30,7 +30,7 @@ fn main() -> ExitCode {
             );
         }
         let Ok(loc) = root.resolve(fid) else { continue };
-        let Ok(bytes) = fs::read(loc.path_under(root.root())) else {
+        let Ok(bytes) = fs::read(loc.path_under(&root)) else {
             continue;
         };
         resolved += 1;

@@ -213,7 +213,7 @@ fn load_lens_flare_sheet(
 
     let sheet = current
         .and_then(|file_id| dat_root.resolve(file_id).ok())
-        .and_then(|loc| std::fs::read(loc.path_under(dat_root.root())).ok())
+        .and_then(|loc| std::fs::read(loc.path_under(&dat_root)).ok())
         .and_then(|bytes| ffxi_dat::sprite_sheet::extract_lens_flare_sheet(&bytes));
 
     let mat = flare_q.single().ok().and_then(|m| mats.get_mut(&m.0));

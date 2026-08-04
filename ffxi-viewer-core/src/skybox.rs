@@ -114,6 +114,27 @@ mod frustum_shell_tests {
         }
     }
 
+    // The whole point of moving the shell with the frustum is that the sky looks
+    // IDENTICAL at every draw distance. A body's apparent size is radius/distance,
+    // so if the discs' radii did not move with the shell the sun and moon would
+    // swell and shrink as the setting changed.
+    #[test]
+    fn apparent_size_is_invariant_across_draw_distances() {
+        const NEAR: f32 = 0.1;
+        const AUTHORED_RADIUS: f32 = 120.0;
+        const AUTHORED_DISTANCE: f32 = 4000.0;
+        let reference = AUTHORED_RADIUS / AUTHORED_DISTANCE;
+        for far in [200.0f32, 500.0, 700.0, 1100.0, 2300.0, 6100.0] {
+            let distance = sky_element_distance(NEAR, far);
+            let radius = AUTHORED_RADIUS * (distance / AUTHORED_DISTANCE);
+            let apparent = radius / distance;
+            assert!(
+                (apparent - reference).abs() < 1e-6,
+                "far {far}: apparent {apparent} != {reference}"
+            );
+        }
+    }
+
     #[test]
     fn degenerate_frustum_does_not_go_negative() {
         assert_eq!(sky_shell_radius(10.0, 1.0), 0.0);

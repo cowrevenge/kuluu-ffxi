@@ -796,6 +796,11 @@ pub fn sun_moon_system(
             _ => None,
         })
         .unwrap_or(SKY_RADIUS);
+    // A celestial body's apparent size is radius/distance, so moving the shell
+    // with the frustum has to move the discs' radii by the same factor or the
+    // sun and moon visibly swell and shrink as the draw-distance setting
+    // changes. The discs are authored against SKY_RADIUS.
+    let sky_scale = sky_radius / SKY_RADIUS;
 
     // The zone DAT's own Sun/Moon billboards are retail's celestial bodies; where they run,
     // these hand-authored primitives would draw a second sun and moon on top of them.
@@ -818,10 +823,10 @@ pub fn sun_moon_system(
             }
         }
         if sun_sprite_tex.is_some() {
-            disc.scale = Vec3::splat(SUN_DISC_RADIUS * 2.0);
+            disc.scale = Vec3::splat(SUN_DISC_RADIUS * 2.0 * sky_scale);
             disc.look_at(cam_pos, Vec3::Y);
         } else {
-            disc.scale = Vec3::splat(SUN_DISC_RADIUS);
+            disc.scale = Vec3::splat(SUN_DISC_RADIUS * sky_scale);
         }
         *vis = if sun_visible {
             Visibility::Inherited
@@ -836,7 +841,7 @@ pub fn sun_moon_system(
     let disc_count = q_moon_disc.iter().count();
     for (mut disc, mut vis) in q_moon_disc.iter_mut() {
         disc.translation = moon_world;
-        disc.scale = Vec3::splat(MOON_DISC_RADIUS * 2.0);
+        disc.scale = Vec3::splat(MOON_DISC_RADIUS * 2.0 * sky_scale);
         disc.look_at(cam_pos, Vec3::Y);
         *vis = if disc_shown {
             Visibility::Inherited

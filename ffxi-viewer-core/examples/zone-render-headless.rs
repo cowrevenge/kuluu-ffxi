@@ -47,6 +47,9 @@ struct P {
     tgt: Vec3,
     fog: bool,
     sky: bool,
+    /// Camera far plane override, so a verification run can exercise the
+    /// frustum-derived sky shell at more than one draw distance.
+    far: Option<f32>,
     hour: f32,
     // Reproduce the live client's sun exactly: sun_moon.rs bias values,
     // cascade_config_from_settings(High preset), 4096 shadow map, and the
@@ -78,6 +81,7 @@ fn main() {
         tgt: Vec3::ZERO,
         fog: false,
         sky: false,
+        far: None,
         hour: 12.0,
         client_sun: false,
         weather: None,
@@ -135,6 +139,10 @@ fn main() {
             "--sky" => {
                 p.sky = true;
                 i += 1;
+            }
+            "--far" => {
+                p.far = Some(a[i + 1].parse().unwrap());
+                i += 2;
             }
             "--hour" => {
                 p.hour = a[i + 1].parse().unwrap();
@@ -362,7 +370,7 @@ fn setup(
                 ..Bloom::NATURAL
             },
             Projection::Perspective(PerspectiveProjection {
-                far: settings.view_distance.max(12000.0),
+                far: p.far.unwrap_or(settings.view_distance.max(12000.0)),
                 fov: settings.fov_deg.to_radians(),
                 ..default()
             }),

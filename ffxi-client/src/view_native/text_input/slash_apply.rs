@@ -357,22 +357,6 @@ pub(super) fn apply_slash_outcome(
                 ),
             );
         }
-        SlashOutcome::SetSky(op) => {
-            use crate::view_native::slash_commands::SkyOp;
-            use ffxi_viewer_core::SkyStyle;
-
-            let g = &mut *slash_writers.graphics;
-            let next = match op {
-                SkyOp::Status => g.sky_style(),
-                SkyOp::Set(style) => style,
-                SkyOp::Toggle => match g.sky_style() {
-                    SkyStyle::Enhanced => SkyStyle::Vanilla,
-                    SkyStyle::Vanilla => SkyStyle::Enhanced,
-                },
-            };
-            g.sky_style = next;
-            push_system_chat_line(scene_state, format!("/sky: {}", next.label()));
-        }
         SlashOutcome::SetZoneLines(op) => {
             use crate::view_native::slash_commands::ZoneLineOp;
             use ffxi_viewer_core::ZoneLineDisplay;

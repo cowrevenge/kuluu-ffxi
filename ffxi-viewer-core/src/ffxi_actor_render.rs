@@ -775,6 +775,15 @@ fn entity_aabb_from_joints(
     any.then(|| Aabb::from_min_max(lo - margin, hi + margin))
 }
 
+// research/XIClient Rendering/Direct3D8Manager.cpp:393,395 — the skeletal vertex colour reaches
+// fixed-function T&L as D3DMCS_COLOR1 exactly as the zone MMB one does, so it takes the same
+// D3DCOLOR byte/255 scale (pinned against `mmb::VERTEX_COLOR_DIVISOR` below:
+// `ffxi_zone_material::AMBIENT_FLOOR` is chosen for both paths at once and only holds while
+// terrain and actors decode alike). Unlike MMB there is no MODULATE4X alpha op on this path, so
+// alpha takes the plain divisor rather than MMB's half-scale one.
+const ACTOR_VERTEX_COLOR_DIVISOR: f32 = u8::MAX as f32;
+const ACTOR_VERTEX_ALPHA_DIVISOR: f32 = ACTOR_VERTEX_COLOR_DIVISOR;
+
 fn build_mesh(buffer: &MeshBuffer, joint_count: usize) -> Mesh {
     let n = buffer.vertices.len();
 
@@ -799,10 +808,10 @@ fn build_mesh(buffer: &MeshBuffer, joint_count: usize) -> Mesh {
         joint0.push(clamp_joint(v.joint_index0, joint_count));
         joint1.push(clamp_joint(v.joint_index1, joint_count));
         color.push([
-            v.color[0] as f32 / 255.0,
-            v.color[1] as f32 / 255.0,
-            v.color[2] as f32 / 255.0,
-            v.color[3] as f32 / 255.0,
+            v.color[0] as f32 / ACTOR_VERTEX_COLOR_DIVISOR,
+            v.color[1] as f32 / ACTOR_VERTEX_COLOR_DIVISOR,
+            v.color[2] as f32 / ACTOR_VERTEX_COLOR_DIVISOR,
+            v.color[3] as f32 / ACTOR_VERTEX_ALPHA_DIVISOR,
         ]);
     }
 
@@ -3472,6 +3481,16 @@ mod pose_resolution_tests {
 mod actor_bounds_tests {
     use super::*;
     use ffxi_dat::skel_mesh::{RenderProperties, SkinVertex};
+
+    // ffxi_zone_material::AMBIENT_FLOOR is tuned once for terrain and actors together, which
+    // only works while both decode their vertex colour at the same scale.
+    #[test]
+    fn actor_and_zone_vertex_colour_decode_at_the_same_scale() {
+        assert_eq!(
+            ACTOR_VERTEX_COLOR_DIVISOR,
+            ffxi_dat::mmb::VERTEX_COLOR_DIVISOR
+        );
+    }
 
     fn synth_vertex(q0: Vec3, q1: Vec3, w: f32, j0: u16, j1: u16) -> SkinVertex {
         SkinVertex {

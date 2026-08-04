@@ -265,8 +265,6 @@ const GRAPHICS_ENTRIES: &[&str] = &[
     "VSync",
     "Frame Rate Cap",
     "FOV",
-    "Sky Style",
-    "Water Style",
     "Dynamic Lights",
     "  Emitter Threshold",
     "  Emitter Intensity",

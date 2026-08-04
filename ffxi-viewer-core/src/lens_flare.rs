@@ -5,7 +5,6 @@ use bevy::render::render_resource::{AsBindGroup, ShaderType};
 use bevy::shader::ShaderRef;
 
 use crate::components::InGameEntity;
-use crate::graphics_settings::GraphicsSettings;
 use crate::sun_moon::VanaSky;
 
 // Max lf0x flare elements packed into the uniform chain. Real lens-flare sheets
@@ -26,9 +25,7 @@ pub struct LensFlareUniform {
 
     pub tint: Vec4,
 
-    // x = element count, y = 1.0 when the lf0x sheet/texture is loaded (data-driven
-    // chain) else 0.0 (analytic fallback), z unused, w = sun visibility [0,1] from
-    // SunOcclusion.
+    // x = element count, yz unused, w = sun visibility [0,1] from SunOcclusion.
     pub flare_params: Vec4,
 
     // Per-element: x = offset fraction along sun->opposite; yz = half-size in screen-UV;
@@ -75,8 +72,8 @@ impl Default for SunOcclusion {
     }
 }
 
-// Per-zone lf0x sheet (offsets + UV frames), loaded from the zone DAT. None where the
-// zone ships no lens-flare sheet (then the analytic halo/ghost/streak is used).
+// Per-zone lf0x sheet (offsets + UV frames), loaded from the zone DAT. Empty where the
+// zone ships no lens-flare sheet, which is where retail draws no flare at all.
 #[derive(Resource, Default, Clone)]
 pub struct LensFlareSheet {
     pub offsets: Vec<f32>,
@@ -124,7 +121,6 @@ fn spawn_lens_flare(
 
 #[allow(clippy::type_complexity)]
 pub fn lens_flare_system(
-    settings: Res<GraphicsSettings>,
     sky: Res<VanaSky>,
     sheet: Res<LensFlareSheet>,
     occlusion: Res<SunOcclusion>,
@@ -146,13 +142,11 @@ pub fn lens_flare_system(
         return;
     };
 
-    // Retail's flare is the lf0x chain the zone ships; where a zone ships none, retail draws
-    // no flare at all. The analytic halo/ghost/streak has no retail counterpart, so it is an
-    // Enhanced embellishment and Vanilla stays data-driven or dark.
-    let vanilla = !settings.sky_embellishments_enabled();
+    // Retail's flare is the lf0x chain the zone ships; where a zone ships none, retail
+    // draws no flare at all.
     let data_driven = !sheet.frames.is_empty();
     let sun_up = sky.sun_altitude > 0.0;
-    if !sun_up || occlusion.visibility <= 0.0 || (vanilla && !data_driven) {
+    if !sun_up || occlusion.visibility <= 0.0 || !data_driven {
         *vis = Visibility::Hidden;
         return;
     }
@@ -193,9 +187,7 @@ pub fn lens_flare_system(
 }
 
 // Load the zone's lf0x lens-flare sprite sheet (per-mesh offset fractions + UV frames
-// + texture) from the zone DAT, mirroring moon_material::load_moon_sprite_sheet. When
-// present the shader draws the data-driven additive chain; otherwise it falls back to
-// the analytic halo/ghost/streak.
+// + texture) from the zone DAT, mirroring moon_material::load_moon_sprite_sheet.
 #[allow(clippy::type_complexity)]
 fn load_lens_flare_sheet(
     scene_state: Res<crate::snapshot::SceneState>,
@@ -231,7 +223,6 @@ fn load_lens_flare_sheet(
         if let Some(mut mat) = mat {
             mat.flare_tex = None;
             mat.data.flare_params.x = 0.0;
-            mat.data.flare_params.y = 0.0;
         }
         return;
     };
@@ -270,7 +261,6 @@ fn load_lens_flare_sheet(
     if let Some(mut mat) = mat {
         mat.flare_tex = Some(handle);
         mat.data.flare_params.x = n as f32;
-        mat.data.flare_params.y = 1.0;
         for i in 0..n {
             let half = half_extents[i];
             mat.data.offsets[i] = Vec4::new(offsets[i], half.x, half.y, 0.0);

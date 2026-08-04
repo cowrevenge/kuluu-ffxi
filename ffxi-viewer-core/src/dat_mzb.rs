@@ -1791,9 +1791,9 @@ fn simple_water_material(texture: Handle<Image>) -> crate::ffxi_zone_material::F
     crate::ffxi_zone_material::FfxiZoneMaterial::new(
         Some(texture),
         crate::skinned_ffxi_material::FfxiMaterialFlags {
-            // (has_texture, blend-emit [0x8000 translucent path], unused,
+            // (has_texture, blend-emit [0x8000 translucent path], fog lane,
             // discard threshold — 0 so the cutout test never fires).
-            flags: Vec4::new(1.0, 1.0, 0.0, 0.0),
+            flags: Vec4::new(1.0, 1.0, crate::ffxi_zone_material::ZONE_FLAG_FOGGED, 0.0),
         },
         WATER_TINT,
         Vec4::ZERO,
@@ -1808,6 +1808,8 @@ fn simple_water_material(texture: Handle<Image>) -> crate::ffxi_zone_material::F
             // constant `depth_bias: 1000.0`).
             z_bias_level: 1,
             depth_write: false,
+            // A reconstructed plane over the MZB water height, not a generator mesh.
+            generator_stage_chain: false,
         },
     )
 }
@@ -1883,26 +1885,14 @@ fn water_ripple_image() -> Image {
     img
 }
 
-// `world_tile_uvs`: the vanilla FFXI water material wants world XZ /
-// WATER_TEX_TILE baked into the mesh, so the shared material's ripples are
-// world-sized and continuous across ponds. bevy_water (enhanced) instead wants
-// UVs normalised over the footprint bounds, so its `coord_offset`/
-// `coord_scale` recover world coords for a continuous, world-scaled wave
-// field.
-fn build_water_surface_mesh(spec: &WaterSpec, world_tile_uvs: bool) -> Mesh {
-    let dx = (spec.max.x - spec.min.x).max(0.01);
-    let dz = (spec.max.z - spec.min.z).max(0.01);
-    let uvs: Vec<[f32; 2]> = if world_tile_uvs {
-        spec.positions
-            .iter()
-            .map(|p| [p[0] / WATER_TEX_TILE, p[2] / WATER_TEX_TILE])
-            .collect()
-    } else {
-        spec.positions
-            .iter()
-            .map(|p| [(p[0] - spec.min.x) / dx, (p[2] - spec.min.z) / dz])
-            .collect()
-    };
+// The FFXI water material wants world XZ / WATER_TEX_TILE baked into the mesh, so
+// the shared material's ripples are world-sized and continuous across ponds.
+fn build_water_surface_mesh(spec: &WaterSpec) -> Mesh {
+    let uvs: Vec<[f32; 2]> = spec
+        .positions
+        .iter()
+        .map(|p| [p[0] / WATER_TEX_TILE, p[2] / WATER_TEX_TILE])
+        .collect();
     let mut mesh = Mesh::new(
         PrimitiveTopology::TriangleList,
         RenderAssetUsages::default(),
@@ -1913,22 +1903,19 @@ fn build_water_surface_mesh(spec: &WaterSpec, world_tile_uvs: bool) -> Mesh {
         vec![[0.0, 1.0, 0.0]; spec.positions.len()],
     );
     mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
-    // Neutral 0.5 vertex colour: the zone shader's XIM `2 · vertexColor`
-    // overbright convention makes 0.5 the identity, leaving the water colour
+    // This plane is reconstructed, not read out of an MMB, so it has to state the
+    // same neutral the MMB decode produces for retail's authored byte 128 — the
+    // zone shader's MODULATE2X restores that to 1.0, leaving the water colour
     // entirely to WATER_TINT.
     mesh.insert_attribute(
         Mesh::ATTRIBUTE_COLOR,
-        vec![[0.5, 0.5, 0.5, 1.0]; spec.positions.len()],
+        vec![ffxi_dat::mmb::vertex_color_neutral(); spec.positions.len()],
     );
     mesh.insert_indices(Indices::U32(spec.indices.clone()));
     mesh
 }
 
-// Drains water footprints queued by the MZB load and spawns one surface each:
-// the vanilla translucent plane, or — when built with `enhanced-water` and the
-// GraphicsSettings toggle is on — bevy_water's animated material on the same
-// footprint mesh. Reads the setting at drain time, so a toggle change takes
-// effect on the next zone (re)load.
+// Drains water footprints queued by the MZB load and spawns one translucent plane each.
 fn water_dist_sq_xz(spec: &WaterSpec, self_pos: Vec3) -> f32 {
     let cx = 0.5 * (spec.min.x + spec.max.x);
     let cz = 0.5 * (spec.min.z + spec.max.z);
@@ -1946,9 +1933,6 @@ pub fn spawn_zone_water(
     mut water_mat: ResMut<ZoneWaterMaterial>,
     settings: Res<crate::graphics::GraphicsSettings>,
     self_q: Query<&GlobalTransform, With<IsSelf>>,
-    #[cfg(feature = "enhanced-water")] mut water_materials: ResMut<
-        Assets<crate::water_enhanced::StandardWaterMaterial>,
-    >,
 ) {
     if pending.specs.is_empty() {
         return;
@@ -1962,7 +1946,6 @@ pub fn spawn_zone_water(
     }
     let load_radius = settings.view_distance * MMB_LOAD_DISTANCE_MARGIN;
     let load_radius_sq = load_radius * load_radius;
-    let enhanced = cfg!(feature = "enhanced-water") && settings.enhanced_water;
     let simple_mat = water_mat
         .0
         .get_or_insert_with(|| {
@@ -2000,33 +1983,8 @@ pub fn spawn_zone_water(
         }
         spawned += 1;
 
-        let mesh = Mesh3d(meshes.add(build_water_surface_mesh(&spec, !enhanced)));
-        let mut e;
-        #[cfg(feature = "enhanced-water")]
-        if enhanced {
-            let mat = crate::water_enhanced::pond_water_material(
-                &mut water_materials,
-                spec.min,
-                spec.max,
-            );
-            e = commands.spawn((
-                MzbOverlay,
-                WaterPlane,
-                MzbNonCollisionMesh,
-                mesh,
-                mat,
-                Transform::IDENTITY,
-                water_vis,
-                bevy::light::NotShadowReceiver,
-                ChildOf(spec.parent),
-            ));
-            if spec.auto_loaded {
-                e.insert(AutoMzbOverlay);
-            }
-            continue;
-        }
-
-        e = commands.spawn((
+        let mesh = Mesh3d(meshes.add(build_water_surface_mesh(&spec)));
+        let mut e = commands.spawn((
             MzbOverlay,
             WaterPlane,
             MzbNonCollisionMesh,
@@ -2042,7 +2000,6 @@ pub fn spawn_zone_water(
         }
     }
     pending.specs = retained;
-    let _ = enhanced;
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3048,5 +3005,32 @@ mod area_map_tests {
             m.lights_at(Vec3::splat(60.0)).unwrap()[0],
             Some(u32::from_le_bytes(*b"li12"))
         );
+    }
+}
+
+#[cfg(test)]
+mod water_surface_tests {
+    use super::*;
+
+    #[test]
+    fn the_water_plane_uses_the_same_neutral_the_mmb_decode_produces() {
+        // This plane is generated, not parsed, so nothing else forces it to agree with
+        // the retail vertex convention the shared zone shader assumes.
+        let mesh = build_water_surface_mesh(&WaterSpec {
+            positions: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]],
+            indices: vec![0, 1, 2],
+            min: Vec3::ZERO,
+            max: Vec3::new(1.0, 0.0, 1.0),
+            parent: Entity::PLACEHOLDER,
+            auto_loaded: false,
+        });
+        let Some(bevy::mesh::VertexAttributeValues::Float32x4(colors)) =
+            mesh.attribute(Mesh::ATTRIBUTE_COLOR)
+        else {
+            panic!("water plane has no vertex colours");
+        };
+        assert!(colors
+            .iter()
+            .all(|c| *c == ffxi_dat::mmb::vertex_color_neutral()));
     }
 }

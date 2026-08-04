@@ -12,10 +12,6 @@ dist = false
 
 [features]
 default = []
-# Enhanced (non-retail) animated water surface via the bevy_water ocean
-# material, selectable at runtime in the graphics menu. Native-only.
-enhanced-water = ["dep:bevy_water"]
-
 # Enhanced (non-retail) mouse-over tooltips on the status-effect ribbon showing
 # each buff's name. Retail has no such tooltip; the info comes from the scraped
 # status-effect name table.
@@ -77,11 +73,6 @@ ab_glyph = "0.2"
 # over the websocket if/when that's wanted.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 ffxi-audio = { path = "../ffxi-audio" }
-# Optional enhanced animated water (feature `enhanced-water`). Native-only;
-# wasm viewer keeps the simple plane. The 0.18.x req is satisfied by the
-# workspace [patch.crates-io] git pin (upstream's Bevy 0.19 migration PR,
-# which keeps the 0.18.1 crate version); see kuluu-u11r.
-bevy_water = { version = "0.18", optional = true }
 # Stable id for the synthetic picking pointer that bridges window-space mouse
 # input onto the off-screen render-scale target (graphics::render_scale, which
 # is itself native-only). from_u128 only — no getrandom needed.

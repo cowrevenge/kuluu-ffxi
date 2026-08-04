@@ -1,5 +1,4 @@
-// Screen-space lens flare (Vanilla sky style — the FFXI-faithful sun glare;
-// Enhanced mode uses bloom on the sun disc instead).
+// Screen-space lens flare — the FFXI-faithful sun glare.
 //
 // The mesh is a unit Rectangle placed in front of the camera and scaled to
 // (over)fill the frustum, so its UV [0,1]² maps to the screen. Unlike the old
@@ -12,12 +11,11 @@
 // Additive blend: where the flare contributes nothing the fragment is black
 // (adds zero), so the quad can cover the whole screen cheaply.
 //
-// When the zone ships an lf0x lens-flare sprite sheet (flare_params.y), the chain is
-// data-driven: each element is an additive textured quad placed along the
-// sun→screen-centre axis at sun*(1-offset)+opposite*offset, sized viewport/32
-// (research/xim ZoneDrawer.kt:231-236). Without a sheet it falls back to three
-// analytic elements keyed off the same axis: a halo bloom, a chain of ghost discs,
-// and a horizontal anamorphic streak.
+// The chain is data-driven off the zone's lf0x lens-flare sprite sheet: each element
+// is an additive textured quad placed along the sun→screen-centre axis at
+// sun*(1-offset)+opposite*offset, sized viewport/32 (research/xim
+// ZoneDrawer.kt:231-236). Retail draws no flare where a zone ships no sheet, so
+// lens_flare.rs hides the quad instead of substituting anything.
 
 #import bevy_pbr::forward_io::VertexOutput
 #import bevy_pbr::mesh_view_bindings::view
@@ -29,8 +27,7 @@ struct LensFlareUniform {
     sun_dir_intensity: vec4<f32>,
     // rgb = flare tint, a = unused.
     tint: vec4<f32>,
-    // x = element count, y = 1.0 when the lf0x sheet is loaded (data-driven
-    // chain), z = sprite scale, w = sun visibility [0,1] (CPU BVH raycast).
+    // x = element count, yz unused, w = sun visibility [0,1] (CPU BVH raycast).
     flare_params: vec4<f32>,
     // x = per-element offset fraction along sun->opposite.
     offsets: array<vec4<f32>, 16>,
@@ -52,14 +49,6 @@ fn fully_transparent() -> vec4<f32> {
     // BLEND_PREMULTIPLIED_ALPHA = src·1 + dst·(1−src.a)). Output alpha MUST be 0
     // so the destination is preserved and we add nothing.
     return vec4<f32>(0.0, 0.0, 0.0, 0.0);
-}
-
-// Soft radial disc: 1.0 at centre, smooth falloff to 0 at `radius`.
-fn disc(uv: vec2<f32>, centre: vec2<f32>, radius: f32, aspect: f32) -> f32 {
-    var d = uv - centre;
-    d.x = d.x * aspect; // undo viewport stretch so the disc stays round
-    let r = length(d);
-    return 1.0 - smoothstep(0.0, radius, r);
 }
 
 @fragment
@@ -101,61 +90,31 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     // Each lens-flare mesh is an additive textured quad placed at
     // sun*(1-offset) + opposite*offset along the sun->screen-centre axis (opposite =
     // sun + 2*to_centre), sized from its own quad geometry. Intensity rides the
-    // raycast occlusion `visibility` instead of an analytic halo.
-    if (data.flare_params.y > 0.5) {
-        let count = u32(data.flare_params.x);
-        let to_centre_d = centre - sun;
-        let opposite = sun + to_centre_d * 2.0;
-        for (var i = 0u; i < count && i < MAX_FLARE_ELEMENTS; i = i + 1u) {
-            let offset = data.offsets[i].x;
-            let pos = sun * (1.0 - offset) + opposite * offset;
-            // Per-element half-extent, already in screen-UV (lens_flare.rs divides the
-            // mesh quad by LENS_FLARE_SCREEN_UNITS, retail's screen/32 draw scale). Each
-            // axis divides by its own screen dimension, so the flare stretches with the
-            // aspect ratio exactly as retail's pixel-space ortho draw does.
-            let half = data.offsets[i].yz;
-            let local = (uv - pos) / half; // [-1,1] inside the quad
-            // Clamp + mask rather than `continue`, so the textureSample stays in
-            // uniform control flow (WGSL requires implicit-LOD sampling there).
-            let inside = step(abs(local.x), 1.0) * step(abs(local.y), 1.0);
-            let quad_uv = clamp(local * 0.5 + vec2<f32>(0.5), vec2<f32>(0.0), vec2<f32>(1.0));
-            let f = data.frame_uv[i];
-            let suv = vec2<f32>(mix(f.x, f.z, quad_uv.x), mix(f.y, f.w, quad_uv.y));
-            let texel = textureSample(flare_tex, flare_samp, suv);
-            col += tint * texel.rgb * texel.a * inside;
-        }
-        let edge_d = 1.0 - smoothstep(0.35, 0.75, length((sun - centre) * vec2<f32>(aspect, 1.0)));
-        return vec4<f32>(col * intensity * visibility * edge_d, 0.0);
+    // raycast occlusion `visibility`.
+    let count = u32(data.flare_params.x);
+    let to_centre = centre - sun;
+    let opposite = sun + to_centre * 2.0;
+    for (var i = 0u; i < count && i < MAX_FLARE_ELEMENTS; i = i + 1u) {
+        let offset = data.offsets[i].x;
+        let pos = sun * (1.0 - offset) + opposite * offset;
+        // Per-element half-extent, already in screen-UV (lens_flare.rs divides the
+        // mesh quad by LENS_FLARE_SCREEN_UNITS, retail's screen/32 draw scale). Each
+        // axis divides by its own screen dimension, so the flare stretches with the
+        // aspect ratio exactly as retail's pixel-space ortho draw does.
+        let half = data.offsets[i].yz;
+        let local = (uv - pos) / half; // [-1,1] inside the quad
+        // Clamp + mask rather than `continue`, so the textureSample stays in
+        // uniform control flow (WGSL requires implicit-LOD sampling there).
+        let inside = step(abs(local.x), 1.0) * step(abs(local.y), 1.0);
+        let quad_uv = clamp(local * 0.5 + vec2<f32>(0.5), vec2<f32>(0.0), vec2<f32>(1.0));
+        let f = data.frame_uv[i];
+        let suv = vec2<f32>(mix(f.x, f.z, quad_uv.x), mix(f.y, f.w, quad_uv.y));
+        let texel = textureSample(flare_tex, flare_samp, suv);
+        col += tint * texel.rgb * texel.a * inside;
     }
 
-    // --- Halo: tight bright core + wide soft bloom around the sun. ---
-    let core = disc(uv, sun, 0.06, aspect);
-    let bloom = disc(uv, sun, 0.32, aspect);
-    col += tint * (pow(core, 2.0) * 1.6 + pow(bloom, 3.0) * 0.45);
-
-    // --- Ghosts: discs spaced along the sun→centre→opposite line. ---
-    let to_centre = centre - sun;
-    let g0 = disc(uv, sun + to_centre * 1.30, 0.045, aspect);
-    let g1 = disc(uv, sun + to_centre * 1.65, 0.085, aspect);
-    let g2 = disc(uv, sun + to_centre * 2.00, 0.030, aspect);
-    let g3 = disc(uv, sun + to_centre * 2.45, 0.120, aspect);
-    let g4 = disc(uv, sun + to_centre * 0.65, 0.025, aspect);
-    col += vec3<f32>(0.55, 0.70, 1.00) * pow(g0, 2.0) * 0.22;
-    col += vec3<f32>(0.90, 0.55, 0.45) * pow(g1, 2.0) * 0.16;
-    col += vec3<f32>(0.50, 1.00, 0.65) * pow(g2, 2.0) * 0.20;
-    col += vec3<f32>(0.70, 0.55, 1.00) * pow(g3, 2.0) * 0.10;
-    col += vec3<f32>(1.00, 0.85, 0.55) * pow(g4, 2.0) * 0.18;
-
-    // --- Anamorphic streak: thin horizontal bar through the sun. ---
-    let dy = abs(uv.y - sun.y);
-    let dx = abs(uv.x - sun.x) * aspect;
-    let streak = (1.0 - smoothstep(0.0, 0.004, dy)) * (1.0 - smoothstep(0.0, 0.6, dx));
-    col += vec3<f32>(0.6, 0.75, 1.0) * streak * 0.5;
-
-    // Fade toward the screen edges — a real flare is strongest with the sun
-    // framed, washing out as it leaves view.
+    // Fade toward the screen edges — a real flare is strongest with the sun framed,
+    // washing out as it leaves view. Premultiplied additive: rgb is the light to add.
     let edge = 1.0 - smoothstep(0.35, 0.75, length((sun - centre) * vec2<f32>(aspect, 1.0)));
-
-    // Premultiplied additive: rgb is the light to add, alpha = 0.
     return vec4<f32>(col * intensity * visibility * edge, 0.0);
 }

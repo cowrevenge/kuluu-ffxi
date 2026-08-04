@@ -566,6 +566,8 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
             drain_mzb_load_state,
             drain_mmb_load_state,
             drain_particle_simulator,
+            drain_zone_sfx,
+            drain_weather_particles,
             key_items::drain_key_items_viewed,
         ),
     );
@@ -810,7 +812,7 @@ fn despawn_ingame_entities(
     mut last_zone: ResMut<LastAutoLoadedZone>,
     mut last_atmo: ResMut<LastAtmosphereZone>,
     mut bgm: ResMut<BgmSlots>,
-    mut weather_ambient: ResMut<ffxi_viewer_core::audio::WeatherAmbient>,
+    mut ambient_bed: ResMut<ffxi_viewer_core::audio::ZoneAmbientBed>,
     mut combat_sfx: ResMut<ffxi_viewer_core::audio::CombatSfxState>,
     mut system_sfx_cursor: ResMut<ffxi_viewer_core::audio::SystemSfxCursor>,
     mut engagement_chat_cursor: ResMut<ffxi_viewer_core::debug_chat::EngagementChatCursor>,
@@ -845,9 +847,8 @@ fn despawn_ingame_entities(
     bgm.bgm_loop_counter = None;
     bgm.bgm_loops_reported = 0;
 
-    weather_ambient.active_entity = None;
-    weather_ambient.active_weather = None;
-    weather_ambient.prev_weather = None;
+    ambient_bed.entity = None;
+    ambient_bed.playing = None;
 
     *combat_sfx = ffxi_viewer_core::audio::CombatSfxState::default();
 
@@ -919,6 +920,16 @@ fn drain_particle_simulator(mut sim: ResMut<ffxi_viewer_core::particle_sim::Part
     if dropped > 0 {
         tracing::info!(dropped, "OnExit(InGame): drained live particle generators");
     }
+}
+
+fn drain_zone_sfx(mut zone_sfx: ResMut<ffxi_viewer_core::zone_sfx::ZoneSfx>) {
+    zone_sfx.clear();
+}
+
+fn drain_weather_particles(
+    mut weather_particles: ResMut<ffxi_viewer_core::weather_particles::WeatherParticles>,
+) {
+    weather_particles.clear();
 }
 
 fn return_to_launcher_on_disconnect(
@@ -1022,7 +1033,7 @@ mod zone_teardown_tests {
         world.init_resource::<super::LastAutoLoadedZone>();
         world.init_resource::<super::LastAtmosphereZone>();
         world.init_resource::<super::BgmSlots>();
-        world.init_resource::<ffxi_viewer_core::audio::WeatherAmbient>();
+        world.init_resource::<ffxi_viewer_core::audio::ZoneAmbientBed>();
         world.init_resource::<ffxi_viewer_core::audio::CombatSfxState>();
         world.init_resource::<ffxi_viewer_core::audio::SystemSfxCursor>();
         world.init_resource::<ffxi_viewer_core::debug_chat::EngagementChatCursor>();

@@ -1,6 +1,5 @@
 use bevy::prelude::*;
 use ffxi_viewer_core::camera::OperatorCamera;
-use ffxi_viewer_core::graphics_settings::GraphicsSettings;
 use ffxi_viewer_core::lens_flare::SunOcclusion;
 use ffxi_viewer_core::sun_moon::{sun_direction, VanaSky, SKY_RADIUS};
 
@@ -54,16 +53,14 @@ fn smoothed_visibility(current: f32, target: f32, dt_secs: f32) -> f32 {
 }
 
 pub fn update_sun_occlusion_system(
-    settings: Res<GraphicsSettings>,
     sky: Res<VanaSky>,
     zone_bvh: Res<ZoneCollisionBvh>,
     cam_q: Query<&GlobalTransform, With<OperatorCamera>>,
     time: Res<Time>,
     mut occlusion: ResMut<SunOcclusion>,
 ) {
-    let vanilla = !settings.sky_embellishments_enabled();
     let sun_up = sky.sun_altitude > 0.0;
-    let target = match (vanilla && sun_up, zone_bvh.0.as_ref(), cam_q.single()) {
+    let target = match (sun_up, zone_bvh.0.as_ref(), cam_q.single()) {
         (true, Some(bvh), Ok(cam)) => {
             sun_visibility_target(bvh, cam.translation(), sun_direction(sky.hour))
         }

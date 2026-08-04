@@ -49,7 +49,6 @@ pub mod scheduler_runtime;
 pub mod skeleton_instance;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod skinned_ffxi_material;
-pub mod sky_realism;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod skybox;
 pub mod snapshot;
@@ -62,10 +61,10 @@ pub mod target_strobe;
 pub mod ui_element_atlas;
 pub mod ui_font;
 pub mod vana_time;
-#[cfg(feature = "enhanced-water")]
-pub mod water_enhanced;
 pub mod weather;
 pub mod weather_fx;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod weather_particles;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod zone_clouds;
 pub mod zone_lights;
@@ -74,6 +73,8 @@ pub mod zone_lines;
 pub mod zone_particles;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod zone_point_lights;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod zone_sfx;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod zone_texture;
 
@@ -90,7 +91,7 @@ pub use components::{
 pub use cursor::{system_cursor_icon, CursorPlugin, CursorRequests, CursorStyle};
 pub use graphics_settings::{
     AaMode, CharacterRenderPath, DynamicLights, GraphicsField, GraphicsSettings, QualityPreset,
-    SkyStyle, TextureFiltering, ZoneLineDisplay, GRAPHICS_FIELDS,
+    TextureFiltering, ZoneLineDisplay, GRAPHICS_FIELDS,
 };
 pub use hud::{add_hud_spawners, HudPlugin};
 pub use input_mode::{
@@ -192,9 +193,6 @@ impl<S: SceneSource + Resource + Component<Mutability = bevy::ecs::component::Mu
         #[cfg(not(target_arch = "wasm32"))]
         app.add_plugins(ffxi_zone_material::FfxiZoneMaterialPlugin);
 
-        #[cfg(feature = "enhanced-water")]
-        app.add_plugins(water_enhanced::EnhancedWaterPlugin);
-
         app.add_plugins(lens_flare::LensFlarePlugin);
 
         app.add_plugins(zone_lights::ZoneLightsPlugin);
@@ -206,7 +204,13 @@ impl<S: SceneSource + Resource + Component<Mutability = bevy::ecs::component::Mu
         app.add_plugins(zone_particles::ZoneParticlesPlugin);
 
         #[cfg(not(target_arch = "wasm32"))]
+        app.add_plugins(zone_sfx::ZoneSfxPlugin);
+
+        #[cfg(not(target_arch = "wasm32"))]
         app.add_plugins(celestial_particles::CelestialParticlesPlugin);
+
+        #[cfg(not(target_arch = "wasm32"))]
+        app.add_plugins(weather_particles::WeatherParticlesPlugin);
 
         #[cfg(not(target_arch = "wasm32"))]
         app.add_plugins(zone_clouds::ZoneCloudsPlugin);
@@ -232,9 +236,7 @@ impl<S: SceneSource + Resource + Component<Mutability = bevy::ecs::component::Mu
             .init_resource::<sun_moon::VanaSky>()
             .init_resource::<weather::ZoneDirectionalLighting>()
             .init_resource::<vana_time::VanaClock>()
-            .init_resource::<sky_realism::SkyRealism>()
             .init_resource::<weather_fx::ActiveWeatherModifier>()
-            .init_resource::<weather_fx::ParticleAssets>()
             .init_resource::<weather_fx::LightningState>()
             .init_resource::<weather_fx::CurrentWeather>()
             .init_resource::<hud::chat_panel::ChatScroll>()
@@ -288,8 +290,6 @@ impl<S: SceneSource + Resource + Component<Mutability = bevy::ecs::component::Mu
                         weather_fx::apply_weather_to_ambient_and_fog_system,
                         sun_moon::sun_moon_system,
                         weather_fx::apply_weather_to_sun_system,
-                        weather_fx::manage_weather_particles_system,
-                        weather_fx::update_weather_particles_system,
                     ),
                 )
                     .chain()
@@ -397,7 +397,6 @@ impl<S: SceneSource + Resource + Component<Mutability = bevy::ecs::component::Mu
                 graphics_settings::apply_projection_system,
                 graphics_settings::apply_vsync_system,
                 graphics_settings::apply_anti_aliasing_system,
-                graphics_settings::apply_sky_realism_system,
                 graphics_settings::apply_tonemapping_system,
             )
                 .chain()

@@ -921,12 +921,6 @@ const COMMANDS: &[(&str, &[Command])] = &[
                 handler: |c| parse_renderscale(c.rest),
             },
             Command {
-                aliases: &["sky"],
-                usage: "[vanilla|enhanced|toggle]",
-                summary: "switch the sky mode — vanilla (retail-faithful) or enhanced (atmosphere + bloom glare); bare `/sky` shows the current mode",
-                handler: |c| parse_sky(c.rest),
-            },
-            Command {
                 aliases: &["lights", "lanterns"],
                 usage: "[on|off | threshold N | intensity N | range N | flicker on|off]",
                 summary: "tune dynamic lantern/fire lights (from over-bright vertices); bare `/lights` lists state",
@@ -1053,8 +1047,6 @@ pub enum SlashOutcome {
 
     /// `Some(scale)` sets the 3D render scale (0.25–2.0); `None` reports it.
     SetRenderScale(Option<f32>),
-
-    SetSky(SkyOp),
 
     SetZoneLines(ZoneLineOp),
 
@@ -2472,12 +2464,9 @@ fn parse_weather(rest: &str) -> SlashOutcome {
         // The four-char `weat/<tag>` DAT names, which is what the zone tree and
         // every log line actually call these. Resolved from the id table rather
         // than a second hand-written list, so the two cannot drift.
-        _ => match key
-            .as_bytes()
-            .try_into()
-            .ok()
-            .and_then(|tag: [u8; 4]| (0u16..=19).find(|&n| ffxi_dat::weather::weather_type_id(n) == tag))
-        {
+        _ => match key.as_bytes().try_into().ok().and_then(|tag: [u8; 4]| {
+            (0u16..=19).find(|&n| ffxi_dat::weather::weather_type_id(n) == tag)
+        }) {
             Some(n) => Weather::from_lsb(n),
             None => {
                 return SlashOutcome::SystemMessage(format!(
@@ -2488,29 +2477,6 @@ fn parse_weather(rest: &str) -> SlashOutcome {
         },
     };
     SlashOutcome::SetWeatherClient(w)
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SkyOp {
-    Status,
-    Set(ffxi_viewer_core::SkyStyle),
-    Toggle,
-}
-
-fn parse_sky(rest: &str) -> SlashOutcome {
-    use ffxi_viewer_core::SkyStyle;
-    let op = match rest.trim().to_ascii_lowercase().as_str() {
-        "" => SkyOp::Status,
-        "toggle" => SkyOp::Toggle,
-        "enhanced" | "physical" => SkyOp::Set(SkyStyle::Enhanced),
-        "vanilla" | "retail" => SkyOp::Set(SkyStyle::Vanilla),
-        other => {
-            return SlashOutcome::SystemMessage(format!(
-                "/sky: unknown mode `{other}` (use vanilla | enhanced | toggle)"
-            ));
-        }
-    };
-    SlashOutcome::SetSky(op)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

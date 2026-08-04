@@ -63,35 +63,6 @@ impl AaMode {
     }
 }
 
-/// The two sky modes. Both share the retail-faithful gradient skybox dome plus
-/// the weat/<type>/ clouds, stars and moon; they differ only in post/lighting
-/// polish. `Enhanced` layers the realism features on — filmic tonemap, bloom
-/// sun-glare, horizon reddening/dimming, moon illusion, earthshine, eclipses.
-/// `Vanilla` is the flat retail look — realism off, direct colour output,
-/// painterly sun flare.
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum SkyStyle {
-    Enhanced,
-    #[default]
-    Vanilla,
-}
-
-impl SkyStyle {
-    pub const fn label(self) -> &'static str {
-        match self {
-            SkyStyle::Enhanced => "Enhanced",
-            SkyStyle::Vanilla => "Vanilla",
-        }
-    }
-
-    pub const fn sky_realism(self) -> crate::sky_realism::SkyRealism {
-        match self {
-            SkyStyle::Enhanced => crate::sky_realism::SkyRealism::enhanced(),
-            SkyStyle::Vanilla => crate::sky_realism::SkyRealism::retail(),
-        }
-    }
-}
-
 /// How zone-line transition triggers are drawn. Retail shows nothing (you walk
 /// into an invisible boundary), so `Off` is the faithful default. `Pillar` is a
 /// debug glow column; `Gate` draws the real oriented trigger footprint
@@ -222,9 +193,6 @@ pub enum GraphicsField {
     FrameRateCap,
     Fov,
 
-    SkyStyle,
-    WaterStyle,
-
     DynamicLights,
     LightThreshold,
     LightIntensity,
@@ -261,8 +229,6 @@ impl GraphicsField {
             GraphicsField::VSync => "VSync",
             GraphicsField::FrameRateCap => "Frame Rate Cap",
             GraphicsField::Fov => "FOV",
-            GraphicsField::SkyStyle => "Sky Style",
-            GraphicsField::WaterStyle => "Water Style",
             GraphicsField::DynamicLights => "Dynamic Lights",
             GraphicsField::LightThreshold => "  Emitter Threshold",
             GraphicsField::LightIntensity => "  Emitter Intensity",
@@ -306,6 +272,8 @@ pub struct GraphicsSettings {
     pub texture_filtering: TextureFiltering,
 
     pub bloom_intensity: f32,
+    // Retail has no volumetric light shafts, so vanilla parity means off at every
+    // tier; the toggle stays as an opt-in embellishment.
     pub volumetric_fog: bool,
     pub fog_step_count: u32,
     pub view_distance: f32,
@@ -314,14 +282,6 @@ pub struct GraphicsSettings {
     #[serde(default)]
     pub fps_cap: u32,
     pub fov_deg: f32,
-
-    #[serde(default)]
-    pub sky_style: SkyStyle,
-
-    // Enhanced (non-retail) animated water via bevy_water; off = the vanilla
-    // translucent plane. Only takes effect when built with `enhanced-water`.
-    #[serde(default)]
-    pub enhanced_water: bool,
 
     #[serde(default)]
     pub dynamic_lights: DynamicLights,
@@ -507,8 +467,6 @@ impl GraphicsSettings {
                 vsync: true,
                 fps_cap: 0,
                 fov_deg: 50.0,
-                sky_style: SkyStyle::Vanilla,
-                enhanced_water: false,
                 dynamic_lights: DynamicLights::Vanilla,
                 light_threshold: DEFAULT_LIGHT_THRESHOLD,
                 light_intensity: DEFAULT_LIGHT_INTENSITY,
@@ -532,14 +490,12 @@ impl GraphicsSettings {
                 anti_aliasing: aa_default,
                 texture_filtering: TextureFiltering::Vanilla,
                 bloom_intensity: 0.08,
-                volumetric_fog: true,
+                volumetric_fog: false,
                 fog_step_count: 64,
                 view_distance: 1100.0,
                 vsync: true,
                 fps_cap: 0,
                 fov_deg: 50.0,
-                sky_style: SkyStyle::Vanilla,
-                enhanced_water: false,
                 dynamic_lights: DynamicLights::Vanilla,
                 light_threshold: DEFAULT_LIGHT_THRESHOLD,
                 light_intensity: DEFAULT_LIGHT_INTENSITY,
@@ -563,14 +519,12 @@ impl GraphicsSettings {
                 anti_aliasing: aa_default,
                 texture_filtering: TextureFiltering::Aniso4x,
                 bloom_intensity: 0.08,
-                volumetric_fog: true,
+                volumetric_fog: false,
                 fog_step_count: 64,
                 view_distance: 6100.0,
                 vsync: true,
                 fps_cap: 0,
                 fov_deg: 50.0,
-                sky_style: SkyStyle::Vanilla,
-                enhanced_water: false,
                 dynamic_lights: DynamicLights::Vanilla,
                 light_threshold: DEFAULT_LIGHT_THRESHOLD,
                 light_intensity: DEFAULT_LIGHT_INTENSITY,
@@ -598,14 +552,12 @@ impl GraphicsSettings {
                 anti_aliasing: AaMode::Msaa8,
                 texture_filtering: TextureFiltering::Aniso8x,
                 bloom_intensity: 0.12,
-                volumetric_fog: true,
+                volumetric_fog: false,
                 fog_step_count: 96,
                 view_distance: 6100.0,
                 vsync: true,
                 fps_cap: 0,
                 fov_deg: 50.0,
-                sky_style: SkyStyle::Vanilla,
-                enhanced_water: false,
                 dynamic_lights: DynamicLights::Vanilla,
                 light_threshold: DEFAULT_LIGHT_THRESHOLD,
                 light_intensity: DEFAULT_LIGHT_INTENSITY,
@@ -662,15 +614,6 @@ impl GraphicsSettings {
             },
             GraphicsField::Fov => format!("{:.0}°", self.fov_deg),
 
-            GraphicsField::SkyStyle => self.sky_style().label().to_string(),
-
-            GraphicsField::WaterStyle => if self.enhanced_water {
-                "Enhanced"
-            } else {
-                "Vanilla"
-            }
-            .into(),
-
             GraphicsField::DynamicLights => {
                 if self.dynamic_lights == DynamicLights::Enhanced && !self.lights_fine_is_default()
                 {
@@ -705,10 +648,6 @@ impl GraphicsSettings {
     pub fn cycle(&mut self, field: GraphicsField, delta: i32) {
         match field {
             GraphicsField::Preset => {
-                // Sky style is orthogonal to the quality tier, so carry it
-                // across a preset change.
-                let sky = self.sky_style;
-                let water = self.enhanced_water;
                 let lights = self.dynamic_lights;
                 let (lt, li, lr, lf) = (
                     self.light_threshold,
@@ -724,8 +663,6 @@ impl GraphicsSettings {
                 let next =
                     cycle_slot(self.preset, PRESET_CYCLE, delta).unwrap_or(QualityPreset::High);
                 *self = Self::for_preset(next);
-                self.sky_style = sky;
-                self.enhanced_water = water;
                 self.dynamic_lights = lights;
                 self.light_threshold = lt;
                 self.light_intensity = li;
@@ -789,15 +726,6 @@ impl GraphicsSettings {
                 self.fov_deg = cycle_slot_f32(self.fov_deg, FOV_SLOTS, delta);
                 self.preset = QualityPreset::Custom;
             }
-            GraphicsField::SkyStyle => {
-                self.sky_style = match self.sky_style {
-                    SkyStyle::Enhanced => SkyStyle::Vanilla,
-                    SkyStyle::Vanilla => SkyStyle::Enhanced,
-                };
-            }
-            GraphicsField::WaterStyle => {
-                self.enhanced_water = !self.enhanced_water;
-            }
             GraphicsField::DynamicLights => {
                 self.dynamic_lights = cycle_slot(self.dynamic_lights, DYNAMIC_LIGHTS_CYCLE, delta)
                     .unwrap_or(DynamicLights::Vanilla);
@@ -859,23 +787,10 @@ impl GraphicsSettings {
         *self = Self::for_preset(QualityPreset::High);
     }
 
-    pub fn sky_style(&self) -> SkyStyle {
-        self.sky_style
-    }
-
-    // Retail outputs colour directly with no filmic tonemap, so Vanilla uses None for
-    // FFXI's punchy/saturated palette; the filmic TonyMcMapface desaturated and
-    // flattened the authored colours. Enhanced keeps it for its realistic HDR look.
+    // Retail outputs colour directly with no filmic tonemap; a filmic curve desaturates
+    // and flattens the authored palette.
     pub fn tonemapping(&self) -> Tonemapping {
-        if self.sky_style == SkyStyle::Vanilla {
-            Tonemapping::None
-        } else {
-            Tonemapping::TonyMcMapface
-        }
-    }
-
-    pub fn sky_embellishments_enabled(&self) -> bool {
-        self.sky_style == SkyStyle::Enhanced
+        Tonemapping::None
     }
 
     fn lights_fine_is_default(&self) -> bool {
@@ -994,8 +909,6 @@ pub const GRAPHICS_FIELDS: &[GraphicsField] = &[
     GraphicsField::VSync,
     GraphicsField::FrameRateCap,
     GraphicsField::Fov,
-    GraphicsField::SkyStyle,
-    GraphicsField::WaterStyle,
     GraphicsField::DynamicLights,
     GraphicsField::LightThreshold,
     GraphicsField::LightIntensity,
@@ -1216,16 +1129,6 @@ pub fn apply_vsync_system(
     }
 }
 
-pub fn apply_sky_realism_system(
-    settings: Res<GraphicsSettings>,
-    mut sky: ResMut<crate::sky_realism::SkyRealism>,
-) {
-    let want = settings.sky_style.sky_realism();
-    if *sky != want {
-        *sky = want;
-    }
-}
-
 pub fn apply_tonemapping_system(
     settings: Res<GraphicsSettings>,
     mut q_cam: Query<&mut Tonemapping, With<OperatorCamera>>,
@@ -1440,9 +1343,10 @@ mod tests {
         assert_eq!(s.preset, QualityPreset::Custom);
 
         let mut s = GraphicsSettings::default();
+        assert!(!s.volumetric_fog, "no retail light shafts at any tier");
         s.cycle(GraphicsField::VolumetricFog, 1);
         assert_eq!(s.preset, QualityPreset::Custom);
-        assert!(!s.volumetric_fog, "toggled off");
+        assert!(s.volumetric_fog, "toggled on");
     }
 
     #[test]
@@ -1457,48 +1361,24 @@ mod tests {
     }
 
     #[test]
-    fn sky_style_toggles_two_modes() {
-        let mut s = GraphicsSettings::default();
-        // Vanilla is the retail-faithful default (painterly sun flare, no
-        // embellishments); Enhanced is the opt-in realism polish.
-        assert_eq!(s.sky_style(), SkyStyle::Vanilla);
-        assert!(!s.sky_embellishments_enabled());
-        s.cycle(GraphicsField::SkyStyle, 1);
-        assert_eq!(s.sky_style(), SkyStyle::Enhanced);
-        assert!(s.sky_embellishments_enabled());
-        assert_eq!(s.preset, QualityPreset::High, "style must not flip preset");
-        // Cycling in either direction just flips the two modes.
-        s.cycle(GraphicsField::SkyStyle, -1);
-        assert_eq!(s.sky_style(), SkyStyle::Vanilla);
-        assert!(
-            !s.sky_embellishments_enabled(),
-            "Vanilla is retail-faithful, no embellishments"
-        );
+    fn sky_and_water_have_no_style_fork() {
+        // The Enhanced sky/water variants were removed: the retail-faithful path is
+        // the only path, so no field may reintroduce a user-selectable fork.
+        assert!(!GRAPHICS_FIELDS
+            .iter()
+            .any(|f| f.label().contains("Sky") || f.label().contains("Water")));
+        assert_eq!(GraphicsSettings::default().tonemapping(), Tonemapping::None);
     }
 
     #[test]
-    fn embellishments_off_only_for_vanilla() {
-        let mut s = GraphicsSettings::default();
-        // Default is Vanilla → embellishments off.
-        assert_eq!(s.sky_style(), SkyStyle::Vanilla);
-        assert!(!s.sky_embellishments_enabled());
-        s.cycle(GraphicsField::SkyStyle, 1);
-        assert_eq!(s.sky_style(), SkyStyle::Enhanced);
-        assert!(s.sky_embellishments_enabled());
-    }
-
-    #[test]
-    fn water_style_toggles_and_is_orthogonal_to_preset() {
-        let mut s = GraphicsSettings::default();
-        assert!(!s.enhanced_water, "vanilla plane by default");
-        assert_eq!(s.value_label(GraphicsField::WaterStyle), "Vanilla");
-        s.cycle(GraphicsField::WaterStyle, 1);
-        assert!(s.enhanced_water);
-        assert_eq!(s.value_label(GraphicsField::WaterStyle), "Enhanced");
-        assert_eq!(s.preset, QualityPreset::High, "water style ⟂ quality tier");
-        // Orthogonal/sticky: a preset change carries the choice across.
-        s.cycle(GraphicsField::Preset, 1);
-        assert!(s.enhanced_water, "water style survives a preset change");
+    fn settings_saved_before_the_sky_water_removal_still_load() {
+        // GraphicsSettings has no deny_unknown_fields, so a user's existing
+        // graphics.json keeps loading after a field is dropped. Pin that.
+        let current = serde_json::to_string(&GraphicsSettings::default()).unwrap();
+        let legacy = current.replacen('{', r#"{"sky_style":"Enhanced","enhanced_water":true,"#, 1);
+        let s: GraphicsSettings =
+            serde_json::from_str(&legacy).expect("legacy graphics.json loads");
+        assert_eq!(s, GraphicsSettings::default());
     }
 
     #[test]
@@ -1544,15 +1424,6 @@ mod tests {
     }
 
     #[test]
-    fn sky_style_maps_to_realism() {
-        use crate::sky_realism::SkyRealism;
-        assert_eq!(SkyStyle::Vanilla.sky_realism(), SkyRealism::retail());
-        assert_eq!(SkyStyle::Enhanced.sky_realism(), SkyRealism::enhanced());
-        assert!(!SkyRealism::retail().earthshine);
-        assert!(SkyRealism::enhanced().earthshine);
-    }
-
-    #[test]
     fn fps_cap_cycles_slots_and_stays_preset_orthogonal() {
         let mut s = GraphicsSettings::default();
         let tier = s.preset;
@@ -1577,19 +1448,6 @@ mod tests {
         assert_eq!(s.preset, tier, "vsync is preset-orthogonal");
         s.cycle(GraphicsField::Preset, 1);
         assert!(!s.vsync, "preset cycle kept vsync off");
-    }
-
-    #[test]
-    fn preset_cycle_preserves_sky_style() {
-        let mut s = GraphicsSettings::default();
-        s.cycle(GraphicsField::SkyStyle, 1); // Vanilla -> Enhanced
-        assert_eq!(s.sky_style(), SkyStyle::Enhanced);
-        s.cycle(GraphicsField::Preset, 1);
-        assert_eq!(
-            s.sky_style(),
-            SkyStyle::Enhanced,
-            "preset cycle kept the style"
-        );
     }
 
     #[test]
@@ -1775,17 +1633,11 @@ mod tests {
     }
 
     #[test]
-    fn depth_of_field_flips_tier_sky_style_does_not() {
+    fn depth_of_field_flips_the_quality_tier() {
         let mut s = GraphicsSettings::default();
         s.cycle(GraphicsField::DepthOfField, 1);
         assert!(s.depth_of_field);
         assert_eq!(s.preset, QualityPreset::Custom, "DoF is a quality knob");
-
-        // Toggling Sky Style is orthogonal to the quality tier.
-        let mut s = GraphicsSettings::default();
-        s.cycle(GraphicsField::SkyStyle, 1); // Vanilla -> Enhanced
-        assert_eq!(s.sky_style(), SkyStyle::Enhanced);
-        assert_eq!(s.preset, QualityPreset::High, "sky style ⟂ quality tier");
     }
 
     #[test]
@@ -1814,22 +1666,15 @@ mod tests {
     }
 
     #[test]
-    fn preset_cycle_resets_dof_keeps_sky_style() {
+    fn preset_cycle_resets_dof_to_the_tier_default() {
         let mut s = GraphicsSettings::default();
         s.cycle(GraphicsField::DepthOfField, 1); // on -> Custom
-        s.cycle(GraphicsField::SkyStyle, 1); // Vanilla -> Enhanced
-        assert_eq!(s.sky_style(), SkyStyle::Enhanced);
 
         s.cycle(GraphicsField::Preset, 1); // Custom -> Medium
         assert_eq!(s.preset, QualityPreset::Medium);
         assert!(
             !s.depth_of_field,
             "preset cycle reset DoF to the tier default"
-        );
-        assert_eq!(
-            s.sky_style(),
-            SkyStyle::Enhanced,
-            "preset cycle kept the sky style"
         );
     }
 
@@ -1910,7 +1755,6 @@ mod tests {
     fn effect_fields_survive_json_roundtrip() {
         let s = GraphicsSettings {
             depth_of_field: true,
-            sky_style: SkyStyle::Vanilla,
             ..Default::default()
         };
         let json = serde_json::to_string(&s).unwrap();

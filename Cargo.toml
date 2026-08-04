@@ -12,10 +12,6 @@ default-members = ["ffxi-proto", "ffxi-client", "ffxi-mcp", "ffxi-nav", "ffxi-na
 # Deterministic/Include/Deterministic.h for the patch comment.
 [patch.crates-io]
 recastnavigation-rs = { path = "vendor/recastnavigation-rs" }
-# Bevy 0.19 port not yet published on crates.io — pinned to the head of the
-# upstream migration PR Neopallium/bevy_water#45. crates.io tops out at 0.18.1
-# (bevy ^0.18). Drop when a 0.19-series release lands (tracked in kuluu-u11r).
-bevy_water = { git = "https://github.com/gameartel/bevy_water", rev = "0da726338576cca487e1642d2403442573e2c276" }
 # Vendored copy of bevy_pbr 0.19.0 with one addition: a RenderDiagnosticsPlugin
 # pass_span around each shadow render pass (src/render/light.rs, grep "KULUU
 # PATCH"). Upstream records GPU timing for the main 3D passes but not shadow

@@ -313,20 +313,26 @@ impl ActionAssets {
 
 const MAX_SUBROUTINE_DEPTH: usize = 6;
 
+// Knuth's MMIX LCG. Every DAT-driven choice the format leaves unauthored (random routine
+// branches, particle spawn spread, sound-emitter jitter) advances this same recurrence, so the
+// pair lives here once rather than being retyped per consumer.
+pub const LCG_MULTIPLIER: u64 = 6364136223846793005;
+pub const LCG_INCREMENT: u64 = 1442695040888963407;
+
+pub fn lcg_next(state: u64) -> u64 {
+    state
+        .wrapping_mul(LCG_MULTIPLIER)
+        .wrapping_add(LCG_INCREMENT)
+}
+
 // research/xim EffectRoutineParser.kt:275-285 — a random block runs exactly one of its children
-// per activation, and which one is not authored in the DAT. A process-local LCG (the same shape
-// as weather_fx::lcg_next) keeps the choice varying without pulling in an rng dependency.
+// per activation, and which one is not authored in the DAT.
 static RANDOM_PICK_STATE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 fn next_random_pick(len: usize) -> usize {
     use std::sync::atomic::Ordering;
     let next = RANDOM_PICK_STATE
-        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |s| {
-            Some(
-                s.wrapping_mul(6364136223846793005)
-                    .wrapping_add(1442695040888963407),
-            )
-        })
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |s| Some(lcg_next(s)))
         .unwrap_or(1);
     if len == 0 {
         0
@@ -410,7 +416,10 @@ pub fn assets_holding<'a>(
 
 // A routine and the generators it names share a chunk directory, and those names are only unique
 // within it, so the walk carries the enclosing directory alongside each chunk.
-fn walk_with_dirs(bytes: &[u8], visit: &mut dyn FnMut([u8; 4], &ffxi_dat::chunk::Chunk<'_>)) {
+fn walk_with_dirs(
+    node: &ffxi_dat::chunk::ChunkNode<'_>,
+    visit: &mut dyn FnMut([u8; 4], &ffxi_dat::chunk::Chunk<'_>),
+) {
     fn rec<'a>(
         node: &ffxi_dat::chunk::ChunkNode<'a>,
         dir: [u8; 4],
@@ -426,17 +435,21 @@ fn walk_with_dirs(bytes: &[u8], visit: &mut dyn FnMut([u8; 4], &ffxi_dat::chunk:
             rec(child, dir, visit);
         }
     }
-    rec(
-        &ffxi_dat::chunk::walk_tree(bytes),
-        ffxi_dat::scheduler::NO_LOCAL_DIR,
-        visit,
-    );
+    rec(node, ffxi_dat::scheduler::NO_LOCAL_DIR, visit);
 }
 
 pub fn parse_action_bytes(bytes: &[u8]) -> (Vec<Scheduler>, ActionAssets) {
+    parse_action_tree(&ffxi_dat::chunk::walk_tree(bytes))
+}
+
+// Chunk ids are only unique within a directory, and a zone DAT repeats them across weat/ subtrees
+// (zone 123 carries `clod` and `hm01..hm15` under both weat/rain and weat/squl), so a consumer
+// that owns one subtree must build its assets from that subtree alone or it binds the wrong
+// mesh/texture/keyframe.
+pub fn parse_action_tree(node: &ffxi_dat::chunk::ChunkNode<'_>) -> (Vec<Scheduler>, ActionAssets) {
     let mut schedulers = Vec::new();
     let mut assets = ActionAssets::default();
-    walk_with_dirs(bytes, &mut |dir, c| {
+    walk_with_dirs(node, &mut |dir, c| {
         let Some(kind) = ChunkKind::from_u8(c.kind) else {
             return;
         };

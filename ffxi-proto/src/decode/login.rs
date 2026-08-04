@@ -200,9 +200,7 @@ impl ServerLogin {
                 ),
             });
         let weather = (body.len() >= Self::WEATHER_OFFSET_TIME_OFFSET + 4).then(|| {
-            let u16_at = |off: usize| {
-                u16::from_le_bytes(body[off..off + 2].try_into().unwrap())
-            };
+            let u16_at = |off: usize| u16::from_le_bytes(body[off..off + 2].try_into().unwrap());
             ZoneInWeather {
                 weather_number: u16_at(Self::WEATHER_NUMBER_OFFSET),
                 weather_number2: u16_at(Self::WEATHER_NUMBER2_OFFSET),
@@ -267,7 +265,10 @@ mod server_login_tests {
         assert_eq!(L::WEATHER_NUMBER_OFFSET, L::EVENT_MODE_OFFSET + 2);
         assert_eq!(L::WEATHER_NUMBER2_OFFSET, L::WEATHER_NUMBER_OFFSET + 2);
         // WeatherTime + WeatherTime2 are the two u32s we skip.
-        assert_eq!(L::WEATHER_OFFSET_TIME_OFFSET, L::WEATHER_NUMBER2_OFFSET + 2 + 4 + 4);
+        assert_eq!(
+            L::WEATHER_OFFSET_TIME_OFFSET,
+            L::WEATHER_NUMBER2_OFFSET + 2 + 4 + 4
+        );
         // ShipStart u32, ShipEnd u16, IsMonstrosity u16, then LoginState.
         assert_eq!(
             L::WEATHER_OFFSET_TIME_OFFSET + 4 + 4 + 2 + 2,

@@ -80,6 +80,8 @@ pub fn state_to_snapshot(s: &SessionState) -> wire::SceneSnapshot {
 
         self_server_status: s.self_server_status,
 
+        self_mount: mount_to_wire(s.self_server_status, s.self_mount_id),
+
         self_casting: s.self_casting.as_ref().map(|c| wire::SelfCasting {
             name: c.name.clone(),
             elapsed_ms: c.elapsed_ms,
@@ -442,6 +444,30 @@ pub fn vec3_to_wire(v: Vec3) -> wire::Vec3 {
     }
 }
 
+// vendor/server/src/map/entities/baseentity.h:111-152 (MOUNTTYPE). Noble Chocobo
+// is a chocobo despite sitting at the far end of the enum — the server routes it
+// through ANIMATION_CHOCOBO like the plain one (charentity.cpp:3253-3256).
+const MOUNT_CHOCOBO: u8 = 0;
+const MOUNT_NOBLE_CHOCOBO: u8 = 34;
+
+/// The mount an entity is riding, from the pair of fields that only mean
+/// something together: the animation byte says *whether*, the mount index says
+/// *which*, and the index keeps its last value after a dismount
+/// (vendor/server/src/map/packets/char_update.cpp:425-427).
+pub fn mount_to_wire(animation: u8, mount_id: u8) -> Option<wire::Mount> {
+    if !ffxi_proto::decode::animation::is_mounted(animation) {
+        return None;
+    }
+    Some(match mount_id {
+        MOUNT_CHOCOBO | MOUNT_NOBLE_CHOCOBO => wire::Mount::Chocobo {
+            // The colour lives in CustomProperties, which 0x037 has no room for
+            // and which only a Personal Chocobo ever sets; a rented one is yellow.
+            colour: wire::ChocoboColour::default(),
+        },
+        mount_id => wire::Mount::Other { mount_id },
+    })
+}
+
 pub fn entity_to_wire(e: &Entity) -> wire::Entity {
     wire::Entity {
         id: e.id,
@@ -459,6 +485,10 @@ pub fn entity_to_wire(e: &Entity) -> wire::Entity {
         look: e.look.map(look_to_wire),
         animation: e.npc_state.map(|s| s.animation).unwrap_or_default(),
         animationsub: e.npc_state.map(|s| s.animationsub).unwrap_or_default(),
+        mount: mount_to_wire(
+            e.npc_state.map(|s| s.animation).unwrap_or_default(),
+            e.mount_id.unwrap_or_default(),
+        ),
         status: e.status,
         char_flags: e.char_flags.map(char_flags_to_wire).unwrap_or_default(),
     }
@@ -661,6 +691,31 @@ pub fn reconnect_to_wire(r: &ReconnectInfo) -> wire::ReconnectInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mount_is_read_from_the_animation_byte_not_the_stale_mount_index() {
+        use ffxi_proto::decode::animation;
+
+        // LSB leaves Flags6.MountIndex set after a dismount, so the index alone
+        // would keep a phantom mount under the player forever.
+        assert_eq!(mount_to_wire(animation::NONE, MOUNT_NOBLE_CHOCOBO), None);
+        assert_eq!(mount_to_wire(animation::ATTACK, 17), None);
+
+        // Both chocobo ids route to the chocobo model family; everything else
+        // carries its MOUNTTYPE through untouched.
+        assert!(matches!(
+            mount_to_wire(animation::CHOCOBO, MOUNT_CHOCOBO),
+            Some(wire::Mount::Chocobo { .. })
+        ));
+        assert!(matches!(
+            mount_to_wire(animation::CHOCOBO, MOUNT_NOBLE_CHOCOBO),
+            Some(wire::Mount::Chocobo { .. })
+        ));
+        assert_eq!(
+            mount_to_wire(animation::MOUNT, 17),
+            Some(wire::Mount::Other { mount_id: 17 })
+        );
+    }
 
     #[test]
     fn action_started_carries_target_id() {

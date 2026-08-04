@@ -20,6 +20,11 @@ pub struct CharStatus {
     /// Movement speed, 0 while bound
     /// (vendor/server/src/map/packets/char_status.cpp `Flags1.Speed`).
     pub speed: u16,
+    /// `MOUNTTYPE` of the mount being ridden, 0 when not mounted *and* when the
+    /// mount is a plain chocobo — both are `MOUNT_CHOCOBO`. Read `server_status`
+    /// through [`animation::is_mounted`] to tell those apart.
+    /// vendor/server/src/map/packets/char_status.cpp:275-279 (`packet->mount_id`).
+    pub mount_id: u8,
 }
 
 impl CharStatus {
@@ -30,6 +35,10 @@ impl CharStatus {
     pub(crate) const DEAD_COUNTER1_OFFSET: usize = 0x38;
     pub(crate) const DEAD_COUNTER2_OFFSET: usize = 0x3C;
     pub(crate) const FISHING_TIMER_OFFSET: usize = 0x46;
+    /// `field_57`, the byte the disassembly's own struct puts right before
+    /// `Field58Flags` (research/XIClient .../Game/Net/Packets/s2c/0x037.h
+    /// static_asserts), which LSB fills from the mount effect's power.
+    pub(crate) const MOUNT_ID_OFFSET: usize = 0x57;
     pub(crate) const SPEED_MASK: u16 = 0x0FFF;
     pub(crate) const MIN_LEN: usize = Self::DEAD_COUNTER2_OFFSET + 4;
 
@@ -50,6 +59,7 @@ impl CharStatus {
             fishing_timer: body.get(Self::FISHING_TIMER_OFFSET).copied().unwrap_or(0),
             speed: u16::from_le_bytes([body[Self::SPEED_OFFSET], body[Self::SPEED_OFFSET + 1]])
                 & Self::SPEED_MASK,
+            mount_id: body.get(Self::MOUNT_ID_OFFSET).copied().unwrap_or(0),
         })
     }
 
@@ -363,6 +373,7 @@ mod char_status_tests {
                 server_status: 0,
                 fishing_timer: 0,
                 speed: 0,
+                mount_id: 0,
             }
             .seconds_until_homepoint()
         };
@@ -397,6 +408,35 @@ mod char_status_tests {
         body[CharStatus::SPEED_OFFSET..CharStatus::SPEED_OFFSET + 2]
             .copy_from_slice(&0xA078u16.to_le_bytes());
         assert_eq!(CharStatus::decode(&body).unwrap().speed, 0x078);
+    }
+
+    #[test]
+    fn char_status_decodes_mount_id_and_defaults_when_truncated() {
+        let mut body = vec![0u8; CharStatus::MOUNT_ID_OFFSET + 1];
+        body[CharStatus::SERVER_STATUS_OFFSET] = animation::MOUNT;
+        body[CharStatus::MOUNT_ID_OFFSET] = 17; // MOUNT_HIPPOGRYPH
+        let cs = CharStatus::decode(&body).unwrap();
+        assert_eq!(cs.mount_id, 17);
+        assert!(animation::is_mounted(cs.server_status));
+
+        // The mount byte sits past every field LSB guarantees, so a short body
+        // must read 0 rather than panic.
+        let short = vec![0u8; CharStatus::MIN_LEN];
+        assert_eq!(CharStatus::decode(&short).unwrap().mount_id, 0);
+    }
+
+    #[test]
+    fn char_status_chocobo_is_mount_id_zero_and_only_animation_tells_it_apart() {
+        let mut body = vec![0u8; CharStatus::MOUNT_ID_OFFSET + 1];
+        assert_eq!(CharStatus::decode(&body).unwrap().mount_id, 0);
+        assert!(!animation::is_mounted(
+            CharStatus::decode(&body).unwrap().server_status
+        ));
+
+        body[CharStatus::SERVER_STATUS_OFFSET] = animation::CHOCOBO;
+        let cs = CharStatus::decode(&body).unwrap();
+        assert_eq!(cs.mount_id, 0, "MOUNT_CHOCOBO shares the unmounted value");
+        assert!(animation::is_mounted(cs.server_status));
     }
 
     #[test]

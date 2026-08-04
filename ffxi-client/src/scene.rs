@@ -264,6 +264,7 @@ mod tests {
                 npc_state: None,
                 status: 0,
                 char_flags: Default::default(),
+                mount_id: None,
             },
             pos_present: true,
         });
@@ -290,6 +291,7 @@ mod tests {
                 npc_state: None,
                 status: 0,
                 char_flags: Default::default(),
+                mount_id: None,
             },
             pos_present: true,
         });
@@ -312,6 +314,7 @@ mod tests {
                 npc_state: None,
                 status: 0,
                 char_flags: Default::default(),
+                mount_id: None,
             },
             pos_present: true,
         });
@@ -334,6 +337,7 @@ mod tests {
                 npc_state: None,
                 status: 0,
                 char_flags: Default::default(),
+                mount_id: None,
             },
             pos_present: true,
         });

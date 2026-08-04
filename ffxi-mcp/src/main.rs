@@ -1356,6 +1356,7 @@ mod tests {
             npc_state: None,
             status: 0,
             char_flags: Default::default(),
+            mount_id: None,
         });
 
         for i in 0..35u32 {
@@ -1380,6 +1381,7 @@ mod tests {
                 npc_state: None,
                 status: 0,
                 char_flags: Default::default(),
+                mount_id: None,
             });
         }
         let v = entities_view(&s);
@@ -1412,6 +1414,7 @@ mod tests {
             npc_state: None,
             status: 0,
             char_flags: Default::default(),
+            mount_id: None,
         });
         s.entities.push(Entity {
             id: 100,
@@ -1434,6 +1437,7 @@ mod tests {
             npc_state: None,
             status: 0,
             char_flags: Default::default(),
+            mount_id: None,
         });
         let v = entities_view(&s);
         assert_eq!(v["entities"][0]["claimed_by"], 4242);

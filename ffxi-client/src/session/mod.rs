@@ -750,6 +750,7 @@ fn handle_sub_packet(
                             npc_state: None,
                             char_flags: None,
                             status: 0,
+                            mount_id: None,
                         },
 
                         pos_present: true,
@@ -947,6 +948,12 @@ fn handle_sub_packet(
                         npc_state,
                         char_flags,
                         status,
+                        // Same General-block gate as npc_state: Flags6 only rides
+                        // an update that carries the block, and the field is stale
+                        // once it does not.
+                        mount_id: (send_flag & UPDATE_HP != 0)
+                            .then(|| decode::PosHead::mount_index(sub.data))
+                            .flatten(),
                     },
                     pos_present,
                 });
@@ -1121,6 +1128,7 @@ fn handle_sub_packet(
                     });
                     let _ = event_tx.send(AgentEvent::SelfServerStatus {
                         status: cs.server_status,
+                        mount_id: cs.mount_id,
                     });
                 }
             }
@@ -5535,6 +5543,7 @@ fn mh_door_entity(model: u16) -> Entity {
         npc_state: None,
         char_flags: None,
         status: 0,
+        mount_id: None,
     }
 }
 

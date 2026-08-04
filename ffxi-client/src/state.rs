@@ -192,6 +192,12 @@ pub struct Entity {
     /// Authoritative for target eligibility; see `ffxi_viewer_wire::Entity`.
     #[serde(default)]
     pub status: u8,
+
+    /// `Flags6.MountIndex` of the last General-block update. Says which mount,
+    /// never whether one is being ridden — that is `npc_state.animation`.
+    /// Preserved across pos-only updates like `look`, for the same reason.
+    #[serde(skip)]
+    pub mount_id: Option<u8>,
 }
 
 /// Which retail colour a run of a chat line takes. Retail renders some
@@ -493,6 +499,11 @@ pub struct SessionState {
     /// players, so this is the only authority for our own rest state.
     #[serde(default)]
     pub self_server_status: u8,
+
+    /// 0x037's `mount_id`, paired with `self_server_status`: which mount we are on,
+    /// while that byte says we are on one at all.
+    #[serde(default)]
+    pub self_mount_id: u8,
 
     /// Projection of the reactor's in-flight cast/action for the Enhanced cast
     /// bar. The reactor's `CastInFlight` is the authoritative owner; this is the
@@ -1204,6 +1215,7 @@ impl SessionState {
                     let preserved_look = entity.look.or(existing.look);
                     let preserved_npc_state = entity.npc_state.or(existing.npc_state);
                     let preserved_char_flags = entity.char_flags.or(existing.char_flags);
+                    let preserved_mount_id = entity.mount_id.or(existing.mount_id);
 
                     let (
                         preserved_pos,
@@ -1235,6 +1247,7 @@ impl SessionState {
                         look: preserved_look,
                         npc_state: preserved_npc_state,
                         char_flags: preserved_char_flags,
+                        mount_id: preserved_mount_id,
                         pos: preserved_pos,
                         heading: preserved_heading,
                         speed: preserved_speed,
@@ -1816,9 +1829,10 @@ impl SessionState {
                 self.shop = None;
                 changed
             }
-            AgentEvent::SelfServerStatus { status } => {
-                let changed = self.self_server_status != *status;
+            AgentEvent::SelfServerStatus { status, mount_id } => {
+                let changed = self.self_server_status != *status || self.self_mount_id != *mount_id;
                 self.self_server_status = *status;
+                self.self_mount_id = *mount_id;
                 changed
             }
             // Machine inputs (consumed by the reactor, not the rendered projection).
@@ -2245,6 +2259,10 @@ pub enum AgentEvent {
     /// renderer reconciles its optimistic local stance against it.
     SelfServerStatus {
         status: u8,
+        /// 0x037's `mount_id` — which mount, not whether one is being ridden.
+        /// It rides this event because both fall out of the same packet and the
+        /// pair is only meaningful read together.
+        mount_id: u8,
     },
 
     /// The reactor fishing machine's view phase (0..=6, see `ffxi_actor`'s `fishing_clip`),
@@ -3530,6 +3548,7 @@ mod tests {
                 npc_state: None,
                 status: 0,
                 char_flags: Default::default(),
+                mount_id: None,
             },
             pos_present: true,
         });
@@ -3557,6 +3576,7 @@ mod tests {
                 npc_state: None,
                 status: 0,
                 char_flags: Default::default(),
+                mount_id: None,
             },
             pos_present: true,
         });
@@ -3644,6 +3664,7 @@ mod tests {
             npc_state: None,
             status: 0,
             char_flags: Default::default(),
+            mount_id: None,
         }
     }
 
@@ -4073,6 +4094,7 @@ mod tests {
                 npc_state: None,
                 status: 0,
                 char_flags: Default::default(),
+                mount_id: None,
             },
             pos_present: true,
         });
@@ -4501,6 +4523,7 @@ mod tests {
             npc_state: None,
             status: 0,
             char_flags: Default::default(),
+            mount_id: None,
         };
 
         // First upsert inserts.
@@ -4568,6 +4591,7 @@ mod tests {
                 npc_state: None,
                 status: 0,
                 char_flags: Default::default(),
+                mount_id: None,
             },
             pos_present: true,
         });

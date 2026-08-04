@@ -105,6 +105,14 @@ pub enum DynamicMenuAction {
     /// through the same sub-target cursor as a weapon skill.
     RangedAttack,
 
+    /// Get off the mount (c2s action 0x12).
+    /// vendor/server/src/map/packets/c2s/0x01a_action.h:67.
+    Dismount,
+
+    /// Dig with the chocobo for a buried item (c2s action 0x11). Self-targeted
+    /// like Dismount. vendor/server/src/map/packets/c2s/0x01a_action.h:66.
+    ChocoboDig,
+
     UseItem {
         container: u8,
         index: u8,
@@ -969,6 +977,20 @@ pub fn ability_group_rows(
             label: "Ranged Attack".to_string(),
             action: DynamicMenuAction::RangedAttack,
         }],
+        // Retail's mounted commands are exactly these two — no other 0x01A
+        // action id is gated on being mounted
+        // (vendor/server/src/map/packets/c2s/0x01a_action.h:52-76). They only
+        // exist while riding, which is also when this group has anything in it.
+        G::Mount if snap.self_mount.is_some() => vec![
+            DynamicMenuRow {
+                label: "Dismount".to_string(),
+                action: DynamicMenuAction::Dismount,
+            },
+            DynamicMenuRow {
+                label: "Dig".to_string(),
+                action: DynamicMenuAction::ChocoboDig,
+            },
+        ],
         G::Mount => Vec::new(),
     };
     rows.sort_by(|a, b| a.label.cmp(&b.label));
@@ -979,7 +1001,7 @@ pub fn ability_group_empty_hint(group: crate::hud::action_model::AbilityGroup) -
     use crate::hud::action_model::AbilityGroup as G;
     match group {
         G::RangedAttack => "You cannot use that command here.",
-        G::Mount => "No mounts available.",
+        G::Mount => "You must be mounted to use that command.",
         _ => "No abilities available.",
     }
 }

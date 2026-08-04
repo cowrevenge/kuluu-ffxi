@@ -77,6 +77,24 @@ impl PosHead {
         ((self.flags0 >> Self::FACETARGET_SHIFT) & Self::FACETARGET_MASK) as u16
     }
 
+    // `Flags6.MountIndex` — the MOUNTTYPE this character last mounted. LSB's own
+    // comment warns it stays set after dismounting
+    // (vendor/server/src/map/packets/char_update.cpp:425-427), so it is only
+    // meaningful once `server_status` says the character is mounted. Flags6 sits
+    // past `PosHead`, inside the `SendFlg.General` block, so a position-only
+    // update does not carry it.
+    const FLAGS6_OFFSET: usize = 64;
+    const MOUNT_INDEX_SHIFT: u32 = 4;
+    const MOUNT_INDEX_MASK: u32 = 0xFF;
+
+    /// The `MOUNTTYPE` in a 0x0D `CHAR_PC`, or `None` when the packet stops short
+    /// of `Flags6`. `MOUNT_CHOCOBO` is 0, which is also the not-mounted value.
+    pub fn mount_index(body: &[u8]) -> Option<u8> {
+        let b = body.get(Self::FLAGS6_OFFSET..Self::FLAGS6_OFFSET + 4)?;
+        let flags6 = u32::from_le_bytes([b[0], b[1], b[2], b[3]]);
+        Some(((flags6 >> Self::MOUNT_INDEX_SHIFT) & Self::MOUNT_INDEX_MASK) as u8)
+    }
+
     pub fn decode_char_npc(body: &[u8]) -> Result<(Self, u32), DecodeError> {
         let head = Self::decode(body)?;
         Ok((head, head.bt_target_id))
@@ -985,6 +1003,21 @@ mod pos_head_tests {
         assert_eq!(h.speed, 25);
         assert_eq!(h.speed_base, 25);
         assert_eq!(h.hpp, 100);
+    }
+
+    #[test]
+    fn char_pc_mount_index_reads_flags6_and_needs_the_general_block() {
+        // Flags6.MountIndex is bits 4..11; GateId occupies the low nibble and must
+        // not bleed in (vendor/server/src/map/packets/char_update.cpp:158-162).
+        let mut buf = vec![0u8; PosHead::FLAGS6_OFFSET + 4];
+        let flags6 = (u32::from(34u8) << PosHead::MOUNT_INDEX_SHIFT) | 0x0F;
+        buf[PosHead::FLAGS6_OFFSET..PosHead::FLAGS6_OFFSET + 4]
+            .copy_from_slice(&flags6.to_le_bytes());
+        assert_eq!(PosHead::mount_index(&buf), Some(34));
+
+        // A position-only update stops before Flags6.
+        let short = vec![0u8; PosHead::SIZE_WITH_BT_TARGET];
+        assert_eq!(PosHead::mount_index(&short), None);
     }
 
     #[test]

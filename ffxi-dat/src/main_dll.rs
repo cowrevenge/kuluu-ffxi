@@ -13,6 +13,25 @@ const WEAPON_SKILL_HINT: u32 = 0xCB81_CB81;
 const DANCE_SKILL_HINT: u32 = 0xB9E2_B9E2;
 // research/xim MainDll.kt:47 emoteAnimationOffsetHint.
 const EMOTE_HINT: u32 = 0x4827_4827;
+// research/xim MainDll.kt raceConfigLookupTableOffsetHint / actionAnimationFileTableOffsetHint.
+const RACE_CONFIG_HINT: u32 = 0xA01B_A01B;
+const ACTION_ANIM_HINT: u32 = 0xCB96_CB96;
+// research/xim MainDll.kt equipmentLookupTableOffsetHint. Unlike the per-race u16
+// tables the marker is the table's own first `(file_id, count)` pair rather than a
+// repeated word: 0x1BA8 = 7080 is HumeM's face base, and the count's high half is 0.
+const EQUIPMENT_HINT: u32 = 0xA81B_0000;
+
+/// Per-race stride of the equipment lookup table, and the per-slot stride within
+/// one race's block. research/xim resource/table/EquipmentModelTable.kt:47,59.
+const EQUIPMENT_RACE_STRIDE: usize = 0x1B0;
+const EQUIPMENT_SLOT_STRIDE: usize = 0x30;
+/// Each slot row is six `(first_file_id, entry_count)` pairs; a zero file id ends it.
+const EQUIPMENT_SLOT_BANDS: usize = 6;
+
+/// The mount pose/movement clips a rider needs (`chi?`, `{n}un?`, …) live this far
+/// past the race's action-animation base; fishing sits at +0x01 in the same block.
+/// research/xim poc/Model.kt:419-425.
+pub const ACTION_ANIM_MOUNT_OFFSET: u16 = 0x05;
 
 // research/xim ZoneMapTable.kt
 const ZONE_MAP_HINT: u64 = 0x6400_0001_0001_0100;
@@ -43,6 +62,9 @@ pub struct MainDll {
     dance_skill_base: usize,
     emote_base: Option<usize>,
     zone_map_base: Option<usize>,
+    race_config_base: Option<usize>,
+    action_anim_base: Option<usize>,
+    equipment_base: Option<usize>,
 }
 
 impl MainDll {
@@ -62,12 +84,18 @@ impl MainDll {
             })?;
         let emote_base = find_offset(&bytes, EMOTE_HINT);
         let zone_map_base = find_offset_u64(&bytes, ZONE_MAP_HINT);
+        let race_config_base = find_offset(&bytes, RACE_CONFIG_HINT);
+        let action_anim_base = find_offset(&bytes, ACTION_ANIM_HINT);
+        let equipment_base = find_offset(&bytes, EQUIPMENT_HINT);
         Ok(Self {
             bytes,
             weapon_skill_base,
             dance_skill_base,
             emote_base,
             zone_map_base,
+            race_config_base,
+            action_anim_base,
+            equipment_base,
         })
     }
 
@@ -115,9 +143,58 @@ impl MainDll {
         self.read16(self.emote_base? + race_index as usize * 2)
     }
 
+    /// The race's config DAT — skeleton plus the shared idle/walk/run clips. The
+    /// two companion motion DATs sit at fixed offsets past it. `race_index` is the
+    /// look race byte (HumeM=1), which also reaches the non-playable configs the
+    /// look byte never carries: 32..=36 are the ridden chocobo, one per colour
+    /// (research/xim poc/Model.kt:54-58, :91-93).
+    pub fn base_race_config_index(&self, race_index: u8) -> Option<u16> {
+        self.read16(self.race_config_base? + race_index as usize * 2)
+    }
+
+    /// First file of the race's action-animation block; see
+    /// [`ACTION_ANIM_MOUNT_OFFSET`]. research/xim MainDll.kt:124-126.
+    pub fn base_action_animation_index(&self, race_index: u8) -> Option<u16> {
+        self.read16(self.action_anim_base? + race_index as usize * 2)
+    }
+
+    /// Model DAT for one equipment slot of one race. `table_index` is the race's
+    /// *equipment* table row, which is not the race index for the non-playable
+    /// configs (the chocobo's race 32 uses row 12; research/xim poc/Model.kt:54).
+    /// `slot` is the retail slot number — 0 face, 1 head, 2 body, 3 hands,
+    /// 4 legs, 5 feet, 6 main, 7 sub, 8 ranged.
+    ///
+    /// The row is a run of `(first_file_id, entry_count)` bands that partition the
+    /// model id space in order, so a model id is located by walking bands and
+    /// subtracting the counts already passed.
+    /// research/xim resource/table/EquipmentModelTable.kt:16-35,54-70.
+    pub fn equipment_model_index(&self, table_index: u8, slot: u8, model_id: u16) -> Option<u32> {
+        let row = self.equipment_base?
+            + EQUIPMENT_RACE_STRIDE * (table_index.checked_sub(1)? as usize)
+            + EQUIPMENT_SLOT_STRIDE * slot as usize;
+        let mut passed = 0u32;
+        for band in 0..EQUIPMENT_SLOT_BANDS {
+            let first = self.read32(row + band * 8)?;
+            let count = self.read32(row + band * 8 + 4)?;
+            if first == 0 {
+                continue;
+            }
+            if u32::from(model_id) < passed + count {
+                return Some(first + u32::from(model_id) - passed);
+            }
+            passed += count;
+        }
+        None
+    }
+
     fn read16(&self, off: usize) -> Option<u16> {
         let b = self.bytes.get(off..off + 2)?;
         Some(u16::from_le_bytes([b[0], b[1]]))
+    }
+
+    fn read32(&self, off: usize) -> Option<u32> {
+        let b = self.bytes.get(off..off + 4)?;
+        Some(u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
     }
 }
 
@@ -192,26 +269,74 @@ mod tests {
         bytes[base + 2] = 0x34;
         bytes[base + 3] = 0x12;
         let dll = MainDll {
-            bytes,
             weapon_skill_base: base,
             dance_skill_base: base,
             emote_base: Some(base),
-            zone_map_base: None,
+            race_config_base: Some(base),
+            action_anim_base: Some(base),
+            ..blank(bytes)
         };
         assert_eq!(dll.base_weapon_skill_index(1), Some(0x1234));
         assert_eq!(dll.base_emote_index(1), Some(0x1234));
+        assert_eq!(dll.base_race_config_index(1), Some(0x1234));
+        assert_eq!(dll.base_action_animation_index(1), Some(0x1234));
     }
 
     #[test]
     fn missing_emote_marker_yields_none() {
-        let dll = MainDll {
-            bytes: vec![0u8; 4],
+        let dll = blank(vec![0u8; 4]);
+        assert_eq!(dll.base_emote_index(1), None);
+        assert_eq!(dll.base_race_config_index(1), None);
+        assert_eq!(dll.base_action_animation_index(1), None);
+        assert_eq!(dll.equipment_model_index(1, 0, 0), None);
+    }
+
+    /// One equipment slot row: `bands` written as the six `(first, count)` pairs
+    /// the table stores, zero-padded.
+    fn equipment_dll(table_index: u8, slot: u8, bands: &[(u32, u32)]) -> MainDll {
+        let row = EQUIPMENT_RACE_STRIDE * usize::from(table_index - 1)
+            + EQUIPMENT_SLOT_STRIDE * usize::from(slot);
+        let mut bytes = vec![0u8; row + EQUIPMENT_SLOT_STRIDE + EQUIPMENT_RACE_STRIDE];
+        for (i, &(first, count)) in bands.iter().enumerate() {
+            let at = row + i * 8;
+            bytes[at..at + 4].copy_from_slice(&first.to_le_bytes());
+            bytes[at + 4..at + 8].copy_from_slice(&count.to_le_bytes());
+        }
+        MainDll {
+            equipment_base: Some(0),
+            ..blank(bytes)
+        }
+    }
+
+    #[test]
+    fn equipment_bands_partition_the_model_id_space_in_order() {
+        // HumeM head, the first three bands of the retail table.
+        let dll = equipment_dll(1, 1, &[(7112, 256), (63323, 48), (63371, 16)]);
+        assert_eq!(dll.equipment_model_index(1, 1, 0), Some(7112));
+        assert_eq!(dll.equipment_model_index(1, 1, 255), Some(7367));
+        assert_eq!(dll.equipment_model_index(1, 1, 256), Some(63323));
+        assert_eq!(dll.equipment_model_index(1, 1, 303), Some(63370));
+        assert_eq!(dll.equipment_model_index(1, 1, 304), Some(63371));
+        assert_eq!(dll.equipment_model_index(1, 1, 320), None);
+    }
+
+    #[test]
+    fn equipment_zero_band_is_skipped_without_consuming_model_ids() {
+        let dll = equipment_dll(1, 1, &[(7112, 4), (0, 99), (63323, 4)]);
+        assert_eq!(dll.equipment_model_index(1, 1, 4), Some(63323));
+    }
+
+    fn blank(bytes: Vec<u8>) -> MainDll {
+        MainDll {
+            bytes,
             weapon_skill_base: 0,
             dance_skill_base: 0,
             emote_base: None,
             zone_map_base: None,
-        };
-        assert_eq!(dll.base_emote_index(1), None);
+            race_config_base: None,
+            action_anim_base: None,
+            equipment_base: None,
+        }
     }
 
     #[test]
@@ -229,11 +354,8 @@ mod tests {
         bytes[r1 + 5] = 8;
 
         let dll = MainDll {
-            bytes,
-            weapon_skill_base: 0,
-            dance_skill_base: 0,
-            emote_base: None,
             zone_map_base: Some(base),
+            ..blank(bytes)
         };
         let rec = dll.zone_map(100, 0).expect("zone 100 record");
         assert_eq!(rec.size, 512);
@@ -254,11 +376,8 @@ mod tests {
             bytes[at + ZONE_MAP_NEXT_DIVISOR] = 1;
         }
         let dll = MainDll {
-            bytes,
-            weapon_skill_base: 0,
-            dance_skill_base: 0,
-            emote_base: None,
             zone_map_base: Some(0),
+            ..blank(bytes)
         };
 
         assert_eq!(dll.zone_map(238, 0), None, "this zone has no sub-zone 0");

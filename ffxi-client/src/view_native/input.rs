@@ -66,6 +66,27 @@ const STRAFE_CANCEL_MS: u64 = 300;
 
 const SPEED_TO_YPS: f32 = 0.1;
 
+// The server does not send a faster speed to a mounted player — LSB caps its
+// mount speed at map.MOUNT_SPEED/2 = 40, *below* the 50 it sends on foot
+// (vendor/server/src/map/entities/battleentity.cpp:327-331). Retail makes up the
+// difference in the client, doubling the decoded speed while mounted and then
+// clamping: research/XIClient/src/XIClient/source/World/Actor/ControllableActor.cpp
+// :627-637. Taking the packet at face value therefore makes mounting *slower*.
+const MOUNTED_SPEED_MULTIPLIER: f32 = 2.0;
+const MAX_MOVE_SPEED_YPS: f32 = 30.0;
+
+/// Yalms per second for a decoded packet speed. `* 0.1` is retail's own decode
+/// (research/XIClient .../Game/Net/Packets/s2c/0x00D.cpp:108, 0x037.cpp:62).
+fn mounted_move_speed(packet_speed: u8, mounted: bool) -> f32 {
+    let speed = f32::from(packet_speed) * SPEED_TO_YPS;
+    let speed = if mounted {
+        speed * MOUNTED_SPEED_MULTIPLIER
+    } else {
+        speed
+    };
+    speed.min(MAX_MOVE_SPEED_YPS)
+}
+
 const BACKPEDAL_SCALE: f32 = 0.5;
 const STRAFE_SCALE: f32 = 0.75;
 
@@ -843,7 +864,9 @@ pub fn dispatch_movement_system(
         heading = heading_for_yaw(chase.yaw);
     }
 
-    let raw_step = self_pos.speed as f32 * SPEED_TO_YPS * time.delta_secs() * walk_mode.scale();
+    let raw_step = mounted_move_speed(self_pos.speed, state.snapshot.self_mount.is_some())
+        * time.delta_secs()
+        * walk_mode.scale();
 
     let mut turn_dx: f32 = 0.0;
     let mut turn_dy: f32 = 0.0;
@@ -1357,6 +1380,7 @@ mod tests {
             look: None,
             animation: 0,
             animationsub: 0,
+            mount: None,
             status: 0,
             char_flags: Default::default(),
         }
@@ -1410,6 +1434,23 @@ mod tests {
         assert_eq!(r.strafe, 0);
         assert_eq!(r.rotate_dir, 0);
         assert_eq!(r.forward, 0);
+    }
+
+    #[test]
+    fn mounted_speed_doubles_and_clamps_like_retail() {
+        // LSB defaults: 50 on foot, 40 mounted. Without the client-side doubling
+        // the mount would be the slower of the two.
+        assert_eq!(mounted_move_speed(50, false), 5.0);
+        assert_eq!(mounted_move_speed(40, true), 8.0);
+        assert!(mounted_move_speed(40, true) > mounted_move_speed(50, false));
+
+        // ControllableActor.cpp clamps after doubling, so the cap is only ever
+        // reachable mounted (an unmounted u8 tops out at 25.5).
+        assert_eq!(mounted_move_speed(u8::MAX, false), 25.5);
+        assert_eq!(mounted_move_speed(u8::MAX, true), MAX_MOVE_SPEED_YPS);
+
+        // Bound sets speed 0; doubling must not conjure movement.
+        assert_eq!(mounted_move_speed(0, true), 0.0);
     }
 
     #[test]

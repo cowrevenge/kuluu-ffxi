@@ -211,6 +211,7 @@ mod tests {
                 npc_state: None,
                 status: 1,
                 char_flags: Default::default(),
+                mount_id: None,
             },
             Entity {
                 id: 0x1000_0102,
@@ -237,6 +238,7 @@ mod tests {
                 }),
                 status: 1,
                 char_flags: Default::default(),
+                mount_id: None,
             },
         ];
 

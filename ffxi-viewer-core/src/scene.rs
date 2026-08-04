@@ -111,6 +111,22 @@ pub struct TrackedEntities {
     pub by_id: HashMap<u32, Entity>,
 }
 
+/// A ridden mount is a second actor standing where its rider stands, so it needs
+/// an id of its own in the actor pipeline (which is keyed on world id throughout).
+/// LSB unique_no tops out at `(4<<28)|(zone<<12)|targid`
+/// (vendor/server/src/map/zone_entities.cpp), so bit 31 is free to mark the
+/// derived id and the mapping stays reversible.
+pub const MOUNT_ACTOR_ID_BIT: u32 = 0x8000_0000;
+
+pub fn mount_actor_id(rider_id: u32) -> u32 {
+    rider_id | MOUNT_ACTOR_ID_BIT
+}
+
+/// The rider a [`mount_actor_id`] belongs to, or `None` for an ordinary world id.
+pub fn mount_actor_rider(world_id: u32) -> Option<u32> {
+    (world_id & MOUNT_ACTOR_ID_BIT != 0).then_some(world_id & !MOUNT_ACTOR_ID_BIT)
+}
+
 pub fn setup_world(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -356,6 +372,39 @@ pub fn sync_entities_system(
         }
     }
 
+    // A mount is a second actor standing exactly where its rider stands; the
+    // rider's own body is then lifted onto the saddle joint by the actor pose
+    // pass. Spawned bare — no orb, no nameplate, not Pickable — because retail
+    // gives a mount none of those; it is scenery bolted to the rider. Its
+    // transform is pinned later, by `pin_mount_actors_system`.
+    for wire in &snap.entities {
+        if snap.mount_of(wire).is_none() {
+            continue;
+        }
+        let Some(&rider_e) = tracked.by_id.get(&wire.id) else {
+            continue;
+        };
+        let id = mount_actor_id(wire.id);
+        seen.insert(id);
+        if tracked.by_id.contains_key(&id) {
+            continue;
+        }
+        let rider_tf = q_xform.get(rider_e).copied().unwrap_or_default();
+        let bevy_e = commands
+            .spawn((
+                crate::components::InGameEntity,
+                WorldEntity {
+                    id,
+                    act_index: wire.act_index,
+                    kind: wire.kind,
+                },
+                rider_tf,
+                Visibility::default(),
+            ))
+            .id();
+        tracked.by_id.insert(id, bevy_e);
+    }
+
     let stale: Vec<u32> = tracked
         .by_id
         .keys()
@@ -370,6 +419,30 @@ pub fn sync_entities_system(
         prediction.by_id.remove(&id);
         motion.by_id.remove(&id);
         blends.by_id.remove(&id);
+    }
+}
+
+/// Holds each mount actor on its rider. Deliberately not part of
+/// `sync_entities_system`: the rider's transform is still being written after
+/// that runs (dead reckoning), and the floor snap that follows must see both
+/// actors already agreeing, or the mount grounds against a stale position.
+pub fn pin_mount_actors_system(
+    tracked: Res<TrackedEntities>,
+    mut q_xform: Query<&mut Transform, With<WorldEntity>>,
+) {
+    for (&id, &bevy_e) in tracked.by_id.iter() {
+        let Some(rider_id) = mount_actor_rider(id) else {
+            continue;
+        };
+        let Some(&rider_e) = tracked.by_id.get(&rider_id) else {
+            continue;
+        };
+        let Ok(rider_tf) = q_xform.get(rider_e).copied() else {
+            continue;
+        };
+        if let Ok(mut t) = q_xform.get_mut(bevy_e) {
+            *t = rider_tf;
+        }
     }
 }
 
@@ -595,6 +668,20 @@ mod tests {
     use super::*;
 
     #[test]
+    fn mount_actor_id_is_reversible_and_disjoint_from_server_ids() {
+        // Largest unique_no LSB can build: (4<<28) | (zone<<12) | targid.
+        let max_server_id = (4u32 << 28) | (0xFFFF << 12) | 0xFFF;
+        assert_eq!(max_server_id & MOUNT_ACTOR_ID_BIT, 0);
+        assert_eq!(mount_actor_rider(max_server_id), None);
+
+        for rider in [0x0100_0001u32, 0x1700_0123, max_server_id] {
+            let mount = mount_actor_id(rider);
+            assert_ne!(mount, rider);
+            assert_eq!(mount_actor_rider(mount), Some(rider));
+        }
+    }
+
+    #[test]
     fn visual_smoothing_lerps_short_then_snaps_long() {
         let near = apply_visual_smoothing(Vec3::ZERO, Vec3::new(0.25, 0.0, 0.0));
         assert!(near.x > 0.0 && near.x < 0.25, "lerp partial: {}", near.x);
@@ -749,6 +836,7 @@ mod tests {
             look: None,
             animation: 0,
             animationsub: 0,
+            mount: None,
             status: 0,
             char_flags: Default::default(),
         }

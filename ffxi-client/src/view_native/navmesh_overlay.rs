@@ -24,6 +24,9 @@ impl Plugin for NavmeshOverlayPlugin {
                 snap_entities_to_mzb_floor_system
                     .after(ffxi_viewer_core::sync_entities_system)
                     .after(ffxi_viewer_core::combat_stance::predict_entities_system)
+                    // A mount must already be on its rider, or it grounds against
+                    // the previous frame's position and bobs behind them.
+                    .after(ffxi_viewer_core::scene::pin_mount_actors_system)
                     .before(ffxi_viewer_core::chase_camera_system)
                     .run_if(in_state(AppPhase::InGame)),
             );

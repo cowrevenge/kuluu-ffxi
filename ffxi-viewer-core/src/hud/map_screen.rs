@@ -1170,6 +1170,7 @@ mod tests {
             look: None,
             animation: 0,
             animationsub: 0,
+            mount: None,
             status: 0,
             char_flags: Default::default(),
         });

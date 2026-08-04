@@ -277,6 +277,7 @@ impl<S: SceneSource + Resource + Component<Mutability = bevy::ecs::component::Mu
                         sync_entity_looks_system,
                         scene::ensure_self_lookcomp_system,
                         process_entity_look_changes,
+                        look_resolver::dispatch_mount_models,
                         camera_transition_system,
                         chase_camera_system,
                         firstperson_camera_system,
@@ -363,6 +364,15 @@ impl<S: SceneSource + Resource + Component<Mutability = bevy::ecs::component::Mu
         app.add_systems(
             Update,
             scene::self_visual_yaw_system.after(sync_entities_system),
+        );
+        // After every writer of a rider's transform (dead reckoning for others,
+        // the yaw smoother for self) and before the floor snap, which has to see
+        // rider and mount already agreeing.
+        app.add_systems(
+            Update,
+            scene::pin_mount_actors_system
+                .after(combat_stance::predict_entities_system)
+                .after(scene::self_visual_yaw_system),
         );
         #[cfg(not(target_arch = "wasm32"))]
         app.add_systems(

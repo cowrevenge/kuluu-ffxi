@@ -14,6 +14,10 @@ const EQUIP_SLOT_ORDER_LEN: usize = 8;
 // 2 = body, 5 = feet, 6 = main, 7 = sub, 8 = ranged), matching the order of
 // `slot_models` below.
 const EQUIP_SLOT_BODY: u8 = 2;
+const EQUIP_SLOT_MAIN: u8 = 6;
+const EQUIP_SLOT_SUB: u8 = 7;
+const EQUIP_SLOT_RANGED: u8 = 8;
+const WEAPON_SLOTS: [u8; 3] = [EQUIP_SLOT_MAIN, EQUIP_SLOT_SUB, EQUIP_SLOT_RANGED];
 
 // FFXiMain `.text` VA 0x100C513D, quoted at
 // research/cexi-docs/reference/ffximain.md:288-300: four ranges split at 1500 /
@@ -561,10 +565,74 @@ pub fn resolve_face(face: u8, race: u8) -> Option<u32> {
     Some(base + u32::from(face))
 }
 
+/// Loads the model for each ridden mount. Kept apart from
+/// [`dispatch_look_driven_models`] because a mount is not chosen by the rider's
+/// look at all — it is a separate actor whose model comes from the mount id.
+pub fn dispatch_mount_models(
+    state: Res<SceneState>,
+    tracked: Res<TrackedEntities>,
+    q_current: Query<&crate::components::MountModel>,
+    mut load_actor_tx: MessageWriter<crate::ffxi_actor_render::LoadActorRequest>,
+    mut commands: Commands,
+) {
+    if !state.dirty {
+        return;
+    }
+    for wire in &state.snapshot.entities {
+        let Some(mount) = state.snapshot.mount_of(wire) else {
+            continue;
+        };
+        let id = crate::scene::mount_actor_id(wire.id);
+        let Some(&bevy_e) = tracked.by_id.get(&id) else {
+            continue;
+        };
+        if q_current.get(bevy_e).is_ok_and(|m| m.0 == mount) {
+            continue;
+        }
+
+        let subject = match mount {
+            ffxi_viewer_wire::Mount::Chocobo { colour } => {
+                crate::ffxi_actor_render::ActorSubject::Mount {
+                    race: crate::ffxi_actor_render::chocobo_race_for_colour(colour),
+                }
+            }
+            // Every non-chocobo mount is an ordinary NPC-shaped model, in one
+            // contiguous file-table block ordered by MOUNTTYPE.
+            ffxi_viewer_wire::Mount::Other { mount_id } => {
+                let Some(file_id) = mount_dat_id(mount_id) else {
+                    warn!("mount id {mount_id} is outside the mount model block");
+                    continue;
+                };
+                crate::ffxi_actor_render::ActorSubject::Npc { file_id }
+            }
+        };
+        load_actor_tx.write(crate::ffxi_actor_render::LoadActorRequest {
+            entity_id: id,
+            subject,
+        });
+        commands
+            .entity(bevy_e)
+            .try_insert(crate::components::MountModel(mount));
+        info!("actor dispatch (mount): rider={} mount={mount:?}", wire.id);
+    }
+}
+
+/// File table index of a non-chocobo mount's model. The block runs from
+/// `MOUNT_QUEST_RAPTOR` (the first `MOUNTTYPE` with a model here) upward, one
+/// file per id — verified against the retail DAT 2026-08-04: 0x19131 raptor,
+/// 0x19133 tiger, 0x19136 bomb, 0x19141 hippogryph, each carrying a `moun`
+/// chunk. Both chocobo ids are absent, hence `checked_sub`.
+/// research/xim poc/game/event/ActorMountEvent.kt:26.
+fn mount_dat_id(mount_id: u8) -> Option<u32> {
+    const MOUNT_BLOCK_BASE: u32 = 0x0001_9131;
+    const FIRST_MODELLED_MOUNT: u8 = 1;
+    Some(MOUNT_BLOCK_BASE + u32::from(mount_id.checked_sub(FIRST_MODELLED_MOUNT)?))
+}
+
 pub fn dispatch_look_driven_models(
     state: Res<SceneState>,
     tracked: Res<TrackedEntities>,
-    q_changed: Query<(&WorldEntity, &LookComp, Option<&EntityModel>), Changed<LookComp>>,
+    q_changed: Query<(&WorldEntity, &LookComp, Option<&EntityModel>)>,
     load_mmb_tx: MessageWriter<LoadMmbRequest>,
     mut load_actor_tx: MessageWriter<crate::ffxi_actor_render::LoadActorRequest>,
     mut commands: Commands,
@@ -573,13 +641,29 @@ pub fn dispatch_look_driven_models(
     let Some(zone_id) = state.snapshot.zone_id else {
         return;
     };
+    // LookComp is only ever written on a dirty frame (sync_entity_looks_system
+    // bails otherwise), so gating here loses no edge and keeps the unfiltered
+    // query — which mount changes need, since they move no LookComp — cheap.
+    if !state.dirty {
+        return;
+    }
 
     let _ = &settings;
+    let mounted_riders: std::collections::HashSet<u32> = state
+        .snapshot
+        .entities
+        .iter()
+        .filter(|e| state.snapshot.mount_of(e).is_some())
+        .map(|e| e.id)
+        .collect();
     for (we, look, current_model) in q_changed.iter() {
-        if let Some(EntityModel(sig)) = current_model {
-            if *sig == look.0 {
-                continue;
-            }
+        let mounted = mounted_riders.contains(&we.id);
+        let signature = EntityModel {
+            look: look.0,
+            mounted,
+        };
+        if current_model == Some(&signature) {
+            continue;
         }
 
         if let EntityLook::Equipped {
@@ -605,7 +689,12 @@ pub fn dispatch_look_driven_models(
             let mut slot_trace: [(u8, u16, Option<u32>); 8] = Default::default();
             for (i, &model_id) in slot_models.iter().enumerate() {
                 let slot_index = (i + 1) as u8;
-                let file_id = resolve_equipment_model(slot_index, model_id, race);
+                // A rider's hands are on the reins, so retail drops the three
+                // weapon slots from the model while mounted
+                // (research/xim poc/ActorModel.kt:264).
+                let file_id = (!(mounted && WEAPON_SLOTS.contains(&slot_index)))
+                    .then(|| resolve_equipment_model(slot_index, model_id, race))
+                    .flatten();
                 slot_trace[i] = (slot_index, model_id, file_id);
                 if let Some(file_id) = file_id {
                     equipment.push(file_id);
@@ -623,14 +712,18 @@ pub fn dispatch_look_driven_models(
                 entity_id: we.id,
                 subject: crate::ffxi_actor_render::ActorSubject::Pc {
                     race,
+                    mounted,
                     equipment: equipment.clone(),
                     // Slot 2 is the body (SkeletalMeshActor.cpp:1659 takes
                     // waist_type from that slot's CIB); `equipment` above drops
                     // slot identity, so pass it separately.
                     body: resolve_equipment_model(EQUIP_SLOT_BODY, body, race),
 
-                    main_weapon: resolve_equipment_model(6, main, race),
-                    sub_weapon: resolve_equipment_model(7, sub, race),
+                    // Still resolved while mounted even though the model is
+                    // suppressed: load_pc reads their CIBs for the waist/shield
+                    // motion selectors, which the seat pose still needs.
+                    main_weapon: resolve_equipment_model(EQUIP_SLOT_MAIN, main, race),
+                    sub_weapon: resolve_equipment_model(EQUIP_SLOT_SUB, sub, race),
                 },
             });
             info!(
@@ -640,7 +733,7 @@ pub fn dispatch_look_driven_models(
                 equipment.len()
             );
             if let Some(&bevy_e) = tracked.by_id.get(&we.id) {
-                commands.entity(bevy_e).try_insert(EntityModel(look.0));
+                commands.entity(bevy_e).try_insert(signature);
             }
             continue;
         }
@@ -681,7 +774,7 @@ pub fn dispatch_look_driven_models(
             we.id, modelid, dat_id
         );
         if let Some(&bevy_e) = tracked.by_id.get(&we.id) {
-            commands.entity(bevy_e).try_insert(EntityModel(look.0));
+            commands.entity(bevy_e).try_insert(signature);
         }
 
         let _ = &load_mmb_tx;
@@ -691,6 +784,30 @@ pub fn dispatch_look_driven_models(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mount_dat_id_maps_the_block_and_rejects_the_chocobo_ids() {
+        // Verified against the retail DAT 2026-08-04 by dumping each file's
+        // skeleton chunk: the block is MOUNTTYPE-ordered from QUEST_RAPTOR.
+        assert_eq!(mount_dat_id(1), Some(0x0001_9131)); // MOUNT_QUEST_RAPTOR, "wyve"
+        assert_eq!(mount_dat_id(3), Some(0x0001_9133)); // MOUNT_TIGER, "tige"
+        assert_eq!(mount_dat_id(17), Some(0x0001_9141)); // MOUNT_HIPPOGRYPH, "kiri"
+
+        // MOUNT_CHOCOBO has no file here at all — it is a PC race config — so a
+        // chocobo must never reach this path.
+        assert_eq!(mount_dat_id(0), None);
+    }
+
+    #[test]
+    fn mounted_rider_loses_only_the_weapon_slots() {
+        assert_eq!(WEAPON_SLOTS, [6, 7, 8]);
+        for slot in [1u8, 2, 3, 4, 5] {
+            assert!(
+                !WEAPON_SLOTS.contains(&slot),
+                "slot {slot} is body armour and must still render while mounted"
+            );
+        }
+    }
 
     #[test]
     fn npc_dat_id_bucket_lower_edges() {

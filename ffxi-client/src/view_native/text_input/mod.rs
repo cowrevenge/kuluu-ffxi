@@ -798,6 +798,8 @@ fn sub_target_action_for(
         A::JobAbility { ability_id } | A::PetAbility { ability_id } => Some(S::Ability(ability_id)),
         A::Weaponskill { skill_id } => Some(S::WeaponSkill(skill_id)),
         A::RangedAttack => Some(S::Ranged),
+        // Both act on the player, so neither opens the sub-target cursor.
+        A::Dismount | A::ChocoboDig => None,
         A::UseItem {
             container,
             index,
@@ -1115,6 +1117,25 @@ fn dispatch_dynamic_menu_action(
                     target_id: tid,
                     target_index: tidx,
                     kind: ActionKind::Shoot,
+                },
+            )
+        }
+        A::Dismount | A::ChocoboDig => {
+            let Some((tid, tidx)) = self_target() else {
+                push_system_chat_line(scene_state, "[menu] mount: self not resolved yet".into());
+                return;
+            };
+            let (label, kind) = if matches!(action, A::Dismount) {
+                ("dismount", ActionKind::Dismount)
+            } else {
+                ("chocobo dig", ActionKind::ChocoboDig)
+            };
+            (
+                label,
+                AgentCommand::Action {
+                    target_id: tid,
+                    target_index: tidx,
+                    kind,
                 },
             )
         }
@@ -1872,6 +1893,7 @@ mod quick_action_tests {
             look: None,
             animation: 0,
             animationsub: 0,
+            mount: None,
             status: 0,
             char_flags: Default::default(),
         }

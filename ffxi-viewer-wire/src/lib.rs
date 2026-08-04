@@ -2,6 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 
+// v15: Entity.mount + SceneSnapshot.self_mount — which mount is being ridden, which picks
+// the mount's model. `animation`/`self_server_status` say only *that* someone is mounted.
 // v14: the retail /check window's remaining panes — CheckResult.linkshell, SceneSnapshot
 // .check_message (s2c 0x0CA), and SceneSnapshot.bazaar as a browsed-bazaar view (seller +
 // per-slot rows with tax) instead of the old never-populated Vec<BazaarEntry>.
@@ -23,7 +25,7 @@ use serde::{Deserialize, Serialize};
 // v5: InventoryItem.charges_remaining + next_use_vana_ts (item recast/charges).
 // v4: SceneSnapshot.delivery_box (dedicated delivery screen) + ViewerCommand::DeliveryBox
 // (postcard frames are not self-describing, so any shape change bumps this).
-pub const PROTOCOL_VERSION: u32 = 14;
+pub const PROTOCOL_VERSION: u32 = 15;
 
 /// Longest countdown `SceneSnapshot::status_icon_expiries` can carry. The
 /// producer rejects anything beyond it as a corrupt 0x063 timestamp, and the HUD
@@ -204,6 +206,36 @@ pub struct CharFlags {
     pub mentor: bool,
 }
 
+/// A mount being ridden. Retail draws the two arms from different model families
+/// — the chocobo is a PC race config (one per colour), everything else an NPC
+/// model — so the split is carried across the wire rather than re-derived.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Mount {
+    /// `MOUNT_CHOCOBO` or `MOUNT_NOBLE_CHOCOBO`, with the colour the server sent.
+    Chocobo { colour: ChocoboColour },
+    /// Any other `MOUNTTYPE`, carried verbatim.
+    Other { mount_id: u8 },
+}
+
+impl Mount {
+    /// Whether this mount's model comes from the PC race-config family rather
+    /// than the NPC mount block.
+    pub fn is_chocobo(self) -> bool {
+        matches!(self, Mount::Chocobo { .. })
+    }
+}
+
+/// Retail's five chocobo coat colours, each a separate race config.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum ChocoboColour {
+    #[default]
+    Yellow,
+    Black,
+    Blue,
+    Red,
+    Green,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Entity {
     pub id: u32,
@@ -239,6 +271,12 @@ pub struct Entity {
     /// `ffxi_proto::decode::NpcState`.
     #[serde(default)]
     pub animationsub: u8,
+
+    /// The mount this entity is riding, or `None` on foot. Resolved by the
+    /// producer: the raw mount index stays set after a dismount, so only the
+    /// animation byte can say whether it means anything.
+    #[serde(default)]
+    pub mount: Option<Mount>,
 
     #[serde(default)]
     pub status: u8,
@@ -582,6 +620,12 @@ pub struct SceneSnapshot {
     #[serde(default)]
     pub self_server_status: u8,
 
+    /// The mount the player is riding, or `None` on foot. Self never appears in
+    /// the CHAR_PC stream that carries `Entity::mount` for other players, so this
+    /// comes from 0x037 instead.
+    #[serde(default)]
+    pub self_mount: Option<Mount>,
+
     /// Self casting/action state, present while an issued spell/ability is in
     /// flight. Drives the Enhanced cast bar. Optimistic on send, reconciled by
     /// the server's BATTLE2 start/finish/interrupt.
@@ -684,6 +728,18 @@ pub struct CheckMessage {
 }
 
 impl SceneSnapshot {
+    /// The mount `entity` is riding. Self is in `entities` but never receives the
+    /// CHAR_PC stream that fills `Entity::mount`, so its mount arrives separately
+    /// and has to be folded back in here — every consumer wants the same answer
+    /// for self and for everyone else.
+    pub fn mount_of(&self, entity: &Entity) -> Option<Mount> {
+        if self.self_char_id == Some(entity.id) {
+            self.self_mount
+        } else {
+            entity.mount
+        }
+    }
+
     pub fn container(&self, id: u8) -> Option<&ContainerView> {
         self.containers.iter().find(|c| c.id == id)
     }
@@ -1259,6 +1315,7 @@ mod tests {
                 look: None,
                 animation: 0,
                 animationsub: 0,
+                mount: None,
                 status: 0,
                 char_flags: CharFlags::default(),
             }],
@@ -1319,6 +1376,7 @@ mod tests {
             play_time_s: 0,
             self_fishing: None,
             self_server_status: 0,
+            self_mount: None,
             self_casting: None,
             myroom: Some(MyRoom {
                 model: 257,

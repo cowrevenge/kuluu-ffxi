@@ -21,22 +21,22 @@ const OFFSET_XOR: u32 = 0x8080_8080;
 const MAGIC_BASE: u32 = 0x1000_0000;
 
 // DialogTable control codes (POLUtils Things/DialogTableEntry.cs).
-const CC_NEWLINE: u8 = 0x07;
+pub(crate) const CC_NEWLINE: u8 = 0x07;
 const CC_PLAYER_NAME: u8 = 0x08;
 const CC_SPEAKER_NAME: u8 = 0x09;
-const CC_NUM: u8 = 0x0a;
+pub(crate) const CC_NUM: u8 = 0x0a;
 const CC_SELECTION: u8 = 0x0b;
 const CC_CHOICE: u8 = 0x0c;
 const CC_ITEM: u8 = 0x19;
 const CC_KEY_ITEM: u8 = 0x1a;
 const CC_CHOCOBO_NAME: u8 = 0x1c;
 const CC_SET_COLOR: u8 = 0x1e;
-const CC_AUTO: u8 = 0x7f;
+pub(crate) const CC_AUTO: u8 = 0x7f;
 /// The one 0x7f code POLUtils reads as two bytes (`7f 85`, player-gender
 /// choice); every other `7f <type>` carries one more parameter byte
 /// (POLUtils Things/DialogTableEntry.cs, the 0x7f branch).
 const AUTO_GENDER_CHOICE: u8 = 0x85;
-const PRINTABLE: std::ops::RangeInclusive<u8> = 0x20..=0x7e;
+pub(crate) const PRINTABLE: std::ops::RangeInclusive<u8> = 0x20..=0x7e;
 
 // Inline substitution tag: `01 <len> <kind> <data…>` where `len` is the whole
 // tag's byte count and `data` holds `82 <0x80|param>` message-parameter
@@ -46,17 +46,34 @@ const PRINTABLE: std::ops::RangeInclusive<u8> = 0x20..=0x7e;
 // with the LSB messageSpecial call signatures that fill their parameters
 // (vendor/server/scripts/globals/npc_util.lua giveKeyItem,
 // vendor/server/scripts/globals/sparkshop.lua YOU_OBTAIN_ITEM(item, count)).
-const CC_INLINE_TAG: u8 = 0x01;
+pub(crate) const CC_INLINE_TAG: u8 = 0x01;
 /// `01 <len> <kind>` — anything shorter cannot be a tag.
 const INLINE_TAG_MIN_LEN: usize = 3;
 const INLINE_TAG_PARAM_REF: u8 = 0x82;
 /// Param indexes arrive offset into the high-bit range: `0x80 | index`.
 const INLINE_TAG_PARAM_BASE: u8 = 0x80;
-const INLINE_KIND_NUM: u8 = 0x03;
-const INLINE_KIND_ITEM: u8 = 0x23;
-const INLINE_KIND_ITEM_PLURAL: u8 = 0x25;
-const INLINE_KIND_ITEM_COUNTED: u8 = 0x29;
-const INLINE_KIND_KEY_ITEM: u8 = 0x33;
+pub(crate) const INLINE_KIND_NUM: u8 = 0x03;
+/// The second numeric kind, carrying the count that an adjacent
+/// [`INLINE_KIND_ITEM_COUNTED_PLURAL`] tag pluralizes ("You synthesized 2 fire
+/// crystals." in the system-message table, entry 160).
+pub(crate) const INLINE_KIND_NUM2: u8 = 0x04;
+/// Item-name substitutions. The kinds differ only in the grammatical form the
+/// client selects — the surrounding article ("a", "the") and any count come
+/// from separate slots in the entry, so every one of them renders as the plain
+/// item name. Kinds observed across the NA install's zone DialogTables and the
+/// system-message table (ROM/27/76.DAT): 0x23 bare, 0x25 plural, 0x26 after
+/// "the", 0x27 after the a/an article slot, 0x28 after "any", 0x29 counted,
+/// 0x2A counted plural.
+pub(crate) const INLINE_KIND_ITEM: u8 = 0x23;
+pub(crate) const INLINE_KIND_ITEM_PLURAL: u8 = 0x25;
+pub(crate) const INLINE_KIND_ITEM_DEFINITE: u8 = 0x26;
+pub(crate) const INLINE_KIND_ITEM_ARTICLED: u8 = 0x27;
+pub(crate) const INLINE_KIND_ITEM_ANY: u8 = 0x28;
+pub(crate) const INLINE_KIND_ITEM_COUNTED: u8 = 0x29;
+pub(crate) const INLINE_KIND_ITEM_COUNTED_PLURAL: u8 = 0x2a;
+pub(crate) const INLINE_KIND_KEY_ITEM: u8 = 0x33;
+/// Zone name (system-message table entry 318 lists linkshell-concierge zones).
+pub(crate) const INLINE_KIND_ZONE: u8 = 0x37;
 
 /// Names [`StringDat::text`] wraps as `{Name}` (plain, via [`plain_marker`]) or
 /// `{Name:param}` (parameterized) for each control code. Render-layer
@@ -108,7 +125,7 @@ pub const AUTO_EMOTE_END: u8 = 0x31;
 const EMOTE_NAME_SLOT_PREFIX: [u8; 2] = [0x01, 0x01];
 const EMOTE_NAME_SLOT_CASTER: u8 = 0x10;
 const EMOTE_NAME_SLOT_TARGET: u8 = 0x11;
-const ALT_OPEN: u8 = b'[';
+pub(crate) const ALT_OPEN: u8 = b'[';
 const ALT_SPLIT: u8 = b'/';
 const ALT_CLOSE: u8 = b']';
 
@@ -209,7 +226,7 @@ pub fn compose_emote_line(entry: &[u8], ctx: &EmoteLineContext) -> String {
 
 /// Split a leading `[a/b]` run into its branches; returns the byte length of
 /// the whole bracketed block as the third element.
-fn split_alternative(bytes: &[u8]) -> Option<(&str, &str, usize)> {
+pub(crate) fn split_alternative(bytes: &[u8]) -> Option<(&str, &str, usize)> {
     let close = bytes.iter().position(|&b| b == ALT_CLOSE)?;
     let split = bytes[..close].iter().position(|&b| b == ALT_SPLIT)?;
     let first = std::str::from_utf8(&bytes[1..split]).ok()?;
@@ -376,7 +393,7 @@ fn rd_u32(buf: &[u8], at: usize) -> u32 {
     u32::from_le_bytes([buf[at], buf[at + 1], buf[at + 2], buf[at + 3]])
 }
 
-fn is_sjis_lead(b: u8) -> bool {
+pub(crate) fn is_sjis_lead(b: u8) -> bool {
     matches!(b, 0x81..=0x9F | 0xE0..=0xFC)
 }
 
@@ -429,19 +446,19 @@ fn decode_dialog_text(bytes: &[u8]) -> String {
     out
 }
 
-struct InlineTag {
+pub(crate) struct InlineTag {
     /// Marker name to emit, `None` for a recognized-but-unrenderable kind
     /// (the tag is still consumed whole so its data bytes never leak as text).
-    marker: Option<&'static str>,
+    pub(crate) marker: Option<&'static str>,
     /// Message-parameter index from the tag's last `82 <0x80|n>` reference —
     /// for item kinds that also carry a count/plural reference, the id ref
     /// comes last (observed: `01 09 29 82 81 80 80 82 80` = count param 1,
     /// item id param 0).
-    param: u8,
-    len: usize,
+    pub(crate) param: u8,
+    pub(crate) len: usize,
 }
 
-fn parse_inline_tag(bytes: &[u8], at: usize) -> Option<InlineTag> {
+pub(crate) fn parse_inline_tag(bytes: &[u8], at: usize) -> Option<InlineTag> {
     let len = *bytes.get(at + 1)? as usize;
     if len < INLINE_TAG_MIN_LEN || at + len > bytes.len() {
         return None;
@@ -451,9 +468,18 @@ fn parse_inline_tag(bytes: &[u8], at: usize) -> Option<InlineTag> {
         return None; // tag data lives in the high-bit range; printable text does not
     }
     let marker = match bytes[at + 2] {
-        INLINE_KIND_NUM => Some(MARKER_NUM),
-        INLINE_KIND_ITEM | INLINE_KIND_ITEM_PLURAL | INLINE_KIND_ITEM_COUNTED => Some(MARKER_ITEM),
+        INLINE_KIND_NUM | INLINE_KIND_NUM2 => Some(MARKER_NUM),
+        INLINE_KIND_ITEM
+        | INLINE_KIND_ITEM_PLURAL
+        | INLINE_KIND_ITEM_DEFINITE
+        | INLINE_KIND_ITEM_ARTICLED
+        | INLINE_KIND_ITEM_ANY
+        | INLINE_KIND_ITEM_COUNTED
+        | INLINE_KIND_ITEM_COUNTED_PLURAL => Some(MARKER_ITEM),
         INLINE_KIND_KEY_ITEM => Some(MARKER_KEY_ITEM),
+        // Recognized but not rendered: consumed whole so its data bytes never
+        // leak as text.
+        INLINE_KIND_ZONE => None,
         _ => None,
     };
     let param = data

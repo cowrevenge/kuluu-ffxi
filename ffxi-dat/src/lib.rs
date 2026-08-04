@@ -30,6 +30,7 @@ pub mod skel_mesh;
 pub mod spell_info;
 pub mod sprite_sheet;
 pub mod sub_area;
+pub mod sysmes;
 pub mod texture;
 pub mod ui_element;
 pub mod vos2;

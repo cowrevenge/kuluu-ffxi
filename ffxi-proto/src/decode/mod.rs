@@ -31,6 +31,8 @@ mod abilities;
 pub use abilities::*;
 mod equip_inspect;
 pub use equip_inspect::*;
+mod treasure;
+pub use treasure::*;
 
 #[derive(Debug, thiserror::Error)]
 pub enum DecodeError {

@@ -263,6 +263,27 @@ pub fn build_subpacket_item_stack(sync: u16, container: u8) -> Vec<u8> {
     buf
 }
 
+// GP_CLI_COMMAND_TROPHY_ENTRY / GP_CLI_COMMAND_TROPHY_ABSENCE,
+// vendor/server/src/map/packets/c2s/0x041_trophy_entry.h and
+// 0x042_trophy_absence.h: a single TrophyItemIndex after the header, the rest
+// padding, so 8 bytes total (size_words = 2). The server rolls the lot value
+// itself and ignores repeat lots/passes on a slot the player already acted on
+// (0x041_trophy_entry.cpp / 0x042_trophy_absence.cpp process).
+pub fn build_subpacket_trophy_lot(sync: u16, slot: u8) -> Vec<u8> {
+    build_subpacket_trophy(ffxi_proto::map::c2s::TROPHY_ENTRY, sync, slot)
+}
+
+pub fn build_subpacket_trophy_pass(sync: u16, slot: u8) -> Vec<u8> {
+    build_subpacket_trophy(ffxi_proto::map::c2s::TROPHY_ABSENCE, sync, slot)
+}
+
+fn build_subpacket_trophy(opcode: u16, sync: u16, slot: u8) -> Vec<u8> {
+    let mut buf = vec![0u8; 8];
+    buf[0..4].copy_from_slice(&build_subpacket_header(opcode, 2, sync));
+    buf[4] = slot;
+    buf
+}
+
 pub fn build_subpacket_item_move(
     sync: u16,
     quantity: u32,

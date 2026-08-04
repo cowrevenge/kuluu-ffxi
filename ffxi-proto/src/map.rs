@@ -82,6 +82,16 @@ pub mod c2s {
     // GP_CLI_COMMAND_TRACKING_END, vendor/server/src/map/packets/c2s/0x0f6_tracking_end.h.
     // Stop tracking: uint32 padding (Dammy).
     pub const TRACKING_END: u16 = 0x0F6;
+
+    // GP_CLI_COMMAND_TROPHY_ENTRY, vendor/server/src/map/packets/c2s/0x041_trophy_entry.h.
+    // Cast lots on a pool item: TrophyItemIndex u8, PropertyItemIndex u8,
+    // padding u8[2]. The server rolls the number itself — the client sends no
+    // lot value (0x041_trophy_entry.cpp process).
+    pub const TROPHY_ENTRY: u16 = 0x041;
+
+    // GP_CLI_COMMAND_TROPHY_ABSENCE, vendor/server/src/map/packets/c2s/0x042_trophy_absence.h.
+    // Pass on a pool item: TrophyItemIndex u8, padding u8.
+    pub const TROPHY_ABSENCE: u16 = 0x042;
 }
 
 /// Wide-scan (tracking) State bytes shared by the s2c 0x0F5/0x0F6 decoders and
@@ -460,6 +470,16 @@ pub mod s2c {
     // GP_SERV_COMMAND_TRACKING_STATE, vendor/server/src/map/packets/s2c/0x0f6_tracking_state.h.
     // Wide-scan list framing (ListStart/ListEnd).
     pub const TRACKING_STATE: u16 = 0x0F6;
+
+    // GP_SERV_COMMAND_TROPHY_LIST, vendor/server/src/map/enums/packet_s2c.h:146.
+    // One item (and/or gil) entering the treasure pool
+    // (vendor/server/src/map/packets/s2c/0x0d2_trophy_list.h).
+    pub const TROPHY_LIST: u16 = 0x0D2;
+
+    // GP_SERV_COMMAND_TROPHY_SOLUTION, vendor/server/src/map/enums/packet_s2c.h:147.
+    // An action taken against a pool item: lot, win, or loss
+    // (vendor/server/src/map/packets/s2c/0x0d3_trophy_solution.h).
+    pub const TROPHY_SOLUTION: u16 = 0x0D3;
 }
 
 #[cfg(test)]

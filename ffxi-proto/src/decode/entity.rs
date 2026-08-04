@@ -354,7 +354,7 @@ mod despawn_tests {
     }
 }
 
-fn read_name_slot(slot: &[u8]) -> Option<String> {
+pub(super) fn read_name_slot(slot: &[u8]) -> Option<String> {
     let n = slot.iter().position(|&b| b == 0).unwrap_or(slot.len());
     if n < 3 {
         return None;

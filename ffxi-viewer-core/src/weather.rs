@@ -63,7 +63,7 @@ pub struct ZoneWeather {
 // Retail does exactly one hop, straight to `suny`, when the requested container
 // misses — research/XIClient/src/XIClient/source/World/Weather/
 // WeatherTransition.cpp:52-54.
-fn weather_type_preference(want: WeatherTypeId) -> impl Iterator<Item = WeatherTypeId> {
+pub(crate) fn weather_type_preference(want: WeatherTypeId) -> impl Iterator<Item = WeatherTypeId> {
     std::iter::once(want).chain(std::iter::once(WEATHER_TYPE_FALLBACK))
 }
 
@@ -78,6 +78,33 @@ impl ZoneWeather {
                 .find(|id| self.sets.by_type.contains_key(id))
                 .unwrap_or(want),
         )
+    }
+
+    /// The ambient beds for the live weather, resolved against the zone's own `weat`
+    /// container rather than the area container `select_records` uses for the 0x2F records.
+    ///
+    /// WeatherTransition.cpp:432-479 `FindPrevSound` enumerates the beds from
+    /// `this->WeatherFile` — the `weat/<tag>` resource — so the bed is a property of the
+    /// zone's weather, not of the block the player stands on. The area containers ship no
+    /// beds at all (`ffxi_dat::weather` harvests them only from `weat`), so routing this
+    /// through the area map silences the bed inside every modelled interior.
+    pub fn ambient_cues(&self) -> &[ffxi_dat::weather::AmbientCue] {
+        let Some((want, _)) = self.selected else {
+            return &[];
+        };
+        weather_type_preference(want)
+            .find_map(|id| self.sets.by_type.get(&id))
+            .or_else(|| self.sets.by_type.values().next())
+            .map(|set| set.ambient(self.indoor()))
+            .unwrap_or_default()
+    }
+
+    /// Always false: no zone-indoor flag is sourced in viewer-core yet, so the
+    /// `indoor`-keyed halves of the DAT harvest (`WeatherSet::indoor`,
+    /// `WeatherSet::indoor_ambient`) stay unreachable. Retail splits on
+    /// `XiZone::zone->PlaceCode` (WeatherTransition.cpp:454-455) — kuluu-dldr.
+    pub fn indoor(&self) -> bool {
+        self.selected.map(|(_, indoor)| indoor).unwrap_or(false)
     }
 }
 
@@ -200,9 +227,7 @@ pub fn sample_zone_weather(
         return;
     }
 
-    // No zone-indoor flag is sourced in viewer-core yet; outdoor sky is the
-    // default. The DAT-level indo/ records are retained for when a zone indoor
-    // flag is plumbed (spec correction 4).
+    // See ZoneWeather::indoor (kuluu-dldr).
     let indoor = false;
     // The `selected` cache re-runs select_records whenever `want` changes, so the
     // active set reloads on CurrentWeather change as well as zone change.
@@ -624,7 +649,7 @@ mod tests {
     fn set_with_fog_r(fog_r: f32) -> ffxi_dat::weather::WeatherSet {
         ffxi_dat::weather::WeatherSet {
             outdoor: vec![rec_with_fog([fog_r, 0.0, 0.0, 1.0])],
-            indoor: Vec::new(),
+            ..Default::default()
         }
     }
 
@@ -664,6 +689,38 @@ mod tests {
         let missing = ffxi_dat::mzb::area_resource_id_from_dir_name(b"ent4");
         let got = select_records(&sets, *b"suny", false, missing);
         assert_eq!(got[0].fog_landscape[0], 0.5);
+    }
+
+    // WeatherTransition.cpp:432-479 reads the beds off the zone's own `weat` resource, and
+    // ffxi_dat harvests them from nowhere else, so walking into a modelled sub-area must not
+    // take the bed away with the fog.
+    #[test]
+    fn the_ambient_bed_survives_walking_into_an_area_container() {
+        const BED_SE: u32 = 1005;
+        let mut zone_weather = ZoneWeather {
+            sets: zone_and_area_sets(),
+            ..Default::default()
+        };
+        zone_weather
+            .sets
+            .by_type
+            .get_mut(b"suny")
+            .unwrap()
+            .outdoor_ambient
+            .push(ffxi_dat::weather::AmbientCue {
+                time_minutes: 0,
+                se_id: BED_SE,
+                loops: true,
+            });
+        zone_weather.selected = Some((*b"suny", false));
+
+        assert_eq!(zone_weather.ambient_cues()[0].se_id, BED_SE);
+        zone_weather.area = ffxi_dat::mzb::area_resource_id_from_dir_name(b"ev01");
+        assert_eq!(
+            zone_weather.ambient_cues()[0].se_id,
+            BED_SE,
+            "the area container ships no beds; falling through to it silences the zone"
+        );
     }
 
     // The weather-type ladder stays inside the resolved area: one XiArea owns one

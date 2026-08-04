@@ -489,7 +489,7 @@ pub struct SfxEvent {
 
     pub volume: f32,
 
-    // World-space emitter. `None` is a 2D cue (UI, system, weather stinger) that mixes dry.
+    // World-space emitter. `None` is a 2D cue (UI, system, zone ambient bed) that mixes dry.
     pub emitter: Option<Vec3>,
 }
 
@@ -575,6 +575,48 @@ pub fn sfx_mix_volume(ev: &SfxEvent, listener: Option<Vec3>) -> f32 {
     (ev.volume * attenuation).clamp(0.0, 1.0)
 }
 
+// research/XIClient/src/XIClient/source/World/Generator/Effects/CYySoundElem.cpp:36-37 —
+// the class defaults Calc3D substitutes for a DAT-authored 0. Load-bearing, not defensive:
+// 591 of the 5,895 shipped sound generators author (far 0, near 0).
+pub const SOUND_NEAR_DEFAULT: f32 = 3.0;
+pub const SOUND_FAR_DEFAULT: f32 = 30.0;
+
+// CYySepRes.cpp:38-42 weights the vertical delta 3x unless the elem is unattached
+// (`a8 == 1`). CYyGenerator.cpp:1173-1176 sets that flag exactly when the generator's
+// attachment code is 0, which every zone-static emitter is.
+pub const ATTACHED_VERTICAL_WEIGHT: f32 = 3.0;
+pub const UNATTACHED_VERTICAL_WEIGHT: f32 = 1.0;
+
+// research/XIClient/src/XIClient/source/Resource/Derived/CYySepRes.cpp:16-60 `Calc3D`:
+// full inside `near`, a linear ramp to silence at `far`, and a hard cull past it. The
+// shipped `near > far` generators fall out of the ordering — everything inside far is
+// full volume. Retail's pan term is not reproduced: this mixer carries no pan (see
+// `sfx_attenuation`).
+pub fn sfx_attenuation_calc3d(
+    listener: Vec3,
+    emitter: Vec3,
+    near: f32,
+    far: f32,
+    vertical_weight: f32,
+) -> f32 {
+    let near = if near == 0.0 {
+        SOUND_NEAR_DEFAULT
+    } else {
+        near
+    };
+    let far = if far == 0.0 { SOUND_FAR_DEFAULT } else { far };
+    let mut delta = listener - emitter;
+    delta.y *= vertical_weight;
+    let dist = delta.length();
+    if dist > far {
+        return 0.0;
+    }
+    if dist <= near {
+        return 1.0;
+    }
+    1.0 - (dist - near) / (far - near)
+}
+
 #[derive(Resource, Default, Debug)]
 pub struct SeRegistry {
     pub by_name: std::collections::HashMap<[u8; 4], u32>,
@@ -586,9 +628,61 @@ impl SeRegistry {
     }
 }
 
+/// Decoded SE handles, keyed by se id AND loop policy.
+///
+/// The two are not interchangeable: a bed handed to `play_sfx_system` would never end,
+/// and a one-shot handle handed to the bed would fall silent after one pass.
 #[derive(Resource, Default)]
 pub struct SfxCache {
-    cached: std::collections::HashMap<u32, Handle<PcmAudio>>,
+    cached: std::collections::HashMap<(u32, bool), Handle<PcmAudio>>,
+    missing: std::collections::HashSet<u32>,
+}
+
+impl SfxCache {
+    /// Sole loader for `PcmAudio` SE assets, so the loop policy has one home.
+    ///
+    /// `looping` keeps the decoded loop point (`ffxi_audio` reads it from the SPW header);
+    /// a looping cue whose file carries no marker restarts from the top, the same policy
+    /// `apply_bgm_system` applies to an unmarked BGM.
+    pub fn handle(
+        &mut self,
+        install: &std::path::Path,
+        pcm_assets: &mut Assets<PcmAudio>,
+        se_id: u32,
+        looping: bool,
+    ) -> Option<Handle<PcmAudio>> {
+        if let Some(h) = self.cached.get(&(se_id, looping)) {
+            return Some(h.clone());
+        }
+        if self.missing.contains(&se_id) {
+            return None;
+        }
+        let Some(path) = find_audio(install, AudioKind::Sfx, se_id) else {
+            // Five ids referenced by the shipped zone DATs are absent from a retail
+            // install; a looping emitter would otherwise re-warn every frame.
+            self.missing.insert(se_id);
+            warn!("audio: sfx {se_id} not found under {}", install.display());
+            return None;
+        };
+        let decoded = match decode_file(&path) {
+            Ok(d) => d,
+            Err(e) => {
+                self.missing.insert(se_id);
+                warn!("audio: sfx {se_id} decode failed: {e}");
+                return None;
+            }
+        };
+        let mut pcm = PcmAudio::from_decoded(decoded);
+        pcm = if looping {
+            let start = pcm.loop_start_sample.unwrap_or(0);
+            pcm.with_loop(Some(start))
+        } else {
+            pcm.with_loop(None)
+        };
+        let handle = pcm_assets.add(pcm);
+        self.cached.insert((se_id, looping), handle.clone());
+        Some(handle)
+    }
 }
 
 pub fn play_sfx_system(
@@ -630,28 +724,8 @@ pub fn play_sfx_system(
         if volume <= 0.0 {
             continue;
         }
-        let handle = if let Some(h) = cache.cached.get(&ev.se_id) {
-            h.clone()
-        } else {
-            let Some(path) = find_audio(&install, AudioKind::Sfx, ev.se_id) else {
-                warn!(
-                    "audio: sfx {} not found under {}",
-                    ev.se_id,
-                    install.display()
-                );
-                continue;
-            };
-            let decoded = match decode_file(&path) {
-                Ok(d) => d,
-                Err(e) => {
-                    warn!("audio: sfx {} decode failed: {e}", ev.se_id);
-                    continue;
-                }
-            };
-
-            let h = pcm_assets.add(PcmAudio::from_decoded(decoded).with_loop(None));
-            cache.cached.insert(ev.se_id, h.clone());
-            h
+        let Some(handle) = cache.handle(&install, &mut pcm_assets, ev.se_id, false) else {
+            continue;
         };
         commands.spawn((
             InGameEntity,
@@ -853,42 +927,23 @@ pub fn observe_ui_mode_transitions(
     *prev_menu_depth = new_menu_depth;
 }
 
-#[derive(Debug, Clone, Copy, Default)]
-pub struct WeatherSfxEntry {
-    pub stinger: Option<u32>,
-    pub ambient: Option<u32>,
-}
-
 pub const WEATHER_FADE_SECS: f32 = 1.0;
 
 pub const BGM_FADE_SECS: f32 = 1.5;
 
-#[derive(Resource, Debug, Clone, Default)]
-pub struct WeatherSfxTable {
-    pub entries: [WeatherSfxEntry; 20],
-}
-
-impl WeatherSfxTable {
-    pub fn get(&self, weather: ffxi_viewer_wire::Weather) -> WeatherSfxEntry {
-        self.entries[weather as usize]
-    }
-
-    pub fn set(
-        &mut self,
-        weather: ffxi_viewer_wire::Weather,
-        entry: WeatherSfxEntry,
-    ) -> WeatherSfxEntry {
-        let prev = self.entries[weather as usize];
-        self.entries[weather as usize] = entry;
-        prev
-    }
-}
-
+/// The zone's 2D ambient bed.
+///
+/// research/XIClient/src/XIClient/source/World/Zone/XiZone.cpp:388-396 hands the current
+/// area's `SoundEffectResource` to `CYySoundElem::SetZoneSound` every frame, and
+/// CYySoundElem.cpp:117-129 (re)plays it at `PAN_CENTER_INDEX` only when the resource
+/// changes — a 2D cue at system volume, not a world emitter.
 #[derive(Resource, Debug, Default)]
-pub struct WeatherAmbient {
-    pub active_entity: Option<Entity>,
-    pub active_weather: Option<ffxi_viewer_wire::Weather>,
-    pub prev_weather: Option<ffxi_viewer_wire::Weather>,
+pub struct ZoneAmbientBed {
+    /// `(zone DAT file, se id)`. Keyed on the resolved se rather than on the weather
+    /// container so the weathers that share a bed (West Ronfaure's suny/clod/mist/fine all
+    /// resolve to se001005) cross-fade the loop onto itself.
+    pub playing: Option<(Option<u32>, u32)>,
+    pub entity: Option<Entity>,
 }
 
 #[derive(Component, Debug, Clone, Copy)]
@@ -921,108 +976,62 @@ impl AudioFade {
     }
 }
 
-pub fn observe_weather_changes(
-    scene: Res<crate::snapshot::SceneState>,
-    table: Res<WeatherSfxTable>,
+/// Resolves the bed for the area, weather and Vana'diel minute the zone environment is
+/// currently sampled at, then cross-fades it in when the se id moves.
+pub fn observe_zone_ambient_bed(
+    zone_weather: Res<crate::weather::ZoneWeather>,
+    vana_clock: Res<crate::vana_time::VanaClock>,
     slots: Res<BgmSlots>,
+    mute: Res<AudioMuteState>,
     mut cache: ResMut<SfxCache>,
     mut pcm_assets: ResMut<Assets<PcmAudio>>,
-    mut ambient: ResMut<WeatherAmbient>,
-    mut sfx_writer: MessageWriter<SfxEvent>,
-    fade_q: Query<Entity, With<AudioFade>>,
+    mut bed: ResMut<ZoneAmbientBed>,
     mut commands: Commands,
 ) {
-    let current = scene.snapshot.weather;
-    if current == ambient.prev_weather {
+    let sky = crate::sun_moon::vana_sky_from_clock(&vana_clock);
+    let time_minutes = (sky.hour * 60.0).rem_euclid(1440.0) as u32;
+    let cue = (!mute.sfx)
+        .then(|| ffxi_dat::weather::select_ambient(zone_weather.ambient_cues(), time_minutes))
+        .flatten()
+        .copied();
+
+    let want = cue.map(|c| (zone_weather.file_id, c.se_id));
+    if want == bed.playing {
         return;
     }
-    let prev = ambient.prev_weather;
-    ambient.prev_weather = current;
+    bed.playing = want;
 
-    let Some(weather) = current else {
-        if let Some(e) = ambient.active_entity.take() {
-            if let Ok(mut ent) = commands.get_entity(e) {
-                ent.insert(AudioFade::fade_out(WEATHER_FADE_SECS));
-            }
-            ambient.active_weather = None;
-        }
-        return;
-    };
-
-    let entry = table.get(weather);
-
-    if let Some(se_id) = entry.stinger {
-        sfx_writer.write(SfxEvent::new(se_id));
-    }
-
-    let new_ambient_id = entry.ambient;
-    let prev_ambient_id = prev.map(|w| table.get(w).ambient).unwrap_or(None);
-
-    if new_ambient_id == prev_ambient_id && ambient.active_entity.is_some() {
-        ambient.active_weather = Some(weather);
-        return;
-    }
-
-    if let Some(e) = ambient.active_entity.take() {
+    if let Some(e) = bed.entity.take() {
         if let Ok(mut ent) = commands.get_entity(e) {
             ent.insert(AudioFade::fade_out(WEATHER_FADE_SECS));
         }
     }
 
-    for e in fade_q.iter() {
-        if Some(e) != ambient.active_entity {}
-    }
-
-    ambient.active_weather = Some(weather);
-
-    let Some(se_id) = new_ambient_id else {
-        return;
-    };
+    let Some(cue) = cue else { return };
     let Some(install) = slots.install_root.clone() else {
         return;
     };
-
-    let handle = if let Some(h) = cache.cached.get(&se_id) {
-        h.clone()
-    } else {
-        let Some(path) = find_audio(&install, AudioKind::Sfx, se_id) else {
-            warn!(
-                "audio: weather ambient {se_id} not found under {}",
-                install.display()
-            );
-            return;
-        };
-        let decoded = match decode_file(&path) {
-            Ok(d) => d,
-            Err(e) => {
-                warn!("audio: weather ambient {se_id} decode failed: {e}");
-                return;
-            }
-        };
-
-        let h = pcm_assets.add(PcmAudio::from_decoded(decoded).with_loop(None));
-        cache.cached.insert(se_id, h.clone());
-        h
+    let Some(handle) = cache.handle(&install, &mut pcm_assets, cue.se_id, cue.loops) else {
+        return;
     };
 
-    let looped_handle = pcm_assets
-        .get(&handle)
-        .cloned()
-        .map(|p| pcm_assets.add(p.with_loop(Some(0))))
-        .unwrap_or(handle);
-
-    let entity = commands
-        .spawn((
-            InGameEntity,
-            AudioPlayer(looped_handle),
-            PlaybackSettings::ONCE.with_volume(bevy::audio::Volume::Linear(0.0)),
-            AudioFade::fade_in(WEATHER_FADE_SECS),
-        ))
-        .id();
-    ambient.active_entity = Some(entity);
+    bed.entity = Some(
+        commands
+            .spawn((
+                InGameEntity,
+                AudioPlayer(handle),
+                PlaybackSettings::ONCE.with_volume(bevy::audio::Volume::Linear(0.0)),
+                AudioFade::fade_in(WEATHER_FADE_SECS),
+            ))
+            .id(),
+    );
     info!(
-        "audio: weather ambient se={se_id} weather={:?} (fade-in {}s)",
-        weather, WEATHER_FADE_SECS
+        "audio: zone ambient bed se={} (activates {:02}:{:02}, loops={}) in DAT {:?}",
+        cue.se_id,
+        cue.time_minutes / 60,
+        cue.time_minutes % 60,
+        cue.loops,
+        zone_weather.file_id,
     );
 }
 
@@ -1062,8 +1071,7 @@ impl Plugin for AudioPlugin {
             .init_resource::<SystemSfxTable>()
             .init_resource::<SystemSfxCursor>()
             .init_resource::<CombatSfxState>()
-            .init_resource::<WeatherSfxTable>()
-            .init_resource::<WeatherAmbient>()
+            .init_resource::<ZoneAmbientBed>()
             .add_message::<SfxEvent>()
             .add_systems(
                 Update,
@@ -1075,11 +1083,17 @@ impl Plugin for AudioPlugin {
                     fire_system_sfx_events,
                     fire_combat_sfx_events,
                     observe_ui_mode_transitions,
-                    observe_weather_changes,
+                    // The launcher backdrop mirrors its flythrough zone into SceneState, so
+                    // ZoneWeather is fully loaded at character select; without an in-game
+                    // gate the backdrop zone's wind loop plays over the character list.
+                    observe_zone_ambient_bed.run_if(crate::camera::in_game),
                     play_sfx_system,
                     tick_audio_fades,
                 )
-                    .chain(),
+                    .chain()
+                    // The bed reads the environment set `sample_zone_weather` selects, so
+                    // a zone warp cannot start a loop from the previous zone's cues.
+                    .after(crate::weather::WeatherSampleSet),
             );
     }
 }
@@ -1625,6 +1639,253 @@ mod tests {
             volumes[0] > 0.0 && volumes[0] < 1.0,
             "the surviving emitter is mid-rolloff from the player, got {volumes:?}"
         );
+    }
+
+    // research/XIClient/.../Resource/Derived/CYySepRes.cpp:44-58 — full inside `near`,
+    // linear to silence at `far`, hard cull past it.
+    #[test]
+    fn calc3d_ramps_linearly_between_near_and_far() {
+        let listener = Vec3::new(10.0, 4.0, -3.0);
+        let at = |d: f32| {
+            sfx_attenuation_calc3d(
+                listener,
+                listener + Vec3::X * d,
+                3.0,
+                30.0,
+                UNATTACHED_VERTICAL_WEIGHT,
+            )
+        };
+        assert_eq!(at(0.0), 1.0);
+        assert_eq!(at(3.0), 1.0);
+        assert!((at(16.5) - 0.5).abs() < 1e-6, "midpoint: {}", at(16.5));
+        assert_eq!(at(30.0), 0.0);
+        assert_eq!(at(30.1), 0.0);
+        assert_eq!(at(1000.0), 0.0);
+
+        let mut prev = 1.0;
+        for i in 0..=64 {
+            let g = at(3.0 + 27.0 * (i as f32 / 64.0));
+            assert!(g <= prev + 1e-6, "gain rose from {prev} to {g}");
+            assert!((0.0..=1.0).contains(&g));
+            prev = g;
+        }
+    }
+
+    // CYySepRes.cpp:24-29 substitutes the class defaults for a DAT-authored 0, which 591 of
+    // the 5,895 shipped sound generators rely on.
+    #[test]
+    fn calc3d_substitutes_the_class_defaults_for_a_zero_range() {
+        let l = Vec3::ZERO;
+        let zeroed =
+            |d: f32| sfx_attenuation_calc3d(l, Vec3::X * d, 0.0, 0.0, UNATTACHED_VERTICAL_WEIGHT);
+        let explicit = |d: f32| {
+            sfx_attenuation_calc3d(
+                l,
+                Vec3::X * d,
+                SOUND_NEAR_DEFAULT,
+                SOUND_FAR_DEFAULT,
+                UNATTACHED_VERTICAL_WEIGHT,
+            )
+        };
+        for d in [0.0, 2.0, 3.0, 12.0, 29.0, 30.0, 45.0] {
+            assert_eq!(zeroed(d), explicit(d), "{d} yalms");
+        }
+    }
+
+    // 25 shipped generators author near > far (file 101's `naki`/`se01`/`se02` at far 30 /
+    // near 50). The ordering makes everything inside far full volume and everything past it
+    // silent, which is what retail's `v10 <= a5` / `v10 > a4` nesting does.
+    #[test]
+    fn calc3d_handles_a_near_wider_than_far() {
+        let l = Vec3::ZERO;
+        let at =
+            |d: f32| sfx_attenuation_calc3d(l, Vec3::X * d, 50.0, 30.0, UNATTACHED_VERTICAL_WEIGHT);
+        assert_eq!(at(0.0), 1.0);
+        assert_eq!(at(29.9), 1.0);
+        assert_eq!(at(30.1), 0.0);
+    }
+
+    // CYyGenerator.cpp:1173-1176 marks an unattached elem, and Calc3D skips the 3x vertical
+    // weight for exactly those. Zone-static emitters are unattached, so a cue 20 yalms
+    // overhead is still audible where an actor-attached one would already be culled.
+    #[test]
+    fn calc3d_weights_height_only_for_attached_emitters() {
+        let l = Vec3::ZERO;
+        let overhead = Vec3::Y * 20.0;
+        assert!(
+            sfx_attenuation_calc3d(l, overhead, 3.0, 30.0, UNATTACHED_VERTICAL_WEIGHT) > 0.0,
+            "an unattached emitter 20 yalms up is inside far"
+        );
+        assert_eq!(
+            sfx_attenuation_calc3d(l, overhead, 3.0, 30.0, ATTACHED_VERTICAL_WEIGHT),
+            0.0,
+            "the same emitter attached measures 60 yalms and is culled"
+        );
+    }
+
+    fn ambient_set(cues: &[(u32, u32)]) -> ffxi_dat::weather::WeatherSet {
+        ffxi_dat::weather::WeatherSet {
+            outdoor_ambient: cues
+                .iter()
+                .map(|&(time_minutes, se_id)| ffxi_dat::weather::AmbientCue {
+                    time_minutes,
+                    se_id,
+                    loops: true,
+                })
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    fn bed_app(install: std::path::PathBuf) -> App {
+        const WEST_RONFAURE_ZONE_DAT: u32 = 200;
+        const DAY_BED: u32 = 1005;
+        const NIGHT_BED: u32 = 1007;
+
+        let mut app = App::new();
+        app.add_plugins(bevy::MinimalPlugins);
+        app.add_plugins(bevy::asset::AssetPlugin::default());
+        app.init_asset::<PcmAudio>();
+
+        let mut zone_weather = crate::weather::ZoneWeather::default();
+        zone_weather.file_id = Some(WEST_RONFAURE_ZONE_DAT);
+        // West Ronfaure's four fair-weather containers all resolve to the same pair.
+        for tag in [*b"suny", *b"clod", *b"mist", *b"fine"] {
+            zone_weather
+                .sets
+                .by_type
+                .insert(tag, ambient_set(&[(360, DAY_BED), (1080, NIGHT_BED)]));
+        }
+
+        app.insert_resource(zone_weather)
+            .insert_resource(BgmSlots {
+                install_root: Some(install),
+                ..Default::default()
+            })
+            .init_resource::<AudioMuteState>()
+            .init_resource::<SfxCache>()
+            .init_resource::<ZoneAmbientBed>()
+            .init_resource::<crate::weather_fx::CurrentWeather>()
+            .init_resource::<crate::vana_time::VanaClock>()
+            .add_systems(
+                Update,
+                (
+                    crate::weather::sample_zone_weather,
+                    observe_zone_ambient_bed,
+                )
+                    .chain(),
+            );
+        app
+    }
+
+    fn step_bed(app: &mut App, hour: f32, weather: ffxi_viewer_wire::Weather) -> Option<Entity> {
+        app.insert_resource(crate::vana_time::VanaClock::anchored_at_hour(hour));
+        app.insert_resource(crate::weather_fx::CurrentWeather(Some(weather)));
+        app.update();
+        app.world().resource::<ZoneAmbientBed>().entity
+    }
+
+    // The bead's headline failure, end to end: the bed must actually reach the mixer, swap
+    // exactly once on the 06:00 boundary, and hold across both a same-bucket time step and a
+    // weather change that resolves to the same se.
+    #[test]
+    fn zone_ambient_bed_plays_and_swaps_only_when_the_se_changes() {
+        use ffxi_viewer_wire::Weather;
+        const DAY_BED: u32 = 1005;
+        const NIGHT_BED: u32 = 1007;
+
+        let Some(root) = ffxi_dat::archive::open_test_install() else {
+            eprintln!("skipping: no FFXI install");
+            return;
+        };
+        let mut app = bed_app(root.root().to_path_buf());
+
+        let night = step_bed(&mut app, 5.0, Weather::Clouds).expect("pre-dawn bed spawns");
+        assert_eq!(
+            app.world().resource::<ZoneAmbientBed>().playing,
+            Some((Some(200), NIGHT_BED)),
+            "no key is earlier than 05:00, so the trailing 18:00 bed carries over"
+        );
+
+        let day = step_bed(&mut app, 6.0, Weather::Clouds).expect("dawn bed spawns");
+        assert_ne!(day, night, "crossing 06:00 must swap the bed");
+        assert_eq!(
+            app.world().resource::<ZoneAmbientBed>().playing,
+            Some((Some(200), DAY_BED))
+        );
+
+        assert_eq!(
+            step_bed(&mut app, 12.0, Weather::Clouds),
+            Some(day),
+            "the same time bucket must not restart the loop"
+        );
+        assert_eq!(
+            step_bed(&mut app, 12.0, Weather::Fog),
+            Some(day),
+            "clod -> mist resolve to the same bed; the loop must not restart"
+        );
+    }
+
+    // The regression pin for the loop point: the bed used to be re-added with
+    // `with_loop(Some(0))`, which restarts an 18-second ambience from its cold intro every
+    // pass instead of from the marked seam 1.3s in.
+    #[test]
+    fn zone_ambient_bed_honours_the_decoded_loop_point() {
+        use ffxi_viewer_wire::Weather;
+        // se001005: SPW loop_start block 3883 of 54,657, 2 channels.
+        const DAY_BED_LOOP_FRAME: usize = 62112;
+        const DAY_BED_CHANNELS: usize = 2;
+
+        let Some(root) = ffxi_dat::archive::open_test_install() else {
+            eprintln!("skipping: no FFXI install");
+            return;
+        };
+        let mut app = bed_app(root.root().to_path_buf());
+        let entity = step_bed(&mut app, 12.0, Weather::Clouds).expect("bed spawns");
+
+        let handle = app
+            .world()
+            .get::<AudioPlayer<PcmAudio>>(entity)
+            .expect("bed carries an AudioPlayer")
+            .0
+            .clone();
+        let pcm = app
+            .world()
+            .resource::<Assets<PcmAudio>>()
+            .get(&handle)
+            .expect("bed asset");
+        assert_eq!(
+            pcm.loop_start_sample,
+            Some(DAY_BED_LOOP_FRAME * DAY_BED_CHANNELS)
+        );
+    }
+
+    // A bed and a one-shot of the same se id must not share a handle, or whichever loaded
+    // first decides whether the other ever ends.
+    #[test]
+    fn sfx_cache_keys_the_loop_policy_with_the_se_id() {
+        let Some(root) = ffxi_dat::archive::open_test_install() else {
+            eprintln!("skipping: no FFXI install");
+            return;
+        };
+        const LOOPING_SE: u32 = 1005;
+
+        let mut app = App::new();
+        app.add_plugins(bevy::asset::AssetPlugin::default());
+        app.init_asset::<PcmAudio>();
+        let world = app.world_mut();
+        let mut cache = SfxCache::default();
+        let mut assets = world.resource_mut::<Assets<PcmAudio>>();
+
+        let looped = cache
+            .handle(root.root(), &mut assets, LOOPING_SE, true)
+            .unwrap();
+        let once = cache
+            .handle(root.root(), &mut assets, LOOPING_SE, false)
+            .unwrap();
+        assert_ne!(looped, once);
+        assert!(assets.get(&looped).unwrap().loop_start_sample.is_some());
+        assert_eq!(assets.get(&once).unwrap().loop_start_sample, None);
     }
 
     #[test]

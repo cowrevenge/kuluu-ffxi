@@ -293,16 +293,57 @@ pub fn weather_type_id(lsb_weather_id: u16) -> WeatherTypeId {
         .unwrap_or(&WEATHER_TYPE_FALLBACK)
 }
 
+/// One ambient bed keyed by the Vana'diel minute it takes over at.
+///
+/// research/XIClient/src/XIClient/source/World/Weather/WeatherTransition.cpp:432-479
+/// `FindPrevSound` — the 0x3D Seps nested under a `weat/<type>` container whose name
+/// passes [`crate::sep::activate_time_minutes`] are the per-time-of-day zone ambience;
+/// the ones that fail it are the payloads of the sibling sound generators, not beds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AmbientCue {
+    pub time_minutes: u32,
+    pub se_id: u32,
+    pub loops: bool,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct WeatherSet {
     pub outdoor: Vec<WeatherRecord>,
     pub indoor: Vec<WeatherRecord>,
+    pub outdoor_ambient: Vec<AmbientCue>,
+    pub indoor_ambient: Vec<AmbientCue>,
 }
 
 impl WeatherSet {
     pub fn is_empty(&self) -> bool {
-        self.outdoor.is_empty() && self.indoor.is_empty()
+        self.outdoor.is_empty()
+            && self.indoor.is_empty()
+            && self.outdoor_ambient.is_empty()
+            && self.indoor_ambient.is_empty()
     }
+
+    pub fn ambient(&self, indoor: bool) -> &[AmbientCue] {
+        if indoor && !self.indoor_ambient.is_empty() {
+            &self.indoor_ambient
+        } else {
+            &self.outdoor_ambient
+        }
+    }
+}
+
+/// The bed retail would be playing at `time_minutes`.
+///
+/// WeatherTransition.cpp:453-470: the greatest activate time earlier than now, and when
+/// nothing is earlier the LAST candidate enumerated — not the latest-keyed one, so `cues`
+/// must stay in DAT order. Retail's `<` is on sub-minute tick times against a key whose
+/// seconds are always zero (FileResource.cpp:630-641), so at whole-minute resolution the
+/// key that just took over is `<=` rather than `<`.
+pub fn select_ambient(cues: &[AmbientCue], time_minutes: u32) -> Option<&AmbientCue> {
+    let now = time_minutes % 1440;
+    cues.iter()
+        .filter(|c| c.time_minutes <= now)
+        .min_by_key(|c| now - c.time_minutes)
+        .or_else(|| cues.last())
 }
 
 /// One area's environment: the per-weather-type record sets keyed by the
@@ -355,6 +396,9 @@ impl ZoneWeatherSets {
 
 const WEAT_DIR: WeatherTypeId = *b"weat";
 const INDO_DIR: WeatherTypeId = *b"indo";
+// CYySepRes.cpp:189-190 rejects any Sep whose parent container FourCC is 'rtxe', which is
+// `extr` in DAT byte order.
+const EXTR_DIR: WeatherTypeId = *b"extr";
 
 pub fn collect_zone_weather_sets(dat_bytes: &[u8]) -> ZoneWeatherSets {
     let tree = chunk::walk_tree(dat_bytes);
@@ -401,19 +445,19 @@ fn find_weat_dirs(
     let is_zone_root = node
         .children
         .iter()
-        .any(|c| c.chunk.kind == 0x01 && c.chunk.name == WEAT_DIR);
+        .any(|c| c.chunk.kind == ChunkKind::Rmp as u8 && c.chunk.name == WEAT_DIR);
 
     for child in &node.children {
         if child.chunk.kind != 0x01 {
             continue;
         }
         if child.chunk.name == WEAT_DIR {
-            harvest_weat_dir(child, by_type);
+            harvest_weat_dir(child, by_type, HarvestAmbient::Yes);
             continue;
         }
         if is_zone_root {
             let mut area: WeatherSetsByType = HashMap::new();
-            harvest_weat_dir(child, &mut area);
+            harvest_weat_dir(child, &mut area, HarvestAmbient::No);
             area.retain(|_, set| !set.is_empty());
             if !area.is_empty() {
                 by_area
@@ -428,7 +472,16 @@ fn find_weat_dirs(
     }
 }
 
-fn harvest_weat_dir(weat: &ChunkNode, by_type: &mut WeatherSetsByType) {
+// Ambient beds are harvested only from a real `weat` container. The area-container arm
+// of find_weat_dirs treats every dir beside `weat` as a weather-type parent, and a zone
+// root's other subtrees ship Seps whose names are valid HHMM by coincidence
+// (`f_tu/fser/0111` is a footstep, `f_tu/effe/ggwa/0000` a waterfall).
+enum HarvestAmbient {
+    Yes,
+    No,
+}
+
+fn harvest_weat_dir(weat: &ChunkNode, by_type: &mut WeatherSetsByType, ambient: HarvestAmbient) {
     for type_node in &weat.children {
         if type_node.chunk.kind != 0x01 {
             continue;
@@ -436,9 +489,44 @@ fn harvest_weat_dir(weat: &ChunkNode, by_type: &mut WeatherSetsByType) {
         let set = by_type.entry(type_node.chunk.name).or_default();
         push_weather_records(type_node, &mut set.outdoor);
         for child in &type_node.children {
-            if child.chunk.kind == 0x01 && child.chunk.name == INDO_DIR {
+            if child.chunk.kind == ChunkKind::Rmp as u8 && child.chunk.name == INDO_DIR {
                 push_weather_records(child, &mut set.indoor);
             }
+        }
+        if matches!(ambient, HarvestAmbient::Yes) {
+            push_ambient_cues(type_node, type_node.chunk.name, set);
+        }
+    }
+}
+
+// WeatherTransition.cpp:446-448 enumerates Seps with `PrepareFromResource(.., Sep, 0, -1)`,
+// which descends the whole container, so a bed nested below the weather tag is in scope.
+// :450-455 then splits them on whether their immediate parent is the `indo` child, and
+// CYySepRes.cpp:186-192 drops anything parented by `extr` outright.
+fn push_ambient_cues(node: &ChunkNode, parent: WeatherTypeId, set: &mut WeatherSet) {
+    for child in &node.children {
+        if child.chunk.kind == ChunkKind::Rmp as u8 || !child.children.is_empty() {
+            push_ambient_cues(child, child.chunk.name, set);
+            continue;
+        }
+        if ChunkKind::from_u8(child.chunk.kind) != Some(ChunkKind::Sep) || parent == EXTR_DIR {
+            continue;
+        }
+        let Some(time_minutes) = crate::sep::activate_time_minutes(&child.chunk.name) else {
+            continue;
+        };
+        let Ok(sep) = crate::sep::Sep::parse(child.chunk.name, child.chunk.data) else {
+            continue;
+        };
+        let cue = AmbientCue {
+            time_minutes,
+            se_id: sep.se_id,
+            loops: sep.loops(),
+        };
+        if parent == INDO_DIR {
+            set.indoor_ambient.push(cue);
+        } else {
+            set.outdoor_ambient.push(cue);
         }
     }
 }
@@ -1037,6 +1125,150 @@ mod tests {
         assert_eq!(weather_type_id(20), WEATHER_TYPE_FALLBACK);
         assert_eq!(weather_type_id(255), WEATHER_TYPE_FALLBACK);
         assert_eq!(WEATHER_TYPE_FALLBACK, *b"suny");
+    }
+
+    fn cue(time_minutes: u32, se_id: u32) -> AmbientCue {
+        AmbientCue {
+            time_minutes,
+            se_id,
+            loops: true,
+        }
+    }
+
+    // WeatherTransition.cpp:453-470 picks the greatest activate time strictly earlier than
+    // now and otherwise the LAST candidate enumerated, which is what makes a 06:00/18:00
+    // pair wrap: before dawn the night bed is the trailing key, not the nearest one.
+    #[test]
+    fn ambient_selection_takes_the_greatest_earlier_key_else_the_last() {
+        let day_night = [cue(360, 1005), cue(1080, 1007)];
+        assert_eq!(select_ambient(&day_night, 359).unwrap().se_id, 1007);
+        assert_eq!(select_ambient(&day_night, 360).unwrap().se_id, 1005);
+        assert_eq!(select_ambient(&day_night, 1079).unwrap().se_id, 1005);
+        assert_eq!(select_ambient(&day_night, 1080).unwrap().se_id, 1007);
+        assert_eq!(select_ambient(&day_night, 1439).unwrap().se_id, 1007);
+
+        // f_hi's four-key twilight set: 04:30 and 16:30 share one bed.
+        let twilight = [cue(270, 10), cue(450, 11), cue(990, 12), cue(1170, 13)];
+        assert_eq!(select_ambient(&twilight, 300).unwrap().se_id, 10);
+        assert_eq!(select_ambient(&twilight, 1020).unwrap().se_id, 12);
+
+        assert!(select_ambient(&[], 720).is_none());
+    }
+
+    // Retail's fallback is "last enumerated", so DAT order is load-bearing and the cue
+    // lists must not be sorted the way the 0x2F record sets are.
+    #[test]
+    fn ambient_fallback_follows_dat_order_not_key_order() {
+        let reversed = [cue(1080, 1007), cue(360, 1005)];
+        assert_eq!(select_ambient(&reversed, 0).unwrap().se_id, 1005);
+    }
+
+    fn ambient_zone_dat(file_id: u32) -> Option<ZoneWeatherSets> {
+        let root = crate::DatRoot::from_env_or_default().ok()?;
+        let loc = root.resolve(file_id).ok()?;
+        let bytes = std::fs::read(loc.path_under(root.root())).ok()?;
+        Some(collect_zone_weather_sets(&bytes))
+    }
+
+    // Measured beds: West Ronfaure's day/night pair plus its indoor bed, Southern San
+    // d'Oria's wind pair, and Ru'Lude Gardens' thunder bed. The `thnd` Sep sitting beside
+    // that last one is a sound generator's payload (`set1`/`set2` at [-120,-20,120] and
+    // [100,-30,-140]) and must NOT enter the bed list.
+    #[test]
+    fn real_dat_ambient_beds_match_the_shipped_keys() {
+        const WEST_RONFAURE: u32 = 200;
+        const SOUTHERN_SAN_DORIA: u32 = 230;
+        const RULUDE_GARDENS: u32 = 101;
+
+        let Some(f_ro) = ambient_zone_dat(WEST_RONFAURE) else {
+            eprintln!("skipping: no FFXI install");
+            return;
+        };
+        let suny = &f_ro.by_type[b"suny"];
+        assert_eq!(
+            suny.outdoor_ambient,
+            vec![cue(360, 1005), cue(1080, 1007)],
+            "f_ro weat/suny beds"
+        );
+        assert_eq!(suny.indoor_ambient, vec![cue(0, 1056)]);
+        assert_eq!(suny.ambient(true), suny.indoor_ambient);
+        assert_eq!(suny.ambient(false), suny.outdoor_ambient);
+
+        let f_tu = ambient_zone_dat(SOUTHERN_SAN_DORIA).unwrap();
+        assert_eq!(
+            f_tu.by_type[b"wind"].outdoor_ambient,
+            vec![cue(360, 1037), cue(1080, 1039)]
+        );
+
+        let s_ju = ambient_zone_dat(RULUDE_GARDENS).unwrap();
+        let thdr = &s_ju.by_type[b"thdr"];
+        assert_eq!(thdr.outdoor_ambient, vec![cue(0, 1096)]);
+        assert!(
+            !thdr.outdoor_ambient.iter().any(|c| c.se_id == 2020),
+            "`thnd` is a generator payload, not a bed: {:?}",
+            thdr.outdoor_ambient
+        );
+    }
+
+    // Census guard: an over- or under-collecting filter is silent otherwise. Measured over
+    // every shipped zone DAT — 1,976 outdoor and 738 indoor candidates, none of them
+    // parented by `extr`, and no weather-type dir carrying more than four outdoor beds.
+    #[test]
+    fn real_dat_ambient_census_matches_the_measured_corpus() {
+        const MIN_OUTDOOR: usize = 1900;
+        const MIN_INDOOR: usize = 700;
+        const MAX_BEDS_PER_DIR: usize = 4;
+
+        let Ok(root) = crate::DatRoot::from_env_or_default() else {
+            eprintln!("skipping: no FFXI install");
+            return;
+        };
+        let mut seen = std::collections::HashSet::new();
+        let (mut outdoor, mut indoor) = (0usize, 0usize);
+        for &(_zone, file_id) in crate::zone_dat::ZONE_DAT_TABLE {
+            if !seen.insert(file_id) {
+                continue;
+            }
+            let Ok(loc) = root.resolve(file_id) else {
+                continue;
+            };
+            let Ok(bytes) = std::fs::read(loc.path_under(root.root())) else {
+                continue;
+            };
+            for (tag, set) in collect_zone_weather_sets(&bytes).by_type {
+                assert!(
+                    set.outdoor_ambient.len() <= MAX_BEDS_PER_DIR,
+                    "DAT {file_id} weat/{} has {} beds",
+                    String::from_utf8_lossy(&tag),
+                    set.outdoor_ambient.len()
+                );
+                outdoor += set.outdoor_ambient.len();
+                indoor += set.indoor_ambient.len();
+            }
+        }
+        assert!(outdoor >= MIN_OUTDOOR, "outdoor beds: {outdoor}");
+        assert!(indoor >= MIN_INDOOR, "indoor beds: {indoor}");
+    }
+
+    // `f_tu/fser/0111` is a footstep Sep whose name is a valid HHMM by coincidence. The
+    // area-container arm treats every dir beside `weat` as a weather-type parent, so
+    // without the weat-only gate it would register `fser` as an area full of beds.
+    #[test]
+    fn real_dat_seps_outside_weat_are_never_beds() {
+        const SOUTHERN_SAN_DORIA: u32 = 230;
+        let Some(sets) = ambient_zone_dat(SOUTHERN_SAN_DORIA) else {
+            eprintln!("skipping: no FFXI install");
+            return;
+        };
+        for (area, by_type) in &sets.by_area {
+            for (tag, set) in by_type {
+                assert!(
+                    set.outdoor_ambient.is_empty() && set.indoor_ambient.is_empty(),
+                    "area {area:#x} tag {} collected beds outside weat/",
+                    String::from_utf8_lossy(tag)
+                );
+            }
+        }
     }
 
     #[test]

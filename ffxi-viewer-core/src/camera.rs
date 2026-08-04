@@ -48,6 +48,14 @@ pub fn nameplate_anchor_y(baked: Option<&BakedActor>) -> f32 {
 #[derive(Component)]
 pub struct OperatorCamera;
 
+/// viewer-core owns no phase state machine, and the launcher backdrop drives the same
+/// `SceneState` the in-game path does. The operator camera is spawned `OnEnter(InGame)` and
+/// reaped with the rest of the `InGameEntity` set on exit, so its presence is the in-game
+/// gate for systems that must not fire behind the character-select screen.
+pub fn in_game(cameras: Query<(), With<OperatorCamera>>) -> bool {
+    !cameras.is_empty()
+}
+
 pub const WORLD_GIZMO_LAYER: usize = 2;
 
 pub fn configure_gizmo_render_layer(mut store: ResMut<bevy::gizmos::config::GizmoConfigStore>) {

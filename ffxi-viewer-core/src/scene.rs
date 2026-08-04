@@ -290,11 +290,6 @@ pub fn sync_entities_system(
                 }
             }
             None => {
-                let pickable = if is_self {
-                    Pickable::IGNORE
-                } else {
-                    Pickable::default()
-                };
                 // Doors/transports have no client model — their visual is the
                 // zone/MMB geometry — so the placeholder orb would render as a
                 // floating sphere over them (kuluu-nf56). Suppress the orb mesh
@@ -312,7 +307,7 @@ pub fn sync_entities_system(
                         act_index: wire.act_index,
                         kind: wire.kind,
                     },
-                    pickable,
+                    Pickable::default(),
                     Transform {
                         translation: world_pos,
                         rotation: heading_to_quat(wire.heading),

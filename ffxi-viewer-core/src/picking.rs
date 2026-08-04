@@ -7,6 +7,7 @@ use bevy::picking::Pickable;
 use bevy::prelude::*;
 use ffxi_viewer_wire::EntityKind;
 
+use crate::camera::CameraMode;
 use crate::components::{IsSelf, Nameplate, WorldEntity};
 use crate::input_mode::{InputMode, TargetActionState};
 use crate::scene::{BakedActor, Target};
@@ -55,6 +56,7 @@ impl Plugin for PickingPlugin {
                 ..default()
             })
             .init_resource::<HoveredEntity>()
+            .init_resource::<CameraMode>()
             .init_resource::<PickBridgePointer>()
             .init_resource::<WorldPickingEnabled>()
             .add_systems(
@@ -117,31 +119,45 @@ fn hitbox_dims(kind: EntityKind, baked: Option<&BakedActor>) -> (f32, f32, f32) 
     (half_width, box_height, center_y)
 }
 
+/// Retail selects your own character on a click like any other actor. The
+/// first-person eye sits inside the hitbox, where the box would swallow every
+/// world click, so the self box is a click surface in chase view only.
+pub fn self_hitbox_pickable(mode: CameraMode) -> bool {
+    matches!(mode, CameraMode::Chase)
+}
+
 fn sync_entity_hitboxes(
     mut commands: Commands,
     assets: Res<HitboxAssets>,
-    q_entity: Query<
-        (
-            Entity,
-            &WorldEntity,
-            Option<&BakedActor>,
-            Option<&HitboxChild>,
-        ),
-        Without<IsSelf>,
-    >,
-    mut q_box: Query<&mut Transform, With<EntityHitbox>>,
+    camera_mode: Res<CameraMode>,
+    q_entity: Query<(
+        Entity,
+        &WorldEntity,
+        Option<&BakedActor>,
+        Option<&HitboxChild>,
+        Has<IsSelf>,
+    )>,
+    mut q_box: Query<(&mut Transform, &mut Pickable), With<EntityHitbox>>,
 ) {
-    for (parent_e, world, baked, child) in &q_entity {
+    for (parent_e, world, baked, child, is_self) in &q_entity {
         let (half_width, box_height, center_y) = hitbox_dims(world.kind, baked);
         let translation = Vec3::new(0.0, center_y, 0.0);
         let scale = Vec3::new(half_width * 2.0, box_height, half_width * 2.0);
+        let pickable = if is_self && !self_hitbox_pickable(*camera_mode) {
+            Pickable::IGNORE
+        } else {
+            Pickable::default()
+        };
 
         match child {
             Some(HitboxChild(box_e)) => {
-                if let Ok(mut tf) = q_box.get_mut(*box_e) {
+                if let Ok((mut tf, mut pick)) = q_box.get_mut(*box_e) {
                     if tf.scale != scale || tf.translation != translation {
                         tf.translation = translation;
                         tf.scale = scale;
+                    }
+                    if *pick != pickable {
+                        *pick = pickable;
                     }
                 }
             }
@@ -161,7 +177,7 @@ fn sync_entity_hitboxes(
                         Visibility::Visible,
                         NotShadowCaster,
                         NotShadowReceiver,
-                        Pickable::default(),
+                        pickable,
                         ChildOf(parent_e),
                     ))
                     .id();
@@ -369,7 +385,7 @@ mod tests {
     }
 
     #[test]
-    fn click_on_self_capsule_with_target_clears() {
+    fn click_on_id_zero_with_target_clears() {
         assert_eq!(
             resolve_click_target(Some(0), Some(17), false),
             ClickResolution::Clear,
@@ -377,10 +393,58 @@ mod tests {
     }
 
     #[test]
-    fn click_on_self_capsule_without_target_opens_menu() {
+    fn click_on_id_zero_without_target_opens_menu() {
         assert_eq!(
             resolve_click_target(Some(0), None, false),
             ClickResolution::OpenContextMenu,
+        );
+    }
+
+    #[test]
+    fn self_is_clickable_in_third_person_only() {
+        assert!(self_hitbox_pickable(CameraMode::Chase));
+        assert!(!self_hitbox_pickable(CameraMode::FirstPerson));
+    }
+
+    #[test]
+    fn self_gets_a_hitbox_that_follows_the_camera_mode() {
+        use bevy::ecs::system::RunSystemOnce;
+
+        let mut world = World::new();
+        world.insert_resource(HitboxAssets {
+            mesh: Handle::default(),
+            material: Handle::default(),
+        });
+        world.insert_resource(CameraMode::Chase);
+        let self_e = world
+            .spawn((
+                IsSelf,
+                WorldEntity {
+                    id: 7,
+                    act_index: 1,
+                    kind: EntityKind::Pc,
+                },
+                Transform::default(),
+                Visibility::default(),
+            ))
+            .id();
+
+        world.run_system_once(sync_entity_hitboxes).unwrap();
+        let box_e = world
+            .entity(self_e)
+            .get::<HitboxChild>()
+            .expect("self is a click target too")
+            .0;
+        assert_eq!(
+            world.entity(box_e).get::<Pickable>().copied(),
+            Some(Pickable::default()),
+        );
+
+        world.insert_resource(CameraMode::FirstPerson);
+        world.run_system_once(sync_entity_hitboxes).unwrap();
+        assert_eq!(
+            world.entity(box_e).get::<Pickable>().copied(),
+            Some(Pickable::IGNORE),
         );
     }
 

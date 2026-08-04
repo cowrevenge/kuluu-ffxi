@@ -189,6 +189,9 @@ impl NameColorChoice {
 pub fn name_color_choice(entity: &Entity, ctx: SelfContext<'_>) -> NameColorChoice {
     use NameColorChoice::Row;
     let flags = &entity.char_flags;
+    // Every flag below except `allegiance`, `charm`, `trust` and `pet` is only
+    // real on CHAR_PC. See `pc_flags_are_real`.
+    let is_pc = pc_flags_are_real(entity.kind);
 
     if entity.is_door()
         || matches!(
@@ -212,7 +215,7 @@ pub fn name_color_choice(entity: &Entity, ctx: SelfContext<'_>) -> NameColorChoi
         }
     }
 
-    if flags.gm_level >= MIN_GM_LEVEL {
+    if is_pc && flags.gm_level >= MIN_GM_LEVEL {
         if let Some(&row) = GM_COLOR_INDICES.get(usize::from(flags.gm_level)) {
             return Row(row);
         }
@@ -227,16 +230,16 @@ pub fn name_color_choice(entity: &Entity, ctx: SelfContext<'_>) -> NameColorChoi
         return Row(ncol::PARTY);
     }
 
-    if flags.yell {
-        return Row(ncol::YELL);
-    }
-    if flags.lfg_master || flags.lfg || flags.auto_party {
-        return Row(ncol::SEEKING);
-    }
-    if flags.anonymous {
-        return Row(ncol::ANONYMOUS);
-    }
-    if matches!(entity.kind, EntityKind::Pc) {
+    if is_pc {
+        if flags.yell {
+            return Row(ncol::YELL);
+        }
+        if flags.lfg_master || flags.lfg || flags.auto_party {
+            return Row(ncol::SEEKING);
+        }
+        if flags.anonymous {
+            return Row(ncol::ANONYMOUS);
+        }
         return Row(ncol::PC);
     }
 
@@ -247,17 +250,42 @@ pub fn name_color_choice(entity: &Entity, ctx: SelfContext<'_>) -> NameColorChoi
         return Row(ncol::PARTY);
     }
 
-    if flags.monster {
+    // Retail reads Flags1.MonsterFlag here, but LSB writes STATUS_TYPE over that
+    // byte, so the bit is 0 for a live mob (see `pc_flags_are_real`). Our own
+    // classification of the spawn is the trustworthy signal.
+    if matches!(entity.kind, EntityKind::Mob) {
         Row(ncol::MOB)
     } else {
         Row(ncol::NPC)
     }
 }
 
+/// Whether an entity's `CharFlags` carry their documented `CHAR_PC` meaning.
+///
+/// They only do on 0x0D. `CHAR_NPC` (0x0E) reuses the same bytes for unrelated
+/// data — `ref<uint8>(0x20) = status` puts STATUS_TYPE over `Flags1`'s low byte
+/// (so `MonsterFlag` is really `status & 1`, and 0 for a live mob), and
+/// `ref<uint32>(0x21) = m_flags` covers the rest of `Flags1`, landing `m_flags`
+/// bit 3 exactly on `LfgFlag` — which is why a plain NPC would otherwise draw in
+/// the seeking-party colour. vendor/server/src/map/packets/entity_update.cpp:328-357.
+///
+/// Retail reaches the same place from the other side: its 0x0E handler *zeroes*
+/// LfgFlag, AutoPartyFlag, AnonymousFlag, PlayOnelineFlag, LinkShellFlag and
+/// LinkDeadFlag rather than reading them off the packet
+/// (research/XIClient/.../0x00E.cpp:236-244).
+///
+/// `allegiance` (0x29), `charm` (0x27 bit 3), `trust` and `pet` (0x28) survive:
+/// LSB writes those explicitly on 0x0E.
+fn pc_flags_are_real(kind: EntityKind) -> bool {
+    matches!(kind, EntityKind::Pc)
+}
+
 /// The claimed-monster block, ActorTelemetry.cpp:1669-1717. A claim only
 /// colours something retail treats as a monster.
 fn claim_color(entity: &Entity, ctx: SelfContext<'_>) -> Option<NameColorChoice> {
-    if !entity.char_flags.monster || entity.claim_id == 0 {
+    // Retail gates this on Flags1.MonsterFlag; that bit is unusable against LSB
+    // (see `pc_flags_are_real`), so gate on the classified kind instead.
+    if !matches!(entity.kind, EntityKind::Mob) || entity.claim_id == 0 {
         return None;
     }
     let claimed_by_self = ctx.self_id == Some(entity.claim_id);
@@ -518,6 +546,79 @@ mod tests {
             name_color_choice(&entity(EntityKind::Npc, 0x0300_0001), solo(&[])),
             NameColorChoice::Row(ncol::NPC)
         );
+    }
+
+    /// On 0x0E, `ref<uint32>(0x21) = m_flags` covers Flags1 bits 8..31, so an
+    /// ordinary NPC's flag word lights LfgFlag, AnonymousFlag, YellFlag and a
+    /// GmLevel at random. None of them may reach the colour: a friendly NPC is
+    /// green whatever that word happens to hold.
+    #[test]
+    fn npc_flag_bytes_are_junk_and_never_recolour_it() {
+        let mut npc = entity(EntityKind::Npc, 0x0300_0001);
+        npc.char_flags = CharFlags {
+            lfg: true,
+            lfg_master: true,
+            auto_party: true,
+            anonymous: true,
+            yell: true,
+            gm_level: 7,
+            linkshell: true,
+            away: true,
+            ..CharFlags::default()
+        };
+        assert_eq!(
+            name_color_choice(&npc, solo(&[])),
+            NameColorChoice::Row(ncol::NPC),
+            "m_flags bleeding through Flags1 must not colour an NPC"
+        );
+    }
+
+    /// The same junk on a mob must leave it the plain mob colour.
+    #[test]
+    fn mob_flag_bytes_are_junk_and_never_recolour_it() {
+        let mut m = mob(0);
+        m.char_flags.lfg = true;
+        m.char_flags.anonymous = true;
+        m.char_flags.gm_level = 5;
+        assert_eq!(
+            name_color_choice(&m, solo(&[])),
+            NameColorChoice::Row(ncol::MOB)
+        );
+    }
+
+    /// LSB writes STATUS_TYPE over the byte retail reads MonsterFlag from, so
+    /// the bit is 0 for a live mob. Colouring must not depend on it.
+    #[test]
+    fn a_mob_colours_from_its_kind_not_the_monster_bit() {
+        let mut unclaimed = mob(0);
+        unclaimed.char_flags.monster = false;
+        assert_eq!(
+            name_color_choice(&unclaimed, solo(&[])),
+            NameColorChoice::Row(ncol::MOB),
+            "a live mob has MonsterFlag clear under LSB"
+        );
+
+        let mut claimed = mob(STRANGER_ID);
+        claimed.char_flags.monster = false;
+        assert_eq!(
+            name_color_choice(&claimed, solo(&[])),
+            NameColorChoice::Row(ncol::CLAIMED_BY_OTHER),
+            "the claim colour must not need the monster bit"
+        );
+    }
+
+    /// A GM colour is a PC-only outcome; the bits are junk on any other spawn.
+    #[test]
+    fn only_players_can_take_a_gm_colour() {
+        for kind in [EntityKind::Npc, EntityKind::Mob, EntityKind::Pet] {
+            let mut e = entity(kind, 0x0300_0002);
+            e.char_flags.gm_level = 5;
+            assert_ne!(
+                name_color_choice(&e, solo(&[])),
+                NameColorChoice::Row(GM_COLOR_INDICES[5]),
+                "{kind:?} must not take a GM colour"
+            );
+        }
     }
 
     #[test]

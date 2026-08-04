@@ -24,7 +24,7 @@ this codebase:
 | Session-state transition | reconnect path, key rotation, status machine | `vendor/server/src/map/map_networking.cpp`, `vendor/server/src/map/map_session.cpp` |
 | Numeric constant | message IDs, opcodes, status enums | `vendor/server/src/map/enums/*.h`, `vendor/server/sql/*.sql` |
 | Lifecycle assumption | when sessions are created/destroyed, IPC ordering | `vendor/server/src/map/map_session_container.cpp`, `vendor/server/src/map/ipc_*.cpp` |
-| Action handler | `0x01A` action sub-IDs, packet validation | `vendor/server/src/map/packets/c2s/0x01a_action.cpp`, `Phoenix/src/.../0x01a_action.cpp` |
+| Action handler | `0x01A` action sub-IDs, packet validation | `vendor/server/src/map/packets/c2s/0x01a_action.cpp`, `research/Phoenix/src/.../0x01a_action.cpp` |
 | Battle message template | placeholder→slot binding per `messageId` | `vendor/server/src/map/enums/msg_basic.h` + emission call sites |
 
 If the Rust symbol doesn't appear in this table's "Examples" column,
@@ -49,7 +49,7 @@ be arbitrary? If the former, it's a boundary symbol — proceed.
 2. **Grep both vendored trees.**
    ```
    grep -rn '<candidate>' vendor/server/src/
-   grep -rn '<candidate>' vendor/Phoenix/src/
+   grep -rn '<candidate>' research/Phoenix/src/   # local clone only; skip if absent
    ```
    The running container uses **LSB** (per
    `~/.claude/projects/.../memory/server_is_lsb_not_phoenix.md`), so

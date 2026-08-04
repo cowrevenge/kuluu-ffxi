@@ -15,11 +15,14 @@ workspace crates.
 
 ## Contents
 
-- `Phoenix/`, `AltanaViewer/`, `XiEvents/`, `XiPackets/` — submodule pointers
-  to upstream repos cited in source comments. Deinitialized by default;
-  populate on demand with `git submodule update --init research/<name>`.
-  See *Which reference for what* below before trusting any of them for
-  bit-level format details.
+- `AltanaViewer/`, `XiEvents/`, `XiPackets/` — submodule pointers to upstream
+  repos cited in source comments. Deinitialized by default; populate on demand
+  with `git submodule update --init research/<name>`. See *Which reference for
+  what* below before trusting any of them for bit-level format details.
+- `Phoenix/`, `xim/` — **not** submodules. Both upstreams are private or
+  git-only, so they are git-ignored and you clone them here yourself. Every
+  `Phoenix/…` citation in this tree assumes such a local clone; absent one,
+  the path simply won't exist.
 - `cexi-viewer/` — [cexi-viewer](https://github.com/CatsAndBoats/cexi-viewer),
   a Tauri/WebGL2 FFXI asset browser (zones, NPCs, PCs, textures, audio) with
   GPU skinning. GPL-3. Reference for DAT parsing, skeleton posing, and
@@ -53,7 +56,9 @@ the higher tier:
    the chase camera), which settles floor-vs-ceiling and camera-skip questions
    that XIM only approximates.
 3. **`Phoenix/`** — server-side divergence signal for wire-protocol
-   questions (LSB under `vendor/` stays authoritative for runtime).
+   questions (LSB under `vendor/` stays authoritative for runtime). Not
+   vendored; needs a local clone, so treat a missing path as "unavailable",
+   not "no divergence".
 4. **`cexi-docs/`** — community format docs (DAT, animation, zone mesh,
    event bytecode, audio, VFX). Useful cross-reference for `ffxi-dat` /
    `ffxi-audio` work, but AI-assisted: treat claims as hypotheses and

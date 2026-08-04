@@ -147,7 +147,7 @@ mod tests {
 | SQL `INSERT INTO` | `vendor/server/sql/*.sql` | Match `INSERT INTO \`table\` VALUES (...)` per line, split on `,` |
 | Lua action table | `vendor/server/scripts/...` | Heavier — only worth it for high-value, stable tables |
 | `#define` constants | scattered in C++ headers | Match `#define NAME VALUE` lines |
-| Phoenix-style `enum class X : uint8_t` | `vendor/Phoenix/src/.../*.h` | Same as LSB enums; useful when LSB hasn't migrated |
+| Phoenix-style `enum class X : uint8_t` | `research/Phoenix/src/.../*.h` (local clone only) | Same as LSB enums; useful when LSB hasn't migrated |
 
 ## When to extend an existing scraper vs add a new one
 

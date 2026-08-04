@@ -1,7 +1,3 @@
-[submodule "research/Phoenix"]
-	path = research/Phoenix
-	url = git@github.com:phoenixffxi/Phoenix.git
-	branch = beta
 [submodule "server"]
 	path = vendor/server
 	url = git@github.com:LandSandBoat/server.git

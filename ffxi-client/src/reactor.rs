@@ -1126,7 +1126,7 @@ fn detour_navmesh_path(zone_id: u16) -> Option<PathBuf> {
 
 fn find_navmesh_dir(start: &std::path::Path) -> Option<PathBuf> {
     for ancestor in start.ancestors() {
-        for sib in ["vendor/server/navmeshes", "vendor/Phoenix/navmeshes"] {
+        for sib in ["vendor/server/navmeshes", "research/Phoenix/navmeshes"] {
             let candidate = ancestor.join(sib);
             if candidate.is_dir() {
                 return Some(candidate);

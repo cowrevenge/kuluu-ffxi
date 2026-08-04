@@ -1,6 +1,6 @@
 ---
 name: protocol-conformance-reviewer
-description: Use this agent to audit any diff that touches code at the LSB boundary (wire decoders/encoders, coord transforms, session-state transitions, shared numeric constants, lifecycle assumptions). Trigger proactively after non-trivial edits to ffxi-proto/, ffxi-client/src/session.rs, ffxi-client/src/wire_translate.rs, ffxi-nav-recast/src/lib.rs, ffxi-client/src/map_client.rs, ffxi-client/src/reactor.rs, or any file that cites vendor/server/ or vendor/Phoenix/ in comments. Generic over boundary types — reports divergences from LSB's authoritative source with file:line pairs on both sides.
+description: Use this agent to audit any diff that touches code at the LSB boundary (wire decoders/encoders, coord transforms, session-state transitions, shared numeric constants, lifecycle assumptions). Trigger proactively after non-trivial edits to ffxi-proto/, ffxi-client/src/session.rs, ffxi-client/src/wire_translate.rs, ffxi-nav-recast/src/lib.rs, ffxi-client/src/map_client.rs, ffxi-client/src/reactor.rs, or any file that cites vendor/server/ or research/Phoenix/ in comments. Generic over boundary types — reports divergences from LSB's authoritative source with file:line pairs on both sides.
 tools: Read, Grep, Glob, Bash
 ---
 
@@ -15,7 +15,7 @@ mechanically.
 
 - **Authoritative server source**: `vendor/server/` (LSB). 
   The running dev container is `landsandboat/server:testing`. Phoenix
-  (`vendor/Phoenix/`) is vendored too but is **not** what runs —
+  (`research/Phoenix/`, a local clone you make yourself — not vendored, often absent) is **not** what runs —
   treat it as divergence evidence, not as truth.
 - **Cite citations**: code at the LSB boundary should already carry
   a `vendor/server/...:line` reference in comments. Missing citations
@@ -60,7 +60,7 @@ Follow the lsb-mirror-check skill's lookup procedure. Briefly:
   `MsgBasic::*`, opcode hex (`0x05E`), utility namespaces
   (`charutils::`, `zoneutils::`, etc.)
 - `grep -rn '<candidate>' vendor/server/src/` (authoritative)
-- `grep -rn '<candidate>' vendor/Phoenix/src/` (divergence signal)
+- `grep -rn '<candidate>' research/Phoenix/src/` (divergence signal; skip if the path is absent)
 - If candidates fail, search by structural identifier — e.g., the
   hex opcode for a packet, the numeric value of a constant.
 
@@ -104,7 +104,7 @@ Output one section per boundary symbol changed, in this shape:
 **kind**: wire-decoder | coord-transform | …
 
 **LSB counterpart**: vendor/server/<file:line> (link)
-**Phoenix counterpart** (if exists): vendor/Phoenix/<file:line>
+**Phoenix counterpart** (only if a local clone exists): research/Phoenix/<file>
   divergence vs LSB: <one-liner>
 
 **Verified**:

@@ -86,7 +86,7 @@ upstream bytes committed) or fetched locally and git-ignored.
 | Project | Role | License / status |
 | --- | --- | --- |
 | [XIM][xim] | Vanilla feature behavior reference (git-ignored, fetched locally) | GPL-3.0 |
-| [phoenixffxi/Phoenix][phx] | Server-protocol reference (submodule pointer) | GPL-3.0 |
+| [phoenixffxi/Phoenix][phx] | Server-protocol reference (git-ignored, fetched locally) | GPL-3.0 |
 | [voliathon/AltanaViewer][av] | DAT/format behavior reference (submodule pointer) | No declared license — treated as all-rights-reserved; reference only |
 | teschnei/lotus-ffxi | FFXI DAT / skeleton / audio **format** reference | No declared license — treated as all-rights-reserved; reference only (see §6) |
 

@@ -35,10 +35,11 @@ runs:
   steps:
     # vendor/server (LSB) is consumed at build time by ffxi-proto / ffxi-nav /
     # ffxi-dat build.rs scripts and is REQUIRED — the build panics without it.
-    # .gitmodules declares it (and Phoenix) with git@ SSH URLs; rewrite the
-    # public LandSandBoat repo to HTTPS so no SSH key is needed. We init only the
-    # public submodules the build actually reads and deliberately skip Phoenix /
-    # AltanaViewer to avoid private-repo auth.
+    # .gitmodules declares it with a git@ SSH URL; rewrite the public
+    # LandSandBoat repo to HTTPS so no SSH key is needed. We init only the
+    # public submodules the build actually reads and deliberately skip
+    # AltanaViewer to avoid private-repo auth. (Phoenix is not a submodule at
+    # all — it is a git-ignored local clone; see research/AGENTS.md.)
     # The Bevy/wgpu/Recast test+build artifacts are huge; on a stock runner the
     # ~14 GB disk fills and `ld` dies with SIGBUS. Reclaim the big preinstalled
     # toolchains the Rust build never touches. The maintained action deletes the

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # PreToolUse hook: when Claude is about to Edit/Write a file that
-# already cites `vendor/server/` or `vendor/Phoenix/` in its
+# already cites `vendor/server/` or `research/Phoenix/` in its
 # comments, surface a one-line reminder to cross-check against LSB.
 #
 # Self-maintaining registry: any file that needs LSB-check should
@@ -29,14 +29,14 @@ if [ "$(wc -c < "$file" 2>/dev/null || echo 0)" -gt 1048576 ]; then
   exit 0
 fi
 
-if grep -qE 'vendor/(server|Phoenix)/' "$file" 2>/dev/null; then
+if grep -qE '(vendor/server|research/Phoenix)/' "$file" 2>/dev/null; then
   # Surface the citation context so the implementer knows where
   # to look. Only the first few citations are shown to keep the
   # reminder small.
   cat >&2 <<MSG
-[lsb-boundary-reminder] '$file' cites vendor/server/ or vendor/Phoenix/ — this is LSB-boundary code.
+[lsb-boundary-reminder] '$file' cites vendor/server/ or research/Phoenix/ — this is LSB-boundary code.
 Before merging, verify the change still matches LSB's authoritative source. Existing citations in this file:
-$(grep -nE 'vendor/(server|Phoenix)/' "$file" | head -3 | sed 's/^/  /')
+$(grep -nE '(vendor/server|research/Phoenix)/' "$file" | head -3 | sed 's/^/  /')
 Use /lsb-mirror-check if you're unsure which LSB symbol to compare against.
 MSG
 fi

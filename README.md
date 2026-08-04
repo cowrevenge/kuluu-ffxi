@@ -73,10 +73,13 @@ Bypass a single push with `git push --no-verify`; `PREPUSH_FAST=1 git push`
 runs fmt only. (`scripts/install-hooks.sh` does the same thing without a build.)
 
 That's everything the compiler needs. Upstream repos that are **not used by
-the build** — only cited in source comments for reference (`Phoenix`,
-`AltanaViewer`) — live under `research/`, not `vendor/`. They stay
-deinitialized; `git submodule update --init research/<name>` populates one if
-you want to read the upstream sources.
+the build** — only cited in source comments for reference (`AltanaViewer`,
+`XiEvents`, `XiPackets`, `XIClient`, `cexi-*`) — live under `research/`, not
+`vendor/`. They stay deinitialized; `git submodule update --init
+research/<name>` populates one if you want to read the upstream sources.
+Phoenix is **not** a submodule: it is private, so clone it yourself into
+`research/Phoenix` (git-ignored) if you want the server-side divergence
+signal.
 
 To actually *run* the client you also need a user-provided retail install
 (~19G, never committed — see [Getting the game files](#getting-the-game-files)).

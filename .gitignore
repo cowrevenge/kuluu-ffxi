@@ -55,6 +55,9 @@ vendor/RZN-mapviewer/
 # XIM browser FFXI client (GPL-3) — read-only feature reference, NEVER commit.
 # Fetch a local copy with `research/fetch-xim.sh`. See research/README.md.
 research/xim/
+# Phoenix server (GPL-3) — private upstream, so not a submodule. Clone it here
+# yourself for the wire-protocol divergence signal. See research/AGENTS.md.
+research/Phoenix/
 # stray top-level copy (older fetch location)
 /xim/
 .functional-emotions

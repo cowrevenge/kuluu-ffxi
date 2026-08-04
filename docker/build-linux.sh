@@ -45,7 +45,7 @@ echo ">> [1/5] staging build source into $STAGE (excluding vendor/game-files, ta
 mkdir -p "$STAGE"
 rsync -a --delete \
     --exclude='/target/' --exclude='/dist/' --exclude='/.git/' \
-    --exclude='/vendor/game-files/' --exclude='/vendor/Phoenix/' \
+    --exclude='/vendor/game-files/' --exclude='/research/Phoenix/' \
     --exclude='/vendor/xi-tinkerer/' --exclude='/vendor/RZN-mapviewer/' \
     --exclude='/vendor/AltanaViewer/' \
     --exclude='/.omc/' --exclude='/.omo/' --exclude='/.claude/' \

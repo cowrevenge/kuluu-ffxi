@@ -678,14 +678,22 @@ pub(crate) fn load_viewed_map(
     let Some(root) = dat_root.0.as_ref() else {
         return;
     };
-    let dll = calib.ensure_dll(root.root());
-    match crate::minimap::retail::load_zone_map_image(root, dll.as_deref(), zone, idx, &mut images)
-    {
+    let Some(dll) = calib.ensure_dll(root.root()) else {
+        *viewed = ViewedMap::default();
+        return;
+    };
+    // `idx` is the row's ordinal in the Change Map list, which indexes the zone's
+    // maps in table order — `sub_zone_id` is not a dense index (kuluu-bqm5).
+    let Some(record) = dll.zone_maps(zone).get(usize::from(idx)).copied() else {
+        *viewed = ViewedMap::default();
+        return;
+    };
+    match crate::minimap::retail::load_zone_map_image(root, &record, &mut images) {
         Some((image, aabb)) => {
             *viewed = ViewedMap {
                 key: Some((zone, idx)),
                 image: Some(image),
-                aabb,
+                aabb: Some(aabb),
             };
         }
         None => *viewed = ViewedMap::default(),

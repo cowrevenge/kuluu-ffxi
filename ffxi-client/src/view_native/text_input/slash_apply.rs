@@ -15,15 +15,15 @@ fn minimap_retail_desc(
             RetailStatus::Idle => {}
         }
     }
-    match ffxi_dat::map_image::map_dat_for_zone(z) {
-        Some(file_id) => format!(
-            "pending (zone {z} maps to file {file_id}; img={} rzone={:?} failed={})",
-            state.retail_image.is_some(),
-            state.retail_zone,
-            state.retail_failed_zones.contains(&z),
-        ),
-        None => format!("no map-DAT mapping for zone {z}"),
-    }
+    // The file id is not named here: the loader picks it out of the FFXiMain
+    // zone-map record, and quoting the POLUtils table's id instead would report
+    // a different map than the one being loaded (kuluu-bqm5).
+    format!(
+        "pending (zone {z}; img={} rzone={:?} failed={})",
+        state.retail_image.is_some(),
+        state.retail_zone,
+        state.retail_failed_zones.contains(&z),
+    )
 }
 
 #[allow(clippy::too_many_arguments)]

@@ -20,10 +20,18 @@ const ZONE_MAP_STRIDE: usize = 0x0E;
 const ZONE_MAP_NEXT_DIVISOR: usize = 0x13;
 const ZONE_MAP_SIZE_NUMERATOR: u16 = 2560;
 
+/// The record's low nibble at byte 4 picks which file-table base its
+/// `file_table_offset` counts from. research/xim `ZoneMapTable.getFileTableOffset`.
+const ZONE_MAP_FILE_TABLE_BASES: [u32; 4] = [0x14C0, 0xD02F, 0xD147, 0x1592];
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ZoneMapRecord {
     pub zone_id: u16,
     pub sub_zone_id: u8,
+    /// The map image's own DAT file id. Carrying it here is what lets a caller
+    /// take the image and the calibration below from one row, instead of
+    /// cross-referencing a table keyed on a different index (kuluu-bqm5).
+    pub file_id: u32,
     pub size: u16,
     pub x_offset: i16,
     pub y_offset: i16,
@@ -64,25 +72,30 @@ impl MainDll {
     }
 
     pub fn zone_map(&self, zone_id: u16, sub_zone_id: u8) -> Option<ZoneMapRecord> {
-        let mut base = self.zone_map_base?;
+        self.zone_maps(zone_id)
+            .into_iter()
+            .find(|rec| rec.sub_zone_id == sub_zone_id)
+    }
+
+    /// Every map the zone ships, in table order. A quarter of the zones number
+    /// their maps from 1, so callers must enumerate rather than assume a
+    /// sub-zone 0 exists (kuluu-bqm5).
+    pub fn zone_maps(&self, zone_id: u16) -> Vec<ZoneMapRecord> {
+        let mut out = Vec::new();
+        let Some(mut base) = self.zone_map_base else {
+            return out;
+        };
         loop {
-            let rec = self.bytes.get(base..base + ZONE_MAP_STRIDE)?;
-            let zid = u16::from_le_bytes([rec[0], rec[1]]);
-            let divisor = rec[5];
-            if zid == zone_id && rec[2] == sub_zone_id {
-                if divisor == 0 {
-                    return None;
+            let Some(rec) = self.bytes.get(base..base + ZONE_MAP_STRIDE) else {
+                return out;
+            };
+            if u16::from_le_bytes([rec[0], rec[1]]) == zone_id {
+                if let Some(parsed) = parse_zone_map(rec) {
+                    out.push(parsed);
                 }
-                return Some(ZoneMapRecord {
-                    zone_id: zid,
-                    sub_zone_id: rec[2],
-                    size: ZONE_MAP_SIZE_NUMERATOR / divisor as u16,
-                    x_offset: i16::from_le_bytes([rec[10], rec[11]]),
-                    y_offset: i16::from_le_bytes([rec[12], rec[13]]),
-                });
             }
             match self.bytes.get(base + ZONE_MAP_NEXT_DIVISOR) {
-                Some(0) | None => return None,
+                Some(0) | None => return out,
                 Some(_) => base += ZONE_MAP_STRIDE,
             }
         }
@@ -118,6 +131,25 @@ fn find_offset(bytes: &[u8], hint: u32) -> Option<usize> {
         pos += 4;
     }
     None
+}
+
+/// One `ZONE_MAP_STRIDE`-byte row. `None` when the divisor is 0, which is how
+/// the table marks a zone that ships no drawable map.
+fn parse_zone_map(rec: &[u8]) -> Option<ZoneMapRecord> {
+    let divisor = rec[5];
+    if divisor == 0 {
+        return None;
+    }
+    let base = *ZONE_MAP_FILE_TABLE_BASES.get(usize::from(rec[4] & 0x0F))?;
+    let file_table_offset = i16::from_le_bytes([rec[8], rec[9]]);
+    Some(ZoneMapRecord {
+        zone_id: u16::from_le_bytes([rec[0], rec[1]]),
+        sub_zone_id: rec[2],
+        file_id: base.wrapping_add_signed(i32::from(file_table_offset)),
+        size: ZONE_MAP_SIZE_NUMERATOR / u16::from(divisor),
+        x_offset: i16::from_le_bytes([rec[10], rec[11]]),
+        y_offset: i16::from_le_bytes([rec[12], rec[13]]),
+    })
 }
 
 fn find_offset_u64(bytes: &[u8], hint: u64) -> Option<usize> {
@@ -208,5 +240,85 @@ mod tests {
         assert_eq!((rec.x_offset, rec.y_offset), (10, -20));
         assert_eq!(dll.zone_map(230, 0).map(|r| r.size), Some(320));
         assert_eq!(dll.zone_map(999, 0), None);
+    }
+
+    #[test]
+    fn zone_maps_enumerates_a_zone_that_numbers_its_maps_from_one() {
+        let mut bytes = vec![0u8; ZONE_MAP_STRIDE * 3];
+        for (slot, sub) in [(0usize, 1u8), (1, 2)] {
+            let at = slot * ZONE_MAP_STRIDE;
+            bytes[at..at + 2].copy_from_slice(&238u16.to_le_bytes());
+            bytes[at + 2] = sub;
+            bytes[at + 5] = 4;
+            bytes[at + 8..at + 10].copy_from_slice(&i16::from(sub).to_le_bytes());
+            bytes[at + ZONE_MAP_NEXT_DIVISOR] = 1;
+        }
+        let dll = MainDll {
+            bytes,
+            weapon_skill_base: 0,
+            dance_skill_base: 0,
+            emote_base: None,
+            zone_map_base: Some(0),
+        };
+
+        assert_eq!(dll.zone_map(238, 0), None, "this zone has no sub-zone 0");
+        let maps = dll.zone_maps(238);
+        assert_eq!(
+            maps.iter().map(|r| r.sub_zone_id).collect::<Vec<_>>(),
+            vec![1, 2],
+            "enumerating still finds both maps"
+        );
+        assert_eq!(
+            maps.iter().map(|r| r.file_id).collect::<Vec<_>>(),
+            vec![
+                ZONE_MAP_FILE_TABLE_BASES[0] + 1,
+                ZONE_MAP_FILE_TABLE_BASES[0] + 2
+            ],
+            "each record names its own map DAT"
+        );
+    }
+
+    /// Gated on a retail install (self-skips). The defect this guards is a
+    /// zone whose maps are numbered from 1 being looked up at sub-zone 0 and
+    /// silently coming back empty (kuluu-bqm5).
+    #[test]
+    fn real_dll_zone_maps_cover_every_zone_that_ships_one() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join(crate::archive::DEFAULT_INSTALL_DIR);
+        let Ok(dll) = MainDll::load(&root) else {
+            return;
+        };
+
+        // Windurst Waters numbers its two maps 1 and 2.
+        let waters = dll.zone_maps(238);
+        assert_eq!(waters.len(), 2, "zone 238 ships two maps");
+        assert!(
+            dll.zone_map(238, 0).is_none(),
+            "and none of them is sub-zone 0"
+        );
+        assert!(
+            waters.iter().all(|r| r.file_id != 0 && r.size > 0),
+            "each carries a usable file id and span"
+        );
+
+        // Across the whole table, enumerating never loses a zone that a
+        // sub-zone-0 lookup would have found.
+        let mut from_zero = 0usize;
+        let mut enumerated = 0usize;
+        for zone in 0..=u16::MAX {
+            let maps = dll.zone_maps(zone);
+            if !maps.is_empty() {
+                enumerated += 1;
+            }
+            if dll.zone_map(zone, 0).is_some() {
+                from_zero += 1;
+                assert!(!maps.is_empty(), "zone {zone} regressed");
+            }
+        }
+        assert!(
+            enumerated > from_zero,
+            "enumerating reaches more zones than a sub-zone-0 lookup ({enumerated} vs {from_zero})"
+        );
     }
 }

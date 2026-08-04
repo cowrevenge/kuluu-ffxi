@@ -35,10 +35,7 @@ fn main() {
             .expect("zone -> mzb file id"),
     };
     let root = DatRoot::from_env_or_default().expect("DatRoot");
-    let path = root
-        .resolve(file_id)
-        .expect("resolve")
-        .path_under(root.root());
+    let path = root.resolve(file_id).expect("resolve").path_under(&root);
     let bytes = std::fs::read(&path).expect("read dat");
     let chunks: Vec<_> = walk(&bytes).filter_map(Result::ok).collect();
     let chunk = chunks

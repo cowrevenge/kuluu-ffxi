@@ -104,7 +104,7 @@ fn sync_zone_particles(
     scene_state: Res<SceneState>,
     mut store: ResMut<ZoneParticles>,
     mut meshes: ResMut<Assets<Mesh>>,
-    mut mats: ResMut<Assets<StandardMaterial>>,
+    mut mats: ResMut<Assets<crate::ffxi_particle_material::FfxiParticleMaterial>>,
     mut images: ResMut<Assets<Image>>,
     mut sim: ResMut<ParticleSimulator>,
     mut commands: Commands,

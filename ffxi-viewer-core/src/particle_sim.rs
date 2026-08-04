@@ -7,7 +7,8 @@ use ffxi_dat::sprite_sheet::ParticleSpriteSheet;
 
 use crate::camera::OperatorCamera;
 use crate::components::InGameEntity;
-use crate::dat_d3m::{d3m_material, decoded_texture_to_image, D3mBlendMode};
+use crate::dat_d3m::{decoded_texture_to_image, D3mBlendMode};
+use crate::ffxi_particle_material::FfxiParticleMaterial;
 use crate::scheduler_runtime::{
     assets_holding, ActionAssets, GlobalEffectDir, MmbSpriteMesh, SchedulerStageEvent, ROUTINE_FPS,
 };
@@ -110,8 +111,12 @@ struct SpriteTemplate {
     positions: Vec<Vec3>,
     uvs: Vec<[f32; 2]>,
     indices: Vec<u32>,
-    brightness: Vec3,
-    vert_alpha: f32,
+    // Stage 0's D argument, one entry per `positions` entry. A particle mesh authors its
+    // silhouette and its tint in this gradient rather than in the texture — the home point's
+    // `sil` curtain (ROM/3/25.DAT) runs white -> purple (0x433F7D) -> black up each strip, and
+    // the black end is what makes an additive plume fade out instead of ending on a lit quad
+    // edge. Taking one vertex's colour for the whole mesh flattens all of that.
+    colors: Vec<Vec4>,
 }
 
 // research/XIClient/src/XIClient/source/Resource/Derived/CMoD3m.cpp:16-104 — the D3m texture-stage
@@ -124,13 +129,17 @@ struct SpriteTemplate {
 // the same per-stage ops, so every template kind goes through `d3m_stage_chain`.
 const D3M_STAGE1_RGB_GAIN: f32 = 2.0;
 const D3M_STAGE1_ALPHA_GAIN: f32 = 4.0;
-// Stage 0's MODULATE2X is already folded into `brightness`/`vert_alpha` by the /128 vertex-colour
+// Stage 0's MODULATE2X is already folded into `SpriteTemplate::colors` by the /128 vertex-colour
 // normalise (ffxi_dat::d3m::VERTEX_COLOR_DIVISOR). NonZeroOneTSS's SELECTARG1 does not double, so
 // the ignore-texture-alpha table divides it back out.
 const D3M_VERTEX_BAKED_GAIN: f32 = 2.0;
 // D3D saturates every texture-stage result. Stage 0's texture argument is only available in the
-// sampler, so the CPU-side stage-0 value saturates without it and the shader's later multiply by
-// a texel <= 1 keeps the drawn colour inside retail's ceiling.
+// sampler, so the CPU keeps only the clamp it can evaluate exactly — stage 0's, which is exact
+// wherever the vertex colour is at or below the /128 midpoint (D * T <= 1 then, so the clamp is
+// a no-op either way). Stage 1's clamp lands in ffxi_particle.wgsl, after the texel multiply:
+// applying it here instead threw away the 4x/8x MODULATE gains before the texel could use them,
+// which is why the home point crystal (D3m alpha 4 * 1.0 * 1.0, saturated in retail at every
+// `kori` texel) drew at bare texture alpha and let the ground show through.
 const D3M_STAGE_CLAMP: f32 = 1.0;
 
 // research/XIClient/src/XIClient/source/World/Generator/Effects/CMoD3mElem.cpp:57-63 — `OnDraw`
@@ -199,8 +208,8 @@ fn d3m_stage_chain(
         vertex_alpha.min(D3M_STAGE_CLAMP)
     };
     (
-        (stage0_rgb * f_rgb * D3M_STAGE1_RGB_GAIN).min(clamp),
-        (stage0_alpha * f_alpha * D3M_STAGE1_ALPHA_GAIN).min(D3M_STAGE_CLAMP),
+        stage0_rgb * f_rgb * D3M_STAGE1_RGB_GAIN,
+        stage0_alpha * f_alpha * D3M_STAGE1_ALPHA_GAIN,
     )
 }
 
@@ -301,7 +310,7 @@ pub fn spawn_particle_generators(
     q_xf: Query<&Transform>,
     global: Option<Res<GlobalEffectDir>>,
     mut meshes: ResMut<Assets<Mesh>>,
-    mut mats: ResMut<Assets<StandardMaterial>>,
+    mut mats: ResMut<Assets<FfxiParticleMaterial>>,
     mut images: ResMut<Assets<Image>>,
     mut sim: ResMut<ParticleSimulator>,
     mut commands: Commands,
@@ -342,7 +351,7 @@ pub fn spawn_particle_generators(
             ffxi_dat::particle_gen::ParticleBlend::Blend => D3mBlendMode::Blended,
             ffxi_dat::particle_gen::ParticleBlend::Subtract => D3mBlendMode::Subtractive,
         };
-        let mat = mats.add(d3m_material(blend, tex));
+        let mat = mats.add(FfxiParticleMaterial::new(blend, tex));
         let mesh = meshes.add(empty_mesh());
 
         let entity = commands
@@ -416,7 +425,7 @@ pub fn spawn_particle_generators(
 pub fn spawn_actor_auto_run_particles(
     q_added: Query<(Entity, &ActorAutoRunEffects), Added<ActorAutoRunEffects>>,
     mut meshes: ResMut<Assets<Mesh>>,
-    mut mats: ResMut<Assets<StandardMaterial>>,
+    mut mats: ResMut<Assets<FfxiParticleMaterial>>,
     mut images: ResMut<Assets<Image>>,
     mut sim: ResMut<ParticleSimulator>,
     mut commands: Commands,
@@ -436,7 +445,7 @@ pub fn spawn_actor_auto_run_particles(
                 ffxi_dat::particle_gen::ParticleBlend::Blend => D3mBlendMode::Blended,
                 ffxi_dat::particle_gen::ParticleBlend::Subtract => D3mBlendMode::Subtractive,
             };
-            let mat = mats.add(d3m_material(blend, tex));
+            let mat = mats.add(FfxiParticleMaterial::new(blend, tex));
             let mesh = meshes.add(empty_mesh());
 
             let entity = commands
@@ -504,7 +513,7 @@ pub fn spawn_zone_particle_generator(
     origin: Vec3,
     opts: ZoneGeneratorOptions,
     meshes: &mut Assets<Mesh>,
-    mats: &mut Assets<StandardMaterial>,
+    mats: &mut Assets<FfxiParticleMaterial>,
     images: &mut Assets<Image>,
     sim: &mut ParticleSimulator,
     commands: &mut Commands,
@@ -528,7 +537,7 @@ pub fn spawn_zone_particle_generator(
         ffxi_dat::particle_gen::ParticleBlend::Blend => D3mBlendMode::Blended,
         ffxi_dat::particle_gen::ParticleBlend::Subtract => D3mBlendMode::Subtractive,
     };
-    let mat = mats.add(d3m_material(blend, tex));
+    let mat = mats.add(FfxiParticleMaterial::new(blend, tex));
     let mesh = meshes.add(empty_mesh());
 
     let entity = commands
@@ -789,7 +798,7 @@ pub fn sync_particle_meshes(
                 live = g.particles.len(),
                 origin = ?g.origin,
                 scale = ?draw.as_ref().map(|d| d.scale),
-                rgb = ?draw.as_ref().map(|d| d.rgb),
+                rgb = ?draw.as_ref().map(|d| d.factor_rgb),
                 frame = ?draw.as_ref().map(|d| d.flipbook_frame),
                 "{:?} billboard",
                 g.def.attach_type,
@@ -818,11 +827,17 @@ pub fn sync_particle_meshes(
     }
 }
 
+// The per-particle half of a draw. The other half is the template's per-vertex colour, folded
+// in by `vertex_color` once per vertex.
 struct ParticleDraw {
     flipbook_frame: usize,
     scale: Vec2,
-    rgb: Vec3,
-    vert_alpha: f32,
+    // Stage 1's F argument (TEXTUREFACTOR): the generator colour after the time-of-day,
+    // day-of-week and moon-phase modulations.
+    factor_rgb: Vec3,
+    factor_alpha: f32,
+    // The raw life curve, before the saturating stage-1 alpha gain.
+    life_alpha: f32,
     world: Vec3,
 }
 
@@ -839,7 +854,6 @@ fn particle_draw(g: &LiveGenerator, p: &Particle, clock: &CelestialClock) -> Par
     } else {
         flipbook_index(g, progress)
     };
-    let tpl = flipbook_template(g, flipbook_frame);
     let sx = g
         .scale_x
         .as_ref()
@@ -895,27 +909,37 @@ fn particle_draw(g: &LiveGenerator, p: &Particle, clock: &CelestialClock) -> Par
         rgb = (rgb * Vec3::from_slice(&table[..3]) * CELESTIAL_MODULATE).min(Vec3::ONE);
     }
 
-    let (stage_rgb, stage_alpha) = d3m_stage_chain(
-        tpl.brightness,
-        tpl.vert_alpha,
-        rgb,
-        tfactor_alpha(&g.def, g.draw_path, alpha),
-        ignores_texture_alpha(&g.def, g.draw_path),
-    );
-    // Additive/subtract ignore the alpha channel, so the alpha curve modulates brightness;
-    // alpha-blended particles keep full-brightness colour and use the alpha channel. That
-    // fold is a brightness proxy rather than a blend factor, so it takes the raw life curve
-    // instead of the saturating stage-1 alpha.
-    let (rgb, vert_alpha) = match g.def.blend {
-        ffxi_dat::particle_gen::ParticleBlend::Blend => (stage_rgb, stage_alpha),
-        _ => (stage_rgb * alpha, 1.0),
-    };
     ParticleDraw {
         flipbook_frame,
         scale: Vec2::new(sx, sy),
-        rgb,
-        vert_alpha,
+        factor_rgb: rgb,
+        factor_alpha: tfactor_alpha(&g.def, g.draw_path, alpha),
+        life_alpha: alpha,
         world: g.origin + p.pos,
+    }
+}
+
+// D3D interpolates stage 0's D argument across the primitive, so the stage chain runs once per
+// vertex against the template's authored colour — not once per particle against a single
+// representative vertex.
+fn vertex_color(g: &LiveGenerator, draw: &ParticleDraw, vertex: Vec4) -> [f32; 4] {
+    let (stage_rgb, stage_alpha) = d3m_stage_chain(
+        vertex.truncate(),
+        vertex.w,
+        draw.factor_rgb,
+        draw.factor_alpha,
+        ignores_texture_alpha(&g.def, g.draw_path),
+    );
+    // An additive/subtractive element draws `SRCALPHA * colour`, so its alpha channel is a
+    // brightness factor rather than a coverage one. We stand the raw life curve in for
+    // retail's alpha stage chain there, and hand it to the blend state as the src alpha the
+    // shader premultiplies with — the multiply then lands on the saturated stage-1 colour,
+    // which is where retail applies it. Alpha-blended elements use the real stage-1 alpha.
+    match g.def.blend {
+        ffxi_dat::particle_gen::ParticleBlend::Blend => {
+            [stage_rgb.x, stage_rgb.y, stage_rgb.z, stage_alpha]
+        }
+        _ => [stage_rgb.x, stage_rgb.y, stage_rgb.z, draw.life_alpha],
     }
 }
 
@@ -944,7 +968,11 @@ struct ParticleKey {
     world: [i32; 3],
     flipbook_frame: usize,
     scale: [i32; 2],
-    color: [i32; 4],
+    // The per-particle colour inputs rather than the drawn colour: the template's per-vertex
+    // half is fixed once `flipbook_frame` is, so these are the only terms that can move it.
+    factor_rgb: [i32; 3],
+    factor_alpha: i32,
+    life_alpha: i32,
 }
 
 fn quantized(v: f32, quantum: f32) -> i32 {
@@ -969,12 +997,9 @@ fn mesh_key(g: &LiveGenerator, rot: Quat, clock: &CelestialClock) -> MeshKey {
                     world: draw.world.to_array().map(spatial),
                     flipbook_frame: draw.flipbook_frame,
                     scale: [spatial(draw.scale.x), spatial(draw.scale.y)],
-                    color: [
-                        color(draw.rgb.x),
-                        color(draw.rgb.y),
-                        color(draw.rgb.z),
-                        color(draw.vert_alpha),
-                    ],
+                    factor_rgb: draw.factor_rgb.to_array().map(color),
+                    factor_alpha: color(draw.factor_alpha),
+                    life_alpha: color(draw.life_alpha),
                 }
             })
             .collect(),
@@ -1011,7 +1036,7 @@ fn rebuild_mesh(g: &LiveGenerator, rot: Quat, clock: &CelestialClock, mesh: &mut
         // orient in Bevy already; actor-local generators integrate in the actor frame.
         let world_basis = g.orientation.is_some() && !g.actor_local;
         let base = positions.len() as u32;
-        for (tp, uv) in tpl.positions.iter().zip(&tpl.uvs) {
+        for ((tp, uv), vertex) in tpl.positions.iter().zip(&tpl.uvs).zip(&tpl.colors) {
             let local = Vec3::new(tp.x * draw.scale.x, tp.y * draw.scale.y, tp.z * sz);
             let oriented = rot * local;
             let oriented = if world_basis {
@@ -1021,7 +1046,7 @@ fn rebuild_mesh(g: &LiveGenerator, rot: Quat, clock: &CelestialClock, mesh: &mut
             };
             positions.push((draw.world + oriented).to_array());
             uvs.push([uv[0] + g.tex_translate.x, uv[1] + g.tex_translate.y]);
-            colors.push([draw.rgb.x, draw.rgb.y, draw.rgb.z, draw.vert_alpha]);
+            colors.push(vertex_color(g, &draw, *vertex));
         }
         indices.extend(tpl.indices.iter().map(|&idx| base + idx));
     }
@@ -1068,13 +1093,16 @@ fn sprite_template(d3m: &ffxi_dat::d3m::D3m) -> Option<SpriteTemplate> {
         .collect();
     let uvs = d3m.vertices.iter().map(|v| v.uv).collect();
     let indices = (0..d3m.vertices.len() as u32).collect();
-    let c = d3m.vertices[0].color;
+    let colors = d3m
+        .vertices
+        .iter()
+        .map(|v| Vec4::from_array(v.color))
+        .collect();
     Some(SpriteTemplate {
         positions,
         uvs,
         indices,
-        brightness: Vec3::new(c[0], c[1], c[2]),
-        vert_alpha: c[3],
+        colors,
     })
 }
 
@@ -1129,16 +1157,20 @@ fn sprite_sheet_templates(ss: &ParticleSpriteSheet) -> Vec<SpriteTemplate> {
             if f.positions.is_empty() {
                 return None;
             }
-            let c = f.colors[0];
             Some(SpriteTemplate {
                 positions: f.positions.iter().map(|p| Vec3::from_array(*p)).collect(),
                 uvs: f.uvs.clone(),
                 indices: (0..f.positions.len() as u32).collect(),
                 // FFXI vertex colors are 2x-overbright (see d3m.rs color parse); the venom-cloud
                 // tint is then modulated by the generator's init_color in rebuild_mesh.
-                brightness: Vec3::new(c[0] as f32, c[1] as f32, c[2] as f32)
-                    / ffxi_dat::d3m::VERTEX_COLOR_DIVISOR,
-                vert_alpha: c[3] as f32 / ffxi_dat::d3m::VERTEX_COLOR_DIVISOR,
+                colors: f
+                    .colors
+                    .iter()
+                    .map(|c| {
+                        Vec4::new(c[0] as f32, c[1] as f32, c[2] as f32, c[3] as f32)
+                            / ffxi_dat::d3m::VERTEX_COLOR_DIVISOR
+                    })
+                    .collect(),
             })
         })
         .collect()
@@ -1166,8 +1198,7 @@ fn mmb_sprite_template(mmb: &MmbSpriteMesh) -> Option<SpriteTemplate> {
         positions: mmb.positions.iter().map(|p| Vec3::from_array(*p)).collect(),
         uvs: mmb.uvs.clone(),
         indices: mmb.indices.clone(),
-        brightness: Vec3::from_array(mmb.brightness),
-        vert_alpha: mmb.vert_alpha,
+        colors: mmb.colors.iter().map(|c| Vec4::from_array(*c)).collect(),
     })
 }
 
@@ -1237,8 +1268,7 @@ mod tests {
                 positions: vec![Vec3::ZERO; 3],
                 uvs: vec![[0.0, 0.0]; 3],
                 indices: vec![0, 1, 2],
-                brightness: Vec3::ONE,
-                vert_alpha: 1.0,
+                colors: vec![Vec4::ONE; 3],
             },
             draw_path: D3mDrawPath::D3m,
             sprite_frames: Vec::new(),
@@ -1270,6 +1300,19 @@ mod tests {
     // Drive the emission math directly (no Bevy world), one tick's worth of frames per call.
     fn advance(g: &mut LiveGenerator, frames: f32) {
         advance_generator(g, frames);
+    }
+
+    // One colour on every template vertex, so a stage-chain expectation is a single number
+    // per particle instead of a gradient.
+    fn set_template_color(g: &mut LiveGenerator, rgba: Vec4) {
+        g.template.colors = vec![rgba; g.template.positions.len()];
+    }
+
+    // The colour a particle actually draws with: `particle_draw` now returns only the
+    // per-particle half, and the template's per-vertex half folds in at `vertex_color`.
+    fn drawn_color(g: &LiveGenerator, clock: &CelestialClock) -> Vec4 {
+        let draw = particle_draw(g, &g.particles[0], clock);
+        Vec4::from_array(vertex_color(g, &draw, g.template.colors[0]))
     }
 
     // A generator stage's duration is authored in 60 fps frames (research/xim util/Fps.kt:9),
@@ -1351,8 +1394,8 @@ mod tests {
         assert!(centroid.length() < RADIUS * 0.2, "off-centre: {centroid}");
     }
 
-    // research/XIClient/src/XIClient/source/Resource/Derived/CMoD3m.cpp:16-104. `brightness` and
-    // `vert_alpha` already carry stage 0's MODULATE2X (the /128 normalise), so an input of 0.25
+    // research/XIClient/src/XIClient/source/Resource/Derived/CMoD3m.cpp:16-104. A template
+    // colour already carries stage 0's MODULATE2X (the /128 normalise), so an input of 0.25
     // here stands for a retail D of 0.125.
     mod stage_chain {
         use super::*;
@@ -1382,16 +1425,18 @@ mod tests {
         fn stage_zero_saturates_before_the_stage_one_gain() {
             let vert = u8::MAX as f32 / ffxi_dat::d3m::VERTEX_COLOR_DIVISOR;
             let (rgb, alpha) = d3m_stage_chain(Vec3::splat(vert), vert, Vec3::ONE, 0.15, false);
-            assert_eq!(alpha, 0.6);
-            assert_eq!(rgb, Vec3::splat(D3M_STAGE_CLAMP));
+            assert_eq!(alpha, D3M_STAGE_CLAMP * 0.15 * D3M_STAGE1_ALPHA_GAIN);
+            assert_eq!(rgb, Vec3::splat(D3M_STAGE_CLAMP * D3M_STAGE1_RGB_GAIN));
         }
 
+        // Stage 1's own saturation is ffxi_particle.wgsl's, because it has to land after the
+        // texel multiply. Clamping the gain away here is what left the D3m 4x/8x MODULATE
+        // unable to lift a sub-unit texel to retail's ceiling.
         #[test]
-        fn a_full_brightness_particle_never_exceeds_the_stage_clamp() {
-            let vert = u8::MAX as f32 / ffxi_dat::d3m::VERTEX_COLOR_DIVISOR;
-            let (rgb, alpha) = d3m_stage_chain(Vec3::splat(vert), vert, Vec3::ONE, 1.0, false);
-            assert_eq!(rgb, Vec3::splat(D3M_STAGE_CLAMP));
-            assert_eq!(alpha, D3M_STAGE_CLAMP);
+        fn the_stage_one_gain_leaves_the_cpu_unsaturated_for_the_shader_to_clamp() {
+            let (rgb, alpha) = d3m_stage_chain(Vec3::ONE, 1.0, Vec3::ONE, 1.0, false);
+            assert_eq!(rgb, Vec3::splat(D3M_STAGE1_RGB_GAIN));
+            assert_eq!(alpha, D3M_STAGE1_ALPHA_GAIN);
         }
 
         // CMoD3mElem.cpp:108-112 — DoMMBDraw forces the ignore-texture-alpha table at blend byte
@@ -1440,7 +1485,7 @@ mod tests {
             d.blend_byte = byte;
             d.init_color = [1.0, 1.0, 1.0, 1.0];
             let mut g = live(d, 100.0);
-            g.template.vert_alpha = 0.5;
+            set_template_color(&mut g, Vec3::ONE.extend(0.5));
             g.particles.push(Particle {
                 pos: Vec3::ZERO,
                 vel: Vec3::ZERO,
@@ -1455,7 +1500,7 @@ mod tests {
         #[test]
         fn blended_particle_carries_the_stage_one_rgb_gain() {
             let mut g = half_life_gen(ffxi_dat::particle_gen::ParticleBlend::Blend, 0x03);
-            g.template.brightness = Vec3::splat(0.25);
+            set_template_color(&mut g, Vec3::splat(0.25).extend(0.5));
             for c in vertex_colors(&g) {
                 assert_eq!([c[0], c[1], c[2]], [0.5, 0.5, 0.5]);
             }
@@ -1464,7 +1509,7 @@ mod tests {
         #[test]
         fn blended_particle_alpha_scales_with_vertex_alpha() {
             let mut g = half_life_gen(ffxi_dat::particle_gen::ParticleBlend::Blend, 0x03);
-            g.template.vert_alpha = 0.25;
+            set_template_color(&mut g, Vec3::ONE.extend(0.25));
             for c in vertex_colors(&g) {
                 assert_eq!(c[3], 0.5);
             }
@@ -1474,7 +1519,7 @@ mod tests {
         #[test]
         fn blend_byte_44_promotes_the_particle_alpha() {
             let mut g = half_life_gen(ffxi_dat::particle_gen::ParticleBlend::Blend, 0x44);
-            g.template.vert_alpha = 0.125;
+            set_template_color(&mut g, Vec3::ONE.extend(0.125));
             let promoted = vertex_colors(&g)[0][3];
             g.def.blend_byte = 0x03;
             let unpromoted = vertex_colors(&g)[0][3];
@@ -1482,23 +1527,55 @@ mod tests {
             assert_eq!(unpromoted, 0.25);
         }
 
+        // An additive element hands the life curve to the blend state as src alpha instead of
+        // pre-multiplying it into rgb, so the shader's premultiply applies it to the colour
+        // stage 1 already saturated — retail's order.
         #[test]
-        fn additive_particle_folds_the_life_curve_into_rgb() {
+        fn additive_particle_carries_the_life_curve_as_src_alpha() {
             let mut g = half_life_gen(ffxi_dat::particle_gen::ParticleBlend::Additive, 0x48);
-            g.template.brightness = Vec3::splat(0.25);
+            set_template_color(&mut g, Vec3::splat(0.25).extend(0.5));
             for c in vertex_colors(&g) {
-                assert_eq!([c[0], c[1], c[2]], [0.25, 0.25, 0.25]);
-                assert_eq!(c[3], 1.0);
+                assert_eq!([c[0], c[1], c[2]], [0.5, 0.5, 0.5]);
+                assert_eq!(c[3], 0.5);
             }
         }
 
-        // The fold is a brightness proxy, not a blend factor: the saturating stage-1 alpha would
-        // hold an additive spray at full brightness until the last quarter of its life.
+        // The home point's `sil` curtain (ROM/3/25.DAT) authors its plume as a per-vertex
+        // white -> purple -> black ramp up each strip. Folding the stage chain once per
+        // particle instead of once per vertex drew the whole strip at the first vertex's
+        // white, which is what made the rising streaks read as lit rectangles with no purple
+        // and no fade-out at the top.
+        #[test]
+        fn a_template_colour_gradient_survives_into_the_mesh() {
+            const WHITE: Vec4 = Vec4::ONE;
+            const PURPLE: Vec4 = Vec4::new(0.26, 0.25, 0.49, 1.0);
+            const BLACK: Vec4 = Vec4::new(0.0, 0.0, 0.0, 1.0);
+
+            let mut g = half_life_gen(ffxi_dat::particle_gen::ParticleBlend::Additive, 0x48);
+            g.template.colors = vec![WHITE, PURPLE, BLACK];
+
+            let drawn = vertex_colors(&g);
+            assert_eq!(drawn.len(), 3, "one colour per template vertex");
+            assert!(drawn[0][0] > drawn[1][0], "white end outshines the purple");
+            assert!(
+                drawn[1][2] > drawn[1][0] && drawn[1][2] > drawn[1][1],
+                "the purple vertex stays blue-dominant: {:?}",
+                drawn[1]
+            );
+            assert_eq!(
+                [drawn[2][0], drawn[2][1], drawn[2][2]],
+                [0.0, 0.0, 0.0],
+                "the black end adds nothing, so an additive plume fades out"
+            );
+        }
+
+        // The life curve is the raw one, not the saturating stage-1 alpha — that would hold an
+        // additive spray at full brightness until the last quarter of its life.
         #[test]
         fn additive_brightness_still_fades_late_in_life() {
             let mut g = half_life_gen(ffxi_dat::particle_gen::ParticleBlend::Additive, 0x48);
             g.particles[0].age_frames = 90.0;
-            let late = vertex_colors(&g)[0][0];
+            let late = vertex_colors(&g)[0][3];
             assert!((late - (1.0 - 0.9f32)).abs() < 1e-6, "{late}");
         }
     }
@@ -1794,9 +1871,8 @@ mod tests {
         );
         // An infinite life pins life progress at 0, which is what keeps a keyframe-tracked
         // channel on the curve's opening value instead of racing to its end.
-        let draw = particle_draw(&g, &g.particles[0], &CelestialClock::default());
         assert!(
-            draw.rgb.is_finite(),
+            drawn_color(&g, &CelestialClock::default()).is_finite(),
             "infinite life must not poison the draw"
         );
     }
@@ -1899,15 +1975,13 @@ mod tests {
 
         // The particle never ages (life_frames == 1, age 0), so any change here is the clock.
         let at = |day_fraction: f32| {
-            particle_draw(
+            drawn_color(
                 &g,
-                &g.particles[0],
                 &CelestialClock {
                     day_fraction,
                     ..Default::default()
                 },
             )
-            .rgb
             .x
         };
         let (dawn, dusk) = (at(0.25), at(0.75));
@@ -1938,10 +2012,8 @@ mod tests {
             moon_phase: 6,
         };
         let untinted = celestial(blended_celestial_def());
-        let plain = particle_draw(&untinted, &untinted.particles[0], &clock)
-            .rgb
-            .x;
-        let tinted = particle_draw(&g, &g.particles[0], &clock).rgb.x;
+        let plain = drawn_color(&untinted, &clock).x;
+        let tinted = drawn_color(&g, &clock).x;
         assert!(
             (tinted - plain * 0.25).abs() < 1e-5,
             "two halving tables at 2x modulate should quarter the channel: {tinted} vs {plain}"
@@ -2045,9 +2117,9 @@ mod tests {
         const VERT_ALPHA: f32 = 0.125;
         let mut cont = live(base, 1.0);
         cont.def.continuous = true;
-        cont.template.vert_alpha = VERT_ALPHA;
+        set_template_color(&mut cont, Vec3::ONE.extend(VERT_ALPHA));
         let mut spray = live(base, 1.0);
-        spray.template.vert_alpha = VERT_ALPHA;
+        set_template_color(&mut spray, Vec3::ONE.extend(VERT_ALPHA));
 
         let particle = |age: f32| Particle {
             pos: Vec3::ZERO,

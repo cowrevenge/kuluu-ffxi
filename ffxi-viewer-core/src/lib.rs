@@ -22,6 +22,8 @@ pub mod debug_chat;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod ffxi_actor_render;
 #[cfg(not(target_arch = "wasm32"))]
+pub mod ffxi_particle_material;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod ffxi_zone_material;
 pub mod graphics;
 pub use graphics::settings as graphics_settings;
@@ -195,6 +197,9 @@ impl<S: SceneSource + Resource + Component<Mutability = bevy::ecs::component::Mu
 
         #[cfg(not(target_arch = "wasm32"))]
         app.add_plugins(ffxi_zone_material::FfxiZoneMaterialPlugin);
+
+        #[cfg(not(target_arch = "wasm32"))]
+        app.add_plugins(ffxi_particle_material::FfxiParticleMaterialPlugin);
 
         app.add_plugins(lens_flare::LensFlarePlugin);
 

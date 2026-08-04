@@ -68,17 +68,6 @@ pub fn decoded_texture_to_image(t: &ffxi_dat::texture::DecodedTexture) -> Image 
     image
 }
 
-pub fn d3m_material(blend: D3mBlendMode, texture: Option<Handle<Image>>) -> StandardMaterial {
-    StandardMaterial {
-        base_color: Color::WHITE,
-        base_color_texture: texture,
-        unlit: true,
-        alpha_mode: blend.alpha_mode(),
-        cull_mode: None,
-        ..default()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -136,13 +125,5 @@ mod tests {
                 .unwrap_or(0),
             0
         );
-    }
-
-    #[test]
-    fn material_is_unlit_and_two_sided() {
-        let mat = d3m_material(D3mBlendMode::Additive, None);
-        assert!(mat.unlit);
-        assert_eq!(mat.cull_mode, None);
-        assert_eq!(mat.alpha_mode, AlphaMode::Add);
     }
 }

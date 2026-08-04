@@ -259,8 +259,9 @@ pub struct MmbSpriteMesh {
     pub positions: Vec<[f32; 3]>,
     pub uvs: Vec<[f32; 2]>,
     pub indices: Vec<u32>,
-    pub brightness: [f32; 3],
-    pub vert_alpha: f32,
+    // Stage 0's D argument per `positions` entry, /128-normalised like a D3m vertex colour so
+    // both particle mesh sources feed `SpriteTemplate::colors` on the same scale.
+    pub colors: Vec<[f32; 4]>,
     pub texture_name: String,
 }
 
@@ -530,6 +531,7 @@ fn mmb_sprite_mesh(data: &[u8]) -> Option<MmbSpriteMesh> {
     let models = ffxi_dat::mmb::parse_models(&dec);
     let mut positions = Vec::new();
     let mut uvs = Vec::new();
+    let mut colors = Vec::new();
     let mut indices = Vec::new();
     let mut texture_name = String::new();
     for m in &models {
@@ -544,6 +546,10 @@ fn mmb_sprite_mesh(data: &[u8]) -> Option<MmbSpriteMesh> {
         for v in &m.vertices {
             positions.push(v.pos);
             uvs.push(v.uv);
+            colors.push(
+                v.rgba
+                    .map(|c| c as f32 / ffxi_dat::d3m::VERTEX_COLOR_DIVISOR),
+            );
         }
         for tri in m.indices.chunks_exact(3) {
             if tri.iter().all(|&i| i < vert_count) {
@@ -554,21 +560,11 @@ fn mmb_sprite_mesh(data: &[u8]) -> Option<MmbSpriteMesh> {
     if positions.is_empty() || indices.is_empty() {
         return None;
     }
-    let c = models
-        .iter()
-        .find(|m| !m.vertices.is_empty())
-        .map(|m| m.vertices[0].rgba)
-        .unwrap_or([128, 128, 128, 128]);
     Some(MmbSpriteMesh {
         positions,
         uvs,
+        colors,
         indices,
-        brightness: [
-            c[0] as f32 / ffxi_dat::d3m::VERTEX_COLOR_DIVISOR,
-            c[1] as f32 / ffxi_dat::d3m::VERTEX_COLOR_DIVISOR,
-            c[2] as f32 / ffxi_dat::d3m::VERTEX_COLOR_DIVISOR,
-        ],
-        vert_alpha: c[3] as f32 / ffxi_dat::d3m::VERTEX_COLOR_DIVISOR,
         texture_name,
     })
 }

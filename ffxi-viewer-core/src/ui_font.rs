@@ -1,3 +1,6 @@
+use std::sync::OnceLock;
+
+use ab_glyph::{Font as _, FontArc};
 use bevy::prelude::*;
 use bevy::text::{Font, FontSource, TextFont};
 
@@ -27,14 +30,73 @@ pub fn apply_ui_font(ui_font: Res<UiFont>, mut q: Query<&mut TextFont, Added<Tex
     }
 }
 
+struct MonoMetrics {
+    advance_em: f32,
+    line_em: f32,
+}
+
+fn metrics() -> &'static MonoMetrics {
+    static METRICS: OnceLock<MonoMetrics> = OnceLock::new();
+    METRICS.get_or_init(|| {
+        let font = FontArc::try_from_slice(DEJAVU_SANS_MONO)
+            .expect("bundled DejaVuSansMono.ttf must parse as a valid TTF for ab_glyph");
+        let upem = font
+            .units_per_em()
+            .expect("bundled DejaVuSansMono.ttf must declare units_per_em");
+        MonoMetrics {
+            advance_em: font.h_advance_unscaled(font.glyph_id('0')) / upem,
+            line_em: font.height_unscaled() / upem,
+        }
+    })
+}
+
+/// Laid-out width of `text` at `font_size`, read from the bundled font's own
+/// metrics. Exact rather than estimated because the HUD font is monospace, which
+/// lets layout reserve room for a label's worst case (a countdown's longest
+/// string, say) without a text-pipeline round trip.
+pub fn text_width_px(text: &str, font_size: f32) -> f32 {
+    text.chars().count() as f32 * metrics().advance_em * font_size
+}
+
+/// Height of one laid-out line at `font_size` — what a caller must clear to sit
+/// something below a single-line label.
+pub fn line_height_px(font_size: f32) -> f32 {
+    metrics().line_em * font_size
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ab_glyph::{Font as _, FontArc};
+    use ab_glyph::FontArc;
 
     #[test]
     fn bundled_font_parses_for_ab_glyph() {
         assert!(FontArc::try_from_slice(DEJAVU_SANS_MONO).is_ok());
+    }
+
+    // text_width_px multiplies one advance by the char count, which only holds
+    // while the bundled font is monospace across every glyph the HUD measures.
+    #[test]
+    fn bundled_font_is_monospace_over_hud_glyphs() {
+        let font = FontArc::try_from_slice(DEJAVU_SANS_MONO).expect("valid ttf");
+        let upem = font.units_per_em().expect("units_per_em");
+        let want = font.h_advance_unscaled(font.glyph_id('0')) / upem;
+        for ch in ['0', '9', ':', 'h', 'm', 's', 'W', ' '] {
+            let got = font.h_advance_unscaled(font.glyph_id(ch)) / upem;
+            assert!(
+                (got - want).abs() < f32::EPSILON,
+                "'{ch}' advances {got} em, not {want} em"
+            );
+        }
+    }
+
+    #[test]
+    fn text_width_scales_with_length_and_size() {
+        let one = text_width_px("0", 10.0);
+        assert!(one > 0.0);
+        assert!((text_width_px("00000", 10.0) - one * 5.0).abs() < 1e-3);
+        assert!((text_width_px("0", 20.0) - one * 2.0).abs() < 1e-3);
+        assert!(line_height_px(10.0) > 10.0, "line box exceeds the em size");
     }
 
     #[test]

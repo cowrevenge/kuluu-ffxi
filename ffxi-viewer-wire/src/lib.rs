@@ -23,6 +23,12 @@ use serde::{Deserialize, Serialize};
 // (postcard frames are not self-describing, so any shape change bumps this).
 pub const PROTOCOL_VERSION: u32 = 13;
 
+/// Longest countdown `SceneSnapshot::status_icon_expiries` can carry. The
+/// producer rejects anything beyond it as a corrupt 0x063 timestamp, and the HUD
+/// reserves label width for the widest string inside the same bound, so the two
+/// cannot drift into a countdown nothing has room to draw.
+pub const MAX_STATUS_TIMER_SECS: u32 = 100 * 3600;
+
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 pub struct Vec3 {
@@ -493,6 +499,9 @@ pub struct SceneSnapshot {
     #[serde(default)]
     pub status_icons: Vec<u16>,
 
+    /// Absolute Unix expiry per `status_icons` entry, 0 for a permanent effect.
+    /// Never further out than [`MAX_STATUS_TIMER_SECS`] — the producer treats a
+    /// longer remaining time as a corrupt timestamp and drops it to 0.
     #[serde(default)]
     pub status_icon_expiries: Vec<u32>,
 

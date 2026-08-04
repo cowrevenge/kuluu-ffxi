@@ -4902,7 +4902,7 @@ fn status_icon_expiry_unix(timestamp: u32, now_unix: u64) -> u32 {
     }
     let vana_now = now_unix.saturating_sub(VANA_EPOCH_UNIX) as u32;
     let remaining = timestamp.wrapping_sub(vana_now.wrapping_mul(60)) / 60;
-    if remaining == 0 || remaining > 100 * 3600 {
+    if remaining == 0 || remaining > ffxi_viewer_wire::MAX_STATUS_TIMER_SECS {
         return 0;
     }
     (now_unix + remaining as u64) as u32

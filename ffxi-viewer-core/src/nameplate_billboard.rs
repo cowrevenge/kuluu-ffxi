@@ -16,7 +16,15 @@ use crate::nameplate_icons::REFERENCE_LETTER;
 use crate::scheduler_runtime::RETAIL_FPS;
 use crate::snapshot::SceneState;
 
-const NAME_PX: f32 = 64.0;
+// Raster resolution of the plate texture, not its on-screen size: the world
+// quad is derived from the texture's height *relative to* one line, so raising
+// this only buys sharper glyphs at the same size.
+const NAME_PX: f32 = 80.0;
+
+// Retail's plate scale is pixel-exact for a 640x480 client (NAME_SCREEN_SCALE),
+// which reads small on a modern display. A deliberate legibility nudge on top
+// of it — the whole plate, so the icon/text proportions stay retail's.
+const NAMEPLATE_LEGIBILITY_SCALE: f32 = 1.15;
 
 // research/XIClient/src/XIClient/source/Game/GameManager.cpp:798-799 — retail's clip planes
 // are fixed, so the nameplate ramp below must not read our camera's user-tunable projection.
@@ -52,7 +60,10 @@ const TARGET_PULSE_BIAS: f32 = 96.0;
 // the product as `(scaledAlpha & 0xFFFFFF80) << 17`, i.e. a shift right by 7.
 const TARGET_PULSE_DIVISOR: f32 = 128.0;
 
-const OUTLINE_RADIUS_PX: i32 = 3;
+// Heavier than a hairline on purpose: the plate is unlit and draws over
+// arbitrary zone geometry, so the outline is what keeps a light name readable
+// against a light wall. Scales with NAME_PX.
+const OUTLINE_RADIUS_PX: i32 = 5;
 
 const OUTLINE_COLOR: [u8; 4] = [0, 0, 0, 220];
 
@@ -273,8 +284,11 @@ pub fn update_nameplate_billboards_system(
         let aspect_ratio = aspect.width.max(1) as f32 / aspect.height.max(1) as f32;
         let plate_to_line = aspect.height.max(1) as f32 / line_px;
         let viewport_height_yalms = 2.0 * view_depth * half_fov_tan;
-        let world_height =
-            viewport_height_yalms * NAME_LINE_SCREEN_FRACTION * plate_to_line * scale;
+        let world_height = viewport_height_yalms
+            * NAME_LINE_SCREEN_FRACTION
+            * plate_to_line
+            * scale
+            * NAMEPLATE_LEGIBILITY_SCALE;
         let world_width = world_height * aspect_ratio;
 
         transform.translation = head_pos;
@@ -513,7 +527,14 @@ fn rasterize_plate(
 
     let letter_advance_px = scaled.h_advance(scaled.glyph_id(char::from(REFERENCE_LETTER)));
     let (placements, icon_strip) = layout_icons(markers, icons, letter_advance_px, line_h as f32);
-    let icon_strip_px = icon_strip.ceil().max(0.0) as u32;
+    // research/XIClient/.../ActorTelemetry.cpp:397-398 — retail separates the
+    // marker run from the name with a space, so the icon never crowds the text.
+    let separator_px = if placements.is_empty() {
+        0.0
+    } else {
+        scaled.h_advance(scaled.glyph_id(' '))
+    };
+    let icon_strip_px = (icon_strip + separator_px).ceil().max(0.0) as u32;
     // Icons are taller than a text line and hang above and below it, so the
     // plate box grows to contain them.
     let icon_top_px = placements.iter().map(|p| p.y_px).fold(0.0_f32, f32::min);

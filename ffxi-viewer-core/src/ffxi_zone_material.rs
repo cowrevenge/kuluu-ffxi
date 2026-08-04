@@ -24,6 +24,22 @@ use crate::skinned_ffxi_material::{write_uniform, FfxiLightingUniform, FfxiMater
 
 static NEXT_ZONE_INSTANCE_ID: AtomicU64 = AtomicU64::new(1);
 
+/// `FfxiMaterialFlags::flags.z` as `zone_ffxi.wgsl` reads it: whether this mesh takes the
+/// camera's `DistanceFog`. Retail gates fog per generator on the CMoElem render-state word
+/// (research/XIClient CMoElem.cpp:542-543, bit 0x2000000 -> `D3DRS_FOGENABLE` false), which
+/// the weat/ sky canopies mostly set — and must, since they sit thousands of units past every
+/// 0x2F fog distance, where fog would replace their colour outright.
+pub const ZONE_FLAG_FOGGED: f32 = 0.0;
+pub const ZONE_FLAG_UNFOGGED: f32 = 1.0;
+
+pub fn zone_fog_flag(fog_enabled: bool) -> f32 {
+    if fog_enabled {
+        ZONE_FLAG_FOGGED
+    } else {
+        ZONE_FLAG_UNFOGGED
+    }
+}
+
 /// Zone lighting is identical for every zone submesh, so it lives in ONE
 /// persistent GPU buffer shared by all zone-material bind groups
 /// ([`ZoneMaterialBuffers::lighting`]) and is refreshed by `write_buffer`, never
@@ -63,6 +79,15 @@ pub struct FfxiZoneMaterialKey {
     pub z_bias_level: u8,
     /// `false` for blended decals (they must not occlude later layers).
     pub depth_write: bool,
+    /// Selects the generator (`CMoD3m`) texture-stage chain over the terrain
+    /// (`ZoneRenderer`) one. Retail runs the same MMB vertex data through two
+    /// different stage setups: zone placements take a single
+    /// `MODULATE2X(TEXTURE, CURRENT)` (ZoneRenderer.cpp:2453-2455), while a mesh
+    /// hung off a generator takes `MODULATE2X(DIFFUSE, TEXTURE)` and then
+    /// `MODULATE2X(CURRENT, TFACTOR)` (CMoD3m.cpp:53-70 `NonZeroTwoTSS`, reached
+    /// for MMB links via CMoD3mElem.cpp:57-63 `DoMMBDraw`) — twice the gain, and
+    /// its TFACTOR is this material's `tint`.
+    pub generator_stage_chain: bool,
 }
 
 impl FfxiZoneMaterialKey {
@@ -73,8 +98,13 @@ impl FfxiZoneMaterialKey {
         mirrored: false,
         z_bias_level: 0,
         depth_write: true,
+        generator_stage_chain: false,
     };
 }
+
+/// Shader def `specialize` pushes for [`FfxiZoneMaterialKey::generator_stage_chain`];
+/// `zone_ffxi.wgsl` matches on it.
+pub const GENERATOR_STAGE_CHAIN_DEF: &str = "FFXI_GENERATOR_STAGE_CHAIN";
 
 #[derive(Asset, TypePath, Clone, Debug)]
 pub struct FfxiZoneMaterial {
@@ -356,6 +386,12 @@ impl Material for FfxiZoneMaterial {
 
         let rk = key.bind_group_data;
 
+        if rk.generator_stage_chain {
+            if let Ok(fragment) = descriptor.fragment_mut() {
+                fragment.shader_defs.push(GENERATOR_STAGE_CHAIN_DEF.into());
+            }
+        }
+
         // xim renders FFXI zone geometry with back-face culling unless the
         // render-state word sets bit 0x2000 (two-sided decals, fences, foliage
         // cards). FFXI winding is CLOCKWISE (D3D convention) — GLDrawer.kt:186
@@ -431,9 +467,10 @@ fn update_zone_material_lighting(
     const COLOR_BIAS: Vec3 = Vec3::new(1.4, 1.36, 1.45);
     const AMBIENT_BIAS_BELOW: f32 = 0.5;
 
-    // Terrain ambient floor, matched to the actor path so ground and models
-    // darken together at night. (Was 0.28, which — ×2 in the overbright shader —
-    // floored night terrain to ~0.56 and washed the darkness out.)
+    // Terrain ambient floor, matched to the actor path so ground and models darken
+    // together at night. Both now run the same stage chain — a neutral vertex times
+    // this floor, through one MODULATE2X — so the two land on the same value without
+    // a per-path correction.
     const AMBIENT_FLOOR: f32 = 0.12;
 
     // research/xim EnvironmentSection.kt:130-131,168: the 0x2F landscape ambient is
@@ -545,5 +582,176 @@ impl Plugin for FfxiZoneMaterialPlugin {
         if let Some(render_app) = app.get_sub_app_mut(RenderApp) {
             render_app.init_resource::<ZoneMaterialBuffers>();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fog_flag_maps_the_generator_bit() {
+        assert_eq!(zone_fog_flag(true), ZONE_FLAG_FOGGED);
+        assert_eq!(zone_fog_flag(false), ZONE_FLAG_UNFOGGED);
+    }
+
+    // The lane crosses into WGSL, where no type holds the two sides together: if the
+    // shader stops testing flags.z the emitters keep setting a flag nothing reads and
+    // every sky layer silently goes back to being fogged flat.
+    #[test]
+    fn shader_gates_distance_fog_on_the_lane() {
+        let lines: Vec<&str> = include_str!("zone_ffxi.wgsl")
+            .lines()
+            .map(str::trim)
+            .collect();
+        let call = lines
+            .iter()
+            .position(|l| l.starts_with("out_color = apply_distance_fog("))
+            .expect("zone_ffxi.wgsl no longer applies distance fog");
+        let guard = lines[..call]
+            .iter()
+            .rev()
+            .find(|l| !l.is_empty() && !l.starts_with("//"))
+            .copied()
+            .unwrap_or_default();
+        assert!(
+            guard.contains("material_flags.flags.z"),
+            "distance fog is not gated on the fog lane; the statement before it is `{guard}`"
+        );
+    }
+
+    // WGSL cannot import a Rust const, so the two sides are pinned by reading the
+    // shader's own declaration. `d3d_stage_chain` below then models retail's stage
+    // math against the SAME number the GPU runs.
+    fn wgsl_const(src: &str, name: &str) -> f32 {
+        let needle = format!("const {name}: f32 =");
+        let (_, rest) = src.split_once(&needle).unwrap_or_else(|| {
+            panic!("shader no longer declares `{name}`");
+        });
+        rest.split(';')
+            .next()
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap_or_else(|e| panic!("`{name}` is not a plain literal: {e}"))
+    }
+
+    const ZONE_WGSL: &str = include_str!("zone_ffxi.wgsl");
+    const ACTOR_WGSL: &str = include_str!("skinned_ffxi.wgsl");
+
+    // research/XIClient Rendering/ZoneRenderer.cpp:2453-2455 over the saturated
+    // fixed-function T&L diffuse of Direct3D8Manager.cpp:373,390,393,395.
+    fn d3d_zone_stage_chain(vertex_rgb: Vec3, irradiance: Vec3, texel: Vec3) -> Vec3 {
+        let gain = wgsl_const(ZONE_WGSL, "D3D_MODULATE_2X");
+        ((vertex_rgb * irradiance).min(Vec3::ONE) * texel * gain).min(Vec3::ONE)
+    }
+
+    #[test]
+    fn neutral_vertex_under_full_light_lands_on_retails_ceiling() {
+        let neutral = Vec3::from_slice(&ffxi_dat::mmb::vertex_color_neutral()[..3]);
+        // One MODULATE2X over the half-scale neutral is unity, not the doubled value a
+        // second (D3m) stage would give.
+        let lit = d3d_zone_stage_chain(neutral, Vec3::ONE, Vec3::ONE);
+        assert!((lit.x - 1.0).abs() < 0.01, "lit was {}", lit.x);
+    }
+
+    #[test]
+    fn the_lit_vertex_term_saturates_before_the_texture_stage() {
+        let neutral = Vec3::from_slice(&ffxi_dat::mmb::vertex_color_neutral()[..3]);
+        // D3D8 fixed-function T&L emits a D3DCOLOR, so irradiance past the point where
+        // vertexColour x light reaches 1.0 cannot brighten the fragment any further.
+        let at_ceiling = d3d_zone_stage_chain(neutral, Vec3::splat(2.0), Vec3::splat(0.4));
+        let far_past = d3d_zone_stage_chain(neutral, Vec3::splat(6.0), Vec3::splat(0.4));
+        assert_eq!(at_ceiling, far_past);
+        assert!((far_past.x - 0.8).abs() < 1e-5, "was {}", far_past.x);
+    }
+
+    #[test]
+    fn overbright_lamp_glass_keeps_retails_night_headroom() {
+        // A fully authored 255 vertex at a night ambient still reads brighter than the
+        // neutral terrain around it, which is what makes lamp glass glow with no light.
+        let glass = Vec3::from_slice(&ffxi_dat::mmb::vertex_color_to_linear([255; 4])[..3]);
+        let neutral = Vec3::from_slice(&ffxi_dat::mmb::vertex_color_neutral()[..3]);
+        let night = Vec3::splat(0.21);
+        let lit = d3d_zone_stage_chain(glass, night, Vec3::ONE);
+        assert!((lit.x - 0.42).abs() < 0.01, "was {}", lit.x);
+        assert!(lit.x > d3d_zone_stage_chain(neutral, night, Vec3::ONE).x);
+    }
+
+    // Both shaders composite through one MODULATE2X; a change to either alone would
+    // put terrain and the characters standing on it on different exposures.
+    #[test]
+    fn both_shaders_share_the_modulate_gain() {
+        assert_eq!(
+            wgsl_const(ZONE_WGSL, "D3D_MODULATE_2X"),
+            wgsl_const(ACTOR_WGSL, "D3D_MODULATE_2X"),
+        );
+    }
+
+    #[test]
+    fn shadow_floor_matches_the_actor_shader() {
+        assert_eq!(
+            wgsl_const(ZONE_WGSL, "FFXI_SHADOW_FLOOR"),
+            wgsl_const(ACTOR_WGSL, "FFXI_SHADOW_FLOOR"),
+        );
+    }
+
+    // The per-stage saturate is the whole point of the fix: without it the lit vertex
+    // term is no longer a D3DCOLOR and the terrain's tonal range doubles. Every
+    // composite that feeds the fragment output has to carry one.
+    #[test]
+    fn both_shaders_saturate_every_composite() {
+        for (name, src) in [("zone_ffxi", ZONE_WGSL), ("skinned_ffxi", ACTOR_WGSL)] {
+            let composites: Vec<&str> = src
+                .lines()
+                .map(str::trim)
+                .filter(|l| l.starts_with("let ") && l.contains("D3D_MODULATE_2X *"))
+                .collect();
+            assert!(!composites.is_empty(), "{name}.wgsl composites nothing");
+            for l in composites {
+                assert!(
+                    l.contains("saturate("),
+                    "{name}.wgsl has an unsaturated texture stage: `{l}`"
+                );
+            }
+        }
+    }
+
+    // Direct3D8Manager.cpp:390,393,395 makes the lit vertex term a D3DCOLOR whichever stage
+    // chain consumes it, so BOTH branches clamp it before the first texel — the outer
+    // saturate the sweep above checks does not, on its own, catch a chain that feeds an
+    // over-1.0 vertex colour straight into MODULATE2X.
+    #[test]
+    fn every_branch_clamps_the_vertex_term_before_the_texel() {
+        let first_stages: Vec<&str> = ZONE_WGSL
+            .lines()
+            .map(str::trim)
+            .filter(|l| {
+                (l.starts_with("let rgb = ") || l.starts_with("let stage0 = ")) && l.contains("lit")
+            })
+            .collect();
+        assert_eq!(
+            first_stages.len(),
+            2,
+            "expected one terrain and one generator composite: {first_stages:?}"
+        );
+        for stage in first_stages {
+            assert!(
+                stage.contains("saturate(lit)"),
+                "composite does not saturate the lit vertex term: `{stage}`"
+            );
+        }
+    }
+
+    // `specialize` pushes this def; the shader has to be the thing that matches on it,
+    // otherwise the two chains silently collapse into whichever one the shader hardcodes.
+    #[test]
+    fn the_shader_branches_on_the_stage_chain_def() {
+        assert!(ZONE_WGSL.contains(&format!("#ifdef {GENERATOR_STAGE_CHAIN_DEF}")));
+        assert_eq!(
+            FfxiZoneMaterialKey::LEGACY.generator_stage_chain,
+            FfxiZoneMaterialKey::default().generator_stage_chain,
+            "the terrain chain must stay the default for every un-annotated mesh"
+        );
     }
 }

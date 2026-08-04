@@ -112,12 +112,23 @@ pub struct CloudGeneratorDef {
     pub color_g_track: Option<[u8; 4]>,
     pub color_b_track: Option<[u8; 4]>,
     pub alpha_mult_track: Option<[u8; 4]>,
+
+    // research/XIClient CMoElem.cpp:542-543 — the element flags word gates fog per
+    // generator, not per layer class: bit set -> D3DRS_FOGENABLE false, else linear fog
+    // from the area record. Measured over ROM/0/115.DAT + ROM/0/125.DAT: cld1 and the
+    // sun/star/moon meshes clear fog, while the overcast cld2 haze sheet (clod/mist/thdr)
+    // and rain's ~4cl keep it.
+    pub fog_enabled: bool,
 }
 
 impl Generator {
     const ATTACH_NONE: u8 = 0x0;
     const ATTACH_SUN: u8 = 0xE;
-    const CONFIG_FOLLOW_CAMERA: u16 = 0x0004;
+    // research/XIClient CYyGenerator.cpp:244 `elem->field_10C = pos[1]` — the CMoElem
+    // render-state word is the u32 at 0x01-setup payload+0, whose low half is the config
+    // bits this parser already read as a u16.
+    const ELEM_FLAG_FOLLOW_CAMERA: u32 = 0x0000_0004;
+    const ELEM_FLAG_NO_FOG: u32 = 0x0200_0000;
 
     // research/xim EnvironmentManager.kt:453-515 weat/<type>/ cld1/cld2/sun1 0x05
     // generators. Mirrors dat-cloud-probe parse_setup: the StandardParticleSetup
@@ -160,11 +171,12 @@ impl Generator {
             }
             match opcode {
                 0x01 if payload + 30 <= body.len() => {
-                    let config = u16::from_le_bytes([body[payload], body[payload + 1]]);
+                    let elem_flags = u32_le(body, payload);
                     setup = Some(CloudGeneratorDef {
                         name,
                         attach,
-                        follow_camera: config & Self::CONFIG_FOLLOW_CAMERA != 0,
+                        follow_camera: elem_flags & Self::ELEM_FLAG_FOLLOW_CAMERA != 0,
+                        fog_enabled: elem_flags & Self::ELEM_FLAG_NO_FOG == 0,
                         linked_id: [
                             body[payload + 8],
                             body[payload + 9],
@@ -988,6 +1000,39 @@ mod tests {
         assert_eq!(g.color_g_track, Some(*b"ksg1"));
         assert_eq!(g.color_b_track, Some(*b"ksb1"));
         assert_eq!(g.alpha_mult_track, None);
+    }
+
+    fn cloud_setup_with_elem_flags(elem_flags: u32) -> Vec<u8> {
+        let mut body = make_body();
+        body[0] = 0x00;
+        let mut cmd = vec![0u8; 36];
+        cmd[0] = 0x01;
+        cmd[1] = 0x09;
+        cmd[4..8].copy_from_slice(&elem_flags.to_le_bytes());
+        cmd[4 + 8..4 + 12].copy_from_slice(b"clod");
+        cmd[4 + 29] = 0x0B;
+        body.extend_from_slice(&cmd);
+        body
+    }
+
+    // The follow-camera bit and the no-fog bit are two halves of ONE u32 (research/XIClient
+    // CYyGenerator.cpp:244), so reading only the low u16 silently drops fog control. Words
+    // measured off ROM/0/115.DAT weat/clod: cld1 0x02440004, cld2 0x00440004.
+    #[test]
+    fn cloud_generator_reads_fog_and_camera_bits_from_one_word() {
+        let unfogged =
+            Generator::parse_cloud_generator(*b"cld1", &cloud_setup_with_elem_flags(0x0244_0004))
+                .unwrap()
+                .unwrap();
+        assert!(unfogged.follow_camera);
+        assert!(!unfogged.fog_enabled);
+
+        let fogged =
+            Generator::parse_cloud_generator(*b"cld2", &cloud_setup_with_elem_flags(0x0044_0004))
+                .unwrap()
+                .unwrap();
+        assert!(fogged.follow_camera);
+        assert!(fogged.fog_enabled);
     }
 
     #[test]

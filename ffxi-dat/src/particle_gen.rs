@@ -10,8 +10,7 @@ use crate::{DatError, Result};
 //   body[0x02] u16  additionalAttachFlags  index 0 — ParticleGeneratorParser.kt:21-33)
 //   body[0x64] u16  emissionVariance
 //   body[0x66] u16  framesPerEmission - 1
-//   body[0x68] u8   particlesPerEmission
-//   body[0x69] u8   genFlags
+//   body[0x68] u32  flags (particle count in the low 9 bits, XIM's genFlags in byte 0x69)
 //   body[0x70..0x80] four u32 section offsets (section data at value - 0x10)
 // Each section is a stream of opcodeConfig u32s: opcode = cfg & 0xFF, size_words = (cfg>>8)&0x1F,
 // allocationOffset = cfg>>0xD; the block is size_words*4 bytes; a 0 opcode/size terminates.
@@ -89,11 +88,71 @@ const ATTACH_SOURCE_ORIENTED: u16 = 0x0001;
 // retail tests as `field_10C & 0x10000000` to pick the D3m element's texture-stage table.
 // research/XIClient/src/XIClient/source/Resource/Derived/CMoD3m.cpp:363-370
 const RENDER_STATE_IGNORE_TEXTURE_ALPHA: u16 = 0x1000;
+// research/xim ParticleInitializers.kt:114 `cameraAttachedBasePosition`.
+const RENDER_STATE_CAMERA_ATTACHED_BASE: u16 = 0x0400;
 
-// research/xim ParticleGeneratorParser.kt:68-70 (genFlags at body[0x69]);
-// continuous singleton + auto-run-at-model-ready semantics: Actor.kt:724-734.
-const GEN_FLAG_CONTINUOUS: u8 = 0x04;
-const GEN_FLAG_AUTO_RUN: u8 = 0x10;
+// research/xim ParticleInitializers.kt:84 `followCamera` — orthogonal to the billboard-type bits
+// in the same word. The weat/ precipitation curtains ride it (La Theine's `~1ra` is cfg 0x0004:
+// camera-following and NOT billboarded).
+const BILLBOARD_FOLLOW_CAMERA: u16 = 0x0004;
+
+// research/XIClient/src/XIClient/source/World/Generator/CYyGenerator.cpp:857-901 — sec2 0x06/0x07
+// offset each new elem by a random direction (two rng angles) at a radius derived from
+// `fpos[1] + fpos[2]`. 0x07 additionally scales that offset per axis, which is how the
+// ground-splash rings (`~1h*`, scale [1.3, 0.0, 1.2]) spread as flat ellipses instead of balls.
+// Retail gates both cases on `CheckFlag29() == false` (:860), i.e. a batched generator's single
+// elem carries its own spread; the consumer decides whether that applies to it (see
+// `ffxi_viewer_core::particle_sim::emit`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PositionVariance {
+    pub radius_variance: f32,
+    pub base_radius: f32,
+    pub axis_scale: [f32; 3],
+}
+
+impl PositionVariance {
+    pub fn max_radius(&self) -> f32 {
+        self.radius_variance + self.base_radius
+    }
+
+    // `unit_radius` in 0..=1 and `yaw`/`pitch` in -PI..=PI are the three draws retail takes
+    // (`ufrand(rmax)`, two `frand(ANGLE_PI)`). The transcription at CYyGenerator.cpp:862-871
+    // computes `ufrand(rmax)` and then writes the un-randomised `rmax` into the offset vector —
+    // the two cannot both be intended, and a shell of drops at one fixed radius is not what the
+    // discarded draw is for, so the random radius wins. research/xim (tier 6) reads it as
+    // `base + variance * u^(1/3)` (ParticleGeneratorSettings.kt:124-150), a solid ball with
+    // uniform density rather than uniform radius.
+    pub fn offset(&self, unit_radius: f32, yaw: f32, pitch: f32) -> [f32; 3] {
+        let r = self.max_radius() * unit_radius;
+        let (sp, cp) = pitch.sin_cos();
+        let (sy, cy) = yaw.sin_cos();
+        [
+            r * cp * cy * self.axis_scale[0],
+            r * sp * self.axis_scale[1],
+            r * cp * sy * self.axis_scale[2],
+        ]
+    }
+}
+
+// research/XIClient/src/XIClient/source/World/Generator/CYyGenerator.cpp:378-379 — the resource
+// body from byte 0x60 is memcpy'd onto the object at `field_C0`, so object offset X reads back at
+// body index X - 0x70 (our `body` already drops the 16-byte chunk header). `flags` (CYyGenerator.h
+// object 0xD8) is therefore the u32 at body[0x68], and Script1..4 (0xE0..0xEC) land on the four
+// section-offset words at body[0x70..0x80], which is what pins the mapping.
+//
+// XIM reads byte 0x68 as an 8-bit particle count and byte 0x69 as `genFlags`
+// (ParticleGeneratorParser.kt:66-70); both are views onto this one word, so the flag bits sit
+// eight higher than XIM's. Continuous-singleton + auto-run semantics: xim Actor.kt:724-734.
+const GEN_FLAGS_OFFSET: usize = 0x68;
+// CYyGenerator.cpp:2820 `(double)(this->flags & 0x1FF)` — the count is 9 bits, not 8.
+const PARTICLE_COUNT_MASK: u32 = 0x1FF;
+const GEN_FLAG_CONTINUOUS: u32 = 0x0400;
+// The bit retail's WeatherTransition.cpp:22 tests to decide whether a weat/<tag> generator
+// activates, and the same bit XIM calls genFlags 0x10.
+const GEN_FLAG_AUTO_RUN: u32 = 0x1000;
+// CYyGenerator.cpp:659-661 CheckFlag29 — a batched generator emits one elem per emission (:2814)
+// and that elem is itself a multi-particle batch.
+const GEN_FLAG_BATCHED: u32 = 0x2000_0000;
 
 // Vana'diel's elemental week (research/xim EnvironmentManager.kt DayOfWeek) and the
 // 12 moon-phase buckets the 0x45/0x4F celestial opcodes index.
@@ -137,9 +196,17 @@ pub struct ParticleGeneratorDef {
     pub base_position: [f32; 3],
     pub max_life_frames: f32,
     pub camera_billboard: bool,
+    // `base_position` is an offset from the camera rather than a world placement. Two independent
+    // flags express it: the billboard word's followCamera bit and the render-state's
+    // cameraAttachedBasePosition bit (La Theine's rain uses the first for the `~1ra` curtain and
+    // the second for the `rai2` mist puff).
+    pub camera_relative: bool,
+    // The spawn spread applied to every emitted particle; None puts them all on one point.
+    pub position_variance: Option<PositionVariance>,
 
     pub continuous: bool,
     pub auto_run: bool,
+    pub batched: bool,
 
     pub attach_type: AttachType,
     pub attach_joint_source: u8,
@@ -215,11 +282,12 @@ impl ParticleGeneratorDef {
         let attach_source_oriented = additional_attach & ATTACH_SOURCE_ORIENTED != 0;
 
         let frames_per_emission = u16_le(body, 0x66) as f32 + 1.0;
-        let particles_per_emission = (body[0x68] as u32).max(1);
         let emission_variance = u16_le(body, 0x64) as f32;
-        let gen_flags = body[0x69];
-        let continuous = gen_flags & GEN_FLAG_CONTINUOUS != 0;
-        let auto_run = gen_flags & GEN_FLAG_AUTO_RUN != 0;
+        let flags = u32_le(body, GEN_FLAGS_OFFSET);
+        let particles_per_emission = flags & PARTICLE_COUNT_MASK;
+        let continuous = flags & GEN_FLAG_CONTINUOUS != 0;
+        let auto_run = flags & GEN_FLAG_AUTO_RUN != 0;
+        let batched = flags & GEN_FLAG_BATCHED != 0;
 
         // Section 2 = particle initializers.
         let sec2_raw = u32_le(body, 0x74) as usize;
@@ -233,6 +301,8 @@ impl ParticleGeneratorDef {
         let mut base_position = [0.0f32; 3];
         let mut max_life_frames = 0.0f32;
         let mut camera_billboard = false;
+        let mut camera_relative = false;
+        let mut position_variance = None;
         let mut is_particle = false;
         let mut init_scale = [1.0f32; 3];
         let mut init_color = [1.0f32; 4];
@@ -265,6 +335,8 @@ impl ParticleGeneratorDef {
                     camera_billboard = bb & 0x0001 != 0 || bb & 0x00C0 == 0x00C0;
                     let render_state = u16_le(body, payload + 2);
                     ignore_texture_alpha = render_state & RENDER_STATE_IGNORE_TEXTURE_ALPHA != 0;
+                    camera_relative = bb & BILLBOARD_FOLLOW_CAMERA != 0
+                        || render_state & RENDER_STATE_CAMERA_ATTACHED_BASE != 0;
                     mesh_id = [
                         body[payload + 8],
                         body[payload + 9],
@@ -289,6 +361,24 @@ impl ParticleGeneratorDef {
                         f32_le(body, payload + 4),
                         f32_le(body, payload + 8),
                     ];
+                }
+                0x06 if payload + 8 <= body.len() => {
+                    position_variance = Some(PositionVariance {
+                        radius_variance: f32_le(body, payload),
+                        base_radius: f32_le(body, payload + 4),
+                        axis_scale: [1.0; 3],
+                    });
+                }
+                0x07 if payload + 20 <= body.len() => {
+                    position_variance = Some(PositionVariance {
+                        radius_variance: f32_le(body, payload),
+                        base_radius: f32_le(body, payload + 4),
+                        axis_scale: [
+                            f32_le(body, payload + 8),
+                            f32_le(body, payload + 12),
+                            f32_le(body, payload + 16),
+                        ],
+                    });
                 }
                 0x09 if payload + 12 <= body.len() => {
                     init_rotation = [
@@ -412,8 +502,11 @@ impl ParticleGeneratorDef {
             base_position,
             max_life_frames,
             camera_billboard,
+            camera_relative,
+            position_variance,
             continuous,
             auto_run,
+            batched,
             attach_type,
             attach_joint_source,
             attach_joint_target,
@@ -440,6 +533,138 @@ impl ParticleGeneratorDef {
 
     pub fn is_singleton(&self) -> bool {
         self.max_life_frames == 0.0
+    }
+}
+
+// research/XIClient/src/XIClient/include/Resource/ResourceType.h:66 `Sep = 61`, dispatched
+// at CYyGenerator.cpp:117 (`modelType` = the same setup byte payload+29 the particle kinds
+// come from) and :193 (`case Sep: elem = new CYySoundElem()`).
+const LINKED_DATA_SOUND: u8 = 0x3D;
+
+// research/XIClient/src/XIClient/source/World/Generator/CYyGenerator.cpp:1167-1185 —
+// initializer 0x4C is the sound elem's setup: `s_far = fpos[1]`, `s_near = fpos[2]`, and
+// `s_width = 0.0` unconditionally, so the third shipped word (non-zero in 22 of the 5,895
+// generators) is discarded rather than read.
+const SOUND_SETUP_OPCODE: u8 = 0x4C;
+
+/// A 0x05 Generator whose setup links a 0x3D `Sep` — a placed sound emitter rather than a
+/// particle. [`ParticleGeneratorDef::parse`] rejects the same chunks, so the two views
+/// never overlap.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct SoundGeneratorDef {
+    pub sep_id: [u8; 4],
+    pub base_position: [f32; 3],
+
+    /// Retail's `CYySoundElem::s_far` / `s_near`. A shipped 0.0 is not "silent" — Calc3D
+    /// substitutes the class defaults (CYySepRes.cpp:24-29), which 591 generators rely on.
+    pub far: f32,
+    pub near: f32,
+
+    /// CYyGenerator.cpp:2834-2836 — the re-emission period is
+    /// `frames_per_emission + uirand(emission_variance)`.
+    pub frames_per_emission: f32,
+    pub emission_variance: f32,
+
+    pub auto_run: bool,
+
+    /// CYyGenerator.cpp:2260-2263 `IsNever()` — `flags & 0x400` (continuous) or a zero
+    /// life. Such a generator never runs the timed emission loop at all: :2789-2794 emits a
+    /// single elem and only re-emits once that one is gone.
+    pub continuous: bool,
+    pub max_life_frames: f32,
+
+    pub attach_type: AttachType,
+}
+
+impl SoundGeneratorDef {
+    pub fn parse(body: &[u8]) -> Result<Option<Self>> {
+        if body.len() < HEADER_LEN {
+            return Err(DatError::TruncatedChunk {
+                offset: 0,
+                needed: HEADER_LEN,
+                available: body.len(),
+            });
+        }
+
+        let attach_flags = u16_le(body, 0x00);
+        let flags = u32_le(body, GEN_FLAGS_OFFSET);
+
+        let sec2_raw = u32_le(body, 0x74) as usize;
+        if sec2_raw < 0x10 || sec2_raw - 0x10 >= body.len() {
+            return Ok(None);
+        }
+        let mut cursor = sec2_raw - 0x10;
+
+        let mut is_sound = false;
+        let mut sep_id = [0u8; 4];
+        let mut base_position = [0.0f32; 3];
+        let mut max_life_frames = 0.0f32;
+        let mut far = 0.0f32;
+        let mut near = 0.0f32;
+
+        while cursor + 4 <= body.len() {
+            let cfg = u32_le(body, cursor);
+            let opcode = (cfg & 0xFF) as u8;
+            let size_words = ((cfg >> 8) & 0x1F) as usize;
+            if opcode == 0x00 || size_words == 0 {
+                break;
+            }
+            let block_len = size_words * 4;
+            let payload = cursor + 4;
+            if cursor + block_len > body.len() {
+                break;
+            }
+            match opcode {
+                0x01 if payload + 32 <= body.len() => {
+                    sep_id = [
+                        body[payload + 8],
+                        body[payload + 9],
+                        body[payload + 10],
+                        body[payload + 11],
+                    ];
+                    base_position = [
+                        f32_le(body, payload + 16),
+                        f32_le(body, payload + 20),
+                        f32_le(body, payload + 24),
+                    ];
+                    is_sound = body[payload + 29] == LINKED_DATA_SOUND;
+                    max_life_frames = u16_le(body, payload + 30) as f32;
+                }
+                SOUND_SETUP_OPCODE if payload + 8 <= body.len() => {
+                    far = f32_le(body, payload);
+                    near = f32_le(body, payload + 4);
+                }
+                _ => {}
+            }
+            cursor += block_len;
+        }
+
+        if !is_sound {
+            return Ok(None);
+        }
+
+        Ok(Some(Self {
+            sep_id,
+            base_position,
+            far,
+            near,
+            frames_per_emission: u16_le(body, 0x66) as f32 + 1.0,
+            emission_variance: u16_le(body, 0x64) as f32,
+            auto_run: flags & GEN_FLAG_AUTO_RUN != 0,
+            continuous: flags & GEN_FLAG_CONTINUOUS != 0,
+            max_life_frames,
+            attach_type: AttachType::from_flag(attach_flags & ATTACH_TYPE_MASK).unwrap_or_default(),
+        }))
+    }
+
+    pub fn is_placed(&self) -> bool {
+        self.base_position != [0.0, 0.0, 0.0]
+    }
+
+    /// CYyGenerator.cpp:2260-2263 + :2789-2794 — a "never" generator holds exactly one live
+    /// elem and re-emits only once it is gone, instead of running the timed emission loop.
+    pub fn is_singleton(&self) -> bool {
+        self.continuous || self.max_life_frames == 0.0
     }
 }
 
@@ -528,15 +753,16 @@ mod tests {
     use super::*;
 
     // Build a generator body matching the real layout: header at 0x64, section-2 offset word at
-    // body[0x74] (value = body_index + 0x10), then the initializer opcode stream.
-    fn build(sec2: &[u8], frames_per_em: u16, ppe: u8) -> Vec<u8> {
-        build_attached(sec2, frames_per_em, ppe, 0, 0)
+    // body[0x74] (value = body_index + 0x10), then the initializer opcode stream. `flags` is the
+    // whole u32 at body[0x68] — particle count in the low 9 bits, gen flags above it.
+    fn build(sec2: &[u8], frames_per_em: u16, flags: u32) -> Vec<u8> {
+        build_attached(sec2, frames_per_em, flags, 0, 0)
     }
 
     fn build_attached(
         sec2: &[u8],
         frames_per_em: u16,
-        ppe: u8,
+        flags: u32,
         attach_flags: u16,
         additional_attach: u16,
     ) -> Vec<u8> {
@@ -544,7 +770,7 @@ mod tests {
         body[0x00..0x02].copy_from_slice(&attach_flags.to_le_bytes());
         body[0x02..0x04].copy_from_slice(&additional_attach.to_le_bytes());
         body[0x66..0x68].copy_from_slice(&(frames_per_em - 1).to_le_bytes());
-        body[0x68] = ppe;
+        body[GEN_FLAGS_OFFSET..GEN_FLAGS_OFFSET + 4].copy_from_slice(&flags.to_le_bytes());
         let sec2_body_index = HEADER_LEN;
         body[0x74..0x78].copy_from_slice(&((sec2_body_index + 0x10) as u32).to_le_bytes());
         body.extend_from_slice(sec2);
@@ -599,7 +825,7 @@ mod tests {
         assert_eq!(def.mesh_id, *b"kir1");
         assert!(def.camera_billboard);
         assert_eq!(def.frames_per_emission, 5.0);
-        assert_eq!(def.particles_per_emission, 1, "ppe 0 clamps to 1");
+        assert_eq!(def.particles_per_emission, 0);
         assert!((def.base_position[1] - 0.2).abs() < 1e-6);
         assert_eq!(def.max_life_frames, 36.0);
         assert!(!def.is_singleton());
@@ -789,16 +1015,36 @@ mod tests {
     fn gen_flags_decode_auto_run_and_continuous() {
         let mut setup = op(0x01, 12, &[]);
         setup[4 + 29] = LINKED_DATA_STATIC_MESH;
-        let mut body = build(&setup, 1, 1);
-        body[0x69] = GEN_FLAG_AUTO_RUN | GEN_FLAG_CONTINUOUS;
+        let body = build(&setup, 1, GEN_FLAG_AUTO_RUN | GEN_FLAG_CONTINUOUS | 1);
         let def = ParticleGeneratorDef::parse(&body).unwrap().unwrap();
         assert!(def.auto_run);
         assert!(def.continuous);
+        assert!(!def.batched);
+        assert_eq!(
+            def.particles_per_emission, 1,
+            "flag bits stay out of the count"
+        );
 
-        let mut body = build(&setup, 1, 1);
-        body[0x69] = 0;
-        let def = ParticleGeneratorDef::parse(&body).unwrap().unwrap();
+        let def = ParticleGeneratorDef::parse(&build(&setup, 1, 1))
+            .unwrap()
+            .unwrap();
         assert!(!def.auto_run);
+        assert!(!def.continuous);
+    }
+
+    // The count is 9 bits wide (CYyGenerator.cpp:2820 `flags & 0x1FF`), so its top bit is bit 0
+    // of the byte XIM calls genFlags. Reading either as a byte truncates the primary weather
+    // curtains: La Theine's `~1ra` authors 299 and an 8-bit read yields 43.
+    #[test]
+    fn particle_count_is_nine_bits_wide() {
+        let mut setup = op(0x01, 12, &[]);
+        setup[4 + 29] = LINKED_DATA_STATIC_MESH;
+        let def = ParticleGeneratorDef::parse(&build(&setup, 30, 0x2000_112B))
+            .unwrap()
+            .unwrap();
+        assert_eq!(def.particles_per_emission, 299);
+        assert!(def.auto_run);
+        assert!(def.batched, "0x2000_0000 is CheckFlag29");
         assert!(!def.continuous);
     }
 
@@ -954,6 +1200,240 @@ mod tests {
             assert_eq!(def.attach_joint_target, 21);
         }
         assert!(seen > 0, "no particle generators parsed from file 3020");
+    }
+
+    // kuluu-ln1q was filed on the premise that retail gates weat/<tag> activation on a predicate
+    // other than the auto-run bit we test. It does not: WeatherTransition.cpp:22 reads
+    // `gen->flags & 0x1000`, and the ConstructFromData offset mapping puts that bit on the byte
+    // XIM calls genFlags. Pin the two views onto one field so nobody re-derives it.
+    #[test]
+    fn real_dat_auto_run_is_the_retail_weather_activation_bit() {
+        const XIM_GEN_FLAGS_BYTE: usize = GEN_FLAGS_OFFSET + 1;
+        const XIM_GEN_FLAG_AUTO_RUN: u8 = 0x10;
+        let Some(bytes) = real_zone_dat(LA_THEINE_ZONE_DAT) else {
+            return;
+        };
+        let mut seen = 0;
+        for c in crate::chunk::walk(&bytes).flatten() {
+            if crate::kind::ChunkKind::from_u8(c.kind) != Some(crate::kind::ChunkKind::Generator) {
+                continue;
+            }
+            let Ok(Some(def)) = ParticleGeneratorDef::parse(c.data) else {
+                continue;
+            };
+            seen += 1;
+            assert_eq!(
+                def.auto_run,
+                c.data[XIM_GEN_FLAGS_BYTE] & XIM_GEN_FLAG_AUTO_RUN != 0,
+                "generator {}",
+                String::from_utf8_lossy(&c.name)
+            );
+        }
+        assert!(
+            seen > 0,
+            "no particle generators in DAT {LA_THEINE_ZONE_DAT}"
+        );
+    }
+
+    const LA_THEINE_ZONE_DAT: u32 = 202;
+
+    fn real_zone_dat(file_id: u32) -> Option<Vec<u8>> {
+        let root = crate::DatRoot::from_env_or_default().ok()?;
+        let loc = root.resolve(file_id).ok()?;
+        std::fs::read(loc.path_under(root.root())).ok()
+    }
+
+    // La Theine's rain curtain is the canonical precipitation generator: camera-following, a
+    // sprite-sheet flipbook, a 9-bit particle count, a 20-unit spawn sphere and downward
+    // FFXI-frame velocity + gravity. Every one of those is a field this module had to learn to
+    // read; if any silently regresses to a default the rain goes back to a point emitter.
+    #[test]
+    fn real_dat_la_theine_rain_curtain() {
+        let Some(bytes) = real_zone_dat(LA_THEINE_ZONE_DAT) else {
+            return;
+        };
+        let mut found = false;
+        for c in crate::chunk::walk(&bytes).flatten() {
+            if c.name != *b"~1ra"
+                || crate::kind::ChunkKind::from_u8(c.kind)
+                    != Some(crate::kind::ChunkKind::Generator)
+            {
+                continue;
+            }
+            let def = ParticleGeneratorDef::parse(c.data).unwrap().unwrap();
+            found = true;
+            assert!(def.auto_run);
+            assert!(def.batched);
+            assert!(def.camera_relative);
+            assert!(!def.camera_billboard);
+            assert_eq!(def.mesh_kind, ParticleMeshKind::SpriteSheet);
+            assert_eq!(def.mesh_id, *b"rain");
+            assert_eq!(def.particles_per_emission, 299);
+            assert_eq!(def.frames_per_emission, 30.0);
+            assert_eq!(def.max_life_frames, 60.0);
+            assert_eq!(def.base_position, [0.0, -35.0, 0.0]);
+            assert!((def.init_velocity[1] - 0.3).abs() < 1e-6);
+            assert!((def.accel.unwrap()[1] - 0.005).abs() < 1e-6);
+            let pv = def.position_variance.expect("sec2 0x06 spawn sphere");
+            assert_eq!(pv.radius_variance, 20.0);
+            assert_eq!(pv.base_radius, 0.0);
+            assert_eq!(pv.axis_scale, [1.0; 3]);
+        }
+        assert!(found, "DAT {LA_THEINE_ZONE_DAT} defines weat/rain/~1ra");
+    }
+
+    // The 0x07 form scales the offset per axis; La Theine's ground-splash rings zero the Y scale
+    // so the spread is a flat ellipse on the ground rather than a ball around the emitter.
+    #[test]
+    fn real_dat_la_theine_rain_splash_spreads_flat() {
+        let Some(bytes) = real_zone_dat(LA_THEINE_ZONE_DAT) else {
+            return;
+        };
+        let mut found = false;
+        for c in crate::chunk::walk(&bytes).flatten() {
+            if c.name != *b"~1h1"
+                || crate::kind::ChunkKind::from_u8(c.kind)
+                    != Some(crate::kind::ChunkKind::Generator)
+            {
+                continue;
+            }
+            let def = ParticleGeneratorDef::parse(c.data).unwrap().unwrap();
+            found = true;
+            assert!(!def.camera_relative, "splashes are placed in the world");
+            let pv = def.position_variance.expect("sec2 0x07 spawn ellipse");
+            assert!((pv.max_radius() - 10.0).abs() < 1e-4);
+            assert_eq!(pv.axis_scale[1], 0.0);
+            assert_eq!(pv.offset(1.0, 0.0, std::f32::consts::FRAC_PI_2)[1], 0.0);
+        }
+        assert!(found, "DAT {LA_THEINE_ZONE_DAT} defines weat/rain/~1h1");
+    }
+
+    // CYyGenerator.cpp:1179-1180 assigns far from the FIRST 0x4C word and near from the
+    // second, and 25 shipped generators author near > far — swapping them would make those
+    // silent everywhere instead of loud everywhere inside far.
+    #[test]
+    fn sound_setup_reads_far_then_near_and_ignores_the_third_word() {
+        let mut setup = op(0x01, 12, &[]);
+        setup[4 + 8..4 + 12].copy_from_slice(b"2024");
+        setup[4 + 29] = LINKED_DATA_SOUND;
+        setup[4 + 16..4 + 20].copy_from_slice(&(-293.5f32).to_le_bytes());
+        let mut p = Vec::new();
+        p.extend_from_slice(&50.0f32.to_le_bytes());
+        p.extend_from_slice(&30.0f32.to_le_bytes());
+        p.extend_from_slice(&6.0f32.to_le_bytes());
+        setup.extend(op(SOUND_SETUP_OPCODE, 4, &p));
+
+        let body = build(&setup, 30, GEN_FLAG_AUTO_RUN);
+        let def = SoundGeneratorDef::parse(&body).unwrap().unwrap();
+        assert_eq!(def.sep_id, *b"2024");
+        assert_eq!(def.far, 50.0);
+        assert_eq!(def.near, 30.0);
+        assert!(def.auto_run);
+        assert!(def.is_placed());
+        assert_eq!(def.frames_per_emission, 30.0);
+
+        assert!(
+            ParticleGeneratorDef::parse(&body).unwrap().is_none(),
+            "a sound generator must never reach the particle sim"
+        );
+    }
+
+    #[test]
+    fn particle_setups_are_not_sound_generators() {
+        let mut setup = op(0x01, 12, &[]);
+        setup[4 + 29] = LINKED_DATA_STATIC_MESH;
+        let body = build(&setup, 1, 1);
+        assert!(SoundGeneratorDef::parse(&body).unwrap().is_none());
+    }
+
+    // West Ronfaure's waterfall spray (`taki/sef1`, a looping cue at far 30 / near 3) and
+    // its bird calls (`aose/mb01`, a one-shot at far 10 with near left at 0 so Calc3D
+    // substitutes the 3.0 default).
+    #[test]
+    fn real_dat_west_ronfaure_placed_sound_generators() {
+        const WEST_RONFAURE_ZONE_DAT: u32 = 200;
+        let Some(bytes) = real_zone_dat(WEST_RONFAURE_ZONE_DAT) else {
+            return;
+        };
+        let mut waterfall = 0;
+        let mut birds = 0;
+        for c in crate::chunk::walk(&bytes).flatten() {
+            if crate::kind::ChunkKind::from_u8(c.kind) != Some(crate::kind::ChunkKind::Generator) {
+                continue;
+            }
+            let Ok(Some(def)) = SoundGeneratorDef::parse(c.data) else {
+                continue;
+            };
+            if c.name == *b"sef1" {
+                waterfall += 1;
+                assert_eq!(def.sep_id, *b"2024");
+                assert_eq!((def.far, def.near), (30.0, 3.0));
+                assert!(def.is_placed());
+                assert!(def.auto_run);
+            }
+            if c.name == *b"mb01" {
+                birds += 1;
+                assert_eq!(def.sep_id, *b"2084");
+                assert_eq!((def.far, def.near), (10.0, 0.0));
+                assert!(def.is_placed());
+            }
+        }
+        assert!(waterfall >= 1, "f_ro/mode/ligh/taki/sef1");
+        assert!(birds >= 1, "f_ro/effe/aose/mb01");
+    }
+
+    // Census guard over every shipped zone DAT: 5,895 sound generators, 5,735 of them
+    // placed, and every one carrying a 0x4C block.
+    #[test]
+    fn real_dat_sound_generator_census() {
+        const MIN_SOUND_GENERATORS: usize = 5800;
+        const MIN_PLACED: usize = 5700;
+        let Ok(root) = crate::DatRoot::from_env_or_default() else {
+            return;
+        };
+        let mut seen = std::collections::HashSet::new();
+        let (mut total, mut placed) = (0usize, 0usize);
+        for &(_zone, file_id) in crate::zone_dat::ZONE_DAT_TABLE {
+            if !seen.insert(file_id) {
+                continue;
+            }
+            let Ok(loc) = root.resolve(file_id) else {
+                continue;
+            };
+            let Ok(bytes) = std::fs::read(loc.path_under(root.root())) else {
+                continue;
+            };
+            for c in crate::chunk::walk(&bytes).flatten() {
+                if crate::kind::ChunkKind::from_u8(c.kind)
+                    != Some(crate::kind::ChunkKind::Generator)
+                {
+                    continue;
+                }
+                if let Ok(Some(def)) = SoundGeneratorDef::parse(c.data) {
+                    total += 1;
+                    placed += usize::from(def.is_placed());
+                }
+            }
+        }
+        assert!(total >= MIN_SOUND_GENERATORS, "sound generators: {total}");
+        assert!(placed >= MIN_PLACED, "placed: {placed}");
+    }
+
+    #[test]
+    fn position_variance_spreads_over_the_full_radius() {
+        let pv = PositionVariance {
+            radius_variance: 20.0,
+            base_radius: 4.0,
+            axis_scale: [1.0; 3],
+        };
+        assert_eq!(pv.max_radius(), 24.0);
+        let len = |o: [f32; 3]| (o[0] * o[0] + o[1] * o[1] + o[2] * o[2]).sqrt();
+        assert!(
+            len(pv.offset(0.0, 1.0, 0.5)).abs() < 1e-5,
+            "u=0 is the origin"
+        );
+        assert!((len(pv.offset(1.0, 1.0, 0.5)) - 24.0).abs() < 1e-4);
+        assert!((len(pv.offset(0.5, -2.0, 1.2)) - 12.0).abs() < 1e-4);
     }
 
     #[test]

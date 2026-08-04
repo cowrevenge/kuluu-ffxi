@@ -16,7 +16,7 @@ use ffxi_dat::weather::{weather_type_id_or_default, WeatherTypeId, WEATHER_TYPE_
 use ffxi_dat::{ChunkKind, DatRoot};
 
 use crate::components::InGameEntity;
-use crate::ffxi_zone_material::FfxiZoneMaterial;
+use crate::ffxi_zone_material::{zone_fog_flag, FfxiZoneMaterial};
 use crate::graphics_settings::GraphicsSettings;
 // research/xim ParticleUpdaters.kt: TextureCoordinateUpdater velocities are per rendered frame.
 use crate::scheduler_runtime::RETAIL_FPS;
@@ -34,7 +34,7 @@ use crate::zone_texture::{decoded_texture_to_image, TextureQuality};
 // that dome — is nearer and depth-occludes the clouds (the "sky is the farthest thing"
 // rule). Derived from SKYBOX_RADIUS so this can't drift from the dome it must sit under.
 const CLOUD_RIM_MARGIN: f32 = 100.0;
-const CLOUD_MIN_RIM: f32 = crate::skybox::SKYBOX_RADIUS - CLOUD_RIM_MARGIN;
+pub const CLOUD_MIN_RIM: f32 = crate::skybox::SKYBOX_RADIUS - CLOUD_RIM_MARGIN;
 
 // research/xim EnvironmentManager.kt:351-369 switchWeather default 3.33s cross-fade
 // between the old and new weat/<type>/ effect sets on a 0x0057 weather change.
@@ -44,9 +44,9 @@ const WEATHER_FADE_SECS: f32 = 3.33;
 // primary cloud canopy. dat_mzb's generator-water path rejects ALL camera-follow
 // sky generators structurally (follow_camera config bit), so this list is only
 // this module's own include filter, not a shared exclusion contract. Per-weather
-// cloud variants beyond cld1/cld2 (e.g. ~4cl) are not yet rendered here (kuluu-nfrp
-// follow-up) but are correctly kept out of world geometry by the follow_camera gate.
-const CLOUD_CANOPY_GENERATOR_NAMES: [[u8; 4]; 2] = [*b"cld1", *b"cld2"];
+// cloud variants beyond cld1/cld2 (e.g. ~4cl) are drawn by no module at all
+// (kuluu-zi3t) but are correctly kept out of world geometry by the follow_camera gate.
+pub(crate) const CLOUD_CANOPY_GENERATOR_NAMES: [[u8; 4]; 2] = [*b"cld1", *b"cld2"];
 
 #[derive(Component)]
 pub struct CloudMesh;
@@ -144,7 +144,10 @@ fn ffxi_to_bevy_basis() -> Quat {
 // container for the requested tag and falls back to `suny` on a miss
 // (research/XIClient/src/XIClient/source/World/Weather/WeatherTransition.cpp:52-54),
 // which is the same single hop the 0x2F record selection takes.
-fn find_weat_type<'a>(node: &'a ChunkNode<'a>, want: WeatherTypeId) -> Option<&'a ChunkNode<'a>> {
+pub(crate) fn find_weat_type<'a>(
+    node: &'a ChunkNode<'a>,
+    want: WeatherTypeId,
+) -> Option<&'a ChunkNode<'a>> {
     find_weat_type_exact(node, want).or_else(|| {
         (want != WEATHER_TYPE_FALLBACK)
             .then(|| find_weat_type_exact(node, WEATHER_TYPE_FALLBACK))
@@ -162,7 +165,7 @@ fn find_weat_type_exact<'a>(
         }
         if child.chunk.name == *b"weat" {
             for type_node in &child.children {
-                if type_node.chunk.kind == 0x01 && type_node.chunk.name == want {
+                if type_node.chunk.kind == ChunkKind::Rmp as u8 && type_node.chunk.name == want {
                     return Some(type_node);
                 }
             }
@@ -218,12 +221,7 @@ fn build_mesh(decrypted: &[u8]) -> Option<(Mesh, f32)> {
             positions.push(v.pos);
             normals.push(v.normal);
             uvs.push(v.uv);
-            colors.push([
-                v.rgba[0] as f32 / 128.0,
-                v.rgba[1] as f32 / 128.0,
-                v.rgba[2] as f32 / 128.0,
-                v.rgba[3] as f32 / 128.0,
-            ]);
+            colors.push(mmb::vertex_color_to_linear(v.rgba));
         }
         for t in m.indices.chunks_exact(3) {
             if t[0] < vert_count && t[1] < vert_count && t[2] < vert_count {
@@ -308,7 +306,7 @@ fn build_cloud_layers(
             .get(&id_str(def.linked_id))
             .or(first_texture.as_ref())
             .cloned();
-        let material = materials.add(cloud_material(texture));
+        let material = materials.add(cloud_material(texture, def.fog_enabled));
 
         out.push(CloudLayerBuild {
             mesh: meshes.add(mesh),
@@ -365,22 +363,31 @@ fn id_str(id: [u8; 4]) -> String {
         .to_string()
 }
 
-// FfxiZoneMaterial with the 2x overbright vertex-lit path; clouds blend over the
-// sky dome so they use AlphaMode::Blend with the texture's own alpha.
-fn cloud_material(texture: Option<Handle<Image>>) -> FfxiZoneMaterial {
+// Clouds blend over the sky dome, so AlphaMode::Blend with the texture's own alpha.
+fn cloud_material(texture: Option<Handle<Image>>, fog_enabled: bool) -> FfxiZoneMaterial {
     let has_texture = if texture.is_some() { 1.0 } else { 0.0 };
     FfxiZoneMaterial::new(
         texture,
         crate::skinned_ffxi_material::FfxiMaterialFlags {
-            flags: Vec4::new(has_texture, 1.0, 0.0, 0.0),
+            flags: Vec4::new(has_texture, 1.0, zone_fog_flag(fog_enabled), 0.0),
         },
         Vec4::ONE,
         Vec4::ZERO,
         AlphaMode::Blend,
-        // Clouds are a synthetic layer with no DAT render-state word; keep the
-        // pre-render-state pipeline (no cull, no bias).
-        crate::ffxi_zone_material::FfxiZoneMaterialKey::LEGACY,
+        // Clouds are a canopy hung off a weat/ generator, so they take the two-stage
+        // CMoD3m chain with the ToD `tint` as its TEXTUREFACTOR. Otherwise a synthetic
+        // layer with no DAT render-state word: no cull, no bias.
+        crate::ffxi_zone_material::FfxiZoneMaterialKey {
+            generator_stage_chain: true,
+            ..crate::ffxi_zone_material::FfxiZoneMaterialKey::LEGACY
+        },
     )
+}
+
+fn read_zone_dat(file_id: u32) -> Option<Vec<u8>> {
+    let root = DatRoot::from_env_or_default().ok()?;
+    let location = root.resolve(file_id).ok()?;
+    fs::read(location.path_under(root.root())).ok()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -404,6 +411,44 @@ fn rebuild_zone_clouds(
         return;
     }
 
+    // Read the DAT BEFORE the teardown commits, so a failed read leaves the current
+    // canopy up instead of swapping the sky for nothing (kuluu-grbo). The key still
+    // latches: every failure here is deterministic for this file id, and re-probing
+    // reloads every VTABLE/FTABLE (DatRoot::open) on each frame that it stays broken.
+    let loaded = file_id.and_then(read_zone_dat);
+    if file_id.is_some() && loaded.is_none() {
+        warn!(
+            ?file_id,
+            "zone clouds: zone DAT unreadable, canopy left as-is"
+        );
+        state.key = key;
+        return;
+    }
+
+    // Resolve and BUILD the replacement before the teardown commits (kuluu-grbo): every
+    // remaining abort — no weat container, no cld1/cld2 under it, an unresolvable mesh —
+    // would otherwise fade the canopy out with nothing to put back. An empty result is
+    // content-correct for the 206 shipped DATs whose tags author no canopy, so it still
+    // tears down; it is just no longer indistinguishable from a failed rebuild.
+    let tree = loaded.as_deref().map(walk_tree);
+    let weat_type = tree.as_ref().and_then(|t| find_weat_type(t, want));
+    let quality = TextureQuality {
+        mipmaps: settings.texture_filtering.mipmaps(),
+        anisotropy: settings.texture_filtering.anisotropy(),
+    };
+    let layers = weat_type
+        .map(|node| {
+            build_cloud_layers(
+                node,
+                quality,
+                weather_opacity(want),
+                &mut meshes,
+                &mut images,
+                &mut materials,
+            )
+        })
+        .unwrap_or_default();
+
     // A weather change within the same zone DAT cross-fades the old set out (xim
     // switchWeather); a DAT change despawns immediately — the old weat/ set
     // belongs to a different DAT and the camera teleports, so a fade would smear.
@@ -426,34 +471,6 @@ fn rebuild_zone_clouds(
     let Some(file_id) = file_id else {
         return;
     };
-    let Ok(root) = DatRoot::from_env_or_default() else {
-        return;
-    };
-    let Ok(location) = root.resolve(file_id) else {
-        return;
-    };
-    let Ok(bytes) = fs::read(location.path_under(root.root())) else {
-        return;
-    };
-
-    let tree = walk_tree(&bytes);
-    let weat_type = match find_weat_type(&tree, want) {
-        Some(n) => n,
-        None => return,
-    };
-
-    let quality = TextureQuality {
-        mipmaps: settings.texture_filtering.mipmaps(),
-        anisotropy: settings.texture_filtering.anisotropy(),
-    };
-    let layers = build_cloud_layers(
-        weat_type,
-        quality,
-        weather_opacity(want),
-        &mut meshes,
-        &mut images,
-        &mut materials,
-    );
 
     for layer in layers {
         let e = commands
@@ -481,14 +498,13 @@ fn rebuild_zone_clouds(
         state.entities.push(e);
     }
 
-    if !state.entities.is_empty() {
-        info!(
-            file_id,
-            type_ = id_str(want),
-            count = state.entities.len(),
-            "zone clouds spawned"
-        );
-    }
+    info!(
+        file_id,
+        type_ = id_str(want),
+        count = state.entities.len(),
+        weat_container = weat_type.is_some(),
+        "zone clouds rebuilt"
+    );
 }
 
 #[allow(clippy::type_complexity)]
@@ -550,7 +566,11 @@ struct StarDome;
 
 #[derive(Resource, Default)]
 struct ZoneStarState {
-    file_id: Option<u32>,
+    // The dome is read out of the CURRENT weather's weat/<tag>/star, and 123 shipped zone
+    // DATs carry one under only some of their tags, so keying on the file id alone latched
+    // whichever weather happened to be live at zone-in: a later change to a tag that does
+    // ship a dome could never rebuild, and one that does not kept the previous tag's.
+    key: Option<(u32, WeatherTypeId)>,
     entity: Option<Entity>,
 }
 
@@ -558,7 +578,7 @@ fn find_star_dir<'a>(weat_type: &'a ChunkNode<'a>) -> Option<&'a ChunkNode<'a>> 
     weat_type
         .children
         .iter()
-        .find(|c| c.chunk.kind == 0x01 && c.chunk.name == *b"star")
+        .find(|c| c.chunk.kind == ChunkKind::Rmp as u8 && c.chunk.name == *b"star")
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -573,29 +593,24 @@ fn rebuild_zone_stars(
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
     let file_id = crate::snapshot::effective_zone_file_id(&scene_state.snapshot);
-    if file_id == state.file_id {
+    let want = weather_type_id_or_default(current_weather.0.map(|w| w as u16));
+    let key = file_id.map(|f| (f, want));
+    if key == state.key {
         return;
     }
     if let Some(e) = state.entity.take() {
         commands.entity(e).try_despawn();
     }
-    state.file_id = file_id;
+    state.key = key;
 
     let Some(file_id) = file_id else {
         return;
     };
-    let Ok(root) = DatRoot::from_env_or_default() else {
-        return;
-    };
-    let Ok(location) = root.resolve(file_id) else {
-        return;
-    };
-    let Ok(bytes) = fs::read(location.path_under(root.root())) else {
+    let Some(bytes) = read_zone_dat(file_id) else {
         return;
     };
 
     let tree = walk_tree(&bytes);
-    let want = weather_type_id_or_default(current_weather.0.map(|w| w as u16));
     let weat_type = match find_weat_type(&tree, want) {
         Some(n) => n,
         None => return,
@@ -636,10 +651,14 @@ fn rebuild_zone_stars(
 
     // Unlit additive: stars are self-luminous points on a black field, so scene
     // lighting must not dim them and the black background must add nothing.
+    // Bevy applies DistanceFog to unlit StandardMaterials too (vendor/bevy_pbr
+    // pbr.wgsl:89 main_pass_post_lighting_processing), and the star generators
+    // clear fog in the DAT (measured star/sta1 = 0x02440204).
     let material = materials.add(StandardMaterial {
         base_color_texture: texture,
         unlit: true,
         alpha_mode: AlphaMode::Add,
+        fog_enabled: false,
         ..default()
     });
 
@@ -752,5 +771,21 @@ mod tests {
         for name in [*b"cld1", *b"cld2"] {
             assert!(CLOUD_CANOPY_GENERATOR_NAMES.contains(&name));
         }
+    }
+
+    // The canopy must carry the generator's own fog bit through, not a blanket
+    // exemption: retail fogs the overcast cld2 haze sheet and not cld1, and both
+    // go through this one constructor.
+    #[test]
+    fn canopy_material_carries_the_generator_fog_bit() {
+        use crate::ffxi_zone_material::{ZONE_FLAG_FOGGED, ZONE_FLAG_UNFOGGED};
+        assert_eq!(
+            cloud_material(None, true).material_flags.flags.z,
+            ZONE_FLAG_FOGGED
+        );
+        assert_eq!(
+            cloud_material(None, false).material_flags.flags.z,
+            ZONE_FLAG_UNFOGGED
+        );
     }
 }

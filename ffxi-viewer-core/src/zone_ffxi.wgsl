@@ -1,18 +1,20 @@
 // FFXI faithful zone/scenery shader — an UNSKINNED port of the character
-// shader (skinned_ffxi.wgsl), reproducing FFXI's zone-mesh lighting model
-// (cross-referenced against research/xim's poc/gl/XimShader.kt:179-187):
+// shader (skinned_ffxi.wgsl), reproducing FFXI's zone-mesh texture-stage chain.
+// The baked per-vertex colour is the PRIMARY illumination; it is what makes
+// lamps/braziers glow at night with no dynamic light.
 //
-//   out = 2 * (vertexColor * (ambient + 2 directional + 4 point)) * texel
+// research/XIClient Rendering/Direct3D8Manager.cpp:373,390,393,395 — zone draws run
+// fixed-function T&L with COLORVERTEX on and both DIFFUSE and AMBIENT sourced from
+// D3DMCS_COLOR1, so the lit vertex term is emitted as a D3DCOLOR and is saturated
+// before it reaches any texture stage. D3D then saturates each stage result in turn.
+// Two stage setups consume that term, selected by FFXI_GENERATOR_STAGE_CHAIN:
 //
-// The baked per-vertex colour is the PRIMARY illumination. FFXI stores it as
-// byte/128 (dat_mmb.rs), so a baked value of 255 maps to ~2.0 — "overbright".
-// That overbright vertex colour, times the ambient floor, times the final 2x
-// boost, is what makes lamps/braziers glow at night with no dynamic light.
+//   terrain   (ZoneRenderer.cpp:2453-2455 ApplyPreRenderState)
+//     out = saturate(2 * texel * saturate(vertexColor * light))
+//   generator (CMoD3m.cpp:53-70 NonZeroTwoTSS, via CMoD3mElem.cpp:57-63 DoMMBDraw)
+//     out = saturate(2 * tint * saturate(2 * vertexColor * light * texel))
 //
-// Bevy's StandardMaterial (which this replaces for zone meshes) treats vertex
-// colour as albedo clamped to [0,1] and requires a live light to be visible,
-// so at night the whole scene — lamps included — went dark. This shader keeps
-// the overbright term and the 2x compositing, matching the actor path.
+// `tint` is the generator's D3DRS_TEXTUREFACTOR; on the terrain chain it is white.
 
 #import bevy_pbr::{
     mesh_functions,
@@ -35,6 +37,16 @@ const FFXI_POINT_FALLOFF_K: f32 = 3.0;
 // the FFXI-native colour magnitude (~peak·gate) the vertex-lit model expects.
 // 25000 = FAITHFUL_LIGHT_INTENSITY.
 const FFXI_CLUSTER_COLOR_SCALE: f32 = 12.566370614 / 25000.0;
+
+// D3DTOP_MODULATE2X's gain. Both retail stage chains are built out of it.
+const D3D_MODULATE_2X: f32 = 2.0;
+
+// Fraction of the sun term a fully shadowed fragment keeps. A tuning, not a retail
+// value: retail casts no shadow map over zone geometry at all, so any floor above 0
+// is already a deliberate departure. Kept identical to skinned_ffxi.wgsl's
+// FFXI_SHADOW_FLOOR (guard test `shadow_floor_matches_the_actor_shader`) so terrain
+// and the characters standing on it shade by the same amount.
+const FFXI_SHADOW_FLOOR: f32 = 0.45;
 
 // Distance fog. FFXI fades distant terrain/water into the horizon backdrop
 // (the weather-DAT `fog_landscape` colour, also painted as ClearColor). Bevy
@@ -64,6 +76,7 @@ struct FfxiLighting {
 
 // Mirror of `FfxiMaterialFlags`. `flags.x` = has_texture (1.0 / 0.0);
 // `flags.y` = blend mode (1.0 = translucent water/glass sub, emit real alpha);
+// `flags.z` = skip distance fog (ffxi_zone_material.rs ZONE_FLAG_UNFOGGED);
 // `flags.w` = alpha discard threshold (0.0 = no discard, e.g. opaque subs).
 struct FfxiMaterialFlags {
     flags: vec4<f32>,
@@ -222,21 +235,37 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
         discard;
     }
     let n = normalize(in.world_normal);
-    // Cast-shadow attenuation on the sun term only (ambient/point fill the rest,
-    // so a shadowed fragment darkens without crushing to black).
-    let sun = sun_shadow_factor(in.world_position, n, in.clip_position.xy);
-    // XIM's `2 * vertexColor * texel`, with vertexColor modulating the scene
-    // light. Vertex colour is overbright (can exceed 1) — do NOT clamp it.
+    // Retail runs no shadow map over zone geometry at all — ShadowRenderer is reached
+    // only per ModelInstance (research/XIClient World/Model/ModelInstance.h:139,
+    // Rendering/ModelRenderer.cpp:145) and paints an actor decal, while a building's
+    // own shading is already baked into these vertex colours. Taking Bevy's cascade
+    // over the full 0..1 range on top of that darkens the same shading twice, so keep
+    // the sun term from falling below the floor the actor shader uses.
+    let sun = mix(
+        FFXI_SHADOW_FLOOR,
+        1.0,
+        sun_shadow_factor(in.world_position, n, in.clip_position.xy),
+    );
     let lit = scene_irradiance(n, in.world_position, sun, in.clip_position.xy) * in.color.rgb;
     // research/xim ParticleGeneratorParser.kt:431-434: ToD color.rgb is a setter folded
     // over the lit texel; color multiplier (.w) scales the emitted alpha.
-    let rgb = 2.0 * lit * texel.rgb * tint.rgb;
+#ifdef FFXI_GENERATOR_STAGE_CHAIN
+    let stage0 = saturate(D3D_MODULATE_2X * saturate(lit) * texel.rgb);
+    let rgb = saturate(D3D_MODULATE_2X * stage0 * tint.rgb);
+#else
+    let rgb = saturate(D3D_MODULATE_2X * saturate(lit) * texel.rgb * tint.rgb);
+#endif
     // 0x8000 subs (water/glass) emit the blended alpha; everything else opaque.
     var out_alpha = 1.0;
     if (material_flags.flags.y > 0.5) {
         out_alpha = combined_a;
     }
     var out_color = vec4<f32>(rgb, out_alpha * tint.w);
-    out_color = apply_distance_fog(out_color, in.world_position);
+    // research/XIClient CMoElem.cpp:542-543: fog is a per-generator render state. The
+    // weat/ sky layers that clear it sit past every 0x2F fog distance, so fogging them
+    // would swap their colour for the horizon tint outright.
+    if (material_flags.flags.z < 0.5) {
+        out_color = apply_distance_fog(out_color, in.world_position);
+    }
     return out_color;
 }

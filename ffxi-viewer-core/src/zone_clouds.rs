@@ -20,7 +20,7 @@ use crate::ffxi_zone_material::{zone_fog_flag, FfxiZoneMaterial};
 use crate::graphics_settings::GraphicsSettings;
 // research/xim ParticleUpdaters.kt: TextureCoordinateUpdater velocities are per rendered frame.
 use crate::scheduler_runtime::RETAIL_FPS;
-use crate::zone_texture::{decoded_texture_to_image, TextureQuality};
+use crate::zone_texture::{decoded_sky_texture_to_image, TextureQuality};
 
 // research/xim EnvironmentManager.kt:453-515 updateWeatherEffects reads weat/<type>/.
 // Only the cld1/cld2 camera-follow canopies are drawn here; the sun (sun1, attach=0xE)
@@ -270,7 +270,7 @@ fn build_cloud_layers(
             continue;
         }
         if let Ok(tex) = decode_texture(c.chunk.data) {
-            let handle = images.add(decoded_texture_to_image(&tex, quality));
+            let handle = images.add(decoded_sky_texture_to_image(&tex, quality));
             if first_texture.is_none() {
                 first_texture = Some(handle.clone());
             }
@@ -653,7 +653,7 @@ fn rebuild_zone_stars(
         .iter()
         .find(|c| c.chunk.kind == ChunkKind::Img as u8)
         .and_then(|c| decode_texture(c.chunk.data).ok())
-        .map(|t| images.add(decoded_texture_to_image(&t, quality)));
+        .map(|t| images.add(decoded_sky_texture_to_image(&t, quality)));
 
     // Unlit additive: stars are self-luminous points on a black field, so scene
     // lighting must not dim them and the black background must add nothing.

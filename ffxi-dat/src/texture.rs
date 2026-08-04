@@ -31,16 +31,29 @@ pub struct DecodedTexture {
     pub rgba: Vec<u8>,
 }
 
-/// FFXI authors texture alpha in the top nibble (the DXT "bc2/8" convention from
-/// Lotus/AltanaViewer), so a fully opaque texel decodes as 0x80, not 0xFF. Expand it to
-/// the full range. Raw alpha < 16 maps to 0, so `ffxi_alpha_remap(raw) == 0 <=> raw < 16`.
+/// Raw decoded alpha below this remaps to fully transparent, so
+/// `ffxi_alpha_remap(raw) == 0 <=> raw < CUTOUT_TRANSPARENT_MAX`. Consumers key their
+/// cutout detection off the same threshold (`zone_texture::has_cutout_alpha`).
+pub const CUTOUT_TRANSPARENT_MAX: u8 = 16;
+
+/// FFXI authors texture alpha at half scale (the DXT "bc2/8" convention from
+/// Lotus/AltanaViewer), so a fully opaque texel decodes as 0x80, not 0xFF. Double it back
+/// to the full range.
+///
+/// The doubling is continuous, NOT a re-quantization of the top nibble. Reading only the
+/// top nibble stretched DXT3's 0x11 alpha step to 32/255, doubling the amplitude of every
+/// ordered dither in FFXI's 4-bit alpha (see [`DXT3_ALPHA_DITHER_STEP`]) instead of
+/// resolving it, and posterized the 8-bit formats — the BGRA32 `fine`/`suny` sky canopies
+/// carry a smooth 0-255 alpha ramp — down to nine levels (kuluu-u5mm).
 ///
 /// Every consumer of a decoded texture's alpha has to apply this — a moon sprite whose
 /// alpha peaks at 0x88 draws at half its authored opacity otherwise.
 #[inline]
 pub fn ffxi_alpha_remap(raw: u8) -> u8 {
-    let bc2 = (raw >> 4) as f32;
-    (bc2 * 255.0 / 8.0).min(255.0).round() as u8
+    if raw < CUTOUT_TRANSPARENT_MAX {
+        return 0;
+    }
+    (raw as u16 * 2).min(255) as u8
 }
 
 /// Apply [`ffxi_alpha_remap`] across an RGBA buffer in place.
@@ -412,6 +425,78 @@ pub fn decode_dxt1_blocks(
     })
 }
 
+/// The one step a DXT3 alpha plane can take: alpha is a 4-bit nibble expanded to 8 bits by
+/// replicating it (`n -> n * 0x11`), so nothing between two nibbles is representable.
+///
+/// FFXI's art leans on that gap. An authored value falling between two nibbles is
+/// approximated by stippling the pair across neighbouring texels in a 4x4 ordered-dither
+/// pattern, and whole sky textures are nothing else: 98.4% of `clod_a01` — the overcast
+/// canopy every zone's `weat/clod` hangs off cld1/cld2 — alternates nibble 7 (119) and
+/// nibble 8 (136) to reach the half-scale-opaque `0x80` that 4 bits cannot hold, and
+/// `star01` alternates nibble 3/4. Retail never shows it: it draws the sky heavily
+/// minified, where filtering averages the stipple back out. We draw the same canopy
+/// magnified, so it reads as a checkerboard over the whole sky (kuluu-u5mm). Measured with
+/// the `dat-sky-alpha-histogram` example, which also confirms the RGB carries no matching
+/// stipple — only alpha is dithered.
+const DXT3_ALPHA_DITHER_STEP: u8 = 0x11;
+
+/// Average an ordered-dithered DXT3 alpha plane back into the continuous value it encodes.
+///
+/// Restricted to 3x3 neighbourhoods spanning exactly one nibble step, which is precisely
+/// the dither signature: a genuine alpha edge (a cutout mask, a sprite border) steps by
+/// more than one nibble and is left untouched, and averaging *within* one quantization step
+/// cannot destroy detail the format was able to store in the first place.
+///
+/// **Opt-in, not part of the decode.** The stipple is only visible where a texture is drawn
+/// magnified, which in practice means the camera-follow sky shells; every other texture
+/// samples it at or below 1:1, where filtering resolves it for free. Running the filter over
+/// a whole zone's textures costs ~5x their decode time on the dev profile for no visible
+/// gain, so callers opt in per texture (`zone_texture::decoded_sky_texture_to_image`).
+///
+/// Must run BEFORE [`ffxi_alpha_remap`]: the remap doubles the recovered mean, whereas
+/// averaging after it would smooth values that have already been stretched apart.
+pub fn resolve_dxt3_alpha_dither(rgba: &mut [u8], width: u32, height: u32) {
+    let (w, h) = (width as usize, height as usize);
+    if w == 0 || h == 0 || rgba.len() < w * h * 4 {
+        return;
+    }
+    // Two guards on one cheap pass. Every decoded DXT3 alpha is a multiple of the nibble
+    // step, so an alpha that is not says this buffer did not come from a 4-bit plane and
+    // has no nibble dither to resolve — callers that cannot cheaply name their source
+    // format (the moon sheet arrives as a format-erased `GraphicImage`) rely on that rather
+    // than on guessing. And a dither needs two levels exactly one nibble apart, so a single
+    // level or a punch-through pair at opposite ends has nothing to resolve either.
+    let mut present = [false; 16];
+    for px in rgba.chunks_exact(4) {
+        if px[3] % DXT3_ALPHA_DITHER_STEP != 0 {
+            return;
+        }
+        present[(px[3] / DXT3_ALPHA_DITHER_STEP) as usize] = true;
+    }
+    if !present.windows(2).any(|pair| pair[0] && pair[1]) {
+        return;
+    }
+
+    let alpha: Vec<u8> = rgba.chunks_exact(4).map(|p| p[3]).collect();
+    for y in 0..h {
+        for x in 0..w {
+            let (mut lo, mut hi, mut sum, mut n) = (u8::MAX, u8::MIN, 0u32, 0u32);
+            for ny in y.saturating_sub(1)..=(y + 1).min(h - 1) {
+                for nx in x.saturating_sub(1)..=(x + 1).min(w - 1) {
+                    let a = alpha[ny * w + nx];
+                    lo = lo.min(a);
+                    hi = hi.max(a);
+                    sum += a as u32;
+                    n += 1;
+                }
+            }
+            if hi - lo == DXT3_ALPHA_DITHER_STEP {
+                rgba[(y * w + x) * 4 + 3] = ((sum + n / 2) / n) as u8;
+            }
+        }
+    }
+}
+
 pub fn decode_dxt3_blocks(
     blocks: &[u8],
     width: u32,
@@ -680,6 +765,111 @@ pub(crate) mod tests {
         assert_eq!(&rgba[4..8], &[255, 0, 0, 255]);
 
         assert_eq!(&rgba[8..12], &[255, 0, 0, 0]);
+    }
+
+    // Builds a DXT3 alpha plane from a per-texel closure, so a test can state the stipple
+    // it cares about instead of hand-packing nibbles.
+    fn dxt3_with_alpha(w: u32, h: u32, f: impl Fn(u32, u32) -> u8) -> Vec<u8> {
+        let blocks_x = w.div_ceil(4) as usize;
+        let mut out = vec![0u8; blocks_x * (h.div_ceil(4) as usize) * 16];
+        for y in 0..h {
+            for x in 0..w {
+                let block = (y / 4) as usize * blocks_x + (x / 4) as usize;
+                let texel = (y % 4) * 4 + (x % 4);
+                let byte = block * 16 + (texel / 2) as usize;
+                let nibble = f(x, y) & 0x0F;
+                out[byte] |= nibble << (4 * (texel % 2));
+            }
+        }
+        out
+    }
+
+    // Post-remap ripple a resolved dither may still carry. A 3x3 mean over a checkerboard
+    // covers 5 texels of one phase and 4 of the other, so neighbouring centres land 0x11/9
+    // apart and round to adjacent 8-bit codes. One code is the quantization floor — a
+    // stipple that small is unrepresentable, where the raw pair is 2*0x11 = 34 codes apart
+    // after the remap.
+    const RESOLVED_RIPPLE_MAX: u8 = 1;
+
+    fn interior_alpha(rgba: &[u8], side: usize) -> Vec<u8> {
+        (1..side - 1)
+            .flat_map(|y| (1..side - 1).map(move |x| (y * side + x) * 4 + 3))
+            .map(|i| rgba[i])
+            .collect()
+    }
+
+    fn ripple(values: &[u8]) -> u8 {
+        values.iter().max().unwrap() - values.iter().min().unwrap()
+    }
+
+    // The whole bug in one assertion: a nibble-7/8 checkerboard is FFXI's way of writing
+    // the half-scale-opaque 0x80 that 4-bit alpha cannot hold, and it has to come out of
+    // the decode->remap chain flat. Pinning both ends together (rather than the decoder or
+    // the remap alone) is what stops a future "restore the exact DXT3 expansion" or a
+    // re-quantizing `ffxi_alpha_remap` from silently putting the sky checkerboard back.
+    #[test]
+    fn dxt3_ordered_dither_decodes_flat() {
+        let blocks = dxt3_with_alpha(8, 8, |x, y| if (x + y) % 2 == 0 { 7 } else { 8 });
+        let mut rgba = decode_dxt3_blocks(&blocks, 8, 8).unwrap();
+        resolve_dxt3_alpha_dither(&mut rgba, 8, 8);
+        let remapped: Vec<u8> = interior_alpha(&rgba, 8)
+            .into_iter()
+            .map(ffxi_alpha_remap)
+            .collect();
+        assert!(
+            ripple(&remapped) <= RESOLVED_RIPPLE_MAX,
+            "a nibble 7/8 stipple still ripples after remap: {remapped:?}"
+        );
+        assert!(
+            *remapped.iter().min().unwrap() >= 238,
+            "the opaque pair must stay opaque, got {remapped:?}"
+        );
+    }
+
+    // The same encoder trick around a different target: `star01` alternates nibble 3/4.
+    // A fix that only knew about the opaque pair would leave the star dome stippled.
+    #[test]
+    fn dxt3_dither_resolves_at_any_nibble_pair() {
+        for lo in 0u8..15 {
+            let blocks = dxt3_with_alpha(8, 8, |x, y| if (x + y) % 2 == 0 { lo } else { lo + 1 });
+            let mut rgba = decode_dxt3_blocks(&blocks, 8, 8).unwrap();
+            resolve_dxt3_alpha_dither(&mut rgba, 8, 8);
+            assert!(
+                ripple(&interior_alpha(&rgba, 8)) <= RESOLVED_RIPPLE_MAX,
+                "nibble {lo}/{} stipple survived",
+                lo + 1
+            );
+        }
+    }
+
+    // Callers that cannot name their source format (the moon sheet arrives as a
+    // format-erased `GraphicImage`) hand this any buffer, so it has to recognize 8-bit alpha
+    // and decline. Averaging a real 8-bit gradient would soften art nothing was wrong with.
+    #[test]
+    fn declines_alpha_that_did_not_come_from_a_nibble_plane() {
+        let mut rgba: Vec<u8> = (0..8u32 * 8)
+            .flat_map(|i| [0, 0, 0, (100 + i % 5) as u8])
+            .collect();
+        let before = rgba.clone();
+        resolve_dxt3_alpha_dither(&mut rgba, 8, 8);
+        assert_eq!(rgba, before, "8-bit alpha must pass through untouched");
+    }
+
+    // The guard that keeps the averaging honest: a cutout mask steps by more than one
+    // nibble, so it must come through the decoder untouched. Blur it and every alpha-tested
+    // leaf/fence card in the game grows a soft fringe.
+    #[test]
+    fn dxt3_leaves_genuine_alpha_edges_alone() {
+        let blocks = dxt3_with_alpha(8, 8, |x, _| if x < 4 { 0 } else { 15 });
+        let mut rgba = decode_dxt3_blocks(&blocks, 8, 8).unwrap();
+        resolve_dxt3_alpha_dither(&mut rgba, 8, 8);
+        for y in 0..8 {
+            for x in 0..8 {
+                let a = rgba[(y * 8 + x) * 4 + 3];
+                let want = if x < 4 { 0 } else { 255 };
+                assert_eq!(a, want, "edge softened at ({x},{y})");
+            }
+        }
     }
 
     #[test]

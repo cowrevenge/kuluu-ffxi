@@ -244,6 +244,10 @@ fn main() {
                 )
                     .chain(),
             )
+            // Owns Assets<FfxiParticleMaterial>, which both particle plugins below write
+            // every frame; without it they panic on the missing resource (lib.rs:201 adds
+            // it ahead of them for the same reason).
+            .add_plugins(ffxi_viewer_core::ffxi_particle_material::FfxiParticleMaterialPlugin)
             .add_plugins(ffxi_viewer_core::celestial_particles::CelestialParticlesPlugin)
             // The weat/<tag> precipitation set, drawn by the same simulator.
             .add_plugins(ffxi_viewer_core::weather_particles::WeatherParticlesPlugin)

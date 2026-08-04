@@ -7,8 +7,7 @@ use ffxi_dat::texture::DecodedTexture;
 
 pub use ffxi_dat::texture::ffxi_alpha_remap;
 
-/// Raw decoded alpha below this becomes fully transparent after [`ffxi_alpha_remap`].
-const CUTOUT_ALPHA_RAW: u8 = 16;
+use ffxi_dat::texture::CUTOUT_TRANSPARENT_MAX as CUTOUT_ALPHA_RAW;
 
 /// Alpha test cutoff used by `FfxiZoneMaterial` (`AlphaMode::Mask(0.5)`), in 8-bit.
 const MASK_THRESHOLD_U8: u8 = 128;
@@ -51,6 +50,21 @@ impl Default for TextureQuality {
 /// The actor (`ffxi_actor_render`) and `dat_vos2` paths have their own,
 /// simpler converters; they are intentional future adopters of this one.
 pub fn decoded_texture_to_image(t: &DecodedTexture, q: TextureQuality) -> Image {
+    convert(t, q, false)
+}
+
+/// [`decoded_texture_to_image`] plus [`ffxi_dat::texture::resolve_dxt3_alpha_dither`], for
+/// the camera-follow sky shells (cloud canopy, star dome).
+///
+/// These are the only surfaces drawn magnified enough for FFXI's stored 4-bit alpha dither
+/// to resolve into visible screen-space dots instead of averaging away under minification —
+/// the whole sky is one 256px texture stretched over the view. Everything else samples at or
+/// below 1:1 and must not pay the filter (kuluu-u5mm).
+pub fn decoded_sky_texture_to_image(t: &DecodedTexture, q: TextureQuality) -> Image {
+    convert(t, q, true)
+}
+
+fn convert(t: &DecodedTexture, q: TextureQuality, undither: bool) -> Image {
     let w = t.width.max(1);
     let h = t.height.max(1);
     let expected = (w as usize) * (h as usize) * 4;
@@ -59,6 +73,11 @@ pub fn decoded_texture_to_image(t: &DecodedTexture, q: TextureQuality) -> Image 
     // A malformed/short buffer would break the box filter's indexing; fall back
     // to a tightly-sized buffer so downstream assumptions hold.
     rgba.resize(expected, 0);
+    // Before the remap, which doubles whatever it is handed — see the note on
+    // `resolve_dxt3_alpha_dither`.
+    if undither {
+        ffxi_dat::texture::resolve_dxt3_alpha_dither(&mut rgba, w, h);
+    }
     for px in rgba.chunks_exact_mut(4) {
         px[3] = ffxi_alpha_remap(px[3]);
     }

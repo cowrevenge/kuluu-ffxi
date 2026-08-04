@@ -161,6 +161,15 @@ fn load_moon_sprite_sheet(
     };
 
     let mut rgba = sheet.texture.rgba;
+    // The moon is a sky shell like the cloud canopy: drawn magnified, so `moonshap`'s
+    // stored 4-bit alpha dither (24.5% of its texels are the nibble 7/8 pair) resolves into
+    // visible dots rather than averaging away. Before the remap, which doubles whatever it
+    // is handed — see `resolve_dxt3_alpha_dither`.
+    ffxi_dat::texture::resolve_dxt3_alpha_dither(
+        &mut rgba,
+        sheet.texture.width,
+        sheet.texture.height,
+    );
     ffxi_dat::texture::apply_ffxi_alpha_remap(&mut rgba);
     let mut image = Image::new(
         Extent3d {

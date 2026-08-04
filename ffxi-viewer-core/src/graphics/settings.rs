@@ -1107,7 +1107,7 @@ pub fn apply_projection_system(
 ) {
     for mut proj in q_cam.iter_mut() {
         if let Projection::Perspective(p) = proj.as_mut() {
-            p.far = settings.view_distance;
+            p.far = crate::skybox::camera_far(settings.view_distance);
             p.fov = settings.fov_deg.to_radians();
         }
     }

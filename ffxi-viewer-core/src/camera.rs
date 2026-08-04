@@ -294,7 +294,7 @@ pub fn build_operator_camera(
             ..Bloom::NATURAL
         },
         Projection::Perspective(PerspectiveProjection {
-            far: settings.view_distance,
+            far: crate::skybox::camera_far(settings.view_distance),
             fov: settings.fov_deg.to_radians(),
             ..default()
         }),

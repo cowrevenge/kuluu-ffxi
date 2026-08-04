@@ -16,11 +16,10 @@ pub struct SunDisc;
 #[derive(Component)]
 pub struct MoonDisc;
 
-/// Reference distance the celestial discs are authored against. The drawn
-/// distance is [`crate::skybox::sky_element_distance`] for the active frustum:
-/// retail sizes its celestial sphere from the frustum too
-/// (XiZone.cpp:187-189), so the sky is in view at any draw distance rather than
-/// only at one. A fixed 4000 is invisible at the 200 the graphics menu offers.
+/// Distance the celestial discs ride at, inside the
+/// [`crate::skybox::SKYBOX_RADIUS`] dome so they depth-sort in front of it.
+/// Fixed, not frustum-derived: [`crate::skybox::camera_far`] is what keeps them
+/// in view at every draw distance.
 pub const SKY_RADIUS: f32 = 4000.0;
 
 const SUN_DISC_RADIUS: f32 = 120.0;
@@ -493,7 +492,7 @@ pub fn sun_moon_system(
             Without<crate::camera::OperatorCamera>,
         ),
     >,
-    q_cam: Query<(&Transform, &Projection), With<crate::camera::OperatorCamera>>,
+    q_cam: Query<&Transform, With<crate::camera::OperatorCamera>>,
     materials_handle: Option<Res<CelestialMaterials>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut moon_materials: ResMut<Assets<crate::moon_material::MoonMaterial>>,
@@ -788,19 +787,7 @@ pub fn sun_moon_system(
         render_cfg.zone_lighting.valid = false;
     }
 
-    let cam = q_cam.single().ok();
-    let cam_pos = cam.map(|(t, _)| t.translation).unwrap_or(Vec3::ZERO);
-    let sky_radius = cam
-        .and_then(|(_, proj)| match proj {
-            Projection::Perspective(p) => Some(crate::skybox::sky_element_distance(p.near, p.far)),
-            _ => None,
-        })
-        .unwrap_or(SKY_RADIUS);
-    // A celestial body's apparent size is radius/distance, so moving the shell
-    // with the frustum has to move the discs' radii by the same factor or the
-    // sun and moon visibly swell and shrink as the draw-distance setting
-    // changes. The discs are authored against SKY_RADIUS.
-    let sky_scale = sky_radius / SKY_RADIUS;
+    let cam_pos = q_cam.single().map(|t| t.translation).unwrap_or(Vec3::ZERO);
 
     // The zone DAT's own Sun/Moon billboards are retail's celestial bodies; where they run,
     // these hand-authored primitives would draw a second sun and moon on top of them.
@@ -808,7 +795,7 @@ pub fn sun_moon_system(
     let sun_visible = sky.sun_altitude > -0.05 && !dat_celestials;
     let sun_sprite_tex = render_cfg.sun_sprite.texture.clone();
     for (mut disc, mut vis, mut mesh3d, _) in q_sun_disc.iter_mut() {
-        disc.translation = cam_pos + sun_dir * sky_radius;
+        disc.translation = cam_pos + sun_dir * SKY_RADIUS;
         // research/xim: the sun is an attach=0xE additive billboard. With a "suns"
         // sprite the disc is a camera-facing textured quad; otherwise the procedural
         // emissive sphere (no sprite fallback).
@@ -823,10 +810,10 @@ pub fn sun_moon_system(
             }
         }
         if sun_sprite_tex.is_some() {
-            disc.scale = Vec3::splat(SUN_DISC_RADIUS * 2.0 * sky_scale);
+            disc.scale = Vec3::splat(SUN_DISC_RADIUS * 2.0);
             disc.look_at(cam_pos, Vec3::Y);
         } else {
-            disc.scale = Vec3::splat(SUN_DISC_RADIUS * sky_scale);
+            disc.scale = Vec3::splat(SUN_DISC_RADIUS);
         }
         *vis = if sun_visible {
             Visibility::Inherited
@@ -837,11 +824,11 @@ pub fn sun_moon_system(
 
     let moon_visible = sky.moon_altitude > 0.0 && sky.moon_illumination > 0.02;
     let disc_shown = moon_visible && !dat_celestials;
-    let moon_world = cam_pos + moon_dir * sky_radius;
+    let moon_world = cam_pos + moon_dir * SKY_RADIUS;
     let disc_count = q_moon_disc.iter().count();
     for (mut disc, mut vis) in q_moon_disc.iter_mut() {
         disc.translation = moon_world;
-        disc.scale = Vec3::splat(MOON_DISC_RADIUS * 2.0 * sky_scale);
+        disc.scale = Vec3::splat(MOON_DISC_RADIUS * 2.0);
         disc.look_at(cam_pos, Vec3::Y);
         *vis = if disc_shown {
             Visibility::Inherited

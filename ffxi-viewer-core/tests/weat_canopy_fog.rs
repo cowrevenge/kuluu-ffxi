@@ -5,7 +5,7 @@ use ffxi_dat::chunk::{walk_tree, ChunkNode};
 use ffxi_dat::generator::Generator;
 use ffxi_dat::weather::collect_weather_records;
 use ffxi_dat::{ChunkKind, DatRoot};
-use ffxi_viewer_core::zone_clouds::cloud_min_rim;
+use ffxi_viewer_core::zone_clouds::CLOUD_MIN_RIM;
 
 /// The two outdoor zone DATs the sky work was measured against: `f_la` and `f_or`.
 const ZONE_DATS: [u32; 2] = [202, 209];
@@ -86,13 +86,12 @@ fn cld1_never_fogs_and_the_overcast_cld2_always_does() {
 /// past every fog distance the zone's own 0x2F records author, so fog can only ever replace
 /// its colour with the horizon tint rather than blend toward it.
 ///
-/// The rim follows the frustum now, so this holds at the default preset and NOT at the
-/// smallest one the menu offers — at 200 the rim is inside the longest authored fog range.
-/// That is why the per-generator fog bit, not the rim, is what keeps cld1 unfogged.
+/// The rim is fixed at every draw distance, so this holds at every preset the menu
+/// offers — but it is still only a supporting argument: the per-generator fog bit,
+/// not the rim, is what keeps cld1 unfogged.
 #[test]
 fn every_authored_fog_distance_is_far_inside_the_canopy_rim() {
-    const DEFAULT_VIEW_DISTANCE: f32 = 6100.0;
-    let rim = cloud_min_rim(DEFAULT_VIEW_DISTANCE);
+    let rim = CLOUD_MIN_RIM;
     for file_id in ZONE_DATS {
         let Some(bytes) = zone_bytes(file_id) else {
             eprintln!("zone DAT {file_id} unavailable; skipping");

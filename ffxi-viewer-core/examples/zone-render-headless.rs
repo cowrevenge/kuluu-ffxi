@@ -47,8 +47,8 @@ struct P {
     tgt: Vec3,
     fog: bool,
     sky: bool,
-    /// Camera far plane override, so a verification run can exercise the
-    /// frustum-derived sky shell at more than one draw distance.
+    /// Draw-distance override (the graphics-menu value, not the far plane), so a
+    /// verification run can exercise the sky at more than one preset.
     far: Option<f32>,
     hour: f32,
     // Reproduce the live client's sun exactly: sun_moon.rs bias values,
@@ -353,8 +353,8 @@ fn setup(
     if p.sky {
         // Same post-processing the client camera carries (camera.rs
         // build_operator_camera): HDR + Bloom give the sun disc its bloom halo,
-        // tonemapping matches the active sky style, and the far plane must clear
-        // the skybox dome (radius SKYBOX_RADIUS 5500) or the sky is clipped away.
+        // tonemapping matches the active sky style, and camera_far derives the far
+        // plane from the draw distance exactly as the client does.
         // OperatorCamera is what sun_moon_system tracks to place the discs and
         // what apply_zone_weather attaches DistanceFog to.
         c.entity(cam).insert((
@@ -370,7 +370,12 @@ fn setup(
                 ..Bloom::NATURAL
             },
             Projection::Perspective(PerspectiveProjection {
-                far: p.far.unwrap_or(settings.view_distance.max(12000.0)),
+                far: p
+                    .far
+                    .map(ffxi_viewer_core::skybox::camera_far)
+                    .unwrap_or_else(|| {
+                        ffxi_viewer_core::skybox::camera_far(settings.view_distance)
+                    }),
                 fov: settings.fov_deg.to_radians(),
                 ..default()
             }),

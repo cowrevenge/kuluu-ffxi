@@ -45,6 +45,17 @@ impl ParticleSimulator {
         self.clock = clock;
     }
 
+    // research/xim Particle.kt:253-254 — a followCamera generator's associated position is its
+    // authored base position taken relative to the camera, refreshed every frame so a weather
+    // curtain stays over the viewer however far they walk.
+    pub fn set_camera_relative_origins(&mut self, cam_pos: Vec3) {
+        for g in &mut self.generators {
+            if g.camera_relative {
+                g.origin = cam_pos + Vec3::from_array(g.def.base_position) * g.vel_basis;
+            }
+        }
+    }
+
     // research/xim ParticleGeneratorAttachment / cexi-viewer particle/runtime.js:517-524 —
     // a Sun/Moon-attached generator's associated position is the celestial body's position
     // offset by the camera, refreshed every frame so the sky rides with the viewer.
@@ -233,9 +244,37 @@ struct LiveGenerator {
     vel_basis: Vec3,
     origin_routine: Option<RoutineOrigin>,
     stopped: bool,
+    // `origin` is rewritten from the camera each frame rather than fixed at spawn.
+    camera_relative: bool,
+    // research/XIClient/src/XIClient/source/World/Generator/CYyGenerator.cpp:2817-2831 —
+    // `GetSomeGeneratorScalar() * 0.3` scales the per-emission count whenever field_DE bit 0 is
+    // set, which Open() arms for every generator under the `taew` (weat) container (:418-434).
+    // See weather_particles::WEATHER_EMIT_SCALE for why it is applied to batched generators too.
+    emit_scale: f32,
+    emit_rng: u64,
     // Key of the last BUILT mesh (spawn writes `empty_mesh`, hence `MeshKey::Empty`), so
     // quantization error is bounded by one quantum and never accumulates across skipped frames.
     built_key: MeshKey,
+}
+
+// The count scale for a generator outside retail's `taew` container: its authored count, as is.
+const UNSCALED_EMISSION: f32 = 1.0;
+
+// Spawn-time knobs a zone/weather caller sets that the generator body cannot carry: retail derives
+// both from where the chunk sits in the DAT tree, not from its own fields.
+#[derive(Clone, Copy)]
+pub struct ZoneGeneratorOptions {
+    pub camera_relative: bool,
+    pub emit_scale: f32,
+}
+
+impl Default for ZoneGeneratorOptions {
+    fn default() -> Self {
+        Self {
+            camera_relative: false,
+            emit_scale: UNSCALED_EMISSION,
+        }
+    }
 }
 
 // Auto-run particle generators embedded in an actor DAT (research/xim
@@ -361,6 +400,9 @@ pub fn spawn_particle_generators(
                 routine: ev.scheduler,
             }),
             stopped: false,
+            camera_relative: false,
+            emit_scale: UNSCALED_EMISSION,
+            emit_rng: emit_seed(entity),
             built_key: MeshKey::Empty,
         });
     }
@@ -420,7 +462,6 @@ pub fn spawn_actor_auto_run_particles(
             let resolve = |id: Option<[u8; 4]>| -> Option<KeyFrameTrack> {
                 id.and_then(|i| fx.assets.keyframes.get(&i).cloned())
             };
-            let rot = def.init_rotation;
             sim.generators.push(LiveGenerator {
                 scale_x: resolve(def.scale_x_track),
                 scale_y: resolve(def.scale_y_track),
@@ -437,13 +478,15 @@ pub fn spawn_actor_auto_run_particles(
                 mesh,
                 entity,
                 auto_run: true,
-                orientation: (!def.camera_billboard)
-                    .then(|| Quat::from_euler(EulerRot::XYZ, rot[0], rot[1], rot[2])),
+                orientation: particle_orientation(&def),
                 actor_local: true,
                 tex_translate: Vec2::ZERO,
                 vel_basis: Vec3::ONE,
                 origin_routine: None,
                 stopped: false,
+                camera_relative: false,
+                emit_scale: UNSCALED_EMISSION,
+                emit_rng: emit_seed(entity),
                 built_key: MeshKey::Empty,
                 def,
             });
@@ -459,6 +502,7 @@ pub fn spawn_zone_particle_generator(
     def: ParticleGeneratorDef,
     assets: &ActionAssets,
     origin: Vec3,
+    opts: ZoneGeneratorOptions,
     meshes: &mut Assets<Mesh>,
     mats: &mut Assets<StandardMaterial>,
     images: &mut Assets<Image>,
@@ -503,7 +547,6 @@ pub fn spawn_zone_particle_generator(
     let resolve = |id: Option<[u8; 4]>| -> Option<KeyFrameTrack> {
         id.and_then(|i| assets.keyframes.get(&i).cloned())
     };
-    let rot = def.init_rotation;
     sim.generators.push(LiveGenerator {
         scale_x: resolve(def.scale_x_track),
         scale_y: resolve(def.scale_y_track),
@@ -520,17 +563,46 @@ pub fn spawn_zone_particle_generator(
         mesh,
         entity,
         auto_run: true,
-        orientation: (!def.camera_billboard)
-            .then(|| Quat::from_euler(EulerRot::XYZ, rot[0], rot[1], rot[2])),
+        orientation: particle_orientation(&def),
         actor_local: false,
         tex_translate: Vec2::ZERO,
         vel_basis: Vec3::new(1.0, -1.0, -1.0),
         origin_routine: None,
         stopped: false,
+        camera_relative: opts.camera_relative,
+        emit_scale: opts.emit_scale,
+        emit_rng: emit_seed(entity),
         built_key: MeshKey::Empty,
         def,
     });
     Some(entity)
+}
+
+// research/XIClient/src/XIClient/source/World/Generator/CYyGenerator.cpp:158 — a batched
+// (CheckFlag29) D3a generator is the one element retail's reimplementation leaves as
+// SPDLOG_ERROR("0x11"), so what a batched sprite sheet actually draws is not transcribable. Its
+// sub-particles are camera-billboarded here: the precipitation curtains are what use the
+// combination (154 of the 155 in the shipped zone DATs sit under weat/), and a rain sheet pinned
+// to a world axis vanishes whenever the camera looks along its normal.
+fn particle_orientation(def: &ParticleGeneratorDef) -> Option<Quat> {
+    let batched_sheet = def.batched && def.mesh_kind == ParticleMeshKind::SpriteSheet;
+    if def.camera_billboard || batched_sheet {
+        return None;
+    }
+    let r = def.init_rotation;
+    Some(Quat::from_euler(EulerRot::XYZ, r[0], r[1], r[2]))
+}
+
+// Distinct per generator so two emitters sharing a def do not spawn identical particle clouds;
+// deterministic so a rebuilt zone/weather set replays the same spread.
+fn emit_seed(entity: Entity) -> u64 {
+    const SEED: u64 = 0x9E37_79B9_7F4A_7C15;
+    SEED ^ entity.to_bits().wrapping_mul(SEED)
+}
+
+fn next_unit(state: &mut u64) -> f32 {
+    *state = crate::scheduler_runtime::lcg_next(*state);
+    ((*state >> 40) as f32) / ((1u64 << 24) as f32)
 }
 
 pub fn stop_generators_for_despawned_owners(
@@ -595,7 +667,7 @@ fn advance_generator(g: &mut LiveGenerator, frames: f32) {
                 break;
             }
             g.emit_accum -= g.def.frames_per_emission;
-            for _ in 0..g.def.particles_per_emission {
+            for _ in 0..emission_count(g) {
                 emit(g, g.def.max_life_frames);
                 if g.def.continuous {
                     break;
@@ -635,9 +707,32 @@ fn continuous_active(g: &LiveGenerator) -> bool {
     !g.stopped && (g.auto_run || g.age_frames <= g.emit_window_frames.max(1.0))
 }
 
+// research/XIClient/src/XIClient/source/World/Generator/CYyGenerator.cpp:2818-2830 — the emit loop
+// runs `for counter in 0..=floor(v161)` over `v161 = (flags & 0x1FF) * scale`, i.e. floor + 1. That
+// trailing +1 is deliberately not reproduced: it would raise every already-tuned non-weather
+// population (10740 shipped generators author a non-zero count) by one particle, so the floor of 1
+// below stands in for it and keeps an authored count of 0 emitting the single particle retail
+// gives it.
+fn emission_count(g: &LiveGenerator) -> u32 {
+    ((g.def.particles_per_emission as f32 * g.emit_scale) as u32).max(1)
+}
+
 fn emit(g: &mut LiveGenerator, life_frames: f32) {
+    // research/XIClient/.../CYyGenerator.cpp:857-871 applies the sec2 0x06/0x07 spawn spread to the
+    // elem, skipping it when CheckFlag29 is set because a batched elem carries its own
+    // sub-particles. Our Particle models the sub-particle in that case, so the spread applies
+    // either way — without it every drop of a rain curtain spawns on one point.
+    let pos = match g.def.position_variance {
+        Some(v) => {
+            let u = next_unit(&mut g.emit_rng);
+            let yaw = (next_unit(&mut g.emit_rng) * 2.0 - 1.0) * std::f32::consts::PI;
+            let pitch = (next_unit(&mut g.emit_rng) * 2.0 - 1.0) * std::f32::consts::PI;
+            Vec3::from_array(v.offset(u, yaw, pitch)) * g.vel_basis
+        }
+        None => Vec3::ZERO,
+    };
     g.particles.push(Particle {
-        pos: Vec3::ZERO,
+        pos,
         vel: Vec3::from_array(g.def.init_velocity) * g.vel_basis,
         age_frames: 0.0,
         life_frames: life_frames.max(1.0),
@@ -1106,8 +1201,11 @@ mod tests {
             base_position: [0.0, 0.5, 0.0],
             max_life_frames: life,
             camera_billboard: true,
+            camera_relative: false,
+            position_variance: None,
             continuous: false,
             auto_run: false,
+            batched: false,
             attach_type: ffxi_dat::particle_gen::AttachType::SourceActor,
             tod_color_tracks: [None; ffxi_dat::particle_gen::TOD_COLOR_CHANNELS],
             tod_color_driven: [false; ffxi_dat::particle_gen::TOD_COLOR_CHANNELS],
@@ -1162,6 +1260,9 @@ mod tests {
             vel_basis: Vec3::ONE,
             origin_routine: None,
             stopped: false,
+            camera_relative: false,
+            emit_scale: UNSCALED_EMISSION,
+            emit_rng: emit_seed(Entity::PLACEHOLDER),
             built_key: MeshKey::Empty,
         }
     }
@@ -1194,6 +1295,60 @@ mod tests {
             after_window, half_second_later,
             "emission stops half a second in, not a whole one"
         );
+    }
+
+    // La Theine's rain curtain authors 299 particles an emission on a 30-frame period with a
+    // 60-frame life. Retail scales that by ~0.3 for everything under weat/, so the steady state
+    // is two emissions' worth of drops, not 598.
+    #[test]
+    fn weather_emit_scale_thins_the_authored_count() {
+        const AUTHORED: u32 = 299;
+        const SCALED: usize = 89;
+        let mut g = live(def(60.0, 30.0, AUTHORED), f32::MAX);
+        g.emit_scale = 0.3;
+        advance(&mut g, 30.0);
+        assert_eq!(g.particles.len(), SCALED);
+        advance(&mut g, 30.0);
+        assert_eq!(g.particles.len(), 2 * SCALED);
+    }
+
+    // Everything outside weat/ keeps its authored count exactly, and an authored count of 0 still
+    // emits the one particle retail's `floor(count) + 1` loop gives it.
+    #[test]
+    fn non_weather_emission_counts_are_unscaled() {
+        let mut g = live(def(600.0, 1.0, 5), f32::MAX);
+        advance(&mut g, 1.0);
+        assert_eq!(g.particles.len(), 5);
+
+        let mut g = live(def(600.0, 1.0, 0), f32::MAX);
+        advance(&mut g, 1.0);
+        assert_eq!(g.particles.len(), 1);
+    }
+
+    // Without the sec2 0x06/0x07 spawn spread every drop of a curtain is emitted on one point.
+    #[test]
+    fn position_variance_spreads_emissions_through_the_sphere() {
+        const RADIUS: f32 = 20.0;
+        let mut d = def(60.0, 1.0, 200);
+        d.init_velocity = [0.0; 3];
+        d.position_variance = Some(ffxi_dat::particle_gen::PositionVariance {
+            radius_variance: RADIUS,
+            base_radius: 0.0,
+            axis_scale: [1.0; 3],
+        });
+        let mut g = live(d, f32::MAX);
+        advance(&mut g, 1.0);
+        assert_eq!(g.particles.len(), 200);
+
+        let radii: Vec<f32> = g.particles.iter().map(|p| p.pos.length()).collect();
+        let max = radii.iter().cloned().fold(0.0, f32::max);
+        let centroid = g.particles.iter().map(|p| p.pos).sum::<Vec3>() / g.particles.len() as f32;
+        assert!(max > RADIUS * 0.9 && max <= RADIUS, "outer radius {max}");
+        assert!(
+            radii.iter().filter(|r| **r < RADIUS * 0.5).count() > 20,
+            "a constant-radius shell leaves the interior empty"
+        );
+        assert!(centroid.length() < RADIUS * 0.2, "off-centre: {centroid}");
     }
 
     // research/XIClient/src/XIClient/source/Resource/Derived/CMoD3m.cpp:16-104. `brightness` and

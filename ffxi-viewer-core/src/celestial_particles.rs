@@ -3,9 +3,12 @@
 use bevy::prelude::*;
 use ffxi_dat::particle_gen::{AttachType, ParticleGeneratorDef};
 use ffxi_dat::weather::WeatherTypeId;
+use ffxi_dat::ChunkKind;
 use ffxi_dat::DatRoot;
 
-use crate::particle_sim::{spawn_zone_particle_generator, CelestialClock, ParticleSimulator};
+use crate::particle_sim::{
+    spawn_zone_particle_generator, CelestialClock, ParticleSimulator, ZoneGeneratorOptions,
+};
 use crate::scheduler_runtime::{parse_action_bytes, ActionAssets};
 use crate::snapshot::{effective_zone_file_id, SceneState};
 use crate::sun_moon::{moon_phase_frame, sun_direction, vana_day_index, DatCelestials, VanaSky};
@@ -53,7 +56,7 @@ fn collect_celestial_defs(
     ) {
         for child in &node.children {
             let c = &child.chunk;
-            if !child.children.is_empty() || c.kind == 0x01 {
+            if !child.children.is_empty() || c.kind == ChunkKind::Rmp as u8 {
                 let descend = if in_weather {
                     true
                 } else if c.name == WEAT_DIR {
@@ -110,6 +113,7 @@ fn spawn_celestial_set(
                 // Placeholder: track_celestial_bodies rewrites this from the camera before
                 // the first mesh rebuild.
                 Vec3::ZERO,
+                ZoneGeneratorOptions::default(),
                 meshes,
                 mats,
                 images,

@@ -1,11 +1,14 @@
 #![cfg(not(target_arch = "wasm32"))]
 
+use ffxi_dat::ChunkKind;
+use std::collections::BTreeMap;
+
 use bevy::prelude::*;
 use ffxi_dat::particle_gen::ParticleGeneratorDef;
 use ffxi_dat::DatRoot;
 use ffxi_viewer_wire::Vec3 as WireVec3;
 
-use crate::particle_sim::{spawn_zone_particle_generator, ParticleSimulator};
+use crate::particle_sim::{spawn_zone_particle_generator, ParticleSimulator, ZoneGeneratorOptions};
 use crate::scene::mzb_to_bevy;
 use crate::scheduler_runtime::parse_action_bytes;
 use crate::snapshot::{effective_zone_file_id, SceneState};
@@ -47,6 +50,42 @@ fn is_fire_generator(name: &[u8; 4], def: &ParticleGeneratorDef) -> bool {
         .trim_end()
         .to_ascii_lowercase();
     FIRE_NAME_PREFIXES.iter().any(|p| n.starts_with(p))
+}
+
+// Everything under weat/ belongs to the active weather, not to the zone's permanent scenery, so it
+// is weather_particles.rs's to spawn and despawn on a weather change. Sixteen `weat/wind/smk*`
+// generators across eight zones match the fire-name gate and would otherwise stand in the world
+// whatever the sky is doing.
+//
+// Still keyed by chunk name, like the `ActionAssets::particle_defs` map this replaced: a zone
+// repeats a generator id across directories (340 collisions corpus-wide, some sharing a base
+// position in Mog House and La Theine), and spawning every copy stacks additive flames on one spot.
+fn zone_static_defs(bytes: &[u8]) -> BTreeMap<[u8; 4], ParticleGeneratorDef> {
+    fn walk(
+        node: &ffxi_dat::chunk::ChunkNode<'_>,
+        out: &mut BTreeMap<[u8; 4], ParticleGeneratorDef>,
+    ) {
+        for child in &node.children {
+            let c = &child.chunk;
+            if !child.children.is_empty() || c.kind == ChunkKind::Rmp as u8 {
+                if c.name != crate::weather_particles::WEAT_DIR {
+                    walk(child, out);
+                }
+                continue;
+            }
+            if ffxi_dat::kind::ChunkKind::from_u8(c.kind)
+                != Some(ffxi_dat::kind::ChunkKind::Generator)
+            {
+                continue;
+            }
+            if let Ok(Some(def)) = ParticleGeneratorDef::parse(c.data) {
+                out.insert(c.name, def);
+            }
+        }
+    }
+    let mut out = BTreeMap::new();
+    walk(&ffxi_dat::chunk::walk_tree(bytes), &mut out);
+    out
 }
 
 fn water_spray_mesh<'a>(
@@ -99,8 +138,8 @@ fn sync_zone_particles(
 
     let (_schedulers, assets) = parse_action_bytes(&bytes);
     let mut spawned = 0usize;
-    for (name, def) in assets.particle_defs.iter() {
-        if water_spray_mesh(def, &assets).is_none() && !is_fire_generator(name, def) {
+    for (name, def) in zone_static_defs(&bytes) {
+        if water_spray_mesh(&def, &assets).is_none() && !is_fire_generator(&name, &def) {
             continue;
         }
         let bp = def.base_position;
@@ -110,9 +149,10 @@ fn sync_zone_particles(
             z: bp[2],
         });
         if let Some(entity) = spawn_zone_particle_generator(
-            *def,
+            def,
             &assets,
             origin,
+            ZoneGeneratorOptions::default(),
             &mut meshes,
             &mut mats,
             &mut images,
@@ -150,6 +190,28 @@ mod tests {
                 ..Default::default()
             },
         )
+    }
+
+    // The fire-name gate accepts `weat/wind/smk*`, so before the weat/ subtree was carved out
+    // this path spawned 16 weather emitters as permanent zone scenery across eight zones —
+    // Batallia Downs (file 197) among them.
+    #[test]
+    fn real_dat_zone_static_defs_skip_the_weat_subtree() {
+        const BATALLIA_DOWNS_ZONE_DAT: u32 = 197;
+        let Some(bytes) = crate::weather_particles::tests::zone_dat(BATALLIA_DOWNS_ZONE_DAT) else {
+            return;
+        };
+        let statics = zone_static_defs(&bytes);
+        assert!(!statics.is_empty(), "zone ships static generators");
+        let weat = crate::weather_particles::tests::weat_generator_names(&bytes);
+        assert!(!weat.is_empty(), "zone ships weat/ generators");
+        for name in statics.keys() {
+            assert!(
+                !weat.contains(name),
+                "{} is a weat/ generator",
+                String::from_utf8_lossy(name)
+            );
+        }
     }
 
     #[test]

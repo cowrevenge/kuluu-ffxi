@@ -38,8 +38,6 @@ pub struct WeatherModifier {
 
     pub fog: Option<DistanceFog>,
 
-    pub particle: Option<ParticleProfile>,
-
     pub lightning: Option<(f32, f32)>,
 }
 
@@ -50,33 +48,10 @@ impl Default for WeatherModifier {
             ambient_brightness_mul: 1.0,
             ambient_tint: Color::WHITE,
             fog: None,
-            particle: None,
             lightning: None,
         }
     }
 }
-
-#[derive(Clone, Copy, Debug)]
-pub struct ParticleProfile {
-    pub kind: ParticleKind,
-
-    pub count: u32,
-    pub color: Color,
-
-    pub fall_speed: f32,
-
-    pub wind: f32,
-
-    pub size: f32,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ParticleKind {
-    Rain,
-    Snow,
-}
-
-pub const MAX_PARTICLES: u32 = 500;
 
 pub fn weather_modifier_for(weather: Weather) -> WeatherModifier {
     use Weather::*;
@@ -136,14 +111,6 @@ pub fn weather_modifier_for(weather: Weather) -> WeatherModifier {
             ambient_brightness_mul: 0.75,
             ambient_tint: Color::srgb(0.85, 0.88, 0.95),
             fog: Some(cool_grey_fog(400.0)),
-            particle: Some(ParticleProfile {
-                kind: ParticleKind::Rain,
-                count: 220,
-                color: Color::srgba(0.70, 0.78, 0.92, 0.85),
-                fall_speed: 28.0,
-                wind: 1.5,
-                size: 0.04,
-            }),
             ..default()
         },
         Squall => WeatherModifier {
@@ -151,14 +118,6 @@ pub fn weather_modifier_for(weather: Weather) -> WeatherModifier {
             ambient_brightness_mul: 0.6,
             ambient_tint: Color::srgb(0.75, 0.80, 0.90),
             fog: Some(cool_grey_fog(220.0)),
-            particle: Some(ParticleProfile {
-                kind: ParticleKind::Rain,
-                count: 420,
-                color: Color::srgba(0.65, 0.72, 0.88, 0.9),
-                fall_speed: 36.0,
-                wind: 5.0,
-                size: 0.05,
-            }),
             ..default()
         },
 
@@ -196,14 +155,6 @@ pub fn weather_modifier_for(weather: Weather) -> WeatherModifier {
             ambient_brightness_mul: 1.05,
             ambient_tint: Color::srgb(0.95, 0.97, 1.05),
             fog: Some(cool_grey_fog(500.0)),
-            particle: Some(ParticleProfile {
-                kind: ParticleKind::Snow,
-                count: 200,
-                color: Color::srgba(1.0, 1.0, 1.0, 0.9),
-                fall_speed: 1.8,
-                wind: 0.8,
-                size: 0.06,
-            }),
             ..default()
         },
         Blizzards => WeatherModifier {
@@ -211,14 +162,6 @@ pub fn weather_modifier_for(weather: Weather) -> WeatherModifier {
             ambient_brightness_mul: 0.85,
             ambient_tint: Color::srgb(0.92, 0.95, 1.05),
             fog: Some(cool_grey_fog(180.0)),
-            particle: Some(ParticleProfile {
-                kind: ParticleKind::Snow,
-                count: 460,
-                color: Color::srgba(1.0, 1.0, 1.0, 0.95),
-                fall_speed: 3.5,
-                wind: 3.0,
-                size: 0.07,
-            }),
             ..default()
         },
 
@@ -227,14 +170,6 @@ pub fn weather_modifier_for(weather: Weather) -> WeatherModifier {
             ambient_brightness_mul: 0.55,
             ambient_tint: Color::srgb(0.75, 0.78, 0.92),
             fog: Some(cool_grey_fog(300.0)),
-            particle: Some(ParticleProfile {
-                kind: ParticleKind::Rain,
-                count: 280,
-                color: Color::srgba(0.65, 0.72, 0.88, 0.9),
-                fall_speed: 30.0,
-                wind: 2.0,
-                size: 0.045,
-            }),
             lightning: Some((5.0, 20.0)),
         },
         Thunderstorms => WeatherModifier {
@@ -242,14 +177,6 @@ pub fn weather_modifier_for(weather: Weather) -> WeatherModifier {
             ambient_brightness_mul: 0.4,
             ambient_tint: Color::srgb(0.68, 0.72, 0.88),
             fog: Some(cool_grey_fog(160.0)),
-            particle: Some(ParticleProfile {
-                kind: ParticleKind::Rain,
-                count: 480,
-                color: Color::srgba(0.60, 0.68, 0.86, 0.95),
-                fall_speed: 38.0,
-                wind: 6.0,
-                size: 0.05,
-            }),
             lightning: Some((2.0, 8.0)),
         },
 
@@ -292,25 +219,6 @@ pub struct ActiveWeatherModifier {
     pub base_ambient_brightness: f32,
 }
 
-#[derive(Component)]
-pub struct WeatherParticle {
-    pub local: Vec3,
-    pub velocity: Vec3,
-}
-
-#[derive(Component)]
-pub struct WeatherParticleRoot {
-    pub kind: ParticleKind,
-}
-
-#[derive(Resource, Default)]
-pub struct ParticleAssets {
-    pub rain_mesh: Option<Handle<Mesh>>,
-    pub snow_mesh: Option<Handle<Mesh>>,
-    pub rain_material: Option<Handle<StandardMaterial>>,
-    pub snow_material: Option<Handle<StandardMaterial>>,
-}
-
 #[derive(Resource, Default)]
 pub struct LightningState {
     pub time_to_next: f32,
@@ -324,9 +232,7 @@ const FLASH_SUN_MUL: f32 = 4.0;
 const FLASH_AMBIENT_MUL: f32 = 3.0;
 
 fn lcg_next(state: &mut u64) -> f32 {
-    *state = state
-        .wrapping_mul(6364136223846793005)
-        .wrapping_add(1442695040888963407);
+    *state = crate::scheduler_runtime::lcg_next(*state);
     ((*state >> 33) as f32) / (u32::MAX as f32)
 }
 
@@ -483,151 +389,6 @@ pub fn apply_weather_to_sun_system(
     }
 }
 
-pub fn manage_weather_particles_system(
-    active: Res<ActiveWeatherModifier>,
-    mut assets: ResMut<ParticleAssets>,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut mats: ResMut<Assets<StandardMaterial>>,
-    q_cam: Query<Entity, With<OperatorCamera>>,
-    q_root: Query<(Entity, &WeatherParticleRoot)>,
-    mut commands: Commands,
-) {
-    let Ok(cam_entity) = q_cam.single() else {
-        return;
-    };
-
-    let desired_kind = active.modifier.particle.map(|p| p.kind);
-    let existing_kind = q_root.iter().next().map(|(_, r)| r.kind);
-
-    if desired_kind == existing_kind && desired_kind.is_some() {
-        return;
-    }
-
-    for (e, _) in q_root.iter() {
-        commands.entity(e).try_despawn();
-    }
-
-    let Some(profile) = active.modifier.particle else {
-        return;
-    };
-
-    let count = profile.count.min(MAX_PARTICLES);
-
-    let (mesh, material) = match profile.kind {
-        ParticleKind::Rain => {
-            let mesh = assets.rain_mesh.clone().unwrap_or_else(|| {
-                let h = meshes.add(Sphere::new(1.0).mesh().ico(1).unwrap());
-                assets.rain_mesh = Some(h.clone());
-                h
-            });
-            let material = assets.rain_material.clone().unwrap_or_else(|| {
-                let h = mats.add(StandardMaterial {
-                    base_color: profile.color,
-                    emissive: LinearRgba::new(0.6, 0.7, 0.9, 1.0),
-                    alpha_mode: AlphaMode::Blend,
-                    ..default()
-                });
-                assets.rain_material = Some(h.clone());
-                h
-            });
-            (mesh, material)
-        }
-        ParticleKind::Snow => {
-            let mesh = assets.snow_mesh.clone().unwrap_or_else(|| {
-                let h = meshes.add(Sphere::new(1.0).mesh().ico(1).unwrap());
-                assets.snow_mesh = Some(h.clone());
-                h
-            });
-            let material = assets.snow_material.clone().unwrap_or_else(|| {
-                let h = mats.add(StandardMaterial {
-                    base_color: profile.color,
-                    emissive: LinearRgba::new(1.2, 1.2, 1.4, 1.0),
-                    alpha_mode: AlphaMode::Blend,
-                    ..default()
-                });
-                assets.snow_material = Some(h.clone());
-                h
-            });
-            (mesh, material)
-        }
-    };
-
-    let root = commands
-        .spawn((
-            WeatherParticleRoot { kind: profile.kind },
-            Transform::default(),
-            Visibility::default(),
-        ))
-        .insert(ChildOf(cam_entity))
-        .id();
-
-    let half_x = 18.0;
-    let half_z = 18.0;
-    let top = 20.0;
-    let bottom = -3.0;
-
-    let mut rng: u64 = 0xCAFEF00DDEADBEEF;
-    let stretch_y = match profile.kind {
-        ParticleKind::Rain => 8.0,
-        ParticleKind::Snow => 1.0,
-    };
-
-    for _ in 0..count {
-        let x = (lcg_next(&mut rng) - 0.5) * 2.0 * half_x;
-        let y = bottom + lcg_next(&mut rng) * (top - bottom);
-        let z = (lcg_next(&mut rng) - 0.5) * 2.0 * half_z;
-        let scale = Vec3::new(profile.size, profile.size * stretch_y, profile.size);
-
-        commands
-            .spawn((
-                WeatherParticle {
-                    local: Vec3::new(x, y, z),
-                    velocity: Vec3::new(profile.wind, -profile.fall_speed, 0.0),
-                },
-                Mesh3d(mesh.clone()),
-                MeshMaterial3d(material.clone()),
-                Transform {
-                    translation: Vec3::new(x, y, z),
-                    scale,
-                    ..default()
-                },
-                Visibility::default(),
-                bevy::light::NotShadowCaster,
-                bevy::light::NotShadowReceiver,
-            ))
-            .insert(ChildOf(root));
-    }
-}
-
-pub fn update_weather_particles_system(
-    time: Res<Time>,
-    mut q_particles: Query<(&mut WeatherParticle, &mut Transform)>,
-) {
-    let dt = time.delta_secs();
-    let half_x = 18.0;
-    let half_z = 18.0;
-    let top = 20.0;
-    let bottom = -3.0;
-    for (mut p, mut xf) in q_particles.iter_mut() {
-        let v = p.velocity;
-        p.local += v * dt;
-        if p.local.y < bottom {
-            p.local.y = top;
-        }
-        if p.local.x > half_x {
-            p.local.x -= half_x * 2.0;
-        } else if p.local.x < -half_x {
-            p.local.x += half_x * 2.0;
-        }
-        if p.local.z > half_z {
-            p.local.z -= half_z * 2.0;
-        } else if p.local.z < -half_z {
-            p.local.z += half_z * 2.0;
-        }
-        xf.translation = p.local;
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -685,55 +446,16 @@ mod tests {
     }
 
     #[test]
-    fn clear_weather_has_no_particle_or_fog() {
+    fn clear_weather_has_no_fog_or_lightning() {
         let m = weather_modifier_for(Weather::Sunshine);
-        assert!(m.particle.is_none());
         assert!(m.fog.is_none());
         assert!(m.lightning.is_none());
     }
 
     #[test]
-    fn thunderstorms_has_lightning_and_heavy_rain() {
+    fn thunderstorms_flash() {
         let m = weather_modifier_for(Weather::Thunderstorms);
-        let p = m.particle.expect("thunderstorms must have particles");
-        assert_eq!(p.kind, ParticleKind::Rain);
-        assert!(
-            p.count > 300,
-            "thunderstorms should be denser than light rain"
-        );
         let (lo, hi) = m.lightning.expect("thunderstorms must flash");
         assert!(lo < hi && lo > 0.0);
-    }
-
-    #[test]
-    fn snow_kinds_use_snow_particles() {
-        for w in [Weather::Snow, Weather::Blizzards] {
-            let m = weather_modifier_for(w);
-            assert_eq!(m.particle.unwrap().kind, ParticleKind::Snow);
-        }
-        for w in [
-            Weather::Rain,
-            Weather::Squall,
-            Weather::Thunder,
-            Weather::Thunderstorms,
-        ] {
-            let m = weather_modifier_for(w);
-            assert_eq!(m.particle.unwrap().kind, ParticleKind::Rain);
-        }
-    }
-
-    #[test]
-    fn particle_count_within_cap() {
-        for w in [
-            Weather::Rain,
-            Weather::Squall,
-            Weather::Thunder,
-            Weather::Thunderstorms,
-            Weather::Snow,
-            Weather::Blizzards,
-        ] {
-            let p = weather_modifier_for(w).particle.unwrap();
-            assert!(p.count <= MAX_PARTICLES, "{:?} exceeded cap", w);
-        }
     }
 }

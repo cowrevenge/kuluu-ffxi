@@ -4,31 +4,47 @@ use bevy::prelude::*;
 use bevy::ui::UiTransform;
 use ffxi_viewer_wire::EntityKind;
 
-use crate::camera::ChaseCamera;
 use crate::components::{InGameEntity, IsSelf, WorldEntity};
 use crate::lock_on::LockOn;
+use crate::nameplate_color::{name_color_choice, NameColorTable, SelfContext};
 use crate::scene::Target;
 use crate::snapshot::SceneState;
 
 use super::{MinimapAabb, MinimapOverlayLayer, MinimapView};
 
-const DOT_DIAMETER_PX: f32 = 6.0;
+const DOT_DIAMETER_PX: f32 = 9.0;
 
-const SELF_MARKER_PX: f32 = 10.0;
+const SELF_MARKER_PX: f32 = 13.0;
 
-/// Nose protruding past the marker's top edge; without an asymmetric shape the
-/// heading rotation of a plain square is invisible at every 90-degree step.
-const SELF_MARKER_NOSE_PX: f32 = 4.0;
+/// Fills mirror the retail `ncol` nameplate rows (`crate::nameplate_color`), so
+/// a dot and the plate over the same actor always agree. These stand in only
+/// for the frames before that table is read out of the DAT, and for a run whose
+/// DAT root never resolves.
+const PC_FALLBACK_COLOR: Color = Color::srgb(1.00, 1.00, 1.00);
+const PARTY_FALLBACK_COLOR: Color = Color::srgb(0.45, 0.75, 1.00);
+const NPC_FALLBACK_COLOR: Color = Color::srgb(0.35, 0.95, 0.45);
+const MOB_FALLBACK_COLOR: Color = Color::srgb(1.00, 0.95, 0.35);
+const OTHER_FALLBACK_COLOR: Color = Color::srgb(0.70, 0.70, 0.70);
 
-const SELF_MARKER_COLOR: Color = Color::srgb(0.2, 1.0, 1.0);
+const SELF_MARKER_COLOR: Color = Color::srgb(0.20, 1.00, 1.00);
 
-const PARTY_MARKER_COLOR: Color = Color::srgb(0.30, 1.00, 0.55);
+/// Role rings. Target and lock-on ride the marker's *edge*, never its fill: the
+/// fill carries the retail name colour, and an unclaimed mob is already yellow.
+const TARGET_RING_COLOR: Color = Color::srgb(1.00, 0.95, 0.20);
+const LOCKED_RING_COLOR: Color = Color::srgb(1.00, 0.40, 0.80);
+const SELF_RING_COLOR: Color = Color::WHITE;
 
-const LOCKED_MARKER_COLOR: Color = Color::srgb(1.0, 0.4, 0.8);
+/// Every dot carries a dark hairline so a pale marker still reads against the
+/// parchment of a retail map image.
+const MARKER_EDGE_COLOR: Color = Color::srgba(0.0, 0.0, 0.0, 0.65);
+const MARKER_EDGE_PX: f32 = 1.0;
+const MARKER_RING_PX: f32 = 2.0;
 
-const TARGET_MARKER_COLOR: Color = Color::srgb(1.0, 0.95, 0.2);
-
-const TARGET_RING_PX: f32 = 2.0;
+/// The marker silhouette is a square with three rounded corners and one sharp
+/// one — a map pin, which points without needing a second node. The sharp
+/// corner sits on the node's top-right diagonal, so the node is rotated back by
+/// this much before being turned to the bearing it should indicate.
+const PIN_TIP_BEARING: f32 = std::f32::consts::FRAC_PI_4;
 
 /// Marker categories. `SelfMarker` and `Target` are role overlays that win
 /// over kind; `Party` is snapshot party-list membership; the rest are per
@@ -81,16 +97,17 @@ impl MarkerCategory {
     }
 
     /// Legend swatch drawn from the same palette the dots use, so the key reads
-    /// as the map itself.
+    /// as the map itself. `Target` shows its ring rather than a fill, which is
+    /// how that role is drawn.
     pub fn swatch_color(self) -> Color {
         match self {
             MarkerCategory::SelfMarker => SELF_MARKER_COLOR,
-            MarkerCategory::Party => PARTY_MARKER_COLOR,
-            MarkerCategory::Target => TARGET_MARKER_COLOR,
-            MarkerCategory::Pc => dot_color(EntityKind::Pc, false, false, false),
-            MarkerCategory::Npc => dot_color(EntityKind::Npc, false, false, false),
-            MarkerCategory::Mob => dot_color(EntityKind::Mob, false, false, false),
-            MarkerCategory::Pet => dot_color(EntityKind::Pet, false, false, false),
+            MarkerCategory::Target => TARGET_RING_COLOR,
+            MarkerCategory::Party => PARTY_FALLBACK_COLOR,
+            MarkerCategory::Pc => fill_fallback(EntityKind::Pc),
+            MarkerCategory::Npc => fill_fallback(EntityKind::Npc),
+            MarkerCategory::Mob => fill_fallback(EntityKind::Mob),
+            MarkerCategory::Pet => fill_fallback(EntityKind::Pet),
         }
     }
 }
@@ -192,6 +209,7 @@ pub fn spawn_minimap_placed_markers(layer: &mut ChildSpawnerCommands) {
                     ..default()
                 },
                 display: Display::None,
+                border_radius: BorderRadius::MAX,
                 ..default()
             },
             BackgroundColor(MINIMAP_PLACED_COLOR),
@@ -229,20 +247,98 @@ pub fn update_minimap_placed_markers(
     }
 }
 
+/// Every marker query a repaint needs, gathered once: the role resources, the
+/// filter bitset, the retail name-colour table, and the snapshot rows the fill
+/// colour is derived from. Built per frame by each surface and handed to
+/// [`sync_marker_layer`].
+pub struct MarkerContext<'a> {
+    self_char_id: u32,
+    target: &'a Target,
+    lock_on: &'a LockOn,
+    filters: &'a MarkerFilters,
+    name_colors: &'a NameColorTable,
+    party_ids: HashSet<u32>,
+    entities: HashMap<u32, &'a ffxi_viewer_wire::Entity>,
+    color_ctx: SelfContext<'a>,
+}
+
+impl<'a> MarkerContext<'a> {
+    pub fn new(
+        scene_state: &'a SceneState,
+        target: &'a Target,
+        lock_on: &'a LockOn,
+        filters: &'a MarkerFilters,
+        name_colors: &'a NameColorTable,
+    ) -> Self {
+        let snapshot = &scene_state.snapshot;
+        Self {
+            self_char_id: snapshot.self_char_id.unwrap_or(0),
+            target,
+            lock_on,
+            filters,
+            name_colors,
+            party_ids: snapshot
+                .party
+                .iter()
+                .map(|m| m.id)
+                .filter(|id| *id != 0)
+                .collect(),
+            entities: snapshot.entities.iter().map(|e| (e.id, e)).collect(),
+            color_ctx: SelfContext {
+                self_id: snapshot.self_char_id,
+                party: &snapshot.party,
+            },
+        }
+    }
+
+    /// The fill for one world dot: the same retail `ncol` colour its nameplate
+    /// draws in, or the per-kind stand-in until that table loads.
+    fn fill(&self, entity_id: u32, kind: EntityKind) -> Color {
+        self.entities
+            .get(&entity_id)
+            .map(|e| name_color_choice(e, self.color_ctx))
+            .and_then(|choice| choice.resolve(self.name_colors))
+            .unwrap_or_else(|| fill_fallback(kind))
+    }
+}
+
+/// Stand-in fill for an actor the retail colour table can't speak for yet.
+fn fill_fallback(kind: EntityKind) -> Color {
+    match kind {
+        EntityKind::Pc => PC_FALLBACK_COLOR,
+        EntityKind::Npc => NPC_FALLBACK_COLOR,
+        EntityKind::Mob => MOB_FALLBACK_COLOR,
+        // A player's pet takes the party row in retail (nameplate_color.rs).
+        EntityKind::Pet => PARTY_FALLBACK_COLOR,
+        EntityKind::Other => OTHER_FALLBACK_COLOR,
+    }
+}
+
+/// Wide-scan marker/list color for the packed `Type` byte (0x0f4_tracking_list:
+/// 0 = char, 1 = npc, 2 = mob), reusing the map's per-kind palette so a tracked
+/// entity reads the same on the list and the map.
+pub fn widescan_color(kind: u8) -> Color {
+    fill_fallback(match kind {
+        0 => EntityKind::Pc,
+        1 => EntityKind::Npc,
+        2 => EntityKind::Mob,
+        _ => EntityKind::Other,
+    })
+}
+
 pub fn update_minimap_overlay(
     view: Res<MinimapView>,
     scene_state: Res<SceneState>,
     target: Res<Target>,
     lock_on: Res<LockOn>,
-    chase: Res<ChaseCamera>,
     filters: Res<MarkerFilters>,
+    name_colors: Res<NameColorTable>,
     q_overlay_layer: Query<Entity, With<MinimapOverlayLayer>>,
     q_self: Query<&Transform, With<IsSelf>>,
     q_transform: Query<(&Transform, &WorldEntity), Without<IsSelf>>,
     mut dots: ResMut<MinimapDots>,
     mut commands: Commands,
-    mut q_dot_node: Query<(&mut Node, &mut BackgroundColor), With<MinimapDot>>,
-    mut q_marker_transform: Query<&mut UiTransform, With<MinimapDot>>,
+    mut q_dot: Query<MarkerNode, With<MinimapDot>>,
 ) {
     let Some(aabb) = view.visible_aabb else {
         return;
@@ -250,124 +346,103 @@ pub fn update_minimap_overlay(
     let Ok(overlay_layer) = q_overlay_layer.single() else {
         return;
     };
-    let self_char_id = scene_state.snapshot.self_char_id.unwrap_or(0);
-    let party_ids = party_id_set(&scene_state);
+    let ctx = MarkerContext::new(&scene_state, &target, &lock_on, &filters, &name_colors);
     sync_marker_layer(
         aabb,
         overlay_layer,
-        self_char_id,
-        &target,
-        &lock_on,
-        chase.yaw,
-        &party_ids,
-        &filters,
+        &ctx,
         &q_self,
         &q_transform,
         &mut dots.by_id,
         &mut commands,
-        &mut q_dot_node,
-        &mut q_marker_transform,
+        &mut q_dot,
     );
 }
 
-/// Party-member entity ids from the snapshot, the party-color / Party-filter
-/// membership source (party ids already live in `SessionState`).
-pub fn party_id_set(scene_state: &SceneState) -> HashSet<u32> {
-    scene_state
-        .snapshot
-        .party
-        .iter()
-        .map(|m| m.id)
-        .filter(|id| *id != 0)
-        .collect()
-}
+/// The mutable pieces of one marker node. Both surfaces query it under their
+/// own disjointness filters, so it is spelled once here.
+pub type MarkerNode = (
+    &'static mut Node,
+    &'static mut BackgroundColor,
+    &'static mut Outline,
+    &'static mut UiTransform,
+);
 
 /// Repaint one marker layer (the minimap widget or the full Map screen) from the
-/// live world: per-entity kind/target/lock dots, the rotating self marker, and
-/// stale-dot cleanup — the single marker code path both surfaces share. `by_id`
-/// is the caller's own dot store (disjoint entity sets); `aabb` is whatever
-/// world→UV window that surface renders.
-#[allow(clippy::too_many_arguments)]
-pub fn sync_marker_layer<FD, FT>(
+/// live world: per-entity dots coloured and pointed like their nameplates, the
+/// self marker, and stale-dot cleanup — the single marker code path both
+/// surfaces share. `by_id` is the caller's own dot store (disjoint entity sets);
+/// `aabb` is whatever world→UV window that surface renders.
+pub fn sync_marker_layer<F>(
     aabb: MinimapAabb,
     overlay_layer: Entity,
-    self_char_id: u32,
-    target: &Target,
-    lock_on: &LockOn,
-    chase_yaw: f32,
-    party_ids: &HashSet<u32>,
-    filters: &MarkerFilters,
+    ctx: &MarkerContext<'_>,
     q_self: &Query<&Transform, With<IsSelf>>,
     q_transform: &Query<(&Transform, &WorldEntity), Without<IsSelf>>,
     by_id: &mut HashMap<u32, Entity>,
     commands: &mut Commands,
-    q_dot_node: &mut Query<(&mut Node, &mut BackgroundColor), FD>,
-    q_marker_transform: &mut Query<&mut UiTransform, FT>,
+    q_dot: &mut Query<MarkerNode, F>,
 ) where
-    FD: bevy::ecs::query::QueryFilter,
-    FT: bevy::ecs::query::QueryFilter,
+    F: bevy::ecs::query::QueryFilter,
 {
     let mut seen: HashSet<u32> = HashSet::with_capacity(by_id.len() + 1);
 
     for (transform, world_entity) in q_transform.iter() {
-        if self_char_id != 0 && world_entity.id == self_char_id {
+        if ctx.self_char_id != 0 && world_entity.id == ctx.self_char_id {
             continue;
         }
 
         let Some(uv) = aabb.world_to_uv_or_offscreen(transform.translation) else {
             continue;
         };
-        let is_target = target.id == Some(world_entity.id);
-        let is_locked = lock_on.target_id == Some(world_entity.id);
-        let is_party = party_ids.contains(&world_entity.id);
+        let is_target = ctx.target.id == Some(world_entity.id);
+        let is_locked = ctx.lock_on.target_id == Some(world_entity.id);
+        let is_party = ctx.party_ids.contains(&world_entity.id);
         let category = marker_category(world_entity.kind, is_party, is_target || is_locked);
-        if !filters.is_visible(category) {
+        if !ctx.filters.is_visible(category) {
             continue;
         }
-        let color = dot_color(world_entity.kind, is_target, is_locked, is_party);
+        let (ring, ring_px) = ring_for(false, is_target, is_locked);
         upsert_dot(
             by_id,
             commands,
             overlay_layer,
             world_entity.id,
-            uv,
-            color,
-            DOT_DIAMETER_PX,
-            q_dot_node,
-            is_target || is_locked,
+            DotStyle {
+                uv,
+                diameter_px: DOT_DIAMETER_PX,
+                fill: ctx.fill(world_entity.id, world_entity.kind),
+                ring,
+                ring_px,
+                rotation: marker_rotation(facing_xz(transform.rotation)),
+            },
+            q_dot,
         );
         seen.insert(world_entity.id);
     }
 
-    if filters.is_visible(MarkerCategory::SelfMarker) {
+    if ctx.filters.is_visible(MarkerCategory::SelfMarker) {
         if let Ok(self_t) = q_self.single() {
             let uv = aabb
                 .world_to_uv_or_offscreen(self_t.translation)
                 .unwrap_or_else(|| aabb.world_to_uv(self_t.translation));
+            let (ring, ring_px) = ring_for(true, false, false);
             upsert_dot(
                 by_id,
                 commands,
                 overlay_layer,
                 SELF_MARKER_ID,
-                uv,
-                SELF_MARKER_COLOR,
-                SELF_MARKER_PX,
-                q_dot_node,
-                false,
+                DotStyle {
+                    uv,
+                    diameter_px: SELF_MARKER_PX,
+                    fill: SELF_MARKER_COLOR,
+                    ring,
+                    ring_px,
+                    rotation: marker_rotation(facing_xz(self_t.rotation)),
+                },
+                q_dot,
             );
             seen.insert(SELF_MARKER_ID);
-
-            if let Some(&marker) = by_id.get(&SELF_MARKER_ID) {
-                let rotation = self_marker_rotation(chase_yaw);
-                if let Ok(mut ui_transform) = q_marker_transform.get_mut(marker) {
-                    if ui_transform.rotation != rotation {
-                        ui_transform.rotation = rotation;
-                    }
-                } else if let Ok(mut ec) = commands.get_entity(marker) {
-                    ec.insert(UiTransform::from_rotation(rotation))
-                        .with_children(spawn_self_marker_nose);
-                }
-            }
         }
     }
 
@@ -385,182 +460,172 @@ pub fn sync_marker_layer<FD, FT>(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn upsert_dot<FD>(
+/// Everything that varies per marker per frame.
+#[derive(Debug, Clone, Copy)]
+struct DotStyle {
+    uv: Vec2,
+    diameter_px: f32,
+    fill: Color,
+    ring: Color,
+    ring_px: f32,
+    rotation: Rot2,
+}
+
+/// Lock-on outranks target, and the self marker always wears its own ring so it
+/// reads at a glance in a crowd. Everything else gets the legibility hairline.
+fn ring_for(is_self: bool, is_target: bool, is_locked: bool) -> (Color, f32) {
+    if is_self {
+        return (SELF_RING_COLOR, MARKER_EDGE_PX);
+    }
+    if is_locked {
+        return (LOCKED_RING_COLOR, MARKER_RING_PX);
+    }
+    if is_target {
+        return (TARGET_RING_COLOR, MARKER_RING_PX);
+    }
+    (MARKER_EDGE_COLOR, MARKER_EDGE_PX)
+}
+
+fn upsert_dot<F>(
     by_id: &mut HashMap<u32, Entity>,
     commands: &mut Commands,
     overlay_layer: Entity,
     entity_id: u32,
-    uv: Vec2,
-    color: Color,
-    diameter_px: f32,
-    q_dot_node: &mut Query<(&mut Node, &mut BackgroundColor), FD>,
-    with_ring: bool,
+    style: DotStyle,
+    q_dot: &mut Query<MarkerNode, F>,
 ) where
-    FD: bevy::ecs::query::QueryFilter,
+    F: bevy::ecs::query::QueryFilter,
 {
-    let half = diameter_px * 0.5;
-    let left_pct = uv.x * 100.0;
-    let top_pct = uv.y * 100.0;
+    let left = Val::Percent(style.uv.x * 100.0);
+    let top = Val::Percent(style.uv.y * 100.0);
 
     if let Some(&dot_entity) = by_id.get(&entity_id) {
-        if let Ok((mut node, mut bg)) = q_dot_node.get_mut(dot_entity) {
-            let want_left = Val::Percent(left_pct);
-            let want_top = Val::Percent(top_pct);
-            if node.left != want_left {
-                node.left = want_left;
+        if let Ok((mut node, mut bg, mut outline, mut transform)) = q_dot.get_mut(dot_entity) {
+            if node.left != left {
+                node.left = left;
             }
-            if node.top != want_top {
-                node.top = want_top;
+            if node.top != top {
+                node.top = top;
             }
-            let want_w = Val::Px(diameter_px);
-            let want_h = Val::Px(diameter_px);
-            if node.width != want_w {
-                node.width = want_w;
+            if bg.0 != style.fill {
+                bg.0 = style.fill;
             }
-            if node.height != want_h {
-                node.height = want_h;
+            if outline.color != style.ring {
+                outline.color = style.ring;
             }
-            let want_margin = UiRect {
-                left: Val::Px(-half),
-                top: Val::Px(-half),
-                ..default()
-            };
-            if node.margin != want_margin {
-                node.margin = want_margin;
+            let ring_width = Val::Px(style.ring_px);
+            if outline.width != ring_width {
+                outline.width = ring_width;
             }
-            if bg.0 != color {
-                bg.0 = color;
+            if transform.rotation != style.rotation {
+                transform.rotation = style.rotation;
             }
         }
         return;
     }
 
-    let border = if with_ring {
-        UiRect::all(Val::Px(TARGET_RING_PX))
-    } else {
-        UiRect::all(Val::Px(0.0))
-    };
+    let half = style.diameter_px * 0.5;
     let dot_entity = commands
         .spawn((
             InGameEntity,
             MinimapDot { entity_id },
             Node {
                 position_type: PositionType::Absolute,
-                left: Val::Percent(left_pct),
-                top: Val::Percent(top_pct),
-                width: Val::Px(diameter_px),
-                height: Val::Px(diameter_px),
+                left,
+                top,
+                width: Val::Px(style.diameter_px),
+                height: Val::Px(style.diameter_px),
                 margin: UiRect {
                     left: Val::Px(-half),
                     top: Val::Px(-half),
                     ..default()
                 },
-                border,
+                border_radius: pin_border_radius(style.diameter_px),
                 ..default()
             },
-            BackgroundColor(color),
-            BorderColor::all(Color::srgb(1.0, 0.95, 0.2)),
+            BackgroundColor(style.fill),
+            Outline::new(Val::Px(style.ring_px), Val::ZERO, style.ring),
+            UiTransform::from_rotation(style.rotation),
             ChildOf(overlay_layer),
         ))
         .id();
     by_id.insert(entity_id, dot_entity);
 }
 
-/// Clockwise UI rotation aligning the marker nose (screen-up when unrotated)
-/// with the player's forward direction. `world_to_uv` maps world +X to
-/// screen-right and +Z to screen-down, and the chase camera sits at
-/// +(sin yaw, cos yaw) behind the player (camera.rs chase placement), so
-/// forward on the map plane is (-sin yaw, -cos yaw) — screen-up rotated
-/// clockwise by -yaw.
-fn self_marker_rotation(yaw: f32) -> Rot2 {
-    Rot2::radians(-yaw)
+/// Three rounded corners and one sharp one: a map pin whose tip is the heading
+/// indicator.
+fn pin_border_radius(diameter_px: f32) -> BorderRadius {
+    let round = Val::Px(diameter_px * 0.5);
+    BorderRadius::new(round, Val::ZERO, round, round)
 }
 
-fn spawn_self_marker_nose(parent: &mut ChildSpawnerCommands) {
-    parent.spawn((
-        Node {
-            position_type: PositionType::Absolute,
-            left: Val::Px((SELF_MARKER_PX - SELF_MARKER_NOSE_PX) * 0.5),
-            top: Val::Px(-SELF_MARKER_NOSE_PX),
-            width: Val::Px(SELF_MARKER_NOSE_PX),
-            height: Val::Px(SELF_MARKER_NOSE_PX),
-            ..default()
-        },
-        BackgroundColor(SELF_MARKER_COLOR),
-    ));
+/// The map-plane direction an entity faces. Entity transforms are yaw-only
+/// `rotY(-heading)` (`scene::heading_to_quat`, and the smoothed equivalent in
+/// `combat_stance::predict_entities_system`), which sends local +X to the world
+/// direction of that heading.
+pub fn facing_xz(rotation: Quat) -> Vec2 {
+    let forward = rotation * Vec3::X;
+    Vec2::new(forward.x, forward.z)
 }
 
-/// Wide-scan marker/list color for the packed `Type` byte (0x0f4_tracking_list:
-/// 0 = char, 1 = npc, 2 = mob), reusing the minimap's per-kind palette so a
-/// tracked entity reads the same on the list and the map.
-pub fn widescan_color(kind: u8) -> Color {
-    let entity_kind = match kind {
-        0 => EntityKind::Pc,
-        1 => EntityKind::Npc,
-        2 => EntityKind::Mob,
-        _ => EntityKind::Other,
-    };
-    dot_color(entity_kind, false, false, false)
-}
-
-pub fn dot_color(kind: EntityKind, is_target: bool, is_locked: bool, is_party: bool) -> Color {
-    if is_locked {
-        return LOCKED_MARKER_COLOR;
-    }
-    if is_target {
-        return TARGET_MARKER_COLOR;
-    }
-    if is_party {
-        return PARTY_MARKER_COLOR;
-    }
-    match kind {
-        EntityKind::Pc => Color::srgb(0.40, 0.85, 1.00),
-        EntityKind::Npc => Color::srgb(0.95, 0.85, 0.30),
-        EntityKind::Mob => Color::srgb(0.95, 0.40, 0.40),
-        EntityKind::Pet => Color::srgb(0.40, 0.85, 0.50),
-        EntityKind::Other => Color::srgb(0.60, 0.60, 0.60),
-    }
+/// Clockwise UI rotation putting the pin's tip on `facing_xz`. `world_to_uv`
+/// maps world +X to screen-right and world +Z to screen-down, so the facing
+/// vector is already in the screen basis the rotation applies in.
+fn marker_rotation(facing_xz: Vec2) -> Rot2 {
+    Rot2::radians(facing_xz.x.atan2(-facing_xz.y) - PIN_TIP_BEARING)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scene::heading_to_quat;
 
-    #[test]
-    fn dot_color_priority_locked_over_target_over_kind() {
-        let locked = dot_color(EntityKind::Mob, true, true, false);
-        let targeted = dot_color(EntityKind::Mob, true, false, false);
-        let mob = dot_color(EntityKind::Mob, false, false, false);
-
-        assert_ne!(locked, targeted);
-        assert_ne!(targeted, mob);
-        assert_ne!(locked, mob);
+    /// Where the pin's tip sits before any rotation, as a unit vector.
+    fn pin_tip_local() -> Vec2 {
+        Rot2::radians(PIN_TIP_BEARING) * Vec2::NEG_Y
     }
 
     #[test]
-    fn dot_color_locked_overrides_pc_kind() {
-        let locked_pc = dot_color(EntityKind::Pc, false, true, false);
-        let pc = dot_color(EntityKind::Pc, false, false, false);
-        assert_ne!(locked_pc, pc);
+    fn fill_fallback_kinds_carry_retail_hues() {
+        let mob = fill_fallback(EntityKind::Mob).to_srgba();
+        assert!(
+            mob.red > 0.9 && mob.green > 0.9 && mob.blue < 0.5,
+            "an unclaimed mob is yellow"
+        );
+        let npc = fill_fallback(EntityKind::Npc).to_srgba();
+        assert!(
+            npc.green > npc.red && npc.green > npc.blue,
+            "an NPC is green"
+        );
+        let party = fill_fallback(EntityKind::Pet).to_srgba();
+        assert!(
+            party.blue > party.red,
+            "a pet takes the blue party row, like its plate"
+        );
+        assert_eq!(fill_fallback(EntityKind::Pc), PC_FALLBACK_COLOR);
     }
 
     #[test]
-    fn dot_color_party_distinct_from_pc_and_overridden_by_role() {
-        let pc = dot_color(EntityKind::Pc, false, false, false);
-        let party = dot_color(EntityKind::Pc, false, false, true);
-        assert_ne!(party, pc, "party members get their own color");
-        assert_eq!(party, PARTY_MARKER_COLOR);
+    fn widescan_colors_match_the_map_palette() {
+        assert_eq!(widescan_color(0), fill_fallback(EntityKind::Pc));
+        assert_eq!(widescan_color(1), fill_fallback(EntityKind::Npc));
+        assert_eq!(widescan_color(2), fill_fallback(EntityKind::Mob));
+    }
 
-        // Target/lock role still wins over party membership.
-        assert_eq!(
-            dot_color(EntityKind::Pc, true, false, true),
-            TARGET_MARKER_COLOR
+    #[test]
+    fn role_rides_the_ring_and_never_the_fill() {
+        let (plain, plain_px) = ring_for(false, false, false);
+        let (target, target_px) = ring_for(false, true, false);
+        let (locked, _) = ring_for(false, true, true);
+
+        assert_eq!(plain, MARKER_EDGE_COLOR);
+        assert_eq!(target, TARGET_RING_COLOR);
+        assert_eq!(locked, LOCKED_RING_COLOR, "lock-on outranks target");
+        assert!(
+            target_px > plain_px,
+            "a role ring is thicker than the legibility hairline"
         );
-        assert_eq!(
-            dot_color(EntityKind::Pc, false, true, true),
-            LOCKED_MARKER_COLOR
-        );
+        assert_eq!(ring_for(true, false, false).0, SELF_RING_COLOR);
     }
 
     #[test]
@@ -601,31 +666,52 @@ mod tests {
         assert!(filters.is_visible(MarkerCategory::Mob));
     }
 
+    /// The heading an actor's `Transform` encodes and the heading the camera
+    /// resolves are the same angle in two conventions; a marker reading the
+    /// transform must land where the camera's forward would.
     #[test]
-    fn self_marker_rotation_aligns_nose_with_forward() {
-        // Screen space is +x right / +y down (Node left/top from world_to_uv);
-        // `UiTransform.rotation` applies its Rot2 matrix in that space.
+    fn facing_from_a_transform_matches_the_camera_heading_convention() {
         for heading in [0u8, 32, 64, 96, 128, 160, 192, 224] {
             let yaw = crate::camera::yaw_for_heading(heading);
-            let forward_screen = Vec2::new(-yaw.sin(), -yaw.cos());
-            let nose_screen = self_marker_rotation(yaw) * Vec2::new(0.0, -1.0);
+            let from_camera = Vec2::new(-yaw.sin(), -yaw.cos());
+            let from_transform = facing_xz(heading_to_quat(heading));
             assert!(
-                (nose_screen - forward_screen).length() < 1e-5,
-                "heading {heading}: nose {nose_screen:?} vs forward {forward_screen:?}"
+                (from_transform - from_camera).length() < 1e-5,
+                "heading {heading}: transform {from_transform:?} vs camera {from_camera:?}"
             );
         }
     }
 
     #[test]
-    fn self_marker_rotation_heading_zero_points_screen_right() {
+    fn marker_tip_points_along_the_entity_facing() {
+        // Screen space is +x right / +y down (Node left/top from world_to_uv);
+        // `UiTransform.rotation` applies its Rot2 matrix in that space.
+        for heading in [0u8, 32, 64, 96, 128, 160, 192, 224] {
+            let facing = facing_xz(heading_to_quat(heading));
+            let tip = marker_rotation(facing) * pin_tip_local();
+            assert!(
+                (tip - facing).length() < 1e-5,
+                "heading {heading}: tip {tip:?} vs facing {facing:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn marker_tip_at_heading_zero_points_screen_right() {
         // FFXI heading 0 faces world +X (camera::yaw_for_heading), and
         // world_to_uv maps +X to screen-right.
-        let rot = self_marker_rotation(crate::camera::yaw_for_heading(0));
-        let nose = rot * Vec2::new(0.0, -1.0);
-        assert!(
-            (nose - Vec2::new(1.0, 0.0)).length() < 1e-5,
-            "nose {nose:?}"
-        );
+        let tip = marker_rotation(facing_xz(heading_to_quat(0))) * pin_tip_local();
+        assert!((tip - Vec2::X).length() < 1e-5, "tip {tip:?}");
+    }
+
+    /// The regression the marker rotation exists to prevent: swivelling the
+    /// camera must not move a marker that stands still (kuluu-2d2c).
+    #[test]
+    fn marker_rotation_ignores_the_camera() {
+        let facing = facing_xz(heading_to_quat(96));
+        let before = marker_rotation(facing);
+        // Same actor, camera swung a quarter turn — nothing the rotation reads.
+        assert_eq!(marker_rotation(facing), before);
     }
 
     #[test]
@@ -639,41 +725,39 @@ mod tests {
         struct TestStore(HashMap<u32, Entity>);
 
         fn run_layer(
+            scene_state: Res<SceneState>,
             filters: Res<MarkerFilters>,
+            name_colors: Res<NameColorTable>,
             q_layer: Query<Entity, With<TestLayer>>,
             q_self: Query<&Transform, With<IsSelf>>,
             q_transform: Query<(&Transform, &WorldEntity), Without<IsSelf>>,
             mut store: ResMut<TestStore>,
             mut commands: Commands,
-            mut q_dot_node: Query<(&mut Node, &mut BackgroundColor), With<MinimapDot>>,
-            mut q_marker_transform: Query<&mut UiTransform, With<MinimapDot>>,
+            mut q_dot: Query<MarkerNode, With<MinimapDot>>,
         ) {
             let layer = q_layer.single().unwrap();
             let aabb = MinimapAabb {
                 min: Vec2::splat(-100.0),
                 max: Vec2::splat(100.0),
             };
-            let party = HashSet::new();
+            let (target, lock_on) = (Target::default(), LockOn::default());
+            let ctx = MarkerContext::new(&scene_state, &target, &lock_on, &filters, &name_colors);
             sync_marker_layer(
                 aabb,
                 layer,
-                0,
-                &Target::default(),
-                &LockOn::default(),
-                0.0,
-                &party,
-                &filters,
+                &ctx,
                 &q_self,
                 &q_transform,
                 &mut store.0,
                 &mut commands,
-                &mut q_dot_node,
-                &mut q_marker_transform,
+                &mut q_dot,
             );
         }
 
         let mut world = World::new();
+        world.init_resource::<SceneState>();
         world.insert_resource(MarkerFilters::default());
+        world.init_resource::<NameColorTable>();
         world.init_resource::<TestStore>();
         world.spawn(TestLayer);
         world.spawn((
@@ -700,17 +784,5 @@ mod tests {
             world.resource::<TestStore>().0.is_empty(),
             "filtering Mob off skips the dot in the shared helper (stale-cleaned)"
         );
-    }
-
-    #[test]
-    fn dot_color_kinds_are_distinct() {
-        let pc = dot_color(EntityKind::Pc, false, false, false);
-        let npc = dot_color(EntityKind::Npc, false, false, false);
-        let mob = dot_color(EntityKind::Mob, false, false, false);
-        let pet = dot_color(EntityKind::Pet, false, false, false);
-        assert_ne!(pc, npc);
-        assert_ne!(npc, mob);
-        assert_ne!(mob, pet);
-        assert_ne!(pc, mob);
     }
 }

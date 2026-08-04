@@ -260,7 +260,7 @@ impl Plugin for MinimapPlugin {
                     update_minimap_view,
                     (
                         update_minimap_image_source,
-                        update_minimap_crop_rect,
+                        update_minimap_image_placement,
                         update_minimap_visibility,
                         update_reset_button_visibility,
                         handle_reset_button_click,
@@ -324,6 +324,9 @@ pub fn spawn_minimap_as_child(p: &mut ChildSpawnerCommands, images: &mut Assets<
             width: Val::Px(MINIMAP_UI_SIZE_PX),
             height: Val::Px(MINIMAP_UI_SIZE_PX),
             border: UiRect::all(Val::Px(1.0)),
+            // The map image is sized and offset to put the visible world window
+            // on this box, so at any zoom but fit it overhangs the widget.
+            overflow: Overflow::clip(),
             ..default()
         },
         BackgroundColor(theme::MAP_BACKING),
@@ -459,69 +462,90 @@ pub fn update_minimap_image_source(
     }
 }
 
-pub fn update_minimap_crop_rect(
+pub fn update_minimap_image_placement(
     state: Res<MinimapState>,
     mode: Res<MinimapMode>,
     view: Res<MinimapView>,
-    zoom: Res<MinimapZoom>,
-    images: Res<Assets<Image>>,
-    mut q: Query<&mut ImageNode, With<MinimapImage>>,
+    mut q: Query<&mut Node, With<MinimapImage>>,
 ) {
-    let Ok(mut image_node) = q.single_mut() else {
+    let Ok(mut node) = q.single_mut() else {
         return;
     };
-
-    if zoom.radius_yalms.is_none() {
-        if image_node.rect.is_some() {
-            image_node.rect = None;
-        }
-        return;
-    }
-    let Some(visible) = view.visible_aabb else {
-        return;
-    };
-    let resolved = state.resolved_mode(*mode);
-    let (handle, full_aabb) = match resolved {
-        MinimapMode::Retail => (state.retail_image.as_ref(), state.retail_aabb),
-        MinimapMode::TopDown => (state.topdown_image.as_ref(), state.aabb),
+    let full_aabb = match state.resolved_mode(*mode) {
+        MinimapMode::Retail => state.retail_aabb,
+        MinimapMode::TopDown => state.aabb,
         MinimapMode::Auto => return,
     };
-    let (Some(handle), Some(full)) = (handle, full_aabb) else {
-        return;
-    };
-    let Some(image) = images.get(handle) else {
-        return;
-    };
-    let size = image.size_f32();
-    let Some(pixel_rect) = crop_pixel_rect(full, visible, size) else {
-        return;
-    };
-
-    if image_node.rect != Some(pixel_rect) {
-        image_node.rect = Some(pixel_rect);
-    }
+    let placement = view
+        .visible_aabb
+        .zip(full_aabb)
+        .and_then(|(visible, full)| MapImagePlacement::of(full, visible))
+        .unwrap_or(MapImagePlacement::FILL);
+    placement.apply(&mut node);
 }
 
-/// Pixel sub-rect of a full-zone map image that `visible` covers, for
-/// `ImageNode.rect` cropping. Shared by the minimap widget and the full Map
-/// screen so both crop the same DAT image identically.
-pub fn crop_pixel_rect(full: MinimapAabb, visible: MinimapAabb, image_size: Vec2) -> Option<Rect> {
-    let full_span = full.max - full.min;
-    if full_span.x.abs() < f32::EPSILON || full_span.y.abs() < f32::EPSILON {
-        return None;
+/// Where a full-zone map image sits inside a map surface, as percentages of that
+/// surface's own box.
+///
+/// The image is *placed*, not cropped: a crop has to clamp at the image edge
+/// while the marker overlay maps world→UV against the unclamped visible window,
+/// so the two disagree by however far the window overhangs the map — which is
+/// exactly what happens near a zone border at low zoom (kuluu-5al7). Scaling and
+/// offsetting the whole image cannot drift, and the overhang clips against the
+/// surface instead.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MapImagePlacement {
+    pub left_pct: f32,
+    pub top_pct: f32,
+    pub width_pct: f32,
+    pub height_pct: f32,
+}
+
+impl MapImagePlacement {
+    /// The whole image stretched over the whole surface — what a fit-to-zone
+    /// view wants, and the safe answer when there is no calibrated AABB to
+    /// place against.
+    pub const FILL: Self = Self {
+        left_pct: 0.0,
+        top_pct: 0.0,
+        width_pct: 100.0,
+        height_pct: 100.0,
+    };
+
+    pub fn of(full: MinimapAabb, visible: MinimapAabb) -> Option<Self> {
+        let visible_span = visible.max - visible.min;
+        if visible_span.x.abs() < f32::EPSILON || visible_span.y.abs() < f32::EPSILON {
+            return None;
+        }
+        let full_span = full.max - full.min;
+        let offset = (full.min - visible.min) / visible_span;
+        let scale = full_span / visible_span;
+        Some(Self {
+            left_pct: offset.x * 100.0,
+            top_pct: offset.y * 100.0,
+            width_pct: scale.x * 100.0,
+            height_pct: scale.y * 100.0,
+        })
     }
-    let uv_min = Vec2::new(
-        (visible.min.x - full.min.x) / full_span.x,
-        (visible.min.y - full.min.y) / full_span.y,
-    );
-    let uv_max = Vec2::new(
-        (visible.max.x - full.min.x) / full_span.x,
-        (visible.max.y - full.min.y) / full_span.y,
-    );
-    Some(Rect {
-        min: (uv_min * image_size).max(Vec2::ZERO),
-        max: (uv_max * image_size).min(image_size),
-    })
+
+    pub fn apply(self, node: &mut Node) {
+        let left = Val::Percent(self.left_pct);
+        let top = Val::Percent(self.top_pct);
+        let width = Val::Percent(self.width_pct);
+        let height = Val::Percent(self.height_pct);
+        if node.left != left {
+            node.left = left;
+        }
+        if node.top != top {
+            node.top = top;
+        }
+        if node.width != width {
+            node.width = width;
+        }
+        if node.height != height {
+            node.height = height;
+        }
+    }
 }
 
 pub fn update_minimap_visibility(
@@ -629,6 +653,81 @@ mod tests {
 
         let inside = aabb.world_to_uv_or_offscreen(Vec3::new(5.0, 0.0, 5.0));
         assert_eq!(inside, Some(Vec2::new(0.5, 0.5)));
+    }
+
+    /// The whole point of placing rather than cropping: wherever the image sits,
+    /// a world point lands on the same fraction of the surface as the marker
+    /// overlay puts its dot (kuluu-5al7).
+    #[test]
+    fn a_placed_image_agrees_with_the_marker_mapping_over_the_map_edge() {
+        let full = MinimapAabb {
+            min: Vec2::new(-300.0, -300.0),
+            max: Vec2::new(300.0, 300.0),
+        };
+        // Player hard against the south-west corner, zoomed out far enough that
+        // the window overhangs the map on two sides.
+        let visible = MinimapAabb {
+            min: Vec2::new(-480.0, -420.0),
+            max: Vec2::new(-80.0, -20.0),
+        };
+        let placement = MapImagePlacement::of(full, visible).expect("non-degenerate window");
+
+        for world in [
+            Vec3::new(-290.0, 0.0, -290.0),
+            Vec3::new(-120.0, 0.0, -300.0),
+            Vec3::new(-200.0, 0.0, -100.0),
+        ] {
+            let marker_uv = visible.world_to_uv(world);
+            let in_image = full.world_to_uv(world);
+            let on_surface = Vec2::new(
+                (placement.left_pct + in_image.x * placement.width_pct) / 100.0,
+                (placement.top_pct + in_image.y * placement.height_pct) / 100.0,
+            );
+            assert!(
+                (marker_uv - on_surface).length() < 1e-4,
+                "{world:?}: marker at {marker_uv:?} but the map feature at {on_surface:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_fit_to_zone_view_places_the_image_over_the_whole_surface() {
+        let full = MinimapAabb {
+            min: Vec2::new(-300.0, -100.0),
+            max: Vec2::new(300.0, 500.0),
+        };
+        assert_eq!(
+            MapImagePlacement::of(full, full),
+            Some(MapImagePlacement::FILL)
+        );
+    }
+
+    #[test]
+    fn a_degenerate_window_has_no_placement() {
+        let full = MinimapAabb {
+            min: Vec2::ZERO,
+            max: Vec2::splat(10.0),
+        };
+        let degenerate = MinimapAabb {
+            min: Vec2::ZERO,
+            max: Vec2::new(0.0, 10.0),
+        };
+        assert_eq!(MapImagePlacement::of(full, degenerate), None);
+    }
+
+    #[test]
+    fn zooming_in_scales_the_image_past_the_surface() {
+        let full = MinimapAabb {
+            min: Vec2::splat(-100.0),
+            max: Vec2::splat(100.0),
+        };
+        let visible = MinimapAabb {
+            min: Vec2::splat(-25.0),
+            max: Vec2::splat(25.0),
+        };
+        let placement = MapImagePlacement::of(full, visible).unwrap();
+        assert!((placement.width_pct - 400.0).abs() < 1e-3);
+        assert!((placement.left_pct + 150.0).abs() < 1e-3);
     }
 
     #[test]

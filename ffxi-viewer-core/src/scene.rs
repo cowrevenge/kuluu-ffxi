@@ -502,7 +502,7 @@ pub fn pick_mob_material(
     }
 }
 
-fn heading_to_quat(heading: u8) -> Quat {
+pub(crate) fn heading_to_quat(heading: u8) -> Quat {
     let angle = (heading as f32) * std::f32::consts::TAU / 256.0;
     Quat::from_rotation_y(-angle)
 }

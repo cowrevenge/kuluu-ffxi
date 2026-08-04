@@ -1,17 +1,16 @@
 use std::collections::HashMap;
 
 use bevy::prelude::*;
-use bevy::ui::UiTransform;
 use ffxi_viewer_wire::SceneSnapshot;
 
-use crate::camera::ChaseCamera;
 use crate::components::{InGameEntity, IsSelf, WorldEntity};
 use crate::hud::style::{self, theme};
 use crate::hud::zone_flash::ZoneNameResolver;
 use crate::input_mode::{InputMode, MenuKind};
 use crate::lock_on::LockOn;
-use crate::minimap::overlay::{self, MarkerFilters, MinimapDot};
-use crate::minimap::{crop_pixel_rect, MinimapMode, MinimapState};
+use crate::minimap::overlay::{self, MarkerContext, MarkerFilters, MarkerNode, MinimapDot};
+use crate::minimap::{MapImagePlacement, MinimapMode, MinimapState};
+use crate::nameplate_color::NameColorTable;
 use crate::scene::Target;
 use crate::snapshot::SceneState;
 
@@ -460,6 +459,9 @@ pub(crate) fn spawn_map_screen(mut commands: Commands, mut images: ResMut<Assets
                 width: Val::Percent(100.0),
                 height: Val::Percent(100.0),
                 display: Display::None,
+                // The map image is sized and offset to put the visible world
+                // window on this box, so at any zoom but fit it overhangs it.
+                overflow: Overflow::clip(),
                 ..default()
             },
             ZIndex(style::WINDOW_Z - 2),
@@ -507,6 +509,7 @@ pub(crate) fn spawn_map_screen(mut commands: Commands, mut images: ResMut<Assets
                         },
                         border: UiRect::all(Val::Px(TRACKED_MARKER_RING_PX)),
                         display: Display::None,
+                        border_radius: BorderRadius::MAX,
                         ..default()
                     },
                     BackgroundColor(TRACKED_MARKER_COLOR),
@@ -547,6 +550,7 @@ pub(crate) fn spawn_map_screen(mut commands: Commands, mut images: ResMut<Assets
                                 border: UiRect::all(Val::Px(1.0)),
                                 flex_direction: FlexDirection::Column,
                                 display: Display::None,
+                                border_radius: BorderRadius::MAX,
                                 ..default()
                             },
                             BackgroundColor(PLACED_MARKER_COLOR),
@@ -696,55 +700,41 @@ pub(crate) fn update_map_screen_image(
     state: Res<MinimapState>,
     minimap_mode: Res<MinimapMode>,
     map_view: Res<MapView>,
-    images: Res<Assets<Image>>,
-    mut q: Query<&mut ImageNode, With<MapScreenImage>>,
+    mut q: Query<(&mut ImageNode, &mut Node), With<MapScreenImage>>,
 ) {
     if !map_open(&mode) {
         return;
     }
-    let Ok(mut image_node) = q.single_mut() else {
+    let Ok((mut image_node, mut node)) = q.single_mut() else {
         return;
     };
     let live_zone = scene_state.snapshot.zone_id.unwrap_or(0);
-    // Change Map preview: show the whole foreign map (no live-minimap crop).
+    // Change Map preview: show the whole foreign map, unzoomed.
     if map_state.viewed_override(live_zone).is_some() {
         if let Some(h) = viewed.image.clone() {
             if image_node.image != h {
                 image_node.image = h;
             }
         }
-        if image_node.rect.is_some() {
-            image_node.rect = None;
-        }
+        MapImagePlacement::FILL.apply(&mut node);
         return;
     }
-    let resolved = state.resolved_mode(*minimap_mode);
-    let (handle, full_aabb) = match resolved {
+    let (handle, full_aabb) = match state.resolved_mode(*minimap_mode) {
         MinimapMode::Retail => (state.retail_image.clone(), state.retail_aabb),
         MinimapMode::TopDown => (state.topdown_image.clone(), state.aabb),
         MinimapMode::Auto => (None, None),
     };
-    if let Some(h) = handle.clone() {
+    if let Some(h) = handle {
         if image_node.image != h {
             image_node.image = h;
         }
     }
-    // Crop only when the map is zoomed in; fit (zoom_radius None) shows the whole
-    // image so the Map opens on the full zone (kuluu-bi1s.3).
-    let rect = match (
-        map_state.zoom_radius,
-        map_view.visible_aabb,
-        full_aabb,
-        handle,
-    ) {
-        (Some(_), Some(visible), Some(full), Some(h)) => images
-            .get(&h)
-            .and_then(|img| crop_pixel_rect(full, visible, img.size_f32())),
-        _ => None,
-    };
-    if image_node.rect != rect {
-        image_node.rect = rect;
-    }
+    let placement = map_view
+        .visible_aabb
+        .zip(full_aabb)
+        .and_then(|(visible, full)| MapImagePlacement::of(full, visible))
+        .unwrap_or(MapImagePlacement::FILL);
+    placement.apply(&mut node);
 }
 
 /// Read-only marker inputs bundled so `update_map_screen_markers` stays under
@@ -753,8 +743,8 @@ pub(crate) fn update_map_screen_image(
 pub(crate) struct MarkerInputs<'w> {
     target: Res<'w, Target>,
     lock_on: Res<'w, LockOn>,
-    chase: Res<'w, ChaseCamera>,
     filters: Res<'w, MarkerFilters>,
+    name_colors: Res<'w, NameColorTable>,
     map_state: Res<'w, MapScreenState>,
 }
 
@@ -779,8 +769,8 @@ pub(crate) fn update_map_screen_markers(
             Without<MapPlaceCursor>,
         ),
     >,
-    mut q_dot_node: Query<
-        (&mut Node, &mut BackgroundColor),
+    mut q_dot: Query<
+        MarkerNode,
         (
             With<MinimapDot>,
             Without<MapScreenRoot>,
@@ -788,7 +778,6 @@ pub(crate) fn update_map_screen_markers(
             Without<MapPlaceCursor>,
         ),
     >,
-    mut q_marker_transform: Query<&mut UiTransform, With<MinimapDot>>,
     mut tracked_q: Query<
         &mut Node,
         (
@@ -864,24 +853,23 @@ pub(crate) fn update_map_screen_markers(
     let (Some(aabb), Ok(overlay_layer)) = (map_view.visible_aabb, q_overlay_layer.single()) else {
         return;
     };
-    let self_char_id = snap.self_char_id.unwrap_or(0);
-    let party_ids = overlay::party_id_set(&scene_state);
+    let ctx = MarkerContext::new(
+        &scene_state,
+        &markers.target,
+        &markers.lock_on,
+        &markers.filters,
+        &markers.name_colors,
+    );
 
     overlay::sync_marker_layer(
         aabb,
         overlay_layer,
-        self_char_id,
-        &markers.target,
-        &markers.lock_on,
-        markers.chase.yaw,
-        &party_ids,
-        &markers.filters,
+        &ctx,
         &q_self,
         &q_transform,
         &mut dots.by_id,
         &mut commands,
-        &mut q_dot_node,
-        &mut q_marker_transform,
+        &mut q_dot,
     );
 
     if let (Ok(mut label), Ok(self_t)) = (grid_q.single_mut(), q_self.single()) {

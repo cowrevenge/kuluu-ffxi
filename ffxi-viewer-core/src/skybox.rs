@@ -158,7 +158,7 @@ mod frustum_shell_tests {
                  so world geometry can sort behind it"
             );
         }
-        assert!(SKY_SORT_DEPTH_STARS < SKY_SORT_DEPTH_CLOUDS);
+        const { assert!(SKY_SORT_DEPTH_STARS < SKY_SORT_DEPTH_CLOUDS) };
     }
 }
 

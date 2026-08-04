@@ -253,7 +253,6 @@ pub fn spawn_status_ribbon(mut commands: Commands, mut images: ResMut<Assets<Ima
                         TextLayout {
                             justify: Justify::Center,
                             linebreak: LineBreak::NoWrap,
-                            ..default()
                         },
                         style::text_font(TIMER_FONT_PX),
                         TextColor(theme::TITLE),

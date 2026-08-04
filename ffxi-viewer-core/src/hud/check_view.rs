@@ -226,7 +226,6 @@ fn spawn_text(p: &mut ChildSpawnerCommands, role: CheckRole, size: f32, color: C
 
 /// Everything the window renders, resolved once per update from the snapshot.
 struct CheckModel<'a> {
-    name: String,
     check: Option<&'a ffxi_viewer_wire::CheckResult>,
     message: Option<&'a str>,
     /// The target's linkshell pearl colour, for tinting their linkshell name.
@@ -270,7 +269,6 @@ fn model<'a>(snap: &'a ffxi_viewer_wire::SceneSnapshot, target_id: u32) -> Check
         .map(|m| m.message.trim())
         .filter(|m| !m.is_empty());
     CheckModel {
-        name,
         check: snap.check.as_ref().filter(|c| c.target_id == target_id),
         message,
         linkshell_color,

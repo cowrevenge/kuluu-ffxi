@@ -3,7 +3,7 @@
 //! Retail builds the plate as one string — icon markers, then a space, then the
 //! name — and the icon glyphs live in the same `font    fontshp ` shape group
 //! as the letters, at codes 0x8E..0xB1, cropped off the `menu    ustatshd`
-//! sheet. research/XIClient/src/XIClient/source/World/Actor/ActorTelemetry.cpp:347
+//! sheet. research/XIClient/.../ActorTelemetry.cpp
 //! `BuildTelemetryActorName` assembles the prefix; :204
 //! `GetPrimaryActorNameMarker` and :296 `GetSecondaryActorNameMarker` choose it.
 
@@ -11,7 +11,7 @@ use ffxi_viewer_wire::{CharFlags, Entity, EntityKind};
 
 /// Glyph codes retail uses for the nameplate icons, indexed into the shape
 /// group as `code - FIRST_GLYPH_CODE`
-/// (research/XIClient/.../CXiActorNameDraw.cpp:139).
+/// (`GetActorNameGlyphData`).
 pub mod glyph {
     /// PlayOnelineFlag — the PlayOnline icon.
     pub const PLAY_ONLINE: u8 = 0x8E;
@@ -20,7 +20,7 @@ pub mod glyph {
     /// LfgFlag — seeking party.
     pub const SEEKING: u8 = 0x91;
     /// The linkshell pearl. The one icon retail tints, using the actor's
-    /// linkshell colour (CXiActorNameDraw.cpp:404-413).
+    /// linkshell colour (`DrawActorNameText`).
     pub const LINKSHELL: u8 = 0x92;
     pub const BAZAAR: u8 = 0x9C;
     /// AutoPartyFlag — accepting invites automatically.
@@ -28,22 +28,22 @@ pub mod glyph {
     /// LfgMasterFlag — the job-master star, drawn as a pair with its tail.
     pub const JOB_MASTER: u8 = 0xAC;
     /// The half-scale companion glyph retail appends after JOB_MASTER
-    /// (CXiActorNameDraw.cpp:301-304).
+    /// (`DrawActorNameText`).
     pub const JOB_MASTER_TAIL: u8 = 0xAD;
 }
 
-/// research/XIClient/.../CXiActorNameDraw.cpp:139 — the shape group starts at
+/// `GetActorNameGlyphData` — the shape group starts at
 /// the space character.
 pub const FIRST_GLYPH_CODE: u8 = 0x20;
 
-/// research/XIClient/.../ActorTelemetry.cpp:329 — retail's GmLevel marker
+/// `GetPrimaryActorNameMarker` — retail's GmLevel marker
 /// table, verbatim. Index 0 is unreachable: the lookup is guarded on a non-zero
 /// level, so a level-0 actor keeps whatever marker it already had.
 const GM_MARKERS: [u8; 8] = [0x93, 0x93, 0x93, 0x95, 0x96, 0x97, 0x98, 0x99];
 
 /// The secondary marker slot only fills for an actor in the allegiance range
 /// retail treats as a ballista/besieged combatant.
-/// research/XIClient/.../ActorTelemetry.cpp:300-316.
+/// `GetSecondaryActorNameMarker`.
 const SECONDARY_ALLEGIANCE_MIN: u8 = 2;
 const SECONDARY_ALLEGIANCE_MAX: u8 = 0x63;
 const SECONDARY_ALLEGIANCE_GAP: std::ops::RangeInclusive<u8> = 0x28..=0x2B;
@@ -58,7 +58,7 @@ const SECONDARY_ALLEGIANCE_GAP: std::ops::RangeInclusive<u8> = 0x28..=0x2B;
 /// Only players carry icons. On `CHAR_NPC` (0x0E) retail clears the flags every
 /// one of these markers reads — LFG, auto-party, anonymous, PlayOnline,
 /// linkshell and linkdead are all forced to 0
-/// (research/XIClient/.../0x00E.cpp:236-244) — so NPCs, mobs, pets and trusts
+/// (research/XIClient/.../0x00E.cpp `RecvCharNpc`) — so NPCs, mobs, pets and trusts
 /// draw a bare name.
 pub fn nameplate_markers(entity: &Entity) -> Vec<u8> {
     let mut markers = Vec::new();
@@ -80,14 +80,14 @@ pub fn nameplate_markers(entity: &Entity) -> Vec<u8> {
     markers
 }
 
-/// `GetPrimaryActorNameMarker` (ActorTelemetry.cpp:204), restricted to the
+/// `GetPrimaryActorNameMarker`, restricted to the
 /// states the snapshot carries. The ballista/besieged markers (0x9E..0xA7), the
 /// Monstrosity marker and the pet/trust-link markers keyed off `AUDIT_130` need
 /// a live allegiance, Monstrosity or pet-packet context we do not decode, so
 /// they are omitted rather than guessed.
 fn primary_marker(flags: &CharFlags) -> Option<u8> {
     // The seed: an actor in a linkshell starts with the pearl in the primary
-    // slot, and every check below may overwrite it (ActorTelemetry.cpp:356-358).
+    // slot, and every check below may overwrite it (`BuildTelemetryActorName`).
     let seed = flags.linkshell.then_some(glyph::LINKSHELL);
 
     if flags.play_online {
@@ -119,7 +119,7 @@ fn primary_marker(flags: &CharFlags) -> Option<u8> {
     seed
 }
 
-/// `GetSecondaryActorNameMarker` (ActorTelemetry.cpp:296). Retail bails out of
+/// `GetSecondaryActorNameMarker`. Retail bails out of
 /// the whole slot unless the actor is in the ballista/besieged allegiance range
 /// (or is a pet, which rides a packet we do not decode), so ordinary play draws
 /// one icon, not two.
@@ -242,8 +242,8 @@ mod tests {
     }
 
     /// `Flags2.GmIconFlag` is retail's "let the other icons show alongside the
-    /// GM name colour" switch (vendor/server/src/map/packets/char_update.cpp:333),
-    /// so it suppresses the GM glyph itself (ActorTelemetry.cpp:313).
+    /// GM name colour" switch (char_update.cpp `CCharUpdatePacket::updateWith`),
+    /// so it suppresses the GM glyph itself (`GetPrimaryActorNameMarker`).
     #[test]
     fn the_gm_icon_flag_suppresses_the_gm_marker() {
         let mut e = pc();

@@ -2,8 +2,8 @@
 //! `font    fontshp ` shape group and kept as raw RGBA so they can be composited
 //! straight into the billboard texture.
 //!
-//! research/XIClient/src/XIClient/source/Rendering/Active/CXiActorNameDraw.cpp:130
-//! `GetActorNameGlyphData` — the on-screen size of a glyph is its quad's vertex
+//! research/XIClient/.../CXiActorNameDraw.cpp `GetActorNameGlyphData` — the
+//! on-screen size of a glyph is its quad's vertex
 //! span, not the texture crop, and the crop comes off a separate sheet.
 
 use bevy::prelude::*;
@@ -19,12 +19,12 @@ const FONT_SHAPE_GROUP: &str = "font    fontshp ";
 pub struct IconGlyph {
     pub sprite: UiSprite,
 
-    /// CXiActorNameDraw.cpp:160-161 — the drawn size is the quad's vertex span
+    /// `GetActorNameGlyphData` — the drawn size is the quad's vertex span
     /// less one, in glyph units.
     pub width_units: f32,
     pub height_units: f32,
 
-    /// CXiActorNameDraw.cpp:146-149 — the quad's top-left bound, which offsets
+    /// `GetActorNameGlyphData` — the quad's top-left bound, which offsets
     /// the glyph against the text line.
     pub x_offset_units: f32,
     pub y_offset_units: f32,
@@ -76,7 +76,7 @@ impl NameplateIcons {
                 .get(index)
                 .and_then(|e| e.components.first())?;
             let [top_left, top_right, bottom_left, _] = component.positions;
-            // CXiActorNameDraw.cpp:160-161 — the drawn box is the vertex span
+            // `GetActorNameGlyphData` — the drawn box is the vertex span
             // less one.
             Some((
                 f32::from(top_right.0 - top_left.0 - 1),

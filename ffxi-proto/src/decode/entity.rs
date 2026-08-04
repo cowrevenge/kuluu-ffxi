@@ -131,15 +131,14 @@ impl PosHead {
 
 /// The `Flags1`/`Flags2`/`Flags3` bitfields shared by `CHAR_PC` (0x0D) and
 /// `CHAR_NPC` (0x0E), named per
-/// `vendor/server/src/map/packets/char_update.cpp:61-134` (`flags1_t`,
-/// `flags2_t`, `flags3_t`); `entity_update.cpp:67-140` declares the same three
-/// layouts for 0x0E. Only meaningful when the packet's General send-flag bit
+/// `vendor/server/src/map/packets/char_update.cpp` (`flags1_t`, `flags2_t`,
+/// `flags3_t`); `entity_update.cpp` declares the same three layouts for 0x0E. Only meaningful when the packet's General send-flag bit
 /// (0x04) is set — the server refreshes the words in that block alone.
 ///
 /// Drives the retail nameplate: colour selection
-/// (research/XIClient/.../ActorTelemetry.cpp:1560 `NameColorSet`) and the icon
+/// (research/XIClient/.../ActorTelemetry.cpp `NameColorSet`) and the icon
 /// markers prefixed to the name
-/// (research/XIClient/.../ActorTelemetry.cpp:204 `GetPrimaryActorNameMarker`).
+/// (research/XIClient/.../ActorTelemetry.cpp `GetPrimaryActorNameMarker`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct CharFlags {
     pub monster: bool,
@@ -155,7 +154,7 @@ pub struct CharFlags {
 
     /// `Flags2.r/g/b`: the equipped linkshell's pearl colour, already expanded
     /// from the 4-bit Exdata channel by the server as `(c << 4) + 15`
-    /// (char_update.cpp:325-327). Meaningless unless `linkshell` is set.
+    /// (`CCharUpdatePacket::updateWith`). Meaningless unless `linkshell` is set.
     pub linkshell_color: [u8; 3],
 
     pub charm: bool,
@@ -166,7 +165,8 @@ pub struct CharFlags {
     pub pet: bool,
 
     /// `Flags3.BallistaTeam`: LSB writes `PChar->allegiance` here
-    /// (char_update.cpp:344, entity_update.cpp:356). ALLEGIANCE_TYPE, so 0 =
+    /// (`CCharUpdatePacket::updateWith`, `CEntityUpdatePacket::updateWith`).
+    /// ALLEGIANCE_TYPE, so 0 =
     /// MOB, 1 = PLAYER, 2..6 = the nation/team values that select the ballista
     /// name colours and markers.
     pub allegiance: u8,
@@ -215,7 +215,7 @@ fn field(word: u32, shift: u32, width: u32) -> u32 {
     word >> shift & ((1 << width) - 1)
 }
 
-// vendor/server/src/map/packets/char_update.cpp:61-90
+// vendor/server/src/map/packets/char_update.cpp `flags1_t`
 mod flags1 {
     pub const MONSTER: u32 = 0;
     pub const LFG: u32 = 11;
@@ -230,7 +230,7 @@ mod flags1 {
     pub const BAZAAR: u32 = 31;
 }
 
-// vendor/server/src/map/packets/char_update.cpp:92-106
+// vendor/server/src/map/packets/char_update.cpp `flags2_t`
 mod flags2 {
     pub const LS_R: u32 = 0;
     pub const LS_G: u32 = 8;
@@ -241,7 +241,7 @@ mod flags2 {
     pub const AUTO_PARTY: u32 = 31;
 }
 
-// vendor/server/src/map/packets/char_update.cpp:108-134
+// vendor/server/src/map/packets/char_update.cpp `flags3_t`
 mod flags3 {
     pub const TRUST: u32 = 0;
     pub const LFG_MASTER: u32 = 1;
@@ -653,7 +653,7 @@ mod char_flags_tests {
         }
     }
 
-    /// char_update.cpp:325-327 packs the pearl colour into the low three bytes
+    /// `CCharUpdatePacket::updateWith` packs the pearl colour into the low three bytes
     /// of Flags2 as `(Exdata channel << 4) + 15`.
     #[test]
     fn linkshell_color_reads_the_low_three_bytes_of_flags2() {
@@ -686,7 +686,7 @@ mod char_flags_tests {
 
     #[test]
     fn allegiance_is_the_ballista_team_byte() {
-        // ALLEGIANCE_TYPE::WINDURST (vendor/server/src/map/entities/baseentity.h:161)
+        // ALLEGIANCE_TYPE::WINDURST (vendor/server/src/map/entities/baseentity.h)
         const WINDURST: u8 = 4;
         let flags = CharFlags::from_pos_head(&head_with(
             0,

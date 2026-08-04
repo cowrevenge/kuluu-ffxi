@@ -2,8 +2,8 @@
 //! retail menu DAT, plus the per-actor index selection retail runs every idle
 //! tick.
 //!
-//! research/XIClient/src/XIClient/source/World/Actor/ActorTelemetry.cpp:420
-//! `InitializeNameColors` (table load) and :1560 `NameColorSet` (selection).
+//! research/XIClient/.../ActorTelemetry.cpp — `InitializeNameColors` (table
+//! load) and `NameColorSet` (selection).
 
 use bevy::prelude::*;
 use ffxi_dat::ui_element::find_ui_element_group;
@@ -13,7 +13,7 @@ use crate::ui_element_atlas::UiElementDatRoot;
 
 const NCOL_GROUP: &str = "menu    ncol    ";
 
-// research/XIClient/src/XIClient/include/World/Actor/ActorTelemetry.h:59 — retail
+// research/XIClient/.../ActorTelemetry.h `NAME_COLOR_COUNT` — retail
 // reads only the first 23 quads of the group even though the DAT ships more.
 pub const NAME_COLOR_COUNT: usize = 23;
 
@@ -40,23 +40,23 @@ pub mod ncol {
     pub const DEAD: usize = 9;
 }
 
-// research/XIClient/src/XIClient/source/World/Actor/ActorTelemetry.cpp:36 —
+// research/XIClient/.../ActorTelemetry.cpp `NameColorIndicesByState` —
 // GmLevel indexes this from 3 upward; levels 0..2 fall through to the normal
 // selection instead of taking a GM colour.
 const GM_COLOR_INDICES: [usize; 8] = [10, 10, 11, 12, 13, 14, 15, 16];
 const MIN_GM_LEVEL: u8 = 3;
 
 /// ALLEGIANCE_TYPE values that pick a nation/team colour, and the `ncol` row
-/// each one takes. vendor/server/src/map/entities/baseentity.h:155 names the
-/// allegiances; ActorTelemetry.cpp:1618-1633 maps them to rows.
+/// each one takes. vendor/server/src/map/entities/baseentity.h `ALLEGIANCE_TYPE`
+/// names the allegiances; `NameColorSet` maps them to rows.
 const ALLEGIANCE_COLOR_INDICES: [(u8, usize); 5] = [(2, 18), (3, 19), (4, 20), (5, 21), (6, 22)];
 
-// ActorTelemetry.cpp:1590 gates the whole allegiance block on this range.
+// `NameColorSet` gates the whole allegiance block on this range.
 const ALLEGIANCE_COLORED_MIN: u8 = 2;
 const ALLEGIANCE_COLORED_MAX: u8 = 99;
 
 /// The nameplate's diffuse colour is drawn through `D3DTOP_MODULATE2X`
-/// (research/XIClient/.../CXiActorNameDraw.cpp:620), so the 0x7F-based table
+/// (`CXiActorNameDraw::OnMove`), so the 0x7F-based table
 /// values reach the screen doubled.
 const MODULATE_2X: f32 = 2.0;
 
@@ -86,7 +86,7 @@ impl NameColorTable {
     }
 
     /// Retail's alliance-but-other-party claim colour: the average of the two
-    /// claim rows. ActorTelemetry.cpp:1706 halves and adds the packed D3D
+    /// claim rows. `NameColorSet` halves and adds the packed D3D
     /// colours, which is a per-channel mean.
     pub fn blend(&self, a: usize, b: usize) -> Option<Color> {
         let (a, b) = (self.color(a)?.to_srgba(), self.color(b)?.to_srgba());
@@ -119,7 +119,7 @@ impl NameColorTable {
 }
 
 /// One menu-shape quad vertex colour → the drawn nameplate colour.
-/// research/XIClient/src/XIClient/source/UI/UIShapeQuad.cpp:63-88 nudges every
+/// research/XIClient/.../UIShapeQuad.cpp `ParseFromResource` nudges every
 /// non-saturated RGB channel up by one and rescales partial alpha by 1.5 on
 /// load; `InitializeNameColors` then reads those adjusted values.
 fn quad_color(raw: [u8; 4]) -> Color {
@@ -136,7 +136,7 @@ fn quad_color(raw: [u8; 4]) -> Color {
     )
 }
 
-// research/XIClient/src/XIClient/source/UI/UIShapeQuad.cpp:81
+// research/XIClient/.../UIShapeQuad.cpp `ParseFromResource`
 const ALPHA_LEGACY_SCALE: f32 = 1.5;
 
 /// Everything the colour rule needs about the viewer's own situation.
@@ -153,7 +153,7 @@ impl SelfContext<'_> {
 
     /// The party number every claim is compared against: the local player's.
     /// Retail reads it off the head of its own group list, which is always the
-    /// local player (ActorTelemetry.cpp:1698-1710); our list arrives in server
+    /// local player (`NameColorSet`); our list arrives in server
     /// order, so look the player up by id and only fall back to the head.
     fn own_party_no(&self) -> Option<u8> {
         self.self_id
@@ -181,7 +181,7 @@ impl NameColorChoice {
 }
 
 /// Port of `ActorTelemetry::NameColorSet`
-/// (research/XIClient/src/XIClient/source/World/Actor/ActorTelemetry.cpp:1560),
+/// (research/XIClient/.../ActorTelemetry.cpp `NameColorSet`),
 /// keeping retail's precedence. The branches that need a live event, ballista
 /// or Monstrosity context (the forced `AUDIT_1D8` colour, the `AUDIT_1D0 & 4`
 /// PvP override, the linked-actor inheritance) have no counterpart in the
@@ -244,8 +244,8 @@ pub fn name_color_choice(entity: &Entity, ctx: SelfContext<'_>) -> NameColorChoi
     }
 
     // A mob whose master is a PC — LSB sets CharmFlag for both a summoned pet
-    // and a charmed monster (vendor/server/src/map/packets/entity_update.cpp:392)
-    // — draws in the party colour. ActorTelemetry.cpp:1723.
+    // and a charmed monster (entity_update.cpp `CEntityUpdatePacket::updateWith`)
+    // — draws in the party colour. `NameColorSet`.
     if flags.charm && !flags.pet {
         return Row(ncol::PARTY);
     }
@@ -267,12 +267,13 @@ pub fn name_color_choice(entity: &Entity, ctx: SelfContext<'_>) -> NameColorChoi
 /// (so `MonsterFlag` is really `status & 1`, and 0 for a live mob), and
 /// `ref<uint32>(0x21) = m_flags` covers the rest of `Flags1`, landing `m_flags`
 /// bit 3 exactly on `LfgFlag` — which is why a plain NPC would otherwise draw in
-/// the seeking-party colour. vendor/server/src/map/packets/entity_update.cpp:328-357.
+/// the seeking-party colour. vendor/server/src/map/packets/entity_update.cpp
+/// `CEntityUpdatePacket::updateWith`.
 ///
 /// Retail reaches the same place from the other side: its 0x0E handler *zeroes*
 /// LfgFlag, AutoPartyFlag, AnonymousFlag, PlayOnelineFlag, LinkShellFlag and
 /// LinkDeadFlag rather than reading them off the packet
-/// (research/XIClient/.../0x00E.cpp:236-244).
+/// (research/XIClient/.../0x00E.cpp `RecvCharNpc`).
 ///
 /// `allegiance` (0x29), `charm` (0x27 bit 3), `trust` and `pet` (0x28) survive:
 /// LSB writes those explicitly on 0x0E.
@@ -280,7 +281,7 @@ fn pc_flags_are_real(kind: EntityKind) -> bool {
     matches!(kind, EntityKind::Pc)
 }
 
-/// The claimed-monster block, ActorTelemetry.cpp:1669-1717. A claim only
+/// The claimed-monster block of `NameColorSet`. A claim only
 /// colours something retail treats as a monster.
 fn claim_color(entity: &Entity, ctx: SelfContext<'_>) -> Option<NameColorChoice> {
     // Retail gates this on Flags1.MonsterFlag; that bit is unusable against LSB
@@ -306,12 +307,12 @@ fn claim_color(entity: &Entity, ctx: SelfContext<'_>) -> Option<NameColorChoice>
 
 /// The icon glyphs draw with a neutral diffuse so the sprite's own colours come
 /// through MODULATE2X unchanged; only the linkshell pearl is tinted.
-/// research/XIClient/.../CXiActorNameDraw.cpp:404-413.
+/// research/XIClient/.../CXiActorNameDraw.cpp `DrawActorNameText`.
 pub const ICON_NEUTRAL_DIFFUSE: u8 = 0x80;
 
 /// The pearl tint for an actor's linkshell icon.
-/// research/XIClient/.../ActorTelemetry.cpp:410 stores the packet's r/g/b as
-/// the alternate colour; CXiActorNameDraw.cpp:408-413 draws glyph 0x92 with it.
+/// `BuildTelemetryActorName` stores the packet's r/g/b as the alternate
+/// colour; `DrawActorNameText` draws glyph 0x92 with it.
 pub fn linkshell_tint(flags: &CharFlags) -> Color {
     let [r, g, b] = flags.linkshell_color;
     Color::srgb(
@@ -528,7 +529,7 @@ mod tests {
     #[test]
     fn a_charmed_monster_is_not_given_the_pet_colour() {
         // LSB only sets the triggerable PetFlag bit for TYPE_MOB
-        // (vendor/server/src/map/packets/entity_update.cpp:404), which is how
+        // (entity_update.cpp `CEntityUpdatePacket::updateWith`), which is how
         // retail tells a charmed mob from a summoned pet.
         let mut charmed = entity(EntityKind::Mob, 0x0200_000A);
         charmed.char_flags.charm = true;

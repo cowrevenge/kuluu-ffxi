@@ -54,10 +54,7 @@ pub fn load_zone_map_image(
     rec: &ZoneMapRecord,
     images: &mut Assets<Image>,
 ) -> Option<(Handle<Image>, MinimapAabb)> {
-    let path = dat_root
-        .resolve(rec.file_id)
-        .ok()?
-        .path_under(dat_root);
+    let path = dat_root.resolve(rec.file_id).ok()?.path_under(dat_root);
     let bytes = std::fs::read(&path).ok()?;
     let graphic = scan_graphics(&bytes).max_by_key(|g| g.width * g.height)?;
     let mut image = Image::new(

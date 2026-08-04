@@ -27,7 +27,7 @@ use std::env;
 // all driven by sun_moon_system exactly as ViewerCorePlugin wires them. Lets us
 // tune the daytime sun glow + warm tone deterministically at a fixed --hour.
 use bevy::post_process::bloom::{Bloom, BloomPrefilter};
-use ffxi_viewer_core::graphics::settings::{GraphicsSettings, SkyStyle};
+use ffxi_viewer_core::graphics::settings::GraphicsSettings;
 use ffxi_viewer_core::lens_flare::LensFlarePlugin;
 use ffxi_viewer_core::moon_material::{MoonMaterial, MoonMaterialPlugin};
 use ffxi_viewer_core::skybox::SkyboxPlugin;
@@ -47,13 +47,14 @@ struct P {
     tgt: Vec3,
     fog: bool,
     sky: bool,
-    vanilla_sky: bool,
-    enhanced_sky: bool,
     hour: f32,
     // Reproduce the live client's sun exactly: sun_moon.rs bias values,
     // cascade_config_from_settings(High preset), 4096 shadow map, and the
     // hour-driven sun_direction() instead of the fixed debug sun position.
     client_sun: bool,
+    // LSB weather id driving the weat/<tag> canopy under --sky. None = whatever
+    // an unset CurrentWeather resolves to, i.e. the client's own zone-in default.
+    weather: Option<u16>,
 }
 #[derive(Resource, Default)]
 struct FC(u32);
@@ -77,10 +78,9 @@ fn main() {
         tgt: Vec3::ZERO,
         fog: false,
         sky: false,
-        vanilla_sky: false,
-        enhanced_sky: false,
         hour: 12.0,
         client_sun: false,
+        weather: None,
     };
     let f3 = |a: &[String], i: usize| {
         Vec3::new(
@@ -136,16 +136,6 @@ fn main() {
                 p.sky = true;
                 i += 1;
             }
-            "--vanilla-sky" => {
-                p.sky = true;
-                p.vanilla_sky = true;
-                i += 1;
-            }
-            "--enhanced-sky" => {
-                p.sky = true;
-                p.enhanced_sky = true;
-                i += 1;
-            }
             "--hour" => {
                 p.hour = a[i + 1].parse().unwrap();
                 i += 2;
@@ -153,6 +143,10 @@ fn main() {
             "--client-sun" => {
                 p.client_sun = true;
                 i += 1;
+            }
+            "--weather" => {
+                p.weather = Some(a[i + 1].parse().unwrap());
+                i += 2;
             }
             _ => {
                 i += 1;
@@ -219,38 +213,13 @@ fn main() {
             )
                 .chain(),
         );
-    // spawn_zone_water requires the bevy_water extended-material assets;
-    // without this plugin its param validation panics on any zone load.
-    #[cfg(feature = "enhanced-water")]
-    app.add_plugins(ffxi_viewer_core::water_enhanced::EnhancedWaterPlugin);
-
     // --sky pulls in the real client sky pipeline. spawn_sun_and_moon runs in
     // setup (below); sun_moon_system drives the discs/lights each frame after
     // the weather record is sampled, and LensFlarePlugin chains its own system
     // after sun_moon_system, exactly as ViewerCorePlugin orders them.
-    let (sky, sky_style) = {
-        let p = app.world().resource::<P>();
-        // Default is now Vanilla (retail-faithful painterly sun flare); --sky
-        // renders that default, --enhanced-sky forces the Enhanced realism style.
-        let style = if p.enhanced_sky {
-            SkyStyle::Enhanced
-        } else if p.vanilla_sky {
-            SkyStyle::Vanilla
-        } else {
-            GraphicsSettings::default().sky_style
-        };
-        (p.sky, style)
-    };
+    let sky = app.world().resource::<P>().sky;
     if sky {
-        let settings = GraphicsSettings {
-            sky_style,
-            ..GraphicsSettings::default()
-        };
-        // Derive SkyRealism from the style via the real mapping (the same one
-        // apply_sky_realism_system uses), so the two never drift.
-        let realism = sky_style.sky_realism();
-        app.insert_resource(settings)
-            .insert_resource(realism)
+        app.insert_resource(GraphicsSettings::default())
             .add_plugins(SkyboxPlugin)
             .add_plugins(MoonMaterialPlugin)
             .add_plugins(LensFlarePlugin)
@@ -268,10 +237,19 @@ fn main() {
                     .chain(),
             )
             .add_plugins(ffxi_viewer_core::celestial_particles::CelestialParticlesPlugin)
+            // The weat/<tag> precipitation set, drawn by the same simulator.
+            .add_plugins(ffxi_viewer_core::weather_particles::WeatherParticlesPlugin)
             .init_resource::<VanaSky>()
             .init_resource::<ZoneDirectionalLighting>()
+            // The weat/<tag> cloud canopy + star dome, the layers whose per-generator
+            // fog bit this harness exists to eyeball (kuluu-grbo).
+            .add_plugins(ffxi_viewer_core::zone_clouds::ZoneCloudsPlugin)
             .add_systems(Startup, spawn_celestials)
             .add_systems(Update, sun_moon_system.after(sample_zone_weather));
+        let weather = app.world().resource::<P>().weather;
+        app.insert_resource(ffxi_viewer_core::weather_fx::CurrentWeather(
+            weather.map(ffxi_viewer_wire::Weather::from_lsb),
+        ));
     }
     app.run();
 }

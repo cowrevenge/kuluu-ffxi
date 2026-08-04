@@ -13,6 +13,8 @@ use crate::graphics_settings::GraphicsSettings;
 pub struct ZoneLightConfig {
     pub enabled: bool,
 
+    /// Multiple of the authored-neutral vertex colour above which a vertex counts as
+    /// lamp/brazier glow. See `cluster_overbright`.
     pub overbright_threshold: f32,
 
     pub warm_only: bool,
@@ -81,7 +83,6 @@ fn enqueue_light_scan(
 fn drain_light_scan(
     mut commands: Commands,
     cfg: Res<ZoneLightConfig>,
-    settings: Res<GraphicsSettings>,
     meshes: Res<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     flame: Option<Res<FlameAssets>>,
@@ -89,7 +90,7 @@ fn drain_light_scan(
     q_mesh: Query<(&Mesh3d, Option<&crate::hud::mesh_debug::MmbDebugInfo>)>,
     q_existing: Query<(), With<ZoneLightEmitter>>,
 ) {
-    if !cfg.enabled || !settings.sky_embellishments_enabled() {
+    if !cfg.enabled {
         pending.0.clear();
         return;
     }
@@ -213,9 +214,15 @@ fn cluster_overbright(
 
     let mut cells: HashMap<(i32, i32, i32), (Vec3, Vec3, f32, u32)> = HashMap::new();
 
+    // Vertex colours decode against retail's D3DCOLOR divisor (ffxi_dat::mmb), where the
+    // authored neutral is a half-scale value the shader's MODULATE2X restores to 1.0.
+    // The threshold is a multiple of THAT neutral, so it stays meaningful (and a saved
+    // graphics.json stays valid) independent of the decode scale.
+    let neutral = ffxi_dat::mmb::vertex_color_neutral()[0];
+
     for (c, p) in colors.iter().zip(positions.iter()) {
         let peak = c[0].max(c[1]).max(c[2]);
-        if peak < cfg.overbright_threshold {
+        if peak < cfg.overbright_threshold * neutral {
             continue;
         }
         if cfg.warm_only && c[2] > c[0] {
@@ -251,7 +258,6 @@ fn cluster_overbright(
 fn animate_zone_lights(
     time: Res<Time>,
     cfg: Res<ZoneLightConfig>,
-    settings: Res<GraphicsSettings>,
     vana_clock: Res<crate::vana_time::VanaClock>,
     mut q: Query<(
         &ZoneLightEmitter,
@@ -260,13 +266,13 @@ fn animate_zone_lights(
         &mut Visibility,
     )>,
 ) {
-    // `/lights off` sets cfg.enabled = false; honour it here (not just sky
-    // embellishments) so toggling off immediately darkens and hides existing
-    // emitters instead of leaving them lit until the next zone re-scan. Lamps
-    // also follow the Vana'diel dusk/dawn ramp — lit at night, dark by day.
+    // `/lights off` sets cfg.enabled = false; honour it here so toggling off
+    // immediately darkens and hides existing emitters instead of leaving them lit
+    // until the next zone re-scan. Lamps also follow the Vana'diel dusk/dawn ramp —
+    // lit at night, dark by day.
     let sky = crate::sun_moon::vana_sky_from_clock(&vana_clock);
     let night = crate::zone_point_lights::lamp_night_factor(sky.sun_altitude);
-    let active = cfg.enabled && settings.sky_embellishments_enabled() && night > 0.0;
+    let active = cfg.enabled && night > 0.0;
     let t = time.elapsed_secs();
     for (emitter, mut light, mut xf, mut vis) in &mut q {
         *vis = if active {
@@ -349,15 +355,22 @@ impl Plugin for ZoneLightsPlugin {
 mod tests {
     use super::*;
 
+    // The scan reads decoded MMB vertex colours, so state the fixtures as the authored
+    // bytes and let the shared decode place them — otherwise a decode-scale change
+    // silently moves every fixture relative to the threshold.
+    fn vertex(rgb: [u8; 3]) -> [f32; 4] {
+        ffxi_dat::mmb::vertex_color_to_linear([rgb[0], rgb[1], rgb[2], 255])
+    }
+
     #[test]
     fn warm_overbright_vertex_clusters() {
         let cfg = ZoneLightConfig::default();
 
         let colors = vec![
-            [1.8, 1.2, 0.6, 1.0],
-            [1.7, 1.1, 0.5, 1.0],
-            [0.4, 0.4, 0.4, 1.0],
-            [0.3, 0.6, 1.9, 1.0],
+            vertex([230, 154, 77]),
+            vertex([217, 140, 64]),
+            vertex([51, 51, 51]),
+            vertex([38, 77, 243]),
         ];
         let positions = vec![
             [10.0, 2.0, 5.0],
@@ -381,7 +394,7 @@ mod tests {
             warm_only: false,
             ..Default::default()
         };
-        let colors = vec![[0.3, 0.6, 1.9, 1.0]];
+        let colors = vec![vertex([38, 77, 243])];
         let positions = vec![[0.0, 0.0, 0.0]];
         assert_eq!(cluster_overbright(&colors, &positions, &cfg).len(), 1);
     }
@@ -389,7 +402,8 @@ mod tests {
     #[test]
     fn below_threshold_yields_nothing() {
         let cfg = ZoneLightConfig::default();
-        let colors = vec![[1.0, 0.9, 0.8, 1.0]];
+        // Just under DEFAULT_LIGHT_THRESHOLD x the authored neutral byte 128.
+        let colors = vec![vertex([128, 115, 102])];
         let positions = vec![[0.0, 0.0, 0.0]];
         assert!(cluster_overbright(&colors, &positions, &cfg).is_empty());
     }

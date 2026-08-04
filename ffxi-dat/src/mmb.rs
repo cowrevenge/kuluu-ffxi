@@ -148,6 +148,32 @@ pub struct MmbVertex {
     pub uv: [f32; 2],
 }
 
+// research/XIClient Rendering/Direct3D8Manager.cpp:393,395 — the MMB vertex colour reaches
+// fixed-function T&L as D3DMCS_COLOR1, i.e. a D3DCOLOR, so its natural scale is byte/255 and
+// the stage-0 MODULATE2X (ZoneRenderer.cpp:2453) lives in the shader, not in this decode.
+pub const VERTEX_COLOR_DIVISOR: f32 = u8::MAX as f32;
+// ZoneRenderer.cpp:2456 pairs that MODULATE2X with an ALPHAOP of MODULATE4X, so the alpha
+// channel carries one extra doubling. `zone_texture::ffxi_alpha_remap` supplies the other,
+// which is why alpha alone normalises against a half-scale divisor.
+pub const VERTEX_ALPHA_DIVISOR: f32 = VERTEX_COLOR_DIVISOR / 2.0;
+
+/// Neutral (identity) vertex colour: retail authors the unshaded MMB vertex at byte 128, so a
+/// generated mesh that wants to defer entirely to its texture/tint must use this value.
+pub const VERTEX_COLOR_NEUTRAL_BYTE: u8 = 128;
+
+pub fn vertex_color_to_linear(rgba: [u8; 4]) -> [f32; 4] {
+    [
+        rgba[0] as f32 / VERTEX_COLOR_DIVISOR,
+        rgba[1] as f32 / VERTEX_COLOR_DIVISOR,
+        rgba[2] as f32 / VERTEX_COLOR_DIVISOR,
+        rgba[3] as f32 / VERTEX_ALPHA_DIVISOR,
+    ]
+}
+
+pub fn vertex_color_neutral() -> [f32; 4] {
+    vertex_color_to_linear([VERTEX_COLOR_NEUTRAL_BYTE; 4])
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct MmbSubRecord<'a> {
     pub offset: usize,
@@ -854,5 +880,25 @@ mod tests {
         assert!((f0 + 46.73).abs() < 0.1, "f0 was {f0}");
         assert!((f1 - 25.27).abs() < 0.1, "f1 was {f1}");
         assert!((f2 + 61.67).abs() < 0.1, "f2 was {f2}");
+    }
+
+    #[test]
+    fn neutral_vertex_colour_is_the_authored_byte_128() {
+        let n = vertex_color_neutral();
+        assert_eq!(n, vertex_color_to_linear([128, 128, 128, 128]));
+        // Measured over the user's retail install (zone DATs 100/116/200/202/209/230): the
+        // per-channel median AND p90 of every MMB vertex colour is exactly 128, the D3DCOLOR
+        // neutral. Under the D3DCOLOR divisor that is a half-scale RGB the stage-0 MODULATE2X
+        // restores to 1.0, and a fully opaque alpha.
+        assert!((n[0] - 0.5).abs() < 0.01, "neutral rgb was {}", n[0]);
+        assert!(n[3] >= 1.0, "neutral alpha was {}", n[3]);
+    }
+
+    #[test]
+    fn vertex_colour_alpha_carries_one_of_the_two_modulate4x_doublings() {
+        assert_eq!(VERTEX_ALPHA_DIVISOR * 2.0, VERTEX_COLOR_DIVISOR);
+        let full = vertex_color_to_linear([255, 255, 255, 255]);
+        assert_eq!(full[0], 1.0);
+        assert_eq!(full[3], 2.0);
     }
 }

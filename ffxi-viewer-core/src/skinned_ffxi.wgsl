@@ -36,6 +36,17 @@
 #import bevy_pbr::fog as fog_fns
 #endif
 
+// D3DTOP_MODULATE2X's gain, the actor draw's single texture stage.
+const D3D_MODULATE_2X: f32 = 2.0;
+
+// Fraction of the sun term a fully shadowed fragment keeps. Real FFXI PCs are flat-lit
+// and receive no world shadow, so any floor above 0 is a deliberate departure; this
+// model's ambient is intentionally low (the 2x compositing compensates), so cutting the
+// sun term to zero collapses the character to a near-black silhouette. Kept identical to
+// zone_ffxi.wgsl's FFXI_SHADOW_FLOOR (guard test `shadow_floor_matches_the_actor_shader`)
+// so a character and the terrain under it shade by the same amount.
+const FFXI_SHADOW_FLOOR: f32 = 0.45;
+
 // Mirror of `FfxiLightingUniform` in skinned_ffxi_material.rs — keep the
 // field order/types identical so AsBindGroup's std140 layout matches.
 struct FfxiLighting {
@@ -276,29 +287,21 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
         return apply_distance_fog(vec4<f32>(rgb + highlight, 1.0), in.world_position);
     }
 
-    // FFXI-faithful: flat per-vertex light * vertex color, composited at 2x the
-    // baked-diffuse texel (XIM's `2 * vertexColor * texel`).
+    // FFXI-faithful: flat per-vertex light * vertex color through the single
+    // MODULATE2X texture stage. research/XIClient Rendering/Direct3D8Manager.cpp:
+    // 373,390,393,395 — fixed-function T&L sources DIFFUSE/AMBIENT from D3DMCS_COLOR1
+    // and emits a D3DCOLOR, so the lit vertex term saturates before the stage.
     //
-    // SOFT shadow-receive, gated by the Model Shadow Receiving setting (`receive_shadows`
-    // / flags.z). Real FFXI PCs are flat-lit and don't receive the world's
-    // shadows, but a gentle receive grounds the model in the scene. The catch:
-    // this model's ambient is intentionally LOW (the 2x doubling compensates),
-    // so cutting the dominant sun term to ZERO on a shadowed fragment collapses
-    // the character to near-black (the old silhouette regression). So unlike the
-    // realistic branch's full 0..1 factor, dim the sun term only PARTWAY — down
-    // to `FAITHFUL_SHADOW_FLOOR` — giving a soft shade that never crushes to a
-    // silhouette. PCs still CAST shadows regardless (the depth prepass writes the
+    // Shadow-receive is gated by the Model Shadow Receiving setting (`receive_shadows`
+    // / flags.z). PCs still CAST shadows regardless (the depth prepass writes the
     // shadow map independent of this branch).
     var sun_scale = 1.0;
     if (receive_shadows) {
-        // Shadowed fragments keep this fraction of the sun term (0 = black,
-        // 1 = no receive). Tuned soft: visible shade without losing the model.
-        let FAITHFUL_SHADOW_FLOOR = 0.45;
         let sun = sun_shadow_factor(in.world_position, n, in.clip_position.xy);
-        sun_scale = mix(FAITHFUL_SHADOW_FLOOR, 1.0, sun);
+        sun_scale = mix(FFXI_SHADOW_FLOOR, 1.0, sun);
     }
-    let lit = scene_irradiance(si, n, in.world_position, 0.0, sun_scale) * in.color.rgb;
-    let rgb = 2.0 * lit * texel.rgb * rec.tint.rgb;
+    let lit = saturate(scene_irradiance(si, n, in.world_position, 0.0, sun_scale) * in.color.rgb);
+    let rgb = saturate(D3D_MODULATE_2X * lit * texel.rgb * rec.tint.rgb);
     // Opaque output (AlphaMode::Mask already discarded cut-out texels). A sub-1
     // alpha here would let the preview camera composite the character see-
     // through over the launcher backdrop. The depth-only cast-shadow / prepass

@@ -16,24 +16,55 @@ pub struct SunDisc;
 #[derive(Component)]
 pub struct MoonDisc;
 
-#[derive(Component)]
-pub struct MoonSphere;
-
 pub const SKY_RADIUS: f32 = 4000.0;
 
 const SUN_DISC_RADIUS: f32 = 120.0;
 const MOON_DISC_RADIUS: f32 = 350.0;
 
-// The sun disc is authored HDR-overbright to drive Enhanced-mode bloom, but the
-// uncapped ~22x peak blows the disc out to a solid white blob when it reflects
-// off a bevy_water surface. Cap it so it still clears the 1.0 bloom threshold
-// with plenty of headroom, without the reflection saturating.
+// The sun disc is authored HDR-overbright so it clears the bloom threshold with
+// headroom; uncapped its ~22x peak blows the disc out to a solid white blob.
 const SUN_DISC_MAX_INTENSITY: f32 = 8.0;
+
+// moon.wgsl's `params` is a vec4 for uniform alignment; only xyz carry meaning.
+const MOON_PARAMS_PAD: f32 = 0.0;
 
 const MOON_CYCLE_VANA_DAYS: u64 = 84;
 const MOON_PHASE_OFFSET: u64 = (886u64 * 360 + 26) % MOON_CYCLE_VANA_DAYS;
 
 const LIGHT_DISTANCE: f32 = 200.0;
+
+// research/XIClient Rendering/ShadowRenderer.cpp:96-101 — retail never lets a shadow rake:
+// whenever the light's elevation is shallower than ANGLE_PI_OVER_3 it rewrites the vertical
+// component to `-(sin(ANGLE_PI_OVER_3) * |xz|)` and renormalises, and :75-79 snaps a
+// below-horizon light to a fixed steep vector outright. Without it a low sun stretches every
+// cast shadow across the whole zone at dawn and dusk. Constants/Floats.cpp:14.
+const SHADOW_ELEVATION_SIN_ARG: f32 = PI / 3.0;
+
+/// Elevation retail's rewrite actually settles at: `sin(ANGLE_PI_OVER_3) * |xz|` over an
+/// unchanged `|xz|` is `atan(sin(ANGLE_PI_OVER_3))`, whatever the light started at.
+pub fn shadow_min_elevation() -> f32 {
+    SHADOW_ELEVATION_SIN_ARG.sin().atan()
+}
+
+/// Snap `to_light` to retail's shadow elevation, leaving the LIT direction
+/// (`ZoneDirectionalLighting`) alone — this feeds only the cascade the sun entity casts.
+///
+/// The test is on ANGLE_PI_OVER_3 but the rewrite lands at `shadow_min_elevation()`, so a sun
+/// between the two is *flattened*, not steepened; ShadowRenderer.cpp:99-102 has one predicate
+/// and one assignment, not a clamp.
+pub fn shadow_cast_direction(to_light: Vec3) -> Vec3 {
+    let horizontal = Vec2::new(to_light.x, to_light.z).length();
+    if to_light.y.atan2(horizontal) >= SHADOW_ELEVATION_SIN_ARG {
+        return to_light;
+    }
+    Vec3::new(
+        to_light.x,
+        SHADOW_ELEVATION_SIN_ARG.sin() * horizontal,
+        to_light.z,
+    )
+    .try_normalize()
+    .unwrap_or(Vec3::Y)
+}
 
 // Maps an F1 diffuse brightness k in [0,1] onto a DirectionalLight illuminance so
 // the zone/actor consumers' `k = illuminance / DIR_REF_LUX` recovers it (both use
@@ -141,15 +172,11 @@ pub struct SunDiscMeshes {
     pub quad: Handle<Mesh>,
 }
 
-#[derive(Resource)]
-pub struct MoonSphereMaterial(pub Handle<StandardMaterial>);
-
 #[derive(Default)]
 pub struct MoonTransitionState {
     pub prev_sun_up: Option<bool>,
     pub prev_moon_up: Option<bool>,
     pub prev_phase_bucket: Option<u8>,
-    pub prev_illumination: Option<f32>,
     pub prev_disc_shown: Option<bool>,
     // Perf: last-written celestial outputs. Unconditional per-frame writes to
     // DirectionalLight/Transform and Assets::get_mut fire change detection /
@@ -160,7 +187,6 @@ pub struct MoonTransitionState {
     // cached so a zone-reload material swap invalidates the cache.
     pub sun_light_written: Option<(Vec3, f32, Vec3, bool)>,
     pub moon_light_written: Option<(Vec3, f32, Vec3)>,
-    pub moon_sphere_written: Option<(AssetId<StandardMaterial>, Vec3)>,
     pub sun_disc_written: Option<(
         AssetId<StandardMaterial>,
         Vec3,
@@ -224,9 +250,14 @@ pub fn spawn_sun_and_moon(
 
     let sphere = meshes.add(Sphere::new(1.0).mesh().ico(3).unwrap());
     let sun_quad = meshes.add(Rectangle::new(1.0, 1.0));
+    // Both celestial bodies ride SKY_RADIUS, far past every measured 0x2F fog distance,
+    // and their DAT generators clear fog (measured sun0/sun1 and moon/kasa = 0x02C400C0;
+    // research/XIClient CMoElem.cpp:542-543). Bevy fogs unlit StandardMaterials too, so
+    // without this the disc renders as a flat horizon-coloured blob.
     let sun_mat = materials.add(StandardMaterial {
         base_color: Color::linear_rgb(20.0, 18.0, 10.0),
         unlit: true,
+        fog_enabled: false,
         ..default()
     });
 
@@ -259,27 +290,6 @@ pub fn spawn_sun_and_moon(
         NotShadowReceiver,
     ));
 
-    let moon_sphere_mesh = meshes.add(Sphere::new(1.0).mesh().ico(4).unwrap());
-    let moon_sphere_mat = materials.add(StandardMaterial {
-        base_color: Color::linear_rgb(0.18, 0.18, 0.20),
-
-        perceptual_roughness: 0.95,
-        metallic: 0.0,
-
-        emissive: LinearRgba::new(0.005, 0.005, 0.008, 1.0),
-        ..default()
-    });
-    commands.spawn((
-        crate::components::InGameEntity,
-        MoonSphere,
-        Mesh3d(moon_sphere_mesh),
-        MeshMaterial3d(moon_sphere_mat.clone()),
-        Transform::from_scale(Vec3::splat(MOON_DISC_RADIUS)),
-        Visibility::Hidden,
-        NotShadowCaster,
-        NotShadowReceiver,
-    ));
-    commands.insert_resource(MoonSphereMaterial(moon_sphere_mat));
     commands.insert_resource(CelestialMaterials {
         sun: sun_mat,
         moon: moon_mat,
@@ -368,11 +378,6 @@ const MOON_PHASE_NAMES: [&str; 8] = [
     "First Quarter",
     "Waxing Gibbous",
 ];
-
-#[inline]
-fn lerp(a: f32, b: f32, t: f32) -> f32 {
-    a + (b - a) * t
-}
 
 // Map our moon phase (0 = full, 0.5 = new; daysmod/84) to the retail 12-frame
 // sprite index, where 0 = New and 6 = Full (research/xim EnvironmentManager.MoonPhase).
@@ -480,29 +485,15 @@ pub fn sun_moon_system(
             Without<SunDisc>,
             Without<IsSun>,
             Without<IsMoon>,
-            Without<MoonSphere>,
-            Without<crate::camera::OperatorCamera>,
-        ),
-    >,
-    mut q_moon_sphere: Query<
-        (&mut Transform, &mut Visibility),
-        (
-            With<MoonSphere>,
-            Without<MoonDisc>,
-            Without<SunDisc>,
-            Without<IsSun>,
-            Without<IsMoon>,
             Without<crate::camera::OperatorCamera>,
         ),
     >,
     q_cam: Query<&Transform, With<crate::camera::OperatorCamera>>,
     materials_handle: Option<Res<CelestialMaterials>>,
-    moon_sphere_handle: Option<Res<MoonSphereMaterial>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut moon_materials: ResMut<Assets<crate::moon_material::MoonMaterial>>,
     mut toasts: MessageWriter<crate::snapshot::ToastEvent>,
     vana_clock: Res<crate::vana_time::VanaClock>,
-    sky_realism: Res<crate::sky_realism::SkyRealism>,
     mut render_cfg: SunMoonRenderCfg,
     mut transition_state: Local<MoonTransitionState>,
 ) {
@@ -510,11 +501,9 @@ pub fn sun_moon_system(
         prev_sun_up,
         prev_moon_up,
         prev_phase_bucket,
-        prev_illumination,
         prev_disc_shown,
         sun_light_written,
         moon_light_written,
-        moon_sphere_written,
         sun_disc_written,
         moon_disc_written,
     } = &mut *transition_state;
@@ -628,21 +617,17 @@ pub fn sun_moon_system(
             light.color = sun_color;
             light.illuminance = sun_lux;
             light.shadow_maps_enabled = !indoors;
-            *xf = Transform::from_translation(sun_to_dir * LIGHT_DISTANCE)
+            // The zone/actor shaders take their lit direction from ZoneDirectionalLighting
+            // whenever the zone ships 0x2F records, so steepening here reaches only the
+            // shadow cascade (and the synthetic no-record fallback).
+            *xf = Transform::from_translation(shadow_cast_direction(sun_to_dir) * LIGHT_DISTANCE)
                 .looking_at(Vec3::ZERO, Vec3::Y);
         }
         *sun_light_written = Some((sun_rgb_lin, sun_lux, sun_to_dir, indoors));
     }
 
-    let moon_dir = if sky_realism.physical_moon_orbit {
-        let cos_theta = (1.0 - 2.0 * sky.moon_illumination).clamp(-1.0, 1.0);
-        let theta = cos_theta.acos();
-        let signed = if sky.moon_waxing { theta } else { -theta };
-        Quat::from_rotation_z(signed) * sun_dir
-    } else {
-        let moon_angle = (sky.hour / 24.0) * 2.0 * PI - PI / 2.0 + PI;
-        Vec3::new(moon_angle.cos(), moon_angle.sin(), 0.25).normalize()
-    };
+    let moon_angle = (sky.hour / 24.0) * 2.0 * PI - PI / 2.0 + PI;
+    let moon_dir = Vec3::new(moon_angle.cos(), moon_angle.sin(), 0.25).normalize();
 
     let moon_altitude = moon_dir.y.asin();
     sky.moon_altitude = moon_altitude;
@@ -833,22 +818,13 @@ pub fn sun_moon_system(
         };
     }
 
-    let moon_visible = sky.moon_altitude > 0.0
-        && (sky.moon_illumination > 0.02 || sky_realism.physical_moon_orbit);
-    let illusion = if sky_realism.moon_illusion {
-        let alt = sky.moon_altitude.max(0.0);
-        let t = (alt / (PI / 6.0)).clamp(0.0, 1.0);
-        1.30 - 0.30 * t
-    } else {
-        1.0
-    };
-
-    let disc_shown = moon_visible && !sky_realism.physical_moon_orbit && !dat_celestials;
+    let moon_visible = sky.moon_altitude > 0.0 && sky.moon_illumination > 0.02;
+    let disc_shown = moon_visible && !dat_celestials;
     let moon_world = cam_pos + moon_dir * SKY_RADIUS;
     let disc_count = q_moon_disc.iter().count();
     for (mut disc, mut vis) in q_moon_disc.iter_mut() {
         disc.translation = moon_world;
-        disc.scale = Vec3::splat(MOON_DISC_RADIUS * 2.0 * illusion);
+        disc.scale = Vec3::splat(MOON_DISC_RADIUS * 2.0);
         disc.look_at(cam_pos, Vec3::Y);
         *vis = if disc_shown {
             Visibility::Inherited
@@ -870,38 +846,10 @@ pub fn sun_moon_system(
         *prev_disc_shown = Some(disc_shown);
     }
 
-    for (mut sphere, mut vis) in q_moon_sphere.iter_mut() {
-        sphere.translation = cam_pos + moon_dir * SKY_RADIUS;
-        sphere.scale = Vec3::splat(MOON_DISC_RADIUS * illusion);
-        *vis = if moon_visible && sky_realism.physical_moon_orbit {
-            Visibility::Inherited
-        } else {
-            Visibility::Hidden
-        };
-    }
-
     // Perf A/B diagnostic: unconditional per-frame get_mut() on these two
     // StandardMaterials fires AssetEvent::Modified every frame (std churn in
     // the perf HUD). Set FFXI_FREEZE_CELESTIAL_MAT=1 to skip the writes.
     let freeze_celestial_mat = std::env::var_os("FFXI_FREEZE_CELESTIAL_MAT").is_some();
-
-    if let Some(handle) = moon_sphere_handle
-        .as_deref()
-        .filter(|_| !freeze_celestial_mat)
-    {
-        let total_v_days = vana_day_index(&vana_clock);
-        let t = celestial_moon_tint(&render_cfg.color_tables, total_v_days, sky.moon_phase);
-        let rgb = Vec3::new(t[0] * 0.20, t[1] * 0.20, t[2] * 0.22);
-        let id = handle.0.id();
-        if moon_sphere_written
-            .is_none_or(|(prev_id, prev)| prev_id != id || prev.distance(rgb) > CELESTIAL_COLOR_EPS)
-        {
-            if let Some(mut mat) = materials.get_mut(&handle.0) {
-                mat.base_color = Color::linear_rgb(rgb.x, rgb.y, rgb.z);
-                *moon_sphere_written = Some((id, rgb));
-            }
-        }
-    }
 
     if let Some(handles) = materials_handle
         .as_deref()
@@ -911,16 +859,12 @@ pub fn sun_moon_system(
             let visible = sky.sun_altitude.max(-0.2);
 
             let elev_norm = (visible / (PI / 2.0)).clamp(0.0, 1.0);
-            let mut intensity = if visible > 0.0 {
-                2.0 + 20.0 * elev_norm.sqrt()
+            let intensity = if visible > 0.0 {
+                8.0 + 14.0 * elev_norm
             } else {
                 (1.0 + 5.0 * (visible + 0.2) / 0.2).max(0.0)
-            };
-
-            if !sky_realism.horizon_dimming && visible > 0.0 {
-                intensity = 8.0 + 14.0 * elev_norm;
             }
-            let intensity = intensity.min(SUN_DISC_MAX_INTENSITY);
+            .min(SUN_DISC_MAX_INTENSITY);
             let c = sun_color.to_linear();
             let rgb = Vec3::new(
                 c.red * intensity,
@@ -961,38 +905,14 @@ pub fn sun_moon_system(
         {
             let visibility = sky.moon_illumination.clamp(0.0, 1.0);
 
-            let mut intensity = if sky.moon_altitude > 0.0 {
+            let intensity = if sky.moon_altitude > 0.0 {
                 0.6 + 1.4 * visibility
             } else {
                 0.0
             };
 
             let total_v_days = vana_day_index(&vana_clock);
-            let mut tint =
-                celestial_moon_tint(&render_cfg.color_tables, total_v_days, sky.moon_phase);
-
-            if sky_realism.horizon_reddening && sky.moon_altitude > 0.0 {
-                let alt_norm = (sky.moon_altitude / (PI / 9.0)).clamp(0.0, 1.0);
-                let warmth = 1.0 - alt_norm;
-                let red_tint = [1.00, 0.55, 0.35];
-                tint = [
-                    lerp(tint[0], red_tint[0], warmth * 0.7),
-                    lerp(tint[1], red_tint[1], warmth * 0.7),
-                    lerp(tint[2], red_tint[2], warmth * 0.7),
-                ];
-            }
-
-            if sky_realism.horizon_dimming && sky.moon_altitude > 0.0 {
-                let alt_norm = (sky.moon_altitude / (PI / 6.0)).clamp(0.0, 1.0);
-                intensity *= 0.5 + 0.5 * alt_norm;
-            }
-
-            let earthshine = if sky_realism.earthshine {
-                let crescent_strength = (1.0 - visibility).powf(2.0);
-                0.06 + 0.10 * crescent_strength
-            } else {
-                0.0
-            };
+            let tint = celestial_moon_tint(&render_cfg.color_tables, total_v_days, sky.moon_phase);
 
             let frame_uv = render_cfg
                 .moon_sprite
@@ -1004,7 +924,7 @@ pub fn sun_moon_system(
                 sky.moon_illumination,
                 if sky.moon_waxing { 1.0 } else { -1.0 },
                 intensity,
-                earthshine,
+                MOON_PARAMS_PAD,
             );
             let id = handles.moon.id();
             if moon_disc_written.is_none_or(|(prev_id, prev_tint, prev_params, prev_frame)| {
@@ -1023,26 +943,6 @@ pub fn sun_moon_system(
                 }
             }
         }
-    }
-
-    if sky_realism.physical_moon_orbit && sky_realism.eclipses {
-        let illum = sky.moon_illumination;
-        if let Some(prev) = *prev_illumination {
-            if prev < 0.999 && illum >= 0.999 && sky.moon_altitude > 0.0 {
-                toasts.write(crate::snapshot::ToastEvent::system(
-                    "🌑 Lunar eclipse — Vana'diel's shadow falls upon the moon.".to_string(),
-                ));
-            }
-
-            if prev > 0.001 && illum <= 0.001 && sky.sun_altitude > 0.0 {
-                toasts.write(crate::snapshot::ToastEvent::system(
-                    "🌒 Solar eclipse — the moon crosses the sun.".to_string(),
-                ));
-            }
-        }
-        *prev_illumination = Some(illum);
-    } else {
-        *prev_illumination = None;
     }
 }
 
@@ -1161,5 +1061,61 @@ mod tests {
         let a = vana_sky_from_unix(base);
         let b = vana_sky_from_unix(base + 0.1);
         assert!(a.hour != b.hour, "hour did not advance sub-second");
+    }
+
+    #[test]
+    fn shadow_direction_never_rakes_below_retails_minimum_elevation() {
+        // research/XIClient ShadowRenderer.cpp:99-102 rewrites any light shallower than
+        // ANGLE_PI_OVER_3 to sit at atan(sin(ANGLE_PI_OVER_3)) ~= 40.9 degrees, in either
+        // hemisphere.
+        for hour in 0..24 {
+            let to_sun = sun_direction(hour as f32);
+            let clamped = shadow_cast_direction(to_sun);
+            let horizontal = Vec2::new(clamped.x, clamped.z).length();
+            let elevation = clamped.y.atan2(horizontal);
+            assert!(
+                elevation >= shadow_min_elevation() - 1e-4,
+                "hour {hour}: shadow elevation {elevation} below the retail minimum"
+            );
+            assert!(
+                (clamped.length() - 1.0).abs() < 1e-4,
+                "hour {hour}: not unit"
+            );
+        }
+    }
+
+    #[test]
+    fn a_steep_sun_keeps_its_own_direction() {
+        let noon = sun_direction(12.0);
+        assert!(noon.y > 0.9, "noon sun should be near-overhead: {noon}");
+        assert_eq!(shadow_cast_direction(noon), noon);
+    }
+
+    // The predicate and the assignment are two different angles, so a sun already steeper
+    // than the 40.9-degree landing but shallower than the 60-degree test is FLATTENED. A
+    // one-sided clamp would leave hour 9.9 alone and draw shadows ~40% short.
+    #[test]
+    fn a_sun_inside_the_rewrite_band_is_snapped_down_to_the_landing_elevation() {
+        let mid = sun_direction(9.9);
+        let horizontal = Vec2::new(mid.x, mid.z).length();
+        let before = mid.y.atan2(horizontal);
+        assert!(
+            (shadow_min_elevation()..SHADOW_ELEVATION_SIN_ARG).contains(&before),
+            "hour 9.9 should sit inside the rewrite band, got {before}"
+        );
+        let after = shadow_cast_direction(mid);
+        let after_elev = after.y.atan2(Vec2::new(after.x, after.z).length());
+        assert!(
+            (after_elev - shadow_min_elevation()).abs() < 1e-4,
+            "expected the landing elevation, got {after_elev}"
+        );
+    }
+
+    #[test]
+    fn the_lit_sun_direction_is_untouched_by_the_shadow_clamp() {
+        // The clamp must not be folded into sun_direction itself — the 0x2F lit
+        // direction and the cast direction are different vectors at dawn/dusk.
+        let dawn = sun_direction(6.5);
+        assert_ne!(shadow_cast_direction(dawn), dawn);
     }
 }

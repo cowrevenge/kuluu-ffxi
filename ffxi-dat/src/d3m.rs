@@ -6,8 +6,9 @@ pub const D3M_VERTEX_STRIDE: usize = 36;
 
 pub const D3M_VERTEX_OFFSET: usize = 0x1E;
 
-// D3m/MMB vertex colour is normalised by 128 rather than 255, folding the D3m texture-stage-0
-// MODULATE2X into the stored value.
+// D3m vertex colour is normalised by 128 rather than 255, folding the D3m texture-stage-0
+// MODULATE2X into the stored value. Distinct from `mmb::VERTEX_COLOR_DIVISOR`, which is the
+// plain D3DCOLOR byte/255 because the zone shader models that MODULATE2X itself.
 // research/XIClient/src/XIClient/source/Resource/Derived/CMoD3m.cpp:16-104
 pub const VERTEX_COLOR_DIVISOR: f32 = 128.0;
 

@@ -301,14 +301,7 @@ pub fn load_mmb(file_id: u32, chunk_idx: usize) -> Result<LoadedMmb, String> {
         let colors: Vec<[f32; 4]> = m
             .vertices
             .iter()
-            .map(|v| {
-                [
-                    v.rgba[0] as f32 / 128.0,
-                    v.rgba[1] as f32 / 128.0,
-                    v.rgba[2] as f32 / 128.0,
-                    v.rgba[3] as f32 / 128.0,
-                ]
-            })
+            .map(|v| mmb::vertex_color_to_linear(v.rgba))
             .collect();
 
         let vert_count = m.vertices.len() as u16;
@@ -676,6 +669,9 @@ pub fn process_load_mmb_requests(
                         mirrored,
                         z_bias_level: rs.z_bias_level(),
                         depth_write: rs.depth_write(),
+                        // Placed zone geometry is drawn by the ZoneRenderer, not off a
+                        // generator, so it takes the single-MODULATE2X terrain chain.
+                        generator_stage_chain: false,
                     };
 
                     // Generator water (sea sheets): force the translucent blend
@@ -686,7 +682,12 @@ pub fn process_load_mmb_requests(
                         materials.add(FfxiZoneMaterial::new(
                             sub_texture,
                             crate::skinned_ffxi_material::FfxiMaterialFlags {
-                                flags: Vec4::new(has_texture, 1.0, 0.0, 0.0),
+                                flags: Vec4::new(
+                                    has_texture,
+                                    1.0,
+                                    crate::ffxi_zone_material::ZONE_FLAG_FOGGED,
+                                    0.0,
+                                ),
                             },
                             w.tint,
                             Vec4::ZERO,
@@ -699,6 +700,9 @@ pub fn process_load_mmb_requests(
                                 // let it float over terrain that should occlude it.
                                 z_bias_level: 0,
                                 depth_write: false,
+                                // A sea sheet hangs off a water generator, so it takes the
+                                // two-stage CMoD3m chain with `w.tint` as its TEXTUREFACTOR.
+                                generator_stage_chain: true,
                             },
                         ))
                     } else {
@@ -712,7 +716,7 @@ pub fn process_load_mmb_requests(
                                         flags: Vec4::new(
                                             has_texture,
                                             blend_flag,
-                                            0.0,
+                                            crate::ffxi_zone_material::ZONE_FLAG_FOGGED,
                                             discard_threshold,
                                         ),
                                     },

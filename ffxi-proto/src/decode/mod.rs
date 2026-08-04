@@ -31,6 +31,10 @@ mod abilities;
 pub use abilities::*;
 mod equip_inspect;
 pub use equip_inspect::*;
+mod inspect_message;
+pub use inspect_message::*;
+mod bazaar;
+pub use bazaar::*;
 mod treasure;
 pub use treasure::*;
 

@@ -171,10 +171,6 @@ pub(super) fn handle_target_action_key(
         );
     }
     if bindings.matches_logical(Action::NavCancel, key) {
-        if check_target.open {
-            check_target.open = false;
-            check_target.target_id = None;
-        }
         return Some(InputMode::World);
     }
     None
@@ -272,9 +268,8 @@ pub(super) fn confirm_target_action_at_cursor(
                         TargetKindLite::Pc | TargetKindLite::SelfPc
                     );
                     if is_pc {
-                        check_target.open = true;
-                        check_target.target_id = Some(e.id);
-                        None
+                        check_target.open(e.id);
+                        Some(InputMode::Check)
                     } else {
                         Some(InputMode::World)
                     }

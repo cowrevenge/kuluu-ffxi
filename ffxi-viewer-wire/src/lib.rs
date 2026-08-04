@@ -2,6 +2,9 @@
 
 use serde::{Deserialize, Serialize};
 
+// v13: the retail /check window's remaining panes — CheckResult.linkshell, SceneSnapshot
+// .check_message (s2c 0x0CA), and SceneSnapshot.bazaar as a browsed-bazaar view (seller +
+// per-slot rows with tax) instead of the old never-populated Vec<BazaarEntry>.
 // v12: ViewerEvent::ActionStarted.animation — the BATTLE2 first-result animation index for
 // every category, which is what keys the caster's effect DAT (the action id does not).
 // v11: ChatLine.spans (per-substitution colouring — retail renders a drop line's item name
@@ -18,7 +21,8 @@ use serde::{Deserialize, Serialize};
 // v5: InventoryItem.charges_remaining + next_use_vana_ts (item recast/charges).
 // v4: SceneSnapshot.delivery_box (dedicated delivery screen) + ViewerCommand::DeliveryBox
 // (postcard frames are not self-describing, so any shape change bumps this).
-pub const PROTOCOL_VERSION: u32 = 12;
+pub const PROTOCOL_VERSION: u32 = 13;
+
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 pub struct Vec3 {
@@ -537,8 +541,9 @@ pub struct SceneSnapshot {
     #[serde(default)]
     pub stats: Option<CharStats>,
 
+    /// The bazaar currently being browsed (View Wares from the Check window).
     #[serde(default)]
-    pub bazaar: Vec<BazaarEntry>,
+    pub bazaar: Option<BazaarView>,
 
     #[serde(default)]
     pub play_time_s: u64,
@@ -588,6 +593,11 @@ pub struct SceneSnapshot {
     #[serde(default)]
     pub check: Option<CheckResult>,
 
+    /// s2c 0x0CA answer to the same /check: the target's bazaar message, keyed
+    /// only by their name (the packet carries no target id).
+    #[serde(default)]
+    pub check_message: Option<CheckMessage>,
+
     /// Server-driven wide-scan (tracking) list and currently tracked target.
     /// Populated from s2c 0x0F4/0x0F5/0x0F6; the viewer renders it without
     /// touching `SessionState` (see `ffxi_proto::map::tracking`).
@@ -630,7 +640,7 @@ pub struct WidescanTracked {
 
 /// `equipped` is indexed by SAVE_EQUIP_KIND slot id (0 = Main .. 15 = Back);
 /// jobs are zero while the target is /anon.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CheckResult {
     pub target_id: u32,
     pub equipped: [Option<u16>; 16],
@@ -639,6 +649,16 @@ pub struct CheckResult {
     pub main_job_lv: u8,
     pub sub_job_lv: u8,
     pub master_lv: u8,
+    /// Equipped linkshell's name; empty when the target wears no pearl.
+    #[serde(default)]
+    pub linkshell: String,
+}
+
+/// s2c 0x0CA INSPECT_MESSAGE: the checked PC's bazaar/seek message.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CheckMessage {
+    pub name: String,
+    pub message: String,
 }
 
 impl SceneSnapshot {
@@ -740,11 +760,36 @@ pub struct CharStats {
     pub resist: [i16; 8],
 }
 
+/// Mirror of `ffxi_client`'s browsed-bazaar model (s2c 0x105 rows keyed by the
+/// seller's inventory slot).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BazaarView {
+    pub seller_id: u32,
+    pub seller_name: String,
+    pub items: Vec<BazaarEntry>,
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BazaarEntry {
+    /// Seller-side inventory slot: the id a purchase names.
+    pub index: u8,
     pub item_no: u16,
     pub quantity: u32,
+    /// Asking price per unit, before tax.
     pub price: u32,
+    /// Zone tax in hundredths of a percent; [`BazaarEntry::total_price`] applies it.
+    pub tax_rate: u16,
+}
+
+impl BazaarEntry {
+    /// Gil charged for `quantity` units, tax included. Mirrors
+    /// `ffxi_client::state::BazaarItem::total_price` (LSB
+    /// vendor/server/src/map/packets/c2s/0x106_bazaar_buy.cpp:103).
+    pub fn total_price(&self, quantity: u32) -> u32 {
+        const TAX_DIVISOR: u64 = 10_000;
+        let base = u64::from(self.price) * u64::from(quantity);
+        u32::try_from(base + u64::from(self.tax_rate) * base / TAX_DIVISOR).unwrap_or(u32::MAX)
+    }
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
@@ -1247,7 +1292,7 @@ mod tests {
             key_items_seen: Vec::new(),
             containers: Vec::new(),
             stats: None,
-            bazaar: Vec::new(),
+            bazaar: None,
             play_time_s: 0,
             self_fishing: None,
             self_server_status: 0,
@@ -1260,6 +1305,7 @@ mod tests {
             emote_jobs: None,
             emote_chairs: None,
             check: None,
+            check_message: None,
             widescan: WidescanList::default(),
         }
     }

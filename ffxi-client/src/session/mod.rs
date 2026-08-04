@@ -15,7 +15,8 @@ mod treasure;
 
 pub(crate) use codec::*;
 pub use codec::{
-    build_subpacket_action, build_subpacket_buffcancel, build_subpacket_camp,
+    build_subpacket_action, build_subpacket_bazaar_buy, build_subpacket_bazaar_exit,
+    build_subpacket_bazaar_list, build_subpacket_buffcancel, build_subpacket_camp,
     build_subpacket_emote_list_req, build_subpacket_equip_inspect, build_subpacket_equip_set,
     build_subpacket_fishing, build_subpacket_item_move, build_subpacket_item_stack,
     build_subpacket_item_use, build_subpacket_motion, build_subpacket_myroom_job,
@@ -1312,11 +1313,57 @@ fn handle_sub_packet(
                     main_job_lv: g.main_job_lv,
                     sub_job_lv: g.sub_job_lv,
                     master_lv: g.master_lv,
+                    linkshell: g.linkshell_name(),
                 });
             }
             Err(e) => {
                 tracing::warn!(error = %e, body_len = sub.data.len(), "0x0C9 EQUIP_INSPECT decode failed");
             }
+        },
+        s2c::INSPECT_MESSAGE => match decode::InspectMessage::decode(sub.data) {
+            Ok(m) => {
+                let _ = event_tx.send(AgentEvent::CheckMessageReceived {
+                    name: m.name,
+                    message: m.message,
+                });
+            }
+            Err(e) => warn_decode_err(sub.opcode, &e),
+        },
+        s2c::BAZAAR_LIST => match decode::BazaarListItem::decode(sub.data) {
+            Ok(row) => {
+                let _ = event_tx.send(AgentEvent::BazaarItemReceived {
+                    index: row.index,
+                    item_no: row.item_no,
+                    quantity: row.quantity,
+                    price: row.price,
+                    tax_rate: row.tax_rate,
+                });
+            }
+            Err(e) => warn_decode_err(sub.opcode, &e),
+        },
+        s2c::BAZAAR_BUY => match decode::BazaarBuy::decode(sub.data) {
+            Ok(buy) => {
+                let _ = event_tx.send(AgentEvent::BazaarBuyResult {
+                    ok: buy.state == decode::BazaarBuyState::Ok,
+                });
+            }
+            Err(e) => warn_decode_err(sub.opcode, &e),
+        },
+        s2c::BAZAAR_CLOSE => match decode::BazaarClose::decode(sub.data) {
+            Ok(_) => {
+                let _ = event_tx.send(AgentEvent::BazaarClosed);
+            }
+            Err(e) => warn_decode_err(sub.opcode, &e),
+        },
+        s2c::BAZAAR_SELL => match decode::BazaarSell::decode(sub.data) {
+            Ok(sell) => {
+                let _ = event_tx.send(AgentEvent::BazaarSoldToOther {
+                    buyer: sell.buyer,
+                    index: sell.index,
+                    quantity: sell.quantity,
+                });
+            }
+            Err(e) => warn_decode_err(sub.opcode, &e),
         },
         s2c::CHAT => {
             if let Some((title, options)) = decode_custom_menu(sub.data) {
@@ -2626,6 +2673,70 @@ async fn keepalive_loop(
                                 message: format!("check send: {e}"),
                             });
                         }
+                    }
+                    Some(AgentCommand::OpenBazaar {
+                        target_id,
+                        target_index,
+                    }) => {
+                        // LSB rejects a BAZAAR_LIST while we still hold a
+                        // BazaarID, and its BAZAAR_EXIT handler clears that id
+                        // unconditionally (0x104_bazaar_exit.cpp:59), so leaving
+                        // first makes re-browsing safe even from a stale view.
+                        let exit = build_subpacket_bazaar_exit(sub_seq);
+                        sub_seq = sub_seq.wrapping_add(1);
+                        let mut sent = map
+                            .send_encrypted(&exit, datagram_header_id(sub_seq), server_last_seq)
+                            .await;
+                        if sent.is_ok() {
+                            let payload =
+                                build_subpacket_bazaar_list(sub_seq, target_id, target_index);
+                            sub_seq = sub_seq.wrapping_add(1);
+                            sent = map
+                                .send_encrypted(&payload, datagram_header_id(sub_seq), server_last_seq)
+                                .await;
+                        }
+                        match sent {
+                            Ok(()) => {
+                                let _ = event_tx.send(AgentEvent::BazaarOpened {
+                                    seller_id: target_id,
+                                    seller_index: target_index,
+                                    seller_name: name_cache
+                                        .get(&target_id)
+                                        .cloned()
+                                        .unwrap_or_default(),
+                                });
+                            }
+                            Err(e) => {
+                                tracing::warn!(error = %e, "bazaar_list send failed");
+                                let _ = event_tx.send(AgentEvent::Error {
+                                    message: format!("bazaar open send: {e}"),
+                                });
+                            }
+                        }
+                    }
+                    Some(AgentCommand::BuyBazaarItem { index, quantity }) => {
+                        let payload = build_subpacket_bazaar_buy(sub_seq, index, quantity);
+                        sub_seq = sub_seq.wrapping_add(1);
+                        if let Err(e) = map
+                            .send_encrypted(&payload, datagram_header_id(sub_seq), server_last_seq)
+                            .await
+                        {
+                            tracing::warn!(error = %e, "bazaar_buy send failed");
+                            let _ = event_tx.send(AgentEvent::Error {
+                                message: format!("bazaar buy send: {e}"),
+                            });
+                        }
+                    }
+                    Some(AgentCommand::CloseBazaar) => {
+                        let payload = build_subpacket_bazaar_exit(sub_seq);
+                        sub_seq = sub_seq.wrapping_add(1);
+                        if let Err(e) = map
+                            .send_encrypted(&payload, datagram_header_id(sub_seq), server_last_seq)
+                            .await
+                        {
+                            tracing::warn!(error = %e, "bazaar_exit send failed");
+                        }
+                        let _ = event_tx.send(AgentEvent::BazaarClosed);
                     }
                     Some(AgentCommand::Heal { mode }) => {
                         let payload = build_subpacket_camp(sub_seq, mode);
@@ -7848,6 +7959,45 @@ mod tests {
         );
         assert_eq!(buf[12], 1, "Kind=CheckName");
         assert_eq!(&buf[13..16], &[0u8; 3], "padding00");
+    }
+
+    #[test]
+    fn bazaar_packet_layouts_match_server_structs() {
+        // GP_CLI_COMMAND_BAZAAR_LIST (c2s/0x105_bazaar_list.h:27-31).
+        let list = build_subpacket_bazaar_list(0xABCD, 0x1234_5678, 42);
+        assert_eq!(list.len(), 12, "header (4) + body (8)");
+        let hdr = u16::from_le_bytes([list[0], list[1]]);
+        assert_eq!(hdr & 0x01FF, 0x105, "opcode = 0x105 BAZAAR_LIST");
+        assert_eq!((hdr >> 9) & 0x7F, 3, "size_words=3");
+        assert_eq!(u16::from_le_bytes([list[2], list[3]]), 0xABCD, "sync");
+        assert_eq!(
+            u32::from_le_bytes(list[4..8].try_into().unwrap()),
+            0x1234_5678,
+            "UniqueNo LE"
+        );
+        assert_eq!(u16::from_le_bytes([list[8], list[9]]), 42, "ActIndex LE");
+        assert_eq!(&list[10..12], &[0u8; 2], "padding00");
+
+        // GP_CLI_COMMAND_BAZAAR_BUY (c2s/0x106_bazaar_buy.h:27-31).
+        let buy = build_subpacket_bazaar_buy(0xBEEF, 7, 12);
+        assert_eq!(buy.len(), 12, "header (4) + body (8)");
+        let hdr = u16::from_le_bytes([buy[0], buy[1]]);
+        assert_eq!(hdr & 0x01FF, 0x106, "opcode = 0x106 BAZAAR_BUY");
+        assert_eq!(buy[4], 7, "BazaarItemIndex");
+        assert_eq!(&buy[5..8], &[0u8; 3], "padding00");
+        assert_eq!(
+            u32::from_le_bytes(buy[8..12].try_into().unwrap()),
+            12,
+            "BuyNum LE"
+        );
+
+        // GP_CLI_COMMAND_BAZAAR_EXIT (c2s/0x104_bazaar_exit.h) is header-only.
+        let exit = build_subpacket_bazaar_exit(0x0042);
+        assert_eq!(exit.len(), 4, "header only");
+        let hdr = u16::from_le_bytes([exit[0], exit[1]]);
+        assert_eq!(hdr & 0x01FF, 0x104, "opcode = 0x104 BAZAAR_EXIT");
+        assert_eq!((hdr >> 9) & 0x7F, 1, "size_words=1");
+        assert_eq!(u16::from_le_bytes([exit[2], exit[3]]), 0x0042, "sync");
     }
 
     #[test]

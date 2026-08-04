@@ -523,10 +523,50 @@ pub struct SessionState {
     #[serde(default)]
     pub check_result: Option<CheckResult>,
 
+    /// s2c 0x0CA answer to the same /check: the target's bazaar message. The
+    /// packet carries no target id, only `sName`, so it is kept beside
+    /// `check_result` rather than merged into it.
+    #[serde(default)]
+    pub check_message: Option<CheckMessage>,
+
+    /// The bazaar we are currently browsing (c2s 0x105 → s2c 0x105 rows).
+    #[serde(default)]
+    pub bazaar: Option<BazaarView>,
+
     /// Server-driven wide-scan (tracking) list, accumulated between the s2c 0x0F6
     /// ListStart/ListEnd frames; `tracked` follows s2c 0x0F5.
     #[serde(default)]
     pub widescan: WidescanList,
+}
+
+/// s2c 0x0CA INSPECT_MESSAGE: the checked PC's bazaar/seek message.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CheckMessage {
+    pub name: String,
+    pub message: String,
+}
+
+/// A bazaar being browsed. Rows are keyed by the seller's LOC_INVENTORY slot
+/// because the server refreshes single rows in place after each purchase
+/// (vendor/server/src/map/packets/c2s/0x106_bazaar_buy.cpp:198).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BazaarView {
+    pub seller_id: u32,
+    pub seller_index: u16,
+    pub seller_name: String,
+    pub items: Vec<BazaarItem>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BazaarItem {
+    pub index: u8,
+    pub item_no: u16,
+    pub quantity: u32,
+    /// Seller's asking price per unit, before tax.
+    pub price: u32,
+    /// Zone tax in hundredths of a percent; the buyer-facing total is computed
+    /// where it is displayed (`ffxi_viewer_wire::BazaarEntry::total_price`).
+    pub tax_rate: u16,
 }
 
 /// Faithful wide-scan model: the server owns membership, order, and gating
@@ -602,6 +642,10 @@ pub struct CheckResult {
     pub main_job_lv: u8,
     pub sub_job_lv: u8,
     pub master_lv: u8,
+    /// Equipped linkshell's name, unpacked from the GENERAL packet's 6-bit
+    /// `sComLinkName`; empty when the target wears no pearl.
+    #[serde(default)]
+    pub linkshell: String,
 }
 
 impl CheckResult {
@@ -615,6 +659,7 @@ impl CheckResult {
             main_job_lv: 0,
             sub_job_lv: 0,
             master_lv: 0,
+            linkshell: String::new(),
         }
     }
 }
@@ -1088,6 +1133,12 @@ impl SessionState {
 
                 self.current_weather = None;
                 self.check_result = None;
+                self.check_message = None;
+                // The seller is a zone-local entity, so a bazaar cannot survive
+                // the warp: LSB resolves the browsed bazaar through
+                // `GetEntity(BazaarID.targid)` and drops any request once that
+                // lookup fails (0x106_bazaar_buy.cpp:46-56).
+                self.bazaar = None;
                 self.self_casting = None;
                 self.self_server_status = 0;
 
@@ -1556,10 +1607,11 @@ impl SessionState {
                 main_job_lv,
                 sub_job_lv,
                 master_lv,
+                linkshell,
             } => {
                 let r = self.check_result_mut(*target_id, *act_index);
                 let next = (*main_job, *sub_job, *main_job_lv, *sub_job_lv, *master_lv);
-                let changed = (
+                let mut changed = (
                     r.main_job,
                     r.sub_job,
                     r.main_job_lv,
@@ -1573,12 +1625,109 @@ impl SessionState {
                     r.sub_job_lv,
                     r.master_lv,
                 ) = next;
+                changed |= r.linkshell != *linkshell;
+                r.linkshell.clone_from(linkshell);
+                changed
+            }
+            AgentEvent::CheckMessageReceived { name, message } => {
+                let next = CheckMessage {
+                    name: name.clone(),
+                    message: message.clone(),
+                };
+                let changed = self.check_message.as_ref() != Some(&next);
+                self.check_message = Some(next);
                 changed
             }
             AgentEvent::CheckCleared => {
-                let changed = self.check_result.is_some();
+                let changed = self.check_result.is_some() || self.check_message.is_some();
                 self.check_result = None;
+                self.check_message = None;
                 changed
+            }
+            AgentEvent::BazaarOpened {
+                seller_id,
+                seller_index,
+                seller_name,
+            } => {
+                self.bazaar = Some(BazaarView {
+                    seller_id: *seller_id,
+                    seller_index: *seller_index,
+                    seller_name: seller_name.clone(),
+                    items: Vec::new(),
+                });
+                true
+            }
+            AgentEvent::BazaarItemReceived {
+                index,
+                item_no,
+                quantity,
+                price,
+                tax_rate,
+            } => {
+                let Some(view) = self.bazaar.as_mut() else {
+                    return false;
+                };
+                let before = view.items.clone();
+                view.items.retain(|it| it.index != *index);
+                if *price != 0 && *quantity != 0 {
+                    view.items.push(BazaarItem {
+                        index: *index,
+                        item_no: *item_no,
+                        quantity: *quantity,
+                        price: *price,
+                        tax_rate: *tax_rate,
+                    });
+                    view.items.sort_unstable_by_key(|it| it.index);
+                }
+                view.items != before
+            }
+            AgentEvent::BazaarClosed => {
+                let changed = self.bazaar.is_some();
+                self.bazaar = None;
+                changed
+            }
+            AgentEvent::BazaarBuyResult { ok } => {
+                let text = if *ok {
+                    "Purchased.".to_string()
+                } else {
+                    "The purchase failed.".to_string()
+                };
+                self.chat.push(ChatLine {
+                    spans: Vec::new(),
+                    channel: ChatChannel::System,
+                    sender: "<bazaar>".into(),
+                    text,
+                    server_ts: 0,
+                });
+                if self.chat.len() > CHAT_HISTORY_CAP {
+                    let drop = self.chat.len() - CHAT_HISTORY_CAP;
+                    self.chat.drain(0..drop);
+                }
+                true
+            }
+            AgentEvent::BazaarSoldToOther {
+                buyer,
+                index,
+                quantity,
+            } => {
+                let item = self
+                    .bazaar
+                    .as_ref()
+                    .and_then(|v| v.items.iter().find(|it| it.index == *index))
+                    .and_then(|it| ffxi_proto::item_names::lookup(it.item_no))
+                    .unwrap_or("an item");
+                self.chat.push(ChatLine {
+                    spans: Vec::new(),
+                    channel: ChatChannel::System,
+                    sender: "<bazaar>".into(),
+                    text: format!("{buyer} purchased {quantity}x {item}."),
+                    server_ts: 0,
+                });
+                if self.chat.len() > CHAT_HISTORY_CAP {
+                    let drop = self.chat.len() - CHAT_HISTORY_CAP;
+                    self.chat.drain(0..drop);
+                }
+                true
             }
             AgentEvent::EventStart { .. } | AgentEvent::KeyRotated { .. } => false,
             AgentEvent::EventDialog { dialog } => {
@@ -2127,7 +2276,7 @@ pub enum AgentEvent {
     },
 
     /// s2c 0x0C9 EQUIP_INSPECT GENERAL (OptionFlag 0x01): the checked PC's jobs
-    /// and levels (zeroed while the target is /anon).
+    /// and levels (zeroed while the target is /anon) plus their linkshell.
     CheckGeneralReceived {
         target_id: u32,
         act_index: u16,
@@ -2136,10 +2285,53 @@ pub enum AgentEvent {
         main_job_lv: u8,
         sub_job_lv: u8,
         master_lv: u8,
+        /// Already unpacked from the 6-bit `sComLinkName`; empty = no pearl.
+        linkshell: String,
+    },
+
+    /// s2c 0x0CA INSPECT_MESSAGE: the checked PC's name and bazaar message.
+    CheckMessageReceived {
+        name: String,
+        message: String,
     },
 
     /// Outbound /check dispatched: drop the previous target's accumulated result.
     CheckCleared,
+
+    /// s2c 0x105 BAZAAR_LIST: one priced row of the browsed bazaar, merged by
+    /// `index`. A row that is no longer for sale (price or quantity zero)
+    /// removes it.
+    BazaarItemReceived {
+        index: u8,
+        item_no: u16,
+        quantity: u32,
+        price: u32,
+        tax_rate: u16,
+    },
+
+    /// Our c2s 0x105 was dispatched: start a fresh (empty) bazaar view for the
+    /// seller so the rows have somewhere to land.
+    BazaarOpened {
+        seller_id: u32,
+        seller_index: u16,
+        seller_name: String,
+    },
+
+    /// s2c 0x107, or our own exit: the browsed bazaar is gone.
+    BazaarClosed,
+
+    /// s2c 0x106: result of our purchase attempt.
+    BazaarBuyResult {
+        ok: bool,
+    },
+
+    /// s2c 0x109: another customer bought `quantity` of row `index` while we
+    /// browse; a refreshed 0x105 row follows.
+    BazaarSoldToOther {
+        buyer: String,
+        index: u8,
+        quantity: u32,
+    },
 
     /// s2c 0x0F6 ListStart: a fresh wide-scan list is about to arrive — clear the
     /// accumulator and mark it building.
@@ -2421,6 +2613,24 @@ pub enum AgentCommand {
         target_index: u16,
         kind: CheckKind,
     },
+
+    /// Browse a PC's bazaar (c2s 0x105). The server answers with one s2c 0x105
+    /// per priced slot and refuses while we still hold another bazaar open, so
+    /// the session sends `CloseBazaar` first when one is already open.
+    OpenBazaar {
+        target_id: u32,
+        target_index: u16,
+    },
+
+    /// Buy `quantity` of the browsed bazaar's row `index` (c2s 0x106). The
+    /// server caps quantity at 99 (0x106_bazaar_buy.cpp validate).
+    BuyBazaarItem {
+        index: u8,
+        quantity: u32,
+    },
+
+    /// Leave the bazaar we are browsing (c2s 0x104).
+    CloseBazaar,
 
     Heal {
         mode: HealMode,
@@ -4073,6 +4283,7 @@ mod tests {
             main_job_lv: 75,
             sub_job_lv: 37,
             master_lv: 0,
+            linkshell: "Kuluu".into(),
         });
         let r = s.check_result.as_ref().expect("accumulated");
         assert_eq!(r.target_id, 0xCAFE);
@@ -4082,6 +4293,98 @@ mod tests {
         assert_eq!(r.equipped[1], None, "unsent slot stays empty");
         assert_eq!((r.main_job, r.main_job_lv), (1, 75));
         assert_eq!((r.sub_job, r.sub_job_lv), (13, 37));
+        assert_eq!(r.linkshell, "Kuluu");
+    }
+
+    #[test]
+    fn check_message_is_kept_beside_the_result_and_cleared_with_it() {
+        let mut s = SessionState::default();
+        s.apply_event(&AgentEvent::CheckMessageReceived {
+            name: "Aliya".into(),
+            message: "Sneak oil 2k".into(),
+        });
+        let m = s.check_message.as_ref().expect("message stored");
+        assert_eq!(m.name, "Aliya");
+        assert_eq!(m.message, "Sneak oil 2k");
+
+        // The 0x0CA lands before the 0x0C9 batches
+        // (0x0dd_equip_inspect.cpp:134-136), so a later result must not drop it.
+        s.apply_event(&AgentEvent::CheckEquipReceived {
+            target_id: 0xCAFE,
+            act_index: 0x123,
+            items: vec![(0, 17440)],
+        });
+        assert!(s.check_message.is_some(), "gear batch keeps the message");
+
+        s.apply_event(&AgentEvent::CheckCleared);
+        assert!(s.check_message.is_none(), "a fresh /check drops it");
+    }
+
+    #[test]
+    fn bazaar_rows_merge_by_slot_and_sold_out_rows_leave() {
+        let mut s = SessionState::default();
+        let row = |index: u8, quantity: u32, price: u32| AgentEvent::BazaarItemReceived {
+            index,
+            item_no: 4096,
+            quantity,
+            price,
+            tax_rate: 500,
+        };
+
+        assert!(
+            !s.apply_event(&row(3, 5, 100)),
+            "a row with no open bazaar is dropped"
+        );
+
+        s.apply_event(&AgentEvent::BazaarOpened {
+            seller_id: 0xCAFE,
+            seller_index: 0x123,
+            seller_name: "Aliya".into(),
+        });
+        s.apply_event(&row(5, 2, 900));
+        s.apply_event(&row(3, 5, 100));
+        let view = s.bazaar.as_ref().expect("open");
+        assert_eq!(
+            view.items.iter().map(|i| i.index).collect::<Vec<_>>(),
+            vec![3, 5],
+            "rows sort by seller slot"
+        );
+
+        // The post-purchase refresh re-sends the same slot rather than adding one.
+        s.apply_event(&row(3, 4, 100));
+        let view = s.bazaar.as_ref().expect("open");
+        assert_eq!(view.items.len(), 2, "same slot merges");
+        assert_eq!(view.items[0].quantity, 4);
+
+        // A depleted slot comes back priced 0 (0x106_bazaar_buy.cpp:198).
+        s.apply_event(&row(3, 0, 0));
+        let view = s.bazaar.as_ref().expect("open");
+        assert_eq!(view.items.iter().map(|i| i.index).collect::<Vec<_>>(), vec![5]);
+    }
+
+    #[test]
+    fn bazaar_view_drops_on_close_and_on_zone_change() {
+        let mut s = SessionState::default();
+        s.apply_event(&AgentEvent::BazaarOpened {
+            seller_id: 0xCAFE,
+            seller_index: 0x123,
+            seller_name: "Aliya".into(),
+        });
+        assert!(s.apply_event(&AgentEvent::BazaarClosed));
+        assert!(s.bazaar.is_none());
+
+        s.apply_event(&AgentEvent::BazaarOpened {
+            seller_id: 0xCAFE,
+            seller_index: 0x123,
+            seller_name: "Aliya".into(),
+        });
+        s.apply_event(&AgentEvent::ZoneChanged {
+            from: None,
+            to: 230,
+            myroom: None,
+            mog_zone_flag: false,
+        });
+        assert!(s.bazaar.is_none(), "the seller is a zone-local entity");
     }
 
     #[test]

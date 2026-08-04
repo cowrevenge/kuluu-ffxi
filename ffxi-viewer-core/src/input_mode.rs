@@ -26,6 +26,16 @@ pub enum InputMode {
     /// state lives in `hud::delivery::DeliveryScreenState`; this variant just
     /// suppresses world movement/camera and routes keys to the delivery handler.
     DeliveryBox,
+
+    /// The /check window owns input: arrows move its equipment grid, confirm on
+    /// View Wares opens the target's bazaar, Esc closes. Cursor state lives in
+    /// `hud::check_view::CheckTarget`.
+    Check,
+
+    /// A browsed bazaar's wares list. Cursor/quantity state lives in
+    /// `hud::bazaar_view::BazaarScreenState`; Esc leaves the bazaar (c2s 0x104)
+    /// and returns to the Check window.
+    Bazaar,
 }
 
 /// The action pending behind a sub-target cursor.

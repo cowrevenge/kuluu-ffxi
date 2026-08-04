@@ -656,6 +656,7 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
         (
             text_input::dialog_mode_sync_system,
             text_input::delivery_mode_sync_system,
+            text_input::bazaar_mode_sync_system,
             input::handle_input_system,
             text_input::text_input_system,
             text_input::mouse_nav_dispatch_system,

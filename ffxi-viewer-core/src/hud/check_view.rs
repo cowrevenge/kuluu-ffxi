@@ -1,58 +1,104 @@
+//! The /check window for a PC target: retail shows the target's gear as an
+//! icon grid, not a text list, beside their name/jobs, linkshell, bazaar
+//! message, and a View Wares entry that is live only while they have a bazaar.
+//!
+//! The grid layout is [`equipment_screen::EQUIP_GRID`] — the same one our own
+//! Equipment window uses, since both windows show the same 16 SAVE_EQUIP_KIND
+//! slots and must not drift apart.
+
 use bevy::prelude::*;
 
-use crate::hud::item_meta::{compose_item_detail, ItemDetail};
-use crate::hud::style::{self, theme};
+use crate::hud::equipment_screen::{EquipmentIndex, EQUIP_GRID};
+use crate::hud::item_dat_root::{ItemDatRoot, ItemIconCache};
+use crate::hud::item_grid::spawn_item_cell;
+use crate::hud::item_ui::{self, framed_box, text_font, theme, transparent_placeholder};
 use crate::snapshot::SceneState;
 
 #[derive(Resource, Debug, Clone, Copy, Default)]
 pub struct CheckTarget {
     pub open: bool,
     pub target_id: Option<u32>,
+    /// Grid cursor, as an [`EquipmentIndex`] discriminant.
+    pub slot: u8,
+    /// Focus sits on View Wares rather than on the grid.
+    pub on_wares: bool,
 }
 
-pub const CHECK_GRID_SLOTS: &[(u8, &str)] = &[
-    (0, "Main"),
-    (1, "Sub"),
-    (2, "Range"),
-    (3, "Ammo"),
-    (4, "Head"),
-    (9, "Neck"),
-    (11, "Ear1"),
-    (12, "Ear2"),
-    (5, "Body"),
-    (6, "Hands"),
-    (13, "Ring1"),
-    (14, "Ring2"),
-    (15, "Back"),
-    (10, "Waist"),
-    (7, "Legs"),
-    (8, "Feet"),
-];
+impl CheckTarget {
+    pub fn open(&mut self, target_id: u32) {
+        *self = Self {
+            open: true,
+            target_id: Some(target_id),
+            slot: EquipmentIndex::Main as u8,
+            on_wares: false,
+        };
+    }
 
-const PANEL_WIDTH_PX: f32 = 320.0;
+    pub fn close(&mut self) {
+        *self = Self::default();
+    }
+
+    /// Move the cursor. The grid wraps like the Equipment window; leaving the
+    /// bottom row downwards lands on View Wares when that entry is live, and
+    /// the button hands focus back to the row it came from.
+    pub fn move_focus(&mut self, dx: i32, dy: i32, wares_enabled: bool) {
+        if self.on_wares {
+            if dy < 0 {
+                self.on_wares = false;
+            }
+            return;
+        }
+        let bottom_row = EQUIP_GRID[EQUIP_GRID.len() - 1];
+        let leaving_grid = dy > 0 && bottom_row.iter().any(|&s| s as u8 == self.slot);
+        if leaving_grid && wares_enabled {
+            self.on_wares = true;
+            return;
+        }
+        self.slot = crate::hud::equipment_screen::grid_move(self.slot, dx, dy);
+    }
+}
+
+/// Detail lines under the focused slot's item name.
+const DETAIL_ROWS: usize = 8;
+const GRID_COL_PX: f32 = 176.0;
+const INFO_COL_PX: f32 = 240.0;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CheckRole {
+    Name,
+    Jobs,
+    Linkshell,
+    Message,
+    CellLabel(EquipmentIndex),
+    DetailName,
+    DetailRow(usize),
+    Wares,
+}
+
+#[derive(Component, Clone, Copy)]
+pub(crate) struct CheckText(CheckRole);
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum IconSlot {
+    Cell(EquipmentIndex),
+    Detail,
+}
+
+#[derive(Component, Clone, Copy)]
+pub(crate) struct CheckIcon(IconSlot);
+
+#[derive(Component, Clone, Copy)]
+pub(crate) struct CheckCellFrame(EquipmentIndex);
+
+#[derive(Component)]
+pub(crate) struct CheckWaresButton;
 
 #[derive(Component)]
 pub struct CheckView;
 
-#[derive(Component)]
-pub struct CheckWaresSection;
+pub(crate) fn spawn_check_view(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
+    let placeholder = transparent_placeholder(&mut images);
 
-#[derive(Component)]
-pub struct CheckWaresRow {
-    pub idx: usize,
-}
-
-#[derive(Component)]
-pub struct CheckGridCell {
-    pub grid_index: usize,
-}
-
-#[derive(Component)]
-pub struct CheckJobRibbon;
-
-const MAX_WARES_ROWS: usize = 8;
-
-pub fn spawn_check_view(mut commands: Commands) {
     commands
         .spawn((
             crate::components::InGameEntity,
@@ -61,179 +107,352 @@ pub fn spawn_check_view(mut commands: Commands) {
                 position_type: PositionType::Absolute,
                 top: Val::Percent(20.0),
                 left: Val::Percent(30.0),
-                width: Val::Px(PANEL_WIDTH_PX),
-                padding: UiRect::axes(Val::Px(10.0), Val::Px(8.0)),
-                border: UiRect::all(Val::Px(1.0)),
-                flex_direction: FlexDirection::Column,
-                row_gap: Val::Px(3.0),
+                column_gap: Val::Px(8.0),
+                flex_direction: FlexDirection::Row,
+                align_items: AlignItems::FlexStart,
                 display: Display::None,
                 ..default()
             },
-            BackgroundColor(theme::FRAME_BG),
-            BorderColor::all(theme::FRAME_EDGE),
         ))
-        .with_children(|p| {
-            p.spawn((
-                Text::new("Check"),
-                style::text_font(14.0),
-                TextColor(theme::TITLE),
-            ));
-
-            p.spawn((
-                CheckWaresSection,
-                Node {
+        .with_children(|root| {
+            // Left: the 4x4 slot grid with the View Wares entry beneath it.
+            let (mut n, bg, bd) = framed_box();
+            n.width = Val::Px(GRID_COL_PX);
+            root.spawn((n, bg, bd)).with_children(|p| {
+                p.spawn((Text::new("Check"), text_font(14.0), TextColor(theme::TITLE)));
+                p.spawn(Node {
                     flex_direction: FlexDirection::Column,
-                    row_gap: Val::Px(1.0),
-                    display: Display::None,
+                    row_gap: Val::Px(4.0),
+                    margin: UiRect::vertical(Val::Px(4.0)),
                     ..default()
-                },
-            ))
-            .with_children(|w| {
-                w.spawn((
-                    Text::new("View Wares"),
-                    style::text_font(13.0),
-                    TextColor(theme::MUTED),
-                ));
-                for idx in 0..MAX_WARES_ROWS {
-                    w.spawn((
-                        CheckWaresRow { idx },
-                        Text::new(""),
-                        style::text_font(13.0),
-                        TextColor(theme::TEXT),
-                    ));
-                }
-            });
-
-            p.spawn((Node {
-                flex_direction: FlexDirection::Column,
-                row_gap: Val::Px(1.0),
-                ..default()
-            },))
-                .with_children(|g| {
-                    for grid_index in 0..CHECK_GRID_SLOTS.len() {
-                        g.spawn((
-                            CheckGridCell { grid_index },
-                            Text::new(""),
-                            style::text_font(13.0),
-                            TextColor(theme::TEXT),
-                        ));
+                })
+                .with_children(|grid| {
+                    for row in EQUIP_GRID.iter() {
+                        grid.spawn(Node {
+                            flex_direction: FlexDirection::Row,
+                            column_gap: Val::Px(4.0),
+                            ..default()
+                        })
+                        .with_children(|line| {
+                            for &slot in row.iter() {
+                                spawn_item_cell(
+                                    line,
+                                    CheckCellFrame(slot),
+                                    CheckIcon(IconSlot::Cell(slot)),
+                                    CheckText(CheckRole::CellLabel(slot)),
+                                    slot.abbr(),
+                                    placeholder.clone(),
+                                );
+                            }
+                        });
                     }
                 });
+                p.spawn((
+                    CheckWaresButton,
+                    Node {
+                        justify_content: JustifyContent::Center,
+                        padding: UiRect::axes(Val::Px(6.0), Val::Px(2.0)),
+                        border: UiRect::all(Val::Px(1.0)),
+                        ..default()
+                    },
+                    BackgroundColor(theme::CELL_BG),
+                    BorderColor::all(theme::CELL_EDGE),
+                ))
+                .with_children(|b| {
+                    b.spawn((
+                        CheckText(CheckRole::Wares),
+                        Text::new("View Wares"),
+                        text_font(13.0),
+                        TextColor(theme::FAINT),
+                    ));
+                });
+            });
 
-            p.spawn((
-                CheckJobRibbon,
-                Text::new(""),
-                style::text_font(13.0),
-                TextColor(theme::TITLE),
-            ));
+            // Right: identity, message, and the focused slot's item card.
+            let (mut n, bg, bd) = framed_box();
+            n.width = Val::Px(INFO_COL_PX);
+            root.spawn((n, bg, bd)).with_children(|p| {
+                spawn_text(p, CheckRole::Name, 14.0, theme::TITLE);
+                spawn_text(p, CheckRole::Jobs, 13.0, theme::TEXT);
+                spawn_text(p, CheckRole::Linkshell, 13.0, theme::TEXT);
+                spawn_text(p, CheckRole::Message, 13.0, theme::MUTED);
+                p.spawn(Node {
+                    flex_direction: FlexDirection::Row,
+                    align_items: AlignItems::Center,
+                    column_gap: Val::Px(6.0),
+                    margin: UiRect::top(Val::Px(6.0)),
+                    ..default()
+                })
+                .with_children(|h| {
+                    h.spawn((
+                        CheckIcon(IconSlot::Detail),
+                        Node {
+                            width: Val::Px(32.0),
+                            height: Val::Px(32.0),
+                            display: Display::None,
+                            ..default()
+                        },
+                        ImageNode::new(placeholder.clone()),
+                    ));
+                    h.spawn((
+                        CheckText(CheckRole::DetailName),
+                        Text::new(""),
+                        text_font(14.0),
+                        TextColor(theme::TITLE),
+                    ));
+                });
+                for i in 0..DETAIL_ROWS {
+                    spawn_text(p, CheckRole::DetailRow(i), 12.0, theme::TEXT);
+                }
+            });
         });
 }
 
-pub fn update_check_view(
+fn spawn_text(p: &mut ChildSpawnerCommands, role: CheckRole, size: f32, color: Color) {
+    p.spawn((
+        CheckText(role),
+        Text::new(""),
+        text_font(size),
+        TextColor(color),
+        Node {
+            display: Display::None,
+            ..default()
+        },
+    ));
+}
+
+/// Everything the window renders, resolved once per update from the snapshot.
+struct CheckModel<'a> {
+    name: String,
+    check: Option<&'a ffxi_viewer_wire::CheckResult>,
+    message: Option<&'a str>,
+    /// The target's linkshell pearl colour, for tinting their linkshell name.
+    linkshell_color: Option<Color>,
+    wares_enabled: bool,
+}
+
+/// Whether View Wares is live for `target_id`. The target's own bazaar flag is
+/// the retail gate: LSB sets `Flags1.BazaarFlag` from `PChar->hasBazaar()`, i.e.
+/// from having any priced inventory slot
+/// (vendor/server/src/map/packets/char_update.cpp:318). Shared with the input
+/// layer so the rendered state and the key that fires cannot disagree.
+pub fn wares_enabled(snap: &ffxi_viewer_wire::SceneSnapshot, target_id: u32) -> bool {
+    snap.entities
+        .iter()
+        .any(|e| e.id == target_id && e.char_flags.bazaar)
+}
+
+fn model<'a>(snap: &'a ffxi_viewer_wire::SceneSnapshot, target_id: u32) -> CheckModel<'a> {
+    let entity = snap.entities.iter().find(|e| e.id == target_id);
+    let name = entity
+        .and_then(|e| e.name.clone())
+        .unwrap_or_else(|| "???".to_string());
+    let linkshell_color = entity.filter(|e| e.char_flags.linkshell).map(|e| {
+        let [r, g, b] = e.char_flags.linkshell_color;
+        Color::srgb_u8(r, g, b)
+    });
+    // 0x0CA carries only the target's name, so it is only theirs if it matches.
+    let message = snap
+        .check_message
+        .as_ref()
+        .filter(|m| m.name == name)
+        .map(|m| m.message.trim())
+        .filter(|m| !m.is_empty());
+    CheckModel {
+        name,
+        check: snap.check.as_ref().filter(|c| c.target_id == target_id),
+        message,
+        linkshell_color,
+        wares_enabled: wares_enabled(snap, target_id),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn update_check_view(
     target: Res<CheckTarget>,
     state: Res<SceneState>,
-    mut view_q: Query<&mut Node, With<CheckView>>,
-    mut wares_section_q: Query<&mut Node, (With<CheckWaresSection>, Without<CheckView>)>,
-    mut wares_row_q: Query<(&CheckWaresRow, &mut Text), Without<CheckGridCell>>,
-    mut grid_q: Query<(&CheckGridCell, &mut Text, &mut TextColor), Without<CheckWaresRow>>,
-    mut ribbon_q: Query<
-        &mut Text,
+    dat_root: Res<ItemDatRoot>,
+    mut icon_cache: ResMut<ItemIconCache>,
+    mut images: ResMut<Assets<Image>>,
+    mut view_q: Query<
+        &mut Node,
         (
-            With<CheckJobRibbon>,
-            Without<CheckWaresRow>,
-            Without<CheckGridCell>,
+            With<CheckView>,
+            Without<CheckText>,
+            Without<CheckIcon>,
+            Without<CheckWaresButton>,
         ),
+    >,
+    mut text_q: Query<
+        (&CheckText, &mut Text, &mut TextColor, &mut Node),
+        (Without<CheckView>, Without<CheckIcon>),
+    >,
+    mut icon_q: Query<(&CheckIcon, &mut Node, &mut ImageNode), Without<CheckView>>,
+    mut cell_q: Query<(&CheckCellFrame, &mut BorderColor, &mut BackgroundColor)>,
+    mut wares_q: Query<
+        (&mut BorderColor, &mut BackgroundColor),
+        (With<CheckWaresButton>, Without<CheckCellFrame>),
     >,
 ) {
     let Ok(mut view_node) = view_q.single_mut() else {
         return;
     };
-
-    if !target.open {
+    let Some(target_id) = target.target_id.filter(|_| target.open) else {
         if view_node.display != Display::None {
             view_node.display = Display::None;
         }
         return;
-    }
-    if view_node.display == Display::None {
+    };
+    if view_node.display != Display::Flex {
         view_node.display = Display::Flex;
     }
 
     let snap = &state.snapshot;
-    let check = snap
-        .check
-        .as_ref()
-        .filter(|c| target.target_id == Some(c.target_id));
+    let m = model(snap, target_id);
+    let focused_slot = EquipmentIndex::from_index(target.slot).unwrap_or(EquipmentIndex::Main);
+    let equipped = |slot: EquipmentIndex| -> Option<u16> {
+        m.check
+            .and_then(|c| c.equipped.get(slot as usize).copied().flatten())
+    };
+    let focused_item = equipped(focused_slot);
+    let (detail_name, detail_rows) =
+        item_ui::focus_detail(focused_item, None, snap, &dat_root, &mut icon_cache);
 
-    let bazaar = &snap.bazaar;
-    if let Ok(mut wares_node) = wares_section_q.single_mut() {
-        let want_display = if bazaar.is_empty() {
-            Display::None
-        } else {
+    for (tag, mut text, mut color, mut node) in text_q.iter_mut() {
+        let (want, want_color, visible) = role_value(
+            tag.0,
+            &m,
+            focused_slot,
+            target.on_wares,
+            &detail_name,
+            &detail_rows,
+        );
+        let display = if visible {
             Display::Flex
+        } else {
+            Display::None
         };
-        if wares_node.display != want_display {
-            wares_node.display = want_display;
+        if node.display != display {
+            node.display = display;
         }
-    }
-    for (row, mut text) in wares_row_q.iter_mut() {
-        let want = match bazaar.get(row.idx) {
-            Some(entry) => {
-                let name = ffxi_proto::item_names::lookup(entry.item_no)
-                    .map(str::to_string)
-                    .unwrap_or_else(|| format!("item #{}", entry.item_no));
-                if entry.quantity > 1 {
-                    format!("  {name} x{}  {} gil", entry.quantity, entry.price)
-                } else {
-                    format!("  {name}  {} gil", entry.price)
-                }
-            }
-            None => String::new(),
-        };
-        if **text != want {
+        if visible && **text != want {
             **text = want;
         }
-    }
-
-    for (cell, mut text, mut color) in grid_q.iter_mut() {
-        let Some(&(slot_id, slot_label)) = CHECK_GRID_SLOTS.get(cell.grid_index) else {
-            continue;
-        };
-        let item_no = check.and_then(|c| c.equipped.get(slot_id as usize).copied().flatten());
-        let (body, filled) = match item_no {
-            Some(no) => {
-                let detail: ItemDetail = compose_item_detail(no, None, snap, None);
-                let name = item_label(no, &detail);
-                (format!("{slot_label:<6}: {name}"), true)
-            }
-            None => (format!("{slot_label:<6}: —"), false),
-        };
-        if **text != body {
-            **text = body;
-        }
-        let want_color = if filled { theme::TEXT } else { theme::MUTED };
         if color.0 != want_color {
             color.0 = want_color;
         }
     }
 
-    if let Ok(mut text) = ribbon_q.single_mut() {
-        let want = job_ribbon(check);
-        if **text != want {
-            **text = want;
+    for (icon, mut node, mut image) in icon_q.iter_mut() {
+        let item = match icon.0 {
+            IconSlot::Cell(slot) => equipped(slot),
+            IconSlot::Detail => focused_item,
+        };
+        match item.and_then(|n| icon_cache.ensure(n, &dat_root, &mut images)) {
+            Some(h) => {
+                if image.image != h {
+                    image.image = h;
+                }
+                if node.display != Display::Flex {
+                    node.display = Display::Flex;
+                }
+            }
+            None => {
+                if node.display != Display::None {
+                    node.display = Display::None;
+                }
+            }
         }
+    }
+
+    for (cell, mut border, mut bg) in cell_q.iter_mut() {
+        let focused = cell.0 == focused_slot && !target.on_wares;
+        set_frame(&mut border, &mut bg, focused, true);
+    }
+
+    if let Ok((mut border, mut bg)) = wares_q.single_mut() {
+        set_frame(&mut border, &mut bg, target.on_wares, m.wares_enabled);
     }
 }
 
-fn item_label(item_no: u16, detail: &ItemDetail) -> String {
-    if let Some(s) = detail.static_.as_ref() {
-        if !s.name.is_empty() {
-            return s.name.clone();
+fn set_frame(border: &mut BorderColor, bg: &mut BackgroundColor, focused: bool, enabled: bool) {
+    let want_border = match (focused, enabled) {
+        (true, _) => theme::CURSOR,
+        (false, true) => theme::CELL_EDGE,
+        (false, false) => theme::FAINT,
+    };
+    if border.left != want_border {
+        *border = BorderColor::all(want_border);
+    }
+    let want_bg = if focused {
+        theme::CURSOR_BG
+    } else {
+        theme::CELL_BG
+    };
+    if bg.0 != want_bg {
+        bg.0 = want_bg;
+    }
+}
+
+fn role_value(
+    role: CheckRole,
+    m: &CheckModel,
+    focused_slot: EquipmentIndex,
+    on_wares: bool,
+    detail_name: &str,
+    detail_rows: &[String],
+) -> (String, Color, bool) {
+    match role {
+        CheckRole::Name => (m.name.clone(), theme::TITLE, true),
+        CheckRole::Jobs => (job_ribbon(m.check), theme::TEXT, true),
+        CheckRole::Linkshell => match m.check.map(|c| c.linkshell.as_str()).unwrap_or("") {
+            "" => (String::new(), theme::TEXT, false),
+            ls => (
+                format!("Linkshell: {ls}"),
+                m.linkshell_color.unwrap_or(theme::TEXT),
+                true,
+            ),
+        },
+        CheckRole::Message => match m.message {
+            Some(msg) => (msg.to_string(), theme::MUTED, true),
+            None => (String::new(), theme::MUTED, false),
+        },
+        CheckRole::CellLabel(slot) => {
+            let filled = m
+                .check
+                .and_then(|c| c.equipped.get(slot as usize).copied().flatten())
+                .is_some();
+            let color = if slot == focused_slot && !on_wares {
+                theme::CURSOR
+            } else {
+                theme::MUTED
+            };
+            // An occupied cell shows its icon instead: keeping the label would
+            // sit beside the icon (row flex) and push it off-centre.
+            (slot.abbr().to_string(), color, !filled)
+        }
+        CheckRole::DetailName => {
+            let empty = format!("{}: —", focused_slot.name());
+            let text = if detail_name == item_ui::NO_ITEM_PROMPT {
+                empty
+            } else {
+                detail_name.to_string()
+            };
+            (text, theme::TITLE, true)
+        }
+        CheckRole::DetailRow(i) => match detail_rows.get(i) {
+            Some(line) => (line.clone(), theme::TEXT, true),
+            None => (String::new(), theme::TEXT, false),
+        },
+        CheckRole::Wares => {
+            let color = match (on_wares, m.wares_enabled) {
+                (true, _) => theme::CURSOR,
+                (false, true) => theme::TEXT,
+                (false, false) => theme::FAINT,
+            };
+            ("View Wares".to_string(), color, true)
         }
     }
-    ffxi_proto::item_names::lookup(item_no)
-        .map(str::to_string)
-        .unwrap_or_else(|| format!("item #{item_no}"))
 }
 
 fn job_ribbon(check: Option<&ffxi_viewer_wire::CheckResult>) -> String {
@@ -248,6 +467,8 @@ fn job_ribbon(check: Option<&ffxi_viewer_wire::CheckResult>) -> String {
                 }
             }
         }
+        // Zeroed jobs are what /anon looks like on the wire
+        // (0x0c9_equip_inspect_general.cpp:44 gates the whole block).
         _ => "Lv.? —".to_string(),
     }
 }
@@ -256,21 +477,73 @@ fn job_ribbon(check: Option<&ffxi_viewer_wire::CheckResult>) -> String {
 mod tests {
     use super::*;
 
-    #[test]
-    fn check_grid_has_sixteen_unique_slots() {
-        assert_eq!(CHECK_GRID_SLOTS.len(), 16, "all 16 equipment slots present");
-        let mut ids: Vec<u8> = CHECK_GRID_SLOTS.iter().map(|(id, _)| *id).collect();
-        ids.sort_unstable();
-        ids.dedup();
-        assert_eq!(ids.len(), 16, "no duplicate slot ids in the grid");
-        assert_eq!(*ids.last().unwrap(), 15, "max slot id is Back (15)");
+    fn target() -> CheckTarget {
+        let mut t = CheckTarget::default();
+        t.open(1);
+        t
     }
 
     #[test]
-    fn grid_reading_order_starts_main_sub() {
-        assert_eq!(CHECK_GRID_SLOTS[0], (0, "Main"));
-        assert_eq!(CHECK_GRID_SLOTS[1], (1, "Sub"));
-        assert_eq!(CHECK_GRID_SLOTS[2], (2, "Range"));
-        assert_eq!(CHECK_GRID_SLOTS[3], (3, "Ammo"));
+    fn grid_navigation_wraps_like_the_equipment_window() {
+        let mut t = target();
+        t.move_focus(1, 0, false);
+        assert_eq!(t.slot, EquipmentIndex::Sub as u8);
+        t.move_focus(-1, 0, false);
+        assert_eq!(t.slot, EquipmentIndex::Main as u8);
+        t.move_focus(0, -1, false);
+        assert_eq!(t.slot, EquipmentIndex::Back as u8, "up from the top wraps");
+    }
+
+    #[test]
+    fn wares_is_reachable_below_the_last_row_only_when_enabled() {
+        let mut t = target();
+        t.slot = EquipmentIndex::Back as u8;
+        t.move_focus(0, 1, false);
+        assert!(!t.on_wares, "a bazaar-less target keeps the wrap");
+        assert_eq!(t.slot, EquipmentIndex::Main as u8);
+
+        let mut t = target();
+        t.slot = EquipmentIndex::Feet as u8;
+        t.move_focus(0, 1, true);
+        assert!(t.on_wares);
+    }
+
+    #[test]
+    fn wares_hands_focus_back_to_the_slot_it_came_from() {
+        let mut t = target();
+        t.slot = EquipmentIndex::Waist as u8;
+        t.move_focus(0, 1, true);
+        assert!(t.on_wares);
+        t.move_focus(1, 0, true);
+        assert!(t.on_wares, "sideways does not leave the button");
+        t.move_focus(0, -1, true);
+        assert!(!t.on_wares);
+        assert_eq!(t.slot, EquipmentIndex::Waist as u8);
+    }
+
+    #[test]
+    fn close_clears_the_target_so_the_window_hides() {
+        let mut t = target();
+        t.on_wares = true;
+        t.close();
+        assert!(!t.open);
+        assert_eq!(t.target_id, None);
+        assert!(!t.on_wares);
+    }
+
+    #[test]
+    fn anonymous_targets_render_the_unknown_job_ribbon() {
+        let anon = ffxi_viewer_wire::CheckResult {
+            target_id: 1,
+            equipped: [None; 16],
+            main_job: 0,
+            sub_job: 0,
+            main_job_lv: 0,
+            sub_job_lv: 0,
+            master_lv: 0,
+            linkshell: String::new(),
+        };
+        assert_eq!(job_ribbon(Some(&anon)), "Lv.? —");
+        assert_eq!(job_ribbon(None), "Lv.? —");
     }
 }

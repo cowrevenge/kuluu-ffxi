@@ -14,6 +14,7 @@ pub mod item_names;
 pub mod item_usable;
 pub mod job_names;
 pub mod key_item_names;
+pub mod linkshell_name;
 pub mod login;
 pub mod magic;
 pub mod map;

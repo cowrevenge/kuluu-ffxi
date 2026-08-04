@@ -96,6 +96,12 @@ impl EquipInspectGeneral {
             master_flags: body[Self::MFLAGS_OFFSET],
         })
     }
+
+    /// The equipped linkshell's name, or empty when the target wears no pearl
+    /// (LSB leaves `sComLinkName` zeroed — 0x0c9_equip_inspect_general.cpp:36-42).
+    pub fn linkshell_name(&self) -> String {
+        crate::linkshell_name::decode(&self.linkshell_name_raw)
+    }
 }
 
 /// One `checkitem_t`; `equip_kind` is SAVE_EQUIP_KIND, whose 0..=15 order equals
@@ -177,7 +183,7 @@ mod equip_inspect_tests {
         buf[4..6].copy_from_slice(&0x01A2u16.to_le_bytes()); // ActIndex
         buf[6] = 0x01; // OptionFlag = GENERAL
         buf[10..12].copy_from_slice(&513u16.to_le_bytes()); // linkshell ItemNo
-        buf[12..17].copy_from_slice(b"Kuluu"); // sComLinkName (raw bytes)
+        buf[12..28].copy_from_slice(&crate::linkshell_name::encode("Kuluu")); // sComLinkName
         buf[28..30].copy_from_slice(&0xABCDu16.to_le_bytes()); // sComColor
         buf[30] = 1; // job[0] = WAR
         buf[31] = 13; // job[1] = NIN
@@ -198,7 +204,7 @@ mod equip_inspect_tests {
         assert_eq!(g.unique_no, 0x0104_00D2);
         assert_eq!(g.act_index, 0x01A2);
         assert_eq!(g.linkshell_item_no, 513);
-        assert_eq!(&g.linkshell_name_raw[..5], b"Kuluu");
+        assert_eq!(g.linkshell_name(), "Kuluu");
         assert_eq!(g.linkshell_color_raw, 0xABCD);
         assert_eq!(g.main_job, 1);
         assert_eq!(g.sub_job, 13);

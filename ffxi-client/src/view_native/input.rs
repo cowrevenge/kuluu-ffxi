@@ -565,7 +565,11 @@ pub fn dispatch_movement_system(
 
     if matches!(
         *mode,
-        InputMode::Chat(_) | InputMode::Dialog(_) | InputMode::DeliveryBox
+        InputMode::Chat(_)
+            | InputMode::Dialog(_)
+            | InputMode::DeliveryBox
+            | InputMode::Check
+            | InputMode::Bazaar
     ) {
         autorun.phantom_forward = false;
         autorun.strafe_held_since = None;

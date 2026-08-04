@@ -1,4 +1,5 @@
 pub mod action_model;
+pub mod bazaar_view;
 #[cfg(feature = "enhanced-cast-bar")]
 pub mod cast_bar;
 pub mod chat_input;
@@ -196,6 +197,7 @@ impl Plugin for HudPlugin {
         }
 
         app.init_resource::<check_view::CheckTarget>();
+        app.init_resource::<bazaar_view::BazaarScreenState>();
         app.init_resource::<status_panel::StatusProfileOpen>();
 
         app.init_resource::<trade::TradeState>();
@@ -289,6 +291,7 @@ impl Plugin for HudPlugin {
                 item_screen::update_bag_tabs.after(item_screen::update_item_screen),
                 trade::update_trade_window,
                 check_view::update_check_view,
+                bazaar_view::update_bazaar_view,
                 status_panel::update_status_panel,
                 equipment_screen::update_equipment_screen.after(menu::refresh_dynamic_menu_rows),
                 delivery::rebuild_delivery_inventory,
@@ -418,6 +421,7 @@ pub fn add_hud_spawners<L: bevy::ecs::schedule::ScheduleLabel + Clone>(app: &mut
             item_screen::spawn_item_screen,
             trade::spawn_trade_window,
             check_view::spawn_check_view,
+            bazaar_view::spawn_bazaar_view,
             status_panel::spawn_status_panel,
             equipment_screen::spawn_equipment_screen,
             delivery::spawn_delivery_screen,

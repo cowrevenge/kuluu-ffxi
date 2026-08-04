@@ -64,7 +64,7 @@ pub fn state_to_snapshot(s: &SessionState) -> wire::SceneSnapshot {
         containers: project_containers(s),
 
         stats: s.char_stats.map(char_stats_to_wire),
-        bazaar: Vec::new(),
+        bazaar: s.bazaar.as_ref().map(bazaar_to_wire),
         play_time_s: 0,
 
         self_fishing: s.self_fishing.map(|f| wire::SelfFishing {
@@ -98,6 +98,11 @@ pub fn state_to_snapshot(s: &SessionState) -> wire::SceneSnapshot {
 
         check: s.check_result.as_ref().map(check_to_wire),
 
+        check_message: s.check_message.as_ref().map(|m| wire::CheckMessage {
+            name: m.name.clone(),
+            message: m.message.clone(),
+        }),
+
         widescan: widescan_to_wire(&s.widescan),
     }
 }
@@ -125,6 +130,24 @@ fn widescan_to_wire(w: &crate::state::WidescanList) -> wire::WidescanList {
     }
 }
 
+fn bazaar_to_wire(b: &crate::state::BazaarView) -> wire::BazaarView {
+    wire::BazaarView {
+        seller_id: b.seller_id,
+        seller_name: b.seller_name.clone(),
+        items: b
+            .items
+            .iter()
+            .map(|it| wire::BazaarEntry {
+                index: it.index,
+                item_no: it.item_no,
+                quantity: it.quantity,
+                price: it.price,
+                tax_rate: it.tax_rate,
+            })
+            .collect(),
+    }
+}
+
 fn check_to_wire(c: &crate::state::CheckResult) -> wire::CheckResult {
     wire::CheckResult {
         target_id: c.target_id,
@@ -134,6 +157,7 @@ fn check_to_wire(c: &crate::state::CheckResult) -> wire::CheckResult {
         main_job_lv: c.main_job_lv,
         sub_job_lv: c.sub_job_lv,
         master_lv: c.master_lv,
+        linkshell: c.linkshell.clone(),
     }
 }
 
@@ -895,6 +919,7 @@ mod tests {
             main_job_lv: 75,
             sub_job_lv: 37,
             master_lv: 0,
+            linkshell: "Kuluu".into(),
         });
         let snap = state_to_snapshot(&s);
         let c = snap.check.expect("check result on the wire");
@@ -904,6 +929,45 @@ mod tests {
         assert_eq!(c.equipped[1], None);
         assert_eq!((c.main_job, c.main_job_lv), (1, 75));
         assert_eq!((c.sub_job, c.sub_job_lv), (13, 37));
+        assert_eq!(c.linkshell, "Kuluu");
+    }
+
+    #[test]
+    fn check_message_and_bazaar_cross_the_wire_boundary() {
+        let mut s = SessionState::default();
+        let snap = state_to_snapshot(&s);
+        assert!(snap.check_message.is_none());
+        assert!(snap.bazaar.is_none());
+
+        s.apply_event(&AgentEvent::CheckMessageReceived {
+            name: "Aliya".into(),
+            message: "Sneak oil 2k".into(),
+        });
+        s.apply_event(&AgentEvent::BazaarOpened {
+            seller_id: 0xCAFE,
+            seller_index: 0x123,
+            seller_name: "Aliya".into(),
+        });
+        s.apply_event(&AgentEvent::BazaarItemReceived {
+            index: 3,
+            item_no: 4096,
+            quantity: 5,
+            price: 1000,
+            tax_rate: 500,
+        });
+
+        let snap = state_to_snapshot(&s);
+        let m = snap.check_message.expect("inspect message on the wire");
+        assert_eq!((m.name.as_str(), m.message.as_str()), ("Aliya", "Sneak oil 2k"));
+
+        let b = snap.bazaar.expect("bazaar on the wire");
+        assert_eq!(b.seller_id, 0xCAFE);
+        assert_eq!(b.seller_name, "Aliya");
+        assert_eq!(b.items.len(), 1);
+        let row = b.items[0];
+        assert_eq!((row.index, row.item_no, row.quantity, row.price), (3, 4096, 5, 1000));
+        // 5% zone tax, applied by the consumer rather than stored pre-taxed.
+        assert_eq!(row.total_price(2), 2100);
     }
 
     #[test]

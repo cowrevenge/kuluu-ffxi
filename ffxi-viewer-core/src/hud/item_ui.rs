@@ -30,9 +30,14 @@ pub fn transparent_placeholder(images: &mut Assets<Image>) -> Handle<Image> {
     images.add(image)
 }
 
+/// What [`focus_detail`] returns as the item name when nothing is focused;
+/// exported so a window that wants its own empty-slot wording can tell the
+/// prompt apart from a real item name.
+pub const NO_ITEM_PROMPT: &str = "Select an item.";
+
 /// The name + detail rows for a focused item, shared by both windows so the
 /// item card reads identically wherever it appears. `None` yields the retail
-/// "Select an item." prompt.
+/// [`NO_ITEM_PROMPT`].
 pub fn focus_detail(
     item_no: Option<u16>,
     focused_slot: Option<(u8, u8)>,
@@ -41,7 +46,7 @@ pub fn focus_detail(
     icon_cache: &mut ItemIconCache,
 ) -> (String, Vec<String>) {
     let Some(item_no) = item_no else {
-        return ("Select an item.".to_string(), Vec::new());
+        return (NO_ITEM_PROMPT.to_string(), Vec::new());
     };
     let dat = icon_cache
         .table(dat_root)

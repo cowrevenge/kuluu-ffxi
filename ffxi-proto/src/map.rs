@@ -83,6 +83,22 @@ pub mod c2s {
     // Stop tracking: uint32 padding (Dammy).
     pub const TRACKING_END: u16 = 0x0F6;
 
+    // GP_CLI_COMMAND_BAZAAR_EXIT, vendor/server/src/map/packets/c2s/0x104_bazaar_exit.h.
+    // Header-only: leaves the bazaar we are browsing. The server clears our
+    // BazaarID, so it must be sent before browsing another one
+    // (0x105_bazaar_list.cpp validate mustEqual BazaarID.id 0).
+    pub const BAZAAR_EXIT: u16 = 0x104;
+
+    // GP_CLI_COMMAND_BAZAAR_LIST, vendor/server/src/map/packets/c2s/0x105_bazaar_list.h:27-31.
+    // View a PC's bazaar: UniqueNo u32, ActIndex u16, padding u16. Answered by
+    // one s2c 0x105 per priced slot.
+    pub const BAZAAR_LIST: u16 = 0x105;
+
+    // GP_CLI_COMMAND_BAZAAR_BUY, vendor/server/src/map/packets/c2s/0x106_bazaar_buy.h:27-31.
+    // Buy from the bazaar we are browsing: BazaarItemIndex u8, padding u8[3],
+    // BuyNum u32 (validator range 1..=99).
+    pub const BAZAAR_BUY: u16 = 0x106;
+
     // GP_CLI_COMMAND_TROPHY_ENTRY, vendor/server/src/map/packets/c2s/0x041_trophy_entry.h.
     // Cast lots on a pool item: TrophyItemIndex u8, PropertyItemIndex u8,
     // padding u8[2]. The server rolls the number itself — the client sends no
@@ -458,6 +474,28 @@ pub mod s2c {
     // /check answer for a PC target: EQUIPMENT batches then one GENERAL packet
     // (vendor/server/src/map/packets/c2s/0x0dd_equip_inspect.cpp:135-136).
     pub const EQUIP_INSPECT: u16 = 0x0C9;
+
+    // GP_SERV_COMMAND_INSPECT_MESSAGE, vendor/server/src/map/packets/s2c/0x0ca_inspect_message.h.
+    // The checked PC's bazaar message and title; pushed just ahead of the 0x0C9
+    // batches and carrying no target id of its own.
+    pub const INSPECT_MESSAGE: u16 = 0x0CA;
+
+    // GP_SERV_COMMAND_BAZAAR_LIST, vendor/server/src/map/packets/s2c/0x105_bazaar_list.h.
+    // One priced row of the bazaar we are browsing; re-pushed per row after each
+    // purchase (0x106_bazaar_buy.cpp:198).
+    pub const BAZAAR_LIST: u16 = 0x105;
+
+    // GP_SERV_COMMAND_BAZAAR_BUY, vendor/server/src/map/packets/s2c/0x106_bazaar_buy.h.
+    // Result of our c2s 0x106 purchase attempt (OK / ERR / END).
+    pub const BAZAAR_BUY: u16 = 0x106;
+
+    // GP_SERV_COMMAND_BAZAAR_CLOSE, vendor/server/src/map/packets/s2c/0x107_bazaar_close.h.
+    // The browsed bazaar emptied (its last priced row sold) or closed.
+    pub const BAZAAR_CLOSE: u16 = 0x107;
+
+    // GP_SERV_COMMAND_BAZAAR_SELL, vendor/server/src/map/packets/s2c/0x109_bazaar_sell.h.
+    // Another customer bought a row of the bazaar we are browsing.
+    pub const BAZAAR_SELL: u16 = 0x109;
 
     // GP_SERV_COMMAND_TRACKING_LIST, vendor/server/src/map/packets/s2c/0x0f4_tracking_list.h.
     // One wide-scan entry (ActIndex/Level/Type + relative x/z + sName[16]).

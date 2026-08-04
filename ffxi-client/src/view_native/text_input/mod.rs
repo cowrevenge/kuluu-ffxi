@@ -13,6 +13,10 @@ use ffxi_viewer_core::{
 
 use super::debug_heights::DebugHeightsRequest;
 
+mod check;
+pub use check::bazaar_mode_sync_system;
+use check::{handle_bazaar_key, handle_check_key};
+
 mod delivery;
 pub use delivery::delivery_mode_sync_system;
 use delivery::handle_delivery_key;
@@ -93,6 +97,8 @@ pub struct SlashWriters<'w, 's> {
     pub item_screen_container: ResMut<'w, ffxi_viewer_core::hud::item_screen::ItemScreenContainer>,
 
     pub check_target: ResMut<'w, ffxi_viewer_core::hud::check_view::CheckTarget>,
+
+    pub bazaar_state: ResMut<'w, ffxi_viewer_core::hud::bazaar_view::BazaarScreenState>,
 
     pub trade_state: ResMut<'w, ffxi_viewer_core::hud::trade::TradeState>,
 
@@ -346,6 +352,29 @@ pub fn text_input_system(
                     &slash_writers.delivery_inv,
                     &cmd_tx.0,
                 );
+            }
+            InputMode::Check => {
+                if let Some(next) = handle_check_key(
+                    &ev.logical_key,
+                    &bindings,
+                    &mut slash_writers.check_target,
+                    &mut slash_writers.bazaar_state,
+                    &scene_state,
+                    &cmd_tx.0,
+                ) {
+                    *mode = next;
+                }
+            }
+            InputMode::Bazaar => {
+                if let Some(next) = handle_bazaar_key(
+                    &ev.logical_key,
+                    &bindings,
+                    &mut slash_writers.bazaar_state,
+                    &scene_state,
+                    &cmd_tx.0,
+                ) {
+                    *mode = next;
+                }
             }
         }
     }
@@ -634,6 +663,19 @@ fn apply_chat_action(
                         let mut stack = MenuStack::root();
                         stack.push(*kind);
                         Some(InputMode::Menu(stack))
+                    }
+                    // `/check <pc>` opens the same window the Check menu entry
+                    // does; the other check kinds answer in chat only.
+                    SlashOutcome::Command(AgentCommand::CheckTarget {
+                        target_id,
+                        kind: crate::state::CheckKind::Check,
+                        ..
+                    }) if entities.iter().any(|e| {
+                        e.id == *target_id && e.kind == ffxi_viewer_wire::EntityKind::Pc
+                    }) =>
+                    {
+                        slash_writers.check_target.open(*target_id);
+                        Some(InputMode::Check)
                     }
                     _ => None,
                 };

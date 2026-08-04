@@ -192,6 +192,48 @@ pub fn build_subpacket_equip_inspect(
     buf
 }
 
+// GP_CLI_COMMAND_BAZAAR_LIST, vendor/server/src/map/packets/c2s/0x105_bazaar_list.h:27-31:
+// UniqueNo u32, ActIndex u16, padding u16. The server rejects it while we still
+// hold a BazaarID, so leave the previous bazaar first (0x105_bazaar_list.cpp validate).
+pub fn build_subpacket_bazaar_list(sync: u16, unique_no: u32, act_index: u16) -> Vec<u8> {
+    let mut buf = vec![0u8; 12];
+    buf[0..4].copy_from_slice(&build_subpacket_header(
+        ffxi_proto::map::c2s::BAZAAR_LIST,
+        3,
+        sync,
+    ));
+    buf[4..8].copy_from_slice(&unique_no.to_le_bytes());
+    buf[8..10].copy_from_slice(&act_index.to_le_bytes());
+    buf
+}
+
+// GP_CLI_COMMAND_BAZAAR_BUY, vendor/server/src/map/packets/c2s/0x106_bazaar_buy.h:27-31:
+// BazaarItemIndex u8, padding u8[3], BuyNum u32. `index` is the seller-side
+// LOC_INVENTORY slot from the s2c 0x105 row.
+pub fn build_subpacket_bazaar_buy(sync: u16, index: u8, quantity: u32) -> Vec<u8> {
+    let mut buf = vec![0u8; 12];
+    buf[0..4].copy_from_slice(&build_subpacket_header(
+        ffxi_proto::map::c2s::BAZAAR_BUY,
+        3,
+        sync,
+    ));
+    buf[4] = index;
+    buf[8..12].copy_from_slice(&quantity.to_le_bytes());
+    buf
+}
+
+// GP_CLI_COMMAND_BAZAAR_EXIT, vendor/server/src/map/packets/c2s/0x104_bazaar_exit.h:
+// header only. Clears our BazaarID server-side and notifies the seller.
+pub fn build_subpacket_bazaar_exit(sync: u16) -> Vec<u8> {
+    let mut buf = vec![0u8; 4];
+    buf[0..4].copy_from_slice(&build_subpacket_header(
+        ffxi_proto::map::c2s::BAZAAR_EXIT,
+        1,
+        sync,
+    ));
+    buf
+}
+
 pub fn build_subpacket_reqlogout(sync: u16, mode: u16, kind: u16) -> Vec<u8> {
     let mut buf = vec![0u8; 8];
     buf[0..4].copy_from_slice(&build_subpacket_header(

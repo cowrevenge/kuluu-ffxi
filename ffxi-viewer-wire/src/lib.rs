@@ -2,6 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 
+// v10: Entity.char_flags (0x0D/0x0E Flags1-3, for retail nameplate colour + icon markers) and
+// PartyMember.party_no (GAttr.PartyNo, to tell an alliance-mate's claim from a party-mate's).
 // v9: ViewerEvent::ActionStarted.result — optional (resolution, animation) pair (None for a
 // truncated, result-less, or non-basic-attack BATTLE2 body).
 // v8: SceneSnapshot.self_server_status (0x037 animation byte for self — the server's
@@ -12,7 +14,7 @@ use serde::{Deserialize, Serialize};
 // v5: InventoryItem.charges_remaining + next_use_vana_ts (item recast/charges).
 // v4: SceneSnapshot.delivery_box (dedicated delivery screen) + ViewerCommand::DeliveryBox
 // (postcard frames are not self-describing, so any shape change bumps this).
-pub const PROTOCOL_VERSION: u32 = 9;
+pub const PROTOCOL_VERSION: u32 = 10;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 pub struct Vec3 {
@@ -160,6 +162,33 @@ pub enum EntityLook {
     },
 }
 
+/// Scene-side mirror of `ffxi_proto::decode::CharFlags` — the 0x0D/0x0E
+/// `Flags1`/`Flags2`/`Flags3` bits the nameplate needs. The bit layout lives
+/// with the decoder; this carries only the decoded values across the wire.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct CharFlags {
+    pub monster: bool,
+    pub lfg: bool,
+    pub anonymous: bool,
+    pub yell: bool,
+    pub away: bool,
+    pub play_online: bool,
+    pub linkshell: bool,
+    pub linkdead: bool,
+    pub gm_level: u8,
+    pub bazaar: bool,
+    pub linkshell_color: [u8; 3],
+    pub charm: bool,
+    pub gm_icon: bool,
+    pub auto_party: bool,
+    pub trust: bool,
+    pub lfg_master: bool,
+    pub pet: bool,
+    pub allegiance: u8,
+    pub new_character: bool,
+    pub mentor: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Entity {
     pub id: u32,
@@ -198,6 +227,9 @@ pub struct Entity {
 
     #[serde(default)]
     pub status: u8,
+
+    #[serde(default)]
+    pub char_flags: CharFlags,
 }
 
 // LSB STATUS_TYPE. vendor/server/src/map/entities/baseentity.h
@@ -304,6 +336,11 @@ pub struct PartyMember {
     pub sub_job_lv: u8,
     pub is_party_leader: bool,
     pub is_alliance_leader: bool,
+
+    /// Which party of the alliance this member sits in (0..2, or 3 for
+    /// "no party"). vendor/server/src/map/packets/s2c/0x0dd_group_list.cpp:40.
+    #[serde(default)]
+    pub party_no: u8,
 
     #[serde(default)]
     pub in_mog_house: bool,
@@ -1094,6 +1131,7 @@ mod tests {
                 animation: 0,
                 animationsub: 0,
                 status: 0,
+                char_flags: CharFlags::default(),
             }],
             party: vec![],
             chat: vec![ChatLine {
@@ -1186,6 +1224,7 @@ mod tests {
             sub_job_lv: 0,
             is_party_leader: false,
             is_alliance_leader: false,
+            party_no: 0,
             in_mog_house: true,
         }];
         assert!(snap.self_in_mog_house(), "self party member flag suffices");

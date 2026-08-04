@@ -210,6 +210,7 @@ mod tests {
                 }),
                 npc_state: None,
                 status: 1,
+                char_flags: Default::default(),
             },
             Entity {
                 id: 0x1000_0102,
@@ -235,6 +236,7 @@ mod tests {
                     status: 1,
                 }),
                 status: 1,
+                char_flags: Default::default(),
             },
         ];
 
@@ -255,6 +257,7 @@ mod tests {
             is_party_leader: true,
             is_alliance_leader: false,
             in_mog_house: false,
+            party_no: 0,
         }];
 
         s.chat = (0..8)

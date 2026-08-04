@@ -427,6 +427,32 @@ pub fn entity_to_wire(e: &Entity) -> wire::Entity {
         animation: e.npc_state.map(|s| s.animation).unwrap_or_default(),
         animationsub: e.npc_state.map(|s| s.animationsub).unwrap_or_default(),
         status: e.status,
+        char_flags: e.char_flags.map(char_flags_to_wire).unwrap_or_default(),
+    }
+}
+
+pub fn char_flags_to_wire(f: ffxi_proto::decode::CharFlags) -> wire::CharFlags {
+    wire::CharFlags {
+        monster: f.monster,
+        lfg: f.lfg,
+        anonymous: f.anonymous,
+        yell: f.yell,
+        away: f.away,
+        play_online: f.play_online,
+        linkshell: f.linkshell,
+        linkdead: f.linkdead,
+        gm_level: f.gm_level,
+        bazaar: f.bazaar,
+        linkshell_color: f.linkshell_color,
+        charm: f.charm,
+        gm_icon: f.gm_icon,
+        auto_party: f.auto_party,
+        trust: f.trust,
+        lfg_master: f.lfg_master,
+        pet: f.pet,
+        allegiance: f.allegiance,
+        new_character: f.new_character,
+        mentor: f.mentor,
     }
 }
 
@@ -484,6 +510,7 @@ pub fn party_to_wire(m: &PartyMember) -> wire::PartyMember {
         sub_job_lv: m.sub_job_lv,
         is_party_leader: m.is_party_leader,
         is_alliance_leader: m.is_alliance_leader,
+        party_no: m.party_no,
         in_mog_house: m.in_mog_house,
     }
 }

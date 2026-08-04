@@ -129,6 +129,129 @@ impl PosHead {
     }
 }
 
+/// The `Flags1`/`Flags2`/`Flags3` bitfields shared by `CHAR_PC` (0x0D) and
+/// `CHAR_NPC` (0x0E), named per
+/// `vendor/server/src/map/packets/char_update.cpp:61-134` (`flags1_t`,
+/// `flags2_t`, `flags3_t`); `entity_update.cpp:67-140` declares the same three
+/// layouts for 0x0E. Only meaningful when the packet's General send-flag bit
+/// (0x04) is set — the server refreshes the words in that block alone.
+///
+/// Drives the retail nameplate: colour selection
+/// (research/XIClient/.../ActorTelemetry.cpp:1560 `NameColorSet`) and the icon
+/// markers prefixed to the name
+/// (research/XIClient/.../ActorTelemetry.cpp:204 `GetPrimaryActorNameMarker`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct CharFlags {
+    pub monster: bool,
+    pub lfg: bool,
+    pub anonymous: bool,
+    pub yell: bool,
+    pub away: bool,
+    pub play_online: bool,
+    pub linkshell: bool,
+    pub linkdead: bool,
+    pub gm_level: u8,
+    pub bazaar: bool,
+
+    /// `Flags2.r/g/b`: the equipped linkshell's pearl colour, already expanded
+    /// from the 4-bit Exdata channel by the server as `(c << 4) + 15`
+    /// (char_update.cpp:325-327). Meaningless unless `linkshell` is set.
+    pub linkshell_color: [u8; 3],
+
+    pub charm: bool,
+    pub gm_icon: bool,
+    pub auto_party: bool,
+    pub trust: bool,
+    pub lfg_master: bool,
+    pub pet: bool,
+
+    /// `Flags3.BallistaTeam`: LSB writes `PChar->allegiance` here
+    /// (char_update.cpp:344, entity_update.cpp:356). ALLEGIANCE_TYPE, so 0 =
+    /// MOB, 1 = PLAYER, 2..6 = the nation/team values that select the ballista
+    /// name colours and markers.
+    pub allegiance: u8,
+
+    pub new_character: bool,
+    pub mentor: bool,
+}
+
+impl CharFlags {
+    pub fn from_pos_head(head: &PosHead) -> Self {
+        let (f1, f2, f3) = (head.flags1, head.flags2, head.flags3);
+        Self {
+            monster: bit(f1, flags1::MONSTER),
+            lfg: bit(f1, flags1::LFG),
+            anonymous: bit(f1, flags1::ANONYMOUS),
+            yell: bit(f1, flags1::YELL),
+            away: bit(f1, flags1::AWAY),
+            play_online: bit(f1, flags1::PLAY_ONLINE),
+            linkshell: bit(f1, flags1::LINKSHELL),
+            linkdead: bit(f1, flags1::LINKDEAD),
+            gm_level: field(f1, flags1::GM_LEVEL, flags1::GM_LEVEL_BITS) as u8,
+            bazaar: bit(f1, flags1::BAZAAR),
+            linkshell_color: [
+                field(f2, flags2::LS_R, flags2::CHANNEL_BITS) as u8,
+                field(f2, flags2::LS_G, flags2::CHANNEL_BITS) as u8,
+                field(f2, flags2::LS_B, flags2::CHANNEL_BITS) as u8,
+            ],
+            charm: bit(f2, flags2::CHARM),
+            gm_icon: bit(f2, flags2::GM_ICON),
+            auto_party: bit(f2, flags2::AUTO_PARTY),
+            trust: bit(f3, flags3::TRUST),
+            lfg_master: bit(f3, flags3::LFG_MASTER),
+            pet: bit(f3, flags3::PET),
+            allegiance: field(f3, flags3::BALLISTA_TEAM, flags3::BALLISTA_TEAM_BITS) as u8,
+            new_character: bit(f3, flags3::NEW_CHARACTER),
+            mentor: bit(f3, flags3::MENTOR),
+        }
+    }
+}
+
+fn bit(word: u32, shift: u32) -> bool {
+    word >> shift & 1 != 0
+}
+
+fn field(word: u32, shift: u32, width: u32) -> u32 {
+    word >> shift & ((1 << width) - 1)
+}
+
+// vendor/server/src/map/packets/char_update.cpp:61-90
+mod flags1 {
+    pub const MONSTER: u32 = 0;
+    pub const LFG: u32 = 11;
+    pub const ANONYMOUS: u32 = 12;
+    pub const YELL: u32 = 13;
+    pub const AWAY: u32 = 14;
+    pub const PLAY_ONLINE: u32 = 16;
+    pub const LINKSHELL: u32 = 17;
+    pub const LINKDEAD: u32 = 18;
+    pub const GM_LEVEL: u32 = 24;
+    pub const GM_LEVEL_BITS: u32 = 3;
+    pub const BAZAAR: u32 = 31;
+}
+
+// vendor/server/src/map/packets/char_update.cpp:92-106
+mod flags2 {
+    pub const LS_R: u32 = 0;
+    pub const LS_G: u32 = 8;
+    pub const LS_B: u32 = 16;
+    pub const CHANNEL_BITS: u32 = 8;
+    pub const CHARM: u32 = 27;
+    pub const GM_ICON: u32 = 28;
+    pub const AUTO_PARTY: u32 = 31;
+}
+
+// vendor/server/src/map/packets/char_update.cpp:108-134
+mod flags3 {
+    pub const TRUST: u32 = 0;
+    pub const LFG_MASTER: u32 = 1;
+    pub const PET: u32 = 6;
+    pub const BALLISTA_TEAM: u32 = 8;
+    pub const BALLISTA_TEAM_BITS: u32 = 8;
+    pub const NEW_CHARACTER: u32 = 23;
+    pub const MENTOR: u32 = 24;
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LookData {
     Standard {
@@ -467,6 +590,135 @@ impl PetSync {
             bt_target_id: u32::from_le_bytes(body[0x10..0x14].try_into().unwrap()),
             name,
         })
+    }
+}
+
+#[cfg(test)]
+mod char_flags_tests {
+    use super::*;
+
+    fn head_with(flags1: u32, flags2: u32, flags3: u32) -> PosHead {
+        let mut buf = vec![0u8; PosHead::SIZE];
+        buf[28..32].copy_from_slice(&flags1.to_le_bytes());
+        buf[32..36].copy_from_slice(&flags2.to_le_bytes());
+        buf[36..40].copy_from_slice(&flags3.to_le_bytes());
+        PosHead::decode(&buf).unwrap()
+    }
+
+    #[test]
+    fn all_flags_clear_by_default() {
+        let flags = CharFlags::from_pos_head(&head_with(0, 0, 0));
+        assert_eq!(flags, CharFlags::default());
+    }
+
+    /// Each named bit must light exactly its own field: a lone set bit at the
+    /// documented shift, decoded, must differ from the all-clear decode in that
+    /// one field only. Catches a shift that silently aliases a neighbour.
+    #[test]
+    fn each_flag1_bit_is_isolated() {
+        let probes: [(u32, fn(&CharFlags) -> bool); 9] = [
+            (flags1::MONSTER, |f| f.monster),
+            (flags1::LFG, |f| f.lfg),
+            (flags1::ANONYMOUS, |f| f.anonymous),
+            (flags1::YELL, |f| f.yell),
+            (flags1::AWAY, |f| f.away),
+            (flags1::PLAY_ONLINE, |f| f.play_online),
+            (flags1::LINKSHELL, |f| f.linkshell),
+            (flags1::LINKDEAD, |f| f.linkdead),
+            (flags1::BAZAAR, |f| f.bazaar),
+        ];
+        for (shift, get) in probes {
+            let flags = CharFlags::from_pos_head(&head_with(1 << shift, 0, 0));
+            assert!(get(&flags), "flags1 bit {shift} did not set its field");
+            let others = probes
+                .iter()
+                .filter(|(s, _)| *s != shift)
+                .filter(|(_, g)| g(&flags))
+                .count();
+            assert_eq!(others, 0, "flags1 bit {shift} bled into another field");
+            assert_eq!(flags.gm_level, 0, "flags1 bit {shift} bled into GmLevel");
+        }
+    }
+
+    #[test]
+    fn gm_level_is_a_three_bit_field_above_the_singles() {
+        for level in 0..=7u8 {
+            let flags =
+                CharFlags::from_pos_head(&head_with(u32::from(level) << flags1::GM_LEVEL, 0, 0));
+            assert_eq!(flags.gm_level, level);
+            assert!(!flags.bazaar, "GmLevel {level} bled into BazaarFlag");
+        }
+    }
+
+    /// char_update.cpp:325-327 packs the pearl colour into the low three bytes
+    /// of Flags2 as `(Exdata channel << 4) + 15`.
+    #[test]
+    fn linkshell_color_reads_the_low_three_bytes_of_flags2() {
+        let flags2 = 0x11u32 | (0x22 << 8) | (0x33 << 16);
+        let flags = CharFlags::from_pos_head(&head_with(0, flags2, 0));
+        assert_eq!(flags.linkshell_color, [0x11, 0x22, 0x33]);
+        assert!(!flags.charm);
+        assert!(!flags.auto_party);
+    }
+
+    #[test]
+    fn flags2_singles_sit_above_the_colour_channels() {
+        for (shift, get) in [
+            (
+                flags2::CHARM,
+                (|f: &CharFlags| f.charm) as fn(&CharFlags) -> bool,
+            ),
+            (flags2::GM_ICON, |f: &CharFlags| f.gm_icon),
+            (flags2::AUTO_PARTY, |f: &CharFlags| f.auto_party),
+        ] {
+            let flags = CharFlags::from_pos_head(&head_with(0, 1 << shift, 0));
+            assert!(get(&flags), "flags2 bit {shift} did not set its field");
+            assert_eq!(
+                flags.linkshell_color,
+                [0, 0, 0],
+                "flags2 bit {shift} bled into the pearl colour"
+            );
+        }
+    }
+
+    #[test]
+    fn allegiance_is_the_ballista_team_byte() {
+        // ALLEGIANCE_TYPE::WINDURST (vendor/server/src/map/entities/baseentity.h:161)
+        const WINDURST: u8 = 4;
+        let flags = CharFlags::from_pos_head(&head_with(
+            0,
+            0,
+            u32::from(WINDURST) << flags3::BALLISTA_TEAM,
+        ));
+        assert_eq!(flags.allegiance, WINDURST);
+        assert!(!flags.trust);
+        assert!(!flags.new_character);
+        assert!(!flags.mentor);
+    }
+
+    #[test]
+    fn flags3_singles_straddle_the_ballista_team_byte() {
+        let probes: [(u32, fn(&CharFlags) -> bool); 5] = [
+            (flags3::TRUST, |f| f.trust),
+            (flags3::LFG_MASTER, |f| f.lfg_master),
+            (flags3::PET, |f| f.pet),
+            (flags3::NEW_CHARACTER, |f| f.new_character),
+            (flags3::MENTOR, |f| f.mentor),
+        ];
+        for (shift, get) in probes {
+            let flags = CharFlags::from_pos_head(&head_with(0, 0, 1 << shift));
+            assert!(get(&flags), "flags3 bit {shift} did not set its field");
+            assert_eq!(
+                flags.allegiance, 0,
+                "flags3 bit {shift} bled into BallistaTeam"
+            );
+            let others = probes
+                .iter()
+                .filter(|(s, _)| *s != shift)
+                .filter(|(_, g)| g(&flags))
+                .count();
+            assert_eq!(others, 0, "flags3 bit {shift} bled into another field");
+        }
     }
 }
 

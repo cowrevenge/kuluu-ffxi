@@ -1175,6 +1175,7 @@ mod tests {
             animation: 0,
             animationsub: 0,
             status: 0,
+            char_flags: Default::default(),
         });
         let rows = widescan_rows(&snap);
         assert_eq!(rows[0].label, "Orcish Fodder (Lv12)");

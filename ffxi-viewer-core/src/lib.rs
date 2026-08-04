@@ -39,6 +39,9 @@ pub mod moon_material;
 pub mod mouse;
 pub mod nameplate;
 pub mod nameplate_billboard;
+pub mod nameplate_color;
+pub mod nameplate_icons;
+pub mod nameplate_marker;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod particle_sim;
 pub mod perf_probe;
@@ -248,6 +251,8 @@ impl<S: SceneSource + Resource + Component<Mutability = bevy::ecs::component::Mu
             .init_resource::<scene::SelfAppearance>()
             .init_resource::<nameplate_billboard::BillboardFont>()
             .init_resource::<ui_font::UiFont>()
+            .add_plugins(nameplate_color::NameColorPlugin)
+            .add_plugins(nameplate_icons::NameplateIconsPlugin)
             .add_plugins(PickingPlugin)
             .add_plugins(CursorPlugin)
             .add_message::<ToastEvent>()

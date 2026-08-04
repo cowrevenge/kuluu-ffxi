@@ -239,10 +239,16 @@ fn upsert_party(list: &mut Vec<PartyMember>, ups: &[PartyMember]) {
             } else {
                 existing.is_alliance_leader
             };
+            let preserved_party_no = if m.name.is_some() {
+                m.party_no
+            } else {
+                existing.party_no
+            };
             *existing = PartyMember {
                 name: preserved_name,
                 is_party_leader: preserved_leader,
                 is_alliance_leader: preserved_alliance,
+                party_no: preserved_party_no,
                 ..m.clone()
             };
         } else {
@@ -274,6 +280,7 @@ mod tests {
             animation: 0,
             animationsub: 0,
             status: 0,
+            char_flags: Default::default(),
         }
     }
 
@@ -360,6 +367,7 @@ mod tests {
             is_party_leader: true,
             is_alliance_leader: false,
             in_mog_house: false,
+            party_no: 0,
         };
         apply_delta(
             &mut snap,
@@ -388,6 +396,7 @@ mod tests {
             is_party_leader: false,
             is_alliance_leader: false,
             in_mog_house: false,
+            party_no: 0,
         };
         apply_delta(
             &mut snap,

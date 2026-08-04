@@ -277,6 +277,7 @@ mod tests {
             is_party_leader: false,
             is_alliance_leader: false,
             in_mog_house: false,
+            party_no: 0,
         }
     }
 

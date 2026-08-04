@@ -15,7 +15,7 @@ use ffxi_dat::DatRoot;
 // The four "static resource" menu UI DATs XIM loads by path
 // (research/xim/.../UiResourceManager.kt:21-26). The day-of-week orb group
 // "menu    framesus" lives in ROM/119/51.DAT.
-const UI_DAT_PATHS: [&str; 4] = [
+pub const UI_DAT_PATHS: [&str; 4] = [
     "ROM/0/13.DAT",
     "ROM/119/51.DAT",
     "ROM/280/15.DAT",

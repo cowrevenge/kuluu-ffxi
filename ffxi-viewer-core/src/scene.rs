@@ -354,7 +354,7 @@ pub fn sync_entities_system(
                     wire.id,
                     wire.kind,
                     name,
-                    crate::nameplate_billboard::nameplate_color(wire.kind, false, false),
+                    crate::nameplate_billboard::NAMEPLATE_FALLBACK_COLOR,
                 );
                 nameplated.insert(wire.id);
             }
@@ -755,6 +755,7 @@ mod tests {
             animation: 0,
             animationsub: 0,
             status: 0,
+            char_flags: Default::default(),
         }
     }
 }

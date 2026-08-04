@@ -263,6 +263,7 @@ mod tests {
                 look: None,
                 npc_state: None,
                 status: 0,
+                char_flags: Default::default(),
             },
             pos_present: true,
         });
@@ -288,6 +289,7 @@ mod tests {
                 look: None,
                 npc_state: None,
                 status: 0,
+                char_flags: Default::default(),
             },
             pos_present: true,
         });
@@ -309,6 +311,7 @@ mod tests {
                 look: None,
                 npc_state: None,
                 status: 0,
+                char_flags: Default::default(),
             },
             pos_present: true,
         });
@@ -330,6 +333,7 @@ mod tests {
                 look: None,
                 npc_state: None,
                 status: 0,
+                char_flags: Default::default(),
             },
             pos_present: true,
         });
@@ -364,6 +368,7 @@ mod tests {
                 is_party_leader: false,
                 is_alliance_leader: false,
                 in_mog_house: false,
+                party_no: 0,
             },
         });
         let scene = SceneSummary::from_state(&s);
@@ -448,6 +453,7 @@ mod tests {
                     is_party_leader: id == 42,
                     is_alliance_leader: false,
                     in_mog_house: false,
+                    party_no: 0,
                 },
             });
         }

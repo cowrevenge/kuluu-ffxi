@@ -730,6 +730,7 @@ fn handle_sub_packet(
 
                             look: None,
                             npc_state: None,
+                            char_flags: None,
                             status: 0,
                         },
 
@@ -877,6 +878,9 @@ fn handle_sub_packet(
                     })
                     .flatten();
 
+                let char_flags =
+                    (send_flag & UPDATE_HP != 0).then(|| decode::CharFlags::from_pos_head(&head));
+
                 let status = match op {
                     s2c::CHAR_NPC => decode::NpcState::decode_char_npc_status(sub.data),
                     _ => Some(0),
@@ -923,6 +927,7 @@ fn handle_sub_packet(
                         speed_base: head.speed_base,
                         look,
                         npc_state,
+                        char_flags,
                         status,
                     },
                     pos_present,
@@ -4957,6 +4962,9 @@ fn party_member_from_attrs(
         sub_job_lv: attrs.sjob_lv,
         is_party_leader: extra.map(|e| e.is_party_leader).unwrap_or(false),
         is_alliance_leader: extra.map(|e| e.is_alliance_leader).unwrap_or(false),
+        // GROUP_ATTR carries no GAttr; NO_PARTY keeps an attrs-only update from
+        // claiming party 0 until the next GROUP_LIST refreshes it.
+        party_no: extra.map(|e| e.party_no).unwrap_or(decode::NO_PARTY),
         in_mog_house: attrs.moghouse_flg != 0,
     }
 }
@@ -5238,6 +5246,7 @@ fn mh_door_entity(model: u16) -> Entity {
         speed_base: 0,
         look: None,
         npc_state: None,
+        char_flags: None,
         status: 0,
     }
 }

@@ -12,6 +12,7 @@ use crate::camera::{nameplate_anchor_y, CameraMode, OperatorCamera};
 use crate::components::{InGameEntity, Nameplate, WorldEntity};
 use crate::scene::{BakedActor, Target};
 // Retail advances the targeted-nameplate pulse once per rendered frame.
+use crate::nameplate_icons::REFERENCE_LETTER;
 use crate::scheduler_runtime::RETAIL_FPS;
 use crate::snapshot::SceneState;
 
@@ -39,7 +40,7 @@ const MIN_VIEW_DEPTH_YALMS: f32 = 1.0;
 const NAME_SCREEN_SCALE: f32 = 0.002_343_75;
 // research/XIClient/src/XIClient/source/Rendering/Active/CXiActorNameDraw.cpp:35 — one name
 // line is one glyph cell tall.
-const NAME_LINE_HEIGHT_UNITS: f32 = 8.0;
+pub const NAME_LINE_HEIGHT_UNITS: f32 = 8.0;
 const NAME_LINE_SCREEN_FRACTION: f32 = NAME_SCREEN_SCALE * NAME_LINE_HEIGHT_UNITS;
 
 // research/XIClient/src/XIClient/source/Rendering/Active/CXiActorNameDraw.cpp:111-112
@@ -72,6 +73,28 @@ impl FromWorld for BillboardFont {
     }
 }
 
+/// Everything the billboard texture is a function of. Comparing the whole key
+/// is what keeps the raster off the hot path: it only re-runs when one of these
+/// actually changes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RasterKey {
+    pub text: String,
+    pub color: [u8; 4],
+    pub hp: Option<u8>,
+    pub markers: Vec<u8>,
+    pub linkshell_tint: [u8; 4],
+}
+
+impl RasterKey {
+    fn matches(&self, text: &str, other: &Self) -> bool {
+        self.text == text
+            && self.color == other.color
+            && self.hp == other.hp
+            && self.markers == other.markers
+            && self.linkshell_tint == other.linkshell_tint
+    }
+}
+
 #[derive(Component)]
 pub struct NameplateBillboard {
     pub entity_id: u32,
@@ -79,11 +102,9 @@ pub struct NameplateBillboard {
 
     pub base_name: String,
 
-    pub last_rendered: String,
-
-    pub last_color: [u8; 4],
-
-    pub last_hp: Option<u8>,
+    /// `None` until the first raster, so a freshly spawned plate always gets
+    /// one even when its resolved colour happens to match the placeholder.
+    pub rastered: Option<RasterKey>,
 
     pub last_alpha: f32,
 }
@@ -108,7 +129,7 @@ pub fn spawn_nameplate_billboard(
 ) -> Entity {
     let rgba = color_to_rgba8(color);
 
-    let raster = rasterize_text_to_image(font, name, NAME_PX, rgba, None).clone();
+    let raster = rasterize_plate(font, name, NAME_PX, rgba, None, &[], rgba, None);
     let aspect = (raster.width(), raster.height());
     let image_handle = images.add(raster);
 
@@ -133,9 +154,7 @@ pub fn spawn_nameplate_billboard(
                 entity_id,
                 kind,
                 base_name: name.to_string(),
-                last_rendered: name.to_string(),
-                last_color: rgba,
-                last_hp: None,
+                rastered: None,
                 last_alpha: 1.0,
             },
             BillboardAspect {
@@ -164,27 +183,11 @@ pub fn self_plate_hidden(is_self: bool, mode: CameraMode) -> bool {
     is_self && matches!(mode, CameraMode::FirstPerson)
 }
 
-pub fn nameplate_color(kind: EntityKind, engaged: bool, dead: bool) -> Color {
-    match kind {
-        EntityKind::Pc => Color::srgb(0.55, 0.95, 1.0),
-        EntityKind::Npc => Color::srgb(0.55, 1.0, 0.55),
-        EntityKind::Mob => {
-            if dead {
-                Color::srgb(0.55, 0.55, 0.55)
-            } else if engaged {
-                Color::srgb(1.0, 0.55, 0.25)
-            } else {
-                Color::srgb(1.0, 0.95, 0.7)
-            }
-        }
-        EntityKind::Pet => Color::srgb(0.55, 0.95, 0.65),
-        EntityKind::Other => Color::srgb(0.85, 0.85, 0.85),
-    }
-}
-
-pub fn format_billboard_label(base_name: &str, _hp_pct: Option<u8>, _kind: EntityKind) -> String {
-    base_name.to_string()
-}
+/// The colour a plate falls back to before the retail `ncol` table is
+/// available — a DAT read that only fails when there is no retail install (the
+/// headless/relay paths). Neutral white so a missing table never invents a
+/// meaning the packet did not carry.
+pub const NAMEPLATE_FALLBACK_COLOR: Color = Color::WHITE;
 
 pub fn update_nameplate_billboards_system(
     state: Res<SceneState>,
@@ -204,9 +207,11 @@ pub fn update_nameplate_billboards_system(
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut images: ResMut<Assets<Image>>,
     font: Res<BillboardFont>,
+    name_colors: Res<crate::nameplate_color::NameColorTable>,
+    icons: Res<crate::nameplate_icons::NameplateIcons>,
     mut commands: Commands,
     mut hp_by_id: Local<std::collections::HashMap<u32, Option<u8>>>,
-    mut claim_by_id: Local<std::collections::HashMap<u32, u32>>,
+    mut raster_inputs: Local<std::collections::HashMap<u32, RasterKey>>,
 ) {
     let Ok((cam_t, projection)) = cam_q.single() else {
         return;
@@ -230,13 +235,20 @@ pub fn update_nameplate_billboards_system(
     // HP/claim only change with a snapshot, and the re-raster inputs (name,
     // color, hp) derive from them — so the texture-regen check only runs on
     // snapshot frames. Billboard orientation/scale below stays per-frame.
-    let dirty = state.dirty;
+    // The retail colour table and icon glyphs are read from the DAT a few
+    // frames into the session, after the first plates have already rastered
+    // against the fallback; their arrival has to re-raster them.
+    let dirty = state.dirty || name_colors.is_changed() || icons.is_changed();
     if dirty {
         hp_by_id.clear();
-        claim_by_id.clear();
+        raster_inputs.clear();
+        let ctx = crate::nameplate_color::SelfContext {
+            self_id: self_char_id,
+            party: &state.snapshot.party,
+        };
         for ent in &state.snapshot.entities {
             hp_by_id.insert(ent.id, ent.hp_pct);
-            claim_by_id.insert(ent.id, ent.claim_id);
+            raster_inputs.insert(ent.id, raster_key_for(ent, ctx, &name_colors));
         }
     }
 
@@ -289,38 +301,65 @@ pub fn update_nameplate_billboards_system(
             continue;
         }
 
-        let engaged = matches!(np.kind, EntityKind::Mob)
-            && self_char_id.is_some_and(|cid| {
-                cid != 0 && claim_by_id.get(&np.entity_id).copied() == Some(cid)
-            });
-
-        let dead = matches!(np.kind, EntityKind::Mob)
-            && hp_by_id.get(&np.entity_id).copied().flatten() == Some(0);
-        let want_color = color_to_rgba8(nameplate_color(np.kind, engaged, dead));
-
-        let snapshot_hp = hp_by_id.get(&np.entity_id).copied().flatten();
-        let want_hp = if matches!(np.kind, EntityKind::Mob | EntityKind::Pet) {
-            snapshot_hp
-        } else {
-            None
+        // The name lives on the component, not the snapshot: a later update can
+        // drop it and the plate must keep the name it spawned with.
+        let Some(inputs) = raster_inputs.get(&np.entity_id) else {
+            continue;
         };
-
-        let want = format_billboard_label(&np.base_name, snapshot_hp, np.kind);
-        if want != np.last_rendered || want_color != np.last_color || want_hp != np.last_hp {
-            if let Some(mat_data) = materials.get_mut(&mat.0) {
-                if let Some(handle) = mat_data.base_color_texture.clone() {
-                    crate::perf_probe::note_nameplate_raster();
-                    let new_img =
-                        rasterize_text_to_image(&font.0, &want, NAME_PX, want_color, want_hp);
-                    aspect.width = new_img.width();
-                    aspect.height = new_img.height();
-                    let _ = images.insert(&handle, new_img);
-                    np.last_rendered = want;
-                    np.last_color = want_color;
-                    np.last_hp = want_hp;
-                }
-            }
+        if np
+            .rastered
+            .as_ref()
+            .is_some_and(|done| done.matches(&np.base_name, inputs))
+        {
+            continue;
         }
+        let want = RasterKey {
+            text: np.base_name.clone(),
+            ..inputs.clone()
+        };
+        let Some(mat_data) = materials.get_mut(&mat.0) else {
+            continue;
+        };
+        let Some(handle) = mat_data.base_color_texture.clone() else {
+            continue;
+        };
+        crate::perf_probe::note_nameplate_raster();
+        let new_img = rasterize_plate(
+            &font.0,
+            &want.text,
+            NAME_PX,
+            want.color,
+            want.hp,
+            &want.markers,
+            want.linkshell_tint,
+            Some(&icons),
+        );
+        aspect.width = new_img.width();
+        aspect.height = new_img.height();
+        let _ = images.insert(&handle, new_img);
+        np.rastered = Some(want.clone());
+    }
+}
+
+/// The full raster input for one entity: retail's name colour, its icon
+/// markers, and the pearl tint those icons draw with.
+fn raster_key_for(
+    ent: &ffxi_viewer_wire::Entity,
+    ctx: crate::nameplate_color::SelfContext<'_>,
+    name_colors: &crate::nameplate_color::NameColorTable,
+) -> RasterKey {
+    let color = crate::nameplate_color::name_color_choice(ent, ctx)
+        .resolve(name_colors)
+        .unwrap_or(NAMEPLATE_FALLBACK_COLOR);
+    let hp = matches!(ent.kind, EntityKind::Mob | EntityKind::Pet)
+        .then_some(ent.hp_pct)
+        .flatten();
+    RasterKey {
+        text: String::new(),
+        color: color_to_rgba8(color),
+        hp,
+        markers: crate::nameplate_marker::nameplate_markers(ent),
+        linkshell_tint: color_to_rgba8(crate::nameplate_color::linkshell_tint(&ent.char_flags)),
     }
 }
 
@@ -362,17 +401,128 @@ fn text_line_height_px(font: &FontArc, px: f32) -> u32 {
     (scaled.ascent() - scaled.descent()).ceil().max(1.0) as u32
 }
 
-fn rasterize_text_to_image(
+// research/XIClient/.../CXiActorNameDraw.cpp:32-34 — an icon that is not the
+// leftmost glyph draws at 0.8 and advances the pen by 0.625; the job-master
+// tail draws at half scale and does not advance at all.
+const ICON_TRAILING_SCALE: f32 = 0.800_000_01;
+const ICON_TRAILING_ADVANCE: f32 = 0.625;
+const ICON_TAIL_SCALE: f32 = 0.5;
+// CXiActorNameDraw.cpp:366-367 — the tail glyph is nudged back over the star.
+const ICON_TAIL_OFFSET_UNITS: f32 = -2.0;
+// CXiActorNameDraw.cpp:623 — the icons' alpha runs through D3DTOP_MODULATE4X
+// against a 0x80 diffuse, i.e. doubled.
+const ICON_ALPHA_MODULATE: u16 = 2;
+
+/// Where one icon glyph lands in the plate, in pixels relative to the text
+/// box's top-left. `y_px` may be negative: retail's icons hang above the line.
+struct IconPlacement {
+    code: u8,
+    x_px: f32,
+    y_px: f32,
+    width_px: f32,
+    height_px: f32,
+}
+
+/// Retail's marker layout pass (CXiActorNameDraw.cpp:342-376), reduced to the
+/// icon run that prefixes the name. Returns the placements and the pen advance
+/// the name text starts after.
+///
+/// Retail lays icons and letters out in one run of shape-group cells, so an
+/// icon's size is fixed against the *letter* cell (8x10 units against the
+/// icon's 15x15), not against a line-height constant. `letter_px` is the same
+/// ratio measured on our own font: one letter's advance and line box.
+fn layout_icons(
+    markers: &[u8],
+    icons: Option<&crate::nameplate_icons::NameplateIcons>,
+    letter_advance_px: f32,
+    letter_box_px: f32,
+) -> (Vec<IconPlacement>, f32) {
+    let Some(icons) = icons else {
+        return (Vec::new(), 0.0);
+    };
+    let Some(cell) = icons.letter_cell() else {
+        return (Vec::new(), 0.0);
+    };
+    if cell.width_units <= 0.0 || cell.height_units <= 0.0 {
+        return (Vec::new(), 0.0);
+    }
+    // One uniform unit, taken from the letter *advance*. Retail's glyph units
+    // are square in cell space, so scaling each axis by its own ratio would
+    // stretch a round icon into an egg on any font whose advance-to-line-box
+    // aspect differs from retail's 8:10 cell. Sizing off the advance keeps the
+    // icon-to-name width ratio retail has, and squares the icon.
+    let unit_px = letter_advance_px / cell.width_units;
+    let letter_center_units = cell.y_offset_units + cell.height_units / 2.0;
+
+    let mut placements = Vec::with_capacity(markers.len());
+    let mut pen = 0.0_f32;
+    for (i, &code) in markers.iter().enumerate() {
+        let Some(glyph) = icons.get(code) else {
+            continue;
+        };
+        let is_tail = code == crate::nameplate_marker::glyph::JOB_MASTER_TAIL;
+        let (scale, advance_scale, x_nudge, y_nudge) = if is_tail {
+            (
+                ICON_TAIL_SCALE,
+                0.0,
+                ICON_TAIL_OFFSET_UNITS - glyph.width_units,
+                ICON_TAIL_OFFSET_UNITS,
+            )
+        } else if i == 0 {
+            (1.0, 1.0, 0.0, 0.0)
+        } else {
+            (
+                ICON_TRAILING_SCALE,
+                ICON_TRAILING_ADVANCE,
+                -glyph.width_units / 2.0,
+                glyph.height_units / 2.0,
+            )
+        };
+        let height_units = glyph.height_units * scale;
+        // Centre the icon on the text line the way retail's cells do, then
+        // apply retail's own nudge for this slot.
+        let center_units = glyph.y_offset_units + y_nudge + height_units / 2.0;
+        placements.push(IconPlacement {
+            code,
+            x_px: (pen + glyph.x_offset_units + x_nudge) * unit_px,
+            y_px: letter_box_px / 2.0 + (center_units - letter_center_units) * unit_px
+                - height_units * unit_px / 2.0,
+            width_px: glyph.width_units * scale * unit_px,
+            height_px: height_units * unit_px,
+        });
+        pen += glyph.width_units * advance_scale;
+    }
+    (placements, pen * unit_px)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn rasterize_plate(
     font: &FontArc,
     text: &str,
     px: f32,
     color: [u8; 4],
     hp_pct: Option<u8>,
+    markers: &[u8],
+    linkshell_tint: [u8; 4],
+    icons: Option<&crate::nameplate_icons::NameplateIcons>,
 ) -> Image {
     let scale = PxScale::from(px);
     let scaled = font.as_scaled(scale);
     let ascent = scaled.ascent();
     let line_h = text_line_height_px(font, px);
+
+    let letter_advance_px = scaled.h_advance(scaled.glyph_id(char::from(REFERENCE_LETTER)));
+    let (placements, icon_strip) = layout_icons(markers, icons, letter_advance_px, line_h as f32);
+    let icon_strip_px = icon_strip.ceil().max(0.0) as u32;
+    // Icons are taller than a text line and hang above and below it, so the
+    // plate box grows to contain them.
+    let icon_top_px = placements.iter().map(|p| p.y_px).fold(0.0_f32, f32::min);
+    let icon_bottom_px = placements
+        .iter()
+        .map(|p| p.y_px + p.height_px)
+        .fold(line_h as f32, f32::max);
+    let top_extra_px = (-icon_top_px).max(0.0).ceil() as u32;
+    let bottom_extra_px = (icon_bottom_px - line_h as f32).max(0.0).ceil() as u32;
 
     let mut pen_x = 0.0_f32;
     let mut max_x = 0.0_f32;
@@ -397,8 +547,10 @@ fn rasterize_text_to_image(
     }
 
     let pad = (OUTLINE_RADIUS_PX + 1) as u32;
-    let width = (max_x.ceil() as u32).max(1) + 2 * pad;
-    let text_height = line_h + 2 * pad;
+    let text_origin_x = pad + icon_strip_px;
+    let text_origin_y = pad + top_extra_px;
+    let width = (max_x.ceil() as u32).max(1) + 2 * pad + icon_strip_px;
+    let text_height = line_h + 2 * pad + top_extra_px + bottom_extra_px;
 
     let hp_strip = HP_BAR_TOP_GAP_PX + HP_BAR_HEIGHT_PX;
     let height = text_height + hp_strip;
@@ -408,8 +560,8 @@ fn rasterize_text_to_image(
         if let Some(outline_glyph) = scaled.outline_glyph(glyph) {
             let bb = outline_glyph.px_bounds();
             outline_glyph.draw(|gx, gy, c| {
-                let px_x = bb.min.x as i32 + gx as i32 + pad as i32;
-                let px_y = bb.min.y as i32 + gy as i32 + pad as i32;
+                let px_x = bb.min.x as i32 + gx as i32 + text_origin_x as i32;
+                let px_y = bb.min.y as i32 + gy as i32 + text_origin_y as i32;
                 if px_x < 0 || px_y < 0 || px_x >= width as i32 || px_y >= text_height as i32 {
                     return;
                 }
@@ -467,6 +619,32 @@ fn rasterize_text_to_image(
         }
     }
 
+    if let Some(icons) = icons {
+        for placement in &placements {
+            let Some(glyph) = icons.get(placement.code) else {
+                continue;
+            };
+            // Only the linkshell pearl keeps a tint; retail forces every other
+            // icon to the neutral diffuse (CXiActorNameDraw.cpp:404-407).
+            let tint = if placement.code == crate::nameplate_marker::glyph::LINKSHELL {
+                linkshell_tint
+            } else {
+                [u8::MAX; 4]
+            };
+            blit_icon(
+                &mut pixels,
+                width,
+                text_height,
+                &glyph.sprite,
+                (pad as f32 + placement.x_px).round() as i32,
+                (text_origin_y as f32 + placement.y_px).round() as i32,
+                placement.width_px.round().max(1.0) as u32,
+                placement.height_px.round().max(1.0) as u32,
+                tint,
+            );
+        }
+    }
+
     if let Some(pct) = hp_pct {
         let bar_pixel_w = (width as f32 * HP_BAR_WIDTH_FRACTION) as u32;
         let bar_x = (width.saturating_sub(bar_pixel_w)) / 2;
@@ -519,6 +697,89 @@ fn rasterize_text_to_image(
     image
 }
 
+/// Scale one icon sprite into the plate and alpha-blend it over what is already
+/// there. Retail filters these glyphs linearly
+/// (CXiActorNameDraw.cpp:618-619), so the resample is bilinear.
+#[allow(clippy::too_many_arguments)]
+fn blit_icon(
+    pixels: &mut [u8],
+    width: u32,
+    max_y: u32,
+    sprite: &ffxi_dat::ui_element::UiSprite,
+    dst_x: i32,
+    dst_y: i32,
+    dst_w: u32,
+    dst_h: u32,
+    tint: [u8; 4],
+) {
+    if sprite.width == 0 || sprite.height == 0 {
+        return;
+    }
+    for row in 0..dst_h {
+        let y = dst_y + row as i32;
+        if y < 0 || y >= max_y as i32 {
+            continue;
+        }
+        let sy = (row as f32 + 0.5) / dst_h as f32 * sprite.height as f32 - 0.5;
+        for col in 0..dst_w {
+            let x = dst_x + col as i32;
+            if x < 0 || x >= width as i32 {
+                continue;
+            }
+            let sx = (col as f32 + 0.5) / dst_w as f32 * sprite.width as f32 - 0.5;
+            let texel = sample_bilinear(sprite, sx, sy);
+
+            let src_a = (u16::from(texel[3]) * ICON_ALPHA_MODULATE).min(u16::from(u8::MAX)) as u32
+                * u32::from(tint[3])
+                / u32::from(u8::MAX);
+            if src_a == 0 {
+                continue;
+            }
+            let pi = ((y as u32 * width + x as u32) * 4) as usize;
+            let dst_a = u32::from(pixels[pi + 3]);
+            let out_a = src_a + dst_a * (u32::from(u8::MAX) - src_a) / u32::from(u8::MAX);
+            for c in 0..3 {
+                let src = u32::from(texel[c]) * u32::from(tint[c]) / u32::from(u8::MAX);
+                let dst = u32::from(pixels[pi + c]);
+                let blended = (src * src_a
+                    + dst * dst_a * (u32::from(u8::MAX) - src_a) / u32::from(u8::MAX))
+                    / out_a.max(1);
+                pixels[pi + c] = blended.min(u32::from(u8::MAX)) as u8;
+            }
+            pixels[pi + 3] = out_a.min(u32::from(u8::MAX)) as u8;
+        }
+    }
+}
+
+fn sample_bilinear(sprite: &ffxi_dat::ui_element::UiSprite, x: f32, y: f32) -> [u8; 4] {
+    let clamp = |v: f32, max: u32| v.clamp(0.0, (max - 1) as f32);
+    let (x, y) = (clamp(x, sprite.width), clamp(y, sprite.height));
+    let (x0, y0) = (x.floor() as u32, y.floor() as u32);
+    let (x1, y1) = (
+        (x0 + 1).min(sprite.width - 1),
+        (y0 + 1).min(sprite.height - 1),
+    );
+    let (fx, fy) = (x - x0 as f32, y - y0 as f32);
+
+    let texel = |tx: u32, ty: u32| -> [f32; 4] {
+        let i = ((ty * sprite.width + tx) * 4) as usize;
+        [
+            sprite.rgba[i] as f32,
+            sprite.rgba[i + 1] as f32,
+            sprite.rgba[i + 2] as f32,
+            sprite.rgba[i + 3] as f32,
+        ]
+    };
+    let (a, b, c, d) = (texel(x0, y0), texel(x1, y0), texel(x0, y1), texel(x1, y1));
+    let mut out = [0u8; 4];
+    for i in 0..4 {
+        let top = a[i] + (b[i] - a[i]) * fx;
+        let bottom = c[i] + (d[i] - c[i]) * fx;
+        out[i] = (top + (bottom - top) * fy).round().clamp(0.0, 255.0) as u8;
+    }
+    out
+}
+
 fn color_to_rgba8(c: Color) -> [u8; 4] {
     let s = c.to_srgba();
     [
@@ -551,6 +812,234 @@ fn hp_color_rgba(pct: u8) -> [u8; 4] {
         (1.0, t)
     };
     [(r * 255.0).round() as u8, (g * 255.0).round() as u8, 0, 255]
+}
+
+#[cfg(test)]
+mod icon_raster_tests {
+    use super::*;
+    use crate::nameplate_icons::NameplateIcons;
+    use crate::nameplate_marker::glyph;
+
+    const WHITE: [u8; 4] = [255, 255, 255, 255];
+
+    fn font() -> FontArc {
+        FontArc::try_from_slice(crate::ui_font::DEJAVU_SANS_MONO).expect("bundled font parses")
+    }
+
+    fn retail_icons() -> Option<NameplateIcons> {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join(ffxi_dat::archive::DEFAULT_INSTALL_DIR);
+        if !root.join("VTABLE.DAT").exists() {
+            return None;
+        }
+        let codes = [
+            glyph::PLAY_ONLINE,
+            glyph::LINKDEAD,
+            glyph::AWAY,
+            glyph::SEEKING,
+            glyph::LINKSHELL,
+            glyph::BAZAAR,
+            glyph::AUTO_PARTY,
+            glyph::JOB_MASTER,
+            glyph::JOB_MASTER_TAIL,
+        ];
+        let mut icons = NameplateIcons::default();
+        let loaded = crate::ui_element_atlas::UI_DAT_PATHS
+            .iter()
+            .filter_map(|rel| std::fs::read(root.join(rel)).ok())
+            .any(|bytes| icons.load_from_dat(&bytes, &codes));
+        loaded.then_some(icons)
+    }
+
+    #[test]
+    fn no_markers_leaves_the_plate_the_size_it_always_was() {
+        let font = font();
+        let bare = rasterize_plate(&font, "Test", NAME_PX, WHITE, None, &[], WHITE, None);
+        let with_empty_icons =
+            rasterize_plate(&font, "Test", NAME_PX, WHITE, None, &[], WHITE, None);
+        assert_eq!(bare.width(), with_empty_icons.width());
+        assert_eq!(bare.height(), with_empty_icons.height());
+    }
+
+    #[test]
+    fn markers_without_a_loaded_glyph_set_are_a_no_op() {
+        let font = font();
+        let bare = rasterize_plate(&font, "Test", NAME_PX, WHITE, None, &[], WHITE, None);
+        let unresolved = rasterize_plate(
+            &font,
+            "Test",
+            NAME_PX,
+            WHITE,
+            None,
+            &[glyph::LINKSHELL],
+            WHITE,
+            None,
+        );
+        assert_eq!(
+            (bare.width(), bare.height()),
+            (unresolved.width(), unresolved.height()),
+            "a plate must not reserve icon space it cannot draw"
+        );
+    }
+
+    /// Gated on a retail install (self-skips).
+    #[test]
+    fn real_dat_pearl_widens_and_heightens_the_plate() {
+        let Some(icons) = retail_icons() else {
+            return;
+        };
+        let font = font();
+        let bare = rasterize_plate(
+            &font,
+            "Test",
+            NAME_PX,
+            WHITE,
+            None,
+            &[],
+            WHITE,
+            Some(&icons),
+        );
+        let with_pearl = rasterize_plate(
+            &font,
+            "Test",
+            NAME_PX,
+            WHITE,
+            None,
+            &[glyph::LINKSHELL],
+            WHITE,
+            Some(&icons),
+        );
+        assert!(
+            with_pearl.width() > bare.width(),
+            "the icon strip must widen the plate"
+        );
+        assert!(
+            with_pearl.height() > bare.height(),
+            "the icon is taller than a text line, so the plate grows"
+        );
+    }
+
+    /// Gated on a retail install (self-skips). The pearl is the one icon retail
+    /// tints, so a coloured linkshell must actually change its pixels.
+    #[test]
+    fn real_dat_pearl_takes_the_linkshell_tint() {
+        let Some(icons) = retail_icons() else {
+            return;
+        };
+        let font = font();
+        let red: [u8; 4] = [255, 0, 0, 255];
+        let untinted = rasterize_plate(
+            &font,
+            "Test",
+            NAME_PX,
+            WHITE,
+            None,
+            &[glyph::LINKSHELL],
+            WHITE,
+            Some(&icons),
+        );
+        let tinted = rasterize_plate(
+            &font,
+            "Test",
+            NAME_PX,
+            WHITE,
+            None,
+            &[glyph::LINKSHELL],
+            red,
+            Some(&icons),
+        );
+        assert_eq!(untinted.width(), tinted.width());
+        assert_ne!(
+            untinted.data, tinted.data,
+            "the pearl must respond to the linkshell colour"
+        );
+
+        let green_total: u64 = tinted
+            .data
+            .as_ref()
+            .expect("raster is CPU-side")
+            .chunks_exact(4)
+            .map(|p| u64::from(p[1]) * u64::from(p[3]))
+            .sum();
+        let green_untinted: u64 = untinted
+            .data
+            .as_ref()
+            .expect("raster is CPU-side")
+            .chunks_exact(4)
+            .map(|p| u64::from(p[1]) * u64::from(p[3]))
+            .sum();
+        assert!(
+            green_total < green_untinted,
+            "a red pearl must carry less green than an untinted one"
+        );
+    }
+
+    /// Gated on a retail install (self-skips). Every other icon is forced to the
+    /// neutral diffuse, so the tint must not reach it.
+    #[test]
+    fn real_dat_non_pearl_icons_ignore_the_linkshell_tint() {
+        let Some(icons) = retail_icons() else {
+            return;
+        };
+        let font = font();
+        let plain = rasterize_plate(
+            &font,
+            "Test",
+            NAME_PX,
+            WHITE,
+            None,
+            &[glyph::AWAY],
+            WHITE,
+            Some(&icons),
+        );
+        let with_tint = rasterize_plate(
+            &font,
+            "Test",
+            NAME_PX,
+            WHITE,
+            None,
+            &[glyph::AWAY],
+            [255, 0, 0, 255],
+            Some(&icons),
+        );
+        assert_eq!(plain.data, with_tint.data);
+    }
+
+    /// Gated on a retail install (self-skips). The tail glyph does not advance
+    /// the pen, so it must not widen the plate beyond the star alone.
+    #[test]
+    fn real_dat_job_master_tail_does_not_advance_the_pen() {
+        let Some(icons) = retail_icons() else {
+            return;
+        };
+        let font = font();
+        let star = rasterize_plate(
+            &font,
+            "Test",
+            NAME_PX,
+            WHITE,
+            None,
+            &[glyph::JOB_MASTER],
+            WHITE,
+            Some(&icons),
+        );
+        let star_with_tail = rasterize_plate(
+            &font,
+            "Test",
+            NAME_PX,
+            WHITE,
+            None,
+            &[glyph::JOB_MASTER, glyph::JOB_MASTER_TAIL],
+            WHITE,
+            Some(&icons),
+        );
+        assert_eq!(star.width(), star_with_tail.width());
+        assert_ne!(
+            star.data, star_with_tail.data,
+            "the tail still draws, it just does not advance"
+        );
+    }
 }
 
 #[cfg(test)]

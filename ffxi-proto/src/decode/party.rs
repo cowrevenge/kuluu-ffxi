@@ -1,5 +1,9 @@
 use super::*;
 
+/// `GAttr.PartyNo` sentinel for "not in a party of the alliance".
+/// vendor/server/src/map/packets/s2c/0x0dd_group_list.cpp:40.
+pub const NO_PARTY: u8 = 3;
+
 #[derive(Debug, Clone)]
 pub struct PartyAttrs {
     pub unique_no: u32,
@@ -24,6 +28,12 @@ pub struct PartyListExtra {
     pub member_number: u8,
     pub is_party_leader: bool,
     pub is_alliance_leader: bool,
+
+    /// `GAttr.PartyNo`: which party of the alliance this member sits in — 0..2,
+    /// or 3 for "no party". vendor/server/src/map/packets/s2c/0x0dd_group_list.cpp:40.
+    /// Retail compares it against the first member's to tell an alliance-mate's
+    /// claim from a party-mate's (research/XIClient/.../ActorTelemetry.cpp:1706).
+    pub party_no: u8,
 
     pub name: Option<String>,
 }
@@ -75,6 +85,8 @@ impl PartyAttrs {
         };
         let gattr = u32::from_le_bytes(body[16..20].try_into().unwrap());
 
+        const PARTY_NO_MASK: u32 = 0x03;
+        let party_no = (gattr & PARTY_NO_MASK) as u8;
         let is_party_leader = (gattr >> 2) & 1 == 1;
         let is_alliance_leader = (gattr >> 3) & 1 == 1;
         let name_bytes = &body[36..52];
@@ -91,6 +103,7 @@ impl PartyAttrs {
             member_number: body[22],
             is_party_leader,
             is_alliance_leader,
+            party_no,
             name,
         };
         Ok((attrs, extra))

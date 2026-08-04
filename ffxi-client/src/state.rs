@@ -180,6 +180,13 @@ pub struct Entity {
     #[serde(skip)]
     pub npc_state: Option<ffxi_proto::decode::NpcState>,
 
+    /// `Flags1`/`Flags2`/`Flags3` of the last General-block update. Drives the
+    /// retail nameplate colour and icon markers. Preserved across pos-only
+    /// updates like `look`, since the server only refreshes the words when the
+    /// General send-flag bit is set.
+    #[serde(skip)]
+    pub char_flags: Option<ffxi_proto::decode::CharFlags>,
+
     /// Live LSB STATUS_TYPE byte, refreshed every update (the server writes it
     /// unconditionally, unlike npc_state's UPDATE_HP-gated fields). 0 = NORMAL.
     /// Authoritative for target eligibility; see `ffxi_viewer_wire::Entity`.
@@ -905,6 +912,11 @@ pub struct PartyMember {
     pub is_party_leader: bool,
     pub is_alliance_leader: bool,
 
+    /// Which party of the alliance this member sits in (0..2, or 3 for
+    /// "no party"). vendor/server/src/map/packets/s2c/0x0dd_group_list.cpp:40.
+    #[serde(default)]
+    pub party_no: u8,
+
     #[serde(default)]
     pub in_mog_house: bool,
 }
@@ -1031,6 +1043,7 @@ impl SessionState {
 
                     let preserved_look = entity.look.or(existing.look);
                     let preserved_npc_state = entity.npc_state.or(existing.npc_state);
+                    let preserved_char_flags = entity.char_flags.or(existing.char_flags);
 
                     let (
                         preserved_pos,
@@ -1061,6 +1074,7 @@ impl SessionState {
                         hp_pct: preserved_hp_pct,
                         look: preserved_look,
                         npc_state: preserved_npc_state,
+                        char_flags: preserved_char_flags,
                         pos: preserved_pos,
                         heading: preserved_heading,
                         speed: preserved_speed,
@@ -1204,10 +1218,16 @@ impl SessionState {
                     } else {
                         member.is_alliance_leader
                     };
+                    let preserved_party_no = if member.name.is_none() {
+                        existing.party_no
+                    } else {
+                        member.party_no
+                    };
                     let merged = PartyMember {
                         name: preserved_name,
                         is_party_leader: preserved_leader,
                         is_alliance_leader: preserved_alliance,
+                        party_no: preserved_party_no,
                         ..member.clone()
                     };
                     if *existing == merged {
@@ -3082,6 +3102,7 @@ mod tests {
             is_party_leader: true,
             is_alliance_leader: false,
             in_mog_house: false,
+            party_no: 0,
         };
         s.apply_event(&AgentEvent::PartyMemberUpdated { member: from_list });
         assert_eq!(s.party.len(), 1);
@@ -3105,6 +3126,7 @@ mod tests {
             is_party_leader: false,
             is_alliance_leader: false,
             in_mog_house: false,
+            party_no: 0,
         };
         s.apply_event(&AgentEvent::PartyMemberUpdated { member: from_attr });
         assert_eq!(s.party.len(), 1, "upsert by id");
@@ -3166,6 +3188,7 @@ mod tests {
                 look: None,
                 npc_state: None,
                 status: 0,
+                char_flags: Default::default(),
             },
             pos_present: true,
         });
@@ -3192,6 +3215,7 @@ mod tests {
                 look: None,
                 npc_state: None,
                 status: 0,
+                char_flags: Default::default(),
             },
             pos_present: true,
         });
@@ -3215,6 +3239,7 @@ mod tests {
             is_party_leader: true,
             is_alliance_leader: false,
             in_mog_house: false,
+            party_no: 0,
         });
         s.apply_event(&AgentEvent::ZoneChanged {
             from: Some(100),
@@ -3277,6 +3302,7 @@ mod tests {
             look: None,
             npc_state: None,
             status: 0,
+            char_flags: Default::default(),
         }
     }
 
@@ -3705,6 +3731,7 @@ mod tests {
                 look: None,
                 npc_state: None,
                 status: 0,
+                char_flags: Default::default(),
             },
             pos_present: true,
         });
@@ -4035,6 +4062,7 @@ mod tests {
             look: None,
             npc_state: None,
             status: 0,
+            char_flags: Default::default(),
         };
 
         // First upsert inserts.
@@ -4101,6 +4129,7 @@ mod tests {
                 look: None,
                 npc_state: None,
                 status: 0,
+                char_flags: Default::default(),
             },
             pos_present: true,
         });

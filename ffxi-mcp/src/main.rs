@@ -1252,6 +1252,7 @@ mod tests {
                 is_party_leader: false,
                 is_alliance_leader: false,
                 in_mog_house: false,
+                party_no: 0,
             },
         };
         assert_eq!(uris_for_event(&ev), &["party://members", "scene://current"]);
@@ -1354,6 +1355,7 @@ mod tests {
             look: None,
             npc_state: None,
             status: 0,
+            char_flags: Default::default(),
         });
 
         for i in 0..35u32 {
@@ -1377,6 +1379,7 @@ mod tests {
                 look: None,
                 npc_state: None,
                 status: 0,
+                char_flags: Default::default(),
             });
         }
         let v = entities_view(&s);
@@ -1408,6 +1411,7 @@ mod tests {
             look: None,
             npc_state: None,
             status: 0,
+            char_flags: Default::default(),
         });
         s.entities.push(Entity {
             id: 100,
@@ -1429,6 +1433,7 @@ mod tests {
             look: None,
             npc_state: None,
             status: 0,
+            char_flags: Default::default(),
         });
         let v = entities_view(&s);
         assert_eq!(v["entities"][0]["claimed_by"], 4242);

@@ -1353,6 +1353,7 @@ mod tests {
             animation: 0,
             animationsub: 0,
             status: 0,
+            char_flags: Default::default(),
         }
     }
 

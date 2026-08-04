@@ -84,6 +84,7 @@ pub enum Goal {
 
 fn debug_pathto_line(text: String) -> ChatLine {
     ChatLine {
+        spans: Vec::new(),
         channel: ChatChannel::Debug,
         sender: "client".into(),
         text,

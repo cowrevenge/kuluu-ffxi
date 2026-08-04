@@ -699,6 +699,7 @@ fn push_local_chat_line(scene_state: &mut SceneState, kind: u8, text: String) {
         .clone()
         .unwrap_or_else(|| "you".into());
     scene_state.push_local_toast(ChatLine {
+        spans: Vec::new(),
         channel,
         sender,
         text,
@@ -710,6 +711,7 @@ fn push_local_chat_line(scene_state: &mut SceneState, kind: u8, text: String) {
 fn push_local_tell_echo(scene_state: &mut SceneState, to: String, text: String) {
     use ffxi_viewer_wire::{ChatChannel, ChatLine};
     scene_state.push_local_toast(ChatLine {
+        spans: Vec::new(),
         channel: ChatChannel::Tell,
         sender: to,
         text,

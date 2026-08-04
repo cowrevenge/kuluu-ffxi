@@ -30,6 +30,12 @@ pub fn state_to_snapshot(s: &SessionState) -> wire::SceneSnapshot {
         shop: s.shop.as_ref().map(shop_to_wire),
 
         delivery_box: delivery_box_to_wire(&s.delivery_box),
+        treasure_pool: s
+            .treasure_pool
+            .iter()
+            .flatten()
+            .map(treasure_slot_to_wire)
+            .collect(),
 
         status_icons: s.status_icons.clone(),
 
@@ -468,12 +474,48 @@ pub fn kind_to_wire(k: EntityKind) -> wire::EntityKind {
 
 pub fn chat_to_wire(c: &ChatLine) -> wire::ChatLine {
     wire::ChatLine {
+        spans: c
+            .spans
+            .iter()
+            .map(|s| wire::ChatSpan {
+                text: s.text.clone(),
+                kind: span_kind_to_wire(s.kind),
+            })
+            .collect(),
         channel: channel_to_wire(c.channel),
         sender: c.sender.clone(),
         text: c.text.clone(),
         server_ts: c.server_ts,
 
         local_seq: 0,
+    }
+}
+
+fn treasure_slot_to_wire(s: &crate::state::TreasurePoolSlot) -> wire::TreasurePoolSlot {
+    use crate::state::TreasureEntry as E;
+    wire::TreasurePoolSlot {
+        slot: s.slot,
+        item_id: s.item_id,
+        item_name: s.item_name.clone(),
+        count: s.count,
+        dropper: s.dropper.clone(),
+        own_entry: match s.own_entry {
+            E::None => wire::TreasureEntry::None,
+            E::Passed => wire::TreasureEntry::Passed,
+            E::Lotted => wire::TreasureEntry::Lotted,
+        },
+        own_lot: s.own_lot,
+        winner: s.winner.clone(),
+        winner_lot: s.winner_lot,
+    }
+}
+
+fn span_kind_to_wire(k: crate::state::ChatSpanKind) -> wire::ChatSpanKind {
+    use crate::state::ChatSpanKind as K;
+    match k {
+        K::Text => wire::ChatSpanKind::Text,
+        K::Item => wire::ChatSpanKind::Item,
+        K::KeyItem => wire::ChatSpanKind::KeyItem,
     }
 }
 

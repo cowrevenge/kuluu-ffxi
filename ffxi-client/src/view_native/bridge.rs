@@ -262,6 +262,7 @@ mod tests {
 
         s.chat = (0..8)
             .map(|i| ChatLine {
+                spans: Vec::new(),
                 channel: if i % 2 == 0 {
                     ChatChannel::Say
                 } else {

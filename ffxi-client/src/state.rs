@@ -194,16 +194,92 @@ pub struct Entity {
     pub status: u8,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Which retail colour a run of a chat line takes. Retail renders some
+/// substitutions apart from the text around them — the item name in
+/// "You find a [lizard tail] on the Rock Lizard." is green against the rest
+/// (`.agents/skills/retail-observe/references/treasure-pool-chat.md`).
+/// Projected to `ffxi_viewer_wire::ChatSpanKind` by `wire_translate`.
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChatSpanKind {
+    Text,
+    Item,
+    KeyItem,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ChatSpan {
+    pub text: String,
+    pub kind: ChatSpanKind,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ChatLine {
     pub channel: ChatChannel,
     pub sender: String,
     pub text: String,
 
     pub server_ts: u32,
+
+    /// Per-substitution colouring, for the lines retail renders multicoloured.
+    /// Empty means the whole line takes the channel colour; when set, the
+    /// concatenated span text equals `text`.
+    #[serde(default)]
+    pub spans: Vec<ChatSpan>,
 }
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
+/// Whether the local player has acted on a pool item
+/// (`GC_ITEM_TROPHY_ENTRY_KIND`, s2c 0x0D2 `Entry`).
+#[derive(Debug, Clone, Copy, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TreasureEntry {
+    #[default]
+    None,
+    Passed,
+    Lotted,
+}
+
+/// One occupied treasure-pool slot. `start_time` is the server's own clock
+/// reading at the drop (s2c 0x0D2 `StartTime`), so it is only meaningful as a
+/// difference against later drops, not as a wall clock.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TreasurePoolSlot {
+    pub slot: u8,
+    pub item_id: u16,
+    pub item_name: String,
+    pub count: u32,
+    pub dropper: String,
+    pub start_time: u32,
+    pub own_entry: TreasureEntry,
+    pub own_lot: Option<u16>,
+    pub winner: Option<String>,
+    pub winner_lot: u16,
+}
+
+impl ChatLine {
+    /// A line with no per-substitution colouring — the common case.
+    pub fn plain(channel: ChatChannel, sender: impl Into<String>, text: impl Into<String>) -> Self {
+        Self {
+            channel,
+            sender: sender.into(),
+            text: text.into(),
+            ..Default::default()
+        }
+    }
+
+    /// A line whose spans carry retail's colouring; `text` is kept as their
+    /// concatenation so every plain-text consumer still reads the whole line.
+    pub fn spanned(channel: ChatChannel, spans: Vec<ChatSpan>) -> Self {
+        Self {
+            channel,
+            text: spans.iter().map(|s| s.text.as_str()).collect(),
+            spans,
+            ..Default::default()
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ChatChannel {
     Say,
@@ -213,6 +289,9 @@ pub enum ChatChannel {
     Linkshell,
     Yell,
     System,
+    /// The catch-all for chat kinds with no dedicated channel, and so the
+    /// default a partially-built line starts from.
+    #[default]
     Other,
 
     Battle,
@@ -324,6 +403,14 @@ pub struct SessionState {
     pub entities: Vec<Entity>,
     pub party: Vec<PartyMember>,
     pub chat: Vec<ChatLine>,
+
+    /// The 10 treasure-pool slots, indexed by `TrophyItemIndex`. Cleared on
+    /// zone change: a player's lot/pass state only lives as long as they stay
+    /// in the zone and party
+    /// (research/XiPackets/world/server/0x00D2).
+    #[serde(default)]
+    pub treasure_pool: Vec<Option<TreasurePoolSlot>>,
+
     pub diagnostics: Diagnostics,
 
     #[serde(default)]
@@ -1008,6 +1095,11 @@ impl SessionState {
                 // entities); drop stale entries/track on any zone change or
                 // home-point warp.
                 self.widescan = WidescanList::default();
+
+                // A lot/pass only holds while the player stays in the zone and
+                // party; the server replays the pool on zone-in
+                // (research/XiPackets/world/server/0x00D2).
+                self.treasure_pool.clear();
                 true
             }
             AgentEvent::PositionChanged { pos } => {
@@ -1190,6 +1282,7 @@ impl SessionState {
 
             AgentEvent::Error { message } => {
                 self.chat.push(ChatLine {
+                    spans: Vec::new(),
                     channel: ChatChannel::System,
                     sender: "<error>".into(),
                     text: message.clone(),
@@ -1504,6 +1597,7 @@ impl SessionState {
                 count,
             } => {
                 self.chat.push(ChatLine {
+                    spans: Vec::new(),
                     channel: ChatChannel::System,
                     sender: "<shop>".into(),
                     text: format!(
@@ -1538,6 +1632,24 @@ impl SessionState {
                 let changed = self.mh_2f_unlocked != Some(*unlocked);
                 self.mh_2f_unlocked = Some(*unlocked);
                 changed
+            }
+            AgentEvent::TreasurePoolUpdated { slot } => {
+                self.treasure_pool
+                    .resize(ffxi_proto::decode::TREASURE_POOL_SIZE, None);
+                match self.treasure_pool.get_mut(slot.slot as usize) {
+                    Some(dest) => {
+                        let changed = dest.as_ref() != Some(slot.as_ref());
+                        *dest = Some((**slot).clone());
+                        changed
+                    }
+                    None => false,
+                }
+            }
+            AgentEvent::TreasurePoolCleared { slot } => {
+                match self.treasure_pool.get_mut(*slot as usize) {
+                    Some(dest) => dest.take().is_some(),
+                    None => false,
+                }
             }
             AgentEvent::DeathTimerUpdated {
                 seconds_until_homepoint,
@@ -1763,6 +1875,16 @@ pub enum AgentEvent {
 
     MogHouse2fUnlockUpdated {
         unlocked: bool,
+    },
+
+    /// A treasure-pool slot was filled or its lot state changed (s2c 0x0D2, and
+    /// the non-final 0x0D3 verdicts).
+    TreasurePoolUpdated {
+        slot: Box<TreasurePoolSlot>,
+    },
+    /// A pool slot emptied: won, lost, or expired (s2c 0x0D3).
+    TreasurePoolCleared {
+        slot: u8,
     },
 
     WeatherUpdated {
@@ -2075,6 +2197,17 @@ pub enum AgentCommand {
     /// Client-local open of the same menu s2c 0x02E OPENMOGMENU triggers
     /// (vendor/server/src/map/packets/s2c/0x02e_openmogmenu.h).
     OpenMogMenu,
+
+    /// Cast lots on a treasure-pool slot — c2s 0x041 TROPHY_ENTRY. The server
+    /// rolls the value, so there is nothing to send but the slot.
+    TreasureLot {
+        slot: u8,
+    },
+
+    /// Pass on a treasure-pool slot — c2s 0x042 TROPHY_ABSENCE.
+    TreasurePass {
+        slot: u8,
+    },
 
     /// Mark key items seen — c2s 0x064 GP_CLI_COMMAND_SCENARIOITEM with the
     /// table's full updated LookItemFlag bitset
@@ -4006,6 +4139,7 @@ mod tests {
         for i in 0..(CHAT_HISTORY_CAP + 50) {
             s.apply_event(&AgentEvent::ChatLine {
                 line: ChatLine {
+                    spans: Vec::new(),
                     channel: ChatChannel::Say,
                     sender: "x".into(),
                     text: format!("msg {i}"),

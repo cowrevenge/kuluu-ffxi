@@ -28,6 +28,7 @@ pub const LOCAL_TOAST_CAP: usize = 256;
 
 pub fn system_chat_line(text: String) -> ChatLine {
     ChatLine {
+        spans: Vec::new(),
         channel: ChatChannel::System,
         sender: "client".into(),
         text,
@@ -38,6 +39,7 @@ pub fn system_chat_line(text: String) -> ChatLine {
 
 pub fn debug_chat_line(text: String) -> ChatLine {
     ChatLine {
+        spans: Vec::new(),
         channel: ChatChannel::Debug,
         sender: "client".into(),
         text,
@@ -475,6 +477,7 @@ mod tests {
     fn rendered_chat_concatenates_server_then_toasts() {
         let mut state = SceneState::default();
         state.snapshot.chat.push(ChatLine {
+            spans: Vec::new(),
             channel: ChatChannel::Say,
             sender: "Server".into(),
             text: "echo".into(),
@@ -482,6 +485,7 @@ mod tests {
             local_seq: 0,
         });
         state.push_local_toast(ChatLine {
+            spans: Vec::new(),
             channel: ChatChannel::System,
             sender: "client".into(),
             text: "/blarg".into(),
@@ -498,6 +502,7 @@ mod tests {
     fn rendered_chat_interleaves_by_arrival_seq() {
         let mut state = SceneState::default();
         state.snapshot.chat.push(ChatLine {
+            spans: Vec::new(),
             channel: ChatChannel::Battle,
             sender: "mob".into(),
             text: "first".into(),
@@ -506,6 +511,7 @@ mod tests {
         });
         state.next_chat_seq = 1;
         state.push_local_toast(ChatLine {
+            spans: Vec::new(),
             channel: ChatChannel::System,
             sender: "client".into(),
             text: "middle".into(),
@@ -514,6 +520,7 @@ mod tests {
         });
 
         state.snapshot.chat.push(ChatLine {
+            spans: Vec::new(),
             channel: ChatChannel::Battle,
             sender: "mob".into(),
             text: "last".into(),
@@ -532,6 +539,7 @@ mod tests {
         let mut state = SceneState::default();
         for i in 0..(LOCAL_TOAST_CAP + 5) {
             state.push_local_toast(ChatLine {
+                spans: Vec::new(),
                 channel: ChatChannel::System,
                 sender: "client".into(),
                 text: format!("toast {i}"),
@@ -549,6 +557,7 @@ mod tests {
     fn chat_appends_and_caps() {
         let mut snap = SceneSnapshot::default();
         let line = ChatLine {
+            spans: Vec::new(),
             channel: ChatChannel::Say,
             sender: "x".into(),
             text: "hi".into(),
@@ -589,6 +598,7 @@ mod tests {
         app.world_mut()
             .resource_mut::<SceneState>()
             .push_local_toast(ChatLine {
+                spans: Vec::new(),
                 channel: ChatChannel::System,
                 sender: "client".into(),
                 text: "/sound on".into(),
@@ -599,6 +609,7 @@ mod tests {
         let mut s = SceneSnapshot::default();
         for text in ["server-a", "server-b"] {
             s.chat.push(ChatLine {
+                spans: Vec::new(),
                 channel: ChatChannel::Battle,
                 sender: "mob".into(),
                 text: text.into(),

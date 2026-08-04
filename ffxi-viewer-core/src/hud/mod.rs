@@ -40,6 +40,7 @@ pub mod style;
 pub mod target_action_menu;
 pub mod target_panel;
 pub mod trade;
+pub mod treasure_pool;
 pub mod vana_clock;
 pub mod weather_icon;
 pub mod zone_flash;
@@ -276,6 +277,7 @@ impl Plugin for HudPlugin {
         );
 
         app.add_systems(Update, logout_countdown::update_logout_countdown);
+        app.add_systems(Update, treasure_pool::update_treasure_pool);
 
         app.add_systems(
             Update,
@@ -397,6 +399,7 @@ pub fn add_hud_spawners<L: bevy::ecs::schedule::ScheduleLabel + Clone>(app: &mut
             status_ribbon::spawn_status_ribbon,
             death_prompt::spawn_death_prompt,
             logout_countdown::spawn_logout_countdown,
+            treasure_pool::spawn_treasure_pool,
             mesh_debug::spawn_mesh_debug_hud,
             entity_hover_card::spawn_entity_hover_card,
             network_status::spawn_network_status,

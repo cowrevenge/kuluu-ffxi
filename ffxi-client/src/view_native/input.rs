@@ -444,6 +444,7 @@ pub fn handle_input_system(
         };
         if let Some(text) = toast {
             state.push_local_toast(ffxi_viewer_wire::ChatLine {
+                spans: Vec::new(),
                 channel: ffxi_viewer_wire::ChatChannel::Debug,
                 sender: "client".into(),
                 text,

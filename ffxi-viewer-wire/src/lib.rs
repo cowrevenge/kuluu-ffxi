@@ -2,6 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 
+// v11: ChatLine.spans (per-substitution colouring — retail renders a drop line's item name
+// green against the rest) and SceneSnapshot.treasure_pool (the 10 pool slots).
 // v10: Entity.char_flags (0x0D/0x0E Flags1-3, for retail nameplate colour + icon markers) and
 // PartyMember.party_no (GAttr.PartyNo, to tell an alliance-mate's claim from a party-mate's).
 // v9: ViewerEvent::ActionStarted.result — optional (resolution, animation) pair (None for a
@@ -14,7 +16,7 @@ use serde::{Deserialize, Serialize};
 // v5: InventoryItem.charges_remaining + next_use_vana_ts (item recast/charges).
 // v4: SceneSnapshot.delivery_box (dedicated delivery screen) + ViewerCommand::DeliveryBox
 // (postcard frames are not self-describing, so any shape change bumps this).
-pub const PROTOCOL_VERSION: u32 = 10;
+pub const PROTOCOL_VERSION: u32 = 11;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 pub struct Vec3 {
@@ -286,7 +288,7 @@ impl Entity {
     }
 }
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ChatChannel {
     Say,
@@ -296,6 +298,9 @@ pub enum ChatChannel {
     Linkshell,
     Yell,
     System,
+    /// The catch-all for chat kinds with no dedicated channel, and so the
+    /// default a partially-built line starts from.
+    #[default]
     Other,
 
     Battle,
@@ -308,7 +313,49 @@ pub enum ChatChannel {
     Emote,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Which retail colour a run of a chat line takes. Retail renders some
+/// substitutions apart from the text around them — the item name in
+/// "You find a [lizard tail] on the Rock Lizard." is green against the rest
+/// (`.agents/skills/retail-observe/references/treasure-pool-chat.md`).
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChatSpanKind {
+    Text,
+    Item,
+    KeyItem,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ChatSpan {
+    pub text: String,
+    pub kind: ChatSpanKind,
+}
+
+/// Whether the local player has acted on a pool item (s2c 0x0D2 `Entry`).
+#[derive(Debug, Clone, Copy, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TreasureEntry {
+    #[default]
+    None,
+    Passed,
+    Lotted,
+}
+
+/// One occupied treasure-pool slot, as the pool panel renders it.
+#[derive(Debug, Clone, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct TreasurePoolSlot {
+    pub slot: u8,
+    pub item_id: u16,
+    pub item_name: String,
+    pub count: u32,
+    pub dropper: String,
+    pub own_entry: TreasureEntry,
+    pub own_lot: Option<u16>,
+    pub winner: Option<String>,
+    pub winner_lot: u16,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ChatLine {
     pub channel: ChatChannel,
     pub sender: String,
@@ -317,6 +364,12 @@ pub struct ChatLine {
 
     #[serde(default)]
     pub local_seq: u64,
+
+    /// Per-substitution colouring, for the lines retail renders multicoloured.
+    /// Empty means the whole line takes the channel colour; when set, the
+    /// concatenated span text equals `text`.
+    #[serde(default)]
+    pub spans: Vec<ChatSpan>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -426,6 +479,10 @@ pub struct SceneSnapshot {
     /// `Some` while a delivery box is open (drives the dedicated delivery screen).
     #[serde(default)]
     pub delivery_box: Option<DeliveryBoxState>,
+
+    /// Occupied treasure-pool slots, newest drop last. Empty when the pool is.
+    #[serde(default)]
+    pub treasure_pool: Vec<TreasurePoolSlot>,
 
     #[serde(default)]
     pub status_icons: Vec<u16>,
@@ -1140,7 +1197,9 @@ mod tests {
                 text: "hi".into(),
                 server_ts: 1_700_000_000,
                 local_seq: 0,
+                spans: Vec::new(),
             }],
+            treasure_pool: vec![],
             diagnostics: Diagnostics {
                 stage: Some(Stage::InZone),
                 blowfish_status: Some(BlowfishStatus::Accepted),

@@ -641,6 +641,18 @@ const COMMANDS: &[(&str, &[Command])] = &[
                 handler: |c| parse_bank(c.rest),
             },
             Command {
+                aliases: &["lot"],
+                usage: "<pool slot>",
+                summary: "cast lots on a treasure pool item",
+                handler: |c| parse_treasure(c.rest, false),
+            },
+            Command {
+                aliases: &["pass"],
+                usage: "<pool slot>",
+                summary: "pass on a treasure pool item",
+                handler: |c| parse_treasure(c.rest, true),
+            },
+            Command {
                 aliases: &["minimap", "mm"],
                 usage: "[show|hide|toggle|mode <top|retail|auto>|cull <N>|zoom ...]",
                 summary: "drive the minimap HUD (visibility, backend, cull, zoom)",
@@ -1407,6 +1419,28 @@ fn parse_buy(rest: &str) -> SlashOutcome {
         None => 1,
     };
     SlashOutcome::ShopBuyRow { shop_index, qty }
+}
+
+/// `/lot <slot>` and `/pass <slot>`, where slot is the `TrophyItemIndex` the
+/// pool panel shows. The server ignores a repeat on a slot this character
+/// already acted on, so no client-side gate is needed.
+fn parse_treasure(rest: &str, pass: bool) -> SlashOutcome {
+    let label = if pass { "/pass" } else { "/lot" };
+    let arg = rest.split_whitespace().next().unwrap_or("");
+    let slot: u8 = match arg.parse() {
+        Ok(n) if (n as usize) < ffxi_proto::decode::TREASURE_POOL_SIZE => n,
+        _ => {
+            return SlashOutcome::SystemMessage(format!(
+                "{label}: usage `{label} <slot 0-{}>`",
+                ffxi_proto::decode::TREASURE_POOL_SIZE - 1
+            ))
+        }
+    };
+    SlashOutcome::Command(if pass {
+        AgentCommand::TreasurePass { slot }
+    } else {
+        AgentCommand::TreasureLot { slot }
+    })
 }
 
 fn parse_sell(rest: &str) -> SlashOutcome {

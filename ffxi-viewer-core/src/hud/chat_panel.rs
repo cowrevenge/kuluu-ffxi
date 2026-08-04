@@ -1,7 +1,7 @@
 use bevy::input::mouse::MouseWheel;
 use bevy::prelude::*;
 use bevy::ui::RelativeCursorPosition;
-use ffxi_viewer_wire::{ChatChannel, ChatLine};
+use ffxi_viewer_wire::{ChatChannel, ChatLine, ChatSpanKind};
 
 use crate::hud::style::{self, theme};
 use crate::input_mode::{InputMode, PassiveCursorFocus};
@@ -467,11 +467,7 @@ pub fn update_chat_panel(
                 };
 
                 let segments: Vec<(String, Color)> = match line {
-                    Some(l) => {
-                        let base = channel_color(l.channel);
-                        let formatted = format_chat_line(l.channel, &l.sender, &l.text);
-                        segment_chat_line(&formatted, base)
-                    }
+                    Some(l) => segment_line(l),
                     None => Vec::new(),
                 };
                 for (i, span_child) in span_children.iter().enumerate() {
@@ -536,6 +532,42 @@ pub fn format_chat_line(channel: ChatChannel, sender: &str, text: &str) -> Strin
         }
 
         ChatChannel::Debug => format!("[dbg] {text}"),
+    }
+}
+
+/// Split one chat line into coloured runs. A line that carries retail's
+/// per-substitution spans keeps them (the item name in a treasure line renders
+/// green against the channel colour); anything else takes the channel colour
+/// with autotranslate phrases picked out.
+pub fn segment_line(l: &ChatLine) -> Vec<(String, Color)> {
+    let base = channel_color(l.channel);
+    if l.spans.is_empty() {
+        let formatted = format_chat_line(l.channel, &l.sender, &l.text);
+        return segment_chat_line(&formatted, base);
+    }
+    // The channel's name prefix still belongs in front of the spans; it is
+    // empty for the unattributed channels the spanned lines actually use.
+    let prefix = format_chat_line(l.channel, &l.sender, "");
+    std::iter::once((prefix, base))
+        .chain(
+            l.spans
+                .iter()
+                .flat_map(|s| segment_chat_line(&s.text, span_color(s.kind, base))),
+        )
+        .filter(|(t, _)| !t.is_empty())
+        .collect()
+}
+
+/// Retail's item-name green, sampled from the 2026-08-03 drop screenshots
+/// (`.agents/skills/retail-observe/references/treasure-pool-chat.md`). Retail
+/// makes this configurable under Config → Font Colors; the exact default RGB is
+/// still unpinned, so this is the closest theme-consistent match.
+const ITEM_NAME_COLOR: Color = Color::srgb(0.55, 0.88, 0.36);
+
+pub fn span_color(kind: ChatSpanKind, base: Color) -> Color {
+    match kind {
+        ChatSpanKind::Text => base,
+        ChatSpanKind::Item | ChatSpanKind::KeyItem => ITEM_NAME_COLOR,
     }
 }
 
@@ -836,6 +868,99 @@ pub fn update_chat_tab_visuals_system(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use ffxi_viewer_wire::ChatSpan;
+
+    fn drop_line() -> ChatLine {
+        // What ffxi-client's treasure handler emits for s2c 0x0D2, composed
+        // from the retail system-message table.
+        ChatLine {
+            channel: ChatChannel::System,
+            sender: String::new(),
+            text: "You find a Lizard Tail on the Rock Lizard.".into(),
+            server_ts: 0,
+            local_seq: 0,
+            spans: vec![
+                ChatSpan {
+                    text: "You find a ".into(),
+                    kind: ChatSpanKind::Text,
+                },
+                ChatSpan {
+                    text: "Lizard Tail".into(),
+                    kind: ChatSpanKind::Item,
+                },
+                ChatSpan {
+                    text: " on the Rock Lizard.".into(),
+                    kind: ChatSpanKind::Text,
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn a_drop_line_colours_only_the_item_name() {
+        let segs = segment_line(&drop_line());
+        let texts: Vec<&str> = segs.iter().map(|(t, _)| t.as_str()).collect();
+        assert_eq!(
+            texts,
+            vec!["You find a ", "Lizard Tail", " on the Rock Lizard."]
+        );
+        assert_eq!(segs[1].1, ITEM_NAME_COLOR);
+        assert_eq!(segs[0].1, segs[2].1, "the text around it shares one colour");
+        assert_ne!(segs[0].1, ITEM_NAME_COLOR);
+    }
+
+    #[test]
+    fn joined_spans_reproduce_the_plain_text() {
+        // The flat `text` is what headless/agent consumers read, so it must
+        // stay the concatenation of what the panel draws.
+        let l = drop_line();
+        let joined: String = segment_line(&l).iter().map(|(t, _)| t.as_str()).collect();
+        assert_eq!(joined, l.text);
+    }
+
+    #[test]
+    fn a_spanned_line_stays_under_the_span_pool() {
+        assert!(segment_line(&drop_line()).len() <= SPANS_PER_ROW);
+    }
+
+    #[test]
+    fn autotranslate_still_splits_inside_a_span() {
+        let mut l = drop_line();
+        l.spans[2].text = " on the {Rock Lizard}.".into();
+        l.text = "You find a Lizard Tail on the {Rock Lizard}.".into();
+        let segs = segment_line(&l);
+        assert!(
+            segs.iter()
+                .any(|(t, c)| t == "{Rock Lizard}" && *c == AUTOTRANSLATE_COLOR),
+            "{segs:?}"
+        );
+    }
+
+    #[test]
+    fn a_line_without_spans_takes_the_old_path() {
+        let l = ChatLine {
+            channel: ChatChannel::Say,
+            sender: "Daisy".into(),
+            text: "hi".into(),
+            server_ts: 0,
+            local_seq: 0,
+            spans: Vec::new(),
+        };
+        let segs = segment_line(&l);
+        assert_eq!(segs.len(), 1);
+        assert_eq!(segs[0].0, "Daisy : hi");
+    }
+
+    #[test]
+    fn a_spanned_line_on_an_attributed_channel_keeps_its_name_prefix() {
+        let mut l = drop_line();
+        l.channel = ChatChannel::Party;
+        l.sender = "Daisy".into();
+        let segs = segment_line(&l);
+        assert_eq!(segs[0].0, "(Daisy) ");
+        assert!(segs.iter().any(|(_, c)| *c == ITEM_NAME_COLOR));
+    }
 
     #[test]
     fn cycle_next_steps_all_tabs_and_wraps() {

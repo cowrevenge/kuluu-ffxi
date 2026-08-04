@@ -385,6 +385,7 @@ mod tests {
         let mut s = base_state();
         s.apply_event(&AgentEvent::ChatLine {
             line: ChatLine {
+                spans: Vec::new(),
                 channel: ChatChannel::Say,
                 sender: "Foo".into(),
                 text: "hello world".into(),
@@ -406,6 +407,7 @@ mod tests {
         let long: String = "x".repeat(120);
         s.apply_event(&AgentEvent::ChatLine {
             line: ChatLine {
+                spans: Vec::new(),
                 channel: ChatChannel::Tell,
                 sender: "F".into(),
                 text: long,

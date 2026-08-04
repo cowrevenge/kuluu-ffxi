@@ -11,6 +11,7 @@ use crate::state::{
 };
 
 mod codec;
+mod treasure;
 
 pub(crate) use codec::*;
 pub use codec::{
@@ -344,6 +345,8 @@ async fn run_map_session(
 
     let mut npc_name_resolver = NpcNameResolver::new(cfg.dat_root.clone());
     let mut emote_text_resolver = EmoteTextResolver::new(cfg.dat_root.clone());
+    let mut sysmes_resolver = treasure::SysMesResolver::new(cfg.dat_root.clone());
+    let mut treasure_pool = treasure::TreasurePool::default();
 
     let mut name_miss_dedup: std::collections::HashMap<
         (u32, crate::state::NameMissKind),
@@ -400,6 +403,8 @@ async fn run_map_session(
                         &mut self_pos_seeded,
                         &mut npc_name_resolver,
                         &mut emote_text_resolver,
+                        &mut sysmes_resolver,
+                        &mut treasure_pool,
                         &mut flood_in_mog_house,
                         &mut mog,
                         spawn_fallback,
@@ -475,6 +480,8 @@ async fn run_map_session(
         self_pos_seeded,
         npc_name_resolver,
         emote_text_resolver,
+        sysmes_resolver,
+        treasure_pool,
         mog,
         flood_talknumwork,
         cfg.dat_root
@@ -575,6 +582,10 @@ fn handle_sub_packet(
 
     emote_text: &mut EmoteTextResolver,
 
+    sysmes: &mut treasure::SysMesResolver,
+
+    pool: &mut treasure::TreasurePool,
+
     was_in_mog_house: &mut bool,
 
     mog: &mut SelfMogState,
@@ -627,6 +638,11 @@ fn handle_sub_packet(
                         _ => {}
                     }
                 }
+
+                // The pool is per-zone: the server replays it after zone-in, so
+                // the slot -> item mapping 0x0D3 depends on has to start empty
+                // or a stale slot would name the wrong item.
+                pool.clear();
 
                 let _ = event_tx.send(AgentEvent::ZoneChanged {
                     from: None,
@@ -1181,6 +1197,17 @@ fn handle_sub_packet(
                 let _ = event_tx.send(AgentEvent::StatusIconsUpdated { icons, expiries });
             }
         }
+        // Treasure pool: 0x0D2 places an item (and/or gil) in a slot, 0x0D3
+        // reports a lot, a win, or a loss against one.
+        s2c::TROPHY_LIST => treasure::handle_trophy_list(
+            sub.data,
+            event_tx,
+            sysmes,
+            pool,
+            name_cache,
+            self_char_name,
+        ),
+        s2c::TROPHY_SOLUTION => treasure::handle_trophy_solution(sub.data, event_tx, sysmes, pool),
         s2c::ABIL_RECAST => {
             let recasts = decode_abil_recast(sub.data);
             let _ = event_tx.send(AgentEvent::AbilityRecastsUpdated { recasts });
@@ -1258,6 +1285,7 @@ fn handle_sub_packet(
                 std::str::from_utf8(sub.data).inspect_err(|e| warn_decode_err(sub.opcode, e))
             {
                 let line = ChatLine {
+                    spans: Vec::new(),
                     channel: ChatChannel::System,
                     sender: "<server>".into(),
                     text: text.trim_end_matches('\0').to_string(),
@@ -1380,6 +1408,7 @@ fn handle_sub_packet(
                     .collect();
                 let _ = event_tx.send(AgentEvent::ChatLine {
                     line: ChatLine {
+                        spans: Vec::new(),
                         channel: ChatChannel::System,
                         sender: "client".into(),
                         text: format!("📦 Bag capacities: {}", summary.join(", ")),
@@ -1410,6 +1439,7 @@ fn handle_sub_packet(
             {
                 let _ = event_tx.send(AgentEvent::ChatLine {
                     line: ChatLine {
+                        spans: Vec::new(),
                         channel: ChatChannel::Debug,
                         sender: "client".into(),
                         text: format!(
@@ -1438,6 +1468,7 @@ fn handle_sub_packet(
             {
                 let _ = event_tx.send(AgentEvent::ChatLine {
                     line: ChatLine {
+                        spans: Vec::new(),
                         channel: ChatChannel::Debug,
                         sender: "client".into(),
                         text: format!(
@@ -1475,6 +1506,7 @@ fn handle_sub_packet(
                 };
                 let _ = event_tx.send(AgentEvent::ChatLine {
                     line: ChatLine {
+                        spans: Vec::new(),
                         channel: ChatChannel::Debug,
                         sender: "client".into(),
                         text: format!(
@@ -1662,6 +1694,7 @@ fn begin_server_event(
             auto_event_end.push((unique_no, act_index, event_id, 0));
             let _ = event_tx.send(AgentEvent::ChatLine {
                 line: ChatLine {
+                    spans: Vec::new(),
                     channel: ChatChannel::System,
                     sender: "client".into(),
                     text: match stopped_op {
@@ -1791,6 +1824,8 @@ async fn keepalive_loop(
     mut self_pos_seeded: bool,
     mut npc_name_resolver: NpcNameResolver,
     mut emote_text_resolver: EmoteTextResolver,
+    mut sysmes_resolver: treasure::SysMesResolver,
+    mut treasure_pool: treasure::TreasurePool,
     mut mog: SelfMogState,
     flood_talknumwork: Vec<Vec<u8>>,
     spell_table: Option<ffxi_dat::spell_info::SpellTable>,
@@ -1998,6 +2033,7 @@ async fn keepalive_loop(
                                 crate::local_menu::Advance::Stub { notice, frame } => {
                                     let _ = event_tx.send(AgentEvent::ChatLine {
                                         line: ChatLine {
+                                            spans: Vec::new(),
                                             channel: ChatChannel::System,
                                             sender: "<client>".into(),
                                             text: format!("[mog] {notice}"),
@@ -2042,6 +2078,7 @@ async fn keepalive_loop(
                                         .unwrap_or("storage");
                                     let _ = event_tx.send(AgentEvent::ChatLine {
                                         line: ChatLine {
+                                            spans: Vec::new(),
                                             channel: ChatChannel::System,
                                             sender: "<client>".into(),
                                             text: format!("[mog] Browsing {name}."),
@@ -2281,6 +2318,7 @@ async fn keepalive_loop(
                                     };
                                     let _ = event_tx.send(AgentEvent::ChatLine {
                                         line: ChatLine {
+                                            spans: Vec::new(),
                                             channel: ChatChannel::System,
                                             sender: "<client>".into(),
                                             text: text.into(),
@@ -2298,6 +2336,7 @@ async fn keepalive_loop(
                                 if std::time::Instant::now() < until {
                                     let _ = event_tx.send(AgentEvent::ChatLine {
                                         line: ChatLine {
+                                            spans: Vec::new(),
                                             channel: ChatChannel::System,
                                             sender: "<client>".into(),
                                             text: "Unable to cast spells at this time.".into(),
@@ -2655,6 +2694,30 @@ async fn keepalive_loop(
                             }
                         }
                     }
+                    // Lot and pass are fire-and-forget: the server answers with
+                    // 0x0D3, and silently ignores a repeat on a slot this
+                    // character already acted on
+                    // (vendor/server/src/map/packets/c2s/0x041_trophy_entry.cpp).
+                    Some(AgentCommand::TreasureLot { slot }) => {
+                        let payload = build_subpacket_trophy_lot(sub_seq, slot);
+                        sub_seq = sub_seq.wrapping_add(1);
+                        if let Err(e) = map
+                            .send_encrypted(&payload, datagram_header_id(sub_seq), server_last_seq)
+                            .await
+                        {
+                            tracing::warn!(error = %e, "treasure lot send failed");
+                        }
+                    }
+                    Some(AgentCommand::TreasurePass { slot }) => {
+                        let payload = build_subpacket_trophy_pass(sub_seq, slot);
+                        sub_seq = sub_seq.wrapping_add(1);
+                        if let Err(e) = map
+                            .send_encrypted(&payload, datagram_header_id(sub_seq), server_last_seq)
+                            .await
+                        {
+                            tracing::warn!(error = %e, "treasure pass send failed");
+                        }
+                    }
                     Some(AgentCommand::TextInput { text }) => {
                         // Only the delivery-box recipient prompt takes free
                         // text; ignore stray input otherwise.
@@ -2932,6 +2995,7 @@ async fn keepalive_loop(
                             if mog.myroom.is_none() && !mog.mog_zone_flag {
                                 let _ = event_tx.send(AgentEvent::ChatLine {
                                     line: ChatLine {
+                                        spans: Vec::new(),
                                         channel: ChatChannel::System,
                                         sender: "<client>".into(),
                                         text: "Mog Menu opened outside a Mog House — the \
@@ -2997,6 +3061,7 @@ async fn keepalive_loop(
                         );
                         let _ = event_tx.send(AgentEvent::ChatLine {
                             line: ChatLine {
+                                spans: Vec::new(),
                                 channel: ChatChannel::System,
                                 sender: "<client>".into(),
                                 text: format!(
@@ -3115,6 +3180,7 @@ async fn keepalive_loop(
                         );
                         let _ = event_tx.send(AgentEvent::ChatLine {
                             line: ChatLine {
+                                spans: Vec::new(),
                                 channel: ChatChannel::System,
                                 sender: "<client>".into(),
                                 text: "Released the pinned event (you walked away from it)."
@@ -3320,6 +3386,7 @@ async fn keepalive_loop(
                                         for text in out.notices {
                                             let _ = event_tx.send(AgentEvent::ChatLine {
                                                 line: ChatLine {
+                                                    spans: Vec::new(),
                                                     channel: ChatChannel::System,
                                                     sender: "<client>".into(),
                                                     text: format!("[delivery] {text}"),
@@ -3464,6 +3531,8 @@ async fn keepalive_loop(
                                 &mut self_pos_seeded,
                                 &mut npc_name_resolver,
                                 &mut emote_text_resolver,
+                                &mut sysmes_resolver,
+                                &mut treasure_pool,
                                 &mut self_in_mog_house,
                                 &mut mog,
                                 None,
@@ -3686,6 +3755,7 @@ fn talknumwork_chat_line(
         ),
     };
     ChatLine {
+        spans: Vec::new(),
         channel: if speaker.is_some() {
             ChatChannel::Say
         } else {
@@ -3703,6 +3773,7 @@ fn build_system_message_line(m: decode::SystemMessage) -> ChatLine {
         None => format!("[system] msg #{} para={},{}", m.message_id, m.para, m.para2),
     };
     ChatLine {
+        spans: Vec::new(),
         channel: ChatChannel::System,
         sender: "<server>".into(),
         text,
@@ -3793,6 +3864,7 @@ fn decode_battle_message(
     let tar_name = name_for_id(tar_id, name_cache);
     if let Some(text) = synth_check_line(message_num, data1, data2, &cas_name, &tar_name) {
         return Some(ChatLine {
+            spans: Vec::new(),
             channel: ChatChannel::Battle,
             sender: cas_name,
             text,
@@ -3812,6 +3884,7 @@ fn decode_battle_message(
         None,
     );
     Some(ChatLine {
+        spans: Vec::new(),
         channel: ChatChannel::Battle,
 
         sender: if subject_is_tar(message_num) {
@@ -4068,6 +4141,7 @@ fn build_battle2_line(
         Some(resource_id),
     );
     Some(ChatLine {
+        spans: Vec::new(),
         channel: ChatChannel::Battle,
         sender: if subject_is_tar(message_num) {
             tar_name.to_string()
@@ -4115,6 +4189,7 @@ fn decode_std_message_examine(
     }
     let name = name_for_id(unique_no, name_cache);
     Some(ChatLine {
+        spans: Vec::new(),
         channel: ChatChannel::System,
         sender: name.clone(),
         text: format!("{name} examines you."),
@@ -4271,6 +4346,7 @@ fn emote_chat_line(
         })
         .unwrap_or_else(|| fallback_emote_text(&cas_name, m.mes_num));
     ChatLine {
+        spans: Vec::new(),
         channel: ChatChannel::Emote,
         sender: String::new(),
         text,
@@ -4719,6 +4795,7 @@ fn emit_event_speech_to_chat(
     };
     let _ = event_tx.send(AgentEvent::ChatLine {
         line: ChatLine {
+            spans: Vec::new(),
             channel: ChatChannel::Say,
             sender: dialog.npc_name.clone().unwrap_or_default(),
             text: text.clone(),
@@ -4799,6 +4876,7 @@ fn decode_chat_std(data: &[u8]) -> Option<ChatLine> {
     };
     let text = decode_chat_text(&data[PREFIX..]);
     Some(ChatLine {
+        spans: Vec::new(),
         channel: ChatChannel::from_chat_kind(kind),
         sender,
         text,
@@ -4920,6 +4998,7 @@ fn note_mog_transition(now_in_mog: bool, was: &mut bool, event_tx: &broadcast::S
     if now_in_mog && !*was {
         let _ = event_tx.send(AgentEvent::ChatLine {
             line: crate::state::ChatLine {
+                spans: Vec::new(),
                 channel: crate::state::ChatChannel::System,
                 sender: "<client>".into(),
                 text: "You're inside a Mog House (LSB keeps the zone id equal \
@@ -4932,6 +5011,7 @@ fn note_mog_transition(now_in_mog: bool, was: &mut bool, event_tx: &broadcast::S
     } else if !now_in_mog && *was {
         let _ = event_tx.send(AgentEvent::ChatLine {
             line: crate::state::ChatLine {
+                spans: Vec::new(),
                 channel: crate::state::ChatChannel::System,
                 sender: "<client>".into(),
                 text: "Left the Mog House (server-side `m_moghouseID` cleared).".into(),

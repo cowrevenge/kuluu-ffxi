@@ -7,7 +7,33 @@ use bevy::shader::ShaderRef;
 use crate::components::InGameEntity;
 use crate::weather::ZoneWeather;
 
+/// Radius the dome mesh is built at. Only a reference scale — the drawn radius
+/// is [`sky_shell_radius`], reached by scaling this mesh.
 pub const SKYBOX_RADIUS: f32 = 5500.0;
+
+/// Retail sizes the celestial sphere off the active frustum rather than a fixed
+/// world radius, so the sky is in view at any draw distance:
+/// `(FarClipPlane - NearClipPlane) * 0.8`, passed straight to
+/// `DrawCelestialSphere` (research/XIClient/src/XIClient/source/World/Zone/
+/// XiZone.cpp:187-189).
+const SKY_SHELL_FRUSTUM_FRACTION: f32 = 0.8;
+
+/// Distance every camera-attached sky element sits at for the given frustum.
+///
+/// A fixed radius is only ever right for one draw distance: at the 200 the
+/// graphics menu offers, a 5500 dome, its canopy and the sun/moon discs all sit
+/// at or past the far plane and nothing sky renders at all.
+pub fn sky_shell_radius(near: f32, far: f32) -> f32 {
+    ((far - near) * SKY_SHELL_FRUSTUM_FRACTION).max(0.0)
+}
+
+/// Sky elements that are not the dome itself sit just inside it, so the dome
+/// stays the farthest thing drawn and everything else depth-sorts against it.
+pub fn sky_element_distance(near: f32, far: f32) -> f32 {
+    sky_shell_radius(near, far) * SKY_ELEMENT_INSET
+}
+
+const SKY_ELEMENT_INSET: f32 = 0.9;
 
 #[derive(Clone, Debug, ShaderType)]
 pub struct SkyboxUniform {
@@ -69,6 +95,31 @@ impl Material for SkyboxGradientMaterial {
     }
 }
 
+#[cfg(test)]
+mod frustum_shell_tests {
+    use super::*;
+
+    // A fixed world radius is only right for one draw distance. The graphics menu
+    // offers 200..6100, and at 200 a 5500 dome, its ~5400 canopy rim and the 4000
+    // discs are all past the far plane, so nothing sky renders at all.
+    #[test]
+    fn every_offered_draw_distance_puts_the_shell_inside_the_frustum() {
+        const NEAR: f32 = 0.1;
+        for far in [200.0f32, 500.0, 700.0, 1100.0, 2300.0, 6100.0] {
+            let dome = sky_shell_radius(NEAR, far);
+            let element = sky_element_distance(NEAR, far);
+            assert!(dome < far, "dome {dome} outside far {far}");
+            assert!(element < dome, "element {element} outside dome {dome}");
+            assert!(element > 0.0);
+        }
+    }
+
+    #[test]
+    fn degenerate_frustum_does_not_go_negative() {
+        assert_eq!(sky_shell_radius(10.0, 1.0), 0.0);
+    }
+}
+
 #[derive(Component)]
 pub struct SkyboxSphere;
 
@@ -94,7 +145,10 @@ fn spawn_skybox_sphere(
 #[allow(clippy::type_complexity)]
 fn update_skybox(
     zone_weather: Res<ZoneWeather>,
-    cam_q: Query<&Transform, (With<crate::camera::OperatorCamera>, Without<SkyboxSphere>)>,
+    cam_q: Query<
+        (&Transform, &Projection),
+        (With<crate::camera::OperatorCamera>, Without<SkyboxSphere>),
+    >,
     mut sky_q: Query<(&mut Transform, &MeshMaterial3d<SkyboxGradientMaterial>), With<SkyboxSphere>>,
     mut mats: ResMut<Assets<SkyboxGradientMaterial>>,
     mut toasts: MessageWriter<crate::snapshot::ToastEvent>,
@@ -102,11 +156,25 @@ fn update_skybox(
     mut prev_keyframe_time: Local<Option<u32>>,
     mut last_applied: Local<Option<([Vec4; 8], [Vec4; 2])>>,
 ) {
-    let cam_pos = cam_q.single().map(|t| t.translation).unwrap_or(Vec3::ZERO);
+    let cam = cam_q.single().ok();
+    let cam_pos = cam.map(|(t, _)| t.translation).unwrap_or(Vec3::ZERO);
+    let radius = cam
+        .and_then(|(_, proj)| match proj {
+            Projection::Perspective(p) => Some(sky_shell_radius(p.near, p.far)),
+            _ => None,
+        })
+        .unwrap_or(SKYBOX_RADIUS);
 
     let sky_mat = if let Ok((mut sky_xf, sky_mat)) = sky_q.single_mut() {
         if sky_xf.translation != cam_pos {
             sky_xf.translation = cam_pos;
+        }
+        // The mesh is built once at SKYBOX_RADIUS; the drawn radius follows the
+        // frustum. X stays negated so the dome is seen from the inside.
+        let scale = radius / SKYBOX_RADIUS;
+        let want = Vec3::new(-scale, scale, scale);
+        if sky_xf.scale != want {
+            sky_xf.scale = want;
         }
         Some(sky_mat.0.clone())
     } else {

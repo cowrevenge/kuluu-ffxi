@@ -5,7 +5,7 @@ use ffxi_dat::chunk::{walk_tree, ChunkNode};
 use ffxi_dat::generator::Generator;
 use ffxi_dat::weather::collect_weather_records;
 use ffxi_dat::{ChunkKind, DatRoot};
-use ffxi_viewer_core::zone_clouds::CLOUD_MIN_RIM;
+use ffxi_viewer_core::zone_clouds::cloud_min_rim;
 
 /// The two outdoor zone DATs the sky work was measured against: `f_la` and `f_or`.
 const ZONE_DATS: [u32; 2] = [202, 209];
@@ -82,11 +82,17 @@ fn cld1_never_fogs_and_the_overcast_cld2_always_does() {
     assert!(checked_cld1 > 0 && checked_cld2 > 0, "no canopies examined");
 }
 
-/// The WHY behind the lane: the canopy is normalised to CLOUD_MIN_RIM, orders of magnitude
+/// The WHY behind the lane: at the draw distance the client ships with, the canopy rim sits
 /// past every fog distance the zone's own 0x2F records author, so fog can only ever replace
 /// its colour with the horizon tint rather than blend toward it.
+///
+/// The rim follows the frustum now, so this holds at the default preset and NOT at the
+/// smallest one the menu offers — at 200 the rim is inside the longest authored fog range.
+/// That is why the per-generator fog bit, not the rim, is what keeps cld1 unfogged.
 #[test]
 fn every_authored_fog_distance_is_far_inside_the_canopy_rim() {
+    const DEFAULT_VIEW_DISTANCE: f32 = 6100.0;
+    let rim = cloud_min_rim(DEFAULT_VIEW_DISTANCE);
     for file_id in ZONE_DATS {
         let Some(bytes) = zone_bytes(file_id) else {
             eprintln!("zone DAT {file_id} unavailable; skipping");
@@ -99,8 +105,8 @@ fn every_authored_fog_distance_is_far_inside_the_canopy_rim() {
         );
         for record in records {
             assert!(
-                record.max_fog_dist_landscape < CLOUD_MIN_RIM,
-                "{file_id} minute {} fog distance {} reaches the canopy rim {CLOUD_MIN_RIM}",
+                record.max_fog_dist_landscape < rim,
+                "{file_id} minute {} fog distance {} reaches the canopy rim {rim}",
                 record.time_minutes,
                 record.max_fog_dist_landscape,
             );

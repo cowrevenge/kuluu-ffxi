@@ -32,9 +32,11 @@ use crate::zone_texture::{decoded_texture_to_image, TextureQuality};
 // (non-depth-writing) cloud sheet drapes over zone geometry farther out than the rim.
 // Push the rim to just inside the gradient sky dome so all terrain — which fits within
 // that dome — is nearer and depth-occludes the clouds (the "sky is the farthest thing"
-// rule). Derived from SKYBOX_RADIUS so this can't drift from the dome it must sit under.
-const CLOUD_RIM_MARGIN: f32 = 100.0;
-pub const CLOUD_MIN_RIM: f32 = crate::skybox::SKYBOX_RADIUS - CLOUD_RIM_MARGIN;
+// rule). Derived from the same frustum shell as the dome so it can't drift outside
+// the dome it must sit under — a rim past the dome is bug kuluu-g64c.
+pub fn cloud_min_rim(view_distance: f32) -> f32 {
+    crate::skybox::sky_element_distance(PerspectiveProjection::default().near, view_distance)
+}
 
 // research/xim EnvironmentManager.kt:351-369 switchWeather default 3.33s cross-fade
 // between the old and new weat/<type>/ effect sets on a 0x0057 weather change.
@@ -252,6 +254,7 @@ fn build_cloud_layers(
     weat_type: &ChunkNode,
     quality: TextureQuality,
     opacity: f32,
+    min_rim: f32,
     meshes: &mut Assets<Mesh>,
     images: &mut Assets<Image>,
     materials: &mut Assets<FfxiZoneMaterial>,
@@ -312,7 +315,7 @@ fn build_cloud_layers(
             mesh: meshes.add(mesh),
             material,
             base_position: def_base_to_vec(&def),
-            scale: layer_scale(&def, half_xz),
+            scale: layer_scale(&def, half_xz, min_rim),
             max_alpha: opacity,
             uv_scroll: Vec2::from_array(def.uv_scroll),
             tracks: resolve_color_tracks(weat_type, &def),
@@ -343,11 +346,11 @@ fn def_base_to_vec(def: &CloudGeneratorDef) -> Vec3 {
 // Camera-follow cloud canopies sit on the camera, so their rim (half_xz * authored
 // 0x0F scale) is pushed out to at least CLOUD_MIN_RIM — keeping the authored aspect
 // ratio — so distant terrain stays nearer and depth-occludes them.
-fn layer_scale(def: &CloudGeneratorDef, half_xz: f32) -> Vec3 {
+fn layer_scale(def: &CloudGeneratorDef, half_xz: f32, min_rim: f32) -> Vec3 {
     let authored = Vec3::from_array(def.scale);
     let rim = half_xz * authored.x.max(authored.z);
     let factor = if rim > 1.0 {
-        (CLOUD_MIN_RIM / rim).max(1.0)
+        (min_rim / rim).max(1.0)
     } else {
         1.0
     };
@@ -442,6 +445,7 @@ fn rebuild_zone_clouds(
                 node,
                 quality,
                 weather_opacity(want),
+                cloud_min_rim(settings.view_distance),
                 &mut meshes,
                 &mut images,
                 &mut materials,

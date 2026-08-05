@@ -1,3 +1,5 @@
+use std::collections::VecDeque;
+
 use bevy::prelude::Resource;
 
 #[derive(Resource, Debug, Clone, Default)]
@@ -93,6 +95,14 @@ pub struct DialogCursor {
 #[derive(Debug, Clone, Default)]
 pub struct ChatBuffer {
     pub text: String,
+
+    /// How far back in [`ChatHistory`] Up/Down has paged. `None` is the fresh
+    /// line being typed; `Some(0)` is the most recent submission.
+    pub history_pos: Option<usize>,
+
+    /// The line that was being typed when paging into history started, restored
+    /// when Down walks back past the newest entry.
+    pub draft: Option<String>,
 }
 
 impl ChatBuffer {
@@ -103,7 +113,82 @@ impl ChatBuffer {
     pub fn with_prefix(prefix: &str) -> Self {
         Self {
             text: prefix.to_string(),
+            ..Self::default()
         }
+    }
+
+    /// Page one entry further back. No-op at the oldest entry or on an empty
+    /// history.
+    pub fn recall_older(&mut self, history: &ChatHistory) {
+        let next = match self.history_pos {
+            None => 0,
+            Some(pos) => pos + 1,
+        };
+        let Some(entry) = history.get(next) else {
+            return;
+        };
+        if self.history_pos.is_none() {
+            self.draft = Some(std::mem::take(&mut self.text));
+        }
+        self.text = entry.to_string();
+        self.history_pos = Some(next);
+    }
+
+    /// Page one entry forward, landing back on the stashed draft past the
+    /// newest entry. No-op when not paging.
+    pub fn recall_newer(&mut self, history: &ChatHistory) {
+        let Some(pos) = self.history_pos else {
+            return;
+        };
+        match pos
+            .checked_sub(1)
+            .and_then(|next| history.get(next).map(|entry| (next, entry.to_string())))
+        {
+            Some((next, entry)) => {
+                self.text = entry;
+                self.history_pos = Some(next);
+            }
+            None => {
+                self.text = self.draft.take().unwrap_or_default();
+                self.history_pos = None;
+            }
+        }
+    }
+}
+
+/// Lines the player has submitted from the chat bar, newest first. Kept as a
+/// resource so it outlives the per-open [`ChatBuffer`].
+#[derive(Resource, Debug, Clone, Default)]
+pub struct ChatHistory {
+    entries: VecDeque<String>,
+}
+
+/// Retail's text input recalls a bounded number of past lines rather than the
+/// whole session; 32 covers a fight's worth of commands without unbounded growth.
+pub const CHAT_HISTORY_MAX: usize = 32;
+
+impl ChatHistory {
+    /// `index` 0 is the most recent submission.
+    pub fn get(&self, index: usize) -> Option<&str> {
+        self.entries.get(index).map(String::as_str)
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// Records a submitted line. Blank lines and an immediate repeat of the
+    /// newest entry are dropped so paging stays useful when a command is spammed.
+    pub fn push(&mut self, line: &str) {
+        if line.trim().is_empty() || self.entries.front().is_some_and(|prev| prev == line) {
+            return;
+        }
+        self.entries.push_front(line.to_string());
+        self.entries.truncate(CHAT_HISTORY_MAX);
     }
 }
 
@@ -395,5 +480,82 @@ mod tests {
     fn pushed_stack_does_not_absorb() {
         let mut stack = MenuStack::default();
         assert!(!stack.take_absorb_open_minus());
+    }
+
+    fn history_of(lines: &[&str]) -> ChatHistory {
+        let mut history = ChatHistory::default();
+        for line in lines {
+            history.push(line);
+        }
+        history
+    }
+
+    #[test]
+    fn history_pages_newest_first_and_clamps_at_the_oldest() {
+        let history = history_of(&["/heal", "hello", "/tell Zilart hi"]);
+        let mut buffer = ChatBuffer::empty();
+
+        buffer.recall_older(&history);
+        assert_eq!(buffer.text, "/tell Zilart hi");
+        buffer.recall_older(&history);
+        assert_eq!(buffer.text, "hello");
+        buffer.recall_older(&history);
+        assert_eq!(buffer.text, "/heal");
+
+        buffer.recall_older(&history);
+        assert_eq!(buffer.text, "/heal", "oldest entry holds");
+    }
+
+    #[test]
+    fn paging_forward_restores_the_stashed_draft() {
+        let history = history_of(&["/heal"]);
+        let mut buffer = ChatBuffer::empty();
+        buffer.text = "half typed".into();
+
+        buffer.recall_older(&history);
+        assert_eq!(buffer.text, "/heal");
+
+        buffer.recall_newer(&history);
+        assert_eq!(buffer.text, "half typed");
+        assert_eq!(buffer.history_pos, None);
+
+        buffer.recall_newer(&history);
+        assert_eq!(buffer.text, "half typed", "already at the fresh line");
+    }
+
+    #[test]
+    fn empty_history_leaves_the_line_alone() {
+        let history = ChatHistory::default();
+        let mut buffer = ChatBuffer::empty();
+        buffer.text = "typing".into();
+
+        buffer.recall_older(&history);
+        buffer.recall_newer(&history);
+
+        assert_eq!(buffer.text, "typing");
+        assert_eq!(buffer.history_pos, None);
+        assert_eq!(buffer.draft, None);
+    }
+
+    #[test]
+    fn blank_and_repeated_lines_are_not_recorded() {
+        let history = history_of(&["/heal", "/heal", "   ", ""]);
+        assert_eq!(history.len(), 1);
+        assert_eq!(history.get(0), Some("/heal"));
+    }
+
+    #[test]
+    fn history_is_capped_at_the_max() {
+        let lines: Vec<String> = (0..CHAT_HISTORY_MAX + 8)
+            .map(|i| format!("/l {i}"))
+            .collect();
+        let mut history = ChatHistory::default();
+        for line in &lines {
+            history.push(line);
+        }
+
+        assert_eq!(history.len(), CHAT_HISTORY_MAX);
+        assert_eq!(history.get(0).map(str::to_string), lines.last().cloned());
+        assert_eq!(history.get(CHAT_HISTORY_MAX), None);
     }
 }

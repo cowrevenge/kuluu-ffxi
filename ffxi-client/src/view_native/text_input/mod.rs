@@ -7,8 +7,8 @@ use ffxi_viewer_core::dat_mmb::LoadMmbRequest;
 use ffxi_viewer_core::dat_mzb::LoadMzbRequest;
 use ffxi_viewer_core::hud::chat_panel::{ActiveChatTab, ChatScroll};
 use ffxi_viewer_core::{
-    Action, Bindings, ChatBuffer, DialogCursor, InputMode, MenuKind, MenuStack, Preset,
-    QuickActionState, SceneState, Target,
+    Action, Bindings, ChatBuffer, ChatHistory, DialogCursor, InputMode, MenuKind, MenuStack,
+    Preset, QuickActionState, SceneState, Target,
 };
 
 use super::debug_heights::DebugHeightsRequest;
@@ -113,6 +113,8 @@ pub struct SlashWriters<'w, 's> {
     pub fishing_spot: Res<'w, ffxi_viewer_core::fishing_spot::FishingSpot>,
 
     pub active_chat_tab: ResMut<'w, ActiveChatTab>,
+
+    pub chat_history: ResMut<'w, ChatHistory>,
 
     pub map_screen_state: ResMut<'w, ffxi_viewer_core::hud::map_screen::MapScreenState>,
 
@@ -233,7 +235,12 @@ pub fn text_input_system(
                 }
             }
             InputMode::Chat(buffer) => {
-                let action = handle_chat_key(&ev.logical_key, &bindings, buffer);
+                let action = handle_chat_key(
+                    &ev.logical_key,
+                    &bindings,
+                    buffer,
+                    &slash_writers.chat_history,
+                );
                 let fishing_gate = slash_writers.fishing_spot.0;
                 apply_chat_action(
                     action,
@@ -577,7 +584,12 @@ enum ChatAction {
     Exit,
 }
 
-fn handle_chat_key(key: &Key, bindings: &Bindings, buffer: &mut ChatBuffer) -> ChatAction {
+fn handle_chat_key(
+    key: &Key,
+    bindings: &Bindings,
+    buffer: &mut ChatBuffer,
+    history: &ChatHistory,
+) -> ChatAction {
     if bindings.matches_logical(Action::ChatSubmit, key) {
         return ChatAction::Submit;
     }
@@ -585,9 +597,19 @@ fn handle_chat_key(key: &Key, bindings: &Bindings, buffer: &mut ChatBuffer) -> C
         return if buffer.text.is_empty() {
             ChatAction::Exit
         } else {
-            buffer.text.clear();
+            *buffer = ChatBuffer::empty();
             ChatAction::Stay
         };
+    }
+    // Free while the bar is open: the movement/camera system early-returns on
+    // InputMode::Chat, so ArrowUp/Down never reach CameraPitchUp/Down here.
+    if bindings.matches_logical(Action::NavUp, key) {
+        buffer.recall_older(history);
+        return ChatAction::Stay;
+    }
+    if bindings.matches_logical(Action::NavDown, key) {
+        buffer.recall_newer(history);
+        return ChatAction::Stay;
     }
     if bindings.matches_logical(Action::ChatBackspace, key) {
         buffer.text.pop();
@@ -645,6 +667,7 @@ fn apply_chat_action(
                 *mode = InputMode::World;
                 return;
             }
+            slash_writers.chat_history.push(trimmed);
             if trimmed.starts_with('/') {
                 let outcome = parse_slash(
                     trimmed,
@@ -1956,5 +1979,68 @@ mod quick_action_tests {
                 "{label} should open {expected:?}",
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod chat_history_tests {
+    use super::*;
+
+    #[test]
+    fn chat_arrows_page_the_submitted_line_history() {
+        let bindings = Bindings::default();
+        let mut history = ChatHistory::default();
+        history.push("/heal");
+        history.push("/tell Zilart hi");
+
+        let mut buffer = ChatBuffer::empty();
+        buffer.text.push_str("draft");
+
+        for (key, expected) in [
+            (Key::ArrowUp, "/tell Zilart hi"),
+            (Key::ArrowUp, "/heal"),
+            (Key::ArrowDown, "/tell Zilart hi"),
+            (Key::ArrowDown, "draft"),
+        ] {
+            handle_chat_key(&key, &bindings, &mut buffer, &history);
+            assert_eq!(buffer.text, expected, "after {key:?}");
+        }
+    }
+
+    #[test]
+    fn chat_typing_is_unaffected_by_the_history_bindings() {
+        let bindings = Bindings::default();
+        let history = ChatHistory::default();
+        let mut buffer = ChatBuffer::empty();
+
+        for key in [
+            Key::Character("h".into()),
+            Key::Character("i".into()),
+            Key::Space,
+            Key::ArrowUp,
+            Key::Character("t".into()),
+        ] {
+            handle_chat_key(&key, &bindings, &mut buffer, &history);
+        }
+
+        assert_eq!(buffer.text, "hi t");
+    }
+
+    #[test]
+    fn clearing_a_recalled_line_resets_the_history_cursor() {
+        let bindings = Bindings::default();
+        let mut history = ChatHistory::default();
+        history.push("/heal");
+
+        let mut buffer = ChatBuffer::empty();
+        handle_chat_key(&Key::ArrowUp, &bindings, &mut buffer, &history);
+        assert_eq!(buffer.history_pos, Some(0));
+
+        handle_chat_key(&Key::Escape, &bindings, &mut buffer, &history);
+        assert_eq!(buffer.text, "");
+        assert_eq!(buffer.history_pos, None);
+
+        handle_chat_key(&Key::ArrowUp, &bindings, &mut buffer, &history);
+        assert_eq!(buffer.text, "/heal");
     }
 }

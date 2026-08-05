@@ -101,8 +101,8 @@ pub use graphics_settings::{
 };
 pub use hud::{add_hud_spawners, HudPlugin};
 pub use input_mode::{
-    ChatBuffer, DialogCursor, InputMode, MenuKind, MenuLevel, MenuStack, PassiveCursorFocus,
-    PassiveCursorState, QuickActionState, DIALOG_MAX_CHOICE,
+    ChatBuffer, ChatHistory, DialogCursor, InputMode, MenuKind, MenuLevel, MenuStack,
+    PassiveCursorFocus, PassiveCursorState, QuickActionState, CHAT_HISTORY_MAX, DIALOG_MAX_CHOICE,
 };
 pub use keybinds::{Action, Bindings, KeyBind, Modifiers, Preset};
 pub use lock_on::{suppresses_retarget, LockOn, ToggleResult as LockOnToggle};
@@ -233,6 +233,7 @@ impl<S: SceneSource + Resource + Component<Mutability = bevy::ecs::component::Mu
             .init_resource::<TrackedEntities>()
             .init_resource::<Target>()
             .init_resource::<InputMode>()
+            .init_resource::<ChatHistory>()
             .init_resource::<Bindings>()
             .init_resource::<CameraMode>()
             .init_resource::<LockOn>()

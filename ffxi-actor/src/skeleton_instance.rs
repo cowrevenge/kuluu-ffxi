@@ -24,6 +24,11 @@ impl RootTransform {
     }
 }
 
+/// The joint a rider is pinned to when [`MountAttach`] applies — the hip, which
+/// every FFXI skeleton files third and which the rest of the body composes from
+/// (research/xim resource/SkeletonInstance.kt, updateCurrentJointTransform).
+pub const HIP_JOINT: usize = 2;
+
 #[derive(Debug, Clone, Copy)]
 pub struct MountAttach {
     pub mount_joint_world: Vec3,
@@ -165,7 +170,7 @@ pub fn pose_world_mounted_into(
             let transform = if override_parent[i].is_some() {
                 let parent = jt[override_parent[i].unwrap()].unwrap();
                 update_with_parent_override(parent, get_anim(i))
-            } else if i == 2 {
+            } else if i == HIP_JOINT {
                 if let Some(m) = mount {
                     mount_attach_transform(m)
                 } else {

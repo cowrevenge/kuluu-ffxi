@@ -3,9 +3,9 @@ use bevy::prelude::*;
 use bevy::render::view::screenshot::{save_to_disk, Capturing, Screenshot};
 use ffxi_actor::skeleton_instance::MountAttach;
 use ffxi_viewer_core::ffxi_actor_render::{
-    advance_actor_pose_standalone, inputs_for_pose, load_mount_race, load_npc, load_pc,
-    mount_seat_local, spawn_loaded_actor, tick_ffxi_render_actors, FfxiRenderActor, PoseState,
-    FRAME_RATE,
+    advance_actor_pose_standalone, chocobo_seat_local, inputs_for_pose, load_mount_race, load_npc,
+    load_pc, mount_seat_local, spawn_loaded_actor, tick_ffxi_render_actors, FfxiRenderActor,
+    PoseState, FRAME_RATE,
 };
 use ffxi_viewer_core::skinned_ffxi_material::{
     FfxiMaterialPlugin, FfxiSkinRegistry, FfxiSkinnedMaterial, FfxiSkinnedMaterialCache,
@@ -52,8 +52,9 @@ struct Params {
 
     mount_race: Option<u8>,
 
-    /// Skeleton-space seat override for calibrating against retail footage;
-    /// skeleton Y is down, so a more negative value seats the rider higher.
+    /// Overrides how far above the chocobo's back the rider's hip is pinned, for
+    /// calibrating against footage; skeleton Y is down, so more negative seats
+    /// the rider higher.
     seat: Option<f32>,
 }
 
@@ -451,8 +452,9 @@ fn spawn_mounted_pair(
     }
 }
 
-/// Re-poses the rider with the seat the mount's own pose defines, mirroring what
-/// `tick_live_ffxi_actors` does for the live path.
+/// Re-poses the rider onto the seat joint its mount defines, mirroring what
+/// `tick_live_ffxi_actors` does for the live path. A chocobo defines none — its
+/// rider keeps the pose its own seat clip already gave it.
 fn pose_rider_on_mount(
     time: Res<Time>,
     params: Res<Params>,
@@ -462,11 +464,11 @@ fn pose_rider_on_mount(
 ) {
     let Ok(mount) = q_mount.single() else { return };
     for (mut rider, tag) in &mut q_rider {
-        let Some(seat) = params.seat.map(|y| Vec3::new(0.0, y, 0.0)).or_else(|| {
-            mount_seat_local(mount.world_pose(), &mount.skeleton, tag.race, tag.chocobo)
-        }) else {
-            continue;
+        let seat = match params.seat.filter(|_| tag.chocobo) {
+            Some(above_back) => chocobo_seat_local(mount.world_pose(), above_back),
+            None => mount_seat_local(mount.world_pose(), &mount.skeleton, tag.race, tag.chocobo),
         };
+        let Some(seat) = seat else { continue };
         advance_actor_pose_standalone(
             &mut rider,
             time.delta_secs() * FRAME_RATE,

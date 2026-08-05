@@ -37,12 +37,23 @@ pub fn first_person_eye_y(baked: Option<&BakedActor>) -> f32 {
         * FIRST_PERSON_EYE_FRAC
 }
 
+/// How much higher a mounted actor's overhead furniture rides. Retail anchors a
+/// name on the AboveHead locator, which PC skeletons hang off the root joint —
+/// so it does not follow a body the seat pose has lifted, and retail makes up
+/// the difference with this while the actor is on a chocobo (research/XIClient
+/// .../World/Actor/SkeletalMeshActor.cpp, `SkeletalMeshActor::GetElem` and
+/// `VirtActor148`). The anchor below is root-relative in exactly the same way,
+/// off a baked mesh height rather than that locator, so retail's rise carries
+/// over even though the baseline sits a little lower.
+const MOUNTED_ANCHOR_RISE: f32 = 1.3;
+
 #[inline]
-pub fn nameplate_anchor_y(baked: Option<&BakedActor>) -> f32 {
+pub fn nameplate_anchor_y(baked: Option<&BakedActor>, mounted: bool) -> f32 {
     baked
         .map(|b| b.actor_height)
         .unwrap_or(FALLBACK_ACTOR_HEIGHT)
         + NAMEPLATE_OFFSET_ABOVE_CROWN
+        + if mounted { MOUNTED_ANCHOR_RISE } else { 0.0 }
 }
 
 #[derive(Component)]

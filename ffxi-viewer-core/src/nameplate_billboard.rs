@@ -206,7 +206,15 @@ pub fn update_nameplate_billboards_system(
     time: Res<Time>,
     target: Res<Target>,
     cam_q: Query<(&Transform, &Projection), (With<OperatorCamera>, Without<NameplateBillboard>)>,
-    world_q: Query<(&Transform, &WorldEntity, Option<&BakedActor>), Without<NameplateBillboard>>,
+    world_q: Query<
+        (
+            &Transform,
+            &WorldEntity,
+            Option<&BakedActor>,
+            Has<crate::components::MountedRider>,
+        ),
+        Without<NameplateBillboard>,
+    >,
     mut billboards: Query<(
         Entity,
         &mut NameplateBillboard,
@@ -238,8 +246,8 @@ pub fn update_nameplate_billboards_system(
 
     let mut pos_by_id: std::collections::HashMap<u32, (Vec3, f32)> =
         std::collections::HashMap::with_capacity(world_q.iter().len());
-    for (t, w, baked) in &world_q {
-        pos_by_id.insert(w.id, (t.translation, nameplate_anchor_y(baked)));
+    for (t, w, baked, mounted) in &world_q {
+        pos_by_id.insert(w.id, (t.translation, nameplate_anchor_y(baked, mounted)));
     }
 
     let self_char_id: Option<u32> = state.snapshot.self_char_id;

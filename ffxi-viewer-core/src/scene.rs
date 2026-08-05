@@ -378,12 +378,18 @@ pub fn sync_entities_system(
     // gives a mount none of those; it is scenery bolted to the rider. Its
     // transform is pinned later, by `pin_mount_actors_system`.
     for wire in &snap.entities {
-        if snap.mount_of(wire).is_none() {
-            continue;
-        }
         let Some(&rider_e) = tracked.by_id.get(&wire.id) else {
             continue;
         };
+        if snap.mount_of(wire).is_none() {
+            commands
+                .entity(rider_e)
+                .remove::<crate::components::MountedRider>();
+            continue;
+        }
+        commands
+            .entity(rider_e)
+            .insert(crate::components::MountedRider);
         let id = mount_actor_id(wire.id);
         seen.insert(id);
         if tracked.by_id.contains_key(&id) {

@@ -84,7 +84,15 @@ pub fn update_nameplates_system(
     state: Res<SceneState>,
     settings: Res<crate::graphics::settings::GraphicsSettings>,
     cam_q: Query<(&Camera, &Transform), (With<OperatorCamera>, Without<WorldEntity>)>,
-    world_q: Query<(&Transform, &WorldEntity, Option<&BakedActor>), Without<Nameplate>>,
+    world_q: Query<
+        (
+            &Transform,
+            &WorldEntity,
+            Option<&BakedActor>,
+            Has<crate::components::MountedRider>,
+        ),
+        Without<Nameplate>,
+    >,
     mut nameplate_q: Query<(Entity, &Nameplate, &mut Node, &Children)>,
     mut label_q: Query<(&NameplateLabel, &mut Text), Without<NameplateCoord>>,
     mut coord_q: Query<&mut Text, (With<NameplateCoord>, Without<NameplateLabel>)>,
@@ -101,8 +109,8 @@ pub fn update_nameplates_system(
     let viewport_to_window = 1.0 / settings.render_scale();
 
     let mut pos_by_id: HashMap<u32, (Vec3, f32)> = HashMap::new();
-    for (t, w, baked) in &world_q {
-        pos_by_id.insert(w.id, (t.translation, nameplate_anchor_y(baked)));
+    for (t, w, baked, mounted) in &world_q {
+        pos_by_id.insert(w.id, (t.translation, nameplate_anchor_y(baked, mounted)));
     }
 
     // HP only changes with a snapshot; screen-space repositioning below still

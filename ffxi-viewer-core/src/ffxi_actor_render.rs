@@ -110,7 +110,7 @@ pub struct LoadedActor {
 
     textures: Vec<NamedTexture>,
 
-    animations: Arc<Vec<SkeletonAnimation>>,
+    pub animations: Arc<Vec<SkeletonAnimation>>,
 
     battle_clips: Arc<Vec<SkeletonAnimation>>,
 
@@ -1783,8 +1783,7 @@ fn routine_motion_clip_last(routines: &HashMap<DatId, Scheduler>, routine: DatId
     sched
         .stages
         .iter()
-        .filter(|t| t.stage.kind == StageKind::Motion)
-        .next_back()
+        .rfind(|t| t.stage.kind == StageKind::Motion)
         .map(|t| DatId::from_name(&t.stage.id))
 }
 
@@ -2518,26 +2517,34 @@ fn saddle_joint_index(race: u8) -> Option<usize> {
         .then(|| SADDLE_JOINT_BASE + usize::from(race - 1))
 }
 
-// A chocobo's seat is a flat height, not a joint: its race skeletons leave the
-// whole per-race saddle block (standard joints 48..) pointing at joint 0 with a
-// zero offset, so there is nothing to look up. Retail hard-codes the height too
-// — research/XIClient .../World/Actor/SkeletalMeshActor.cpp,
-// `SkeletalMeshActor::GetElem`, whose `IsOnChocobo` branch is a flat 1.3 — but
-// it anchors the actor root, where we anchor the rider's hip joint, so the
-// magnitude does not transplant. This one is calibrated against retail footage
-// (Rolanberry Fields, 2026-08-04): the rider's belt clears the back and the boot
-// falls level with the chocobo's knee. Skeleton space is Y-down, so up is
-// negative.
-const CHOCOBO_SEAT_HEIGHT: f32 = -1.6;
-
 /// The nudge xim applies on top of a joint-derived seat, marked in its source as
 /// an unexplained fudge (research/xim resource/SkeletonInstance.kt,
-/// applyMountAttachTransform). It has no counterpart in the chocobo constant.
+/// applyMountAttachTransform).
 const SADDLE_JOINT_NUDGE: Vec3 = Vec3::new(0.0, -0.1, 0.0);
+
+/// Base of a chocobo's spine — the stretch of back the saddle is strapped to,
+/// and the part of the animal that rises and falls with its gait. Its race
+/// skeletons file the pelvis and the first two spine segments as one coincident
+/// chain, so any of the three reads the same seat.
+const CHOCOBO_BACK_JOINT: usize = 3;
+
+/// How far above that joint the rider's hip belongs. A chocobo declares no seat
+/// of its own — the whole per-race saddle block is dead — and retail hard-codes
+/// the height too (research/XIClient .../World/Actor/SkeletalMeshActor.cpp,
+/// `SkeletalMeshActor::GetElem`, a flat 1.3 for `IsOnChocobo`), but against the
+/// actor root rather than the animated back, so the magnitude does not
+/// transplant. Calibrated against retail footage (Rolanberry Fields,
+/// 2026-08-04): the belt clears the saddle and the boot falls level with the
+/// chocobo's knee. Skeleton space is Y-down, so up is negative.
+const CHOCOBO_SEAT_ABOVE_BACK: f32 = -0.24;
 
 /// Where the rider's hip joint is pinned on the mount it is riding, in the
 /// mount's skeleton space. Both actors share a world transform, so the mount's
 /// own pose needs no reframing to be read as the rider's.
+///
+/// A chocobo's seat has to be read off its animated back and not from a fixed
+/// height: the back travels about a tenth of a yalm through a gallop, and a
+/// rider held still against that has the saddle saw up through their body.
 pub fn mount_seat_local(
     mount_pose: &[Mat4],
     mount_skeleton: &Skeleton,
@@ -2545,11 +2552,25 @@ pub fn mount_seat_local(
     chocobo: bool,
 ) -> Option<Vec3> {
     if chocobo {
-        return Some(Vec3::new(0.0, CHOCOBO_SEAT_HEIGHT, 0.0));
+        return chocobo_seat_local(mount_pose, CHOCOBO_SEAT_ABOVE_BACK);
     }
     let joint = saddle_joint_index(rider_race)?;
     let seat = standard_joint_world_position(mount_pose, mount_skeleton, joint)?;
     Some(seat + SADDLE_JOINT_NUDGE)
+}
+
+/// [`mount_seat_local`]'s chocobo case with the height left open, so the render
+/// harness can sweep it against footage without rebuilding the library.
+///
+/// Only the back's *height* is taken. Its joint sits behind the animal's origin,
+/// which is already the middle of the saddle, so carrying x/z across would slide
+/// the rider back over the tail.
+pub fn chocobo_seat_local(mount_pose: &[Mat4], above_back: f32) -> Option<Vec3> {
+    let back = mount_pose
+        .get(CHOCOBO_BACK_JOINT)?
+        .to_scale_rotation_translation()
+        .2;
+    Some(Vec3::new(0.0, back.y + above_back, 0.0))
 }
 
 #[derive(Clone, Copy)]
@@ -2584,8 +2605,8 @@ pub struct SnapshotActorState {
     /// Look race of the rider, on a mount actor's entry. Every mount skeleton
     /// carries one saddle joint per playable race, because each sits differently.
     rider_race: u8,
-    /// Set on a mount actor's entry when it is a ridden chocobo, whose seat is a
-    /// flat height rather than a joint.
+    /// Set on a mount actor's entry when it is a ridden chocobo, whose rider is
+    /// seated by their animation rather than pinned to a saddle joint.
     mount_is_chocobo: bool,
 }
 
@@ -2679,11 +2700,12 @@ pub fn tick_live_ffxi_actors(
     );
     let actor_world_by_id: &HashMap<u32, Vec3> = &actor_world_scratch;
 
-    // Where each rider's body has to sit. Read off the mount actor's posed
-    // skeleton, which shares the rider's root transform exactly (scene.rs pins
-    // the mount entity to the rider's), so the joint needs no reframing. Taken
-    // from the pose the mount held last frame — the two actors are posed in the
-    // same pass and a frame of lag on a seat is not visible.
+    // Where each rider's body has to be pinned, for the mounts that pin one.
+    // Read off the mount actor's posed skeleton, which shares the rider's root
+    // transform exactly (scene.rs pins the mount entity to the rider's), so the
+    // joint needs no reframing. Taken from the pose the mount held last frame —
+    // the two actors are posed in the same pass and a frame of lag on a seat is
+    // not visible.
     mount_attach_scratch.clear();
     for (a, _) in &q_actors {
         let Some(rider_id) = crate::scene::mount_actor_rider(a.world_id) else {
@@ -3531,10 +3553,11 @@ mod pose_resolution_tests {
         assert!(load_mount_race(black).is_ok(), "black chocobo race config");
     }
 
-    /// The reason `mount_seat_local` special-cases a chocobo: its race skeleton
-    /// leaves every per-race saddle joint pointing at joint 0 with a zero offset,
-    /// so the joint lookup other mounts use resolves to the ground and drops the
-    /// rider through the floor. Self-skips without a retail install.
+    /// Why `mount_seat_local` reads a chocobo's seat off its spine instead of
+    /// the saddle joint every other mount declares: a chocobo race skeleton
+    /// leaves that whole per-race block pointing at joint 0 with a zero offset,
+    /// so the lookup resolves to the ground and drops the rider through the
+    /// floor. Self-skips without a retail install.
     #[test]
     fn chocobo_race_skeletons_define_no_saddle_joints() {
         if DatRoot::from_env_or_default().is_err() {
@@ -3553,14 +3576,68 @@ mod pose_resolution_tests {
             assert_eq!(
                 standard_joint_world_position(&pose, &actor.skeleton, joint),
                 Some(Vec3::ZERO),
-                "std {joint} is unexpectedly a real saddle joint; the flat \
-                 CHOCOBO_SEAT_HEIGHT would then be masking real data"
-            );
-            assert_eq!(
-                mount_seat_local(&pose, &actor.skeleton, rider_race, true),
-                Some(Vec3::new(0.0, CHOCOBO_SEAT_HEIGHT, 0.0)),
+                "std {joint} is unexpectedly a real saddle joint; reading the \
+                 spine instead would then be discarding real data"
             );
         }
+    }
+
+    /// The seat has to move, which is the whole reason it is read from a pose
+    /// rather than fixed: a chocobo's back rises and falls through its gallop,
+    /// and a rider pinned to one height has the saddle saw up through them.
+    /// Self-skips without a retail install.
+    #[test]
+    fn a_chocobos_seat_rises_and_falls_with_its_gait() {
+        if DatRoot::from_env_or_default().is_err() {
+            return;
+        }
+        let mount = load_mount_race(chocobo_race_for_colour(
+            ffxi_viewer_wire::ChocoboColour::Yellow,
+        ))
+        .expect("yellow chocobo race config");
+        let run = DatId::from_str("run?");
+        let clips: Vec<SkeletonAnimation> = mount
+            .animations
+            .iter()
+            .filter(|c| c.id.parameterized_match(&run))
+            .cloned()
+            .collect();
+        assert!(!clips.is_empty(), "the chocobo carries its own run clip");
+        let length = clips
+            .iter()
+            .map(|c| c.length_in_frames())
+            .fold(0.0_f32, f32::max);
+
+        const SAMPLES: usize = 8;
+        let seats: Vec<f32> = (0..SAMPLES)
+            .map(|k| {
+                let t = length * k as f32 / SAMPLES as f32;
+                let clips = clips.clone();
+                let pose = pose_world(
+                    &mount.skeleton,
+                    move |joint| {
+                        clips
+                            .iter()
+                            .find_map(|c| c.get_joint_transform(joint as u32, t))
+                    },
+                    ffxi_actor::skeleton_instance::RootTransform::identity(),
+                    &[],
+                );
+                chocobo_seat_local(&pose, CHOCOBO_SEAT_ABOVE_BACK)
+                    .expect("a chocobo skeleton reaches the spine")
+                    .y
+            })
+            .collect();
+
+        let lo = seats.iter().copied().fold(f32::INFINITY, f32::min);
+        let hi = seats.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+        // Rider bodies are around two yalms tall, so a seat that wanders this
+        // far is plainly visible against one.
+        assert!(
+            hi - lo > 0.05,
+            "the seat barely moves over a gallop ({lo}..{hi}); either the clip \
+             stopped being found or the joint stopped being the spine"
+        );
     }
 
     /// The rider's seat clips live in a DAT that is only loaded while mounted.

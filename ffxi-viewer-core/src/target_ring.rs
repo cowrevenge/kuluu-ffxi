@@ -115,7 +115,12 @@ pub fn draw_target_arrow_system(
     state: Res<SceneState>,
     time: Res<Time>,
     cam_q: Query<&Transform, With<OperatorCamera>>,
-    world_q: Query<(&Transform, &WorldEntity, Option<&BakedActor>)>,
+    world_q: Query<(
+        &Transform,
+        &WorldEntity,
+        Option<&BakedActor>,
+        Has<crate::components::MountedRider>,
+    )>,
     mut gizmos: Gizmos,
 ) {
     let Some(target_id) = target.id else {
@@ -128,13 +133,13 @@ pub fn draw_target_arrow_system(
 
     let fill = target_ring_color(engaged_on(&state, target_id));
 
-    for (t, w, baked) in &world_q {
+    for (t, w, baked, mounted) in &world_q {
         if w.id != target_id {
             continue;
         }
 
         let tip_y = t.translation.y
-            + nameplate_anchor_y(baked)
+            + nameplate_anchor_y(baked, mounted)
             + ARROW_TIP_ABOVE_ANCHOR
             + arrow_bob_offset(time.elapsed_secs());
         let apex = Vec3::new(t.translation.x, tip_y, t.translation.z);
@@ -157,7 +162,12 @@ pub fn draw_sub_target_cursor_system(
     state: Res<SceneState>,
     time: Res<Time>,
     cam_q: Query<&Transform, With<OperatorCamera>>,
-    world_q: Query<(&Transform, &WorldEntity, Option<&BakedActor>)>,
+    world_q: Query<(
+        &Transform,
+        &WorldEntity,
+        Option<&BakedActor>,
+        Has<crate::components::MountedRider>,
+    )>,
     mut gizmos: Gizmos,
 ) {
     let crate::InputMode::SubTarget(st) = &*mode else {
@@ -177,10 +187,10 @@ pub fn draw_sub_target_cursor_system(
     let self_pos = state
         .snapshot
         .self_char_id
-        .and_then(|sid| world_q.iter().find(|(_, w, _)| w.id == sid))
-        .map(|(t, _, _)| t.translation);
+        .and_then(|sid| world_q.iter().find(|(_, w, _, _)| w.id == sid))
+        .map(|(t, _, _, _)| t.translation);
 
-    for (t, w, baked) in &world_q {
+    for (t, w, baked, mounted) in &world_q {
         if w.id != candidate {
             continue;
         }
@@ -195,7 +205,7 @@ pub fn draw_sub_target_cursor_system(
         };
 
         let tip_y = t.translation.y
-            + nameplate_anchor_y(baked)
+            + nameplate_anchor_y(baked, mounted)
             + ARROW_TIP_ABOVE_ANCHOR
             + arrow_bob_offset(time.elapsed_secs());
         let apex = Vec3::new(t.translation.x, tip_y, t.translation.z);

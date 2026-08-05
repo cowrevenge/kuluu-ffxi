@@ -1,37 +1,52 @@
-use bevy::math::Vec3;
-use ffxi_actor::skeleton_instance::{pose_world, standard_joint_world_position, RootTransform};
+use bevy::math::{Mat4, Vec3};
+use ffxi_actor::skeleton_instance::{pose_world, RootTransform};
+use ffxi_dat::skel_anim::SkeletonAnimation;
 use ffxi_viewer_core::ffxi_actor_render::{load_mount_race, load_pc, LoadedActor};
 
-fn skin_bounds(a: &LoadedActor) -> (Vec3, Vec3) {
-    let mut lo = Vec3::splat(f32::INFINITY);
-    let mut hi = Vec3::splat(f32::NEG_INFINITY);
-    for sm in &a.skel_meshes {
-        for m in &sm.meshes {
-            for v in &m.vertices {
-                let p = Vec3::from(v.p0);
-                lo = lo.min(p);
-                hi = hi.max(p);
-            }
-        }
+fn layered<'a>(
+    clips: &'a [SkeletonAnimation],
+    prefix: &str,
+) -> impl Fn(usize) -> Option<ffxi_dat::skel_anim::KeyFrameTransform> + Clone + 'a {
+    let picked: Vec<&SkeletonAnimation> = clips
+        .iter()
+        .filter(|c| c.id.as_str().starts_with(prefix))
+        .collect();
+    move |joint: usize| {
+        picked
+            .iter()
+            .find_map(|c| c.get_joint_transform(joint as u32, 0.0))
     }
-    (lo, hi)
 }
 
-fn posed_bounds(a: &LoadedActor, pose: &[bevy::math::Mat4]) -> (Vec3, Vec3) {
-    let mut lo = Vec3::splat(f32::INFINITY);
-    let mut hi = Vec3::splat(f32::NEG_INFINITY);
+fn layered_at<'a>(
+    clips: &'a [SkeletonAnimation],
+    prefix: &str,
+    t: f32,
+) -> impl Fn(usize) -> Option<ffxi_dat::skel_anim::KeyFrameTransform> + Clone + 'a {
+    let picked: Vec<&SkeletonAnimation> = clips
+        .iter()
+        .filter(|c| c.id.as_str().starts_with(prefix))
+        .collect();
+    move |joint: usize| {
+        picked
+            .iter()
+            .find_map(|c| c.get_joint_transform(joint as u32, t))
+    }
+}
+
+fn part_joint_histogram(a: &LoadedActor) {
     for sm in &a.skel_meshes {
+        let mut counts: std::collections::BTreeMap<u16, usize> = Default::default();
         for m in &sm.meshes {
             for v in &m.vertices {
-                let j0 = usize::from(v.joint_index0);
-                let Some(m0) = pose.get(j0) else { continue };
-                let p = m0.transform_point3(Vec3::from(v.p0));
-                lo = lo.min(p);
-                hi = hi.max(p);
+                *counts.entry(v.joint_index0).or_default() += 1;
             }
         }
+        let mut top: Vec<(u16, usize)> = counts.into_iter().collect();
+        top.sort_by_key(|&(_, c)| std::cmp::Reverse(c));
+        top.truncate(8);
+        println!("  part {:6} joints {:?}", sm.id.as_str(), top);
     }
-    (lo, hi)
 }
 
 fn main() {
@@ -45,140 +60,85 @@ fn main() {
         .unwrap_or(3);
 
     let mount = load_mount_race(race).expect("load_mount_race");
-    let skel = &mount.skeleton;
-    let pose = pose_world(skel, |_| None, RootTransform::identity(), &[]);
-
-    println!(
-        "mount race {race}: joints={} references={} meshes={}",
-        skel.joints.len(),
-        skel.references.len(),
-        mount.skel_meshes.len()
-    );
-    let (lo, hi) = skin_bounds(&mount);
-    println!("  bind skin bounds  lo={lo:?} hi={hi:?}");
-    let (lo, hi) = posed_bounds(&mount, &pose);
-    println!("  posed skin bounds lo={lo:?} hi={hi:?}");
-    for bb in &skel.bounding_boxes {
-        println!("  bbox {bb:?}");
-    }
-
-    println!("--- standard joints 40..64 (raw) ---");
-    for i in 40..64.min(skel.references.len()) {
-        let r = &skel.references[i];
-        let p = standard_joint_world_position(&pose, skel, i);
-        println!(
-            "  std {i:3}  joint {:3}  offset {:?}  world {p:?}",
-            r.index, r.position_offset
-        );
-    }
-    println!("--- standard joints with a non-origin world position ---");
-    for i in 0..skel.references.len() {
-        let Some(p) = standard_joint_world_position(&pose, skel, i) else {
-            continue;
-        };
-        let r = &skel.references[i];
-        if p == Vec3::ZERO && r.index == 0 {
-            continue;
-        }
-        println!(
-            "  std {i:3}  joint {:3}  offset {:?}  world ({:.3}, {:.3}, {:.3})",
-            r.index, r.position_offset, p.x, p.y, p.z
-        );
-    }
-
     let rider = load_pc(rider_race, true, &[], None, None, None).expect("load_pc");
-    let rpose = pose_world(&rider.skeleton, |_| None, RootTransform::identity(), &[]);
-    let (lo, hi) = posed_bounds(&rider, &rpose);
-    println!("--- rider race {rider_race} (mounted load) ---");
-    println!(
-        "  joints={} posed lo={lo:?} hi={hi:?}",
-        rider.skeleton.joints.len()
-    );
-    for i in [0usize, 1, 2, 3] {
-        let t = rpose.get(i).map(|m| m.to_scale_rotation_translation().2);
-        println!("  joint {i} pose translation {t:?}");
-    }
-    for i in [2usize, 8, 9] {
-        println!(
-            "  std {i} world {:?}",
-            standard_joint_world_position(&rpose, &rider.skeleton, i)
-        );
-    }
 
-    let root = ffxi_dat::DatRoot::from_env_or_default().expect("DatRoot");
-    let dll = ffxi_dat::main_dll::MainDll::load(root.root()).expect("FFXiMain.dll");
-    let base = dll
-        .base_action_animation_index(rider_race)
-        .expect("action anim base");
-    let id = u32::from(base + ffxi_dat::main_dll::ACTION_ANIM_MOUNT_OFFSET);
-    let loc = root.resolve(id).expect("resolve mount pose dat");
-    let bytes = std::fs::read(loc.path_under(&root)).expect("read mount pose dat");
-    let clips = ffxi_dat::resource_dir::ResourceDir::from_bytes(bytes).collect_animations();
-    println!("--- rider mount-pose DAT {id}: {} clips ---", clips.len());
-    let mut ids: Vec<String> = clips.iter().map(|c| c.id.as_str()).collect();
-    ids.sort();
-    println!("  {ids:?}");
+    println!("--- mount parts: vertex counts per bound joint ---");
+    part_joint_histogram(&mount);
 
-    let mskel_id = u32::from(dll.base_race_config_index(race).expect("mount race config"));
-    let mloc = root.resolve(mskel_id).expect("resolve mount race dat");
-    let mbytes = std::fs::read(mloc.path_under(&root)).expect("read mount race dat");
-    let mclips = ffxi_dat::resource_dir::ResourceDir::from_bytes(mbytes).collect_animations();
-    let mut mids: Vec<String> = mclips.iter().map(|c| c.id.as_str()).collect();
-    mids.sort();
-    println!("--- mount race DAT {mskel_id}: {} clips ---", mclips.len());
-    println!("  {mids:?}");
-
-    let layered = |clips: &[ffxi_dat::skel_anim::SkeletonAnimation], names: &[&str]| {
-        let picked: Vec<ffxi_dat::skel_anim::SkeletonAnimation> = names
-            .iter()
-            .filter_map(|n| clips.iter().find(|c| c.id.as_str() == *n).cloned())
-            .collect();
-        move |joint: usize| {
-            picked
-                .iter()
-                .find_map(|c| c.get_joint_transform(joint as u32, 0.0))
-        }
-    };
-
-    for names in [&["chi0", "chi1"][..], &["run0", "run1"][..]] {
-        let rposed = pose_world(
-            &rider.skeleton,
-            layered(&clips, names),
-            RootTransform::identity(),
-            &[],
-        );
-        let (lo, hi) = posed_bounds(&rider, &rposed);
-        let hips = rposed[2].to_scale_rotation_translation().2;
-        println!("rider clip {names:?} unmounted-pose: hips={hips:?} lo={lo:?} hi={hi:?}");
-    }
-
-    let mposed = pose_world(
+    let idle = pose_world(
         &mount.skeleton,
-        layered(&mclips, &["chi0"]),
+        layered(&mount.animations, "chi"),
         RootTransform::identity(),
         &[],
     );
-    let (lo, hi) = posed_bounds(&mount, &mposed);
-    println!("mount clip chi0: lo={lo:?} hi={hi:?}");
-    for sm in &mount.skel_meshes {
-        let mut plo = Vec3::splat(f32::INFINITY);
-        let mut phi = Vec3::splat(f32::NEG_INFINITY);
-        for m in &sm.meshes {
-            for v in &m.vertices {
-                let Some(m0) = mposed.get(usize::from(v.joint_index0)) else {
-                    continue;
-                };
-                let p = m0.transform_point3(Vec3::from(v.p0));
-                plo = plo.min(p);
-                phi = phi.max(p);
+    println!("--- mount joints in the chi? carrying pose (skeleton space, Y-down) ---");
+    for (i, m) in idle.iter().enumerate() {
+        let t = m.to_scale_rotation_translation().2;
+        println!("  joint {i:3}  ({:7.3}, {:7.3}, {:7.3})", t.x, t.y, t.z);
+    }
+
+    println!("--- vertical travel of each mount joint over run? ---");
+    let samples: Vec<Vec<Mat4>> = (0..8)
+        .map(|k| {
+            pose_world(
+                &mount.skeleton,
+                layered_at(&mount.animations, "run", k as f32 * 4.0),
+                RootTransform::identity(),
+                &[],
+            )
+        })
+        .collect();
+    for i in 0..mount.skeleton.joints.len() {
+        let ys: Vec<f32> = samples
+            .iter()
+            .map(|p| p[i].to_scale_rotation_translation().2.y)
+            .collect();
+        let lo = ys.iter().copied().fold(f32::INFINITY, f32::min);
+        let hi = ys.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+        if hi - lo > 0.01 {
+            println!("  joint {i:3}  y {lo:7.3}..{hi:7.3}  travel {:.3}", hi - lo);
+        }
+    }
+
+    println!("--- root (joint 0) animated translation in the rider's mounted clips ---");
+    for c in rider.animations.iter() {
+        if let Some(t) = c.get_joint_transform(0, 0.0) {
+            println!("  {:5} root t={:?}", c.id.as_str(), t.translation);
+        }
+    }
+    println!("--- root animated translation in the mount's own clips ---");
+    for c in mount.animations.iter() {
+        if let Some(t) = c.get_joint_transform(0, 0.0) {
+            println!("  {:5} root t={:?}", c.id.as_str(), t.translation);
+        }
+    }
+
+    for prefix in ["chi", "run"] {
+        let pose = pose_world(
+            &rider.skeleton,
+            layered(&rider.animations, prefix),
+            RootTransform::identity(),
+            &[],
+        );
+        let hip = pose[ffxi_actor::skeleton_instance::HIP_JOINT]
+            .to_scale_rotation_translation()
+            .2;
+        let mut lo = Vec3::splat(f32::INFINITY);
+        let mut hi = Vec3::splat(f32::NEG_INFINITY);
+        for sm in &rider.skel_meshes {
+            for m in &sm.meshes {
+                for v in &m.vertices {
+                    if let Some(j) = pose.get(usize::from(v.joint_index0)) {
+                        let p = j.transform_point3(Vec3::from(v.p0));
+                        lo = lo.min(p);
+                        hi = hi.max(p);
+                    }
+                }
             }
         }
-        println!("  part {} lo={plo:?} hi={phi:?}", sm.id.as_str());
-    }
-    for i in [21usize, 43, 48, 50] {
         println!(
-            "  mount std {i} world {:?}",
-            standard_joint_world_position(&mposed, &mount.skeleton, i)
+            "rider {prefix}?: hip={hip:?} body y {:.3}..{:.3}",
+            lo.y, hi.y
         );
     }
 }

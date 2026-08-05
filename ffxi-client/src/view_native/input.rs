@@ -570,6 +570,7 @@ pub fn dispatch_movement_system(
             | InputMode::DeliveryBox
             | InputMode::Check
             | InputMode::Bazaar
+            | InputMode::Auction
     ) {
         autorun.phantom_forward = false;
         autorun.strafe_held_since = None;

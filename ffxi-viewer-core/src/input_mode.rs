@@ -38,6 +38,11 @@ pub enum InputMode {
     /// `hud::bazaar_view::BazaarScreenState`; Esc leaves the bazaar (c2s 0x104)
     /// and returns to the Check window.
     Bazaar,
+
+    /// The Auction House counter UI is open and modal. Screen/cursor state
+    /// lives in `hud::auction::AuctionScreenState`; the native input layer
+    /// drives it and emits the Ah* `AgentCommand`s.
+    Auction,
 }
 
 /// The action pending behind a sub-target cursor.

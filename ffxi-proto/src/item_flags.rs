@@ -9,6 +9,8 @@ include!(concat!(env!("OUT_DIR"), "/item_flags_table.rs"));
 /// @FLAG_CAN_SEND_ACCT — deliverable to a character on the same account even
 /// when @FLAG_NODELIVERY is set (server enforces the account match).
 pub const CAN_SEND_ACCT: u32 = 0x00010;
+/// @FLAG_NOAUCTION — cannot be listed on the Auction House.
+pub const NOAUCTION: u32 = 0x00040;
 /// @FLAG_NODELIVERY — cannot be staged into the delivery box.
 pub const NODELIVERY: u32 = 0x02000;
 /// @FLAG_EX — cannot be traded.
@@ -42,6 +44,12 @@ pub fn account_bound(id: u16) -> bool {
     flags & NODELIVERY != 0 && flags & CAN_SEND_ACCT != 0
 }
 
+/// Whether the AH sell picker should offer this item. Mirrors auctionutils
+/// SellingItems' NoAuction reject (vendor/server/src/map/utils/auctionutils.cpp).
+pub fn auctionable(id: u16) -> bool {
+    lookup(id) & NOAUCTION == 0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -50,9 +58,10 @@ mod tests {
     fn chocobo_bedding_is_account_bound() {
         // item 1: @FLAG_MYSTERY_BOX | @FLAG_CAN_SEND_ACCT | @FLAG_NOAUCTION |
         // @FLAG_NODELIVERY | @FLAG_EX (item_basic.sql).
-        assert_eq!(lookup(1), 0x4 | 0x10 | 0x40 | 0x2000 | 0x4000);
+        assert_eq!(lookup(1), 0x4 | 0x10 | NOAUCTION | 0x2000 | 0x4000);
         assert!(deliverable(1), "CanSendAccount overrides NoDelivery");
         assert!(account_bound(1));
+        assert!(!auctionable(1), "NoAuction blocks the AH sell picker");
     }
 
     #[test]

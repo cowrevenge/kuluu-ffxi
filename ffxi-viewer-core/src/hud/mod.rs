@@ -1,4 +1,5 @@
 pub mod action_model;
+pub mod auction;
 pub mod bazaar_view;
 #[cfg(feature = "enhanced-cast-bar")]
 pub mod cast_bar;
@@ -10,6 +11,7 @@ pub mod death_prompt;
 pub mod delivery;
 pub mod diagnostics;
 pub mod dialog;
+pub mod digit_spinner;
 pub mod entity_hover_card;
 pub mod equipment_screen;
 pub mod item_dat_root;
@@ -205,6 +207,11 @@ impl Plugin for HudPlugin {
         app.init_resource::<delivery::DeliveryScreenState>();
         app.init_resource::<delivery::DeliveryInventory>();
 
+        app.init_resource::<auction::AuctionScreenState>();
+        app.init_resource::<auction::AuctionSellInventory>();
+        app.init_resource::<auction::AuctionEventCursor>();
+        app.add_message::<auction::AuctionRowActivated>();
+
         app.add_message::<target_action_menu::TargetActionActivated>();
         app.add_message::<trade::TradeIntent>();
         app.init_resource::<target_panel::SwingPulse>();
@@ -296,6 +303,9 @@ impl Plugin for HudPlugin {
                 equipment_screen::update_equipment_screen.after(menu::refresh_dynamic_menu_rows),
                 delivery::rebuild_delivery_inventory,
                 delivery::update_delivery_screen.after(delivery::rebuild_delivery_inventory),
+                auction::rebuild_sell_inventory,
+                auction::update_auction_screen.after(auction::rebuild_sell_inventory),
+                auction::auction_chat_echo_system,
             ),
         );
         // Map screen + minimap markers depend on `crate::minimap` (wasm-gated).
@@ -353,6 +363,8 @@ impl Plugin for HudPlugin {
                 dialog::dialog_mouse_click_system,
                 quick_action::quick_action_mouse_hover_system,
                 quick_action::quick_action_mouse_click_system,
+                auction::auction_mouse_hover_system,
+                auction::auction_mouse_click_system,
             ),
         );
 
@@ -425,6 +437,7 @@ pub fn add_hud_spawners<L: bevy::ecs::schedule::ScheduleLabel + Clone>(app: &mut
             status_panel::spawn_status_panel,
             equipment_screen::spawn_equipment_screen,
             delivery::spawn_delivery_screen,
+            auction::spawn_auction_screen,
         ),
     );
     // Depends on `crate::minimap` (wasm-gated).

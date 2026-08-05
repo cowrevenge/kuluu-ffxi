@@ -17,6 +17,10 @@ mod check;
 pub use check::bazaar_mode_sync_system;
 use check::{handle_bazaar_key, handle_check_key};
 
+mod auction;
+pub use auction::auction_mode_sync_system;
+use auction::{auction_click, handle_auction_key};
+
 mod delivery;
 pub use delivery::delivery_mode_sync_system;
 use delivery::handle_delivery_key;
@@ -107,6 +111,10 @@ pub struct SlashWriters<'w, 's> {
     pub delivery_state: ResMut<'w, ffxi_viewer_core::hud::delivery::DeliveryScreenState>,
 
     pub delivery_inv: Res<'w, ffxi_viewer_core::hud::delivery::DeliveryInventory>,
+
+    pub auction_state: ResMut<'w, ffxi_viewer_core::hud::auction::AuctionScreenState>,
+
+    pub auction_inv: Res<'w, ffxi_viewer_core::hud::auction::AuctionSellInventory>,
 
     pub select_target: ResMut<'w, SelectTargetMode>,
 
@@ -388,6 +396,18 @@ pub fn text_input_system(
                     &bindings,
                     &mut slash_writers.bazaar_state,
                     &mut scene_state,
+                    &cmd_tx.0,
+                ) {
+                    *mode = next;
+                }
+            }
+            InputMode::Auction => {
+                if let Some(next) = handle_auction_key(
+                    &ev.logical_key,
+                    &bindings,
+                    &mut slash_writers.auction_state,
+                    &mut scene_state,
+                    &slash_writers.auction_inv,
                     &cmd_tx.0,
                 ) {
                     *mode = next;
@@ -1370,12 +1390,25 @@ fn confirm_quick_action_at_cursor(
     }
 }
 
+/// The mouse-activation streams `mouse_nav_dispatch_system` consumes, bundled
+/// to stay inside Bevy's 16-parameter system limit.
+#[derive(SystemParam)]
+pub struct MouseNavEvents<'w, 's> {
+    pub menu: MessageReader<'w, 's, ffxi_viewer_core::hud::menu::MenuRowActivated>,
+    pub dialog: MessageReader<'w, 's, ffxi_viewer_core::hud::dialog::DialogChoiceActivated>,
+    pub quick_action:
+        MessageReader<'w, 's, ffxi_viewer_core::hud::quick_action::QuickActionActivated>,
+    pub target_action:
+        MessageReader<'w, 's, ffxi_viewer_core::hud::target_action_menu::TargetActionActivated>,
+    pub sort_req: MessageReader<'w, 's, ffxi_viewer_core::hud::item_detail::InventorySortRequested>,
+    pub auction: MessageReader<'w, 's, ffxi_viewer_core::hud::auction::AuctionRowActivated>,
+}
+
+#[allow(clippy::too_many_arguments)]
 pub fn mouse_nav_dispatch_system(
-    mut menu_events: MessageReader<ffxi_viewer_core::hud::menu::MenuRowActivated>,
-    mut dialog_events: MessageReader<ffxi_viewer_core::hud::dialog::DialogChoiceActivated>,
-    mut qa_events: MessageReader<ffxi_viewer_core::hud::quick_action::QuickActionActivated>,
-    mut ta_events: MessageReader<ffxi_viewer_core::hud::target_action_menu::TargetActionActivated>,
-    mut sort_req_events: MessageReader<ffxi_viewer_core::hud::item_detail::InventorySortRequested>,
+    mut events: MouseNavEvents,
+    mut auction_screen: ResMut<ffxi_viewer_core::hud::auction::AuctionScreenState>,
+    auction_inv: Res<ffxi_viewer_core::hud::auction::AuctionSellInventory>,
     cmd_tx: Res<CommandTx>,
     mut bindings: ResMut<Bindings>,
     mut keybinds_state: ResMut<KeybindsStateRes>,
@@ -1392,7 +1425,7 @@ pub fn mouse_nav_dispatch_system(
     let current_target = target.id;
     let self_pos = scene_state.snapshot.self_pos.pos;
 
-    for ev in menu_events.read() {
+    for ev in events.menu.read() {
         if let InputMode::Menu(stack) = &mut *mode {
             // A click drops the cursor on the clicked row of the current level,
             // then confirms — same as pressing Enter there.
@@ -1420,7 +1453,7 @@ pub fn mouse_nav_dispatch_system(
         }
     }
 
-    for ev in dialog_events.read() {
+    for ev in events.dialog.read() {
         if let InputMode::Dialog(cursor) = &mut *mode {
             // Text-entry frames have no clickable choices; typing owns the frame.
             if scene_state
@@ -1438,7 +1471,7 @@ pub fn mouse_nav_dispatch_system(
         }
     }
 
-    for ev in qa_events.read() {
+    for ev in events.quick_action.read() {
         if let InputMode::QuickAction(state) = &mut *mode {
             state.cursor = ev.slot;
             let snapshot = QuickActionState {
@@ -1457,7 +1490,7 @@ pub fn mouse_nav_dispatch_system(
         }
     }
 
-    for ev in ta_events.read() {
+    for ev in events.target_action.read() {
         if let InputMode::TargetAction(state) = &mut *mode {
             state.cursor = ev.slot;
 
@@ -1478,11 +1511,26 @@ pub fn mouse_nav_dispatch_system(
         }
     }
 
-    for ev in sort_req_events.read() {
+    for ev in events.sort_req.read() {
         if let Err(e) = cmd_tx.0.try_send(AgentCommand::StackInventory {
             container: ev.container,
         }) {
             push_system_chat_line(&mut scene_state, format!("sort dropped (channel): {e}"));
+        }
+    }
+
+    for ev in events.auction.read() {
+        if matches!(*mode, InputMode::Auction) {
+            if let Some(next) = auction_click(
+                ev.region,
+                ev.slot,
+                &mut auction_screen,
+                &mut scene_state,
+                &auction_inv,
+                &cmd_tx.0,
+            ) {
+                *mode = next;
+            }
         }
     }
 }

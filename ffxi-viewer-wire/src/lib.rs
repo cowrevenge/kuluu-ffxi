@@ -2,6 +2,9 @@
 
 use serde::{Deserialize, Serialize};
 
+// v17: ViewerEvent::Auction{MenuOpened,BidResult,SellResult,SellRefused,CancelResult,
+// SearchFailed} — edge-triggered AH outcomes the HUD turns into retail chat echoes
+// (the snapshot's AuctionUi carries only the settled state, not the transition).
 // v16: SceneSnapshot.auction — the Auction House surface (counter open flag, browse
 // catalog, price history, the 7 sales-status slots, fee quote, busy spinner).
 // v15: Entity.mount + SceneSnapshot.self_mount — which mount is being ridden, which picks
@@ -27,7 +30,7 @@ use serde::{Deserialize, Serialize};
 // v5: InventoryItem.charges_remaining + next_use_vana_ts (item recast/charges).
 // v4: SceneSnapshot.delivery_box (dedicated delivery screen) + ViewerCommand::DeliveryBox
 // (postcard frames are not self-describing, so any shape change bumps this).
-pub const PROTOCOL_VERSION: u32 = 16;
+pub const PROTOCOL_VERSION: u32 = 17;
 
 /// Longest countdown `SceneSnapshot::status_icon_expiries` can carry. The
 /// producer rejects anything beyond it as a corrupt 0x063 timestamp, and the HUD
@@ -1269,6 +1272,42 @@ pub enum ViewerEvent {
 
     VanaTimeSynced {
         game_time: u32,
+    },
+
+    /// s2c 0x04C Open: the AH counter menu opened. Edge-triggered (the
+    /// snapshot's `AuctionUi::open` stays true until zone change, so a repeat
+    /// Open at the counter is only visible here).
+    AuctionMenuOpened,
+
+    /// s2c 0x04C Bid echo; `ok` on Result 1, else the LSB message code drives
+    /// the retail "You were unable to buy the <item> for <N> gil." echo.
+    AuctionBidResult {
+        ok: bool,
+        item_no: u16,
+        price: u32,
+        quantity: u32,
+    },
+
+    /// s2c 0x04C LotIn verdict ("Merchandise placed on auction." on ok).
+    AuctionSellResult {
+        ok: bool,
+    },
+
+    /// s2c 0x04C AskCommit rejection (no fee quote); `result` is LSB's message
+    /// code (197 = auctionutils SellingItems reject, e.g. a partial stack).
+    AuctionSellRefused {
+        result: u8,
+    },
+
+    /// s2c 0x04C LotCancel verdict for sales-status `slot`.
+    AuctionCancelResult {
+        slot: u8,
+        ok: bool,
+    },
+
+    /// A search-server round trip (browse/history) failed.
+    AuctionSearchFailed {
+        message: String,
     },
 }
 

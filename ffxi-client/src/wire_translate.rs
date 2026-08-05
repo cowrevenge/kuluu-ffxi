@@ -438,6 +438,32 @@ pub fn event_to_viewer_event(ev: AgentEvent) -> Option<wire::ViewerEvent> {
         AgentEvent::VanaTimeSynced { game_time } => {
             Some(wire::ViewerEvent::VanaTimeSynced { game_time })
         }
+        AgentEvent::AuctionMenuOpened => Some(wire::ViewerEvent::AuctionMenuOpened),
+        AgentEvent::AuctionBidResult {
+            ok,
+            item_no,
+            price,
+            quantity,
+            ..
+        } => Some(wire::ViewerEvent::AuctionBidResult {
+            ok,
+            item_no,
+            price,
+            quantity,
+        }),
+        AgentEvent::AuctionSellResult { ok, .. } => {
+            Some(wire::ViewerEvent::AuctionSellResult { ok })
+        }
+        AgentEvent::AuctionSellQuote {
+            quote: None,
+            result,
+        } => Some(wire::ViewerEvent::AuctionSellRefused { result }),
+        AgentEvent::AuctionCancelResult { slot, ok, .. } => {
+            Some(wire::ViewerEvent::AuctionCancelResult { slot, ok })
+        }
+        AgentEvent::AuctionSearchFailed { message } => {
+            Some(wire::ViewerEvent::AuctionSearchFailed { message })
+        }
 
         _ => None,
     }

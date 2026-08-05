@@ -494,6 +494,7 @@ async fn run_map_session(
         cfg.dat_root
             .as_ref()
             .map(|r| ffxi_dat::spell_info::SpellTable::open(r.root())),
+        cfg.server.clone(),
     )
     .await
 }
@@ -1892,6 +1893,9 @@ async fn keepalive_loop(
     mut mog: SelfMogState,
     flood_zone_messages: Vec<(u16, Vec<u8>)>,
     spell_table: Option<ffxi_dat::spell_info::SpellTable>,
+    // FFXI_SERVER host (session::Config::server); the search server listens
+    // beside the auth/lobby ports there, not on the per-zone map address.
+    server_host: String,
 ) -> Result<MapOutcome> {
     let mut last_recv = std::time::Instant::now();
 
@@ -1950,6 +1954,9 @@ async fn keepalive_loop(
     let mut local_menu = crate::local_menu::LocalMenuSession::new();
 
     let mut dbox = crate::delivery_box::DeliveryBoxSession::default();
+
+    let mut auction = crate::auction::AuctionFlow::default();
+    let ah_search_inflight = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
 
     // Delivery-box recipient entry: `awaiting_recipient` is set while the
     // name-entry frame is up (the next TextInput answers it);
@@ -2754,6 +2761,163 @@ async fn keepalive_loop(
                         }
                         let _ = event_tx.send(AgentEvent::BazaarClosed);
                     }
+                    Some(AgentCommand::AhBrowse { category, sorts }) => {
+                        spawn_ah_search(
+                            &ah_search_inflight,
+                            &event_tx,
+                            server_host.clone(),
+                            AhSearchQuery::Browse { category, sorts },
+                        );
+                    }
+                    Some(AgentCommand::AhHistory { item_id, stack }) => {
+                        spawn_ah_search(
+                            &ah_search_inflight,
+                            &event_tx,
+                            server_host.clone(),
+                            AhSearchQuery::History { item_id, stack },
+                        );
+                    }
+                    Some(AgentCommand::AhBid {
+                        item_id,
+                        stack,
+                        price,
+                    }) => {
+                        // LSB's PacketValidator drops the whole 0x04E when
+                        // BidPrice is outside 1..=999_999_999 — no reply ever
+                        // comes back, so reject it here instead.
+                        if !auc_price_valid(price, &event_tx) {
+                            continue;
+                        }
+                        let payload = build_subpacket_auc_bid(
+                            sub_seq,
+                            price,
+                            item_id,
+                            crate::auction::stacks_wire(stack),
+                            crate::auction::AUCTION_BID_WORK_INDEX,
+                        );
+                        sub_seq = sub_seq.wrapping_add(1);
+                        match map
+                            .send_encrypted(&payload, datagram_header_id(sub_seq), server_last_seq)
+                            .await
+                        {
+                            Ok(()) => {
+                                let _ = event_tx.send(AgentEvent::AuctionOpStarted {
+                                    op: crate::state::AuctionBusy::PlacingBid,
+                                });
+                            }
+                            Err(e) => {
+                                tracing::warn!(error = %e, "auc bid send failed");
+                                let _ = event_tx.send(AgentEvent::Error {
+                                    message: format!("auction bid send: {e}"),
+                                });
+                            }
+                        }
+                    }
+                    Some(AgentCommand::AhSell {
+                        inventory_slot,
+                        stack,
+                        price,
+                    }) => match inv_mirror.get(&inventory_slot) {
+                        // Commission shares BidPrice's validator range; see AhBid.
+                        Some(_) if !auc_price_valid(price, &event_tx) => {}
+                        Some(&(item_no, _, _)) => {
+                            let sell = auction.request_sell(inventory_slot, item_no, stack, price);
+                            let payload = build_subpacket_auc_ask_commit(
+                                sub_seq,
+                                sell.price,
+                                sell.inventory_slot as u16,
+                                sell.item_no,
+                                crate::auction::stacks_wire(sell.stack),
+                            );
+                            sub_seq = sub_seq.wrapping_add(1);
+                            if let Err(e) = map
+                                .send_encrypted(
+                                    &payload,
+                                    datagram_header_id(sub_seq),
+                                    server_last_seq,
+                                )
+                                .await
+                            {
+                                tracing::warn!(error = %e, "auc ask_commit send failed");
+                                let _ = event_tx.send(AgentEvent::Error {
+                                    message: format!("auction sell send: {e}"),
+                                });
+                            }
+                        }
+                        None => {
+                            let _ = event_tx.send(AgentEvent::Error {
+                                message: format!(
+                                    "auction sell: no item in inventory slot {inventory_slot}"
+                                ),
+                            });
+                        }
+                    },
+                    Some(AgentCommand::AhSellConfirm) => match auction.confirm_sell() {
+                        Some((sell, work_index)) => {
+                            let payload = build_subpacket_auc_lot_in(
+                                sub_seq,
+                                sell.price,
+                                sell.inventory_slot as u16,
+                                crate::auction::stacks_wire(sell.stack),
+                                work_index,
+                            );
+                            sub_seq = sub_seq.wrapping_add(1);
+                            if let Err(e) = map
+                                .send_encrypted(
+                                    &payload,
+                                    datagram_header_id(sub_seq),
+                                    server_last_seq,
+                                )
+                                .await
+                            {
+                                tracing::warn!(error = %e, "auc lot_in send failed");
+                                let _ = event_tx.send(AgentEvent::Error {
+                                    message: format!("auction sell confirm send: {e}"),
+                                });
+                            }
+                        }
+                        None => {
+                            let _ = event_tx.send(AgentEvent::Error {
+                                message: "auction sell confirm: no fee quote pending".into(),
+                            });
+                        }
+                    },
+                    Some(AgentCommand::AhSalesStatus) => {
+                        let payload = build_subpacket_auc_info(sub_seq);
+                        sub_seq = sub_seq.wrapping_add(1);
+                        if let Err(e) = map
+                            .send_encrypted(&payload, datagram_header_id(sub_seq), server_last_seq)
+                            .await
+                        {
+                            tracing::warn!(error = %e, "auc info send failed");
+                            let _ = event_tx.send(AgentEvent::Error {
+                                message: format!("auction sales status send: {e}"),
+                            });
+                        }
+                    }
+                    Some(AgentCommand::AhCancelSale { slot }) => {
+                        if (slot as usize) >= crate::state::AUCTION_SLOTS {
+                            let _ = event_tx.send(AgentEvent::Error {
+                                message: format!("auction cancel: slot {slot} out of range"),
+                            });
+                        } else {
+                            let payload = build_subpacket_auc_lot_cancel(sub_seq, slot as i8);
+                            sub_seq = sub_seq.wrapping_add(1);
+                            if let Err(e) = map
+                                .send_encrypted(
+                                    &payload,
+                                    datagram_header_id(sub_seq),
+                                    server_last_seq,
+                                )
+                                .await
+                            {
+                                tracing::warn!(error = %e, "auc lot_cancel send failed");
+                                let _ = event_tx.send(AgentEvent::Error {
+                                    message: format!("auction cancel send: {e}"),
+                                });
+                            }
+                        }
+                    }
                     Some(AgentCommand::Heal { mode }) => {
                         let payload = build_subpacket_camp(sub_seq, mode);
                         sub_seq = sub_seq.wrapping_add(1);
@@ -3549,6 +3713,29 @@ async fn keepalive_loop(
                                     Err(e) => {
                                         tracing::warn!(error = ?e, "could not decode 0x04B PBX_RESULT");
                                     }
+                                }
+                                continue;
+                            }
+
+                            if sub.opcode == ffxi_proto::map::s2c::AUC {
+                                match decode::Auction::decode(sub.data) {
+                                    Ok(a) => {
+                                        let out = auction.on_packet(&a);
+                                        for ev in out.events {
+                                            let _ = event_tx.send(ev);
+                                        }
+                                        if out.send_work_check {
+                                            let payload = build_subpacket_auc_work_check(sub_seq);
+                                            sub_seq = sub_seq.wrapping_add(1);
+                                            if let Err(e) = map
+                                                .send_encrypted(&payload, datagram_header_id(sub_seq), server_last_seq)
+                                                .await
+                                            {
+                                                tracing::warn!(error = %e, "auc work_check send failed");
+                                            }
+                                        }
+                                    }
+                                    Err(e) => warn_decode_err(sub.opcode, e),
                                 }
                                 continue;
                             }
@@ -5257,6 +5444,78 @@ fn decode_chat_text(bytes: &[u8]) -> String {
 fn trim_nul_string(bytes: &[u8]) -> String {
     let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
     String::from_utf8_lossy(&bytes[..end]).into_owned()
+}
+
+/// GP_CLI_COMMAND_AUC::validate ranges Commission/BidPrice/LimitPrice
+/// 1..=AUCTION_PRICE_MAX (vendor/server/src/map/packets/c2s/0x04e_auc.cpp).
+fn auc_price_valid(price: u32, event_tx: &broadcast::Sender<AgentEvent>) -> bool {
+    let valid = (1..=ffxi_proto::decode::AUCTION_PRICE_MAX).contains(&price);
+    if !valid {
+        let _ = event_tx.send(AgentEvent::Error {
+            message: format!(
+                "auction price {price} outside 1..={}",
+                ffxi_proto::decode::AUCTION_PRICE_MAX
+            ),
+        });
+    }
+    valid
+}
+
+#[derive(Debug)]
+enum AhSearchQuery {
+    Browse { category: u8, sorts: Vec<u32> },
+    History { item_id: u16, stack: bool },
+}
+
+/// Runs one AH search-server round-trip off the session loop so the 200ms
+/// reactor tick never blocks on TCP. `inflight` serializes searches; the task
+/// clears it before publishing so the result event is the reopen signal.
+fn spawn_ah_search(
+    inflight: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    event_tx: &broadcast::Sender<AgentEvent>,
+    host: String,
+    query: AhSearchQuery,
+) {
+    use std::sync::atomic::Ordering;
+    if inflight.swap(true, Ordering::AcqRel) {
+        let _ = event_tx.send(AgentEvent::Error {
+            message: "auction search already in flight".into(),
+        });
+        return;
+    }
+    let _ = event_tx.send(AgentEvent::AuctionOpStarted {
+        op: crate::state::AuctionBusy::Downloading,
+    });
+    let inflight = inflight.clone();
+    let event_tx = event_tx.clone();
+    tokio::spawn(async move {
+        let event = match query {
+            AhSearchQuery::Browse { category, sorts } => {
+                match crate::search_client::ah_list(&host, category, &sorts).await {
+                    Ok(catalog) => AgentEvent::AuctionBrowseResults {
+                        category,
+                        total: catalog.total,
+                        listings: catalog.listings.into_iter().map(Into::into).collect(),
+                    },
+                    Err(e) => AgentEvent::AuctionSearchFailed {
+                        message: format!("AH browse: {e:#}"),
+                    },
+                }
+            }
+            AhSearchQuery::History { item_id, stack } => {
+                match crate::search_client::ah_history(&host, item_id, stack).await {
+                    Ok(h) => AgentEvent::AuctionHistoryResults {
+                        history: crate::state::AhHistoryView::from_wire(h, stack),
+                    },
+                    Err(e) => AgentEvent::AuctionSearchFailed {
+                        message: format!("AH history: {e:#}"),
+                    },
+                }
+            }
+        };
+        inflight.store(false, Ordering::Release);
+        let _ = event_tx.send(event);
+    });
 }
 
 async fn send_pbx(

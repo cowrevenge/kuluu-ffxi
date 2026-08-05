@@ -4,6 +4,7 @@ pub mod agent_codec;
 pub mod agent_io;
 #[cfg(unix)]
 pub mod agent_socket;
+pub mod auction;
 pub mod auth_binary;
 pub mod auth_client;
 pub mod config_dir;
@@ -29,6 +30,7 @@ pub mod net_health;
 pub mod overlay_store;
 pub mod reactor;
 pub mod scene;
+pub mod search_client;
 pub mod session;
 pub mod state;
 pub mod supervisor;

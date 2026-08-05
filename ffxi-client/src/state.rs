@@ -590,6 +590,9 @@ pub struct SessionState {
     #[serde(default)]
     pub bazaar: Option<BazaarView>,
 
+    #[serde(default)]
+    pub auction: AuctionState,
+
     /// Server-driven wide-scan (tracking) list, accumulated between the s2c 0x0F6
     /// ListStart/ListEnd frames; `tracked` follows s2c 0x0F5.
     #[serde(default)]
@@ -624,6 +627,143 @@ pub struct BazaarItem {
     /// Zone tax in hundredths of a percent; the buyer-facing total is computed
     /// where it is displayed (`ffxi_viewer_wire::BazaarEntry::total_price`).
     pub tax_rate: u16,
+}
+
+pub const AUCTION_SLOTS: usize = ffxi_proto::decode::AUCTION_SLOT_COUNT as usize;
+
+/// Auction House model. The counter menu rides s2c 0x04C (map server); the
+/// browse catalog and price history come from the search server
+/// ([`crate::search_client`]).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct AuctionState {
+    /// Set by the s2c Open push; the close is client-local, so it only clears
+    /// on zone change (the counter NPC is zone-local, like a bazaar seller).
+    pub open: bool,
+    pub browse: Option<AhCatalogView>,
+    pub history: Option<AhHistoryView>,
+    pub sales_status: [Option<AhSaleStatus>; AUCTION_SLOTS],
+    /// Last AskCommit fee quote; consumed by `AgentCommand::AhSellConfirm`.
+    pub fee_quote: Option<AhFeeQuote>,
+    pub busy: Option<AuctionBusy>,
+}
+
+/// Which retail spinner the in-flight AH op renders ("Downloading data .." /
+/// "Placing bid ...", observation record
+/// .agents/skills/retail-observe/references/auction-house.md).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AuctionBusy {
+    Downloading,
+    PlacingBid,
+}
+
+/// One category's full catalog (all TCP_AH_REQUEST pages merged).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AhCatalogView {
+    pub category: u8,
+    pub total: u16,
+    pub listings: Vec<AhListingView>,
+}
+
+/// Serde mirror of `ffxi_proto::search::AhListing` — open-listing counts (the
+/// retail catalog's bracketed `[N]` stock numbers), never prices.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AhListingView {
+    pub item_id: u16,
+    /// Singles currently up for sale; 0 = none listed.
+    pub singles_for_sale: u32,
+    /// Stacks currently up for sale; `None` = item is not stackable.
+    pub stacks_for_sale: Option<u32>,
+}
+
+impl From<ffxi_proto::search::AhListing> for AhListingView {
+    fn from(l: ffxi_proto::search::AhListing) -> Self {
+        Self {
+            item_id: l.item_id,
+            singles_for_sale: l.singles_for_sale,
+            stacks_for_sale: l.stacks_for_sale,
+        }
+    }
+}
+
+/// Serde mirror of `ffxi_proto::search::AhHistory` plus the request's
+/// single-vs-stack form, which the response does not echo.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AhHistoryView {
+    pub item_id: u16,
+    pub stack: bool,
+    /// Count of open listings of the requested form; not a price.
+    pub open_listings: u32,
+    pub category: u16,
+    pub sales: Vec<AhSaleView>,
+}
+
+impl AhHistoryView {
+    pub fn from_wire(h: ffxi_proto::search::AhHistory, stack: bool) -> Self {
+        Self {
+            item_id: h.item_id,
+            stack,
+            open_listings: h.open_listings,
+            category: h.category,
+            sales: h.sales.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AhSaleView {
+    pub price: u32,
+    pub sell_date: u32,
+    pub seller: String,
+    pub buyer: String,
+}
+
+impl From<ffxi_proto::search::AhSale> for AhSaleView {
+    fn from(s: ffxi_proto::search::AhSale) -> Self {
+        Self {
+            price: s.price,
+            sell_date: s.sell_date,
+            seller: s.seller,
+            buyer: s.buyer,
+        }
+    }
+}
+
+/// One populated sales-status slot. Serde mirror of the
+/// `ffxi_proto::decode::AuctionSaleSlot` Parcel fields the client uses.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AhSaleStatus {
+    pub stat: u8,
+    pub item_no: u16,
+    /// 1 for a single, the stack size for a stack (GP_SERV_COMMAND_AUC slot
+    /// constructor writes `1 - stack`).
+    pub quantity: u8,
+    pub price: u32,
+    pub timestamp: u32,
+}
+
+impl From<&ffxi_proto::decode::AuctionSaleSlot> for AhSaleStatus {
+    fn from(s: &ffxi_proto::decode::AuctionSaleSlot) -> Self {
+        Self {
+            stat: s.stat,
+            item_no: s.item_no,
+            quantity: s.quantity,
+            price: s.price,
+            timestamp: s.timestamp,
+        }
+    }
+}
+
+/// The s2c AskCommit fee quote plus the asking price the session sent, which
+/// the quote does not echo (the CItem GP_SERV_COMMAND_AUC constructor writes
+/// the computed fee into Commission).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AhFeeQuote {
+    pub fee: u32,
+    pub inventory_slot: u8,
+    pub item_no: u16,
+    pub stack: bool,
+    pub asking_price: u32,
 }
 
 /// Faithful wide-scan model: the server owns membership, order, and gating
@@ -1214,6 +1354,9 @@ impl SessionState {
                 // `GetEntity(BazaarID.targid)` and drops any request once that
                 // lookup fails (0x106_bazaar_buy.cpp:46-56).
                 self.bazaar = None;
+                // The AH counter is likewise zone-local (sendMenu from the NPC;
+                // GP_CLI_COMMAND_AUC::validate gates on the zone's MISC_AH).
+                self.auction = AuctionState::default();
                 self.self_casting = None;
                 self.self_server_status = 0;
 
@@ -1961,6 +2104,74 @@ impl SessionState {
                 self.widescan.tracked = *tracked;
                 changed
             }
+            AgentEvent::AuctionMenuOpened => {
+                let changed = !self.auction.open || self.auction.busy.is_some();
+                self.auction.open = true;
+                self.auction.busy = None;
+                changed
+            }
+            AgentEvent::AuctionOpStarted { op } => {
+                let changed = self.auction.busy != Some(*op);
+                self.auction.busy = Some(*op);
+                changed
+            }
+            AgentEvent::AuctionBrowseResults {
+                category,
+                total,
+                listings,
+            } => {
+                self.auction.browse = Some(AhCatalogView {
+                    category: *category,
+                    total: *total,
+                    listings: listings.clone(),
+                });
+                self.auction.busy = None;
+                true
+            }
+            AgentEvent::AuctionHistoryResults { history } => {
+                self.auction.history = Some(history.clone());
+                self.auction.busy = None;
+                true
+            }
+            AgentEvent::AuctionSearchFailed { .. } => {
+                let changed = self.auction.busy.is_some();
+                self.auction.busy = None;
+                changed
+            }
+            AgentEvent::AuctionSellQuote { quote, .. } => {
+                let changed = self.auction.fee_quote != *quote;
+                self.auction.fee_quote = *quote;
+                changed
+            }
+            AgentEvent::AuctionSellResult { ok, .. } => {
+                let changed = *ok && self.auction.fee_quote.is_some();
+                if *ok {
+                    self.auction.fee_quote = None;
+                }
+                changed
+            }
+            AgentEvent::AuctionBidResult { .. } => {
+                let changed = self.auction.busy.is_some();
+                self.auction.busy = None;
+                changed
+            }
+            AgentEvent::AuctionSalesStatusReset { result } => {
+                if *result != ffxi_proto::decode::AUCTION_RESULT_OPEN {
+                    return false;
+                }
+                let changed = self.auction.sales_status.iter().any(Option::is_some);
+                self.auction.sales_status = Default::default();
+                changed
+            }
+            AgentEvent::AuctionSalesSlot { slot, sale } => {
+                let Some(cell) = self.auction.sales_status.get_mut(*slot as usize) else {
+                    return false;
+                };
+                let changed = cell != sale;
+                *cell = sale.clone();
+                changed
+            }
+            AgentEvent::AuctionCancelResult { .. } => false,
             AgentEvent::SelfCastStarted { name, total_ms } => {
                 self.self_casting = Some(SelfCasting {
                     name: name.clone(),
@@ -2420,6 +2631,77 @@ pub enum AgentEvent {
     WidescanTrackUpdated {
         tracked: Option<WidescanPos>,
     },
+
+    /// s2c 0x04C Open: the AH counter menu opened (lua_baseentity sendMenu).
+    AuctionMenuOpened,
+
+    /// An AH op with a spinner was dispatched; cleared by its result event.
+    AuctionOpStarted {
+        op: AuctionBusy,
+    },
+
+    /// Search-server TCP_AH_REQUEST answered (all pages merged).
+    AuctionBrowseResults {
+        category: u8,
+        total: u16,
+        listings: Vec<AhListingView>,
+    },
+
+    /// Search-server TCP_AH_HISTORY_SINGLE/_STACK answered.
+    AuctionHistoryResults {
+        history: AhHistoryView,
+    },
+
+    /// A search-server round-trip failed (unreachable, timeout, bad frame).
+    AuctionSearchFailed {
+        message: String,
+    },
+
+    /// s2c AskCommit: the listing-fee quote (`quote: None` on rejection, with
+    /// the LSB message code in `result` — 197 from auctionutils SellingItems).
+    AuctionSellQuote {
+        quote: Option<AhFeeQuote>,
+        result: u8,
+    },
+
+    /// s2c LotIn: `ok` on Result 1 ("Merchandise put up on auction"), else the
+    /// raw LSB message code in `result`.
+    AuctionSellResult {
+        ok: bool,
+        result: u8,
+    },
+
+    /// s2c Bid echo. `ok` on Result 1; 0xC5 = outbid/none cheap enough ("You
+    /// were unable to buy the X for N gil."), 0xE5 = no space / Rare dupe
+    /// (auctionutils PurchasingItems). `quantity` echoes ItemStacks: the stack
+    /// size for a stack bid, 1 for a single.
+    AuctionBidResult {
+        ok: bool,
+        item_no: u16,
+        price: u32,
+        quantity: u32,
+        result: u8,
+    },
+
+    /// s2c Info ack: Result 1 restarts the 7-slot sales-status stream
+    /// (auctionutils OpenListOfSales clears its history first); 246 = throttled.
+    AuctionSalesStatusReset {
+        result: u8,
+    },
+
+    /// One sales-status slot (s2c 0x0C/LotCheck row); `sale: None` empties it.
+    AuctionSalesSlot {
+        slot: u8,
+        sale: Option<AhSaleStatus>,
+    },
+
+    /// s2c LotCancel verdict: Result 0 = returned to inventory, 0xE5 = failed
+    /// (inventory full; the slot keeps its row).
+    AuctionCancelResult {
+        slot: u8,
+        ok: bool,
+        result: u8,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -2737,6 +3019,52 @@ pub enum AgentCommand {
     /// c2s 0x0F6 TRACKING_END: stop tracking
     /// (vendor/server/src/map/packets/c2s/0x0f6_tracking_end.h).
     WidescanEnd,
+
+    /// Fetch a category's catalog from the search server (TCP_AH_REQUEST).
+    /// `sorts` are the server-side ORDER BY params
+    /// (`ffxi_proto::search::SORT_*`); empty = retail's "natural" ascending
+    /// item-id order. Runs on its own task; one search in flight at a time.
+    AhBrowse {
+        category: u8,
+        #[serde(default)]
+        sorts: Vec<u32>,
+    },
+
+    /// Fetch an item's last-10-sales history from the search server
+    /// (TCP_AH_HISTORY_SINGLE/_STACK).
+    AhHistory {
+        item_id: u16,
+        stack: bool,
+    },
+
+    /// Bid on `item_id` (c2s 0x04E Bid). The server fills the cheapest
+    /// matching listing priced <= `price`, or answers 0xC5.
+    AhBid {
+        item_id: u16,
+        stack: bool,
+        price: u32,
+    },
+
+    /// Request a listing-fee quote (c2s 0x04E AskCommit; the asking price
+    /// rides Commission, ranged 1..=999_999_999 by GP_CLI_COMMAND_AUC::validate).
+    /// `AhSellConfirm` completes the listing once the quote lands.
+    AhSell {
+        inventory_slot: u8,
+        stack: bool,
+        price: u32,
+    },
+
+    /// Complete a pending listing: LotIn with the stored quote and asking
+    /// price. Ignored (with an error event) while no quote is pending.
+    AhSellConfirm,
+
+    /// Open Sales Status (c2s 0x04E Info; the server re-streams the 7 slots).
+    AhSalesStatus,
+
+    /// Cancel the sale in sales-status `slot` (c2s 0x04E LotCancel).
+    AhCancelSale {
+        slot: u8,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -4359,6 +4687,131 @@ mod tests {
         assert_eq!(slot.quantity, 25);
         assert!(slot.locked, "lock flag updated");
         assert_eq!(slot.item_no, 4112, "item_no preserved (qty-only update)");
+    }
+
+    #[test]
+    fn auction_events_fold_open_browse_history_and_busy() {
+        let mut s = SessionState::default();
+        assert!(!s.auction.open);
+
+        assert!(s.apply_event(&AgentEvent::AuctionMenuOpened));
+        assert!(s.auction.open);
+
+        s.apply_event(&AgentEvent::AuctionOpStarted {
+            op: AuctionBusy::Downloading,
+        });
+        assert_eq!(s.auction.busy, Some(AuctionBusy::Downloading));
+
+        s.apply_event(&AgentEvent::AuctionBrowseResults {
+            category: 35,
+            total: 2,
+            listings: vec![AhListingView {
+                item_id: 4096,
+                singles_for_sale: 3,
+                stacks_for_sale: Some(1),
+            }],
+        });
+        let browse = s.auction.browse.as_ref().expect("catalog stored");
+        assert_eq!(browse.category, 35);
+        assert_eq!(browse.listings[0].singles_for_sale, 3);
+        assert_eq!(s.auction.busy, None, "results clear the spinner");
+
+        s.apply_event(&AgentEvent::AuctionOpStarted {
+            op: AuctionBusy::Downloading,
+        });
+        s.apply_event(&AgentEvent::AuctionSearchFailed {
+            message: "connection refused".into(),
+        });
+        assert_eq!(s.auction.busy, None, "failure clears the spinner");
+
+        s.apply_event(&AgentEvent::AuctionHistoryResults {
+            history: AhHistoryView {
+                item_id: 4096,
+                stack: true,
+                open_listings: 4,
+                category: 35,
+                sales: vec![AhSaleView {
+                    price: 1180,
+                    sell_date: 1_754_000_000,
+                    seller: "Atti".into(),
+                    buyer: "Verilight".into(),
+                }],
+            },
+        });
+        assert_eq!(s.auction.history.as_ref().unwrap().sales.len(), 1);
+
+        s.apply_event(&AgentEvent::AuctionOpStarted {
+            op: AuctionBusy::PlacingBid,
+        });
+        s.apply_event(&AgentEvent::AuctionBidResult {
+            ok: false,
+            item_no: 17440,
+            price: 490,
+            quantity: 1,
+            result: 0xC5,
+        });
+        assert_eq!(s.auction.busy, None, "bid verdict clears the spinner");
+    }
+
+    #[test]
+    fn auction_sell_quote_sales_slots_and_zone_reset() {
+        let mut s = SessionState::default();
+        s.apply_event(&AgentEvent::AuctionMenuOpened);
+
+        let quote = AhFeeQuote {
+            fee: 9,
+            inventory_slot: 5,
+            item_no: 4570,
+            stack: true,
+            asking_price: 1180,
+        };
+        s.apply_event(&AgentEvent::AuctionSellQuote {
+            quote: Some(quote),
+            result: ffxi_proto::decode::AUCTION_RESULT_OPEN,
+        });
+        assert_eq!(s.auction.fee_quote, Some(quote));
+
+        s.apply_event(&AgentEvent::AuctionSellResult {
+            ok: true,
+            result: ffxi_proto::decode::AUCTION_RESULT_OPEN,
+        });
+        assert_eq!(s.auction.fee_quote, None, "listed sale consumes the quote");
+
+        let sale = AhSaleStatus {
+            stat: ffxi_proto::decode::AUCTION_SALE_STAT_LISTED,
+            item_no: 4570,
+            quantity: 12,
+            price: 1180,
+            timestamp: 0,
+        };
+        s.apply_event(&AgentEvent::AuctionSalesSlot {
+            slot: 3,
+            sale: Some(sale.clone()),
+        });
+        assert_eq!(s.auction.sales_status[3], Some(sale));
+
+        s.apply_event(&AgentEvent::AuctionSalesStatusReset { result: 246 });
+        assert!(
+            s.auction.sales_status[3].is_some(),
+            "throttled Info keeps slots"
+        );
+        s.apply_event(&AgentEvent::AuctionSalesStatusReset {
+            result: ffxi_proto::decode::AUCTION_RESULT_OPEN,
+        });
+        assert!(s.auction.sales_status.iter().all(Option::is_none));
+
+        assert!(!s.apply_event(&AgentEvent::AuctionSalesSlot {
+            slot: AUCTION_SLOTS as u8,
+            sale: None,
+        }));
+
+        s.apply_event(&AgentEvent::ZoneChanged {
+            from: Some(234),
+            to: 235,
+            myroom: None,
+            mog_zone_flag: false,
+        });
+        assert_eq!(s.auction, AuctionState::default(), "AH is zone-local");
     }
 
     #[test]

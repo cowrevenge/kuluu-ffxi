@@ -344,6 +344,32 @@ impl MzbCollisionGeometry {
         mzb::TerrainType::from_nibble(*self.tri_terrain.get(tri_id)?)
     }
 
+    /// Whether any up-facing floor in this column, from `from_y` down to
+    /// `from_y - max_drop`, is water.
+    ///
+    /// Unlike [`Self::terrain_nearest`], this deliberately looks *past* the
+    /// surface the player is standing on. A quay, pier or bridge railing puts
+    /// solid ground at the angler's own height with the water several yalms
+    /// below, and the nearest-floor answer there is always more quay — which is
+    /// exactly where fishing is most obviously expected to work.
+    pub fn water_below(&self, xz: Vec2, from_y: f32, max_drop: f32) -> bool {
+        let mut found = false;
+        self.for_each_hit_in_column(xz, |tri_id, hit_y, normal| {
+            if found || normal.y < FLOOR_NORMAL_MIN {
+                return;
+            }
+            if hit_y > from_y + WATER_PROBE_HEAD_ROOM || hit_y < from_y - max_drop {
+                return;
+            }
+            found = self
+                .tri_terrain
+                .get(tri_id)
+                .and_then(|t| mzb::TerrainType::from_nibble(*t))
+                .is_some_and(mzb::TerrainType::is_water);
+        });
+        found
+    }
+
     fn for_each_hit_in_column(&self, xz: Vec2, mut visit: impl FnMut(usize, f32, Vec3)) {
         const RAY_ORIGIN_Y: f32 = 1000.0;
         let orig = Vec3::new(xz.x, RAY_ORIGIN_Y, xz.y);
@@ -472,20 +498,29 @@ const FISH_PROBE_NEAR: f32 = 2.0;
 const FISH_PROBE_FAR: f32 = 4.0;
 const FISH_PROBE_STEP: f32 = 1.0;
 
+/// How far below the angler's feet a probe still counts the water it finds.
+/// Sized to clear the Port San d'Oria quay, whose walkway sits ~8 yalms over the
+/// harbour — standing on a pier and casting down is the ordinary case, and a
+/// nearest-floor-only test refuses every one of them. Bounded so a bridge over a
+/// distant river, or a rampart above a moat two storeys down, still reads as dry.
+const FISH_PROBE_MAX_DROP: f32 = 12.0;
+
+/// Slack above the angler's feet, so water lapping fractionally higher than the
+/// stone they stand on is not excluded by float noise.
+const WATER_PROBE_HEAD_ROOM: f32 = 0.5;
+
 /// Whether the player is facing water close enough to cast into — the terrain
 /// half of retail's client-side fishing gate. `facing` is the unit direction the
 /// character model looks along, in Bevy world space.
 ///
-/// Grounds each probe on the floor nearest the player's own Y so a pond seen
-/// across a wall from a floor above does not count.
+/// Accepts water at the angler's own level or up to [`FISH_PROBE_MAX_DROP`]
+/// below it, so casting from a quay works while a pond two storeys down does
+/// not.
 pub fn facing_water(geom: &MzbCollisionGeometry, pos: Vec3, facing: Vec3) -> bool {
     let mut d = FISH_PROBE_NEAR;
     while d <= FISH_PROBE_FAR {
         let p = pos + facing * d;
-        if geom
-            .terrain_nearest(Vec2::new(p.x, p.z), pos.y)
-            .is_some_and(mzb::TerrainType::is_water)
-        {
+        if geom.water_below(Vec2::new(p.x, p.z), pos.y, FISH_PROBE_MAX_DROP) {
             return true;
         }
         d += FISH_PROBE_STEP;

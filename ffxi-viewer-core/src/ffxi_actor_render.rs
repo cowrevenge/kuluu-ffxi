@@ -1773,6 +1773,21 @@ fn routine_motion_clip(routines: &HashMap<DatId, Scheduler>, routine: DatId) -> 
         .map(|t| DatId::from_name(&t.stage.id))
 }
 
+/// The routine's *last* Motion stage. Every `fsh<n>` routine carries two — a
+/// wind-up and the pose it settles into (`fsh0` = `fh0?` cast then `fh1?` wait,
+/// `fsh1` = `fh8?` set-the-hook then `fh2?` fight). A phase the client holds for
+/// an indefinite time has to loop the settled stage; looping the wind-up instead
+/// replays the cast over and over.
+fn routine_motion_clip_last(routines: &HashMap<DatId, Scheduler>, routine: DatId) -> Option<DatId> {
+    let sched = routines.get(&routine)?;
+    sched
+        .stages
+        .iter()
+        .filter(|t| t.stage.kind == StageKind::Motion)
+        .next_back()
+        .map(|t| DatId::from_name(&t.stage.id))
+}
+
 pub(crate) use ffxi_proto::magic::CATEGORY_MAGIC_START as MAGIC_START_CATEGORY;
 
 pub(crate) fn action_routine(action_kind: u8, cast_suffix: Option<&str>) -> Option<(DatId, bool)> {
@@ -1946,8 +1961,16 @@ fn advance_actor_pose(
         .fishing_phase
         .and_then(actor_state::fishing_clip)
         .and_then(|fc| {
-            routine_motion_clip(routines, fc.id).map(|motion| actor_state::FishingClip {
-                id: motion,
+            // A looping phase (cast/wait, fighting) is held for an indefinite
+            // time, so it settles on the routine's last Motion stage; a
+            // resolution phase plays its wind-up once and holds.
+            let motion = if fc.looping {
+                routine_motion_clip_last(routines, fc.id)
+            } else {
+                routine_motion_clip(routines, fc.id)
+            };
+            motion.map(|id| actor_state::FishingClip {
+                id,
                 looping: fc.looping,
             })
         });

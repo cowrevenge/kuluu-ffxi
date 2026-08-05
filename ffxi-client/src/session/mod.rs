@@ -16,14 +16,16 @@ mod treasure;
 
 pub(crate) use codec::*;
 pub use codec::{
-    build_subpacket_action, build_subpacket_bazaar_buy, build_subpacket_bazaar_exit,
-    build_subpacket_bazaar_list, build_subpacket_buffcancel, build_subpacket_camp,
-    build_subpacket_emote_list_req, build_subpacket_equip_inspect, build_subpacket_equip_set,
-    build_subpacket_fishing, build_subpacket_item_move, build_subpacket_item_stack,
-    build_subpacket_item_use, build_subpacket_motion, build_subpacket_myroom_job,
-    build_subpacket_pbx, build_subpacket_reqlogout, build_subpacket_shop_buy,
-    build_subpacket_shop_sell_req, build_subpacket_shop_sell_set, build_subpacket_tracking_end,
-    build_subpacket_tracking_list, build_subpacket_tracking_start,
+    build_subpacket_action, build_subpacket_auc_ask_commit, build_subpacket_auc_bid,
+    build_subpacket_auc_info, build_subpacket_auc_lot_cancel, build_subpacket_auc_lot_check,
+    build_subpacket_auc_lot_in, build_subpacket_auc_work_check, build_subpacket_bazaar_buy,
+    build_subpacket_bazaar_exit, build_subpacket_bazaar_list, build_subpacket_buffcancel,
+    build_subpacket_camp, build_subpacket_emote_list_req, build_subpacket_equip_inspect,
+    build_subpacket_equip_set, build_subpacket_fishing, build_subpacket_item_move,
+    build_subpacket_item_stack, build_subpacket_item_use, build_subpacket_motion,
+    build_subpacket_myroom_job, build_subpacket_pbx, build_subpacket_reqlogout,
+    build_subpacket_shop_buy, build_subpacket_shop_sell_req, build_subpacket_shop_sell_set,
+    build_subpacket_tracking_end, build_subpacket_tracking_list, build_subpacket_tracking_start,
 };
 
 struct NpcNameResolver {

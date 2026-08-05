@@ -108,6 +108,10 @@ pub mod c2s {
     // GP_CLI_COMMAND_TROPHY_ABSENCE, vendor/server/src/map/packets/c2s/0x042_trophy_absence.h.
     // Pass on a pool item: TrophyItemIndex u8, padding u8.
     pub const TROPHY_ABSENCE: u16 = 0x042;
+
+    // GP_CLI_COMMAND_AUC, vendor/server/src/map/packets/c2s/0x04e_auc.h.
+    // Auction house sub-protocol; command bytes: [`crate::decode::AuctionCommand`].
+    pub const AUC: u16 = 0x04E;
 }
 
 /// Wide-scan (tracking) State bytes shared by the s2c 0x0F5/0x0F6 decoders and
@@ -427,6 +431,11 @@ pub mod s2c {
     // GP_SERV_COMMAND_PBX_RESULT, vendor/server/src/map/packets/s2c/0x04b_pbx_result.h.
     // Delivery box reply; short (0x14) or full (0x58, with item payload) form.
     pub const PBX_RESULT: u16 = 0x04B;
+
+    // GP_SERV_COMMAND_AUC, vendor/server/src/map/packets/s2c/0x04c_auc.h.
+    // Auction house reply, same body layout as c2s AUC
+    // ([`crate::decode::Auction`]).
+    pub const AUC: u16 = 0x04C;
 
     pub const MISCDATA: u16 = 0x063;
 

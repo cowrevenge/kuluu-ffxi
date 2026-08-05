@@ -37,6 +37,8 @@ mod bazaar;
 pub use bazaar::*;
 mod treasure;
 pub use treasure::*;
+mod auction;
+pub use auction::*;
 
 #[derive(Debug, thiserror::Error)]
 pub enum DecodeError {

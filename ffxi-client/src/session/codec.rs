@@ -404,6 +404,108 @@ pub fn build_subpacket_pbx(sync: u16, op: &crate::state::DeliveryBoxOp) -> Vec<u
     buf
 }
 
+// GP_CLI_COMMAND_AUC (vendor/server/src/map/packets/c2s/0x04e_auc.h). The
+// GP_AUC_PARAM union is 12 bytes, so sizeof = 60 — LSB's PacketSize gate —
+// with the 40-byte Parcel left zeroed c2s (GP_CLI_COMMAND_AUC::validate
+// requires Result/ResultStatus zero).
+const AUC_SUBPACKET_LEN: usize = 60;
+const AUC_COMMAND_OFFSET: usize = 4;
+const AUC_WORK_INDEX_OFFSET: usize = 5;
+const AUC_PARAM_PRICE_OFFSET: usize = 8;
+const AUC_PARAM_WORD0_OFFSET: usize = 12;
+const AUC_PARAM_WORD1_OFFSET: usize = 14;
+const AUC_PARAM_STACKS_OFFSET: usize = 16;
+
+fn build_subpacket_auc(sync: u16, command: decode::AuctionCommand, work_index: i8) -> Vec<u8> {
+    let mut buf = vec![0u8; AUC_SUBPACKET_LEN];
+    buf[0..4].copy_from_slice(&build_subpacket_header(
+        ffxi_proto::map::c2s::AUC,
+        (AUC_SUBPACKET_LEN / 4) as u16,
+        sync,
+    ));
+    buf[AUC_COMMAND_OFFSET] = command as u8;
+    buf[AUC_WORK_INDEX_OFFSET] = work_index as u8;
+    buf
+}
+
+fn write_auc_param(buf: &mut [u8], price: u32, word0: u16, word1: u16, stacks: u32) {
+    buf[AUC_PARAM_PRICE_OFFSET..AUC_PARAM_PRICE_OFFSET + 4].copy_from_slice(&price.to_le_bytes());
+    buf[AUC_PARAM_WORD0_OFFSET..AUC_PARAM_WORD0_OFFSET + 2].copy_from_slice(&word0.to_le_bytes());
+    buf[AUC_PARAM_WORD1_OFFSET..AUC_PARAM_WORD1_OFFSET + 2].copy_from_slice(&word1.to_le_bytes());
+    buf[AUC_PARAM_STACKS_OFFSET..AUC_PARAM_STACKS_OFFSET + 4]
+        .copy_from_slice(&stacks.to_le_bytes());
+}
+
+/// AH open handshake (GP_CLI_COMMAND_AUC::validate pins AucWorkIndex to -1).
+pub fn build_subpacket_auc_work_check(sync: u16) -> Vec<u8> {
+    build_subpacket_auc(
+        sync,
+        decode::AuctionCommand::WorkCheck,
+        decode::AUCTION_WORK_INDEX_NONE,
+    )
+}
+
+/// Sales Status window open (auctionutils::OpenListOfSales).
+pub fn build_subpacket_auc_info(sync: u16) -> Vec<u8> {
+    build_subpacket_auc(
+        sync,
+        decode::AuctionCommand::Info,
+        decode::AUCTION_WORK_INDEX_NONE,
+    )
+}
+
+/// Fee quote before the sale confirm (GP_AUC_PARAM_ASKCOMMIT;
+/// `item_work_index` is the LOC_INVENTORY slot).
+pub fn build_subpacket_auc_ask_commit(
+    sync: u16,
+    commission: u32,
+    item_work_index: u16,
+    item_no: u16,
+    stacks: u32,
+) -> Vec<u8> {
+    let mut buf = build_subpacket_auc(
+        sync,
+        decode::AuctionCommand::AskCommit,
+        decode::AUCTION_WORK_INDEX_NONE,
+    );
+    write_auc_param(&mut buf, commission, item_work_index, item_no, stacks);
+    buf
+}
+
+/// Sale confirm into slot `work_index` (0..=6); GP_AUC_PARAM_LOT.
+pub fn build_subpacket_auc_lot_in(
+    sync: u16,
+    limit_price: u32,
+    item_work_index: u16,
+    stacks: u32,
+    work_index: i8,
+) -> Vec<u8> {
+    let mut buf = build_subpacket_auc(sync, decode::AuctionCommand::LotIn, work_index);
+    write_auc_param(&mut buf, limit_price, item_work_index, 0, stacks);
+    buf
+}
+
+/// Bid against slot `work_index`; GP_AUC_PARAM_BID.
+pub fn build_subpacket_auc_bid(
+    sync: u16,
+    bid_price: u32,
+    item_no: u16,
+    stacks: u32,
+    work_index: i8,
+) -> Vec<u8> {
+    let mut buf = build_subpacket_auc(sync, decode::AuctionCommand::Bid, work_index);
+    write_auc_param(&mut buf, bid_price, item_no, 0, stacks);
+    buf
+}
+
+pub fn build_subpacket_auc_lot_cancel(sync: u16, work_index: i8) -> Vec<u8> {
+    build_subpacket_auc(sync, decode::AuctionCommand::LotCancel, work_index)
+}
+
+pub fn build_subpacket_auc_lot_check(sync: u16, work_index: i8) -> Vec<u8> {
+    build_subpacket_auc(sync, decode::AuctionCommand::LotCheck, work_index)
+}
+
 // c2s 0x100 GP_CLI_COMMAND_MYROOM_JOB: MainJobIndex u8 @4, SupportJobIndex u8 @5,
 // u16 pad; 0 = keep the current job
 // (vendor/server/src/map/packets/c2s/0x100_myroom_job.h:27-31).
@@ -708,4 +810,68 @@ pub(crate) fn build_subpacket_pos(
         .unwrap_or(0);
     buf[24..28].copy_from_slice(&now.to_le_bytes());
     buf
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ffxi_proto::decode::{
+        AUCTION_STACKS_SINGLE, AUCTION_STACKS_STACK, AUCTION_WORK_INDEX_NONE,
+    };
+
+    fn assert_auc_frame(buf: &[u8], sync: u16, command: decode::AuctionCommand) {
+        assert_eq!(buf.len(), AUC_SUBPACKET_LEN, "sizeof(GP_CLI_COMMAND_AUC)");
+        let hdr = u16::from_le_bytes([buf[0], buf[1]]);
+        assert_eq!(
+            hdr & ffxi_proto::framing::SUBPACKET_OPCODE_MASK,
+            ffxi_proto::map::c2s::AUC,
+            "opcode 0x04E"
+        );
+        assert_eq!(
+            (hdr >> 9) as usize,
+            AUC_SUBPACKET_LEN / 4,
+            "size_words = 15"
+        );
+        assert_eq!(u16::from_le_bytes([buf[2], buf[3]]), sync, "sync");
+        assert_eq!(buf[AUC_COMMAND_OFFSET], command as u8, "Command");
+        assert_eq!(buf[6], 0, "Result (GP_CLI_COMMAND_AUC::validate)");
+        assert_eq!(buf[7], 0, "ResultStatus (GP_CLI_COMMAND_AUC::validate)");
+        assert_eq!(&buf[20..AUC_SUBPACKET_LEN], &[0u8; 40], "Parcel unused c2s");
+    }
+
+    #[test]
+    fn auc_ask_commit_layout_matches_server_struct() {
+        let buf = build_subpacket_auc_ask_commit(0xBEEF, 9, 5, 4570, AUCTION_STACKS_STACK);
+        assert_auc_frame(&buf, 0xBEEF, decode::AuctionCommand::AskCommit);
+        assert_eq!(buf[AUC_WORK_INDEX_OFFSET] as i8, AUCTION_WORK_INDEX_NONE);
+        assert_eq!(u32::from_le_bytes(buf[8..12].try_into().unwrap()), 9);
+        assert_eq!(u16::from_le_bytes([buf[12], buf[13]]), 5);
+        assert_eq!(u16::from_le_bytes([buf[14], buf[15]]), 4570);
+        assert_eq!(
+            u32::from_le_bytes(buf[16..20].try_into().unwrap()),
+            AUCTION_STACKS_STACK
+        );
+    }
+
+    #[test]
+    fn auc_bid_layout_matches_server_struct() {
+        let buf = build_subpacket_auc_bid(0x1234, 490, 17440, AUCTION_STACKS_SINGLE, 6);
+        assert_auc_frame(&buf, 0x1234, decode::AuctionCommand::Bid);
+        assert_eq!(buf[AUC_WORK_INDEX_OFFSET] as i8, 6);
+        assert_eq!(u32::from_le_bytes(buf[8..12].try_into().unwrap()), 490);
+        assert_eq!(u16::from_le_bytes([buf[12], buf[13]]), 17440);
+        assert_eq!(u16::from_le_bytes([buf[14], buf[15]]), 0, "padding00");
+        assert_eq!(
+            u32::from_le_bytes(buf[16..20].try_into().unwrap()),
+            AUCTION_STACKS_SINGLE
+        );
+    }
+
+    #[test]
+    fn auc_work_check_pins_open_handshake() {
+        let buf = build_subpacket_auc_work_check(0x0042);
+        assert_auc_frame(&buf, 0x0042, decode::AuctionCommand::WorkCheck);
+        assert_eq!(buf[AUC_WORK_INDEX_OFFSET] as i8, AUCTION_WORK_INDEX_NONE);
+        assert_eq!(&buf[8..20], &[0u8; 12], "GP_AUC_PARAM unused");
+    }
 }

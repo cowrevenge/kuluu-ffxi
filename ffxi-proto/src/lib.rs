@@ -28,6 +28,7 @@ pub mod msg_channel;
 pub mod msg_system;
 pub mod packet_names;
 pub mod recast;
+pub mod search;
 pub mod skill_names;
 pub mod spell_names;
 pub mod status_effects;

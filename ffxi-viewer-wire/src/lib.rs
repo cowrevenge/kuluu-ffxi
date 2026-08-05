@@ -2,6 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 
+// v16: SceneSnapshot.auction — the Auction House surface (counter open flag, browse
+// catalog, price history, the 7 sales-status slots, fee quote, busy spinner).
 // v15: Entity.mount + SceneSnapshot.self_mount — which mount is being ridden, which picks
 // the mount's model. `animation`/`self_server_status` say only *that* someone is mounted.
 // v14: the retail /check window's remaining panes — CheckResult.linkshell, SceneSnapshot
@@ -25,7 +27,7 @@ use serde::{Deserialize, Serialize};
 // v5: InventoryItem.charges_remaining + next_use_vana_ts (item recast/charges).
 // v4: SceneSnapshot.delivery_box (dedicated delivery screen) + ViewerCommand::DeliveryBox
 // (postcard frames are not self-describing, so any shape change bumps this).
-pub const PROTOCOL_VERSION: u32 = 15;
+pub const PROTOCOL_VERSION: u32 = 16;
 
 /// Longest countdown `SceneSnapshot::status_icon_expiries` can carry. The
 /// producer rejects anything beyond it as a corrupt 0x063 timestamp, and the HUD
@@ -605,6 +607,12 @@ pub struct SceneSnapshot {
     #[serde(default)]
     pub bazaar: Option<BazaarView>,
 
+    /// The Auction House surface (counter menu, browse catalog, price history,
+    /// sales status). `auction.open` gates the HUD; current gil is read from
+    /// `containers` (LOC_INVENTORY slot 0), not duplicated here.
+    #[serde(default)]
+    pub auction: AuctionUi,
+
     #[serde(default)]
     pub play_time_s: u64,
 
@@ -889,6 +897,94 @@ impl BazaarEntry {
         let base = u64::from(self.price) * u64::from(quantity);
         u32::try_from(base + u64::from(self.tax_rate) * base / TAX_DIVISOR).unwrap_or(u32::MAX)
     }
+}
+
+/// Sales-status slot count. Mirrors `ffxi_proto::decode::AUCTION_SLOT_COUNT`
+/// (GP_SERV_COMMAND_AUC carries 7 Parcel slots); a producer-side guard test
+/// pins the two together.
+pub const AH_SALES_SLOT_COUNT: usize = 7;
+
+/// Mirror of `ffxi_client`'s `AuctionState`. `open` is set by the s2c Open
+/// push and only clears on zone change (the counter NPC is zone-local).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuctionUi {
+    pub open: bool,
+    pub browse: Option<AhCatalogView>,
+    pub history: Option<AhHistoryView>,
+    pub sales_status: [Option<AhSaleStatus>; AH_SALES_SLOT_COUNT],
+    /// Last AskCommit fee quote, awaiting the sell confirm.
+    pub fee_quote: Option<AhFeeQuote>,
+    pub busy: Option<AuctionBusy>,
+}
+
+/// Which retail spinner the in-flight AH op renders ("Downloading data .." /
+/// "Placing bid ...", observation record
+/// .agents/skills/retail-observe/references/auction-house.md).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AuctionBusy {
+    Downloading,
+    PlacingBid,
+}
+
+/// One category's full catalog (all search-server pages merged).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AhCatalogView {
+    pub category: u8,
+    pub total: u16,
+    pub listings: Vec<AhListingView>,
+}
+
+/// One catalog row — open-listing counts (the retail bracketed `[N]` stock
+/// numbers), never prices.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AhListingView {
+    pub item_id: u16,
+    /// Singles currently up for sale; 0 = none listed.
+    pub singles_for_sale: u32,
+    /// Stacks currently up for sale; `None` = item is not stackable.
+    pub stacks_for_sale: Option<u32>,
+}
+
+/// Price history for one item in one form (single or stack).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AhHistoryView {
+    pub item_id: u16,
+    pub stack: bool,
+    /// Count of open listings of the requested form; not a price.
+    pub open_listings: u32,
+    pub category: u16,
+    pub sales: Vec<AhSaleView>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AhSaleView {
+    pub price: u32,
+    pub sell_date: u32,
+    pub seller: String,
+    pub buyer: String,
+}
+
+/// One populated sales-status slot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AhSaleStatus {
+    pub stat: u8,
+    pub item_no: u16,
+    /// 1 for a single, the stack size for a stack.
+    pub quantity: u8,
+    pub price: u32,
+    pub timestamp: u32,
+}
+
+/// The AskCommit fee quote plus the asking price the session sent (the quote
+/// does not echo it). Drives the retail fee/placement Yes/No confirms.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AhFeeQuote {
+    pub fee: u32,
+    pub inventory_slot: u8,
+    pub item_no: u16,
+    pub stack: bool,
+    pub asking_price: u32,
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
@@ -1301,6 +1397,57 @@ pub enum ClientFrame {
 mod tests {
     use super::*;
 
+    fn sample_auction() -> AuctionUi {
+        let mut sales_status = [None; AH_SALES_SLOT_COUNT];
+        sales_status[2] = Some(AhSaleStatus {
+            stat: 1,
+            item_no: 4570,
+            quantity: 12,
+            price: 1_180,
+            timestamp: 1_700_000_100,
+        });
+        AuctionUi {
+            open: true,
+            browse: Some(AhCatalogView {
+                category: 7,
+                total: 2,
+                listings: vec![
+                    AhListingView {
+                        item_id: 4570,
+                        singles_for_sale: 14,
+                        stacks_for_sale: Some(3),
+                    },
+                    AhListingView {
+                        item_id: 17440,
+                        singles_for_sale: 0,
+                        stacks_for_sale: None,
+                    },
+                ],
+            }),
+            history: Some(AhHistoryView {
+                item_id: 4570,
+                stack: true,
+                open_listings: 3,
+                category: 7,
+                sales: vec![AhSaleView {
+                    price: 1_180,
+                    sell_date: 1_700_000_000,
+                    seller: "Aliya".into(),
+                    buyer: "Sylvie".into(),
+                }],
+            }),
+            sales_status,
+            fee_quote: Some(AhFeeQuote {
+                fee: 9,
+                inventory_slot: 5,
+                item_no: 4570,
+                stack: true,
+                asking_price: 1_180,
+            }),
+            busy: Some(AuctionBusy::Downloading),
+        }
+    }
+
     fn sample_snapshot() -> SceneSnapshot {
         SceneSnapshot {
             stage: Stage::InZone,
@@ -1394,6 +1541,7 @@ mod tests {
             containers: Vec::new(),
             stats: None,
             bazaar: None,
+            auction: sample_auction(),
             play_time_s: 0,
             self_fishing: None,
             self_server_status: 0,
@@ -1569,6 +1717,7 @@ mod tests {
                         sub_map: 0
                     })
                 );
+                assert_eq!(s.auction, sample_auction());
             }
             other => panic!("wrong variant: {other:?}"),
         }

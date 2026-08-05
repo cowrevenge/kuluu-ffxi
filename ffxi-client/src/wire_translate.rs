@@ -66,6 +66,7 @@ pub fn state_to_snapshot(s: &SessionState) -> wire::SceneSnapshot {
 
         stats: s.char_stats.map(char_stats_to_wire),
         bazaar: s.bazaar.as_ref().map(bazaar_to_wire),
+        auction: auction_to_wire(&s.auction),
         play_time_s: 0,
 
         self_fishing: s.self_fishing.map(|f| wire::SelfFishing {
@@ -152,6 +153,61 @@ fn bazaar_to_wire(b: &crate::state::BazaarView) -> wire::BazaarView {
                 tax_rate: it.tax_rate,
             })
             .collect(),
+    }
+}
+
+fn auction_to_wire(a: &crate::state::AuctionState) -> wire::AuctionUi {
+    wire::AuctionUi {
+        open: a.open,
+        browse: a.browse.as_ref().map(|b| wire::AhCatalogView {
+            category: b.category,
+            total: b.total,
+            listings: b
+                .listings
+                .iter()
+                .map(|l| wire::AhListingView {
+                    item_id: l.item_id,
+                    singles_for_sale: l.singles_for_sale,
+                    stacks_for_sale: l.stacks_for_sale,
+                })
+                .collect(),
+        }),
+        history: a.history.as_ref().map(|h| wire::AhHistoryView {
+            item_id: h.item_id,
+            stack: h.stack,
+            open_listings: h.open_listings,
+            category: h.category,
+            sales: h
+                .sales
+                .iter()
+                .map(|s| wire::AhSaleView {
+                    price: s.price,
+                    sell_date: s.sell_date,
+                    seller: s.seller.clone(),
+                    buyer: s.buyer.clone(),
+                })
+                .collect(),
+        }),
+        sales_status: a.sales_status.clone().map(|slot| {
+            slot.map(|s| wire::AhSaleStatus {
+                stat: s.stat,
+                item_no: s.item_no,
+                quantity: s.quantity,
+                price: s.price,
+                timestamp: s.timestamp,
+            })
+        }),
+        fee_quote: a.fee_quote.map(|q| wire::AhFeeQuote {
+            fee: q.fee,
+            inventory_slot: q.inventory_slot,
+            item_no: q.item_no,
+            stack: q.stack,
+            asking_price: q.asking_price,
+        }),
+        busy: a.busy.map(|b| match b {
+            crate::state::AuctionBusy::Downloading => wire::AuctionBusy::Downloading,
+            crate::state::AuctionBusy::PlacingBid => wire::AuctionBusy::PlacingBid,
+        }),
     }
 }
 
@@ -1035,6 +1091,125 @@ mod tests {
         );
         // 5% zone tax, applied by the consumer rather than stored pre-taxed.
         assert_eq!(row.total_price(2), 2100);
+    }
+
+    #[test]
+    fn auction_sales_slot_counts_agree() {
+        assert_eq!(wire::AH_SALES_SLOT_COUNT, crate::state::AUCTION_SLOTS);
+    }
+
+    #[test]
+    fn auction_state_crosses_the_wire_boundary() {
+        use crate::state::{
+            AhCatalogView, AhFeeQuote, AhHistoryView, AhListingView, AhSaleStatus, AhSaleView,
+            AuctionBusy, AuctionState, AUCTION_SLOTS,
+        };
+
+        let mut s = SessionState::default();
+        assert_eq!(state_to_snapshot(&s).auction, wire::AuctionUi::default());
+
+        let mut sales_status: [Option<AhSaleStatus>; AUCTION_SLOTS] = Default::default();
+        sales_status[6] = Some(AhSaleStatus {
+            stat: 1,
+            item_no: 4570,
+            quantity: 12,
+            price: 1_180,
+            timestamp: 1_700_000_100,
+        });
+        s.auction = AuctionState {
+            open: true,
+            browse: Some(AhCatalogView {
+                category: 7,
+                total: 2,
+                listings: vec![
+                    AhListingView {
+                        item_id: 4570,
+                        singles_for_sale: 14,
+                        stacks_for_sale: Some(3),
+                    },
+                    AhListingView {
+                        item_id: 17440,
+                        singles_for_sale: 0,
+                        stacks_for_sale: None,
+                    },
+                ],
+            }),
+            history: Some(AhHistoryView {
+                item_id: 4570,
+                stack: true,
+                open_listings: 3,
+                category: 7,
+                sales: vec![AhSaleView {
+                    price: 1_180,
+                    sell_date: 1_700_000_000,
+                    seller: "Aliya".into(),
+                    buyer: "Sylvie".into(),
+                }],
+            }),
+            sales_status,
+            fee_quote: Some(AhFeeQuote {
+                fee: 9,
+                inventory_slot: 5,
+                item_no: 4570,
+                stack: true,
+                asking_price: 1_180,
+            }),
+            busy: Some(AuctionBusy::PlacingBid),
+        };
+
+        let a = state_to_snapshot(&s).auction;
+        assert!(a.open);
+        assert_eq!(a.busy, Some(wire::AuctionBusy::PlacingBid));
+
+        let b = a.browse.expect("catalog on the wire");
+        assert_eq!((b.category, b.total), (7, 2));
+        assert_eq!(b.listings.len(), 2);
+        assert_eq!(
+            (
+                b.listings[0].item_id,
+                b.listings[0].singles_for_sale,
+                b.listings[0].stacks_for_sale
+            ),
+            (4570, 14, Some(3))
+        );
+        assert_eq!(
+            b.listings[1].stacks_for_sale, None,
+            "unstackable stays None"
+        );
+
+        let h = a.history.expect("history on the wire");
+        assert_eq!(
+            (h.item_id, h.stack, h.open_listings, h.category),
+            (4570, true, 3, 7)
+        );
+        assert_eq!(h.sales.len(), 1);
+        assert_eq!(
+            (
+                h.sales[0].price,
+                h.sales[0].seller.as_str(),
+                h.sales[0].buyer.as_str()
+            ),
+            (1_180, "Aliya", "Sylvie")
+        );
+
+        assert!(a.sales_status[..6].iter().all(Option::is_none));
+        let slot = a.sales_status[6].expect("sales slot on the wire");
+        assert_eq!(
+            (
+                slot.stat,
+                slot.item_no,
+                slot.quantity,
+                slot.price,
+                slot.timestamp
+            ),
+            (1, 4570, 12, 1_180, 1_700_000_100)
+        );
+
+        let q = a.fee_quote.expect("fee quote on the wire");
+        assert_eq!(
+            (q.fee, q.inventory_slot, q.item_no, q.stack, q.asking_price),
+            (9, 5, 4570, true, 1_180)
+        );
     }
 
     #[test]

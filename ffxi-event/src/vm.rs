@@ -76,6 +76,10 @@ const OP_REQSET_PRIORITY: u8 = 0x29;
 const OP_REQWAIT: u8 = 0x2A;
 const OP_LOADEXTSCHEDULER: u8 = 0x5B;
 const OP_LOADEXTSCHEDULER2: u8 = 0x66;
+const OP_WAITSCHEDULOR: u8 = 0x53;
+const OP_WAITMAPSCHEDULOR: u8 = 0x54;
+const OP_WAITLOADSCHEDULER: u8 = 0x55;
+const OP_CHOCOBO: u8 = 0x7E;
 const OP_SETBITWORK: u8 = 0x40;
 const OP_GETBITWORK: u8 = 0x41;
 const OP_SENDTAG: u8 = 0x43;
@@ -116,6 +120,10 @@ const REFERENCE_FLAG: u32 = 0x8000;
 const REFERENCE_INDEX_MASK: u32 = 0x7FFF;
 /// QUERYWAIT stores this in `Work_Zone[0]` when the player cancels the menu.
 const CHOICE_CANCELLED: u32 = 254;
+/// Opcodes one [`EventVm::step`] may run before it gives up — see the check
+/// itself. Far above any authored run between yields, so it only ever fires on
+/// a loop this VM cannot leave.
+const OPCODE_BUDGET_PER_STEP: u32 = 100_000;
 
 /// `XiEvent` runtime for a single event, simplified to the linear+jump+message
 /// flow (the full 16-entry priority `ReqStack` is a Stage 2 concern). Mirrors the
@@ -232,6 +240,7 @@ impl EventVm {
         if self.finished {
             return StepResult::Done;
         }
+        let mut budget = OPCODE_BUDGET_PER_STEP;
         loop {
             let Some(&op) = self.event_data.get(self.exec_pointer) else {
                 // Retail reads 0 (== OP_END) here, so ending is faithful; flag
@@ -247,6 +256,24 @@ impl EventVm {
                 );
                 return StepResult::Done;
             };
+            // Retail runs the program each frame until an opcode sets RetFlag,
+            // and authored events always reach one. Ours can miss it, because
+            // the opcodes it steps over blind include the ones that would have
+            // moved a loop's condition along; without a budget that is a hung
+            // client rather than a dropped scene. Report it as the opcode we
+            // were spinning on, which is the same signal the host already logs
+            // and releases on.
+            budget -= 1;
+            if budget == 0 {
+                self.finished = true;
+                tracing::warn!(
+                    exec_pointer = self.exec_pointer,
+                    op = format!("0x{op:02X}"),
+                    "event VM exceeded its opcode budget; the script is looping \
+                     on state this VM does not model"
+                );
+                return StepResult::Unimplemented(op);
+            }
             match op {
                 OP_END => {
                     self.finished = true;
@@ -392,6 +419,32 @@ impl EventVm {
                 // VM models no actors.
                 OP_LOADEXTSCHEDULER | OP_LOADEXTSCHEDULER2 => {
                     self.exec_pointer += OPCODE_META[op as usize].size as usize;
+                }
+                // XiEvent WAITSCHEDULOR/WAITMAPSCHEDULOR/WAITLOADSCHEDULER
+                // (research/XiEvents/OpCodes/0x0053.md–0x0055.md): block until
+                // two named actors' schedulers finish. Same early exit as the
+                // loaders above — both actors have to resolve before retail
+                // waits on anything, and this VM resolves none. Load-bearing:
+                // the chocobo rental cutscene is one 0x53, and refusing it
+                // auto-released the whole scene.
+                OP_WAITSCHEDULOR | OP_WAITMAPSCHEDULOR | OP_WAITLOADSCHEDULER => {
+                    self.exec_pointer += OPCODE_META[op as usize].size as usize;
+                }
+                // XiEvent CHOCOBO (research/XiEvents/OpCodes/0x007E.md): puts an
+                // actor on or off a mount mid-cutscene. The mount the player
+                // ends up on is the server's to confirm — it arrives as 0x037,
+                // which the session already handles — so all this VM owes the
+                // scene is the right width, which is its case byte's. Refusing
+                // it auto-released the rental cutscene one opcode past 0x53.
+                OP_CHOCOBO => {
+                    let Some(width) = self
+                        .event_data
+                        .get(self.exec_pointer + 1)
+                        .and_then(|&sub| crate::opcode_meta::sub_size(op, sub))
+                    else {
+                        return StepResult::Unimplemented(op);
+                    };
+                    self.exec_pointer += width as usize;
                 }
                 _ => {
                     let meta = OPCODE_META.get(op as usize).copied();
@@ -675,6 +728,41 @@ mod tests {
             assert_eq!(
                 size, 15,
                 "op 0x{op:02X} size drifted from research/XiEvents/OpCodes (param3=0 advance)"
+            );
+            let mut data = vec![op];
+            data.extend(std::iter::repeat_n(0u8, size - 1));
+            data.push(OP_END);
+            let mut e = vm(data, vec![]);
+            assert_eq!(
+                e.step(),
+                StepResult::Done,
+                "op 0x{op:02X} should run to END"
+            );
+            assert_eq!(e.exec_pointer(), size, "op 0x{op:02X} advanced wrong size");
+        }
+    }
+
+    #[test]
+    fn a_script_that_loops_forever_stops_instead_of_hanging() {
+        // GOTO 0: the tightest loop the bytecode can express.
+        let mut e = vm(vec![OP_GOTO, 0x00, 0x00], vec![]);
+        assert_eq!(e.step(), StepResult::Unimplemented(OP_GOTO));
+        // And it stays stopped rather than spinning again on the next tick.
+        assert_eq!(e.step(), StepResult::Done);
+    }
+
+    #[test]
+    fn scheduler_wait_family_skips_by_size_and_continues() {
+        // Sizes are load-bearing: these opcodes carry actor references the VM
+        // steps over blind, so a wrong width lands mid-instruction.
+        for (op, size) in [
+            (OP_WAITSCHEDULOR, 13usize),
+            (OP_WAITMAPSCHEDULOR, 13),
+            (OP_WAITLOADSCHEDULER, 15),
+        ] {
+            assert_eq!(
+                OPCODE_META[op as usize].size as usize, size,
+                "op 0x{op:02X} size drifted from research/XiEvents/OpCodes"
             );
             let mut data = vec![op];
             data.extend(std::iter::repeat_n(0u8, size - 1));

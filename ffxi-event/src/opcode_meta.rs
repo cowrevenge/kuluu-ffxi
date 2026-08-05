@@ -1374,6 +1374,17 @@ pub fn sub_size(op: u8, sub: u8) -> Option<u8> {
             2 => 6,
             _ => 2,
         }),
+        // 0x007E.md: the mount/dismount opcode, whose width is its case. Cases
+        // 3 and 6 are wider because they carry the chocobo's CustomProperties;
+        // 7 carries a mount id. Retail computes width 0 for any other case and
+        // then advances by it — a hang, so authored data cannot hold one.
+        OP_CHOCOBO => match sub {
+            0..=2 | 4 | 5 | 8 => Some(6),
+            3 => Some(16),
+            6 => Some(18),
+            7 => Some(8),
+            _ => None,
+        },
         _ => None,
     }
 }
@@ -1382,6 +1393,7 @@ const OP_DEFCAMERA: u8 = 0x46;
 const OP_LOOKAT: u8 = 0x79;
 const OP_MUSIC: u8 = 0x5C;
 const OP_MOGHOUSE_VISIT: u8 = 0xC2;
+const OP_CHOCOBO: u8 = 0x7E;
 
 #[cfg(test)]
 mod tests {
@@ -1414,6 +1426,16 @@ mod tests {
         assert_eq!(sub_size(0xC2, 1), Some(4));
         assert_eq!(sub_size(0xC2, 2), Some(6));
         assert_eq!(sub_size(0xC2, 7), Some(2));
+        // 0x007E.md — the mount opcode's width is its case. The two wide ones
+        // carry the chocobo's CustomProperties, so mistaking them for the
+        // common 6 lands mid-operand.
+        for sub in [0u8, 1, 2, 4, 5, 8] {
+            assert_eq!(sub_size(0x7E, sub), Some(6), "0x7E sub {sub}");
+        }
+        assert_eq!(sub_size(0x7E, 3), Some(16));
+        assert_eq!(sub_size(0x7E, 6), Some(18));
+        assert_eq!(sub_size(0x7E, 7), Some(8));
+        assert_eq!(sub_size(0x7E, 9), None, "undocumented case has no width");
     }
 
     // Every width sub_size can return must be <= the table's fixed size, which is
@@ -1421,7 +1443,7 @@ mod tests {
     // not the dispatch.
     #[test]
     fn sub_widths_never_exceed_the_tables_widest_case() {
-        for op in [0x46u8, 0x79, 0x5C, 0xC2] {
+        for op in [0x46u8, 0x79, 0x5C, 0xC2, 0x7E] {
             let fixed = OPCODE_META[op as usize].size;
             for sub in 0..=u8::MAX {
                 if let Some(w) = sub_size(op, sub) {

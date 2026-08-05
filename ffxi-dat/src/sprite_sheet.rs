@@ -36,6 +36,11 @@ pub struct LensFlareSheet {
     pub frames: Vec<UvRect>,
     pub offsets: Vec<f32>,
     pub half_extents: Vec<[f32; 2]>,
+    /// Each mesh's authored vertex colour, the D argument of retail's texture-stage chain —
+    /// this is where the chain's core/halo/ghost intensities live (lf03 in file 201 ramps its
+    /// alpha byte 100, 50, 50, 30, 20 down the chain). Raw bytes; the consumer applies
+    /// [`crate::d3m::VERTEX_COLOR_DIVISOR`] like every other stage-0 D.
+    pub colors: Vec<[u8; 4]>,
     pub texture: GraphicImage,
 }
 
@@ -46,11 +51,20 @@ fn rd_f32(b: &[u8], o: usize) -> f32 {
     f32::from_le_bytes([b[o], b[o + 1], b[o + 2], b[o + 3]])
 }
 
+// Per-mesh geometry summary: the UV sub-rect, the flare offset fraction, the quad's half
+// extent and its vertex colour. One entry per mesh in sheet order.
+#[derive(Default)]
+struct SheetMeshes {
+    frames: Vec<UvRect>,
+    offsets: Vec<f32>,
+    half_extents: Vec<[f32; 2]>,
+    colors: Vec<[u8; 4]>,
+}
+
 // Parse the per-mesh frames and (for lens-flare sheets) per-mesh offset fractions.
 // research/xim SpriteSheetSection.kt:44-79: each mesh is { u16==1, u8 num_quads, u8,
 // [lens_flare: f32 offset + 3 discarded floats], 6*num_quads verts }.
-#[allow(clippy::type_complexity)]
-fn parse_frames_offsets(b: &[u8]) -> Option<(Vec<UvRect>, Vec<f32>, Vec<[f32; 2]>)> {
+fn parse_frames_offsets(b: &[u8]) -> Option<SheetMeshes> {
     if b.len() < 24 {
         return None;
     }
@@ -64,9 +78,7 @@ fn parse_frames_offsets(b: &[u8]) -> Option<(Vec<UvRect>, Vec<f32>, Vec<[f32; 2]
         1.0
     };
 
-    let mut frames = Vec::with_capacity(num_mesh);
-    let mut offsets = Vec::with_capacity(if lens_flare { num_mesh } else { 0 });
-    let mut half_extents = Vec::with_capacity(num_mesh);
+    let mut out = SheetMeshes::default();
     let mut p = 24usize;
     for _ in 0..num_mesh {
         if p + 4 > b.len() {
@@ -78,13 +90,16 @@ fn parse_frames_offsets(b: &[u8]) -> Option<(Vec<UvRect>, Vec<f32>, Vec<[f32; 2]
             if p + 16 > b.len() {
                 return None;
             }
-            offsets.push(rd_f32(b, p));
+            out.offsets.push(rd_f32(b, p));
             p += 16;
         }
         let num_verts = 6 * num_quads;
         let (mut u0, mut v0, mut u1, mut v1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
         let (mut x0, mut y0, mut x1, mut y1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
-        for _ in 0..num_verts {
+        // A flare element is a flat quad authored at one colour, so the first vertex's is the
+        // mesh's; the D3m path keeps the full per-vertex array because its meshes shade.
+        let mut color = [0u8; 4];
+        for i in 0..num_verts {
             if p + 24 > b.len() {
                 return None;
             }
@@ -94,6 +109,9 @@ fn parse_frames_offsets(b: &[u8]) -> Option<(Vec<UvRect>, Vec<f32>, Vec<[f32; 2]
             x1 = x1.max(x);
             y0 = y0.min(y);
             y1 = y1.max(y);
+            if i == 0 {
+                color = [b[p + 12], b[p + 13], b[p + 14], b[p + 15]];
+            }
             let u = rd_f32(b, p + 16) * uv_scale;
             let v = rd_f32(b, p + 20) * uv_scale;
             u0 = u0.min(u);
@@ -102,14 +120,15 @@ fn parse_frames_offsets(b: &[u8]) -> Option<(Vec<UvRect>, Vec<f32>, Vec<[f32; 2]
             v1 = v1.max(v);
             p += 24;
         }
-        frames.push(UvRect { u0, v0, u1, v1 });
-        half_extents.push([(x1 - x0) * 0.5, (y1 - y0) * 0.5]);
+        out.frames.push(UvRect { u0, v0, u1, v1 });
+        out.half_extents.push([(x1 - x0) * 0.5, (y1 - y0) * 0.5]);
+        out.colors.push(color);
     }
-    Some((frames, offsets, half_extents))
+    Some(out)
 }
 
 fn parse_frames(b: &[u8]) -> Option<Vec<UvRect>> {
-    parse_frames_offsets(b).map(|(frames, ..)| frames)
+    parse_frames_offsets(b).map(|m| m.frames)
 }
 
 // A single flipbook frame's full quad geometry (positions + UVs + per-vertex colors),
@@ -267,15 +286,16 @@ pub fn extract_lens_flare_sheet(dat_bytes: &[u8]) -> Option<LensFlareSheet> {
             continue;
         }
         let (category, id) = texture_tokens(b);
-        let (frames, offsets, half_extents) = parse_frames_offsets(b)?;
-        if frames.is_empty() || offsets.len() != frames.len() {
+        let m = parse_frames_offsets(b)?;
+        if m.frames.is_empty() || m.offsets.len() != m.frames.len() {
             continue;
         }
         let texture = scan_graphics(dat_bytes).find(|g| g.category == category && g.id == id)?;
         return Some(LensFlareSheet {
-            frames,
-            offsets,
-            half_extents,
+            frames: m.frames,
+            offsets: m.offsets,
+            half_extents: m.half_extents,
+            colors: m.colors,
             texture,
         });
     }
@@ -338,11 +358,26 @@ mod tests {
     }
 
     fn quad(u0: f32, v0: f32, u1: f32, v1: f32) -> Vec<u8> {
-        // One quad = 6 verts of { vec3 pos, rgba u8x4, f32 u, f32 v } = 24B each.
-        let uvs = [(u0, v0), (u1, v0), (u1, v1), (u0, v0), (u1, v1), (u0, v1)];
+        colored_quad(u0, v0, u1, v1, [0u8; 4], 0.0)
+    }
+
+    // One quad = 6 verts of { vec3 pos, rgba u8x4, f32 u, f32 v } = 24B each, laid out as a
+    // `half`-half-extent square so half_extents/colors can both be asserted.
+    fn colored_quad(u0: f32, v0: f32, u1: f32, v1: f32, color: [u8; 4], half: f32) -> Vec<u8> {
+        let corners = [
+            (-half, -half, u0, v0),
+            (half, -half, u1, v0),
+            (half, half, u1, v1),
+            (-half, -half, u0, v0),
+            (half, half, u1, v1),
+            (-half, half, u0, v1),
+        ];
         let mut v = Vec::new();
-        for (u, vv) in uvs {
-            v.extend_from_slice(&[0u8; 16]); // pos(12) + rgba(4)
+        for (x, y, u, vv) in corners {
+            v.extend_from_slice(&x.to_le_bytes());
+            v.extend_from_slice(&y.to_le_bytes());
+            v.extend_from_slice(&0f32.to_le_bytes());
+            v.extend_from_slice(&color);
             v.extend_from_slice(&u.to_le_bytes());
             v.extend_from_slice(&vv.to_le_bytes());
         }
@@ -402,19 +437,45 @@ mod tests {
         let mut b = header(2, true, "lf0a", "flar");
         b.extend(mesh(1, Some(0.25), (0.0, 0.0, 0.5, 0.5)));
         b.extend(mesh(1, Some(1.40), (0.5, 0.5, 1.0, 1.0)));
-        let (frames, offsets, _) = parse_frames_offsets(&b).unwrap();
-        assert_eq!(frames.len(), 2);
-        assert_eq!(offsets.len(), 2);
-        assert!((offsets[0] - 0.25).abs() < 1e-6);
-        assert!((offsets[1] - 1.40).abs() < 1e-6);
+        let m = parse_frames_offsets(&b).unwrap();
+        assert_eq!(m.frames.len(), 2);
+        assert_eq!(m.offsets.len(), 2);
+        assert!((m.offsets[0] - 0.25).abs() < 1e-6);
+        assert!((m.offsets[1] - 1.40).abs() < 1e-6);
     }
 
     #[test]
     fn non_lens_flare_has_no_offsets() {
         let mut b = header(1, false, "suns", "suny");
         b.extend(mesh(1, None, (0.0, 0.0, 1.0, 1.0)));
-        let (_frames, offsets, _) = parse_frames_offsets(&b).unwrap();
-        assert!(offsets.is_empty());
+        assert!(parse_frames_offsets(&b).unwrap().offsets.is_empty());
+    }
+
+    // The per-mesh vertex colour is the D argument of retail's texture-stage chain and carries
+    // the flare chain's authored core/halo/ghost intensities (lf03 in file 201 ramps its alpha
+    // byte 100, 50, 50, 30, 20). Collapsing the sheet to UV rects alone drew every element at
+    // one brightness.
+    #[test]
+    fn lens_flare_captures_each_meshs_vertex_colour_and_half_extent() {
+        let mut b = header(2, true, "lf0a", "flar");
+        let mut core = vec![0u8; 4];
+        core[0..2].copy_from_slice(&1u16.to_le_bytes());
+        core[2] = 1;
+        core.extend_from_slice(&0.0f32.to_le_bytes());
+        core.extend_from_slice(&[0u8; 12]);
+        core.extend(colored_quad(0.0, 0.0, 0.5, 0.5, [128, 128, 128, 100], 4.0));
+        let mut ghost = vec![0u8; 4];
+        ghost[0..2].copy_from_slice(&1u16.to_le_bytes());
+        ghost[2] = 1;
+        ghost.extend_from_slice(&0.5f32.to_le_bytes());
+        ghost.extend_from_slice(&[0u8; 12]);
+        ghost.extend(colored_quad(0.5, 0.5, 1.0, 1.0, [128, 128, 128, 20], 1.0));
+        b.extend(core);
+        b.extend(ghost);
+
+        let m = parse_frames_offsets(&b).unwrap();
+        assert_eq!(m.colors, vec![[128, 128, 128, 100], [128, 128, 128, 20]]);
+        assert_eq!(m.half_extents, vec![[4.0, 4.0], [1.0, 1.0]]);
     }
 
     // A single-quad mesh with distinct per-vertex positions/uvs so the particle parser's

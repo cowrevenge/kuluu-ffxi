@@ -20,20 +20,35 @@
 #import bevy_pbr::forward_io::VertexOutput
 #import bevy_pbr::mesh_view_bindings::view
 
-const MAX_FLARE_ELEMENTS: u32 = 16u;
+const MAX_FLARE_ELEMENTS: u32 = 32u;
 
 struct LensFlareUniform {
-    // xyz = normalized world-space sun direction, w = intensity [0,1].
-    sun_dir_intensity: vec4<f32>,
-    // rgb = flare tint, a = unused.
-    tint: vec4<f32>,
+    // xyz = normalized world-space sun direction, w unused.
+    sun_dir: vec4<f32>,
+    // Stage-1 TEXTUREFACTOR F (the lf0x particle's colour in retail).
+    texture_factor: vec4<f32>,
     // x = element count, yz unused, w = sun visibility [0,1] (CPU BVH raycast).
     flare_params: vec4<f32>,
-    // x = per-element offset fraction along sun->opposite.
-    offsets: array<vec4<f32>, 16>,
+    // x = per-element offset fraction along sun->opposite; yz = half-size in screen-UV.
+    offsets: array<vec4<f32>, 32>,
     // (u0,v0,u1,v1) sub-rect of each element in the lf0x texture.
-    frame_uv: array<vec4<f32>, 16>,
+    frame_uv: array<vec4<f32>, 32>,
+    // Stage-0 D: each element's authored vertex colour, already /128.
+    element_color: array<vec4<f32>, 32>,
 };
+
+// research/XIClient/src/XIClient/source/Resource/Derived/CMoD3m.cpp:16-104, the same texture-stage
+// table particle_sim::d3m_stage_chain follows: stage 0 is MODULATE2X(D,T) — already folded into D
+// by the /128 vertex-colour normalise — and stage 1 is MODULATE2X(CURRENT,F) for rgb,
+// MODULATE4X(CURRENT,F) for alpha. research/xim gl/XimLensFlareShader.kt reaches the identical
+// 4x/8x totals off /255 colours, and gl/GLDrawer.kt:808 blends them SRC_ALPHA + ONE.
+const STAGE1_RGB_GAIN: f32 = 2.0;
+const STAGE1_ALPHA_GAIN: f32 = 4.0;
+
+// Screen-centre distance (aspect-corrected, so 0.5 is the top/bottom edge) at which the flare
+// starts and finishes fading out as the sun leaves the frame.
+const EDGE_FADE_START: f32 = 0.5;
+const EDGE_FADE_END: f32 = 0.75;
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(0) var<uniform> data: LensFlareUniform;
 @group(#{MATERIAL_BIND_GROUP}) @binding(1) var flare_tex: texture_2d<f32>;
@@ -53,13 +68,8 @@ fn fully_transparent() -> vec4<f32> {
 
 @fragment
 fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
-    let intensity = data.sun_dir_intensity.w;
-    if (intensity <= 0.0) {
-        return fully_transparent();
-    }
-
     // --- Project the sun to screen space against the live view matrix. ---
-    let sun_dir = data.sun_dir_intensity.xyz;
+    let sun_dir = data.sun_dir.xyz;
     let sun_world = view.world_position + sun_dir * SUN_SKY_RADIUS;
     let sun_clip = view.clip_from_world * vec4<f32>(sun_world, 1.0);
     if (sun_clip.w <= 0.0) {
@@ -82,7 +92,7 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     // screen position, matching the projected `sun` regardless of overscan.
     let uv = (in.position.xy - view.viewport.xy) / max(view.viewport.zw, vec2<f32>(1.0));
     let centre = vec2<f32>(0.5, 0.5);
-    let tint = data.tint.rgb;
+    let factor = data.texture_factor;
 
     var col = vec3<f32>(0.0);
 
@@ -110,11 +120,26 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
         let f = data.frame_uv[i];
         let suv = vec2<f32>(mix(f.x, f.z, quad_uv.x), mix(f.y, f.w, quad_uv.y));
         let texel = textureSample(flare_tex, flare_samp, suv);
-        col += tint * texel.rgb * texel.a * inside;
+        // The stage chain, saturating after the texel multiply the way D3D saturates each
+        // stage. The element's own vertex alpha is what ramps the chain from a blown-out core
+        // to the faint ghosts, and SRC_ALPHA+ONE is why it multiplies the added light.
+        let d = min(data.element_color[i], vec4<f32>(1.0));
+        let stage1 = clamp(
+            vec4<f32>(
+                d.rgb * texel.rgb * factor.rgb * STAGE1_RGB_GAIN,
+                d.a * texel.a * factor.a * STAGE1_ALPHA_GAIN,
+            ),
+            vec4<f32>(0.0),
+            vec4<f32>(1.0),
+        );
+        col += stage1.rgb * stage1.a * inside;
     }
 
-    // Fade toward the screen edges — a real flare is strongest with the sun framed,
-    // washing out as it leaves view. Premultiplied additive: rgb is the light to add.
-    let edge = 1.0 - smoothstep(0.35, 0.75, length((sun - centre) * vec2<f32>(aspect, 1.0)));
-    return vec4<f32>(col * intensity * visibility * edge, 0.0);
+    // Retail gates the chain on an occlusion query against a fixed screen-space quad at the
+    // sun, so it dies as the sun leaves the frame; `visibility` is the terrain half of that
+    // (a BVH raycast), and this is the framing half — full strength while the sun is on
+    // screen, gone shortly after it exits.
+    let edge = 1.0 - smoothstep(EDGE_FADE_START, EDGE_FADE_END,
+        length((sun - centre) * vec2<f32>(aspect, 1.0)));
+    return vec4<f32>(col * visibility * edge, 0.0);
 }

@@ -23,7 +23,12 @@ pub struct MoonDisc;
 pub const SKY_RADIUS: f32 = 4000.0;
 
 const SUN_DISC_RADIUS: f32 = 120.0;
-const MOON_DISC_RADIUS: f32 = 350.0;
+
+/// Edge length of the moon billboard at [`SKY_RADIUS`], sized to subtend retail's angle: the
+/// `moon` generator's sprite quad measures 3.94 units and its init scale is 20 (dat-celestial-probe,
+/// file 201), so retail's moon is 78.8 units across at the 900-unit celestial distance — 5.0°,
+/// which is 350 units across at our 4000.
+const MOON_DISC_EDGE: f32 = 350.0;
 
 // The sun disc is authored HDR-overbright so it clears the bloom threshold with
 // headroom; uncapped its ~22x peak blows the disc out to a solid white blob.
@@ -288,7 +293,7 @@ pub fn spawn_sun_and_moon(
         MoonDisc,
         Mesh3d(moon_quad),
         MeshMaterial3d(moon_mat.clone()),
-        Transform::from_scale(Vec3::splat(MOON_DISC_RADIUS * 2.0)),
+        Transform::from_scale(Vec3::splat(MOON_DISC_EDGE)),
         Visibility::Hidden,
         NotShadowCaster,
         NotShadowReceiver,
@@ -322,6 +327,17 @@ pub fn sun_color_for_hour(hour: f32, sun_altitude: f32) -> (Color, f32) {
 
     let lux = 1500.0 + 8500.0 * elev;
     (Color::srgb(r, g, b), lux)
+}
+
+/// Turn a celestial billboard's quad face toward the camera.
+///
+/// `Rectangle`'s only face is its +Z side (`bevy_mesh` dim2.rs: normals `[0,0,1]`, CCW from
+/// +Z), and a `Material` impl has no cull-mode hook — `render/mesh.rs` pins `cull_mode:
+/// Some(Face::Back)` for every one. `look_at(cam)` aims the quad's FORWARD (-Z) at the
+/// camera, which shows it its back face and culls it away; the direction has to be the one
+/// pointing away from the camera so +Z lands on the viewer.
+fn face_camera(disc: &mut Transform, cam_pos: Vec3) {
+    disc.look_to(disc.translation - cam_pos, Vec3::Y);
 }
 
 // DAT-space (FFXI, Y-down/Z-flipped) direction -> Bevy, same axis mapping as
@@ -811,7 +827,7 @@ pub fn sun_moon_system(
         }
         if sun_sprite_tex.is_some() {
             disc.scale = Vec3::splat(SUN_DISC_RADIUS * 2.0);
-            disc.look_at(cam_pos, Vec3::Y);
+            face_camera(&mut disc, cam_pos);
         } else {
             disc.scale = Vec3::splat(SUN_DISC_RADIUS);
         }
@@ -828,8 +844,8 @@ pub fn sun_moon_system(
     let disc_count = q_moon_disc.iter().count();
     for (mut disc, mut vis) in q_moon_disc.iter_mut() {
         disc.translation = moon_world;
-        disc.scale = Vec3::splat(MOON_DISC_RADIUS * 2.0);
-        disc.look_at(cam_pos, Vec3::Y);
+        disc.scale = Vec3::splat(MOON_DISC_EDGE);
+        face_camera(&mut disc, cam_pos);
         *vis = if disc_shown {
             Visibility::Inherited
         } else {
@@ -969,6 +985,24 @@ mod tests {
         assert!((model_light_mix(1080) - 0.5).abs() < 1e-5);
         assert_eq!(model_light_mix(1085), 0.0);
         assert_eq!(model_light_mix(1200), 0.0);
+    }
+
+    // The celestial discs are single-sided `Rectangle` quads under an unconditional
+    // `cull_mode: Some(Face::Back)`, so an orientation that lands the quad's -Z on the viewer
+    // draws nothing at all. Assert the face normal, not just "some rotation happened".
+    #[test]
+    fn a_billboard_shows_its_textured_face_to_the_camera() {
+        let cam = Vec3::new(120.0, 30.0, -45.0);
+        for dir in [Vec3::Y, Vec3::X, Vec3::NEG_Z, Vec3::new(0.6, 0.7, -0.4)] {
+            let mut disc = Transform::from_translation(cam + dir.normalize() * SKY_RADIUS);
+            face_camera(&mut disc, cam);
+            let to_cam = (cam - disc.translation).normalize();
+            let quad_normal = disc.rotation * Vec3::Z;
+            assert!(
+                quad_normal.dot(to_cam) > 0.999,
+                "quad normal {quad_normal} faces away from the camera ({to_cam})"
+            );
+        }
     }
 
     #[test]

@@ -7,9 +7,10 @@ use bevy::shader::ShaderRef;
 use crate::components::InGameEntity;
 use crate::sun_moon::VanaSky;
 
-// Max lf0x flare elements packed into the uniform chain. Real lens-flare sheets
-// carry only a handful of meshes; extra slots stay inert (count gates them).
-pub const MAX_FLARE_ELEMENTS: usize = 16;
+// Max lf0x flare elements packed into the uniform chain. The longest retail chain measured
+// across the zone DATs is 26 meshes (lf03, file 201), so 32 covers every shipped sheet with
+// headroom; extra slots stay inert (count gates them).
+pub const MAX_FLARE_ELEMENTS: usize = 32;
 
 // research/xim ZoneDrawer.kt:231 `scale = Vector3f(width/32, height/32, 1)` — a flare
 // mesh's local units are screen fractions of 1/32, so a quad spanning 32 units covers the
@@ -20,10 +21,14 @@ const LENS_FLARE_SCREEN_UNITS: f32 = 32.0;
 #[derive(Clone, Debug, ShaderType)]
 pub struct LensFlareUniform {
     // xyz = normalized world-space sun direction (projected to screen in the
-    // shader against the render-frame view matrix — no CPU frame lag), w = intensity.
-    pub sun_dir_intensity: Vec4,
+    // shader against the render-frame view matrix — no CPU frame lag), w unused.
+    pub sun_dir: Vec4,
 
-    pub tint: Vec4,
+    /// The stage-1 TEXTUREFACTOR F. In retail this is the lf0x particle's own colour
+    /// (research/xim ZoneDrawer.kt:238 `effectColor = effect.textureFactor`), which the
+    /// generator's time-of-day curves drive; until those generators run (kuluu-b98u) the
+    /// neutral F is the honest stand-in, leaving the sheet's own colours in charge.
+    pub texture_factor: Vec4,
 
     // x = element count, yz unused, w = sun visibility [0,1] from SunOcclusion.
     pub flare_params: Vec4,
@@ -34,16 +39,22 @@ pub struct LensFlareUniform {
 
     // Per-element UV sub-rect (u0,v0,u1,v1) into the lf0x texture.
     pub frame_uv: [Vec4; MAX_FLARE_ELEMENTS],
+
+    /// Per-element stage-0 D: the mesh's authored vertex colour over
+    /// [`ffxi_dat::d3m::VERTEX_COLOR_DIVISOR`], which is where the chain's core/halo/ghost
+    /// intensity ramp lives.
+    pub element_color: [Vec4; MAX_FLARE_ELEMENTS],
 }
 
 impl Default for LensFlareUniform {
     fn default() -> Self {
         Self {
-            sun_dir_intensity: Vec4::new(0.0, 1.0, 0.0, 0.0),
-            tint: Vec4::new(1.0, 0.95, 0.85, 1.0),
+            sun_dir: Vec4::new(0.0, 1.0, 0.0, 0.0),
+            texture_factor: Vec4::ONE,
             flare_params: Vec4::ZERO,
             offsets: [Vec4::ZERO; MAX_FLARE_ELEMENTS],
             frame_uv: [Vec4::new(0.0, 0.0, 1.0, 1.0); MAX_FLARE_ELEMENTS],
+            element_color: [Vec4::ONE; MAX_FLARE_ELEMENTS],
         }
     }
 }
@@ -78,6 +89,14 @@ impl Default for SunOcclusion {
 pub struct LensFlareSheet {
     pub offsets: Vec<f32>,
     pub frames: Vec<Vec4>,
+}
+
+// One drawable element of the chain, in the units the shader consumes.
+struct FlareElement {
+    offset: f32,
+    half: Vec2,
+    frame_uv: Vec4,
+    color: Vec4,
 }
 
 impl Material for LensFlareMaterial {
@@ -164,9 +183,6 @@ pub fn lens_flare_system(
     // against the live view matrix, so the flare can't lag the camera.
     let sun_dir = crate::sun_moon::sun_direction(sky.hour);
 
-    let elev = (sky.sun_altitude / std::f32::consts::FRAC_PI_2).clamp(0.0, 1.0);
-    let intensity = 0.55 + 0.45 * elev;
-
     let fov_y = match proj {
         Projection::Perspective(p) => p.fov,
         _ => std::f32::consts::FRAC_PI_3,
@@ -181,7 +197,7 @@ pub fn lens_flare_system(
     *vis = Visibility::Inherited;
 
     if let Some(mut mat) = mats.get_mut(&flare_mat.0) {
-        mat.data.sun_dir_intensity = sun_dir.extend(intensity);
+        mat.data.sun_dir = sun_dir.extend(0.0);
         mat.data.flare_params.w = occlusion.visibility;
     }
 }
@@ -227,18 +243,42 @@ fn load_lens_flare_sheet(
         return;
     };
 
-    let n = sheet.offsets.len().min(MAX_FLARE_ELEMENTS);
-    let offsets: Vec<f32> = sheet.offsets[..n].to_vec();
-    let half_extents: Vec<Vec2> = sheet.half_extents[..n]
+    // Retail multiplies each element's quad by the screen-derived draw scale, so a mesh with
+    // no extent covers no pixels — the shipped chains are padded with them (20 of lf03's 26).
+    // Dropping them here keeps the shader's `(uv - pos) / half` off a division by zero.
+    let drawable: Vec<FlareElement> = sheet
+        .offsets
         .iter()
-        .map(|h| Vec2::from_array(*h) / LENS_FLARE_SCREEN_UNITS)
+        .zip(sheet.half_extents.iter())
+        .zip(sheet.frames.iter().zip(sheet.colors.iter()))
+        .filter_map(|((offset, half), (frame, color))| {
+            let half = Vec2::from_array(*half) / LENS_FLARE_SCREEN_UNITS;
+            (half.x > 0.0 && half.y > 0.0).then(|| FlareElement {
+                offset: *offset,
+                half,
+                frame_uv: Vec4::new(frame.u0, frame.v0, frame.u1, frame.v1),
+                color: Vec4::new(
+                    color[0] as f32,
+                    color[1] as f32,
+                    color[2] as f32,
+                    color[3] as f32,
+                ) / ffxi_dat::d3m::VERTEX_COLOR_DIVISOR,
+            })
+        })
         .collect();
-    let frames: Vec<Vec4> = sheet.frames[..n]
-        .iter()
-        .map(|f| Vec4::new(f.u0, f.v0, f.u1, f.v1))
-        .collect();
+    if drawable.len() > MAX_FLARE_ELEMENTS {
+        warn!(
+            elements = drawable.len(),
+            cap = MAX_FLARE_ELEMENTS,
+            "lens flare: chain truncated"
+        );
+    }
+    let n = drawable.len().min(MAX_FLARE_ELEMENTS);
 
-    let image = Image::new(
+    // No ffxi_alpha_remap here, unlike the moon sheet: the stage-1 MODULATE4X below is retail's
+    // own compensation for the half-range alpha convention (lf03 peaks at 0x80, and
+    // 4 x 0.78 x 0.5 saturates the core exactly), so remapping first would double it.
+    let mut image = Image::new(
         Extent3d {
             width: sheet.texture.width,
             height: sheet.texture.height,
@@ -249,22 +289,28 @@ fn load_lens_flare_sheet(
         TextureFormat::Rgba8UnormSrgb,
         RenderAssetUsages::default(),
     );
-    let mut image = image;
     image.sampler = ImageSampler::linear();
     let handle = images.add(image);
 
     *sheet_res = LensFlareSheet {
-        offsets: offsets.clone(),
-        frames: frames.clone(),
+        offsets: drawable[..n].iter().map(|e| e.offset).collect(),
+        frames: drawable[..n].iter().map(|e| e.frame_uv).collect(),
     };
+
+    info!(
+        elements = n,
+        authored = sheet.offsets.len(),
+        tex = format!("{}×{}", sheet.texture.width, sheet.texture.height),
+        "lens flare: loaded zone lf0x sheet"
+    );
 
     if let Some(mut mat) = mat {
         mat.flare_tex = Some(handle);
         mat.data.flare_params.x = n as f32;
-        for i in 0..n {
-            let half = half_extents[i];
-            mat.data.offsets[i] = Vec4::new(offsets[i], half.x, half.y, 0.0);
-            mat.data.frame_uv[i] = frames[i];
+        for (i, e) in drawable[..n].iter().enumerate() {
+            mat.data.offsets[i] = Vec4::new(e.offset, e.half.x, e.half.y, 0.0);
+            mat.data.frame_uv[i] = e.frame_uv;
+            mat.data.element_color[i] = e.color;
         }
     }
 }

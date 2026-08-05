@@ -148,14 +148,14 @@ fn visit(node: &ChunkNode<'_>, path: &mut Vec<String>, bytes: &[u8], hits: &mut 
         if let Some(t) = def.day_of_week_color {
             let cols: Vec<String> = t
                 .iter()
-                .map(|c| format!("({:.2},{:.2},{:.2})", c[0], c[1], c[2]))
+                .map(|c| format!("({:.2},{:.2},{:.2},a{:.2})", c[0], c[1], c[2], c[3]))
                 .collect();
             println!("        0x4E dow  {}", cols.join(" "));
         }
         if let Some(t) = def.moon_phase_color {
             let cols: Vec<String> = t
                 .iter()
-                .map(|c| format!("({:.2},{:.2},{:.2})", c[0], c[1], c[2]))
+                .map(|c| format!("({:.2},{:.2},{:.2},a{:.2})", c[0], c[1], c[2], c[3]))
                 .collect();
             println!("        0x4F phase {}", cols.join(" "));
         }

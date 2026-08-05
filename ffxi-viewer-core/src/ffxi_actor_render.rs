@@ -2495,12 +2495,17 @@ fn saddle_joint_index(race: u8) -> Option<usize> {
         .then(|| SADDLE_JOINT_BASE + usize::from(race - 1))
 }
 
-/// Skeleton space is Y-down, so the seat sits 1.3 yalms *above* the mount's feet.
-/// Retail hard-codes the height for a chocobo rather than reading a joint —
-/// research/XIClient .../World/Actor/SkeletalMeshActor.cpp,
-/// `SkeletalMeshActor::GetElem` (the `IsOnChocobo` branch) — which is why the
-/// chocobo race skeletons leave the whole per-race saddle block unset.
-const CHOCOBO_SEAT_HEIGHT: f32 = -1.3;
+// A chocobo's seat is a flat height, not a joint: its race skeletons leave the
+// whole per-race saddle block (standard joints 48..) pointing at joint 0 with a
+// zero offset, so there is nothing to look up. Retail hard-codes the height too
+// — research/XIClient .../World/Actor/SkeletalMeshActor.cpp,
+// `SkeletalMeshActor::GetElem`, whose `IsOnChocobo` branch is a flat 1.3 — but
+// it anchors the actor root, where we anchor the rider's hip joint, so the
+// magnitude does not transplant. This one is calibrated against retail footage
+// (Rolanberry Fields, 2026-08-04): the rider's belt clears the back and the boot
+// falls level with the chocobo's knee. Skeleton space is Y-down, so up is
+// negative.
+const CHOCOBO_SEAT_HEIGHT: f32 = -1.6;
 
 /// The nudge xim applies on top of a joint-derived seat, marked in its source as
 /// an unexplained fudge (research/xim resource/SkeletonInstance.kt,
@@ -3501,6 +3506,38 @@ mod pose_resolution_tests {
         let black = chocobo_race_for_colour(ffxi_viewer_wire::ChocoboColour::Black);
         assert_ne!(race, black);
         assert!(load_mount_race(black).is_ok(), "black chocobo race config");
+    }
+
+    /// The reason `mount_seat_local` special-cases a chocobo: its race skeleton
+    /// leaves every per-race saddle joint pointing at joint 0 with a zero offset,
+    /// so the joint lookup other mounts use resolves to the ground and drops the
+    /// rider through the floor. Self-skips without a retail install.
+    #[test]
+    fn chocobo_race_skeletons_define_no_saddle_joints() {
+        if DatRoot::from_env_or_default().is_err() {
+            return;
+        }
+        let race = chocobo_race_for_colour(ffxi_viewer_wire::ChocoboColour::Yellow);
+        let actor = load_mount_race(race).expect("yellow chocobo race config");
+        let pose = pose_world(
+            &actor.skeleton,
+            |_| None,
+            ffxi_actor::skeleton_instance::RootTransform::identity(),
+            &[],
+        );
+        for rider_race in 1..=8u8 {
+            let joint = saddle_joint_index(rider_race).expect("playable race");
+            assert_eq!(
+                standard_joint_world_position(&pose, &actor.skeleton, joint),
+                Some(Vec3::ZERO),
+                "std {joint} is unexpectedly a real saddle joint; the flat \
+                 CHOCOBO_SEAT_HEIGHT would then be masking real data"
+            );
+            assert_eq!(
+                mount_seat_local(&pose, &actor.skeleton, rider_race, true),
+                Some(Vec3::new(0.0, CHOCOBO_SEAT_HEIGHT, 0.0)),
+            );
+        }
     }
 
     /// The rider's seat clips live in a DAT that is only loaded while mounted.

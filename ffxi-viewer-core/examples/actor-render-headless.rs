@@ -1,9 +1,11 @@
 use bevy::app::AppExit;
 use bevy::prelude::*;
 use bevy::render::view::screenshot::{save_to_disk, Capturing, Screenshot};
+use ffxi_actor::skeleton_instance::MountAttach;
 use ffxi_viewer_core::ffxi_actor_render::{
-    inputs_for_pose, load_npc, load_pc, spawn_loaded_actor, tick_ffxi_render_actors,
-    FfxiRenderActor, PoseState, FRAME_RATE,
+    advance_actor_pose_standalone, inputs_for_pose, load_mount_race, load_npc, load_pc,
+    mount_seat_local, spawn_loaded_actor, tick_ffxi_render_actors, FfxiRenderActor, PoseState,
+    FRAME_RATE,
 };
 use ffxi_viewer_core::skinned_ffxi_material::{
     FfxiMaterialPlugin, FfxiSkinRegistry, FfxiSkinnedMaterial, FfxiSkinnedMaterialCache,
@@ -15,6 +17,16 @@ enum Subject {
     Npc(u32),
     Pc(u8, Vec<u32>),
 }
+
+/// Marks the rider of the `--mount` pair; the mount actor carries `MountActor`.
+#[derive(Component)]
+struct Rider {
+    race: u8,
+    chocobo: bool,
+}
+
+#[derive(Component)]
+struct MountActor;
 
 #[derive(Resource, Clone)]
 struct Params {
@@ -37,7 +49,18 @@ struct Params {
     realistic: bool,
 
     shadowtest: bool,
+
+    mount_race: Option<u8>,
+
+    /// Skeleton-space seat override for calibrating against retail footage;
+    /// skeleton Y is down, so a more negative value seats the rider higher.
+    seat: Option<f32>,
 }
+
+/// Off-screen render target; `Screenshot::primary_window()` returns black on
+/// macOS when the window is never presented, so we capture this image instead.
+#[derive(Resource)]
+struct CapTarget(Handle<Image>);
 
 #[derive(Resource, Default)]
 struct FrameCount(u32);
@@ -75,6 +98,7 @@ fn main() {
                 set_inputs,
                 apply_realistic_flag,
                 tick_ffxi_render_actors,
+                pose_rider_on_mount,
                 capture,
             )
                 .chain(),
@@ -97,6 +121,8 @@ fn parse_params(args: &[String]) -> Params {
     let mut autoframe = false;
     let mut realistic = false;
     let mut shadowtest = false;
+    let mut mount_race = None;
+    let mut seat = None;
 
     let mut i = 1;
     while i < args.len() {
@@ -173,6 +199,14 @@ fn parse_params(args: &[String]) -> Params {
                 realistic = true;
                 i += 1;
             }
+            "--mount" => {
+                mount_race = args.get(i + 1).and_then(|s| s.parse().ok());
+                i += 2;
+            }
+            "--seat" => {
+                seat = args.get(i + 1).and_then(|s| s.parse().ok());
+                i += 2;
+            }
             "--shadowtest" => {
                 shadowtest = true;
                 ground = true;
@@ -197,6 +231,8 @@ fn parse_params(args: &[String]) -> Params {
         autoframe,
         realistic,
         shadowtest,
+        mount_race,
+        seat,
     }
 }
 
@@ -204,13 +240,34 @@ fn setup_scene(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut std_materials: ResMut<Assets<StandardMaterial>>,
+    mut images: ResMut<Assets<Image>>,
     params: Res<Params>,
 ) {
     let look_y = params.cam_height;
     let d = params.cam_dist;
 
+    // Off-screen render target (see CapTarget).
+    let size = bevy::render::render_resource::Extent3d {
+        width: 900,
+        height: 1100,
+        depth_or_array_layers: 1,
+    };
+    let mut target = Image::new_fill(
+        size,
+        bevy::render::render_resource::TextureDimension::D2,
+        &[0, 0, 0, 255],
+        bevy::render::render_resource::TextureFormat::Rgba8UnormSrgb,
+        bevy::asset::RenderAssetUsages::default(),
+    );
+    target.texture_descriptor.usage = bevy::render::render_resource::TextureUsages::TEXTURE_BINDING
+        | bevy::render::render_resource::TextureUsages::COPY_SRC
+        | bevy::render::render_resource::TextureUsages::RENDER_ATTACHMENT;
+    let target = images.add(target);
+    commands.insert_resource(CapTarget(target.clone()));
+
     commands.spawn((
         Camera3d::default(),
+        bevy::camera::RenderTarget::Image(target.into()),
         Transform::from_xyz(d * 0.45, look_y + d * 0.25, d)
             .looking_at(Vec3::new(0.0, look_y, 0.0), Vec3::Y),
     ));
@@ -270,6 +327,23 @@ fn spawn_subject(
     mut images: ResMut<Assets<Image>>,
     params: Res<Params>,
 ) {
+    if let (Some(mount_race), Subject::Pc(rider_race, equip)) = (params.mount_race, &params.subject)
+    {
+        spawn_mounted_pair(
+            &mut commands,
+            &mut meshes,
+            &mut materials,
+            &mut material_cache,
+            &mut registry,
+            &mut images,
+            &params,
+            *rider_race,
+            equip,
+            mount_race,
+        );
+        return;
+    }
+
     let loaded = match &params.subject {
         Subject::Npc(id) => load_npc(*id),
         Subject::Pc(race, equip) => load_pc(*race, false, equip, None, None, None),
@@ -309,6 +383,106 @@ fn spawn_subject(
     }
 }
 
+/// Retail's ridden chocobos are PC race configs (32..=36), everything else in the
+/// mount block is an NPC model — so a chocobo pair is the only one this harness
+/// builds from `load_mount_race`.
+const CHOCOBO_RACES: std::ops::RangeInclusive<u8> = 32..=36;
+
+#[allow(clippy::too_many_arguments)]
+fn spawn_mounted_pair(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<FfxiSkinnedMaterial>,
+    material_cache: &mut FfxiSkinnedMaterialCache,
+    registry: &mut FfxiSkinRegistry,
+    images: &mut Assets<Image>,
+    params: &Params,
+    rider_race: u8,
+    equip: &[u32],
+    mount_race: u8,
+) {
+    let quality = ffxi_viewer_core::zone_texture::TextureQuality {
+        mipmaps: true,
+        anisotropy: 8,
+    };
+    let chocobo = CHOCOBO_RACES.contains(&mount_race);
+
+    let mount = match load_mount_race(mount_race) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("load_mount_race({mount_race}) failed: {e}");
+            return;
+        }
+    };
+    let rider = match load_pc(rider_race, true, equip, None, None, None) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("load_pc({rider_race}, mounted) failed: {e}");
+            return;
+        }
+    };
+
+    if let Some((min, max)) = mount.bind_pose_bounds(params.yaw, params.scale) {
+        commands.insert_resource(SubjectBounds { min, max });
+    }
+
+    for (loaded, tag) in [(&mount, true), (&rider, false)] {
+        let entity = spawn_loaded_actor(
+            commands,
+            meshes,
+            materials,
+            material_cache,
+            registry,
+            images,
+            loaded,
+            Vec3::ZERO,
+            params.yaw,
+            params.scale,
+            quality,
+        );
+        if tag {
+            commands.entity(entity).insert(MountActor);
+        } else {
+            commands.entity(entity).insert(Rider {
+                race: rider_race,
+                chocobo,
+            });
+        }
+    }
+}
+
+/// Re-poses the rider with the seat the mount's own pose defines, mirroring what
+/// `tick_live_ffxi_actors` does for the live path.
+fn pose_rider_on_mount(
+    time: Res<Time>,
+    params: Res<Params>,
+    mut registry: ResMut<FfxiSkinRegistry>,
+    q_mount: Query<&FfxiRenderActor, (With<MountActor>, Without<Rider>)>,
+    mut q_rider: Query<(&mut FfxiRenderActor, &Rider), Without<MountActor>>,
+) {
+    let Ok(mount) = q_mount.single() else { return };
+    for (mut rider, tag) in &mut q_rider {
+        let Some(seat) = params.seat.map(|y| Vec3::new(0.0, y, 0.0)).or_else(|| {
+            mount_seat_local(mount.world_pose(), &mount.skeleton, tag.race, tag.chocobo)
+        }) else {
+            continue;
+        };
+        advance_actor_pose_standalone(
+            &mut rider,
+            time.delta_secs() * FRAME_RATE,
+            Some(MountAttach {
+                mount_joint_world: seat,
+                facing_dir: 0.0,
+                rider_rotation: 0.0,
+            }),
+        );
+        registry
+            .skin_mut(rider.skin_slot())
+            .joints
+            .set_from(rider.world_pose());
+    }
+}
+
 fn reframe_camera(
     mut commands: Commands,
     params: Res<Params>,
@@ -334,10 +508,16 @@ fn reframe_camera(
     commands.remove_resource::<SubjectBounds>();
 }
 
-fn set_inputs(params: Res<Params>, mut q: Query<&mut FfxiRenderActor>) {
+fn set_inputs(
+    params: Res<Params>,
+    mut q: Query<(&mut FfxiRenderActor, Has<Rider>, Has<MountActor>)>,
+) {
     let inputs = inputs_for_pose(params.pose, params.engaged);
-    for mut actor in &mut q {
+    for (mut actor, rider, mount) in &mut q {
         actor.inputs = inputs;
+        // Both halves of a mounted pair pose from `chi?`: the mount its carrying
+        // pose, the rider the matching seat.
+        actor.inputs.mount_or_chocobo = rider || mount;
     }
 }
 
@@ -350,6 +530,7 @@ fn apply_realistic_flag(params: Res<Params>, mut registry: ResMut<FfxiSkinRegist
     });
 }
 
+#[allow(clippy::too_many_arguments)]
 fn capture(
     mut commands: Commands,
     mut fc: ResMut<FrameCount>,
@@ -357,6 +538,7 @@ fn capture(
     params: Res<Params>,
     q_cap: Query<Entity, With<Capturing>>,
     q_actor: Query<&FfxiRenderActor>,
+    target: Res<CapTarget>,
     mut exit: MessageWriter<AppExit>,
 ) {
     fc.0 += 1;
@@ -368,7 +550,7 @@ fn capture(
 
     if !shot.0 && fc.0 >= params.cap && near_target {
         commands
-            .spawn(Screenshot::primary_window())
+            .spawn(Screenshot::image(target.0.clone()))
             .observe(save_to_disk(params.out.clone()));
         shot.0 = true;
         let joints = q_actor
@@ -393,7 +575,7 @@ fn capture(
 
     if !shot.0 && fc.0 >= params.cap + (FRAME_RATE as u32) * 20 {
         commands
-            .spawn(Screenshot::primary_window())
+            .spawn(Screenshot::image(target.0.clone()))
             .observe(save_to_disk(params.out.clone()));
         shot.0 = true;
     }

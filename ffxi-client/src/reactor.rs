@@ -972,12 +972,8 @@ impl Reactor {
         let Some(pos) = self.state.self_position() else {
             return self.cfg.max_step_per_tick;
         };
-        if pos.speed == 0 {
-            return 0.0;
-        }
-        let base = pos.speed_base.max(1) as f32;
-        let ratio = (pos.speed as f32 / base).min(2.0);
-        self.cfg.max_step_per_tick * ratio
+        self.cfg.max_step_per_tick
+            * crate::state::move_speed_ratio(pos.speed, self.state.self_mounted())
     }
 
     fn face_entity(&self, target_id: u32) -> Option<AgentCommand> {
@@ -1331,7 +1327,16 @@ mod tests {
         act_index: u16,
         bt_target_id: u32,
     ) -> AgentEvent {
-        upsert_with_speed(id, pos, hp_pct, kind, act_index, bt_target_id, 40, 40)
+        upsert_with_speed(
+            id,
+            pos,
+            hp_pct,
+            kind,
+            act_index,
+            bt_target_id,
+            crate::state::BASE_PACKET_SPEED,
+            crate::state::BASE_PACKET_SPEED,
+        )
     }
 
     fn upsert_with_speed(
@@ -3150,11 +3155,9 @@ mod tests {
         assert!(matches!(r.goal, Goal::Pathing { .. }));
     }
 
-    #[test]
-    fn pathing_scales_step_by_server_speed_ratio() {
+    fn step_for(speed: u8, mounted: bool) -> f32 {
         let mut r = Reactor::new(step_test_cfg());
         r.observe_event(&connected(1));
-
         r.observe_event(&upsert_with_speed(
             1,
             Vec3::default(),
@@ -3162,57 +3165,50 @@ mod tests {
             EntityKind::Pc,
             1,
             0,
-            20,
+            speed,
             40,
         ));
+        if mounted {
+            r.observe_event(&AgentEvent::SelfServerStatus {
+                status: ffxi_proto::decode::animation::CHOCOBO,
+                mount_id: 0,
+            });
+        }
         r.handle_command(AgentCommand::PathTo {
-            x: 10.0,
+            x: 100.0,
             y: 0.0,
             z: 0.0,
             force: true,
         });
-        let out = r.tick();
-        match out.commands.as_slice() {
-            [AgentCommand::Move { x, .. }] => {
-                assert!(
-                    (x - 0.5).abs() < 1e-4,
-                    "expected step x=0.5 (half of base 1.0), got {x}"
-                );
-            }
+        match r.tick().commands.as_slice() {
+            [AgentCommand::Move { x, .. }] => *x,
             other => panic!("expected single scaled Move, got {other:?}"),
         }
     }
 
     #[test]
-    fn pathing_step_caps_at_2x_base_against_weird_server_values() {
-        let mut r = Reactor::new(step_test_cfg());
-        r.observe_event(&connected(1));
-        r.observe_event(&upsert_with_speed(
-            1,
-            Vec3::default(),
-            100,
-            EntityKind::Pc,
-            1,
-            0,
-            200,
-            40,
-        ));
-        r.handle_command(AgentCommand::PathTo {
-            x: 10.0,
-            y: 0.0,
-            z: 0.0,
-            force: true,
-        });
-        let out = r.tick();
-        match out.commands.as_slice() {
-            [AgentCommand::Move { x, .. }] => {
-                assert!(
-                    *x <= 2.0 + 1e-4,
-                    "step must be capped at 2× base (=2.0), got {x}"
-                );
-            }
-            other => panic!("expected capped Move, got {other:?}"),
-        }
+    fn pathing_scales_step_by_the_retail_speed_decode() {
+        // `max_step_per_tick` is the budget at the unmounted BASE_PACKET_SPEED,
+        // so the step is just the ratio of decoded yalms per second.
+        assert!((step_for(50, false) - 1.0).abs() < 1e-4);
+        assert!((step_for(25, false) - 0.5).abs() < 1e-4);
+        assert!((step_for(20, false) - 0.4).abs() < 1e-4);
+    }
+
+    #[test]
+    fn pathing_is_faster_mounted_even_though_the_server_sends_less_speed() {
+        let mounted = step_for(40, true);
+        assert!((mounted - 1.6).abs() < 1e-4, "expected 1.6, got {mounted}");
+        assert!(mounted > step_for(50, false));
+    }
+
+    #[test]
+    fn pathing_step_clamps_at_the_retail_speed_ceiling() {
+        // MAX_MOVE_SPEED_YPS / (BASE_PACKET_SPEED * SPEED_TO_YPS) = 30 / 5.
+        let capped = step_for(u8::MAX, true);
+        assert!((capped - 6.0).abs() < 1e-4, "expected 6.0, got {capped}");
+        // Unmounted a u8 tops out below the ceiling, so it is not clamped.
+        assert!((step_for(u8::MAX, false) - 5.1).abs() < 1e-4);
     }
 
     #[test]

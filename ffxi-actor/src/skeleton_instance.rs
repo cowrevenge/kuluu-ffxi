@@ -269,7 +269,7 @@ fn update_joint(
 fn mount_attach_transform(m: MountAttach) -> JointTransform {
     JointTransform {
         r: Quat::from_rotation_y(m.facing_dir - std::f32::consts::FRAC_PI_2 + m.rider_rotation),
-        t: m.mount_joint_world + Vec3::new(0.0, -0.1, 0.0),
+        t: m.mount_joint_world,
         s: Vec3::ONE,
     }
 }
@@ -646,7 +646,7 @@ mod tests {
         let world = pose_world_mounted(&s, |_| None, RootTransform::identity(), &[], Some(mount));
         let j2 = world[2].transform_point3(Vec3::ZERO);
 
-        assert!(approx(j2, Vec3::new(3.0, 3.9, 5.0), 1e-4), "j2 = {j2}");
+        assert!(approx(j2, Vec3::new(3.0, 4.0, 5.0), 1e-4), "j2 = {j2}");
 
         let j3 = world[3].transform_point3(Vec3::ZERO);
         assert!(

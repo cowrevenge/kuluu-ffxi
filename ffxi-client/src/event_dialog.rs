@@ -353,6 +353,75 @@ pub fn substitute_entity_names(text: String, params: &[i32]) -> String {
     })
 }
 
+/// [`substitute_entity_names`] keeping the substitution boundary, so the item /
+/// key-item name can be coloured apart from the text around it. Retail renders
+/// it as its own green run — the boundary is exactly the substitution slot,
+/// excluding the article before it and the punctuation after
+/// (`.agents/skills/retail-observe/references/treasure-pool-chat.md`).
+pub fn spanned_entity_names(text: &str, params: &[i32]) -> Vec<ffxi_dat::sysmes::Span> {
+    use ffxi_dat::sysmes::{Span, SpanKind};
+
+    const MARKERS: [(&str, SpanKind); 2] = [
+        (MARKER_KEY_ITEM, SpanKind::KeyItem),
+        (MARKER_ITEM, SpanKind::Item),
+    ];
+    let opens: Vec<(String, SpanKind)> = MARKERS
+        .iter()
+        .map(|(m, k)| (format!("{{{m}:"), *k))
+        .collect();
+
+    let mut spans: Vec<Span> = Vec::new();
+    let push_text = |spans: &mut Vec<Span>, text: &str| {
+        if text.is_empty() {
+            return;
+        }
+        match spans.last_mut() {
+            Some(last) if last.kind == SpanKind::Text => last.text.push_str(text),
+            _ => spans.push(Span {
+                text: text.to_string(),
+                kind: SpanKind::Text,
+            }),
+        }
+    };
+
+    let mut rest = text;
+    loop {
+        let next = opens
+            .iter()
+            .filter_map(|(open, kind)| rest.find(open.as_str()).map(|at| (at, open, *kind)))
+            .min_by_key(|(at, _, _)| *at);
+        let Some((at, open, kind)) = next else { break };
+
+        let after_open = &rest[at + open.len()..];
+        let resolved = after_open.find('}').and_then(|end| {
+            let index: usize = after_open[..end].parse().ok()?;
+            let id = u16::try_from(*params.get(index)?).ok()?;
+            let name = match kind {
+                SpanKind::KeyItem => ffxi_proto::key_item_names::lookup(id),
+                _ => ffxi_proto::item_names::lookup(id),
+            }?;
+            Some((name.to_string(), end + 1))
+        });
+
+        push_text(&mut spans, &rest[..at]);
+        match resolved {
+            Some((name, consumed)) => {
+                spans.push(Span { text: name, kind });
+                rest = &after_open[consumed..];
+            }
+            // Unresolvable marker: left verbatim, exactly like the plain
+            // substitution, so a missing name stays visible instead of
+            // silently vanishing.
+            None => {
+                push_text(&mut spans, open);
+                rest = after_open;
+            }
+        }
+    }
+    push_text(&mut spans, rest);
+    spans
+}
+
 fn substitute_param_marker(
     text: String,
     marker: &str,

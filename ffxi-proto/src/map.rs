@@ -442,6 +442,19 @@ pub mod s2c {
     // numeric params; MesNum indexes the zone dialog DAT.
     pub const TALKNUMWORK: u16 = 0x02A;
 
+    // The rest of the TALKNUM family — same zone dialog DAT lookup, different
+    // parameter payloads. LSB routes every fishing line through these
+    // (vendor/server/src/map/utils/fishingutils.cpp).
+    //
+    // GP_SERV_COMMAND_TALKNUM, .../s2c/0x036_talknum.h — bare message id.
+    pub const TALKNUM: u16 = 0x036;
+    // GP_SERV_COMMAND_TALKNUMWORK2, .../s2c/0x027_talknumwork2.h — message id
+    // plus 4+8 numeric params and two string params.
+    pub const TALKNUMWORK2: u16 = 0x027;
+    // GP_SERV_COMMAND_TALKNUMNAME, .../s2c/0x043_talknumname.h — message id
+    // plus a 16-byte name.
+    pub const TALKNUMNAME: u16 = 0x043;
+
     pub const SCENARIO_ITEM: u16 = 0x055;
 
     // vendor/server/src/map/packets/s2c/0x057_weather.h

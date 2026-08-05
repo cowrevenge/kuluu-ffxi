@@ -364,14 +364,14 @@ async fn run_map_session(
 
     let mut mog = SelfMogState::default();
 
-    // s2c 0x02A TALKNUMWORK resolves against the zone dialog DAT owned by the
+    // The TALKNUM family resolves against the zone dialog DAT owned by the
     // keepalive loop's DialogSession, so bodies arriving during the flood are
     // buffered and replayed once it exists — never dropped silently. The cap
     // bounds memory against a misbehaving server; zone onZoneIn lua emits only
     // a handful of messageSpecial lines (e.g.
     // vendor/server/scripts/zones/Attohwa_Chasm/Zone.lua).
-    const FLOOD_TALKNUMWORK_MAX: usize = 32;
-    let mut flood_talknumwork: Vec<Vec<u8>> = Vec::new();
+    const FLOOD_ZONE_MESSAGE_MAX: usize = 32;
+    let mut flood_zone_messages: Vec<(u16, Vec<u8>)> = Vec::new();
     while std::time::Instant::now() < flood_deadline {
         match tokio::time::timeout(std::time::Duration::from_millis(500), map.recv_decrypted())
             .await
@@ -381,11 +381,14 @@ async fn run_map_session(
                 server_last_seq = header.id_and_size;
                 for sub in framing::walk_sub_packets(&buf[framing::FFXI_HEADER_SIZE..]).flatten() {
                     total_subs += 1;
-                    if sub.opcode == ffxi_proto::map::s2c::TALKNUMWORK {
-                        if flood_talknumwork.len() < FLOOD_TALKNUMWORK_MAX {
-                            flood_talknumwork.push(sub.data.to_vec());
+                    if ZONE_MESSAGE_OPCODES.contains(&sub.opcode) {
+                        if flood_zone_messages.len() < FLOOD_ZONE_MESSAGE_MAX {
+                            flood_zone_messages.push((sub.opcode, sub.data.to_vec()));
                         } else {
-                            tracing::warn!("TALKNUMWORK flood buffer full; dropping zone message");
+                            tracing::warn!(
+                                opcode = format!("{:#05X}", sub.opcode),
+                                "zone-message flood buffer full; dropping zone message"
+                            );
                         }
                         continue;
                     }
@@ -485,7 +488,7 @@ async fn run_map_session(
         sysmes_resolver,
         treasure_pool,
         mog,
-        flood_talknumwork,
+        flood_zone_messages,
         cfg.dat_root
             .as_ref()
             .map(|r| ffxi_dat::spell_info::SpellTable::open(r.root())),
@@ -1885,7 +1888,7 @@ async fn keepalive_loop(
     mut sysmes_resolver: treasure::SysMesResolver,
     mut treasure_pool: treasure::TreasurePool,
     mut mog: SelfMogState,
-    flood_talknumwork: Vec<Vec<u8>>,
+    flood_zone_messages: Vec<(u16, Vec<u8>)>,
     spell_table: Option<ffxi_dat::spell_info::SpellTable>,
 ) -> Result<MapOutcome> {
     let mut last_recv = std::time::Instant::now();
@@ -1931,8 +1934,9 @@ async fn keepalive_loop(
         character_name.clone(),
     );
 
-    for body in &flood_talknumwork {
-        emit_talknumwork_chat(
+    for (opcode, body) in &flood_zone_messages {
+        emit_zone_message_chat(
+            *opcode,
             body,
             &mut dialog_session,
             current_zone_id,
@@ -3547,11 +3551,12 @@ async fn keepalive_loop(
                                 continue;
                             }
 
-                            // TALKNUMWORK resolves against the zone dialog DAT
-                            // that dialog_session owns, so it can't live in
-                            // handle_sub_packet.
-                            if sub.opcode == ffxi_proto::map::s2c::TALKNUMWORK {
-                                emit_talknumwork_chat(
+                            // The TALKNUM family resolves against the zone
+                            // dialog DAT that dialog_session owns, so it can't
+                            // live in handle_sub_packet.
+                            if ZONE_MESSAGE_OPCODES.contains(&sub.opcode) {
+                                emit_zone_message_chat(
+                                    sub.opcode,
                                     sub.data,
                                     &mut dialog_session,
                                     current_zone_id,
@@ -3827,65 +3832,150 @@ pub async fn run_event_folder(
     }
 }
 
-/// Decode one s2c 0x02A TALKNUMWORK body and emit its chat line. Shared by the
+/// The s2c opcodes that print a zone-dialog string: TALKNUMWORK2, TALKNUMWORK,
+/// TALKNUM, TALKNUMNAME. They differ only in which parameters they carry, so
+/// [`emit_zone_message_chat`] handles all four. LSB routes every fishing line
+/// through this family (vendor/server/src/map/utils/fishingutils.cpp).
+pub(crate) const ZONE_MESSAGE_OPCODES: [u16; 4] = [
+    ffxi_proto::map::s2c::TALKNUMWORK2,
+    ffxi_proto::map::s2c::TALKNUMWORK,
+    ffxi_proto::map::s2c::TALKNUM,
+    ffxi_proto::map::s2c::TALKNUMNAME,
+];
+
+/// One TALKNUM-family message flattened to what rendering a chat line needs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ZoneMessage {
+    message_index: u16,
+    /// The attributed speaker, already resolved against the hide-name flag —
+    /// `None` when retail would print the line unattributed.
+    speaker: Option<String>,
+    nums: Vec<i32>,
+}
+
+/// Decode one TALKNUM-family body and emit its chat line. Shared by the
 /// keepalive receive path and the zone-in flood replay so both honor the
-/// never-drop-silently invariant of [`talknumwork_chat_line`].
-fn emit_talknumwork_chat(
+/// never-drop-silently invariant of [`zone_message_chat_line`].
+fn emit_zone_message_chat(
+    opcode: u16,
     body: &[u8],
     dialog_session: &mut crate::event_dialog::DialogSession,
     zone_id: u16,
     character_name: &str,
     event_tx: &broadcast::Sender<AgentEvent>,
 ) {
-    match decode::TalkNumWork::decode(body) {
-        Ok(tnw) => {
-            let zone_text = dialog_session.zone_text(zone_id, tnw.message_index() as usize);
+    use ffxi_proto::map::s2c;
+
+    let decoded = match opcode {
+        s2c::TALKNUMWORK => decode::TalkNumWork::decode(body).map(|t| ZoneMessage {
+            message_index: t.message_index(),
+            speaker: (!t.hide_name()).then(|| t.speaker_name()).flatten(),
+            nums: t.num.to_vec(),
+        }),
+        // 0x036 carries no name field: retail resolves the entity from
+        // UniqueNo, and for every fishing line that is the angler whose name
+        // the dialog string already embeds.
+        s2c::TALKNUM => decode::TalkNum::decode(body).map(|t| ZoneMessage {
+            message_index: t.message_index(),
+            speaker: None,
+            nums: Vec::new(),
+        }),
+        s2c::TALKNUMWORK2 => decode::TalkNumWork2::decode(body).map(|t| ZoneMessage {
+            message_index: t.message_index(),
+            speaker: (!t.hide_name()).then(|| t.actor_name()).flatten(),
+            // Retail addresses both parameter banks through one index space.
+            nums: t.num1.iter().chain(t.num2.iter()).copied().collect(),
+        }),
+        s2c::TALKNUMNAME => decode::TalkNumName::decode(body).map(|t| ZoneMessage {
+            message_index: t.message_index(),
+            speaker: (!t.hide_name()).then(|| t.actor_name()).flatten(),
+            nums: Vec::new(),
+        }),
+        _ => return,
+    };
+
+    match decoded {
+        Ok(msg) => {
+            if let Some(size) = hooked_fish_size(zone_id, msg.message_index) {
+                let _ = event_tx.send(AgentEvent::FishHookedSize { size });
+            }
+            let zone_text = dialog_session.zone_text(zone_id, msg.message_index as usize);
             let _ = event_tx.send(AgentEvent::ChatLine {
-                line: talknumwork_chat_line(&tnw, zone_text, character_name),
+                line: zone_message_chat_line(&msg, zone_text, character_name),
             });
         }
-        Err(e) => warn_decode_err(ffxi_proto::map::s2c::TALKNUMWORK, &e),
+        Err(e) => warn_decode_err(opcode, &e),
     }
 }
 
-/// Render s2c 0x02A TALKNUMWORK as a chat line: the zone dialog DAT entry at
-/// `message_index()` with `num[]` params substituted ({Num:N}, {KeyItem:N},
+/// The hooked-fish size a zone message announces, if it announces one. LSB
+/// pushes this TALKNUM immediately before 0x115, so the mini-game bar is
+/// labelled by the time it appears
+/// (vendor/server/src/map/utils/fishingutils.cpp `SendHookResponse`).
+fn hooked_fish_size(zone_id: u16, mes_num: u16) -> Option<crate::state::FishSize> {
+    use ffxi_proto::fishing_messages::kind;
+    match ffxi_proto::fishing_messages::classify(zone_id, mes_num)? {
+        kind::HOOKED_SMALL_FISH => Some(crate::state::FishSize::Small),
+        kind::HOOKED_LARGE_FISH => Some(crate::state::FishSize::Large),
+        _ => None,
+    }
+}
+
+/// Render a TALKNUM-family message as a chat line: the zone dialog DAT entry at
+/// `message_index` with the packet's params substituted ({Num:N}, {KeyItem:N},
 /// {Item:N}). Degrades to a placeholder when the zone's string DAT is
 /// unavailable — the message must never drop silently.
-fn talknumwork_chat_line(
-    tnw: &decode::TalkNumWork,
+fn zone_message_chat_line(
+    msg: &ZoneMessage,
     zone_text: Option<String>,
     player_name: &str,
 ) -> ChatLine {
-    let speaker = (!tnw.hide_name()).then(|| tnw.speaker_name()).flatten();
-    let text = match zone_text {
-        Some(raw) => crate::event_dialog::substitute_entity_names(
-            crate::event_dialog::substitute_nums(
-                crate::event_dialog::substitute_names(
-                    ffxi_event::clean_display(&raw, &tnw.num),
-                    player_name,
-                    speaker.as_deref(),
-                ),
-                &tnw.num,
-            ),
-            &tnw.num,
-        ),
-        None => format!(
-            "[zone message {} — dialog DAT unavailable; params {:?}]",
-            tnw.message_index(),
-            tnw.num,
-        ),
+    let speaker = msg.speaker.clone();
+    let channel = if speaker.is_some() {
+        ChatChannel::Say
+    } else {
+        ChatChannel::System
     };
+    let Some(raw) = zone_text else {
+        return ChatLine {
+            spans: Vec::new(),
+            channel,
+            sender: speaker.unwrap_or_default(),
+            text: format!(
+                "[zone message {} — dialog DAT unavailable; params {:?}]",
+                msg.message_index, msg.nums,
+            ),
+            server_ts: 0,
+        };
+    };
+
+    // Item names stay their own span so the HUD can colour them apart, the way
+    // retail does for every line that substitutes one — the fished-up catch
+    // included (`.agents/skills/retail-observe/references/treasure-pool-chat.md`).
+    let substituted = crate::event_dialog::substitute_nums(
+        crate::event_dialog::substitute_names(
+            ffxi_event::clean_display(&raw, &msg.nums),
+            player_name,
+            speaker.as_deref(),
+        ),
+        &msg.nums,
+    );
+    let spans: Vec<crate::state::ChatSpan> =
+        crate::event_dialog::spanned_entity_names(&substituted, &msg.nums)
+            .into_iter()
+            .map(|s| crate::state::ChatSpan {
+                text: s.text,
+                kind: match s.kind {
+                    ffxi_dat::sysmes::SpanKind::Text => crate::state::ChatSpanKind::Text,
+                    ffxi_dat::sysmes::SpanKind::Item => crate::state::ChatSpanKind::Item,
+                    ffxi_dat::sysmes::SpanKind::KeyItem => crate::state::ChatSpanKind::KeyItem,
+                },
+            })
+            .collect();
+
     ChatLine {
-        spans: Vec::new(),
-        channel: if speaker.is_some() {
-            ChatChannel::Say
-        } else {
-            ChatChannel::System
-        },
         sender: speaker.unwrap_or_default(),
-        text,
-        server_ts: 0,
+        ..ChatLine::spanned(channel, spans)
     }
 }
 
@@ -6241,29 +6331,22 @@ mod tests {
         );
     }
 
-    fn tnw(mes_num: u16, num: [i32; 4], name: &str) -> decode::TalkNumWork {
-        let mut name_buf = [0u8; decode::TalkNumWork::NAME_LEN];
-        name_buf[..name.len()].copy_from_slice(name.as_bytes());
-        decode::TalkNumWork {
-            unique_no: 0x100,
-            num,
-            act_index: 5,
-            mes_num,
-            kind: 0,
-            flag: 0,
-            name: name_buf,
+    /// A 0x02A-shaped [`ZoneMessage`], the way `emit_zone_message_chat` builds
+    /// one: the speaker is dropped when the hide-name flag is set.
+    fn tnw(mes_num: u16, num: [i32; 4], name: &str) -> ZoneMessage {
+        let hidden = mes_num & decode::MESNUM_HIDE_NAME_FLAG != 0;
+        ZoneMessage {
+            message_index: mes_num & !decode::MESNUM_HIDE_NAME_FLAG,
+            speaker: (!hidden && !name.is_empty()).then(|| name.to_string()),
+            nums: num.to_vec(),
         }
     }
 
     #[test]
     fn talknumwork_resolves_key_item_marker_from_zone_text() {
         // Key item 1 = Zeruhn Report (vendor/server/scripts/enum/key_item.lua).
-        let line = talknumwork_chat_line(
-            &tnw(
-                6438 | decode::TalkNumWork::MESNUM_HIDE_NAME_FLAG,
-                [1, 0, 0, 0],
-                "",
-            ),
+        let line = zone_message_chat_line(
+            &tnw(6438 | decode::MESNUM_HIDE_NAME_FLAG, [1, 0, 0, 0], ""),
             Some("Obtained key item: {KeyItem:0}.".to_string()),
             "Zeid",
         );
@@ -6306,9 +6389,9 @@ mod tests {
         );
         let zone_text = ds.zone_text(230, ZONE230_KEYITEM_OBTAINED_MAY2023 as usize);
         assert!(zone_text.is_some(), "zone 230 string DAT must load");
-        let line = talknumwork_chat_line(
+        let line = zone_message_chat_line(
             &tnw(
-                ZONE230_KEYITEM_OBTAINED_MAY2023 | decode::TalkNumWork::MESNUM_HIDE_NAME_FLAG,
+                ZONE230_KEYITEM_OBTAINED_MAY2023 | decode::MESNUM_HIDE_NAME_FLAG,
                 [1, 0, 0, 0],
                 "",
             ),
@@ -6321,7 +6404,7 @@ mod tests {
 
     #[test]
     fn talknumwork_shows_speaker_name_when_not_hidden() {
-        let line = talknumwork_chat_line(
+        let line = zone_message_chat_line(
             &tnw(100, [7, 0, 0, 0], "Trion"),
             Some("{SpeakerName} counts {Num:0}.".to_string()),
             "Zeid",
@@ -6333,12 +6416,8 @@ mod tests {
 
     #[test]
     fn talknumwork_degrades_to_placeholder_without_zone_strings() {
-        let line = talknumwork_chat_line(
-            &tnw(
-                6438 | decode::TalkNumWork::MESNUM_HIDE_NAME_FLAG,
-                [512, 0, 0, 0],
-                "",
-            ),
+        let line = zone_message_chat_line(
+            &tnw(6438 | decode::MESNUM_HIDE_NAME_FLAG, [512, 0, 0, 0], ""),
             None,
             "Zeid",
         );
@@ -6450,8 +6529,8 @@ mod tests {
         assert!(cast.is_none());
     }
 
-    /// A 0x02A buffered during the zone-in flood must replay as a chat line
-    /// once the keepalive loop's DialogSession exists — degrading to the
+    /// A zone message buffered during the zone-in flood must replay as a chat
+    /// line once the keepalive loop's DialogSession exists — degrading to the
     /// placeholder without a DAT, never dropping silently.
     #[test]
     fn buffered_flood_talknumwork_replays_as_chat_line() {
@@ -6459,7 +6538,14 @@ mod tests {
         let (tx, mut rx) = broadcast::channel(4);
         let mut body = vec![0u8; decode::TalkNumWork::SIZE];
         body[22..24].copy_from_slice(&42u16.to_le_bytes());
-        emit_talknumwork_chat(&body, &mut ds, 230, "Tester", &tx);
+        emit_zone_message_chat(
+            ffxi_proto::map::s2c::TALKNUMWORK,
+            &body,
+            &mut ds,
+            230,
+            "Tester",
+            &tx,
+        );
         let AgentEvent::ChatLine { line } = rx.try_recv().expect("replay must emit an event")
         else {
             panic!("expected ChatLine");
@@ -6468,6 +6554,84 @@ mod tests {
             line.text.contains("zone message 42"),
             "no-DAT replay degrades to the placeholder: {}",
             line.text
+        );
+    }
+
+    /// The three newly-handled family members must each reach chat. Every LSB
+    /// fishing line arrives on one of them
+    /// (vendor/server/src/map/utils/fishingutils.cpp), so a silently-unhandled
+    /// opcode here is a whole feature going quiet.
+    #[test]
+    fn every_zone_message_opcode_emits_a_chat_line() {
+        use ffxi_proto::map::s2c;
+        const MES_NUM: u16 = 7265;
+
+        for (opcode, size, mes_num_off) in [
+            (s2c::TALKNUM, decode::TalkNum::SIZE, 6),
+            (s2c::TALKNUMWORK2, decode::TalkNumWork2::SIZE, 6),
+            (s2c::TALKNUMNAME, decode::TalkNumName::SIZE, 6),
+            (s2c::TALKNUMWORK, decode::TalkNumWork::SIZE, 22),
+        ] {
+            assert!(
+                ZONE_MESSAGE_OPCODES.contains(&opcode),
+                "{opcode:#05X} is not routed to the zone-message handler"
+            );
+            let mut ds = crate::event_dialog::DialogSession::new(None, "Tester".into());
+            let (tx, mut rx) = broadcast::channel(4);
+            let mut body = vec![0u8; size];
+            body[mes_num_off..mes_num_off + 2].copy_from_slice(&MES_NUM.to_le_bytes());
+            emit_zone_message_chat(opcode, &body, &mut ds, 230, "Tester", &tx);
+
+            let AgentEvent::ChatLine { line } = rx
+                .try_recv()
+                .unwrap_or_else(|e| panic!("{opcode:#05X} emitted nothing: {e}"))
+            else {
+                panic!("expected ChatLine");
+            };
+            assert!(
+                line.text.contains(&MES_NUM.to_string()),
+                "{opcode:#05X} placeholder must expose the index: {}",
+                line.text
+            );
+        }
+    }
+
+    /// LSB's fishing catch constructor sets the hide-name flag and puts the
+    /// fish id in Num1[0], so the line renders unattributed with the item name
+    /// substituted. vendor/server/src/map/packets/s2c/0x027_talknumwork2.cpp
+    #[test]
+    fn talknumwork2_substitutes_the_caught_item() {
+        let msg = ZoneMessage {
+            message_index: 7267,
+            speaker: None,
+            nums: vec![4304, 1, 0, 0],
+        };
+        let line = zone_message_chat_line(
+            &msg,
+            Some("{PlayerName} caught {Item:0}!".to_string()),
+            "Kuluu",
+        );
+        assert_eq!(line.channel, ChatChannel::System);
+        assert!(
+            line.text.starts_with("Kuluu caught ") && !line.text.contains("{Item:0}"),
+            "item marker must resolve: {}",
+            line.text
+        );
+
+        // Retail colours the item name apart from the rest of the line, so the
+        // substitution must survive as its own span rather than being flattened
+        // into the surrounding text.
+        let item: Vec<&crate::state::ChatSpan> = line
+            .spans
+            .iter()
+            .filter(|s| s.kind == crate::state::ChatSpanKind::Item)
+            .collect();
+        assert_eq!(item.len(), 1, "spans: {:?}", line.spans);
+        assert!(!item[0].text.contains("caught"), "{:?}", item[0]);
+        assert!(
+            line.spans.iter().any(|s| s.text.contains("Kuluu caught")),
+            "surrounding text stays plain: {:?}",
+            line.spans
         );
     }
 

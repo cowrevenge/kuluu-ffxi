@@ -3594,7 +3594,7 @@ async fn keepalive_loop(
                                     let new_addr = parse_logout_addr(&logout, map.server_addr());
                                     let _ = event_tx.send(AgentEvent::ZoneChanged {
                                         from: None,
-                                        to: 0,
+                                        to: ffxi_viewer_wire::ZONE_UNKNOWN,
                                         myroom: None,
                                         mog_zone_flag: false,
                                     });

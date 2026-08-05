@@ -8,6 +8,15 @@ pub const HEALING: u8 = 33;
 
 pub const SIT: u8 = 47;
 
+/// A door's swing state. Retail keeps the same value as the door actor's
+/// `GameStatus` (research/XIClient .../World/Actor/GameStatus.h, `D_OPEN` /
+/// `D_CLOSE`), so this one byte is the whole of what the server says about a
+/// door — the swing itself is the client's, driven from the zone DAT's per-door
+/// `open`/`clos` routines (`enum ANIMATIONTYPE`,
+/// vendor/server/src/map/entities/baseentity.h).
+pub const OPEN_DOOR: u8 = 8;
+pub const CLOSE_DOOR: u8 = 9;
+
 /// Riding a chocobo — the classic mount, which retail renders from a dedicated
 /// PC race config rather than the generic mount model block. Noble Chocobo also
 /// arrives as `CHOCOBO`; the two differ only in `CustomProperties[1]`

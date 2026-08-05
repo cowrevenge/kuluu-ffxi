@@ -161,6 +161,7 @@ pub struct DatOverlayPlugin;
 
 impl Plugin for DatOverlayPlugin {
     fn build(&self, app: &mut App) {
+        app.add_observer(crate::ffxi_actor_render::despawn_morph_column);
         app.add_message::<LoadMmbRequest>()
             .add_message::<crate::dat_vos2::LoadVos2Request>()
             .add_message::<crate::ffxi_actor_render::LoadActorRequest>()

@@ -1192,6 +1192,12 @@ pub struct SceneDelta {
     pub myroom: Option<MyRoom>,
 }
 
+/// [`ViewerEvent::ZoneChanged::to`] for the half of a zone change that only
+/// tears the connection down: the server has said "reconnect over there" and the
+/// destination is not known until the new map session hands it over. No real
+/// zone is 0, so it cannot collide with an arrival.
+pub const ZONE_UNKNOWN: u16 = 0;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ViewerEvent {
     ZoneChanged {

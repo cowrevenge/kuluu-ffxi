@@ -2189,6 +2189,63 @@ mod shadow_cast_scope_tests {
 }
 
 #[cfg(test)]
+mod morph_column_tests {
+    use super::*;
+
+    fn morph(orb: Entity, root: Entity) -> crate::components::MorphIn {
+        crate::components::MorphIn {
+            elapsed: 0.0,
+            actor_root: root,
+            orb: Some(orb),
+            orb_mat: None,
+            orb_emissive: LinearRgba::BLACK,
+        }
+    }
+
+    /// The actual regression: an actor reload replaces `MorphIn` rather than
+    /// removing it, and the replacement cannot know the old column's id. Before
+    /// the observer owned that lifetime, the column stayed on the player for the
+    /// rest of the session.
+    #[test]
+    fn replacing_the_component_takes_the_old_column_with_it() {
+        let mut app = App::new();
+        app.add_observer(despawn_morph_column);
+
+        let actor = app.world_mut().spawn_empty().id();
+        let wire = app.world_mut().spawn_empty().id();
+        let first = app.world_mut().spawn(ChildOf(wire)).id();
+        app.world_mut().entity_mut(wire).insert(morph(first, actor));
+
+        let second = app.world_mut().spawn(ChildOf(wire)).id();
+        app.world_mut()
+            .entity_mut(wire)
+            .insert(morph(second, actor));
+        app.update();
+
+        assert!(app.world().get_entity(first).is_err(), "old column leaked");
+        assert!(app.world().get_entity(second).is_ok(), "new column reaped");
+    }
+
+    #[test]
+    fn finishing_the_morph_takes_its_column_with_it() {
+        let mut app = App::new();
+        app.add_observer(despawn_morph_column);
+
+        let actor = app.world_mut().spawn_empty().id();
+        let wire = app.world_mut().spawn_empty().id();
+        let orb = app.world_mut().spawn(ChildOf(wire)).id();
+        app.world_mut().entity_mut(wire).insert(morph(orb, actor));
+
+        app.world_mut()
+            .entity_mut(wire)
+            .remove::<crate::components::MorphIn>();
+        app.update();
+
+        assert!(app.world().get_entity(orb).is_err());
+    }
+}
+
+#[cfg(test)]
 mod head_look_tests {
     use super::*;
 
@@ -2317,6 +2374,7 @@ pub fn poll_load_actor_tasks(
     mut in_flight: ResMut<ActorLoadInFlight>,
     q_existing: Query<&FfxiRenderRoot>,
     q_ball: Query<&MeshMaterial3d<StandardMaterial>, With<Mesh3d>>,
+    q_self: Query<(), With<crate::components::IsSelf>>,
 ) {
     if in_flight.tasks.is_empty() && in_flight.ready.is_empty() {
         return;
@@ -2386,27 +2444,36 @@ pub fn poll_load_actor_tasks(
         // A transient child carries the stretch: the wire entity is driven by
         // sync and the model shares its transform, so neither can be reshaped.
         // A reload has no resting orb to consume and just regrows the model.
-        let orb = q_ball.get(wire_entity).ok().and_then(|mm| {
-            let lit = std_materials.get(&mm.0).map(|m| {
-                let mut m = m.clone();
-                m.alpha_mode = AlphaMode::Blend;
-                m
-            })?;
-            let emissive = lit.emissive;
-            let handle = std_materials.add(lit);
-            commands.entity(wire_entity).remove::<Mesh3d>();
-            let orb = commands
-                .spawn((
-                    Mesh3d(entity_mesh.morph_orb.clone()),
-                    MeshMaterial3d(handle.clone()),
-                    Transform::from_xyz(0.0, MORPH_COLUMN_PIVOT_Y, 0.0),
-                    Visibility::Visible,
-                    bevy::light::NotShadowCaster,
-                    ChildOf(wire_entity),
-                ))
-                .id();
-            Some((orb, handle, emissive))
-        });
+        //
+        // Retail materialises no column on the player's own body — it is simply
+        // there when the screen fades in (retail capture, Upper Jeuno ->
+        // Rolanberry Fields, 2026-08-04). Ours ran on every zone-in.
+        let orb = q_self
+            .get(wire_entity)
+            .is_err()
+            .then(|| q_ball.get(wire_entity).ok())
+            .flatten()
+            .and_then(|mm| {
+                let lit = std_materials.get(&mm.0).map(|m| {
+                    let mut m = m.clone();
+                    m.alpha_mode = AlphaMode::Blend;
+                    m
+                })?;
+                let emissive = lit.emissive;
+                let handle = std_materials.add(lit);
+                commands.entity(wire_entity).remove::<Mesh3d>();
+                let orb = commands
+                    .spawn((
+                        Mesh3d(entity_mesh.morph_orb.clone()),
+                        MeshMaterial3d(handle.clone()),
+                        Transform::from_xyz(0.0, MORPH_COLUMN_PIVOT_Y, 0.0),
+                        Visibility::Visible,
+                        bevy::light::NotShadowCaster,
+                        ChildOf(wire_entity),
+                    ))
+                    .id();
+                Some((orb, handle, emissive))
+            });
 
         commands.entity(root).insert(Transform {
             translation: Vec3::ZERO,
@@ -2481,13 +2548,29 @@ pub fn tick_morph_in(
             if let Ok(mut tf) = q_tf.get_mut(morph.actor_root) {
                 tf.scale = Vec3::ONE;
             }
-            if let Some(orb) = morph.orb {
-                commands.entity(orb).try_despawn();
-            }
             commands
                 .entity(wire_entity)
                 .remove::<crate::components::MorphIn>();
         }
+    }
+}
+
+/// The column is owned by the [`MorphIn`] that spawned it, not by whoever
+/// happens to finish it. Nothing else holds the child's id, so an actor reload
+/// — which *replaces* the component rather than removing it — used to strand
+/// the old column on a living player forever.
+///
+/// [`MorphIn`]: crate::components::MorphIn
+pub fn despawn_morph_column(
+    trigger: On<Discard, crate::components::MorphIn>,
+    q: Query<&crate::components::MorphIn>,
+    mut commands: Commands,
+) {
+    let Ok(morph) = q.get(trigger.event().event_target()) else {
+        return;
+    };
+    if let Some(orb) = morph.orb {
+        commands.entity(orb).try_despawn();
     }
 }
 

@@ -48,8 +48,8 @@ pub struct EntityModel {
 pub struct MountModel(pub ffxi_viewer_wire::Mount);
 
 /// Model-load transition: grows the actor in while a transient orb stretches
-/// into a light-column and dissolves. Both child entities are torn down on
-/// completion (or with the parent, recursively).
+/// into a light-column and dissolves. The column's lifetime belongs to this
+/// component — see `ffxi_actor_render::despawn_morph_column`.
 #[derive(Component, Debug, Clone)]
 pub struct MorphIn {
     pub elapsed: f32,

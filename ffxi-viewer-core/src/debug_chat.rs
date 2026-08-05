@@ -21,9 +21,10 @@ pub fn report_engagement_events_system(
     }
     for i in cursor.pos..len {
         let line = match &events.recent[i] {
-            ViewerEvent::ZoneChanged { from, to } => Some(match from {
-                Some(prev) => format!("→ Zone change: 0x{:04X} → 0x{:04X}", prev, to),
-                None => format!("→ Zone entered: 0x{:04X}", to),
+            ViewerEvent::ZoneChanged { from, to } => Some(match (from, *to) {
+                (_, ffxi_viewer_wire::ZONE_UNKNOWN) => "→ Leaving the zone".to_string(),
+                (Some(prev), to) => format!("→ Zone change: 0x{prev:04X} → 0x{to:04X}"),
+                (None, to) => format!("→ Zone entered: 0x{to:04X}"),
             }),
             ViewerEvent::EngagedBy { entity_id } => {
                 let name = scene_state

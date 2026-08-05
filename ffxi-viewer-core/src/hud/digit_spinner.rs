@@ -86,29 +86,25 @@ impl DigitSpinner {
         };
     }
 
-    /// `▲ +`: step the active digit up (no carry into the next place; All
-    /// jumps to the cap), clamped to the cap.
+    /// `▲ +`: add the active place value (carrying into higher digits),
+    /// clamped to the cap; All jumps to the cap.
     pub fn up(&mut self) {
         match self.column {
             SpinnerColumn::All => self.value = self.cap,
             SpinnerColumn::Digit(p) => {
-                if self.digit_at(p) < 9 {
-                    self.value = self.value.saturating_add(pow10(p)).min(self.cap);
-                }
+                self.value = self.value.saturating_add(pow10(p)).min(self.cap);
                 self.edited |= 1 << p;
             }
         }
     }
 
-    /// `▼ −`: step the active digit down (a 0 digit stays 0 — no borrow from
-    /// the next place; All resets to 0).
+    /// `▼ −`: subtract the active place value (borrowing from higher digits —
+    /// 600 on the tens steps to 590), floored at 0; All resets to 0.
     pub fn down(&mut self) {
         match self.column {
             SpinnerColumn::All => self.value = 0,
             SpinnerColumn::Digit(p) => {
-                if self.digit_at(p) > 0 {
-                    self.value -= pow10(p);
-                }
+                self.value = self.value.saturating_sub(pow10(p));
                 self.edited |= 1 << p;
             }
         }
@@ -165,8 +161,19 @@ mod tests {
         assert_eq!(s.value, 101, "hundreds column steps by 100");
         s.down();
         s.down();
-        assert_eq!(s.value, 1, "clamps at the subtraction floor");
+        assert_eq!(s.value, 0, "subtraction floors at 0, not the digit");
         assert_eq!(s.edited & 0b101, 0b101, "ones + hundreds marked edited");
+    }
+
+    #[test]
+    fn down_borrows_across_digits() {
+        let mut s = DigitSpinner::with_value(999_999_999, 600);
+        s.column = SpinnerColumn::Digit(1);
+        s.down();
+        assert_eq!(s.value, 590, "600 minus a tens step borrows from the 6");
+        s.up();
+        s.up();
+        assert_eq!(s.value, 610, "590 plus two tens steps carries back");
     }
 
     #[test]

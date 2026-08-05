@@ -23,7 +23,8 @@ pub struct CharStatus {
     /// `MOUNTTYPE` of the mount being ridden, 0 when not mounted *and* when the
     /// mount is a plain chocobo — both are `MOUNT_CHOCOBO`. Read `server_status`
     /// through [`animation::is_mounted`] to tell those apart.
-    /// vendor/server/src/map/packets/char_status.cpp:275-279 (`packet->mount_id`).
+    /// `packet->mount_id` in CCharStatusPacket's constructor,
+    /// vendor/server/src/map/packets/char_status.cpp.
     pub mount_id: u8,
 }
 

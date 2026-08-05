@@ -11,14 +11,15 @@ pub const SIT: u8 = 47;
 /// Riding a chocobo — the classic mount, which retail renders from a dedicated
 /// PC race config rather than the generic mount model block. Noble Chocobo also
 /// arrives as `CHOCOBO`; the two differ only in `CustomProperties[1]`
-/// (vendor/server/src/map/entities/charentity.cpp:3249-3259).
+/// (vendor/server/src/map/entities/charentity.cpp,
+/// CCharEntity::tryStartNextEvent).
 pub const CHOCOBO: u8 = 5;
 
 /// Riding any non-chocobo mount; the specific one comes from the packet's mount
 /// index, not from this byte.
 pub const MOUNT: u8 = 85;
 
-/// `CBattleEntity::isMounted` (vendor/server/src/map/entities/battleentity.cpp:201-204)
+/// `CBattleEntity::isMounted` (vendor/server/src/map/entities/battleentity.cpp)
 /// — the single predicate the server itself uses to gate mount speed and to refuse
 /// actions, so the client must agree with it exactly.
 pub fn is_mounted(animation: u8) -> bool {

@@ -444,16 +444,17 @@ pub fn vec3_to_wire(v: Vec3) -> wire::Vec3 {
     }
 }
 
-// vendor/server/src/map/entities/baseentity.h:111-152 (MOUNTTYPE). Noble Chocobo
+// MOUNTTYPE, vendor/server/src/map/entities/baseentity.h. Noble Chocobo
 // is a chocobo despite sitting at the far end of the enum — the server routes it
-// through ANIMATION_CHOCOBO like the plain one (charentity.cpp:3253-3256).
+// through ANIMATION_CHOCOBO like the plain one
+// (charentity.cpp, CCharEntity::tryStartNextEvent).
 const MOUNT_CHOCOBO: u8 = 0;
 const MOUNT_NOBLE_CHOCOBO: u8 = 34;
 
 /// The mount an entity is riding, from the pair of fields that only mean
 /// something together: the animation byte says *whether*, the mount index says
 /// *which*, and the index keeps its last value after a dismount
-/// (vendor/server/src/map/packets/char_update.cpp:425-427).
+/// (vendor/server/src/map/packets/char_update.cpp, CCharUpdatePacket::updateWith).
 pub fn mount_to_wire(animation: u8, mount_id: u8) -> Option<wire::Mount> {
     if !ffxi_proto::decode::animation::is_mounted(animation) {
         return None;

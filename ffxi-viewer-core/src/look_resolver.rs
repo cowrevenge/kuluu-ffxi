@@ -622,7 +622,7 @@ pub fn dispatch_mount_models(
 /// file per id — verified against the retail DAT 2026-08-04: 0x19131 raptor,
 /// 0x19133 tiger, 0x19136 bomb, 0x19141 hippogryph, each carrying a `moun`
 /// chunk. Both chocobo ids are absent, hence `checked_sub`.
-/// research/xim poc/game/event/ActorMountEvent.kt:26.
+/// research/xim poc/game/event/ActorMountEvent.kt, ActorMountEvent.apply.
 fn mount_dat_id(mount_id: u8) -> Option<u32> {
     const MOUNT_BLOCK_BASE: u32 = 0x0001_9131;
     const FIRST_MODELLED_MOUNT: u8 = 1;
@@ -691,7 +691,8 @@ pub fn dispatch_look_driven_models(
                 let slot_index = (i + 1) as u8;
                 // A rider's hands are on the reins, so retail drops the three
                 // weapon slots from the model while mounted
-                // (research/xim poc/ActorModel.kt:264).
+                // (research/xim poc/ActorModel.kt,
+                // ActorModel.getHiddenSlotIds).
                 let file_id = (!(mounted && WEAPON_SLOTS.contains(&slot_index)))
                     .then(|| resolve_equipment_model(slot_index, model_id, race))
                     .flatten();

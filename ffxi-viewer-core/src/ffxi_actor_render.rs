@@ -43,7 +43,7 @@ pub enum ActorSubject {
         race: u8,
         /// Loads the race's mount-pose animation DAT alongside the usual motion
         /// ones, which is where a rider's `chi?` seat and the other mount poses
-        /// live (research/xim poc/Model.kt:419-425).
+        /// live (research/xim poc/Model.kt, PcModel.getMountAnimationResource).
         mounted: bool,
         equipment: Vec<u32>,
         /// Body slot, kept apart from `equipment` because its CIB `waist_type`
@@ -61,7 +61,7 @@ pub enum ActorSubject {
     /// A ridden mount whose model is a PC race config rather than an NPC model.
     /// Only the chocobo is built this way in retail — one race per coat colour,
     /// with the body parts coming from the equipment table like a PC's gear.
-    /// research/xim poc/Model.kt:54-58.
+    /// research/xim poc/Model.kt, RaceGenderConfig.
     Mount {
         race: u8,
     },
@@ -490,7 +490,7 @@ pub fn load_npc(file_id: u32) -> Result<LoadedActor, String> {
 /// Ridden-chocobo race configs, one per coat colour, paired with the equipment
 /// table row its body parts come from. Retail's race index and equipment row
 /// diverge for every non-playable config, so the pairing is data, not arithmetic
-/// (research/xim poc/Model.kt:54-58).
+/// (research/xim poc/Model.kt, RaceGenderConfig).
 const CHOCOBO_RACE_TABLE: [(u8, u8); 5] = [(32, 12), (33, 13), (34, 14), (35, 15), (36, 16)];
 
 /// The body slots a chocobo is assembled from. It has no face row and carries no
@@ -604,7 +604,8 @@ const WAIST_MOTION_OFFSET: u32 = 2;
 // colliding with the upper-body DAT.
 const WAIST_TYPE_MIN: u8 = 1;
 
-/// The race's mount-pose animation DAT. research/xim poc/Model.kt:419-425.
+/// The race's mount-pose animation DAT.
+/// research/xim poc/Model.kt, PcModel.getMountAnimationResource.
 fn mount_pose_dat(root: &DatRoot, race: u8) -> Option<Vec<u8>> {
     let dll = ffxi_dat::main_dll::MainDll::load(root.root())
         .inspect_err(|e| warn!("FFXiMain.dll unreadable, mount poses unavailable: {e}"))
@@ -2451,7 +2452,7 @@ fn observed_rest_kind(animation: u8) -> ffxi_actor::actor_state::RestKind {
 /// Standard-joint index of the seat a rider of `race` occupies on a mount. Mount
 /// skeletons carry one per playable race because each sits differently; the block
 /// starts at 48 and is indexed by the look race less one.
-/// research/xim resource/SkeletonInstance.kt:269-276.
+/// research/xim resource/SkeletonInstance.kt, applyMountAttachTransform.
 fn saddle_joint_index(race: u8) -> Option<usize> {
     const SADDLE_JOINT_BASE: usize = 48;
     const PLAYABLE_RACES: u8 = 8;
@@ -2483,7 +2484,7 @@ pub struct SnapshotActorState {
     rest: ffxi_actor::actor_state::RestKind,
     /// Set on a mount actor and on the rider sitting on it. Both play `chi?`:
     /// the mount its carrying pose, the rider the matching seat
-    /// (research/xim poc/Actor.kt:310-312).
+    /// (research/xim poc/Actor.kt, Actor.getIdleAnimationId).
     mount_or_chocobo: bool,
     /// A mount actor stands where its rider stands and moves when the rider
     /// moves, so its gait is read from the rider's motion, not its own — it has

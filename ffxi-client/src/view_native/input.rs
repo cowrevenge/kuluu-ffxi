@@ -68,7 +68,8 @@ const SPEED_TO_YPS: f32 = 0.1;
 
 // The server does not send a faster speed to a mounted player — LSB caps its
 // mount speed at map.MOUNT_SPEED/2 = 40, *below* the 50 it sends on foot
-// (vendor/server/src/map/entities/battleentity.cpp:327-331). Retail makes up the
+// (vendor/server/src/map/entities/battleentity.cpp, CBattleEntity::UpdateSpeed).
+// Retail makes up the
 // difference in the client, doubling the decoded speed while mounted and then
 // clamping: research/XIClient/src/XIClient/source/World/Actor/ControllableActor.cpp
 // :627-637. Taking the packet at face value therefore makes mounting *slower*.
@@ -76,7 +77,7 @@ const MOUNTED_SPEED_MULTIPLIER: f32 = 2.0;
 const MAX_MOVE_SPEED_YPS: f32 = 30.0;
 
 /// Yalms per second for a decoded packet speed. `* 0.1` is retail's own decode
-/// (research/XIClient .../Game/Net/Packets/s2c/0x00D.cpp:108, 0x037.cpp:62).
+/// (research/XIClient .../Game/Net/Packets/s2c, RecvCharPc and RecvServerStatus).
 fn mounted_move_speed(packet_speed: u8, mounted: bool) -> f32 {
     let speed = f32::from(packet_speed) * SPEED_TO_YPS;
     let speed = if mounted {

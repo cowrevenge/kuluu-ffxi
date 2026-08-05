@@ -106,11 +106,13 @@ pub enum DynamicMenuAction {
     RangedAttack,
 
     /// Get off the mount (c2s action 0x12).
-    /// vendor/server/src/map/packets/c2s/0x01a_action.h:67.
+    /// GP_CLI_COMMAND_ACTION_ACTIONID,
+    /// vendor/server/src/map/packets/c2s/0x01a_action.h.
     Dismount,
 
     /// Dig with the chocobo for a buried item (c2s action 0x11). Self-targeted
-    /// like Dismount. vendor/server/src/map/packets/c2s/0x01a_action.h:66.
+    /// like Dismount. GP_CLI_COMMAND_ACTION_ACTIONID,
+    /// vendor/server/src/map/packets/c2s/0x01a_action.h.
     ChocoboDig,
 
     UseItem {
@@ -979,7 +981,8 @@ pub fn ability_group_rows(
         }],
         // Retail's mounted commands are exactly these two — no other 0x01A
         // action id is gated on being mounted
-        // (vendor/server/src/map/packets/c2s/0x01a_action.h:52-76). They only
+        // (GP_CLI_COMMAND_ACTION_ACTIONID,
+        // vendor/server/src/map/packets/c2s/0x01a_action.h). They only
         // exist while riding, which is also when this group has anything in it.
         G::Mount if snap.self_mount.is_some() => vec![
             DynamicMenuRow {

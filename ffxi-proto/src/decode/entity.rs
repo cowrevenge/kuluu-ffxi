@@ -79,7 +79,8 @@ impl PosHead {
 
     // `Flags6.MountIndex` — the MOUNTTYPE this character last mounted. LSB's own
     // comment warns it stays set after dismounting
-    // (vendor/server/src/map/packets/char_update.cpp:425-427), so it is only
+    // (vendor/server/src/map/packets/char_update.cpp,
+    // CCharUpdatePacket::updateWith), so it is only
     // meaningful once `server_status` says the character is mounted. Flags6 sits
     // past `PosHead`, inside the `SendFlg.General` block, so a position-only
     // update does not carry it.
@@ -1008,7 +1009,7 @@ mod pos_head_tests {
     #[test]
     fn char_pc_mount_index_reads_flags6_and_needs_the_general_block() {
         // Flags6.MountIndex is bits 4..11; GateId occupies the low nibble and must
-        // not bleed in (vendor/server/src/map/packets/char_update.cpp:158-162).
+        // not bleed in (flags6_t, vendor/server/src/map/packets/char_update.cpp).
         let mut buf = vec![0u8; PosHead::FLAGS6_OFFSET + 4];
         let flags6 = (u32::from(34u8) << PosHead::MOUNT_INDEX_SHIFT) | 0x0F;
         buf[PosHead::FLAGS6_OFFSET..PosHead::FLAGS6_OFFSET + 4]

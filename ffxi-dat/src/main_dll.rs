@@ -22,7 +22,8 @@ const ACTION_ANIM_HINT: u32 = 0xCB96_CB96;
 const EQUIPMENT_HINT: u32 = 0xA81B_0000;
 
 /// Per-race stride of the equipment lookup table, and the per-slot stride within
-/// one race's block. research/xim resource/table/EquipmentModelTable.kt:47,59.
+/// one race's block. research/xim resource/table/EquipmentModelTable.kt,
+/// parseRaceGenderTable.
 const EQUIPMENT_RACE_STRIDE: usize = 0x1B0;
 const EQUIPMENT_SLOT_STRIDE: usize = 0x30;
 /// Each slot row is six `(first_file_id, entry_count)` pairs; a zero file id ends it.
@@ -30,7 +31,7 @@ const EQUIPMENT_SLOT_BANDS: usize = 6;
 
 /// The mount pose/movement clips a rider needs (`chi?`, `{n}un?`, …) live this far
 /// past the race's action-animation base; fishing sits at +0x01 in the same block.
-/// research/xim poc/Model.kt:419-425.
+/// research/xim poc/Model.kt, PcModel.getMountAnimationResource.
 pub const ACTION_ANIM_MOUNT_OFFSET: u16 = 0x05;
 
 // research/xim ZoneMapTable.kt
@@ -147,27 +148,30 @@ impl MainDll {
     /// two companion motion DATs sit at fixed offsets past it. `race_index` is the
     /// look race byte (HumeM=1), which also reaches the non-playable configs the
     /// look byte never carries: 32..=36 are the ridden chocobo, one per colour
-    /// (research/xim poc/Model.kt:54-58, :91-93).
+    /// (research/xim poc/Model.kt, RaceGenderConfig and PcModelLoader.preload).
     pub fn base_race_config_index(&self, race_index: u8) -> Option<u16> {
         self.read16(self.race_config_base? + race_index as usize * 2)
     }
 
     /// First file of the race's action-animation block; see
-    /// [`ACTION_ANIM_MOUNT_OFFSET`]. research/xim MainDll.kt:124-126.
+    /// [`ACTION_ANIM_MOUNT_OFFSET`]. research/xim MainDll.kt,
+    /// getActionAnimationIndex.
     pub fn base_action_animation_index(&self, race_index: u8) -> Option<u16> {
         self.read16(self.action_anim_base? + race_index as usize * 2)
     }
 
     /// Model DAT for one equipment slot of one race. `table_index` is the race's
     /// *equipment* table row, which is not the race index for the non-playable
-    /// configs (the chocobo's race 32 uses row 12; research/xim poc/Model.kt:54).
+    /// configs (the chocobo's race 32 uses row 12; research/xim poc/Model.kt,
+    /// RaceGenderConfig).
     /// `slot` is the retail slot number — 0 face, 1 head, 2 body, 3 hands,
     /// 4 legs, 5 feet, 6 main, 7 sub, 8 ranged.
     ///
     /// The row is a run of `(first_file_id, entry_count)` bands that partition the
     /// model id space in order, so a model id is located by walking bands and
     /// subtracting the counts already passed.
-    /// research/xim resource/table/EquipmentModelTable.kt:16-35,54-70.
+    /// research/xim resource/table/EquipmentModelTable.kt, getItemModelPath and
+    /// parseRaceGenderTable.
     pub fn equipment_model_index(&self, table_index: u8, slot: u8, model_id: u16) -> Option<u32> {
         let row = self.equipment_base?
             + EQUIPMENT_RACE_STRIDE * (table_index.checked_sub(1)? as usize)

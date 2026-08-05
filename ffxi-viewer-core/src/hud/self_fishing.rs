@@ -1,5 +1,5 @@
 use bevy::prelude::*;
-use ffxi_viewer_wire::{FishingArrow, SelfFishing};
+use ffxi_viewer_wire::{FishSize, FishingArrow, SelfFishing};
 
 use crate::hud::style::{self, theme};
 use crate::keybinds::{Action, Bindings};
@@ -69,7 +69,10 @@ pub fn compute_model(fishing: Option<&SelfFishing>) -> FishingHudModel {
     }
     FishingHudModel {
         visible: true,
-        status: "Fish on!",
+        // Retail names the bar after the hook message rather than the fish, and
+        // has no wording for a bite whose hook message went missing
+        // (research/xim FishHppUi.kt) — fall back to the small-fish label.
+        status: f.size.unwrap_or(FishSize::Small).label(),
         bar: Some((f.fish_hp as f32 / f.fish_max as f32).clamp(0.0, 1.0)),
         arrow: f.arrow,
     }
@@ -287,6 +290,7 @@ mod tests {
             fish_max,
             fish_hp,
             arrow,
+            size: None,
         }
     }
 
@@ -307,8 +311,22 @@ mod tests {
     #[test]
     fn bar_tracks_fish_stamina() {
         let m = compute_model(Some(&fishing(1, 200, 50, None)));
-        assert_eq!(m.status, "Fish on!");
         assert_eq!(m.bar, Some(0.25));
+    }
+
+    #[test]
+    fn the_hook_message_names_the_bar() {
+        let mut f = fishing(1, 200, 50, None);
+        f.size = Some(FishSize::Large);
+        assert_eq!(compute_model(Some(&f)).status, "Large Fish");
+        f.size = Some(FishSize::Small);
+        assert_eq!(compute_model(Some(&f)).status, "Small Fish");
+        f.size = None;
+        assert_eq!(
+            compute_model(Some(&f)).status,
+            "Small Fish",
+            "a missing hook message still names the bar"
+        );
     }
 
     #[test]

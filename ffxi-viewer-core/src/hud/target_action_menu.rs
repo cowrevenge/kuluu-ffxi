@@ -346,6 +346,7 @@ mod tests {
             trusts_available: false,
             engaged: false,
             usable_items_available: true,
+            can_fish: false,
         }
     }
 

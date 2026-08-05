@@ -76,6 +76,10 @@ pub fn state_to_snapshot(s: &SessionState) -> wire::SceneSnapshot {
                 left: a.left,
                 golden: a.golden,
             }),
+            size: f.size.map(|s| match s {
+                crate::state::FishSize::Small => wire::FishSize::Small,
+                crate::state::FishSize::Large => wire::FishSize::Large,
+            }),
         }),
 
         self_server_status: s.self_server_status,

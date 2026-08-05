@@ -798,6 +798,24 @@ pub struct SelfCasting {
     pub interrupted: bool,
 }
 
+/// Which "something caught the hook" line the server sent; retail labels the
+/// mini-game bar off it (research/xim FishHppUi.kt).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FishSize {
+    Small,
+    Large,
+}
+
+impl FishSize {
+    pub fn label(self) -> &'static str {
+        match self {
+            FishSize::Small => "Small Fish",
+            FishSize::Large => "Large Fish",
+        }
+    }
+}
+
 /// Self fishing view for the renderer/HUD.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SelfFishing {
@@ -809,6 +827,9 @@ pub struct SelfFishing {
     pub fish_hp: u16,
     /// The arrow the player must react to, if any.
     pub arrow: Option<FishingArrow>,
+    /// Hooked-fish size, once the server's hook message has landed.
+    #[serde(default)]
+    pub size: Option<FishSize>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]

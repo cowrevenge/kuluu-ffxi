@@ -297,6 +297,7 @@ pub fn click_to_target_system(
     scene: Res<crate::snapshot::SceneState>,
     enabled: Res<WorldPickingEnabled>,
     lock_on: Res<crate::lock_on::LockOn>,
+    fishing_spot: Res<crate::fishing_spot::FishingSpot>,
     mut target: ResMut<Target>,
     mut input_mode: ResMut<InputMode>,
 ) {
@@ -345,6 +346,7 @@ pub fn click_to_target_system(
                     scene.snapshot.self_char_id,
                     engaged,
                     crate::hud::menu::any_usable_item(&scene.snapshot),
+                    fishing_spot.0.is_ready(),
                 );
                 if !action_model::build_target_action_entries(&ctx, &crate::hud::overlay::RETAIL)
                     .is_empty()

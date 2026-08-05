@@ -260,15 +260,70 @@ pub struct MzbNormal {
     pub n: [f32; 3],
 }
 
+/// Surface a collision triangle represents, from the [`MzbTriangleInfo::terrain`]
+/// nibble. Names from research/xim ZoneDefParser.kt `TerrainType`; the mapping is
+/// **measured**, not taken from XIM (tier 6): `dat-fishing-terrain-probe` scores
+/// the nibble against LSB's independent `vendor/server/sql/fishing_area.sql`, and
+/// water runs 0.3-4% of triangles zone-wide against 10-45% inside every radial
+/// fishing cylinder. [`crate::footstep`] corroborates the 0..=10 span from the
+/// shipped `fses` sound tables.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TerrainType {
+    Object,
+    Path,
+    Grass,
+    Sand,
+    Snow,
+    Stone,
+    Metal,
+    Wood,
+    ShallowWater,
+    DeepWater,
+    UnkA,
+}
+
+impl TerrainType {
+    pub fn from_nibble(n: u8) -> Option<Self> {
+        Some(match n {
+            0 => Self::Object,
+            1 => Self::Path,
+            2 => Self::Grass,
+            3 => Self::Sand,
+            4 => Self::Snow,
+            5 => Self::Stone,
+            6 => Self::Metal,
+            7 => Self::Wood,
+            8 => Self::ShallowWater,
+            9 => Self::DeepWater,
+            10 => Self::UnkA,
+            _ => return None,
+        })
+    }
+
+    /// The surfaces a line can be cast into. Retail's client-side fishing gate
+    /// accepts both depths (research/xim Scene.kt `canFish`).
+    pub fn is_water(self) -> bool {
+        matches!(self, Self::ShallowWater | Self::DeepWater)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct MzbTriangleInfo {
-    pub material: u8,
+    /// Terrain nibble: bit 15 of each of the four index words, low bit first.
+    /// See [`TerrainType`].
+    pub terrain: u8,
 
     pub is_invalid: bool,
 
     /// Third index word's `0x4000`. Feeds [`double_sided_skip`] — the chase
     /// camera and line-of-sight pass through, movement does not.
     pub camera_transparent: bool,
+}
+
+impl MzbTriangleInfo {
+    pub fn terrain_type(&self) -> Option<TerrainType> {
+        TerrainType::from_nibble(self.terrain)
+    }
 }
 
 /// Third index word: `triangle->VertexIndex3 & 0x4000` in
@@ -515,13 +570,13 @@ fn parse_one_mesh(body: &[u8], pos: usize) -> Result<MzbMesh> {
         let m1 = ((v1_raw >> 15) & 1) as u8;
         let m2 = ((v2_raw >> 15) & 1) as u8;
         let m3 = ((n0_raw >> 15) & 1) as u8;
-        let material = m0 | (m1 << 1) | (m2 << 2) | (m3 << 3);
+        let terrain = m0 | (m1 << 1) | (m2 << 2) | (m3 << 3);
         let is_invalid = (v1_raw & TRI_SECOND_WORD_FLAG) != 0;
         let camera_transparent = (v2_raw & TRI_CAMERA_TRANSPARENT) != 0;
         triangles.push([v0, v1, v2]);
         triangle_normals.push(n0);
         tri_info.push(MzbTriangleInfo {
-            material,
+            terrain,
             is_invalid,
             camera_transparent,
         });
@@ -1532,14 +1587,17 @@ mod tests {
             "indices: v0 masked with 0x7FFF, v1/v2 with 0x3FFF"
         );
         assert_eq!(m.triangle_normals[0], 0);
-        assert_eq!(m.tri_info[0].material, 0b0001, "material from v0 top bit");
+        assert_eq!(
+            m.tri_info[0].terrain, 0b0001,
+            "terrain nibble from v0 top bit"
+        );
         assert!(m.tri_info[0].is_invalid, "is_invalid from v1 bit 14");
         assert!(!m.tri_info[0].camera_transparent);
 
         assert_eq!(m.triangles[1], [0, 2, 3]);
         assert_eq!(
-            m.tri_info[1].material, 0b1100,
-            "material composed from v2 + n0 top bits"
+            m.tri_info[1].terrain, 0b1100,
+            "terrain nibble composed from v2 + n0 top bits"
         );
         assert!(!m.tri_info[1].is_invalid);
         assert!(

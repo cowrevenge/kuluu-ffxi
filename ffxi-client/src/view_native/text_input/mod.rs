@@ -110,6 +110,8 @@ pub struct SlashWriters<'w, 's> {
 
     pub select_target: ResMut<'w, SelectTargetMode>,
 
+    pub fishing_spot: Res<'w, ffxi_viewer_core::fishing_spot::FishingSpot>,
+
     pub active_chat_tab: ResMut<'w, ActiveChatTab>,
 
     pub map_screen_state: ResMut<'w, ffxi_viewer_core::hud::map_screen::MapScreenState>,
@@ -224,6 +226,7 @@ pub fn text_input_system(
                     target_changed,
                     engaged,
                     ffxi_viewer_core::hud::menu::any_usable_item(&scene_state.snapshot),
+                    slash_writers.fishing_spot.0.is_ready(),
                     &cmd_tx.0,
                 ) {
                     *mode = next;
@@ -231,6 +234,7 @@ pub fn text_input_system(
             }
             InputMode::Chat(buffer) => {
                 let action = handle_chat_key(&ev.logical_key, &bindings, buffer);
+                let fishing_gate = slash_writers.fishing_spot.0;
                 apply_chat_action(
                     action,
                     &mut mode,
@@ -248,6 +252,7 @@ pub fn text_input_system(
                     #[cfg(unix)]
                     agent_paused.as_deref(),
                     session_event_tx.as_deref(),
+                    fishing_gate,
                     &mut slash_writers,
                     &mut draw_distance,
                 );
@@ -621,6 +626,7 @@ fn apply_chat_action(
     keybinds_state: &mut KeybindsStateRes,
     #[cfg(unix)] agent_paused: Option<&super::AgentPaused>,
     session_event_tx: Option<&super::SessionEventTx>,
+    fishing_gate: ffxi_viewer_core::fishing_spot::FishingGate,
     slash_writers: &mut SlashWriters,
     draw_distance: &mut ffxi_viewer_core::dat_mzb::DrawDistance,
 ) {
@@ -649,6 +655,7 @@ fn apply_chat_action(
                     scene_state.snapshot.self_char_id,
                     &scene_state.snapshot.party,
                     scene_state.snapshot.myroom,
+                    fishing_gate,
                 );
                 tracing::debug!(buffer = %trimmed, outcome = ?outcome, "chat submit: slash");
 

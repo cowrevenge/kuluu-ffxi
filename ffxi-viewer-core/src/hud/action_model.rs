@@ -15,6 +15,7 @@ pub enum TargetActionId {
     Disengage,
     Check,
     Open,
+    Fish,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -48,6 +49,12 @@ pub struct TargetActionContext {
     /// (`hud::menu::any_usable_item`); when false the "Items" entry is
     /// greyed out (kuluu-268h).
     pub usable_items_available: bool,
+
+    /// Retail's client-side fishing gate: idle, a fishing rod in the ranged
+    /// slot, and water within casting reach ahead. All three must hold before
+    /// "Fish" is offered at all — retail omits the entry rather than greying it
+    /// (research/xim UiState.kt `getCurrentActions`).
+    pub can_fish: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -119,6 +126,11 @@ fn applies_to(id: TargetActionId, kind: TargetKindLite, engaged: bool) -> bool {
         TargetActionId::Trust => matches!(kind, None | Pc | SelfPc),
 
         TargetActionId::Open => matches!(kind, Door),
+
+        // Fishing needs no target; retail keeps the entry available when one
+        // happens to be selected (research/xim UiState.kt `getCurrentActions`
+        // appends it independently of the target).
+        TargetActionId::Fish => true,
     }
 }
 
@@ -137,12 +149,16 @@ pub fn build_target_action_entries(
         TargetActionId::Items,
         TargetActionId::Trade,
         TargetActionId::Disengage,
+        TargetActionId::Fish,
         TargetActionId::Check,
     ];
 
     let mut out = Vec::new();
     for &id in ORDER {
         if id == TargetActionId::Trust && !ctx.trusts_available {
+            continue;
+        }
+        if id == TargetActionId::Fish && !ctx.can_fish {
             continue;
         }
         if !applies_to(id, ctx.target_kind, ctx.engaged) {
@@ -188,6 +204,7 @@ pub fn build_target_action_entries(
             TargetActionId::Trade => (ActionEntryKind::Plain, "Trade".to_string()),
             TargetActionId::Check => (ActionEntryKind::Plain, "Check".to_string()),
             TargetActionId::Open => (ActionEntryKind::Plain, "Open".to_string()),
+            TargetActionId::Fish => (ActionEntryKind::Plain, "Fish".to_string()),
         };
 
         let hint = if out_of_range {
@@ -216,6 +233,7 @@ pub fn context_for_target(
     self_id: Option<u32>,
     engaged: bool,
     usable_items_available: bool,
+    can_fish: bool,
 ) -> TargetActionContext {
     use ffxi_viewer_wire::EntityKind;
 
@@ -249,6 +267,7 @@ pub fn context_for_target(
         trusts_available: false,
         engaged,
         usable_items_available,
+        can_fish,
     }
 }
 
@@ -287,6 +306,7 @@ mod tests {
             trusts_available: false,
             engaged: false,
             usable_items_available: true,
+            can_fish: false,
         }
     }
 

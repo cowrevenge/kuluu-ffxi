@@ -11,6 +11,7 @@ pub(super) fn handle_world_key(
     target_changed: bool,
     engaged: bool,
     usable_items_available: bool,
+    can_fish: bool,
     cmd_tx: &Sender<AgentCommand>,
 ) -> Option<InputMode> {
     if bindings.matches_logical(Action::OpenChat, key) {
@@ -46,15 +47,29 @@ pub(super) fn handle_world_key(
                         self_id,
                         engaged,
                         usable_items_available,
+                        can_fish,
                     )
                 }
             }
-            None => None,
+            // Retail opens the same menu with nothing selected — that is where
+            // the untargeted commands (Magic / Abilities / Items / Fish) live
+            // (research/xim UiState.kt `handleDefaultEnter`). The opener returns
+            // None when the list would be empty, so this cannot pop a blank box.
+            None => open_target_action_menu(
+                current_target,
+                entities,
+                self_pos,
+                self_id,
+                engaged,
+                usable_items_available,
+                can_fish,
+            ),
         };
     }
     None
 }
 
+#[allow(clippy::too_many_arguments)]
 fn open_target_action_menu(
     current_target: Option<u32>,
     entities: &[ffxi_viewer_wire::Entity],
@@ -62,6 +77,7 @@ fn open_target_action_menu(
     self_id: Option<u32>,
     engaged: bool,
     usable_items_available: bool,
+    can_fish: bool,
 ) -> Option<InputMode> {
     use ffxi_viewer_core::hud::action_model;
     let ctx = action_model::context_for_target(
@@ -71,6 +87,7 @@ fn open_target_action_menu(
         self_id,
         engaged,
         usable_items_available,
+        can_fish,
     );
     if action_model::build_target_action_entries(&ctx, &ffxi_viewer_core::hud::overlay::RETAIL)
         .is_empty()
@@ -321,6 +338,12 @@ pub(super) fn confirm_target_action_at_cursor(
                     }
                 }
                 None => push_system_chat_line(scene_state, "[menu] Open: no target".to_string()),
+            }
+            Some(InputMode::World)
+        }
+        TargetActionId::Fish => {
+            if let Err(err) = cmd_tx.try_send(AgentCommand::Fish) {
+                push_system_chat_line(scene_state, format!("[menu] Fish dispatch dropped: {err}"));
             }
             Some(InputMode::World)
         }

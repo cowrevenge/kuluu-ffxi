@@ -17,6 +17,10 @@ const LSB_MOB_SKILLS_SQL: &str = "../vendor/server/sql/mob_skills.sql";
 const LSB_ITEM_BASIC_SQL: &str = "../vendor/server/sql/item_basic.sql";
 const LSB_ITEM_EQUIPMENT_SQL: &str = "../vendor/server/sql/item_equipment.sql";
 const LSB_ITEM_USABLE_SQL: &str = "../vendor/server/sql/item_usable.sql";
+const LSB_ITEM_WEAPON_SQL: &str = "../vendor/server/sql/item_weapon.sql";
+const LSB_ZONE_LUA: &str = "../vendor/server/scripts/enum/zone.lua";
+const LSB_ZONE_SCRIPTS_DIR: &str = "../vendor/server/scripts/zones";
+const LSB_FISHINGUTILS_H: &str = "../vendor/server/src/map/utils/fishingutils.h";
 const LSB_STATUS_EFFECTS_SQL: &str = "../vendor/server/sql/status_effects.sql";
 const LSB_PACKET_S2C_H: &str = "../vendor/server/src/map/enums/packet_s2c.h";
 const LSB_PACKET_C2S_H: &str = "../vendor/server/src/map/enums/packet_c2s.h";
@@ -47,6 +51,10 @@ fn main() -> Result<()> {
     println!("cargo:rerun-if-changed={LSB_ITEM_BASIC_SQL}");
     println!("cargo:rerun-if-changed={LSB_ITEM_EQUIPMENT_SQL}");
     println!("cargo:rerun-if-changed={LSB_ITEM_USABLE_SQL}");
+    println!("cargo:rerun-if-changed={LSB_ITEM_WEAPON_SQL}");
+    println!("cargo:rerun-if-changed={LSB_ZONE_LUA}");
+    println!("cargo:rerun-if-changed={LSB_ZONE_SCRIPTS_DIR}");
+    println!("cargo:rerun-if-changed={LSB_FISHINGUTILS_H}");
     println!("cargo:rerun-if-changed={LSB_STATUS_EFFECTS_SQL}");
     println!("cargo:rerun-if-changed={LSB_PACKET_S2C_H}");
     println!("cargo:rerun-if-changed={LSB_PACKET_C2S_H}");
@@ -387,6 +395,35 @@ fn main() -> Result<()> {
     println!(
         "cargo:warning=ffxi-proto: scraped {} item_usable entries",
         usable_entries.len(),
+    );
+
+    let weapon_src = fs::read_to_string(LSB_ITEM_WEAPON_SQL)
+        .with_context(|| format!("reading {LSB_ITEM_WEAPON_SQL}"))?;
+    let weapon_skill_entries = parse_sql_weapon_skill_rows(&weapon_src)?;
+    write_u16_u8_table(
+        &out_dir.join("weapon_skill_table.rs"),
+        "WEAPON_SKILL",
+        LSB_ITEM_WEAPON_SQL,
+        &weapon_skill_entries,
+    )?;
+    println!(
+        "ffxi-proto: scraped {} item_weapon skill entries",
+        weapon_skill_entries.len(),
+    );
+
+    let fishing_offsets = parse_zone_fishing_message_offsets()?;
+    write_u16_u16_table(
+        &out_dir.join("fishing_zone_offset_table.rs"),
+        "FISHING_ZONE_OFFSET",
+        LSB_ZONE_SCRIPTS_DIR,
+        &fishing_offsets,
+    )?;
+    let fishing_kinds = parse_fish_message_offset_enum()?;
+    write_fish_message_consts(&out_dir.join("fishing_message_consts.rs"), &fishing_kinds)?;
+    println!(
+        "ffxi-proto: scraped {} zone fishing-message offsets and {} message kinds",
+        fishing_offsets.len(),
+        fishing_kinds.len(),
     );
 
     let pkt_s2c_src = fs::read_to_string(LSB_PACKET_S2C_H)
@@ -1101,6 +1138,154 @@ fn parse_lua_indexed_pair_table(
         bail!("parsed zero entries for `{needle_prefix}` — source format may have changed");
     }
     Ok(out)
+}
+
+/// `item_weapon` (itemId, skill). Skill 0 rows carry no skill type and are
+/// dropped so a lookup miss and "no skill" are the same answer.
+fn parse_sql_weapon_skill_rows(src: &str) -> Result<Vec<(u16, u8)>> {
+    const ITEM_ID_FIELD: usize = 0;
+    const SKILL_FIELD: usize = 2;
+
+    let needle = "INSERT INTO `item_weapon` VALUES ";
+    let mut out = Vec::new();
+    for line in src.lines() {
+        let Some(rest) = line.trim().strip_prefix(needle) else {
+            continue;
+        };
+        let mut cursor = rest;
+        while let Some(open) = cursor.find('(') {
+            cursor = &cursor[open + 1..];
+            let Some((tuple, after)) = split_sql_tuple(cursor) else {
+                break;
+            };
+            cursor = after;
+            let fields = split_sql_fields(tuple);
+            let id = fields
+                .get(ITEM_ID_FIELD)
+                .and_then(|s| s.trim().parse::<u16>().ok());
+            let skill = fields
+                .get(SKILL_FIELD)
+                .and_then(|s| s.trim().parse::<u8>().ok());
+            if let (Some(id), Some(skill)) = (id, skill) {
+                if skill != 0 {
+                    out.push((id, skill));
+                }
+            }
+        }
+    }
+    if out.is_empty() {
+        bail!(
+            "parsed zero rows from `INSERT INTO item_weapon` — \
+             the LSB dump layout changed under {LSB_ITEM_WEAPON_SQL}"
+        );
+    }
+    Ok(out)
+}
+
+/// Each zone's `FISHING_MESSAGE_OFFSET` text id, keyed by zone id. LSB reads the
+/// same value at runtime (`fishingutils::LoadFishingMessages`), then adds a
+/// FISHMESSAGEOFFSET to it before putting the result on the wire — so the client
+/// needs the base to recover which fishing message a MesNum is.
+fn parse_zone_fishing_message_offsets() -> Result<Vec<(u16, u16)>> {
+    let zone_src =
+        fs::read_to_string(LSB_ZONE_LUA).with_context(|| format!("reading {LSB_ZONE_LUA}"))?;
+    let mut zone_ids: std::collections::HashMap<String, u16> = std::collections::HashMap::new();
+    for line in zone_src.lines() {
+        let Some((name, rest)) = line.split_once('=') else {
+            continue;
+        };
+        let name = name.trim();
+        if name.is_empty() || !name.chars().all(|c| c.is_ascii_uppercase() || c == '_') {
+            continue;
+        }
+        if let Ok(id) = rest.trim().trim_end_matches(',').parse::<u16>() {
+            zone_ids.insert(name.to_string(), id);
+        }
+    }
+    if zone_ids.is_empty() {
+        bail!("parsed no zone ids out of {LSB_ZONE_LUA}");
+    }
+
+    let mut out = Vec::new();
+    let dir = fs::read_dir(LSB_ZONE_SCRIPTS_DIR)
+        .with_context(|| format!("reading {LSB_ZONE_SCRIPTS_DIR}"))?;
+    for entry in dir.flatten() {
+        let ids_lua = entry.path().join("IDs.lua");
+        let Ok(src) = fs::read_to_string(&ids_lua) else {
+            continue;
+        };
+        let zone_name = src
+            .lines()
+            .find_map(|l| l.trim().strip_prefix("zones[xi.zone.")?.split(']').next())
+            .map(str::to_string);
+        let offset = src.lines().find_map(|l| {
+            let rest = l.split_once("FISHING_MESSAGE_OFFSET")?.1;
+            rest.split_once('=')?
+                .1
+                .split(&[',', '-'][..])
+                .next()?
+                .trim()
+                .parse::<u16>()
+                .ok()
+        });
+        if let (Some(name), Some(offset)) = (zone_name, offset) {
+            if let Some(&id) = zone_ids.get(name.trim()) {
+                out.push((id, offset));
+            }
+        }
+    }
+    if out.is_empty() {
+        bail!("parsed no FISHING_MESSAGE_OFFSET entries under {LSB_ZONE_SCRIPTS_DIR}");
+    }
+    Ok(out)
+}
+
+/// The FISHMESSAGEOFFSET enum: how far past a zone's base each fishing message
+/// sits. vendor/server/src/map/utils/fishingutils.h
+fn parse_fish_message_offset_enum() -> Result<Vec<(String, u8)>> {
+    const PREFIX: &str = "FISHMESSAGEOFFSET_";
+    let src = fs::read_to_string(LSB_FISHINGUTILS_H)
+        .with_context(|| format!("reading {LSB_FISHINGUTILS_H}"))?;
+    let mut out = Vec::new();
+    for line in src.lines() {
+        let line = line.trim();
+        let Some(rest) = line.strip_prefix(PREFIX) else {
+            continue;
+        };
+        let Some((name, value)) = rest.split_once('=') else {
+            continue;
+        };
+        let value = value.trim();
+        let value = value
+            .split_whitespace()
+            .next()
+            .unwrap_or(value)
+            .trim_end_matches(',');
+        let parsed = match value.strip_prefix("0x") {
+            Some(hex) => u8::from_str_radix(hex, 16).ok(),
+            None => value.parse::<u8>().ok(),
+        };
+        if let Some(v) = parsed {
+            out.push((name.trim().to_string(), v));
+        }
+    }
+    if out.is_empty() {
+        bail!("parsed no {PREFIX} entries out of {LSB_FISHINGUTILS_H}");
+    }
+    Ok(out)
+}
+
+fn write_fish_message_consts(out_path: &std::path::Path, entries: &[(String, u8)]) -> Result<()> {
+    let mut out = String::new();
+    out.push_str(&format!(
+        "// AUTO-GENERATED by ffxi-proto/build.rs from {LSB_FISHINGUTILS_H}.\n"
+    ));
+    out.push_str("// Do not edit by hand.\n");
+    for (name, value) in entries {
+        out.push_str(&format!("pub const {name}: u8 = {value};\n"));
+    }
+    fs::write(out_path, &out)?;
+    Ok(())
 }
 
 fn parse_sql_insert_rows(

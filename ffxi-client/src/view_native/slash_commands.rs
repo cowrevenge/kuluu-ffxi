@@ -16,6 +16,9 @@ struct SlashCtx<'a> {
     self_char_id: Option<u32>,
     party: &'a [ffxi_viewer_wire::PartyMember],
     myroom: Option<ffxi_viewer_wire::MyRoom>,
+    /// Retail's client-side fishing gate, evaluated by the renderer against the
+    /// loaded zone collision (`ffxi_viewer_core::fishing_spot`).
+    fishing: ffxi_viewer_core::fishing_spot::FishingGate,
 }
 
 struct Command {
@@ -703,7 +706,13 @@ const COMMANDS: &[(&str, &[Command])] = &[
                 aliases: &["fish"],
                 usage: "",
                 summary: "cast a line (drives the fishing mini-game)",
-                handler: |_| SlashOutcome::Command(AgentCommand::Fish),
+                handler: |c| match c.fishing.refusal() {
+                    // Retail refuses locally rather than asking the server, so
+                    // the rod/bait/water checks never leave the client
+                    // (research/xim FishingStartEvent.kt).
+                    Some(msg) => SlashOutcome::SystemMessage(msg.to_string()),
+                    None => SlashOutcome::Command(AgentCommand::Fish),
+                },
             },
             Command {
                 aliases: &["hook"],
@@ -1215,6 +1224,7 @@ pub fn parse_slash(
     self_char_id: Option<u32>,
     party: &[ffxi_viewer_wire::PartyMember],
     myroom: Option<ffxi_viewer_wire::MyRoom>,
+    fishing: ffxi_viewer_core::fishing_spot::FishingGate,
 ) -> SlashOutcome {
     let trimmed = buffer.trim_start();
     let body = trimmed.strip_prefix('/').unwrap_or(trimmed);
@@ -1237,6 +1247,7 @@ pub fn parse_slash(
         self_char_id,
         party,
         myroom,
+        fishing,
     };
 
     match COMMANDS
@@ -3294,6 +3305,7 @@ mod tests {
             None,
             &[],
             None,
+            ffxi_viewer_core::fishing_spot::FishingGate::Ready,
         )
     }
 
@@ -3356,6 +3368,7 @@ mod tests {
             Some(42),
             &[],
             None,
+            ffxi_viewer_core::fishing_spot::FishingGate::Ready,
         );
         assert!(matches!(
             outcome,
@@ -3415,7 +3428,8 @@ mod tests {
                 None,
                 Some(100),
                 &party,
-                None
+                None,
+                ffxi_viewer_core::fishing_spot::FishingGate::Ready,
             ),
             SlashOutcome::SetTarget(Some(100))
         ));
@@ -3429,7 +3443,8 @@ mod tests {
                 None,
                 Some(100),
                 &party,
-                None
+                None,
+                ffxi_viewer_core::fishing_spot::FishingGate::Ready,
             ),
             SlashOutcome::SetTarget(Some(300))
         ));
@@ -3443,7 +3458,8 @@ mod tests {
                 None,
                 Some(100),
                 &party,
-                None
+                None,
+                ffxi_viewer_core::fishing_spot::FishingGate::Ready,
             ),
             SlashOutcome::SystemMessage(_)
         ));
@@ -4796,6 +4812,7 @@ mod tests {
                 model: 257,
                 sub_map: 0,
             }),
+            ffxi_viewer_core::fishing_spot::FishingGate::Ready,
         );
         match outcome {
             SlashOutcome::Command(AgentCommand::ChangeJob {

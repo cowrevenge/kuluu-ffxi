@@ -421,10 +421,10 @@ pub fn track_entity_motion_system(
         let pos = transform.translation;
 
         let heading_u8 = heading_by_id.get(&world.id).copied().unwrap_or(0);
-        let heading_rad = (heading_u8 as f32) * std::f32::consts::TAU / 256.0;
+        let heading_rad = heading_to_rad(heading_u8);
 
-        let fwd_x = heading_rad.sin();
-        let fwd_z = -heading_rad.cos();
+        let fwd = heading_forward(heading_u8);
+        let (fwd_x, fwd_z) = (fwd.x, fwd.z);
 
         let right_x = fwd_z;
         let right_z = -fwd_x;
@@ -557,6 +557,15 @@ impl EntityPrediction {
 #[inline]
 fn heading_to_rad(heading: u8) -> f32 {
     (heading as f32) * std::f32::consts::TAU / 256.0
+}
+
+/// World-space direction an entity with this heading faces. The one place the
+/// `(sin, -cos)` pairing lives — the motion basis below and the fishing water
+/// probe both come through here rather than re-deriving it.
+#[inline]
+pub fn heading_forward(heading: u8) -> Vec3 {
+    let rad = heading_to_rad(heading);
+    Vec3::new(rad.sin(), 0.0, -rad.cos())
 }
 
 #[inline]

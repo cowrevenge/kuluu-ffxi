@@ -24,6 +24,7 @@ pub enum MenuEntryId {
     TargetDisengage,
     TargetCheck,
     TargetOpen,
+    TargetFish,
 }
 
 impl MenuEntryId {
@@ -40,6 +41,7 @@ impl MenuEntryId {
             TargetActionId::Disengage => MenuEntryId::TargetDisengage,
             TargetActionId::Check => MenuEntryId::TargetCheck,
             TargetActionId::Open => MenuEntryId::TargetOpen,
+            TargetActionId::Fish => MenuEntryId::TargetFish,
         }
     }
 }

@@ -1,7 +1,7 @@
 //! Reports every MZB triangle in a vertical column with all per-triangle
 //! attributes ffxi-dat parses, so a collision predicate can be designed from
 //! data rather than guessed: authored normal (vs the winding-derived one),
-//! is_invalid, camera-transparent bit, material, raw mesh flags, placement
+//! is_invalid, camera-transparent bit, terrain nibble, raw mesh flags, placement
 //! determinant.
 //!
 //! Usage: zz-mzb-tri-probe <zone_id> <x> <y> [<x2> <y2> ...]
@@ -20,7 +20,7 @@ struct Tri {
     geom_n: Vec3,
     invalid: bool,
     camera_transparent: bool,
-    material: u8,
+    terrain: u8,
     mesh_flags: u16,
     det_neg: bool,
 }
@@ -82,7 +82,7 @@ fn main() {
                 geom_n: (v[1] - v[0]).cross(v[2] - v[0]).normalize_or_zero(),
                 invalid: info.is_invalid,
                 camera_transparent: info.camera_transparent,
-                material: info.material,
+                terrain: info.terrain,
                 mesh_flags: m.flags,
                 det_neg: p.flip_winding,
             });
@@ -333,7 +333,7 @@ fn main() {
                 t.geom_n.y,
                 t.invalid,
                 t.camera_transparent,
-                t.material,
+                t.terrain,
                 t.mesh_flags & 1 != 0,
                 t.det_neg
             );

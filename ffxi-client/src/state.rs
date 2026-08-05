@@ -134,6 +134,46 @@ pub fn model_radius(kind: EntityKind) -> f32 {
     }
 }
 
+/// Retail's own decode of the wire speed byte
+/// (research/XIClient .../Game/Net/Packets/s2c, RecvCharPc and RecvServerStatus).
+pub const SPEED_TO_YPS: f32 = 0.1;
+
+// The server does not send a faster speed to a mounted player — LSB caps its
+// mount speed at map.MOUNT_SPEED/2 = 40, *below* the 50 it sends on foot
+// (vendor/server/src/map/entities/battleentity.cpp, CBattleEntity::UpdateSpeed).
+// Retail makes up the difference in the client, doubling the decoded speed while
+// mounted and then clamping
+// (research/XIClient .../World/Actor/ControllableActor.cpp,
+// ControllableActor::StepControl). Taking the packet at face value therefore
+// makes mounting *slower*.
+pub const MOUNTED_SPEED_MULTIPLIER: f32 = 2.0;
+pub const MAX_MOVE_SPEED_YPS: f32 = 30.0;
+
+/// The speed LSB sends an unmounted PC, which every "step per tick" budget in
+/// the reactor is calibrated against
+/// (vendor/server/src/map/entities/battleentity.cpp, CBattleEntity::UpdateSpeed).
+pub const BASE_PACKET_SPEED: u8 = 50;
+
+/// Yalms per second for a decoded packet speed. `speed_base` is a separate value
+/// retail keeps but never spends on the movement rate — `StepControl` reads only
+/// the doubled-and-clamped `speed`, so scaling by `speed / speed_base` would
+/// under-drive a mounted PC rather than over-drive it.
+pub fn move_speed_yps(packet_speed: u8, mounted: bool) -> f32 {
+    let speed = f32::from(packet_speed) * SPEED_TO_YPS;
+    let speed = if mounted {
+        speed * MOUNTED_SPEED_MULTIPLIER
+    } else {
+        speed
+    };
+    speed.min(MAX_MOVE_SPEED_YPS)
+}
+
+/// Movement rate as a multiple of the unmounted run the callers' per-tick step
+/// budgets are sized for.
+pub fn move_speed_ratio(packet_speed: u8, mounted: bool) -> f32 {
+    move_speed_yps(packet_speed, mounted) / move_speed_yps(BASE_PACKET_SPEED, false)
+}
+
 fn merge_kind(existing: EntityKind, incoming: EntityKind) -> EntityKind {
     use EntityKind::*;
     match (existing, incoming) {
@@ -1098,6 +1138,13 @@ impl SessionState {
             .unwrap_or(false)
     }
 
+    /// Riding is read off the broadcast animation byte, not `self_mount_id`:
+    /// 0x037 carries the mount *identity* but the animation byte is what says
+    /// we are on it, and it is the field every observer sees too.
+    pub fn self_mounted(&self) -> bool {
+        ffxi_proto::decode::animation::is_mounted(self.self_server_status)
+    }
+
     pub fn self_position(&self) -> Option<Position> {
         let char_id = self.char_id?;
         self.entities
@@ -1839,13 +1886,20 @@ impl SessionState {
             AgentEvent::FishingCast { .. }
             | AgentEvent::FishingServerPhase { .. }
             | AgentEvent::FishingEnded => false,
+            // Only labels a cast already in flight. The hook message is a plain
+            // zone-dialog line whose index another message in the same zone
+            // could collide with, so it must never be what *starts* the HUD —
+            // the server's FISHING_START phase does that first.
+            AgentEvent::FishHookedSize { size } => match self.self_fishing.as_mut() {
+                Some(f) => {
+                    let changed = f.size != Some(*size);
+                    f.size = Some(*size);
+                    changed
+                }
+                None => false,
+            },
             AgentEvent::FishHooked { params } => {
-                let f = self.self_fishing.get_or_insert(SelfFishing {
-                    phase: 1,
-                    fish: None,
-                    fish_hp: 0,
-                    arrow: None,
-                });
+                let f = self.self_fishing.get_or_insert(SelfFishing::starting(1));
                 let changed = f.fish != Some(*params) || f.fish_hp != params.stamina;
                 f.fish = Some(*params);
                 f.fish_hp = params.stamina;
@@ -1855,12 +1909,7 @@ impl SessionState {
                 Some(p) => {
                     let changed = self.self_fishing.map(|f| f.phase) != Some(*p);
                     self.self_fishing
-                        .get_or_insert(SelfFishing {
-                            phase: *p,
-                            fish: None,
-                            fish_hp: 0,
-                            arrow: None,
-                        })
+                        .get_or_insert(SelfFishing::starting(*p))
                         .phase = *p;
                     changed
                 }
@@ -2244,6 +2293,12 @@ pub enum AgentEvent {
     /// A fish bit; the mini-game can begin. Decoded from 0x115 GP_SERV_COMMAND_FISH.
     FishHooked {
         params: FishParams,
+    },
+
+    /// The hooked-fish size, from the 0x036 TALKNUM the server pushes just
+    /// ahead of 0x115. Only the mini-game bar's label depends on it.
+    FishHookedSize {
+        size: FishSize,
     },
 
     /// Raw self animation phase straight from the 0x037 byte (machine input for the
@@ -2896,6 +2951,15 @@ pub struct FishingArrow {
     pub golden: bool,
 }
 
+/// Which "something caught the hook" line the server sent. Retail labels the
+/// mini-game bar off it (research/xim FishHppUi.kt); nothing in 0x115 carries
+/// the size, so this is the only signal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FishSize {
+    Small,
+    Large,
+}
+
 /// The self player's fishing state, as a view for the renderer/HUD. `None` when not
 /// fishing. The reactor's fishing machine is the authoritative owner; this is the
 /// projection it publishes through the event folder.
@@ -2909,6 +2973,22 @@ pub struct SelfFishing {
     pub fish_hp: u16,
     /// The arrow the player must currently react to, if any.
     pub arrow: Option<FishingArrow>,
+    /// Set by the hook message, which LSB pushes just before 0x115
+    /// (vendor/server/src/map/utils/fishingutils.cpp `SendHookResponse`).
+    pub size: Option<FishSize>,
+}
+
+impl SelfFishing {
+    /// A fresh cast at `phase`, before anything has bitten.
+    pub fn starting(phase: u8) -> Self {
+        Self {
+            phase,
+            fish: None,
+            fish_hp: 0,
+            arrow: None,
+            size: None,
+        }
+    }
 }
 
 /// The self player's in-flight cast/action, as a serializable view for the cast

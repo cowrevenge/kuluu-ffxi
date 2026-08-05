@@ -22,7 +22,7 @@ pub const DEFAULT_MOB_DRAW_DISTANCE: f32 = 50.0;
 
 pub const MMB_LOAD_DISTANCE_MARGIN: f32 = 1.25;
 
-const MZB_MATERIAL_PALETTE: [[f32; 3]; 16] = [
+const MZB_TERRAIN_PALETTE: [[f32; 3]; 16] = [
     [0.85, 0.55, 0.40],
     [0.75, 0.65, 0.45],
     [0.50, 0.65, 0.55],
@@ -152,6 +152,12 @@ pub struct MzbCollisionGeometry {
     /// matching the `tri_normals` fallback convention.
     pub camera_skip: Vec<bool>,
 
+    /// Per triangle, parallel to `indices.chunks(3)`: the MZB terrain nibble
+    /// (`ffxi_dat::mzb::TerrainType`). Read by [`Self::terrain_nearest`], which
+    /// is what the fishing gate asks "is the player facing water". Empty means
+    /// "unknown terrain", matching the `tri_normals` fallback convention.
+    pub tri_terrain: Vec<u8>,
+
     pub cell_index: std::collections::HashMap<(i32, i32), Vec<u32>>,
 
     /// DAT file the triangles came from. Grounding against a zone the player
@@ -226,7 +232,7 @@ impl MzbCollisionGeometry {
 
     pub fn ground_raycast(&self, xz: Vec2, ceiling_y: f32) -> Option<f32> {
         let mut best_y: Option<f32> = None;
-        self.for_each_hit_in_column(xz, |hit_y, normal| {
+        self.for_each_hit_in_column(xz, |_, hit_y, normal| {
             if normal.y < FLOOR_NORMAL_MIN || hit_y > ceiling_y {
                 return;
             }
@@ -250,7 +256,7 @@ impl MzbCollisionGeometry {
     /// walk in Lower Jeuno used to strand the player on a ceiling (kuluu-0nnl).
     pub fn ground_nearest(&self, xz: Vec2, ref_y: f32) -> Option<f32> {
         let mut best: Option<f32> = None;
-        self.for_each_hit_in_column(xz, |hit_y, normal| {
+        self.for_each_hit_in_column(xz, |_, hit_y, normal| {
             if normal.y < FLOOR_NORMAL_MIN {
                 return;
             }
@@ -271,7 +277,7 @@ impl MzbCollisionGeometry {
     /// where a reference Y far below the floor must still snap up.
     pub fn ground_step(&self, xz: Vec2, feet_y: f32, max_rise: f32) -> Option<f32> {
         let mut best: Option<f32> = None;
-        self.for_each_hit_in_column(xz, |hit_y, normal| {
+        self.for_each_hit_in_column(xz, |_, hit_y, normal| {
             if normal.y < FLOOR_NORMAL_MIN || hit_y > feet_y + max_rise {
                 return;
             }
@@ -316,12 +322,29 @@ impl MzbCollisionGeometry {
 
     pub fn ground_raycast_all(&self, xz: Vec2) -> Vec<(f32, Vec3)> {
         let mut hits: Vec<(f32, Vec3)> = Vec::new();
-        self.for_each_hit_in_column(xz, |hit_y, normal| hits.push((hit_y, normal)));
+        self.for_each_hit_in_column(xz, |_, hit_y, normal| hits.push((hit_y, normal)));
         hits.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
         hits
     }
 
-    fn for_each_hit_in_column(&self, xz: Vec2, mut visit: impl FnMut(f32, Vec3)) {
+    /// Terrain of the up-facing floor in this column nearest `ref_y` — the same
+    /// surface [`Self::ground_nearest`] would place an entity on, so "what am I
+    /// standing on / looking at" and "where would I stand" cannot disagree.
+    pub fn terrain_nearest(&self, xz: Vec2, ref_y: f32) -> Option<mzb::TerrainType> {
+        let mut best: Option<(f32, usize)> = None;
+        self.for_each_hit_in_column(xz, |tri_id, hit_y, normal| {
+            if normal.y < FLOOR_NORMAL_MIN {
+                return;
+            }
+            if best.is_none_or(|(prev, _)| (hit_y - ref_y).abs() < (prev - ref_y).abs()) {
+                best = Some((hit_y, tri_id));
+            }
+        });
+        let (_, tri_id) = best?;
+        mzb::TerrainType::from_nibble(*self.tri_terrain.get(tri_id)?)
+    }
+
+    fn for_each_hit_in_column(&self, xz: Vec2, mut visit: impl FnMut(usize, f32, Vec3)) {
         const RAY_ORIGIN_Y: f32 = 1000.0;
         let orig = Vec3::new(xz.x, RAY_ORIGIN_Y, xz.y);
         let dir = Vec3::new(0.0, -1.0, 0.0);
@@ -344,7 +367,13 @@ impl MzbCollisionGeometry {
         }
     }
 
-    fn visit_tri(&self, orig: Vec3, dir: Vec3, tri_id: usize, visit: &mut impl FnMut(f32, Vec3)) {
+    fn visit_tri(
+        &self,
+        orig: Vec3,
+        dir: Vec3,
+        tri_id: usize,
+        visit: &mut impl FnMut(usize, f32, Vec3),
+    ) {
         let base = tri_id * 3;
         let v0 = self.positions[self.indices[base] as usize];
         let v1 = self.positions[self.indices[base + 1] as usize];
@@ -355,7 +384,7 @@ impl MzbCollisionGeometry {
                 Some(n) => *n,
                 None => (v1 - v0).cross(v2 - v0).normalize_or_zero(),
             };
-            visit(hit_y, normal);
+            visit(tri_id, hit_y, normal);
         }
     }
 }
@@ -377,6 +406,7 @@ pub fn build_collision_geometry(
     let mut indices: Vec<u32> = Vec::new();
     let mut tri_normals: Vec<Vec3> = Vec::new();
     let mut camera_skip: Vec<bool> = Vec::new();
+    let mut tri_terrain: Vec<u8> = Vec::new();
     let mut missing = 0usize;
 
     for inst in instances {
@@ -409,6 +439,7 @@ pub fn build_collision_geometry(
                 sub.flags,
                 sub.tri_camera_transparent.get(t).copied().unwrap_or(false),
             ));
+            tri_terrain.push(sub.tri_terrain.get(t).copied().unwrap_or_default());
         }
     }
 
@@ -428,8 +459,38 @@ pub fn build_collision_geometry(
         indices,
         tri_normals,
         camera_skip,
+        tri_terrain,
         source_file_id: file_id,
     }
+}
+
+/// Yalms ahead of the player sampled for water, and the step between samples.
+/// Retail's client-side fishing gate probes the floor at 2, 3 and 4 yalms along
+/// the facing direction and accepts if any of them is water
+/// (research/xim Scene.kt `canFish`).
+const FISH_PROBE_NEAR: f32 = 2.0;
+const FISH_PROBE_FAR: f32 = 4.0;
+const FISH_PROBE_STEP: f32 = 1.0;
+
+/// Whether the player is facing water close enough to cast into — the terrain
+/// half of retail's client-side fishing gate. `facing` is the unit direction the
+/// character model looks along, in Bevy world space.
+///
+/// Grounds each probe on the floor nearest the player's own Y so a pond seen
+/// across a wall from a floor above does not count.
+pub fn facing_water(geom: &MzbCollisionGeometry, pos: Vec3, facing: Vec3) -> bool {
+    let mut d = FISH_PROBE_NEAR;
+    while d <= FISH_PROBE_FAR {
+        let p = pos + facing * d;
+        if geom
+            .terrain_nearest(Vec2::new(p.x, p.z), pos.y)
+            .is_some_and(mzb::TerrainType::is_water)
+        {
+            return true;
+        }
+        d += FISH_PROBE_STEP;
+    }
+    false
 }
 
 fn build_cell_index(
@@ -582,7 +643,7 @@ pub struct MzbSubMesh {
     pub positions: Vec<[f32; 3]>,
     pub indices: Vec<u32>,
 
-    pub tri_material: Vec<u8>,
+    pub tri_terrain: Vec<u8>,
 
     /// Authored face normal per triangle, mesh-local. MZB winding does not
     /// imply facing — measured over Lower Jeuno / Port Jeuno / Windurst Woods /
@@ -736,7 +797,7 @@ fn bake_submesh(m: &mzb::MzbMesh) -> MzbSubMesh {
         .iter()
         .flat_map(|t| [t[0], t[1], t[2]])
         .collect();
-    let tri_material: Vec<u8> = m.tri_info.iter().map(|t| t.material).collect();
+    let tri_terrain: Vec<u8> = m.tri_info.iter().map(|t| t.terrain).collect();
     let tri_normal: Vec<[f32; 3]> = m
         .triangle_normals
         .iter()
@@ -747,7 +808,7 @@ fn bake_submesh(m: &mzb::MzbMesh) -> MzbSubMesh {
     MzbSubMesh {
         positions,
         indices,
-        tri_material,
+        tri_terrain,
         tri_normal,
         tri_camera_transparent,
         flags: m.flags,
@@ -2125,7 +2186,7 @@ fn spawn_mzb_overlay(
         for &i in &sub.indices {
             indices.push(i + base);
         }
-        tri_mat.extend_from_slice(&sub.tri_material);
+        tri_mat.extend_from_slice(&sub.tri_terrain);
     }
 
     let spawn_merged = |commands: &mut Commands,
@@ -2167,7 +2228,7 @@ fn spawn_mzb_overlay(
                 .zip(vert_mat.iter())
                 .map(|(n, &m)| {
                     let shade = 0.4 + 0.6 * (n[1] * 0.5 + 0.5);
-                    let pal = MZB_MATERIAL_PALETTE[(m & 0x0F) as usize];
+                    let pal = MZB_TERRAIN_PALETTE[(m & 0x0F) as usize];
                     [pal[0] * shade, pal[1] * shade, pal[2] * shade, 1.0]
                 })
                 .collect();
@@ -2583,6 +2644,7 @@ mod ground_tests {
             indices,
             tri_normals,
             camera_skip: Vec::new(),
+            tri_terrain: Vec::new(),
             cell_index: std::collections::HashMap::new(),
             source_file_id: None,
         }
@@ -2605,7 +2667,7 @@ mod ground_tests {
                 .map(|v| v.to_array())
                 .collect(),
             indices: floor_at(0.0).1.to_vec(),
-            tri_material: vec![0; 2],
+            tri_terrain: vec![0; 2],
             tri_normal: vec![[0.0, 1.0, 0.0]; 2],
             tri_camera_transparent: transparent.to_vec(),
             flags,

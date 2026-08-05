@@ -25,6 +25,7 @@ pub mod ffxi_actor_render;
 pub mod ffxi_particle_material;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod ffxi_zone_material;
+pub mod fishing_spot;
 pub mod graphics;
 pub use graphics::settings as graphics_settings;
 pub mod hud;
@@ -253,6 +254,7 @@ impl<S: SceneSource + Resource + Component<Mutability = bevy::ecs::component::Mu
             .init_resource::<hud::chat_panel::ChatScrollAccum>()
             .init_resource::<hud::chat_panel::BattleScrollAccum>()
             .init_resource::<hud::chat_panel::DebugScrollAccum>()
+            .init_resource::<fishing_spot::FishingSpot>()
             .init_resource::<scene::SelfAppearance>()
             .init_resource::<nameplate_billboard::BillboardFont>()
             .init_resource::<ui_font::UiFont>()
@@ -318,6 +320,15 @@ impl<S: SceneSource + Resource + Component<Mutability = bevy::ecs::component::Mu
             weather::WeatherSampleSet
                 .before(sun_moon::sun_moon_system)
                 .after(weather_fx::sync_current_weather_from_snapshot),
+        );
+
+        // Native only: the water half of the gate needs the MZB collision, which
+        // the wasm build does not load.
+        #[cfg(not(target_arch = "wasm32"))]
+        app.add_systems(
+            Update,
+            fishing_spot::update_fishing_spot
+                .run_if(resource_exists::<dat_mzb::MzbCollisionGeometry>),
         );
 
         #[cfg(not(target_arch = "wasm32"))]

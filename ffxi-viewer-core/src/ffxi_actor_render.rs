@@ -519,7 +519,7 @@ fn mount_equipment_table_index(race: u8) -> Option<u8> {
 /// A mount built from a PC race config: the skeleton and its `chi?`/run/walk
 /// clips come from the race DAT, the body parts from the race's equipment table
 /// row at model id 0 — a rented chocobo wears none of the trait variants.
-fn load_mount_race(race: u8) -> Result<LoadedActor, String> {
+pub fn load_mount_race(race: u8) -> Result<LoadedActor, String> {
     crate::perf_probe::note_model_load();
     let root = DatRoot::from_env_or_default().map_err(|e| format!("DatRoot: {e}"))?;
     let dll =
@@ -604,17 +604,14 @@ const WAIST_MOTION_OFFSET: u32 = 2;
 // colliding with the upper-body DAT.
 const WAIST_TYPE_MIN: u8 = 1;
 
-/// The race's mount-pose animation DAT.
+/// One DAT off the race's action-animation base.
 /// research/xim poc/Model.kt, PcModel.getMountAnimationResource.
-fn mount_pose_dat(root: &DatRoot, race: u8) -> Option<Vec<u8>> {
+fn action_anim_dat(root: &DatRoot, race: u8, offset: u16) -> Option<Vec<u8>> {
     let dll = ffxi_dat::main_dll::MainDll::load(root.root())
-        .inspect_err(|e| warn!("FFXiMain.dll unreadable, mount poses unavailable: {e}"))
+        .inspect_err(|e| warn!("FFXiMain.dll unreadable, action poses unavailable: {e}"))
         .ok()?;
     let base = dll.base_action_animation_index(race)?;
-    read_dat(
-        root,
-        u32::from(base + ffxi_dat::main_dll::ACTION_ANIM_MOUNT_OFFSET),
-    )
+    read_dat(root, u32::from(base + offset))
 }
 
 pub fn load_pc(
@@ -683,10 +680,19 @@ pub fn load_pc(
     // their own run/walk variants ship in one DAT off the race's action-animation
     // base, and only while riding does retail put it in the animation set.
     if mounted {
-        match mount_pose_dat(&root, race) {
+        match action_anim_dat(&root, race, ffxi_dat::main_dll::ACTION_ANIM_MOUNT_OFFSET) {
             Some(bytes) => anim_dirs.insert(0, ResourceDir::from_bytes(bytes)),
             None => warn!("load_pc race={race}: no mount-pose DAT — rider will not sit"),
         }
+    }
+
+    // Fishing is not a load-time property the way mounting is — any PC in view
+    // can start a cast at any time, and an actor is built once — so the fishing
+    // DAT rides along for every PC. It is a quarter the size of the race base
+    // and carries the `fsh*` routines the pose selector resolves through.
+    match action_anim_dat(&root, race, ffxi_dat::main_dll::ACTION_ANIM_FISHING_OFFSET) {
+        Some(bytes) => anim_dirs.push(ResourceDir::from_bytes(bytes)),
+        None => warn!("load_pc race={race}: no fishing DAT — fishing poses unavailable"),
     }
 
     let resolved_default;
@@ -1099,6 +1105,10 @@ pub struct FfxiRenderActor {
 impl FfxiRenderActor {
     pub fn skin_slot(&self) -> u32 {
         self.skin_slot
+    }
+
+    pub fn world_pose(&self) -> &[Mat4] {
+        &self.world_pose
     }
 
     pub fn instance_slots(&self) -> &[u32] {
@@ -1621,6 +1631,17 @@ fn decoded_texture_to_image(t: &DecodedTexture, q: crate::zone_texture::TextureQ
     )
 }
 
+/// Pose one actor outside the live snapshot path, for the offline render
+/// harnesses. `mount` is what `tick_live_ffxi_actors` derives from the mount
+/// actor's own pose; passing it here keeps the seat maths in one place.
+pub fn advance_actor_pose_standalone(
+    actor: &mut FfxiRenderActor,
+    elapsed_frames: f32,
+    mount: Option<MountAttach>,
+) {
+    advance_actor_pose(actor, elapsed_frames, None, mount);
+}
+
 pub fn tick_ffxi_render_actors(
     time: Res<Time>,
     mut registry: ResMut<FfxiSkinRegistry>,
@@ -1916,7 +1937,20 @@ fn advance_actor_pose(
     // research/xim Actor.kt:361 (updateFishingState) — the fishing macro-pose overrides
     // locomotion/idle/rest. fsh0 (cast/wait) and fsh1 (fighting) loop; fsh2..fsh6
     // (resolution) play once and hold (see the one-shot handling below).
-    let fishing = inputs.fishing_phase.and_then(actor_state::fishing_clip);
+    //
+    // `fsh<n>` is a routine, not a clip: retail enqueues it as a model routine and
+    // the routine's first Motion stage names the real `fh<n>?` animation. Looking
+    // the routine id up in `animations` directly matches nothing, which is why the
+    // pose never played.
+    let fishing = inputs
+        .fishing_phase
+        .and_then(actor_state::fishing_clip)
+        .and_then(|fc| {
+            routine_motion_clip(routines, fc.id).map(|motion| actor_state::FishingClip {
+                id: motion,
+                looping: fc.looping,
+            })
+        });
 
     let mut one_shot_rest = false;
     let (selected_id, is_idle) = if let Some(id) = action_id {
@@ -2461,6 +2495,35 @@ fn saddle_joint_index(race: u8) -> Option<usize> {
         .then(|| SADDLE_JOINT_BASE + usize::from(race - 1))
 }
 
+/// Skeleton space is Y-down, so the seat sits 1.3 yalms *above* the mount's feet.
+/// Retail hard-codes the height for a chocobo rather than reading a joint —
+/// research/XIClient .../World/Actor/SkeletalMeshActor.cpp,
+/// `SkeletalMeshActor::GetElem` (the `IsOnChocobo` branch) — which is why the
+/// chocobo race skeletons leave the whole per-race saddle block unset.
+const CHOCOBO_SEAT_HEIGHT: f32 = -1.3;
+
+/// The nudge xim applies on top of a joint-derived seat, marked in its source as
+/// an unexplained fudge (research/xim resource/SkeletonInstance.kt,
+/// applyMountAttachTransform). It has no counterpart in the chocobo constant.
+const SADDLE_JOINT_NUDGE: Vec3 = Vec3::new(0.0, -0.1, 0.0);
+
+/// Where the rider's hip joint is pinned on the mount it is riding, in the
+/// mount's skeleton space. Both actors share a world transform, so the mount's
+/// own pose needs no reframing to be read as the rider's.
+pub fn mount_seat_local(
+    mount_pose: &[Mat4],
+    mount_skeleton: &Skeleton,
+    rider_race: u8,
+    chocobo: bool,
+) -> Option<Vec3> {
+    if chocobo {
+        return Some(Vec3::new(0.0, CHOCOBO_SEAT_HEIGHT, 0.0));
+    }
+    let joint = saddle_joint_index(rider_race)?;
+    let seat = standard_joint_world_position(mount_pose, mount_skeleton, joint)?;
+    Some(seat + SADDLE_JOINT_NUDGE)
+}
+
 #[derive(Clone, Copy)]
 pub struct SnapshotActorState {
     pos: ffxi_viewer_wire::Vec3,
@@ -2493,6 +2556,9 @@ pub struct SnapshotActorState {
     /// Look race of the rider, on a mount actor's entry. Every mount skeleton
     /// carries one saddle joint per playable race, because each sits differently.
     rider_race: u8,
+    /// Set on a mount actor's entry when it is a ridden chocobo, whose seat is a
+    /// flat height rather than a joint.
+    mount_is_chocobo: bool,
 }
 
 /// Per-entity lookups derived from `SceneState.snapshot.entities`, rebuilt only
@@ -2542,6 +2608,7 @@ pub fn tick_live_ffxi_actors(
                     mount_or_chocobo: mounted,
                     motion_from: None,
                     rider_race: 0,
+                    mount_is_chocobo: false,
                 },
             );
             index.id_by_targid.insert(e.act_index, e.id);
@@ -2562,6 +2629,10 @@ pub fn tick_live_ffxi_actors(
                             Some(ffxi_viewer_wire::EntityLook::Equipped { race, .. }) => race,
                             _ => 0,
                         },
+                        mount_is_chocobo: state
+                            .snapshot
+                            .mount_of(e)
+                            .is_some_and(|m| m.is_chocobo()),
                     },
                 );
             }
@@ -2590,17 +2661,19 @@ pub fn tick_live_ffxi_actors(
         let Some(rider_id) = crate::scene::mount_actor_rider(a.world_id) else {
             continue;
         };
-        let Some(rider_race) = index.by_id.get(&a.world_id).map(|s| s.rider_race) else {
+        let Some(mount_state) = index.by_id.get(&a.world_id) else {
             continue;
         };
-        let Some(joint) = saddle_joint_index(rider_race) else {
-            continue;
-        };
-        if let Some(p) = standard_joint_world_position(&a.world_pose, &a.skeleton, joint) {
+        if let Some(seat) = mount_seat_local(
+            &a.world_pose,
+            &a.skeleton,
+            mount_state.rider_race,
+            mount_state.mount_is_chocobo,
+        ) {
             mount_attach_scratch.insert(
                 rider_id,
                 MountAttach {
-                    mount_joint_world: p,
+                    mount_joint_world: seat,
                     // Heading lives on the entity Transform here, not in the pose
                     // frame, so the rider only takes the mount's own seat rotation.
                     facing_dir: 0.0,

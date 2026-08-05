@@ -276,6 +276,32 @@ impl DialogSession {
         self.ensure_strings(zone);
         self.strings.as_ref()?.text(index)
     }
+
+    /// [`Self::zone_text`] restricted to entries that are actually printable
+    /// lines. An entry carrying a Selection control code is a menu — prompt plus
+    /// options — which retail drives through the event VM and never prints as
+    /// chat, so a chat packet naming one means the server's text ids and this
+    /// install's dialog DAT disagree about where the block starts.
+    ///
+    /// That happens whenever the two were built for different client eras: on
+    /// the LandSandBoat pin under `vendor/`, the fishing block sits 8-10 entries
+    /// above where a May-2023 install has it, so every fishing line would render
+    /// as whatever entry now occupies that index. Returning `None` keeps the
+    /// caller's placeholder — visibly wrong beats plausibly wrong.
+    pub fn zone_chat_text(&mut self, zone: u16, index: usize) -> Option<String> {
+        self.ensure_strings(zone);
+        let dat = self.strings.as_ref()?;
+        if dat.menu(index).is_some() {
+            tracing::warn!(
+                zone,
+                index,
+                "zone message names a menu entry, not a line — server text ids and the \
+                 installed dialog DAT are from different client eras"
+            );
+            return None;
+        }
+        dat.text(index)
+    }
 }
 
 fn frame_to_dialog(

@@ -30,9 +30,18 @@ const EQUIPMENT_SLOT_STRIDE: usize = 0x30;
 const EQUIPMENT_SLOT_BANDS: usize = 6;
 
 /// The mount pose/movement clips a rider needs (`chi?`, `{n}un?`, …) live this far
-/// past the race's action-animation base; fishing sits at +0x01 in the same block.
+/// past the race's action-animation base.
 /// research/xim poc/Model.kt, PcModel.getMountAnimationResource.
 pub const ACTION_ANIM_MOUNT_OFFSET: u16 = 0x05;
+
+/// The fishing DAT, in the same block. It holds the `fsh0`..`fsh9` *routines*
+/// (each naming the `fh0?`..`fhd?` motion clips that live alongside them) plus
+/// the `hits`/`hitl` sweat routines s2c 0x038 SCHEDULOR triggers.
+///
+/// Measured on the retail install: race 1's action base is 38603, and 38604 is
+/// the only DAT in `base..base+8` carrying `fsh*`. Pinned by
+/// `ffxi-viewer-core/tests/fishing_pose_clips.rs`.
+pub const ACTION_ANIM_FISHING_OFFSET: u16 = 0x01;
 
 // research/xim ZoneMapTable.kt
 const ZONE_MAP_HINT: u64 = 0x6400_0001_0001_0100;

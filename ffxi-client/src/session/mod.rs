@@ -3899,7 +3899,7 @@ fn emit_zone_message_chat(
             if let Some(size) = hooked_fish_size(zone_id, msg.message_index) {
                 let _ = event_tx.send(AgentEvent::FishHookedSize { size });
             }
-            let zone_text = dialog_session.zone_text(zone_id, msg.message_index as usize);
+            let zone_text = dialog_session.zone_chat_text(zone_id, msg.message_index as usize);
             let _ = event_tx.send(AgentEvent::ChatLine {
                 line: zone_message_chat_line(&msg, zone_text, character_name),
             });
@@ -3942,7 +3942,7 @@ fn zone_message_chat_line(
             channel,
             sender: speaker.unwrap_or_default(),
             text: format!(
-                "[zone message {} — dialog DAT unavailable; params {:?}]",
+                "[zone message {} — no printable dialog entry; params {:?}]",
                 msg.message_index, msg.nums,
             ),
             server_ts: 0,

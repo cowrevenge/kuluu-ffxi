@@ -226,6 +226,10 @@ impl Auction {
     }
 }
 
+// sizeof(GP_SERV_COMMAND_AUC::PacketData) — a widened GP_AUC_PARAM or
+// GP_AUC_BOX upstream must be caught here, not at runtime.
+const _: () = assert!(Auction::SIZE == 56 && AuctionSaleSlot::SIZE == 40);
+
 const NAME_LEN: usize = 16;
 
 fn name_at(body: &[u8], offset: usize) -> String {

@@ -68,7 +68,7 @@ pub const AH_LIST_ITEMS_PER_PACKET: usize = 20;
 // vendor/server/src/search/packets/auction_history.cpp:30-55
 pub const AH_HISTORY_RESPONSE_TYPE: u8 = 0x85;
 pub const AH_HISTORY_ITEM_OFFSET: usize = 0x18;
-pub const AH_HISTORY_PRICE_OFFSET: usize = 0x1A;
+pub const AH_HISTORY_OPEN_LISTINGS_OFFSET: usize = 0x1A;
 pub const AH_HISTORY_CATEGORY_OFFSET: usize = 0x1E;
 pub const AH_HISTORY_ROWS_OFFSET: usize = 0x20;
 pub const AH_HISTORY_ROW_SIZE: usize = 40;
@@ -246,13 +246,21 @@ impl SearchCrypto {
     }
 }
 
+/// The item ctor overwrites StackAmount for `stackSize == 1` items
+/// (vendor/server/src/search/data_loader.cpp GetAHItemsToCategory).
+pub const AH_NOT_STACKABLE: u32 = u32::MAX;
+
+/// Open-listing COUNTS, not prices — the retail catalog's bracketed `[N]`
+/// stock numbers (data_loader.cpp GetAHItemsToCategory:
+/// SingleAmount = COUNT(*)-SUM(stack), StackAmount = SUM(stack) over
+/// unsold rows). Prices appear only in sale history.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AhListing {
     pub item_id: u16,
-    /// 0 = no single listed (vendor/server/src/search/data_loader.cpp `COUNT(*)-SUM(stack)` price probe)
-    pub single_price: u32,
-    /// 0 = no stack listed
-    pub stack_price: u32,
+    /// Singles currently up for sale; 0 = none listed
+    pub singles_for_sale: u32,
+    /// Stacks currently up for sale; `None` = item is not stackable
+    pub stacks_for_sale: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -292,10 +300,11 @@ pub fn parse_ah_list(body: &[u8]) -> Result<AhListPage, SearchError> {
     let listings = (0..count)
         .map(|i| {
             let off = AH_LIST_ITEMS_OFFSET + AH_LIST_ITEM_SIZE * i;
+            let stacks = rd_u32(body, off + 6);
             AhListing {
                 item_id: rd_u16(body, off),
-                single_price: rd_u32(body, off + 2),
-                stack_price: rd_u32(body, off + 6),
+                singles_for_sale: rd_u32(body, off + 2),
+                stacks_for_sale: (stacks != AH_NOT_STACKABLE).then_some(stacks),
             }
         })
         .collect();
@@ -318,8 +327,10 @@ pub struct AhSale {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AhHistory {
     pub item_id: u16,
-    /// Current cheapest listing for the requested form; 0 = none listed
-    pub current_price: u32,
+    /// Count of open listings of the requested form (single vs stack), not a
+    /// price (auction_history.cpp ctor takes GetAHItemFromItemID's
+    /// Single/StackAmount; the not-stackable override does not apply here)
+    pub open_listings: u32,
     pub category: u16,
     pub sales: Vec<AhSale>,
 }
@@ -368,7 +379,7 @@ pub fn parse_ah_history(body: &[u8]) -> Result<AhHistory, SearchError> {
         .collect();
     Ok(AhHistory {
         item_id: rd_u16(body, AH_HISTORY_ITEM_OFFSET),
-        current_price: rd_u32(body, AH_HISTORY_PRICE_OFFSET),
+        open_listings: rd_u32(body, AH_HISTORY_OPEN_LISTINGS_OFFSET),
         category: rd_u16(body, AH_HISTORY_CATEGORY_OFFSET),
         sales,
     })
@@ -491,6 +502,20 @@ mod tests {
         }
     }
 
+    /// The `len-0x18` seed word sits inside the MD5-hashed span — the subtlest
+    /// part of the framing (a hash starting after it would still roundtrip).
+    #[test]
+    fn seed_word_is_inside_hash_coverage() {
+        let mut client = SearchCrypto::new();
+        let mut frame = client.encode_ah_list_request(1, &[], CLIENT_KEY);
+        let seed_off = frame.len() - SERVER_KEY_FROM_END;
+        let mut server = LsbServer::new();
+        server.decrypt(&mut frame);
+        assert!(server.validate(&frame));
+        frame[seed_off] ^= 0xFF;
+        assert!(!server.validate(&frame));
+    }
+
     #[test]
     fn tampered_request_fails_lsb_validation() {
         let mut client = SearchCrypto::new();
@@ -551,13 +576,13 @@ mod tests {
             vec![
                 AhListing {
                     item_id: 4096,
-                    single_price: 120,
-                    stack_price: 1100
+                    singles_for_sale: 120,
+                    stacks_for_sale: Some(1100)
                 },
                 AhListing {
                     item_id: 4097,
-                    single_price: 0,
-                    stack_price: 900
+                    singles_for_sale: 0,
+                    stacks_for_sale: Some(900)
                 },
             ]
         );
@@ -638,7 +663,7 @@ mod tests {
         frame[0x10..0x12].copy_from_slice(&item_id.to_le_bytes());
         frame[AH_HISTORY_ITEM_OFFSET..AH_HISTORY_ITEM_OFFSET + 2]
             .copy_from_slice(&item_id.to_le_bytes());
-        frame[AH_HISTORY_PRICE_OFFSET..AH_HISTORY_PRICE_OFFSET + 4]
+        frame[AH_HISTORY_OPEN_LISTINGS_OFFSET..AH_HISTORY_OPEN_LISTINGS_OFFSET + 4]
             .copy_from_slice(&price.to_le_bytes());
         frame[AH_HISTORY_CATEGORY_OFFSET..AH_HISTORY_CATEGORY_OFFSET + 2]
             .copy_from_slice(&category.to_le_bytes());
@@ -667,7 +692,7 @@ mod tests {
         let frame = build_history_response(4096, 120, 12, &rows);
         let history = parse_ah_history(&frame).unwrap();
         assert_eq!(history.item_id, 4096);
-        assert_eq!(history.current_price, 120);
+        assert_eq!(history.open_listings, 120);
         assert_eq!(history.category, 12);
         assert_eq!(history.sales.len(), 2);
         assert_eq!(
@@ -687,7 +712,7 @@ mod tests {
         let frame = build_history_response(4096, 0, 12, &[]);
         let history = parse_ah_history(&frame).unwrap();
         assert!(history.sales.is_empty());
-        assert_eq!(history.current_price, 0);
+        assert_eq!(history.open_listings, 0);
     }
 
     #[test]

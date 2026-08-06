@@ -117,7 +117,10 @@ pub fn reset_interaction_flags_on_zone_change(
     *rest = ffxi_viewer_core::combat_stance::RestStance::default();
     // Swing the camera behind the character's new facing on every zone-in,
     // in both chase and first person (retail resets the view to look ahead).
+    // Snap rather than smooth: the player teleported, so a lerp would smear
+    // the eye across the two zones' coordinates.
     chase.yaw = ffxi_viewer_core::yaw_for_heading(state.snapshot.self_pos.heading);
+    chase.snap_to_anchor = true;
 }
 
 pub fn advance_heading_turn(

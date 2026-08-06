@@ -92,6 +92,10 @@ pub struct ChaseCamera {
     pub smoothing: f32,
 
     pub synced_initial: bool,
+
+    /// Set on zone-in: the player teleported, so the next chase update places
+    /// the eye directly behind them instead of smoothing across zones.
+    pub snap_to_anchor: bool,
 }
 
 impl ChaseCamera {
@@ -173,6 +177,7 @@ impl Default for ChaseCamera {
             distance: Self::DIST_MAX,
             smoothing: 0.18,
             synced_initial: false,
+            snap_to_anchor: false,
         }
     }
 }
@@ -362,7 +367,12 @@ pub fn chase_camera_system(
     let radius = chase.orbit_radius();
     let desired = anchor + yaw_dir * (radius * cos_p) + Vec3::Y * (radius * sin_p);
 
-    cam_t.translation = cam_t.translation.lerp(desired, chase.smoothing);
+    if chase.snap_to_anchor {
+        cam_t.translation = desired;
+        chase.snap_to_anchor = false;
+    } else {
+        cam_t.translation = cam_t.translation.lerp(desired, chase.smoothing);
+    }
     cam_t.look_at(anchor, Vec3::Y);
 }
 
@@ -527,6 +537,61 @@ mod tests {
         assert!(
             (look - expected).length() < 1e-6,
             "look {look:?} != expected {expected:?}"
+        );
+    }
+
+    #[test]
+    fn snap_to_anchor_places_eye_behind_player_without_smoothing() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .insert_resource(CameraMode::Chase)
+            .insert_resource(SceneState::default())
+            .insert_resource(ChaseCamera {
+                snap_to_anchor: true,
+                ..Default::default()
+            })
+            .add_systems(Update, chase_camera_system);
+        let player_pos = Vec3::new(10.0, 1.0, -4.0);
+        app.world_mut()
+            .spawn((IsSelf, Transform::from_translation(player_pos)));
+        let cam = app
+            .world_mut()
+            .spawn((OperatorCamera, Transform::from_xyz(999.0, 500.0, -999.0)))
+            .id();
+
+        app.update();
+
+        let chase = app.world().resource::<ChaseCamera>();
+        assert!(!chase.snap_to_anchor, "snap flag consumed by the update");
+        let expected_yaw = yaw_for_heading(
+            app.world()
+                .resource::<SceneState>()
+                .snapshot
+                .self_pos
+                .heading,
+        );
+        assert_eq!(
+            chase.yaw, expected_yaw,
+            "zone-in yaw follows player heading"
+        );
+
+        let anchor = player_pos + Vec3::Y * third_person_anchor_y(None);
+        let radius = chase.orbit_radius();
+        let yaw_dir = Vec3::new(expected_yaw.sin(), 0.0, expected_yaw.cos());
+        let expected_eye = anchor
+            + yaw_dir * (radius * chase.pitch.cos())
+            + Vec3::Y * (radius * chase.pitch.sin());
+        let cam_t = *app.world().get::<Transform>(cam).unwrap();
+        assert!(
+            (cam_t.translation - expected_eye).length() < 1e-4,
+            "eye {:?} snapped to {expected_eye:?} behind the player, no lerp from the old zone",
+            cam_t.translation
+        );
+        let look = *cam_t.forward();
+        let want = (anchor - expected_eye).normalize();
+        assert!(
+            (look - want).length() < 1e-4,
+            "camera faces along the player's heading: {look:?} != {want:?}"
         );
     }
 

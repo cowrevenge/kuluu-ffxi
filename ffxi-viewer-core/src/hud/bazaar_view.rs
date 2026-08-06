@@ -98,18 +98,7 @@ pub fn purchase_prompt(item_name: &str, quantity: u32, total_gil: u32) -> String
     )
 }
 
-/// Retail writes gil with thousands separators everywhere it shows a price.
-pub fn group_digits(value: u32) -> String {
-    let digits = value.to_string();
-    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
-    for (i, c) in digits.chars().enumerate() {
-        if i > 0 && (digits.len() - i).is_multiple_of(3) {
-            out.push(',');
-        }
-        out.push(c);
-    }
-    out
-}
+pub use ffxi_proto::gil::group_digits;
 
 #[derive(Component)]
 pub struct BazaarPanel;
@@ -435,15 +424,6 @@ mod tests {
         assert_eq!(e.total_price(3), 3150);
         // A tax-free zone charges the asking price exactly.
         assert_eq!(entry(1, 4096, 12, 1000, 0).total_price(4), 4000);
-    }
-
-    #[test]
-    fn prices_group_into_thousands_like_retail() {
-        assert_eq!(group_digits(0), "0");
-        assert_eq!(group_digits(999), "999");
-        assert_eq!(group_digits(24_999), "24,999");
-        assert_eq!(group_digits(14_000_000), "14,000,000");
-        assert_eq!(group_digits(1_389_292), "1,389,292");
     }
 
     #[test]

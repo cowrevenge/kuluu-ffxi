@@ -10,6 +10,7 @@ pub mod entity_stream;
 pub mod equip_info;
 pub mod fishing_messages;
 pub mod framing;
+pub mod gil;
 pub mod item_flags;
 pub mod item_names;
 pub mod item_usable;

@@ -136,7 +136,7 @@ impl DeliveryBoxSession {
                 if let Some(item) = item_of(r) {
                     out.notices.push(format!(
                         "The {} you sent to {} was delivered.",
-                        item_name(item.item_no),
+                        parcel_name(&item),
                         item.counterpart.as_deref().unwrap_or("someone"),
                     ));
                 }
@@ -155,7 +155,7 @@ impl DeliveryBoxSession {
                     // slot (artifacts/retail/moghouse-menu-notes.md).
                     out.notices.push(format!(
                         "You take the {} out of delivery slot {}.",
-                        item_name(item.item_no),
+                        parcel_name(&item),
                         slot + 1,
                     ));
                 }
@@ -167,7 +167,7 @@ impl DeliveryBoxSession {
                 if let Some(item) = item_of(r).or_else(|| self.slots[slot as usize].clone()) {
                     out.notices.push(format!(
                         "The {} was returned to {}.",
-                        item_name(item.item_no),
+                        parcel_name(&item),
                         item.counterpart.as_deref().unwrap_or("its sender"),
                     ));
                 }
@@ -280,6 +280,17 @@ pub fn item_name(item_no: u16) -> String {
     ffxi_proto::item_names::lookup(item_no)
         .map(str::to_string)
         .unwrap_or_else(|| format!("item #{item_no}"))
+}
+
+/// How a parcel reads in a chat line. Gil is one delivery cell holding an
+/// amount rather than a countable item (LSB item 65535), so the bare name
+/// would say nothing about how much arrived.
+fn parcel_name(item: &DeliveryItem) -> String {
+    if item.item_no == ffxi_proto::map::GIL_ITEM_NO {
+        format!("{} gil", ffxi_proto::gil::group_digits(item.quantity))
+    } else {
+        item_name(item.item_no)
+    }
 }
 
 #[cfg(test)]
@@ -447,6 +458,28 @@ mod tests {
             .notices
             .iter()
             .any(|n| n.contains("You take") && n.ends_with("out of delivery slot 4.")));
+    }
+
+    /// A gil parcel is one cell holding an amount, so the take line has to name
+    /// the amount — "the Gil" tells the player nothing.
+    #[test]
+    fn taking_gil_names_the_amount() {
+        let mut s = DeliveryBoxSession::default();
+        s.open = Some(DeliveryBoxNo::Incoming);
+        s.slots[0] = Some(DeliveryItem {
+            item_no: ffxi_proto::map::GIL_ITEM_NO,
+            quantity: 1_250_000,
+            counterpart: Some("Oldman".into()),
+            stat: pbx::stat::INCOMING,
+        });
+
+        let mut get = result(pbx::command::GET, DeliveryBoxNo::Incoming, pbx::result::OK);
+        get.post_work_no = 0;
+        let out = s.on_result(&get);
+        assert_eq!(
+            out.notices,
+            vec!["You take the 1,250,000 gil out of delivery slot 1.".to_string()]
+        );
     }
 
     /// Inventory-full Get (0xB9) keeps the slot and surfaces the retail error.

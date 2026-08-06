@@ -330,12 +330,15 @@ impl BtnId {
         }
     }
 
+    /// Retail's Receive panel labels the send-back button "Return"
+    /// (artifacts/retail/moghouse-menu-notes.md); the wire command behind it is
+    /// PBX Reject.
     fn caption(self) -> &'static str {
         match self {
             BtnId::Send => "Send",
             BtnId::Exit => "Exit",
             BtnId::Take => "Take",
-            BtnId::Reject => "Reject",
+            BtnId::Reject => "Return",
         }
     }
 }
@@ -906,14 +909,16 @@ fn text_value(
                 None => (String::new(), theme::MUTED, true),
             }
         }
+        // Retail shows Current Gil on both panels, comma-grouped with a " G"
+        // suffix (artifacts/retail/moghouse-menu-notes.md).
         Role::GilLine => (
-            format!("Current Gil  {gil} G"),
+            format!("Current Gil  {} G", ffxi_proto::gil::group_digits(gil)),
             if matches!(screen.focus, DeliveryFocus::Gil) {
                 theme::CURSOR
             } else {
                 theme::TEXT
             },
-            outgoing,
+            true,
         ),
         Role::SpinnerLine => match &screen.selector {
             Some(b) => (b.spinner.label(), theme::CURSOR, true),
@@ -952,7 +957,7 @@ fn text_value(
                 None => (String::new(), theme::TEXT, false),
             }
         }
-        Role::Button(id) => (id.caption().to_string(), theme::TEXT, false),
+        Role::Button(id) => (id.caption().to_string(), theme::TEXT, true),
         Role::Hint => {
             let other = if outgoing { "Received" } else { "Send" };
             (
@@ -1014,6 +1019,64 @@ mod tests {
             inv_len: 0,
             recipient_ok: false,
         }
+    }
+
+    fn button_text(id: BtnId) -> (String, bool) {
+        let state = DeliveryBoxState {
+            box_no: DeliveryBoxNo::Incoming,
+            slots: vec![None; ffxi_proto::map::pbx::SLOT_COUNT],
+            ..Default::default()
+        };
+        let (text, _, visible) = text_value(
+            Role::Button(id),
+            &state,
+            &DeliveryScreenState::default(),
+            false,
+            false,
+            0,
+            &[],
+            0,
+            0,
+            "",
+            &[],
+        );
+        (text, visible)
+    }
+
+    /// Same empty-box cause as the buttons: the Current Gil frame is spawned
+    /// for both panels, so its text has to render on the Receive panel too.
+    #[test]
+    fn current_gil_line_renders_on_the_receive_panel() {
+        let state = DeliveryBoxState {
+            box_no: DeliveryBoxNo::Incoming,
+            slots: vec![None; ffxi_proto::map::pbx::SLOT_COUNT],
+            ..Default::default()
+        };
+        let (text, _, visible) = text_value(
+            Role::GilLine,
+            &state,
+            &DeliveryScreenState::default(),
+            false,
+            false,
+            80_146,
+            &[],
+            0,
+            0,
+            "",
+            &[],
+        );
+        assert_eq!(text, "Current Gil  80,146 G");
+        assert!(visible);
+    }
+
+    /// The action buttons rendered as empty bordered boxes: the frame showed
+    /// but its caption was pinned to `Display::None`.
+    #[test]
+    fn action_buttons_show_their_retail_captions() {
+        assert_eq!(button_text(BtnId::Take), ("Take".to_string(), true));
+        assert_eq!(button_text(BtnId::Reject), ("Return".to_string(), true));
+        assert_eq!(button_text(BtnId::Send), ("Send".to_string(), true));
+        assert_eq!(button_text(BtnId::Exit), ("Exit".to_string(), true));
     }
 
     #[test]

@@ -420,40 +420,71 @@ pub fn text_input_system(
 pub fn dialog_mode_sync_system(
     state: Res<SceneState>,
     mut mode: ResMut<InputMode>,
-    mut last_grid_id: Local<Option<(u32, u16)>>,
+    mut cursors: Local<DialogCursors>,
 ) {
     let dialog = state.snapshot.dialog.as_ref();
     match (&*mode, dialog.is_some()) {
-        (InputMode::World, true) => {
-            let mut cursor = DialogCursor::default();
-            if let Some(choice) = dialog.and_then(default_grid_choice) {
-                cursor.cursor = choice;
-            }
-            *mode = InputMode::Dialog(cursor);
-        }
+        (InputMode::World, true) => *mode = InputMode::Dialog(DialogCursor::default()),
         (InputMode::Dialog(_), false) => {
             *mode = InputMode::World;
+            cursors.closed();
         }
         _ => {}
     }
-
-    // A grid frame (delivery box) can open while already in Dialog mode (from
-    // the Mog Menu), so the transition arm above never fires for it. Snap the
-    // cursor onto the first grid cell the first time each grid frame appears so
-    // the box — not the trailing Cancel row — is focused by default.
-    let grid_id = dialog.and_then(|d| {
-        d.grid
-            .as_ref()
-            .map(|_| (d.event_id, d.choices.len() as u16))
-    });
-    if grid_id != *last_grid_id {
-        *last_grid_id = grid_id;
-        if let (InputMode::Dialog(cursor), Some(dialog)) = (&mut *mode, dialog) {
-            if let Some(choice) = default_grid_choice(dialog) {
-                cursor.cursor = choice;
-            }
-        }
+    let InputMode::Dialog(cursor) = &mut *mode else {
+        return;
+    };
+    let first_row = dialog.and_then(default_grid_choice).unwrap_or_default();
+    if let Some(row) = cursors.switch(dialog.map(frame_id), cursor.cursor, first_row) {
+        cursor.cursor = row;
     }
+}
+
+/// Per-menu cursor memory. A submenu replaces the dialog frame in place while
+/// Dialog mode stays active (the Mog Menu's Delivery Box row, the delivery
+/// grid), so without this the cursor keeps the parent row's index — which is
+/// why "Delivery Box" (row 2) opened onto "Send" (row 2) instead of "Receive".
+/// Retail opens each menu on its first row and restores the row a menu was left
+/// on when Esc backs out (artifacts/retail/moghouse-menu-notes.md).
+#[derive(Default)]
+pub struct DialogCursors {
+    open: Option<u64>,
+    seen: std::collections::HashMap<u64, u32>,
+}
+
+impl DialogCursors {
+    /// Files `cursor` under the frame being left and returns the row the newly
+    /// shown `frame` opens on — `None` while the frame is unchanged.
+    fn switch(&mut self, frame: Option<u64>, cursor: u32, first_row: u32) -> Option<u32> {
+        if frame == self.open {
+            return None;
+        }
+        if let Some(left) = self.open {
+            self.seen.insert(left, cursor);
+        }
+        self.open = frame;
+        let frame = frame?;
+        Some(self.seen.get(&frame).copied().unwrap_or(first_row))
+    }
+
+    fn closed(&mut self) {
+        self.open = None;
+        self.seen.clear();
+    }
+}
+
+/// Which menu is on screen, for cursor bookkeeping. Deliberately blind to the
+/// choice *labels*: the delivery grid rewrites its cell captions as slots fill
+/// and stack counts change, and that must not read as a new menu.
+fn frame_id(dialog: &ffxi_viewer_wire::DialogState) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    dialog.event_id.hash(&mut hasher);
+    dialog.npc_id.hash(&mut hasher);
+    dialog.prompt.hash(&mut hasher);
+    dialog.choices.len().hash(&mut hasher);
+    dialog.text_entry.hash(&mut hasher);
+    hasher.finish()
 }
 
 /// The choice index the cursor should default to for a grid dialog: the first
@@ -1942,6 +1973,73 @@ fn handle_passive_cursor_key(
             }
             None
         }
+    }
+}
+
+#[cfg(test)]
+mod dialog_cursor_tests {
+    use super::*;
+
+    const NO_GRID: u32 = 0;
+    const MOG_ROOT: u64 = 1;
+    const DELIVERY_SUBMENU: u64 = 2;
+
+    /// Picking "Delivery Box" (row 2 of the Mog Menu) must open the
+    /// Receive/Send submenu on Receive, not carry row 2 into it and land on
+    /// Send.
+    #[test]
+    fn a_submenu_opens_on_its_first_row() {
+        let mut cursors = DialogCursors::default();
+        assert_eq!(cursors.switch(Some(MOG_ROOT), 0, NO_GRID), Some(0));
+        assert_eq!(
+            cursors.switch(Some(DELIVERY_SUBMENU), 1, NO_GRID),
+            Some(0),
+            "the parent's row does not follow us in"
+        );
+    }
+
+    /// ...and backing out puts the parent's cursor back where it was.
+    #[test]
+    fn backing_out_restores_the_parent_row() {
+        let mut cursors = DialogCursors::default();
+        cursors.switch(Some(MOG_ROOT), 0, NO_GRID);
+        cursors.switch(Some(DELIVERY_SUBMENU), 1, NO_GRID);
+        assert_eq!(
+            cursors.switch(Some(MOG_ROOT), 0, NO_GRID),
+            Some(1),
+            "Delivery Box is still the highlighted root row"
+        );
+    }
+
+    /// A redraw of the same frame (delivery slots filling in) must not move the
+    /// cursor the player put somewhere.
+    #[test]
+    fn an_unchanged_frame_leaves_the_cursor_alone() {
+        let mut cursors = DialogCursors::default();
+        cursors.switch(Some(DELIVERY_SUBMENU), 0, NO_GRID);
+        assert_eq!(cursors.switch(Some(DELIVERY_SUBMENU), 2, NO_GRID), None);
+    }
+
+    /// Closing the dialog forgets everything: the next conversation starts
+    /// fresh rather than reopening on a stale row.
+    #[test]
+    fn closing_the_dialog_clears_the_memory() {
+        let mut cursors = DialogCursors::default();
+        cursors.switch(Some(MOG_ROOT), 0, NO_GRID);
+        cursors.switch(Some(DELIVERY_SUBMENU), 3, NO_GRID);
+        cursors.closed();
+        assert_eq!(cursors.switch(Some(DELIVERY_SUBMENU), 0, NO_GRID), Some(0));
+    }
+
+    /// A grid frame opens on its first cell, not row 0.
+    #[test]
+    fn a_grid_frame_opens_on_its_first_cell() {
+        const FIRST_CELL: u32 = 1;
+        let mut cursors = DialogCursors::default();
+        assert_eq!(
+            cursors.switch(Some(DELIVERY_SUBMENU), 0, FIRST_CELL),
+            Some(FIRST_CELL)
+        );
     }
 }
 

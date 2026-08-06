@@ -2374,7 +2374,7 @@ pub fn poll_load_actor_tasks(
     mut in_flight: ResMut<ActorLoadInFlight>,
     q_existing: Query<&FfxiRenderRoot>,
     q_ball: Query<&MeshMaterial3d<StandardMaterial>, With<Mesh3d>>,
-    q_self: Query<(), With<crate::components::IsSelf>>,
+    state: Res<crate::snapshot::SceneState>,
 ) {
     if in_flight.tasks.is_empty() && in_flight.ready.is_empty() {
         return;
@@ -2445,13 +2445,17 @@ pub fn poll_load_actor_tasks(
         // sync and the model shares its transform, so neither can be reshaped.
         // A reload has no resting orb to consume and just regrows the model.
         //
-        // Retail materialises no column on the player's own body — it is simply
-        // there when the screen fades in (retail capture, Upper Jeuno ->
-        // Rolanberry Fields, 2026-08-04). Ours ran on every zone-in.
-        let orb = q_self
-            .get(wire_entity)
-            .is_err()
-            .then(|| q_ball.get(wire_entity).ok())
+        // The placeholder ball is the stand-in for a body that has not loaded
+        // yet, so the model arriving consumes it either way. What retail skips
+        // for self is only the morph-in column it would have stretched into
+        // (retail capture, Upper Jeuno -> Rolanberry Fields, 2026-08-04) —
+        // skipping the whole branch here stranded the ball on the player.
+        let resting_ball = q_ball.get(wire_entity).ok();
+        if resting_ball.is_some() {
+            commands.entity(wire_entity).remove::<Mesh3d>();
+        }
+        let orb = (Some(entity_id) != state.snapshot.self_char_id)
+            .then_some(resting_ball)
             .flatten()
             .and_then(|mm| {
                 let lit = std_materials.get(&mm.0).map(|m| {
@@ -2461,7 +2465,6 @@ pub fn poll_load_actor_tasks(
                 })?;
                 let emissive = lit.emissive;
                 let handle = std_materials.add(lit);
-                commands.entity(wire_entity).remove::<Mesh3d>();
                 let orb = commands
                     .spawn((
                         Mesh3d(entity_mesh.morph_orb.clone()),

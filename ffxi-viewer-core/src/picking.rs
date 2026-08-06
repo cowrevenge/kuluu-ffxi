@@ -1,5 +1,5 @@
 use bevy::light::{NotShadowCaster, NotShadowReceiver};
-use bevy::picking::events::{Out, Over};
+use bevy::picking::hover::HoverMap;
 use bevy::picking::mesh_picking::MeshPickingPlugin;
 use bevy::picking::pointer::{PointerButton, PointerId};
 use bevy::picking::prelude::*;
@@ -119,11 +119,23 @@ fn hitbox_dims(kind: EntityKind, baked: Option<&BakedActor>) -> (f32, f32, f32) 
     (half_width, box_height, center_y)
 }
 
+/// The self hitbox reports its hits without blocking the ray: the box is
+/// deliberately oversized, so a target in front of, inside, or behind it must
+/// still reach the hover map and outrank self via [`choose_hovered_id`].
+const SELF_PICKABLE: Pickable = Pickable {
+    should_block_lower: false,
+    is_hoverable: true,
+};
+
 /// Retail selects your own character on a click like any other actor. The
 /// first-person eye sits inside the hitbox, where the box would swallow every
 /// world click, so the self box is a click surface in chase view only.
-pub fn self_hitbox_pickable(mode: CameraMode) -> bool {
-    matches!(mode, CameraMode::Chase)
+pub fn self_hitbox_pickable(mode: CameraMode) -> Pickable {
+    if matches!(mode, CameraMode::Chase) {
+        SELF_PICKABLE
+    } else {
+        Pickable::IGNORE
+    }
 }
 
 fn sync_entity_hitboxes(
@@ -138,16 +150,27 @@ fn sync_entity_hitboxes(
         Has<IsSelf>,
     )>,
     mut q_box: Query<(&mut Transform, &mut Pickable), With<EntityHitbox>>,
+    mut q_root_pick: Query<&mut Pickable, (With<WorldEntity>, Without<EntityHitbox>)>,
 ) {
     for (parent_e, world, baked, child, is_self) in &q_entity {
         let (half_width, box_height, center_y) = hitbox_dims(world.kind, baked);
         let translation = Vec3::new(0.0, center_y, 0.0);
         let scale = Vec3::new(half_width * 2.0, box_height, half_width * 2.0);
-        let pickable = if is_self && !self_hitbox_pickable(*camera_mode) {
-            Pickable::IGNORE
+        let pickable = if is_self {
+            self_hitbox_pickable(*camera_mode)
         } else {
             Pickable::default()
         };
+        // The placeholder ball rides the entity root with a blocking Pickable;
+        // self's root gets the same non-blocking surface as its hitbox so a
+        // target behind the player is reachable through it too.
+        if is_self {
+            if let Ok(mut root_pick) = q_root_pick.get_mut(parent_e) {
+                if *root_pick != pickable {
+                    *root_pick = pickable;
+                }
+            }
+        }
 
         match child {
             Some(HitboxChild(box_e)) => {
@@ -188,36 +211,71 @@ fn sync_entity_hitboxes(
 }
 
 pub fn update_hovered_entity_system(
-    mut over_events: MessageReader<Pointer<Over>>,
-    mut out_events: MessageReader<Pointer<Out>>,
+    hover_map: Res<HoverMap>,
+    bridge: Res<PickBridgePointer>,
+    scene: Res<crate::snapshot::SceneState>,
     world_q: Query<&WorldEntity>,
     parent_q: Query<&ChildOf>,
     nameplate_q: Query<&Nameplate>,
-    bridge: Res<PickBridgePointer>,
     mut hovered: ResMut<HoveredEntity>,
 ) {
-    let accept = |id: PointerId| id == PointerId::Mouse || Some(id) == bridge.0;
-    for ev in out_events.read() {
-        if !accept(ev.pointer_id) {
-            continue;
-        }
-        if let Some(id) = resolve_hit_entity_id(ev.entity, &world_q, &parent_q, &nameplate_q) {
-            if hovered.id == Some(id) {
-                hovered.id = None;
-            }
+    let id = priority_hover_id(
+        &hover_map,
+        &bridge,
+        &world_q,
+        &parent_q,
+        &nameplate_q,
+        scene.snapshot.self_char_id,
+    );
+    if hovered.id != id {
+        hovered.id = id;
+    }
+}
+
+/// The self hitbox reports without blocking, so several entities can sit under
+/// one pointer; gather every resolved (id, depth) and let [`choose_hovered_id`]
+/// rank them. Hits from the mouse and the render-scale bridge pointer count
+/// alike; id 0 is the self entity before its char id arrives.
+fn priority_hover_id(
+    hover_map: &HoverMap,
+    bridge: &PickBridgePointer,
+    world_q: &Query<&WorldEntity>,
+    parent_q: &Query<&ChildOf>,
+    nameplate_q: &Query<&Nameplate>,
+    self_id: Option<u32>,
+) -> Option<u32> {
+    let hits = [Some(PointerId::Mouse), bridge.0]
+        .into_iter()
+        .flatten()
+        .filter_map(|pointer| hover_map.get(&pointer))
+        .flatten()
+        .filter_map(|(entity, hit)| {
+            let id = resolve_hit_entity_id(*entity, world_q, parent_q, nameplate_q)?;
+            (id != 0).then_some((id, hit.depth))
+        });
+    choose_hovered_id(hits, self_id)
+}
+
+/// Any non-self hit outranks self at any depth — the self box is oversized on
+/// purpose, so a target in front of, inside, or behind it always wins; nearest
+/// depth decides between non-self hits. Self is picked only when it is the
+/// sole entity under the pointer.
+fn choose_hovered_id(
+    hits: impl IntoIterator<Item = (u32, f32)>,
+    self_id: Option<u32>,
+) -> Option<u32> {
+    let mut nearest_other: Option<(u32, f32)> = None;
+    let mut self_hit = false;
+    for (id, depth) in hits {
+        if Some(id) == self_id {
+            self_hit = true;
+        } else if nearest_other.is_none_or(|(_, d)| depth < d) {
+            nearest_other = Some((id, depth));
         }
     }
-    for ev in over_events.read() {
-        if !accept(ev.pointer_id) {
-            continue;
-        }
-        if let Some(id) = resolve_hit_entity_id(ev.entity, &world_q, &parent_q, &nameplate_q) {
-            if id == 0 {
-                continue;
-            }
-            hovered.id = Some(id);
-        }
-    }
+    nearest_other
+        .map(|(id, _)| id)
+        .or(if self_hit { self_id } else { None })
 }
 
 fn find_world_entity<'q>(
@@ -298,6 +356,8 @@ pub fn click_to_target_system(
     enabled: Res<WorldPickingEnabled>,
     lock_on: Res<crate::lock_on::LockOn>,
     fishing_spot: Res<crate::fishing_spot::FishingSpot>,
+    hover_map: Res<HoverMap>,
+    bridge: Res<PickBridgePointer>,
     mut target: ResMut<Target>,
     mut input_mode: ResMut<InputMode>,
 ) {
@@ -305,6 +365,14 @@ pub fn click_to_target_system(
         clicks.clear();
         return;
     }
+    let winner = priority_hover_id(
+        &hover_map,
+        &bridge,
+        &q_world,
+        &q_parent,
+        &q_nameplate,
+        scene.snapshot.self_char_id,
+    );
     for ev in clicks.read() {
         if ev.button != PointerButton::Primary {
             continue;
@@ -316,7 +384,15 @@ pub fn click_to_target_system(
         if pointer.left_dragged {
             continue;
         }
-        let hit_id = resolve_hit_entity_id(ev.entity, &q_world, &q_parent, &q_nameplate);
+        let raw_id = resolve_hit_entity_id(ev.entity, &q_world, &q_parent, &q_nameplate);
+        // One physical click reaches every hovered entity — self's
+        // non-blocking box among them — but only the priority winner may
+        // answer, or the duplicate event would retarget a second time and
+        // reopen the menu. Unresolvable hits (UI nodes) pass through as None.
+        let hit_id = match raw_id {
+            Some(id) if winner != Some(id) => continue,
+            other => other,
+        };
         if let Some(id) = hit_id {
             if id != 0
                 && scene
@@ -404,8 +480,34 @@ mod tests {
 
     #[test]
     fn self_is_clickable_in_third_person_only() {
-        assert!(self_hitbox_pickable(CameraMode::Chase));
-        assert!(!self_hitbox_pickable(CameraMode::FirstPerson));
+        assert_eq!(self_hitbox_pickable(CameraMode::Chase), SELF_PICKABLE);
+        assert_eq!(
+            self_hitbox_pickable(CameraMode::FirstPerson),
+            Pickable::IGNORE
+        );
+    }
+
+    #[test]
+    fn self_hitbox_reports_without_blocking_other_targets() {
+        let pickable = self_hitbox_pickable(CameraMode::Chase);
+        assert!(pickable.is_hoverable);
+        assert!(!pickable.should_block_lower);
+    }
+
+    #[test]
+    fn other_targets_outrank_self_at_any_depth() {
+        // Target behind the player (self box is the nearer hit): it still wins.
+        assert_eq!(choose_hovered_id([(7, 1.0), (42, 5.0)], Some(7)), Some(42));
+        // Target in front of the player: nearest hit wins as usual.
+        assert_eq!(choose_hovered_id([(7, 5.0), (42, 1.0)], Some(7)), Some(42));
+        // Nearest of several non-self targets wins, self ignored.
+        assert_eq!(
+            choose_hovered_id([(42, 3.0), (43, 2.0), (7, 1.0)], Some(7)),
+            Some(43)
+        );
+        // Self alone under the pointer stays selectable.
+        assert_eq!(choose_hovered_id([(7, 1.0)], Some(7)), Some(7));
+        assert_eq!(choose_hovered_id(std::iter::empty(), Some(7)), None);
     }
 
     #[test]
@@ -439,7 +541,7 @@ mod tests {
             .0;
         assert_eq!(
             world.entity(box_e).get::<Pickable>().copied(),
-            Some(Pickable::default()),
+            Some(SELF_PICKABLE),
         );
 
         world.insert_resource(CameraMode::FirstPerson);

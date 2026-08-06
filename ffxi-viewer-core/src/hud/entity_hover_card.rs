@@ -83,9 +83,9 @@ pub fn update_entity_hover_card_system(
         return;
     };
 
-    let id = match hovered.id {
-        Some(id) if target.id != Some(id) => id,
-        _ => {
+    let id = match hover_card_id(hovered.id, target.id, state.snapshot.self_char_id) {
+        Some(id) => id,
+        None => {
             if card.display != Display::None {
                 card.display = Display::None;
             }
@@ -132,6 +132,17 @@ pub fn update_entity_hover_card_system(
     }
 }
 
+/// Hovering your own body still click-targets it, but retail draws no
+/// mouse-over card for yourself; the current target's card is likewise
+/// suppressed in favor of the target frame.
+fn hover_card_id(hovered: Option<u32>, target: Option<u32>, self_id: Option<u32>) -> Option<u32> {
+    let id = hovered?;
+    if target == Some(id) || self_id == Some(id) {
+        return None;
+    }
+    Some(id)
+}
+
 fn format_name(name: Option<&str>, kind: EntityKind) -> String {
     let n = name.unwrap_or("?");
     format!("{n}  [{}]", kind_tag(kind))
@@ -150,6 +161,14 @@ fn kind_tag(kind: EntityKind) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn self_hover_shows_no_card() {
+        assert_eq!(hover_card_id(Some(7), None, Some(7)), None);
+        assert_eq!(hover_card_id(Some(42), None, Some(7)), Some(42));
+        assert_eq!(hover_card_id(Some(42), Some(42), Some(7)), None);
+        assert_eq!(hover_card_id(None, None, Some(7)), None);
+    }
 
     #[test]
     fn name_format_uses_kind_tag() {

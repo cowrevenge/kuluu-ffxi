@@ -37,13 +37,14 @@ fn dump_zone(root: &DatRoot, zone_id: u16) -> Result<(), Box<dyn std::error::Err
     println!("  {} keyframes:", records.len());
     for r in &records {
         println!(
-            "    V{:02}:{:02} sky[0]={:?} sky[7]={:?} ambient={:?} fog={:?} brightness={:.3}",
+            "    V{:02}:{:02} sky[0]={:?} sky[7]={:?} ambient={:?} fog={:?} bg={:?} brightness={:.3}",
             r.time_minutes / 60,
             r.time_minutes % 60,
             r.skybox_colors[0],
             r.skybox_colors[7],
             r.ambient_landscape,
             r.fog_landscape,
+            r.background_color,
             r.diffuse_mul_landscape,
         );
     }

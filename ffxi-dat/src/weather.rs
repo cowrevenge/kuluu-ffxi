@@ -41,6 +41,13 @@ pub struct WeatherRecord {
     pub fog_offset: f32,
     pub max_far_clip: f32,
 
+    // research/xim EnvironmentSection.kt:290 clearColor@76 == XIClient
+    // WorldParameters.BackgroundColor: the record's own backdrop. Retail's
+    // DrawSky overrides it outdoors with the interpolated horizon slice
+    // (XiZone.cpp:191 SetBackColor(bsarr[0])), so this only shows through
+    // indoors, where the dome is not drawn (xim EnvironmentManager.kt:139-140).
+    pub background_color: [f32; 4],
+
     pub skybox_colors: [[f32; 4]; 8],
 
     pub skybox_altitudes: [f32; 8],
@@ -103,6 +110,7 @@ pub fn parse_weather_record(name: &[u8; 4], body: &[u8]) -> Result<WeatherRecord
 
         fog_offset: f32_at(80),
         max_far_clip: f32_at(88),
+        background_color: u32_to_rgba(u32_at(76)),
 
         skybox_colors: [
             u32_to_rgba(u32_at(108)),
@@ -637,6 +645,7 @@ fn lerp_records(a: &WeatherRecord, b: &WeatherRecord, t: f32, time_minutes: u32)
 
         fog_offset: lerp(a.fog_offset, b.fog_offset),
         max_far_clip: lerp(a.max_far_clip, b.max_far_clip),
+        background_color: lerp4(a.background_color, b.background_color),
         skybox_colors: sk_c,
         skybox_altitudes: sk_a,
     }
@@ -813,6 +822,10 @@ mod tests {
         body[36..40].copy_from_slice(&1.0f32.to_le_bytes());
         body[68..72].copy_from_slice(&0.75f32.to_le_bytes());
 
+        body[76] = 0x11;
+        body[77] = 0x22;
+        body[78] = 0x33;
+
         body[108] = 0xFF;
         body[109] = 0x10;
         body[110] = 0x20;
@@ -833,6 +846,15 @@ mod tests {
         assert_eq!(rec.diffuse_mul_landscape, 0.75);
         assert_eq!(rec.skybox_colors[0][0], 1.0);
         assert_eq!(rec.skybox_altitudes[3], 0.5);
+        assert_eq!(
+            rec.background_color,
+            [
+                0x11 as f32 / 255.0,
+                0x22 as f32 / 255.0,
+                0x33 as f32 / 255.0,
+                0.0
+            ]
+        );
     }
 
     // Retail-byte guard (skips without an install). The sky dome shader reads
@@ -963,6 +985,7 @@ mod tests {
             diffuse_mul_landscape: brightness,
             fog_offset: 0.0,
             max_far_clip: 0.0,
+            background_color: [0.0; 4],
             skybox_colors: [[0.0; 4]; 8],
             skybox_altitudes: [0.0; 8],
         }

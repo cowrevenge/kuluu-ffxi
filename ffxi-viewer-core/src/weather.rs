@@ -420,16 +420,26 @@ fn capture_default_clear_color(
 // on the with-record path, so the painted horizon leaked across zone lines
 // into weatherless zones).
 //
-// The zone fog color is what the DAT expects at the far plane; using it as
-// the backdrop makes both fog paths (DistanceFog and volumetric) converge to
-// the same horizon. The weather keyframes are already sampled per Vana'diel
-// minute, so no extra time-of-day scaling is applied. With no record
-// (weatherless zone, wasm, mid-zone-line) the startup default is restored.
+// Retail derives no lighting from the skybox — ambient/sun/fog are
+// independently authored channels of the same weather keyframe
+// (XiArea.cpp:140-220 UpdateLightingColorsFromWeather vs XiZone.cpp:149-206
+// DrawSky). The one sky->scene coupling is this backdrop: outdoors it is the
+// interpolated horizon slice SkyPalette[0] (XiZone.cpp:191
+// SetBackColor(bsarr[0]); xim EnvironmentManager.kt:139-140), indoors the
+// record's own background color, which is all a windowless interior ever
+// clears to. Fog deliberately stays a touch darker than the horizon band in
+// the authored data, so terrain fading to `fog_landscape` meets a brighter
+// sky. With no record (weatherless zone, wasm, mid-zone-line) the startup
+// default is restored.
 pub(crate) fn zone_clear_color(rec: Option<&WeatherRecord>, default: Color) -> Color {
     match rec {
         Some(rec) => {
-            let [fr, fg, fb, _] = rec.fog_landscape;
-            Color::srgb(fr, fg, fb)
+            let [r, g, b, _] = if rec.indoors {
+                rec.background_color
+            } else {
+                rec.skybox_colors[0]
+            };
+            Color::srgb(r, g, b)
         }
         None => default,
     }
@@ -609,6 +619,7 @@ mod tests {
             diffuse_mul_landscape: 0.0,
             fog_offset: 0.0,
             max_far_clip: 0.0,
+            background_color: [0.0; 4],
             skybox_colors: [[0.0; 4]; 8],
             skybox_altitudes: [0.0; 8],
         }
@@ -622,18 +633,32 @@ mod tests {
     }
 
     #[test]
-    fn record_paints_the_zone_fog_horizon() {
-        // The keyframes are already sampled per Vana'diel minute, so the raw
-        // zone fog color is the backdrop in both fog modes.
-        let rec = rec_with_fog([0.5, 0.6, 0.7, 1.0]);
+    fn outdoor_record_paints_the_sky_horizon_not_the_fog_color() {
+        // XiZone.cpp:191 — the outdoor backdrop is the interpolated horizon
+        // slice, deliberately distinct from the (darker) authored fog color.
+        let mut rec = rec_with_fog([0.5, 0.6, 0.7, 1.0]);
+        rec.skybox_colors[0] = [0.8, 0.7, 0.6, 1.0];
         let got = zone_clear_color(Some(&rec), DEFAULT);
-        assert_color_close(got, Color::srgb(0.5, 0.6, 0.7));
+        assert_color_close(got, Color::srgb(0.8, 0.7, 0.6));
+    }
+
+    #[test]
+    fn indoor_record_paints_its_own_background_color() {
+        // xim EnvironmentManager.kt:139-140 — indoors never sees the dome, so
+        // the backdrop is the record's background color (@76), not the sky.
+        let mut rec = rec_with_fog([0.5, 0.6, 0.7, 1.0]);
+        rec.indoors = true;
+        rec.background_color = [0.05, 0.04, 0.06, 1.0];
+        rec.skybox_colors[0] = [0.8, 0.7, 0.6, 1.0];
+        let got = zone_clear_color(Some(&rec), DEFAULT);
+        assert_color_close(got, Color::srgb(0.05, 0.04, 0.06));
     }
 
     #[test]
     fn foggy_to_weatherless_transition_restores_default() {
         // Foggy zone paints a non-default horizon...
-        let rec = rec_with_fog([0.5, 0.6, 0.7, 1.0]);
+        let mut rec = rec_with_fog([0.5, 0.6, 0.7, 1.0]);
+        rec.skybox_colors[0] = [0.8, 0.7, 0.6, 1.0];
         let painted = zone_clear_color(Some(&rec), DEFAULT);
         assert_ne!(painted, DEFAULT);
         // ...then a zone line drops the record: the backdrop must snap back to

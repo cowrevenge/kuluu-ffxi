@@ -62,7 +62,7 @@ fn sync_window_title(
     let Ok(mut window) = windows.single_mut() else {
         return;
     };
-    let new_title = format!("ffxi-client — {}", server.display_label());
+    let new_title = format!("ffxi-client - {}", server.display_label());
     if window.title != new_title {
         window.title = new_title;
     }
@@ -177,7 +177,7 @@ impl Default for CharCreateForm {
 impl CharCreateForm {
     pub fn validation_msg(&self) -> Option<String> {
         if self.name.is_empty() {
-            return Some("Enter a name (3–15 letters, A–Z only).".into());
+            return Some("Enter a name (3-15 letters, A-Z only).".into());
         }
         if self.name.len() < 3 {
             return Some("Name is too short (minimum 3 letters).".into());
@@ -186,7 +186,7 @@ impl CharCreateForm {
             return Some("Name is too long (maximum 15 letters).".into());
         }
         if !self.name.chars().all(|c| c.is_ascii_alphabetic()) {
-            return Some("Letters only — server rejects digits and punctuation.".into());
+            return Some("Letters only - server rejects digits and punctuation.".into());
         }
         None
     }
@@ -1017,7 +1017,7 @@ fn decide_initial_screen(
         return;
     }
 
-    // No reachable DAT install → gate to DatSetup before login, else names
+    // No reachable DAT install -> gate to DatSetup before login, else names
     // render as "?" and no geometry loads. Direct-mode keeps its --require-dat
     // path and is left to autostart.
     if gate_done.is_none()

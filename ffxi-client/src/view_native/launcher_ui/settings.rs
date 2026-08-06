@@ -69,7 +69,7 @@ pub(super) fn load_settings_form(mut form: ResMut<SettingsForm>) {
 fn current_effective(var: &str) -> String {
     match std::env::var(var) {
         Ok(v) if !v.is_empty() => v,
-        _ => "(unset — using built-in default)".to_string(),
+        _ => "(unset - using built-in default)".to_string(),
     }
 }
 
@@ -259,7 +259,7 @@ fn spawn_path_field(
                 rowc.spawn(button_bundle(
                     ButtonBundleProps::default(),
                     (),
-                    Spawn((Text::new("Browse…"), ThemedText)),
+                    Spawn((Text::new("Browse..."), ThemedText)),
                 ))
                 .observe(
                     move |_ev: On<Activate>,

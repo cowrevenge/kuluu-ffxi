@@ -251,7 +251,7 @@ pub(super) fn row() -> impl Bundle {
     }
 }
 
-/// Visually attaches a value button and its companion action (e.g. a `×`
+/// Visually attaches a value button and its companion action (e.g. an `x`
 /// remove button) into one bordered unit, and refuses to shrink so a wrapping
 /// parent moves the whole chip to the next line instead of squishing it.
 pub(super) fn chip_group() -> impl Bundle {

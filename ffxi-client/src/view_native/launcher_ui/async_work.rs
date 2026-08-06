@@ -452,7 +452,7 @@ pub(super) fn spawn_char_create_task(
     let (Some(handle), Some(auth)) = (handle, auth) else {
         runtime.0.spawn(async move {
             let _ = tx.send(Err(anyhow!(
-                "no live lobby session available — please log in again"
+                "no live lobby session available - please log in again"
             )));
         });
         commands.insert_resource(CharCreateInFlightChan { rx });
@@ -503,7 +503,7 @@ pub(super) fn poll_char_create_system(
             tracing::info!(
                 name = %ok.created_name,
                 char_count = ok.handle.chars().len(),
-                "char-create: success — bouncing through AuthInFlight to clear server's justCreatedNewChar flag"
+                "char-create: success - bouncing through AuthInFlight to clear server's justCreatedNewChar flag"
             );
 
             if let Ok(mut slot) = opened.0.lock() {
@@ -828,7 +828,7 @@ pub(super) fn spawn_char_delete_task(
     let (Some(handle), Some(auth)) = (handle, auth) else {
         runtime.0.spawn(async move {
             let _ = tx.send(Err(anyhow!(
-                "no live lobby session available — please log in again"
+                "no live lobby session available - please log in again"
             )));
         });
         commands.insert_resource(CharDeleteChan { rx });

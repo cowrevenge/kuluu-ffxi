@@ -15,7 +15,7 @@ use super::common::{
 use super::{LauncherState, ServerInfo};
 
 /// Compact metrics for the graphics list. [`LABEL_WIDTH`]/[`ROW_FONT_SIZE`] are
-/// sized so the longest label ("Model Shadow Receiving") stays on one line —
+/// sized so the longest label ("Model Shadow Receiving") stays on one line -
 /// wrapped labels were what made the list overflow the window.
 const ROW_FONT_SIZE: f32 = 13.0;
 const LABEL_WIDTH: f32 = 172.0;
@@ -57,7 +57,7 @@ pub(super) struct GraphicsValueText(GraphicsField);
 #[derive(Component)]
 pub(super) struct AdvancedRow;
 
-/// The disclosure row's label text, swapped between ▸ and ▾.
+/// The disclosure row's label text, swapped between `>` and `v`.
 #[derive(Component)]
 pub(super) struct AdvancedToggleLabel;
 
@@ -66,8 +66,8 @@ pub(super) struct AdvancedToggleLabel;
 #[derive(Resource, Default)]
 pub(super) struct GraphicsAdvancedOpen(pub bool);
 
-const ADVANCED_COLLAPSED: &str = "▸ Advanced — light tuning";
-const ADVANCED_EXPANDED: &str = "▾ Advanced — light tuning";
+const ADVANCED_COLLAPSED: &str = "> Advanced - light tuning";
+const ADVANCED_EXPANDED: &str = "v Advanced - light tuning";
 
 pub(super) fn spawn_ui(
     mut commands: Commands,
@@ -265,7 +265,7 @@ fn spawn_field_row(
         rowc.spawn(button_bundle(
             ButtonBundleProps::default(),
             (),
-            Spawn((Text::new("◀"), ThemedText)),
+            Spawn((Text::new("<"), ThemedText)),
         ))
         .observe(
             move |_ev: On<Activate>, mut settings: ResMut<GraphicsSettings>| {
@@ -292,7 +292,7 @@ fn spawn_field_row(
         rowc.spawn(button_bundle(
             ButtonBundleProps::default(),
             (),
-            Spawn((Text::new("▶"), ThemedText)),
+            Spawn((Text::new(">"), ThemedText)),
         ))
         .observe(
             move |_ev: On<Activate>, mut settings: ResMut<GraphicsSettings>| {
@@ -317,7 +317,7 @@ pub(super) fn redraw_graphics_system(
     }
 }
 
-/// Show/hide the Advanced sub-knob rows and flip the ▸/▾ disclosure label when
+/// Show/hide the Advanced sub-knob rows and flip the `>`/`v` disclosure label when
 /// the user toggles the Advanced row.
 pub(super) fn redraw_advanced_visibility(
     open: Res<GraphicsAdvancedOpen>,

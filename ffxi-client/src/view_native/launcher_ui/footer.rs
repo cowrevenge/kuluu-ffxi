@@ -40,7 +40,7 @@ const HOVER_LIGHTEN: f32 = 0.12;
 /// (`Luminance::lighter` clamps at white).
 const FOOTER_LINK_HOVER_BG: Color = Color::srgba(1.0, 1.0, 1.0, 0.10);
 
-const VERSION_SEP: &str = " · ";
+const VERSION_SEP: &str = " | ";
 
 // `[profile.dist]` inherits release, so dist and release both stamp "release".
 // Intended: cargo's `PROFILE` is unreliable for custom profiles, and the useful
@@ -278,14 +278,14 @@ mod tests {
     fn version_line_formats_all_three_fields() {
         assert_eq!(
             version_line("0.4.0", "debug", "aarch64-apple-darwin"),
-            "v0.4.0 · debug · aarch64-apple-darwin",
+            "v0.4.0 | debug | aarch64-apple-darwin",
         );
     }
 
     #[test]
     fn build_stamp_fields_are_populated() {
         // env! is a compile error when the var is missing, but not when it is
-        // empty — this is what actually guards the build.rs contract.
+        // empty - this is what actually guards the build.rs contract.
         assert!(
             TARGET_TRIPLE.matches('-').count() >= 2,
             "not a target triple: {TARGET_TRIPLE:?}",

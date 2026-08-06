@@ -64,6 +64,18 @@ run_style() {
     echo "checks: use hud::style::{theme, text_font, window_frame}; hud::palette was removed" >&2
     return 1
   fi
+
+  # ASCII-only launcher UI: the launcher renders every string with Bevy's
+  # bundled default font (FiraMono-subset), which covers only printable ASCII
+  # (U+0020-007E) — arrows, em/en dashes, ellipses, middle dots all rasterize
+  # as tofu boxes. Gate the whole tree (comments included) so the rule stays a
+  # trivial grep with no judgment calls; the same constraint applies by hand to
+  # any other string rendered with the default font (e.g. hud::style::text_font).
+  if LC_ALL=C grep -rIn '[^ -~]' ffxi-client/src/view_native/launcher_ui/ --include='*.rs'; then
+    echo "checks: style — launcher_ui is not ASCII-only; Bevy's default font renders only U+0020-007E," >&2
+    echo "checks:   anything else shows as tofu. Use ASCII substitutes (< > -> ... - | x)." >&2
+    return 1
+  fi
 }
 
 run_harness() {

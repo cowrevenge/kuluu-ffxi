@@ -226,7 +226,7 @@ fn build_banner(commands: &mut Commands, latest: &str) {
             ))
             .with_children(|bar| {
                 bar.spawn((
-                    Text::new(format!("Update available → {latest}")),
+                    Text::new(format!("Update available: {latest}")),
                     TextFont {
                         font_size: 13.0.into(),
                         ..default()

@@ -52,11 +52,11 @@ pub(super) fn spawn_ui(
             root.spawn(panel_node(620.0)).with_children(|panel| {
                 spawn_settings_close_titlebar(panel, "Servers");
                 if n == 0 {
-                    panel.spawn(hint("No servers saved yet — click '+ Add server' below."));
+                    panel.spawn(hint("No servers saved yet - click '+ Add server' below."));
                 }
 
                 for (idx, s) in servers.iter().enumerate() {
-                    let label = format!("{} — {}:{}", s.name, s.host, s.auth_port);
+                    let label = format!("{} - {}:{}", s.name, s.host, s.auth_port);
                     let server_name = s.name.clone();
                     let variant = if idx == cursor_idx {
                         ButtonVariant::Primary

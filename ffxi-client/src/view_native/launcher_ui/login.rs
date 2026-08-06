@@ -474,7 +474,7 @@ pub(super) fn spawn_error_ui(
 ) {
     let body = msg.0.clone();
     let (heading, back_label) = match *ret {
-        // The account is still signed in and the character list is intact —
+        // The account is still signed in and the character list is intact -
         // a lobby-select / map-handoff failure only needs another pick.
         LoginErrorReturn::CharList => ("Couldn't enter world", "Back to characters"),
         LoginErrorReturn::Login => ("Login failed", "Back to login"),

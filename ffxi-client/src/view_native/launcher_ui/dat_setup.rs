@@ -50,7 +50,7 @@ pub(super) fn enter_prefill(mut form: ResMut<DatSetupForm>) {
     }
     if let Some(found) = install_detect::detect().into_iter().next() {
         form.path = found.display().to_string();
-        form.feedback = Some(Ok("Found an install automatically — click Continue.".into()));
+        form.feedback = Some(Ok("Found an install automatically - click Continue.".into()));
     }
 }
 
@@ -81,7 +81,7 @@ fn build_ui(commands: &mut Commands, form: &DatSetupForm) {
     let status = match &form.feedback {
         Some(Ok(msg)) => Some((msg.clone(), OK_COLOR)),
         Some(Err(msg)) => Some((msg.clone(), ERR_COLOR)),
-        None if valid => Some(("Looks good — a valid FFXI install.".to_string(), OK_COLOR)),
+        None if valid => Some(("Looks good - a valid FFXI install.".to_string(), OK_COLOR)),
         None if !path.trim().is_empty() => Some((
             "Not a FINAL FANTASY XI install (needs VTABLE.DAT and a ROM folder).".to_string(),
             ERR_COLOR,
@@ -95,7 +95,7 @@ fn build_ui(commands: &mut Commands, form: &DatSetupForm) {
             root.spawn(panel_node(660.0)).with_children(|panel| {
                 panel.spawn(title("Locate your FINAL FANTASY XI install"));
                 panel.spawn(hint(
-                    "Kuluu ships no game data — it reads geometry, textures, audio, and names \
+                    "Kuluu ships no game data - it reads geometry, textures, audio, and names \
                      from a retail FINAL FANTASY XI install you already own. Point it at that \
                      folder (the one containing VTABLE.DAT and a ROM directory). Press Enter or \
                      click Continue when it validates.",
@@ -147,7 +147,7 @@ fn build_ui(commands: &mut Commands, form: &DatSetupForm) {
                         rowc.spawn(button_bundle(
                             ButtonBundleProps::default(),
                             (),
-                            Spawn((Text::new("Browse…"), ThemedText)),
+                            Spawn((Text::new("Browse..."), ThemedText)),
                         ))
                         .observe(
                             |_ev: On<Activate>,
@@ -213,7 +213,7 @@ fn pick_folder(form: &mut DatSetupForm) {
         }
     }
     form.feedback = if is_valid(&chosen) {
-        Some(Ok("Looks good — a valid FFXI install.".into()))
+        Some(Ok("Looks good - a valid FFXI install.".into()))
     } else {
         Some(Err(
             "That folder doesn't contain a FINAL FANTASY XI install.".into(),

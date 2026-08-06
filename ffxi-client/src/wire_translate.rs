@@ -491,7 +491,7 @@ pub fn position_to_wire(p: Position) -> wire::Position {
 }
 
 pub fn look_to_wire(l: ffxi_proto::decode::LookData) -> wire::EntityLook {
-    use ffxi_proto::decode::LookData;
+    use ffxi_proto::decode::{DoorId, LookData};
     match l {
         LookData::Standard { modelid } => wire::EntityLook::Standard { modelid },
         LookData::Equipped {
@@ -517,7 +517,10 @@ pub fn look_to_wire(l: ffxi_proto::decode::LookData) -> wire::EntityLook {
             sub,
             ranged,
         },
-        LookData::Door { size } => wire::EntityLook::Door { size },
+        LookData::Door { size, door_id } => wire::EntityLook::Door {
+            size,
+            door_id: door_id.map(DoorId::bytes),
+        },
         LookData::Transport { size } => wire::EntityLook::Transport { size },
     }
 }

@@ -163,6 +163,7 @@ pub(super) fn apply_slash_outcome(
                 world_transform: None,
                 water: None,
                 lod: None,
+                door: None,
             });
             let label = match entity_id {
                 Some(id) => format!("/load_mmb_on {id} {file_id} {chunk_idx}: spawning…"),

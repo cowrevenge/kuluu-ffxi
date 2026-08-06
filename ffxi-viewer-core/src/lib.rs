@@ -73,6 +73,8 @@ pub mod weather_fx;
 pub mod weather_particles;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod zone_clouds;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod zone_doors;
 pub mod zone_lights;
 pub mod zone_lines;
 #[cfg(not(target_arch = "wasm32"))]
@@ -211,6 +213,9 @@ impl<S: SceneSource + Resource + Component<Mutability = bevy::ecs::component::Mu
 
         #[cfg(not(target_arch = "wasm32"))]
         app.add_plugins(zone_particles::ZoneParticlesPlugin);
+
+        #[cfg(not(target_arch = "wasm32"))]
+        app.add_plugins(zone_doors::ZoneDoorsPlugin);
 
         #[cfg(not(target_arch = "wasm32"))]
         app.add_plugins(zone_sfx::ZoneSfxPlugin);

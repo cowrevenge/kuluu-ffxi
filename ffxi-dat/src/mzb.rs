@@ -832,9 +832,11 @@ pub struct MmbPlacement {
 const BLOCK_ID_UNDERSCORE_GROUP: u8 = b'_';
 const BLOCK_ID_AT_GROUP: u8 = b'@';
 
-/// ZoneLayoutData.cpp:88-104 — `UnderscoreAtStruct::Subchunks` is a fixed array of
-/// four; placements past the fourth in a FourCC group are counted but never stored,
-/// so they are never drawn.
+/// `UnderscoreAtStruct::Subchunks` is a fixed array of four
+/// (research/XIClient/.../World/Zone/Terrain/UnderscoreAtStruct.h); members past
+/// the fourth are counted by `ZoneLayoutData::InitUnderscoreAtStructs` and then
+/// dropped, and `SubchunkCount` is clamped to the array, so nothing can draw or
+/// address them.
 pub const UNDERSCORE_AT_GROUP_MAX_SUBCHUNKS: usize = 4;
 
 impl MmbPlacement {
@@ -1162,6 +1164,63 @@ impl MmbRenderType {
     }
 }
 
+/// One `_`/`@` FourCC family of placements — retail's `UnderscoreAtStruct`
+/// (research/XIClient/.../World/Zone/Terrain/UnderscoreAtStruct.h).
+///
+/// A door entity's `DoorId` FourCC, the DAT directory holding its `open`/`clos`
+/// Scheduler routines, and this `four_cc` are the same four bytes, so the group is
+/// the join from a door entity to the leaves it swings.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnderscoreAtGroup {
+    pub four_cc: u32,
+
+    /// Indices into the placement table, in `UnderscoreAtStruct::Subchunks` slot
+    /// order — a Scheduler 0x0D stage addresses a leaf by that slot, so the order is
+    /// load-bearing, not cosmetic. At most
+    /// [`UNDERSCORE_AT_GROUP_MAX_SUBCHUNKS`] entries.
+    pub subchunks: Vec<usize>,
+}
+
+impl UnderscoreAtGroup {
+    /// The FourCC as the four characters that name the DAT directory. `BlockID` is
+    /// read little-endian (`MmbPlacement::block_id`), so byte 0 is the leading
+    /// `_`/`@`.
+    pub fn four_cc_bytes(&self) -> [u8; 4] {
+        self.four_cc.to_le_bytes()
+    }
+}
+
+/// The zone's `_`/`@` FourCC groups, re-expressing
+/// `ZoneLayoutData::InitUnderscoreAtStructs`
+/// (research/XIClient/.../World/Zone/Terrain/ZoneLayoutData.cpp).
+///
+/// Retail walks the placement table once to open a group at each FourCC's first
+/// member, then walks it again per group collecting every placement with that
+/// `BlockID`; `ZoneRenderer::OpenMzb` fills `positionedBlocks` one-for-one from the
+/// record table, so both the group order and the subchunk order are placement-table
+/// order.
+pub fn underscore_at_groups(placements: &[MmbPlacement]) -> Vec<UnderscoreAtGroup> {
+    let mut groups: Vec<UnderscoreAtGroup> = Vec::new();
+    let mut group_of: HashMap<u32, usize> = HashMap::new();
+    for (i, p) in placements.iter().enumerate() {
+        if !p.in_underscore_at_group() {
+            continue;
+        }
+        let slot = *group_of.entry(p.block_id).or_insert_with(|| {
+            groups.push(UnderscoreAtGroup {
+                four_cc: p.block_id,
+                subchunks: Vec::with_capacity(UNDERSCORE_AT_GROUP_MAX_SUBCHUNKS),
+            });
+            groups.len() - 1
+        });
+        let group = &mut groups[slot];
+        if group.subchunks.len() < UNDERSCORE_AT_GROUP_MAX_SUBCHUNKS {
+            group.subchunks.push(i);
+        }
+    }
+    groups
+}
+
 /// Per-placement visibility for one MZB, parallel to `placements`.
 ///
 /// Retail reaches a placement through one of two passes, so neither alone is the
@@ -1178,16 +1237,10 @@ pub fn drawn_placements(placements: &[MmbPlacement], active_sub_area: Option<u32
         .map(|p| MmbRenderType::classify(p, active_sub_area).is_drawn())
         .collect();
 
-    let mut group_seen: HashMap<u32, usize> = HashMap::new();
-    for (i, p) in placements.iter().enumerate() {
-        if !p.in_underscore_at_group() {
-            continue;
-        }
-        let seen = group_seen.entry(p.block_id).or_insert(0);
-        if *seen < UNDERSCORE_AT_GROUP_MAX_SUBCHUNKS {
+    for group in underscore_at_groups(placements) {
+        for i in group.subchunks {
             drawn[i] = true;
         }
-        *seen += 1;
     }
     drawn
 }
@@ -2470,6 +2523,44 @@ mod tests {
     }
 
     #[test]
+    fn underscore_at_groups_keep_placement_table_order() {
+        let placements = [
+            placement(fourcc(b"_6e1"), 0),
+            placement(fourcc(b"@ab1"), 0),
+            placement(0, 0),
+            placement(fourcc(b"ent0"), 0),
+            placement(fourcc(b"_6e1"), 0),
+            placement(fourcc(b"@ab1"), 0),
+        ];
+        let groups = underscore_at_groups(&placements);
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].four_cc_bytes(), *b"_6e1");
+        assert_eq!(groups[0].subchunks, vec![0, 4]);
+        assert_eq!(groups[1].four_cc_bytes(), *b"@ab1");
+        assert_eq!(groups[1].subchunks, vec![1, 5]);
+    }
+
+    #[test]
+    fn an_underscore_at_group_stores_only_its_first_four_subchunks() {
+        let door = fourcc(b"_6e0");
+        let placements: Vec<MmbPlacement> = (0..UNDERSCORE_AT_GROUP_MAX_SUBCHUNKS + 2)
+            .map(|_| placement(door, 0))
+            .collect();
+        let groups = underscore_at_groups(&placements);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(
+            groups[0].subchunks,
+            (0..UNDERSCORE_AT_GROUP_MAX_SUBCHUNKS).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn a_keyed_block_outside_the_underscore_at_families_forms_no_group() {
+        let placements = [placement(fourcc(b"ent0"), 0), placement(0, 0)];
+        assert!(underscore_at_groups(&placements).is_empty());
+    }
+
+    #[test]
     fn a_suppressed_placeholder_that_is_also_a_door_still_draws() {
         const SUB_AREA: u32 = 0x1CE;
         let placements = [placement(fourcc(b"_6e0"), SUB_AREA)];
@@ -2480,8 +2571,9 @@ mod tests {
         assert_eq!(drawn_placements(&placements, Some(SUB_AREA)), vec![true]);
     }
 
-    /// Lower Jeuno's 82 RenderType-0 chunks are 68 door leaves (`_6e*`) plus 14
-    /// zone-line entrance stand-ins (`ent0`..`entd`, meshes `eml0`..`emlc`).
+    /// Southern San d'Oria's 82 RenderType-0 chunks are 68 door leaves (`_6e*`)
+    /// plus 14 zone-line entrance stand-ins (`ent0`..`entd`, meshes
+    /// `eml0`..`emlc`). Zone id from vendor/server/sql/zone_settings.sql.
     const RENDER_TYPE_GATE_ZONE_ID: u16 = 230;
     const RENDER_TYPE_GATE_ZONE_HIDDEN: usize = 14;
 
@@ -2511,5 +2603,91 @@ mod tests {
             .iter()
             .zip(&drawn)
             .any(|(p, d)| p.in_underscore_at_group() && *d));
+    }
+
+    /// The Southern San d'Oria stables door. `_6ey` is at once the zone-DAT
+    /// directory holding the `open`/`clos` Scheduler routines, the `BlockID` of the
+    /// two `door03` leaves below, and the LSB `npc_list` name whose `pos_x` -7.999
+    /// is those leaves' midpoint.
+    const DOOR_GROUP_FOUR_CC: &[u8; 4] = b"_6ey";
+    const DOOR_GROUP_MESH: &str = "door03";
+    /// One group per `/t_sa/door/<fourcc>/` directory in zone 230's DAT.
+    const DOOR_GROUP_ZONE_GROUPS: usize = 34;
+    const DOOR_GROUP_LEAF_TRANS: [[f32; 3]; 2] = [[-9.4, 1.4, -92.06], [-6.6, 1.4, -92.06]];
+    /// The second leaf is the first mirrored through its own Z axis.
+    const DOOR_GROUP_LEAF_SCALE_Z: [f32; 2] = [1.0, -1.0];
+    /// The authored tenth-of-a-yalm coordinates reach us as f32 (-9.400009 for
+    /// -9.4), so compare to well under the 0.1 authoring grid.
+    const AUTHORED_COORD_EPS: f32 = 1e-3;
+
+    /// Northern San d'Oria, a second city zone — asserted only for shape, so a
+    /// different client era's placement table cannot invalidate the test.
+    const SECOND_DOOR_ZONE_ID: u16 = 231;
+
+    fn assert_group_shape(placements: &[MmbPlacement], groups: &[UnderscoreAtGroup]) {
+        let mut seen: Vec<u32> = Vec::new();
+        for g in groups {
+            assert!(!seen.contains(&g.four_cc));
+            seen.push(g.four_cc);
+            assert!(!g.subchunks.is_empty());
+            assert!(g.subchunks.len() <= UNDERSCORE_AT_GROUP_MAX_SUBCHUNKS);
+            assert!(g.subchunks.windows(2).all(|w| w[0] < w[1]));
+            for &i in &g.subchunks {
+                assert_eq!(placements[i].block_id, g.four_cc);
+            }
+        }
+        let distinct = placements
+            .iter()
+            .filter(|p| p.in_underscore_at_group())
+            .map(|p| p.block_id)
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(groups.len(), distinct.len());
+    }
+
+    #[test]
+    fn retail_zone_groups_door_leaves_under_their_four_cc() {
+        let Some(root) = crate::archive::open_test_install() else {
+            eprintln!("skipping: no FFXI install");
+            return;
+        };
+        let body = zone_mzb_body(&root, RENDER_TYPE_GATE_ZONE_ID);
+        let h = MzbHeader::parse(&body).unwrap();
+        let placements = parse_mmb_placements(&body, &h).unwrap();
+        let groups = underscore_at_groups(&placements);
+
+        assert_eq!(groups.len(), DOOR_GROUP_ZONE_GROUPS);
+        assert_group_shape(&placements, &groups);
+
+        let door = groups
+            .iter()
+            .find(|g| g.four_cc_bytes() == *DOOR_GROUP_FOUR_CC)
+            .unwrap();
+        assert_eq!(door.subchunks.len(), DOOR_GROUP_LEAF_TRANS.len());
+        for (slot, &i) in door.subchunks.iter().enumerate() {
+            let p = &placements[i];
+            assert_eq!(p.id_str().trim_end(), DOOR_GROUP_MESH);
+            for (axis, expected) in DOOR_GROUP_LEAF_TRANS[slot].iter().enumerate() {
+                assert!(
+                    (p.trans[axis] - expected).abs() < AUTHORED_COORD_EPS,
+                    "{p:?}"
+                );
+            }
+            assert_eq!(p.scale[2], DOOR_GROUP_LEAF_SCALE_Z[slot]);
+        }
+    }
+
+    #[test]
+    fn a_second_retail_city_zone_groups_its_doors() {
+        let Some(root) = crate::archive::open_test_install() else {
+            eprintln!("skipping: no FFXI install");
+            return;
+        };
+        let body = zone_mzb_body(&root, SECOND_DOOR_ZONE_ID);
+        let h = MzbHeader::parse(&body).unwrap();
+        let placements = parse_mmb_placements(&body, &h).unwrap();
+        let groups = underscore_at_groups(&placements);
+
+        assert!(!groups.is_empty());
+        assert_group_shape(&placements, &groups);
     }
 }

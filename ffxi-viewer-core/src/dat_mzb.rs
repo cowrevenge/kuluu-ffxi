@@ -905,6 +905,12 @@ pub struct ZoneMmbSpawn {
     // None when the placement resolved to a single mesh for all three LOD bands
     // (the majority), which needs no per-frame variant pick.
     pub lod: Option<ZoneMeshLod>,
+
+    // Set only for a member of a `_`/`@` FourCC group — the placements a door's
+    // Scheduler routines address by subchunk slot. None for every other
+    // placement, including the generator water sheets, which carry no MZB
+    // record and so belong to no group.
+    pub door: Option<crate::zone_doors::ZoneDoorLeaf>,
 }
 
 /// World-space (Bevy frame) footprint of one area-bound placement.
@@ -1068,6 +1074,35 @@ impl ZoneMeshLod {
     }
 }
 
+/// World matrix of one MZB placement, from the TRS the record carries.
+///
+/// Retail composes Identity -> scale -> RotateX -> RotateY -> RotateZ ->
+/// translate in D3D row-vector convention (research/XIClient/src/XIClient/
+/// source/Rendering/ZoneRenderer.cpp:430-443, with Matrix4.cpp:200-204
+/// `MultiplyRight` = this*r and :508-511 `out = v*M`), which transposes to
+/// column-vector T*Rz*Ry*Rx*S — glam's *extrinsic* XYZ. The intrinsic
+/// `EulerRot::XYZ` is Rx*Ry*Rz, the reverse. Self-proven by the
+/// order-reversed inverse chain at ZoneRenderer.cpp:459-466.
+///
+/// `UnderscoreAtStruct::InitMatrix` rebuilds an animated `_`/`@` block's matrix
+/// from its own copy of the same three vectors in the same order, so a door leaf
+/// re-poses by re-calling this with the routine's offset folded in — see
+/// [`crate::zone_doors::ZoneDoorLeaf::posed_transform`].
+pub fn placement_bevy_transform(scale: Vec3, rot: Vec3, trans: Vec3) -> Mat4 {
+    let to_bevy = Mat4::from_cols(
+        Vec4::new(1.0, 0.0, 0.0, 0.0),
+        Vec4::new(0.0, -1.0, 0.0, 0.0),
+        Vec4::new(0.0, 0.0, -1.0, 0.0),
+        Vec4::new(0.0, 0.0, 0.0, 1.0),
+    );
+    to_bevy
+        * Mat4::from_scale_rotation_translation(
+            scale,
+            Quat::from_euler(EulerRot::XYZEx, rot.x, rot.y, rot.z),
+            trans,
+        )
+}
+
 pub fn build_zone_mmb_spawns(
     file_id: u32,
     chunk_idx: Option<usize>,
@@ -1164,6 +1199,8 @@ pub fn build_zone_mmb_spawns(
     const ACTIVE_SUB_AREA: Option<u32> = None;
     let drawn_flags = mzb::drawn_placements(&placements, ACTIVE_SUB_AREA);
 
+    let door_leaf_slots = crate::zone_doors::leaf_slots(&placements);
+
     let sub_areas = match sub_area::from_dat(&bytes) {
         Ok(s) => s,
         Err(e) => {
@@ -1194,7 +1231,7 @@ pub fn build_zone_mmb_spawns(
     let mut area_boxes: Vec<ZoneAreaBox> = Vec::new();
     let light_bindings = mzb::parse_light_bindings(&plain, &header);
     let mut light_boxes: Vec<ZoneChunkLightBox> = Vec::new();
-    for (p, &drawn) in placements.iter().zip(drawn_flags.iter()) {
+    for (placement_idx, (p, &drawn)) in placements.iter().zip(drawn_flags.iter()).enumerate() {
         let id = p.id_str().trim_end_matches('\0').trim_end();
 
         // Retail's BlockManager.GetByName answers one mesh per name; duplicate
@@ -1221,26 +1258,11 @@ pub fn build_zone_mmb_spawns(
             name_to_locals.get(name).and_then(|l| l.first().copied())
         });
 
-        // Retail composes Identity -> scale -> RotateX -> RotateY -> RotateZ ->
-        // translate in D3D row-vector convention (research/XIClient/src/XIClient/
-        // source/Rendering/ZoneRenderer.cpp:430-443, with Matrix4.cpp:200-204
-        // `MultiplyRight` = this*r and :508-511 `out = v*M`), which transposes to
-        // column-vector T*Rz*Ry*Rx*S — glam's *extrinsic* XYZ. The intrinsic
-        // `EulerRot::XYZ` is Rx*Ry*Rz, the reverse. Self-proven by the
-        // order-reversed inverse chain at ZoneRenderer.cpp:459-466.
-        let m_ffxi = Mat4::from_scale_rotation_translation(
-            Vec3::new(p.scale[0], p.scale[1], p.scale[2]),
-            Quat::from_euler(EulerRot::XYZEx, p.rot[0], p.rot[1], p.rot[2]),
-            Vec3::new(p.trans[0], p.trans[1], p.trans[2]),
+        let bevy_transform = placement_bevy_transform(
+            Vec3::from_array(p.scale),
+            Vec3::from_array(p.rot),
+            Vec3::from_array(p.trans),
         );
-
-        let to_bevy = Mat4::from_cols(
-            Vec4::new(1.0, 0.0, 0.0, 0.0),
-            Vec4::new(0.0, -1.0, 0.0, 0.0),
-            Vec4::new(0.0, 0.0, -1.0, 0.0),
-            Vec4::new(0.0, 0.0, 0.0, 1.0),
-        );
-        let bevy_transform = to_bevy * m_ffxi;
 
         // Built before the render gate: retail binds every positioned block to
         // its area (ZoneRenderer.cpp:710-718) and the interiors that carry one
@@ -1288,11 +1310,15 @@ pub fn build_zone_mmb_spawns(
         // far cull has nothing to decide per frame, so it stays a plain always-on
         // spawn rather than paying for a distance query.
         let needs_lod_component = variants.len() > 1 || uses_lod_rendering;
+        let door = door_leaf_slots
+            .get(&placement_idx)
+            .map(|slot| crate::zone_doors::ZoneDoorLeaf::new(*slot, p));
         for local in variants {
             out.push(ZoneMmbSpawn {
                 chunk_idx: mmb_indices[local],
                 bevy_transform,
                 water: None,
+                door,
                 lod: needs_lod_component.then(|| ZoneMeshLod {
                     thresholds: p.lod_thresholds(),
                     level_mask: lod_set.level_mask(local),
@@ -1405,8 +1431,10 @@ pub fn build_zone_mmb_spawns(
                 world_min,
                 world_max,
             }),
-            // Generator sheets carry no placement record, so no LOD triple.
+            // Generator sheets carry no placement record, so no LOD triple and
+            // no `_`/`@` group membership.
             lod: None,
+            door: None,
         });
     }
 
@@ -2425,6 +2453,7 @@ fn spawn_mzb_overlay(
                     world_transform: Some(offset * s.bevy_transform),
                     water: s.water,
                     lod: s.lod,
+                    door: s.door.map(|d| d.with_world_offset(req.world_pos)),
                 });
             }
             push_system_msg(

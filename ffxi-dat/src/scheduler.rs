@@ -47,6 +47,19 @@ const MOTION_TRANSITION_IN_OFFSET: usize = 24;
 const MOTION_TRANSITION_OUT_OFFSET: usize = 28;
 const MOTION_MAX_LOOP_OFFSET: usize = 30;
 
+// research/xim EffectRoutineParser.kt parseSection2, opcodes 0x0C/0x0D: a Vector3f then a u32
+// index, read straight after duration. Verified against the shipped DATs rather than trusted:
+// every one of the 18829 0x0C/0x0D stages across the 85962 resolvable files is exactly six
+// dwords long, none carries a byte past +24, and the +20 dword is only ever 0..=3.
+const MODEL_TRANSFORM_PAYLOAD_LEN: usize = 24;
+const MODEL_TRANSFORM_VECTOR_OFFSET: usize = 8;
+const MODEL_TRANSFORM_SUBCHUNK_OFFSET: usize = 20;
+
+// A stage addresses a slot of the group `mzb::underscore_at_groups` builds, so the bound is
+// that builder's rather than a second reading of the same retail array.
+pub const MODEL_TRANSFORM_SUBCHUNK_SLOTS: u32 =
+    crate::mzb::UNDERSCORE_AT_GROUP_MAX_SUBCHUNKS as u32;
+
 const NO_STAGE_ID: [u8; 4] = [0; 4];
 
 fn effect_section_start(body: &[u8]) -> usize {
@@ -69,7 +82,20 @@ fn effect_section_start(body: &[u8]) -> usize {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// research/xim EffectRoutineEffects.kt ModelTransformEffect. `final_value` is an OFFSET FROM
+// the placement's authored transform, reached across the stage's `duration_frames`; rotation
+// is radians about each axis, translation yalms. Read as absolute it would fling every shut
+// door in the game to yaw 0: the DAT closes doors authored at 90°, 180°, 225° and 315° with
+// the same `clos` value of 0,0,0, and parks Mea's `_pmd` lift at the world origin. XIClient's
+// HandleTag0x0C/0x0D are undecompiled, so the DAT is the authority here, not the disassembly.
+// `subchunk` selects one placement of the routine directory's BlockID group.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ModelTransform {
+    pub final_value: [f32; 3],
+    pub subchunk: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SchedulerStage {
     pub kind: StageKind,
 
@@ -86,6 +112,11 @@ pub struct SchedulerStage {
     pub max_loops: u16,
     pub transition_in: u16,
     pub transition_out: u16,
+
+    // `Some` exactly for the two model-transform kinds, whose payload occupies the dwords the
+    // generic decoder reads `id` from; `id` is `NO_STAGE_ID` on those stages so a consumer can
+    // never take rotation.x for a DatId.
+    pub model_transform: Option<ModelTransform>,
 
     // research/xim EffectRoutineParser.kt:275-285,553-559 — stages between a 0x3D and its 0x3E
     // are children of one RandomChildRoutine, not siblings on the timeline: retail runs exactly
@@ -105,6 +136,12 @@ pub struct SchedulerStage {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StageKind {
     Motion,
+
+    // research/xim EffectRoutineParser.kt parseSection2 0x0C ModelTranslationRoutine / 0x0D
+    // ModelRotationRoutine. Retail's swinging doors are these: `door/<BlockID>/open` rotates the
+    // group's leaves to 80 degrees about Y, `clos` back to 0.
+    ModelTranslation,
+    ModelRotation,
 
     SoundOnTarget,
 
@@ -152,6 +189,8 @@ impl StageKind {
             0x0A if length_words == SOUND_EMITTER_LENGTH_WORDS => Self::SoundOnCaster,
             0x0A => Self::SubRoutine,
             0x0B => Self::SoundOnTarget,
+            0x0C if length_words * 4 >= MODEL_TRANSFORM_PAYLOAD_LEN => Self::ModelTranslation,
+            0x0D if length_words * 4 >= MODEL_TRANSFORM_PAYLOAD_LEN => Self::ModelRotation,
             // research/xim EffectRoutineParser.kt:253-257 — StopParticleGeneratorRoutine, id =
             // the generator DatId to stop (ROM/0/0.DAT `stbk` stops the cast aura's gn10..gn13).
             0x2D => Self::StopParticle,
@@ -179,6 +218,10 @@ impl StageKind {
             _ => Self::Unknown,
         }
     }
+
+    pub fn is_model_transform(self) -> bool {
+        matches!(self, Self::ModelTranslation | Self::ModelRotation)
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -187,7 +230,7 @@ pub struct Scheduler {
     pub stages: Vec<TimedStage>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TimedStage {
     pub frame: u32,
     pub stage: SchedulerStage,
@@ -235,6 +278,14 @@ impl Scheduler {
             if stage_bytes >= STAGE_HEADER_LEN {
                 let read_u16 =
                     |off: usize| u16::from_le_bytes([body[cursor + off], body[cursor + off + 1]]);
+                let read_u32 = |off: usize| {
+                    u32::from_le_bytes([
+                        body[cursor + off],
+                        body[cursor + off + 1],
+                        body[cursor + off + 2],
+                        body[cursor + off + 3],
+                    ])
+                };
                 // research/xim EffectRoutineParser.kt:413-418 — ControlFlowBlock is constructed
                 // with `delay = 0` whatever the bytes say.
                 let delay = match raw_type {
@@ -243,7 +294,20 @@ impl Scheduler {
                 };
                 let duration = read_u16(DURATION_OFFSET);
                 let has_id = stage_bytes >= STAGE_WITH_ID_LEN;
-                let id = if has_id {
+                let kind = if has_id {
+                    StageKind::from_stage(raw_type, length_words)
+                } else {
+                    StageKind::Unknown
+                };
+                let model_transform = kind.is_model_transform().then(|| {
+                    let component =
+                        |i: usize| f32::from_bits(read_u32(MODEL_TRANSFORM_VECTOR_OFFSET + i * 4));
+                    ModelTransform {
+                        final_value: [component(0), component(1), component(2)],
+                        subchunk: read_u32(MODEL_TRANSFORM_SUBCHUNK_OFFSET),
+                    }
+                });
+                let id = if has_id && model_transform.is_none() {
                     [
                         body[cursor + ID_OFFSET],
                         body[cursor + ID_OFFSET + 1],
@@ -252,11 +316,6 @@ impl Scheduler {
                     ]
                 } else {
                     NO_STAGE_ID
-                };
-                let kind = if has_id {
-                    StageKind::from_stage(raw_type, length_words)
-                } else {
-                    StageKind::Unknown
                 };
                 let (max_loops, transition_in, transition_out) =
                     if kind == StageKind::Motion && stage_bytes >= MOTION_PAYLOAD_LEN {
@@ -284,6 +343,7 @@ impl Scheduler {
                         max_loops,
                         transition_in,
                         transition_out,
+                        model_transform,
                         random_group: open_group,
                         local_dir,
                     },
@@ -622,6 +682,254 @@ mod tests {
                 .any(|t| t.stage.kind == StageKind::DamageCallback),
             "mdam holds the 0x2B damage callback"
         );
+    }
+
+    const MODEL_TRANSFORM_WORDS: u8 = (MODEL_TRANSFORM_PAYLOAD_LEN / 4) as u8;
+
+    fn model_transform_stage_bytes(
+        opcode: u8,
+        delay: u16,
+        duration: u16,
+        value: [f32; 3],
+        subchunk: u32,
+    ) -> Vec<u8> {
+        let mut b = timed_stage_bytes(opcode, MODEL_TRANSFORM_WORDS, delay, duration);
+        for v in value {
+            b.extend_from_slice(&v.to_le_bytes());
+        }
+        b.extend_from_slice(&subchunk.to_le_bytes());
+        assert_eq!(b.len(), MODEL_TRANSFORM_PAYLOAD_LEN);
+        b
+    }
+
+    // Layout pin, decoded by hand out of ROM zone DAT 330 `t_sa/door/_6ey/open`: the six-dword
+    // stage puts delay at +4, duration at +6, three floats at +8/+12/+16 and the subchunk slot at
+    // +20. The dwords at +8..+20 are exactly what the generic decoder would have handed back as a
+    // DatId, so `id` must come back blank.
+    #[test]
+    fn model_transform_payload_is_a_vector_at_8_and_a_subchunk_at_20() {
+        const SWING: f32 = 1.3962256;
+        const DURATION: u16 = 70;
+        for (opcode, kind) in [
+            (0x0Cu8, StageKind::ModelTranslation),
+            (0x0D, StageKind::ModelRotation),
+        ] {
+            let mut body = vec![0u8; SCHEDULER_HEADER_LEN];
+            body.extend(model_transform_stage_bytes(
+                opcode,
+                0,
+                DURATION,
+                [0.0, SWING, 0.0],
+                1,
+            ));
+            assert_eq!(
+                &body[SCHEDULER_HEADER_LEN + MODEL_TRANSFORM_VECTOR_OFFSET + 4
+                    ..SCHEDULER_HEADER_LEN + MODEL_TRANSFORM_VECTOR_OFFSET + 8],
+                &SWING.to_le_bytes(),
+                "the y component sits at +12"
+            );
+
+            let s = Scheduler::parse(*b"open", &body).unwrap();
+            let st = s.stages[0].stage;
+            assert_eq!(st.kind, kind);
+            assert_eq!(st.raw_type, opcode);
+            assert_eq!(st.duration_frames, DURATION);
+            assert_eq!(
+                st.model_transform,
+                Some(ModelTransform {
+                    final_value: [0.0, SWING, 0.0],
+                    subchunk: 1,
+                })
+            );
+            assert_eq!(
+                st.id, NO_STAGE_ID,
+                "the transform payload must never surface as a DatId"
+            );
+        }
+    }
+
+    // A transform stage shorter than the payload cannot be decoded, and half a vector is worse
+    // than none: it stays Unknown rather than claiming a garbage transform.
+    #[test]
+    fn model_transform_opcode_shorter_than_the_payload_stays_unknown() {
+        let mut body = vec![0u8; SCHEDULER_HEADER_LEN];
+        body.extend(timed_stage_bytes(0x0D, 0x03, 0, 0));
+        body.extend_from_slice(&0u32.to_le_bytes());
+        let s = Scheduler::parse(*b"open", &body).unwrap();
+        assert_eq!(s.stages[0].stage.kind, StageKind::Unknown);
+        assert_eq!(s.stages[0].stage.model_transform, None);
+    }
+
+    // The two-leaf door shape, and the answer to whether the halves swing together: in
+    // research/xim EffectRoutineInstance runEffects the `while (storedFrames >= 0f)` test is made
+    // BEFORE `storedFrames -= head.delay`, so a stage always runs in the iteration that charges
+    // its own delay. Leaf 1's delay of a whole swing gates only what comes after it — both leaves
+    // start at frame 0 and swing together.
+    #[test]
+    fn both_door_leaves_start_on_the_same_frame() {
+        const LEAF_FRAMES: u16 = 70;
+        let mut body = vec![0u8; SCHEDULER_HEADER_LEN];
+        body.extend(model_transform_stage_bytes(
+            0x0D,
+            0,
+            LEAF_FRAMES,
+            [0.0, 1.0, 0.0],
+            0,
+        ));
+        body.extend(model_transform_stage_bytes(
+            0x0D,
+            LEAF_FRAMES,
+            LEAF_FRAMES,
+            [0.0, 1.0, 0.0],
+            1,
+        ));
+        body.extend(timed_stage_bytes(0x53, 0x03, 0, 0));
+        body.extend_from_slice(b"snd0");
+
+        let s = Scheduler::parse(*b"open", &body).unwrap();
+        assert_eq!(s.stages[0].frame, 0);
+        assert_eq!(s.stages[1].frame, 0);
+        assert_eq!(
+            s.stages[2].frame,
+            u32::from(LEAF_FRAMES),
+            "leaf 1's delay holds back the stage after it, not leaf 1 itself"
+        );
+    }
+
+    // vendor/server/src/map/zone.h ZONE_SOUTHERN_SANDORIA.
+    const SOUTHERN_SANDORIA: u16 = 230;
+    // The BlockID of the two `door03` placements outside the S. San d'Oria stables, and the name
+    // of the routine directory that swings them.
+    const STABLE_DOOR_GROUP: [u8; 4] = *b"_6ey";
+
+    fn zone_schedulers(zone_id: u16) -> Option<Vec<Scheduler>> {
+        schedulers_in_file(crate::zone_dat::zone_id_to_mzb_file_id(zone_id)?)
+    }
+
+    // Retail-byte guard (skips without an install). Both leaves of the S. San d'Oria stable door
+    // rotate about Y to the same angle and back to zero, addressed to subchunk 0 and 1 of the
+    // `_6ey` placement group. Before the 0x0D arm existed this decoded as an Unknown stage whose
+    // `id` was the four zero bytes of rotation.x.
+    #[test]
+    fn real_dat_ssandy_stable_door_rotates_two_subchunks() {
+        // The DAT stores 1.3962256 rad; retail authored the round degree figure.
+        const SWING_DEGREES: f32 = 80.0;
+        // f32 radians round-tripped through degrees land ~0.003 deg off the authored value.
+        const DEGREE_TOLERANCE: f32 = 0.01;
+        const SWING_FRAMES: u16 = 70;
+
+        let Some(scheds) = zone_schedulers(SOUTHERN_SANDORIA) else {
+            return;
+        };
+        let routine = |name: &[u8; 4]| {
+            scheds
+                .iter()
+                .find(|s| {
+                    &s.name == name
+                        && s.stages
+                            .first()
+                            .is_some_and(|t| t.stage.local_dir == STABLE_DOOR_GROUP)
+                })
+                .unwrap_or_else(|| {
+                    panic!("{} has a {} routine", "_6ey", String::from_utf8_lossy(name))
+                })
+        };
+
+        let open: Vec<ModelTransform> = routine(b"open")
+            .stages
+            .iter()
+            .filter_map(|t| t.stage.model_transform)
+            .collect();
+        assert_eq!(open.len(), 2, "one stage per door leaf");
+        for (slot, mt) in open.iter().enumerate() {
+            assert_eq!(mt.subchunk, slot as u32);
+            assert_eq!(mt.final_value[0], 0.0, "no pitch");
+            assert_eq!(mt.final_value[2], 0.0, "no roll");
+            assert!(
+                (mt.final_value[1].to_degrees().abs() - SWING_DEGREES).abs() < DEGREE_TOLERANCE,
+                "leaf {slot} swings {} deg",
+                mt.final_value[1].to_degrees()
+            );
+        }
+
+        let open_stages = &routine(b"open").stages;
+        let rotations: Vec<&TimedStage> = open_stages
+            .iter()
+            .filter(|t| t.stage.kind == StageKind::ModelRotation)
+            .collect();
+        assert!(rotations.iter().all(|t| t.stage.id == NO_STAGE_ID));
+        for t in &rotations {
+            assert_eq!(t.stage.duration_frames, SWING_FRAMES);
+            assert_eq!(
+                t.frame, 0,
+                "both leaves start together — leaf 1's authored delay gates what follows it"
+            );
+        }
+        assert!(
+            open_stages
+                .iter()
+                .any(|t| t.stage.kind == StageKind::SoundOnTarget && &t.stage.id == b"9021"),
+            "the swing plays the door's SEP sound"
+        );
+
+        let clos: Vec<ModelTransform> = routine(b"clos")
+            .stages
+            .iter()
+            .filter_map(|t| t.stage.model_transform)
+            .collect();
+        assert_eq!(clos.len(), 2);
+        for (slot, mt) in clos.iter().enumerate() {
+            assert_eq!(mt.subchunk, slot as u32);
+            assert_eq!(
+                mt.final_value, [0.0; 3],
+                "closing drives the leaves back to the authored rest pose, not by a delta"
+            );
+        }
+    }
+
+    // Retail-byte guard (skips without an install). Pso'Xja's sliding stone blocks are the
+    // translation opcode and Tavnazian Safehold's doors the rotation one, so between them these
+    // three zones exercise both. Every transform stage in them must fit the same layout: a
+    // subchunk inside the four slots retail keeps, and a rotation inside one turn.
+    #[test]
+    fn real_dat_model_transform_layout_holds_across_zones() {
+        // vendor/server/src/map/zone.h ZONE_PSOXJA / ZONE_TAVNAZIAN_SAFEHOLD.
+        const PSOXJA: u16 = 9;
+        const TAVNAZIAN_SAFEHOLD: u16 = 26;
+
+        let mut translations = 0usize;
+        let mut rotations = 0usize;
+        for zone_id in [PSOXJA, TAVNAZIAN_SAFEHOLD, SOUTHERN_SANDORIA] {
+            let Some(scheds) = zone_schedulers(zone_id) else {
+                return;
+            };
+            for stage in scheds.iter().flat_map(|s| s.stages.iter()).map(|t| t.stage) {
+                let Some(mt) = stage.model_transform else {
+                    continue;
+                };
+                assert!(
+                    mt.subchunk < MODEL_TRANSFORM_SUBCHUNK_SLOTS,
+                    "zone {zone_id} addresses subchunk {}",
+                    mt.subchunk
+                );
+                assert_eq!(stage.id, NO_STAGE_ID);
+                match stage.kind {
+                    StageKind::ModelTranslation => translations += 1,
+                    StageKind::ModelRotation => {
+                        rotations += 1;
+                        for v in mt.final_value {
+                            assert!(
+                                v.abs() <= std::f32::consts::TAU,
+                                "zone {zone_id} rotates {v} rad — past a full turn, so the field
+                                 is not an angle"
+                            );
+                        }
+                    }
+                    other => panic!("a transform payload on {other:?}"),
+                }
+            }
+        }
+        assert!(translations > 0 && rotations > 0);
     }
 
     #[test]

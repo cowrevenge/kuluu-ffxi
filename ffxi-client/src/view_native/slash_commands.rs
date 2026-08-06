@@ -2450,7 +2450,7 @@ fn render_debug_entity(arg: &str, entities: &[WireEntity], self_pos: WireVec3) -
                 "  legs=0x{legs:04X} feet=0x{feet:04X} main=0x{main:04X} sub=0x{sub:04X} ranged=0x{ranged:04X}"
             ));
         }
-        Some(EntityLook::Door { size }) => s.push_str(&format!(" door size={size}")),
+        Some(EntityLook::Door { size, .. }) => s.push_str(&format!(" door size={size}")),
         Some(EntityLook::Transport { size }) => s.push_str(&format!(" transport size={size}")),
     }
     s.push('\n');
@@ -2942,7 +2942,7 @@ fn parse_look(
              hands=0x{hands:04X} legs=0x{legs:04X} feet=0x{feet:04X} \
              main=0x{main:04X} sub=0x{sub:04X} ranged=0x{ranged:04X}"
         ),
-        Some(EntityLook::Door { size }) => format!("look: DOOR (size={size})"),
+        Some(EntityLook::Door { size, .. }) => format!("look: DOOR (size={size})"),
         Some(EntityLook::Transport { size }) => format!("look: TRANSPORT (size={size})"),
     };
     SlashOutcome::SystemMessage(format!("/look [{name}] {body}"))

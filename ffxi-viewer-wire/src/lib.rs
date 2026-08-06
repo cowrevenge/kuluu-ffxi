@@ -2,6 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 
+// v18: EntityLook::Door.door_id — the door's FourCC, which joins the entity to the MZB
+// placement group and the zone-DAT routines that swing it (nothing else on the wire can).
 // v17: ViewerEvent::Auction{MenuOpened,BidResult,SellResult,SellRefused,CancelResult,
 // SearchFailed} — edge-triggered AH outcomes the HUD turns into retail chat echoes
 // (the snapshot's AuctionUi carries only the settled state, not the transition).
@@ -30,7 +32,7 @@ use serde::{Deserialize, Serialize};
 // v5: InventoryItem.charges_remaining + next_use_vana_ts (item recast/charges).
 // v4: SceneSnapshot.delivery_box (dedicated delivery screen) + ViewerCommand::DeliveryBox
 // (postcard frames are not self-describing, so any shape change bumps this).
-pub const PROTOCOL_VERSION: u32 = 17;
+pub const PROTOCOL_VERSION: u32 = 18;
 
 /// Longest countdown `SceneSnapshot::status_icon_expiries` can carry. The
 /// producer rejects anything beyond it as a corrupt 0x063 timestamp, and the HUD
@@ -178,6 +180,15 @@ pub enum EntityLook {
     },
     Door {
         size: u16,
+
+        /// `ffxi_proto::decode::DoorId` as its four raw bytes — the FourCC LSB
+        /// writes into the door's 0x0E look. It names both the zone-DAT
+        /// directory holding the door's `open`/`clos` routines and the MZB
+        /// `BlockID` of the leaves those routines swing, so it is the only
+        /// join from this entity to its geometry. `None` when the server sent
+        /// an all-zero id (`DoorId::new`'s reject).
+        #[serde(default)]
+        door_id: Option<[u8; 4]>,
     },
     Transport {
         size: u16,
@@ -1687,7 +1698,10 @@ mod tests {
 
         let door = Entity {
             kind: EntityKind::Other,
-            look: Some(EntityLook::Door { size: 2 }),
+            look: Some(EntityLook::Door {
+                size: 2,
+                door_id: None,
+            }),
             ..base.clone()
         };
         assert!(

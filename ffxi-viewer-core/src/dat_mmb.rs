@@ -124,6 +124,8 @@ pub struct LoadMmbRequest {
     pub water: Option<GenWater>,
 
     pub lod: Option<crate::dat_mzb::ZoneMeshLod>,
+
+    pub door: Option<crate::zone_doors::ZoneDoorLeaf>,
 }
 
 // Animates one generator water sheet's UV scroll. Each sheet owns its material
@@ -612,6 +614,9 @@ pub fn process_load_mmb_requests(
                         if let Some(lod) = req.lod {
                             e.insert(lod);
                         }
+                        if let Some(door) = req.door {
+                            e.insert(door);
+                        }
                         e.id()
                     }
                 };
@@ -965,6 +970,7 @@ mod tests {
             world_transform: Some(Mat4::from_translation(pos)),
             water: None,
             lod: None,
+            door: None,
         }
     }
 
@@ -977,6 +983,7 @@ mod tests {
             world_transform: None,
             water: None,
             lod: None,
+            door: None,
         }
     }
 

@@ -1,4 +1,5 @@
 use super::*;
+use std::fmt;
 
 #[derive(Debug, Clone, Copy)]
 pub struct PosHead {
@@ -309,6 +310,58 @@ mod flags3 {
     pub const MENTOR: u32 = 24;
 }
 
+/// The FourCC a `MODEL_DOOR` entity carries in `CHAR_NPC` (0x0E) —
+/// `GP_SERV_CHAR_NPC` `packet_data_2.DoorId`
+/// (research/XIClient/.../Game/Net/Packets/s2c/0x00E.h `CharNpcTypeFields`).
+/// LSB fills it with the entity's `npc_list.name`
+/// (vendor/server/src/map/packets/entity_update.cpp
+/// `CEntityUpdatePacket::updateWith`, `case MODEL_DOOR`).
+///
+/// The same FourCC is the `BlockID` of the door's MMB placement group in the
+/// zone MZB and names the zone-DAT directory holding its `open`/`clos`
+/// Scheduler routines, so this — not the entity name, which only rides an
+/// `UPDATE_NAME` packet — is the join from wire entity to geometry.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct DoorId([u8; 4]);
+
+impl DoorId {
+    pub const LEN: usize = 4;
+
+    /// `BlockID == 0` is the MZB "not in a FourCC group" sentinel that
+    /// `MmbPlacement::in_underscore_at_group` (ffxi-dat) tests, and it is what
+    /// LSB leaves in the field for a door entity with an empty name.
+    const UNGROUPED: u32 = 0;
+
+    pub fn new(bytes: [u8; Self::LEN]) -> Option<Self> {
+        (u32::from_le_bytes(bytes) != Self::UNGROUPED).then_some(Self(bytes))
+    }
+
+    pub const fn bytes(self) -> [u8; Self::LEN] {
+        self.0
+    }
+
+    /// The MZB `BlockID` form. Retail reads the FourCC as a little-endian
+    /// `int32` and tests `(unsigned char)BlockID` for the group prefix
+    /// (research/XIClient/.../World/Zone/Terrain/ZoneLayoutData.cpp
+    /// `InitUnderscoreAtStructs`), so this compares directly against
+    /// `MmbPlacement::block_id`.
+    pub const fn block_id(self) -> u32 {
+        u32::from_le_bytes(self.0)
+    }
+}
+
+impl fmt::Display for DoorId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0.escape_ascii())
+    }
+}
+
+impl fmt::Debug for DoorId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "DoorId({self})")
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LookData {
     Standard {
@@ -331,6 +384,7 @@ pub enum LookData {
 
     Door {
         size: u16,
+        door_id: Option<DoorId>,
     },
 
     Transport {
@@ -340,6 +394,20 @@ pub enum LookData {
 
 impl LookData {
     pub(crate) const LOOK_BODY_OFFSET: usize = 0x2C;
+
+    /// `CharNpcTypeFields::field_30`, whose retail struct offsets are relative
+    /// to `GP_SERV_POS_HEAD` — exactly this `body` — so
+    /// `offsetof(GP_SERV_CHAR_NPC, Data) + offsetof(CharNpcGenericData, Extra)
+    /// == 0x30` (research/XIClient/.../s2c/0x00E.h) is this constant verbatim.
+    /// LSB writes the same bytes at packet 0x34, four past the `look.size` it
+    /// puts at packet 0x30.
+    pub(crate) const DOOR_ID_BODY_OFFSET: usize = 0x30;
+
+    fn door_id(body: &[u8]) -> Option<DoorId> {
+        let off = Self::DOOR_ID_BODY_OFFSET;
+        let raw = body.get(off..off + DoorId::LEN)?;
+        DoorId::new(raw.try_into().ok()?)
+    }
 
     pub fn decode_char_npc(body: &[u8]) -> Option<Self> {
         let off = Self::LOOK_BODY_OFFSET;
@@ -370,7 +438,10 @@ impl LookData {
                     ranged: u16::from_le_bytes([body[off + 18], body[off + 19]]),
                 })
             }
-            2 => Some(LookData::Door { size }),
+            2 => Some(LookData::Door {
+                size,
+                door_id: Self::door_id(body),
+            }),
             3 | 4 => Some(LookData::Transport { size }),
             _ => None,
         }
@@ -479,6 +550,7 @@ const _: () = {
     assert!(NpcState::ANIMATION_OFFSET < NpcState::STATUS_OFFSET);
     assert!(NpcState::STATUS_OFFSET < NpcState::ANIMATIONSUB_OFFSET);
     assert!(NpcState::ANIMATIONSUB_OFFSET < LookData::LOOK_BODY_OFFSET);
+    assert!(LookData::LOOK_BODY_OFFSET < LookData::DOOR_ID_BODY_OFFSET);
 };
 
 #[cfg(test)]
@@ -832,6 +904,100 @@ mod look_data_tests {
     fn look_data_truncated_returns_none() {
         let buf = vec![0u8; 0x20];
         assert_eq!(LookData::decode_char_npc(&buf), None);
+    }
+
+    /// `MODELTYPE::MODEL_DOOR` (vendor/server/src/map/packets/entity_update.h).
+    const MODEL_DOOR: u16 = 2;
+
+    /// `case MODEL_DOOR` in `CEntityUpdatePacket::updateWith` calls
+    /// `setSize(0x48)`, and body[0] is LSB packet 0x04.
+    const DOOR_BODY_LEN: usize = 0x48 - 4;
+
+    fn door_body(name: &[u8]) -> Vec<u8> {
+        let mut buf = vec![0u8; DOOR_BODY_LEN];
+        let look = LookData::LOOK_BODY_OFFSET;
+        buf[look..look + 2].copy_from_slice(&MODEL_DOOR.to_le_bytes());
+        let id = LookData::DOOR_ID_BODY_OFFSET;
+        buf[id..id + name.len()].copy_from_slice(name);
+        buf
+    }
+
+    /// Pins the two door offsets to LSB's packet-relative writes, minus the
+    /// 4-byte sub-packet header this decoder's `body` starts past
+    /// (vendor/server/src/map/packets/entity_update.cpp `case MODEL_DOOR`:
+    /// `ref<uint16>(0x30) = look.size`, name memcpy'd to 0x34).
+    #[test]
+    fn door_offsets_map_to_lsb_packet_bytes_0x30_and_0x34() {
+        assert_eq!(LookData::LOOK_BODY_OFFSET, 0x30 - 4);
+        assert_eq!(LookData::DOOR_ID_BODY_OFFSET, 0x34 - 4);
+    }
+
+    #[test]
+    fn look_data_decodes_door_fourcc() {
+        // Southern San d'Oria's Chocobo Stables door
+        // (vendor/server/sql/npc_list.sql, npcid 17719475, look 0x0200…).
+        const SANDORIA_STABLES: &[u8; DoorId::LEN] = b"_6ey";
+
+        let buf = door_body(SANDORIA_STABLES);
+        let LookData::Door { size, door_id } =
+            LookData::decode_char_npc(&buf).expect("MODEL_DOOR look")
+        else {
+            panic!("look.size 2 must classify as Door");
+        };
+        assert_eq!(size, MODEL_DOOR);
+
+        let door_id = door_id.expect("a named door carries its FourCC");
+        assert_eq!(door_id.bytes(), *SANDORIA_STABLES);
+        assert_eq!(door_id.to_string(), "_6ey");
+
+        // The join: the FourCC read little-endian is the MZB `BlockID`, whose
+        // first byte is what `MmbPlacement::in_underscore_at_group` tests.
+        assert_eq!(door_id.block_id(), u32::from_le_bytes(*SANDORIA_STABLES));
+        assert_eq!(door_id.block_id().to_le_bytes()[0], b'_');
+    }
+
+    /// The FourCC is written by the `look.size` switch, which sits outside every
+    /// `updatemask` branch, so it must survive a body carrying no send flags at
+    /// all — unlike the name, which needs UPDATE_NAME.
+    #[test]
+    fn door_fourcc_survives_an_empty_updatemask() {
+        let buf = door_body(b"_6ey");
+        assert_eq!(buf[6], 0, "test body sanity: no send flags set");
+        assert!(matches!(
+            LookData::decode_char_npc(&buf),
+            Some(LookData::Door {
+                door_id: Some(_),
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn nameless_door_still_classifies_as_a_door() {
+        let buf = door_body(b"");
+        assert_eq!(
+            LookData::decode_char_npc(&buf),
+            Some(LookData::Door {
+                size: MODEL_DOOR,
+                door_id: None,
+            })
+        );
+    }
+
+    /// A body that stops at the look word (a private server sending the short
+    /// 0x0E form) must still classify as a door rather than vanish.
+    #[test]
+    fn door_body_truncated_before_the_fourcc_yields_no_id() {
+        let mut buf = vec![0u8; LookData::DOOR_ID_BODY_OFFSET + DoorId::LEN - 1];
+        let look = LookData::LOOK_BODY_OFFSET;
+        buf[look..look + 2].copy_from_slice(&MODEL_DOOR.to_le_bytes());
+        assert_eq!(
+            LookData::decode_char_npc(&buf),
+            Some(LookData::Door {
+                size: MODEL_DOOR,
+                door_id: None,
+            })
+        );
     }
 
     #[test]

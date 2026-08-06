@@ -10,6 +10,10 @@ use ffxi_client::search_client::{self, SEARCH_PORT};
 // vendor/server/documentation/Auction Categories.txt (item_basic.aH).
 const AH_CATEGORY_CRYSTALS: u8 = 35;
 
+// Body armor: hundreds of items in any stock item DB, so the catalog spans
+// many search_handler pages and the TCP_AH_REQUEST_MORE pull gets exercised.
+const AH_CATEGORY_BODY: u8 = 18;
+
 // vendor/server/sql/item_basic.sql: itemid 4096 = fire_crystal, a stackable
 // Crystals-category item present in every LSB item DB.
 const FIRE_CRYSTAL: u16 = 4096;
@@ -72,6 +76,23 @@ async fn auction_browse_and_history_against_live_lsb() {
     for listing in &catalog.listings {
         assert_ne!(listing.item_id, 0, "catalog rows carry real item ids");
     }
+
+    // The regression that made every equipment category time out: only the
+    // first page ever arrived, because the follow-up pages were never asked
+    // for. A single-page category (Crystals, above) cannot catch it.
+    let body = with_retry(|| search_client::ah_list(&server_host, AH_CATEGORY_BODY, &[]))
+        .await
+        .expect("multi-page AH category browse");
+    assert!(
+        body.total as usize > ffxi_proto::search::AH_LIST_ITEMS_PER_PACKET,
+        "body armor must span more than one page to be a paging test (got {})",
+        body.total
+    );
+    assert_eq!(
+        body.listings.len(),
+        body.total as usize,
+        "every page merged, not just the first"
+    );
 
     let history = with_retry(|| search_client::ah_history(&server_host, FIRE_CRYSTAL, true))
         .await

@@ -41,9 +41,31 @@ decrypted `len-0x18` word at offset 20 for the response. AH list request:
 category id at 0x16, sort-param count at 0x12, params at 0x18+8i. History
 request: item id at 0x12, stack flag at 0x15. List response (`auction_list.cpp`):
 type 0x95 at 0x0B, total count at 0x0E, 20 items/packet of 10 bytes each
-(`u16 itemid, u32 single_price, u32 stack_price`) from 0x18; 0x80 at 0x0A marks
-the final packet. Prices are the *current cheapest listing* per form; 0 = none
-listed. History response (`auction_history.cpp`): 10 most recent sales.
+(`u16 itemid, u32 single_count, u32 stack_count`) from 0x18; 0x80 at 0x0A marks
+the final packet. Those two u32s are open-listing **counts**, not prices —
+retail's bracketed `[N]` stock numbers (`data_loader.cpp`
+`GetAHItemsToCategory`); prices appear only in sale history.
+History response (`auction_history.cpp`): 10 most recent sales.
+
+### Catalog paging is pull-based (measured on HorizonXI 2026-08-05)
+
+The catalog is **not** pushed in one burst. The server answers `TCP_AH_REQUEST`
+with page 0 (20 rows) and then sends nothing — each later page must be pulled
+with a `TCP_AH_REQUEST_MORE` carrying the same body. Measured against
+`play.horizonxi.com`, category 18 (Body): 14 pages, 270 rows, 526 ms when each
+page is requested; a wait-only client got page 0 and stalled indefinitely.
+The `MORE` frame's category/sort fields are ignored — paging offset is
+per-connection server state — but we resend the real ones because stock LSB
+re-reads them (`search_handler.cpp:267-268`).
+
+Two consequences for the client:
+
+- **One client key per connection, not per request.** `SearchHandler::key`
+  evolves in place; splicing a fresh key into a follow-up request makes the
+  next response fail our integrity check. Reuse the key for the whole socket.
+- Stock LSB queues *every* page up front, so the same client works there: the
+  redundant `MORE` re-dumps land behind the pages still being read and are
+  dropped when the socket closes at the final page.
 
 ## Category tree (observed; ids from `vendor/server/documentation/Auction Categories.txt`)
 

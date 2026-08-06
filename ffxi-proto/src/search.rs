@@ -180,9 +180,34 @@ impl SearchCrypto {
         sorts: &[u32],
         client_key: u32,
     ) -> Vec<u8> {
+        self.encode_ah_list(TCP_AH_REQUEST, category, sorts, client_key)
+    }
+
+    /// The follow-up page request. Retail asks for the catalog one 20-item page
+    /// at a time; a server that pages on demand sends nothing further until
+    /// this arrives (observation record
+    /// .agents/skills/retail-observe/references/auction-house.md). Body is the
+    /// original request's — `HandleAuctionHouseRequest` re-reads category and
+    /// sort params for both types (search_handler.cpp:267-268).
+    pub fn encode_ah_list_more_request(
+        &mut self,
+        category: u8,
+        sorts: &[u32],
+        client_key: u32,
+    ) -> Vec<u8> {
+        self.encode_ah_list(TCP_AH_REQUEST_MORE, category, sorts, client_key)
+    }
+
+    fn encode_ah_list(
+        &mut self,
+        request_type: u8,
+        category: u8,
+        sorts: &[u32],
+        client_key: u32,
+    ) -> Vec<u8> {
         let payload_end = AH_LIST_PARAMS_OFFSET + AH_LIST_PARAM_STRIDE * sorts.len();
         let len = payload_end + SERVER_KEY_FROM_END;
-        self.encode_request(len, TCP_AH_REQUEST, client_key, |frame| {
+        self.encode_request(len, request_type, client_key, |frame| {
             frame[AH_LIST_SORT_COUNT_OFFSET] = sorts.len() as u8;
             frame[AH_LIST_CATEGORY_OFFSET] = category;
             for (i, sort) in sorts.iter().enumerate() {
@@ -483,6 +508,53 @@ mod tests {
             server.key, client.key,
             "key evolution must stay in lockstep"
         );
+    }
+
+    /// The follow-up page request differs from the first only in its type byte:
+    /// HandleAuctionHouseRequest reads category/sorts from the same offsets for
+    /// both (search_handler.cpp:267-268).
+    #[test]
+    fn ah_list_more_request_repeats_the_body_under_the_more_type() {
+        let mut client = SearchCrypto::new();
+        let first = client.encode_ah_list_request(18, &[SORT_NAME], CLIENT_KEY);
+        let mut more = client.encode_ah_list_more_request(18, &[SORT_NAME], CLIENT_KEY);
+        assert_eq!(
+            more.len(),
+            first.len(),
+            "same payload shape, so the same frame length"
+        );
+
+        let mut server = LsbServer::new();
+        server.decrypt(&mut more);
+        assert!(server.validate(&more), "server-side MD5 validation");
+        assert_eq!(more[REQUEST_TYPE_OFFSET], TCP_AH_REQUEST_MORE);
+        assert_eq!(more[AH_LIST_SORT_COUNT_OFFSET], 1);
+        assert_eq!(more[AH_LIST_CATEGORY_OFFSET], 18);
+        assert_eq!(rd_u32(&more, AH_LIST_PARAMS_OFFSET), SORT_NAME);
+    }
+
+    /// Reusing one client key across a connection's requests keeps both sides'
+    /// key state identical, so later pages still decrypt — changing it
+    /// mid-connection made HorizonXI's next response fail the integrity check
+    /// (observed 2026-08-05).
+    #[test]
+    fn repeated_requests_under_one_client_key_hold_key_state_steady() {
+        let mut client = SearchCrypto::new();
+        let mut server = LsbServer::new();
+
+        let mut first = client.encode_ah_list_request(18, &[], CLIENT_KEY);
+        server.decrypt(&mut first);
+        assert!(server.validate(&first));
+        let after_first = client.key;
+
+        let mut more = client.encode_ah_list_more_request(18, &[], CLIENT_KEY);
+        server.decrypt(&mut more);
+        assert!(server.validate(&more));
+        assert_eq!(
+            client.key, after_first,
+            "key unchanged across the page pull"
+        );
+        assert_eq!(server.key, client.key, "and still in lockstep with LSB");
     }
 
     #[test]

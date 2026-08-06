@@ -304,6 +304,13 @@ pub fn sync_entities_system(
                 if let Ok(mut m) = q_mat.get_mut(existing) {
                     m.0 = mat;
                 }
+                // The spawn arm can only tag self once the id is known, and the
+                // player's own entity routinely arrives before it — every reader
+                // of this marker (camera, first-person, the self plate) would
+                // then treat the player as somebody else for the whole session.
+                if is_self {
+                    commands.entity(existing).insert(IsSelf);
+                }
             }
             None => {
                 // Doors/transports have no client model — their visual is the

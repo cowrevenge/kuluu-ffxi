@@ -2,8 +2,19 @@ use std::collections::HashMap;
 
 use bevy::prelude::*;
 
+/// Two independent HUD suppressors, OR-ed by [`apply_hud_hidden`]: the player's
+/// own screenshot toggle must survive a cutscene taking and giving back the HUD.
 #[derive(Resource, Default)]
-pub struct HudHidden(pub bool);
+pub struct HudHidden {
+    pub manual: bool,
+    pub cutscene: bool,
+}
+
+impl HudHidden {
+    pub fn any(&self) -> bool {
+        self.manual || self.cutscene
+    }
+}
 
 #[derive(Component)]
 pub struct HudHideExempt;
@@ -18,7 +29,7 @@ pub fn apply_hud_hidden(
     mut stash: ResMut<HudHideStash>,
     mut roots: Query<(Entity, &mut Visibility), HudRootFilter>,
 ) {
-    if hidden.0 {
+    if hidden.any() {
         for (entity, mut vis) in roots.iter_mut() {
             if *vis != Visibility::Hidden {
                 stash.0.entry(entity).or_insert(*vis);
@@ -63,12 +74,12 @@ mod tests {
             .spawn((Node::default(), Visibility::Hidden))
             .id();
 
-        app.world_mut().resource_mut::<HudHidden>().0 = true;
+        app.world_mut().resource_mut::<HudHidden>().manual = true;
         app.update();
         assert_eq!(vis(&app, shown), Visibility::Hidden);
         assert_eq!(vis(&app, closed), Visibility::Hidden);
 
-        app.world_mut().resource_mut::<HudHidden>().0 = false;
+        app.world_mut().resource_mut::<HudHidden>().manual = false;
         app.update();
         assert_eq!(vis(&app, shown), Visibility::Inherited);
         assert_eq!(vis(&app, closed), Visibility::Hidden);
@@ -90,7 +101,7 @@ mod tests {
             .spawn((Node::default(), Visibility::Inherited, ChildOf(root)))
             .id();
 
-        app.world_mut().resource_mut::<HudHidden>().0 = true;
+        app.world_mut().resource_mut::<HudHidden>().manual = true;
         app.update();
         assert_eq!(vis(&app, exempt), Visibility::Inherited);
         assert_eq!(vis(&app, root), Visibility::Hidden);
@@ -100,7 +111,7 @@ mod tests {
     #[test]
     fn root_spawned_while_hidden_is_hidden_then_restored() {
         let mut app = test_app();
-        app.world_mut().resource_mut::<HudHidden>().0 = true;
+        app.world_mut().resource_mut::<HudHidden>().manual = true;
         app.update();
 
         let late = app
@@ -110,9 +121,31 @@ mod tests {
         app.update();
         assert_eq!(vis(&app, late), Visibility::Hidden);
 
-        app.world_mut().resource_mut::<HudHidden>().0 = false;
+        app.world_mut().resource_mut::<HudHidden>().manual = false;
         app.update();
         assert_eq!(vis(&app, late), Visibility::Inherited);
+    }
+
+    #[test]
+    fn a_cutscene_release_does_not_undo_the_players_own_toggle() {
+        let mut app = test_app();
+        let root = app
+            .world_mut()
+            .spawn((Node::default(), Visibility::Inherited))
+            .id();
+
+        app.world_mut().resource_mut::<HudHidden>().manual = true;
+        app.world_mut().resource_mut::<HudHidden>().cutscene = true;
+        app.update();
+        assert_eq!(vis(&app, root), Visibility::Hidden);
+
+        app.world_mut().resource_mut::<HudHidden>().cutscene = false;
+        app.update();
+        assert_eq!(vis(&app, root), Visibility::Hidden);
+
+        app.world_mut().resource_mut::<HudHidden>().manual = false;
+        app.update();
+        assert_eq!(vis(&app, root), Visibility::Inherited);
     }
 
     #[test]
@@ -122,14 +155,14 @@ mod tests {
             .world_mut()
             .spawn((Node::default(), Visibility::Inherited))
             .id();
-        app.world_mut().resource_mut::<HudHidden>().0 = true;
+        app.world_mut().resource_mut::<HudHidden>().manual = true;
         app.update();
 
         *app.world_mut().get_mut::<Visibility>(root).unwrap() = Visibility::Visible;
         app.update();
         assert_eq!(vis(&app, root), Visibility::Hidden);
 
-        app.world_mut().resource_mut::<HudHidden>().0 = false;
+        app.world_mut().resource_mut::<HudHidden>().manual = false;
         app.update();
         assert_eq!(vis(&app, root), Visibility::Inherited);
     }

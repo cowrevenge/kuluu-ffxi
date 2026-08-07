@@ -7,7 +7,7 @@ use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat, T
 pub const MINIMAP_BAKE_LAYER: usize = 3;
 
 use crate::components::InGameEntity;
-use crate::dat_mzb::{LoadMzbInFlight, MzbCollisionGeometry};
+use crate::dat_mzb::{LoadMzbInFlight, MzbCollisionGeometry, ZONE_SLOT_MAIN};
 use crate::ffxi_zone_material::ZoneGlobalLighting;
 use crate::snapshot::SceneState;
 
@@ -94,7 +94,7 @@ pub fn bake_topdown_on_zone_or_policy_change(
     state: Res<MinimapState>,
     mut stage: ResMut<BakeStage>,
 ) {
-    if geom.positions.is_empty() {
+    if geom.block(ZONE_SLOT_MAIN).positions.is_empty() {
         return;
     }
     let policy_changed = policy.is_changed();
@@ -131,14 +131,18 @@ pub fn spawn_bake_camera(
         return;
     };
 
-    let collision_pending = !mzb_in_flight.tasks.is_empty();
+    // Slot 0 only: the map covers the zone, so an interior streaming in behind
+    // a doorway must not stall the bake.
+    let collision_pending = mzb_in_flight.pending_in_slot(ZONE_SLOT_MAIN);
     if waited < BAKE_MIN_WARMUP_FRAMES || collision_pending {
         *stage = BakeStage::Requested {
             waited: waited.saturating_add(1),
         };
         return;
     }
-    let Some(aabb_3d) = compute_world_aabb(&geom.positions) else {
+    // Sized from the main block alone: an interior's triangles would shrink the
+    // map to the shop's bounding box.
+    let Some(aabb_3d) = compute_world_aabb(&geom.block(ZONE_SLOT_MAIN).positions) else {
         *stage = BakeStage::Idle;
         return;
     };

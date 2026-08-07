@@ -14,7 +14,13 @@ const ENTRY_TABLE_HEADER_LEN: usize = 16;
 const ENTRY_LEN: usize = 64;
 
 const POSITION_OFFSET: usize = 0x00;
-const ORIENTATION_OFFSET: usize = 0x0C;
+/// Where XIM reads the x component of a rotation vec3
+/// (ZoneInteractionSection.kt:51-113) the retail DATs hold an integer: `0` in 350
+/// of the 370 shipped `m`-rects and 500..558 in the other 20. See
+/// [`ZoneInteraction::rect_class`].
+const RECT_CLASS_OFFSET: usize = 0x0C;
+const ROTATION_Y_OFFSET: usize = 0x10;
+const ROTATION_Z_OFFSET: usize = 0x14;
 const SIZE_OFFSET: usize = 0x18;
 const SOURCE_ID_OFFSET: usize = 0x24;
 const DEST_ID_OFFSET: usize = 0x28;
@@ -38,13 +44,26 @@ const UNIT_BOX_HALF_EXTENT: f32 = 0.5;
 pub const MOG_HOUSE_PREFIX_CLASSIC: &str = "zmr";
 pub const MOG_HOUSE_PREFIX_WOTG: &str = "zms";
 
+/// The [`ZoneInteraction::rect_class`] `RidManager::Add` (RidManager.cpp:100-122)
+/// puts in the hit-check array; every other class it drops.
+pub const RECT_CLASS_HIT_CHECKED: u32 = 0;
+
 /// One 64-byte RID entry: an oriented trigger box in FFXI-native zone space
 /// (= LSB server coords; render via `mzb_to_bevy`, not `ffxi_to_bevy`).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ZoneInteraction {
     /// OBB center.
     pub position: [f32; 3],
-    /// Euler radians, applied ZYX.
+    /// Which record class the entry belongs to; `0` is the hit-checked one.
+    /// `RidManager::Add`
+    /// (research/XIClient/src/XIClient/source/World/Zone/Triggers/RidManager.cpp:100-122)
+    /// puts only the class-0 rects in the array the per-frame checks walk, and in
+    /// the shipped DATs the non-zero classes are coarse sub-map regions (boxes of
+    /// 200-1400 units whose ids resolve to Img chunks), not trigger volumes.
+    pub rect_class: u32,
+    /// Euler radians, applied ZYX. Component 0 is always `0.0`: those bytes are
+    /// [`ZoneInteraction::rect_class`], and retail rotates the box by
+    /// `-orientation.y` alone (RidManager.cpp:109).
     pub orientation: [f32; 3],
     /// FULL extents: x,z horizontal, y vertical; box vertically centered on `position`.
     pub size: [f32; 3],
@@ -88,14 +107,32 @@ impl ZoneInteraction {
                 || self.source_id.starts_with(MOG_HOUSE_PREFIX_WOTG))
     }
 
-    /// The sub-area (building interior) this rect activates, `None` when it is not
-    /// a sub-area trigger. `RidManager::InitSubModels`
+    /// A trigger volume that latches a sub-area. `RidManager::InitSubModels`
     /// (research/XIClient/src/XIClient/source/World/Zone/Triggers/RidManager.cpp:611-647)
-    /// keeps the `m`-prefixed rects whose dest fourcc is non-zero;
-    /// research/cexi-docs/zone/subareas.md:65 names `param` as the id, which the
-    /// retail install confirms — see [`crate::sub_area`].
+    /// keeps the `m`-prefixed rects whose dest fourcc is non-zero, and
+    /// `RidManager::Add` hit-checks only [`RECT_CLASS_HIT_CHECKED`].
+    pub fn is_sub_area_trigger(&self) -> bool {
+        self.is_sub_area() && self.dest_id.is_some() && self.rect_class == RECT_CLASS_HIT_CHECKED
+    }
+
+    /// The `m`-rects of the other classes: coarse sub-map regions rather than
+    /// sub-area triggers, whose ids name Img chunks and not interior MZBs.
+    pub fn is_sub_map_region(&self) -> bool {
+        self.is_sub_area() && self.dest_id.is_some() && self.rect_class != RECT_CLASS_HIT_CHECKED
+    }
+
+    /// What a sub-area trigger latches, `None` when the rect is not one. `0` is a
+    /// value in its own right — the signal to leave the active sub-area, not a
+    /// record to discard.
+    pub fn sub_area_param(&self) -> Option<u32> {
+        self.is_sub_area_trigger().then_some(self.param)
+    }
+
+    /// The interior a sub-area trigger declares, `None` for the leave rects and for
+    /// every non-trigger. research/cexi-docs/zone/subareas.md:65 names `param` as
+    /// the id, which the retail install confirms — see [`crate::sub_area`].
     pub fn sub_area_id(&self) -> Option<u32> {
-        (self.is_sub_area() && self.dest_id.is_some() && self.param != 0).then_some(self.param)
+        self.sub_area_param().filter(|p| *p != 0)
     }
 
     /// Point-in-box in FFXI zone space. `RidManager::Add`
@@ -134,11 +171,15 @@ fn rd_i16(body: &[u8], off: usize) -> i16 {
     i16::from_le_bytes([body[off], body[off + 1]])
 }
 
+fn rd_f32(body: &[u8], off: usize) -> f32 {
+    f32::from_le_bytes([body[off], body[off + 1], body[off + 2], body[off + 3]])
+}
+
 fn rd_vec3(body: &[u8], off: usize) -> [f32; 3] {
     [
-        f32::from_le_bytes([body[off], body[off + 1], body[off + 2], body[off + 3]]),
-        f32::from_le_bytes([body[off + 4], body[off + 5], body[off + 6], body[off + 7]]),
-        f32::from_le_bytes([body[off + 8], body[off + 9], body[off + 10], body[off + 11]]),
+        rd_f32(body, off),
+        rd_f32(body, off + 4),
+        rd_f32(body, off + 8),
     ]
 }
 
@@ -194,7 +235,12 @@ pub fn parse(body: &[u8]) -> Result<Vec<ZoneInteraction>> {
         let dest_raw: [u8; 4] = e[DEST_ID_OFFSET..DEST_ID_OFFSET + 4].try_into().unwrap();
         out.push(ZoneInteraction {
             position,
-            orientation: rd_vec3(e, ORIENTATION_OFFSET),
+            rect_class: rd_u32(e, RECT_CLASS_OFFSET),
+            orientation: [
+                0.0,
+                rd_f32(e, ROTATION_Y_OFFSET),
+                rd_f32(e, ROTATION_Z_OFFSET),
+            ],
             size: rd_vec3(e, SIZE_OFFSET),
             source_id: DatId(
                 e[SOURCE_ID_OFFSET..SOURCE_ID_OFFSET + 4]
@@ -240,6 +286,7 @@ mod tests {
     #[allow(clippy::too_many_arguments)]
     fn synth_entry(
         position: [f32; 3],
+        rect_class: u32,
         orientation: [f32; 3],
         size: [f32; 3],
         source: &[u8; 4],
@@ -251,7 +298,9 @@ mod tests {
     ) -> [u8; ENTRY_LEN] {
         let mut e = [0u8; ENTRY_LEN];
         put_f32x3(&mut e, POSITION_OFFSET, position);
-        put_f32x3(&mut e, ORIENTATION_OFFSET, orientation);
+        e[RECT_CLASS_OFFSET..RECT_CLASS_OFFSET + 4].copy_from_slice(&rect_class.to_le_bytes());
+        e[ROTATION_Y_OFFSET..ROTATION_Y_OFFSET + 4].copy_from_slice(&orientation[1].to_le_bytes());
+        e[ROTATION_Z_OFFSET..ROTATION_Z_OFFSET + 4].copy_from_slice(&orientation[2].to_le_bytes());
         put_f32x3(&mut e, SIZE_OFFSET, size);
         e[SOURCE_ID_OFFSET..SOURCE_ID_OFFSET + 4].copy_from_slice(source);
         e[DEST_ID_OFFSET..DEST_ID_OFFSET + 4].copy_from_slice(dest);
@@ -282,6 +331,7 @@ mod tests {
     fn synthetic_body_roundtrips() {
         let trigger = synth_entry(
             [164.933, -5.547, 164.792],
+            RECT_CLASS_HIT_CHECKED,
             [0.0, 3.93, 0.0],
             [12.0, 8.0, 2.0],
             b"zmr0",
@@ -293,6 +343,7 @@ mod tests {
         );
         let marker = synth_entry(
             [162.591, -4.103, 162.423],
+            RECT_CLASS_HIT_CHECKED,
             [0.0, 2.36, 0.0],
             [1.0, 4.0, 4.0],
             b"zmr1",
@@ -304,6 +355,7 @@ mod tests {
         );
         let door = synth_entry(
             [0.0, -1.0, -8.0],
+            RECT_CLASS_HIT_CHECKED,
             [0.0; 3],
             [2.0, 3.0, 1.0],
             b"_720",
@@ -348,6 +400,75 @@ mod tests {
     }
 
     #[test]
+    fn rect_class_is_an_integer_and_keeps_out_of_the_orientation() {
+        const SUB_MAP_REGION_CLASS: u32 = 555;
+        let e = synth_entry(
+            [0.0; 3],
+            SUB_MAP_REGION_CLASS,
+            [0.0, 1.5, 0.0],
+            [1.0; 3],
+            b"m6t1",
+            &[0x20, 0, 0, 0],
+            0x1C6,
+            0,
+            0,
+            [0, 0],
+        );
+        let parsed = parse(&synth_body(&[e])).unwrap()[0];
+        assert_eq!(parsed.rect_class, SUB_MAP_REGION_CLASS);
+        assert_eq!(parsed.orientation, [0.0, 1.5, 0.0]);
+        assert!(parsed.is_sub_map_region());
+        assert!(!parsed.is_sub_area_trigger());
+        assert_eq!(parsed.sub_area_param(), None);
+        assert_eq!(parsed.sub_area_id(), None);
+    }
+
+    /// Gated on a retail install (self-skips without one). Pins the measured split
+    /// across every shipped zone: 350 of the 370 `m`-rects are class 0 and the
+    /// other 20 fall in 500..=558, so the classifier is separating two real record
+    /// classes rather than reading noise.
+    #[test]
+    fn shipped_m_rects_split_into_two_classes() {
+        const EXPECTED_TRIGGERS: usize = 350;
+        const EXPECTED_REGIONS: usize = 20;
+        const REGION_CLASS_RANGE: std::ops::RangeInclusive<u32> = 500..=558;
+
+        let Some(root) = crate::archive::open_test_install() else {
+            eprintln!("skipping: no FFXI install");
+            return;
+        };
+
+        let (mut triggers, mut regions) = (0usize, 0usize);
+        for zone_id in 0u16..=400 {
+            let Some(file_id) = crate::zone_dat::zone_id_to_mzb_file_id(zone_id) else {
+                continue;
+            };
+            let Ok(loc) = root.resolve(file_id) else {
+                continue;
+            };
+            let Ok(bytes) = std::fs::read(loc.path_under(&root)) else {
+                continue;
+            };
+            for i in from_dat(&bytes).unwrap() {
+                if !i.is_sub_area() {
+                    continue;
+                }
+                if i.rect_class == RECT_CLASS_HIT_CHECKED {
+                    triggers += 1;
+                } else {
+                    assert!(
+                        REGION_CLASS_RANGE.contains(&i.rect_class),
+                        "zone {zone_id} rect class {}",
+                        i.rect_class
+                    );
+                    regions += 1;
+                }
+            }
+        }
+        assert_eq!((triggers, regions), (EXPECTED_TRIGGERS, EXPECTED_REGIONS));
+    }
+
+    #[test]
     fn bad_magic_and_truncation_error() {
         let mut body = synth_body(&[]);
         body[0] = b'X';
@@ -368,6 +489,7 @@ mod tests {
         assert_eq!(u32::from_le_bytes(*b"zmr0"), 812805498);
         let e = synth_entry(
             [0.0; 3],
+            RECT_CLASS_HIT_CHECKED,
             [0.0; 3],
             [1.0; 3],
             b"zmr0",

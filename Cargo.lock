@@ -3225,6 +3225,7 @@ dependencies = [
  "ffxi-actor",
  "ffxi-audio",
  "ffxi-dat",
+ "ffxi-event",
  "ffxi-proto",
  "ffxi-viewer-wire",
  "js-sys",

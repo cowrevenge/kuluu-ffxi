@@ -6,6 +6,7 @@ use ffxi_dat::dmsg::{
 };
 use ffxi_dat::event_dat::EventBlock;
 
+use crate::cue::EventCue;
 use crate::vm::{EventVm, StepResult};
 
 /// 0x05B `EndPara` the client returns for a cancelled event in place of
@@ -88,6 +89,14 @@ impl DialogRunner {
             Pending::Start => {}
         }
         self.run(strings)
+    }
+
+    /// Drain the choreography cues the last [`advance`](Self::advance) /
+    /// [`cancel`](Self::cancel) produced, in execution order — the staging half
+    /// of a step, which [`DialogStep`] (the dialog half) cannot carry because
+    /// one step emits any number of them.
+    pub fn take_cues(&mut self) -> Vec<EventCue> {
+        self.vm.take_cues()
     }
 
     /// Cancel out of the current frame (the Esc path): a menu reports the
@@ -586,5 +595,110 @@ mod tests {
             }
         }
         assert_eq!(end_para, Some(1), "Signet pick must return EndPara == 1");
+    }
+
+    /// The chocobo rental in Southern San d'Oria (zone 230, event 599) is the
+    /// reference staged cutscene: the renter sits the player down, the screen
+    /// fades out, the renter is hidden, the player is put on a chocobo, and the
+    /// screen fades back in. Every one of those beats is a cue, and none of
+    /// them is a dialog frame. Self-skips without an install.
+    #[test]
+    fn chocobo_rental_emits_its_staging_cues() {
+        use crate::cue::{
+            ActorLookup, EventCue, SCHEDULER_DURATION_FROM_DAT, SCHEDULER_FADE_DAT_ID,
+            SCHEDULER_TAG_FADE_IN, SCHEDULER_TAG_FADE_OUT, STATUS_EVENT_CHOCOBO,
+        };
+
+        let Some(root) = install() else {
+            eprintln!("skipping: no FFXI install");
+            return;
+        };
+        const ZONE: u16 = 230;
+        const RENTAL_EVENT: u16 = 599;
+        /// The chocobo renter (Southern San d'Oria stables), who owns event 599.
+        const RENTER: u32 = 0x010E_602F;
+        /// The entity the renter poses and then hides as the player mounts.
+        const POSED_ACTOR: u32 = 0x010E_6032;
+        /// The rental's "yes" menu option.
+        const RENT_OPTION: u32 = 0;
+
+        let eloc = ffxi_dat::event_locate::zone_id_to_event_location(ZONE).expect("event loc");
+        let edat = EventDat::parse(&std::fs::read(eloc.path_under(&root)).expect("read"))
+            .expect("parse event dat");
+        let sfid = ffxi_dat::zone_dat::zone_id_to_string_file_id(ZONE).expect("string file id");
+        let sloc = root.resolve(sfid).expect("resolve string dat");
+        let strings =
+            StringDat::parse(&std::fs::read(sloc.path_under(&root)).expect("read string dat"))
+                .expect("parse string dat");
+
+        let block = edat.block_for_actor(RENTER).expect("renter block");
+        let mut runner =
+            DialogRunner::start(block, RENTAL_EVENT, 0, vec![]).expect("rental event 599");
+
+        let mut cues = Vec::new();
+        for _ in 0..32 {
+            let step = runner.advance(Some(RENT_OPTION), &strings);
+            cues.extend(runner.take_cues());
+            match step {
+                DialogStep::Frame(_) => {}
+                DialogStep::Ended { .. } => break,
+                DialogStep::Stopped(op) => panic!("rental stopped on opcode 0x{op:02X}"),
+            }
+        }
+
+        let fade = |tag| EventCue::Scheduler {
+            dat_id: SCHEDULER_FADE_DAT_ID,
+            actor1: ActorLookup::EVENT_ENTITY,
+            actor2: ActorLookup::EVENT_ENTITY,
+            tag,
+            duration: SCHEDULER_DURATION_FROM_DAT,
+        };
+        let staging = [
+            fade(SCHEDULER_TAG_FADE_OUT),
+            EventCue::ActorHide {
+                target: ActorLookup(POSED_ACTOR),
+                hide: true,
+            },
+            EventCue::Mount {
+                target: ActorLookup::LOCAL_PLAYER,
+                status_event: STATUS_EVENT_CHOCOBO,
+                mount_id: None,
+            },
+            fade(SCHEDULER_TAG_FADE_IN),
+        ];
+        let observed: Vec<EventCue> = cues
+            .iter()
+            .copied()
+            .filter(|c| staging.contains(c))
+            .collect();
+        assert_eq!(
+            observed, staging,
+            "rental staging cues\nall cues: {cues:#?}"
+        );
+
+        // The renter also poses the player: "kue0" (kneel) before the menu,
+        // "sit0" once the rental is agreed.
+        let motion_keys: Vec<[u8; 4]> = cues
+            .iter()
+            .filter_map(|c| match c {
+                EventCue::ActorMotion { key, .. } => Some(*key),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(motion_keys, [*b"kue0", *b"sit0"], "rental actor motions");
+
+        assert!(
+            cues.contains(&EventCue::CameraLock { lock: true }),
+            "the rental takes the camera: {cues:#?}"
+        );
+
+        // The authored duck-under: volume table index 32 eased over 120 frames.
+        assert!(
+            cues.contains(&EventCue::MusicVolume {
+                volume: 32,
+                fade_frames: 120,
+            }),
+            "the rental ducks the music: {cues:#?}"
+        );
     }
 }

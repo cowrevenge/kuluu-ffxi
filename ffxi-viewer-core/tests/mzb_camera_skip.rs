@@ -2,7 +2,7 @@ use bevy::math::{Vec2, Vec3};
 use ffxi_viewer_core::dat_mzb::{build_collision_geometry, load_mzb_placed, MAX_GROUND_STEP_UP};
 
 /// Lower Jeuno (DAT 345). Skips without a retail DAT install.
-fn jeuno() -> Option<ffxi_viewer_core::dat_mzb::MzbCollisionGeometry> {
+fn jeuno() -> Option<ffxi_viewer_core::dat_mzb::MzbCollisionBlock> {
     if std::env::var("FFXI_DAT_PATH").is_err() {
         eprintln!("FFXI_DAT_PATH unset; skipping");
         return None;
@@ -122,6 +122,8 @@ fn grounding_is_unaffected_by_the_camera_skip() {
     // The Lower Jeuno anchor the BVH test uses, which is also where the
     // fly-up-onto-the-roof bug (kuluu-0nnl) was reported.
     let (cx, cz) = (16.84_f32, -41.35_f32);
+    let geom = ffxi_viewer_core::dat_mzb::MzbCollisionGeometry::from_block(geom);
+    let without = ffxi_viewer_core::dat_mzb::MzbCollisionGeometry::from_block(without);
     for iz in -20..=20 {
         for ix in -20..=20 {
             let xz = Vec2::new(cx + ix as f32, cz + iz as f32);

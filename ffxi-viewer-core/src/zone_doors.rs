@@ -592,6 +592,7 @@ mod tests {
                     final_value: [0.0, y, 0.0],
                     subchunk,
                 }),
+                screen_color: None,
                 random_group: None,
                 local_dir: ffxi_dat::scheduler::NO_LOCAL_DIR,
             },
@@ -1083,7 +1084,7 @@ mod tests {
             return;
         }
         AsyncComputeTaskPool::get_or_init(Default::default);
-        let build = crate::dat_mzb::build_zone_mmb_spawns(SSANDY_ZONE_DAT, None)
+        let build = crate::dat_mzb::build_zone_mmb_spawns(SSANDY_ZONE_DAT, None, None)
             .expect("Southern San d'Oria builds");
 
         let stables = build

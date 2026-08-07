@@ -48,7 +48,10 @@ impl Plugin for MousePlugin {
             .init_resource::<CameraMode>()
             .init_resource::<ChaseCamera>()
             .add_systems(PreUpdate, collect_mouse_system)
-            .add_systems(Update, mouse_camera_system);
+            .add_systems(
+                Update,
+                mouse_camera_system.run_if(crate::cutscene::player_camera_allowed),
+            );
     }
 }
 

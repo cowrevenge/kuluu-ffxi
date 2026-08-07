@@ -1,7 +1,7 @@
 use bevy::picking::Pickable;
 use bevy::prelude::*;
 
-use ffxi_viewer_core::dat_mzb::{LastAutoLoadedZone, LoadMzbInFlight};
+use ffxi_viewer_core::dat_mzb::{LastAutoLoadedZone, LoadMzbInFlight, ZONE_SLOT_MAIN};
 use ffxi_viewer_core::SceneState;
 use ffxi_viewer_wire::Stage;
 
@@ -189,7 +189,10 @@ fn drive_zone_overlay_fade(
     let ready = stage == Stage::InZone
         && last_auto.file_id.is_some()
         && last_auto.file_id == want_file_id
-        && mzb_in_flight.tasks.is_empty();
+        // Slot 0 only: a sub-area interior streaming in behind a doorway is not
+        // a zone transition, and gating on it re-raises the loading overlay
+        // every time the player walks into a shop.
+        && !mzb_in_flight.pending_in_slot(ZONE_SLOT_MAIN);
 
     let prev = *fade;
     *fade = tick(*fade, time.delta_secs(), ready);

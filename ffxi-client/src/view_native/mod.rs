@@ -20,6 +20,7 @@ pub mod perf_hud;
 pub mod qos;
 pub mod screenshot;
 pub mod slash_commands;
+pub mod sub_area_report;
 pub mod sun_occlusion;
 pub mod target_list_hud;
 pub mod text_input;
@@ -244,6 +245,9 @@ pub(crate) fn insert_dat_roots(
         dat_root.clone(),
     ));
     sink.put(ffxi_viewer_core::ui_element_atlas::UiElementDatRoot(
+        dat_root.clone(),
+    ));
+    sink.put(ffxi_viewer_core::cutscene::CutsceneFadeDatRoot(
         dat_root.clone(),
     ));
     sink.put(DatRootRes(dat_root));
@@ -571,6 +575,7 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
             drain_particle_simulator,
             drain_zone_sfx,
             drain_weather_particles,
+            drain_cutscene_state,
             key_items::drain_key_items_viewed,
         ),
     );
@@ -668,6 +673,7 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
             input::sync_target_lock_system,
             input::tab_cycle_invalidate_system,
             key_items::key_items_mark_seen_system,
+            sub_area_report::report_sub_area_system,
         )
             .chain()
             .after(ffxi_viewer_core::chase_camera_system)
@@ -679,11 +685,14 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
         input::camera_polish_system
             .before(ffxi_viewer_core::chase_camera_system)
             .before(ffxi_viewer_core::firstperson_camera_system)
-            .run_if(in_state(AppPhase::InGame)),
+            .run_if(in_state(AppPhase::InGame))
+            .run_if(ffxi_viewer_core::cutscene::player_camera_allowed),
     );
     app.add_systems(
         FixedUpdate,
-        input::dispatch_movement_system.run_if(in_state(AppPhase::InGame)),
+        input::dispatch_movement_system
+            .run_if(in_state(AppPhase::InGame))
+            .run_if(ffxi_viewer_core::cutscene::player_camera_allowed),
     );
     app.add_systems(
         Update,
@@ -869,6 +878,19 @@ fn despawn_ingame_entities(
     animation_blends.by_id.clear();
 
     tracing::info!(count, "OnExit(InGame): despawned scoped entities");
+}
+
+/// The cutscene fade latches by design, so its release has to be reachable from the session
+/// boundary too — a black screen with no driver left is the one failure this feature must
+/// not be able to reach.
+fn drain_cutscene_state(
+    mut mode: ResMut<ffxi_viewer_core::CutsceneMode>,
+    mut fade: ResMut<ffxi_viewer_core::ScreenFade>,
+    mut hud_hidden: ResMut<ffxi_viewer_core::hud_hide::HudHidden>,
+) {
+    *mode = ffxi_viewer_core::CutsceneMode::default();
+    fade.clear();
+    hud_hidden.cutscene = false;
 }
 
 fn drain_entity_prediction(

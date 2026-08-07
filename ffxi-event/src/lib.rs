@@ -11,11 +11,19 @@
 //! function docs (a studied reference, not a build input). The implemented set
 //! is the minimal dialog flow; unimplemented opcodes are skipped by their
 //! documented size when safe, or stop the VM ([`StepResult::Unimplemented`])
-//! when they would otherwise desync the exec pointer.
+//! when they would otherwise desync the exec pointer. The staging opcodes that
+//! do not yield (fade, actor motion, camera lock, …) report through
+//! [`EventCue`] instead — see [`cue`].
 
+pub mod cue;
 pub mod opcode_meta;
 pub mod runner;
 pub mod vm;
 
+pub use cue::{
+    dat_id_helper, ActorLookup, EventCue, FourCc, MUSIC_VOLUME_MAX, SCHEDULER_DAT_ID_BASE,
+    SCHEDULER_DURATION_FROM_DAT, SCHEDULER_FADE_DAT_ID, SCHEDULER_TAG_FADE_IN,
+    SCHEDULER_TAG_FADE_OUT, STATUS_EVENT_CHOCOBO, STATUS_EVENT_IDLE, STATUS_EVENT_MOUNT,
+};
 pub use runner::{clean_display, DialogFrame, DialogRunner, DialogStep, EVENT_CANCELLED_END_PARA};
 pub use vm::{EventChoice, EventMessage, EventVm, StepResult};

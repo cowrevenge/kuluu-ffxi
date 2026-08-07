@@ -71,6 +71,14 @@ pub mod c2s {
 
     pub const REQ_LOGOUT: u16 = 0x0E7;
 
+    // GP_CLI_COMMAND_SUBMAPCHANGE, vendor/server/src/map/packets/c2s/
+    // 0x0f2_submapchange.h. Sent whenever the client crosses into a different
+    // sub-area within the current zone (State/SubMapNumber below); the server
+    // assigns SubMapNumber to PChar->loc.boundary and saves it, so an unsent
+    // change desyncs the next relog's restored interior
+    // (0x0f2_submapchange.cpp process).
+    pub const SUBMAPCHANGE: u16 = 0x0F2;
+
     // GP_CLI_COMMAND_TRACKING_LIST, vendor/server/src/map/packets/c2s/0x0f4_tracking_list.h.
     // Wide-scan list request: uint32 SendFlg (must be 1, `crate::map::tracking::SEND_FLG_REQUEST`).
     pub const TRACKING_LIST: u16 = 0x0F4;
@@ -137,6 +145,21 @@ pub mod tracking {
     /// c2s 0x0F4 SendFlg must equal 1 to request the wide-scan list
     /// (vendor/server/src/map/packets/c2s/0x0f4_tracking_list.h SendFlg).
     pub const SEND_FLG_REQUEST: u32 = 1;
+}
+
+/// c2s 0x0F2 SUBMAPCHANGE wire vocabulary
+/// (vendor/server/src/map/packets/c2s/0x0f2_submapchange.h).
+pub mod submap {
+    /// GP_CLI_COMMAND_SUBMAPCHANGE_STATE (0x0f2_submapchange.h). `Event` requires
+    /// an active `currentEvent` server-side (GP_CLI_COMMAND_SUBMAPCHANGE::validate)
+    /// so ordinary free-roam sub-area crossings always send `General`.
+    pub mod state {
+        pub const GENERAL: u16 = 0x01;
+        pub const EVENT: u16 = 0x02;
+    }
+
+    /// Retail clamps a negative ("no sub-area") boundary to 0 on the wire.
+    pub const NO_SUB_AREA: u16 = 0;
 }
 
 /// Delivery box ("post box") wire vocabulary shared by c2s 0x04D and s2c 0x04B.

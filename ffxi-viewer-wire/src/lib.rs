@@ -2,6 +2,9 @@
 
 use serde::{Deserialize, Serialize};
 
+// v19: the cutscene channel — ViewerEvent::{CutsceneStarted,CutsceneCue,CutsceneEnded} plus
+// CutsceneCue/CutsceneActor. The event VM's staging opcodes (actor motion, screen fade,
+// camera lock, event-hide, mount) had no way across the boundary at all before this.
 // v18: EntityLook::Door.door_id — the door's FourCC, which joins the entity to the MZB
 // placement group and the zone-DAT routines that swing it (nothing else on the wire can).
 // v17: ViewerEvent::Auction{MenuOpened,BidResult,SellResult,SellRefused,CancelResult,
@@ -32,7 +35,7 @@ use serde::{Deserialize, Serialize};
 // v5: InventoryItem.charges_remaining + next_use_vana_ts (item recast/charges).
 // v4: SceneSnapshot.delivery_box (dedicated delivery screen) + ViewerCommand::DeliveryBox
 // (postcard frames are not self-describing, so any shape change bumps this).
-pub const PROTOCOL_VERSION: u32 = 18;
+pub const PROTOCOL_VERSION: u32 = 19;
 
 /// Longest countdown `SceneSnapshot::status_icon_expiries` can carry. The
 /// producer rejects anything beyond it as a corrupt 0x063 timestamp, and the HUD
@@ -665,6 +668,12 @@ pub struct SceneSnapshot {
     #[serde(default)]
     pub mh_2f_unlocked: Option<bool>,
 
+    /// `SubMapNumber` from 0x00A LOGIN (`PChar->loc.boundary`): the sub-area
+    /// interior the server has the character standing in at zone-in, which the
+    /// renderer's sub-area latch seeds from. `None` until a login lands.
+    #[serde(default)]
+    pub sub_area: Option<u16>,
+
     /// Job-emote unlock bitfield from s2c 0x11A (bit = job id - 1, bit 0 =
     /// WAR); `None` until the server answers a 0x119 request. Gates the
     /// emote-list menu's Job row.
@@ -1212,6 +1221,58 @@ pub struct SceneDelta {
 /// zone is 0, so it cannot collide with an arrival.
 pub const ZONE_UNKNOWN: u16 = 0;
 
+/// A four-character scheduler/action key in file byte order. The tag values
+/// themselves are `ffxi_event`'s (`SCHEDULER_TAG_FADE_OUT`, …) — this crate
+/// only carries them, so it never names one.
+pub type FourCc = [u8; 4];
+
+/// Which entity a [`CutsceneCue`] names. The event VM's own operand is an
+/// unresolved `ActorLookup`; the producer resolves it against the running
+/// event's entity before it crosses this boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CutsceneActor {
+    LocalPlayer,
+    Entity { server_id: u32 },
+}
+
+/// One staging effect the running event script asked for, in execution order.
+/// Scoped to the event session: every one of these is undone at
+/// [`ViewerEvent::CutsceneEnded`], because the bytecode routinely never undoes
+/// it itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CutsceneCue {
+    /// Play action `key` on `actor`, with `partner` as the action's partner.
+    ActorMotion {
+        actor: CutsceneActor,
+        partner: CutsceneActor,
+        key: FourCc,
+    },
+    /// Run scheduler `tag` out of scheduler DAT `dat_id` over the two actors.
+    /// `duration` 0 means "play the DAT-authored timing verbatim".
+    Scheduler {
+        dat_id: u32,
+        actor: CutsceneActor,
+        partner: CutsceneActor,
+        tag: FourCc,
+        duration: u16,
+    },
+    /// Set/clear the target's event-hide render flag. The flag is inert once
+    /// the event session ends — retail stops consulting it rather than
+    /// clearing it.
+    ActorHide { target: CutsceneActor, hide: bool },
+    /// Take camera control away from the player, or give it back.
+    CameraLock { lock: bool },
+    /// Put the target on or off a mount. `status_event` is the `GameStatus`
+    /// value the script writes; `mount_id` is carried only by the non-chocobo
+    /// mount cases.
+    Mount {
+        target: CutsceneActor,
+        status_event: u8,
+        mount_id: Option<u16>,
+    },
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ViewerEvent {
     ZoneChanged {
@@ -1320,6 +1381,23 @@ pub enum ViewerEvent {
     AuctionSearchFailed {
         message: String,
     },
+
+    /// An event session opened. Everything a [`CutsceneCue`] changes is scoped
+    /// to the span between this and [`ViewerEvent::CutsceneEnded`].
+    CutsceneStarted {
+        event_id: u32,
+    },
+
+    /// One staging cue from the running event script.
+    Cutscene {
+        cue: CutsceneCue,
+    },
+
+    /// The event session closed. Every scoped change reverts here, whether or
+    /// not the script undid it: retail's de facto teardown for an unpaired
+    /// camera lock is the zone change, so the producer sends this on every
+    /// exit (script end, cancel, watchdog release, zone change, disconnect).
+    CutsceneEnded,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1608,6 +1686,7 @@ mod tests {
                 sub_map: 0,
             }),
             mh_2f_unlocked: None,
+            sub_area: None,
             emote_jobs: None,
             emote_chairs: None,
             check: None,
@@ -1913,5 +1992,48 @@ mod tests {
         assert_eq!(Weather::from_lsb(20), Weather::None);
         assert_eq!(Weather::from_lsb(26), Weather::None);
         assert_eq!(Weather::from_lsb(39), Weather::None);
+    }
+
+    /// Postcard frames are not self-describing, so a cue that works over the
+    /// in-process bridge has to survive the relay's encode/decode too.
+    #[test]
+    fn a_cutscene_cue_survives_the_postcard_relay() {
+        let cues = [
+            CutsceneCue::Scheduler {
+                dat_id: 30904,
+                actor: CutsceneActor::LocalPlayer,
+                partner: CutsceneActor::Entity {
+                    server_id: 0x010E_602F,
+                },
+                tag: *b"fdi0",
+                duration: 0,
+            },
+            CutsceneCue::CameraLock { lock: true },
+            CutsceneCue::ActorHide {
+                target: CutsceneActor::Entity {
+                    server_id: 0x010E_6032,
+                },
+                hide: true,
+            },
+            CutsceneCue::Mount {
+                target: CutsceneActor::LocalPlayer,
+                status_event: 85,
+                mount_id: Some(4),
+            },
+            CutsceneCue::ActorMotion {
+                actor: CutsceneActor::Entity { server_id: 1 },
+                partner: CutsceneActor::LocalPlayer,
+                key: *b"kue0",
+            },
+        ];
+        for cue in cues {
+            let bytes =
+                postcard::to_stdvec(&Frame::Event(ViewerEvent::Cutscene { cue })).expect("encode");
+            let back: Frame = postcard::from_bytes(&bytes).expect("decode");
+            let Frame::Event(ViewerEvent::Cutscene { cue: back }) = back else {
+                panic!("frame kind changed across postcard: {back:?}");
+            };
+            assert_eq!(back, cue);
+        }
     }
 }

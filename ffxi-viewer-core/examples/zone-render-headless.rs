@@ -440,6 +440,8 @@ fn fire(mut tx: MessageWriter<LoadMzbRequest>, p: Res<P>) {
         chunk_idx: None,
         world_pos: Vec3::ZERO,
         auto_loaded: false,
+        slot: ffxi_viewer_core::dat_mzb::ZONE_SLOT_MAIN,
+        active_sub_area: None,
     });
 }
 

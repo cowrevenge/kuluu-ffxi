@@ -1,6 +1,7 @@
 use bevy::math::{Vec2, Vec3};
 use ffxi_viewer_core::dat_mzb::{
-    build_collision_geometry, load_mzb_placed, FLOOR_NORMAL_MIN, MAX_GROUND_STEP_UP,
+    build_collision_geometry, load_mzb_placed, MzbCollisionGeometry, FLOOR_NORMAL_MIN,
+    MAX_GROUND_STEP_UP,
 };
 
 /// Pins the Mog House grounding geometry against the real Windurst MH DAT
@@ -17,7 +18,11 @@ fn mh_391_spawn_column_grounds_to_interior_floor_not_roof() {
     }
     bevy::tasks::AsyncComputeTaskPool::get_or_init(bevy::tasks::TaskPool::new);
     let (submeshes, instances) = load_mzb_placed(391, None).expect("load DAT 391");
-    let geom = build_collision_geometry(&submeshes, &instances, Some(391));
+    let geom = MzbCollisionGeometry::from_block(build_collision_geometry(
+        &submeshes,
+        &instances,
+        Some(391),
+    ));
     assert!(geom.tri_count() > 1000, "MH collision unexpectedly small");
 
     let spawn = Vec2::new(0.0, 0.0);
@@ -88,7 +93,11 @@ fn mh_391_doorway_is_a_gap_in_mzb_collision() {
     }
     bevy::tasks::AsyncComputeTaskPool::get_or_init(bevy::tasks::TaskPool::new);
     let (submeshes, instances) = load_mzb_placed(391, None).expect("load DAT 391");
-    let geom = build_collision_geometry(&submeshes, &instances, Some(391));
+    let geom = MzbCollisionGeometry::from_block(build_collision_geometry(
+        &submeshes,
+        &instances,
+        Some(391),
+    ));
     let tris = geom.camera_triangles();
 
     // Head height at the server spawn column, the anchor the chase camera orbits.

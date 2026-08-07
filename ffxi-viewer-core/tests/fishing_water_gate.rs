@@ -9,7 +9,8 @@
 use bevy::math::{Vec2, Vec3};
 use ffxi_dat::mzb::TerrainType;
 use ffxi_viewer_core::dat_mzb::{
-    build_collision_geometry, facing_water, load_mzb_placed, MzbCollisionGeometry,
+    build_collision_geometry, facing_water, load_mzb_placed, MzbCollisionBlock,
+    MzbCollisionGeometry, ZONE_SLOT_MAIN,
 };
 use ffxi_viewer_core::scene::mzb_to_bevy;
 
@@ -36,11 +37,11 @@ fn zone() -> Option<MzbCollisionGeometry> {
     let file_id =
         ffxi_dat::zone_dat::effective_zone_dat_file_id(Some(ZONE_CARPENTERS_LANDING), None)?;
     let (submeshes, instances) = load_mzb_placed(file_id, None).ok()?;
-    Some(build_collision_geometry(
+    Some(MzbCollisionGeometry::from_block(build_collision_geometry(
         &submeshes,
         &instances,
         Some(file_id),
-    ))
+    )))
 }
 
 /// `load_mzb_placed` returns Bevy-space geometry; LSB's coordinates are raw MZB
@@ -53,13 +54,15 @@ fn to_bevy_xz(x: f32, z: f32) -> Vec2 {
 #[test]
 fn terrain_is_carried_through_to_the_collision_geometry() {
     let Some(geom) = zone() else { return };
+    let block: &MzbCollisionBlock = geom.block(ZONE_SLOT_MAIN);
     assert_eq!(
-        geom.tri_terrain.len(),
+        block.tri_terrain.len(),
         geom.tri_count(),
         "terrain must be per placed triangle, like camera_skip"
     );
     assert!(
-        geom.tri_terrain
+        block
+            .tri_terrain
             .iter()
             .any(|&t| TerrainType::from_nibble(t).is_some_and(TerrainType::is_water)),
         "Carpenters' Landing has no water triangles — the nibble is not the terrain type"

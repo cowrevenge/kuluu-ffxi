@@ -8,7 +8,9 @@
 
 use bevy::math::{Vec2, Vec3};
 use ffxi_viewer_core::combat_stance::heading_forward;
-use ffxi_viewer_core::dat_mzb::{build_collision_geometry, facing_water, load_mzb_placed};
+use ffxi_viewer_core::dat_mzb::{
+    build_collision_geometry, facing_water, load_mzb_placed, MzbCollisionGeometry,
+};
 
 /// Search half-extent and step in yalms around the zone origin.
 const SEARCH_RADIUS: f32 = 400.0;
@@ -23,7 +25,11 @@ fn main() {
     let file_id = ffxi_dat::zone_dat::effective_zone_dat_file_id(Some(zone), None)
         .expect("zone -> dat file id");
     let (submeshes, instances) = load_mzb_placed(file_id, None).expect("load mzb");
-    let geom = build_collision_geometry(&submeshes, &instances, Some(file_id));
+    let geom = MzbCollisionGeometry::from_block(build_collision_geometry(
+        &submeshes,
+        &instances,
+        Some(file_id),
+    ));
     println!(
         "zone {zone} (DAT {file_id}): {} triangles",
         geom.tri_count()

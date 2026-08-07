@@ -2747,6 +2747,7 @@ mod tests {
     fn zmr0_rect() -> ffxi_dat::zone_interaction::ZoneInteraction {
         ffxi_dat::zone_interaction::ZoneInteraction {
             position: [164.933, -5.547, 164.792],
+            rect_class: ffxi_dat::zone_interaction::RECT_CLASS_HIT_CHECKED,
             orientation: [0.0, 3.93, 0.0],
             size: [12.0, 8.0, 2.0],
             source_id: ffxi_dat::datid::DatId(*b"zmr0"),

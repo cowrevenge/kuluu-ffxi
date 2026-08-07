@@ -62,6 +62,27 @@ pub const MODEL_TRANSFORM_SUBCHUNK_SLOTS: u32 =
 
 const NO_STAGE_ID: [u8; 4] = [0; 4];
 
+/// The MODULATE2X argument that leaves the scene untinted. research/XIClient
+/// `GameManager::RenderSomething` composites the persistent screen colour with
+/// `D3DTOP_MODULATE2X`, whose identity is 0x80 — which is why the authored
+/// fade-in destination is 128,128,128 rather than 255,255,255.
+pub const SCREEN_COLOR_UNIT: u8 = 0x80;
+
+/// A [`StageKind::ScreenColorDrive`] destination, in the DAT's own byte scale.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScreenColor {
+    pub rgba: [u8; 4],
+}
+
+impl ScreenColor {
+    /// The destination as a multiplier of the untinted scene: 1.0 leaves it
+    /// alone, 0.0 drives the channel to black.
+    pub fn tint(self) -> [f32; 4] {
+        self.rgba
+            .map(|c| f32::from(c) / f32::from(SCREEN_COLOR_UNIT))
+    }
+}
+
 fn effect_section_start(body: &[u8]) -> usize {
     let Some(raw) = body
         .get(SECTION2_SLOT..SECTION2_SLOT + 4)
@@ -118,6 +139,11 @@ pub struct SchedulerStage {
     // never take rotation.x for a DatId.
     pub model_transform: Option<ModelTransform>,
 
+    // `Some` exactly for `ScreenColorDrive`: research/XIClient HandleTag0x0F reads
+    // destination{Red,Green,Blue,Alpha} out of the dword the generic decoder takes `id` from,
+    // so `id` is `NO_STAGE_ID` there for the same reason as a model transform.
+    pub screen_color: Option<ScreenColor>,
+
     // research/xim EffectRoutineParser.kt:275-285,553-559 — stages between a 0x3D and its 0x3E
     // are children of one RandomChildRoutine, not siblings on the timeline: retail runs exactly
     // one of them per activation (`vatk`'s four atk1..atk4 grunts). Members of the same block
@@ -142,6 +168,12 @@ pub enum StageKind {
     // group's leaves to 80 degrees about Y, `clos` back to 0.
     ModelTranslation,
     ModelRotation,
+
+    /// research/XIClient `Game::Scheduler::HandleTag0x0F` — drive the persistent
+    /// full-screen colour linearly to [`SchedulerStage::screen_color`] over
+    /// `duration_frames`, then latch there (`ScreenColorDriveTask`'s destructor
+    /// snaps the field to the destination). The screen fade is one of these.
+    ScreenColorDrive,
 
     SoundOnTarget,
 
@@ -191,6 +223,7 @@ impl StageKind {
             0x0B => Self::SoundOnTarget,
             0x0C if length_words * 4 >= MODEL_TRANSFORM_PAYLOAD_LEN => Self::ModelTranslation,
             0x0D if length_words * 4 >= MODEL_TRANSFORM_PAYLOAD_LEN => Self::ModelRotation,
+            0x0F => Self::ScreenColorDrive,
             // research/xim EffectRoutineParser.kt:253-257 — StopParticleGeneratorRoutine, id =
             // the generator DatId to stop (ROM/0/0.DAT `stbk` stops the cast aura's gn10..gn13).
             0x2D => Self::StopParticle,
@@ -307,15 +340,20 @@ impl Scheduler {
                         subchunk: read_u32(MODEL_TRANSFORM_SUBCHUNK_OFFSET),
                     }
                 });
-                let id = if has_id && model_transform.is_none() {
+                let payload = has_id.then(|| {
                     [
                         body[cursor + ID_OFFSET],
                         body[cursor + ID_OFFSET + 1],
                         body[cursor + ID_OFFSET + 2],
                         body[cursor + ID_OFFSET + 3],
                     ]
-                } else {
-                    NO_STAGE_ID
+                });
+                let screen_color = payload
+                    .filter(|_| kind == StageKind::ScreenColorDrive)
+                    .map(|rgba| ScreenColor { rgba });
+                let id = match payload {
+                    Some(bytes) if model_transform.is_none() && screen_color.is_none() => bytes,
+                    _ => NO_STAGE_ID,
                 };
                 let (max_loops, transition_in, transition_out) =
                     if kind == StageKind::Motion && stage_bytes >= MOTION_PAYLOAD_LEN {
@@ -344,6 +382,7 @@ impl Scheduler {
                         transition_in,
                         transition_out,
                         model_transform,
+                        screen_color,
                         random_group: open_group,
                         local_dir,
                     },
@@ -1233,6 +1272,46 @@ mod tests {
             s.stages[2].frame, 35,
             "the sound waits out the animation lock's delay too"
         );
+    }
+
+    // research/XIClient HandleTag0x0F: opcode 0x0F, three dwords, destination RGBA in the third.
+    const SCREEN_COLOR_OPCODE: u8 = 0x0F;
+    const SCREEN_COLOR_STAGE_WORDS: u8 = (STAGE_WITH_ID_LEN / 4) as u8;
+
+    #[test]
+    fn screen_color_drive_takes_the_id_dword_as_its_destination() {
+        let mut body = vec![0u8; SCHEDULER_HEADER_LEN];
+        body.extend(timed_stage_bytes(
+            SCREEN_COLOR_OPCODE,
+            SCREEN_COLOR_STAGE_WORDS,
+            30,
+            30,
+        ));
+        body.extend_from_slice(&[0x00, 0x00, 0x00, SCREEN_COLOR_UNIT]);
+
+        let s = Scheduler::parse(*b"fdo0", &body).unwrap();
+        let stage = s.stages[0].stage;
+        assert_eq!(stage.kind, StageKind::ScreenColorDrive);
+        assert_eq!(stage.duration_frames, 30);
+        assert_eq!(
+            stage.screen_color,
+            Some(ScreenColor {
+                rgba: [0x00, 0x00, 0x00, SCREEN_COLOR_UNIT]
+            })
+        );
+        assert_eq!(
+            stage.id, NO_STAGE_ID,
+            "the destination bytes must not be readable as a DatId"
+        );
+    }
+
+    #[test]
+    fn screen_color_unit_is_the_untinted_multiplier() {
+        let identity = ScreenColor {
+            rgba: [SCREEN_COLOR_UNIT; 4],
+        };
+        assert_eq!(identity.tint(), [1.0; 4]);
+        assert_eq!(ScreenColor { rgba: [0; 4] }.tint(), [0.0; 4]);
     }
 
     // research/xim EffectRoutineParser.kt:408-412 — ControlFlowBranch takes no argument, so a

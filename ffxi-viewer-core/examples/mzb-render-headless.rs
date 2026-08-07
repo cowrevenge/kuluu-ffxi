@@ -199,6 +199,8 @@ fn fire_load_request(mut tx: MessageWriter<LoadMzbRequest>, params: Res<RenderPa
         chunk_idx: None,
         world_pos: Vec3::ZERO,
         auto_loaded: false,
+        slot: ffxi_viewer_core::dat_mzb::ZONE_SLOT_MAIN,
+        active_sub_area: None,
     });
 }
 

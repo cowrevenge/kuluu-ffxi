@@ -554,6 +554,13 @@ pub struct SessionState {
     #[serde(default)]
     pub myroom: Option<MyRoomInfo>,
 
+    /// `SubMapNumber` the server reported in 0x00A LOGIN
+    /// (`PChar->loc.boundary`): which sub-area interior the character is
+    /// standing in on arrival. Cleared by a zone change, so it only ever
+    /// describes the zone currently loaded.
+    #[serde(default)]
+    pub sub_area: Option<u16>,
+
     #[serde(default)]
     pub mog_zone_flag: bool,
 
@@ -948,6 +955,53 @@ pub struct DialogGridCell {
     pub sent: bool,
 }
 
+/// Which entity a [`CutsceneCue`] names, resolved from the event VM's
+/// [`ffxi_event::ActorLookup`] against the running event's own entity (the VM
+/// deliberately leaves that to its host).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CutsceneActor {
+    LocalPlayer,
+    Entity { server_id: u32 },
+}
+
+/// One staging effect the running event script asked for — the renderer-facing
+/// half of [`ffxi_event::EventCue`]. `MusicVolume` is absent because 0x5D rides
+/// [`AgentEvent::MusicVolumeChanged`] instead of the cue stream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CutsceneCue {
+    ActorMotion {
+        actor: CutsceneActor,
+        partner: CutsceneActor,
+        key: ffxi_event::FourCc,
+    },
+    Scheduler {
+        dat_id: u32,
+        actor: CutsceneActor,
+        partner: CutsceneActor,
+        tag: ffxi_event::FourCc,
+        duration: u16,
+    },
+    ActorHide {
+        target: CutsceneActor,
+        hide: bool,
+    },
+    CameraLock {
+        lock: bool,
+    },
+    Mount {
+        target: CutsceneActor,
+        status_event: u8,
+        mount_id: Option<u16>,
+    },
+}
+
+/// Number of music slots [`AgentEvent::MusicVolumeChanged::slot`] can name
+/// (vendor/server/src/map/enums/music_slot.h `MusicSlot`, ZoneDay..Fishing).
+/// The 0x5D event opcode sets retail's single master music volume, so it is
+/// carried as the same volume on every slot.
+pub const MUSIC_SLOT_COUNT: u8 = 8;
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ShopState {
     pub offset_index: u16,
@@ -1339,6 +1393,7 @@ impl SessionState {
 
                 self.myroom = *myroom;
                 self.mog_zone_flag = *mog_zone_flag;
+                self.sub_area = None;
 
                 self.logout_countdown = None;
                 self.death_homepoint_secs = None;
@@ -1370,6 +1425,11 @@ impl SessionState {
                 // (research/XiPackets/world/server/0x00D2).
                 self.treasure_pool.clear();
                 true
+            }
+            AgentEvent::SubAreaSynced { sub_area } => {
+                let changed = self.sub_area != *sub_area;
+                self.sub_area = *sub_area;
+                changed
             }
             AgentEvent::PositionChanged { pos } => {
                 let mut changed = false;
@@ -1933,7 +1993,11 @@ impl SessionState {
                 });
                 true
             }
-            AgentEvent::EventStart { .. } | AgentEvent::KeyRotated { .. } => false,
+            AgentEvent::EventStart { .. }
+            | AgentEvent::KeyRotated { .. }
+            | AgentEvent::CutsceneStarted { .. }
+            | AgentEvent::CutsceneCue { .. }
+            | AgentEvent::CutsceneEnded => false,
             AgentEvent::EventDialog { dialog } => {
                 let changed = self.dialog.as_ref() != Some(dialog);
                 self.dialog = Some(dialog.clone());
@@ -2225,6 +2289,11 @@ pub enum AgentEvent {
         #[serde(default)]
         mog_zone_flag: bool,
     },
+    /// `SubMapNumber` out of 0x00A LOGIN, emitted right after the
+    /// [`AgentEvent::ZoneChanged`] that clears it.
+    SubAreaSynced {
+        sub_area: Option<u16>,
+    },
     PositionChanged {
         pos: Position,
     },
@@ -2267,6 +2336,23 @@ pub enum AgentEvent {
     EventDialog {
         dialog: DialogState,
     },
+
+    /// An event session opened. Distinct from [`AgentEvent::EventStart`],
+    /// which also fires for client-local menus that run no script.
+    CutsceneStarted {
+        event_id: u32,
+    },
+
+    /// One staging cue the running event script emitted.
+    CutsceneCue {
+        cue: CutsceneCue,
+    },
+
+    /// The event session closed and everything scoped to it reverts. Sent on
+    /// every exit — script end, cancel, watchdog release, zone change,
+    /// disconnect — because an event body routinely locks the camera and never
+    /// unlocks it (retail's teardown is the zone change).
+    CutsceneEnded,
 
     ShopUpdated {
         shop: ShopState,
@@ -2769,6 +2855,18 @@ pub enum AgentCommand {
     /// (vendor/server/src/map/packets/c2s/0x0f1_buffcancel.cpp).
     CancelBuff {
         icon: u16,
+    },
+
+    /// c2s 0x0F2 GP_CLI_COMMAND_SUBMAPCHANGE — report a client-side sub-area
+    /// latch change (the geometry-driven boundary crossing lives in
+    /// `ffxi-dat`/`ffxi-viewer-core`; this is only the wire report). Sent with
+    /// State = General (`ffxi_proto::map::submap::state::GENERAL`); Event
+    /// requires an active server event and is not used here.
+    /// `sub_area` is the LSB `SubMapNumber`/`PChar->loc.boundary` value —
+    /// pass `ffxi_proto::map::submap::NO_SUB_AREA` (0) for "no sub-area",
+    /// matching retail's clamp of a negative boundary.
+    ReportSubArea {
+        sub_area: u16,
     },
 
     EndEvent,

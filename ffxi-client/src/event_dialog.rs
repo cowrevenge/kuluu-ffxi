@@ -9,14 +9,15 @@
 use std::sync::Arc;
 
 use ffxi_dat::dmsg::{
-    plain_marker, StringDat, MARKER_ITEM, MARKER_KEY_ITEM, MARKER_NUM, MARKER_PLAYER_NAME,
-    MARKER_SPEAKER_NAME,
+    plain_marker, StringDat, MARKER_CHOCOBO_NAME, MARKER_ITEM, MARKER_KEY_ITEM, MARKER_NUM,
+    MARKER_PLAYER_NAME, MARKER_SPEAKER_NAME,
 };
 use ffxi_dat::event_dat::{EventBlockSource, EventDat};
 use ffxi_dat::DatRoot;
-use ffxi_event::{DialogRunner, DialogStep};
+use ffxi_event::{ActorLookup, DialogRunner, DialogStep, EventCue};
+use tokio::sync::broadcast;
 
-use crate::state::DialogState;
+use crate::state::{AgentEvent, CutsceneActor, CutsceneCue, DialogState};
 
 struct ActiveEvent {
     unique_no: u32,
@@ -112,6 +113,13 @@ pub struct DialogSession {
     strings: Option<StringDat>,
     runner: Option<DialogRunner>,
     active: Option<ActiveEvent>,
+    /// Cues drained from the VM after each step, held until the caller takes
+    /// them: a step that ends the event still emits them (the chocobo rental's
+    /// fade-in lands in the step that ends the script).
+    cues: Vec<ResolvedCue>,
+    /// Per-zone fishing-era reconciliation state, built lazily on the first
+    /// TALKNUM-family message of the zone.
+    fishing: std::collections::HashMap<u16, FishingEra>,
 }
 
 impl DialogSession {
@@ -125,7 +133,17 @@ impl DialogSession {
             strings: None,
             runner: None,
             active: None,
+            cues: Vec::new(),
+            fishing: std::collections::HashMap::new(),
         }
+    }
+
+    /// The staging cues the VM emitted since the last drain, in execution
+    /// order, with their actors resolved. Empty after one call. Drain after
+    /// every [`begin`](Self::begin) / [`advance`](Self::advance) /
+    /// [`cancel`](Self::cancel), including the ones that ended the event.
+    pub fn take_cues(&mut self) -> Vec<ResolvedCue> {
+        std::mem::take(&mut self.cues)
     }
 
     /// `(unique_no, act_index, event_id)` of the active VM-driven event, for the
@@ -191,11 +209,17 @@ impl DialogSession {
             return undriveable(UndriveableReason::NoEventEntry);
         };
         let step = runner.advance(None, strings);
+        self.cues.extend(
+            runner
+                .take_cues()
+                .into_iter()
+                .map(|c| resolve_cue(c, unique_no)),
+        );
         let active = ActiveEvent {
             unique_no,
             act_index,
             event_id,
-            agent_event_id: ((unique_no as u64) << 16 | event_id as u64) as u32,
+            agent_event_id: agent_event_id(unique_no, event_id),
             npc_name,
         };
         match step {
@@ -244,24 +268,31 @@ impl DialogSession {
             self.clear();
             return Advance::Ended { end_para: 0 };
         };
-        match step(runner, strings) {
+        let event_entity = active.unique_no;
+        let outcome = step(runner, strings);
+        let cues: Vec<ResolvedCue> = runner
+            .take_cues()
+            .into_iter()
+            .map(|c| resolve_cue(c, event_entity))
+            .collect();
+        let advance = match outcome {
             DialogStep::Frame(frame) => {
-                let dialog = frame_to_dialog(active, frame, &self.player_name);
-                Advance::Frame(dialog)
+                Advance::Frame(frame_to_dialog(active, frame, &self.player_name))
             }
-            DialogStep::Ended { end_para } => {
-                self.clear();
-                Advance::Ended { end_para }
-            }
+            DialogStep::Ended { end_para } => Advance::Ended { end_para },
             DialogStep::Stopped(op) => {
                 tracing::warn!(
                     op = format!("0x{op:02X}"),
                     "event VM stopped mid-dialog; releasing with end_para 0"
                 );
-                self.clear();
                 Advance::Ended { end_para: 0 }
             }
+        };
+        self.cues.extend(cues);
+        if matches!(advance, Advance::Ended { .. }) {
+            self.clear();
         }
+        advance
     }
 
     pub fn clear(&mut self) {
@@ -301,6 +332,405 @@ impl DialogSession {
             return None;
         }
         dat.text(index)
+    }
+
+    /// Resolve a TALKNUM-family message as a fishing line, reconciling the
+    /// client-era skew between the server's text ids and this install's
+    /// dialog DAT. The wire id is `server_base + offset`; the DAT entry lives
+    /// at `install_base + offset`, and the two bases differ whenever the
+    /// server and the install were built for different client eras (the
+    /// vendor LSB pin sits ~9 entries above a May-2023 install). Without
+    /// reconciliation every fishing line renders as whatever entry the skew
+    /// lands on — another line entirely, or the menu-guard placeholder.
+    pub fn fishing_chat(&mut self, zone: u16, mes_num: u16, opcode: u16) -> FishingChat {
+        let Some(pin_base) = ffxi_proto::fishing_messages::zone_offset(zone) else {
+            return FishingChat::NotFishing;
+        };
+        self.ensure_strings(zone);
+        let era = self.fishing.entry(zone).or_default();
+        let install_base = match era.install_base {
+            Some(found) => found,
+            None => {
+                let found = self.strings.as_ref().and_then(find_fishing_block);
+                if found.is_none() {
+                    tracing::debug!(
+                        zone,
+                        "no fishing block landmarks in the zone dialog DAT; era \
+                         reconciliation disabled for this zone"
+                    );
+                }
+                era.install_base = Some(found);
+                found
+            }
+        };
+        let Some(install_base) = install_base else {
+            return FishingChat::NotFishing;
+        };
+
+        let era = self.fishing.get_mut(&zone).expect("entry inserted above");
+        let server = std::mem::take(&mut era.server);
+        let dat = self.strings.as_ref().expect("strings ensured above");
+        let printable = |offset: u8| -> Option<String> {
+            let index = install_base as usize + offset as usize;
+            if dat.menu(index).is_some() {
+                return None;
+            }
+            dat.text(index)
+        };
+        let (chat, server) =
+            resolve_fishing(&printable, pin_base, install_base, mes_num, opcode, server);
+        self.fishing
+            .get_mut(&zone)
+            .expect("entry inserted above")
+            .server = server;
+        chat
+    }
+}
+
+/// Opaque id for the agent event stream, joining the triggering entity to the
+/// event it runs. Emitted by [`DialogSession::begin`] as
+/// [`DialogState::event_id`] and by the cutscene channel as
+/// [`AgentEvent::CutsceneStarted::event_id`]; the two must agree.
+pub fn agent_event_id(unique_no: u32, event_id: u16) -> u32 {
+    ((unique_no as u64) << 16 | event_id as u64) as u32
+}
+
+/// A drained [`EventCue`] with its actors resolved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResolvedCue {
+    /// Crosses the wire boundary as a [`CutsceneCue`].
+    Scene(CutsceneCue),
+    /// 0x5D rides the existing [`AgentEvent::MusicVolumeChanged`] instead of
+    /// the cue stream.
+    MusicVolume { volume: u8, fade_frames: u16 },
+}
+
+/// Resolve one VM cue against `event_entity`, the server id of the entity the
+/// running event belongs to.
+pub fn resolve_cue(cue: EventCue, event_entity: u32) -> ResolvedCue {
+    let actor = |lookup| resolve_actor(lookup, event_entity);
+    ResolvedCue::Scene(match cue {
+        EventCue::ActorMotion {
+            actor1,
+            actor2,
+            key,
+        } => CutsceneCue::ActorMotion {
+            actor: actor(actor1),
+            partner: actor(actor2),
+            key,
+        },
+        EventCue::Scheduler {
+            dat_id,
+            actor1,
+            actor2,
+            tag,
+            duration,
+        } => CutsceneCue::Scheduler {
+            dat_id,
+            actor: actor(actor1),
+            partner: actor(actor2),
+            tag,
+            duration,
+        },
+        EventCue::ActorHide { target, hide } => CutsceneCue::ActorHide {
+            target: actor(target),
+            hide,
+        },
+        EventCue::CameraLock { lock } => CutsceneCue::CameraLock { lock },
+        EventCue::Mount {
+            target,
+            status_event,
+            mount_id,
+        } => CutsceneCue::Mount {
+            target: actor(target),
+            status_event,
+            mount_id,
+        },
+        EventCue::MusicVolume {
+            volume,
+            fade_frames,
+        } => {
+            return ResolvedCue::MusicVolume {
+                volume,
+                fade_frames,
+            }
+        }
+    })
+}
+
+/// The event-entity selector and the default handler's fallback both mean "the
+/// entity this event belongs to"; only a literal server id names another.
+fn resolve_actor(lookup: ActorLookup, event_entity: u32) -> CutsceneActor {
+    if lookup.is_local_player() {
+        return CutsceneActor::LocalPlayer;
+    }
+    CutsceneActor::Entity {
+        server_id: lookup.server_id().unwrap_or(event_entity),
+    }
+}
+
+/// Why an event session is closing. Every variant releases the scope
+/// identically; the enum exists so each call site names its exit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EventSessionExit {
+    /// The script reached END/EXECEND, or the 0x05B EVENT_END went out.
+    ScriptEnded,
+    /// The player escaped the frame, or the server cancelled the event.
+    Cancelled,
+    /// The pinned-event watchdog grace expired, or the player walked away.
+    WatchdogReleased,
+    ZoneChanged,
+    Disconnected,
+}
+
+/// The event session's ownership of the client state its cues change.
+///
+/// 0x46 case 1 takes camera control and 1310 of 5269 retail event bodies never
+/// issue the matching case 0 — an unpaired lock is the norm, and retail's de
+/// facto release is the zone change. So the lock is scoped to the session and
+/// dropped at every [`EventSessionExit`], never latched by the bytecode alone:
+/// a permanently locked camera after a cutscene is worse than no lock at all.
+#[derive(Debug, Default)]
+pub struct CutsceneScope {
+    open: bool,
+    camera_locked: bool,
+    published: bool,
+}
+
+impl CutsceneScope {
+    /// Open the session. Idempotent while one is already open.
+    pub fn start(&mut self, event_id: u32, event_tx: &broadcast::Sender<AgentEvent>) {
+        if self.open {
+            return;
+        }
+        self.open = true;
+        let _ = event_tx.send(AgentEvent::CutsceneStarted { event_id });
+    }
+
+    /// Publish one resolved cue, recording the scope-owned state it takes.
+    pub fn push(&mut self, cue: ResolvedCue, event_tx: &broadcast::Sender<AgentEvent>) {
+        self.published = true;
+        match cue {
+            ResolvedCue::Scene(cue) => {
+                if let CutsceneCue::CameraLock { lock } = cue {
+                    self.camera_locked = lock;
+                }
+                let _ = event_tx.send(AgentEvent::CutsceneCue { cue });
+            }
+            ResolvedCue::MusicVolume {
+                volume,
+                fade_frames,
+            } => {
+                tracing::debug!(volume, fade_frames, "event script set music volume (0x5D)");
+                for slot in 0..crate::state::MUSIC_SLOT_COUNT {
+                    let _ = event_tx.send(AgentEvent::MusicVolumeChanged { slot, volume });
+                }
+            }
+        }
+    }
+
+    /// Close the session, releasing everything it still owns. Idempotent, and
+    /// safe to call on a path that had no event running.
+    pub fn end(&mut self, exit: EventSessionExit, event_tx: &broadcast::Sender<AgentEvent>) {
+        if self.camera_locked {
+            self.camera_locked = false;
+            let _ = event_tx.send(AgentEvent::CutsceneCue {
+                cue: CutsceneCue::CameraLock { lock: false },
+            });
+        }
+        // A cue can still be published after the scope closed — a server
+        // CancelEvent shuts the scope while the runner lives on, and the next
+        // drive pushes into it. Anything that reached the renderer has to be
+        // released, or a fade latches the screen black with no driver left.
+        if !self.open && !self.published {
+            return;
+        }
+        self.open = false;
+        self.published = false;
+        tracing::debug!(?exit, "event session closed");
+        let _ = event_tx.send(AgentEvent::CutsceneEnded);
+    }
+
+    pub fn camera_locked(&self) -> bool {
+        self.camera_locked
+    }
+
+    pub fn is_open(&self) -> bool {
+        self.open
+    }
+}
+
+/// Outcome of reconciling a TALKNUM-family message against the installed
+/// dialog DAT across client eras.
+pub enum FishingChat {
+    /// Not a fishing message under any verified hypothesis — the caller falls
+    /// back to the plain direct lookup.
+    NotFishing,
+    /// A verified fishing line: the DAT entry text and the FISHMESSAGEOFFSET
+    /// it resolved to.
+    Line { text: String, offset: u8 },
+    /// Fishing-shaped, but no hypothesis survived verification — the caller
+    /// prints the placeholder rather than a guess.
+    Unresolved,
+}
+
+/// Per-zone era-reconciliation state.
+#[derive(Default)]
+struct FishingEra {
+    /// Landmark-verified fishing-block base of the installed dialog DAT.
+    /// `Some(None)` = scanned, block not found.
+    install_base: Option<Option<u16>>,
+    server: ServerBase,
+}
+
+/// The server-side fishing base, learned from the wire.
+#[derive(Debug, Default)]
+enum ServerBase {
+    #[default]
+    Unknown,
+    /// Surviving candidates, intersected across messages.
+    Candidates(Vec<u16>),
+    Known(u16),
+}
+
+/// How far apart the same zone's fishing base can sit between the installed
+/// DAT and the server's text ids and still count as the same block. Observed:
+/// 9 between the vendor LSB pin and a May-2023 install, 26 between an older
+/// server fork and that install.
+const MAX_ERA_SKEW: u16 = 96;
+
+/// Locate the fishing block in an installed dialog DAT by its landmark lines,
+/// returning the block's base — the index LSB calls FISHING_MESSAGE_OFFSET.
+/// One landmark could collide with another block's duplicate line, so the
+/// match requires three lines at their exact relative offsets.
+fn find_fishing_block(dat: &StringDat) -> Option<u16> {
+    use ffxi_proto::fishing_messages::{kind, offset_text};
+    let (norod, nocatch, hooked) = (
+        offset_text(kind::NOROD)?,
+        offset_text(kind::NOCATCH)?,
+        offset_text(kind::HOOKED_SMALL_FISH)?,
+    );
+    let at = |index: usize, probe: &str| dat.text(index).is_some_and(|t| t.starts_with(probe));
+    for i in kind::NOROD as usize..dat.len() {
+        if !at(i, norod) {
+            continue;
+        }
+        let base = i - kind::NOROD as usize;
+        if at(base + kind::NOCATCH as usize, nocatch)
+            && at(base + kind::HOOKED_SMALL_FISH as usize, hooked)
+        {
+            return u16::try_from(base).ok();
+        }
+    }
+    None
+}
+
+/// Pick the DAT entry for a TALKNUM-family fishing message. `printable`
+/// resolves a FISHMESSAGEOFFSET to the install's entry text, honoring the
+/// menu guard. Pure state machine so it can be unit-tested without a DAT.
+fn resolve_fishing(
+    printable: &dyn Fn(u8) -> Option<String>,
+    pin_base: u16,
+    install_base: u16,
+    mes_num: u16,
+    opcode: u16,
+    server: ServerBase,
+) -> (FishingChat, ServerBase) {
+    use ffxi_proto::fishing_messages as fm;
+
+    // The line `base` claims this message is: a known offset the opcode
+    // carries, landing on a printable in-block entry.
+    let hypothesis = |base: u16| -> Option<(u8, String)> {
+        let offset = u8::try_from(mes_num.checked_sub(base)?).ok()?;
+        if !fm::carried_by(opcode, offset) {
+            return None;
+        }
+        printable(offset).map(|text| (offset, text))
+    };
+
+    // The not-yet-locked path. The server almost always speaks the vendor
+    // pin's era (the dev stack) or the installed DAT's own era (a server
+    // matched to the player's client); exactly one verified hypothesis locks
+    // the zone's base. Both verifying is a skew coincidence, and neither
+    // means a third era — those fall through to learning, which intersects
+    // the `mes_num - offset` candidates each message implies until one
+    // survives.
+    let unknown = |candidates: Option<Vec<u16>>| -> (FishingChat, ServerBase) {
+        let mut verified = Vec::new();
+        for base in [install_base, pin_base] {
+            if verified.iter().any(|&(b, _, _)| b == base) {
+                continue;
+            }
+            if let Some((offset, text)) = hypothesis(base) {
+                verified.push((base, offset, text));
+            }
+        }
+        if verified.len() == 1 {
+            let (base, offset, text) = verified.pop().expect("len checked");
+            return (FishingChat::Line { text, offset }, ServerBase::Known(base));
+        }
+
+        let observations: Vec<u16> = fm::OFFSETS
+            .iter()
+            .copied()
+            .filter(|&o| fm::carried_by(opcode, o))
+            .filter(|&o| printable(o).is_some())
+            .filter_map(|o| mes_num.checked_sub(u16::from(o)))
+            .filter(|&b| b.abs_diff(install_base) <= MAX_ERA_SKEW)
+            .collect();
+        if observations.is_empty() {
+            // Nothing about this message says fishing (e.g. a lua-driven
+            // messageSpecial): leave any learning state untouched.
+            let server = match candidates {
+                None => ServerBase::Unknown,
+                Some(prev) => ServerBase::Candidates(prev),
+            };
+            return (FishingChat::NotFishing, server);
+        }
+        let survivors = match candidates {
+            None => observations,
+            Some(prev) => {
+                let next: Vec<u16> = prev
+                    .into_iter()
+                    .filter(|b| observations.contains(b))
+                    .collect();
+                if next.is_empty() {
+                    tracing::warn!(
+                        mes_num,
+                        "fishing era candidates exhausted; restarting learning"
+                    );
+                    observations
+                } else {
+                    next
+                }
+            }
+        };
+        if let [base] = survivors.as_slice() {
+            let base = *base;
+            match hypothesis(base) {
+                Some((offset, text)) => {
+                    (FishingChat::Line { text, offset }, ServerBase::Known(base))
+                }
+                None => (FishingChat::Unresolved, ServerBase::Known(base)),
+            }
+        } else {
+            (FishingChat::Unresolved, ServerBase::Candidates(survivors))
+        }
+    };
+
+    match server {
+        ServerBase::Known(base) => match hypothesis(base) {
+            Some((offset, text)) => (FishingChat::Line { text, offset }, ServerBase::Known(base)),
+            // The lock can be a skew coincidence: retry unlocked and adopt a
+            // verified rival, but a message that says nothing about fishing
+            // (a lua special) leaves the lock alone.
+            None => match unknown(None) {
+                (FishingChat::NotFishing, _) => (FishingChat::NotFishing, ServerBase::Known(base)),
+                retried => retried,
+            },
+        },
+        ServerBase::Unknown => unknown(None),
+        ServerBase::Candidates(prev) => unknown(Some(prev)),
     }
 }
 
@@ -351,6 +781,21 @@ pub fn substitute_names(text: String, player_name: &str, speaker_name: Option<&s
     let text = text.replace(&plain_marker(MARKER_PLAYER_NAME), player_name);
     match speaker_name {
         Some(name) => text.replace(&plain_marker(MARKER_SPEAKER_NAME), name),
+        None => text,
+    }
+}
+
+/// Resolve the parameterized text slots the dmsg decoder leaves as
+/// `{ChocoboName:N}` (control code 0x1C — POLUtils' `ChocoboName`, really a
+/// generic string slot) with the name the packet carried: the angler on LSB's
+/// catch broadcasts. Every index resolves to the same name — zone messages
+/// carry just one. `None` leaves the markers visible, like [`substitute_names`]
+/// does for an unknown speaker.
+pub fn substitute_text_params(text: String, name: Option<&str>) -> String {
+    match name {
+        Some(name) => {
+            substitute_param_marker(text, MARKER_CHOCOBO_NAME, &|_| Some(name.to_string()))
+        }
         None => text,
     }
 }
@@ -574,6 +1019,261 @@ fn load_strings(root: Option<&DatRoot>, zone: u16) -> Option<StringDat> {
 mod tests {
     use super::*;
 
+    /// A miniature fishing block: offsets relative to a base, mirroring the
+    /// real layout's landmark lines.
+    struct FakeDat {
+        lines: Vec<(u8, &'static str)>,
+    }
+
+    impl FakeDat {
+        /// The landmarks `find_fishing_block` keys on, plus the lines the
+        /// tests exercise.
+        fn new() -> Self {
+            Self {
+                lines: vec![
+                    (0x01, "You can't fish without a rod in your hands."),
+                    (0x04, "You didn't catch anything."),
+                    (0x08, "Something caught the hook!"),
+                    (
+                        0x11,
+                        "Your rod breaks. Whatever caught the hook was pretty big.",
+                    ),
+                    (0x27, "{ChocoboName:0} caught  {Item:0}!"),
+                    (0x0E, "{ChocoboName:0} caught {Num:1} {Item:0}!"),
+                ],
+            }
+        }
+
+        fn printable(&self) -> impl Fn(u8) -> Option<String> + '_ {
+            |offset| {
+                self.lines
+                    .iter()
+                    .find(|(o, _)| *o == offset)
+                    .map(|(_, t)| t.to_string())
+            }
+        }
+    }
+
+    use ffxi_proto::fishing_messages::kind;
+    use ffxi_proto::map::s2c;
+
+    /// The vendor pin's base sits 9 above a May-2023 install's, the skew the
+    /// era reconciliation exists for.
+    const PIN: u16 = 7258;
+    const INSTALL: u16 = 7249;
+
+    fn line_text(chat: &FishingChat) -> Option<&str> {
+        match chat {
+            FishingChat::Line { text, .. } => Some(text),
+            _ => None,
+        }
+    }
+
+    /// Dev stack: a pin-era server against a May-2023 install. A catch
+    /// announcement verifies against the pin base alone and locks it.
+    #[test]
+    fn pin_era_server_locks_on_the_first_catch() {
+        let dat = FakeDat::new();
+        let mes = PIN + kind::CATCH as u16;
+        let (chat, server) = resolve_fishing(
+            &dat.printable(),
+            PIN,
+            INSTALL,
+            mes,
+            s2c::TALKNUMWORK2,
+            ServerBase::Unknown,
+        );
+        assert_eq!(line_text(&chat), Some("{ChocoboName:0} caught  {Item:0}!"));
+        assert!(matches!(server, ServerBase::Known(PIN)));
+
+        // Once locked, a message whose direct index would have been another
+        // line entirely (install[PIN + NOCATCH - INSTALL] = offset 13, not the
+        // NOCATCH line) renders the shifted NOCATCH line.
+        let (chat, _) = resolve_fishing(
+            &dat.printable(),
+            PIN,
+            INSTALL,
+            PIN + kind::NOCATCH as u16,
+            s2c::TALKNUM,
+            server,
+        );
+        assert_eq!(line_text(&chat), Some("You didn't catch anything."));
+    }
+
+    /// An era-matched server (base == install's) keeps rendering directly,
+    /// and locks on the first message.
+    #[test]
+    fn era_matched_server_renders_directly() {
+        let dat = FakeDat::new();
+        let (chat, server) = resolve_fishing(
+            &dat.printable(),
+            PIN,
+            INSTALL,
+            INSTALL + kind::NOCATCH as u16,
+            s2c::TALKNUM,
+            ServerBase::Unknown,
+        );
+        assert_eq!(line_text(&chat), Some("You didn't catch anything."));
+        assert!(matches!(server, ServerBase::Known(INSTALL)));
+    }
+
+    /// A skew coincidence — the pin hypothesis and the install hypothesis both
+    /// land on real lines — must not guess: placeholder and keep learning.
+    /// (HOOKED_SMALL at skew 9 aliases RODBREAK_TOOBIG.)
+    #[test]
+    fn a_skew_coincidence_is_unresolved_not_guessed() {
+        let dat = FakeDat::new();
+        let (chat, server) = resolve_fishing(
+            &dat.printable(),
+            PIN,
+            INSTALL,
+            PIN + kind::HOOKED_SMALL_FISH as u16,
+            s2c::TALKNUM,
+            ServerBase::Unknown,
+        );
+        assert!(matches!(chat, FishingChat::Unresolved));
+        assert!(matches!(server, ServerBase::Candidates(_)));
+    }
+
+    /// A server from a third era (base matching neither pin nor install) is
+    /// learned by intersecting the candidates each message implies: an
+    /// ambiguous catch, then any TALKNUM line, converges.
+    #[test]
+    fn a_third_era_server_base_is_learned_from_the_wire() {
+        const SERVER: u16 = 7220; // matches neither PIN nor INSTALL
+        let dat = FakeDat::new();
+
+        // A catch broadcast: CATCH and CATCH_INV_FULL/CATCH_MULTI candidates.
+        let (chat, server) = resolve_fishing(
+            &dat.printable(),
+            PIN,
+            INSTALL,
+            SERVER + kind::CATCH as u16,
+            s2c::TALKNUMWORK2,
+            ServerBase::Unknown,
+        );
+        assert!(matches!(chat, FishingChat::Unresolved));
+
+        // Any single-offset message intersects the candidates to a singleton.
+        let (chat, server) = resolve_fishing(
+            &dat.printable(),
+            PIN,
+            INSTALL,
+            SERVER + kind::NOCATCH as u16,
+            s2c::TALKNUM,
+            server,
+        );
+        assert_eq!(line_text(&chat), Some("You didn't catch anything."));
+        assert!(matches!(server, ServerBase::Known(SERVER)));
+
+        // The catch that previously had to wait now renders.
+        let (chat, _) = resolve_fishing(
+            &dat.printable(),
+            PIN,
+            INSTALL,
+            SERVER + kind::CATCH as u16,
+            s2c::TALKNUMWORK2,
+            server,
+        );
+        assert_eq!(line_text(&chat), Some("{ChocoboName:0} caught  {Item:0}!"));
+    }
+
+    /// A catch broadcast on a third-era server narrows the base to the
+    /// catch-family candidates; the next single-offset line intersects them
+    /// to a singleton.
+    #[test]
+    fn a_multi_catch_narrows_then_a_talknum_locks() {
+        const SERVER: u16 = 7220;
+        let dat = FakeDat::new();
+        let (chat, server) = resolve_fishing(
+            &dat.printable(),
+            PIN,
+            INSTALL,
+            SERVER + kind::CATCH_MULTI as u16,
+            s2c::TALKNUMWORK2,
+            ServerBase::Unknown,
+        );
+        assert!(matches!(chat, FishingChat::Unresolved));
+        let ServerBase::Candidates(c) = &server else {
+            panic!("multi-catch must narrow, not lock: {server:?}");
+        };
+        assert!(c.contains(&SERVER) && c.len() >= 2, "candidates: {c:?}");
+
+        let (chat, server) = resolve_fishing(
+            &dat.printable(),
+            PIN,
+            INSTALL,
+            SERVER + kind::NOCATCH as u16,
+            s2c::TALKNUM,
+            server,
+        );
+        assert_eq!(line_text(&chat), Some("You didn't catch anything."));
+        assert!(matches!(server, ServerBase::Known(SERVER)));
+    }
+
+    /// A message with no fishing-shaped interpretation (a lua messageSpecial)
+    /// is NotFishing and must not disturb learning state.
+    #[test]
+    fn non_fishing_messages_do_not_disturb_learning() {
+        let dat = FakeDat::new();
+        let (chat, server) = resolve_fishing(
+            &dat.printable(),
+            PIN,
+            INSTALL,
+            42,
+            s2c::TALKNUMWORK,
+            ServerBase::Unknown,
+        );
+        assert!(matches!(chat, FishingChat::NotFishing));
+        assert!(matches!(server, ServerBase::Unknown));
+    }
+
+    /// Build a synthetic DialogTable from per-entry (already-plain) text
+    /// bytes. Mirrors ffxi_dat::dmsg's own test helper; the format constants
+    /// duplicate `StringDat::parse`'s (TEXT_XOR / OFFSET_XOR / MAGIC_BASE),
+    /// which are pub(crate) to ffxi-dat — ffxi-dat's tests pin the format.
+    fn synth_dat(entries: &[&[u8]]) -> Vec<u8> {
+        let count = entries.len();
+        let table_size = 4 * count;
+        let mut offsets = Vec::with_capacity(count);
+        let mut running = table_size as u32;
+        for e in entries {
+            offsets.push(running);
+            running += e.len() as u32;
+        }
+        let data_len = table_size as u32 + entries.iter().map(|e| e.len() as u32).sum::<u32>();
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&(0x1000_0000u32.wrapping_add(data_len)).to_le_bytes());
+        for off in &offsets {
+            buf.extend_from_slice(&(off ^ 0x8080_8080).to_le_bytes());
+        }
+        for e in entries {
+            buf.extend(e.iter().map(|b| b ^ 0x80));
+        }
+        buf
+    }
+
+    /// The landmark scan must find the block at its shifted position and
+    /// reject a lone duplicate line.
+    #[test]
+    fn finds_the_fishing_block_by_landmarks() {
+        let mut entries: Vec<&[u8]> = vec![b" filler"; 9000];
+        // A duplicate of one landmark without the others proves nothing.
+        entries[100] = b"You didn't catch anything.";
+        let base = 7249usize;
+        entries[base + 0x01] = b"You can't fish without a rod in your hands.";
+        entries[base + 0x04] = b"You didn't catch anything.";
+        entries[base + 0x08] = b"Something caught the hook!";
+        let dat = StringDat::parse(&synth_dat(&entries)).expect("parse");
+        assert_eq!(find_fishing_block(&dat), Some(base as u16));
+
+        // Without the confirming landmarks there is no block.
+        let mut bare: Vec<&[u8]> = vec![b" filler"; 100];
+        bare[50] = b"You can't fish without a rod in your hands.";
+        let dat = StringDat::parse(&synth_dat(&bare)).expect("parse");
+        assert_eq!(find_fishing_block(&dat), None);
+    }
+
     #[test]
     fn substitutes_player_and_speaker_names() {
         let text = "{SpeakerName}: Well met, {PlayerName}.".to_string();
@@ -589,6 +1289,20 @@ mod tests {
         assert_eq!(
             substitute_names(text, "Zeid", None),
             "{SpeakerName} greets Zeid."
+        );
+    }
+
+    #[test]
+    fn substitutes_text_params_with_the_actor_name() {
+        let text = "{ChocoboName:0} caught  {Item:0}!".to_string();
+        assert_eq!(
+            substitute_text_params(text, Some("Kuluu")),
+            "Kuluu caught  {Item:0}!"
+        );
+        // No name: the marker stays visible rather than vanishing.
+        assert_eq!(
+            substitute_text_params("{ChocoboName:0} caught!".to_string(), None),
+            "{ChocoboName:0} caught!"
         );
     }
 
@@ -647,5 +1361,171 @@ mod tests {
         assert_eq!(dialog.nums, vec![0, 250]);
         assert_eq!(dialog.prompt.as_deref(), Some("Trion: 250 gil, Zeid."));
         assert_eq!(dialog.choices, vec!["Pay 250.", "Decline."]);
+    }
+
+    fn drain(rx: &mut broadcast::Receiver<AgentEvent>) -> Vec<AgentEvent> {
+        let mut out = Vec::new();
+        while let Ok(ev) = rx.try_recv() {
+            out.push(ev);
+        }
+        out
+    }
+
+    fn camera_locks(events: &[AgentEvent]) -> Vec<bool> {
+        events
+            .iter()
+            .filter_map(|ev| match ev {
+                AgentEvent::CutsceneCue {
+                    cue: CutsceneCue::CameraLock { lock },
+                } => Some(*lock),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// 0x46 case 1 with no matching case 0 is the norm (1310 of 5269 retail
+    /// event bodies), so the scope — not the bytecode — has to give the camera
+    /// back, on every way out of the session. Each variant here is a real call
+    /// site in `session::keepalive_loop`.
+    #[test]
+    fn the_camera_lock_is_released_on_every_exit_without_a_case_zero() {
+        const EVENT_ID: u32 = 0x010E_602F;
+        for exit in [
+            EventSessionExit::ScriptEnded,
+            EventSessionExit::Cancelled,
+            EventSessionExit::WatchdogReleased,
+            EventSessionExit::ZoneChanged,
+            EventSessionExit::Disconnected,
+        ] {
+            let (tx, mut rx) = broadcast::channel(16);
+            let mut scope = CutsceneScope::default();
+            scope.start(EVENT_ID, &tx);
+            scope.push(
+                ResolvedCue::Scene(CutsceneCue::CameraLock { lock: true }),
+                &tx,
+            );
+            assert!(scope.camera_locked(), "{exit:?}");
+            let _ = drain(&mut rx);
+
+            scope.end(exit, &tx);
+            assert!(!scope.camera_locked(), "{exit:?} left the camera locked");
+            let events = drain(&mut rx);
+            assert_eq!(
+                camera_locks(&events),
+                vec![false],
+                "{exit:?} must publish exactly one release: {events:?}"
+            );
+            assert!(
+                matches!(events.last(), Some(AgentEvent::CutsceneEnded)),
+                "{exit:?} must close the session last: {events:?}"
+            );
+            assert!(!scope.is_open(), "{exit:?}");
+        }
+    }
+
+    /// A second exit on the same session (the watchdog firing behind an
+    /// already-sent 0x05B) must not re-announce anything.
+    #[test]
+    fn ending_an_already_closed_session_is_silent() {
+        let (tx, mut rx) = broadcast::channel(16);
+        let mut scope = CutsceneScope::default();
+        scope.start(1, &tx);
+        scope.push(
+            ResolvedCue::Scene(CutsceneCue::CameraLock { lock: true }),
+            &tx,
+        );
+        scope.end(EventSessionExit::ScriptEnded, &tx);
+        let _ = drain(&mut rx);
+
+        scope.end(EventSessionExit::ZoneChanged, &tx);
+        assert!(drain(&mut rx).is_empty());
+    }
+
+    /// Case 0 mid-event gives the camera back early; the exit must not send a
+    /// second release for a lock nobody holds.
+    #[test]
+    fn a_mid_event_case_zero_releases_early_and_only_once() {
+        let (tx, mut rx) = broadcast::channel(16);
+        let mut scope = CutsceneScope::default();
+        scope.start(1, &tx);
+        for lock in [true, false] {
+            scope.push(ResolvedCue::Scene(CutsceneCue::CameraLock { lock }), &tx);
+        }
+        assert!(!scope.camera_locked());
+        scope.end(EventSessionExit::ScriptEnded, &tx);
+
+        let events = drain(&mut rx);
+        assert_eq!(camera_locks(&events), vec![true, false], "{events:?}");
+    }
+
+    /// 0x5D is a master volume, so it rides the existing music-volume event on
+    /// every slot rather than a cue of its own.
+    #[test]
+    fn music_volume_rides_the_music_event_on_every_slot() {
+        const VOLUME: u8 = 40;
+        let (tx, mut rx) = broadcast::channel(32);
+        let mut scope = CutsceneScope::default();
+        scope.start(1, &tx);
+        scope.push(
+            ResolvedCue::MusicVolume {
+                volume: VOLUME,
+                fade_frames: 30,
+            },
+            &tx,
+        );
+        let slots: Vec<u8> = drain(&mut rx)
+            .into_iter()
+            .filter_map(|ev| match ev {
+                AgentEvent::MusicVolumeChanged { slot, volume } => {
+                    assert_eq!(volume, VOLUME);
+                    Some(slot)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            slots,
+            (0..crate::state::MUSIC_SLOT_COUNT).collect::<Vec<_>>()
+        );
+    }
+
+    /// The VM leaves its actor operands unresolved on purpose: the local
+    /// player, the event's own entity and a named entity all have to stay
+    /// distinguishable here (hiding the posed NPC vs mounting the player).
+    #[test]
+    fn actor_lookups_resolve_against_the_running_events_entity() {
+        const EVENT_ENTITY: u32 = 0x010E_602F;
+        const POSED_NPC: u32 = 0x010E_6032;
+
+        let hide = |lookup| {
+            resolve_cue(
+                EventCue::ActorHide {
+                    target: lookup,
+                    hide: true,
+                },
+                EVENT_ENTITY,
+            )
+        };
+        let target = |cue| match cue {
+            ResolvedCue::Scene(CutsceneCue::ActorHide { target, .. }) => target,
+            other => panic!("not a hide cue: {other:?}"),
+        };
+
+        assert_eq!(
+            target(hide(ActorLookup::LOCAL_PLAYER)),
+            CutsceneActor::LocalPlayer
+        );
+        assert_eq!(
+            target(hide(ActorLookup::EVENT_ENTITY)),
+            CutsceneActor::Entity {
+                server_id: EVENT_ENTITY
+            }
+        );
+        assert_eq!(
+            target(hide(ActorLookup(POSED_NPC))),
+            CutsceneActor::Entity {
+                server_id: POSED_NPC
+            }
+        );
     }
 }

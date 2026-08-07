@@ -82,11 +82,119 @@ pub fn from_dat(bytes: &[u8]) -> Result<Vec<SubArea>> {
     Ok(from_interactions(&zone_interaction::from_dat(bytes)?))
 }
 
-/// The sub-area whose trigger volume holds `p` (FFXI zone space), or `None` for
-/// the ordinary outdoors state — retail's `CollisionMng.field_4 == -1`
-/// (ZoneRenderer.cpp:172). Feed the answer to [`crate::mzb::drawn_placements`].
-pub fn active_at(sub_areas: &[SubArea], p: [f32; 3]) -> Option<u32> {
-    sub_areas.iter().find(|s| s.contains(p)).map(|s| s.id)
+/// World-space AABB of the exterior shell a sub-area stands in for: the union of
+/// the placements whose [`MmbPlacement::sub_area_link`] names it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SubAreaShell {
+    pub id: u32,
+    pub min: [f32; 3],
+    pub max: [f32; 3],
+}
+
+impl SubAreaShell {
+    pub fn contains_inflated(&self, p: [f32; 3], margin: f32) -> bool {
+        (0..3).all(|i| p[i] >= self.min[i] - margin && p[i] <= self.max[i] + margin)
+    }
+}
+
+/// How far past a shell the player must get before the latch drops its interior.
+/// The doorway rects stand off from the shell they open — Port Jeuno's measured
+/// worst case is 5.0-5.6 units of clearance — so a tighter test would drop the
+/// interior while the player is still in the doorway.
+pub const SUB_AREA_SHELL_CLEAR_MARGIN: f32 = 8.0;
+
+/// Retail's `CollisionMng.field_4` (`-1` = outdoors, ZoneRenderer.cpp:172) kept as
+/// state over a stream of player positions, because it cannot be a pure function of
+/// position: of the 334 sub-area triggers the shipped zones declare, none lies
+/// inside its own interior (205 straddle it, 129 sit wholly outside), so a
+/// containment test would drop the interior as the player crossed the doorway and
+/// rematerialise the shell around them.
+///
+/// The SET rule — latch on the rising edge into a trigger — is inference by
+/// elimination rather than code-cited: XIClient has no writer of
+/// `CollisionMng.field_4` besides two `= -1` resets, and the bridging
+/// `gcZoneSubMapChangeSet` is an `XICLIENT_CODE_MISSING` stub. The clear condition
+/// is unsettled; this is the conservative fail-safe, keeping the interior until the
+/// player is clear of every trigger *and* of [`SubAreaShell`] by
+/// [`SUB_AREA_SHELL_CLEAR_MARGIN`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct SubAreaLatch {
+    triggers: Vec<ZoneInteraction>,
+    shells: Vec<SubAreaShell>,
+    inside: Vec<bool>,
+    active: Option<u32>,
+}
+
+impl SubAreaLatch {
+    /// `shells` may omit ids; a sub-area with no shell is never cleared
+    /// geometrically, only by a `param == 0` trigger.
+    pub fn new(interactions: &[ZoneInteraction], shells: Vec<SubAreaShell>) -> Self {
+        let triggers: Vec<ZoneInteraction> = interactions
+            .iter()
+            .filter(|i| i.is_sub_area_trigger())
+            .copied()
+            .collect();
+        Self {
+            inside: vec![false; triggers.len()],
+            triggers,
+            shells,
+            active: None,
+        }
+    }
+
+    pub fn active(&self) -> Option<u32> {
+        self.active
+    }
+
+    pub fn triggers(&self) -> &[ZoneInteraction] {
+        &self.triggers
+    }
+
+    /// Drops the interior and forgets which rects the player stood in, for a zone
+    /// change or a warp — retail's `field_4 = -1` reset.
+    pub fn reset(&mut self) {
+        self.active = None;
+        self.inside.iter_mut().for_each(|b| *b = false);
+    }
+
+    /// Puts the latch straight into `active` without a trigger crossing, for the
+    /// `SubMapNumber` the server hands over at zone-in: a character who logged
+    /// out inside a shop is standing in the interior before they ever cross its
+    /// doorway rect, and the rising-edge rule alone can only see them leave.
+    /// From here the ordinary clear rule applies, so walking out still drops it.
+    pub fn set_active(&mut self, id: Option<u32>) {
+        self.active = id;
+    }
+
+    /// Advance the latch to player position `p` (FFXI zone space) and report the
+    /// sub-area now swapped in. Feed the answer to [`crate::mzb::drawn_placements`]
+    /// and [`crate::mzb::MzbPlacement::collides_in`].
+    pub fn update(&mut self, p: [f32; 3]) -> Option<u32> {
+        let mut entered: Option<u32> = None;
+        let mut any_inside = false;
+        for (i, t) in self.triggers.iter().enumerate() {
+            let now = t.contains(p);
+            if now && !self.inside[i] {
+                entered = Some(t.param);
+            }
+            self.inside[i] = now;
+            any_inside |= now;
+        }
+
+        if let Some(param) = entered {
+            self.active = (param != 0).then_some(param);
+        } else if let Some(id) = self.active {
+            let held_by_shell = self
+                .shells
+                .iter()
+                .find(|s| s.id == id)
+                .is_none_or(|s| s.contains_inflated(p, SUB_AREA_SHELL_CLEAR_MARGIN));
+            if !any_inside && !held_by_shell {
+                self.active = None;
+            }
+        }
+        self.active
+    }
 }
 
 /// Sub-area links the zone's placements name but no `m`-rect declares. Retail can
@@ -115,6 +223,7 @@ mod tests {
     fn trigger(id: u32, position: [f32; 3], orientation_y: f32, size: [f32; 3]) -> ZoneInteraction {
         ZoneInteraction {
             position,
+            rect_class: zone_interaction::RECT_CLASS_HIT_CHECKED,
             orientation: [0.0, orientation_y, 0.0],
             size,
             source_id: DatId(*b"m6t1"),
@@ -144,18 +253,35 @@ mod tests {
     fn only_m_rects_with_a_dest_and_a_param_are_sub_areas() {
         let mut no_dest = trigger(0x1C6, [0.0; 3], 0.0, [1.0; 3]);
         no_dest.dest_id = None;
-        let mut no_param = trigger(0, [0.0; 3], 0.0, [1.0; 3]);
-        no_param.param = 0;
+        let leave = trigger(0, [0.0; 3], 0.0, [1.0; 3]);
         let mut zone_line = trigger(0x1C6, [0.0; 3], 0.0, [1.0; 3]);
         zone_line.source_id = DatId(*b"zmr0");
+        let mut region = trigger(0x1C6, [0.0; 3], 0.0, [1.0; 3]);
+        region.rect_class = 555;
 
         assert_eq!(no_dest.sub_area_id(), None);
-        assert_eq!(no_param.sub_area_id(), None);
+        assert_eq!(leave.sub_area_id(), None);
         assert_eq!(zone_line.sub_area_id(), None);
+        assert_eq!(region.sub_area_id(), None);
+        assert!(region.is_sub_map_region());
         assert_eq!(
             trigger(0x1C6, [0.0; 3], 0.0, [1.0; 3]).sub_area_id(),
             Some(0x1C6)
         );
+    }
+
+    /// The leave signal is a `param == 0` trigger, which `sub_area_id` folds into
+    /// the same `None` as "not a trigger" — only [`ZoneInteraction::sub_area_param`]
+    /// keeps them apart, and the latch depends on that.
+    #[test]
+    fn a_zero_param_trigger_is_a_leave_signal_not_a_non_trigger() {
+        let leave = trigger(0, [0.0; 3], 0.0, [1.0; 3]);
+        let mut zone_line = trigger(0, [0.0; 3], 0.0, [1.0; 3]);
+        zone_line.source_id = DatId(*b"zmr0");
+
+        assert_eq!(leave.sub_area_param(), Some(0));
+        assert_eq!(zone_line.sub_area_param(), None);
+        assert_eq!(from_interactions(&[leave]), Vec::new());
     }
 
     #[test]
@@ -217,15 +343,139 @@ mod tests {
         assert!(!t.contains([1.0, 0.0, 0.0]));
     }
 
+    const SHOP: u32 = 0x1C6;
+    /// The furthest a Port Jeuno doorway rect was measured to stand off the shell
+    /// it opens; [`SUB_AREA_SHELL_CLEAR_MARGIN`] has to reach past it.
+    const MEASURED_MAX_DOORWAY_STANDOFF: f32 = 5.6;
+
+    /// A doorway rect just outside the shell, the way the shipped ones sit: the
+    /// building spans x 0..20, the rect straddles x = -1.
+    fn shop_house() -> (Vec<ZoneInteraction>, Vec<SubAreaShell>) {
+        (
+            vec![trigger(SHOP, [-1.0, 0.0, 10.0], 0.0, [4.0, 8.0, 6.0])],
+            vec![SubAreaShell {
+                id: SHOP,
+                min: [0.0, -4.0, 0.0],
+                max: [20.0, 12.0, 20.0],
+            }],
+        )
+    }
+
     #[test]
-    fn active_at_reports_none_outside_every_trigger() {
-        let subs = from_interactions(&[
-            trigger(0x1C6, [0.0; 3], 0.0, [2.0; 3]),
-            trigger(0x1C7, [50.0, 0.0, 0.0], 0.0, [2.0; 3]),
-        ]);
-        assert_eq!(active_at(&subs, [0.5, 0.0, 0.5]), Some(0x1C6));
-        assert_eq!(active_at(&subs, [50.5, 0.0, 0.0]), Some(0x1C7));
-        assert_eq!(active_at(&subs, [25.0, 0.0, 0.0]), None);
+    fn the_latch_sets_on_entering_a_trigger_and_holds_past_it() {
+        let (triggers, shells) = shop_house();
+        let mut latch = SubAreaLatch::new(&triggers, shells);
+
+        assert_eq!(latch.update([-10.0, 0.0, 10.0]), None, "approaching");
+        assert_eq!(
+            latch.update([-1.0, 0.0, 10.0]),
+            Some(SHOP),
+            "in the doorway"
+        );
+        assert_eq!(
+            latch.update([10.0, 0.0, 10.0]),
+            Some(SHOP),
+            "deep inside, past every rect"
+        );
+    }
+
+    #[test]
+    fn the_latch_clears_only_once_clear_of_the_inflated_shell() {
+        let (triggers, shells) = shop_house();
+        let mut latch = SubAreaLatch::new(&triggers, shells);
+        latch.update([-1.0, 0.0, 10.0]);
+        latch.update([10.0, 0.0, 10.0]);
+
+        assert_eq!(
+            latch.update([-1.0, 0.0, 10.0]),
+            Some(SHOP),
+            "back in the door"
+        );
+        assert_eq!(
+            latch.update([-MEASURED_MAX_DOORWAY_STANDOFF, 0.0, 10.0]),
+            Some(SHOP),
+            "outside every rect but no further out than a real doorway stands"
+        );
+        assert_eq!(
+            latch.update([-(SUB_AREA_SHELL_CLEAR_MARGIN + 1.0), 0.0, 10.0]),
+            None,
+            "past the margin"
+        );
+    }
+
+    #[test]
+    fn leaving_by_a_different_door_of_the_same_building_still_clears() {
+        let west = trigger(SHOP, [-1.0, 0.0, 10.0], 0.0, [4.0, 8.0, 6.0]);
+        let east = trigger(SHOP, [21.0, 0.0, 10.0], 0.0, [4.0, 8.0, 6.0]);
+        let shells = vec![SubAreaShell {
+            id: SHOP,
+            min: [0.0, -4.0, 0.0],
+            max: [20.0, 12.0, 20.0],
+        }];
+        let mut latch = SubAreaLatch::new(&[west, east], shells);
+
+        latch.update([-10.0, 0.0, 10.0]);
+        assert_eq!(latch.update([-1.0, 0.0, 10.0]), Some(SHOP));
+        assert_eq!(latch.update([10.0, 0.0, 10.0]), Some(SHOP));
+        assert_eq!(
+            latch.update([21.0, 0.0, 10.0]),
+            Some(SHOP),
+            "the far door re-arms the same id"
+        );
+        assert_eq!(
+            latch.update([20.0 + SUB_AREA_SHELL_CLEAR_MARGIN + 1.0, 0.0, 10.0]),
+            None
+        );
+    }
+
+    #[test]
+    fn a_zero_param_rect_clears_the_latch_where_it_stands() {
+        let (mut triggers, shells) = shop_house();
+        triggers.push(trigger(0, [10.0, 0.0, 10.0], 0.0, [2.0, 8.0, 2.0]));
+        let mut latch = SubAreaLatch::new(&triggers, shells);
+
+        latch.update([-1.0, 0.0, 10.0]);
+        assert_eq!(latch.active(), Some(SHOP));
+        assert_eq!(
+            latch.update([10.0, 0.0, 10.0]),
+            None,
+            "the leave rect clears while still inside the shell"
+        );
+    }
+
+    #[test]
+    fn entering_a_second_building_swaps_the_active_sub_area() {
+        let a = trigger(SHOP, [-1.0, 0.0, 10.0], 0.0, [4.0, 8.0, 6.0]);
+        let b = trigger(SHOP + 1, [99.0, 0.0, 10.0], 0.0, [4.0, 8.0, 6.0]);
+        let mut latch = SubAreaLatch::new(&[a, b], Vec::new());
+        latch.update([-1.0, 0.0, 10.0]);
+        assert_eq!(latch.active(), Some(SHOP));
+        assert_eq!(latch.update([99.0, 0.0, 10.0]), Some(SHOP + 1));
+    }
+
+    /// Without a shell the geometric clear has nothing to test against, so the
+    /// fail-safe keeps the interior; only [`SubAreaLatch::reset`] or a leave rect
+    /// drops it.
+    #[test]
+    fn a_sub_area_with_no_shell_is_never_cleared_geometrically() {
+        let (triggers, _) = shop_house();
+        let mut latch = SubAreaLatch::new(&triggers, Vec::new());
+        latch.update([-1.0, 0.0, 10.0]);
+        assert_eq!(latch.update([9999.0, 0.0, 9999.0]), Some(SHOP));
+        latch.reset();
+        assert_eq!(latch.active(), None);
+    }
+
+    #[test]
+    fn the_latch_ignores_rects_that_are_not_sub_area_triggers() {
+        let mut region = trigger(SHOP, [0.0; 3], 0.0, [100.0; 3]);
+        region.rect_class = 555;
+        let mut zone_line = trigger(SHOP + 1, [0.0; 3], 0.0, [100.0; 3]);
+        zone_line.source_id = DatId(*b"zmr0");
+
+        let mut latch = SubAreaLatch::new(&[region, zone_line], Vec::new());
+        assert!(latch.triggers().is_empty());
+        assert_eq!(latch.update([0.0; 3]), None);
     }
 
     /// Gated on a retail install (self-skips without one). Lower Jeuno is the

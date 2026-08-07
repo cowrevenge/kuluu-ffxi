@@ -142,7 +142,7 @@ impl Default for BgmSlots {
     fn default() -> Self {
         Self {
             tracks: [None; SLOT_COUNT],
-            slot_gain: [1.0; SLOT_COUNT],
+            slot_gain: [UNITY_SLOT_GAIN; SLOT_COUNT],
             install_root: resolve_install_root(),
             event_cursor: 0,
             active: None,
@@ -296,6 +296,10 @@ pub fn derive_bgm_playback_state(
     };
 }
 
+/// Un-attenuated playback, and the value every slot rests at outside an event script's
+/// 0x5D volume ramp.
+pub const UNITY_SLOT_GAIN: f32 = 1.0;
+
 pub fn drain_music_events_system(events: Res<EventLog>, mut slots: ResMut<BgmSlots>) {
     let total = events.pushed_total;
     let first_global = total.saturating_sub(events.recent.len() as u64);
@@ -328,6 +332,11 @@ pub fn drain_music_events_system(events: Res<EventLog>, mut slots: ResMut<BgmSlo
                 if s < SLOT_COUNT {
                     slots.slot_gain[s] = (*volume as f32 / 127.0).clamp(0.0, 1.0);
                 }
+            }
+            // An event script's 0x5D duck is scoped to its session the way every other
+            // cutscene cue is: the bytecode routinely ends without restoring the volume.
+            ViewerEvent::CutsceneEnded => {
+                slots.slot_gain = [UNITY_SLOT_GAIN; SLOT_COUNT];
             }
             _ => {}
         }
@@ -1262,6 +1271,32 @@ mod tests {
         let slots = app.world().resource::<BgmSlots>();
         assert_eq!(slots.tracks[2], Some(99));
         assert!((slots.slot_gain[2] - 64.0 / 127.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn a_cutscene_duck_is_undone_when_the_session_ends() {
+        let mut app = App::new();
+        app.init_resource::<EventLog>()
+            .init_resource::<BgmSlots>()
+            .add_systems(Update, drain_music_events_system);
+
+        {
+            let mut events = app.world_mut().resource_mut::<EventLog>();
+            events.push(ViewerEvent::CutsceneStarted { event_id: 599 });
+            events.push(ViewerEvent::MusicVolumeChanged { slot: 0, volume: 0 });
+        }
+        app.update();
+        assert_eq!(app.world().resource::<BgmSlots>().slot_gain[0], 0.0);
+
+        {
+            let mut events = app.world_mut().resource_mut::<EventLog>();
+            events.push(ViewerEvent::CutsceneEnded);
+        }
+        app.update();
+        assert_eq!(
+            app.world().resource::<BgmSlots>().slot_gain,
+            [UNITY_SLOT_GAIN; SLOT_COUNT]
+        );
     }
 
     #[test]

@@ -12,6 +12,7 @@ pub fn state_to_snapshot(s: &SessionState) -> wire::SceneSnapshot {
         stage: stage_to_wire(s.stage),
         char_name: s.character.clone(),
         zone_id: s.zone_id,
+        sub_area: s.sub_area,
         self_pos,
         entities: s.entities.iter().map(entity_to_wire).collect(),
         party: s.party.iter().map(party_to_wire).collect(),
@@ -464,8 +465,66 @@ pub fn event_to_viewer_event(ev: AgentEvent) -> Option<wire::ViewerEvent> {
         AgentEvent::AuctionSearchFailed { message } => {
             Some(wire::ViewerEvent::AuctionSearchFailed { message })
         }
+        AgentEvent::CutsceneStarted { event_id } => {
+            Some(wire::ViewerEvent::CutsceneStarted { event_id })
+        }
+        AgentEvent::CutsceneCue { cue } => Some(wire::ViewerEvent::Cutscene {
+            cue: cutscene_cue_to_wire(cue),
+        }),
+        AgentEvent::CutsceneEnded => Some(wire::ViewerEvent::CutsceneEnded),
 
         _ => None,
+    }
+}
+
+fn cutscene_actor_to_wire(a: crate::state::CutsceneActor) -> wire::CutsceneActor {
+    match a {
+        crate::state::CutsceneActor::LocalPlayer => wire::CutsceneActor::LocalPlayer,
+        crate::state::CutsceneActor::Entity { server_id } => {
+            wire::CutsceneActor::Entity { server_id }
+        }
+    }
+}
+
+fn cutscene_cue_to_wire(cue: crate::state::CutsceneCue) -> wire::CutsceneCue {
+    use crate::state::CutsceneCue as Cue;
+    match cue {
+        Cue::ActorMotion {
+            actor,
+            partner,
+            key,
+        } => wire::CutsceneCue::ActorMotion {
+            actor: cutscene_actor_to_wire(actor),
+            partner: cutscene_actor_to_wire(partner),
+            key,
+        },
+        Cue::Scheduler {
+            dat_id,
+            actor,
+            partner,
+            tag,
+            duration,
+        } => wire::CutsceneCue::Scheduler {
+            dat_id,
+            actor: cutscene_actor_to_wire(actor),
+            partner: cutscene_actor_to_wire(partner),
+            tag,
+            duration,
+        },
+        Cue::ActorHide { target, hide } => wire::CutsceneCue::ActorHide {
+            target: cutscene_actor_to_wire(target),
+            hide,
+        },
+        Cue::CameraLock { lock } => wire::CutsceneCue::CameraLock { lock },
+        Cue::Mount {
+            target,
+            status_event,
+            mount_id,
+        } => wire::CutsceneCue::Mount {
+            target: cutscene_actor_to_wire(target),
+            status_event,
+            mount_id,
+        },
     }
 }
 
@@ -1310,5 +1369,131 @@ mod tests {
         }
         s.apply_event(&AgentEvent::EquipCleared);
         assert!(s.equipment.iter().all(|c| c.is_none()));
+    }
+
+    /// Bytecode for one `LOADEVENTSCHEDULER2` (0x45) carrying the screen
+    /// fade-out tag, followed by END. The file operand has to be a reference
+    /// (bit 0x8000) because `getworkofs` reads a bare small literal out of the
+    /// work array, not as an immediate.
+    fn fade_out_block(event_id: u16) -> ffxi_dat::event_dat::EventBlock {
+        const OP_LOADEVENTSCHEDULER2: u8 = 0x45;
+        const REFERENCE_FLAG: u16 = 0x8000;
+        /// 30704 + 200 == `ffxi_event::SCHEDULER_FADE_DAT_ID`, the pair every
+        /// authored fade call site resolves to.
+        const FADE_WORK_OPERAND: u32 = 200;
+
+        let width = ffxi_event::opcode_meta::OPCODE_META[OP_LOADEVENTSCHEDULER2 as usize].size;
+        let mut code = vec![0u8; width as usize];
+        code[0] = OP_LOADEVENTSCHEDULER2;
+        code[1..3].copy_from_slice(&REFERENCE_FLAG.to_le_bytes());
+        code[3..7].copy_from_slice(&ffxi_event::ActorLookup::EVENT_ENTITY.0.to_le_bytes());
+        code[7..11].copy_from_slice(&ffxi_event::ActorLookup::LOCAL_PLAYER.0.to_le_bytes());
+        code[11..15].copy_from_slice(&ffxi_event::SCHEDULER_TAG_FADE_OUT);
+        // Trailing zeros are OP_END, so the script terminates right after.
+        code.push(0);
+
+        ffxi_dat::event_dat::EventBlock {
+            actor: 0,
+            event_ids: vec![event_id],
+            event_offsets: vec![0],
+            references: vec![FADE_WORK_OPERAND],
+            event_data: code,
+        }
+    }
+
+    /// A one-entry dialog DAT: the VM needs a string table to run, but a
+    /// choreography-only script never reads it.
+    fn empty_strings() -> ffxi_dat::dmsg::StringDat {
+        const TEXT_XOR: u8 = 0x80;
+        const OFFSET_XOR: u32 = 0x8080_8080;
+        const MAGIC_BASE: u32 = 0x1000_0000;
+        let entry: &[u8] = b" ";
+        let table_size = 4u32;
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&(MAGIC_BASE + table_size + entry.len() as u32).to_le_bytes());
+        buf.extend_from_slice(&(table_size ^ OFFSET_XOR).to_le_bytes());
+        buf.extend(entry.iter().map(|b| b ^ TEXT_XOR));
+        ffxi_dat::dmsg::StringDat::parse(&buf).expect("synthetic dialog DAT parses")
+    }
+
+    /// The full channel: a cue the VM emits reaches the renderer as a
+    /// `ViewerEvent`, with the FourCC the emitter exported still matching what
+    /// a consumer would match on. Re-typing `b"fdo0"` here would defeat the
+    /// point — the guard is that both sides name `SCHEDULER_TAG_FADE_OUT`.
+    #[test]
+    fn a_fade_cue_from_the_vm_arrives_as_a_viewer_event() {
+        use crate::event_dialog::{resolve_cue, CutsceneScope, EventSessionExit};
+
+        const EVENT_ID: u16 = 599;
+        const NPC_ID: u32 = 0x010E_602F;
+
+        let block = fade_out_block(EVENT_ID);
+        let strings = empty_strings();
+        let mut runner = ffxi_event::DialogRunner::start(&block, EVENT_ID, 0, Vec::new())
+            .expect("block authors the event");
+        let step = runner.advance(None, &strings);
+        assert!(
+            matches!(step, ffxi_event::DialogStep::Ended { .. }),
+            "choreography-only script runs to completion: {step:?}"
+        );
+
+        let (tx, mut rx) = tokio::sync::broadcast::channel(32);
+        let mut scope = CutsceneScope::default();
+        scope.start(crate::event_dialog::agent_event_id(NPC_ID, EVENT_ID), &tx);
+        for cue in runner.take_cues() {
+            scope.push(resolve_cue(cue, NPC_ID), &tx);
+        }
+        scope.end(EventSessionExit::ScriptEnded, &tx);
+
+        let mut viewer = Vec::new();
+        while let Ok(ev) = rx.try_recv() {
+            viewer.extend(event_to_viewer_event(ev));
+        }
+
+        assert!(
+            matches!(
+                viewer.first(),
+                Some(wire::ViewerEvent::CutsceneStarted { .. })
+            ),
+            "the session start opens the channel: {viewer:?}"
+        );
+        assert!(
+            matches!(viewer.last(), Some(wire::ViewerEvent::CutsceneEnded)),
+            "and the session end closes it: {viewer:?}"
+        );
+        let fade = viewer.iter().find(|ev| {
+            matches!(
+                ev,
+                wire::ViewerEvent::Cutscene {
+                    cue: wire::CutsceneCue::Scheduler { .. }
+                }
+            )
+        });
+        let Some(wire::ViewerEvent::Cutscene { cue }) = fade else {
+            panic!("no scheduler cue crossed the wire: {viewer:?}");
+        };
+        assert_eq!(
+            *cue,
+            wire::CutsceneCue::Scheduler {
+                dat_id: ffxi_event::SCHEDULER_FADE_DAT_ID,
+                actor: wire::CutsceneActor::Entity { server_id: NPC_ID },
+                partner: wire::CutsceneActor::LocalPlayer,
+                // The emitter's const, never a re-typed b"fdo0": that identity
+                // is the whole contract this test pins.
+                tag: ffxi_event::SCHEDULER_TAG_FADE_OUT,
+                duration: ffxi_event::SCHEDULER_DURATION_FROM_DAT,
+            }
+        );
+    }
+
+    /// The 0x5D master volume is fanned across the music slots, so the count
+    /// here and the one the renderer indexes have to be the same number.
+    #[cfg(feature = "native-window")]
+    #[test]
+    fn the_music_slot_count_matches_the_renderer_mixer() {
+        assert_eq!(
+            crate::state::MUSIC_SLOT_COUNT as usize,
+            ffxi_viewer_core::audio::SLOT_COUNT
+        );
     }
 }

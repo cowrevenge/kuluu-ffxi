@@ -164,6 +164,8 @@ pub(super) fn apply_slash_outcome(
                 water: None,
                 lod: None,
                 door: None,
+                slot: ffxi_viewer_core::dat_mzb::ZONE_SLOT_MAIN,
+                sub_area_link: 0,
             });
             let label = match entity_id {
                 Some(id) => format!("/load_mmb_on {id} {file_id} {chunk_idx}: spawning…"),
@@ -689,6 +691,8 @@ pub(super) fn apply_slash_outcome(
                 world_pos: bevy_pos,
 
                 auto_loaded: false,
+                slot: ffxi_viewer_core::dat_mzb::ZONE_SLOT_MAIN,
+                active_sub_area: None,
             });
             let idx_desc = match chunk_idx {
                 Some(i) => format!("chunk {i}"),
@@ -700,7 +704,7 @@ pub(super) fn apply_slash_outcome(
             );
         }
         SlashOutcome::SubArea { op, self_pos } => {
-            apply_sub_area(op, self_pos, scene_state, &mut slash_writers.load_mzb);
+            apply_sub_area(op, self_pos, scene_state, &mut slash_writers.set_sub_area);
         }
         SlashOutcome::ShopBuyRow { shop_index, qty } => match scene_state.snapshot.shop.as_ref() {
             Some(shop) => {
@@ -808,14 +812,11 @@ pub(super) fn apply_slash_outcome(
     }
 }
 
-/// Sub-area triggers are stored in FFXI zone space, which is the same frame the
-/// snapshot reports the player in (ffxi-dat `ZoneInteraction`), so the trigger
-/// test takes `self_pos` unconverted.
 fn apply_sub_area(
     op: SubAreaOp,
     self_pos: ffxi_viewer_wire::Vec3,
     scene_state: &mut SceneState,
-    load_mzb: &mut MessageWriter<LoadMzbRequest>,
+    set_sub_area: &mut MessageWriter<ffxi_viewer_core::sub_area_activation::SetSubArea>,
 ) {
     let Some(zone_file_id) =
         ffxi_viewer_core::snapshot::effective_zone_file_id(&scene_state.snapshot)
@@ -841,7 +842,9 @@ fn apply_sub_area(
         return;
     }
 
-    let here = [self_pos.x, self_pos.y, self_pos.z];
+    // Snapshot order is (x, ground depth, height); the RID rects keep the DAT's
+    // (x, height, ground depth). Same remap as `reactor::is_inside_dat_obb`.
+    let here = [self_pos.x, self_pos.z, self_pos.y];
     let wanted = match op {
         SubAreaOp::List => {
             let mut lines = vec![format!(
@@ -898,18 +901,17 @@ fn apply_sub_area(
         return;
     }
 
-    // The interior's placements are already expressed in the parent zone's world
-    // space, so it spawns at the origin rather than at the player.
-    load_mzb.write(LoadMzbRequest {
-        file_id: s.sub_area.file_id,
-        chunk_idx: None,
-        world_pos: Vec3::ZERO,
-        auto_loaded: false,
+    // Handing the id to the latch rather than loading the DAT here keeps one
+    // owner of the sub-area block, so a manual load cannot stack a second
+    // interior on top of the one the player walked into. The latch governs from
+    // there: an interior the player is not standing in drops again at once.
+    set_sub_area.write(ffxi_viewer_core::sub_area_activation::SetSubArea {
+        sub_area: Some(s.sub_area.id),
     });
     push_system_chat_line(
         scene_state,
         format!(
-            "/subarea {:#x}: loading interior DAT {}…",
+            "/subarea {:#x}: activating interior DAT {}…",
             s.sub_area.id, s.sub_area.file_id
         ),
     );

@@ -11,6 +11,7 @@ use bevy::tasks::futures_lite::future;
 use bevy::tasks::{AsyncComputeTaskPool, Task};
 use ffxi_dat::mmb::MmbHeader;
 use ffxi_dat::mzb::AreaResourceId;
+use ffxi_dat::zone_interaction::ZoneInteraction;
 use ffxi_dat::{mmb, mzb, sub_area, walk, ChunkKind, DatRoot};
 
 use crate::components::{IsSelf, WorldEntity};
@@ -133,8 +134,29 @@ impl Default for DrawDistance {
 #[derive(Component)]
 pub struct MzbCollisionMesh;
 
-#[derive(Resource, Default)]
-pub struct MzbCollisionGeometry {
+/// research/XIClient/src/XIClient/include/Rendering/ZoneRenderer.h:45
+/// `MAX_ZONE_LOAD_COUNT = 2` — retail keeps the main zone block and the one
+/// sub-area interior the player stands in loaded at the same time.
+pub const ZONE_BLOCK_SLOTS: usize = 2;
+pub const ZONE_SLOT_MAIN: u8 = 0;
+pub const ZONE_SLOT_SUB_AREA: u8 = 1;
+
+/// Which zone block an entity belongs to. Stamped on every entity a
+/// [`LoadMzbRequest`] produces — the MZB overlay parent and its meshes, the
+/// water planes, and the zone-model parents the MMB path spawns for it — so
+/// retiring an interior cannot take the main zone with it. [`AutoMzbOverlay`]
+/// cannot do that job: `dat_mmb` stamps it on interior zone models too.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ZoneBlockSlot(pub u8);
+
+/// The exterior shell placement an interior stands in for, from
+/// `MmbPlacement::sub_area_link`. `0` is ordinary geometry.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ZoneSubAreaLink(pub u32);
+
+/// One loaded zone block's collision triangles.
+#[derive(Default, Clone)]
+pub struct MzbCollisionBlock {
     pub positions: Vec<Vec3>,
 
     pub indices: Vec<u32>,
@@ -168,6 +190,18 @@ pub struct MzbCollisionGeometry {
     pub source_file_id: Option<u32>,
 }
 
+/// Every loaded zone block's collision, queried as one surface.
+///
+/// A sub-area interior does not floor its own doorway: measured over the
+/// shipped town zones, 15-271 one-yalm columns per interior are floored by the
+/// parent block only, and that is the doorway approach itself. So the two
+/// blocks are folded into a single column read rather than replacing one with
+/// the other, and each query applies its selection rule once over the union.
+#[derive(Resource, Default)]
+pub struct MzbCollisionGeometry {
+    slots: [MzbCollisionBlock; ZONE_BLOCK_SLOTS],
+}
+
 #[derive(Clone)]
 pub struct LoadedZoneGeom {
     pub submeshes: Arc<Vec<MzbSubMesh>>,
@@ -178,30 +212,51 @@ pub struct LoadedZoneGeom {
 
 #[derive(Resource, Default)]
 pub struct LoadMzbInFlight {
-    pub tasks: std::collections::HashMap<u32, (Vec<LoadMzbRequest>, Task<LoadedZoneGeom>)>,
+    pub tasks: std::collections::HashMap<ZoneGeomKey, (Vec<LoadMzbRequest>, Task<LoadedZoneGeom>)>,
 }
 
+impl LoadMzbInFlight {
+    /// Whether a load is outstanding for `slot`. The "zone is ready" gates ask
+    /// this about [`ZONE_SLOT_MAIN`] only: an interior streaming in behind a
+    /// doorway is not a zone transition, and treating it as one re-raises the
+    /// loading overlay and stalls the minimap bake every time the player walks
+    /// into a shop.
+    pub fn pending_in_slot(&self, slot: u8) -> bool {
+        self.tasks
+            .values()
+            .any(|(reqs, _)| reqs.iter().any(|r| r.slot == slot))
+    }
+}
+
+/// LRU of parsed zone blocks.
+///
+/// Keyed on `(file_id, active_sub_area)`, not `file_id` alone: the cached
+/// [`LoadedZoneGeom::mmb_spawns`] is already latched to the sub-area that was
+/// active when it was built, so a one-key cache serves a shell-visible build to
+/// a shell-suppressed request.
 #[derive(Resource, Default)]
 pub struct ZoneGeomCache {
-    pub entries: VecDeque<(u32, LoadedZoneGeom)>,
+    pub entries: VecDeque<(ZoneGeomKey, LoadedZoneGeom)>,
 }
+
+pub type ZoneGeomKey = (u32, Option<u32>);
 
 pub const ZONE_GEOM_CACHE_CAP: usize = 4;
 
 impl ZoneGeomCache {
-    fn get_and_promote(&mut self, file_id: u32) -> Option<LoadedZoneGeom> {
-        let pos = self.entries.iter().position(|(id, _)| *id == file_id)?;
+    fn get_and_promote(&mut self, key: ZoneGeomKey) -> Option<LoadedZoneGeom> {
+        let pos = self.entries.iter().position(|(k, _)| *k == key)?;
         let entry = self.entries.remove(pos)?;
         let geom = entry.1.clone();
         self.entries.push_front(entry);
         Some(geom)
     }
 
-    fn insert(&mut self, file_id: u32, geom: LoadedZoneGeom) {
-        if let Some(pos) = self.entries.iter().position(|(id, _)| *id == file_id) {
+    fn insert(&mut self, key: ZoneGeomKey, geom: LoadedZoneGeom) {
+        if let Some(pos) = self.entries.iter().position(|(k, _)| *k == key) {
             self.entries.remove(pos);
         }
-        self.entries.push_front((file_id, geom));
+        self.entries.push_front((key, geom));
         while self.entries.len() > ZONE_GEOM_CACHE_CAP {
             self.entries.pop_back();
         }
@@ -225,73 +280,15 @@ const NORMAL_MATRIX_MIN_DET: f32 = 1e-6;
 /// double the tallest stair riser, well under the shortest storey.
 pub const MAX_GROUND_STEP_UP: f32 = 1.0;
 
-impl MzbCollisionGeometry {
+impl MzbCollisionBlock {
     pub fn tri_count(&self) -> usize {
         self.indices.len() / 3
     }
 
-    pub fn ground_raycast(&self, xz: Vec2, ceiling_y: f32) -> Option<f32> {
-        let mut best_y: Option<f32> = None;
-        self.for_each_hit_in_column(xz, |_, hit_y, normal| {
-            if normal.y < FLOOR_NORMAL_MIN || hit_y > ceiling_y {
-                return;
-            }
-            best_y = Some(match best_y {
-                Some(prev) if prev > hit_y => prev,
-                _ => hit_y,
-            });
-        });
-        best_y
-    }
-
-    /// Up-facing floor in this column whose height is closest to `ref_y`.
-    /// Unlike [`Self::ground_raycast`]'s one-sided `ceiling` cutoff, "nearest"
-    /// is a fixed point under grounding (a grounded entity's nearest floor is
-    /// the floor it stands on), so it doesn't oscillate when the reference Y
-    /// wobbles near a cutoff, and it picks the entity's own level in a
-    /// multi-floor building instead of the floor above.
-    ///
-    /// Down-facing surfaces are rejected: accepting them (`normal.y.abs()`)
-    /// makes the underside of every roof a landing surface, which is how a short
-    /// walk in Lower Jeuno used to strand the player on a ceiling (kuluu-0nnl).
-    pub fn ground_nearest(&self, xz: Vec2, ref_y: f32) -> Option<f32> {
-        let mut best: Option<f32> = None;
-        self.for_each_hit_in_column(xz, |_, hit_y, normal| {
-            if normal.y < FLOOR_NORMAL_MIN {
-                return;
-            }
-            best = Some(match best {
-                Some(prev) if (prev - ref_y).abs() <= (hit_y - ref_y).abs() => prev,
-                _ => hit_y,
-            });
-        });
-        best
-    }
-
-    /// [`Self::ground_nearest`] restricted to floors the walker could actually
-    /// step up onto. Unbounded downwards — descending a ledge is a fall, and
-    /// with no gravity model a downward snap is how a fall is expressed.
-    ///
-    /// This is the player-movement entry point. `ground_nearest` is for placing
-    /// an entity whose height is already known-good (other PCs, mobs, markers),
-    /// where a reference Y far below the floor must still snap up.
-    pub fn ground_step(&self, xz: Vec2, feet_y: f32, max_rise: f32) -> Option<f32> {
-        let mut best: Option<f32> = None;
-        self.for_each_hit_in_column(xz, |_, hit_y, normal| {
-            if normal.y < FLOOR_NORMAL_MIN || hit_y > feet_y + max_rise {
-                return;
-            }
-            best = Some(match best {
-                Some(prev) if (prev - feet_y).abs() <= (hit_y - feet_y).abs() => prev,
-                _ => hit_y,
-            });
-        });
-        best
-    }
-
     /// World triangles retail's chase camera sees — everything except the
     /// `DoubleSidedSkipPolicy` skip set. The camera BVH and every camera probe
-    /// must come through here or they disagree with the game.
+    /// must come through [`MzbCollisionGeometry::camera_triangles`], which folds
+    /// this over every loaded block, or they disagree with the game.
     ///
     /// Filtering happens here, before the BVH is built, because `CollisionBvh`
     /// reorders its triangle copy by leaf order: no per-triangle array can be
@@ -318,56 +315,6 @@ impl MzbCollisionGeometry {
                 ]
             })
             .collect()
-    }
-
-    pub fn ground_raycast_all(&self, xz: Vec2) -> Vec<(f32, Vec3)> {
-        let mut hits: Vec<(f32, Vec3)> = Vec::new();
-        self.for_each_hit_in_column(xz, |_, hit_y, normal| hits.push((hit_y, normal)));
-        hits.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-        hits
-    }
-
-    /// Terrain of the up-facing floor in this column nearest `ref_y` — the same
-    /// surface [`Self::ground_nearest`] would place an entity on, so "what am I
-    /// standing on / looking at" and "where would I stand" cannot disagree.
-    pub fn terrain_nearest(&self, xz: Vec2, ref_y: f32) -> Option<mzb::TerrainType> {
-        let mut best: Option<(f32, usize)> = None;
-        self.for_each_hit_in_column(xz, |tri_id, hit_y, normal| {
-            if normal.y < FLOOR_NORMAL_MIN {
-                return;
-            }
-            if best.is_none_or(|(prev, _)| (hit_y - ref_y).abs() < (prev - ref_y).abs()) {
-                best = Some((hit_y, tri_id));
-            }
-        });
-        let (_, tri_id) = best?;
-        mzb::TerrainType::from_nibble(*self.tri_terrain.get(tri_id)?)
-    }
-
-    /// Whether any up-facing floor in this column, from `from_y` down to
-    /// `from_y - max_drop`, is water.
-    ///
-    /// Unlike [`Self::terrain_nearest`], this deliberately looks *past* the
-    /// surface the player is standing on. A quay, pier or bridge railing puts
-    /// solid ground at the angler's own height with the water several yalms
-    /// below, and the nearest-floor answer there is always more quay — which is
-    /// exactly where fishing is most obviously expected to work.
-    pub fn water_below(&self, xz: Vec2, from_y: f32, max_drop: f32) -> bool {
-        let mut found = false;
-        self.for_each_hit_in_column(xz, |tri_id, hit_y, normal| {
-            if found || normal.y < FLOOR_NORMAL_MIN {
-                return;
-            }
-            if hit_y > from_y + WATER_PROBE_HEAD_ROOM || hit_y < from_y - max_drop {
-                return;
-            }
-            found = self
-                .tri_terrain
-                .get(tri_id)
-                .and_then(|t| mzb::TerrainType::from_nibble(*t))
-                .is_some_and(mzb::TerrainType::is_water);
-        });
-        found
     }
 
     fn for_each_hit_in_column(&self, xz: Vec2, mut visit: impl FnMut(usize, f32, Vec3)) {
@@ -415,6 +362,183 @@ impl MzbCollisionGeometry {
     }
 }
 
+/// Ranks two step-eligible floors for [`MzbCollisionGeometry::ground_step`].
+///
+/// Inside a `window`-sized band around the feet both blocks genuinely floor the
+/// column — a shop doorway is floored by the town block *and* by the interior,
+/// 0-136 such columns per interior — and retail has the player standing in the
+/// interior there, so the higher slot wins. Outside the band the nearest floor
+/// wins, exactly as with a single block, and ties keep the incumbent.
+fn step_candidate_beats(cand: (u8, f32), best: (u8, f32), feet_y: f32, window: f32) -> bool {
+    let (cand_slot, cand_y) = cand;
+    let (best_slot, best_y) = best;
+    let cand_dist = (cand_y - feet_y).abs();
+    let best_dist = (best_y - feet_y).abs();
+    if cand_slot != best_slot && cand_dist <= window && best_dist <= window {
+        return cand_slot > best_slot;
+    }
+    cand_dist < best_dist
+}
+
+impl MzbCollisionGeometry {
+    pub fn from_block(block: MzbCollisionBlock) -> Self {
+        let mut geom = Self::default();
+        geom.set_block(ZONE_SLOT_MAIN, block);
+        geom
+    }
+
+    pub fn block(&self, slot: u8) -> &MzbCollisionBlock {
+        &self.slots[slot as usize]
+    }
+
+    pub fn set_block(&mut self, slot: u8, block: MzbCollisionBlock) {
+        self.slots[slot as usize] = block;
+    }
+
+    pub fn clear_block(&mut self, slot: u8) {
+        self.slots[slot as usize] = MzbCollisionBlock::default();
+    }
+
+    /// DAT file the main zone block came from — the zone the player is in. An
+    /// interior in [`ZONE_SLOT_SUB_AREA`] is a block *within* that zone and
+    /// never answers "which zone is loaded".
+    pub fn source_file_id(&self) -> Option<u32> {
+        self.block(ZONE_SLOT_MAIN).source_file_id
+    }
+
+    pub fn tri_count(&self) -> usize {
+        self.slots.iter().map(MzbCollisionBlock::tri_count).sum()
+    }
+
+    pub fn camera_triangles(&self) -> Vec<[Vec3; 3]> {
+        self.slots
+            .iter()
+            .flat_map(MzbCollisionBlock::camera_triangles)
+            .collect()
+    }
+
+    pub fn ground_raycast(&self, xz: Vec2, ceiling_y: f32) -> Option<f32> {
+        let mut best_y: Option<f32> = None;
+        self.for_each_hit_in_column(xz, |_, _, hit_y, normal| {
+            if normal.y < FLOOR_NORMAL_MIN || hit_y > ceiling_y {
+                return;
+            }
+            best_y = Some(match best_y {
+                Some(prev) if prev > hit_y => prev,
+                _ => hit_y,
+            });
+        });
+        best_y
+    }
+
+    /// Up-facing floor in this column whose height is closest to `ref_y`.
+    /// Unlike [`Self::ground_raycast`]'s one-sided `ceiling` cutoff, "nearest"
+    /// is a fixed point under grounding (a grounded entity's nearest floor is
+    /// the floor it stands on), so it doesn't oscillate when the reference Y
+    /// wobbles near a cutoff, and it picks the entity's own level in a
+    /// multi-floor building instead of the floor above.
+    ///
+    /// Down-facing surfaces are rejected: accepting them (`normal.y.abs()`)
+    /// makes the underside of every roof a landing surface, which is how a short
+    /// walk in Lower Jeuno used to strand the player on a ceiling (kuluu-0nnl).
+    pub fn ground_nearest(&self, xz: Vec2, ref_y: f32) -> Option<f32> {
+        let mut best: Option<f32> = None;
+        self.for_each_hit_in_column(xz, |_, _, hit_y, normal| {
+            if normal.y < FLOOR_NORMAL_MIN {
+                return;
+            }
+            best = Some(match best {
+                Some(prev) if (prev - ref_y).abs() <= (hit_y - ref_y).abs() => prev,
+                _ => hit_y,
+            });
+        });
+        best
+    }
+
+    /// [`Self::ground_nearest`] restricted to floors the walker could actually
+    /// step up onto. Unbounded downwards — descending a ledge is a fall, and
+    /// with no gravity model a downward snap is how a fall is expressed.
+    ///
+    /// This is the player-movement entry point. `ground_nearest` is for placing
+    /// an entity whose height is already known-good (other PCs, mobs, markers),
+    /// where a reference Y far below the floor must still snap up.
+    pub fn ground_step(&self, xz: Vec2, feet_y: f32, max_rise: f32) -> Option<f32> {
+        let mut best: Option<(u8, f32)> = None;
+        self.for_each_hit_in_column(xz, |slot, _, hit_y, normal| {
+            if normal.y < FLOOR_NORMAL_MIN || hit_y > feet_y + max_rise {
+                return;
+            }
+            let cand = (slot, hit_y);
+            if best.is_none_or(|prev| step_candidate_beats(cand, prev, feet_y, max_rise)) {
+                best = Some(cand);
+            }
+        });
+        best.map(|(_, hit_y)| hit_y)
+    }
+
+    pub fn ground_raycast_all(&self, xz: Vec2) -> Vec<(f32, Vec3)> {
+        let mut hits: Vec<(f32, Vec3)> = Vec::new();
+        self.for_each_hit_in_column(xz, |_, _, hit_y, normal| hits.push((hit_y, normal)));
+        hits.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+        hits
+    }
+
+    /// Terrain of the up-facing floor in this column nearest `ref_y` — the same
+    /// surface [`Self::ground_nearest`] would place an entity on, so "what am I
+    /// standing on / looking at" and "where would I stand" cannot disagree.
+    pub fn terrain_nearest(&self, xz: Vec2, ref_y: f32) -> Option<mzb::TerrainType> {
+        let mut best: Option<(f32, u8, usize)> = None;
+        self.for_each_hit_in_column(xz, |slot, tri_id, hit_y, normal| {
+            if normal.y < FLOOR_NORMAL_MIN {
+                return;
+            }
+            if best.is_none_or(|(prev, _, _)| (hit_y - ref_y).abs() < (prev - ref_y).abs()) {
+                best = Some((hit_y, slot, tri_id));
+            }
+        });
+        let (_, slot, tri_id) = best?;
+        mzb::TerrainType::from_nibble(*self.block(slot).tri_terrain.get(tri_id)?)
+    }
+
+    /// Whether any up-facing floor in this column, from `from_y` down to
+    /// `from_y - max_drop`, is water.
+    ///
+    /// Unlike [`Self::terrain_nearest`], this deliberately looks *past* the
+    /// surface the player is standing on. A quay, pier or bridge railing puts
+    /// solid ground at the angler's own height with the water several yalms
+    /// below, and the nearest-floor answer there is always more quay — which is
+    /// exactly where fishing is most obviously expected to work.
+    pub fn water_below(&self, xz: Vec2, from_y: f32, max_drop: f32) -> bool {
+        let mut found = false;
+        self.for_each_hit_in_column(xz, |slot, tri_id, hit_y, normal| {
+            if found || normal.y < FLOOR_NORMAL_MIN {
+                return;
+            }
+            if hit_y > from_y + WATER_PROBE_HEAD_ROOM || hit_y < from_y - max_drop {
+                return;
+            }
+            found = self
+                .block(slot)
+                .tri_terrain
+                .get(tri_id)
+                .and_then(|t| mzb::TerrainType::from_nibble(*t))
+                .is_some_and(mzb::TerrainType::is_water);
+        });
+        found
+    }
+
+    /// Every loaded block's hits in one column, tagged with the slot that owns
+    /// them so a query can reach that block's parallel per-triangle arrays and
+    /// break ties between blocks.
+    fn for_each_hit_in_column(&self, xz: Vec2, mut visit: impl FnMut(u8, usize, f32, Vec3)) {
+        for (slot, block) in self.slots.iter().enumerate() {
+            block.for_each_hit_in_column(xz, |tri_id, hit_y, normal| {
+                visit(slot as u8, tri_id, hit_y, normal)
+            });
+        }
+    }
+}
+
 /// Bakes placed submeshes into the geometry the player grounds on. The client
 /// and the `zz-*` collision probes both go through here, so a probe can't
 /// disagree with what the game actually walks on.
@@ -427,7 +551,7 @@ pub fn build_collision_geometry(
     submeshes: &[MzbSubMesh],
     instances: &[MzbInstance],
     file_id: Option<u32>,
-) -> MzbCollisionGeometry {
+) -> MzbCollisionBlock {
     let mut positions: Vec<Vec3> = Vec::new();
     let mut indices: Vec<u32> = Vec::new();
     let mut tri_normals: Vec<Vec3> = Vec::new();
@@ -479,7 +603,7 @@ pub fn build_collision_geometry(
         );
     }
 
-    MzbCollisionGeometry {
+    MzbCollisionBlock {
         cell_index: build_cell_index(&positions, &indices),
         positions,
         indices,
@@ -644,6 +768,7 @@ pub struct WaterSpec {
     pub max: Vec3,
     pub parent: Entity,
     pub auto_loaded: bool,
+    pub slot: u8,
 }
 
 // MZB load computes per-placement water footprints (CPU-side) and queues them
@@ -672,6 +797,23 @@ pub struct LoadMzbRequest {
     pub world_pos: Vec3,
 
     pub auto_loaded: bool,
+
+    /// Which [`ZoneBlockSlot`] this block occupies, stamped on every entity the
+    /// request produces. Installing a block overwrites the slot's collision,
+    /// area and light boxes, but not its entities: an issuer that is replacing
+    /// an occupant calls [`ZoneBlockRetire::retire`] first.
+    pub slot: u8,
+
+    /// Sub-area the player is inside while this block is built, so
+    /// `mzb::drawn_placements` can demote the placeholder shell it stands in for
+    /// (retail `SetRenderTypes`). Part of the [`ZoneGeomCache`] key.
+    pub active_sub_area: Option<u32>,
+}
+
+impl LoadMzbRequest {
+    pub fn cache_key(&self) -> ZoneGeomKey {
+        (self.file_id, self.active_sub_area)
+    }
 }
 
 pub struct MzbSubMesh {
@@ -911,6 +1053,10 @@ pub struct ZoneMmbSpawn {
     // placement, including the generator water sheets, which carry no MZB
     // record and so belong to no group.
     pub door: Option<crate::zone_doors::ZoneDoorLeaf>,
+
+    /// `MmbPlacement::sub_area_link` — the interior this placement is the
+    /// closed-up exterior shell of, or 0 for ordinary geometry.
+    pub sub_area_link: u32,
 }
 
 /// World-space (Bevy frame) footprint of one area-bound placement.
@@ -977,6 +1123,20 @@ pub struct ZoneMmbBuild {
     pub spawns: Vec<ZoneMmbSpawn>,
     pub area_boxes: Vec<ZoneAreaBox>,
     pub light_boxes: Vec<ZoneChunkLightBox>,
+
+    /// The zone's sub-area trigger rects and the exterior shells they stand in
+    /// for, both in FFXI zone space — everything
+    /// [`sub_area::SubAreaLatch::new`] needs. Read off the same DAT parse the
+    /// placements come from, so activation costs no extra file I/O.
+    pub sub_area_triggers: Vec<ZoneInteraction>,
+    pub sub_area_shells: Vec<sub_area::SubAreaShell>,
+
+    /// Ascending, deduplicated ids among [`Self::sub_area_triggers`] whose
+    /// interior DAT this install actually ships. Resolved here, where the
+    /// VTABLE/FTABLE are already open on the task pool: asking the same
+    /// question from the driver would re-read the whole file table on the main
+    /// thread at every doorway.
+    pub loadable_sub_areas: Vec<u32>,
 }
 
 /// Which [`AreaResourceId`] each point of the zone belongs to.
@@ -991,22 +1151,45 @@ pub struct ZoneMmbBuild {
 /// question the ground query does.
 #[derive(Resource, Default)]
 pub struct ZoneAreaMap {
+    slots: [ZoneAreaSlot; ZONE_BLOCK_SLOTS],
+}
+
+#[derive(Default, Clone)]
+pub struct ZoneAreaSlot {
     pub boxes: Vec<ZoneAreaBox>,
 
     /// DAT file the boxes came from, so a stale zone's interiors can't keep
-    /// tinting the new one (same reason [`MzbCollisionGeometry::source_file_id`]
-    /// exists).
+    /// tinting the new one (same reason
+    /// [`MzbCollisionBlock::source_file_id`] exists).
     pub source_file_id: Option<u32>,
 }
 
 impl ZoneAreaMap {
+    pub fn set_block(&mut self, slot: u8, boxes: Vec<ZoneAreaBox>, source_file_id: Option<u32>) {
+        self.slots[slot as usize] = ZoneAreaSlot {
+            boxes,
+            source_file_id,
+        };
+    }
+
+    pub fn clear_block(&mut self, slot: u8) {
+        self.slots[slot as usize] = ZoneAreaSlot::default();
+    }
+
+    pub fn source_file_id(&self) -> Option<u32> {
+        self.slots[ZONE_SLOT_MAIN as usize].source_file_id
+    }
+
     /// The area at `p`, or `None` for the zone-wide environment.
     ///
     /// Innermost wins: areas nest (a room inside a building shell), and retail's
-    /// per-block answer is the most specific block holding the actor.
+    /// per-block answer is the most specific block holding the actor. Boxes from
+    /// every loaded block compete in that one comparison, so an interior's own
+    /// rooms outrank the town block that contains them.
     pub fn area_at(&self, p: Vec3) -> Option<AreaResourceId> {
-        self.boxes
+        self.slots
             .iter()
+            .flat_map(|s| s.boxes.iter())
             .filter(|b| b.holds(p))
             .min_by(|a, b| {
                 a.footprint()
@@ -1027,6 +1210,11 @@ impl ZoneAreaMap {
 /// table, which is the only case the nearest-N pick still answers.
 #[derive(Resource, Default)]
 pub struct ZoneChunkLightMap {
+    slots: [ZoneChunkLightSlot; ZONE_BLOCK_SLOTS],
+}
+
+#[derive(Default, Clone)]
+pub struct ZoneChunkLightSlot {
     pub boxes: Vec<ZoneChunkLightBox>,
 
     /// DAT file the boxes came from, so a stale zone cannot keep lighting the
@@ -1035,15 +1223,32 @@ pub struct ZoneChunkLightMap {
 }
 
 impl ZoneChunkLightMap {
+    pub fn set_block(
+        &mut self,
+        slot: u8,
+        boxes: Vec<ZoneChunkLightBox>,
+        source_file_id: Option<u32>,
+    ) {
+        self.slots[slot as usize] = ZoneChunkLightSlot {
+            boxes,
+            source_file_id,
+        };
+    }
+
+    pub fn clear_block(&mut self, slot: u8) {
+        self.slots[slot as usize] = ZoneChunkLightSlot::default();
+    }
+
     pub fn is_authored(&self) -> bool {
-        !self.boxes.is_empty()
+        self.slots.iter().any(|s| !s.boxes.is_empty())
     }
 
     /// The authored lights of the chunk at `p`, innermost chunk first — the same
     /// most-specific-block answer [`ZoneAreaMap::area_at`] gives.
     pub fn lights_at(&self, p: Vec3) -> Option<[Option<mzb::LightId>; mzb::LIGHT_REFERENCE_COUNT]> {
-        self.boxes
+        self.slots
             .iter()
+            .flat_map(|s| s.boxes.iter())
             .filter(|b| block_holds(b.min, b.max, p))
             .min_by(|a, b| {
                 block_footprint(a.min, a.max)
@@ -1106,6 +1311,7 @@ pub fn placement_bevy_transform(scale: Vec3, rot: Vec3, trans: Vec3) -> Mat4 {
 pub fn build_zone_mmb_spawns(
     file_id: u32,
     chunk_idx: Option<usize>,
+    active_sub_area: Option<u32>,
 ) -> Result<ZoneMmbBuild, String> {
     let root =
         DatRoot::from_env_or_default().map_err(|e| format!("DatRoot::from_env_or_default: {e}"))?;
@@ -1194,23 +1400,21 @@ pub fn build_zone_mmb_spawns(
     let placements = mzb::parse_mmb_placements(&plain, &header)
         .map_err(|e| format!("MZB parse_mmb_placements: {e}"))?;
 
-    // The auto-load path never swaps an interior in, so every shell stays up —
-    // retail's "not inside a building" state. `/subarea` is the manual way in.
-    const ACTIVE_SUB_AREA: Option<u32> = None;
-    let drawn_flags = mzb::drawn_placements(&placements, ACTIVE_SUB_AREA);
+    let drawn_flags = mzb::drawn_placements(&placements, active_sub_area);
 
     let door_leaf_slots = crate::zone_doors::leaf_slots(&placements);
 
-    let sub_areas = match sub_area::from_dat(&bytes) {
-        Ok(s) => s,
+    let interactions = match ffxi_dat::zone_interaction::from_dat(&bytes) {
+        Ok(i) => i,
         Err(e) => {
             warn!("MZB {file_id}: sub-area section unreadable ({e}); no interiors offered");
             Vec::new()
         }
     };
+    let sub_areas = sub_area::from_interactions(&interactions);
     if !sub_areas.is_empty() {
         info!(
-            "MZB {file_id}: {} sub-area interior(s) declared but not loaded — ids {:?} (`/subarea`)",
+            "MZB {file_id}: {} sub-area interior(s) declared — ids {:?}",
             sub_areas.len(),
             sub_areas.iter().map(|s| s.id).collect::<Vec<_>>()
         );
@@ -1231,6 +1435,7 @@ pub fn build_zone_mmb_spawns(
     let mut area_boxes: Vec<ZoneAreaBox> = Vec::new();
     let light_bindings = mzb::parse_light_bindings(&plain, &header);
     let mut light_boxes: Vec<ZoneChunkLightBox> = Vec::new();
+    let mut shell_bounds: HashMap<u32, (Vec3, Vec3)> = HashMap::new();
     for (placement_idx, (p, &drawn)) in placements.iter().zip(drawn_flags.iter()).enumerate() {
         let id = p.id_str().trim_end_matches('\0').trim_end();
 
@@ -1280,6 +1485,27 @@ pub fn build_zone_mmb_spawns(
             }
         }
 
+        // Also built before the render gate, and for the same reason the areas
+        // are: once an interior is active its own shell placement stops being
+        // drawn, and the shell is exactly the volume the latch needs to know the
+        // player has left.
+        if p.sub_area_link != 0 {
+            if let Some(bounds) = lod_set
+                .distinct_indices()
+                .first()
+                .and_then(|&local| mmb_bounds[local])
+            {
+                let (min, max) = world_bounds_from_local(bevy_transform, bounds.0, bounds.1);
+                shell_bounds
+                    .entry(p.sub_area_link)
+                    .and_modify(|b| {
+                        b.0 = b.0.min(min);
+                        b.1 = b.1.max(max);
+                    })
+                    .or_insert((min, max));
+            }
+        }
+
         if !drawn {
             gated += 1;
             continue;
@@ -1319,6 +1545,7 @@ pub fn build_zone_mmb_spawns(
                 bevy_transform,
                 water: None,
                 door,
+                sub_area_link: p.sub_area_link,
                 lod: needs_lod_component.then(|| ZoneMeshLod {
                     thresholds: p.lod_thresholds(),
                     level_mask: lod_set.level_mask(local),
@@ -1431,10 +1658,11 @@ pub fn build_zone_mmb_spawns(
                 world_min,
                 world_max,
             }),
-            // Generator sheets carry no placement record, so no LOD triple and
-            // no `_`/`@` group membership.
+            // Generator sheets carry no placement record, so no LOD triple, no
+            // `_`/`@` group membership and no sub-area shell role.
             lod: None,
             door: None,
+            sub_area_link: 0,
         });
     }
 
@@ -1587,10 +1815,37 @@ pub fn build_zone_mmb_spawns(
 
     log_light_binding_coverage(file_id, &chunks, &light_bindings, &light_boxes);
 
+    let sub_area_shells = shell_bounds
+        .into_iter()
+        .map(|(id, (min, max))| {
+            let (ffxi_min, ffxi_max) = ffxi_bounds_from_bevy(min, max);
+            sub_area::SubAreaShell {
+                id,
+                min: ffxi_min,
+                max: ffxi_max,
+            }
+        })
+        .collect();
+
+    let sub_area_triggers: Vec<ZoneInteraction> = interactions
+        .into_iter()
+        .filter(ZoneInteraction::is_sub_area_trigger)
+        .collect();
+    let mut loadable_sub_areas: Vec<u32> = sub_area_triggers
+        .iter()
+        .filter_map(ZoneInteraction::sub_area_id)
+        .filter(|id| root.resolve(sub_area::sub_area_file_id(*id)).is_ok())
+        .collect();
+    loadable_sub_areas.sort_unstable();
+    loadable_sub_areas.dedup();
+
     Ok(ZoneMmbBuild {
         spawns: out,
         area_boxes,
         light_boxes,
+        sub_area_triggers,
+        sub_area_shells,
+        loadable_sub_areas,
     })
 }
 
@@ -1692,6 +1947,14 @@ fn world_bounds_from_local(
     (world_min, world_max)
 }
 
+/// Back-converts a Bevy-frame AABB to FFXI zone space, the frame the sub-area
+/// trigger rects and the server's player position are expressed in. The only
+/// difference between the frames is the axis-aligned Y/Z negation in
+/// [`placement_bevy_transform`], so the corners swap rather than move.
+fn ffxi_bounds_from_bevy(min: Vec3, max: Vec3) -> ([f32; 3], [f32; 3]) {
+    ([min.x, -max.y, -max.z], [max.x, -min.y, -min.z])
+}
+
 /// One entry of [`zone_sub_areas`]: a building interior the zone can swap in,
 /// paired with whether its DAT is actually present in this install.
 #[derive(Debug, Clone)]
@@ -1785,10 +2048,19 @@ pub fn kick_load_mzb_tasks(
     mut pending_water: ResMut<PendingWaterSpawns>,
     mut in_flight: ResMut<LoadMzbInFlight>,
     mut cache: ResMut<ZoneGeomCache>,
+    mut activation: ResMut<crate::sub_area_activation::SubAreaActivation>,
 ) {
     let init_vis = compute_init_visibility(draw.zone_geom_mode);
     for req in events.read() {
-        if let Some(geom) = cache.get_and_promote(req.file_id) {
+        if req.slot as usize >= ZONE_BLOCK_SLOTS {
+            warn!(
+                slot = req.slot,
+                file_id = req.file_id,
+                "MZB load request names a zone block slot that does not exist; ignored"
+            );
+            continue;
+        }
+        if let Some(geom) = cache.get_and_promote(req.cache_key()) {
             spawn_mzb_overlay(
                 *req,
                 &geom,
@@ -1801,19 +2073,21 @@ pub fn kick_load_mzb_tasks(
                 &mut chunk_light_map,
                 &mut load_mmb_tx,
                 &mut pending_water,
+                &mut activation,
                 init_vis,
                 true,
             );
             continue;
         }
 
-        if let Some((reqs, _)) = in_flight.tasks.get_mut(&req.file_id) {
+        if let Some((reqs, _)) = in_flight.tasks.get_mut(&req.cache_key()) {
             reqs.push(*req);
             continue;
         }
 
         let file_id = req.file_id;
         let chunk_idx = req.chunk_idx;
+        let active_sub_area = req.active_sub_area;
         let pool = AsyncComputeTaskPool::get();
         let task = pool.spawn(async move {
             let (submeshes, instances) = match load_mzb_placed(file_id, chunk_idx) {
@@ -1826,14 +2100,14 @@ pub fn kick_load_mzb_tasks(
                     };
                 }
             };
-            let mmb_spawns = build_zone_mmb_spawns(file_id, chunk_idx);
+            let mmb_spawns = build_zone_mmb_spawns(file_id, chunk_idx, active_sub_area);
             LoadedZoneGeom {
                 submeshes: Arc::new(submeshes),
                 instances: Arc::new(instances),
                 mmb_spawns,
             }
         });
-        in_flight.tasks.insert(file_id, (vec![*req], task));
+        in_flight.tasks.insert(req.cache_key(), (vec![*req], task));
     }
 }
 
@@ -1850,23 +2124,24 @@ pub fn poll_load_mzb_tasks(
     mut pending_water: ResMut<PendingWaterSpawns>,
     mut in_flight: ResMut<LoadMzbInFlight>,
     mut cache: ResMut<ZoneGeomCache>,
+    mut activation: ResMut<crate::sub_area_activation::SubAreaActivation>,
 ) {
     let init_vis = compute_init_visibility(draw.zone_geom_mode);
 
-    let mut completed: Vec<(u32, Vec<LoadMzbRequest>, LoadedZoneGeom)> = Vec::new();
-    in_flight.tasks.retain(|file_id, (reqs, task)| {
-        match future::block_on(future::poll_once(task)) {
+    let mut completed: Vec<(ZoneGeomKey, Vec<LoadMzbRequest>, LoadedZoneGeom)> = Vec::new();
+    in_flight.tasks.retain(
+        |key, (reqs, task)| match future::block_on(future::poll_once(task)) {
             Some(geom) => {
-                completed.push((*file_id, std::mem::take(reqs), geom));
+                completed.push((*key, std::mem::take(reqs), geom));
                 false
             }
             None => true,
-        }
-    });
-    for (file_id, reqs, geom) in completed {
+        },
+    );
+    for (key, reqs, geom) in completed {
         let cache_eligible = !geom.submeshes.is_empty() && !geom.instances.is_empty();
         if cache_eligible {
-            cache.insert(file_id, geom.clone());
+            cache.insert(key, geom.clone());
         }
         for req in reqs {
             spawn_mzb_overlay(
@@ -1881,6 +2156,7 @@ pub fn poll_load_mzb_tasks(
                 &mut chunk_light_map,
                 &mut load_mmb_tx,
                 &mut pending_water,
+                &mut activation,
                 init_vis,
                 false,
             );
@@ -2112,6 +2388,7 @@ pub fn spawn_zone_water(
             MzbOverlay,
             WaterPlane,
             MzbNonCollisionMesh,
+            ZoneBlockSlot(spec.slot),
             mesh,
             MeshMaterial3d(simple_mat.clone()),
             Transform::IDENTITY,
@@ -2139,6 +2416,7 @@ fn spawn_mzb_overlay(
     chunk_light_map: &mut ResMut<ZoneChunkLightMap>,
     load_mmb_tx: &mut MessageWriter<crate::dat_mmb::LoadMmbRequest>,
     pending_water: &mut PendingWaterSpawns,
+    activation: &mut ResMut<crate::sub_area_activation::SubAreaActivation>,
     init_vis: (Visibility, Visibility),
     _from_cache: bool,
 ) {
@@ -2148,27 +2426,44 @@ fn spawn_mzb_overlay(
     // stands, which is a question the fog answers even for a zone whose
     // collision section is empty.
     if let Ok(build) = &geom.mmb_spawns {
-        area_map.boxes = build
-            .area_boxes
-            .iter()
-            .map(|b| ZoneAreaBox {
-                area_id: b.area_id,
-                min: b.min + req.world_pos,
-                max: b.max + req.world_pos,
-            })
-            .collect();
-        area_map.source_file_id = Some(req.file_id);
+        // Only the main block declares interiors: a sub-area DAT is a block
+        // within a zone, not a zone that can hold blocks of its own.
+        if req.slot == ZONE_SLOT_MAIN {
+            activation.install_zone(
+                req.file_id,
+                &build.sub_area_triggers,
+                build.sub_area_shells.clone(),
+                build.loadable_sub_areas.clone(),
+            );
+        }
 
-        chunk_light_map.boxes = build
-            .light_boxes
-            .iter()
-            .map(|b| ZoneChunkLightBox {
-                min: b.min + req.world_pos,
-                max: b.max + req.world_pos,
-                lights: b.lights,
-            })
-            .collect();
-        chunk_light_map.source_file_id = Some(req.file_id);
+        area_map.set_block(
+            req.slot,
+            build
+                .area_boxes
+                .iter()
+                .map(|b| ZoneAreaBox {
+                    area_id: b.area_id,
+                    min: b.min + req.world_pos,
+                    max: b.max + req.world_pos,
+                })
+                .collect(),
+            Some(req.file_id),
+        );
+
+        chunk_light_map.set_block(
+            req.slot,
+            build
+                .light_boxes
+                .iter()
+                .map(|b| ZoneChunkLightBox {
+                    min: b.min + req.world_pos,
+                    max: b.max + req.world_pos,
+                    lights: b.lights,
+                })
+                .collect(),
+            Some(req.file_id),
+        );
     }
 
     let submeshes: &[MzbSubMesh] = geom.submeshes.as_slice();
@@ -2208,6 +2503,7 @@ fn spawn_mzb_overlay(
     let mut parent_spawn = commands.spawn((
         crate::components::InGameEntity,
         MzbOverlay,
+        ZoneBlockSlot(req.slot),
         Transform::from_translation(req.world_pos),
         Visibility::default(),
     ));
@@ -2299,6 +2595,7 @@ fn spawn_mzb_overlay(
         }
         let mut child = commands.spawn((
             MzbOverlay,
+            ZoneBlockSlot(req.slot),
             Mesh3d(meshes.add(mesh)),
             MeshMaterial3d(material),
             Transform::IDENTITY,
@@ -2320,7 +2617,10 @@ fn spawn_mzb_overlay(
     let noncollision_verts = noncollision_positions.len();
     let noncollision_tris = noncollision_indices.len() / 3;
 
-    **collision_geometry = build_collision_geometry(submeshes, instances, Some(req.file_id));
+    collision_geometry.set_block(
+        req.slot,
+        build_collision_geometry(submeshes, instances, Some(req.file_id)),
+    );
 
     spawn_merged(
         commands,
@@ -2424,6 +2724,7 @@ fn spawn_mzb_overlay(
             max,
             parent,
             auto_loaded: req.auto_loaded,
+            slot: req.slot,
         });
         water_added += 1;
     }
@@ -2454,6 +2755,8 @@ fn spawn_mzb_overlay(
                     water: s.water,
                     lod: s.lod,
                     door: s.door.map(|d| d.with_world_offset(req.world_pos)),
+                    slot: req.slot,
+                    sub_area_link: s.sub_area_link,
                 });
             }
             push_system_msg(
@@ -2469,6 +2772,78 @@ fn spawn_mzb_overlay(
                 toasts,
                 format!("/load_mzb {}: zone-MMB spawn: {msg}", req.file_id),
             );
+        }
+    }
+}
+
+/// Everything one zone block owns, taken back down together.
+///
+/// The despawn is by [`ZoneBlockSlot`] and never by [`AutoMzbOverlay`]: the MMB
+/// path stamps `AutoMzbOverlay` on every zone-model placement it spawns,
+/// interior ones included, so despawning by it takes the main zone with the
+/// interior.
+#[derive(bevy::ecs::system::SystemParam)]
+pub struct ZoneBlockRetire<'w, 's> {
+    pub commands: Commands<'w, 's>,
+    pub slots: Query<'w, 's, (Entity, &'static ZoneBlockSlot)>,
+    pub collision_geometry: ResMut<'w, MzbCollisionGeometry>,
+    pub area_map: ResMut<'w, ZoneAreaMap>,
+    pub chunk_light_map: ResMut<'w, ZoneChunkLightMap>,
+    pub pending_water: ResMut<'w, PendingWaterSpawns>,
+    pub mmb_queue: ResMut<'w, crate::dat_mmb::MmbLoadQueue>,
+    pub mzb_in_flight: ResMut<'w, LoadMzbInFlight>,
+}
+
+impl ZoneBlockRetire<'_, '_> {
+    pub fn retire(&mut self, slot: u8) {
+        for (e, s) in self.slots.iter() {
+            if s.0 == slot {
+                if let Ok(mut ec) = self.commands.get_entity(e) {
+                    ec.despawn();
+                }
+            }
+        }
+        self.collision_geometry.clear_block(slot);
+        self.area_map.clear_block(slot);
+        self.chunk_light_map.clear_block(slot);
+        self.pending_water.specs.retain(|w| w.slot != slot);
+        self.mmb_queue.pending.retain(|r| r.slot != slot);
+        self.mzb_in_flight
+            .tasks
+            .retain(|_, (reqs, _)| reqs.iter().all(|r| r.slot != slot));
+    }
+}
+
+/// Retail's `SetRenderTypes` demotes the placements standing in for the active
+/// interior to a type the draw passes skip
+/// (research/XIClient/src/XIClient/source/Rendering/ZoneRenderer.cpp:619-641).
+/// Doing it as visibility rather than as a build-time gate is what lets the
+/// shell come back when the player walks out, without reloading the zone.
+/// Placements that also carry [`ZoneMeshLod`] are left to
+/// [`select_zone_mmb_lod`], which owns their `Visibility` every frame and folds
+/// the same suppression in — two writers on one component would fight.
+///
+/// The sweep is keyed on the selected id, not on `Res::is_changed`: the driver
+/// ticks the latch through a `ResMut` every frame, so change detection on the
+/// resource is always set and would sweep every shell every frame.
+pub fn apply_sub_area_shell_visibility(
+    active: Res<crate::sub_area_activation::SubAreaActivation>,
+    mut last_applied: Local<Option<u32>>,
+    mut shells: Query<(Ref<ZoneSubAreaLink>, &mut Visibility), Without<ZoneMeshLod>>,
+) {
+    let sweep_all = *last_applied != active.active();
+    *last_applied = active.active();
+    for (link, mut vis) in shells.iter_mut() {
+        if !sweep_all && !link.is_added() {
+            continue;
+        }
+        let want = if mzb::is_suppressed_placeholder(link.0, active.active()) {
+            Visibility::Hidden
+        } else {
+            Visibility::Inherited
+        };
+        if *vis != want {
+            *vis = want;
         }
     }
 }
@@ -2507,10 +2882,10 @@ pub fn auto_load_zone_geometry_system(
     // entities against geometry they're not in: entering a Mog House snapped
     // the player onto a city surface at the MH-origin column, and the
     // nearest-floor snap then resolved that stuck Y to the MH model's roof.
-    if collision_geometry.source_file_id != current {
+    if collision_geometry.source_file_id() != current {
         *collision_geometry = MzbCollisionGeometry::default();
     }
-    if area_map.source_file_id != current {
+    if area_map.source_file_id() != current {
         *area_map = ZoneAreaMap::default();
     }
 
@@ -2533,6 +2908,13 @@ pub fn auto_load_zone_geometry_system(
                 chunk_idx: None,
                 world_pos: Vec3::ZERO,
                 auto_loaded: true,
+                slot: ZONE_SLOT_MAIN,
+                // The main block keeps every shell placement spawned even when
+                // the player zones in already inside one: suppression is the
+                // per-frame visibility pass, which is reversible, and a
+                // build-time gate here would leave a hole where the shell
+                // belongs the moment they step back outside.
+                active_sub_area: None,
             });
 
             let zone_label = scene_state
@@ -2568,15 +2950,22 @@ pub fn auto_load_zone_geometry_system(
 /// falls into.
 pub fn select_zone_mmb_lod(
     camera_q: Query<&GlobalTransform, With<crate::camera::OperatorCamera>>,
-    mut lod_q: Query<(&GlobalTransform, &ZoneMeshLod, &mut Visibility)>,
+    active: Res<crate::sub_area_activation::SubAreaActivation>,
+    mut lod_q: Query<(
+        &GlobalTransform,
+        &ZoneMeshLod,
+        Option<&ZoneSubAreaLink>,
+        &mut Visibility,
+    )>,
 ) {
     let Ok(camera_t) = camera_q.single() else {
         return;
     };
     let eye = camera_t.translation();
 
-    for (chunk_t, lod, mut vis) in lod_q.iter_mut() {
-        let want = if lod.is_drawn_at(chunk_t.translation().distance_squared(eye)) {
+    for (chunk_t, lod, link, mut vis) in lod_q.iter_mut() {
+        let suppressed = link.is_some_and(|l| mzb::is_suppressed_placeholder(l.0, active.active()));
+        let want = if !suppressed && lod.is_drawn_at(chunk_t.translation().distance_squared(eye)) {
             Visibility::Inherited
         } else {
             Visibility::Hidden
@@ -2674,7 +3063,7 @@ mod placement_transform_tests {
 }
 
 #[cfg(test)]
-mod ground_tests {
+pub(crate) mod ground_tests {
     use super::*;
 
     fn floor_at(h: f32) -> ([Vec3; 4], [u32; 6]) {
@@ -2692,7 +3081,7 @@ mod ground_tests {
     /// `facings` is the authored normal per slab; `Vec3::Y` is a floor,
     /// `Vec3::NEG_Y` a ceiling. MZB winding does not imply facing, so these are
     /// independent of the vertex order in [`floor_at`].
-    fn slabs(slabs: &[(f32, Vec3)]) -> MzbCollisionGeometry {
+    pub(crate) fn slab_block(slabs: &[(f32, Vec3)]) -> MzbCollisionBlock {
         let mut positions = Vec::new();
         let mut indices = Vec::new();
         let mut tri_normals = Vec::new();
@@ -2703,7 +3092,7 @@ mod ground_tests {
             indices.extend(idx.iter().map(|i| base + i));
             tri_normals.extend([*facing; 2]);
         }
-        MzbCollisionGeometry {
+        MzbCollisionBlock {
             positions,
             indices,
             tri_normals,
@@ -2712,6 +3101,21 @@ mod ground_tests {
             cell_index: std::collections::HashMap::new(),
             source_file_id: None,
         }
+    }
+
+    fn slabs(slabs: &[(f32, Vec3)]) -> MzbCollisionGeometry {
+        MzbCollisionGeometry::from_block(slab_block(slabs))
+    }
+
+    /// One up-facing slab whose footprint is centred on `centre_xz`, so two
+    /// blocks can floor columns that do not overlap.
+    pub(crate) fn slab_block_at(centre_xz: Vec2, y: f32) -> MzbCollisionBlock {
+        let mut block = slab_block(&[(y, Vec3::Y)]);
+        for p in &mut block.positions {
+            p.x += centre_xz.x;
+            p.z += centre_xz.y;
+        }
+        block
     }
 
     fn two_floors(low: f32, high: f32) -> MzbCollisionGeometry {
@@ -2884,6 +3288,116 @@ mod ground_tests {
             "a pathing entity sent a flat reference Y far below ground still snaps up"
         );
     }
+
+    /// The measured shape of the problem: over the shipped town zones 15-271
+    /// one-yalm columns per interior are floored by the parent block and not by
+    /// the interior, and those columns are the doorway approach. Replacing the
+    /// block instead of folding the two would drop the player through it.
+    const DOORWAY_COLUMN: Vec2 = Vec2::new(0.0, 0.0);
+    const INTERIOR_COLUMN: Vec2 = Vec2::new(40.0, 0.0);
+    const PARENT_FLOOR_Y: f32 = 1.0;
+    const INTERIOR_FLOOR_Y: f32 = 3.0;
+
+    fn town_and_interior() -> MzbCollisionGeometry {
+        let mut geom =
+            MzbCollisionGeometry::from_block(slab_block_at(DOORWAY_COLUMN, PARENT_FLOOR_Y));
+        geom.set_block(
+            ZONE_SLOT_SUB_AREA,
+            slab_block_at(INTERIOR_COLUMN, INTERIOR_FLOOR_Y),
+        );
+        geom
+    }
+
+    #[test]
+    fn both_blocks_floor_their_own_columns_through_one_query() {
+        let geom = town_and_interior();
+        assert_eq!(
+            geom.ground_step(DOORWAY_COLUMN, PARENT_FLOOR_Y, MAX_GROUND_STEP_UP),
+            Some(PARENT_FLOOR_Y),
+            "the doorway approach is floored by the parent block alone"
+        );
+        assert_eq!(
+            geom.ground_step(INTERIOR_COLUMN, INTERIOR_FLOOR_Y, MAX_GROUND_STEP_UP),
+            Some(INTERIOR_FLOOR_Y),
+            "the interior is floored by the sub-area block alone"
+        );
+    }
+
+    #[test]
+    fn an_ambiguous_column_stands_on_the_interior_floor() {
+        let mut geom = MzbCollisionGeometry::from_block(slab_block_at(
+            INTERIOR_COLUMN,
+            INTERIOR_FLOOR_Y - MAX_GROUND_STEP_UP / 2.0,
+        ));
+        geom.set_block(
+            ZONE_SLOT_SUB_AREA,
+            slab_block_at(INTERIOR_COLUMN, INTERIOR_FLOOR_Y),
+        );
+        assert_eq!(
+            geom.ground_step(INTERIOR_COLUMN, INTERIOR_FLOOR_Y, MAX_GROUND_STEP_UP),
+            Some(INTERIOR_FLOOR_Y),
+            "where both blocks floor the column the player stands in the interior"
+        );
+    }
+
+    #[test]
+    fn outside_the_step_window_the_nearest_floor_still_wins() {
+        let far_below = INTERIOR_FLOOR_Y - 10.0 * MAX_GROUND_STEP_UP;
+        let mut geom =
+            MzbCollisionGeometry::from_block(slab_block_at(INTERIOR_COLUMN, INTERIOR_FLOOR_Y));
+        geom.set_block(
+            ZONE_SLOT_SUB_AREA,
+            slab_block_at(INTERIOR_COLUMN, far_below),
+        );
+        assert_eq!(
+            geom.ground_step(INTERIOR_COLUMN, INTERIOR_FLOOR_Y, MAX_GROUND_STEP_UP),
+            Some(INTERIOR_FLOOR_Y),
+            "the slot preference is confined to the step-up window"
+        );
+    }
+
+    #[test]
+    fn terrain_and_water_read_the_block_that_owns_the_nearest_floor() {
+        let mut geom = town_and_interior();
+        const DEEP_WATER_NIBBLE: u8 = 9;
+        assert_eq!(
+            mzb::TerrainType::from_nibble(DEEP_WATER_NIBBLE),
+            Some(mzb::TerrainType::DeepWater)
+        );
+        geom.slots[ZONE_SLOT_SUB_AREA as usize].tri_terrain =
+            vec![DEEP_WATER_NIBBLE; geom.block(ZONE_SLOT_SUB_AREA).tri_count()];
+
+        assert_eq!(
+            geom.terrain_nearest(INTERIOR_COLUMN, INTERIOR_FLOOR_Y),
+            Some(mzb::TerrainType::DeepWater),
+            "the nibble comes from the block whose floor the query picked"
+        );
+        assert!(
+            geom.water_below(INTERIOR_COLUMN, INTERIOR_FLOOR_Y, MAX_GROUND_STEP_UP),
+            "water in either block answers the one global probe"
+        );
+        assert!(
+            !geom.water_below(DOORWAY_COLUMN, PARENT_FLOOR_Y, MAX_GROUND_STEP_UP),
+            "the parent block's untagged floor is not water"
+        );
+    }
+
+    #[test]
+    fn camera_triangles_and_tri_count_span_every_loaded_block() {
+        let geom = town_and_interior();
+        assert_eq!(geom.tri_count(), 4);
+        assert_eq!(geom.camera_triangles().len(), 4);
+    }
+
+    /// Only the main block answers "which zone is loaded": an interior is a
+    /// block within the zone, and letting it answer would make the auto-loader
+    /// think the player had zoned.
+    #[test]
+    fn the_interior_block_does_not_claim_to_be_the_zone() {
+        let mut geom = town_and_interior();
+        geom.slots[ZONE_SLOT_SUB_AREA as usize].source_file_id = Some(554);
+        assert_eq!(geom.source_file_id(), None);
+    }
 }
 
 #[cfg(test)]
@@ -2985,10 +3499,9 @@ mod area_map_tests {
     }
 
     fn map(boxes: Vec<ZoneAreaBox>) -> ZoneAreaMap {
-        ZoneAreaMap {
-            boxes,
-            source_file_id: None,
-        }
+        let mut m = ZoneAreaMap::default();
+        m.set_block(ZONE_SLOT_MAIN, boxes, None);
+        m
     }
 
     #[test]
@@ -3078,10 +3591,9 @@ mod area_map_tests {
     }
 
     fn light_map(boxes: Vec<ZoneChunkLightBox>) -> ZoneChunkLightMap {
-        ZoneChunkLightMap {
-            boxes,
-            source_file_id: None,
-        }
+        let mut m = ZoneChunkLightMap::default();
+        m.set_block(ZONE_SLOT_MAIN, boxes, None);
+        m
     }
 
     #[test]
@@ -3149,6 +3661,7 @@ mod water_surface_tests {
             max: Vec3::new(1.0, 0.0, 1.0),
             parent: Entity::PLACEHOLDER,
             auto_loaded: false,
+            slot: ZONE_SLOT_MAIN,
         });
         let Some(bevy::mesh::VertexAttributeValues::Float32x4(colors)) =
             mesh.attribute(Mesh::ATTRIBUTE_COLOR)
@@ -3158,5 +3671,193 @@ mod water_surface_tests {
         assert!(colors
             .iter()
             .all(|c| *c == ffxi_dat::mmb::vertex_color_neutral()));
+    }
+}
+
+/// The two slot-plumbing invariants a doorway crossing depends on and that
+/// nothing else observes directly: the geom cache key and the per-slot
+/// "still loading" gate.
+#[cfg(test)]
+mod zone_block_slot_tests {
+    use super::*;
+
+    /// Konschtat Highlands' zone DAT and one of the interiors a town zone
+    /// declares; only their distinctness matters here.
+    const ZONE_FILE_ID: u32 = 100;
+    const SUB_AREA: u32 = 0x1C6;
+
+    const SHELL_VISIBLE: &str = "built with every shell up";
+    const SHELL_SUPPRESSED: &str = "built with the interior swapped in";
+
+    fn geom(marker: &str) -> LoadedZoneGeom {
+        LoadedZoneGeom {
+            submeshes: Arc::new(Vec::new()),
+            instances: Arc::new(Vec::new()),
+            mmb_spawns: Err(marker.to_string()),
+        }
+    }
+
+    fn request(file_id: u32, slot: u8, active_sub_area: Option<u32>) -> LoadMzbRequest {
+        LoadMzbRequest {
+            file_id,
+            chunk_idx: None,
+            world_pos: Vec3::ZERO,
+            auto_loaded: true,
+            slot,
+            active_sub_area,
+        }
+    }
+
+    fn marker_of(geom: LoadedZoneGeom) -> String {
+        match geom.mmb_spawns {
+            Err(marker) => marker,
+            Ok(_) => panic!("this fixture carries a marker"),
+        }
+    }
+
+    /// `LoadedZoneGeom::mmb_spawns` is already latched to the sub-area that was
+    /// active when it was built, so a file-id-only key hands a shell-visible
+    /// build to a shell-suppressed request and the shop's exterior stays drawn
+    /// over its own interior.
+    #[test]
+    fn the_geom_cache_tells_two_sub_area_states_of_one_file_apart() {
+        let open = request(ZONE_FILE_ID, ZONE_SLOT_MAIN, None);
+        let inside = request(ZONE_FILE_ID, ZONE_SLOT_MAIN, Some(SUB_AREA));
+        assert_ne!(open.cache_key(), inside.cache_key());
+
+        let mut cache = ZoneGeomCache::default();
+        cache.insert(open.cache_key(), geom(SHELL_VISIBLE));
+        assert!(
+            cache.get_and_promote(inside.cache_key()).is_none(),
+            "a build made with every shell up cannot serve a suppressed request"
+        );
+
+        cache.insert(inside.cache_key(), geom(SHELL_SUPPRESSED));
+        assert_eq!(
+            marker_of(
+                cache
+                    .get_and_promote(open.cache_key())
+                    .expect("still cached")
+            ),
+            SHELL_VISIBLE
+        );
+        assert_eq!(
+            marker_of(
+                cache
+                    .get_and_promote(inside.cache_key())
+                    .expect("still cached")
+            ),
+            SHELL_SUPPRESSED
+        );
+    }
+
+    /// The zone-overlay fade and the minimap bake both gate on this. Answering
+    /// it zone-wide re-raises the loading screen and stalls the bake every time
+    /// the player walks into a shop.
+    #[test]
+    fn an_interior_streaming_in_is_not_a_pending_zone_load() {
+        let pool = AsyncComputeTaskPool::get_or_init(bevy::tasks::TaskPool::default);
+        let mut in_flight = LoadMzbInFlight::default();
+        let req = request(
+            sub_area::sub_area_file_id(SUB_AREA),
+            ZONE_SLOT_SUB_AREA,
+            Some(SUB_AREA),
+        );
+        in_flight.tasks.insert(
+            req.cache_key(),
+            (vec![req], pool.spawn(async { geom(SHELL_SUPPRESSED) })),
+        );
+
+        assert!(in_flight.pending_in_slot(ZONE_SLOT_SUB_AREA));
+        assert!(
+            !in_flight.pending_in_slot(ZONE_SLOT_MAIN),
+            "the zone itself is loaded; only the interior is outstanding"
+        );
+    }
+}
+
+/// The DAT seam activation stands on, against the shipped zone files: what
+/// [`build_zone_mmb_spawns`] hands [`crate::sub_area_activation::SubAreaActivation::install_zone`],
+/// and that naming an interior really does gate its shell out of the build.
+#[cfg(test)]
+mod real_dat_sub_area_tests {
+    use super::*;
+    use std::collections::BTreeSet;
+
+    /// Southern San d'Oria, whose shops and guilds are the canonical interiors.
+    const SSANDY_ZONE_DAT: u32 = 330;
+
+    fn build(active_sub_area: Option<u32>) -> Option<ZoneMmbBuild> {
+        if DatRoot::from_env_or_default().is_err() {
+            eprintln!("skipping: no FFXI install");
+            return None;
+        }
+        AsyncComputeTaskPool::get_or_init(Default::default);
+        Some(
+            build_zone_mmb_spawns(SSANDY_ZONE_DAT, None, active_sub_area)
+                .expect("Southern San d'Oria builds"),
+        )
+    }
+
+    #[test]
+    fn real_dat_a_town_zone_hands_the_latch_triggers_shells_and_loadable_ids() {
+        let Some(build) = build(None) else {
+            return;
+        };
+
+        assert!(
+            build
+                .sub_area_triggers
+                .iter()
+                .all(ZoneInteraction::is_sub_area_trigger),
+            "install_zone builds a latch out of these; a plain zone line in the list \
+             would teleport the player into an interior"
+        );
+        let declared: BTreeSet<u32> = build
+            .sub_area_triggers
+            .iter()
+            .filter_map(ZoneInteraction::sub_area_id)
+            .collect();
+        assert!(!declared.is_empty(), "a town zone declares interiors");
+
+        assert!(
+            build.loadable_sub_areas.windows(2).all(|w| w[0] < w[1]),
+            "ascending and deduplicated: SubAreaActivation::is_loadable binary-searches it"
+        );
+        for id in &build.loadable_sub_areas {
+            assert!(
+                declared.contains(id),
+                "sub-area {id:#x} is loadable but no trigger rect can select it"
+            );
+            assert!(
+                build.sub_area_shells.iter().any(|s| s.id == *id),
+                "sub-area {id:#x} has no shell, so the latch could never clear it geometrically"
+            );
+        }
+    }
+
+    #[test]
+    fn real_dat_activating_an_interior_gates_its_shell_out_of_the_build() {
+        let Some(open) = build(None) else {
+            return;
+        };
+        let id = *open
+            .loadable_sub_areas
+            .first()
+            .expect("this install ships at least one Southern San d'Oria interior");
+        let inside = build(Some(id)).expect("the install is present");
+
+        assert!(
+            inside.spawns.len() < open.spawns.len(),
+            "naming {id:#x} must drop its placeholder shell; it is the same build otherwise \
+             ({} spawns either way)",
+            open.spawns.len()
+        );
+        assert_eq!(
+            inside.sub_area_shells.len(),
+            open.sub_area_shells.len(),
+            "the shell bounds are measured ahead of the render gate, so the latch keeps \
+             its clear volume for the interior it is standing in"
+        );
     }
 }

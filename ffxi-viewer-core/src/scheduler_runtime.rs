@@ -1917,6 +1917,7 @@ mod tests {
                 random_group: None,
                 local_dir: ffxi_dat::scheduler::NO_LOCAL_DIR,
                 model_transform: None,
+                screen_color: None,
             },
         }
     }

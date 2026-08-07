@@ -264,7 +264,7 @@ pub fn handle_input_system(
 
     if !matches!(*mode, InputMode::Chat(_)) {
         if bindings.just_pressed(Action::ToggleHud, &keys) {
-            hud_capture.hud_hidden.0 = !hud_capture.hud_hidden.0;
+            hud_capture.hud_hidden.manual = !hud_capture.hud_hidden.manual;
         }
         if bindings.just_pressed(Action::Screenshot, &keys) {
             hud_capture

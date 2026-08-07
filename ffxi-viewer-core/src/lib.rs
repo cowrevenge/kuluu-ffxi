@@ -10,6 +10,7 @@ pub mod celestial_particles;
 pub mod combat_stance;
 pub mod components;
 pub mod cursor;
+pub mod cutscene;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod dat_d3m;
 #[cfg(not(target_arch = "wasm32"))]
@@ -59,6 +60,8 @@ pub mod skinned_ffxi_material;
 pub mod skybox;
 pub mod snapshot;
 pub mod source;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod sub_area_activation;
 pub mod sub_target;
 pub mod sun_moon;
 pub mod target_ring;
@@ -97,6 +100,7 @@ pub use components::{
     EntityModel, HpIndicator, InGameEntity, IsSelf, LookComp, Nameplate, WorldEntity,
 };
 pub use cursor::{system_cursor_icon, CursorPlugin, CursorRequests, CursorStyle};
+pub use cutscene::{CutsceneMode, CutscenePlugin, ScreenFade};
 pub use graphics_settings::{
     AaMode, CharacterRenderPath, DynamicLights, GraphicsField, GraphicsSettings, QualityPreset,
     TextureFiltering, ZoneLineDisplay, GRAPHICS_FIELDS,
@@ -228,6 +232,8 @@ impl<S: SceneSource + Resource + Component<Mutability = bevy::ecs::component::Mu
 
         #[cfg(not(target_arch = "wasm32"))]
         app.add_plugins(zone_clouds::ZoneCloudsPlugin);
+
+        app.add_plugins(cutscene::CutscenePlugin);
 
         app.add_plugins(debug_chat::DebugChatPlugin);
         app.init_resource::<SceneState>()

@@ -1,5 +1,9 @@
 use ffxi_dat::event_dat::EventBlock;
 
+use crate::cue::{
+    dat_id_helper, ActorLookup, EventCue, FourCc, MUSIC_VOLUME_MAX, SCHEDULER_DAT_ID_BASE,
+    STATUS_EVENT_CHOCOBO, STATUS_EVENT_IDLE, STATUS_EVENT_MOUNT,
+};
 use crate::opcode_meta::OPCODE_META;
 
 /// A message the VM asked to display: dialog string `message_id` from the zone
@@ -76,6 +80,11 @@ const OP_REQSET_PRIORITY: u8 = 0x29;
 const OP_REQWAIT: u8 = 0x2A;
 const OP_LOADEXTSCHEDULER: u8 = 0x5B;
 const OP_LOADEXTSCHEDULER2: u8 = 0x66;
+const OP_SCHEDULOR: u8 = 0x2C;
+const OP_LOADEVENTSCHEDULER2: u8 = 0x45;
+const OP_DEFCAMERA: u8 = 0x46;
+const OP_EVENTHIDE: u8 = 0x4E;
+const OP_MUSICVOLUME: u8 = 0x5D;
 const OP_WAITSCHEDULOR: u8 = 0x53;
 const OP_WAITMAPSCHEDULOR: u8 = 0x54;
 const OP_WAITLOADSCHEDULER: u8 = 0x55;
@@ -102,14 +111,37 @@ const ACTOR_PAIR_SPEAKER_OFS: usize = 2;
 // renderer models lip-sync (research/XiEvents/OpCodes/0x00B0.md).
 const ACTOR_PAIR_MESSAGE_ID_OFS: usize = 10;
 
-/// `XiEvent::GetActorIndex` reserved lookup values (research/XiEvents/Event VM
-/// Functions.md): 0x7FFFFFC0 local player, …C1–…D1 party/alliance slots,
-/// …F8 the event entity, …F9/…F0 the local player again.
-const ACTOR_LOOKUP_RESERVED: std::ops::RangeInclusive<u32> = 0x7FFF_FFC0..=0x7FFF_FFF9;
-/// A lookup with any high byte set is a literal entity server id, whose low
-/// bits are the target index — `val & 0x3FF` (same doc, default handler).
-const ACTOR_LOOKUP_SERVER_ID_MASK: u32 = 0xFF00_0000;
-const ACTOR_LOOKUP_TARGET_INDEX_MASK: u32 = 0x3FF;
+// Choreography operand offsets from the opcode byte, per
+// research/XiEvents/OpCodes/*.md.
+const SCHEDULOR_ACTOR1_OFS: usize = 1; // 0x002C
+const SCHEDULOR_ACTOR2_OFS: usize = 5;
+const SCHEDULOR_KEY_OFS: usize = 9;
+const LOADEVENTSCHEDULER2_FILE_OFS: usize = 1; // 0x0045
+const LOADEVENTSCHEDULER2_ACTOR1_OFS: usize = 3;
+const LOADEVENTSCHEDULER2_ACTOR2_OFS: usize = 7;
+const LOADEVENTSCHEDULER2_TAG_OFS: usize = 11;
+const LOADEVENTSCHEDULER2_DURATION_OFS: usize = 15;
+const DEFCAMERA_CASE_OFS: usize = 1; // 0x0046
+const DEFCAMERA_CASE_UNLOCK: u8 = 0;
+const DEFCAMERA_CASE_LOCK: u8 = 1;
+const EVENTHIDE_FLAG_OFS: usize = 1; // 0x004E
+const EVENTHIDE_FLAG_MASK: u8 = 1;
+const EVENTHIDE_TARGET_OFS: usize = 2;
+const MUSICVOLUME_LEVEL_OFS: usize = 1; // 0x005D
+const MUSICVOLUME_FADE_OFS: usize = 3;
+const CHOCOBO_CASE_OFS: usize = 1; // 0x007E
+const CHOCOBO_TARGET_OFS: usize = 2;
+const CHOCOBO_MOUNT_ID_OFS: usize = 6;
+/// 0x7E cases that write a `StatusEvent`, by the value they write
+/// (research/XiEvents/OpCodes/0x007E.md). Case 2 is deliberately absent — see
+/// its arm in [`EventVm::step`] — as is case 4, which writes nothing.
+const CHOCOBO_CASES_IDLE: [u8; 2] = [0, 5];
+const CHOCOBO_CASES_CHOCOBO: [u8; 3] = [1, 3, 6];
+const CHOCOBO_CASE_MOUNT: u8 = 7;
+const CHOCOBO_CASE_UNMOUNT: u8 = 8;
+/// `entity->MountId = getworkofs(6) + 1` — the id is stored biased by one.
+const CHOCOBO_MOUNT_ID_BIAS: u16 = 1;
+const CHOCOBO_UNMOUNT_ID: u16 = 0;
 
 const WORK_LOCAL_LEN: usize = 80;
 const WORK_ZONE_LEN: usize = 96;
@@ -145,6 +177,9 @@ pub struct EventVm {
     pending_message: Option<EventMessage>,
     pending_choice: Option<EventChoice>,
     selection_made: bool,
+    /// Choreography cues emitted since the host last drained them — see
+    /// [`Self::take_cues`].
+    cues: Vec<EventCue>,
     finished: bool,
     /// Diagnostics: execution ran off the end of the bytecode without an
     /// END/EXECEND opcode. Retail treats this the same as END (the missing-
@@ -183,6 +218,7 @@ impl EventVm {
             pending_message: None,
             pending_choice: None,
             selection_made: false,
+            cues: Vec::new(),
             finished: false,
             ran_past_end: false,
             oob_reads: std::cell::Cell::new(0),
@@ -212,6 +248,14 @@ impl EventVm {
 
     pub fn exec_pointer(&self) -> usize {
         self.exec_pointer
+    }
+
+    /// Drain the [`EventCue`]s the staging opcodes emitted, in execution order.
+    /// They accumulate across [`step`](Self::step) calls (one step can emit
+    /// several), so the host drains after each step rather than reading a
+    /// per-step return value.
+    pub fn take_cues(&mut self) -> Vec<EventCue> {
+        std::mem::take(&mut self.cues)
     }
 
     /// True if the program counter ran off the end of the bytecode without an
@@ -430,12 +474,59 @@ impl EventVm {
                 OP_WAITSCHEDULOR | OP_WAITMAPSCHEDULOR | OP_WAITLOADSCHEDULER => {
                     self.exec_pointer += OPCODE_META[op as usize].size as usize;
                 }
+                OP_SCHEDULOR => {
+                    self.cues.push(EventCue::ActorMotion {
+                        actor1: ActorLookup(self.eventgetcode2(SCHEDULOR_ACTOR1_OFS)),
+                        actor2: ActorLookup(self.eventgetcode2(SCHEDULOR_ACTOR2_OFS)),
+                        key: self.fourcc_at(SCHEDULOR_KEY_OFS),
+                    });
+                    self.advance(op);
+                }
+                OP_LOADEVENTSCHEDULER2 => {
+                    let file = dat_id_helper(self.getworkofs(LOADEVENTSCHEDULER2_FILE_OFS, 0));
+                    self.cues.push(EventCue::Scheduler {
+                        dat_id: SCHEDULER_DAT_ID_BASE.wrapping_add(file as u32),
+                        actor1: ActorLookup(self.eventgetcode2(LOADEVENTSCHEDULER2_ACTOR1_OFS)),
+                        actor2: ActorLookup(self.eventgetcode2(LOADEVENTSCHEDULER2_ACTOR2_OFS)),
+                        tag: self.fourcc_at(LOADEVENTSCHEDULER2_TAG_OFS),
+                        duration: self.getworkofs(LOADEVENTSCHEDULER2_DURATION_OFS, 0) as u16,
+                    });
+                    self.advance(op);
+                }
+                // Case 2 queries the camera state into a work slot rather than
+                // changing it, and every other case is retail's no-op
+                // fall-through (research/XiEvents/OpCodes/0x0046.md).
+                OP_DEFCAMERA => {
+                    match self.byte_at(DEFCAMERA_CASE_OFS) {
+                        DEFCAMERA_CASE_LOCK => self.cues.push(EventCue::CameraLock { lock: true }),
+                        DEFCAMERA_CASE_UNLOCK => {
+                            self.cues.push(EventCue::CameraLock { lock: false })
+                        }
+                        _ => {}
+                    }
+                    self.advance(op);
+                }
+                OP_EVENTHIDE => {
+                    self.cues.push(EventCue::ActorHide {
+                        target: ActorLookup(self.eventgetcode2(EVENTHIDE_TARGET_OFS)),
+                        hide: self.byte_at(EVENTHIDE_FLAG_OFS) & EVENTHIDE_FLAG_MASK != 0,
+                    });
+                    self.advance(op);
+                }
+                OP_MUSICVOLUME => {
+                    self.cues.push(EventCue::MusicVolume {
+                        volume: self
+                            .getworkofs(MUSICVOLUME_LEVEL_OFS, 0)
+                            .clamp(0, MUSIC_VOLUME_MAX as i32)
+                            as u8,
+                        fade_frames: self.getworkofs(MUSICVOLUME_FADE_OFS, 0) as u16,
+                    });
+                    self.advance(op);
+                }
                 // XiEvent CHOCOBO (research/XiEvents/OpCodes/0x007E.md): puts an
-                // actor on or off a mount mid-cutscene. The mount the player
-                // ends up on is the server's to confirm — it arrives as 0x037,
-                // which the session already handles — so all this VM owes the
-                // scene is the right width, which is its case byte's. Refusing
-                // it auto-released the rental cutscene one opcode past 0x53.
+                // actor on or off a mount mid-cutscene. Its width is its case
+                // byte's; refusing it auto-released the rental cutscene one
+                // opcode past 0x53.
                 OP_CHOCOBO => {
                     let Some(width) = self
                         .event_data
@@ -444,6 +535,7 @@ impl EventVm {
                     else {
                         return StepResult::Unimplemented(op);
                     };
+                    self.emit_mount_cue();
                     self.exec_pointer += width as usize;
                 }
                 _ => {
@@ -491,10 +583,44 @@ impl EventVm {
     /// whole line when a lookup fails, which is the failure mode this VM exists
     /// to avoid.
     fn actor_index(&self, lookup: u32) -> u16 {
-        if !ACTOR_LOOKUP_RESERVED.contains(&lookup) && lookup & ACTOR_LOOKUP_SERVER_ID_MASK != 0 {
-            return (lookup & ACTOR_LOOKUP_TARGET_INDEX_MASK) as u16;
-        }
-        self.speaker_index
+        ActorLookup(lookup)
+            .target_index()
+            .unwrap_or(self.speaker_index)
+    }
+
+    /// The four ASCII operand bytes at `ExecPointer + index`, in file order —
+    /// the scheduler/action keys are tags, not numbers.
+    fn fourcc_at(&self, index: usize) -> FourCc {
+        self.eventgetcode2(index).to_le_bytes()
+    }
+
+    /// The `StatusEvent` write 0x7E's case performs, as a cue
+    /// (research/XiEvents/OpCodes/0x007E.md). Case 2 writes nothing: it
+    /// re-executes every frame until the target's mount attachment reports
+    /// ready, a signal no host of ours has, so it advances instead of spinning.
+    fn emit_mount_cue(&mut self) {
+        let case = self.byte_at(CHOCOBO_CASE_OFS);
+        let target = ActorLookup(self.eventgetcode2(CHOCOBO_TARGET_OFS));
+        let (status_event, mount_id) = if CHOCOBO_CASES_IDLE.contains(&case) {
+            (STATUS_EVENT_IDLE, None)
+        } else if CHOCOBO_CASES_CHOCOBO.contains(&case) {
+            (STATUS_EVENT_CHOCOBO, None)
+        } else if case == CHOCOBO_CASE_MOUNT {
+            let id = self.getworkofs(CHOCOBO_MOUNT_ID_OFS, 0) as u16;
+            (
+                STATUS_EVENT_MOUNT,
+                Some(id.wrapping_add(CHOCOBO_MOUNT_ID_BIAS)),
+            )
+        } else if case == CHOCOBO_CASE_UNMOUNT {
+            (STATUS_EVENT_IDLE, Some(CHOCOBO_UNMOUNT_ID))
+        } else {
+            return;
+        };
+        self.cues.push(EventCue::Mount {
+            target,
+            status_event,
+            mount_id,
+        });
     }
 
     fn byte_at(&self, index: usize) -> u8 {
@@ -1168,6 +1294,206 @@ mod tests {
         let mut e = vm(message_program(OP_MESSAGE_ACTOR_PAIR, &operands), vec![]);
         assert_eq!(e.step(), StepResult::Unimplemented(OP_MESSAGE_ACTOR_PAIR));
         assert_eq!(e.exec_pointer(), 0);
+    }
+
+    use crate::cue::{
+        FourCc, SCHEDULER_DURATION_FROM_DAT, SCHEDULER_FADE_DAT_ID, SCHEDULER_TAG_FADE_IN,
+        SCHEDULER_TAG_FADE_OUT,
+    };
+
+    /// Run one choreography opcode (padded to its documented width) to END and
+    /// return the cues it emitted.
+    fn cues_of(op: u8, operands: &[u8], references: Vec<u32>) -> Vec<EventCue> {
+        let mut data = vec![op];
+        data.extend_from_slice(operands);
+        let width = crate::opcode_meta::sub_size(op, data.get(1).copied().unwrap_or(0))
+            .unwrap_or(OPCODE_META[op as usize].size) as usize;
+        assert_eq!(
+            data.len(),
+            width,
+            "op 0x{op:02X} operands must fill its width"
+        );
+        data.push(OP_END);
+        let mut e = vm(data, references);
+        assert_eq!(e.step(), StepResult::Done, "op 0x{op:02X} must run to END");
+        assert_eq!(e.exec_pointer(), width, "op 0x{op:02X} advanced wrong size");
+        e.take_cues()
+    }
+
+    /// Operand bytes for the 0x45 fade sites the whole retail corpus authors:
+    /// work operand -> References[0], both actors the event entity, the fade
+    /// tag raw, duration -> References[1].
+    fn fade_operands(tag: FourCc) -> Vec<u8> {
+        let mut o = REF0.to_vec();
+        o.extend_from_slice(&LOOKUP_EVENT_ENTITY.to_le_bytes());
+        o.extend_from_slice(&LOOKUP_EVENT_ENTITY.to_le_bytes());
+        o.extend_from_slice(&tag);
+        o.extend_from_slice(&[0x01, 0x80]);
+        o
+    }
+
+    /// Guard for the emitter/matcher contract: 0x45's tag operand is four raw
+    /// ASCII bytes in file order, and the fade pair the host matches on is
+    /// exactly what the VM emits from that bytecode.
+    #[test]
+    fn fade_scheduler_opcode_emits_the_exported_tags_and_dat_id() {
+        /// References[0]: the work operand every authored fade site passes.
+        const FADE_WORK_OPERAND: u32 = 200;
+        for tag in [SCHEDULER_TAG_FADE_OUT, SCHEDULER_TAG_FADE_IN] {
+            assert_eq!(
+                cues_of(
+                    OP_LOADEVENTSCHEDULER2,
+                    &fade_operands(tag),
+                    vec![FADE_WORK_OPERAND, SCHEDULER_DURATION_FROM_DAT as u32],
+                ),
+                [EventCue::Scheduler {
+                    dat_id: SCHEDULER_FADE_DAT_ID,
+                    actor1: ActorLookup::EVENT_ENTITY,
+                    actor2: ActorLookup::EVENT_ENTITY,
+                    tag,
+                    duration: SCHEDULER_DURATION_FROM_DAT,
+                }]
+            );
+        }
+    }
+
+    /// 0x2C's third operand is an ASCII action key, not a numeric id.
+    #[test]
+    fn actor_motion_opcode_emits_its_ascii_action_key() {
+        const KNEEL: FourCc = *b"kue0";
+        let mut operands = NPC_SERVER_ID.to_le_bytes().to_vec();
+        operands.extend_from_slice(&LOOKUP_EVENT_ENTITY.to_le_bytes());
+        operands.extend_from_slice(&KNEEL);
+        assert_eq!(
+            cues_of(OP_SCHEDULOR, &operands, vec![]),
+            [EventCue::ActorMotion {
+                actor1: ActorLookup(NPC_SERVER_ID),
+                actor2: ActorLookup::EVENT_ENTITY,
+                key: KNEEL,
+            }]
+        );
+    }
+
+    /// 0x4E's hide flag is bit 0 of the byte after the opcode; the target is the
+    /// lookup at +2 and the cue is event-scoped either way.
+    #[test]
+    fn event_hide_opcode_emits_both_directions() {
+        for (flag, hide) in [(1u8, true), (0, false)] {
+            let mut operands = vec![flag];
+            operands.extend_from_slice(&NPC_SERVER_ID.to_le_bytes());
+            assert_eq!(
+                cues_of(OP_EVENTHIDE, &operands, vec![]),
+                [EventCue::ActorHide {
+                    target: ActorLookup(NPC_SERVER_ID),
+                    hide,
+                }]
+            );
+        }
+    }
+
+    /// 0x46 case 1 takes the camera, case 0 gives it back; case 2 only queries
+    /// the current state, so it stages nothing.
+    #[test]
+    fn camera_opcode_emits_only_its_lock_and_unlock_cases() {
+        assert_eq!(
+            cues_of(OP_DEFCAMERA, &[DEFCAMERA_CASE_LOCK], vec![]),
+            [EventCue::CameraLock { lock: true }]
+        );
+        assert_eq!(
+            cues_of(OP_DEFCAMERA, &[DEFCAMERA_CASE_UNLOCK], vec![]),
+            [EventCue::CameraLock { lock: false }]
+        );
+        assert!(cues_of(OP_DEFCAMERA, &[2, 0x0A, 0x00], vec![]).is_empty());
+    }
+
+    /// 0x5D's first operand is a volume *table index*, its second a frame count.
+    #[test]
+    fn music_volume_opcode_emits_table_index_and_frame_count() {
+        const DUCKED: u32 = 32;
+        const FADE_FRAMES: u32 = 120;
+        let operands = [0x00, 0x80, 0x01, 0x80];
+        assert_eq!(
+            cues_of(OP_MUSICVOLUME, &operands, vec![DUCKED, FADE_FRAMES]),
+            [EventCue::MusicVolume {
+                volume: DUCKED as u8,
+                fade_frames: FADE_FRAMES as u16,
+            }]
+        );
+        // The table tops out at MUSIC_VOLUME_MAX, so an out-of-range work value
+        // saturates rather than wrapping into a quiet volume.
+        assert_eq!(
+            cues_of(OP_MUSICVOLUME, &operands, vec![9999, 0]),
+            [EventCue::MusicVolume {
+                volume: MUSIC_VOLUME_MAX,
+                fade_frames: 0,
+            }]
+        );
+    }
+
+    /// 0x7E's mount cases, and the one that must not stage anything: case 2
+    /// re-runs in retail until a mount attachment reports ready, a signal this
+    /// VM has no source for, so it advances silently instead of spinning.
+    #[test]
+    fn mount_opcode_emits_per_case_status_events() {
+        let player = ActorLookup::LOCAL_PLAYER.0.to_le_bytes();
+        let case = |sub: u8| {
+            let mut o = vec![sub];
+            o.extend_from_slice(&player);
+            o
+        };
+        let mount = |status_event, mount_id| {
+            [EventCue::Mount {
+                target: ActorLookup::LOCAL_PLAYER,
+                status_event,
+                mount_id,
+            }]
+        };
+        assert_eq!(
+            cues_of(OP_CHOCOBO, &case(1), vec![]),
+            mount(STATUS_EVENT_CHOCOBO, None)
+        );
+        for sub in CHOCOBO_CASES_IDLE {
+            assert_eq!(
+                cues_of(OP_CHOCOBO, &case(sub), vec![]),
+                mount(STATUS_EVENT_IDLE, None),
+                "0x7E case {sub}"
+            );
+        }
+        assert!(cues_of(OP_CHOCOBO, &case(2), vec![]).is_empty());
+
+        // Case 7's mount id is its work operand biased by one.
+        const MOUNT_WORK: u32 = 3;
+        let mut seven = case(CHOCOBO_CASE_MOUNT);
+        seven.extend_from_slice(&REF0);
+        assert_eq!(
+            cues_of(OP_CHOCOBO, &seven, vec![MOUNT_WORK]),
+            mount(STATUS_EVENT_MOUNT, Some(MOUNT_WORK as u16 + 1))
+        );
+        assert_eq!(
+            cues_of(OP_CHOCOBO, &case(CHOCOBO_CASE_UNMOUNT), vec![]),
+            mount(STATUS_EVENT_IDLE, Some(CHOCOBO_UNMOUNT_ID))
+        );
+    }
+
+    /// Cues accumulate across a step in execution order and drain exactly once.
+    #[test]
+    fn take_cues_drains_in_execution_order() {
+        let mut data = vec![OP_DEFCAMERA, DEFCAMERA_CASE_LOCK, OP_EVENTHIDE, 1];
+        data.extend_from_slice(&NPC_SERVER_ID.to_le_bytes());
+        data.push(OP_END);
+        let mut e = vm(data, vec![]);
+        assert_eq!(e.step(), StepResult::Done);
+        assert_eq!(
+            e.take_cues(),
+            [
+                EventCue::CameraLock { lock: true },
+                EventCue::ActorHide {
+                    target: ActorLookup(NPC_SERVER_ID),
+                    hide: true,
+                },
+            ]
+        );
+        assert!(e.take_cues().is_empty(), "a drained cue is not replayed");
     }
 
     /// Trigger-packet parameters ride along on every message opcode.

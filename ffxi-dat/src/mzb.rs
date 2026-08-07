@@ -374,9 +374,13 @@ pub struct MzbMesh {
 const COLL_MESH_COUNT: usize = 0x00;
 const COLL_MESH_DATA_OFFSET: usize = 0x04;
 const COLL_GRID_DATA_OFFSET: usize = 0x10;
-/// Everything this parser reads from `CollisionDataHeader`, i.e. through
-/// `GridDataOffset`.
-const COLL_HEADER_READ_LEN: usize = COLL_GRID_DATA_OFFSET + 4;
+/// `CollisionDataHeader::SomeOffset` / `SomeCount` — the base and length of the
+/// flat [`CollisionObjectData`](COLL_OBJECT_RECORD_LEN) array the grid cells point
+/// into.
+const COLL_OBJECT_ARRAY_OFFSET: usize = 0x14;
+const COLL_OBJECT_ARRAY_COUNT: usize = 0x18;
+/// Everything this parser reads from `CollisionDataHeader`, i.e. the whole struct.
+const COLL_HEADER_READ_LEN: usize = COLL_OBJECT_ARRAY_COUNT + 4;
 
 /// ZoneBlockFormat.h:166-176 — `CollisionMeshHeader`, one per collision mesh.
 const MESH_VERTEX_ARRAY: usize = 0x00;
@@ -400,6 +404,12 @@ const COLL_OBJECT_NORMAL_MATRIX_LEN: usize = 3 * 3 * 4;
 /// `CollisionObjectData::flags`, past all three matrices. Only present above
 /// [`LEGACY_COLLISION_OBJECT_MAX_VERSION`].
 const COLL_OBJECT_FLAGS: usize = 2 * COLL_OBJECT_MATRIX_LEN + COLL_OBJECT_NORMAL_MATRIX_LEN;
+/// `CollisionObjectData::something2`, six dwords past `flags`: the sub-area whose
+/// interior replaces this object. `CollisionManager::KO_CharaCollision` and three
+/// sibling walkers skip the object while that sub-area is the active one.
+const COLL_OBJECT_SUB_AREA_LINK: usize = COLL_OBJECT_FLAGS + 0x18;
+/// `something2` closes the record.
+const COLL_OBJECT_RECORD_LEN: usize = COLL_OBJECT_SUB_AREA_LINK + 4;
 
 /// Resolve the collision-data header, or `None` when the zone ships no collision
 /// section (ZoneRenderer.cpp:574 guards the whole path on a non-zero offset).
@@ -613,10 +623,73 @@ pub struct MzbPlacement {
     pub grid_y: u16,
 
     pub water_height: Option<f32>,
+
+    /// `CollisionObjectData::something2`: the sub-area whose interior stands in
+    /// for this object, `0` for ordinary zone collision. Feed it to
+    /// [`MzbPlacement::collides_in`].
+    pub sub_area_link: u32,
+
+    /// Slot in the zone's collision-object array, which is index-parallel to
+    /// [`parse_mmb_placements`]'s table. `None` on the legacy short record, whose
+    /// stride this parser does not know.
+    ///
+    /// [`parse_placements`] emits one entry per (object, mesh) pair, so several
+    /// entries share an index; dedupe on it before treating entries as objects.
+    pub object_index: Option<u32>,
+}
+
+impl MzbPlacement {
+    /// Whether this collision object is solid while `active_sub_area` is swapped
+    /// in — the collision-side twin of [`MmbRenderType::classify`], sharing its
+    /// predicate so the shell can never be drawn and solid at once.
+    pub fn collides_in(&self, active_sub_area: Option<u32>) -> bool {
+        !is_suppressed_placeholder(self.sub_area_link, active_sub_area)
+    }
 }
 
 pub fn parse_mesh_at(body: &[u8], offset: usize) -> Result<MzbMesh> {
     parse_one_mesh(body, offset)
+}
+
+fn dword(body: &[u8], off: usize) -> u32 {
+    u32::from_le_bytes([body[off], body[off + 1], body[off + 2], body[off + 3]])
+}
+
+/// Every collision object's [`MzbPlacement::sub_area_link`], in
+/// `CollisionDataHeader::SomeOffset` order — the array [`MzbPlacement::object_index`]
+/// indexes, itself index-parallel to [`parse_mmb_placements`]. Empty on the legacy
+/// short record, which carries no link.
+///
+/// This is the whole table; the grid walk [`parse_placements`] does reaches only the
+/// objects some cell references, and in zone 289 that is six sub-areas short.
+pub fn collision_object_sub_area_links(body: &[u8], header: &MzbHeader) -> Result<Vec<u32>> {
+    let Some(mt) = collision_header(body, header)? else {
+        return Ok(Vec::new());
+    };
+    if !header.has_collision_object_tail() {
+        return Ok(Vec::new());
+    }
+    let base = dword(body, mt + COLL_OBJECT_ARRAY_OFFSET) as usize;
+    let count = dword(body, mt + COLL_OBJECT_ARRAY_COUNT) as usize;
+    if count == 0 {
+        return Ok(Vec::new());
+    }
+    let end = base.saturating_add(count.saturating_mul(COLL_OBJECT_RECORD_LEN));
+    if base == 0 || end > body.len() {
+        return Err(MzbError::CollisionDataOutOfRange {
+            offset: base,
+            len: body.len(),
+        }
+        .into());
+    }
+    Ok((0..count)
+        .map(|i| {
+            dword(
+                body,
+                base + i * COLL_OBJECT_RECORD_LEN + COLL_OBJECT_SUB_AREA_LINK,
+            )
+        })
+        .collect())
 }
 
 pub fn parse_placements(body: &[u8], header: &MzbHeader) -> Result<Vec<MzbPlacement>> {
@@ -632,6 +705,18 @@ pub fn parse_placements(body: &[u8], header: &MzbHeader) -> Result<Vec<MzbPlacem
     if grid_offset == 0 || grid_offset >= body.len() {
         return Ok(Vec::new());
     }
+    let object_array_offset = u32::from_le_bytes([
+        body[mt + COLL_OBJECT_ARRAY_OFFSET],
+        body[mt + COLL_OBJECT_ARRAY_OFFSET + 1],
+        body[mt + COLL_OBJECT_ARRAY_OFFSET + 2],
+        body[mt + COLL_OBJECT_ARRAY_OFFSET + 3],
+    ]) as usize;
+    let object_array_count = u32::from_le_bytes([
+        body[mt + COLL_OBJECT_ARRAY_COUNT],
+        body[mt + COLL_OBJECT_ARRAY_COUNT + 1],
+        body[mt + COLL_OBJECT_ARRAY_COUNT + 2],
+        body[mt + COLL_OBJECT_ARRAY_COUNT + 3],
+    ]) as usize;
 
     let gw = header.grid_cells_x();
     let gh = header.grid_cells_z();
@@ -705,6 +790,24 @@ pub fn parse_placements(body: &[u8], header: &MzbHeader) -> Result<Vec<MzbPlacem
                     body[geo_off + MESH_FLAGS + 1],
                 ]);
 
+                let has_tail = header.has_collision_object_tail()
+                    && mat_off + COLL_OBJECT_RECORD_LEN <= body.len();
+
+                let sub_area_link = if has_tail {
+                    let o = mat_off + COLL_OBJECT_SUB_AREA_LINK;
+                    u32::from_le_bytes([body[o], body[o + 1], body[o + 2], body[o + 3]])
+                } else {
+                    0
+                };
+
+                let object_index = has_tail
+                    .then(|| mat_off.checked_sub(object_array_offset))
+                    .flatten()
+                    .filter(|d| d % COLL_OBJECT_RECORD_LEN == 0)
+                    .map(|d| d / COLL_OBJECT_RECORD_LEN)
+                    .filter(|i| *i < object_array_count)
+                    .map(|i| i as u32);
+
                 let water_off = mat_off + COLL_OBJECT_FLAGS;
                 let water_height =
                     if header.has_collision_object_tail() && water_off + 4 <= body.len() {
@@ -732,6 +835,8 @@ pub fn parse_placements(body: &[u8], header: &MzbHeader) -> Result<Vec<MzbPlacem
                     grid_x: x as u16,
                     grid_y: y as u16,
                     water_height,
+                    sub_area_link,
+                    object_index,
                 });
             }
         }
@@ -1140,20 +1245,33 @@ pub enum MmbRenderType {
 /// ZoneRenderer.cpp:990, :2662 — `RenderType > 1`.
 const MMB_RENDER_TYPE_DRAW_MIN: u8 = 2;
 
+/// Whether a `sub_area_link` names the sub-area currently swapped in, i.e. whether
+/// its owner is the placeholder the interior is standing in for. Retail keeps the
+/// active id in `CollisionManager::field_4`, sentinel `-1` for "none"
+/// (ZoneRenderer.cpp:172, :666), so a link of `0` — "not a placeholder"
+/// (research/cexi-docs/zone/subareas.md:76-84) — must never match, the way the
+/// `-1` sentinel cannot.
+///
+/// The render pass ([`MmbRenderType::classify`]) and the collision pass
+/// ([`MzbPlacement::collides_in`]) share this one predicate.
+pub fn is_suppressed_placeholder(sub_area_link: u32, active_sub_area: Option<u32>) -> bool {
+    active_sub_area.is_some_and(|a| a != NO_SUB_AREA_LINK && sub_area_link == a)
+}
+
+/// A [`MzbPlacement::sub_area_link`] / [`MmbPlacement::sub_area_link`] of `0`:
+/// ordinary zone geometry, standing in for no interior
+/// (research/cexi-docs/zone/subareas.md:76-84).
+pub const NO_SUB_AREA_LINK: u32 = 0;
+
 impl MmbRenderType {
     /// `active_sub_area` is the sub-area currently swapped in, `None` when the
-    /// player is in the open zone. Retail keeps it as `CollisionManager::field_4`,
-    /// sentinel `-1` for "none" (ZoneRenderer.cpp:172, :666), which no placement's
-    /// `sub_area_link` can equal.
+    /// player is in the open zone.
     pub fn classify(p: &MmbPlacement, active_sub_area: Option<u32>) -> Self {
         let mut rt = MmbRenderType::Static;
         if p.block_id != 0 {
             rt = MmbRenderType::Keyed;
         }
-        // `sub_area_link == 0` is "not a placeholder", never a sub-area id
-        // (research/cexi-docs/zone/subareas.md:76-84), so a zero here must not
-        // sweep out every ordinary chunk the way retail's `-1` sentinel cannot.
-        if active_sub_area.is_some_and(|a| a != 0 && p.sub_area_link == a) {
+        if is_suppressed_placeholder(p.sub_area_link, active_sub_area) {
             rt = MmbRenderType::SuppressedPlaceholder;
         }
         rt
@@ -1893,6 +2011,79 @@ mod tests {
         );
     }
 
+    /// `CollisionObjectData::something2` closes the 0xC0-byte record, so it shares
+    /// the version gate `flags` is under, and the object's slot is its distance from
+    /// `CollisionDataHeader::SomeOffset` in whole records.
+    #[test]
+    fn collision_sub_area_link_and_object_index_come_from_the_record_tail() {
+        const COLL_HEADER: usize = 0x20;
+        const MAT_OFF: usize = 0x220;
+        const LINK: u32 = 0x1CE;
+        const OBJECT_COUNT: u32 = 4;
+
+        let mut body = synth_mzb_with_placement();
+        body.resize(MAT_OFF + COLL_OBJECT_RECORD_LEN, 0);
+
+        let array_off = (MAT_OFF - COLL_OBJECT_RECORD_LEN) as u32;
+        let o = COLL_HEADER + COLL_OBJECT_ARRAY_OFFSET;
+        body[o..o + 4].copy_from_slice(&array_off.to_le_bytes());
+        let o = COLL_HEADER + COLL_OBJECT_ARRAY_COUNT;
+        body[o..o + 4].copy_from_slice(&OBJECT_COUNT.to_le_bytes());
+        let o = MAT_OFF + COLL_OBJECT_SUB_AREA_LINK;
+        body[o..o + 4].copy_from_slice(&LINK.to_le_bytes());
+
+        body[3] = LEGACY_COLLISION_OBJECT_MAX_VERSION + 1;
+        let modern = MzbHeader::parse(&body).unwrap();
+        let p = parse_placements(&body, &modern).unwrap()[0];
+        assert_eq!(p.sub_area_link, LINK);
+        assert_eq!(p.object_index, Some(1));
+        assert!(
+            !p.collides_in(Some(LINK)),
+            "the shell yields to its interior"
+        );
+        assert!(p.collides_in(Some(LINK + 1)));
+        assert!(p.collides_in(None));
+
+        body[3] = LEGACY_COLLISION_OBJECT_MAX_VERSION;
+        let legacy = MzbHeader::parse(&body).unwrap();
+        let p = parse_placements(&body, &legacy).unwrap()[0];
+        assert_eq!(p.sub_area_link, 0);
+        assert_eq!(p.object_index, None);
+        assert!(p.collides_in(Some(LINK)));
+    }
+
+    /// A record whose slot would fall outside `SomeCount`, or land mid-record, is
+    /// not an object of this array and must not be reported as one.
+    #[test]
+    fn an_object_index_outside_the_declared_array_is_none() {
+        const COLL_HEADER: usize = 0x20;
+        const MAT_OFF: usize = 0x220;
+
+        let mut body = synth_mzb_with_placement();
+        body.resize(MAT_OFF + COLL_OBJECT_RECORD_LEN, 0);
+        body[3] = LEGACY_COLLISION_OBJECT_MAX_VERSION + 1;
+
+        let set_array = |body: &mut Vec<u8>, off: u32, count: u32| {
+            let o = COLL_HEADER + COLL_OBJECT_ARRAY_OFFSET;
+            body[o..o + 4].copy_from_slice(&off.to_le_bytes());
+            let o = COLL_HEADER + COLL_OBJECT_ARRAY_COUNT;
+            body[o..o + 4].copy_from_slice(&count.to_le_bytes());
+        };
+        let index = |body: &Vec<u8>| {
+            let h = MzbHeader::parse(body).unwrap();
+            parse_placements(body, &h).unwrap()[0].object_index
+        };
+
+        set_array(&mut body, (MAT_OFF - COLL_OBJECT_RECORD_LEN) as u32, 1);
+        assert_eq!(index(&body), None, "slot 1 of a 1-object array");
+
+        set_array(&mut body, (MAT_OFF - COLL_OBJECT_RECORD_LEN + 4) as u32, 4);
+        assert_eq!(index(&body), None, "not a whole number of records");
+
+        set_array(&mut body, MAT_OFF as u32 + 4, 4);
+        assert_eq!(index(&body), None, "record before the array base");
+    }
+
     fn synth_mmb_placement_record(version: u8) -> Vec<u8> {
         let mut body = vec![0u8; MZB_HEADER_LEN + PLACEMENT_RECORD_LEN];
         let size_and_version = (body.len() as u32) | ((version as u32) << 24);
@@ -2113,6 +2304,69 @@ mod tests {
         assert!(h.has_collision_data());
         assert_eq!(h.substructure_type, 0);
         assert!(!parse_placements(&body, &h).unwrap().is_empty());
+    }
+
+    /// Zones that declare sub-areas, sampling both file-id branches: Southern
+    /// San d'Oria, Lower Jeuno, and the high-offset zone 289.
+    const SUB_AREA_ZONE_IDS: [u16; 3] = [230, 245, 289];
+
+    /// Gated on a retail install (self-skips without one). The two DAT-side link
+    /// tables — `CollisionObjectData::something2` and
+    /// `PositionedMeshBlockData::SubAreaLink` — name the same sub-areas, and are
+    /// index-parallel, in all 283 shipped zone MZBs. Deliberately not compared
+    /// against the `m`-rect set: 12 zones diverge from it.
+    #[test]
+    fn collision_and_render_sub_area_links_name_the_same_sub_areas() {
+        use std::collections::BTreeSet;
+
+        let Some(root) = crate::archive::open_test_install() else {
+            eprintln!("skipping: no FFXI install");
+            return;
+        };
+
+        for zone_id in SUB_AREA_ZONE_IDS {
+            let body = zone_mzb_body(&root, zone_id);
+            let h = MzbHeader::parse(&body).unwrap();
+            let collision = parse_placements(&body, &h).unwrap();
+            let rendered = parse_mmb_placements(&body, &h).unwrap();
+
+            let objects = collision_object_sub_area_links(&body, &h).unwrap();
+            assert_eq!(
+                objects.len(),
+                rendered.len(),
+                "zone {zone_id} collision-object array and MMB table are the same length"
+            );
+
+            let nonzero =
+                |v: &[u32]| -> BTreeSet<u32> { v.iter().copied().filter(|l| *l != 0).collect() };
+            let rendered_links: Vec<u32> = rendered.iter().map(|p| p.sub_area_link).collect();
+            assert!(
+                !nonzero(&objects).is_empty(),
+                "zone {zone_id} was chosen because it declares sub-areas"
+            );
+            assert_eq!(
+                nonzero(&objects),
+                nonzero(&rendered_links),
+                "zone {zone_id}"
+            );
+            assert_eq!(objects, rendered_links, "zone {zone_id} is index-parallel");
+
+            let mut reached: BTreeSet<u32> = BTreeSet::new();
+            for p in &collision {
+                let i = p.object_index.unwrap_or_else(|| {
+                    panic!("zone {zone_id} object at grid {:?}", (p.grid_x, p.grid_y))
+                });
+                reached.insert(i);
+                assert_eq!(
+                    objects[i as usize], p.sub_area_link,
+                    "zone {zone_id} object {i} disagrees with the object array"
+                );
+            }
+            assert!(
+                reached.len() < collision.len(),
+                "zone {zone_id} emits one entry per (object, mesh) pair, so callers must dedupe"
+            );
+        }
     }
 
     #[test]

@@ -339,6 +339,10 @@ async fn run_map_session(
     let mut server_last_seq: u16 = 0;
     let mut total_subs = 0usize;
     let mut pending_event_end: Vec<(u32, u16, u16)> = Vec::new();
+    // Scoped owner of everything an event script's cues change; see
+    // `CutsceneScope`. Declared with the session so every exit path out of it
+    // — including the bootstrap flood — releases through the same object.
+    let mut cutscene = crate::event_dialog::CutsceneScope::default();
     let mut self_act_index: Option<u16> = None;
     let mut name_cache: std::collections::HashMap<u32, String> = Default::default();
 
@@ -398,6 +402,7 @@ async fn run_map_session(
                         &sub,
                         event_tx,
                         &mut pending_event_end,
+                        &mut cutscene,
                         bootstrap.char_id,
                         bootstrap.char_name,
                         &mut self_act_index,
@@ -472,6 +477,7 @@ async fn run_map_session(
         sub_seq,
         server_last_seq,
         pending_event_end,
+        cutscene,
         bootstrap.char_id,
         bootstrap.char_name.to_string(),
         current_zone_id,
@@ -565,6 +571,7 @@ fn handle_sub_packet(
     sub: &framing::SubPacket<'_>,
     event_tx: &broadcast::Sender<AgentEvent>,
     pending_event_end: &mut Vec<(u32, u16, u16)>,
+    cutscene: &mut crate::event_dialog::CutsceneScope,
     self_char_id: u32,
 
     self_char_name: &str,
@@ -657,6 +664,13 @@ fn handle_sub_packet(
                     to: login.zone_no,
                     myroom: mog.myroom,
                     mog_zone_flag: mog.mog_zone_flag,
+                });
+
+                // After ZoneChanged, which clears it: the renderer's sub-area
+                // latch seeds from this so a character who logged out inside a
+                // shop comes back inside the interior, not inside its shell.
+                let _ = event_tx.send(AgentEvent::SubAreaSynced {
+                    sub_area: login.sub_area,
                 });
 
                 if let Some(room) = mog.myroom {
@@ -1174,7 +1188,7 @@ fn handle_sub_packet(
             }
         }
         s2c::EVENTUCOFF => {
-            handle_eventucoff(sub.data, pending_event_end, event_tx);
+            handle_eventucoff(sub.data, pending_event_end, cutscene, event_tx);
         }
         s2c::WPOS | s2c::WPOS2 => {
             if let Ok(fm) =
@@ -1724,6 +1738,7 @@ fn begin_server_event(
     dialog_session: &mut crate::event_dialog::DialogSession,
     trigger: EventTrigger,
     event_tx: &broadcast::Sender<AgentEvent>,
+    cutscene: &mut crate::event_dialog::CutsceneScope,
     pending_event_end: &mut Vec<(u32, u16, u16)>,
     auto_event_end: &mut Vec<(u32, u16, u16, u32)>,
 ) {
@@ -1733,8 +1748,23 @@ fn begin_server_event(
         trigger.act_index,
         trigger.event_id,
     );
-    match dialog_session.begin(trigger) {
+    let outcome = dialog_session.begin(trigger);
+    let cues = dialog_session.take_cues();
+    // A choreography-only script runs to completion inside `begin`, so its
+    // cues have to open and close a session of their own or nothing downstream
+    // would ever see them.
+    if !cues.is_empty() {
+        cutscene.start(
+            crate::event_dialog::agent_event_id(unique_no, event_id),
+            event_tx,
+        );
+        for cue in cues {
+            cutscene.push(cue, event_tx);
+        }
+    }
+    match outcome {
         crate::event_dialog::Begin::Frame(dialog) => {
+            cutscene.start(dialog.event_id, event_tx);
             let _ = event_tx.send(AgentEvent::EventStart {
                 event_id: dialog.event_id,
             });
@@ -1743,6 +1773,7 @@ fn begin_server_event(
             pending_event_end.push((unique_no, act_index, event_id));
         }
         crate::event_dialog::Begin::Ended { end_para } => {
+            cutscene.end(crate::event_dialog::EventSessionExit::ScriptEnded, event_tx);
             auto_event_end.push((unique_no, act_index, event_id, end_para));
         }
         crate::event_dialog::Begin::Undriveable { stopped_op, reason } => {
@@ -1755,6 +1786,7 @@ fn begin_server_event(
                 stopped_op = ?stopped_op.map(|op| format!("0x{op:02X}")),
                 "auto-releasing VM-undriveable event"
             );
+            cutscene.end(crate::event_dialog::EventSessionExit::Cancelled, event_tx);
             auto_event_end.push((unique_no, act_index, event_id, 0));
             let _ = event_tx.send(AgentEvent::ChatLine {
                 line: ChatLine {
@@ -1869,6 +1901,7 @@ async fn keepalive_loop(
     mut sub_seq: u16,
     mut server_last_seq: u16,
     mut pending_event_end: Vec<(u32, u16, u16)>,
+    mut cutscene: crate::event_dialog::CutsceneScope,
     self_char_id: u32,
     character_name: String,
     mut current_zone_id: u16,
@@ -2052,7 +2085,11 @@ async fn keepalive_loop(
                         // (OnEventFinish result, vendor/server/src/map/packets/
                         // c2s/0x05b_eventend.cpp:36-70).
                         } else if let Some((u, a, n)) = dialog_session.active_end() {
-                            match dialog_session.cancel() {
+                            let advance = dialog_session.cancel();
+                            for cue in dialog_session.take_cues() {
+                                cutscene.push(cue, &event_tx);
+                            }
+                            match advance {
                                 crate::event_dialog::Advance::Frame(dialog) => {
                                     emit_event_speech_to_chat(&event_tx, &dialog);
                                     let _ = event_tx.send(AgentEvent::EventDialog { dialog });
@@ -2065,6 +2102,7 @@ async fn keepalive_loop(
                                             tracing::warn!(error = %e, "EVENT_END (vm) send failed");
                                         }
                                     }
+                                    cutscene.end(crate::event_dialog::EventSessionExit::Cancelled, &event_tx);
                                     let _ = event_tx.send(AgentEvent::EventEnded);
                                 }
                             }
@@ -2077,6 +2115,7 @@ async fn keepalive_loop(
                             if let Err(e) = map.send_encrypted(&payload, datagram_header_id(sub_seq), server_last_seq).await {
                                 tracing::warn!(error = %e, "EVENT_END send failed");
                             }
+                            cutscene.end(crate::event_dialog::EventSessionExit::ScriptEnded, &event_tx);
                             let _ = event_tx.send(AgentEvent::EventEnded);
                         } else {
                             // Nothing outstanding server-side: every tracked
@@ -2086,6 +2125,7 @@ async fn keepalive_loop(
                             // (vendor/server/src/map/packets/c2s/
                             // validation.cpp:58-77), so there is no valid
                             // event-finish to fabricate here.
+                            cutscene.end(crate::event_dialog::EventSessionExit::ScriptEnded, &event_tx);
                             let _ = event_tx.send(AgentEvent::EventEnded);
                         }
                     }
@@ -2212,7 +2252,11 @@ async fn keepalive_loop(
                         // VM-driven event: feed the selection to the script and
                         // advance; only send EVENT_END once it ends.
                         } else if let Some((u, a, n)) = dialog_session.active_end() {
-                            match dialog_session.advance(Some(choice)) {
+                            let advance = dialog_session.advance(Some(choice));
+                            for cue in dialog_session.take_cues() {
+                                cutscene.push(cue, &event_tx);
+                            }
+                            match advance {
                                 crate::event_dialog::Advance::Frame(dialog) => {
                                     emit_event_speech_to_chat(&event_tx, &dialog);
                                     let _ = event_tx.send(AgentEvent::EventDialog { dialog });
@@ -2225,6 +2269,7 @@ async fn keepalive_loop(
                                             tracing::warn!(error = %e, "EVENT_END (vm choice) send failed");
                                         }
                                     }
+                                    cutscene.end(crate::event_dialog::EventSessionExit::ScriptEnded, &event_tx);
                                     let _ = event_tx.send(AgentEvent::EventEnded);
                                 }
                             }
@@ -2246,6 +2291,7 @@ async fn keepalive_loop(
                             }
 
                             take_pending_event_end(&mut pending_event_end, event_id, event_num);
+                            cutscene.end(crate::event_dialog::EventSessionExit::ScriptEnded, &event_tx);
                             let _ = event_tx.send(AgentEvent::EventEnded);
                         }
                     }
@@ -2343,6 +2389,7 @@ async fn keepalive_loop(
                         {
                             tracing::warn!(error = %e, "custom menu reply send failed");
                         }
+                        cutscene.end(crate::event_dialog::EventSessionExit::ScriptEnded, &event_tx);
                         let _ = event_tx.send(AgentEvent::EventEnded);
                     }
                     Some(AgentCommand::Action {
@@ -2990,6 +3037,23 @@ async fn keepalive_loop(
                     // 0x0D3, and silently ignores a repeat on a slot this
                     // character already acted on
                     // (vendor/server/src/map/packets/c2s/0x041_trophy_entry.cpp).
+                    // Fire-and-forget: the server has nothing to answer with,
+                    // it just saves PChar->loc.boundary
+                    // (vendor/server/src/map/packets/c2s/0x0f2_submapchange.cpp).
+                    Some(AgentCommand::ReportSubArea { sub_area }) => {
+                        let payload = build_subpacket_submapchange(
+                            sub_seq,
+                            ffxi_proto::map::submap::state::GENERAL,
+                            sub_area,
+                        );
+                        sub_seq = sub_seq.wrapping_add(1);
+                        if let Err(e) = map
+                            .send_encrypted(&payload, datagram_header_id(sub_seq), server_last_seq)
+                            .await
+                        {
+                            tracing::warn!(error = %e, "submapchange send failed");
+                        }
+                    }
                     Some(AgentCommand::TreasureLot { slot }) => {
                         let payload = build_subpacket_trophy_lot(sub_seq, slot);
                         sub_seq = sub_seq.wrapping_add(1);
@@ -3416,6 +3480,7 @@ async fn keepalive_loop(
                                 npc_name: None,
                             },
                             &event_tx,
+                            &mut cutscene,
                             &mut pending_event_end,
                             &mut auto_event_end,
                         );
@@ -3464,6 +3529,7 @@ async fn keepalive_loop(
                     payload.extend(flush.payload);
                     sub_seq = flush.next_sub_seq;
                     for _ in 0..flush.released {
+                        cutscene.end(crate::event_dialog::EventSessionExit::WatchdogReleased, &event_tx);
                         let _ = event_tx.send(AgentEvent::EventEnded);
                     }
                     if flush.clear_dialog {
@@ -3592,6 +3658,10 @@ async fn keepalive_loop(
                             if let Ok(logout) = decode::ServerLogout::decode(sub.data) {
                                 if logout.is_zone_change() {
                                     let new_addr = parse_logout_addr(&logout, map.server_addr());
+                                    cutscene.end(
+                                        crate::event_dialog::EventSessionExit::ZoneChanged,
+                                        &event_tx,
+                                    );
                                     let _ = event_tx.send(AgentEvent::ZoneChanged {
                                         from: None,
                                         to: ffxi_viewer_wire::ZONE_UNKNOWN,
@@ -3775,6 +3845,7 @@ async fn keepalive_loop(
                                         &mut dialog_session,
                                         trigger,
                                         &event_tx,
+                                        &mut cutscene,
                                         &mut pending_event_end,
                                         &mut auto_event_end,
                                     );
@@ -3835,6 +3906,7 @@ async fn keepalive_loop(
                                 &sub,
                                 &event_tx,
                                 &mut pending_event_end,
+                                &mut cutscene,
                                 self_char_id,
                                 &character_name,
                                 &mut self_act_index,
@@ -3950,6 +4022,15 @@ async fn keepalive_loop(
         }
     }
 
+    // The map session outlives no cutscene: the next one starts with a fresh
+    // `CutsceneScope`, so anything still held has to be released here or it
+    // would never be (an event body that locked the camera and never issued
+    // 0x46 case 0 is the common case, not the exception).
+    cutscene.end(
+        crate::event_dialog::EventSessionExit::Disconnected,
+        &event_tx,
+    );
+
     if let Some(addr) = reconnect_addr {
         Ok(MapOutcome::Reconnect {
             new_addr: addr,
@@ -4039,6 +4120,11 @@ struct ZoneMessage {
     /// The attributed speaker, already resolved against the hide-name flag —
     /// `None` when retail would print the line unattributed.
     speaker: Option<String>,
+    /// The name the dialog string's text params (`{ChocoboName:N}`) resolve
+    /// to — the angler on LSB's catch broadcasts. Kept apart from `speaker`:
+    /// LSB's fishing constructor sets the hide-name flag precisely because the
+    /// dialog string embeds this name itself.
+    actor: Option<String>,
     nums: Vec<i32>,
 }
 
@@ -4059,6 +4145,7 @@ fn emit_zone_message_chat(
         s2c::TALKNUMWORK => decode::TalkNumWork::decode(body).map(|t| ZoneMessage {
             message_index: t.message_index(),
             speaker: (!t.hide_name()).then(|| t.speaker_name()).flatten(),
+            actor: t.speaker_name(),
             nums: t.num.to_vec(),
         }),
         // 0x036 carries no name field: retail resolves the entity from
@@ -4067,28 +4154,47 @@ fn emit_zone_message_chat(
         s2c::TALKNUM => decode::TalkNum::decode(body).map(|t| ZoneMessage {
             message_index: t.message_index(),
             speaker: None,
+            actor: None,
             nums: Vec::new(),
         }),
         s2c::TALKNUMWORK2 => decode::TalkNumWork2::decode(body).map(|t| ZoneMessage {
             message_index: t.message_index(),
             speaker: (!t.hide_name()).then(|| t.actor_name()).flatten(),
+            actor: t.actor_name(),
             // Retail addresses both parameter banks through one index space.
             nums: t.num1.iter().chain(t.num2.iter()).copied().collect(),
         }),
         s2c::TALKNUMNAME => decode::TalkNumName::decode(body).map(|t| ZoneMessage {
             message_index: t.message_index(),
             speaker: (!t.hide_name()).then(|| t.actor_name()).flatten(),
+            actor: t.actor_name(),
             nums: Vec::new(),
         }),
         _ => return,
     };
 
+    use crate::event_dialog::FishingChat;
     match decoded {
         Ok(msg) => {
-            if let Some(size) = hooked_fish_size(zone_id, msg.message_index) {
+            // Fishing lines resolve against the DAT-located fishing block,
+            // reconciling server/install client-era skew; anything else takes
+            // the direct lookup.
+            let (zone_text, size) =
+                match dialog_session.fishing_chat(zone_id, msg.message_index, opcode) {
+                    FishingChat::Line { text, offset } => (Some(text), fish_size_of_offset(offset)),
+                    // Unresolved: a guess would print another line entirely, so
+                    // the text degrades to the placeholder — but the mini-game
+                    // bar label keeps the pin-era classification, correct for the
+                    // dev stack and era-matched servers.
+                    FishingChat::Unresolved => (None, hooked_fish_size(zone_id, msg.message_index)),
+                    FishingChat::NotFishing => (
+                        dialog_session.zone_chat_text(zone_id, msg.message_index as usize),
+                        hooked_fish_size(zone_id, msg.message_index),
+                    ),
+                };
+            if let Some(size) = size {
                 let _ = event_tx.send(AgentEvent::FishHookedSize { size });
             }
-            let zone_text = dialog_session.zone_chat_text(zone_id, msg.message_index as usize);
             let _ = event_tx.send(AgentEvent::ChatLine {
                 line: zone_message_chat_line(&msg, zone_text, character_name),
             });
@@ -4102,8 +4208,14 @@ fn emit_zone_message_chat(
 /// labelled by the time it appears
 /// (vendor/server/src/map/utils/fishingutils.cpp `SendHookResponse`).
 fn hooked_fish_size(zone_id: u16, mes_num: u16) -> Option<crate::state::FishSize> {
+    ffxi_proto::fishing_messages::classify(zone_id, mes_num).and_then(fish_size_of_offset)
+}
+
+/// The bar label for a resolved FISHMESSAGEOFFSET, if it is one of the two
+/// "something caught the hook" lines.
+fn fish_size_of_offset(offset: u8) -> Option<crate::state::FishSize> {
     use ffxi_proto::fishing_messages::kind;
-    match ffxi_proto::fishing_messages::classify(zone_id, mes_num)? {
+    match offset {
         kind::HOOKED_SMALL_FISH => Some(crate::state::FishSize::Small),
         kind::HOOKED_LARGE_FISH => Some(crate::state::FishSize::Large),
         _ => None,
@@ -4142,10 +4254,13 @@ fn zone_message_chat_line(
     // retail does for every line that substitutes one — the fished-up catch
     // included (`.agents/skills/retail-observe/references/treasure-pool-chat.md`).
     let substituted = crate::event_dialog::substitute_nums(
-        crate::event_dialog::substitute_names(
-            ffxi_event::clean_display(&raw, &msg.nums),
-            player_name,
-            speaker.as_deref(),
+        crate::event_dialog::substitute_text_params(
+            crate::event_dialog::substitute_names(
+                ffxi_event::clean_display(&raw, &msg.nums),
+                player_name,
+                speaker.as_deref(),
+            ),
+            msg.actor.as_deref(),
         ),
         &msg.nums,
     );
@@ -5318,6 +5433,7 @@ fn eventucoff_mode_of(data: &[u8]) -> Option<u32> {
 fn handle_eventucoff(
     data: &[u8],
     pending_event_end: &mut Vec<(u32, u16, u16)>,
+    cutscene: &mut crate::event_dialog::CutsceneScope,
     event_tx: &broadcast::Sender<AgentEvent>,
 ) {
     match eventucoff_mode_of(data) {
@@ -5326,6 +5442,7 @@ fn handle_eventucoff(
         }
         Some(ffxi_proto::map::eventucoff_mode::CANCEL_EVENT) => {
             pending_event_end.clear();
+            cutscene.end(crate::event_dialog::EventSessionExit::Cancelled, event_tx);
             let _ = event_tx.send(AgentEvent::EventEnded);
         }
         _ => {}
@@ -6599,6 +6716,7 @@ mod tests {
         ZoneMessage {
             message_index: mes_num & !decode::MESNUM_HIDE_NAME_FLAG,
             speaker: (!hidden && !name.is_empty()).then(|| name.to_string()),
+            actor: (!name.is_empty()).then(|| name.to_string()),
             nums: num.to_vec(),
         }
     }
@@ -6865,6 +6983,7 @@ mod tests {
         let msg = ZoneMessage {
             message_index: 7267,
             speaker: None,
+            actor: Some("Kuluu".to_string()),
             nums: vec![4304, 1, 0, 0],
         };
         let line = zone_message_chat_line(
@@ -6927,13 +7046,35 @@ mod tests {
         let (tx, mut rx) = broadcast::channel(8);
         let mut pending = vec![(0xDEADBEEFu32, 7u16, 535u16)];
         let packed = ffxi_proto::map::eventucoff_mode::CANCEL_EVENT | (535u32 << 8);
-        handle_eventucoff(&packed.to_le_bytes(), &mut pending, &tx);
+        // Locked by 0x46 case 1 and never unlocked, the retail-common shape.
+        let mut cutscene = crate::event_dialog::CutsceneScope::default();
+        cutscene.start(535, &tx);
+        cutscene.push(
+            crate::event_dialog::ResolvedCue::Scene(crate::state::CutsceneCue::CameraLock {
+                lock: true,
+            }),
+            &tx,
+        );
+        while rx.try_recv().is_ok() {}
+
+        handle_eventucoff(&packed.to_le_bytes(), &mut pending, &mut cutscene, &tx);
         assert!(
             pending.is_empty(),
             "server force-close drops tracked events"
         );
+        assert!(
+            !cutscene.camera_locked(),
+            "the server's cancel must give the camera back"
+        );
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(AgentEvent::CutsceneCue {
+                cue: crate::state::CutsceneCue::CameraLock { lock: false }
+            })
+        ));
+        assert!(matches!(rx.try_recv(), Ok(AgentEvent::CutsceneEnded)));
         assert!(matches!(rx.try_recv(), Ok(AgentEvent::EventEnded)));
-        assert!(rx.try_recv().is_err(), "exactly one event emitted");
+        assert!(rx.try_recv().is_err(), "exactly one release emitted");
     }
 
     #[test]
@@ -6943,6 +7084,7 @@ mod tests {
         handle_eventucoff(
             &ffxi_proto::map::eventucoff_mode::FISHING.to_le_bytes(),
             &mut pending,
+            &mut crate::event_dialog::CutsceneScope::default(),
             &tx,
         );
         assert_eq!(pending.len(), 1);
@@ -6957,7 +7099,12 @@ mod tests {
         const EVENT_RECV_PENDING: u32 = 1;
         let (tx, mut rx) = broadcast::channel(8);
         let mut pending = vec![(1u32, 2u16, 3u16)];
-        handle_eventucoff(&EVENT_RECV_PENDING.to_le_bytes(), &mut pending, &tx);
+        handle_eventucoff(
+            &EVENT_RECV_PENDING.to_le_bytes(),
+            &mut pending,
+            &mut crate::event_dialog::CutsceneScope::default(),
+            &tx,
+        );
         assert_eq!(pending.len(), 1);
         assert!(rx.try_recv().is_err());
     }

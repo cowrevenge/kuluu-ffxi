@@ -82,6 +82,14 @@ pub struct ServerLogin {
 
     pub myroom: Option<ServerLoginMyroom>,
 
+    /// `SubMapNumber` — `PChar->loc.boundary`, the server's authoritative
+    /// initial sub-area for this zone-in (vendor/server/src/map/packets/s2c/
+    /// 0x00a_login.h field order; see [`Self::SUB_AREA_OFFSET`]). Distinct
+    /// from [`ServerLoginMyroom::sub_map_number`] (`MyroomSubMapNumber`,
+    /// offset 0xA4, u8) — that is a different field and would truncate a
+    /// sub-area id (sub-areas run 293..640).
+    pub sub_area: Option<u16>,
+
     pub zone_in_event: Option<ZoneInEvent>,
 
     /// Weather in force as the character zones in.
@@ -130,6 +138,12 @@ impl ServerLogin {
     pub(crate) const MUSIC_NUM_SIZE: usize = 5 * 2;
 
     pub(crate) const GAME_TIME_OFFSET: usize = 0x38;
+
+    // GrapIDTbl[9] u16 at 0x40 (18 bytes) runs to MusicNum[5] u16 at 0x52 (10
+    // bytes, MUSIC_NUM_OFFSET above), which lands SubMapNumber immediately
+    // before EVENT_NUM_OFFSET below — pinning both neighbours proves the
+    // offset (see `sub_area_offset_sits_between_music_num_and_event_num`).
+    pub(crate) const SUB_AREA_OFFSET: usize = 0x5C;
 
     pub(crate) const EVENT_NUM_OFFSET: usize = 0x5E;
     pub(crate) const EVENT_PARA_OFFSET: usize = 0x60;
@@ -180,6 +194,13 @@ impl ServerLogin {
         } else {
             None
         };
+        let sub_area = (body.len() >= Self::SUB_AREA_OFFSET + 2).then(|| {
+            u16::from_le_bytes(
+                body[Self::SUB_AREA_OFFSET..Self::SUB_AREA_OFFSET + 2]
+                    .try_into()
+                    .unwrap(),
+            )
+        });
         let zone_in_event = (pos_head.server_status == Self::SERVER_STATUS_EVENT
             && body.len() >= Self::EVENT_MODE_OFFSET + 2)
             .then(|| ZoneInEvent {
@@ -219,6 +240,7 @@ impl ServerLogin {
             pos_head,
             music_num,
             myroom: ServerLoginMyroom::decode(body),
+            sub_area,
             zone_in_event,
             weather,
         })
@@ -274,6 +296,19 @@ mod server_login_tests {
             L::WEATHER_OFFSET_TIME_OFFSET + 4 + 4 + 2 + 2,
             super::ServerLoginMyroom::LOGIN_STATE_OFFSET
         );
+    }
+
+    /// Pins SUB_AREA_OFFSET against the two already-pinned neighbours it sits
+    /// between in GP_SERV_COMMAND_LOGIN::PacketData
+    /// (vendor/server/src/map/packets/s2c/0x00a_login.h:96-105): MusicNum[5]
+    /// (MUSIC_NUM_OFFSET, 10 bytes) then SubMapNumber (u16) then EventNum
+    /// (EVENT_NUM_OFFSET). If a field were inserted ahead of SubMapNumber,
+    /// this chain — not just the standalone constant — would break.
+    #[test]
+    fn sub_area_offset_sits_between_music_num_and_event_num() {
+        use super::ServerLogin as L;
+        assert_eq!(L::SUB_AREA_OFFSET, L::MUSIC_NUM_OFFSET + L::MUSIC_NUM_SIZE);
+        assert_eq!(L::EVENT_NUM_OFFSET, L::SUB_AREA_OFFSET + 2);
     }
 
     use super::*;
@@ -354,6 +389,25 @@ mod server_login_tests {
         let l = ServerLogin::decode(&buf).unwrap();
         assert_eq!(l.zone_no, 230);
         assert!(l.myroom.is_none());
+    }
+
+    #[test]
+    fn server_login_decodes_sub_area() {
+        let mut buf = vec![0u8; 0x100];
+        buf[44..48].copy_from_slice(&230u32.to_le_bytes());
+        // Sub-area ids run 293..640, well past a u8 — pin one to prove the
+        // u16 width, not just the offset.
+        buf[ServerLogin::SUB_AREA_OFFSET..ServerLogin::SUB_AREA_OFFSET + 2]
+            .copy_from_slice(&400u16.to_le_bytes());
+        let l = ServerLogin::decode(&buf).unwrap();
+        assert_eq!(l.sub_area, Some(400));
+    }
+
+    #[test]
+    fn server_login_short_body_yields_no_sub_area() {
+        let buf = vec![0u8; ServerLogin::SUB_AREA_OFFSET + 1];
+        let l = ServerLogin::decode(&buf).unwrap();
+        assert_eq!(l.sub_area, None);
     }
 
     #[test]

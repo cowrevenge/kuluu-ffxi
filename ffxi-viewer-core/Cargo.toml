@@ -42,6 +42,9 @@ enhanced-cast-bar = []
 bevy = { workspace = true, features = ["serialize", "bevy_audio"] }
 ffxi-viewer-wire = { path = "../ffxi-viewer-wire" }
 ffxi-dat = { path = "../ffxi-dat" }
+# The cutscene staging contracts (`cutscene.rs`): the fade scheduler's DAT id and
+# FourCC tags are the event VM's, matched here rather than re-typed.
+ffxi-event = { path = "../ffxi-event" }
 # Phase 3 faithful character render path: pure-Rust XIM port of per-joint
 # world pose (`skeleton_instance`), the 8-slot animation coordinator
 # (`animation`), and animation *selection* (`actor_state`). Glam-only, no

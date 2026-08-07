@@ -521,6 +521,22 @@ pub fn build_subpacket_myroom_job(sync: u16, main_job: Option<u8>, sub_job: Opti
     buf
 }
 
+// c2s 0x0F2 GP_CLI_COMMAND_SUBMAPCHANGE: State u16 @4, SubMapNumber u16 @6
+// (vendor/server/src/map/packets/c2s/0x0f2_submapchange.h). Sent on every
+// sub-area latch change so `PChar->loc.boundary` — and the next relog's
+// restored interior — stay in sync (0x0f2_submapchange.cpp process).
+pub(crate) fn build_subpacket_submapchange(sync: u16, state: u16, sub_map_number: u16) -> Vec<u8> {
+    let mut buf = vec![0u8; 8];
+    buf[0..4].copy_from_slice(&build_subpacket_header(
+        ffxi_proto::map::c2s::SUBMAPCHANGE,
+        2,
+        sync,
+    ));
+    buf[4..6].copy_from_slice(&state.to_le_bytes());
+    buf[6..8].copy_from_slice(&sub_map_number.to_le_bytes());
+    buf
+}
+
 pub(crate) fn build_subpacket_header(opcode: u16, size_words: u16, sync: u16) -> [u8; 4] {
     let id_and_size = framing::subpacket_header_word(opcode, size_words);
     let mut h = [0u8; 4];
@@ -865,6 +881,37 @@ mod tests {
             u32::from_le_bytes(buf[16..20].try_into().unwrap()),
             AUCTION_STACKS_SINGLE
         );
+    }
+
+    #[test]
+    fn submapchange_layout_matches_server_struct() {
+        let buf =
+            build_subpacket_submapchange(0x0102, ffxi_proto::map::submap::state::GENERAL, 400);
+        assert_eq!(buf.len(), 8, "sizeof(GP_CLI_COMMAND_SUBMAPCHANGE) + header");
+        let hdr = u16::from_le_bytes([buf[0], buf[1]]);
+        assert_eq!(
+            hdr & ffxi_proto::framing::SUBPACKET_OPCODE_MASK,
+            ffxi_proto::map::c2s::SUBMAPCHANGE,
+            "opcode 0x0F2"
+        );
+        assert_eq!((hdr >> 9) as usize, 2, "size_words");
+        assert_eq!(u16::from_le_bytes([buf[2], buf[3]]), 0x0102, "sync");
+        assert_eq!(
+            u16::from_le_bytes([buf[4], buf[5]]),
+            ffxi_proto::map::submap::state::GENERAL,
+            "State"
+        );
+        assert_eq!(u16::from_le_bytes([buf[6], buf[7]]), 400, "SubMapNumber");
+    }
+
+    #[test]
+    fn submapchange_no_sub_area_sentinel_is_zero() {
+        let buf = build_subpacket_submapchange(
+            1,
+            ffxi_proto::map::submap::state::GENERAL,
+            ffxi_proto::map::submap::NO_SUB_AREA,
+        );
+        assert_eq!(u16::from_le_bytes([buf[6], buf[7]]), 0);
     }
 
     #[test]

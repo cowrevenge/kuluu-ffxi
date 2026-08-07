@@ -357,7 +357,7 @@ pub fn build_zone_collision_bvh_system(
         return;
     }
     *debounce = None;
-    if geom.indices.is_empty() {
+    if geom.tri_count() == 0 {
         zone_bvh.0 = None;
         return;
     }

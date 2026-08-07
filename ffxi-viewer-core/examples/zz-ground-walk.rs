@@ -7,7 +7,9 @@
 
 use bevy::math::Vec2;
 use bevy::tasks::AsyncComputeTaskPool;
-use ffxi_viewer_core::dat_mzb::{build_collision_geometry, load_mzb_placed, MAX_GROUND_STEP_UP};
+use ffxi_viewer_core::dat_mzb::{
+    build_collision_geometry, load_mzb_placed, MzbCollisionGeometry, MAX_GROUND_STEP_UP,
+};
 
 fn main() {
     let mut args = std::env::args().skip(1);
@@ -26,7 +28,11 @@ fn main() {
         .expect("zone -> mzb file id");
     let (submeshes, instances) = load_mzb_placed(file_id, None).expect("load_mzb_placed");
 
-    let geom = build_collision_geometry(&submeshes, &instances, Some(file_id));
+    let geom = MzbCollisionGeometry::from_block(build_collision_geometry(
+        &submeshes,
+        &instances,
+        Some(file_id),
+    ));
 
     // KULUU_RISE_HIST=cx,cy,radius,step — histogram the per-frame upward snap
     // over a lattice of walks across an area, to separate the stair/ramp regime

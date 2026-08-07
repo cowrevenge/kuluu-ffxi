@@ -47,6 +47,7 @@ pub struct CaptureMode {
 pub struct SlashWriters<'w, 's> {
     pub load_mmb: MessageWriter<'w, LoadMmbRequest>,
     pub load_mzb: MessageWriter<'w, LoadMzbRequest>,
+    pub set_sub_area: MessageWriter<'w, ffxi_viewer_core::sub_area_activation::SetSubArea>,
     pub debug_heights: MessageWriter<'w, DebugHeightsRequest>,
 
     pub logout_requested:

@@ -126,6 +126,15 @@ pub struct LoadMmbRequest {
     pub lod: Option<crate::dat_mzb::ZoneMeshLod>,
 
     pub door: Option<crate::zone_doors::ZoneDoorLeaf>,
+
+    /// Zone block this placement belongs to, stamped on the spawned entity as
+    /// [`crate::dat_mzb::ZoneBlockSlot`] so retiring an interior finds it.
+    /// Ignored for entity-attached models, which no zone block owns.
+    pub slot: u8,
+
+    /// `MmbPlacement::sub_area_link`; 0 for everything that is not the exterior
+    /// shell of an interior.
+    pub sub_area_link: u32,
 }
 
 // Animates one generator water sheet's UV scroll. Each sheet owns its material
@@ -168,6 +177,9 @@ impl Plugin for DatOverlayPlugin {
             .add_message::<crate::dat_vos2::LoadVos2Request>()
             .add_message::<crate::ffxi_actor_render::LoadActorRequest>()
             .add_message::<crate::dat_mzb::LoadMzbRequest>()
+            .add_message::<crate::sub_area_activation::SubAreaChanged>()
+            .add_message::<crate::sub_area_activation::SetSubArea>()
+            .init_resource::<crate::sub_area_activation::SubAreaActivation>()
             .init_resource::<MmbHandleCache>()
             .init_resource::<MmbLoadQueue>()
             .init_resource::<MmbParseCache>()
@@ -188,6 +200,7 @@ impl Plugin for DatOverlayPlugin {
                 Update,
                 (
                     crate::dat_mzb::auto_load_zone_geometry_system,
+                    crate::sub_area_activation::drive_sub_area_activation,
                     dispatch_look_driven_models,
                     crate::dat_mzb::kick_load_mzb_tasks,
                     crate::dat_mzb::poll_load_mzb_tasks,
@@ -204,6 +217,7 @@ impl Plugin for DatOverlayPlugin {
                 (
                     crate::dat_mzb::cull_entities_by_distance,
                     crate::dat_mzb::select_zone_mmb_lod,
+                    crate::dat_mzb::apply_sub_area_shell_visibility,
                     crate::dat_mzb::apply_zone_geom_visibility,
                     crate::dat_mzb::scroll_water_uv,
                     scroll_gen_water_uv,
@@ -609,7 +623,13 @@ pub fn process_load_mmb_requests(
                             Visibility::default(),
                         ));
                         if is_zone_spawn {
-                            e.insert(crate::dat_mzb::AutoMzbOverlay);
+                            e.insert((
+                                crate::dat_mzb::AutoMzbOverlay,
+                                crate::dat_mzb::ZoneBlockSlot(req.slot),
+                            ));
+                            if req.sub_area_link != 0 {
+                                e.insert(crate::dat_mzb::ZoneSubAreaLink(req.sub_area_link));
+                            }
                         }
                         if let Some(lod) = req.lod {
                             e.insert(lod);
@@ -932,6 +952,7 @@ mod tests {
     };
     use crate::zone_texture::ffxi_alpha_remap;
     use bevy::prelude::{AlphaMode, Mat4, Vec3};
+    use ffxi_dat::mzb::NO_SUB_AREA_LINK;
 
     #[test]
     fn repass_triggers_on_events_parses_budget_or_settings() {
@@ -971,6 +992,8 @@ mod tests {
             water: None,
             lod: None,
             door: None,
+            slot: crate::dat_mzb::ZONE_SLOT_MAIN,
+            sub_area_link: NO_SUB_AREA_LINK,
         }
     }
 
@@ -984,6 +1007,8 @@ mod tests {
             water: None,
             lod: None,
             door: None,
+            slot: crate::dat_mzb::ZONE_SLOT_MAIN,
+            sub_area_link: NO_SUB_AREA_LINK,
         }
     }
 

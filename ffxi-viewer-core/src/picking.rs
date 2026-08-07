@@ -373,6 +373,13 @@ pub fn click_to_target_system(
         &q_nameplate,
         scene.snapshot.self_char_id,
     );
+    // One physical click emits one Click per hovered entity — the priority
+    // winner's surface, self's non-blocking box beside it, and the full-window
+    // surface under everything that resolves to no entity (and is what makes
+    // click-on-empty-ground reach us at all). Resolve the click exactly once:
+    // the winner's world hit if present, else the background passthrough.
+    let mut world_hit: Option<u32> = None;
+    let mut background_hit = false;
     for ev in clicks.read() {
         if ev.button != PointerButton::Primary {
             continue;
@@ -384,51 +391,52 @@ pub fn click_to_target_system(
         if pointer.left_dragged {
             continue;
         }
-        let raw_id = resolve_hit_entity_id(ev.entity, &q_world, &q_parent, &q_nameplate);
-        // One physical click reaches every hovered entity — self's
-        // non-blocking box among them — but only the priority winner may
-        // answer, or the duplicate event would retarget a second time and
-        // reopen the menu. Unresolvable hits (UI nodes) pass through as None.
-        let hit_id = match raw_id {
-            Some(id) if winner != Some(id) => continue,
-            other => other,
-        };
-        if let Some(id) = hit_id {
-            if id != 0
-                && scene
-                    .snapshot
-                    .entities
-                    .iter()
-                    .any(|e| e.id == id && !e.is_targetable())
-            {
-                continue;
-            }
+        match resolve_hit_entity_id(ev.entity, &q_world, &q_parent, &q_nameplate) {
+            Some(id) if winner == Some(id) => world_hit = Some(id),
+            Some(_) => {}
+            None => background_hit = true,
         }
-        let locked = crate::lock_on::suppresses_retarget(&lock_on, false);
-        match resolve_click_target(hit_id, target.id, locked) {
-            ClickResolution::Ignored => {}
-            ClickResolution::Set(id) => target.id = Some(id),
-            ClickResolution::Clear => target.id = None,
-            ClickResolution::OpenContextMenu => {
-                use crate::hud::action_model;
-                let engaged = matches!(
-                    scene.snapshot.current_goal,
-                    Some(ffxi_viewer_wire::ReactorGoal::Engaged { .. })
-                );
-                let ctx = action_model::context_for_target(
-                    target.id,
-                    &scene.snapshot.entities,
-                    scene.snapshot.self_pos.pos,
-                    scene.snapshot.self_char_id,
-                    engaged,
-                    crate::hud::menu::any_usable_item(&scene.snapshot),
-                    fishing_spot.0.is_ready(),
-                );
-                if !action_model::build_target_action_entries(&ctx, &crate::hud::overlay::RETAIL)
-                    .is_empty()
-                {
-                    *input_mode = InputMode::TargetAction(TargetActionState::open(ctx));
-                }
+    }
+    let hit_id = match (world_hit, background_hit) {
+        (Some(id), _) => Some(id),
+        (None, true) => None,
+        (None, false) => return,
+    };
+    if let Some(id) = hit_id {
+        if id != 0
+            && scene
+                .snapshot
+                .entities
+                .iter()
+                .any(|e| e.id == id && !e.is_targetable())
+        {
+            return;
+        }
+    }
+    let locked = crate::lock_on::suppresses_retarget(&lock_on, false);
+    match resolve_click_target(hit_id, target.id, locked) {
+        ClickResolution::Ignored => {}
+        ClickResolution::Set(id) => target.id = Some(id),
+        ClickResolution::Clear => target.id = None,
+        ClickResolution::OpenContextMenu => {
+            use crate::hud::action_model;
+            let engaged = matches!(
+                scene.snapshot.current_goal,
+                Some(ffxi_viewer_wire::ReactorGoal::Engaged { .. })
+            );
+            let ctx = action_model::context_for_target(
+                target.id,
+                &scene.snapshot.entities,
+                scene.snapshot.self_pos.pos,
+                scene.snapshot.self_char_id,
+                engaged,
+                crate::hud::menu::any_usable_item(&scene.snapshot),
+                fishing_spot.0.is_ready(),
+            );
+            if !action_model::build_target_action_entries(&ctx, &crate::hud::overlay::RETAIL)
+                .is_empty()
+            {
+                *input_mode = InputMode::TargetAction(TargetActionState::open(ctx));
             }
         }
     }
@@ -437,6 +445,140 @@ pub fn click_to_target_system(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use bevy::camera::NormalizedRenderTarget;
+    use bevy::ecs::system::RunSystemOnce;
+    use bevy::picking::backend::HitData;
+    use bevy::picking::pointer::Location;
+
+    fn click_world() -> World {
+        let mut world = World::new();
+        world.insert_resource(Messages::<Pointer<Click>>::default());
+        world.insert_resource(crate::mouse::MousePointer::default());
+        let mut scene = crate::snapshot::SceneState::default();
+        scene.snapshot.self_char_id = Some(7);
+        world.insert_resource(scene);
+        world.insert_resource(WorldPickingEnabled(true));
+        world.insert_resource(crate::lock_on::LockOn::default());
+        world.insert_resource(crate::fishing_spot::FishingSpot::default());
+        world.insert_resource(HoverMap::default());
+        world.insert_resource(PickBridgePointer::default());
+        world.insert_resource(Target::default());
+        world.insert_resource(InputMode::default());
+        world
+    }
+
+    fn spawn_hit_entity(world: &mut World, id: u32) -> (Entity, Entity) {
+        let root = world
+            .spawn(WorldEntity {
+                id,
+                act_index: 1,
+                kind: EntityKind::Pc,
+            })
+            .id();
+        let hitbox = world
+            .spawn((EntityHitbox { entity_id: id }, ChildOf(root)))
+            .id();
+        (root, hitbox)
+    }
+
+    fn hover_hit(depth: f32) -> HitData {
+        HitData::new(Entity::PLACEHOLDER, depth, None, None)
+    }
+
+    fn set_hover(world: &mut World, hits: &[(Entity, f32)]) {
+        let mut map = HoverMap::default();
+        let entry = map.0.entry(PointerId::Mouse).or_default();
+        for (entity, depth) in hits {
+            entry.insert(*entity, hover_hit(*depth));
+        }
+        world.insert_resource(map);
+    }
+
+    fn send_click(world: &mut World, entity: Entity) {
+        let msg = Pointer::new(
+            PointerId::Mouse,
+            Location {
+                target: NormalizedRenderTarget::None {
+                    width: 1,
+                    height: 1,
+                },
+                position: Vec2::ZERO,
+            },
+            Click {
+                button: PointerButton::Primary,
+                hit: hover_hit(1.0),
+                duration: std::time::Duration::ZERO,
+                count: 1,
+            },
+            entity,
+        );
+        world.resource_mut::<Messages<Pointer<Click>>>().write(msg);
+    }
+
+    #[test]
+    fn click_on_self_hitbox_sets_self_target() {
+        let mut world = click_world();
+        let (_root, hitbox) = spawn_hit_entity(&mut world, 7);
+        set_hover(&mut world, &[(hitbox, 1.0)]);
+        send_click(&mut world, hitbox);
+        world.run_system_once(click_to_target_system).unwrap();
+        assert_eq!(world.resource::<Target>().id, Some(7));
+    }
+
+    #[test]
+    fn click_with_target_behind_self_hits_the_target() {
+        let mut world = click_world();
+        let (_self_root, self_box) = spawn_hit_entity(&mut world, 7);
+        let (_other_root, other_box) = spawn_hit_entity(&mut world, 42);
+        // Self's box is the nearer hit; the target behind it still wins, and
+        // bevy emits one Click per hovered entity for the single press.
+        set_hover(&mut world, &[(self_box, 1.0), (other_box, 5.0)]);
+        send_click(&mut world, self_box);
+        send_click(&mut world, other_box);
+        world.run_system_once(click_to_target_system).unwrap();
+        assert_eq!(world.resource::<Target>().id, Some(42));
+        assert!(matches!(world.resource::<InputMode>(), InputMode::World));
+    }
+
+    #[test]
+    fn click_with_background_surface_still_targets_self() {
+        // The observed regression: one physical click on self emitted a Click
+        // for the self hitbox AND for an unresolvable full-window surface;
+        // processed in the wrong order, the None resolution cleared the
+        // just-set target.
+        for background_first in [true, false] {
+            let mut world = click_world();
+            let (_root, hitbox) = spawn_hit_entity(&mut world, 7);
+            let background = world.spawn_empty().id();
+            set_hover(&mut world, &[(hitbox, 1.0), (background, 0.0)]);
+            if background_first {
+                send_click(&mut world, background);
+                send_click(&mut world, hitbox);
+            } else {
+                send_click(&mut world, hitbox);
+                send_click(&mut world, background);
+            }
+            world.run_system_once(click_to_target_system).unwrap();
+            assert_eq!(
+                world.resource::<Target>().id,
+                Some(7),
+                "background_first={background_first}"
+            );
+            assert!(matches!(world.resource::<InputMode>(), InputMode::World));
+        }
+    }
+
+    #[test]
+    fn background_only_click_clears_target() {
+        let mut world = click_world();
+        world.insert_resource(Target { id: Some(42) });
+        let background = world.spawn_empty().id();
+        set_hover(&mut world, &[(background, 0.0)]);
+        send_click(&mut world, background);
+        world.run_system_once(click_to_target_system).unwrap();
+        assert_eq!(world.resource::<Target>().id, None);
+    }
 
     #[test]
     fn click_on_new_entity_retargets() {

@@ -78,12 +78,17 @@ pub fn collect_mouse_system(
             MouseButton::Left => {
                 if pressed {
                     state.left_dragged = false;
+                    // Winit coalesces the approach motion into the press's
+                    // frame on long frames; that movement predates the hold
+                    // and must not trip the drag threshold below.
+                    state.delta = Vec2::ZERO;
                 }
                 state.left = pressed;
             }
             MouseButton::Right => {
                 if pressed {
                     state.right_dragged = false;
+                    state.delta = Vec2::ZERO;
                 }
                 state.right = pressed;
             }
@@ -181,6 +186,39 @@ mod tests {
         let p = app.world().resource::<MousePointer>();
         assert_eq!(p.delta, Vec2::ZERO);
         assert_eq!(p.wheel, 0.0);
+    }
+
+    #[test]
+    fn motion_coalesced_into_the_press_frame_is_not_a_drag() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .add_message::<MouseMotion>()
+            .add_message::<MouseButtonInput>()
+            .add_message::<MouseWheel>()
+            .add_message::<CursorMoved>()
+            .init_resource::<InputMode>()
+            .init_resource::<SceneState>()
+            .add_plugins(MousePlugin);
+
+        // The cursor's approach and the button press arrive in one frame (a
+        // long frame under load); the click must not be read as a drag.
+        app.world_mut().write_message(MouseMotion {
+            delta: Vec2::new(300.0, 200.0),
+        });
+        app.world_mut().write_message(MouseButtonInput {
+            button: MouseButton::Left,
+            state: ButtonState::Pressed,
+            window: Entity::PLACEHOLDER,
+        });
+        app.update();
+        assert!(!app.world().resource::<MousePointer>().left_dragged);
+
+        // Motion on later frames while held is a real drag.
+        app.world_mut().write_message(MouseMotion {
+            delta: Vec2::new(30.0, 0.0),
+        });
+        app.update();
+        assert!(app.world().resource::<MousePointer>().left_dragged);
     }
 
     #[test]

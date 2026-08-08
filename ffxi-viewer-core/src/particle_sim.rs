@@ -52,8 +52,9 @@ impl ParticleSimulator {
     // yaw-invariant vel_basis fold below is equivalent). cameraAttachedBasePosition rotates the
     // base offset by the view matrix — xim's `left*-x + up*y + forward*-z` with its
     // backward-pointing lookAtForward is `rot * (-x, y, -z)` here (Matrix4f.kt:265-327) — so
-    // the mist/dust sheet rides in front of the viewer however they turn (+z authors a placement
-    // ahead of the camera). Both refresh every frame.
+    // the mist/dust sheet is born in front of the viewer however they are turned (+z authors a
+    // placement ahead of the camera). Both refresh every frame, but a cameraAttachedBasePosition
+    // particle reads the result once — see `Particle::spawn_origin`.
     pub fn set_camera_relative_origins(&mut self, cam_pos: Vec3, cam_rot: Quat) {
         for g in &mut self.generators {
             if !g.camera_relative {
@@ -307,6 +308,11 @@ pub struct ActorAutoRunEffects {
 
 struct Particle {
     pos: Vec3,
+    // research/xim Particle.kt:238-241 — cameraAttachedBasePosition resolves the offset from the
+    // camera only while `age == 0`, so the particle is placed in front of the viewer once and
+    // then lives in world space. Carrying the live generator origin instead glues the whole
+    // emission to the camera as one rigid sheet that swings out of view on a pitch.
+    spawn_origin: Vec3,
     vel: Vec3,
     age_frames: f32,
     life_frames: f32,
@@ -740,6 +746,7 @@ fn emit(g: &mut LiveGenerator, life_frames: f32) {
     };
     g.particles.push(Particle {
         pos,
+        spawn_origin: g.origin,
         vel: Vec3::from_array(g.def.init_velocity) * g.vel_basis,
         age_frames: 0.0,
         life_frames: life_frames.max(1.0),
@@ -913,7 +920,15 @@ fn particle_draw(g: &LiveGenerator, p: &Particle, clock: &CelestialClock) -> Par
         factor_rgb: rgb,
         factor_alpha: tfactor_alpha(&g.def, g.draw_path, alpha),
         life_alpha: alpha,
-        world: g.origin + p.pos,
+        world: particle_origin(g, p) + p.pos,
+    }
+}
+
+fn particle_origin(g: &LiveGenerator, p: &Particle) -> Vec3 {
+    if g.def.camera_attached_base {
+        p.spawn_origin
+    } else {
+        g.origin
     }
 }
 
@@ -1427,6 +1442,54 @@ mod tests {
         assert!((got - want).length() < 1e-4, "{got} != {want}");
     }
 
+    // research/xim Particle.kt:238-241 — a cameraAttachedBasePosition particle reads the offset
+    // from the camera only at age 0. Re-reading it every frame drags the whole live emission
+    // along as one rigid sheet: the dust storm sits pinned in front of the player and swings off
+    // screen the moment the camera pitches. New emissions still follow the camera.
+    #[test]
+    fn camera_attached_particles_keep_their_birth_origin() {
+        let mut sheet = def(70.0, 10.0, 1);
+        sheet.camera_relative = true;
+        sheet.camera_attached_base = true;
+        sheet.base_position = [0.0, 0.0, 13.0];
+        sheet.init_velocity = [0.0; 3];
+        let mut sheet = live(sheet, f32::MAX);
+        sheet.camera_relative = true;
+
+        let mut sim = ParticleSimulator::default();
+        sim.generators.push(sheet);
+
+        sim.set_camera_relative_origins(Vec3::ZERO, Quat::IDENTITY);
+        advance(&mut sim.generators[0], 10.0);
+        let born = sim.generators[0].particles.len();
+        assert!(born > 0);
+
+        // The camera walks 100 yalms and turns to look the other way.
+        let moved = Vec3::new(100.0, 0.0, 0.0);
+        sim.set_camera_relative_origins(moved, Quat::from_rotation_y(std::f32::consts::PI));
+        advance(&mut sim.generators[0], 10.0);
+
+        let g = &sim.generators[0];
+        let clock = CelestialClock::default();
+        let worlds: Vec<Vec3> = g
+            .particles
+            .iter()
+            .map(|p| particle_draw(g, p, &clock).world)
+            .collect();
+        for w in &worlds[..born] {
+            assert!(
+                (*w - Vec3::new(0.0, 0.0, -13.0)).length() < 1e-3,
+                "already-live particle followed the camera: {w}"
+            );
+        }
+        for w in &worlds[born..] {
+            assert!(
+                (*w - (moved + Vec3::new(0.0, 0.0, 13.0))).length() < 1e-3,
+                "new emission did not follow the camera: {w}"
+            );
+        }
+    }
+
     // La Theine's rain curtain authors 299 particles an emission on a 30-frame period with a
     // 60-frame life. Retail scales that by ~0.3 for everything under weat/, so the steady state
     // is two emissions' worth of drops, not 598.
@@ -1575,6 +1638,7 @@ mod tests {
             set_template_color(&mut g, Vec3::ONE.extend(0.5));
             g.particles.push(Particle {
                 pos: Vec3::ZERO,
+                spawn_origin: Vec3::ZERO,
                 vel: Vec3::ZERO,
                 age_frames: 50.0,
                 life_frames: 100.0,
@@ -1695,6 +1759,7 @@ mod tests {
             let mut g = live(def(100.0, 1.0, 1), 100.0);
             g.particles.push(Particle {
                 pos: Vec3::new(1.0, 2.0, 3.0),
+                spawn_origin: Vec3::ZERO,
                 vel: Vec3::ZERO,
                 age_frames: 50.0,
                 life_frames: 100.0,
@@ -2031,6 +2096,7 @@ mod tests {
         g.auto_run = true;
         g.particles.push(Particle {
             pos: Vec3::ZERO,
+            spawn_origin: Vec3::ZERO,
             vel: Vec3::ZERO,
             age_frames: 0.0,
             life_frames: 1.0,
@@ -2210,6 +2276,7 @@ mod tests {
 
         let particle = |age: f32| Particle {
             pos: Vec3::ZERO,
+            spawn_origin: Vec3::ZERO,
             vel: Vec3::ZERO,
             age_frames: age,
             life_frames: 4.0,

@@ -86,7 +86,7 @@ fn collect_precipitation(node: &ChunkNode<'_>) -> Vec<([u8; 4], ParticleGenerato
 
 #[derive(Resource, Default)]
 pub struct WeatherParticles {
-    loaded: Option<(Option<u32>, WeatherTypeId)>,
+    loaded: Option<(Option<u32>, WeatherTypeId, bool)>,
     entities: Vec<Entity>,
 }
 
@@ -103,6 +103,7 @@ fn sync_weather_particles(
     scene_state: Res<SceneState>,
     zone_weather: Res<crate::weather::ZoneWeather>,
     mut store: ResMut<WeatherParticles>,
+    global: Option<Res<crate::scheduler_runtime::GlobalEffectDir>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut mats: ResMut<Assets<crate::ffxi_particle_material::FfxiParticleMaterial>>,
     mut images: ResMut<Assets<Image>>,
@@ -113,10 +114,13 @@ fn sync_weather_particles(
     let weather = zone_weather
         .active_weather_type()
         .unwrap_or(ffxi_dat::weather::WEATHER_TYPE_FALLBACK);
-    if store.loaded == Some((file_id, weather)) {
+    // The global effect dir loads off-thread, so the key carries its arrival: a set built before
+    // it lands is missing every generator whose sheet lives there and has to be rebuilt once.
+    let key = (file_id, weather, global.is_some());
+    if store.loaded == Some(key) {
         return;
     }
-    store.loaded = Some((file_id, weather));
+    store.loaded = Some(key);
 
     // OnExit(InGame) does not fire on a zone warp, and a weather change swaps the whole set, so
     // the previous one is despawned explicitly here.
@@ -144,6 +148,7 @@ fn sync_weather_particles(
         return;
     }
     let (_schedulers, assets) = parse_action_tree(weat);
+    let global = global.as_ref().map(|g| &g.assets);
 
     for (name, def) in &defs {
         let bp = def.base_position;
@@ -158,14 +163,16 @@ fn sync_weather_particles(
                 z: bp[2],
             })
         };
+        let opts = ZoneGeneratorOptions {
+            camera_relative: def.camera_relative,
+            emit_scale: WEATHER_EMIT_SCALE,
+        };
         let entity = spawn_zone_particle_generator(
             *def,
             &assets,
+            global,
             origin,
-            ZoneGeneratorOptions {
-                camera_relative: def.camera_relative,
-                emit_scale: WEATHER_EMIT_SCALE,
-            },
+            opts,
             &mut meshes,
             &mut mats,
             &mut images,
@@ -197,7 +204,7 @@ fn track_weather_particles(
     let Some(cam) = cam.iter().next() else {
         return;
     };
-    sim.set_camera_relative_origins(cam.translation());
+    sim.set_camera_relative_origins(cam.translation(), cam.rotation());
 }
 
 pub struct WeatherParticlesPlugin;
@@ -288,6 +295,54 @@ pub(crate) mod tests {
         for canopy in ["cld2", "~4cl"] {
             assert!(!names.iter().any(|n| n == canopy), "{canopy} claimed here");
         }
+    }
+
+    // La Theine's second DAT carries the dust storm: a single camera-attached batched sheet whose
+    // `hit3` sprite sheet ships nowhere in the zone DAT at all — it lives in the global effect
+    // dir at syst/effe/hit3. The zone-local assets alone drop the generator and the storm renders
+    // with sound and no particles.
+    #[test]
+    fn real_dat_dust_storm_sheet_lives_in_the_global_effect_dir() {
+        const LA_THEINE_B_DAT: u32 = 203;
+        let Some(bytes) = zone_dat(LA_THEINE_B_DAT) else {
+            return;
+        };
+        let tree = ffxi_dat::chunk::walk_tree(&bytes);
+        let Some(weat) = find_weat_type(&tree, *b"dust") else {
+            return;
+        };
+        if weat.chunk.name != *b"dust" {
+            return;
+        }
+        let defs = collect_precipitation(weat);
+        let names: Vec<String> = defs
+            .iter()
+            .map(|(n, _)| String::from_utf8_lossy(n).into_owned())
+            .collect();
+        assert_eq!(names, ["~1du"], "{names:?}");
+        let dust = defs[0].1;
+        assert!(dust.camera_attached_base && !dust.follow_camera);
+        assert_eq!(&dust.mesh_id, b"hit3");
+
+        let (_s, scoped) = parse_action_tree(weat);
+        let (_s, whole) = crate::scheduler_runtime::parse_action_bytes(&bytes);
+        for zone_tier in [&scoped, &whole] {
+            assert!(!zone_tier.sprite_sheets.contains_key(b"hit3"));
+            assert!(!zone_tier.mmbs.contains_key(b"hit3"));
+        }
+
+        let Some(global) = zone_dat(crate::scheduler_runtime::GLOBAL_EFFECT_DIR_FILE_ID) else {
+            return;
+        };
+        let (_s, global) = crate::scheduler_runtime::parse_action_bytes(&global);
+        assert!(
+            global.sprite_sheets.contains_key(b"hit3"),
+            "the dust sheet resolves only against the global effect dir"
+        );
+        // The alpha and time-of-day tint curves stay zone-local, so the two tiers have to be
+        // searched per link, not picked once for the whole generator.
+        assert!(scoped.keyframes.contains_key(b"kdus"));
+        assert!(!global.keyframes.contains_key(b"kdus"));
     }
 
     // Chunk ids repeat across weat/<tag> subtrees inside one DAT, so resolving assets against the

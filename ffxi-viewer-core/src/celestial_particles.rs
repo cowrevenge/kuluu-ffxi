@@ -110,6 +110,7 @@ fn spawn_celestial_set(
             let entity = spawn_zone_particle_generator(
                 *def,
                 assets,
+                None,
                 // Placeholder: track_celestial_bodies rewrites this from the camera before
                 // the first mesh rebuild.
                 Vec3::ZERO,

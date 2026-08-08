@@ -199,8 +199,13 @@ pub struct ParticleGeneratorDef {
     // `base_position` is an offset from the camera rather than a world placement. Two independent
     // flags express it: the billboard word's followCamera bit and the render-state's
     // cameraAttachedBasePosition bit (La Theine's rain uses the first for the `~1ra` curtain and
-    // the second for the `rai2` mist puff).
+    // the second for the `rai2` mist puff). They place differently — followCamera pins the
+    // generator to the camera position outright, cameraAttachedBasePosition rotates the offset
+    // by the view matrix (research/xim Particle.kt:238-254) — so both are kept alongside the
+    // union.
     pub camera_relative: bool,
+    pub follow_camera: bool,
+    pub camera_attached_base: bool,
     // The spawn spread applied to every emitted particle; None puts them all on one point.
     pub position_variance: Option<PositionVariance>,
 
@@ -301,7 +306,8 @@ impl ParticleGeneratorDef {
         let mut base_position = [0.0f32; 3];
         let mut max_life_frames = 0.0f32;
         let mut camera_billboard = false;
-        let mut camera_relative = false;
+        let mut follow_camera = false;
+        let mut camera_attached_base = false;
         let mut position_variance = None;
         let mut is_particle = false;
         let mut init_scale = [1.0f32; 3];
@@ -335,8 +341,8 @@ impl ParticleGeneratorDef {
                     camera_billboard = bb & 0x0001 != 0 || bb & 0x00C0 == 0x00C0;
                     let render_state = u16_le(body, payload + 2);
                     ignore_texture_alpha = render_state & RENDER_STATE_IGNORE_TEXTURE_ALPHA != 0;
-                    camera_relative = bb & BILLBOARD_FOLLOW_CAMERA != 0
-                        || render_state & RENDER_STATE_CAMERA_ATTACHED_BASE != 0;
+                    follow_camera = bb & BILLBOARD_FOLLOW_CAMERA != 0;
+                    camera_attached_base = render_state & RENDER_STATE_CAMERA_ATTACHED_BASE != 0;
                     mesh_id = [
                         body[payload + 8],
                         body[payload + 9],
@@ -502,7 +508,9 @@ impl ParticleGeneratorDef {
             base_position,
             max_life_frames,
             camera_billboard,
-            camera_relative,
+            camera_relative: follow_camera || camera_attached_base,
+            follow_camera,
+            camera_attached_base,
             position_variance,
             continuous,
             auto_run,

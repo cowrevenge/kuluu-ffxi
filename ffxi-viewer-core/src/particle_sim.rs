@@ -46,14 +46,25 @@ impl ParticleSimulator {
         self.clock = clock;
     }
 
-    // research/xim Particle.kt:253-254 — a followCamera generator's associated position is its
-    // authored base position taken relative to the camera, refreshed every frame so a weather
-    // curtain stays over the viewer however far they walk.
-    pub fn set_camera_relative_origins(&mut self, cam_pos: Vec3) {
+    // research/xim Particle.kt:238-254 — the two camera flags place differently. followCamera
+    // pins the generator to the camera position outright (the base offset then lands per
+    // particle through the billboard transform; the shipped curtains author pure-Y bases, so the
+    // yaw-invariant vel_basis fold below is equivalent). cameraAttachedBasePosition rotates the
+    // base offset by the view matrix — xim's `left*-x + up*y + forward*-z` with its
+    // backward-pointing lookAtForward is `rot * (-x, y, -z)` here (Matrix4f.kt:265-327) — so
+    // the mist/dust sheet rides in front of the viewer however they turn (+z authors a placement
+    // ahead of the camera). Both refresh every frame.
+    pub fn set_camera_relative_origins(&mut self, cam_pos: Vec3, cam_rot: Quat) {
         for g in &mut self.generators {
-            if g.camera_relative {
-                g.origin = cam_pos + Vec3::from_array(g.def.base_position) * g.vel_basis;
+            if !g.camera_relative {
+                continue;
             }
+            let bp = g.def.base_position;
+            g.origin = if g.def.camera_attached_base {
+                cam_pos + cam_rot * Vec3::new(-bp[0], bp[1], -bp[2])
+            } else {
+                cam_pos + Vec3::from_array(bp) * g.vel_basis
+            };
         }
     }
 
@@ -510,6 +521,7 @@ pub fn spawn_actor_auto_run_particles(
 pub fn spawn_zone_particle_generator(
     def: ParticleGeneratorDef,
     assets: &ActionAssets,
+    global: Option<&ActionAssets>,
     origin: Vec3,
     opts: ZoneGeneratorOptions,
     meshes: &mut Assets<Mesh>,
@@ -518,20 +530,8 @@ pub fn spawn_zone_particle_generator(
     sim: &mut ParticleSimulator,
     commands: &mut Commands,
 ) -> Option<Entity> {
-    // Zone sprays link a D3M billboard, an MMB mesh, or a SpriteSheet by DatId (e.g. Bastok
-    // "abuk", Port Windurst "rivsea"); the MMB/SpriteSheet texture resolves by internal name.
-    let (template, sprite_frames, tex, draw_path) =
-        if let Some((template, frames, tex)) = resolve_mesh(assets, &def, images) {
-            (template, frames, tex, D3mDrawPath::D3m)
-        } else {
-            let mmb = assets.mmbs.get(&def.mesh_id)?;
-            let template = mmb_sprite_template(mmb)?;
-            let tex = assets
-                .images_by_name
-                .get(&mmb.texture_name)
-                .map(|t| images.add(decoded_texture_to_image(t)));
-            (template, Vec::new(), tex, D3mDrawPath::Mmb)
-        };
+    let (template, sprite_frames, tex, draw_path) = resolve_zone_mesh(assets, &def, images)
+        .or_else(|| global.and_then(|g| resolve_zone_mesh(g, &def, images)))?;
     let blend = match def.blend {
         ffxi_dat::particle_gen::ParticleBlend::Additive => D3mBlendMode::Additive,
         ffxi_dat::particle_gen::ParticleBlend::Blend => D3mBlendMode::Blended,
@@ -553,14 +553,12 @@ pub fn spawn_zone_particle_generator(
         ))
         .id();
 
-    let resolve = |id: Option<[u8; 4]>| -> Option<KeyFrameTrack> {
-        id.and_then(|i| assets.keyframes.get(&i).cloned())
-    };
+    let resolve = |id: Option<[u8; 4]>| keyframe(assets, global, id);
     sim.generators.push(LiveGenerator {
         scale_x: resolve(def.scale_x_track),
         scale_y: resolve(def.scale_y_track),
         alpha: resolve(def.alpha_track),
-        tod_color: resolve_tod_tracks(&def, assets),
+        tod_color: def.tod_color_tracks.map(|id| keyframe(assets, global, id)),
         template,
         draw_path,
         sprite_frames,
@@ -1108,6 +1106,43 @@ fn sprite_template(d3m: &ffxi_dat::d3m::D3m) -> Option<SpriteTemplate> {
 
 // None when the referenced mesh isn't present, which leaves zone callers to fall back to an
 // MMB mesh.
+// Zone sprays link a D3M billboard, an MMB mesh, or a SpriteSheet by DatId (e.g. Bastok "abuk",
+// Port Windurst "rivsea"); the MMB/SpriteSheet texture resolves by internal name.
+fn resolve_zone_mesh(
+    assets: &ActionAssets,
+    def: &ParticleGeneratorDef,
+    images: &mut Assets<Image>,
+) -> Option<(
+    SpriteTemplate,
+    Vec<SpriteTemplate>,
+    Option<Handle<Image>>,
+    D3mDrawPath,
+)> {
+    if let Some((template, frames, tex)) = resolve_mesh(assets, def, images) {
+        return Some((template, frames, tex, D3mDrawPath::D3m));
+    }
+    let mmb = assets.mmbs.get(&def.mesh_id)?;
+    let template = mmb_sprite_template(mmb)?;
+    let tex = assets
+        .images_by_name
+        .get(&mmb.texture_name)
+        .map(|t| images.add(decoded_texture_to_image(t)));
+    Some((template, Vec::new(), tex, D3mDrawPath::Mmb))
+}
+
+fn keyframe(
+    assets: &ActionAssets,
+    global: Option<&ActionAssets>,
+    id: Option<[u8; 4]>,
+) -> Option<KeyFrameTrack> {
+    let id = id?;
+    assets
+        .keyframes
+        .get(&id)
+        .or_else(|| global.and_then(|g| g.keyframes.get(&id)))
+        .cloned()
+}
+
 fn resolve_mesh(
     assets: &ActionAssets,
     def: &ParticleGeneratorDef,
@@ -1233,6 +1268,8 @@ mod tests {
             max_life_frames: life,
             camera_billboard: true,
             camera_relative: false,
+            follow_camera: false,
+            camera_attached_base: false,
             position_variance: None,
             continuous: false,
             auto_run: false,
@@ -1338,6 +1375,56 @@ mod tests {
             after_window, half_second_later,
             "emission stops half a second in, not a whole one"
         );
+    }
+
+    // La Theine's `~1ra` curtain is followCamera with a pure-Y base: it rides the camera with
+    // its 35-up offset however the camera yaws. The `rai2`/`~1du` sheets are
+    // cameraAttachedBasePosition: the authored offset is view-space, so a +z placement stays in
+    // front of the viewer as the camera turns (research/xim Particle.kt:238-254).
+    #[test]
+    fn camera_relative_origins_split_by_flag() {
+        let cam_pos = Vec3::new(100.0, 5.0, 200.0);
+        let yaw180 = Quat::from_rotation_y(std::f32::consts::PI);
+
+        let mut curtain = def(60.0, 30.0, 1);
+        curtain.camera_relative = true;
+        curtain.follow_camera = true;
+        curtain.base_position = [0.0, -35.0, 0.0];
+        let mut curtain = live(curtain, 0.0);
+        curtain.camera_relative = true;
+        curtain.vel_basis = Vec3::new(1.0, -1.0, -1.0);
+
+        let mut sheet = def(60.0, 30.0, 1);
+        sheet.camera_relative = true;
+        sheet.camera_attached_base = true;
+        sheet.base_position = [0.0, -10.0, 10.0];
+        let mut sheet = live(sheet, 0.0);
+        sheet.camera_relative = true;
+
+        let mut sim = ParticleSimulator::default();
+        sim.generators.push(curtain);
+        sim.generators.push(sheet);
+
+        sim.set_camera_relative_origins(cam_pos, Quat::IDENTITY);
+        assert_eq!(
+            sim.generators[0].origin,
+            cam_pos + Vec3::new(0.0, 35.0, 0.0)
+        );
+        // Identity view looks along -Z: the authored (0, -10, 10) lands 10 below and 10 ahead.
+        assert_eq!(
+            sim.generators[1].origin,
+            cam_pos + Vec3::new(0.0, -10.0, -10.0)
+        );
+
+        sim.set_camera_relative_origins(cam_pos, yaw180);
+        // The curtain's vertical fold is yaw-invariant; the sheet swings behind the turn.
+        assert_eq!(
+            sim.generators[0].origin,
+            cam_pos + Vec3::new(0.0, 35.0, 0.0)
+        );
+        let got = sim.generators[1].origin;
+        let want = cam_pos + Vec3::new(0.0, -10.0, 10.0);
+        assert!((got - want).length() < 1e-4, "{got} != {want}");
     }
 
     // La Theine's rain curtain authors 299 particles an emission on a 30-frame period with a

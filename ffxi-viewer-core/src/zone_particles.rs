@@ -151,6 +151,7 @@ fn sync_zone_particles(
         if let Some(entity) = spawn_zone_particle_generator(
             def,
             &assets,
+            None,
             origin,
             ZoneGeneratorOptions::default(),
             &mut meshes,

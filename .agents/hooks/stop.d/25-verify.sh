@@ -27,6 +27,8 @@ set -uo pipefail
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 # shellcheck source=../stop-lib.sh
 . "$here/../stop-lib.sh"
+# shellcheck source=../session-edits.lib.sh
+. "$here/../session-edits.lib.sh"
 load_payload
 
 [ "${VERIFY_GATE:-on}" = "off" ] && exit 0
@@ -36,23 +38,28 @@ snap="${TMPDIR:-/tmp}/claude-verify-gate/${SESSION_ID}"
 [ -f "$snap.porcelain" ] || exit 0  # no baseline → can't tell what's this session's work
 
 # --- What runtime-observable source did THIS session change? -------------
-# ONLY uncommitted working-tree changes vs the SessionStart snapshot. We
-# deliberately do NOT scan committed history (base_head..HEAD): in a shared
-# checkout with concurrent agents / worktree merges, other sessions' commits
-# fall into that range and get misattributed here — cross-session
-# contamination that fires the gate on work this session never touched. A
-# file another agent committed never shows up as *your* dirty file, so the
-# working-tree diff is the contamination-free signal for "this session's
-# work". Trade-off: an edit→commit→leave without verifying escapes the Stop
-# gate; accepted, since the false positives it removes are worse than that gap
-# (and committed code is a reviewable unit the commit-nudge already gates).
+# Uncommitted working-tree changes vs the SessionStart snapshot, then
+# intersected with the per-session edit ledger. Two separate contamination
+# sources have to be excluded:
+#   - committed history (base_head..HEAD) — in a shared checkout another
+#     agent's commits fall in that range, so it is never scanned. Trade-off:
+#     an edit→commit→leave without verifying escapes this gate; accepted,
+#     since committed code is a reviewable unit the commit-nudge gates.
+#   - concurrent working-tree writes — another live session dirtying a file
+#     also shows up as "dirty now, clean at my session start", which fired
+#     this gate on work the agent never touched. The ledger records the
+#     paths THIS session wrote (per tool call), so the intersection is the
+#     contamination-free set.
 # Filter to surfaces /verify can observe: Rust + shaders, excluding tests
 # (covered by cargo) and vendor/ (LSB upstream, its own suite).
+ledger_exists "$SESSION_ID" || exit 0  # recorder unregistered → stay silent
 current=$(git -C "$CWD" status --porcelain 2>/dev/null || true)
-session_dirty=$(comm -23 \
-  <(printf '%s\n' "$current" | sort -u) \
-  <(sort -u "$snap.porcelain" 2>/dev/null) \
-  | sed -E 's/^.{3}//; s/^"(.*)"$/\1/; s/.* -> //' || true)  # strip status cols, quotes, rename arrows
+session_dirty=$(comm -12 \
+  <(comm -23 \
+      <(printf '%s\n' "$current" | sort -u) \
+      <(sort -u "$snap.porcelain" 2>/dev/null) \
+    | sed -E 's/^.{3}//; s/^"(.*)"$/\1/; s/.* -> //' | sort -u) \
+  <(ledger_read "$SESSION_ID") || true)
 
 changed=$(printf '%s\n' "$session_dirty" \
   | grep -E '\.(rs|wgsl)$' \

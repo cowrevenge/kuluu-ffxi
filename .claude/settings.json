@@ -51,6 +51,24 @@
           }
         ],
         "matcher": "Read|Grep|Glob"
+      },
+      {
+        "hooks": [
+          {
+            "command": "${CLAUDE_PROJECT_DIR}/.agents/hooks/session-edits-record.sh",
+            "type": "command"
+          }
+        ],
+        "matcher": "Edit|Write|NotebookEdit"
+      },
+      {
+        "hooks": [
+          {
+            "command": "${CLAUDE_PROJECT_DIR}/.agents/hooks/session-edits-bash-post.sh",
+            "type": "command"
+          }
+        ],
+        "matcher": "Bash"
       }
     ],
     "PreToolUse": [
@@ -71,6 +89,15 @@
           }
         ],
         "matcher": "Edit|Write"
+      },
+      {
+        "hooks": [
+          {
+            "command": "${CLAUDE_PROJECT_DIR}/.agents/hooks/session-edits-bash-pre.sh",
+            "type": "command"
+          }
+        ],
+        "matcher": "Bash"
       }
     ],
     "SessionStart": [

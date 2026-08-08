@@ -1,8 +1,13 @@
 #!/usr/bin/env bash
-# Stop sub-check (priority 20): lines dirty now but absent from the
-# SessionStart baseline = work this session produced. If any, nudge the
-# agent to group uncontroversial changes into a commit. Baseline written
-# by commit-nudge-start.sh.
+# Stop sub-check (priority 20): files this session wrote that are still
+# uncommitted. If any, nudge the agent to group uncontroversial changes
+# into a commit.
+#
+# Attribution is the edit ledger (session-edits.lib.sh), NOT the dirty-vs-
+# SessionStart delta: in a shared checkout a concurrent session's writes
+# also land in that delta, and this check would demand commits for work
+# the agent never made. The SessionStart baseline still filters out
+# inherited dirt.
 #
 # Contract: see stop-lib.sh. Exit 0 = pass; fire = exit 10 + reason.
 
@@ -11,6 +16,8 @@ set -uo pipefail
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 # shellcheck source=../stop-lib.sh
 . "$here/../stop-lib.sh"
+# shellcheck source=../session-edits.lib.sh
+. "$here/../session-edits.lib.sh"
 load_payload
 
 git -C "$CWD" rev-parse --git-dir >/dev/null 2>&1 || exit 0
@@ -28,6 +35,17 @@ session_lines=$(comm -23 \
   | grep -v '^$' || true)
 [ -z "$session_lines" ] && exit 0
 
+# Keep only lines whose path this session actually wrote. No ledger at all
+# means the recording hooks are unregistered — stay silent rather than fall
+# back to the contaminated tree delta.
+ledger_exists "$SESSION_ID" || exit 0
+session_lines=$(comm -12 \
+  <(printf '%s\n' "$session_lines" \
+      | sed -E 's/^.{3}//; s/^"(.*)"$/\1/; s/.* -> //' | sort -u) \
+  <(ledger_read "$SESSION_ID") \
+  | grep -v '^$' || true)
+[ -z "$session_lines" ] && exit 0
+
 file_count=$(printf '%s\n' "$session_lines" | grep -c . || true)
 shown=$(printf '%s\n' "$session_lines" | head -20)
 [ "$file_count" -gt 20 ] && shown="${shown}
@@ -39,5 +57,5 @@ sig=$( { printf '%s\n' "$session_lines"; git -C "$CWD" diff HEAD 2>/dev/null; } 
   | shasum -a 256 | cut -d' ' -f1)
 sig_changed claude-commit-nudge "$sig" || exit 0
 
-fire "$(printf 'Stop-hook checkpoint (silent — output NO prose either way): this session left %s uncommitted file(s):\n%s\n\nThis list is files dirtied since the session started, so in a shared tree it may mix in other sessions edits. Commit the files YOU edited this session, grouped into one or more coherent, uncontroversial commits with clear messages. Stage scoped by path: `git add <path>` for files only this session touched. For a file that may ALSO hold another session edits, stage just your own hunks — `git add -p`, or `git apply --cached` of only your diff hunks — never the whole shared file, and never `-A`. Leave files you did not edit untouched. The commit(s) your ONLY output. If mid-flight, just stop. Never narrate this checkpoint. Quiet until the work changes.' \
+fire "$(printf 'Stop-hook checkpoint (silent — output NO prose either way): this session wrote %s file(s) that are still uncommitted:\n%s\n\nThese are files THIS session wrote (recorded per tool call), so they are yours to commit. Group them into one or more coherent, uncontroversial commits with clear messages. Stage scoped by path: `git add <path>`. A file here may still hold another session edits interleaved with yours — if the diff shows hunks you did not write, stage only your own (`git add -p`), never `-A`. The commit(s) your ONLY output. If mid-flight, just stop. Never narrate this checkpoint. Quiet until the work changes.' \
   "$file_count" "$shown")"

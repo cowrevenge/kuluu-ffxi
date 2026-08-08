@@ -654,15 +654,17 @@ pub fn sync_entity_looks_system(
             continue;
         };
         let current = q_look.get(bevy_e).ok();
+        // A look the server stops reporting is not a look that changed: only
+        // self's snapshot entity ever goes back to None (pos-only updates drop
+        // it), and clearing the component there fought ensure_self_lookcomp_system
+        // re-seeding it, so dispatch_look_driven_models -- scheduled between the
+        // two -- never saw self hold a LookComp and never requested the model.
         match (&wire.look, current) {
             (Some(new), Some(LookComp(old))) if new == old => {}
             (Some(new), _) => {
                 commands.entity(bevy_e).try_insert(LookComp(*new));
             }
-            (None, Some(_)) => {
-                commands.entity(bevy_e).remove::<LookComp>();
-            }
-            (None, None) => {}
+            (None, _) => {}
         }
     }
 }
@@ -826,6 +828,41 @@ mod tests {
         let mut e = entity_with_hp(17, Some(75));
         e.status = 2;
         assert!(should_clear_target(Some(17), &[e]));
+    }
+
+    // kuluu-2sqm: self's snapshot entity reports look = None on pos-only
+    // updates. Clearing LookComp there raced ensure_self_lookcomp_system's
+    // re-seed, and dispatch_look_driven_models -- which only acts on entities
+    // holding a LookComp -- never requested the model, so the player rendered
+    // as the bare placeholder orb for the whole session.
+    #[test]
+    fn look_going_none_keeps_the_last_known_lookcomp() {
+        let mut app = App::new();
+        app.init_resource::<SceneState>()
+            .init_resource::<TrackedEntities>()
+            .add_systems(Update, sync_entity_looks_system);
+
+        let look = EntityLook::Standard { modelid: 42 };
+        let bevy_e = app.world_mut().spawn(LookComp(look)).id();
+        app.world_mut()
+            .resource_mut::<TrackedEntities>()
+            .by_id
+            .insert(7, bevy_e);
+
+        let mut wire = entity_with_hp(7, None);
+        wire.look = None;
+        {
+            let mut state = app.world_mut().resource_mut::<SceneState>();
+            state.snapshot.entities = vec![wire];
+            state.dirty = true;
+        }
+        app.update();
+
+        assert_eq!(
+            app.world().get::<LookComp>(bevy_e).map(|l| l.0),
+            Some(look),
+            "a look the server stopped reporting must not clear the component"
+        );
     }
 
     fn entity_with_hp(id: u32, hp_pct: Option<u8>) -> ffxi_viewer_wire::Entity {

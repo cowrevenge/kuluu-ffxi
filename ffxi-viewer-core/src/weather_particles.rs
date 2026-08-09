@@ -297,14 +297,15 @@ pub(crate) mod tests {
         }
     }
 
-    // La Theine's second DAT carries the dust storm: a single camera-attached batched sheet whose
-    // `hit3` sprite sheet ships nowhere in the zone DAT at all — it lives in the global effect
-    // dir at syst/effe/hit3. The zone-local assets alone drop the generator and the storm renders
-    // with sound and no particles.
+    // Valkurm Dunes carries the dust storm: a single camera-attached batched sheet whose `hit3`
+    // sprite sheet ships nowhere in the zone DAT at all — it lives in the global effect dir at
+    // syst/effe/hit3. The zone-local assets alone drop the generator and the storm renders with
+    // sound and no particles.
+    const VALKURM_DUNES_ZONE_DAT: u32 = 203;
+
     #[test]
     fn real_dat_dust_storm_sheet_lives_in_the_global_effect_dir() {
-        const LA_THEINE_B_DAT: u32 = 203;
-        let Some(bytes) = zone_dat(LA_THEINE_B_DAT) else {
+        let Some(bytes) = zone_dat(VALKURM_DUNES_ZONE_DAT) else {
             return;
         };
         let tree = ffxi_dat::chunk::walk_tree(&bytes);

@@ -2832,6 +2832,17 @@ pub enum AgentCommand {
 
     StopMove,
 
+    /// Client-side height repair for the under-every-floor wedge (kuluu-mo4q).
+    /// Distinct from [`AgentCommand::Move`] because it is not player movement:
+    /// the reactor must neither cancel the player's goal for it nor drop it
+    /// while a forced-move override is running.
+    GroundCorrection {
+        x: f32,
+        y: f32,
+        z: f32,
+        heading: u8,
+    },
+
     /// Free-text answer to a client-local text-entry dialog frame (currently
     /// only the delivery-box recipient prompt). Ignored when no text entry is
     /// pending.
@@ -3663,9 +3674,10 @@ mod tests {
         assert_eq!(s.current_weather, None);
     }
 
-    // 0x00A LOGIN carries the zone-in weather, and session/mod.rs emits it
-    // *after* the ZoneChanged that clears current_weather. Pin that ordering:
-    // reversed, a zone-in would render the default sky until the next 0x057.
+    // The fold half of the zone-in weather path: a WeatherUpdated applied after
+    // a ZoneChanged is kept, so the 0x00A weather is not re-cleared. The emit
+    // ordering that feeds it is pinned in session/mod.rs by
+    // `login_emits_zone_in_weather_after_the_zone_change`.
     #[test]
     fn zone_in_weather_survives_the_zone_change_clear() {
         let mut s = SessionState::default();

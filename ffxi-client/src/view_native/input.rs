@@ -1014,6 +1014,7 @@ pub fn recover_self_ground_system(
     state: Res<SceneState>,
     cmd_tx: Res<CommandTx>,
     collision: Res<ffxi_viewer_core::dat_mzb::MzbCollisionGeometry>,
+    mzb_in_flight: Res<ffxi_viewer_core::dat_mzb::LoadMzbInFlight>,
     mut prediction: ResMut<LocalPlayerPrediction>,
     mut under_secs: Local<f32>,
 ) {
@@ -1022,10 +1023,6 @@ pub fn recover_self_ground_system(
         .snapshot
         .self_char_id
         .is_some_and(|id| state.snapshot.entities.iter().any(|e| e.id == id));
-    if !self_present {
-        under_floor_debounce_fires(&mut under_secs, false, time.delta_secs());
-        return;
-    }
 
     // Before the first movement tick the prediction is unset, so the seed the
     // server sent is what needs checking.
@@ -1034,6 +1031,53 @@ pub fn recover_self_ground_system(
     } else {
         Vec3::new(self_pos.pos.x, self_pos.pos.y, self_pos.pos.z)
     };
+
+    let Some(cmd) = ground_recovery_step(
+        &collision,
+        &mzb_in_flight,
+        pos,
+        self_pos.heading,
+        self_present,
+        time.delta_secs(),
+        &mut under_secs,
+    ) else {
+        return;
+    };
+    if let AgentCommand::GroundCorrection { z, .. } = cmd {
+        prediction.pos = Vec3::new(pos.x, pos.y, z);
+        prediction.initialized = true;
+    }
+    let _ = cmd_tx.0.try_send(cmd);
+}
+
+/// The corrective command [`recover_self_ground_system`] emits. It is
+/// deliberately not an [`AgentCommand::Move`]: the reactor treats a Move as
+/// player intent and would cancel a Following/Pathing goal for it, or drop it
+/// outright under a forced-move override (kuluu-mo4q).
+pub fn ground_recovery_command(x: f32, y: f32, z: f32, heading: u8) -> AgentCommand {
+    AgentCommand::GroundCorrection { x, y, z, heading }
+}
+
+/// Inert while a zone/interior load is in flight: the "under every floor is
+/// unreachable by walking" argument holds only over a *complete* collision set,
+/// and `sub_area_activation` swaps an interior in behind the exterior shell
+/// asynchronously — mid-swap an indoor player's column holds only the shell
+/// above them, and recovering onto it is the kuluu-0nnl roof snap. The load
+/// outlasts [`UNDER_FLOOR_RECOVERY_SECS`], so the debounce alone cannot cover
+/// this.
+fn ground_recovery_step(
+    collision: &ffxi_viewer_core::dat_mzb::MzbCollisionGeometry,
+    mzb_in_flight: &ffxi_viewer_core::dat_mzb::LoadMzbInFlight,
+    pos: Vec3,
+    heading: u8,
+    self_present: bool,
+    dt: f32,
+    under_secs: &mut f32,
+) -> Option<AgentCommand> {
+    if !self_present || mzb_in_flight.any_pending() {
+        under_floor_debounce_fires(under_secs, false, dt);
+        return None;
+    }
     let column = bevy::math::Vec2::new(pos.x, -pos.y);
     let feet_y = -pos.z;
 
@@ -1047,25 +1091,15 @@ pub fn recover_self_ground_system(
     // No floor at all means the zone collision has not loaded yet (it is reset
     // on zone change) or the column is genuinely floorless — neither is a wedge.
     let under = !reachable && collision.ground_nearest(column, feet_y).is_some();
-    if !under_floor_debounce_fires(&mut under_secs, under, time.delta_secs()) {
-        return;
+    if !under_floor_debounce_fires(under_secs, under, dt) {
+        return None;
     }
 
-    let Some(recovered_z) = collision.ground_or_recover_wire_z(pos.x, pos.y, pos.z) else {
-        return;
-    };
+    let recovered_z = collision.ground_or_recover_wire_z(pos.x, pos.y, pos.z)?;
     if (recovered_z - pos.z).abs() <= f32::EPSILON {
-        return;
+        return None;
     }
-
-    prediction.pos = Vec3::new(pos.x, pos.y, recovered_z);
-    prediction.initialized = true;
-    let _ = cmd_tx.0.try_send(AgentCommand::Move {
-        x: pos.x,
-        y: pos.y,
-        z: recovered_z,
-        heading: self_pos.heading,
-    });
+    Some(ground_recovery_command(pos.x, pos.y, recovered_z, heading))
 }
 
 fn heading_to_forward(heading: u8) -> (f32, f32) {
@@ -1405,6 +1439,202 @@ mod tests {
         assert!(
             !under_floor_debounce_fires(&mut acc, true, UNDER_FLOOR_RECOVERY_SECS * 0.9),
             "a moment on solid ground clears the accumulator, so a stray floorless column never fires"
+        );
+    }
+
+    /// A single up-facing slab at bevy y = `floor_y` spanning the origin
+    /// column, enough for `ground_step`/`ground_nearest` to resolve.
+    fn slab_collision(floor_y: f32) -> ffxi_viewer_core::dat_mzb::MzbCollisionGeometry {
+        use ffxi_viewer_core::dat_mzb::{
+            build_collision_geometry, MzbCollisionGeometry, MzbInstance, MzbSubMesh,
+        };
+        const HALF: f32 = 10.0;
+        let sub = MzbSubMesh {
+            positions: vec![
+                [-HALF, floor_y, -HALF],
+                [HALF, floor_y, -HALF],
+                [HALF, floor_y, HALF],
+                [-HALF, floor_y, HALF],
+            ],
+            indices: vec![0, 1, 2, 0, 2, 3],
+            tri_terrain: vec![0, 0],
+            tri_normal: vec![[0.0, 1.0, 0.0], [0.0, 1.0, 0.0]],
+            tri_camera_transparent: vec![false, false],
+            flags: 0,
+        };
+        let inst = MzbInstance {
+            submesh_idx: 0,
+            bevy_transform: bevy::prelude::Transform::IDENTITY,
+            water_height_bevy: None,
+        };
+        MzbCollisionGeometry::from_block(build_collision_geometry(&[sub], &[inst], None))
+    }
+
+    /// A [`LoadMzbInFlight`] holding one outstanding zone-geometry load, as the
+    /// window where `sub_area_activation` has retired a block and its
+    /// replacement has not installed yet.
+    fn one_load_in_flight() -> ffxi_viewer_core::dat_mzb::LoadMzbInFlight {
+        use ffxi_viewer_core::dat_mzb::{LoadMzbInFlight, LoadedZoneGeom};
+        bevy::tasks::AsyncComputeTaskPool::get_or_init(bevy::tasks::TaskPool::new);
+        let task = bevy::tasks::AsyncComputeTaskPool::get().spawn(async {
+            LoadedZoneGeom {
+                submeshes: std::sync::Arc::new(Vec::new()),
+                instances: std::sync::Arc::new(Vec::new()),
+                mmb_spawns: Err(String::from("test stub")),
+            }
+        });
+        let mut in_flight = LoadMzbInFlight::default();
+        in_flight.tasks.insert((0, None), (Vec::new(), task));
+        in_flight
+    }
+
+    /// The wedge repro: feet at wire z = 0 (bevy y = 0) with the only floor a
+    /// full body above, past `MAX_GROUND_STEP_UP`.
+    const WEDGE_FLOOR_BEVY_Y: f32 = 5.0;
+    const WEDGE_POS: Vec3 = Vec3::new(0.0, 0.0, 0.0);
+
+    #[test]
+    fn recovery_is_gated_while_zone_collision_is_still_loading() {
+        const TICK: f32 = 1.0 / 60.0;
+        let collision = slab_collision(WEDGE_FLOOR_BEVY_Y);
+        let loading = one_load_in_flight();
+        let idle = ffxi_viewer_core::dat_mzb::LoadMzbInFlight::default();
+        let mut under_secs = 0.0f32;
+
+        // Well past the debounce: an interior swap outlasts
+        // UNDER_FLOOR_RECOVERY_SECS, which is exactly why the debounce alone is
+        // not the gate.
+        let loading_ticks = (UNDER_FLOOR_RECOVERY_SECS * 4.0 / TICK) as u32;
+        for _ in 0..loading_ticks {
+            assert!(
+                ground_recovery_step(
+                    &collision,
+                    &loading,
+                    WEDGE_POS,
+                    0,
+                    true,
+                    TICK,
+                    &mut under_secs
+                )
+                .is_none(),
+                "recovered onto the shell while the collision set was incomplete"
+            );
+        }
+
+        let mut fired = None;
+        for _ in 0..loading_ticks {
+            if let Some(cmd) =
+                ground_recovery_step(&collision, &idle, WEDGE_POS, 0, true, TICK, &mut under_secs)
+            {
+                fired = Some(cmd);
+                break;
+            }
+        }
+        match fired {
+            Some(AgentCommand::GroundCorrection { z, .. }) => {
+                assert!(
+                    (z + WEDGE_FLOOR_BEVY_Y).abs() < 1e-3,
+                    "recovered to wire z {z}, expected the slab"
+                );
+            }
+            other => panic!("recovery must still fire on a real wedge once loaded, got {other:?}"),
+        }
+    }
+
+    /// The command the recovery actually emits must route through the reactor
+    /// as a correction, not as player movement (kuluu-mo4q): the player's goal
+    /// survives it, and it is not swallowed while a forced move is running.
+    #[test]
+    fn recovery_command_keeps_the_goal_and_survives_an_override() {
+        use ffxi_client::reactor::{Goal, Reactor, ReactorConfig};
+        use ffxi_client::state::{AgentEvent, Position, Vec3 as WireVec3};
+
+        let collision = slab_collision(WEDGE_FLOOR_BEVY_Y);
+        let mut under_secs = 0.0f32;
+        let cmd = ground_recovery_step(
+            &collision,
+            &ffxi_viewer_core::dat_mzb::LoadMzbInFlight::default(),
+            WEDGE_POS,
+            0,
+            true,
+            UNDER_FLOOR_RECOVERY_SECS,
+            &mut under_secs,
+        )
+        .expect("the wedge column must produce a recovery");
+        let recovered_z = match cmd {
+            AgentCommand::GroundCorrection { z, .. } | AgentCommand::Move { z, .. } => z,
+            ref other => panic!("unexpected recovery command {other:?}"),
+        };
+
+        let mut r = Reactor::new(ReactorConfig::default());
+        r.handle_command(AgentCommand::Follow {
+            target_id: 7,
+            distance: 3.0,
+        });
+        let routing = r.handle_command(cmd.clone());
+        assert!(
+            routing.forward.is_some(),
+            "recovery never reached the wire: {routing:?}"
+        );
+        assert!(
+            matches!(r.current_goal(), Goal::Following { target_id: 7, .. }),
+            "recovery cancelled the player's follow: {:?}",
+            r.current_goal()
+        );
+
+        const OVERRIDE_TTL_MS: u32 = 5_000;
+        let forced_target = Position {
+            pos: WireVec3 {
+                x: 10.0,
+                y: 0.0,
+                z: 0.0,
+            },
+            ..Position::default()
+        };
+        r.observe_event(&AgentEvent::ForcedMove {
+            mode: 0,
+            target: forced_target,
+            duration_ms: OVERRIDE_TTL_MS,
+        });
+        let routing = r.handle_command(cmd);
+        assert!(
+            routing.forward.is_some(),
+            "recovery dropped while a forced-move override was active"
+        );
+        assert!(
+            matches!(r.current_override(), Some(ov) if (ov.target.z - recovered_z).abs() < 1e-6),
+            "the override replays its own target every tick, so its height must be rebased"
+        );
+    }
+
+    #[test]
+    fn recovery_debounce_restarts_after_the_load_gate_clears() {
+        let collision = slab_collision(WEDGE_FLOOR_BEVY_Y);
+        let loading = one_load_in_flight();
+        let idle = ffxi_viewer_core::dat_mzb::LoadMzbInFlight::default();
+        let mut under_secs = 0.0f32;
+        assert!(ground_recovery_step(
+            &collision,
+            &loading,
+            WEDGE_POS,
+            0,
+            true,
+            UNDER_FLOOR_RECOVERY_SECS * 10.0,
+            &mut under_secs
+        )
+        .is_none());
+        assert!(
+            ground_recovery_step(
+                &collision,
+                &idle,
+                WEDGE_POS,
+                0,
+                true,
+                UNDER_FLOOR_RECOVERY_SECS * 0.5,
+                &mut under_secs
+            )
+            .is_none(),
+            "gated time must not count toward the debounce"
         );
     }
 

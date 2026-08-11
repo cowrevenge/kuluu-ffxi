@@ -226,6 +226,15 @@ impl LoadMzbInFlight {
             .values()
             .any(|(reqs, _)| reqs.iter().any(|r| r.slot == slot))
     }
+
+    /// Whether a load is outstanding in *any* slot. A gate whose correctness
+    /// needs the collision set to be complete asks this rather than
+    /// [`Self::pending_in_slot`]: `sub_area_activation` swaps an interior in
+    /// behind the exterior shell asynchronously, and mid-swap an indoor
+    /// player's column can legitimately hold only the shell above them.
+    pub fn any_pending(&self) -> bool {
+        !self.tasks.is_empty()
+    }
 }
 
 /// LRU of parsed zone blocks.

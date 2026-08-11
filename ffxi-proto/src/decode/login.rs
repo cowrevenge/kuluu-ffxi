@@ -123,7 +123,11 @@ pub struct ZoneInWeather {
     /// whose `field_NN` names run +4 ahead of the true payload offsets).
     pub previous_weather_number: u16,
     /// `WeatherTime` — `zone->GetWeatherChangeTime()`, retail's
-    /// `CurrentWeatherStartTime` (0x00A.cpp:91), in minutes.
+    /// `CurrentWeatherStartTime` (0x00A.cpp:91), in **Earth seconds since the
+    /// Vana'diel epoch**: 0x00a_login.cpp:154 assigns
+    /// `zone->GetWeatherChangeTime()`, which zone.cpp:670 sets from
+    /// `earth_time::vanadiel_timestamp()`
+    /// (vendor/server/src/common/earth_time.h:304-308).
     pub weather_time: u32,
     /// `WeatherTime2` — retail's `PreviousWeatherStartTime` (0x00A.cpp:95).
     pub previous_weather_time: u32,
@@ -187,11 +191,11 @@ impl ServerLogin {
     // decoder already uses: MusicNum[5] at 0x52 runs to SubMapNumber at 0x5C,
     // and past the weather block sit ShipStart/ShipEnd/IsMonstrosity, landing
     // exactly on LOGIN_STATE_OFFSET 0x7C.
-    pub(crate) const WEATHER_NUMBER_OFFSET: usize = 0x64;
-    pub(crate) const WEATHER_NUMBER2_OFFSET: usize = 0x66;
-    pub(crate) const WEATHER_TIME_OFFSET: usize = 0x68;
-    pub(crate) const WEATHER_TIME2_OFFSET: usize = 0x6C;
-    pub(crate) const WEATHER_OFFSET_TIME_OFFSET: usize = 0x70;
+    pub const WEATHER_NUMBER_OFFSET: usize = 0x64;
+    pub const WEATHER_NUMBER2_OFFSET: usize = 0x66;
+    pub const WEATHER_TIME_OFFSET: usize = 0x68;
+    pub const WEATHER_TIME2_OFFSET: usize = 0x6C;
+    pub const WEATHER_OFFSET_TIME_OFFSET: usize = 0x70;
 
     /// `PosHead.server_status` while a zone-in event is pending — the packet's
     /// event fields are only written then, and event id 0 is a real cutscene

@@ -1616,11 +1616,21 @@ fn handle_sub_packet(
         // and on every equip/lockstyle/head-toggle change
         // (entities/charentity.cpp:1174, c2s/0x053_lockstyle.cpp:37,
         // c2s/0x0dc_config.cpp:113).
-        s2c::GRAP_LIST => {
-            if let Some(look) = decode::LookData::decode_grap_list(sub.data) {
+        s2c::GRAP_LIST => match decode::LookData::decode_grap_list(sub.data) {
+            Some(look) => {
                 let _ = event_tx.send(AgentEvent::SelfLookUpdated { look });
             }
-        }
+            // Without this, a wrong body-offset assumption is invisible: self
+            // just keeps the launcher seed look with nothing in the log.
+            None => warn_decode_err(
+                sub.opcode,
+                format_args!(
+                    "GrapIDTbl at offset {} absent or zeroed in a {}-byte body",
+                    decode::LookData::GRAP_LIST_TBL_OFFSET,
+                    sub.data.len()
+                ),
+            ),
+        },
         s2c::MAGIC_DATA => {
             if let Ok(m) =
                 decode::MagicData::decode(sub.data).inspect_err(|e| warn_decode_err(sub.opcode, e))
@@ -2046,6 +2056,13 @@ async fn keepalive_loop(
                 }
                 match cmd {
                     None => break,
+                    Some(AgentCommand::GroundCorrection { x, y, z, heading }) => {
+                        // The player did not walk, so no cast is interrupted:
+                        // this is the client repairing a wedged height that the
+                        // server only ever echoes back (kuluu-mo4q).
+                        self_pos = Position { pos: Vec3 { x, y, z }, heading, ..self_pos };
+                        let _ = event_tx.send(AgentEvent::PositionChanged { pos: self_pos });
+                    }
                     Some(AgentCommand::Move { x, y, z, heading }) => {
                         // Translation (not a turn-in-place) interrupts a spell in
                         // flight — retail cancels the cast when the caster moves.
@@ -6025,6 +6042,99 @@ fn apply_zoneline_spawn_fallback(seed: Vec3, fallback: Option<Vec3>) -> Vec3 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Drives the real [`handle_sub_packet`] arm for `opcode` and returns the
+    /// events it emitted, in emission order.
+    fn sub_packet_events(opcode: u16, body: &[u8]) -> Vec<AgentEvent> {
+        let (tx, mut rx) = broadcast::channel(64);
+        handle_sub_packet(
+            &framing::SubPacket {
+                opcode,
+                sequence: 0,
+                data: body,
+            },
+            &tx,
+            &mut Vec::new(),
+            &mut crate::event_dialog::CutsceneScope::default(),
+            0,
+            "Tester",
+            &mut None,
+            &mut std::collections::HashMap::new(),
+            &mut std::collections::HashMap::new(),
+            &mut std::collections::HashMap::new(),
+            &mut std::collections::HashMap::new(),
+            &mut 0,
+            &mut Position::default(),
+            &mut false,
+            &mut NpcNameResolver::new(None),
+            &mut EmoteTextResolver::new(None),
+            &mut treasure::SysMesResolver::new(None),
+            &mut treasure::TreasurePool::default(),
+            &mut false,
+            &mut SelfMogState::default(),
+            None,
+        );
+        let mut out = Vec::new();
+        while let Ok(ev) = rx.try_recv() {
+            out.push(ev);
+        }
+        out
+    }
+
+    /// `ZoneChanged` clears `SessionState::current_weather`, so the LOGIN arm
+    /// must emit the 0x00A zone-in weather *after* it. Reversed, a zoning
+    /// character renders the default sky until the next 0x057 — which LSB only
+    /// sends on a weather change (vendor/server/src/map/zone.cpp:672).
+    #[test]
+    fn login_emits_zone_in_weather_after_the_zone_change() {
+        const WEATHER_NUMBER: u16 = 4;
+        use ffxi_proto::decode::ServerLogin;
+
+        let mut body = vec![0u8; ServerLogin::WEATHER_OFFSET_TIME_OFFSET + 4];
+        body[ServerLogin::WEATHER_NUMBER_OFFSET..ServerLogin::WEATHER_NUMBER_OFFSET + 2]
+            .copy_from_slice(&WEATHER_NUMBER.to_le_bytes());
+
+        let events = sub_packet_events(ffxi_proto::map::s2c::LOGIN, &body);
+        let zone_at = events
+            .iter()
+            .position(|e| matches!(e, AgentEvent::ZoneChanged { .. }))
+            .expect("LOGIN emits ZoneChanged");
+        let weather_at = events
+            .iter()
+            .position(
+                |e| matches!(e, AgentEvent::WeatherUpdated { weather_number } if *weather_number == WEATHER_NUMBER),
+            )
+            .expect("LOGIN emits the zone-in weather");
+        assert!(
+            weather_at > zone_at,
+            "WeatherUpdated must follow ZoneChanged, got {events:?}"
+        );
+    }
+
+    /// A 0x051 body whose GrapIDTbl does not decode must go through
+    /// [`warn_decode_err`] like every sibling arm — dropped silently, a wrong
+    /// body-offset assumption looks exactly like "self kept the launcher seed"
+    /// with nothing in the log. Observed through the dedup gate, which
+    /// `warn_decode_err` consumes for the opcode it logs.
+    #[test]
+    fn grap_list_decode_failure_is_logged() {
+        use ffxi_proto::decode::LookData;
+        use ffxi_proto::map::s2c;
+
+        let body = vec![0u8; LookData::GRAP_LIST_TBL_OFFSET + LookData::GRAP_ID_TBL_LEN];
+        assert!(
+            LookData::decode_grap_list(&body).is_none(),
+            "a zeroed GrapIDTbl is the undecodable case"
+        );
+        assert!(
+            sub_packet_events(s2c::GRAP_LIST, &body).is_empty(),
+            "no look is published from an undecodable body"
+        );
+        assert!(
+            !first_decode_err(s2c::GRAP_LIST),
+            "the failure must have been reported, consuming the dedup gate"
+        );
+    }
 
     #[test]
     fn decode_err_dedup_is_per_opcode() {

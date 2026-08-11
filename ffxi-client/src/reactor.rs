@@ -555,6 +555,17 @@ impl Reactor {
                 };
                 CommandRouting::absorbed_with_goal(snapshot_goal(&self.goal))
             }
+            AgentCommand::GroundCorrection { z, .. } => {
+                // A height repair is not player movement (kuluu-mo4q): it must
+                // not cancel a Following/Pathing/Banking goal the player asked
+                // for, and it must reach the wire even mid-override — the
+                // override replays its own target every tick, so its height is
+                // rebased too or the correction is undone before it lands.
+                if let Some(ov) = self.reactor_override.as_mut() {
+                    ov.target.z = z;
+                }
+                CommandRouting::forward(cmd)
+            }
             AgentCommand::Move { .. } => {
                 if self.override_active() {
                     return CommandRouting::default();

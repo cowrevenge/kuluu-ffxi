@@ -1528,6 +1528,31 @@ pub fn sub_size(op: u8, sub: u8) -> Option<u8> {
     }
 }
 
+/// Sub-cases of the window/menu families that retail *polls*: they set `RetFlag`
+/// and return with `ExecPointer` untouched until the player has typed a value,
+/// picked an entry, or the server has answered, and only then advance while
+/// storing the answer into a work slot. Nothing in this VM can satisfy them — it
+/// has no text-input, linkshell-menu or search-window surface — so advancing by
+/// [`sub_size`] would run the script on as if the player had answered, with the
+/// destination work slot holding 0. The VM stops on them instead, which the host
+/// already handles by ending the event rather than rendering a wrong frame
+/// (research/XiEvents/OpCodes/0x0071.md, 0x00CC.md, 0x00B4.md).
+pub fn is_input_wait(op: u8, sub: u8) -> bool {
+    match op {
+        // 0x01/0x02 poll the password window and the server's reply; 0x11/0x13/
+        // 0x31 the numeric/string input buffer; 0x41 the Linkshell Concierge
+        // choice. Excludes 0x53 and 0xB4/0x15: those hold only while their UI
+        // object EXISTS and advance when it is absent (0x0071.md case 0x53,
+        // 0x00B4.md case 0x15), and this VM never creates one, so retail's own
+        // answer here is the unconditional advance.
+        OP_MENU => matches!(sub, 0x01 | 0x02 | 0x11 | 0x13 | 0x31 | 0x41),
+        // 0x11 polls the search-menu zone window opened by case 0x10 and stores
+        // the picked zone.
+        OP_ITEMINFO => sub == 0x11,
+        _ => false,
+    }
+}
+
 const OP_DEFCAMERA: u8 = 0x46;
 const OP_LOOKAT: u8 = 0x79;
 const OP_MUSIC: u8 = 0x5C;
@@ -1674,6 +1699,32 @@ mod tests {
         assert_eq!(sub_size(0xAC, 2), Some(6));
         assert_eq!(sub_size(0xAC, 4), Some(8));
         assert_eq!(sub_size(0xAC, 5), None);
+    }
+
+    // The polls retail holds ExecPointer on until the player or the server
+    // answers, against the cases that open those windows and advance at once.
+    #[test]
+    fn input_waits_cover_the_polls_and_not_the_openers() {
+        // 0x0071.md
+        for sub in [0x01u8, 0x02, 0x11, 0x13, 0x31, 0x41] {
+            assert!(is_input_wait(0x71, sub), "0x71 sub {sub:#04X} polls");
+        }
+        for sub in [
+            0x00u8, 0x03, 0x10, 0x12, 0x20, 0x21, 0x30, 0x32, 0x40, 0x50, 0x54,
+        ] {
+            assert!(!is_input_wait(0x71, sub), "0x71 sub {sub:#04X} advances");
+        }
+        // 0x00CC.md
+        assert!(is_input_wait(0xCC, 0x11));
+        assert!(!is_input_wait(0xCC, 0x10));
+        assert!(!is_input_wait(0xCC, 0x02));
+        // Object-existence polls, not input waits: retail advances when the
+        // object is absent, and this VM never creates one.
+        assert!(!is_input_wait(0x71, 0x53));
+        assert!(!is_input_wait(0xB4, 0x15));
+        assert!(!is_input_wait(0xB4, 0x14));
+        // A family with no poll case at all.
+        assert!(!is_input_wait(0xB6, 0x11));
     }
 
     // Every width sub_size can return must be <= the table's fixed size, which is

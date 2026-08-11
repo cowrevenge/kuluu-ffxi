@@ -57,8 +57,10 @@ pub enum StepResult {
     Done,
     /// The event was force-cancelled (MESWAIT saw an invalid open state).
     Cancelled,
-    /// An opcode the VM does not implement and cannot safely skip (a jump or a
-    /// yielding opcode); execution stops to avoid desyncing `ExecPointer`.
+    /// An opcode the VM does not implement and cannot safely skip (a jump, a
+    /// yielding opcode, or a player-input poll it cannot answer — see
+    /// [`crate::opcode_meta::is_input_wait`]); execution stops rather than
+    /// desyncing `ExecPointer` or inventing the answer.
     Unimplemented(u8),
 }
 
@@ -618,11 +620,15 @@ impl EventVm {
                 OP_LOOKSET | OP_EVENTPOSSET | OP_LOADROOM | OP_ITEMINFO | OP_ENTITYSPEED
                 | OP_MOVE | OP_WINDOW | OP_MENU | OP_RENDERFLAG | OP_REQRESET | OP_STRINGOPS
                 | OP_NAMESET | OP_SUBSCHED | OP_STATUSSET => {
-                    let Some(width) = self
-                        .event_data
-                        .get(self.exec_pointer + 1)
-                        .and_then(|&sub| crate::opcode_meta::sub_size(op, sub))
-                    else {
+                    let Some(&sub) = self.event_data.get(self.exec_pointer + 1) else {
+                        return StepResult::Unimplemented(op);
+                    };
+                    // The player-input polls have no width this VM may take —
+                    // see [`crate::opcode_meta::is_input_wait`].
+                    if crate::opcode_meta::is_input_wait(op, sub) {
+                        return StepResult::Unimplemented(op);
+                    }
+                    let Some(width) = crate::opcode_meta::sub_size(op, sub) else {
                         return StepResult::Unimplemented(op);
                     };
                     self.exec_pointer += width as usize;
@@ -1305,6 +1311,43 @@ mod tests {
                 e.exec_pointer(),
                 width,
                 "op 0x{op:02X} sub 0x{sub:02X} advanced wrong size"
+            );
+        }
+    }
+
+    /// The player-input polls must stop the VM. Retail leaves `ExecPointer`
+    /// where it is until the player has typed a value or picked an entry, then
+    /// advances while storing the answer; skipping by the case width instead
+    /// runs the script on as if the player had answered, with the destination
+    /// work slot holding 0 (research/XiEvents/OpCodes/0x0071.md, 0x00CC.md,
+    /// 0x00B4.md).
+    #[test]
+    fn input_wait_polls_stop_rather_than_advancing_unanswered() {
+        for (op, sub) in [
+            (OP_MENU, 0x01u8),
+            (OP_MENU, 0x02),
+            (OP_MENU, 0x11),
+            (OP_MENU, 0x13),
+            (OP_MENU, 0x31),
+            (OP_MENU, 0x41),
+            (OP_ITEMINFO, 0x11),
+        ] {
+            let width = crate::opcode_meta::sub_size(op, sub)
+                .unwrap_or_else(|| panic!("op 0x{op:02X} sub 0x{sub:02X} has a documented width"))
+                as usize;
+            let mut data = vec![op, sub];
+            data.extend(std::iter::repeat_n(0u8, width - 2));
+            data.push(OP_END);
+            let mut e = vm(data, vec![]);
+            assert_eq!(
+                e.step(),
+                StepResult::Unimplemented(op),
+                "op 0x{op:02X} sub 0x{sub:02X} must stop for input"
+            );
+            assert_eq!(
+                e.exec_pointer(),
+                0,
+                "op 0x{op:02X} sub 0x{sub:02X} must not advance"
             );
         }
     }

@@ -4,7 +4,11 @@ use crate::cue::{
     dat_id_helper, ActorLookup, EventCue, FourCc, MUSIC_VOLUME_MAX, SCHEDULER_DAT_ID_BASE,
     STATUS_EVENT_CHOCOBO, STATUS_EVENT_IDLE, STATUS_EVENT_MOUNT,
 };
-use crate::opcode_meta::OPCODE_META;
+use crate::opcode_meta::{
+    OPCODE_META, OP_ENTITYSPEED, OP_EVENTPOSSET, OP_ITEMINFO, OP_LOADROOM, OP_LOOKSET, OP_MENU,
+    OP_MOVE, OP_NAMESET, OP_RENDERFLAG, OP_REQRESET, OP_STATUSSET, OP_STRINGOPS, OP_SUBSCHED,
+    OP_WINDOW,
+};
 
 /// A message the VM asked to display: dialog string `message_id` from the zone
 /// dialog DAT ([`ffxi_dat::dmsg::StringDat`]).
@@ -94,6 +98,44 @@ const OP_GETBITWORK: u8 = 0x41;
 const OP_SENDTAG: u8 = 0x43;
 const OP_SLEEP: u8 = 0x6F;
 const OP_TURNWAIT: u8 = 0x70;
+const OP_LOADWAIT: u8 = 0x80;
+const OP_TURNCHECK: u8 = 0x76;
+const OP_ANIMWAIT: u8 = 0x99;
+const OP_EMOT: u8 = 0x6E;
+const OP_TRANSPAR: u8 = 0x6C;
+const OP_MAPLOAD: u8 = 0x34;
+const OP_MAPLOAD_KEEP: u8 = 0x35;
+const OP_MUSICREADWAIT: u8 = 0x9A;
+const OP_YIELD: u8 = 0x58;
+const OP_PLAYANIM: u8 = 0x63;
+const OP_BITTEST: u8 = 0x3E;
+const OP_QUERYWAIT2: u8 = 0x7F;
+
+// Advances the actor-driven wait opcodes take when their entity does not
+// resolve — retail's own `!GetActorIndex` / `!entity` early exit, which is the
+// only path this actor-less VM can be on (research/XiEvents/OpCodes/0x0080.md,
+// 0x0076.md, 0x0099.md, 0x006E.md, 0x006C.md, 0x0063.md).
+const LOADWAIT_SIZE: usize = 5;
+const EMOT_SIZE: usize = 7;
+const TRANSPAR_SIZE: usize = 9;
+const PLAYANIM_SIZE: usize = 3;
+/// 0x0034.md (and 0x0035.md, the same handler without the zone close) spreads
+/// its zone load over three `EventIdle` ticks driven by two file-scope counters,
+/// advancing only on the last; the net effect of the sequence is +3, and this VM
+/// has no frame clock to spend the first two on.
+const MAPLOAD_SIZE: usize = 3;
+/// 0x0058.md is `ExecPointer++; RetFlag = 1`; 0x009A.md yields only while the
+/// music server is mid-read, which nothing here triggers.
+const YIELD_SIZE: usize = 1;
+
+// 0x003E BITTEST operand layout (research/XiEvents/OpCodes/0x003E.md): the bit
+// index at +3 selects a work slot `bit >> 5` past the one named at +1, and the
+// branch target at +5 is taken when the bit is clear.
+const BIT_TEST_INDEX_OFS: usize = 3;
+const BIT_TEST_WORD_OFS: usize = 1;
+const BIT_TEST_TARGET_OFS: usize = 5;
+const BIT_TEST_WORD_SHIFT: i32 = 5;
+const BIT_TEST_BIT_MASK: i32 = 0x1F;
 
 const MESSAGE_OPEN_NONE: u8 = 0;
 const MESSAGE_OPEN_AWAITING: u8 = 1;
@@ -152,6 +194,9 @@ const REFERENCE_FLAG: u32 = 0x8000;
 const REFERENCE_INDEX_MASK: u32 = 0x7FFF;
 /// QUERYWAIT stores this in `Work_Zone[0]` when the player cancels the menu.
 const CHOICE_CANCELLED: u32 = 254;
+/// QUERYWAIT2 (0x7F) stores 255 for the same cancel and runs on
+/// (research/XiEvents/OpCodes/0x007F.md).
+const CHOICE_CANCELLED_QUERYWAIT2: u32 = 255;
 /// Opcodes one [`EventVm::step`] may run before it gives up — see the check
 /// itself. Far above any authored run between yields, so it only ever fires on
 /// a loop this VM cannot leave.
@@ -538,6 +583,50 @@ impl EventVm {
                     self.emit_mount_cue();
                     self.exec_pointer += width as usize;
                 }
+                // The actor-driven waits: retail yields only once the named
+                // entity resolves and reports mid-load/mid-turn/mid-animation,
+                // and this VM resolves no actors, so each takes its own
+                // "no such entity" advance (research/XiEvents/OpCodes/0x0080.md,
+                // 0x0076.md, 0x0099.md — 0x99 advances on every path).
+                OP_LOADWAIT | OP_TURNCHECK | OP_ANIMWAIT => self.exec_pointer += LOADWAIT_SIZE,
+                OP_EMOT => self.exec_pointer += EMOT_SIZE,
+                OP_TRANSPAR => self.exec_pointer += TRANSPAR_SIZE,
+                OP_PLAYANIM => self.exec_pointer += PLAYANIM_SIZE,
+                OP_MAPLOAD | OP_MAPLOAD_KEEP => self.exec_pointer += MAPLOAD_SIZE,
+                OP_MUSICREADWAIT | OP_YIELD => self.exec_pointer += YIELD_SIZE,
+                OP_BITTEST => self.op_bit_test(op),
+                // 0x007F is 0x25 QUERYWAIT with one difference: a cancelled
+                // menu stores 255 and runs on rather than ending the event
+                // (research/XiEvents/OpCodes/0x007F.md).
+                OP_QUERYWAIT2 => {
+                    if !self.selection_made {
+                        return match self.pending_choice.clone() {
+                            Some(choice) => StepResult::AwaitChoice(choice),
+                            None => StepResult::AwaitMessageAck,
+                        };
+                    }
+                    self.selection_made = false;
+                    self.pending_choice = None;
+                    if self.work_zone[0] == CHOICE_CANCELLED {
+                        self.work_zone[0] = CHOICE_CANCELLED_QUERYWAIT2;
+                    }
+                    self.exec_pointer += 1;
+                }
+                // The sub-byte-dispatched families. Their width is the case's,
+                // not the table's widest, so an undocumented sub stops the VM
+                // rather than falling back and landing mid-instruction.
+                OP_LOOKSET | OP_EVENTPOSSET | OP_LOADROOM | OP_ITEMINFO | OP_ENTITYSPEED
+                | OP_MOVE | OP_WINDOW | OP_MENU | OP_RENDERFLAG | OP_REQRESET | OP_STRINGOPS
+                | OP_NAMESET | OP_SUBSCHED | OP_STATUSSET => {
+                    let Some(width) = self
+                        .event_data
+                        .get(self.exec_pointer + 1)
+                        .and_then(|&sub| crate::opcode_meta::sub_size(op, sub))
+                    else {
+                        return StepResult::Unimplemented(op);
+                    };
+                    self.exec_pointer += width as usize;
+                }
                 _ => {
                     let meta = OPCODE_META.get(op as usize).copied();
                     match meta {
@@ -739,6 +828,19 @@ impl EventVm {
         } else {
             let v3 = self.getworkofs(5, 0);
             self.setworkofs(7, (mask & v3).wrapping_shr(shift));
+        }
+    }
+
+    /// `XiEvent::CodeBITTEST` (0x003E): branch on one bit of a work slot. The
+    /// bit index picks both the word (`>> 5`, applied as `getworkofs`' index
+    /// shift) and the bit within it (research/XiEvents/OpCodes/0x003E.md).
+    fn op_bit_test(&mut self, op: u8) {
+        let bit = self.getworkofs(BIT_TEST_INDEX_OFS, 0);
+        let word = self.getworkofs(BIT_TEST_WORD_OFS, bit >> BIT_TEST_WORD_SHIFT);
+        if word & (1i32 << (bit & BIT_TEST_BIT_MASK)) != 0 {
+            self.exec_pointer += OPCODE_META[op as usize].size as usize;
+        } else {
+            self.exec_pointer = self.eventgetcode(BIT_TEST_TARGET_OFS) as usize;
         }
     }
 
@@ -1008,10 +1110,203 @@ mod tests {
 
     #[test]
     fn unimplemented_jump_opcode_stops() {
-        // 0x3E is a jumping opcode we don't implement; it must not be skipped by
+        // 0x44 is a jumping opcode we don't implement; it must not be skipped by
         // size (that would desync ExecPointer), so the VM stops.
-        let mut e = vm(vec![0x3E, 0, 0, 0, 0, 0, 0], vec![]);
-        assert_eq!(e.step(), StepResult::Unimplemented(0x3E));
+        const OP_UNIMPLEMENTED_JUMP: u8 = 0x44;
+        assert!(OPCODE_META[OP_UNIMPLEMENTED_JUMP as usize].jumps);
+        let mut e = vm(vec![OP_UNIMPLEMENTED_JUMP, 0, 0, 0, 0, 0, 0], vec![]);
+        assert_eq!(e.step(), StepResult::Unimplemented(OP_UNIMPLEMENTED_JUMP));
+        assert_eq!(e.exec_pointer(), 0);
+    }
+
+    /// The actor-driven waits all reduce to retail's own "no such entity"
+    /// advance here, and the width is load-bearing: each carries an actor
+    /// lookup the VM steps over blind.
+    #[test]
+    fn actor_early_exit_opcodes_skip_by_size_and_continue() {
+        for (op, size) in [
+            (OP_LOADWAIT, LOADWAIT_SIZE),
+            (OP_TURNCHECK, LOADWAIT_SIZE),
+            (OP_ANIMWAIT, LOADWAIT_SIZE),
+            (OP_EMOT, EMOT_SIZE),
+            (OP_TRANSPAR, TRANSPAR_SIZE),
+            (OP_MAPLOAD, MAPLOAD_SIZE),
+            (OP_MAPLOAD_KEEP, MAPLOAD_SIZE),
+            (OP_MUSICREADWAIT, YIELD_SIZE),
+            (OP_YIELD, YIELD_SIZE),
+            (OP_PLAYANIM, PLAYANIM_SIZE),
+        ] {
+            assert_eq!(
+                OPCODE_META[op as usize].size as usize, size,
+                "op 0x{op:02X} size drifted from research/XiEvents/OpCodes"
+            );
+            let mut data = vec![op];
+            data.extend(std::iter::repeat_n(0u8, size - 1));
+            data.push(OP_END);
+            let mut e = vm(data, vec![]);
+            assert_eq!(
+                e.step(),
+                StepResult::Done,
+                "op 0x{op:02X} should run to END"
+            );
+            assert_eq!(e.exec_pointer(), size, "op 0x{op:02X} advanced wrong size");
+        }
+    }
+
+    /// 0x3E BITTEST program: bit index from References[1], work word named by
+    /// `word_operand`, branch target `target`.
+    fn bit_test_program(word_operand: [u8; 2], target: u8) -> Vec<u8> {
+        let mut data = vec![OP_BITTEST];
+        data.extend_from_slice(&word_operand);
+        data.extend_from_slice(&[0x01, 0x80]); // bit index: References[1]
+        data.extend_from_slice(&[target, 0x00]);
+        data
+    }
+
+    #[test]
+    fn op_3e_bit_test_takes_the_set_branch() {
+        // WorkLocal[10] = References[0] = 1, then test its bit 0 (References[1]).
+        let mut data = vec![OP_GET_STORE, 0x0A, 0x00, 0x00, 0x80];
+        data.extend_from_slice(&bit_test_program([0x0A, 0x00], 13));
+        data.push(OP_END); // 12: the set branch
+        data.push(0xFF); // 13: the clear branch must not run
+        let mut e = vm(data, vec![1, 0]);
+        assert_eq!(e.step(), StepResult::Done);
+        assert_eq!(e.exec_pointer(), 12);
+    }
+
+    #[test]
+    fn op_3e_bit_test_jumps_when_clear() {
+        // WorkLocal[10] is unset, so bit 0 is clear and the u16 target is taken.
+        let mut data = bit_test_program([0x0A, 0x00], 8);
+        data.push(0xFF); // 7: the set branch must not run
+        data.push(OP_END); // 8: the branch target
+        let mut e = vm(data, vec![0, 0]);
+        assert_eq!(e.step(), StepResult::Done);
+        assert_eq!(e.exec_pointer(), 8);
+    }
+
+    /// Bit 32 lives in the NEXT work slot: the index shift is what selects it,
+    /// so dropping `getworkofs`' shift argument would read slot 10 and branch
+    /// the other way.
+    #[test]
+    fn op_3e_bit_test_index_selects_the_next_work_word() {
+        // WorkLocal[11] = References[0] = 1; test bit 32 (References[1]) of the
+        // slot named as WorkLocal[10].
+        let mut data = vec![OP_GET_STORE, 0x0B, 0x00, 0x00, 0x80];
+        data.extend_from_slice(&bit_test_program([0x0A, 0x00], 13));
+        data.push(OP_END); // 12: the set branch
+        data.push(0xFF); // 13: the clear branch must not run
+        let mut e = vm(data, vec![1, 32]);
+        assert_eq!(e.step(), StepResult::Done);
+        assert_eq!(e.exec_pointer(), 12);
+    }
+
+    /// 0x7F yields for a selection exactly like 0x25.
+    #[test]
+    fn op_7f_querywait2_yields_then_resumes() {
+        let data = vec![
+            OP_QUERY,
+            0x00,
+            0x80,
+            0x01,
+            0x80,
+            0x00,
+            0x00,
+            OP_QUERYWAIT2,
+            OP_END,
+        ];
+        let expected = StepResult::AwaitChoice(EventChoice {
+            message_id: 500,
+            speaker_index: 5,
+            default_index: 0,
+            params: vec![],
+        });
+        let mut e = vm(data, vec![500, 0]);
+        assert_eq!(e.step(), expected);
+        assert_eq!(e.step(), expected, "still awaiting until a choice is made");
+        e.select_choice(Some(1));
+        assert_eq!(e.step(), StepResult::Done);
+        assert_eq!(e.exec_pointer(), 8);
+    }
+
+    /// Unlike 0x25, a cancelled menu stores 255 and the event runs on.
+    #[test]
+    fn op_7f_querywait2_does_not_cancel_on_a_cancelled_choice() {
+        let data = vec![
+            OP_QUERY,
+            0x00,
+            0x80,
+            0x01,
+            0x80,
+            0x00,
+            0x00,
+            OP_QUERYWAIT2,
+            OP_END,
+        ];
+        let mut e = vm(data, vec![500, 0]);
+        assert!(matches!(e.step(), StepResult::AwaitChoice(_)));
+        e.select_choice(None);
+        assert_eq!(e.step(), StepResult::Done);
+        assert_eq!(e.exec_pointer(), 8);
+        assert_eq!(e.work_zone(0), CHOICE_CANCELLED_QUERYWAIT2 as i32);
+    }
+
+    /// A sub byte with no documented width must stop the VM, not fall back to
+    /// the table's widest case — that would advance 0xB6 by 20 over a 2-byte
+    /// instruction and start executing operands as opcodes.
+    #[test]
+    fn sub_width_opcodes_stop_rather_than_falling_back_to_the_fixed_size() {
+        for (op, sub) in [(OP_LOOKSET, 0x16u8), (OP_STRINGOPS, 0x07)] {
+            let mut data = vec![op, sub];
+            data.extend(std::iter::repeat_n(
+                0u8,
+                OPCODE_META[op as usize].size as usize,
+            ));
+            let mut e = vm(data, vec![]);
+            assert_eq!(
+                e.step(),
+                StepResult::Unimplemented(op),
+                "op 0x{op:02X} sub 0x{sub:02X} must stop"
+            );
+            assert_eq!(e.exec_pointer(), 0, "op 0x{op:02X} must not advance");
+        }
+    }
+
+    /// The sub-byte families advance by their case's width, and reach END.
+    #[test]
+    fn sub_width_opcodes_advance_by_their_case_width() {
+        for (op, sub, width) in [
+            (OP_LOOKSET, 0x0Bu8, 20usize),
+            (OP_EVENTPOSSET, 0x01, 2),
+            (OP_LOADROOM, 0x00, 4),
+            (OP_ITEMINFO, 0x02, 14),
+            (OP_ENTITYSPEED, 0x05, 7),
+            (OP_MOVE, 0x00, 8),
+            (OP_WINDOW, 0x14, 12),
+            (OP_MENU, 0x20, 16),
+            (OP_RENDERFLAG, 0x1B, 6),
+            (OP_REQRESET, 0x01, 7),
+            (OP_NAMESET, 0x00, 4),
+            (OP_SUBSCHED, 0x05, 18),
+            (OP_STRINGOPS, 0x08, 23),
+            (OP_STATUSSET, 0x04, 8),
+        ] {
+            let mut data = vec![op, sub];
+            data.extend(std::iter::repeat_n(0u8, width - 2));
+            data.push(OP_END);
+            let mut e = vm(data, vec![]);
+            assert_eq!(
+                e.step(),
+                StepResult::Done,
+                "op 0x{op:02X} sub 0x{sub:02X} should run to END"
+            );
+            assert_eq!(
+                e.exec_pointer(),
+                width,
+                "op 0x{op:02X} sub 0x{sub:02X} advanced wrong size"
+            );
+        }
     }
 
     #[test]

@@ -703,8 +703,9 @@ pub const OPCODE_META: &[OpMeta] = &[
         sets_ret: true,
         valid: true,
     }, // 0x0070
+    // Widest case is 0x20's 16, which the doc's `OpCode Size` header row omits.
     OpMeta {
-        size: 10,
+        size: 16,
         jumps: false,
         sets_ret: true,
         valid: true,
@@ -967,8 +968,10 @@ pub const OPCODE_META: &[OpMeta] = &[
         sets_ret: false,
         valid: true,
     }, // 0x009C
+    // Widest case is 0x08's 23; `jumps` stays set because case 0x07 is a real
+    // jump, so an unhandled 0x9D must never be skipped by this size.
     OpMeta {
-        size: 0,
+        size: 23,
         jumps: true,
         sets_ret: false,
         valid: true,
@@ -1345,11 +1348,13 @@ pub const OPCODE_META: &[OpMeta] = &[
 /// successful. `None` means the opcode is fixed-width, or that its width is not
 /// modelled yet and the caller should fall back to `OpMeta::size`.
 ///
-/// Rules transcribed from the retail pseudo-code in atom0s/XiEvents
-/// `OpCodes/*.md`, which lists each of these with a multi-valued `OpCode Size`.
-/// Only opcodes whose dispatch is decided by the sub byte alone appear here:
-/// 0xAE, 0xB7 and 0xD8 also vary, but their width is entangled with a runtime
-/// actor lookup, so they are left to the wider VM work rather than guessed at.
+/// Rules transcribed from the retail pseudo-code *body* in atom0s/XiEvents
+/// `OpCodes/*.md` — never its `OpCode Size` header row, which is incomplete
+/// (0x0071.md lists `2,4,6,8,10` and omits its case 0x20's 16). Only opcodes
+/// whose dispatch is decided by the sub byte alone appear here: 0xAE, 0xB7 and
+/// 0xD8 also vary, but their width is entangled with a runtime actor lookup, as
+/// are 0x9D cases 0x07 (a jump) and 0x0C, so those are left to the wider VM work
+/// rather than guessed at.
 pub fn sub_size(op: u8, sub: u8) -> Option<u8> {
     match op {
         // 0x0046.md: sub 2 reads a work offset (4); every other path, including
@@ -1385,6 +1390,140 @@ pub fn sub_size(op: u8, sub: u8) -> Option<u8> {
             7 => Some(8),
             _ => None,
         },
+        // 0x00B6.md: the entity-look family. Cases 0x0B/0x0D/0x0E carry a whole
+        // Look struct, 0x0F a model size, 0x14/0x15 an actor lookup. Case 0x10
+        // advances 2 only once the player entity has finished loading; this VM
+        // models no load state, so it takes the loaded path.
+        OP_LOOKSET => match sub {
+            0x00..=0x0A | 0x0C | 0x0F | 0x11 => Some(4),
+            0x0B => Some(20),
+            0x0D => Some(14),
+            0x0E => Some(16),
+            0x10 | 0x12 | 0x13 => Some(2),
+            0x14 | 0x15 => Some(6),
+            _ => None,
+        },
+        // 0x0047.md: case 0 sends the position tag (10); case 1 polls until the
+        // server acknowledges it (2). We have no pending-tag state, so case 1
+        // takes the acknowledged path.
+        OP_EVENTPOSSET => match sub {
+            0 => Some(10),
+            1 => Some(2),
+            _ => None,
+        },
+        // 0x0075.md: case 0 opens an indoor sub-region (4), case 1 polls (2),
+        // case 2 is `ExecPointer -= 6` then `+= 8` on the sub-region change
+        // succeeding — net +2.
+        OP_LOADROOM => match sub {
+            0 => Some(4),
+            1 | 2 => Some(2),
+            _ => None,
+        },
+        // 0x00CC.md: the item/search info windows.
+        OP_ITEMINFO => match sub {
+            0x00 | 0x01 | 0x03 => Some(10),
+            0x02 => Some(14),
+            0x10 => Some(6),
+            0x11 | 0x20 => Some(4),
+            _ => None,
+        },
+        // 0x0059.md: entity turn/move speed. The odd 7 is case 5's trailing
+        // flag byte, the 6 case 6's actor lookup with no work operand.
+        OP_ENTITYSPEED => match sub {
+            0 | 2 | 7 => Some(4),
+            1 | 3 | 4 | 8 => Some(8),
+            5 => Some(7),
+            6 => Some(6),
+            _ => None,
+        },
+        // 0x001F.md: case 0 sets the goal position (8); case 1 re-runs each
+        // frame while the entity walks and advances 2 on arrival. No frame
+        // clock here, so case 1 arrives immediately.
+        OP_MOVE => match sub {
+            0 => Some(8),
+            1 => Some(2),
+            _ => None,
+        },
+        // 0x00B4.md: the event window family. Cases 0x00/0x13 carry a 16-byte
+        // string, 0x14 five work operands, 0x05/0x06 a trailing key byte.
+        OP_WINDOW => match sub {
+            0x00 | 0x13 => Some(20),
+            0x01 | 0x02 | 0x04 | 0x0F | 0x10 | 0x11 | 0x12 => Some(6),
+            0x03 | 0x08 | 0x0B | 0x0D | 0x0E | 0x15 => Some(2),
+            0x05 | 0x06 => Some(3),
+            0x07 | 0x09 | 0x0A | 0x0C => Some(4),
+            0x14 => Some(12),
+            _ => None,
+        },
+        // 0x0071.md: the event menu family. 0x11 falls through to 0x13 in the
+        // C switch; case 0x20 reads seven work operands.
+        OP_MENU => match sub {
+            0x00 | 0x01 | 0x02 | 0x21 | 0x51 | 0x53 => Some(2),
+            0x03 | 0x10 | 0x11 | 0x13 | 0x30 | 0x31 | 0x40 | 0x50 | 0x52 | 0x55 => Some(4),
+            0x12 | 0x32 => Some(6),
+            0x41 => Some(8),
+            0x54 => Some(10),
+            0x20 => Some(16),
+            _ => None,
+        },
+        // 0x00AB.md: render-flag toggles on the event entity; 0x1B/0x1C take an
+        // actor lookup instead.
+        OP_RENDERFLAG => match sub {
+            0x00..=0x10 | 0x12 | 0x13 | 0x19 | 0x1A => Some(2),
+            0x11 | 0x14..=0x18 => Some(4),
+            0x1B | 0x1C => Some(6),
+            _ => None,
+        },
+        // 0x007A.md: event-VM reset / ExtData sharing. Case 2 advances in retail
+        // only when the target actor resolves AND owns an event pointer; this VM
+        // resolves no actors, so advancing 6 is a deliberate divergence — the
+        // faithful alternative is a spin the host cannot break.
+        OP_REQRESET => match sub {
+            0 | 2 | 5 => Some(6),
+            1 => Some(7),
+            3 => Some(2),
+            4 => Some(8),
+            _ => None,
+        },
+        // 0x00B5.md: sub 0 renames the event entity (4); any other sub sets
+        // RetFlag without advancing, so authored data cannot hold one.
+        OP_NAMESET => match sub {
+            0 => Some(4),
+            _ => None,
+        },
+        // 0x005F.md: each case steps one byte then delegates to another opcode
+        // handler, so the widths are 1 + the delegate's: 0xC1's 5, 0x5B's 15/17,
+        // 0x53's 13.
+        OP_SUBSCHED => match sub {
+            0 | 1 => Some(2),
+            2 => Some(6),
+            3 | 4 => Some(16),
+            5 | 6 => Some(18),
+            7 => Some(14),
+            _ => None,
+        },
+        // 0x00AC.md: entity status/render-flag writes; cases 2-4 take an actor
+        // lookup instead of the event entity.
+        OP_STATUSSET => match sub {
+            0 | 1 => Some(4),
+            2 | 3 => Some(6),
+            4 => Some(8),
+            _ => None,
+        },
+        // 0x009D.md: the string/indirect-work family. The cases that consult
+        // `PTR_Ptr_Work_Zone` (0x0D, 0x0E) take the branch for an unpopulated
+        // slot, and the string-compare cases (0x08, 0x09) take their
+        // fall-through, because this VM models neither store. Case 0x07 is a
+        // real jump and 0x0C's width depends on a runtime value, so both are
+        // absent and keep stopping the VM.
+        OP_STRINGOPS => match sub {
+            0x00 | 0x01 | 0x03 | 0x04 | 0x05 | 0x06 | 0x0E => Some(8),
+            0x02 => Some(6),
+            0x08 => Some(23),
+            0x09 => Some(9),
+            0x0A | 0x0B | 0x0D | 0x0F | 0x10 => Some(10),
+            _ => None,
+        },
         _ => None,
     }
 }
@@ -1394,6 +1533,20 @@ const OP_LOOKAT: u8 = 0x79;
 const OP_MUSIC: u8 = 0x5C;
 const OP_MOGHOUSE_VISIT: u8 = 0xC2;
 const OP_CHOCOBO: u8 = 0x7E;
+pub(crate) const OP_LOOKSET: u8 = 0xB6;
+pub(crate) const OP_EVENTPOSSET: u8 = 0x47;
+pub(crate) const OP_LOADROOM: u8 = 0x75;
+pub(crate) const OP_ITEMINFO: u8 = 0xCC;
+pub(crate) const OP_ENTITYSPEED: u8 = 0x59;
+pub(crate) const OP_MOVE: u8 = 0x1F;
+pub(crate) const OP_WINDOW: u8 = 0xB4;
+pub(crate) const OP_MENU: u8 = 0x71;
+pub(crate) const OP_RENDERFLAG: u8 = 0xAB;
+pub(crate) const OP_REQRESET: u8 = 0x7A;
+pub(crate) const OP_NAMESET: u8 = 0xB5;
+pub(crate) const OP_SUBSCHED: u8 = 0x5F;
+pub(crate) const OP_STRINGOPS: u8 = 0x9D;
+pub(crate) const OP_STATUSSET: u8 = 0xAC;
 
 #[cfg(test)]
 mod tests {
@@ -1436,6 +1589,91 @@ mod tests {
         assert_eq!(sub_size(0x7E, 6), Some(18));
         assert_eq!(sub_size(0x7E, 7), Some(8));
         assert_eq!(sub_size(0x7E, 9), None, "undocumented case has no width");
+        // 0x00B6.md — the look family; the wide cases carry a whole Look struct.
+        assert_eq!(sub_size(0xB6, 0x0A), Some(4));
+        assert_eq!(sub_size(0xB6, 0x0B), Some(20));
+        assert_eq!(sub_size(0xB6, 0x0D), Some(14));
+        assert_eq!(sub_size(0xB6, 0x0E), Some(16));
+        assert_eq!(sub_size(0xB6, 0x10), Some(2));
+        assert_eq!(sub_size(0xB6, 0x15), Some(6));
+        assert_eq!(sub_size(0xB6, 0x16), None);
+        // 0x0047.md
+        assert_eq!(sub_size(0x47, 0), Some(10));
+        assert_eq!(sub_size(0x47, 1), Some(2));
+        assert_eq!(sub_size(0x47, 2), None);
+        // 0x0075.md — case 2's -6/+8 pair nets +2.
+        assert_eq!(sub_size(0x75, 0), Some(4));
+        assert_eq!(sub_size(0x75, 1), Some(2));
+        assert_eq!(sub_size(0x75, 2), Some(2));
+        assert_eq!(sub_size(0x75, 3), None);
+        // 0x00CC.md
+        assert_eq!(sub_size(0xCC, 0x00), Some(10));
+        assert_eq!(sub_size(0xCC, 0x02), Some(14));
+        assert_eq!(sub_size(0xCC, 0x10), Some(6));
+        assert_eq!(sub_size(0xCC, 0x11), Some(4));
+        assert_eq!(sub_size(0xCC, 0x20), Some(4));
+        assert_eq!(sub_size(0xCC, 0x21), None);
+        // 0x0059.md — the two odd widths are the ones a fixed 8 would overrun.
+        assert_eq!(sub_size(0x59, 0), Some(4));
+        assert_eq!(sub_size(0x59, 1), Some(8));
+        assert_eq!(sub_size(0x59, 5), Some(7));
+        assert_eq!(sub_size(0x59, 6), Some(6));
+        assert_eq!(sub_size(0x59, 9), None);
+        // 0x001F.md
+        assert_eq!(sub_size(0x1F, 0), Some(8));
+        assert_eq!(sub_size(0x1F, 1), Some(2));
+        assert_eq!(sub_size(0x1F, 2), None);
+        // 0x00B4.md
+        assert_eq!(sub_size(0xB4, 0x00), Some(20));
+        assert_eq!(sub_size(0xB4, 0x05), Some(3));
+        assert_eq!(sub_size(0xB4, 0x13), Some(20));
+        assert_eq!(sub_size(0xB4, 0x14), Some(12));
+        assert_eq!(sub_size(0xB4, 0x15), Some(2));
+        assert_eq!(sub_size(0xB4, 0x16), None);
+        // 0x0071.md — 0x11 falls through to 0x13 in the C switch, and 0x20 is
+        // the 16-wide case the doc's size header omits.
+        assert_eq!(sub_size(0x71, 0x11), Some(4));
+        assert_eq!(sub_size(0x71, 0x13), Some(4));
+        assert_eq!(sub_size(0x71, 0x20), Some(16));
+        assert_eq!(sub_size(0x71, 0x54), Some(10));
+        assert_eq!(sub_size(0x71, 0x56), None);
+        // 0x00AB.md
+        assert_eq!(sub_size(0xAB, 0x11), Some(4));
+        assert_eq!(sub_size(0xAB, 0x14), Some(4));
+        assert_eq!(sub_size(0xAB, 0x19), Some(2));
+        assert_eq!(sub_size(0xAB, 0x1B), Some(6));
+        assert_eq!(sub_size(0xAB, 0x1D), None);
+        // 0x007A.md
+        assert_eq!(sub_size(0x7A, 0), Some(6));
+        assert_eq!(sub_size(0x7A, 1), Some(7));
+        assert_eq!(sub_size(0x7A, 3), Some(2));
+        assert_eq!(sub_size(0x7A, 4), Some(8));
+        assert_eq!(sub_size(0x7A, 6), None);
+        // 0x00B5.md — only sub 0 advances at all.
+        assert_eq!(sub_size(0xB5, 0), Some(4));
+        assert_eq!(sub_size(0xB5, 1), None);
+        // 0x005F.md — 1 byte plus the delegated opcode's own advance.
+        assert_eq!(sub_size(0x5F, 0), Some(2));
+        assert_eq!(sub_size(0x5F, 2), Some(6));
+        assert_eq!(sub_size(0x5F, 3), Some(16));
+        assert_eq!(sub_size(0x5F, 5), Some(18));
+        assert_eq!(sub_size(0x5F, 7), Some(14));
+        assert_eq!(sub_size(0x5F, 8), None);
+        // 0x009D.md — 0x07 is a real jump and 0x0C's width is runtime-decided.
+        assert_eq!(sub_size(0x9D, 0x00), Some(8));
+        assert_eq!(sub_size(0x9D, 0x02), Some(6));
+        assert_eq!(sub_size(0x9D, 0x07), None);
+        assert_eq!(sub_size(0x9D, 0x08), Some(23));
+        assert_eq!(sub_size(0x9D, 0x09), Some(9));
+        assert_eq!(sub_size(0x9D, 0x0A), Some(10));
+        assert_eq!(sub_size(0x9D, 0x0C), None);
+        assert_eq!(sub_size(0x9D, 0x0E), Some(8));
+        assert_eq!(sub_size(0x9D, 0x11), None);
+        // 0x00AC.md
+        assert_eq!(sub_size(0xAC, 0), Some(4));
+        assert_eq!(sub_size(0xAC, 2), Some(6));
+        assert_eq!(sub_size(0xAC, 4), Some(8));
+        assert_eq!(sub_size(0xAC, 5), None);
     }
 
     // Every width sub_size can return must be <= the table's fixed size, which is
@@ -1443,7 +1681,10 @@ mod tests {
     // not the dispatch.
     #[test]
     fn sub_widths_never_exceed_the_tables_widest_case() {
-        for op in [0x46u8, 0x79, 0x5C, 0xC2, 0x7E] {
+        for op in [
+            0x46u8, 0x79, 0x5C, 0xC2, 0x7E, 0xB6, 0x47, 0x75, 0xCC, 0x59, 0x1F, 0xB4, 0x71, 0xAB,
+            0x7A, 0xB5, 0x5F, 0x9D, 0xAC,
+        ] {
             let fixed = OPCODE_META[op as usize].size;
             for sub in 0..=u8::MAX {
                 if let Some(w) = sub_size(op, sub) {

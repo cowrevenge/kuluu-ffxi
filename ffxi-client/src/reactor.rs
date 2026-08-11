@@ -1071,10 +1071,17 @@ fn step_point(from: Vec3, to: Vec3, step_size: f32) -> Vec3 {
         return to;
     }
     let f = step_size / dist;
+    // Height interpolates toward the destination rather than freezing at
+    // `from.z`: holding it drags a stale height across every /follow, engage
+    // approach and override step, which is the reactor half of the wire-z wedge
+    // (kuluu-mo4q). The async runtime has no MZB collision (ffxi-viewer-core is
+    // native-window only), so the destination's height is the best estimate
+    // here; `recover_self_ground_system` is the authority whenever the viewer
+    // has the zone's floor loaded.
     Vec3 {
         x: from.x + dx * f,
         y: from.y + dy * f,
-        z: from.z,
+        z: from.z + (to.z - from.z) * f,
     }
 }
 
@@ -2387,6 +2394,40 @@ mod tests {
 
         let p = step_point(from, to, 100.0);
         assert!((p.x - 1.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn step_point_interpolates_height() {
+        let from = Vec3::default();
+        let to = Vec3 {
+            x: 10.0,
+            y: 0.0,
+            z: -10.0,
+        };
+
+        let p = step_point(from, to, 5.0);
+        assert!(
+            (p.z + 5.0).abs() < 1e-3,
+            "a partial step must carry half the height change, got {}",
+            p.z
+        );
+    }
+
+    #[test]
+    fn step_point_reaches_target_height_on_the_final_step() {
+        let from = Vec3::default();
+        let to = Vec3 {
+            x: 1.0,
+            y: 0.0,
+            z: -9.279,
+        };
+
+        let p = step_point(from, to, 100.0);
+        assert!(
+            (p.z - to.z).abs() < 1e-6,
+            "the capped final step lands on the destination height, got {}",
+            p.z
+        );
     }
 
     #[test]

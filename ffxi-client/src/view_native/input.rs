@@ -950,7 +950,10 @@ pub fn dispatch_movement_system(
     // The step-up bound is what keeps a gap in the floor from launching us: with
     // it unbounded, one tick in Lower Jeuno snapped 5.5 units onto a roof and the
     // ratcheted reference height kept us there (kuluu-0nnl). No floor within
-    // reach means hold our height and let the server correct.
+    // reach means hold our height for this tick; `recover_self_ground_system` is
+    // the only thing that may break that hold, because the server never corrects
+    // a bad z — it persists and echoes back whatever c2s 0x015 sends
+    // (kuluu-mo4q).
     //
     // Horizontal movement is unconstrained here: the navmesh no longer gates it
     // (it's mob-pathing only now). Client-side wall collision from MZB walls is
@@ -975,6 +978,94 @@ pub fn dispatch_movement_system(
     });
 
     prediction.pos = Vec3::new(final_x, final_y, final_z);
+}
+
+/// How long the player must be under every floor in their column before the
+/// wedge recovery fires. A stray floorless column is crossed in a tick or two at
+/// run speed; a wedge lasts forever, so the delay separates them and keeps a
+/// residual collision hole from launching the player onto a roof the way
+/// kuluu-0nnl did.
+const UNDER_FLOOR_RECOVERY_SECS: f32 = 0.5;
+
+/// Debounce for [`recover_self_ground_system`]: fires once `under` has held for
+/// [`UNDER_FLOOR_RECOVERY_SECS`], and rearms whenever the player is grounded
+/// again.
+fn under_floor_debounce_fires(under_secs: &mut f32, under: bool, dt: f32) -> bool {
+    if !under {
+        *under_secs = 0.0;
+        return false;
+    }
+    *under_secs += dt;
+    if *under_secs < UNDER_FLOOR_RECOVERY_SECS {
+        return false;
+    }
+    *under_secs = 0.0;
+    true
+}
+
+/// Breaks the wire-z wedge (kuluu-mo4q). `dispatch_movement_system` holds height
+/// whenever `ground_step` finds no floor within reach, and the server never
+/// corrects it — c2s 0x015 carries our z, the server persists it, and the 0x00A
+/// / CHAR_PC self seed hands the same bad z back next login. Being under every
+/// floor in the column is unreachable by walking (descent is unbounded), so it
+/// is always a wedge and always safe to recover upward.
+pub fn recover_self_ground_system(
+    time: Res<Time<Fixed>>,
+    state: Res<SceneState>,
+    cmd_tx: Res<CommandTx>,
+    collision: Res<ffxi_viewer_core::dat_mzb::MzbCollisionGeometry>,
+    mut prediction: ResMut<LocalPlayerPrediction>,
+    mut under_secs: Local<f32>,
+) {
+    let self_pos = state.snapshot.self_pos;
+    let self_present = state
+        .snapshot
+        .self_char_id
+        .is_some_and(|id| state.snapshot.entities.iter().any(|e| e.id == id));
+    if !self_present {
+        under_floor_debounce_fires(&mut under_secs, false, time.delta_secs());
+        return;
+    }
+
+    // Before the first movement tick the prediction is unset, so the seed the
+    // server sent is what needs checking.
+    let pos = if prediction.initialized {
+        prediction.pos
+    } else {
+        Vec3::new(self_pos.pos.x, self_pos.pos.y, self_pos.pos.z)
+    };
+    let column = bevy::math::Vec2::new(pos.x, -pos.y);
+    let feet_y = -pos.z;
+
+    let reachable = collision
+        .ground_step(
+            column,
+            feet_y,
+            ffxi_viewer_core::dat_mzb::MAX_GROUND_STEP_UP,
+        )
+        .is_some();
+    // No floor at all means the zone collision has not loaded yet (it is reset
+    // on zone change) or the column is genuinely floorless — neither is a wedge.
+    let under = !reachable && collision.ground_nearest(column, feet_y).is_some();
+    if !under_floor_debounce_fires(&mut under_secs, under, time.delta_secs()) {
+        return;
+    }
+
+    let Some(recovered_z) = collision.ground_or_recover_wire_z(pos.x, pos.y, pos.z) else {
+        return;
+    };
+    if (recovered_z - pos.z).abs() <= f32::EPSILON {
+        return;
+    }
+
+    prediction.pos = Vec3::new(pos.x, pos.y, recovered_z);
+    prediction.initialized = true;
+    let _ = cmd_tx.0.try_send(AgentCommand::Move {
+        x: pos.x,
+        y: pos.y,
+        z: recovered_z,
+        heading: self_pos.heading,
+    });
 }
 
 fn heading_to_forward(heading: u8) -> (f32, f32) {
@@ -1282,6 +1373,40 @@ const TAB_SAMPLE_HEIGHTS: [f32; 5] = [0.0, 0.5, 1.0, 1.5, 2.0];
 mod tests {
     use super::*;
     use ffxi_viewer_wire::{Entity as WireEntity, EntityKind, Vec3 as WireVec3};
+
+    #[test]
+    fn under_floor_debounce_waits_then_fires_once() {
+        const TICK: f32 = 1.0 / 60.0;
+        let mut acc = 0.0f32;
+        let mut ticks = 0;
+        while !under_floor_debounce_fires(&mut acc, true, TICK) {
+            ticks += 1;
+            assert!(ticks < 1000, "debounce never fired while under the floor");
+        }
+        assert!(
+            (ticks as f32 * TICK - UNDER_FLOOR_RECOVERY_SECS).abs() < TICK,
+            "fired after {ticks} ticks, expected ~{UNDER_FLOOR_RECOVERY_SECS}s"
+        );
+        assert!(
+            !under_floor_debounce_fires(&mut acc, true, TICK),
+            "the debounce rearms after firing rather than repeating every tick"
+        );
+    }
+
+    #[test]
+    fn under_floor_debounce_rearms_when_grounded() {
+        let mut acc = 0.0f32;
+        assert!(!under_floor_debounce_fires(
+            &mut acc,
+            true,
+            UNDER_FLOOR_RECOVERY_SECS * 0.9
+        ));
+        assert!(!under_floor_debounce_fires(&mut acc, false, 0.0));
+        assert!(
+            !under_floor_debounce_fires(&mut acc, true, UNDER_FLOOR_RECOVERY_SECS * 0.9),
+            "a moment on solid ground clears the accumulator, so a stray floorless column never fires"
+        );
+    }
 
     #[test]
     fn heal_toggle_alternates_stance_and_wire_mode() {

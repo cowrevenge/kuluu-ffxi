@@ -690,7 +690,11 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
     );
     app.add_systems(
         FixedUpdate,
-        input::dispatch_movement_system
+        (
+            input::dispatch_movement_system,
+            input::recover_self_ground_system,
+        )
+            .chain()
             .run_if(in_state(AppPhase::InGame))
             .run_if(ffxi_viewer_core::cutscene::player_camera_allowed),
     );

@@ -476,6 +476,25 @@ impl MzbCollisionGeometry {
         best.map(|(_, hit_y)| hit_y)
     }
 
+    /// [`Self::ground_step`] with an escape hatch for a walker already beneath
+    /// every floor in its column. Walking cannot reach that state — descent is
+    /// unbounded, so the floor you are standing on is always within reach — it
+    /// only arises from a bad server seed or from walking into a hillside while
+    /// wall collision is missing (kuluu-q5sn). Holding height there wedges the
+    /// wire z permanently, because the server persists and echoes back whatever
+    /// c2s 0x015 sends (kuluu-mo4q).
+    pub fn ground_or_recover(&self, xz: Vec2, feet_y: f32, max_rise: f32) -> Option<f32> {
+        self.ground_step(xz, feet_y, max_rise)
+            .or_else(|| self.ground_nearest(xz, feet_y))
+    }
+
+    /// [`Self::ground_or_recover`] in wire coordinates: bevy.x = ffxi.x,
+    /// bevy.z = -ffxi.y, bevy.y = -ffxi.z.
+    pub fn ground_or_recover_wire_z(&self, x: f32, y: f32, z: f32) -> Option<f32> {
+        self.ground_or_recover(Vec2::new(x, -y), -z, MAX_GROUND_STEP_UP)
+            .map(|floor_bevy_y| -floor_bevy_y)
+    }
+
     pub fn ground_raycast_all(&self, xz: Vec2) -> Vec<(f32, Vec3)> {
         let mut hits: Vec<(f32, Vec3)> = Vec::new();
         self.for_each_hit_in_column(xz, |_, _, hit_y, normal| hits.push((hit_y, normal)));
@@ -3276,6 +3295,66 @@ pub(crate) mod ground_tests {
         assert!(
             fall.is_some_and(|y| (y - 0.4).abs() < 1e-3),
             "descent is unbounded — walking off a ledge falls, got {fall:?}"
+        );
+    }
+
+    /// The West Ronfaure riverbed column (zone 100, ffxi x=-390.20 y=-437.21)
+    /// reduced to its one floor: a self seed of wire z=0 puts the player 9.28
+    /// under the world, where `ground_step` refuses forever (kuluu-mo4q).
+    #[test]
+    fn ground_or_recover_lifts_a_player_under_the_world() {
+        let geom = slabs(&[(9.279, Vec3::Y)]);
+        assert_eq!(
+            geom.ground_step(Vec2::ZERO, 0.0, MAX_GROUND_STEP_UP),
+            None,
+            "the wedge: the only floor is past the step-up bound"
+        );
+        let recovered = geom.ground_or_recover(Vec2::ZERO, 0.0, MAX_GROUND_STEP_UP);
+        assert!(
+            recovered.is_some_and(|y| (y - 9.279).abs() < 1e-3),
+            "under the world, recovery snaps to the real floor, got {recovered:?}"
+        );
+    }
+
+    #[test]
+    fn ground_or_recover_wire_z_matches_the_bevy_flip() {
+        let geom = slabs(&[(9.279, Vec3::Y)]);
+        let z = geom.ground_or_recover_wire_z(0.0, 0.0, 0.0);
+        assert!(
+            z.is_some_and(|z| (z + 9.279).abs() < 1e-3),
+            "wire z is the negated bevy floor height, got {z:?}"
+        );
+    }
+
+    /// The kuluu-0nnl pin: recovery must be inert whenever any floor is within
+    /// step-up reach, or a hole in the street relaunches the player onto a roof.
+    #[test]
+    fn ground_or_recover_does_not_reach_a_roof_from_a_floor() {
+        let geom = two_floors(0.4, 7.13);
+        let grounded = geom.ground_or_recover(Vec2::ZERO, 0.0, MAX_GROUND_STEP_UP);
+        assert!(
+            grounded.is_some_and(|y| (y - 0.4).abs() < 1e-3),
+            "the reachable floor wins over the roof, got {grounded:?}"
+        );
+    }
+
+    #[test]
+    fn ground_or_recover_holds_height_without_any_floor() {
+        let geom = slabs(&[(6.44, Vec3::NEG_Y)]);
+        assert_eq!(
+            geom.ground_or_recover(Vec2::ZERO, 0.0, MAX_GROUND_STEP_UP),
+            None,
+            "a ceiling-only column grounds nowhere, so the caller keeps its height"
+        );
+    }
+
+    #[test]
+    fn ground_or_recover_still_falls_off_a_ledge() {
+        let geom = slabs(&[(0.4, Vec3::Y)]);
+        let fall = geom.ground_or_recover(Vec2::ZERO, 12.0, MAX_GROUND_STEP_UP);
+        assert!(
+            fall.is_some_and(|y| (y - 0.4).abs() < 1e-3),
+            "recovery must not clamp the unbounded drop side, got {fall:?}"
         );
     }
 

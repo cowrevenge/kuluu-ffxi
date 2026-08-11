@@ -255,6 +255,9 @@ struct LiveGenerator {
     auto_run: bool,
     // Fixed particle orientation (init_rotation); None = camera billboard.
     orientation: Option<Quat>,
+    // `is_solid_mesh(template)`, resolved once at spawn: whether the linked mesh has extent on
+    // all three axes and can therefore carry the aim-at-eye world orientation.
+    solid_mesh: bool,
     // The mesh entity is a child of the actor root, so vertex positions are
     // built in the actor's FFXI-local frame instead of world space.
     actor_local: bool,
@@ -406,6 +409,7 @@ pub fn spawn_particle_generators(
             scale_y: resolve(def.scale_y_track),
             alpha: resolve(def.alpha_track),
             tod_color: resolve_tod_tracks(&def, assets),
+            solid_mesh: is_solid_mesh(&template),
             template,
             draw_path: D3mDrawPath::D3m,
             sprite_frames,
@@ -495,6 +499,7 @@ pub fn spawn_actor_auto_run_particles(
                 scale_y: resolve(def.scale_y_track),
                 alpha: resolve(def.alpha_track),
                 tod_color: resolve_tod_tracks(&def, &fx.assets),
+                solid_mesh: is_solid_mesh(&template),
                 template,
                 draw_path: D3mDrawPath::D3m,
                 sprite_frames,
@@ -567,6 +572,7 @@ pub fn spawn_zone_particle_generator(
         scale_y: resolve(def.scale_y_track),
         alpha: resolve(def.alpha_track),
         tod_color: def.tod_color_tracks.map(|id| keyframe(assets, global, id)),
+        solid_mesh: is_solid_mesh(&template),
         template,
         draw_path,
         sprite_frames,
@@ -1057,9 +1063,29 @@ fn needs_rebuild(built: &MeshKey, next: &MeshKey) -> bool {
 // research/xim Particle.kt:326-334 + GLDrawer.kt:474-489 — BillBoardType::Camera is not a screen
 // billboard: retail leaves the modelview alone and gives the particle a world orientation that
 // aims its mesh-local +X at the eye, so the mesh stays a solid with all three axes scaled. Only
-// BillBoardType::XYZ replaces the modelview basis with the view basis.
+// BillBoardType::XYZ replaces the modelview basis with the view basis. `solid_mesh` is what
+// makes that description true of the linked geometry.
 fn is_axial_camera_billboard(g: &LiveGenerator) -> bool {
-    g.def.billboard == ParticleBillboard::Camera && g.orientation.is_none() && !g.actor_local
+    g.def.billboard == ParticleBillboard::Camera
+        && g.orientation.is_none()
+        && !g.actor_local
+        && g.solid_mesh
+}
+
+// A template with no extent on some axis is a flat authored sprite quad — every D3M billboard
+// and SpriteSheet frame is an XY rectangle whose vertices carry z exactly 0, so its only face
+// normal is the axis it is missing. Aiming such a quad's local +X at the eye lays its plane
+// along the view ray and it draws edge-on, which is why the aim-at-eye rotation describes only
+// the solids retail links to a Camera generator (the `suns`/`moon`/`hdhu` glow domes, thin in x
+// and round in y/z).
+fn is_solid_mesh(template: &SpriteTemplate) -> bool {
+    let mut lo = Vec3::splat(f32::INFINITY);
+    let mut hi = Vec3::splat(f32::NEG_INFINITY);
+    for p in &template.positions {
+        lo = lo.min(*p);
+        hi = hi.max(*p);
+    }
+    (hi - lo).cmpgt(Vec3::ZERO).all()
 }
 
 // research/xim Particle.kt:548-569 `applyMovementOrientation`, with the direction supplied by
@@ -1402,6 +1428,7 @@ mod tests {
             entity: Entity::PLACEHOLDER,
             auto_run: false,
             orientation: None,
+            solid_mesh: false,
             actor_local: false,
             tex_translate: Vec2::ZERO,
             vel_basis: Vec3::ONE,
@@ -2195,6 +2222,26 @@ mod tests {
         g
     }
 
+    fn retail_assets(file_id: u32) -> Option<ActionAssets> {
+        let root = ffxi_dat::archive::open_test_install()?;
+        let loc = match root.resolve(file_id) {
+            Ok(loc) => loc,
+            Err(err) => {
+                eprintln!("skipping: file {file_id} is not in this install ({err})");
+                return None;
+            }
+        };
+        let path = loc.path_under(&root);
+        let bytes = match std::fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(err) => {
+                eprintln!("skipping: {} unreadable ({err})", path.display());
+                return None;
+            }
+        };
+        Some(crate::scheduler_runtime::parse_action_bytes(&bytes).1)
+    }
+
     fn view(rot: Quat) -> CameraView {
         CameraView {
             rot,
@@ -2211,6 +2258,8 @@ mod tests {
         d.init_scale = init_scale;
         let mut g = celestial(d);
         g.vel_basis = ZONE_VEL_BASIS;
+        // The glow domes this stands in for are solids; `local` is one dome vertex.
+        g.solid_mesh = true;
         g.template = SpriteTemplate {
             positions: vec![local],
             uvs: vec![[0.0, 0.0]],
@@ -2281,6 +2330,89 @@ mod tests {
             },
         );
         assert!((positions[0].length() - Z_SCALE).abs() < 1e-3);
+    }
+
+    // Mirrors what `spawn_zone_particle_generator` wires up for a generator declared in a zone
+    // DAT, so the guard below reads the same geometry the running client would.
+    fn zone_generator(assets: &ActionAssets, name: &[u8; 4]) -> LiveGenerator {
+        let def = *assets
+            .particle_defs
+            .get(name)
+            .expect("the zone DAT declares the generator");
+        let mut images = Assets::<Image>::default();
+        let (template, sprite_frames, _, draw_path) =
+            resolve_zone_mesh(assets, &def, &mut images).expect("its linked mesh resolves");
+        let mut g = celestial(def);
+        g.solid_mesh = is_solid_mesh(&template);
+        g.template = template;
+        g.sprite_frames = sprite_frames;
+        g.draw_path = draw_path;
+        g.orientation = particle_orientation(&g.def);
+        g.actor_local = false;
+        g.vel_basis = ZONE_VEL_BASIS;
+        g
+    }
+
+    // The shipped zone DATs put two unrelated kinds of mesh behind a Camera generator. ROM 210's
+    // `sun0` links the `suns` MMB dome, a solid authored around its x axis (extent 11.4 x 50.0 x
+    // 49.5) — the case the aim-at-eye rotation describes. ROM 230's `bun4` links the `chob`
+    // sprite sheet, a 2 x 2 xy quad whose z extent is exactly 0; aiming its local +X at the eye
+    // puts its one face along the view ray and it draws edge-on, so it keeps the screen
+    // billboard (kuluu-fjd3). Skips without a retail install.
+    #[test]
+    fn only_a_solid_mesh_takes_the_axial_camera_path() {
+        const SUN_DOME_ZONE: u32 = 210;
+        const SUN_DOME_GEN: [u8; 4] = *b"sun0";
+        const SPRITE_SHEET_ZONE: u32 = 230;
+        const SPRITE_SHEET_GEN: [u8; 4] = *b"bun4";
+        // Far enough along +Z that the eye direction is that axis to well inside FACING.
+        const EYE_DISTANCE: f32 = 500.0;
+        const FACING: f32 = 0.999;
+
+        let (Some(dome_assets), Some(sheet_assets)) = (
+            retail_assets(SUN_DOME_ZONE),
+            retail_assets(SPRITE_SHEET_ZONE),
+        ) else {
+            return;
+        };
+        let dome = zone_generator(&dome_assets, &SUN_DOME_GEN);
+        let sheet = zone_generator(&sheet_assets, &SPRITE_SHEET_GEN);
+
+        for g in [&dome, &sheet] {
+            assert_eq!(g.def.billboard, ParticleBillboard::Camera);
+            assert!(g.orientation.is_none());
+        }
+        assert!(
+            is_solid_mesh(&dome.template),
+            "the suns dome has extent on all three axes"
+        );
+        assert!(
+            !is_solid_mesh(&sheet.template),
+            "the chob sheet frame is a flat xy quad"
+        );
+        assert!(is_axial_camera_billboard(&dome));
+        assert!(!is_axial_camera_billboard(&sheet));
+
+        let eye = |z: f32| CameraView {
+            rot: Quat::IDENTITY,
+            pos: Vec3::new(0.0, 0.0, z),
+        };
+        // An identity camera rotation leaves the sheet's authored +Z normal alone, which is what
+        // an eye on the +Z axis sees; the axial rotation swings that normal to +X instead.
+        let (positions, _) = rebuilt(&sheet, eye(EYE_DISTANCE));
+        let normal = (positions[1] - positions[0])
+            .cross(positions[2] - positions[0])
+            .normalize();
+        assert!(
+            normal.dot(Vec3::Z).abs() > FACING,
+            "the flat sheet faces the eye, normal {normal}"
+        );
+
+        // The dome does carry the aim-at-eye orientation, so its drawn vertices move with the eye.
+        assert_ne!(
+            rebuilt(&dome, eye(EYE_DISTANCE)).0,
+            rebuilt(&dome, eye(-EYE_DISTANCE)).0
+        );
     }
 
     // Only an axial camera billboard reorients with the eye position, so only it may put the
@@ -2488,12 +2620,20 @@ mod tests {
     // The shipped f_ro (zone DAT 210) tables: `kasa`, the lunar halo MMB, carries a 0x4F alpha
     // lane that is zero outside phases 5..=7, while the `moon` sprite's never drops below 0.42.
     // With the alpha lane dropped, the halo drew as a saturated disc ~20 degrees across that
-    // swamped the moon at every phase. Skips without a retail install.
+    // swamped the moon at every phase. The drawn alpha is pinned to a value, not just to
+    // "> 0", so a halo that regressed to near-invisible near full moon also fails.
+    // Skips without a retail install.
     #[test]
     fn zone_210_lunar_halo_is_dark_except_near_full_moon() {
         const F_RO: u32 = 210;
-        const HALO_LIT_PHASES: std::ops::RangeInclusive<usize> = 5..=7;
         const SPRITE_MIN_ALPHA: f32 = 0.5;
+        // `kasa`'s 0x4F alpha lane as shipped, dumped byte-for-byte from f_ro.
+        const HALO_PHASE_ALPHA_BYTE: [u8; ffxi_dat::particle_gen::MOON_PHASES] =
+            [0, 0, 0, 0, 0, 60, 128, 60, 0, 0, 0, 0];
+        // The rest of `kasa`'s modulate chain (its day-of-week lane and init colour, both
+        // phase-independent) is a constant gain on that lane: 160/255 as shipped.
+        const HALO_CHAIN_GAIN: f32 = 160.0 / u8::MAX as f32;
+        const ALPHA_EPS: f32 = 1e-6;
 
         let Some(bytes) = zone_bytes(F_RO) else {
             eprintln!("skipping: no retail DAT root (set FFXI_DAT_PATH)");
@@ -2501,17 +2641,25 @@ mod tests {
         };
         let halo = moon_attached_def(&bytes, b"kasa");
         let sprite = moon_attached_def(&bytes, b"moon");
+        let halo_table = halo
+            .moon_phase_color
+            .expect("the halo generator carries a moon-phase colour table");
 
         for phase in 0..ffxi_dat::particle_gen::MOON_PHASES {
+            let lane = HALO_PHASE_ALPHA_BYTE[phase] as f32 / u8::MAX as f32;
+            assert!(
+                (halo_table[phase][3] - lane).abs() < ALPHA_EPS,
+                "halo alpha lane read back from the DAT, phase {phase}: \
+                 {} vs {lane}",
+                halo_table[phase][3]
+            );
+
             let halo_alpha = phase_alpha(&halo, phase);
-            if HALO_LIT_PHASES.contains(&phase) {
-                assert!(halo_alpha > 0.0, "halo lit near full moon, phase {phase}");
-            } else {
-                assert_eq!(
-                    halo_alpha, 0.0,
-                    "halo dark away from full moon, phase {phase}"
-                );
-            }
+            let expected = lane * HALO_CHAIN_GAIN;
+            assert!(
+                (halo_alpha - expected).abs() < ALPHA_EPS,
+                "halo draws its DAT alpha lane, phase {phase}: {halo_alpha} vs {expected}"
+            );
             assert!(
                 phase_alpha(&sprite, phase) > SPRITE_MIN_ALPHA,
                 "the moon disc itself stays visible at phase {phase}"
@@ -2867,26 +3015,6 @@ mod tests {
             assets.images_by_name.insert(String::new(), one_pixel());
 
             assert!(resolved_texture(&assets).is_none());
-        }
-
-        fn retail_assets(file_id: u32) -> Option<ActionAssets> {
-            let root = ffxi_dat::archive::open_test_install()?;
-            let loc = match root.resolve(file_id) {
-                Ok(loc) => loc,
-                Err(err) => {
-                    eprintln!("skipping: file {file_id} is not in this install ({err})");
-                    return None;
-                }
-            };
-            let path = loc.path_under(&root);
-            let bytes = match std::fs::read(&path) {
-                Ok(bytes) => bytes,
-                Err(err) => {
-                    eprintln!("skipping: {} unreadable ({err})", path.display());
-                    return None;
-                }
-            };
-            Some(crate::scheduler_runtime::parse_action_bytes(&bytes).1)
         }
 
         fn texture_for(assets: &ActionAssets, def: &ParticleGeneratorDef) -> Option<Handle<Image>> {

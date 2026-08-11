@@ -8,7 +8,7 @@ use crate::map_image::{scan_graphics, GraphicImage};
 //   u16 unk_flag, u16 num_mesh, u8 lens_flare, u8, u8, u8 norm_flag,
 //   char[0x10] texture_name (two 8-byte tokens = category + id),
 //   then num_mesh frames of { u16==1, u8 num_quads, u8, [16B if lens_flare],
-//   (6*num_quads) verts of { vec3 pos, rgba u8x4, f32 u, f32 v } }.
+//   (6*num_quads) verts of { vec3 pos, D3DCOLOR u32, f32 u, f32 v } }.
 // When unk_flag==1 && norm_flag==0 the UVs are texel-space and scale by 1/256.
 pub const MOON_PHASE_FRAMES: usize = 12;
 
@@ -38,7 +38,7 @@ pub struct LensFlareSheet {
     pub half_extents: Vec<[f32; 2]>,
     /// Each mesh's authored vertex colour, the D argument of retail's texture-stage chain —
     /// this is where the chain's core/halo/ghost intensities live (lf03 in file 201 ramps its
-    /// alpha byte 100, 50, 50, 30, 20 down the chain). Raw bytes; the consumer applies
+    /// alpha byte 100, 50, 50, 30, 20 down the chain). RGBA bytes; the consumer applies
     /// [`crate::d3m::VERTEX_COLOR_DIVISOR`] like every other stage-0 D.
     pub colors: Vec<[u8; 4]>,
     pub texture: GraphicImage,
@@ -49,6 +49,15 @@ fn rd_u16(b: &[u8], o: usize) -> u16 {
 }
 fn rd_f32(b: &[u8], o: usize) -> f32 {
     f32::from_le_bytes([b[o], b[o + 1], b[o + 2], b[o + 3]])
+}
+
+// The vertex diffuse is a D3DCOLOR (the sprite vertex is the D3DFVF_XYZ|DIFFUSE|TEX1 layout,
+// hence the 24-byte stride), i.e. ARGB packed little-endian, so the file bytes run B,G,R,A --
+// research/XIClient/src/XIClient/include/Rendering/Color/ARGBByte.h, the same order
+// `crate::d3m` unpacks. (research/xim SpriteSheetSection.kt:67 reads this one field as RGBA,
+// against its own nextBGRA everywhere else it walks a vertex buffer.)
+fn rd_d3dcolor(b: &[u8], o: usize) -> [u8; 4] {
+    [b[o + 2], b[o + 1], b[o], b[o + 3]]
 }
 
 // Per-mesh geometry summary: the UV sub-rect, the flare offset fraction, the quad's half
@@ -110,7 +119,7 @@ fn parse_frames_offsets(b: &[u8]) -> Option<SheetMeshes> {
             y0 = y0.min(y);
             y1 = y1.max(y);
             if i == 0 {
-                color = [b[p + 12], b[p + 13], b[p + 14], b[p + 15]];
+                color = rd_d3dcolor(b, p + 12);
             }
             let u = rd_f32(b, p + 16) * uv_scale;
             let v = rd_f32(b, p + 20) * uv_scale;
@@ -167,7 +176,7 @@ impl ParticleSpriteSheet {
 }
 
 // Same mesh walk as parse_frames_offsets (research/xim SpriteSheetSection.kt:44-79), but
-// retains each vertex's { vec3 pos, rgba u8x4, f32 u, f32 v } instead of collapsing to a
+// retains each vertex's { vec3 pos, D3DCOLOR u32, f32 u, f32 v } instead of collapsing to a
 // UV bounding rect.
 fn parse_particle_frames(b: &[u8]) -> Option<Vec<SpriteFrame>> {
     if b.len() < 24 {
@@ -206,7 +215,7 @@ fn parse_particle_frames(b: &[u8]) -> Option<Vec<SpriteFrame>> {
                 return None;
             }
             positions.push([rd_f32(b, p), rd_f32(b, p + 4), rd_f32(b, p + 8)]);
-            colors.push([b[p + 12], b[p + 13], b[p + 14], b[p + 15]]);
+            colors.push(rd_d3dcolor(b, p + 12));
             uvs.push([rd_f32(b, p + 16) * uv_scale, rd_f32(b, p + 20) * uv_scale]);
             p += 24;
         }
@@ -335,7 +344,7 @@ mod tests {
         colored_quad(u0, v0, u1, v1, [0u8; 4], 0.0)
     }
 
-    // One quad = 6 verts of { vec3 pos, rgba u8x4, f32 u, f32 v } = 24B each, laid out as a
+    // One quad = 6 verts of { vec3 pos, D3DCOLOR u32, f32 u, f32 v } = 24B each, laid out as a
     // `half`-half-extent square so half_extents/colors can both be asserted.
     fn colored_quad(u0: f32, v0: f32, u1: f32, v1: f32, color: [u8; 4], half: f32) -> Vec<u8> {
         let corners = [
@@ -452,6 +461,47 @@ mod tests {
         assert_eq!(m.half_extents, vec![[4.0, 4.0], [1.0, 1.0]]);
     }
 
+    // Both parse paths must hand consumers true RGBA: `lens_flare.rs` and `particle_sim.rs`
+    // index the array as (r,g,b,a), but the file stores a D3DCOLOR, whose little-endian bytes
+    // run B,G,R,A (research/XIClient/src/XIClient/include/Rendering/Color/ARGBByte.h). Taking
+    // them in file order swapped red and blue: `tam3`/`tam4`'s sheet, authored 0x80800000_u32
+    // ARGB, drew blue instead of red, and the lf03 flare ghosts drew cold instead of warm.
+    #[test]
+    fn vertex_colour_unpacks_the_d3dcolor_word_as_rgba() {
+        const AUTHORED_ARGB: u32 = 0x6040_80C0;
+        const EXPECTED_RGBA: [u8; 4] = [0x40, 0x80, 0xC0, 0x60];
+        const HALF_EXTENT: f32 = 1.0;
+
+        let mut b = header(1, false, "lf0a", "flar");
+        let mut m = vec![0u8; 4];
+        m[0..2].copy_from_slice(&1u16.to_le_bytes());
+        m[2] = 1;
+        m.extend(colored_quad(
+            0.0,
+            0.0,
+            1.0,
+            1.0,
+            AUTHORED_ARGB.to_le_bytes(),
+            HALF_EXTENT,
+        ));
+        b.extend(m);
+
+        assert_eq!(
+            parse_frames_offsets(&b).unwrap().colors,
+            vec![EXPECTED_RGBA]
+        );
+        let particle = ParticleSpriteSheet::parse(&b).unwrap();
+        assert_eq!(
+            particle.frames[0].colors,
+            vec![EXPECTED_RGBA; particle.frames[0].positions.len()]
+        );
+    }
+
+    // The fixture vertex's authored D3DCOLOR: A=40 R=10 G=20 B=30, distinct per channel so a
+    // channel swap can't hide.
+    const GEOM_MESH_ARGB: u32 = 0x280A_141E;
+    const GEOM_MESH_RGBA: [u8; 4] = [10, 20, 30, 40];
+
     // A single-quad mesh with distinct per-vertex positions/uvs so the particle parser's
     // full-geometry retention (not just a UV bounding rect) can be asserted.
     fn geom_mesh(verts: &[([f32; 3], [f32; 2])]) -> Vec<u8> {
@@ -463,7 +513,7 @@ mod tests {
             for c in pos {
                 m.extend_from_slice(&c.to_le_bytes());
             }
-            m.extend_from_slice(&[10, 20, 30, 40]);
+            m.extend_from_slice(&GEOM_MESH_ARGB.to_le_bytes());
             m.extend_from_slice(&uv[0].to_le_bytes());
             m.extend_from_slice(&uv[1].to_le_bytes());
         }
@@ -492,6 +542,6 @@ mod tests {
         assert_eq!(ss.frames[0].positions[3], [3.0, 4.0, 0.0]);
         assert!((ss.frames[0].uvs[2][0] - 0.2).abs() < 1e-6);
         assert_eq!(ss.frames[1].positions[1], [-1.0, 0.0, 5.0]);
-        assert_eq!(ss.frames[0].colors[0], [10, 20, 30, 40]);
+        assert_eq!(ss.frames[0].colors[0], GEOM_MESH_RGBA);
     }
 }

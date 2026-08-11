@@ -1,7 +1,9 @@
 use bevy::prelude::*;
 use ffxi_viewer_core::camera::OperatorCamera;
+use ffxi_viewer_core::dat_mzb::MMB_LOAD_DISTANCE_MARGIN;
 use ffxi_viewer_core::lens_flare::SunOcclusion;
 use ffxi_viewer_core::sun_moon::{sun_angular_radius, sun_direction, VanaSky, SKY_RADIUS};
+use ffxi_viewer_core::weather::ZoneWeather;
 
 use super::collision_bvh::{CollisionBvh, ZoneCollisionBvh};
 
@@ -55,6 +57,19 @@ fn sun_visibility_target(bvh: &CollisionBvh, origin: Vec3, sun_dir: Vec3, reach:
     unoccluded as f32 / dirs.len() as f32
 }
 
+// research/xim ParticleDrawer.kt:239-248 queryLensFlare: retail's flare visibility is a
+// depth-buffer occlusion query, so only geometry actually drawn that frame occludes, while our
+// collision BVH holds the whole zone block. Three bounds decide what the player can see: zone
+// placements are only spawned inside view_distance * MMB_LOAD_DISTANCE_MARGIN (dat_mmb.rs:468),
+// DAT distance fog leaves no contrast past its visibility distance while the sky dome is drawn
+// unfogged (weather.rs apply_zone_weather), and the sun billboard itself sits at SKY_RADIUS so
+// anything past it is behind the sun.
+fn occlusion_reach(view_distance: f32, fog_visibility: Option<f32>) -> f32 {
+    (view_distance * MMB_LOAD_DISTANCE_MARGIN)
+        .min(fog_visibility.unwrap_or(f32::INFINITY))
+        .min(SKY_RADIUS)
+}
+
 fn smoothed_visibility(current: f32, target: f32, dt_secs: f32) -> f32 {
     let blend = 1.0 - (-SUN_VISIBILITY_FADE_PER_SEC * dt_secs).exp();
     let next = current + (target - current) * blend;
@@ -69,16 +84,12 @@ pub fn update_sun_occlusion_system(
     sky: Res<VanaSky>,
     zone_bvh: Res<ZoneCollisionBvh>,
     settings: Res<ffxi_viewer_core::graphics_settings::GraphicsSettings>,
+    zone_weather: Res<ZoneWeather>,
     cam_q: Query<&GlobalTransform, With<OperatorCamera>>,
     time: Res<Time>,
     mut occlusion: ResMut<SunOcclusion>,
 ) {
-    // research/xim ParticleDrawer.kt:239-248 queryLensFlare: retail's visibility is a
-    // depth-buffer occlusion query, so only geometry rendered this frame occludes. Zone
-    // geometry is spawned only inside view_distance (dat_mmb.rs:436, dat_mzb.rs:2366) while the
-    // collision BVH holds the whole zone block, so a SKY_RADIUS ray at sunrise is answered
-    // almost entirely by terrain that was never drawn and sits past the fog.
-    let reach = settings.view_distance.min(SKY_RADIUS);
+    let reach = occlusion_reach(settings.view_distance, zone_weather.fog_visibility_dist());
     let sun_up = sky.sun_altitude > 0.0;
     let target = match (sun_up, zone_bvh.0.as_ref(), cam_q.single()) {
         (true, Some(bvh), Ok(cam)) => {
@@ -101,8 +112,18 @@ mod tests {
     const NOON_HOUR: f32 = 12.0;
     const TEST_DT_SECS: f32 = 1.0 / 60.0;
 
-    // The default graphics preset's view_distance, i.e. what update_sun_occlusion_system passes.
-    const TEST_REACH: f32 = 500.0;
+    // A mid-range DAT max_fog_dist_landscape, standing in for the outdoor zone the strobe was
+    // reported in.
+    const TEST_FOG_VISIBILITY: f32 = 1200.0;
+
+    // What update_sun_occlusion_system passes at the shipping default (GraphicsSettings::default()
+    // is QualityPreset::High).
+    fn default_reach() -> f32 {
+        occlusion_reach(
+            ffxi_viewer_core::graphics_settings::GraphicsSettings::default().view_distance,
+            Some(TEST_FOG_VISIBILITY),
+        )
+    }
 
     // The point-sample cone this fix replaced (~6px at a 1080p-tall 60-degree FoV viewport).
     const LEGACY_TAP_ANGLE_RAD: f32 = 0.006;
@@ -151,7 +172,7 @@ mod tests {
         let bvh =
             CollisionBvh::from_world_triangles(wall_quad(origin + sun_dir * 10.0, sun_dir, 50.0));
         assert_eq!(
-            sun_visibility_target(&bvh, origin, sun_dir, TEST_REACH),
+            sun_visibility_target(&bvh, origin, sun_dir, default_reach()),
             0.0
         );
     }
@@ -163,36 +184,83 @@ mod tests {
         let bvh =
             CollisionBvh::from_world_triangles(wall_quad(origin - sun_dir * 10.0, sun_dir, 50.0));
         assert_eq!(
-            sun_visibility_target(&bvh, origin, sun_dir, TEST_REACH),
+            sun_visibility_target(&bvh, origin, sun_dir, default_reach()),
             1.0
         );
     }
 
     // research/xim ParticleDrawer.kt:239-248: retail's flare visibility is a depth-buffer query,
-    // so only what was drawn this frame occludes. Collision past the spawn radius is invisible
-    // to the player and must not answer the query.
+    // so only what was drawn this frame occludes. Collision the player cannot see is invisible
+    // to the query. Both walls sit inside SKY_RADIUS so the sun's own sphere is not what
+    // rejects the far one.
     #[test]
     fn geometry_beyond_the_rendered_draw_distance_does_not_occlude() {
         let origin = Vec3::new(0.0, 1.0, 0.0);
         let sun_dir = sun_direction(NOON_HOUR);
+        let far_dist = TEST_FOG_VISIBILITY * 2.0;
+        assert!(far_dist < SKY_RADIUS);
         let far = CollisionBvh::from_world_triangles(wall_quad(
-            origin + sun_dir * (TEST_REACH * 2.0),
+            origin + sun_dir * far_dist,
             sun_dir,
             200.0,
         ));
         assert_eq!(
-            sun_visibility_target(&far, origin, sun_dir, TEST_REACH),
+            sun_visibility_target(&far, origin, sun_dir, default_reach()),
             1.0
         );
 
         let near = CollisionBvh::from_world_triangles(wall_quad(
-            origin + sun_dir * (TEST_REACH * 0.5),
+            origin + sun_dir * (TEST_FOG_VISIBILITY * 0.5),
             sun_dir,
             200.0,
         ));
         assert_eq!(
-            sun_visibility_target(&near, origin, sun_dir, TEST_REACH),
+            sun_visibility_target(&near, origin, sun_dir, default_reach()),
             0.0
+        );
+    }
+
+    #[test]
+    fn the_shipping_default_reach_is_bounded_by_what_is_drawn() {
+        let high = ffxi_viewer_core::graphics_settings::GraphicsSettings::default();
+        assert_eq!(
+            occlusion_reach(high.view_distance, Some(TEST_FOG_VISIBILITY)),
+            TEST_FOG_VISIBILITY,
+            "fog must bound the ray at the High preset's view distance"
+        );
+        assert!(
+            default_reach() < SKY_RADIUS,
+            "reach at the shipping default must be shorter than the sun's own sphere"
+        );
+
+        let low_view_distance = 200.0;
+        assert_eq!(
+            occlusion_reach(low_view_distance, None),
+            low_view_distance * MMB_LOAD_DISTANCE_MARGIN,
+            "with no weather record the spawn radius bounds the ray"
+        );
+        assert_eq!(
+            occlusion_reach(f32::MAX, None),
+            SKY_RADIUS,
+            "geometry past the sun billboard cannot occlude it"
+        );
+    }
+
+    // Pins the fog contract: the reach a shipping session uses is the distance the emitter
+    // (weather.rs apply_zone_weather) hands FogFalloff, not a re-derived copy.
+    #[test]
+    fn the_reach_fog_bound_is_the_emitters_visibility_distance() {
+        let rec = ffxi_dat::weather::WeatherRecord {
+            max_fog_dist_landscape: TEST_FOG_VISIBILITY,
+            ..Default::default()
+        };
+        assert_eq!(
+            occlusion_reach(
+                ffxi_viewer_core::graphics_settings::GraphicsSettings::default().view_distance,
+                Some(ffxi_viewer_core::weather::fog_visibility_dist(&rec)),
+            ),
+            default_reach(),
+            "the fog bound must be the emitter's visibility distance, not a local copy"
         );
     }
 
@@ -229,7 +297,7 @@ mod tests {
             disc_extent * 0.01,
             disc_extent * 10.0,
         ));
-        let vis = sun_visibility_target(&bvh, origin, sun_dir, TEST_REACH);
+        let vis = sun_visibility_target(&bvh, origin, sun_dir, default_reach());
         let tolerance = 1.5 / SUN_OCCLUSION_TAP_COUNT as f32;
         assert!(
             (vis - 0.5).abs() <= tolerance,
@@ -249,7 +317,7 @@ mod tests {
             sun_dir,
             wall_dist * LEGACY_TAP_ANGLE_RAD,
         ));
-        let vis = sun_visibility_target(&bvh, origin, sun_dir, TEST_REACH);
+        let vis = sun_visibility_target(&bvh, origin, sun_dir, default_reach());
         assert!(
             vis > 0.5 && vis < 1.0,
             "sub-disc occluder should dim, not hide, got {vis}"

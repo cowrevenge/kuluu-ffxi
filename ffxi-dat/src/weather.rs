@@ -7,7 +7,7 @@ use crate::{
     DatError, Result,
 };
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct WeatherRecord {
     pub time_minutes: u32,
 

@@ -106,6 +106,21 @@ impl ZoneWeather {
     pub fn indoor(&self) -> bool {
         self.selected.map(|(_, indoor)| indoor).unwrap_or(false)
     }
+
+    /// The distance fed to `FogFalloff::from_visibility_colors` for the record the player's
+    /// own area is fogged through, i.e. the range past which DAT fog leaves no contrast.
+    pub fn fog_visibility_dist(&self) -> Option<f32> {
+        let rec = self.area_current.or(self.current)?;
+        Some(fog_visibility_dist(&rec))
+    }
+}
+
+// FogFalloff::from_visibility_colors divides by the visibility distance and a DAT record may
+// carry 0 (weather.rs harvest default), which would make the extinction non-finite.
+const MIN_FOG_VISIBILITY_DIST: f32 = 80.0;
+
+pub fn fog_visibility_dist(rec: &WeatherRecord) -> f32 {
+    rec.max_fog_dist_landscape.max(MIN_FOG_VISIBILITY_DIST)
 }
 
 // wire::Weather shares the LSB weather.h discriminant ordering, so the variant
@@ -559,7 +574,7 @@ pub fn apply_zone_weather(
             (fg * 1.06).min(1.0),
             (fb * 1.02).min(1.0),
         );
-        let visibility = fog_rec.max_fog_dist_landscape.max(80.0);
+        let visibility = fog_visibility_dist(&fog_rec);
         let want = DistanceFog {
             color: fog_color,
             directional_light_color: inscatter,
@@ -630,6 +645,28 @@ mod tests {
         for (a, b) in [(g.red, w.red), (g.green, w.green), (g.blue, w.blue)] {
             assert!((a - b).abs() < 1e-5, "got {g:?}, want {w:?}");
         }
+    }
+
+    // The occlusion reach in ffxi-client sun_occlusion.rs reads this to decide how far a lens-flare
+    // ray may see; it must stay the area-fogged record apply_zone_weather hands FogFalloff.
+    #[test]
+    fn zone_weather_reports_the_area_records_fog_visibility() {
+        let mut zone = ZoneWeather::default();
+        assert_eq!(zone.fog_visibility_dist(), None);
+
+        let mut zone_rec = rec_with_fog([0.5; 4]);
+        zone_rec.max_fog_dist_landscape = 900.0;
+        zone.current = Some(zone_rec);
+        assert_eq!(zone.fog_visibility_dist(), Some(900.0));
+
+        let mut area_rec = zone_rec;
+        area_rec.max_fog_dist_landscape = 300.0;
+        zone.area_current = Some(area_rec);
+        assert_eq!(zone.fog_visibility_dist(), Some(300.0));
+
+        area_rec.max_fog_dist_landscape = 0.0;
+        zone.area_current = Some(area_rec);
+        assert_eq!(zone.fog_visibility_dist(), Some(MIN_FOG_VISIBILITY_DIST));
     }
 
     #[test]

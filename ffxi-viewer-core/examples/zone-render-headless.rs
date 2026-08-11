@@ -180,6 +180,7 @@ fn main() {
         .add_message::<ToastEvent>()
         .init_resource::<DrawDistance>()
         .init_resource::<MzbCollisionGeometry>()
+        .init_resource::<ffxi_viewer_core::sub_area_activation::SubAreaActivation>()
         .init_resource::<ffxi_viewer_core::dat_mzb::ZoneAreaMap>()
         .init_resource::<ffxi_viewer_core::dat_mzb::ZoneChunkLightMap>()
         .init_resource::<PendingWaterSpawns>()

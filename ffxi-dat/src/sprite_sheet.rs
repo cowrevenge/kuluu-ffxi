@@ -248,32 +248,6 @@ pub fn extract_moon_sprite_sheet(dat_bytes: &[u8]) -> Option<MoonSpriteSheet> {
     None
 }
 
-// Locate the retail sun sprite sheet (texture category "suns"/"suny", non-lens-flare,
-// attach=0xE Sun in the weather tree) and pair it with its decoded texture. Unlike the
-// moon this is not a 12-frame phase sheet, so frame-count is not constrained.
-pub fn extract_sun_sprite_sheet(dat_bytes: &[u8]) -> Option<MoonSpriteSheet> {
-    for c in walk(dat_bytes).filter_map(Result::ok) {
-        if ChunkKind::from_u8(c.kind) != Some(ChunkKind::SpriteSheet) {
-            continue;
-        }
-        let b = c.data;
-        if b.len() < 24 || b[4] != 0 {
-            continue;
-        }
-        let (category, id) = texture_tokens(b);
-        if category != "suns" && category != "suny" {
-            continue;
-        }
-        let frames = parse_frames(b)?;
-        if frames.is_empty() {
-            continue;
-        }
-        let texture = scan_graphics(dat_bytes).find(|g| g.category == category && g.id == id)?;
-        return Some(MoonSpriteSheet { frames, texture });
-    }
-    None
-}
-
 // Locate a lens-flare sprite sheet (lf0x chain: lens_flare flag set) and pair it with
 // its decoded texture, capturing each mesh's offset fraction along the sun axis.
 pub fn extract_lens_flare_sheet(dat_bytes: &[u8]) -> Option<LensFlareSheet> {
@@ -421,7 +395,7 @@ mod tests {
 
     #[test]
     fn parses_frame_uv_bounds() {
-        let mut b = header(1, false, "suns", "suny");
+        let mut b = header(1, false, "moon", "moon");
         b.extend(mesh(1, None, (0.1, 0.2, 0.7, 0.8)));
         let frames = parse_frames(&b).unwrap();
         assert_eq!(frames.len(), 1);
@@ -446,7 +420,7 @@ mod tests {
 
     #[test]
     fn non_lens_flare_has_no_offsets() {
-        let mut b = header(1, false, "suns", "suny");
+        let mut b = header(1, false, "moon", "moon");
         b.extend(mesh(1, None, (0.0, 0.0, 1.0, 1.0)));
         assert!(parse_frames_offsets(&b).unwrap().offsets.is_empty());
     }

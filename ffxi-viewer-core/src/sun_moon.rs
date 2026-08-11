@@ -22,7 +22,15 @@ pub struct MoonDisc;
 /// in view at every draw distance.
 pub const SKY_RADIUS: f32 = 4000.0;
 
-const SUN_DISC_RADIUS: f32 = 120.0;
+pub const SUN_DISC_RADIUS: f32 = 120.0;
+
+/// Angular radius of the drawn sun disc as seen from the camera. The lens-flare occlusion
+/// query samples exactly this cone: retail tests visibility by drawing the sun particle's own
+/// quad with colour writes off and taking the fraction of pixels that pass
+/// (research/xim src/jsMain/kotlin/xim/poc/ParticleDrawer.kt:239-248).
+pub fn sun_angular_radius() -> f32 {
+    (SUN_DISC_RADIUS / SKY_RADIUS).atan()
+}
 
 /// Edge length of the moon billboard at [`SKY_RADIUS`], sized to subtend retail's angle: the
 /// `moon` generator's sprite quad measures 3.94 units and its init scale is 20 (dat-celestial-probe,
@@ -172,15 +180,6 @@ pub struct CelestialMaterials {
     pub moon: Handle<crate::moon_material::MoonMaterial>,
 }
 
-// The SunDisc swaps between the procedural emissive sphere (no sprite) and an additive
-// textured billboard quad sized from the DAT "suns" sprite extents. Both meshes are
-// pre-built so the swap is a Mesh3d component write.
-#[derive(Resource)]
-pub struct SunDiscMeshes {
-    pub sphere: Handle<Mesh>,
-    pub quad: Handle<Mesh>,
-}
-
 #[derive(Default)]
 pub struct MoonTransitionState {
     pub prev_sun_up: Option<bool>,
@@ -196,12 +195,7 @@ pub struct MoonTransitionState {
     // cached so a zone-reload material swap invalidates the cache.
     pub sun_light_written: Option<(Vec3, f32, Vec3, bool)>,
     pub moon_light_written: Option<(Vec3, f32, Vec3)>,
-    pub sun_disc_written: Option<(
-        AssetId<StandardMaterial>,
-        Vec3,
-        Vec4,
-        Option<AssetId<Image>>,
-    )>,
+    pub sun_disc_written: Option<(AssetId<StandardMaterial>, Vec3)>,
     pub moon_disc_written: Option<(
         AssetId<crate::moon_material::MoonMaterial>,
         Vec4,
@@ -258,7 +252,6 @@ pub fn spawn_sun_and_moon(
     ));
 
     let sphere = meshes.add(Sphere::new(1.0).mesh().ico(3).unwrap());
-    let sun_quad = meshes.add(Rectangle::new(1.0, 1.0));
     // Both celestial bodies ride SKY_RADIUS, far past every measured 0x2F fog distance,
     // and their DAT generators clear fog (measured sun0/sun1 and moon/kasa = 0x02C400C0;
     // research/XIClient CMoElem.cpp:542-543). Bevy fogs unlit StandardMaterials too, so
@@ -277,17 +270,13 @@ pub fn spawn_sun_and_moon(
     commands.spawn((
         crate::components::InGameEntity,
         SunDisc,
-        Mesh3d(sphere.clone()),
+        Mesh3d(sphere),
         MeshMaterial3d(sun_mat.clone()),
         Transform::from_scale(Vec3::splat(SUN_DISC_RADIUS)),
         Visibility::Hidden,
         NotShadowCaster,
         NotShadowReceiver,
     ));
-    commands.insert_resource(SunDiscMeshes {
-        sphere,
-        quad: sun_quad,
-    });
     commands.spawn((
         crate::components::InGameEntity,
         MoonDisc,
@@ -454,8 +443,6 @@ pub struct SunMoonRenderCfg<'w> {
     pub settings: Res<'w, crate::graphics_settings::GraphicsSettings>,
     pub moon_sprite: Res<'w, crate::moon_material::MoonSpriteFrames>,
     pub color_tables: Res<'w, crate::moon_material::CelestialColorTables>,
-    pub sun_sprite: Res<'w, crate::moon_material::SunSprite>,
-    pub sun_disc_meshes: Option<Res<'w, SunDiscMeshes>>,
     pub zone_weather: Res<'w, crate::weather::ZoneWeather>,
     pub zone_lighting: ResMut<'w, crate::weather::ZoneDirectionalLighting>,
     pub dat_celestials: Res<'w, DatCelestials>,
@@ -487,7 +474,6 @@ pub fn sun_moon_system(
         (
             &mut Transform,
             &mut Visibility,
-            &mut Mesh3d,
             &MeshMaterial3d<StandardMaterial>,
         ),
         (
@@ -809,28 +795,14 @@ pub fn sun_moon_system(
     // these hand-authored primitives would draw a second sun and moon on top of them.
     let dat_celestials = render_cfg.dat_celestials.active;
     let sun_visible = sky.sun_altitude > -0.05 && !dat_celestials;
-    let sun_sprite_tex = render_cfg.sun_sprite.texture.clone();
-    for (mut disc, mut vis, mut mesh3d, _) in q_sun_disc.iter_mut() {
+    // No shipped zone DAT carries a sun sprite sheet (surveyed over all 298 resolvable zone
+    // DATs, kuluu-nykm): retail's sun art is the Sun-attached StaticMesh generators sun0/sun1
+    // (mesh `suns`/`sun2`, pinned by ffxi-dat particle_gen::tests
+    // ::real_dat_sun_is_a_sun_attached_static_mesh_not_a_sprite_sheet) plus the lf0x
+    // screen-space flare chain, so this disc is always the procedural sphere.
+    for (mut disc, mut vis, _) in q_sun_disc.iter_mut() {
         disc.translation = cam_pos + sun_dir * SKY_RADIUS;
-        // research/xim: the sun is an attach=0xE additive billboard. With a "suns"
-        // sprite the disc is a camera-facing textured quad; otherwise the procedural
-        // emissive sphere (no sprite fallback).
-        if let Some(meshes) = render_cfg.sun_disc_meshes.as_deref() {
-            let want = if sun_sprite_tex.is_some() {
-                &meshes.quad
-            } else {
-                &meshes.sphere
-            };
-            if mesh3d.0 != *want {
-                mesh3d.0 = want.clone();
-            }
-        }
-        if sun_sprite_tex.is_some() {
-            disc.scale = Vec3::splat(SUN_DISC_RADIUS * 2.0);
-            face_camera(&mut disc, cam_pos);
-        } else {
-            disc.scale = Vec3::splat(SUN_DISC_RADIUS);
-        }
+        disc.scale = Vec3::splat(SUN_DISC_RADIUS);
         *vis = if sun_visible {
             Visibility::Inherited
         } else {
@@ -891,34 +863,14 @@ pub fn sun_moon_system(
                 c.green * intensity * 0.95,
                 c.blue * intensity * 0.75,
             );
-            let frame = render_cfg.sun_sprite.frame_uv;
-            let sprite_id = sun_sprite_tex.as_ref().map(|h| h.id());
             let id = handles.sun.id();
-            if sun_disc_written.is_none_or(|(prev_id, prev_rgb, prev_frame, prev_tex)| {
+            if sun_disc_written.is_none_or(|(prev_id, prev_rgb)| {
                 prev_id != id
                     || prev_rgb.distance(rgb) > CELESTIAL_COLOR_EPS * rgb.length().max(1.0)
-                    || prev_frame != frame
-                    || prev_tex != sprite_id
             }) {
                 if let Some(mut sun_mat) = materials.get_mut(&handles.sun) {
                     sun_mat.base_color = Color::linear_rgb(rgb.x, rgb.y, rgb.z);
-                    // With a retail "suns" sprite the disc renders as an additive textured
-                    // billboard; without one it stays the untextured emissive sphere.
-                    if sun_sprite_tex.is_some() {
-                        if sun_mat.base_color_texture != sun_sprite_tex {
-                            sun_mat.base_color_texture = sun_sprite_tex.clone();
-                        }
-                        sun_mat.uv_transform = bevy::math::Affine2::from_scale_angle_translation(
-                            Vec2::new(frame.z - frame.x, frame.w - frame.y),
-                            0.0,
-                            Vec2::new(frame.x, frame.y),
-                        );
-                        sun_mat.alpha_mode = AlphaMode::Add;
-                    } else if sun_mat.base_color_texture.is_some() {
-                        sun_mat.base_color_texture = None;
-                        sun_mat.alpha_mode = AlphaMode::Opaque;
-                    }
-                    *sun_disc_written = Some((id, rgb, frame, sprite_id));
+                    *sun_disc_written = Some((id, rgb));
                 }
             }
         }

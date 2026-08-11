@@ -2,7 +2,9 @@ use bevy::asset::RenderAssetUsages;
 use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
 
-use ffxi_dat::particle_gen::{KeyFrameTrack, ParticleGeneratorDef, ParticleMeshKind};
+use ffxi_dat::particle_gen::{
+    KeyFrameTrack, ParticleBillboard, ParticleGeneratorDef, ParticleMeshKind,
+};
 use ffxi_dat::sprite_sheet::ParticleSpriteSheet;
 
 use crate::camera::OperatorCamera;
@@ -762,7 +764,8 @@ pub fn sync_particle_meshes(
     mut sim: ResMut<ParticleSimulator>,
     mut commands: Commands,
 ) {
-    let cam_rot = cam.iter().next().map(|t| t.rotation()).unwrap_or_default();
+    let cam_xf = cam.iter().next().copied().unwrap_or_default();
+    let (cam_rot, cam_pos) = (cam_xf.rotation(), cam_xf.translation());
     let clock = sim.clock;
     let trace_celestial = std::env::var_os("FFXI_TRACE_CELESTIAL").is_some();
 
@@ -809,10 +812,11 @@ pub fn sync_particle_meshes(
                 g.def.attach_type,
             );
         }
-        let key = mesh_key(g, rot, &clock);
+        let view = CameraView { rot, pos: cam_pos };
+        let key = mesh_key(g, view, &clock);
         if needs_rebuild(&g.built_key, &key) {
             if let Some(mut mesh) = meshes.get_mut(&g.mesh) {
-                rebuild_mesh(g, rot, &clock, &mut mesh);
+                rebuild_mesh(g, view, &clock, &mut mesh);
                 g.built_key = key;
             }
         }
@@ -899,7 +903,10 @@ fn particle_draw(g: &LiveGenerator, p: &Particle, clock: &CelestialClock) -> Par
         }
     }
     // research/xim Particle.kt:217-218 getColor() — the day-of-week tint is applied first,
-    // then the moon-phase tint, each as a 2x modulate (out = min(1, out * 2 * c)).
+    // then the moon-phase tint, each as a 2x modulate (out = min(1, out * 2 * c)). Both use
+    // Color.modulateInPlace (Color.kt:102-108), which scales alpha too, and NOT the rgb-only
+    // Color.modulateRgbInPlace (Color.kt:95-100) sitting next to it: the tables' alpha lane is
+    // what gates the lunar halo off outside the full-moon phases.
     for table in [
         g.def
             .day_of_week_color
@@ -912,6 +919,7 @@ fn particle_draw(g: &LiveGenerator, p: &Particle, clock: &CelestialClock) -> Par
     .flatten()
     {
         rgb = (rgb * Vec3::from_slice(&table[..3]) * CELESTIAL_MODULATE).min(Vec3::ONE);
+        alpha = (alpha * table[TOD_ALPHA_CHANNEL] * CELESTIAL_MODULATE).min(1.0);
     }
 
     ParticleDraw {
@@ -948,10 +956,19 @@ fn vertex_color(g: &LiveGenerator, draw: &ParticleDraw, vertex: Vec4) -> [f32; 4
     // retail's alpha stage chain there, and hand it to the blend state as the src alpha the
     // shader premultiplies with — the multiply then lands on the saturated stage-1 colour,
     // which is where retail applies it. Alpha-blended elements use the real stage-1 alpha.
-    match g.def.blend {
-        ffxi_dat::particle_gen::ParticleBlend::Blend => {
+    match (g.def.blend, g.draw_path) {
+        (ffxi_dat::particle_gen::ParticleBlend::Blend, _) => {
             [stage_rgb.x, stage_rgb.y, stage_rgb.z, stage_alpha]
         }
+        // An MMB's own vertex alpha is the shape, not a uniform: the sun/moon glow domes are
+        // untextured gradients that ramp 128 at the centre to 0 at the rim, so folding the life
+        // curve onto a flat 1.0 would draw them as hard-edged discs.
+        (_, D3mDrawPath::Mmb) => [
+            stage_rgb.x,
+            stage_rgb.y,
+            stage_rgb.z,
+            draw.life_alpha * vertex.w.min(D3M_STAGE_CLAMP),
+        ],
         _ => [stage_rgb.x, stage_rgb.y, stage_rgb.z, draw.life_alpha],
     }
 }
@@ -971,9 +988,22 @@ enum MeshKey {
     Empty,
     Live {
         rot: [i32; 4],
+        // Only an axial camera billboard reorients per particle from the eye position, so only
+        // it puts the camera translation in the key; every other generator would rebuild on
+        // every step the camera takes.
+        cam_pos: Option<[i32; 3]>,
         uv_scroll: [i32; 2],
         particles: Vec<ParticleKey>,
     },
+}
+
+// The camera terms rebuild_mesh orients against: the screen-billboard rotation (already folded
+// into the generator's local frame by the caller) and the eye position an axial camera billboard
+// aims at.
+#[derive(Clone, Copy)]
+struct CameraView {
+    rot: Quat,
+    pos: Vec3,
 }
 
 #[derive(PartialEq, Eq, Debug)]
@@ -992,14 +1022,15 @@ fn quantized(v: f32, quantum: f32) -> i32 {
     (v / quantum).round() as i32
 }
 
-fn mesh_key(g: &LiveGenerator, rot: Quat, clock: &CelestialClock) -> MeshKey {
+fn mesh_key(g: &LiveGenerator, cam: CameraView, clock: &CelestialClock) -> MeshKey {
     if g.particles.is_empty() {
         return MeshKey::Empty;
     }
     let spatial = |v: f32| quantized(v, MESH_KEY_SPATIAL_QUANTUM);
     let color = |v: f32| quantized(v, MESH_KEY_COLOR_QUANTUM);
     MeshKey::Live {
-        rot: rot.to_array().map(spatial),
+        rot: cam.rot.to_array().map(spatial),
+        cam_pos: is_axial_camera_billboard(g).then(|| cam.pos.to_array().map(spatial)),
         uv_scroll: [spatial(g.tex_translate.x), spatial(g.tex_translate.y)],
         particles: g
             .particles
@@ -1023,21 +1054,54 @@ fn needs_rebuild(built: &MeshKey, next: &MeshKey) -> bool {
     built != next
 }
 
-fn rebuild_mesh(g: &LiveGenerator, rot: Quat, clock: &CelestialClock, mesh: &mut Mesh) {
+// research/xim Particle.kt:326-334 + GLDrawer.kt:474-489 — BillBoardType::Camera is not a screen
+// billboard: retail leaves the modelview alone and gives the particle a world orientation that
+// aims its mesh-local +X at the eye, so the mesh stays a solid with all three axes scaled. Only
+// BillBoardType::XYZ replaces the modelview basis with the view basis.
+fn is_axial_camera_billboard(g: &LiveGenerator) -> bool {
+    g.def.billboard == ParticleBillboard::Camera && g.orientation.is_none() && !g.actor_local
+}
+
+// research/xim Particle.kt:548-569 `applyMovementOrientation`, with the direction supplied by
+// Particle.kt:330 (`camera position - particle position`). `vel_basis` is an involution, so the
+// same fold carries the Bevy-space direction into the DAT frame the template lives in.
+fn axial_camera_rotation(particle_world: Vec3, cam_pos: Vec3, vel_basis: Vec3) -> Quat {
+    const AXIS_ALIGNED_Y: f32 = 0.999;
+    let m = (cam_pos - particle_world) * vel_basis;
+    let Some(m) = m.try_normalize() else {
+        return Quat::IDENTITY;
+    };
+    if m.y.abs() >= AXIS_ALIGNED_Y {
+        return Quat::from_rotation_z(m.y.signum() * std::f32::consts::FRAC_PI_2);
+    }
+    let left = Vec3::Y.cross(m).normalize();
+    let up = m.cross(left).normalize();
+    let angle = -up.dot(Vec3::Y).clamp(-1.0, 1.0).acos() * m.y.signum();
+    Quat::from_axis_angle(left, angle) * Quat::from_rotation_y(-m.z.atan2(m.x))
+}
+
+fn rebuild_mesh(g: &LiveGenerator, cam: CameraView, clock: &CelestialClock, mesh: &mut Mesh) {
     let verts_per = g.template.positions.len();
     let n = g.particles.len();
     let mut positions = Vec::with_capacity(n * verts_per);
     let mut uvs = Vec::with_capacity(n * verts_per);
     let mut colors = Vec::with_capacity(n * verts_per);
     let mut indices = Vec::with_capacity(n * g.template.indices.len());
+    let axial = is_axial_camera_billboard(g);
 
     for p in &g.particles {
         let draw = particle_draw(g, p, clock);
         let tpl = flipbook_template(g, draw.flipbook_frame);
 
-        // Billboard sprites are flat (z unused); a fixed-orientation 3D particle
-        // mesh keeps its DAT depth axis scaled by the untracked init z-scale.
-        let sz = if g.orientation.is_some() {
+        let rot = if axial {
+            axial_camera_rotation(draw.world, cam.pos, g.vel_basis)
+        } else {
+            cam.rot
+        };
+        // Billboard sprites are flat (z unused); a 3-D particle mesh — a fixed-orientation
+        // one, or an axial camera billboard, which stays a world-oriented solid — keeps its
+        // DAT depth axis scaled by the untracked init z-scale.
+        let sz = if g.orientation.is_some() || axial {
             g.def.init_scale[2]
         } else {
             1.0
@@ -1045,9 +1109,9 @@ fn rebuild_mesh(g: &LiveGenerator, rot: Quat, clock: &CelestialClock, mesh: &mut
         // Fixed-orientation zone sheets carry raw FFXI-frame geometry; apply the
         // generator's FFXI->Bevy basis (the same flip on origin/velocity, matching
         // dat_mzb.rs to_bevy) so a falling water sheet hangs down into the basin
-        // instead of standing up above the emitter (kuluu-czc6). Camera billboards
+        // instead of standing up above the emitter (kuluu-czc6). Screen billboards
         // orient in Bevy already; actor-local generators integrate in the actor frame.
-        let world_basis = g.orientation.is_some() && !g.actor_local;
+        let world_basis = (g.orientation.is_some() || axial) && !g.actor_local;
         let base = positions.len() as u32;
         for ((tp, uv), vertex) in tpl.positions.iter().zip(&tpl.uvs).zip(&tpl.colors) {
             let local = Vec3::new(tp.x * draw.scale.x, tp.y * draw.scale.y, tp.z * sz);
@@ -1282,6 +1346,7 @@ mod tests {
             base_position: [0.0, 0.5, 0.0],
             max_life_frames: life,
             camera_billboard: true,
+            billboard: ParticleBillboard::Xyz,
             camera_relative: false,
             follow_camera: false,
             camera_attached_base: false,
@@ -1621,7 +1686,12 @@ mod tests {
 
         fn vertex_colors(g: &LiveGenerator) -> Vec<[f32; 4]> {
             let mut mesh = empty_mesh();
-            rebuild_mesh(g, Quat::IDENTITY, &CelestialClock::default(), &mut mesh);
+            rebuild_mesh(
+                g,
+                view(Quat::IDENTITY),
+                &CelestialClock::default(),
+                &mut mesh,
+            );
             match mesh.attribute(Mesh::ATTRIBUTE_COLOR) {
                 Some(bevy::mesh::VertexAttributeValues::Float32x4(v)) => v.clone(),
                 _ => panic!("expected Float32x4 vertex colours"),
@@ -1745,7 +1815,12 @@ mod tests {
         let g = live(def(2.0, 1.0, 1), 3.0);
         assert!(g.particles.is_empty());
         let mut mesh = empty_mesh();
-        rebuild_mesh(&g, Quat::IDENTITY, &CelestialClock::default(), &mut mesh);
+        rebuild_mesh(
+            &g,
+            view(Quat::IDENTITY),
+            &CelestialClock::default(),
+            &mut mesh,
+        );
         assert!(count(&mesh) > 0, "empty rebuild must not be zero-length");
     }
 
@@ -1781,7 +1856,7 @@ mod tests {
             ] {
                 assert!(!needs_rebuild(
                     &g.built_key,
-                    &mesh_key(&g, rot, &CelestialClock::default())
+                    &mesh_key(&g, view(rot), &CelestialClock::default())
                 ));
             }
         }
@@ -1789,22 +1864,22 @@ mod tests {
         #[test]
         fn sub_quantum_motion_skips() {
             let mut g = one_particle_gen();
-            let built = mesh_key(&g, Quat::IDENTITY, &CelestialClock::default());
+            let built = mesh_key(&g, view(Quat::IDENTITY), &CelestialClock::default());
             g.particles[0].pos.x += MESH_KEY_SPATIAL_QUANTUM * 0.25;
             assert!(!needs_rebuild(
                 &built,
-                &mesh_key(&g, Quat::IDENTITY, &CelestialClock::default())
+                &mesh_key(&g, view(Quat::IDENTITY), &CelestialClock::default())
             ));
         }
 
         #[test]
         fn super_quantum_motion_rebuilds() {
             let mut g = one_particle_gen();
-            let built = mesh_key(&g, Quat::IDENTITY, &CelestialClock::default());
+            let built = mesh_key(&g, view(Quat::IDENTITY), &CelestialClock::default());
             g.particles[0].pos.x += MESH_KEY_SPATIAL_QUANTUM * 2.0;
             assert!(needs_rebuild(
                 &built,
-                &mesh_key(&g, Quat::IDENTITY, &CelestialClock::default())
+                &mesh_key(&g, view(Quat::IDENTITY), &CelestialClock::default())
             ));
         }
 
@@ -1813,32 +1888,36 @@ mod tests {
         #[test]
         fn alpha_stage_change_rebuilds() {
             let mut g = one_particle_gen();
-            let built = mesh_key(&g, Quat::IDENTITY, &CelestialClock::default());
+            let built = mesh_key(&g, view(Quat::IDENTITY), &CelestialClock::default());
             g.particles[0].age_frames = 90.0;
             assert!(needs_rebuild(
                 &built,
-                &mesh_key(&g, Quat::IDENTITY, &CelestialClock::default())
+                &mesh_key(&g, view(Quat::IDENTITY), &CelestialClock::default())
             ));
         }
 
         #[test]
         fn camera_rotation_rebuilds_a_live_billboard() {
             let g = one_particle_gen();
-            let built = mesh_key(&g, Quat::IDENTITY, &CelestialClock::default());
+            let built = mesh_key(&g, view(Quat::IDENTITY), &CelestialClock::default());
             assert!(needs_rebuild(
                 &built,
-                &mesh_key(&g, Quat::from_rotation_y(0.5), &CelestialClock::default())
+                &mesh_key(
+                    &g,
+                    view(Quat::from_rotation_y(0.5)),
+                    &CelestialClock::default()
+                )
             ));
         }
 
         #[test]
         fn uv_scroll_change_rebuilds() {
             let mut g = one_particle_gen();
-            let built = mesh_key(&g, Quat::IDENTITY, &CelestialClock::default());
+            let built = mesh_key(&g, view(Quat::IDENTITY), &CelestialClock::default());
             g.tex_translate.x += MESH_KEY_SPATIAL_QUANTUM * 2.0;
             assert!(needs_rebuild(
                 &built,
-                &mesh_key(&g, Quat::IDENTITY, &CelestialClock::default())
+                &mesh_key(&g, view(Quat::IDENTITY), &CelestialClock::default())
             ));
         }
     }
@@ -1886,7 +1965,12 @@ mod tests {
     fn fixed_orientation_sheet_hangs_below_emitter() {
         let g = sheet_gen(Some(Quat::IDENTITY));
         let mut mesh = empty_mesh();
-        rebuild_mesh(&g, Quat::IDENTITY, &CelestialClock::default(), &mut mesh);
+        rebuild_mesh(
+            &g,
+            view(Quat::IDENTITY),
+            &CelestialClock::default(),
+            &mut mesh,
+        );
         // Local +Y (0..4) flipped through vel_basis -> Bevy -Y, so every sheet vertex
         // sits at or below the emit origin (y=10); none stand above it.
         assert!(
@@ -1899,7 +1983,12 @@ mod tests {
     fn camera_billboard_sheet_not_flipped() {
         let g = sheet_gen(None);
         let mut mesh = empty_mesh();
-        rebuild_mesh(&g, Quat::IDENTITY, &CelestialClock::default(), &mut mesh);
+        rebuild_mesh(
+            &g,
+            view(Quat::IDENTITY),
+            &CelestialClock::default(),
+            &mut mesh,
+        );
         // Billboard: no basis flip, so the same +Y geometry rises above the emitter.
         assert!(
             max_sheet_y(&mesh) > 10.0 + 1.0,
@@ -2106,6 +2195,157 @@ mod tests {
         g
     }
 
+    fn view(rot: Quat) -> CameraView {
+        CameraView {
+            rot,
+            pos: Vec3::ZERO,
+        }
+    }
+
+    // The zone/celestial FFXI->Bevy fold `spawn_zone_particle_generator` installs.
+    const ZONE_VEL_BASIS: Vec3 = Vec3::new(1.0, -1.0, -1.0);
+
+    fn axial_celestial(init_scale: [f32; 3], local: Vec3) -> LiveGenerator {
+        let mut d = def(1.0, 1.0, 1);
+        d.billboard = ParticleBillboard::Camera;
+        d.init_scale = init_scale;
+        let mut g = celestial(d);
+        g.vel_basis = ZONE_VEL_BASIS;
+        g.template = SpriteTemplate {
+            positions: vec![local],
+            uvs: vec![[0.0, 0.0]],
+            indices: vec![0, 0, 0],
+            colors: vec![Vec4::ONE],
+        };
+        g
+    }
+
+    fn rebuilt(g: &LiveGenerator, cam: CameraView) -> (Vec<Vec3>, Vec<Vec4>) {
+        use bevy::mesh::VertexAttributeValues::{Float32x3, Float32x4};
+        let mut mesh = empty_mesh();
+        rebuild_mesh(g, cam, &CelestialClock::default(), &mut mesh);
+        let Some(Float32x3(pos)) = mesh.attribute(Mesh::ATTRIBUTE_POSITION) else {
+            panic!("rebuilt mesh has f32x3 positions");
+        };
+        let Some(Float32x4(col)) = mesh.attribute(Mesh::ATTRIBUTE_COLOR) else {
+            panic!("rebuilt mesh has f32x4 colours");
+        };
+        (
+            pos.iter().copied().map(Vec3::from_array).collect(),
+            col.iter().copied().map(Vec4::from_array).collect(),
+        )
+    }
+
+    // research/xim Particle.kt:330 + 548-569 — BillBoardType::Camera orients the particle in the
+    // world so mesh-local +X points at the eye. Drawing it as a screen billboard instead turns
+    // the sun/moon glow dome's symmetry axis sideways (kuluu-fjd3).
+    #[test]
+    fn camera_billboard_points_mesh_local_x_at_the_camera() {
+        const PARALLEL_TOLERANCE: f32 = 1e-4;
+        let g = axial_celestial([1.0; 3], Vec3::X);
+        for cam_pos in [
+            Vec3::new(900.0, 0.0, 0.0),
+            Vec3::new(0.0, 700.0, 0.0),
+            Vec3::new(0.0, -700.0, 0.0),
+            Vec3::new(0.0, 0.0, -12.0),
+            Vec3::new(3.0, 4.0, 5.0),
+        ] {
+            let (positions, _) = rebuilt(
+                &g,
+                CameraView {
+                    rot: Quat::IDENTITY,
+                    pos: cam_pos,
+                },
+            );
+            let offset = positions[0].normalize();
+            assert!(
+                (offset.dot(cam_pos.normalize()) - 1.0).abs() < PARALLEL_TOLERANCE,
+                "cam {cam_pos} gave axis {offset}",
+            );
+        }
+    }
+
+    // The authored z-scale is a real third axis on a camera billboard — retail's
+    // ScaleInitializer writes all three (research/xim ParticleInitializers.kt:846-857) and file
+    // 104's `weat/suny/sun1` authors [40, 30, 100]. A screen sprite drops it; an axial dome
+    // must not.
+    #[test]
+    fn camera_billboard_applies_the_authored_z_scale() {
+        const Z_SCALE: f32 = 100.0;
+        let g = axial_celestial([40.0, 30.0, Z_SCALE], Vec3::Z);
+        let (positions, _) = rebuilt(
+            &g,
+            CameraView {
+                rot: Quat::IDENTITY,
+                pos: Vec3::new(900.0, 0.0, 0.0),
+            },
+        );
+        assert!((positions[0].length() - Z_SCALE).abs() < 1e-3);
+    }
+
+    // Only an axial camera billboard reorients with the eye position, so only it may put the
+    // camera translation in the rebuild key; every other generator would rebuild its mesh on
+    // every step the camera takes (kuluu-b5nt).
+    #[test]
+    fn only_the_axial_camera_billboard_keys_on_camera_position() {
+        let clock = CelestialClock::default();
+        let at = |g: &LiveGenerator, x: f32| {
+            mesh_key(
+                g,
+                CameraView {
+                    rot: Quat::IDENTITY,
+                    pos: Vec3::new(x, 0.0, 0.0),
+                },
+                &clock,
+            )
+        };
+        let axial = axial_celestial([1.0; 3], Vec3::X);
+        assert_ne!(at(&axial, 10.0), at(&axial, 20.0));
+
+        let mut screen = axial_celestial([1.0; 3], Vec3::X);
+        screen.def.billboard = ParticleBillboard::Xyz;
+        assert_eq!(at(&screen, 10.0), at(&screen, 20.0));
+    }
+
+    // The sun/moon domes are untextured meshes whose whole shape is a vertex-alpha ramp (128 at
+    // the centre to 0 at the rim), so substituting the flat life curve on the MMB draw path
+    // renders them as hard-edged discs. The D3m path keeps the substitution.
+    #[test]
+    fn mmb_additive_keeps_the_vertex_alpha_gradient() {
+        const VERTEX_ALPHAS: [f32; 3] = [1.0, 0.75, 0.0];
+        const HALF_LIFE_ALPHA: f32 = 0.5;
+        let mut g = axial_celestial([1.0; 3], Vec3::X);
+        g.template.positions = vec![Vec3::X; VERTEX_ALPHAS.len()];
+        g.template.uvs = vec![[0.0, 0.0]; VERTEX_ALPHAS.len()];
+        g.template.indices = vec![0, 1, 2];
+        g.template.colors = VERTEX_ALPHAS
+            .iter()
+            .map(|&a| Vec4::new(1.0, 1.0, 1.0, a))
+            .collect();
+        g.particles[0].age_frames = HALF_LIFE_ALPHA;
+
+        let cam = CameraView {
+            rot: Quat::IDENTITY,
+            pos: Vec3::new(900.0, 0.0, 0.0),
+        };
+
+        g.draw_path = D3mDrawPath::Mmb;
+        let (_, colors) = rebuilt(&g, cam);
+        for (c, a) in colors.iter().zip(VERTEX_ALPHAS) {
+            assert!(
+                (c.w - HALF_LIFE_ALPHA * a).abs() < 1e-6,
+                "mmb alpha {}",
+                c.w
+            );
+        }
+
+        g.draw_path = D3mDrawPath::D3m;
+        let (_, colors) = rebuilt(&g, cam);
+        for c in &colors {
+            assert!((c.w - HALF_LIFE_ALPHA).abs() < 1e-6, "d3m alpha {}", c.w);
+        }
+    }
+
     fn ramp(from: f32, to: f32) -> KeyFrameTrack {
         KeyFrameTrack {
             points: vec![(0.0, from), (1.0, to)],
@@ -2171,6 +2411,112 @@ mod tests {
             (tinted - plain * 0.25).abs() < 1e-5,
             "two halving tables at 2x modulate should quarter the channel: {tinted} vs {plain}"
         );
+    }
+
+    // research/xim Particle.kt:217-218 modulates with Color.modulateInPlace (Color.kt:102-108),
+    // which scales all four channels — dropping the tables' alpha lane leaves the lunar halo
+    // lit at every moon phase instead of only around full moon.
+    #[test]
+    fn celestial_tints_modulate_alpha_not_just_rgb() {
+        const IDENTITY: f32 = 0.5;
+        let table = |alpha: f32| [IDENTITY, IDENTITY, IDENTITY, alpha];
+
+        let alpha_at = |phase_alpha: Option<f32>| {
+            let mut def = blended_celestial_def();
+            if let Some(phase_alpha) = phase_alpha {
+                def.day_of_week_color =
+                    Some([table(IDENTITY); ffxi_dat::particle_gen::DAYS_OF_WEEK]);
+                def.moon_phase_color =
+                    Some([table(phase_alpha); ffxi_dat::particle_gen::MOON_PHASES]);
+            }
+            let g = celestial(def);
+            particle_draw(
+                &g,
+                &g.particles[0],
+                &CelestialClock {
+                    day_fraction: 0.5,
+                    day_of_week: 0,
+                    moon_phase: 11,
+                },
+            )
+            .life_alpha
+        };
+
+        assert_eq!(
+            alpha_at(Some(0.0)),
+            0.0,
+            "a zero-alpha phase entry hides the sprite"
+        );
+        assert!(
+            (alpha_at(Some(IDENTITY)) - alpha_at(None)).abs() < 1e-5,
+            "a 0.5 entry at 2x modulate is the identity"
+        );
+    }
+
+    fn zone_bytes(file_id: u32) -> Option<Vec<u8>> {
+        let root = ffxi_dat::DatRoot::from_env_or_default().ok()?;
+        let location = root.resolve(file_id).ok()?;
+        std::fs::read(location.path_under(&root)).ok()
+    }
+
+    fn moon_attached_def(bytes: &[u8], name: &[u8; 4]) -> ParticleGeneratorDef {
+        ffxi_dat::chunk::walk(bytes)
+            .flatten()
+            .filter(|c| {
+                c.name == *name
+                    && ffxi_dat::ChunkKind::from_u8(c.kind) == Some(ffxi_dat::ChunkKind::Generator)
+            })
+            .find_map(|c| ParticleGeneratorDef::parse(c.data).ok().flatten())
+            .filter(|d| d.attach_type == ffxi_dat::particle_gen::AttachType::Moon)
+            .expect("zone DAT declares the Moon-attached generator")
+    }
+
+    fn phase_alpha(def: &ParticleGeneratorDef, moon_phase: usize) -> f32 {
+        let g = celestial(*def);
+        particle_draw(
+            &g,
+            &g.particles[0],
+            &CelestialClock {
+                day_fraction: 0.5,
+                day_of_week: 0,
+                moon_phase,
+            },
+        )
+        .life_alpha
+    }
+
+    // The shipped f_ro (zone DAT 210) tables: `kasa`, the lunar halo MMB, carries a 0x4F alpha
+    // lane that is zero outside phases 5..=7, while the `moon` sprite's never drops below 0.42.
+    // With the alpha lane dropped, the halo drew as a saturated disc ~20 degrees across that
+    // swamped the moon at every phase. Skips without a retail install.
+    #[test]
+    fn zone_210_lunar_halo_is_dark_except_near_full_moon() {
+        const F_RO: u32 = 210;
+        const HALO_LIT_PHASES: std::ops::RangeInclusive<usize> = 5..=7;
+        const SPRITE_MIN_ALPHA: f32 = 0.5;
+
+        let Some(bytes) = zone_bytes(F_RO) else {
+            eprintln!("skipping: no retail DAT root (set FFXI_DAT_PATH)");
+            return;
+        };
+        let halo = moon_attached_def(&bytes, b"kasa");
+        let sprite = moon_attached_def(&bytes, b"moon");
+
+        for phase in 0..ffxi_dat::particle_gen::MOON_PHASES {
+            let halo_alpha = phase_alpha(&halo, phase);
+            if HALO_LIT_PHASES.contains(&phase) {
+                assert!(halo_alpha > 0.0, "halo lit near full moon, phase {phase}");
+            } else {
+                assert_eq!(
+                    halo_alpha, 0.0,
+                    "halo dark away from full moon, phase {phase}"
+                );
+            }
+            assert!(
+                phase_alpha(&sprite, phase) > SPRITE_MIN_ALPHA,
+                "the moon disc itself stays visible at phase {phase}"
+            );
+        }
     }
 
     // A tint table that is the identity everywhere except `target`, where it halves red.
@@ -2288,7 +2634,12 @@ mod tests {
 
         let alpha_of = |g: &LiveGenerator| -> f32 {
             let mut mesh = empty_mesh();
-            rebuild_mesh(g, Quat::IDENTITY, &CelestialClock::default(), &mut mesh);
+            rebuild_mesh(
+                g,
+                view(Quat::IDENTITY),
+                &CelestialClock::default(),
+                &mut mesh,
+            );
             match mesh.attribute(Mesh::ATTRIBUTE_COLOR).unwrap() {
                 bevy::mesh::VertexAttributeValues::Float32x4(c) => c[0][3],
                 _ => panic!("expected Float32x4 colours"),

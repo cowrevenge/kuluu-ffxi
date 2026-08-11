@@ -441,6 +441,21 @@ pub struct MmbModel {
     pub indices: Vec<u16>,
 }
 
+// research/xim ZoneMeshSection.kt:73-100 — the section vertex record is 16-byte texture name,
+// u16 count, u16 flags, then pos vec3 + normal vec3 + BGRA + uv (36 bytes), with a second vec3
+// interleaved when the section's vertex-blend config is set (48).
+const VERTEX_STRIDE_PLAIN: usize = 36;
+const VERTEX_STRIDE_VERTEX_BLEND: usize = 48;
+const CONFIG_VERTEX_BLEND: u8 = 2;
+
+fn vertex_stride(config: u8) -> usize {
+    if config == CONFIG_VERTEX_BLEND {
+        VERTEX_STRIDE_VERTEX_BLEND
+    } else {
+        VERTEX_STRIDE_PLAIN
+    }
+}
+
 pub fn parse_models(decrypted: &[u8]) -> Vec<MmbModel> {
     const SMMB_HEAD_SIZE: usize = 16;
     const SMMB_HEADER_SIZE: usize = 48;
@@ -452,7 +467,7 @@ pub fn parse_models(decrypted: &[u8]) -> Vec<MmbModel> {
     let is_v1 = &decrypted[0..3] == b"MMB";
 
     let d3 = if is_v1 { 0 } else { decrypted[4] };
-    let vertex_stride: usize = if d3 == 2 { 48 } else { 36 };
+    let vertex_stride = vertex_stride(d3);
 
     let header_off = SMMB_HEAD_SIZE;
     let pieces = u32::from_le_bytes([
@@ -892,6 +907,108 @@ mod tests {
         // restores to 1.0, and a fully opaque alpha.
         assert!((n[0] - 0.5).abs() < 0.01, "neutral rgb was {}", n[0]);
         assert!(n[3] >= 1.0, "neutral alpha was {}", n[3]);
+    }
+
+    // West Ronfaure, whose weat/ tree carries the sun/moon glow domes the celestial billboards
+    // link (`suns` = "sunsphere", `moon` = "moonsphere").
+    const F_RO_ZONE_DAT: u32 = 201;
+    // The decoded extents of those domes, in mesh-local units before the generator's authored
+    // scale. Pinned because kuluu-fjd3 suspected the opposite — that these decode ~100x too
+    // large through a wrong vertex stride — and the file itself settles it: every one of these
+    // equals the MMB's own header AABB, so the layout is right and the size is authored.
+    const CELESTIAL_MESH_EXTENTS: [(&str, [f32; 3]); 3] = [
+        ("suns", [11.354_175, 49.949_73, 49.519_125]),
+        ("suns", [16.354_174, 43.656_073, 43.279_718]),
+        ("moon", [0.83078, 16.378_85, 16.378_85]),
+    ];
+    const CELESTIAL_EXTENT_TOLERANCE: f32 = 1e-3;
+
+    fn celestial_mmbs() -> Option<Vec<(String, Vec<u8>)>> {
+        let root = crate::archive::open_test_install()?;
+        let loc = root.resolve(F_RO_ZONE_DAT).ok()?;
+        let bytes = std::fs::read(loc.path_under(&root)).ok()?;
+        let mut out = Vec::new();
+        for c in crate::chunk::walk(&bytes).flatten() {
+            if crate::kind::ChunkKind::from_u8(c.kind) != Some(crate::kind::ChunkKind::Mmb) {
+                continue;
+            }
+            let name = String::from_utf8_lossy(&c.name).trim_end().to_string();
+            if name != "suns" && name != "moon" {
+                continue;
+            }
+            out.push((name, decrypt(c.data).ok()?));
+        }
+        Some(out)
+    }
+
+    fn decoded_extent(decrypted: &[u8]) -> Option<([f32; 3], [f32; 3])> {
+        let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
+        let mut any = false;
+        for v in parse_models(decrypted)
+            .iter()
+            .flat_map(|m| m.vertices.iter())
+        {
+            any = true;
+            for a in 0..3 {
+                lo[a] = lo[a].min(v.pos[a]);
+                hi[a] = hi[a].max(v.pos[a]);
+            }
+        }
+        any.then_some((lo, hi))
+    }
+
+    #[test]
+    fn real_dat_celestial_mmb_extent_matches_header_bounds() {
+        let Some(mmbs) = celestial_mmbs() else {
+            return;
+        };
+        assert_eq!(mmbs.len(), 4, "f_ro ships two suns and two moon domes");
+        for (name, dec) in &mmbs {
+            let header = MmbHeader::parse(dec).unwrap();
+            let (lo, hi) = decoded_extent(dec).expect("celestial MMB has vertices");
+            let (hlo, hhi) = header.local_bounds().expect("celestial MMB has an AABB");
+            for a in 0..3 {
+                assert!(
+                    (lo[a] - hlo[a]).abs() < CELESTIAL_EXTENT_TOLERANCE
+                        && (hi[a] - hhi[a]).abs() < CELESTIAL_EXTENT_TOLERANCE,
+                    "{name} axis {a}: decoded [{}, {}] vs header [{}, {}]",
+                    lo[a],
+                    hi[a],
+                    hlo[a],
+                    hhi[a],
+                );
+            }
+            let extent = [hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]];
+            assert!(
+                CELESTIAL_MESH_EXTENTS.iter().any(|(n, e)| n == name
+                    && (0..3).all(|a| (e[a] - extent[a]).abs() < CELESTIAL_EXTENT_TOLERANCE)),
+                "{name} decoded an unpinned extent {extent:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn real_dat_celestial_mmb_uses_the_plain_vertex_stride() {
+        let Some(mmbs) = celestial_mmbs() else {
+            return;
+        };
+        for (name, dec) in &mmbs {
+            assert_ne!(
+                dec[4], CONFIG_VERTEX_BLEND,
+                "{name} carries no vertex-blend vec3, so its records are the plain stride",
+            );
+            assert_eq!(vertex_stride(dec[4]), VERTEX_STRIDE_PLAIN);
+        }
+    }
+
+    #[test]
+    fn vertex_stride_is_the_vertex_blend_config_bit() {
+        assert_eq!(vertex_stride(0), VERTEX_STRIDE_PLAIN);
+        assert_eq!(vertex_stride(1), VERTEX_STRIDE_PLAIN);
+        assert_eq!(
+            vertex_stride(CONFIG_VERTEX_BLEND),
+            VERTEX_STRIDE_VERTEX_BLEND
+        );
     }
 
     #[test]

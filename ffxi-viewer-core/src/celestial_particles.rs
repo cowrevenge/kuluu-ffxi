@@ -24,11 +24,12 @@ pub const CELESTIAL_DISTANCE: f32 = 900.0;
 // active weather selects which celestial set is drawn.
 const WEAT_DIR: WeatherTypeId = *b"weat";
 
-// Opt-in until kuluu-fjd3 lands: the sun/halo billboards link an MMB whose vertex positions
-// decode ~100x too large, so `suns` (extent ~50) times its authored scale of 70 covers the
-// whole sky instead of ~3 degrees of it. Everything else in this path is verified against the
-// DAT — position, phase frame, tint tables, the time-of-day colour curves — so the module
-// stays wired and drivable; it just does not displace the hand-authored discs by default.
+// Opt-in until kuluu-b98u lands. The DAT weather tree supplies the sun/moon glow dome
+// (`suns`/`moon`, BillBoardType::Camera), the moon sprite sheet and the lunar halo — but not
+// necessarily the sun disc: in f_ro the disc comes from the screen-space lens-flare chain, while
+// other zones author a small-scale third `suns` generator for it (file 104 `weat/fine/sun2`,
+// init_scale 2.0). So retiring the hand-authored discs is a per-zone coverage question, not a
+// flip of this gate.
 const DAT_CELESTIALS_ENV: &str = "FFXI_DAT_CELESTIALS";
 
 fn dat_celestials_enabled() -> bool {

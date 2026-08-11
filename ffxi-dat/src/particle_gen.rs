@@ -96,6 +96,50 @@ const RENDER_STATE_CAMERA_ATTACHED_BASE: u16 = 0x0400;
 // camera-following and NOT billboarded).
 const BILLBOARD_FOLLOW_CAMERA: u16 = 0x0004;
 
+// research/xim ParticleInitializers.kt:90-103 — the billboard-type ladder over the same word,
+// tested in this order. Retail keeps the modes distinct: a `Camera` particle keeps a world
+// orientation that aims its mesh-local +X at the eye, while `Xyz` replaces the modelview's
+// upper 3x3 with the view basis (research/xim GLDrawer.kt:474-489). Collapsing the two draws an
+// axial 3-D mesh (the sun/moon glow domes) as a flat screen sprite.
+const BILLBOARD_CAMERA_MASK: u16 = 0x00C0;
+const BILLBOARD_MOVEMENT_MASK: u16 = 0x0081;
+const BILLBOARD_MOVEMENT_HORIZONTAL: u16 = 0x0080;
+const BILLBOARD_MOVEMENT: u16 = 0x0040;
+const BILLBOARD_XZ: u16 = 0x4000;
+const BILLBOARD_XYZ: u16 = 0x0001;
+
+/// Retail's `BillBoardType` (research/xim ParticleInitializers.kt:90-103).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ParticleBillboard {
+    #[default]
+    None,
+    Camera,
+    Movement,
+    MovementHorizontal,
+    Xz,
+    Xyz,
+}
+
+impl ParticleBillboard {
+    fn from_flags(bb: u16) -> Self {
+        if bb & BILLBOARD_CAMERA_MASK == BILLBOARD_CAMERA_MASK {
+            Self::Camera
+        } else if bb & BILLBOARD_MOVEMENT_MASK == BILLBOARD_MOVEMENT_MASK {
+            Self::Movement
+        } else if bb & BILLBOARD_MOVEMENT_HORIZONTAL != 0 {
+            Self::MovementHorizontal
+        } else if bb & BILLBOARD_MOVEMENT != 0 {
+            Self::Movement
+        } else if bb & BILLBOARD_XZ != 0 {
+            Self::Xz
+        } else if bb & BILLBOARD_XYZ != 0 {
+            Self::Xyz
+        } else {
+            Self::None
+        }
+    }
+}
+
 // research/XIClient/src/XIClient/source/World/Generator/CYyGenerator.cpp:857-901 — sec2 0x06/0x07
 // offset each new elem by a random direction (two rng angles) at a radius derived from
 // `fpos[1] + fpos[2]`. 0x07 additionally scales that offset per axis, which is how the
@@ -196,6 +240,7 @@ pub struct ParticleGeneratorDef {
     pub base_position: [f32; 3],
     pub max_life_frames: f32,
     pub camera_billboard: bool,
+    pub billboard: ParticleBillboard,
     // `base_position` is an offset from the camera rather than a world placement. Two independent
     // flags express it: the billboard word's followCamera bit and the render-state's
     // cameraAttachedBasePosition bit (La Theine's rain uses the first for the `~1ra` curtain and
@@ -306,6 +351,7 @@ impl ParticleGeneratorDef {
         let mut base_position = [0.0f32; 3];
         let mut max_life_frames = 0.0f32;
         let mut camera_billboard = false;
+        let mut billboard = ParticleBillboard::None;
         let mut follow_camera = false;
         let mut camera_attached_base = false;
         let mut position_variance = None;
@@ -338,7 +384,9 @@ impl ParticleGeneratorDef {
             match opcode {
                 0x01 if payload + 32 <= body.len() => {
                     let bb = u16_le(body, payload);
-                    camera_billboard = bb & 0x0001 != 0 || bb & 0x00C0 == 0x00C0;
+                    billboard = ParticleBillboard::from_flags(bb);
+                    camera_billboard = bb & BILLBOARD_XYZ != 0
+                        || bb & BILLBOARD_CAMERA_MASK == BILLBOARD_CAMERA_MASK;
                     let render_state = u16_le(body, payload + 2);
                     ignore_texture_alpha = render_state & RENDER_STATE_IGNORE_TEXTURE_ALPHA != 0;
                     follow_camera = bb & BILLBOARD_FOLLOW_CAMERA != 0;
@@ -508,6 +556,7 @@ impl ParticleGeneratorDef {
             base_position,
             max_life_frames,
             camera_billboard,
+            billboard,
             camera_relative: follow_camera || camera_attached_base,
             follow_camera,
             camera_attached_base,
@@ -1458,6 +1507,132 @@ mod tests {
         assert!((kf.sample(0.5) - 0.22).abs() < 1e-6);
         assert!((kf.sample(0.75) - 0.17).abs() < 1e-6);
         assert!((kf.sample(1.5) - 0.12).abs() < 1e-6, "clamps to last");
+    }
+
+    #[test]
+    fn billboard_flag_ladder_matches_xim() {
+        use ParticleBillboard::*;
+        for (flags, want) in [
+            (0x0000u16, None),
+            (0x00C0, Camera),
+            (0x00C1, Camera),
+            (0x0081, Movement),
+            (0x0080, MovementHorizontal),
+            (0x0040, Movement),
+            (0x4000, Xz),
+            (0x0001, Xyz),
+        ] {
+            assert_eq!(
+                ParticleBillboard::from_flags(flags),
+                want,
+                "flags 0x{flags:04X}",
+            );
+        }
+    }
+
+    const WEST_RONFAURE_ZONE_DAT: u32 = 201;
+
+    // The two modes must not re-collapse into one bool: `sun0`/`kasa` are BillBoardType::Camera,
+    // an axially-oriented solid whose mesh-local +X aims at the eye, while the moon sprite is
+    // BillBoardType::XYZ, a flat screen billboard (research/xim GLDrawer.kt:474-489). Drawing
+    // the first as the second flattens the sun/moon glow domes into sky-filling sails.
+    #[test]
+    fn real_dat_celestial_billboard_modes_split() {
+        let Some(bytes) = real_zone_dat(WEST_RONFAURE_ZONE_DAT) else {
+            return;
+        };
+        let mut seen = [0usize; 3];
+        for c in crate::chunk::walk(&bytes).flatten() {
+            if crate::kind::ChunkKind::from_u8(c.kind) != Some(crate::kind::ChunkKind::Generator) {
+                continue;
+            }
+            let Ok(Some(def)) = ParticleGeneratorDef::parse(c.data) else {
+                continue;
+            };
+            match &c.name {
+                b"sun0" => {
+                    seen[0] += 1;
+                    assert_eq!(def.billboard, ParticleBillboard::Camera);
+                    assert_eq!(def.mesh_kind, ParticleMeshKind::StaticMesh);
+                    assert_eq!(def.mesh_id, *b"suns");
+                    assert_eq!(def.init_scale, [70.0; 3]);
+                }
+                b"kasa" => {
+                    seen[1] += 1;
+                    assert_eq!(def.billboard, ParticleBillboard::Camera);
+                    assert_eq!(def.mesh_kind, ParticleMeshKind::StaticMesh);
+                    assert_eq!(def.mesh_id, *b"moon");
+                    assert_eq!(def.init_scale, [20.0; 3]);
+                }
+                b"moon" => {
+                    seen[2] += 1;
+                    assert_eq!(def.billboard, ParticleBillboard::Xyz);
+                    assert_eq!(def.mesh_kind, ParticleMeshKind::SpriteSheet);
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(
+            seen,
+            [1, 2, 2],
+            "f_ro suny/sun0, {{fine,suny}}/moon/{{kasa,moon}}"
+        );
+    }
+
+    // Why this is pinned (kuluu-nykm): the client used to resolve the sun billboard from a 0x21
+    // sprite sheet whose texture category is "suns"/"suny". No shipped zone DAT has one — a
+    // survey over all 298 resolvable zone DATs found zero — so that path was dead and the sun
+    // silently stayed a procedural primitive. Retail's sun art is these Sun-attached StaticMesh
+    // generators plus the lf0x screen-space flare chain. If this test ever fails the sprite-sheet
+    // hypothesis is worth revisiting; until then it must not be re-added on a hunch.
+    #[test]
+    fn real_dat_sun_is_a_sun_attached_static_mesh_not_a_sprite_sheet() {
+        let Some(bytes) = real_zone_dat(WEST_RONFAURE_ZONE_DAT) else {
+            return;
+        };
+        let mut sun_meshes = 0usize;
+        for c in crate::chunk::walk(&bytes).flatten() {
+            match crate::kind::ChunkKind::from_u8(c.kind) {
+                Some(crate::kind::ChunkKind::Generator) => {
+                    let Ok(Some(def)) = ParticleGeneratorDef::parse(c.data) else {
+                        continue;
+                    };
+                    if def.attach_type != AttachType::Sun {
+                        continue;
+                    }
+                    if !matches!(&c.name, b"sun0" | b"sun1") {
+                        continue;
+                    }
+                    sun_meshes += 1;
+                    assert_eq!(
+                        def.mesh_kind,
+                        ParticleMeshKind::StaticMesh,
+                        "sun generator {} is an MMB, not a sprite sheet",
+                        String::from_utf8_lossy(&c.name)
+                    );
+                    // `suns` under fine/suny weather, `sun2` under the overcast variants.
+                    assert!(
+                        matches!(&def.mesh_id, b"suns" | b"sun2"),
+                        "unexpected sun mesh {}",
+                        String::from_utf8_lossy(&def.mesh_id)
+                    );
+                }
+                Some(crate::kind::ChunkKind::SpriteSheet) => {
+                    let Some(sheet) = crate::sprite_sheet::ParticleSpriteSheet::parse(c.data)
+                    else {
+                        continue;
+                    };
+                    assert!(
+                        sheet.category != "suns" && sheet.category != "suny",
+                        "unexpected sun sprite sheet: {}/{}",
+                        sheet.category,
+                        sheet.id
+                    );
+                }
+                _ => {}
+            }
+        }
+        assert!(sun_meshes > 0, "file 201 defines Sun-attached sun0/sun1");
     }
 
     #[test]

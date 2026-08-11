@@ -58,15 +58,6 @@ pub struct CelestialColorTables {
     pub moon_phase: Option<[[f32; 4]; 12]>,
 }
 
-// The retail sun billboard sprite (texture + first-frame UV sub-rect) for the current
-// zone, or None where the zone ships no "suns"/"suny" sprite sheet (then the sun stays
-// the procedural emissive sphere). research/xim: sun is an attach=0xE additive billboard.
-#[derive(Resource, Default, Clone)]
-pub struct SunSprite {
-    pub texture: Option<Handle<Image>>,
-    pub frame_uv: Vec4,
-}
-
 impl Material for MoonMaterial {
     fn fragment_shader() -> ShaderRef {
         "embedded://ffxi_viewer_core/moon.wgsl".into()
@@ -89,7 +80,6 @@ fn load_moon_sprite_sheet(
     mut images: ResMut<Assets<Image>>,
     mut frames_res: ResMut<MoonSpriteFrames>,
     mut color_tables: ResMut<CelestialColorTables>,
-    mut sun_sprite: ResMut<SunSprite>,
     mut loaded_zone: Local<Option<Option<u32>>>,
 ) {
     let current = crate::snapshot::effective_zone_file_id(&scene_state.snapshot);
@@ -119,33 +109,6 @@ fn load_moon_sprite_sheet(
             };
         }
         None => *color_tables = CelestialColorTables::default(),
-    }
-
-    match dat_bytes
-        .as_deref()
-        .and_then(ffxi_dat::sprite_sheet::extract_sun_sprite_sheet)
-    {
-        Some(s) => {
-            let mut image = Image::new(
-                Extent3d {
-                    width: s.texture.width,
-                    height: s.texture.height,
-                    depth_or_array_layers: 1,
-                },
-                TextureDimension::D2,
-                s.texture.rgba.clone(),
-                TextureFormat::Rgba8UnormSrgb,
-                RenderAssetUsages::default(),
-            );
-            image.sampler = ImageSampler::linear();
-            let handle = images.add(image);
-            let f = s.frames[0];
-            *sun_sprite = SunSprite {
-                texture: Some(handle),
-                frame_uv: Vec4::new(f.u0, f.v0, f.u1, f.v1),
-            };
-        }
-        None => *sun_sprite = SunSprite::default(),
     }
 
     let sheet = dat_bytes
@@ -210,7 +173,6 @@ impl Plugin for MoonMaterialPlugin {
         app.init_resource::<MoonDatRoot>()
             .init_resource::<MoonSpriteFrames>()
             .init_resource::<CelestialColorTables>()
-            .init_resource::<SunSprite>()
             .add_plugins(MaterialPlugin::<MoonMaterial>::default())
             .add_systems(Update, load_moon_sprite_sheet);
     }

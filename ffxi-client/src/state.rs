@@ -545,6 +545,12 @@ pub struct SessionState {
     #[serde(default)]
     pub self_mount_id: u8,
 
+    /// Latched self appearance from 0x00A LOGIN / 0x051 GRAP_LIST. Ordering
+    /// proof: 0x051 can land before self's entity exists, and `ZoneChanged`
+    /// clears `entities`, so the last-known look is re-applied on upsert.
+    #[serde(skip)]
+    pub self_look: Option<ffxi_proto::decode::LookData>,
+
     /// Projection of the reactor's in-flight cast/action for the Enhanced cast
     /// bar. The reactor's `CastInFlight` is the authoritative owner; this is the
     /// serializable view it republishes each tick (mirrors `self_fishing`).
@@ -1456,13 +1462,16 @@ impl SessionState {
                 entity,
                 pos_present,
             } => {
+                let latched_self_look = (self.char_id == Some(entity.id))
+                    .then_some(self.self_look)
+                    .flatten();
                 if let Some(existing) = self.entities.iter_mut().find(|e| e.id == entity.id) {
                     let preserved_name = entity.name.clone().or_else(|| existing.name.clone());
                     let merged_kind = merge_kind(existing.kind, entity.kind);
 
                     let preserved_hp_pct = entity.hp_pct.or(existing.hp_pct);
 
-                    let preserved_look = entity.look.or(existing.look);
+                    let preserved_look = entity.look.or(existing.look).or(latched_self_look);
                     let preserved_npc_state = entity.npc_state.or(existing.npc_state);
                     let preserved_char_flags = entity.char_flags.or(existing.char_flags);
                     let preserved_mount_id = entity.mount_id.or(existing.mount_id);
@@ -1512,7 +1521,9 @@ impl SessionState {
                         true
                     }
                 } else {
-                    self.entities.push(entity.clone());
+                    let mut inserted = entity.clone();
+                    inserted.look = inserted.look.or(latched_self_look);
+                    self.entities.push(inserted);
                     true
                 }
             }
@@ -1816,6 +1827,17 @@ impl SessionState {
             AgentEvent::EquipCleared => {
                 let changed = self.equipment.iter().any(|c| c.is_some());
                 self.equipment = [None; EQUIPMENT_SLOTS];
+                changed
+            }
+            AgentEvent::SelfLookUpdated { look } => {
+                let mut changed = self.self_look != Some(*look);
+                self.self_look = Some(*look);
+                if let Some(char_id) = self.char_id {
+                    if let Some(ent) = self.entities.iter_mut().find(|e| e.id == char_id) {
+                        changed |= ent.look != Some(*look);
+                        ent.look = Some(*look);
+                    }
+                }
                 changed
             }
             AgentEvent::SpellsKnownUpdated { ids } => {
@@ -2530,6 +2552,14 @@ pub enum AgentEvent {
     },
 
     EquipCleared,
+
+    /// Self's appearance from s2c 0x051 GRAP_LIST — the only push channel for
+    /// it, since LSB never broadcasts a 0x00D CHAR_PC about a player to that
+    /// player (vendor/server/src/map/zone_entities.cpp
+    /// `CZoneEntities::UpdateEntityPacket`).
+    SelfLookUpdated {
+        look: ffxi_proto::decode::LookData,
+    },
 
     SpellsKnownUpdated {
         ids: Vec<u16>,
@@ -3633,6 +3663,22 @@ mod tests {
         assert_eq!(s.current_weather, None);
     }
 
+    // 0x00A LOGIN carries the zone-in weather, and session/mod.rs emits it
+    // *after* the ZoneChanged that clears current_weather. Pin that ordering:
+    // reversed, a zone-in would render the default sky until the next 0x057.
+    #[test]
+    fn zone_in_weather_survives_the_zone_change_clear() {
+        let mut s = SessionState::default();
+        s.apply_event(&AgentEvent::ZoneChanged {
+            from: None,
+            to: 103,
+            myroom: None,
+            mog_zone_flag: false,
+        });
+        s.apply_event(&AgentEvent::WeatherUpdated { weather_number: 4 });
+        assert_eq!(s.current_weather, Some(4));
+    }
+
     #[test]
     fn widescan_list_builds_between_start_and_end_and_clears_on_zone_change() {
         let mut s = SessionState::default();
@@ -4361,6 +4407,104 @@ mod tests {
             matches!(s.entities[0].look, Some(LookData::Standard { modelid: 99 })),
             "Some(new_look) must overwrite, not get preserved as the prior Equipped value"
         );
+    }
+
+    const SELF_CHAR_ID: u32 = 7;
+
+    fn self_test_look() -> ffxi_proto::decode::LookData {
+        ffxi_proto::decode::LookData::Equipped {
+            face: 3,
+            race: 3,
+            head: 0x011,
+            body: 0x022,
+            hands: 0x033,
+            legs: 0x044,
+            feet: 0x055,
+            main: 0x066,
+            sub: 0x077,
+            ranged: 0x088,
+        }
+    }
+
+    fn connected_self_state() -> SessionState {
+        let mut s = SessionState::default();
+        s.apply_event(&AgentEvent::Connected {
+            account_id: 42,
+            char_id: SELF_CHAR_ID,
+            character: "Tester".into(),
+            zone_id: 100,
+        });
+        s
+    }
+
+    #[test]
+    fn self_look_updated_sets_look_on_self_entity() {
+        let mut s = connected_self_state();
+        let mut ent = make_test_entity(SELF_CHAR_ID, Some("Tester"), EntityKind::Pc);
+        ent.look = None;
+        s.apply_event(&AgentEvent::EntityUpserted {
+            entity: ent,
+            pos_present: true,
+        });
+
+        let dirty = s.apply_event(&AgentEvent::SelfLookUpdated {
+            look: self_test_look(),
+        });
+        assert!(dirty, "a new self look must mark the state dirty");
+        assert_eq!(s.entities[0].look, Some(self_test_look()));
+    }
+
+    #[test]
+    fn self_look_latch_applies_when_grap_list_precedes_self_entity() {
+        let mut s = connected_self_state();
+        s.apply_event(&AgentEvent::SelfLookUpdated {
+            look: self_test_look(),
+        });
+
+        let mut ent = make_test_entity(SELF_CHAR_ID, Some("Tester"), EntityKind::Pc);
+        ent.look = None;
+        s.apply_event(&AgentEvent::EntityUpserted {
+            entity: ent,
+            pos_present: true,
+        });
+        assert_eq!(s.entities[0].look, Some(self_test_look()));
+    }
+
+    #[test]
+    fn self_look_survives_pos_only_upsert() {
+        let mut s = connected_self_state();
+        s.apply_event(&AgentEvent::SelfLookUpdated {
+            look: self_test_look(),
+        });
+        let mut ent = make_test_entity(SELF_CHAR_ID, Some("Tester"), EntityKind::Pc);
+        ent.look = None;
+        s.apply_event(&AgentEvent::EntityUpserted {
+            entity: ent,
+            pos_present: true,
+        });
+
+        let mut pos_only = make_test_entity(SELF_CHAR_ID, None, EntityKind::Pc);
+        pos_only.look = None;
+        s.apply_event(&AgentEvent::EntityUpserted {
+            entity: pos_only,
+            pos_present: true,
+        });
+        assert_eq!(s.entities[0].look, Some(self_test_look()));
+    }
+
+    #[test]
+    fn self_look_latch_does_not_leak_to_other_entities() {
+        let mut s = connected_self_state();
+        s.apply_event(&AgentEvent::SelfLookUpdated {
+            look: self_test_look(),
+        });
+        let mut other = make_test_entity(SELF_CHAR_ID + 1, Some("Someone"), EntityKind::Pc);
+        other.look = None;
+        s.apply_event(&AgentEvent::EntityUpserted {
+            entity: other,
+            pos_present: true,
+        });
+        assert_eq!(s.entities[0].look, None);
     }
 
     #[test]

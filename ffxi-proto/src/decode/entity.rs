@@ -321,7 +321,7 @@ mod flags3 {
 /// zone MZB and names the zone-DAT directory holding its `open`/`clos`
 /// Scheduler routines, so this — not the entity name, which only rides an
 /// `UPDATE_NAME` packet — is the join from wire entity to geometry.
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct DoorId([u8; 4]);
 
 impl DoorId {
@@ -362,7 +362,7 @@ impl fmt::Debug for DoorId {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum LookData {
     Standard {
         modelid: u16,
@@ -449,9 +449,30 @@ impl LookData {
 
     pub const CHAR_PC_GRAP_OFFSET: usize = 0x44;
 
+    /// `GP_SERV_COMMAND_GRAP_LIST::PacketData` opens with `GrapIDTbl`
+    /// (vendor/server/src/map/packets/s2c/0x051_grap_list.h), so the table sits
+    /// at the start of the body.
+    pub const GRAP_LIST_TBL_OFFSET: usize = 0;
+
+    pub const GRAP_ID_TBL_SLOTS: usize = 9;
+    pub const GRAP_ID_TBL_LEN: usize = Self::GRAP_ID_TBL_SLOTS * 2;
+
+    /// Slot tag stripped from `GrapIDTbl[i]`: LSB writes `look.<slot> + 0x{i}000`
+    /// (vendor/server/src/map/packets/s2c/0x051_grap_list.cpp:32-39 and
+    /// vendor/server/src/map/packets/char_update.cpp), the same encoding in all
+    /// three carriers of the table (0x00D CHAR_PC, 0x00A LOGIN, 0x051 GRAP_LIST).
+    const GRAP_ID_MODEL_MASK: u16 = 0x0FFF;
+
     pub fn decode_char_pc(body: &[u8]) -> Option<Self> {
-        let off = Self::CHAR_PC_GRAP_OFFSET;
-        if body.len() < off + 18 {
+        Self::decode_grap_id_tbl(body, Self::CHAR_PC_GRAP_OFFSET)
+    }
+
+    pub fn decode_grap_list(body: &[u8]) -> Option<Self> {
+        Self::decode_grap_id_tbl(body, Self::GRAP_LIST_TBL_OFFSET)
+    }
+
+    pub fn decode_grap_id_tbl(body: &[u8], off: usize) -> Option<Self> {
+        if body.len() < off + Self::GRAP_ID_TBL_LEN {
             return None;
         }
         let slot0 = u16::from_le_bytes([body[off], body[off + 1]]);
@@ -463,7 +484,7 @@ impl LookData {
 
         let read_slot = |i: usize| -> u16 {
             let p = off + 2 * i;
-            u16::from_le_bytes([body[p], body[p + 1]]) & 0x0FFF
+            u16::from_le_bytes([body[p], body[p + 1]]) & Self::GRAP_ID_MODEL_MASK
         };
         Some(LookData::Equipped {
             face,
@@ -1051,6 +1072,49 @@ mod look_data_tests {
         buf[LookData::CHAR_PC_GRAP_OFFSET..LookData::CHAR_PC_GRAP_OFFSET + 2]
             .copy_from_slice(&0x0107u16.to_le_bytes());
         assert_eq!(LookData::decode_char_pc(&buf), None);
+    }
+
+    fn grap_id_tbl_bytes() -> Vec<u8> {
+        let mut tbl = vec![0u8; LookData::GRAP_ID_TBL_LEN];
+        let slots: [u16; LookData::GRAP_ID_TBL_SLOTS] = [
+            0x0307, 0x1001, 0x2002, 0x3003, 0x4004, 0x5005, 0x6006, 0x7007, 0x8008,
+        ];
+        for (i, v) in slots.iter().enumerate() {
+            tbl[i * 2..i * 2 + 2].copy_from_slice(&v.to_le_bytes());
+        }
+        tbl
+    }
+
+    #[test]
+    fn grap_list_and_char_pc_decode_the_same_table() {
+        let tbl = grap_id_tbl_bytes();
+
+        let mut grap_list = vec![0u8; LookData::GRAP_LIST_TBL_OFFSET + tbl.len()];
+        grap_list[LookData::GRAP_LIST_TBL_OFFSET..].copy_from_slice(&tbl);
+
+        let mut char_pc = vec![0u8; LookData::CHAR_PC_GRAP_OFFSET + tbl.len()];
+        char_pc[LookData::CHAR_PC_GRAP_OFFSET..].copy_from_slice(&tbl);
+
+        let expected = LookData::Equipped {
+            face: 0x07,
+            race: 0x03,
+            head: 1,
+            body: 2,
+            hands: 3,
+            legs: 4,
+            feet: 5,
+            main: 6,
+            sub: 7,
+            ranged: 8,
+        };
+        assert_eq!(LookData::decode_grap_list(&grap_list), Some(expected));
+        assert_eq!(LookData::decode_char_pc(&char_pc), Some(expected));
+    }
+
+    #[test]
+    fn grap_list_zero_slot0_returns_none() {
+        let buf = vec![0u8; LookData::GRAP_ID_TBL_LEN];
+        assert_eq!(LookData::decode_grap_list(&buf), None);
     }
 }
 

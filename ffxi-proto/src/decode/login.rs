@@ -92,6 +92,13 @@ pub struct ServerLogin {
 
     pub zone_in_event: Option<ZoneInEvent>,
 
+    /// The character's own appearance. LSB never sends a 0x00D CHAR_PC about a
+    /// player to that player (vendor/server/src/map/zone_entities.cpp
+    /// `CZoneEntities::UpdateEntityPacket` skips `PCurrentChar == PEntity`), so
+    /// this `GrapIDTbl` — written at 0x00a_login.cpp:167-175 with the same slot
+    /// tagging as CHAR_PC — plus 0x051 GRAP_LIST are self's only look sources.
+    pub look: Option<LookData>,
+
     /// Weather in force as the character zones in.
     ///
     /// The server sends 0x057 WEATHER only when the weather *changes*
@@ -106,12 +113,35 @@ pub struct ServerLogin {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ZoneInWeather {
     /// `WeatherNumber` — the LSB weather id, same discriminant order as 0x057.
+    /// This is the weather actually in force: retail's `FUNC_ZoneSetUp` calls
+    /// `XiArea_SetWeather` twice, with the `*2` slot first and this one second
+    /// (research/XiPackets/world/server/0x000A/README.md:221-250).
     pub weather_number: u16,
-    /// `WeatherNumber2` — the second weather slot. Populated during a
-    /// transition; not yet consumed, and not assumed to be the incoming side.
-    pub weather_number2: u16,
-    /// `WeatherOffsetTime`.
+    /// `WeatherNumber2` — the weather being transitioned *from*, not the
+    /// incoming side: retail assigns it to `PreviousWeatherNumber`
+    /// (research/XIClient/src/XIClient/source/Game/Net/Packets/s2c/0x00A.cpp:90-96,
+    /// whose `field_NN` names run +4 ahead of the true payload offsets).
+    pub previous_weather_number: u16,
+    /// `WeatherTime` — `zone->GetWeatherChangeTime()`, retail's
+    /// `CurrentWeatherStartTime` (0x00A.cpp:91), in minutes.
+    pub weather_time: u32,
+    /// `WeatherTime2` — retail's `PreviousWeatherStartTime` (0x00A.cpp:95).
+    pub previous_weather_time: u32,
+    /// `WeatherOffsetTime` — two packed u16s: the low half is retail's
+    /// `CurrentWeatherOffsetTime`, the high half its `PreviousWeatherOffsetTime`
+    /// (0x00A.cpp:92,96; `FUNC_ZoneSetUp` feeds `HIWORD` to the previous pass).
     pub offset_time: u32,
+}
+
+impl ZoneInWeather {
+    /// LSB never writes the previous-weather slots —
+    /// vendor/server/src/map/packets/s2c/0x00a_login.cpp:153-155 sets only
+    /// `WeatherNumber`/`WeatherTime` under a `// TODO: Previous weather` — so
+    /// they arrive zeroed. Weather id 0 is a real weather (`fine`), so a
+    /// consumer must gate on this rather than read 0 as clear skies.
+    pub fn has_previous(&self) -> bool {
+        self.previous_weather_number != 0 || self.previous_weather_time != 0
+    }
 }
 
 /// Zone-in cutscene carried inside s2c 0x00A LOGIN: when `currentEvent` is
@@ -139,10 +169,13 @@ impl ServerLogin {
 
     pub(crate) const GAME_TIME_OFFSET: usize = 0x38;
 
-    // GrapIDTbl[9] u16 at 0x40 (18 bytes) runs to MusicNum[5] u16 at 0x52 (10
-    // bytes, MUSIC_NUM_OFFSET above), which lands SubMapNumber immediately
-    // before EVENT_NUM_OFFSET below — pinning both neighbours proves the
-    // offset (see `sub_area_offset_sits_between_music_num_and_event_num`).
+    // vendor/server/src/map/packets/s2c/0x00a_login.h:99 — GrapIDTbl[9] u16
+    // runs to MusicNum[5] u16 at MUSIC_NUM_OFFSET, which lands SubMapNumber
+    // immediately before EVENT_NUM_OFFSET below; pinning the neighbours proves
+    // both offsets (see `grap_id_tbl_offset_abuts_music_num` and
+    // `sub_area_offset_sits_between_music_num_and_event_num`).
+    pub(crate) const GRAP_ID_TBL_OFFSET: usize = 0x40;
+
     pub(crate) const SUB_AREA_OFFSET: usize = 0x5C;
 
     pub(crate) const EVENT_NUM_OFFSET: usize = 0x5E;
@@ -156,6 +189,8 @@ impl ServerLogin {
     // exactly on LOGIN_STATE_OFFSET 0x7C.
     pub(crate) const WEATHER_NUMBER_OFFSET: usize = 0x64;
     pub(crate) const WEATHER_NUMBER2_OFFSET: usize = 0x66;
+    pub(crate) const WEATHER_TIME_OFFSET: usize = 0x68;
+    pub(crate) const WEATHER_TIME2_OFFSET: usize = 0x6C;
     pub(crate) const WEATHER_OFFSET_TIME_OFFSET: usize = 0x70;
 
     /// `PosHead.server_status` while a zone-in event is pending — the packet's
@@ -222,14 +257,13 @@ impl ServerLogin {
             });
         let weather = (body.len() >= Self::WEATHER_OFFSET_TIME_OFFSET + 4).then(|| {
             let u16_at = |off: usize| u16::from_le_bytes(body[off..off + 2].try_into().unwrap());
+            let u32_at = |off: usize| u32::from_le_bytes(body[off..off + 4].try_into().unwrap());
             ZoneInWeather {
                 weather_number: u16_at(Self::WEATHER_NUMBER_OFFSET),
-                weather_number2: u16_at(Self::WEATHER_NUMBER2_OFFSET),
-                offset_time: u32::from_le_bytes(
-                    body[Self::WEATHER_OFFSET_TIME_OFFSET..Self::WEATHER_OFFSET_TIME_OFFSET + 4]
-                        .try_into()
-                        .unwrap(),
-                ),
+                previous_weather_number: u16_at(Self::WEATHER_NUMBER2_OFFSET),
+                weather_time: u32_at(Self::WEATHER_TIME_OFFSET),
+                previous_weather_time: u32_at(Self::WEATHER_TIME2_OFFSET),
+                offset_time: u32_at(Self::WEATHER_OFFSET_TIME_OFFSET),
             }
         });
         Ok(Self {
@@ -242,6 +276,7 @@ impl ServerLogin {
             myroom: ServerLoginMyroom::decode(body),
             sub_area,
             zone_in_event,
+            look: LookData::decode_grap_id_tbl(body, Self::GRAP_ID_TBL_OFFSET),
             weather,
         })
     }
@@ -286,11 +321,9 @@ mod server_login_tests {
         use super::ServerLogin as L;
         assert_eq!(L::WEATHER_NUMBER_OFFSET, L::EVENT_MODE_OFFSET + 2);
         assert_eq!(L::WEATHER_NUMBER2_OFFSET, L::WEATHER_NUMBER_OFFSET + 2);
-        // WeatherTime + WeatherTime2 are the two u32s we skip.
-        assert_eq!(
-            L::WEATHER_OFFSET_TIME_OFFSET,
-            L::WEATHER_NUMBER2_OFFSET + 2 + 4 + 4
-        );
+        assert_eq!(L::WEATHER_TIME_OFFSET, L::WEATHER_NUMBER2_OFFSET + 2);
+        assert_eq!(L::WEATHER_TIME2_OFFSET, L::WEATHER_TIME_OFFSET + 4);
+        assert_eq!(L::WEATHER_OFFSET_TIME_OFFSET, L::WEATHER_TIME2_OFFSET + 4);
         // ShipStart u32, ShipEnd u16, IsMonstrosity u16, then LoginState.
         assert_eq!(
             L::WEATHER_OFFSET_TIME_OFFSET + 4 + 4 + 2 + 2,
@@ -410,6 +443,63 @@ mod server_login_tests {
         assert_eq!(l.sub_area, None);
     }
 
+    // Distinct sentinels in every weather field: an offset-arithmetic test
+    // cannot catch a current/previous pair swapped inside the constructor.
+    #[test]
+    fn zone_in_weather_decodes_current_and_previous_slots() {
+        let mut buf = vec![0u8; 0x104];
+        let put16 = |b: &mut Vec<u8>, off: usize, v: u16| {
+            b[off..off + 2].copy_from_slice(&v.to_le_bytes());
+        };
+        let put32 = |b: &mut Vec<u8>, off: usize, v: u32| {
+            b[off..off + 4].copy_from_slice(&v.to_le_bytes());
+        };
+        put16(&mut buf, ServerLogin::WEATHER_NUMBER_OFFSET, 6);
+        put16(&mut buf, ServerLogin::WEATHER_NUMBER2_OFFSET, 2);
+        put32(&mut buf, ServerLogin::WEATHER_TIME_OFFSET, 0x1111_1111);
+        put32(&mut buf, ServerLogin::WEATHER_TIME2_OFFSET, 0x2222_2222);
+        put32(
+            &mut buf,
+            ServerLogin::WEATHER_OFFSET_TIME_OFFSET,
+            0x3333_4444,
+        );
+
+        let w = ServerLogin::decode(&buf).unwrap().weather.unwrap();
+        assert_eq!(w.weather_number, 6);
+        assert_eq!(w.previous_weather_number, 2);
+        assert_eq!(w.weather_time, 0x1111_1111);
+        assert_eq!(w.previous_weather_time, 0x2222_2222);
+        assert_eq!(w.offset_time, 0x3333_4444);
+        assert!(w.has_previous());
+    }
+
+    // vendor/server/src/map/packets/s2c/0x00a_login.cpp:153-155 writes only
+    // WeatherNumber/WeatherTime, so the previous slots arrive zeroed and a
+    // cross-fade must not read 0 as weather id 0 (`fine`).
+    #[test]
+    fn lsb_zeroed_previous_weather_slots_are_not_weather_id_zero() {
+        let mut buf = vec![0u8; 0x104];
+        buf[ServerLogin::WEATHER_NUMBER_OFFSET..ServerLogin::WEATHER_NUMBER_OFFSET + 2]
+            .copy_from_slice(&4u16.to_le_bytes());
+        buf[ServerLogin::WEATHER_TIME_OFFSET..ServerLogin::WEATHER_TIME_OFFSET + 4]
+            .copy_from_slice(&1234u32.to_le_bytes());
+
+        let w = ServerLogin::decode(&buf).unwrap().weather.unwrap();
+        assert_eq!(w.weather_number, 4);
+        assert_eq!(w.weather_time, 1234);
+        assert_eq!(w.previous_weather_number, 0);
+        assert_eq!(w.previous_weather_time, 0);
+        assert!(!w.has_previous());
+    }
+
+    #[test]
+    fn short_body_yields_no_zone_in_weather() {
+        let buf = vec![0u8; ServerLogin::WEATHER_OFFSET_TIME_OFFSET + 3];
+        let l = ServerLogin::decode(&buf).unwrap();
+        assert_eq!(l.weather, None);
+        assert!(l.sub_area.is_some());
+    }
+
     #[test]
     fn server_login_myroom_jeuno_model_decodes() {
         let mut buf = vec![0u8; 0x100];
@@ -490,6 +580,54 @@ mod server_login_tests {
         assert_eq!(l.pos_head.dir, 96);
         assert_eq!(l.pos_head.speed, 40);
         assert_eq!(l.pos_head.speed_base, 40);
+    }
+
+    // vendor/server/src/map/packets/s2c/0x00a_login.h:99 — GrapIDTbl[9] sits
+    // immediately before MusicNum[5]; pin the abutment so a field insertion
+    // cannot slide the table without failing here.
+    #[test]
+    fn grap_id_tbl_offset_abuts_music_num() {
+        use super::ServerLogin as L;
+        assert_eq!(L::GRAP_ID_TBL_OFFSET, 0x40);
+        assert_eq!(
+            L::GRAP_ID_TBL_OFFSET + LookData::GRAP_ID_TBL_LEN,
+            L::MUSIC_NUM_OFFSET
+        );
+    }
+
+    #[test]
+    fn server_login_carries_self_look_from_grap_id_tbl() {
+        let mut buf = vec![0u8; ServerLogin::MUSIC_NUM_OFFSET];
+        // 0x00a_login.cpp:167-175 — slot0 = face | race << 8, slot i tagged +0x{i}000.
+        let slots: [u16; LookData::GRAP_ID_TBL_SLOTS] = [
+            0x0507, 0x1011, 0x2022, 0x3033, 0x4044, 0x5055, 0x6066, 0x7077, 0x8088,
+        ];
+        for (i, v) in slots.iter().enumerate() {
+            let off = ServerLogin::GRAP_ID_TBL_OFFSET + i * 2;
+            buf[off..off + 2].copy_from_slice(&v.to_le_bytes());
+        }
+        let l = ServerLogin::decode(&buf).unwrap();
+        assert_eq!(
+            l.look,
+            Some(LookData::Equipped {
+                face: 0x07,
+                race: 0x05,
+                head: 0x011,
+                body: 0x022,
+                hands: 0x033,
+                legs: 0x044,
+                feet: 0x055,
+                main: 0x066,
+                sub: 0x077,
+                ranged: 0x088,
+            })
+        );
+    }
+
+    #[test]
+    fn server_login_without_grap_id_tbl_has_no_look() {
+        let buf = vec![0u8; ServerLogin::MUSIC_NUM_OFFSET];
+        assert_eq!(ServerLogin::decode(&buf).unwrap().look, None);
     }
 }
 

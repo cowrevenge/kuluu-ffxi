@@ -867,6 +867,62 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_self_entity_carries_look() {
+        const SELF_CHAR_ID: u32 = 7;
+        let look = ffxi_proto::decode::LookData::Equipped {
+            face: 3,
+            race: 3,
+            head: 0x011,
+            body: 0x022,
+            hands: 0x033,
+            legs: 0x044,
+            feet: 0x055,
+            main: 0x066,
+            sub: 0x077,
+            ranged: 0x088,
+        };
+
+        let mut s = SessionState::default();
+        s.apply_event(&AgentEvent::Connected {
+            account_id: 42,
+            char_id: SELF_CHAR_ID,
+            character: "Tester".into(),
+            zone_id: 100,
+        });
+        s.apply_event(&AgentEvent::EntityUpserted {
+            entity: Entity {
+                id: SELF_CHAR_ID,
+                act_index: SELF_CHAR_ID as u16,
+                kind: EntityKind::Pc,
+                name: Some("Tester".into()),
+                pos: Vec3::default(),
+                heading: 0,
+                hp_pct: Some(100),
+                bt_target_id: 0,
+                face_target: 0,
+                claim_id: 0,
+                speed: 0,
+                speed_base: 0,
+                look: None,
+                npc_state: None,
+                char_flags: None,
+                status: 0,
+                mount_id: None,
+            },
+            pos_present: true,
+        });
+        s.apply_event(&AgentEvent::SelfLookUpdated { look });
+
+        let snap = state_to_snapshot(&s);
+        let self_entity = snap
+            .entities
+            .iter()
+            .find(|e| Some(e.id) == snap.self_char_id)
+            .expect("self entity present in snapshot");
+        assert_eq!(self_entity.look, Some(look_to_wire(look)));
+    }
+
+    #[test]
     fn action_started_carries_target_id() {
         for target_id in [Some(0xBEEFu32), None] {
             let mapped = event_to_viewer_event(AgentEvent::ActionStarted {

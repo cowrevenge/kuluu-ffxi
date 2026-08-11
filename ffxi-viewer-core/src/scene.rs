@@ -627,10 +627,10 @@ pub fn ensure_self_lookcomp_system(
         return;
     };
     // Seed the self look from the launcher-time appearance ONLY when nothing has
-    // set it yet, so the model shows before the server's CHAR_PC for self lands.
-    // Once a LookComp exists, sync_entity_looks_system (server-driven) owns it —
-    // otherwise this would clobber the server look every frame and the self model
-    // would never reflect gear changes (other PCs already update via that system).
+    // set it yet, so the model shows before the server's 0x00A LOGIN / 0x051
+    // GRAP_LIST appearance lands. Once a LookComp exists, sync_entity_looks_system
+    // (server-driven) owns it — otherwise this would clobber the server look every
+    // frame and the self model would never reflect gear changes.
     for (e, current) in q_self.iter() {
         if current.is_none() {
             if let Ok(mut ec) = commands.get_entity(e) {
@@ -654,11 +654,10 @@ pub fn sync_entity_looks_system(
             continue;
         };
         let current = q_look.get(bevy_e).ok();
-        // A look the server stops reporting is not a look that changed: only
-        // self's snapshot entity ever goes back to None (pos-only updates drop
-        // it), and clearing the component there fought ensure_self_lookcomp_system
-        // re-seeding it, so dispatch_look_driven_models -- scheduled between the
-        // two -- never saw self hold a LookComp and never requested the model.
+        // A look the server stops reporting is not a look that changed: clearing
+        // the component on None fought ensure_self_lookcomp_system re-seeding it,
+        // so dispatch_look_driven_models -- scheduled between the two -- never saw
+        // self hold a LookComp and never requested the model.
         match (&wire.look, current) {
             (Some(new), Some(LookComp(old))) if new == old => {}
             (Some(new), _) => {

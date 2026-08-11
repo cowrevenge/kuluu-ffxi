@@ -692,7 +692,9 @@ fn handle_sub_packet(
                 if let Some(w) = login.weather {
                     tracing::info!(
                         weather_number = w.weather_number,
-                        weather_number2 = w.weather_number2,
+                        weather_time = w.weather_time,
+                        previous_weather_number = w.previous_weather_number,
+                        has_previous = w.has_previous(),
                         offset_time = w.offset_time,
                         "0x00A LOGIN carries zone-in weather"
                     );
@@ -766,7 +768,7 @@ fn handle_sub_packet(
                             speed: head.speed,
                             speed_base: head.speed_base,
 
-                            look: None,
+                            look: login.look,
                             npc_state: None,
                             char_flags: None,
                             status: 0,
@@ -925,24 +927,6 @@ fn handle_sub_packet(
                     _ => Some(0),
                 }
                 .unwrap_or(0);
-
-                if op == s2c::CHAR_PC && head.unique_no == self_char_id && look.is_none() {
-                    let start = decode::LookData::CHAR_PC_GRAP_OFFSET;
-                    let end = (start + 18).min(sub.data.len());
-                    let slice = sub.data.get(start..end).unwrap_or(&[]);
-                    let hex: String = slice
-                        .iter()
-                        .map(|b| format!("{b:02x}"))
-                        .collect::<Vec<_>>()
-                        .join(" ");
-                    tracing::info!(
-                        target: "self_look_probe",
-                        body_len = sub.data.len(),
-                        send_flag = sub.data.get(6).copied().unwrap_or(0),
-                        grap_hex = %hex,
-                        "CHAR_PC for self: look decoded None (body[0x44..0x56] dumped)"
-                    );
-                }
 
                 const UPDATE_POS: u8 = 0x01;
                 let pos_present = send_flag & UPDATE_POS != 0;
@@ -1622,6 +1606,19 @@ fn handle_sub_packet(
                     container: e.container,
                     container_index: e.container_index,
                 });
+            }
+        }
+        // Self's appearance channel: LSB skips the owning char in every
+        // ENTITY_UPDATE/SPAWN broadcast (vendor/server/src/map/zone_entities.cpp
+        // `CZoneEntities::UpdateEntityPacket`), so a player never receives a
+        // 0x00D CHAR_PC about itself. 0x051 is what it gets instead — at zone-in
+        // (packets/c2s/0x00a_login.cpp:131), on gameok (c2s/0x00c_gameok.cpp:67)
+        // and on every equip/lockstyle/head-toggle change
+        // (entities/charentity.cpp:1174, c2s/0x053_lockstyle.cpp:37,
+        // c2s/0x0dc_config.cpp:113).
+        s2c::GRAP_LIST => {
+            if let Some(look) = decode::LookData::decode_grap_list(sub.data) {
+                let _ = event_tx.send(AgentEvent::SelfLookUpdated { look });
             }
         }
         s2c::MAGIC_DATA => {

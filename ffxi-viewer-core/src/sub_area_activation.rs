@@ -59,11 +59,11 @@ pub struct SubAreaActivation {
 }
 
 impl SubAreaActivation {
-    /// Which interior is swapped in. Suppresses the shell it stands in for
-    /// through [`crate::dat_mzb::apply_sub_area_shell_visibility`] and
-    /// [`crate::dat_mzb::select_zone_mmb_lod`]. Render-side only so far — the
-    /// shell's collision stays solid until `MzbPlacement::collides_in` is wired
-    /// into [`crate::dat_mzb::build_collision_geometry`].
+    /// Which interior is swapped in. Suppresses the shell it stands in for on
+    /// both sides: visually through
+    /// [`crate::dat_mzb::apply_sub_area_shell_visibility`] and
+    /// [`crate::dat_mzb::select_zone_mmb_lod`], and physically through
+    /// [`crate::dat_mzb::MzbCollisionGeometry::set_suppressed`].
     pub fn active(&self) -> Option<u32> {
         self.active
     }
@@ -126,6 +126,7 @@ pub fn drive_sub_area_activation(
     if zone_file_id != activation.zone_file_id && activation.is_armed() {
         activation.forget_zone();
         retire.retire(ZONE_SLOT_SUB_AREA);
+        retire.collision_geometry.set_suppressed(None);
         return;
     }
 
@@ -162,6 +163,9 @@ pub fn drive_sub_area_activation(
     }
 
     retire.retire(ZONE_SLOT_SUB_AREA);
+    // Must precede the load: suppressing after it leaves shell and interior both
+    // solid for the frames the load takes.
+    retire.collision_geometry.set_suppressed(selected);
     activation.active = selected;
     changed_tx.write(SubAreaChanged { sub_area: selected });
 

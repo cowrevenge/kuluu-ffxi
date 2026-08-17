@@ -1466,6 +1466,7 @@ mod tests {
             submesh_idx: 0,
             bevy_transform: bevy::prelude::Transform::IDENTITY,
             water_height_bevy: None,
+            sub_area_link: 0,
         };
         MzbCollisionGeometry::from_block(build_collision_geometry(&[sub], &[inst], None))
     }

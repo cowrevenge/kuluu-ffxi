@@ -188,6 +188,20 @@ pub struct MzbCollisionBlock {
     /// moment the effective zone DAT changes instead of waiting for the new
     /// load to land.
     pub source_file_id: Option<u32>,
+
+    /// Per triangle, parallel to `indices.chunks(3)`: the placeholder shell it
+    /// belongs to, `NO_SUB_AREA_LINK` for ordinary zone surface. Empty means
+    /// "no shells here", matching the `tri_normals` fallback convention.
+    pub tri_sub_area: Vec<u32>,
+
+    /// Which shell [`Self::for_each_hit_in_column`] walks past. Retail suppresses
+    /// at query time rather than by rebuilding the block —
+    /// `CollisionManager::KO_CharaCollision` admits an object only while
+    /// `CollisionMng.field_4 != objectData->something2` — so this is settable on a
+    /// block already loaded, and a doorway crossing costs no reload. Mirrors
+    /// [`MzbCollisionGeometry`]'s copy; only [`MzbCollisionGeometry::set_suppressed`]
+    /// and [`MzbCollisionGeometry::set_block`] may write it.
+    pub(crate) suppressed: Option<u32>,
 }
 
 /// Every loaded zone block's collision, queried as one surface.
@@ -200,6 +214,7 @@ pub struct MzbCollisionBlock {
 #[derive(Resource, Default)]
 pub struct MzbCollisionGeometry {
     slots: [MzbCollisionBlock; ZONE_BLOCK_SLOTS],
+    suppressed: Option<u32>,
 }
 
 #[derive(Clone)]
@@ -295,9 +310,12 @@ impl MzbCollisionBlock {
     }
 
     /// World triangles retail's chase camera sees — everything except the
-    /// `DoubleSidedSkipPolicy` skip set. The camera BVH and every camera probe
-    /// must come through [`MzbCollisionGeometry::camera_triangles`], which folds
-    /// this over every loaded block, or they disagree with the game.
+    /// `DoubleSidedSkipPolicy` skip set and a suppressed interior shell (the
+    /// shell is invisible and walk-through while its interior is active; a
+    /// camera colliding with it would pull in against nothing). The camera BVH
+    /// and every camera probe must come through
+    /// [`MzbCollisionGeometry::camera_triangles`], which folds this over every
+    /// loaded block, or they disagree with the game.
     ///
     /// Filtering happens here, before the BVH is built, because `CollisionBvh`
     /// reorders its triangle copy by leaf order: no per-triangle array can be
@@ -316,6 +334,7 @@ impl MzbCollisionBlock {
             .chunks_exact(3)
             .enumerate()
             .filter(|(i, _)| desynced || !self.camera_skip.get(*i).copied().unwrap_or(false))
+            .filter(|(i, _)| !self.is_suppressed(*i))
             .map(|(_, t)| {
                 [
                     self.positions[t[0] as usize],
@@ -324,6 +343,12 @@ impl MzbCollisionBlock {
                 ]
             })
             .collect()
+    }
+
+    fn is_suppressed(&self, tri_id: usize) -> bool {
+        self.tri_sub_area
+            .get(tri_id)
+            .is_some_and(|link| mzb::is_suppressed_placeholder(*link, self.suppressed))
     }
 
     fn for_each_hit_in_column(&self, xz: Vec2, mut visit: impl FnMut(usize, f32, Vec3)) {
@@ -356,6 +381,9 @@ impl MzbCollisionBlock {
         tri_id: usize,
         visit: &mut impl FnMut(usize, f32, Vec3),
     ) {
+        if self.is_suppressed(tri_id) {
+            return;
+        }
         let base = tri_id * 3;
         let v0 = self.positions[self.indices[base] as usize];
         let v1 = self.positions[self.indices[base + 1] as usize];
@@ -402,10 +430,23 @@ impl MzbCollisionGeometry {
 
     pub fn set_block(&mut self, slot: u8, block: MzbCollisionBlock) {
         self.slots[slot as usize] = block;
+        self.slots[slot as usize].suppressed = self.suppressed;
     }
 
     pub fn clear_block(&mut self, slot: u8) {
         self.slots[slot as usize] = MzbCollisionBlock::default();
+    }
+
+    /// Stop colliding with the shell the given interior replaced, the way
+    /// `CollisionManager::KO_CharaCollision` does: the shell's triangles stay in
+    /// the block and are walked past, so no reload is needed and the shell comes
+    /// straight back when the player leaves. Applies across slots because a
+    /// suppressed link is suppressed everywhere retail walks.
+    pub fn set_suppressed(&mut self, sub_area: Option<u32>) {
+        self.suppressed = sub_area;
+        for block in &mut self.slots {
+            block.suppressed = sub_area;
+        }
     }
 
     /// DAT file the main zone block came from — the zone the player is in. An
@@ -585,6 +626,7 @@ pub fn build_collision_geometry(
     let mut tri_normals: Vec<Vec3> = Vec::new();
     let mut camera_skip: Vec<bool> = Vec::new();
     let mut tri_terrain: Vec<u8> = Vec::new();
+    let mut tri_sub_area: Vec<u32> = Vec::new();
     let mut missing = 0usize;
 
     for inst in instances {
@@ -618,6 +660,7 @@ pub fn build_collision_geometry(
                 sub.tri_camera_transparent.get(t).copied().unwrap_or(false),
             ));
             tri_terrain.push(sub.tri_terrain.get(t).copied().unwrap_or_default());
+            tri_sub_area.push(inst.sub_area_link);
         }
     }
 
@@ -638,6 +681,8 @@ pub fn build_collision_geometry(
         tri_normals,
         camera_skip,
         tri_terrain,
+        tri_sub_area,
+        suppressed: None,
         source_file_id: file_id,
     }
 }
@@ -870,6 +915,10 @@ pub struct MzbInstance {
     pub bevy_transform: Transform,
 
     pub water_height_bevy: Option<f32>,
+
+    /// `ffxi_dat::mzb::MzbPlacement::sub_area_link` — the interior whose shell
+    /// this is, `NO_SUB_AREA_LINK` for ordinary zone surface.
+    pub sub_area_link: u32,
 }
 
 pub fn load_mzb_placed(
@@ -924,6 +973,7 @@ pub fn load_mzb_placed(
                 submesh_idx: idx,
                 bevy_transform: Transform::IDENTITY,
                 water_height_bevy: None,
+                sub_area_link: 0,
             });
         }
         return Ok((submeshes, instances));
@@ -989,6 +1039,7 @@ pub fn load_mzb_placed(
             submesh_idx: idx,
             bevy_transform: Transform::from_matrix(m_bevy),
             water_height_bevy,
+            sub_area_link: p.sub_area_link,
         });
     }
 
@@ -3126,6 +3177,8 @@ pub(crate) mod ground_tests {
             tri_normals,
             camera_skip: Vec::new(),
             tri_terrain: Vec::new(),
+            tri_sub_area: Vec::new(),
+            suppressed: None,
             cell_index: std::collections::HashMap::new(),
             source_file_id: None,
         }
@@ -3148,6 +3201,117 @@ pub(crate) mod ground_tests {
 
     fn two_floors(low: f32, high: f32) -> MzbCollisionGeometry {
         slabs(&[(low, Vec3::Y), (high, Vec3::Y)])
+    }
+
+    /// The shell roof stands above the interior floor, so whichever surface is
+    /// live is the one `ground_step` lands on — walking into the shop has to put
+    /// the player on the room's floor, not on the placeholder that stood there.
+    #[test]
+    fn an_active_interior_stops_its_shell_colliding_and_gets_it_back_on_leaving() {
+        const SHELL: u32 = 328;
+        const SHELL_ROOF_Y: f32 = 6.0;
+        const INTERIOR_FLOOR_Y: f32 = 2.0;
+
+        let mut block = slab_block(&[(INTERIOR_FLOOR_Y, Vec3::Y), (SHELL_ROOF_Y, Vec3::Y)]);
+        block.tri_sub_area = vec![0, 0, SHELL, SHELL];
+        let mut geom = MzbCollisionGeometry::from_block(block);
+
+        let ground = |g: &MzbCollisionGeometry| g.ground_nearest(Vec2::ZERO, SHELL_ROOF_Y);
+        assert_eq!(
+            ground(&geom),
+            Some(SHELL_ROOF_Y),
+            "outside, the shell is solid"
+        );
+
+        geom.set_suppressed(Some(SHELL));
+        assert_eq!(
+            ground(&geom),
+            Some(INTERIOR_FLOOR_Y),
+            "inside, the walk passes the shell and lands on the room"
+        );
+
+        geom.set_suppressed(None);
+        assert_eq!(ground(&geom), Some(SHELL_ROOF_Y), "leaving restores it");
+    }
+
+    /// A `0` link is ordinary zone surface (`NO_SUB_AREA_LINK`), so no active
+    /// value may ever suppress it.
+    #[test]
+    fn suppressing_never_matches_ordinary_zone_surface() {
+        let mut block = slab_block(&[(1.0, Vec3::Y)]);
+        block.tri_sub_area = vec![0, 0];
+        let mut geom = MzbCollisionGeometry::from_block(block);
+
+        geom.set_suppressed(Some(0));
+        assert_eq!(geom.ground_nearest(Vec2::ZERO, 5.0), Some(1.0));
+    }
+
+    /// A block arriving while the player is already inside must come up
+    /// suppressed, or a main-zone reload re-solidifies the shell around them.
+    #[test]
+    fn a_block_landing_during_an_active_interior_inherits_the_suppression() {
+        const SHELL: u32 = 328;
+        let mut geom = MzbCollisionGeometry::default();
+        geom.set_suppressed(Some(SHELL));
+
+        let mut block = slab_block(&[(2.0, Vec3::Y), (6.0, Vec3::Y)]);
+        block.tri_sub_area = vec![0, 0, SHELL, SHELL];
+        geom.set_block(ZONE_SLOT_MAIN, block);
+
+        assert_eq!(geom.ground_nearest(Vec2::ZERO, 6.0), Some(2.0));
+    }
+
+    /// `tri_sub_area` fans out per *placed* triangle like `camera_skip`: one
+    /// submesh placed both as a shell and as ordinary surface must suppress
+    /// only the shell instance's triangles.
+    #[test]
+    fn sub_area_link_is_per_placed_triangle() {
+        const SHELL: u32 = 328;
+        let (positions, indices) = floor_at(0.0);
+        let submeshes = vec![MzbSubMesh {
+            positions: positions.iter().map(|v| v.to_array()).collect(),
+            indices: indices.to_vec(),
+            tri_terrain: vec![0; 2],
+            tri_normal: vec![[0.0, 1.0, 0.0]; 2],
+            tri_camera_transparent: vec![false; 2],
+            flags: 0,
+        }];
+        let instances = vec![
+            MzbInstance {
+                submesh_idx: 0,
+                bevy_transform: Transform::IDENTITY,
+                water_height_bevy: None,
+                sub_area_link: SHELL,
+            },
+            MzbInstance {
+                submesh_idx: 0,
+                bevy_transform: Transform::from_xyz(50.0, 0.0, 0.0),
+                water_height_bevy: None,
+                sub_area_link: 0,
+            },
+        ];
+        let block = build_collision_geometry(&submeshes, &instances, None);
+        assert_eq!(block.tri_sub_area, vec![SHELL, SHELL, 0, 0]);
+
+        let mut geom = MzbCollisionGeometry::from_block(block);
+        assert_eq!(geom.camera_triangles().len(), 4);
+
+        geom.set_suppressed(Some(SHELL));
+        assert_eq!(
+            geom.ground_nearest(Vec2::ZERO, 5.0),
+            None,
+            "the shell instance stops colliding"
+        );
+        assert_eq!(
+            geom.ground_nearest(Vec2::new(50.0, 0.0), 5.0),
+            Some(0.0),
+            "the ordinary instance of the same submesh stays solid"
+        );
+        assert_eq!(
+            geom.camera_triangles().len(),
+            2,
+            "the chase camera must not collide with the invisible shell either"
+        );
     }
 
     /// Two instances of one submesh: `camera_skip` must be per *placed* triangle,
@@ -3176,16 +3340,19 @@ pub(crate) mod ground_tests {
                 submesh_idx: 0,
                 bevy_transform: Transform::IDENTITY,
                 water_height_bevy: None,
+                sub_area_link: 0,
             },
             MzbInstance {
                 submesh_idx: 0,
                 bevy_transform: Transform::from_xyz(50.0, 0.0, 0.0),
                 water_height_bevy: None,
+                sub_area_link: 0,
             },
             MzbInstance {
                 submesh_idx: 1,
                 bevy_transform: Transform::from_xyz(100.0, 0.0, 0.0),
                 water_height_bevy: None,
+                sub_area_link: 0,
             },
         ];
         let geom = build_collision_geometry(&submeshes, &instances, None);

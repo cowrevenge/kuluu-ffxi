@@ -65,6 +65,9 @@ pub(crate) const INLINE_KIND_NUM2: u8 = 0x04;
 /// "the", 0x27 after the a/an article slot, 0x28 after "any", 0x29 counted,
 /// 0x2A counted plural.
 pub(crate) const INLINE_KIND_ITEM: u8 = 0x23;
+/// Singular item directly behind the a/an article slot — the fishing "caught a
+/// <item>!" and digging "You dig up a <item>" lines use it.
+pub(crate) const INLINE_KIND_ITEM_SINGULAR_ARTICLED: u8 = 0x24;
 pub(crate) const INLINE_KIND_ITEM_PLURAL: u8 = 0x25;
 pub(crate) const INLINE_KIND_ITEM_DEFINITE: u8 = 0x26;
 pub(crate) const INLINE_KIND_ITEM_ARTICLED: u8 = 0x27;
@@ -470,6 +473,7 @@ pub(crate) fn parse_inline_tag(bytes: &[u8], at: usize) -> Option<InlineTag> {
     let marker = match bytes[at + 2] {
         INLINE_KIND_NUM | INLINE_KIND_NUM2 => Some(MARKER_NUM),
         INLINE_KIND_ITEM
+        | INLINE_KIND_ITEM_SINGULAR_ARTICLED
         | INLINE_KIND_ITEM_PLURAL
         | INLINE_KIND_ITEM_DEFINITE
         | INLINE_KIND_ITEM_ARTICLED
@@ -796,6 +800,17 @@ mod tests {
 
         let singular = [CC_INLINE_TAG, 0x05, INLINE_KIND_ITEM, 0x82, 0x80];
         let dat = StringDat::parse(&synth(&[&singular])).expect("parse");
+        assert_eq!(dat.text(0).as_deref(), Some("{Item:0}"));
+
+        // The fishing/digging "caught a <item>!" lines use the 0x24 kind.
+        let articled = [
+            CC_INLINE_TAG,
+            0x05,
+            INLINE_KIND_ITEM_SINGULAR_ARTICLED,
+            0x82,
+            0x80,
+        ];
+        let dat = StringDat::parse(&synth(&[&articled])).expect("parse");
         assert_eq!(dat.text(0).as_deref(), Some("{Item:0}"));
     }
 

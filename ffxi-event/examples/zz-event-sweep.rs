@@ -14,6 +14,9 @@ use ffxi_event::{EventVm, StepResult};
 /// forever otherwise.
 const STEP_LIMIT: usize = 4096;
 
+/// Offline there is no host clock, so expire any authored wait in one jump.
+const OFFLINE_WAIT_SKIP_SECS: f32 = 3600.0;
+
 fn main() {
     let root = DatRoot::from_env_or_default().expect("DatRoot");
     let zones: Vec<u16> = {
@@ -77,6 +80,7 @@ fn main() {
                             *stops.entry(op).or_default() += 1;
                             break;
                         }
+                        StepResult::Waiting => vm.tick(OFFLINE_WAIT_SKIP_SECS),
                     }
                 }
             }

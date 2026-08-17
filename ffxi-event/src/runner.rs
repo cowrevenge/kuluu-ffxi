@@ -45,6 +45,10 @@ pub enum DialogStep {
     /// Hit an opcode the VM can't run; the session falls back (EVENT_END) rather
     /// than render a wrong frame. `op` is the opcode value.
     Stopped(u8),
+    /// The scene is holding on a timed wait. The host keeps the event open and
+    /// drives [`DialogRunner::tick`] until it yields something else; there is no
+    /// frame to show and nothing for the player to answer.
+    Waiting,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -99,6 +103,16 @@ impl DialogRunner {
         self.vm.take_cues()
     }
 
+    /// Advance a held wait by `dt_secs` of host clock and run on if it expired.
+    /// Cheap to call every tick: it is a no-op unless a wait is actually held.
+    pub fn tick(&mut self, dt_secs: f32, strings: &StringDat) -> DialogStep {
+        if !self.vm.is_waiting() {
+            return DialogStep::Waiting;
+        }
+        self.vm.tick(dt_secs);
+        self.run(strings)
+    }
+
     /// Cancel out of the current frame (the Esc path): a menu reports the
     /// cancel selection, a message invalidates the open dialog; either way the
     /// VM ends the event with [`EVENT_CANCELLED_END_PARA`].
@@ -144,6 +158,7 @@ impl DialogRunner {
                     }
                 }
                 StepResult::Unimplemented(op) => return DialogStep::Stopped(op),
+                StepResult::Waiting => return DialogStep::Waiting,
             }
         }
     }
@@ -269,6 +284,68 @@ mod tests {
     use ffxi_dat::event_dat::{EventDat, ZONE_PLAYER_ACTOR};
     use ffxi_dat::DatRoot;
     use std::path::Path;
+
+    /// The session ticks the runner unconditionally every 100ms, including
+    /// while a frame is displayed awaiting the player. That tick must be a
+    /// no-op — a `tick` that re-runs the VM would auto-answer every dialog.
+    #[test]
+    fn ticking_a_displayed_frame_neither_advances_nor_re_emits() {
+        let strings = empty_strings();
+        let data = vec![OP_MESSAGE, 0x00, 0x80, OP_MESWAIT, OP_END];
+        let mut runner = DialogRunner::start(&one_event_block(data, vec![10]), 1, 0, vec![])
+            .expect("synthetic block has event 1");
+        assert!(matches!(
+            runner.advance(None, &strings),
+            DialogStep::Frame(_)
+        ));
+        for _ in 0..5 {
+            assert_eq!(runner.tick(10.0, &strings), DialogStep::Waiting);
+        }
+        assert!(matches!(
+            runner.advance(None, &strings),
+            DialogStep::Ended { .. }
+        ));
+    }
+
+    /// A scene that opens on a fade: `advance` yields `Waiting`, the host
+    /// clock carries it to the frame, and the player's answer ends it. Pins
+    /// the runner plumbing between [`EventVm::tick`] and the session.
+    #[test]
+    fn a_scene_opening_on_a_wait_carries_to_its_frame_and_end() {
+        use crate::vm::OP_WAIT;
+        let strings = empty_strings();
+        let data = vec![
+            OP_WAIT, 0x01, 0x80, OP_MESSAGE, 0x00, 0x80, OP_MESWAIT, OP_END,
+        ];
+        let mut runner = DialogRunner::start(&one_event_block(data, vec![10, 30]), 1, 0, vec![])
+            .expect("synthetic block has event 1");
+        assert_eq!(runner.advance(None, &strings), DialogStep::Waiting);
+        assert_eq!(
+            runner.tick(0.1, &strings),
+            DialogStep::Waiting,
+            "0.5s authored, 0.1s elapsed"
+        );
+        assert!(matches!(runner.tick(1.0, &strings), DialogStep::Frame(_)));
+        assert!(matches!(
+            runner.advance(None, &strings),
+            DialogStep::Ended { .. }
+        ));
+    }
+
+    /// Advance, running any timed wait to expiry — the tests have no host
+    /// clock, so an authored fade is skipped rather than slept through.
+    fn advance_past_waits(
+        runner: &mut DialogRunner,
+        choice: Option<u32>,
+        strings: &StringDat,
+    ) -> DialogStep {
+        const WAIT_SKIP_SECS: f32 = 3600.0;
+        let mut step = runner.advance(choice, strings);
+        while matches!(step, DialogStep::Waiting) {
+            step = runner.tick(WAIT_SKIP_SECS, strings);
+        }
+        step
+    }
 
     #[test]
     fn clean_display_strips_formatting_but_keeps_substitutions() {
@@ -478,7 +555,7 @@ mod tests {
                     };
                     // Bound the interaction loop; auto-pick option 0 for menus.
                     for _ in 0..16 {
-                        match runner.advance(Some(0), &strings) {
+                        match advance_past_waits(&mut runner, Some(0), &strings) {
                             DialogStep::Frame(_) => frames += 1,
                             DialogStep::Ended { .. } => {
                                 ended += 1;
@@ -488,6 +565,7 @@ mod tests {
                                 *stopped.entry(op).or_default() += 1;
                                 break;
                             }
+                            DialogStep::Waiting => unreachable!("consumed by advance_past_waits"),
                         }
                     }
                 }
@@ -534,13 +612,14 @@ mod tests {
         let mut frames = Vec::new();
         let mut ended = false;
         for _ in 0..16 {
-            match runner.advance(Some(0), &strings) {
+            match advance_past_waits(&mut runner, Some(0), &strings) {
                 DialogStep::Frame(f) => frames.push(f.text),
                 DialogStep::Ended { .. } => {
                     ended = true;
                     break;
                 }
                 DialogStep::Stopped(op) => panic!("event 32759 stopped on opcode 0x{op:02X}"),
+                DialogStep::Waiting => unreachable!("consumed by advance_past_waits"),
             }
         }
         assert!(ended, "event 32759 did not end cleanly within 16 steps");
@@ -585,13 +664,14 @@ mod tests {
 
         let mut end_para = None;
         for _ in 0..32 {
-            match runner.advance(Some(0), &strings) {
+            match advance_past_waits(&mut runner, Some(0), &strings) {
                 DialogStep::Frame(_) => {}
                 DialogStep::Ended { end_para: ep } => {
                     end_para = Some(ep);
                     break;
                 }
                 DialogStep::Stopped(op) => panic!("event 32759 stopped on opcode 0x{op:02X}"),
+                DialogStep::Waiting => unreachable!("consumed by advance_past_waits"),
             }
         }
         assert_eq!(end_para, Some(1), "Signet pick must return EndPara == 1");
@@ -637,12 +717,13 @@ mod tests {
 
         let mut cues = Vec::new();
         for _ in 0..32 {
-            let step = runner.advance(Some(RENT_OPTION), &strings);
+            let step = advance_past_waits(&mut runner, Some(RENT_OPTION), &strings);
             cues.extend(runner.take_cues());
             match step {
                 DialogStep::Frame(_) => {}
                 DialogStep::Ended { .. } => break,
                 DialogStep::Stopped(op) => panic!("rental stopped on opcode 0x{op:02X}"),
+                DialogStep::Waiting => unreachable!("consumed by advance_past_waits"),
             }
         }
 

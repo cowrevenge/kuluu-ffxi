@@ -37,6 +37,9 @@ pub enum Advance {
     /// The event is over — the caller sends EVENT_END with `end_para` as the
     /// 0x05B `EndPara` (the VM's `Work_Zone[1]`, or a cancel sentinel).
     Ended { end_para: u32 },
+    /// The scene is holding on a timed wait: no frame to show, and the event
+    /// stays open. The caller must not send EVENT_END on this.
+    Waiting,
 }
 
 /// Outcome of starting a VM-driven event.
@@ -84,6 +87,9 @@ pub enum Begin {
         stopped_op: Option<u8>,
         reason: UndriveableReason,
     },
+    /// The scene opened on a timed wait — a fade before the first line. The
+    /// event stays open and [`DialogSession::tick`] carries it forward.
+    Waiting,
 }
 
 /// One server-dispatched event trigger, normalised across 0x32/0x33/0x34.
@@ -240,6 +246,11 @@ impl DialogSession {
                     reason: UndriveableReason::StoppedOnOpcode,
                 }
             }
+            DialogStep::Waiting => {
+                self.runner = Some(runner);
+                self.active = Some(active);
+                Begin::Waiting
+            }
         }
     }
 
@@ -257,6 +268,16 @@ impl DialogSession {
     /// [`ffxi_event::EVENT_CANCELLED_END_PARA`].
     pub fn cancel(&mut self) -> Advance {
         self.drive(|runner, strings| runner.cancel(strings))
+    }
+
+    /// Run the host clock into a scene holding on a timed wait; a no-op
+    /// ([`Advance::Waiting`]) while a frame is displayed instead. Call only
+    /// while [`active_end`] is `Some` — like [`advance`](Self::advance), a
+    /// desynced call releases the event rather than wedging it open.
+    ///
+    /// [`active_end`]: Self::active_end
+    pub fn tick(&mut self, dt_secs: f32) -> Advance {
+        self.drive(|runner, strings| runner.tick(dt_secs, strings))
     }
 
     fn drive(&mut self, step: impl FnOnce(&mut DialogRunner, &StringDat) -> DialogStep) -> Advance {
@@ -287,6 +308,7 @@ impl DialogSession {
                 );
                 Advance::Ended { end_para: 0 }
             }
+            DialogStep::Waiting => Advance::Waiting,
         };
         self.cues.extend(cues);
         if matches!(advance, Advance::Ended { .. }) {

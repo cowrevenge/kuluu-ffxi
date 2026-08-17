@@ -62,13 +62,18 @@ pub enum StepResult {
     /// [`crate::opcode_meta::is_input_wait`]); execution stops rather than
     /// desyncing `ExecPointer` or inventing the answer.
     Unimplemented(u8),
+    /// Blocked on a timed wait; the host runs its clock into [`EventVm::tick`]
+    /// and steps again. Only the pure timers yield here — an actor-gated wait
+    /// would block on state this VM never models, turning a dropped scene into a
+    /// hung client.
+    Waiting,
 }
 
 pub(crate) const OP_END: u8 = 0x00;
 const OP_GOTO: u8 = 0x01;
 const OP_IF: u8 = 0x02;
 const OP_GET_STORE: u8 = 0x03;
-const OP_WAIT: u8 = 0x1C;
+pub(crate) const OP_WAIT: u8 = 0x1C;
 const OP_JUMP: u8 = 0x1A;
 const OP_RETURN: u8 = 0x1B;
 pub(crate) const OP_MESSAGE: u8 = 0x1D;
@@ -237,7 +242,26 @@ pub struct EventVm {
     /// (fully or partly) past the end of the bytecode; each read yields 0.
     /// `Cell` because reads happen through `&self` accessors.
     oob_reads: std::cell::Cell<u32>,
+    /// Retail's `ReqStack[RunPos].WaitTime`: what is left of a timed wait, and
+    /// how far to step once it runs out. Armed by the opcode, drained by
+    /// [`Self::tick`].
+    wait: Option<Wait>,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Wait {
+    remaining_units: f32,
+    advance: usize,
+}
+
+/// `WaitTime` decrements by `GetFrameDelay()`, which counts 1/60ths of a
+/// second: research/XiEvents OpCodes/0x005A.md scales it by `0.016666668` and
+/// 0x0031.md divides it by 60.0 for per-second motion.
+const WAIT_UNITS_PER_SEC: f32 = 60.0;
+
+/// `0x6F` SLEEP authors no operand and loads this fixed duration
+/// (research/XiEvents OpCodes/0x006F.md).
+const SLEEP_WAIT_UNITS: f32 = 16.0;
 
 impl EventVm {
     /// Start `event_id` from `block` (the actor's event block), with
@@ -268,6 +292,7 @@ impl EventVm {
             cues: Vec::new(),
             finished: false,
             ran_past_end: false,
+            wait: None,
             oob_reads: std::cell::Cell::new(0),
         })
     }
@@ -326,10 +351,40 @@ impl EventVm {
         self.work_zone.get(index).copied().unwrap_or(0) as i32
     }
 
+    fn arm_wait(&mut self, units: f32, advance: usize) -> StepResult {
+        self.wait = Some(Wait {
+            remaining_units: units,
+            advance,
+        });
+        StepResult::Waiting
+    }
+
+    /// Run the host's clock into the wait. Retail decrements once per frame and
+    /// steps the pointer on the frame the timer goes negative, so a zero-length
+    /// wait still costs a tick — which is what keeps a scene's cues from all
+    /// landing together.
+    pub fn tick(&mut self, dt_secs: f32) {
+        let Some(wait) = self.wait.as_mut() else {
+            return;
+        };
+        wait.remaining_units -= dt_secs * WAIT_UNITS_PER_SEC;
+        if wait.remaining_units < 0.0 {
+            self.exec_pointer += wait.advance;
+            self.wait = None;
+        }
+    }
+
+    pub fn is_waiting(&self) -> bool {
+        self.wait.is_some()
+    }
+
     /// Run opcodes until the VM yields (one `EventIdle` tick).
     pub fn step(&mut self) -> StepResult {
         if self.finished {
             return StepResult::Done;
+        }
+        if self.wait.is_some() {
+            return StepResult::Waiting;
         }
         let mut budget = OPCODE_BUDGET_PER_STEP;
         loop {
@@ -392,14 +447,15 @@ impl EventVm {
                     self.op_bitwork(false);
                     self.exec_pointer += 9;
                 }
-                // 0x6F sleeps until ReqStack WaitTime expires, 0x70 yields while
-                // the event entity is mid-turn; both then ExecPointer++. We model
-                // no frame clock or entity render state, so they reduce to an
-                // advance (XiEvents OpCodes/0x006F.md, 0x0070.md).
-                OP_SLEEP | OP_TURNWAIT => self.exec_pointer += 1,
-                // 0x1C is a timed wait (reads its duration, ticks it down each
-                // frame, then advances +3) — also a no-frame-clock advance.
-                OP_WAIT => self.exec_pointer += 3,
+                // Retail yields here only while the event entity is mid-turn,
+                // which is render state we do not model, so only its other path
+                // is reachable (research/XiEvents OpCodes/0x0070.md).
+                OP_TURNWAIT => self.exec_pointer += 1,
+                OP_SLEEP => return self.arm_wait(SLEEP_WAIT_UNITS, 1),
+                OP_WAIT => {
+                    let units = self.getworkofs(1, 0) as f32;
+                    return self.arm_wait(units, 3);
+                }
                 // 0x43 asks the host to send the pending 0x05B tag to the server
                 // and advances +2 on success. The actual mid-event send is a
                 // session-level refinement; locally we advance so the script runs
@@ -890,6 +946,53 @@ mod tests {
 
     fn vm(event_data: Vec<u8>, references: Vec<u32>) -> EventVm {
         EventVm::start(&block(event_data, references), 7, 5, vec![]).unwrap()
+    }
+
+    /// One authored second of wait must cost a second of host clock. Before the
+    /// VM had one, a whole scene's worth of cues landed in the tick the player
+    /// answered and every fade snapped. The `0x1C` duration goes through
+    /// `getworkofs` like any operand, so it rides a Reference here.
+    #[test]
+    fn a_timed_wait_spends_the_time_it_authors() {
+        const ONE_SECOND: u32 = WAIT_UNITS_PER_SEC as u32;
+        let mut e = vm(vec![OP_WAIT, 0x00, 0x80, OP_END], vec![ONE_SECOND]);
+
+        assert_eq!(e.step(), StepResult::Waiting);
+        e.tick(0.5);
+        assert_eq!(e.step(), StepResult::Waiting, "half way is still waiting");
+        e.tick(0.6);
+        assert_eq!(e.step(), StepResult::Done);
+    }
+
+    /// Retail re-reads `WaitTime` only when it is not already counting, so a
+    /// stepped-but-unexpired wait must not restart and strand the scene.
+    #[test]
+    fn stepping_a_held_wait_does_not_restart_it() {
+        let mut e = vm(
+            vec![OP_WAIT, 0x00, 0x80, OP_END],
+            vec![WAIT_UNITS_PER_SEC as u32],
+        );
+        assert_eq!(e.step(), StepResult::Waiting);
+        for _ in 0..10 {
+            e.tick(0.09);
+            assert_eq!(e.step(), StepResult::Waiting);
+        }
+        e.tick(0.2);
+        assert_eq!(e.step(), StepResult::Done, "the clock accumulated");
+    }
+
+    /// A zero-length wait still yields once — retail sets RetFlag before testing
+    /// the timer — so a scene can never spin through one without the host.
+    /// Expiry is strictly `< 0.0` as in retail, so it takes a real (nonzero)
+    /// slice of host clock to clear, never the same instant it was armed.
+    #[test]
+    fn a_zero_length_wait_still_costs_a_tick() {
+        let mut e = vm(vec![OP_WAIT, 0x00, 0x80, OP_END], vec![0]);
+        assert_eq!(e.step(), StepResult::Waiting);
+        e.tick(0.0);
+        assert_eq!(e.step(), StepResult::Waiting, "no host clock has passed");
+        e.tick(0.01);
+        assert_eq!(e.step(), StepResult::Done);
     }
 
     #[test]
@@ -1449,8 +1552,13 @@ mod tests {
     #[test]
     fn sleep_wait_turn_opcodes_advance() {
         // 0x6F (+1), 0x70 (+1), 0x1C (+3 over its 2 operand bytes) then END.
+        // The timers each cost a slice of host clock before advancing.
         let data = vec![OP_SLEEP, OP_TURNWAIT, OP_WAIT, 0x00, 0x00, OP_END];
         let mut e = vm(data, vec![]);
+        assert_eq!(e.step(), StepResult::Waiting, "0x6F arms its fixed 16");
+        e.tick(1.0);
+        assert_eq!(e.step(), StepResult::Waiting, "0x1C arms (zero-length)");
+        e.tick(1.0);
         assert_eq!(e.step(), StepResult::Done);
         assert_eq!(e.exec_pointer(), 5);
     }

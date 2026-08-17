@@ -8,6 +8,9 @@ use ffxi_dat::event_dat::EventDat;
 use ffxi_dat::DatRoot;
 use ffxi_event::{DialogRunner, DialogStep};
 
+/// Offline there is no host clock, so expire any authored wait in one jump.
+const OFFLINE_WAIT_SKIP_SECS: f32 = 3600.0;
+
 fn main() {
     let mut args = std::env::args().skip(1);
     let zone: u16 = args.next().and_then(|s| s.parse().ok()).expect("zone id");
@@ -47,8 +50,13 @@ fn main() {
             continue;
         };
         let mut response = None;
+        let mut next = None;
         for step in 0..64 {
-            match runner.advance(response.take(), &strings) {
+            let outcome = match next.take() {
+                Some(s) => s,
+                None => runner.advance(response.take(), &strings),
+            };
+            match outcome {
                 DialogStep::Frame(f) => {
                     println!(
                         "  {step:2}. frame speaker={:?} choices={} text={:?}",
@@ -67,6 +75,10 @@ fn main() {
                 DialogStep::Stopped(op) => {
                     println!("  {step:2}. STOPPED on opcode 0x{op:02X}");
                     break;
+                }
+                DialogStep::Waiting => {
+                    println!("  {step:2}. waiting (clock skipped offline)");
+                    next = Some(runner.tick(OFFLINE_WAIT_SKIP_SECS, &strings));
                 }
             }
         }

@@ -1783,6 +1783,12 @@ fn begin_server_event(
             cutscene.end(crate::event_dialog::EventSessionExit::ScriptEnded, event_tx);
             auto_event_end.push((unique_no, act_index, event_id, end_para));
         }
+        crate::event_dialog::Begin::Waiting => {
+            let id = crate::event_dialog::agent_event_id(unique_no, event_id);
+            cutscene.start(id, event_tx);
+            let _ = event_tx.send(AgentEvent::EventStart { event_id: id });
+            pending_event_end.push((unique_no, act_index, event_id));
+        }
         crate::event_dialog::Begin::Undriveable { stopped_op, reason } => {
             tracing::warn!(
                 zone = zone_id,
@@ -1957,7 +1963,7 @@ async fn keepalive_loop(
 
     let mut server_seq_applied: Option<u16> = None;
 
-    let mut tick = tokio::time::interval(std::time::Duration::from_millis(100));
+    let mut tick = tokio::time::interval(SESSION_TICK_PERIOD);
     tick.tick().await;
     let mut reconnect_addr: Option<std::net::SocketAddr> = None;
 
@@ -2119,6 +2125,10 @@ async fn keepalive_loop(
                                     cutscene.end(crate::event_dialog::EventSessionExit::Cancelled, &event_tx);
                                     let _ = event_tx.send(AgentEvent::EventEnded);
                                 }
+                                // Esc mid-wait: the VM defers the cancel to the
+                                // next message wait; if none follows, the scene
+                                // just plays out (kuluu-bxts: cancel latch).
+                                crate::event_dialog::Advance::Waiting => {}
                             }
                         } else if !pending_event_end.is_empty() {
                             let mut payload = Vec::new();
@@ -2286,6 +2296,7 @@ async fn keepalive_loop(
                                     cutscene.end(crate::event_dialog::EventSessionExit::ScriptEnded, &event_tx);
                                     let _ = event_tx.send(AgentEvent::EventEnded);
                                 }
+                                crate::event_dialog::Advance::Waiting => {}
                             }
                         } else {
                             let payload = build_subpacket_event_end(
@@ -3384,6 +3395,34 @@ async fn keepalive_loop(
                 }
             }
             _ = tick.tick() => {
+
+                // Carry a scene holding on a timed wait (0x1C/0x6F). Without
+                // this the VM runs a cutscene to its end in the tick the player
+                // answers, and every cue lands on one frame.
+                if let Some((u, a, n)) = dialog_session.active_end() {
+                    let advance = dialog_session.tick(SESSION_TICK_PERIOD.as_secs_f32());
+                    for cue in dialog_session.take_cues() {
+                        cutscene.push(cue, &event_tx);
+                    }
+                    match advance {
+                        crate::event_dialog::Advance::Frame(dialog) => {
+                            emit_event_speech_to_chat(&event_tx, &dialog);
+                            let _ = event_tx.send(AgentEvent::EventDialog { dialog });
+                        }
+                        crate::event_dialog::Advance::Ended { end_para } => {
+                            if take_pending_event_end(&mut pending_event_end, u, n) {
+                                let payload = build_subpacket_event_end(sub_seq, u, a, current_zone_id, n, end_para);
+                                sub_seq = sub_seq.wrapping_add(1);
+                                if let Err(e) = map.send_encrypted(&payload, datagram_header_id(sub_seq), server_last_seq).await {
+                                    tracing::warn!(error = %e, "EVENT_END (vm wait) send failed");
+                                }
+                            }
+                            cutscene.end(crate::event_dialog::EventSessionExit::ScriptEnded, &event_tx);
+                            let _ = event_tx.send(AgentEvent::EventEnded);
+                        }
+                        crate::event_dialog::Advance::Waiting => {}
+                    }
+                }
 
                 // Advance the cast bar and clear the action lock when it expires.
                 if let Some(c) = &cast_in_flight {
@@ -5828,6 +5867,10 @@ fn face_target_for(target_index: u16, self_act_index: Option<u16>) -> u16 {
         target_index
     }
 }
+
+/// Also the resolution a cutscene's timed waits are served at, so it bounds how
+/// far a fade can overrun its authored duration.
+const SESSION_TICK_PERIOD: std::time::Duration = std::time::Duration::from_millis(100);
 
 const MOVE_EMISSION_PERIOD: std::time::Duration = std::time::Duration::from_millis(100);
 

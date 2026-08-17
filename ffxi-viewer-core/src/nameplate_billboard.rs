@@ -124,6 +124,11 @@ pub struct NameplateBillboard {
 pub struct BillboardAspect {
     pub width: u32,
     pub height: u32,
+
+    /// Texture-space y of the text line's center. The world transform pins the
+    /// line — not the icon-padded box — to the anchor, so an icon changes the
+    /// plate's extent without moving the name.
+    pub text_center_y_px: f32,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -141,8 +146,12 @@ pub fn spawn_nameplate_billboard(
     let rgba = color_to_rgba8(color);
 
     let raster = rasterize_plate(font, name, NAME_PX, rgba, None, &[], rgba, None);
-    let aspect = (raster.width(), raster.height());
-    let image_handle = images.add(raster);
+    let aspect = (
+        raster.image.width(),
+        raster.image.height(),
+        raster.text_center_y_px,
+    );
+    let image_handle = images.add(raster.image);
 
     let mesh_handle = meshes.add(Rectangle::new(1.0, 1.0));
 
@@ -171,6 +180,7 @@ pub fn spawn_nameplate_billboard(
             BillboardAspect {
                 width: aspect.0,
                 height: aspect.1,
+                text_center_y_px: aspect.2,
             },
             Mesh3d(mesh_handle),
             MeshMaterial3d(material_handle),
@@ -299,7 +309,13 @@ pub fn update_nameplate_billboards_system(
             * NAMEPLATE_LEGIBILITY_SCALE;
         let world_width = world_height * aspect_ratio;
 
-        transform.translation = head_pos;
+        let rise = quad_center_rise(
+            world_height / plate_to_line,
+            line_px,
+            aspect.height,
+            aspect.text_center_y_px,
+        );
+        transform.translation = head_pos + Vec3::from(cam_t.up()) * rise;
         transform.rotation = cam_t.rotation;
         transform.scale = Vec3::new(world_width, world_height, 1.0);
         *vis = Visibility::Visible;
@@ -356,9 +372,10 @@ pub fn update_nameplate_billboards_system(
             want.linkshell_tint,
             Some(&icons),
         );
-        aspect.width = new_img.width();
-        aspect.height = new_img.height();
-        let _ = images.insert(&handle, new_img);
+        aspect.width = new_img.image.width();
+        aspect.height = new_img.image.height();
+        aspect.text_center_y_px = new_img.text_center_y_px;
+        let _ = images.insert(&handle, new_img.image);
         np.rastered = Some(want.clone());
     }
 }
@@ -412,6 +429,23 @@ pub fn scale_for_view_depth(view_depth_yalms: f32) -> Option<f32> {
     )
 }
 
+/// The lift the quad center needs so the text line — not the center of the
+/// icon-padded box — sits at the same anchor-relative height on every plate.
+/// Zero for a bare plate (its box center already is the anchor, the
+/// always-present HP strip balancing the outline pad), nonzero once an icon's
+/// overhang grows the box asymmetrically: the name never moves, the overhang
+/// just extends the box around it.
+fn quad_center_rise(
+    line_world: f32,
+    line_px: f32,
+    texture_height: u32,
+    text_center_y_px: f32,
+) -> f32 {
+    let hp_strip = (HP_BAR_TOP_GAP_PX + HP_BAR_HEIGHT_PX) as f32;
+    line_world * (hp_strip * 0.5 - (texture_height.max(1) as f32 * 0.5 - text_center_y_px))
+        / line_px
+}
+
 pub fn target_alpha_pulse(frame: u32) -> f32 {
     let angle_deg = frame.wrapping_mul(TARGET_PULSE_DEGREES_PER_FRAME) % FULL_TURN_DEGREES;
     ((angle_deg as f32).to_radians().sin() * TARGET_PULSE_AMPLITUDE + TARGET_PULSE_BIAS)
@@ -431,6 +465,12 @@ const ICON_TRAILING_ADVANCE: f32 = 0.625;
 const ICON_TAIL_SCALE: f32 = 0.5;
 // CXiActorNameDraw.cpp:366-367 — the tail glyph is nudged back over the star.
 const ICON_TAIL_OFFSET_UNITS: f32 = -2.0;
+// Retail boxes the status icons at 15 units against the 8-unit line
+// (NAME_LINE_HEIGHT_UNITS), which lands near 1.5x the cap height on the bundled
+// font and crowds the name. A deliberate legibility nudge — companion to
+// NAMEPLATE_LEGIBILITY_SCALE — shrinking the whole icon run uniformly, so
+// icon-to-icon proportions and advances stay retail's.
+const ICON_DRAW_SCALE: f32 = 0.75;
 // CXiActorNameDraw.cpp:623 — the icons' alpha runs through D3DTOP_MODULATE4X
 // against a 0x80 diffuse, i.e. doubled.
 const ICON_ALPHA_MODULATE: u16 = 2;
@@ -473,7 +513,7 @@ fn layout_icons(
     // stretch a round icon into an egg on any font whose advance-to-line-box
     // aspect differs from retail's 8:10 cell. Sizing off the advance keeps the
     // icon-to-name width ratio retail has, and squares the icon.
-    let unit_px = letter_advance_px / cell.width_units;
+    let unit_px = letter_advance_px / cell.width_units * ICON_DRAW_SCALE;
     let letter_center_units = cell.y_offset_units + cell.height_units / 2.0;
 
     let mut placements = Vec::with_capacity(markers.len());
@@ -517,6 +557,14 @@ fn layout_icons(
     (placements, pen * unit_px)
 }
 
+/// The plate texture plus the texture-space y of its text line's center, so the
+/// world transform can pin the line to the anchor however tall the icon overhang
+/// makes the box.
+struct PlateImage {
+    image: Image,
+    text_center_y_px: f32,
+}
+
 #[allow(clippy::too_many_arguments)]
 fn rasterize_plate(
     font: &FontArc,
@@ -527,7 +575,7 @@ fn rasterize_plate(
     markers: &[u8],
     linkshell_tint: [u8; 4],
     icons: Option<&crate::nameplate_icons::NameplateIcons>,
-) -> Image {
+) -> PlateImage {
     let scale = PxScale::from(px);
     let scaled = font.as_scaled(scale);
     let ascent = scaled.ascent();
@@ -723,7 +771,10 @@ fn rasterize_plate(
         RenderAssetUsages::default(),
     );
     image.sampler = ImageSampler::linear();
-    image
+    PlateImage {
+        image,
+        text_center_y_px: text_origin_y as f32 + line_h as f32 * 0.5,
+    }
 }
 
 /// Scale one icon sprite into the plate and alpha-blend it over what is already
@@ -887,8 +938,22 @@ mod icon_raster_tests {
         let bare = rasterize_plate(&font, "Test", NAME_PX, WHITE, None, &[], WHITE, None);
         let with_empty_icons =
             rasterize_plate(&font, "Test", NAME_PX, WHITE, None, &[], WHITE, None);
-        assert_eq!(bare.width(), with_empty_icons.width());
-        assert_eq!(bare.height(), with_empty_icons.height());
+        assert_eq!(bare.image.width(), with_empty_icons.image.width());
+        assert_eq!(bare.image.height(), with_empty_icons.image.height());
+    }
+
+    /// A bare plate's box center IS the anchor — pinned against the real
+    /// raster, not invented numbers, so a layout change (outline pad, HP
+    /// strip) that shifts every nameplate vertically cannot pass unnoticed.
+    #[test]
+    fn a_real_bare_raster_needs_no_quad_rise() {
+        let font = font();
+        let line_px = text_line_height_px(&font, NAME_PX) as f32;
+        let bare = rasterize_plate(&font, "Test", NAME_PX, WHITE, None, &[], WHITE, None);
+        assert_eq!(
+            quad_center_rise(0.02, line_px, bare.image.height(), bare.text_center_y_px),
+            0.0
+        );
     }
 
     #[test]
@@ -906,15 +971,17 @@ mod icon_raster_tests {
             None,
         );
         assert_eq!(
-            (bare.width(), bare.height()),
-            (unresolved.width(), unresolved.height()),
+            (bare.image.width(), bare.image.height()),
+            (unresolved.image.width(), unresolved.image.height()),
             "a plate must not reserve icon space it cannot draw"
         );
     }
 
-    /// Gated on a retail install (self-skips).
+    /// Gated on a retail install (self-skips). At ICON_DRAW_SCALE the pearl
+    /// rides inside the text line; where its residual overhang still grows the
+    /// box, quad_center_rise pins the line, so width is the only hard guarantee.
     #[test]
-    fn real_dat_pearl_widens_and_heightens_the_plate() {
+    fn real_dat_pearl_widens_the_plate() {
         let Some(icons) = retail_icons() else {
             return;
         };
@@ -940,12 +1007,12 @@ mod icon_raster_tests {
             Some(&icons),
         );
         assert!(
-            with_pearl.width() > bare.width(),
+            with_pearl.image.width() > bare.image.width(),
             "the icon strip must widen the plate"
         );
         assert!(
-            with_pearl.height() > bare.height(),
-            "the icon is taller than a text line, so the plate grows"
+            with_pearl.text_center_y_px >= bare.text_center_y_px,
+            "an icon may push the line down inside the box, never lift it"
         );
     }
 
@@ -978,13 +1045,14 @@ mod icon_raster_tests {
             red,
             Some(&icons),
         );
-        assert_eq!(untinted.width(), tinted.width());
+        assert_eq!(untinted.image.width(), tinted.image.width());
         assert_ne!(
-            untinted.data, tinted.data,
+            untinted.image.data, tinted.image.data,
             "the pearl must respond to the linkshell colour"
         );
 
         let green_total: u64 = tinted
+            .image
             .data
             .as_ref()
             .expect("raster is CPU-side")
@@ -992,6 +1060,7 @@ mod icon_raster_tests {
             .map(|p| u64::from(p[1]) * u64::from(p[3]))
             .sum();
         let green_untinted: u64 = untinted
+            .image
             .data
             .as_ref()
             .expect("raster is CPU-side")
@@ -1032,7 +1101,7 @@ mod icon_raster_tests {
             [255, 0, 0, 255],
             Some(&icons),
         );
-        assert_eq!(plain.data, with_tint.data);
+        assert_eq!(plain.image.data, with_tint.image.data);
     }
 
     /// Gated on a retail install (self-skips). The tail glyph does not advance
@@ -1063,9 +1132,9 @@ mod icon_raster_tests {
             WHITE,
             Some(&icons),
         );
-        assert_eq!(star.width(), star_with_tail.width());
+        assert_eq!(star.image.width(), star_with_tail.image.width());
         assert_ne!(
-            star.data, star_with_tail.data,
+            star.image.data, star_with_tail.image.data,
             "the tail still draws, it just does not advance"
         );
     }
@@ -1074,6 +1143,38 @@ mod icon_raster_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn text_line_pins_to_one_anchor_height_with_or_without_icons() {
+        // (texture height, text-center y) pairs consistent with the raster
+        // layout: an icon's overhang grows the box and pushes the line down
+        // inside it by the same amount above and below.
+        let line_world = 0.02;
+        let line_px = 94.0;
+        let bare = (130, 53.0);
+        let pearl = (160, 68.0);
+        // Top overhang exceeding the bottom: the box grows asymmetrically, so
+        // a rise of exactly zero (a "pin the box center" impl) would move the
+        // line. This is the fixture that makes the equality non-vacuous.
+        let lopsided = (160, 75.0);
+        // Where the line lands relative to the anchor: the quad rise plus the
+        // line's own offset from the quad center.
+        let line_height = |(h, tc): (u32, f32)| {
+            quad_center_rise(line_world, line_px, h, tc)
+                + line_world * (h as f32 * 0.5 - tc) / line_px
+        };
+        assert!((line_height(bare) - line_height(pearl)).abs() < 1e-9);
+        assert!((line_height(bare) - line_height(lopsided)).abs() < 1e-9);
+        assert!(
+            quad_center_rise(line_world, line_px, lopsided.0, lopsided.1) > 0.0,
+            "an upward overhang lifts the quad to keep the line put"
+        );
+        assert_eq!(
+            quad_center_rise(line_world, line_px, bare.0, bare.1),
+            0.0,
+            "a bare plate keeps its box centered on the anchor"
+        );
+    }
 
     #[test]
     fn self_billboard_matches_known_self_id() {

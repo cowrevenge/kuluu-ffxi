@@ -309,3 +309,4 @@
 {"id":"int-99b8d9ea72c413c6fe48383c2648847f","kind":"field_change","created_at":"2026-08-11T15:20:41.424525Z","actor":"jw","issue_id":"kuluu-fjd3","extra":{"field":"status","new_value":"open","old_value":"in_progress"}}
 {"id":"int-e02ac66cf8e1528868c5daa391202cbb","kind":"field_change","created_at":"2026-08-11T15:20:41.663424Z","actor":"jw","issue_id":"kuluu-lqz2","extra":{"field":"status","new_value":"open","old_value":"in_progress"}}
 {"id":"int-c1b43cf9a03997dae1f71475af8c2a57","kind":"field_change","created_at":"2026-08-11T15:21:10.826906Z","actor":"jw","issue_id":"kuluu-u7r5","extra":{"field":"status","new_value":"open","old_value":"in_progress"}}
+{"id":"int-5bb9d9e17bc7cb87876470ecd2fb95ae","kind":"field_change","created_at":"2026-08-17T04:55:10.381629Z","actor":"jw","issue_id":"kuluu-lqz2","extra":{"field":"status","new_value":"closed","old_value":"open","reason":"Closed"}}

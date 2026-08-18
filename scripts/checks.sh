@@ -32,6 +32,15 @@ cd "$(git rev-parse --show-toplevel)"
 # the release workflow's build flags.
 FEATURES=(--features native-window)
 
+# Route every cargo invocation through the stall watchdog so a jobserver wedge
+# fails loudly instead of hanging the gate — a wedged run here previously sat
+# 34 minutes at 0% CPU while holding the build lock (bead kuluu-p5a5). Set
+# CARGO_GUARD=0 to bypass (the guard adds ~1s of poll overhead per invocation).
+GUARD="$PWD/scripts/cargo-guard.sh"
+if [ "${CARGO_GUARD:-1}" = "1" ] && [ -x "$GUARD" ]; then
+  cargo() { "$GUARD" "$@"; }
+fi
+
 run_fmt() {
   cargo fmt --all --check
 }

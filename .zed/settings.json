@@ -1,0 +1,13 @@
+{
+  "//": "Project-local editor settings. rust-analyzer runs `cargo check --workspace --all-targets` continuously; without targetDir it writes into the same target/debug the CLI builds into and takes the same exclusive build lock, so an editor check and a terminal build block each other. Measured in this repo: an RA check sat 27 minutes behind a `cargo test` on target/debug/.cargo-lock. targetDir:true moves it to target/rust-analyzer. features mirrors scripts/checks.sh so RA analyzes the same cfg the build compiles. See bead kuluu-p5a5.",
+  "lsp": {
+    "rust-analyzer": {
+      "initialization_options": {
+        "cargo": {
+          "targetDir": true,
+          "features": ["native-window"]
+        }
+      }
+    }
+  }
+}

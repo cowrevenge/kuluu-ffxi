@@ -531,7 +531,7 @@ fn drive_zone_clouds(
 ) {
     let cam_pos = cam_q.single().map(|t| t.translation).unwrap_or(Vec3::ZERO);
     let basis = ffxi_to_bevy_basis();
-    let day_fraction = crate::hud::vana_clock::full_day_fraction(vana_clock.earth_unix_secs_now());
+    let day_fraction = crate::vana_time::full_day_fraction(vana_clock.earth_unix_secs_now());
     let dt = time.delta_secs();
     let frames = time.elapsed_secs() * RETAIL_FPS;
 
@@ -741,7 +741,7 @@ fn drive_zone_stars(
     }
 
     // One slow celestial roll per Vana day.
-    let frac = crate::hud::vana_clock::full_day_fraction(vana_clock.earth_unix_secs_now());
+    let frac = crate::vana_time::full_day_fraction(vana_clock.earth_unix_secs_now());
     for (mut xf, mut vis, mat) in stars.iter_mut() {
         if *vis != want {
             *vis = want;

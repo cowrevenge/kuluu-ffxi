@@ -2,7 +2,7 @@ use std::f32::consts::PI;
 
 use bevy::prelude::*;
 
-use crate::hud::vana_clock::EARTH_EPOCH_UNIX;
+use crate::vana_time::EARTH_EPOCH_UNIX;
 
 #[derive(Component)]
 pub struct IsSun;
@@ -549,8 +549,7 @@ pub fn sun_moon_system(
     if let Some(prev) = *prev_phase_bucket {
         if prev != phase_bucket {
             let weekday =
-                crate::hud::vana_clock::VanaWeekday::from_vana_day(vana_day_index(&vana_clock))
-                    .name();
+                crate::vana_time::VanaWeekday::from_vana_day(vana_day_index(&vana_clock)).name();
             toasts.write(crate::snapshot::ToastEvent::system(format!(
                 "☾ Moon: {} ({:.0}% illuminated) — {}",
                 MOON_PHASE_NAMES[phase_bucket as usize],
@@ -921,7 +920,7 @@ pub fn sun_moon_system(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::hud::vana_clock::EARTH_SECS_PER_VANA_DAY;
+    use crate::vana_time::EARTH_SECS_PER_VANA_DAY;
 
     // research/xim EnvironmentSection.kt:206-225: pure moon before 355, ramp to pure
     // sun by 365, pure sun until 1075, ramp back to pure moon by 1085.

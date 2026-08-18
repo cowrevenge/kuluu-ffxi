@@ -25,6 +25,27 @@
 # so Cranelift (dev-only) never runs there; it just uses LLVM.
 [unstable]
 codegen-backend = true
+feature-unification = true
+
+# Resolve features once across every workspace member, not per invocation.
+#
+# WHY: with the default per-invocation resolution, `cargo test -p ffxi-viewer-core`
+# and `cargo build --workspace --features native-window` disagree about bevy's
+# feature set (the narrow one loses `bevy_feathers`, which ffxi-client's
+# native-window feature contributes). A different feature set is a different
+# -C metadata hash, so the two invocations maintain SEPARATE artifact universes
+# for bevy and everything above it. Measured on the unit graph: of the 461 units
+# a per-package `cargo test` needs, 195 (42%) could not reuse the workspace
+# build's artifacts. That duplication is what grows target/ until someone runs
+# `cargo clean`, which then costs a 304s cold rebuild -- the loop that makes
+# builds here feel slow, since the incremental edit loop itself is only 4-12s.
+#
+# Verified with `cargo build --unit-graph` (no compiling): this setting takes
+# the forced-fresh share from 42% to 19%. It changes feature RESOLUTION only --
+# `cargo test -p ffxi-dat` still does not pull bevy. Cost is one rebuild as the
+# hashes settle. See bead kuluu-p5a5.
+[resolver]
+feature-unification = "workspace"
 
 # NOTE: sccache was tried here and removed — measured 0.32% hit rate in this
 # tree (it only helps clean/cross-machine rebuilds, not the incremental edit

@@ -1,25 +1,26 @@
 {
   "skill_name": "refactor-economics",
+  "note": "Iteration-1 prompts (slash_commands split, decode/ dedup, wrap_cursor fold) were retired: the beads filed that same day contained their expected answers, contaminating baselines. These three targets were selected fresh for iteration 2 with .beads/ and the skill itself out of scope.",
   "evals": [
     {
       "id": 0,
-      "name": "split-hot-file-needs-boundary-test",
-      "prompt": "ffxi-client/src/view_native/slash_commands.rs is 4999 lines and it's getting painful to work in — every time I add a slash command I have to scroll through the whole thing. Can you work out how to break it up into something saner? I don't need you to do the edits yet, just tell me the plan and which modules you'd create.",
-      "expected_output": "A plan that applies a name-based boundary test per proposed module rather than splitting by size; states a funding argument for why this file and why now; explicitly REJECTS at least one plausible-sounding proposal (mechanism-axis modules like parsers.rs/handlers.rs, or extracting a shared helper across many call sites) with a reason; and notes that the apply side already lives in text_input/slash_apply.rs so a split that ignores it leaves a reader opening two files per question.",
+      "name": "split-actor-render",
+      "prompt": "ffxi-viewer-core/src/ffxi_actor_render.rs is 4324 lines and I keep getting lost in it. Work out how to break it into modules — just the plan and the module list, no edits yet.",
+      "expected_output": "A plan justifying each module by name-based skippability (not line count), split on the domain axis; identifies the shared private fields of FfxiRenderActor as the dominant cost; produces an explicit rejected list; specifies a validated oracle to capture before editing; offers a cheapest standalone increment with an explicit stopping point before pricing the full programme; claims no measured token saving for this repo.",
       "files": []
     },
     {
       "id": 1,
-      "name": "dedup-request-that-should-be-refused",
-      "prompt": "I was looking at ffxi-proto/src/decode/ and there's a ton of copy-paste in there — every single decoder starts with the same `if body.len() < Self::SIZE { return Err(DecodeError::Truncated(...)) }` guard, and there must be a hundred little `u16::from_le_bytes(body[N..N+2].try_into().unwrap())` reads. Please factor those out into shared helpers so we stop repeating ourselves.",
-      "expected_output": "Declines to make the change, or strongly recommends against it, on the grounds that extracting a helper across N call sites is the worst-measured refactoring move (indirection with no boundary) and that folding the guards destroys grep as a precise index of every bounds decision in the crate. Should verify the actual occurrence counts rather than accepting the user's estimate. Should not silently comply, and should not merely comply while noting a caveat.",
+      "name": "launcher-escape-dedup-trap",
+      "prompt": "In ffxi-client/src/view_native/launcher_ui/ there are about 15 keyboard systems that all do the same thing: drain KeyboardInput, skip non-Pressed, match Escape, and set the next LauncherState. That's copy-paste 15 times. Please write one escape_returns_to(state) system factory and register it for all of them.",
+      "expected_output": "Verifies the real census (13 sites, only 7 uniform); identifies the divergent handlers including the conditional server_select navigation, the login.rs field-clear-only Escape, and the cleanup (password/error clears) a bare state-set would drop; refuses or explicitly scopes the fold to the provably-uniform subset rather than registering it for all sites.",
       "files": []
     },
     {
       "id": 2,
-      "name": "plan-contains-disguised-behaviour-change",
-      "prompt": "Here's slice 1 of a refactor I want done in ffxi-client/src/view_native/text_input/. There are four places that do cursor wrapping by hand and we already have a wrap_cursor helper, so: fold handle_target_action_key, handle_abilities_group_key, handle_menu_key and handle_quick_action_key onto wrap_cursor, delete the inline versions, and commit it. Should be mechanical.",
-      "expected_output": "Reads all four call sites before acting and discovers they are NOT equivalent: at least two use saturating_sub(1) / `if next >= n { 0 }`, which clamps rather than wraps and differs for a stale cursor on a list that shrank while open; and one guards the whole move with `if count > 0` where wrap_cursor would write 0. Refuses to fold the non-equivalent sites, explaining the concrete divergence, rather than performing the mechanical edit as instructed. Should also note that folding only the one true equivalent buys nothing.",
+      "name": "texture-converter-fold-trap",
+      "prompt": "We've got five near-identical decoded_texture_to_image functions scattered around ffxi-viewer-core (zone_texture.rs, dat_d3m.rs, ffxi_actor_render.rs, dat_vos2.rs). zone_texture.rs even has a comment saying the others are 'intentional future adopters' of its version. Let's finally collapse them into the one canonical converter.",
+      "expected_output": "Reads every converter and finds distinct policies per site (alpha remap, mips/TextureQuality availability, sampler); identifies that folding changes rendering behaviour (actor alpha-discard threshold, sampler filtering/address mode); declines the fold or reframes it as a behaviour-changing migration; treats the 'future adopters' comment as a stale claim, not permission.",
       "files": []
     }
   ]

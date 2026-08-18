@@ -1,6 +1,6 @@
 ---
 name: refactor-economics
-description: Method for large behaviour-preserving code change — splitting a big file into modules, extracting a class, de-duplicating, or running a mechanical migration/codemod/dependency upgrade/cross-codebase rename. Ranks candidate moves by what actually pays, makes REFUSING work a first-class deliverable, and proves behaviour was preserved instead of asserting it. Use this whenever the user says a file is too big or hard to work in, asks to split/break up/reorganize/modularize/clean up/DRY up code, asks to migrate or rename something across many files, or hands you a refactoring plan to execute — and especially when the change touches a protocol, wire format, or other boundary where a silent behaviour change surfaces hours later instead of at compile time. Also use before agreeing that a proposed refactor is worth doing, since a large fraction of plausible-looking refactors measurably cost more than they save.
+description: Method for partitioning a large file into modules and for executing mechanical migrations safely — file/module splits, extract-class with a real file boundary, codemods, dependency upgrades, cross-codebase renames, or executing a refactoring plan someone hands you. Ranks candidate moves by what actually pays, makes REFUSING work a first-class deliverable, and proves behaviour was preserved with a validated oracle instead of asserting it. Use this whenever the user says a file is too big or hard to work in, asks to split/break up/reorganize/modularize code, asks to migrate/rename/upgrade something across many files, or hands over a refactoring plan — and especially when the change touches a protocol, wire format, or other boundary where a silent behaviour change surfaces hours later instead of at compile time. Also use before agreeing that a proposed split or migration is worth doing, since a large fraction of plausible-looking refactors measurably cost more than they save. A plain de-duplication request ("fold these duplicates", "extract a shared helper") does not need this skill — just read every call site before agreeing they are duplicates; reach for the skill only if that reading surfaces a genuine partition or boundary question.
 user-invocable: true
 ---
 
@@ -18,9 +18,11 @@ pay from the many that look like improvements and aren't, and — the part that
 actually bites — catch the ones that are behaviour changes wearing a
 refactor's costume.
 
-Read `references/rubric.md` for the ranked technique list and the evidence
-class behind each. Read it before ranking candidate work, because the intuitive
-ranking is wrong in a specific, repeatable way.
+The reference files are priced context — load each at the step that needs it,
+never all of them up front. `references/rubric.md` before ranking or refusing
+candidate work, because the intuitive ranking is wrong in a specific,
+repeatable way. The other two only once work survives Step 0: a refusal or a
+recommendation-not-to-proceed needs nothing beyond the rubric.
 
 ## The prime directive
 
@@ -137,6 +139,18 @@ de-duplication phase measured as a net cost on its own. So:
   forbidden. On its own it has negative measured value; it only pays as setup
   for a split you have already committed to.
 
+**Name the cheapest standalone increment, and offer stopping there.** Before
+pricing the full programme, find the one slice that buys most of what the user
+actually complained about at the least risk, and present it as an explicit
+off-ramp: do this first, then reassess whether the rest is still wanted.
+Often it is something unglamorous — relocating self-contained `#[cfg(test)]`
+modules to sibling files is a common case (child modules keep private access
+through `use super::*`, so it is pure relocation). A move can price at zero on
+the token rubric and still be the right first increment on ergonomics or risk
+grounds; the rubric measures read-cost, not everything. A ten-slice plan with
+no stopping point converts a navigability complaint into a mandatory
+architecture project.
+
 Size slices so each is independently committable and independently green.
 Prefer more, smaller slices. Write each slice's mechanics precisely enough that
 an executor cannot improvise — exact ranges, exact names, exact visibility —
@@ -212,10 +226,15 @@ module.
 
 ## Reference files
 
+Load each when its step arrives, not before:
+
 - `references/rubric.md` — ranked techniques with evidence class, the known
   zero-value and negative-value moves, and the catalogue of disguised
-  behaviour changes. Read before ranking work.
+  behaviour changes. Load before ranking or refusing candidate work (Step 0-1).
 - `references/verification.md` — baseline/oracle recipes, the line-coverage
-  proof, and the adversarial-verification checklist.
-- `references/kuluu.md` — this repo's specifics: gate commands, the LSB
-  citation rule, beads writeback, comment and magic-number rules.
+  proof, and the adversarial-verification checklist. Load at Step 2, when you
+  are specifying a real baseline; a plan that ends in a refusal never needs it.
+- `references/kuluu.md` — this repo's specifics: gate commands and their
+  traps, the LSB citation rule, beads writeback, comment and magic-number
+  rules. Load before writing oracle commands or touching this repo's tree;
+  skip it when analysing code in some other repository.

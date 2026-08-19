@@ -33,10 +33,10 @@ use std::sync::Arc;
 use anyhow::Result;
 use bevy::log::LogPlugin;
 use bevy::prelude::*;
-use ffxi_client::auth_client::AuthClient;
-use ffxi_client::lobby_client::LobbyClient;
-use ffxi_client::reactor::ReactorConfig;
-use ffxi_client::{spawn_session_with_reactor, SessionHandle};
+use ffxi_session::auth_client::AuthClient;
+use ffxi_session::lobby_client::LobbyClient;
+use ffxi_session::reactor::ReactorConfig;
+use ffxi_session::{spawn_session_with_reactor, SessionHandle};
 use ffxi_viewer_core::{
     add_hud_spawners,
     atmosphere::LastAtmosphereZone,
@@ -260,7 +260,7 @@ pub(crate) struct AgentPaused(pub std::sync::Arc<std::sync::atomic::AtomicBool>)
 /// Focus-less GUI driving (kuluu-0pof): shared with the agent socket decoder so
 /// remote `debug_drive`/`debug_heights` commands reach the Bevy input path.
 #[derive(Resource, Clone)]
-pub(crate) struct DebugControlHandle(pub ffxi_client::debug_control::SharedDebugControl);
+pub(crate) struct DebugControlHandle(pub ffxi_session::debug_control::SharedDebugControl);
 
 pub struct NativeRunArgs {
     pub server: String,
@@ -1127,7 +1127,7 @@ fn bridge_connecting(
         return;
     };
 
-    let cfg = ffxi_client::session::Config {
+    let cfg = ffxi_session::session::Config {
         server: server.server.clone(),
         map_host_override: ports.map_host_override.clone(),
         auth_port: ports.auth_port,
@@ -1135,7 +1135,7 @@ fn bridge_connecting(
         view_port: ports.view_port,
         user: selection.user,
         password: selection.password,
-        char_selection: ffxi_client::session::CharSelection::Id(selection.char_id),
+        char_selection: ffxi_session::session::CharSelection::Id(selection.char_id),
         initial_state: Some(selection.initial_state),
 
         user_driven_events: true,
@@ -1171,12 +1171,12 @@ fn bridge_connecting(
     // Focus-less GUI driving (kuluu-0pof): the socket writes movement/heights
     // requests into this handle; GUI systems read it. Always present so input
     // systems can depend on it even when no socket is listening.
-    let debug_ctrl = ffxi_client::debug_control::DebugControl::new_shared();
+    let debug_ctrl = ffxi_session::debug_control::DebugControl::new_shared();
     commands.insert_resource(DebugControlHandle(debug_ctrl.clone()));
 
     #[cfg(unix)]
     if let Some(arg) = agent.0.clone() {
-        let listen = ffxi_client::agent_socket::resolve_listen(&arg);
+        let listen = ffxi_session::agent_socket::resolve_listen(&arg);
         let cmd_tx_agent = cmd_tx.clone();
         let event_tx_agent = event_tx.clone();
         let pause = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -1185,7 +1185,7 @@ fn bridge_connecting(
         let pause_for_socket = pause;
         let debug_ctrl_socket = debug_ctrl.clone();
         runtime.0.spawn(async move {
-            if let Err(err) = ffxi_client::agent_socket::serve(
+            if let Err(err) = ffxi_session::agent_socket::serve(
                 listen,
                 cmd_tx_agent,
                 event_tx_agent,

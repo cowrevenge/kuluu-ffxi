@@ -64,7 +64,7 @@ const PITCH_STEP_HELD: f32 = 0.015;
 
 const STRAFE_CANCEL_MS: u64 = 300;
 
-use ffxi_client::state::move_speed_yps;
+use ffxi_session::state::move_speed_yps;
 
 const BACKPEDAL_SCALE: f32 = 0.5;
 const STRAFE_SCALE: f32 = 0.75;
@@ -1547,8 +1547,8 @@ mod tests {
     /// survives it, and it is not swallowed while a forced move is running.
     #[test]
     fn recovery_command_keeps_the_goal_and_survives_an_override() {
-        use ffxi_client::reactor::{Goal, Reactor, ReactorConfig};
-        use ffxi_client::state::{AgentEvent, Position, Vec3 as WireVec3};
+        use ffxi_session::reactor::{Goal, Reactor, ReactorConfig};
+        use ffxi_session::state::{AgentEvent, Position, Vec3 as WireVec3};
 
         let collision = slab_collision(WEDGE_FLOOR_BEVY_Y);
         let mut under_secs = 0.0f32;
@@ -1788,7 +1788,7 @@ mod tests {
         assert_eq!(move_speed_yps(u8::MAX, false), 25.5);
         assert_eq!(
             move_speed_yps(u8::MAX, true),
-            ffxi_client::state::MAX_MOVE_SPEED_YPS
+            ffxi_session::state::MAX_MOVE_SPEED_YPS
         );
 
         // Bound sets speed 0; doubling must not conjure movement.

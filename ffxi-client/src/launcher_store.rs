@@ -124,7 +124,7 @@ pub fn keyring_account_key(server_name: &str, username: &str) -> String {
 }
 
 fn default_path() -> Option<PathBuf> {
-    crate::config_dir::config_file("launcher.json").ok()
+    ffxi_session::config_dir::config_file("launcher.json").ok()
 }
 
 fn parse_store(path: &std::path::Path) -> Option<LauncherStore> {

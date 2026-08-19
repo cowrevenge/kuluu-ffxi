@@ -45,7 +45,7 @@ impl OverlayStore {
     }
 
     pub fn default_path() -> Result<PathBuf> {
-        crate::config_dir::config_file("dat_overlays.json")
+        ffxi_session::config_dir::config_file("dat_overlays.json")
     }
 
     pub fn path(&self) -> &Path {

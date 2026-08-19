@@ -5,7 +5,7 @@
 
 use std::time::Duration;
 
-use ffxi_client::search_client::{self, SEARCH_PORT};
+use ffxi_session::search_client::{self, SEARCH_PORT};
 
 // vendor/server/documentation/Auction Categories.txt (item_basic.aH).
 const AH_CATEGORY_CRYSTALS: u8 = 35;

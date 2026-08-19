@@ -1,5 +1,5 @@
-use ffxi_client::session::{build_subpacket_action, build_subpacket_item_use};
-use ffxi_client::state::ActionKind;
+use ffxi_session::session::{build_subpacket_action, build_subpacket_item_use};
+use ffxi_session::state::ActionKind;
 
 #[test]
 fn cast_magic_action_layout_matches_phoenix_struct() {

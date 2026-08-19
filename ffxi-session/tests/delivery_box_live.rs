@@ -13,7 +13,7 @@ mod common;
 
 use std::time::Duration;
 
-use ffxi_client::{
+use ffxi_session::{
     session::{self, CharSelection, Config},
     state::{
         AgentCommand, AgentEvent, DeliveryBoxNo, DeliveryBoxOp, DeliveryBoxUpdate, EntityKind,

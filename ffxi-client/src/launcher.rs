@@ -2,9 +2,9 @@ use std::io::{self, BufRead, Write};
 
 use anyhow::{anyhow, bail, Result};
 
-use ffxi_client::auth_client::{AuthClient, AuthSession};
-use ffxi_client::lobby_client::{CharSlot, LobbyClient};
-use ffxi_client::session::InitialState;
+use ffxi_session::auth_client::{AuthClient, AuthSession};
+use ffxi_session::lobby_client::{CharSlot, LobbyClient};
+use ffxi_session::session::InitialState;
 
 pub struct Selection {
     pub user: String,

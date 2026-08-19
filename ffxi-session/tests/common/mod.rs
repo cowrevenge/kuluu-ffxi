@@ -6,7 +6,7 @@ use anyhow::{anyhow, Context, Result};
 use mysql_async::prelude::*;
 use mysql_async::{Conn, Pool};
 
-use ffxi_client::auth_client::AuthClient;
+use ffxi_session::auth_client::AuthClient;
 
 pub const DEFAULT_DB_URL: &str = "mysql://xiadmin:password@127.0.0.1:3306/xidb";
 

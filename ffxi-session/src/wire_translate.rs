@@ -1541,15 +1541,4 @@ mod tests {
             }
         );
     }
-
-    /// The 0x5D master volume is fanned across the music slots, so the count
-    /// here and the one the renderer indexes have to be the same number.
-    #[cfg(feature = "native-window")]
-    #[test]
-    fn the_music_slot_count_matches_the_renderer_mixer() {
-        assert_eq!(
-            crate::state::MUSIC_SLOT_COUNT as usize,
-            ffxi_viewer_core::audio::SLOT_COUNT
-        );
-    }
 }

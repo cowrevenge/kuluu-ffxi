@@ -2,9 +2,9 @@ use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
 use bevy::prelude::*;
-use ffxi_client::auth_client::AuthClient;
-use ffxi_client::lobby_client::{LobbyClient, LobbyHandle, MapHandoff};
-use ffxi_client::session::InitialState;
+use ffxi_session::auth_client::AuthClient;
+use ffxi_session::lobby_client::{LobbyClient, LobbyHandle, MapHandoff};
+use ffxi_session::session::InitialState;
 use tokio::sync::oneshot;
 
 use crate::launcher::Selection;
@@ -47,7 +47,7 @@ fn save_on_success(server_name: &str, username: &str, password: &str, remember: 
 
 struct AuthOk {
     handle: LobbyHandle,
-    auth: ffxi_client::auth_client::AuthSession,
+    auth: ffxi_session::auth_client::AuthSession,
     user: String,
     pass: String,
 }
@@ -207,7 +207,7 @@ pub(super) fn despawn_auth_ui(mut commands: Commands, q: Query<Entity, With<Auth
 struct ConnectOk {
     handoff: MapHandoff,
     key3: [u8; 20],
-    auth: ffxi_client::auth_client::AuthSession,
+    auth: ffxi_session::auth_client::AuthSession,
 }
 
 struct ConnectErr {
@@ -272,8 +272,8 @@ pub(super) fn spawn_connect_task(
 
 async fn select_with_existing_handle(
     handle: LobbyHandle,
-    slot: &ffxi_client::lobby_client::CharSlot,
-    auth_session: ffxi_client::auth_client::AuthSession,
+    slot: &ffxi_session::lobby_client::CharSlot,
+    auth_session: ffxi_session::auth_client::AuthSession,
 ) -> std::result::Result<ConnectOk, ConnectErr> {
     let mut key3 = [0u8; 20];
     for (i, b) in key3.iter_mut().enumerate() {
@@ -298,7 +298,7 @@ async fn reopen_and_select(
     lobby: &LobbyClient,
     user: &str,
     pass: &str,
-    slot: &ffxi_client::lobby_client::CharSlot,
+    slot: &ffxi_session::lobby_client::CharSlot,
 ) -> std::result::Result<ConnectOk, ConnectErr> {
     let session = auth.login(user, pass).await.map_err(|e| ConnectErr {
         msg: format!("re-login: {e}"),
@@ -440,7 +440,7 @@ pub(super) fn spawn_char_create_task(
         Err(_) => (None, None),
     };
 
-    let spec = ffxi_client::lobby_client::CharCreateSpec {
+    let spec = ffxi_session::lobby_client::CharCreateSpec {
         name: form.name.clone(),
         race: form.race,
         job: form.job,
@@ -468,8 +468,8 @@ pub(super) fn spawn_char_create_task(
 
 async fn run_char_create(
     handle: LobbyHandle,
-    auth: ffxi_client::auth_client::AuthSession,
-    spec: ffxi_client::lobby_client::CharCreateSpec,
+    auth: ffxi_session::auth_client::AuthSession,
+    spec: ffxi_session::lobby_client::CharCreateSpec,
 ) -> Result<CharCreateOk> {
     let name = spec.name.clone();
     tracing::info!(name = %name, race = spec.race, job = spec.job, "char-create: sending");

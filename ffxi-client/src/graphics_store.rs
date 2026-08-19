@@ -20,7 +20,7 @@ impl GraphicsStore {
     }
 
     pub fn default_path() -> Result<PathBuf> {
-        crate::config_dir::config_file("graphics.json")
+        ffxi_session::config_dir::config_file("graphics.json")
     }
 
     pub fn path(&self) -> &Path {

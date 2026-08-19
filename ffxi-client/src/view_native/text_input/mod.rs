@@ -1367,7 +1367,7 @@ fn confirm_dialog_choice(
 }
 
 fn mog_menu_storage_choice(d: &ffxi_viewer_wire::DialogState, choice: u32) -> Option<u8> {
-    use ffxi_client::local_menu::{storage_row_container, MOG_MENU_ID, STORAGE_PROMPT};
+    use ffxi_session::local_menu::{storage_row_container, MOG_MENU_ID, STORAGE_PROMPT};
     if d.npc_id != MOG_MENU_ID {
         return None;
     }

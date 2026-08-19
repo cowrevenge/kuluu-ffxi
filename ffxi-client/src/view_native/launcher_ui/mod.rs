@@ -20,9 +20,9 @@ use std::sync::{Arc, Mutex};
 
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
-use ffxi_client::auth_client::{AuthClient, AuthFlavor};
 use ffxi_client::launcher_store::{AuthFlavorKind, ServerProfile};
-use ffxi_client::lobby_client::LobbyClient;
+use ffxi_session::auth_client::{AuthClient, AuthFlavor};
+use ffxi_session::lobby_client::LobbyClient;
 use tokio::runtime::Handle as RtHandle;
 
 use crate::launcher::{Defaults, Selection};
@@ -473,8 +473,8 @@ pub(crate) struct LauncherClients {
 
 #[derive(Default)]
 pub(crate) struct OpenedLobbyInner {
-    pub handle: Option<ffxi_client::lobby_client::LobbyHandle>,
-    pub auth: Option<ffxi_client::auth_client::AuthSession>,
+    pub handle: Option<ffxi_session::lobby_client::LobbyHandle>,
+    pub auth: Option<ffxi_session::auth_client::AuthSession>,
 }
 
 #[derive(Resource, Default)]
@@ -487,10 +487,10 @@ pub(crate) struct Credentials {
 }
 
 #[derive(Resource, Default)]
-pub(crate) struct CharListData(pub Vec<ffxi_client::lobby_client::CharSlot>);
+pub(crate) struct CharListData(pub Vec<ffxi_session::lobby_client::CharSlot>);
 
 #[derive(Resource, Default)]
-pub(crate) struct SelectedChar(pub Option<ffxi_client::lobby_client::CharSlot>);
+pub(crate) struct SelectedChar(pub Option<ffxi_session::lobby_client::CharSlot>);
 
 #[derive(Resource, Default)]
 pub(crate) struct PendingConnect(pub Option<Selection>);

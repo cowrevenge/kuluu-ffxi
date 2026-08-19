@@ -2,7 +2,7 @@ use bevy::camera::visibility::RenderLayers;
 use bevy::prelude::*;
 use bevy::tasks::futures_lite::future;
 use bevy::tasks::{AsyncComputeTaskPool, Task};
-use ffxi_client::lobby_client::CharSlot;
+use ffxi_session::lobby_client::CharSlot;
 use ffxi_viewer_core::dat_vos2::spawn_equipped;
 use ffxi_viewer_core::ffxi_actor_render::{
     inputs_for_pose, load_pc, spawn_loaded_actor, FfxiRenderActor, LoadedActor, PoseState,

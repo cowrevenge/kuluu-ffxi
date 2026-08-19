@@ -367,4 +367,16 @@ mod tests {
             .expect("final snapshot published");
         assert_eq!(last.snap.zone_id, Some(999), "last unseen state delivered");
     }
+
+    /// The 0x5D master volume is fanned across the music slots, so the count
+    /// here and the one the renderer indexes have to be the same number.
+    /// Lives here (not in ffxi-session) because it is the one assertion that
+    /// needs both sides of the session/renderer boundary in scope.
+    #[test]
+    fn the_music_slot_count_matches_the_renderer_mixer() {
+        assert_eq!(
+            ffxi_session::state::MUSIC_SLOT_COUNT as usize,
+            ffxi_viewer_core::audio::SLOT_COUNT
+        );
+    }
 }

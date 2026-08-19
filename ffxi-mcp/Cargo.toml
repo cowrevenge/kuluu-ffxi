@@ -3,7 +3,7 @@ name = "ffxi-mcp"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "MCP server bridging the FFXI ffxi-client to LLM harnesses (Claude Code, OpenCode, pi.dev)."
+description = "MCP server bridging the FFXI ffxi-session runtime to LLM harnesses (Claude Code, OpenCode, pi.dev)."
 # The MCP server is the canonical entry — `cargo run -p ffxi-mcp` and
 # the `.mcp.json` invocations both rely on this. The companion
 # `ffxi-mcp-repl` binary needs an explicit `--bin` flag.
@@ -27,8 +27,8 @@ path = "src/bin/ffxi-mcp-repl.rs"
 # is operating. Opt-in at runtime via the `FFXI_RELAY_LISTEN` env var.
 # `default-features = false` keeps the GUI (`native-window` → Bevy) out of
 # the headless, network-facing MCP crate now that it's a default feature of
-# ffxi-client. We only want the `relay` transport here.
-ffxi-client = { path = "../ffxi-client", default-features = false, features = ["relay"] }
+# ffxi-session. We only want the `relay` transport here.
+ffxi-session = { path = "../ffxi-session", features = ["relay"] }
 # Direct dep so headless MCP can attempt a DAT-install load for the
 # Config's `dat_root` field. AGPL note: ffxi-dat is built against
 # POLUtils (Apache-2.0), not xi-tinkerer, so linking from the
@@ -46,6 +46,6 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 
 # The MCP server/REPL are dev/agent tooling, not a shipped artifact — dist
-# packages only ffxi-client.
+# packages only ffxi-client (the GUI binary).
 [package.metadata.dist]
 dist = false

@@ -1309,7 +1309,7 @@ pub async fn run(
                     if internal_cmd_tx.send(cmd).await.is_err() { break; }
                 }
                 tracing::trace!(
-                    target: "ffxi_client::reactor",
+                    target: "ffxi_session::reactor",
                     elapsed_us = tick_started.elapsed().as_micros() as u64,
                     cmds_emitted,
                     "reactor.tick"

@@ -1,8 +1,8 @@
 #![allow(clippy::type_complexity, clippy::too_many_arguments)]
 
 #[cfg(any(feature = "native-window", feature = "relay"))]
-use ffxi_client::state;
-use ffxi_client::{agent_io, auth_client, lobby_client, session};
+use ffxi_session::state;
+use ffxi_session::{agent_io, auth_client, lobby_client, session};
 
 #[cfg(feature = "native-window")]
 use ffxi_client::graphics_store;
@@ -13,9 +13,9 @@ use ffxi_client::marker_store;
 #[cfg(feature = "native-window")]
 use ffxi_client::overlay_store;
 #[cfg(feature = "relay")]
-use ffxi_client::relay;
+use ffxi_session::relay;
 #[cfg(feature = "native-window")]
-use ffxi_client::wire_translate;
+use ffxi_session::wire_translate;
 mod launcher;
 #[cfg(feature = "native-window")]
 mod view_native;
@@ -51,7 +51,7 @@ struct Args {
     map_host_override: Option<String>,
 
     #[cfg(feature = "relay")]
-    #[arg(long, value_parser = ffxi_client::relay::parse_relay_listen)]
+    #[arg(long, value_parser = ffxi_session::relay::parse_relay_listen)]
     relay_listen: Option<std::net::SocketAddr>,
 
     #[cfg(unix)]
@@ -376,11 +376,11 @@ async fn run_command_async(args: Args, auth: auth_client::AuthClient) -> Result<
                 .clone()
                 .or_else(|| std::env::var("FFXI_AGENT_LISTEN").ok())
             {
-                let listen = ffxi_client::agent_socket::resolve_listen(&arg);
+                let listen = ffxi_session::agent_socket::resolve_listen(&arg);
                 let sock_cmd_tx = cmd_tx.clone();
                 let sock_event_tx = event_tx.clone();
                 tokio::spawn(async move {
-                    if let Err(err) = ffxi_client::agent_socket::serve(
+                    if let Err(err) = ffxi_session::agent_socket::serve(
                         listen,
                         sock_cmd_tx,
                         sock_event_tx,

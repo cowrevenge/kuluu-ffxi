@@ -20,7 +20,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use tokio::sync::{broadcast, mpsc, Mutex, RwLock};
 
-use ffxi_client::{
+use ffxi_session::{
     goal_store::GoalStore,
     reactor::ReactorConfig,
     relay,
@@ -703,7 +703,7 @@ async fn read_resource(
         "debug://name_misses" => serde_json::to_string_pretty(&name_misses_view(state))
             .map_err(|e| format!("serialize name_misses: {e}")),
         "goal://current" => {
-            use ffxi_client::state::ReactorGoalSnapshot;
+            use ffxi_session::state::ReactorGoalSnapshot;
             match &state.current_goal {
                 Some(ReactorGoalSnapshot::Idle) | None => {
                     let store = goal_store.lock().await;
@@ -738,7 +738,7 @@ fn entities_view(state: &SessionState) -> serde_json::Value {
     let from = self_pos_p.pos;
 
     let self_id = state.char_id;
-    let mut scored: Vec<(&ffxi_client::state::Entity, f32)> = state
+    let mut scored: Vec<(&ffxi_session::state::Entity, f32)> = state
         .entities
         .iter()
         .filter(|e| Some(e.id) != self_id)
@@ -1156,7 +1156,7 @@ fn parse_port(name: &str, default: u16) -> Result<u16> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ffxi_client::state::{ActionKind, Entity, EntityKind, PartyMember, Position, Stage, Vec3};
+    use ffxi_session::state::{ActionKind, Entity, EntityKind, PartyMember, Position, Stage, Vec3};
 
     #[test]
     fn cmd_kind_label_for_action_surface_tools() {
@@ -1278,8 +1278,8 @@ mod tests {
     fn inventory_events_invalidate_inventory_resource() {
         let upd = AgentEvent::InventoryUpdated {
             container: 0,
-            update: ffxi_client::state::InventoryUpdate::SlotChanged {
-                slot: ffxi_client::state::ItemSlot {
+            update: ffxi_session::state::InventoryUpdate::SlotChanged {
+                slot: ffxi_session::state::ItemSlot {
                     index: 7,
                     item_no: 4112,
                     quantity: 1,
@@ -1313,7 +1313,7 @@ mod tests {
             AgentEvent::EventStart { event_id: 1 },
             AgentEvent::EventEnded,
             AgentEvent::KeyRotated {
-                previous_status: ffxi_client::state::BlowfishStatus::Accepted,
+                previous_status: ffxi_session::state::BlowfishStatus::Accepted,
             },
             AgentEvent::Error {
                 message: "x".into(),
@@ -1472,7 +1472,7 @@ mod tests {
         );
         assert_eq!(
             cmd_kind_label(&AgentCommand::DeliveryBox {
-                op: ffxi_client::state::DeliveryBoxOp::Confirm
+                op: ffxi_session::state::DeliveryBoxOp::Confirm
             }),
             "delivery_box"
         );
@@ -1539,7 +1539,7 @@ mod tests {
 
     #[tokio::test]
     async fn goal_resource_prefers_in_memory_over_stale_disk() {
-        use ffxi_client::state::ReactorGoalSnapshot;
+        use ffxi_session::state::ReactorGoalSnapshot;
 
         let goal_path = std::env::temp_dir().join(format!(
             "ffxi-mcp-test-goal-prefers-live-{}.json",

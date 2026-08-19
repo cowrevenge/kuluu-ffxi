@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use ffxi_client::state::{AgentCommand, AgentEvent};
+use ffxi_session::state::{AgentCommand, AgentEvent};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use tokio::sync::{broadcast, mpsc};
@@ -129,7 +129,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ffxi_client::agent_socket;
+    use ffxi_session::agent_socket;
     use std::time::Duration;
 
     fn temp_sock(label: &str) -> PathBuf {

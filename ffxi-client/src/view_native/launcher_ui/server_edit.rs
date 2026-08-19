@@ -6,8 +6,8 @@ use bevy::input::ButtonState;
 use bevy::prelude::*;
 use bevy::ui_widgets::{Activate, ValueChange};
 
-use ffxi_client::auth_client;
 use ffxi_client::launcher_store::{self, AuthFlavorKind, ServerProfile};
+use ffxi_session::auth_client;
 
 use super::common::{hint, panel_node, row, screen_root, spawn_breadcrumb, title, Crumb};
 use crate::view_native::widgets::text_field::text_field;

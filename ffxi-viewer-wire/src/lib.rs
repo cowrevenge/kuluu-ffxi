@@ -2036,4 +2036,84 @@ mod tests {
             assert_eq!(back, cue);
         }
     }
+
+    /// SceneSnapshot is an EXTENSION SURFACE: the relay publishes it to
+    /// external consumers (ffxi-mcp, the wasm viewer, future addons), so it
+    /// evolves additive-only. This pin makes any field rename/removal (a
+    /// breaking change for consumers) and any addition (fine, but must be
+    /// deliberate) fail here first, so the diff shows the contract change.
+    #[test]
+    fn snapshot_top_level_fields_are_pinned() {
+        let v = serde_json::to_value(SceneSnapshot::default()).unwrap();
+        let mut got: Vec<String> = v.as_object().unwrap().keys().cloned().collect();
+        got.sort();
+        let mut want: Vec<&str> = vec![
+            "stage",
+            "char_name",
+            "zone_id",
+            "self_pos",
+            "entities",
+            "party",
+            "chat",
+            "chat_base_seq",
+            "diagnostics",
+            "net_stats",
+            "current_goal",
+            "last_reconnect",
+            "producer_monotonic_ms",
+            "self_char_id",
+            "dialog",
+            "shop",
+            "delivery_box",
+            "treasure_pool",
+            "status_icons",
+            "status_icon_expiries",
+            "ability_recasts",
+            "logout_countdown",
+            "death_homepoint_secs",
+            "weather",
+            "equipped",
+            "spells_known",
+            "job_abilities_known",
+            "weaponskills_known",
+            "pet_abilities_known",
+            "key_items",
+            "key_items_seen",
+            "containers",
+            "stats",
+            "bazaar",
+            "auction",
+            "play_time_s",
+            "self_fishing",
+            "self_server_status",
+            "self_mount",
+            "self_casting",
+            "myroom",
+            "mh_2f_unlocked",
+            "sub_area",
+            "emote_jobs",
+            "emote_chairs",
+            "check",
+            "check_message",
+            "widescan",
+        ];
+        want.sort();
+        assert_eq!(got, want, "SceneSnapshot fields changed: additive-only, update this pin deliberately and rebuild relay consumers together");
+    }
+
+    const SNAPSHOT_DEFAULT_POSTCARD_HEX: &str = "00000000000000000000000000000000191900000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000";
+
+    /// Postcard is positional, not self-describing: field ORDER and TYPES are
+    /// the wire format. Any reorder/retype (and any append) changes these
+    /// bytes; consumers built from the same commit stay in sync, but the
+    /// change must be deliberate.
+    #[test]
+    fn snapshot_default_postcard_bytes_are_pinned() {
+        let bytes = postcard::to_allocvec(&SceneSnapshot::default()).unwrap();
+        let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(
+            hex, SNAPSHOT_DEFAULT_POSTCARD_HEX,
+            "SceneSnapshot postcard encoding changed: update the pin deliberately and rebuild relay consumers together"
+        );
+    }
 }

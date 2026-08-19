@@ -17,7 +17,14 @@ use crate::snapshot::SceneState;
 /// Retail's Map is full-screen: the DAT map image fills the viewport with the 3D
 /// world faintly visible behind it, drawn at this alpha (retail composites the
 /// map semi-transparently over the scene).
-const MAP_IMAGE_ALPHA: f32 = 0.86;
+const MAP_IMAGE_ALPHA: f32 = 0.90;
+
+/// Black scrim between the scene and the map image. Without it the parchment's
+/// contrast tracks whatever the camera happens to face — a sunlit dune or PC
+/// silhouette bleeding through at (1 - MAP_IMAGE_ALPHA) washes the map out —
+/// so damp the scene uniformly first; through scrim + image it contributes a
+/// steady ~6% instead of a scene-dependent 14% (kuluu-kshw).
+const MAP_BACKDROP_ALPHA: f32 = 0.40;
 
 /// Top-right command/submode panel geometry.
 const PANEL_WIDTH_PX: f32 = 190.0;
@@ -467,6 +474,17 @@ pub(crate) fn spawn_map_screen(mut commands: Commands, mut images: ResMut<Assets
             ZIndex(style::WINDOW_Z - 2),
         ))
         .with_children(|root| {
+            root.spawn((
+                Node {
+                    position_type: PositionType::Absolute,
+                    top: Val::Px(0.0),
+                    left: Val::Px(0.0),
+                    width: Val::Percent(100.0),
+                    height: Val::Percent(100.0),
+                    ..default()
+                },
+                BackgroundColor(Color::srgba(0.0, 0.0, 0.0, MAP_BACKDROP_ALPHA)),
+            ));
             root.spawn((
                 MapScreenImage,
                 ImageNode {

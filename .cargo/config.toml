@@ -26,6 +26,18 @@
 [unstable]
 codegen-backend = true
 feature-unification = true
+# Keep rustc metadata only in .rmeta files instead of also embedding it in
+# every .rlib/.dylib (cargo -Zno-embed-metadata, cargo#16513). Shrinks target/
+# -- the pressure that drives the bloat -> `cargo clean` -> 304s-cold-rebuild
+# loop (kuluu-p5a5). Flipping this key either way invalidates the whole build
+# cache once.
+#
+# -Zfine-grain-locking was evaluated at the same time and REJECTED (2026-08):
+# its "waiting job blocks all other jobs" regression fix (cargo#16657) never
+# merged, and it only parallelizes non-artifact commands like `check` -- our
+# contention is between concurrent builds/tests, which it cannot parallelize.
+# rust-analyzer already has its own target dir (.zed/settings.json).
+no-embed-metadata = true
 
 # Resolve features once across every workspace member, not per invocation.
 #

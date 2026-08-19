@@ -86,9 +86,36 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # 3D viewer engine, used by the native windowed client. No longer
 # constrained by `bevy_ratatui_camera`'s feature requirements (the TUI
-# subcommand was removed); future work can now trim Bevy default
-# features per `[features]` of the native-window build.
-bevy = { version = "0.19", features = ["debug"] }
+# subcommand was removed).
+#
+# Default features are expanded by hand so two unreferenced crates on the
+# cold-build critical path can be dropped (kuluu-p5a5: bevy_gltf at unit-graph
+# depth 21, bevy_world_serialization at 19; zero references in our source --
+# all geometry comes from retail DATs, not glTF, and we use no scene
+# serialization). The list below is bevy 0.19.0's `default = ["2d", "3d",
+# "ui", "audio"]` expanded one level, minus `bevy_gltf` + `gltf_animation`
+# (from 3d_bevy_render) and with `scene` replaced by `bevy_scene` alone
+# (dropping bevy_world_serialization). Re-check the expansion on a Bevy
+# upgrade (kuluu-qsfj).
+bevy = { version = "0.19", default-features = false, features = [
+    "debug",
+    "default_app",
+    "default_platform",
+    "2d_bevy_render",
+    "3d_api",
+    "bevy_render",
+    "bevy_core_pipeline",
+    "bevy_gizmos_render",
+    "bevy_anti_alias",
+    "bevy_pbr",
+    "bevy_post_process",
+    "ui_api",
+    "ui_bevy_render",
+    "bevy_ui_widgets",
+    "bevy_scene",
+    "picking",
+    "audio",
+] }
 
 # MCP server SDK for the ffxi-mcp crate (Stage 4).
 rmcp = { version = "2.2", features = ["server", "macros", "schemars", "transport-io"] }

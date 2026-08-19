@@ -1,8 +1,7 @@
 use bevy::prelude::*;
-use ffxi_viewer_wire::PartyMember;
 
 use crate::hud::style::{self, theme};
-use crate::snapshot::SceneState;
+use crate::snapshot::{resolve_self, SceneState};
 
 #[derive(Component)]
 pub struct SelfHudPanel;
@@ -223,15 +222,6 @@ pub fn update_self_party_indicator(
     }
 }
 
-pub fn resolve_self(party: &[PartyMember], self_char_id: Option<u32>) -> Option<&PartyMember> {
-    if let Some(id) = self_char_id {
-        if let Some(m) = party.iter().find(|m| m.id == id) {
-            return Some(m);
-        }
-    }
-    party.first()
-}
-
 pub fn hp_color(pct: u8) -> Color {
     if pct >= 76 {
         theme::GOOD
@@ -245,55 +235,6 @@ pub fn hp_color(pct: u8) -> Color {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn pm(id: u32, hp: u32, hp_pct: u8) -> PartyMember {
-        PartyMember {
-            id,
-            act_index: id as u16,
-            name: Some("X".into()),
-            hp,
-            mp: 0,
-            tp: 0,
-            hp_pct,
-            mp_pct: 0,
-            zone_no: 0,
-            main_job: 0,
-            main_job_lv: 0,
-            sub_job: 0,
-            sub_job_lv: 0,
-            is_party_leader: false,
-            is_alliance_leader: false,
-            in_mog_house: false,
-            party_no: 0,
-        }
-    }
-
-    #[test]
-    fn resolve_self_uses_self_char_id_when_present() {
-        let party = vec![pm(1, 100, 100), pm(42, 500, 80)];
-        let me = resolve_self(&party, Some(42));
-        assert_eq!(me.unwrap().hp, 500);
-    }
-
-    #[test]
-    fn resolve_self_falls_back_to_first_when_id_unknown() {
-        let party = vec![pm(1, 100, 100), pm(42, 500, 80)];
-        let me = resolve_self(&party, None);
-        assert_eq!(me.unwrap().hp, 100);
-    }
-
-    #[test]
-    fn resolve_self_falls_back_to_first_when_id_not_in_party() {
-        let party = vec![pm(1, 100, 100), pm(42, 500, 80)];
-        let me = resolve_self(&party, Some(999));
-        assert_eq!(me.unwrap().hp, 100);
-    }
-
-    #[test]
-    fn resolve_self_returns_none_for_empty_party() {
-        let party: Vec<PartyMember> = vec![];
-        assert!(resolve_self(&party, Some(42)).is_none());
-    }
 
     #[test]
     fn hp_color_bands() {

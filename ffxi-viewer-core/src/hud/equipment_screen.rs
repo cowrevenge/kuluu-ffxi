@@ -6,73 +6,7 @@ use crate::hud::status_panel;
 use crate::input_mode::{InputMode, MenuKind};
 use crate::snapshot::SceneState;
 
-pub const SLOT_NAMES: [&str; 16] = [
-    "Main", "Sub", "Ranged", "Ammo", "Head", "Body", "Hands", "Legs", "Feet", "Neck", "Waist",
-    "L.Ear", "R.Ear", "L.Ring", "R.Ring", "Back",
-];
-
-// The labels retail prints in each equipment cell, under the icon
-// (retail capture 2026-08-04, HorizonXI /check window).
-const SLOT_ABBR: [&str; 16] = [
-    "Main", "Sub", "Range", "Ammo", "Head", "Body", "Hands", "Legs", "Feet", "Neck", "Waist",
-    "Ear1", "Ear2", "Ring1", "Ring2", "Back",
-];
-
-// Discriminants are the internal slot indices used by SceneSnapshot.equipped[16]
-// and MenuKind::EquipSlot — `repr(u8)` lets `slot as usize` recover that index.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(u8)]
-pub enum EquipmentIndex {
-    Main = 0,
-    Sub = 1,
-    Range = 2,
-    Ammo = 3,
-    Head = 4,
-    Body = 5,
-    Hands = 6,
-    Legs = 7,
-    Feet = 8,
-    Neck = 9,
-    Waist = 10,
-    LeftEar = 11,
-    RightEar = 12,
-    LeftRing = 13,
-    RightRing = 14,
-    Back = 15,
-}
-
-impl EquipmentIndex {
-    pub const ALL: [EquipmentIndex; 16] = [
-        Self::Main,
-        Self::Sub,
-        Self::Range,
-        Self::Ammo,
-        Self::Head,
-        Self::Body,
-        Self::Hands,
-        Self::Legs,
-        Self::Feet,
-        Self::Neck,
-        Self::Waist,
-        Self::LeftEar,
-        Self::RightEar,
-        Self::LeftRing,
-        Self::RightRing,
-        Self::Back,
-    ];
-
-    pub fn from_index(index: u8) -> Option<Self> {
-        Self::ALL.get(index as usize).copied()
-    }
-
-    pub fn name(self) -> &'static str {
-        SLOT_NAMES[self as usize]
-    }
-
-    pub fn abbr(self) -> &'static str {
-        SLOT_ABBR[self as usize]
-    }
-}
+use crate::equip_slot::EquipmentIndex;
 
 // Retail equipment-window grid, one group per row (ref: kuluu-y04 retail
 // screenshot): weapons / head-neck-ears / body-hands-rings / back-waist-legs-feet.
@@ -398,7 +332,7 @@ pub(crate) fn update_equipment_screen(
     }
 
     let snap = &state.snapshot;
-    let me = crate::hud::self_hud::resolve_self(&snap.party, snap.self_char_id);
+    let me = crate::snapshot::resolve_self(&snap.party, snap.self_char_id);
 
     let equipped = |slot: EquipmentIndex| -> Option<u16> {
         snap.equipped.get(slot as usize).copied().flatten()
@@ -680,15 +614,6 @@ mod tests {
     }
 
     #[test]
-    fn all_is_discriminant_ordered() {
-        for (i, &slot) in EquipmentIndex::ALL.iter().enumerate() {
-            assert_eq!(slot as usize, i, "ALL must be in discriminant order");
-            assert_eq!(EquipmentIndex::from_index(i as u8), Some(slot));
-        }
-        assert_eq!(EquipmentIndex::from_index(16), None);
-    }
-
-    #[test]
     fn grid_rows_are_retail_groups() {
         use EquipmentIndex::*;
         // Row 0 = weapons (Main/Sub/Ranged/Ammo); column 0 = Main/Head/Body/Back.
@@ -713,15 +638,5 @@ mod tests {
         assert_eq!(grid_move(0, 0, -1), 15);
         // Wrap: left from Main (row 0) -> Ammo (col 3, row 0, slot 3).
         assert_eq!(grid_move(0, -1, 0), 3);
-    }
-
-    #[test]
-    fn slot_names_and_abbr_aligned() {
-        assert_eq!(SLOT_NAMES.len(), 16);
-        assert_eq!(SLOT_ABBR.len(), 16);
-        assert_eq!(SLOT_NAMES[10], "Waist");
-        assert_eq!(SLOT_ABBR[10], "Waist");
-        assert_eq!(SLOT_ABBR[11], "Ear1", "retail numbers the paired slots");
-        assert_eq!(SLOT_ABBR[13], "Ring1");
     }
 }

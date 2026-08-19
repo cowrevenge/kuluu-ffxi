@@ -222,7 +222,7 @@ pub fn update_status_panel(
     }
 
     let snap = &state.snapshot;
-    let me = crate::hud::self_hud::resolve_self(&snap.party, snap.self_char_id);
+    let me = crate::snapshot::resolve_self(&snap.party, snap.self_char_id);
 
     if let Ok(mut text) = header_q.single_mut() {
         let want = profile_header(snap, me);

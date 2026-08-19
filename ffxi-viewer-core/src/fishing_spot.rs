@@ -11,8 +11,8 @@ use bevy::prelude::*;
 
 /// Snapshot equipment slot ids, LSB `SLOT_RANGED` / `SLOT_AMMO`
 /// (vendor/server/src/map/entities/battleentity.h:179).
-const SLOT_RANGE: usize = crate::hud::equipment_screen::EquipmentIndex::Range as usize;
-const SLOT_AMMO: usize = crate::hud::equipment_screen::EquipmentIndex::Ammo as usize;
+const SLOT_RANGE: usize = crate::equip_slot::EquipmentIndex::Range as usize;
+const SLOT_AMMO: usize = crate::equip_slot::EquipmentIndex::Ammo as usize;
 
 /// Why the player cannot cast, or that they can. The reason is what `/fish`
 /// echoes back; the menu only asks whether it is [`FishingGate::Ready`].

@@ -87,7 +87,7 @@ fn drain_light_scan(
     mut materials: ResMut<Assets<StandardMaterial>>,
     flame: Option<Res<FlameAssets>>,
     mut pending: ResMut<PendingLightScan>,
-    q_mesh: Query<(&Mesh3d, Option<&crate::hud::mesh_debug::MmbDebugInfo>)>,
+    q_mesh: Query<(&Mesh3d, Option<&crate::components::MmbDebugInfo>)>,
     q_existing: Query<(), With<ZoneLightEmitter>>,
 ) {
     if !cfg.enabled {

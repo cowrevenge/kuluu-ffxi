@@ -20,6 +20,7 @@ pub mod dat_mzb;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod dat_vos2;
 pub mod debug_chat;
+pub mod equip_slot;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod ffxi_actor_render;
 #[cfg(not(target_arch = "wasm32"))]

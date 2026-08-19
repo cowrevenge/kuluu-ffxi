@@ -29,6 +29,22 @@ pub struct Nameplate {
 #[derive(Component, Debug, Clone, Copy)]
 pub struct HpIndicator;
 
+/// Which MMB submesh a zone-geometry mesh entity came from. Attached by
+/// `dat_mmb` at spawn; read by the `hud::mesh_debug` hover panel and by
+/// `zone_lights` diagnostics.
+#[derive(Component, Debug, Clone)]
+pub struct MmbDebugInfo {
+    pub file_id: u32,
+
+    pub chunk_idx: usize,
+
+    pub sub_index: usize,
+
+    pub asset_name: String,
+
+    pub variant_name: String,
+}
+
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LookComp(pub EntityLook);
 

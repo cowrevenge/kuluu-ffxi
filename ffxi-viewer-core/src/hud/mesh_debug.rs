@@ -1,22 +1,9 @@
 use bevy::picking::events::{Move, Out, Over, Pointer};
 use bevy::picking::pointer::PointerId;
-use bevy::picking::Pickable;
 use bevy::prelude::*;
 
+use crate::components::MmbDebugInfo;
 use crate::hud::style::{self, theme};
-
-#[derive(Component, Debug, Clone)]
-pub struct MmbDebugInfo {
-    pub file_id: u32,
-
-    pub chunk_idx: usize,
-
-    pub sub_index: usize,
-
-    pub asset_name: String,
-
-    pub variant_name: String,
-}
 
 #[derive(Resource, Default, Debug, Clone)]
 pub struct MeshHoverDebug {
@@ -142,13 +129,4 @@ pub fn update_mesh_debug_hud(
     if **text != want {
         **text = want;
     }
-}
-
-pub fn mesh_debug_bundle(info: MmbDebugInfo) -> (Pickable, MmbDebugInfo) {
-    // IGNORE, not default(): this bundle is attached to every MMB submesh
-    // unconditionally, and a blocking Pickable::default() here made MMB props
-    // swallow the world-picking ray so entity hitboxes behind them were never
-    // hit (kuluu-k929). The off-by-default mesh-debug hover loses MMB hover as a
-    // result; it would need its own MeshRayCast to survive opt-in picking.
-    (Pickable::IGNORE, info)
 }

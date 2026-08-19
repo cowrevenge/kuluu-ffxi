@@ -9,7 +9,8 @@
 
 use bevy::prelude::*;
 
-use crate::hud::equipment_screen::{EquipmentIndex, EQUIP_GRID};
+use crate::equip_slot::EquipmentIndex;
+use crate::hud::equipment_screen::EQUIP_GRID;
 use crate::hud::item_dat_root::{ItemDatRoot, ItemIconCache};
 use crate::hud::item_grid::spawn_item_cell;
 use crate::hud::item_ui::{self, framed_box, text_font, theme, transparent_placeholder};

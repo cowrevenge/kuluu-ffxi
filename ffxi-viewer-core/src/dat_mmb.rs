@@ -786,15 +786,13 @@ pub fn process_load_mmb_requests(
                         ));
                     }
 
-                    child.insert(crate::hud::mesh_debug::mesh_debug_bundle(
-                        crate::hud::mesh_debug::MmbDebugInfo {
-                            file_id: req.file_id,
-                            chunk_idx: req.chunk_idx,
-                            sub_index,
-                            asset_name: loaded.asset_name.clone(),
-                            variant_name: sub.variant_name.trim().to_string(),
-                        },
-                    ));
+                    child.insert(mesh_debug_bundle(crate::components::MmbDebugInfo {
+                        file_id: req.file_id,
+                        chunk_idx: req.chunk_idx,
+                        sub_index,
+                        asset_name: loaded.asset_name.clone(),
+                        variant_name: sub.variant_name.trim().to_string(),
+                    }));
                 }
 
                 let is_zone_spawn = req.entity_id.is_none() && req.world_transform.is_some();
@@ -942,6 +940,17 @@ pub fn apply_texture_filtering_system(
         }
     }
     applied.anisotropy = Some(aniso);
+}
+
+fn mesh_debug_bundle(
+    info: crate::components::MmbDebugInfo,
+) -> (bevy::picking::Pickable, crate::components::MmbDebugInfo) {
+    // IGNORE, not default(): this bundle is attached to every MMB submesh
+    // unconditionally, and a blocking Pickable::default() here made MMB props
+    // swallow the world-picking ray so entity hitboxes behind them were never
+    // hit (kuluu-k929). The off-by-default mesh-debug hover loses MMB hover as a
+    // result; it would need its own MeshRayCast to survive opt-in picking.
+    (bevy::picking::Pickable::IGNORE, info)
 }
 
 #[cfg(test)]

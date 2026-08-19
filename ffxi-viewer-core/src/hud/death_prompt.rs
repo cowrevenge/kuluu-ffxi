@@ -1,7 +1,7 @@
 use bevy::prelude::*;
 
-use crate::hud::self_hud::resolve_self;
 use crate::hud::style::{self, theme};
+use crate::snapshot::resolve_self;
 use crate::snapshot::SceneState;
 
 #[derive(Component)]

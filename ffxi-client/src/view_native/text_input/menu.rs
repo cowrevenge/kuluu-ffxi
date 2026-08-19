@@ -92,7 +92,7 @@ fn resolve_menu_entry(kind: MenuKind, label: &str) -> MenuDispatch {
 }
 
 const EQUIP_SLOT_INDEX_MAX: u8 =
-    (ffxi_viewer_core::hud::equipment_screen::EquipmentIndex::ALL.len() - 1) as u8;
+    (ffxi_viewer_core::equip_slot::EquipmentIndex::ALL.len() - 1) as u8;
 
 pub(super) fn confirm_menu_at_cursor(
     bindings: &mut Bindings,

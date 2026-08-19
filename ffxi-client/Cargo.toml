@@ -40,10 +40,13 @@ native-window = [
     "dep:arboard",
     "dep:rfd",
     "dep:ffxi-viewer-core",
-    "ffxi-viewer-core/enhanced-buff-tooltips",
-    "ffxi-viewer-core/enhanced-cast-bar",
     "dep:ffxi-viewer-wire",
 ]
+# Enhanced (non-retail) features are OPT-IN, never part of a default build:
+# vanilla parity is the project default (AGENTS.md). The `?` keeps these from
+# force-enabling the viewer dep outside native-window builds.
+enhanced-buff-tooltips = ["ffxi-viewer-core?/enhanced-buff-tooltips"]
+enhanced-cast-bar = ["ffxi-viewer-core?/enhanced-cast-bar"]
 # Enable the WebSocket relay listener (`--relay-listen <addr>` global flag).
 # Publishes the same `ffxi-viewer-wire` frames the in-process bridge produces,
 # so external tools (and the future wasm browser viewer) can consume the

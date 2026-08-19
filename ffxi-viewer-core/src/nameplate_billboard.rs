@@ -1,11 +1,9 @@
 use std::sync::Arc;
 
 use ab_glyph::{Font, FontArc, PxScale, ScaleFont};
-use bevy::asset::RenderAssetUsages;
 use bevy::image::{Image, ImageSampler};
 use bevy::light::{NotShadowCaster, NotShadowReceiver};
 use bevy::prelude::*;
-use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use ffxi_viewer_wire::EntityKind;
 
 use crate::camera::{nameplate_anchor_y, CameraMode, OperatorCamera};
@@ -24,7 +22,13 @@ const NAME_PX: f32 = 80.0;
 // Retail's plate scale is pixel-exact for a 640x480 client (NAME_SCREEN_SCALE),
 // which reads small on a modern display. A deliberate legibility nudge on top
 // of it — the whole plate, so the icon/text proportions stay retail's.
-const NAMEPLATE_LEGIBILITY_SCALE: f32 = 1.15;
+const NAMEPLATE_LEGIBILITY_SCALE: f32 = 1.3;
+
+// Retail's depth ramp shrinks a plate to 6% past ~500 yalms and to 31% at a
+// routine 20-yalm engage distance — unreadable off a 640x480 CRT. A legibility
+// floor over the ramp (scale_for_view_depth stays retail-pure): every drawable
+// plate keeps at least this fraction of full size. Reached near ~13 yalms.
+const NAMEPLATE_MIN_DEPTH_SCALE: f32 = 0.45;
 
 // research/XIClient/src/XIClient/source/Game/GameManager.cpp:798-799 — retail's clip planes
 // are fixed, so the nameplate ramp below must not read our camera's user-tunable projection.
@@ -63,9 +67,13 @@ const TARGET_PULSE_DIVISOR: f32 = 128.0;
 // Heavier than a hairline on purpose: the plate is unlit and draws over
 // arbitrary zone geometry, so the outline is what keeps a light name readable
 // against a light wall. Scales with NAME_PX.
-const OUTLINE_RADIUS_PX: i32 = 5;
+const OUTLINE_RADIUS_PX: i32 = 7;
 
-const OUTLINE_COLOR: [u8; 4] = [0, 0, 0, 220];
+const OUTLINE_COLOR: [u8; 4] = [0, 0, 0, 255];
+
+// The bundled mono font's strokes are thinner than retail's chunky bitmap
+// glyphs; a second coverage pass offset horizontally fakes the weight.
+const BOLD_DILATE_PX: i32 = 2;
 
 const HP_BAR_HEIGHT_PX: u32 = 16;
 
@@ -294,7 +302,7 @@ pub fn update_nameplate_billboards_system(
 
         let head_pos = entity_pos + Vec3::Y * head_y_offset;
         let view_depth = (head_pos - cam_pos).dot(cam_forward);
-        let Some(scale) = scale_for_view_depth(view_depth) else {
+        let Some(scale) = legibility_scale_for_view_depth(view_depth) else {
             *vis = Visibility::Hidden;
             continue;
         };
@@ -413,6 +421,10 @@ pub fn view_depth_to_fixed_point(view_depth_yalms: f32) -> Option<u32> {
     }
     let depth_fixed = (z_ndc * NDC_DEPTH_FIXED_POINT_SCALE as f32) as u32;
     (depth_fixed <= MAX_DRAWABLE_DEPTH_FIXED).then_some(depth_fixed)
+}
+
+pub fn legibility_scale_for_view_depth(view_depth_yalms: f32) -> Option<f32> {
+    scale_for_view_depth(view_depth_yalms).map(|s| s.max(NAMEPLATE_MIN_DEPTH_SCALE))
 }
 
 pub fn scale_for_view_depth(view_depth_yalms: f32) -> Option<f32> {
@@ -623,7 +635,7 @@ fn rasterize_plate(
         glyphs.push(positioned);
     }
 
-    let pad = (OUTLINE_RADIUS_PX + 1) as u32;
+    let pad = (OUTLINE_RADIUS_PX + BOLD_DILATE_PX + 1) as u32;
     let text_origin_x = pad + icon_strip_px;
     let text_origin_y = pad + top_extra_px;
     let width = (max_x.ceil() as u32).max(1) + 2 * pad + icon_strip_px;
@@ -637,14 +649,19 @@ fn rasterize_plate(
         if let Some(outline_glyph) = scaled.outline_glyph(glyph) {
             let bb = outline_glyph.px_bounds();
             outline_glyph.draw(|gx, gy, c| {
-                let px_x = bb.min.x as i32 + gx as i32 + text_origin_x as i32;
                 let px_y = bb.min.y as i32 + gy as i32 + text_origin_y as i32;
-                if px_x < 0 || px_y < 0 || px_x >= width as i32 || px_y >= text_height as i32 {
+                if px_y < 0 || px_y >= text_height as i32 {
                     return;
                 }
-                let i = (px_y as u32 * width + px_x as u32) as usize;
                 let added = (c * 255.0).round().clamp(0.0, 255.0) as u8;
-                coverage[i] = coverage[i].saturating_add(added);
+                for dx in 0..=BOLD_DILATE_PX {
+                    let px_x = bb.min.x as i32 + gx as i32 + dx + text_origin_x as i32;
+                    if px_x < 0 || px_x >= width as i32 {
+                        continue;
+                    }
+                    let i = (px_y as u32 * width + px_x as u32) as usize;
+                    coverage[i] = coverage[i].saturating_add(added);
+                }
             });
         }
     }
@@ -659,21 +676,28 @@ fn rasterize_plate(
             let text_alpha = coverage[(y * w_i + x) as usize];
 
             let mut outline_alpha: u8 = 0;
-            let y0 = (y - r).max(0);
-            let y1 = (y + r).min(text_h_i - 1);
-            let x0 = (x - r).max(0);
-            let x1 = (x + r).min(w_i - 1);
-            for ny in y0..=y1 {
-                let dy = ny - y;
-                let dy2 = dy * dy;
-                for nx in x0..=x1 {
-                    let dx = nx - x;
-                    if dx * dx + dy2 > r2 {
-                        continue;
-                    }
-                    let na = coverage[(ny * w_i + nx) as usize];
-                    if na > outline_alpha {
-                        outline_alpha = na;
+            // An opaque glyph pixel fully covers the outline ((1 - ta) = 0),
+            // so the neighborhood scan is skippable there.
+            if text_alpha < u8::MAX || color[3] < u8::MAX {
+                let y0 = (y - r).max(0);
+                let y1 = (y + r).min(text_h_i - 1);
+                let x0 = (x - r).max(0);
+                let x1 = (x + r).min(w_i - 1);
+                'scan: for ny in y0..=y1 {
+                    let dy = ny - y;
+                    let dy2 = dy * dy;
+                    for nx in x0..=x1 {
+                        let dx = nx - x;
+                        if dx * dx + dy2 > r2 {
+                            continue;
+                        }
+                        let na = coverage[(ny * w_i + nx) as usize];
+                        if na > outline_alpha {
+                            outline_alpha = na;
+                            if outline_alpha == u8::MAX {
+                                break 'scan;
+                            }
+                        }
                     }
                 }
             }
@@ -759,16 +783,19 @@ fn rasterize_plate(
         }
     }
 
-    let mut image = Image::new(
-        Extent3d {
-            width,
-            height,
-            depth_or_array_layers: 1,
-        },
-        TextureDimension::D2,
+    // The plate rasters at NAME_PX but draws minified almost everywhere the
+    // depth ramp is past its plateau; without mips that minification aliases
+    // the glyph edges into sparkle. Clamp sampler: the HP strip touches the
+    // texture edge, and a Repeat wrap would bleed it across.
+    let mut image = crate::zone_texture::image_with_mips(
         pixels,
-        TextureFormat::Rgba8UnormSrgb,
-        RenderAssetUsages::default(),
+        width,
+        height,
+        crate::zone_texture::TextureQuality {
+            mipmaps: true,
+            anisotropy: 1,
+        },
+        false,
     );
     image.sampler = ImageSampler::linear();
     PlateImage {
@@ -1233,6 +1260,24 @@ mod tests {
                 "depth {depth}: got {got}, want {want}"
             );
         }
+    }
+
+    #[test]
+    fn legibility_floor_caps_the_retail_shrink_without_touching_near_plates() {
+        assert_eq!(legibility_scale_for_view_depth(3.0), Some(1.0));
+        assert_eq!(
+            legibility_scale_for_view_depth(10.0),
+            scale_for_view_depth(10.0)
+        );
+        for depth in [20.0, 50.0, 100.0, 5000.0] {
+            assert_eq!(
+                legibility_scale_for_view_depth(depth),
+                Some(NAMEPLATE_MIN_DEPTH_SCALE),
+                "depth {depth} must sit on the legibility floor"
+            );
+        }
+        assert_eq!(legibility_scale_for_view_depth(0.5), None);
+        assert_eq!(legibility_scale_for_view_depth(1.0e6), None);
     }
 
     #[test]

@@ -1,0 +1,9 @@
+[package]
+name = "lsb-scrape"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Build-time parsing/emission helpers for scraping LSB SQL dumps, lua enums, and C++ headers into compile-time Rust tables. Consumed only from build scripts."
+
+[dependencies]
+anyhow.workspace = true

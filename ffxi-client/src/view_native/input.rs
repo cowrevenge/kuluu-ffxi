@@ -200,6 +200,26 @@ pub fn camera_relative_motion_heading(camera_forward_h: u8, forward: i32, steer:
     (motion_raw.round() as i32).rem_euclid(256) as u8
 }
 
+/// Modes that plant the character: an NPC dialog or a shop/box/counter screen
+/// owns them until it closes. `Chat` is deliberately absent -- retail keeps
+/// auto-run going while the input line is focused.
+pub fn mode_cancels_autorun(mode: &InputMode) -> bool {
+    matches!(
+        mode,
+        InputMode::Dialog(_)
+            | InputMode::DeliveryBox
+            | InputMode::Check
+            | InputMode::Bazaar
+            | InputMode::Auction
+    )
+}
+
+/// Modes whose keystrokes belong to a text buffer, not to movement or camera.
+/// Auto-run survives on `phantom_forward` alone.
+pub fn mode_swallows_keys(mode: &InputMode) -> bool {
+    matches!(mode, InputMode::Chat(_))
+}
+
 pub fn autorun_after_toggle(phantom_forward: bool, toggle_just_pressed: bool) -> bool {
     if toggle_just_pressed {
         !phantom_forward
@@ -566,19 +586,18 @@ pub fn dispatch_movement_system(
     // Default to stopped so every early return below reports no movement.
     **move_intent = ffxi_viewer_core::combat_stance::SelfMoveIntent::default();
 
-    if matches!(
-        *mode,
-        InputMode::Chat(_)
-            | InputMode::Dialog(_)
-            | InputMode::DeliveryBox
-            | InputMode::Check
-            | InputMode::Bazaar
-            | InputMode::Auction
-    ) {
+    if mode_cancels_autorun(&mode) {
         autorun.phantom_forward = false;
         autorun.strafe_held_since = None;
         return;
     }
+
+    let no_keys = ButtonInput::<KeyCode>::default();
+    let keys: &ButtonInput<KeyCode> = if mode_swallows_keys(&mode) {
+        &no_keys
+    } else {
+        &keys
+    };
 
     let in_picker = matches!(
         *mode,
@@ -589,10 +608,10 @@ pub fn dispatch_movement_system(
     );
 
     let mut pitch_d = 0.0;
-    if !in_picker && bindings.pressed(Action::CameraPitchUp, &keys) {
+    if !in_picker && bindings.pressed(Action::CameraPitchUp, keys) {
         pitch_d += PITCH_STEP_HELD;
     }
-    if !in_picker && bindings.pressed(Action::CameraPitchDown, &keys) {
+    if !in_picker && bindings.pressed(Action::CameraPitchDown, keys) {
         pitch_d -= PITCH_STEP_HELD;
     }
     if pitch_d != 0.0 {
@@ -605,10 +624,10 @@ pub fn dispatch_movement_system(
 
     let mut yaw_d = 0.0;
     let yaw_step = CAMERA_YAW_RATE * time.delta_secs();
-    if !in_picker && bindings.pressed(Action::CameraYawLeft, &keys) {
+    if !in_picker && bindings.pressed(Action::CameraYawLeft, keys) {
         yaw_d -= yaw_step;
     }
-    if !in_picker && bindings.pressed(Action::CameraYawRight, &keys) {
+    if !in_picker && bindings.pressed(Action::CameraYawRight, keys) {
         yaw_d += yaw_step;
     }
     if yaw_d != 0.0 {
@@ -618,10 +637,10 @@ pub fn dispatch_movement_system(
     if matches!(*camera_mode, CameraMode::Chase) && !in_picker && !env.minimap_hover.hovered {
         let mut zoom_d = 0.0;
         let step = ChaseCamera::KEYBOARD_ZOOM_RATE * time.delta_secs();
-        if bindings.pressed(Action::CameraZoomIn, &keys) {
+        if bindings.pressed(Action::CameraZoomIn, keys) {
             zoom_d -= step;
         }
-        if bindings.pressed(Action::CameraZoomOut, &keys) {
+        if bindings.pressed(Action::CameraZoomOut, keys) {
             zoom_d += step;
         }
         if zoom_d != 0.0 {
@@ -648,9 +667,7 @@ pub fn dispatch_movement_system(
             Action::RotateLeft,
             Action::RotateRight,
         ];
-        let pressed_move = move_actions
-            .iter()
-            .any(|a| bindings.just_pressed(*a, &keys));
+        let pressed_move = move_actions.iter().any(|a| bindings.just_pressed(*a, keys));
         if pressed_move {
             if matches!(rest_stance.kind, RestKind::Heal) {
                 let _ = cmd_tx.0.try_send(AgentCommand::Heal {
@@ -673,17 +690,17 @@ pub fn dispatch_movement_system(
         return;
     }
 
-    let backward_just_pressed = bindings.just_pressed(Action::MoveBackward, &keys);
+    let backward_just_pressed = bindings.just_pressed(Action::MoveBackward, keys);
     if backward_just_pressed {
         autorun.phantom_forward = false;
     }
 
     // Retail autorun is steerable: A/D carve the run without cancelling it.
     // Held strafe or Q/E rotate cancels after a short grace.
-    let any_strafe = bindings.pressed(Action::StrafeLeft, &keys)
-        || bindings.pressed(Action::StrafeRight, &keys)
-        || bindings.pressed(Action::RotateLeft, &keys)
-        || bindings.pressed(Action::RotateRight, &keys);
+    let any_strafe = bindings.pressed(Action::StrafeLeft, keys)
+        || bindings.pressed(Action::StrafeRight, keys)
+        || bindings.pressed(Action::RotateLeft, keys)
+        || bindings.pressed(Action::RotateRight, keys);
     if any_strafe {
         let now = Instant::now();
         let started = *autorun.strafe_held_since.get_or_insert(now);
@@ -700,14 +717,14 @@ pub fn dispatch_movement_system(
     let first_person = matches!(*camera_mode, CameraMode::FirstPerson);
 
     let resolved = resolve_move_inputs(
-        bindings.pressed(Action::MoveForward, &keys),
-        bindings.pressed(Action::MoveBackward, &keys),
-        bindings.pressed(Action::TurnLeft, &keys),
-        bindings.pressed(Action::TurnRight, &keys),
-        bindings.pressed(Action::StrafeLeft, &keys),
-        bindings.pressed(Action::StrafeRight, &keys),
-        bindings.pressed(Action::RotateLeft, &keys),
-        bindings.pressed(Action::RotateRight, &keys),
+        bindings.pressed(Action::MoveForward, keys),
+        bindings.pressed(Action::MoveBackward, keys),
+        bindings.pressed(Action::TurnLeft, keys),
+        bindings.pressed(Action::TurnRight, keys),
+        bindings.pressed(Action::StrafeLeft, keys),
+        bindings.pressed(Action::StrafeRight, keys),
+        bindings.pressed(Action::RotateLeft, keys),
+        bindings.pressed(Action::RotateRight, keys),
         autorun.phantom_forward,
         locked,
     );
@@ -735,8 +752,8 @@ pub fn dispatch_movement_system(
     // Deliberate camera pan (yaw keys / mouse drag) re-aims a pure W/S run;
     // the latch only holds the run direction against the passive
     // auto-recenter, not against the player actively steering the camera.
-    let camera_panning = bindings.pressed(Action::CameraYawLeft, &keys)
-        || bindings.pressed(Action::CameraYawRight, &keys)
+    let camera_panning = bindings.pressed(Action::CameraYawLeft, keys)
+        || bindings.pressed(Action::CameraYawRight, keys)
         || env.pointer.left
         || env.pointer.right;
     // A/D carve, Q/E rotate, and camera panning recompute the run direction
@@ -1933,6 +1950,33 @@ mod tests {
     fn autorun_unchanged_without_toggle_press() {
         assert!(!autorun_after_toggle(false, false));
         assert!(autorun_after_toggle(true, false));
+    }
+
+    #[test]
+    fn focused_chat_input_keeps_autorun_running() {
+        let chat = InputMode::Chat(ChatBuffer::empty());
+        assert!(!mode_cancels_autorun(&chat));
+        assert!(mode_swallows_keys(&chat));
+    }
+
+    #[test]
+    fn npc_and_shop_screens_cancel_autorun() {
+        for mode in [
+            InputMode::Dialog(ffxi_viewer_core::DialogCursor::default()),
+            InputMode::DeliveryBox,
+            InputMode::Check,
+            InputMode::Bazaar,
+            InputMode::Auction,
+        ] {
+            assert!(mode_cancels_autorun(&mode), "{mode:?}");
+            assert!(!mode_swallows_keys(&mode), "{mode:?}");
+        }
+    }
+
+    #[test]
+    fn world_mode_neither_cancels_autorun_nor_swallows_keys() {
+        assert!(!mode_cancels_autorun(&InputMode::World));
+        assert!(!mode_swallows_keys(&InputMode::World));
     }
 
     #[test]

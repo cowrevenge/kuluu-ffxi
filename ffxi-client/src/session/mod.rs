@@ -1877,8 +1877,8 @@ fn apply_self_battle2_to_cast(
                 }
             };
             match header.action_kind {
-                ffxi_proto::magic::CATEGORY_MAGIC_START => {
-                    let routine = ffxi_proto::magic::magic_start_routine(header.action_id);
+                ffxi_vocab::magic::CATEGORY_MAGIC_START => {
+                    let routine = ffxi_vocab::magic::magic_start_routine(header.action_id);
                     if routine.is_some_and(|r| r.interrupt) {
                         end(true);
                         clear = true;
@@ -1895,7 +1895,7 @@ fn apply_self_battle2_to_cast(
                             .max(now + std::time::Duration::from_millis(u64::from(bar.total_ms)));
                     }
                 }
-                ffxi_proto::magic::CATEGORY_MAGIC_FINISH => {
+                ffxi_vocab::magic::CATEGORY_MAGIC_FINISH => {
                     end(false);
                     clear = true;
                 }
@@ -2256,7 +2256,7 @@ async fn keepalive_loop(
                                                 && item_no != 0
                                                 && quantity != 0
                                                 && !locked
-                                                && ffxi_proto::item_flags::deliverable(item_no)
+                                                && ffxi_vocab::item_flags::deliverable(item_no)
                                         })
                                         .map(|(&inv_slot, &(item_no, quantity, _))| {
                                             crate::local_menu::PickableItem {
@@ -2506,7 +2506,7 @@ async fn keepalive_loop(
                             let now = std::time::Instant::now();
                             // Start the client-side recast clock for a spell.
                             if let crate::state::ActionKind::CastMagic { spell_id, .. } = &kind {
-                                if let Some(rms) = ffxi_proto::cast_time::spell_recast_time_ms(
+                                if let Some(rms) = ffxi_vocab::cast_time::spell_recast_time_ms(
                                     *spell_id as u16,
                                 ) {
                                     if rms > 0 {
@@ -4337,7 +4337,7 @@ fn zone_message_chat_line(
 }
 
 fn build_system_message_line(m: decode::SystemMessage) -> ChatLine {
-    let text = match ffxi_proto::msg_system::lookup(m.message_id) {
+    let text = match ffxi_vocab::msg_system::lookup(m.message_id) {
         Some(raw) => substitute_system_placeholders(raw, m.para, m.para2),
         None => format!("[system] msg #{} para={},{}", m.message_id, m.para, m.para2),
     };
@@ -4739,7 +4739,7 @@ fn template_for_id(message_num: u16) -> Option<&'static str> {
             return Some(template);
         }
     }
-    ffxi_proto::msg_basic::lookup(message_num)
+    ffxi_vocab::msg_basic::lookup(message_num)
 }
 
 // vendor/server/src/map/enums/msg_std.h:48 — "<name> examines you.", sent to
@@ -4859,7 +4859,7 @@ fn render_check_mob(message_num: u16, data1: u32, data2: u32, tar_name: &str) ->
     line
 }
 
-// ffxi_proto::msg_basic is scraped from the trailing comment on each msg_basic.h enumerator,
+// ffxi_vocab::msg_basic is scraped from the trailing comment on each msg_basic.h enumerator,
 // which fails the client two ways. Id 116 (the generic "uses <ability>" line shared by
 // no-numeric buff JAs like Boost id39 / Warcry id32; abilities.sql message1=116) has no
 // enumerator at all, so lookup(116) is None and the self-JA battle line goes missing. And
@@ -4922,20 +4922,20 @@ const READIES_ABILITY_MESSAGE: u16 = 326;
 
 fn skill_name(message_num: u16, data1: u32, action_id: u32) -> String {
     if COMBAT_SKILL_MESSAGES.contains(&message_num) {
-        return ffxi_proto::skill_names::lookup(data1 as u8)
+        return ffxi_vocab::skill_names::lookup(data1 as u8)
             .map(str::to_string)
             .unwrap_or_else(|| format!("skill #{data1}"));
     }
     if message_num == READIES_ABILITY_MESSAGE {
         return ability_name(action_id);
     }
-    ffxi_proto::tp_move_names::lookup(action_id as u16)
+    ffxi_vocab::tp_move_names::lookup(action_id as u16)
         .map(str::to_string)
         .unwrap_or_else(|| format!("skill #{action_id}"))
 }
 
 fn ability_name(action_id: u32) -> String {
-    ffxi_proto::ability_names::lookup(action_id as u16)
+    ffxi_vocab::ability_names::lookup(action_id as u16)
         .map(str::to_string)
         .unwrap_or_else(|| format!("ability #{action_id}"))
 }
@@ -5008,7 +5008,7 @@ fn fallback_emote_text(cas_name: &str, mes_num: u16) -> String {
     } else {
         u8::try_from(mes_num)
             .ok()
-            .and_then(ffxi_proto::emote_names::lookup)
+            .and_then(ffxi_vocab::emote_names::lookup)
             .map(str::to_lowercase)
             .unwrap_or_else(|| format!("emote{mes_num}"))
     };
@@ -5067,7 +5067,7 @@ fn substitute_battle_placeholders(
     }
 
     if s.contains("<spell>") {
-        let name = ffxi_proto::spell_names::lookup(resolved_action_id as u16)
+        let name = ffxi_vocab::spell_names::lookup(resolved_action_id as u16)
             .map(str::to_string)
             .unwrap_or_else(|| format!("spell #{resolved_action_id}"));
         s = s.replace("<spell>", &name);
@@ -5076,19 +5076,19 @@ fn substitute_battle_placeholders(
         s = s.replace("<ability>", &ability_name(resolved_action_id));
     }
     if s.contains("<item>") {
-        let name = ffxi_proto::item_names::lookup(resolved_action_id as u16)
+        let name = ffxi_vocab::item_names::lookup(resolved_action_id as u16)
             .map(str::to_string)
             .unwrap_or_else(|| format!("item #{resolved_action_id}"));
         s = s.replace("<item>", &name);
     }
     if s.contains("<job>") {
-        let name = ffxi_proto::job_names::lookup(resolved_action_id as u16)
+        let name = ffxi_vocab::job_names::lookup(resolved_action_id as u16)
             .map(str::to_string)
             .unwrap_or_else(|| format!("job #{resolved_action_id}"));
         s = s.replace("<job>", &name);
     }
     if s.contains("<status>") {
-        let name = ffxi_proto::status_names::lookup(data1 as u16)
+        let name = ffxi_vocab::status_names::lookup(data1 as u16)
             .map(str::to_string)
             .unwrap_or_else(|| format!("status #{data1}"));
         s = s.replace("<status>", &name);
@@ -5364,7 +5364,7 @@ fn now_unix_secs() -> u64 {
         .unwrap_or(0)
 }
 
-use ffxi_proto::vana_time::VANA_EPOCH_UNIX;
+use ffxi_vocab::vana_time::VANA_EPOCH_UNIX;
 
 // vendor/server/src/map/packets/s2c/0x063_miscdata_status_icons.cpp:
 // timestamp = (remaining_seconds + vanadiel_timestamp()) * 60, u32-wrapping;

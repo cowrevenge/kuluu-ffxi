@@ -356,7 +356,7 @@ pub fn update_status_ribbon_selection(
     for (chip, mut border) in chips.iter_mut() {
         let want = if focused && chip.slot == cursor {
             let icon = icons.get(chip.slot).copied().unwrap_or(0);
-            if ffxi_proto::status_effects::is_cancelable(icon) {
+            if ffxi_vocab::status_effects::is_cancelable(icon) {
                 theme::CURSOR
             } else {
                 theme::MUTED
@@ -471,7 +471,7 @@ pub mod tooltip {
             .find(|(_, i)| matches!(i, Interaction::Hovered | Interaction::Pressed))
             .and_then(|(chip, _)| icons.get(chip.slot).copied());
 
-        let name = hovered_icon.and_then(ffxi_proto::status_names::lookup);
+        let name = hovered_icon.and_then(ffxi_vocab::status_names::lookup);
         let Some(name) = name else {
             if card.display != Display::None {
                 card.display = Display::None;

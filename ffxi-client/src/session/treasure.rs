@@ -266,7 +266,7 @@ pub(super) fn chat_lines(line: &SysMesLine) -> Vec<ChatLine> {
 }
 
 fn item_name(item_id: u16) -> String {
-    ffxi_proto::item_names::lookup(item_id)
+    ffxi_vocab::item_names::lookup(item_id)
         .map(str::to_string)
         .unwrap_or_else(|| format!("item #{item_id}"))
 }

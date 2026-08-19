@@ -1787,7 +1787,7 @@ fn routine_motion_clip_last(routines: &HashMap<DatId, Scheduler>, routine: DatId
         .map(|t| DatId::from_name(&t.stage.id))
 }
 
-pub(crate) use ffxi_proto::magic::CATEGORY_MAGIC_START as MAGIC_START_CATEGORY;
+pub(crate) use ffxi_vocab::magic::CATEGORY_MAGIC_START as MAGIC_START_CATEGORY;
 
 pub(crate) fn action_routine(action_kind: u8, cast_suffix: Option<&str>) -> Option<(DatId, bool)> {
     Some(match action_kind {
@@ -3025,7 +3025,7 @@ impl SpellSuffixCache {
             .as_ref()
             .and_then(|t| t.lookup(spell_id as u16))
             .and_then(|s| s.magic_type.cast_suffix())
-            .or_else(|| ffxi_proto::magic::cast_suffix(spell_id))
+            .or_else(|| ffxi_vocab::magic::cast_suffix(spell_id))
     }
 }
 
@@ -3059,7 +3059,7 @@ pub fn dispatch_action_overlay(
         // (vendor/server/src/map/action/interrupts.cpp:268-284); treating it as a start would
         // re-arm the looping pose for CAST_TIMEOUT_FRAMES instead of dropping it.
         let magic = (action_kind == MAGIC_START_CATEGORY)
-            .then(|| ffxi_proto::magic::magic_start_routine(action_id))
+            .then(|| ffxi_vocab::magic::magic_start_routine(action_id))
             .flatten();
         if magic.is_some_and(|m| m.interrupt) {
             if actor.action.map(|a| a.cast_pose).unwrap_or(false) {

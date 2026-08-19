@@ -838,11 +838,11 @@ pub fn substitute_nums(text: String, params: &[i32]) -> String {
 pub fn substitute_entity_names(text: String, params: &[i32]) -> String {
     let text = substitute_param_marker(text, MARKER_KEY_ITEM, &|index| {
         let id = u16::try_from(*params.get(index)?).ok()?;
-        ffxi_proto::key_item_names::lookup(id).map(str::to_string)
+        ffxi_vocab::key_item_names::lookup(id).map(str::to_string)
     });
     substitute_param_marker(text, MARKER_ITEM, &|index| {
         let id = u16::try_from(*params.get(index)?).ok()?;
-        ffxi_proto::item_names::lookup(id).map(str::to_string)
+        ffxi_vocab::item_names::lookup(id).map(str::to_string)
     })
 }
 
@@ -890,8 +890,8 @@ pub fn spanned_entity_names(text: &str, params: &[i32]) -> Vec<ffxi_dat::sysmes:
             let index: usize = after_open[..end].parse().ok()?;
             let id = u16::try_from(*params.get(index)?).ok()?;
             let name = match kind {
-                SpanKind::KeyItem => ffxi_proto::key_item_names::lookup(id),
-                _ => ffxi_proto::item_names::lookup(id),
+                SpanKind::KeyItem => ffxi_vocab::key_item_names::lookup(id),
+                _ => ffxi_vocab::item_names::lookup(id),
             }?;
             Some((name.to_string(), end + 1))
         });

@@ -867,12 +867,12 @@ fn sub_target_action_for(
     use ffxi_viewer_core::input_mode::SubTargetAction as S;
     match action {
         A::CastSpell { spell_id }
-            if ffxi_proto::valid_target::spell(spell_id).is_some_and(|f| f.is_self_only()) =>
+            if ffxi_vocab::valid_target::spell(spell_id).is_some_and(|f| f.is_self_only()) =>
         {
             None
         }
         A::JobAbility { ability_id } | A::PetAbility { ability_id }
-            if ffxi_proto::valid_target::ability(ability_id).is_some_and(|f| f.is_self_only()) =>
+            if ffxi_vocab::valid_target::ability(ability_id).is_some_and(|f| f.is_self_only()) =>
         {
             None
         }
@@ -1010,8 +1010,8 @@ fn handle_sub_target_key(
     entities: &[ffxi_viewer_wire::Entity],
     cmd_tx: &Sender<AgentCommand>,
 ) -> Option<InputMode> {
-    use ffxi_proto::valid_target::TargetFlags;
     use ffxi_viewer_core::sub_target;
+    use ffxi_vocab::valid_target::TargetFlags;
 
     let flags = TargetFlags(state.flags);
     let ents = gather_sub_target_entities(scene_state);
@@ -1116,7 +1116,7 @@ fn dispatch_dynamic_menu_action(
     let (kind_name, cmd) = match action {
         A::CastSpell { spell_id } => {
             let self_only =
-                ffxi_proto::valid_target::spell(spell_id).is_some_and(|f| f.is_self_only());
+                ffxi_vocab::valid_target::spell(spell_id).is_some_and(|f| f.is_self_only());
             let resolved = if self_only {
                 self_target()
             } else {
@@ -1145,7 +1145,7 @@ fn dispatch_dynamic_menu_action(
         }
         A::JobAbility { ability_id } | A::PetAbility { ability_id } => {
             let self_only =
-                ffxi_proto::valid_target::ability(ability_id).is_some_and(|f| f.is_self_only());
+                ffxi_vocab::valid_target::ability(ability_id).is_some_and(|f| f.is_self_only());
             let resolved = if self_only {
                 self_target()
             } else {
@@ -1963,7 +1963,7 @@ fn handle_passive_cursor_key(
             }
             if bindings.matches_logical(Action::NavConfirm, key) {
                 if let Some(&icon) = icons.get(state.status_cursor) {
-                    if ffxi_proto::status_effects::is_cancelable(icon) {
+                    if ffxi_vocab::status_effects::is_cancelable(icon) {
                         let _ = cmd_tx.try_send(AgentCommand::CancelBuff { icon });
                     }
                 }

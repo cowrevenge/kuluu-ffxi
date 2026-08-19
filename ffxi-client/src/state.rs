@@ -2004,7 +2004,7 @@ impl SessionState {
                     .bazaar
                     .as_ref()
                     .and_then(|v| v.items.iter().find(|it| it.index == *index))
-                    .and_then(|it| ffxi_proto::item_names::lookup(it.item_no))
+                    .and_then(|it| ffxi_vocab::item_names::lookup(it.item_no))
                     .unwrap_or("an item");
                 self.push_chat(ChatLine {
                     spans: Vec::new(),
@@ -2892,7 +2892,7 @@ pub enum AgentCommand {
     /// c2s 0x0F1 GP_CLI_COMMAND_BUFFCANCEL — click a status effect off by its
     /// icon id. The server deletes every effect with that icon
     /// (DelStatusEffectsByIcon) and does NOT re-check cancelability, so the
-    /// caller must gate on `ffxi_proto::status_effects::is_cancelable`
+    /// caller must gate on `ffxi_vocab::status_effects::is_cancelable`
     /// (vendor/server/src/map/packets/c2s/0x0f1_buffcancel.cpp).
     CancelBuff {
         icon: u16,
@@ -3621,7 +3621,7 @@ impl ActionKind {
         match self {
             ActionKind::CastMagic { spell_id, .. } => {
                 let ms = self.spell_cast_ms(*spell_id, dat_cast_ms)?;
-                let name = ffxi_proto::spell_names::lookup(*spell_id as u16)
+                let name = ffxi_vocab::spell_names::lookup(*spell_id as u16)
                     .map(str::to_string)
                     .unwrap_or_else(|| format!("spell #{spell_id}"));
                 Some((name, ms))
@@ -3645,7 +3645,7 @@ impl ActionKind {
 
     fn spell_cast_ms(&self, spell_id: u32, dat_cast_ms: Option<u32>) -> Option<u32> {
         dat_cast_ms
-            .or_else(|| ffxi_proto::cast_time::spell_cast_time_ms(spell_id as u16).map(u32::from))
+            .or_else(|| ffxi_vocab::cast_time::spell_cast_time_ms(spell_id as u16).map(u32::from))
             .filter(|ms| *ms > 0)
     }
 }

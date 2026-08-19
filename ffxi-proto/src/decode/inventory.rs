@@ -130,7 +130,7 @@ pub struct ItemAttr {
 
 /// Charges + live recast decoded from the 24-byte item extdata of a charged
 /// (usable/enchanted) item. `next_use_vana_ts` is an absolute Vana'diel
-/// timestamp (Earth seconds since [`crate::vana_time::VANA_EPOCH_UNIX`]).
+/// timestamp (Earth seconds since `ffxi_vocab::vana_time::VANA_EPOCH_UNIX`).
 /// Readiness is signaled by `ready` (extdata flags-hi bit 0x40), NOT by a zero
 /// timestamp: LSB only writes Attr[4..8] on the cooldown path and leaves stale
 /// m_extra bytes there when ready (0x020_item_attr.cpp:57-68), so consumers

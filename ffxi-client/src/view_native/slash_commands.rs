@@ -1307,7 +1307,7 @@ fn emote_outcome(ctx: &SlashCtx, emote_id: u8, mode_arg: &str, param: u16) -> Sl
 /// it isn't one (falls through to unknown-command).
 fn parse_canned_emote(cmd: &str, rest: &str, ctx: &SlashCtx) -> Option<SlashOutcome> {
     use ffxi_proto::map::emote;
-    let id = ffxi_proto::emote_names::id_for_command(cmd)?;
+    let id = ffxi_vocab::emote_names::id_for_command(cmd)?;
     if emote::HELM_ONLY.contains(&id) || id == emote::BELL || id == emote::JOB {
         // HELM ids are server-initiated; Bell/Job have their own commands.
         return None;
@@ -1354,11 +1354,11 @@ fn parse_jobemote(rest: &str, ctx: &SlashCtx) -> SlashOutcome {
 
 fn resolve_job_id(arg: &str) -> Option<u16> {
     if let Ok(id) = arg.parse::<u16>() {
-        return ffxi_proto::job_names::lookup(id).map(|_| id);
+        return ffxi_vocab::job_names::lookup(id).map(|_| id);
     }
     (1..=u8::MAX as u16).find(|&id| {
-        ffxi_proto::job_names::abbrev(id).is_some_and(|a| a.eq_ignore_ascii_case(arg))
-            || ffxi_proto::job_names::lookup(id).is_some_and(|n| n.eq_ignore_ascii_case(arg))
+        ffxi_vocab::job_names::abbrev(id).is_some_and(|a| a.eq_ignore_ascii_case(arg))
+            || ffxi_vocab::job_names::lookup(id).is_some_and(|n| n.eq_ignore_ascii_case(arg))
     })
 }
 
@@ -2128,11 +2128,11 @@ fn parse_mhexit(rest: &str, zone_id: Option<u16>) -> SlashOutcome {
 // three-letter code ("WAR"), or the numeric JOBTYPE id — all case-insensitive.
 fn parse_job_token(token: &str) -> Option<u8> {
     if let Ok(id) = token.parse::<u16>() {
-        return (id > 0 && ffxi_proto::job_names::lookup(id).is_some()).then_some(id as u8);
+        return (id > 0 && ffxi_vocab::job_names::lookup(id).is_some()).then_some(id as u8);
     }
-    ffxi_proto::job_names::JOB_ABBREVS
+    ffxi_vocab::job_names::JOB_ABBREVS
         .iter()
-        .chain(ffxi_proto::job_names::JOB_NAMES.iter())
+        .chain(ffxi_vocab::job_names::JOB_NAMES.iter())
         .find(|(id, name)| *id > 0 && name.eq_ignore_ascii_case(token))
         .map(|(id, _)| *id as u8)
 }
@@ -5146,7 +5146,7 @@ mod tests {
     #[test]
     fn no_alias_shadows_a_scraped_emote_name() {
         use ffxi_proto::map::emote;
-        for &(id, name) in ffxi_proto::emote_names::EMOTES {
+        for &(id, name) in ffxi_vocab::emote_names::EMOTES {
             if emote::HELM_ONLY.contains(&id) || id == emote::BELL || id == emote::JOB {
                 continue;
             }

@@ -666,7 +666,7 @@ pub fn build_sell_rows(snap: &SceneSnapshot) -> Vec<SellRow> {
                 && it.item_no != 0
                 && it.item_no != ffxi_proto::map::GIL_ITEM_NO
                 && !it.locked
-                && ffxi_proto::item_flags::auctionable(it.item_no)
+                && ffxi_vocab::item_flags::auctionable(it.item_no)
         })
         .map(|it| SellRow {
             inv_slot: it.index,
@@ -697,7 +697,7 @@ pub fn rebuild_sell_inventory(
 }
 
 pub fn item_name(item_no: u16) -> String {
-    ffxi_proto::item_names::lookup(item_no)
+    ffxi_vocab::item_names::lookup(item_no)
         .map(str::to_string)
         .unwrap_or_else(|| format!("Item #{item_no}"))
 }
@@ -1636,8 +1636,8 @@ pub fn filtered_listings(
         .iter()
         .filter(|l| {
             main_job == 0
-                || ffxi_proto::equip_info::lookup(l.item_id)
-                    .map(|info| ffxi_proto::equip_info::fits_job(&info, main_job))
+                || ffxi_vocab::equip_info::lookup(l.item_id)
+                    .map(|info| ffxi_vocab::equip_info::fits_job(&info, main_job))
                     .unwrap_or(true)
         })
         .copied()

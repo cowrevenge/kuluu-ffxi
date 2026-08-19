@@ -3082,6 +3082,7 @@ dependencies = [
  "ffxi-proto",
  "ffxi-viewer-core",
  "ffxi-viewer-wire",
+ "ffxi-vocab",
  "futures-util",
  "keyring",
  "log",
@@ -3172,6 +3173,7 @@ name = "ffxi-proto"
 version = "0.4.0"
 dependencies = [
  "anyhow",
+ "ffxi-vocab",
  "lsb-scrape",
  "md-5",
  "serde",
@@ -3191,6 +3193,7 @@ dependencies = [
  "ffxi-event",
  "ffxi-proto",
  "ffxi-viewer-wire",
+ "ffxi-vocab",
  "js-sys",
  "serde",
  "serde_json",
@@ -3224,6 +3227,14 @@ dependencies = [
  "postcard",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "ffxi-vocab"
+version = "0.4.0"
+dependencies = [
+ "anyhow",
+ "lsb-scrape",
 ]
 
 [[package]]

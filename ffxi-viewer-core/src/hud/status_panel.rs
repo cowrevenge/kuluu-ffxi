@@ -300,7 +300,7 @@ pub(crate) fn job_abbrev(job_id: u8) -> String {
         return "---".to_string();
     }
     // Canonical 3-letter code from LSB (2 → "MNK"); truncating "Monk" gives "MON".
-    match ffxi_proto::job_names::abbrev(job_id as u16) {
+    match ffxi_vocab::job_names::abbrev(job_id as u16) {
         Some(code) => code.to_string(),
         None => format!("J{job_id}"),
     }
@@ -349,7 +349,7 @@ pub fn job_level_rows(overlay: &ActiveOverlay, levels: &[(u8, u8)]) -> Vec<JobLe
         .iter()
         .filter(|(job_id, _)| overlay.0.job_allowed(*job_id))
         .filter_map(|&(job_id, level)| {
-            ffxi_proto::job_names::lookup(job_id as u16).map(|name| JobLevelRow {
+            ffxi_vocab::job_names::lookup(job_id as u16).map(|name| JobLevelRow {
                 job_id,
                 name,
                 level,

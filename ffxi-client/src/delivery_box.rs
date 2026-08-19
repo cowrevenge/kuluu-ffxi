@@ -277,7 +277,7 @@ fn item_of(r: &PbxResult) -> Option<DeliveryItem> {
 }
 
 pub fn item_name(item_no: u16) -> String {
-    ffxi_proto::item_names::lookup(item_no)
+    ffxi_vocab::item_names::lookup(item_no)
         .map(str::to_string)
         .unwrap_or_else(|| format!("item #{item_no}"))
 }
@@ -287,7 +287,7 @@ pub fn item_name(item_no: u16) -> String {
 /// would say nothing about how much arrived.
 fn parcel_name(item: &DeliveryItem) -> String {
     if item.item_no == ffxi_proto::map::GIL_ITEM_NO {
-        format!("{} gil", ffxi_proto::gil::group_digits(item.quantity))
+        format!("{} gil", ffxi_vocab::gil::group_digits(item.quantity))
     } else {
         item_name(item.item_no)
     }

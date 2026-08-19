@@ -965,8 +965,8 @@ pub fn action_dat_file_id(
     // 3 = weaponskill finish, 4 = magic finish, 6 = job-ability finish.
     match action_kind {
         3 => weapon_skill_file_id(animation?, race?, main_dll?),
-        4 => ffxi_proto::action_anim::spell_file_id(action_id, animation),
-        6 => ffxi_proto::action_anim::ability_file_id(action_id, animation),
+        4 => ffxi_vocab::action_anim::spell_file_id(action_id, animation),
+        6 => ffxi_vocab::action_anim::ability_file_id(action_id, animation),
         _ => None,
     }
 }
@@ -1141,7 +1141,7 @@ pub fn dispatch_cast_routine_started(
         };
         // cmd_arg is the routine FourCC, not a spell id (magic_state.cpp:102); an "sp*" FourCC is
         // an interrupt on the same category (interrupts.cpp:268-284) and must tear the cast down.
-        let magic = ffxi_proto::magic::magic_start_routine(action_id);
+        let magic = ffxi_vocab::magic::magic_start_routine(action_id);
         if magic.is_some_and(|m| m.interrupt) {
             if let Ok(cast) = q_cast.get(actor_entity) {
                 sim.stop_routine(actor_entity, cast.routine);

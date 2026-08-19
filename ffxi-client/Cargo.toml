@@ -71,6 +71,7 @@ dynamic_linking = ["bevy/dynamic_linking"]
 
 [dependencies]
 ffxi-proto = { path = "../ffxi-proto" }
+ffxi-vocab = { path = "../ffxi-vocab" }
 ffxi-nav = { path = "../ffxi-nav" }
 ffxi-nav-recast = { path = "../ffxi-nav-recast" }
 ffxi-dat = { path = "../ffxi-dat" }

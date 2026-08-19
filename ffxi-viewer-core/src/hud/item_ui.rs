@@ -56,7 +56,7 @@ pub fn focus_detail(
         .as_ref()
         .map(|s| s.name.clone())
         .filter(|n| !n.is_empty())
-        .or_else(|| ffxi_proto::item_names::lookup(item_no).map(|s| s.to_string()))
+        .or_else(|| ffxi_vocab::item_names::lookup(item_no).map(|s| s.to_string()))
         .unwrap_or_else(|| format!("Item #{item_no}"));
     (name, item_detail::detail_rows(&detail))
 }

@@ -644,7 +644,7 @@ pub(crate) fn rebuild_delivery_inventory(
             .map(|s| s.flags & (FLAG_RARE | FLAG_EX) != 0)
             .unwrap_or(false)
     };
-    inv.rows = build_inventory(snap, ffxi_proto::item_flags::deliverable, ex_rare);
+    inv.rows = build_inventory(snap, ffxi_vocab::item_flags::deliverable, ex_rare);
 }
 
 fn recipient_value_text(d: &DeliveryBoxState, editing: Option<&String>) -> String {
@@ -912,7 +912,7 @@ fn text_value(
         // Retail shows Current Gil on both panels, comma-grouped with a " G"
         // suffix (artifacts/retail/moghouse-menu-notes.md).
         Role::GilLine => (
-            format!("Current Gil  {} G", ffxi_proto::gil::group_digits(gil)),
+            format!("Current Gil  {} G", ffxi_vocab::gil::group_digits(gil)),
             if matches!(screen.focus, DeliveryFocus::Gil) {
                 theme::CURSOR
             } else {
@@ -934,7 +934,7 @@ fn text_value(
             let list_idx = inv_start + i;
             match rows.get(list_idx) {
                 Some(r) => {
-                    let name = ffxi_proto::item_names::lookup(r.item_no)
+                    let name = ffxi_vocab::item_names::lookup(r.item_no)
                         .map(|s| s.to_string())
                         .unwrap_or_else(|| format!("Item #{}", r.item_no));
                     let qty = if r.quantity > 1 {

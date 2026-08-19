@@ -98,7 +98,7 @@ pub fn purchase_prompt(item_name: &str, quantity: u32, total_gil: u32) -> String
     )
 }
 
-pub use ffxi_proto::gil::group_digits;
+pub use ffxi_vocab::gil::group_digits;
 
 #[derive(Component)]
 pub struct BazaarPanel;
@@ -398,7 +398,7 @@ fn row_color(cursor: bool, affordable: bool) -> Color {
 pub fn item_name(item_no: u16, dat_name: Option<String>) -> String {
     dat_name
         .filter(|n| !n.is_empty())
-        .or_else(|| ffxi_proto::item_names::lookup(item_no).map(str::to_string))
+        .or_else(|| ffxi_vocab::item_names::lookup(item_no).map(str::to_string))
         .unwrap_or_else(|| format!("Item #{item_no}"))
 }
 

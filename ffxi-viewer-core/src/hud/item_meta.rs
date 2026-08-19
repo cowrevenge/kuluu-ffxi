@@ -43,7 +43,7 @@ pub fn now_vana_ts() -> u32 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
-        .saturating_sub(ffxi_proto::vana_time::VANA_EPOCH_UNIX) as u32
+        .saturating_sub(ffxi_vocab::vana_time::VANA_EPOCH_UNIX) as u32
 }
 
 /// A charged item is unusable when it has no charges left or its recast has not

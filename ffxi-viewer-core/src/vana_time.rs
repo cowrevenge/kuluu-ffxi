@@ -3,7 +3,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use bevy::prelude::*;
 use ffxi_viewer_wire::ViewerEvent;
 
-pub use ffxi_proto::vana_time::VANA_EPOCH_UNIX as EARTH_EPOCH_UNIX;
+pub use ffxi_vocab::vana_time::VANA_EPOCH_UNIX as EARTH_EPOCH_UNIX;
 
 pub const EARTH_SECS_PER_VANA_HOUR: u64 = 144;
 

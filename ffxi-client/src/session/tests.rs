@@ -1,4 +1,3 @@
-
 use super::*;
 
 /// Drives the real [`handle_sub_packet`] arm for `opcode` and returns the
@@ -907,7 +906,7 @@ fn self_cast_bar_starts_on_magic_start_not_on_send() {
     );
 
     apply_self_battle2_to_cast(
-        &battle2_self(ffxi_proto::magic::CATEGORY_MAGIC_START, CABK),
+        &battle2_self(ffxi_vocab::magic::CATEGORY_MAGIC_START, CABK),
         &mut cast,
         &tx,
     );
@@ -921,7 +920,7 @@ fn self_cast_bar_starts_on_magic_start_not_on_send() {
     assert!(rx.try_recv().is_err(), "exactly one start event");
 
     apply_self_battle2_to_cast(
-        &battle2_self(ffxi_proto::magic::CATEGORY_MAGIC_START, CABK),
+        &battle2_self(ffxi_vocab::magic::CATEGORY_MAGIC_START, CABK),
         &mut cast,
         &tx,
     );
@@ -931,7 +930,7 @@ fn self_cast_bar_starts_on_magic_start_not_on_send() {
     );
 
     apply_self_battle2_to_cast(
-        &battle2_self(ffxi_proto::magic::CATEGORY_MAGIC_START, SPBK),
+        &battle2_self(ffxi_vocab::magic::CATEGORY_MAGIC_START, SPBK),
         &mut cast,
         &tx,
     );
@@ -950,13 +949,13 @@ fn self_cast_bar_ends_on_magic_finish() {
     let (tx, mut rx) = broadcast::channel(8);
     let mut cast = armed_cast(1000);
     apply_self_battle2_to_cast(
-        &battle2_self(ffxi_proto::magic::CATEGORY_MAGIC_START, CAWH),
+        &battle2_self(ffxi_vocab::magic::CATEGORY_MAGIC_START, CAWH),
         &mut cast,
         &tx,
     );
     let _started = rx.try_recv().expect("start");
     apply_self_battle2_to_cast(
-        &battle2_self(ffxi_proto::magic::CATEGORY_MAGIC_FINISH, 0),
+        &battle2_self(ffxi_vocab::magic::CATEGORY_MAGIC_FINISH, 0),
         &mut cast,
         &tx,
     );

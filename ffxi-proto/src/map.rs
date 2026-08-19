@@ -342,7 +342,7 @@ pub mod emote {
 
     // Emote ids referenced by name in code; the full table is the build-time
     // scrape of vendor/server/src/map/enums/emote.h
-    // (`crate::emote_names::EMOTES`), and `pinned_ids_match_scraped_table`
+    // (`ffxi_vocab::emote_names::EMOTES`), and `pinned_ids_match_scraped_table`
     // guards these against it.
     pub const BELL: u8 = 73;
     pub const JOB: u8 = 74;
@@ -570,10 +570,10 @@ mod tests {
     #[test]
     fn pinned_emote_ids_match_scraped_table() {
         use super::emote;
-        assert_eq!(crate::emote_names::lookup(emote::BELL), Some("Bell"));
-        assert_eq!(crate::emote_names::lookup(emote::JOB), Some("Job"));
+        assert_eq!(ffxi_vocab::emote_names::lookup(emote::BELL), Some("Bell"));
+        assert_eq!(ffxi_vocab::emote_names::lookup(emote::JOB), Some("Job"));
         assert_eq!(
-            emote::HELM_ONLY.map(crate::emote_names::lookup),
+            emote::HELM_ONLY.map(ffxi_vocab::emote_names::lookup),
             [Some("Logging"), Some("Excavation"), Some("Harvesting")]
         );
     }

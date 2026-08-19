@@ -1,0 +1,11 @@
+[package]
+name = "ffxi-vocab"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "FFXI game vocabulary scraped from LSB at build time: item/spell/ability/job/status names, equip and usability tables, message-text ids. No wire parsing — that is ffxi-proto."
+build = "build.rs"
+
+[build-dependencies]
+anyhow.workspace = true
+lsb-scrape = { path = "../lsb-scrape" }

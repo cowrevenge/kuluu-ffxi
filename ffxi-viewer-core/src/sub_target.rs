@@ -8,7 +8,7 @@
 //! returns to the menu with cursor preserved.
 
 use crate::input_mode::SubTargetAction;
-use ffxi_proto::valid_target::TargetFlags;
+use ffxi_vocab::valid_target::TargetFlags;
 
 /// Snapshot of one targetable entity, gathered by the client per frame.
 #[derive(Debug, Clone, Copy)]
@@ -119,10 +119,10 @@ pub fn cycle_candidate(
 pub fn action_flags(action: SubTargetAction) -> TargetFlags {
     match action {
         SubTargetAction::Spell(id) => {
-            ffxi_proto::valid_target::spell(id).unwrap_or(TargetFlags(TargetFlags::SELF))
+            ffxi_vocab::valid_target::spell(id).unwrap_or(TargetFlags(TargetFlags::SELF))
         }
         SubTargetAction::Ability(id) => {
-            ffxi_proto::valid_target::ability(id).unwrap_or(TargetFlags(TargetFlags::SELF))
+            ffxi_vocab::valid_target::ability(id).unwrap_or(TargetFlags(TargetFlags::SELF))
         }
         SubTargetAction::WeaponSkill(_) | SubTargetAction::Ranged => {
             TargetFlags(TargetFlags::ENEMY)

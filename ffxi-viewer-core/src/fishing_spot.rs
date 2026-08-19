@@ -69,7 +69,7 @@ pub fn gate_from_snapshot(snapshot: &ffxi_viewer_wire::SceneSnapshot) -> Fishing
     }
 
     let is_gear = |slot: usize| {
-        snapshot.equipped[slot].is_some_and(ffxi_proto::weapon_skill::is_fishing_gear)
+        snapshot.equipped[slot].is_some_and(ffxi_vocab::weapon_skill::is_fishing_gear)
     };
     if !is_gear(SLOT_RANGE) {
         return FishingGate::NoRod;
@@ -129,8 +129,8 @@ mod tests {
 
     #[test]
     fn rod_and_bait_pass_the_equipment_gate() {
-        assert!(ffxi_proto::weapon_skill::is_fishing_gear(ROD));
-        assert!(ffxi_proto::weapon_skill::is_fishing_gear(BAIT));
+        assert!(ffxi_vocab::weapon_skill::is_fishing_gear(ROD));
+        assert!(ffxi_vocab::weapon_skill::is_fishing_gear(BAIT));
         assert_eq!(gate_from_snapshot(&rigged()), FishingGate::Ready);
     }
 

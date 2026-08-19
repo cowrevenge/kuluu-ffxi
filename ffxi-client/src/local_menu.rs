@@ -952,7 +952,7 @@ fn job_list_menu(info: &JobInfoState, support: bool) -> Menu {
         if info.unlocked & (1u32 << job) == 0 {
             continue;
         }
-        let name = ffxi_proto::job_names::lookup(job as u16).unwrap_or("Unknown");
+        let name = ffxi_vocab::job_names::lookup(job as u16).unwrap_or("Unknown");
         let level = info
             .job_levels
             .get(job as usize)

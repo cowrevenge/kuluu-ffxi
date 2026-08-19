@@ -209,7 +209,7 @@ pub fn item_qty_label(name: &str, quantity: u32) -> String {
 pub const KEY_ITEM_UNSEEN_SUFFIX: &str = " (new)";
 
 pub fn key_item_row_label(id: u16, seen: bool) -> String {
-    let name = ffxi_proto::key_item_names::lookup(id)
+    let name = ffxi_vocab::key_item_names::lookup(id)
         .map(str::to_string)
         .unwrap_or_else(|| format!("Key Item #{id}"));
     if seen {
@@ -399,7 +399,7 @@ pub fn action_recast_remaining(
         | DynamicMenuAction::PetAbility { ability_id } => *ability_id,
         _ => return None,
     };
-    let recast_id = ffxi_proto::recast::ability_recast_id(ability_id)?;
+    let recast_id = ffxi_vocab::recast::ability_recast_id(ability_id)?;
     let expiry = ability_recasts
         .iter()
         .find(|(rid, _)| *rid == recast_id)
@@ -623,7 +623,7 @@ pub fn refresh_dynamic_menu_rows(
             .spells_known
             .iter()
             .filter_map(|&id| {
-                ffxi_proto::spell_names::lookup(id).map(|name| DynamicMenuRow {
+                ffxi_vocab::spell_names::lookup(id).map(|name| DynamicMenuRow {
                     label: name.to_string(),
                     action: DynamicMenuAction::CastSpell { spell_id: id },
                 })
@@ -636,19 +636,19 @@ pub fn refresh_dynamic_menu_rows(
                     + snap.pet_abilities_known.len(),
             );
             out.extend(snap.job_abilities_known.iter().filter_map(|&id| {
-                ffxi_proto::ability_names::lookup(id).map(|name| DynamicMenuRow {
+                ffxi_vocab::ability_names::lookup(id).map(|name| DynamicMenuRow {
                     label: name.to_string(),
                     action: DynamicMenuAction::JobAbility { ability_id: id },
                 })
             }));
             out.extend(snap.weaponskills_known.iter().filter_map(|&id| {
-                ffxi_proto::ability_names::lookup(id).map(|name| DynamicMenuRow {
+                ffxi_vocab::ability_names::lookup(id).map(|name| DynamicMenuRow {
                     label: format!("{name} (WS)"),
                     action: DynamicMenuAction::Weaponskill { skill_id: id },
                 })
             }));
             out.extend(snap.pet_abilities_known.iter().filter_map(|&id| {
-                ffxi_proto::ability_names::lookup(id).map(|name| DynamicMenuRow {
+                ffxi_vocab::ability_names::lookup(id).map(|name| DynamicMenuRow {
                     label: format!("{name} (Pet)"),
                     action: DynamicMenuAction::PetAbility { ability_id: id },
                 })
@@ -661,7 +661,7 @@ pub fn refresh_dynamic_menu_rows(
             .unwrap_or(&[])
             .iter()
             .filter_map(|slot| {
-                let name = ffxi_proto::item_names::lookup(slot.item_no)?;
+                let name = ffxi_vocab::item_names::lookup(slot.item_no)?;
                 let label = item_qty_label(name, slot.quantity);
                 Some(DynamicMenuRow {
                     label,
@@ -690,17 +690,17 @@ pub fn refresh_dynamic_menu_rows(
             snap.inventory_main()
                 .iter()
                 .filter_map(|slot| {
-                    let info = ffxi_proto::equip_info::lookup(slot.item_no)?;
-                    if !ffxi_proto::equip_info::fits_slot(&info, equip_slot) {
+                    let info = ffxi_vocab::equip_info::lookup(slot.item_no)?;
+                    if !ffxi_vocab::equip_info::fits_slot(&info, equip_slot) {
                         return None;
                     }
-                    if main_job != 0 && !ffxi_proto::equip_info::fits_job(&info, main_job) {
+                    if main_job != 0 && !ffxi_vocab::equip_info::fits_job(&info, main_job) {
                         return None;
                     }
                     if main_lv != 0 && info.level > main_lv {
                         return None;
                     }
-                    let name = ffxi_proto::item_names::lookup(slot.item_no)?;
+                    let name = ffxi_vocab::item_names::lookup(slot.item_no)?;
                     let label = if info.level > 0 {
                         format!("{name} (Lv{})", info.level)
                     } else {
@@ -775,7 +775,7 @@ pub fn emote_rows(snap: &ffxi_viewer_wire::SceneSnapshot) -> Vec<DynamicMenuRow>
         .and_then(|id| snap.party.iter().find(|m| m.id == id))
         .map(|m| m.main_job)
         .unwrap_or(0);
-    ffxi_proto::emote_names::EMOTES
+    ffxi_vocab::emote_names::EMOTES
         .iter()
         .filter(|&&(id, _)| !emote::HELM_ONLY.contains(&id))
         .filter(|&&(id, _)| {
@@ -797,7 +797,7 @@ pub fn emote_command_word(id: u8) -> String {
     if id == ffxi_proto::map::emote::JOB {
         return "jobemote".to_string();
     }
-    ffxi_proto::emote_names::lookup(id)
+    ffxi_vocab::emote_names::lookup(id)
         .map(str::to_lowercase)
         .unwrap_or_else(|| format!("emote{id}"))
 }
@@ -824,10 +824,10 @@ pub fn item_usable_now(
 ) -> bool {
     use ffxi_proto::map::container as c;
 
-    let Some(info) = ffxi_proto::item_usable::lookup(slot.item_no) else {
+    let Some(info) = ffxi_vocab::item_usable::lookup(slot.item_no) else {
         return false;
     };
-    let is_equipment = ffxi_proto::equip_info::lookup(slot.item_no).is_some();
+    let is_equipment = ffxi_vocab::equip_info::lookup(slot.item_no).is_some();
     if is_equipment {
         // Charged equipment: usable only while equipped. Equipment without
         // charges never fires from the menu even though it may sit in
@@ -851,7 +851,7 @@ pub fn usable_item_rows(snap: &ffxi_viewer_wire::SceneSnapshot) -> Vec<DynamicMe
         .flat_map(|cont| cont.items.iter())
         .filter(|slot| item_usable_now(snap, slot))
         .filter_map(|slot| {
-            let name = ffxi_proto::item_names::lookup(slot.item_no)?;
+            let name = ffxi_vocab::item_names::lookup(slot.item_no)?;
             let label = item_qty_label(name, slot.quantity);
             Some(DynamicMenuRow {
                 label,
@@ -912,7 +912,7 @@ pub fn item_action_rows(
     let movable =
         item_no != ffxi_proto::map::GIL_ITEM_NO && container != c::LOC_TEMPITEMS && !slot.locked;
     if movable {
-        let equipable = ffxi_proto::equip_info::lookup(item_no).is_some();
+        let equipable = ffxi_vocab::equip_info::lookup(item_no).is_some();
         for dest in crate::hud::item_screen::accessible_containers(snap) {
             if dest == container || dest == c::LOC_TEMPITEMS || (c::is_wardrobe(dest) && !equipable)
             {
@@ -949,7 +949,7 @@ pub fn ability_group_rows(
             .job_abilities_known
             .iter()
             .filter_map(|&id| {
-                ffxi_proto::ability_names::lookup(id).map(|name| DynamicMenuRow {
+                ffxi_vocab::ability_names::lookup(id).map(|name| DynamicMenuRow {
                     label: name.to_string(),
                     action: DynamicMenuAction::JobAbility { ability_id: id },
                 })
@@ -959,7 +959,7 @@ pub fn ability_group_rows(
             .weaponskills_known
             .iter()
             .filter_map(|&id| {
-                ffxi_proto::ability_names::lookup(id).map(|name| DynamicMenuRow {
+                ffxi_vocab::ability_names::lookup(id).map(|name| DynamicMenuRow {
                     label: name.to_string(),
                     action: DynamicMenuAction::Weaponskill { skill_id: id },
                 })
@@ -969,7 +969,7 @@ pub fn ability_group_rows(
             .pet_abilities_known
             .iter()
             .filter_map(|&id| {
-                ffxi_proto::ability_names::lookup(id).map(|name| DynamicMenuRow {
+                ffxi_vocab::ability_names::lookup(id).map(|name| DynamicMenuRow {
                     label: name.to_string(),
                     action: DynamicMenuAction::PetAbility { ability_id: id },
                 })
@@ -1277,7 +1277,7 @@ fn format_row_body(
                 .get(slot)
                 .copied()
                 .flatten()
-                .and_then(ffxi_proto::item_names::lookup)
+                .and_then(ffxi_vocab::item_names::lookup)
                 .unwrap_or("—");
             format!("{label:<7}: {item_name}")
         }
@@ -1302,7 +1302,7 @@ mod tests {
     #[test]
     fn action_recast_remaining_gates_on_cooldown_abilities() {
         let provoke = DynamicMenuAction::JobAbility { ability_id: 35 };
-        let rid = ffxi_proto::recast::ability_recast_id(35).expect("provoke has a recast group");
+        let rid = ffxi_vocab::recast::ability_recast_id(35).expect("provoke has a recast group");
         // On cooldown: expiry 30s in the future -> Some(remaining).
         assert_eq!(
             action_recast_remaining(&[(rid, 1030)], &provoke, 1000),

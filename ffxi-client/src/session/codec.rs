@@ -4,7 +4,7 @@ use super::*;
 // BuffNo u16 (the status icon id), padding u16. The server runs
 // DelStatusEffectsByIcon(BuffNo) and blocks the packet only while InEvent
 // (0x0f1_buffcancel.cpp); it does NOT re-check cancelability, so the caller
-// gates on ffxi_proto::status_effects::is_cancelable.
+// gates on ffxi_vocab::status_effects::is_cancelable.
 pub fn build_subpacket_buffcancel(sync: u16, buff_no: u16) -> Vec<u8> {
     let mut buf = vec![0u8; 8];
     buf[0..4].copy_from_slice(&build_subpacket_header(0x0F1, 2, sync));
@@ -789,7 +789,7 @@ pub(crate) fn emote_send_block_reason(
     if mode > emote::mode::MOTION {
         return Some(format!("invalid mode {mode}"));
     }
-    if ffxi_proto::emote_names::lookup(emote_id).is_none() {
+    if ffxi_vocab::emote_names::lookup(emote_id).is_none() {
         return Some(format!("unknown emote id {emote_id}"));
     }
     if emote_id == emote::BELL && !(emote::BELL_NOTE_MIN..=emote::BELL_NOTE_MAX).contains(&param) {

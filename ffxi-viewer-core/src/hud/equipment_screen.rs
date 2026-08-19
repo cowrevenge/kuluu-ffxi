@@ -466,7 +466,7 @@ fn role_value(
                 .get(selected_slot as usize)
                 .copied()
                 .flatten()
-                .and_then(ffxi_proto::item_names::lookup)
+                .and_then(ffxi_vocab::item_names::lookup)
                 .unwrap_or("(empty)");
             (
                 format!("{}: {item}", selected_slot.name()),

@@ -467,7 +467,7 @@ fn role_value(
 /// `Lv.75 Black Mage / Lv.37 White Mage` — retail levels both jobs and spaces
 /// the separator (retail capture 2026-08-04, HorizonXI).
 pub fn job_ribbon(check: Option<&ffxi_viewer_wire::CheckResult>) -> String {
-    let job_name = |id: u8| ffxi_proto::job_names::lookup(u16::from(id)).unwrap_or("Adventurer");
+    let job_name = |id: u8| ffxi_vocab::job_names::lookup(u16::from(id)).unwrap_or("Adventurer");
     match check {
         Some(c) if c.main_job != 0 => {
             let main = format!("Lv.{} {}", c.main_job_lv, job_name(c.main_job));
@@ -541,7 +541,7 @@ mod tests {
         assert_eq!(t.slot, EquipmentIndex::Main as u8);
     }
 
-    // Scraped LSB job ids (ffxi_proto::job_names).
+    // Scraped LSB job ids (ffxi_vocab::job_names).
     const BLACK_MAGE: u8 = 4;
     const WHITE_MAGE: u8 = 3;
 

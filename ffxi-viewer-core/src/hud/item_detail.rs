@@ -129,7 +129,7 @@ fn format_jobs(jobs_mask: u32) -> String {
     // Bit 0 is JOB_NONE; real jobs are 1..=22 (canonical codes scraped from LSB).
     let parts: Vec<&str> = (1..32u32)
         .filter(|bit| jobs_mask & (1 << bit) != 0)
-        .filter_map(|bit| ffxi_proto::job_names::abbrev(bit as u16))
+        .filter_map(|bit| ffxi_vocab::job_names::abbrev(bit as u16))
         .collect();
     if parts.is_empty() {
         "All".to_string()

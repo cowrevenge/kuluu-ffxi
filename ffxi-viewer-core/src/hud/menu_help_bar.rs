@@ -368,7 +368,7 @@ fn buff_bar_content(snap: &ffxi_viewer_wire::SceneSnapshot, cursor: usize) -> Op
     }
     let cursor = cursor.min(icons.len() - 1);
     let icon = icons[cursor];
-    let name = ffxi_proto::status_names::lookup(icon).unwrap_or("(Unknown effect)");
+    let name = ffxi_vocab::status_names::lookup(icon).unwrap_or("(Unknown effect)");
     Some(BarContent {
         title: menu::menu_title(MenuKind::Status).to_string(),
         counter: format!("{}/{}", cursor + 1, icons.len()),

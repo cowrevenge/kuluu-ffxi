@@ -186,7 +186,10 @@ fn spawn_backdrop_camera(
 
 fn despawn_backdrop_camera(mut commands: Commands, q: Query<Entity, With<BackdropScoped>>) {
     for e in q.iter() {
-        commands.entity(e).despawn();
+        // try_despawn: despawn() is recursive, so a parent earlier in the query may have
+        // already freed this entity; bare despawn() floods the bevy_ecs error handler with
+        // "Entity despawned" WARNs at login (same fix as despawn_ingame_entities).
+        commands.entity(e).try_despawn();
     }
 
     commands.remove_resource::<BackdropFadeMaterial>();

@@ -69,9 +69,10 @@ pub struct LensFlareMaterial {
     pub flare_tex: Option<Handle<Image>>,
 }
 
-// Fraction of the sun left unoccluded by zone geometry, written by a client-side
-// raycast against its zone collision BVH (ffxi-client sun_occlusion.rs). Consumers
-// without a BVH (wasm viewer, headless example) keep the default: fully visible.
+// Fraction of the sun left unoccluded, written by a client-side disc-tap raycast
+// against the zone collision BVH plus the drawn actors' pose-tracked Aabbs
+// (ffxi-client sun_occlusion.rs). Consumers without those (wasm viewer, headless
+// example) keep the default: fully visible.
 #[derive(Resource, Clone, Copy, Debug)]
 pub struct SunOcclusion {
     pub visibility: f32,

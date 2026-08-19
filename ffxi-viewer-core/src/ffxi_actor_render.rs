@@ -1351,7 +1351,7 @@ fn insert_auto_run_effects(commands: &mut Commands, actor_root: Entity, loaded: 
 }
 
 #[derive(Component)]
-pub(crate) struct FfxiActorMeshChild;
+pub struct FfxiActorMeshChild;
 
 #[derive(Component)]
 pub(crate) struct ActorMeshJointBounds {

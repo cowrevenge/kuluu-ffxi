@@ -472,6 +472,10 @@ pub(crate) fn spawn_map_screen(mut commands: Commands, mut images: ResMut<Assets
                 ImageNode {
                     image: placeholder,
                     color: Color::srgba(1.0, 1.0, 1.0, MAP_IMAGE_ALPHA),
+                    // Stretch, not the Auto default: Bevy 0.19 draws Auto images
+                    // aspect-fit centered inside the node, which detaches the
+                    // picture from the percent-placed marker overlay (kuluu-y4ye).
+                    image_mode: NodeImageMode::Stretch,
                     ..default()
                 },
                 Node {

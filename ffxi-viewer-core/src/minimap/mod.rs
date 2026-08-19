@@ -336,7 +336,10 @@ pub fn spawn_minimap_as_child(p: &mut ChildSpawnerCommands, images: &mut Assets<
     .with_children(|p| {
         p.spawn((
             MinimapImage,
-            ImageNode::new(placeholder),
+            // Stretch, not the Auto default: Bevy 0.19 draws Auto images
+            // aspect-fit centered inside the node, which detaches the picture
+            // from the percent-placed marker overlay (kuluu-y4ye).
+            ImageNode::new(placeholder).with_mode(NodeImageMode::Stretch),
             Node {
                 position_type: PositionType::Absolute,
                 top: Val::Px(0.0),

@@ -1,7 +1,8 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use ffxi_session::agent_socket::AGENT_PIDFILE_NAME;
 use ffxi_session::state::{AgentCommand, AgentEvent};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
@@ -9,23 +10,26 @@ use tokio::sync::{broadcast, mpsc};
 
 pub fn resolve_attach(arg: &str) -> Result<PathBuf> {
     if arg.eq_ignore_ascii_case("auto") {
-        let pidfile = std::env::temp_dir().join("ffxi-agent.pid");
-        let body = std::fs::read_to_string(&pidfile).with_context(|| {
-            format!(
-                "reading agent pidfile {} (was ffxi-client started with `--agent-listen auto`?)",
-                pidfile.display()
-            )
-        })?;
-        let v: serde_json::Value = serde_json::from_str(&body)
-            .with_context(|| format!("parsing pidfile JSON at {}", pidfile.display()))?;
-        let sock = v
-            .get("sock")
-            .and_then(|s| s.as_str())
-            .ok_or_else(|| anyhow::anyhow!("pidfile missing `sock` field"))?;
-        Ok(PathBuf::from(sock))
+        resolve_pidfile(&std::env::temp_dir().join(AGENT_PIDFILE_NAME))
     } else {
         Ok(PathBuf::from(arg))
     }
+}
+
+fn resolve_pidfile(pidfile: &Path) -> Result<PathBuf> {
+    let body = std::fs::read_to_string(pidfile).with_context(|| {
+        format!(
+            "reading agent pidfile {} (was ffxi-client started with `--agent-listen auto`?)",
+            pidfile.display()
+        )
+    })?;
+    let v: serde_json::Value = serde_json::from_str(&body)
+        .with_context(|| format!("parsing pidfile JSON at {}", pidfile.display()))?;
+    let sock = v
+        .get("sock")
+        .and_then(|s| s.as_str())
+        .ok_or_else(|| anyhow::anyhow!("pidfile missing `sock` field"))?;
+    Ok(PathBuf::from(sock))
 }
 
 pub async fn run(
@@ -209,8 +213,11 @@ mod tests {
     }
 
     #[test]
-    fn resolve_attach_auto_reads_pidfile() {
-        let pidfile = std::env::temp_dir().join("ffxi-agent.pid");
+    fn resolve_pidfile_reads_sock() {
+        let pidfile = std::env::temp_dir().join(format!(
+            "ffxi-mcp-attach-resolve-{}.pid",
+            std::process::id()
+        ));
         let sock = std::env::temp_dir().join(format!(
             "ffxi-agent-attach-resolve-{}.sock",
             std::process::id()
@@ -218,9 +225,20 @@ mod tests {
         let body = serde_json::json!({ "pid": 42u32, "sock": sock.to_string_lossy() });
         std::fs::write(&pidfile, body.to_string()).expect("write pidfile");
 
-        let p = resolve_attach("auto").expect("resolve auto");
+        let p = resolve_pidfile(&pidfile).expect("resolve pidfile");
         assert_eq!(p, sock);
 
         let _ = std::fs::remove_file(&pidfile);
+    }
+
+    #[test]
+    fn pidfile_path_contract_matches_agent_socket() {
+        let listen = agent_socket::resolve_listen("auto");
+        let pidfile = listen.pidfile.expect("auto listen carries a pidfile");
+        assert_eq!(
+            pidfile.file_name().and_then(|n| n.to_str()),
+            Some(AGENT_PIDFILE_NAME)
+        );
+        assert_eq!(pidfile.parent(), Some(std::env::temp_dir().as_path()));
     }
 }

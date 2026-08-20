@@ -356,7 +356,11 @@ pub(super) fn handle_menu_key(
     target_id: Option<u32>,
     self_pos: ffxi_viewer_wire::Vec3,
     map_state: &mut ffxi_viewer_core::hud::map_screen::MapScreenState,
-    map_markers: &mut ffxi_viewer_core::hud::map_screen::MapMarkers,
+    // `Mut` (not `&mut` off a call-site `ResMut` deref, which flags the
+    // resource changed on every menu key): dropped untouched on non-Map paths,
+    // change detection fires only when the Map screen mutates a marker
+    // (kuluu-df0x).
+    map_markers: Mut<ffxi_viewer_core::hud::map_screen::MapMarkers>,
     map_view: &ffxi_viewer_core::hud::map_screen::MapView,
     minimap_state: &ffxi_viewer_core::minimap::MinimapState,
 ) -> Option<InputMode> {
@@ -376,6 +380,7 @@ pub(super) fn handle_menu_key(
     if top_kind == MenuKind::Map {
         return handle_map_key(
             key,
+            key_code,
             bindings,
             stack,
             scene_state,
@@ -548,7 +553,7 @@ pub(super) fn handle_menu_key(
         };
         if let Some(forward) = page {
             let rows = ffxi_viewer_core::hud::menu::list_page_rows(kind);
-            let level = stack.active_level_mut()?;
+            let level = stack.current_mut()?;
             level.cursor =
                 ffxi_viewer_core::hud::menu::page_cursor(level.cursor, entry_count, rows, forward);
             return None;
@@ -556,7 +561,7 @@ pub(super) fn handle_menu_key(
     }
 
     if bindings.matches_logical(Action::NavUp, key) {
-        let level = stack.active_level_mut()?;
+        let level = stack.current_mut()?;
         level.cursor = if cursor == 0 {
             entry_count.saturating_sub(1)
         } else {
@@ -565,7 +570,7 @@ pub(super) fn handle_menu_key(
         return None;
     }
     if bindings.matches_logical(Action::NavDown, key) {
-        let level = stack.active_level_mut()?;
+        let level = stack.current_mut()?;
         let next = cursor + 1;
         level.cursor = if next >= entry_count { 0 } else { next };
         return None;
@@ -600,6 +605,247 @@ pub(super) fn handle_menu_key(
         };
     }
     None
+}
+
+#[cfg(test)]
+mod menu_key_tests {
+    use super::*;
+    use crate::keybinds_store::KeybindsStore;
+    use bevy::ecs::world::World;
+    use ffxi_viewer_core::hud::map_screen::{MapMarkers, MapScreenState, MapSubMode, MapView};
+    use ffxi_viewer_core::input_mode::Pane;
+    use ffxi_viewer_core::minimap::{MinimapAabb, MinimapState};
+
+    struct Harness {
+        bindings: Bindings,
+        scene_state: SceneState,
+        keybinds_state: KeybindsStateRes,
+        graphics: ffxi_viewer_core::GraphicsSettings,
+        status_profile_open: ffxi_viewer_core::hud::status_panel::StatusProfileOpen,
+        hud_panels: ffxi_viewer_core::hud::HudPanels,
+        net_status: ffxi_viewer_core::hud::network_status::NetStatusVisible,
+        vana_clock: ffxi_viewer_core::vana_time::VanaClock,
+        vana_clock_visible: ffxi_viewer_core::hud::vana_clock::VanaClockVisible,
+        sort_options: ffxi_viewer_core::hud::item_detail::SortOptions,
+        item_menu_focus: ffxi_viewer_core::hud::item_detail::ItemMenuFocus,
+        item_bag: ffxi_viewer_core::hud::item_screen::ItemScreenContainer,
+        dynamic: ffxi_viewer_core::hud::menu::DynamicMenu,
+        map_state: MapScreenState,
+        map_view: MapView,
+        minimap_state: MinimapState,
+        cmd_tx: Sender<AgentCommand>,
+        _cmd_rx: tokio::sync::mpsc::Receiver<AgentCommand>,
+    }
+
+    impl Harness {
+        fn new() -> Self {
+            let (cmd_tx, _cmd_rx) = tokio::sync::mpsc::channel(8);
+            Self {
+                bindings: Bindings::default(),
+                scene_state: SceneState::default(),
+                keybinds_state: KeybindsStateRes {
+                    store: KeybindsStore::new(
+                        std::env::temp_dir().join("kuluu-menu-key-tests-unused.json"),
+                    ),
+                    persisted: Default::default(),
+                },
+                graphics: Default::default(),
+                status_profile_open: Default::default(),
+                hud_panels: Default::default(),
+                net_status: Default::default(),
+                vana_clock: ffxi_viewer_core::vana_time::VanaClock::anchored_at_hour(12.0),
+                vana_clock_visible: Default::default(),
+                sort_options: Default::default(),
+                item_menu_focus: Default::default(),
+                item_bag: Default::default(),
+                dynamic: Default::default(),
+                map_state: MapScreenState::default(),
+                map_view: MapView::default(),
+                minimap_state: MinimapState::default(),
+                cmd_tx,
+                _cmd_rx,
+            }
+        }
+
+        fn key(
+            &mut self,
+            key: &Key,
+            key_code: KeyCode,
+            stack: &mut MenuStack,
+            map_markers: Mut<MapMarkers>,
+        ) -> Option<InputMode> {
+            handle_menu_key(
+                key,
+                key_code,
+                &mut self.bindings,
+                stack,
+                &mut self.scene_state,
+                &self.cmd_tx,
+                &mut self.keybinds_state,
+                &mut self.graphics,
+                &mut self.status_profile_open,
+                &mut self.hud_panels,
+                &mut self.net_status,
+                &self.vana_clock,
+                &mut self.vana_clock_visible,
+                &mut self.sort_options,
+                &mut self.item_menu_focus,
+                &mut self.item_bag,
+                &self.dynamic,
+                None,
+                ffxi_viewer_wire::Vec3::default(),
+                &mut self.map_state,
+                map_markers,
+                &self.map_view,
+                &self.minimap_state,
+            )
+        }
+    }
+
+    fn marker_world() -> World {
+        let mut world = World::new();
+        world.insert_resource(MapMarkers::default());
+        world.clear_trackers();
+        world
+    }
+
+    /// kuluu-ce6z: the cursor is read from `stack.current()`, so writes must go
+    /// to `current_mut()` too. With `active_pane = Pane::Left` on a depth-2
+    /// stack, `active_level_mut()` resolves to the PARENT level and a NavDown
+    /// computed from the top level's state would corrupt the parent's cursor.
+    #[test]
+    fn nav_down_writes_the_level_it_read_even_with_left_pane_active() {
+        const PARENT_CURSOR_SENTINEL: usize = 3;
+        let mut harness = Harness::new();
+        let mut world = marker_world();
+        let mut stack = MenuStack::root();
+        stack.push(MenuKind::Config);
+        stack.levels[0].cursor = PARENT_CURSOR_SENTINEL;
+        stack.active_pane = Pane::Left;
+
+        let markers = world.resource_mut::<MapMarkers>();
+        harness.key(&Key::ArrowDown, KeyCode::ArrowDown, &mut stack, markers);
+
+        assert_eq!(stack.levels[1].cursor, 1, "top level cursor advances");
+        assert_eq!(
+            stack.levels[0].cursor, PARENT_CURSOR_SENTINEL,
+            "parent level cursor is untouched"
+        );
+        assert_eq!(stack.active_pane, Pane::Left, "pane not altered by nav");
+    }
+
+    /// kuluu-df0x: navigating a non-Map menu must not flag MapMarkers changed
+    /// (marker_store::sync_markers rewrites markers.json on is_changed).
+    #[test]
+    fn non_map_menu_key_does_not_flag_markers_changed() {
+        let mut harness = Harness::new();
+        let mut world = marker_world();
+        let mut stack = MenuStack::root();
+
+        let markers = world.resource_mut::<MapMarkers>();
+        harness.key(&Key::ArrowDown, KeyCode::ArrowDown, &mut stack, markers);
+
+        assert!(
+            !world.is_resource_changed::<MapMarkers>(),
+            "menu navigation must not dirty MapMarkers"
+        );
+    }
+
+    #[test]
+    fn placing_a_marker_flags_markers_changed() {
+        const ZONE: u16 = 231;
+        let mut harness = Harness::new();
+        let mut world = marker_world();
+        let mut stack = MenuStack::root();
+        stack.push(MenuKind::Map);
+        stack.take_absorb_open_minus();
+
+        harness.scene_state.snapshot.zone_id = Some(ZONE);
+        harness.map_state.mode = MapSubMode::Markers;
+        harness.map_state.map_cursor = Some(bevy::math::Vec2::splat(0.5));
+        harness.map_state.marker_entry = Some("Camp".into());
+        harness.map_view.visible_aabb = Some(MinimapAabb {
+            min: bevy::math::Vec2::new(-100.0, -100.0),
+            max: bevy::math::Vec2::new(100.0, 100.0),
+        });
+
+        let markers = world.resource_mut::<MapMarkers>();
+        harness.key(&Key::Enter, KeyCode::Enter, &mut stack, markers);
+
+        assert!(
+            world.is_resource_changed::<MapMarkers>(),
+            "confirming a named marker must dirty MapMarkers so it persists"
+        );
+        let markers = world.resource::<MapMarkers>();
+        assert_eq!(markers.for_zone(ZONE).len(), 1);
+        assert_eq!(markers.for_zone(ZONE)[0].label, "Camp");
+    }
+
+    /// kuluu-kzxp: Period/Comma zoom the full-screen map on default binds. The
+    /// logical-key path never resolves non-letter printables, so the zoom gate
+    /// must match on the raw keycode.
+    #[test]
+    fn default_zoom_keys_zoom_the_map_screen() {
+        let mut harness = Harness::new();
+        let mut world = marker_world();
+        let mut stack = MenuStack::root();
+        stack.push(MenuKind::Map);
+        stack.take_absorb_open_minus();
+        assert_eq!(harness.map_state.zoom_radius, None, "opens fit-to-zone");
+
+        let markers = world.resource_mut::<MapMarkers>();
+        harness.key(
+            &Key::Character(".".into()),
+            KeyCode::Period,
+            &mut stack,
+            markers,
+        );
+        let zoomed_in = harness.map_state.zoom_radius;
+        assert!(zoomed_in.is_some(), "Period zooms in from fit-to-zone");
+
+        let markers = world.resource_mut::<MapMarkers>();
+        harness.key(
+            &Key::Character(",".into()),
+            KeyCode::Comma,
+            &mut stack,
+            markers,
+        );
+        assert_eq!(
+            harness.map_state.zoom_radius, None,
+            "Comma zooms back out to fit-to-zone"
+        );
+    }
+
+    #[test]
+    fn typing_punctuation_into_a_marker_label_does_not_zoom() {
+        let mut harness = Harness::new();
+        let mut world = marker_world();
+        let mut stack = MenuStack::root();
+        stack.push(MenuKind::Map);
+        stack.take_absorb_open_minus();
+        harness.map_state.mode = MapSubMode::Markers;
+        harness.map_state.marker_entry = Some("E-8".to_string());
+
+        let markers = world.resource_mut::<MapMarkers>();
+        harness.key(
+            &Key::Character(",".into()),
+            KeyCode::Comma,
+            &mut stack,
+            markers,
+        );
+        let markers = world.resource_mut::<MapMarkers>();
+        harness.key(
+            &Key::Character(".".into()),
+            KeyCode::Period,
+            &mut stack,
+            markers,
+        );
+        assert_eq!(harness.map_state.marker_entry.as_deref(), Some("E-8,."));
+        assert_eq!(
+            harness.map_state.zoom_radius, None,
+            "zoom binds must not fire while a marker label is being typed"
+        );
+    }
 }
 
 #[cfg(test)]

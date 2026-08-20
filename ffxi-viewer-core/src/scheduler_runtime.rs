@@ -24,8 +24,9 @@ pub const RETAIL_FPS: f32 = 30.0;
 
 const POST_FINISH_TTL_SECS: f32 = 2.0;
 
-// The entity the currently-running routine is aimed at. Written in the same commands chain as
-// `ActiveScheduler` by every routine dispatcher, so it can never outlive the routine that set it.
+// The entity the currently-running routine is aimed at. Written unconditionally in the same
+// commands chain as `ActiveScheduler` by every routine dispatcher and stripped with it at the
+// post-finish TTL, so a routine never reads a predecessor's target.
 #[derive(Component, Debug, Clone, Copy, Default)]
 pub struct ActionTarget(pub Option<Entity>);
 
@@ -244,7 +245,9 @@ pub fn tick_active_schedulers(
         if sched.finished() {
             let finish_secs = sched.last_frame() as f32 / ROUTINE_FPS;
             if sched.elapsed >= finish_secs + POST_FINISH_TTL_SECS {
-                commands.entity(entity).remove::<ActiveScheduler>();
+                commands
+                    .entity(entity)
+                    .remove::<(ActiveScheduler, ActionAssets, ActionTarget)>();
             }
         }
     }
@@ -1112,7 +1115,7 @@ pub fn dispatch_cast_routine_started(
     global: Option<Res<GlobalEffectDir>>,
     q_cast: Query<&CastRoutine>,
     mut sim: ResMut<crate::particle_sim::ParticleSimulator>,
-    mut spell_suffix: Local<crate::ffxi_actor_render::SpellSuffixCache>,
+    mut spell_suffix: ResMut<crate::ffxi_actor_render::SpellSuffixCache>,
     mut commands: Commands,
     mut last_seen: Local<u64>,
 ) {
@@ -1418,11 +1421,10 @@ fn run_routine_on(
     let Some(active) = ActiveScheduler::from_routine(&lookup, routine) else {
         return;
     };
-    let mut entity = commands.entity(entity);
-    entity.try_insert(active);
-    if let Some(target) = flipped_target {
-        entity.try_insert(ActionTarget(Some(target)));
-    }
+    commands
+        .entity(entity)
+        .try_insert(active)
+        .try_insert(ActionTarget(flipped_target));
 }
 
 // Belt-and-braces stop for the case retail's 0x2D StopParticle stages cannot reach: an
@@ -1924,6 +1926,41 @@ mod tests {
 
     fn make_scheduler(name: [u8; 4], stages: Vec<TimedStage>) -> Scheduler {
         Scheduler { name, stages }
+    }
+
+    // ActionAssets holds a routine's decoded textures/meshes and ActionTarget its aim; both must
+    // leave with ActiveScheduler at the post-finish TTL or every actor that ever ran an action
+    // retains one action DAT's decoded asset set (and a stale target) until despawn.
+    #[test]
+    fn tick_active_schedulers_strips_action_components_after_ttl() {
+        let mut app = App::new();
+        app.add_message::<SchedulerStageEvent>()
+            .init_resource::<Time>()
+            .add_systems(Update, tick_active_schedulers);
+
+        let actor = app
+            .world_mut()
+            .spawn((
+                ActiveScheduler::from_scheduler(&make_scheduler(*b"test", Vec::new())),
+                ActionAssets::default(),
+                ActionTarget(None),
+            ))
+            .id();
+
+        let half_ttl = std::time::Duration::from_secs_f32(POST_FINISH_TTL_SECS / 2.0);
+        app.world_mut().resource_mut::<Time>().advance_by(half_ttl);
+        app.update();
+        let entity = app.world().entity(actor);
+        assert!(entity.contains::<ActiveScheduler>());
+        assert!(entity.contains::<ActionAssets>());
+        assert!(entity.contains::<ActionTarget>());
+
+        app.world_mut().resource_mut::<Time>().advance_by(half_ttl);
+        app.update();
+        let entity = app.world().entity(actor);
+        assert!(!entity.contains::<ActiveScheduler>());
+        assert!(!entity.contains::<ActionAssets>());
+        assert!(!entity.contains::<ActionTarget>());
     }
 
     // Every completion routine ends in a 0x2B DamageCallback (a spell's `mdam`), so a melee

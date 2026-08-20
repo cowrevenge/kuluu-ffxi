@@ -384,8 +384,9 @@ pub fn entry_action(
     dynamic.rows.get(idx).map(|r| r.action)
 }
 
-/// Remaining recast (seconds) for a menu action, or `None` if ready. `now` is
-/// absolute Unix seconds (matching the 0x119 ABIL_RECAST expiry). The single
+/// Remaining recast (seconds) for a menu action, or `None` if ready. `now` must
+/// be [`ffxi_viewer_wire::recast_now_unix`] — the clock the 0x119 ABIL_RECAST
+/// expiries are stamped with. The single
 /// source of truth for both greying a menu row and blocking its confirm. Spells
 /// have no snapshot recast field yet (LSB never sends magic recasts), so only
 /// job/pet abilities resolve here.
@@ -1320,6 +1321,31 @@ mod tests {
                 1000
             ),
             None
+        );
+    }
+
+    #[test]
+    fn recast_expiry_stamped_with_recast_now_unix_reads_back_undrifted() {
+        // Guard for kuluu-t815: expiries are absolute seconds on the
+        // recast_now_unix() clock, so a consumer passing that same clock as
+        // `now` must read back the stamped duration (to within one tick).
+        // The gate (text_input) and display (target_action_menu) both do; a
+        // consumer on any other clock (e.g. VanaClock) would drift by the
+        // client/server skew this test cannot see — keep them on this helper.
+        const REMAINING_SECS: u32 = 45;
+        let provoke = DynamicMenuAction::JobAbility { ability_id: 35 };
+        let rid = ffxi_vocab::recast::ability_recast_id(35).expect("provoke has a recast group");
+        let expiry = ffxi_viewer_wire::recast_now_unix() + REMAINING_SECS;
+
+        let remaining = action_recast_remaining(
+            &[(rid, expiry)],
+            &provoke,
+            ffxi_viewer_wire::recast_now_unix(),
+        )
+        .expect("ability still on recast");
+        assert!(
+            (REMAINING_SECS - 1..=REMAINING_SECS).contains(&remaining),
+            "remaining {remaining} drifted from stamped {REMAINING_SECS}"
         );
     }
 

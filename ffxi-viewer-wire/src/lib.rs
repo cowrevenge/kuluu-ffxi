@@ -43,6 +43,18 @@ pub const PROTOCOL_VERSION: u32 = 19;
 /// cannot drift into a countdown nothing has room to draw.
 pub const MAX_STATUS_TIMER_SECS: u32 = 100 * 3600;
 
+/// The one clock for `ability_recasts` math: local wall-clock Unix seconds.
+/// The producer stamps expiries with it and every gate/display computes
+/// remaining time against it — reading a different clock (e.g. the
+/// server-anchored Vana'diel clock) lets the menu and the dispatch gate
+/// disagree under client/server skew (kuluu-t815).
+pub fn recast_now_unix() -> u32 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as u32)
+        .unwrap_or(0)
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 pub struct Vec3 {
     pub x: f32,
@@ -575,6 +587,8 @@ pub struct SceneSnapshot {
     #[serde(default)]
     pub status_icon_expiries: Vec<u32>,
 
+    /// (recast group id, absolute expiry) pairs; expiries are local-clock Unix
+    /// seconds stamped with [`recast_now_unix`], which all readers must use.
     #[serde(default)]
     pub ability_recasts: Vec<(u16, u32)>,
 

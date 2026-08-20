@@ -121,7 +121,6 @@ pub fn update_target_action_menu(
     overlay: Res<ActiveOverlay>,
 
     scene: Res<crate::snapshot::SceneState>,
-    vana_clock: Res<crate::vana_time::VanaClock>,
     mut panel_q: Query<&mut Node, With<TargetActionMenu>>,
     mut row_q: Query<
         (&TargetActionRow, &mut Node, &mut Text, &mut TextColor),
@@ -206,7 +205,7 @@ pub fn update_target_action_menu(
             } else if let Some(leaf) = rows.get(start + row.slot) {
                 let is_cursor = start + row.slot == sub_cursor;
                 let caret = style::cursor_prefix(is_cursor);
-                let now = vana_clock.earth_unix_secs_now() as u32;
+                let now = ffxi_viewer_wire::recast_now_unix();
                 match crate::hud::menu::action_recast_remaining(
                     &scene.snapshot.ability_recasts,
                     &leaf.action,

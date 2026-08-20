@@ -247,6 +247,19 @@ pub async fn run(
     let mut current_seed = key3;
     let mut iteration: u32 = 0;
 
+    // The spell DAT (ROM/118/114.DAT) is zone-invariant: load it once off the
+    // runtime instead of re-reading it on every zone change inside the loop.
+    let spell_table: Option<std::sync::Arc<ffxi_dat::spell_info::SpellTable>> =
+        match cfg.dat_root.clone() {
+            Some(root) => tokio::task::spawn_blocking(move || {
+                ffxi_dat::spell_info::SpellTable::open(root.root())
+            })
+            .await
+            .ok()
+            .map(std::sync::Arc::new),
+            None => None,
+        };
+
     let mut spawn_fallback: Option<Vec3> = None;
     emit_stage(&event_tx, Stage::MapBootstrap);
     tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
@@ -263,6 +276,7 @@ pub async fn run(
             spawn_fallback.take(),
             &mut cmd_rx,
             &event_tx,
+            spell_table.clone(),
         )
         .await?;
 
@@ -320,6 +334,7 @@ async fn run_map_session(
     spawn_fallback: Option<Vec3>,
     cmd_rx: &mut mpsc::Receiver<AgentCommand>,
     event_tx: &broadcast::Sender<AgentEvent>,
+    spell_table: Option<std::sync::Arc<ffxi_dat::spell_info::SpellTable>>,
 ) -> Result<MapOutcome> {
     map.send_bootstrap(bootstrap).await?;
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
@@ -497,9 +512,7 @@ async fn run_map_session(
         treasure_pool,
         mog,
         flood_zone_messages,
-        cfg.dat_root
-            .as_ref()
-            .map(|r| ffxi_dat::spell_info::SpellTable::open(r.root())),
+        spell_table,
         cfg.server.clone(),
     )
     .await
@@ -1938,7 +1951,7 @@ async fn keepalive_loop(
     mut treasure_pool: treasure::TreasurePool,
     mut mog: SelfMogState,
     flood_zone_messages: Vec<(u16, Vec<u8>)>,
-    spell_table: Option<ffxi_dat::spell_info::SpellTable>,
+    spell_table: Option<std::sync::Arc<ffxi_dat::spell_info::SpellTable>>,
     // FFXI_SERVER host (session::Config::server); the search server listens
     // beside the auth/lobby ports there, not on the per-zone map address.
     server_host: String,
@@ -4903,8 +4916,22 @@ const TEMPLATE_OVERRIDES: &[(u16, &str)] = &[
         "The <player> uses <ability>. <target> takes <number> points of damage.",
     ),
     (324, "The <player> uses <ability>, but misses <target>."),
+    // 565 (MsgBasic::Obtains) is only ever sent with gil as the argument —
+    // vendor/server/src/map/utils/charutils.cpp:4756 (party split) and :4763
+    // (solo) both push gil into GP_SERV_COMMAND_BATTLE_MESSAGE, and
+    // vendor/server/scripts/globals/regimes.lua:1480 names it FOV_OBTAINS_GIL —
+    // so the scraped "<target> obtains <amount>." is rendered with the gil
+    // unit (retail wording tracked in kuluu-us91).
     (565, "<target> obtains <amount> gil."),
 ];
+
+// Ids above that intentionally shadow a scraped msg_basic entry: for all but
+// 565 the LSB enumerator comment elides tokens as a bare "..", so the scrape
+// carries an unusable template (see the WHY atop TEMPLATE_OVERRIDES); 565's
+// reason is on its entry. Guarded by
+// tests::template_overrides_only_shadow_msg_basic_deliberately.
+#[cfg(test)]
+const DELIBERATE_SHADOWS: &[u16] = &[14, 31, 100, 101, 102, 103, 136, 137, 317, 324, 565];
 
 fn subject_is_tar(message_num: u16) -> bool {
     matches!(message_num, 97)
@@ -5425,7 +5452,7 @@ fn decode_miscdata_status_icons(data: &[u8]) -> Option<(Vec<u16>, Vec<u32>)> {
 fn decode_abil_recast(data: &[u8]) -> Vec<(u16, u32)> {
     const ENTRY_SIZE: usize = 8;
     const ENTRY_COUNT: usize = 31;
-    let now_unix = now_unix_secs();
+    let now_unix = ffxi_viewer_wire::recast_now_unix();
     let mut out = Vec::new();
     for i in 0..ENTRY_COUNT {
         let off = i * ENTRY_SIZE;
@@ -5437,7 +5464,7 @@ fn decode_abil_recast(data: &[u8]) -> Vec<(u16, u32)> {
         if timer == 0 {
             continue;
         }
-        out.push((timer_id, (now_unix + timer as u64) as u32));
+        out.push((timer_id, now_unix.saturating_add(timer as u32)));
     }
     out
 }
@@ -5562,13 +5589,15 @@ fn is_no_speaker_chat_kind(kind: u8) -> bool {
 // Server customMenu prompt (home point Set/Yes/No, quest confirmations, …):
 // GP_SERV_COMMAND_CHAT_STD with type MESSAGE_GMPROMPT and sender name
 // `_CUSTOM_MENU`, message = quoted-concat `"Title""Opt1""Opt2"…`
-// (vendor/server/src/map/lua/lua_baseentity.cpp:621 customMenu +
-// luautils.cpp SetCustomMenuContext). The reply round-trips as a `_CUSTOM_MENU`
-// tell whose body the server parses in HandleCustomMenu (0x0b6_chat_name.cpp:79).
+// (vendor/server/src/map/lua/lua_baseentity.cpp:615 customMenu +
+// luautils.cpp:5288 SetCustomMenuContext). The reply round-trips as a
+// `_CUSTOM_MENU` tell the server routes to HandleCustomMenu
+// (0x0b6_chat_name.cpp:79-:82).
 const CUSTOM_MENU_SENDER: &str = "_CUSTOM_MENU";
 const MESSAGE_GMPROMPT: u8 = 12; // vendor/server/src/map/enums/chat_message_type.h:37
-                                 // HandleCustomMenu extracts the result after this marker and drops the trailing
-                                 // `)`; the "Canceled." payload takes the onCancelled branch (luautils.cpp NA).
+                                 // HandleCustomMenu (luautils.cpp:5323) extracts the result after this marker and
+                                 // drops the trailing `)`; the "Canceled." payload takes the onCancelled branch
+                                 // (luautils.cpp:5368 NA).
 const CUSTOM_MENU_RESULT_MARKER: &str = ": Result (";
 const CUSTOM_MENU_CANCEL: &str = "Canceled.";
 

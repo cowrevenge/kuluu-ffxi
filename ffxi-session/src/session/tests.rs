@@ -1192,8 +1192,22 @@ fn tell_packet_truncates_oversize_inputs() {
     let long_name = "a".repeat(50);
     let buf = build_subpacket_tell(0, &long_name, "x");
 
-    assert_eq!(&buf[6..20], &[b'a'; 14][..], "first 14 chars of name");
-    assert_eq!(buf[20], 0, "sName NUL-terminated even on truncation");
+    // sName is char[15] read via asStringFromUntrustedSource(sName,
+    // sizeof(sName)) (0x0b6_chat_name.cpp:76), so a full unterminated
+    // 15-byte field is legal on the wire.
+    assert_eq!(&buf[6..21], &[b'a'; 15][..], "first 15 chars of name");
+    assert_eq!(&buf[21..22], b"x", "message follows the full sName field");
+}
+
+#[test]
+fn tell_packet_carries_full_fifteen_char_name() {
+    let name = "Abcdefghijklmno";
+    assert_eq!(name.len(), crate::session::codec::CHAT_NAME_SNAME_LEN);
+    let buf = build_subpacket_tell(0, name, "hi");
+
+    assert_eq!(&buf[6..21], name.as_bytes(), "all 15 name bytes carried");
+    assert_eq!(&buf[21..23], b"hi", "message body");
+    assert_eq!(buf[23], 0, "trailing NUL");
 }
 
 #[test]
@@ -1704,6 +1718,28 @@ fn battle2_self_ja_uses_ability_line_resolves_from_override() {
         "got: {}",
         line.text
     );
+}
+
+#[test]
+fn template_overrides_only_shadow_msg_basic_deliberately() {
+    for &(id, template) in TEMPLATE_OVERRIDES {
+        match ffxi_vocab::msg_basic::lookup(id) {
+            None => assert!(
+                !DELIBERATE_SHADOWS.contains(&id),
+                "id {id} is listed as a deliberate shadow but the scrape has no entry to shadow"
+            ),
+            Some(scraped) => {
+                assert_ne!(
+                    template, scraped,
+                    "id {id} silently shadows an identical scraped msg_basic value"
+                );
+                assert!(
+                    DELIBERATE_SHADOWS.contains(&id),
+                    "id {id} overrides scraped msg_basic {scraped:?} without a DELIBERATE_SHADOWS listing"
+                );
+            }
+        }
+    }
 }
 
 #[test]
@@ -2451,15 +2487,21 @@ fn status_icon_expiry_recovers_remaining_seconds() {
 
 #[test]
 fn abil_recast_decodes_running_timers() {
+    const TIMER_SECS: u16 = 120;
     let mut data = vec![0u8; 8 * 31 + 8];
-    data[0..2].copy_from_slice(&120u16.to_le_bytes());
+    data[0..2].copy_from_slice(&TIMER_SECS.to_le_bytes());
     data[3] = 5; // TimerId (Provoke recast group)
     data[8..10].copy_from_slice(&0u16.to_le_bytes()); // second slot ready -> skipped
     data[11] = 7;
+    let before = ffxi_viewer_wire::recast_now_unix();
     let recasts = super::decode_abil_recast(&data);
+    let after = ffxi_viewer_wire::recast_now_unix();
     assert_eq!(recasts.len(), 1);
     assert_eq!(recasts[0].0, 5);
-    assert!(recasts[0].1 >= now_unix_secs() as u32 + 119);
+    // Expiry must be stamped with recast_now_unix() — the clock every consumer
+    // (gate + display) reads (kuluu-t815).
+    assert!(recasts[0].1 >= before + TIMER_SECS as u32);
+    assert!(recasts[0].1 <= after + TIMER_SECS as u32);
 }
 
 #[test]

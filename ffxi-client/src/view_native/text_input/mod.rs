@@ -295,7 +295,7 @@ pub fn text_input_system(
                     current_target,
                     self_pos,
                     &mut slash_writers.map_screen_state,
-                    &mut slash_writers.map_markers,
+                    slash_writers.map_markers.reborrow(),
                     &slash_writers.map_view,
                     &slash_writers.minimap_state,
                 ) {
@@ -577,7 +577,8 @@ fn handle_trade_key(
     if bindings.matches_logical(Action::NavConfirm, key) {
         match trade_state.focus {
             TradeFocus::Gil => {
-                let snapshot_gil = 0;
+                let snapshot_gil =
+                    ffxi_viewer_core::hud::delivery::current_gil(&scene_state.snapshot);
                 trade::begin_gil_entry(trade_state, snapshot_gil);
                 None
             }
@@ -1072,12 +1073,8 @@ fn dispatch_dynamic_menu_action(
 ) {
     use ffxi_viewer_core::hud::menu::DynamicMenuAction as A;
     // Refuse an ability still on recast client-side (retail blocks it locally rather
-    // than sending it and getting the server's "wait longer" reject). 0x119 recasts
-    // are absolute Unix expiry, so compare against wall-clock Unix seconds.
-    let now_unix = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as u32)
-        .unwrap_or(0);
+    // than sending it and getting the server's "wait longer" reject).
+    let now_unix = ffxi_viewer_wire::recast_now_unix();
     if let Some(remaining) = ffxi_viewer_core::hud::menu::action_recast_remaining(
         &scene_state.snapshot.ability_recasts,
         &action,

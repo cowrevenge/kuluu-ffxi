@@ -250,6 +250,9 @@ pub(crate) fn insert_dat_roots(
     sink.put(ffxi_viewer_core::cutscene::CutsceneFadeDatRoot(
         dat_root.clone(),
     ));
+    // Re-arm the latched spell-DAT load so a settings-screen DAT reload doesn't
+    // serve suffixes from the previous install (kuluu-08rh).
+    sink.put(ffxi_viewer_core::ffxi_actor_render::SpellSuffixCache::default());
     sink.put(DatRootRes(dat_root));
 }
 

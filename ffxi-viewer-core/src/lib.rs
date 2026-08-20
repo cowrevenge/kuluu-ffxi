@@ -415,6 +415,12 @@ impl<S: SceneSource + Resource + Component<Mutability = bevy::ecs::component::Mu
                 .before(ffxi_actor_render::tick_live_ffxi_actors),
         );
 
+        // Process-wide: one lazily-loaded copy of the zone-invariant spell DAT
+        // (ROM/118/114.DAT), shared by dispatch_action_overlay and
+        // scheduler_runtime::dispatch_cast_routine_started; no session drain.
+        #[cfg(not(target_arch = "wasm32"))]
+        app.init_resource::<ffxi_actor_render::SpellSuffixCache>();
+
         #[cfg(not(target_arch = "wasm32"))]
         app.add_systems(
             Update,

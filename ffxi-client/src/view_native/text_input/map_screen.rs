@@ -6,12 +6,13 @@ const MAP_CURSOR_STEP_UV: f32 = 0.02;
 #[allow(clippy::too_many_arguments)]
 pub(super) fn handle_map_key(
     key: &Key,
+    key_code: KeyCode,
     bindings: &Bindings,
     stack: &mut MenuStack,
     scene_state: &mut SceneState,
     cmd_tx: &Sender<AgentCommand>,
     map_state: &mut ffxi_viewer_core::hud::map_screen::MapScreenState,
-    map_markers: &mut ffxi_viewer_core::hud::map_screen::MapMarkers,
+    map_markers: Mut<ffxi_viewer_core::hud::map_screen::MapMarkers>,
     map_view: &ffxi_viewer_core::hud::map_screen::MapView,
     minimap_state: &ffxi_viewer_core::minimap::MinimapState,
 ) -> Option<InputMode> {
@@ -19,18 +20,23 @@ pub(super) fn handle_map_key(
         change_map_targets, widescan_rows, MapSubMode, COMMAND_ROWS,
     };
 
-    // Zoom the map with the camera-zoom keys in any submode (dedicated keys, so
-    // they never clash with the arrow-driven cursor/crosshair). The Map keeps its
-    // own zoom, independent of the minimap (kuluu-bi1s.3).
-    let zone_half =
-        ffxi_viewer_core::minimap::zone_half_span(minimap_state.retail_aabb.or(minimap_state.aabb));
-    if bindings.matches_logical(Action::CameraZoomIn, key) {
-        map_state.zoom_by(1.0 / ffxi_viewer_core::minimap::ZOOM_STEP_FACTOR, zone_half);
-        return None;
-    }
-    if bindings.matches_logical(Action::CameraZoomOut, key) {
-        map_state.zoom_by(ffxi_viewer_core::minimap::ZOOM_STEP_FACTOR, zone_half);
-        return None;
+    // Zoom the map with the camera-zoom keys in any submode, except while a
+    // marker label is being typed: the default binds are Period/Comma, which
+    // the label needs as literal '.'/',' text. Matched on the raw keycode
+    // because the logical-key path never resolves symbol keys (kuluu-kzxp).
+    // The Map keeps its own zoom, independent of the minimap (kuluu-bi1s.3).
+    if map_state.marker_entry.is_none() {
+        let zone_half = ffxi_viewer_core::minimap::zone_half_span(
+            minimap_state.retail_aabb.or(minimap_state.aabb),
+        );
+        if bindings.matches_keycode(Action::CameraZoomIn, key_code) {
+            map_state.zoom_by(1.0 / ffxi_viewer_core::minimap::ZOOM_STEP_FACTOR, zone_half);
+            return None;
+        }
+        if bindings.matches_keycode(Action::CameraZoomOut, key_code) {
+            map_state.zoom_by(ffxi_viewer_core::minimap::ZOOM_STEP_FACTOR, zone_half);
+            return None;
+        }
     }
 
     match map_state.mode {
@@ -117,7 +123,10 @@ fn handle_markers_key(
     bindings: &Bindings,
     scene_state: &mut SceneState,
     map_state: &mut ffxi_viewer_core::hud::map_screen::MapScreenState,
-    map_markers: &mut ffxi_viewer_core::hud::map_screen::MapMarkers,
+    // `Mut` so change detection (which triggers the markers.json rewrite in
+    // marker_store::sync_markers) fires only on the branch that actually
+    // mutates a marker, not on every keypress routed through here (kuluu-df0x).
+    mut map_markers: Mut<ffxi_viewer_core::hud::map_screen::MapMarkers>,
     visible_aabb: Option<ffxi_viewer_core::minimap::MinimapAabb>,
 ) -> Option<InputMode> {
     use ffxi_viewer_core::hud::map_screen::MapMarker;

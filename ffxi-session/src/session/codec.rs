@@ -588,13 +588,20 @@ pub(crate) fn build_subpacket_chat(sync: u16, kind: u8, text: &str) -> Vec<u8> {
     buf
 }
 
+// GP_CLI_COMMAND_CHAT_NAME.sName is char[15] (vendor/server/src/map/packets/
+// c2s/0x0b6_chat_name.h:31); LSB reads it via asStringFromUntrustedSource(
+// sName, sizeof(sName)) (0x0b6_chat_name.cpp:76), whose strnlen form tolerates
+// a fully-populated unterminated field, so all 15 bytes are usable.
+pub(crate) const CHAT_NAME_SNAME_LEN: usize = 15;
+const CHAT_NAME_MESSAGE_OFFSET: usize = 4 + 1 + 1 + CHAT_NAME_SNAME_LEN;
+
 pub(crate) fn build_subpacket_tell(sync: u16, recipient: &str, text: &str) -> Vec<u8> {
     let r_bytes = recipient.as_bytes();
-    let r_len = r_bytes.len().min(14);
+    let r_len = r_bytes.len().min(CHAT_NAME_SNAME_LEN);
     let t_bytes = text.as_bytes();
     let t_len = t_bytes.len().min(127);
 
-    let body_unpadded = 1 + 1 + 15 + t_len + 1;
+    let body_unpadded = 1 + 1 + CHAT_NAME_SNAME_LEN + t_len + 1;
     let body_padded = (body_unpadded + 3) & !3;
     let total = 4 + body_padded;
     let size_words = (total / 4) as u16;
@@ -609,7 +616,8 @@ pub(crate) fn build_subpacket_tell(sync: u16, recipient: &str, text: &str) -> Ve
 
     buf[6..6 + r_len].copy_from_slice(&r_bytes[..r_len]);
 
-    buf[21..21 + t_len].copy_from_slice(&t_bytes[..t_len]);
+    buf[CHAT_NAME_MESSAGE_OFFSET..CHAT_NAME_MESSAGE_OFFSET + t_len]
+        .copy_from_slice(&t_bytes[..t_len]);
     buf
 }
 

@@ -237,6 +237,15 @@ impl Bindings {
         nav_keycode_for(key) == Some(b.key)
     }
 
+    /// Match against the physical key code of a keyboard event. Needed where a
+    /// bind lives on a non-letter printable (e.g. CameraZoomIn/Out on
+    /// Period/Comma), which `matches_logical` deliberately never resolves.
+    pub fn matches_keycode(&self, action: Action, key_code: KeyCode) -> bool {
+        self.map
+            .get(&action)
+            .is_some_and(|b| b.mods == Modifiers::NONE && b.key == key_code)
+    }
+
     /// Short display name for the key bound to `action`, for UI hints like
     /// "Sort  [F]". Falls back to `None` when the action is unbound or the
     /// bound key has no label yet.
@@ -444,6 +453,29 @@ mod tests {
         let mut b = Bindings::empty();
         b.insert(Action::OpenMenu, KeyBind::new(KeyCode::Minus));
         assert!(!b.matches_logical(Action::OpenMenu, &Key::Character("-".into())));
+    }
+
+    #[test]
+    fn matches_keycode_resolves_symbol_binds_logical_never_matches() {
+        let b = Bindings::default();
+
+        assert!(b.matches_keycode(Action::CameraZoomIn, KeyCode::Period));
+        assert!(b.matches_keycode(Action::CameraZoomOut, KeyCode::Comma));
+        assert!(!b.matches_keycode(Action::CameraZoomIn, KeyCode::Comma));
+
+        assert!(!b.matches_logical(Action::CameraZoomIn, &Key::Character(".".into())));
+        assert!(!b.matches_logical(Action::CameraZoomOut, &Key::Character(",".into())));
+    }
+
+    #[test]
+    fn matches_keycode_requires_no_modifiers() {
+        let mut b = Bindings::empty();
+        b.insert(
+            Action::CameraZoomIn,
+            KeyBind::with(KeyCode::Period, Modifiers::CTRL),
+        );
+        assert!(!b.matches_keycode(Action::CameraZoomIn, KeyCode::Period));
+        assert!(!b.matches_keycode(Action::CameraZoomOut, KeyCode::Period));
     }
 
     #[test]

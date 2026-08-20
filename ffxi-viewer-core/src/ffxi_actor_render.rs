@@ -3007,7 +3007,7 @@ const CAST_TIMEOUT_FRAMES: f32 = 60.0 * FRAME_RATE;
 // The cast-motion clip keys on the retail spell DAT's magicType (research/xim
 // DatResource.kt::castSuffix), which splits enfeebling across white/black — unlike
 // the LSB magic skill. Fall back to the skill-derived suffix when the DAT is absent.
-#[derive(Default)]
+#[derive(Default, Resource)]
 pub struct SpellSuffixCache {
     loaded: bool,
     table: Option<ffxi_dat::spell_info::SpellTable>,
@@ -3033,7 +3033,7 @@ pub fn dispatch_action_overlay(
     events: Res<crate::snapshot::EventLog>,
     mut q_actors: Query<&mut FfxiRenderActor>,
     mut last_seen: Local<u64>,
-    mut spell_suffix: Local<SpellSuffixCache>,
+    mut spell_suffix: ResMut<SpellSuffixCache>,
 ) {
     let new_count =
         (events.pushed_total.saturating_sub(*last_seen)).min(events.recent.len() as u64) as usize;

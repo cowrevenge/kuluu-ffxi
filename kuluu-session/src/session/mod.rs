@@ -2649,6 +2649,12 @@ async fn keepalive_loop(
                                 message: format!("widescan end send: {e}"),
                             });
                         }
+                        // The server acknowledges c2s 0x0F6 with silence, not a
+                        // 0x0F5 Lose, so the tracked state must clear locally
+                        // like retail's client does — otherwise the compass
+                        // pointer and map marker freeze on the last streamed
+                        // position forever.
+                        let _ = event_tx.send(AgentEvent::WidescanTrackUpdated { tracked: None });
                     }
                     Some(AgentCommand::FishingRequest { mode, para, para2 }) => {
                         let payload = build_subpacket_fishing(

@@ -50,11 +50,17 @@ const PLACED_MARKER_COLOR: Color = Color::srgb(1.0, 0.55, 0.10);
 
 /// Distinct color for the currently tracked (0x0F5) target, kept clear of the
 /// per-kind list palette and the minimap's target/lock colors.
-const TRACKED_MARKER_COLOR: Color = Color::srgb(1.0, 0.30, 0.95);
+pub(crate) const TRACKED_MARKER_COLOR: Color = Color::srgb(1.0, 0.30, 0.95);
 
 /// Wide-scan result dot size, slightly under the live entity dots so a scan hit
 /// that walks into spawn range reads as a promotion, not a duplicate.
 const WIDESCAN_DOT_PX: f32 = 7.0;
+
+/// Hollow ring over the wide-scan list's selected entry, sized to enclose a
+/// live entity dot; drawn in the list cursor color so the selection reads
+/// across both surfaces.
+const WIDESCAN_CURSOR_RING_PX: f32 = 15.0;
+const WIDESCAN_CURSOR_RING_WIDTH_PX: f32 = 2.0;
 
 /// The Map screen's four sub-modes. Retail opens on a floating command submenu
 /// (Markers / Wide Scan / Change Map); selecting a row drills into that mode.
@@ -257,6 +263,9 @@ pub struct MapTrackedMarker;
 pub struct MapWidescanDot;
 
 #[derive(Component)]
+pub struct MapWidescanCursorMarker;
+
+#[derive(Component)]
 pub struct MapPlaceCursor;
 
 #[derive(Component, Clone, Copy)]
@@ -358,6 +367,25 @@ fn widescan_kind_label(kind: u8) -> &'static str {
         2 => "Mob",
         _ => "Unknown",
     }
+}
+
+/// The tracked (0x0F5) entity's world position: the live entity transform when
+/// spawned, else the raw stream coords. 0x0F5 carries raw LSB values (y =
+/// height, z = the second horizontal axis; ffxi-proto decode/widescan.rs
+/// WidescanPos), so they swap into the wire convention `ffxi_to_bevy` expects.
+/// Shared by the map's tracked marker and the compass track pointer.
+pub(crate) fn tracked_world(
+    tracked: Option<kuluu_snapshot::WidescanTracked>,
+    lookup_local: impl Fn(u16) -> Option<Vec3>,
+) -> Option<Vec3> {
+    let t = tracked?;
+    Some(lookup_local(t.act_index).unwrap_or_else(|| {
+        crate::scene::ffxi_to_bevy(kuluu_snapshot::Vec3 {
+            x: t.x,
+            y: t.z,
+            z: t.y,
+        })
+    }))
 }
 
 /// World position of a wide-scan entry. `rel_x`/`rel_z` are LSB's two
@@ -587,6 +615,25 @@ pub(crate) fn spawn_map_screen(mut commands: Commands, mut images: ResMut<Assets
                     },
                     BackgroundColor(TRACKED_MARKER_COLOR),
                     BorderColor::all(Color::WHITE),
+                ));
+                let whalf = WIDESCAN_CURSOR_RING_PX * 0.5;
+                overlay_layer.spawn((
+                    MapWidescanCursorMarker,
+                    Node {
+                        position_type: PositionType::Absolute,
+                        width: Val::Px(WIDESCAN_CURSOR_RING_PX),
+                        height: Val::Px(WIDESCAN_CURSOR_RING_PX),
+                        margin: UiRect {
+                            left: Val::Px(-whalf),
+                            top: Val::Px(-whalf),
+                            ..default()
+                        },
+                        border: UiRect::all(Val::Px(WIDESCAN_CURSOR_RING_WIDTH_PX)),
+                        display: Display::None,
+                        border_radius: BorderRadius::MAX,
+                        ..default()
+                    },
+                    BorderColor::all(theme::CURSOR),
                 ));
                 let phalf = PLACE_CURSOR_PX * 0.5;
                 overlay_layer.spawn((
@@ -962,23 +1009,13 @@ pub(crate) fn update_map_screen_markers(
     }
 
     if let Ok(mut node) = tracked_q.single_mut() {
-        let uv = snap.widescan.tracked.and_then(|t| {
-            let world = q_transform
+        let uv = tracked_world(snap.widescan.tracked, |act_index| {
+            q_transform
                 .iter()
-                .find(|(_, we)| we.act_index == t.act_index)
+                .find(|(_, we)| we.act_index == act_index)
                 .map(|(tf, _)| tf.translation)
-                .unwrap_or_else(|| {
-                    // 0x0F5 carries raw LSB coords (y = height, z = the second
-                    // horizontal axis; ffxi-proto decode/widescan.rs WidescanPos)
-                    // — swap into the wire convention ffxi_to_bevy expects.
-                    crate::scene::ffxi_to_bevy(kuluu_snapshot::Vec3 {
-                        x: t.x,
-                        y: t.z,
-                        z: t.y,
-                    })
-                });
-            aabb.world_to_uv_or_offscreen(world)
-        });
+        })
+        .and_then(|world| aabb.world_to_uv_or_offscreen(world));
         set_overlay_marker(&mut node, uv);
     }
 
@@ -994,7 +1031,8 @@ pub(crate) fn update_map_screen_markers(
 /// submode is up, positioned by their self-relative offsets so entries far
 /// beyond the local spawn range still land on the map (kuluu-iw58). Entries
 /// with a locally spawned entity are skipped: the live layer already draws them
-/// with their nameplate color and facing.
+/// with their nameplate color and facing. The list's selected row additionally
+/// gets a cursor ring over its entity (kuluu-zbve).
 pub(crate) fn update_map_widescan_dots(
     mode: Res<InputMode>,
     scene_state: Res<SceneState>,
@@ -1004,8 +1042,9 @@ pub(crate) fn update_map_widescan_dots(
     mut commands: Commands,
     q_overlay_layer: Query<Entity, With<MapScreenOverlayLayer>>,
     q_self: Query<&Transform, With<IsSelf>>,
-    q_local: Query<&WorldEntity>,
-    mut q_dot: Query<&mut Node, With<MapWidescanDot>>,
+    q_local: Query<(&Transform, &WorldEntity), Without<IsSelf>>,
+    mut q_dot: Query<&mut Node, (With<MapWidescanDot>, Without<MapWidescanCursorMarker>)>,
+    mut cursor_q: Query<&mut Node, (With<MapWidescanCursorMarker>, Without<MapWidescanDot>)>,
 ) {
     let snap = &scene_state.snapshot;
     let live_zone = snap.zone_id.unwrap_or(0);
@@ -1023,10 +1062,37 @@ pub(crate) fn update_map_widescan_dots(
                 ec.despawn();
             }
         }
+        if let Ok(mut node) = cursor_q.single_mut() {
+            if node.display != Display::None {
+                node.display = Display::None;
+            }
+        }
         return;
     };
 
-    let local: std::collections::HashSet<u16> = q_local.iter().map(|we| we.act_index).collect();
+    let selected_uv = {
+        let rows = widescan_rows(snap);
+        rows.get(map_state.cursor).and_then(|row| {
+            let world = q_local
+                .iter()
+                .find(|(_, we)| we.act_index == row.act_index)
+                .map(|(t, _)| t.translation)
+                .or_else(|| {
+                    snap.widescan
+                        .entries
+                        .iter()
+                        .find(|e| e.act_index == row.act_index)
+                        .map(|e| widescan_dot_world(self_t.translation, e.rel_x, e.rel_z))
+                })?;
+            aabb.world_to_uv_or_offscreen(world)
+        })
+    };
+    if let Ok(mut node) = cursor_q.single_mut() {
+        set_overlay_marker(&mut node, selected_uv);
+    }
+
+    let local: std::collections::HashSet<u16> =
+        q_local.iter().map(|(_, we)| we.act_index).collect();
     let mut seen: std::collections::HashSet<u16> =
         std::collections::HashSet::with_capacity(snap.widescan.entries.len());
     let half = WIDESCAN_DOT_PX * 0.5;

@@ -44,7 +44,7 @@ const MARKER_RING_PX: f32 = 2.0;
 /// one — a map pin, which points without needing a second node. The sharp
 /// corner sits on the node's top-right diagonal, so the node is rotated back by
 /// this much before being turned to the bearing it should indicate.
-const PIN_TIP_BEARING: f32 = std::f32::consts::FRAC_PI_4;
+pub(crate) const PIN_TIP_BEARING: f32 = std::f32::consts::FRAC_PI_4;
 
 /// Marker categories. `SelfMarker` and `Target` are role overlays that win
 /// over kind; `Party` is snapshot party-list membership; the rest are per
@@ -554,7 +554,7 @@ fn upsert_dot<F>(
 
 /// Three rounded corners and one sharp one: a map pin whose tip is the heading
 /// indicator.
-fn pin_border_radius(diameter_px: f32) -> BorderRadius {
+pub(crate) fn pin_border_radius(diameter_px: f32) -> BorderRadius {
     let round = Val::Px(diameter_px * 0.5);
     BorderRadius::new(round, Val::ZERO, round, round)
 }

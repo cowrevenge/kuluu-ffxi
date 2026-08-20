@@ -248,7 +248,11 @@ impl Plugin for HudPlugin {
                 dialog::update_dialog_grid_system,
                 dialog::update_dialog_options_system,
                 shop::update_shop_panel_system,
-                compass::update_compass,
+                (
+                    compass::update_compass,
+                    #[cfg(not(target_arch = "wasm32"))]
+                    compass::update_compass_track_pointer,
+                ),
                 vana_clock::update_vana_clock,
                 zone_flash::update_zone_flash,
                 (

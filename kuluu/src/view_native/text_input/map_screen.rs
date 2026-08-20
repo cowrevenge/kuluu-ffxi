@@ -51,7 +51,7 @@ pub(super) fn handle_map_key(
                 return None;
             }
             if bindings.matches_logical(Action::NavCancel, key) {
-                return close_map_screen(stack, map_state, cmd_tx);
+                return close_map_screen(stack, map_state);
             }
             None
         }
@@ -268,12 +268,14 @@ fn return_to_command(map_state: &mut kuluu_render::hud::map_screen::MapScreenSta
 
 /// Close the Map screen: stop tracking (0x0F6), reset the submode, and pop back
 /// to the menu it opened from, or to the world if it was the only level.
+// No WidescanEnd here: retail sends c2s 0x0F6 TRACKING_END only on an explicit
+// cancel (the Wide Scan submode's Cancel), so an active track survives closing
+// the map and keeps driving the compass pointer (research/XiPackets
+// world/client/0x00F6).
 fn close_map_screen(
     stack: &mut MenuStack,
     map_state: &mut kuluu_render::hud::map_screen::MapScreenState,
-    cmd_tx: &Sender<AgentCommand>,
 ) -> Option<InputMode> {
-    let _ = cmd_tx.try_send(AgentCommand::WidescanEnd);
     map_state.reset();
     if stack.pop() {
         None

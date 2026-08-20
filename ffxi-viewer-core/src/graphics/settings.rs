@@ -348,6 +348,21 @@ pub const DEFAULT_DOF_APERTURE: f32 = 2.8;
 // 3D buffer for performance and upscales to the window; above 1.0 supersamples.
 pub const DEFAULT_RENDER_SCALE: f32 = 1.0;
 
+// Retail derives its vertical fov from a projection focal length over a fixed
+// half-height: fovy = 2*atan2f(192, ProjectionFocalLength)
+// (research/XIClient/src/XIClient/source/World/Generator/Effects/CMoElem.cpp:274).
+pub const RETAIL_PROJECTION_HALF_HEIGHT: f32 = 192.0;
+// research/XIClient/src/XIClient/source/World/Camera/CameraManager.cpp:318:
+// SetProjectionFocalLength(350.0f) is the default; cutscene/zoom effects animate it.
+pub const RETAIL_DEFAULT_FOCAL_LENGTH: f32 = 350.0;
+// = retail_default_fov_deg(); f32::atan is not const fn, so the derived value is
+// pinned by the default_fov_derives_from_retail_focal_length guard test.
+pub const DEFAULT_FOV_DEG: f32 = 57.495_83;
+
+pub fn retail_default_fov_deg() -> f32 {
+    (2.0 * (RETAIL_PROJECTION_HALF_HEIGHT / RETAIL_DEFAULT_FOCAL_LENGTH).atan()).to_degrees()
+}
+
 fn default_light_threshold() -> f32 {
     DEFAULT_LIGHT_THRESHOLD
 }
@@ -392,7 +407,18 @@ const FOG_STEP_SLOTS: &[u32] = &[32, 64, 96, 128];
 
 const VIEW_DISTANCE_SLOTS: &[f32] = &[200.0, 500.0, 700.0, 1100.0, 2300.0, 6100.0];
 const FOV_SLOTS: &[f32] = &[
-    50.0, 55.0, 60.0, 65.0, 70.0, 75.0, 80.0, 85.0, 90.0, 95.0, 100.0,
+    50.0,
+    55.0,
+    DEFAULT_FOV_DEG,
+    60.0,
+    65.0,
+    70.0,
+    75.0,
+    80.0,
+    85.0,
+    90.0,
+    95.0,
+    100.0,
 ];
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -466,7 +492,7 @@ impl GraphicsSettings {
                 view_distance: 500.0,
                 vsync: true,
                 fps_cap: 0,
-                fov_deg: 50.0,
+                fov_deg: DEFAULT_FOV_DEG,
                 dynamic_lights: DynamicLights::Vanilla,
                 light_threshold: DEFAULT_LIGHT_THRESHOLD,
                 light_intensity: DEFAULT_LIGHT_INTENSITY,
@@ -495,7 +521,7 @@ impl GraphicsSettings {
                 view_distance: 1100.0,
                 vsync: true,
                 fps_cap: 0,
-                fov_deg: 50.0,
+                fov_deg: DEFAULT_FOV_DEG,
                 dynamic_lights: DynamicLights::Vanilla,
                 light_threshold: DEFAULT_LIGHT_THRESHOLD,
                 light_intensity: DEFAULT_LIGHT_INTENSITY,
@@ -524,7 +550,7 @@ impl GraphicsSettings {
                 view_distance: 6100.0,
                 vsync: true,
                 fps_cap: 0,
-                fov_deg: 50.0,
+                fov_deg: DEFAULT_FOV_DEG,
                 dynamic_lights: DynamicLights::Vanilla,
                 light_threshold: DEFAULT_LIGHT_THRESHOLD,
                 light_intensity: DEFAULT_LIGHT_INTENSITY,
@@ -557,7 +583,7 @@ impl GraphicsSettings {
                 view_distance: 6100.0,
                 vsync: true,
                 fps_cap: 0,
-                fov_deg: 50.0,
+                fov_deg: DEFAULT_FOV_DEG,
                 dynamic_lights: DynamicLights::Vanilla,
                 light_threshold: DEFAULT_LIGHT_THRESHOLD,
                 light_intensity: DEFAULT_LIGHT_INTENSITY,
@@ -1304,6 +1330,19 @@ mod tests {
                 s.render_scale
             );
         }
+    }
+
+    #[test]
+    fn default_fov_derives_from_retail_focal_length() {
+        assert!(
+            (DEFAULT_FOV_DEG - retail_default_fov_deg()).abs() < 1e-3,
+            "DEFAULT_FOV_DEG {} != 2*atan({}/{}) = {}",
+            DEFAULT_FOV_DEG,
+            RETAIL_PROJECTION_HALF_HEIGHT,
+            RETAIL_DEFAULT_FOCAL_LENGTH,
+            retail_default_fov_deg()
+        );
+        assert!(FOV_SLOTS.iter().any(|x| (x - DEFAULT_FOV_DEG).abs() < 1e-3));
     }
 
     #[test]

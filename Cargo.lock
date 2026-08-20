@@ -3051,7 +3051,7 @@ dependencies = [
 
 [[package]]
 name = "ffxi-actor"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "ffxi-dat",
  "glam",
@@ -3059,7 +3059,7 @@ dependencies = [
 
 [[package]]
 name = "ffxi-audio"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "hound",
  "thiserror 2.0.18",
@@ -3067,7 +3067,7 @@ dependencies = [
 
 [[package]]
 name = "ffxi-dat"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "rayon",
@@ -3077,7 +3077,7 @@ dependencies = [
 
 [[package]]
 name = "ffxi-event"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "ffxi-dat",
  "tracing",
@@ -3085,7 +3085,7 @@ dependencies = [
 
 [[package]]
 name = "ffxi-nav-recast"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "dirs",
  "glam",
@@ -3099,7 +3099,7 @@ dependencies = [
 
 [[package]]
 name = "ffxi-proto"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "ffxi-vocab",
@@ -3111,7 +3111,7 @@ dependencies = [
 
 [[package]]
 name = "ffxi-vocab"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "lsb-scrape",
@@ -4159,7 +4159,7 @@ dependencies = [
 
 [[package]]
 name = "kuluu"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "arboard",
@@ -4191,7 +4191,7 @@ dependencies = [
 
 [[package]]
 name = "kuluu-mcp"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "ffxi-dat",
@@ -4207,7 +4207,7 @@ dependencies = [
 
 [[package]]
 name = "kuluu-nav"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "bincode",
@@ -4221,7 +4221,7 @@ dependencies = [
 
 [[package]]
 name = "kuluu-render"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "ab_glyph",
  "bevy",
@@ -4241,7 +4241,7 @@ dependencies = [
 
 [[package]]
 name = "kuluu-session"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "dirs",
@@ -4272,7 +4272,7 @@ dependencies = [
 
 [[package]]
 name = "kuluu-snapshot"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "postcard",
  "serde",
@@ -4281,7 +4281,7 @@ dependencies = [
 
 [[package]]
 name = "kuluu-viewer-wasm"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "bevy",
  "console_error_panic_hook",
@@ -4440,7 +4440,7 @@ dependencies = [
 
 [[package]]
 name = "lsb-scrape"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
 ]
@@ -8191,7 +8191,7 @@ checksum = "3ae8337f8a065cfc972643663ea4279e04e7256de865aa66fe25cec5fb912d3f"
 
 [[package]]
 name = "xtask"
-version = "0.4.0"
+version = "0.5.0"
 
 [[package]]
 name = "yazi"

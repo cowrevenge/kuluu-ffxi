@@ -200,7 +200,9 @@ fn reconcile_render_scale_system(
                 RenderScaleCompositeCamera,
                 Camera2d,
                 Camera {
-                    order: 1,
+                    // After the nameplate overlay pass, which shares the
+                    // operator camera's off-screen target.
+                    order: crate::nameplate_overlay::NAMEPLATE_OVERLAY_CAMERA_ORDER + 1,
                     ..default()
                 },
                 IsDefaultUiCamera,

@@ -188,6 +188,7 @@ pub fn spawn_nameplate_billboard(
     commands
         .spawn((
             InGameEntity,
+            crate::nameplate_overlay::nameplate_render_layers(),
             Nameplate { entity_id, kind },
             NameplateBillboard {
                 entity_id,

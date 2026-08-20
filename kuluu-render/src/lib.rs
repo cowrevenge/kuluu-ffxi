@@ -45,6 +45,7 @@ pub mod mouse;
 pub mod nameplate;
 pub mod nameplate_billboard;
 pub mod nameplate_color;
+pub mod nameplate_overlay;
 pub mod nameplate_icons;
 pub mod nameplate_marker;
 #[cfg(not(target_arch = "wasm32"))]
@@ -296,6 +297,7 @@ impl<S: SceneSource + Resource + Component<Mutability = bevy::ecs::component::Mu
                         camera_transition_system,
                         chase_camera_system,
                         firstperson_camera_system,
+                        nameplate_overlay::sync_nameplate_overlay_camera,
                         sync_aggro_system,
                         nameplate::update_nameplates_system,
                         nameplate_billboard::update_nameplate_billboards_system,

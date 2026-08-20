@@ -1736,6 +1736,9 @@ fn apply_event_dedupes_identical_self_position() {
 /// change lands as a reviewed edit to this sentinel instead of a silent
 /// consumer break.
 #[allow(dead_code)]
+// Uniform `{ .. }` keeps the sentinel name-only: a variant gaining or losing
+// fields must not break it, only a rename/removal should.
+#[allow(clippy::unneeded_struct_pattern)]
 fn _agentcommand_is_additive_only(x: &AgentCommand) {
     match x {
         AgentCommand::Move { .. } => (),
@@ -1810,6 +1813,9 @@ fn _agentcommand_is_additive_only(x: &AgentCommand) {
 /// change lands as a reviewed edit to this sentinel instead of a silent
 /// consumer break.
 #[allow(dead_code)]
+// Uniform `{ .. }` keeps the sentinel name-only: a variant gaining or losing
+// fields must not break it, only a rename/removal should.
+#[allow(clippy::unneeded_struct_pattern)]
 fn _agentevent_is_additive_only(x: &AgentEvent) {
     match x {
         AgentEvent::Connected { .. } => (),

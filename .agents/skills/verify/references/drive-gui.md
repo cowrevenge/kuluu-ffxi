@@ -163,6 +163,13 @@ Resolve `<pid>` with `pgrep -f "^target/debug/ffxi-client"` — a bare
 Keep delays ≥0.3s, capture after each step, and Read the result — keystrokes
 are fire-and-forget.
 
+Use `key code`, not `keystroke`, for keys the client binds physically:
+`keystroke "/"` arrives as a text-insertion event, misses the client's
+`KeyCode::Slash` chat-open binding, and falls through to in-world hotkeys
+(observed: it opened the Job Abilities menu instead). `key code 44` (physical
+Slash) works. Letters typed *into an already-open* text field are fine as
+`keystroke`.
+
 Because this steals focus, batch the keystroke legs of a run together instead
 of interleaving them with focus-free work, and warn the user before you start
 taking over their keyboard.

@@ -58,7 +58,6 @@ pub mod scheduler_runtime;
 pub mod skeleton_instance;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod skinned_ffxi_material;
-#[cfg(not(target_arch = "wasm32"))]
 pub mod skybox;
 pub mod snapshot;
 pub mod source;
@@ -88,7 +87,6 @@ pub mod zone_particles;
 pub mod zone_point_lights;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod zone_sfx;
-#[cfg(not(target_arch = "wasm32"))]
 pub mod zone_texture;
 
 pub use camera::{
@@ -293,7 +291,6 @@ impl<S: SceneSource + Resource + Component<Mutability = bevy::ecs::component::Mu
                         sync_entity_looks_system,
                         scene::ensure_self_lookcomp_system,
                         process_entity_look_changes,
-                        look_resolver::dispatch_mount_models,
                         camera_transition_system,
                         chase_camera_system,
                         firstperson_camera_system,
@@ -329,6 +326,18 @@ impl<S: SceneSource + Resource + Component<Mutability = bevy::ecs::component::Mu
             app.init_resource::<target_strobe::StrobeState>();
             app.add_systems(Update, target_strobe::target_strobe_system);
         }
+
+        // Native only: mount dispatch feeds the dat_mmb mesh loader, which the
+        // wasm build does not carry. Slotted where it sat in the chained tuple:
+        // after look changes it consumes, before the cameras.
+        #[cfg(not(target_arch = "wasm32"))]
+        app.add_systems(
+            Update,
+            look_resolver::dispatch_mount_models
+                .after(process_entity_look_changes)
+                .before(camera_transition_system)
+                .run_if(resource_exists::<EntityMesh>),
+        );
 
         app.configure_sets(
             Update,

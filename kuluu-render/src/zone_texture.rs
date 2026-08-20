@@ -1,5 +1,3 @@
-#![cfg(not(target_arch = "wasm32"))]
-
 use bevy::asset::RenderAssetUsages;
 use bevy::image::{Image, ImageAddressMode, ImageFilterMode, ImageSampler, ImageSamplerDescriptor};
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};

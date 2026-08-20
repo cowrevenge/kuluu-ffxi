@@ -1,3 +1,8 @@
+// dat_vos2 is native-only; the probe has no wasm form.
+#[cfg(target_arch = "wasm32")]
+fn main() {}
+
+#[cfg(not(target_arch = "wasm32"))]
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 4 {

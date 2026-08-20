@@ -99,8 +99,6 @@ pub struct ZonePointLight {
     pub range: f32,
 
     pub attenuation: f32,
-
-    pub is_character: bool,
 }
 
 #[derive(Resource, Default)]
@@ -157,7 +155,6 @@ pub fn build_active_scene_lights(
             color: l.color * night * flick,
             range,
             attenuation: SCENE_LIGHT_FALLOFF_K / (range * range),
-            is_character: l.is_character,
         });
     }
     for (gt, pl) in &q_emitters {
@@ -173,7 +170,6 @@ pub fn build_active_scene_lights(
             color: Vec3::new(lin.red, lin.green, lin.blue) * mag,
             range,
             attenuation: SCENE_LIGHT_FALLOFF_K / (range * range),
-            is_character: false,
         });
     }
 }
@@ -190,11 +186,13 @@ pub type PointLightArrays = (
 /// arrays of `FfxiLightingUniform`. `point_color.w` carries range (the shader
 /// treats slots with range <= 0 as empty); `point_atten` is
 /// `(const, linear, quad, _)`. Excess beyond `MAX_POINT_LIGHTS` is dropped.
-fn pack_point_light_arrays(selected: &[ZonePointLight]) -> PointLightArrays {
+fn pack_point_light_arrays<'a>(
+    selected: impl Iterator<Item = &'a ZonePointLight>,
+) -> PointLightArrays {
     let mut point_pos = [Vec4::ZERO; MAX_POINT_LIGHTS];
     let mut point_color = [Vec4::ZERO; MAX_POINT_LIGHTS];
     let mut point_atten = [Vec4::ZERO; MAX_POINT_LIGHTS];
-    for (slot, l) in selected.iter().take(MAX_POINT_LIGHTS).enumerate() {
+    for (slot, l) in selected.take(MAX_POINT_LIGHTS).enumerate() {
         point_pos[slot] = l.world_pos.extend(0.0);
         point_color[slot] = l.color.extend(l.range);
         point_atten[slot] = Vec4::new(SCENE_LIGHT_CONST_ATTEN, 0.0, l.attenuation, 0.0);
@@ -232,23 +230,33 @@ pub fn authored_point_light_indices(
 /// authors; the caller may cache the selection while the light set and the actor
 /// hold still, repacking live colors per frame via [`point_light_arrays_for`].
 pub fn nearest_point_light_indices(pos: Vec3, lights: &[ZonePointLight], count: usize) -> Vec<u32> {
-    let mut in_range: Vec<(f32, u32)> = lights
-        .iter()
-        .enumerate()
-        .filter(|(_, l)| pos.distance_squared(l.world_pos) <= l.range * l.range)
-        .map(|(i, l)| (pos.distance_squared(l.world_pos), i as u32))
-        .collect();
-    in_range.sort_by(|a, b| a.0.total_cmp(&b.0));
-    in_range.truncate(count.min(MAX_POINT_LIGHTS));
-    in_range.into_iter().map(|(_, i)| i).collect()
+    let count = count.min(MAX_POINT_LIGHTS);
+    let mut nearest = [(f32::INFINITY, 0u32); MAX_POINT_LIGHTS];
+    let mut len = 0;
+    for (i, l) in lights.iter().enumerate() {
+        let d2 = pos.distance_squared(l.world_pos);
+        if d2 > l.range * l.range {
+            continue;
+        }
+        if len < count {
+            nearest[len] = (d2, i as u32);
+            len += 1;
+        } else if count == 0 || d2 >= nearest[count - 1].0 {
+            continue;
+        } else {
+            nearest[count - 1] = (d2, i as u32);
+        }
+        let mut slot = len - 1;
+        while slot > 0 && nearest[slot].0 < nearest[slot - 1].0 {
+            nearest.swap(slot, slot - 1);
+            slot -= 1;
+        }
+    }
+    nearest[..len].iter().map(|&(_, i)| i).collect()
 }
 
 pub fn point_light_arrays_for(lights: &[ZonePointLight], indices: &[u32]) -> PointLightArrays {
-    let selected: Vec<ZonePointLight> = indices
-        .iter()
-        .filter_map(|&i| lights.get(i as usize).copied())
-        .collect();
-    pack_point_light_arrays(&selected)
+    pack_point_light_arrays(indices.iter().filter_map(|&i| lights.get(i as usize)))
 }
 
 pub fn nearest_point_light_arrays(
@@ -305,7 +313,6 @@ fn load_zone_point_lights(scene_state: Res<SceneState>, mut store: ResMut<ZonePo
             color: Vec3::new(pl.color[0], pl.color[1], pl.color[2]),
             range: pl.range,
             attenuation: pl.attenuation,
-            is_character: c.name.first() == Some(&b'c'),
         });
     }
 
@@ -441,7 +448,6 @@ mod tests {
             color: Vec3::splat(1.0),
             range,
             attenuation: 0.25,
-            is_character: false,
         }
     }
 
@@ -620,6 +626,41 @@ mod tests {
                 "quad attenuation term = light.attenuation"
             );
         }
+    }
+
+    // The bounded insertion pick must match the old collect-then-sort semantics:
+    // with more in-range lights than slots, the MAX_POINT_LIGHTS nearest come
+    // back in ascending distance order.
+    #[test]
+    fn overfull_zone_yields_the_nearest_max_in_ascending_order() {
+        // Distances 1..=n in scrambled order, so the pick must both evict far
+        // lights and insert mid-list.
+        let n = MAX_POINT_LIGHTS + 9;
+        let lights: Vec<ZonePointLight> = (0..n)
+            .map(|i| {
+                let d = (i * 7) % n + 1;
+                let x = if i % 2 == 0 { d as f32 } else { -(d as f32) };
+                light(Vec3::new(x, 0.0, 0.0), 1000.0)
+            })
+            .collect();
+        let mut all: Vec<usize> = lights
+            .iter()
+            .map(|l| l.world_pos.x.abs() as usize)
+            .collect();
+        all.sort_unstable();
+        assert_eq!(
+            all,
+            (1..=n).collect::<Vec<_>>(),
+            "scramble is a permutation"
+        );
+        let picked = nearest_point_light_indices(Vec3::ZERO, &lights, MAX_POINT_LIGHTS);
+        assert_eq!(picked.len(), MAX_POINT_LIGHTS);
+        let dists: Vec<f32> = picked
+            .iter()
+            .map(|&i| lights[i as usize].world_pos.x.abs())
+            .collect();
+        let expected: Vec<f32> = (1..=MAX_POINT_LIGHTS as i32).map(|d| d as f32).collect();
+        assert_eq!(dists, expected, "nearest MAX_POINT_LIGHTS, ascending");
     }
 
     #[test]

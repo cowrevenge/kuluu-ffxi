@@ -75,6 +75,16 @@ const OUTLINE_COLOR: [u8; 4] = [0, 0, 0, 255];
 // glyphs; a second coverage pass offset horizontally fakes the weight.
 const BOLD_DILATE_PX: i32 = 2;
 
+// Retail draws names in a screen-space pass after the world and its effects
+// (research/XIClient/src/XIClient/source/Rendering/Active/CXiActorNameDraw.cpp,
+// pre-transformed RHW quads). Bevy's Transparent3d instead sorts every blend
+// draw by view-space AABB-centre Z, where camera-anchored quads (lens flare,
+// weather) rank nearest and blend over the plates (same failure the sky layers
+// hit, kuluu-w4jf). A uniform positive sort bias past the sky dome makes every
+// plate outrank all unbiased world transparents while preserving
+// plate-vs-plate order and the opaque-geometry depth test.
+const NAMEPLATE_SORT_BIAS: f32 = crate::skybox::SKYBOX_RADIUS;
+
 const HP_BAR_HEIGHT_PX: u32 = 16;
 
 const HP_BAR_TOP_GAP_PX: u32 = 8;
@@ -169,6 +179,7 @@ pub fn spawn_nameplate_billboard(
 
         unlit: true,
         alpha_mode: AlphaMode::Blend,
+        depth_bias: NAMEPLATE_SORT_BIAS,
 
         cull_mode: None,
         ..default()
@@ -1260,6 +1271,15 @@ mod tests {
                 "depth {depth}: got {got}, want {want}"
             );
         }
+    }
+
+    #[test]
+    fn plates_outrank_camera_anchored_transparents_at_any_populated_distance() {
+        // Camera-anchored quads (lens flare, weather) rank ~0 in the
+        // Transparent3d sort; a plate at view depth d ranks -d + bias. Server
+        // entity visibility tops out near 50 yalms; 1000 bounds it with room.
+        const FARTHEST_POPULATED_ENTITY_YALMS: f32 = 1000.0;
+        assert!(NAMEPLATE_SORT_BIAS - FARTHEST_POPULATED_ENTITY_YALMS > 0.0);
     }
 
     #[test]

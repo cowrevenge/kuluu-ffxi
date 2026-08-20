@@ -192,6 +192,7 @@ impl Plugin for HudPlugin {
         #[cfg(not(target_arch = "wasm32"))]
         {
             app.init_resource::<map_screen::MapScreenDots>();
+            app.init_resource::<map_screen::MapWidescanDots>();
             app.init_resource::<map_screen::MapScreenState>();
             app.init_resource::<map_screen::MapMarkers>();
             app.init_resource::<map_screen::ViewedMap>();
@@ -318,6 +319,7 @@ impl Plugin for HudPlugin {
                 map_screen::update_map_view,
                 map_screen::update_map_screen_image,
                 map_screen::update_map_screen_markers,
+                map_screen::update_map_widescan_dots.after(map_screen::update_map_view),
                 map_screen::update_map_placed_markers,
                 map_screen::update_map_panel,
             ),

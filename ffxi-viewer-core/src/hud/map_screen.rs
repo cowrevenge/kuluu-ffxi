@@ -52,6 +52,10 @@ const PLACED_MARKER_COLOR: Color = Color::srgb(1.0, 0.55, 0.10);
 /// per-kind list palette and the minimap's target/lock colors.
 const TRACKED_MARKER_COLOR: Color = Color::srgb(1.0, 0.30, 0.95);
 
+/// Wide-scan result dot size, slightly under the live entity dots so a scan hit
+/// that walks into spawn range reads as a promotion, not a duplicate.
+const WIDESCAN_DOT_PX: f32 = 7.0;
+
 /// The Map screen's four sub-modes. Retail opens on a floating command submenu
 /// (Markers / Wide Scan / Change Map); selecting a row drills into that mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -223,6 +227,14 @@ impl MapScreenDots {
     }
 }
 
+/// Wide-scan result dots keyed by the entry's `act_index`, disjoint from
+/// `MapScreenDots` (live entities, keyed by unique_no) so the two layers never
+/// collide over keys or stale-sweep each other's nodes.
+#[derive(Resource, Default)]
+pub struct MapWidescanDots {
+    pub by_index: HashMap<u16, Entity>,
+}
+
 #[derive(Component)]
 pub struct MapScreenRoot;
 
@@ -240,6 +252,9 @@ pub struct MapGridLabel;
 
 #[derive(Component)]
 pub struct MapTrackedMarker;
+
+#[derive(Component)]
+pub struct MapWidescanDot;
 
 #[derive(Component)]
 pub struct MapPlaceCursor;
@@ -287,9 +302,8 @@ pub struct WidescanRow {
 /// server-relative offset, colored by kind, named from the server `sName` or —
 /// when empty (current LSB, which omits sName by design; see
 /// `ffxi-proto 0x0f4_tracking_list`) — the local entity keyed on `act_index`.
-/// Entries we can't name either way are dropped rather than shown as bare
-/// `#<index>` placeholders: LSB can't name entities we haven't locally spawned,
-/// so a wall of numbered rows is noise, not signal (kuluu-bi1s.6).
+/// Entries beyond spawn range have neither name source, but retail lists every
+/// scan hit, so they get a generic kind label and stay trackable (kuluu-iw58).
 pub fn widescan_rows(snap: &SceneSnapshot) -> Vec<WidescanRow> {
     let mut entries: Vec<&ffxi_viewer_wire::WidescanEntry> = snap.widescan.entries.iter().collect();
     entries.sort_by_key(|e| {
@@ -298,27 +312,51 @@ pub fn widescan_rows(snap: &SceneSnapshot) -> Vec<WidescanRow> {
     });
     entries
         .into_iter()
-        .filter_map(|e| {
+        .map(|e| {
             let name = if !e.name.is_empty() {
                 e.name.clone()
             } else {
                 snap.entities
                     .iter()
                     .find(|ent| ent.act_index == e.act_index)
-                    .and_then(|ent| ent.name.clone())?
+                    .and_then(|ent| ent.name.clone())
+                    .unwrap_or_else(|| widescan_kind_label(e.kind).to_string())
             };
             let label = if e.level > 0 {
                 format!("{name} (Lv{})", e.level)
             } else {
                 name
             };
-            Some(WidescanRow {
+            WidescanRow {
                 act_index: e.act_index,
                 label,
                 color: overlay::widescan_color(e.kind),
-            })
+            }
         })
         .collect()
+}
+
+/// Generic row label for an entry the server didn't name and the client hasn't
+/// spawned, by the packed `Type` (0x0f4_tracking_list: 0 char, 1 npc, 2 mob).
+fn widescan_kind_label(kind: u8) -> &'static str {
+    match kind {
+        0 => "Character",
+        1 => "NPC",
+        2 => "Mob",
+        _ => "Unknown",
+    }
+}
+
+/// World position of a wide-scan entry. `rel_x`/`rel_z` are LSB's two
+/// horizontal deltas (internal x/z; wire x/y after the movement-decode axis
+/// swap, see `ffxi-proto decode/movement.rs`), applied to the self transform.
+pub fn widescan_dot_world(self_world: Vec3, rel_x: i16, rel_z: i16) -> Vec3 {
+    self_world
+        + crate::scene::ffxi_to_bevy(ffxi_viewer_wire::Vec3 {
+            x: rel_x as f32,
+            y: rel_z as f32,
+            z: 0.0,
+        })
 }
 
 /// A rendered panel row: text, color, and whether the cursor is on it.
@@ -917,10 +955,13 @@ pub(crate) fn update_map_screen_markers(
                 .find(|(_, we)| we.act_index == t.act_index)
                 .map(|(tf, _)| tf.translation)
                 .unwrap_or_else(|| {
+                    // 0x0F5 carries raw LSB coords (y = height, z = the second
+                    // horizontal axis; ffxi-proto decode/widescan.rs WidescanPos)
+                    // — swap into the wire convention ffxi_to_bevy expects.
                     crate::scene::ffxi_to_bevy(ffxi_viewer_wire::Vec3 {
                         x: t.x,
-                        y: t.y,
-                        z: t.z,
+                        y: t.z,
+                        z: t.y,
                     })
                 });
             aabb.world_to_uv_or_offscreen(world)
@@ -933,6 +974,104 @@ pub(crate) fn update_map_screen_markers(
             .then_some(markers.map_state.map_cursor)
             .flatten();
         set_overlay_marker(&mut node, uv);
+    }
+}
+
+/// Plot the server's wide-scan hits (0x0F4 entries) as dots while the Wide Scan
+/// submode is up, positioned by their self-relative offsets so entries far
+/// beyond the local spawn range still land on the map (kuluu-iw58). Entries
+/// with a locally spawned entity are skipped: the live layer already draws them
+/// with their nameplate color and facing.
+pub(crate) fn update_map_widescan_dots(
+    mode: Res<InputMode>,
+    scene_state: Res<SceneState>,
+    map_view: Res<MapView>,
+    map_state: Res<MapScreenState>,
+    mut dots: ResMut<MapWidescanDots>,
+    mut commands: Commands,
+    q_overlay_layer: Query<Entity, With<MapScreenOverlayLayer>>,
+    q_self: Query<&Transform, With<IsSelf>>,
+    q_local: Query<&WorldEntity>,
+    mut q_dot: Query<&mut Node, With<MapWidescanDot>>,
+) {
+    let snap = &scene_state.snapshot;
+    let live_zone = snap.zone_id.unwrap_or(0);
+    let active = map_open(&mode)
+        && map_state.mode == MapSubMode::WideScan
+        && map_state.viewed_override(live_zone).is_none();
+    let inputs = map_view
+        .visible_aabb
+        .zip(q_self.single().ok())
+        .zip(q_overlay_layer.single().ok())
+        .filter(|_| active);
+    let Some(((aabb, self_t), overlay_layer)) = inputs else {
+        for (_, dot) in dots.by_index.drain() {
+            if let Ok(mut ec) = commands.get_entity(dot) {
+                ec.despawn();
+            }
+        }
+        return;
+    };
+
+    let local: std::collections::HashSet<u16> = q_local.iter().map(|we| we.act_index).collect();
+    let mut seen: std::collections::HashSet<u16> =
+        std::collections::HashSet::with_capacity(snap.widescan.entries.len());
+    let half = WIDESCAN_DOT_PX * 0.5;
+    for e in &snap.widescan.entries {
+        if local.contains(&e.act_index) {
+            continue;
+        }
+        let world = widescan_dot_world(self_t.translation, e.rel_x, e.rel_z);
+        let Some(uv) = aabb.world_to_uv_or_offscreen(world) else {
+            continue;
+        };
+        seen.insert(e.act_index);
+        match dots.by_index.get(&e.act_index) {
+            Some(&dot) => {
+                if let Ok(mut node) = q_dot.get_mut(dot) {
+                    set_overlay_marker(&mut node, Some(uv));
+                }
+            }
+            None => {
+                let dot = commands
+                    .spawn((
+                        InGameEntity,
+                        MapWidescanDot,
+                        Node {
+                            position_type: PositionType::Absolute,
+                            left: Val::Percent(uv.x * 100.0),
+                            top: Val::Percent(uv.y * 100.0),
+                            width: Val::Px(WIDESCAN_DOT_PX),
+                            height: Val::Px(WIDESCAN_DOT_PX),
+                            margin: UiRect {
+                                left: Val::Px(-half),
+                                top: Val::Px(-half),
+                                ..default()
+                            },
+                            border_radius: BorderRadius::MAX,
+                            ..default()
+                        },
+                        BackgroundColor(overlay::widescan_color(e.kind)),
+                        ChildOf(overlay_layer),
+                    ))
+                    .id();
+                dots.by_index.insert(e.act_index, dot);
+            }
+        }
+    }
+
+    let stale: Vec<u16> = dots
+        .by_index
+        .keys()
+        .copied()
+        .filter(|idx| !seen.contains(idx))
+        .collect();
+    for idx in stale {
+        if let Some(dot) = dots.by_index.remove(&idx) {
+            if let Ok(mut ec) = commands.get_entity(dot) {
+                ec.despawn();
+            }
+        }
     }
 }
 
@@ -1152,19 +1291,32 @@ mod tests {
     }
 
     #[test]
-    fn widescan_drops_unnameable_entries() {
-        // No server sName and no local entity → not a row (kuluu-bi1s.6).
+    fn widescan_unnamed_entries_get_generic_kind_labels() {
+        // No server sName and no local entity (beyond spawn range): the entry
+        // must still be listed and trackable (kuluu-iw58).
         let snap = SceneSnapshot {
             widescan: WidescanList {
-                entries: vec![entry(48, 0, 2, 1, 1), entry(190, 0, 1, 2, 2)],
+                entries: vec![
+                    entry(48, 24, 2, 1, 1),
+                    entry(190, 0, 1, 2, 2),
+                    entry(300, 0, 0, 3, 3),
+                ],
                 tracked: None,
             },
             ..Default::default()
         };
-        assert!(
-            widescan_rows(&snap).is_empty(),
-            "bare #index rows are dropped"
-        );
+        let rows = widescan_rows(&snap);
+        let labels: Vec<&str> = rows.iter().map(|r| r.label.as_str()).collect();
+        assert_eq!(labels, vec!["Mob (Lv24)", "NPC", "Character"]);
+        assert_eq!(rows[0].act_index, 48, "generic rows keep their act_index");
+    }
+
+    #[test]
+    fn widescan_dot_world_maps_rel_offsets_onto_the_map_plane() {
+        // rel_x/rel_z are LSB's horizontal deltas; wire y = lsb_z, so Bevy
+        // X += rel_x and Z -= rel_z while height is untouched (scene::ffxi_to_bevy).
+        let world = widescan_dot_world(bevy::math::Vec3::new(10.0, 5.0, -20.0), 3, 4);
+        assert_eq!(world, bevy::math::Vec3::new(13.0, 5.0, -24.0));
     }
 
     #[test]

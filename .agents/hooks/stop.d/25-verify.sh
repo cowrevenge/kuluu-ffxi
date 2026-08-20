@@ -103,7 +103,7 @@ fi
 # live integration tests, GUI screenshots, the evidence recorder itself.
 # Count only activity AFTER the last source change — earlier runs verified
 # an earlier tree.
-SIG_RE='ffxi-mcp|events\.jsonl|play --headless|play_lifecycle|zone_change|agent_session|screencapture|record-evidence\.sh|hxi\.sh (capture|key|click|type)'
+SIG_RE='kuluu-mcp|events\.jsonl|play --headless|play_lifecycle|zone_change|agent_session|screencapture|record-evidence\.sh|hxi\.sh (capture|key|click|type)'
 last_sig=0
 if [ -n "$TRANSCRIPT" ] && [ -f "$TRANSCRIPT" ]; then
   last_sig=$(jq -rs --arg re "$SIG_RE" '

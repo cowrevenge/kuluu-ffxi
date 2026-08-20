@@ -10,7 +10,7 @@
 
 set -euo pipefail
 
-CONFIG_DIR="${FFXI_MCP_CONFIG_DIR:-$HOME/.config/ffxi-mcp}"
+CONFIG_DIR="${FFXI_MCP_CONFIG_DIR:-$HOME/.config/kuluu-mcp}"
 GOAL_FILE="${FFXI_MCP_GOAL_PATH:-$CONFIG_DIR/goal.json}"
 EVENT_FILE="${FFXI_MCP_EVENT_PATH:-$CONFIG_DIR/last-event.json}"
 

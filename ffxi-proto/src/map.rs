@@ -145,6 +145,16 @@ pub mod tracking {
     /// c2s 0x0F4 SendFlg must equal 1 to request the wide-scan list
     /// (vendor/server/src/map/packets/c2s/0x0f4_tracking_list.h SendFlg).
     pub const SEND_FLG_REQUEST: u32 = 1;
+
+    // s2c 0x0F4 packed Type = objtype/2
+    // (vendor/server/src/map/packets/s2c/0x0f4_tracking_list.cpp). Retail
+    // resolves npc/mob names client-side from the ActIndex; a CHAR entry with
+    // no sName is hidden entirely (research/XiPackets world/server/0x00F4).
+    pub mod kind {
+        pub const CHAR: u8 = 0;
+        pub const NPC: u8 = 1;
+        pub const MOB: u8 = 2;
+    }
 }
 
 /// c2s 0x0F2 SUBMAPCHANGE wire vocabulary

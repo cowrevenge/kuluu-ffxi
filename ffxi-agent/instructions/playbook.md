@@ -12,11 +12,11 @@ high-level intent through the MCP `ffxi` server.
 you (LLM)
   │  MCP/stdio
   ▼
-ffxi-mcp ──cmd_tx──▶ supervisor → reactor → session → FFXI server
+kuluu-mcp ──cmd_tx──▶ supervisor → reactor → session → FFXI server
    │                     │           │
    └─events ─────────────┤           │ 200ms tick
                          │           │
-                  ~/.config/ffxi-mcp/goal.json  ← persisted
+                  ~/.config/kuluu-mcp/goal.json  ← persisted
 ```
 
 You wake up on:
@@ -93,10 +93,10 @@ export FFXI_CHAR=...      # exact display name
 export FFXI_SERVER=127.0.0.1   # or HorizonXI hostname
 ```
 
-The MCP server invocation expects `ffxi-mcp` on PATH. Install with:
+The MCP server invocation expects `kuluu-mcp` on PATH. Install with:
 
 ```bash
-cargo install --path ffxi-mcp
+cargo install --path kuluu-mcp
 ```
 
 ## Live calibration caveats

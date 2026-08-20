@@ -139,6 +139,12 @@ fn index_by_embedded_id(bytes: &[u8]) -> HashMap<u32, usize> {
     map
 }
 
+/// Inverse of [`split_id`]: the full entity unique-no for a zone-static
+/// entity's 12-bit slot (targid), e.g. to name a wide-scan ActIndex.
+pub fn compose_id(zone_id: u16, slot: u16) -> u32 {
+    ID_MARKER | (u32::from(zone_id) << 12) | u32::from(slot & 0xFFF)
+}
+
 pub fn split_id(npc_id: u32) -> Option<(u16, u16)> {
     if (npc_id & 0xFF00_0000) != ID_MARKER {
         return None;
@@ -158,7 +164,13 @@ mod tests {
     const TEST_ZONE_ID: u16 = 230;
 
     fn entity_id(zone_id: u16, slot: u16) -> u32 {
-        ID_MARKER | (u32::from(zone_id) << 12) | u32::from(slot)
+        compose_id(zone_id, slot)
+    }
+
+    #[test]
+    fn compose_id_roundtrips_through_split_id() {
+        assert_eq!(split_id(compose_id(230, 10)), Some((230, 10)));
+        assert_eq!(compose_id(230, 10), 17_719_306);
     }
 
     fn synth_table(zone_id: u16) -> NpcNameTable {

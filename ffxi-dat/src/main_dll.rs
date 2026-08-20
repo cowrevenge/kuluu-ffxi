@@ -40,7 +40,7 @@ pub const ACTION_ANIM_MOUNT_OFFSET: u16 = 0x05;
 ///
 /// Measured on the retail install: race 1's action base is 38603, and 38604 is
 /// the only DAT in `base..base+8` carrying `fsh*`. Pinned by
-/// `ffxi-viewer-core/tests/fishing_pose_clips.rs`.
+/// `kuluu-render/tests/fishing_pose_clips.rs`.
 pub const ACTION_ANIM_FISHING_OFFSET: u16 = 0x01;
 
 // research/xim ZoneMapTable.kt

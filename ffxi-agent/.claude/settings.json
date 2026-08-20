@@ -3,7 +3,7 @@
   "permissions": {
     "allow": [
       "mcp__ffxi__*",
-      "Read(//Users/jon/.config/ffxi-mcp/**)",
+      "Read(//Users/jon/.config/kuluu-mcp/**)",
       "Read(//Volumes/Sidecar/ffxi/ffxi-agent/playbooks/**)"
     ],
     "defaultMode": "acceptEdits"

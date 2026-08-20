@@ -3066,38 +3066,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ffxi-client"
-version = "0.4.0"
-dependencies = [
- "anyhow",
- "arboard",
- "bevy",
- "bevy_framepace",
- "clap",
- "ffxi-dat",
- "ffxi-nav",
- "ffxi-nav-recast",
- "ffxi-proto",
- "ffxi-session",
- "ffxi-viewer-core",
- "ffxi-viewer-wire",
- "ffxi-vocab",
- "keyring",
- "log",
- "rfd",
- "rustls",
- "serde",
- "serde_json",
- "sha2 0.11.0",
- "tempfile",
- "tokio",
- "tracing",
- "tracing-chrome",
- "tracing-subscriber",
- "ureq",
-]
-
-[[package]]
 name = "ffxi-dat"
 version = "0.4.0"
 dependencies = [
@@ -3116,42 +3084,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "ffxi-mcp"
-version = "0.4.0"
-dependencies = [
- "anyhow",
- "ffxi-dat",
- "ffxi-session",
- "rmcp",
- "schemars",
- "serde",
- "serde_json",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "ffxi-nav"
-version = "0.4.0"
-dependencies = [
- "anyhow",
- "bincode",
- "glam",
- "image",
- "pathfinding",
- "serde",
- "tempfile",
- "thiserror 2.0.18",
-]
-
-[[package]]
 name = "ffxi-nav-recast"
 version = "0.4.0"
 dependencies = [
  "dirs",
- "ffxi-nav",
  "glam",
+ "kuluu-nav",
  "recastnavigation-rs",
  "tempfile",
  "thiserror 2.0.18",
@@ -3169,86 +3107,6 @@ dependencies = [
  "md-5",
  "serde",
  "thiserror 2.0.18",
-]
-
-[[package]]
-name = "ffxi-session"
-version = "0.4.0"
-dependencies = [
- "anyhow",
- "dirs",
- "ffxi-dat",
- "ffxi-event",
- "ffxi-nav",
- "ffxi-nav-recast",
- "ffxi-proto",
- "ffxi-viewer-wire",
- "ffxi-vocab",
- "futures-util",
- "mac_address",
- "mysql_async",
- "postcard",
- "rustls",
- "rustls-pki-types",
- "serde",
- "serde_json",
- "sha2 0.11.0",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "tokio-rustls",
- "tokio-tungstenite",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "ffxi-viewer-core"
-version = "0.4.0"
-dependencies = [
- "ab_glyph",
- "bevy",
- "chrono",
- "ffxi-actor",
- "ffxi-audio",
- "ffxi-dat",
- "ffxi-event",
- "ffxi-proto",
- "ffxi-viewer-wire",
- "ffxi-vocab",
- "js-sys",
- "serde",
- "serde_json",
- "uuid",
-]
-
-[[package]]
-name = "ffxi-viewer-wasm"
-version = "0.4.0"
-dependencies = [
- "bevy",
- "console_error_panic_hook",
- "console_log",
- "ffxi-viewer-core",
- "ffxi-viewer-wire",
- "flume",
- "futures-util",
- "gloo-net",
- "gloo-utils 0.2.0",
- "log",
- "postcard",
- "wasm-bindgen",
- "wasm-bindgen-futures",
- "web-sys",
-]
-
-[[package]]
-name = "ffxi-viewer-wire"
-version = "0.4.0"
-dependencies = [
- "postcard",
- "serde",
- "serde_json",
 ]
 
 [[package]]
@@ -4297,6 +4155,148 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1d50be8a24c37debdf3170be6ca396d5b5b165f37f94837891adac735ca416b8"
 dependencies = [
  "bitflags 2.11.1",
+]
+
+[[package]]
+name = "kuluu"
+version = "0.4.0"
+dependencies = [
+ "anyhow",
+ "arboard",
+ "bevy",
+ "bevy_framepace",
+ "clap",
+ "ffxi-dat",
+ "ffxi-nav-recast",
+ "ffxi-proto",
+ "ffxi-vocab",
+ "keyring",
+ "kuluu-nav",
+ "kuluu-render",
+ "kuluu-session",
+ "kuluu-snapshot",
+ "log",
+ "rfd",
+ "rustls",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-chrome",
+ "tracing-subscriber",
+ "ureq",
+]
+
+[[package]]
+name = "kuluu-mcp"
+version = "0.4.0"
+dependencies = [
+ "anyhow",
+ "ffxi-dat",
+ "kuluu-session",
+ "rmcp",
+ "schemars",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "kuluu-nav"
+version = "0.4.0"
+dependencies = [
+ "anyhow",
+ "bincode",
+ "glam",
+ "image",
+ "pathfinding",
+ "serde",
+ "tempfile",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "kuluu-render"
+version = "0.4.0"
+dependencies = [
+ "ab_glyph",
+ "bevy",
+ "chrono",
+ "ffxi-actor",
+ "ffxi-audio",
+ "ffxi-dat",
+ "ffxi-event",
+ "ffxi-proto",
+ "ffxi-vocab",
+ "js-sys",
+ "kuluu-snapshot",
+ "serde",
+ "serde_json",
+ "uuid",
+]
+
+[[package]]
+name = "kuluu-session"
+version = "0.4.0"
+dependencies = [
+ "anyhow",
+ "dirs",
+ "ffxi-dat",
+ "ffxi-event",
+ "ffxi-nav-recast",
+ "ffxi-proto",
+ "ffxi-vocab",
+ "futures-util",
+ "kuluu-nav",
+ "kuluu-snapshot",
+ "mac_address",
+ "mysql_async",
+ "postcard",
+ "rustls",
+ "rustls-pki-types",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-rustls",
+ "tokio-tungstenite",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "kuluu-snapshot"
+version = "0.4.0"
+dependencies = [
+ "postcard",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "kuluu-viewer-wasm"
+version = "0.4.0"
+dependencies = [
+ "bevy",
+ "console_error_panic_hook",
+ "console_log",
+ "flume",
+ "futures-util",
+ "gloo-net",
+ "gloo-utils 0.2.0",
+ "kuluu-render",
+ "kuluu-snapshot",
+ "log",
+ "postcard",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
 ]
 
 [[package]]

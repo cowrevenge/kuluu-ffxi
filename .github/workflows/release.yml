@@ -73,15 +73,15 @@ jobs:
           cache-key: release-linux
 
       - name: Build binary
-        run: cargo build --release --locked -p ffxi-client --features native-window
+        run: cargo build --release --locked -p kuluu --features native-window
 
       - name: Package
         env:
           TAG: ${{ needs.setup.outputs.tag }}
         run: |
           mkdir -p dist
-          strip target/release/ffxi-client
-          tar -C target/release -czf "dist/ffxi-client-${TAG}-x86_64-linux.tar.gz" ffxi-client
+          strip target/release/kuluu
+          tar -C target/release -czf "dist/kuluu-${TAG}-x86_64-linux.tar.gz" kuluu
 
       - uses: actions/upload-artifact@v7
         with:
@@ -115,18 +115,18 @@ jobs:
           cache-key: release-macos
 
       - name: Build binary
-        run: cargo build --release --locked -p ffxi-client --features native-window
+        run: cargo build --release --locked -p kuluu --features native-window
 
       - name: Package
         env:
           TAG: ${{ needs.setup.outputs.tag }}
         run: |
           mkdir -p dist
-          strip target/release/ffxi-client
+          strip target/release/kuluu
           # strip invalidates the linker's ad-hoc signature on arm64, which makes
           # the binary fail to launch ("killed: 9"); re-sign ad-hoc to restore it.
-          codesign --force --sign - target/release/ffxi-client
-          tar -C target/release -czf "dist/ffxi-client-${TAG}-aarch64-macos.tar.gz" ffxi-client
+          codesign --force --sign - target/release/kuluu
+          tar -C target/release -czf "dist/kuluu-${TAG}-aarch64-macos.tar.gz" kuluu
 
       - uses: actions/upload-artifact@v7
         with:
@@ -152,7 +152,7 @@ jobs:
           cache-key: release-windows
 
       - name: Build binary
-        run: cargo build --release --locked -p ffxi-client --features native-window
+        run: cargo build --release --locked -p kuluu --features native-window
 
       - name: Package
         env:
@@ -161,7 +161,7 @@ jobs:
         # into a separate .pdb, so the .exe ships lean without a strip step.
         run: |
           New-Item -ItemType Directory -Force -Path dist | Out-Null
-          Compress-Archive -Path target/release/ffxi-client.exe -DestinationPath "dist/ffxi-client-$env:TAG-x86_64-windows.zip"
+          Compress-Archive -Path target/release/kuluu.exe -DestinationPath "dist/kuluu-$env:TAG-x86_64-windows.zip"
 
       - uses: actions/upload-artifact@v7
         with:
@@ -187,7 +187,7 @@ jobs:
           tool: trunk
 
       - name: Build WASM bundle
-        working-directory: ffxi-viewer-wasm
+        working-directory: kuluu-viewer-wasm
         run: trunk build --release
 
       - name: Package
@@ -195,7 +195,7 @@ jobs:
           TAG: ${{ needs.setup.outputs.tag }}
         run: |
           mkdir -p dist
-          ( cd ffxi-viewer-wasm/dist && zip -r "../../dist/ffxi-viewer-wasm-${TAG}.zip" . )
+          ( cd kuluu-viewer-wasm/dist && zip -r "../../dist/kuluu-viewer-wasm-${TAG}.zip" . )
 
       - uses: actions/upload-artifact@v7
         with:
@@ -215,7 +215,7 @@ jobs:
           merge-multiple: true
 
       # SHA256SUMS pins the integrity contract the in-app updater verifies
-      # against (ffxi-client/src/view_native/launcher_ui/updater.rs). Hash the
+      # against (kuluu/src/view_native/launcher_ui/updater.rs). Hash the
       # bare basenames so each line matches the asset filename the updater
       # downloads, not the runner's artifacts/ directory prefix.
       - name: Generate SHA256SUMS

@@ -23,7 +23,7 @@ is read-only.
 5. `read_resource { uri: "diagnostics://session" }`.
 6. `read_resource { uri: "goal://current" }`.
 7. `read_resource { uri: "inventory://current" }`.
-8. Read sidecar: `~/.config/ffxi-mcp/last-event.json` (may not exist).
+8. Read sidecar: `~/.config/kuluu-mcp/last-event.json` (may not exist).
 
 ## Report format
 

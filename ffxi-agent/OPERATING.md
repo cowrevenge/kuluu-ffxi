@@ -17,10 +17,10 @@ the maintained source of truth:
 ## 1. Build
 
 ```bash
-cargo build -p ffxi-mcp
+cargo build -p kuluu-mcp
 ```
 
-The binary lands at `target/debug/ffxi-mcp`. Integration tests locate it by
+The binary lands at `target/debug/kuluu-mcp`. Integration tests locate it by
 walking up from `current_exe` (`tests/common/mcp_client.rs:36`), so skipping
 this step makes `agent_session` / `disconnect_recovery` panic with an explicit
 build instruction. Note `.mcp.json` invokes `cargo run --release` instead —
@@ -40,11 +40,11 @@ Live integration tests self-skip when nothing is reachable on
 proof, so run the one that matches the layer you suspect:
 
 ```bash
-cargo test -p ffxi-client --test play_lifecycle    -- --nocapture
-cargo test -p ffxi-client --test zone_change       -- --nocapture
-cargo test -p ffxi-client --test agent_session     -- --nocapture
-cargo test -p ffxi-client --test action_dispatch   -- --nocapture
-cargo test -p ffxi-client --test delivery_box_live -- --nocapture
+cargo test -p kuluu --test play_lifecycle    -- --nocapture
+cargo test -p kuluu --test zone_change       -- --nocapture
+cargo test -p kuluu --test agent_session     -- --nocapture
+cargo test -p kuluu --test action_dispatch   -- --nocapture
+cargo test -p kuluu --test delivery_box_live -- --nocapture
 ```
 
 - **`play_lifecycle`** — auth → lobby → map → InZone → disconnect, on the bare
@@ -53,7 +53,7 @@ cargo test -p ffxi-client --test delivery_box_live -- --nocapture
 - **`zone_change`** — GM `!zone N` → reconnect → re-zone-in. Requires
   `gmlevel ≥ 1`, which the fixture sets. Validates Blowfish key rotation across
   the transition.
-- **`agent_session`** — the transport-conformance floor. Drives `ffxi-mcp` over
+- **`agent_session`** — the transport-conformance floor. Drives `kuluu-mcp` over
   JSON-RPC stdio: `initialize` → `tools/list` → `resources/list` →
   `resources/subscribe scene://current` → wait-for-InZone → read
   `scene://current` → `tools/call snapshot` → expect
@@ -65,7 +65,7 @@ cargo test -p ffxi-client --test delivery_box_live -- --nocapture
 container mid-session, which disrupts anything else sharing the stack:
 
 ```bash
-RESTART_MAP_SERVER=1 cargo test -p ffxi-client --test disconnect_recovery -- --nocapture
+RESTART_MAP_SERVER=1 cargo test -p kuluu --test disconnect_recovery -- --nocapture
 ```
 
 It restarts `server-map-1` (override with `MAP_SERVER_CONTAINER`), asserts the
@@ -74,7 +74,7 @@ supervisor notices within 30 s and is back InZone within 60 s, then prints
 
 ## 3. Driving an LLM harness manually
 
-Two ways in. **Standalone** — `ffxi-mcp` owns its own session:
+Two ways in. **Standalone** — `kuluu-mcp` owns its own session:
 
 ```bash
 export FFXI_USER='your_account'
@@ -82,25 +82,25 @@ export FFXI_PASS='your_password'
 export FFXI_CHAR_ID=12345678        # u32 from chars.charid
 export FFXI_CHAR='YourCharName'
 export FFXI_SERVER=127.0.0.1
-export RUST_LOG=info,ffxi_client=info,ffxi_mcp=debug
+export RUST_LOG=info,kuluu=info,kuluu_mcp=debug
 ```
 
-**Attach** — a native `ffxi-client` window owns the session and the harness
+**Attach** — a native `kuluu` window owns the session and the harness
 joins it over a unix socket, so you can watch what the LLM is doing:
 
 ```bash
-cargo run -p ffxi-client -- --agent-listen auto play
+cargo run -p kuluu -- --agent-listen auto play
 ```
 
 That writes `$TMPDIR/ffxi-agent.pid` with the socket path; the `ffxi-attach`
 server in `.mcp.json` sets `FFXI_ATTACH=auto` to resolve it
-(`ffxi-mcp/src/attach.rs:10`). Recipe and gotchas: `drive-gui.md`.
+(`kuluu-mcp/src/attach.rs:10`). Recipe and gotchas: `drive-gui.md`.
 
 Then point a harness at the binary:
 
 * **Claude Code**: `cd ffxi-agent && claude` (auto-discovers `.mcp.json`).
 * **OpenCode**: `cd ffxi-agent && opencode` (same `.mcp.json`).
-* **MCP Inspector**: `npx @modelcontextprotocol/inspector ./target/debug/ffxi-mcp` —
+* **MCP Inspector**: `npx @modelcontextprotocol/inspector ./target/debug/kuluu-mcp` —
   fastest way to confirm tools/resources surface correctly without an LLM.
 
 ### 3a. Harness compatibility
@@ -122,17 +122,17 @@ Cross-harness invariants:
   social (`chat`, `tell`), flow (`request_zone_change`, `end_event`,
   `raise_menu`, `tractor_menu`, `homepoint_menu`, `wait_for_event`), and
   session (`snapshot`, `debug_heights`, `read_resource`, `disconnect`).
-  `ffxi-mcp/src/main.rs` is the list that counts — `tools/list` in the
+  `kuluu-mcp/src/main.rs` is the list that counts — `tools/list` in the
   Inspector is the cheapest way to confirm what a given build exposes.
 - Resource surface — 5 resources (`scene://current`, `party://members`,
   `diagnostics://session`, `goal://current`, `inventory://current`).
   `read_resource` re-exposes all five as a tool for clients without
   `resources/read`.
 - Notifications — `notifications/resources/updated` fires on the `AgentEvent`s
-  gated in `ffxi-mcp/src/main.rs::uris_for_event`.
+  gated in `kuluu-mcp/src/main.rs::uris_for_event`.
 - Working directory — start the harness from `ffxi-agent/` so `.mcp.json`
-  resolves; it points at `../Cargo.toml -p ffxi-mcp`, compiling against the
-  workspace root. `cargo test -p ffxi-client` etc. run from the repo root.
+  resolves; it points at `../Cargo.toml -p kuluu-mcp`, compiling against the
+  workspace root. `cargo test -p kuluu` etc. run from the repo root.
 
 Observed gotchas:
 
@@ -162,8 +162,8 @@ docker restart -t 0 server-map-1
 The supervisor must reconnect and resume the persisted goal from the user
 config dir (`kuluu/goal.json`, override with `FFXI_MCP_GOAL_PATH`). Watch for:
 
-* `INFO ffxi_client::supervisor: supervisor.attempt.start attempt=2 replaying_goal=true`
-* `INFO ffxi_client::supervisor: supervisor.reconnected attempt=2 downtime_ms=…`
+* `INFO kuluu::supervisor: supervisor.attempt.start attempt=2 replaying_goal=true`
+* `INFO kuluu::supervisor: supervisor.reconnected attempt=2 downtime_ms=…`
 
 ### 4b. Co-play goal — agent-as-healer
 
@@ -194,7 +194,7 @@ Tracing events fire at three layers, each at a level that keeps defaults quiet:
 To profile reactor ticks:
 
 ```bash
-RUST_LOG=info,ffxi_client::reactor=trace cargo run -p ffxi-mcp …
+RUST_LOG=info,kuluu::reactor=trace cargo run -p kuluu-mcp …
 ```
 
 Events are key=value, not JSON; switch to the `tracing-subscriber` JSON
@@ -208,7 +208,7 @@ Budgets:
 
 That last split is forced by the UDP floor. `net_health::MAP_SILENCE_TIMEOUT`
 declares a disconnect after 60 s without any inbound server packet
-(`ffxi-client/src/net_health.rs:4`, enforced at `session.rs:3517`) — UDP gives
+(`kuluu/src/net_health.rs:4`, enforced at `session.rs:3517`) — UDP gives
 no socket-level "connection lost" signal, so silence detection is the only
 mechanism. On a hard map-server crash expect ~60 s to notice, ~5–10 s to
 re-auth and re-zone, ≥ 65 s total. Lowering the threshold (15 s = 15 missed

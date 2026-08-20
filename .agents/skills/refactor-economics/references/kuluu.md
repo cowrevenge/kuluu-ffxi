@@ -58,7 +58,7 @@ client packet while the session still looks healthy.
   second source. Pin the coupling with a guard test.
 - **Never hand-copy upstream values.** If it derives from LSB or POLUtils, scrape
   it at build time (`vendor-scrape` skill).
-- `ffxi-viewer-core` is `#![forbid(unsafe_code)]`.
+- `kuluu-render` is `#![forbid(unsafe_code)]`.
 - UI text under `launcher_ui/` must be printable ASCII.
 - **Don't run `cargo fmt --all`** to autofix in a shared tree — it reformats the
   whole workspace including another session's in-progress files. Use
@@ -69,7 +69,7 @@ client packet while the session still looks healthy.
 - **`pub(super)` does not reach siblings.** In `text_input::menu::confirm` it
   means `pub(in text_input::menu)`, so a sibling `text_input::mouse_nav` calling
   it is E0603. This is why module directories here are **flat** — the in-repo
-  precedent is `ffxi-viewer-core/src/hud/`, 40 flat files behind one `mod.rs`.
+  precedent is `kuluu-render/src/hud/`, 40 flat files behind one `mod.rs`.
 - **A parent's private items are visible to descendants** through `use super::*`,
   so moving a function into a child file often needs *no* visibility change at
   all. Compile before annotating.

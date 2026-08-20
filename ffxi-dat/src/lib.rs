@@ -43,7 +43,7 @@ pub use archive::{discover_overlays, DatLocation, DatRoot};
 pub use chunk::{walk, walk_tree, Chunk, ChunkNode, ChunkWalker};
 pub use item_dat::ItemStatic;
 pub use kind::ChunkKind;
-pub use npc_names::{split_id, NpcNameTable, NPC_LIST_FILE_ID_BASE};
+pub use npc_names::{compose_id, split_id, NpcNameTable, NPC_LIST_FILE_ID_BASE};
 
 use std::path::PathBuf;
 

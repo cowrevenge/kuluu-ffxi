@@ -35,14 +35,14 @@ an event stream.
 |---|---|---|
 | Wire protocol, session state, reactor goals, zoning, chat, entity/spawn flow | JSON event stream + MCP resources | **Headless MCP** (preferred) or raw stdio — `references/drive-headless.md` |
 | Rendering, HUD, camera, input-driven movement, materials, minimap, audio | Pixels/audio of the native window | **GUI + MCP attach** — `references/drive-gui.md` |
-| Session/zone/MCP transport layers as a whole | Live integration tests (self-skip without a server) | `cargo test -p ffxi-client --test play_lifecycle` / `zone_change` / `agent_session` — see `references/drive-headless.md` §Tests |
+| Session/zone/MCP transport layers as a whole | Live integration tests (self-skip without a server) | `cargo test -p kuluu --test play_lifecycle` / `zone_change` / `agent_session` — see `references/drive-headless.md` §Tests |
 | Both (e.g. a fix spanning session.rs and view_native) | Verify the protocol half headless first — it's cheaper and isolates failures — then the GUI half | both references |
 
 Two constraints shape everything:
 
 - **The reactor is not wired in `play --headless`** (main.rs spawns the bare
   session). Anything reactor-driven — zoneline auto-trigger, follow, engage,
-  pathing — only runs under `ffxi-mcp` standalone (which spawns
+  pathing — only runs under `kuluu-mcp` standalone (which spawns
   supervisor→reactor→session) or in the GUI. Raw stdio can still send explicit
   `AgentCommand`s like `request_zone_change`.
 - **Verification runs on the human's desktop while they're using it, so drive
@@ -94,7 +94,7 @@ prompt.
   char `Verilamp` (gmlevel 5). This is the LSB provisioning-doc example
   credential for this machine's dev DB — safe to type into launch commands and
   logs, not a real secret. Launch:
-  `cargo run -p ffxi-client --features native-window -- --agent-listen auto play verilight 'TestPass!1234' Verilamp`
+  `cargo run -p kuluu --features native-window -- --agent-listen auto play verilight 'TestPass!1234' Verilamp`
 - **Real character** (the user's) — credentials come from env
   (`FFXI_USER`/`FFXI_PASS`/`FFXI_CHAR`); never commit or log them. Use only
   when the check specifically needs the user's own character/progress.
@@ -107,12 +107,12 @@ prompt.
   (`decode::ZoneInEvent`) and must be answered with 0x05B or the char sticks
   InEvent (0x05E/0x0E7 rejected). If those symptoms ever return, check the
   sync/header invariant first (`map_networking.cpp:419-428`).
-- **Ephemeral fixture chars** (`ffxi-client/tests/common/mod.rs::EphemeralChar`)
+- **Ephemeral fixture chars** (`kuluu/tests/common/mod.rs::EphemeralChar`)
   — created against the live lobby + DB, gmlevel set pre-first-login; what the
   integration tests use. Gotcha: when the accounts AUTO_INCREMENT outruns the
   fixture's sentinel accid scheme, the lobby rejects the char select
   ("mismatched character name" in connect logs) and the test dies at the 0x02
-  ack step. Also rebuild `target/debug/ffxi-mcp` — the agent_session test
+  ack step. Also rebuild `target/debug/kuluu-mcp` — the agent_session test
   spawns it without rebuilding.
 
 ## Reporting

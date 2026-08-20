@@ -1,5 +1,5 @@
 name: ffxi
-command: ffxi-mcp
+command: kuluu-mcp
 args: []
 env:
   FFXI_SERVER: "${FFXI_SERVER:-127.0.0.1}"

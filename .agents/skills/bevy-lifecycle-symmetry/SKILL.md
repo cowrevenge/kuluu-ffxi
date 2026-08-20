@@ -23,7 +23,7 @@ work.
 ## Decision: does this change touch lifecycle?
 
 Yes, run the checklist when the change:
-- Adds a `commands.spawn(...)` (in `ffxi-viewer-core` or `ffxi-client`).
+- Adds a `commands.spawn(...)` (in `kuluu-render` or `kuluu`).
 - Adds a `#[derive(Resource)]` or `init_resource::<T>()` for a type
   that holds cached / per-session / per-zone state.
 - Adds a new system gated on `in_state(AppPhase::InGame)` (or any
@@ -59,9 +59,9 @@ For each new `commands.spawn(...)` introduced or modified:
    was added later. Check every branch (`match` arms, `if/else`,
    `Option::map_or_else`).
 
-Authoritative reference: `ffxi-viewer-core/src/dat_mmb.rs:677` (the
+Authoritative reference: `kuluu-render/src/dat_mmb.rs:677` (the
 fresh-spawn parent that fixed the logout bug), and
-`ffxi-viewer-core/src/dat_mzb.rs:1030` (the MZB parent that was always
+`kuluu-render/src/dat_mzb.rs:1030` (the MZB parent that was always
 correct).
 
 ## Checklist: resource layer
@@ -83,7 +83,7 @@ For each new `Resource` or modified Resource field:
    If yes: this is a session-scoped Resource and needs a drain.
 
 2. **Register the drain in
-   `ffxi-client/src/view_native/mod.rs::despawn_ingame_entities`** —
+   `kuluu/src/view_native/mod.rs::despawn_ingame_entities`** —
    the canonical `OnExit(AppPhase::InGame)` handler. Add the resource
    to the system's parameters and clear/reset the relevant fields.
    `*r = T::default()` is fine for fully-stateless resets.
@@ -125,9 +125,9 @@ For systems registered at `OnEnter` / `OnExit` / state predicates:
 
 After making a lifecycle-adjacent change, before declaring done:
 
-1. **Build**: `cargo check -p ffxi-client -p ffxi-viewer-core`.
+1. **Build**: `cargo check -p kuluu -p kuluu-render`.
 2. **Test classifier if you touched it**:
-   `cargo test -p ffxi-client --bin ffxi-client --features native-window disconnect`.
+   `cargo test -p kuluu --bin kuluu --features native-window disconnect`.
 3. **Manual smoke** (when an operator is available): launch, enter a
    zone with visible decorative geometry (Lower Jeuno, San d'Oria),
    `/logout`, confirm:

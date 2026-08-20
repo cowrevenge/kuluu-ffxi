@@ -94,8 +94,8 @@ gh release view vX.Y.Z -R jondwillis/kuluu-ffxi \
 ```
 
 1. **`tagName` is `vX.Y.Z`**, not `main` and not the bare version.
-2. **Assets are named for the tag** — `ffxi-client-vX.Y.Z-aarch64-macos.tar.gz`,
-   `-x86_64-linux.tar.gz`, `-x86_64-windows.zip`, `ffxi-viewer-wasm-vX.Y.Z.zip`,
+2. **Assets are named for the tag** — `kuluu-vX.Y.Z-aarch64-macos.tar.gz`,
+   `-x86_64-linux.tar.gz`, `-x86_64-windows.zip`, `kuluu-viewer-wasm-vX.Y.Z.zip`,
    plus `SHA256SUMS`. If the tag was wrong, the asset names carry the wrong tag
    too, and the in-app updater matches on filename.
 3. **Checksums match.** Download and check — the updater verifies against this
@@ -108,7 +108,7 @@ gh release view vX.Y.Z -R jondwillis/kuluu-ffxi \
    (`gh release download` needs `-R` when run outside the repo — it shells out
    to git to infer the repo otherwise.)
 4. **The binary launches.** Extract the host-platform archive and run
-   `./ffxi-client --version`. Printing clap usage is a pass — it proves the
+   `./kuluu --version`. Printing clap usage is a pass — it proves the
    process started. This specifically catches the macOS arm64 trap: `strip`
    invalidates the linker's ad-hoc signature, and an unsigned arm64 binary dies
    with `killed: 9`. `release.yml` re-signs with `codesign --force --sign -`
@@ -119,7 +119,7 @@ gh release view vX.Y.Z -R jondwillis/kuluu-ffxi \
 ### The release published under the wrong tag
 
 Symptom: a release named and tagged `main` (or anything non-semver), marked
-Latest, with assets named `ffxi-client-main-*`. Player-visible, because the
+Latest, with assets named `kuluu-main-*`. Player-visible, because the
 in-app updater reads the Latest release plus its `SHA256SUMS`.
 
 Cause, and the general lesson: **a reusable workflow inherits the *caller's*

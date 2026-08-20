@@ -12,7 +12,7 @@ into Rust statics":
 - `ffxi-proto/build.rs` scrapes `vendor/server/src/map/enums/msg_*.h`
   into typed message-ID tables (`msg_basic`, `msg_channel`,
   `msg_area`, `msg_action_modifier`, `msg_system`).
-- `ffxi-nav/build.rs` scrapes `vendor/server/sql/zonelines.sql` into a
+- `kuluu-nav/build.rs` scrapes `vendor/server/sql/zonelines.sql` into a
   static `&[ZoneLine]` array indexed by `from_zone`.
 
 Apply this pattern any time you need values from LSB that are
@@ -160,7 +160,7 @@ narrow so unrelated edits don't trigger rebuilds.
 ## Cross-references
 
 - `ffxi-proto/build.rs` — multi-enum scraper template
-- `ffxi-nav/build.rs` — single-SQL-file scraper template with
+- `kuluu-nav/build.rs` — single-SQL-file scraper template with
   load-bearing y/z swap documented inline (see that file's module
   comment for an example of capturing transformation semantics at
   scrape time)

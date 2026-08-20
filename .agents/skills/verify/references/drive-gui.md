@@ -26,7 +26,7 @@ looks like a clean voluntary shutdown rather than a fault:
 ```
 bevy_winit::system: Monitor removed 675v0
 bevy_window::system: No windows are open, exiting
-ffxi_client::view_native::exit_watchdog: teardown checkpoint stage="app.run() returned — winit loop exited cleanly"
+kuluu::view_native::exit_watchdog: teardown checkpoint stage="app.run() returned — winit loop exited cleanly"
 ```
 
 Read that signature as *the display slept*, not as a client bug — it has cost
@@ -59,7 +59,7 @@ Doing it by hand instead — **do not ask the user for credentials** (see
 SKILL.md "Character strategy"):
 
 ```bash
-target/debug/ffxi-client --agent-listen auto play --unfocused --mute \
+target/debug/kuluu --agent-listen auto play --unfocused --mute \
   verilight 'TestPass!1234' Verilamp
 ```
 
@@ -138,7 +138,7 @@ command never happens. `chat` is `{"cmd":"chat","kind":0,"text":"!hp 9999"}`;
 sending `message` instead of `text` deserializes to nothing. Confirm a GM
 command actually landed (re-`snapshot`, check the value moved) before
 concluding the server rejected it. Variant names come from `AgentCommand` in
-`ffxi-client/src/state.rs` — read the enum rather than guessing. `ActionKind`
+`kuluu/src/state.rs` — read the enum rather than guessing. `ActionKind`
 is internally tagged, so a cast nests as
 `{"kind":"cast_magic","spell_id":896,…}` inside the `kind` field.
 
@@ -157,8 +157,8 @@ osascript -e 'tell application "System Events"
 end tell'
 ```
 
-Resolve `<pid>` with `pgrep -f "^target/debug/ffxi-client"` — a bare
-`pgrep -f ffxi-client` also matches the harness's own shell wrapper, and the
+Resolve `<pid>` with `pgrep -f "^target/debug/kuluu"` — a bare
+`pgrep -f kuluu` also matches the harness's own shell wrapper, and the
 `osascript` then fails with "Invalid index". Needs Accessibility permission.
 Keep delays ≥0.3s, capture after each step, and Read the result — keystrokes
 are fire-and-forget.

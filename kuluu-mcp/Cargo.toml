@@ -1,0 +1,51 @@
+[package]
+name = "kuluu-mcp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "MCP server bridging the FFXI kuluu-session runtime to LLM harnesses (Claude Code, OpenCode, pi.dev)."
+# The MCP server is the canonical entry — `cargo run -p kuluu-mcp` and
+# the `.mcp.json` invocations both rely on this. The companion
+# `kuluu-mcp-repl` binary needs an explicit `--bin` flag.
+default-run = "kuluu-mcp"
+
+[[bin]]
+name = "kuluu-mcp"
+path = "src/main.rs"
+
+# Headless REPL: spawns `kuluu-mcp` as a subprocess and exposes a
+# line-oriented terminal driver for tool calls. Useful for scripted
+# regression sequences and for poking the MCP layer without an LLM
+# in the loop. See `src/bin/kuluu-mcp-repl.rs`.
+[[bin]]
+name = "kuluu-mcp-repl"
+path = "src/bin/kuluu-mcp-repl.rs"
+
+[dependencies]
+# `relay` enables the WebSocket viewer relay so an LLM-driven session can
+# be observed in the browser viewer (`kuluu-viewer-wasm`) while the agent
+# is operating. Opt-in at runtime via the `FFXI_RELAY_LISTEN` env var.
+# `default-features = false` keeps the GUI (`native-window` → Bevy) out of
+# the headless, network-facing MCP crate now that it's a default feature of
+# kuluu-session. We only want the `relay` transport here.
+kuluu-session = { path = "../kuluu-session", features = ["relay"] }
+# Direct dep so headless MCP can attempt a DAT-install load for the
+# Config's `dat_root` field. AGPL note: ffxi-dat is built against
+# POLUtils (Apache-2.0), not xi-tinkerer, so linking from the
+# network-facing MCP crate is allowed — see
+# `~/.claude/projects/.../memory/ffxi_agpl_containment.md`.
+ffxi-dat = { path = "../ffxi-dat" }
+
+anyhow.workspace = true
+rmcp.workspace = true
+schemars.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+# The MCP server/REPL are dev/agent tooling, not a shipped artifact — dist
+# packages only kuluu (the GUI binary).
+[package.metadata.dist]
+dist = false

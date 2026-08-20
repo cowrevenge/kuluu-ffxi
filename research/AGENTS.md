@@ -65,7 +65,7 @@ the higher tier:
    verify against tier 1–2 before baking values into the crates.
 5. **`cexi-viewer/`** — rendering and asset-pipeline reference: WebGL2 GPU
    skinning, zone time-of-day/weather, BGW/SPW playback. Most useful for
-   `ffxi-viewer-core` materials and `ffxi-actor` posing.
+   `kuluu-render` materials and `ffxi-actor` posing.
 6. **`xim/`** — broad behavioral/architecture reference (actor handling,
    packet flow, DAT pipeline), but the author rarely consulted the
    disassembly and states XIM is unaware of in-memory-only bits/fields.

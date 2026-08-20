@@ -105,7 +105,7 @@ be arbitrary? If the former, it's a boundary symbol — proceed.
 - [ ] Value matches LSB's definition (`vendor/server/src/map/enums/`)
 - [ ] Prefer a `build.rs` scraper over hand-maintained constants
       where the LSB definition is in a parseable header or SQL file
-      (the `ffxi-proto/build.rs` and `ffxi-nav/build.rs` patterns
+      (the `ffxi-proto/build.rs` and `kuluu-nav/build.rs` patterns
       are the precedents). Hand-maintained values drift.
 
 ### Session-state transition

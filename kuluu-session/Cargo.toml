@@ -1,0 +1,53 @@
+[package]
+name = "kuluu-session"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The Tokio FFXI session runtime for LSB/Phoenix servers: supervisor/reactor/session pipeline, auth/lobby/map transports, SessionState, and the wire-snapshot translation. No rendering — the Bevy client lives in kuluu."
+
+[features]
+# WebSocket relay listener publishing kuluu-snapshot frames to external
+# consumers (kuluu-mcp, the wasm viewer). Tungstenite + postcard ride behind it.
+relay = ["dep:tokio-tungstenite", "dep:postcard", "dep:futures-util"]
+
+[dependencies]
+ffxi-proto = { path = "../ffxi-proto" }
+ffxi-vocab = { path = "../ffxi-vocab" }
+kuluu-nav = { path = "../kuluu-nav" }
+ffxi-nav-recast = { path = "../ffxi-nav-recast" }
+ffxi-dat = { path = "../ffxi-dat" }
+ffxi-event = { path = "../ffxi-event" }
+kuluu-snapshot = { path = "../kuluu-snapshot" }
+
+anyhow.workspace = true
+# Binary xiloader auth (e.g. HorizonXI's hxiloader v1.3) embeds the local
+# MAC at offset 0x50 of the login payload. mac_address resolves the
+# primary interface MAC cross-platform; thiserror gives us typed errors
+# distinct from the JSON flavor's anyhow! bails.
+mac_address = "1"
+thiserror = "2"
+# Native per-platform user config dir (macOS ~/Library/Application Support,
+# Windows %APPDATA%\Roaming, Linux $XDG_CONFIG_HOME else ~/.config) for the
+# goal store (and, via config_dir, the client's launcher/graphics/keybinds
+# stores). Wraps the OS APIs and applies the XDG basedir spec.
+dirs = "6"
+rustls.workspace = true
+rustls-pki-types.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tokio.workspace = true
+tokio-rustls.workspace = true
+tracing.workspace = true
+
+# Relay-only deps. Postcard is the canonical encoding; tokio-tungstenite is
+# the WebSocket server. futures-util gives us the SinkExt/StreamExt traits
+# tungstenite's split sink/stream rely on.
+tokio-tungstenite = { version = "0.24", optional = true }
+postcard = { version = "1", optional = true, features = ["use-std"] }
+futures-util = { version = "0.3", optional = true }
+
+[dev-dependencies]
+mysql_async.workspace = true
+tempfile = "3"
+tracing-subscriber.workspace = true

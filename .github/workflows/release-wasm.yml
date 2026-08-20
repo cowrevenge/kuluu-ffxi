@@ -49,15 +49,15 @@ jobs:
           tool: trunk
 
       - name: Build WASM bundle
-        working-directory: ffxi-viewer-wasm
+        working-directory: kuluu-viewer-wasm
         run: trunk build --release
 
       - name: Package
         run: |
           mkdir -p dist
-          ( cd ffxi-viewer-wasm/dist && zip -r "../../dist/ffxi-viewer-wasm.zip" . )
+          ( cd kuluu-viewer-wasm/dist && zip -r "../../dist/kuluu-viewer-wasm.zip" . )
 
       - uses: actions/upload-artifact@v7
         with:
           name: artifacts-wasm
-          path: dist/ffxi-viewer-wasm.zip
+          path: dist/kuluu-viewer-wasm.zip

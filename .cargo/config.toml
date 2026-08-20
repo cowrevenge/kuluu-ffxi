@@ -41,9 +41,9 @@ no-embed-metadata = true
 
 # Resolve features once across every workspace member, not per invocation.
 #
-# WHY: with the default per-invocation resolution, `cargo test -p ffxi-viewer-core`
+# WHY: with the default per-invocation resolution, `cargo test -p kuluu-render`
 # and `cargo build --workspace --features native-window` disagree about bevy's
-# feature set (the narrow one loses `bevy_feathers`, which ffxi-client's
+# feature set (the narrow one loses `bevy_feathers`, which kuluu's
 # native-window feature contributes). A different feature set is a different
 # -C metadata hash, so the two invocations maintain SEPARATE artifact universes
 # for bevy and everything above it. Measured on the unit graph: of the 461 units

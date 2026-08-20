@@ -27,7 +27,7 @@ jobs:
         shell: bash
         run: |
           version=$(cargo metadata --no-deps --format-version=1 \
-            | jq -r '.packages[] | select(.name=="ffxi-client") | .version')
+            | jq -r '.packages[] | select(.name=="kuluu") | .version')
           tag="v${version}"
           echo "Workspace version: ${version} (tag ${tag})"
           if git rev-parse "refs/tags/${tag}" >/dev/null 2>&1; then

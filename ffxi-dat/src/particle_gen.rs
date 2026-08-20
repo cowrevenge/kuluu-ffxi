@@ -146,7 +146,7 @@ impl ParticleBillboard {
 // ground-splash rings (`~1h*`, scale [1.3, 0.0, 1.2]) spread as flat ellipses instead of balls.
 // Retail gates both cases on `CheckFlag29() == false` (:860), i.e. a batched generator's single
 // elem carries its own spread; the consumer decides whether that applies to it (see
-// `ffxi_viewer_core::particle_sim::emit`).
+// `kuluu_render::particle_sim::emit`).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PositionVariance {
     pub radius_variance: f32,

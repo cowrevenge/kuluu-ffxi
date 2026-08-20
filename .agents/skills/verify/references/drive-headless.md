@@ -2,7 +2,7 @@
 
 Three ways to a protocol-observable session, strongest first.
 
-## 1. ffxi-mcp standalone (preferred)
+## 1. kuluu-mcp standalone (preferred)
 
 Spawns the full supervisor→reactor→session pipeline and exposes MCP
 tools/resources over stdio. This is the only headless path with the reactor
@@ -10,8 +10,8 @@ tools/resources over stdio. This is the only headless path with the reactor
 waits instead of log polling.
 
 ```bash
-cargo build -p ffxi-mcp          # binary at target/debug/ffxi-mcp
-FFXI_USER=... FFXI_PASS=... FFXI_CHAR=... FFXI_SERVER=127.0.0.1 target/debug/ffxi-mcp
+cargo build -p kuluu-mcp          # binary at target/debug/kuluu-mcp
+FFXI_USER=... FFXI_PASS=... FFXI_CHAR=... FFXI_SERVER=127.0.0.1 target/debug/kuluu-mcp
 ```
 
 Drive it as an MCP server (`claude mcp add` / `.mcp.json` — see
@@ -37,7 +37,7 @@ on stderr. **No reactor** — send explicit commands only.
 
 ```bash
 D=$(mktemp -d); mkfifo $D/in; (exec 3>$D/in; sleep 900 & wait) &   # hold write end open
-cargo run -q -p ffxi-client --features native-window -- \
+cargo run -q -p kuluu --features native-window -- \
   play <user> '<pass>' <CharName> --headless < $D/in > $D/events.jsonl 2> $D/client.log &
 
 echo '{"cmd":"move","x":164.9,"y":164.8,"z":-5.5,"heading":64}' > $D/in
@@ -60,10 +60,10 @@ server is reachable** — they are runtime verification harnesses, not CI
 re-runs. Use them to bisect which layer is broken before hand-driving:
 
 ```bash
-cargo test -p ffxi-client --test play_lifecycle -- --nocapture   # auth→lobby→map→InZone→disconnect (~3s)
-cargo test -p ffxi-client --test zone_change    -- --nocapture   # GM !zone → reconnect → re-zone-in
-cargo test -p ffxi-client --test agent_session  -- --nocapture   # full MCP-driven session (transport floor)
-RESTART_MAP_SERVER=1 cargo test -p ffxi-client --test disconnect_recovery -- --nocapture  # destructive, opt-in
+cargo test -p kuluu --test play_lifecycle -- --nocapture   # auth→lobby→map→InZone→disconnect (~3s)
+cargo test -p kuluu --test zone_change    -- --nocapture   # GM !zone → reconnect → re-zone-in
+cargo test -p kuluu --test agent_session  -- --nocapture   # full MCP-driven session (transport floor)
+RESTART_MAP_SERVER=1 cargo test -p kuluu --test disconnect_recovery -- --nocapture  # destructive, opt-in
 ```
 
 They use the `EphemeralChar` fixture (`tests/common/mod.rs`): isolated
@@ -74,8 +74,8 @@ fixture's — that delta is the bug or the blocker.
 ## Provisioning throwaway chars manually
 
 ```bash
-cargo run -p ffxi-client --features native-window -- provision <user> 'TestPass!1234'
-cargo run -p ffxi-client --features native-window -- create-char <user> 'TestPass!1234' <Name> 1 1 0 1 1
+cargo run -p kuluu --features native-window -- provision <user> 'TestPass!1234'
+cargo run -p kuluu --features native-window -- create-char <user> 'TestPass!1234' <Name> 1 1 0 1 1
 docker exec server-database-1 mariadb -uxiadmin -ppassword xidb \
   -e "UPDATE chars SET pos_zone=230,pos_x=..,pos_y=..,pos_z=.. WHERE charname='<Name>';"
 ```

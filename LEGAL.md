@@ -41,7 +41,7 @@ their own licenses. The full map:
 | `ffxi-proto` | `blowfish.cpp`, `compress.dat`, `decompress.dat`, `msg_basic.h`, `msg.lua`, `effect.lua`, `job_name.lua`, `spell_list.sql`, `abilities.sql`, `item_basic.sql`, `item_equipment.sql` | [LandSandBoat/server][lsb] | GPL-3.0 |
 | `ffxi-dat` | `zone_settings.sql` | [LandSandBoat/server][lsb] | GPL-3.0 |
 | `ffxi-dat` | `ROMFileMappings.xml` | [Windower/POLUtils][pol] | Apache-2.0 |
-| `ffxi-nav` | `zonelines.sql` | [LandSandBoat/server][lsb] | GPL-3.0 |
+| `kuluu-nav` | `zonelines.sql` | [LandSandBoat/server][lsb] | GPL-3.0 |
 | `ffxi-audio` | `track_names.json` | [voliathon/AltanaListener][al] | (no declared license — see §6) |
 
 `ffxi-nav-recast` additionally fetches navmesh data from

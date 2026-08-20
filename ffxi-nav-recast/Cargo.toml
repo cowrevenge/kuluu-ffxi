@@ -6,7 +6,7 @@ license.workspace = true
 description = "Recast/Detour-backed NavMesh for FFXI zones, sourced from LandSandBoat/xiNavmeshes."
 
 [dependencies]
-ffxi-nav = { path = "../ffxi-nav" }
+kuluu-nav = { path = "../kuluu-nav" }
 recastnavigation-rs = "0.1"
 glam = "0.32"
 thiserror = { workspace = true }

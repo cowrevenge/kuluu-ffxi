@@ -2,7 +2,7 @@
   "mcpServers": {
     "ffxi": {
       "command": "cargo",
-      "args": ["run", "--release", "--manifest-path", "../Cargo.toml", "-p", "ffxi-mcp"],
+      "args": ["run", "--release", "--manifest-path", "../Cargo.toml", "-p", "kuluu-mcp"],
       "env": {
         "FFXI_SERVER": "127.0.0.1",
         "FFXI_AUTH_PORT": "54231",
@@ -16,7 +16,7 @@
     },
     "ffxi-attach": {
       "command": "cargo",
-      "args": ["run", "--release", "--manifest-path", "../Cargo.toml", "-p", "ffxi-mcp"],
+      "args": ["run", "--release", "--manifest-path", "../Cargo.toml", "-p", "kuluu-mcp"],
       "env": {
         "FFXI_ATTACH": "auto",
         "FFXI_SERVER": "127.0.0.1",

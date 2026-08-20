@@ -2,7 +2,7 @@ pub mod fetch;
 
 use std::path::{Path, PathBuf};
 
-use ffxi_nav::{glam::Vec3, NavMesh};
+use kuluu_nav::{glam::Vec3, NavMesh};
 use recastnavigation_rs::demo::load_nav_mesh;
 use recastnavigation_rs::detour::{
     DtNavMesh, DtNavMeshQuery, DtPolyRef, DtQueryFilter, DtStraightPathOptions,

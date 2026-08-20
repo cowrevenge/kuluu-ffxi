@@ -11,6 +11,6 @@ publish = false
 [dependencies]
 
 # Project automation, never a shipped artifact — keep dist's release packaging
-# focused on ffxi-client.
+# focused on kuluu.
 [package.metadata.dist]
 dist = false

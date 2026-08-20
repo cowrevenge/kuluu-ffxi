@@ -58,7 +58,7 @@ pub fn fetch(zone_id: u16) -> Result<Option<PathBuf>, FetchError> {
 
 fn candidate_filenames(zone_id: u16) -> Vec<String> {
     let mut out = vec![format!("{zone_id}.nav")];
-    if let Some(name) = ffxi_nav::zone_name(zone_id) {
+    if let Some(name) = kuluu_nav::zone_name(zone_id) {
         out.push(format!("{name}.nav"));
     }
     out

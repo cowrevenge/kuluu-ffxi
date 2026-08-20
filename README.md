@@ -94,14 +94,14 @@ To actually *run* the client you also need a user-provided retail install
 Native window (the default `play` mode; GUI ships by default):
 
 ```bash
-cargo run -p ffxi-client -- play
+cargo run -p kuluu -- play
 ```
 
 Headless (JSON-line agent session, useful for protocol work and for driving the
 client from an automation/LLM harness via the MCP bridge):
 
 ```bash
-cargo run -p ffxi-client --no-default-features -- play --headless
+cargo run -p kuluu --no-default-features -- play --headless
 ```
 
 If any credential env var is unset, the launcher prompts for it and lists

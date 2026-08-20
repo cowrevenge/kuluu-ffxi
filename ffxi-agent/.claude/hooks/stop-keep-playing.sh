@@ -2,9 +2,9 @@
 # Stop hook for the FFXI agent: keep the loop alive, but only when there's
 # actually something to do.
 #
-# Reads two sidecar files written by ffxi-mcp:
-#   ~/.config/ffxi-mcp/goal.json         — current reactor goal (idle/active)
-#   ~/.config/ffxi-mcp/last-event.json   — most recent high-signal event
+# Reads two sidecar files written by kuluu-mcp:
+#   ~/.config/kuluu-mcp/goal.json         — current reactor goal (idle/active)
+#   ~/.config/kuluu-mcp/last-event.json   — most recent high-signal event
 #
 # Decision matrix:
 #   - FFXI_AUTONOMY_OFF set                 → exit 0 (operator opted out)
@@ -29,7 +29,7 @@ if printf '%s' "$input" | grep -q '"stop_hook_active"[[:space:]]*:[[:space:]]*tr
   exit 0
 fi
 
-CONFIG_DIR="${FFXI_MCP_CONFIG_DIR:-$HOME/.config/ffxi-mcp}"
+CONFIG_DIR="${FFXI_MCP_CONFIG_DIR:-$HOME/.config/kuluu-mcp}"
 GOAL_FILE="${FFXI_MCP_GOAL_PATH:-$CONFIG_DIR/goal.json}"
 EVENT_FILE="${FFXI_MCP_EVENT_PATH:-$CONFIG_DIR/last-event.json}"
 RECENT_EVENT_WINDOW_MS=30000

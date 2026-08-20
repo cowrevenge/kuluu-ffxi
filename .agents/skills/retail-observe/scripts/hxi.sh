@@ -200,7 +200,7 @@ case "$cmd" in
         front=$(osascript -e 'tell application "System Events" to get name of first process whose frontmost is true' 2>/dev/null)
         case ${front:-} in
           WinAppHelper|prl_vm_app) : ;;
-          *) die "could not focus guest app '$owner' (frontmost=${front:-?}). Another host app is grabbing focus — a running remake client (\`ffxi-client play\`) is the usual culprit; quit or minimize it, then retry." ;;
+          *) die "could not focus guest app '$owner' (frontmost=${front:-?}). Another host app is grabbing focus — a running remake client (\`kuluu play\`) is the usual culprit; quit or minimize it, then retry." ;;
         esac
         ;;
       *)

@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Build `ffxi-client --features native-window` for x86_64 Linux (Steam Deck)
+# Build `kuluu --features native-window` for x86_64 Linux (Steam Deck)
 # from an Apple-Silicon Mac, using an emulated linux/amd64 container.
 #
 # Usage:  docker/build-linux.sh [cargo-args...]
-#   default: build --release --locked -p ffxi-client --features native-window
+#   default: build --release --locked -p kuluu --features native-window
 #
 # Why this shape:
 #  * Target is x86_64 (Steam Deck) but the host is aarch64, so every docker
@@ -38,7 +38,7 @@ TARGET_VOL="ffxi-linux-target"
 
 CARGO_ARGS=("$@")
 if [ "${#CARGO_ARGS[@]}" -eq 0 ]; then
-    CARGO_ARGS=(build --release --locked -p ffxi-client --features native-window)
+    CARGO_ARGS=(build --release --locked -p kuluu --features native-window)
 fi
 
 echo ">> [1/5] staging build source into $STAGE (excluding vendor/game-files, target, .git)..."
@@ -85,13 +85,13 @@ docker run --rm -t --platform "$PLATFORM" \
     -e CARGO_NET_GIT_FETCH_WITH_CLI=true \
     -w /src \
     "$IMAGE" \
-    bash -euo pipefail -c 'cargo "$@"; ls -lh /target/release/ffxi-client' _ "${CARGO_ARGS[@]}"
+    bash -euo pipefail -c 'cargo "$@"; ls -lh /target/release/kuluu' _ "${CARGO_ARGS[@]}"
 
-echo ">> [5/5] extracting binary to dist/ffxi-client..."
+echo ">> [5/5] extracting binary to dist/kuluu..."
 mkdir -p "$REPO/dist"
 docker run --rm --platform "$PLATFORM" -v "$TARGET_VOL":/target "$IMAGE" \
-    cat /target/release/ffxi-client > "$REPO/dist/ffxi-client"
-chmod +x "$REPO/dist/ffxi-client"
+    cat /target/release/kuluu > "$REPO/dist/kuluu"
+chmod +x "$REPO/dist/kuluu"
 
-echo ">> done. Binary: $REPO/dist/ffxi-client"
-ls -lh "$REPO/dist/ffxi-client"
+echo ">> done. Binary: $REPO/dist/kuluu"
+ls -lh "$REPO/dist/kuluu"

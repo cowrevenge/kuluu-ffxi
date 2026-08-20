@@ -8,10 +8,10 @@
 #
 # WHY `-p <crate>` with no --features, even though checks.sh warns that a
 # mismatched feature set forks the dependency graph: measured here, the fork is
-# the cheap option. Timings for an edit to ffxi-viewer-core (bead kuluu-p5a5):
-#     cargo test -p ffxi-viewer-core --lib .................    9s
+# the cheap option. Timings for an edit to kuluu-render (bead kuluu-p5a5):
+#     cargo test -p kuluu-render --lib .................    9s
 #     cargo test --workspace --features native-window --lib .  254s
-#     cargo check -p ffxi-viewer-core --lib ................   111s
+#     cargo check -p kuluu-render --lib ................   111s
 # The forked graph costs disk (a second set of artifacts), not wall clock, once
 # both sets exist. Matching the workspace unification would be ~28x slower per
 # edit, so the narrow invocation stays.

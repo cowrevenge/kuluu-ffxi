@@ -37,24 +37,24 @@ if [[ $do_build == 1 ]]; then
     echo ">> building x86_64 binary (incremental, Rosetta)..."
     "$REPO/docker/build-linux.sh"
 fi
-[[ -f "$REPO/dist/ffxi-client" ]] || { echo "!! no dist/ffxi-client — drop --no-build." >&2; exit 1; }
+[[ -f "$REPO/dist/kuluu" ]] || { echo "!! no dist/kuluu — drop --no-build." >&2; exit 1; }
 
-SRC="$REPO/dist/ffxi-client"
+SRC="$REPO/dist/kuluu"
 if [[ $do_strip == 1 ]]; then
     echo ">> stripping (x86_64 strip, in container)..."
     docker run --rm --platform linux/amd64 -v "$TARGET_VOL":/target "$IMAGE" \
-        strip -s /target/release/ffxi-client -o /target/ffxi-client.stripped
+        strip -s /target/release/kuluu -o /target/kuluu.stripped
     docker run --rm --platform linux/amd64 -v "$TARGET_VOL":/target "$IMAGE" \
-        cat /target/ffxi-client.stripped > "$REPO/dist/ffxi-client.stripped"
-    SRC="$REPO/dist/ffxi-client.stripped"
+        cat /target/kuluu.stripped > "$REPO/dist/kuluu.stripped"
+    SRC="$REPO/dist/kuluu.stripped"
 fi
 
 mkdir -p "$SYNC_DIR"
-echo ">> dropping $(basename "$SRC") ($(du -h "$SRC" | cut -f1)) into $SYNC_DIR/ffxi-client"
+echo ">> dropping $(basename "$SRC") ($(du -h "$SRC" | cut -f1)) into $SYNC_DIR/kuluu"
 # Write to a temp name then rename, so Syncthing never publishes a half-copied
 # binary (it would happily sync a truncated file mid-cp).
-cp -f "$SRC" "$SYNC_DIR/.ffxi-client.tmp"
-mv -f "$SYNC_DIR/.ffxi-client.tmp" "$SYNC_DIR/ffxi-client"
+cp -f "$SRC" "$SYNC_DIR/.kuluu.tmp"
+mv -f "$SYNC_DIR/.kuluu.tmp" "$SYNC_DIR/kuluu"
 
 if [[ $do_wait == 0 ]]; then
     echo ">> queued for Syncthing. (skipped delivery wait)"; exit 0
@@ -85,7 +85,7 @@ for _ in range(60):
         c = get(f"/rest/db/completion?folder={folder}&device={dev}")
         worst = min(worst, c.get("completion", 0))
     if worst >= 100.0:
-        print(">> delivered to Deck (100%). Re-run ./ffxi-client on the Deck.", flush=True); sys.exit(0)
+        print(">> delivered to Deck (100%). Re-run ./kuluu on the Deck.", flush=True); sys.exit(0)
     print(f"   {worst:5.1f}% ...", flush=True); time.sleep(3)
 print(">> still syncing after 3 min — it'll finish in the background.", flush=True)
 PY

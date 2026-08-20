@@ -482,7 +482,7 @@ mod tests {
         assert!(parse(&body).is_err(), "entry count beyond body errors");
     }
 
-    /// Pins the coupling with the ffxi-nav zonelines scrape: LSB stores the trigger's
+    /// Pins the coupling with the kuluu-nav zonelines scrape: LSB stores the trigger's
     /// source fourcc as the zonelines.sql primary key (vendor/server/sql/zonelines.sql:748).
     #[test]
     fn rect_id_matches_lsb_zonelines_primary_key() {

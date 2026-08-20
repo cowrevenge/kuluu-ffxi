@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Launch a GUI verification session without taking over the user's machine.
 #
-#   launch.sh <logfile> [extra ffxi-client play args...]
+#   launch.sh <logfile> [extra kuluu play args...]
 #
 # Passes --unfocused --mute by default (drop --mute by exporting FFXI_VERIFY_SOUND=1
 # when the change under test is audio). Then restores whatever app was frontmost:
@@ -28,14 +28,14 @@ flags=(--unfocused)
 prev=$(osascript -e 'tell application "System Events" to get name of first process whose frontmost is true' 2>/dev/null || true)
 
 rm -f "$log"
-target/debug/ffxi-client --agent-listen auto play "${flags[@]}" "$@" \
+target/debug/kuluu --agent-listen auto play "${flags[@]}" "$@" \
   "$FFXI_VERIFY_USER" "$FFXI_VERIFY_PASS" "$FFXI_VERIFY_CHAR" > "$log" 2>&1 &
 client_pid=$!
 
 # Give the window a moment to exist, then hand focus back. Doing this once after
 # the window appears is enough — the client never re-activates itself.
 sleep 6
-if [ -n "$prev" ] && [ "$prev" != "ffxi-client" ]; then
+if [ -n "$prev" ] && [ "$prev" != "kuluu" ]; then
   osascript -e "tell application \"System Events\" to set frontmost of (first process whose name is \"$prev\") to true" >/dev/null 2>&1 || true
 fi
 

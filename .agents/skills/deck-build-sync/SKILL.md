@@ -1,7 +1,7 @@
 ---
 name: deck-build-sync
 description: >
-  Build a release ffxi-client binary for x86_64 Linux and ship it to the
+  Build a release kuluu binary for x86_64 Linux and ship it to the
   paired Steam Deck over Syncthing. Use whenever the user asks to build a
   release/Deck/Linux binary, "push to the deck", "sync to my steam deck",
   test on the Deck, or update the build the Deck is running — even if they
@@ -63,7 +63,7 @@ What it does, in order (see the script's own header comments for the full
 rationale — Docker named volumes instead of bind-mounts, because colima's
 host bind-mounts are unreliable):
 
-1. Builds `ffxi-client --release --locked --features native-window` for
+1. Builds `kuluu --release --locked --features native-window` for
    x86_64 Linux via `docker/build-linux.sh`.
 2. Strips the binary inside the container.
 3. Drops it into the Syncthing-shared folder (`~/Sync-ffxi-deck` by default),
@@ -76,7 +76,7 @@ Useful flags (pass through to the script):
 
 | Flag | Effect |
 |---|---|
-| `--no-build` | Skip the build, just re-sync the current `dist/ffxi-client` |
+| `--no-build` | Skip the build, just re-sync the current `dist/kuluu` |
 | `--no-strip` | Push the full unstripped ~235MB binary instead of the ~144MB stripped one |
 | `--no-wait` | Queue the sync and return immediately, without blocking on Syncthing delivery confirmation |
 
@@ -89,11 +89,11 @@ Env overrides if the user's setup differs from defaults:
 The script's last line is the confirmation to look for:
 
 ```
->> delivered to Deck (100%). Re-run ./ffxi-client on the Deck.
+>> delivered to Deck (100%). Re-run ./kuluu on the Deck.
 ```
 
 Report that back to the user. On the Deck side there is nothing further for
-you to do — the user just re-launches `./ffxi-client` there themselves.
+you to do — the user just re-launches `./kuluu` there themselves.
 
 If the Syncthing REST query fails (e.g. the API key/config path differs, or
 Syncthing isn't running locally), the script degrades gracefully with a

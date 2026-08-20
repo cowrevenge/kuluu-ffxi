@@ -16,7 +16,7 @@
         "--manifest-path",
         "../Cargo.toml",
         "-p",
-        "ffxi-mcp"
+        "kuluu-mcp"
       ],
       "environment": {
         "FFXI_SERVER": "127.0.0.1",
@@ -39,7 +39,7 @@
         "--manifest-path",
         "../Cargo.toml",
         "-p",
-        "ffxi-mcp"
+        "kuluu-mcp"
       ],
       "environment": {
         "FFXI_ATTACH": "auto",

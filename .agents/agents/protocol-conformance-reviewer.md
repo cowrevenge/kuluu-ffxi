@@ -1,6 +1,6 @@
 ---
 name: protocol-conformance-reviewer
-description: Use this agent to audit any diff that touches code at the LSB boundary (wire decoders/encoders, coord transforms, session-state transitions, shared numeric constants, lifecycle assumptions). Trigger proactively after non-trivial edits to ffxi-proto/, ffxi-client/src/session.rs, ffxi-client/src/wire_translate.rs, ffxi-nav-recast/src/lib.rs, ffxi-client/src/map_client.rs, ffxi-client/src/reactor.rs, or any file that cites vendor/server/ or research/Phoenix/ in comments. Generic over boundary types — reports divergences from LSB's authoritative source with file:line pairs on both sides.
+description: Use this agent to audit any diff that touches code at the LSB boundary (wire decoders/encoders, coord transforms, session-state transitions, shared numeric constants, lifecycle assumptions). Trigger proactively after non-trivial edits to ffxi-proto/, kuluu/src/session.rs, kuluu/src/wire_translate.rs, ffxi-nav-recast/src/lib.rs, kuluu/src/map_client.rs, kuluu/src/reactor.rs, or any file that cites vendor/server/ or research/Phoenix/ in comments. Generic over boundary types — reports divergences from LSB's authoritative source with file:line pairs on both sides.
 tools: Read, Grep, Glob, Bash
 ---
 

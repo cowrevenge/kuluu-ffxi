@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <title>ffxi-viewer</title>
+    
+<script type="module">
+import init, * as bindings from '/ffxi-viewer-wasm-8f9ac8b0616aa839.js';
+const wasm = await init({ module_or_path: '/ffxi-viewer-wasm-8f9ac8b0616aa839_bg.wasm' });
+
+
+window.wasmBindings = bindings;
+
+
+dispatchEvent(new CustomEvent("TrunkApplicationStarted", {detail: {wasm}}));
+
+</script>
+    <style>
+        :root {
+            --chrome-bg: #0b0b10;
+            --chrome-fg: #00d8d8;
+            --chrome-border: #666;
+        }
+        html, body {
+            margin: 0;
+            padding: 0;
+            height: 100%;
+            background: var(--chrome-bg);
+            color: var(--chrome-fg);
+            font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+            overflow: hidden;
+        }
+        #titlebar {
+            position: fixed;
+            top: 0; left: 0; right: 0;
+            padding: 4px 12px;
+            color: var(--chrome-fg);
+            border-bottom: 1px solid var(--chrome-border);
+            font-size: 13px;
+            letter-spacing: 0.5px;
+            z-index: 10;
+            pointer-events: none;
+        }
+        canvas#bevy {
+            display: block;
+            width: 100vw;
+            height: 100vh;
+            outline: none;
+        }
+    </style>
+<link rel="modulepreload" href="/ffxi-viewer-wasm-8f9ac8b0616aa839.js" crossorigin="anonymous" integrity="sha384-E73FclCHvxgFu1qdVN6tQ8bYzCTEbtoci2Tx46Ug4w7/JQOGAf+FjpLZHIH6QYgS"><link rel="preload" href="/ffxi-viewer-wasm-8f9ac8b0616aa839_bg.wasm" crossorigin="anonymous" integrity="sha384-aq1vMQDswaYMCcC+muq2XE3DQjAvFz29OcWcfhYEeSI12zluM9u6Gl/ZgJgJRs0e" as="fetch" type="application/wasm"></head>
+<body>
+    <div id="titlebar">▌ ffxi-viewer ●</div>
+    <canvas id="bevy"></canvas>
+</body>
+</html>

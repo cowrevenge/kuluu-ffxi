@@ -59,7 +59,7 @@ run_style() {
   # hud::palette dev-overlay module is gone; any reference to it — including a
   # reintroduced definition — fails here, which is the point: the unification
   # stays durable as windows are added.
-  local hud_dir="ffxi-viewer-core/src/hud"
+  local hud_dir="kuluu-render/src/hud"
   local bad=()
   for f in "$hud_dir"/*.rs; do
     [[ "$(basename "$f")" == "style.rs" ]] && continue
@@ -80,9 +80,19 @@ run_style() {
   # as tofu boxes. Gate the whole tree (comments included) so the rule stays a
   # trivial grep with no judgment calls; the same constraint applies by hand to
   # any other string rendered with the default font (e.g. hud::style::text_font).
-  if LC_ALL=C grep -rIn '[^ -~]' ffxi-client/src/view_native/launcher_ui/ --include='*.rs'; then
+  if LC_ALL=C grep -rIn '[^ -~]' kuluu/src/view_native/launcher_ui/ --include='*.rs'; then
     echo "checks: style — launcher_ui is not ASCII-only; Bevy's default font renders only U+0020-007E," >&2
     echo "checks:   anything else shows as tofu. Use ASCII substitutes (< > -> ... - | x)." >&2
+    return 1
+  fi
+
+  # Crate-naming contract: ffxi-* crates are domain truth (facts about the
+  # game/LSB, provable against retail) and must not carry Enhanced (non-retail)
+  # behavior — that lives in kuluu-* product crates behind opt-in gates. A hit
+  # here means an enhanced feature/cfg leaked below the product layer.
+  if grep -rIn --include='*.rs' --include='*.toml' 'enhanced' ffxi-*/; then
+    echo "checks: style — 'enhanced' found inside an ffxi-* crate; ffxi-* is the faithful" >&2
+    echo "checks:   domain layer. Move Enhanced behavior into a kuluu-* crate behind an opt-in." >&2
     return 1
   fi
 }

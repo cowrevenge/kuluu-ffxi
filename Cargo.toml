@@ -1,9 +1,9 @@
 [workspace]
 resolver = "2"
-members = ["ffxi-proto", "ffxi-client", "ffxi-mcp", "ffxi-nav", "ffxi-nav-recast", "ffxi-viewer-wire", "ffxi-viewer-core", "ffxi-viewer-wasm", "ffxi-dat", "ffxi-actor", "ffxi-audio", "ffxi-event", "ffxi-session", "ffxi-vocab", "lsb-scrape", "xtask"]
+members = ["ffxi-proto", "kuluu", "kuluu-mcp", "kuluu-nav", "ffxi-nav-recast", "kuluu-snapshot", "kuluu-render", "kuluu-viewer-wasm", "ffxi-dat", "ffxi-actor", "ffxi-audio", "ffxi-event", "kuluu-session", "ffxi-vocab", "lsb-scrape", "xtask"]
 # `xtask` is project automation run on demand via `cargo xtask` — exclude it
 # from the default set so plain `cargo build`/`test` don't compile it.
-default-members = ["ffxi-proto", "ffxi-client", "ffxi-mcp", "ffxi-nav", "ffxi-nav-recast", "ffxi-viewer-wire", "ffxi-viewer-core", "ffxi-viewer-wasm", "ffxi-dat", "ffxi-actor", "ffxi-audio", "ffxi-event", "ffxi-session", "ffxi-vocab", "lsb-scrape"]
+default-members = ["ffxi-proto", "kuluu", "kuluu-mcp", "kuluu-nav", "ffxi-nav-recast", "kuluu-snapshot", "kuluu-render", "kuluu-viewer-wasm", "ffxi-dat", "ffxi-actor", "ffxi-audio", "ffxi-event", "kuluu-session", "ffxi-vocab", "lsb-scrape"]
 
 # Vendored fork of recastnavigation-rs 0.1.0 with a one-line `#include
 # <cstddef>` in Deterministic.h. Without it, `cargo test` fails with
@@ -39,7 +39,7 @@ bevy_light = { path = "vendor/bevy_light" }
 # .cargo/config.toml):
 #   * codegen-backend = "cranelift" for *our* crates — Cranelift's debug
 #     codegen is much faster than LLVM, which is the bulk of the wait when
-#     rebuilding a Bevy-dependent workspace crate like ffxi-viewer-core.
+#     rebuilding a Bevy-dependent workspace crate like kuluu-render.
 #   * deps keep the LLVM backend at opt-level=3, so their runtime perf is
 #     unchanged (Cranelift does not optimize like LLVM).
 #   * debug = "line-tables-only" keeps file:line in panics/backtraces but
@@ -117,7 +117,7 @@ bevy = { version = "0.19", default-features = false, features = [
     "audio",
 ] }
 
-# MCP server SDK for the ffxi-mcp crate (Stage 4).
+# MCP server SDK for the kuluu-mcp crate (Stage 4).
 rmcp = { version = "2.2", features = ["server", "macros", "schemars", "transport-io"] }
 schemars = "1"
 
@@ -131,7 +131,7 @@ mysql_async = { version = "0.37", default-features = false, features = ["minimal
 # `v0.0.0-disttest` dry-run validates the pipeline, the hand-rolled release.yml
 # still ships and this config is inert. Config lives here (not a separate
 # dist-workspace.toml) so the auto-release version-bump tooling keeps reading a
-# single file. Only ffxi-client ships — every other bin crate sets
+# single file. Only kuluu ships — every other bin crate sets
 # `[package.metadata.dist] dist = false`.
 [workspace.metadata.dist]
 cargo-dist-version = "0.32.0"
@@ -144,7 +144,7 @@ targets = [
     "aarch64-apple-darwin",
     "x86_64-pc-windows-msvc",
 ]
-# Mirror the hand-rolled legs' `cargo build -p ffxi-client --features native-window`.
+# Mirror the hand-rolled legs' `cargo build -p kuluu --features native-window`.
 features = ["native-window"]
 default-features = true
 # A YAML array of steps injected before `dist build`. The path is resolved

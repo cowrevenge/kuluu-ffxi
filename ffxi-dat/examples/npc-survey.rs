@@ -253,7 +253,7 @@ fn main() -> ExitCode {
         println!("  3. run `/load_mmb_on <entity_id> <file_id> <chunk_idx>` against candidates");
         println!("     until the mesh visually matches.");
         println!("  4. add the confirmed row to MODELID_TABLE in");
-        println!("     `ffxi-viewer-core/src/look_resolver.rs`.");
+        println!("     `kuluu-render/src/look_resolver.rs`.");
         return ExitCode::SUCCESS;
     };
 
@@ -352,7 +352,7 @@ fn main() -> ExitCode {
     println!("Next step: pick one (modelid, file_id) pair, run");
     println!("  /load_mmb_on <entity_id> <file_id> <modelid>");
     println!("against an NPC of that modelid. If the mesh matches, add the row to");
-    println!("ffxi-viewer-core/src/look_resolver.rs:MODELID_TABLE.");
+    println!("kuluu-render/src/look_resolver.rs:MODELID_TABLE.");
 
     ExitCode::SUCCESS
 }

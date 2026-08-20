@@ -38,9 +38,13 @@ async fn zone_change_reconnects_with_rotated_key() {
         .with_test_writer()
         .try_init();
 
-    let fixture = EphemeralChar::create(&server_host, auth_port)
+    let Some(fixture) = EphemeralChar::create(&server_host, auth_port)
         .await
-        .expect("provisioning ephemeral LSB account+char");
+        .expect("provisioning ephemeral LSB account+char")
+    else {
+        eprintln!("skipping: xidb not reachable; treating the LSB stack as absent");
+        return;
+    };
     eprintln!(
         "fixture: user={} accid={} charid={} charname={} gmlevel=5",
         fixture.username, fixture.accid, fixture.charid, fixture.charname,

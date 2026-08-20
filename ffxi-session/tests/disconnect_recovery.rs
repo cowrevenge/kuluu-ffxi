@@ -59,9 +59,13 @@ async fn disconnect_recovery_reconnects_after_map_restart() {
         .with_test_writer()
         .try_init();
 
-    let fixture = EphemeralChar::create(&server_host, auth_port)
+    let Some(fixture) = EphemeralChar::create(&server_host, auth_port)
         .await
-        .expect("provisioning ephemeral LSB account+char");
+        .expect("provisioning ephemeral LSB account+char")
+    else {
+        eprintln!("skipping: xidb not reachable; treating the LSB stack as absent");
+        return;
+    };
     eprintln!(
         "fixture: user={} accid={} charid={} charname={}",
         fixture.username, fixture.accid, fixture.charid, fixture.charname,

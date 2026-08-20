@@ -2,6 +2,8 @@
 
 pub mod mcp_client;
 
+use std::time::Duration;
+
 use anyhow::{anyhow, Context, Result};
 use mysql_async::prelude::*;
 use mysql_async::{Conn, Pool};
@@ -9,6 +11,10 @@ use mysql_async::{Conn, Pool};
 use ffxi_session::auth_client::AuthClient;
 
 pub const DEFAULT_DB_URL: &str = "mysql://xiadmin:password@127.0.0.1:3306/xidb";
+
+// A half-up stack (something accepts on the port but mysqld never completes
+// the handshake) must self-skip like an absent one, not hang the test binary.
+const XIDB_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
 const FIXTURE_PASSWORD: &str = "TestPass!1234";
 
@@ -83,8 +89,35 @@ pub struct EphemeralChar {
     pool: Pool,
 }
 
+// Ok(None) = xidb is effectively unreachable (timed out mid-handshake, or the
+// accept-then-drop / refused IO class) and the caller should self-skip; any
+// other failure is a real provisioning error and still propagates.
+async fn xidb_conn(db_url: &str, connect_timeout: Duration) -> Result<Option<(Pool, Conn)>> {
+    let pool = Pool::new(db_url);
+    match tokio::time::timeout(connect_timeout, pool.get_conn()).await {
+        Ok(Ok(conn)) => Ok(Some((pool, conn))),
+        Ok(Err(mysql_async::Error::Io(err))) => {
+            eprintln!("xidb at {db_url}: handshake failed ({err}); treating as unreachable");
+            let _ = pool.disconnect().await;
+            Ok(None)
+        }
+        Ok(Err(err)) => {
+            let _ = pool.disconnect().await;
+            Err(err).with_context(|| format!("connecting to xidb at {db_url}"))
+        }
+        Err(_) => {
+            eprintln!(
+                "xidb at {db_url}: no handshake within {connect_timeout:?}; \
+                 treating as unreachable"
+            );
+            let _ = pool.disconnect().await;
+            Ok(None)
+        }
+    }
+}
+
 impl EphemeralChar {
-    pub async fn create(server_host: &str, auth_port: u16) -> Result<Self> {
+    pub async fn create(server_host: &str, auth_port: u16) -> Result<Option<Self>> {
         let db_url = std::env::var("TEST_DB_URL").unwrap_or_else(|_| DEFAULT_DB_URL.to_string());
 
         let suffix = fixture_name_suffix(
@@ -99,11 +132,9 @@ impl EphemeralChar {
 
         let password = FIXTURE_PASSWORD.to_string();
 
-        let pool = Pool::new(db_url.as_str());
-        let mut conn = pool
-            .get_conn()
-            .await
-            .with_context(|| format!("connecting to xidb at {db_url}"))?;
+        let Some((pool, mut conn)) = xidb_conn(&db_url, XIDB_CONNECT_TIMEOUT).await? else {
+            return Ok(None);
+        };
 
         let auth = AuthClient::new(server_host.to_string(), auth_port);
         auth.ensure_account(&username, &password)
@@ -142,14 +173,14 @@ impl EphemeralChar {
 
         drop(conn);
 
-        Ok(Self {
+        Ok(Some(Self {
             username,
             password,
             accid,
             charid,
             charname,
             pool,
-        })
+        }))
     }
 
     // Frees only the session row; the account (and the char + child rows it
@@ -280,6 +311,45 @@ async fn sweep_orphaned_child_rows(conn: &mut Conn) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod xidb_conn_tests {
+    use super::*;
+
+    const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(2);
+
+    fn db_url(port: u16) -> String {
+        format!("mysql://user:pass@127.0.0.1:{port}/xidb")
+    }
+
+    #[tokio::test]
+    async fn accept_then_drop_self_skips() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            loop {
+                let _ = listener.accept().await;
+            }
+        });
+
+        let got = xidb_conn(&db_url(port), HANDSHAKE_TIMEOUT)
+            .await
+            .expect("accept-then-drop must self-skip, not error");
+        assert!(got.is_none());
+    }
+
+    #[tokio::test]
+    async fn refused_port_self_skips() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+
+        let got = xidb_conn(&db_url(port), HANDSHAKE_TIMEOUT)
+            .await
+            .expect("connect-refused must self-skip, not error");
+        assert!(got.is_none());
+    }
 }
 
 #[cfg(test)]

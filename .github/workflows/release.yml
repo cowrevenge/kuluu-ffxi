@@ -215,6 +215,20 @@ jobs:
         with:
           cache-key: release-windows-arm
 
+      # rust-toolchain.toml pins rustc-codegen-cranelift-preview, which rustup
+      # does not distribute for aarch64-pc-windows-msvc — the rustup shim then
+      # refuses every cargo call on this host. Cranelift is dev-only (release
+      # builds use LLVM), so install the same pinned channel without the file's
+      # component list and point RUSTUP_TOOLCHAIN at it, which makes rustup
+      # ignore rust-toolchain.toml. The channel is read from the file so the
+      # pinned date has a single source.
+      - name: Bypass rust-toolchain.toml (no Cranelift dist for this host)
+        shell: bash
+        run: |
+          channel=$(sed -n 's/^channel = "\(.*\)".*/\1/p' rust-toolchain.toml)
+          rustup toolchain install "$channel" --profile minimal
+          echo "RUSTUP_TOOLCHAIN=$channel" >> "$GITHUB_ENV"
+
       - name: Build binary
         run: cargo build --release --locked -p kuluu --features native-window
 

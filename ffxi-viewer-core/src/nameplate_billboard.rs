@@ -1279,7 +1279,7 @@ mod tests {
         // Transparent3d sort; a plate at view depth d ranks -d + bias. Server
         // entity visibility tops out near 50 yalms; 1000 bounds it with room.
         const FARTHEST_POPULATED_ENTITY_YALMS: f32 = 1000.0;
-        assert!(NAMEPLATE_SORT_BIAS - FARTHEST_POPULATED_ENTITY_YALMS > 0.0);
+        const { assert!(NAMEPLATE_SORT_BIAS - FARTHEST_POPULATED_ENTITY_YALMS > 0.0) }
     }
 
     #[test]

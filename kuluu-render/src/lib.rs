@@ -45,9 +45,9 @@ pub mod mouse;
 pub mod nameplate;
 pub mod nameplate_billboard;
 pub mod nameplate_color;
-pub mod nameplate_overlay;
 pub mod nameplate_icons;
 pub mod nameplate_marker;
+pub mod nameplate_overlay;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod particle_sim;
 pub mod perf_probe;

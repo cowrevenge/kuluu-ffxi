@@ -1484,6 +1484,44 @@ mod tests {
         );
     }
 
+    // research/xim MainTool.kt:64 turns wall ms into frames at the single 60 fps internal
+    // clock (util/Fps.kt:9), MainTool.kt:118 hands that one value to EffectManager.update,
+    // and Scene.kt:125-126 registers the zone DAT's autoRun generators (braziers,
+    // campfires) into that same manager — zone ambients share the ROUTINE_FPS clock with
+    // action routines, with no half-rate zone clock (kuluu-rf4h).
+    #[test]
+    fn zone_auto_run_generators_share_the_routine_clock() {
+        use bevy::ecs::system::RunSystemOnce;
+        use std::time::Duration;
+
+        const TICK_SECS: f32 = 0.25;
+
+        let mut ambient = live(def(600.0, 1.0, 1), 0.0);
+        ambient.auto_run = true;
+        let routine = live(def(600.0, 1.0, 1), f32::MAX);
+
+        let mut sim = ParticleSimulator::default();
+        sim.generators.push(ambient);
+        sim.generators.push(routine);
+
+        let mut world = World::new();
+        let mut time = Time::<()>::default();
+        time.advance_by(Duration::from_secs_f32(TICK_SECS));
+        world.insert_resource(time);
+        world.insert_resource(sim);
+        world.run_system_once(tick_particle_simulator).unwrap();
+
+        let sim = world.resource::<ParticleSimulator>();
+        let frames = TICK_SECS * ROUTINE_FPS;
+        let [ambient, routine] = &sim.generators[..] else {
+            panic!("two generators");
+        };
+        assert_eq!(ambient.age_frames, frames);
+        assert_eq!(ambient.age_frames, routine.age_frames);
+        assert_eq!(ambient.particles.len(), frames as usize);
+        assert_eq!(ambient.particles.len(), routine.particles.len());
+    }
+
     // La Theine's `~1ra` curtain is followCamera with a pure-Y base: it rides the camera with
     // its 35-up offset however the camera yaws. The `rai2`/`~1du` sheets are
     // cameraAttachedBasePosition: the authored offset is view-space, so a +z placement stays in

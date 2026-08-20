@@ -88,6 +88,36 @@ jobs:
           name: linux
           path: dist/*
 
+  linux-arm:
+    name: Build (aarch64 Linux)
+    needs: [setup, ci]
+    # GitHub's hosted arm64 runner (free for public repos) builds natively —
+    # no cross toolchain, unlike the Deck's Rosetta-backed x86_64 pipeline.
+    runs-on: ubuntu-24.04-arm
+    env:
+      CXXFLAGS: ""
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ./.github/actions/setup-build
+        with:
+          cache-key: release-linux-arm
+
+      - name: Build binary
+        run: cargo build --release --locked -p kuluu --features native-window
+
+      - name: Package
+        env:
+          TAG: ${{ needs.setup.outputs.tag }}
+        run: |
+          mkdir -p dist
+          strip target/release/kuluu
+          tar -C target/release -czf "dist/kuluu-${TAG}-aarch64-linux.tar.gz" kuluu
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: linux-arm
+          path: dist/*
+
   macos:
     name: Build (aarch64 macOS)
     needs: [setup, ci]
@@ -168,6 +198,38 @@ jobs:
           name: windows
           path: dist/*
 
+  windows-arm:
+    name: Build (aarch64 Windows)
+    # Native aarch64-pc-windows-msvc build on GitHub's hosted arm64 Windows
+    # runner (free for public repos). Serves Snapdragon laptops and Windows-on-
+    # ARM VMs (Parallels on Apple Silicon), which otherwise run the x86_64
+    # build under Prism emulation. Same CXXFLAGS blanking as the x86_64 leg so
+    # the Recast C++ bridge builds with the runner's MSVC arm64 toolchain.
+    needs: [setup, ci]
+    runs-on: windows-11-arm
+    env:
+      CXXFLAGS: ""
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ./.github/actions/setup-build
+        with:
+          cache-key: release-windows-arm
+
+      - name: Build binary
+        run: cargo build --release --locked -p kuluu --features native-window
+
+      - name: Package
+        env:
+          TAG: ${{ needs.setup.outputs.tag }}
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Compress-Archive -Path target/release/kuluu.exe -DestinationPath "dist/kuluu-$env:TAG-aarch64-windows.zip"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: windows-arm
+          path: dist/*
+
   wasm:
     name: Build (browser WASM)
     needs: [setup, ci]
@@ -204,7 +266,7 @@ jobs:
 
   publish:
     name: Publish GitHub Release
-    needs: [setup, linux, macos, windows, wasm]
+    needs: [setup, linux, linux-arm, macos, windows, windows-arm, wasm]
     runs-on: ubuntu-latest
     permissions:
       contents: write

@@ -121,6 +121,12 @@ Launching unfocused makes this fallback more likely, since nothing guarantees
 the window ends up visible. Leaving the client somewhere it stays partly
 on screen (a free corner, a second display) avoids the blip entirely.
 
+A **minimized** window (AXMinimized=true — launch.sh's focus-restore can leave
+it that way) defeats the raise-and-retry: `frontmost` does not unminimize, so
+captures stay black and keystrokes go nowhere. Recover with an explicit
+System Events `AXRaise` action on the window (or `set value of attribute
+"AXMinimized" to false`), then resend any keystrokes sent while minimized.
+
 Read every PNG back with the Read tool before citing it. A guard reporting
 `lit=100%` only proves the GPU drew *something*.
 

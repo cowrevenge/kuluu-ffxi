@@ -19,11 +19,16 @@ use ffxi_dat::sysmes::{self, SpanKind, SysMesDat, SysMesLine, SysMesParams};
 pub(super) struct SysMesResolver {
     root: Option<std::sync::Arc<ffxi_dat::DatRoot>>,
     table: Option<Option<SysMesDat>>,
+    items: Option<Option<ffxi_dat::item_dat::ItemTable>>,
 }
 
 impl SysMesResolver {
     pub(super) fn new(root: Option<std::sync::Arc<ffxi_dat::DatRoot>>) -> Self {
-        Self { root, table: None }
+        Self {
+            root,
+            table: None,
+            items: None,
+        }
     }
 
     fn table(&mut self) -> Option<&SysMesDat> {
@@ -40,6 +45,19 @@ impl SysMesResolver {
             })
             .as_ref()
     }
+
+    /// Retail's chat-log item name ("fire crystal", not "Fire Crystal") from
+    /// the item DAT, falling back to the display name without an install.
+    fn log_name(&mut self, item_id: u16) -> String {
+        let root = self.root.as_ref();
+        self.items
+            .get_or_insert_with(|| root.map(|r| ffxi_dat::item_dat::ItemTable::open(r.root())))
+            .as_ref()
+            .and_then(|t| t.lookup(item_id))
+            .map(|i| i.log_name)
+            .filter(|n| !n.is_empty())
+            .unwrap_or_else(|| item_name(item_id))
+    }
 }
 
 /// The session task's own view of the pool. s2c 0x0D3 names only a slot index,
@@ -54,10 +72,8 @@ impl TreasurePool {
         self.slots.get(slot as usize)?.as_ref()
     }
 
-    fn item_name(&self, slot: u8) -> String {
-        self.get(slot)
-            .map(|s| s.item_name.clone())
-            .unwrap_or_default()
+    fn item_id(&self, slot: u8) -> Option<u16> {
+        self.get(slot).map(|s| s.item_id)
     }
 
     pub(super) fn clear(&mut self) {
@@ -95,6 +111,7 @@ pub(super) fn handle_trophy_list(
     }
 
     let item_name = item_name(t.item_no);
+    let log_name = sysmes.log_name(t.item_no);
     let dropper = name_cache
         .get(&t.target_unique_no)
         .cloned()
@@ -107,7 +124,7 @@ pub(super) fn handle_trophy_list(
     // zone-in stays silent.
     if t.entry == TrophyEntryKind::None {
         let mut params = SysMesParams::default();
-        params.items[0] = Some(&item_name);
+        params.items[0] = Some(&log_name);
         let index = if t.is_container {
             params.strings[1] = Some(&dropper);
             sysmes::treasure::FIND_IN
@@ -150,14 +167,17 @@ pub(super) fn handle_trophy_solution(
     else {
         return;
     };
-    let item_name = pool.item_name(t.slot);
+    let log_name = pool
+        .item_id(t.slot)
+        .map(|id| sysmes.log_name(id))
+        .unwrap_or_default();
 
     let mut params = SysMesParams::default();
-    params.items[0] = Some(&item_name);
+    params.items[0] = Some(&log_name);
 
     match t.judge {
         TrophyJudge::Pending => {
-            announce_lot(&t, event_tx, sysmes, &item_name);
+            announce_lot(&t, event_tx, sysmes, &log_name);
             if let Some(Some(s)) = pool.slots.get_mut(t.slot as usize) {
                 s.winner = t.loot_name.clone();
                 s.winner_lot = t.loot_point.max(0) as u16;
@@ -172,7 +192,7 @@ pub(super) fn handle_trophy_solution(
             return;
         }
         TrophyJudge::Won => {
-            announce_lot(&t, event_tx, sysmes, &item_name);
+            announce_lot(&t, event_tx, sysmes, &log_name);
             // Under a Won verdict the client reads LootUniqueNo as a message
             // selector, not an entity id: 0 means the local player won
             // (research/XiPackets/world/server/0x00D3).
@@ -211,13 +231,13 @@ fn announce_lot(
     t: &TrophySolution,
     event_tx: &broadcast::Sender<AgentEvent>,
     sysmes: &mut SysMesResolver,
-    item_name: &str,
+    log_name: &str,
 ) {
     if !t.announces_lot() {
         return;
     }
     let mut params = SysMesParams::default();
-    params.items[0] = Some(item_name);
+    params.items[0] = Some(log_name);
     if t.judge == TrophyJudge::Won && t.entry_unique_no == 0 {
         emit(event_tx, sysmes, sysmes::treasure::YOU_CAST_LOTS, &params);
         return;

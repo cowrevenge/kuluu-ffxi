@@ -32,6 +32,13 @@ pub const ITEM_FLAG_EX: u16 = 0x4000;
 pub struct ItemStatic {
     pub name: String,
 
+    /// Retail's chat-log name ("fire crystal", "sprig of chamomile") — its own
+    /// string in the DAT, not a case-fold of `name`. Falls back to `name` when
+    /// the block's string table carries no log entries.
+    pub log_name: String,
+
+    pub log_name_plural: String,
+
     pub description: String,
 
     pub slot_mask: u16,
@@ -111,12 +118,14 @@ fn decode_item_static(block: &[u8]) -> Option<ItemStatic> {
             (0, 0, 0, 0, 0, 0)
         };
 
-    let (name, description) = read_item_strings(block).unwrap_or_default();
+    let strings = read_item_strings(block).unwrap_or_default();
     let icon = decode_icon(block);
 
     Some(ItemStatic {
-        name,
-        description,
+        name: strings.name,
+        log_name: strings.log_name,
+        log_name_plural: strings.log_name_plural,
+        description: strings.description,
         slot_mask,
         jobs_mask,
         races_mask,
@@ -247,7 +256,23 @@ fn decode_icon(block: &[u8]) -> Option<GraphicImage> {
         .map(|(img, _)| img)
 }
 
-fn read_item_strings(block: &[u8]) -> Option<(String, String)> {
+#[derive(Debug, Default)]
+struct ItemStrings {
+    name: String,
+    log_name: String,
+    log_name_plural: String,
+    description: String,
+}
+
+// The count==5 string table is (0=display name, 1=numeric kind flag,
+// 2=log name singular, 3=log name plural, 4=description) — POLUtils Item.cs's
+// LogNameSingular/LogNamePlural layout, verified against this install
+// (id 636 "Chamomile" logs as "sprig of chamomile", a distinct string).
+const STRING_TABLE_LOG_NAME: usize = 2;
+const STRING_TABLE_LOG_NAME_PLURAL: usize = 3;
+const STRING_TABLE_DESCRIPTION: usize = 4;
+
+fn read_item_strings(block: &[u8]) -> Option<ItemStrings> {
     let table_region_end = ITEM_ICON_OFFSET;
 
     let mut probe = 0x10;
@@ -267,7 +292,7 @@ fn read_item_strings(block: &[u8]) -> Option<(String, String)> {
     None
 }
 
-fn parse_string_table(block: &[u8], table_off: usize, count: usize) -> Option<(String, String)> {
+fn parse_string_table(block: &[u8], table_off: usize, count: usize) -> Option<ItemStrings> {
     let mut metas = Vec::with_capacity(count);
     for i in 0..count {
         let m = table_off + 4 + i * 8;
@@ -282,16 +307,30 @@ fn parse_string_table(block: &[u8], table_off: usize, count: usize) -> Option<(S
     };
 
     let name = read_at(metas.first()?.0)?;
-    let description = match count {
-        5 => read_at(metas[4].0).unwrap_or_default(),
-        2 => read_at(metas[1].0).unwrap_or_default(),
-        _ => String::new(),
+    let (log_name, log_name_plural, description) = match count {
+        5 => (
+            read_at(metas[STRING_TABLE_LOG_NAME].0).unwrap_or_default(),
+            read_at(metas[STRING_TABLE_LOG_NAME_PLURAL].0).unwrap_or_default(),
+            read_at(metas[STRING_TABLE_DESCRIPTION].0).unwrap_or_default(),
+        ),
+        2 => (
+            String::new(),
+            String::new(),
+            read_at(metas[1].0).unwrap_or_default(),
+        ),
+        _ => Default::default(),
     };
 
     if name.is_empty() {
         return None;
     }
-    Some((name, description))
+    let fallback = |s: String| if s.is_empty() { name.clone() } else { s };
+    Some(ItemStrings {
+        log_name: fallback(log_name),
+        log_name_plural: fallback(log_name_plural),
+        name,
+        description,
+    })
 }
 
 fn read_inline_string(block: &[u8], at: usize) -> Option<String> {

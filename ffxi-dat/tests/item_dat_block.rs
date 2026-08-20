@@ -37,7 +37,8 @@ fn write_inline_string(block: &mut [u8], off: usize, text: &str) -> usize {
     p - off
 }
 
-fn build_block(item_id: u32, name: &str, desc: &str, flags: u16) -> Vec<u8> {
+fn build_block(item_id: u32, names: [&str; 3], desc: &str, flags: u16) -> Vec<u8> {
+    let [name, log_name, log_name_plural] = names;
     let mut block = vec![0u8; ITEM_BLOCK_STRIDE];
 
     block[0x00..0x04].copy_from_slice(&item_id.to_le_bytes());
@@ -86,10 +87,10 @@ fn build_block(item_id: u32, name: &str, desc: &str, flags: u16) -> Vec<u8> {
     body += 4;
 
     rel_offsets[2] = (body - table_off) as u32;
-    body += write_inline_string(&mut block, body, name);
+    body += write_inline_string(&mut block, body, log_name);
 
     rel_offsets[3] = (body - table_off) as u32;
-    body += write_inline_string(&mut block, body, name);
+    body += write_inline_string(&mut block, body, log_name_plural);
 
     rel_offsets[4] = (body - table_off) as u32;
     let _ = write_inline_string(&mut block, body, desc);
@@ -117,7 +118,7 @@ fn lookup_decodes_minimal_armor_block() {
     let item_id: u16 = 0x3000;
     let block = build_block(
         item_id as u32,
-        "Test Cap",
+        ["Test Cap", "test cap", "test caps"],
         "DEF:10\nA hand-built test item.",
         ITEM_FLAG_RARE | ITEM_FLAG_EX,
     );
@@ -128,6 +129,8 @@ fn lookup_decodes_minimal_armor_block() {
 
     let item = item_dat::lookup(&dat, item_id).expect("block decodes");
     assert_eq!(item.name, "Test Cap");
+    assert_eq!(item.log_name, "test cap");
+    assert_eq!(item.log_name_plural, "test caps");
     assert_eq!(item.description, "DEF:10\nA hand-built test item.");
     assert_eq!(item.level, 50);
     assert_eq!(item.slot_mask, 0x0010);
@@ -144,9 +147,22 @@ fn lookup_decodes_minimal_armor_block() {
 }
 
 #[test]
+fn empty_log_names_fall_back_to_the_display_name() {
+    let item_id: u16 = 0x3002;
+    let block = build_block(item_id as u32, ["Test Cap", "", ""], "x", 0);
+    let mut dat = vec![0u8; (item_id as usize + 1) * ITEM_BLOCK_STRIDE];
+    let start = item_id as usize * ITEM_BLOCK_STRIDE;
+    dat[start..start + ITEM_BLOCK_STRIDE].copy_from_slice(&block);
+
+    let item = item_dat::lookup(&dat, item_id).expect("block decodes");
+    assert_eq!(item.log_name, "Test Cap");
+    assert_eq!(item.log_name_plural, "Test Cap");
+}
+
+#[test]
 fn icon_at_matches_lookup_icon() {
     let item_id: u16 = 0x3001;
-    let block = build_block(item_id as u32, "Iconic", "x", 0);
+    let block = build_block(item_id as u32, ["Iconic", "iconic", "iconics"], "x", 0);
     let mut dat = vec![0u8; (item_id as usize + 1) * ITEM_BLOCK_STRIDE];
     let start = item_id as usize * ITEM_BLOCK_STRIDE;
     dat[start..start + ITEM_BLOCK_STRIDE].copy_from_slice(&block);

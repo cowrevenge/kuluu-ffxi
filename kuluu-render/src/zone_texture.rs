@@ -169,7 +169,7 @@ fn build_mip_chain(mip0: Vec<u8>, w: u32, h: u32, target_cov: Option<f32>) -> (V
 }
 
 #[inline]
-fn srgb_to_linear(c: u8) -> f32 {
+pub fn srgb_to_linear(c: u8) -> f32 {
     let s = c as f32 / 255.0;
     if s <= 0.04045 {
         s / 12.92
@@ -179,7 +179,7 @@ fn srgb_to_linear(c: u8) -> f32 {
 }
 
 #[inline]
-fn linear_to_srgb(l: f32) -> u8 {
+pub fn linear_to_srgb(l: f32) -> u8 {
     let l = l.clamp(0.0, 1.0);
     let s = if l <= 0.003_130_8 {
         l * 12.92

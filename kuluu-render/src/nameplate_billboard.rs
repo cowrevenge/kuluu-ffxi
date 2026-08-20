@@ -178,7 +178,7 @@ pub fn spawn_nameplate_billboard(
         base_color: Color::WHITE,
 
         unlit: true,
-        alpha_mode: AlphaMode::Blend,
+        alpha_mode: AlphaMode::Premultiplied,
         depth_bias: NAMEPLATE_SORT_BIAS,
 
         cull_mode: None,
@@ -349,7 +349,11 @@ pub fn update_nameplate_billboards_system(
         };
         if want_alpha != np.last_alpha {
             if let Some(mut mat_data) = materials.get_mut(&mat.0) {
-                mat_data.base_color = Color::WHITE.with_alpha(want_alpha);
+                // Premultiplied fade: the whole texel (color and coverage)
+                // scales together, or the pulse would turn additive.
+                mat_data.base_color = Color::LinearRgba(LinearRgba::new(
+                    want_alpha, want_alpha, want_alpha, want_alpha,
+                ));
                 np.last_alpha = want_alpha;
             }
         }
@@ -794,6 +798,14 @@ fn rasterize_plate(
         }
     }
 
+    // Premultiply (in linear space) before the mip build. Box-filtering
+    // straight alpha lets the RGB of transparent texels dilute minified
+    // strokes — glyphs turned semi-transparent and took on whatever was behind
+    // the plate (sky vs wall read differently, kuluu-iic9 follow-up). With
+    // premultiplied texels the filter weights color by coverage, and
+    // AlphaMode::Premultiplied keeps the GPU blend consistent with it.
+    premultiply_linear(&mut pixels);
+
     // The plate rasters at NAME_PX but draws minified almost everywhere the
     // depth ramp is past its plateau; without mips that minification aliases
     // the glyph edges into sparkle. Clamp sampler: the HP strip touches the
@@ -812,6 +824,22 @@ fn rasterize_plate(
     PlateImage {
         image,
         text_center_y_px: text_origin_y as f32 + line_h as f32 * 0.5,
+    }
+}
+
+fn premultiply_linear(pixels: &mut [u8]) {
+    for px in pixels.chunks_exact_mut(4) {
+        let a = px[3] as f32 / 255.0;
+        if px[3] == u8::MAX {
+            continue;
+        }
+        if px[3] == 0 {
+            px[..3].fill(0);
+            continue;
+        }
+        for c in &mut px[..3] {
+            *c = crate::zone_texture::linear_to_srgb(crate::zone_texture::srgb_to_linear(*c) * a);
+        }
     }
 }
 
@@ -968,6 +996,27 @@ mod icon_raster_tests {
             .filter_map(|rel| std::fs::read(root.join(rel)).ok())
             .any(|bytes| icons.load_from_dat(&bytes, &codes));
         loaded.then_some(icons)
+    }
+
+    /// Premultiplied invariant: no texel may carry more color than coverage
+    /// (decoded rgb <= alpha), else the GPU's One/OneMinusSrcAlpha blend turns
+    /// the excess additive and the plate brightens over bright backgrounds.
+    #[test]
+    fn raster_is_premultiplied_no_texel_outshines_its_coverage() {
+        let font = font();
+        let plate = rasterize_plate(&font, "Test", NAME_PX, WHITE, Some(50), &[], WHITE, None);
+        let data = plate.image.data.as_ref().expect("raster is CPU-side");
+        let mip0 = (plate.image.width() * plate.image.height() * 4) as usize;
+        let quantization_slack = 2.0 / 255.0;
+        for px in data[..mip0].chunks_exact(4) {
+            let a = px[3] as f32 / 255.0;
+            for &c in &px[..3] {
+                assert!(
+                    crate::zone_texture::srgb_to_linear(c) <= a + quantization_slack,
+                    "texel {px:?} carries color beyond its alpha"
+                );
+            }
+        }
     }
 
     #[test]

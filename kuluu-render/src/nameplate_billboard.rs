@@ -974,12 +974,7 @@ mod icon_raster_tests {
     }
 
     fn retail_icons() -> Option<NameplateIcons> {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("..")
-            .join(ffxi_dat::archive::DEFAULT_INSTALL_DIR);
-        if !root.join("VTABLE.DAT").exists() {
-            return None;
-        }
+        let root = ffxi_dat::archive::open_test_install()?;
         let codes = [
             glyph::PLAY_ONLINE,
             glyph::LINKDEAD,
@@ -992,10 +987,9 @@ mod icon_raster_tests {
             glyph::JOB_MASTER_TAIL,
         ];
         let mut icons = NameplateIcons::default();
-        let loaded = crate::ui_element_atlas::UI_DAT_PATHS
-            .iter()
-            .filter_map(|rel| std::fs::read(root.join(rel)).ok())
-            .any(|bytes| icons.load_from_dat(&bytes, &codes));
+        let loaded = crate::ui_element_atlas::read_ui_dats(&root)
+            .into_iter()
+            .any(|(_, bytes)| icons.load_from_dat(&bytes, &codes));
         loaded.then_some(icons)
     }
 

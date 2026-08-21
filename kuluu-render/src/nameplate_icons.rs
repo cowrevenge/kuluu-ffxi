@@ -10,7 +10,7 @@ use bevy::prelude::*;
 use ffxi_dat::ui_element::{find_ui_element_group, ui_sprite, UiSprite};
 
 use crate::nameplate_marker::FIRST_GLYPH_CODE;
-use crate::ui_element_atlas::{UiElementDatRoot, UI_DAT_PATHS};
+use crate::ui_element_atlas::{read_ui_dats, UiElementDatRoot};
 
 const FONT_SHAPE_GROUP: &str = "font    fontshp ";
 
@@ -151,14 +151,11 @@ pub fn load_nameplate_icons_system(
         return;
     };
     let codes = marker_codes();
-    for rel in UI_DAT_PATHS {
-        let Ok(bytes) = std::fs::read(root.root().join(rel)) else {
-            continue;
-        };
+    for (id, bytes) in read_ui_dats(root) {
         if icons.load_from_dat(&bytes, &codes) {
             info!(
                 glyphs = icons.glyphs.len(),
-                dat = rel,
+                dat = id,
                 "loaded retail nameplate icon glyphs"
             );
             return;
@@ -180,15 +177,12 @@ mod tests {
     use super::*;
 
     fn retail_dats() -> Vec<Vec<u8>> {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("..")
-            .join(ffxi_dat::archive::DEFAULT_INSTALL_DIR);
-        if !root.join("VTABLE.DAT").exists() {
+        let Some(root) = ffxi_dat::archive::open_test_install() else {
             return Vec::new();
-        }
-        UI_DAT_PATHS
-            .iter()
-            .filter_map(|rel| std::fs::read(root.join(rel)).ok())
+        };
+        read_ui_dats(&root)
+            .into_iter()
+            .map(|(_, bytes)| bytes)
             .collect()
     }
 

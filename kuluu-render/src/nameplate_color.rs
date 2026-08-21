@@ -329,14 +329,11 @@ pub fn load_name_colors_system(mut table: ResMut<NameColorTable>, dat_root: Res<
     let Some(root) = dat_root.0.as_ref() else {
         return;
     };
-    for rel in crate::ui_element_atlas::UI_DAT_PATHS {
-        let Ok(bytes) = std::fs::read(root.root().join(rel)) else {
-            continue;
-        };
+    for (id, bytes) in crate::ui_element_atlas::read_ui_dats(root) {
         if table.load_from_dat(&bytes) {
             info!(
                 entries = table.len(),
-                dat = rel,
+                dat = id,
                 "loaded retail nameplate name-colour table"
             );
             return;
@@ -749,17 +746,13 @@ mod tests {
     /// the two rows the claim colours depend on.
     #[test]
     fn real_dat_table_loads_with_retail_claim_colors() {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("..")
-            .join(ffxi_dat::archive::DEFAULT_INSTALL_DIR);
-        if !root.join("VTABLE.DAT").exists() {
+        let Some(root) = ffxi_dat::archive::open_test_install() else {
             return;
-        }
+        };
         let mut table = NameColorTable::default();
-        let loaded = crate::ui_element_atlas::UI_DAT_PATHS
-            .iter()
-            .filter_map(|rel| std::fs::read(root.join(rel)).ok())
-            .any(|bytes| table.load_from_dat(&bytes));
+        let loaded = crate::ui_element_atlas::read_ui_dats(&root)
+            .into_iter()
+            .any(|(_, bytes)| table.load_from_dat(&bytes));
         assert!(
             loaded,
             "the ncol group must resolve from the retail UI DATs"

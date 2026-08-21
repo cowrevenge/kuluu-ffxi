@@ -35,6 +35,12 @@ const PANEL_RIGHT_PX: f32 = 8.0;
 /// submodes keep the panel top-right (vanilla reference, kuluu-lf42).
 const PANEL_LEFT_PX: f32 = 8.0;
 
+/// Retail's list box is a fixed-size frame; a content-sized panel jumps in
+/// height whenever the scroll window slides past rows that wrap to two lines
+/// (kuluu-xavp). The command submenu stays content-sized like retail's small
+/// button stack.
+const PANEL_LIST_HEIGHT_PCT: f32 = 55.0;
+
 /// Rows in the reusable panel pool — sized for the wide-scan roster and the
 /// Change Map zone list, which are the longest submode lists.
 pub const PANEL_ROWS: usize = 24;
@@ -125,6 +131,11 @@ impl MapMarkers {
 pub struct MapScreenState {
     pub mode: MapSubMode,
     pub cursor: usize,
+    /// The command submenu's cursor, parked while a submode owns `cursor` and
+    /// restored on back-out so leaving Wide Scan lands back on the Wide Scan
+    /// row (the generic `MenuStack` gets this per-level; this bespoke state
+    /// mirrors it, kuluu-xavp).
+    pub command_cursor: usize,
     /// Markers placement crosshair, in map UV (0..1). `None` until Markers opens.
     pub map_cursor: Option<Vec2>,
     /// The (zone, map_index) the image shows. `None` = the live zone, index 0;
@@ -760,6 +771,7 @@ pub(crate) fn spawn_map_screen(mut commands: Commands, mut images: ResMut<Assets
     n.top = Val::Px(PANEL_TOP_PX);
     n.right = Val::Px(PANEL_RIGHT_PX);
     n.width = Val::Px(PANEL_WIDTH_PX);
+    n.overflow = Overflow::clip_y();
     n.display = Display::None;
     commands
         .spawn((
@@ -1304,6 +1316,14 @@ pub(crate) fn update_map_panel(
         }
         if node.right != right {
             node.right = right;
+        }
+        let height = if map_state.mode == MapSubMode::Command {
+            Val::Auto
+        } else {
+            Val::Percent(PANEL_LIST_HEIGHT_PCT)
+        };
+        if node.height != height {
+            node.height = height;
         }
     }
     if !open {

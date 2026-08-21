@@ -279,6 +279,7 @@ fn enter_submode(
 ) {
     use kuluu_render::hud::map_screen::MapSubMode;
     map_state.mode = sub;
+    map_state.command_cursor = map_state.cursor;
     map_state.cursor = 0;
     match sub {
         MapSubMode::WideScan => {
@@ -291,10 +292,11 @@ fn enter_submode(
     }
 }
 
-/// Return from a submode to the command submenu, restoring the command cursor.
+/// Return from a submode to the command submenu, restoring the command cursor
+/// so backing out of Wide Scan lands on the Wide Scan row, not Markers.
 fn return_to_command(map_state: &mut kuluu_render::hud::map_screen::MapScreenState) {
     map_state.mode = kuluu_render::hud::map_screen::MapSubMode::Command;
-    map_state.cursor = 0;
+    map_state.cursor = map_state.command_cursor;
     map_state.map_cursor = None;
     map_state.marker_entry = None;
 }

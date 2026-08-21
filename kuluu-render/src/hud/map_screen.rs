@@ -415,6 +415,15 @@ pub fn widescan_dot_world(self_world: Vec3, rel_x: i16, rel_z: i16) -> Vec3 {
         })
 }
 
+/// First pooled row index of the scroll window: the cursor never sits lower
+/// than the window's middle row, so it cannot scroll under the fixed panel's
+/// clipped bottom edge even when wrapped two-line rows shrink how many of the
+/// `PANEL_ROWS` actually fit (kuluu-pfpt). The list end shows fewer trailing
+/// rows instead of pinning a full window.
+fn panel_scroll_start(cursor: usize) -> usize {
+    cursor.saturating_sub(PANEL_ROWS / 2)
+}
+
 /// A rendered panel row: text, color, and whether the cursor is on it.
 struct PanelRow {
     text: String,
@@ -1358,12 +1367,7 @@ pub(crate) fn update_map_panel(
     let markers = map_markers.for_zone(zone);
     let rows = panel_rows(&map_state, snap, markers, &zone_name);
 
-    // Scroll the pool so the cursor stays visible in long lists.
-    let total = rows.len();
-    let start = map_state
-        .cursor
-        .saturating_sub(PANEL_ROWS / 2)
-        .min(total.saturating_sub(PANEL_ROWS));
+    let start = panel_scroll_start(map_state.cursor);
 
     for (row, mut text, mut color, mut node) in row_q.iter_mut() {
         let idx = start + row.slot;
@@ -1470,6 +1474,15 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(widescan_rows(&snap)[0].label, "E9 (Lv12)");
+    }
+
+    #[test]
+    fn panel_scroll_keeps_the_cursor_at_or_above_the_window_middle() {
+        // A cursor at the very end of a long list must stay at visual row
+        // PANEL_ROWS/2, never drift toward the clipped bottom (kuluu-pfpt).
+        let last = 40;
+        assert_eq!(last - panel_scroll_start(last), PANEL_ROWS / 2);
+        assert_eq!(panel_scroll_start(3), 0, "short lists start at the top");
     }
 
     #[test]

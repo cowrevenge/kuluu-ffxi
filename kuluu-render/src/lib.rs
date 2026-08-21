@@ -279,6 +279,16 @@ impl<S: SceneSource + Resource + Component<Mutability = bevy::ecs::component::Mu
             .add_systems(Update, ui_font::apply_ui_font)
             .add_systems(PreUpdate, ingest_system::<S>.run_if(resource_exists::<S>))
             .add_systems(PostUpdate, drain_toast_events)
+            // After every Update-schedule camera writer (chase, first-person,
+            // the client's wall-collision clamp), before propagation computes
+            // the GlobalTransforms the renderer extracts — a copy taken any
+            // earlier lags the collision clamp and the plates jiggle against
+            // the world (kuluu-wupy follow-up).
+            .add_systems(
+                PostUpdate,
+                nameplate_overlay::sync_nameplate_overlay_camera
+                    .before(bevy::transform::TransformSystems::Propagate),
+            )
             .add_systems(
                 PreUpdate,
                 vana_time::ingest_vana_time.after(ingest_system::<S>),
@@ -294,7 +304,6 @@ impl<S: SceneSource + Resource + Component<Mutability = bevy::ecs::component::Mu
                         camera_transition_system,
                         chase_camera_system,
                         firstperson_camera_system,
-                        nameplate_overlay::sync_nameplate_overlay_camera,
                         sync_aggro_system,
                         nameplate::update_nameplates_system,
                         nameplate_billboard::update_nameplate_billboards_system,

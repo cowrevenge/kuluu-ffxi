@@ -11,3 +11,4 @@ pub mod keybinds_store;
 pub mod marker_store;
 #[cfg(feature = "native-window")]
 pub mod overlay_store;
+pub mod padbinds_store;

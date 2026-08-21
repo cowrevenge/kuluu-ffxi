@@ -22,14 +22,30 @@ pub struct MoveEnvParams<'w> {
     pub collision: Res<'w, kuluu_render::dat_mzb::MzbCollisionGeometry>,
     pub minimap_hover: Res<'w, kuluu_render::minimap::input::MinimapHoverGate>,
     pub pointer: Res<'w, kuluu_render::MousePointer>,
+    pub pad: Res<'w, super::gamepad_input::PadStickIntent>,
     // Focus-less GUI driving (kuluu-0pof): remote movement injection.
     pub debug_ctrl: Option<Res<'w, super::DebugControlHandle>>,
+}
+
+/// Rising-edge memory for the pad stick, standing in for `just_pressed` where
+/// held keys have one (rest-break and autorun-cancel).
+#[derive(Default)]
+pub struct PadEdges {
+    move_active: bool,
+    back_active: bool,
 }
 
 #[derive(SystemParam)]
 pub struct HudCaptureParams<'w> {
     pub hud_hidden: ResMut<'w, kuluu_render::hud_hide::HudHidden>,
     pub screenshot: MessageWriter<'w, super::screenshot::ScreenshotRequest>,
+}
+
+#[derive(SystemParam)]
+pub struct KeyActionSources<'w> {
+    pub keys: Res<'w, ButtonInput<KeyCode>>,
+    pub bindings: Res<'w, Bindings>,
+    pub pad: Res<'w, super::gamepad_input::PadPressed>,
 }
 
 #[derive(SystemParam)]
@@ -68,6 +84,10 @@ use kuluu_session::state::move_speed_yps;
 
 const BACKPEDAL_SCALE: f32 = 0.5;
 const STRAFE_SCALE: f32 = 0.75;
+
+// A stick pulled this far toward the camera cancels autorun, like a tapped S;
+// gentler deflections only carve (retail autorun is steerable).
+const PAD_BACK_CANCEL_DEFLECTION: f32 = 0.5;
 
 const PREDICTION_RESYNC_YALMS: f32 = 5.0;
 
@@ -188,16 +208,43 @@ pub fn resolve_move_inputs(
 }
 
 /// World-space run heading for a camera-relative move: `forward` along the
-/// camera's forward axis, `steer` along camera-right. Callers guarantee at
-/// least one component is non-zero (steer_in_chase requires it).
-pub fn camera_relative_motion_heading(camera_forward_h: u8, forward: i32, steer: i32) -> u8 {
+/// camera's forward axis, `steer` along camera-right. Components are analog
+/// (a stick preserves its direction ratio; keyboard passes -1/0/1). Callers
+/// guarantee at least one component is non-zero (steer_in_chase requires it).
+pub fn camera_relative_motion_heading(camera_forward_h: u8, forward: f32, steer: f32) -> u8 {
     let (cf_x, cf_y) = heading_to_forward(camera_forward_h);
     let (cr_x, cr_y) = heading_to_forward(camera_forward_h.wrapping_add(64));
-    let mx = cf_x * forward as f32 + cr_x * steer as f32;
-    let my = cf_y * forward as f32 + cr_y * steer as f32;
+    let mx = cf_x * forward + cr_x * steer;
+    let my = cf_y * forward + cr_y * steer;
     let motion_radians = my.atan2(mx);
     let motion_raw = motion_radians * -(128.0 / std::f32::consts::PI);
     (motion_raw.round() as i32).rem_euclid(256) as u8
+}
+
+/// Retail resolves pad-vs-keyboard analog input by magnitude: whichever
+/// source deflects further wins, ties to the keyboard
+/// (research/XIClient InputManager::GetAnalogKey).
+pub fn pick_mag(keyboard: f32, pad: f32) -> f32 {
+    if pad.abs() > keyboard.abs() {
+        pad
+    } else {
+        keyboard
+    }
+}
+
+/// [`pick_mag`] quantized for the digital movement paths (locked-on strafe /
+/// backpedal and first-person forward), which step at full speed per
+/// direction like held keys.
+pub fn merge_dir(keyboard: i32, pad: f32) -> i32 {
+    if pad.abs() > keyboard.abs() as f32 {
+        if pad > 0.0 {
+            1
+        } else {
+            -1
+        }
+    } else {
+        keyboard
+    }
 }
 
 /// Modes that plant the character: an NPC dialog or a shop/box/counter screen
@@ -241,8 +288,7 @@ pub struct SelectTargetMode {
 }
 
 pub fn handle_input_system(
-    keys: Res<ButtonInput<KeyCode>>,
-    bindings: Res<Bindings>,
+    input_src: KeyActionSources,
     mut window_close: MessageReader<WindowCloseRequested>,
     mut state: ResMut<SceneState>,
     cmd_tx: Res<CommandTx>,
@@ -264,6 +310,12 @@ pub fn handle_input_system(
     let lock_on = &mut camera.lock_on;
     let camera_transition = &mut camera.transition;
 
+    let keys = &input_src.keys;
+    let bindings = &input_src.bindings;
+    // Keyboard and pad are merged per action: the pad dispatches `Action`s
+    // directly (gamepad_input::PadPressed) rather than pulsing synthetic keys.
+    let just = |a: Action| bindings.just_pressed(a, keys) || input_src.pad.just_pressed(a);
+
     let cmd_held = keys.pressed(KeyCode::SuperLeft) || keys.pressed(KeyCode::SuperRight);
     let close_shortcut =
         cmd_held && (keys.just_pressed(KeyCode::KeyQ) || keys.just_pressed(KeyCode::KeyW));
@@ -274,19 +326,17 @@ pub fn handle_input_system(
         return;
     }
 
-    if !matches!(*mode, InputMode::Chat(_))
-        && bindings.just_pressed(Action::ToggleFirstPerson, &keys)
-    {
+    if !matches!(*mode, InputMode::Chat(_)) && just(Action::ToggleFirstPerson) {
         chase.yaw = kuluu_render::yaw_for_heading(state.snapshot.self_pos.heading);
         camera_transition.begin(**camera_mode, chase.distance);
         cursor_lock.locked = false;
     }
 
     if !matches!(*mode, InputMode::Chat(_)) {
-        if bindings.just_pressed(Action::ToggleHud, &keys) {
+        if just(Action::ToggleHud) {
             hud_capture.hud_hidden.manual = !hud_capture.hud_hidden.manual;
         }
-        if bindings.just_pressed(Action::Screenshot, &keys) {
+        if just(Action::Screenshot) {
             hud_capture
                 .screenshot
                 .write(super::screenshot::ScreenshotRequest {
@@ -295,7 +345,7 @@ pub fn handle_input_system(
         }
     }
 
-    if bindings.just_pressed(Action::TogglePassiveCursor, &keys) {
+    if just(Action::TogglePassiveCursor) {
         match *mode {
             InputMode::World => {
                 *mode = InputMode::PassiveCursor(PassiveCursorState::fresh_chat());
@@ -317,13 +367,13 @@ pub fn handle_input_system(
     // chat/menu/targeting so Enter sets the hook instead of acquiring a target
     // (retail consumes these keys for the mini-game while the rod is out).
     if state.snapshot.self_fishing.is_some() {
-        let fishing_input = if bindings.just_pressed(Action::FishingHook, &keys) {
+        let fishing_input = if just(Action::FishingHook) {
             Some(FishingInput::Hook)
-        } else if bindings.just_pressed(Action::FishingReelLeft, &keys) {
+        } else if just(Action::FishingReelLeft) {
             Some(FishingInput::Left)
-        } else if bindings.just_pressed(Action::FishingReelRight, &keys) {
+        } else if just(Action::FishingReelRight) {
             Some(FishingInput::Right)
-        } else if bindings.just_pressed(Action::FishingCancel, &keys) {
+        } else if just(Action::FishingCancel) {
             Some(FishingInput::Cancel)
         } else {
             None
@@ -334,11 +384,11 @@ pub fn handle_input_system(
         }
     }
 
-    if bindings.just_pressed(Action::OpenChatCommand, &keys) {
+    if bindings.just_pressed(Action::OpenChatCommand, keys) {
         *mode = InputMode::Chat(ChatBuffer::empty());
         return;
     }
-    if bindings.just_pressed(Action::OpenMenu, &keys) {
+    if just(Action::OpenMenu) {
         *mode = InputMode::Menu(MenuStack::root());
         return;
     }
@@ -348,14 +398,13 @@ pub fn handle_input_system(
     // lock; every other targeting key below is pinned by it.
     let target_pinned = kuluu_render::suppresses_retarget(lock_on, select_target.active);
 
-    if !select_target.active && !target_pinned && bindings.just_pressed(Action::ClearTarget, &keys)
-    {
+    if !select_target.active && !target_pinned && just(Action::ClearTarget) {
         target.id = None;
     }
 
-    let tab = bindings.just_pressed(Action::CycleTarget, &keys);
+    let tab = just(Action::CycleTarget);
 
-    let enter_acquire = bindings.just_pressed(Action::ConfirmAction, &keys)
+    let enter_acquire = just(Action::ConfirmAction)
         && target.id.is_none()
         && !kuluu_render::hud::death_prompt::is_dead(&state);
     if (tab || enter_acquire) && !target_pinned {
@@ -387,17 +436,17 @@ pub fn handle_input_system(
         }
     }
 
-    let party_slot = if bindings.just_pressed(Action::TargetSelf, &keys) {
+    let party_slot = if bindings.just_pressed(Action::TargetSelf, keys) {
         Some(1)
-    } else if bindings.just_pressed(Action::TargetParty2, &keys) {
+    } else if bindings.just_pressed(Action::TargetParty2, keys) {
         Some(2)
-    } else if bindings.just_pressed(Action::TargetParty3, &keys) {
+    } else if bindings.just_pressed(Action::TargetParty3, keys) {
         Some(3)
-    } else if bindings.just_pressed(Action::TargetParty4, &keys) {
+    } else if bindings.just_pressed(Action::TargetParty4, keys) {
         Some(4)
-    } else if bindings.just_pressed(Action::TargetParty5, &keys) {
+    } else if bindings.just_pressed(Action::TargetParty5, keys) {
         Some(5)
-    } else if bindings.just_pressed(Action::TargetParty6, &keys) {
+    } else if bindings.just_pressed(Action::TargetParty6, keys) {
         Some(6)
     } else {
         None
@@ -412,11 +461,9 @@ pub fn handle_input_system(
             target.id = Some(id);
         }
     }
-    autorun.phantom_forward = autorun_after_toggle(
-        autorun.phantom_forward,
-        bindings.just_pressed(Action::ToggleAutorun, &keys),
-    );
-    if bindings.just_pressed(Action::ToggleWalk, &keys) {
+    autorun.phantom_forward =
+        autorun_after_toggle(autorun.phantom_forward, just(Action::ToggleAutorun));
+    if bindings.just_pressed(Action::ToggleWalk, keys) {
         walk_mode.walking = !walk_mode.walking;
     }
     // Retail's "Select active window" action toggles lock-on / focuses the
@@ -424,7 +471,7 @@ pub fn handle_input_system(
     // lived on this action pre-rename has been removed — engaging goes through
     // the Attack action menu entry.
 
-    if bindings.just_pressed(Action::Sit, &keys) {
+    if bindings.just_pressed(Action::Sit, keys) {
         use kuluu_render::combat_stance::RestKind;
         let next = match rest_stance.kind {
             RestKind::Sit => RestKind::None,
@@ -439,11 +486,11 @@ pub fn handle_input_system(
         };
         rest_stance.kind = next;
     }
-    if bindings.just_pressed(Action::Heal, &keys) {
+    if bindings.just_pressed(Action::Heal, keys) {
         toggle_heal(&mut rest_stance, &cmd_tx);
     }
 
-    if bindings.just_pressed(Action::ToggleLockOn, &keys) {
+    if just(Action::ToggleLockOn) {
         let result = lock_on.toggle(target.id);
         let toast = match result {
             LockOnToggle::Locked(id) => {
@@ -576,6 +623,7 @@ pub fn dispatch_movement_system(
     // direction with it (S would otherwise chase a target that stays 180° away —
     // the sideways-circle bug from the 2026-07-20 10.19 recording).
     mut steer_latch: Local<Option<(i32, u8)>>,
+    mut pad_edges: Local<PadEdges>,
     mut prediction: ResMut<LocalPlayerPrediction>,
     env: MoveEnvParams,
     mut stance: StanceParams,
@@ -607,6 +655,17 @@ pub fn dispatch_movement_system(
             | InputMode::PassiveCursor(_)
     );
 
+    // Pad sticks stay live where keyboard is muted or repurposed: retail keeps
+    // the pad moving the character while the chat line has focus and while a
+    // menu is open (menus are the d-pad's domain, not the sticks').
+    let pad_move = env.pad.movement;
+    let pad_cam = env.pad.camera;
+    let pad_move_started = pad_move != Vec2::ZERO && !pad_edges.move_active;
+    pad_edges.move_active = pad_move != Vec2::ZERO;
+    let pad_back = pad_move.y < -PAD_BACK_CANCEL_DEFLECTION;
+    let pad_back_started = pad_back && !pad_edges.back_active;
+    pad_edges.back_active = pad_back;
+
     let mut pitch_d = 0.0;
     if !in_picker && bindings.pressed(Action::CameraPitchUp, keys) {
         pitch_d += PITCH_STEP_HELD;
@@ -614,6 +673,7 @@ pub fn dispatch_movement_system(
     if !in_picker && bindings.pressed(Action::CameraPitchDown, keys) {
         pitch_d -= PITCH_STEP_HELD;
     }
+    pitch_d += pad_cam.y * PITCH_STEP_HELD;
     if pitch_d != 0.0 {
         let (lo, hi) = match *camera_mode {
             CameraMode::Chase => (ChaseCamera::PITCH_MIN, ChaseCamera::PITCH_MAX),
@@ -630,6 +690,7 @@ pub fn dispatch_movement_system(
     if !in_picker && bindings.pressed(Action::CameraYawRight, keys) {
         yaw_d += yaw_step;
     }
+    yaw_d += pad_cam.x * yaw_step;
     if yaw_d != 0.0 {
         chase.yaw += yaw_d;
     }
@@ -667,7 +728,8 @@ pub fn dispatch_movement_system(
             Action::RotateLeft,
             Action::RotateRight,
         ];
-        let pressed_move = move_actions.iter().any(|a| bindings.just_pressed(*a, keys));
+        let pressed_move =
+            move_actions.iter().any(|a| bindings.just_pressed(*a, keys)) || pad_move_started;
         if pressed_move {
             if matches!(rest_stance.kind, RestKind::Heal) {
                 let _ = cmd_tx.0.try_send(AgentCommand::Heal {
@@ -690,7 +752,8 @@ pub fn dispatch_movement_system(
         return;
     }
 
-    let backward_just_pressed = bindings.just_pressed(Action::MoveBackward, keys);
+    let backward_just_pressed =
+        bindings.just_pressed(Action::MoveBackward, keys) || pad_back_started;
     if backward_just_pressed {
         autorun.phantom_forward = false;
     }
@@ -700,7 +763,8 @@ pub fn dispatch_movement_system(
     let any_strafe = bindings.pressed(Action::StrafeLeft, keys)
         || bindings.pressed(Action::StrafeRight, keys)
         || bindings.pressed(Action::RotateLeft, keys)
-        || bindings.pressed(Action::RotateRight, keys);
+        || bindings.pressed(Action::RotateRight, keys)
+        || pad_move.x != 0.0;
     if any_strafe {
         let now = Instant::now();
         let started = *autorun.strafe_held_since.get_or_insert(now);
@@ -741,24 +805,45 @@ pub fn dispatch_movement_system(
             }
         }
     }
+    // Pad-vs-keyboard analog resolution is retail's larger-magnitude rule
+    // (pick_mag). `pf`/`ps` keep the stick's direction ratio for the
+    // camera-relative run; the locked and first-person paths step digitally,
+    // so the stick quantizes to a direction there (merge_dir).
+    let pf = pick_mag(forward as f32, pad_move.y);
+    let ps = if first_person || locked {
+        0.0
+    } else {
+        pick_mag(resolved.steer as f32, pad_move.x)
+    };
+    if locked {
+        forward = merge_dir(forward, pad_move.y);
+        strafe = merge_dir(strafe, pad_move.x);
+    } else if first_person {
+        forward = merge_dir(forward, pad_move.y);
+    }
     // In chase mode steer is always a camera-relative run component (solo A/D
     // runs sideways); only first person keeps the arrow-turn pivot.
-    // In first person A/D rotate the view like Q/E, at the same snappy rate.
-    let fp_rotate = if first_person { resolved.steer } else { 0 };
-    let turn_rate = ROTATE_KEY_RATE_RAD_PER_SEC * (resolved.rotate_dir + fp_rotate) as f32;
+    // In first person A/D (and the stick's x axis) rotate the view like Q/E.
+    let fp_rotate = if first_person {
+        pick_mag(resolved.steer as f32, pad_move.x)
+    } else {
+        0.0
+    };
+    let turn_rate = ROTATE_KEY_RATE_RAD_PER_SEC * (resolved.rotate_dir as f32 + fp_rotate);
     let (player_rotate_u8, heading_delta_units) =
         advance_heading_turn(&mut turn_accum.units, turn_rate, time.delta_secs());
-    let steer_in_chase = !first_person && !locked && (forward != 0 || resolved.steer != 0);
+    let steer_in_chase = !first_person && !locked && (pf != 0.0 || ps != 0.0);
     // Deliberate camera pan (yaw keys / mouse drag) re-aims a pure W/S run;
     // the latch only holds the run direction against the passive
     // auto-recenter, not against the player actively steering the camera.
     let camera_panning = bindings.pressed(Action::CameraYawLeft, keys)
         || bindings.pressed(Action::CameraYawRight, keys)
+        || pad_cam.x != 0.0
         || env.pointer.left
         || env.pointer.right;
     // A/D carve, Q/E rotate, and camera panning recompute the run direction
     // against the live camera every frame; anything else holds the latch.
-    if !steer_in_chase || resolved.steer != 0 || resolved.rotate_dir != 0 || camera_panning {
+    if !steer_in_chase || ps != 0.0 || resolved.rotate_dir != 0 || camera_panning {
         *steer_latch = None;
     }
 
@@ -872,15 +957,16 @@ pub fn dispatch_movement_system(
     let mut turn_dy: f32 = 0.0;
     if steer_in_chase {
         let camera_forward_h = heading_for_yaw(chase.yaw);
-        let continuous = resolved.steer != 0 || resolved.rotate_dir != 0 || camera_panning;
+        let continuous = ps != 0.0 || resolved.rotate_dir != 0 || camera_panning;
         let motion_h = if continuous {
-            camera_relative_motion_heading(camera_forward_h, forward, resolved.steer)
+            camera_relative_motion_heading(camera_forward_h, pf, ps)
         } else {
+            let pf_sign = if pf > 0.0 { 1 } else { -1 };
             match *steer_latch {
-                Some((f, h)) if f == forward => h,
+                Some((f, h)) if f == pf_sign => h,
                 _ => {
-                    let h = camera_relative_motion_heading(camera_forward_h, forward, 0);
-                    *steer_latch = Some((forward, h));
+                    let h = camera_relative_motion_heading(camera_forward_h, pf_sign as f32, 0.0);
+                    *steer_latch = Some((pf_sign, h));
                     h
                 }
             }
@@ -1306,6 +1392,7 @@ const TARGET_HEAD_OFFSET_Y: f32 = 1.5;
 pub fn camera_polish_system(
     keys: Res<ButtonInput<KeyCode>>,
     bindings: Res<Bindings>,
+    pad: Res<super::gamepad_input::PadStickIntent>,
     time: Res<Time>,
     mode: Res<InputMode>,
     camera_mode: Res<CameraMode>,
@@ -1323,7 +1410,8 @@ pub fn camera_polish_system(
     }
 
     let yaw_input = bindings.pressed(Action::CameraYawLeft, &keys)
-        || bindings.pressed(Action::CameraYawRight, &keys);
+        || bindings.pressed(Action::CameraYawRight, &keys)
+        || pad.camera.x != 0.0;
     let drag_active = pointer.left || pointer.right;
     if yaw_input || drag_active {
         recenter.manual_override = true;
@@ -1335,7 +1423,8 @@ pub fn camera_polish_system(
         || bindings.pressed(Action::TurnLeft, &keys)
         || bindings.pressed(Action::TurnRight, &keys)
         || bindings.pressed(Action::RotateLeft, &keys)
-        || bindings.pressed(Action::RotateRight, &keys);
+        || bindings.pressed(Action::RotateRight, &keys)
+        || pad.movement != Vec2::ZERO;
     if movement_input {
         recenter.manual_override = false;
     }
@@ -1348,8 +1437,9 @@ pub fn camera_polish_system(
         && !recenter.manual_override
         && matches!(*camera_mode, CameraMode::Chase)
     {
-        let carving =
-            bindings.pressed(Action::TurnLeft, &keys) || bindings.pressed(Action::TurnRight, &keys);
+        let carving = bindings.pressed(Action::TurnLeft, &keys)
+            || bindings.pressed(Action::TurnRight, &keys)
+            || pad.movement.x != 0.0;
         let rate = if carving {
             CARVE_FOLLOW_RATE
         } else {
@@ -1889,7 +1979,7 @@ mod tests {
         // S runs at the camera: motion heading = camera forward + 180° (128 units).
         for cam in [0u8, 64, 128, 200] {
             assert_eq!(
-                camera_relative_motion_heading(cam, -1, 0),
+                camera_relative_motion_heading(cam, -1.0, 0.0),
                 cam.wrapping_add(128),
                 "cam={cam}"
             );
@@ -1915,21 +2005,51 @@ mod tests {
     #[test]
     fn forward_motion_heading_matches_camera_forward() {
         for cam in [0u8, 33, 100, 250] {
-            assert_eq!(camera_relative_motion_heading(cam, 1, 0), cam, "cam={cam}");
+            assert_eq!(
+                camera_relative_motion_heading(cam, 1.0, 0.0),
+                cam,
+                "cam={cam}"
+            );
         }
     }
 
     #[test]
     fn steer_motion_heading_is_camera_right() {
         // D alone runs along camera-right (+64 heading units); A camera-left.
-        assert_eq!(camera_relative_motion_heading(0, 0, 1), 64);
-        assert_eq!(camera_relative_motion_heading(0, 0, -1), 192);
+        assert_eq!(camera_relative_motion_heading(0, 0.0, 1.0), 64);
+        assert_eq!(camera_relative_motion_heading(0, 0.0, -1.0), 192);
     }
 
     #[test]
     fn forward_steer_motion_heading_is_diagonal() {
-        assert_eq!(camera_relative_motion_heading(0, 1, 1), 32);
-        assert_eq!(camera_relative_motion_heading(0, -1, 1), 96);
+        assert_eq!(camera_relative_motion_heading(0, 1.0, 1.0), 32);
+        assert_eq!(camera_relative_motion_heading(0, -1.0, 1.0), 96);
+    }
+
+    #[test]
+    fn analog_motion_heading_preserves_stick_direction_ratio() {
+        // A stick at 30° off camera-forward must not collapse to the 45°
+        // digital diagonal: atan(0.5/0.866) = 30° = ~21 heading units.
+        let h = camera_relative_motion_heading(0, 0.866, 0.5);
+        assert!((21i32 - i32::from(h)).abs() <= 1, "got {h}");
+    }
+
+    #[test]
+    fn pick_mag_larger_deflection_wins_ties_to_keyboard() {
+        assert_eq!(pick_mag(1.0, 0.4), 1.0);
+        assert_eq!(pick_mag(0.0, -0.7), -0.7);
+        assert_eq!(pick_mag(-1.0, 0.9), -1.0);
+        assert_eq!(pick_mag(1.0, -1.0), 1.0);
+        assert_eq!(pick_mag(0.0, 0.0), 0.0);
+    }
+
+    #[test]
+    fn merge_dir_quantizes_a_winning_stick() {
+        assert_eq!(merge_dir(0, 0.8), 1);
+        assert_eq!(merge_dir(0, -0.3), -1);
+        assert_eq!(merge_dir(1, -0.4), 1);
+        assert_eq!(merge_dir(-1, 0.9), -1);
+        assert_eq!(merge_dir(0, 0.0), 0);
     }
 
     #[test]

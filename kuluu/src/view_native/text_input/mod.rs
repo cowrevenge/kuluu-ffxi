@@ -136,6 +136,15 @@ pub struct SlashWriters<'w, 's> {
     pub overlay_store: Option<Res<'w, kuluu::overlay_store::OverlayStoreRes>>,
 }
 
+/// Real keyboard events plus the pad-synthesized ones
+/// (`gamepad_input::PadKeyEvent`); the pad channel is separate so Bevy's
+/// `keyboard_input_system` never mistakes synthetic presses for held keys.
+#[derive(SystemParam)]
+pub struct KeyEventStreams<'w, 's> {
+    pub keyboard: MessageReader<'w, 's, KeyboardInput>,
+    pub pad: MessageReader<'w, 's, super::gamepad_input::PadKeyEvent>,
+}
+
 #[derive(SystemParam)]
 pub struct MenuConfirmWriters<'w> {
     pub graphics: ResMut<'w, kuluu_render::GraphicsSettings>,
@@ -156,7 +165,7 @@ use crate::view_native::slash_commands::{
 };
 
 pub fn text_input_system(
-    mut events: MessageReader<KeyboardInput>,
+    mut events: KeyEventStreams,
     cmd_tx: Res<CommandTx>,
     mut bindings: ResMut<Bindings>,
     mut keybinds_state: ResMut<KeybindsStateRes>,
@@ -188,7 +197,8 @@ pub fn text_input_system(
 
     let target_changed = target.is_changed();
 
-    for ev in events.read() {
+    let pad_synth: Vec<KeyboardInput> = events.pad.read().map(|e| e.0.clone()).collect();
+    for ev in events.keyboard.read().chain(pad_synth.iter()) {
         if ev.state != ButtonState::Pressed {
             continue;
         }

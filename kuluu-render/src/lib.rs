@@ -110,7 +110,7 @@ pub use input_mode::{
     ChatBuffer, ChatHistory, DialogCursor, InputMode, MenuKind, MenuLevel, MenuStack,
     PassiveCursorFocus, PassiveCursorState, QuickActionState, CHAT_HISTORY_MAX, DIALOG_MAX_CHOICE,
 };
-pub use keybinds::{Action, Bindings, KeyBind, Modifiers, Preset};
+pub use keybinds::{Action, Bindings, KeyBind, Modifiers, PadAction, PadBindings, Preset};
 pub use lock_on::{suppresses_retarget, LockOn, ToggleResult as LockOnToggle};
 pub use mouse::{CursorLockRequest, MousePlugin, MousePointer};
 pub use picking::{

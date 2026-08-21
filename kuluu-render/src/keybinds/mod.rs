@@ -4,8 +4,10 @@ use bevy::input::keyboard::{Key, KeyCode};
 use bevy::input::ButtonInput;
 use bevy::prelude::Resource;
 
+pub mod pad;
 pub mod presets;
 
+pub use pad::{PadAction, PadBindings};
 pub use presets::Preset;
 
 #[derive(
@@ -256,6 +258,38 @@ impl Bindings {
         }
         keycode_label(b.key)
     }
+}
+
+/// Inverse of [`nav_keycode_for`] over the same fixed table: the `Key` a
+/// synthesized `KeyboardInput` must carry so `matches_logical` resolves it
+/// back to `key`. `None` means the key is outside the navigable set and no
+/// event should be synthesized for it (kuluu-obha: a silent fallback here
+/// misdispatched pad buttons after a rebind).
+pub fn logical_key_for(key: KeyCode) -> Option<Key> {
+    let named = match key {
+        KeyCode::Enter => Some(Key::Enter),
+        KeyCode::Escape => Some(Key::Escape),
+        KeyCode::Backspace => Some(Key::Backspace),
+        KeyCode::Tab => Some(Key::Tab),
+        KeyCode::Space => Some(Key::Space),
+        KeyCode::ArrowUp => Some(Key::ArrowUp),
+        KeyCode::ArrowDown => Some(Key::ArrowDown),
+        KeyCode::ArrowLeft => Some(Key::ArrowLeft),
+        KeyCode::ArrowRight => Some(Key::ArrowRight),
+        KeyCode::PageUp => Some(Key::PageUp),
+        KeyCode::PageDown => Some(Key::PageDown),
+        KeyCode::Home => Some(Key::Home),
+        KeyCode::End => Some(Key::End),
+        KeyCode::NumpadAdd => Some(Key::Character("+".into())),
+        _ => None,
+    };
+    named.or_else(|| {
+        keycode_letter(key).map(|c| Key::Character(c.to_ascii_lowercase().to_string().into()))
+    })
+}
+
+fn keycode_letter(key: KeyCode) -> Option<char> {
+    ('A'..='Z').find(|c| letter_keycode(*c) == Some(key))
 }
 
 fn nav_keycode_for(key: &Key) -> Option<KeyCode> {
@@ -510,6 +544,47 @@ mod tests {
         );
 
         assert!(!b.matches_logical(Action::NavConfirm, &Key::Enter));
+    }
+
+    /// kuluu-obha guard: `logical_key_for` and `nav_keycode_for` must share
+    /// one table, so a synthesized event for any bound navigable key resolves
+    /// back to the same key — and unmappable keys synthesize nothing instead
+    /// of falling back to Enter.
+    #[test]
+    fn logical_key_for_roundtrips_the_nav_table() {
+        let mut covered = 0;
+        let named = [
+            KeyCode::Enter,
+            KeyCode::Escape,
+            KeyCode::Backspace,
+            KeyCode::Tab,
+            KeyCode::Space,
+            KeyCode::ArrowUp,
+            KeyCode::ArrowDown,
+            KeyCode::ArrowLeft,
+            KeyCode::ArrowRight,
+            KeyCode::PageUp,
+            KeyCode::PageDown,
+            KeyCode::Home,
+            KeyCode::End,
+            KeyCode::NumpadAdd,
+        ];
+        for kc in named {
+            let key = logical_key_for(kc).expect("named nav key must map");
+            assert_eq!(nav_keycode_for(&key), Some(kc), "roundtrip for {kc:?}");
+            covered += 1;
+        }
+        for c in 'A'..='Z' {
+            let kc = letter_keycode(c).unwrap();
+            let key = logical_key_for(kc).expect("letter must map");
+            assert_eq!(nav_keycode_for(&key), Some(kc), "roundtrip for {kc:?}");
+            covered += 1;
+        }
+        assert_eq!(covered, 14 + 26);
+
+        assert_eq!(logical_key_for(KeyCode::Minus), None);
+        assert_eq!(logical_key_for(KeyCode::F1), None);
+        assert_eq!(logical_key_for(KeyCode::PrintScreen), None);
     }
 
     #[test]

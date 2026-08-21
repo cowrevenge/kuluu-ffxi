@@ -12,6 +12,7 @@ use kuluu::keybinds_store;
 use kuluu::marker_store;
 #[cfg(feature = "native-window")]
 use kuluu::overlay_store;
+use kuluu::padbinds_store;
 #[cfg(feature = "relay")]
 use kuluu_session::relay;
 #[cfg(feature = "native-window")]

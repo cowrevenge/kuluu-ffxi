@@ -636,8 +636,11 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
     app.init_resource::<input::SelectTargetMode>();
     app.init_resource::<key_items::KeyItemsViewed>();
 
-    app.init_resource::<gamepad_input::GamepadAxisHeld>();
+    app.insert_resource(crate::padbinds_store::load_or_default());
     app.init_resource::<gamepad_input::PrimaryGamepad>();
+    app.init_resource::<gamepad_input::PadStickIntent>();
+    app.init_resource::<gamepad_input::PadPressed>();
+    app.add_message::<gamepad_input::PadKeyEvent>();
     app.add_systems(
         PreUpdate,
         gamepad_input::track_primary_gamepad_system.before(bevy::input::InputSystems),
@@ -646,19 +649,17 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
         Update,
         gamepad_input::gamepad_launcher_nav_system.run_if(in_state(AppPhase::Launcher)),
     );
-    // bevy::input::keyboard::keyboard_input_system::clear() must run first.
+    // .after(InputSystems): the Gamepad components are refreshed there.
     app.add_systems(
         PreUpdate,
-        gamepad_input::gamepad_movement_camera_system
+        (
+            gamepad_input::gamepad_stick_system,
+            gamepad_input::gamepad_action_system,
+        )
             .after(bevy::input::InputSystems)
             .run_if(in_state(AppPhase::InGame)),
     );
-    app.add_systems(
-        PreUpdate,
-        gamepad_input::gamepad_ingame_action_system
-            .after(bevy::input::InputSystems)
-            .run_if(in_state(AppPhase::InGame)),
-    );
+    app.add_systems(OnExit(AppPhase::InGame), gamepad_input::drain_pad_state);
 
     app.add_systems(
         Update,

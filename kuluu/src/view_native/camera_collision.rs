@@ -195,6 +195,20 @@ pub fn clamp_chase_camera_to_collision(
     };
     *smoothed_effective = Some(effective);
 
+    tracing::trace!(
+        target: "camera_boom",
+        wanted,
+        hit_t,
+        hit_any,
+        eff = effective,
+        ax = anchor.x,
+        ay = anchor.y,
+        az = anchor.z,
+        yaw = chase.yaw,
+        pitch = chase.pitch,
+        "boom"
+    );
+
     cam_t.translation = anchor + dir * effective;
     cam_t.look_at(anchor, Vec3::Y);
 }

@@ -282,12 +282,35 @@ pub fn sync_entities_system(
             Some(existing) => {
                 if let Ok(mut t) = q_xform.get_mut(existing) {
                     if is_self {
+                        trace!(
+                            target: "self_sync",
+                            echo_x = world_pos.x,
+                            echo_z = world_pos.z,
+                            cur_x = t.translation.x,
+                            cur_z = t.translation.z,
+                            "self ingest"
+                        );
+                        // Same visual smoothing every other entity gets: a
+                        // snapshot-cadence hiccup delivers several movement
+                        // ticks in one ingest, and a hard snap renders that as
+                        // a single-frame leap of the actor and its nameplate
+                        // (the camera smooths, so it reads as jiggle). The
+                        // 2-yalm snap threshold still passes real teleports
+                        // through instantly.
                         let y = if zone_changed {
                             world_pos.y
                         } else {
                             t.translation.y
                         };
-                        t.translation = Vec3::new(world_pos.x, y, world_pos.z);
+                        let stepped = if zone_changed {
+                            world_pos
+                        } else {
+                            apply_visual_smoothing(
+                                Vec3::new(t.translation.x, world_pos.y, t.translation.z),
+                                world_pos,
+                            )
+                        };
+                        t.translation = Vec3::new(stepped.x, y, stepped.z);
                         // Rotation is owned by self_visual_yaw_system: the
                         // movement heading snaps (about-face, first step) but
                         // the rendered body should whip around, not teleport.

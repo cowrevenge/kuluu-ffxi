@@ -3,28 +3,44 @@ use kuluu_snapshot::Weather;
 
 use crate::hud::style::{self, theme};
 use crate::snapshot::SceneState;
+use crate::ui_element_atlas::{UiElementAtlas, UiElementDatRoot};
+
+// Retail's weather indicator: "font    usgaiji " elements 0-7 are the eight
+// element icons (textures elfire..eldark, ROM/119/51.DAT); the single weather
+// of an element draws one icon, its double draws two
+// (research/xim/src/jsMain/kotlin/xim/poc/ui/Compass.kt:69-96).
+const USGAIJI_GROUP: &str = "font    usgaiji ";
+const ICON_SIZE_PX: f32 = 14.0;
+const MAX_ICONS: usize = 2;
 
 #[derive(Component)]
 pub struct WeatherIconPanel;
 
 #[derive(Component)]
-pub struct WeatherIconGlyph;
+pub struct WeatherIconSlot(usize);
 
-pub fn weather_glyph(w: Weather) -> &'static str {
+#[derive(Component)]
+pub struct WeatherIconLabel;
+
+pub fn weather_sprite(w: Weather) -> Option<(usize, usize)> {
     match w {
-        Weather::None => "",
-        Weather::Sunshine => "\u{2600}",
-        Weather::Clouds => "\u{2601}",
-        Weather::Fog => "\u{1F32B}",
-        Weather::HotSpell | Weather::HeatWave => "\u{1F525}",
-        Weather::Rain | Weather::Squall => "\u{1F327}",
-        Weather::DustStorm | Weather::SandStorm => "\u{1F32A}",
-        Weather::Wind | Weather::Gales => "\u{1F4A8}",
-        Weather::Snow | Weather::Blizzards => "\u{2744}",
-        Weather::Thunder | Weather::Thunderstorms => "\u{26A1}",
-        Weather::Auroras => "\u{1F30C}",
-        Weather::StellarGlare => "\u{2728}",
-        Weather::Gloom | Weather::Darkness => "\u{25CF}",
+        Weather::None | Weather::Sunshine | Weather::Clouds | Weather::Fog => None,
+        Weather::HotSpell => Some((0, 1)),
+        Weather::HeatWave => Some((0, 2)),
+        Weather::Snow => Some((1, 1)),
+        Weather::Blizzards => Some((1, 2)),
+        Weather::Wind => Some((2, 1)),
+        Weather::Gales => Some((2, 2)),
+        Weather::DustStorm => Some((3, 1)),
+        Weather::SandStorm => Some((3, 2)),
+        Weather::Thunder => Some((4, 1)),
+        Weather::Thunderstorms => Some((4, 2)),
+        Weather::Rain => Some((5, 1)),
+        Weather::Squall => Some((5, 2)),
+        Weather::Auroras => Some((6, 1)),
+        Weather::StellarGlare => Some((6, 2)),
+        Weather::Gloom => Some((7, 1)),
+        Weather::Darkness => Some((7, 2)),
     }
 }
 
@@ -62,6 +78,7 @@ pub fn spawn_weather_icon_as_child(p: &mut ChildSpawnerCommands) {
             border: UiRect::all(Val::Px(1.0)),
             justify_content: JustifyContent::Center,
             align_items: AlignItems::Center,
+            column_gap: Val::Px(3.0),
             display: Display::None,
             ..default()
         },
@@ -69,8 +86,20 @@ pub fn spawn_weather_icon_as_child(p: &mut ChildSpawnerCommands) {
         BorderColor::all(theme::FRAME_EDGE),
     ))
     .with_children(|p| {
+        for slot in 0..MAX_ICONS {
+            p.spawn((
+                WeatherIconSlot(slot),
+                Node {
+                    width: Val::Px(ICON_SIZE_PX),
+                    height: Val::Px(ICON_SIZE_PX),
+                    display: Display::None,
+                    ..default()
+                },
+                ImageNode::new(Handle::default()),
+            ));
+        }
         p.spawn((
-            WeatherIconGlyph,
+            WeatherIconLabel,
             Text::new(""),
             style::text_font(14.0),
             TextColor(theme::TEXT),
@@ -80,35 +109,54 @@ pub fn spawn_weather_icon_as_child(p: &mut ChildSpawnerCommands) {
 
 pub fn update_weather_icon(
     state: Res<SceneState>,
-    mut panel_q: Query<&mut Node, With<WeatherIconPanel>>,
-    mut text_q: Query<&mut Text, With<WeatherIconGlyph>>,
+    mut panel_q: Query<&mut Node, (With<WeatherIconPanel>, Without<WeatherIconSlot>)>,
+    mut slot_q: Query<(&WeatherIconSlot, &mut Node, &mut ImageNode)>,
+    mut text_q: Query<&mut Text, With<WeatherIconLabel>>,
+    mut atlas: ResMut<UiElementAtlas>,
+    dat_root: Res<UiElementDatRoot>,
+    mut images: ResMut<Assets<Image>>,
 ) {
     if !state.dirty {
         return;
     }
     let weather = state.snapshot.weather.unwrap_or(Weather::None);
-    let glyph = weather_glyph(weather);
+    let label = weather_label(weather);
 
-    let Ok(mut node) = panel_q.single_mut() else {
+    let Ok(mut panel) = panel_q.single_mut() else {
         return;
     };
     let Ok(mut text) = text_q.single_mut() else {
         return;
     };
 
-    if glyph.is_empty() {
-        if node.display != Display::None {
-            node.display = Display::None;
+    if label.is_empty() {
+        if panel.display != Display::None {
+            panel.display = Display::None;
         }
         return;
     }
 
-    if node.display != Display::Flex {
-        node.display = Display::Flex;
+    if panel.display != Display::Flex {
+        panel.display = Display::Flex;
     }
-    let want = format!("{glyph} {}", weather_label(weather));
-    if **text != want {
-        **text = want;
+    if **text != label {
+        **text = label.to_string();
+    }
+
+    let sprite = weather_sprite(weather);
+    for (slot, mut node, mut image) in slot_q.iter_mut() {
+        let handle = sprite
+            .filter(|(_, count)| slot.0 < *count)
+            .and_then(|(index, _)| atlas.ensure(USGAIJI_GROUP, index, &dat_root, &mut images));
+        match handle {
+            Some(handle) => {
+                image.image = handle;
+                node.display = Display::Flex;
+            }
+            None => {
+                node.display = Display::None;
+            }
+        }
     }
 }
 
@@ -117,13 +165,41 @@ mod tests {
     use super::*;
 
     #[test]
-    fn none_variant_has_empty_glyph_and_label() {
-        assert_eq!(weather_glyph(Weather::None), "");
+    fn fine_weather_family_has_no_icon() {
+        for w in [
+            Weather::None,
+            Weather::Sunshine,
+            Weather::Clouds,
+            Weather::Fog,
+        ] {
+            assert_eq!(weather_sprite(w), None, "{w:?}");
+        }
         assert_eq!(weather_label(Weather::None), "");
     }
 
     #[test]
-    fn every_non_none_variant_has_a_glyph() {
+    fn elemental_weathers_pair_single_and_double_on_one_index() {
+        // research/xim/src/jsMain/kotlin/xim/poc/ui/Compass.kt:74-89
+        let pairs = [
+            (Weather::HotSpell, Weather::HeatWave, 0),
+            (Weather::Snow, Weather::Blizzards, 1),
+            (Weather::Wind, Weather::Gales, 2),
+            (Weather::DustStorm, Weather::SandStorm, 3),
+            (Weather::Thunder, Weather::Thunderstorms, 4),
+            (Weather::Rain, Weather::Squall, 5),
+            (Weather::Auroras, Weather::StellarGlare, 6),
+            (Weather::Gloom, Weather::Darkness, 7),
+        ];
+        for (single, double, index) in pairs {
+            assert_eq!(weather_sprite(single), Some((index, 1)), "{single:?}");
+            assert_eq!(weather_sprite(double), Some((index, 2)), "{double:?}");
+            assert!(!weather_label(single).is_empty(), "{single:?}");
+            assert!(!weather_label(double).is_empty(), "{double:?}");
+        }
+    }
+
+    #[test]
+    fn icon_counts_fit_the_spawned_slots() {
         let all = [
             Weather::Sunshine,
             Weather::Clouds,
@@ -146,8 +222,10 @@ mod tests {
             Weather::Darkness,
         ];
         for w in all {
-            assert!(!weather_glyph(w).is_empty(), "{w:?} missing glyph");
-            assert!(!weather_label(w).is_empty(), "{w:?} missing label");
+            if let Some((index, count)) = weather_sprite(w) {
+                assert!(index < 8, "{w:?}");
+                assert!((1..=MAX_ICONS).contains(&count), "{w:?}");
+            }
         }
     }
 }

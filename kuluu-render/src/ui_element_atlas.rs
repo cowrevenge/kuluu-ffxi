@@ -12,15 +12,24 @@ use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use ffxi_dat::ui_element::{ui_sprite, UiSprite};
 use ffxi_dat::DatRoot;
 
-// The four "static resource" menu UI DATs XIM loads by path
-// (research/xim/.../UiResourceManager.kt:21-26). The day-of-week orb group
-// "menu    framesus" lives in ROM/119/51.DAT.
-pub const UI_DAT_PATHS: [&str; 4] = [
-    "ROM/0/13.DAT",
-    "ROM/119/51.DAT",
-    "ROM/280/15.DAT",
-    "ROM/324/95.DAT",
-];
+// The four "static resource" menu UI DATs. XIM hardcodes their ROM paths
+// (research/xim/.../UiResourceManager.kt:21-26 — ROM/0/13, ROM/119/51,
+// ROM/280/15, ROM/324/95); these are those paths reverse-mapped through
+// VTABLE/FTABLE to file ids, the version-stable handle, so an install whose
+// patch level shuffles the physical ROM layout still resolves. The
+// day-of-week orbs and weather element icons live in id 39542 (ROM/119/51).
+pub const UI_DAT_FILE_IDS: [u32; 4] = [13, 39542, 39551, 39560];
+
+pub fn read_ui_dats(root: &DatRoot) -> Vec<(u32, Vec<u8>)> {
+    UI_DAT_FILE_IDS
+        .into_iter()
+        .filter_map(|id| {
+            let loc = root.resolve(id).ok()?;
+            let bytes = std::fs::read(loc.path_under(root)).ok()?;
+            Some((id, bytes))
+        })
+        .collect()
+}
 
 const FRAMES_JP: &str = "menu    frames  ";
 const FRAMES_US: &str = "menu    framesus";
@@ -65,11 +74,10 @@ impl UiElementAtlas {
             self.unavailable = true;
             return &self.dats;
         };
-        for rel in UI_DAT_PATHS {
-            if let Ok(bytes) = std::fs::read(root.root().join(rel)) {
-                self.dats.push(Arc::new(bytes));
-            }
-        }
+        self.dats = read_ui_dats(root)
+            .into_iter()
+            .map(|(_, bytes)| Arc::new(bytes))
+            .collect();
         self.loaded = true;
         self.unavailable = self.dats.is_empty();
         &self.dats
@@ -150,5 +158,25 @@ mod tests {
         // Second lookup is served from the cache (same handle).
         let again = atlas.ensure(FRAMES_JP, 106, &dat_root, &mut images);
         assert_eq!(again.as_ref(), Some(&handle));
+    }
+
+    // Gated on a retail install (self-skips). The weather-icon widget resolves
+    // "font    usgaiji " 0-7 (the eight element icons, ROM/119/51.DAT); pin
+    // that every index uploads as a 16x16 sprite.
+    #[test]
+    fn real_dat_usgaiji_weather_icons_upload_16x16() {
+        let Some(dat_root) = test_dat_root() else {
+            return;
+        };
+        let mut images = Assets::<Image>::default();
+        let mut atlas = UiElementAtlas::default();
+
+        for index in 0..8 {
+            let handle = atlas
+                .ensure("font    usgaiji ", index, &dat_root, &mut images)
+                .unwrap_or_else(|| panic!("usgaiji element {index} resolves"));
+            let image = images.get(&handle).expect("uploaded image present");
+            assert_eq!((image.width(), image.height()), (16, 16), "index {index}");
+        }
     }
 }

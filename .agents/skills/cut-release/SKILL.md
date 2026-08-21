@@ -75,8 +75,25 @@ gh run list --limit 5
 gh run watch <run-id>
 ```
 
-The graph is `setup` (resolve tag) → `ci` gate (fmt/clippy/test) → four parallel
-build legs (linux / macos / windows / wasm) → `publish`.
+The graph is `setup` (resolve tag) → `ci` gate (fmt/clippy/test) → six parallel
+build legs (linux / linux-arm / macos / windows / windows-arm / wasm) →
+`publish`. The arm legs build natively on GitHub's hosted `ubuntu-24.04-arm`
+and `windows-11-arm` runners (free for public repos) — no cross toolchain.
+
+**Rehearse workflow changes before burning a release on them.** A new or
+edited build leg can be dry-run without publishing: branch, add `if: false` to
+the `publish` job, `gh workflow run release.yml --ref <branch> -f
+tag=vX.Y.Z-armtest` (the setup validator admits suffixed tags), watch the
+legs, delete the branch. Cheaper than the delete-tag/fix/re-push recovery loop,
+and it caught the windows-arm Cranelift failure before v0.5.1 shipped.
+
+**The windows-arm leg must bypass `rust-toolchain.toml`.** rustup has no
+`rustc-codegen-cranelift-preview` dist for `aarch64-pc-windows-msvc`, and the
+pinned component list wedges *every* cargo call on that host. The leg installs
+the same pinned channel `--profile minimal` and sets `RUSTUP_TOOLCHAIN` (env
+beats the file). Cranelift is dev-only; release builds are LLVM. Any future
+component added to `rust-toolchain.toml` needs the same check against that
+host triple.
 
 **A `cancelled` standalone CI run is benign.** `ci.yml` uses
 `concurrency: group: ci-${{ github.ref }}` with `cancel-in-progress: true`, so
@@ -95,9 +112,10 @@ gh release view vX.Y.Z -R jondwillis/kuluu-ffxi \
 
 1. **`tagName` is `vX.Y.Z`**, not `main` and not the bare version.
 2. **Assets are named for the tag** — `kuluu-vX.Y.Z-aarch64-macos.tar.gz`,
-   `-x86_64-linux.tar.gz`, `-x86_64-windows.zip`, `kuluu-viewer-wasm-vX.Y.Z.zip`,
-   plus `SHA256SUMS`. If the tag was wrong, the asset names carry the wrong tag
-   too, and the in-app updater matches on filename.
+   `-x86_64-linux.tar.gz`, `-aarch64-linux.tar.gz`, `-x86_64-windows.zip`,
+   `-aarch64-windows.zip`, `kuluu-viewer-wasm-vX.Y.Z.zip`, plus `SHA256SUMS`.
+   If the tag was wrong, the asset names carry the wrong tag too, and the
+   in-app updater matches on filename.
 3. **Checksums match.** Download and check — the updater verifies against this
    file, so a mismatch bricks in-app updates:
    ```bash
@@ -113,6 +131,18 @@ gh release view vX.Y.Z -R jondwillis/kuluu-ffxi \
    invalidates the linker's ad-hoc signature, and an unsigned arm64 binary dies
    with `killed: 9`. `release.yml` re-signs with `codesign --force --sign -`
    after stripping; this check is what confirms it survived.
+5. **The aarch64-linux binary launches in colima** (the VM is arm64 Linux).
+   The bind mount must live under `/Users` — macOS `mktemp -d` paths aren't
+   mounted into the VM — and the bare ubuntu image needs the runtime libs:
+   ```bash
+   docker run --rm --platform linux/arm64 -v /Users/.../dir:/k ubuntu:24.04 \
+     bash -c "apt-get update -q >/dev/null && apt-get install -y -q \
+       libwayland-client0 libxkbcommon0 libx11-6 libxcursor1 libxrandr2 \
+       libxi6 libasound2t64 libudev1 libdbus-1-3 libgl1 >/dev/null; \
+       /k/kuluu --help"
+   ```
+   The aarch64-windows zip has no local run-proof while the Parallels VMs are
+   down; note it as checksum-verified-only in the report.
 
 ## When it goes wrong
 

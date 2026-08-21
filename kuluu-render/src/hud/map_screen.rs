@@ -31,9 +31,13 @@ const PANEL_WIDTH_PX: f32 = 190.0;
 const PANEL_TOP_PX: f32 = 48.0;
 const PANEL_RIGHT_PX: f32 = 8.0;
 
+/// Retail anchors the Wide Scan roster on the left screen edge; the other
+/// submodes keep the panel top-right (vanilla reference, kuluu-lf42).
+const PANEL_LEFT_PX: f32 = 8.0;
+
 /// Rows in the reusable panel pool — sized for the wide-scan roster and the
 /// Change Map zone list, which are the longest submode lists.
-const PANEL_ROWS: usize = 24;
+pub const PANEL_ROWS: usize = 24;
 
 const TRACKED_MARKER_PX: f32 = 14.0;
 const TRACKED_MARKER_RING_PX: f32 = 2.0;
@@ -56,11 +60,11 @@ pub(crate) const TRACKED_MARKER_COLOR: Color = Color::srgb(1.0, 0.30, 0.95);
 /// that walks into spawn range reads as a promotion, not a duplicate.
 const WIDESCAN_DOT_PX: f32 = 7.0;
 
-/// Hollow ring over the wide-scan list's selected entry, sized to enclose a
-/// live entity dot; drawn in the list cursor color so the selection reads
-/// across both surfaces.
-const WIDESCAN_CURSOR_RING_PX: f32 = 15.0;
-const WIDESCAN_CURSOR_RING_WIDTH_PX: f32 = 2.0;
+/// Retail marks the wide-scan list's selected entry with a large orange
+/// crosshair centered on the entity (vanilla Wide Scan reference, kuluu-lf42).
+const WIDESCAN_CURSOR_CROSS_SPAN_PX: f32 = 56.0;
+const WIDESCAN_CURSOR_CROSS_THICKNESS_PX: f32 = 2.0;
+const WIDESCAN_CURSOR_COLOR: Color = Color::srgba(1.0, 0.35, 0.10, 0.90);
 
 /// The Map screen's four sub-modes. Retail opens on a floating command submenu
 /// (Markers / Wide Scan / Change Map); selecting a row drills into that mode.
@@ -616,25 +620,56 @@ pub(crate) fn spawn_map_screen(mut commands: Commands, mut images: ResMut<Assets
                     BackgroundColor(TRACKED_MARKER_COLOR),
                     BorderColor::all(Color::WHITE),
                 ));
-                let whalf = WIDESCAN_CURSOR_RING_PX * 0.5;
-                overlay_layer.spawn((
-                    MapWidescanCursorMarker,
-                    Node {
-                        position_type: PositionType::Absolute,
-                        width: Val::Px(WIDESCAN_CURSOR_RING_PX),
-                        height: Val::Px(WIDESCAN_CURSOR_RING_PX),
-                        margin: UiRect {
-                            left: Val::Px(-whalf),
-                            top: Val::Px(-whalf),
+                let whalf = WIDESCAN_CURSOR_CROSS_SPAN_PX * 0.5;
+                let thalf = WIDESCAN_CURSOR_CROSS_THICKNESS_PX * 0.5;
+                overlay_layer
+                    .spawn((
+                        MapWidescanCursorMarker,
+                        Node {
+                            position_type: PositionType::Absolute,
+                            width: Val::Px(WIDESCAN_CURSOR_CROSS_SPAN_PX),
+                            height: Val::Px(WIDESCAN_CURSOR_CROSS_SPAN_PX),
+                            margin: UiRect {
+                                left: Val::Px(-whalf),
+                                top: Val::Px(-whalf),
+                                ..default()
+                            },
+                            display: Display::None,
                             ..default()
                         },
-                        border: UiRect::all(Val::Px(WIDESCAN_CURSOR_RING_WIDTH_PX)),
-                        display: Display::None,
-                        border_radius: BorderRadius::MAX,
-                        ..default()
-                    },
-                    BorderColor::all(theme::CURSOR),
-                ));
+                    ))
+                    .with_children(|cross| {
+                        cross.spawn((
+                            Node {
+                                position_type: PositionType::Absolute,
+                                left: Val::Px(0.0),
+                                top: Val::Percent(50.0),
+                                width: Val::Percent(100.0),
+                                height: Val::Px(WIDESCAN_CURSOR_CROSS_THICKNESS_PX),
+                                margin: UiRect {
+                                    top: Val::Px(-thalf),
+                                    ..default()
+                                },
+                                ..default()
+                            },
+                            BackgroundColor(WIDESCAN_CURSOR_COLOR),
+                        ));
+                        cross.spawn((
+                            Node {
+                                position_type: PositionType::Absolute,
+                                top: Val::Px(0.0),
+                                left: Val::Percent(50.0),
+                                height: Val::Percent(100.0),
+                                width: Val::Px(WIDESCAN_CURSOR_CROSS_THICKNESS_PX),
+                                margin: UiRect {
+                                    left: Val::Px(-thalf),
+                                    ..default()
+                                },
+                                ..default()
+                            },
+                            BackgroundColor(WIDESCAN_CURSOR_COLOR),
+                        ));
+                    });
                 let phalf = PLACE_CURSOR_PX * 0.5;
                 overlay_layer.spawn((
                     MapPlaceCursor,
@@ -1258,6 +1293,17 @@ pub(crate) fn update_map_panel(
         let want = if open { Display::Flex } else { Display::None };
         if node.display != want {
             node.display = want;
+        }
+        let (left, right) = if map_state.mode == MapSubMode::WideScan {
+            (Val::Px(PANEL_LEFT_PX), Val::Auto)
+        } else {
+            (Val::Auto, Val::Px(PANEL_RIGHT_PX))
+        };
+        if node.left != left {
+            node.left = left;
+        }
+        if node.right != right {
+            node.right = right;
         }
     }
     if !open {

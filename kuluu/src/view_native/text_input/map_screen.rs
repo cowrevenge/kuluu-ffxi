@@ -61,6 +61,10 @@ pub(super) fn handle_map_key(
                 map_state.cursor = wrap_cursor(map_state.cursor, rows.len(), dir);
                 return None;
             }
+            if let Some(dir) = page_dir(bindings, key) {
+                map_state.cursor = page_cursor(map_state.cursor, rows.len(), dir);
+                return None;
+            }
             if bindings.matches_logical(Action::NavConfirm, key) {
                 if let Some(row) = rows.get(map_state.cursor) {
                     if let Err(e) = cmd_tx.try_send(AgentCommand::WidescanTrack {
@@ -94,6 +98,10 @@ pub(super) fn handle_map_key(
             let targets = change_map_targets(map_state, &scene_state.snapshot);
             if let Some(dir) = nav_dir(bindings, key) {
                 map_state.cursor = wrap_cursor(map_state.cursor, targets.len(), dir);
+                return None;
+            }
+            if let Some(dir) = page_dir(bindings, key) {
+                map_state.cursor = page_cursor(map_state.cursor, targets.len(), dir);
                 return None;
             }
             if bindings.matches_logical(Action::NavConfirm, key) {
@@ -228,6 +236,31 @@ fn nav_dir(bindings: &Bindings, key: &Key) -> Option<i32> {
     }
 }
 
+/// A single left/right page step, or `None` if the key isn't left/right.
+fn page_dir(bindings: &Bindings, key: &Key) -> Option<i32> {
+    if bindings.matches_logical(Action::NavLeft, key) {
+        Some(-1)
+    } else if bindings.matches_logical(Action::NavRight, key) {
+        Some(1)
+    } else {
+        None
+    }
+}
+
+/// Page a clamped list cursor by one panel-full (retail Wide Scan left/right);
+/// the ends clamp rather than wrap.
+fn page_cursor(cursor: usize, len: usize, dir: i32) -> usize {
+    if len == 0 {
+        return 0;
+    }
+    let page = kuluu_render::hud::map_screen::PANEL_ROWS;
+    if dir < 0 {
+        cursor.saturating_sub(page)
+    } else {
+        (cursor + page).min(len - 1)
+    }
+}
+
 /// Move a wrapping list cursor by `dir` (±1); empty lists park at 0.
 fn wrap_cursor(cursor: usize, len: usize, dir: i32) -> usize {
     if len == 0 {
@@ -281,5 +314,31 @@ fn close_map_screen(
         None
     } else {
         Some(InputMode::World)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{page_cursor, wrap_cursor};
+    use kuluu_render::hud::map_screen::PANEL_ROWS;
+
+    #[test]
+    fn page_cursor_steps_by_a_panel_and_clamps_at_the_ends() {
+        let len = PANEL_ROWS * 2 + 5;
+        assert_eq!(page_cursor(0, len, 1), PANEL_ROWS);
+        assert_eq!(
+            page_cursor(PANEL_ROWS * 2, len, 1),
+            len - 1,
+            "clamps at end"
+        );
+        assert_eq!(page_cursor(PANEL_ROWS + 3, len, -1), 3);
+        assert_eq!(page_cursor(3, len, -1), 0, "clamps at start");
+        assert_eq!(page_cursor(0, 0, 1), 0, "empty list parks at 0");
+    }
+
+    #[test]
+    fn wrap_cursor_wraps_where_page_cursor_clamps() {
+        assert_eq!(wrap_cursor(0, 5, -1), 4);
+        assert_eq!(page_cursor(0, 5, -1), 0);
     }
 }

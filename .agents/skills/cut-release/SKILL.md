@@ -87,6 +87,15 @@ tag=vX.Y.Z-armtest` (the setup validator admits suffixed tags), watch the
 legs, delete the branch. Cheaper than the delete-tag/fix/re-push recovery loop,
 and it caught the windows-arm Cranelift failure before v0.5.1 shipped.
 
+**Both Windows legs set `RUSTFLAGS: -C target-feature=+crt-static`.** Rust's
+MSVC targets link the C runtime dynamically by default, so without it the exe
+imports `VCRUNTIME140.dll` — which Windows does not ship (it comes from the
+VC++ redistributable, arch-specific: the x64 redist does not satisfy an ARM64
+exe). Ubiquitous on x86_64, routinely absent on fresh Windows-on-ARM, where
+v0.5.1 failed at launch (kuluu-ddgn). Verify a Windows release by scanning the
+shipped exe for CRT DLL name strings (vcruntime/msvcp/ucrt) — zero hits is the
+pass; rehearsal-run artifacts let you check this *before* publishing.
+
 **The windows-arm leg must bypass `rust-toolchain.toml`.** rustup has no
 `rustc-codegen-cranelift-preview` dist for `aarch64-pc-windows-msvc`, and the
 pinned component list wedges *every* cargo call on that host. The leg installs

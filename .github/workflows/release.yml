@@ -171,10 +171,18 @@ jobs:
     # Recast C++ bridge; MSVC's cl.exe can't parse it. Cargo's non-forced [env]
     # yields to a var already in the environment (same trick as ci.yml on
     # Linux), so an empty value here wins and the bridge builds against the
-    # runner's MSVC toolchain. No RUSTFLAGS override is needed: the lld link-arg
-    # in .cargo/config.toml is scoped to target.aarch64-apple-darwin only.
+    # runner's MSVC toolchain. RUSTFLAGS is safe to set: the lld link-arg in
+    # .cargo/config.toml is scoped to target.aarch64-apple-darwin only.
+    #
+    # crt-static embeds the MSVC C runtime so the shipped exe has no
+    # VCRUNTIME140.dll import — Rust's MSVC targets link the CRT dynamically
+    # by default, and a machine without the matching-arch VC++ redistributable
+    # (common on fresh Windows-on-ARM; masked on x86_64 by the redist's
+    # ubiquity) fails at launch with the missing-DLL dialog (kuluu-ddgn).
+    # The cc-built Recast bridge follows the target feature (/MT).
     env:
       CXXFLAGS: ""
+      RUSTFLAGS: "-C target-feature=+crt-static"
     steps:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/setup-build
@@ -204,11 +212,15 @@ jobs:
     # runner (free for public repos). Serves Snapdragon laptops and Windows-on-
     # ARM VMs (Parallels on Apple Silicon), which otherwise run the x86_64
     # build under Prism emulation. Same CXXFLAGS blanking as the x86_64 leg so
-    # the Recast C++ bridge builds with the runner's MSVC arm64 toolchain.
+    # the Recast C++ bridge builds with the runner's MSVC arm64 toolchain, and
+    # the same crt-static as the x86_64 leg: fresh Windows-on-ARM machines
+    # rarely have the ARM64 VC++ redistributable, so a dynamically-linked CRT
+    # fails at launch with the missing-VCRUNTIME140.dll dialog (kuluu-ddgn).
     needs: [setup, ci]
     runs-on: windows-11-arm
     env:
       CXXFLAGS: ""
+      RUSTFLAGS: "-C target-feature=+crt-static"
     steps:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/setup-build

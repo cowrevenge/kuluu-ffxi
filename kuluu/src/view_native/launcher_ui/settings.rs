@@ -305,18 +305,13 @@ fn pick_folder_into(field: SettingsField, title: &str, form: &mut SettingsForm) 
         SettingsField::NavmeshDir => form.navmesh_dir.clone(),
         SettingsField::Mac => String::new(),
     };
-    let mut dialog = rfd::FileDialog::new().set_title(format!("Select {title}"));
     let start_dir = if !start.trim().is_empty() {
-        std::path::PathBuf::from(start.trim())
+        Some(std::path::PathBuf::from(start.trim()))
     } else {
-        std::env::var_os("HOME")
-            .map(std::path::PathBuf::from)
-            .unwrap_or_default()
+        super::common::home_dir_fallback()
     };
-    if start_dir.is_dir() {
-        dialog = dialog.set_directory(start_dir);
-    }
-    let Some(path) = dialog.pick_folder() else {
+    let Some(path) = super::common::pick_folder_blocking(format!("Select {title}"), start_dir)
+    else {
         return;
     };
     let chosen = path.display().to_string();

@@ -188,18 +188,15 @@ fn build_ui(commands: &mut Commands, form: &DatSetupForm) {
 
 fn pick_folder(form: &mut DatSetupForm) {
     let start = form.path.trim().to_string();
-    let mut dialog = rfd::FileDialog::new().set_title("Select your FINAL FANTASY XI folder");
     let start_dir = if !start.is_empty() {
-        std::path::PathBuf::from(&start)
+        Some(std::path::PathBuf::from(&start))
     } else {
-        std::env::var_os("HOME")
-            .map(std::path::PathBuf::from)
-            .unwrap_or_default()
+        super::common::home_dir_fallback()
     };
-    if start_dir.is_dir() {
-        dialog = dialog.set_directory(start_dir);
-    }
-    let Some(picked) = dialog.pick_folder() else {
+    let Some(picked) = super::common::pick_folder_blocking(
+        "Select your FINAL FANTASY XI folder".into(),
+        start_dir,
+    ) else {
         return;
     };
     let mut chosen = picked.display().to_string();

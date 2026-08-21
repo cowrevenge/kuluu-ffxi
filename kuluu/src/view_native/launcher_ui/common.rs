@@ -411,3 +411,43 @@ pub(super) fn open_url(url: &str) {
         tracing::warn!(error = %e, url, "could not open external url");
     }
 }
+
+/// Native blocking folder picker shared by the DAT-setup and Settings screens.
+/// On Windows the dialog runs on its own thread: winit owns the main thread's
+/// COM apartment and message pump, and a blocking IFileDialog there took the
+/// whole client down (kuluu-38bj); the join also turns a dialog panic into a
+/// cancelled pick instead of a dead launcher. macOS must stay on the main
+/// thread (NSOpenPanel requirement); Linux goes through the xdg portal.
+pub(super) fn pick_folder_blocking(
+    title: String,
+    start_dir: Option<std::path::PathBuf>,
+) -> Option<std::path::PathBuf> {
+    #[cfg(target_os = "windows")]
+    {
+        std::thread::spawn(move || run_folder_dialog(title, start_dir))
+            .join()
+            .ok()
+            .flatten()
+    }
+    #[cfg(not(target_os = "windows"))]
+    run_folder_dialog(title, start_dir)
+}
+
+fn run_folder_dialog(
+    title: String,
+    start_dir: Option<std::path::PathBuf>,
+) -> Option<std::path::PathBuf> {
+    let mut dialog = rfd::FileDialog::new().set_title(title);
+    if let Some(dir) = start_dir.filter(|d| d.is_dir()) {
+        dialog = dialog.set_directory(dir);
+    }
+    dialog.pick_folder()
+}
+
+/// `HOME` is a Unix convention; a plain PowerShell launch has only
+/// `USERPROFILE`, which left the picker with no start directory on Windows.
+pub(super) fn home_dir_fallback() -> Option<std::path::PathBuf> {
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(std::path::PathBuf::from)
+}

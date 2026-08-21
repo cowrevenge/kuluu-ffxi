@@ -120,7 +120,6 @@ pub fn update_weather_icon(
         return;
     }
     let weather = state.snapshot.weather.unwrap_or(Weather::None);
-    let label = weather_label(weather);
 
     let Ok(mut panel) = panel_q.single_mut() else {
         return;
@@ -129,25 +128,27 @@ pub fn update_weather_icon(
         return;
     };
 
-    if label.is_empty() {
+    // Retail shows no indicator at all for the non-elemental weathers
+    // (fine/sunshine/clouds/fog draw nothing, research/xim Compass.kt:70-73).
+    let Some((index, count)) = weather_sprite(weather) else {
         if panel.display != Display::None {
             panel.display = Display::None;
         }
         return;
-    }
+    };
 
     if panel.display != Display::Flex {
         panel.display = Display::Flex;
     }
+    let label = weather_label(weather);
     if **text != label {
         **text = label.to_string();
     }
 
-    let sprite = weather_sprite(weather);
     for (slot, mut node, mut image) in slot_q.iter_mut() {
-        let handle = sprite
-            .filter(|(_, count)| slot.0 < *count)
-            .and_then(|(index, _)| atlas.ensure(USGAIJI_GROUP, index, &dat_root, &mut images));
+        let handle = (slot.0 < count)
+            .then(|| atlas.ensure(USGAIJI_GROUP, index, &dat_root, &mut images))
+            .flatten();
         match handle {
             Some(handle) => {
                 image.image = handle;
@@ -165,7 +166,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn fine_weather_family_has_no_icon() {
+    fn fine_weather_family_has_no_icon_and_hides_the_panel() {
         for w in [
             Weather::None,
             Weather::Sunshine,
@@ -174,7 +175,6 @@ mod tests {
         ] {
             assert_eq!(weather_sprite(w), None, "{w:?}");
         }
-        assert_eq!(weather_label(Weather::None), "");
     }
 
     #[test]

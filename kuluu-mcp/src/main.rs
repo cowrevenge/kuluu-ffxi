@@ -1,3 +1,4 @@
+#[cfg(unix)]
 mod attach;
 
 use std::sync::Arc;
@@ -1065,19 +1066,30 @@ async fn main() -> Result<()> {
 
     let event_tx_for_producer = event_tx.clone();
     let supervisor_handle = if let Some(arg) = attach_arg {
-        let sock = match attach::resolve_attach(&arg) {
-            Ok(p) => p,
-            Err(err) => {
-                eprintln!("error: FFXI_ATTACH={arg:?}: {err:#}");
-                std::process::exit(2);
-            }
-        };
+        #[cfg(unix)]
+        {
+            let sock = match attach::resolve_attach(&arg) {
+                Ok(p) => p,
+                Err(err) => {
+                    eprintln!("error: FFXI_ATTACH={arg:?}: {err:#}");
+                    std::process::exit(2);
+                }
+            };
 
-        tokio::spawn(async move {
-            if let Err(e) = attach::run(sock, cmd_rx, event_tx_for_producer).await {
-                tracing::error!(error = %e, "attach bridge exited with error");
-            }
-        })
+            tokio::spawn(async move {
+                if let Err(e) = attach::run(sock, cmd_rx, event_tx_for_producer).await {
+                    tracing::error!(error = %e, "attach bridge exited with error");
+                }
+            })
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (arg, cmd_rx, event_tx_for_producer);
+            eprintln!(
+                "error: FFXI_ATTACH is not supported on Windows (requires Unix domain sockets)"
+            );
+            std::process::exit(2);
+        }
     } else {
         let cfg = cfg.expect("non-attach mode constructs cfg above");
         let sup_cfg = SupervisorConfig {

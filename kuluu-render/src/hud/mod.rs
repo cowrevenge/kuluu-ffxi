@@ -60,6 +60,10 @@ pub struct HudPanels {
     pub perf: bool,
     pub target_cycle: bool,
     pub mesh_debug: bool,
+    /// Debug noclip (kuluu-q5sn follow-up): bypass the client-side wall clamp
+    /// in movement. Grounding stays on. Toggled from the Debug menu NoClip row
+    /// or /noclip; both flip this same flag.
+    pub noclip: bool,
 }
 
 #[derive(Component)]

@@ -20,6 +20,9 @@ pub struct MoveEnvParams<'w> {
     // mob-pathing mesh that flattens stairs, so it is NOT used here — only for
     // /pathto and minimap culling (kuluu-oe8y; see AGENTS.md).
     pub collision: Res<'w, kuluu_render::dat_mzb::MzbCollisionGeometry>,
+    /// Debug noclip: when on, the wall clamp in dispatch_movement is bypassed
+    /// (grounding stays on). Toggled from the Debug menu NoClip row or /noclip.
+    pub hud_panels: Res<'w, kuluu_render::hud::HudPanels>,
     pub minimap_hover: Res<'w, kuluu_render::minimap::input::MinimapHoverGate>,
     pub pointer: Res<'w, kuluu_render::MousePointer>,
     pub pad: Res<'w, super::gamepad_input::PadStickIntent>,
@@ -33,6 +36,26 @@ pub struct MoveEnvParams<'w> {
 pub struct PadEdges {
     move_active: bool,
     back_active: bool,
+}
+
+/// Bundled per-tick locals for [`dispatch_movement_system`]. Kept as a
+/// single `Local<DispatchLocals>` because bevy's `SystemParam` derive tops
+/// out at 16 params per system and this fn was already at the ceiling.
+/// Fields are the previous individual `Local`s verbatim; behaviour is
+/// unchanged.
+#[derive(Default)]
+pub struct DispatchLocals {
+    /// Latched world-space run heading for pure W/S: (forward sign, motion
+    /// heading). Sampled from the camera frame when the key state changes,
+    /// then held fixed so the camera's auto-recenter can swing behind
+    /// without dragging the run direction with it.
+    pub steer_latch: Option<(i32, u8)>,
+    /// Rising-edge memory for pad stick just_pressed emulation.
+    pub pad_edges: PadEdges,
+    /// Bounce-settle countdown — nonzero for a few ticks after any
+    /// landed / grace-held tick; see the stair-settle clamp before the
+    /// Move send.
+    pub step_settle: u8,
 }
 
 #[derive(SystemParam)]
@@ -617,13 +640,10 @@ pub fn dispatch_movement_system(
     mut autorun: ResMut<AutoRun>,
     mut chase: ResMut<ChaseCamera>,
     mut turn_accum: ResMut<HeadingTurnAccum>,
-    // Latched world-space run heading for pure W/S: (forward sign, motion heading).
-    // Sampled from the camera frame when the key state changes, then held fixed so
-    // the camera's auto-recenter can swing behind without dragging the run
-    // direction with it (S would otherwise chase a target that stays 180° away —
-    // the sideways-circle bug from the 2026-07-20 10.19 recording).
-    mut steer_latch: Local<Option<(i32, u8)>>,
-    mut pad_edges: Local<PadEdges>,
+    // Bundled per-tick locals (steer_latch + pad_edges + step_settle) so this
+    // fn stays under bevy's 16-param SystemParam ceiling. See `DispatchLocals`
+    // for the field-level docs the individual `Local`s used to carry.
+    mut locals: Local<DispatchLocals>,
     mut prediction: ResMut<LocalPlayerPrediction>,
     env: MoveEnvParams,
     mut stance: StanceParams,
@@ -660,11 +680,11 @@ pub fn dispatch_movement_system(
     // menu is open (menus are the d-pad's domain, not the sticks').
     let pad_move = env.pad.movement;
     let pad_cam = env.pad.camera;
-    let pad_move_started = pad_move != Vec2::ZERO && !pad_edges.move_active;
-    pad_edges.move_active = pad_move != Vec2::ZERO;
+    let pad_move_started = pad_move != Vec2::ZERO && !locals.pad_edges.move_active;
+    locals.pad_edges.move_active = pad_move != Vec2::ZERO;
     let pad_back = pad_move.y < -PAD_BACK_CANCEL_DEFLECTION;
-    let pad_back_started = pad_back && !pad_edges.back_active;
-    pad_edges.back_active = pad_back;
+    let pad_back_started = pad_back && !locals.pad_edges.back_active;
+    locals.pad_edges.back_active = pad_back;
 
     let mut pitch_d = 0.0;
     if !in_picker && bindings.pressed(Action::CameraPitchUp, keys) {
@@ -702,6 +722,14 @@ pub fn dispatch_movement_system(
             zoom_d -= step;
         }
         if bindings.pressed(Action::CameraZoomOut, keys) {
+            zoom_d += step;
+        }
+        // PgUp/PgDn drive the same chase zoom: Action::PageUp/PageDown are bound to those
+        // keys in every preset and were previously unconsumed.
+        if bindings.pressed(Action::PageUp, keys) {
+            zoom_d -= step;
+        }
+        if bindings.pressed(Action::PageDown, keys) {
             zoom_d += step;
         }
         if zoom_d != 0.0 {
@@ -844,7 +872,7 @@ pub fn dispatch_movement_system(
     // A/D carve, Q/E rotate, and camera panning recompute the run direction
     // against the live camera every frame; anything else holds the latch.
     if !steer_in_chase || ps != 0.0 || resolved.rotate_dir != 0 || camera_panning {
-        *steer_latch = None;
+        locals.steer_latch = None;
     }
 
     let self_pos = state.snapshot.self_pos;
@@ -962,11 +990,11 @@ pub fn dispatch_movement_system(
             camera_relative_motion_heading(camera_forward_h, pf, ps)
         } else {
             let pf_sign = if pf > 0.0 { 1 } else { -1 };
-            match *steer_latch {
+            match locals.steer_latch {
                 Some((f, h)) if f == pf_sign => h,
                 _ => {
                     let h = camera_relative_motion_heading(camera_forward_h, pf_sign as f32, 0.0);
-                    *steer_latch = Some((pf_sign, h));
+                    locals.steer_latch = Some((pf_sign, h));
                     h
                 }
             }
@@ -1058,20 +1086,95 @@ pub fn dispatch_movement_system(
     // a bad z — it persists and echoes back whatever c2s 0x015 sends
     // (kuluu-mo4q).
     //
-    // Horizontal movement is unconstrained here: the navmesh no longer gates it
-    // (it's mob-pathing only now). Client-side wall collision from MZB walls is
-    // the follow-up (kuluu-q5sn); walls are server-authoritative until then.
+    // Horizontal movement: wall collision is client-side against the MZB wall
+    // triangles (kuluu-q5sn). This tick's displacement (including forced
+    // turns) is clamped, axis-separated, BEFORE it feeds prediction and c2s
+    // 0x015, so the wire never carries a position inside a wall: the server
+    // persists whatever we send (kuluu-mo4q). The navmesh still gates nothing
+    // here (mob-pathing only). Suppressed interior shells are walked past
+    // inside the query, so a shop doorway does not become a wall
+    // (kuluu-vbpt follow-up).
+    let wall_dx = x - basis_pos.x;
+    let wall_dy = y - basis_pos.y;
+    let clip = if !env.hud_panels.noclip && (wall_dx != 0.0 || wall_dy != 0.0) {
+        env.collision
+            .wall_clip_wire(basis_pos.x, basis_pos.y, basis_pos.z, wall_dx, wall_dy)
+    } else {
+        kuluu_render::dat_mzb::WallClipResult::none(wall_dx, wall_dy)
+    };
+    x = basis_pos.x + clip.dx;
+    y = basis_pos.y + clip.dy;
     let final_x = x;
     let final_y = y;
-    let final_z = env
-        .collision
-        .ground_step(
-            bevy::math::Vec2::new(final_x, -final_y),
-            -basis_pos.z,
-            kuluu_render::dat_mzb::MAX_GROUND_STEP_UP,
-        )
-        .map(|floor_bevy_y| -floor_bevy_y)
-        .unwrap_or(basis_pos.z);
+    // A validated step-up this tick owns the vertical snap: its landing floor is
+    // exactly where we stand. Re-running ground_step from our old height would pick
+    // the surface nearest that OLD height in the new column — for a stair with
+    // ground under it (Bastok Mines 2026-08-23) that is the low slab behind the
+    // riser we just crossed, undoing every step.
+    let mut stepped_this_tick = clip.landed_floor.is_some();
+    let final_z = match clip.landed_floor {
+        Some(floor_bevy_y) => -floor_bevy_y,
+        None => {
+            // Step grace: after a validated step-up we walk at normal speed while
+            // the floor comes up under us; hold its height meanwhile (ground_step
+            // would drop us onto the low slab under a buried stair). Grounding at
+            // or above that floor clears it; the tick count bounds airtime.
+            let pending_now = env.collision.pending_floor.lock().take();
+            stepped_this_tick |= pending_now.is_some();
+            let stepped_z = env
+                .collision
+                .ground_step(
+                    bevy::math::Vec2::new(final_x, -final_y),
+                    -basis_pos.z,
+                    kuluu_render::dat_mzb::MAX_GROUND_STEP_UP,
+                )
+                .map(|floor_bevy_y| -floor_bevy_y);
+            match pending_now {
+                Some((f, ticks)) => {
+                    let f_wire = -f;
+                    match stepped_z {
+                        // Grounded at or below the grace floor: still walking over to
+                        // it. Consume one tick — and let the count EXPIRE at zero:
+                        // writing (f, 0) back is a fixed point that would hold the
+                        // phantom height forever if the floor never arrives.
+                        Some(sz) if sz >= f_wire - 1e-3 => {
+                            let next = ticks.saturating_sub(1);
+                            *env.collision.pending_floor.lock() = (next > 0).then_some((f, next));
+                            f_wire
+                        }
+                        // Grounded higher (on it or on the next level up): let go.
+                        _ => stepped_z.unwrap_or(f_wire),
+                    }
+                }
+                None => stepped_z.unwrap_or(basis_pos.z),
+            }
+        }
+    };
+
+    // Stair-settle clamp (bounce fix): the tick after a step-up lands,
+    // ground_step re-samples the tread and can come back a hair below the
+    // face_top the landing used — the body pops up then dips, reading as a
+    // bounce on every riser. While settling (a few ticks after any landed /
+    // grace tick), swallow only TINY wire-z drops; real descents — ramps
+    // steeper than the threshold-per-tick, walk-offs, the grace-expiry slab
+    // drop — exceed it and pass through untouched.
+    const STEP_SETTLE_TICKS: u8 = 6;
+    const STEP_SETTLE_MAX_DROP: f32 = 0.08;
+    if stepped_this_tick {
+        locals.step_settle = STEP_SETTLE_TICKS;
+    }
+    let final_z = if locals.step_settle > 0 {
+        locals.step_settle -= 1;
+        // wire z grows downward: a small positive delta is the dip we swallow
+        let drop = final_z - basis_pos.z;
+        if drop > 0.0 && drop < STEP_SETTLE_MAX_DROP {
+            basis_pos.z
+        } else {
+            final_z
+        }
+    } else {
+        final_z
+    };
 
     let _ = cmd_tx.0.try_send(AgentCommand::Move {
         x: final_x,
@@ -1151,6 +1254,35 @@ pub fn recover_self_ground_system(
         prediction.initialized = true;
     }
     let _ = cmd_tx.0.try_send(cmd);
+}
+
+/// Apply the local walker's predicted position directly to the IsSelf
+/// Transform. Runs in FixedUpdate right after `dispatch_movement_system` so
+/// the rendered player follows the walker deterministically at 60 Hz. Without
+/// this, self.y is only ever updated by the navmesh overlay's incidental
+/// ground snap or a zone change, so climbing stairs visibly stutters even
+/// though the walker itself is computing final_z correctly per tick.
+pub fn apply_self_prediction_system(
+    prediction: Res<LocalPlayerPrediction>,
+    mut q_self: Query<
+        &mut Transform,
+        (With<IsSelf>, Without<OperatorCamera>),
+    >,
+) {
+    if !prediction.initialized {
+        return;
+    }
+    let Ok(mut t) = q_self.single_mut() else {
+        return;
+    };
+    // prediction.pos is in wire (ffxi) space; convert to Bevy for the Transform.
+    let wire = kuluu_snapshot::Vec3 {
+        x: prediction.pos.x,
+        y: prediction.pos.y,
+        z: prediction.pos.z,
+    };
+    // Preserve rotation â self_visual_yaw_system owns it.
+    t.translation = kuluu_render::ffxi_to_bevy(wire);
 }
 
 /// The corrective command [`recover_self_ground_system`] emits. It is

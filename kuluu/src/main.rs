@@ -5,6 +5,8 @@ use kuluu_session::state;
 use kuluu_session::{agent_io, auth_client, lobby_client, session};
 
 #[cfg(feature = "native-window")]
+use kuluu::audio_store;
+#[cfg(feature = "native-window")]
 use kuluu::graphics_store;
 #[cfg(feature = "native-window")]
 use kuluu::keybinds_store;

@@ -304,16 +304,30 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
 
     let mut app = App::new();
 
+    // Load persisted graphics settings up here (rather than after DefaultPlugins)
+    // so the initial window mode can honour `GraphicsSettings::fullscreen`. The
+    // load is disk-only and doesn't touch app state; we hand the loaded value
+    // straight to insert_resource further down. FFXI_FULLSCREEN env var still
+    // wins — Direct-presentation diagnostics and remote-launch scripts rely on
+    // it, and it shouldn't be overridden by whatever the last session saved.
+    let (loaded_graphics, graphics_store_obj) = crate::graphics_store::load_or_default();
+
     // FFXI_FULLSCREEN forces exclusive fullscreen so macOS presents Direct instead of Composited
     // (native ⌃⌘F stays Composited); the Metal HUD's Composited/Direct flag then isolates whether
     // the periodic frame spikes are WindowServer compositor pacing.
-    let window_mode = if std::env::var_os("FFXI_FULLSCREEN").is_some() {
+    let force_exclusive = std::env::var_os("FFXI_FULLSCREEN").is_some();
+    let want_fullscreen = force_exclusive || loaded_graphics.fullscreen;
+    let window_mode = if !want_fullscreen {
+        bevy::window::WindowMode::Windowed
+    } else if loaded_graphics.windowed_fullscreen && !force_exclusive {
+        // Saved preference is borderless windowed-fullscreen. The env-var
+        // override always means exclusive, so it wins over this.
+        bevy::window::WindowMode::BorderlessFullscreen(bevy::window::MonitorSelection::Primary)
+    } else {
         bevy::window::WindowMode::Fullscreen(
             bevy::window::MonitorSelection::Primary,
             bevy::window::VideoModeSelection::Current,
         )
-    } else {
-        bevy::window::WindowMode::Windowed
     };
     // FFXI_WINDOW_SIZE=WxH overrides the initial window size — lets scripted
     // verification exercise responsive layouts without OS-level window control.
@@ -360,12 +374,27 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
     }
     app.add_plugins(plugin_group);
 
-    if mute {
-        app.insert_resource(kuluu_render::audio::AudioMuteState {
+    // Persisted audio settings: /debug Sound off (or /sound off) writes to
+    // audio.json alongside graphics.json; restarts read it back here. CLI
+    // `--mute` still wins — if the flag was passed, force both muted
+    // regardless of what was on disk (a user asking for silence on launch
+    // shouldn't get music because their last session left it on).
+    let (loaded_audio_raw, audio_store_obj) = crate::audio_store::load_or_default();
+    let loaded_audio = if mute {
+        kuluu_render::audio::AudioMuteState {
             bgm: true,
             sfx: true,
-        });
-    }
+            // Keep whatever master volume was persisted; --mute only forces the
+            // category mutes, it isn't a volume reset.
+            ..loaded_audio_raw
+        }
+    } else {
+        loaded_audio_raw
+    };
+    app.insert_resource(loaded_audio);
+    app.insert_resource(crate::audio_store::AudioStateRes {
+        store: audio_store_obj,
+    });
 
     // Bevy 0.19's GPU-driven mesh preprocessing is a large regression on Apple integrated GPUs
     // (measured 2026-07: 12.8fps GPU path vs 34.3fps CPU path in the same scene; the GPU-path
@@ -592,7 +621,7 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
     app.insert_resource(loaded_bindings);
     app.insert_resource(crate::keybinds_store::KeybindsStateRes { store, persisted });
 
-    let (loaded_graphics, graphics_store_obj) = crate::graphics_store::load_or_default();
+    // (graphics settings were loaded above so the initial window mode could honour `fullscreen`.)
     app.insert_resource(loaded_graphics);
     app.insert_resource(crate::graphics_store::GraphicsStateRes {
         store: graphics_store_obj,
@@ -695,6 +724,7 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
         (
             input::dispatch_movement_system,
             input::recover_self_ground_system,
+            input::apply_self_prediction_system,
         )
             .chain()
             .run_if(in_state(AppPhase::InGame))
@@ -706,6 +736,7 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
     );
 
     app.add_systems(Update, crate::graphics_store::persist_graphics_on_change);
+    app.add_systems(Update, crate::audio_store::persist_audio_on_change);
     app.add_systems(Update, crate::marker_store::sync_markers);
 
     app.add_systems(

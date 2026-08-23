@@ -192,6 +192,8 @@ pub enum GraphicsField {
     VSync,
     FrameRateCap,
     Fov,
+    Fullscreen,
+    Windowed,
 
     DynamicLights,
     LightThreshold,
@@ -229,6 +231,8 @@ impl GraphicsField {
             GraphicsField::VSync => "VSync",
             GraphicsField::FrameRateCap => "Frame Rate Cap",
             GraphicsField::Fov => "FOV",
+            GraphicsField::Fullscreen => "Fullscreen",
+            GraphicsField::Windowed => "Windowed",
             GraphicsField::DynamicLights => "Dynamic Lights",
             GraphicsField::LightThreshold => "  Emitter Threshold",
             GraphicsField::LightIntensity => "  Emitter Intensity",
@@ -326,6 +330,17 @@ pub struct GraphicsSettings {
 
     #[serde(default = "default_render_scale")]
     pub render_scale: f32,
+
+    /// Whether the window is fullscreen at all. Display preference like VSync,
+    /// doesn't touch the quality preset. `FFXI_FULLSCREEN` env var still wins at
+    /// startup. When on, `windowed_fullscreen` picks exclusive vs borderless.
+    #[serde(default)]
+    pub fullscreen: bool,
+
+    /// When `fullscreen` is on, choose borderless windowed-fullscreen (true)
+    /// instead of exclusive/true fullscreen (false). Ignored while windowed.
+    #[serde(default)]
+    pub windowed_fullscreen: bool,
 }
 
 pub const DEFAULT_LIGHT_THRESHOLD: f32 = 1.15;
@@ -507,6 +522,8 @@ impl GraphicsSettings {
                 dof_aperture_f_stops: DEFAULT_DOF_APERTURE,
                 zone_line_display: ZoneLineDisplay::Off,
                 render_scale: DEFAULT_RENDER_SCALE,
+                fullscreen: false,
+                windowed_fullscreen: false,
             },
             QualityPreset::Medium => Self {
                 preset,
@@ -536,6 +553,8 @@ impl GraphicsSettings {
                 dof_aperture_f_stops: DEFAULT_DOF_APERTURE,
                 zone_line_display: ZoneLineDisplay::Off,
                 render_scale: DEFAULT_RENDER_SCALE,
+                fullscreen: false,
+                windowed_fullscreen: false,
             },
             QualityPreset::High => Self {
                 preset,
@@ -565,6 +584,8 @@ impl GraphicsSettings {
                 dof_aperture_f_stops: DEFAULT_DOF_APERTURE,
                 zone_line_display: ZoneLineDisplay::Off,
                 render_scale: DEFAULT_RENDER_SCALE,
+                fullscreen: false,
+                windowed_fullscreen: false,
             },
             QualityPreset::Ultra => Self {
                 preset,
@@ -598,6 +619,8 @@ impl GraphicsSettings {
                 dof_aperture_f_stops: DEFAULT_DOF_APERTURE,
                 zone_line_display: ZoneLineDisplay::Off,
                 render_scale: DEFAULT_RENDER_SCALE,
+                fullscreen: false,
+                windowed_fullscreen: false,
             },
 
             QualityPreset::Custom => Self {
@@ -634,6 +657,8 @@ impl GraphicsSettings {
             GraphicsField::FogStepCount => format!("{}", self.fog_step_count),
             GraphicsField::ViewDistance => format!("{:.0}m", self.view_distance),
             GraphicsField::VSync => bool_label(self.vsync).into(),
+            GraphicsField::Fullscreen => bool_label(self.fullscreen).into(),
+            GraphicsField::Windowed => bool_label(self.windowed_fullscreen).into(),
             GraphicsField::FrameRateCap => match self.fps_cap {
                 0 => "Off".into(),
                 n => format!("{n} fps"),
@@ -744,6 +769,18 @@ impl GraphicsSettings {
             }
             GraphicsField::VSync => {
                 self.vsync = !self.vsync;
+            }
+            GraphicsField::Fullscreen => {
+                // A quality preset shouldn't be reset just because the user
+                // toggled fullscreen — this is a display preference, not a
+                // preset-influencing knob. Same treatment as VSync.
+                self.fullscreen = !self.fullscreen;
+            }
+            GraphicsField::Windowed => {
+                // Chooses borderless (windowed) fullscreen vs exclusive. Only
+                // has a visible effect while Fullscreen is on; when windowed
+                // the flag is stored but the window stays a normal window.
+                self.windowed_fullscreen = !self.windowed_fullscreen;
             }
             GraphicsField::FrameRateCap => {
                 self.fps_cap = cycle_slot_u32(self.fps_cap, FPS_CAP_SLOTS, delta);
@@ -935,6 +972,8 @@ pub const GRAPHICS_FIELDS: &[GraphicsField] = &[
     GraphicsField::VSync,
     GraphicsField::FrameRateCap,
     GraphicsField::Fov,
+    GraphicsField::Fullscreen,
+    GraphicsField::Windowed,
     GraphicsField::DynamicLights,
     GraphicsField::LightThreshold,
     GraphicsField::LightIntensity,
@@ -1151,6 +1190,48 @@ pub fn apply_vsync_system(
         };
         if window.present_mode != target {
             window.present_mode = target;
+        }
+    }
+}
+
+/// Reflects `GraphicsSettings::fullscreen` onto the primary window's mode.
+/// The initial window mode is chosen at startup (see `view_native/mod.rs`)
+/// from either `FFXI_FULLSCREEN` or the persisted `fullscreen` field; this
+/// system is what makes an in-game toggle actually change the window without
+/// restart.
+pub fn apply_fullscreen_system(
+    settings: Res<GraphicsSettings>,
+    mut q_window: Query<&mut Window, With<PrimaryWindow>>,
+) {
+    use bevy::window::{MonitorSelection, VideoModeSelection, WindowMode};
+    for mut window in q_window.iter_mut() {
+        // Three states:
+        //   !fullscreen                        -> Windowed (a normal window)
+        //   fullscreen && !windowed_fullscreen -> exclusive/true Fullscreen
+        //   fullscreen &&  windowed_fullscreen -> borderless windowed-fullscreen
+        // The Windowed row toggles the last bit and does nothing visible while
+        // we're in plain Windowed mode.
+        let target = if !settings.fullscreen {
+            WindowMode::Windowed
+        } else if settings.windowed_fullscreen {
+            WindowMode::BorderlessFullscreen(MonitorSelection::Primary)
+        } else {
+            WindowMode::Fullscreen(MonitorSelection::Primary, VideoModeSelection::Current)
+        };
+        // Compare by variant so re-asserting the same mode doesn't trigger a
+        // redundant swap-chain rebuild (the fullscreen variants carry selection
+        // payloads that don't derive PartialEq cleanly).
+        let same = matches!(
+            (&window.mode, &target),
+            (WindowMode::Windowed, WindowMode::Windowed)
+                | (
+                    WindowMode::BorderlessFullscreen(_),
+                    WindowMode::BorderlessFullscreen(_)
+                )
+                | (WindowMode::Fullscreen(_, _), WindowMode::Fullscreen(_, _))
+        );
+        if !same {
+            window.mode = target;
         }
     }
 }

@@ -4,6 +4,8 @@ pub mod launcher_store;
 pub mod secret_store;
 
 #[cfg(feature = "native-window")]
+pub mod audio_store;
+#[cfg(feature = "native-window")]
 pub mod graphics_store;
 #[cfg(feature = "native-window")]
 pub mod keybinds_store;

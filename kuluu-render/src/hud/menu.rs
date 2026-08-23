@@ -258,8 +258,21 @@ pub const DEBUG_PERF: &str = "Perf";
 pub const DEBUG_TARGET_CYCLE: &str = "Target Cycle";
 pub const DEBUG_MESH: &str = "Mesh Debug";
 pub const DEBUG_NET_STATUS: &str = "Net Status";
+pub const DEBUG_NOCLIP: &str = "NoClip";
+pub const DEBUG_SOUND: &str = "Sound";
+pub const DEBUG_VOLUME: &str = "Volume";
+pub const DEBUG_PRINT_POS: &str = "Print Pos";
 
-const DEBUG_ENTRIES: &[&str] = &[DEBUG_PERF, DEBUG_TARGET_CYCLE, DEBUG_MESH, DEBUG_NET_STATUS];
+const DEBUG_ENTRIES: &[&str] = &[
+    DEBUG_PERF,
+    DEBUG_TARGET_CYCLE,
+    DEBUG_MESH,
+    DEBUG_NET_STATUS,
+    DEBUG_NOCLIP,
+    DEBUG_SOUND,
+    DEBUG_VOLUME,
+    DEBUG_PRINT_POS,
+];
 
 const GRAPHICS_ENTRIES: &[&str] = &[
     "Preset",
@@ -275,6 +288,8 @@ const GRAPHICS_ENTRIES: &[&str] = &[
     "VSync",
     "Frame Rate Cap",
     "FOV",
+    "Fullscreen",
+    "Windowed",
     "Dynamic Lights",
     "  Emitter Threshold",
     "  Emitter Intensity",
@@ -1031,6 +1046,7 @@ pub fn update_main_menu(
     settings: Res<GraphicsSettings>,
     panels: Res<crate::hud::HudPanels>,
     net_status: Res<crate::hud::network_status::NetStatusVisible>,
+    audio_mute: Res<crate::audio::AudioMuteState>,
 
     scene: Res<crate::snapshot::SceneState>,
     dynamic: Res<DynamicMenu>,
@@ -1123,6 +1139,7 @@ pub fn update_main_menu(
                 .unwrap_or("<unknown>")
                 .to_string()
         };
+        let sound_on = !(audio_mute.bgm && audio_mute.sfx);
         let body = format_row_body(
             view.kind,
             list_idx,
@@ -1130,6 +1147,8 @@ pub fn update_main_menu(
             &settings,
             &panels,
             net_status.0,
+            sound_on,
+            audio_mute.master_pct(),
             &scene.snapshot,
         );
 
@@ -1256,6 +1275,8 @@ fn format_row_body(
     settings: &GraphicsSettings,
     panels: &crate::hud::HudPanels,
     net_status_on: bool,
+    sound_on: bool,
+    master_pct: i32,
     snapshot: &kuluu_snapshot::SceneSnapshot,
 ) -> String {
     match kind {
@@ -1269,8 +1290,13 @@ fn format_row_body(
             None => label.to_string(),
         },
         MenuKind::Debug => {
-            let on = debug_panel_state(label, panels, net_status_on);
-            format!("{label:<14}[{}]", if on { "on" } else { "off" })
+            // Volume is a 0..=100 number row, not an on/off toggle.
+            if label == DEBUG_VOLUME {
+                format!("{label:<14}[{master_pct:>3}]")
+            } else {
+                let on = debug_panel_state(label, panels, net_status_on, sound_on);
+                format!("{label:<14}[{}]", if on { "on" } else { "off" })
+            }
         }
         MenuKind::Equipment => {
             let item_name = snapshot
@@ -1286,12 +1312,20 @@ fn format_row_body(
     }
 }
 
-pub fn debug_panel_state(label: &str, panels: &crate::hud::HudPanels, net_status_on: bool) -> bool {
+pub fn debug_panel_state(
+    label: &str,
+    panels: &crate::hud::HudPanels,
+    net_status_on: bool,
+    sound_on: bool,
+) -> bool {
     match label {
         DEBUG_PERF => panels.perf,
         DEBUG_TARGET_CYCLE => panels.target_cycle,
         DEBUG_MESH => panels.mesh_debug,
+        DEBUG_NOCLIP => panels.noclip,
         DEBUG_NET_STATUS => net_status_on,
+        DEBUG_SOUND => sound_on,
+        // Print Pos is a button, not a toggle — always shows [off].
         _ => false,
     }
 }
@@ -1840,10 +1874,12 @@ mod tests {
             perf: true,
             target_cycle: false,
             mesh_debug: true,
+            noclip: true,
         };
         assert!(debug_panel_state(DEBUG_PERF, &panels, false));
         assert!(!debug_panel_state(DEBUG_TARGET_CYCLE, &panels, false));
         assert!(debug_panel_state(DEBUG_MESH, &panels, false));
+        assert!(debug_panel_state(DEBUG_NOCLIP, &panels, false));
         assert!(debug_panel_state(DEBUG_NET_STATUS, &panels, true));
         assert!(!debug_panel_state(DEBUG_NET_STATUS, &panels, false));
 

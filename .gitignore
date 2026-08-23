@@ -2,6 +2,17 @@
 **/target/
 **/*.rs.bk
 
+# Working backups made during edits (*.rs.bak, *.rs.bak-<tag>) — local only.
+**/*.rs.bak*
+
+# Throwaway probe/replay harnesses (tmp_* prefix) — local dev tooling.
+/kuluu-render/tests/tmp_*.rs
+
+
+# Root release exe — build artifact, ~120MB (over GitHub's 100MB blob limit).
+# Regenerate: cargo build -p kuluu --release && logs/sync_exe.ps1
+/kuluu.exe
+
 # Node / abandoned scaffolds
 **/node_modules/
 
@@ -31,6 +42,8 @@
 # Logs
 *.log
 log/
+/logs/
+/play_cowland.bat
 
 # jacq build output — regenerate via `jacq build` in ffxi-agent/.
 ffxi-agent/dist/
@@ -91,3 +104,16 @@ artifacts/
 
 # Chrome/Perfetto traces from --features trace runs — runtime artifacts
 /trace-*.json
+
+# CowEngine import (2026-08-22) — the old C++ client engine moved over wholesale
+# from C:\CowEngine. Not yet part of this workspace; keep out until we decide what
+# to absorb into the Rust crates. data/roms inside is ~11GB SE-copyrighted retail
+# DATs (same rationale as vendor/game-files/ above).
+/cow_ashita_module_examples/
+/docs/
+/extracted_dats/
+/cow_tools/
+/Archived_cowengine/
+
+*.bak-speedup
+speedup.ps1

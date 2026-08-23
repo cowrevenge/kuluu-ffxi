@@ -942,6 +942,12 @@ const COMMANDS: &[(&str, &[Command])] = &[
                 handler: |c| parse_netstat(c.rest),
             },
             Command {
+                aliases: &["noclip"],
+                usage: "[on|off|toggle]",
+                summary: "debug: bypass client-side wall collision (grounding stays on); same state as the Debug menu NoClip row",
+                handler: |c| parse_noclip(c.rest),
+            },
+            Command {
                 aliases: &["renderscale", "rscale"],
                 usage: "[25-200 | 0.25-2.0]",
                 summary: "3D render scale: <100% renders the world at lower res and upscales (perf); >100% supersamples. HUD stays native. Bare `/renderscale` reports it.",
@@ -1069,6 +1075,8 @@ pub enum SlashOutcome {
     SetDevHud(Option<bool>),
 
     SetNetStatus(Option<bool>),
+
+    SetNoClip(Option<bool>),
 
     SetVanaClock(Option<bool>),
 
@@ -2678,6 +2686,21 @@ fn parse_devhud(rest: &str) -> SlashOutcome {
         }
     };
     SlashOutcome::SetDevHud(setting)
+}
+
+fn parse_noclip(rest: &str) -> SlashOutcome {
+    let arg = rest.trim().to_ascii_lowercase();
+    let setting = match arg.as_str() {
+        "" | "toggle" => None,
+        "on" | "true" | "1" => Some(true),
+        "off" | "false" | "0" => Some(false),
+        other => {
+            return SlashOutcome::SystemMessage(format!(
+                "/noclip: bad arg `{other}` (use on|off|toggle)"
+            ));
+        }
+    };
+    SlashOutcome::SetNoClip(setting)
 }
 
 fn parse_netstat(rest: &str) -> SlashOutcome {

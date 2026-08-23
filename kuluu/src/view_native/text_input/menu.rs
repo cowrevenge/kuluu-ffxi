@@ -99,6 +99,7 @@ pub(super) fn confirm_menu_at_cursor(
     status_profile_open: &mut kuluu_render::hud::status_panel::StatusProfileOpen,
     hud_panels: &mut kuluu_render::hud::HudPanels,
     net_status: &mut kuluu_render::hud::network_status::NetStatusVisible,
+    audio_mute: &mut kuluu_render::audio::AudioMuteState,
     vana_clock: &kuluu_render::vana_time::VanaClock,
     vana_clock_visible: &mut kuluu_render::hud::vana_clock::VanaClockVisible,
     dynamic: &kuluu_render::hud::menu::DynamicMenu,
@@ -112,7 +113,20 @@ pub(super) fn confirm_menu_at_cursor(
 
     if matches!(kind, MenuKind::Debug) {
         let label = kuluu_render::hud::menu::entry_label(kind, cursor, dynamic);
-        toggle_debug_panel(label, hud_panels, net_status, scene_state);
+        // Volume is a 0..=100 number row adjusted with Left/Right, not a toggle.
+        // Pressing the confirm key on it should do nothing rather than fall
+        // through to toggle_debug_panel's unknown-entry branch.
+        if label == kuluu_render::hud::menu::DEBUG_VOLUME {
+            return None;
+        }
+        toggle_debug_panel(
+            label,
+            hud_panels,
+            net_status,
+            audio_mute,
+            self_pos,
+            scene_state,
+        );
         return None;
     }
 
@@ -297,9 +311,28 @@ fn toggle_debug_panel(
     label: &str,
     hud_panels: &mut kuluu_render::hud::HudPanels,
     net_status: &mut kuluu_render::hud::network_status::NetStatusVisible,
+    audio_mute: &mut kuluu_render::audio::AudioMuteState,
+    self_pos: kuluu_snapshot::Vec3,
     scene_state: &mut SceneState,
 ) {
-    use kuluu_render::hud::menu::{DEBUG_MESH, DEBUG_NET_STATUS, DEBUG_PERF, DEBUG_TARGET_CYCLE};
+    use kuluu_render::hud::menu::{
+        DEBUG_MESH, DEBUG_NET_STATUS, DEBUG_NOCLIP, DEBUG_PERF, DEBUG_PRINT_POS, DEBUG_SOUND,
+        DEBUG_TARGET_CYCLE,
+    };
+
+    // Print Pos is a button, not a toggle: fire and return before the
+    // on/off banner below. Prints self wire coords to the system chat.
+    if label == DEBUG_PRINT_POS {
+        push_system_chat_line(
+            scene_state,
+            format!(
+                "[debug] pos: x={:.3} y={:.3} z={:.3}",
+                self_pos.x, self_pos.y, self_pos.z,
+            ),
+        );
+        return;
+    }
+
     let on = match label {
         DEBUG_PERF => {
             hud_panels.perf = !hud_panels.perf;
@@ -313,9 +346,21 @@ fn toggle_debug_panel(
             hud_panels.mesh_debug = !hud_panels.mesh_debug;
             hud_panels.mesh_debug
         }
+        DEBUG_NOCLIP => {
+            hud_panels.noclip = !hud_panels.noclip;
+            hud_panels.noclip
+        }
         DEBUG_NET_STATUS => {
             net_status.0 = !net_status.0;
             net_status.0
+        }
+        DEBUG_SOUND => {
+            // Toggle master: if either category is currently unmuted,
+            // sound reads as ON, so a click MUTES both. Otherwise UNMUTE.
+            let was_on = !(audio_mute.bgm && audio_mute.sfx);
+            audio_mute.bgm = was_on;
+            audio_mute.sfx = was_on;
+            !was_on
         }
         other => {
             push_system_chat_line(scene_state, format!("[menu] Debug: unknown `{other}`"));
@@ -340,6 +385,7 @@ pub(super) fn handle_menu_key(
     status_profile_open: &mut kuluu_render::hud::status_panel::StatusProfileOpen,
     hud_panels: &mut kuluu_render::hud::HudPanels,
     net_status: &mut kuluu_render::hud::network_status::NetStatusVisible,
+    audio_mute: &mut kuluu_render::audio::AudioMuteState,
     vana_clock: &kuluu_render::vana_time::VanaClock,
     vana_clock_visible: &mut kuluu_render::hud::vana_clock::VanaClockVisible,
     sort_options: &mut kuluu_render::hud::item_detail::SortOptions,
@@ -504,6 +550,24 @@ pub(super) fn handle_menu_key(
         }
     }
 
+    // Debug menu: the Volume row is a 0..=100 number adjusted with Left/Right.
+    // Every other Debug row is a toggle handled on the confirm key, so only
+    // Volume consumes arrows here; anything else falls through to normal list
+    // navigation.
+    if matches!(kind, MenuKind::Debug) {
+        let label = kuluu_render::hud::menu::entry_label(kind, cursor, dynamic);
+        if label == kuluu_render::hud::menu::DEBUG_VOLUME {
+            if bindings.matches_logical(Action::NavLeft, key) {
+                audio_mute.cycle_master(-1);
+                return None;
+            }
+            if bindings.matches_logical(Action::NavRight, key) {
+                audio_mute.cycle_master(1);
+                return None;
+            }
+        }
+    }
+
     // The Equipment screen is a 2D retail icon grid: arrows move between grid
     // cells (cursor stays an internal slot index), not down a linear list.
     if matches!(kind, MenuKind::Equipment) {
@@ -574,6 +638,7 @@ pub(super) fn handle_menu_key(
             status_profile_open,
             hud_panels,
             net_status,
+            audio_mute,
             vana_clock,
             vana_clock_visible,
             dynamic,
@@ -612,6 +677,7 @@ mod menu_key_tests {
         status_profile_open: kuluu_render::hud::status_panel::StatusProfileOpen,
         hud_panels: kuluu_render::hud::HudPanels,
         net_status: kuluu_render::hud::network_status::NetStatusVisible,
+        audio_mute: kuluu_render::audio::AudioMuteState,
         vana_clock: kuluu_render::vana_time::VanaClock,
         vana_clock_visible: kuluu_render::hud::vana_clock::VanaClockVisible,
         sort_options: kuluu_render::hud::item_detail::SortOptions,
@@ -641,6 +707,7 @@ mod menu_key_tests {
                 status_profile_open: Default::default(),
                 hud_panels: Default::default(),
                 net_status: Default::default(),
+                audio_mute: Default::default(),
                 vana_clock: kuluu_render::vana_time::VanaClock::anchored_at_hour(12.0),
                 vana_clock_visible: Default::default(),
                 sort_options: Default::default(),
@@ -674,6 +741,7 @@ mod menu_key_tests {
                 &mut self.status_profile_open,
                 &mut self.hud_panels,
                 &mut self.net_status,
+                &mut self.audio_mute,
                 &self.vana_clock,
                 &mut self.vana_clock_visible,
                 &mut self.sort_options,

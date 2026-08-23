@@ -151,6 +151,7 @@ pub struct MenuConfirmWriters<'w> {
     pub status_profile_open: ResMut<'w, kuluu_render::hud::status_panel::StatusProfileOpen>,
     pub hud_panels: ResMut<'w, kuluu_render::hud::HudPanels>,
     pub net_status: ResMut<'w, kuluu_render::hud::network_status::NetStatusVisible>,
+    pub audio_mute: ResMut<'w, kuluu_render::audio::AudioMuteState>,
     pub vana_clock: Res<'w, kuluu_render::vana_time::VanaClock>,
     pub vana_clock_visible: ResMut<'w, kuluu_render::hud::vana_clock::VanaClockVisible>,
     pub item_screen_container: ResMut<'w, kuluu_render::hud::item_screen::ItemScreenContainer>,
@@ -158,7 +159,7 @@ pub struct MenuConfirmWriters<'w> {
 use tokio::sync::mpsc::Sender;
 
 use crate::keybinds_store::KeybindsStateRes;
-use crate::state::{ActionKind, AgentCommand, AgentEvent, CheckKind, ReqLogoutKind};
+use crate::state::{ActionKind, AgentCommand, CheckKind, ReqLogoutKind};
 use crate::view_native::input::{CommandTx, SelectTargetMode};
 use crate::view_native::slash_commands::{
     parse_slash, system_chat_line, KeybindUpdate, SlashOutcome, SubAreaOp,
@@ -295,6 +296,7 @@ pub fn text_input_system(
                     &mut slash_writers.status_profile_open,
                     &mut slash_writers.hud_panels,
                     &mut slash_writers.net_status_visible,
+                    &mut slash_writers.audio_mute,
                     &slash_writers.vana_clock,
                     &mut slash_writers.vana_clock_visible,
                     &mut slash_writers.sort_options,
@@ -1478,6 +1480,7 @@ pub fn mouse_nav_dispatch_system(
                 &mut menu_writers.status_profile_open,
                 &mut menu_writers.hud_panels,
                 &mut menu_writers.net_status,
+                &mut menu_writers.audio_mute,
                 &menu_writers.vana_clock,
                 &mut menu_writers.vana_clock_visible,
                 &dynamic_menu,

@@ -466,6 +466,7 @@ impl<S: SceneSource + Resource + Component<Mutability = bevy::ecs::component::Mu
                 graphics_settings::apply_volumetric_fog_system,
                 graphics_settings::apply_projection_system,
                 graphics_settings::apply_vsync_system,
+                graphics_settings::apply_fullscreen_system,
                 graphics_settings::apply_anti_aliasing_system,
                 graphics_settings::apply_tonemapping_system,
             )

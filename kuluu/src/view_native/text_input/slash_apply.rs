@@ -36,7 +36,7 @@ pub(super) fn apply_slash_outcome(
     bindings: &mut Bindings,
     keybinds_state: &mut KeybindsStateRes,
     #[cfg(unix)] agent_paused: Option<&crate::view_native::AgentPaused>,
-    session_event_tx: Option<&crate::view_native::SessionEventTx>,
+    _session_event_tx: Option<&crate::view_native::SessionEventTx>,
     slash_writers: &mut SlashWriters,
     draw_distance: &mut kuluu_render::dat_mzb::DrawDistance,
 ) {
@@ -328,6 +328,18 @@ pub(super) fn apply_slash_outcome(
             push_system_chat_line(
                 scene_state,
                 format!("/netstat: {}", if next { "on" } else { "off" }),
+            );
+        }
+        SlashOutcome::SetNoClip(setting) => {
+            let next = setting.unwrap_or(!slash_writers.hud_panels.noclip);
+            slash_writers.hud_panels.noclip = next;
+            push_system_chat_line(
+                scene_state,
+                format!(
+                    "/noclip: {} (wall collision {})",
+                    if next { "on" } else { "off" },
+                    if next { "bypassed" } else { "active" }
+                ),
             );
         }
         SlashOutcome::SetVanaClock(setting) => {

@@ -290,30 +290,23 @@ pub fn sync_entities_system(
                             cur_z = t.translation.z,
                             "self ingest"
                         );
-                        // Same visual smoothing every other entity gets: a
-                        // snapshot-cadence hiccup delivers several movement
-                        // ticks in one ingest, and a hard snap renders that as
-                        // a single-frame leap of the actor and its nameplate
-                        // (the camera smooths, so it reads as jiggle). The
-                        // 2-yalm snap threshold still passes real teleports
-                        // through instantly.
-                        let y = if zone_changed {
-                            world_pos.y
-                        } else {
-                            t.translation.y
-                        };
-                        let stepped = if zone_changed {
-                            world_pos
-                        } else {
-                            apply_visual_smoothing(
-                                Vec3::new(t.translation.x, world_pos.y, t.translation.z),
-                                world_pos,
-                            )
-                        };
-                        t.translation = Vec3::new(stepped.x, y, stepped.z);
-                        // Rotation is owned by self_visual_yaw_system: the
-                        // movement heading snaps (about-face, first step) but
-                        // the rendered body should whip around, not teleport.
+                        // Self Transform is owned by apply_self_prediction_system
+                        // (FixedUpdate, driven by LocalPlayerPrediction). The
+                        // server just echoes our c2s 0x015, so ingesting the echo
+                        // here would fight the walker and re-introduce the
+                        // horizontal jiggle the smoothing was meant to hide, and
+                        // stall self.y on stairs (held from prev frame).
+                        //
+                        // Zone change is the one case where the wire is
+                        // authoritative: the walker resyncs from snapshot on
+                        // init or big deltas (PREDICTION_RESYNC_YALMS), but
+                        // seeding the Transform here avoids a one-frame flicker
+                        // at the old zone's coords before the next FixedUpdate
+                        // tick lands. Rotation is owned by
+                        // self_visual_yaw_system.
+                        if zone_changed {
+                            t.translation = world_pos;
+                        }
                     } else if matches!(wire.kind, EntityKind::Other) {
                         // Doors/transports and other non-actor entities keep the
                         // simple visual lerp; pathed NPCs are dead-reckoned by

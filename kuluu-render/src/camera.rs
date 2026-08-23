@@ -13,6 +13,17 @@ use crate::graphics_settings::GraphicsSettings;
 use crate::scene::BakedActor;
 use crate::snapshot::SceneState;
 
+/// Kept for the camera systems and the client's collision clamp, which all
+/// subtract `offset` from the anchor Y. Step smoothing now happens at the
+/// source (the rendered self Transform Y is low-pass filtered in
+/// `apply_self_prediction_system`), so this offset stays 0 — the field exists
+/// so every camera-path anchor stays wired through one place if a camera-side
+/// offset is ever needed again.
+#[derive(Resource, Default)]
+pub struct CameraStepSmoothing {
+    pub offset: f32,
+}
+
 const THIRD_PERSON_ANCHOR_FRAC: f32 = 0.55;
 
 const FIRST_PERSON_EYE_FRAC: f32 = 0.92;
@@ -339,6 +350,7 @@ pub fn chase_camera_system(
     mode: Res<CameraMode>,
     mut chase: ResMut<ChaseCamera>,
     state: Res<SceneState>,
+    step: Res<CameraStepSmoothing>,
     q_self: Query<(&Transform, Option<&BakedActor>), (With<IsSelf>, Without<OperatorCamera>)>,
     mut q_cam: Query<&mut Transform, (With<OperatorCamera>, Without<IsSelf>)>,
 ) {
@@ -363,7 +375,7 @@ pub fn chase_camera_system(
     let yaw_dir = Vec3::new(chase.yaw.sin(), 0.0, chase.yaw.cos());
 
     let anchor_y = third_person_anchor_y(baked);
-    let anchor = self_t.translation + Vec3::Y * anchor_y;
+    let anchor = self_t.translation + Vec3::Y * (anchor_y - step.offset);
     let radius = chase.orbit_radius();
     let desired = anchor + yaw_dir * (radius * cos_p) + Vec3::Y * (radius * sin_p);
 
@@ -379,6 +391,7 @@ pub fn chase_camera_system(
 pub fn firstperson_camera_system(
     mode: Res<CameraMode>,
     chase: Res<ChaseCamera>,
+    step: Res<CameraStepSmoothing>,
     q_self: Query<(&Transform, Option<&BakedActor>), (With<IsSelf>, Without<OperatorCamera>)>,
     mut q_cam: Query<&mut Transform, (With<OperatorCamera>, Without<IsSelf>)>,
 ) {
@@ -392,7 +405,7 @@ pub fn firstperson_camera_system(
         return;
     };
 
-    let eye = self_t.translation + Vec3::Y * first_person_eye_y(baked);
+    let eye = self_t.translation + Vec3::Y * (first_person_eye_y(baked) - step.offset);
     let cos_p = chase.pitch.cos();
     let look_dir = Vec3::new(
         -chase.yaw.sin() * cos_p,
@@ -546,6 +559,7 @@ mod tests {
         app.add_plugins(MinimalPlugins)
             .insert_resource(CameraMode::Chase)
             .insert_resource(SceneState::default())
+            .insert_resource(CameraStepSmoothing::default())
             .insert_resource(ChaseCamera {
                 snap_to_anchor: true,
                 ..Default::default()

@@ -238,6 +238,7 @@ impl<S: SceneSource + Resource + Component<Mutability = bevy::ecs::component::Mu
 
         app.add_plugins(debug_chat::DebugChatPlugin);
         app.init_resource::<SceneState>()
+            .init_resource::<camera::CameraStepSmoothing>()
             // Read by sun_moon_system on every platform; only celestial_particles (native)
             // ever sets it true.
             .init_resource::<sun_moon::DatCelestials>()

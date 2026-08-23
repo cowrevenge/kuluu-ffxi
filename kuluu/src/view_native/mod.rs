@@ -1,3 +1,4 @@
+pub mod avian_bridge;
 pub mod bridge;
 pub mod camera_collision;
 pub mod collision_bvh;
@@ -373,6 +374,7 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
             plugin_group.disable::<bevy::render::pipelined_rendering::PipelinedRenderingPlugin>();
     }
     app.add_plugins(plugin_group);
+    app.add_plugins(avian_bridge::AvianBridgePlugin);
 
     // Persisted audio settings: /debug Sound off (or /sound off) writes to
     // audio.json alongside graphics.json; restarts read it back here. CLI

@@ -234,6 +234,30 @@ pub struct MzbCollisionGeometry {
     pub pending_floor: parking_lot::Mutex<Option<(f32, u8)>>,
 }
 
+impl MzbCollisionGeometry {
+    /// Merged triangle soup of every loaded block (suppressed slot skipped),
+    /// already in Bevy space, for mirroring the zone into an external physics
+    /// trimesh (avian3d bridge).
+    pub fn trimesh_data(&self) -> (Vec<Vec3>, Vec<[u32; 3]>) {
+        let mut positions: Vec<Vec3> = Vec::new();
+        let mut tris: Vec<[u32; 3]> = Vec::new();
+        for (slot, block) in self.slots.iter().enumerate() {
+            if self.suppressed == Some(slot as u32) {
+                continue;
+            }
+            if block.indices.is_empty() {
+                continue;
+            }
+            let base = positions.len() as u32;
+            positions.extend_from_slice(&block.positions);
+            for t in block.indices.chunks_exact(3) {
+                tris.push([base + t[0], base + t[1], base + t[2]]);
+            }
+        }
+        (positions, tris)
+    }
+}
+
 /// Max ticks of [`MzbCollisionGeometry::pending_floor`] grace — ~one yalm of
 /// walking at 60 fps, well past any slab edge a validated landing promised within
 /// its (≤ one body-radius + move) reach.

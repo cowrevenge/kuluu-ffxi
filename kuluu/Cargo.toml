@@ -74,6 +74,7 @@ ffxi-vocab = { path = "../ffxi-vocab" }
 kuluu-nav = { path = "../kuluu-nav" }
 ffxi-nav-recast = { path = "../ffxi-nav-recast" }
 ffxi-dat = { path = "../ffxi-dat" }
+avian3d = "0.7"
 
 anyhow.workspace = true
 clap.workspace = true

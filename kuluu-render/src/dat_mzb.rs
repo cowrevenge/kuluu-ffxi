@@ -556,6 +556,65 @@ impl MzbCollisionGeometry {
         best.map(|(_, hit_y)| hit_y)
     }
 
+    /// Footprint-averaged ground height for smooth-slope rendering across
+    /// stair treads (retail-style). Casts 8 rays in a ring of radius `radius`
+    /// around `center_xz`, all searching downward from `ceiling_y`, and
+    /// returns the average of the hit heights. Samples whose height differs
+    /// from the median by more than `outlier_thresh` are discarded (guards
+    /// against sample points falling off the staircase onto adjacent lower or
+    /// higher ground). Returns `None` if fewer than 3 samples survived.
+    ///
+    /// The point: on a big flat area the average equals the center height
+    /// (all 8 rays hit the same floor). On a staircase the sample ring
+    /// straddles two treads, so the average smoothly interpolates between
+    /// them as the character walks across the boundary — a continuous ramp
+    /// instead of a per-tread snap. Direction-agnostic, so sidling up stairs
+    /// works the same as walking straight up them.
+    pub fn footprint_ground_y(
+        &self,
+        center_xz: Vec2,
+        ceiling_y: f32,
+        radius: f32,
+        outlier_thresh: f32,
+    ) -> Option<f32> {
+        // 8 points: 4 cardinals + 4 diagonals. Diagonals scaled by 1/sqrt(2)
+        // so they sit ON the circle of `radius`, not outside it.
+        let d = radius * std::f32::consts::FRAC_1_SQRT_2;
+        let offsets: [Vec2; 8] = [
+            Vec2::new( radius,  0.0),
+            Vec2::new(-radius,  0.0),
+            Vec2::new( 0.0,  radius),
+            Vec2::new( 0.0, -radius),
+            Vec2::new( d,  d),
+            Vec2::new( d, -d),
+            Vec2::new(-d,  d),
+            Vec2::new(-d, -d),
+        ];
+        let mut hits: Vec<f32> = offsets
+            .iter()
+            .filter_map(|o| self.ground_raycast(center_xz + *o, ceiling_y))
+            .collect();
+        if hits.len() < 3 {
+            return None;
+        }
+        // Median (odd-count) or lower of the two middle values (even-count) —
+        // simple and cheap; exact median isn't needed, only a robust central
+        // value for outlier rejection.
+        hits.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let median = hits[hits.len() / 2];
+        // Reject stragglers (off-stair samples).
+        let kept: Vec<f32> = hits
+            .iter()
+            .copied()
+            .filter(|h| (h - median).abs() <= outlier_thresh)
+            .collect();
+        if kept.len() < 3 {
+            return None;
+        }
+        Some(kept.iter().sum::<f32>() / kept.len() as f32)
+    }
+
+
     /// [`Self::ground_step`] with an escape hatch for a walker already beneath
     /// every floor in its column. Walking cannot reach that state — descent is
     /// unbounded, so the floor you are standing on is always within reach — it

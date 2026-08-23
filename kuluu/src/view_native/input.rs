@@ -114,6 +114,149 @@ const PAD_BACK_CANCEL_DEFLECTION: f32 = 0.5;
 
 const PREDICTION_RESYNC_YALMS: f32 = 5.0;
 
+/// Persistent staircase lock. Once the rings + burst detect a staircase,
+/// its plane equation is stored here and character Y rides it every frame
+/// until we walk off (ring average diverges from plane prediction, or we
+/// leave the plane's extent). Zero raycasts per frame while locked (except
+/// the cheap ring scan running in the background for exit detection).
+#[derive(bevy::prelude::Resource, Clone, Copy)]
+pub struct StaircaseLock {
+    pub active: bool,
+    pub origin_xz: bevy::math::Vec2,
+    pub up_dir: bevy::math::Vec2,
+    pub slope: f32,
+    pub base_y: f32,
+    pub tread_depth: f32,
+    pub riser: f32,
+    pub width: f32,
+    pub forward_extent: f32,
+    pub back_extent: f32,
+    // Grid burst hits captured at lock time, kept for viz.
+    pub burst: [(bevy::math::Vec3, bool); 21],
+    // Trigger delay: rings must detect stairs for 2 consecutive frames.
+    pub detect_streak: u8,
+}
+
+impl Default for StaircaseLock {
+    fn default() -> Self {
+        Self {
+            active: false,
+            origin_xz: bevy::math::Vec2::ZERO,
+            up_dir: bevy::math::Vec2::ZERO,
+            slope: 0.0,
+            base_y: 0.0,
+            tread_depth: 0.0,
+            riser: 0.0,
+            width: 0.0,
+            forward_extent: 0.0,
+            back_extent: 0.0,
+            burst: [(bevy::math::Vec3::ZERO, false); 21],
+            detect_streak: 0,
+        }
+    }
+}
+
+/// Debug data captured by `apply_self_prediction_system` for the gizmo drawer
+/// to render in Update. FixedUpdate can't draw gizmos directly.
+#[derive(bevy::prelude::Resource, Clone, Copy)]
+pub struct FootprintDebug {
+    pub enabled: bool,
+    pub center_xz: bevy::math::Vec2,
+    pub center_y: f32,
+    pub radius: f32,
+    pub sampled_points: [(bevy::math::Vec2, f32, bool, i8); 60], // (xz, y, green_kept, stair_band 0=none, +1..=+5 = up steps, -1..=-5 = down steps)
+    pub avg_y: f32,
+    pub slope_active: bool, // avg differs from center by > threshold
+    // The 5 forward probe points along the detected up-stairs direction:
+    // (world xz, ground y). NaN y means the probe didn't hit anything.
+    pub fwd_probes: [(bevy::math::Vec2, f32); 11],
+    // True when the line fit qualified as a staircase (slope in stair range)
+    // and we're actively riding the ramp.
+    pub ramp_locked: bool,
+    // Fitted line at the two endpoints of the forward probe span, so the
+    // drawer can just connect (near) to (far) as one purple segment.
+    pub ramp_near_xz: bevy::math::Vec2,
+    pub ramp_near_y: f32,
+    pub ramp_far_xz: bevy::math::Vec2,
+    pub ramp_far_y: f32,
+    // Locked staircase geometry (persistent across frames while committed).
+    pub lock_active: bool,
+    pub lock_origin_xz: bevy::math::Vec2,   // character xz at lock time
+    pub lock_up_dir: bevy::math::Vec2,       // world-space up-stairs direction
+    pub lock_slope: f32,                     // rise per unit horizontal
+    pub lock_base_y: f32,                    // ground y at lock origin
+    pub lock_tread_depth: f32,               // horizontal distance per stair (~1.0)
+    #[allow(dead_code)]
+    pub lock_riser: f32,                     // vertical rise per stair (~0.4)
+    pub lock_width: f32,                     // half-width of staircase for gizmo
+    #[allow(dead_code)]
+    pub lock_forward_extent: f32,            // how far ahead the plane extends
+    #[allow(dead_code)]
+    pub lock_back_extent: f32,               // how far behind the plane extends
+    // 15-point grid burst hits captured at lock time (5 forward x 3 wide).
+    pub burst_hits: [(bevy::math::Vec3, bool); 21], // 7x3 grid
+    pub lock_check: u8, // 0 none, 1 up-weak, 2 few-pts, 3 fit-fail, 4 lo-r2, 5 lo-slope, 6 LOCKED
+    // Strongest down-bearing fit found this frame (highest |slope|*r2 among
+    // bearings whose fit slope was negative). NaN if no down-bearing had a
+    // usable fit. Used to render two colored diagnostic orbs above the head
+    // so we can see R² and |slope| without a text overlay.
+    pub down_bearing_r2: f32,
+    pub down_bearing_abs_slope: f32,
+    // Forward-side per-side fit result (whichever side up_dir points at).
+    // NaN if the per-side block didn't run (any_qualifies stayed false).
+    pub fwd_fit_r2: f32,
+    pub fwd_fit_abs_slope: f32,
+    // Purple straight-down march: probe hits and detected risers. Fixed
+    // arrays (not Vec) so FootprintDebug stays Copy. NaN y = unused slot.
+    pub purple_probes: [(bevy::math::Vec2, f32); 60],
+    pub purple_probe_count: usize,
+    pub purple_risers: [(bevy::math::Vec2, f32); 5],
+    pub purple_riser_count: usize,
+    #[allow(dead_code)]
+    pub purple_slope: f32, // NaN if the march didn't produce a slope
+}
+
+impl Default for FootprintDebug {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            center_xz: bevy::math::Vec2::ZERO,
+            center_y: 0.0,
+            radius: 0.0,
+            sampled_points: [(bevy::math::Vec2::ZERO, 0.0, false, 0i8); 60],
+            avg_y: 0.0,
+            slope_active: false,
+            fwd_probes: [(bevy::math::Vec2::ZERO, f32::NAN); 11],
+            ramp_locked: false,
+            ramp_near_xz: bevy::math::Vec2::ZERO,
+            ramp_near_y: 0.0,
+            ramp_far_xz: bevy::math::Vec2::ZERO,
+            ramp_far_y: 0.0,
+            lock_active: false,
+            lock_origin_xz: bevy::math::Vec2::ZERO,
+            lock_up_dir: bevy::math::Vec2::ZERO,
+            lock_slope: 0.0,
+            lock_base_y: 0.0,
+            lock_tread_depth: 0.0,
+            lock_riser: 0.0,
+            lock_width: 0.0,
+            lock_forward_extent: 0.0,
+            lock_back_extent: 0.0,
+            burst_hits: [(bevy::math::Vec3::ZERO, false); 21],
+            lock_check: 0,
+            down_bearing_r2: f32::NAN,
+            down_bearing_abs_slope: f32::NAN,
+            fwd_fit_r2: f32::NAN,
+            fwd_fit_abs_slope: f32::NAN,
+            purple_probes: [(bevy::math::Vec2::ZERO, f32::NAN); 60],
+            purple_probe_count: 0,
+            purple_risers: [(bevy::math::Vec2::ZERO, f32::NAN); 5],
+            purple_riser_count: 0,
+            purple_slope: f32::NAN,
+        }
+    }
+}
+
 // Retail body turn into a new camera-relative run direction takes ~0.5-0.7s
 // for 90° (HorizonXI video 2026-07-20, D-press frames). The carve rate of a
 // held A/D is then paced by the lazy camera follow (AUTO_RECENTER_RATE), not
@@ -1264,6 +1407,9 @@ pub fn recover_self_ground_system(
 /// though the walker itself is computing final_z correctly per tick.
 pub fn apply_self_prediction_system(
     prediction: Res<LocalPlayerPrediction>,
+    collision: Res<kuluu_render::dat_mzb::MzbCollisionGeometry>,
+    mut dbg: ResMut<FootprintDebug>,
+    mut lock: ResMut<StaircaseLock>,
     mut q_self: Query<
         &mut Transform,
         (With<IsSelf>, Without<OperatorCamera>),
@@ -1282,7 +1428,801 @@ pub fn apply_self_prediction_system(
         z: prediction.pos.z,
     };
     // Preserve rotation â self_visual_yaw_system owns it.
-    t.translation = kuluu_render::ffxi_to_bevy(wire);
+    let mut target = kuluu_render::ffxi_to_bevy(wire);
+
+    // Slope-smoothed rendered Y across stair treads (Option B, "Better B").
+    // The walker's authoritative Y snaps tread-to-tread — mathematically correct
+    // for collision, but visually a jackhammer. The rendered mesh Y is instead
+    // the average ground height over an 8-point ring around the character's
+    // footprint. On flat ground all samples hit the same floor and it equals
+    // the center height (no change). On stairs the ring straddles two treads
+    // so the average smoothly ramps between them as the character walks across
+    // the boundary — the continuous "red diagonal" retail look. Works in any
+    // direction (radial sampling), critical for sidling up huge stairs.
+    //
+    // radius 0.3 : smaller than the smallest tread depth (0.4), so samples sit
+    //              on one tread on flat/aligned parts; big enough that any
+    //              tread transition immediately puts samples on both sides.
+    // reject 0.4 : one stair rise, so samples on adjacent treads always pass;
+    //              anything further (sample fell off the stair onto other
+    //              terrain) is discarded before averaging.
+    // ceiling +2 : raycast searches DOWN from a bit above the character, so
+    //              the first floor hit is the tread we're on, not one below.
+    // -------------------------------------------------------------------
+    // Three-ring staircase detector (retail red-line slope).
+    //
+    // Three concentric rings of 8 rays each at radii 0.5, 1.0, 1.5 (24 rays).
+    // For each of the 8 compass bearings the 4 heights (center + 3 ring
+    // samples at 0.0/0.5/1.0/1.5 from character) are least-squares fit to a
+    // line — that bearing's local slope + confidence (R^2). A weighted
+    // vector-sum over all 8 bearings yields a CONTINUOUS up-stairs direction
+    // (not snapped to one of 8 bearings), then 5 more forward probes at
+    // 2.0..4.0 along that direction refit the line over 9 points so long
+    // staircases hold a consistent slope. Character Y rides the fit's
+    // intercept — continuous by construction, no tread snap ever.
+    // -------------------------------------------------------------------
+    // 5 concentric rings inside the original 1.5 outer bound — denser
+    // sampling for better slope detection without extending scan range.
+    const R_1: f32 = 0.4;
+    const R_2: f32 = 0.7;
+    const R_3: f32 = 1.0;
+    const R_4: f32 = 1.3;
+    const R_5: f32 = 1.5;
+    // Samples per ring — 12 = 30° angular resolution (was 8 = 45°). Denser
+    // ring sampling makes per-bearing slope fits more stable.
+    const RING_SAMPLES: usize = 12;
+    const FWD_START: f32 = 2.0;
+    const FWD_STEP:  f32 = 0.5;
+    const FWD_COUNT: usize = 5;
+    const STAIR_SLOPE_MIN: f32 = 0.20;
+    const STAIR_SLOPE_MAX: f32 = 0.80;
+    const CONF_MIN: f32 = 0.40;   // R^2 threshold — low because a staircase fit through a step-shaped point cloud is inherently noisy vs a true line
+    const FP_REJECT: f32 = 0.5;   // ring-average outlier threshold
+
+    let center_xz = bevy::math::Vec2::new(target.x, target.z);
+    let center_y_raw = collision.ground_raycast(center_xz, target.y + 2.0).unwrap_or(target.y);
+    let offset_above_tread = target.y - center_y_raw;
+
+    // 12 bearings at 30° spacing (was 8 at 45°). Finer angular resolution
+    // for detecting stair direction; generated procedurally.
+    let mut bearings: [bevy::math::Vec2; RING_SAMPLES] = [bevy::math::Vec2::ZERO; RING_SAMPLES];
+    for i in 0..RING_SAMPLES {
+        let angle = (i as f32) * std::f32::consts::TAU / (RING_SAMPLES as f32);
+        bearings[i] = bevy::math::Vec2::new(angle.cos(), angle.sin());
+    }
+
+    // Sample all three rings. Store as [ring][bearing] = (world xz, y).
+    let radii = [R_1, R_2, R_3, R_4, R_5];
+    let mut ring: [[(bevy::math::Vec2, f32); RING_SAMPLES]; 5] =
+        [[(bevy::math::Vec2::ZERO, f32::NAN); RING_SAMPLES]; 5];
+    for (ri, r) in radii.iter().enumerate() {
+        for (bi, b) in bearings.iter().enumerate() {
+            let world_xz = center_xz + *b * *r;
+            let y = collision.ground_raycast(world_xz, target.y + 2.0).unwrap_or(f32::NAN);
+            ring[ri][bi] = (world_xz, y);
+        }
+    }
+
+    // Debug: pack the middle ring's samples into the existing 8-slot debug array.
+    let mut sample_data: [(bevy::math::Vec2, f32, bool, i8); 60] = [(bevy::math::Vec2::ZERO, 0.0, false, 0i8); 60];
+    for ri in 0..5 {
+        for bi in 0..RING_SAMPLES {
+            sample_data[ri * RING_SAMPLES + bi] = (ring[ri][bi].0, ring[ri][bi].1, false, 0i8);
+        }
+    }
+
+    // Classify every ring sample as: valid same-tread (green, sd.2 = true),
+    // valid stair band (sd.3 != 0, up or down), or invalid (red outlier / gray
+    // lip, sd.2 = false && sd.3 == 0). Downstream calcs must skip the invalid
+    // ones: they don't represent the player's tread nor a real stair riser,
+    // so feeding them into slope fits, descent direction weights, or descent
+    // detection pollutes the result.
+    //
+    // Same-tread first: |y - center_y_raw| <= 0.1 → green. Then per-bearing
+    // radial chaining for bands: walk each bearing from the player OUTWARD
+    // and assign band N only if the samples inward on the same bearing form a
+    // valid climbing/descending chain (same-tread → band 1 → band 2 …). An
+    // isolated patch at band height with a gap/wall between it and the player
+    // gets no band and stays red.
+    let band_ranges = [(0.1f32, 0.5f32), (0.5, 0.92), (0.92, 1.34), (1.34, 1.76), (1.76, 2.18)];
+    let band_of = |d: f32| -> i8 {
+        for (k, (lo, hi)) in band_ranges.iter().enumerate() {
+            if d >= *lo && d <= *hi { return (k + 1) as i8; }
+            if -d >= *lo && -d <= *hi { return -((k + 1) as i8); }
+        }
+        0
+    };
+    // Same-tread pass.
+    for ri in 0..5 {
+        for bi in 0..RING_SAMPLES {
+            let slot = ri * RING_SAMPLES + bi;
+            let sd = &mut sample_data[slot];
+            if sd.1.is_nan() { continue; }
+            if (sd.1 - center_y_raw).abs() <= 0.1 {
+                sd.2 = true;
+            }
+        }
+    }
+    // Per-bearing radial chaining pass.
+    for bi in 0..RING_SAMPLES {
+        let mut prev_level: i8 = 0; // 0 = player's tread level
+        for ri in 0..5 {
+            let slot = ri * RING_SAMPLES + bi;
+            let sd = &mut sample_data[slot];
+            if sd.1.is_nan() { prev_level = 0; continue; }
+            if sd.2 {
+                // Same-tread: re-anchors the chain at the player's tread.
+                prev_level = 0;
+                continue;
+            }
+            let d = sd.1 - center_y_raw;
+            let this_band = band_of(d);
+            if this_band == 0 {
+                // In the "lip" dead zone (small |d| but not same-tread) or
+                // above all band ranges. No band; break the chain so nothing
+                // further out rides on it.
+                prev_level = 0;
+                continue;
+            }
+            let continues = if this_band > 0 {
+                prev_level >= 0 && this_band <= prev_level + 1
+            } else {
+                prev_level <= 0 && this_band >= prev_level - 1
+            };
+            if continues {
+                sd.3 = this_band;
+                prev_level = this_band;
+            } else {
+                prev_level = 0;
+            }
+        }
+    }
+
+    // Per-bearing least-squares fit y = slope*x + intercept over the 4 points
+    // (0, r_inner, r_mid, r_outer). Compute slope and R^2.
+    fn fit4(xs: &[f32], ys: &[f32]) -> Option<(f32, f32, f32)> {
+        let valid: Vec<(f32, f32)> = xs.iter().zip(ys.iter())
+            .filter(|(_, y)| !y.is_nan()).map(|(x, y)| (*x, *y)).collect();
+        if valid.len() < 3 { return None; }
+        let n = valid.len() as f32;
+        let sx: f32 = valid.iter().map(|p| p.0).sum();
+        let sy: f32 = valid.iter().map(|p| p.1).sum();
+        let sxx: f32 = valid.iter().map(|p| p.0 * p.0).sum();
+        let sxy: f32 = valid.iter().map(|p| p.0 * p.1).sum();
+        let denom = n * sxx - sx * sx;
+        if denom.abs() < 1e-6 { return None; }
+        let slope = (n * sxy - sx * sy) / denom;
+        let intercept = (sy - slope * sx) / n;
+        // R^2 against horizontal mean.
+        let mean_y = sy / n;
+        let ss_tot: f32 = valid.iter().map(|p| (p.1 - mean_y).powi(2)).sum();
+        let ss_res: f32 = valid.iter().map(|p| (p.1 - (slope * p.0 + intercept)).powi(2)).sum();
+        let r2 = if ss_tot > 1e-6 { 1.0 - ss_res / ss_tot } else { 1.0 };
+        Some((slope, intercept, r2))
+    }
+
+    // ==== VALIDATED DATASET ====
+    // After classification, this is the ONLY dataset downstream calcs should
+    // touch. If a sample is red (band == 0 && !same_tread) or gray (small
+    // |dy| but not same-tread), it never lands here. Consumers below MUST NOT
+    // reach back into the raw `ring` array.
+    // Layout per sample: (ring_index, bearing_index, world_xz, y, band).
+    //   band > 0  = up-stair band
+    //   band < 0  = down-stair band
+    //   band == 0 = same-tread (green); still valid, feeds slope fits.
+    // Fixed-size backing array to avoid a Vec allocation each frame.
+    let mut valid_samples: [(usize, usize, bevy::math::Vec2, f32, i8); 60] =
+        [(0, 0, bevy::math::Vec2::ZERO, f32::NAN, 0); 60];
+    let mut valid_count: usize = 0;
+    for ri in 0..5 {
+        for bi in 0..RING_SAMPLES {
+            let slot = ri * RING_SAMPLES + bi;
+            let sd = &sample_data[slot];
+            if sd.1.is_nan() { continue; }
+            let is_valid = sd.2 || sd.3 != 0;
+            if !is_valid { continue; }
+            valid_samples[valid_count] = (ri, bi, sd.0, sd.1, sd.3);
+            valid_count += 1;
+        }
+    }
+    // Bearing-indexed view: valid_by_bearing[bi] holds up to 5 (ri, y) pairs
+    // for that bearing, in ring order. NaN = ring slot invalid on this
+    // bearing. Used by the per-bearing slope fits below.
+    let mut valid_by_bearing: [[f32; 5]; RING_SAMPLES] = [[f32::NAN; 5]; RING_SAMPLES];
+    for k in 0..valid_count {
+        let (ri, bi, _xz, y, _b) = valid_samples[k];
+        valid_by_bearing[bi][ri] = y;
+    }
+
+    // For each bearing, fit the 6-point profile [center, r1, r2, r3, r4, r5].
+    let xs = [0.0f32, R_1, R_2, R_3, R_4, R_5];
+    let mut bearing_slopes: [Option<(f32, f32)>; RING_SAMPLES] = [None; RING_SAMPLES];
+    for bi in 0..RING_SAMPLES {
+        let ys = [
+            center_y_raw,
+            valid_by_bearing[bi][0],
+            valid_by_bearing[bi][1],
+            valid_by_bearing[bi][2],
+            valid_by_bearing[bi][3],
+            valid_by_bearing[bi][4],
+        ];
+        // Require at least 4 non-NaN samples so a mostly-red bearing (which
+        // has only 1-2 valid samples) can't fit a near-perfect line by
+        // accident and pull the vector-sum sideways.
+        let non_nan = ys.iter().filter(|y| !y.is_nan()).count();
+        if non_nan < 4 { continue; }
+        if let Some((slope, _int, r2)) = fit4(&xs, &ys) {
+            bearing_slopes[bi] = Some((slope, r2));
+        }
+    }
+
+    // Weighted vector-sum of bearings using |slope| * r2 as weight. The
+    // accumulator should point TOWARD whichever direction has stair-shaped
+    // geometry, whether the stairs go up (positive slope along that bearing)
+    // or down (negative slope). Using signed slope makes acc point away from
+    // a pure-down staircase and into the flat side, which then fails the fit.
+    // Using |slope| collapses both cases correctly: acc points at the
+    // detected staircase axis, and the refit determines up vs down from the
+    // sign of the final slope.
+    let mut acc = bevy::math::Vec2::ZERO;
+    let mut best_conf: f32 = 0.0;
+    let mut best_slope: f32 = 0.0;
+    let mut any_qualifies = false;
+    // Track the strongest DOWN-bearing (negative-slope) for diagnostic display.
+    // "Strongest" = highest |slope| * r2 product, regardless of whether it
+    // passed the qualification checks. Lets us see, on a frame with cyan
+    // bands but no lock, exactly what R² and |slope| the fits produced.
+    let mut down_best_score: f32 = 0.0;
+    let mut down_best_r2: f32 = f32::NAN;
+    let mut down_best_abs_slope: f32 = f32::NAN;
+    for bi in 0..RING_SAMPLES {
+        if let Some((slope, r2)) = bearing_slopes[bi] {
+            if slope < 0.0 {
+                let score = slope.abs() * r2.max(0.0);
+                if score > down_best_score {
+                    down_best_score = score;
+                    down_best_r2 = r2;
+                    down_best_abs_slope = slope.abs();
+                }
+            }
+            if r2 >= CONF_MIN
+                && slope.abs() >= STAIR_SLOPE_MIN
+                && slope.abs() <= STAIR_SLOPE_MAX
+            {
+                any_qualifies = true;
+                acc += bearings[bi] * slope.abs() * r2;
+                let conf = r2 * slope.abs();
+                if conf > best_conf {
+                    best_conf = conf;
+                    best_slope = slope;
+                }
+            }
+        }
+    }
+
+    let mut ramp_y: Option<f32> = None;
+    let mut ramp_locked = false;
+    let mut fwd_probes_dbg: [(bevy::math::Vec2, f32); 11] =
+        [(bevy::math::Vec2::ZERO, f32::NAN); 11];
+    let mut ramp_near = (center_xz, center_y_raw);
+    let mut ramp_far = (center_xz, center_y_raw);
+    let mut up_dir = bevy::math::Vec2::ZERO;
+    // Set by the purple straight-down march when it measures an exact slope;
+    // overrides the pink-fit slope for the lock stage.
+    let mut up_dir_slope_override: Option<f32> = None;
+    // Direction the purple march measured its slope along (the descent
+    // direction), so the lock uses THIS rather than up_dir which may point at
+    // an ascending flight.
+    let mut purple_march_dir: bevy::math::Vec2 = bevy::math::Vec2::ZERO;
+    // Per-side fit diagnostics — captured to render as orbs so we can see
+    // whether the fit stage actually qualifies for down-stairs.
+    let mut dbg_fwd_fit_r2: f32 = f32::NAN;
+    let mut dbg_fwd_fit_abs_slope: f32 = f32::NAN;
+
+    if any_qualifies && acc.length_squared() > 1e-6 {
+        // Continuous up-stairs direction (not snapped to 8 bearings).
+        up_dir = acc.normalize();
+        // Fit forward and backward sides INDEPENDENTLY. A single line across
+        // both sides can't describe a landing (stairs on one side, flat on
+        // the other) because it isn't a line. Fitting each side separately
+        // lets a landing lock on the stair side alone, and lets a continuous
+        // staircase lock both sides with matching slopes.
+        //
+        // ONLY include samples that differ in height from the character by
+        // more than half a riser (|y - center_y_raw| >= 0.15). Samples at the
+        // character's own tread height contribute (x, 0) points that anchor
+        // the regression at zero slope, pulling the fit shallow. On a landing
+        // where the character is at the top of a staircase, half the "forward"
+        // ring is still on the top tread — including those flat samples in
+        // the fit drops the computed slope below STAIR_SLOPE_MIN even though
+        // the descending samples are correctly stepped. Filter them out.
+        // Center (0, center_y) still anchors the intercept, but as x=0 it
+        // doesn't skew the slope.
+        let same_tread = |y: f32| (y - center_y_raw).abs() < 0.15;
+        let mut fwd_pts: Vec<(f32, f32)> = vec![(0.0, center_y_raw)];
+        let mut back_pts: Vec<(f32, f32)> = vec![(0.0, center_y_raw)];
+        // Read from the validated dataset only. Red samples never made it in.
+        // Skip same-tread (band == 0 but green) samples too — they anchor at
+        // 0-slope and pull the fit shallow on landings; only actual banded
+        // stair samples feed the slope.
+        for k in 0..valid_count {
+            let (_ri, _bi, xz, y, band) = valid_samples[k];
+            if band == 0 { continue; }        // same-tread, skip for slope
+            if same_tread(y) { continue; }    // belt-and-suspenders check
+            let dx = xz - center_xz;
+            let proj = dx.dot(up_dir);
+            if proj > 0.0 {
+                fwd_pts.push((proj, y));
+            } else if proj < 0.0 {
+                // Store backward samples with positive x (distance from
+                // center) so each side's fit uses the same coordinate
+                // convention: x = distance out from character, y = ground.
+                back_pts.push((-proj, y));
+            }
+        }
+        // Bidirectional forward-probe: 11 points at [-5..=5] along up_dir.
+        // Forward probes go into fwd_pts; backward probes go into back_pts
+        // (with sign flipped on their distance). Same-tread filter applies:
+        // a probe that lands on the character's landing doesn't reveal
+        // staircase shape.
+        for i in 0..11usize {
+            let dist = -5.0 + i as f32;
+            if dist.abs() < 0.5 { continue; }
+            let probe_xz = center_xz + up_dir * dist;
+            let y = collision.ground_raycast(probe_xz, center_y_raw + 2.0);
+            fwd_probes_dbg[i] = (probe_xz, y.unwrap_or(f32::NAN));
+            if let Some(y) = y {
+                if same_tread(y) { continue; }
+                if dist > 0.0 {
+                    fwd_pts.push((dist, y));
+                } else {
+                    back_pts.push((-dist, y));
+                }
+            }
+        }
+        // Fit each side.
+        let fwd_fit = if fwd_pts.len() >= 4 {
+            let xs: Vec<f32> = fwd_pts.iter().map(|p| p.0).collect();
+            let ys: Vec<f32> = fwd_pts.iter().map(|p| p.1).collect();
+            fit4(&xs, &ys)
+        } else { None };
+        let back_fit = if back_pts.len() >= 4 {
+            let xs: Vec<f32> = back_pts.iter().map(|p| p.0).collect();
+            let ys: Vec<f32> = back_pts.iter().map(|p| p.1).collect();
+            fit4(&xs, &ys)
+        } else { None };
+        // Capture fwd_fit result for diagnostic display.
+        if let Some((s, _, r)) = fwd_fit {
+            dbg_fwd_fit_r2 = r;
+            dbg_fwd_fit_abs_slope = s.abs();
+        }
+        // A side qualifies if slope in stair range AND R² passes.
+        let side_qualifies = |f: Option<(f32, f32, f32)>| -> Option<(f32, f32, f32)> {
+            f.and_then(|(s, i, r)| {
+                if r >= CONF_MIN && s.abs() >= STAIR_SLOPE_MIN && s.abs() <= STAIR_SLOPE_MAX {
+                    Some((s, i, r))
+                } else {
+                    None
+                }
+            })
+        };
+        let fwd_q = side_qualifies(fwd_fit);
+        let back_q = side_qualifies(back_fit);
+        // Pick the higher-R² qualifying side. IMPORTANT: each side was fit
+        // with x = distance out from character (positive on that side). So
+        // back-side slope describes how Y changes as you walk BACKWARD along
+        // up_dir. To draw the far endpoint we use the same-side's raw
+        // (slope, intercept) with x = far_dist. The DIRECTION along up_dir
+        // flips (forward = +up_dir, backward = -up_dir), but the SLOPE we
+        // multiply by far_dist must stay in that side's own frame.
+        // For best_slope (a "forward-relative" number downstream code reads),
+        // we flip the back-side slope's sign so a "going down away from you"
+        // reads negative regardless of which side.
+        let (raw_slope, raw_intercept, _raw_r2, forward_side, any_side_qualified) = match (fwd_q, back_q) {
+            (Some(f), Some(b)) => {
+                if f.2 >= b.2 { (f.0, f.1, f.2, true, true) } else { (b.0, b.1, b.2, false, true) }
+            }
+            (Some(f), None) => (f.0, f.1, f.2, true, true),
+            (None, Some(b)) => (b.0, b.1, b.2, false, true),
+            (None, None) => (0.0, 0.0, 0.0, true, false),
+        };
+        if any_side_qualified {
+            ramp_y = Some(raw_intercept);
+            ramp_locked = true;
+            let far_dist = FWD_START + FWD_STEP * (FWD_COUNT as f32 - 1.0);
+            let dir_sign = if forward_side { 1.0 } else { -1.0 };
+            ramp_near = (center_xz, raw_intercept);
+            ramp_far = (
+                center_xz + up_dir * far_dist * dir_sign,
+                // Height at far_dist along whichever side we fit — raw_slope
+                // is in that side's own x=distance-out frame, so no sign
+                // flip on the slope here.
+                raw_intercept + raw_slope * far_dist,
+            );
+            // best_slope is in the "forward-along-up_dir" frame for downstream
+            // code: flip sign when we picked the backward side.
+            best_slope = if forward_side { raw_slope } else { -raw_slope };
+        }
+    }
+
+    // ---- Purple straight-down march: exact slope from vertical probes ----
+    // The pink fan (above) gives a good DIRECTION (up_dir) but its slope math
+    // is a least-squares fit through an angled sample fan, which produces a
+    // wrong slope on descending stairs. This second pass measures the slope
+    // EXACTLY: march straight-down raycasts every 0.1 along up_dir, record the
+    // true ground height at each point, and find the risers (points where the
+    // ground steps down by ~0.4). The horizontal distance between two risers
+    // is the tread depth; the drop is the rise. rise / tread_depth = exact
+    // slope. Only runs when a drop is already detected (a down-band exists),
+    // so it's extra work only when there's actually a descent to measure.
+    // Needs at least 2 risers: with only 1 step we skip everything and let the
+    // player just drop off it (unnoticeable). Cap at 5 risers.
+    //
+    // Riser validity: a hard ~0.4 drop. Accept per-step drops in 0.2..=0.45.
+    // A drop bigger than 0.45 between adjacent 0.1 samples is a cliff, not a
+    // stair: stop the march there.
+    let mut purple_probes_arr: [(bevy::math::Vec2, f32); 60] =
+        [(bevy::math::Vec2::ZERO, f32::NAN); 60];
+    let mut purple_probe_count: usize = 0;
+    let mut purple_slope: Option<f32> = None;
+    let mut purple_risers_arr: [(bevy::math::Vec2, f32); 5] =
+        [(bevy::math::Vec2::ZERO, f32::NAN); 5];
+    let mut purple_riser_count: usize = 0;
+    // Detect a descent: any validated sample with a down-band. Reads only
+    // from the validated dataset.
+    let mut down_drop_detected = false;
+    for k in 0..valid_count {
+        if valid_samples[k].4 < 0 { down_drop_detected = true; break; }
+    }
+    // Direction of the descent — weighted sum of DOWN-BAND sample bearings
+    // from the validated dataset. Weight by band depth (|band| ∈ 1..=5).
+    let mut descent_dir = bevy::math::Vec2::ZERO;
+    for k in 0..valid_count {
+        let (_ri, _bi, xz, _y, band) = valid_samples[k];
+        if band >= 0 { continue; }
+        let dir = xz - center_xz;
+        if dir.length_squared() > 1e-6 {
+            descent_dir += dir.normalize() * (-band as f32);
+        }
+    }
+    let march_dir = if descent_dir.length_squared() > 1e-6 {
+        descent_dir.normalize()
+    } else {
+        up_dir
+    };
+    if march_dir.length_squared() > 0.5 && down_drop_detected {
+        const STEP: f32 = 0.1;
+        const MAX_MARCH: f32 = 6.0;        // up to 6 units out (~5-6 treads)
+        const RISER_MIN: f32 = 0.2;
+        const RISER_MAX: f32 = 0.45;
+        let n_steps = ((MAX_MARCH / STEP) as usize).min(60);
+        // Record risers as we find them: (world_xz at the riser, along-distance).
+        // A riser is a cumulative drop from the last tread level of >= RISER_MIN
+        // that resolves within a short run. We track the "current tread height"
+        // and watch for the ground dropping a full riser below it.
+        let mut prev_y = center_y_raw;
+        let mut current_tread_y = center_y_raw;
+        // Pre-collect XZ positions of RED ring samples (band == 0, not
+        // same-tread, not NaN). Red = the ring raycast returned data we
+        // couldn't chain — often a wall-face hit rather than real ground. If
+        // a purple probe lands near one of these, its raycast is likely
+        // hitting the same bad geometry, so its height is unreliable and we
+        // stop the march there rather than record a spurious riser.
+        let mut red_xz: [bevy::math::Vec2; 60] = [bevy::math::Vec2::ZERO; 60];
+        let mut red_count: usize = 0;
+        for ri in 0..5 {
+            for bi in 0..RING_SAMPLES {
+                let slot = ri * RING_SAMPLES + bi;
+                let sd = &sample_data[slot];
+                if sd.1.is_nan() { continue; }
+                if sd.2 || sd.3 != 0 { continue; }
+                // Also skip gray "lip" samples (small |d| from foot) — those
+                // are real ground, just a small step. Only pure red counts.
+                let dy = sd.1 - center_y_raw;
+                if dy.abs() < 0.15 { continue; }
+                if red_count < 60 {
+                    red_xz[red_count] = sd.0;
+                    red_count += 1;
+                }
+            }
+        }
+        const RED_PROX: f32 = 0.35;    // reject probe if within this of a red sample
+        for i in 1..=n_steps {
+            let along = STEP * i as f32;
+            let probe_xz = center_xz + march_dir * along;
+            // Reject probe if it's near a red ring sample — its raycast is
+            // going into the same unreliable geometry that flagged that
+            // sample red. Break the march: we can't chain further out through
+            // bad ground.
+            let mut near_red = false;
+            for k in 0..red_count {
+                if probe_xz.distance_squared(red_xz[k]) < RED_PROX * RED_PROX {
+                    near_red = true;
+                    break;
+                }
+            }
+            if near_red { break; }
+            let y = match collision.ground_raycast(probe_xz, center_y_raw + 2.0) {
+                Some(y) => y,
+                None => break, // ran off the geometry
+            };
+            if purple_probe_count < 60 {
+                purple_probes_arr[purple_probe_count] = (probe_xz, y);
+                purple_probe_count += 1;
+            }
+            // Drop between this sample and the previous 0.1 sample.
+            let step_drop = prev_y - y; // positive = went down
+            if step_drop > RISER_MAX {
+                // Too steep for a single stair riser in one 0.1 step: cliff.
+                break;
+            }
+            // Cumulative drop from the current tread level.
+            let tread_drop = current_tread_y - y; // positive = below tread
+            if tread_drop >= RISER_MIN && tread_drop <= RISER_MAX {
+                // Found a full riser: the ground has settled ~0.4 below the
+                // tread we were on. Record it and treat this as the new tread.
+                if purple_riser_count < 5 {
+                    purple_risers_arr[purple_riser_count] = (probe_xz, along);
+                    purple_riser_count += 1;
+                }
+                current_tread_y = y;
+                if purple_riser_count >= 5 { break; }
+            } else if tread_drop > RISER_MAX {
+                // Overshot a riser (dropped more than one step between tread
+                // checks) — still count it as a riser at ~0.4 and re-baseline,
+                // but clamp the new tread to one riser down so a double-drop
+                // doesn't desync the baseline.
+                if purple_riser_count < 5 {
+                    purple_risers_arr[purple_riser_count] = (probe_xz, along);
+                    purple_riser_count += 1;
+                }
+                current_tread_y -= 0.4;
+                if purple_riser_count >= 5 { break; }
+            }
+            prev_y = y;
+        }
+        if purple_riser_count >= 2 {
+            // Exact slope = total rise / total run between first and last riser.
+            let first = purple_risers_arr[0];
+            let last = purple_risers_arr[purple_riser_count - 1];
+            let run = last.1 - first.1;                          // along-distance
+            let rise = 0.4 * (purple_riser_count as f32 - 1.0);  // one riser each
+            if run > 1e-3 {
+                let s = rise / run; // magnitude; down = descending
+                purple_slope = Some(s);
+            }
+        }
+    }
+    // If the purple march measured a slope, it OVERRIDES the pink fit for the
+    // lock: it's the exact rise/run, not a noisy regression. Force the ramp
+    // lock on and set best_slope to the measured value (negative = down, since
+    // this only runs when a down-drop was detected).
+    if let Some(ps) = purple_slope {
+        best_slope = -ps; // down
+        ramp_locked = true;
+        up_dir_slope_override = Some(-ps);
+        purple_march_dir = march_dir;
+        // Recompute the ramp gizmo line to follow the measured descent, or the
+        // stale pink-fit endpoints (which can shoot off to the sky on a bad
+        // down-fit) keep getting drawn. Near = player foot, far = along the
+        // descent direction dropping at the measured slope.
+        let far_dist = FWD_START + FWD_STEP * (FWD_COUNT as f32 - 1.0);
+        ramp_near = (center_xz, center_y_raw);
+        ramp_far = (
+            center_xz + march_dir * far_dist,
+            center_y_raw - ps * far_dist, // descending
+        );
+    }
+
+    // Ring-average fallback (Better-B) — median-reject over middle ring only,
+    // used only when the ramp fit didn't lock.
+    let mut ring_avg = center_y_raw;
+    {
+        // Only validated middle-ring (ri==2) samples feed the fallback avg.
+        let mut hits: Vec<f32> = Vec::new();
+        for k in 0..valid_count {
+            if valid_samples[k].0 == 2 { hits.push(valid_samples[k].3); }
+        }
+        if hits.len() >= 3 {
+            hits.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            let median = hits[hits.len() / 2];
+            let kept: Vec<f32> = hits.iter().copied()
+                .filter(|h| (h - median).abs() <= FP_REJECT).collect();
+            if kept.len() >= 3 {
+                ring_avg = kept.iter().sum::<f32>() / kept.len() as f32;
+            }
+        }
+    }
+
+    // --------- Persistent staircase lock logic ---------
+    // A locked plane means: character_y = base_y + up_dir dot (char_xz - origin_xz) * slope.
+    // Zero per-frame raycasts once locked; cheap plane math only.
+
+    // Is the current position still within the locked staircase's extent?
+    let mut lock_valid = false;
+    let mut lock_predicted_y = 0.0;
+    if lock.active {
+        let rel = center_xz - lock.origin_xz;
+        let along = rel.dot(lock.up_dir);
+        let across = (rel - lock.up_dir * along).length();
+        if along >= -lock.back_extent && along <= lock.forward_extent && across <= lock.width {
+            lock_predicted_y = lock.base_y + along * lock.slope;
+            // Ring-avg sanity check: if we're on the locked stairs, ring avg
+            // should be within a couple risers of the predicted y.
+            if (ring_avg - lock_predicted_y).abs() <= lock.riser * 2.0 {
+                lock_valid = true;
+            }
+        }
+    }
+
+    // Detection streak update: gate burst firing on 2 consecutive detections.
+    if ramp_locked {
+        lock.detect_streak = lock.detect_streak.saturating_add(1);
+    } else if !lock_valid {
+        lock.detect_streak = 0;
+    }
+
+    let mut lock_dbg_check: u8 = 0;
+    // Fire the burst if we have a fresh 2-frame detection and no active lock.
+    if !lock.active && lock.detect_streak >= 1 {
+        lock_dbg_check = 1; // up_dir too weak by default; overwritten below
+    }
+    if !lock.active && lock.detect_streak >= 1
+        && (up_dir.length_squared() > 0.5 || up_dir_slope_override.is_some())
+    {
+        // 15-point grid: 5 along up_dir at [-1.0, 0, 1.0, 2.0, 3.0], 3 lateral
+        // at [-1.0, 0, 1.0] perpendicular to up_dir.
+        let right = bevy::math::Vec2::new(up_dir.y, -up_dir.x); // 90 deg rotation
+        // Symmetric grid: 7 along up_dir (3 back + character + 3 fwd) x 3 lateral.
+        // Scans both directions so a detected staircase covers what's behind as
+        // well as ahead. The line fit spans the whole thing.
+        let forwards = [-3.0f32, -2.0, -1.0, 0.0, 1.0, 2.0, 3.0];
+        let laterals = [-1.0f32, 0.0, 1.0];
+        let mut burst_hits: [(bevy::math::Vec3, bool); 21] =
+            [(bevy::math::Vec3::ZERO, false); 21];
+        let mut grid_pts: Vec<(f32, f32)> = Vec::with_capacity(33);
+        for (i, f) in forwards.iter().enumerate() {
+            for (j, l) in laterals.iter().enumerate() {
+                let idx = i * 3 + j;
+                let probe_xz = center_xz + up_dir * *f + right * *l;
+                if let Some(y) = collision.ground_raycast(probe_xz, center_y_raw + 2.0) {
+                    burst_hits[idx] = (bevy::math::Vec3::new(probe_xz.x, y, probe_xz.y), true);
+                    grid_pts.push((*f, y));
+                }
+            }
+        }
+        // Fit plane along up_dir over the whole grid, but drop plateau
+        // outliers first: when standing at the top of stairs, many far probes
+        // hit the flat landing at the same Y, which pulls R^2 down. Keep only
+        // points whose Y is "in line" with a stair-shaped trend.
+        if grid_pts.len() < 8 { lock_dbg_check = 2; }
+        if grid_pts.len() >= 8 {
+            // Preliminary fit with all points.
+            let xs_all: Vec<f32> = grid_pts.iter().map(|p| p.0).collect();
+            let ys_all: Vec<f32> = grid_pts.iter().map(|p| p.1).collect();
+            let (xs, ys) = if let Some((sp, ip, _)) = fit4(&xs_all, &ys_all) {
+                // Reject points that deviate more than 0.3 (~ 3/4 riser) from
+                // the prelim line. Plateau tails at either end will drop out.
+                let kept: Vec<(f32, f32)> = grid_pts.iter()
+                    .filter(|(x, y)| ((sp * *x + ip) - *y).abs() <= 0.3)
+                    .copied().collect();
+                if kept.len() >= 6 {
+                    (kept.iter().map(|p| p.0).collect::<Vec<_>>(),
+                     kept.iter().map(|p| p.1).collect::<Vec<_>>())
+                } else {
+                    (xs_all, ys_all)
+                }
+            } else {
+                (xs_all, ys_all)
+            };
+            lock_dbg_check = 3; // fit-failed sentinel; overwritten below
+            if let Some((s2, i2, r2c)) = fit4(&xs, &ys) {
+                if r2c < 0.5 { lock_dbg_check = 4; }
+                else if s2.abs() < STAIR_SLOPE_MIN || s2.abs() > STAIR_SLOPE_MAX { lock_dbg_check = 5; }
+                if r2c >= 0.5 && s2.abs() >= STAIR_SLOPE_MIN && s2.abs() <= STAIR_SLOPE_MAX {
+                    // LOCK.
+                    lock_dbg_check = 6;
+                    lock.active = true;
+                    lock.origin_xz = center_xz;
+                    lock.up_dir = up_dir;
+                    lock.slope = s2;
+                    lock.base_y = i2;
+                    lock.tread_depth = 1.0;                    // FFXI treads ~1.0 wide
+                    lock.riser = 0.4;                          // and 0.4 tall
+                    lock.width = 3.0;                          // ~6 units wide staircase
+                    lock.forward_extent = 5.0;                 // 5 treads ahead
+                    lock.back_extent = 5.0;                    // 5 treads behind
+                    lock.burst = burst_hits;
+                }
+            }
+            // Purple override: if the grid fit didn't lock (typically check 5,
+            // slope out of range on descending stairs) but the purple march
+            // measured an EXACT slope from vertical probes, lock using that.
+            // Purple's rise/run is a direct measurement, not a regression, so
+            // it's authoritative for the down case the grid fit gets wrong.
+            if lock_dbg_check != 6 {
+                if let Some(measured) = up_dir_slope_override {
+                    if measured.abs() >= STAIR_SLOPE_MIN && measured.abs() <= STAIR_SLOPE_MAX {
+                        lock_dbg_check = 6;
+                        lock.active = true;
+                        lock.origin_xz = center_xz;
+                        // Use the descent direction the purple march measured
+                        // along, not up_dir (which may aim at an up-flight).
+                        lock.up_dir = if purple_march_dir.length_squared() > 0.5 {
+                            purple_march_dir
+                        } else {
+                            up_dir
+                        };
+                        lock.slope = measured;      // exact, signed (down = negative)
+                        lock.base_y = center_y_raw; // anchor at the player's foot
+                        lock.tread_depth = 1.0;
+                        lock.riser = 0.4;
+                        lock.width = 3.0;
+                        lock.forward_extent = 5.0;
+                        lock.back_extent = 5.0;
+                        lock.burst = burst_hits;
+                    }
+                }
+            }
+        }
+    }
+
+    // Chosen y: locked plane (best), or ramp fit, or ring avg.
+    let chosen_y = if lock_valid {
+        lock_predicted_y
+    } else {
+        // Not on the lock (or no lock): disengage the lock so it doesn't
+        // linger and mispredict, and fall back to ramp fit or ring avg.
+        if lock.active && !lock_valid {
+            lock.active = false;
+        }
+        ramp_y.unwrap_or(ring_avg)
+    };
+    let avg_for_dbg = chosen_y;
+    let slope_active = (chosen_y - center_y_raw).abs() > 0.05;
+    target.y = chosen_y + offset_above_tread;
+
+    let _ = best_conf;
+    let _ = best_slope;
+    *dbg = FootprintDebug {
+        enabled: true,
+        center_xz,
+        center_y: center_y_raw,
+        radius: R_3,
+        sampled_points: sample_data,
+        avg_y: avg_for_dbg,
+        slope_active,
+        fwd_probes: fwd_probes_dbg,
+        ramp_locked,
+        ramp_near_xz: ramp_near.0,
+        ramp_near_y: ramp_near.1,
+        ramp_far_xz: ramp_far.0,
+        ramp_far_y: ramp_far.1,
+        lock_active: lock.active,
+        lock_origin_xz: lock.origin_xz,
+        lock_up_dir: lock.up_dir,
+        lock_slope: lock.slope,
+        lock_base_y: lock.base_y,
+        lock_tread_depth: lock.tread_depth,
+        lock_riser: lock.riser,
+        lock_width: lock.width,
+        lock_forward_extent: lock.forward_extent,
+        lock_back_extent: lock.back_extent,
+        burst_hits: lock.burst,
+        lock_check: lock_dbg_check,
+        down_bearing_r2: down_best_r2,
+        down_bearing_abs_slope: down_best_abs_slope,
+        fwd_fit_r2: dbg_fwd_fit_r2,
+        fwd_fit_abs_slope: dbg_fwd_fit_abs_slope,
+        purple_probes: purple_probes_arr,
+        purple_probe_count,
+        purple_risers: purple_risers_arr,
+        purple_riser_count,
+        purple_slope: purple_slope.unwrap_or(f32::NAN),
+    };
+
+    // Preserve rotation — self_visual_yaw_system owns it.
+    t.translation = target;
 }
 
 /// The corrective command [`recover_self_ground_system`] emits. It is
@@ -2635,4 +3575,320 @@ mod tests {
         let entities = vec![ent(1, 100.0, 0.0), ent(2, 200.0, 0.0)];
         assert_eq!(first_pick(&entities, None, culled_proj), None);
     }
+}
+
+
+/// Draws the footprint sampler debug: bright orange ring around the character
+/// at radius `dbg.radius`, tiny spheres at each sample point (green kept, red
+/// rejected), and a bright red disk at the averaged Y when slope smoothing is
+/// active (i.e. we're crossing tread boundaries and the character Y is being
+/// pulled off the raw ground). Runs per render frame (Update) since gizmos
+/// aren't valid in FixedUpdate.
+pub fn draw_footprint_debug_system(
+    dbg: Res<FootprintDebug>,
+    panels: Res<kuluu_render::hud::HudPanels>,
+    mut gizmos: bevy::prelude::Gizmos,
+) {
+    use bevy::color::Color;
+    use bevy::math::{Isometry3d, Quat, Vec3};
+    if !dbg.enabled { return; }
+    // User-facing menu toggle: Draw Stair Climber. When off, detection still
+    // runs (so the character keeps climbing correctly) but no gizmos render.
+    if !panels.stair_draw { return; }
+    let center = Vec3::new(dbg.center_xz.x, dbg.center_y + 0.02, dbg.center_xz.y);
+    // Five orange rings at 0.4/0.7/1.0/1.3/1.5 — denser sampling inside the
+    // same 1.5 outer bound, better granularity for slope detection.
+    let iso = Isometry3d::new(center, Quat::from_rotation_x(std::f32::consts::FRAC_PI_2));
+    gizmos.circle(iso, 0.4, Color::srgb(0.35, 0.18, 0.0));
+    gizmos.circle(iso, 0.7, Color::srgb(0.55, 0.30, 0.0));
+    gizmos.circle(iso, 1.0, Color::srgb(0.75, 0.42, 0.0));
+    gizmos.circle(iso, 1.3, Color::srgb(0.90, 0.52, 0.0));
+    gizmos.circle(iso, 1.5, Color::srgb(1.00, 0.60, 0.0));
+    // Sample points: green kept, red rejected.
+    for (xz, y, kept, band) in dbg.sampled_points.iter() {
+        if y.is_nan() { continue; }
+        let p = Vec3::new(xz.x, *y + 0.02, xz.y);
+        // Up-bands (band > 0): purple ramp, brightening with step count.
+        // Down-bands (band < 0): cyan ramp, brightening with step count.
+        // Direction visible at a glance: purple stairs go UP away from you,
+        // cyan stairs go DOWN away from you.
+        let dy = *y - dbg.center_y;
+        let color = if *band > 0 {
+            let t = (*band as f32 - 1.0) / 4.0;
+            let r = 0.55 + 0.35 * t;
+            let g = 0.10 + 0.55 * t;
+            let b = 1.00;
+            Color::srgb(r, g, b)
+        } else if *band < 0 {
+            let t = ((-*band) as f32 - 1.0) / 4.0;
+            let r = 0.05 + 0.20 * t;
+            let g = 0.55 + 0.35 * t;
+            let b = 0.85 + 0.15 * t;
+            Color::srgb(r, g, b)
+        } else if *kept {
+            Color::srgb(0.2, 1.0, 0.2)
+        } else if dy.abs() < 0.15 {
+            // Near-tread lip: no band, not same-tread, but only a small height
+            // delta from the player's foot (0.10..=0.15, roughly). A curb,
+            // expansion joint, or the top of a very short lip that isn't the
+            // player's step and isn't a stair riser either. Gray it out so the
+            // display doesn't scream red for a non-issue.
+            Color::srgb(0.55, 0.55, 0.55)
+        } else {
+            Color::srgb(1.0, 0.2, 0.2)
+        };
+        gizmos.sphere(Isometry3d::from_translation(p), 0.06, color);
+    }
+    // Bright red ring at the averaged Y when slope is active (retail-red).
+    if dbg.slope_active {
+        let avg_center = Vec3::new(dbg.center_xz.x, dbg.avg_y + 0.05, dbg.center_xz.y);
+        let iso2 = Isometry3d::new(avg_center, Quat::from_rotation_x(std::f32::consts::FRAC_PI_2));
+        gizmos.circle(iso2, dbg.radius * 0.85, Color::srgb(1.0, 0.1, 0.1));
+    }
+    // Purple: the fitted ramp line + forward-probe hit points. Drawn whenever
+    // we HAVE a fit (even when it wasn't locked), so we can see WHY a
+    // detection didn't lock (line tilt out of range, misaligned, etc).
+    if !dbg.ramp_near_xz.abs_diff_eq(dbg.ramp_far_xz, 1e-4) {
+        let purple = if dbg.ramp_locked {
+            Color::srgb(0.75, 0.15, 1.0) // bright locked
+        } else {
+            Color::srgb(0.35, 0.10, 0.55) // dim / speculative
+        };
+        let a = Vec3::new(dbg.ramp_near_xz.x, dbg.ramp_near_y + 0.08, dbg.ramp_near_xz.y);
+        let b = Vec3::new(dbg.ramp_far_xz.x, dbg.ramp_far_y + 0.08, dbg.ramp_far_xz.y);
+        gizmos.line(a, b, purple);
+        for (pxz, py) in dbg.fwd_probes.iter() {
+            if py.is_nan() { continue; }
+            let p = Vec3::new(pxz.x, *py + 0.05, pxz.y);
+            gizmos.sphere(Isometry3d::from_translation(p), 0.05, purple);
+        }
+    }
+
+    // Lock-check status marker above character's head:
+    //   0 gray  = no detection
+    //   0 cyan (override) = bands detected on ground but no fit stage reached
+    //   1 red   = detection but up_dir too weak
+    //   2 orange = grid probes < 8
+    //   3 yellow = line fit math failed
+    //   4 amber = R^2 too low
+    //   5 pink  = R^2 ok but slope out of stair range
+    //   6 lime  = LOCKED
+    let any_band = dbg.sampled_points.iter().any(|(_, _, _, b)| *b != 0);
+    let (r,g,b) = match dbg.lock_check {
+        1 => (1.0, 0.0, 0.0),
+        2 => (1.0, 0.4, 0.0),
+        3 => (1.0, 1.0, 0.0),
+        4 => (1.0, 0.7, 0.0),
+        5 => (1.0, 0.4, 0.6),
+        6 => (0.2, 1.0, 0.2),
+        _ => if any_band { (0.0, 0.9, 1.0) } else { (0.3, 0.3, 0.3) },
+    };
+    let head = Vec3::new(dbg.center_xz.x, dbg.center_y + 2.5, dbg.center_xz.y);
+    gizmos.sphere(Isometry3d::from_translation(head), 0.15, Color::srgb(r, g, b));
+
+    // Diagnostic orbs for the strongest DOWN-bearing (when there is one).
+    // Left orb (R²): radius scales 0.05..=0.30 with R² clamped to 0..=1.
+    //   Green if R² ≥ CONF_MIN (0.4), red otherwise.
+    // Right orb (|slope|): radius scales 0.05..=0.30 with |slope| clamped
+    //   to 0..=1. Green if |slope| in [0.20, 0.80], red otherwise.
+    // Positioned to the left and right of the head sphere so both are
+    // legible next to it.
+    if !dbg.down_bearing_r2.is_nan() && !dbg.down_bearing_abs_slope.is_nan() {
+        let r2 = dbg.down_bearing_r2.clamp(0.0, 1.0);
+        let abs_slope_clamped = dbg.down_bearing_abs_slope.clamp(0.0, 1.0);
+        let r2_ok = dbg.down_bearing_r2 >= 0.40;
+        let slope_ok = dbg.down_bearing_abs_slope >= 0.20 && dbg.down_bearing_abs_slope <= 0.80;
+        let r2_col = if r2_ok { Color::srgb(0.2, 1.0, 0.2) } else { Color::srgb(1.0, 0.2, 0.2) };
+        let sl_col = if slope_ok { Color::srgb(0.2, 1.0, 0.2) } else { Color::srgb(1.0, 0.2, 0.2) };
+        let r2_size = 0.05 + 0.25 * r2;
+        let sl_size = 0.05 + 0.25 * abs_slope_clamped;
+        let r2_pos = Vec3::new(dbg.center_xz.x - 0.5, dbg.center_y + 2.5, dbg.center_xz.y);
+        let sl_pos = Vec3::new(dbg.center_xz.x + 0.5, dbg.center_y + 2.5, dbg.center_xz.y);
+        gizmos.sphere(Isometry3d::from_translation(r2_pos), r2_size, r2_col);
+        gizmos.sphere(Isometry3d::from_translation(sl_pos), sl_size, sl_col);
+    }
+    // Per-side FIT diagnostic orbs — one row HIGHER above the head. If these
+    // are missing entirely, the per-side block never ran (any_qualifies stayed
+    // false — i.e. no bearing qualified globally). If they render but are
+    // red, the per-side fit produced values that DID fail the check even
+    // though individual bearings passed.
+    if !dbg.fwd_fit_r2.is_nan() && !dbg.fwd_fit_abs_slope.is_nan() {
+        let r2 = dbg.fwd_fit_r2.clamp(0.0, 1.0);
+        let abs_slope_clamped = dbg.fwd_fit_abs_slope.clamp(0.0, 1.0);
+        let r2_ok = dbg.fwd_fit_r2 >= 0.40;
+        let slope_ok = dbg.fwd_fit_abs_slope >= 0.20 && dbg.fwd_fit_abs_slope <= 0.80;
+        let r2_col = if r2_ok { Color::srgb(0.2, 1.0, 0.2) } else { Color::srgb(1.0, 0.2, 0.2) };
+        let sl_col = if slope_ok { Color::srgb(0.2, 1.0, 0.2) } else { Color::srgb(1.0, 0.2, 0.2) };
+        let r2_size = 0.05 + 0.25 * r2;
+        let sl_size = 0.05 + 0.25 * abs_slope_clamped;
+        let r2_pos = Vec3::new(dbg.center_xz.x - 0.5, dbg.center_y + 3.3, dbg.center_xz.y);
+        let sl_pos = Vec3::new(dbg.center_xz.x + 0.5, dbg.center_y + 3.3, dbg.center_xz.y);
+        gizmos.sphere(Isometry3d::from_translation(r2_pos), r2_size, r2_col);
+        gizmos.sphere(Isometry3d::from_translation(sl_pos), sl_size, sl_col);
+        // Magnitude read-out: stack of small white marker orbs to the right of
+        // the slope orb, one per 0.25 of raw |slope|. Lets us read whether the
+        // fwd-fit slope is slightly over 0.80 (3-4 markers) or wildly over
+        // (many markers) without a text overlay. Raw, unclamped.
+        let markers = (dbg.fwd_fit_abs_slope / 0.25).floor().clamp(0.0, 12.0) as i32;
+        for m in 0..markers {
+            let mp = Vec3::new(
+                dbg.center_xz.x + 1.0,
+                dbg.center_y + 3.0 + 0.18 * m as f32,
+                dbg.center_xz.y,
+            );
+            gizmos.sphere(Isometry3d::from_translation(mp), 0.06, Color::srgb(1.0, 1.0, 1.0));
+        }
+    }
+
+    // Purple straight-down march visualization. Each vertical probe hit is a
+    // small purple dot at the true ground height. Detected risers are bright
+    // magenta spheres. A polyline through the probe hits shows the measured
+    // staircase profile — this is the EXACT geometry the slope is computed
+    // from, so if the risers land on the real stair edges, the measurement
+    // is correct.
+    if dbg.purple_probe_count > 0 {
+        let purple = Color::srgb(0.6, 0.1, 0.9);
+        let mut prev: Option<Vec3> = None;
+        for k in 0..dbg.purple_probe_count {
+            let (xz, y) = dbg.purple_probes[k];
+            if y.is_nan() { continue; }
+            let p = Vec3::new(xz.x, y + 0.03, xz.y);
+            gizmos.sphere(Isometry3d::from_translation(p), 0.03, purple);
+            if let Some(pv) = prev {
+                gizmos.line(pv, p, purple);
+            }
+            prev = Some(p);
+        }
+        let riser_col = Color::srgb(1.0, 0.2, 1.0);
+        for k in 0..dbg.purple_riser_count {
+            let (xz, _along) = dbg.purple_risers[k];
+            // Draw the riser marker at the probe's ground height by finding the
+            // matching probe; fall back to character height if not found.
+            let mut y = dbg.center_y;
+            for j in 0..dbg.purple_probe_count {
+                let (pxz, py) = dbg.purple_probes[j];
+                if pxz.abs_diff_eq(xz, 1e-3) { y = py; break; }
+            }
+            let p = Vec3::new(xz.x, y + 0.06, xz.y);
+            gizmos.sphere(Isometry3d::from_translation(p), 0.10, riser_col);
+        }
+    }
+
+    // Full staircase mesh outline when LOCKED. Draws 5 tread rectangles at
+    // their heights along the locked up_dir, connected by riser segments.
+    // This is the "engine KNOWS the whole staircase" visualization.
+    if dbg.lock_active {
+        let up = Vec3::new(dbg.lock_up_dir.x, 0.0, dbg.lock_up_dir.y);
+        let right = Vec3::new(dbg.lock_up_dir.y, 0.0, -dbg.lock_up_dir.x); // 90 deg
+        let bright = Color::srgb(0.90, 0.30, 1.00);
+        // 7 tread rectangles from -3 to +3 along up (both directions).
+        for step in -3i32..=3 {
+            let along = step as f32 * dbg.lock_tread_depth;
+            let center_along = Vec3::new(dbg.lock_origin_xz.x, 0.0, dbg.lock_origin_xz.y)
+                + up * along;
+            let y = dbg.lock_base_y + along * dbg.lock_slope + 0.03;
+            let hw = dbg.lock_width;
+            let hd = dbg.lock_tread_depth * 0.5;
+            let p0 = Vec3::new(center_along.x - right.x * hw - up.x * hd, y, center_along.z - right.z * hw - up.z * hd);
+            let p1 = Vec3::new(center_along.x + right.x * hw - up.x * hd, y, center_along.z + right.z * hw - up.z * hd);
+            let p2 = Vec3::new(center_along.x + right.x * hw + up.x * hd, y, center_along.z + right.z * hw + up.z * hd);
+            let p3 = Vec3::new(center_along.x - right.x * hw + up.x * hd, y, center_along.z - right.z * hw + up.z * hd);
+            gizmos.line(p0, p1, bright);
+            gizmos.line(p1, p2, bright);
+            gizmos.line(p2, p3, bright);
+            gizmos.line(p3, p0, bright);
+        }
+        // Vertical risers connecting adjacent treads at the front edge, both directions.
+        for step in -3i32..3 {
+            let along_a = step as f32 * dbg.lock_tread_depth + dbg.lock_tread_depth * 0.5;
+            let y_a = dbg.lock_base_y + along_a * dbg.lock_slope + 0.03;
+            let y_b = dbg.lock_base_y + (along_a + dbg.lock_tread_depth) * dbg.lock_slope + 0.03;
+            let cx = dbg.lock_origin_xz.x + up.x * along_a;
+            let cz = dbg.lock_origin_xz.y + up.z * along_a;
+            let hw = dbg.lock_width;
+            let left = Vec3::new(cx - right.x * hw, y_a, cz - right.z * hw);
+            let rgt = Vec3::new(cx + right.x * hw, y_a, cz + right.z * hw);
+            let left_up = Vec3::new(left.x, y_b, left.z);
+            let rgt_up = Vec3::new(rgt.x, y_b, rgt.z);
+            gizmos.line(left, left_up, bright);
+            gizmos.line(rgt, rgt_up, bright);
+        }
+        // Burst hit points (raw probe data).
+        for (pos, valid) in dbg.burst_hits.iter() {
+            if !valid { continue; }
+            let p = Vec3::new(pos.x, pos.y + 0.06, pos.z);
+            gizmos.sphere(Isometry3d::from_translation(p), 0.07,
+                Color::srgb(1.0, 0.5, 1.0));
+        }
+    }
+}
+
+/// Populates the shared StairDebugSnapshot from FootprintDebug each frame,
+/// so the render crate's status panel (Show Stair Status) can display it
+/// without pulling in a dependency on the input crate. Only runs when the
+/// panel toggle is on — otherwise the snapshot stays as it was.
+pub fn update_stair_debug_snapshot_system(
+    dbg: Res<FootprintDebug>,
+    panels: Res<kuluu_render::hud::HudPanels>,
+    mut snap: ResMut<kuluu_render::hud::stair_debug::StairDebugSnapshot>,
+) {
+    use kuluu_render::hud::stair_debug::{OrbInfo, OrbTag};
+    if !panels.stair_debug { return; }
+    snap.drawing_enabled = panels.stair_draw;
+    snap.player_xz = dbg.center_xz;
+    snap.player_y = dbg.center_y;
+    // Slopes: derive from lock state and the purple march measurement.
+    // For a locked staircase, lock_slope is the authoritative signed slope.
+    // Show the up direction's magnitude as slope_up when slope > 0, else
+    // slope_down. Purple's measurement (purple_slope) is a positive magnitude
+    // for descents; expose it as slope_down if no up-slope is live.
+    let (mut slope_up, mut slope_down) = (None, None);
+    if dbg.lock_active {
+        if dbg.lock_slope > 0.0 { slope_up = Some(dbg.lock_slope); }
+        else if dbg.lock_slope < 0.0 { slope_down = Some(-dbg.lock_slope); }
+    }
+    if slope_down.is_none() && !dbg.purple_slope.is_nan() && dbg.purple_slope > 0.0 {
+        slope_down = Some(dbg.purple_slope);
+    }
+    snap.slope_up = slope_up;
+    snap.slope_down = slope_down;
+    // Per-orb classification. Same rules the renderer uses.
+    let mut count_green = 0;
+    let mut count_up = 0;
+    let mut count_down = 0;
+    let mut count_gray = 0;
+    let mut count_red = 0;
+    let mut orb_count = 0;
+    for (xz, y, kept, band) in dbg.sampled_points.iter() {
+        if y.is_nan() { continue; }
+        let tag = if *band > 0 {
+            count_up += 1;
+            OrbTag::UpBand(*band)
+        } else if *band < 0 {
+            count_down += 1;
+            OrbTag::DownBand(-*band)
+        } else if *kept {
+            count_green += 1;
+            OrbTag::Green
+        } else {
+            let dy = *y - dbg.center_y;
+            if dy.abs() < 0.15 {
+                count_gray += 1;
+                OrbTag::Gray
+            } else {
+                count_red += 1;
+                OrbTag::Red
+            }
+        };
+        if orb_count < 60 {
+            snap.orbs[orb_count] = OrbInfo { xz: *xz, y: *y, tag };
+            orb_count += 1;
+        }
+    }
+    snap.count_green = count_green;
+    snap.count_up = count_up;
+    snap.count_down = count_down;
+    snap.count_gray = count_gray;
+    snap.count_red = count_red;
+    snap.orb_count = orb_count;
 }

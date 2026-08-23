@@ -27,6 +27,7 @@ pub mod map_screen;
 pub mod menu;
 pub mod menu_help_bar;
 pub mod mesh_debug;
+pub mod stair_debug;
 pub mod network_status;
 pub mod overlay;
 pub mod panel_column;
@@ -64,6 +65,15 @@ pub struct HudPanels {
     /// in movement. Grounding stays on. Toggled from the Debug menu NoClip row
     /// or /noclip; both flip this same flag.
     pub noclip: bool,
+    /// Stair-climber debug: when true, shows the status panel populated by
+    /// the input crate's stair detection state (orbs, slopes, classification
+    /// counts). Independent from `stair_draw` (whether the in-world gizmos
+    /// render); either can be on without the other.
+    pub stair_debug: bool,
+    /// Draws the in-world stair-climber gizmos (ring orbs, purple march,
+    /// head sphere, ramp line). Off = detection still runs (the character
+    /// still climbs), just no visuals.
+    pub stair_draw: bool,
 }
 
 #[derive(Component)]
@@ -181,6 +191,7 @@ impl Plugin for HudPlugin {
         app.init_resource::<chat_panel::ChatUnread>();
         app.init_resource::<chat_panel::ChatActivityTracker>();
         app.init_resource::<mesh_debug::MeshHoverDebug>();
+        app.init_resource::<stair_debug::StairDebugSnapshot>();
 
         app.init_resource::<zone_flash::ZoneFlashState>();
         app.init_resource::<self_hud::SelfHealTracker>();
@@ -391,6 +402,7 @@ impl Plugin for HudPlugin {
             (
                 mesh_debug::update_hover_state,
                 mesh_debug::update_mesh_debug_hud,
+                stair_debug::update_stair_debug_hud,
             )
                 .chain(),
         );
@@ -430,6 +442,9 @@ pub fn add_hud_spawners<L: bevy::ecs::schedule::ScheduleLabel + Clone>(app: &mut
             network_status::spawn_network_status,
         ),
     );
+    // Separate call: bevy's add_systems tuple bound caps at 20, and we're
+    // already at 20 above.
+    app.add_systems(schedule.clone(), stair_debug::spawn_stair_debug_hud);
 
     #[cfg(feature = "enhanced-buff-tooltips")]
     app.add_systems(schedule.clone(), status_ribbon::tooltip::spawn_buff_tooltip);

@@ -46,6 +46,7 @@ const INWARD_LERP: f32 = 0.45;
 pub fn clamp_chase_camera_to_collision(
     mode: Res<CameraMode>,
     chase: Res<ChaseCamera>,
+    step: Res<kuluu_render::camera::CameraStepSmoothing>,
     time: Res<Time>,
     draw: Res<DrawDistance>,
     scene_state: Res<SceneState>,
@@ -105,7 +106,7 @@ pub fn clamp_chase_camera_to_collision(
         return;
     };
 
-    let anchor = self_t.translation + Vec3::Y * third_person_anchor_y(baked);
+    let anchor = self_t.translation + Vec3::Y * (third_person_anchor_y(baked) - step.offset);
 
     let cos_p = chase.pitch.cos();
     let sin_p = chase.pitch.sin();

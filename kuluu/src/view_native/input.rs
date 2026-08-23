@@ -632,6 +632,7 @@ pub fn dispatch_movement_system(
     keys: Res<ButtonInput<KeyCode>>,
     bindings: Res<Bindings>,
     time: Res<Time<Fixed>>,
+    avian: super::avian_bridge::AvianMoveParams,
     state: Res<SceneState>,
     cmd_tx: Res<CommandTx>,
     mode: Res<InputMode>,
@@ -1097,8 +1098,15 @@ pub fn dispatch_movement_system(
     let wall_dx = x - basis_pos.x;
     let wall_dy = y - basis_pos.y;
     let clip = if !env.hud_panels.noclip && (wall_dx != 0.0 || wall_dy != 0.0) {
-        env.collision
-            .wall_clip_wire(basis_pos.x, basis_pos.y, basis_pos.z, wall_dx, wall_dy)
+        super::avian_bridge::wall_clip_avian(
+            &avian,
+            basis_pos.x,
+            basis_pos.y,
+            basis_pos.z,
+            wall_dx,
+            wall_dy,
+            time.delta_secs(),
+        )
     } else {
         kuluu_render::dat_mzb::WallClipResult::none(wall_dx, wall_dy)
     };
@@ -1281,8 +1289,9 @@ pub fn apply_self_prediction_system(
         y: prediction.pos.y,
         z: prediction.pos.z,
     };
+    let target = kuluu_render::ffxi_to_bevy(wire);
     // Preserve rotation â self_visual_yaw_system owns it.
-    t.translation = kuluu_render::ffxi_to_bevy(wire);
+    t.translation = target;
 }
 
 /// The corrective command [`recover_self_ground_system`] emits. It is

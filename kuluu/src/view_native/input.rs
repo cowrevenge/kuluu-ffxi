@@ -214,6 +214,8 @@ pub struct FootprintDebug {
     pub purple_riser_count: usize,
     #[allow(dead_code)]
     pub purple_slope: f32, // NaN if the march didn't produce a slope
+    #[allow(dead_code)]
+    pub purple_slope_up: f32, // NaN if the ascent march didn't produce a slope
 }
 
 impl Default for FootprintDebug {
@@ -253,6 +255,7 @@ impl Default for FootprintDebug {
             purple_risers: [(bevy::math::Vec2::ZERO, f32::NAN); 5],
             purple_riser_count: 0,
             purple_slope: f32::NAN,
+            purple_slope_up: f32::NAN,
         }
     }
 }
@@ -1524,25 +1527,87 @@ pub fn apply_self_prediction_system(
     // valid climbing/descending chain (same-tread → band 1 → band 2 …). An
     // isolated patch at band height with a gap/wall between it and the player
     // gets no band and stays red.
-    let band_ranges = [(0.1f32, 0.5f32), (0.5, 0.92), (0.92, 1.34), (1.34, 1.76), (1.76, 2.18)];
-    let band_of = |d: f32| -> i8 {
-        for (k, (lo, hi)) in band_ranges.iter().enumerate() {
-            if d >= *lo && d <= *hi { return (k + 1) as i8; }
-            if -d >= *lo && -d <= *hi { return -((k + 1) as i8); }
-        }
-        0
-    };
+    // Two-pass dynamic band classification.
+    //
+    // Band 1 is the *first stair step* — the player's own tread is called
+    // "same-tread green" and is not itself numbered (though conceptually
+    // green IS band 0 / the shared base). A real tread height H is
+    // typically ~0.4 in this world, so a legit first step lands somewhere
+    // in [0.20, 0.45]. Anything smaller than 0.20 is a bump or noise
+    // (gray downstream), not a stair.
+    //
+    // Pass A — same-tread (green): |dy| ≤ 0.06.
+    // Pass B — band 1 candidates: 0.20 ≤ |dy| ≤ 0.45. Static range so we
+    //          have something to measure H from on the first frame.
+    // Measure — H = median |dy| across all band 1 candidates. Falls back
+    //          to 0.4 when no candidates exist yet.
+    // Pass C — band N for N ≥ 2: |dy| ∈ ((N - 0.5) * H, (N + 0.5) * H].
+    //          Ranges scale with the measured tread height so a shallow
+    //          0.30 staircase doesn't get rounded up into a 0.40+ world.
+    //
+    // The per-bearing radial chaining pass then runs the same as before:
+    // outward from the player, band N is only kept if the sample inward
+    // on the same bearing is band N-1 (or the player's tread).
+    const GREEN_TOL: f32 = 0.06;
+    const B1_LO: f32 = 0.20;
+    const B1_HI: f32 = 0.45;
+    const H_FALLBACK: f32 = 0.4;
+
     // Same-tread pass.
     for ri in 0..5 {
         for bi in 0..RING_SAMPLES {
             let slot = ri * RING_SAMPLES + bi;
             let sd = &mut sample_data[slot];
             if sd.1.is_nan() { continue; }
-            if (sd.1 - center_y_raw).abs() <= 0.1 {
+            if (sd.1 - center_y_raw).abs() <= GREEN_TOL {
                 sd.2 = true;
             }
         }
     }
+
+    // Band 1 candidate pass — collect |dy| for every non-green sample
+    // whose absolute drop/rise falls in the static band 1 window.
+    let mut b1_dys: Vec<f32> = Vec::with_capacity(60);
+    for ri in 0..5 {
+        for bi in 0..RING_SAMPLES {
+            let slot = ri * RING_SAMPLES + bi;
+            let sd = &sample_data[slot];
+            if sd.1.is_nan() || sd.2 { continue; }
+            let ady = (sd.1 - center_y_raw).abs();
+            if ady >= B1_LO && ady <= B1_HI {
+                b1_dys.push(ady);
+            }
+        }
+    }
+    // Median-of-candidates → H. Median rather than mean so one bad
+    // sample can't drag the tread height around.
+    let h_step: f32 = if b1_dys.is_empty() {
+        H_FALLBACK
+    } else {
+        b1_dys.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        b1_dys[b1_dys.len() / 2]
+    };
+
+    // Dynamic band classifier. Band 1 uses the static window (that's the
+    // window we measured H in). Bands 2..=5 use half-step windows around
+    // integer multiples of H, so a sample at |dy| ≈ N*H lands cleanly in
+    // band N even for shallow or steep staircases.
+    let band_of = |d: f32| -> i8 {
+        let ad = d.abs();
+        if ad >= B1_LO && ad <= B1_HI {
+            return if d > 0.0 { 1 } else { -1 };
+        }
+        for n in 2..=5i8 {
+            let nf = n as f32;
+            let lo = (nf - 0.5) * h_step;
+            let hi = (nf + 0.5) * h_step;
+            if ad > lo && ad <= hi {
+                return if d > 0.0 { n } else { -n };
+            }
+        }
+        0
+    };
+
     // Per-bearing radial chaining pass.
     for bi in 0..RING_SAMPLES {
         let mut prev_level: i8 = 0; // 0 = player's tread level
@@ -2014,6 +2079,129 @@ pub fn apply_self_prediction_system(
         );
     }
 
+    // ---------- Ascent march ----------
+    // Mirror of the purple (descent) march for stairs the player is walking
+    // UP into. Structure is deliberately parallel: detect the direction from
+    // up-band samples, march outward at 0.1, watch for RISES of ~0.4 as
+    // risers accumulate, compute rise/run.
+    //
+    // Deliberately does NOT touch best_slope, ramp_locked, up_dir_slope_override,
+    // or the ramp gizmo — those are downhill lock machinery. The ascent slope
+    // is a reporting-only measurement so the HUD stops showing `up=-` while
+    // sitting on a bunch of up+1 samples.
+    let mut purple_slope_up: Option<f32> = None;
+    let mut up_rise_detected = false;
+    for k in 0..valid_count {
+        if valid_samples[k].4 > 0 { up_rise_detected = true; break; }
+    }
+    // Direction of the ascent — weighted sum of UP-BAND sample bearings from
+    // the validated dataset. Weight by band height (|band| ∈ 1..=5).
+    let mut ascent_dir = bevy::math::Vec2::ZERO;
+    for k in 0..valid_count {
+        let (_ri, _bi, xz, _y, band) = valid_samples[k];
+        if band <= 0 { continue; }
+        let dir = xz - center_xz;
+        if dir.length_squared() > 1e-6 {
+            ascent_dir += dir.normalize() * (band as f32);
+        }
+    }
+    let up_march_dir = if ascent_dir.length_squared() > 1e-6 {
+        ascent_dir.normalize()
+    } else {
+        up_dir
+    };
+    if up_march_dir.length_squared() > 0.5 && up_rise_detected {
+        const STEP: f32 = 0.1;
+        const MAX_MARCH: f32 = 6.0;
+        const RISER_MIN: f32 = 0.2;
+        const RISER_MAX: f32 = 0.45;
+        let n_steps = ((MAX_MARCH / STEP) as usize).min(60);
+        let mut prev_y = center_y_raw;
+        let mut current_tread_y = center_y_raw;
+        // Same red-proximity guard as the descent march — if a probe lands
+        // near a red ring sample, the raycast is going into the same
+        // unreliable geometry, so we stop the march there.
+        let mut red_xz: [bevy::math::Vec2; 60] = [bevy::math::Vec2::ZERO; 60];
+        let mut red_count: usize = 0;
+        for ri in 0..5 {
+            for bi in 0..RING_SAMPLES {
+                let slot = ri * RING_SAMPLES + bi;
+                let sd = &sample_data[slot];
+                if sd.1.is_nan() { continue; }
+                if sd.2 || sd.3 != 0 { continue; }
+                let dy = sd.1 - center_y_raw;
+                if dy.abs() < 0.15 { continue; }
+                if red_count < 60 {
+                    red_xz[red_count] = sd.0;
+                    red_count += 1;
+                }
+            }
+        }
+        const RED_PROX: f32 = 0.35;
+        let mut up_risers_arr: [(bevy::math::Vec2, f32); 5] =
+            [(bevy::math::Vec2::ZERO, f32::NAN); 5];
+        let mut up_riser_count: usize = 0;
+        for i in 1..=n_steps {
+            let along = STEP * i as f32;
+            let probe_xz = center_xz + up_march_dir * along;
+            let mut near_red = false;
+            for k in 0..red_count {
+                if probe_xz.distance_squared(red_xz[k]) < RED_PROX * RED_PROX {
+                    near_red = true;
+                    break;
+                }
+            }
+            if near_red { break; }
+            // Look higher for the ascent raycast — a step ahead might be up
+            // to 5 risers above us over 6 units of march, so start the ray
+            // well above that.
+            let y = match collision.ground_raycast(probe_xz, center_y_raw + 4.0) {
+                Some(y) => y,
+                None => break,
+            };
+            // Rise between this sample and the previous 0.1 sample.
+            let step_rise = y - prev_y; // positive = went up
+            // Ascent-specific: raycasts snap to tread tops, so a single 0.1
+            // horizontal step can slightly overshoot a riser height when the
+            // probe lands just past a tread edge. The descent uses RISER_MAX
+            // (0.45) for its cliff gate; for ascent we allow a hair more so
+            // a probe that lands ~0.47 above the previous doesn't kill the
+            // march. Anything past 0.5 is a real wall.
+            const ASCENT_CLIFF_MAX: f32 = 0.48;
+            if step_rise > ASCENT_CLIFF_MAX {
+                // Too tall for a single stair riser in one 0.1 step: wall.
+                break;
+            }
+            // Cumulative rise from the current tread level.
+            let tread_rise = y - current_tread_y; // positive = above tread
+            if tread_rise >= RISER_MIN && tread_rise <= RISER_MAX {
+                if up_riser_count < 5 {
+                    up_risers_arr[up_riser_count] = (probe_xz, along);
+                    up_riser_count += 1;
+                }
+                current_tread_y = y;
+                if up_riser_count >= 5 { break; }
+            } else if tread_rise > RISER_MAX {
+                if up_riser_count < 5 {
+                    up_risers_arr[up_riser_count] = (probe_xz, along);
+                    up_riser_count += 1;
+                }
+                current_tread_y += 0.4;
+                if up_riser_count >= 5 { break; }
+            }
+            prev_y = y;
+        }
+        if up_riser_count >= 2 {
+            let first = up_risers_arr[0];
+            let last = up_risers_arr[up_riser_count - 1];
+            let run = last.1 - first.1;
+            let rise = 0.4 * (up_riser_count as f32 - 1.0);
+            if run > 1e-3 {
+                purple_slope_up = Some(rise / run); // magnitude; up
+            }
+        }
+    }
+
     // Ring-average fallback (Better-B) — median-reject over middle ring only,
     // used only when the ramp fit didn't lock.
     let mut ring_avg = center_y_raw;
@@ -2219,6 +2407,7 @@ pub fn apply_self_prediction_system(
         purple_risers: purple_risers_arr,
         purple_riser_count,
         purple_slope: purple_slope.unwrap_or(f32::NAN),
+        purple_slope_up: purple_slope_up.unwrap_or(f32::NAN),
     };
 
     // Preserve rotation — self_visual_yaw_system owns it.
@@ -3664,81 +3853,10 @@ pub fn draw_footprint_debug_system(
         }
     }
 
-    // Lock-check status marker above character's head:
-    //   0 gray  = no detection
-    //   0 cyan (override) = bands detected on ground but no fit stage reached
-    //   1 red   = detection but up_dir too weak
-    //   2 orange = grid probes < 8
-    //   3 yellow = line fit math failed
-    //   4 amber = R^2 too low
-    //   5 pink  = R^2 ok but slope out of stair range
-    //   6 lime  = LOCKED
-    let any_band = dbg.sampled_points.iter().any(|(_, _, _, b)| *b != 0);
-    let (r,g,b) = match dbg.lock_check {
-        1 => (1.0, 0.0, 0.0),
-        2 => (1.0, 0.4, 0.0),
-        3 => (1.0, 1.0, 0.0),
-        4 => (1.0, 0.7, 0.0),
-        5 => (1.0, 0.4, 0.6),
-        6 => (0.2, 1.0, 0.2),
-        _ => if any_band { (0.0, 0.9, 1.0) } else { (0.3, 0.3, 0.3) },
-    };
-    let head = Vec3::new(dbg.center_xz.x, dbg.center_y + 2.5, dbg.center_xz.y);
-    gizmos.sphere(Isometry3d::from_translation(head), 0.15, Color::srgb(r, g, b));
-
-    // Diagnostic orbs for the strongest DOWN-bearing (when there is one).
-    // Left orb (R²): radius scales 0.05..=0.30 with R² clamped to 0..=1.
-    //   Green if R² ≥ CONF_MIN (0.4), red otherwise.
-    // Right orb (|slope|): radius scales 0.05..=0.30 with |slope| clamped
-    //   to 0..=1. Green if |slope| in [0.20, 0.80], red otherwise.
-    // Positioned to the left and right of the head sphere so both are
-    // legible next to it.
-    if !dbg.down_bearing_r2.is_nan() && !dbg.down_bearing_abs_slope.is_nan() {
-        let r2 = dbg.down_bearing_r2.clamp(0.0, 1.0);
-        let abs_slope_clamped = dbg.down_bearing_abs_slope.clamp(0.0, 1.0);
-        let r2_ok = dbg.down_bearing_r2 >= 0.40;
-        let slope_ok = dbg.down_bearing_abs_slope >= 0.20 && dbg.down_bearing_abs_slope <= 0.80;
-        let r2_col = if r2_ok { Color::srgb(0.2, 1.0, 0.2) } else { Color::srgb(1.0, 0.2, 0.2) };
-        let sl_col = if slope_ok { Color::srgb(0.2, 1.0, 0.2) } else { Color::srgb(1.0, 0.2, 0.2) };
-        let r2_size = 0.05 + 0.25 * r2;
-        let sl_size = 0.05 + 0.25 * abs_slope_clamped;
-        let r2_pos = Vec3::new(dbg.center_xz.x - 0.5, dbg.center_y + 2.5, dbg.center_xz.y);
-        let sl_pos = Vec3::new(dbg.center_xz.x + 0.5, dbg.center_y + 2.5, dbg.center_xz.y);
-        gizmos.sphere(Isometry3d::from_translation(r2_pos), r2_size, r2_col);
-        gizmos.sphere(Isometry3d::from_translation(sl_pos), sl_size, sl_col);
-    }
-    // Per-side FIT diagnostic orbs — one row HIGHER above the head. If these
-    // are missing entirely, the per-side block never ran (any_qualifies stayed
-    // false — i.e. no bearing qualified globally). If they render but are
-    // red, the per-side fit produced values that DID fail the check even
-    // though individual bearings passed.
-    if !dbg.fwd_fit_r2.is_nan() && !dbg.fwd_fit_abs_slope.is_nan() {
-        let r2 = dbg.fwd_fit_r2.clamp(0.0, 1.0);
-        let abs_slope_clamped = dbg.fwd_fit_abs_slope.clamp(0.0, 1.0);
-        let r2_ok = dbg.fwd_fit_r2 >= 0.40;
-        let slope_ok = dbg.fwd_fit_abs_slope >= 0.20 && dbg.fwd_fit_abs_slope <= 0.80;
-        let r2_col = if r2_ok { Color::srgb(0.2, 1.0, 0.2) } else { Color::srgb(1.0, 0.2, 0.2) };
-        let sl_col = if slope_ok { Color::srgb(0.2, 1.0, 0.2) } else { Color::srgb(1.0, 0.2, 0.2) };
-        let r2_size = 0.05 + 0.25 * r2;
-        let sl_size = 0.05 + 0.25 * abs_slope_clamped;
-        let r2_pos = Vec3::new(dbg.center_xz.x - 0.5, dbg.center_y + 3.3, dbg.center_xz.y);
-        let sl_pos = Vec3::new(dbg.center_xz.x + 0.5, dbg.center_y + 3.3, dbg.center_xz.y);
-        gizmos.sphere(Isometry3d::from_translation(r2_pos), r2_size, r2_col);
-        gizmos.sphere(Isometry3d::from_translation(sl_pos), sl_size, sl_col);
-        // Magnitude read-out: stack of small white marker orbs to the right of
-        // the slope orb, one per 0.25 of raw |slope|. Lets us read whether the
-        // fwd-fit slope is slightly over 0.80 (3-4 markers) or wildly over
-        // (many markers) without a text overlay. Raw, unclamped.
-        let markers = (dbg.fwd_fit_abs_slope / 0.25).floor().clamp(0.0, 12.0) as i32;
-        for m in 0..markers {
-            let mp = Vec3::new(
-                dbg.center_xz.x + 1.0,
-                dbg.center_y + 3.0 + 0.18 * m as f32,
-                dbg.center_xz.y,
-            );
-            gizmos.sphere(Isometry3d::from_translation(mp), 0.06, Color::srgb(1.0, 1.0, 1.0));
-        }
-    }
+    // (Removed: overhead diagnostic orbs — head lock_check status sphere,
+    // down-bearing R²/slope pair, fwd-fit R²/slope pair, magnitude markers.
+    // All of that info now shows numerically in the Stair Debug HUD panel,
+    // so the overhead balls were pure visual noise.)
 
     // Purple straight-down march visualization. Each vertical probe hit is a
     // small purple dot at the true ground height. Detected risers are bright
@@ -3837,11 +3955,12 @@ pub fn update_stair_debug_snapshot_system(
     snap.drawing_enabled = panels.stair_draw;
     snap.player_xz = dbg.center_xz;
     snap.player_y = dbg.center_y;
-    // Slopes: derive from lock state and the purple march measurement.
+    // Slopes: derive from lock state and the purple march measurements.
     // For a locked staircase, lock_slope is the authoritative signed slope.
     // Show the up direction's magnitude as slope_up when slope > 0, else
-    // slope_down. Purple's measurement (purple_slope) is a positive magnitude
-    // for descents; expose it as slope_down if no up-slope is live.
+    // slope_down. The two purple march measurements (purple_slope and
+    // purple_slope_up) are positive magnitudes; expose them if the lock
+    // hasn't already claimed that direction.
     let (mut slope_up, mut slope_down) = (None, None);
     if dbg.lock_active {
         if dbg.lock_slope > 0.0 { slope_up = Some(dbg.lock_slope); }
@@ -3849,6 +3968,9 @@ pub fn update_stair_debug_snapshot_system(
     }
     if slope_down.is_none() && !dbg.purple_slope.is_nan() && dbg.purple_slope > 0.0 {
         slope_down = Some(dbg.purple_slope);
+    }
+    if slope_up.is_none() && !dbg.purple_slope_up.is_nan() && dbg.purple_slope_up > 0.0 {
+        slope_up = Some(dbg.purple_slope_up);
     }
     snap.slope_up = slope_up;
     snap.slope_down = slope_down;

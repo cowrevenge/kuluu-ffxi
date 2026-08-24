@@ -2180,6 +2180,10 @@ pub fn apply_self_prediction_system(
     // is a reporting-only measurement so the HUD stops showing `up=-` while
     // sitting on a bunch of up+1 samples.
     let mut purple_slope_up: Option<f32> = None;
+    // Measured raycast Y at the first/last ascent riser, hoisted to fn scope
+    // so the render step can anchor on it (mirrors first_riser_y for descent).
+    let mut up_first_riser_y: f32 = 0.0;
+    let mut up_last_riser_y: f32 = 0.0;
     let mut up_rise_detected = false;
     for k in 0..valid_count {
         if valid_samples[k].4 > 0 { up_rise_detected = true; break; }
@@ -2231,8 +2235,6 @@ pub fn apply_self_prediction_system(
         let mut up_risers_arr: [(bevy::math::Vec2, f32); 5] =
             [(bevy::math::Vec2::ZERO, f32::NAN); 5];
         let mut up_riser_count: usize = 0;
-        let mut up_first_riser_y: f32 = 0.0;
-        let mut up_last_riser_y: f32 = 0.0;
         for i in 1..=n_steps {
             let along = STEP * i as f32;
             let probe_xz = center_xz + up_march_dir * along;
@@ -2553,56 +2555,49 @@ pub fn apply_self_prediction_system(
         }
     }
 
-    // Chosen y (debug/telemetry): locked plane, or ramp fit, or ring avg. The
-    // teardown here now only fires when the character is OUTSIDE the plane's
-    // extent (lock_valid stayed false above) — i.e. a far backstop. On-stairs
-    // frames are always within extent, so they never hit this path; the
-    // debounced ramp_locked exit is the real release at the landing.
-    let chosen_y = if lock_valid {
-        lock_predicted_y
+    // ---- Direct measured-slope render. No lock consultation, no smoothing. ----
+    // If the march measured a slope this frame, ride a plane anchored on the
+    // FIRST measured riser (its real raycast Y doesn't step with wire). If no
+    // march this frame, HOLD the last rendered Y -- never warp back to the
+    // stepped wire. Wire is only the first-ever-frame fallback.
+    //
+    // StaircaseLock above still runs (other systems read it), but this render
+    // path ignores it -- lock/blend flapping cannot corrupt Y anymore.
+    let measured_slope: Option<(f32, f32, f32)> =
+        if let (Some(ps), Some(fa)) = (purple_slope, march_first_riser_rel) {
+            // descent: signed negative (down along march_dir)
+            Some((-ps, fa, first_riser_y))
+        } else if let (Some(us), Some(fa)) = (purple_slope_up, march_first_riser_rel) {
+            // ascent: signed positive (up along march_dir)
+            Some((us, fa, up_first_riser_y))
+        } else {
+            None
+        };
+    let rendered_y = if let Some((signed_slope, first_along, first_y)) = measured_slope {
+        // Plane at char foot: foot along = 0, anchor at first_along along
+        // march_dir with measured Y = first_y. Signed slope. Foot Y is
+        //   render_y = first_y + (0 - first_along) * signed_slope
+        //           = first_y - first_along * signed_slope
+        // As char walks toward the anchor, first_along shrinks smoothly and
+        // render_y slides between tread heights every frame. No lock, no
+        // smoothing, just measured math.
+        first_y - first_along * signed_slope
+    } else if yblend.init {
+        // No march this frame -- hold last rendered Y. No warp to wire.
+        yblend.last
     } else {
-        // Not on the lock (or no lock): disengage the lock so it doesn't
-        // linger and mispredict, and fall back to ramp fit or ring avg.
-        if lock.active && !lock_valid {
-            lock.active = false;
-        }
-        ramp_y.unwrap_or(ring_avg)
+        // First-ever frame with no march -- fall back to wire.
+        target.y
     };
+    let chosen_y = rendered_y;
     let avg_for_dbg = chosen_y;
     let slope_active = (chosen_y - center_y_raw).abs() > 0.05;
-
-    // Rendered Y. Locked → ride the measured plane exactly. Unlocked → raw
-    // wire Y (snapped tread-to-tread; identical to the floor on flat ground,
-    // so no visual difference there). The old code added offset_above_tread
-    // (wire Y minus floor) on top of the smooth value, which reinjected the
-    // tread snap into the render — the per-step pop-then-dip.
-    //
-    // INVARIANT (protects classification): the rendered slope Y must never
-    // feed a raycast ceiling or a classification baseline. All sampling in
-    // this function anchors to the wire-derived `target` captured BEFORE
-    // this assignment, and `target` is rebuilt from prediction.pos every
-    // tick — so greens stay green no matter what we render.
-    let desired_y = if lock_valid { lock_predicted_y } else { target.y };
-    const RENDER_Y_BLEND_SECS: f32 = 0.1;
-    let flipped = yblend.init && yblend.was_locked != lock_valid;
-    if !yblend.init {
-        yblend.init = true;
-        yblend.last = desired_y;
-    }
-    yblend.was_locked = lock_valid;
-    if flipped {
-        yblend.from = yblend.last;
-        yblend.left = RENDER_Y_BLEND_SECS;
-    }
-    let rendered_y = if yblend.left > 0.0 {
-        let t = 1.0 - (yblend.left / RENDER_Y_BLEND_SECS).clamp(0.0, 1.0);
-        let e = t * t * (3.0 - 2.0 * t); // smoothstep ease
-        yblend.left = (yblend.left - time.delta_secs()).max(0.0);
-        yblend.from + (desired_y - yblend.from) * e
-    } else {
-        desired_y
-    };
+    // yblend collapses to a pure hold-slot (no smoothstep, no lerp).
+    yblend.init = true;
     yblend.last = rendered_y;
+    yblend.was_locked = false;
+    yblend.from = rendered_y;
+    yblend.left = 0.0;
     target.y = rendered_y;
 
     let _ = best_conf;

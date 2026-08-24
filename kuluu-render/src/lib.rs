@@ -61,6 +61,7 @@ pub mod skinned_ffxi_material;
 pub mod skybox;
 pub mod snapshot;
 pub mod source;
+pub mod stair_cache;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod sub_area_activation;
 pub mod sub_target;
@@ -271,6 +272,7 @@ impl<S: SceneSource + Resource + Component<Mutability = bevy::ecs::component::Mu
             .init_resource::<scene::SelfAppearance>()
             .init_resource::<nameplate_billboard::BillboardFont>()
             .init_resource::<ui_font::UiFont>()
+            .init_resource::<stair_cache::StairCache>()
             .add_plugins(nameplate_color::NameColorPlugin)
             .add_plugins(nameplate_icons::NameplateIconsPlugin)
             .add_plugins(PickingPlugin)
@@ -293,6 +295,10 @@ impl<S: SceneSource + Resource + Component<Mutability = bevy::ecs::component::Mu
             .add_systems(
                 PreUpdate,
                 vana_time::ingest_vana_time.after(ingest_system::<S>),
+            )
+            .add_systems(
+                Update,
+                stair_cache::invalidate_cache_on_zone_change_system,
             )
             .add_systems(
                 Update,

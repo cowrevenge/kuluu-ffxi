@@ -1441,7 +1441,6 @@ pub fn apply_self_prediction_system(
     const STAIR_SLOPE_MIN: f32 = 0.20;
     const STAIR_SLOPE_MAX: f32 = 0.80;
     const CONF_MIN: f32 = 0.40;   // R^2 threshold — low because a staircase fit through a step-shaped point cloud is inherently noisy vs a true line
-    const FP_REJECT: f32 = 0.5;   // ring-average outlier threshold
 
     let center_xz = bevy::math::Vec2::new(target.x, target.z);
     let center_y_raw = collision.ground_raycast(center_xz, target.y + 2.0).unwrap_or(target.y);

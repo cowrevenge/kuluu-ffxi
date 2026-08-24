@@ -135,6 +135,11 @@ pub struct StaircaseLock {
     pub burst: [(bevy::math::Vec3, bool); 21],
     // Trigger delay: rings must detect stairs for 2 consecutive frames.
     pub detect_streak: u8,
+    // Slope smoother: counts consecutive frames where a newly measured slope
+    // disagreed with `slope` by more than SLOPE_MATCH_TOL. On streak >= 3 (or
+    // a sign flip) the new value replaces `slope`. A single noisy frame
+    // otherwise leaves `slope` untouched so the rendered plane doesn't tilt.
+    pub slope_streak: u8,
 }
 
 impl Default for StaircaseLock {
@@ -152,6 +157,7 @@ impl Default for StaircaseLock {
             back_extent: 0.0,
             burst: [(bevy::math::Vec3::ZERO, false); 21],
             detect_streak: 0,
+            slope_streak: 0,
         }
     }
 }
@@ -195,17 +201,6 @@ pub struct FootprintDebug {
     pub lock_back_extent: f32,               // how far behind the plane extends
     // 15-point grid burst hits captured at lock time (5 forward x 3 wide).
     pub burst_hits: [(bevy::math::Vec3, bool); 21], // 7x3 grid
-    pub lock_check: u8, // 0 none, 1 up-weak, 2 few-pts, 3 fit-fail, 4 lo-r2, 5 lo-slope, 6 LOCKED
-    // Strongest down-bearing fit found this frame (highest |slope|*r2 among
-    // bearings whose fit slope was negative). NaN if no down-bearing had a
-    // usable fit. Used to render two colored diagnostic orbs above the head
-    // so we can see R² and |slope| without a text overlay.
-    pub down_bearing_r2: f32,
-    pub down_bearing_abs_slope: f32,
-    // Forward-side per-side fit result (whichever side up_dir points at).
-    // NaN if the per-side block didn't run (any_qualifies stayed false).
-    pub fwd_fit_r2: f32,
-    pub fwd_fit_abs_slope: f32,
     // Purple straight-down march: probe hits and detected risers. Fixed
     // arrays (not Vec) so FootprintDebug stays Copy. NaN y = unused slot.
     pub purple_probes: [(bevy::math::Vec2, f32); 60],
@@ -245,11 +240,6 @@ impl Default for FootprintDebug {
             lock_forward_extent: 0.0,
             lock_back_extent: 0.0,
             burst_hits: [(bevy::math::Vec3::ZERO, false); 21],
-            lock_check: 0,
-            down_bearing_r2: f32::NAN,
-            down_bearing_abs_slope: f32::NAN,
-            fwd_fit_r2: f32::NAN,
-            fwd_fit_abs_slope: f32::NAN,
             purple_probes: [(bevy::math::Vec2::ZERO, f32::NAN); 60],
             purple_probe_count: 0,
             purple_risers: [(bevy::math::Vec2::ZERO, f32::NAN); 5],
@@ -1402,6 +1392,57 @@ pub fn recover_self_ground_system(
     let _ = cmd_tx.0.try_send(cmd);
 }
 
+/// Render-Y blend state for `apply_self_prediction_system`: eases the rendered
+/// Y over ~100ms when the source flips between the locked stair plane and the
+/// raw wire Y, so lock engage/disengage (the first/last riser) doesn't pop.
+#[derive(Default)]
+pub struct RenderYBlend {
+    init: bool,
+    was_locked: bool,
+    last: f32,
+    from: f32,
+    left: f32,
+}
+
+/// Slope smoother for `StaircaseLock`. Called at every lock re-engage. Retains
+/// the previous `lock.slope` when the newly measured value is close (within
+/// SLOPE_MATCH_TOL), so a noisy fit that re-locks a slightly different slope
+/// each frame doesn't visibly tilt the rendered plane frame-to-frame. Releases
+/// (accepts the new value) when the streak of mismatches hits SLOPE_MISMATCH_MAX,
+/// or immediately if the sign flipped (ascending ↔ descending is a real
+/// transition across a landing, not noise).
+///
+/// `prev`: the current `lock.slope` (0.0 the very first time — treated as
+///   "no prior", accept unconditionally).
+/// `new`:  the freshly measured slope this frame.
+/// `streak`: mutable mismatch counter, reset on accept.
+fn smooth_lock_slope(prev: f32, new: f32, streak: &mut u8) -> f32 {
+    const SLOPE_MATCH_TOL: f32 = 0.05;
+    const SLOPE_MISMATCH_MAX: u8 = 3;
+    // No prior lock: seed and accept.
+    if prev == 0.0 {
+        *streak = 0;
+        return new;
+    }
+    // Sign flip: real geometry change, accept immediately.
+    if prev.signum() != new.signum() {
+        *streak = 0;
+        return new;
+    }
+    // Close enough: keep the smoothed value, reset streak.
+    if (new - prev).abs() <= SLOPE_MATCH_TOL {
+        *streak = 0;
+        return prev;
+    }
+    // Mismatch: bump streak. Release once we've seen enough disagreement in a row.
+    *streak = streak.saturating_add(1);
+    if *streak >= SLOPE_MISMATCH_MAX {
+        *streak = 0;
+        return new;
+    }
+    prev
+}
+
 /// Apply the local walker's predicted position directly to the IsSelf
 /// Transform. Runs in FixedUpdate right after `dispatch_movement_system` so
 /// the rendered player follows the walker deterministically at 60 Hz. Without
@@ -1411,8 +1452,10 @@ pub fn recover_self_ground_system(
 pub fn apply_self_prediction_system(
     prediction: Res<LocalPlayerPrediction>,
     collision: Res<kuluu_render::dat_mzb::MzbCollisionGeometry>,
+    time: Res<Time<Fixed>>,
     mut dbg: ResMut<FootprintDebug>,
     mut lock: ResMut<StaircaseLock>,
+    mut yblend: Local<RenderYBlend>,
     mut q_self: Query<
         &mut Transform,
         (With<IsSelf>, Without<OperatorCamera>),
@@ -1484,7 +1527,6 @@ pub fn apply_self_prediction_system(
 
     let center_xz = bevy::math::Vec2::new(target.x, target.z);
     let center_y_raw = collision.ground_raycast(center_xz, target.y + 2.0).unwrap_or(target.y);
-    let offset_above_tread = target.y - center_y_raw;
 
     // 12 bearings at 30° spacing (was 8 at 45°). Finer angular resolution
     // for detecting stair direction; generated procedurally.
@@ -1733,23 +1775,8 @@ pub fn apply_self_prediction_system(
     let mut best_conf: f32 = 0.0;
     let mut best_slope: f32 = 0.0;
     let mut any_qualifies = false;
-    // Track the strongest DOWN-bearing (negative-slope) for diagnostic display.
-    // "Strongest" = highest |slope| * r2 product, regardless of whether it
-    // passed the qualification checks. Lets us see, on a frame with cyan
-    // bands but no lock, exactly what R² and |slope| the fits produced.
-    let mut down_best_score: f32 = 0.0;
-    let mut down_best_r2: f32 = f32::NAN;
-    let mut down_best_abs_slope: f32 = f32::NAN;
     for bi in 0..RING_SAMPLES {
         if let Some((slope, r2)) = bearing_slopes[bi] {
-            if slope < 0.0 {
-                let score = slope.abs() * r2.max(0.0);
-                if score > down_best_score {
-                    down_best_score = score;
-                    down_best_r2 = r2;
-                    down_best_abs_slope = slope.abs();
-                }
-            }
             if r2 >= CONF_MIN
                 && slope.abs() >= STAIR_SLOPE_MIN
                 && slope.abs() <= STAIR_SLOPE_MAX
@@ -1779,10 +1806,6 @@ pub fn apply_self_prediction_system(
     // direction), so the lock uses THIS rather than up_dir which may point at
     // an ascending flight.
     let mut purple_march_dir: bevy::math::Vec2 = bevy::math::Vec2::ZERO;
-    // Per-side fit diagnostics — captured to render as orbs so we can see
-    // whether the fit stage actually qualifies for down-stairs.
-    let mut dbg_fwd_fit_r2: f32 = f32::NAN;
-    let mut dbg_fwd_fit_abs_slope: f32 = f32::NAN;
 
     if any_qualifies && acc.length_squared() > 1e-6 {
         // Continuous up-stairs direction (not snapped to 8 bearings).
@@ -1856,11 +1879,6 @@ pub fn apply_self_prediction_system(
             let ys: Vec<f32> = back_pts.iter().map(|p| p.1).collect();
             fit4(&xs, &ys)
         } else { None };
-        // Capture fwd_fit result for diagnostic display.
-        if let Some((s, _, r)) = fwd_fit {
-            dbg_fwd_fit_r2 = r;
-            dbg_fwd_fit_abs_slope = s.abs();
-        }
         // A side qualifies if slope in stair range AND R² passes.
         let side_qualifies = |f: Option<(f32, f32, f32)>| -> Option<(f32, f32, f32)> {
             f.and_then(|(s, i, r)| {
@@ -2202,6 +2220,28 @@ pub fn apply_self_prediction_system(
         }
     }
 
+    // Wire the ascent march into the lock plumbing on frames where the
+    // descent march did NOT produce a slope (i.e. the player is going up,
+    // not down). Without this, `ramp_locked` never fires from ascent,
+    // `detect_streak` never accumulates, the burst grid never runs, and
+    // the render side never gets a smoothed plane on climbs. The ascent
+    // slope is signed positive (going up), so up_dir_slope_override gets
+    // +slope; up_dir stays the ascent march's measured direction.
+    if purple_slope.is_none() {
+        if let Some(us) = purple_slope_up {
+            best_slope = us; // up
+            ramp_locked = true;
+            up_dir_slope_override = Some(us);
+            purple_march_dir = up_march_dir;
+            let far_dist = FWD_START + FWD_STEP * (FWD_COUNT as f32 - 1.0);
+            ramp_near = (center_xz, center_y_raw);
+            ramp_far = (
+                center_xz + up_march_dir * far_dist,
+                center_y_raw + us * far_dist, // ascending
+            );
+        }
+    }
+
     // Ring-average fallback (Better-B) — median-reject over middle ring only,
     // used only when the ramp fit didn't lock.
     let mut ring_avg = center_y_raw;
@@ -2250,11 +2290,10 @@ pub fn apply_self_prediction_system(
         lock.detect_streak = 0;
     }
 
-    let mut lock_dbg_check: u8 = 0;
+    // Whether the grid fit locked this frame. The purple-march override
+    // below consults it to avoid re-locking on top of a successful grid fit.
+    let mut grid_locked = false;
     // Fire the burst if we have a fresh 2-frame detection and no active lock.
-    if !lock.active && lock.detect_streak >= 1 {
-        lock_dbg_check = 1; // up_dir too weak by default; overwritten below
-    }
     if !lock.active && lock.detect_streak >= 1
         && (up_dir.length_squared() > 0.5 || up_dir_slope_override.is_some())
     {
@@ -2283,7 +2322,6 @@ pub fn apply_self_prediction_system(
         // outliers first: when standing at the top of stairs, many far probes
         // hit the flat landing at the same Y, which pulls R^2 down. Keep only
         // points whose Y is "in line" with a stair-shaped trend.
-        if grid_pts.len() < 8 { lock_dbg_check = 2; }
         if grid_pts.len() >= 8 {
             // Preliminary fit with all points.
             let xs_all: Vec<f32> = grid_pts.iter().map(|p| p.0).collect();
@@ -2303,17 +2341,14 @@ pub fn apply_self_prediction_system(
             } else {
                 (xs_all, ys_all)
             };
-            lock_dbg_check = 3; // fit-failed sentinel; overwritten below
             if let Some((s2, i2, r2c)) = fit4(&xs, &ys) {
-                if r2c < 0.5 { lock_dbg_check = 4; }
-                else if s2.abs() < STAIR_SLOPE_MIN || s2.abs() > STAIR_SLOPE_MAX { lock_dbg_check = 5; }
                 if r2c >= 0.5 && s2.abs() >= STAIR_SLOPE_MIN && s2.abs() <= STAIR_SLOPE_MAX {
                     // LOCK.
-                    lock_dbg_check = 6;
+                    grid_locked = true;
                     lock.active = true;
                     lock.origin_xz = center_xz;
                     lock.up_dir = up_dir;
-                    lock.slope = s2;
+                    lock.slope = smooth_lock_slope(lock.slope, s2, &mut lock.slope_streak);
                     lock.base_y = i2;
                     lock.tread_depth = 1.0;                    // FFXI treads ~1.0 wide
                     lock.riser = 0.4;                          // and 0.4 tall
@@ -2328,10 +2363,9 @@ pub fn apply_self_prediction_system(
             // measured an EXACT slope from vertical probes, lock using that.
             // Purple's rise/run is a direct measurement, not a regression, so
             // it's authoritative for the down case the grid fit gets wrong.
-            if lock_dbg_check != 6 {
+            if !grid_locked {
                 if let Some(measured) = up_dir_slope_override {
                     if measured.abs() >= STAIR_SLOPE_MIN && measured.abs() <= STAIR_SLOPE_MAX {
-                        lock_dbg_check = 6;
                         lock.active = true;
                         lock.origin_xz = center_xz;
                         // Use the descent direction the purple march measured
@@ -2341,7 +2375,8 @@ pub fn apply_self_prediction_system(
                         } else {
                             up_dir
                         };
-                        lock.slope = measured;      // exact, signed (down = negative)
+                        // exact, signed (down = negative)
+                        lock.slope = smooth_lock_slope(lock.slope, measured, &mut lock.slope_streak);
                         lock.base_y = center_y_raw; // anchor at the player's foot
                         lock.tread_depth = 1.0;
                         lock.riser = 0.4;
@@ -2355,7 +2390,26 @@ pub fn apply_self_prediction_system(
         }
     }
 
-    // Chosen y: locked plane (best), or ramp fit, or ring avg.
+    // Re-evaluate lock validity now that the burst block may have engaged a
+    // fresh lock this frame. Without this, a lock that just went active would
+    // still see lock_valid=false from the pre-burst evaluation, and the
+    // chosen_y branch below would immediately disengage it before the render
+    // step ever got to ride the plane. That was the "35 ticks with
+    // slope_streak>0 but 0 ticks with lock.active" symptom in the capture.
+    if lock.active && !lock_valid {
+        let rel = center_xz - lock.origin_xz;
+        let along = rel.dot(lock.up_dir);
+        let across = (rel - lock.up_dir * along).length();
+        if along >= -lock.back_extent && along <= lock.forward_extent && across <= lock.width {
+            let pred = lock.base_y + along * lock.slope;
+            if (ring_avg - pred).abs() <= lock.riser * 2.0 {
+                lock_predicted_y = pred;
+                lock_valid = true;
+            }
+        }
+    }
+
+    // Chosen y (debug/telemetry): locked plane, or ramp fit, or ring avg.
     let chosen_y = if lock_valid {
         lock_predicted_y
     } else {
@@ -2368,7 +2422,40 @@ pub fn apply_self_prediction_system(
     };
     let avg_for_dbg = chosen_y;
     let slope_active = (chosen_y - center_y_raw).abs() > 0.05;
-    target.y = chosen_y + offset_above_tread;
+
+    // Rendered Y. Locked → ride the measured plane exactly. Unlocked → raw
+    // wire Y (snapped tread-to-tread; identical to the floor on flat ground,
+    // so no visual difference there). The old code added offset_above_tread
+    // (wire Y minus floor) on top of the smooth value, which reinjected the
+    // tread snap into the render — the per-step pop-then-dip.
+    //
+    // INVARIANT (protects classification): the rendered slope Y must never
+    // feed a raycast ceiling or a classification baseline. All sampling in
+    // this function anchors to the wire-derived `target` captured BEFORE
+    // this assignment, and `target` is rebuilt from prediction.pos every
+    // tick — so greens stay green no matter what we render.
+    let desired_y = if lock_valid { lock_predicted_y } else { target.y };
+    const RENDER_Y_BLEND_SECS: f32 = 0.1;
+    let flipped = yblend.init && yblend.was_locked != lock_valid;
+    if !yblend.init {
+        yblend.init = true;
+        yblend.last = desired_y;
+    }
+    yblend.was_locked = lock_valid;
+    if flipped {
+        yblend.from = yblend.last;
+        yblend.left = RENDER_Y_BLEND_SECS;
+    }
+    let rendered_y = if yblend.left > 0.0 {
+        let t = 1.0 - (yblend.left / RENDER_Y_BLEND_SECS).clamp(0.0, 1.0);
+        let e = t * t * (3.0 - 2.0 * t); // smoothstep ease
+        yblend.left = (yblend.left - time.delta_secs()).max(0.0);
+        yblend.from + (desired_y - yblend.from) * e
+    } else {
+        desired_y
+    };
+    yblend.last = rendered_y;
+    target.y = rendered_y;
 
     let _ = best_conf;
     let _ = best_slope;
@@ -2397,11 +2484,6 @@ pub fn apply_self_prediction_system(
         lock_forward_extent: lock.forward_extent,
         lock_back_extent: lock.back_extent,
         burst_hits: lock.burst,
-        lock_check: lock_dbg_check,
-        down_bearing_r2: down_best_r2,
-        down_bearing_abs_slope: down_best_abs_slope,
-        fwd_fit_r2: dbg_fwd_fit_r2,
-        fwd_fit_abs_slope: dbg_fwd_fit_abs_slope,
         purple_probes: purple_probes_arr,
         purple_probe_count,
         purple_risers: purple_risers_arr,

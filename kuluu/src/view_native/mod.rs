@@ -729,6 +729,8 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
             input::dispatch_movement_system,
             input::recover_self_ground_system,
             input::apply_self_prediction_system,
+            // FFXI_STAIR_CAPTURE: one JSON position line per tick (no-op unless set).
+            input::stair_capture_system,
         )
             .chain()
             .run_if(in_state(AppPhase::InGame))
@@ -1208,6 +1210,23 @@ fn bridge_connecting(
     // systems can depend on it even when no socket is listening.
     let debug_ctrl = kuluu_session::debug_control::DebugControl::new_shared();
     commands.insert_resource(DebugControlHandle(debug_ctrl.clone()));
+
+    // Stair-capture drive channel (FFXI_STAIR_DRIVE): always present so the input
+    // path can depend on it; only listens when the env var names an address.
+    let stair_drive = std::sync::Arc::new(std::sync::Mutex::new(
+        crate::view_native::input::StairDrive::default(),
+    ));
+    commands.insert_resource(crate::view_native::input::StairDriveHandle(stair_drive.clone()));
+    if let Ok(spec) = std::env::var("FFXI_STAIR_DRIVE") {
+        let addr: std::net::SocketAddr = spec.parse().unwrap_or_else(|_| {
+            let port: u16 = spec.trim_start_matches(':').parse().unwrap_or(9537);
+            std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, port))
+        });
+        let drive = stair_drive.clone();
+        runtime.0.spawn(async move {
+            crate::view_native::input::serve_stair_drive(addr, drive).await;
+        });
+    }
 
     #[cfg(unix)]
     if let Some(arg) = agent.0.clone() {

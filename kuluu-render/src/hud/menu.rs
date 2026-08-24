@@ -262,6 +262,8 @@ pub const DEBUG_NOCLIP: &str = "NoClip";
 pub const DEBUG_SOUND: &str = "Sound";
 pub const DEBUG_VOLUME: &str = "Volume";
 pub const DEBUG_PRINT_POS: &str = "Print Pos";
+pub const DEBUG_STAIR_DRAW: &str = "Draw Stair Climber";
+pub const DEBUG_STAIR_STATUS: &str = "Show Stair Status";
 
 const DEBUG_ENTRIES: &[&str] = &[
     DEBUG_PERF,
@@ -272,6 +274,8 @@ const DEBUG_ENTRIES: &[&str] = &[
     DEBUG_SOUND,
     DEBUG_VOLUME,
     DEBUG_PRINT_POS,
+    DEBUG_STAIR_DRAW,
+    DEBUG_STAIR_STATUS,
 ];
 
 const GRAPHICS_ENTRIES: &[&str] = &[
@@ -1325,6 +1329,8 @@ pub fn debug_panel_state(
         DEBUG_NOCLIP => panels.noclip,
         DEBUG_NET_STATUS => net_status_on,
         DEBUG_SOUND => sound_on,
+        DEBUG_STAIR_DRAW => panels.stair_draw,
+        DEBUG_STAIR_STATUS => panels.stair_debug,
         // Print Pos is a button, not a toggle — always shows [off].
         _ => false,
     }

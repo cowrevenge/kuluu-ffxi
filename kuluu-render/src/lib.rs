@@ -97,7 +97,8 @@ pub use camera::{
     WORLD_GIZMO_LAYER,
 };
 pub use components::{
-    EntityModel, HpIndicator, InGameEntity, IsSelf, LookComp, Nameplate, WorldEntity,
+    CurrRenderPos, EntityModel, HpIndicator, InGameEntity, IsSelf, LookComp, Nameplate,
+    PrevRenderPos, WorldEntity,
 };
 pub use cursor::{system_cursor_icon, CursorPlugin, CursorRequests, CursorStyle};
 pub use cutscene::{CutsceneMode, CutscenePlugin, ScreenFade};
@@ -300,6 +301,7 @@ impl<S: SceneSource + Resource + Component<Mutability = bevy::ecs::component::Mu
                         sync_entities_system,
                         sync_entity_looks_system,
                         scene::ensure_self_lookcomp_system,
+                        scene::ensure_self_render_pos_system,
                         process_entity_look_changes,
                         camera_transition_system,
                         chase_camera_system,
@@ -328,6 +330,17 @@ impl<S: SceneSource + Resource + Component<Mutability = bevy::ecs::component::Mu
                 )
                     .chain()
                     .run_if(resource_exists::<EntityMesh>),
+            )
+            // Runs every rendered frame in the fixed-loop tail, after any
+            // fixed tick may have fired, before Update systems that read
+            // Transform (chase camera, nameplates). Lerps the visual position
+            // between the last two authoritative render Ys so a display frame
+            // rate faster than the 60Hz fixed step doesn't quantize the
+            // chase-camera anchor into visible stair-shake.
+            .add_systems(
+                bevy::prelude::RunFixedMainLoop,
+                scene::interpolate_self_transform_system
+                    .in_set(bevy::prelude::RunFixedMainLoopSystems::AfterFixedMainLoop),
             );
 
         #[cfg(not(target_arch = "wasm32"))]

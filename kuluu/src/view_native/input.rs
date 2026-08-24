@@ -1371,7 +1371,7 @@ pub struct RenderYBlend {
 pub fn apply_self_prediction_system(
     prediction: Res<LocalPlayerPrediction>,
     collision: Res<kuluu_render::dat_mzb::MzbCollisionGeometry>,
-    time: Res<Time<Fixed>>,
+    _time: Res<Time<Fixed>>,
     mut dbg: ResMut<FootprintDebug>,
     mut yblend: Local<RenderYBlend>,
     mut q_self: Query<
@@ -1710,7 +1710,7 @@ pub fn apply_self_prediction_system(
         }
     }
 
-    let mut ramp_y: Option<f32> = None;
+    let mut _ramp_y: Option<f32> = None;
     let mut ramp_locked = false;
     let mut fwd_probes_dbg: [(bevy::math::Vec2, f32); 11] =
         [(bevy::math::Vec2::ZERO, f32::NAN); 11];
@@ -1828,7 +1828,7 @@ pub fn apply_self_prediction_system(
             (None, None) => (0.0, 0.0, 0.0, true, false),
         };
         if any_side_qualified {
-            ramp_y = Some(raw_intercept);
+            _ramp_y = Some(raw_intercept);
             ramp_locked = true;
             let far_dist = FWD_START + FWD_STEP * (FWD_COUNT as f32 - 1.0);
             let dir_sign = if forward_side { 1.0 } else { -1.0 };
@@ -2187,26 +2187,6 @@ pub fn apply_self_prediction_system(
                 center_xz + up_march_dir * far_dist,
                 center_y_raw + us * far_dist, // ascending
             );
-        }
-    }
-
-    // Ring-average fallback (Better-B) — median-reject over middle ring only,
-    // used only when the ramp fit didn't lock.
-    let mut ring_avg = center_y_raw;
-    {
-        // Only validated middle-ring (ri==2) samples feed the fallback avg.
-        let mut hits: Vec<f32> = Vec::new();
-        for k in 0..valid_count {
-            if valid_samples[k].0 == 2 { hits.push(valid_samples[k].3); }
-        }
-        if hits.len() >= 3 {
-            hits.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-            let median = hits[hits.len() / 2];
-            let kept: Vec<f32> = hits.iter().copied()
-                .filter(|h| (h - median).abs() <= FP_REJECT).collect();
-            if kept.len() >= 3 {
-                ring_avg = kept.iter().sum::<f32>() / kept.len() as f32;
-            }
         }
     }
 

@@ -117,73 +117,6 @@ const PAD_BACK_CANCEL_DEFLECTION: f32 = 0.5;
 
 const PREDICTION_RESYNC_YALMS: f32 = 5.0;
 
-/// Persistent staircase lock. Once the rings + burst detect a staircase,
-/// its plane equation is stored here and character Y rides it every frame
-/// until we walk off (ring average diverges from plane prediction, or we
-/// leave the plane's extent). Zero raycasts per frame while locked (except
-/// the cheap ring scan running in the background for exit detection).
-#[derive(bevy::prelude::Resource, Clone, Copy)]
-pub struct StaircaseLock {
-    pub active: bool,
-    pub origin_xz: bevy::math::Vec2,
-    pub up_dir: bevy::math::Vec2,
-    pub slope: f32,
-    pub base_y: f32,
-    pub tread_depth: f32,
-    pub riser: f32,
-    pub width: f32,
-    pub forward_extent: f32,
-    pub back_extent: f32,
-    // Grid burst hits captured at lock time, kept for viz.
-    pub burst: [(bevy::math::Vec3, bool); 21],
-    // Trigger delay: rings must detect stairs for 2 consecutive frames.
-    pub detect_streak: u8,
-    // Slope smoother: counts consecutive frames where a newly measured slope
-    // disagreed with `slope` by more than SLOPE_MATCH_TOL. On streak >= 3 (or
-    // a sign flip) the new value replaces `slope`. A single noisy frame
-    // otherwise leaves `slope` untouched so the rendered plane doesn't tilt.
-    pub slope_streak: u8,
-    // Exit debounce: counts consecutive frames where the live ramp detection
-    // (ramp_locked) came back false while we were locked. A single miss is a
-    // probe spike and is ignored; only EXIT_FRAMES in a row means we've reached
-    // the landing (or walked off the flight) and the plane releases once. This
-    // is the ONLY thing that ends a held lock from the inside — the old
-    // per-frame ring-avg match no longer gates validity.
-    pub flat_streak: u8,
-    // Sloped-region bounds along the plane's axis (lock frame; origin at the
-    // engage position). Below ramp_start the plane holds flat at base_y (the
-    // approach floor); past ramp_end it holds flat at the far landing height.
-    // Both come from the march's MEASURED riser positions: ramp_start once at
-    // engage, ramp_end as a high-water mark that advances while risers remain
-    // ahead and freezes at the true last riser -- endpoint correctness no
-    // longer depends on release timing at all.
-    pub ramp_start: f32,
-    pub ramp_end: f32,
-}
-
-impl Default for StaircaseLock {
-    fn default() -> Self {
-        Self {
-            active: false,
-            origin_xz: bevy::math::Vec2::ZERO,
-            up_dir: bevy::math::Vec2::ZERO,
-            slope: 0.0,
-            base_y: 0.0,
-            tread_depth: 0.0,
-            riser: 0.0,
-            width: 0.0,
-            forward_extent: 0.0,
-            back_extent: 0.0,
-            burst: [(bevy::math::Vec3::ZERO, false); 21],
-            detect_streak: 0,
-            slope_streak: 0,
-            flat_streak: 0,
-            ramp_start: 0.0,
-            ramp_end: f32::INFINITY,
-        }
-    }
-}
-
 /// Debug data captured by `apply_self_prediction_system` for the gizmo drawer
 /// to render in Update. FixedUpdate can't draw gizmos directly.
 #[derive(bevy::prelude::Resource, Clone, Copy)]
@@ -207,22 +140,6 @@ pub struct FootprintDebug {
     pub ramp_near_y: f32,
     pub ramp_far_xz: bevy::math::Vec2,
     pub ramp_far_y: f32,
-    // Locked staircase geometry (persistent across frames while committed).
-    pub lock_active: bool,
-    pub lock_origin_xz: bevy::math::Vec2,   // character xz at lock time
-    pub lock_up_dir: bevy::math::Vec2,       // world-space up-stairs direction
-    pub lock_slope: f32,                     // rise per unit horizontal
-    pub lock_base_y: f32,                    // ground y at lock origin
-    pub lock_tread_depth: f32,               // horizontal distance per stair (~1.0)
-    #[allow(dead_code)]
-    pub lock_riser: f32,                     // vertical rise per stair (~0.4)
-    pub lock_width: f32,                     // half-width of staircase for gizmo
-    #[allow(dead_code)]
-    pub lock_forward_extent: f32,            // how far ahead the plane extends
-    #[allow(dead_code)]
-    pub lock_back_extent: f32,               // how far behind the plane extends
-    // 15-point grid burst hits captured at lock time (5 forward x 3 wide).
-    pub burst_hits: [(bevy::math::Vec3, bool); 21], // 7x3 grid
     // Purple straight-down march: probe hits and detected risers. Fixed
     // arrays (not Vec) so FootprintDebug stays Copy. NaN y = unused slot.
     pub purple_probes: [(bevy::math::Vec2, f32); 60],
@@ -251,17 +168,6 @@ impl Default for FootprintDebug {
             ramp_near_y: 0.0,
             ramp_far_xz: bevy::math::Vec2::ZERO,
             ramp_far_y: 0.0,
-            lock_active: false,
-            lock_origin_xz: bevy::math::Vec2::ZERO,
-            lock_up_dir: bevy::math::Vec2::ZERO,
-            lock_slope: 0.0,
-            lock_base_y: 0.0,
-            lock_tread_depth: 0.0,
-            lock_riser: 0.0,
-            lock_width: 0.0,
-            lock_forward_extent: 0.0,
-            lock_back_extent: 0.0,
-            burst_hits: [(bevy::math::Vec3::ZERO, false); 21],
             purple_probes: [(bevy::math::Vec2::ZERO, f32::NAN); 60],
             purple_probe_count: 0,
             purple_risers: [(bevy::math::Vec2::ZERO, f32::NAN); 5],
@@ -1456,45 +1362,6 @@ pub struct RenderYBlend {
     left: f32,
 }
 
-/// Slope smoother for `StaircaseLock`. Called at every lock re-engage. Retains
-/// the previous `lock.slope` when the newly measured value is close (within
-/// SLOPE_MATCH_TOL), so a noisy fit that re-locks a slightly different slope
-/// each frame doesn't visibly tilt the rendered plane frame-to-frame. Releases
-/// (accepts the new value) when the streak of mismatches hits SLOPE_MISMATCH_MAX,
-/// or immediately if the sign flipped (ascending ↔ descending is a real
-/// transition across a landing, not noise).
-///
-/// `prev`: the current `lock.slope` (0.0 the very first time — treated as
-///   "no prior", accept unconditionally).
-/// `new`:  the freshly measured slope this frame.
-/// `streak`: mutable mismatch counter, reset on accept.
-fn smooth_lock_slope(prev: f32, new: f32, streak: &mut u8) -> f32 {
-    const SLOPE_MATCH_TOL: f32 = 0.05;
-    const SLOPE_MISMATCH_MAX: u8 = 3;
-    // No prior lock: seed and accept.
-    if prev == 0.0 {
-        *streak = 0;
-        return new;
-    }
-    // Sign flip: real geometry change, accept immediately.
-    if prev.signum() != new.signum() {
-        *streak = 0;
-        return new;
-    }
-    // Close enough: keep the smoothed value, reset streak.
-    if (new - prev).abs() <= SLOPE_MATCH_TOL {
-        *streak = 0;
-        return prev;
-    }
-    // Mismatch: bump streak. Release once we've seen enough disagreement in a row.
-    *streak = streak.saturating_add(1);
-    if *streak >= SLOPE_MISMATCH_MAX {
-        *streak = 0;
-        return new;
-    }
-    prev
-}
-
 /// Apply the local walker's predicted position directly to the IsSelf
 /// Transform. Runs in FixedUpdate right after `dispatch_movement_system` so
 /// the rendered player follows the walker deterministically at 60 Hz. Without
@@ -1506,7 +1373,6 @@ pub fn apply_self_prediction_system(
     collision: Res<kuluu_render::dat_mzb::MzbCollisionGeometry>,
     time: Res<Time<Fixed>>,
     mut dbg: ResMut<FootprintDebug>,
-    mut lock: ResMut<StaircaseLock>,
     mut yblend: Local<RenderYBlend>,
     mut q_self: Query<
         &mut Transform,
@@ -1851,18 +1717,13 @@ pub fn apply_self_prediction_system(
     let mut ramp_near = (center_xz, center_y_raw);
     let mut ramp_far = (center_xz, center_y_raw);
     let mut up_dir = bevy::math::Vec2::ZERO;
-    // Set by the purple straight-down march when it measures an exact slope;
-    // overrides the pink-fit slope for the lock stage.
-    let mut up_dir_slope_override: Option<f32> = None;
-    // Direction the purple march measured its slope along (the descent
-    // direction), so the lock uses THIS rather than up_dir which may point at
-    // an ascending flight.
-    let mut purple_march_dir: bevy::math::Vec2 = bevy::math::Vec2::ZERO;
-    // First/last MEASURED riser positions from whichever march is driving the
-    // lock this frame, as along-distances relative to the character (march
-    // direction == lock direction). These feed lock.ramp_start / ramp_end.
+    // (Dead now the lock is gone; kept only because the descent/ascent march
+    // still writes into them. Prefixed with _ to silence unused warnings.)
+    let mut _up_dir_slope_override: Option<f32> = None;
+    let mut _purple_march_dir: bevy::math::Vec2 = bevy::math::Vec2::ZERO;
+    // Along-distance of the first MEASURED riser -- used by the render step.
     let mut march_first_riser_rel: Option<f32> = None;
-    let mut march_last_riser_rel: Option<f32> = None;
+    let mut _march_last_riser_rel: Option<f32> = None;
 
     if any_qualifies && acc.length_squared() > 1e-6 {
         // Continuous up-stairs direction (not snapped to 8 bearings).
@@ -2145,7 +2006,7 @@ pub fn apply_self_prediction_system(
                 purple_slope = Some(s);
             }
             march_first_riser_rel = Some(first.1);
-            march_last_riser_rel = Some(last.1);
+            _march_last_riser_rel = Some(last.1);
         }
     }
     // If the purple march measured a slope, it OVERRIDES the pink fit for the
@@ -2155,8 +2016,8 @@ pub fn apply_self_prediction_system(
     if let Some(ps) = purple_slope {
         best_slope = -ps; // down
         ramp_locked = true;
-        up_dir_slope_override = Some(-ps);
-        purple_march_dir = march_dir;
+        _up_dir_slope_override = Some(-ps);
+        _purple_march_dir = march_dir;
         // Recompute the ramp gizmo line to follow the measured descent, or the
         // stale pink-fit endpoints (which can shoot off to the sky on a bad
         // down-fit) keep getting drawn. Near = player foot, far = along the
@@ -2302,7 +2163,7 @@ pub fn apply_self_prediction_system(
             // lock this frame (descent takes precedence when both fire).
             if purple_slope.is_none() {
                 march_first_riser_rel = Some(first.1);
-                march_last_riser_rel = Some(last.1);
+                _march_last_riser_rel = Some(last.1);
             }
         }
     }
@@ -2318,8 +2179,8 @@ pub fn apply_self_prediction_system(
         if let Some(us) = purple_slope_up {
             best_slope = us; // up
             ramp_locked = true;
-            up_dir_slope_override = Some(us);
-            purple_march_dir = up_march_dir;
+            _up_dir_slope_override = Some(us);
+            _purple_march_dir = up_march_dir;
             let far_dist = FWD_START + FWD_STEP * (FWD_COUNT as f32 - 1.0);
             ramp_near = (center_xz, center_y_raw);
             ramp_far = (
@@ -2349,220 +2210,11 @@ pub fn apply_self_prediction_system(
         }
     }
 
-    // --------- Persistent staircase lock logic ---------
-    // A locked plane means: character_y = base_y + up_dir dot (char_xz - origin_xz) * slope.
-    // Zero per-frame raycasts once locked; cheap plane math only.
-
-    // Is the current position still within the locked staircase's extent?
-    let mut lock_valid = false;
-    let mut lock_predicted_y = 0.0;
-    if lock.active {
-        let rel = center_xz - lock.origin_xz;
-        let along = rel.dot(lock.up_dir);
-        let across = (rel - lock.up_dir * along).length();
-        // Advance the sloped-region high-water mark while the live march
-        // still sees risers ahead along the locked direction. When the
-        // flight ends no risers remain ahead, ramp_end freezes at the true
-        // last riser, and the plane flattens there — the landing no longer
-        // inherits the slope while the exit debounce counts down.
-        if ramp_locked && purple_march_dir.dot(lock.up_dir) > 0.7 {
-            if let Some(last_rel) = march_last_riser_rel {
-                let cand = along + last_rel;
-                lock.ramp_end = if lock.ramp_end.is_finite() {
-                    lock.ramp_end.max(cand)
-                } else {
-                    cand
-                };
-            }
-        }
-        if along >= -lock.back_extent && along <= lock.forward_extent && across <= lock.width {
-            let along_eff = along.max(lock.ramp_start).min(lock.ramp_end);
-            lock_predicted_y = lock.base_y + (along_eff - lock.ramp_start) * lock.slope;
-            // Being inside the locked plane's extent is the ONLY maintenance
-            // test. The old ring-avg match that used to gate this is gone: a
-            // smooth plane riding over stepped wire diverges from the averaged
-            // ground by up to a step BY DESIGN, so any given tread crest could
-            // trip a tight |ring_avg - predicted| gate and tear the lock down —
-            // that was the 120-transition jackhammer. Spike immunity is the
-            // whole reason the lock exists; extent is geometric off the plane
-            // itself and doesn't flinch at stepped ground.
-            lock_valid = true;
-        }
-    }
-
-    // Debounced exit. While locked, ramp_locked (purple march / forward-probe
-    // fit, computed every frame above) keeps confirming stairs. When it stops
-    // confirming for EXIT_FRAMES frames running, we've reached the landing or
-    // walked off — release the plane exactly once. A one- or two-frame miss is
-    // a probe spike and is ignored, same debounce philosophy as detect_streak
-    // on the way in. Runs BEFORE the detect-streak update and burst below so a
-    // release also zeroes detect_streak and can't instantly re-lock this frame.
-    const EXIT_FRAMES: u8 = 12;
-    if lock.active {
-        if ramp_locked {
-            lock.flat_streak = 0;
-        } else {
-            lock.flat_streak = lock.flat_streak.saturating_add(1);
-            if lock.flat_streak >= EXIT_FRAMES {
-                lock.active = false;
-                lock.flat_streak = 0;
-                lock_valid = false;
-            }
-        }
-    }
-
-    // Detection streak update: gate burst firing on 2 consecutive detections.
-    if ramp_locked {
-        lock.detect_streak = lock.detect_streak.saturating_add(1);
-    } else if !lock_valid {
-        lock.detect_streak = 0;
-    }
-
-    // Whether the grid fit locked this frame. The purple-march override
-    // below consults it to avoid re-locking on top of a successful grid fit.
-    let mut grid_locked = false;
-    // Fire the burst if we have a fresh 2-frame detection and no active lock.
-    if !lock.active && lock.detect_streak >= 1
-        && (up_dir.length_squared() > 0.5 || up_dir_slope_override.is_some())
-    {
-        // 15-point grid: 5 along up_dir at [-1.0, 0, 1.0, 2.0, 3.0], 3 lateral
-        // at [-1.0, 0, 1.0] perpendicular to up_dir.
-        let right = bevy::math::Vec2::new(up_dir.y, -up_dir.x); // 90 deg rotation
-        // Symmetric grid: 7 along up_dir (3 back + character + 3 fwd) x 3 lateral.
-        // Scans both directions so a detected staircase covers what's behind as
-        // well as ahead. The line fit spans the whole thing.
-        let forwards = [-3.0f32, -2.0, -1.0, 0.0, 1.0, 2.0, 3.0];
-        let laterals = [-1.0f32, 0.0, 1.0];
-        let mut burst_hits: [(bevy::math::Vec3, bool); 21] =
-            [(bevy::math::Vec3::ZERO, false); 21];
-        let mut grid_pts: Vec<(f32, f32)> = Vec::with_capacity(33);
-        for (i, f) in forwards.iter().enumerate() {
-            for (j, l) in laterals.iter().enumerate() {
-                let idx = i * 3 + j;
-                let probe_xz = center_xz + up_dir * *f + right * *l;
-                if let Some(y) = collision.ground_raycast(probe_xz, center_y_raw + 2.0) {
-                    burst_hits[idx] = (bevy::math::Vec3::new(probe_xz.x, y, probe_xz.y), true);
-                    grid_pts.push((*f, y));
-                }
-            }
-        }
-        // Fit plane along up_dir over the whole grid, but drop plateau
-        // outliers first: when standing at the top of stairs, many far probes
-        // hit the flat landing at the same Y, which pulls R^2 down. Keep only
-        // points whose Y is "in line" with a stair-shaped trend.
-        if grid_pts.len() >= 8 {
-            // Preliminary fit with all points.
-            let xs_all: Vec<f32> = grid_pts.iter().map(|p| p.0).collect();
-            let ys_all: Vec<f32> = grid_pts.iter().map(|p| p.1).collect();
-            let (xs, ys) = if let Some((sp, ip, _)) = fit4(&xs_all, &ys_all) {
-                // Reject points that deviate more than 0.3 (~ 3/4 riser) from
-                // the prelim line. Plateau tails at either end will drop out.
-                let kept: Vec<(f32, f32)> = grid_pts.iter()
-                    .filter(|(x, y)| ((sp * *x + ip) - *y).abs() <= 0.3)
-                    .copied().collect();
-                if kept.len() >= 6 {
-                    (kept.iter().map(|p| p.0).collect::<Vec<_>>(),
-                     kept.iter().map(|p| p.1).collect::<Vec<_>>())
-                } else {
-                    (xs_all, ys_all)
-                }
-            } else {
-                (xs_all, ys_all)
-            };
-            if let Some((s2, i2, r2c)) = fit4(&xs, &ys) {
-                if r2c >= 0.5 && s2.abs() >= STAIR_SLOPE_MIN && s2.abs() <= STAIR_SLOPE_MAX {
-                    // LOCK.
-                    grid_locked = true;
-                    lock.active = true;
-                    lock.origin_xz = center_xz;
-                    lock.up_dir = up_dir;
-                    lock.slope = smooth_lock_slope(lock.slope, s2, &mut lock.slope_streak);
-                    lock.base_y = i2;
-                    lock.tread_depth = 1.0;                    // FFXI treads ~1.0 wide
-                    lock.riser = 0.4;                          // and 0.4 tall
-                    lock.width = 3.0;                          // ~6 units wide staircase
-                    // Extent spans a whole flight so one lock covers the entire
-                    // staircase — no re-anchor every few treads (each re-anchor
-                    // rebases base_y and pops the render). The debounced exit
-                    // above is what actually ends the lock at the landing; these
-                    // are a far backstop, not the normal release.
-                    lock.forward_extent = 40.0;
-                    lock.back_extent = 40.0;
-                    lock.flat_streak = 0;
-                    // Sloped-region bounds from the march's measured risers
-                    // (unbounded fallback when no march data this frame).
-                    lock.ramp_start = march_first_riser_rel.unwrap_or(0.0).max(0.0);
-                    lock.ramp_end = march_last_riser_rel.unwrap_or(f32::INFINITY);
-                    lock.burst = burst_hits;
-                }
-            }
-            // Purple override: if the grid fit didn't lock (typically check 5,
-            // slope out of range on descending stairs) but the purple march
-            // measured an EXACT slope from vertical probes, lock using that.
-            // Purple's rise/run is a direct measurement, not a regression, so
-            // it's authoritative for the down case the grid fit gets wrong.
-            if !grid_locked {
-                if let Some(measured) = up_dir_slope_override {
-                    if measured.abs() >= STAIR_SLOPE_MIN && measured.abs() <= STAIR_SLOPE_MAX {
-                        lock.active = true;
-                        lock.origin_xz = center_xz;
-                        // Use the descent direction the purple march measured
-                        // along, not up_dir (which may aim at an up-flight).
-                        lock.up_dir = if purple_march_dir.length_squared() > 0.5 {
-                            purple_march_dir
-                        } else {
-                            up_dir
-                        };
-                        // exact, signed (down = negative)
-                        lock.slope = smooth_lock_slope(lock.slope, measured, &mut lock.slope_streak);
-                        lock.base_y = center_y_raw; // anchor at the player's foot
-                        lock.tread_depth = 1.0;
-                        lock.riser = 0.4;
-                        lock.width = 3.0;
-                        // One lock spans the whole flight (see grid branch).
-                        lock.forward_extent = 40.0;
-                        lock.back_extent = 40.0;
-                        lock.flat_streak = 0;
-                        // Sloped-region bounds from the march's measured
-                        // risers (unbounded fallback when absent).
-                        lock.ramp_start = march_first_riser_rel.unwrap_or(0.0).max(0.0);
-                        lock.ramp_end = march_last_riser_rel.unwrap_or(f32::INFINITY);
-                        lock.burst = burst_hits;
-                    }
-                }
-            }
-        }
-    }
-
-    // Re-evaluate lock validity now that the burst block may have engaged a
-    // fresh lock this frame. Without this, a lock that just went active would
-    // still see lock_valid=false from the pre-burst evaluation, and the
-    // chosen_y branch below would immediately disengage it before the render
-    // step ever got to ride the plane. That was the "35 ticks with
-    // slope_streak>0 but 0 ticks with lock.active" symptom in the capture.
-    if lock.active && !lock_valid {
-        let rel = center_xz - lock.origin_xz;
-        let along = rel.dot(lock.up_dir);
-        let across = (rel - lock.up_dir * along).length();
-        if along >= -lock.back_extent && along <= lock.forward_extent && across <= lock.width {
-            // Extent-only, matching the maintenance test above. No ring-avg
-            // gate — a just-engaged plane hasn't converged with the stepped
-            // ground yet, and requiring it to would disengage the lock on the
-            // very frame it locked (the old lock_active-never-true symptom).
-            let along_eff = along.max(lock.ramp_start).min(lock.ramp_end);
-            lock_predicted_y = lock.base_y + (along_eff - lock.ramp_start) * lock.slope;
-            lock_valid = true;
-        }
-    }
-
-    // ---- Direct measured-slope render. No lock consultation, no smoothing. ----
+    // ---- Direct measured-slope render. No lock. No smoothing. ----
     // If the march measured a slope this frame, ride a plane anchored on the
     // FIRST measured riser (its real raycast Y doesn't step with wire). If no
     // march this frame, HOLD the last rendered Y -- never warp back to the
     // stepped wire. Wire is only the first-ever-frame fallback.
-    //
-    // StaircaseLock above still runs (other systems read it), but this render
-    // path ignores it -- lock/blend flapping cannot corrupt Y anymore.
     let measured_slope: Option<(f32, f32, f32)> =
         if let (Some(ps), Some(fa)) = (purple_slope, march_first_riser_rel) {
             // descent: signed negative (down along march_dir)
@@ -2616,17 +2268,6 @@ pub fn apply_self_prediction_system(
         ramp_near_y: ramp_near.1,
         ramp_far_xz: ramp_far.0,
         ramp_far_y: ramp_far.1,
-        lock_active: lock.active,
-        lock_origin_xz: lock.origin_xz,
-        lock_up_dir: lock.up_dir,
-        lock_slope: lock.slope,
-        lock_base_y: lock.base_y,
-        lock_tread_depth: lock.tread_depth,
-        lock_riser: lock.riser,
-        lock_width: lock.width,
-        lock_forward_extent: lock.forward_extent,
-        lock_back_extent: lock.back_extent,
-        burst_hits: lock.burst,
         purple_probes: purple_probes_arr,
         purple_probe_count,
         purple_risers: purple_risers_arr,
@@ -4117,53 +3758,6 @@ pub fn draw_footprint_debug_system(
         }
     }
 
-    // Full staircase mesh outline when LOCKED. Draws 5 tread rectangles at
-    // their heights along the locked up_dir, connected by riser segments.
-    // This is the "engine KNOWS the whole staircase" visualization.
-    if dbg.lock_active {
-        let up = Vec3::new(dbg.lock_up_dir.x, 0.0, dbg.lock_up_dir.y);
-        let right = Vec3::new(dbg.lock_up_dir.y, 0.0, -dbg.lock_up_dir.x); // 90 deg
-        let bright = Color::srgb(0.90, 0.30, 1.00);
-        // 7 tread rectangles from -3 to +3 along up (both directions).
-        for step in -3i32..=3 {
-            let along = step as f32 * dbg.lock_tread_depth;
-            let center_along = Vec3::new(dbg.lock_origin_xz.x, 0.0, dbg.lock_origin_xz.y)
-                + up * along;
-            let y = dbg.lock_base_y + along * dbg.lock_slope + 0.03;
-            let hw = dbg.lock_width;
-            let hd = dbg.lock_tread_depth * 0.5;
-            let p0 = Vec3::new(center_along.x - right.x * hw - up.x * hd, y, center_along.z - right.z * hw - up.z * hd);
-            let p1 = Vec3::new(center_along.x + right.x * hw - up.x * hd, y, center_along.z + right.z * hw - up.z * hd);
-            let p2 = Vec3::new(center_along.x + right.x * hw + up.x * hd, y, center_along.z + right.z * hw + up.z * hd);
-            let p3 = Vec3::new(center_along.x - right.x * hw + up.x * hd, y, center_along.z - right.z * hw + up.z * hd);
-            gizmos.line(p0, p1, bright);
-            gizmos.line(p1, p2, bright);
-            gizmos.line(p2, p3, bright);
-            gizmos.line(p3, p0, bright);
-        }
-        // Vertical risers connecting adjacent treads at the front edge, both directions.
-        for step in -3i32..3 {
-            let along_a = step as f32 * dbg.lock_tread_depth + dbg.lock_tread_depth * 0.5;
-            let y_a = dbg.lock_base_y + along_a * dbg.lock_slope + 0.03;
-            let y_b = dbg.lock_base_y + (along_a + dbg.lock_tread_depth) * dbg.lock_slope + 0.03;
-            let cx = dbg.lock_origin_xz.x + up.x * along_a;
-            let cz = dbg.lock_origin_xz.y + up.z * along_a;
-            let hw = dbg.lock_width;
-            let left = Vec3::new(cx - right.x * hw, y_a, cz - right.z * hw);
-            let rgt = Vec3::new(cx + right.x * hw, y_a, cz + right.z * hw);
-            let left_up = Vec3::new(left.x, y_b, left.z);
-            let rgt_up = Vec3::new(rgt.x, y_b, rgt.z);
-            gizmos.line(left, left_up, bright);
-            gizmos.line(rgt, rgt_up, bright);
-        }
-        // Burst hit points (raw probe data).
-        for (pos, valid) in dbg.burst_hits.iter() {
-            if !valid { continue; }
-            let p = Vec3::new(pos.x, pos.y + 0.06, pos.z);
-            gizmos.sphere(Isometry3d::from_translation(p), 0.07,
-                Color::srgb(1.0, 0.5, 1.0));
-        }
-    }
 }
 
 /// Populates the shared StairDebugSnapshot from FootprintDebug each frame,
@@ -4180,21 +3774,13 @@ pub fn update_stair_debug_snapshot_system(
     snap.drawing_enabled = panels.stair_draw;
     snap.player_xz = dbg.center_xz;
     snap.player_y = dbg.center_y;
-    // Slopes: derive from lock state and the purple march measurements.
-    // For a locked staircase, lock_slope is the authoritative signed slope.
-    // Show the up direction's magnitude as slope_up when slope > 0, else
-    // slope_down. The two purple march measurements (purple_slope and
-    // purple_slope_up) are positive magnitudes; expose them if the lock
-    // hasn't already claimed that direction.
+    // Slopes: taken directly from the purple march measurements every frame.
+    // (StaircaseLock is gone; measured march is authoritative.)
     let (mut slope_up, mut slope_down) = (None, None);
-    if dbg.lock_active {
-        if dbg.lock_slope > 0.0 { slope_up = Some(dbg.lock_slope); }
-        else if dbg.lock_slope < 0.0 { slope_down = Some(-dbg.lock_slope); }
-    }
-    if slope_down.is_none() && !dbg.purple_slope.is_nan() && dbg.purple_slope > 0.0 {
+    if !dbg.purple_slope.is_nan() && dbg.purple_slope > 0.0 {
         slope_down = Some(dbg.purple_slope);
     }
-    if slope_up.is_none() && !dbg.purple_slope_up.is_nan() && dbg.purple_slope_up > 0.0 {
+    if !dbg.purple_slope_up.is_nan() && dbg.purple_slope_up > 0.0 {
         slope_up = Some(dbg.purple_slope_up);
     }
     snap.slope_up = slope_up;
@@ -4348,7 +3934,6 @@ pub struct CaptureState {
 pub fn stair_capture_system(
     state: Res<SceneState>,
     prediction: Res<LocalPlayerPrediction>,
-    lock: Res<StaircaseLock>,
     dbg: Res<FootprintDebug>,
     mode: Res<InputMode>,
     rest: Res<kuluu_render::combat_stance::RestStance>,
@@ -4416,9 +4001,9 @@ pub fn stair_capture_system(
         transform.translation.y,
         transform.translation.z,
         state.snapshot.self_pos.heading,
-        lock.active,
-        lock.slope,
-        lock.slope_streak,
+        false, // lock (removed; harness JSON schema kept for tool compat)
+        0.0,   // slope (removed)
+        0u8,   // streak (removed)
         pslope_json,
         pslope_up_json,
         cap.dir,

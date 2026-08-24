@@ -720,7 +720,6 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
             .run_if(kuluu_render::cutscene::player_camera_allowed),
     );
     app.init_resource::<input::FootprintDebug>();
-    app.init_resource::<input::StaircaseLock>();
     app.add_systems(Update, (input::draw_footprint_debug_system, input::update_stair_debug_snapshot_system)
         .run_if(in_state(AppPhase::InGame)));
     app.add_systems(

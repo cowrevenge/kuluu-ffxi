@@ -2215,7 +2215,17 @@ pub fn apply_self_prediction_system(
         // As char walks toward the anchor, first_along shrinks smoothly and
         // render_y slides between tread heights every frame. No lock, no
         // smoothing, just measured math.
-        first_y - first_along * signed_slope
+        //
+        // Clamp to actual ground at foot: the plane extrapolates backward
+        // past the character when march sees risers ahead. On flat approach
+        // that extrapolation dips BELOW ground and sinks the mesh into the
+        // floor (kuluu-render's navmesh snap used to hide this by yanking Y
+        // back to ground; it's now exempt for self). Clamping to center_y_raw
+        // (the raycast at character XZ) keeps the mesh on top of the ground
+        // during approach and only rides the plane once we're actually on
+        // the stairs.
+        let plane_y = first_y - first_along * signed_slope;
+        plane_y.max(center_y_raw)
     } else if yblend.init {
         // No march this frame -- hold last rendered Y. No warp to wire.
         yblend.last

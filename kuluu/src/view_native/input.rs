@@ -140,6 +140,13 @@ pub struct StaircaseLock {
     // a sign flip) the new value replaces `slope`. A single noisy frame
     // otherwise leaves `slope` untouched so the rendered plane doesn't tilt.
     pub slope_streak: u8,
+    // Exit debounce: counts consecutive frames where the live ramp detection
+    // (ramp_locked) came back false while we were locked. A single miss is a
+    // probe spike and is ignored; only EXIT_FRAMES in a row means we've reached
+    // the landing (or walked off the flight) and the plane releases once. This
+    // is the ONLY thing that ends a held lock from the inside — the old
+    // per-frame ring-avg match no longer gates validity.
+    pub flat_streak: u8,
 }
 
 impl Default for StaircaseLock {
@@ -158,6 +165,7 @@ impl Default for StaircaseLock {
             burst: [(bevy::math::Vec3::ZERO, false); 21],
             detect_streak: 0,
             slope_streak: 0,
+            flat_streak: 0,
         }
     }
 }
@@ -2275,10 +2283,35 @@ pub fn apply_self_prediction_system(
         let across = (rel - lock.up_dir * along).length();
         if along >= -lock.back_extent && along <= lock.forward_extent && across <= lock.width {
             lock_predicted_y = lock.base_y + along * lock.slope;
-            // Ring-avg sanity check: if we're on the locked stairs, ring avg
-            // should be within a couple risers of the predicted y.
-            if (ring_avg - lock_predicted_y).abs() <= lock.riser * 2.0 {
-                lock_valid = true;
+            // Being inside the locked plane's extent is the ONLY maintenance
+            // test. The old ring-avg match that used to gate this is gone: a
+            // smooth plane riding over stepped wire diverges from the averaged
+            // ground by up to a step BY DESIGN, so any given tread crest could
+            // trip a tight |ring_avg - predicted| gate and tear the lock down —
+            // that was the 120-transition jackhammer. Spike immunity is the
+            // whole reason the lock exists; extent is geometric off the plane
+            // itself and doesn't flinch at stepped ground.
+            lock_valid = true;
+        }
+    }
+
+    // Debounced exit. While locked, ramp_locked (purple march / forward-probe
+    // fit, computed every frame above) keeps confirming stairs. When it stops
+    // confirming for EXIT_FRAMES frames running, we've reached the landing or
+    // walked off — release the plane exactly once. A one- or two-frame miss is
+    // a probe spike and is ignored, same debounce philosophy as detect_streak
+    // on the way in. Runs BEFORE the detect-streak update and burst below so a
+    // release also zeroes detect_streak and can't instantly re-lock this frame.
+    const EXIT_FRAMES: u8 = 12;
+    if lock.active {
+        if ramp_locked {
+            lock.flat_streak = 0;
+        } else {
+            lock.flat_streak = lock.flat_streak.saturating_add(1);
+            if lock.flat_streak >= EXIT_FRAMES {
+                lock.active = false;
+                lock.flat_streak = 0;
+                lock_valid = false;
             }
         }
     }
@@ -2353,8 +2386,14 @@ pub fn apply_self_prediction_system(
                     lock.tread_depth = 1.0;                    // FFXI treads ~1.0 wide
                     lock.riser = 0.4;                          // and 0.4 tall
                     lock.width = 3.0;                          // ~6 units wide staircase
-                    lock.forward_extent = 5.0;                 // 5 treads ahead
-                    lock.back_extent = 5.0;                    // 5 treads behind
+                    // Extent spans a whole flight so one lock covers the entire
+                    // staircase — no re-anchor every few treads (each re-anchor
+                    // rebases base_y and pops the render). The debounced exit
+                    // above is what actually ends the lock at the landing; these
+                    // are a far backstop, not the normal release.
+                    lock.forward_extent = 40.0;
+                    lock.back_extent = 40.0;
+                    lock.flat_streak = 0;
                     lock.burst = burst_hits;
                 }
             }
@@ -2381,8 +2420,10 @@ pub fn apply_self_prediction_system(
                         lock.tread_depth = 1.0;
                         lock.riser = 0.4;
                         lock.width = 3.0;
-                        lock.forward_extent = 5.0;
-                        lock.back_extent = 5.0;
+                        // One lock spans the whole flight (see grid branch).
+                        lock.forward_extent = 40.0;
+                        lock.back_extent = 40.0;
+                        lock.flat_streak = 0;
                         lock.burst = burst_hits;
                     }
                 }
@@ -2401,15 +2442,20 @@ pub fn apply_self_prediction_system(
         let along = rel.dot(lock.up_dir);
         let across = (rel - lock.up_dir * along).length();
         if along >= -lock.back_extent && along <= lock.forward_extent && across <= lock.width {
-            let pred = lock.base_y + along * lock.slope;
-            if (ring_avg - pred).abs() <= lock.riser * 2.0 {
-                lock_predicted_y = pred;
-                lock_valid = true;
-            }
+            // Extent-only, matching the maintenance test above. No ring-avg
+            // gate — a just-engaged plane hasn't converged with the stepped
+            // ground yet, and requiring it to would disengage the lock on the
+            // very frame it locked (the old lock_active-never-true symptom).
+            lock_predicted_y = lock.base_y + along * lock.slope;
+            lock_valid = true;
         }
     }
 
-    // Chosen y (debug/telemetry): locked plane, or ramp fit, or ring avg.
+    // Chosen y (debug/telemetry): locked plane, or ramp fit, or ring avg. The
+    // teardown here now only fires when the character is OUTSIDE the plane's
+    // extent (lock_valid stayed false above) — i.e. a far backstop. On-stairs
+    // frames are always within extent, so they never hit this path; the
+    // debounced ramp_locked exit is the real release at the landing.
     let chosen_y = if lock_valid {
         lock_predicted_y
     } else {

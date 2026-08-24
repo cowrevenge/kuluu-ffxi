@@ -1350,16 +1350,17 @@ pub fn recover_self_ground_system(
     let _ = cmd_tx.0.try_send(cmd);
 }
 
-/// Render-Y blend state for `apply_self_prediction_system`: eases the rendered
-/// Y over ~100ms when the source flips between the locked stair plane and the
-/// raw wire Y, so lock engage/disengage (the first/last riser) doesn't pop.
+/// Stair-plane engagement gate. Ride the measured slope plane only while the
+/// plane's Y stays within one riser-height of the wire ground under the
+/// character — i.e. the plane represents where we actually are, not a
+/// backward extrapolation into flat ground below us. `is_moving` requires
+/// XZ velocity (with a 100ms grace so a stutter tap doesn't pop). When
+/// disengaged, mesh Y follows the walker's tread-snapped wire Y directly.
 #[derive(Default)]
-pub struct RenderYBlend {
-    init: bool,
-    was_locked: bool,
-    last: f32,
-    from: f32,
-    left: f32,
+pub struct PlaneState {
+    engaged: bool,
+    last_wire_xz: Option<bevy::math::Vec2>,
+    stopped_secs: f32,
 }
 
 /// Apply the local walker's predicted position directly to the IsSelf
@@ -1371,9 +1372,9 @@ pub struct RenderYBlend {
 pub fn apply_self_prediction_system(
     prediction: Res<LocalPlayerPrediction>,
     collision: Res<kuluu_render::dat_mzb::MzbCollisionGeometry>,
-    _time: Res<Time<Fixed>>,
+    time: Res<Time<Fixed>>,
     mut dbg: ResMut<FootprintDebug>,
-    mut yblend: Local<RenderYBlend>,
+    mut plane_state: Local<PlaneState>,
     mut q_self: Query<
         (
             &mut kuluu_render::PrevRenderPos,
@@ -2192,56 +2193,65 @@ pub fn apply_self_prediction_system(
         }
     }
 
-    // ---- Direct measured-slope render. No lock. No smoothing. ----
-    // If the march measured a slope this frame, ride a plane anchored on the
-    // FIRST measured riser (its real raycast Y doesn't step with wire). If no
-    // march this frame, HOLD the last rendered Y -- never warp back to the
-    // stepped wire. Wire is only the first-ever-frame fallback.
-    let measured_slope: Option<(f32, f32, f32)> =
+    // ---- Plane engagement gate ----
+    // Ride the measured slope only while it actually represents the ground
+    // under the character. Two-sided proximity gate: |plane_y - wire_y| must
+    // be within one riser-height (0.4). Below that, plane is a backward
+    // extrapolation into flat ground and would sink the mesh. Above that,
+    // plane is a forward extrapolation past the top of the flight and would
+    // float the mesh above the landing. Both are correct plane math but not
+    // meaningful at the character's current position.
+    //
+    // is_moving: XZ delta from last tick, 100ms grace so a stutter pause
+    // doesn't flip us off the plane.
+    const STOP_GRACE_SECS: f32 = 0.100;
+    let this_xz = bevy::math::Vec2::new(target.x, target.z);
+    let moved_this_tick = plane_state
+        .last_wire_xz
+        .map(|last| last.distance_squared(this_xz) > 1e-8)
+        .unwrap_or(false);
+    if moved_this_tick {
+        plane_state.stopped_secs = 0.0;
+    } else {
+        plane_state.stopped_secs += time.delta_secs();
+    }
+    plane_state.last_wire_xz = Some(this_xz);
+    let is_moving = plane_state.stopped_secs < STOP_GRACE_SECS;
+
+    // plane_y at character foot from whichever march produced a slope.
+    let plane_y_at_foot: Option<f32> =
         if let (Some(ps), Some(fa)) = (purple_slope, march_first_riser_rel) {
-            // descent: signed negative (down along march_dir)
-            Some((-ps, fa, first_riser_y))
+            Some(first_riser_y - fa * (-ps)) // descent: signed negative
         } else if let (Some(us), Some(fa)) = (purple_slope_up, march_first_riser_rel) {
-            // ascent: signed positive (up along march_dir)
-            Some((us, fa, up_first_riser_y))
+            Some(up_first_riser_y - fa * us) // ascent: signed positive
         } else {
             None
         };
-    let rendered_y = if let Some((signed_slope, first_along, first_y)) = measured_slope {
-        // Plane at char foot: foot along = 0, anchor at first_along along
-        // march_dir with measured Y = first_y. Signed slope. Foot Y is
-        //   render_y = first_y + (0 - first_along) * signed_slope
-        //           = first_y - first_along * signed_slope
-        // As char walks toward the anchor, first_along shrinks smoothly and
-        // render_y slides between tread heights every frame. No lock, no
-        // smoothing, just measured math.
-        //
-        // Clamp to actual ground at foot: the plane extrapolates backward
-        // past the character when march sees risers ahead. On flat approach
-        // that extrapolation dips BELOW ground and sinks the mesh into the
-        // floor (kuluu-render's navmesh snap used to hide this by yanking Y
-        // back to ground; it's now exempt for self). Clamping to center_y_raw
-        // (the raycast at character XZ) keeps the mesh on top of the ground
-        // during approach and only rides the plane once we're actually on
-        // the stairs.
-        let plane_y = first_y - first_along * signed_slope;
-        plane_y.max(center_y_raw)
-    } else if yblend.init {
-        // No march this frame -- hold last rendered Y. No warp to wire.
-        yblend.last
+
+    // Two-sided proximity gate.
+    const ENGAGE_TOL: f32 = 0.4;
+    let plane_matches_ground = plane_y_at_foot
+        .map(|p| (p - target.y).abs() <= ENGAGE_TOL)
+        .unwrap_or(false);
+
+    if !is_moving || !plane_matches_ground {
+        plane_state.engaged = false;
     } else {
-        // First-ever frame with no march -- fall back to wire.
+        // Both conditions passed: engage (or stay engaged).
+        plane_state.engaged = true;
+    }
+
+    let rendered_y = if plane_state.engaged {
+        // engaged implies plane_y_at_foot is Some (plane_matches_ground
+        // requires it). Defensive fallback to wire.
+        plane_y_at_foot.unwrap_or(target.y)
+    } else {
+        // Stopped, off-flight, or plane extrapolates too far from ground.
         target.y
     };
     let chosen_y = rendered_y;
     let avg_for_dbg = chosen_y;
     let slope_active = (chosen_y - center_y_raw).abs() > 0.05;
-    // yblend collapses to a pure hold-slot (no smoothstep, no lerp).
-    yblend.init = true;
-    yblend.last = rendered_y;
-    yblend.was_locked = false;
-    yblend.from = rendered_y;
-    yblend.left = 0.0;
     target.y = rendered_y;
 
     let _ = best_conf;

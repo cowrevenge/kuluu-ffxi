@@ -150,6 +150,15 @@ pub struct StaircaseLock {
     // is the ONLY thing that ends a held lock from the inside — the old
     // per-frame ring-avg match no longer gates validity.
     pub flat_streak: u8,
+    // Sloped-region bounds along the plane's axis (lock frame; origin at the
+    // engage position). Below ramp_start the plane holds flat at base_y (the
+    // approach floor); past ramp_end it holds flat at the far landing height.
+    // Both come from the march's MEASURED riser positions: ramp_start once at
+    // engage, ramp_end as a high-water mark that advances while risers remain
+    // ahead and freezes at the true last riser -- endpoint correctness no
+    // longer depends on release timing at all.
+    pub ramp_start: f32,
+    pub ramp_end: f32,
 }
 
 impl Default for StaircaseLock {
@@ -169,6 +178,8 @@ impl Default for StaircaseLock {
             detect_streak: 0,
             slope_streak: 0,
             flat_streak: 0,
+            ramp_start: 0.0,
+            ramp_end: f32::INFINITY,
         }
     }
 }
@@ -1847,6 +1858,11 @@ pub fn apply_self_prediction_system(
     // direction), so the lock uses THIS rather than up_dir which may point at
     // an ascending flight.
     let mut purple_march_dir: bevy::math::Vec2 = bevy::math::Vec2::ZERO;
+    // First/last MEASURED riser positions from whichever march is driving the
+    // lock this frame, as along-distances relative to the character (march
+    // direction == lock direction). These feed lock.ramp_start / ramp_end.
+    let mut march_first_riser_rel: Option<f32> = None;
+    let mut march_last_riser_rel: Option<f32> = None;
 
     if any_qualifies && acc.length_squared() > 1e-6 {
         // Continuous up-stairs direction (not snapped to 8 bearings).
@@ -1992,6 +2008,10 @@ pub fn apply_self_prediction_system(
     let mut purple_risers_arr: [(bevy::math::Vec2, f32); 5] =
         [(bevy::math::Vec2::ZERO, f32::NAN); 5];
     let mut purple_riser_count: usize = 0;
+    // Measured tread Y at the first and last detected riser -- the real rise,
+    // replacing the old hardcoded 0.4-per-riser assumption.
+    let mut first_riser_y: f32 = 0.0;
+    let mut last_riser_y: f32 = 0.0;
     // Detect a descent: any validated sample with a down-band. Reads only
     // from the validated dataset.
     let mut down_drop_detected = false;
@@ -2083,9 +2103,12 @@ pub fn apply_self_prediction_system(
             // Cumulative drop from the current tread level.
             let tread_drop = current_tread_y - y; // positive = below tread
             if tread_drop >= RISER_MIN && tread_drop <= RISER_MAX {
-                // Found a full riser: the ground has settled ~0.4 below the
-                // tread we were on. Record it and treat this as the new tread.
+                // Found a full riser: the ground settled one measured step
+                // below the tread we were on. Record it AND its true Y and
+                // treat this as the new tread.
                 if purple_riser_count < 5 {
+                    if purple_riser_count == 0 { first_riser_y = y; }
+                    last_riser_y = y;
                     purple_risers_arr[purple_riser_count] = (probe_xz, along);
                     purple_riser_count += 1;
                 }
@@ -2093,10 +2116,13 @@ pub fn apply_self_prediction_system(
                 if purple_riser_count >= 5 { break; }
             } else if tread_drop > RISER_MAX {
                 // Overshot a riser (dropped more than one step between tread
-                // checks) — still count it as a riser at ~0.4 and re-baseline,
-                // but clamp the new tread to one riser down so a double-drop
-                // doesn't desync the baseline.
+                // checks) — still count it as a riser and re-baseline, but
+                // clamp the new tread to one riser down so a double-drop
+                // doesn't desync the baseline. The recorded Y is the TRUE
+                // measured ground either way.
                 if purple_riser_count < 5 {
+                    if purple_riser_count == 0 { first_riser_y = y; }
+                    last_riser_y = y;
                     purple_risers_arr[purple_riser_count] = (probe_xz, along);
                     purple_riser_count += 1;
                 }
@@ -2106,15 +2132,20 @@ pub fn apply_self_prediction_system(
             prev_y = y;
         }
         if purple_riser_count >= 2 {
-            // Exact slope = total rise / total run between first and last riser.
+            // Exact slope = MEASURED drop / measured run between the first and
+            // last detected riser. The old code assumed every riser is 0.4
+            // tall; real flights vary (Jeuno risers are ~0.286), which
+            // inflated the slope ~40% and sank the plane through the stairs.
             let first = purple_risers_arr[0];
             let last = purple_risers_arr[purple_riser_count - 1];
             let run = last.1 - first.1;                          // along-distance
-            let rise = 0.4 * (purple_riser_count as f32 - 1.0);  // one riser each
-            if run > 1e-3 {
+            let rise = first_riser_y - last_riser_y;             // measured drop
+            if run > 1e-3 && rise > 1e-3 {
                 let s = rise / run; // magnitude; down = descending
                 purple_slope = Some(s);
             }
+            march_first_riser_rel = Some(first.1);
+            march_last_riser_rel = Some(last.1);
         }
     }
     // If the purple march measured a slope, it OVERRIDES the pink fit for the
@@ -2200,6 +2231,8 @@ pub fn apply_self_prediction_system(
         let mut up_risers_arr: [(bevy::math::Vec2, f32); 5] =
             [(bevy::math::Vec2::ZERO, f32::NAN); 5];
         let mut up_riser_count: usize = 0;
+        let mut up_first_riser_y: f32 = 0.0;
+        let mut up_last_riser_y: f32 = 0.0;
         for i in 1..=n_steps {
             let along = STEP * i as f32;
             let probe_xz = center_xz + up_march_dir * along;
@@ -2235,6 +2268,8 @@ pub fn apply_self_prediction_system(
             let tread_rise = y - current_tread_y; // positive = above tread
             if tread_rise >= RISER_MIN && tread_rise <= RISER_MAX {
                 if up_riser_count < 5 {
+                    if up_riser_count == 0 { up_first_riser_y = y; }
+                    up_last_riser_y = y;
                     up_risers_arr[up_riser_count] = (probe_xz, along);
                     up_riser_count += 1;
                 }
@@ -2242,6 +2277,8 @@ pub fn apply_self_prediction_system(
                 if up_riser_count >= 5 { break; }
             } else if tread_rise > RISER_MAX {
                 if up_riser_count < 5 {
+                    if up_riser_count == 0 { up_first_riser_y = y; }
+                    up_last_riser_y = y;
                     up_risers_arr[up_riser_count] = (probe_xz, along);
                     up_riser_count += 1;
                 }
@@ -2254,9 +2291,16 @@ pub fn apply_self_prediction_system(
             let first = up_risers_arr[0];
             let last = up_risers_arr[up_riser_count - 1];
             let run = last.1 - first.1;
-            let rise = 0.4 * (up_riser_count as f32 - 1.0);
-            if run > 1e-3 {
+            // Measured climb (see the descent note — 0.4-per-riser is gone).
+            let rise = up_last_riser_y - up_first_riser_y;
+            if run > 1e-3 && rise > 1e-3 {
                 purple_slope_up = Some(rise / run); // magnitude; up
+            }
+            // Only feed ramp bounds when the ascent march is driving the
+            // lock this frame (descent takes precedence when both fire).
+            if purple_slope.is_none() {
+                march_first_riser_rel = Some(first.1);
+                march_last_riser_rel = Some(last.1);
             }
         }
     }
@@ -2314,8 +2358,24 @@ pub fn apply_self_prediction_system(
         let rel = center_xz - lock.origin_xz;
         let along = rel.dot(lock.up_dir);
         let across = (rel - lock.up_dir * along).length();
+        // Advance the sloped-region high-water mark while the live march
+        // still sees risers ahead along the locked direction. When the
+        // flight ends no risers remain ahead, ramp_end freezes at the true
+        // last riser, and the plane flattens there — the landing no longer
+        // inherits the slope while the exit debounce counts down.
+        if ramp_locked && purple_march_dir.dot(lock.up_dir) > 0.7 {
+            if let Some(last_rel) = march_last_riser_rel {
+                let cand = along + last_rel;
+                lock.ramp_end = if lock.ramp_end.is_finite() {
+                    lock.ramp_end.max(cand)
+                } else {
+                    cand
+                };
+            }
+        }
         if along >= -lock.back_extent && along <= lock.forward_extent && across <= lock.width {
-            lock_predicted_y = lock.base_y + along * lock.slope;
+            let along_eff = along.max(lock.ramp_start).min(lock.ramp_end);
+            lock_predicted_y = lock.base_y + (along_eff - lock.ramp_start) * lock.slope;
             // Being inside the locked plane's extent is the ONLY maintenance
             // test. The old ring-avg match that used to gate this is gone: a
             // smooth plane riding over stepped wire diverges from the averaged
@@ -2427,6 +2487,10 @@ pub fn apply_self_prediction_system(
                     lock.forward_extent = 40.0;
                     lock.back_extent = 40.0;
                     lock.flat_streak = 0;
+                    // Sloped-region bounds from the march's measured risers
+                    // (unbounded fallback when no march data this frame).
+                    lock.ramp_start = march_first_riser_rel.unwrap_or(0.0).max(0.0);
+                    lock.ramp_end = march_last_riser_rel.unwrap_or(f32::INFINITY);
                     lock.burst = burst_hits;
                 }
             }
@@ -2457,6 +2521,10 @@ pub fn apply_self_prediction_system(
                         lock.forward_extent = 40.0;
                         lock.back_extent = 40.0;
                         lock.flat_streak = 0;
+                        // Sloped-region bounds from the march's measured
+                        // risers (unbounded fallback when absent).
+                        lock.ramp_start = march_first_riser_rel.unwrap_or(0.0).max(0.0);
+                        lock.ramp_end = march_last_riser_rel.unwrap_or(f32::INFINITY);
                         lock.burst = burst_hits;
                     }
                 }
@@ -2479,7 +2547,8 @@ pub fn apply_self_prediction_system(
             // gate — a just-engaged plane hasn't converged with the stepped
             // ground yet, and requiring it to would disengage the lock on the
             // very frame it locked (the old lock_active-never-true symptom).
-            lock_predicted_y = lock.base_y + along * lock.slope;
+            let along_eff = along.max(lock.ramp_start).min(lock.ramp_end);
+            lock_predicted_y = lock.base_y + (along_eff - lock.ramp_start) * lock.slope;
             lock_valid = true;
         }
     }

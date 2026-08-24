@@ -28,6 +28,9 @@ pub struct MoveEnvParams<'w> {
     pub pad: Res<'w, super::gamepad_input::PadStickIntent>,
     // Focus-less GUI driving (kuluu-0pof): remote movement injection.
     pub debug_ctrl: Option<Res<'w, super::DebugControlHandle>>,
+    // Stair-capture drive channel (FFXI_STAIR_DRIVE): forward/strafe holds plus
+    // a Q/E-style turn axis for the external driver. None unless wired at connect.
+    pub stair_drive: Option<Res<'w, StairDriveHandle>>,
 }
 
 /// Rising-edge memory for the pad stick, standing in for `just_pressed` where
@@ -952,7 +955,7 @@ pub fn dispatch_movement_system(
     let locked = lock_on.target_id.is_some();
     let first_person = matches!(*camera_mode, CameraMode::FirstPerson);
 
-    let resolved = resolve_move_inputs(
+    let mut resolved = resolve_move_inputs(
         bindings.pressed(Action::MoveForward, keys),
         bindings.pressed(Action::MoveBackward, keys),
         bindings.pressed(Action::TurnLeft, keys),
@@ -976,6 +979,21 @@ pub fn dispatch_movement_system(
                 strafe = s;
             }
         }
+    }
+    // Stair-capture drive channel (FFXI_STAIR_DRIVE): remote holds fold into the
+    // real input pipeline exactly like held WASD/Q/E keys — steer-latch, heading
+    // carve and re-ground all see them as normal movement. The one-shot `w` warp
+    // is applied to chase.yaw in the yaw section below (exact aim, no timed pan).
+    let drive_axes = env
+        .stair_drive
+        .as_ref()
+        .and_then(|h| h.0.lock().ok())
+        .and_then(|d| d.active());
+    let drive_c = drive_axes.map(|a| a.3).unwrap_or(0);
+    if let Some((df, ds, dt, _dc)) = drive_axes {
+        forward = df;
+        strafe = ds;
+        resolved.rotate_dir += dt;
     }
     // Pad-vs-keyboard analog resolution is retail's larger-magnitude rule
     // (pick_mag). `pf`/`ps` keep the stick's direction ratio for the
@@ -1012,7 +1030,8 @@ pub fn dispatch_movement_system(
         || bindings.pressed(Action::CameraYawRight, keys)
         || pad_cam.x != 0.0
         || env.pointer.left
-        || env.pointer.right;
+        || env.pointer.right
+        || drive_c != 0;
     // A/D carve, Q/E rotate, and camera panning recompute the run direction
     // against the live camera every frame; anything else holds the latch.
     if !steer_in_chase || ps != 0.0 || resolved.rotate_dir != 0 || camera_panning {
@@ -1079,6 +1098,20 @@ pub fn dispatch_movement_system(
     // included). In chase mode the camera instead trails via auto-recenter.
     if player_rotate_u8 != 0 && first_person {
         chase.yaw -= heading_delta_units * std::f32::consts::TAU / 256.0;
+    }
+
+    // Stair-capture drive camera axes: remote pan at the key yaw rate, plus a
+    // one-shot exact warp (the "cheat": snap instead of timed presses fighting
+    // latency). Runs before the idle early-return so aiming works while stopped.
+    if drive_c != 0 {
+        chase.yaw += drive_c as f32 * CAMERA_YAW_RATE * time.delta_secs();
+    }
+    if let Some(handle) = env.stair_drive.as_ref() {
+        if let Ok(mut d) = handle.0.lock() {
+            if let Some(target) = d.take_warp() {
+                chase.yaw += wrap_signed_pi(target - chase.yaw);
+            }
+        }
     }
 
     if forward == 0 && strafe == 0 && player_rotate_u8 == 0 && !steer_in_chase {
@@ -4141,4 +4174,205 @@ pub fn update_stair_debug_snapshot_system(
     snap.count_gray = count_gray;
     snap.count_red = count_red;
     snap.orb_count = orb_count;
+}
+
+// -----------------------------------------------------------------------------
+// Stair-capture harness (FFXI_STAIR_DRIVE / FFXI_STAIR_CAPTURE) — rebuild #3.
+// An external driver holds {-1,0,1} axes over a TCP JSON line; dispatch folds
+// them into the real input pipeline, and `stair_capture_system` writes one JSON
+// position sample per FixedUpdate tick while capturing. See docs/stair_capture.md
+// for the protocol, run recipe and coordinate facts.
+// -----------------------------------------------------------------------------
+
+/// Remote drive state: axis holds from the external driver. Same {-1,0,1}
+/// forward/strafe semantics as held keys, plus a Q/E-style turn axis (folded
+/// into rotate_dir) and a chase-camera pan axis; `yaw_warp` is a one-shot exact
+/// camera-aim target consumed on the next dispatch tick.
+#[derive(Default)]
+pub struct StairDrive {
+    pub f: i32,
+    pub s: i32,
+    pub t: i32,
+    /// Chase-camera yaw pan axis (W is camera-relative in chase mode; the body
+    /// turn `t` does NOT re-aim forward).
+    pub c: i32,
+    /// Hold expiry; `None` means never armed (fresh handle has no live hold).
+    until: Option<Instant>,
+    /// One-shot exact chase.yaw target (radians); applied once, then cleared.
+    yaw_warp: Option<f32>,
+}
+
+impl StairDrive {
+    /// Live override axes (f, s, t, c), or `None` once the hold expired.
+    pub fn active(&self) -> Option<(i32, i32, i32, i32)> {
+        match self.until {
+            Some(u) if Instant::now() < u => Some((self.f, self.s, self.t, self.c)),
+            _ => None,
+        }
+    }
+
+    /// Consume the pending one-shot camera warp, if any.
+    pub fn take_warp(&mut self) -> Option<f32> {
+        self.yaw_warp.take()
+    }
+}
+
+/// Shared with the `FFXI_STAIR_DRIVE` TCP listener so driver holds reach the Bevy
+/// input path without OS keystrokes. Always inserted; only listened on when the
+/// env var names an address.
+#[derive(Resource)]
+pub struct StairDriveHandle(pub std::sync::Arc<std::sync::Mutex<StairDrive>>);
+
+/// One TCP line per hold: `{"f":1,"s":0,"t":0,"c":0,"ms":8000}`. `f`/`s` are the
+/// run axes (W/S, A/D), `t` is Q/E-style rotate-in-place, `c` pans the chase
+/// camera at the key yaw rate; optional `"w"` sets a one-shot exact yaw target.
+/// Replaces any prior hold; all-zero with `ms == 0` clears.
+pub async fn serve_stair_drive(
+    addr: std::net::SocketAddr,
+    drive: std::sync::Arc<std::sync::Mutex<StairDrive>>,
+) {
+    let Ok(listener) = tokio::net::TcpListener::bind(addr).await else {
+        tracing::warn!(%addr, "FFXI_STAIR_DRIVE bind failed");
+        return;
+    };
+    tracing::info!(%addr, "FFXI_STAIR_DRIVE listening");
+    loop {
+        let Ok((sock, _)) = listener.accept().await else { break };
+        use tokio::io::{AsyncBufReadExt, BufReader};
+        let mut lines = BufReader::new(tokio::io::BufWriter::new(sock)).lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            // One hold per line; each line fully replaces the previous one.
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else { continue };
+            let f = v.get("f").and_then(|x| x.as_i64()).unwrap_or(0);
+            let s = v.get("s").and_then(|x| x.as_i64()).unwrap_or(0);
+            let t = v.get("t").and_then(|x| x.as_i64()).unwrap_or(0);
+            let c = v.get("c").and_then(|x| x.as_i64()).unwrap_or(0);
+            let ms = v.get("ms").and_then(|x| x.as_u64()).unwrap_or(0);
+            let w = v.get("w").and_then(|x| x.as_f64());
+            if (f, s, t, c) == (0, 0, 0, 0) && ms == 0 {
+                // Clear: expire the hold immediately.
+                drive.lock().ok().map(|mut d| d.until = None);
+            } else {
+                if let Ok(mut d) = drive.lock() {
+                    d.f = f as i32;
+                    d.s = s as i32;
+                    d.t = t as i32;
+                    d.c = c as i32;
+                    d.until = Some(Instant::now() + Duration::from_millis(ms));
+                }
+            }
+            if let Some(target) = w {
+                drive.lock().ok().map(|mut d| d.yaw_warp = Some(target as f32));
+            }
+        }
+    }
+}
+
+/// Per-tick capture state: tick counter + direction hysteresis memory.
+#[derive(Default)]
+pub struct CaptureState {
+    tick: u64,
+    last_z: Option<f32>,
+    dir: &'static str,
+}
+
+/// One JSON position sample per FixedUpdate tick while FFXI_STAIR_CAPTURE names
+/// an output file. Emits rendered transform, wire (FFXI-space) prediction +
+/// heading, StaircaseLock state, purple-march slopes, derived up/down direction,
+/// and gate diagnostics (active drive axes + dispatch early-return conditions)
+/// so a frozen run can be diagnosed from the stream itself.
+pub fn stair_capture_system(
+    state: Res<SceneState>,
+    prediction: Res<LocalPlayerPrediction>,
+    lock: Res<StaircaseLock>,
+    dbg: Res<FootprintDebug>,
+    mode: Res<InputMode>,
+    rest: Res<kuluu_render::combat_stance::RestStance>,
+    camera: Res<ChaseCamera>,
+    drive: Option<Res<'_, StairDriveHandle>>,
+    q_self: Query<&Transform, (With<IsSelf>, Without<OperatorCamera>)>,
+    mut cap: Local<CaptureState>,
+) {
+    static PATH: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    let Some(path) = PATH.get_or_init(|| std::env::var("FFXI_STAIR_CAPTURE").ok()) else {
+        return;
+    };
+    let Some(transform) = q_self.single().ok() else {
+        return; // no rendered self yet (zone transition / not logged in)
+    };
+    if state.snapshot.self_char_id.is_none() {
+        return;
+    }
+    let wire = prediction.pos;
+    cap.tick += 1;
+
+    // Direction hysteresis: |dwz| > 0.015/tick flips dir, otherwise hold last.
+    let dz = match cap.last_z {
+        Some(last) => wire.z - last,
+        None => 0.0,
+    };
+    if dz.abs() > 0.015 {
+        cap.dir = if dz < 0.0 { "up" } else { "down" };
+    }
+    cap.last_z = Some(wire.z);
+
+    // Active drive axes (diagnostics): what the driver is holding right now.
+    let axes = drive
+        .as_ref()
+        .and_then(|h| h.0.lock().ok())
+        .and_then(|d| d.active())
+        .unwrap_or((0, 0, 0, 0));
+    let rest_on = !matches!(rest.kind, kuluu_render::combat_stance::RestKind::None);
+    // NaN means "the march produced no slope" — emit JSON null like run #2.
+    let pslope_json =
+        if dbg.purple_slope.is_nan() { String::from("null") } else { format!("{:.9e}", dbg.purple_slope) };
+    let pslope_up_json = if dbg.purple_slope_up.is_nan() {
+        String::from("null")
+    } else {
+        format!("{:.9e}", dbg.purple_slope_up)
+    };
+
+    let line = format!(
+        "{{\"tick\":{},\"t_ms\":{},{},\"wx\":{:.9e},\"wy\":{:.9e},\"wz\":{:.9e},\
+         \"rx\":{:.9e},\"ry\":{:.9e},\"rz\":{:.9e},\"heading\":{},\
+         \"lock\":{},\"slope\":{},\"streak\":{},\
+         \"pslope\":{},\"pslope_up\":{},\"dir\":\"{}\",\
+         \"cancel\":{},\"swallow\":{},\"rest\":{},\
+         \"df\":{},\"ds\":{},\"dt\":{},\"dc\":{}}}",
+        cap.tick,
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0),
+        format!("\"cyaw\":{:.9e}", camera.yaw),
+        wire.x,
+        wire.y,
+        wire.z,
+        transform.translation.x,
+        transform.translation.y,
+        transform.translation.z,
+        state.snapshot.self_pos.heading,
+        lock.active,
+        lock.slope,
+        lock.slope_streak,
+        pslope_json,
+        pslope_up_json,
+        cap.dir,
+        mode_cancels_autorun(&mode),
+        mode_swallows_keys(&mode),
+        rest_on,
+        axes.0,
+        axes.1,
+        axes.2,
+        axes.3,
+    );
+
+    use std::io::Write;
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        let _ = writeln!(f, "{line}");
+    }
 }

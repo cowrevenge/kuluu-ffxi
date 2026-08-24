@@ -1378,7 +1378,6 @@ pub fn apply_self_prediction_system(
     time: Res<Time<Fixed>>,
     mut dbg: ResMut<FootprintDebug>,
     mut plane_state: Local<PlaneState>,
-    mut stair_cache: ResMut<kuluu_render::stair_cache::StairCache>,
     mut q_self: Query<
         (
             &mut kuluu_render::PrevRenderPos,
@@ -1731,14 +1730,6 @@ pub fn apply_self_prediction_system(
     // Along-distance of the first MEASURED riser -- used by the render step.
     let mut march_first_riser_rel: Option<f32> = None;
     let mut _march_last_riser_rel: Option<f32> = None;
-    // XZ of the first measured riser and the axis pointing UP the slope,
-    // captured for feeding kuluu_render::stair_cache. Descent march produces
-    // a downhill axis, ascent produces uphill; we normalize both to "positive
-    // along = uphill" here so the cache always sees one convention.
-    let mut march_first_riser_xz: Option<bevy::math::Vec2> = None;
-    let mut march_first_riser_y_hoisted: f32 = 0.0;
-    let mut march_axis_up: bevy::math::Vec2 = bevy::math::Vec2::ZERO;
-    let mut march_signed_slope: f32 = 0.0;
 
     if any_qualifies && acc.length_squared() > 1e-6 {
         // Continuous up-stairs direction (not snapped to 8 bearings).
@@ -2022,14 +2013,6 @@ pub fn apply_self_prediction_system(
             }
             march_first_riser_rel = Some(first.1);
             _march_last_riser_rel = Some(last.1);
-            // Cache seeding: descent march_dir points downhill, so up-axis
-            // is -march_dir. Signed slope +ps is rise per unit uphill.
-            if let Some(ps) = purple_slope {
-                march_first_riser_xz = Some(first.0);
-                march_first_riser_y_hoisted = first_riser_y;
-                march_axis_up = -march_dir;
-                march_signed_slope = ps;
-            }
         }
     }
     // If the purple march measured a slope, it OVERRIDES the pink fit for the
@@ -2187,13 +2170,6 @@ pub fn apply_self_prediction_system(
             if purple_slope.is_none() {
                 march_first_riser_rel = Some(first.1);
                 _march_last_riser_rel = Some(last.1);
-                // Cache seeding: ascent up_march_dir already points uphill.
-                if let Some(us) = purple_slope_up {
-                    march_first_riser_xz = Some(first.0);
-                    march_first_riser_y_hoisted = up_first_riser_y;
-                    march_axis_up = up_march_dir;
-                    march_signed_slope = us;
-                }
             }
         }
     }
@@ -2237,44 +2213,35 @@ pub fn apply_self_prediction_system(
     plane_state.last_wire_xz = Some(this_xz);
     let is_moving = plane_state.stopped_secs < STOP_GRACE_SECS;
 
-    // Seed the persistent stair-plane cache whenever the live march measured
-    // a slope this tick. add_from_march is idempotent: it extends the seed
-    // via collision raycasts, then merges into an existing cached plane for
-    // the same physical staircase or appends a new one. Cheap to re-seed
-    // every tick because merge dedupes.
-    if let Some(first_xz) = march_first_riser_xz {
-        stair_cache.add_from_march(
-            &collision,
-            first_xz,
-            march_first_riser_y_hoisted,
-            march_axis_up,
-            march_signed_slope,
-        );
-    }
+    // plane_y_at_foot: the measured slope plane's Y at the character's current
+    // XZ. Same formula the old direct-render used, kept as-is.
+    let plane_y_at_foot: Option<f32> =
+        if let (Some(ps), Some(fa)) = (purple_slope, march_first_riser_rel) {
+            Some(first_riser_y - fa * (-ps)) // descent: signed negative
+        } else if let (Some(us), Some(fa)) = (purple_slope_up, march_first_riser_rel) {
+            Some(up_first_riser_y - fa * us) // ascent: signed positive
+        } else {
+            None
+        };
 
-    // plane_y_at_foot: prefer the persistent cache (covers the toe and crest
-    // regions the live march can't see), fall back to a live-march plane if
-    // the cache misses at the character's XZ.
-    let cache_y = stair_cache.y_at(this_xz);
-    let live_y = if let (Some(ps), Some(fa)) = (purple_slope, march_first_riser_rel) {
-        Some(first_riser_y - fa * (-ps)) // descent: signed negative
-    } else if let (Some(us), Some(fa)) = (purple_slope_up, march_first_riser_rel) {
-        Some(up_first_riser_y - fa * us) // ascent: signed positive
-    } else {
-        None
-    };
-    let plane_y_at_foot: Option<f32> = cache_y.or(live_y);
-
-    // "Any plane exists at the character's XZ" -- true if the cache covers
-    // this position OR the live march is producing a plane this tick.
-    let plane_covers_here = plane_y_at_foot.is_some();
+    // "March sees risers around the character" -- the plane is safe to ride
+    // only if we're close to a real measured riser (either just ahead or just
+    // behind). If march_first_riser_rel is far past the character in the march
+    // direction, we've walked off the flight; disengage.
+    const RISER_PROXIMITY_YALMS: f32 = 1.5;
+    let march_sees_risers_here = purple_riser_count >= 2
+        && march_first_riser_rel
+            .map(|r| r.abs() < RISER_PROXIMITY_YALMS)
+            .unwrap_or(false);
 
     // Engagement state machine:
-    //   moving + plane-covers-here + plane below wire+RISER_MAX  -> engage
-    //   !moving  OR  !plane-covers-here                          -> disengage
-    // When engaged, ride the plane's Y. Disengagement is one-shot each way.
+    //   moving + march-sees-risers + plane below wire+RISER_MAX  -> engage
+    //   !moving  OR  !march-sees-risers                          -> disengage
+    //   engaged carries through frames where march briefly stops seeing
+    //     risers only if is_moving stays true; the moment march loses risers
+    //     with is_moving, we still disengage (hole in stairs case).
     const ENGAGE_MAX_UP_STEP: f32 = 0.4; // same RISER_MAX gate the march uses
-    if !is_moving || !plane_covers_here {
+    if !is_moving || !march_sees_risers_here {
         plane_state.engaged = false;
     } else if !plane_state.engaged {
         // One-shot engagement gate. Ascending: plane must be at or under
@@ -2288,8 +2255,9 @@ pub fn apply_self_prediction_system(
     }
 
     let rendered_y = if plane_state.engaged {
-        // engaged implies plane_y_at_foot is Some (plane_covers_here
-        // requires it). Fall back to wire only defensively.
+        // engaged implies plane_y_at_foot is Some (march_sees_risers_here
+        // required purple_riser_count >= 2, which the same march that fills
+        // plane_y_at_foot). Fall back to wire only defensively.
         plane_y_at_foot.unwrap_or(target.y)
     } else {
         // Stopped or off-flight: textured ground.

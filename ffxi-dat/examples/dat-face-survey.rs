@@ -5,6 +5,10 @@
 use ffxi_dat::archive::DatRoot;
 use ffxi_dat::resource_dir::ResourceDir;
 
+// Retail ships placeholder face DATs (e.g. HumeM face 16, fid 7096: 3 vertices,
+// 0 triangles) that pass a has-a-mesh check yet render nothing.
+const STUB_VERTEX_MIN: usize = 16;
+
 const FACE_BASES: [(&str, u32); 8] = [
     ("HumeM", 7080),
     ("HumeF", 10256),
@@ -42,9 +46,19 @@ fn main() {
                 }
             };
             let meshes = ResourceDir::from_bytes(bytes).collect_skel_meshes();
+            let vertices: usize = meshes
+                .iter()
+                .flat_map(|m| &m.meshes)
+                .map(|b| b.vertices.len())
+                .sum();
             if meshes.is_empty() {
                 problems.push(format!(
                     "face {face} fid {file_id}: 0 meshes ({})",
+                    path.display()
+                ));
+            } else if vertices < STUB_VERTEX_MIN {
+                problems.push(format!(
+                    "face {face} fid {file_id}: stub ({vertices} vertices) ({})",
                     path.display()
                 ));
             } else {

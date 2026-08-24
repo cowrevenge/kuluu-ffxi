@@ -682,6 +682,14 @@ pub fn dispatch_look_driven_models(
             let mut equipment: Vec<u32> = Vec::new();
             if let Some(file_id) = resolve_face(face, race) {
                 equipment.push(file_id);
+            } else {
+                // The face DAT carries the head and hair; dropping it renders a
+                // decapitated PC, so a face outside the per-race band must be
+                // loud enough for a user's stderr to explain the screenshot.
+                warn!(
+                    "pc face unresolved (entity {}): race {} face {} outside the face band -- head/hair will not render",
+                    we.id, race, face
+                );
             }
 
             let slot_models = [head, body, hands, legs, feet, main, sub, ranged];

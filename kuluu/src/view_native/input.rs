@@ -1375,14 +1375,17 @@ pub fn apply_self_prediction_system(
     mut dbg: ResMut<FootprintDebug>,
     mut yblend: Local<RenderYBlend>,
     mut q_self: Query<
-        &mut Transform,
+        (
+            &mut kuluu_render::PrevRenderPos,
+            &mut kuluu_render::CurrRenderPos,
+        ),
         (With<IsSelf>, Without<OperatorCamera>),
     >,
 ) {
     if !prediction.initialized {
         return;
     }
-    let Ok(mut t) = q_self.single_mut() else {
+    let Ok((mut prev, mut curr)) = q_self.single_mut() else {
         return;
     };
     // prediction.pos is in wire (ffxi) space; convert to Bevy for the Transform.
@@ -2256,7 +2259,23 @@ pub fn apply_self_prediction_system(
     };
 
     // Preserve rotation — self_visual_yaw_system owns it.
-    t.translation = target;
+    // Publish the tick's authoritative render position to the interpolation
+    // buffer. interpolate_self_transform_system (RunFixedMainLoop) lerps
+    // Transform.translation between prev and curr every render frame so the
+    // chase camera sees smooth motion instead of stair-stepped 60Hz updates.
+    //
+    // Uninitialized state: ensure_self_render_pos_system attaches PrevRenderPos
+    // + CurrRenderPos seeded from the spawn Transform, but the spawn Transform
+    // may still be the placeholder ZERO if this is the frame before scene sync.
+    // Detect that (both exactly ZERO) and seed to this tick's target so the
+    // first render doesn't warp from origin.
+    if prev.0 == bevy::math::Vec3::ZERO && curr.0 == bevy::math::Vec3::ZERO {
+        prev.0 = target;
+        curr.0 = target;
+    } else {
+        prev.0 = curr.0;
+        curr.0 = target;
+    }
 }
 
 /// The corrective command [`recover_self_ground_system`] emits. It is
@@ -3918,14 +3937,17 @@ pub fn stair_capture_system(
     rest: Res<kuluu_render::combat_stance::RestStance>,
     camera: Res<ChaseCamera>,
     drive: Option<Res<'_, StairDriveHandle>>,
-    q_self: Query<&Transform, (With<IsSelf>, Without<OperatorCamera>)>,
+    q_self: Query<
+        &kuluu_render::CurrRenderPos,
+        (With<IsSelf>, Without<OperatorCamera>),
+    >,
     mut cap: Local<CaptureState>,
 ) {
     static PATH: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
     let Some(path) = PATH.get_or_init(|| std::env::var("FFXI_STAIR_CAPTURE").ok()) else {
         return;
     };
-    let Some(transform) = q_self.single().ok() else {
+    let Some(curr_pos) = q_self.single().ok() else {
         return; // no rendered self yet (zone transition / not logged in)
     };
     if state.snapshot.self_char_id.is_none() {
@@ -3976,9 +3998,12 @@ pub fn stair_capture_system(
         wire.x,
         wire.y,
         wire.z,
-        transform.translation.x,
-        transform.translation.y,
-        transform.translation.z,
+        // rx/ry/rz = per-tick authoritative render position (pre-interpolation).
+        // Transform.translation is what the camera SEES (lerped between ticks);
+        // CurrRenderPos.0 is what apply_self_prediction wrote THIS tick.
+        curr_pos.0.x,
+        curr_pos.0.y,
+        curr_pos.0.z,
         state.snapshot.self_pos.heading,
         false, // lock (removed; harness JSON schema kept for tool compat)
         0.0,   // slope (removed)

@@ -5,7 +5,7 @@ use bevy::picking::Pickable;
 use bevy::prelude::*;
 use kuluu_snapshot::{EntityKind, EntityLook, Vec3 as WireVec3};
 
-use crate::components::{IsSelf, LookComp, MorphIn, Nameplate, WorldEntity};
+use crate::components::{CurrRenderPos, IsSelf, LookComp, MorphIn, Nameplate, PrevRenderPos, WorldEntity};
 use crate::graphics_settings::GraphicsSettings;
 use crate::snapshot::SceneState;
 
@@ -627,6 +627,41 @@ pub fn self_visual_yaw_system(
     let target = heading_to_quat(state.snapshot.self_pos.heading);
     let alpha = 1.0 - (-SELF_VISUAL_YAW_RATE * time.delta_secs()).exp();
     t.rotation = t.rotation.slerp(target, alpha);
+}
+
+/// Attaches [`PrevRenderPos`] and [`CurrRenderPos`] to the local player entity
+/// on the frame it becomes IsSelf, seeded from its current Transform so the
+/// very first interpolation lerps between two identical points (no origin
+/// warp). Runs every frame; the query filter makes it a no-op once the
+/// components exist. Mirrors [`ensure_self_lookcomp_system`].
+pub fn ensure_self_render_pos_system(
+    q: Query<(Entity, &Transform), (With<IsSelf>, Without<CurrRenderPos>)>,
+    mut commands: Commands,
+) {
+    for (e, t) in &q {
+        commands.entity(e).insert((
+            PrevRenderPos(t.translation),
+            CurrRenderPos(t.translation),
+        ));
+    }
+}
+
+/// Runs every rendered frame in `RunFixedMainLoopSystems::AfterFixedMainLoop`.
+/// Lerps the visual Transform between the last two authoritative render
+/// positions (produced by `apply_self_prediction_system` at 60Hz) using the
+/// fixed-timestep overstep fraction. This decouples the visible character
+/// motion from the fixed-tick cadence so the chase camera, which reads
+/// Transform every render frame, no longer sees stair-step Y jitter as the
+/// display frame rate races ahead of FixedUpdate.
+pub fn interpolate_self_transform_system(
+    fixed_time: Res<Time<Fixed>>,
+    mut q: Query<(&mut Transform, &PrevRenderPos, &CurrRenderPos), With<IsSelf>>,
+) {
+    let Ok((mut t, prev, curr)) = q.single_mut() else {
+        return;
+    };
+    let alpha = fixed_time.overstep_fraction();
+    t.translation = prev.0.lerp(curr.0, alpha);
 }
 
 #[derive(Resource, Default, Debug, Clone)]

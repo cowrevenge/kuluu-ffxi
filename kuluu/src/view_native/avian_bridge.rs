@@ -84,17 +84,33 @@ impl Plugin for AvianBridgePlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(PhysicsPlugins::default())
             .insert_resource(Gravity(Vec3::ZERO))
-            .init_resource::<ZoneAvianCollider>()
-            .add_systems(
-                Update,
-                (
-                    sync_zone_collider,
-                    sync_door_colliders,
-                    sync_mob_collider_radius,
-                    sync_mob_colliders,
-                ),
-            );
+            .init_resource::<ZoneAvianCollider>();
+        // The four collider-sync systems (sync_zone_collider, sync_door_colliders,
+        // sync_mob_collider_radius, sync_mob_colliders) are scheduled in mod.rs
+        // into FixedUpdate .before(dispatch_movement_system), NOT here in Update.
+        // Reason: avian runs its physics + spatial-query pipeline in
+        // FixedPostUpdate (which is BEFORE Update in the frame). The walker
+        // (dispatch_movement_system) sweeps in FixedUpdate. If the colliders
+        // synced in Update they'd land a full frame after the walker already
+        // cast, so a just-spawned mob/door would be walk-through-able its first
+        // tick. Ordering them before the walker in the same FixedUpdate makes
+        // each collider present and positioned before the sweep.
     }
+}
+
+/// Schedules the four collider-sync systems into FixedUpdate before the walker.
+/// Called from mod.rs where `dispatch_movement_system` is in scope.
+pub fn add_collider_sync_systems(app: &mut App) {
+    app.add_systems(
+        FixedUpdate,
+        (
+            sync_zone_collider,
+            sync_door_colliders,
+            sync_mob_collider_radius,
+            sync_mob_colliders,
+        )
+            .before(super::input::dispatch_movement_system),
+    );
 }
 
 /// The one static trimesh entity mirroring the currently loaded zone blocks.
@@ -282,11 +298,29 @@ fn sync_mob_colliders(
     mut commands: Commands,
     to_build: Query<
         (Entity, &Transform, &MobColliderRadius),
-        (Without<IsSelf>, Without<MobColliderLink>, Without<MobColliderOwner>),
+        (
+            Without<IsSelf>,
+            Without<MobColliderLink>,
+            Without<MobColliderOwner>,
+        ),
     >,
-    visuals: Query<&Transform, (With<MobColliderLink>, Without<IsSelf>, Without<MobColliderOwner>)>,
+    visuals: Query<
+        &Transform,
+        (
+            With<MobColliderLink>,
+            Without<IsSelf>,
+            Without<MobColliderOwner>,
+        ),
+    >,
     links: Query<(Entity, &MobColliderLink)>,
-    mut collider_tf: Query<&mut Transform, (With<MobColliderOwner>, Without<MobColliderLink>, Without<IsSelf>)>,
+    mut collider_tf: Query<
+        &mut Transform,
+        (
+            With<MobColliderOwner>,
+            Without<MobColliderLink>,
+            Without<IsSelf>,
+        ),
+    >,
     owners: Query<(Entity, &MobColliderOwner)>,
 ) {
     // Spawn a separate collider entity for each newly-sized visual.
@@ -391,6 +425,13 @@ fn landing_walkable(sq: &SpatialQuery, at: Vec3, dir_xz: Vec3) -> bool {
 
 /// Layer mask for ground/floor: walls and doors (a closed drawbridge is floor).
 fn ground_mask() -> LayerMask {
+    LayerMask::from([GameLayer::Wall, GameLayer::Door])
+}
+
+/// Layer mask for the camera boom: walls and doors block the camera; mobs
+/// never do (you always see through/past creatures). Same solid world the
+/// walker collides against — one collision authority for movement AND camera.
+pub fn camera_mask() -> LayerMask {
     LayerMask::from([GameLayer::Wall, GameLayer::Door])
 }
 /// Layer mask for obstacle bodies: mobs only.

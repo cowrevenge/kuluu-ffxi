@@ -375,6 +375,11 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
     }
     app.add_plugins(plugin_group);
     app.add_plugins(avian_bridge::AvianBridgePlugin);
+    // Collider syncs run in FixedUpdate before dispatch_movement_system so
+    // mob/door colliders are present + positioned before the walker sweeps
+    // (avian's own pipeline update is in FixedPostUpdate; this ordering keeps
+    // just-spawned colliders from being walk-through-able their first tick).
+    avian_bridge::add_collider_sync_systems(&mut app);
 
     // Persisted audio settings: /debug Sound off (or /sound off) writes to
     // audio.json alongside graphics.json; restarts read it back here. CLI
@@ -756,7 +761,7 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
     app.add_systems(
         Update,
         collision_bvh::build_zone_collision_bvh_system
-            .before(camera_collision::clamp_chase_camera_to_collision)
+            .before(camera_collision::resolve_camera)
             .run_if(in_state(AppPhase::InGame).or_else(in_state(AppPhase::Launcher))),
     );
     app.add_systems(
@@ -767,8 +772,7 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
     );
     app.add_systems(
         Update,
-        camera_collision::clamp_chase_camera_to_collision
-            .after(kuluu_render::chase_camera_system)
+        camera_collision::resolve_camera
             .before(kuluu_render::nameplate_billboard::update_nameplate_billboards_system)
             .run_if(in_state(AppPhase::InGame)),
     );
@@ -776,14 +780,14 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
     app.add_systems(
         Update,
         camera_collision::draw_camera_collision_debug
-            .after(camera_collision::clamp_chase_camera_to_collision)
+            .after(camera_collision::resolve_camera)
             .run_if(in_state(AppPhase::InGame)),
     );
 
     app.add_systems(
         PostUpdate,
         nameplate_occlude::occlude_nameplates_system
-            .after(camera_collision::clamp_chase_camera_to_collision)
+            .after(camera_collision::resolve_camera)
             .run_if(in_state(AppPhase::InGame)),
     );
 

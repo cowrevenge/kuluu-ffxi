@@ -1,12 +1,25 @@
 use bevy::prelude::*;
 
+use avian3d::prelude::*;
+
 use kuluu_render::components::IsSelf;
 use kuluu_render::dat_mzb::{CameraCollisionSource, DrawDistance, ZoneGeomMode};
 use kuluu_render::scene::BakedActor;
 use kuluu_render::snapshot::SceneState;
-use kuluu_render::{third_person_anchor_y, CameraMode, ChaseCamera, OperatorCamera};
+use kuluu_render::{third_person_anchor_y, yaw_for_heading, CameraMode, ChaseCamera, OperatorCamera};
 
+use super::avian_bridge::camera_mask;
 use super::collision_bvh::{CollisionBvh, ZoneCollisionBvh};
+
+/// Gap-proportional pull rate (1/sec) for the position spring, HORIZONTAL only.
+/// At run speed ~6 yalms/sec the settled horizontal gap is speed / PULL_RATE
+/// = ~3 yalms: the character leads, the camera trails. Rotation is never
+/// lagged (this engine has no lean); only position.
+const CAM_PULL_RATE: f32 = 2.0;
+
+/// Cap on the spring's horizontal per-second travel toward the player. Must
+/// exceed sprint speed or the gap grows without bound; warps use snap_to_anchor.
+const CAM_MAX_SPEED: f32 = 12.0;
 
 /// Whether the chase camera should collide with zone MMB static placements (Mog
 /// House furniture and the exit-door model). Inside a Mog House this is always
@@ -43,58 +56,18 @@ const OUTWARD_LERP: f32 = 0.18;
 
 const INWARD_LERP: f32 = 0.45;
 
-pub fn clamp_chase_camera_to_collision(
+pub fn resolve_camera(
     mode: Res<CameraMode>,
-    chase: Res<ChaseCamera>,
+    mut chase: ResMut<ChaseCamera>,
     step: Res<kuluu_render::camera::CameraStepSmoothing>,
+    mut follow: ResMut<kuluu_render::camera::AnchorFollow>,
     time: Res<Time>,
-    draw: Res<DrawDistance>,
     scene_state: Res<SceneState>,
-    zone_bvh: Res<ZoneCollisionBvh>,
+    sq: SpatialQuery,
     self_q: Query<(&Transform, Option<&BakedActor>), (With<IsSelf>, Without<OperatorCamera>)>,
     mut cam_q: Query<&mut Transform, (With<OperatorCamera>, Without<IsSelf>)>,
-    bvh_q: Query<&CollisionBvh>,
-
-    pending_q: Query<
-        Entity,
-        (
-            With<kuluu_render::components::CameraOccluder>,
-            Without<CollisionBvh>,
-        ),
-    >,
-    mut last_summary: Local<Option<(usize, usize)>>,
-
-    mut last_probe_log: Local<f32>,
-
     mut smoothed_effective: Local<Option<f32>>,
 ) {
-    let source = draw.camera_collision_source;
-    let use_mmb = camera_collides_with_mmb(source, scene_state.snapshot.myroom.is_some());
-    let bvh_count = bvh_q.iter().count();
-    let pending_count = pending_q.iter().count();
-    let summary = (bvh_count, pending_count);
-    if *last_summary != Some(summary) {
-        *last_summary = Some(summary);
-        for (i, bvh) in bvh_q.iter().enumerate() {
-            let (mn, mx) = bvh.root_aabb().unwrap_or((Vec3::ZERO, Vec3::ZERO));
-            tracing::debug!(
-                bvh_index = i,
-                tri_count = bvh.tri_count(),
-                aabb_min = ?(mn.x, mn.y, mn.z),
-                aabb_max = ?(mx.x, mx.y, mx.z),
-                "camera_collision probe: MMB BVH summary"
-            );
-        }
-        tracing::debug!(
-            source = source.label(),
-            mmb_bvhs = bvh_count,
-            mmb_pending = pending_count,
-            zone_bvh = zone_bvh.0.is_some(),
-            zone_bvh_tris = zone_bvh.0.as_ref().map(|b| b.tri_count()).unwrap_or(0),
-            "camera_collision probe: coverage summary"
-        );
-    }
-
     if !matches!(*mode, CameraMode::Chase) {
         *smoothed_effective = None;
         return;
@@ -106,89 +79,69 @@ pub fn clamp_chase_camera_to_collision(
         return;
     };
 
-    let anchor = self_t.translation + Vec3::Y * (third_person_anchor_y(baked) - step.offset);
+    // Init sync: align yaw behind the player on the first frame (moved here
+    // from the retired chase_camera_system).
+    if !chase.synced_initial {
+        chase.yaw = yaw_for_heading(scene_state.snapshot.self_pos.heading);
+        chase.synced_initial = true;
+    }
 
+    // --- Pass 1: position spring (HORIZONTAL only) ---
+    // Rate-limited follow: move the anchor toward the player at
+    // min(gap*rate, max_speed), travel capped at the gap so it can't overshoot,
+    // no easing so it can't wobble. Y is taken direct from the (already
+    // render-smoothed) player Transform, so the camera never floats above the
+    // player on stairs. snap_to_anchor (zone/warp) resets to exact position.
+    let player_pos = self_t.translation;
+    let follow_pos = match follow.pos {
+        Some(prev) if !chase.snap_to_anchor => {
+            let gap_xz = Vec2::new(player_pos.x - prev.x, player_pos.z - prev.z);
+            let dist = gap_xz.length();
+            let new_xz = if dist < 1e-5 {
+                Vec2::new(prev.x, prev.z)
+            } else {
+                let dt = time.delta_secs().max(1e-4);
+                let speed = (dist * CAM_PULL_RATE).min(CAM_MAX_SPEED);
+                let travel = (speed * dt).min(dist);
+                Vec2::new(prev.x, prev.z) + gap_xz / dist * travel
+            };
+            Vec3::new(new_xz.x, player_pos.y, new_xz.y)
+        }
+        _ => player_pos,
+    };
+    follow.pos = Some(follow_pos);
+
+    // --- Pass 2: orbit (instant rotation, never lagged) ---
+    let anchor = follow_pos + Vec3::Y * (third_person_anchor_y(baked) - step.offset);
     let cos_p = chase.pitch.cos();
     let sin_p = chase.pitch.sin();
     let dir = Vec3::new(chase.yaw.sin() * cos_p, sin_p, chase.yaw.cos() * cos_p);
-
-    // Not `chase.distance` — `chase_camera_system` places the eye at
-    // `orbit_radius()`, which grows past it to hold the horizontal standoff.
-    // Ray the distance the camera actually travels or the far end goes unswept.
     let wanted = chase.orbit_radius();
 
+    // --- Pass 3: collision pull-in against the AVIAN world ---
+    // Ray from the anchor along the boom; walls+doors block, mobs never do.
+    // Same solid world the walker sweeps. Nearest hit shortens the boom so the
+    // camera never clips through geometry.
     let mut hit_t = wanted;
-    let mut hit_any = false;
-
-    if source.uses_mzb() {
-        if let Some(bvh) = &zone_bvh.0 {
-            if let Some(t) = bvh.ray_cast(anchor, dir, hit_t) {
-                if t < hit_t {
-                    hit_t = t;
-                    hit_any = true;
-                }
-            }
-        }
-    }
-
-    if use_mmb {
-        for bvh in bvh_q.iter() {
-            if let Some(t) = bvh.ray_cast(anchor, dir, hit_t) {
-                if t < hit_t {
-                    hit_t = t;
-                    hit_any = true;
-                }
-            }
-        }
-    }
-
-    let now = time.elapsed_secs();
-    if now - *last_probe_log >= 1.0 && tracing::enabled!(tracing::Level::DEBUG) {
-        *last_probe_log = now;
-        let probe_start = std::time::Instant::now();
-
-        let mut brute_hit_t = wanted;
-        let mut brute_hit_any = false;
-        let mut total_tris: usize = 0;
-        if source.uses_mzb() {
-            if let Some(bvh) = &zone_bvh.0 {
-                total_tris += bvh.tri_count();
-                if let Some(t) = bvh.ray_cast_brute_force(anchor, dir, brute_hit_t) {
-                    if t < brute_hit_t {
-                        brute_hit_t = t;
-                        brute_hit_any = true;
-                    }
-                }
-            }
-        }
-        if use_mmb {
-            for bvh in bvh_q.iter() {
-                total_tris += bvh.tri_count();
-                if let Some(t) = bvh.ray_cast_brute_force(anchor, dir, brute_hit_t) {
-                    if t < brute_hit_t {
-                        brute_hit_t = t;
-                        brute_hit_any = true;
-                    }
-                }
-            }
-        }
-        tracing::debug!(
-            source = source.label(),
-            anchor = ?(anchor.x, anchor.y, anchor.z),
-            dir = ?(dir.x, dir.y, dir.z),
+    if let Ok(ray_dir) = Dir3::new(dir) {
+        if let Some(hit) = sq.cast_ray(
+            anchor,
+            ray_dir,
             wanted,
-            bvh_hit = hit_any,
-            bvh_hit_t = if hit_any { hit_t } else { f32::NAN },
-            brute_hit = brute_hit_any,
-            brute_hit_t = if brute_hit_any { brute_hit_t } else { f32::NAN },
-            total_tris,
-            "camera_collision probe: per-cast outcome"
-        );
-        kuluu_render::perf_probe::note_debug_probe(probe_start.elapsed());
+            true,
+            &SpatialQueryFilter::from_mask(camera_mask()),
+        ) {
+            if hit.distance < hit_t {
+                hit_t = hit.distance;
+            }
+        }
     }
 
     let target = clamped_camera_distance(hit_t, wanted);
 
+    // Boom-LENGTH easing (not position): snap in fast when a wall appears, ease
+    // out slow when it clears, so the camera doesn't jitter at wall edges. The
+    // position spring is pass 1; this only smooths the pull-in distance.
     let effective = match *smoothed_effective {
         Some(prev) if target < prev => target * INWARD_LERP + prev * (1.0 - INWARD_LERP),
         Some(prev) => prev + (target - prev) * OUTWARD_LERP,
@@ -196,22 +149,10 @@ pub fn clamp_chase_camera_to_collision(
     };
     *smoothed_effective = Some(effective);
 
-    tracing::trace!(
-        target: "camera_boom",
-        wanted,
-        hit_t,
-        hit_any,
-        eff = effective,
-        ax = anchor.x,
-        ay = anchor.y,
-        az = anchor.z,
-        yaw = chase.yaw,
-        pitch = chase.pitch,
-        "boom"
-    );
-
+    // --- Single write: this system is the sole camera authority ---
     cam_t.translation = anchor + dir * effective;
     cam_t.look_at(anchor, Vec3::Y);
+    chase.snap_to_anchor = false;
 }
 
 fn clamped_camera_distance(hit_t: f32, wanted: f32) -> f32 {

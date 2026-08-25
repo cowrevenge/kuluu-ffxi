@@ -11,6 +11,7 @@ use crate::components::IsSelf;
 use crate::graphics_settings::AaMode;
 use crate::graphics_settings::GraphicsSettings;
 use crate::scene::BakedActor;
+#[cfg_attr(not(test), allow(unused_imports))]
 use crate::snapshot::SceneState;
 
 /// Kept for the camera systems and the client's collision clamp, which all
@@ -23,6 +24,31 @@ use crate::snapshot::SceneState;
 pub struct CameraStepSmoothing {
     pub offset: f32,
 }
+
+/// Rate-limited follow of the player position, used as the chase-camera anchor
+/// instead of the raw player Transform. When the player starts moving the
+/// anchor lags briefly (hesitates); each tick it moves toward the player at a
+/// speed proportional to the gap (up to a cap). When the player stops, the
+/// gap shrinks and the speed goes to zero — the anchor coasts in and stops
+/// exactly on the player. No overshoot, no oscillation.
+///
+/// Not a spring: a spring's restoring force keeps momentum after target is
+/// reached and produces bounce. Here velocity is DERIVED from the current
+/// gap every tick, so hitting the target is a fixed point.
+#[derive(Resource)]
+pub struct AnchorFollow {
+    /// The smoothed anchor position (world space). None until first sample,
+    /// then set to the player's position and updated each tick.
+    pub pos: Option<Vec3>,
+}
+
+impl Default for AnchorFollow {
+    fn default() -> Self {
+        Self { pos: None }
+    }
+}
+
+
 
 const THIRD_PERSON_ANCHOR_FRAC: f32 = 0.55;
 
@@ -346,46 +372,13 @@ pub fn build_operator_camera(
     }
 }
 
-pub fn chase_camera_system(
-    mode: Res<CameraMode>,
-    mut chase: ResMut<ChaseCamera>,
-    state: Res<SceneState>,
-    step: Res<CameraStepSmoothing>,
-    q_self: Query<(&Transform, Option<&BakedActor>), (With<IsSelf>, Without<OperatorCamera>)>,
-    mut q_cam: Query<&mut Transform, (With<OperatorCamera>, Without<IsSelf>)>,
-) {
-    if !matches!(*mode, CameraMode::Chase) {
-        return;
-    }
-
-    let Ok((self_t, baked)) = q_self.single() else {
-        return;
-    };
-    let Ok(mut cam_t) = q_cam.single_mut() else {
-        return;
-    };
-
-    if !chase.synced_initial {
-        chase.yaw = yaw_for_heading(state.snapshot.self_pos.heading);
-        chase.synced_initial = true;
-    }
-
-    let cos_p = chase.pitch.cos();
-    let sin_p = chase.pitch.sin();
-    let yaw_dir = Vec3::new(chase.yaw.sin(), 0.0, chase.yaw.cos());
-
-    let anchor_y = third_person_anchor_y(baked);
-    let anchor = self_t.translation + Vec3::Y * (anchor_y - step.offset);
-    let radius = chase.orbit_radius();
-    let desired = anchor + yaw_dir * (radius * cos_p) + Vec3::Y * (radius * sin_p);
-
-    if chase.snap_to_anchor {
-        cam_t.translation = desired;
-        chase.snap_to_anchor = false;
-    } else {
-        cam_t.translation = cam_t.translation.lerp(desired, chase.smoothing);
-    }
-    cam_t.look_at(anchor, Vec3::Y);
+pub fn chase_camera_system() {
+    // RETIRED. The chase camera is now owned entirely by the single authority
+    // `resolve_camera` (kuluu/src/view_native/camera_collision.rs), which lives
+    // in the crate that can reach the avian world for collision. This fn is kept
+    // only as a scheduling anchor for the systems in mod.rs that order against
+    // `chase_camera_system`; it takes no params and does nothing. Do not add
+    // camera logic here — it belongs in resolve_camera.
 }
 
 pub fn firstperson_camera_system(
@@ -560,6 +553,7 @@ mod tests {
             .insert_resource(CameraMode::Chase)
             .insert_resource(SceneState::default())
             .insert_resource(CameraStepSmoothing::default())
+            .insert_resource(AnchorFollow::default())
             .insert_resource(ChaseCamera {
                 snap_to_anchor: true,
                 ..Default::default()

@@ -59,6 +59,9 @@ pub struct DispatchLocals {
     /// landed / grace-held tick; see the stair-settle clamp before the
     /// Move send.
     pub step_settle: u8,
+    /// Mob push-through accrual: which mob the player is shoving and for how
+    /// long, so a sustained press releases that one mob from the sweep.
+    pub push_through: super::avian_bridge::PushThrough,
 }
 
 #[derive(SystemParam)]
@@ -1192,8 +1195,9 @@ pub fn dispatch_movement_system(
     let wall_dx = x - basis_pos.x;
     let wall_dy = y - basis_pos.y;
     let clip = if !env.hud_panels.noclip && (wall_dx != 0.0 || wall_dy != 0.0) {
-        super::avian_bridge::wall_clip_avian(
+        super::avian_bridge::resolve_position(
             &avian,
+            &mut locals.push_through,
             basis_pos.x,
             basis_pos.y,
             basis_pos.z,

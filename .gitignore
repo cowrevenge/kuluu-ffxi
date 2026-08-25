@@ -117,3 +117,6 @@ artifacts/
 
 *.bak-speedup
 speedup.ps1
+
+*.bak
+jackhammer.jsonl

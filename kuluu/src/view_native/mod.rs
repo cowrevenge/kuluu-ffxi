@@ -727,13 +727,13 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
             .run_if(kuluu_render::cutscene::player_camera_allowed),
     );
     app.init_resource::<input::FootprintDebug>();
+    app.init_resource::<input::LastStairDetection>();
     app.add_systems(Update, (input::draw_footprint_debug_system, input::update_stair_debug_snapshot_system)
         .run_if(in_state(AppPhase::InGame)));
     app.add_systems(
         FixedUpdate,
         (
             input::dispatch_movement_system,
-            input::recover_self_ground_system,
             input::apply_self_prediction_system,
             // FFXI_STAIR_CAPTURE: one JSON position line per tick (no-op unless set).
             input::stair_capture_system,

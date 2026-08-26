@@ -82,21 +82,56 @@ pub fn update_stair_debug_hud(
 fn build_status_text(snap: &StairDebugSnapshot) -> String {
     let mut out = String::with_capacity(2048);
 
-    // header block
-    out.push_str("=== STAIR DEBUG ===\n");
-    out.push_str(&format!(
-        "drawing : {}\n",
-        if snap.drawing_enabled { "on" } else { "off" }
-    ));
-    out.push_str(&format!(
-        "player  : xz=({:+.2},{:+.2})  y={:+.2}\n",
-        snap.player_xz.x, snap.player_xz.y, snap.player_y,
-    ));
-    out.push_str(&format!(
-        "slope   : up={}  down={}\n",
-        fmt_opt(snap.slope_up),
-        fmt_opt(snap.slope_down),
-    ));
+    // Right-hand column: the last two orchestration (resolve_position) verdicts.
+    // Each header line is padded to a fixed width, then the orch field for that
+    // row is appended, so the wire-height decision reads to the RIGHT and the
+    // panel doesn't grow downward.
+    const LW: usize = 44; // left-column width before the orch column
+    let orch_block = |out: &mut String, i: usize, label: &str| {
+        let d = snap.orch[i];
+        out.push_str(&format!("{}:\n", label));
+        if !d.valid {
+            out.push_str("  <none>\n");
+            return;
+        }
+        out.push_str(&format!("  is_a_stop   = {}   why = {}\n", d.is_a_stop as u8, d.reason));
+        out.push_str(&format!("  block_n     = ({:+.2},{:+.2},{:+.2})\n", d.block_nx, d.block_ny, d.block_nz));
+        out.push_str(&format!("  hit_pt      = ({:+.1},{:+.1},{:+.1})\n", d.hit_x, d.hit_y, d.hit_z));
+        out.push_str(&format!("  start_xz    = ({:+.1},{:+.1})\n", d.start_x, d.start_z));
+        out.push_str(&format!("  stop_slope  = {}   angle = {:.1}\n", d.stop_slope as u8, d.slope_angle));
+        out.push_str(&format!("  stop_steps  = {}   step_h = {:+.2}  step_slope = {:+.2}\n", d.stop_steps as u8, d.step_height, d.step_slope));
+        out.push_str(&format!("  stop_wall   = {}   wall_h = {:+.2}\n", d.stop_wall as u8, d.wall_height));
+        out.push_str(&format!("  stop_door   = {}\n", d.stop_door as u8));
+        out.push_str(&format!("  stop_mob    = {}   soft = {:.2}\n", d.stop_mob as u8, d.soft_timer));
+    };
+    let mut line = |left: String, right: &str| {
+        out.push_str(&format!("{:<width$}{}\n", left, right, width = LW));
+    };
+
+    line("=== STAIR DEBUG ===".to_string(), "");
+    line(
+        format!("drawing : {}", if snap.drawing_enabled { "on" } else { "off" }),
+        "",
+    );
+    line(
+        format!(
+            "player  : xz=({:+.2},{:+.2})  y={:+.2}",
+            snap.player_xz.x, snap.player_xz.y, snap.player_y,
+        ),
+        "",
+    );
+    line(
+        format!("slope   : up={}  down={}", fmt_opt(snap.slope_up), fmt_opt(snap.slope_down)),
+        "",
+    );
+
+    out.push('\n');
+    out.push_str("-- orchestration (last 2 ticks) --\n");
+    orch_block(&mut out, 0, "[t-0] newest");
+    orch_block(&mut out, 1, "[t-1]");
+    if !snap.door_name.is_empty() {
+        out.push_str(&format!("DOOR: {}\n", snap.door_name));
+    }
 
     out.push('\n');
     out.push_str(&format!(
@@ -176,6 +211,56 @@ pub struct StairDebugSnapshot {
     pub count_red: usize,
     pub orb_count: usize,
     pub orbs: [OrbInfo; 60],
+    /// The last two resolve_position (orchestration) verdicts, newest first.
+    /// Printed as a right-hand column in the debug panel so the wire-height
+    /// decision can be watched against what the detector (orbs) sees.
+    pub orch: [OrchDecision; 2],
+    pub door_name: String,
+}
+
+/// Shared log of the last two orchestration decisions, written by
+/// dispatch_movement_system (input crate) and read into StairDebugSnapshot by
+/// the snapshot system. Newest at index 0.
+#[derive(Resource, Debug, Clone, Default)]
+pub struct OrchDecisionLog {
+    pub last_two: [OrchDecision; 2],
+    /// Mesh/texture name of the most recent blocking door, for debug.
+    pub last_door_name: String,
+}
+
+impl OrchDecisionLog {
+    /// Push a new decision, shifting the previous into slot 1.
+    pub fn push(&mut self, d: OrchDecision) {
+        self.last_two[1] = self.last_two[0];
+        self.last_two[0] = d;
+    }
+}
+
+/// One tick's orchestration verdict from resolve_position: what did the wire
+/// mover actually decide about the geometry ahead / underfoot.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct OrchDecision {
+    pub valid: bool,
+    pub is_a_stop: bool,
+    pub stop_slope: bool,
+    pub slope_angle: f32,
+    pub stop_steps: bool,
+    pub step_slope: f32,
+    pub step_height: f32,
+    pub stop_wall: bool,
+    pub wall_height: f32,
+    pub stop_door: bool,
+    pub stop_mob: bool,
+    pub soft_timer: f32,
+    pub block_nx: f32,
+    pub block_ny: f32,
+    pub block_nz: f32,
+    pub reason: &'static str,
+    pub hit_x: f32,
+    pub hit_y: f32,
+    pub hit_z: f32,
+    pub start_x: f32,
+    pub start_z: f32,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -223,6 +308,8 @@ impl Default for StairDebugSnapshot {
             count_red: 0,
             orb_count: 0,
             orbs: [OrbInfo { xz: Vec2::ZERO, y: 0.0, tag: OrbTag::Empty }; 60],
+            orch: [OrchDecision::default(); 2],
+            door_name: String::new(),
         }
     }
 }

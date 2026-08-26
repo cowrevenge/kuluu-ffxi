@@ -12,7 +12,7 @@ use bevy::prelude::*;
 use std::time::Duration;
 
 use kuluu_render::components::{CameraOccluder, IsSelf, WorldEntity};
-use kuluu_render::dat_mzb::{MzbCollisionGeometry, WallClipResult};
+use kuluu_render::dat_mzb::{MzbCollisionGeometry, WallClipResult, MAX_GROUND_STEP_UP};
 
 /// Collision classes in the unified avian world. Every collider carries
 /// exactly one membership so the position resolver can ask "what did I hit"
@@ -57,18 +57,6 @@ pub const HALF: f32 = RADIUS + SEG_LEN * 0.5;
 pub const MAX_STEP: f32 = 0.45;
 /// Steepest surface treated as walkable ground. 60deg: normal.y >= cos(60)=0.5.
 pub const SLOPE_MAX_ANGLE: f32 = std::f32::consts::PI / 3.0;
-/// Max height the horizontal slide may gain in one tick before it's reverted.
-/// move_and_slide projects velocity onto contact planes, so a steep face lets
-/// the slide itself ride up walls at any angle (goat climbing). Gains past
-/// this epsilon revert the slide; the swept step is the ONLY climb path.
-pub const SLIDE_UP_EPS: f32 = 0.08;
-/// Max gained/horizontal ratio for a swept step to count as a stair not a wall.
-/// A real riser (~0.286 over ~0.5 tread) is ~0.57; a wall-hump is >2. tan(60)
-/// ~= 1.73 admits everything up to the 60deg we allow and rejects steeper.
-pub const MAX_CLIMB_SLOPE: f32 = 1.73;
-/// Furthest the ground search looks down for a walkable surface before the
-/// character is considered stranded (mid-air, no reachable floor).
-pub const MAX_FALL: f32 = 30.0;
 /// Radius of the thin walkability/ground probe. The 0.8-wide walker capsule
 /// grazes riser faces and misreads them as walls; a small sphere sees only
 /// what's actually underfoot.
@@ -171,7 +159,7 @@ fn sync_door_colliders(
         (With<CameraOccluder>, Without<DoorColliderBuilt>),
     >,
 ) {
-    for (entity, mesh3d, global) in query.iter() {
+    for (entity, mesh3d, _global) in query.iter() {
         let Some(mesh) = meshes.get(mesh3d.0.id()) else {
             continue;
         };
@@ -184,10 +172,16 @@ fn sync_door_colliders(
         let Some(indices) = mesh.indices() else {
             continue;
         };
-        let xform = global.to_matrix();
+        // Build the trimesh from LOCAL mesh verts. avian positions the collider
+        // by the entity's transform, so pre-transforming to world space applied
+        // the placement transform TWICE -- the collider landed at
+        // origin + world_verts, a phantom wall far from the drawn mesh (found
+        // via tshimono26_h blocking open floor at (-35,61.6) with its real wall
+        // drawn near (+65,+121.6), origin (-100,0,-60)). Local verts = collider
+        // exactly where the mesh renders.
         let mut verts: Vec<Vec3> = Vec::with_capacity(positions.len());
         for p in positions {
-            verts.push(xform.transform_point3(Vec3::from_array(*p)));
+            verts.push(Vec3::from_array(*p));
         }
         let mut tris: Vec<[u32; 3]> = Vec::with_capacity(indices.len() / 3);
         let mut it = indices.iter();
@@ -357,6 +351,7 @@ fn sync_mob_colliders(
 pub struct AvianMoveParams<'w, 's> {
     pub mas: MoveAndSlide<'w, 's>,
     pub sq: SpatialQuery<'w, 's>,
+    pub geom: Res<'w, MzbCollisionGeometry>,
 }
 
 fn capsule() -> Collider {
@@ -365,6 +360,7 @@ fn capsule() -> Collider {
 
 /// Vertical probe: distance the capsule travels along `dir` before contact,
 /// capped at `max`, restricted to the given layer mask. Raw shape cast.
+#[allow(dead_code)]
 fn probe(sq: &SpatialQuery, col: &Collider, from: Vec3, dir: Dir3, max: f32, mask: LayerMask) -> f32 {
     match sq.cast_shape(
         col,
@@ -380,11 +376,13 @@ fn probe(sq: &SpatialQuery, col: &Collider, from: Vec3, dir: Dir3, max: f32, mas
 }
 
 /// A thin sphere collider for walkability sampling (see THIN_R).
+#[allow(dead_code)]
 fn thin_probe() -> Collider {
     Collider::sphere(THIN_R)
 }
 
 /// True when a surface normal is close enough to straight up to be walkable.
+#[allow(dead_code)]
 fn is_walkable(normal: Vec3) -> bool {
     normal.y >= SLOPE_MAX_ANGLE.cos()
 }
@@ -393,6 +391,7 @@ fn is_walkable(normal: Vec3) -> bool {
 /// (doors are floors too). None if nothing within `max`. The wide walker
 /// capsule grazes riser faces and misreads them as walls; the thin sphere sees
 /// only what's underfoot.
+#[allow(dead_code)]
 fn ground_normal(sq: &SpatialQuery, center: Vec3, max: f32) -> Option<Vec3> {
     let hit = sq.cast_shape(
         &thin_probe(),
@@ -408,6 +407,7 @@ fn ground_normal(sq: &SpatialQuery, center: Vec3, max: f32) -> Option<Vec3> {
 /// Multi-sampled walkability for a swept-step landing: center and +/- along
 /// travel. Walkable if ANY sample passes (a tread edge always has one probe
 /// mid-tread); a uniform steep wall fails all three. Permissive on all-miss.
+#[allow(dead_code)]
 fn landing_walkable(sq: &SpatialQuery, at: Vec3, dir_xz: Vec3) -> bool {
     const SPREAD: f32 = 0.15;
     let max = HALF + MAX_STEP;
@@ -437,6 +437,59 @@ pub fn camera_mask() -> LayerMask {
 /// Layer mask for obstacle bodies: mobs only.
 fn mob_mask() -> LayerMask {
     LayerMask::from([GameLayer::Mob])
+}
+
+/// Layer mask for doors only.
+fn door_mask() -> LayerMask {
+    LayerMask::from([GameLayer::Door])
+}
+
+/// True if a capsule sweep from `start` along `want` hits anything in `mask`.
+/// (Superseded by entity_in_layer for stop classification; kept for reference.)
+#[allow(dead_code)]
+fn layer_ahead(sq: &SpatialQuery, col: &Collider, start: Vec3, want: Vec3, mask: LayerMask) -> bool {
+    let len = want.length();
+    if len < 1e-6 {
+        return false;
+    }
+    let Ok(dir) = Dir3::new(want / len) else { return false; };
+    sq.cast_shape(
+        col,
+        start,
+        Quat::IDENTITY,
+        dir,
+        &ShapeCastConfig::from_max_distance(len),
+        &SpatialQueryFilter::from_mask(mask),
+    )
+    .is_some()
+}
+
+/// Does `ent` belong to `mask`? Casts mask-only along the move and checks the
+/// hit entity IS `ent`. This classifies the SPECIFIC entity avian stopped us on
+/// -- not any door/mob somewhere in the path -- killing false positives.
+fn entity_in_layer(
+    sq: &SpatialQuery,
+    col: &Collider,
+    start: Vec3,
+    want: Vec3,
+    mask: LayerMask,
+    ent: Entity,
+) -> bool {
+    let len = want.length();
+    if len < 1e-6 {
+        return false;
+    }
+    let Ok(dir) = Dir3::new(want / len) else { return false; };
+    sq.cast_shape(
+        col,
+        start,
+        Quat::IDENTITY,
+        dir,
+        &ShapeCastConfig::from_max_distance(len),
+        &SpatialQueryFilter::from_mask(mask),
+    )
+    .map(|h| h.entity == ent)
+    .unwrap_or(false)
 }
 
 /// The single horizontal-obstacle question: cast the capsule along `want` from
@@ -540,38 +593,118 @@ pub fn resolve_position(
     dx: f32,
     dy: f32,
     dt: f32,
+    // OUT: the one detect_stairs result this tick, for asp + HUD to read (dedup).
+    det_out: &mut Option<super::input::StairDetection>,
+    // OUT: when the block was classified as a door, the door entity, so the
+    // caller can resolve its mesh/texture name for debug.
+    door_ent_out: &mut Option<Entity>,
 ) -> WallClipResult {
     let col = capsule();
     let feet0 = -z;
     let start = Vec3::new(x, feet0 + HALF, -y);
     let want = Vec3::new(dx, 0.0, -dy);
     let want_len = want.length();
-    if want_len < 1e-6 {
-        push.release();
-        return WallClipResult::none(dx, dy);
-    }
     let dt = dt.max(1e-4);
 
-    // ---- PASS A: horizontal obstacle resolution ----
-    // Decide whether a mob is blocking, and whether we've earned push-through.
+    // Ceiling to cast ground rays down from: a bit above the head.
+    // The floor PLANE: cast down from body-center (feet + 1.0) to the floor at
+    // the player's XZ. Body-relative origin, so it is stable whether the player
+    // is grounded OR in the air -- the plane does not move with the (possibly
+    // airborne) live Y. Everything below references THIS, not the live position,
+    // so the height output can't feed back into its own input.
+    let body_center_y = feet0 + 1.0;
+    let plane_y = av
+        .geom
+        .ground_raycast(Vec2::new(x, -y), body_center_y)
+        .unwrap_or(feet0);
+
+    // THE ONE detect_stairs call this tick (word of god). Runs from the stable
+    // plane at the CURRENT xz. apply_self_prediction_system and the HUD read
+    // this same result via LastStairDetection -- no duplicate raycasting.
+    let det = super::input::detect_stairs(Vec3::new(x, plane_y, -y), &av.geom);
+    *det_out = Some(det);
+    *door_ent_out = None;
+
+    // ---- STOPPED (no input): settle onto the actual tread ----
+    // While moving we ride the smooth footprint ramp (below); the instant input
+    // stops we drop onto the real stepped surface underneath. The 0.2 up/down
+    // guard: ground_step accepts a floor up to MAX_GROUND_STEP_UP above the feet
+    // (rise onto a tread you are wedged just below) and any distance below
+    // (fall to the tread). This is what "fall to the tread when you stop" means,
+    // and the up-accept keeps you from sinking through the stairs.
+    if want_len < 1e-6 {
+        push.release();
+        let floor = av
+            .geom
+            .ground_step(Vec2::new(x, -y), feet0, MAX_GROUND_STEP_UP)
+            .or_else(|| av.geom.ground_nearest(Vec2::new(x, -y), feet0));
+        return WallClipResult {
+            dx: 0.0,
+            dy: 0.0,
+            landed_floor: floor.map(|f| -f),
+            dbg_is_a_stop: false,
+            dbg_stop_slope: false,
+            dbg_slope_angle: 0.0,
+            dbg_stop_steps: false,
+            dbg_step_slope: 0.0,
+            dbg_step_height: 0.0,
+            dbg_stop_wall: false,
+            dbg_wall_height: 0.0,
+            dbg_stop_door: false,
+            dbg_stop_mob: false,
+            dbg_soft_timer: 0.0,
+            dbg_block_nx: 0.0,
+            dbg_block_ny: 0.0,
+            dbg_block_nz: 0.0,
+            dbg_reason: "stopped-input",
+            dbg_hit_x: 0.0,
+            dbg_hit_y: 0.0,
+            dbg_hit_z: 0.0,
+        };
+    }
+
+    // =====================================================================
+    // ORCHESTRATION (word of god). One ordered sequence, one authority. The
+    // slide is STEP ONE; its result flows into ONE priority-ordered
+    // classification that makes ONE decision; step three assembles the result.
+    // Nothing overrides anything after the fact. The debug flags are set by the
+    // SAME classification, so the HUD can never disagree with what moved us.
+    // =====================================================================
+    const STEP_HEIGHT: f32 = 0.4; // max auto-climb
+    const SNAP_DOWN: f32 = 0.4;   // ground-snap reach below feet
+    let move_dir = Vec2::new(want.x, want.z).normalize_or_zero();
+    let here = Vec2::new(x, -y);
+
+    // debug accumulators (set by the single classification below)
+    let mut dbg_is_a_stop = false;
+    let mut dbg_stop_slope = false;
+    let mut dbg_slope_angle = 0.0f32;
+    let mut dbg_stop_steps = false;
+    let mut dbg_step_slope = 0.0f32;
+    let mut dbg_step_height = 0.0f32;
+    let mut dbg_stop_wall = false;
+    let mut dbg_wall_height = 0.0f32;
+    let mut dbg_stop_door = false;
+    let mut dbg_stop_mob = false;
+    let dbg_soft_timer = (PUSH_THROUGH_SECS - push.secs).max(0.0);
+    let mut dbg_reason: &'static str = "moving-free";
+
+    // ---- STEP 1: SLIDE (the orchestration runs avian, once) ----------------
+    // Mob push-through accrual decides whether one mob entity is excluded, then
+    // we build the filter and slide. slide_walls_only returns the moved position
+    // AND the first blocking (non-walkable) contact normal (None = not stopped).
     let mut excluded_mob: Option<Entity> = None;
     if let Some((_d, ent, is_mob)) = horizontal_obstacle(&av.sq, &col, start, want, None) {
         if is_mob {
-            // Soft block: accrue press time; once past threshold, exclude it.
             if push.press(ent, dt) {
                 excluded_mob = Some(ent);
             }
-            // else: mob stays in the sweep, so the slide below stops at it.
         } else {
-            // Wall or door in front: not a mob press, clear any mob accrual.
             push.release();
         }
     } else {
         push.release();
     }
-
-    // Horizontal slide against walls+doors (+ any non-excluded mob), no height
-    // gain allowed (revert goat-climbing).
     let mut hfilter = SpatialQueryFilter::from_mask(LayerMask::from([
         GameLayer::Wall,
         GameLayer::Door,
@@ -580,111 +713,147 @@ pub fn resolve_position(
     if let Some(e) = excluded_mob {
         hfilter = hfilter.with_excluded_entities([e]);
     }
-    let mut p1 = slide_filtered(&av.mas, &col, start, want / dt, dt, &hfilter);
-    if p1.y > start.y + SLIDE_UP_EPS {
-        p1 = start;
-    }
-    let moved1 = Vec2::new(p1.x - start.x, p1.z - start.z).length();
+    let mut block_normal: Option<Vec3> = None;
+    let mut block_entity: Option<Entity> = None;
+    let mut block_point: Option<Vec3> = None;
+    let p1 = slide_walls_only(
+        &av.mas, &col, start, want / dt, dt, &hfilter, &mut block_normal, &mut block_entity,
+        &mut block_point,
+    );
+    let slide_xz = Vec2::new(p1.x, p1.z);
 
-    // ---- PASS B: vertical (swept step + ground snap + fall) ----
-    // Everything below queries WALL+DOOR only (mobs are never floors).
-    let gmask = ground_mask();
+    // ---- STEP 2: CLASSIFY (ONE decision, priority order) -------------------
+    // Inputs: the slide result (slide_xz, block_normal) + the detector (det).
+    // We pick exactly ONE outcome and set (move_xz, final_feet, debug) from it.
+    // Priority: stairs-ahead > blocked(door>mob>wall) > free-walk.
+    let move_xz;
+    let final_feet;
 
-    // Swept stair step (up -> forward -> down) when the slide came up short.
-    let mut p = p1;
-    let short = want_len - moved1;
-    if short > 1e-3 {
-        let up = probe(&av.sq, &col, p1, Dir3::Y, MAX_STEP, gmask);
-        if up > 1e-3 {
-            let lifted = p1 + Vec3::Y * up;
-            let dir2 = Vec3::new(want.x, 0.0, want.z).normalize_or_zero();
-            let p2 = slide_filtered(
-                &av.mas,
-                &col,
-                lifted,
-                dir2 * (short / dt),
-                dt,
-                &SpatialQueryFilter::from_mask(gmask),
-            );
-            let fwd = Vec2::new(p2.x - lifted.x, p2.z - lifted.z).length();
-            if fwd > 1e-5 {
-                if let Some((down, _n)) = probe_hit(&av.sq, &col, p2, Dir3::NEG_Y, up + MAX_STEP, gmask) {
-                    let p3 = p2 - Vec3::Y * down;
-                    let gained = p3.y - p1.y;
-                    let horiz = Vec2::new(p3.x - start.x, p3.z - start.z).length();
-                    let climb_slope = if horiz > 1e-4 { gained / horiz } else { f32::INFINITY };
-                    if gained > 1e-3
-                        && gained <= MAX_STEP
-                        && climb_slope <= MAX_CLIMB_SLOPE
-                        && landing_walkable(&av.sq, p3, dir2)
-                    {
-                        p = p3;
-                    }
-                }
+    // (a) Walkable stairs ahead (detector sees an up/down band in our path).
+    //     This takes priority over avian's per-riser block: a staircase reads to
+    //     avian as a vertical wall every tick, so if we let the block win we get
+    //     the stop/go cycle. The detector is the authority on "is this walkable".
+    let stairs_ahead = {
+        let mut found = false;
+        for &(oxz, oy, _g, band) in det.sample_data.iter() {
+            if band == 0 || oy.is_nan() {
+                continue; // green (same tread) or invalid
+            }
+            let along = (oxz - here).dot(move_dir);
+            let rise = (oy - plane_y).abs(); // up OR down both walkable
+            if along >= -0.2 && rise > 0.02 && rise <= STEP_HEIGHT * 3.0 {
+                found = true;
+                break;
             }
         }
-    }
+        found
+    };
 
-    // Ground snap: capsule support within MAX_STEP settles unconditionally
-    // (you can't be rejected off geometry you're standing on).
-    let short_hit = probe_hit(&av.sq, &col, p, Dir3::NEG_Y, MAX_STEP, gmask);
-    let mut settled = false;
-    if let Some((down, _n)) = short_hit {
-        if down < MAX_STEP {
-            p -= Vec3::Y * down;
-            settled = true;
+    if stairs_ahead {
+        dbg_reason = "stairs-ahead";
+        dbg_is_a_stop = true;
+        dbg_stop_steps = true;
+        dbg_step_height = det.ramp_near.1 - plane_y;
+        dbg_step_slope = det.best_slope;
+        dbg_slope_angle = det.best_slope.atan().to_degrees();
+        move_xz = Vec2::new(start.x + want.x, start.z + want.z);
+        final_feet = det.ramp_near.1;
+    } else if let Some(n) = block_normal {
+        // (b) BLOCKED by something that is not a walkable staircase. Classify the
+        //     SPECIFIC entity avian stopped us on (block_entity).
+        dbg_is_a_stop = true;
+
+        // GROUND TRUTH: cast a clean forward ray a short distance against
+        // walls+doors. If NOTHING is really in front of us, avian's move_and_slide
+        // fabricated the contact (depenetration artifact) -- we should NOT block.
+        let probe_from = Vec3::new(start.x, start.y, start.z);
+        let clean_hit = Dir3::new(want / want.length().max(1e-6)).ok().and_then(|d| {
+            av.sq.cast_ray(
+                probe_from,
+                d,
+                RADIUS + 0.6, // just in front (capsule radius + a little)
+                true,
+                &SpatialQueryFilter::from_mask(LayerMask::from([
+                    GameLayer::Wall,
+                    GameLayer::Door,
+                ])),
+            )
+        });
+        // Record for debug: did the clean forward ray actually find a face?
+        let real = clean_hit.is_some();
+
+        let ent = block_entity;
+        let door_hit = ent.is_some_and(|e| {
+            entity_in_layer(&av.sq, &col, start, want, door_mask(), e)
+        });
+        let mob_hit = excluded_mob.is_none()
+            && ent.is_some_and(|e| {
+                entity_in_layer(&av.sq, &col, start, want, mob_mask(), e)
+            });
+
+        if door_hit {
+            dbg_reason = if real { "door-REAL" } else { "door-PHANTOM" };
+            dbg_stop_door = true;
+            *door_ent_out = ent;
+            move_xz = slide_xz;
+            final_feet = det.center_y;
+        } else if mob_hit {
+            dbg_reason = if real { "mob-REAL" } else { "mob-PHANTOM" };
+            dbg_stop_mob = true;
+            move_xz = slide_xz;
+            final_feet = det.center_y;
+        } else {
+            dbg_reason = if real { "wall-REAL" } else { "wall-PHANTOM" };
+            let angle = n.y.clamp(-1.0, 1.0).acos();
+            dbg_stop_wall = true;
+            dbg_slope_angle = angle.to_degrees();
+            dbg_wall_height = 1.0;
+            move_xz = slide_xz;
+            final_feet = det.center_y;
+        }
+    } else {
+        // (c) FREE WALK: not stopped, no stairs. Take avian's slide result and
+        //     snap to the ground under the new position.
+        move_xz = slide_xz;
+        if det.ramp_locked {
+            dbg_stop_slope = true; // informational: walking a locked ramp
+            dbg_slope_angle = det.best_slope.atan().to_degrees();
+            final_feet = det.ramp_near.1;
+        } else if let Some(g) = av.geom.ground_step(slide_xz, plane_y, SNAP_DOWN) {
+            final_feet = g;
+        } else {
+            final_feet = det.center_y;
         }
     }
 
-    // Long fall: thin-probe down, skipping unwalkable faces, to real ground.
-    if !settled {
-        let thin = thin_probe();
-        let mut search_from = p;
-        let mut total_down = 0.0f32;
-        let mut steps = 0u8;
-        while steps < 8 && total_down < MAX_FALL {
-            let remaining = MAX_FALL - total_down;
-            let hit = av.sq.cast_shape(
-                &thin,
-                search_from,
-                Quat::IDENTITY,
-                Dir3::NEG_Y,
-                &ShapeCastConfig::from_max_distance(remaining),
-                &SpatialQueryFilter::from_mask(gmask),
-            );
-            match hit {
-                None => break,
-                Some(h) => {
-                    let normal: Vec3 = h.normal1.into();
-                    if is_walkable(normal) {
-                        let surface_y = search_from.y - h.distance - THIN_R;
-                        p.y = surface_y + HALF;
-                        settled = true;
-                        break;
-                    } else {
-                        let skip = h.distance + THIN_R;
-                        search_from.y -= skip;
-                        total_down += skip;
-                        steps += 1;
-                    }
-                }
-            }
-        }
-    }
-
-    if !settled {
-        // Stranded: nothing walkable within MAX_FALL. Revert to start.
-        p = start;
-    }
-
+    // ---- STEP 3: ASSEMBLE --------------------------------------------------
     WallClipResult {
-        dx: p.x - start.x,
-        dy: -(p.z - start.z),
-        landed_floor: Some(p.y - HALF),
+        dx: move_xz.x - start.x,
+        dy: -(move_xz.y - start.z),
+        landed_floor: Some(final_feet),
+        dbg_is_a_stop,
+        dbg_stop_slope,
+        dbg_slope_angle,
+        dbg_stop_steps,
+        dbg_step_slope,
+        dbg_step_height,
+        dbg_stop_wall,
+        dbg_wall_height,
+        dbg_stop_door,
+        dbg_stop_mob,
+        dbg_soft_timer,
+        dbg_block_nx: block_normal.map(|n| n.x).unwrap_or(0.0),
+        dbg_block_ny: block_normal.map(|n| n.y).unwrap_or(0.0),
+        dbg_block_nz: block_normal.map(|n| n.z).unwrap_or(0.0),
+        dbg_reason,
+        dbg_hit_x: block_point.map(|p| p.x).unwrap_or(0.0),
+        dbg_hit_y: block_point.map(|p| p.y).unwrap_or(0.0),
+        dbg_hit_z: block_point.map(|p| p.z).unwrap_or(0.0),
     }
 }
 
 /// Like `probe` but returns (distance, normal) for a masked down/any cast.
+#[allow(dead_code)]
 fn probe_hit(
     sq: &SpatialQuery,
     col: &Collider,
@@ -704,27 +873,79 @@ fn probe_hit(
     Some((hit.distance, hit.normal1.into()))
 }
 
-/// move_and_slide with an explicit filter (layer-restricted slide).
-fn slide_filtered(
+/// move_and_slide that only treats WALLS as blocking. Any contact whose surface
+/// is walkable (normal within SLOPE_MAX_ANGLE of straight up: floor, ramps up to
+/// 60deg, stair treads) returns `Ignore` -- the slide does not stop or deflect on
+/// it, so walkable ground never blocks horizontal travel (fixes "stuck on flat
+/// floor" and removes any surface the slide could ride up = no goat). Steeper
+/// faces (>60deg = true walls) return `Accept` and block/slide as normal.
+fn slide_walls_only(
     mas: &MoveAndSlide,
     col: &Collider,
     from: Vec3,
     vel: Vec3,
     dt: f32,
     filter: &SpatialQueryFilter,
+    // OUT: the normal of the first blocking (non-walkable) contact, if any.
+    // Some(normal) => the slide was stopped by a wall/steep face this tick.
+    block_normal: &mut Option<Vec3>,
+    // OUT: the entity of the first blocking contact, for layer classification.
+    block_entity: &mut Option<Entity>,
+    // OUT: the world contact POINT of the block (where collision happened).
+    block_point: &mut Option<Vec3>,
 ) -> Vec3 {
     if vel.length_squared() < 1e-12 || dt <= 0.0 {
         return from;
     }
-    mas.move_and_slide(
-        col,
-        from,
-        Quat::IDENTITY,
-        vel,
-        Duration::from_secs_f32(dt),
-        &MoveAndSlideConfig::default(),
-        filter,
-        |_hit| MoveAndSlideHitResponse::Accept,
-    )
-    .position
+    let mut captured: Option<Vec3> = None;
+    let mut captured_ent: Option<Entity> = None;
+    let mut captured_pt: Option<Vec3> = None;
+    let pos = mas
+        .move_and_slide(
+            col,
+            from,
+            Quat::IDENTITY,
+            vel,
+            Duration::from_secs_f32(dt),
+            &MoveAndSlideConfig::default(),
+            filter,
+            |hit| {
+                // hit.normal is a Dir3 pointing away from the character. Up-y
+                // >= cos(60deg) => walkable => ignore (not a wall). Otherwise
+                // it's a blocking face: capture its normal for classification.
+                let n: Vec3 = (*hit.normal).into();
+                if n.y >= SLOPE_MAX_ANGLE.cos() {
+                    MoveAndSlideHitResponse::Ignore
+                } else {
+                    // SANITY GATE: a real block is within the capsule's reach. If
+                    // avian reports a contact point far from the player (a
+                    // depenetration artifact or degenerate trimesh contact
+                    // returning garbage coords), it is NOT in front of us --
+                    // ignore it instead of treating distant geometry as a wall.
+                    let pt: Vec3 = Vec3::new(
+                        hit.point.x as f32,
+                        hit.point.y as f32,
+                        hit.point.z as f32,
+                    );
+                    let reach = RADIUS + HALF + 0.5; // capsule reach + margin
+                    let horiz = Vec2::new(pt.x - from.x, pt.z - from.z).length();
+                    if horiz > reach {
+                        // Contact is not actually in front of us -> phantom.
+                        MoveAndSlideHitResponse::Ignore
+                    } else {
+                        if captured.is_none() {
+                            captured = Some(n);
+                            captured_ent = Some(hit.entity);
+                            captured_pt = Some(pt);
+                        }
+                        MoveAndSlideHitResponse::Accept
+                    }
+                }
+            },
+        )
+        .position;
+    *block_normal = captured;
+    *block_entity = captured_ent;
+    *block_point = captured_pt;
+    pos
 }

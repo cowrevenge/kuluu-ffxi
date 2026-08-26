@@ -4328,6 +4328,27 @@ pub struct WallClipResult {
     /// the old feet in the NEW column, which for a stair with ground under it is the low
     /// slab behind the riser just crossed — undoing every step (Bastok Mines 2026-08-23).
     pub landed_floor: Option<f32>,
+    /// Debug: WHY movement stopped this tick (stair HUD). Pure instrumentation.
+    pub dbg_is_a_stop: bool,
+    pub dbg_stop_slope: bool,
+    pub dbg_slope_angle: f32,
+    pub dbg_stop_steps: bool,
+    pub dbg_step_slope: f32,
+    pub dbg_step_height: f32,
+    pub dbg_stop_wall: bool,
+    pub dbg_wall_height: f32,
+    pub dbg_stop_door: bool,
+    pub dbg_stop_mob: bool,
+    pub dbg_soft_timer: f32,
+    /// WHY the slide stopped: the captured block normal (x,y,z) and a short
+    /// reason string. Pure debug so we can SEE what avian caught.
+    pub dbg_block_ny: f32,
+    pub dbg_block_nx: f32,
+    pub dbg_block_nz: f32,
+    pub dbg_reason: &'static str,
+    pub dbg_hit_x: f32,
+    pub dbg_hit_y: f32,
+    pub dbg_hit_z: f32,
 }
 
 impl WallClipResult {
@@ -4336,6 +4357,24 @@ impl WallClipResult {
             dx,
             dy,
             landed_floor: None,
+            dbg_is_a_stop: false,
+            dbg_stop_slope: false,
+            dbg_slope_angle: 0.0,
+            dbg_stop_steps: false,
+            dbg_step_slope: 0.0,
+            dbg_step_height: 0.0,
+            dbg_stop_wall: false,
+            dbg_wall_height: 0.0,
+            dbg_stop_door: false,
+            dbg_stop_mob: false,
+            dbg_soft_timer: 0.0,
+            dbg_block_ny: 0.0,
+            dbg_block_nx: 0.0,
+            dbg_block_nz: 0.0,
+            dbg_reason: "none",
+            dbg_hit_x: 0.0,
+            dbg_hit_y: 0.0,
+            dbg_hit_z: 0.0,
         }
     }
 }
@@ -4850,6 +4889,24 @@ impl MzbCollisionGeometry {
             dx: p.x - start_xz.x,
             dy: -(p.y - start_xz.y),
             landed_floor: landed,
+            dbg_is_a_stop: false,
+            dbg_stop_slope: false,
+            dbg_slope_angle: 0.0,
+            dbg_stop_steps: false,
+            dbg_step_slope: 0.0,
+            dbg_step_height: 0.0,
+            dbg_stop_wall: false,
+            dbg_wall_height: 0.0,
+            dbg_stop_door: false,
+            dbg_stop_mob: false,
+            dbg_soft_timer: 0.0,
+            dbg_block_ny: 0.0,
+            dbg_block_nx: 0.0,
+            dbg_block_nz: 0.0,
+            dbg_reason: "none",
+            dbg_hit_x: 0.0,
+            dbg_hit_y: 0.0,
+            dbg_hit_z: 0.0,
         }
     }
 }

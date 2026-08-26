@@ -14,7 +14,7 @@ pub struct StanceParams<'w> {
 }
 
 #[derive(SystemParam)]
-pub struct MoveEnvParams<'w> {
+pub struct MoveEnvParams<'w, 's> {
     // Player movement grounds height on the retail MZB zone collision (the real
     // .dat floor, which has the stairs). The coarse LSB Recast navmesh is a
     // mob-pathing mesh that flattens stairs, so it is NOT used here — only for
@@ -31,6 +31,22 @@ pub struct MoveEnvParams<'w> {
     // Stair-capture drive channel (FFXI_STAIR_DRIVE): forward/strafe holds plus
     // a Q/E-style turn axis for the external driver. None unless wired at connect.
     pub stair_drive: Option<Res<'w, StairDriveHandle>>,
+    /// Debug: the stair HUD's orchestration column reads the last two
+    /// resolve_position verdicts from here (written each moving tick).
+    pub orch_log: ResMut<'w, kuluu_render::hud::stair_debug::OrchDecisionLog>,
+    /// The one stair detection per tick (word of god): resolve_position writes
+    /// it, apply_self_prediction_system + HUD read it. No duplicate detect_stairs.
+    pub last_stair: ResMut<'w, LastStairDetection>,
+    /// For resolving a blocking door entity's mesh/texture name in debug.
+    pub mmb_names: Query<
+        'w,
+        's,
+        (
+            &'static kuluu_render::components::MmbDebugInfo,
+            &'static GlobalTransform,
+            &'static ViewVisibility,
+        ),
+    >,
 }
 
 /// Rising-edge memory for the pad stick, standing in for `just_pressed` where
@@ -713,7 +729,7 @@ pub fn dispatch_movement_system(
     // for the field-level docs the individual `Local`s used to carry.
     mut locals: Local<DispatchLocals>,
     mut prediction: ResMut<LocalPlayerPrediction>,
-    env: MoveEnvParams,
+    mut env: MoveEnvParams,
     mut stance: StanceParams,
 ) {
     let rest_stance = &mut stance.rest_stance;
@@ -1179,10 +1195,11 @@ pub fn dispatch_movement_system(
     // The step-up bound is what keeps a gap in the floor from launching us: with
     // it unbounded, one tick in Lower Jeuno snapped 5.5 units onto a roof and the
     // ratcheted reference height kept us there (kuluu-0nnl). No floor within
-    // reach means hold our height for this tick; `recover_self_ground_system` is
-    // the only thing that may break that hold, because the server never corrects
-    // a bad z — it persists and echoes back whatever c2s 0x015 sends
-    // (kuluu-mo4q).
+    // reach means hold our height for this tick. The old MZB wedge recovery
+    // (kuluu-mo4q) is retired: the avian walker's move_and_slide depenetrates
+    // overlap on every call, and the long-fall probe re-grounds on movement.
+    // Note the server never corrects a bad z — it persists and echoes back
+    // whatever c2s 0x015 sends.
     //
     // Horizontal movement: wall collision is client-side against the MZB wall
     // triangles (kuluu-q5sn). This tick's displacement (including forced
@@ -1194,6 +1211,8 @@ pub fn dispatch_movement_system(
     // (kuluu-vbpt follow-up).
     let wall_dx = x - basis_pos.x;
     let wall_dy = y - basis_pos.y;
+    let mut det_out: Option<StairDetection> = None;
+    let mut door_ent_out: Option<Entity> = None;
     let clip = if !env.hud_panels.noclip && (wall_dx != 0.0 || wall_dy != 0.0) {
         super::avian_bridge::resolve_position(
             &avian,
@@ -1204,12 +1223,76 @@ pub fn dispatch_movement_system(
             wall_dx,
             wall_dy,
             time.delta_secs(),
+            &mut det_out,
+            &mut door_ent_out,
         )
     } else {
         kuluu_render::dat_mzb::WallClipResult::none(wall_dx, wall_dy)
     };
+    // Store the one stair detection this tick (if resolve_position ran). asp +
+    // HUD read it from here instead of calling detect_stairs again.
+    if let Some(d) = det_out {
+        env.last_stair.0 = d;
+    }
+    // If a door blocked us, resolve its mesh/texture name + drawn state.
+    let mut door_drawn = 1u8;
+    let door_name: String = match door_ent_out {
+        Some(e) => match env.mmb_names.get(e) {
+            Ok((info, gt, vis)) => {
+                door_drawn = vis.get() as u8;
+                let p = gt.translation();
+                format!(
+                    "mesh={} tex={} worldpos=({:+.1},{:+.1},{:+.1}) drawn={}",
+                    info.asset_name, info.variant_name, p.x, p.y, p.z, door_drawn
+                )
+            }
+            Err(_) => {
+                // No ViewVisibility/MmbDebugInfo -> treat as not drawn (phantom).
+                door_drawn = 0;
+                "door(entity, no MmbDebugInfo)".to_string()
+            }
+        },
+        None => String::new(),
+    };
+    // WALK THROUGH an undrawn door: if the blocking door isn't actually being
+    // rendered, it's a phantom collider -- pass through it. Restore the full
+    // intended move and clear the stop BEFORE applying to position.
+    let mut clip = clip;
+    if clip.dbg_stop_door && door_drawn == 0 {
+        clip.dx = wall_dx;
+        clip.dy = wall_dy;
+        clip.dbg_is_a_stop = false;
+        clip.dbg_stop_door = false;
+        clip.dbg_reason = "door-undrawn-passthrough";
+    }
     x = basis_pos.x + clip.dx;
     y = basis_pos.y + clip.dy;
+    // Debug: record the orchestration verdict for the stair HUD's right column.
+    env.orch_log.push(kuluu_render::hud::stair_debug::OrchDecision {
+        valid: true,
+        is_a_stop: clip.dbg_is_a_stop,
+        stop_slope: clip.dbg_stop_slope,
+        slope_angle: clip.dbg_slope_angle,
+        stop_steps: clip.dbg_stop_steps,
+        step_slope: clip.dbg_step_slope,
+        step_height: clip.dbg_step_height,
+        stop_wall: clip.dbg_stop_wall,
+        wall_height: clip.dbg_wall_height,
+        stop_door: clip.dbg_stop_door,
+        stop_mob: clip.dbg_stop_mob,
+        soft_timer: clip.dbg_soft_timer,
+        block_nx: clip.dbg_block_nx,
+        block_ny: clip.dbg_block_ny,
+        block_nz: clip.dbg_block_nz,
+        reason: clip.dbg_reason,
+        hit_x: clip.dbg_hit_x,
+        hit_y: clip.dbg_hit_y,
+        hit_z: clip.dbg_hit_z,
+        start_x: basis_pos.x,
+        start_z: -basis_pos.y,
+    });
+    // Stash the door name (if any) in a resource for the HUD to show.
+    env.orch_log.last_door_name = door_name;
     let final_x = x;
     let final_y = y;
     // A validated step-up this tick owns the vertical snap: its landing floor is
@@ -1292,87 +1375,15 @@ pub fn dispatch_movement_system(
     prediction.pos = Vec3::new(final_x, final_y, final_z);
 }
 
-/// How long the player must be under every floor in their column before the
-/// wedge recovery fires. A stray floorless column is crossed in a tick or two at
-/// run speed; a wedge lasts forever, so the delay separates them and keeps a
-/// residual collision hole from launching the player onto a roof the way
-/// kuluu-0nnl did.
-const UNDER_FLOOR_RECOVERY_SECS: f32 = 0.5;
-
-/// Debounce for [`recover_self_ground_system`]: fires once `under` has held for
-/// [`UNDER_FLOOR_RECOVERY_SECS`], and rearms whenever the player is grounded
-/// again.
-fn under_floor_debounce_fires(under_secs: &mut f32, under: bool, dt: f32) -> bool {
-    if !under {
-        *under_secs = 0.0;
-        return false;
-    }
-    *under_secs += dt;
-    if *under_secs < UNDER_FLOOR_RECOVERY_SECS {
-        return false;
-    }
-    *under_secs = 0.0;
-    true
-}
-
-/// Breaks the wire-z wedge (kuluu-mo4q). `dispatch_movement_system` holds height
-/// whenever `ground_step` finds no floor within reach, and the server never
-/// corrects it — c2s 0x015 carries our z, the server persists it, and the 0x00A
-/// / CHAR_PC self seed hands the same bad z back next login. Being under every
-/// floor in the column is unreachable by walking (descent is unbounded), so it
-/// is always a wedge and always safe to recover upward.
-pub fn recover_self_ground_system(
-    time: Res<Time<Fixed>>,
-    state: Res<SceneState>,
-    cmd_tx: Res<CommandTx>,
-    collision: Res<kuluu_render::dat_mzb::MzbCollisionGeometry>,
-    mzb_in_flight: Res<kuluu_render::dat_mzb::LoadMzbInFlight>,
-    mut prediction: ResMut<LocalPlayerPrediction>,
-    mut under_secs: Local<f32>,
-) {
-    let self_pos = state.snapshot.self_pos;
-    let self_present = state
-        .snapshot
-        .self_char_id
-        .is_some_and(|id| state.snapshot.entities.iter().any(|e| e.id == id));
-
-    // Before the first movement tick the prediction is unset, so the seed the
-    // server sent is what needs checking.
-    let pos = if prediction.initialized {
-        prediction.pos
-    } else {
-        Vec3::new(self_pos.pos.x, self_pos.pos.y, self_pos.pos.z)
-    };
-
-    let Some(cmd) = ground_recovery_step(
-        &collision,
-        &mzb_in_flight,
-        pos,
-        self_pos.heading,
-        self_present,
-        time.delta_secs(),
-        &mut under_secs,
-    ) else {
-        return;
-    };
-    if let AgentCommand::GroundCorrection { z, .. } = cmd {
-        prediction.pos = Vec3::new(pos.x, pos.y, z);
-        prediction.initialized = true;
-    }
-    let _ = cmd_tx.0.try_send(cmd);
-}
-
-/// Stair-plane engagement gate. Ride the measured slope plane only while the
-/// plane's Y stays within one riser-height of the wire ground under the
-/// character — i.e. the plane represents where we actually are, not a
-/// backward extrapolation into flat ground below us. `is_moving` requires
-/// XZ velocity (with a 100ms grace so a stutter tap doesn't pop). When
-/// disengaged, mesh Y follows the walker's tread-snapped wire Y directly.
+/// Render-Y smoother state. The ONE authority for the self mesh's vertical
+/// render position. The avian walker's wire Y steps tread-to-tread
+/// (mathematically correct for collision); the render Y is a rate-limited
+/// follow of it, so treads become a continuous ramp. No march, no fitted
+/// plane, no engagement gates — the ring/purple march above still runs but
+/// feeds ONLY the stair-debug HUD and gizmos now.
 #[derive(Default)]
 pub struct PlaneState {
-    engaged: bool,
-    last_wire_xz: Option<bevy::math::Vec2>,
-    stopped_secs: f32,
+    last_render_y: Option<f32>,
 }
 
 /// Apply the local walker's predicted position directly to the IsSelf
@@ -1385,6 +1396,7 @@ pub fn apply_self_prediction_system(
     prediction: Res<LocalPlayerPrediction>,
     collision: Res<kuluu_render::dat_mzb::MzbCollisionGeometry>,
     time: Res<Time<Fixed>>,
+    last_stair: Res<LastStairDetection>,
     mut dbg: ResMut<FootprintDebug>,
     mut plane_state: Local<PlaneState>,
     mut q_self: Query<
@@ -1443,6 +1455,178 @@ pub fn apply_self_prediction_system(
     // -------------------------------------------------------------------
     // 5 concentric rings inside the original 1.5 outer bound — denser
     // sampling for better slope detection without extending scan range.
+    // Orchestration calls the detector -- it does not contain it. detect_stairs
+    // answers "step? slope? what ground height?" from position+geom. The render
+    // smoother below reads this; resolve_position (wire height) reads it too.
+    // One detector, multiple readers; the HUD reads the same StairDetection.
+    // Read the ONE detection computed by resolve_position this tick (word of
+    // god). No second detect_stairs call. `collision` is still used elsewhere in
+    // this system, so it stays a param.
+    let _ = &collision;
+    let __det = last_stair.0;
+    let center_xz = __det.center_xz;
+    let center_y_raw = __det.center_y;
+    let sample_data = __det.sample_data;
+    let ramp_near = __det.ramp_near;
+    let ramp_far = __det.ramp_far;
+    let ramp_locked = __det.ramp_locked;
+    let best_slope = __det.best_slope;
+    let best_conf = __det.best_conf;
+    let fwd_probes_dbg = __det.fwd_probes_dbg;
+    let purple_probes_arr = __det.purple_probes_arr;
+    let purple_probe_count = __det.purple_probe_count;
+    let purple_risers_arr = __det.purple_risers_arr;
+    let purple_riser_count = __det.purple_riser_count;
+    let purple_slope = __det.purple_slope;
+    let purple_slope_up = __det.purple_slope_up;
+    let march_first_riser_rel = __det.march_first_riser_rel;
+    // ---- Render-Y smoother (the merge) ----
+    // ONE smoothing authority between the avian walker's wire Y and the
+    // rendered mesh Y. The walker steps tread-to-tread; the render follows at
+    // a capped vertical rate, turning treads into a continuous ramp in BOTH
+    // directions (climb and descent). Everything upstream (ring, purple
+    // march, orbs, ramp fit) is diagnostics for the stair HUD only — it no
+    // longer writes render state, so nothing is left to blink, disengage, or
+    // warp. The camera consumes this Y via the interpolated Transform, so
+    // vertical smoothing lives here and ONLY here.
+    //
+    // RATE: max sustained vertical speed on FFXI stairs is about
+    // slope(0.286/0.5) * sprint(~7 y/s) ~= 4 y/s; 6.0 tracks that with margin
+    // so the render never falls cumulatively behind, while a fresh 0.286
+    // riser still spreads across ~3 ticks instead of one.
+    // SNAP: deltas past this are teleports (zone line, /goto, long falls) —
+    // gliding those would smear the mesh across the world; snap instead.
+    const RENDER_Y_RATE: f32 = 6.0; // yalms per second
+    const RENDER_Y_SNAP: f32 = 2.0; // yalms
+    let rendered_y = match plane_state.last_render_y {
+        Some(last) => {
+            let diff = target.y - last;
+            if diff.abs() > RENDER_Y_SNAP {
+                target.y
+            } else {
+                let max_step = RENDER_Y_RATE * time.delta_secs();
+                last + diff.clamp(-max_step, max_step)
+            }
+        }
+        None => target.y,
+    };
+    plane_state.last_render_y = Some(rendered_y);
+    let _ = march_first_riser_rel;
+    let chosen_y = rendered_y;
+    let avg_for_dbg = chosen_y;
+    let slope_active = (chosen_y - center_y_raw).abs() > 0.05;
+    target.y = rendered_y;
+
+    let _ = best_conf;
+    let _ = best_slope;
+    *dbg = FootprintDebug {
+        enabled: true,
+        center_xz,
+        center_y: center_y_raw,
+        radius: 1.0, // R_3 (detector ring radius), inlined post-extraction
+        sampled_points: sample_data,
+        avg_y: avg_for_dbg,
+        slope_active,
+        fwd_probes: fwd_probes_dbg,
+        ramp_locked,
+        ramp_near_xz: ramp_near.0,
+        ramp_near_y: ramp_near.1,
+        ramp_far_xz: ramp_far.0,
+        ramp_far_y: ramp_far.1,
+        purple_probes: purple_probes_arr,
+        purple_probe_count,
+        purple_risers: purple_risers_arr,
+        purple_riser_count,
+        purple_slope: purple_slope.unwrap_or(f32::NAN),
+        purple_slope_up: purple_slope_up.unwrap_or(f32::NAN),
+    };
+
+    // Preserve rotation — self_visual_yaw_system owns it.
+    // Publish the tick's authoritative render position to the interpolation
+    // buffer. interpolate_self_transform_system (RunFixedMainLoop) lerps
+    // Transform.translation between prev and curr every render frame so the
+    // chase camera sees smooth motion instead of stair-stepped 60Hz updates.
+    //
+    // Uninitialized state: ensure_self_render_pos_system attaches PrevRenderPos
+    // + CurrRenderPos seeded from the spawn Transform, but the spawn Transform
+    // may still be the placeholder ZERO if this is the frame before scene sync.
+    // Detect that (both exactly ZERO) and seed to this tick's target so the
+    // first render doesn't warp from origin.
+    if prev.0 == bevy::math::Vec3::ZERO && curr.0 == bevy::math::Vec3::ZERO {
+        prev.0 = target;
+        curr.0 = target;
+    } else {
+        prev.0 = curr.0;
+        curr.0 = target;
+    }
+}
+
+
+/// The staircase detector's answer. Computed by `detect_stairs`, read by the
+/// render-Y smoother (apply_self_prediction_system) AND the wire height
+/// (resolve_position). One detector, multiple readers; the HUD reads it too.
+#[derive(Clone, Copy)]
+pub struct StairDetection {
+    pub center_xz: bevy::math::Vec2,
+    pub center_y: f32,
+    pub sample_data: [(bevy::math::Vec2, f32, bool, i8); 60],
+    pub ramp_near: (bevy::math::Vec2, f32),
+    pub ramp_far: (bevy::math::Vec2, f32),
+    pub ramp_locked: bool,
+    pub best_slope: f32,
+    pub best_conf: f32,
+    pub fwd_probes_dbg: [(bevy::math::Vec2, f32); 11],
+    pub purple_probes_arr: [(bevy::math::Vec2, f32); 60],
+    pub purple_probe_count: usize,
+    pub purple_risers_arr: [(bevy::math::Vec2, f32); 5],
+    pub purple_riser_count: usize,
+    pub purple_slope: Option<f32>,
+    pub purple_slope_up: Option<f32>,
+    pub march_first_riser_rel: Option<f32>,
+}
+
+/// The single stored result of the ONE detect_stairs call per tick. The
+/// orchestration (resolve_position) computes it; apply_self_prediction_system
+/// and the HUD READ it from here. Word of god: one detector, many readers, no
+/// duplicate raycasting.
+#[derive(bevy::prelude::Resource, Clone, Copy)]
+pub struct LastStairDetection(pub StairDetection);
+
+impl Default for LastStairDetection {
+    fn default() -> Self {
+        Self(detect_stairs_empty())
+    }
+}
+
+/// A zeroed StairDetection for the resource's initial value (before the first
+/// real detection lands).
+fn detect_stairs_empty() -> StairDetection {
+    StairDetection {
+        center_xz: bevy::math::Vec2::ZERO,
+        center_y: 0.0,
+        sample_data: [(bevy::math::Vec2::ZERO, 0.0, false, 0i8); 60],
+        ramp_near: (bevy::math::Vec2::ZERO, 0.0),
+        ramp_far: (bevy::math::Vec2::ZERO, 0.0),
+        ramp_locked: false,
+        best_slope: 0.0,
+        best_conf: 0.0,
+        fwd_probes_dbg: [(bevy::math::Vec2::ZERO, f32::NAN); 11],
+        purple_probes_arr: [(bevy::math::Vec2::ZERO, f32::NAN); 60],
+        purple_probe_count: 0,
+        purple_risers_arr: [(bevy::math::Vec2::ZERO, f32::NAN); 5],
+        purple_riser_count: 0,
+        purple_slope: None,
+        purple_slope_up: None,
+        march_first_riser_rel: None,
+    }
+}
+
+/// Staircase detector, lifted verbatim from apply_self_prediction_system. Pure:
+/// reads position + collision, returns the slope/ground answer.
+pub fn detect_stairs(
+    target: bevy::math::Vec3,
+    collision: &kuluu_render::dat_mzb::MzbCollisionGeometry,
+) -> StairDetection {
     const R_1: f32 = 0.4;
     const R_2: f32 = 0.7;
     const R_3: f32 = 1.0;
@@ -2205,156 +2389,24 @@ pub fn apply_self_prediction_system(
         }
     }
 
-    // ---- Plane engagement gate ----
-    // Ride the measured slope only while it actually represents the ground
-    // under the character. Two-sided proximity gate: |plane_y - wire_y| must
-    // be within one riser-height (0.4). Below that, plane is a backward
-    // extrapolation into flat ground and would sink the mesh. Above that,
-    // plane is a forward extrapolation past the top of the flight and would
-    // float the mesh above the landing. Both are correct plane math but not
-    // meaningful at the character's current position.
-    //
-    // is_moving: XZ delta from last tick, 100ms grace so a stutter pause
-    // doesn't flip us off the plane.
-    const STOP_GRACE_SECS: f32 = 0.100;
-    let this_xz = bevy::math::Vec2::new(target.x, target.z);
-    let moved_this_tick = plane_state
-        .last_wire_xz
-        .map(|last| last.distance_squared(this_xz) > 1e-8)
-        .unwrap_or(false);
-    if moved_this_tick {
-        plane_state.stopped_secs = 0.0;
-    } else {
-        plane_state.stopped_secs += time.delta_secs();
-    }
-    plane_state.last_wire_xz = Some(this_xz);
-    let is_moving = plane_state.stopped_secs < STOP_GRACE_SECS;
-
-    // plane_y at character foot from whichever march produced a slope.
-    let plane_y_at_foot: Option<f32> =
-        if let (Some(ps), Some(fa)) = (purple_slope, march_first_riser_rel) {
-            Some(first_riser_y - fa * (-ps)) // descent: signed negative
-        } else if let (Some(us), Some(fa)) = (purple_slope_up, march_first_riser_rel) {
-            Some(up_first_riser_y - fa * us) // ascent: signed positive
-        } else {
-            None
-        };
-
-    // Two-sided proximity gate.
-    const ENGAGE_TOL: f32 = 0.4;
-    let plane_matches_ground = plane_y_at_foot
-        .map(|p| (p - target.y).abs() <= ENGAGE_TOL)
-        .unwrap_or(false);
-
-    if !is_moving || !plane_matches_ground {
-        plane_state.engaged = false;
-    } else {
-        // Both conditions passed: engage (or stay engaged).
-        plane_state.engaged = true;
-    }
-
-    let rendered_y = if plane_state.engaged {
-        // engaged implies plane_y_at_foot is Some (plane_matches_ground
-        // requires it). Defensive fallback to wire.
-        plane_y_at_foot.unwrap_or(target.y)
-    } else {
-        // Stopped, off-flight, or plane extrapolates too far from ground.
-        target.y
-    };
-    let chosen_y = rendered_y;
-    let avg_for_dbg = chosen_y;
-    let slope_active = (chosen_y - center_y_raw).abs() > 0.05;
-    target.y = rendered_y;
-
-    let _ = best_conf;
-    let _ = best_slope;
-    *dbg = FootprintDebug {
-        enabled: true,
+    StairDetection {
         center_xz,
         center_y: center_y_raw,
-        radius: R_3,
-        sampled_points: sample_data,
-        avg_y: avg_for_dbg,
-        slope_active,
-        fwd_probes: fwd_probes_dbg,
+        sample_data,
+        ramp_near,
+        ramp_far,
         ramp_locked,
-        ramp_near_xz: ramp_near.0,
-        ramp_near_y: ramp_near.1,
-        ramp_far_xz: ramp_far.0,
-        ramp_far_y: ramp_far.1,
-        purple_probes: purple_probes_arr,
+        best_slope,
+        best_conf,
+        fwd_probes_dbg,
+        purple_probes_arr,
         purple_probe_count,
-        purple_risers: purple_risers_arr,
+        purple_risers_arr,
         purple_riser_count,
-        purple_slope: purple_slope.unwrap_or(f32::NAN),
-        purple_slope_up: purple_slope_up.unwrap_or(f32::NAN),
-    };
-
-    // Preserve rotation — self_visual_yaw_system owns it.
-    // Publish the tick's authoritative render position to the interpolation
-    // buffer. interpolate_self_transform_system (RunFixedMainLoop) lerps
-    // Transform.translation between prev and curr every render frame so the
-    // chase camera sees smooth motion instead of stair-stepped 60Hz updates.
-    //
-    // Uninitialized state: ensure_self_render_pos_system attaches PrevRenderPos
-    // + CurrRenderPos seeded from the spawn Transform, but the spawn Transform
-    // may still be the placeholder ZERO if this is the frame before scene sync.
-    // Detect that (both exactly ZERO) and seed to this tick's target so the
-    // first render doesn't warp from origin.
-    if prev.0 == bevy::math::Vec3::ZERO && curr.0 == bevy::math::Vec3::ZERO {
-        prev.0 = target;
-        curr.0 = target;
-    } else {
-        prev.0 = curr.0;
-        curr.0 = target;
-    }}
-
-/// The corrective command [`recover_self_ground_system`] emits. It is
-/// deliberately not an [`AgentCommand::Move`]: the reactor treats a Move as
-/// player intent and would cancel a Following/Pathing goal for it, or drop it
-/// outright under a forced-move override (kuluu-mo4q).
-pub fn ground_recovery_command(x: f32, y: f32, z: f32, heading: u8) -> AgentCommand {
-    AgentCommand::GroundCorrection { x, y, z, heading }
-}
-
-/// Inert while a zone/interior load is in flight: the "under every floor is
-/// unreachable by walking" argument holds only over a *complete* collision set,
-/// and `sub_area_activation` swaps an interior in behind the exterior shell
-/// asynchronously — mid-swap an indoor player's column holds only the shell
-/// above them, and recovering onto it is the kuluu-0nnl roof snap. The load
-/// outlasts [`UNDER_FLOOR_RECOVERY_SECS`], so the debounce alone cannot cover
-/// this.
-fn ground_recovery_step(
-    collision: &kuluu_render::dat_mzb::MzbCollisionGeometry,
-    mzb_in_flight: &kuluu_render::dat_mzb::LoadMzbInFlight,
-    pos: Vec3,
-    heading: u8,
-    self_present: bool,
-    dt: f32,
-    under_secs: &mut f32,
-) -> Option<AgentCommand> {
-    if !self_present || mzb_in_flight.any_pending() {
-        under_floor_debounce_fires(under_secs, false, dt);
-        return None;
+        purple_slope,
+        purple_slope_up,
+        march_first_riser_rel,
     }
-    let column = bevy::math::Vec2::new(pos.x, -pos.y);
-    let feet_y = -pos.z;
-
-    let reachable = collision
-        .ground_step(column, feet_y, kuluu_render::dat_mzb::MAX_GROUND_STEP_UP)
-        .is_some();
-    // No floor at all means the zone collision has not loaded yet (it is reset
-    // on zone change) or the column is genuinely floorless — neither is a wedge.
-    let under = !reachable && collision.ground_nearest(column, feet_y).is_some();
-    if !under_floor_debounce_fires(under_secs, under, dt) {
-        return None;
-    }
-
-    let recovered_z = collision.ground_or_recover_wire_z(pos.x, pos.y, pos.z)?;
-    if (recovered_z - pos.z).abs() <= f32::EPSILON {
-        return None;
-    }
-    Some(ground_recovery_command(pos.x, pos.y, recovered_z, heading))
 }
 
 fn heading_to_forward(heading: u8) -> (f32, f32) {
@@ -2666,237 +2718,6 @@ const TAB_SAMPLE_HEIGHTS: [f32; 5] = [0.0, 0.5, 1.0, 1.5, 2.0];
 mod tests {
     use super::*;
     use kuluu_snapshot::{Entity as WireEntity, EntityKind, Vec3 as WireVec3};
-
-    #[test]
-    fn under_floor_debounce_waits_then_fires_once() {
-        const TICK: f32 = 1.0 / 60.0;
-        let mut acc = 0.0f32;
-        let mut ticks = 0;
-        while !under_floor_debounce_fires(&mut acc, true, TICK) {
-            ticks += 1;
-            assert!(ticks < 1000, "debounce never fired while under the floor");
-        }
-        assert!(
-            (ticks as f32 * TICK - UNDER_FLOOR_RECOVERY_SECS).abs() < TICK,
-            "fired after {ticks} ticks, expected ~{UNDER_FLOOR_RECOVERY_SECS}s"
-        );
-        assert!(
-            !under_floor_debounce_fires(&mut acc, true, TICK),
-            "the debounce rearms after firing rather than repeating every tick"
-        );
-    }
-
-    #[test]
-    fn under_floor_debounce_rearms_when_grounded() {
-        let mut acc = 0.0f32;
-        assert!(!under_floor_debounce_fires(
-            &mut acc,
-            true,
-            UNDER_FLOOR_RECOVERY_SECS * 0.9
-        ));
-        assert!(!under_floor_debounce_fires(&mut acc, false, 0.0));
-        assert!(
-            !under_floor_debounce_fires(&mut acc, true, UNDER_FLOOR_RECOVERY_SECS * 0.9),
-            "a moment on solid ground clears the accumulator, so a stray floorless column never fires"
-        );
-    }
-
-    /// A single up-facing slab at bevy y = `floor_y` spanning the origin
-    /// column, enough for `ground_step`/`ground_nearest` to resolve.
-    fn slab_collision(floor_y: f32) -> kuluu_render::dat_mzb::MzbCollisionGeometry {
-        use kuluu_render::dat_mzb::{
-            build_collision_geometry, MzbCollisionGeometry, MzbInstance, MzbSubMesh,
-        };
-        const HALF: f32 = 10.0;
-        let sub = MzbSubMesh {
-            positions: vec![
-                [-HALF, floor_y, -HALF],
-                [HALF, floor_y, -HALF],
-                [HALF, floor_y, HALF],
-                [-HALF, floor_y, HALF],
-            ],
-            indices: vec![0, 1, 2, 0, 2, 3],
-            tri_terrain: vec![0, 0],
-            tri_normal: vec![[0.0, 1.0, 0.0], [0.0, 1.0, 0.0]],
-            tri_camera_transparent: vec![false, false],
-            flags: 0,
-        };
-        let inst = MzbInstance {
-            submesh_idx: 0,
-            bevy_transform: bevy::prelude::Transform::IDENTITY,
-            water_height_bevy: None,
-            sub_area_link: 0,
-        };
-        MzbCollisionGeometry::from_block(build_collision_geometry(&[sub], &[inst], None))
-    }
-
-    /// A [`LoadMzbInFlight`] holding one outstanding zone-geometry load, as the
-    /// window where `sub_area_activation` has retired a block and its
-    /// replacement has not installed yet.
-    fn one_load_in_flight() -> kuluu_render::dat_mzb::LoadMzbInFlight {
-        use kuluu_render::dat_mzb::{LoadMzbInFlight, LoadedZoneGeom};
-        bevy::tasks::AsyncComputeTaskPool::get_or_init(bevy::tasks::TaskPool::new);
-        let task = bevy::tasks::AsyncComputeTaskPool::get().spawn(async {
-            LoadedZoneGeom {
-                submeshes: std::sync::Arc::new(Vec::new()),
-                instances: std::sync::Arc::new(Vec::new()),
-                mmb_spawns: Err(String::from("test stub")),
-            }
-        });
-        let mut in_flight = LoadMzbInFlight::default();
-        in_flight.tasks.insert((0, None), (Vec::new(), task));
-        in_flight
-    }
-
-    /// The wedge repro: feet at wire z = 0 (bevy y = 0) with the only floor a
-    /// full body above, past `MAX_GROUND_STEP_UP`.
-    const WEDGE_FLOOR_BEVY_Y: f32 = 5.0;
-    const WEDGE_POS: Vec3 = Vec3::new(0.0, 0.0, 0.0);
-
-    #[test]
-    fn recovery_is_gated_while_zone_collision_is_still_loading() {
-        const TICK: f32 = 1.0 / 60.0;
-        let collision = slab_collision(WEDGE_FLOOR_BEVY_Y);
-        let loading = one_load_in_flight();
-        let idle = kuluu_render::dat_mzb::LoadMzbInFlight::default();
-        let mut under_secs = 0.0f32;
-
-        // Well past the debounce: an interior swap outlasts
-        // UNDER_FLOOR_RECOVERY_SECS, which is exactly why the debounce alone is
-        // not the gate.
-        let loading_ticks = (UNDER_FLOOR_RECOVERY_SECS * 4.0 / TICK) as u32;
-        for _ in 0..loading_ticks {
-            assert!(
-                ground_recovery_step(
-                    &collision,
-                    &loading,
-                    WEDGE_POS,
-                    0,
-                    true,
-                    TICK,
-                    &mut under_secs
-                )
-                .is_none(),
-                "recovered onto the shell while the collision set was incomplete"
-            );
-        }
-
-        let mut fired = None;
-        for _ in 0..loading_ticks {
-            if let Some(cmd) =
-                ground_recovery_step(&collision, &idle, WEDGE_POS, 0, true, TICK, &mut under_secs)
-            {
-                fired = Some(cmd);
-                break;
-            }
-        }
-        match fired {
-            Some(AgentCommand::GroundCorrection { z, .. }) => {
-                assert!(
-                    (z + WEDGE_FLOOR_BEVY_Y).abs() < 1e-3,
-                    "recovered to wire z {z}, expected the slab"
-                );
-            }
-            other => panic!("recovery must still fire on a real wedge once loaded, got {other:?}"),
-        }
-    }
-
-    /// The command the recovery actually emits must route through the reactor
-    /// as a correction, not as player movement (kuluu-mo4q): the player's goal
-    /// survives it, and it is not swallowed while a forced move is running.
-    #[test]
-    fn recovery_command_keeps_the_goal_and_survives_an_override() {
-        use kuluu_session::reactor::{Goal, Reactor, ReactorConfig};
-        use kuluu_session::state::{AgentEvent, Position, Vec3 as WireVec3};
-
-        let collision = slab_collision(WEDGE_FLOOR_BEVY_Y);
-        let mut under_secs = 0.0f32;
-        let cmd = ground_recovery_step(
-            &collision,
-            &kuluu_render::dat_mzb::LoadMzbInFlight::default(),
-            WEDGE_POS,
-            0,
-            true,
-            UNDER_FLOOR_RECOVERY_SECS,
-            &mut under_secs,
-        )
-        .expect("the wedge column must produce a recovery");
-        let recovered_z = match cmd {
-            AgentCommand::GroundCorrection { z, .. } | AgentCommand::Move { z, .. } => z,
-            ref other => panic!("unexpected recovery command {other:?}"),
-        };
-
-        let mut r = Reactor::new(ReactorConfig::default());
-        r.handle_command(AgentCommand::Follow {
-            target_id: 7,
-            distance: 3.0,
-        });
-        let routing = r.handle_command(cmd.clone());
-        assert!(
-            routing.forward.is_some(),
-            "recovery never reached the wire: {routing:?}"
-        );
-        assert!(
-            matches!(r.current_goal(), Goal::Following { target_id: 7, .. }),
-            "recovery cancelled the player's follow: {:?}",
-            r.current_goal()
-        );
-
-        const OVERRIDE_TTL_MS: u32 = 5_000;
-        let forced_target = Position {
-            pos: WireVec3 {
-                x: 10.0,
-                y: 0.0,
-                z: 0.0,
-            },
-            ..Position::default()
-        };
-        r.observe_event(&AgentEvent::ForcedMove {
-            mode: 0,
-            target: forced_target,
-            duration_ms: OVERRIDE_TTL_MS,
-        });
-        let routing = r.handle_command(cmd);
-        assert!(
-            routing.forward.is_some(),
-            "recovery dropped while a forced-move override was active"
-        );
-        assert!(
-            matches!(r.current_override(), Some(ov) if (ov.target.z - recovered_z).abs() < 1e-6),
-            "the override replays its own target every tick, so its height must be rebased"
-        );
-    }
-
-    #[test]
-    fn recovery_debounce_restarts_after_the_load_gate_clears() {
-        let collision = slab_collision(WEDGE_FLOOR_BEVY_Y);
-        let loading = one_load_in_flight();
-        let idle = kuluu_render::dat_mzb::LoadMzbInFlight::default();
-        let mut under_secs = 0.0f32;
-        assert!(ground_recovery_step(
-            &collision,
-            &loading,
-            WEDGE_POS,
-            0,
-            true,
-            UNDER_FLOOR_RECOVERY_SECS * 10.0,
-            &mut under_secs
-        )
-        .is_none());
-        assert!(
-            ground_recovery_step(
-                &collision,
-                &idle,
-                WEDGE_POS,
-                0,
-                true,
-                UNDER_FLOOR_RECOVERY_SECS * 0.5,
-                &mut under_secs
-            )
-            .is_none(),
-            "gated time must not count toward the debounce"
-        );
-    }
 
     #[test]
     fn heal_toggle_alternates_stance_and_wire_mode() {
@@ -3796,6 +3617,7 @@ pub fn draw_footprint_debug_system(
 pub fn update_stair_debug_snapshot_system(
     dbg: Res<FootprintDebug>,
     panels: Res<kuluu_render::hud::HudPanels>,
+    orch_log: Res<kuluu_render::hud::stair_debug::OrchDecisionLog>,
     mut snap: ResMut<kuluu_render::hud::stair_debug::StairDebugSnapshot>,
 ) {
     use kuluu_render::hud::stair_debug::{OrbInfo, OrbTag};
@@ -3814,6 +3636,9 @@ pub fn update_stair_debug_snapshot_system(
     }
     snap.slope_up = slope_up;
     snap.slope_down = slope_down;
+    // Orchestration verdicts (last two ticks) for the right-hand column.
+    snap.orch = orch_log.last_two;
+    snap.door_name = orch_log.last_door_name.clone();
     // Per-orb classification. Same rules the renderer uses.
     let mut count_green = 0;
     let mut count_up = 0;

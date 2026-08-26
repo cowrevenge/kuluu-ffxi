@@ -192,6 +192,7 @@ impl Plugin for HudPlugin {
         app.init_resource::<chat_panel::ChatActivityTracker>();
         app.init_resource::<mesh_debug::MeshHoverDebug>();
         app.init_resource::<stair_debug::StairDebugSnapshot>();
+        app.init_resource::<stair_debug::OrchDecisionLog>();
 
         app.init_resource::<zone_flash::ZoneFlashState>();
         app.init_resource::<self_hud::SelfHealTracker>();

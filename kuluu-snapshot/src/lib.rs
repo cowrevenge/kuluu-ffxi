@@ -314,6 +314,13 @@ pub struct Entity {
 
     #[serde(default)]
     pub char_flags: CharFlags,
+
+    /// entity_update byte 0x2B (LSB `namevis`; PosHead `flags3 >> 24`):
+    /// retail's suppression byte for helper NPCs ("blank" cutscene actors,
+    /// effect anchors, trigger points). Real NPCs and doors carry 0; helpers
+    /// carry 0x20/0x40/0x80-class bits (Bastok Mines dataset: 32..128).
+    #[serde(default)]
+    pub name_vis: u8,
 }
 
 // LSB STATUS_TYPE. vendor/server/src/map/entities/baseentity.h
@@ -329,6 +336,14 @@ mod status_type {
 impl Entity {
     pub fn is_dead(&self) -> bool {
         self.hp_pct == Some(0)
+    }
+
+    /// Retail-hidden helper NPC: any namevis hide-class bit set. Empirical
+    /// mask from LSB zone datasets (helpers: 32..128; the lone namevis=1
+    /// entity stays visible); refine against XiPackets 0x0E if needed.
+    /// Suppresses nameplate, hover, and targeting.
+    pub fn name_hidden(&self) -> bool {
+        self.name_vis & 0xF8 != 0
     }
 
     // Blacklist (not whitelist) so an undecoded byte fails open, staying targetable.
@@ -355,6 +370,9 @@ impl Entity {
     /// selectable except doors, whose Talk interaction is the retail door flow.
     pub fn is_targetable(&self) -> bool {
         if !self.status_selectable() {
+            return false;
+        }
+        if self.name_hidden() {
             return false;
         }
         if matches!(self.kind, EntityKind::Other) && !self.is_door() {

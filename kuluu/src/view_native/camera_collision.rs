@@ -58,6 +58,7 @@ const INWARD_LERP: f32 = 0.45;
 
 pub fn resolve_camera(
     mode: Res<CameraMode>,
+    settings: Res<kuluu_render::GraphicsSettings>,
     mut chase: ResMut<ChaseCamera>,
     step: Res<kuluu_render::camera::CameraStepSmoothing>,
     mut follow: ResMut<kuluu_render::camera::AnchorFollow>,
@@ -94,7 +95,7 @@ pub fn resolve_camera(
     // player on stairs. snap_to_anchor (zone/warp) resets to exact position.
     let player_pos = self_t.translation;
     let follow_pos = match follow.pos {
-        Some(prev) if !chase.snap_to_anchor => {
+        Some(prev) if settings.camera_spring && !chase.snap_to_anchor => {
             let gap_xz = Vec2::new(player_pos.x - prev.x, player_pos.z - prev.z);
             let dist = gap_xz.length();
             let new_xz = if dist < 1e-5 {
@@ -142,10 +143,14 @@ pub fn resolve_camera(
     // Boom-LENGTH easing (not position): snap in fast when a wall appears, ease
     // out slow when it clears, so the camera doesn't jitter at wall edges. The
     // position spring is pass 1; this only smooths the pull-in distance.
-    let effective = match *smoothed_effective {
-        Some(prev) if target < prev => target * INWARD_LERP + prev * (1.0 - INWARD_LERP),
-        Some(prev) => prev + (target - prev) * OUTWARD_LERP,
-        None => target,
+    let effective = if !settings.camera_spring {
+        target
+    } else {
+        match *smoothed_effective {
+            Some(prev) if target < prev => target * INWARD_LERP + prev * (1.0 - INWARD_LERP),
+            Some(prev) => prev + (target - prev) * OUTWARD_LERP,
+            None => target,
+        }
     };
     *smoothed_effective = Some(effective);
 

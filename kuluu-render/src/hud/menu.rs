@@ -261,9 +261,11 @@ pub const DEBUG_NET_STATUS: &str = "Net Status";
 pub const DEBUG_NOCLIP: &str = "NoClip";
 pub const DEBUG_SOUND: &str = "Sound";
 pub const DEBUG_VOLUME: &str = "Volume";
-pub const DEBUG_PRINT_POS: &str = "Print Pos";
+pub const DEBUG_PRINT_POS: &str = "Enter";
 pub const DEBUG_STAIR_DRAW: &str = "Draw Stair Climber";
 pub const DEBUG_STAIR_STATUS: &str = "Show Stair Status";
+pub const DEBUG_GRAPHICS_DEBUG: &str = "Graphics Debug";
+pub const DEBUG_POSITION_LOG: &str = "Panel Pos Log";
 
 const DEBUG_ENTRIES: &[&str] = &[
     DEBUG_PERF,
@@ -276,24 +278,34 @@ const DEBUG_ENTRIES: &[&str] = &[
     DEBUG_PRINT_POS,
     DEBUG_STAIR_DRAW,
     DEBUG_STAIR_STATUS,
+    DEBUG_GRAPHICS_DEBUG,
+    DEBUG_POSITION_LOG,
 ];
 
+// Grouped: display -> interface/camera -> quality -> lighting.
 const GRAPHICS_ENTRIES: &[&str] = &[
     "Preset",
+    "Fullscreen",
+    "Windowed",
+    "VSync",
+    "Frame Rate Cap",
+    "Render Scale",
+    "FOV",
+    "UI Scale",
+    "Menu Scale",
+    "Camera Spring",
+    "Anti-Aliasing",
+    "Texture Filtering",
     "Shadow Quality",
     "Shadow Cascades",
     "Shadow Distance",
-    "Anti-Aliasing",
-    "Texture Filtering",
     "Bloom",
     "Volumetric Fog",
     "Fog Quality",
     "View Distance",
-    "VSync",
-    "Frame Rate Cap",
-    "FOV",
-    "Fullscreen",
-    "Windowed",
+    "Depth of Field",
+    "DoF Aperture",
+    "Zone Lines",
     "Dynamic Lights",
     "  Emitter Threshold",
     "  Emitter Intensity",
@@ -303,10 +315,6 @@ const GRAPHICS_ENTRIES: &[&str] = &[
     "Shading",
     "Model Shadow Receiving",
     "Model Shadow Casting",
-    "Depth of Field",
-    "DoF Aperture",
-    "Zone Lines",
-    "Render Scale",
     "Reset to High",
 ];
 
@@ -1331,6 +1339,8 @@ pub fn debug_panel_state(
         DEBUG_SOUND => sound_on,
         DEBUG_STAIR_DRAW => panels.stair_draw,
         DEBUG_STAIR_STATUS => panels.stair_debug,
+        DEBUG_GRAPHICS_DEBUG => panels.graphics_debug,
+        DEBUG_POSITION_LOG => panels.position_log,
         // Print Pos is a button, not a toggle — always shows [off].
         _ => false,
     }

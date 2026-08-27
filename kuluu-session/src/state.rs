@@ -203,6 +203,12 @@ pub struct Entity {
     #[serde(default)]
     pub face_target: u16,
 
+    /// entity_update namevis byte (PosHead flags3 top byte). Rides the
+    /// Position block like `face_target`, so it is preserved across
+    /// non-position updates.
+    #[serde(default)]
+    pub name_vis: u8,
+
     #[serde(default)]
     pub claim_id: u32,
 
@@ -1484,6 +1490,7 @@ impl SessionState {
                         preserved_speed,
                         preserved_speed_base,
                         preserved_face_target,
+                        preserved_name_vis,
                     ) = if *pos_present {
                         (
                             entity.pos,
@@ -1491,6 +1498,7 @@ impl SessionState {
                             entity.speed,
                             entity.speed_base,
                             entity.face_target,
+                            entity.name_vis,
                         )
                     } else {
                         (
@@ -1499,6 +1507,7 @@ impl SessionState {
                             existing.speed,
                             existing.speed_base,
                             existing.face_target,
+                            existing.name_vis,
                         )
                     };
                     let merged = Entity {
@@ -1514,6 +1523,7 @@ impl SessionState {
                         speed: preserved_speed,
                         speed_base: preserved_speed_base,
                         face_target: preserved_face_target,
+                        name_vis: preserved_name_vis,
                         ..entity.clone()
                     };
                     if *existing == merged {

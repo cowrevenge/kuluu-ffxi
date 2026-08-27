@@ -27,6 +27,7 @@ pub fn spawn_stair_debug_hud(mut commands: Commands) {
             BackgroundColor(theme::FRAME_BG),
             BorderColor::all(theme::CURSOR),
             Visibility::Hidden,
+            StairDebugPanelRoot,
         ))
         .with_children(|p| {
             p.spawn((
@@ -99,7 +100,7 @@ fn build_status_text(snap: &StairDebugSnapshot) -> String {
         out.push_str(&format!("  hit_pt      = ({:+.1},{:+.1},{:+.1})\n", d.hit_x, d.hit_y, d.hit_z));
         out.push_str(&format!("  start_xz    = ({:+.1},{:+.1})\n", d.start_x, d.start_z));
         out.push_str(&format!("  stop_slope  = {}   angle = {:.1}\n", d.stop_slope as u8, d.slope_angle));
-        out.push_str(&format!("  stop_steps  = {}   step_h = {:+.2}  step_slope = {:+.2}\n", d.stop_steps as u8, d.step_height, d.step_slope));
+        out.push_str(&format!("  stop_steps  = {}   step_h = {:+.2}  step_slope = {:+.2}  tall_wall_before_step = {}\n", d.stop_steps as u8, d.step_height, d.step_slope, d.tall_wall as u8));
         out.push_str(&format!("  stop_wall   = {}   wall_h = {:+.2}\n", d.stop_wall as u8, d.wall_height));
         out.push_str(&format!("  stop_door   = {}\n", d.stop_door as u8));
         out.push_str(&format!("  stop_mob    = {}   soft = {:.2}\n", d.stop_mob as u8, d.soft_timer));
@@ -117,6 +118,21 @@ fn build_status_text(snap: &StairDebugSnapshot) -> String {
         format!(
             "player  : xz=({:+.2},{:+.2})  y={:+.2}",
             snap.player_xz.x, snap.player_xz.y, snap.player_y,
+        ),
+        "",
+    );
+    line(
+        format!(
+            "zone    : {} (id={})",
+            if snap.zone_name.is_empty() { "?" } else { snap.zone_name.as_str() },
+            snap.zone_id,
+        ),
+        "",
+    );
+    line(
+        format!(
+            "dat     : {}",
+            if snap.dat_path.is_empty() { "?" } else { snap.dat_path.as_str() },
         ),
         "",
     );
@@ -155,7 +171,18 @@ fn build_status_text(snap: &StairDebugSnapshot) -> String {
     push_group(&mut out, "gray",    live, snap.player_y, |t| matches!(t, OrbTag::Gray));
     push_group(&mut out, "red",     live, snap.player_y, |t| matches!(t, OrbTag::Red));
 
-    out
+    // Pin the panel to a CONSTANT line count: the orbs listing varies per tick,
+    // and a height that changes every frame makes the panel column reflow --
+    // every UI bottom edge below this panel bounces while the camera (and the
+    // sample set) moves. Truncate-and-pad so layout never changes.
+    const PANEL_LINES: usize = 120;
+    let mut lines: Vec<&str> = out.lines().collect();
+    lines.truncate(PANEL_LINES);
+    let mut fixed = lines.join("\n");
+    for _ in lines.len()..PANEL_LINES {
+        fixed.push('\n');
+    }
+    fixed
 }
 
 fn push_group(
@@ -216,6 +243,14 @@ pub struct StairDebugSnapshot {
     /// decision can be watched against what the detector (orbs) sees.
     pub orch: [OrchDecision; 2],
     pub door_name: String,
+    /// Zone name (from kuluu_nav::zone_name), or empty if unknown.
+    pub zone_name: String,
+    /// Live server zone id (SceneState.snapshot.zone_id), 0 if none yet.
+    pub zone_id: u16,
+    /// Effective MZB DAT path ("ROMx/y/z.DAT"), or empty if unresolved.
+    /// Effective = mog-house model wins over zone id (matches
+    /// ffxi_dat::zone_dat::effective_zone_dat_file_id).
+    pub dat_path: String,
 }
 
 /// Shared log of the last two orchestration decisions, written by
@@ -245,6 +280,7 @@ pub struct OrchDecision {
     pub stop_slope: bool,
     pub slope_angle: f32,
     pub stop_steps: bool,
+    pub tall_wall: bool,
     pub step_slope: f32,
     pub step_height: f32,
     pub stop_wall: bool,
@@ -310,6 +346,15 @@ impl Default for StairDebugSnapshot {
             orbs: [OrbInfo { xz: Vec2::ZERO, y: 0.0, tag: OrbTag::Empty }; 60],
             orch: [OrchDecision::default(); 2],
             door_name: String::new(),
+            zone_name: String::new(),
+            zone_id: 0,
+            dat_path: String::new(),
         }
     }
 }
+
+
+/// Marks the stair debug panel's root node so the metrics system can measure
+/// its own laid-out rect.
+#[derive(bevy::ecs::component::Component)]
+pub struct StairDebugPanelRoot;

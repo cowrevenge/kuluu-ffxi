@@ -192,6 +192,9 @@ pub enum GraphicsField {
     VSync,
     FrameRateCap,
     Fov,
+    UiScale,
+    CameraSpring,
+    MenuScale,
     Fullscreen,
     Windowed,
 
@@ -231,6 +234,9 @@ impl GraphicsField {
             GraphicsField::VSync => "VSync",
             GraphicsField::FrameRateCap => "Frame Rate Cap",
             GraphicsField::Fov => "FOV",
+            GraphicsField::UiScale => "UI Scale",
+            GraphicsField::CameraSpring => "Camera Spring",
+            GraphicsField::MenuScale => "Menu Scale",
             GraphicsField::Fullscreen => "Fullscreen",
             GraphicsField::Windowed => "Windowed",
             GraphicsField::DynamicLights => "Dynamic Lights",
@@ -264,6 +270,13 @@ impl GraphicsField {
     }
 }
 
+fn default_ui_scale() -> f32 {
+    1.0
+}
+fn default_menu_scale_on() -> bool {
+    true
+}
+
 #[derive(Resource, Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct GraphicsSettings {
     pub preset: QualityPreset,
@@ -286,6 +299,22 @@ pub struct GraphicsSettings {
     #[serde(default)]
     pub fps_cap: u32,
     pub fov_deg: f32,
+    /// HUD size multiplier on top of the resolution-relative base (1080p =
+    /// 1.0x). Applied via bevy's UiScale by apply_ui_scale_system.
+    #[serde(default = "default_ui_scale")]
+    pub ui_scale: f32,
+    /// Camera position-spring + boom easing. OFF by default while the
+    /// accel-driven UI jitter is under investigation (2026-08-27: disabling
+    /// this empirically killed the every-other-frame HUD jitter). Toggled in
+    /// the Debug menu; persisted here so the choice sticks.
+    #[serde(default)]
+    pub camera_spring: bool,
+    /// Menu-only UI scale multiplier. Applied on top of the resolution-relative
+    /// base and the global UI Scale, so "Menu Scale off" holds menu panels at
+    /// the 1080p baseline while HUD widgets still track the window. Toggled in
+    /// the Graphics menu; persisted here.
+    #[serde(default = "default_menu_scale_on")]
+    pub menu_scale: bool,
 
     #[serde(default)]
     pub dynamic_lights: DynamicLights,
@@ -508,6 +537,9 @@ impl GraphicsSettings {
                 vsync: true,
                 fps_cap: 0,
                 fov_deg: DEFAULT_FOV_DEG,
+            ui_scale: 1.0,
+            camera_spring: false,
+            menu_scale: true,
                 dynamic_lights: DynamicLights::Vanilla,
                 light_threshold: DEFAULT_LIGHT_THRESHOLD,
                 light_intensity: DEFAULT_LIGHT_INTENSITY,
@@ -539,6 +571,9 @@ impl GraphicsSettings {
                 vsync: true,
                 fps_cap: 0,
                 fov_deg: DEFAULT_FOV_DEG,
+            ui_scale: 1.0,
+            camera_spring: false,
+            menu_scale: true,
                 dynamic_lights: DynamicLights::Vanilla,
                 light_threshold: DEFAULT_LIGHT_THRESHOLD,
                 light_intensity: DEFAULT_LIGHT_INTENSITY,
@@ -570,6 +605,9 @@ impl GraphicsSettings {
                 vsync: true,
                 fps_cap: 0,
                 fov_deg: DEFAULT_FOV_DEG,
+            ui_scale: 1.0,
+            camera_spring: false,
+            menu_scale: true,
                 dynamic_lights: DynamicLights::Vanilla,
                 light_threshold: DEFAULT_LIGHT_THRESHOLD,
                 light_intensity: DEFAULT_LIGHT_INTENSITY,
@@ -605,6 +643,9 @@ impl GraphicsSettings {
                 vsync: true,
                 fps_cap: 0,
                 fov_deg: DEFAULT_FOV_DEG,
+            ui_scale: 1.0,
+            camera_spring: false,
+            menu_scale: true,
                 dynamic_lights: DynamicLights::Vanilla,
                 light_threshold: DEFAULT_LIGHT_THRESHOLD,
                 light_intensity: DEFAULT_LIGHT_INTENSITY,
@@ -664,6 +705,9 @@ impl GraphicsSettings {
                 n => format!("{n} fps"),
             },
             GraphicsField::Fov => format!("{:.0}°", self.fov_deg),
+            GraphicsField::UiScale => format!("{:.0}%", self.ui_scale * 100.0),
+            GraphicsField::CameraSpring => (if self.camera_spring { "on" } else { "off" }).to_string(),
+            GraphicsField::MenuScale => (if self.menu_scale { "on" } else { "off" }).to_string(),
 
             GraphicsField::DynamicLights => {
                 if self.dynamic_lights == DynamicLights::Enhanced && !self.lights_fine_is_default()
@@ -784,6 +828,16 @@ impl GraphicsSettings {
             }
             GraphicsField::FrameRateCap => {
                 self.fps_cap = cycle_slot_u32(self.fps_cap, FPS_CAP_SLOTS, delta);
+            }
+            GraphicsField::CameraSpring => {
+                if delta != 0 { self.camera_spring = !self.camera_spring; }
+            }
+            GraphicsField::MenuScale => {
+                if delta != 0 { self.menu_scale = !self.menu_scale; }
+            }
+            GraphicsField::UiScale => {
+                self.ui_scale =
+                    cycle_slot_f32(self.ui_scale, &[0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0], delta);
             }
             GraphicsField::Fov => {
                 self.fov_deg = cycle_slot_f32(self.fov_deg, FOV_SLOTS, delta);
@@ -958,22 +1012,30 @@ pub fn init_msaa_caps_system(
     }
 }
 
+// Grouped: display -> interface/camera -> quality -> lighting.
 pub const GRAPHICS_FIELDS: &[GraphicsField] = &[
     GraphicsField::Preset,
+    GraphicsField::Fullscreen,
+    GraphicsField::Windowed,
+    GraphicsField::VSync,
+    GraphicsField::FrameRateCap,
+    GraphicsField::RenderScale,
+    GraphicsField::Fov,
+    GraphicsField::UiScale,
+    GraphicsField::MenuScale,
+    GraphicsField::CameraSpring,
+    GraphicsField::AntiAliasing,
+    GraphicsField::TextureFiltering,
     GraphicsField::ShadowMapSize,
     GraphicsField::ShadowCascadeCount,
     GraphicsField::ShadowMaxDistance,
-    GraphicsField::AntiAliasing,
-    GraphicsField::TextureFiltering,
     GraphicsField::BloomIntensity,
     GraphicsField::VolumetricFog,
     GraphicsField::FogStepCount,
     GraphicsField::ViewDistance,
-    GraphicsField::VSync,
-    GraphicsField::FrameRateCap,
-    GraphicsField::Fov,
-    GraphicsField::Fullscreen,
-    GraphicsField::Windowed,
+    GraphicsField::DepthOfField,
+    GraphicsField::DofAperture,
+    GraphicsField::ZoneLineDisplay,
     GraphicsField::DynamicLights,
     GraphicsField::LightThreshold,
     GraphicsField::LightIntensity,
@@ -983,10 +1045,6 @@ pub const GRAPHICS_FIELDS: &[GraphicsField] = &[
     GraphicsField::CharacterLighting,
     GraphicsField::CharacterShadowReceive,
     GraphicsField::CharacterShadowCast,
-    GraphicsField::DepthOfField,
-    GraphicsField::DofAperture,
-    GraphicsField::ZoneLineDisplay,
-    GraphicsField::RenderScale,
 ];
 
 fn cycle_slot<T: PartialEq + Copy>(current: T, slots: &[T], delta: i32) -> Option<T> {
@@ -1661,6 +1719,9 @@ mod tests {
             shadow_max_distance: 400.0,
             volumetric_fog: true,
             fov_deg: 90.0,
+            ui_scale: 1.0,
+            camera_spring: false,
+            menu_scale: true,
             ..Default::default()
         };
         assert_eq!(s.value_label(GraphicsField::Preset), "Ultra");
@@ -1880,5 +1941,62 @@ mod tests {
         let json = serde_json::to_string(&s).unwrap();
         let back: GraphicsSettings = serde_json::from_str(&json).unwrap();
         assert_eq!(s, back);
+    }
+}
+
+
+/// Resolution-relative HUD scaling: UiScale = (logical height / 1080) x the
+/// user's UI Scale setting, so panels authored against a 1080p baseline grow
+/// and shrink with the window. Reacts to WindowResized events the same tick
+/// they arrive, and marks UiScale mutated even when the numeric value is
+/// unchanged so bevy_ui reflows on layout-affecting changes.
+pub fn apply_ui_scale_system(
+    settings: Res<GraphicsSettings>,
+    windows: bevy::ecs::system::Query<
+        &bevy::window::Window,
+        bevy::ecs::query::With<bevy::window::PrimaryWindow>,
+    >,
+    mut ui: ResMut<bevy::ui::UiScale>,
+    mut prev_size: bevy::ecs::system::Local<bevy::math::UVec2>,
+) {
+    let Ok(w) = windows.single() else {
+        return;
+    };
+    // Frame-over-frame check on BOTH physical axes. A drag on either edge
+    // must trigger relayout: width-only drags feed percent-sized nodes and
+    // pane offsets, height-only drags feed the auto-scale ratio. Physical
+    // (not logical) size updates the same frame the drag lands.
+    let ph = w.physical_size();
+    let resize_fired = *prev_size != ph;
+    *prev_size = ph;
+    // WHOLE-NUMBER EFFECTIVE SCALE, driven by the SMALLER axis so panels
+    // authored against a 1080p landscape frame don't overflow when the
+    // window is wider-than-tall in a way that makes the height-only
+    // multiplier too small (or vice versa when very tall/narrow). Compare
+    // both axes against their 1080p/1920p baselines and take the min:
+    // whichever axis is tightest sets the fit.
+    let logical = bevy::math::Vec2::new(w.width(), w.height());
+    let auto_h = (logical.y / 1080.0).max(0.1);
+    let auto_w = (logical.x / 1920.0).max(0.1);
+    let auto_raw = auto_h.min(auto_w);
+    // SMOOTH fractional scale (standard reference-resolution model, per
+    // Unity CanvasScaler et al). Vector UI with text re-rasterized at final
+    // size handles fractional factors fine; the earlier quarter/integer
+    // quantization was a pixel-art technique misapplied to vector UI and
+    // caused the 50%/75% collapse. Floored so scale can never reach zero.
+    let want = (auto_raw * settings.ui_scale).max(0.25);
+    let changed = (ui.0 - want).abs() > 0.001;
+    if changed {
+        ui.0 = want;
+    } else if resize_fired {
+        // Same scale value at the new size: still touch UiScale so bevy_ui
+        // re-samples the viewport extent for percent-sized nodes. NOTE:
+        // deliberately NO blanket per-node dirtying here. The earlier
+        // all-nodes set_changed() sledgehammer forced full menu rebuilds on
+        // every settings change, which reset the menu cursor mid-input and
+        // let stray presses land on rows the user never selected (the
+        // accidental TAA flip). Retained-mode rule: value changes repaint
+        // row text; they never rebuild the tree.
+        ui.set_changed();
     }
 }

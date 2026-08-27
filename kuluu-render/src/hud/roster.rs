@@ -207,7 +207,7 @@ pub fn update_roster_panel_system(
 
     if shape_changed {
         for (e, _, _) in rows_q.iter() {
-            commands.entity(e).despawn();
+            commands.entity(e).try_despawn();
         }
         commands.entity(panel).with_children(|p| {
             for member in party {

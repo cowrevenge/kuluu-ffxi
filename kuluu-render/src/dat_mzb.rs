@@ -3010,7 +3010,7 @@ impl ZoneBlockRetire<'_, '_> {
         for (e, s) in self.slots.iter() {
             if s.0 == slot {
                 if let Ok(mut ec) = self.commands.get_entity(e) {
-                    ec.despawn();
+                    ec.try_despawn();
                 }
             }
         }
@@ -3085,7 +3085,7 @@ pub fn auto_load_zone_geometry_system(
 
     for e in auto_q.iter() {
         if let Ok(mut ec) = commands.get_entity(e) {
-            ec.despawn();
+            ec.try_despawn();
         }
     }
 
@@ -4335,6 +4335,9 @@ pub struct WallClipResult {
     pub dbg_stop_steps: bool,
     pub dbg_step_slope: f32,
     pub dbg_step_height: f32,
+    /// The tall-wall veto fired: geometry above STEP_HEIGHT directly ahead
+    /// blocked a stairs/lip ride this tick.
+    pub dbg_tall_wall: bool,
     pub dbg_stop_wall: bool,
     pub dbg_wall_height: f32,
     pub dbg_stop_door: bool,
@@ -4361,6 +4364,7 @@ impl WallClipResult {
             dbg_stop_slope: false,
             dbg_slope_angle: 0.0,
             dbg_stop_steps: false,
+            dbg_tall_wall: false,
             dbg_step_slope: 0.0,
             dbg_step_height: 0.0,
             dbg_stop_wall: false,
@@ -4893,6 +4897,7 @@ impl MzbCollisionGeometry {
             dbg_stop_slope: false,
             dbg_slope_angle: 0.0,
             dbg_stop_steps: false,
+            dbg_tall_wall: false,
             dbg_step_slope: 0.0,
             dbg_step_height: 0.0,
             dbg_stop_wall: false,

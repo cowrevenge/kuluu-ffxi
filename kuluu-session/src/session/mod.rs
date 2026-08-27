@@ -777,6 +777,7 @@ fn handle_sub_packet(
                             hp_pct: Some(head.hpp),
                             bt_target_id: head.bt_target_id,
                             face_target: head.facetarget(),
+                            name_vis: (head.flags3 >> 24) as u8,
                             claim_id: 0,
                             speed: head.speed,
                             speed_base: head.speed_base,
@@ -883,13 +884,19 @@ fn handle_sub_packet(
                     );
                 }
 
-                let name = wire_name.or_else(|| {
-                    if op == s2c::CHAR_NPC {
-                        npc_name_resolver.lookup(head.unique_no).map(str::to_string)
-                    } else {
-                        None
-                    }
-                });
+                // Retail resolves static NPC names from the zone's NPC-name
+                // DAT by id and IGNORES the wire name field for them -- on the
+                // wire that field carries the door FourCC for doors ("_6i3")
+                // and the internal script name for helpers ("blank"). DAT
+                // first; wire only as fallback for ids the DAT does not cover.
+                let name = if op == s2c::CHAR_NPC {
+                    npc_name_resolver
+                        .lookup(head.unique_no)
+                        .map(str::to_string)
+                        .or(wire_name)
+                } else {
+                    wire_name
+                };
 
                 let name = name.map(|n| n.replace('_', " "));
                 if let Some(n) = name.as_ref() {
@@ -958,6 +965,7 @@ fn handle_sub_packet(
                         hp_pct,
                         bt_target_id,
                         face_target: head.facetarget(),
+                        name_vis: (head.flags3 >> 24) as u8,
                         claim_id,
                         speed: head.speed,
                         speed_base: head.speed_base,
@@ -6106,6 +6114,7 @@ fn mh_door_entity(model: u16) -> Entity {
         hp_pct: None,
         bt_target_id: 0,
         face_target: 0,
+        name_vis: 0,
         claim_id: 0,
         speed: 0,
         speed_base: 0,

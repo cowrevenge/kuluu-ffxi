@@ -2463,10 +2463,11 @@ fn render_debug_entity(arg: &str, entities: &[WireEntity], self_pos: WireVec3) -
     }
     s.push('\n');
     s.push_str(&format!(
-        "  anim={} animsub={} status={}{}",
+        "  anim={} animsub={} status={} namevis={}{}",
         e.animation,
         e.animationsub,
         e.status,
+        e.name_vis,
         if e.animationsub != 0 { "  EFFECT" } else { "" }
     ));
     s
@@ -3287,6 +3288,7 @@ mod tests {
             heading: 0,
             hp_pct: None,
             bt_target_id: 0,
+            name_vis: 0,
             face_target: 0,
             claim_id: 0,
             speed: 0,

@@ -489,6 +489,12 @@ impl<S: SceneSource + Resource + Component<Mutability = bevy::ecs::component::Mu
                 .run_if(resource_changed::<GraphicsSettings>),
         );
 
+        // UNGATED: reacts to window resizes frame-over-frame, so it cannot
+        // live inside the resource_changed tuple above (that only runs when
+        // the settings menu writes -- the "HUD only rescales when I open the
+        // menu" bug).
+        app.add_systems(Update, graphics_settings::apply_ui_scale_system);
+
         #[cfg(not(target_arch = "wasm32"))]
         app.add_systems(
             Update,

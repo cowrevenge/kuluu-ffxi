@@ -54,6 +54,13 @@ pub struct RenderScaleState {
     /// Image render-target scale factor (kept equal to the window's, so the
     /// image's logical size is `window_logical * render_scale`).
     scale_factor: f32,
+    /// Kept alive one rebuild cycle so in-flight render passes never draw into
+    /// a freed texture during a live window resize (the resize crash).
+    prev_image: Option<Handle<Image>>,
+    /// Live-drag debounce: a new size must hold for two frames before the
+    /// off-screen image is rebuilt.
+    pending_size: UVec2,
+    pending_streak: u8,
     /// The synthetic pointer that carries mouse input onto the image target.
     bridge: PointerId,
 }
@@ -64,6 +71,9 @@ impl Default for RenderScaleState {
             image: None,
             built_size: UVec2::ZERO,
             scale_factor: 1.0,
+            prev_image: None,
+            pending_size: UVec2::ZERO,
+            pending_streak: 0,
             bridge: PointerId::Custom(Uuid::from_u128(BRIDGE_POINTER_UUID)),
         }
     }
@@ -83,8 +93,11 @@ impl Plugin for RenderScalePlugin {
             )
             .add_systems(
                 Update,
-                reconcile_render_scale_system
-                    .after(crate::graphics::settings::apply_anti_aliasing_system),
+                (
+                    snap_window_to_even_system,
+                    reconcile_render_scale_system
+                        .after(crate::graphics::settings::apply_anti_aliasing_system),
+                ),
             );
     }
 }
@@ -128,17 +141,31 @@ fn reconcile_render_scale_system(
     mut state: ResMut<RenderScaleState>,
     mut commands: Commands,
     q_op: Query<
-        (Entity, Option<&RenderTarget>),
+        (
+            Entity,
+            Option<&RenderTarget>,
+            bevy::ecs::query::Has<bevy::ui::IsDefaultUiCamera>,
+        ),
         (With<OperatorCamera>, Without<RenderScaleCompositeCamera>),
     >,
     q_composite: Query<Entity, With<RenderScaleCompositeCamera>>,
     mut q_display: Query<(Entity, &mut ImageNode), With<RenderScaleDisplayNode>>,
+    mut dbg_snap: ResMut<crate::hud::graphics_debug::GraphicsDebugState>,
 ) {
-    let Ok((op_entity, op_target)) = q_op.single() else {
+    let Ok((op_entity, op_target, op_is_default_ui)) = q_op.single() else {
         return;
     };
 
     if !settings.wants_render_scale() {
+        // EXACTLY ONE DEFAULT UI CAMERA, native configuration: the operator.
+        // Without a marker, bevy falls back to "highest order camera on the
+        // primary window" -- the nameplate OVERLAY Camera3d, never meant to
+        // carry the HUD, and the source of the double-rendered UI (two panel
+        // copies in one frame; "jitter" = the copies fighting). Screenshot-
+        // confirmed 2026-08-28.
+        if !op_is_default_ui {
+            commands.entity(op_entity).insert(bevy::ui::IsDefaultUiCamera);
+        }
         // Tear back down to the native single-camera path.
         if state.image.is_some() {
             commands
@@ -152,6 +179,7 @@ fn reconcile_render_scale_system(
             }
             state.image = None;
         }
+        dbg_snap.img = (0, 0);
         return;
     }
 
@@ -164,24 +192,74 @@ fn reconcile_render_scale_system(
     }
     let scale_factor = window.scale_factor();
     let s = settings.render_scale();
+    // Even-floored: an odd window (e.g. maximized 2560x1369) times a scale
+    // can round to an odd image; odd attachment dimensions feed the same
+    // half-pixel class of problems the window even-snap exists for.
     let want = UVec2::new(
-        ((phys.x as f32 * s).round() as u32).max(1),
-        ((phys.y as f32 * s).round() as u32).max(1),
+        (((phys.x as f32 * s).round() as u32).max(2)) & !1,
+        (((phys.y as f32 * s).round() as u32).max(2)) & !1,
     );
 
+    // Scaled configuration: the composite camera owns IsDefaultUiCamera;
+    // a second marker on the operator would trip bevy's multi-marker warning
+    // and re-create the ambiguity this fixes.
+    if op_is_default_ui {
+        commands
+            .entity(op_entity)
+            .remove::<bevy::ui::IsDefaultUiCamera>();
+    }
+    dbg_snap.img = (want.x, want.y);
     let need_rebuild = state.image.is_none()
         || state.built_size != want
         || (state.scale_factor - scale_factor).abs() > 1e-3;
     if need_rebuild {
-        let handle = create_render_scale_image(&mut images, want.x, want.y);
-        state.image = Some(handle);
-        state.built_size = want;
-        state.scale_factor = scale_factor;
+        let first = state.image.is_none();
+        if !first && state.pending_size != want {
+            // New size this frame: start the debounce, keep serving the OLD
+            // image (and its OLD RenderTarget pointer -- see below) so a live
+            // drag doesn't rebuild per pixel.
+            state.pending_size = want;
+            state.pending_streak = 0;
+        } else if !first && state.pending_streak < 1 {
+            state.pending_streak += 1;
+        } else {
+            // ATOMIC SWITCHOVER. Create the new image AND rewrite the
+            // camera's RenderTarget to point at it in the SAME command flush.
+            // The bug this fixes: previously `state.image` was reassigned
+            // here while the RenderTarget update happened later in the
+            // function, so for a frame the color image was new (720p) while
+            // the camera still targeted the old handle -- and depth,
+            // which is allocated by prepare_core_3d_depth_textures against
+            // the camera's target size, matched neither. The result was
+            // depth (old_size) + color (new_size) in one pass = wgpu
+            // validation crash.
+            //
+            // Now: new handle, RenderTarget insert, and prev_image retention
+            // all happen atomically. Depth will be reallocated to match the
+            // new target size on the same frame the color image switches.
+            state.prev_image = state.image.take();
+            let handle = create_render_scale_image(&mut images, want.x, want.y);
+            commands
+                .entity(op_entity)
+                .insert(RenderTarget::Image(ImageRenderTarget {
+                    handle: handle.clone(),
+                    scale_factor,
+                }));
+            state.image = Some(handle);
+            state.built_size = want;
+            state.scale_factor = scale_factor;
+            state.pending_size = want;
+            state.pending_streak = 0;
+        }
     }
+    let Some(_) = state.image else {
+        return; // mid-debounce with no image yet (first frames only)
+    };
     let handle = state.image.clone().expect("image set above");
 
-    // Point the 3D camera at the off-screen image (re-applied every frame so it
-    // self-heals across the AA-driven camera respawn, which drops this component).
+    // Self-heal: the AA-driven camera respawn drops RenderTarget. Re-apply
+    // it every frame when a live image exists and the camera isn't already
+    // pointed at it. Safe outside a size change: same handle, no-op insert.
     if op_target.and_then(|t| t.as_image()) != Some(&handle) {
         commands
             .entity(op_entity)
@@ -282,5 +360,80 @@ fn mirror_pointer_to_render_target_system(
     let mut writer = io.p1();
     for ev in mirrored {
         writer.write(ev);
+    }
+}
+
+
+/// WINDOW EVEN-SNAP. Odd physical window dimensions put every centered and
+/// percent-sized UI element on a half-pixel, and half-pixel positions round
+/// unstably under relayout -- with the debug text churning every frame, glyphs
+/// and borders flip a pixel in different directions and the panel "spreads"
+/// (the arbitrary-window-size jitter; default size and fullscreen are even, so
+/// they never showed it). Snap windowed-mode size DOWN to even physical
+/// dimensions; a 1px shrink is invisible. Fullscreen modes are left alone.
+/// Self-quiescing: once even, nothing is written, so no resize-event loop.
+fn snap_window_to_even_system(
+    mut windows: Query<&mut Window, With<PrimaryWindow>>,
+    monitors: Query<&bevy::window::Monitor>,
+    mut cameras: Query<
+        &mut Camera,
+        bevy::ecs::query::Or<(
+            With<OperatorCamera>,
+            With<RenderScaleCompositeCamera>,
+        )>,
+    >,
+) {
+    let Ok(mut window) = windows.single_mut() else {
+        return;
+    };
+    if !matches!(window.mode, bevy::window::WindowMode::Windowed) {
+        return; // fullscreen/borderless: OS owns the size
+    }
+    let p = window.physical_size();
+    if p.x < 2 || p.y < 2 {
+        return;
+    }
+    let even = UVec2::new(p.x & !1, p.y & !1);
+    // MAXIMIZE detection (Bevy 0.19 has no public read of the OS bit): the
+    // current physical size matching any monitor's full extent on either
+    // axis means OS-driven maximum. Resizing there is what Windows treats
+    // as a manual resize, which un-maximizes -- the "click Max, it snaps
+    // back" bug. So: two strategies, one goal (even effective dimensions
+    // everywhere).
+    let maximized = monitors
+        .iter()
+        .any(|m| m.physical_size().x == p.x || m.physical_size().y == p.y);
+    if maximized {
+        // Maximized + odd: LETTERBOX instead of resize. Camera viewports get
+        // the even-floored rect; the window keeps its OS geometry (Max stays
+        // Max), rendering and UI layout see 2560x1368 instead of 2560x1369,
+        // and the 1px dead row is invisible. Cleared when dimensions are
+        // already even.
+        let want_viewport = (even != p).then(|| bevy::camera::Viewport {
+            physical_position: UVec2::ZERO,
+            physical_size: even,
+            depth: 0.0..1.0,
+        });
+        for mut cam in &mut cameras {
+            let differs = match (&cam.viewport, &want_viewport) {
+                (None, None) => false,
+                (Some(a), Some(b)) => a.physical_size != b.physical_size,
+                _ => true,
+            };
+            if differs {
+                cam.viewport = want_viewport.clone();
+            }
+        }
+        return;
+    }
+    // Plain windowed sizes: snap the window itself down to even, and make
+    // sure no stale letterbox viewport survives from a maximized phase.
+    for mut cam in &mut cameras {
+        if cam.viewport.is_some() {
+            cam.viewport = None;
+        }
+    }
+    if even != p {
+        window.resolution.set_physical_resolution(even.x, even.y);
     }
 }

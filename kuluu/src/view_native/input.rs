@@ -47,6 +47,9 @@ pub struct MoveEnvParams<'w, 's> {
             &'static ViewVisibility,
         ),
     >,
+    /// Standalone avian door colliders are anonymous; this resolves them back
+    /// to the occluder placement that carries MmbDebugInfo + ViewVisibility.
+    pub door_source: Query<'w, 's, &'static super::avian_bridge::DoorColliderSource>,
 }
 
 /// Rising-edge memory for the pad stick, standing in for `just_pressed` where
@@ -1234,37 +1237,31 @@ pub fn dispatch_movement_system(
     if let Some(d) = det_out {
         env.last_stair.0 = d;
     }
-    // If a door blocked us, resolve its mesh/texture name + drawn state.
-    let mut door_drawn = 1u8;
+    // If a door blocked us, resolve its mesh/texture name + drawn state
+    // (drawn is informational only now: the undrawn-passthrough is gone, so
+    // it feeds the debug string and nothing else).
     let door_name: String = match door_ent_out {
-        Some(e) => match env.mmb_names.get(e) {
-            Ok((info, gt, vis)) => {
-                door_drawn = vis.get() as u8;
-                let p = gt.translation();
-                format!(
-                    "mesh={} tex={} worldpos=({:+.1},{:+.1},{:+.1}) drawn={}",
-                    info.asset_name, info.variant_name, p.x, p.y, p.z, door_drawn
-                )
+        Some(e) => {
+            // The avian door collider is a STANDALONE entity (world-baked verts,
+            // identity transform) and carries no identity components itself.
+            // Follow its DoorColliderSource link back to the occluder placement
+            // that has MmbDebugInfo + ViewVisibility; fall back to the entity
+            // itself for any collider still attached directly (old path).
+            let ident = env.door_source.get(e).map(|s| s.0).unwrap_or(e);
+            match env.mmb_names.get(ident) {
+                Ok((info, gt, vis)) => {
+                    let drawn = vis.get() as u8;
+                    let p = gt.translation();
+                    format!(
+                        "mesh={} tex={} worldpos=({:+.1},{:+.1},{:+.1}) drawn={}",
+                        info.asset_name, info.variant_name, p.x, p.y, p.z, drawn
+                    )
+                }
+                Err(_) => "door(entity, no MmbDebugInfo)".to_string(),
             }
-            Err(_) => {
-                // No ViewVisibility/MmbDebugInfo -> treat as not drawn (phantom).
-                door_drawn = 0;
-                "door(entity, no MmbDebugInfo)".to_string()
-            }
-        },
+        }
         None => String::new(),
     };
-    // WALK THROUGH an undrawn door: if the blocking door isn't actually being
-    // rendered, it's a phantom collider -- pass through it. Restore the full
-    // intended move and clear the stop BEFORE applying to position.
-    let mut clip = clip;
-    if clip.dbg_stop_door && door_drawn == 0 {
-        clip.dx = wall_dx;
-        clip.dy = wall_dy;
-        clip.dbg_is_a_stop = false;
-        clip.dbg_stop_door = false;
-        clip.dbg_reason = "door-undrawn-passthrough";
-    }
     x = basis_pos.x + clip.dx;
     y = basis_pos.y + clip.dy;
     // Debug: record the orchestration verdict for the stair HUD's right column.
@@ -1274,6 +1271,7 @@ pub fn dispatch_movement_system(
         stop_slope: clip.dbg_stop_slope,
         slope_angle: clip.dbg_slope_angle,
         stop_steps: clip.dbg_stop_steps,
+        tall_wall: clip.dbg_tall_wall,
         step_slope: clip.dbg_step_slope,
         step_height: clip.dbg_step_height,
         stop_wall: clip.dbg_stop_wall,
@@ -2792,6 +2790,7 @@ mod tests {
             heading: 0,
             hp_pct: None,
             bt_target_id: 0,
+            name_vis: 0,
             face_target: 0,
             claim_id: 0,
             speed: 0,
@@ -3610,6 +3609,18 @@ pub fn draw_footprint_debug_system(
 
 }
 
+/// Cache for the STAIR DEBUG zone/dat header lines: `DatRoot::from_env_or_default()`
+/// touches the filesystem, so we only re-resolve when the effective zone key
+/// (zone id + mog-house model) actually changes. Missing DAT root -> "?".
+#[derive(Resource, Default)]
+pub struct StairDebugZoneCache {
+    /// Last effective key we resolved. `None` = never resolved yet.
+    last_key: Option<(Option<u16>, Option<u16>)>,
+    zone_name: String,
+    zone_id: u16,
+    dat_path: String,
+}
+
 /// Populates the shared StairDebugSnapshot from FootprintDebug each frame,
 /// so the render crate's status panel (Show Stair Status) can display it
 /// without pulling in a dependency on the input crate. Only runs when the
@@ -3618,10 +3629,42 @@ pub fn update_stair_debug_snapshot_system(
     dbg: Res<FootprintDebug>,
     panels: Res<kuluu_render::hud::HudPanels>,
     orch_log: Res<kuluu_render::hud::stair_debug::OrchDecisionLog>,
+    scene: Res<kuluu_render::snapshot::SceneState>,
+    mut zone_cache: ResMut<StairDebugZoneCache>,
     mut snap: ResMut<kuluu_render::hud::stair_debug::StairDebugSnapshot>,
 ) {
     use kuluu_render::hud::stair_debug::{OrbInfo, OrbTag};
     if !panels.stair_debug { return; }
+    // Zone / DAT header: resolve on effective-zone-key change only. Effective
+    // key = (zone_id, myroom model) so mog-house interiors show the interior's
+    // DAT, matching effective_zone_file_id.
+    let snap_ref = &scene.snapshot;
+    let key = (snap_ref.zone_id, snap_ref.myroom.map(|m| m.model));
+    if zone_cache.last_key != Some(key) {
+        zone_cache.last_key = Some(key);
+        zone_cache.zone_id = snap_ref.zone_id.unwrap_or(0);
+        zone_cache.zone_name = snap_ref
+            .zone_id
+            .and_then(kuluu_nav::zone_name)
+            .unwrap_or("")
+            .to_string();
+        zone_cache.dat_path = match (
+            kuluu_render::snapshot::effective_zone_file_id(snap_ref),
+            ffxi_dat::DatRoot::from_env_or_default().ok(),
+        ) {
+            (Some(fid), Some(root)) => root
+                .resolve(fid)
+                .ok()
+                .map(|loc| {
+                    format!("{}/{}/{}.DAT", loc.rom_dir, loc.sub_path.dir, loc.sub_path.file)
+                })
+                .unwrap_or_default(),
+            _ => String::new(),
+        };
+    }
+    snap.zone_id = zone_cache.zone_id;
+    snap.zone_name = zone_cache.zone_name.clone();
+    snap.dat_path = zone_cache.dat_path.clone();
     snap.drawing_enabled = panels.stair_draw;
     snap.player_xz = dbg.center_xz;
     snap.player_y = dbg.center_y;

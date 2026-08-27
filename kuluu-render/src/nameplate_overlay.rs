@@ -40,7 +40,7 @@ pub fn sync_nameplate_overlay_camera(
             &Camera,
             Option<&RenderTarget>,
             &Transform,
-            &Projection,
+            bevy::ecs::change_detection::Ref<'static, Projection>,
             &Msaa,
         ),
         (With<OperatorCamera>, Without<NameplateOverlayCamera>),
@@ -59,7 +59,7 @@ pub fn sync_nameplate_overlay_camera(
 ) {
     let Ok((main_cam, main_target, main_t, main_proj, main_msaa)) = main_q.single() else {
         for (e, ..) in &overlay_q {
-            commands.entity(e).despawn();
+            commands.entity(e).try_despawn();
         }
         return;
     };
@@ -91,7 +91,7 @@ pub fn sync_nameplate_overlay_camera(
             Tonemapping::None,
             *main_msaa,
             *main_t,
-            main_proj.clone(),
+            (*main_proj).clone(),
         ));
         return;
     };
@@ -105,7 +105,13 @@ pub fn sync_nameplate_overlay_camera(
     if *t != *main_t {
         *t = *main_t;
     }
-    *proj = main_proj.clone();
+    // Copy the projection ONLY when the source changed (FOV/AA edits). The
+    // previous unconditional per-frame clone marked Projection changed every
+    // frame on a camera sharing the main view target -- per-frame camera
+    // recompute churn, and the last unguarded writer on the scaled path.
+    if main_proj.is_changed() {
+        *proj = (*main_proj).clone();
+    }
     if *msaa != *main_msaa {
         *msaa = *main_msaa;
     }

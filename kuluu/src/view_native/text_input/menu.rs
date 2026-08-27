@@ -316,8 +316,9 @@ fn toggle_debug_panel(
     scene_state: &mut SceneState,
 ) {
     use kuluu_render::hud::menu::{
-        DEBUG_MESH, DEBUG_NET_STATUS, DEBUG_NOCLIP, DEBUG_PERF, DEBUG_PRINT_POS, DEBUG_SOUND,
-        DEBUG_STAIR_DRAW, DEBUG_STAIR_STATUS, DEBUG_TARGET_CYCLE,
+        DEBUG_GRAPHICS_DEBUG, DEBUG_MESH, DEBUG_NET_STATUS, DEBUG_NOCLIP, DEBUG_PERF,
+        DEBUG_POSITION_LOG, DEBUG_PRINT_POS, DEBUG_SOUND, DEBUG_STAIR_DRAW, DEBUG_STAIR_STATUS,
+        DEBUG_TARGET_CYCLE,
     };
 
     // Print Pos is a button, not a toggle: fire and return before the
@@ -357,6 +358,14 @@ fn toggle_debug_panel(
         DEBUG_STAIR_STATUS => {
             hud_panels.stair_debug = !hud_panels.stair_debug;
             hud_panels.stair_debug
+        }
+        DEBUG_GRAPHICS_DEBUG => {
+            hud_panels.graphics_debug = !hud_panels.graphics_debug;
+            hud_panels.graphics_debug
+        }
+        DEBUG_POSITION_LOG => {
+            hud_panels.position_log = !hud_panels.position_log;
+            hud_panels.position_log
         }
         DEBUG_NET_STATUS => {
             net_status.0 = !net_status.0;

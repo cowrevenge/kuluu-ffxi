@@ -28,6 +28,7 @@ pub mod menu;
 pub mod menu_help_bar;
 pub mod mesh_debug;
 pub mod stair_debug;
+pub mod graphics_debug;
 pub mod network_status;
 pub mod overlay;
 pub mod panel_column;
@@ -74,6 +75,11 @@ pub struct HudPanels {
     /// head sphere, ramp line). Off = detection still runs (the character
     /// still climbs), just no visuals.
     pub stair_draw: bool,
+    /// Graphics-debug panel (win/img/panel metrics). Runtime-only, no persist.
+    pub graphics_debug: bool,
+    /// Rolling panel-position capture to panelpositions.txt. Runtime-only,
+    /// default off so the game never spams a log unasked. No persist.
+    pub position_log: bool,
 }
 
 #[derive(Component)]
@@ -192,6 +198,15 @@ impl Plugin for HudPlugin {
         app.init_resource::<chat_panel::ChatActivityTracker>();
         app.init_resource::<mesh_debug::MeshHoverDebug>();
         app.init_resource::<stair_debug::StairDebugSnapshot>();
+        app.init_resource::<graphics_debug::GraphicsDebugState>();
+        // Render-world probe for the surface size (see graphics_debug).
+        if let Some(render_app) = app.get_sub_app_mut(bevy::render::RenderApp) {
+            render_app.add_systems(
+                bevy::render::Render,
+                graphics_debug::record_surface_size
+                    .in_set(bevy::render::RenderSystems::PrepareViews),
+            );
+        }
         app.init_resource::<stair_debug::OrchDecisionLog>();
 
         app.init_resource::<zone_flash::ZoneFlashState>();
@@ -404,6 +419,8 @@ impl Plugin for HudPlugin {
                 mesh_debug::update_hover_state,
                 mesh_debug::update_mesh_debug_hud,
                 stair_debug::update_stair_debug_hud,
+                graphics_debug::graphics_debug_metrics_system,
+                graphics_debug::update_graphics_debug_hud,
             )
                 .chain(),
         );
@@ -446,6 +463,7 @@ pub fn add_hud_spawners<L: bevy::ecs::schedule::ScheduleLabel + Clone>(app: &mut
     // Separate call: bevy's add_systems tuple bound caps at 20, and we're
     // already at 20 above.
     app.add_systems(schedule.clone(), stair_debug::spawn_stair_debug_hud);
+    app.add_systems(schedule.clone(), graphics_debug::spawn_graphics_debug_hud);
 
     #[cfg(feature = "enhanced-buff-tooltips")]
     app.add_systems(schedule.clone(), status_ribbon::tooltip::spawn_buff_tooltip);

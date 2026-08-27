@@ -11,7 +11,7 @@ use avian3d::prelude::*;
 use bevy::prelude::*;
 use std::time::Duration;
 
-use kuluu_render::components::{CameraOccluder, IsSelf, WorldEntity};
+use kuluu_render::components::{IsSelf, WorldEntity};
 use kuluu_render::dat_mzb::{MzbCollisionGeometry, WallClipResult, MAX_GROUND_STEP_UP};
 
 /// Collision classes in the unified avian world. Every collider carries
@@ -39,9 +39,6 @@ pub enum GameLayer {
 /// Membership helpers so collider spawns read clearly and stay consistent.
 fn wall_layers() -> CollisionLayers {
     CollisionLayers::new(GameLayer::Wall, LayerMask::ALL)
-}
-fn door_layers() -> CollisionLayers {
-    CollisionLayers::new(GameLayer::Door, LayerMask::ALL)
 }
 fn mob_layers() -> CollisionLayers {
     CollisionLayers::new(GameLayer::Mob, LayerMask::ALL)
@@ -72,8 +69,9 @@ impl Plugin for AvianBridgePlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(PhysicsPlugins::default())
             .insert_resource(Gravity(Vec3::ZERO))
-            .init_resource::<ZoneAvianCollider>();
-        // The four collider-sync systems (sync_zone_collider, sync_door_colliders,
+            .init_resource::<ZoneAvianCollider>()
+            .add_observer(despawn_door_leaf_collider);
+        // The three collider-sync systems (sync_zone_collider,
         // sync_mob_collider_radius, sync_mob_colliders) are scheduled in mod.rs
         // into FixedUpdate .before(dispatch_movement_system), NOT here in Update.
         // Reason: avian runs its physics + spatial-query pipeline in
@@ -86,14 +84,14 @@ impl Plugin for AvianBridgePlugin {
     }
 }
 
-/// Schedules the four collider-sync systems into FixedUpdate before the walker.
+/// Schedules the three collider-sync systems into FixedUpdate before the walker.
 /// Called from mod.rs where `dispatch_movement_system` is in scope.
 pub fn add_collider_sync_systems(app: &mut App) {
     app.add_systems(
         FixedUpdate,
         (
             sync_zone_collider,
-            sync_door_colliders,
+            sync_door_leaf_colliders,
             sync_mob_collider_radius,
             sync_mob_colliders,
         )
@@ -117,7 +115,7 @@ fn sync_zone_collider(
         return;
     }
     if let Some(e) = zc.entity.take() {
-        commands.entity(e).despawn();
+        commands.entity(e).try_despawn();
     }
     let (positions, tris) = geom.trimesh_data();
     zc.tris = tris.len();
@@ -136,68 +134,160 @@ fn sync_zone_collider(
     );
 }
 
-/// Marks a `CameraOccluder` (MMB placement: door, gate, furniture) that has
-/// been given a Door-layer avian collider, so we build each one exactly once.
-/// Lifecycle rides the occluder entity: when the placement despawns, this
-/// component and its collider go with it — no separate bookkeeping.
-#[derive(Component)]
-struct DoorColliderBuilt;
+// ---------------------------------------------------------------------------
+// REMOVED: sync_door_colliders (the MMB-visual -> Door-layer collider mirror).
+//
+// Why it's gone (Bastok Mines ROM/1/34.DAT, probed 2026-08-26): the MZB
+// collision section is retail's authored truth of what blocks. 855 of 1525
+// visual placements have an index-parallel collision object at the identical
+// origin (walls, kabe-atariyou invisible collision helpers, door1/door2/
+// doorstop); the other 670 are visual-only decor that retail NEVER collides
+// (cho_door among them -- the chocobo door has NO collision object by
+// authorial intent). dat_mzb's build_collision_geometry already instances all
+// collision objects into the Wall-layer trimesh, so mirroring visual MMB
+// meshes into physics (a) duplicated every real wall -- avian reported the
+// MZB copy one tick ("wall-REAL") and the MMB copy the next ("door-REAL"),
+// the coin-toss flip-flop -- and (b) invented blockers for the 670
+// visual-only placements, which is where every "door in the wall" and the
+// original chocobo-doorway phantom came from. Single collision authority =
+// the MZB collision section, like retail.
+//
+// Openable-door state (door1/door2 etc., which ARE in the collision section)
+// is future work: per-object suppression in MzbCollisionGeometry (the
+// sub_area suppression machinery is the template), keyed by the
+// collision-object index that is parallel to the named visual placement.
+// ---------------------------------------------------------------------------
 
-/// Mirror MMB placement geometry into the avian world as static Door colliders
-/// so the walker HARD-BLOCKS on doors (slides along them, never through). At
-/// baseline only MZB walls were in the walker's collision world; doors are
-/// MMB `CameraOccluder` entities that only the camera BVH saw, which is why
-/// you could walk straight through a closed door. Same triangle source the
-/// camera BVH uses (world-transformed occluder mesh), now also a walker
-/// obstacle. Vertices are baked to world space and the collider entity sits at
-/// identity, matching the zone-collider pattern (no double transform).
-fn sync_door_colliders(
+/// Links a door-leaf collider back to a named visual mesh (a submesh child
+/// carrying MmbDebugInfo), so input.rs's debug lookup can print which door
+/// blocked. Inserted by `sync_door_leaf_colliders`.
+#[derive(Component)]
+pub struct DoorColliderSource(pub Entity);
+
+// ---------------------------------------------------------------------------
+// Door-leaf colliders: the one place door SOLIDITY lives.
+//
+// A door in this engine is three things with three owners: the MESH (a `_`/`@`
+// FourCC placement group; each drawn leaf carries ZoneDoorLeaf and is re-posed
+// by apply_zone_door_stages as it swings), the STATE (the server door entity:
+// kind Other + EntityLook::Door, whose door_id FourCC == the group's BlockID
+// and whose animation byte drives the open/clos routines), and the COLLISION,
+// which before this system was owned by NOBODY: the MZB gives door groups no
+// collision by authorial intent (retail door solidity is dynamic), the old
+// blanket MMB collider mirror is deleted, and the door entity itself is
+// kind-Other so the mob path ignores it. Result: doors rendered, animated,
+// and walk-through in every state.
+//
+// This system closes the gap: one standalone Door-layer trimesh per
+// door-routine leaf, verts baked through the AUTHORED (closed) pose --
+// mirror-correct via the full matrix, independent of the current swing --
+// then toggled by the leaf's live pose: authored pose = closed = solid;
+// any displacement (open or mid-swing) = ColliderDisabled = passable.
+// Only groups with door open/clos routines qualify (doors.dir); other
+// underscore families stay MZB-only.
+// ---------------------------------------------------------------------------
+
+/// On the leaf placement: its standalone collider entity, for streaming
+/// teardown (see `despawn_door_leaf_collider`).
+#[derive(Component)]
+struct DoorLeafCollider(Entity);
+
+fn sync_door_leaf_colliders(
     mut commands: Commands,
+    doors: Res<kuluu_render::zone_doors::ZoneDoors>,
     meshes: Res<Assets<Mesh>>,
-    query: Query<
-        (Entity, &Mesh3d, &GlobalTransform),
-        (With<CameraOccluder>, Without<DoorColliderBuilt>),
+    to_build: Query<
+        (Entity, &kuluu_render::zone_doors::ZoneDoorLeaf, &Children),
+        Without<DoorLeafCollider>,
     >,
+    mesh_children: Query<&Mesh3d>,
+    built: Query<(&DoorLeafCollider, &kuluu_render::zone_doors::ZoneDoorLeaf)>,
+    disabled_q: Query<&ColliderDisabled>,
 ) {
-    for (entity, mesh3d, _global) in query.iter() {
-        let Some(mesh) = meshes.get(mesh3d.0.id()) else {
-            continue;
-        };
-        let Some(positions) = mesh
-            .attribute(Mesh::ATTRIBUTE_POSITION)
-            .and_then(|a| a.as_float3())
-        else {
-            continue;
-        };
-        let Some(indices) = mesh.indices() else {
-            continue;
-        };
-        // Build the trimesh from LOCAL mesh verts. avian positions the collider
-        // by the entity's transform, so pre-transforming to world space applied
-        // the placement transform TWICE -- the collider landed at
-        // origin + world_verts, a phantom wall far from the drawn mesh (found
-        // via tshimono26_h blocking open floor at (-35,61.6) with its real wall
-        // drawn near (+65,+121.6), origin (-100,0,-60)). Local verts = collider
-        // exactly where the mesh renders.
-        let mut verts: Vec<Vec3> = Vec::with_capacity(positions.len());
-        for p in positions {
-            verts.push(Vec3::from_array(*p));
+    // Build pass.
+    for (leaf_ent, leaf, kids) in to_build.iter() {
+        if doors.dir(leaf.four_cc).is_none() {
+            continue; // not a door-routine group
         }
-        let mut tris: Vec<[u32; 3]> = Vec::with_capacity(indices.len() / 3);
-        let mut it = indices.iter();
-        while let (Some(a), Some(b), Some(c)) = (it.next(), it.next(), it.next()) {
-            tris.push([a as u32, b as u32, c as u32]);
+        let xform = leaf.posed_transform(kuluu_render::zone_doors::DoorPose::default());
+        let mut verts: Vec<Vec3> = Vec::new();
+        let mut tris: Vec<[u32; 3]> = Vec::new();
+        let mut name_src: Option<Entity> = None;
+        let mut ready = true;
+        for child in kids.iter() {
+            let Ok(m3) = mesh_children.get(child) else {
+                continue;
+            };
+            let Some(mesh) = meshes.get(m3.0.id()) else {
+                ready = false; // asset still loading: retry next tick
+                break;
+            };
+            let Some(positions) = mesh
+                .attribute(Mesh::ATTRIBUTE_POSITION)
+                .and_then(|a| a.as_float3())
+            else {
+                continue;
+            };
+            let Some(indices) = mesh.indices() else {
+                continue;
+            };
+            if name_src.is_none() {
+                name_src = Some(child);
+            }
+            let base = verts.len() as u32;
+            verts.extend(
+                positions
+                    .iter()
+                    .map(|v| xform.transform_point3(Vec3::from_array(*v))),
+            );
+            let mut it = indices.iter();
+            while let (Some(a), Some(b), Some(c)) = (it.next(), it.next(), it.next()) {
+                tris.push([base + a as u32, base + b as u32, base + c as u32]);
+            }
         }
-        if tris.is_empty() {
-            // Mesh not ready or empty: leave unmarked so we retry next frame.
+        if !ready || tris.is_empty() {
             continue;
         }
-        commands.entity(entity).insert((
-            RigidBody::Static,
-            Collider::trimesh(verts, tris),
-            door_layers(),
-            DoorColliderBuilt,
-        ));
+        let collider = commands
+            .spawn((
+                RigidBody::Static,
+                Collider::trimesh(verts, tris),
+                CollisionLayers::new(GameLayer::Door, LayerMask::ALL),
+                Transform::default(),
+                DoorColliderSource(name_src.unwrap_or(leaf_ent)),
+            ))
+            .id();
+        commands.entity(leaf_ent).insert(DoorLeafCollider(collider));
+    }
+
+    // Toggle pass: authored pose = closed = solid; any displacement = open.
+    for (dc, leaf) in built.iter() {
+        let pose = doors.pose(leaf.key());
+        let closed = pose.rotation == Vec3::ZERO && pose.translation == Vec3::ZERO;
+        let is_disabled = disabled_q.get(dc.0).is_ok();
+        if closed == is_disabled {
+            if let Ok(mut e) = commands.get_entity(dc.0) {
+                if closed {
+                    e.remove::<ColliderDisabled>();
+                } else {
+                    e.insert(ColliderDisabled);
+                }
+            }
+        }
+    }
+}
+
+/// Frees the standalone leaf collider when its leaf placement streams out
+/// (a root entity is not caught by the placement's recursive despawn).
+fn despawn_door_leaf_collider(
+    trigger: On<Remove, DoorLeafCollider>,
+    q: Query<&DoorLeafCollider>,
+    mut commands: Commands,
+) {
+    if let Ok(dc) = q.get(trigger.event().event_target()) {
+        // try_despawn: the zone sweep may have taken the collider already;
+        // already-gone is a legitimate state here, not an error to log.
+        commands.entity(dc.0).try_despawn();
     }
 }
 
@@ -279,7 +369,7 @@ struct MobColliderLink(Entity);
 /// Marks a spawned collider entity's owner so it can be despawned when the
 /// visual goes away.
 #[derive(Component)]
-struct MobColliderOwner(Entity);
+pub struct MobColliderOwner(Entity);
 
 /// Spawn a KINEMATIC Mob-layer capsule on a SEPARATE entity for each non-self
 /// visual with a known model radius, and keep it parked at the visual's current
@@ -341,7 +431,9 @@ fn sync_mob_colliders(
     // Despawn colliders whose visual is gone.
     for (collider, owner) in owners.iter() {
         if visuals.get(owner.0).is_err() && links.get(owner.0).is_err() {
-            commands.entity(collider).despawn();
+            // try_despawn: at zone boundaries the teardown can race this
+            // sweep for the same collider; second-in-line must be silent.
+            commands.entity(collider).try_despawn();
         }
     }
 }
@@ -352,6 +444,56 @@ pub struct AvianMoveParams<'w, 's> {
     pub mas: MoveAndSlide<'w, 's>,
     pub sq: SpatialQuery<'w, 's>,
     pub geom: Res<'w, MzbCollisionGeometry>,
+    /// Mob collider -> actor link, for the body-block test.
+    pub mob_owner: Query<'w, 's, &'static MobColliderOwner>,
+    /// Actor kind ([obj] never body-blocks), for the body-block test.
+    pub world_ents: Query<'w, 's, &'static WorldEntity>,
+    /// Descendant walk for the drawn test (same walk the radius snapshot does).
+    pub children: Query<'w, 's, &'static Children>,
+    /// "Is the texture drawn": a rendered mesh in the actor's subtree.
+    pub mesh_vis: Query<'w, 's, &'static InheritedVisibility, With<Mesh3d>>,
+}
+
+/// Should this mob collider body-block the walker at all? Rule, in order:
+///   1. EntityKind::Other -- the HUD's "[obj]": door objects, "???" points,
+///      event triggers. These NEVER body-block, whatever mesh they carry;
+///      retail does not collide with object entities. (The invisible
+///      "? [obj]" plaza blocker is this class: real entity, real placeholder
+///      mesh, draws nothing.)
+///   2. Character kinds block only when their texture is actually drawn: a
+///      rendered mesh in the actor's subtree (same descendant walk the radius
+///      snapshot does; InheritedVisibility so a real mob doesn't turn
+///      walk-through when the camera looks away). Undrawn actor = invisible
+///      entity = walk through.
+fn mob_body_blocks(av: &AvianMoveParams, collider_ent: Entity) -> bool {
+    let Ok(owner) = av.mob_owner.get(collider_ent) else {
+        return false;
+    };
+    if let Ok(we) = av.world_ents.get(owner.0) {
+        if matches!(we.kind, kuluu_snapshot::EntityKind::Other) {
+            return false;
+        }
+    }
+    let Ok(kids) = av.children.get(owner.0) else {
+        return false;
+    };
+    drawn_mesh_in(kids, av)
+}
+
+fn drawn_mesh_in(kids: &Children, av: &AvianMoveParams) -> bool {
+    for child in kids.iter() {
+        if let Ok(vis) = av.mesh_vis.get(child) {
+            if vis.get() {
+                return true;
+            }
+        }
+        if let Ok(k) = av.children.get(child) {
+            if drawn_mesh_in(k, av) {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 fn capsule() -> Collider {
@@ -646,6 +788,7 @@ pub fn resolve_position(
             dbg_stop_slope: false,
             dbg_slope_angle: 0.0,
             dbg_stop_steps: false,
+            dbg_tall_wall: false,
             dbg_step_slope: 0.0,
             dbg_step_height: 0.0,
             dbg_stop_wall: false,
@@ -696,7 +839,15 @@ pub fn resolve_position(
     let mut excluded_mob: Option<Entity> = None;
     if let Some((_d, ent, is_mob)) = horizontal_obstacle(&av.sq, &col, start, want, None) {
         if is_mob {
-            if push.press(ent, dt) {
+            if !mob_body_blocks(av, ent) {
+                // No drawn texture on the actor = invisible server entity
+                // (event trigger, door object). Those never body-block:
+                // exclude instantly, no push-through timer. Walls behind
+                // still apply -- the slide runs with only this one entity
+                // excluded from the filter.
+                excluded_mob = Some(ent);
+                push.release();
+            } else if push.press(ent, dt) {
                 excluded_mob = Some(ent);
             }
         } else {
@@ -729,17 +880,42 @@ pub fn resolve_position(
     let move_xz;
     let final_feet;
 
-    // (a) Walkable stairs ahead (detector sees an up/down band in our path).
-    //     This takes priority over avian's per-riser block: a staircase reads to
-    //     avian as a vertical wall every tick, so if we let the block win we get
-    //     the stop/go cycle. The detector is the authority on "is this walkable".
+    // Avian absorbed most of the requested move without necessarily capturing
+    // a block: a rounded-bottom contact on a low sill reads walkable -> Ignore,
+    // the capsule embeds, and the slide comes back truncated with no evidence.
+    // This flag is what lets the lip ride below rescue that silent stop.
+    let want_len = Vec2::new(want.x, want.z).length();
+    let slide_len = (slide_xz - Vec2::new(start.x, start.z)).length();
+    let slide_truncated = want_len > 1e-4 && slide_len < want_len * 0.6;
+
+    // (a) Walkable stairs OR a small lip ahead. Two detector signals ride:
+    //     - banded risers (band != 0): real staircases. Avian sees each riser
+    //       as a vertical wall every tick; letting the block win = stop/go.
+    //     - sub-band lips (band == 0, small positive rise): door sills and
+    //       thresholds below the detector's riser quantum -- the HUD's GRAY
+    //       orbs. Avian has NO step height, so a 0.1-yalm sill hard-stops the
+    //       capsule silently ("moving-free" with a zero delta). Retail walks
+    //       straight over these. Lips ride ONLY when the slide was actually
+    //       truncated, so this rescues a stuck capsule and never bypasses
+    //       normal wall sliding on gently uneven ground.
+    //     The detector is the authority on "is this walkable" for both.
+    let mut lip_h: f32 = 0.0;
     let stairs_ahead = {
         let mut found = false;
         for &(oxz, oy, _g, band) in det.sample_data.iter() {
-            if band == 0 || oy.is_nan() {
-                continue; // green (same tread) or invalid
+            if oy.is_nan() {
+                continue; // invalid sample
             }
             let along = (oxz - here).dot(move_dir);
+            if band == 0 {
+                // Sub-band lip: UP only (drops are ground-snap's job), CLOSE
+                // ahead only (step when we reach it, not from a yalm out).
+                let rise = oy - plane_y;
+                if along >= -0.2 && along <= 0.9 && rise > 0.02 && rise <= STEP_HEIGHT {
+                    lip_h = lip_h.max(rise);
+                }
+                continue;
+            }
             let rise = (oy - plane_y).abs(); // up OR down both walkable
             if along >= -0.2 && rise > 0.02 && rise <= STEP_HEIGHT * 3.0 {
                 found = true;
@@ -748,16 +924,50 @@ pub fn resolve_position(
         }
         found
     };
+    let lip_ride = !stairs_ahead && lip_h > 0.0 && slide_truncated;
 
-    if stairs_ahead {
-        dbg_reason = "stairs-ahead";
+    // TALL-WALL VETO: a stair riser tops out at STEP_HEIGHT, so a ray fired
+    // JUST above that height, a hand's width ahead, can only hit something
+    // taller than a step -- a wall. Without this, the detector seeing treads
+    // on the far side of a thin side wall rode the walker straight through
+    // it. The reach is tight (RADIUS + 0.15) so the SECOND riser of a real
+    // staircase -- one tread deeper, the first thing tall enough to cross
+    // this ray -- stays out of range and never vetoes legitimate climbing.
+    let tall_wall_before_step = (stairs_ahead || lip_h > 0.0)
+        && Dir3::new(Vec3::new(move_dir.x, 0.0, move_dir.y))
+            .ok()
+            .is_some_and(|d| {
+                av.sq
+                    .cast_ray(
+                        Vec3::new(start.x, plane_y + STEP_HEIGHT + 0.01, start.z),
+                        d,
+                        RADIUS + 0.15,
+                        true,
+                        &SpatialQueryFilter::from_mask(LayerMask::from([
+                            GameLayer::Wall,
+                            GameLayer::Door,
+                        ])),
+                    )
+                    .is_some()
+            });
+
+    if (stairs_ahead || lip_ride) && !tall_wall_before_step {
+        if stairs_ahead {
+            dbg_reason = "stairs-ahead";
+            dbg_step_height = det.ramp_near.1 - plane_y;
+            dbg_step_slope = det.best_slope;
+            dbg_slope_angle = det.best_slope.atan().to_degrees();
+            final_feet = det.ramp_near.1;
+        } else {
+            // Lip-step: full forward move, feet lifted onto the sill this
+            // tick so the capsule clears the edge (no embed, no truncation).
+            dbg_reason = "lip-step";
+            dbg_step_height = lip_h;
+            final_feet = plane_y + lip_h;
+        }
         dbg_is_a_stop = true;
         dbg_stop_steps = true;
-        dbg_step_height = det.ramp_near.1 - plane_y;
-        dbg_step_slope = det.best_slope;
-        dbg_slope_angle = det.best_slope.atan().to_degrees();
         move_xz = Vec2::new(start.x + want.x, start.z + want.z);
-        final_feet = det.ramp_near.1;
     } else if let Some(n) = block_normal {
         // (b) BLOCKED by something that is not a walkable staircase. Classify the
         //     SPECIFIC entity avian stopped us on (block_entity).
@@ -798,10 +1008,26 @@ pub fn resolve_position(
             move_xz = slide_xz;
             final_feet = det.center_y;
         } else if mob_hit {
-            dbg_reason = if real { "mob-REAL" } else { "mob-PHANTOM" };
-            dbg_stop_mob = true;
-            move_xz = slide_xz;
-            final_feet = det.center_y;
+            // REAL/PHANTOM by the drawn test, NOT the forward ray: the ray only
+            // sees Wall+Door, so a mob in open space always read "PHANTOM",
+            // visible or not. Drawn actor = real body = soft block. Undrawn =
+            // invisible entity = walk through. (This arm normally only fires
+            // for a second undrawn mob behind one already excluded pre-slide.)
+            if ent.is_some_and(|e| mob_body_blocks(av, e)) {
+                dbg_reason = "mob-REAL";
+                dbg_stop_mob = true;
+                move_xz = slide_xz;
+                final_feet = det.center_y;
+            } else {
+                dbg_reason = "mob-PHANTOM-pass";
+                dbg_is_a_stop = false;
+                let dest = Vec2::new(start.x + want.x, start.z + want.z);
+                move_xz = dest;
+                final_feet = av
+                    .geom
+                    .ground_step(dest, plane_y, SNAP_DOWN)
+                    .unwrap_or(det.center_y);
+            }
         } else {
             dbg_reason = if real { "wall-REAL" } else { "wall-PHANTOM" };
             let angle = n.y.clamp(-1.0, 1.0).acos();
@@ -835,6 +1061,7 @@ pub fn resolve_position(
         dbg_stop_slope,
         dbg_slope_angle,
         dbg_stop_steps,
+        dbg_tall_wall: tall_wall_before_step,
         dbg_step_slope,
         dbg_step_height,
         dbg_stop_wall,

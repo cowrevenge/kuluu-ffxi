@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 #![allow(clippy::type_complexity, clippy::too_many_arguments)]
 
+pub mod actor_diag;
 pub mod atmosphere;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod audio;

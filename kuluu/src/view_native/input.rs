@@ -430,6 +430,8 @@ pub fn handle_input_system(
         cmd_held && (keys.just_pressed(KeyCode::KeyQ) || keys.just_pressed(KeyCode::KeyW));
     let os_close = window_close.read().next().is_some();
     if close_shortcut || os_close {
+        // TEMP (exit-hunt): identify which close path fired.
+        tracing::info!(close_shortcut, os_close, "TEMP input.rs: AppExit via close path");
         let _ = cmd_tx.0.try_send(AgentCommand::Disconnect);
         exit.write_default();
         return;

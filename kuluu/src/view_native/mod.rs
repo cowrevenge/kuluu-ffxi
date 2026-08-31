@@ -6,6 +6,7 @@ pub mod debug_heights;
 pub mod exit_watchdog;
 mod gamepad_input;
 pub mod input;
+pub mod key_drive;
 pub mod key_items;
 pub mod launcher_backdrop;
 // 0.19 deprecated the feathers `*_bundle` spawn fns in favor of BSN scenes;

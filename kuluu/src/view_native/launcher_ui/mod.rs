@@ -564,7 +564,7 @@ pub(crate) fn register(
         .insert_resource(login::LoginUiDirty::default())
         .insert_resource(LoginErrorMsg::default())
         .insert_resource(LoginErrorReturn::default())
-        .insert_resource(RuntimeHandle(runtime))
+        .insert_resource(RuntimeHandle(runtime.clone()))
         .insert_resource(ServerInfo {
             server: server.to_string(),
             profile_name: None,
@@ -589,6 +589,24 @@ pub(crate) fn register(
         .insert_resource(dat_setup::DatSetupUiDirty::default())
         .insert_resource(ChangePasswordForm::default())
         .insert_resource(DefaultCharName(defaults.char_name));
+
+    // FFXI_KEY_DRIVE: synthetic-key injection listener (see view_native::key_drive).
+    // The queue is always present so systems can depend on it; only listens when the
+    // env var names an address. Lets a remote driver operate launcher UI screens
+    // with no OS keystrokes and no window focus.
+    let key_msgs: Arc<Mutex<Vec<super::key_drive::KeyMsg>>> = Arc::new(Mutex::new(Vec::new()));
+    app.insert_resource(super::key_drive::KeyDriveQueue(key_msgs.clone()))
+        .add_systems(PreUpdate, super::key_drive::key_drive_system);
+    if let Ok(spec) = std::env::var("FFXI_KEY_DRIVE") {
+        let addr: std::net::SocketAddr = spec.parse().unwrap_or_else(|_| {
+            let port: u16 = spec.trim_start_matches(':').parse().unwrap_or(9538);
+            std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, port))
+        });
+        let queue = key_msgs.clone();
+        runtime.spawn(async move {
+            super::key_drive::serve_key_drive(addr, queue).await;
+        });
+    }
 
     app.add_systems(OnEnter(AppPhase::Launcher), spawn_launcher_camera)
         .add_systems(OnExit(AppPhase::Launcher), despawn_launcher_camera);
@@ -738,6 +756,17 @@ pub(crate) fn register(
             )
                 .run_if(in_state(LauncherState::Login)),
         );
+
+    // Initial keyboard focus + arrow-key navigation for the login form (see
+    // login::focus_default_target_system / login::arrow_nav_system): the blue
+    // outline starts on "Log in" so a bare Enter activates it; arrows move
+    // between tabbable widgets in visual order, wrapping at the edges.
+    app.add_systems(
+        Update,
+        (login::focus_default_target_system, login::arrow_nav_system)
+            .chain()
+            .run_if(in_state(LauncherState::Login)),
+    );
 
     app.add_systems(
         OnEnter(LauncherState::AuthInFlight),

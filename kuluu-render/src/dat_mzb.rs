@@ -569,7 +569,11 @@ impl MzbCollisionGeometry {
     pub fn ground_step(&self, xz: Vec2, feet_y: f32, max_rise: f32) -> Option<f32> {
         let mut best: Option<(u8, f32)> = None;
         self.for_each_hit_in_column(xz, |slot, _, hit_y, normal| {
-            if normal.y < FLOOR_NORMAL_MIN || hit_y > feet_y + max_rise {
+            // STEP_UP_REACH_EPSILON: the column ray's fixed high origin leaves
+            // ~1e-4-yalm f32 noise in reported hit heights, so a riser sitting
+            // EXACTLY at the bound (a real stair step right at MAX_GROUND_STEP_UP)
+            // must not be coin-flipped out of reach.
+            if normal.y < FLOOR_NORMAL_MIN || hit_y > feet_y + max_rise + STEP_UP_REACH_EPSILON {
                 return;
             }
             let cand = (slot, hit_y);

@@ -876,9 +876,12 @@ pub fn resolve_position(
     // ---- STEP 2: CLASSIFY (ONE decision, priority order) -------------------
     // Inputs: the slide result (slide_xz, block_normal) + the detector (det).
     // We pick exactly ONE outcome and set (move_xz, final_feet, debug) from it.
-    // Priority: stairs-ahead > blocked(door>mob>wall) > free-walk.
-    let move_xz;
-    let final_feet;
+    // Priority: slope-ride(pre-triggered) > stairs-ahead > blocked(door>mob>wall)
+    // > free-walk. The ride's result is collected separately (ride_result) and
+    // applied AFTER the chain, so no branch ever reassigns a decided tick —
+    // one decision per tick, and definite-assignment stays provable.
+    let mut move_xz;
+    let mut final_feet;
 
     // Avian absorbed most of the requested move without necessarily capturing
     // a block: a rounded-bottom contact on a low sill reads walkable -> Ignore,
@@ -933,7 +936,11 @@ pub fn resolve_position(
     // it. The reach is tight (RADIUS + 0.15) so the SECOND riser of a real
     // staircase -- one tread deeper, the first thing tall enough to cross
     // this ray -- stays out of range and never vetoes legitimate climbing.
-    let tall_wall_before_step = (stairs_ahead || lip_h > 0.0)
+    // `det.ramp_locked` included too: the pre-triggered slope-ride engages BEFORE a
+    // riser is close enough for ring samples, so the veto must fire then as well —
+    // otherwise we'd ride the walker straight through a wall standing between us and
+    // the staircase.
+    let tall_wall_before_step = (stairs_ahead || det.ramp_locked || lip_h > 0.0)
         && Dir3::new(Vec3::new(move_dir.x, 0.0, move_dir.y))
             .ok()
             .is_some_and(|d| {
@@ -951,7 +958,59 @@ pub fn resolve_position(
                     .is_some()
             });
 
-    if (stairs_ahead || lip_ride) && !tall_wall_before_step {
+    // (a0) SLOPE-RIDE — continuous stair follow, pre-triggered. When the detector
+    // holds a locked ramp line (march-measured or fit), feet ride THAT LINE instead
+    // of snapping to det.ramp_near.1 per tick: wire Y advances at slope × progress,
+    // so treads are one continuous incline on the WIRE (collision + c2s 0x015), not
+    // just in render — ground_step never gets a turn mid-stair, which is what used to
+    // force us down onto the slab under a buried staircase. The rise is anchored at
+    // the FIRST RISER (march_first_riser_rel): the flat approach before it stays at
+    // current foot level exactly, so the follow engages while we are still walking UP
+    // TO the steps (no float over the last flat strip).
+    // HOLE DETECTOR: a down-ray at the destination xz must find floor within
+    // STAIR_HOLE_DROP of the ride line; a missing tread / open hole drops us through
+    // via ground-snap — exactly what plain walking did before slope-ride existed.
+    const STAIR_HOLE_DROP: f32 = 0.5;
+    // Some(destination, feet) when the ride decides this tick; resolved after
+    // the legacy chain below (it outranks every arm).
+    let mut ride_result: Option<(Vec2, f32)> = None;
+    let mut ride_hole_fall = false;
+    if det.ramp_locked && !tall_wall_before_step {
+        let target_xz = Vec2::new(start.x + want.x, start.z + want.z);
+        if let Some(pred) = slope_ride_feet(&det, plane_y, here, target_xz) {
+            if av
+                .geom
+                .ground_raycast(target_xz, pred.max(plane_y) + 0.5)
+                .is_some_and(|actual| actual >= pred - STAIR_HOLE_DROP)
+            {
+                dbg_reason = "slope-ride";
+                dbg_is_a_stop = true;
+                dbg_stop_steps = true;
+                // Continuous-ride tick: no discrete step happened, so dispatch must not
+                // re-arm the stair-settle dip clamp — it would swallow our small per-tick
+                // descent deltas (pre-ride code produced per-riser jumps that cleared the
+                // 0.08 gate).
+                dbg_stop_slope = true;
+                dbg_step_height = pred - plane_y;
+                dbg_step_slope = det.best_slope;
+                dbg_slope_angle = det.best_slope.atan().to_degrees();
+                ride_result = Some((target_xz, pred)); // resolved after the chain below
+            } else {
+                // Hole in the stair: no real floor under the ride line at the
+                // destination. Disengage; ground-snap (below) drops us through.
+                dbg_reason = "stair-hole-fall";
+                ride_hole_fall = true;
+            }
+        }
+    }
+
+    // Hole-fall ticks skip the hold arm A as well: its ramp_near flat-hold would
+    // float us across a missing tread instead of letting ground-snap drop us.
+    if ride_result.is_none()
+        && !ride_hole_fall
+        && (stairs_ahead || lip_ride)
+        && !tall_wall_before_step
+    {
         if stairs_ahead {
             dbg_reason = "stairs-ahead";
             dbg_step_height = det.ramp_near.1 - plane_y;
@@ -1041,7 +1100,9 @@ pub fn resolve_position(
         // (c) FREE WALK: not stopped, no stairs. Take avian's slide result and
         //     snap to the ground under the new position.
         move_xz = slide_xz;
-        if det.ramp_locked {
+        // A hole-fall disengage skips the locked-ramp flat hold: the ground-snap
+        // below is what drops us through the gap.
+        if det.ramp_locked && !ride_hole_fall {
             dbg_stop_slope = true; // informational: walking a locked ramp
             dbg_slope_angle = det.best_slope.atan().to_degrees();
             final_feet = det.ramp_near.1;
@@ -1049,6 +1110,32 @@ pub fn resolve_position(
             final_feet = g;
         } else {
             final_feet = det.center_y;
+        }
+    }
+
+    // SLOPE-RIDE outranks every legacy arm above (one decision per tick): when
+    // it fired, its result replaces whatever the chain assigned. Without this a
+    // successful ascent tick fell into C's flat hold, which froze wire Y at
+    // current foot level — the climb would only ever happen in render.
+    if let Some((r_xz, r_feet)) = ride_result {
+        move_xz = r_xz;
+        final_feet = r_feet;
+    }
+
+    // TEMP (stair diagnosis): console trace of decision flips — a flickering
+    // ramp lock shows up as slope-ride/stairs-ahead alternating line by line.
+    // Remove once the stair work is verified in-game.
+    {
+        static LAST_REASON: std::sync::atomic::AtomicUsize =
+            std::sync::atomic::AtomicUsize::new(usize::MAX);
+        let cur = dbg_reason.as_bytes().as_ptr() as usize;
+        if LAST_REASON.swap(cur, std::sync::atomic::Ordering::Relaxed) != cur {
+            tracing::info!(
+                reason = dbg_reason,
+                slope_deg = dbg_slope_angle,
+                step_h = dbg_step_height,
+                "stair decision change",
+            );
         }
     }
 
@@ -1077,6 +1164,46 @@ pub fn resolve_position(
         dbg_hit_y: block_point.map(|p| p.y).unwrap_or(0.0),
         dbg_hit_z: block_point.map(|p| p.z).unwrap_or(0.0),
     }
+}
+
+/// Continuous stair-ride height at this tick's destination xz: the detector's measured
+/// ramp line, anchored so the flat approach before the first riser stays at current foot
+/// level and rise accumulates only past it (see SLOPE-RIDE in [`resolve_position`]).
+/// Returns `None` when the ride doesn't apply this tick. All xz are bevy space; `plane_y`
+/// is current foot level (bevy up).
+fn slope_ride_feet(
+    det: &super::input::StairDetection,
+    plane_y: f32,
+    here: Vec2,
+    target: Vec2,
+) -> Option<f32> {
+    // One riser + margin — a larger single-tick delta means the fit is lying.
+    const MAX_TICK_DELTA: f32 = 0.45;
+
+    let slope = det.best_slope;
+    if !slope.is_finite() || slope.abs() < 0.02 {
+        return None; // not a stair-grade surface
+    }
+    // Ramp direction from the detector's gizmo endpoints (near = player-side anchor).
+    let line = det.ramp_far.0 - det.ramp_near.0;
+    let len = line.length();
+    if len < 1e-4 {
+        return None; // degenerate line — not actually on/beside a locked ramp
+    }
+    let dir = line / len;
+    let here_t = ((here - det.ramp_near.0).dot(dir)).max(0.0);
+    let target_t = (target - det.ramp_near.0).dot(dir);
+    if target_t <= here_t {
+        return None; // no progress along the ramp this tick — stay flat, ground-snap handles it
+    }
+    // The march measured where the first riser sits relative to the player; before it,
+    // the surface is flat at foot level. (Pink-fit lock with no march data: near-zero approach.)
+    let d0 = det.march_first_riser_rel.unwrap_or(0.3);
+    let feet = plane_y + slope * ((target_t - (here_t + d0)).max(0.0));
+    if (feet - plane_y).abs() > MAX_TICK_DELTA {
+        return None;
+    }
+    Some(feet)
 }
 
 /// Like `probe` but returns (distance, normal) for a masked down/any cast.

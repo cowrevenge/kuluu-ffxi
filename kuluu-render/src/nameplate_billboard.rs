@@ -47,6 +47,13 @@ const FADE_END_DEPTH_FIXED: u32 = 0x1004;
 // reciprocal-w gate (1/depth < 1) drops names inside one yalm of the view plane.
 const MIN_VIEW_DEPTH_YALMS: f32 = 1.0;
 
+// TEMP DEBUG — nameplate visibility hunt ("stop the hidden, so that they draw"): when
+// true the self-plate cull and the view-depth gate below stop writing Visibility::Hidden.
+// Every plate gets its full treatment (transform/scale/alpha) and is drawn; the counters
+// still increment at each gate point, so the panel keeps reporting who *would have*
+// been hidden. REMOVE this const plus both gated-out `*vis = Hidden` writes when done.
+const DEBUG_FORCE_VISIBLE: bool = true;
+
 // research/XIClient/src/XIClient/source/Rendering/Active/CXiActorNameDraw.cpp:31 — glyph units
 // to viewport fraction, applied to a pre-transformed (RHW=1) screen-space quad.
 const NAME_SCREEN_SCALE: f32 = 0.002_343_75;
@@ -136,6 +143,24 @@ pub struct NameplateBillboard {
     pub rastered: Option<RasterKey>,
 
     pub last_alpha: f32,
+}
+
+/// Per-frame billboard visibility breakdown for the Debug menu "Nameplate
+/// Debug" panel: main-world mirror of what `Visibility::Hidden` is hiding,
+/// with the reason — extract can only read the flag, not why it was set.
+#[derive(Resource, Default, Clone, Copy, Debug)]
+pub struct NameplateBillboardDebug {
+    /// Billboard entities present this frame.
+    pub total: u32,
+    /// Self-plate camera-mode cull (overhead self name in first person).
+    pub hide_self: u32,
+    /// View-depth gate: behind the camera forward plane or within
+    /// MIN_VIEW_DEPTH_YALMS of it. This is a half-plane test, not frustum.
+    pub hidden_depth: u32,
+    /// Plates set Visible + transformed this frame.
+    pub visible: u32,
+    /// Billboards whose actor no longer exists — despawned mid-frame.
+    pub despawned: u32,
 }
 
 #[derive(Component)]
@@ -259,6 +284,7 @@ pub fn update_nameplate_billboards_system(
     name_colors: Res<crate::nameplate_color::NameColorTable>,
     icons: Res<crate::nameplate_icons::NameplateIcons>,
     mut commands: Commands,
+    mut dbg_out: ResMut<NameplateBillboardDebug>,
     mut hp_by_id: Local<std::collections::HashMap<u32, Option<u8>>>,
     mut raster_inputs: Local<std::collections::HashMap<u32, RasterKey>>,
 ) {
@@ -301,22 +327,47 @@ pub fn update_nameplate_billboards_system(
         }
     }
 
+    // Debug breakdown mirrors each gate below; see NameplateBillboardDebug.
+    let mut total = 0u32;
+    let mut hide_self = 0u32;
+    let mut hidden_depth = 0u32;
+    let mut visible_n = 0u32;
+    let mut despawned = 0u32;
+
     for (ui_entity, mut np, mut aspect, mut transform, mut vis, mat) in &mut billboards {
-        if self_plate_hidden(is_self_billboard(np.entity_id, self_char_id), *camera_mode) {
-            *vis = Visibility::Hidden;
-            continue;
+        total += 1;
+        let self_cull =
+            self_plate_hidden(is_self_billboard(np.entity_id, self_char_id), *camera_mode);
+        if self_cull {
+            hide_self += 1; // counted even when force-visible keeps the plate drawn
+            if !DEBUG_FORCE_VISIBLE {
+                *vis = Visibility::Hidden;
+                continue;
+            }
         }
 
         let Some(&(entity_pos, head_y_offset)) = pos_by_id.get(&np.entity_id) else {
+            despawned += 1;
             commands.entity(ui_entity).try_despawn();
             continue;
         };
 
         let head_pos = entity_pos + Vec3::Y * head_y_offset;
         let view_depth = (head_pos - cam_pos).dot(cam_forward);
-        let Some(scale) = legibility_scale_for_view_depth(view_depth) else {
-            *vis = Visibility::Hidden;
-            continue;
+        let scale = match legibility_scale_for_view_depth(view_depth) {
+            Some(s) => s,
+            None if DEBUG_FORCE_VISIBLE => {
+                // TEMP DEBUG: gate would have hidden this plate — count it, but keep
+                // drawing with a neutral near-distance scale (plates behind the camera
+                // plane clip out in the GPU frustum anyway).
+                hidden_depth += 1;
+                1.0
+            }
+            None => {
+                hidden_depth += 1;
+                *vis = Visibility::Hidden;
+                continue;
+            }
         };
 
         let aspect_ratio = aspect.width.max(1) as f32 / aspect.height.max(1) as f32;
@@ -339,6 +390,7 @@ pub fn update_nameplate_billboards_system(
         transform.rotation = cam_t.rotation;
         transform.scale = Vec3::new(world_width, world_height, 1.0);
         *vis = Visibility::Visible;
+        visible_n += 1;
 
         // Pulse is time-driven (steps at RETAIL_FPS via pulse_frame, so the
         // last_alpha guard bounds writes to 30/s) and must run on non-snapshot
@@ -402,6 +454,12 @@ pub fn update_nameplate_billboards_system(
         let _ = images.insert(&handle, new_img.image);
         np.rastered = Some(want.clone());
     }
+
+    dbg_out.total = total;
+    dbg_out.hide_self = hide_self;
+    dbg_out.hidden_depth = hidden_depth;
+    dbg_out.visible = visible_n;
+    dbg_out.despawned = despawned;
 }
 
 /// The full raster input for one entity: retail's name colour, its icon

@@ -11,8 +11,6 @@ use crate::components::IsSelf;
 use crate::graphics_settings::AaMode;
 use crate::graphics_settings::GraphicsSettings;
 use crate::scene::BakedActor;
-#[cfg_attr(not(test), allow(unused_imports))]
-use crate::snapshot::SceneState;
 
 /// Kept for the camera systems and the client's collision clamp, which all
 /// subtract `offset` from the anchor Y. Step smoothing now happens at the
@@ -35,20 +33,12 @@ pub struct CameraStepSmoothing {
 /// Not a spring: a spring's restoring force keeps momentum after target is
 /// reached and produces bounce. Here velocity is DERIVED from the current
 /// gap every tick, so hitting the target is a fixed point.
-#[derive(Resource)]
+#[derive(Resource, Default)]
 pub struct AnchorFollow {
     /// The smoothed anchor position (world space). None until first sample,
     /// then set to the player's position and updated each tick.
     pub pos: Option<Vec3>,
 }
-
-impl Default for AnchorFollow {
-    fn default() -> Self {
-        Self { pos: None }
-    }
-}
-
-
 
 const THIRD_PERSON_ANCHOR_FRAC: f32 = 0.55;
 
@@ -546,62 +536,9 @@ mod tests {
         );
     }
 
-    #[test]
-    fn snap_to_anchor_places_eye_behind_player_without_smoothing() {
-        let mut app = App::new();
-        app.add_plugins(MinimalPlugins)
-            .insert_resource(CameraMode::Chase)
-            .insert_resource(SceneState::default())
-            .insert_resource(CameraStepSmoothing::default())
-            .insert_resource(AnchorFollow::default())
-            .insert_resource(ChaseCamera {
-                snap_to_anchor: true,
-                ..Default::default()
-            })
-            .add_systems(Update, chase_camera_system);
-        let player_pos = Vec3::new(10.0, 1.0, -4.0);
-        app.world_mut()
-            .spawn((IsSelf, Transform::from_translation(player_pos)));
-        let cam = app
-            .world_mut()
-            .spawn((OperatorCamera, Transform::from_xyz(999.0, 500.0, -999.0)))
-            .id();
-
-        app.update();
-
-        let chase = app.world().resource::<ChaseCamera>();
-        assert!(!chase.snap_to_anchor, "snap flag consumed by the update");
-        let expected_yaw = yaw_for_heading(
-            app.world()
-                .resource::<SceneState>()
-                .snapshot
-                .self_pos
-                .heading,
-        );
-        assert_eq!(
-            chase.yaw, expected_yaw,
-            "zone-in yaw follows player heading"
-        );
-
-        let anchor = player_pos + Vec3::Y * third_person_anchor_y(None);
-        let radius = chase.orbit_radius();
-        let yaw_dir = Vec3::new(expected_yaw.sin(), 0.0, expected_yaw.cos());
-        let expected_eye = anchor
-            + yaw_dir * (radius * chase.pitch.cos())
-            + Vec3::Y * (radius * chase.pitch.sin());
-        let cam_t = *app.world().get::<Transform>(cam).unwrap();
-        assert!(
-            (cam_t.translation - expected_eye).length() < 1e-4,
-            "eye {:?} snapped to {expected_eye:?} behind the player, no lerp from the old zone",
-            cam_t.translation
-        );
-        let look = *cam_t.forward();
-        let want = (anchor - expected_eye).normalize();
-        assert!(
-            (look - want).length() < 1e-4,
-            "camera faces along the player's heading: {look:?} != {want:?}"
-        );
-    }
+    // snap_to_anchor_places_eye_behind_player_without_smoothing migrated to
+    // kuluu::view_native::camera_collision after the WIP camera work retired this
+    // crate's chase authority (resolve_camera is now the single eye owner).
 
     #[test]
     fn operator_camera_renders_world_and_gizmo_layers() {

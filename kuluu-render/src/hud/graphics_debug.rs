@@ -5,6 +5,10 @@
 use bevy::prelude::*;
 use std::sync::atomic::{AtomicU32, Ordering};
 
+use crate::nameplate_final_pass::{
+    NameplateFrameSnap, NAMEPLATE_PASS_DEBUG, NAMEPLATE_PROBE_TEXT,
+};
+
 /// Actual swapchain/surface size as the RENDER world sees it, bridged to the
 /// main world through atomics (debug-only plumbing). If the user's stale
 /// initial-value theory is right, `win=` will move on resize while this
@@ -161,5 +165,150 @@ pub fn graphics_debug_metrics_system(
             history.clear();
             *frame = 0;
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Nameplate Debug panel: last two render ticks of the final in-view pass.
+// Splits "names don't show" into stages: nothing extracted / hidden culled /
+// texture-not-in-GpuImage-cache / bound-but-no-draws / pipeline-compiling /
+// drawn-but-off-screen (far_ndc answers that one).
+// ---------------------------------------------------------------------------
+
+#[derive(Component)]
+pub struct NameplateDebugHud;
+
+#[derive(Component)]
+pub struct NameplateDebugText;
+
+/// One tick's pass state, formatted for the panel. Counter chain left to
+/// right: plates extracted -> hidden culled upstream -> GPU texture cache
+/// misses (nogpuimg) / data-not-uploaded (nodata) -> bound this tick ->
+/// drawn into the operator view (pipeline + farthest-plate clip position).
+fn nameplate_snap_line(tag: &str, s: NameplateFrameSnap) -> String {
+    let draw = if !s.operator_cam {
+        "NO OPERATOR CAMERA".to_string()
+    } else if !s.reached_draw {
+        // Prepare writes bound/gputex unconditionally when it runs; all-zero
+        // plus no draw means the render thread simply hadn't finished P/D for
+        // this tick at HUD-read time (extract ran ahead of its own pass).
+        if s.bound == 0 && s.gpu_images_total == 0 {
+            "in flight (P/D not done at read time)".to_string()
+        } else {
+            "draw stage NOT reached this tick".to_string()
+        }
+    } else if !s.pipeline_ready && s.target_fmt.is_none() {
+        format!(
+            "samples={} bound-plates=0 (reached operator view, nothing to draw)",
+            s.samples
+        )
+    } else if !s.pipeline_ready {
+        match s.target_fmt {
+            Some(f) => format!("pipeline COMPILING fmt={:?} samples={}", f, s.samples),
+            None => format!("samples={} draws=0 (no target fmt yet)", s.samples),
+        }
+    } else if s.draws == 0 {
+        match s.target_fmt {
+            Some(f) => format!("draws=0 pipe=ok fmt={:?} samples={}", f, s.samples),
+            None => format!("draws=0 pipe=ok samples={}", s.samples),
+        }
+    } else {
+        // Main line stays short (panel width): draws + pipeline state only.
+        let main = match s.target_fmt {
+            Some(f) => format!("draws={} pipe=ok fmt={:?} samples={}", s.draws, f, s.samples),
+            None => format!("draws={} pipe=ok samples={}", s.draws, s.samples),
+        };
+        // Farthest plate (head of the blend order): on screen = ndc xy inside
+        // [-1, 1] AND w > 0; alpha near 0 means fully faded even if in view.
+        let mut tail = format!(
+            "far_ndc=({:+.2},{:+.2}) w={:.3} alpha={:.2}",
+            s.far_ndc_x, s.far_ndc_y, s.far_w, s.far_alpha
+        );
+        // Billboard gate breakdown (main-world mirror of Visibility::Hidden):
+        // answers "why is `hidden` what it is". Only when there's something to
+        // explain.
+        if s.bb_total > 0 || s.hidden > 0 {
+            tail.push_str(&format!(
+                " bb {} visible of {} | self={} depth-gate={} gone={}",
+                s.bb_visible, s.bb_total, s.bb_hide_self, s.bb_hidden_depth, s.bb_despawned
+            ));
+        }
+        format!("{}\n      {}", main, tail)
+    };
+    format!(
+        // {tag} captures the `tag` parameter from scope; the bare specifiers
+        // take the seven counters in order.
+        "{tag}: plates={} hidden={} nogpuimg={} nodata={} bound={} gputex={} | {}",
+        s.plates_total,
+        s.hidden,
+        s.no_gpu_image,
+        s.not_had_data,
+        s.bound,
+        s.gpu_images_total,
+        draw
+    )
+}
+
+pub fn spawn_nameplate_debug_hud(mut commands: Commands) {
+    commands
+        .spawn((
+            crate::components::InGameEntity,
+            NameplateDebugHud,
+            Node {
+                position_type: PositionType::Absolute,
+                top: Val::Px(240.0),
+                left: Val::Px(540.0),
+                padding: UiRect::axes(Val::Px(8.0), Val::Px(6.0)),
+                border: UiRect::all(Val::Px(1.0)),
+                ..default()
+            },
+            BackgroundColor(crate::hud::style::theme::FRAME_BG),
+            BorderColor::all(crate::hud::style::theme::CURSOR),
+            Visibility::Hidden,
+        ))
+        .with_children(|p| {
+            p.spawn((NameplateDebugText, Text::new("")));
+        });
+}
+
+pub fn update_nameplate_debug_hud(
+    panels: Res<crate::hud::HudPanels>,
+    mut q_root: Query<&mut Visibility, With<NameplateDebugHud>>,
+    mut q_text: Query<&mut Text, With<NameplateDebugText>>,
+) {
+    let Ok(mut vis) = q_root.single_mut() else {
+        return;
+    };
+    if !panels.nameplate_debug {
+        if *vis != Visibility::Hidden {
+            *vis = Visibility::Hidden;
+        }
+        return;
+    }
+    if *vis != Visibility::Inherited {
+        *vis = Visibility::Inherited;
+    }
+    let Ok(mut text) = q_text.single_mut() else {
+        return;
+    };
+    // Render-thread-owned ring of the last two ticks; held only for this brief
+    // read, never across a system boundary.
+    let mut s = {
+        let dbg = NAMEPLATE_PASS_DEBUG.lock().unwrap_or_else(|p| p.into_inner());
+        format!(
+            "=== NAMEPLATE DEBUG (last 2 ticks) ===\n{}\n{}",
+            nameplate_snap_line(&format!("f{:>7}", dbg.frame.saturating_sub(1)), dbg.prev),
+            nameplate_snap_line(&format!("f{:>7}", dbg.frame), dbg.cur)
+        )
+    };
+    // TEMP DEBUG probe (visibility hunt): live camera/clip/center ground truth,
+    // refreshed ~1/s by the render-thread draw system. test5u_ndc must read
+    // ~(0,0); any plate with |ndc| < 1 and w > 0 should be visible on screen.
+    if let Some(probe) = NAMEPLATE_PROBE_TEXT.lock().unwrap_or_else(|p| p.into_inner()).clone() {
+        s.push_str("\n--- PROBE (live, ~1/s) ---\n");
+        s.push_str(&probe);
+    }
+    if text.0 != s {
+        text.0 = s;
     }
 }

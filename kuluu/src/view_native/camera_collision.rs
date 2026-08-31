@@ -6,7 +6,9 @@ use kuluu_render::components::IsSelf;
 use kuluu_render::dat_mzb::{CameraCollisionSource, DrawDistance, ZoneGeomMode};
 use kuluu_render::scene::BakedActor;
 use kuluu_render::snapshot::SceneState;
-use kuluu_render::{third_person_anchor_y, yaw_for_heading, CameraMode, ChaseCamera, OperatorCamera};
+use kuluu_render::{
+    third_person_anchor_y, yaw_for_heading, CameraMode, ChaseCamera, OperatorCamera,
+};
 
 use super::avian_bridge::camera_mask;
 use super::collision_bvh::{CollisionBvh, ZoneCollisionBvh};
@@ -250,6 +252,8 @@ pub fn draw_camera_collision_debug(
 
 #[cfg(test)]
 mod tests {
+    use kuluu_render::camera::AnchorFollow;
+
     use super::*;
 
     #[test]
@@ -293,5 +297,83 @@ mod tests {
         assert!(!camera_collides_with_mmb(CameraCollisionSource::Mzb, false));
         assert!(camera_collides_with_mmb(CameraCollisionSource::Mmb, false));
         assert!(camera_collides_with_mmb(CameraCollisionSource::Both, false));
+    }
+
+    #[test]
+    fn snap_to_anchor_places_eye_behind_player_without_smoothing() {
+        // Migrated from kuluu-render::camera after the WIP camera work retired its
+        // chase authority: resolve_camera is now the single eye owner (this crate,
+        // which can reach the avian world). Zone-in snap must land on frame one —
+        // no lerp from wherever the previous zone left the eye.
+        let mut app = App::new();
+        // A full render app registers the Mesh asset (storage + AssetEvent bus);
+        // avian's collider-cache systems read both, so give them what a real
+        // app has or their params fail validation on frame one.
+        app.add_plugins(MinimalPlugins)
+            .add_plugins(bevy::asset::AssetPlugin::default())
+            .init_asset::<bevy::mesh::Mesh>()
+            .add_plugins(PhysicsPlugins::default())
+            .insert_resource(CameraMode::Chase)
+            .insert_resource(kuluu_render::GraphicsSettings {
+                camera_spring: false,
+                ..Default::default()
+            })
+            .insert_resource(SceneState::default())
+            .insert_resource(kuluu_render::camera::CameraStepSmoothing::default())
+            .insert_resource(AnchorFollow::default())
+            .insert_resource(ChaseCamera {
+                snap_to_anchor: true,
+                ..Default::default()
+            })
+            .add_systems(Update, resolve_camera);
+
+        let player_pos = Vec3::new(10.0, 1.0, -4.0);
+        app.world_mut()
+            .spawn((IsSelf, Transform::from_translation(player_pos)));
+        let cam = app
+            .world_mut()
+            .spawn((OperatorCamera, Transform::from_xyz(999.0, 500.0, -999.0)))
+            .id();
+
+        app.update();
+
+        let chase = app.world().resource::<ChaseCamera>();
+        assert!(!chase.snap_to_anchor, "snap flag consumed by the update");
+        let expected_yaw = yaw_for_heading(
+            app.world()
+                .resource::<SceneState>()
+                .snapshot
+                .self_pos
+                .heading,
+        );
+        assert_eq!(
+            chase.yaw, expected_yaw,
+            "zone-in yaw follows player heading"
+        );
+
+        // No wall in this empty world: the effective distance is the wanted orbit
+        // padded off by WALL_PAD (retail's fixed clip-plane padding), never lerp'd.
+        let anchor = player_pos + Vec3::Y * third_person_anchor_y(None);
+        let expected_dist = clamped_camera_distance(chase.orbit_radius(), chase.orbit_radius());
+        let cos_p = chase.pitch.cos();
+        let sin_p = chase.pitch.sin();
+        let dir = Vec3::new(
+            expected_yaw.sin() * cos_p,
+            sin_p,
+            expected_yaw.cos() * cos_p,
+        );
+        let expected_eye = anchor + dir * expected_dist;
+        let cam_t = *app.world().get::<Transform>(cam).unwrap();
+        assert!(
+            (cam_t.translation - expected_eye).length() < 1e-4,
+            "eye {:?} snapped to {expected_eye:?} behind the player, no lerp from the old zone",
+            cam_t.translation
+        );
+        let look = *cam_t.forward();
+        let want = (anchor - expected_eye).normalize();
+        assert!(
+            (look - want).length() < 1e-4,
+            "camera faces along the player's heading: {look:?} != {want:?}"
+        );
     }
 }

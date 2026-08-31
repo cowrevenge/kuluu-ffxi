@@ -45,6 +45,7 @@ pub mod mouse;
 pub mod nameplate;
 pub mod nameplate_billboard;
 pub mod nameplate_color;
+pub mod nameplate_final_pass;
 pub mod nameplate_icons;
 pub mod nameplate_marker;
 pub mod nameplate_overlay;
@@ -211,6 +212,9 @@ impl<S: SceneSource + Resource + Component<Mutability = bevy::ecs::component::Mu
 
         app.add_plugins(lens_flare::LensFlarePlugin);
 
+        // Nameplates: final in-view pass (replaces the retired overlay camera).
+        app.add_plugins(nameplate_final_pass::NameplateFinalPassPlugin);
+
         app.add_plugins(zone_lights::ZoneLightsPlugin);
 
         #[cfg(not(target_arch = "wasm32"))]
@@ -272,6 +276,7 @@ impl<S: SceneSource + Resource + Component<Mutability = bevy::ecs::component::Mu
             .init_resource::<fishing_spot::FishingSpot>()
             .init_resource::<scene::SelfAppearance>()
             .init_resource::<nameplate_billboard::BillboardFont>()
+            .init_resource::<nameplate_billboard::NameplateBillboardDebug>()
             .init_resource::<ui_font::UiFont>()
             .add_plugins(nameplate_color::NameColorPlugin)
             .add_plugins(nameplate_icons::NameplateIconsPlugin)
@@ -282,16 +287,9 @@ impl<S: SceneSource + Resource + Component<Mutability = bevy::ecs::component::Mu
             .add_systems(Update, ui_font::apply_ui_font)
             .add_systems(PreUpdate, ingest_system::<S>.run_if(resource_exists::<S>))
             .add_systems(PostUpdate, drain_toast_events)
-            // After every Update-schedule camera writer (chase, first-person,
-            // the client's wall-collision clamp), before propagation computes
-            // the GlobalTransforms the renderer extracts — a copy taken any
-            // earlier lags the collision clamp and the plates jiggle against
-            // the world (kuluu-wupy follow-up).
-            .add_systems(
-                PostUpdate,
-                nameplate_overlay::sync_nameplate_overlay_camera
-                    .before(bevy::transform::TransformSystems::Propagate),
-            )
+            // (The nameplate overlay camera used to need a PostUpdate mirror system
+            // here; the final pass in nameplate_final_pass reads each plate's
+            // GlobalTransform from extraction instead.)
             .add_systems(
                 PreUpdate,
                 vana_time::ingest_vana_time.after(ingest_system::<S>),

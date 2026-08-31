@@ -85,11 +85,15 @@ pub(super) fn apply_slash_outcome(
             target.id = id;
         }
         SlashOutcome::Quit => {
+            // TEMP (exit-hunt): identify which close path fired.
+            tracing::info!("TEMP slash_apply.rs: SlashOutcome::Quit -> AppExit");
             let _ = cmd_tx.try_send(AgentCommand::Disconnect);
             exit.write_default();
             crate::view_native::exit_watchdog::arm();
         }
         SlashOutcome::QuitWithLogout(kind) => {
+            // TEMP (exit-hunt): identify which close path fired.
+            tracing::info!(?kind, "TEMP slash_apply.rs: SlashOutcome::QuitWithLogout -> AppExit");
             let req = AgentCommand::ReqLogout { kind };
             if let Some(toast) = reqlogout_ack_text(&req) {
                 push_system_chat_line(scene_state, toast.into());

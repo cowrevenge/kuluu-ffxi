@@ -42,6 +42,12 @@ impl Crumb {
     }
 }
 
+/// Marker for the widget that should receive initial keyboard focus when its
+/// screen is shown (see `login::focus_default_target_system`). The blue focus
+/// outline starts here instead of nowhere, so Enter activates it immediately.
+#[derive(Component)]
+pub(super) struct DefaultFocusTarget;
+
 pub(super) const PANEL_BG: Color = Color::srgba(0.04, 0.04, 0.05, 0.85);
 pub(super) const PANEL_BORDER_COLOR: Color = Color::srgb(0.20, 0.20, 0.24);
 
@@ -361,6 +367,8 @@ fn spawn_titlebar(
                 match action {
                     NavAction::Close => {
                         btn.observe(|_ev: On<Activate>, mut exit: MessageWriter<AppExit>| {
+                            // TEMP (exit-hunt): identify which close path fired.
+                            tracing::info!("TEMP common.rs: launcher UI X/close button activated -> AppExit");
                             exit.write_default();
                         });
                     }

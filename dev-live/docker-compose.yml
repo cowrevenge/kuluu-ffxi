@@ -1,0 +1,210 @@
+# =============================================================================
+# Cow live LSB stack — rebuilt 2026-08-29 with deterministic networking.
+#
+# Why this layout kills the "UDP dies every PC restart" class of bugs:
+#   * one named network `cow` with an explicit subnet -> Docker can never
+#     silently re-pick a range on boot
+#   * every service gets a fixed static IP (ipv4_address) -> topology is
+#     identical after every reboot / recreate
+#   * inter-service traffic uses DNS names (XI_NETWORK_SQL_HOST=cow-db,
+#     XI_NETWORK_ZMQ_IP=cow-world), so nothing depends on IPs except this file
+#   * all client-facing ports are declared HERE; the cow-dnat sidecar (below)
+#     is still REQUIRED for gameplay: Docker Desktop's published-UDP proxy
+#     drops cow-map's s2c replies back to this PC — same reason it existed in
+#     the old stack. It re-arms itself, so nothing manual on reboot
+#
+# Volumes keep their historical names (dev_cow_*) so the MariaDB data and the
+# FFXI meshes carry over from the old stack untouched.
+#
+# Bring up:  docker compose -f C:\Cow_Kuluu_ffxi-engine\dev-live\docker-compose.yml up -d
+# Test UDP:  powershell -NoProfile -File C:\Cow_Kuluu_ffxi-engine\dev-live\udp-probe.ps1
+# =============================================================================
+
+x-dbcreds: &dbcreds
+  MARIADB_DATABASE: xidb
+  MARIADB_USER: xiadmin
+  MARIADB_PASSWORD: 'password'
+  MARIADB_ROOT_PASSWORD: 'root'
+
+x-common: &common
+  image: ghcr.io/landsandboat/server:latest
+  environment:
+    <<: *dbcreds
+    XI_NETWORK_HTTP_HOST: 0.0.0.0
+    XI_NETWORK_ZMQ_IP: cow-world
+    XI_NETWORK_SQL_HOST: cow-db
+
+networks:
+  cow:
+    name: cow
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.30.0.0/16
+
+volumes:
+  dbdata:
+    name: dev_cow_dbdata      # explicit global name -> reuses the existing volume (DB data)
+  navmeshes:
+    name: dev_cow_navmeshes
+  ximeshes:
+    name: dev_cow_ximeshes
+
+services:
+  database:
+    image: mariadb:12.3
+    container_name: cow-db
+    restart: unless-stopped
+    command: ['--character-set-server=utf8mb4', '--collation-server=utf8mb4_general_ci']
+    environment: *dbcreds
+    volumes:
+      - dbdata:/var/lib/mysql              # -> global volume dev_cow_dbdata (existing DB data)
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      start_period: 10s
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    networks:
+      cow: { ipv4_address: 172.30.0.10 }
+
+  # Runs dbtool migrations using the local clone (mounted over /server so sql/ + tools exist).
+  database-update:
+    <<: *common
+    container_name: cow-dbupdate
+    command: ["python", "/server/tools/dbtool.py", "update"]
+    environment:
+      MARIADB_DATABASE: xidb
+      MARIADB_USER: xiadmin
+      MARIADB_PASSWORD: 'password'
+      MARIADB_ROOT_PASSWORD: 'root'
+      XI_NETWORK_HTTP_HOST: 0.0.0.0
+      XI_NETWORK_ZMQ_IP: cow-world
+      XI_NETWORK_SQL_HOST: cow-db
+      REPO_URL: "https://github.com/LandSandBoat/server"
+      COMMIT_SHA: "1bcb81861045128f13b90e3b1f531b3fa72c1fe6"
+    volumes:
+      - C:\Cow_Kuluu_ffxi-engine\Archived_cowengine\third_party\lsb:/server
+    depends_on:
+      database:
+        condition: service_healthy
+    networks:
+      cow: { ipv4_address: 172.30.0.60 }
+
+  connect:
+    <<: *common
+    container_name: cow-connect
+    command: ["/server/xi_connect"]
+    restart: unless-stopped
+    ports:
+      - "54001:54001/tcp"   # LOGIN_VIEW_PORT (lobby char list/select)
+      - "54230:54230/tcp"   # LOGIN_DATA_PORT (xiloader data channel, TCP)
+      - "54231:54231/tcp"   # LOGIN_AUTH_PORT (JSON over TLS)
+    depends_on:
+      database-update:
+        condition: service_completed_successfully
+    networks:
+      cow: { ipv4_address: 172.30.0.30 }
+
+  search:
+    <<: *common
+    container_name: cow-search
+    command: ["/server/xi_search"]
+    restart: unless-stopped
+    ports:
+      - "54002:54002/tcp"
+    depends_on:
+      database-update:
+        condition: service_completed_successfully
+    networks:
+      cow: { ipv4_address: 172.30.0.50 }
+
+  world:
+    <<: *common
+    container_name: cow-world
+    command: ["/server/xi_world"]
+    restart: unless-stopped
+    ports:
+      - "8088:8088/tcp"     # xi_world HTTP API
+    depends_on:
+      database-update:
+        condition: service_completed_successfully
+    networks:
+      cow: { ipv4_address: 172.30.0.20 }
+
+  map:
+    <<: *common
+    container_name: cow-map
+    command: ["/server/xi_map"]
+    restart: unless-stopped
+    ports:
+      - "54230:54230/udp"   # MAP_PORT (gameplay traffic)
+    volumes:
+      - navmeshes:/server/navmeshes       # -> global volume dev_cow_navmeshes
+      - ximeshes:/server/ximeshes           # -> global volume dev_cow_ximeshes
+    depends_on:
+      database-update:
+        condition: service_completed_successfully
+      world:
+        condition: service_started
+    networks:
+      cow: { ipv4_address: 172.30.0.40 }
+
+  # s2c return path (kept from the old dev stack — DO NOT REMOVE):
+  # Docker Desktop's published-UDP proxy never delivers cow-map's replies back
+  # to this PC. This keeper shares cow-map's netns and re-adds two rules:
+  #   raw PREROUTING: -p udp --dport 54230 -j NOTRACK
+  #   nat OUTPUT:     -p udp --sport 54230 -j DNAT --to-destination $HOST_IP:$CLIENT_PORT
+  # HOST_IP = this PC's LAN IP (default below; if it changes, put HOST_IP=... in a file named .env next to this compose — compose picks it up automatically).
+  # CLIENT_PORT must match FFXI_MAP_LOCAL_PORT — the port kuluu binds its map socket to.
+  # "VERIFIED" line in `docker logs cow-dnat` = safe to log in. Cadence: 3s while clobbered / 15s stable.
+  dnat-keeper:
+    image: alpine:latest
+    container_name: cow-dnat
+    network_mode: "service:map"
+    cap_add:
+      - NET_ADMIN
+    environment:
+      HOST_IP: ${HOST_IP:-192.168.40.231}
+      CLIENT_PORT: "47500"
+    command: >
+      sh -c 'apk add --no-cache iptables >/dev/null 2>&1 && prev=0; while true; do
+        iptables -t raw -C PREROUTING -p udp --dport 54230 -j NOTRACK 2>/dev/null ||
+          { echo "[dnat] arming NOTRACK"; iptables -t raw -A PREROUTING -p udp --dport 54230 -j NOTRACK || echo "[dnat] ERROR: NOTRACK add failed (NET_ADMIN?)"; };
+        iptables -t nat -C OUTPUT -p udp --sport 54230 -j DNAT --to-destination $$HOST_IP:$$CLIENT_PORT 2>/dev/null ||
+          { echo "[dnat] arming DNAT -> $$HOST_IP:$$CLIENT_PORT"; iptables -t nat -A OUTPUT -p udp --sport 54230 -j DNAT --to-destination $$HOST_IP:$$CLIENT_PORT || echo "[dnat] ERROR: DNAT add failed (NET_ADMIN?)"; };
+        if iptables -t raw -C PREROUTING -p udp --dport 54230 -j NOTRACK 2>/dev/null &&
+           iptables -t nat -C OUTPUT -p udp --sport 54230 -j DNAT --to-destination $$HOST_IP:$$CLIENT_PORT 2>/dev/null; then s=1; else s=0; fi;
+        if [ "$$s" = "1" ] && [ "$$prev" = "0" ]; then echo "[dnat] VERIFIED: both rules live, entering 15s maintenance"; fi;
+        prev=$$s;
+        if [ "$$s" = "1" ]; then sleep 15; else echo "[dnat] WARN: rule vanished right after add (dockerd settling), fast retry in 3s"; sleep 3; fi;
+      done'
+    depends_on:
+      map:
+        condition: service_started
+    restart: unless-stopped
+
+  # Deterministic UDP round-trip probe (PC -> published port -> back).
+  # Reply = b"ECHO:<payload>". If udp-probe.ps1 prints ECHOS, Docker Desktop's
+  # published-UDP return path is healthy and no DNAT sidecar can ever be needed.
+  # Delete this service if you want it gone; everything else stands on its own.
+  udp-probe:
+    image: python:3-alpine
+    container_name: cow-udp-probe
+    restart: unless-stopped
+    entrypoint: ["python", "-c"]
+    command:
+      - |
+        import socket
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.bind(("0.0.0.0", 19475))
+        sink = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sink.bind(("0.0.0.0", 19476))   # silent delivery counter: nobody reads it; rx_queue in /proc/net/udp accumulates (hex 4C14)
+        print("udp-probe listening on 19475/udp", flush=True)
+        while True:
+            data, addr = s.recvfrom(65535)
+            print("FROM", addr[0], "port", addr[1], flush=True)
+            s.sendto(b"ECHO:" + data, addr)
+    network_mode: host   # mirrored WSL: bind directly on the PC's real interfaces; no port proxy in between
+    # ports are implicit with network_mode host: 19475/udp echo + 19476/udp silent counter
+

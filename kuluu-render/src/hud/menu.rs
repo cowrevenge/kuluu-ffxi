@@ -266,6 +266,7 @@ pub const DEBUG_STAIR_DRAW: &str = "Draw Stair Climber";
 pub const DEBUG_STAIR_STATUS: &str = "Show Stair Status";
 pub const DEBUG_GRAPHICS_DEBUG: &str = "Graphics Debug";
 pub const DEBUG_POSITION_LOG: &str = "Panel Pos Log";
+pub const DEBUG_NAMEPLATES: &str = "Nameplate Debug";
 
 const DEBUG_ENTRIES: &[&str] = &[
     DEBUG_PERF,
@@ -280,6 +281,7 @@ const DEBUG_ENTRIES: &[&str] = &[
     DEBUG_STAIR_STATUS,
     DEBUG_GRAPHICS_DEBUG,
     DEBUG_POSITION_LOG,
+    DEBUG_NAMEPLATES,
 ];
 
 // Grouped: display -> interface/camera -> quality -> lighting.
@@ -1341,6 +1343,7 @@ pub fn debug_panel_state(
         DEBUG_STAIR_STATUS => panels.stair_debug,
         DEBUG_GRAPHICS_DEBUG => panels.graphics_debug,
         DEBUG_POSITION_LOG => panels.position_log,
+        DEBUG_NAMEPLATES => panels.nameplate_debug,
         // Print Pos is a button, not a toggle — always shows [off].
         _ => false,
     }
@@ -1891,13 +1894,14 @@ mod tests {
             target_cycle: false,
             mesh_debug: true,
             noclip: true,
+            ..Default::default()
         };
-        assert!(debug_panel_state(DEBUG_PERF, &panels, false));
-        assert!(!debug_panel_state(DEBUG_TARGET_CYCLE, &panels, false));
-        assert!(debug_panel_state(DEBUG_MESH, &panels, false));
-        assert!(debug_panel_state(DEBUG_NOCLIP, &panels, false));
-        assert!(debug_panel_state(DEBUG_NET_STATUS, &panels, true));
-        assert!(!debug_panel_state(DEBUG_NET_STATUS, &panels, false));
+        assert!(debug_panel_state(DEBUG_PERF, &panels, false, false));
+        assert!(!debug_panel_state(DEBUG_TARGET_CYCLE, &panels, false, false));
+        assert!(debug_panel_state(DEBUG_MESH, &panels, false, false));
+        assert!(debug_panel_state(DEBUG_NOCLIP, &panels, false, false));
+        assert!(debug_panel_state(DEBUG_NET_STATUS, &panels, true, false));
+        assert!(!debug_panel_state(DEBUG_NET_STATUS, &panels, false, false));
 
         for label in DEBUG_ENTRIES {
             assert_eq!(

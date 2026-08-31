@@ -77,6 +77,10 @@ pub struct HudPanels {
     pub stair_draw: bool,
     /// Graphics-debug panel (win/img/panel metrics). Runtime-only, no persist.
     pub graphics_debug: bool,
+    /// Nameplate Debug panel: last-two-tick pass state from the final in-view
+    /// nameplate pass (extract/bind/draw counters + far-plate clip position).
+    /// Runtime-only, no persist.
+    pub nameplate_debug: bool,
     /// Rolling panel-position capture to panelpositions.txt. Runtime-only,
     /// default off so the game never spams a log unasked. No persist.
     pub position_log: bool,
@@ -421,6 +425,7 @@ impl Plugin for HudPlugin {
                 stair_debug::update_stair_debug_hud,
                 graphics_debug::graphics_debug_metrics_system,
                 graphics_debug::update_graphics_debug_hud,
+                graphics_debug::update_nameplate_debug_hud,
             )
                 .chain(),
         );
@@ -464,6 +469,10 @@ pub fn add_hud_spawners<L: bevy::ecs::schedule::ScheduleLabel + Clone>(app: &mut
     // already at 20 above.
     app.add_systems(schedule.clone(), stair_debug::spawn_stair_debug_hud);
     app.add_systems(schedule.clone(), graphics_debug::spawn_graphics_debug_hud);
+    app.add_systems(
+        schedule.clone(),
+        graphics_debug::spawn_nameplate_debug_hud,
+    );
 
     #[cfg(feature = "enhanced-buff-tooltips")]
     app.add_systems(schedule.clone(), status_ribbon::tooltip::spawn_buff_tooltip);

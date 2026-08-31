@@ -1,7 +1,8 @@
-use bevy::camera::Hdr;
+use bevy::camera::{Camera3dDepthTextureUsage, Hdr};
 use bevy::light::{ShadowFilteringMethod, VolumetricFog};
 use bevy::post_process::bloom::Bloom;
 use bevy::prelude::*;
+use bevy::render::render_resource::TextureUsages;
 
 #[cfg(not(target_arch = "wasm32"))]
 use bevy::anti_alias::taa::TemporalAntiAliasing;
@@ -314,6 +315,14 @@ pub fn build_operator_camera(
     settings: &GraphicsSettings,
     restore_transform: Option<Transform>,
 ) {
+    // Depth texture is allocated per (target, msaa) with the OR of every view's usage on
+    // that target (bevy core_3d prepare_core_3d_depth_textures), and re-created when MSAA
+    // toggles — so this flag follows the current sample count for free.
+    let mut camera_3d = Camera3d::default();
+    camera_3d.depth_texture_usages = Camera3dDepthTextureUsage::from(
+        TextureUsages::RENDER_ATTACHMENT | TextureUsages::TEXTURE_BINDING,
+    );
+
     let mut camera = commands.spawn((
         crate::components::InGameEntity,
         OperatorCamera,
@@ -322,7 +331,11 @@ pub fn build_operator_camera(
         // both native and off-screen scale.
         bevy::picking::mesh_picking::MeshPickingCamera,
         bevy::camera::visibility::RenderLayers::from_layers(&[0, WORLD_GIZMO_LAYER]),
-        Camera3d::default(),
+        // The nameplate final pass reads this view's depth buffer to occlude plates
+        // against walls. With MSAA on that read is a texture sample of the multi-sample
+        // depth buffer (nameplate_final_pass.rs), which requires TEXTURE_BINDING — Bevy
+        // only adds it for cameras carrying OcclusionCulling, so set it explicitly here.
+        camera_3d,
         Hdr,
         settings.tonemapping(),
         ShadowFilteringMethod::Gaussian,

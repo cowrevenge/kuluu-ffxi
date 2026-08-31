@@ -5,9 +5,7 @@
 use bevy::prelude::*;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use crate::nameplate_final_pass::{
-    NameplateFrameSnap, NAMEPLATE_PASS_DEBUG, NAMEPLATE_PROBE_TEXT,
-};
+use crate::nameplate_final_pass::{NameplateFrameSnap, NAMEPLATE_PASS_DEBUG};
 
 /// Actual swapchain/surface size as the RENDER world sees it, bridged to the
 /// main world through atomics (debug-only plumbing). If the user's stale
@@ -293,7 +291,7 @@ pub fn update_nameplate_debug_hud(
     };
     // Render-thread-owned ring of the last two ticks; held only for this brief
     // read, never across a system boundary.
-    let mut s = {
+    let s = {
         let dbg = NAMEPLATE_PASS_DEBUG.lock().unwrap_or_else(|p| p.into_inner());
         format!(
             "=== NAMEPLATE DEBUG (last 2 ticks) ===\n{}\n{}",
@@ -301,13 +299,6 @@ pub fn update_nameplate_debug_hud(
             nameplate_snap_line(&format!("f{:>7}", dbg.frame), dbg.cur)
         )
     };
-    // TEMP DEBUG probe (visibility hunt): live camera/clip/center ground truth,
-    // refreshed ~1/s by the render-thread draw system. test5u_ndc must read
-    // ~(0,0); any plate with |ndc| < 1 and w > 0 should be visible on screen.
-    if let Some(probe) = NAMEPLATE_PROBE_TEXT.lock().unwrap_or_else(|p| p.into_inner()).clone() {
-        s.push_str("\n--- PROBE (live, ~1/s) ---\n");
-        s.push_str(&probe);
-    }
     if text.0 != s {
         text.0 = s;
     }

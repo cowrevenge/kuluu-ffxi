@@ -47,13 +47,6 @@ const FADE_END_DEPTH_FIXED: u32 = 0x1004;
 // reciprocal-w gate (1/depth < 1) drops names inside one yalm of the view plane.
 const MIN_VIEW_DEPTH_YALMS: f32 = 1.0;
 
-// TEMP DEBUG — nameplate visibility hunt ("stop the hidden, so that they draw"): when
-// true the self-plate cull and the view-depth gate below stop writing Visibility::Hidden.
-// Every plate gets its full treatment (transform/scale/alpha) and is drawn; the counters
-// still increment at each gate point, so the panel keeps reporting who *would have*
-// been hidden. REMOVE this const plus both gated-out `*vis = Hidden` writes when done.
-const DEBUG_FORCE_VISIBLE: bool = true;
-
 // research/XIClient/src/XIClient/source/Rendering/Active/CXiActorNameDraw.cpp:31 — glyph units
 // to viewport fraction, applied to a pre-transformed (RHW=1) screen-space quad.
 const NAME_SCREEN_SCALE: f32 = 0.002_343_75;
@@ -339,11 +332,9 @@ pub fn update_nameplate_billboards_system(
         let self_cull =
             self_plate_hidden(is_self_billboard(np.entity_id, self_char_id), *camera_mode);
         if self_cull {
-            hide_self += 1; // counted even when force-visible keeps the plate drawn
-            if !DEBUG_FORCE_VISIBLE {
-                *vis = Visibility::Hidden;
-                continue;
-            }
+            hide_self += 1;
+            *vis = Visibility::Hidden;
+            continue;
         }
 
         let Some(&(entity_pos, head_y_offset)) = pos_by_id.get(&np.entity_id) else {
@@ -354,20 +345,10 @@ pub fn update_nameplate_billboards_system(
 
         let head_pos = entity_pos + Vec3::Y * head_y_offset;
         let view_depth = (head_pos - cam_pos).dot(cam_forward);
-        let scale = match legibility_scale_for_view_depth(view_depth) {
-            Some(s) => s,
-            None if DEBUG_FORCE_VISIBLE => {
-                // TEMP DEBUG: gate would have hidden this plate — count it, but keep
-                // drawing with a neutral near-distance scale (plates behind the camera
-                // plane clip out in the GPU frustum anyway).
-                hidden_depth += 1;
-                1.0
-            }
-            None => {
-                hidden_depth += 1;
-                *vis = Visibility::Hidden;
-                continue;
-            }
+        let Some(scale) = legibility_scale_for_view_depth(view_depth) else {
+            hidden_depth += 1;
+            *vis = Visibility::Hidden;
+            continue;
         };
 
         let aspect_ratio = aspect.width.max(1) as f32 / aspect.height.max(1) as f32;

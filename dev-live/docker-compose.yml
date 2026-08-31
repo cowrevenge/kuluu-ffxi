@@ -84,7 +84,7 @@ services:
       REPO_URL: "https://github.com/LandSandBoat/server"
       COMMIT_SHA: "1bcb81861045128f13b90e3b1f531b3fa72c1fe6"
     volumes:
-      - C:\Cow_Kuluu_ffxi-engine\Archived_cowengine\third_party\lsb:/server
+      - C:\Cow_Kuluu_ffxi-engine\archive\cowengine\third_party\lsb:/server   # moved from Archived_cowengine (2026-09-01)
     depends_on:
       database:
         condition: service_healthy

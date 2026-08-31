@@ -6,14 +6,14 @@
 
 struct VsIn {
     @location(0) position: vec3<f32>,
-    @location(1) uv: vec2<f32>;
+    @location(1) uv: vec2<f32>,
 };
 
 // Per-plate data, rewritten by the CPU each frame before the pass. Byte layout
 // (80 total): model mat4 at 0, fade alpha f32 at 64, pad to 80.
 struct PlateUniform {
     model: mat4x4<f32>,
-    fade_alpha: f32;
+    fade_alpha: f32,
 };
 
 // Per-view data for this frame's run of the pass: the clip matrix of the view
@@ -21,7 +21,7 @@ struct PlateUniform {
 // plane. Byte layout: mat4 @ 0, near f32 @ 64.
 struct ViewUniform {
     clip_from_world: mat4x4<f32>,
-    near: f32;
+    near: f32,
 };
 
 @group(0) @binding(0) var<uniform> plate: PlateUniform;

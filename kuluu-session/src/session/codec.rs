@@ -555,6 +555,20 @@ pub(crate) fn build_subpacket_gameok(sync: u16) -> Vec<u8> {
     buf
 }
 
+// c2s 0x061 GP_CLI_COMMAND_CLISTATUS: unknown00 u8 @4 (validated 0..=1), padded
+// to a word. The server answers with SendLocalPlayerPackets — GROUP_ATTR for
+// self, CLISTATUS, ... (vendor/server/src/map/packets/c2s/0x061_clistatus.cpp).
+pub(crate) fn build_subpacket_clistatus(sync: u16) -> Vec<u8> {
+    let mut buf = vec![0u8; 8];
+    buf[0..4].copy_from_slice(&build_subpacket_header(
+        ffxi_proto::map::c2s::CLISTATUS,
+        1,
+        sync,
+    ));
+    // unknown00 stays 0 (validate: range 0..=1).
+    buf
+}
+
 pub(crate) fn build_subpacket_zone_transition(sync: u16) -> Vec<u8> {
     let mut buf = vec![0u8; 8];
     buf[0..4].copy_from_slice(&build_subpacket_header(

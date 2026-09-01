@@ -139,6 +139,15 @@ const PAD_BACK_CANCEL_DEFLECTION: f32 = 0.5;
 
 const PREDICTION_RESYNC_YALMS: f32 = 5.0;
 
+/// Stair-detector lip cutoff (yalms): a ring sample within this height of the
+/// player's foot is a LIP — curb, expansion joint, or broken decorative stair
+/// piece. Lips are gray in the debug display and ignored by every stair calc
+/// (banding, march guards). Must equal the band-1 lower bound (`B1_LO`) so no
+/// sample falls into an unclassified gap: |dy| <= LIP_MAX is a lip, above it
+/// up to 0.4 is a real step (purple/cyan), beyond that is red (wall / too
+/// tall / unchainable).
+const LIP_MAX: f32 = 0.18;
+
 /// Debug data captured by `apply_self_prediction_system` for the gizmo drawer
 /// to render in Update. FixedUpdate can't draw gizmos directly.
 #[derive(bevy::prelude::Resource, Clone, Copy)]
@@ -1692,11 +1701,11 @@ pub fn detect_stairs(
     // "same-tread green" and is not itself numbered (though conceptually
     // green IS band 0 / the shared base). A real tread height H is
     // typically ~0.4 in this world, so a legit first step lands somewhere
-    // in [0.20, 0.45]. Anything smaller than 0.20 is a bump or noise
-    // (gray downstream), not a stair.
+    // in (0.18, 0.45]. Anything at or below 0.18 is a lip (gray downstream),
+    // not a stair.
     //
     // Pass A — same-tread (green): |dy| ≤ 0.06.
-    // Pass B — band 1 candidates: 0.20 ≤ |dy| ≤ 0.45. Static range so we
+    // Pass B — band 1 candidates: 0.18 < |dy| ≤ 0.45. Static range so we
     //          have something to measure H from on the first frame.
     // Measure — H = median |dy| across all band 1 candidates. Falls back
     //          to 0.4 when no candidates exist yet.
@@ -1708,7 +1717,13 @@ pub fn detect_stairs(
     // outward from the player, band N is only kept if the sample inward
     // on the same bearing is band N-1 (or the player's tread).
     const GREEN_TOL: f32 = 0.06;
-    const B1_LO: f32 = 0.20;
+    // Band-1 window: (LIP_MAX, 0.4] — above the lip cutoff up to a full
+    // riser. B1_LO == LIP_MAX so no |dy| falls into an unclassified gap
+    // between gray and purple; a sample at exactly LIP_MAX is still a lip.
+    const B1_LO: f32 = LIP_MAX;
+    // Upper bound stays 0.45 (not 0.4): real 0.4 risers measure up to ~0.43
+    // in collision data, and capping at exactly 0.4 would push noisy 0.4
+    // steps out of band 1 into red — the same bug as the old 0.2 lower bound.
     const B1_HI: f32 = 0.45;
     const H_FALLBACK: f32 = 0.4;
 
@@ -1733,7 +1748,9 @@ pub fn detect_stairs(
             let sd = &sample_data[slot];
             if sd.1.is_nan() || sd.2 { continue; }
             let ady = (sd.1 - center_y_raw).abs();
-            if ady >= B1_LO && ady <= B1_HI {
+            // Strictly above the lip cutoff — a sample at exactly LIP_MAX is
+            // still a lip, and lips must not feed the H measurement.
+            if ady > B1_LO && ady <= B1_HI {
                 b1_dys.push(ady);
             }
         }
@@ -1753,7 +1770,9 @@ pub fn detect_stairs(
     // band N even for shallow or steep staircases.
     let band_of = |d: f32| -> i8 {
         let ad = d.abs();
-        if ad >= B1_LO && ad <= B1_HI {
+        // Strictly above the lip cutoff — a sample at exactly LIP_MAX is
+        // still a lip (gray), not a step.
+        if ad > B1_LO && ad <= B1_HI {
             return if d > 0.0 { 1 } else { -1 };
         }
         for n in 2..=5i8 {
@@ -2120,10 +2139,10 @@ pub fn detect_stairs(
                 let sd = &sample_data[slot];
                 if sd.1.is_nan() { continue; }
                 if sd.2 || sd.3 != 0 { continue; }
-                // Also skip gray "lip" samples (small |d| from foot) — those
-                // are real ground, just a small step. Only pure red counts.
+                // Also skip gray "lip" samples (|d| <= LIP_MAX) — those
+                // are real ground, not unreliable geometry. Only pure red counts.
                 let dy = sd.1 - center_y_raw;
-                if dy.abs() < 0.15 { continue; }
+                if dy.abs() <= LIP_MAX { continue; }
                 if red_count < 60 {
                     red_xz[red_count] = sd.0;
                     red_count += 1;
@@ -2283,8 +2302,10 @@ pub fn detect_stairs(
                 let sd = &sample_data[slot];
                 if sd.1.is_nan() { continue; }
                 if sd.2 || sd.3 != 0 { continue; }
+                // Same gray-lip skip as the descent march: |d| <= LIP_MAX is
+                // real ground (a lip), not unreliable geometry.
                 let dy = sd.1 - center_y_raw;
-                if dy.abs() < 0.15 { continue; }
+                if dy.abs() <= LIP_MAX { continue; }
                 if red_count < 60 {
                     red_xz[red_count] = sd.0;
                     red_count += 1;
@@ -3533,12 +3554,11 @@ pub fn draw_footprint_debug_system(
             Color::srgb(r, g, b)
         } else if *kept {
             Color::srgb(0.2, 1.0, 0.2)
-        } else if dy.abs() < 0.15 {
-            // Near-tread lip: no band, not same-tread, but only a small height
-            // delta from the player's foot (0.10..=0.15, roughly). A curb,
-            // expansion joint, or the top of a very short lip that isn't the
-            // player's step and isn't a stair riser either. Gray it out so the
-            // display doesn't scream red for a non-issue.
+        } else if dy.abs() <= LIP_MAX {
+            // Near-tread lip: no band, not same-tread, but at or below the
+            // lip cutoff (LIP_MAX = 0.18). A curb, expansion joint, or a
+            // broken decorative stair piece — not a real riser. Gray it out
+            // so the display doesn't scream red for a non-issue.
             Color::srgb(0.55, 0.55, 0.55)
         } else {
             Color::srgb(1.0, 0.2, 0.2)
@@ -3704,7 +3724,7 @@ pub fn update_stair_debug_snapshot_system(
             OrbTag::Green
         } else {
             let dy = *y - dbg.center_y;
-            if dy.abs() < 0.15 {
+            if dy.abs() <= LIP_MAX {
                 count_gray += 1;
                 OrbTag::Gray
             } else {

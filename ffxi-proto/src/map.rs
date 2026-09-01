@@ -5,6 +5,13 @@ pub const MAX_DATAGRAM: usize = 2500;
 pub mod c2s {
     pub const LOGIN: u16 = 0x00A;
 
+    // GP_CLI_COMMAND_CLISTATUS, vendor/server/src/map/packets/c2s/0x061_clistatus.h.
+    // Requests the local player's status block; the server answers with
+    // SendLocalPlayerPackets (charutils.cpp) — s2c GROUP_ATTR (0x0DF) for self +
+    // CLISTATUS + ... This is how a solo player gets its own group entry after
+    // zone-in/login: LSB pushes no 0x0DD/0x0DF to players without a party.
+    pub const CLISTATUS: u16 = 0x061;
+
     pub const GAMEOK: u16 = 0x00C;
     pub const NETEND: u16 = 0x00D;
     pub const ZONE_TRANSITION: u16 = 0x011;

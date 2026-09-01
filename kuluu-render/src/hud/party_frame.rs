@@ -538,7 +538,10 @@ pub fn update_party_frame_system(
 
     let self_member = crate::snapshot::resolve_self(&snap.party, snap.self_char_id);
     let self_zone = self_member.map(|m| m.zone_no);
-    let self_id = self_member.map(|m| m.id);
+    // Prefer the session's own char id over resolve_self's party.first()
+    // fallback: on a zone-in the group list can land before our own entry,
+    // and pulling a stranger into window A as "self" miscolours their row.
+    let self_id = snap.self_char_id.or(self_member.map(|m| m.id));
     let self_pos = snap.self_pos.pos;
 
     // Group members by party_no (0/1/2); self is ALWAYS row 0 of window A,
@@ -564,13 +567,18 @@ pub fn update_party_frame_system(
         .map(|m| m.party_no != ffxi_proto::decode::NO_PARTY)
         .unwrap_or(false);
 
-    // Show/hide window roots. Party A hides when solo unless the debug flag.
+    // Show/hide window roots. This is a client HUD, not XIUI: missing party
+    // data never hides window A — retail hides the frame only while a
+    // map-server transition is in flight (Stage::Zoning), and its first draw
+    // after load is the self row with name + 0/0 until group data lands.
+    let zoning = snap.stage == kuluu_snapshot::Stage::Zoning;
     for (root, mut node) in root_q.iter_mut() {
-        let has_members = !windows[root.party_no as usize].is_empty();
-        let show = if root.party_no == 0 {
-            has_members && (!solo || settings.show_when_solo)
+        let show = if zoning {
+            false
+        } else if root.party_no == 0 {
+            settings.show_when_solo
         } else {
-            has_members
+            !windows[root.party_no as usize].is_empty()
         };
         node.display = if show { Display::Flex } else { Display::None };
     }
@@ -613,8 +621,37 @@ pub fn update_party_frame_system(
                 commands.entity(c).despawn();
             }
         }
-        let members = &windows[host.party_no as usize];
         let is_l1 = layout_for(host.party_no, &settings);
+
+        // Zone-in default draw (retail parity): window A with no group data yet
+        // shows a synthetic self row — name + 0/0 — instead of hiding. The real
+        // entry replaces it the moment group data lands (key change -> rebuild).
+        let synthetic_self;
+        let members: Vec<&kuluu_snapshot::PartyMember> =
+            if host.party_no == 0 && windows[0].is_empty() {
+                synthetic_self = kuluu_snapshot::PartyMember {
+                    id: snap.self_char_id.unwrap_or(0),
+                    act_index: 0,
+                    name: snap.char_name.clone(),
+                    hp: 0,
+                    mp: 0,
+                    tp: 0,
+                    hp_pct: 0,
+                    mp_pct: 0,
+                    zone_no: snap.zone_id.unwrap_or(0),
+                    main_job: 0,
+                    main_job_lv: 0,
+                    sub_job: 0,
+                    sub_job_lv: 0,
+                    is_party_leader: false,
+                    is_alliance_leader: false,
+                    party_no: ffxi_proto::decode::NO_PARTY,
+                    in_mog_house: false,
+                };
+                vec![&synthetic_self]
+            } else {
+                windows[host.party_no as usize].clone()
+            };
 
         // min_rows: keep dimmed placeholder rows under the live members.
         let total_rows = members.len().max(settings.min_rows as usize);
@@ -646,12 +683,17 @@ pub fn update_party_frame_system(
 /// Everything that affects row/title rendering, cheaply comparable. Position
 /// data is deliberately EXCLUDED — distance readouts are updated in place by
 /// update_party_dist_text_system, so movement never triggers a rebuild.
+/// Zone + stage ARE included: a zone-in must force the first default draw even
+/// when the party list looks identical to the previous zone's (or empty), and
+/// Zoning<->InZone flips must re-run the show/hide logic.
 #[derive(Clone, PartialEq)]
 pub struct PartyContentKey {
     party: Vec<kuluu_snapshot::PartyMember>,
     char_name: Option<String>,
     flags: Vec<(u32, kuluu_snapshot::CharFlags)>,
     treasure_nonempty: bool,
+    zone_id: Option<u16>,
+    stage: kuluu_snapshot::Stage,
 }
 
 fn party_content_key(snap: &kuluu_snapshot::SceneSnapshot) -> PartyContentKey {
@@ -671,6 +713,8 @@ fn party_content_key(snap: &kuluu_snapshot::SceneSnapshot) -> PartyContentKey {
         char_name: snap.char_name.clone(),
         flags,
         treasure_nonempty: !snap.treasure_pool.is_empty(),
+        zone_id: snap.zone_id,
+        stage: snap.stage,
     }
 }
 

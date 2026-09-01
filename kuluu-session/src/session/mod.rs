@@ -474,6 +474,18 @@ async fn run_map_session(
             .await?;
         tracing::info!(sub_seq, "sent 0x00C GAMEOK (zone-in)");
     }
+    // c2s 0x061 CLISTATUS: request the local player's status block. The server
+    // answers with SendLocalPlayerPackets — including s2c GROUP_ATTR (0x0DF) for
+    // self, which is the ONLY source of group data on zone-in for a solo player
+    // (LSB pushes no 0x0DD/0x0DF to players without a party). Without this the
+    // party frame would sit on its default 0/0 draw until the next zone.
+    {
+        let payload = build_subpacket_clistatus(sub_seq);
+        sub_seq = sub_seq.wrapping_add(1);
+        map.send_encrypted(&payload, datagram_header_id(sub_seq), server_last_seq)
+            .await?;
+        tracing::info!(sub_seq, "sent 0x061 CLISTATUS (zone-in self status request)");
+    }
     emit_stage(event_tx, Stage::InZone);
     let _ = event_tx.send(AgentEvent::Diagnostics {
         diagnostics: Diagnostics {

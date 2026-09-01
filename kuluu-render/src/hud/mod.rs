@@ -84,6 +84,9 @@ pub struct HudPanels {
     /// Rolling panel-position capture to panelpositions.txt. Runtime-only,
     /// default off so the game never spams a log unasked. No persist.
     pub position_log: bool,
+    /// Party-frame UI Settings panel (Debug menu): layout overrides, bar
+    /// toggles, distance readouts, scale. Runtime-only, no persist.
+    pub ui_settings: bool,
 }
 
 #[derive(Component)]
@@ -236,6 +239,7 @@ impl Plugin for HudPlugin {
         app.init_resource::<check_view::CheckTarget>();
         app.init_resource::<bazaar_view::BazaarScreenState>();
         app.init_resource::<status_panel::StatusProfileOpen>();
+        app.init_resource::<party_frame::PartyFrameSettings>();
 
         app.init_resource::<trade::TradeState>();
 
@@ -289,6 +293,7 @@ impl Plugin for HudPlugin {
                 vana_clock::update_vana_clock,
                 zone_flash::update_zone_flash,
                 party_frame::update_party_frame_system,
+                party_frame::update_ui_settings_system,
                 self_fishing::update_fishing_hud,
                 (
                     status_ribbon::update_status_ribbon,
@@ -387,6 +392,8 @@ impl Plugin for HudPlugin {
         app.add_systems(
             Update,
             (
+                party_frame::party_row_click_system,
+                party_frame::ui_settings_click_system,
                 menu::menu_mouse_hover_system,
                 menu::menu_mouse_click_system,
                 item_screen::item_row_mouse_hover_system,

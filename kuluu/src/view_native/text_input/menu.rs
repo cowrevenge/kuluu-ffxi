@@ -344,7 +344,7 @@ fn toggle_debug_panel(
     use kuluu_render::hud::menu::{
         DEBUG_GRAPHICS_DEBUG, DEBUG_MESH, DEBUG_NAMEPLATES, DEBUG_NET_STATUS, DEBUG_NOCLIP,
         DEBUG_PERF, DEBUG_POSITION_LOG, DEBUG_PRINT_POS, DEBUG_SOUND, DEBUG_STAIR_DRAW,
-        DEBUG_STAIR_STATUS, DEBUG_TARGET_CYCLE,
+        DEBUG_STAIR_STATUS, DEBUG_TARGET_CYCLE, DEBUG_UI_SETTINGS,
     };
 
     // Print Pos is a button, not a toggle: fire and return before the
@@ -396,6 +396,10 @@ fn toggle_debug_panel(
         DEBUG_NAMEPLATES => {
             hud_panels.nameplate_debug = !hud_panels.nameplate_debug;
             hud_panels.nameplate_debug
+        }
+        DEBUG_UI_SETTINGS => {
+            hud_panels.ui_settings = !hud_panels.ui_settings;
+            hud_panels.ui_settings
         }
         DEBUG_NET_STATUS => {
             net_status.0 = !net_status.0;

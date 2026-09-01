@@ -64,7 +64,16 @@ pub fn resolve_equipment_slot(slot_id: u16, race: u8) -> Option<u32> {
     }
     let (thr, base) = chosen?;
     if base == 0 {
-        return None;
+        // Retail clamps a model id past the slot's table to model 0 instead of
+        // dropping the part ("wrong GRP number",
+        // research/XIClient/src/XIClient/source/World/Actor/SkeletalMeshActor.cpp:489-494),
+        // so an out-of-band id renders the slot's base model, never a missing
+        // body part.
+        let (_, first_base) = bps.first()?;
+        if *first_base == 0 {
+            return None;
+        }
+        return Some(*first_base);
     }
     Some(base + id - u32::from(thr))
 }
@@ -559,8 +568,18 @@ pub fn resolve_face(face: u8, race: u8) -> Option<u32> {
     let face_band = PC_MODEL_IDS[(race - 1) as usize][0];
     let base = face_band.first()?.1;
     let count = face_band.get(1).map_or(u16::MAX, |&(thr, _)| thr);
-    if base == 0 || u16::from(face) >= count {
+    if base == 0 {
         return None;
+    }
+    if u16::from(face) >= count {
+        // Retail clamp: an id past the slot's table renders model 0, never a
+        // missing part ("wrong GRP number", research/XIClient/src/XIClient/
+        // source/World/Actor/SkeletalMeshActor.cpp:489-494). For the face slot
+        // that means an out-of-band face byte renders face 0 instead of a
+        // decapitated PC. Loud because it means the server sent a face this
+        // client's tables don't know -- the wrong-face render needs explaining.
+        warn!("face {face} out of band for race {race}: clamping to face 0 (retail behavior)");
+        return Some(base);
     }
     Some(base + u32::from(face))
 }
@@ -682,6 +701,14 @@ pub fn dispatch_look_driven_models(
             let mut equipment: Vec<u32> = Vec::new();
             if let Some(file_id) = resolve_face(face, race) {
                 equipment.push(file_id);
+            } else {
+                // Only reachable for a race outside 1..=8; the face DAT carries
+                // the head and hair, so it must be loud enough for a user's
+                // stderr to explain a decapitated screenshot.
+                warn!(
+                    "pc face unresolved (entity {}): race {} is not a PC race (face {}) -- head/hair will not render",
+                    we.id, race, face
+                );
             }
 
             let slot_models = [head, body, hands, legs, feet, main, sub, ranged];
@@ -878,7 +905,10 @@ mod tests {
 
         assert_eq!(resolve_equipment_slot(0x1260, 1), Some(102961));
 
-        assert_eq!(resolve_equipment_slot(0x12A0, 1), None);
+        // Past the last band: retail clamps to model 0 of the slot ("wrong GRP
+        // number", SkeletalMeshActor.cpp:489-494), so the head slot's base file
+        // comes back instead of a dropped body part.
+        assert_eq!(resolve_equipment_slot(0x12A0, 1), Some(7112));
     }
 
     #[test]
@@ -908,10 +938,12 @@ mod tests {
 
     #[test]
     fn face_band_boundaries() {
-        // 32 face entries (0..31); index 31 is the last face file, 32 collides
-        // with the head slot (HumeM head base 7112).
+        // 32 face entries (0..31); index 31 is the last face file. An
+        // out-of-band face clamps to face 0 the way retail does ("wrong GRP
+        // number", SkeletalMeshActor.cpp:489-494) -- never a decapitated PC.
         assert_eq!(resolve_face(31, 1), Some(7111));
-        assert_eq!(resolve_face(32, 1), None);
+        assert_eq!(resolve_face(32, 1), Some(7080));
+        assert_eq!(resolve_face(255, 5), Some(19784));
         assert_eq!(resolve_equipment_slot(0x1000, 1), Some(7112));
         // Invalid races reject.
         assert_eq!(resolve_face(0, 0), None);

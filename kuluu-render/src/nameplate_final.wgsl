@@ -31,14 +31,15 @@ struct ViewUniform {
 
 // Scene depth of the view this pass draws into. The single-sample variant tests
 // it as a HARDWARE attachment instead and never touches these bindings (the
-// group is simply left unbound); they exist so one pipeline layout serves both
-// variants. Only referenced when MANUAL_DEPTH_TEST is compiled in, i.e. MSAA on:
-// the multi-sample depth buffer cannot sit beside the 1-sample processed color
-// image in one pass, so textureGather reads this pixel's four sub-sampled scene
-// depths (same mechanism bevy's depth-prepass mesh shaders use).
+// group is simply left unbound); the DLSS/upscaler variant skips the test
+// entirely and also leaves them unbound. Only referenced when
+// MANUAL_DEPTH_TEST is compiled in, i.e. MSAA on: the multi-sample depth
+// buffer cannot sit beside the 1-sample processed color image in one pass,
+// so per-sample textureLoad reads this pixel's sub-sampled scene depths
+// (WGSL forbids textureGather on multisampled depth — the only legal read
+// is textureLoad(tex, coord, sample), so each sample gets its own load).
 #ifdef MANUAL_DEPTH_TEST
 @group(1) @binding(0) var scene_depth: texture_depth_multisampled_2d;
-@group(1) @binding(1) var depth_smp: sampler;
 #endif
 
 struct VsOut {
@@ -74,19 +75,47 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     if (in.clip.w <= 0.0) {
         discard;
     }
-    // The four sub-sampled scene depths of this pixel: same encoding as the
-    // plate's own stored value — closer = LARGER (near/d). Any sub-sample nearer
-    // than the plate means opaque geometry occupies part of this pixel, so the
-    // plate hides behind it — mirroring the hardware GreaterEqual test the
-    // attachment variant uses when MSAA is off. Compare distances instead: both
-    // sides divide by the same near (cancels), and gathered values can be 0 at
-    // the far plane, where division would blow up.
-    let d_scene = textureGather(scene_depth, depth_smp, in.uv);
-    if (all(d_scene > vec4<f32>(1e-6))) {
-        let scene_dist = view_u.near / d_scene;          // geometry distance per sub-sample
-        if (any(scene_dist < in.view_dist)) {            // nearer than the plate -> occludes
-            discard;
+    // MSAA sub-sample depths of THIS pixel. WGSL forbids textureGather on
+    // multisampled textures ("Unable to operate on image class Depth {
+    // multi: true }") — the only legal read is textureLoad(tex, coord, sample),
+    // so read each sub-sample explicitly. Bevy's MSAA count (2/4/8) is baked
+    // into the pipeline via the MSAA_SAMPLES_N shader def by the CPU side, so
+    // each variant reads exactly its own samples — no wasted loads, no missing
+    // ones. pix comes from @builtin(position) which is integer pixel indices
+    // in fragment stage. textureLoad needs no sampler, so the depth group is a
+    // single texture binding.
+    let pix = vec2<i32>(in.clip.xy);
+
+    // Sample-count constant, set by exactly one shader def per pipeline
+    // variant. Falls back to 4 (the game's default preset) so a missing def
+    // still compiles into a plausible shader instead of silently killing the
+    // MSAA path.
+    #ifdef MSAA_SAMPLES_8
+    let sample_count: i32 = 8;
+    #else ifdef MSAA_SAMPLES_2
+    let sample_count: i32 = 2;
+    #else
+    let sample_count: i32 = 4;
+    #endif
+
+    // Any sub-sample nearer than the plate means opaque geometry occupies
+    // part of this pixel — hide the plate behind it (same GreaterEqual test
+    // the attachment variant uses). Compare distances (near/d) instead of raw
+    // depth values: both sides divide by the same near (cancels), and a 0
+    // sample at the far plane would blow up the division.
+    var occluded: bool = false;
+    for (var i: i32 = 0; i < sample_count; i = i + 1) {
+        let d = textureLoad(scene_depth, pix, i);
+        if (d > 1e-6) {
+            let scene_dist = view_u.near / d;
+            if (scene_dist < in.view_dist) {
+                occluded = true;
+                break;
+            }
         }
+    }
+    if (occluded) {
+        discard;
     }
     #endif
 

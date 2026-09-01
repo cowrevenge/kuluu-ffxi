@@ -373,6 +373,23 @@ pub fn build_operator_camera(
     if matches!(settings.anti_aliasing, AaMode::Taa) {
         camera.insert(TemporalAntiAliasing::default());
     }
+
+    // DLSS SR replaces both MSAA and TAA (settings.msaa() reports Off for
+    // AaMode::Dlss, and dlss_active() can't be true at the same time as
+    // wants_taa()). The component's #[require] pulls in TemporalJitter,
+    // MipBias, DepthPrepass, MotionVectorPrepass and Hdr automatically. Gated
+    // on dlss_active(), not the raw mode: with the runtime unsupported (or on
+    // a default build, where this block doesn't compile at all) the camera
+    // comes up plain and the menu shows DLSS (N/A).
+    #[cfg(all(not(target_arch = "wasm32"), feature = "dlss"))]
+    if settings.dlss_active() {
+        camera.insert(bevy::anti_alias::dlss::Dlss::<
+            bevy::anti_alias::dlss::DlssSuperResolutionFeature,
+        > {
+            perf_quality_mode: crate::graphics::dlss::to_bevy_quality(settings.dlss_quality),
+            ..Default::default()
+        });
+    }
 }
 
 pub fn chase_camera_system() {

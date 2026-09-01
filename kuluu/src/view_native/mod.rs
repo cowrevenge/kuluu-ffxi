@@ -343,6 +343,18 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
     // Before DefaultPlugins so these pools win get_or_init and TaskPoolPlugin's
     // create_default_pools no-ops (kuluu-3q8t).
     qos::init_task_pools_with_qos();
+    // DLSS init must precede RenderPlugin (inside DefaultPlugins below): the
+    // init plugin registers raw-Vulkan-instance callbacks that RenderPlugin's
+    // build consumes, and it panics without the project id resource in place
+    // first. DlssPlugin itself (the render-graph side) is auto-added by
+    // AntiAliasPlugin under the same feature; whether DLSS actually works is
+    // then reported at runtime via DlssSuperResolutionSupported, which
+    // kuluu-render's availability probe folds into the graphics menu.
+    #[cfg(feature = "dlss")]
+    {
+        app.insert_resource(kuluu_render::graphics::dlss::project_id());
+        app.add_plugins(bevy::anti_alias::dlss::DlssInitPlugin);
+    }
     let mut plugins = DefaultPlugins.set(WindowPlugin {
         primary_window: Some(Window {
             title: format!("kuluu — {server}"),

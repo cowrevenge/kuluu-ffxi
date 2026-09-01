@@ -27,7 +27,7 @@
 //! Occlusion: single-sample views attach the main pass's depth buffer (`StoreOp::Load`,
 //! no re-clear) and test it in hardware; with MSAA on the view's multi-sample depth
 //! buffer cannot sit beside the 1× processed color image, so the fragment shader reads
-//! that pixel's sub-sampled scene depths instead (textureGather over a multisample
+//! that pixel's sub-sampled scene depths instead (per-sample textureLoad over a multisample
 //! `texture_depth_multisampled_2d`, same mechanism bevy's depth-prepass mesh shaders use)
 //! and discards where any of them is nearer. Either way walls occlude plates; the MSAA
 //! read needs the operator camera to carry `TEXTURE_BINDING` on its depth texture usage,
@@ -38,7 +38,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 
 use bevy::asset::{embedded_asset, AssetServer, Handle};
-use bevy::camera::{MainPassResolutionOverride, Viewport};
+use bevy::camera::MainPassResolutionOverride;
 use bevy::core_pipeline::{
     core_3d::CORE_3D_DEPTH_FORMAT, upscaling::upscaling, Core3d, Core3dSystems,
 };
@@ -48,19 +48,14 @@ use bevy::mesh::VertexBufferLayout;
 use bevy::prelude::*;
 use bevy::render::render_resource::{
     binding_types::{
-        sampler as smp_entry,
-        texture_depth_2d_multisampled,
-        texture_2d,
-        uniform_buffer,
+        sampler as smp_entry, texture_2d, texture_depth_2d_multisampled, uniform_buffer,
     },
-    AddressMode, BindGroup, BindGroupEntries, BindGroupLayoutDescriptor, BindGroupLayoutEntries,
-    BlendComponent,
+    BindGroup, BindGroupEntries, BindGroupLayoutDescriptor, BindGroupLayoutEntries, BlendComponent,
     BlendFactor, BlendOperation, BlendState, Buffer, BufferBinding, BufferDescriptor,
     BufferInitDescriptor, BufferUsages, CachedRenderPipelineId, ColorTargetState, ColorWrites,
     CompareFunction, DepthBiasState, DepthStencilState, FragmentState, FrontFace, IndexFormat,
-    FilterMode, MipmapFilterMode, MultisampleState, PipelineCache, PolygonMode, PrimitiveState,
-    PrimitiveTopology, RenderPassDescriptor, RenderPipelineDescriptor, Sampler, SamplerBindingType,
-    SamplerDescriptor, ShaderStages, ShaderType,
+    MultisampleState, PipelineCache, PolygonMode, PrimitiveState, PrimitiveTopology,
+    RenderPassDescriptor, RenderPipelineDescriptor, SamplerBindingType, ShaderStages, ShaderType,
     StencilFaceState, StencilState, StoreOp, TextureFormat, TextureSampleType, VertexFormat,
     VertexState, VertexStepMode,
 };
@@ -126,7 +121,14 @@ fn plate_bgl_descriptor() -> BindGroupLayoutDescriptor {
             ShaderStages::FRAGMENT,
             (
                 uniform_buffer::<PlateUniform>(false).visibility(ShaderStages::VERTEX),
-                uniform_buffer::<ViewUniform>(false).visibility(ShaderStages::VERTEX),
+                // VERTEX_FRAGMENT: vs reads clip_from_world, and the MSAA
+                // manual-depth-test path in fs reads .near to turn stored
+                // reversed-Z depth into a view distance. Was VERTEX-only until
+                // the fragment gained that read — the layout must cover every
+                // stage that touches the binding or wgpu rejects the pipeline
+                // ("group 0 binding 1 not available … visibility flags don't
+                // include the shader stage").
+                uniform_buffer::<ViewUniform>(false).visibility(ShaderStages::VERTEX_FRAGMENT),
                 texture_2d(TextureSampleType::Float { filterable: true }),
                 smp_entry(SamplerBindingType::Filtering),
             ),
@@ -134,7 +136,7 @@ fn plate_bgl_descriptor() -> BindGroupLayoutDescriptor {
     )
 }
 
-// Bind-group entry set for group 1 — the view's scene depth, shared by every plate of a
+// Bind-group entry for group 1 — the view's scene depth, shared by every plate of a
 // tick (one bind group, rebuilt per frame while MSAA is on). The single-sample variant
 // leaves this slot unbound and tests the attached depth buffer in hardware instead.
 fn depth_bgl_descriptor() -> BindGroupLayoutDescriptor {
@@ -142,13 +144,13 @@ fn depth_bgl_descriptor() -> BindGroupLayoutDescriptor {
         "nameplate_final_pass_depth_bgl",
         &BindGroupLayoutEntries::sequential(
             ShaderStages::FRAGMENT,
-            (
-                // Multi-sample scene depth, sampled with textureGather in the fragment
-                // shader (see nameplate_final.wgsl). Pairs with bevy's own prepass BGL
-                // entries for the same buffer.
-                texture_depth_2d_multisampled(),
-                smp_entry(SamplerBindingType::Filtering),
-            ),
+            // Multi-sample scene depth, read with per-sample textureLoad in the
+            // fragment shader (see nameplate_final.wgsl). textureLoad needs no
+            // sampler, so this group is a lone texture binding. Pairs with
+            // bevy's own prepass BGL entry for the same buffer. (One-element
+            // tuple keeps the same `sequential` constructor the rest of the
+            // file uses.)
+            (texture_depth_2d_multisampled(),),
         ),
     )
 }
@@ -160,11 +162,9 @@ pub struct NameplatePassGpu {
     /// Shared between bind groups AND the pipeline descriptor (single source of
     /// truth for the layout shape).
     pub bgl_descriptor: BindGroupLayoutDescriptor,
-    /// Group 1: this view's multi-sample scene depth + its sampler.
+    /// Group 1: this view's multi-sample scene depth (a lone texture — the
+    /// per-sample textureLoad path needs no sampler).
     pub depth_bgl_descriptor: BindGroupLayoutDescriptor,
-    /// Clamp-to-edge nearest — all textureGather needs, and what bevy's SSAO uses for
-    /// exactly this read of the multi-sample depth buffer.
-    pub depth_sampler: Sampler,
     pub vertex_buffer: Buffer,
     pub index_buffer: Buffer,
     /// Written once per frame by the draw system (the current view's clip matrix);
@@ -176,21 +176,6 @@ impl NameplatePassGpu {
     fn new(device: &RenderDevice, asset_server: &AssetServer) -> Self {
         let bgl_descriptor = plate_bgl_descriptor();
         let depth_bgl_descriptor = depth_bgl_descriptor();
-
-        let depth_sampler = device.create_sampler(&SamplerDescriptor {
-            label: Some("nameplate_final_pass_depth"),
-            address_mode_u: AddressMode::ClampToEdge,
-            address_mode_v: AddressMode::ClampToEdge,
-            address_mode_w: AddressMode::ClampToEdge,
-            mag_filter: FilterMode::Nearest,
-            min_filter: FilterMode::Nearest,
-            mipmap_filter: MipmapFilterMode::Nearest,
-            lod_min_clamp: 0.0,
-            lod_max_clamp: 1.0,
-            compare: None,
-            anisotropy_clamp: 1,
-            border_color: None,
-        });
 
         let mut vertex_bytes: Vec<u8> = Vec::with_capacity(PLATE_VERTEX_DATA.len() * 20);
         for v in PLATE_VERTEX_DATA {
@@ -226,7 +211,6 @@ impl NameplatePassGpu {
             shader,
             bgl_descriptor,
             depth_bgl_descriptor,
-            depth_sampler,
             vertex_buffer,
             index_buffer,
             view_uniforms,
@@ -237,26 +221,63 @@ impl NameplatePassGpu {
 /// Pipeline descriptor. Keyed on (target format, whether the scene depth buffer is
 /// attached): this pass always draws single-sample AFTER all effects (the current main
 /// side holds the resolved, processed image) and depth is Bevy's fixed 3D format
-/// everywhere. `with_depth` attaches it for a hardware GreaterEqual test; without it
+/// everywhere. `Hardware` attaches it for a hardware GreaterEqual test; `Gather`
 /// (MSAA on — the multi-sample buffer cannot sit beside a 1× color attachment in one
-/// pass) the MANUAL_DEPTH_TEST shader def moves the same test into the fragment stage,
-/// where textureGather reads the pixel's sub-sampled scene depths. Either way walls
-/// occlude plates; group 1 (the depth binding) is only ever set on the !with_depth run.
+/// pass) compiles the MANUAL_DEPTH_TEST shader def, moving the same test into the
+/// fragment stage where per-sample textureLoad reads the pixel's sub-sampled scene depths.
+/// Either way walls occlude plates; group 1 (the depth binding) is only ever set on
+/// the Gather run. `Unoccluded` skips the depth test entirely: used under an
+/// upscaler (DLSS), where the pass draws into the FULL-RES post-upscale color
+/// target but the depth buffer only holds valid geometry in its render-res
+/// sub-rectangle — a hardware test against that buffer occludes plates against
+/// stale/garbage texels outside the sub-rect and misplaced geometry inside it, so
+/// always-visible is the correct trade until the pass learns to sample the
+/// render-res sub-rect explicitly (scoped in docs/DLSS.md).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum PlateDepthMode {
+    /// Single-sample view: scene depth attached, hardware GreaterEqual.
+    Hardware,
+    /// MSAA view: no attachment, shader-side per-sample textureLoad test (group 1).
+    Gather,
+    /// Upscaled view (MainPassResolutionOverride present): no depth test.
+    Unoccluded,
+}
+
 fn plate_pipeline_descriptor(
     shader: &Handle<Shader>,
     bgl: &BindGroupLayoutDescriptor,
     depth_bgl: &BindGroupLayoutDescriptor,
     target_format: TextureFormat,
-    with_depth: bool,
+    mode: PlateDepthMode,
+    // MSAA sample count — only meaningful when `mode == Gather` (the shader
+    // reads exactly this many sub-samples per pixel via textureLoad, since
+    // WGSL forbids textureGather on multisampled depth). Ignored otherwise.
+    // Bevy's Msaa is 1/2/4/8; the shader falls back to a 4-sample loop if no
+    // MSAA_SAMPLES_N def is set.
+    samples: u32,
 ) -> RenderPipelineDescriptor {
-    // Compiled into the manual-occlusion variant only; the attached-depth variant never
-    // references group 1, so one layout (both groups) serves both. A bare def name is a
-    // Bool(name, true) — exactly what #ifdef MANUAL_DEPTH_TEST in the shader expects.
-    let shader_defs: Vec<bevy::shader::ShaderDefVal> = if with_depth {
-        Vec::new()
-    } else {
-        vec!["MANUAL_DEPTH_TEST".into()]
+    // Compiled into the manual-occlusion variant only; the other two never
+    // reference group 1, so one layout (both groups) serves all three. A bare def
+    // name is a Bool(name, true) — exactly what #ifdef MANUAL_DEPTH_TEST in the
+    // shader expects. Unoccluded is the same shader as Hardware (no defs) minus
+    // the depth attachment: with no ifdef content and no depth state, every
+    // fragment simply passes.
+    let mut shader_defs: Vec<bevy::shader::ShaderDefVal> = match mode {
+        PlateDepthMode::Hardware | PlateDepthMode::Unoccluded => Vec::new(),
+        PlateDepthMode::Gather => vec!["MANUAL_DEPTH_TEST".into()],
     };
+    if matches!(mode, PlateDepthMode::Gather) {
+        // Pick the sample-count def that matches this view. Bevy only ever
+        // reports 1/2/4/8; 2 and 8 need a def, 4 is the shader's fallback so
+        // no def emitted. `samples` is only Gather-relevant (Hardware runs
+        // when samples <= 1, Unoccluded ignores it), so any other value
+        // silently uses the 4-sample fallback rather than panicking.
+        match samples {
+            2 => shader_defs.push("MSAA_SAMPLES_2".into()),
+            8 => shader_defs.push("MSAA_SAMPLES_8".into()),
+            _ => {}
+        }
+    }
     let vertex_layout = VertexBufferLayout::from_vertex_formats(
         VertexStepMode::Vertex,
         [VertexFormat::Float32x3, VertexFormat::Float32x2],
@@ -272,7 +293,16 @@ fn plate_pipeline_descriptor(
 
     RenderPipelineDescriptor {
         label: Some("nameplate_final_pass".into()),
-        layout: vec![bgl.clone(), depth_bgl.clone()],
+        // Only Gather binds group 1 (the multisample depth). Hardware and
+        // Unoccluded leave slot 1 unbound at draw time, so declaring the
+        // depth BGL in their layout makes wgpu reject the draw with "the
+        // current set RenderPipeline expects a BindGroup to be set at index
+        // 1". Layout must match actual bindings, not the union across modes.
+        layout: if matches!(mode, PlateDepthMode::Gather) {
+            vec![bgl.clone(), depth_bgl.clone()]
+        } else {
+            vec![bgl.clone()]
+        },
         immediate_size: 0,
         vertex: VertexState {
             shader: shader.clone(),
@@ -293,7 +323,7 @@ fn plate_pipeline_descriptor(
         // (The old material carried a huge depth_bias for TRANSPARENT-phase sorting;
         // nothing equivalent is needed here — first frame of A/B will confirm no
         // co-planar z-fight against zone geometry.)
-        depth_stencil: if with_depth {
+        depth_stencil: if matches!(mode, PlateDepthMode::Hardware) {
             Some(DepthStencilState {
                 format: CORE_3D_DEPTH_FORMAT,
                 depth_write_enabled: Some(false),
@@ -506,7 +536,6 @@ pub static NAMEPLATE_PASS_DEBUG: Mutex<NameplatePassDebug> = Mutex::new(Nameplat
     prev: NAMEPLATE_SNAP_ZERO,
 });
 
-
 // ---------------------------------------------------------------------------
 // Systems
 // ---------------------------------------------------------------------------
@@ -535,7 +564,9 @@ fn extract_nameplates(
     // Rotate last completed tick into prev; this tick builds a fresh cur.
     let mut hidden = 0u32;
     {
-        let mut dbg = NAMEPLATE_PASS_DEBUG.lock().unwrap_or_else(|p| p.into_inner());
+        let mut dbg = NAMEPLATE_PASS_DEBUG
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         dbg.prev = dbg.cur;
         dbg.frame += 1;
         dbg.cur = NameplateFrameSnap::default();
@@ -568,7 +599,9 @@ fn extract_nameplates(
     }
     data.plates = plates;
     {
-        let mut dbg = NAMEPLATE_PASS_DEBUG.lock().unwrap_or_else(|p| p.into_inner());
+        let mut dbg = NAMEPLATE_PASS_DEBUG
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         dbg.cur.plates_total = data.plates.len() as u32;
         dbg.cur.hidden = hidden;
         dbg.cur.bb_total = bb_debug.total;
@@ -665,7 +698,9 @@ fn prepare_nameplate_bindings(
     }
 
     {
-        let mut dbg = NAMEPLATE_PASS_DEBUG.lock().unwrap_or_else(|p| p.into_inner());
+        let mut dbg = NAMEPLATE_PASS_DEBUG
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         dbg.cur.no_gpu_image = no_gpu_image;
         dbg.cur.not_had_data = not_had_data;
         dbg.cur.bound = bound;
@@ -711,7 +746,7 @@ fn draw_nameplate_final_pass(
     pipeline_cache: Res<PipelineCache>,
     queue: Res<RenderQueue>,
     mut ctx: RenderContext,
-    mut pipe_state: Local<Option<((TextureFormat, bool), CachedRenderPipelineId)>>,
+    mut pipe_state: Local<Option<((TextureFormat, PlateDepthMode, u32), CachedRenderPipelineId)>>,
 ) {
     let (ev, resolution_override, target, depth, msaa) = view.into_inner();
 
@@ -733,9 +768,27 @@ fn draw_nameplate_final_pass(
     // attachment here is count 1 in every mode. Scene depth can only be ATTACHED when the view
     // itself is single-sample — with MSAA on, the multi-sample depth buffer cannot sit beside a
     // 1-sample color attachment in one pass; that variant instead compiles the fragment's
-    // textureGather test against the same buffer (see nameplate_final.wgsl).
+    // per-sample textureLoad test against the same buffer (see nameplate_final.wgsl).
+    //
+    // Under an upscaler (DLSS sets MainPassResolutionOverride) neither test is
+    // sound: this pass runs post-upscale at full res while the depth buffer only
+    // holds valid geometry in its render-res sub-rect (bevy sizes the TEXTURE
+    // from physical_target_size, so no size mismatch — just stale content past
+    // the sub-rect). Depth-testing full-res plates against that gives wrong
+    // occlusion, and the old viewport-override squished plates into the
+    // sub-rect corner of the FULL-res color target. So: no viewport, no depth
+    // test — plates draw unoccluded, at correct screen positions. The mode
+    // check comes first because it decides both pipeline and attachments;
+    // MSAA is forced off under DLSS anyway, but override-first keeps this
+    // correct for any future upscaler that runs multisampled.
     let samples = msaa.map_or(1, Msaa::samples);
-    let with_depth = samples <= 1;
+    let mode = if resolution_override.is_some() {
+        PlateDepthMode::Unoccluded
+    } else if samples > 1 {
+        PlateDepthMode::Gather
+    } else {
+        PlateDepthMode::Hardware
+    };
 
     // Far-to-near in current view space: with premultiplied blending the NEAREST
     // plate must draw LAST, over everything behind it. View-space z is negative
@@ -785,16 +838,22 @@ fn draw_nameplate_final_pass(
         queue_write(&queue, &gpu.view_uniforms, 0, &bytes);
     }
 
-    // Lazily specialize the pipeline for (target format, depth-attached) — one in
+    // Lazily specialize the pipeline for (target format, depth mode) — one in
     // practice each: Rgba16Float with Hdr; the render-scale image path reuses them.
     // Debug mirror: the draw stage reached the operator view this tick.
     {
-        let mut dbg = NAMEPLATE_PASS_DEBUG.lock().unwrap_or_else(|p| p.into_inner());
+        let mut dbg = NAMEPLATE_PASS_DEBUG
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         dbg.cur.reached_draw = true;
         dbg.cur.samples = samples;
     }
 
-    let key = (target.main_texture_format(), with_depth);
+    // Key includes `samples` so cycling MSAA 2x -> 4x -> 8x compiles a fresh
+    // pipeline per level (each variant's sample loop is a compile-time
+    // constant). Hardware/Unoccluded ignore the sample count on the shader
+    // side, but keying on it costs nothing and avoids any special-casing here.
+    let key = (target.main_texture_format(), mode, samples);
     if pipe_state.as_ref().is_none_or(|(k, _)| *k != key) {
         let id = pipeline_cache.queue_render_pipeline(plate_pipeline_descriptor(
             &gpu.shader,
@@ -802,6 +861,7 @@ fn draw_nameplate_final_pass(
             &gpu.depth_bgl_descriptor,
             key.0,
             key.1,
+            key.2,
         ));
         *pipe_state = Some((key, id));
     }
@@ -809,7 +869,9 @@ fn draw_nameplate_final_pass(
 
     let Some(pipeline) = pipeline_cache.get_render_pipeline(pipeline_id) else {
         {
-            let mut dbg = NAMEPLATE_PASS_DEBUG.lock().unwrap_or_else(|p| p.into_inner());
+            let mut dbg = NAMEPLATE_PASS_DEBUG
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
             dbg.cur.draws = 0;
             dbg.cur.pipeline_ready = false;
             dbg.cur.target_fmt = Some(key.0);
@@ -825,7 +887,9 @@ fn draw_nameplate_final_pass(
     // Depth: LOAD what geometry wrote; storing it back keeps later passes seeing
     // the same "already used" state (no re-clear).
     {
-        let mut dbg = NAMEPLATE_PASS_DEBUG.lock().unwrap_or_else(|p| p.into_inner());
+        let mut dbg = NAMEPLATE_PASS_DEBUG
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         dbg.cur.draws = draws.len() as u32;
         dbg.cur.pipeline_ready = true;
         dbg.cur.target_fmt = Some(key.0);
@@ -847,12 +911,12 @@ fn draw_nameplate_final_pass(
     // multi-sample depth buffer. Rebuilt each tick — a single handle, and it tracks
     // target/MSAA changes without any cache bookkeeping. It lives to the end of the
     // function because the tracked pass retains every binding set on it until its scope.
-    let depth_bg = if !with_depth {
+    let depth_bg = if matches!(mode, PlateDepthMode::Gather) {
         let bgl = pipeline_cache.get_bind_group_layout(&gpu.depth_bgl_descriptor);
         Some(device.create_bind_group(
             "nameplate_final_pass_depth_binding",
             &bgl,
-            &BindGroupEntries::sequential((depth.view(), &gpu.depth_sampler)),
+            &BindGroupEntries::sequential((depth.view(),)),
         ))
     } else {
         None
@@ -861,9 +925,10 @@ fn draw_nameplate_final_pass(
     let mut pass = ctx.begin_tracked_render_pass(RenderPassDescriptor {
         label: Some("nameplate_final_pass"),
         color_attachments: &[Some(target.get_unsampled_color_attachment())],
-        // Single-sample views test this buffer in hardware; MSAA-on views leave it out of
-        // the pass and run the shader-side gather test instead (see `with_depth`).
-        depth_stencil_attachment: if with_depth {
+        // Single-sample views test this buffer in hardware; MSAA-on views leave it out
+        // of the pass and run the shader-side gather test; upscaled views leave it out
+        // and skip the test entirely (see `PlateDepthMode`).
+        depth_stencil_attachment: if matches!(mode, PlateDepthMode::Hardware) {
             Some(depth.get_attachment(StoreOp::Store))
         } else {
             None
@@ -873,12 +938,11 @@ fn draw_nameplate_final_pass(
         multiview_mask: None,
     });
 
-    if let Some(override_size) = resolution_override {
-        if let Some(viewport) = Viewport::from_viewport_and_override(None, Some(override_size)) {
-            pass.set_camera_viewport(&viewport);
-        }
-    }
-
+    // Deliberately NO viewport here in any mode: this pass positions plates in
+    // the CURRENT (post-upscale) target's clip space, so under DLSS the old
+    // MainPassResolutionOverride viewport squished every plate into the
+    // render-res corner of the full-res image. Non-upscaled views never had an
+    // override, making the removed block a no-op for them.
     pass.set_render_pipeline(pipeline);
 
     if let Some(bg) = &depth_bg {
@@ -1024,9 +1088,9 @@ mod tests {
         // World-space plate centers; under this view each maps to z_view = −x,
         // so x=50 is farthest (most-negative), x=1 nearest.
         let mut plates = vec![
-            P(0, Vec3::new(1.0, 0.0, 0.0)),   // view z -1   (nearest)
-            P(1, Vec3::new(50.0, 0.0, 0.0)),  // view z -50  (farthest)
-            P(2, Vec3::new(20.0, 0.0, 0.0)),  // view z -20
+            P(0, Vec3::new(1.0, 0.0, 0.0)),  // view z -1   (nearest)
+            P(1, Vec3::new(50.0, 0.0, 0.0)), // view z -50  (farthest)
+            P(2, Vec3::new(20.0, 0.0, 0.0)), // view z -20
         ];
         plates.sort_by(|a, b| {
             let za = view_from_world * a.1.extend(1.0);

@@ -20,6 +20,20 @@ fn apply_graphics_cycle(cursor: usize, delta: i32, graphics: &mut kuluu_render::
     }
 }
 
+/// Same shape for the DLSS Config submenu: slot -> DLSS_CONFIG_FIELDS. The
+/// reset row sits one past the fields and is handled by the caller, so a
+/// cursor there is a no-op here (get returns None), matching apply_graphics_cycle.
+fn apply_graphics_dlss_cycle(
+    cursor: usize,
+    delta: i32,
+    graphics: &mut kuluu_render::GraphicsSettings,
+) {
+    use kuluu_render::graphics_settings::DLSS_CONFIG_FIELDS;
+    if let Some(&field) = DLSS_CONFIG_FIELDS.get(cursor) {
+        graphics.cycle(field, delta);
+    }
+}
+
 fn resolve_menu_entry(kind: MenuKind, label: &str) -> MenuDispatch {
     use kuluu_render::hud::menu::{COMM_EMOTE_LIST, ROOT_LOG_OUT, ROOT_SHUT_DOWN};
     match (kind, label) {
@@ -180,8 +194,20 @@ pub(super) fn confirm_menu_at_cursor(
         if cursor == kuluu_render::hud::menu::GRAPHICS_RESET_SLOT {
             graphics.reset_to_default();
             push_system_chat_line(scene_state, "[menu] Graphics reset to High".into());
+        } else if cursor == kuluu_render::hud::menu::GRAPHICS_DLSS_CONFIG_SLOT {
+            stack.push(MenuKind::GraphicsDlss);
         } else {
             apply_graphics_cycle(cursor, 1, graphics);
+        }
+        return None;
+    }
+
+    if matches!(kind, MenuKind::GraphicsDlss) {
+        if cursor == kuluu_render::hud::menu::GRAPHICS_DLSS_RESET_SLOT {
+            graphics.reset_dlss_config();
+            push_system_chat_line(scene_state, "[menu] DLSS config reset to defaults".into());
+        } else {
+            apply_graphics_dlss_cycle(cursor, 1, graphics);
         }
         return None;
     }
@@ -567,6 +593,17 @@ pub(super) fn handle_menu_key(
         }
         if bindings.matches_logical(Action::NavRight, key) {
             apply_graphics_cycle(cursor, 1, graphics);
+            return None;
+        }
+    }
+
+    if matches!(kind, MenuKind::GraphicsDlss) {
+        if bindings.matches_logical(Action::NavLeft, key) {
+            apply_graphics_dlss_cycle(cursor, -1, graphics);
+            return None;
+        }
+        if bindings.matches_logical(Action::NavRight, key) {
+            apply_graphics_dlss_cycle(cursor, 1, graphics);
             return None;
         }
     }

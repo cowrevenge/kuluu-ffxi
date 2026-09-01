@@ -66,6 +66,12 @@ trace = ["bevy/trace_chrome", "dep:tracing-chrome"]
 # Combine with native-window, e.g.:
 #   cargo run -p kuluu --features=native-window,relay,dynamic_linking
 dynamic_linking = ["bevy/dynamic_linking"]
+# NVIDIA DLSS Super Resolution. Implies the native viewer (DLSS is meaningless
+# without a window) and lights up the DLSS rows in both graphics menus when the
+# runtime supports it. Build-time requirements (DLSS SDK + Vulkan SDK + clang,
+# DLSS_SDK env var) and the runtime DLL story live in docs/DLSS.md. Typical:
+#   cargo run -p kuluu --features=native-window,dlss
+dlss = ["native-window", "kuluu-render/dlss", "bevy/dlss"]
 
 [dependencies]
 kuluu-session = { path = "../kuluu-session" }

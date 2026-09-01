@@ -1,6 +1,6 @@
 use bevy::prelude::*;
 
-use crate::graphics_settings::{GraphicsSettings, GRAPHICS_FIELDS};
+use crate::graphics_settings::{GraphicsSettings, DLSS_CONFIG_FIELDS, GRAPHICS_FIELDS};
 use crate::hud::style::{self, theme};
 use crate::input_mode::{InputMode, MenuKind, MenuStack};
 
@@ -261,7 +261,7 @@ pub const DEBUG_NET_STATUS: &str = "Net Status";
 pub const DEBUG_NOCLIP: &str = "NoClip";
 pub const DEBUG_SOUND: &str = "Sound";
 pub const DEBUG_VOLUME: &str = "Volume";
-pub const DEBUG_PRINT_POS: &str = "Enter";
+pub const DEBUG_PRINT_POS: &str = "Print POS";
 pub const DEBUG_STAIR_DRAW: &str = "Draw Stair Climber";
 pub const DEBUG_STAIR_STATUS: &str = "Show Stair Status";
 pub const DEBUG_GRAPHICS_DEBUG: &str = "Graphics Debug";
@@ -297,6 +297,7 @@ const GRAPHICS_ENTRIES: &[&str] = &[
     "Menu Scale",
     "Camera Spring",
     "Anti-Aliasing",
+    "DLSS",
     "Texture Filtering",
     "Shadow Quality",
     "Shadow Cascades",
@@ -317,10 +318,32 @@ const GRAPHICS_ENTRIES: &[&str] = &[
     "Shading",
     "Model Shadow Receiving",
     "Model Shadow Casting",
+    "DLSS Config",
     "Reset to High",
 ];
 
-pub const GRAPHICS_RESET_SLOT: usize = GRAPHICS_FIELDS.len();
+/// Slot of the "DLSS Config" row: first row past the cyclable fields; pushes
+/// `MenuKind::GraphicsDlss` instead of cycling (text_input::menu special-cases
+/// it exactly like the reset row below it).
+pub const GRAPHICS_DLSS_CONFIG_SLOT: usize = GRAPHICS_FIELDS.len();
+
+pub const GRAPHICS_RESET_SLOT: usize = GRAPHICS_FIELDS.len() + 1;
+
+/// In-game DLSS Config submenu rows: the DLSS_CONFIG_FIELDS labels plus a
+/// reset row. Kept in lockstep by the graphics_dlss_entries_match_fields
+/// guard test.
+const GRAPHICS_DLSS_ENTRIES: &[&str] = &[
+    "DLSS Quality",
+    "RR Preset",
+    "SR Preset",
+    "RR Responsivity",
+    "Neural Uplift",
+    "Sharpness",
+    "Reset DLSS to defaults",
+];
+
+/// Slot of "Reset DLSS to defaults": first row past the DLSS config fields.
+pub const GRAPHICS_DLSS_RESET_SLOT: usize = DLSS_CONFIG_FIELDS.len();
 
 const MAX_ENTRY_COUNT: usize = {
     let r = ROOT_ENTRIES.len();
@@ -329,10 +352,13 @@ const MAX_ENTRY_COUNT: usize = {
     let e = EQUIPMENT_ENTRIES.len();
     let s = STATUS_LABELS.len();
 
+    let gd = GRAPHICS_DLSS_ENTRIES.len();
+
     let d = DYNAMIC_VISIBLE_ROWS;
     let rc = if r >= c { r } else { c };
     let rcg = if rc >= g { rc } else { g };
-    let rcge = if rcg >= e { rcg } else { e };
+    let rcgd = if rcg >= gd { rcg } else { gd };
+    let rcge = if rcgd >= e { rcgd } else { e };
     let rcges = if rcge >= s { rcge } else { s };
     if rcges >= d {
         rcges
@@ -474,6 +500,7 @@ fn static_entries(kind: MenuKind) -> &'static [&'static str] {
 
         MenuKind::Communication => COMMUNICATION_ENTRIES,
         MenuKind::EmoteList => &[],
+        MenuKind::GraphicsDlss => GRAPHICS_DLSS_ENTRIES,
         // The Map screen renders its own bespoke panes; it has no generic list.
         MenuKind::Map => &[],
     }
@@ -496,6 +523,7 @@ pub fn menu_title(kind: MenuKind) -> &'static str {
         MenuKind::EquipSlot(_) => "Equip",
         MenuKind::Communication => "Communication",
         MenuKind::EmoteList => "Emote List",
+        MenuKind::GraphicsDlss => "DLSS Config",
         MenuKind::Map => "Map",
     }
 }
@@ -565,7 +593,7 @@ pub const GRAPHICS_PANE_WIDTH: f32 = 320.0;
 
 fn pane_width_for(kind: MenuKind) -> f32 {
     match kind {
-        MenuKind::Graphics => GRAPHICS_PANE_WIDTH,
+        MenuKind::Graphics | MenuKind::GraphicsDlss => GRAPHICS_PANE_WIDTH,
         _ => MENU_PANE_WIDTH,
     }
 }
@@ -1303,10 +1331,25 @@ fn format_row_body(
 
             None => label.to_string(),
         },
+        MenuKind::GraphicsDlss => match DLSS_CONFIG_FIELDS.get(slot).copied() {
+            Some(field) => format!(
+                "{:<16}[{}]",
+                format!("{}:", field.label()),
+                settings.value_label(field)
+            ),
+
+            // The trailing reset action row.
+            None => label.to_string(),
+        },
         MenuKind::Debug => {
             // Volume is a 0..=100 number row, not an on/off toggle.
             if label == DEBUG_VOLUME {
                 format!("{label:<14}[{master_pct:>3}]")
+            } else if label == DEBUG_PRINT_POS {
+                // A button, not a toggle: Enter fires it (prints self coords
+                // to system chat), so the value column says what Enter does
+                // instead of a stateless [off].
+                format!("{label:<14}[enter]")
             } else {
                 let on = debug_panel_state(label, panels, net_status_on, sound_on);
                 format!("{label:<14}[{}]", if on { "on" } else { "off" })
@@ -1344,7 +1387,9 @@ pub fn debug_panel_state(
         DEBUG_GRAPHICS_DEBUG => panels.graphics_debug,
         DEBUG_POSITION_LOG => panels.position_log,
         DEBUG_NAMEPLATES => panels.nameplate_debug,
-        // Print Pos is a button, not a toggle — always shows [off].
+        // Print POS is a button, not a toggle — it never reads on/off (the
+        // row formatter shows [enter] for it); false here is just the
+        // don't-care default for any label without panel state.
         _ => false,
     }
 }
@@ -2008,8 +2053,8 @@ mod tests {
     fn graphics_entries_match_field_labels() {
         assert_eq!(
             GRAPHICS_ENTRIES.len(),
-            GRAPHICS_FIELDS.len() + 1,
-            "expected one row per field + a trailing Reset row"
+            GRAPHICS_FIELDS.len() + 2,
+            "expected one row per field + trailing DLSS Config and Reset rows"
         );
         for (i, field) in GRAPHICS_FIELDS.iter().enumerate() {
             assert_eq!(
@@ -2021,8 +2066,36 @@ mod tests {
             );
         }
         assert_eq!(
+            GRAPHICS_ENTRIES[GRAPHICS_DLSS_CONFIG_SLOT], "DLSS Config",
+            "the first slot past the fields must open the DLSS submenu"
+        );
+        assert_eq!(
             GRAPHICS_ENTRIES[GRAPHICS_RESET_SLOT], "Reset to High",
-            "the slot past the last field must be the Reset action"
+            "the last slot must be the Reset action"
+        );
+    }
+
+    #[test]
+    fn graphics_dlss_entries_match_fields() {
+        assert_eq!(
+            GRAPHICS_DLSS_ENTRIES.len(),
+            DLSS_CONFIG_FIELDS.len() + 1,
+            "expected one row per DLSS config field + a trailing reset row"
+        );
+        for (i, field) in DLSS_CONFIG_FIELDS.iter().enumerate() {
+            assert_eq!(
+                GRAPHICS_DLSS_ENTRIES[i],
+                field.label(),
+                "row {i} label drift"
+            );
+        }
+        assert_eq!(
+            GRAPHICS_DLSS_ENTRIES[GRAPHICS_DLSS_RESET_SLOT],
+            "Reset DLSS to defaults"
+        );
+        assert!(
+            DLSS_CONFIG_FIELDS.iter().all(|f| f.is_dlss_config()),
+            "every submenu row must be flagged is_dlss_config"
         );
     }
 

@@ -49,6 +49,13 @@ pub enum AaMode {
     Msaa8,
 
     Taa,
+
+    /// NVIDIA DLSS Super Resolution: upscaling + anti-aliasing in one. Only
+    /// reachable in the cycler when `dlss_supported` (runtime capability, set
+    /// by `graphics::dlss` on dlss-feature builds); the variant itself is
+    /// unconditional so a graphics.json written by a dlss build still
+    /// deserializes on a default build (where it behaves as Off).
+    Dlss,
 }
 
 impl AaMode {
@@ -59,6 +66,38 @@ impl AaMode {
             AaMode::Msaa4 => "MSAA 4x",
             AaMode::Msaa8 => "MSAA 8x",
             AaMode::Taa => "TAA",
+            AaMode::Dlss => "DLSS",
+        }
+    }
+}
+
+/// DLSS Super Resolution performance/quality tier. Mirrors
+/// `dlss_wgpu::DlssPerfQualityMode` one-to-one (mapping lives in
+/// `graphics::dlss`, dlss-feature builds only); defined unconditionally so the
+/// persisted graphics.json round-trips on default builds too.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum DlssQuality {
+    /// Let DLSS pick a tier from the output resolution (NVIDIA's
+    /// recommendation and dlss_wgpu's default).
+    #[default]
+    Auto,
+    /// Anti-aliasing only, no upscaling (native-res DLSS).
+    Dlaa,
+    Quality,
+    Balanced,
+    Performance,
+    UltraPerformance,
+}
+
+impl DlssQuality {
+    pub const fn label(self) -> &'static str {
+        match self {
+            DlssQuality::Auto => "Auto",
+            DlssQuality::Dlaa => "DLAA",
+            DlssQuality::Quality => "Quality",
+            DlssQuality::Balanced => "Balanced",
+            DlssQuality::Performance => "Performance",
+            DlssQuality::UltraPerformance => "Ultra Perf",
         }
     }
 }
@@ -216,6 +255,28 @@ pub enum GraphicsField {
     ZoneLineDisplay,
 
     RenderScale,
+
+    /// DLSS on/off toggle in the main graphics list (a mirror of
+    /// `anti_aliasing == AaMode::Dlss`; N/A while unsupported).
+    Dlss,
+
+    // --- DLSS Config submenu rows (DLSS_CONFIG_FIELDS, not GRAPHICS_FIELDS) ---
+    /// SR performance/quality tier — the one live knob.
+    DlssQuality,
+    /// Ray Reconstruction preset. Inert placeholder: bevy_anti_alias 0.19
+    /// exposes SR only, no RR plumbing. Always "N/A".
+    DlssRrPreset,
+    /// Super Resolution model preset (RenoDX-style J/K/L/M). Inert:
+    /// dlss_wgpu 4.0 doesn't surface preset selection. Always "N/A".
+    DlssSrPreset,
+    /// RR responsivity bias. Inert (RR itself unavailable). Always "N/A".
+    DlssRrResponsivity,
+    /// DLSS neural uplift master toggle. Inert: needs nvngx_dlssnr plumbing
+    /// that doesn't exist in bevy/dlss_wgpu. Always "N/A".
+    DlssNeuralUplift,
+    /// Post-upscale sharpening. Wireable later via bevy's
+    /// ContrastAdaptiveSharpening; shipped inert for now. Always "N/A".
+    DlssSharpness,
 }
 
 impl GraphicsField {
@@ -252,7 +313,43 @@ impl GraphicsField {
             GraphicsField::DofAperture => "DoF Aperture",
             GraphicsField::ZoneLineDisplay => "Zone Lines",
             GraphicsField::RenderScale => "Render Scale",
+            GraphicsField::Dlss => "DLSS",
+            GraphicsField::DlssQuality => "DLSS Quality",
+            GraphicsField::DlssRrPreset => "RR Preset",
+            GraphicsField::DlssSrPreset => "SR Preset",
+            GraphicsField::DlssRrResponsivity => "RR Responsivity",
+            GraphicsField::DlssNeuralUplift => "Neural Uplift",
+            GraphicsField::DlssSharpness => "Sharpness",
         }
+    }
+
+    /// Rows that live in the DLSS Config surface (a pushed submenu in-game, a
+    /// disclosure in the launcher) rather than the main graphics list.
+    pub const fn is_dlss_config(self) -> bool {
+        matches!(
+            self,
+            GraphicsField::DlssQuality
+                | GraphicsField::DlssRrPreset
+                | GraphicsField::DlssSrPreset
+                | GraphicsField::DlssRrResponsivity
+                | GraphicsField::DlssNeuralUplift
+                | GraphicsField::DlssSharpness
+        )
+    }
+
+    /// The inert RenoDX-parity placeholders: visible so the config surface
+    /// shows what's planned, but nothing behind them until the SDK plumbing
+    /// (RR / presets / neural uplift / CAS) exists. value_label = "N/A",
+    /// cycle = no-op, on every build.
+    pub const fn is_dlss_placeholder(self) -> bool {
+        matches!(
+            self,
+            GraphicsField::DlssRrPreset
+                | GraphicsField::DlssSrPreset
+                | GraphicsField::DlssRrResponsivity
+                | GraphicsField::DlssNeuralUplift
+                | GraphicsField::DlssSharpness
+        )
     }
 
     /// Fine-tuning knobs hidden behind the "Advanced" disclosure: the
@@ -284,6 +381,22 @@ pub struct GraphicsSettings {
     pub shadow_cascade_count: u32,
     pub shadow_max_distance: f32,
     pub anti_aliasing: AaMode,
+
+    /// DLSS SR quality tier, applied whenever `anti_aliasing == AaMode::Dlss`.
+    /// Persisted independently of the on/off state so toggling DLSS off and on
+    /// keeps the chosen tier. NOT owned by quality presets — preset cycling
+    /// carries it over untouched.
+    #[serde(default)]
+    pub dlss_quality: DlssQuality,
+
+    /// Runtime capability: true only when the dlss cargo feature is compiled
+    /// in AND the renderer initialized DLSS on this machine (RTX GPU + Vulkan
+    /// + the NVIDIA snippet DLLs present). Set once at startup by
+    /// `graphics::dlss::update_dlss_availability_system`; never persisted.
+    /// Everything user-facing keys off this: the AA cycler only offers DLSS,
+    /// and the DLSS rows only cycle, while it is true.
+    #[serde(skip)]
+    pub dlss_supported: bool,
 
     #[serde(default)]
     pub texture_filtering: TextureFiltering,
@@ -477,6 +590,31 @@ const AA_SLOTS: &[AaMode] = &[
 #[cfg(target_arch = "wasm32")]
 const AA_SLOTS: &[AaMode] = &[AaMode::Off, AaMode::Msaa2, AaMode::Msaa4, AaMode::Msaa8];
 
+// The cycler used instead of AA_SLOTS while `dlss_supported`: same list with
+// DLSS appended, so the mode shows up as one more mutually-exclusive AA choice
+// (native only — DLSS is Vulkan/RTX, wasm never supports it).
+#[cfg(not(target_arch = "wasm32"))]
+const AA_SLOTS_DLSS: &[AaMode] = &[
+    AaMode::Off,
+    AaMode::Msaa2,
+    AaMode::Msaa4,
+    AaMode::Msaa8,
+    AaMode::Taa,
+    AaMode::Dlss,
+];
+
+#[cfg(target_arch = "wasm32")]
+const AA_SLOTS_DLSS: &[AaMode] = AA_SLOTS;
+
+const DLSS_QUALITY_SLOTS: &[DlssQuality] = &[
+    DlssQuality::Auto,
+    DlssQuality::Dlaa,
+    DlssQuality::Quality,
+    DlssQuality::Balanced,
+    DlssQuality::Performance,
+    DlssQuality::UltraPerformance,
+];
+
 const PRESET_CYCLE: &[QualityPreset] = &[
     QualityPreset::Low,
     QualityPreset::Medium,
@@ -529,6 +667,8 @@ impl GraphicsSettings {
                 shadow_cascade_count: 2,
                 shadow_max_distance: 200.0,
                 anti_aliasing: AaMode::Off,
+                dlss_quality: DlssQuality::Auto,
+                dlss_supported: false,
                 texture_filtering: TextureFiltering::Vanilla,
                 bloom_intensity: 0.0,
                 volumetric_fog: false,
@@ -563,6 +703,8 @@ impl GraphicsSettings {
                 shadow_cascade_count: 3,
                 shadow_max_distance: 300.0,
                 anti_aliasing: aa_default,
+                dlss_quality: DlssQuality::Auto,
+                dlss_supported: false,
                 texture_filtering: TextureFiltering::Vanilla,
                 bloom_intensity: 0.08,
                 volumetric_fog: false,
@@ -597,6 +739,8 @@ impl GraphicsSettings {
                 shadow_cascade_count: 4,
                 shadow_max_distance: 700.0,
                 anti_aliasing: aa_default,
+                dlss_quality: DlssQuality::Auto,
+                dlss_supported: false,
                 texture_filtering: TextureFiltering::Aniso4x,
                 bloom_intensity: 0.08,
                 volumetric_fog: false,
@@ -635,6 +779,8 @@ impl GraphicsSettings {
                 // pass. No preset should silently pay that — the prepass is opt-in
                 // via Depth of Field only. TAA stays available as a manual choice.
                 anti_aliasing: AaMode::Msaa8,
+                dlss_quality: DlssQuality::Auto,
+                dlss_supported: false,
                 texture_filtering: TextureFiltering::Aniso8x,
                 bloom_intensity: 0.12,
                 volumetric_fog: false,
@@ -685,7 +831,15 @@ impl GraphicsSettings {
             GraphicsField::ShadowMapSize => format!("{}px", self.shadow_map_size),
             GraphicsField::ShadowCascadeCount => format!("{}", self.shadow_cascade_count),
             GraphicsField::ShadowMaxDistance => format!("{:.0}m", self.shadow_max_distance),
-            GraphicsField::AntiAliasing => self.anti_aliasing.label().to_string(),
+            GraphicsField::AntiAliasing => {
+                // A json written by a dlss build can land us on Dlss while this
+                // machine/build can't do it; say so instead of a bare "DLSS".
+                if matches!(self.anti_aliasing, AaMode::Dlss) && !self.dlss_supported {
+                    "DLSS (N/A)".to_string()
+                } else {
+                    self.anti_aliasing.label().to_string()
+                }
+            }
             GraphicsField::TextureFiltering => self.texture_filtering.label().to_string(),
             GraphicsField::BloomIntensity => {
                 if self.bloom_intensity <= 1e-3 {
@@ -736,7 +890,37 @@ impl GraphicsSettings {
             GraphicsField::DepthOfField => bool_label(self.depth_of_field).into(),
             GraphicsField::DofAperture => format!("f/{:.1}", self.dof_aperture_f_stops),
             GraphicsField::ZoneLineDisplay => self.zone_line_display.label().to_string(),
-            GraphicsField::RenderScale => format!("{:.0}%", self.render_scale * 100.0),
+            GraphicsField::RenderScale => {
+                if self.dlss_active() {
+                    // DLSS owns internal resolution (the quality tier picks
+                    // it); the manual scale is parked until DLSS is off.
+                    "DLSS".to_string()
+                } else {
+                    format!("{:.0}%", self.render_scale * 100.0)
+                }
+            }
+            GraphicsField::Dlss => {
+                if !self.dlss_supported {
+                    "N/A".to_string()
+                } else if matches!(self.anti_aliasing, AaMode::Dlss) {
+                    "On".to_string()
+                } else {
+                    "Off".to_string()
+                }
+            }
+            GraphicsField::DlssQuality => {
+                if self.dlss_supported {
+                    self.dlss_quality.label().to_string()
+                } else {
+                    "N/A".to_string()
+                }
+            }
+            // Inert placeholders: grayed on every build (see is_dlss_placeholder).
+            GraphicsField::DlssRrPreset
+            | GraphicsField::DlssSrPreset
+            | GraphicsField::DlssRrResponsivity
+            | GraphicsField::DlssNeuralUplift
+            | GraphicsField::DlssSharpness => "N/A".to_string(),
         }
     }
 
@@ -755,6 +939,13 @@ impl GraphicsSettings {
                 let zld = self.zone_line_display;
                 let vsync = self.vsync;
                 let fps_cap = self.fps_cap;
+                // Presets never own DLSS (kuluu decision, 2026-09): no preset
+                // turns it on, and picking a preset doesn't turn it off. The
+                // preset's own anti_aliasing applies only when DLSS wasn't the
+                // active mode going in — same carry-over class as VSync.
+                let was_dlss = matches!(self.anti_aliasing, AaMode::Dlss);
+                let dlss_quality = self.dlss_quality;
+                let dlss_supported = self.dlss_supported;
                 let next =
                     cycle_slot(self.preset, PRESET_CYCLE, delta).unwrap_or(QualityPreset::High);
                 *self = Self::for_preset(next);
@@ -768,6 +959,11 @@ impl GraphicsSettings {
                 self.zone_line_display = zld;
                 self.vsync = vsync;
                 self.fps_cap = fps_cap;
+                self.dlss_quality = dlss_quality;
+                self.dlss_supported = dlss_supported;
+                if was_dlss {
+                    self.anti_aliasing = AaMode::Dlss;
+                }
             }
             GraphicsField::ShadowMapSize => {
                 self.shadow_map_size =
@@ -785,8 +981,19 @@ impl GraphicsSettings {
                 self.preset = QualityPreset::Custom;
             }
             GraphicsField::AntiAliasing => {
+                // DLSS appears as one more cycler slot only while the runtime
+                // supports it. When a dlss-build json lands us on Dlss on a
+                // machine/build without support, the current value isn't in the
+                // plain list; cycle_slot treats an unknown current as slot 0,
+                // so one click lands on a real mode — cycling away always
+                // works, the row just can't cycle back onto DLSS.
+                let slots = if self.dlss_supported {
+                    AA_SLOTS_DLSS
+                } else {
+                    AA_SLOTS
+                };
                 self.anti_aliasing =
-                    cycle_slot(self.anti_aliasing, AA_SLOTS, delta).unwrap_or(AaMode::Msaa4);
+                    cycle_slot(self.anti_aliasing, slots, delta).unwrap_or(AaMode::Msaa4);
                 self.preset = QualityPreset::Custom;
             }
             GraphicsField::TextureFiltering => {
@@ -894,14 +1101,65 @@ impl GraphicsSettings {
                         .unwrap_or(ZoneLineDisplay::Off);
             }
             GraphicsField::RenderScale => {
+                // DLSS owns internal resolution while active; the row reads
+                // "DLSS" (value_label) and refuses to move so the stored scale
+                // can't silently drift under it.
+                if self.dlss_active() {
+                    return;
+                }
                 self.render_scale = cycle_slot_f32(self.render_scale, RENDER_SCALE_SLOTS, delta);
                 self.preset = QualityPreset::Custom;
             }
+            GraphicsField::Dlss => {
+                // On/Off mirror of anti_aliasing == Dlss. Refuses while
+                // unsupported (the row reads "N/A"), so both menu surfaces get
+                // the gray-out from this one spot. Turning DLSS off lands on
+                // AA Off — the user re-picks MSAA/TAA in the cycler if wanted.
+                if !self.dlss_supported {
+                    return;
+                }
+                self.anti_aliasing = if matches!(self.anti_aliasing, AaMode::Dlss) {
+                    AaMode::Off
+                } else {
+                    AaMode::Dlss
+                };
+                self.preset = QualityPreset::Custom;
+            }
+            GraphicsField::DlssQuality => {
+                if !self.dlss_supported {
+                    return;
+                }
+                self.dlss_quality = cycle_slot(self.dlss_quality, DLSS_QUALITY_SLOTS, delta)
+                    .unwrap_or(DlssQuality::Auto);
+                // A quality-tier change flows into the live camera via the AA
+                // respawn key (apply_anti_aliasing_system); no preset reset —
+                // like VSync, this is a display/perf preference, and presets
+                // never own DLSS state.
+            }
+            // Inert placeholders: nothing behind them yet, cycling is a no-op
+            // on every build (the row reads "N/A").
+            GraphicsField::DlssRrPreset
+            | GraphicsField::DlssSrPreset
+            | GraphicsField::DlssRrResponsivity
+            | GraphicsField::DlssNeuralUplift
+            | GraphicsField::DlssSharpness => {}
         }
     }
 
     pub fn reset_to_default(&mut self) {
+        // Capability is runtime-detected, not a preference: a menu reset must
+        // not un-detect DLSS support (the availability system only writes it
+        // once at startup).
+        let dlss_supported = self.dlss_supported;
         *self = Self::for_preset(QualityPreset::High);
+        self.dlss_supported = dlss_supported;
+    }
+
+    /// Reset only the DLSS Config surface: quality back to Auto. The inert
+    /// placeholders have no state to reset; on/off (the AA mode) is a main-list
+    /// concern and stays put.
+    pub fn reset_dlss_config(&mut self) {
+        self.dlss_quality = DlssQuality::Auto;
     }
 
     // Retail outputs colour directly with no filmic tonemap; a filmic curve desaturates
@@ -919,7 +1177,11 @@ impl GraphicsSettings {
 
     pub fn msaa(&self) -> Msaa {
         match self.anti_aliasing {
-            AaMode::Off | AaMode::Taa => Msaa::Off,
+            // Dlss: the DLSS pass is the anti-aliasing — multisampling under it
+            // would burn fill for samples the upscaler ignores. (When Dlss is
+            // set but unsupported this also means no AA, which the menu makes
+            // visible as "DLSS (N/A)" so the user knows to cycle away.)
+            AaMode::Off | AaMode::Taa | AaMode::Dlss => Msaa::Off,
             AaMode::Msaa2 => Msaa::Sample2,
             AaMode::Msaa4 => Msaa::Sample4,
             AaMode::Msaa8 => Msaa::Sample8,
@@ -930,6 +1192,14 @@ impl GraphicsSettings {
         matches!(self.anti_aliasing, AaMode::Taa)
     }
 
+    /// DLSS is chosen AND this build/machine can actually run it. The single
+    /// gate every consumer keys off (camera respawn, render-scale composite,
+    /// nameplate pass): intent without a working runtime is always a no-op, so
+    /// a dlss-build json loaded on a default build changes nothing.
+    pub fn dlss_active(&self) -> bool {
+        matches!(self.anti_aliasing, AaMode::Dlss) && self.dlss_supported
+    }
+
     /// Clamped render-scale factor (3D-buffer resolution ÷ window resolution).
     pub fn render_scale(&self) -> f32 {
         self.render_scale.clamp(0.25, 2.0)
@@ -937,8 +1207,13 @@ impl GraphicsSettings {
 
     /// True when the 3D buffer should be rendered off-window and (up/down)scaled.
     /// At exactly 1.0 the camera renders straight to the window (no extra passes).
+    /// Always false while DLSS is active: DLSS owns internal resolution and
+    /// upscaling, so the manual composite path must stand down or the frame
+    /// gets scaled twice. This is the single gate every render-scale system
+    /// keys off, so returning false here tears the composite down and blocks
+    /// the pointer remap in one place.
     pub fn wants_render_scale(&self) -> bool {
-        (self.render_scale() - 1.0).abs() > 1e-3
+        !self.dlss_active() && (self.render_scale() - 1.0).abs() > 1e-3
     }
 }
 
@@ -1025,6 +1300,7 @@ pub const GRAPHICS_FIELDS: &[GraphicsField] = &[
     GraphicsField::MenuScale,
     GraphicsField::CameraSpring,
     GraphicsField::AntiAliasing,
+    GraphicsField::Dlss,
     GraphicsField::TextureFiltering,
     GraphicsField::ShadowMapSize,
     GraphicsField::ShadowCascadeCount,
@@ -1045,6 +1321,18 @@ pub const GRAPHICS_FIELDS: &[GraphicsField] = &[
     GraphicsField::CharacterLighting,
     GraphicsField::CharacterShadowReceive,
     GraphicsField::CharacterShadowCast,
+];
+
+/// The DLSS Config surface, top to bottom: the live quality knob first, then
+/// the inert RenoDX-parity placeholders (see `is_dlss_placeholder`). Rendered
+/// as a pushed submenu in-game and a disclosure block in the launcher.
+pub const DLSS_CONFIG_FIELDS: &[GraphicsField] = &[
+    GraphicsField::DlssQuality,
+    GraphicsField::DlssRrPreset,
+    GraphicsField::DlssSrPreset,
+    GraphicsField::DlssRrResponsivity,
+    GraphicsField::DlssNeuralUplift,
+    GraphicsField::DlssSharpness,
 ];
 
 fn cycle_slot<T: PartialEq + Copy>(current: T, slots: &[T], delta: i32) -> Option<T> {
@@ -1113,12 +1401,21 @@ pub fn apply_anti_aliasing_system(
     mut commands: Commands,
     q_cam: Query<(Entity, &Transform), With<OperatorCamera>>,
     caps: Option<Res<MsaaCaps>>,
-    mut last_applied: Local<Option<(Msaa, bool, bool)>>,
+    mut last_applied: Local<Option<(Msaa, bool, bool, bool, DlssQuality)>>,
 ) {
     let target_msaa = caps
         .map(|c| c.clamp(settings.msaa()))
         .unwrap_or_else(|| settings.msaa());
     let want_taa = settings.wants_taa();
+    // Both DLSS knobs are respawn-keyed: toggling adds/removes the camera's
+    // Dlss component, and a quality-tier change goes through a full respawn
+    // too — a fresh view entity is guaranteed to re-create the DLSS context
+    // at the new internal resolution, where mutating a live component leans
+    // on bevy's prepare-side re-creation that we can't compile-verify here.
+    // One extra respawn per menu click is cheap; document as a possible
+    // in-place optimization once a dlss build is in hand (docs/DLSS.md).
+    let want_dlss = settings.dlss_active();
+    let dlss_quality = settings.dlss_quality;
     // volumetric_fog is part of the respawn key because bevy's
     // `extract_volumetric_fog` is insert-only into the persistent render-world
     // view entity (its cleanup path only runs when *no* `VolumetricLight`
@@ -1127,7 +1424,13 @@ pub fn apply_anti_aliasing_system(
     // `VolumetricFog` from a live camera therefore leaves fog rendering
     // forever; despawning the camera and rebuilding it is the only reliable
     // way to toggle it at runtime.
-    let next = (target_msaa, want_taa, settings.volumetric_fog);
+    let next = (
+        target_msaa,
+        want_taa,
+        settings.volumetric_fog,
+        want_dlss,
+        dlss_quality,
+    );
 
     if *last_applied == Some(next) {
         return;
@@ -1139,7 +1442,12 @@ pub fn apply_anti_aliasing_system(
 
     commands.entity(entity).despawn();
     let mut settings_for_respawn = settings.clone();
-    let aa = if want_taa {
+    // With DLSS active, keep Dlss as the respawn AA mode (msaa() already
+    // reported Off for it, so the reconstruction below would clobber it to
+    // AaMode::Off and the camera would come back without its Dlss component).
+    let aa = if want_dlss {
+        AaMode::Dlss
+    } else if want_taa {
         AaMode::Taa
     } else {
         match target_msaa {
@@ -1400,7 +1708,7 @@ pub fn apply_camera_prepass_system(
     let Ok((entity, depth)) = q_cam.single() else {
         return;
     };
-    let keep_depth = settings.depth_of_field || settings.wants_taa();
+    let keep_depth = settings.depth_of_field || settings.wants_taa() || settings.dlss_active();
     // try_* so we no-op (not panic) if apply_anti_aliasing_system queued a
     // despawn+respawn of this same camera earlier in the frame.
     match (keep_depth, depth.is_some()) {
@@ -1941,6 +2249,121 @@ mod tests {
         let json = serde_json::to_string(&s).unwrap();
         let back: GraphicsSettings = serde_json::from_str(&json).unwrap();
         assert_eq!(s, back);
+    }
+
+    #[test]
+    fn dlss_rows_refuse_while_unsupported() {
+        let mut s = GraphicsSettings::default();
+        assert!(!s.dlss_supported, "capability starts undetected");
+        assert_eq!(s.value_label(GraphicsField::Dlss), "N/A");
+        assert_eq!(s.value_label(GraphicsField::DlssQuality), "N/A");
+
+        // Toggling and quality-cycling are no-ops while unsupported, and the
+        // no-op must not dirty the preset either.
+        s.cycle(GraphicsField::Dlss, 1);
+        assert!(!matches!(s.anti_aliasing, AaMode::Dlss));
+        s.cycle(GraphicsField::DlssQuality, 1);
+        assert_eq!(s.dlss_quality, DlssQuality::Auto);
+        assert_eq!(s.preset, QualityPreset::High);
+
+        // The AA cycler never reaches Dlss without support: a full loop from
+        // Off visits only the plain slots.
+        s.anti_aliasing = AaMode::Off;
+        for _ in 0..AA_SLOTS.len() {
+            s.cycle(GraphicsField::AntiAliasing, 1);
+            assert!(!matches!(s.anti_aliasing, AaMode::Dlss));
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn dlss_toggle_and_cycler_when_supported() {
+        let mut s = GraphicsSettings::default();
+        s.dlss_supported = true;
+        assert_eq!(s.value_label(GraphicsField::Dlss), "Off");
+
+        s.cycle(GraphicsField::Dlss, 1);
+        assert!(matches!(s.anti_aliasing, AaMode::Dlss));
+        assert!(s.dlss_active());
+        assert_eq!(s.value_label(GraphicsField::Dlss), "On");
+        assert_eq!(s.value_label(GraphicsField::AntiAliasing), "DLSS");
+        assert_eq!(s.msaa(), Msaa::Off, "DLSS implies multisampling off");
+        assert!(!s.wants_taa(), "DLSS implies TAA off");
+
+        // Render scale is DLSS-owned while active: reads "DLSS", refuses to move.
+        let scale_before = s.render_scale;
+        s.cycle(GraphicsField::RenderScale, 1);
+        assert_eq!(s.render_scale, scale_before);
+        assert_eq!(s.value_label(GraphicsField::RenderScale), "DLSS");
+
+        // Off lands on AA Off (user re-picks MSAA/TAA in the cycler).
+        s.cycle(GraphicsField::Dlss, 1);
+        assert!(matches!(s.anti_aliasing, AaMode::Off));
+
+        // The AA cycler includes Dlss as the slot after Taa when supported.
+        s.anti_aliasing = AaMode::Taa;
+        s.cycle(GraphicsField::AntiAliasing, 1);
+        assert!(matches!(s.anti_aliasing, AaMode::Dlss));
+    }
+
+    #[test]
+    fn dlss_quality_cycles_and_survives_preset_and_reset() {
+        let mut s = GraphicsSettings::default();
+        s.dlss_supported = true;
+        s.cycle(GraphicsField::Dlss, 1);
+        s.cycle(GraphicsField::DlssQuality, 1);
+        assert_eq!(s.dlss_quality, DlssQuality::Quality);
+
+        // Presets never own DLSS: cycling a preset keeps on-state, tier, and
+        // capability.
+        s.cycle(GraphicsField::Preset, 1);
+        assert!(s.dlss_active(), "preset cycle kept DLSS on");
+        assert_eq!(s.dlss_quality, DlssQuality::Quality);
+        assert!(s.dlss_supported);
+
+        // DLSS Config reset touches only the tier.
+        s.reset_dlss_config();
+        assert_eq!(s.dlss_quality, DlssQuality::Auto);
+        assert!(s.dlss_active(), "config reset left on/off alone");
+
+        // Full menu reset returns to High (DLSS off, Msaa4) but must not
+        // un-detect the runtime capability.
+        s.reset_to_default();
+        assert!(!matches!(s.anti_aliasing, AaMode::Dlss));
+        assert!(s.dlss_supported, "reset preserved capability");
+    }
+
+    #[test]
+    fn dlss_placeholders_stay_inert() {
+        let mut s = GraphicsSettings::default();
+        s.dlss_supported = true;
+        for &f in DLSS_CONFIG_FIELDS {
+            if f.is_dlss_placeholder() {
+                assert_eq!(s.value_label(f), "N/A", "{f:?}");
+                let before = s.clone();
+                s.cycle(f, 1);
+                assert_eq!(s, before, "{f:?} cycled state");
+            }
+        }
+    }
+
+    #[test]
+    fn dlss_mode_in_json_is_inert_on_default_builds() {
+        // A graphics.json written by a dlss build round-trips: the mode
+        // deserializes, but with capability undetected everything reads N/A
+        // and dlss_active is false — pure no-op.
+        let s = GraphicsSettings {
+            anti_aliasing: AaMode::Dlss,
+            dlss_quality: DlssQuality::Performance,
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&s).unwrap();
+        let back: GraphicsSettings = serde_json::from_str(&json).unwrap();
+        assert!(matches!(back.anti_aliasing, AaMode::Dlss));
+        assert_eq!(back.dlss_quality, DlssQuality::Performance);
+        assert!(!back.dlss_supported, "serde(skip) field never persists");
+        assert!(!back.dlss_active());
+        assert_eq!(back.value_label(GraphicsField::AntiAliasing), "DLSS (N/A)");
     }
 }
 

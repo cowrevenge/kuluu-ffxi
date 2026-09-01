@@ -640,7 +640,9 @@ dependencies = [
  "bevy_render",
  "bevy_shader",
  "bevy_utils",
+ "dlss_wgpu",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -1205,6 +1207,7 @@ dependencies = [
  "bevy_render",
  "bevy_scene",
  "bevy_shader",
+ "bevy_solari",
  "bevy_sprite",
  "bevy_sprite_render",
  "bevy_state",
@@ -1647,6 +1650,36 @@ dependencies = [
 ]
 
 [[package]]
+name = "bevy_solari"
+version = "0.19.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6137adc9b4b9ddba719c63c2cf777607210e8f22b4978fbcf73a58acfe39b920"
+dependencies = [
+ "bevy_anti_alias",
+ "bevy_app",
+ "bevy_asset",
+ "bevy_camera",
+ "bevy_color",
+ "bevy_core_pipeline",
+ "bevy_derive",
+ "bevy_diagnostic",
+ "bevy_ecs",
+ "bevy_image",
+ "bevy_math",
+ "bevy_mesh",
+ "bevy_pbr",
+ "bevy_platform",
+ "bevy_reflect",
+ "bevy_render",
+ "bevy_shader",
+ "bevy_transform",
+ "bevy_utils",
+ "bytemuck",
+ "derive_more",
+ "tracing",
+]
+
+[[package]]
 name = "bevy_sprite"
 version = "0.19.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2014,6 +2047,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "bindgen"
+version = "0.72.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "993776b509cfb49c750f11b8f07a46fa23e0a1386ffc01fb1e7d343efc387895"
+dependencies = [
+ "bitflags 2.11.1",
+ "cexpr",
+ "clang-sys",
+ "itertools 0.10.5",
+ "log",
+ "prettyplease",
+ "proc-macro2",
+ "quote",
+ "regex",
+ "rustc-hash 2.1.2",
+ "shlex",
+ "syn 2.0.117",
+]
+
+[[package]]
 name = "bit-set"
 version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2255,6 +2308,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6d43a04d8753f35258c91f8ec639f792891f748a1edbd759cf1dcea3382ad83c"
 
 [[package]]
+name = "cexpr"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6fac387a98bb7c37292057cffc56d62ecb629900026402633ae9160df93a8766"
+dependencies = [
+ "nom 7.1.3",
+]
+
+[[package]]
 name = "cfg-if"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2323,6 +2385,17 @@ checksum = "57663b653d948a338bfb3eeba9bb2fd5fcfaecb9e199e87e1eda4d9e8b240fd9"
 dependencies = [
  "ciborium-io",
  "half",
+]
+
+[[package]]
+name = "clang-sys"
+version = "1.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "157a8ba7b480713b56f4c09fd13fc3e0a22a5dfab8097ba61cbc5feef950788a"
+dependencies = [
+ "glob",
+ "libc",
+ "libloading",
 ]
 
 [[package]]
@@ -3011,6 +3084,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "dlss_wgpu"
+version = "4.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "75a51601d25ae0c9cc759d421fe40d3c5a031dd8c2e92970e9038a040ef178b4"
+dependencies = [
+ "ash",
+ "bindgen",
+ "bitflags 2.11.1",
+ "cc",
+ "thiserror 2.0.20",
+ "uuid",
+ "wgpu",
+]
+
+[[package]]
 name = "document-features"
 version = "0.2.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3219,7 +3307,7 @@ dependencies = [
 
 [[package]]
 name = "ffxi-actor"
-version = "0.5.2"
+version = "0.6.0"
 dependencies = [
  "ffxi-dat",
  "glam",
@@ -3227,7 +3315,7 @@ dependencies = [
 
 [[package]]
 name = "ffxi-audio"
-version = "0.5.2"
+version = "0.6.0"
 dependencies = [
  "hound",
  "thiserror 2.0.20",
@@ -3235,7 +3323,7 @@ dependencies = [
 
 [[package]]
 name = "ffxi-dat"
-version = "0.5.2"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "rayon",
@@ -3245,7 +3333,7 @@ dependencies = [
 
 [[package]]
 name = "ffxi-event"
-version = "0.5.2"
+version = "0.6.0"
 dependencies = [
  "ffxi-dat",
  "tracing",
@@ -3253,7 +3341,7 @@ dependencies = [
 
 [[package]]
 name = "ffxi-nav-recast"
-version = "0.5.2"
+version = "0.6.0"
 dependencies = [
  "dirs",
  "glam",
@@ -3267,7 +3355,7 @@ dependencies = [
 
 [[package]]
 name = "ffxi-proto"
-version = "0.5.2"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "ffxi-vocab",
@@ -3279,7 +3367,7 @@ dependencies = [
 
 [[package]]
 name = "ffxi-vocab"
-version = "0.5.2"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "lsb-scrape",
@@ -3637,6 +3725,12 @@ dependencies = [
  "num-traits",
  "simba",
 ]
+
+[[package]]
+name = "glob"
+version = "0.3.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e4eba85ea1d0a966a983acd07deee566e67395d2d96b6fb39e62b5a833f1eb0b"
 
 [[package]]
 name = "gloo-net"
@@ -4389,7 +4483,7 @@ dependencies = [
 
 [[package]]
 name = "kuluu"
-version = "0.5.2"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "arboard",
@@ -4422,7 +4516,7 @@ dependencies = [
 
 [[package]]
 name = "kuluu-mcp"
-version = "0.5.2"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "ffxi-dat",
@@ -4438,7 +4532,7 @@ dependencies = [
 
 [[package]]
 name = "kuluu-nav"
-version = "0.5.2"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "bincode",
@@ -4452,7 +4546,7 @@ dependencies = [
 
 [[package]]
 name = "kuluu-render"
-version = "0.5.2"
+version = "0.6.0"
 dependencies = [
  "ab_glyph",
  "bevy",
@@ -4473,7 +4567,7 @@ dependencies = [
 
 [[package]]
 name = "kuluu-session"
-version = "0.5.2"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "dirs",
@@ -4504,7 +4598,7 @@ dependencies = [
 
 [[package]]
 name = "kuluu-snapshot"
-version = "0.5.2"
+version = "0.6.0"
 dependencies = [
  "postcard",
  "serde",
@@ -4513,7 +4607,7 @@ dependencies = [
 
 [[package]]
 name = "kuluu-viewer-wasm"
-version = "0.5.2"
+version = "0.6.0"
 dependencies = [
  "bevy",
  "console_error_panic_hook",
@@ -4672,7 +4766,7 @@ dependencies = [
 
 [[package]]
 name = "lsb-scrape"
-version = "0.5.2"
+version = "0.6.0"
 dependencies = [
  "anyhow",
 ]
@@ -4738,6 +4832,12 @@ checksum = "488016bfae457b036d996092f6cb448677611ce4449e970ceaf42695203f218a"
 dependencies = [
  "autocfg",
 ]
+
+[[package]]
+name = "minimal-lexical"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "68354c5c6bd36d73ff3feceb05efa59b6acb7626617f4962be322a825e61f79a"
 
 [[package]]
 name = "miniz_oxide"
@@ -4947,6 +5047,16 @@ dependencies = [
  "cfg-if",
  "cfg_aliases",
  "libc",
+]
+
+[[package]]
+name = "nom"
+version = "7.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d273983c5a657a70a3e8f2a01329822f3b8c8172b73826411a55751e404a0a4a"
+dependencies = [
+ "memchr",
+ "minimal-lexical",
 ]
 
 [[package]]
@@ -7465,7 +7575,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b8765b90061cba6c22b5831f675da109ae5561588290f9fa2317adab2714d5a6"
 dependencies = [
  "memchr",
- "nom",
+ "nom 8.0.0",
  "petgraph",
 ]
 
@@ -8750,7 +8860,7 @@ checksum = "3ae8337f8a065cfc972643663ea4279e04e7256de865aa66fe25cec5fb912d3f"
 
 [[package]]
 name = "xtask"
-version = "0.5.2"
+version = "0.6.0"
 
 [[package]]
 name = "yazi"

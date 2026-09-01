@@ -12,6 +12,12 @@ dist = false
 
 [features]
 default = []
+# NVIDIA DLSS Super Resolution (native Vulkan/RTX only). Compiles the runtime
+# plumbing in graphics/dlss.rs and chains to bevy's dlss feature (which pulls
+# dlss_wgpu; building it needs the DLSS SDK checked out and DLSS_SDK set — see
+# docs/DLSS.md). The settings/menu surface exists on every build; without this
+# feature it permanently reads N/A.
+dlss = ["bevy/dlss"]
 # Enhanced (non-retail) mouse-over tooltips on the status-effect ribbon showing
 # each buff's name. Retail has no such tooltip; the info comes from the scraped
 # status-effect name table.

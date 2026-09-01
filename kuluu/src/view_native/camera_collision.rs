@@ -95,6 +95,13 @@ pub fn resolve_camera(
     // no easing so it can't wobble. Y is taken direct from the (already
     // render-smoothed) player Transform, so the camera never floats above the
     // player on stairs. snap_to_anchor (zone/warp) resets to exact position.
+    //
+    // IMPORTANT: this smoothed value is the boom ORIGIN (where the camera rig
+    // sits), NOT the orbit/look-at pivot. Using it as the pivot made rotation
+    // swing around the trailing anchor while the player sat off to one side —
+    // the "dizzy, off-center rotation" bug. The pivot is always the player's
+    // true position (see `pivot` below); the spring only softens how the rig
+    // glides toward that pivot horizontally.
     let player_pos = self_t.translation;
     let follow_pos = match follow.pos {
         Some(prev) if settings.camera_spring && !chase.snap_to_anchor => {
@@ -115,20 +122,29 @@ pub fn resolve_camera(
     follow.pos = Some(follow_pos);
 
     // --- Pass 2: orbit (instant rotation, never lagged) ---
-    let anchor = follow_pos + Vec3::Y * (third_person_anchor_y(baked) - step.offset);
+    // Pivot is ALWAYS the player, spring or not: rotation orbits the player and
+    // the look-at keeps the player centered in frame. The spring-smoothed
+    // follow_pos only shifts the boom origin, so the rig can glide while the
+    // subject stays put under rotation. Both share the same anchor height
+    // (direct-Y off the player) so the boom stays level.
+    let anchor_y = Vec3::Y * (third_person_anchor_y(baked) - step.offset);
+    let pivot = player_pos + anchor_y;
+    let boom_origin = follow_pos + anchor_y;
     let cos_p = chase.pitch.cos();
     let sin_p = chase.pitch.sin();
     let dir = Vec3::new(chase.yaw.sin() * cos_p, sin_p, chase.yaw.cos() * cos_p);
     let wanted = chase.orbit_radius();
 
     // --- Pass 3: collision pull-in against the AVIAN world ---
-    // Ray from the anchor along the boom; walls+doors block, mobs never do.
+    // Ray from the pivot along the boom; walls+doors block, mobs never do.
     // Same solid world the walker sweeps. Nearest hit shortens the boom so the
-    // camera never clips through geometry.
+    // camera never clips through geometry. Cast from the pivot (the player),
+    // not the glide origin, so wall pull-in is measured from where the camera
+    // is actually looking.
     let mut hit_t = wanted;
     if let Ok(ray_dir) = Dir3::new(dir) {
         if let Some(hit) = sq.cast_ray(
-            anchor,
+            pivot,
             ray_dir,
             wanted,
             true,
@@ -157,8 +173,12 @@ pub fn resolve_camera(
     *smoothed_effective = Some(effective);
 
     // --- Single write: this system is the sole camera authority ---
-    cam_t.translation = anchor + dir * effective;
-    cam_t.look_at(anchor, Vec3::Y);
+    // Eye sits along the boom from the glide origin, but the camera LOOKS AT the
+    // player pivot — so however the rig glides, the player stays centered and
+    // rotation orbits the player. When the spring is off, boom_origin == pivot
+    // and this reduces to the exact old centered behavior.
+    cam_t.translation = boom_origin + dir * effective;
+    cam_t.look_at(pivot, Vec3::Y);
     chase.snap_to_anchor = false;
 }
 
@@ -374,6 +394,62 @@ mod tests {
         assert!(
             (look - want).length() < 1e-4,
             "camera faces along the player's heading: {look:?} != {want:?}"
+        );
+    }
+
+    #[test]
+    fn spring_on_keeps_player_centered_under_rotation() {
+        // The "dizzy" bug: with the spring on, the orbit/look-at used the
+        // lagged follow anchor, so rotating swung the view around a point
+        // behind the player. Regression guard: however the boom origin glides,
+        // the camera must always LOOK AT the player pivot, so the player stays
+        // centered and rotation orbits the player. We approximate "mid-glide"
+        // by seeding AnchorFollow behind the player, running one frame with the
+        // spring on, and checking the camera's forward ray points at the
+        // player anchor (not the lagged follow position).
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .add_plugins(bevy::asset::AssetPlugin::default())
+            .init_asset::<bevy::mesh::Mesh>()
+            .add_plugins(PhysicsPlugins::default())
+            .insert_resource(CameraMode::Chase)
+            .insert_resource(kuluu_render::GraphicsSettings {
+                camera_spring: true,
+                ..Default::default()
+            })
+            .insert_resource(SceneState::default())
+            .insert_resource(kuluu_render::camera::CameraStepSmoothing::default())
+            // Seed the follow anchor well behind the player so the glide gap is
+            // large this frame — the worst case for off-center rotation.
+            .insert_resource(AnchorFollow {
+                pos: Some(Vec3::new(0.0, 1.0, -6.0)),
+            })
+            .insert_resource(ChaseCamera {
+                // Not a warp: we want the spring path, not the snap path.
+                snap_to_anchor: false,
+                synced_initial: true,
+                ..Default::default()
+            })
+            .add_systems(Update, resolve_camera);
+
+        let player_pos = Vec3::new(0.0, 1.0, 0.0);
+        app.world_mut()
+            .spawn((IsSelf, Transform::from_translation(player_pos)));
+        let cam = app
+            .world_mut()
+            .spawn((OperatorCamera, Transform::from_xyz(0.0, 0.0, 0.0)))
+            .id();
+
+        app.update();
+
+        let cam_t = *app.world().get::<Transform>(cam).unwrap();
+        let pivot = player_pos + Vec3::Y * third_person_anchor_y(None);
+        let look = *cam_t.forward();
+        let want = (pivot - cam_t.translation).normalize();
+        assert!(
+            (look - want).length() < 1e-4,
+            "spring-on camera must look at the PLAYER pivot, not the lagged \
+             anchor: forward {look:?} != {want:?} (dizzy-rotation regression)"
         );
     }
 }

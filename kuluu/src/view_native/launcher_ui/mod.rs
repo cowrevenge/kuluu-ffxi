@@ -696,6 +696,7 @@ pub(crate) fn register(
     );
 
     app.init_resource::<graphics::GraphicsAdvancedOpen>()
+        .init_resource::<graphics::GraphicsDlssOpen>()
         .add_systems(OnEnter(LauncherState::Graphics), graphics::spawn_ui)
         .add_systems(OnExit(LauncherState::Graphics), graphics::despawn_ui)
         .add_systems(
@@ -704,6 +705,7 @@ pub(crate) fn register(
                 graphics::keyboard_input_system,
                 graphics::redraw_graphics_system,
                 graphics::redraw_advanced_visibility,
+                graphics::redraw_dlss_visibility,
                 graphics::update_scrollbar_visibility,
             )
                 .run_if(in_state(LauncherState::Graphics)),

@@ -104,8 +104,8 @@ pub use components::{
 pub use cursor::{system_cursor_icon, CursorPlugin, CursorRequests, CursorStyle};
 pub use cutscene::{CutsceneMode, CutscenePlugin, ScreenFade};
 pub use graphics_settings::{
-    AaMode, CharacterRenderPath, DynamicLights, GraphicsField, GraphicsSettings, QualityPreset,
-    TextureFiltering, ZoneLineDisplay, GRAPHICS_FIELDS,
+    AaMode, CharacterRenderPath, DlssQuality, DynamicLights, GraphicsField, GraphicsSettings,
+    QualityPreset, TextureFiltering, ZoneLineDisplay, DLSS_CONFIG_FIELDS, GRAPHICS_FIELDS,
 };
 pub use hud::{add_hud_spawners, HudPlugin};
 pub use input_mode::{
@@ -492,6 +492,18 @@ impl<S: SceneSource + Resource + Component<Mutability = bevy::ecs::component::Mu
         // the settings menu writes -- the "HUD only rescales when I open the
         // menu" bug).
         app.add_systems(Update, graphics_settings::apply_ui_scale_system);
+
+        // UNGATED for the same reason: the capability probe writes the
+        // settings resource itself (once, on the frame the renderer's
+        // DlssSuperResolutionSupported marker is seen), which then makes the
+        // resource_changed apply chain run. Ordered before it so the AA
+        // respawn key sees the capability the same frame.
+        #[cfg(all(not(target_arch = "wasm32"), feature = "dlss"))]
+        app.add_systems(
+            Update,
+            graphics::dlss::update_dlss_availability_system
+                .before(graphics_settings::apply_anti_aliasing_system),
+        );
 
         #[cfg(not(target_arch = "wasm32"))]
         app.add_systems(

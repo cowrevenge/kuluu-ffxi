@@ -81,7 +81,8 @@ pub struct PartyFrameSettings {
     pub layout_a: u8,
     pub layout_b: u8,
     pub layout_c: u8,
-    /// Show Party A even when solo (XIUI showPartyListWhenSolo).
+    /// Show Party A when solo. This is a client HUD, not XIUI — the frame
+    /// always shows; the flag only exists so the Debug menu can hide it.
     pub show_when_solo: bool,
     /// Draw the MP bar for no-MP jobs too.
     pub always_show_mp_bar: bool,
@@ -109,7 +110,7 @@ impl Default for PartyFrameSettings {
             layout_a: 0,
             layout_b: 0,
             layout_c: 0,
-            show_when_solo: false,
+            show_when_solo: true,
             always_show_mp_bar: true,
             show_tp: true,
             show_member_distance: true,

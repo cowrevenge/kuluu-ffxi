@@ -891,8 +891,8 @@ fn spawn_row_l1(
                     );
                 });
 
-            // MP bar + TP value share ONE line, right-aligned under the HP
-            // bar's right edge (XIUI L1 keeps both in the bottom strip).
+            // [TP value] [MP bar] on ONE line, right-aligned under the HP
+            // bar's right edge. TP is a bare number (gold at 1000) — no label.
             let show_mp = s.always_show_mp_bar || m.mp > 0;
             if show_mp || s.show_tp {
                 bars.spawn(Node {
@@ -905,6 +905,13 @@ fn spawn_row_l1(
                     ..default()
                 })
                 .with_children(|line| {
+                    if s.show_tp {
+                        line.spawn((
+                            Text::new(format!("{}", m.tp)),
+                            style::text_font(JOB_PX * sc.max(0.75)),
+                            TextColor(if m.tp >= 1000 { TP_FULL } else { TP_DIM }),
+                        ));
+                    }
                     if show_mp {
                         line.spawn(bar_track(mp_w, bar_h))
                             .with_children(|mp| {
@@ -917,13 +924,6 @@ fn spawn_row_l1(
                                     JOB_PX * sc.max(0.75),
                                 );
                             });
-                    }
-                    if s.show_tp {
-                        line.spawn((
-                            Text::new(format!("TP {}", m.tp)),
-                            style::text_font(JOB_PX * sc.max(0.75)),
-                            TextColor(if m.tp >= 1000 { TP_FULL } else { TP_DIM }),
-                        ));
                     }
                 });
             }

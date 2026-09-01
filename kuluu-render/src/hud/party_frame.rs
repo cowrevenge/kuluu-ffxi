@@ -826,17 +826,16 @@ fn spawn_row_l1(
 
             let show_mp = s.always_show_mp_bar || m.mp > 0;
             if show_mp {
-                bars.spawn((
-                    bar_track(mp_w, bar_h),
+                // Single merged Node — two Nodes in one spawn bundle panic at
+                // apply time (duplicate component).
+                bars.spawn(Node {
                     // Right-align the MP bar under the HP bar's right edge.
-                    Node {
-                        margin: UiRect {
-                            left: Val::Px(hp_w - mp_w),
-                            ..default()
-                        },
+                    margin: UiRect {
+                        left: Val::Px(hp_w - mp_w),
                         ..default()
                     },
-                ))
+                    ..bar_track(mp_w, bar_h)
+                })
                 .with_children(|mp| {
                     fill_or_block(
                         mp,
@@ -1014,12 +1013,12 @@ fn spawn_row_l2(
         });
 
         // HP bar: right-aligned in the entry box.
-        row.spawn((bar_track(hp_w, bar_h), Node {
+        row.spawn(Node {
             position_type: PositionType::Absolute,
             left: Val::Px(entry_w - hp_w),
             top: Val::Px(hp_top),
-            ..default()
-        }))
+            ..bar_track(hp_w, bar_h)
+        })
         .with_children(|hp| {
             fill_or_block(
                 hp,
@@ -1034,12 +1033,12 @@ fn spawn_row_l2(
         // MP bar: below HP, shifted up so the HP bar covers its top sliver.
         let show_mp = s.always_show_mp_bar || m.mp > 0;
         if show_mp {
-            row.spawn((bar_track(mp_w, bar_h), Node {
+            row.spawn(Node {
                 position_type: PositionType::Absolute,
                 left: Val::Px(entry_w - mp_w),
                 top: Val::Px(hp_top + bar_h - mp_overlap),
-                ..default()
-            }))
+                ..bar_track(mp_w, bar_h)
+            })
             .with_children(|mp| {
                 fill_or_block(
                     mp,

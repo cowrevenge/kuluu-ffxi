@@ -307,6 +307,15 @@ impl Plugin for HudPlugin {
             ),
         );
 
+        // Separate call: the main HUD tuple above is already at Bevy's 20-element
+        // limit. In-place distance readouts — must follow the row rebuild so
+        // freshly spawned distance texts get their value same-frame.
+        app.add_systems(
+            Update,
+            party_frame::update_party_dist_text_system
+                .after(party_frame::update_party_frame_system),
+        );
+
         app.add_systems(
             Update,
             menu::refresh_dynamic_menu_rows.before(menu::update_main_menu),

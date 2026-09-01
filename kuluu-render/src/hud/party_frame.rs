@@ -59,7 +59,6 @@ const TITLE_PX: f32 = 14.0;
 const MP_COLOR: Color = Color::srgb(0.30, 0.50, 0.90);
 const TP_FULL: Color = Color::srgb(1.00, 0.80, 0.20);
 const TP_DIM: Color = Color::srgb(0.55, 0.55, 0.55);
-const BAR_TRACK: Color = theme::CELL_BG;
 const OUT_OF_ZONE_BLOCK: Color = Color::srgb(0.02, 0.02, 0.02);
 const LEADER_DOT: Color = Color::srgb(1.00, 0.82, 0.25);
 const TARGET_BG: Color = Color::srgba(0.35, 0.55, 0.95, 0.30);
@@ -188,6 +187,12 @@ pub struct PartyTitle {
 /// Distance-to-target readout on the Party A title row.
 #[derive(Component)]
 pub struct PartyTargetDist;
+
+/// Per-member distance text on an L1 name line. Updated in place between row
+/// rebuilds so movement never triggers a clear-and-respawn (which made the
+/// panel's measured size oscillate — the "double box" ghost).
+#[derive(Component)]
+pub struct MemberDistText(pub u32);
 
 /// "Treas." flag on the Party A title row (left of the title), lit while the
 /// party treasure pool holds items — XIUI DrawWindow title flanks.
@@ -510,21 +515,26 @@ pub fn update_party_frame_system(
     colors: Res<NameColorTable>,
     zone_names: Option<Res<crate::hud::zone_flash::ZoneNameResolver>>,
     mut root_q: Query<(&PartyFrameRoot, &mut Node), Without<PartyRowsHost>>,
-    // One merged query: two separate `&mut Text` queries (title + dist) would
-    // conflict at runtime (B0001) — Bevy can't prove the entities disjoint.
-    mut title_dist_q:
-        Query<(
-            &mut Text,
-            Option<&PartyTitle>,
-            Option<&PartyTargetDist>,
-            Option<&PartyTreasureFlag>,
-        )>,
+    // One merged query: two separate `&mut Text` queries would conflict at
+    // runtime (B0001) — Bevy can't prove the entities disjoint. Distance texts
+    // are NOT touched here; update_party_dist_text_system keeps them fresh in
+    // place every frame.
+    mut title_q:
+        Query<(&mut Text, Option<&PartyTitle>, Option<&PartyTreasureFlag>)>,
     host_q: Query<(Entity, &PartyRowsHost, Option<&Children>)>,
+    mut last_key: Local<Option<PartyContentKey>>,
 ) {
-    if !state.dirty && !target.is_changed() && !settings.is_changed() {
+    // Rebuild only when rendered content actually changes. `state.dirty` fires
+    // on EVERY packet (position updates while moving); clear-and-respawn per
+    // frame made the panel's measured size oscillate between frames — a
+    // temporal double image ("double box"). The old self_hud updated text in
+    // place and never churned entities, which is why it didn't have this.
+    let snap = &state.snapshot;
+    let key = party_content_key(snap);
+    if !target.is_changed() && !settings.is_changed() && Some(&key) == last_key.as_ref() {
         return;
     }
-    let snap = &state.snapshot;
+    *last_key = Some(key);
 
     let self_member = crate::snapshot::resolve_self(&snap.party, snap.self_char_id);
     let self_zone = self_member.map(|m| m.zone_no);
@@ -565,9 +575,10 @@ pub fn update_party_frame_system(
         node.display = if show { Display::Flex } else { Display::None };
     }
 
-    // Titles + distance-to-target + treasure flag on the Party A title row
-    // (one merged query — separate `&mut Text` queries would conflict B0001).
-    for (mut text, title, dist, treasure) in title_dist_q.iter_mut() {
+    // Titles + treasure flag (one merged query — separate `&mut Text` queries
+    // would conflict B0001). Distance readouts are owned by
+    // update_party_dist_text_system.
+    for (mut text, title, treasure) in title_q.iter_mut() {
         let want = if let Some(title) = title {
             match title.party_no {
                 0 => {
@@ -586,12 +597,6 @@ pub fn update_party_frame_system(
                 String::new()
             } else {
                 "Treas.".to_string()
-            }
-        } else if dist.is_some() {
-            if settings.show_target_distance {
-                target_dist_text(target.id, snap, self_pos)
-            } else {
-                String::new()
             }
         } else {
             continue;
@@ -638,6 +643,44 @@ pub fn update_party_frame_system(
     }
 }
 
+/// Everything that affects row/title rendering, cheaply comparable. Position
+/// data is deliberately EXCLUDED — distance readouts are updated in place by
+/// update_party_dist_text_system, so movement never triggers a rebuild.
+#[derive(Clone, PartialEq)]
+pub struct PartyContentKey {
+    party: Vec<kuluu_snapshot::PartyMember>,
+    char_name: Option<String>,
+    flags: Vec<(u32, kuluu_snapshot::CharFlags)>,
+    treasure_nonempty: bool,
+}
+
+fn party_content_key(snap: &kuluu_snapshot::SceneSnapshot) -> PartyContentKey {
+    let mut flags = snap
+        .party
+        .iter()
+        .filter_map(|m| {
+            snap.entities
+                .iter()
+                .find(|e| e.id == m.id)
+                .map(|e| (m.id, e.char_flags))
+        })
+        .collect::<Vec<_>>();
+    flags.sort_by_key(|(id, _)| *id);
+    PartyContentKey {
+        party: snap.party.clone(),
+        char_name: snap.char_name.clone(),
+        flags,
+        treasure_nonempty: !snap.treasure_pool.is_empty(),
+    }
+}
+
+fn dist_str(a: kuluu_snapshot::Vec3, b: kuluu_snapshot::Vec3) -> String {
+    let dx = a.x - b.x;
+    let dy = a.y - b.y;
+    let dz = a.z - b.z;
+    format!("{:.1}", (dx * dx + dy * dy + dz * dz).sqrt())
+}
+
 fn target_dist_text(
     target_id: Option<u32>,
     snap: &kuluu_snapshot::SceneSnapshot,
@@ -647,10 +690,40 @@ fn target_dist_text(
     let Some(ent) = snap.entities.iter().find(|e| e.id == tid) else {
         return String::new();
     };
-    let dx = self_pos.x - ent.pos.x;
-    let dy = self_pos.y - ent.pos.y;
-    let dz = self_pos.z - ent.pos.z;
-    format!("d={:.1}y", (dx * dx + dy * dy + dz * dz).sqrt())
+    format!("d={}y", dist_str(self_pos, ent.pos))
+}
+
+/// Keeps distance readouts fresh between row rebuilds (in place, no churn):
+/// per-member distances on L1 name lines + target distance on the Party A
+/// title line. Runs every frame; writes only when a string actually changes.
+pub fn update_party_dist_text_system(
+    state: Res<SceneState>,
+    target: Res<Target>,
+    settings: Res<PartyFrameSettings>,
+    mut q: Query<(&mut Text, Option<&MemberDistText>, Option<&PartyTargetDist>)>,
+) {
+    let snap = &state.snapshot;
+    let self_pos = snap.self_pos.pos;
+    for (mut text, member, target_dist) in q.iter_mut() {
+        let want = if let Some(member) = member {
+            snap.entities
+                .iter()
+                .find(|e| e.id == member.0)
+                .map(|e| dist_str(self_pos, e.pos))
+                .unwrap_or_default()
+        } else if target_dist.is_some() {
+            if settings.show_target_distance {
+                target_dist_text(target.id, snap, self_pos)
+            } else {
+                String::new()
+            }
+        } else {
+            continue;
+        };
+        if **text != want {
+            **text = want;
+        }
+    }
 }
 
 // ---- member rows ---------------------------------------------------------------
@@ -694,17 +767,13 @@ fn spawn_member_row(
         .color(if is_self { ncol::PC } else { ncol::PARTY })
         .unwrap_or(Color::WHITE);
 
-    // Member distance to self (L1 name line).
-    let member_dist: Option<String> = if s.show_member_distance && !out_of_zone {
+    // Member distance to self (L1 name line). Self gets none — its distance
+    // to itself is always 0.0 (the "weird 0.0" behind the frame).
+    let member_dist: Option<String> = if s.show_member_distance && !out_of_zone && !is_self {
         snap.entities
             .iter()
             .find(|e| e.id == m.id)
-            .map(|e| {
-                let dx = self_pos.x - e.pos.x;
-                let dy = self_pos.y - e.pos.y;
-                let dz = self_pos.z - e.pos.z;
-                format!("{:.1}", (dx * dx + dy * dy + dz * dz).sqrt())
-            })
+            .map(|e| dist_str(self_pos, e.pos))
     } else {
         None
     };
@@ -783,18 +852,16 @@ fn spawn_row_l1(
     }
 
     row.with_children(|row| {
-        // Job icon slot (placeholder text until icon textures land).
-        row.spawn((
-            Node {
-                width: Val::Px(icon_size),
-                height: Val::Px(entry_h),
-                flex_shrink: 0.0,
-                justify_content: JustifyContent::Center,
-                align_items: AlignItems::Center,
-                ..default()
-            },
-            BackgroundColor(BAR_TRACK),
-        ))
+        // Job icon slot (placeholder text until icon textures land). No
+        // background box — the filled rectangle read as a leftover artifact.
+        row.spawn((Node {
+            width: Val::Px(icon_size),
+            height: Val::Px(entry_h),
+            flex_shrink: 0.0,
+            justify_content: JustifyContent::Center,
+            align_items: AlignItems::Center,
+            ..default()
+        },))
         .with_children(|icon| {
             icon.spawn((
                 Text::new(job_abbrev(m.main_job)),
@@ -824,45 +891,41 @@ fn spawn_row_l1(
                     );
                 });
 
+            // MP bar + TP value share ONE line, right-aligned under the HP
+            // bar's right edge (XIUI L1 keeps both in the bottom strip).
             let show_mp = s.always_show_mp_bar || m.mp > 0;
-            if show_mp {
-                // Single merged Node — two Nodes in one spawn bundle panic at
-                // apply time (duplicate component).
+            if show_mp || s.show_tp {
                 bars.spawn(Node {
-                    // Right-align the MP bar under the HP bar's right edge.
-                    margin: UiRect {
-                        left: Val::Px(hp_w - mp_w),
-                        ..default()
-                    },
-                    ..bar_track(mp_w, bar_h)
+                    position_type: PositionType::Relative,
+                    width: Val::Px(hp_w),
+                    flex_direction: FlexDirection::Row,
+                    align_items: AlignItems::Center,
+                    justify_content: JustifyContent::FlexEnd,
+                    column_gap: Val::Px(4.0),
+                    ..default()
                 })
-                .with_children(|mp| {
-                    fill_or_block(
-                        mp,
-                        out_of_zone,
-                        m.mp_pct as f32,
-                        MP_COLOR,
-                        &format!("{}", m.mp),
-                        JOB_PX * sc.max(0.75),
-                    );
+                .with_children(|line| {
+                    if show_mp {
+                        line.spawn(bar_track(mp_w, bar_h))
+                            .with_children(|mp| {
+                                fill_or_block(
+                                    mp,
+                                    out_of_zone,
+                                    m.mp_pct as f32,
+                                    MP_COLOR,
+                                    &format!("{}", m.mp),
+                                    JOB_PX * sc.max(0.75),
+                                );
+                            });
+                    }
+                    if s.show_tp {
+                        line.spawn((
+                            Text::new(format!("TP {}", m.tp)),
+                            style::text_font(JOB_PX * sc.max(0.75)),
+                            TextColor(if m.tp >= 1000 { TP_FULL } else { TP_DIM }),
+                        ));
+                    }
                 });
-            }
-
-            // TP text (L1 only), right of the bars column bottom.
-            if s.show_tp {
-                bars.spawn((
-                    Text::new(format!("TP {}", m.tp)),
-                    style::text_font(JOB_PX * sc.max(0.75)),
-                    TextColor(if m.tp >= 1000 { TP_FULL } else { TP_DIM }),
-                    Node {
-                        margin: UiRect {
-                            left: Val::Px(hp_w - 46.0),
-                            top: Val::Px(1.0),
-                            ..default()
-                        },
-                        ..default()
-                    },
-                ));
             }
         });
 
@@ -907,6 +970,7 @@ fn spawn_row_l1(
                     },
                 ));
                 line.spawn((
+                    MemberDistText(m.id),
                     Text::new(d),
                     style::text_font(JOB_PX * s.scale.max(0.75)),
                     TextColor(theme::MUTED),

@@ -475,7 +475,7 @@ pub struct ChatLine {
     pub spans: Vec<ChatSpan>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PartyMember {
     pub id: u32,
     pub act_index: u16,

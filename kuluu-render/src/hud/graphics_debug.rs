@@ -123,12 +123,12 @@ pub fn update_graphics_debug_hud(
 /// the buffer so a later session starts fresh.
 pub fn graphics_debug_metrics_system(
     windows: Query<&Window, With<bevy::window::PrimaryWindow>>,
-    // Party/self frame (HP/MP/TP/job/Solo). self_hud::SelfHud marks the
-    // Absolute root node; StatusPanel is the character-profile screen and
-    // is display: None until opened -- wrong target.
+    // Party/self frame (HP/MP/TP/job/Solo). PartyFrameRoot marks each party
+    // window's Absolute root node; .iter() below picks the largest, i.e. the
+    // populated Party A frame.
     panel: Query<
         (&bevy::ui::ComputedNode, &bevy::ui::UiGlobalTransform),
-        With<crate::hud::self_hud::SelfHudPanel>,
+        With<crate::hud::party_frame::PartyFrameRoot>,
     >,
     panels: Res<crate::hud::HudPanels>,
     mut state: ResMut<GraphicsDebugState>,

@@ -33,9 +33,9 @@ pub mod network_status;
 pub mod overlay;
 pub mod panel_column;
 pub mod quick_action;
-pub mod roster;
+// (roster mockup deleted — real party/self HUD is party_frame.rs)
+pub mod party_frame;
 pub mod self_fishing;
-pub mod self_hud;
 pub mod shop;
 pub mod spinner;
 pub mod stage_bar;
@@ -214,7 +214,6 @@ impl Plugin for HudPlugin {
         app.init_resource::<stair_debug::OrchDecisionLog>();
 
         app.init_resource::<zone_flash::ZoneFlashState>();
-        app.init_resource::<self_hud::SelfHealTracker>();
 
         app.init_resource::<status_ribbon::StatusIconCache>();
         app.init_resource::<status_ribbon::StatusIconDatRoot>();
@@ -270,7 +269,6 @@ impl Plugin for HudPlugin {
                 stage_bar::update_stage_bar,
                 chat_panel::update_chat_panel,
                 diagnostics::update_diagnostics,
-                roster::update_roster_panel_system,
                 chat_input::update_chat_input,
                 menu::update_main_menu,
                 quick_action::update_quick_action,
@@ -290,11 +288,7 @@ impl Plugin for HudPlugin {
                 ),
                 vana_clock::update_vana_clock,
                 zone_flash::update_zone_flash,
-                (
-                    self_hud::update_self_hud,
-                    self_hud::update_self_status,
-                    self_hud::update_self_party_indicator,
-                ),
+                party_frame::update_party_frame_system,
                 self_fishing::update_fishing_hud,
                 (
                     status_ribbon::update_status_ribbon,
@@ -316,7 +310,6 @@ impl Plugin for HudPlugin {
         app.add_systems(
             Update,
             panel_column::layout_panel_column_system
-                .after(roster::update_roster_panel_system)
                 .after(target_panel::update_target_panel_system),
         );
 
@@ -445,7 +438,6 @@ pub fn add_hud_spawners<L: bevy::ecs::schedule::ScheduleLabel + Clone>(app: &mut
         (
             spawn_bottom_left_stack,
             diagnostics::spawn_diagnostics,
-            roster::spawn_roster_panel,
             chat_input::spawn_chat_input,
             menu::spawn_main_menu,
             menu_help_bar::spawn_menu_help_bar,
@@ -455,7 +447,7 @@ pub fn add_hud_spawners<L: bevy::ecs::schedule::ScheduleLabel + Clone>(app: &mut
             shop::spawn_shop_panel,
             zone_flash::spawn_zone_flash,
             self_fishing::spawn_fishing_hud,
-            self_hud::spawn_self_hud,
+            party_frame::spawn_party_frames,
             status_ribbon::spawn_status_ribbon,
             death_prompt::spawn_death_prompt,
             logout_countdown::spawn_logout_countdown,

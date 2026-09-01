@@ -996,10 +996,19 @@ impl Plugin for NameplateFinalPassPlugin {
                 // before the PostProcess set — verified against bevy 0.19 sources),
                 // BEFORE upscaling writes the window. Per-camera sub-schedule: runs
                 // once per Camera3d, gated to the operator inside.
+                //
+                // ALSO before `ui_pass`: bevy's UI composite is scheduled
+                // `.after(Core3dSystems::PostProcess).before(upscaling)` — the
+                // exact same bounds as this pass (bevy_ui_render 0.19,
+                // render_pass::ui_pass). With no explicit edge between them the
+                // two ran in arbitrary order and plates could land on TOP of the
+                // HUD. Ordering before ui_pass makes the UI composite over the
+                // plates, so nameplates never overwrite menus/HUD.
                 .add_systems(
                     Core3d,
                     draw_nameplate_final_pass
                         .after(Core3dSystems::PostProcess)
+                        .before(bevy::ui_render::ui_pass)
                         .before(upscaling),
                 );
         }

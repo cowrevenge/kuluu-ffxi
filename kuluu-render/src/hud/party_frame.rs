@@ -71,6 +71,15 @@ const SUBTARGET_BG: Color = Color::srgba(0.95, 0.80, 0.25, 0.30);
 #[allow(dead_code)]
 const SUBTARGET_BORDER: Color = Color::srgb(1.00, 0.87, 0.40);
 const BAND_COLOR: Color = Color::srgba(0.35, 0.06, 0.06, 0.55); // L1 alternating band
+const TREASURE_FLAG: Color = Color::srgb(1.00, 0.84, 0.00);
+// Activity-flag marker colors (XIUI display.lua DrawCurrentTarget block).
+const FLAG_DC: Color = Color::srgb(0.60, 0.60, 0.60);
+const FLAG_GM: Color = Color::srgb(1.00, 0.20, 0.20);
+const FLAG_MENTOR: Color = Color::srgb(1.00, 0.85, 0.30);
+const FLAG_NEW: Color = Color::srgb(0.40, 0.90, 0.40);
+const FLAG_AWAY: Color = Color::srgb(0.55, 0.55, 0.55);
+const FLAG_LFP: Color = Color::srgb(0.45, 0.70, 1.00);
+const FLAG_BAZAAR: Color = Color::srgb(1.00, 0.80, 0.20);
 
 // ---- settings (Debug-menu "UI Settings" only) ------------------------------
 
@@ -124,6 +133,30 @@ impl Default for PartyFrameSettings {
     }
 }
 
+/// Single activity marker per member, retail priority order (XIUI mirrors
+/// FFXI's player-icon rule: only one at a time):
+/// link-dead > GM > mentor > new-adv > away > LFP/LFG > bazaar.
+/// Sync is omitted — it needs buff data (0x076), not entity flags.
+fn activity_marker(flags: &kuluu_snapshot::CharFlags) -> Option<(&'static str, Color)> {
+    if flags.linkdead {
+        Some(("D/C", FLAG_DC))
+    } else if flags.gm_level > 0 {
+        Some(("GM", FLAG_GM))
+    } else if flags.mentor {
+        Some(("Mtr", FLAG_MENTOR))
+    } else if flags.new_character {
+        Some(("New", FLAG_NEW))
+    } else if flags.away {
+        Some(("Away", FLAG_AWAY))
+    } else if flags.lfg {
+        Some(("LFP", FLAG_LFP))
+    } else if flags.bazaar {
+        Some(("Baz", FLAG_BAZAAR))
+    } else {
+        None
+    }
+}
+
 fn layout_for(party_no: u8, s: &PartyFrameSettings) -> bool {
     // returns true for L1, false for L2
     let forced = match party_no {
@@ -155,6 +188,11 @@ pub struct PartyTitle {
 /// Distance-to-target readout on the Party A title row.
 #[derive(Component)]
 pub struct PartyTargetDist;
+
+/// "Treas." flag on the Party A title row (left of the title), lit while the
+/// party treasure pool holds items — XIUI DrawWindow title flanks.
+#[derive(Component)]
+pub struct PartyTreasureFlag;
 
 /// Container that holds the member rows for one window.
 #[derive(Component)]
@@ -349,6 +387,22 @@ pub fn spawn_party_frames(mut commands: Commands) {
                     },
                     TextLayout::justify(Justify::Center),
                 ));
+                // Treasure-pool flag on the title row, left of the title
+                // (Party A only) — lit while the pool holds items.
+                if party_no == 0 {
+                    root.spawn((
+                        PartyTreasureFlag,
+                        Text::new(""),
+                        style::text_font(JOB_PX),
+                        TextColor(TREASURE_FLAG),
+                        Node {
+                            position_type: PositionType::Absolute,
+                            top: Val::Px(-TITLE_PX * 0.65),
+                            left: Val::Px(4.0),
+                            ..default()
+                        },
+                    ));
+                }
                 // Distance-to-target on the title row, right side (Party A only).
                 if party_no == 0 {
                     root.spawn((
@@ -456,8 +510,15 @@ pub fn update_party_frame_system(
     colors: Res<NameColorTable>,
     zone_names: Option<Res<crate::hud::zone_flash::ZoneNameResolver>>,
     mut root_q: Query<(&PartyFrameRoot, &mut Node), Without<PartyRowsHost>>,
-    mut title_q: Query<(&PartyTitle, &mut Text)>,
-    mut dist_q: Query<&mut Text, With<PartyTargetDist>>,
+    // One merged query: two separate `&mut Text` queries (title + dist) would
+    // conflict at runtime (B0001) — Bevy can't prove the entities disjoint.
+    mut title_dist_q:
+        Query<(
+            &mut Text,
+            Option<&PartyTitle>,
+            Option<&PartyTargetDist>,
+            Option<&PartyTreasureFlag>,
+        )>,
     host_q: Query<(Entity, &PartyRowsHost, Option<&Children>)>,
 ) {
     if !state.dirty && !target.is_changed() && !settings.is_changed() {
@@ -504,31 +565,36 @@ pub fn update_party_frame_system(
         node.display = if show { Display::Flex } else { Display::None };
     }
 
-    // Titles.
-    for (title, mut text) in title_q.iter_mut() {
-        let want = match title.party_no {
-            0 => {
-                if self_in_party && !solo {
-                    "Party"
-                } else {
-                    "Solo"
+    // Titles + distance-to-target + treasure flag on the Party A title row
+    // (one merged query — separate `&mut Text` queries would conflict B0001).
+    for (mut text, title, dist, treasure) in title_dist_q.iter_mut() {
+        let want = if let Some(title) = title {
+            match title.party_no {
+                0 => {
+                    if self_in_party && !solo {
+                        "Party".to_string()
+                    } else {
+                        "Solo".to_string()
+                    }
                 }
+                1 => "Party B".to_string(),
+                2 => "Party C".to_string(),
+                _ => String::new(),
             }
-            1 => "Party B",
-            2 => "Party C",
-            _ => "",
-        };
-        if **text != want {
-            **text = want.to_string();
-        }
-    }
-
-    // Distance-to-target on the Party A title row.
-    for mut text in dist_q.iter_mut() {
-        let want = if settings.show_target_distance {
-            target_dist_text(target.id, snap, self_pos)
+        } else if treasure.is_some() {
+            if snap.treasure_pool.is_empty() {
+                String::new()
+            } else {
+                "Treas.".to_string()
+            }
+        } else if dist.is_some() {
+            if settings.show_target_distance {
+                target_dist_text(target.id, snap, self_pos)
+            } else {
+                String::new()
+            }
         } else {
-            String::new()
+            continue;
         };
         if **text != want {
             **text = want;
@@ -643,12 +709,29 @@ fn spawn_member_row(
         None
     };
 
+    // Activity marker from entity flags — only members present as visible
+    // entities carry one (out-of-zone rows have no Entity).
+    let flag = snap
+        .entities
+        .iter()
+        .find(|e| e.id == m.id)
+        .map(|e| activity_marker(&e.char_flags))
+        .flatten();
+
     if is_l1 {
         spawn_row_l1(
-            parent, m, s, name_label, name_color, member_dist, out_of_zone, is_target,
+            parent,
+            m,
+            s,
+            name_label,
+            name_color,
+            member_dist,
+            flag,
+            out_of_zone,
+            is_target,
         );
     } else {
-        spawn_row_l2(parent, m, s, name_label, name_color, out_of_zone, is_target);
+        spawn_row_l2(parent, m, s, name_label, name_color, flag, out_of_zone, is_target);
     }
 }
 
@@ -661,6 +744,7 @@ fn spawn_row_l1(
     name_label: String,
     name_color: Color,
     member_dist: Option<String>,
+    flag: Option<(&'static str, Color)>,
     out_of_zone: bool,
     is_target: bool,
 ) {
@@ -809,6 +893,13 @@ fn spawn_row_l1(
                 style::text_font(NAME_PX * s.scale.max(0.75)),
                 TextColor(name_color),
             ));
+            if let Some((label, color)) = flag {
+                line.spawn((
+                    Text::new(label.to_string()),
+                    style::text_font(JOB_PX * s.scale.max(0.75)),
+                    TextColor(color),
+                ));
+            }
             if let Some(d) = member_dist {
                 line.spawn((
                     Node {
@@ -834,6 +925,7 @@ fn spawn_row_l2(
     s: &PartyFrameSettings,
     name_label: String,
     name_color: Color,
+    flag: Option<(&'static str, Color)>,
     out_of_zone: bool,
     is_target: bool,
 ) {
@@ -901,6 +993,13 @@ fn spawn_row_l2(
                 style::text_font(NAME_PX * sc.max(0.75)),
                 TextColor(name_color),
             ));
+            if let Some((label, color)) = flag {
+                line.spawn((
+                    Text::new(label.to_string()),
+                    style::text_font(JOB_PX * sc.max(0.75)),
+                    TextColor(color),
+                ));
+            }
             line.spawn(Node {
                 flex_grow: 1.0,
                 ..default()
@@ -1204,6 +1303,22 @@ mod tests {
             cycle_setting(UiSettingKey::MinRows, &mut s);
         }
         assert_eq!(s.min_rows, 1, "full cycle returns to default");
+    }
+
+    #[test]
+    fn activity_marker_priority() {
+        use kuluu_snapshot::CharFlags;
+        let label = |f: &CharFlags| activity_marker(f).map(|(l, _)| l);
+        assert!(label(&CharFlags::default()).is_none());
+        let mut f = CharFlags::default();
+        f.bazaar = true;
+        assert_eq!(label(&f), Some("Baz"));
+        f.lfg = true; // outranks bazaar
+        assert_eq!(label(&f), Some("LFP"));
+        f.away = true; // outranks lfp
+        assert_eq!(label(&f), Some("Away"));
+        f.linkdead = true; // top priority
+        assert_eq!(label(&f), Some("D/C"));
     }
 
     #[test]

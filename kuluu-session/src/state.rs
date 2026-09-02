@@ -454,6 +454,13 @@ pub struct SessionState {
     pub zone_id: Option<u16>,
     pub entities: Vec<Entity>,
     pub party: Vec<PartyMember>,
+
+    /// Monotonically increasing counter, bumped on every `ZoneChanged`. The
+    /// renderer's party-frame content key includes this so a zone transition
+    /// always forces a UI rebuild, even when the party data looks identical.
+    #[serde(default)]
+    pub zone_generation: u64,
+
     pub chat: Vec<ChatLine>,
 
     /// Lines already evicted from `chat` by [`CHAT_HISTORY_CAP`], so
@@ -1414,6 +1421,7 @@ impl SessionState {
 
                 self.entities.clear();
                 self.party.clear();
+                self.zone_generation = self.zone_generation.wrapping_add(1);
 
                 self.current_weather = None;
                 self.check_result = None;
@@ -1639,6 +1647,53 @@ impl SessionState {
                     server_ts: 0,
                 });
                 true
+            }
+            AgentEvent::PartyTableReset { members } => {
+                // GROUP_TBL arrived. Two shapes matter:
+                //  - solo: LSB answers 0x076 with GROUP_TBL(nullptr) — Kind 0,
+                //    no entries. Self is NOT in the table, and self's only
+                //    source of stats is GROUP_ATTR (0x061 reply / UPDATE_HP),
+                //    so wiping here would leave the frame on 0/0 until the
+                //    next HP change. Self is always retained.
+                //  - party: the table is the authoritative roster. Members it
+                //    no longer lists are dropped; members it still lists keep
+                //    their stats (the 0x0DD burst that follows refreshes them);
+                //    new ids get a skeleton row.
+                let self_id = self.char_id;
+                let before = self.party.clone();
+                self.party.retain(|m| {
+                    Some(m.id) == self_id || members.iter().any(|e| e.unique_no == m.id)
+                });
+                for entry in members {
+                    if let Some(existing) = self.party.iter_mut().find(|m| m.id == entry.unique_no) {
+                        existing.act_index = entry.act_index;
+                        existing.zone_no = entry.zone_no;
+                        existing.is_party_leader = entry.is_party_leader;
+                        existing.is_alliance_leader = entry.is_alliance_leader;
+                        existing.party_no = entry.party_no;
+                    } else {
+                        self.party.push(PartyMember {
+                            id: entry.unique_no,
+                            act_index: entry.act_index,
+                            name: None,
+                            hp: 0,
+                            mp: 0,
+                            tp: 0,
+                            hp_pct: 0,
+                            mp_pct: 0,
+                            zone_no: entry.zone_no,
+                            main_job: 0,
+                            main_job_lv: 0,
+                            sub_job: 0,
+                            sub_job_lv: 0,
+                            is_party_leader: entry.is_party_leader,
+                            is_alliance_leader: entry.is_alliance_leader,
+                            party_no: entry.party_no,
+                            in_mog_house: false,
+                        });
+                    }
+                }
+                before != self.party
             }
             AgentEvent::PartyMemberUpdated { member } => {
                 if let Some(existing) = self.party.iter_mut().find(|m| m.id == member.id) {
@@ -2506,6 +2561,13 @@ pub enum AgentEvent {
 
     PartyMemberUpdated {
         member: PartyMember,
+    },
+
+    /// GROUP_TBL (s2c 0x0C8) arrived: the server is sending a fresh party
+    /// definition. Clear the party list and seed it with the skeleton entries
+    /// from the table; the full stats follow in GROUP_LIST (0x0DD) packets.
+    PartyTableReset {
+        members: Vec<ffxi_proto::decode::GroupTblEntry>,
     },
 
     LowHp {

@@ -106,12 +106,9 @@ impl Plugin for RenderScalePlugin {
             )
             .add_systems(
                 Update,
-                (
-                    snap_window_to_even_system,
-                    (reconcile_render_scale_system, assert_hud_camera_ownership)
-                        .chain()
-                        .after(crate::graphics::settings::apply_anti_aliasing_system),
-                ),
+                (reconcile_render_scale_system, assert_hud_camera_ownership)
+                    .chain()
+                    .after(crate::graphics::settings::apply_anti_aliasing_system),
             );
     }
 }
@@ -414,6 +411,7 @@ fn mirror_pointer_to_render_target_system(
 /// they never showed it). Snap windowed-mode size DOWN to even physical
 /// dimensions; a 1px shrink is invisible. Fullscreen modes are left alone.
 /// Self-quiescing: once even, nothing is written, so no resize-event loop.
+#[allow(dead_code)]
 fn snap_window_to_even_system(
     mut windows: Query<&mut Window, With<PrimaryWindow>>,
     monitors: Query<&bevy::window::Monitor>,

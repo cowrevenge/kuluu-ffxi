@@ -302,8 +302,10 @@ mod tests {
 
     #[test]
     fn unknown_lines_rejected() {
-        assert_eq!(KeyMsg::from_json_line("not json"), None);
-        assert_eq!(KeyMsg::from_json_line(r#"{"foo":1}"#), None);
+        // matches! (not assert_eq!(.., None)): rkyv's cross-type PartialEq
+        // impls (via ffxi-nav-recast) break bare-None inference in assert_eq!
+        assert!(matches!(KeyMsg::from_json_line("not json"), None));
+        assert!(matches!(KeyMsg::from_json_line(r#"{"foo":1}"#), None));
     }
 
     #[test]

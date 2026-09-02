@@ -267,6 +267,7 @@ pub const DEBUG_STAIR_STATUS: &str = "Show Stair Status";
 pub const DEBUG_GRAPHICS_DEBUG: &str = "Graphics Debug";
 pub const DEBUG_POSITION_LOG: &str = "Panel Pos Log";
 pub const DEBUG_NAMEPLATES: &str = "Nameplate Debug";
+pub const DEBUG_UI_SETTINGS: &str = "UI Settings";
 
 const DEBUG_ENTRIES: &[&str] = &[
     DEBUG_PERF,
@@ -282,6 +283,7 @@ const DEBUG_ENTRIES: &[&str] = &[
     DEBUG_GRAPHICS_DEBUG,
     DEBUG_POSITION_LOG,
     DEBUG_NAMEPLATES,
+    DEBUG_UI_SETTINGS,
 ];
 
 // Grouped: display -> interface/camera -> quality -> lighting.
@@ -1387,6 +1389,7 @@ pub fn debug_panel_state(
         DEBUG_GRAPHICS_DEBUG => panels.graphics_debug,
         DEBUG_POSITION_LOG => panels.position_log,
         DEBUG_NAMEPLATES => panels.nameplate_debug,
+        DEBUG_UI_SETTINGS => panels.ui_settings,
         // Print POS is a button, not a toggle — it never reads on/off (the
         // row formatter shows [enter] for it); false here is just the
         // don't-care default for any label without panel state.

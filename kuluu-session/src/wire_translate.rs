@@ -16,6 +16,7 @@ pub fn state_to_snapshot(s: &SessionState) -> wire::SceneSnapshot {
         self_pos,
         entities: s.entities.iter().map(entity_to_wire).collect(),
         party: s.party.iter().map(party_to_wire).collect(),
+        zone_generation: s.zone_generation,
         chat: s.chat.iter().map(chat_to_wire).collect(),
         chat_base_seq: s.chat_dropped,
         diagnostics: diagnostics_to_wire(&s.diagnostics),

@@ -2,6 +2,10 @@
 
 use serde::{Deserialize, Serialize};
 
+// v20: SceneSnapshot.zone_generation — a counter bumped on every zone change so the
+// party frame's content key differs after a transition even when the roster is
+// byte-identical to the previous zone (the fast-path race where the 0x0DD/0x0DF refill
+// lands in the same poll as the ZoneChanged clear).
 // v19: the cutscene channel — ViewerEvent::{CutsceneStarted,CutsceneCue,CutsceneEnded} plus
 // CutsceneCue/CutsceneActor. The event VM's staging opcodes (actor motion, screen fade,
 // camera lock, event-hide, mount) had no way across the boundary at all before this.
@@ -35,7 +39,7 @@ use serde::{Deserialize, Serialize};
 // v5: InventoryItem.charges_remaining + next_use_vana_ts (item recast/charges).
 // v4: SceneSnapshot.delivery_box (dedicated delivery screen) + ViewerCommand::DeliveryBox
 // (postcard frames are not self-describing, so any shape change bumps this).
-pub const PROTOCOL_VERSION: u32 = 19;
+pub const PROTOCOL_VERSION: u32 = 20;
 
 /// Longest countdown `SceneSnapshot::status_icon_expiries` can carry. The
 /// producer rejects anything beyond it as a corrupt 0x063 timestamp, and the HUD
@@ -475,7 +479,7 @@ pub struct ChatLine {
     pub spans: Vec<ChatSpan>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PartyMember {
     pub id: u32,
     pub act_index: u16,
@@ -557,6 +561,12 @@ pub struct SceneSnapshot {
     pub self_pos: Position,
     pub entities: Vec<Entity>,
     pub party: Vec<PartyMember>,
+
+    /// Monotonically increasing counter, bumped on every zone change. Forces
+    /// the party-frame content key to differ after a zone transition even when
+    /// the party data is byte-identical.
+    #[serde(default)]
+    pub zone_generation: u64,
 
     pub chat: Vec<ChatLine>,
 
@@ -1653,8 +1663,10 @@ mod tests {
                 mount: None,
                 status: 0,
                 char_flags: CharFlags::default(),
+                name_vis: 0,
             }],
             party: vec![],
+            zone_generation: 7,
             chat: vec![ChatLine {
                 channel: ChatChannel::Say,
                 sender: "Other".into(),
@@ -2087,6 +2099,7 @@ mod tests {
             "self_pos",
             "entities",
             "party",
+            "zone_generation",
             "chat",
             "chat_base_seq",
             "diagnostics",
@@ -2134,7 +2147,7 @@ mod tests {
         assert_eq!(got, want, "SceneSnapshot fields changed: additive-only, update this pin deliberately and rebuild relay consumers together");
     }
 
-    const SNAPSHOT_DEFAULT_POSTCARD_HEX: &str = "00000000000000000000000000000000191900000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000";
+    const SNAPSHOT_DEFAULT_POSTCARD_HEX: &str = "0000000000000000000000000000000019190000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000";
 
     /// Postcard is positional, not self-describing: field ORDER and TYPES are
     /// the wire format. Any reorder/retype (and any append) changes these

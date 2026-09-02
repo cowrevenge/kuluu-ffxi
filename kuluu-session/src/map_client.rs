@@ -198,9 +198,16 @@ impl MapClient {
             .filter_map(|r| r.ok().map(|s| format!("0x{:03x}", s.opcode)))
             .collect();
         if !opcodes.is_empty() {
+            // `stamp` is the server's server_packet_id as stamped on this
+            // datagram (preparePacket, vendor/server/src/map/map_networking.cpp):
+            // our next c2s must ack exactly this value or parse()'s retransmit
+            // guard eats it. Watching stamp vs. the ack we send next is how a
+            // desync shows up in the log.
+            let stamp = u16::from_le_bytes(buf[0..2].try_into().unwrap());
             tracing::info!(
                 bytes = n,
                 src = %src,
+                stamp,
                 sub_count = opcodes.len(),
                 sub_opcodes = opcodes.join(" "),
                 "recv"

@@ -14,8 +14,10 @@ enum MenuDispatch {
 }
 
 fn apply_graphics_cycle(cursor: usize, delta: i32, graphics: &mut kuluu_render::GraphicsSettings) {
-    use kuluu_render::graphics_settings::GRAPHICS_FIELDS;
-    if let Some(&field) = GRAPHICS_FIELDS.get(cursor) {
+    // The page carries two non-field action rows ("DLSS Config" under the DLSS
+    // on/off row, "Reset to High" at the bottom), so the cursor slot does not
+    // index GRAPHICS_FIELDS directly — resolve through the shared mapping.
+    if let Some(field) = kuluu_render::hud::menu::graphics_field_at(cursor) {
         graphics.cycle(field, delta);
     }
 }

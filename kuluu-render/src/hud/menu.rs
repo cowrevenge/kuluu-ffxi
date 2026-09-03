@@ -1,6 +1,6 @@
 use bevy::prelude::*;
 
-use crate::graphics_settings::{GraphicsSettings, DLSS_CONFIG_FIELDS, GRAPHICS_FIELDS};
+use crate::graphics_settings::{GraphicsField, GraphicsSettings, DLSS_CONFIG_FIELDS, GRAPHICS_FIELDS};
 use crate::hud::style::{self, theme};
 use crate::input_mode::{InputMode, MenuKind, MenuStack};
 
@@ -300,6 +300,7 @@ const GRAPHICS_ENTRIES: &[&str] = &[
     "Camera Spring",
     "Anti-Aliasing",
     "DLSS",
+    "DLSS Config",
     "Texture Filtering",
     "Shadow Quality",
     "Shadow Cascades",
@@ -320,16 +321,41 @@ const GRAPHICS_ENTRIES: &[&str] = &[
     "Shading",
     "Model Shadow Receiving",
     "Model Shadow Casting",
-    "DLSS Config",
     "Reset to High",
 ];
 
-/// Slot of the "DLSS Config" row: first row past the cyclable fields; pushes
-/// `MenuKind::GraphicsDlss` instead of cycling (text_input::menu special-cases
-/// it exactly like the reset row below it).
-pub const GRAPHICS_DLSS_CONFIG_SLOT: usize = GRAPHICS_FIELDS.len();
+/// Slot of the "DLSS Config" row: directly under the DLSS on/off row — one
+/// feature, so the two stay adjacent instead of the config entry sitting at
+/// the bottom of a long page. Pushes `MenuKind::GraphicsDlss` instead of
+/// cycling (text_input::menu special-cases it).
+const fn dlss_config_slot() -> usize {
+    let mut i = 0;
+    while i < GRAPHICS_FIELDS.len() {
+        if matches!(GRAPHICS_FIELDS[i], GraphicsField::Dlss) {
+            return i + 1;
+        }
+        i += 1;
+    }
+    panic!("GraphicsField::Dlss must be in GRAPHICS_FIELDS");
+}
 
+pub const GRAPHICS_DLSS_CONFIG_SLOT: usize = dlss_config_slot();
+
+/// Slot of "Reset to High": the last row on the page.
 pub const GRAPHICS_RESET_SLOT: usize = GRAPHICS_FIELDS.len() + 1;
+
+/// Maps a Graphics-page cursor slot onto its cyclable field, skipping the two
+/// action rows ("DLSS Config" under the DLSS on/off row, "Reset to High" at
+/// the bottom). `None` for those slots.
+pub fn graphics_field_at(slot: usize) -> Option<GraphicsField> {
+    if slot == GRAPHICS_DLSS_CONFIG_SLOT || slot == GRAPHICS_RESET_SLOT {
+        return None;
+    }
+    // Exactly one action row (the config row) sits before the reset row, so
+    // slots past it shift down by one against the field list.
+    let field_idx = if slot < GRAPHICS_DLSS_CONFIG_SLOT { slot } else { slot - 1 };
+    GRAPHICS_FIELDS.get(field_idx).copied()
+}
 
 /// In-game DLSS Config submenu rows: the DLSS_CONFIG_FIELDS labels plus a
 /// reset row. Kept in lockstep by the graphics_dlss_entries_match_fields
@@ -340,6 +366,9 @@ const GRAPHICS_DLSS_ENTRIES: &[&str] = &[
     "SR Preset",
     "RR Responsivity",
     "Neural Uplift",
+    "NR Intensity",
+    "Local Tone Strength",
+    "Structure Strength",
     "Sharpness",
     "Reset DLSS to defaults",
 ];
@@ -1324,13 +1353,14 @@ fn format_row_body(
     snapshot: &kuluu_snapshot::SceneSnapshot,
 ) -> String {
     match kind {
-        MenuKind::Graphics => match GRAPHICS_FIELDS.get(slot).copied() {
+        MenuKind::Graphics => match graphics_field_at(slot) {
             Some(field) => format!(
                 "{:<16}[{}]",
                 format!("{}:", field.label()),
                 settings.value_label(field)
             ),
 
+            // The two action rows (DLSS Config, Reset to High).
             None => label.to_string(),
         },
         MenuKind::GraphicsDlss => match DLSS_CONFIG_FIELDS.get(slot).copied() {
@@ -1477,7 +1507,8 @@ mod tests {
             .init_resource::<crate::hud::HudPanels>()
             .init_resource::<NetStatusVisible>()
             .init_resource::<SceneState>()
-            .init_resource::<DynamicMenu>();
+            .init_resource::<DynamicMenu>()
+            .init_resource::<crate::audio::AudioMuteState>();
 
         let mut stack = MenuStack::root();
         stack.current_mut().unwrap().cursor = cursor;
@@ -2062,25 +2093,34 @@ mod tests {
         assert_eq!(
             GRAPHICS_ENTRIES.len(),
             GRAPHICS_FIELDS.len() + 2,
-            "expected one row per field + trailing DLSS Config and Reset rows"
+            "expected one row per field + the DLSS Config and Reset rows"
         );
-        for (i, field) in GRAPHICS_FIELDS.iter().enumerate() {
-            assert_eq!(
-                GRAPHICS_ENTRIES[i],
-                field.label(),
-                "row {i} label drift: entry={:?}, field.label()={:?}",
-                GRAPHICS_ENTRIES[i],
-                field.label()
-            );
+        // Walk the page in order: cyclable rows carry their field's label, the
+        // two action rows sit at their pinned slots.
+        let mut field_i = 0;
+        for (slot, entry) in GRAPHICS_ENTRIES.iter().enumerate() {
+            match slot {
+                s if s == GRAPHICS_DLSS_CONFIG_SLOT => assert_eq!(*entry, "DLSS Config"),
+                s if s == GRAPHICS_RESET_SLOT => assert_eq!(*entry, "Reset to High"),
+                _ => {
+                    let field = *GRAPHICS_FIELDS.get(field_i).expect("field per cyclable row");
+                    assert_eq!(
+                        *entry,
+                        field.label(),
+                        "row {slot} label drift: entry={:?}, field.label()={:?}",
+                        entry,
+                        field.label()
+                    );
+                    field_i += 1;
+                }
+            }
         }
-        assert_eq!(
-            GRAPHICS_ENTRIES[GRAPHICS_DLSS_CONFIG_SLOT], "DLSS Config",
-            "the first slot past the fields must open the DLSS submenu"
-        );
-        assert_eq!(
-            GRAPHICS_ENTRIES[GRAPHICS_RESET_SLOT], "Reset to High",
-            "the last slot must be the Reset action"
-        );
+        // The config row must sit directly under the DLSS on/off row.
+        let dlss_slot = GRAPHICS_FIELDS
+            .iter()
+            .position(|f| matches!(f, GraphicsField::Dlss))
+            .expect("Dlss in GRAPHICS_FIELDS");
+        assert_eq!(GRAPHICS_DLSS_CONFIG_SLOT, dlss_slot + 1);
     }
 
     #[test]

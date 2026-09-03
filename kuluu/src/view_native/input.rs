@@ -1363,7 +1363,16 @@ pub fn dispatch_movement_system(
     // drop — exceed it and pass through untouched.
     const STEP_SETTLE_TICKS: u8 = 6;
     const STEP_SETTLE_MAX_DROP: f32 = 0.08;
-    if stepped_this_tick {
+    // Arm only on a real step-up: wire z must have RISEN past the dip
+    // threshold this tick. On the live avian path landed_floor is Some on
+    // every moving tick (resolve_position always reports its floor), so arming
+    // off it kept this clamp permanently armed — swallowing gentle-slope
+    // descents (~0.018/tick at 6 y/s on a ~10° dune, well under the threshold)
+    // until the prediction feedback released them in one ~0.09 jump: a ~12 Hz
+    // sawtooth that was worst exactly where slopes are gradual. Riser crossings
+    // rise >= STEP_SETTLE_MAX_DROP; per-tick slope motion does not.
+    let stepped_up = basis_pos.z - final_z > STEP_SETTLE_MAX_DROP;
+    if stepped_this_tick && stepped_up {
         locals.step_settle = STEP_SETTLE_TICKS;
     }
     let final_z = if locals.step_settle > 0 {

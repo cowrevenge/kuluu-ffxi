@@ -782,13 +782,16 @@ EvaluateFeature (step 5), is verified ungated in v310.8 and stays a direct call.
 1. **HDR input format**: kuluu's operator camera is Hdr → main texture likely BgraFloat32. Unknown whether the
    v310.8 NR parser accepts 32F color input; the addon has an "HDR transfer" control, suggesting SDR preference is
    possible. Plan: try as-is first — SL logs will show `UnsupportedInputFormat` (0xBAD0_0008) if not → fallback =
-   add an HDR→LDR copy pass before NR.
+   add an HDR→LDR copy pass before NR. **§7.4 adds a second darkening suspect: our Local Tone default of 1.0 is
+   the MAXIMUM of the official 0–1 Tone Intensity range — test Local Tone → 0 first (cheap, no code).**
 1b. **MVec — RESOLVED in build 12 (§2.12 Bug 4)**: Bevy produces no motion-vector texture for our camera, so
    evaluate sends a zero-filled Rg16Float stand-in (= bevy's `MOTION_VECTOR_PREPASS_FORMAT`) sized to the input,
    created alongside the feature and cleared once — an explicit "no camera motion" instead of NULL (NULL is
    tolerated by this build: eval null-checks only Color/Output, but MVec semantics with NULL are undefined).
    OPEN LIMITATION: a zero stand-in does not fix real camera-motion misalignment; if flicker persists while the
    camera moves → Reset-every-frame (pure spatial) or wire bevy's actual MotionVectorPrepass when SR is active.
+   **§7.3 (post-launch research): NVIDIA confirmed motion vectors are one of only TWO runtime inputs — this
+   stand-in is now the prime suspect for any motion-related artifact.**
    (Build-11 history: MVec was omitted then — verified safe at both layers, parser @ 0x19F30 stores NULL for a
    missing MVec and continues; backend eval @ 0x180018620 null-checks ONLY Color (+0x20) and Output (+0x68).)
 
@@ -855,3 +858,110 @@ kuluu-render/src/graphics/dlss.rs  doc updates (last session) — UNCOMMITTED
 ~/.cargo/.../dlss_wgpu-4.0.0/src/{nvsdk_ngx,sd,super_resolution}.rs      FFI template (texture_to_ngx @ nvsdk_ngx.rs:202)
 ~/.cargo/.../bevy_anti_alias-0.19.1/src/dlss/{mod,node,prepare,extract}.rs  pipeline hook templates
 ```
+
+---
+
+## 7. Official DLSS 5 knowledge (researched post-launch, 2026-09-04)
+
+NVIDIA released DLSS 5 on **September 3, 2026** (debut title: NBA 2K27; available via the
+Game Ready driver + GeForce NOW). What they published, and what it means for our integration:
+
+### 7.1 What NVIDIA actually published
+- **Research page + paper**: [DLSS 5: Generative Neural Rendering](https://research.nvidia.com/labs/adlr/DLSS5)
+  (NVIDIA ADLR, published Sept 1, 2026). The PDF (`files/DLSS5_Report.pdf`, ~293 MB — mostly
+  embedded media; the abstract is the useful part) states: DLSS 5 is "a real-time generative
+  rendering stage" using **3D-guided neural rendering** — a **one-step pixel-space diffusion model**
+  conditioned at inference on *the current rendered frame, engine motion vectors, carried temporal
+  state, and artistic-direction values*; trained with consistency supervision from renderer-derived
+  scene attributes; causal + deterministic inference; strict per-frame compute budget; real-time up to
+  4K. "First DLSS technology to generate the final displayed appearance rather than reconstruct a
+  higher-cost reference output." Runs locally as a rendering stage on **GeForce RTX 50 Series**.
+- **Gamescom technical briefing** (Edward Liu, DLSS research lead + Gabriele Leone, content tech
+director), covered in detail by [TechPowerUp's review](https://www.techpowerup.com/review/nvidia-dlss-5-technical-preview/)
+  (Sept 1, 2026). This is the best public source on runtime behavior — quotes below are from it.
+- **Launch coverage**: release date + RTX 50-only confirmation ([pcmasterinsider](https://pcmasterinsider.com/nvidia-dlss-5-release-date)).
+
+### 7.2 Developer docs status (answers "does NVIDIA release how these things work?")
+**No developer-facing NR integration doc exists as of launch day.** The public Streamline SDK is still
+at **v2.12.0 (June 23, 2026)** — released *before* DLSS 5; its notes are "Bug Fixes & Stability
+Improvements" and the repo docs/feature list cover SR / RR / MFG only ([releases](https://github.com/NVIDIA-RTX/Streamline/releases),
+[dev page](https://developer.nvidia.com/rtx/dlss)). The public NGX feature enum (our local SDK v310.5.3
+headers) ends at `RayReconstruction = 13`; NR is the undocumented **feature 0x12 (= 18)** we already
+target — community logs call it "feature 18" too. Consequences:
+- Our direct-Vulkan-NGX path (`nvngx_dlssnr.dll` + forwarder, §2.10–§3.5) remains the only way in;
+  nothing to migrate to yet.
+- **Watch `NVIDIA-RTX/Streamline` releases** for an NR plugin + programming guide — that would replace
+  our reverse-engineered parameter names (§2.2) with a supported ABI, and is the first thing to check
+  after any driver/SDK update.
+- The RenoDX/OptiScaler community addons (D3D12 detours) are the only other public integrations; their
+  logs remain useful ground truth for parameter behavior (§2.5).
+
+### 7.3 Runtime inputs — the big one for us
+From the briefing: **at runtime the model receives exactly two things — the rendered output frame and
+the motion vectors. Nothing else.** Depth, normals, albedo, lighting semantics are used *during training
+only* (consistency supervision). TPU: "a sharp break from the rest of the DLSS family" — RR wants 20+
+engine buffers, SR needs color+depth+MV; DLSS 5 needs color+MV. Also confirmed:
+- **Runs at native output resolution** — asked whether it runs at reduced internal res: "just native,
+  the output resolution of DLSS." (Matches our full-window feature creation.)
+- **Placement: end of pipeline, after all SR upscaling outputs; Frame Generation runs immediately
+  after.** Our `nr_node` sits in PostProcess after EarlyPostProcess where SR lives — correct placement.
+- Works on any input (pure raster, native res, upscale/downscale); no other DLSS tech required. RT input
+  gives a better baseline (contact shadows/scattering) but is not needed.
+- **Garbage in, garbage out**: TAA/SR pixelation and ghosting are reproduced *pixel for pixel*; low-res
+  geometry/textures stay low-res, just less photoreal.
+- Geometry preservation: the model adds lighting/material response on top of a frame but "cannot touch
+  the geometry underneath" — silhouettes/normals/shapes come back as drawn.
+
+**Implication (validates §4 item 1b):** our zero-filled MVec stand-in is now confirmed as the prime
+suspect for any motion-related artifact. Temporal stability is *trained on* real motion vectors; feeding
+"no motion" every frame while the camera moves means the temporal state cannot track the scene.
+Fix path unchanged: bevy's `MotionVectorPrepass` when SR is active (or a depth+camera TAAU-style pass),
+then drop the stand-in. Until then, expect shimmer/ghosting specifically during camera movement — that
+is the documented limitation, not a new bug.
+
+### 7.4 Official controls vs our knobs
+| Official (launch) | Semantics | Ours (v310.8 runtime) |
+|---|---|---|
+| **Structure Intensity** 0–1 | high-frequency uplift: AO, contact shadows, reflections, SSS | `DLSSNR.LocalStructureStrength` (`nr_structure_strength`, def 1.0) |
+| **Tone Intensity** 0–1 | low-frequency uplift: broad lighting + color response; **at 0 the output is identical to the rendered frame for that component** | `DLSSNR.LocalToneStrength` (`nr_local_tone_strength`, def 1.0) |
+| (global strength) | overall effect amount | `DLSSNR.Intensity` (`nr_intensity`, def 1.01 = addon default; parser default 1.0 ≈ no-op) |
+| Models A/B/C | three weight sets, visibly different, **no perf difference**, switchable per scene/cutscene | not exposed in v310.8 params we know of — check for a model-select key on next disasm pass |
+| Masking (auto + developer groups) | both feed ONE screen-space control buffer; **zero cost to the model** regardless of content | no mask input seen in our param contract (§2.2) — likely driver-side only at this stage |
+
+Exact semantic equivalence between v310.8's `Local*` names and launch naming is unverified (the runtime
+predates the public release), but the structure/tone split matches 1:1.
+
+**Implication for "textures darker" (user symptom #3):** Tone Intensity governs low-frequency lighting/
+color response, and our default `nr_local_tone_strength = 1.0` is the *maximum* of the official 0–1
+range — i.e. full tone uplift by default. Two concrete tests:
+1. Set **Local Tone Strength → 0** (keep Structure > 0): if the darkening disappears, it is the tone
+   component re-lighting low frequencies; ship a lower default or document the knob.
+2. The §4 item-1 HDR question still applies: the model was trained on renderer-derived attributes; if we
+   feed post-tonemap LDR where it expects linear HDR (or vice versa), "low-frequency lighting" means
+   something different and can read as a global darkening/brightening shift.
+
+### 7.5 Performance — official numbers, set expectations accordingly
+- **Cost: ~50–60% of frame rate on average across RTX 50 GPUs at all resolutions** (NVIDIA's own answer,
+  measured in NBA 2K27). "No per-game tuning — the model is the model." This is a design property, not a
+  bug: NR at full window resolution halving FPS is *expected* on any card below a top-end 5090.
+- NVIDIA offsets it with MFG + SR in their own charts (4K/5090: 370 fps ≈ 62 *rendered* frames with
+  MFG 6X). Community corollary: **DLAA + NR fight over the same Tensor cores** — DLSS Quality mode + NR
+  measured better than DLAA + NR (Stellar Blade, 3090: 73 → 80 fps).
+- The model has been made ~5x faster since development began (started needing dual RTX 5090s) — expect
+  driver-side cost to keep dropping.
+- Community levers we do NOT have officially: OptiScaler's "Model Resolution" control runs the model
+  below output resolution (the only real cost lever found so far); and early-driver builds had a **VRAM
+  leak when toggling the NR checkbox on/off** (workaround there: slide intensity 0–2 instead of
+  toggling). Our pipeline releases/recreates the feature on mode changes (§3.1) — worth watching SL logs
+  for VRAM growth across repeated Neural Uplift toggles in `dlssplay.bat` sessions.
+- **RTX 50 only, confirmed by NVIDIA ("Yes, it is")** — Blackwell FP4 Tensor cores; the leaked DLL's
+  explicit runtime gate for unsupported architectures (§2.10–§2.11 module-gate findings) turned out to be
+  the shipping behavior. Modders have forced it on Ada/Ampere with patched DLLs (FP8→FP16 pipeline);
+  not a path we take.
+
+### 7.6 Sources
+- https://research.nvidia.com/labs/adlr/DLSS5 (official abstract; paper PDF behind S3, geo-blocked from this host)
+- https://www.techpowerup.com/review/nvidia-dlss-5-technical-preview/ (Gamescom briefing coverage, all 7 pages)
+- https://pcmasterinsider.com/nvidia-dlss-5-release-date (launch date / hardware scope)
+- https://github.com/NVIDIA-RTX/Streamline/releases (SDK version status as of 2026-09-04)
+- Community: NexusMods Stellar Blade DLSS5 thread (nvngx_dlssnr.dll behavior, OptiScaler, toggle VRAM leak — Sept 1–2, 2026)

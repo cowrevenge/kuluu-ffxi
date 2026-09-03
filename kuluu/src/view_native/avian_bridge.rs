@@ -389,7 +389,7 @@ fn sync_mob_colliders(
         ),
     >,
     visuals: Query<
-        &Transform,
+        (&Transform, &MobColliderRadius),
         (
             With<MobColliderLink>,
             Without<IsSelf>,
@@ -408,26 +408,35 @@ fn sync_mob_colliders(
     owners: Query<(Entity, &MobColliderOwner)>,
 ) {
     // Spawn a separate collider entity for each newly-sized visual.
+    // The visual transform sits at the FEET and the model AABB extends up from
+    // there, but a capsule is centered on its Transform — parking it raw puts
+    // every mob half-sunk with an effective top of half_height instead of
+    // 2 x half_height. Center it on the AABB (feet + half_height), exactly like
+    // the player capsule's feet0 + HALF.
     for (visual, t, r) in to_build.iter() {
         let seg = (r.half_height * 2.0 - r.radius * 2.0).max(0.05);
+        let center = t.translation + Vec3::Y * r.half_height;
         let collider = commands
             .spawn((
                 RigidBody::Kinematic,
                 Collider::capsule(r.radius, seg),
                 mob_layers(),
-                Transform::from_translation(t.translation),
+                Transform::from_translation(center),
                 MobColliderOwner(visual),
             ))
             .id();
         commands.entity(visual).insert(MobColliderLink(collider));
     }
-    // Park each collider on its visual's current position.
+    // Park each collider on its visual's current position (AABB-centered, as above).
     for (visual, link) in links.iter() {
-        let Ok(vt) = visuals.get(visual) else {
+        let Ok((vt, r)) = visuals.get(visual) else {
             continue;
         };
         if let Ok(mut ct) = collider_tf.get_mut(link.0) {
-            ct.translation = vt.translation;
+            // A half-sunk short mob only touches the player's bottom cap: a steep
+            // normal that slide_walls_only classifies as walkable floor — which is
+            // why collision "only worked on some mobs / some approach angles".
+            ct.translation = vt.translation + Vec3::Y * r.half_height;
         }
     }
     // Despawn colliders whose visual is gone.

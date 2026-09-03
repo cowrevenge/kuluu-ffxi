@@ -2461,13 +2461,14 @@ fn render_debug_entity(arg: &str, entities: &[WireEntity], self_pos: WireVec3) -
         Some(EntityLook::Door { size, .. }) => s.push_str(&format!(" door size={size}")),
         Some(EntityLook::Transport { size }) => s.push_str(&format!(" transport size={size}")),
     }
+    // n/a = no General-block update has carried the byte yet (it rides UPDATE_HP).
+    let namevis = e.name_vis.map_or_else(|| "n/a".to_string(), |v| v.to_string());
     s.push('\n');
     s.push_str(&format!(
-        "  anim={} animsub={} status={} namevis={}{}",
+        "  anim={} animsub={} status={} namevis={namevis}{}",
         e.animation,
         e.animationsub,
         e.status,
-        e.name_vis,
         if e.animationsub != 0 { "  EFFECT" } else { "" }
     ));
     s
@@ -3288,7 +3289,7 @@ mod tests {
             heading: 0,
             hp_pct: None,
             bt_target_id: 0,
-            name_vis: 0,
+            name_vis: None,
             face_target: 0,
             claim_id: 0,
             speed: 0,

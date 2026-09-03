@@ -610,7 +610,7 @@ mod tests {
             hp_pct: None,
             bt_target_id: 0,
             face_target: 0,
-            name_vis: 0,
+            name_vis: None,
             claim_id: 0,
             speed: 0,
             speed_base: 0,

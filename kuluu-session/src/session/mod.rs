@@ -941,7 +941,10 @@ fn handle_sub_packet(
                             hp_pct: Some(head.hpp),
                             bt_target_id: head.bt_target_id,
                             face_target: head.facetarget(),
-                            name_vis: (head.flags3 >> 24) as u8,
+                            // 0x00A's PosHead leaves flags3 zeroed — upstream never
+                            // writes namevis in the login packet (only entity_update.cpp
+                            // does, under UPDATE_HP). The first General-block 0x00E sets it.
+                            name_vis: None,
                             claim_id: 0,
                             speed: head.speed,
                             speed_base: head.speed_base,
@@ -1129,7 +1132,10 @@ fn handle_sub_packet(
                         hp_pct,
                         bt_target_id,
                         face_target: head.facetarget(),
-                        name_vis: (head.flags3 >> 24) as u8,
+                        // UPDATE_HP-gated like its neighbours: entity_update.cpp:357/:408
+                        // write byte 0x2B only inside `if (updatemask & UPDATE_HP)`, and the
+                        // packet buffer is zero-filled, so a POS-only update carries no namevis.
+                        name_vis: (send_flag & UPDATE_HP != 0).then(|| (head.flags3 >> 24) as u8),
                         claim_id,
                         speed: head.speed,
                         speed_base: head.speed_base,
@@ -6328,7 +6334,7 @@ fn mh_door_entity(model: u16) -> Entity {
         hp_pct: None,
         bt_target_id: 0,
         face_target: 0,
-        name_vis: 0,
+        name_vis: None,
         claim_id: 0,
         speed: 0,
         speed_base: 0,

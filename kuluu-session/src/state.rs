@@ -203,11 +203,14 @@ pub struct Entity {
     #[serde(default)]
     pub face_target: u16,
 
-    /// entity_update namevis byte (PosHead flags3 top byte). Rides the
-    /// Position block like `face_target`, so it is preserved across
-    /// non-position updates.
+    /// entity_update namevis byte (PosHead flags3 top byte), written under
+    /// UPDATE_HP — vendor/server/src/map/packets/entity_update.cpp:357/:408 put
+    /// `ref<uint8>(0x2B) = PEntity->namevis` inside `if (updatemask & UPDATE_HP)`.
+    /// The packet buffer is zero-filled, so a POS-only update carries no namevis:
+    /// `None` until the first General-block update does, preserved across
+    /// pos-only updates like `char_flags`.
     #[serde(default)]
-    pub name_vis: u8,
+    pub name_vis: Option<u8>,
 
     #[serde(default)]
     pub claim_id: u32,
@@ -1491,6 +1494,9 @@ impl SessionState {
                     let preserved_npc_state = entity.npc_state.or(existing.npc_state);
                     let preserved_char_flags = entity.char_flags.or(existing.char_flags);
                     let preserved_mount_id = entity.mount_id.or(existing.mount_id);
+                    // UPDATE_HP-gated at the source (entity_update.cpp:357/:408), so
+                    // merge like char_flags — never off pos_present.
+                    let preserved_name_vis = entity.name_vis.or(existing.name_vis);
 
                     let (
                         preserved_pos,
@@ -1498,7 +1504,6 @@ impl SessionState {
                         preserved_speed,
                         preserved_speed_base,
                         preserved_face_target,
-                        preserved_name_vis,
                     ) = if *pos_present {
                         (
                             entity.pos,
@@ -1506,7 +1511,6 @@ impl SessionState {
                             entity.speed,
                             entity.speed_base,
                             entity.face_target,
-                            entity.name_vis,
                         )
                     } else {
                         (
@@ -1515,7 +1519,6 @@ impl SessionState {
                             existing.speed,
                             existing.speed_base,
                             existing.face_target,
-                            existing.name_vis,
                         )
                     };
                     let merged = Entity {

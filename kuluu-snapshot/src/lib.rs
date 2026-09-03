@@ -2,6 +2,9 @@
 
 use serde::{Deserialize, Serialize};
 
+// v22: Entity.name_vis is now Option<u8> — None until a General-block update carries
+// it. The byte rides UPDATE_HP (entity_update.cpp:357/:408), not the Position block,
+// so a POS-only 0x00E must not clobber the last known value with its zero-filled byte.
 // v21: Entity.char_flags.untargetable — flags1 TargetOffFlag, the server's
 // targetability authority (LSB m_flags FLAG_UNTARGETABLE for NPC/MOB, the explicit
 // "Untargetable player" bit for PCs). namevis no longer gates targeting.
@@ -42,7 +45,7 @@ use serde::{Deserialize, Serialize};
 // v5: InventoryItem.charges_remaining + next_use_vana_ts (item recast/charges).
 // v4: SceneSnapshot.delivery_box (dedicated delivery screen) + ViewerCommand::DeliveryBox
 // (postcard frames are not self-describing, so any shape change bumps this).
-pub const PROTOCOL_VERSION: u32 = 21;
+pub const PROTOCOL_VERSION: u32 = 22;
 
 /// Longest countdown `SceneSnapshot::status_icon_expiries` can carry. The
 /// producer rejects anything beyond it as a corrupt 0x063 timestamp, and the HUD
@@ -330,12 +333,14 @@ pub struct Entity {
     pub char_flags: CharFlags,
 
     /// entity_update byte 0x2B (LSB `namevis`; PosHead `flags3 >> 24`), written
-    /// under UPDATE_HP. LSB NAMEVIS (vendor/server/src/map/entities/baseentity.h):
-    /// 0x01 icon, 0x08 hide-name, 0x80 ghost-phase — the other bits in the data
-    /// are render-phase flags on real NPCs (Survival Guides carry 0x20), so only
-    /// 0x08 suppresses anything.
+    /// under UPDATE_HP — vendor/server/src/map/packets/entity_update.cpp:357/:408.
+    /// `None` until the first General-block update carries it; treated as visible,
+    /// matching the server's VIS_NONE default (baseentity.cpp:45). LSB NAMEVIS
+    /// (vendor/server/src/map/entities/baseentity.h): 0x01 icon, 0x08 hide-name,
+    /// 0x80 ghost-phase — the other bits in the data are render-phase flags on real
+    /// NPCs (Survival Guides carry 0x20), so only 0x08 suppresses anything.
     #[serde(default)]
-    pub name_vis: u8,
+    pub name_vis: Option<u8>,
 }
 
 // LSB STATUS_TYPE. vendor/server/src/map/entities/baseentity.h
@@ -359,7 +364,7 @@ impl Entity {
     /// defines only 0x01/0x08/0x80, so the other bits are render-phase flags,
     /// not name suppression. Suppresses the nameplate only — never targeting.
     pub fn name_hidden(&self) -> bool {
-        self.name_vis & 0x08 != 0
+        self.name_vis.is_some_and(|v| v & 0x08 != 0)
     }
 
     // Blacklist (not whitelist) so an undecoded byte fails open, staying targetable.
@@ -1678,7 +1683,7 @@ mod tests {
                 mount: None,
                 status: 0,
                 char_flags: CharFlags::default(),
-                name_vis: 0,
+                name_vis: None,
             }],
             party: vec![],
             zone_generation: 7,

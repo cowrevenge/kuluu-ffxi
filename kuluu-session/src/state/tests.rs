@@ -567,7 +567,7 @@ fn apply_event_folds_in_documented_order() {
             hp_pct: Some(80),
             bt_target_id: 0,
             face_target: 0,
-            name_vis: 0,
+            name_vis: None,
             claim_id: 0,
             speed: 0,
             speed_base: 0,
@@ -596,7 +596,7 @@ fn apply_event_folds_in_documented_order() {
             hp_pct: Some(50),
             bt_target_id: 0,
             face_target: 0,
-            name_vis: 0,
+            name_vis: None,
             claim_id: 0,
             speed: 0,
             speed_base: 0,
@@ -685,7 +685,7 @@ fn make_test_entity(id: u32, name: Option<&str>, kind: EntityKind) -> Entity {
         hp_pct: Some(100),
         bt_target_id: 0,
         face_target: 0,
-        name_vis: 0,
+        name_vis: None,
         claim_id: 0,
         speed: 0,
         speed_base: 0,
@@ -833,6 +833,62 @@ fn entity_upserted_preserves_hp_pct_across_position_only_update() {
         s.entities[0].hp_pct,
         Some(0),
         "Some(0) (mob died) must overwrite, not get preserved as Some(50)"
+    );
+}
+
+#[test]
+fn entity_upserted_name_vis_survives_pos_only_tick() {
+    // #512-4: namevis is written under UPDATE_HP (entity_update.cpp:357/:408), and a
+    // POS-only 0x00E carries the byte zero-filled. Merging off pos_present would
+    // un-hide a hidden entity the moment it moved.
+    let mut s = SessionState::default();
+    let mut ent = make_test_entity(42, Some("Survival Guide"), EntityKind::Npc);
+    ent.name_vis = Some(0x08); // FLAG_HIDE_NAME
+    s.apply_event(&AgentEvent::EntityUpserted {
+        entity: ent,
+        pos_present: true,
+    });
+    assert_eq!(s.entities[0].name_vis, Some(0x08));
+
+    let mut moved = make_test_entity(42, None, EntityKind::Npc); // POS-only: no namevis byte
+    moved.pos = Vec3 {
+        x: 50.0,
+        y: 1.0,
+        z: -20.0,
+    };
+    s.apply_event(&AgentEvent::EntityUpserted {
+        entity: moved,
+        pos_present: true,
+    });
+    assert_eq!(
+        s.entities[0].name_vis,
+        Some(0x08),
+        "a POS-only tick must not un-hide a hidden entity (zero-filled byte is not data)"
+    );
+}
+
+#[test]
+fn entity_upserted_name_vis_applies_on_hp_only_tick() {
+    // #512-4: HideName(true) sets UPDATE_HP, not UPDATE_POS. Merging off pos_present
+    // kept the stale visible value for a static NPC the server just hid.
+    let mut s = SessionState::default();
+    let ent = make_test_entity(42, Some("Unity Master"), EntityKind::Npc);
+    s.apply_event(&AgentEvent::EntityUpserted {
+        entity: ent,
+        pos_present: true,
+    });
+    assert_eq!(s.entities[0].name_vis, None);
+
+    let mut hidden = make_test_entity(42, None, EntityKind::Npc);
+    hidden.name_vis = Some(0x08); // HideName(true) -> updatemask |= UPDATE_HP only
+    s.apply_event(&AgentEvent::EntityUpserted {
+        entity: hidden,
+        pos_present: false,
+    });
+    assert_eq!(
+        s.entities[0].name_vis,
+        Some(0x08),
+        "an HP-only tick must apply the new namevis even without UPDATE_POS"
     );
 }
 
@@ -1214,7 +1270,7 @@ fn self_position_returns_self_entity_pos() {
             hp_pct: Some(100),
             bt_target_id: 0,
             face_target: 0,
-            name_vis: 0,
+            name_vis: None,
             claim_id: 0,
             speed: 40,
             speed_base: 40,
@@ -1769,7 +1825,7 @@ fn apply_event_dedupes_identical_entity_upserts() {
         hp_pct: Some(80),
         bt_target_id: 0,
         face_target: 0,
-        name_vis: 0,
+        name_vis: None,
         claim_id: 0,
         speed: 0,
         speed_base: 0,
@@ -1838,7 +1894,7 @@ fn apply_event_dedupes_identical_self_position() {
             hp_pct: Some(100),
             bt_target_id: 0,
             face_target: 0,
-            name_vis: 0,
+            name_vis: None,
             claim_id: 0,
             speed: 40,
             speed_base: 40,

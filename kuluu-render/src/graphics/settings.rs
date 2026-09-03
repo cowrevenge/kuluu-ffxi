@@ -1323,11 +1323,13 @@ impl GraphicsSettings {
         matches!(self.anti_aliasing, AaMode::Dlss) && self.dlss_supported
     }
 
-    /// Neural Uplift (NR) is toggled AND this build/machine can actually run
-    /// DLSS. The gate for the NR pipeline (graphics/dlss_nr.rs). Independent of
-    /// the SR on/off state: NR works with or without SR active.
+    /// Neural Uplift (NR) is toggled AND DLSS itself is active. The gate for the
+    /// NR pipeline (graphics/dlss_nr.rs): NR is a DLSS-family post effect, so it
+    /// stands down entirely whenever the AA mode leaves Dlss — cycling to MSAA or
+    /// TAA must stop evaluating, not just change what SR feeds it. Still
+    /// independent of the quality tier: any DlssQuality (incl. Dlaa) keeps NR on.
     pub fn nr_active(&self) -> bool {
-        self.neural_uplift && self.dlss_supported
+        self.neural_uplift && self.dlss_active()
     }
 
     /// Clamped render-scale factor (3D-buffer resolution ÷ window resolution).
@@ -2451,13 +2453,13 @@ mod tests {
         s.dlss_supported = true;
         s.cycle(GraphicsField::Dlss, 1);
         s.cycle(GraphicsField::DlssQuality, 1);
-        assert_eq!(s.dlss_quality, DlssQuality::Quality);
+        assert_eq!(s.dlss_quality, DlssQuality::Dlaa); // Auto -> Dlaa is the first step
 
         // Presets never own DLSS: cycling a preset keeps on-state, tier, and
         // capability.
         s.cycle(GraphicsField::Preset, 1);
         assert!(s.dlss_active(), "preset cycle kept DLSS on");
-        assert_eq!(s.dlss_quality, DlssQuality::Quality);
+        assert_eq!(s.dlss_quality, DlssQuality::Dlaa);
         assert!(s.dlss_supported);
 
         // DLSS Config reset touches only the tier.
@@ -2498,22 +2500,44 @@ mod tests {
         assert_eq!(s.value_label(GraphicsField::DlssNeuralUplift), "Off");
         assert!(!s.nr_active());
 
+        // NR is a DLSS-family effect: the toggle alone, in any other AA mode,
+        // must not activate it.
         s.cycle(GraphicsField::DlssNeuralUplift, 1);
         assert!(s.neural_uplift);
-        assert!(s.nr_active(), "toggle + support => nr_active");
+        assert!(!s.nr_active(), "toggle without Dlss mode stays off");
+
+        s.anti_aliasing = AaMode::Dlss;
+        assert!(s.nr_active(), "toggle + support + Dlss mode => nr_active");
         assert_eq!(s.value_label(GraphicsField::DlssNeuralUplift), "On");
+
+        // The reported bug: leaving DLSS mode must stop NR even with the toggle
+        // still on — otherwise it keeps evaluating under MSAA/TAA.
+        s.anti_aliasing = AaMode::Msaa4;
+        assert!(!s.nr_active(), "leaving Dlss mode turns NR off regardless of the toggle");
 
         // Knobs cycle through their slots (default intensity is the addon's 1.01).
         assert!((s.nr_intensity - 1.01).abs() < 1e-6);
         s.cycle(GraphicsField::DlssNrIntensity, 1);
         assert!((s.nr_intensity - 1.25).abs() < 1e-6);
 
-        // Presets never own NR state: cycling a preset keeps it all.
+        // Presets never own NR state (toggle + knobs) NOR the DLSS on/off
+        // mirror: from outside Dlss mode the preset's own AA applies and NR
+        // stays off; from inside it, the cycle carries both over.
+        s.cycle(GraphicsField::Preset, 1); // still in Msaa4 here
+        assert!(s.neural_uplift && (s.nr_intensity - 1.25).abs() < 1e-6);
+        assert!(!matches!(s.anti_aliasing, AaMode::Dlss));
+        assert!(!s.nr_active());
+
+        s.anti_aliasing = AaMode::Dlss;
         s.cycle(GraphicsField::Preset, 1);
-        assert!(s.neural_uplift && s.nr_active());
-        assert!((s.nr_intensity - 1.25).abs() < 1e-6);
+        assert!(
+            matches!(s.anti_aliasing, AaMode::Dlss),
+            "presets carry the Dlss mirror over"
+        );
+        assert!(s.nr_active(), "NR stays active across a preset cycle inside DLSS mode");
 
         // DLSS Config reset turns NR off and restores knob defaults; SR on/off stays put.
+        s.anti_aliasing = AaMode::Msaa4; // non-Dlss so the toggle below lands ON
         s.cycle(GraphicsField::Dlss, 1); // SR on
         s.reset_dlss_config();
         assert!(!s.neural_uplift);

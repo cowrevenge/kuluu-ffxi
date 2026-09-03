@@ -241,16 +241,18 @@ impl MzbCollisionGeometry {
     pub fn trimesh_data(&self) -> (Vec<Vec3>, Vec<[u32; 3]>) {
         let mut positions: Vec<Vec3> = Vec::new();
         let mut tris: Vec<[u32; 3]> = Vec::new();
-        for (slot, block) in self.slots.iter().enumerate() {
-            if self.suppressed == Some(slot as u32) {
-                continue;
-            }
+        for block in self.slots.iter() {
             if block.indices.is_empty() {
                 continue;
             }
             let base = positions.len() as u32;
             positions.extend_from_slice(&block.positions);
-            for t in block.indices.chunks_exact(3) {
+            for (i, t) in block.indices.chunks_exact(3).enumerate() {
+                // Suppressed shell triangles are walk-through in every MZB query;
+                // the physics mesh must mirror that or interiors get invisible walls.
+                if block.is_suppressed(i) {
+                    continue;
+                }
                 tris.push([base + t[0], base + t[1], base + t[2]]);
             }
         }

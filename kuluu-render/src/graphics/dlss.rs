@@ -4,10 +4,9 @@
 //! in `settings.rs` so persisted configs round-trip on every build.
 //!
 //! Wiring lives in three places:
-//! - the app inserts [`project_id`] and `DlssInitPlugin` before
-//!   `DefaultPlugins` (kuluu/src/view_native/mod.rs) — required by
-//!   bevy_anti_alias so the Vulkan instance is created with the DLSS
-//!   extensions;
+//! - the app inserts [`project_id`] before `DefaultPlugins`
+//!   (kuluu/src/view_native/mod.rs) — Bevy adds `DlssInitPlugin` itself under
+//!   the dlss feature, and it panics without that resource;
 //! - [`update_dlss_availability_system`] (registered in kuluu-render's plugin,
 //!   ordered before `apply_anti_aliasing_system`) copies the renderer's
 //!   verdict into `GraphicsSettings::dlss_supported`;

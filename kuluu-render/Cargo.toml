@@ -17,7 +17,10 @@ default = []
 # dlss_wgpu; building it needs the DLSS SDK checked out and DLSS_SDK set — see
 # docs/DLSS.md). The settings/menu surface exists on every build; without this
 # feature it permanently reads N/A.
-dlss = ["bevy/dlss"]
+# `dep:kuluu-dlss-nr` is the DLSS 5 Neural Uplift FFI crate (safe wrapper
+# around nvngx_dlssnr.dll). It must only ever be built when nvsdk_ngx_s.lib
+# is in the link graph — which is exactly what bevy/dlss -> dlss_wgpu does.
+dlss = ["bevy/dlss", "dep:kuluu-dlss-nr"]
 # Enhanced (non-retail) mouse-over tooltips on the status-effect ribbon showing
 # each buff's name. Retail has no such tooltip; the info comes from the scraped
 # status-effect name table.
@@ -87,6 +90,13 @@ parking_lot = "0.12"
 # over the websocket if/when that's wanted.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 ffxi-audio = { path = "../ffxi-audio" }
+# DLSS 5 Neural Uplift FFI (see the `dlss` feature above). Optional: without
+# the feature it is not in the dependency graph at all.
+kuluu-dlss-nr = { path = "../kuluu-dlss-nr", optional = true }
+# Same pinned copy as bevy's wgpu (29.x in the lockfile — zero new compile):
+# graphics/dlss_nr.rs names a few raw wgpu types that bevy does not re-export
+# (TextureTransition/TextureUses). Native-only; wasm never sees it.
+wgpu = { version = "29", default-features = false, features = ["std"] }
 # Stable id for the synthetic picking pointer that bridges window-space mouse
 # input onto the off-screen render-scale target (graphics::render_scale, which
 # is itself native-only). from_u128 only — no getrandom needed.

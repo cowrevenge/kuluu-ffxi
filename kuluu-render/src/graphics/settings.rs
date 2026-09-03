@@ -271,9 +271,17 @@ pub enum GraphicsField {
     DlssSrPreset,
     /// RR responsivity bias. Inert (RR itself unavailable). Always "N/A".
     DlssRrResponsivity,
-    /// DLSS neural uplift master toggle. Inert: needs nvngx_dlssnr plumbing
-    /// that doesn't exist in bevy/dlss_wgpu. Always "N/A".
+    /// DLSS 5 Neural Uplift (NR) master toggle. Live on dlss builds with an
+    /// RTX GPU + `nvngx_dlssnr.dll` staged next to the exe; N/A otherwise.
+    /// Drives the NR pipeline in `graphics/dlss_nr.rs`.
     DlssNeuralUplift,
+    /// NR enhancement strength (the addon's "NR Intensity"; 1.0 reads as
+    /// "no visible effect", kuluu default 1.01). Live while supported.
+    DlssNrIntensity,
+    /// NR local tone-mapping strength. Live while supported.
+    DlssNrLocalTone,
+    /// NR local structure (edge) strength. Live while supported.
+    DlssNrStructure,
     /// Post-upscale sharpening. Wireable later via bevy's
     /// ContrastAdaptiveSharpening; shipped inert for now. Always "N/A".
     DlssSharpness,
@@ -319,6 +327,9 @@ impl GraphicsField {
             GraphicsField::DlssSrPreset => "SR Preset",
             GraphicsField::DlssRrResponsivity => "RR Responsivity",
             GraphicsField::DlssNeuralUplift => "Neural Uplift",
+            GraphicsField::DlssNrIntensity => "NR Intensity",
+            GraphicsField::DlssNrLocalTone => "Local Tone Strength",
+            GraphicsField::DlssNrStructure => "Structure Strength",
             GraphicsField::DlssSharpness => "Sharpness",
         }
     }
@@ -333,21 +344,23 @@ impl GraphicsField {
                 | GraphicsField::DlssSrPreset
                 | GraphicsField::DlssRrResponsivity
                 | GraphicsField::DlssNeuralUplift
+                | GraphicsField::DlssNrIntensity
+                | GraphicsField::DlssNrLocalTone
+                | GraphicsField::DlssNrStructure
                 | GraphicsField::DlssSharpness
         )
     }
 
     /// The inert RenoDX-parity placeholders: visible so the config surface
     /// shows what's planned, but nothing behind them until the SDK plumbing
-    /// (RR / presets / neural uplift / CAS) exists. value_label = "N/A",
-    /// cycle = no-op, on every build.
+    /// (RR / presets / CAS) exists. value_label = "N/A", cycle = no-op, on
+    /// every build. Neural Uplift left this set when kuluu-dlss-nr landed.
     pub const fn is_dlss_placeholder(self) -> bool {
         matches!(
             self,
             GraphicsField::DlssRrPreset
                 | GraphicsField::DlssSrPreset
                 | GraphicsField::DlssRrResponsivity
-                | GraphicsField::DlssNeuralUplift
                 | GraphicsField::DlssSharpness
         )
     }
@@ -373,6 +386,17 @@ fn default_ui_scale() -> f32 {
 fn default_menu_scale_on() -> bool {
     true
 }
+/// The RenoDX addon's NR Intensity default: 1.0 is the parser default and can
+/// read as "no visible effect", so kuluu starts one notch above it.
+fn default_nr_intensity() -> f32 {
+    1.01
+}
+fn default_nr_local_tone() -> f32 {
+    1.0
+}
+fn default_nr_structure() -> f32 {
+    1.0
+}
 
 #[derive(Resource, Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct GraphicsSettings {
@@ -388,6 +412,24 @@ pub struct GraphicsSettings {
     /// carries it over untouched.
     #[serde(default)]
     pub dlss_quality: DlssQuality,
+
+    /// DLSS 5 Neural Uplift (NR) master toggle. Live only while `dlss_supported`
+    /// AND the NR runtime DLL is staged next to the exe; N/A otherwise. NOT
+    /// owned by quality presets — preset cycling carries it over untouched.
+    #[serde(default)]
+    pub neural_uplift: bool,
+
+    /// NR enhancement strength (addon default 1.01; see `default_nr_intensity`).
+    #[serde(default = "default_nr_intensity")]
+    pub nr_intensity: f32,
+
+    /// NR local tone-mapping strength.
+    #[serde(default = "default_nr_local_tone")]
+    pub nr_local_tone_strength: f32,
+
+    /// NR local structure (edge) strength.
+    #[serde(default = "default_nr_structure")]
+    pub nr_structure_strength: f32,
 
     /// Runtime capability: true only when the dlss cargo feature is compiled
     /// in AND the renderer initialized DLSS on this machine (RTX GPU + Vulkan
@@ -590,22 +632,6 @@ const AA_SLOTS: &[AaMode] = &[
 #[cfg(target_arch = "wasm32")]
 const AA_SLOTS: &[AaMode] = &[AaMode::Off, AaMode::Msaa2, AaMode::Msaa4, AaMode::Msaa8];
 
-// The cycler used instead of AA_SLOTS while `dlss_supported`: same list with
-// DLSS appended, so the mode shows up as one more mutually-exclusive AA choice
-// (native only — DLSS is Vulkan/RTX, wasm never supports it).
-#[cfg(not(target_arch = "wasm32"))]
-const AA_SLOTS_DLSS: &[AaMode] = &[
-    AaMode::Off,
-    AaMode::Msaa2,
-    AaMode::Msaa4,
-    AaMode::Msaa8,
-    AaMode::Taa,
-    AaMode::Dlss,
-];
-
-#[cfg(target_arch = "wasm32")]
-const AA_SLOTS_DLSS: &[AaMode] = AA_SLOTS;
-
 const DLSS_QUALITY_SLOTS: &[DlssQuality] = &[
     DlssQuality::Auto,
     DlssQuality::Dlaa,
@@ -648,6 +674,11 @@ const ZONE_LINE_DISPLAY_CYCLE: &[ZoneLineDisplay] = &[
 
 const DOF_APERTURE_SLOTS: &[f32] = &[1.4, 2.0, 2.8, 4.0, 5.6, 8.0];
 
+// NR menu slots (RenoDX addon parity): intensity starts at the parser's no-op
+// value and one notch above it; tone/structure span off..double.
+const NR_INTENSITY_SLOTS: &[f32] = &[0.5, 0.75, 1.0, 1.01, 1.25, 1.5, 2.0];
+const NR_TONE_STRUCTURE_SLOTS: &[f32] = &[0.0, 0.5, 1.0, 1.5, 2.0];
+
 // Sub-1.0 downscales the 3D buffer (perf); 1.0 is native; >1.0 supersamples (SSAA).
 // 1.0 must stay in this list — it's the default and the no-op path.
 // 30 matches retail's native cadence; 0 = Off (framepace Auto). A flat cap
@@ -668,6 +699,10 @@ impl GraphicsSettings {
                 shadow_max_distance: 200.0,
                 anti_aliasing: AaMode::Off,
                 dlss_quality: DlssQuality::Auto,
+                neural_uplift: false,
+                nr_intensity: default_nr_intensity(),
+                nr_local_tone_strength: default_nr_local_tone(),
+                nr_structure_strength: default_nr_structure(),
                 dlss_supported: false,
                 texture_filtering: TextureFiltering::Vanilla,
                 bloom_intensity: 0.0,
@@ -677,9 +712,9 @@ impl GraphicsSettings {
                 vsync: true,
                 fps_cap: 0,
                 fov_deg: DEFAULT_FOV_DEG,
-            ui_scale: 1.0,
-            camera_spring: false,
-            menu_scale: true,
+                ui_scale: 1.0,
+                camera_spring: false,
+                menu_scale: true,
                 dynamic_lights: DynamicLights::Vanilla,
                 light_threshold: DEFAULT_LIGHT_THRESHOLD,
                 light_intensity: DEFAULT_LIGHT_INTENSITY,
@@ -704,6 +739,10 @@ impl GraphicsSettings {
                 shadow_max_distance: 300.0,
                 anti_aliasing: aa_default,
                 dlss_quality: DlssQuality::Auto,
+                neural_uplift: false,
+                nr_intensity: default_nr_intensity(),
+                nr_local_tone_strength: default_nr_local_tone(),
+                nr_structure_strength: default_nr_structure(),
                 dlss_supported: false,
                 texture_filtering: TextureFiltering::Vanilla,
                 bloom_intensity: 0.08,
@@ -713,9 +752,9 @@ impl GraphicsSettings {
                 vsync: true,
                 fps_cap: 0,
                 fov_deg: DEFAULT_FOV_DEG,
-            ui_scale: 1.0,
-            camera_spring: false,
-            menu_scale: true,
+                ui_scale: 1.0,
+                camera_spring: false,
+                menu_scale: true,
                 dynamic_lights: DynamicLights::Vanilla,
                 light_threshold: DEFAULT_LIGHT_THRESHOLD,
                 light_intensity: DEFAULT_LIGHT_INTENSITY,
@@ -740,6 +779,10 @@ impl GraphicsSettings {
                 shadow_max_distance: 700.0,
                 anti_aliasing: aa_default,
                 dlss_quality: DlssQuality::Auto,
+                neural_uplift: false,
+                nr_intensity: default_nr_intensity(),
+                nr_local_tone_strength: default_nr_local_tone(),
+                nr_structure_strength: default_nr_structure(),
                 dlss_supported: false,
                 texture_filtering: TextureFiltering::Aniso4x,
                 bloom_intensity: 0.08,
@@ -749,9 +792,9 @@ impl GraphicsSettings {
                 vsync: true,
                 fps_cap: 0,
                 fov_deg: DEFAULT_FOV_DEG,
-            ui_scale: 1.0,
-            camera_spring: false,
-            menu_scale: true,
+                ui_scale: 1.0,
+                camera_spring: false,
+                menu_scale: true,
                 dynamic_lights: DynamicLights::Vanilla,
                 light_threshold: DEFAULT_LIGHT_THRESHOLD,
                 light_intensity: DEFAULT_LIGHT_INTENSITY,
@@ -780,6 +823,10 @@ impl GraphicsSettings {
                 // via Depth of Field only. TAA stays available as a manual choice.
                 anti_aliasing: AaMode::Msaa8,
                 dlss_quality: DlssQuality::Auto,
+                neural_uplift: false,
+                nr_intensity: default_nr_intensity(),
+                nr_local_tone_strength: default_nr_local_tone(),
+                nr_structure_strength: default_nr_structure(),
                 dlss_supported: false,
                 texture_filtering: TextureFiltering::Aniso8x,
                 bloom_intensity: 0.12,
@@ -789,9 +836,9 @@ impl GraphicsSettings {
                 vsync: true,
                 fps_cap: 0,
                 fov_deg: DEFAULT_FOV_DEG,
-            ui_scale: 1.0,
-            camera_spring: false,
-            menu_scale: true,
+                ui_scale: 1.0,
+                camera_spring: false,
+                menu_scale: true,
                 dynamic_lights: DynamicLights::Vanilla,
                 light_threshold: DEFAULT_LIGHT_THRESHOLD,
                 light_intensity: DEFAULT_LIGHT_INTENSITY,
@@ -860,7 +907,9 @@ impl GraphicsSettings {
             },
             GraphicsField::Fov => format!("{:.0}°", self.fov_deg),
             GraphicsField::UiScale => format!("{:.0}%", self.ui_scale * 100.0),
-            GraphicsField::CameraSpring => (if self.camera_spring { "on" } else { "off" }).to_string(),
+            GraphicsField::CameraSpring => {
+                (if self.camera_spring { "on" } else { "off" }).to_string()
+            }
             GraphicsField::MenuScale => (if self.menu_scale { "on" } else { "off" }).to_string(),
 
             GraphicsField::DynamicLights => {
@@ -915,11 +964,40 @@ impl GraphicsSettings {
                     "N/A".to_string()
                 }
             }
+            // Live NR rows: N/A while unsupported, values otherwise (the knobs
+            // stay adjustable before the toggle is flipped on).
+            GraphicsField::DlssNeuralUplift => {
+                if !self.dlss_supported {
+                    "N/A".to_string()
+                } else {
+                    bool_label(self.neural_uplift).into()
+                }
+            }
+            GraphicsField::DlssNrIntensity => {
+                if self.dlss_supported {
+                    format!("{:.2}", self.nr_intensity)
+                } else {
+                    "N/A".to_string()
+                }
+            }
+            GraphicsField::DlssNrLocalTone => {
+                if self.dlss_supported {
+                    format!("{:.2}", self.nr_local_tone_strength)
+                } else {
+                    "N/A".to_string()
+                }
+            }
+            GraphicsField::DlssNrStructure => {
+                if self.dlss_supported {
+                    format!("{:.2}", self.nr_structure_strength)
+                } else {
+                    "N/A".to_string()
+                }
+            }
             // Inert placeholders: grayed on every build (see is_dlss_placeholder).
             GraphicsField::DlssRrPreset
             | GraphicsField::DlssSrPreset
             | GraphicsField::DlssRrResponsivity
-            | GraphicsField::DlssNeuralUplift
             | GraphicsField::DlssSharpness => "N/A".to_string(),
         }
     }
@@ -946,6 +1024,13 @@ impl GraphicsSettings {
                 let was_dlss = matches!(self.anti_aliasing, AaMode::Dlss);
                 let dlss_quality = self.dlss_quality;
                 let dlss_supported = self.dlss_supported;
+                // NR is DLSS-family: presets never own it either.
+                let nr = (
+                    self.neural_uplift,
+                    self.nr_intensity,
+                    self.nr_local_tone_strength,
+                    self.nr_structure_strength,
+                );
                 let next =
                     cycle_slot(self.preset, PRESET_CYCLE, delta).unwrap_or(QualityPreset::High);
                 *self = Self::for_preset(next);
@@ -961,6 +1046,12 @@ impl GraphicsSettings {
                 self.fps_cap = fps_cap;
                 self.dlss_quality = dlss_quality;
                 self.dlss_supported = dlss_supported;
+                (
+                    self.neural_uplift,
+                    self.nr_intensity,
+                    self.nr_local_tone_strength,
+                    self.nr_structure_strength,
+                ) = nr;
                 if was_dlss {
                     self.anti_aliasing = AaMode::Dlss;
                 }
@@ -981,19 +1072,13 @@ impl GraphicsSettings {
                 self.preset = QualityPreset::Custom;
             }
             GraphicsField::AntiAliasing => {
-                // DLSS appears as one more cycler slot only while the runtime
-                // supports it. When a dlss-build json lands us on Dlss on a
-                // machine/build without support, the current value isn't in the
-                // plain list; cycle_slot treats an unknown current as slot 0,
-                // so one click lands on a real mode — cycling away always
-                // works, the row just can't cycle back onto DLSS.
-                let slots = if self.dlss_supported {
-                    AA_SLOTS_DLSS
-                } else {
-                    AA_SLOTS
-                };
+                // DLSS is NOT a cycler slot (user decision 2026-10): the
+                // explicit DLSS on/off row owns that transition. When a json
+                // lands us on Dlss, the current value isn't in AA_SLOTS;
+                // cycle_slot treats an unknown current as slot 0, so one click
+                // lands on a real mode — cycling away always works.
                 self.anti_aliasing =
-                    cycle_slot(self.anti_aliasing, slots, delta).unwrap_or(AaMode::Msaa4);
+                    cycle_slot(self.anti_aliasing, AA_SLOTS, delta).unwrap_or(AaMode::Msaa4);
                 self.preset = QualityPreset::Custom;
             }
             GraphicsField::TextureFiltering => {
@@ -1037,14 +1122,21 @@ impl GraphicsSettings {
                 self.fps_cap = cycle_slot_u32(self.fps_cap, FPS_CAP_SLOTS, delta);
             }
             GraphicsField::CameraSpring => {
-                if delta != 0 { self.camera_spring = !self.camera_spring; }
+                if delta != 0 {
+                    self.camera_spring = !self.camera_spring;
+                }
             }
             GraphicsField::MenuScale => {
-                if delta != 0 { self.menu_scale = !self.menu_scale; }
+                if delta != 0 {
+                    self.menu_scale = !self.menu_scale;
+                }
             }
             GraphicsField::UiScale => {
-                self.ui_scale =
-                    cycle_slot_f32(self.ui_scale, &[0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0], delta);
+                self.ui_scale = cycle_slot_f32(
+                    self.ui_scale,
+                    &[0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0],
+                    delta,
+                );
             }
             GraphicsField::Fov => {
                 self.fov_deg = cycle_slot_f32(self.fov_deg, FOV_SLOTS, delta);
@@ -1136,12 +1228,39 @@ impl GraphicsSettings {
                 // like VSync, this is a display/perf preference, and presets
                 // never own DLSS state.
             }
+            // Live NR rows: refuse while unsupported (the row reads "N/A").
+            GraphicsField::DlssNeuralUplift => {
+                if !self.dlss_supported {
+                    return;
+                }
+                self.neural_uplift = !self.neural_uplift;
+                self.preset = QualityPreset::Custom;
+            }
+            GraphicsField::DlssNrIntensity => {
+                if !self.dlss_supported {
+                    return;
+                }
+                self.nr_intensity = cycle_slot_f32(self.nr_intensity, NR_INTENSITY_SLOTS, delta);
+            }
+            GraphicsField::DlssNrLocalTone => {
+                if !self.dlss_supported {
+                    return;
+                }
+                self.nr_local_tone_strength =
+                    cycle_slot_f32(self.nr_local_tone_strength, NR_TONE_STRUCTURE_SLOTS, delta);
+            }
+            GraphicsField::DlssNrStructure => {
+                if !self.dlss_supported {
+                    return;
+                }
+                self.nr_structure_strength =
+                    cycle_slot_f32(self.nr_structure_strength, NR_TONE_STRUCTURE_SLOTS, delta);
+            }
             // Inert placeholders: nothing behind them yet, cycling is a no-op
             // on every build (the row reads "N/A").
             GraphicsField::DlssRrPreset
             | GraphicsField::DlssSrPreset
             | GraphicsField::DlssRrResponsivity
-            | GraphicsField::DlssNeuralUplift
             | GraphicsField::DlssSharpness => {}
         }
     }
@@ -1155,11 +1274,15 @@ impl GraphicsSettings {
         self.dlss_supported = dlss_supported;
     }
 
-    /// Reset only the DLSS Config surface: quality back to Auto. The inert
-    /// placeholders have no state to reset; on/off (the AA mode) is a main-list
-    /// concern and stays put.
+    /// Reset only the DLSS Config surface: quality back to Auto, NR toggle off
+    /// with its knobs back to defaults. The inert placeholders have no state
+    /// to reset; SR on/off (the AA mode) is a main-list concern and stays put.
     pub fn reset_dlss_config(&mut self) {
         self.dlss_quality = DlssQuality::Auto;
+        self.neural_uplift = false;
+        self.nr_intensity = default_nr_intensity();
+        self.nr_local_tone_strength = default_nr_local_tone();
+        self.nr_structure_strength = default_nr_structure();
     }
 
     // Retail outputs colour directly with no filmic tonemap; a filmic curve desaturates
@@ -1198,6 +1321,13 @@ impl GraphicsSettings {
     /// a dlss-build json loaded on a default build changes nothing.
     pub fn dlss_active(&self) -> bool {
         matches!(self.anti_aliasing, AaMode::Dlss) && self.dlss_supported
+    }
+
+    /// Neural Uplift (NR) is toggled AND this build/machine can actually run
+    /// DLSS. The gate for the NR pipeline (graphics/dlss_nr.rs). Independent of
+    /// the SR on/off state: NR works with or without SR active.
+    pub fn nr_active(&self) -> bool {
+        self.neural_uplift && self.dlss_supported
     }
 
     /// Clamped render-scale factor (3D-buffer resolution ÷ window resolution).
@@ -1332,6 +1462,9 @@ pub const DLSS_CONFIG_FIELDS: &[GraphicsField] = &[
     GraphicsField::DlssSrPreset,
     GraphicsField::DlssRrResponsivity,
     GraphicsField::DlssNeuralUplift,
+    GraphicsField::DlssNrIntensity,
+    GraphicsField::DlssNrLocalTone,
+    GraphicsField::DlssNrStructure,
     GraphicsField::DlssSharpness,
 ];
 
@@ -1708,7 +1841,12 @@ pub fn apply_camera_prepass_system(
     let Ok((entity, depth)) = q_cam.single() else {
         return;
     };
-    let keep_depth = settings.depth_of_field || settings.wants_taa() || settings.dlss_active();
+    // NR needs the prepass depth too (when single-sampled), so it keeps the
+    // DepthPrepass alive even with SR off and no other depth consumer.
+    let keep_depth = settings.depth_of_field
+        || settings.wants_taa()
+        || settings.dlss_active()
+        || settings.nr_active();
     // try_* so we no-op (not panic) if apply_anti_aliasing_system queued a
     // despawn+respawn of this same camera earlier in the frame.
     match (keep_depth, depth.is_some()) {
@@ -2300,10 +2438,11 @@ mod tests {
         s.cycle(GraphicsField::Dlss, 1);
         assert!(matches!(s.anti_aliasing, AaMode::Off));
 
-        // The AA cycler includes Dlss as the slot after Taa when supported.
+        // The AA cycler does NOT include Dlss (user decision): cycling from
+        // Taa wraps to Off; the explicit DLSS row owns that transition.
         s.anti_aliasing = AaMode::Taa;
         s.cycle(GraphicsField::AntiAliasing, 1);
-        assert!(matches!(s.anti_aliasing, AaMode::Dlss));
+        assert!(matches!(s.anti_aliasing, AaMode::Off));
     }
 
     #[test]
@@ -2348,6 +2487,51 @@ mod tests {
     }
 
     #[test]
+    fn neural_uplift_rows_are_live_when_supported() {
+        let mut s = GraphicsSettings::default();
+        assert_eq!(s.value_label(GraphicsField::DlssNeuralUplift), "N/A");
+        // Refuses to cycle while unsupported.
+        s.cycle(GraphicsField::DlssNeuralUplift, 1);
+        assert!(!s.neural_uplift);
+
+        s.dlss_supported = true;
+        assert_eq!(s.value_label(GraphicsField::DlssNeuralUplift), "Off");
+        assert!(!s.nr_active());
+
+        s.cycle(GraphicsField::DlssNeuralUplift, 1);
+        assert!(s.neural_uplift);
+        assert!(s.nr_active(), "toggle + support => nr_active");
+        assert_eq!(s.value_label(GraphicsField::DlssNeuralUplift), "On");
+
+        // Knobs cycle through their slots (default intensity is the addon's 1.01).
+        assert!((s.nr_intensity - 1.01).abs() < 1e-6);
+        s.cycle(GraphicsField::DlssNrIntensity, 1);
+        assert!((s.nr_intensity - 1.25).abs() < 1e-6);
+
+        // Presets never own NR state: cycling a preset keeps it all.
+        s.cycle(GraphicsField::Preset, 1);
+        assert!(s.neural_uplift && s.nr_active());
+        assert!((s.nr_intensity - 1.25).abs() < 1e-6);
+
+        // DLSS Config reset turns NR off and restores knob defaults; SR on/off stays put.
+        s.cycle(GraphicsField::Dlss, 1); // SR on
+        s.reset_dlss_config();
+        assert!(!s.neural_uplift);
+        assert!((s.nr_intensity - 1.01).abs() < 1e-6);
+        assert!(
+            matches!(s.anti_aliasing, AaMode::Dlss),
+            "reset left SR on/off alone"
+        );
+
+        // Toggled in a json but unsupported => nr_active stays false (no-op).
+        let s2 = GraphicsSettings {
+            neural_uplift: true,
+            ..Default::default()
+        };
+        assert!(!s2.nr_active());
+    }
+
+    #[test]
     fn dlss_mode_in_json_is_inert_on_default_builds() {
         // A graphics.json written by a dlss build round-trips: the mode
         // deserializes, but with capability undetected everything reads N/A
@@ -2366,7 +2550,6 @@ mod tests {
         assert_eq!(back.value_label(GraphicsField::AntiAliasing), "DLSS (N/A)");
     }
 }
-
 
 /// Resolution-relative HUD scaling: UiScale = (logical height / 1080) x the
 /// user's UI Scale setting, so panels authored against a 1080p baseline grow

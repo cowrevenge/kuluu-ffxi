@@ -4515,6 +4515,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "kuluu-dlss-nr"
+version = "0.6.0"
+dependencies = [
+ "ash",
+ "wgpu",
+]
+
+[[package]]
 name = "kuluu-mcp"
 version = "0.6.0"
 dependencies = [
@@ -4545,6 +4553,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "kuluu-ngx-fwd"
+version = "0.1.0"
+
+[[package]]
 name = "kuluu-render"
 version = "0.6.0"
 dependencies = [
@@ -4558,11 +4570,13 @@ dependencies = [
  "ffxi-proto",
  "ffxi-vocab",
  "js-sys",
+ "kuluu-dlss-nr",
  "kuluu-snapshot",
  "parking_lot",
  "serde",
  "serde_json",
  "uuid",
+ "wgpu",
 ]
 
 [[package]]
@@ -8080,6 +8094,7 @@ dependencies = [
  "smallvec",
  "static_assertions",
  "wasm-bindgen",
+ "wasm-bindgen-futures",
  "web-sys",
  "wgpu-core",
  "wgpu-hal",

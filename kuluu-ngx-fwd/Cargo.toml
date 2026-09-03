@@ -1,0 +1,20 @@
+[package]
+name = "kuluu-ngx-fwd"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Return-address forwarder so nvngx_dlssnr.dll's Init_Ext sees a caller whose module name contains nvngx.dll"
+
+[lib]
+# Cargo won't let a lib target contain '.', so the DLL is built as kuluu_ngx_fwd.dll
+# and renamed to nvngx.dll_kuluu.dll at staging time (see build-dlss.bat lines in the notes).
+name = "kuluu_ngx_fwd"
+crate-type = ["cdylib"]
+
+[dependencies]
+# intentionally none: no windows-sys, no libc. Plain std so the workspace profile (panic=unwind) links cleanly. The forwarder never loads anything itself,
+# it just makes one real CALL through a function pointer kuluu hands it.
+
+# NOTE: [profile.*] is only honored in the workspace root Cargo.toml. The root already
+# builds release for build-dlss.bat; the only thing we need from the profile is that
+# panic=abort or panic=unwind both work here because nothing in this crate can panic.

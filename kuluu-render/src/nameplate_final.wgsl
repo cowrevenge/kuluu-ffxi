@@ -17,11 +17,14 @@ struct PlateUniform {
 };
 
 // Per-view data for this frame's run of the pass: the clip matrix of the view
-// currently being drawn (the operator camera's), plus its projection near
-// plane. Byte layout: mat4 @ 0, near f32 @ 64.
+// currently being drawn (the operator camera's), its projection near plane, and
+// the render-res/full-res scale that maps a full-res fragment onto the depth
+// sub-rect the main pass actually wrote under an upscaler. Byte layout:
+// mat4 @ 0, near f32 @ 64, subrect_scale vec2 @ 72 (total stays 80).
 struct ViewUniform {
     clip_from_world: mat4x4<f32>,
     near: f32,
+    subrect_scale: vec2<f32>,
 };
 
 @group(0) @binding(0) var<uniform> plate: PlateUniform;
@@ -29,17 +32,22 @@ struct ViewUniform {
 @group(0) @binding(2) var plate_tex: texture_2d<f32>;
 @group(0) @binding(3) var plate_smp: sampler;
 
-// Scene depth of the view this pass draws into. The single-sample variant tests
-// it as a HARDWARE attachment instead and never touches these bindings (the
-// group is simply left unbound); the DLSS/upscaler variant skips the test
-// entirely and also leaves them unbound. Only referenced when
-// MANUAL_DEPTH_TEST is compiled in, i.e. MSAA on: the multi-sample depth
-// buffer cannot sit beside the 1-sample processed color image in one pass,
-// so per-sample textureLoad reads this pixel's sub-sampled scene depths
-// (WGSL forbids textureGather on multisampled depth — the only legal read
-// is textureLoad(tex, coord, sample), so each sample gets its own load).
+// Scene depth of the view this pass draws into. The Hardware variant tests it
+// as an ATTACHMENT instead and never touches these bindings (the group is
+// simply left unbound). Only referenced when MANUAL_DEPTH_TEST is compiled in:
+// - MSAA on: the multi-sample depth buffer cannot sit beside the 1-sample
+//   processed color image in one pass, so per-sample textureLoad reads this
+//   pixel's sub-sampled scene depths (WGSL forbids textureGather on
+//   multisampled depth — the only legal read is textureLoad(tex, coord,
+//   sample), so each sample gets its own load).
+// - Upscaler active: single-sample depth bound as a plain texture; one nearest
+//   load at the render-res sub-rect pixel (SUBRECT_SCALE + SINGLE_SAMPLE_DEPTH).
 #ifdef MANUAL_DEPTH_TEST
+#ifdef SINGLE_SAMPLE_DEPTH
+@group(1) @binding(0) var scene_depth: texture_depth_2d;
+#else
 @group(1) @binding(0) var scene_depth: texture_depth_multisampled_2d;
+#endif
 #endif
 
 struct VsOut {
@@ -75,16 +83,37 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     if (in.clip.w <= 0.0) {
         discard;
     }
-    // MSAA sub-sample depths of THIS pixel. WGSL forbids textureGather on
+    // Pixel of scene depth this fragment maps to. @builtin(position) is the
+    // fragment centre in pixel units, so truncation yields the texel index.
+    var pix = vec2<f32>(in.clip.xy);
+    #ifdef SUBRECT_SCALE
+    // Under an upscaler the main pass rendered into a top-left sub-rect at
+    // render resolution: scale full-res fragment coords down into that sub-rect
+    // so every fragment lands on depth the scene actually wrote (the hardware
+    // attachment test can't do this — it would read stale texels past the
+    // sub-rect and occlude plates against garbage).
+    pix *= view_u.subrect_scale;
+    #endif
+    let pix_i = vec2<i32>(pix);
+
+    #ifdef SINGLE_SAMPLE_DEPTH
+    // Single-sample scene depth: one nearest load, same GreaterEqual distance
+    // test the attachment variant uses. Compare distances (near/d) instead of
+    // raw depth values: both sides divide by the same near (cancels), and a 0
+    // sample at the far plane would blow up the division.
+    let d = textureLoad(scene_depth, pix_i, 0);
+    if (d > 1e-6 && view_u.near / d < in.view_dist) {
+        discard;
+    }
+    #else
+    // MSAA sub-sample depths of that pixel. WGSL forbids textureGather on
     // multisampled textures ("Unable to operate on image class Depth {
     // multi: true }") — the only legal read is textureLoad(tex, coord, sample),
     // so read each sub-sample explicitly. Bevy's MSAA count (2/4/8) is baked
     // into the pipeline via the MSAA_SAMPLES_N shader def by the CPU side, so
     // each variant reads exactly its own samples — no wasted loads, no missing
-    // ones. pix comes from @builtin(position) which is integer pixel indices
-    // in fragment stage. textureLoad needs no sampler, so the depth group is a
-    // single texture binding.
-    let pix = vec2<i32>(in.clip.xy);
+    // ones. textureLoad needs no sampler, so the depth group is a single
+    // texture binding.
 
     // Sample-count constant, set by exactly one shader def per pipeline
     // variant. Falls back to 4 (the game's default preset) so a missing def
@@ -100,12 +129,10 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
 
     // Any sub-sample nearer than the plate means opaque geometry occupies
     // part of this pixel — hide the plate behind it (same GreaterEqual test
-    // the attachment variant uses). Compare distances (near/d) instead of raw
-    // depth values: both sides divide by the same near (cancels), and a 0
-    // sample at the far plane would blow up the division.
+    // the attachment variant uses).
     var occluded: bool = false;
     for (var i: i32 = 0; i < sample_count; i = i + 1) {
-        let d = textureLoad(scene_depth, pix, i);
+        let d = textureLoad(scene_depth, pix_i, i);
         if (d > 1e-6) {
             let scene_dist = view_u.near / d;
             if (scene_dist < in.view_dist) {
@@ -117,6 +144,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     if (occluded) {
         discard;
     }
+    #endif
     #endif
 
     // Replicates core_3d's PBR unlit + AlphaMode::Premultiplied pixel math over the

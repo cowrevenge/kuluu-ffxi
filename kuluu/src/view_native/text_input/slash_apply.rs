@@ -93,7 +93,10 @@ pub(super) fn apply_slash_outcome(
         }
         SlashOutcome::QuitWithLogout(kind) => {
             // TEMP (exit-hunt): identify which close path fired.
-            tracing::info!(?kind, "TEMP slash_apply.rs: SlashOutcome::QuitWithLogout -> AppExit");
+            tracing::info!(
+                ?kind,
+                "TEMP slash_apply.rs: SlashOutcome::QuitWithLogout -> AppExit"
+            );
             let req = AgentCommand::ReqLogout { kind };
             if let Some(toast) = reqlogout_ack_text(&req) {
                 push_system_chat_line(scene_state, toast.into());

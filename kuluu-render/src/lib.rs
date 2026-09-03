@@ -54,7 +54,6 @@ pub mod particle_sim;
 pub mod perf_probe;
 pub mod picking;
 pub mod scene;
-pub mod wobble_trace;
 pub mod scheduler_runtime;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod skeleton_instance;
@@ -77,6 +76,7 @@ pub mod weather;
 pub mod weather_fx;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod weather_particles;
+pub mod wobble_trace;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod zone_clouds;
 #[cfg(not(target_arch = "wasm32"))]
@@ -519,6 +519,12 @@ impl<S: SceneSource + Resource + Component<Mutability = bevy::ecs::component::Mu
             graphics::dlss::update_dlss_availability_system
                 .before(graphics_settings::apply_anti_aliasing_system),
         );
+
+        // DLSS 5 Neural Uplift (NR): registers its main-world apply system +
+        // component extraction plugin, and the render-world prepare/node
+        // systems (see graphics/dlss_nr.rs). No-op without nvngx_dlssnr.dll.
+        #[cfg(all(not(target_arch = "wasm32"), feature = "dlss"))]
+        graphics::dlss_nr::register(app);
 
         #[cfg(not(target_arch = "wasm32"))]
         app.add_systems(

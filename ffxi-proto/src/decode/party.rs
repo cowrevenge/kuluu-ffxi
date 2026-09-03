@@ -38,7 +38,11 @@ impl GroupTbl {
     /// Decode the GROUP_TBL body (everything after the sub-packet header).
     ///
     /// Layout (vendor/server/src/map/packets/s2c/0x0c8_group_tbl.h):
-    ///   [0]      Kind: u8 (0 = none, 1 = party, 2 = alliance)
+    ///   [0]      Kind: u8 — PartyKind::Party = 0, PartyKind::Alliance = 5
+    ///            (vendor/server/src/map/enums/party_kind.h). A solo/disbanded
+    ///            packet is also 0: GP_SERV_PACKET zero-memsets its buffer and
+    ///            DisbandParty sends GROUP_TBL(nullptr) (party.cpp:128), so byte 0
+    ///            alone cannot tell Party from None — member presence decides.
     ///   [1..4]   padding
     ///   [4..]    array of up to 20 GROUP_TBL entries, 12 bytes each:
     ///     [0..4]   UniqueNo: u32
@@ -51,12 +55,6 @@ impl GroupTbl {
         if body.len() < 4 {
             return Err(DecodeError::Truncated(4, body.len()));
         }
-        let kind = match body[0] {
-            0 => GroupKind::None,
-            1 => GroupKind::Party,
-            2 => GroupKind::Alliance,
-            v => GroupKind::Unknown(v),
-        };
 
         const ENTRY_SIZE: usize = 12;
         const ENTRY_START: usize = 4;
@@ -92,6 +90,16 @@ impl GroupTbl {
                 zone_no,
             });
         }
+
+        let kind = match body[0] {
+            // vendor/server/src/map/enums/party_kind.h: Alliance == 5.
+            5 => GroupKind::Alliance,
+            // Party == 0 — indistinguishable from the solo/disbanded packet
+            // (zero-memset buffer, party.cpp:128), so member presence decides.
+            0 if members.is_empty() => GroupKind::None,
+            0 => GroupKind::Party,
+            v => GroupKind::Unknown(v),
+        };
 
         Ok(Self { kind, members })
     }
@@ -317,7 +325,9 @@ mod group_tbl_tests {
     #[test]
     fn group_tbl_party_parses_flags_and_zones() {
         let mut body = vec![0u8; 4 + 20 * 12];
-        body[0] = 1;
+        // PartyKind::Party == 0 (vendor/server/src/map/enums/party_kind.h) — the
+        // old test pinned 1, a value LSB never sends.
+        body[0] = 0;
         // party_no=1, PartyLeaderFlg set (bit2) -> flags 0b101
         body[4..16].copy_from_slice(&entry(0x0010_0042, 7, 0b101, 235));
         // party_no=2 (bits0-1), no leader flags; ZoneNo 0 is legal here
@@ -346,7 +356,9 @@ mod group_tbl_tests {
     #[test]
     fn group_tbl_alliance_kind_and_truncated() {
         let mut body = vec![0u8; 4 + 12];
-        body[0] = 2;
+        // PartyKind::Alliance == 5 (vendor/server/src/map/enums/party_kind.h) — the
+        // old test pinned 2, a value LSB never sends.
+        body[0] = 5;
         body[4..16].copy_from_slice(&entry(5, 1, 0b1000, 1)); // AllianceLeaderFlg (bit3)
         let tbl = GroupTbl::decode(&body).unwrap();
         assert_eq!(tbl.kind, GroupKind::Alliance);

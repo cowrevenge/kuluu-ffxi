@@ -802,7 +802,7 @@ pub fn resolve_position(
         return WallClipResult {
             dx: 0.0,
             dy: 0.0,
-            landed_floor: floor.map(|f| -f),
+            landed_floor: floor,
             dbg_is_a_stop: false,
             dbg_stop_slope: false,
             dbg_slope_angle: 0.0,

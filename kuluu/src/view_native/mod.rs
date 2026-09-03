@@ -749,6 +749,10 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
         FixedUpdate,
         (
             input::dispatch_movement_system,
+            // Breaks a persistent wire-z wedge (kuluu-mo4q): runs right after
+            // dispatch so it sees this tick's held height, before the render
+            // smoother follows prediction.
+            input::recover_self_ground_system,
             input::apply_self_prediction_system,
             // FFXI_STAIR_CAPTURE: one JSON position line per tick (no-op unless set).
             input::stair_capture_system,

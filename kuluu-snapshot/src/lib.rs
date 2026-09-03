@@ -2,6 +2,9 @@
 
 use serde::{Deserialize, Serialize};
 
+// v21: Entity.char_flags.untargetable — flags1 TargetOffFlag, the server's
+// targetability authority (LSB m_flags FLAG_UNTARGETABLE for NPC/MOB, the explicit
+// "Untargetable player" bit for PCs). namevis no longer gates targeting.
 // v20: SceneSnapshot.zone_generation — a counter bumped on every zone change so the
 // party frame's content key differs after a transition even when the roster is
 // byte-identical to the previous zone (the fast-path race where the 0x0DD/0x0DF refill
@@ -39,7 +42,7 @@ use serde::{Deserialize, Serialize};
 // v5: InventoryItem.charges_remaining + next_use_vana_ts (item recast/charges).
 // v4: SceneSnapshot.delivery_box (dedicated delivery screen) + ViewerCommand::DeliveryBox
 // (postcard frames are not self-describing, so any shape change bumps this).
-pub const PROTOCOL_VERSION: u32 = 20;
+pub const PROTOCOL_VERSION: u32 = 21;
 
 /// Longest countdown `SceneSnapshot::status_icon_expiries` can carry. The
 /// producer rejects anything beyond it as a corrupt 0x063 timestamp, and the HUD
@@ -239,6 +242,13 @@ pub struct CharFlags {
     pub allegiance: u8,
     pub new_character: bool,
     pub mentor: bool,
+
+    /// `Flags1.TargetOffFlag` (bit 19): the server's untargetable bit — LSB
+    /// `m_flags & FLAG_UNTARGETABLE` for NPC/MOB, char_update's "Untargetable
+    /// player" field for PCs. The targetability authority; see
+    /// [`Entity::is_targetable`] and ffxi-proto's decode citation.
+    #[serde(default)]
+    pub untargetable: bool,
 }
 
 /// A mount being ridden. Retail draws the two arms from different model families
@@ -319,10 +329,11 @@ pub struct Entity {
     #[serde(default)]
     pub char_flags: CharFlags,
 
-    /// entity_update byte 0x2B (LSB `namevis`; PosHead `flags3 >> 24`):
-    /// retail's suppression byte for helper NPCs ("blank" cutscene actors,
-    /// effect anchors, trigger points). Real NPCs and doors carry 0; helpers
-    /// carry 0x20/0x40/0x80-class bits (Bastok Mines dataset: 32..128).
+    /// entity_update byte 0x2B (LSB `namevis`; PosHead `flags3 >> 24`), written
+    /// under UPDATE_HP. LSB NAMEVIS (vendor/server/src/map/entities/baseentity.h):
+    /// 0x01 icon, 0x08 hide-name, 0x80 ghost-phase — the other bits in the data
+    /// are render-phase flags on real NPCs (Survival Guides carry 0x20), so only
+    /// 0x08 suppresses anything.
     #[serde(default)]
     pub name_vis: u8,
 }
@@ -342,12 +353,13 @@ impl Entity {
         self.hp_pct == Some(0)
     }
 
-    /// Retail-hidden helper NPC: any namevis hide-class bit set. Empirical
-    /// mask from LSB zone datasets (helpers: 32..128; the lone namevis=1
-    /// entity stays visible); refine against XiPackets 0x0E if needed.
-    /// Suppresses nameplate, hover, and targeting.
+    /// Retail-hidden helper NPC: VIS_HIDE_NAME set — mannequins, "blank"
+    /// cutscene actors. vendor/server/src/map/entities/baseentity.cpp:159
+    /// `IsNameHidden() = namevis & FLAG_HIDE_NAME` (0x08); the NAMEVIS enum
+    /// defines only 0x01/0x08/0x80, so the other bits are render-phase flags,
+    /// not name suppression. Suppresses the nameplate only — never targeting.
     pub fn name_hidden(&self) -> bool {
-        self.name_vis & 0xF8 != 0
+        self.name_vis & 0x08 != 0
     }
 
     // Blacklist (not whitelist) so an undecoded byte fails open, staying targetable.
@@ -372,11 +384,14 @@ impl Entity {
     /// Selectable by click / `<t>`. Dead players stay selectable so a healer can
     /// target them to Raise; dead mobs/NPCs do not. `Other` entities are not
     /// selectable except doors, whose Talk interaction is the retail door flow.
+    /// Targetability authority is the server's untargetable bit (flags1
+    /// TargetOffFlag = LSB m_flags FLAG_UNTARGETABLE for NPC/MOB) — namevis
+    /// never gates targeting upstream.
     pub fn is_targetable(&self) -> bool {
         if !self.status_selectable() {
             return false;
         }
-        if self.name_hidden() {
+        if self.char_flags.untargetable {
             return false;
         }
         if matches!(self.kind, EntityKind::Other) && !self.is_door() {

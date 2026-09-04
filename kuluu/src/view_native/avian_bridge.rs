@@ -607,15 +607,15 @@ fn mob_mask() -> LayerMask {
     LayerMask::from([GameLayer::Mob])
 }
 
-
-
 /// Does `ent`'s collider carry membership in `layer`, read straight from the
 /// layers avian stores on the entity? `block_entity` comes out of avian's own
 /// contact callback, so its stored layers are authoritative for "what stopped
 /// us" — no re-cast to guess (a cast along the move could miss a blocker that
 /// is not exactly ahead, or report a different entity as the first hit).
 fn ent_layer_is(av: &AvianMoveParams, ent: Entity, layer: GameLayer) -> bool {
-    av.col_layers.get(ent).is_ok_and(|l| l.memberships.has_all(layer))
+    av.col_layers
+        .get(ent)
+        .is_ok_and(|l| l.memberships.has_all(layer))
 }
 
 /// The single horizontal-obstacle question: cast the capsule along `want` from
@@ -702,6 +702,58 @@ impl PushThrough {
     }
 }
 
+/// Cross-tick memory for the stair slope-ride. detect_stairs re-derives its
+/// lock from scratch every tick, so in the one-riser window at the top of a
+/// flight -- and on any tick the march trips -- the lock flickers off and the
+/// ride disengages. The freed ticks used to re-pin wire Y to the measured
+/// tread under the feet (the "sticks to each step" snap: line up on engaged
+/// ticks, tread top on freed ticks). The latch remembers the last few ticks'
+/// lock and the ride-line direction so (a) freed ticks can HOLD foot level
+/// instead of dropping, and (b) the ride's engagement test tolerates the
+/// per-tick re-estimated direction wobble instead of flipping on a 90-degree
+/// sign. It NEVER owns height by itself: lift still comes only from
+/// slope_ride_feet's measured line and its hole check, so the latch cannot
+/// carry a walker up a phantom slope past the top of the stairs.
+#[derive(Default, Clone, Copy)]
+pub struct RideLatch {
+    /// Ticks since the detector last reported a locked ramp.
+    quiet: u32,
+    /// Last locked ride-line direction (horizontal, unit).
+    dir: Vec2,
+}
+
+impl RideLatch {
+    /// The ride line was live within the last few ticks: freed ticks hold
+    /// foot level instead of snapping to the tread beneath the feet.
+    fn recently_locked(&self) -> bool {
+        self.quiet <= RIDE_RELEASE_QUIET
+    }
+
+    /// The latch's remembered ride direction, when the line was live recently
+    /// (widens the engagement tolerance against per-tick direction wobble).
+    fn latched_dir(&self) -> Option<Vec2> {
+        (self.quiet <= RIDE_RELEASE_QUIET).then_some(self.dir)
+    }
+
+    fn note(&mut self, locked: bool, dir: Option<Vec2>) {
+        if locked {
+            self.quiet = 0;
+            if let Some(d) = dir {
+                if d.length_squared() > 1e-6 {
+                    self.dir = d.normalize();
+                }
+            }
+        } else {
+            self.quiet = self.quiet.saturating_add(1);
+        }
+    }
+}
+
+/// Ticks of no detector lock before the ride's freed-tick memory expires:
+/// ~0.2 s at 30 Hz -- long enough to span the top-of-flight lock gap and a
+/// missed march, short enough that a walker leaving the stairs settles.
+const RIDE_RELEASE_QUIET: u32 = 6;
+
 /// THE resolver. One authority, two passes, fixed priority. Replaces the old
 /// `wall_clip_avian`. Wire contract unchanged: ffxi x/y horizontal, z vertical
 /// (grows DOWN); bevy x=x, z=-y, y=-z (up).
@@ -713,6 +765,8 @@ impl PushThrough {
 pub fn resolve_position(
     av: &AvianMoveParams,
     push: &mut PushThrough,
+    // Cross-tick ride memory (lock hysteresis + direction latch); see RideLatch.
+    latch: &mut RideLatch,
     x: f32,
     y: f32,
     z: f32,
@@ -749,6 +803,14 @@ pub fn resolve_position(
     // this same result via LastStairDetection -- no duplicate raycasting.
     let det = super::input::detect_stairs(Vec3::new(x, plane_y, -y), &av.geom);
     *det_out = Some(det);
+    // Cross-tick ride memory: the detector re-derives its lock from scratch
+    // every tick, so remember it (plus the ride-line direction) for the
+    // freed-tick fallback and the engagement tolerance below. See RideLatch.
+    let ride_line_dir = det.ramp_far.0 - det.ramp_near.0;
+    latch.note(
+        det.ramp_locked,
+        (ride_line_dir.length_squared() > 1e-6).then_some(ride_line_dir),
+    );
     *door_ent_out = None;
 
     // ---- STOPPED (no input): settle onto the actual tread ----
@@ -981,8 +1043,19 @@ pub fn resolve_position(
             )
             .unwrap_or(f32::NAN);
         // Measured ground at the destination: "the step is soon" engagement.
-        let dest_y = av.geom.ground_raycast(target_xz, plane_y + 2.0).unwrap_or(f32::NAN);
-        if let Some(pred) = slope_ride_feet(&det, plane_y, here, target_xz, behind_y, dest_y) {
+        let dest_y = av
+            .geom
+            .ground_raycast(target_xz, plane_y + 2.0)
+            .unwrap_or(f32::NAN);
+        if let Some(pred) = slope_ride_feet(
+            &det,
+            plane_y,
+            here,
+            target_xz,
+            behind_y,
+            dest_y,
+            latch.latched_dir(),
+        ) {
             if av
                 .geom
                 .ground_raycast(target_xz, pred.max(plane_y) + 0.5)
@@ -1021,7 +1094,7 @@ pub fn resolve_position(
             dbg_step_height = det.ramp_near.1 - plane_y;
             dbg_step_slope = det.best_slope;
             dbg_slope_angle = det.best_slope.atan().to_degrees();
-            final_feet = det.ramp_near.1;
+            final_feet = det.ramp_near.1.max(feet0); // stairs never pull us below our feet
         } else {
             // Lip-step: full forward move, feet lifted onto the sill this
             // tick so the capsule clears the edge (no embed, no truncation).
@@ -1046,16 +1119,18 @@ pub fn resolve_position(
         // artifact does not. Parry's trimesh contact points can sit ~0.1 off the
         // face, so the probe is a sphere, not a ray.
         let real = match block_point {
-            Some(pt) => !av.sq.shape_intersections(
-                &Collider::sphere(0.2),
-                pt,
-                Quat::IDENTITY,
-                &SpatialQueryFilter::from_mask(LayerMask::from([
-                    GameLayer::Wall,
-                    GameLayer::Door,
-                ])),
-            )
-            .is_empty(),
+            Some(pt) => !av
+                .sq
+                .shape_intersections(
+                    &Collider::sphere(0.2),
+                    pt,
+                    Quat::IDENTITY,
+                    &SpatialQueryFilter::from_mask(LayerMask::from([
+                        GameLayer::Wall,
+                        GameLayer::Door,
+                    ])),
+                )
+                .is_empty(),
             // No contact point captured: unverifiable — treat as a real stop.
             None => true,
         };
@@ -1108,7 +1183,9 @@ pub fn resolve_position(
             // Gated hard — only a floor actually WITHIN step reach of our feet,
             // so a plain wall stop never gets its height forced by ground_step.
             let dest = Vec2::new(start.x + want.x, start.z + want.z);
-            if let Some(floor) = av.geom.ground_step(dest, plane_y, MAX_GROUND_STEP_UP)
+            if let Some(floor) = av
+                .geom
+                .ground_step(dest, plane_y, MAX_GROUND_STEP_UP)
                 .filter(|&floor| floor > plane_y + 0.02)
             {
                 dbg_reason = "step-up-rescue";
@@ -1157,7 +1234,7 @@ pub fn resolve_position(
         if det.ramp_locked && !ride_hole_fall {
             dbg_stop_slope = true; // informational: walking a locked ramp
             dbg_slope_angle = det.best_slope.atan().to_degrees();
-            final_feet = det.ramp_near.1;
+            final_feet = feet0; // hold level; ramp_near.1 is the tread underfoot, below the line
         } else if let Some(g) = av.geom.ground_step(slide_xz, plane_y, SNAP_DOWN) {
             // Ground is the FALLBACK authority here: it takes over only when
             // nothing else moved us vertically this tick AND the delta is real.
@@ -1174,6 +1251,15 @@ pub fn resolve_position(
             //     stopped steps from gliding.
             if g > feet0 + MAX_GROUND_STEP_UP {
                 dbg_reason = "free-walk-hold";
+                final_feet = feet0;
+            } else if latch.recently_locked() && g < feet0 {
+                // Freed from the ride within the latch window: the floor here
+                // is the tread/slab underfoot, BELOW the line we were riding;
+                // dropping onto it re-snaps Y down to each step. Hold level
+                // until the latch expires -- a real ledge/hole drop starts
+                // far below the feet and the latch is long gone by then
+                // (RIDE_RELEASE_QUIET), so descent is unaffected.
+                dbg_reason = "post-ride-hold";
                 final_feet = feet0;
             } else {
                 final_feet = g;
@@ -1225,7 +1311,9 @@ pub fn resolve_position(
 /// Returns `None` when the ride doesn't apply this tick. All xz are bevy space; `plane_y`
 /// is current foot level (bevy up); `behind_y` is the measured ground a step BEHIND us
 /// along the ramp direction; `dest_y` is the measured ground at this tick's destination
-/// xz. NaN when there's no floor at that point.
+/// xz. NaN when there's no floor at that point. `latched_dir` is the
+/// RideLatch's remembered line direction, tolerating per-tick re-estimation
+/// wobble in the engagement test.
 fn slope_ride_feet(
     det: &super::input::StairDetection,
     plane_y: f32,
@@ -1233,6 +1321,7 @@ fn slope_ride_feet(
     target: Vec2,
     behind_y: f32,
     dest_y: f32,
+    latched_dir: Option<Vec2>,
 ) -> Option<f32> {
     // One riser + margin — a larger single-tick delta means the fit is lying.
     const MAX_TICK_DELTA: f32 = 0.45;
@@ -1248,11 +1337,28 @@ fn slope_ride_feet(
         return None; // degenerate line — not actually on/beside a locked ramp
     }
     let dir = line / len;
-    let here_t = ((here - det.ramp_near.0).dot(dir)).max(0.0);
-    let target_t = (target - det.ramp_near.0).dot(dir);
-    if target_t <= here_t {
-        return None; // no progress along the ramp this tick — stay flat, ground-snap handles it
+    // Engagement with a tolerance: the line direction is re-estimated every
+    // tick (up_march_dir wobble), and a hard sign flip on the tick's progress
+    // let one noisy estimate disengage the ride -- the freed tick then re-pinned
+    // wire Y to the tread under the feet (per-step sticking). Disengage only
+    // when the tick's movement is away from BOTH this tick's line direction
+    // and the latched direction (more than SLOPE_MAX_ANGLE past perpendicular);
+    // walking roughly along the ramp rides through a wobbly estimate.
+    let tick_disp = target - here;
+    let disp_dir = tick_disp / tick_disp.length().max(1e-8);
+    let away = -disp_dir.dot(dir);
+    let away_latch = latched_dir.map_or(0.0, |l| -disp_dir.dot(l));
+    // Away from this tick's line AND (if a latched line exists) away from that
+    // one: genuinely off the ramp. With no latch, the per-tick direction alone
+    // decides -- but at a 120-degree tolerance, not a 90-degree sign flip.
+    let off_line = away > SLOPE_MAX_ANGLE.cos()
+        && (latched_dir.is_none() || away_latch > SLOPE_MAX_ANGLE.cos());
+    if off_line {
+        return None; // walking away from the line: ground-snap owns height
     }
+    let advance = tick_disp.dot(dir).max(0.0);
+    // The old hard `target_t <= here_t` sign gate is gone: it let one wobbly
+    // per-tick direction estimate disengage the ride (see above).
     // The march measured where the first riser sits relative to the player; before it,
     // the surface is flat at foot level. (Pink-fit lock with no march data: near-zero approach.)
     let mut d0 = det.march_first_riser_rel.unwrap_or(0.3);
@@ -1285,7 +1391,7 @@ fn slope_ride_feet(
     if slope > 0.0 && dest_above {
         d0 = 0.0;
     }
-    let feet = plane_y + slope * ((target_t - (here_t + d0)).max(0.0));
+    let feet = plane_y + slope * (advance - d0).max(0.0);
     if (feet - plane_y).abs() > MAX_TICK_DELTA {
         return None;
     }
@@ -1663,11 +1769,13 @@ mod live_path_tests {
     fn walk_tick(
         avian: AvianMoveParams,
         mut push: Local<PushThrough>,
+        mut latch: Local<RideLatch>,
         req: Res<WalkReq>,
         mut out: ResMut<LiveOut>,
     ) {
         let clip = resolve_position(
-            &avian, &mut push, req.x, req.y, req.z, req.dx, req.dy, DT, &mut None, &mut None,
+            &avian, &mut push, &mut latch, req.x, req.y, req.z, req.dx, req.dy, DT, &mut None,
+            &mut None,
         );
         out.0.push(clip);
     }
@@ -2007,7 +2115,11 @@ mod live_path_tests {
                 .expect("walk_tick runs");
             app.world_mut().resource_mut::<LiveOut>().0.pop().unwrap()
         };
-        assert_eq!(clip.dbg_reason, "stopped-input", "reason={}", clip.dbg_reason);
+        assert_eq!(
+            clip.dbg_reason, "stopped-input",
+            "reason={}",
+            clip.dbg_reason
+        );
         let floor = clip.landed_floor.expect("settled arm reports a floor");
         assert!((floor - 4.0 * 0.3).abs() < 1e-3, "tread: {floor:.4}");
         // And on flat ground the stop settles to the floor underfoot.
@@ -2065,9 +2177,10 @@ mod live_path_tests {
             pos.0 += clip.dx;
             pos.1 += clip.dy;
             if let Some(f) = clip.landed_floor {
-                // No float over the approach strip: wire height may never rise
-                // more than a hair above the slab before we are past x=0.
-                if pos.0 < 0.05 && f > 0.06 {
+                // No float over the approach strip: up to the tick that arrives at the
+                // first riser face, wire height may never rise more than a hair above the
+                // slab. At the face the ride's merge-up legitimately starts (one tick's rise);
+                if pos.0 < 0.0 && f > 0.06 {
                     panic!(
                         "floated off the approach slab at x={:.2}: h={:.3} reason={}",
                         pos.0, f, clip.dbg_reason
@@ -2123,7 +2236,10 @@ mod live_path_tests {
                 f,
                 clip.dbg_reason
             ),
-            None => panic!("moving tick must report a floor, reason={}", clip.dbg_reason),
+            None => panic!(
+                "moving tick must report a floor, reason={}",
+                clip.dbg_reason
+            ),
         }
     }
 
@@ -2139,7 +2255,8 @@ mod live_path_tests {
         assert!(
             (det.best_slope - want).abs() < 0.25,
             "slope {:.3} vs expected ~{:.3}",
-            det.best_slope, want
+            det.best_slope,
+            want
         );
     }
 

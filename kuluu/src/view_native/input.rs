@@ -81,6 +81,8 @@ pub struct DispatchLocals {
     /// Mob push-through accrual: which mob the player is shoving and for how
     /// long, so a sustained press releases that one mob from the sweep.
     pub push_through: super::avian_bridge::PushThrough,
+    /// Cross-tick stair slope-ride memory (lock hysteresis + direction latch).
+    pub ride_latch: super::avian_bridge::RideLatch,
 }
 
 #[derive(SystemParam)]
@@ -1225,10 +1227,13 @@ pub fn dispatch_movement_system(
     let wall_dy = y - basis_pos.y;
     let mut det_out: Option<StairDetection> = None;
     let mut door_ent_out: Option<Entity> = None;
+    let mut latch = locals.ride_latch;
+    let push = &mut locals.push_through;
     let clip = if !env.hud_panels.noclip && (wall_dx != 0.0 || wall_dy != 0.0) {
         super::avian_bridge::resolve_position(
             &avian,
-            &mut locals.push_through,
+            push,
+            &mut latch,
             basis_pos.x,
             basis_pos.y,
             basis_pos.z,
@@ -1241,6 +1246,9 @@ pub fn dispatch_movement_system(
     } else {
         kuluu_render::dat_mzb::WallClipResult::none(wall_dx, wall_dy)
     };
+    // The latch is copied out (stable can't disjoint-borrow two Local fields);
+    // write it back so the hysteresis memory carries into the next tick.
+    locals.ride_latch = latch;
     // Store the one stair detection this tick (if resolve_position ran). asp +
     // HUD read it from here instead of calling detect_stairs again.
     if let Some(d) = det_out {

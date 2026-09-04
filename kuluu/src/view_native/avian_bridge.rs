@@ -468,6 +468,9 @@ pub struct AvianMoveParams<'w, 's> {
     pub children: Query<'w, 's, &'static Children>,
     /// "Is the texture drawn": a rendered mesh in the actor's subtree.
     pub mesh_vis: Query<'w, 's, &'static InheritedVisibility, With<Mesh3d>>,
+    /// Each collider's own layer membership (avian stores it on the entity).
+    /// STEP 2 reads this to classify what stopped us — no re-cast needed.
+    pub col_layers: Query<'w, 's, &'static CollisionLayers>,
 }
 
 /// Should this mob collider body-block the walker at all? Rule, in order:
@@ -604,67 +607,15 @@ fn mob_mask() -> LayerMask {
     LayerMask::from([GameLayer::Mob])
 }
 
-/// Layer mask for doors only.
-fn door_mask() -> LayerMask {
-    LayerMask::from([GameLayer::Door])
-}
 
-/// True if a capsule sweep from `start` along `want` hits anything in `mask`.
-/// (Superseded by entity_in_layer for stop classification; kept for reference.)
-#[allow(dead_code)]
-fn layer_ahead(
-    sq: &SpatialQuery,
-    col: &Collider,
-    start: Vec3,
-    want: Vec3,
-    mask: LayerMask,
-) -> bool {
-    let len = want.length();
-    if len < 1e-6 {
-        return false;
-    }
-    let Ok(dir) = Dir3::new(want / len) else {
-        return false;
-    };
-    sq.cast_shape(
-        col,
-        start,
-        Quat::IDENTITY,
-        dir,
-        &ShapeCastConfig::from_max_distance(len),
-        &SpatialQueryFilter::from_mask(mask),
-    )
-    .is_some()
-}
 
-/// Does `ent` belong to `mask`? Casts mask-only along the move and checks the
-/// hit entity IS `ent`. This classifies the SPECIFIC entity avian stopped us on
-/// -- not any door/mob somewhere in the path -- killing false positives.
-fn entity_in_layer(
-    sq: &SpatialQuery,
-    col: &Collider,
-    start: Vec3,
-    want: Vec3,
-    mask: LayerMask,
-    ent: Entity,
-) -> bool {
-    let len = want.length();
-    if len < 1e-6 {
-        return false;
-    }
-    let Ok(dir) = Dir3::new(want / len) else {
-        return false;
-    };
-    sq.cast_shape(
-        col,
-        start,
-        Quat::IDENTITY,
-        dir,
-        &ShapeCastConfig::from_max_distance(len),
-        &SpatialQueryFilter::from_mask(mask),
-    )
-    .map(|h| h.entity == ent)
-    .unwrap_or(false)
+/// Does `ent`'s collider carry membership in `layer`, read straight from the
+/// layers avian stores on the entity? `block_entity` comes out of avian's own
+/// contact callback, so its stored layers are authoritative for "what stopped
+/// us" — no re-cast to guess (a cast along the move could miss a blocker that
+/// is not exactly ahead, or report a different entity as the first hit).
+fn ent_layer_is(av: &AvianMoveParams, ent: Entity, layer: GameLayer) -> bool {
+    av.col_layers.get(ent).is_ok_and(|l| l.memberships.has_all(layer))
 }
 
 /// The single horizontal-obstacle question: cast the capsule along `want` from
@@ -1108,10 +1059,14 @@ pub fn resolve_position(
         let real = clean_hit.is_some();
 
         let ent = block_entity;
-        let door_hit =
-            ent.is_some_and(|e| entity_in_layer(&av.sq, &col, start, want, door_mask(), e));
-        let mob_hit = excluded_mob.is_none()
-            && ent.is_some_and(|e| entity_in_layer(&av.sq, &col, start, want, mob_mask(), e));
+        // Read the blocker's OWN layers from avian (no re-cast). A Mob-layer
+        // blocker is a mob even when another mob was already pre-excluded this
+        // tick: walking into a cluster of invisible NPCs used to leak here —
+        // first capsule excluded in STEP 1, second capsule stopped the slide,
+        // `excluded_mob.is_some()` forced mob_hit=false and the whole cluster
+        // hard-stopped as "wall-PHANTOM".
+        let door_hit = ent.is_some_and(|e| ent_layer_is(av, e, GameLayer::Door));
+        let mob_hit = ent.is_some_and(|e| ent_layer_is(av, e, GameLayer::Mob));
 
         if door_hit {
             dbg_reason = if real { "door-REAL" } else { "door-PHANTOM" };
@@ -1158,14 +1113,29 @@ pub fn resolve_position(
                 dbg_stop_steps = true;
                 move_xz = dest; // full forward move, feet lifted — no embed
                 final_feet = floor;
-            } else {
-                dbg_reason = if real { "wall-REAL" } else { "wall-PHANTOM" };
+            } else if real {
+                // A wall/door face really is in front of us: stop and slide.
+                dbg_reason = "wall-REAL";
                 let angle = n.y.clamp(-1.0, 1.0).acos();
                 dbg_stop_wall = true;
                 dbg_slope_angle = angle.to_degrees();
                 dbg_wall_height = 1.0;
                 move_xz = slide_xz;
                 final_feet = det.center_y;
+            } else {
+                // PHANTOM: no wall/door face in front of us within reach — avian
+                // fabricated this contact (depenetration artifact off the trimesh
+                // soup). The GROUND TRUTH ray says there is nothing to block on,
+                // so we do not block: take the full forward move and let the
+                // ground probe own our height.
+                dbg_reason = "wall-PHANTOM-pass";
+                dbg_is_a_stop = false;
+                let dest = Vec2::new(start.x + want.x, start.z + want.z);
+                move_xz = dest;
+                final_feet = av
+                    .geom
+                    .ground_step(dest, plane_y, SNAP_DOWN)
+                    .unwrap_or(det.center_y);
             }
         }
     } else {

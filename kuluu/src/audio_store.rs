@@ -37,7 +37,7 @@ impl AudioStore {
     pub fn load(&self) -> Result<Option<AudioMuteState>> {
         match std::fs::read(&self.path) {
             Ok(bytes) => {
-                let state: AudioMuteState = serde_json::from_slice(&bytes)
+                let state = parse_audio_state(&bytes)
                     .with_context(|| format!("parse {}", self.path.display()))?;
                 Ok(Some(state))
             }
@@ -60,6 +60,35 @@ impl AudioStore {
             .with_context(|| format!("rename {} → {}", tmp.display(), self.path.display()))?;
         Ok(())
     }
+}
+
+/// Parse `audio.json` leniently, field by field: one malformed value (a
+/// hand-edited typo) defaults just that field instead of resetting the whole
+/// store — which the persist system would then overwrite on the next change,
+/// destroying every other valid setting. A syntactically broken document still
+/// fails outright; there is nothing to salvage from it.
+///
+/// `master` is clamped to 0..=1 (and NaN rejected) on the way in: a persisted
+/// `"master": 100` would otherwise be a 100x gain while the menu display —
+/// which clamps — still shows 100%.
+fn parse_audio_state(bytes: &[u8]) -> Result<AudioMuteState> {
+    let v: serde_json::Value = serde_json::from_slice(bytes)?;
+    let mut state = AudioMuteState::default();
+    if let Some(bgm) = v.get("bgm").and_then(|x| x.as_bool()) {
+        state.bgm = bgm;
+    }
+    if let Some(sfx) = v.get("sfx").and_then(|x| x.as_bool()) {
+        state.sfx = sfx;
+    }
+    if let Some(master) = v
+        .get("master")
+        .and_then(|x| x.as_f64())
+        .map(|m| m as f32)
+        .filter(|m| m.is_finite())
+    {
+        state.master = master.clamp(0.0, 1.0);
+    }
+    Ok(state)
 }
 
 /// Load persisted audio state or fall back to defaults. Same signature as
@@ -151,5 +180,32 @@ mod tests {
     fn missing_file_is_none() {
         let store = AudioStore::new(tmp_path());
         assert!(store.load().unwrap().is_none());
+    }
+
+    /// One malformed field must default just that field — not reset the whole
+    /// store (which persist would then overwrite, destroying valid settings) —
+    /// and an out-of-range master must clamp instead of becoming 100x gain.
+    #[test]
+    fn load_salvages_one_bad_field_and_clamps_master() {
+        let path = tmp_path();
+        std::fs::write(&path, br#"{"bgm": true, "sfx": "yes", "master": 100}"#).unwrap();
+        let s = AudioStore::new(&path)
+            .load()
+            .unwrap()
+            .expect("present");
+        assert!(s.bgm, "valid field survives a bad neighbour");
+        assert!(!s.sfx, "malformed sfx falls back to default (unmuted)");
+        assert_eq!(s.master, 1.0, "master clamps into 0..=1 instead of 100x gain");
+    }
+
+    #[test]
+    fn load_rejects_nan_master() {
+        let path = tmp_path();
+        std::fs::write(&path, br#"{"master": NaN}"#).unwrap();
+        let s = AudioStore::new(&path)
+            .load()
+            .unwrap()
+            .expect("present");
+        assert_eq!(s.master, 1.0, "NaN falls back to full volume");
     }
 }

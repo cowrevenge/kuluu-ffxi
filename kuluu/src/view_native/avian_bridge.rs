@@ -19,12 +19,17 @@ use kuluu_render::dat_mzb::{MzbCollisionGeometry, WallClipResult, MAX_GROUND_STE
 /// and branch: walls and doors both block-and-slide (a door is a wall you
 /// can't pass, not a hard freeze), mobs soft-block with push-through. The
 /// resolver casts per-layer or reads the hit entity's layer to decide.
+// avian's PhysicsLayer trait requires a `Default` variant owning bit 0, and
+// colliders spawned without an explicit CollisionLayers fall back to exactly
+// that bit. We point it at Wall instead of a separate "unclassified" ghost:
+// a layer-less collider then blocks like terrain — visible in-game — rather
+// than sitting in a layer no query mask includes (silently invisible to the
+// walker/camera/mob passes). Every real spawn site sets its layers explicitly;
+// this is only the fail-loud fallback for a future mistake.
 #[derive(PhysicsLayer, Default)]
 pub enum GameLayer {
-    /// Unclassified / default. Nothing meaningful should land here.
-    #[default]
-    Default,
     /// Static zone geometry (MZB walls, floors, ramps, stairs). Block + slide.
+    #[default]
     Wall,
     /// MMB placements that block movement (doors, gates, solid furniture).
     /// Block + slide exactly like Wall, but a distinct class so it can never

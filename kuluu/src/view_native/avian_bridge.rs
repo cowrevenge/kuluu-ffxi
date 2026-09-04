@@ -1141,8 +1141,16 @@ pub fn resolve_position(
             }
         }
     } else {
-        // (c) FREE WALK: not stopped, no stairs. Take avian's slide result and
-        //     snap to the ground under the new position.
+        // (c) FREE WALK: not stopped, no stairs/lip/ride owns this tick. Take
+        //     avian's slide result; vertical authority is a priority chain where
+        //     the measured ground is the LAST resort — never an unconditional
+        //     per-tick snap. Snapping to the measured tread on every moving tick
+        //     fights the slope-ride line and every other height owner ("pasting
+        //     on ground force at the end fucks it all up"): a moving walker rides
+        //     the smooth surface, only a stopped walker falls to the real step
+        //     (the STOPPED arm above), and a walker starting under/inside the
+        //     slope merges toward it over time based on speed — clipping through
+        //     as the animation hides.
         move_xz = slide_xz;
         // A hole-fall disengage skips the locked-ramp flat hold: the ground-snap
         // below is what drops us through the gap.
@@ -1151,7 +1159,25 @@ pub fn resolve_position(
             dbg_slope_angle = det.best_slope.atan().to_degrees();
             final_feet = det.ramp_near.1;
         } else if let Some(g) = av.geom.ground_step(slide_xz, plane_y, SNAP_DOWN) {
-            final_feet = g;
+            // Ground is the FALLBACK authority here: it takes over only when
+            // nothing else moved us vertically this tick AND the delta is real.
+            //   - floor well below our feet  -> we walked off a ledge / through a
+            //     hole: fall to it (descent is unbounded, so any drop is taken).
+            //   - floor at or slightly above -> flat tracking / riding a walkable
+            //     slope up to one riser per tick: follow it.
+            //   - floor MORE than a riser above us but avian did not block -> we
+            //     are under/inside the slope or just short of a riser face: HOLD
+            //     foot level this tick. The step arms own the climb when the
+            //     slide truncates, the ride owns it once locked, and merging up
+            //     over subsequent ticks is exactly "slop toward the slope based
+            //     on speed" — a per-tick snap-up to the measured tread is what
+            //     stopped steps from gliding.
+            if g > feet0 + MAX_GROUND_STEP_UP {
+                dbg_reason = "free-walk-hold";
+                final_feet = feet0;
+            } else {
+                final_feet = g;
+            }
         } else {
             final_feet = det.center_y;
         }
@@ -2009,6 +2035,96 @@ mod live_path_tests {
         // Bevy space: target at feet level on the flat approach (wire y=0).
         let det = crate::view_native::input::detect_stairs(Vec3::new(-5.0, 0.0, 0.0), &g);
         assert!(!det.ramp_locked, "flat ground locked a ramp");
+    }
+
+    /// R4: a moving walker on the flat approach to a buried stair must NOT float
+    /// above the slab (the old unconditional ground_step snap could lift wire Y
+    /// off the measured floor mid-approach), and once the first riser is reached
+    /// it merges up along the ride line — clipping through as the animation hides
+    /// — to the top. Start well back so the approach strip is long enough to
+    /// observe: height stays at slab level until progress passes the measured
+    /// first-riser distance, then climbs.
+    #[test]
+    fn buried_stair_approach_no_float_then_merge_up_live() {
+        let (r, d) = (0.26f32, 0.48);
+        let mut app = live_app(stair_with_ground_under(8, d, r));
+        // Walk from x=-2.0: ~1.65 yalms of flat approach before the first riser.
+        let mut pos = (-2.0f32, 0.0f32, 0.0f32);
+        for _ in 0..400 {
+            app.world_mut().insert_resource(WalkReq {
+                x: pos.0,
+                y: pos.1,
+                z: pos.2,
+                dx: RUN * DT,
+                dy: 0.0,
+            });
+            app.world_mut()
+                .run_system_once(walk_tick)
+                .expect("walk_tick runs");
+            let clip = app.world_mut().resource_mut::<LiveOut>().0.pop().unwrap();
+            pos.0 += clip.dx;
+            pos.1 += clip.dy;
+            if let Some(f) = clip.landed_floor {
+                // No float over the approach strip: wire height may never rise
+                // more than a hair above the slab before we are past x=0.
+                if pos.0 < 0.05 && f > 0.06 {
+                    panic!(
+                        "floated off the approach slab at x={:.2}: h={:.3} reason={}",
+                        pos.0, f, clip.dbg_reason
+                    );
+                }
+                pos.2 = -f;
+            }
+        }
+        assert!(
+            (-pos.2 - 8.0 * r).abs() < 0.05 && pos.0 > 8.0 * d,
+            "merged up to the top: x={:.2} h={:.3}",
+            pos.0,
+            -pos.2
+        );
+    }
+
+    /// R4 hold case, pinned directly on one tick: the walker starts SUNK — its
+    /// feet are more than a riser (0.4) below the measured floor under it, i.e.
+    /// starting under/inside the surface (a bad spawn z). Free walk, not blocked,
+    /// no locked ramp. The old arm (c) snapped wire Y up to that floor in ONE
+    /// tick; now it HOLDS foot level (`free-walk-hold`) and the merge toward the
+    /// surface happens over subsequent ticks — the persistent-wedge recovery owns
+    /// the eventual snap-up, never a pasted per-tick ground force.
+    #[test]
+    fn free_walk_holds_level_when_sunk_below_floor_live() {
+        let mut app = live_app(flat_with_wall(2.0, 3.0, NO_SUB_AREA_LINK));
+        // Feet 0.5 below the flat floor (wire z grows down: z=+0.5).
+        app.world_mut().insert_resource(WalkReq {
+            x: -5.0,
+            y: 0.0,
+            z: 0.5,
+            dx: RUN * DT,
+            dy: 0.0,
+        });
+        app.world_mut()
+            .run_system_once(walk_tick)
+            .expect("walk_tick runs");
+        let clip = app.world_mut().resource_mut::<LiveOut>().0.pop().unwrap();
+        assert!(
+            !clip.dbg_is_a_stop,
+            "free walk, not blocked: reason={}",
+            clip.dbg_reason
+        );
+        assert_eq!(
+            clip.dbg_reason, "free-walk-hold",
+            "sunk start must hold foot level, got {}",
+            clip.dbg_reason
+        );
+        match clip.landed_floor {
+            Some(f) => assert!(
+                (f - (-0.5)).abs() < 1e-3,
+                "held foot level while sunk: h={:.4} reason={}",
+                f,
+                clip.dbg_reason
+            ),
+            None => panic!("moving tick must report a floor, reason={}", clip.dbg_reason),
+        }
     }
 
     /// A staircase ahead locks the detector with a slope near r/d.

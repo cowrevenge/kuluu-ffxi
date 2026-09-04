@@ -990,7 +990,10 @@ pub fn resolve_position(
                             GameLayer::Door,
                         ])),
                     )
-                    .is_some()
+                    // A hit on a WALKABLE face (normal within SLOPE_MAX_ANGLE of
+                    // up) is a slope we can ride, not a wall: no veto. Only steep
+                    // faces (>60deg from vertical) block the step/ride.
+                    .is_some_and(|hit| hit.normal.y < SLOPE_MAX_ANGLE.cos())
             });
 
     // (a0) SLOPE-RIDE — continuous stair follow, pre-triggered. When the detector
@@ -1012,7 +1015,18 @@ pub fn resolve_position(
     let mut ride_hole_fall = false;
     if det.ramp_locked && !tall_wall_before_step {
         let target_xz = Vec2::new(start.x + want.x, start.z + want.z);
-        if let Some(pred) = slope_ride_feet(&det, plane_y, here, target_xz) {
+        // Measured ground a step behind us along the ramp direction: tells the
+        // ride whether we're already ON a rising surface (smooth-ramp anchor).
+        let behind_y = av
+            .geom
+            .ground_raycast(
+                Vec2::new(start.x - move_dir.x * 0.15, start.z - move_dir.y * 0.15),
+                plane_y + 2.0,
+            )
+            .unwrap_or(f32::NAN);
+        // Measured ground at the destination: "the step is soon" engagement.
+        let dest_y = av.geom.ground_raycast(target_xz, plane_y + 2.0).unwrap_or(f32::NAN);
+        if let Some(pred) = slope_ride_feet(&det, plane_y, here, target_xz, behind_y, dest_y) {
             if av
                 .geom
                 .ground_raycast(target_xz, pred.max(plane_y) + 0.5)
@@ -1122,13 +1136,32 @@ pub fn resolve_position(
                     .unwrap_or(det.center_y);
             }
         } else {
-            dbg_reason = if real { "wall-REAL" } else { "wall-PHANTOM" };
-            let angle = n.y.clamp(-1.0, 1.0).acos();
-            dbg_stop_wall = true;
-            dbg_slope_angle = angle.to_degrees();
-            dbg_wall_height = 1.0;
-            move_xz = slide_xz;
-            final_feet = det.center_y;
+            // STEP-UP RESCUE: the slide was blocked, but there is walkable
+            // ground within MAX_GROUND_STEP_UP above our feet just ahead — that's
+            // a riser or lip, not a wall. Shallow risers (rise < capsule radius)
+            // wedge the rounded bottom in their corner and avian reports blended
+            // edge normals (n.y ~0.4) that read as "wall"; the tall-wall veto can
+            // also hold the step arms off when the NEXT riser is within reach on
+            // narrow treads. The legacy walker stepped these every time: climb.
+            // Gated hard — only a floor actually WITHIN step reach of our feet,
+            // so a plain wall stop never gets its height forced by ground_step.
+            let dest = Vec2::new(start.x + want.x, start.z + want.z);
+            if let Some(floor) = av.geom.ground_step(dest, plane_y, MAX_GROUND_STEP_UP)
+                .filter(|&floor| floor > plane_y + 0.02)
+            {
+                dbg_reason = "step-up-rescue";
+                dbg_stop_steps = true;
+                move_xz = dest; // full forward move, feet lifted — no embed
+                final_feet = floor;
+            } else {
+                dbg_reason = if real { "wall-REAL" } else { "wall-PHANTOM" };
+                let angle = n.y.clamp(-1.0, 1.0).acos();
+                dbg_stop_wall = true;
+                dbg_slope_angle = angle.to_degrees();
+                dbg_wall_height = 1.0;
+                move_xz = slide_xz;
+                final_feet = det.center_y;
+            }
         }
     } else {
         // (c) FREE WALK: not stopped, no stairs. Take avian's slide result and
@@ -1204,12 +1237,16 @@ pub fn resolve_position(
 /// ramp line, anchored so the flat approach before the first riser stays at current foot
 /// level and rise accumulates only past it (see SLOPE-RIDE in [`resolve_position`]).
 /// Returns `None` when the ride doesn't apply this tick. All xz are bevy space; `plane_y`
-/// is current foot level (bevy up).
+/// is current foot level (bevy up); `behind_y` is the measured ground a step BEHIND us
+/// along the ramp direction; `dest_y` is the measured ground at this tick's destination
+/// xz. NaN when there's no floor at that point.
 fn slope_ride_feet(
     det: &super::input::StairDetection,
     plane_y: f32,
     here: Vec2,
     target: Vec2,
+    behind_y: f32,
+    dest_y: f32,
 ) -> Option<f32> {
     // One riser + margin — a larger single-tick delta means the fit is lying.
     const MAX_TICK_DELTA: f32 = 0.45;
@@ -1232,7 +1269,36 @@ fn slope_ride_feet(
     }
     // The march measured where the first riser sits relative to the player; before it,
     // the surface is flat at foot level. (Pink-fit lock with no march data: near-zero approach.)
-    let d0 = det.march_first_riser_rel.unwrap_or(0.3);
+    let mut d0 = det.march_first_riser_rel.unwrap_or(0.3);
+    // SMOOTH-RAMP ANCHOR: discrete stairs have a flat approach — the ground stays
+    // at foot level until the first riser face (distance d0), so anchoring there
+    // keeps wire Y exactly flat over that strip. A smooth ramp has NO such strip:
+    // the surface starts rising within this tick's travel, and anchoring at the
+    // march's "first riser" (a probe-step counting artifact on a continuous slope)
+    // kept wire Y flat while the destination was already above it — the capsule
+    // bottom embedded in the face, avian depenetrated us backward every tick
+    // (oscillation), and the tall-wall veto locked the ride out permanently.
+    // When the measured ground at our own position or just behind us is already
+    // rising relative to foot level, there is no flat approach: anchor at our
+    // position so the rise engages from this tick.
+    let on_rising_surface = {
+        let here_y = det.center_y;
+        (here_y.is_finite() && plane_y - here_y > 0.05)
+            || (behind_y.is_finite() && plane_y - behind_y > 0.05)
+    };
+    if slope > 0.0 && on_rising_surface {
+        d0 = 0.0;
+    }
+    // "The step is soon": even while we still stand on the flat strip, if the
+    // measured ground at this tick's DESTINATION is already above foot level,
+    // the rise starts within our travel — anchoring past it would leave wire Y
+    // flat into an embedded tick. Engage from now; MAX_TICK_DELTA below caps
+    // how fast we can merge up (a walker starting under/inside the slope climbs
+    // toward it over a few ticks, clipping through as the animation hides).
+    let dest_above = dest_y.is_finite() && dest_y - plane_y > 0.05;
+    if slope > 0.0 && dest_above {
+        d0 = 0.0;
+    }
     let feet = plane_y + slope * ((target_t - (here_t + d0)).max(0.0));
     if (feet - plane_y).abs() > MAX_TICK_DELTA {
         return None;
@@ -1259,6 +1325,724 @@ fn probe_hit(
         &SpatialQueryFilter::from_mask(mask),
     )?;
     Some((hit.distance, hit.normal1.into()))
+}
+
+#[cfg(test)]
+mod live_path_tests {
+    //! Live-path coverage for [`resolve_position`] + [`crate::view_native::input::detect_stairs`].
+    //!
+    //! The legacy hand-rolled walker (`MzbCollisionGeometry::wall_clip_wire`) is no
+    //! longer on the production path — dispatch_movement_system routes every tick
+    //! through this resolver against a real avian world. These tests mirror the
+    //! scenario suite that used to pin wall_clip_wire (kuluu-render's
+    //! `wall_collision_tests`), re-pointed at the live implementation: same geometry
+    //! builders, same walk-loop contract (input.rs' consumption of WallClipResult),
+    //! real avian move-and-slide + spatial queries.
+
+    use super::*;
+    use bevy::ecs::system::RunSystemOnce;
+    use ffxi_dat::mzb::NO_SUB_AREA_LINK;
+    use kuluu_render::dat_mzb::{MzbCollisionBlock, MzbCollisionGeometry};
+
+    /// Same tick contract as the legacy suite and input.rs' fixed step: 30 Hz,
+    /// run speed.
+    const DT: f32 = 1.0 / 30.0;
+    const RUN: f32 = 6.0;
+
+    // ------------------------------------------------------------------
+    // Geometry builders (ported from kuluu-render's wall_collision_tests)
+    // ------------------------------------------------------------------
+
+    fn quad(b: &mut MzbCollisionBlock, v: [Vec3; 4], n: Vec3, link: u32) {
+        let i0 = b.positions.len() as u32;
+        b.positions.extend_from_slice(&v);
+        b.indices
+            .extend_from_slice(&[i0, i0 + 1, i0 + 2, i0, i0 + 2, i0 + 3]);
+        b.tri_normals.extend_from_slice(&[n, n]);
+        b.tri_sub_area.extend_from_slice(&[link, link]);
+    }
+
+    fn staircase(steps: usize, d: f32, r: f32, balustrades: bool) -> MzbCollisionGeometry {
+        let mut b = MzbCollisionBlock::default();
+        quad(
+            &mut b,
+            [
+                Vec3::new(-10.0, 0.0, -3.0),
+                Vec3::new(0.0, 0.0, -3.0),
+                Vec3::new(0.0, 0.0, 3.0),
+                Vec3::new(-10.0, 0.0, 3.0),
+            ],
+            Vec3::Y,
+            NO_SUB_AREA_LINK,
+        );
+        for i in 0..steps {
+            let x0 = i as f32 * d;
+            let y0 = i as f32 * r;
+            let y1 = y0 + r;
+            quad(
+                &mut b,
+                [
+                    Vec3::new(x0, y0, -3.0),
+                    Vec3::new(x0, y0, 3.0),
+                    Vec3::new(x0, y1, 3.0),
+                    Vec3::new(x0, y1, -3.0),
+                ],
+                Vec3::new(-1.0, 0.0, 0.0),
+                NO_SUB_AREA_LINK,
+            );
+            quad(
+                &mut b,
+                [
+                    Vec3::new(x0, y1, -3.0),
+                    Vec3::new(x0 + d, y1, -3.0),
+                    Vec3::new(x0 + d, y1, 3.0),
+                    Vec3::new(x0, y1, 3.0),
+                ],
+                Vec3::Y,
+                NO_SUB_AREA_LINK,
+            );
+        }
+        let xt = steps as f32 * d;
+        let yt = steps as f32 * r;
+        quad(
+            &mut b,
+            [
+                Vec3::new(xt, yt, -3.0),
+                Vec3::new(xt + 10.0, yt, -3.0),
+                Vec3::new(xt + 10.0, yt, 3.0),
+                Vec3::new(xt, yt, 3.0),
+            ],
+            Vec3::Y,
+            NO_SUB_AREA_LINK,
+        );
+        if balustrades {
+            let sl = (d * d + r * r).sqrt();
+            for zed in [3.0f32, -3.0] {
+                let nn = Vec3::new(0.0, 0.0, -zed.signum());
+                quad(
+                    &mut b,
+                    [
+                        Vec3::new(-2.0, 0.0, zed),
+                        Vec3::new(xt + 2.0, yt, zed),
+                        Vec3::new(xt + 2.0, yt + 1.2, zed),
+                        Vec3::new(-2.0, 1.2, zed),
+                    ],
+                    nn,
+                    NO_SUB_AREA_LINK,
+                );
+                let sn = Vec3::new(-r / sl, d / sl, 0.0);
+                quad(
+                    &mut b,
+                    [
+                        Vec3::new(0.0, 0.0, zed - 0.2 * zed.signum()),
+                        Vec3::new(xt, yt, zed - 0.2 * zed.signum()),
+                        Vec3::new(xt + 0.3, yt, zed - 0.2 * zed.signum()),
+                        Vec3::new(0.3, 0.0, zed - 0.2 * zed.signum()),
+                    ],
+                    sn,
+                    NO_SUB_AREA_LINK,
+                );
+            }
+        }
+        MzbCollisionGeometry::from_block(b)
+    }
+
+    fn flat_with_wall(wall_x: f32, height: f32, link: u32) -> MzbCollisionGeometry {
+        let mut b = MzbCollisionBlock::default();
+        quad(
+            &mut b,
+            [
+                Vec3::new(-10.0, 0.0, -10.0),
+                Vec3::new(10.0, 0.0, -10.0),
+                Vec3::new(10.0, 0.0, 10.0),
+                Vec3::new(-10.0, 0.0, 10.0),
+            ],
+            Vec3::Y,
+            NO_SUB_AREA_LINK,
+        );
+        quad(
+            &mut b,
+            [
+                Vec3::new(wall_x, 0.0, -10.0),
+                Vec3::new(wall_x, 0.0, 10.0),
+                Vec3::new(wall_x, height, 10.0),
+                Vec3::new(wall_x, height, -10.0),
+            ],
+            Vec3::new(-1.0, 0.0, 0.0),
+            link,
+        );
+        MzbCollisionGeometry::from_block(b)
+    }
+
+    fn corridor(gap: f32) -> MzbCollisionGeometry {
+        let mut b = MzbCollisionBlock::default();
+        quad(
+            &mut b,
+            [
+                Vec3::new(-10.0, 0.0, -10.0),
+                Vec3::new(10.0, 0.0, -10.0),
+                Vec3::new(10.0, 0.0, 10.0),
+                Vec3::new(-10.0, 0.0, 10.0),
+            ],
+            Vec3::Y,
+            NO_SUB_AREA_LINK,
+        );
+        let h = gap / 2.0;
+        quad(
+            &mut b,
+            [
+                Vec3::new(2.0, 0.0, h),
+                Vec3::new(3.0, 0.0, h),
+                Vec3::new(3.0, 2.5, h),
+                Vec3::new(2.0, 2.5, h),
+            ],
+            Vec3::new(0.0, 0.0, -1.0),
+            NO_SUB_AREA_LINK,
+        );
+        quad(
+            &mut b,
+            [
+                Vec3::new(2.0, 0.0, -h),
+                Vec3::new(3.0, 0.0, -h),
+                Vec3::new(3.0, 2.5, -h),
+                Vec3::new(2.0, 2.5, -h),
+            ],
+            Vec3::new(0.0, 0.0, 1.0),
+            NO_SUB_AREA_LINK,
+        );
+        MzbCollisionGeometry::from_block(b)
+    }
+
+    fn parapet_platform(wall_x: f32, wall_h: f32, plat_y: f32) -> MzbCollisionGeometry {
+        let mut b = MzbCollisionBlock::default();
+        quad(
+            &mut b,
+            [
+                Vec3::new(-10.0, 0.0, -10.0),
+                Vec3::new(wall_x, 0.0, -10.0),
+                Vec3::new(wall_x, 0.0, 10.0),
+                Vec3::new(-10.0, 0.0, 10.0),
+            ],
+            Vec3::Y,
+            NO_SUB_AREA_LINK,
+        );
+        quad(
+            &mut b,
+            [
+                Vec3::new(wall_x, 0.0, -10.0),
+                Vec3::new(wall_x, 0.0, 10.0),
+                Vec3::new(wall_x, wall_h, 10.0),
+                Vec3::new(wall_x, wall_h, -10.0),
+            ],
+            Vec3::new(-1.0, 0.0, 0.0),
+            NO_SUB_AREA_LINK,
+        );
+        quad(
+            &mut b,
+            [
+                Vec3::new(wall_x, plat_y, -10.0),
+                Vec3::new(10.0, plat_y, -10.0),
+                Vec3::new(10.0, plat_y, 10.0),
+                Vec3::new(wall_x, plat_y, 10.0),
+            ],
+            Vec3::Y,
+            NO_SUB_AREA_LINK,
+        );
+        MzbCollisionGeometry::from_block(b)
+    }
+
+    /// The Bastok Mines stair as measured 2026-08-23: riser/tread flight with a
+    /// level-0 terrace slab continuing UNDER the treads.
+    fn stair_with_ground_under(steps: usize, d: f32, r: f32) -> MzbCollisionGeometry {
+        let mut b = MzbCollisionBlock::default();
+        quad(
+            &mut b,
+            [
+                Vec3::new(-10.0, 0.0, -3.0),
+                Vec3::new(steps as f32 * d + 5.0, 0.0, -3.0),
+                Vec3::new(steps as f32 * d + 5.0, 0.0, 3.0),
+                Vec3::new(-10.0, 0.0, 3.0),
+            ],
+            Vec3::Y,
+            NO_SUB_AREA_LINK,
+        );
+        for i in 0..steps {
+            let x0 = i as f32 * d;
+            let y0 = i as f32 * r;
+            let y1 = y0 + r;
+            quad(
+                &mut b,
+                [
+                    Vec3::new(x0, y0, -3.0),
+                    Vec3::new(x0, y0, 3.0),
+                    Vec3::new(x0, y1, 3.0),
+                    Vec3::new(x0, y1, -3.0),
+                ],
+                Vec3::new(-1.0, 0.0, 0.0),
+                NO_SUB_AREA_LINK,
+            );
+            quad(
+                &mut b,
+                [
+                    Vec3::new(x0, y1, -3.0),
+                    Vec3::new(x0 + d, y1, -3.0),
+                    Vec3::new(x0 + d, y1, 3.0),
+                    Vec3::new(x0, y1, 3.0),
+                ],
+                Vec3::Y,
+                NO_SUB_AREA_LINK,
+            );
+        }
+        let xt = steps as f32 * d;
+        let yt = steps as f32 * r;
+        quad(
+            &mut b,
+            [
+                Vec3::new(xt, yt, -3.0),
+                Vec3::new(xt + 10.0, yt, -3.0),
+                Vec3::new(xt + 10.0, yt, 3.0),
+                Vec3::new(xt, yt, 3.0),
+            ],
+            Vec3::Y,
+            NO_SUB_AREA_LINK,
+        );
+        MzbCollisionGeometry::from_block(b)
+    }
+
+    // ------------------------------------------------------------------
+    // Live world + walk driver
+    // ------------------------------------------------------------------
+
+    /// One static trimesh collider mirroring the zone blocks — exactly what
+    /// `sync_zone_collider` spawns in production.
+    fn spawn_zone_collider(world: &mut World, geom: &MzbCollisionGeometry) -> Option<Entity> {
+        let (positions, tris) = geom.trimesh_data();
+        if tris.is_empty() {
+            return None;
+        }
+        Some(
+            world
+                .spawn((
+                    RigidBody::Static,
+                    Collider::trimesh(positions, tris),
+                    wall_layers(),
+                    Transform::default(),
+                ))
+                .id(),
+        )
+    }
+
+    /// Headless app with the avian world built around `geom`: PhysicsPlugins +
+    /// the zone trimesh collider + the geometry resource, then forced physics
+    /// steps so avian builds its collider trees / spatial queries (a headless
+    /// test advances Time by ~0 real seconds, so no fixed step would run on its
+    /// own).
+    fn live_app(geom: MzbCollisionGeometry) -> App {
+        let mut app = App::new();
+        // TimePlugin inserts the Time resources + fixed-step runner that
+        // PhysicsPlugins' schedule is driven by (App::new() alone has no Time).
+        app.add_plugins(bevy::time::TimePlugin);
+        app.add_plugins(PhysicsPlugins::default());
+        // Avian's collider backend + cache systems expect the mesh asset store
+        // and its event stream; a minimal test app has no asset plugin, so
+        // initialize both.
+        let world = app.world_mut();
+        world.init_resource::<Assets<Mesh>>();
+        world.init_resource::<bevy::ecs::message::Messages<AssetEvent<Mesh>>>();
+        spawn_zone_collider(&mut app.world_mut(), &geom);
+        app.insert_resource(geom);
+        app.init_resource::<LiveOut>();
+        for _ in 0..2 {
+            app.world_mut()
+                .resource_mut::<Time>()
+                .advance_by(std::time::Duration::from_secs_f32(1.0 / 60.0));
+            app.update();
+        }
+        app
+    }
+
+    #[derive(Resource)]
+    struct WalkReq {
+        x: f32,
+        y: f32,
+        z: f32,
+        dx: f32,
+        dy: f32,
+    }
+
+    #[derive(Resource, Default)]
+    struct LiveOut(Vec<WallClipResult>);
+
+    /// One tick of the LIVE resolver — dispatch_movement_system's exact call.
+    fn walk_tick(
+        avian: AvianMoveParams,
+        mut push: Local<PushThrough>,
+        req: Res<WalkReq>,
+        mut out: ResMut<LiveOut>,
+    ) {
+        let clip = resolve_position(
+            &avian, &mut push, req.x, req.y, req.z, req.dx, req.dy, DT, &mut None, &mut None,
+        );
+        out.0.push(clip);
+    }
+
+    /// Walk from wire (x,y,z) in wire dir for `ticks` through the live resolver —
+    /// input.rs' exact consumption: x += dx, y += dy, landed_floor owns z.
+    fn live_walk(
+        app: &mut App,
+        start: (f32, f32, f32),
+        dir: (f32, f32),
+        ticks: usize,
+    ) -> (f32, f32, f32) {
+        let mut pos = start;
+        for _ in 0..ticks {
+            app.world_mut().insert_resource(WalkReq {
+                x: pos.0,
+                y: pos.1,
+                z: pos.2,
+                dx: dir.0 * RUN * DT,
+                dy: dir.1 * RUN * DT,
+            });
+            app.world_mut()
+                .run_system_once(walk_tick)
+                .expect("walk_tick runs");
+            let clip = app.world_mut().resource_mut::<LiveOut>().0.pop().unwrap();
+            pos.0 += clip.dx;
+            pos.1 += clip.dy;
+            if let Some(f) = clip.landed_floor {
+                pos.2 = -f;
+            }
+        }
+        pos
+    }
+
+    // ------------------------------------------------------------------
+    // The suite — live-path versions of kuluu-render's wall_collision_tests
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn stairs_ascend_full_matrix_live() {
+        // Riser heights stay at or below MAX_GROUND_STEP_UP (0.4): nothing over
+        // half a yalm is climbable, so 0.5-riser flights are NOT in the matrix —
+        // they are pinned by riser_above_step_height_blocks_ascent_live instead.
+        for (r, d) in [
+            (0.2, 0.25),
+            (0.25, 0.3),
+            (0.3, 0.4),
+            (0.35, 0.5),
+            (0.4, 0.4),
+            (0.3, 0.9),
+        ] {
+            for bal in [false, true] {
+                let mut app = live_app(staircase(12, d, r, bal));
+                let (x, _y, z) = live_walk(&mut app, (-2.0, 0.0, 0.0), (1.0, 0.0), 600);
+                assert!(
+                    (-z - 12.0 * r).abs() < 0.05 && x > 12.0 * d,
+                    "stuck ascending r={r} d={d} bal={bal}: x={x:.2} h={:.2}",
+                    -z
+                );
+            }
+        }
+    }
+
+    /// A flight whose risers exceed MAX_GROUND_STEP_UP (0.4) cannot be climbed:
+    /// the walker stops at the foot of the first riser and never gains height.
+    #[test]
+    fn riser_above_step_height_blocks_ascent_live() {
+        let mut app = live_app(staircase(12, 0.5, 0.5, false));
+        let (x, _y, z) = live_walk(&mut app, (-2.0, 0.0, 0.0), (1.0, 0.0), 600);
+        assert!(
+            x < -0.2 && z.abs() < 0.05,
+            "blocked at the foot of the 0.5-riser flight: x={x:.3} h={z:.3}",
+        );
+    }
+
+    #[test]
+    fn stairs_descend_full_matrix_live() {
+        for (r, d) in [(0.2, 0.25), (0.3, 0.4), (0.35, 0.5), (0.5, 0.5), (0.3, 0.9)] {
+            for bal in [false, true] {
+                let mut app = live_app(staircase(12, d, r, bal));
+                let top = (12.0 * d + 3.0, 0.0, -(12.0 * r));
+                let (x, _y, z) = live_walk(&mut app, top, (-1.0, 0.0), 600);
+                assert!(
+                    (-z).abs() < 0.05 && x < -1.0,
+                    "stuck descending r={r} d={d} bal={bal}: x={x:.2} h={:.2}",
+                    -z
+                );
+            }
+        }
+    }
+
+    /// A flush riser at or below MAX_GROUND_STEP_UP (0.4) is a step: climb it.
+    #[test]
+    fn flush_step_onto_platform_works_live() {
+        let mut app = live_app(parapet_platform(2.0, 0.35, 0.35));
+        let (x, _y, z) = live_walk(&mut app, (-2.0, 0.0, 0.0), (1.0, 0.0), 300);
+        assert!(
+            x > 3.0 && (-z - 0.35).abs() < 0.05,
+            "stepped up: x={x:.2} h={:.2}",
+            -z
+        );
+    }
+
+    /// A flush riser ABOVE MAX_GROUND_STEP_UP is a wall, not a step: the walker
+    /// stops in standoff and never climbs (0.8 > 0.4 — nothing over half a yalm
+    /// is walkable).
+    #[test]
+    fn flush_riser_above_step_height_blocks_live() {
+        let mut app = live_app(parapet_platform(2.0, 0.8, 0.8));
+        let (x, _y, z) = live_walk(&mut app, (-2.0, 0.0, 0.0), (1.0, 0.0), 300);
+        assert!(
+            x < 2.0 - 0.35 && x > 2.0 - 0.65 && z.abs() < 0.05,
+            "standoff at the tall riser: x={x:.3} h={z:.3}",
+        );
+    }
+
+    #[test]
+    fn corridor_pass_and_block_live() {
+        let mut app = live_app(corridor(1.2));
+        let (x, _, _) = live_walk(&mut app, (-2.0, 0.0, 0.0), (1.0, 0.0), 300);
+        assert!(x > 4.0, "1.2 gap passes: x={x:.2}");
+
+        let mut app = live_app(corridor(0.7));
+        let (x, _, _) = live_walk(&mut app, (-2.0, 0.0, 0.0), (1.0, 0.0), 300);
+        assert!(x < 2.0, "0.7 gap blocks: x={x:.2}");
+    }
+
+    #[test]
+    fn embedded_start_recovers_and_never_tunnels_live() {
+        let mut app = live_app(flat_with_wall(2.0, 3.0, NO_SUB_AREA_LINK));
+        // Start embedded in the wall (capsule radius 0.4, face at x=2).
+        let (x, _, _) = live_walk(&mut app, (1.75, 0.0, 0.0), (1.0, 0.0), 120);
+        assert!(x < 2.0, "never crossed: x={x:.3}");
+
+        let mut app = live_app(flat_with_wall(2.0, 3.0, NO_SUB_AREA_LINK));
+        let (xa, _, _) = live_walk(&mut app, (1.75, 0.0, 0.0), (-1.0, 0.0), 60);
+        assert!(xa < 1.0, "walking away works: x={xa:.2}");
+    }
+
+    /// The #2 regression on the live path: a suppressed sub-area shell must be
+    /// absent from the avian trimesh (trimesh_data mirrors MZB suppression), so
+    /// the resolver walks straight through where the unsuppressed wall blocks.
+    #[test]
+    fn suppressed_shell_is_walk_through_live() {
+        let mut app = live_app(flat_with_wall(2.0, 3.0, 7));
+        let (x, _, _) = live_walk(&mut app, (-2.0, 0.0, 0.0), (1.0, 0.0), 120);
+        assert!(x < 2.0, "blocks while unsuppressed: x={x:.2}");
+
+        let mut g = flat_with_wall(2.0, 3.0, 7);
+        g.set_suppressed(Some(7));
+        let mut app = live_app(g);
+        let (x2, _, _) = live_walk(&mut app, (-2.0, 0.0, 0.0), (1.0, 0.0), 120);
+        assert!(x2 > 4.0, "suppressed shell passes: x={x2:.2}");
+    }
+
+    #[test]
+    fn stair_with_ground_under_climbs_live() {
+        for (r, d) in [(0.26, 0.48), (0.35, 0.5)] {
+            let mut app = live_app(stair_with_ground_under(8, d, r));
+            // Start flush against the first riser — his spawn was ~0.35 yalms off it.
+            let start_x = -RADIUS + 0.05;
+            let (x, _y, z) = live_walk(&mut app, (start_x, 0.0, 0.0), (1.0, 0.0), 600);
+            assert!(
+                (-z - 8.0 * r).abs() < 0.05 && x > 8.0 * d,
+                "pinned at foot of buried stair r={r} d={d}: x={x:.2} h={:.3}",
+                -z
+            );
+        }
+    }
+
+    #[test]
+    fn stair_with_ground_under_descends_live() {
+        let (r, d) = (0.26f32, 0.48);
+        let mut app = live_app(stair_with_ground_under(8, d, r));
+        let top = (8.0 * d + 3.0, 0.0, -(8.0 * r));
+        let (x, _y, z) = live_walk(&mut app, top, (-1.0, 0.0), 600);
+        assert!(
+            (-z).abs() < 0.05 && x < -1.0,
+            "stuck descending buried stair: x={x:.2} h={:.3}",
+            -z
+        );
+    }
+
+    #[test]
+    fn ramp_40_degrees_walks_up_free_live() {
+        let top = 4.0 * (40f32.to_radians().tan());
+        let mut b = MzbCollisionBlock::default();
+        quad(
+            &mut b,
+            [
+                Vec3::new(-10.0, 0.0, -6.0),
+                Vec3::new(2.0, 0.0, -6.0),
+                Vec3::new(2.0, 0.0, 6.0),
+                Vec3::new(-10.0, 0.0, 6.0),
+            ],
+            Vec3::Y,
+            NO_SUB_AREA_LINK,
+        );
+        let run = 4.0;
+        let l = (run * run + top * top).sqrt();
+        let n = Vec3::new(-top / l, run / l, 0.0);
+        quad(
+            &mut b,
+            [
+                Vec3::new(2.0, 0.0, -6.0),
+                Vec3::new(6.0, top, -6.0),
+                Vec3::new(6.0, top, 6.0),
+                Vec3::new(2.0, 0.0, 6.0),
+            ],
+            n,
+            NO_SUB_AREA_LINK,
+        );
+        quad(
+            &mut b,
+            [
+                Vec3::new(6.0, top, -6.0),
+                Vec3::new(16.0, top, -6.0),
+                Vec3::new(16.0, top, 6.0),
+                Vec3::new(6.0, top, 6.0),
+            ],
+            Vec3::Y,
+            NO_SUB_AREA_LINK,
+        );
+        let mut app = live_app(MzbCollisionGeometry::from_block(b));
+        let (x, _y, z) = live_walk(&mut app, (-2.0, 0.0, 0.0), (1.0, 0.0), 400);
+        assert!(
+            x > 6.5 && (-z - top).abs() < 0.05,
+            "ramp free: x={x:.2} h={:.2}",
+            -z
+        );
+    }
+
+    #[test]
+    fn cliff_descent_is_never_a_wall_live() {
+        let mut b = MzbCollisionBlock::default();
+        quad(
+            &mut b,
+            [
+                Vec3::new(-10.0, 2.0, -6.0),
+                Vec3::new(2.0, 2.0, -6.0),
+                Vec3::new(2.0, 2.0, 6.0),
+                Vec3::new(-10.0, 2.0, 6.0),
+            ],
+            Vec3::Y,
+            NO_SUB_AREA_LINK,
+        );
+        quad(
+            &mut b,
+            [
+                Vec3::new(2.0, 0.0, -6.0),
+                Vec3::new(2.0, 0.0, 6.0),
+                Vec3::new(2.0, 2.0, 6.0),
+                Vec3::new(2.0, 2.0, -6.0),
+            ],
+            Vec3::new(1.0, 0.0, 0.0),
+            NO_SUB_AREA_LINK,
+        );
+        quad(
+            &mut b,
+            [
+                Vec3::new(2.0, 0.0, -6.0),
+                Vec3::new(10.0, 0.0, -6.0),
+                Vec3::new(10.0, 0.0, 6.0),
+                Vec3::new(2.0, 0.0, 6.0),
+            ],
+            Vec3::Y,
+            NO_SUB_AREA_LINK,
+        );
+        let mut app = live_app(MzbCollisionGeometry::from_block(b));
+        let (x, _y, z) = live_walk(&mut app, (0.0, 0.0, -2.0), (1.0, 0.0), 200);
+        assert!(
+            x > 4.0 && (-z).abs() < 0.05,
+            "walked off and landed: x={x:.2} h={:.2}",
+            -z
+        );
+    }
+
+    #[test]
+    fn tall_wall_blocks_with_standoff_live() {
+        let mut app = live_app(flat_with_wall(2.0, 3.0, NO_SUB_AREA_LINK));
+        let (x, _y, _z) = live_walk(&mut app, (-2.0, 0.0, 0.0), (1.0, 0.0), 300);
+        assert!(x < 2.0 - 0.35 && x > 2.0 - 0.65, "standoff: x={x:.3}");
+    }
+
+    // ------------------------------------------------------------------
+    // Resolver-specific coverage the legacy suite never had
+    // ------------------------------------------------------------------
+
+    /// The STOPPED arm (want_len < 1e-6): no input settles onto the actual tread
+    /// instead of holding the smooth ramp height.
+    #[test]
+    fn stopped_input_settles_onto_tread() {
+        let mut app = live_app(staircase(4, 0.5, 0.3, false));
+        // Stand on the top terrace (feet at 4*0.3), no input: floor must be the
+        // terrace, not a lower tread or NaN.
+        let clip = {
+            app.world_mut().insert_resource(WalkReq {
+                x: 2.5,
+                y: 0.0,
+                z: -(4.0 * 0.3),
+                dx: 0.0,
+                dy: 0.0,
+            });
+            app.world_mut()
+                .run_system_once(walk_tick)
+                .expect("walk_tick runs");
+            app.world_mut().resource_mut::<LiveOut>().0.pop().unwrap()
+        };
+        assert_eq!(clip.dbg_reason, "stopped-input", "reason={}", clip.dbg_reason);
+        let floor = clip.landed_floor.expect("settled arm reports a floor");
+        assert!((floor - 4.0 * 0.3).abs() < 1e-3, "tread: {floor:.4}");
+        // And on flat ground the stop settles to the floor underfoot.
+        let mut app = live_app(flat_with_wall(2.0, 3.0, NO_SUB_AREA_LINK));
+        app.world_mut().insert_resource(WalkReq {
+            x: -5.0,
+            y: 0.0,
+            z: 0.0,
+            dx: 0.0,
+            dy: 0.0,
+        });
+        app.world_mut()
+            .run_system_once(walk_tick)
+            .expect("walk_tick runs");
+        let clip = app.world_mut().resource_mut::<LiveOut>().0.pop().unwrap();
+        let flat_floor = clip.landed_floor.expect("settled arm reports a floor");
+        assert!(flat_floor.abs() < 1e-3, "flat: {flat_floor:.4}");
+    }
+
+    /// detect_stairs is the word-of-god detector resolve_position rides on: flat
+    /// ground must NOT lock a ramp.
+    #[test]
+    fn detect_stairs_flat_ground_not_locked() {
+        let g = flat_with_wall(2.0, 3.0, NO_SUB_AREA_LINK);
+        // Bevy space: target at feet level on the flat approach (wire y=0).
+        let det = crate::view_native::input::detect_stairs(Vec3::new(-5.0, 0.0, 0.0), &g);
+        assert!(!det.ramp_locked, "flat ground locked a ramp");
+    }
+
+    /// A staircase ahead locks the detector with a slope near r/d.
+    #[test]
+    fn detect_stairs_locks_ramp_on_staircase_ahead() {
+        let (d, r) = (0.5f32, 0.3);
+        let g = staircase(12, d, r, false);
+        // Stand on the flat approach just before the first riser.
+        let det = crate::view_native::input::detect_stairs(Vec3::new(-1.0, 0.0, 0.0), &g);
+        assert!(det.ramp_locked, "staircase ahead did not lock");
+        let want = r / d;
+        assert!(
+            (det.best_slope - want).abs() < 0.25,
+            "slope {:.3} vs expected ~{:.3}",
+            det.best_slope, want
+        );
+    }
+
+    /// A tall wall ahead is not a ramp: the detector must stay unlocked.
+    #[test]
+    fn detect_stairs_wall_ahead_not_locked() {
+        let g = flat_with_wall(2.0, 3.0, NO_SUB_AREA_LINK);
+        let det = crate::view_native::input::detect_stairs(Vec3::new(-1.0, 0.0, 0.0), &g);
+        assert!(!det.ramp_locked, "wall ahead locked a ramp");
+    }
 }
 
 /// move_and_slide that only treats WALLS as blocking. Any contact whose surface

@@ -586,64 +586,6 @@ impl MzbCollisionGeometry {
         best.map(|(_, hit_y)| hit_y)
     }
 
-    /// Footprint-averaged ground height for smooth-slope rendering across
-    /// stair treads (retail-style). Casts 8 rays in a ring of radius `radius`
-    /// around `center_xz`, all searching downward from `ceiling_y`, and
-    /// returns the average of the hit heights. Samples whose height differs
-    /// from the median by more than `outlier_thresh` are discarded (guards
-    /// against sample points falling off the staircase onto adjacent lower or
-    /// higher ground). Returns `None` if fewer than 3 samples survived.
-    ///
-    /// The point: on a big flat area the average equals the center height
-    /// (all 8 rays hit the same floor). On a staircase the sample ring
-    /// straddles two treads, so the average smoothly interpolates between
-    /// them as the character walks across the boundary — a continuous ramp
-    /// instead of a per-tread snap. Direction-agnostic, so sidling up stairs
-    /// works the same as walking straight up them.
-    pub fn footprint_ground_y(
-        &self,
-        center_xz: Vec2,
-        ceiling_y: f32,
-        radius: f32,
-        outlier_thresh: f32,
-    ) -> Option<f32> {
-        // 8 points: 4 cardinals + 4 diagonals. Diagonals scaled by 1/sqrt(2)
-        // so they sit ON the circle of `radius`, not outside it.
-        let d = radius * std::f32::consts::FRAC_1_SQRT_2;
-        let offsets: [Vec2; 8] = [
-            Vec2::new(radius, 0.0),
-            Vec2::new(-radius, 0.0),
-            Vec2::new(0.0, radius),
-            Vec2::new(0.0, -radius),
-            Vec2::new(d, d),
-            Vec2::new(d, -d),
-            Vec2::new(-d, d),
-            Vec2::new(-d, -d),
-        ];
-        let mut hits: Vec<f32> = offsets
-            .iter()
-            .filter_map(|o| self.ground_raycast(center_xz + *o, ceiling_y))
-            .collect();
-        if hits.len() < 3 {
-            return None;
-        }
-        // Median (odd-count) or lower of the two middle values (even-count) —
-        // simple and cheap; exact median isn't needed, only a robust central
-        // value for outlier rejection.
-        hits.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        let median = hits[hits.len() / 2];
-        // Reject stragglers (off-stair samples).
-        let kept: Vec<f32> = hits
-            .iter()
-            .copied()
-            .filter(|h| (h - median).abs() <= outlier_thresh)
-            .collect();
-        if kept.len() < 3 {
-            return None;
-        }
-        Some(kept.iter().sum::<f32>() / kept.len() as f32)
-    }
-
     /// [`Self::ground_step`] with an escape hatch for a walker already beneath
     /// every floor in its column. Walking cannot reach that state — descent is
     /// unbounded, so the floor you are standing on is always within reach — it
@@ -4302,6 +4244,16 @@ pub const STEP_TOP_TOLERANCE: f32 = 0.05;
 /// Slide re-projection passes per tick (wall, then crease).
 pub const SLIDE_ITERATIONS: usize = 3;
 
+/// Penetration depth at which a face we are NOT moving into still blocks the
+/// sweep. Two faces pinching a gap narrower than the capsule diameter each
+/// read "parallel" to the motion individually, but together they must stop us
+/// (corridor_pass_and_block: a 0.7-gap corridor passed at full speed because
+/// both ±z faces had zero opposing component). Stuck-on-walls sliding only
+/// ever re-detects its wall at ~1e-4 triangle-seam dip — the same noise
+/// `capsule_sweep`'s `PLAYER_WALL_RADIUS - 1e-4` is sized for — far below
+/// this slop, so parallel slides still pass.
+pub const PINCH_PENETRATION_SLOP: f32 = 0.02;
+
 /// Depenetration passes for a move that STARTS embedded (bad server seed, mid
 /// zone-swap). Resting at sweep standoff (~R) must not fight the approach, so
 /// only penetration past DEPEN_SLOP pushes out.
@@ -4494,8 +4446,18 @@ impl MzbCollisionGeometry {
             // partings pass through.
             let n2 = Vec2::new(c.normal.x, c.normal.z);
             let n2l = n2.length();
-            if n2l > 1e-4 && d_hat.dot(n2 / n2l) >= -1e-3 {
-                return None;
+            if n2l > 1e-4 {
+                let into_face = d_hat.dot(n2 / n2l) < -1e-3;
+                // A face we are not moving into cannot block — UNLESS the
+                // capsule is already genuinely overlapping it: two faces
+                // pinching a gap narrower than the diameter each look
+                // "parallel" to the motion, but together they must stop us.
+                // Stuck-on-walls sliding only re-detects its wall at ~1e-4
+                // seam dip (below PINCH_PENETRATION_SLOP), so it still passes.
+                let pinched = r_eff - c.dist_sq.sqrt() > PINCH_PENETRATION_SLOP;
+                if !into_face && !pinched {
+                    return None;
+                }
             }
             Some(c)
         };
@@ -4565,6 +4527,14 @@ impl MzbCollisionGeometry {
         xz
     }
 
+    /// LEGACY — NOT on the production path. The live walker is
+    /// `kuluu::view_native::avian_bridge::resolve_position` (dispatch_movement_system
+    /// routes every tick through it against the avian trimesh mirror of these
+    /// blocks); this hand-rolled capsule sweep is kept only as a reference
+    /// implementation pinned by its own scenario suite (`wall_collision_tests`
+    /// below) — live-path coverage lives in kuluu's `avian_bridge::live_path_tests`.
+    /// Do not extend new behaviour here; change the avian resolver instead.
+    ///
     /// kuluu-q5sn (v5/v6): clamp one tick's horizontal displacement against MZB
     /// wall triangles so the player slides along walls, steps up stairs, and
     /// walks off ledges. Wire in/out (bevy.x = ffxi.x, bevy.z = -ffxi.y,
@@ -4668,7 +4638,11 @@ impl MzbCollisionGeometry {
                         return None;
                     }
                     let pos = p + dir * s;
-                    let f0 = self.ground_raycast(pos, feet + MAX_GROUND_STEP_UP)?;
+                    // Same reach as ground_step: a riser sitting exactly on the
+                    // bound must be deterministically reachable, not coin-flipped
+                    // by ~1e-4 ray noise (STEP_UP_REACH_EPSILON).
+                    let f0 = self
+                        .ground_raycast(pos, feet + MAX_GROUND_STEP_UP + STEP_UP_REACH_EPSILON)?;
                     if f0 <= feet + STEP_UP_REACH_EPSILON {
                         return None;
                     }
@@ -4783,15 +4757,17 @@ impl MzbCollisionGeometry {
                             // A legal tread: a floor above our feet but within one
                             // step, that the capsule fits on (grazing the next riser
                             // is allowed; only tall geometry rejects).
-                            let Some(f0) =
-                                self.ground_raycast(probe_pos, feet + MAX_GROUND_STEP_UP)
-                            else {
+                            let Some(f0) = self.ground_raycast(
+                                probe_pos,
+                                feet + MAX_GROUND_STEP_UP + STEP_UP_REACH_EPSILON,
+                            ) else {
                                 continue;
                             };
                             if f0 <= feet + STEP_UP_REACH_EPSILON {
                                 continue;
                             }
-                            if f0 > feet + MAX_GROUND_STEP_UP {
+                            // Same reach as ground_step (bound + epsilon).
+                            if f0 > feet + MAX_GROUND_STEP_UP + STEP_UP_REACH_EPSILON {
                                 continue;
                             }
                             let clear = self
@@ -4973,6 +4949,12 @@ fn point_tri_dist_sq(p: Vec3, a: Vec3, b: Vec3, c: Vec3) -> f32 {
     ((a + ab * v + ac * w) - p).length_squared()
 }
 
+#[cfg(test)]
+/// LEGACY suite: these scenarios pin the hand-rolled `wall_clip_wire` walker,
+/// which is no longer on the production path. The live resolver
+/// (`kuluu::view_native::avian_bridge::resolve_position`) has its own mirror of
+/// this scenario set in kuluu's `avian_bridge::live_path_tests`, driven through
+/// a real avian world — that suite is what guards the game.
 #[cfg(test)]
 mod wall_collision_tests {
     use super::*;
@@ -5285,14 +5267,15 @@ mod wall_collision_tests {
 
     #[test]
     fn stairs_ascend_full_matrix() {
+        // Riser heights stay at or below MAX_GROUND_STEP_UP (0.4): nothing over
+        // half a yalm is climbable, so 0.5-riser flights are NOT in the matrix —
+        // they are pinned by riser_above_step_height_blocks_ascent instead.
         for (r, d) in [
             (0.2, 0.25),
             (0.25, 0.3),
             (0.3, 0.4),
             (0.35, 0.5),
             (0.4, 0.4),
-            (0.5, 0.5),
-            (0.5, 1.0),
             (0.3, 0.9),
         ] {
             for bal in [false, true] {
@@ -5305,6 +5288,18 @@ mod wall_collision_tests {
                 );
             }
         }
+    }
+
+    /// A flight whose risers exceed MAX_GROUND_STEP_UP (0.4) cannot be climbed:
+    /// the walker stops at the foot of the first riser and never gains height.
+    #[test]
+    fn riser_above_step_height_blocks_ascent() {
+        let g = staircase(12, 0.5, 0.5, false);
+        let (x, _y, z) = walk(&g, (-2.0, 0.0, 0.0), (1.0, 0.0), 600);
+        assert!(
+            x < -0.2 && z.abs() < 0.05,
+            "blocked at the foot of the 0.5-riser flight: x={x:.3} h={z:.3}",
+        );
     }
 
     #[test]
@@ -5346,14 +5341,28 @@ mod wall_collision_tests {
         assert!((-z).abs() < 0.01, "stayed low: h={:.3}", -z);
     }
 
+    /// A flush riser at or below MAX_GROUND_STEP_UP (0.4) is a step: climb it.
     #[test]
     fn flush_step_onto_platform_works() {
+        let g = parapet_platform(2.0, 0.35, 0.35);
+        let (x, _y, z) = walk(&g, (-2.0, 0.0, 0.0), (1.0, 0.0), 300);
+        assert!(
+            x > 3.0 && (-z - 0.35).abs() < 0.05,
+            "stepped up: x={x:.2} h={:.2}",
+            -z
+        );
+    }
+
+    /// A flush riser ABOVE MAX_GROUND_STEP_UP is a wall, not a step: the walker
+    /// stops in standoff and never climbs (0.8 > 0.4 — nothing over half a yalm
+    /// is walkable).
+    #[test]
+    fn flush_riser_above_step_height_blocks() {
         let g = parapet_platform(2.0, 0.8, 0.8);
         let (x, _y, z) = walk(&g, (-2.0, 0.0, 0.0), (1.0, 0.0), 300);
         assert!(
-            x > 3.0 && (-z - 0.8).abs() < 0.05,
-            "stepped up: x={x:.2} h={:.2}",
-            -z
+            x < 2.0 - 0.35 && x > 2.0 - 0.65 && z.abs() < 0.05,
+            "standoff at the tall riser: x={x:.3} h={z:.3}",
         );
     }
 

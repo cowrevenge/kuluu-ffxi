@@ -537,7 +537,29 @@ pub fn update_party_frame_system(
     // temporal double image ("double box"). The old self_hud updated text in
     // place and never churned entities, which is why it didn't have this.
     let snap = &state.snapshot;
-    let key = party_content_key(snap);
+    // Cheap gate before the expensive key build. party_content_key deep-clones
+    // the party list and scans every entity per member, so it must not run 60x
+    // a second while idle. ingest_system runs in PreUpdate and sets `dirty`
+    // only when fresh data lands; with no new snapshot this frame the scene is
+    // byte-identical to what last_key was built from — including the entity
+    // flags it scanned — so equal cheap fields prove the whole key would be
+    // unchanged. A fresh snapshot still pays for the full scan: char_flags can
+    // move without touching any field below (a member toggling seeking-party).
+    if !target.is_changed() && !settings.is_changed() {
+        if let Some(last) = last_key.as_ref() {
+            let cheap_equal = snap.zone_id == last.zone_id
+                && snap.stage == last.stage
+                && snap.zone_generation == last.zone_generation
+                && colors.generation() == last.name_color_generation
+                && (!snap.treasure_pool.is_empty()) == last.treasure_nonempty
+                && snap.party == last.party
+                && snap.char_name.as_deref() == last.char_name.as_deref();
+            if cheap_equal && !state.dirty {
+                return;
+            }
+        }
+    }
+    let key = party_content_key(snap, colors.generation());
     if !target.is_changed() && !settings.is_changed() && Some(&key) == last_key.as_ref() {
         return;
     }
@@ -693,7 +715,7 @@ pub fn update_party_frame_system(
 /// Zone + stage ARE included: a zone-in must force the first default draw even
 /// when the party list looks identical to the previous zone's (or empty), and
 /// Zoning<->InZone flips must re-run the show/hide logic.
-#[derive(Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct PartyContentKey {
     party: Vec<kuluu_snapshot::PartyMember>,
     char_name: Option<String>,
@@ -705,9 +727,17 @@ pub struct PartyContentKey {
     /// change. Guarantees the key differs after a zone transition even when the
     /// actual party data is byte-identical, forcing the UI to rebuild.
     zone_generation: u64,
+    /// NameColorTable content version (0 until the retail table loads). The
+    /// table can land after the first draw and its colours feed every row's
+    /// name tint — without it in the key, late-loaded colours would sit stale
+    /// until some unrelated field happened to change.
+    name_color_generation: u64,
 }
 
-fn party_content_key(snap: &kuluu_snapshot::SceneSnapshot) -> PartyContentKey {
+fn party_content_key(
+    snap: &kuluu_snapshot::SceneSnapshot,
+    name_color_generation: u64,
+) -> PartyContentKey {
     let mut flags = snap
         .party
         .iter()
@@ -727,6 +757,7 @@ fn party_content_key(snap: &kuluu_snapshot::SceneSnapshot) -> PartyContentKey {
         zone_id: snap.zone_id,
         stage: snap.stage,
         zone_generation: snap.zone_generation,
+        name_color_generation,
     }
 }
 
@@ -1380,6 +1411,19 @@ pub fn ui_settings_click_system(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The retail colour table can land after the first party draw; its content
+    /// version must be part of the key or late-loaded colours sit stale until an
+    /// unrelated field happens to change.
+    #[test]
+    fn content_key_tracks_name_color_table_generation() {
+        let snap = kuluu_snapshot::SceneSnapshot::default();
+        let a = party_content_key(&snap, 0);
+        let b = party_content_key(&snap, 1);
+        assert_eq!(a.party, b.party, "same scene, only the table moved");
+        assert_ne!(a.name_color_generation, b.name_color_generation);
+        assert_ne!(a, b, "late table load must force a rebuild");
+    }
 
     #[test]
     fn hp_ramp_bands() {

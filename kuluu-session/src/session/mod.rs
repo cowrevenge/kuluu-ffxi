@@ -507,7 +507,18 @@ async fn run_map_session(
     // GROUP_ATTR, matching the order LSB's own ReloadParty() uses. For a solo
     // player LSB answers with an empty GROUP_TBL(nullptr); the state merge
     // keeps self through that (see PartyTableReset).
-    {
+    //
+    // Skipped while InEvent: LSB validates 0x076 against BlockedState::InEvent
+    // and drops it silently during a cutscene (vendor/server/src/map/packets/
+    // c2s/0x076_group_list_req.cpp:31). Zone-in events start ~4 s after the
+    // bootstrap 0x00A (AfterZoneIn queue, vendor/server/src/map/packets/c2s/
+    // 0x00a_login.cpp), so a dragged flood can land this send inside one —
+    // by then the event's dialog packets already sit in pending_event_end.
+    // The keepalive loop fires the request once that drains; any 0x05B it
+    // flushes first precedes us in the same datagram, so the server sees the
+    // event end before the request.
+    let mut group_list_deferred = false;
+    if pending_event_end.is_empty() {
         let payload = build_subpacket_group_list_req(sub_seq);
         sub_seq = sub_seq.wrapping_add(1);
         map.send_encrypted(&payload, datagram_header_id(sub_seq), server_last_seq)
@@ -516,6 +527,12 @@ async fn run_map_session(
             sub_seq,
             ack = server_last_seq,
             "sent 0x076 GROUP_LIST_REQ (zone-in party request)"
+        );
+    } else {
+        group_list_deferred = true;
+        tracing::info!(
+            pending_events = pending_event_end.len(),
+            "in-event at zone-in — deferring 0x076 GROUP_LIST_REQ until the event clears"
         );
     }
     quiesce!();
@@ -553,6 +570,7 @@ async fn run_map_session(
         sub_seq,
         server_last_seq,
         pending_event_end,
+        group_list_deferred,
         cutscene,
         bootstrap.char_id,
         bootstrap.char_name.to_string(),
@@ -2158,6 +2176,9 @@ async fn keepalive_loop(
     mut sub_seq: u16,
     mut server_last_seq: u16,
     mut pending_event_end: Vec<(u32, u16, u16)>,
+    // 0x076 GROUP_LIST_REQ was skipped at zone-in because we were InEvent;
+    // fire it on the first tick after the event clears.
+    mut group_list_deferred: bool,
     mut cutscene: crate::event_dialog::CutsceneScope,
     self_char_id: u32,
     character_name: String,
@@ -3876,6 +3897,17 @@ async fn keepalive_loop(
                     }
                     pending_event_end_since = None;
                     pending_event_end_anchor = None;
+                }
+
+                // Deferred 0x076 GROUP_LIST_REQ (skipped at zone-in while InEvent —
+                // LSB drops it there, vendor/server/src/map/packets/c2s/
+                // 0x076_group_list_req.cpp:31). Fire now that the event has cleared;
+                // any 0x05B this tick's flush sent precedes us in the same datagram.
+                if group_list_deferred && pending_event_end.is_empty() {
+                    group_list_deferred = false;
+                    payload.extend(build_subpacket_group_list_req(sub_seq));
+                    sub_seq = sub_seq.wrapping_add(1);
+                    tracing::info!("sent deferred 0x076 GROUP_LIST_REQ (zone-in party request, event cleared)");
                 }
 
                 if let Some(target) = rubber_band_target {

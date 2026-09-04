@@ -1662,11 +1662,11 @@ mod tests {
 
     /// The wedge repro: feet at wire z = 0 (bevy y = 0) with the only floor a
     /// full body above, past `MAX_GROUND_STEP_UP`.
-    const WEDGE_FLOOR_BEVY_Y: f32 = 5.319;
+    const WEDGE_FLOOR_BEVY_Y: f32 = 5.0;
     const WEDGE_POS: Vec3 = Vec3::new(0.0, 0.0, 0.0);
 
     #[test]
-    fn live_wedge_candidate_repairs_the_reported_column() {
+    fn wedged_candidate_repairs_the_reported_column() {
         const ASSERT_EPSILON: f32 = 1e-3;
         let collision = slab_collision(WEDGE_FLOOR_BEVY_Y);
         let candidate = ground_recovery_candidate(

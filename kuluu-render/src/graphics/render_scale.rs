@@ -45,7 +45,10 @@ const BRIDGE_POINTER_UUID: u128 = 0x6b756c75_72656e64_72736361_6c655f30;
 /// nameplate-overlay slot. The operator Camera3d writes the scene at order 0 and —
 /// since Phase 1 removed the second overlay Camera3d that shared this target — is
 /// the ONLY other window writer on this path; anything spawned between them (or a
-/// second Camera3d) would double-draw the frame, see docs/camera_notes.md.
+/// second Camera3d) would double-draw the frame. The slot values are pinned by
+/// `scaled_mode_composite_is_one_slot_past_the_retired_overlay` below and by
+/// [`crate::nameplate_overlay::NAMEPLATE_OVERLAY_CAMERA_ORDER`] /
+/// [`crate::camera::build_operator_camera`].
 pub const RENDER_SCALE_COMPOSITE_ORDER: isize =
     crate::nameplate_overlay::NAMEPLATE_OVERLAY_CAMERA_ORDER + 1;
 

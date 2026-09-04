@@ -80,7 +80,9 @@ const PITCH_STEP_HELD: f32 = 0.015;
 
 const STRAFE_CANCEL_MS: u64 = 300;
 
-use kuluu_session::state::move_speed_yps;
+use kuluu_session::state::{
+    ground_correction_matches, move_speed_yps, GROUND_CORRECTION_XY_EPSILON_YALMS,
+};
 
 const BACKPEDAL_SCALE: f32 = 0.5;
 const STRAFE_SCALE: f32 = 0.75;
@@ -1090,75 +1092,127 @@ pub fn dispatch_movement_system(
 /// kuluu-0nnl did.
 const UNDER_FLOOR_RECOVERY_SECS: f32 = 0.5;
 
-/// Debounce for [`recover_self_ground_system`]: fires once `under` has held for
-/// [`UNDER_FLOOR_RECOVERY_SECS`], and rearms whenever the player is grounded
-/// again.
-fn under_floor_debounce_fires(under_secs: &mut f32, under: bool, dt: f32) -> bool {
-    if !under {
-        *under_secs = 0.0;
-        return false;
+#[derive(Debug, Clone, Copy)]
+struct GroundRecoveryCandidate {
+    zone_id: u16,
+    self_id: u32,
+    reported_pos: Vec3,
+    recovered_z: f32,
+}
+
+impl GroundRecoveryCandidate {
+    fn matches(self, other: Self) -> bool {
+        self.zone_id == other.zone_id
+            && self.self_id == other.self_id
+            && ground_correction_matches(
+                self.reported_pos.x,
+                self.reported_pos.y,
+                other.reported_pos.x,
+                other.reported_pos.y,
+            )
+            && (self.reported_pos.z - other.reported_pos.z).abs()
+                <= GROUND_CORRECTION_XY_EPSILON_YALMS
+            && (self.recovered_z - other.recovered_z).abs() <= GROUND_CORRECTION_XY_EPSILON_YALMS
     }
-    *under_secs += dt;
-    if *under_secs < UNDER_FLOOR_RECOVERY_SECS {
-        return false;
+}
+
+#[derive(Default)]
+pub(crate) struct GroundRecoveryTracker {
+    candidate: Option<GroundRecoveryCandidate>,
+    stable_secs: f32,
+    queued: bool,
+}
+
+impl GroundRecoveryTracker {
+    fn observe(&mut self, candidate: Option<GroundRecoveryCandidate>, dt: f32) -> bool {
+        let Some(candidate) = candidate else {
+            *self = Self::default();
+            return false;
+        };
+        if !self.candidate.is_some_and(|prior| prior.matches(candidate)) {
+            self.candidate = Some(candidate);
+            self.stable_secs = 0.0;
+            self.queued = false;
+        }
+        self.stable_secs += dt;
+        !self.queued && self.stable_secs >= UNDER_FLOOR_RECOVERY_SECS
     }
-    *under_secs = 0.0;
-    true
+
+    fn mark_queued(&mut self) {
+        self.queued = true;
+    }
 }
 
 /// Breaks the wire-z wedge (kuluu-mo4q). `dispatch_movement_system` holds height
-/// whenever `ground_step` finds no floor within reach, and the server never
-/// corrects it — c2s 0x015 carries our z, the server persists it, and the 0x00A
-/// / CHAR_PC self seed hands the same bad z back next login. Being under every
-/// floor in the column is unreachable by walking (descent is unbounded), so it
-/// is always a wedge and always safe to recover upward.
+/// whenever `ground_step` finds no floor within reach. LSB ordinarily accepts
+/// all three client coordinates without terrain validation; forced-position
+/// and charm states are the exceptions
+/// (`vendor/server/src/map/packets/c2s/0x015_pos.cpp`).
+/// Being under every floor in the column is unreachable by walking, so it is
+/// always a wedge and always safe to recover upward.
 pub fn recover_self_ground_system(
     time: Res<Time<Fixed>>,
     state: Res<SceneState>,
     cmd_tx: Res<CommandTx>,
     collision: Res<kuluu_render::dat_mzb::MzbCollisionGeometry>,
     mzb_in_flight: Res<kuluu_render::dat_mzb::LoadMzbInFlight>,
-    mut prediction: ResMut<LocalPlayerPrediction>,
-    mut under_secs: Local<f32>,
+    mut tracker: Local<GroundRecoveryTracker>,
 ) {
     let self_pos = state.snapshot.self_pos;
-    let self_present = state
-        .snapshot
-        .self_char_id
-        .is_some_and(|id| state.snapshot.entities.iter().any(|e| e.id == id));
-
-    // Before the first movement tick the prediction is unset, so the seed the
-    // server sent is what needs checking.
-    let pos = if prediction.initialized {
-        prediction.pos
-    } else {
-        Vec3::new(self_pos.pos.x, self_pos.pos.y, self_pos.pos.z)
-    };
-
-    let Some(cmd) = ground_recovery_step(
+    let self_id = state.snapshot.self_char_id.filter(|id| {
+        state
+            .snapshot
+            .entities
+            .iter()
+            .any(|entity| entity.id == *id)
+    });
+    let reported_pos = Vec3::new(self_pos.pos.x, self_pos.pos.y, self_pos.pos.z);
+    let candidate = ground_recovery_candidate(
         &collision,
         &mzb_in_flight,
-        pos,
-        self_pos.heading,
-        self_present,
-        time.delta_secs(),
-        &mut under_secs,
-    ) else {
+        state.snapshot.zone_id,
+        self_id,
+        reported_pos,
+    );
+    if !tracker.observe(candidate, time.delta_secs()) {
+        return;
+    }
+    let Some(candidate) = candidate else {
         return;
     };
-    if let AgentCommand::GroundCorrection { z, .. } = cmd {
-        prediction.pos = Vec3::new(pos.x, pos.y, z);
-        prediction.initialized = true;
+    let cmd = ground_recovery_command(
+        candidate.zone_id,
+        candidate.self_id,
+        candidate.reported_pos.x,
+        candidate.reported_pos.y,
+        candidate.recovered_z,
+        self_pos.heading,
+    );
+    if cmd_tx.0.try_send(cmd).is_ok() {
+        tracker.mark_queued();
     }
-    let _ = cmd_tx.0.try_send(cmd);
 }
 
 /// The corrective command [`recover_self_ground_system`] emits. It is
 /// deliberately not an [`AgentCommand::Move`]: the reactor treats a Move as
 /// player intent and would cancel a Following/Pathing goal for it, or drop it
 /// outright under a forced-move override (kuluu-mo4q).
-pub fn ground_recovery_command(x: f32, y: f32, z: f32, heading: u8) -> AgentCommand {
-    AgentCommand::GroundCorrection { x, y, z, heading }
+pub fn ground_recovery_command(
+    zone_id: u16,
+    self_id: u32,
+    x: f32,
+    y: f32,
+    z: f32,
+    heading: u8,
+) -> AgentCommand {
+    AgentCommand::GroundCorrection {
+        zone_id,
+        self_id,
+        x,
+        y,
+        z,
+        heading,
+    }
 }
 
 /// Inert while a zone/interior load is in flight: the "under every floor is
@@ -1168,37 +1222,37 @@ pub fn ground_recovery_command(x: f32, y: f32, z: f32, heading: u8) -> AgentComm
 /// above them, and recovering onto it is the kuluu-0nnl roof snap. The load
 /// outlasts [`UNDER_FLOOR_RECOVERY_SECS`], so the debounce alone cannot cover
 /// this.
-fn ground_recovery_step(
+fn ground_recovery_candidate(
     collision: &kuluu_render::dat_mzb::MzbCollisionGeometry,
     mzb_in_flight: &kuluu_render::dat_mzb::LoadMzbInFlight,
+    zone_id: Option<u16>,
+    self_id: Option<u32>,
     pos: Vec3,
-    heading: u8,
-    self_present: bool,
-    dt: f32,
-    under_secs: &mut f32,
-) -> Option<AgentCommand> {
-    if !self_present || mzb_in_flight.any_pending() {
-        under_floor_debounce_fires(under_secs, false, dt);
+) -> Option<GroundRecoveryCandidate> {
+    let zone_id = zone_id?;
+    let self_id = self_id?;
+    if mzb_in_flight.any_pending() {
         return None;
     }
     let column = bevy::math::Vec2::new(pos.x, -pos.y);
     let feet_y = -pos.z;
 
-    let reachable = collision
+    if collision
         .ground_step(column, feet_y, kuluu_render::dat_mzb::MAX_GROUND_STEP_UP)
-        .is_some();
-    // No floor at all means the zone collision has not loaded yet (it is reset
-    // on zone change) or the column is genuinely floorless — neither is a wedge.
-    let under = !reachable && collision.ground_nearest(column, feet_y).is_some();
-    if !under_floor_debounce_fires(under_secs, under, dt) {
+        .is_some()
+    {
         return None;
     }
-
     let recovered_z = collision.ground_or_recover_wire_z(pos.x, pos.y, pos.z)?;
     if (recovered_z - pos.z).abs() <= f32::EPSILON {
         return None;
     }
-    Some(ground_recovery_command(pos.x, pos.y, recovered_z, heading))
+    Some(GroundRecoveryCandidate {
+        zone_id,
+        self_id,
+        reported_pos: pos,
+        recovered_z,
+    })
 }
 
 fn heading_to_forward(heading: u8) -> (f32, f32) {
@@ -1512,11 +1566,17 @@ mod tests {
     use kuluu_snapshot::{Entity as WireEntity, EntityKind, Vec3 as WireVec3};
 
     #[test]
-    fn under_floor_debounce_waits_then_fires_once() {
+    fn recovery_tracker_waits_then_latches_until_the_report_changes() {
         const TICK: f32 = 1.0 / 60.0;
-        let mut acc = 0.0f32;
+        let candidate = GroundRecoveryCandidate {
+            zone_id: 100,
+            self_id: 7,
+            reported_pos: Vec3::ZERO,
+            recovered_z: -5.319,
+        };
+        let mut tracker = GroundRecoveryTracker::default();
         let mut ticks = 0;
-        while !under_floor_debounce_fires(&mut acc, true, TICK) {
+        while !tracker.observe(Some(candidate), TICK) {
             ticks += 1;
             assert!(ticks < 1000, "debounce never fired while under the floor");
         }
@@ -1524,24 +1584,32 @@ mod tests {
             (ticks as f32 * TICK - UNDER_FLOOR_RECOVERY_SECS).abs() < TICK,
             "fired after {ticks} ticks, expected ~{UNDER_FLOOR_RECOVERY_SECS}s"
         );
+        tracker.mark_queued();
         assert!(
-            !under_floor_debounce_fires(&mut acc, true, TICK),
-            "the debounce rearms after firing rather than repeating every tick"
+            !tracker.observe(Some(candidate), UNDER_FLOOR_RECOVERY_SECS * 2.0),
+            "one bad reported pose must enqueue at most one correction"
         );
+        assert!(!tracker.observe(None, 0.0));
+        assert!(!tracker.observe(Some(candidate), TICK));
     }
 
     #[test]
-    fn under_floor_debounce_rearms_when_grounded() {
-        let mut acc = 0.0f32;
-        assert!(!under_floor_debounce_fires(
-            &mut acc,
-            true,
-            UNDER_FLOOR_RECOVERY_SECS * 0.9
-        ));
-        assert!(!under_floor_debounce_fires(&mut acc, false, 0.0));
+    fn recovery_tracker_does_not_accumulate_across_columns() {
+        let first = GroundRecoveryCandidate {
+            zone_id: 100,
+            self_id: 7,
+            reported_pos: Vec3::ZERO,
+            recovered_z: -5.319,
+        };
+        let second = GroundRecoveryCandidate {
+            reported_pos: Vec3::new(GROUND_CORRECTION_XY_EPSILON_YALMS * 2.0, 0.0, 0.0),
+            ..first
+        };
+        let mut tracker = GroundRecoveryTracker::default();
+        assert!(!tracker.observe(Some(first), UNDER_FLOOR_RECOVERY_SECS * 0.9));
         assert!(
-            !under_floor_debounce_fires(&mut acc, true, UNDER_FLOOR_RECOVERY_SECS * 0.9),
-            "a moment on solid ground clears the accumulator, so a stray floorless column never fires"
+            !tracker.observe(Some(second), UNDER_FLOOR_RECOVERY_SECS * 0.2),
+            "time from another collision column must not satisfy the debounce"
         );
     }
 
@@ -1594,8 +1662,50 @@ mod tests {
 
     /// The wedge repro: feet at wire z = 0 (bevy y = 0) with the only floor a
     /// full body above, past `MAX_GROUND_STEP_UP`.
-    const WEDGE_FLOOR_BEVY_Y: f32 = 5.0;
+    const WEDGE_FLOOR_BEVY_Y: f32 = 5.319;
     const WEDGE_POS: Vec3 = Vec3::new(0.0, 0.0, 0.0);
+
+    #[test]
+    fn live_wedge_candidate_repairs_the_reported_column() {
+        const ASSERT_EPSILON: f32 = 1e-3;
+        let collision = slab_collision(WEDGE_FLOOR_BEVY_Y);
+        let candidate = ground_recovery_candidate(
+            &collision,
+            &kuluu_render::dat_mzb::LoadMzbInFlight::default(),
+            Some(103),
+            Some(7),
+            WEDGE_POS,
+        )
+        .expect("the reported wire position is still wedged");
+        let cmd = ground_recovery_command(
+            candidate.zone_id,
+            candidate.self_id,
+            candidate.reported_pos.x,
+            candidate.reported_pos.y,
+            candidate.recovered_z,
+            7,
+        );
+
+        assert!(matches!(
+            cmd,
+            AgentCommand::GroundCorrection { x, y, z, heading, .. }
+                if x.abs() < ASSERT_EPSILON
+                    && y.abs() < ASSERT_EPSILON
+                    && (z + WEDGE_FLOOR_BEVY_Y).abs() < ASSERT_EPSILON
+                    && heading == 7
+        ));
+        assert!(
+            ground_recovery_candidate(
+                &collision,
+                &kuluu_render::dat_mzb::LoadMzbInFlight::default(),
+                Some(103),
+                Some(7),
+                Vec3::new(20.0, 0.0, 0.0),
+            )
+            .is_none(),
+            "a diagnosis from the origin column must not select another column's floor"
+        );
+    }
 
     #[test]
     fn recovery_is_gated_while_zone_collision_is_still_loading() {
@@ -1603,74 +1713,66 @@ mod tests {
         let collision = slab_collision(WEDGE_FLOOR_BEVY_Y);
         let loading = one_load_in_flight();
         let idle = kuluu_render::dat_mzb::LoadMzbInFlight::default();
-        let mut under_secs = 0.0f32;
+        let mut tracker = GroundRecoveryTracker::default();
 
         // Well past the debounce: an interior swap outlasts
         // UNDER_FLOOR_RECOVERY_SECS, which is exactly why the debounce alone is
         // not the gate.
         let loading_ticks = (UNDER_FLOOR_RECOVERY_SECS * 4.0 / TICK) as u32;
         for _ in 0..loading_ticks {
+            let candidate =
+                ground_recovery_candidate(&collision, &loading, Some(103), Some(7), WEDGE_POS);
             assert!(
-                ground_recovery_step(
-                    &collision,
-                    &loading,
-                    WEDGE_POS,
-                    0,
-                    true,
-                    TICK,
-                    &mut under_secs
-                )
-                .is_none(),
+                candidate.is_none(),
                 "recovered onto the shell while the collision set was incomplete"
             );
+            assert!(!tracker.observe(candidate, TICK));
         }
 
         let mut fired = None;
         for _ in 0..loading_ticks {
-            if let Some(cmd) =
-                ground_recovery_step(&collision, &idle, WEDGE_POS, 0, true, TICK, &mut under_secs)
-            {
-                fired = Some(cmd);
+            let candidate =
+                ground_recovery_candidate(&collision, &idle, Some(103), Some(7), WEDGE_POS);
+            if tracker.observe(candidate, TICK) {
+                fired = candidate;
                 break;
             }
         }
         match fired {
-            Some(AgentCommand::GroundCorrection { z, .. }) => {
+            Some(GroundRecoveryCandidate { recovered_z, .. }) => {
                 assert!(
-                    (z + WEDGE_FLOOR_BEVY_Y).abs() < 1e-3,
-                    "recovered to wire z {z}, expected the slab"
+                    (recovered_z + WEDGE_FLOOR_BEVY_Y).abs() < 1e-3,
+                    "recovered to wire z {recovered_z}, expected the slab"
                 );
             }
             other => panic!("recovery must still fire on a real wedge once loaded, got {other:?}"),
         }
     }
 
-    /// The command the recovery actually emits must route through the reactor
-    /// as a correction, not as player movement (kuluu-mo4q): the player's goal
-    /// survives it, and it is not swallowed while a forced move is running.
     #[test]
-    fn recovery_command_keeps_the_goal_and_survives_an_override() {
+    fn recovery_command_keeps_the_goal_and_only_rebases_its_own_override_column() {
         use kuluu_session::reactor::{Goal, Reactor, ReactorConfig};
         use kuluu_session::state::{AgentEvent, Position, Vec3 as WireVec3};
 
         let collision = slab_collision(WEDGE_FLOOR_BEVY_Y);
-        let mut under_secs = 0.0f32;
-        let cmd = ground_recovery_step(
+        let candidate = ground_recovery_candidate(
             &collision,
             &kuluu_render::dat_mzb::LoadMzbInFlight::default(),
+            Some(103),
+            Some(7),
             WEDGE_POS,
-            0,
-            true,
-            UNDER_FLOOR_RECOVERY_SECS,
-            &mut under_secs,
         )
         .expect("the wedge column must produce a recovery");
-        let recovered_z = match cmd {
-            AgentCommand::GroundCorrection { z, .. } | AgentCommand::Move { z, .. } => z,
-            ref other => panic!("unexpected recovery command {other:?}"),
-        };
+        let recovered_z = candidate.recovered_z;
+        let cmd = ground_recovery_command(103, 7, 0.0, 0.0, recovered_z, 0);
 
         let mut r = Reactor::new(ReactorConfig::default());
+        r.observe_event(&AgentEvent::Connected {
+            account_id: 1,
+            char_id: 7,
+            character: "Tester".into(),
+            zone_id: 103,
+        });
         r.handle_command(AgentCommand::Follow {
             target_id: 7,
             distance: 3.0,
@@ -1700,14 +1802,25 @@ mod tests {
             target: forced_target,
             duration_ms: OVERRIDE_TTL_MS,
         });
-        let routing = r.handle_command(cmd);
+        let routing = r.handle_command(cmd.clone());
+        assert!(
+            routing.forward.is_none(),
+            "a correction diagnosed in another column must not affect forced movement"
+        );
+        assert!(
+            matches!(r.current_override(), Some(ov) if ov.target.z.abs() < f32::EPSILON),
+            "a different forced-move column must keep its own height"
+        );
+
+        let matching = ground_recovery_command(103, 7, 10.0, 0.0, recovered_z, 0);
+        let routing = r.handle_command(matching);
         assert!(
             routing.forward.is_some(),
-            "recovery dropped while a forced-move override was active"
+            "a correction at the forced target may repair that target"
         );
         assert!(
             matches!(r.current_override(), Some(ov) if (ov.target.z - recovered_z).abs() < 1e-6),
-            "the override replays its own target every tick, so its height must be rebased"
+            "the override's own column should retain the corrected height"
         );
     }
 
@@ -1716,28 +1829,14 @@ mod tests {
         let collision = slab_collision(WEDGE_FLOOR_BEVY_Y);
         let loading = one_load_in_flight();
         let idle = kuluu_render::dat_mzb::LoadMzbInFlight::default();
-        let mut under_secs = 0.0f32;
-        assert!(ground_recovery_step(
-            &collision,
-            &loading,
-            WEDGE_POS,
-            0,
-            true,
-            UNDER_FLOOR_RECOVERY_SECS * 10.0,
-            &mut under_secs
-        )
-        .is_none());
+        let mut tracker = GroundRecoveryTracker::default();
+        let candidate =
+            ground_recovery_candidate(&collision, &loading, Some(103), Some(7), WEDGE_POS);
+        assert!(candidate.is_none());
+        assert!(!tracker.observe(candidate, UNDER_FLOOR_RECOVERY_SECS * 10.0));
+        let candidate = ground_recovery_candidate(&collision, &idle, Some(103), Some(7), WEDGE_POS);
         assert!(
-            ground_recovery_step(
-                &collision,
-                &idle,
-                WEDGE_POS,
-                0,
-                true,
-                UNDER_FLOOR_RECOVERY_SECS * 0.5,
-                &mut under_secs
-            )
-            .is_none(),
+            !tracker.observe(candidate, UNDER_FLOOR_RECOVERY_SECS * 0.5),
             "gated time must not count toward the debounce"
         );
     }

@@ -1806,6 +1806,72 @@ fn _agentcommand_is_additive_only(x: &AgentCommand) {
     }
 }
 
+#[test]
+fn death_menu_offer_is_durable_and_clears_on_revive_or_zone_change() {
+    use ffxi_proto::decode::DeathMenuOffer;
+
+    let mut state = SessionState::default();
+    assert!(state.apply_event(&AgentEvent::DeathMenuUpdated {
+        offer: Some(DeathMenuOffer::Raise),
+    }));
+    assert_eq!(state.death_menu_offer, Some(DeathMenuOffer::Raise));
+
+    assert!(state.apply_event(&AgentEvent::DeathTimerUpdated {
+        seconds_until_homepoint: None,
+    }));
+    assert_eq!(state.death_menu_offer, None);
+
+    state.apply_event(&AgentEvent::DeathMenuUpdated {
+        offer: Some(DeathMenuOffer::Tractor),
+    });
+    state.apply_event(&AgentEvent::ZoneChanged {
+        from: Some(100),
+        to: 101,
+        myroom: None,
+        mog_zone_flag: false,
+    });
+    assert_eq!(state.death_menu_offer, None);
+}
+
+#[test]
+fn ground_height_correction_is_same_column_and_height_only() {
+    let mut position = Position {
+        pos: Vec3 {
+            x: 10.0,
+            y: 20.0,
+            z: 0.0,
+        },
+        heading: 73,
+        speed: 4,
+        speed_base: 5,
+    };
+    assert!(!apply_ground_height_correction(
+        &mut position,
+        11.0,
+        20.0,
+        -5.319
+    ));
+    assert_eq!(position.pos.z, 0.0);
+
+    assert!(apply_ground_height_correction(
+        &mut position,
+        10.0,
+        20.0,
+        -5.319
+    ));
+    assert_eq!(
+        position.pos,
+        Vec3 {
+            x: 10.0,
+            y: 20.0,
+            z: -5.319
+        }
+    );
+    assert_eq!(position.heading, 73);
+    assert_eq!(position.speed, 4);
+    assert_eq!(position.speed_base, 5);
+}
+
 /// AgentEvent is an EXTENSION SURFACE: its serde tags ("cmd"/"type",
 /// snake_case variant names) are the agent-socket/MCP wire contract, so it
 /// evolves additive-only. This match is exhaustive on purpose — adding,
@@ -1880,6 +1946,7 @@ fn _agentevent_is_additive_only(x: &AgentEvent) {
         AgentEvent::HumanReleased { .. } => (),
         AgentEvent::MusicChanged { .. } => (),
         AgentEvent::DeathTimerUpdated { .. } => (),
+        AgentEvent::DeathMenuUpdated { .. } => (),
         AgentEvent::MusicVolumeChanged { .. } => (),
         AgentEvent::LevelUp { .. } => (),
         AgentEvent::SkillLevelUp { .. } => (),

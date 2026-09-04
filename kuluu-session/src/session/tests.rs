@@ -38,6 +38,36 @@ fn sub_packet_events(opcode: u16, body: &[u8]) -> Vec<AgentEvent> {
     out
 }
 
+#[test]
+fn death_menu_packet_emits_the_server_offer() {
+    use ffxi_proto::decode::DeathMenuOffer;
+
+    const DEATH_MENU_BODY_SIZE: usize = 8;
+    const DEATH_MENU_TRACTOR_TYPE: u16 = 2;
+    let mut body = [0u8; DEATH_MENU_BODY_SIZE];
+    body[0..4].copy_from_slice(&0x0102_0304u32.to_le_bytes());
+    body[4..6].copy_from_slice(&0x0506u16.to_le_bytes());
+    body[6..8].copy_from_slice(&DEATH_MENU_TRACTOR_TYPE.to_le_bytes());
+
+    let events = sub_packet_events(ffxi_proto::map::s2c::DEATH_MENU, &body);
+    assert!(matches!(
+        events.as_slice(),
+        [AgentEvent::DeathMenuUpdated {
+            offer: Some(DeathMenuOffer::Tractor),
+        }]
+    ));
+}
+
+#[test]
+fn death_menu_packet_rejects_a_truncated_body() {
+    let events = sub_packet_events(ffxi_proto::map::s2c::DEATH_MENU, &[0; 7]);
+    assert!(events.is_empty());
+    assert!(
+        !first_decode_err(ffxi_proto::map::s2c::DEATH_MENU),
+        "the decode failure must have passed through the warning dedup gate"
+    );
+}
+
 /// `ZoneChanged` clears `SessionState::current_weather`, so the LOGIN arm
 /// must emit the 0x00A zone-in weather *after* it. Reversed, a zoning
 /// character renders the default sky until the next 0x057 — which LSB only

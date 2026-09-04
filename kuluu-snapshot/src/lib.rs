@@ -2,6 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 
+// v20: SceneSnapshot.death_menu_offer — the durable s2c 0x0F9 Raise/Reraise or
+// Tractor offer shown while dead.
 // v19: the cutscene channel — ViewerEvent::{CutsceneStarted,CutsceneCue,CutsceneEnded} plus
 // CutsceneCue/CutsceneActor. The event VM's staging opcodes (actor motion, screen fade,
 // camera lock, event-hide, mount) had no way across the boundary at all before this.
@@ -35,7 +37,7 @@ use serde::{Deserialize, Serialize};
 // v5: InventoryItem.charges_remaining + next_use_vana_ts (item recast/charges).
 // v4: SceneSnapshot.delivery_box (dedicated delivery screen) + ViewerCommand::DeliveryBox
 // (postcard frames are not self-describing, so any shape change bumps this).
-pub const PROTOCOL_VERSION: u32 = 19;
+pub const PROTOCOL_VERSION: u32 = 20;
 
 /// Longest countdown `SceneSnapshot::status_icon_expiries` can carry. The
 /// producer rejects anything beyond it as a corrupt 0x063 timestamp, and the HUD
@@ -714,6 +716,18 @@ pub struct SceneSnapshot {
     /// touching `SessionState` (see `ffxi_proto::map::tracking`).
     #[serde(default)]
     pub widescan: WidescanList,
+
+    /// Server-offered alternative to returning to the home point while dead.
+    /// `None` is the ordinary home-point-only menu.
+    #[serde(default)]
+    pub death_menu_offer: Option<DeathMenuOffer>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeathMenuOffer {
+    Raise,
+    Tractor,
 }
 
 /// Mirror of `kuluu`'s wide-scan model across the wire boundary. Entries
@@ -1707,6 +1721,7 @@ mod tests {
             check: None,
             check_message: None,
             widescan: WidescanList::default(),
+            death_menu_offer: None,
         }
     }
 
@@ -2111,12 +2126,13 @@ mod tests {
             "check",
             "check_message",
             "widescan",
+            "death_menu_offer",
         ];
         want.sort();
         assert_eq!(got, want, "SceneSnapshot fields changed: additive-only, update this pin deliberately and rebuild relay consumers together");
     }
 
-    const SNAPSHOT_DEFAULT_POSTCARD_HEX: &str = "00000000000000000000000000000000191900000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000";
+    const SNAPSHOT_DEFAULT_POSTCARD_HEX: &str = "0000000000000000000000000000000019190000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000";
 
     /// Postcard is positional, not self-describing: field ORDER and TYPES are
     /// the wire format. Any reorder/retype (and any append) changes these

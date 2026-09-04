@@ -564,6 +564,11 @@ pub mod s2c {
     // Wide-scan list framing (ListStart/ListEnd).
     pub const TRACKING_STATE: u16 = 0x0F6;
 
+    // GP_SERV_COMMAND_RES, vendor/server/src/map/enums/packet_s2c.h:159.
+    // Updates the death menu to home-point-only, Raise/Reraise, or Tractor
+    // (vendor/server/src/map/packets/s2c/0x0f9_res.h).
+    pub const DEATH_MENU: u16 = 0x0F9;
+
     // GP_SERV_COMMAND_TROPHY_LIST, vendor/server/src/map/enums/packet_s2c.h:146.
     // One item (and/or gil) entering the treasure pool
     // (vendor/server/src/map/packets/s2c/0x0d2_trophy_list.h).

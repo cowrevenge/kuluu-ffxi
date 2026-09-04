@@ -218,6 +218,7 @@ impl Plugin for HudPlugin {
         app.init_resource::<target_panel::SwingPulse>();
         app.init_resource::<logout_countdown::LogoutCountdownAnchor>();
         app.init_resource::<logout_countdown::OptimisticLogoutCountdown>();
+        app.init_resource::<death_prompt::DeathPromptSelection>();
         app.add_message::<logout_countdown::LogoutRequested>();
 
         app.add_message::<menu::MenuRowActivated>();

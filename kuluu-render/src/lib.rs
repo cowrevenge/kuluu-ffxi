@@ -454,8 +454,6 @@ impl<S: SceneSource + Resource + Component<Mutability = bevy::ecs::component::Mu
             scene::auto_clear_target_system.before(sync_entities_system),
         );
 
-        app.add_systems(Update, lock_on::auto_lock_on_when_engaged);
-
         app.add_systems(Update, self_visibility_for_camera_mode_system);
 
         app.add_systems(

@@ -504,6 +504,11 @@ pub struct SessionState {
     #[serde(default)]
     pub death_homepoint_secs: Option<u32>,
 
+    /// Server-offered alternative to returning home while dead (s2c 0x0F9).
+    /// `None` is the ordinary home-point-only menu.
+    #[serde(default)]
+    pub death_menu_offer: Option<ffxi_proto::decode::DeathMenuOffer>,
+
     #[serde(default)]
     pub current_weather: Option<u16>,
 
@@ -1405,6 +1410,7 @@ impl SessionState {
 
                 self.logout_countdown = None;
                 self.death_homepoint_secs = None;
+                self.death_menu_offer = None;
 
                 self.entities.clear();
                 self.party.clear();
@@ -2091,8 +2097,17 @@ impl SessionState {
             AgentEvent::DeathTimerUpdated {
                 seconds_until_homepoint,
             } => {
-                let changed = self.death_homepoint_secs != *seconds_until_homepoint;
+                let changed = self.death_homepoint_secs != *seconds_until_homepoint
+                    || (seconds_until_homepoint.is_none() && self.death_menu_offer.is_some());
                 self.death_homepoint_secs = *seconds_until_homepoint;
+                if seconds_until_homepoint.is_none() {
+                    self.death_menu_offer = None;
+                }
+                changed
+            }
+            AgentEvent::DeathMenuUpdated { offer } => {
+                let changed = self.death_menu_offer != *offer;
+                self.death_menu_offer = *offer;
                 changed
             }
             AgentEvent::WeatherUpdated { weather_number } => {
@@ -2599,6 +2614,12 @@ pub enum AgentEvent {
         seconds_until_homepoint: Option<u32>,
     },
 
+    /// s2c 0x0F9 `GP_SERV_COMMAND_RES`: `None` restores the default
+    /// home-point-only menu; `Some` offers Raise/Reraise or Tractor.
+    DeathMenuUpdated {
+        offer: Option<ffxi_proto::decode::DeathMenuOffer>,
+    },
+
     MusicVolumeChanged {
         slot: u8,
         volume: u8,
@@ -2822,6 +2843,32 @@ pub enum AgentEvent {
     },
 }
 
+pub const GROUND_CORRECTION_XY_EPSILON_YALMS: f32 = 0.05;
+
+pub fn ground_correction_matches(
+    expected_x: f32,
+    expected_y: f32,
+    actual_x: f32,
+    actual_y: f32,
+) -> bool {
+    let dx = expected_x - actual_x;
+    let dy = expected_y - actual_y;
+    dx * dx + dy * dy <= GROUND_CORRECTION_XY_EPSILON_YALMS * GROUND_CORRECTION_XY_EPSILON_YALMS
+}
+
+pub fn apply_ground_height_correction(
+    position: &mut Position,
+    expected_x: f32,
+    expected_y: f32,
+    corrected_z: f32,
+) -> bool {
+    if !ground_correction_matches(expected_x, expected_y, position.pos.x, position.pos.y) {
+        return false;
+    }
+    position.pos.z = corrected_z;
+    true
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "cmd", rename_all = "snake_case")]
 pub enum AgentCommand {
@@ -2835,10 +2882,14 @@ pub enum AgentCommand {
     StopMove,
 
     /// Client-side height repair for the under-every-floor wedge (kuluu-mo4q).
-    /// Distinct from [`AgentCommand::Move`] because it is not player movement:
-    /// the reactor must neither cancel the player's goal for it nor drop it
-    /// while a forced-move override is running.
+    /// The identity and horizontal coordinates identify the position whose
+    /// height was diagnosed; the session applies `z` only while they still
+    /// match.
     GroundCorrection {
+        #[serde(default)]
+        zone_id: u16,
+        #[serde(default)]
+        self_id: u32,
         x: f32,
         y: f32,
         z: f32,

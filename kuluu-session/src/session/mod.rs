@@ -1150,6 +1150,13 @@ fn handle_sub_packet(
                 }
             }
         }
+        s2c::DEATH_MENU => {
+            if let Ok(menu) =
+                decode::DeathMenu::decode(sub.data).inspect_err(|e| warn_decode_err(sub.opcode, e))
+            {
+                let _ = event_tx.send(AgentEvent::DeathMenuUpdated { offer: menu.offer });
+            }
+        }
         s2c::FISH => {
             if let Ok(f) =
                 decode::FishPacket::decode(sub.data).inspect_err(|e| warn_decode_err(sub.opcode, e))
@@ -2085,12 +2092,13 @@ async fn keepalive_loop(
                 }
                 match cmd {
                     None => break,
-                    Some(AgentCommand::GroundCorrection { x, y, z, heading }) => {
-                        // The player did not walk, so no cast is interrupted:
-                        // this is the client repairing a wedged height that the
-                        // server only ever echoes back (kuluu-mo4q).
-                        self_pos = Position { pos: Vec3 { x, y, z }, heading, ..self_pos };
-                        let _ = event_tx.send(AgentEvent::PositionChanged { pos: self_pos });
+                    Some(AgentCommand::GroundCorrection { zone_id, self_id, x, y, z, .. }) => {
+                        if zone_id == current_zone_id
+                            && self_id == self_char_id
+                            && crate::state::apply_ground_height_correction(&mut self_pos, x, y, z)
+                        {
+                            let _ = event_tx.send(AgentEvent::PositionChanged { pos: self_pos });
+                        }
                     }
                     Some(AgentCommand::Move { x, y, z, heading }) => {
                         // Translation (not a turn-in-place) interrupts a spell in
@@ -2526,6 +2534,16 @@ async fn keepalive_loop(
                                 message: format!("action send: {e}"),
                             });
                         } else {
+                            if matches!(
+                                kind,
+                                crate::state::ActionKind::RaiseMenu { .. }
+                                    | crate::state::ActionKind::TractorMenu { .. }
+                            ) {
+                                // LSB consumes the offer in c2s 0x01A without
+                                // sending a matching 0x0F9 reset; the retail
+                                // client closes the submenu immediately.
+                                let _ = event_tx.send(AgentEvent::DeathMenuUpdated { offer: None });
+                            }
                             let now = std::time::Instant::now();
                             // Start the client-side recast clock for a spell.
                             if let crate::state::ActionKind::CastMagic { spell_id, .. } = &kind {

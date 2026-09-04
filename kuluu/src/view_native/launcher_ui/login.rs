@@ -539,14 +539,6 @@ pub(super) fn arrow_nav_system(
             .iter()
             .map(|(e, cn, gt)| (gt.affine().translation + cn.size * 0.5, e))
             .collect();
-        // TEMP diagnostics for arrow-nav bring-up; remove once verified.
-        tracing::info!(
-            key = ?ev.logical_key,
-            n_cands = cands.len(),
-            cur = ?cur,
-            positions = ?cands.iter().take(12).collect::<Vec<_>>(),
-            "arrow nav (TEMP)"
-        );
         if cands.is_empty() {
             continue;
         }
@@ -590,8 +582,6 @@ pub(super) fn arrow_nav_system(
             Some(e) => e,
             None => continue,
         };
-        // TEMP diagnostics for arrow-nav bring-up; remove once verified.
-        tracing::info!(target = ?target, "arrow nav pick (TEMP)");
         input_focus.set(target, FocusCause::Navigated);
     }
 }

@@ -1194,23 +1194,6 @@ pub fn resolve_position(
         final_feet = r_feet;
     }
 
-    // TEMP (stair diagnosis): console trace of decision flips — a flickering
-    // ramp lock shows up as slope-ride/stairs-ahead alternating line by line.
-    // Remove once the stair work is verified in-game.
-    {
-        static LAST_REASON: std::sync::atomic::AtomicUsize =
-            std::sync::atomic::AtomicUsize::new(usize::MAX);
-        let cur = dbg_reason.as_bytes().as_ptr() as usize;
-        if LAST_REASON.swap(cur, std::sync::atomic::Ordering::Relaxed) != cur {
-            tracing::info!(
-                reason = dbg_reason,
-                slope_deg = dbg_slope_angle,
-                step_h = dbg_step_height,
-                "stair decision change",
-            );
-        }
-    }
-
     // ---- STEP 3: ASSEMBLE --------------------------------------------------
     WallClipResult {
         dx: move_xz.x - start.x,

@@ -1335,7 +1335,13 @@ fn short_zone(zone_no: u16, resolver: Option<&crate::hud::zone_flash::ZoneNameRe
         0 => format!("Z{zone_no}"),
         1 => words[0].to_string(),
         _ if words.get(1) == Some(&"of") => words.last().copied().unwrap_or(words[0]).to_string(),
-        2 => format!("{}{}", &words[0][..words[0].len().min(2)], words[1]),
+        2 => {
+            // Char-based, not byte-sliced: a first word starting with a
+            // multi-byte char (CJK/emoji zone names) would panic on a byte
+            // index that is not a char boundary.
+            let head: String = words[0].chars().take(2).collect();
+            format!("{}{}", head, words[1])
+        }
         _ => {
             let initials: String = words[..words.len() - 1]
                 .iter()
@@ -1473,6 +1479,14 @@ mod tests {
         assert_eq!(label(&f), Some("Away"));
         f.linkdead = true; // top priority
         assert_eq!(label(&f), Some("D/C"));
+    }
+
+    /// A two-word zone whose first word starts with multi-byte chars must not
+    /// hit a non-char-boundary byte slice (pre-fix this panicked).
+    #[test]
+    fn short_zone_two_word_multibyte_first_word_does_not_panic() {
+        let resolver = crate::hud::zone_flash::ZoneNameResolver::new(|_: u16| Some("水城 広場"));
+        assert_eq!(short_zone(1, Some(&resolver)), "水城広場");
     }
 
     #[test]

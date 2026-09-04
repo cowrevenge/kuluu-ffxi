@@ -315,11 +315,7 @@ impl NrParams {
         // SAFETY: `name` is NUL-terminated for the call; NULL is a valid stored
         // value (the host layer's setter just records the pointer it is given).
         unsafe {
-            NVSDK_NGX_Parameter_SetVoidPointer(
-                self.ptr,
-                cstr(name).as_ptr(),
-                std::ptr::null_mut(),
-            );
+            NVSDK_NGX_Parameter_SetVoidPointer(self.ptr, cstr(name).as_ptr(), std::ptr::null_mut());
         };
     }
 

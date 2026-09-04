@@ -353,20 +353,22 @@ pub fn prepare_nr(
         // pass ends (storing the clear) when its RenderPass drops.
         // The inner wgpu::Device, not RenderDevice's own create_texture (which
         // returns bevy's Texture wrapper — we need the raw wgpu texture/view).
-        let mvec_texture = render_device.wgpu_device().create_texture(&TextureDescriptor {
-            label: Some("kuluu_dlss_nr_mvec"),
-            size: Extent3d {
-                width: out_size.x,
-                height: out_size.y,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: TextureDimension::D2,
-            format: TextureFormat::Rg16Float,
-            usage: TextureUsages::TEXTURE_BINDING | TextureUsages::RENDER_ATTACHMENT,
-            view_formats: &[],
-        });
+        let mvec_texture = render_device
+            .wgpu_device()
+            .create_texture(&TextureDescriptor {
+                label: Some("kuluu_dlss_nr_mvec"),
+                size: Extent3d {
+                    width: out_size.x,
+                    height: out_size.y,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: TextureDimension::D2,
+                format: TextureFormat::Rg16Float,
+                usage: TextureUsages::TEXTURE_BINDING | TextureUsages::RENDER_ATTACHMENT,
+                view_formats: &[],
+            });
         let mvec_view = mvec_texture.create_view(&TextureViewDescriptor::default());
 
         // The one-time clear runs on its OWN encoder: wgpu-core 29 forbids mixing the high-level and raw encoding APIs on one CommandEncoder (the first use locks the EncodingApi — build-12 panic). The create path below encodes through raw Vulkan, so it keeps a separate raw-only encoder; submitting this clear first guarantees it completes before any frame samples MVec.
@@ -596,8 +598,12 @@ pub fn nr_node(
         warn!("dlss-nr: EvaluateFeature failed: {}", result_name(r));
         // The flip above already moved the main texture to `destination`;
         // without a write into it, next frame would read undefined contents.
-        preserve_main_after_flip(ctx.command_encoder(), view_target.source_texture,
-            view_target.destination_texture, out_extent);
+        preserve_main_after_flip(
+            ctx.command_encoder(),
+            view_target.source_texture,
+            view_target.destination_texture,
+            out_extent,
+        );
         return;
     }
 

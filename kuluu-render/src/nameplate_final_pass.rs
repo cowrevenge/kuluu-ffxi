@@ -761,7 +761,11 @@ fn plate_uniform_bytes(model: &Mat4, fade_alpha: f32) -> [u8; PLATE_UNIFORM_SIZE
 
 /// [clip mat4 (64 B)][near f32 @ 64][subrect_scale vec2 @ 72] — the exact
 /// layout nameplate_final.wgsl's ViewUniform reads. Factored out so a unit test pins it.
-fn view_uniform_bytes(clip: Mat4, near: f32, subrect_scale: Vec2) -> [u8; VIEW_UNIFORM_SIZE as usize] {
+fn view_uniform_bytes(
+    clip: Mat4,
+    near: f32,
+    subrect_scale: Vec2,
+) -> [u8; VIEW_UNIFORM_SIZE as usize] {
     let mut bytes = [0u8; VIEW_UNIFORM_SIZE as usize];
     for (i, c) in clip.to_cols_array().iter().enumerate() {
         bytes[i * 4..i * 4 + 4].copy_from_slice(&c.to_le_bytes());
@@ -1194,10 +1198,7 @@ mod tests {
         }
         assert_eq!(f32::from_le_bytes(bytes[64..68].try_into().unwrap()), 0.5);
         assert_eq!(f32::from_le_bytes(bytes[72..76].try_into().unwrap()), 0.5);
-        assert_eq!(
-            f32::from_le_bytes(bytes[76..80].try_into().unwrap()),
-            0.25
-        );
+        assert_eq!(f32::from_le_bytes(bytes[76..80].try_into().unwrap()), 0.25);
     }
 
     /// Uniform packing: mat4 at byte 0, alpha at byte 64, rest zero — the exact

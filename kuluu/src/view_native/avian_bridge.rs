@@ -1037,26 +1037,28 @@ pub fn resolve_position(
         //     SPECIFIC entity avian stopped us on (block_entity).
         dbg_is_a_stop = true;
 
-        // GROUND TRUTH: cast a clean forward ray a short distance against
-        // walls+doors. If NOTHING is really in front of us, avian's move_and_slide
-        // fabricated the contact (depenetration artifact) -- we should NOT block.
-        let probe_from = Vec3::new(start.x, start.y, start.z);
-        let clean_hit = Dir3::new(want / want.length().max(1e-6))
-            .ok()
-            .and_then(|d| {
-                av.sq.cast_ray(
-                    probe_from,
-                    d,
-                    RADIUS + 0.6, // just in front (capsule radius + a little)
-                    true,
-                    &SpatialQueryFilter::from_mask(LayerMask::from([
-                        GameLayer::Wall,
-                        GameLayer::Door,
-                    ])),
-                )
-            });
-        // Record for debug: did the clean forward ray actually find a face?
-        let real = clean_hit.is_some();
+        // GROUND TRUTH: does Wall/Door geometry actually exist at the reported
+        // contact? A small sphere against walls+doors at the contact point:
+        // real blockers — including SIDE-FACING pinch faces, which a forward-
+        // along-want ray cannot see (a 0.7-gap corridor's ±z slabs are
+        // perpendicular to the motion; the old forward ray let us walk straight
+        // through both) — have their geometry here; a fabricated depenetration
+        // artifact does not. Parry's trimesh contact points can sit ~0.1 off the
+        // face, so the probe is a sphere, not a ray.
+        let real = match block_point {
+            Some(pt) => !av.sq.shape_intersections(
+                &Collider::sphere(0.2),
+                pt,
+                Quat::IDENTITY,
+                &SpatialQueryFilter::from_mask(LayerMask::from([
+                    GameLayer::Wall,
+                    GameLayer::Door,
+                ])),
+            )
+            .is_empty(),
+            // No contact point captured: unverifiable — treat as a real stop.
+            None => true,
+        };
 
         let ent = block_entity;
         // Read the blocker's OWN layers from avian (no re-cast). A Mob-layer
@@ -1729,6 +1731,37 @@ mod live_path_tests {
                 );
             }
         }
+    }
+
+    /// A sub-band lip (0.1 rise, below LIP_MAX = 0.18) is walkable — door sills
+    /// and carpets. The rounded capsule bottom clips the low riser edge with a
+    /// steep normal (avian reads it walkable), so this exercises the FREE-WALK
+    /// arm's ground_step snap-up; if avian does block, the lip-ride arm must
+    /// rescue it. Either way the walker ends ON the platform, not stuck at its
+    /// foot. Regression: user-reported ".1 carpet stopped us" after #513.
+    #[test]
+    fn small_lip_onto_carpet_works_live() {
+        let mut app = live_app(parapet_platform(2.0, 0.1, 0.1));
+        let (x, _y, z) = live_walk(&mut app, (-2.0, 0.0, 0.0), (1.0, 0.0), 300);
+        assert!(
+            x > 3.0 && (-z - 0.1).abs() < 0.05,
+            "stepped over the 0.1 lip: x={x:.2} h={:.2}",
+            -z
+        );
+    }
+
+    /// A riser just ABOVE LIP_MAX (0.19) classifies as band-1 stair, not lip:
+    /// the stairs-ahead arm must carry it. Pins the LIP_MAX boundary from both
+    /// sides together with small_lip_onto_carpet_works_live.
+    #[test]
+    fn sub_band_edge_riser_works_live() {
+        let mut app = live_app(parapet_platform(2.0, 0.19, 0.19));
+        let (x, _y, z) = live_walk(&mut app, (-2.0, 0.0, 0.0), (1.0, 0.0), 300);
+        assert!(
+            x > 3.0 && (-z - 0.19).abs() < 0.05,
+            "stepped over the 0.19 riser: x={x:.2} h={:.2}",
+            -z
+        );
     }
 
     /// A flush riser at or below MAX_GROUND_STEP_UP (0.4) is a step: climb it.

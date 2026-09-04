@@ -88,3 +88,6 @@ artifacts/
 
 # Editor/tool backups
 *.bak
+
+# Session scratch + crash dumps (rustc ICE logs, saved pre-rewrite file versions) — local only.
+archive/scratch/

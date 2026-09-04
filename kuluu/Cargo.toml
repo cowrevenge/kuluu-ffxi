@@ -72,6 +72,11 @@ dynamic_linking = ["bevy/dynamic_linking"]
 # DLSS_SDK env var) and the runtime DLL story live in docs/DLSS.md. Typical:
 #   cargo run -p kuluu --features=native-window,dlss
 dlss = ["native-window", "kuluu-render/dlss", "bevy/dlss"]
+# DEV-ONLY: the in-game Debug menu (page 2 of Commands, incl. its Retail+
+# section with the DLSS/Job Display gates). Never part of a shipped release
+# build — retail parity holds by construction; build-dlss.bat enables it for
+# testing. See kuluu-render's `debug-menu`.
+debug-menu = ["kuluu-render?/debug-menu"]
 
 [dependencies]
 kuluu-session = { path = "../kuluu-session" }

@@ -135,6 +135,11 @@ pub(super) fn confirm_menu_at_cursor(
         if label == kuluu_render::hud::menu::DEBUG_VOLUME {
             return None;
         }
+        // Retail+ section rows live in GraphicsSettings (persisted), not
+        // HudPanels — handle them before the panel toggles.
+        if handle_retail_plus_row(label, graphics, scene_state) {
+            return None;
+        }
         toggle_debug_panel(
             label,
             hud_panels,
@@ -332,6 +337,68 @@ fn activate_current_time(
     vana_clock_visible.0 = !vana_clock_visible.0;
     for line in kuluu_render::hud::vana_clock::current_time_chat_lines(vana_clock) {
         push_system_chat_line(scene_state, line);
+    }
+}
+
+/// Retail+ section rows (dev-only Debug menu). Returns true when the label is
+/// one of them and it was handled here — the caller must not fall through to
+/// `toggle_debug_panel`. The two live toggles flip GraphicsSettings fields, so
+/// `persist_graphics_on_change` writes graphics.json automatically; Mob HP
+/// Under is an N/A placeholder with no state yet.
+fn handle_retail_plus_row(
+    label: &str,
+    graphics: &mut kuluu_render::GraphicsSettings,
+    scene_state: &mut SceneState,
+) -> bool {
+    use kuluu_render::hud::menu::{
+        DEBUG_RETAIL_LABEL, DEBUG_RETAIL_SEPARATOR, RETAIL_DLSS_MENU, RETAIL_JOB_DISPLAY,
+        RETAIL_MOB_HP_UNDER,
+    };
+    match label {
+        // Section chrome: no state, no banner.
+        DEBUG_RETAIL_SEPARATOR | DEBUG_RETAIL_LABEL => true,
+        RETAIL_DLSS_MENU => {
+            graphics.dlss_menu_enabled = !graphics.dlss_menu_enabled;
+            if graphics.dlss_menu_enabled && !graphics.dlss_supported {
+                // The user just asked for DLSS in the Graphics menu on a
+                // machine/build that can't run it (DLLs missing, no RTX/Vulkan,
+                // or built without the dlss feature). Say so loudly — the row
+                // will keep reading N/A until the runtime files are present.
+                tracing::error!(
+                    "[menu] DLSS enabled in menu but the NVIDIA DLSS runtime files were not found \
+                     (DLSS DLLs missing, no RTX/Vulkan support, or this build lacks the dlss feature) — \
+                     Graphics menu will show N/A"
+                );
+            }
+            push_system_chat_line(
+                scene_state,
+                format!(
+                    "[menu] {label}: {}",
+                    if graphics.dlss_menu_enabled { "on" } else { "off" }
+                ),
+            );
+            true
+        }
+        RETAIL_MOB_HP_UNDER => {
+            // Placeholder: no state yet. A banner so the click doesn't read as dead.
+            push_system_chat_line(
+                scene_state,
+                "[menu] Mob HP Under: N/A (not implemented yet)".into(),
+            );
+            true
+        }
+        RETAIL_JOB_DISPLAY => {
+            graphics.job_display = !graphics.job_display;
+            push_system_chat_line(
+                scene_state,
+                format!(
+                    "[menu] {label}: {}",
+                    if graphics.job_display { "on" } else { "off" }
+                ),
+            );
+            true
+        }
+        _ => false,
     }
 }
 

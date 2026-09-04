@@ -1,6 +1,8 @@
 use bevy::prelude::*;
 
-use crate::graphics_settings::{GraphicsField, GraphicsSettings, DLSS_CONFIG_FIELDS, GRAPHICS_FIELDS};
+use crate::graphics_settings::{
+    GraphicsField, GraphicsSettings, DLSS_CONFIG_FIELDS, GRAPHICS_FIELDS,
+};
 use crate::hud::style::{self, theme};
 use crate::input_mode::{InputMode, MenuKind, MenuStack};
 
@@ -39,6 +41,10 @@ const ROOT_ENTRIES: &[&str] = &[
     ROOT_CURRENT_TIME,
     ROOT_COMMUNICATION,
     "Graphics",
+    // DEV-ONLY: the Debug menu (incl. its Retail+ section) renders in
+    // testing builds (`debug-menu` feature, build-dlss.bat) but is compiled
+    // out of shipped release builds — retail parity holds by construction.
+    #[cfg(feature = "debug-menu")]
     "Debug",
     ROOT_SHUT_DOWN,
     ROOT_LOG_OUT,
@@ -269,6 +275,19 @@ pub const DEBUG_POSITION_LOG: &str = "Panel Pos Log";
 pub const DEBUG_NAMEPLATES: &str = "Nameplate Debug";
 pub const DEBUG_UI_SETTINGS: &str = "UI Settings";
 
+// Retail+ section (dev-only Debug menu): a separator row, the section label,
+// then three toggles. The two live toggles persist in GraphicsSettings (so
+// they survive restarts); Mob HP Under is an N/A placeholder for now.
+pub const DEBUG_RETAIL_SEPARATOR: &str = "────────────────────────────";
+pub const DEBUG_RETAIL_LABEL: &str = "Retail+";
+/// Makes DLSS selectable in the Graphics menu. Does NOT turn DLSS on — with
+/// it off (the default) every DLSS row reads N/A even on capable machines.
+pub const RETAIL_DLSS_MENU: &str = "DLSS On/Off";
+/// Placeholder row: no state yet, always [N/A].
+pub const RETAIL_MOB_HP_UNDER: &str = "Mob HP Under";
+/// Gates the party-frame Job column (retail shows none; default off).
+pub const RETAIL_JOB_DISPLAY: &str = "Job Display";
+
 const DEBUG_ENTRIES: &[&str] = &[
     DEBUG_PERF,
     DEBUG_TARGET_CYCLE,
@@ -284,6 +303,11 @@ const DEBUG_ENTRIES: &[&str] = &[
     DEBUG_POSITION_LOG,
     DEBUG_NAMEPLATES,
     DEBUG_UI_SETTINGS,
+    DEBUG_RETAIL_SEPARATOR,
+    DEBUG_RETAIL_LABEL,
+    RETAIL_DLSS_MENU,
+    RETAIL_MOB_HP_UNDER,
+    RETAIL_JOB_DISPLAY,
 ];
 
 // Grouped: display -> interface/camera -> quality -> lighting.
@@ -353,7 +377,11 @@ pub fn graphics_field_at(slot: usize) -> Option<GraphicsField> {
     }
     // Exactly one action row (the config row) sits before the reset row, so
     // slots past it shift down by one against the field list.
-    let field_idx = if slot < GRAPHICS_DLSS_CONFIG_SLOT { slot } else { slot - 1 };
+    let field_idx = if slot < GRAPHICS_DLSS_CONFIG_SLOT {
+        slot
+    } else {
+        slot - 1
+    };
     GRAPHICS_FIELDS.get(field_idx).copied()
 }
 
@@ -1382,6 +1410,28 @@ fn format_row_body(
                 // to system chat), so the value column says what Enter does
                 // instead of a stateless [off].
                 format!("{label:<14}[enter]")
+            } else if label == DEBUG_RETAIL_SEPARATOR || label == DEBUG_RETAIL_LABEL {
+                // Section chrome: no value column.
+                label.to_string()
+            } else if label == RETAIL_DLSS_MENU {
+                // Menu gate, not the DLSS on/off itself (that lives in the
+                // Graphics menu): [on] means "DLSS is selectable there".
+                format!(
+                    "{label:<14}[{}]",
+                    if settings.dlss_menu_enabled {
+                        "on"
+                    } else {
+                        "off"
+                    }
+                )
+            } else if label == RETAIL_MOB_HP_UNDER {
+                // Placeholder: no state yet, always N/A.
+                format!("{label:<14}[N/A]")
+            } else if label == RETAIL_JOB_DISPLAY {
+                format!(
+                    "{label:<14}[{}]",
+                    if settings.job_display { "on" } else { "off" }
+                )
             } else {
                 let on = debug_panel_state(label, panels, net_status_on, sound_on);
                 format!("{label:<14}[{}]", if on { "on" } else { "off" })
@@ -2103,7 +2153,9 @@ mod tests {
                 s if s == GRAPHICS_DLSS_CONFIG_SLOT => assert_eq!(*entry, "DLSS Config"),
                 s if s == GRAPHICS_RESET_SLOT => assert_eq!(*entry, "Reset to High"),
                 _ => {
-                    let field = *GRAPHICS_FIELDS.get(field_i).expect("field per cyclable row");
+                    let field = *GRAPHICS_FIELDS
+                        .get(field_i)
+                        .expect("field per cyclable row");
                     assert_eq!(
                         *entry,
                         field.label(),

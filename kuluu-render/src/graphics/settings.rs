@@ -51,10 +51,10 @@ pub enum AaMode {
     Taa,
 
     /// NVIDIA DLSS Super Resolution: upscaling + anti-aliasing in one. Only
-    /// reachable in the cycler when `dlss_supported` (runtime capability, set
-    /// by `graphics::dlss` on dlss-feature builds); the variant itself is
-    /// unconditional so a graphics.json written by a dlss build still
-    /// deserializes on a default build (where it behaves as Off).
+    /// reachable through the Graphics menu's explicit DLSS on/off row, and
+    /// only while `dlss_selectable()` (runtime capability AND the Retail+
+    /// gate); the variant itself is unconditional so a graphics.json written
+    /// with DLSS on still deserializes on any build (where it behaves as Off).
     Dlss,
 }
 
@@ -435,10 +435,27 @@ pub struct GraphicsSettings {
     /// in AND the renderer initialized DLSS on this machine (RTX GPU + Vulkan
     /// + the NVIDIA snippet DLLs present). Set once at startup by
     /// `graphics::dlss::update_dlss_availability_system`; never persisted.
-    /// Everything user-facing keys off this: the AA cycler only offers DLSS,
-    /// and the DLSS rows only cycle, while it is true.
+    /// Combined with [`Self::dlss_menu_enabled`] it gates everything
+    /// user-facing: the DLSS rows only read/cycle while both are true.
     #[serde(skip)]
     pub dlss_supported: bool,
+
+    /// Retail+ menu gate (dev-only Debug menu): when true, the Graphics menu
+    /// exposes DLSS — the DLSS row cycles and a persisted `AaMode::Dlss`
+    /// takes effect. OFF by default: vanilla parity (retail has no DLSS), so
+    /// one dlss-capable build serves both audiences instead of shipping a
+    /// separate DLSS release. This does NOT turn DLSS on — it only makes it
+    /// selectable; the Graphics menu's own DLSS row still owns on/off.
+    /// Persisted here so the choice sticks across runs (camera_spring class).
+    #[serde(default)]
+    pub dlss_menu_enabled: bool,
+
+    /// Retail+ gate for the party-frame Job column. OFF by default — retail's
+    /// party frame shows no job abbreviations; ours is an enhancement, so it
+    /// stays hidden unless explicitly enabled in the dev-only Debug menu.
+    /// Persisted here so the choice sticks across runs.
+    #[serde(default)]
+    pub job_display: bool,
 
     #[serde(default)]
     pub texture_filtering: TextureFiltering,
@@ -704,6 +721,8 @@ impl GraphicsSettings {
                 nr_local_tone_strength: default_nr_local_tone(),
                 nr_structure_strength: default_nr_structure(),
                 dlss_supported: false,
+                dlss_menu_enabled: false,
+                job_display: false,
                 texture_filtering: TextureFiltering::Vanilla,
                 bloom_intensity: 0.0,
                 volumetric_fog: false,
@@ -744,6 +763,8 @@ impl GraphicsSettings {
                 nr_local_tone_strength: default_nr_local_tone(),
                 nr_structure_strength: default_nr_structure(),
                 dlss_supported: false,
+                dlss_menu_enabled: false,
+                job_display: false,
                 texture_filtering: TextureFiltering::Vanilla,
                 bloom_intensity: 0.08,
                 volumetric_fog: false,
@@ -784,6 +805,8 @@ impl GraphicsSettings {
                 nr_local_tone_strength: default_nr_local_tone(),
                 nr_structure_strength: default_nr_structure(),
                 dlss_supported: false,
+                dlss_menu_enabled: false,
+                job_display: false,
                 texture_filtering: TextureFiltering::Aniso4x,
                 bloom_intensity: 0.08,
                 volumetric_fog: false,
@@ -828,6 +851,8 @@ impl GraphicsSettings {
                 nr_local_tone_strength: default_nr_local_tone(),
                 nr_structure_strength: default_nr_structure(),
                 dlss_supported: false,
+                dlss_menu_enabled: false,
+                job_display: false,
                 texture_filtering: TextureFiltering::Aniso8x,
                 bloom_intensity: 0.12,
                 volumetric_fog: false,
@@ -879,9 +904,10 @@ impl GraphicsSettings {
             GraphicsField::ShadowCascadeCount => format!("{}", self.shadow_cascade_count),
             GraphicsField::ShadowMaxDistance => format!("{:.0}m", self.shadow_max_distance),
             GraphicsField::AntiAliasing => {
-                // A json written by a dlss build can land us on Dlss while this
-                // machine/build can't do it; say so instead of a bare "DLSS".
-                if matches!(self.anti_aliasing, AaMode::Dlss) && !self.dlss_supported {
+                // A json written with DLSS on can land us on Dlss while this
+                // machine/build can't run it — or the Retail+ gate is closed;
+                // say so instead of a bare "DLSS".
+                if matches!(self.anti_aliasing, AaMode::Dlss) && !self.dlss_selectable() {
                     "DLSS (N/A)".to_string()
                 } else {
                     self.anti_aliasing.label().to_string()
@@ -949,7 +975,9 @@ impl GraphicsSettings {
                 }
             }
             GraphicsField::Dlss => {
-                if !self.dlss_supported {
+                // N/A while the runtime can't run it OR the Retail+ gate is
+                // closed (the default) — one dlss build serves both audiences.
+                if !self.dlss_selectable() {
                     "N/A".to_string()
                 } else if matches!(self.anti_aliasing, AaMode::Dlss) {
                     "On".to_string()
@@ -958,37 +986,37 @@ impl GraphicsSettings {
                 }
             }
             GraphicsField::DlssQuality => {
-                if self.dlss_supported {
+                if self.dlss_selectable() {
                     self.dlss_quality.label().to_string()
                 } else {
                     "N/A".to_string()
                 }
             }
-            // Live NR rows: N/A while unsupported, values otherwise (the knobs
-            // stay adjustable before the toggle is flipped on).
+            // Live NR rows: N/A while not selectable, values otherwise (the
+            // knobs stay adjustable before the toggle is flipped on).
             GraphicsField::DlssNeuralUplift => {
-                if !self.dlss_supported {
+                if !self.dlss_selectable() {
                     "N/A".to_string()
                 } else {
                     bool_label(self.neural_uplift).into()
                 }
             }
             GraphicsField::DlssNrIntensity => {
-                if self.dlss_supported {
+                if self.dlss_selectable() {
                     format!("{:.2}", self.nr_intensity)
                 } else {
                     "N/A".to_string()
                 }
             }
             GraphicsField::DlssNrLocalTone => {
-                if self.dlss_supported {
+                if self.dlss_selectable() {
                     format!("{:.2}", self.nr_local_tone_strength)
                 } else {
                     "N/A".to_string()
                 }
             }
             GraphicsField::DlssNrStructure => {
-                if self.dlss_supported {
+                if self.dlss_selectable() {
                     format!("{:.2}", self.nr_structure_strength)
                 } else {
                     "N/A".to_string()
@@ -1024,6 +1052,8 @@ impl GraphicsSettings {
                 let was_dlss = matches!(self.anti_aliasing, AaMode::Dlss);
                 let dlss_quality = self.dlss_quality;
                 let dlss_supported = self.dlss_supported;
+                // Retail+ gates are user choices, not preset-owned.
+                let (dlss_menu_enabled, job_display) = (self.dlss_menu_enabled, self.job_display);
                 // NR is DLSS-family: presets never own it either.
                 let nr = (
                     self.neural_uplift,
@@ -1046,6 +1076,8 @@ impl GraphicsSettings {
                 self.fps_cap = fps_cap;
                 self.dlss_quality = dlss_quality;
                 self.dlss_supported = dlss_supported;
+                self.dlss_menu_enabled = dlss_menu_enabled;
+                self.job_display = job_display;
                 (
                     self.neural_uplift,
                     self.nr_intensity,
@@ -1203,11 +1235,12 @@ impl GraphicsSettings {
                 self.preset = QualityPreset::Custom;
             }
             GraphicsField::Dlss => {
-                // On/Off mirror of anti_aliasing == Dlss. Refuses while
-                // unsupported (the row reads "N/A"), so both menu surfaces get
-                // the gray-out from this one spot. Turning DLSS off lands on
-                // AA Off — the user re-picks MSAA/TAA in the cycler if wanted.
-                if !self.dlss_supported {
+                // On/Off mirror of anti_aliasing == Dlss. Refuses while not
+                // selectable (the row reads "N/A" — runtime unsupported OR the
+                // Retail+ gate closed), so both menu surfaces get the gray-out
+                // from this one spot. Turning DLSS off lands on AA Off — the
+                // user re-picks MSAA/TAA in the cycler if wanted.
+                if !self.dlss_selectable() {
                     return;
                 }
                 self.anti_aliasing = if matches!(self.anti_aliasing, AaMode::Dlss) {
@@ -1218,7 +1251,7 @@ impl GraphicsSettings {
                 self.preset = QualityPreset::Custom;
             }
             GraphicsField::DlssQuality => {
-                if !self.dlss_supported {
+                if !self.dlss_selectable() {
                     return;
                 }
                 self.dlss_quality = cycle_slot(self.dlss_quality, DLSS_QUALITY_SLOTS, delta)
@@ -1228,29 +1261,29 @@ impl GraphicsSettings {
                 // like VSync, this is a display/perf preference, and presets
                 // never own DLSS state.
             }
-            // Live NR rows: refuse while unsupported (the row reads "N/A").
+            // Live NR rows: refuse while not selectable (the row reads "N/A").
             GraphicsField::DlssNeuralUplift => {
-                if !self.dlss_supported {
+                if !self.dlss_selectable() {
                     return;
                 }
                 self.neural_uplift = !self.neural_uplift;
                 self.preset = QualityPreset::Custom;
             }
             GraphicsField::DlssNrIntensity => {
-                if !self.dlss_supported {
+                if !self.dlss_selectable() {
                     return;
                 }
                 self.nr_intensity = cycle_slot_f32(self.nr_intensity, NR_INTENSITY_SLOTS, delta);
             }
             GraphicsField::DlssNrLocalTone => {
-                if !self.dlss_supported {
+                if !self.dlss_selectable() {
                     return;
                 }
                 self.nr_local_tone_strength =
                     cycle_slot_f32(self.nr_local_tone_strength, NR_TONE_STRUCTURE_SLOTS, delta);
             }
             GraphicsField::DlssNrStructure => {
-                if !self.dlss_supported {
+                if !self.dlss_selectable() {
                     return;
                 }
                 self.nr_structure_strength =
@@ -1268,10 +1301,15 @@ impl GraphicsSettings {
     pub fn reset_to_default(&mut self) {
         // Capability is runtime-detected, not a preference: a menu reset must
         // not un-detect DLSS support (the availability system only writes it
-        // once at startup).
+        // once at startup). The Retail+ gates are user choices too — a reset
+        // returns quality knobs to High but keeps the menu/Job decisions.
         let dlss_supported = self.dlss_supported;
+        let dlss_menu_enabled = self.dlss_menu_enabled;
+        let job_display = self.job_display;
         *self = Self::for_preset(QualityPreset::High);
         self.dlss_supported = dlss_supported;
+        self.dlss_menu_enabled = dlss_menu_enabled;
+        self.job_display = job_display;
     }
 
     /// Reset only the DLSS Config surface: quality back to Auto, NR toggle off
@@ -1315,12 +1353,21 @@ impl GraphicsSettings {
         matches!(self.anti_aliasing, AaMode::Taa)
     }
 
-    /// DLSS is chosen AND this build/machine can actually run it. The single
-    /// gate every consumer keys off (camera respawn, render-scale composite,
-    /// nameplate pass): intent without a working runtime is always a no-op, so
+    /// DLSS is usable in the menu: runtime-capable AND the Retail+ gate is
+    /// open. Every user-facing DLSS surface keys off this — with the gate off
+    /// (the default) the rows read N/A and refuse to cycle even on capable
+    /// machines, which is what lets one dlss build serve both audiences.
+    pub fn dlss_selectable(&self) -> bool {
+        self.dlss_menu_enabled && self.dlss_supported
+    }
+
+    /// DLSS is chosen AND this build/machine can actually run it AND the
+    /// Retail+ gate is open. The single gate every consumer keys off (camera
+    /// respawn, render-scale composite, nameplate pass): intent without a
+    /// working runtime — or with the menu gate closed — is always a no-op, so
     /// a dlss-build json loaded on a default build changes nothing.
     pub fn dlss_active(&self) -> bool {
-        matches!(self.anti_aliasing, AaMode::Dlss) && self.dlss_supported
+        matches!(self.anti_aliasing, AaMode::Dlss) && self.dlss_selectable()
     }
 
     /// Neural Uplift (NR) is toggled AND DLSS itself is active. The gate for the
@@ -2415,11 +2462,66 @@ mod tests {
         }
     }
 
+    #[test]
+    fn dlss_gate_off_by_default_keeps_everything_na() {
+        // The Retail+ gate is off by default: even on a capable machine DLSS
+        // stays N/A and inert until explicitly enabled in the Debug menu —
+        // this is what lets one dlss build serve both audiences.
+        let mut s = GraphicsSettings::default();
+        s.dlss_supported = true;
+        assert!(!s.dlss_selectable(), "gate defaults to off");
+        assert_eq!(s.value_label(GraphicsField::Dlss), "N/A");
+        assert_eq!(s.value_label(GraphicsField::DlssQuality), "N/A");
+
+        s.cycle(GraphicsField::Dlss, 1);
+        assert!(!matches!(s.anti_aliasing, AaMode::Dlss));
+        assert_eq!(
+            s.preset,
+            QualityPreset::High,
+            "refused cycle must not dirty preset"
+        );
+
+        // A persisted Dlss mode + capability is still inert with the gate
+        // closed: dlss_active drives camera/render-scale/nameplate, so it
+        // must be false or the frame would upscale while the menu says N/A.
+        s.anti_aliasing = AaMode::Dlss;
+        assert!(!s.dlss_active());
+        assert_eq!(s.value_label(GraphicsField::AntiAliasing), "DLSS (N/A)");
+
+        // Opening the gate makes everything live again without touching AA mode.
+        s.dlss_menu_enabled = true;
+        assert!(s.dlss_selectable());
+        assert!(s.dlss_active(), "gate + capability + Dlss mode => active");
+        assert_eq!(s.value_label(GraphicsField::Dlss), "On");
+
+        // Closing the gate again stands DLSS down (rendering falls back to no AA).
+        s.dlss_menu_enabled = false;
+        assert!(!s.dlss_active());
+    }
+
+    #[test]
+    fn retail_gates_survive_preset_cycle_and_reset() {
+        let mut s = GraphicsSettings::default();
+        s.dlss_menu_enabled = true;
+        s.job_display = true;
+        s.cycle(GraphicsField::Preset, 1);
+        assert!(
+            s.dlss_menu_enabled && s.job_display,
+            "preset cycle kept the gates"
+        );
+        s.reset_to_default();
+        assert!(
+            s.dlss_menu_enabled && s.job_display,
+            "menu reset kept the gates"
+        );
+    }
+
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn dlss_toggle_and_cycler_when_supported() {
         let mut s = GraphicsSettings::default();
         s.dlss_supported = true;
+        s.dlss_menu_enabled = true;
         assert_eq!(s.value_label(GraphicsField::Dlss), "Off");
 
         s.cycle(GraphicsField::Dlss, 1);
@@ -2451,6 +2553,7 @@ mod tests {
     fn dlss_quality_cycles_and_survives_preset_and_reset() {
         let mut s = GraphicsSettings::default();
         s.dlss_supported = true;
+        s.dlss_menu_enabled = true;
         s.cycle(GraphicsField::Dlss, 1);
         s.cycle(GraphicsField::DlssQuality, 1);
         assert_eq!(s.dlss_quality, DlssQuality::Dlaa); // Auto -> Dlaa is the first step
@@ -2468,10 +2571,11 @@ mod tests {
         assert!(s.dlss_active(), "config reset left on/off alone");
 
         // Full menu reset returns to High (DLSS off, Msaa4) but must not
-        // un-detect the runtime capability.
+        // un-detect the runtime capability or close the Retail+ gate.
         s.reset_to_default();
         assert!(!matches!(s.anti_aliasing, AaMode::Dlss));
         assert!(s.dlss_supported, "reset preserved capability");
+        assert!(s.dlss_menu_enabled, "reset preserved the Retail+ gate");
     }
 
     #[test]
@@ -2497,6 +2601,7 @@ mod tests {
         assert!(!s.neural_uplift);
 
         s.dlss_supported = true;
+        s.dlss_menu_enabled = true;
         assert_eq!(s.value_label(GraphicsField::DlssNeuralUplift), "Off");
         assert!(!s.nr_active());
 
@@ -2513,7 +2618,10 @@ mod tests {
         // The reported bug: leaving DLSS mode must stop NR even with the toggle
         // still on — otherwise it keeps evaluating under MSAA/TAA.
         s.anti_aliasing = AaMode::Msaa4;
-        assert!(!s.nr_active(), "leaving Dlss mode turns NR off regardless of the toggle");
+        assert!(
+            !s.nr_active(),
+            "leaving Dlss mode turns NR off regardless of the toggle"
+        );
 
         // Knobs cycle through their slots (default intensity is the addon's 1.01).
         assert!((s.nr_intensity - 1.01).abs() < 1e-6);
@@ -2534,7 +2642,10 @@ mod tests {
             matches!(s.anti_aliasing, AaMode::Dlss),
             "presets carry the Dlss mirror over"
         );
-        assert!(s.nr_active(), "NR stays active across a preset cycle inside DLSS mode");
+        assert!(
+            s.nr_active(),
+            "NR stays active across a preset cycle inside DLSS mode"
+        );
 
         // DLSS Config reset turns NR off and restores knob defaults; SR on/off stays put.
         s.anti_aliasing = AaMode::Msaa4; // non-Dlss so the toggle below lands ON

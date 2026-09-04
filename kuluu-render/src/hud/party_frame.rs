@@ -519,6 +519,9 @@ pub fn update_party_frame_system(
     mut commands: Commands,
     state: Res<SceneState>,
     target: Res<Target>,
+    // Retail+ gate (dev-only Debug menu): the L1 job-icon column is hidden
+    // unless explicitly enabled — retail's party frame shows no jobs.
+    graphics: Res<crate::graphics_settings::GraphicsSettings>,
     settings: Res<PartyFrameSettings>,
     colors: Res<NameColorTable>,
     zone_names: Option<Res<crate::hud::zone_flash::ZoneNameResolver>>,
@@ -553,13 +556,14 @@ pub fn update_party_frame_system(
                 && colors.generation() == last.name_color_generation
                 && (!snap.treasure_pool.is_empty()) == last.treasure_nonempty
                 && snap.party == last.party
-                && snap.char_name.as_deref() == last.char_name.as_deref();
+                && snap.char_name.as_deref() == last.char_name.as_deref()
+                && graphics.job_display == last.job_display;
             if cheap_equal && !state.dirty {
                 return;
             }
         }
     }
-    let key = party_content_key(snap, colors.generation());
+    let key = party_content_key(snap, colors.generation(), graphics.job_display);
     if !target.is_changed() && !settings.is_changed() && Some(&key) == last_key.as_ref() {
         return;
     }
@@ -700,6 +704,7 @@ pub fn update_party_frame_system(
                             target.id,
                             snap,
                             self_pos,
+                            graphics.job_display,
                         );
                     }
                     None => spawn_placeholder_row(host_cb, is_l1, &settings),
@@ -732,11 +737,16 @@ pub struct PartyContentKey {
     /// name tint — without it in the key, late-loaded colours would sit stale
     /// until some unrelated field happened to change.
     name_color_generation: u64,
+    /// Retail+ gate (GraphicsSettings.job_display): toggling it must rebuild
+    /// the L1 rows with/without the job-icon column even when nothing else in
+    /// the snapshot changed.
+    job_display: bool,
 }
 
 fn party_content_key(
     snap: &kuluu_snapshot::SceneSnapshot,
     name_color_generation: u64,
+    job_display: bool,
 ) -> PartyContentKey {
     let mut flags = snap
         .party
@@ -758,6 +768,7 @@ fn party_content_key(
         stage: snap.stage,
         zone_generation: snap.zone_generation,
         name_color_generation,
+        job_display,
     }
 }
 
@@ -829,6 +840,7 @@ fn spawn_member_row(
     target_id: Option<u32>,
     snap: &kuluu_snapshot::SceneSnapshot,
     self_pos: kuluu_snapshot::Vec3,
+    job_display: bool,
 ) {
     let out_of_zone = matches!((self_zone, Some(m.zone_no)), (Some(sz), Some(mz)) if sz != mz);
     let is_target = target_id == Some(m.id);
@@ -887,6 +899,7 @@ fn spawn_member_row(
             flag,
             out_of_zone,
             is_target,
+            job_display,
         );
     } else {
         spawn_row_l2(
@@ -914,13 +927,16 @@ fn spawn_row_l1(
     flag: Option<(&'static str, Color)>,
     out_of_zone: bool,
     is_target: bool,
+    job_display: bool,
 ) {
     let sc = s.scale;
     let hp_w = L1_HP_BASE_W * BASE_MULT * L1_HP_W_MULT * sc;
     let mp_w = L1_MP_BASE_W * BASE_MULT * L1_HP_W_MULT * L1_MP_EXTRA_W_MULT * sc;
     let bar_h = L1_BAR_H * sc;
-    let icon_size = L1_ICON_SIZE * sc;
-    let inset = L1_BAR_INSET * sc;
+    // Retail+ gate: with the job column off the row is just the bars — no
+    // icon slot, no gap (retail's party frame has no jobs).
+    let icon_size = if job_display { L1_ICON_SIZE * sc } else { 0.0 };
+    let inset = if job_display { L1_BAR_INSET * sc } else { 0.0 };
     let entry_h = bar_h + 1.0 + bar_h;
 
     // Row root: relative so the absolute name line anchors to it. Uniform
@@ -949,21 +965,24 @@ fn spawn_row_l1(
     row.with_children(|row| {
         // Job icon slot (placeholder text until icon textures land). No
         // background box — the filled rectangle read as a leftover artifact.
-        row.spawn((Node {
-            width: Val::Px(icon_size),
-            height: Val::Px(entry_h),
-            flex_shrink: 0.0,
-            justify_content: JustifyContent::Center,
-            align_items: AlignItems::Center,
-            ..default()
-        },))
-            .with_children(|icon| {
-                icon.spawn((
-                    Text::new(job_abbrev(m.main_job)),
-                    style::text_font(JOB_PX * sc.max(0.75)),
-                    TextColor(theme::MUTED),
-                ));
-            });
+        // Retail+ gate: skipped entirely when job_display is off.
+        if job_display {
+            row.spawn((Node {
+                width: Val::Px(icon_size),
+                height: Val::Px(entry_h),
+                flex_shrink: 0.0,
+                justify_content: JustifyContent::Center,
+                align_items: AlignItems::Center,
+                ..default()
+            },))
+                .with_children(|icon| {
+                    icon.spawn((
+                        Text::new(job_abbrev(m.main_job)),
+                        style::text_font(JOB_PX * sc.max(0.75)),
+                        TextColor(theme::MUTED),
+                    ));
+                });
+        }
 
         // Bars column: HP on top, MP right-aligned under it (XIUI L1).
         row.spawn((Node {
@@ -1424,11 +1443,23 @@ mod tests {
     #[test]
     fn content_key_tracks_name_color_table_generation() {
         let snap = kuluu_snapshot::SceneSnapshot::default();
-        let a = party_content_key(&snap, 0);
-        let b = party_content_key(&snap, 1);
+        let a = party_content_key(&snap, 0, false);
+        let b = party_content_key(&snap, 1, false);
         assert_eq!(a.party, b.party, "same scene, only the table moved");
         assert_ne!(a.name_color_generation, b.name_color_generation);
         assert_ne!(a, b, "late table load must force a rebuild");
+    }
+
+    /// Toggling the Retail+ Job Display gate must force an L1 row rebuild even
+    /// when nothing else in the snapshot changed (the column appears/disappears).
+    #[test]
+    fn content_key_tracks_job_display_gate() {
+        let snap = kuluu_snapshot::SceneSnapshot::default();
+        let a = party_content_key(&snap, 0, false);
+        let b = party_content_key(&snap, 0, true);
+        assert_eq!(a.name_color_generation, b.name_color_generation);
+        assert_ne!(a.job_display, b.job_display);
+        assert_ne!(a, b, "job gate toggle must force a rebuild");
     }
 
     #[test]

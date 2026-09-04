@@ -352,10 +352,15 @@ async fn run_map_session(
 
     // Safety cap for the pre-GAMEOK drain (the self-seed normally lands well
     // before it). The post-send quiescence drains below are short by design:
-    // each only needs to observe the server's response to the previous send so
-    // the next c2s carries a fresh ack — parse() drops any non-LOGIN c2s whose
-    // ack != server_packet_id (vendor/server/src/map/map_networking.cpp:478),
-    // and that counter advances once per processed c2s.
+    // each only needs to observe one s2c stamped AFTER the server accepted the
+    // previous send so the next c2s carries a fresh ack — parse() drops any
+    // non-LOGIN c2s whose ack != server_packet_id (vendor/server/src/map/
+    // map_networking.cpp:478), and that counter advances once per processed
+    // c2s (:499) — never per s2c sent. Breaking on the fresh stamp instead of
+    // waiting for socket idle keeps each inter-c2s gap to milliseconds; a full
+    // 8 s cap drain in a busy zone would exceed LSB's 5 s link-dead window
+    // (vendor/server/src/map/map_session_container.cpp:206-220) and mark us
+    // disconnecting mid-zone-in.
     const FLOOD_DRAIN_CAP: std::time::Duration = std::time::Duration::from_secs(8);
     let flood_deadline = std::time::Instant::now() + FLOOD_DRAIN_CAP;
     let mut server_last_seq: u16 = 0;
@@ -397,6 +402,7 @@ async fn run_map_session(
         map,
         flood_deadline,
         false,
+        None,
         &mut server_last_seq,
         &mut total_subs,
         &mut self_pos_seeded,
@@ -452,6 +458,7 @@ async fn run_map_session(
                 map,
                 std::time::Instant::now() + FLOOD_DRAIN_CAP,
                 true,
+                Some(server_last_seq),
                 &mut server_last_seq,
                 &mut total_subs,
                 &mut self_pos_seeded,
@@ -591,6 +598,10 @@ fn should_break_flood(break_on_idle: bool, self_pos_seeded: bool) -> bool {
 /// Drains and processes zone-in traffic until `deadline`, or earlier once the
 /// socket has been idle for one recv window: unconditionally when
 /// `break_on_idle`, otherwise only after the self position seed has landed.
+/// When `ack_at_send` is Some (post-send quiescence), also breaks as soon as a
+/// datagram stamped differently from that ack arrives — the server's id only
+/// advances when it accepts one of our c2s, so any post-acceptance stamp is
+/// exactly the next fresh ack and there is no reason to keep waiting for idle.
 /// Every received datagram refreshes `*server_last_seq` so the next c2s can
 /// carry a fresh ack (see parse()'s retransmit guard).
 #[allow(clippy::too_many_arguments)]
@@ -598,6 +609,7 @@ async fn drain_zone_flood(
     map: &MapClient,
     deadline: std::time::Instant,
     break_on_idle: bool,
+    ack_at_send: Option<u16>,
     server_last_seq: &mut u16,
     total_subs: &mut usize,
     self_pos_seeded: &mut bool,
@@ -668,6 +680,15 @@ async fn drain_zone_flood(
                         mog,
                         zoneline_spawn_fallback,
                     );
+                }
+                // Post-send quiesce: the server's id only advances when it accepts one of our c2s
+                // (vendor/server/src/map/map_networking.cpp:499), so any datagram stamped differently
+                // from the ack we just sent proves acceptance — break instead of waiting for idle.
+                // Waiting for idle in a busy zone runs the full FLOOD_DRAIN_CAP with zero c2s sent,
+                // and LSB flips isLinkDead at 5 s of c2s silence (vendor/server/src/map/
+                // map_session_container.cpp:206-220) — marking us disconnecting mid-zone-in.
+                if ack_at_send.is_some_and(|ack| *server_last_seq != ack) {
+                    break;
                 }
             }
 

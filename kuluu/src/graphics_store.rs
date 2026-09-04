@@ -56,7 +56,8 @@ impl GraphicsStore {
 /// Deserialize one JSON value into `T`, or `None` when it is missing or
 /// malformed — used by [`parse_graphics_settings`] to salvage field-by-field.
 fn take<T: serde::de::DeserializeOwned>(v: &serde_json::Value, key: &str) -> Option<T> {
-    v.get(key).and_then(|j| serde_json::from_value(j.clone()).ok())
+    v.get(key)
+        .and_then(|j| serde_json::from_value(j.clone()).ok())
 }
 
 /// Parse `graphics.json` leniently, field by field: one malformed value (a
@@ -75,8 +76,8 @@ fn take<T: serde::de::DeserializeOwned>(v: &serde_json::Value, key: &str) -> Opt
 /// user choices that must survive a restart (default off when absent).
 fn parse_graphics_settings(bytes: &[u8]) -> Result<GraphicsSettings> {
     use kuluu_render::{
-        AaMode, CharacterRenderPath, DlssQuality, DynamicLights, QualityPreset,
-        TextureFiltering, ZoneLineDisplay,
+        AaMode, CharacterRenderPath, DlssQuality, DynamicLights, QualityPreset, TextureFiltering,
+        ZoneLineDisplay,
     };
 
     let v: serde_json::Value = serde_json::from_slice(bytes)?;
@@ -316,13 +317,20 @@ mod tests {
         )
         .unwrap();
         let loaded = store.load().unwrap().expect("present");
-        assert_eq!(loaded.preset, QualityPreset::Low, "valid field survives a bad neighbour");
+        assert_eq!(
+            loaded.preset,
+            QualityPreset::Low,
+            "valid field survives a bad neighbour"
+        );
         assert_eq!(
             loaded.vsync,
             GraphicsSettings::default().vsync,
             "malformed vsync falls back to default"
         );
-        assert_eq!(loaded.ui_scale, 2.0, "ui_scale clamps into the menu slot range");
+        assert_eq!(
+            loaded.ui_scale, 2.0,
+            "ui_scale clamps into the menu slot range"
+        );
     }
 
     #[test]

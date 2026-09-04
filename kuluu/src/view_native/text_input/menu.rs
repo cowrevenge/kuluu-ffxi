@@ -374,7 +374,11 @@ fn handle_retail_plus_row(
                 scene_state,
                 format!(
                     "[menu] {label}: {}",
-                    if graphics.dlss_menu_enabled { "on" } else { "off" }
+                    if graphics.dlss_menu_enabled {
+                        "on"
+                    } else {
+                        "off"
+                    }
                 ),
             );
             true

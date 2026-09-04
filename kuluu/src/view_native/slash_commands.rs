@@ -2462,7 +2462,9 @@ fn render_debug_entity(arg: &str, entities: &[WireEntity], self_pos: WireVec3) -
         Some(EntityLook::Transport { size }) => s.push_str(&format!(" transport size={size}")),
     }
     // n/a = no General-block update has carried the byte yet (it rides UPDATE_HP).
-    let namevis = e.name_vis.map_or_else(|| "n/a".to_string(), |v| v.to_string());
+    let namevis = e
+        .name_vis
+        .map_or_else(|| "n/a".to_string(), |v| v.to_string());
     s.push('\n');
     s.push_str(&format!(
         "  anim={} animsub={} status={} namevis={namevis}{}",

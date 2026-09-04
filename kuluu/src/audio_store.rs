@@ -189,23 +189,20 @@ mod tests {
     fn load_salvages_one_bad_field_and_clamps_master() {
         let path = tmp_path();
         std::fs::write(&path, br#"{"bgm": true, "sfx": "yes", "master": 100}"#).unwrap();
-        let s = AudioStore::new(&path)
-            .load()
-            .unwrap()
-            .expect("present");
+        let s = AudioStore::new(&path).load().unwrap().expect("present");
         assert!(s.bgm, "valid field survives a bad neighbour");
         assert!(!s.sfx, "malformed sfx falls back to default (unmuted)");
-        assert_eq!(s.master, 1.0, "master clamps into 0..=1 instead of 100x gain");
+        assert_eq!(
+            s.master, 1.0,
+            "master clamps into 0..=1 instead of 100x gain"
+        );
     }
 
     #[test]
     fn load_rejects_nan_master() {
         let path = tmp_path();
         std::fs::write(&path, br#"{"master": NaN}"#).unwrap();
-        let s = AudioStore::new(&path)
-            .load()
-            .unwrap()
-            .expect("present");
+        let s = AudioStore::new(&path).load().unwrap().expect("present");
         assert_eq!(s.master, 1.0, "NaN falls back to full volume");
     }
 }

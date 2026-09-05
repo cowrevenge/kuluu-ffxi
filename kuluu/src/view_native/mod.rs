@@ -1193,6 +1193,7 @@ fn bridge_connecting(
         state_rx,
         cmd_tx,
         event_tx,
+        entity_changes_rx,
         session_task: _,
         folder_task: _,
     } = spawn_session_with_reactor(cfg, ReactorConfig::player());
@@ -1264,7 +1265,12 @@ fn bridge_connecting(
         });
     }
 
-    commands.insert_resource(NativeSource::new(&runtime.0, state_rx, event_rx));
+    commands.insert_resource(NativeSource::new(
+        &runtime.0,
+        state_rx,
+        event_rx,
+        entity_changes_rx,
+    ));
     commands.insert_resource(CommandTx(cmd_tx));
 
     commands.insert_resource(SessionEventTx(event_tx));

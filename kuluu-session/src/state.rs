@@ -1411,9 +1411,24 @@ impl SessionState {
         }
         self.check_result.as_mut().expect("just ensured Some")
     }
+}
 
-    /// Takes both pending entity sets (leaving them empty). The translator
-    /// calls this once per translate cycle; ids present in `removals` win over
+/// One drained batch of [`SessionState::pending_entity_upserts`] /
+/// [`SessionState::pending_entity_removals`]. The event folder drains it after
+/// each fold and forwards it to the translator, which merges batches into
+/// O(changed) scene deltas. `other_changed` marks a batch whose triggering
+/// event also mutated non-entity state (chat, party, stage, …); the translator
+/// answers those with a full snapshot instead of an entity-only delta.
+#[derive(Debug, Clone, Default)]
+pub struct EntityChanges {
+    pub upserts: HashSet<u32>,
+    pub removals: HashSet<u32>,
+    pub other_changed: bool,
+}
+
+impl SessionState {
+    /// Takes both pending entity sets (leaving them empty). The event folder
+    /// drains this after each fold; ids present in `removals` win over
     /// `upserts` — an upsert-then-remove within one batch nets to a removal.
     pub fn take_pending_entities(&mut self) -> (HashSet<u32>, HashSet<u32>) {
         (

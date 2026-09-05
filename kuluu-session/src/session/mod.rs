@@ -4467,6 +4467,7 @@ fn emit_stage(tx: &broadcast::Sender<AgentEvent>, stage: Stage) {
 pub async fn run_event_folder(
     mut event_rx: broadcast::Receiver<AgentEvent>,
     state_tx: tokio::sync::watch::Sender<crate::state::SessionState>,
+    changes_tx: tokio::sync::mpsc::UnboundedSender<crate::state::EntityChanges>,
 ) {
     use tokio::sync::broadcast::error::RecvError;
     let mut total_dropped: u64 = 0;
@@ -4477,7 +4478,38 @@ pub async fn run_event_folder(
             // (e.g. identical PositionChanged / EntityUpserted resends) do not
             // trigger downstream scene rebuilds (kuluu-p09).
             Ok(event) => {
-                state_tx.send_if_modified(|s| s.apply_event(&event));
+                // Entity-only events stamp the pending sets inside apply_event;
+                // drain them here into a batch for the translator's delta path.
+                // Anything else that mutates state flags other_changed so the
+                // translator falls back to a full snapshot (SceneDelta cannot
+                // express clears/evictions of non-entity fields). The send runs
+                // inside the fold closure — before watch bumps its version — so
+                // a translator that observes this event's state is guaranteed
+                // to find its batch already in the channel.
+                let entity_only = matches!(
+                    event,
+                    AgentEvent::EntityUpserted { .. }
+                        | AgentEvent::EntityRemoved { .. }
+                        | AgentEvent::PositionChanged { .. }
+                        | AgentEvent::ForcedMove { .. }
+                        | AgentEvent::SelfLookUpdated { .. }
+                        | AgentEvent::EntityPatched { .. }
+                );
+                let changes_tx = &changes_tx;
+                state_tx.send_if_modified(|s| {
+                    let changed = s.apply_event(&event);
+                    if changed {
+                        let (upserts, removals) = s.take_pending_entities();
+                        if !upserts.is_empty() || !removals.is_empty() || !entity_only {
+                            let _ = changes_tx.send(crate::state::EntityChanges {
+                                upserts,
+                                removals,
+                                other_changed: !entity_only,
+                            });
+                        }
+                    }
+                    changed
+                });
             }
             Err(RecvError::Lagged(n)) => {
                 total_dropped += n;

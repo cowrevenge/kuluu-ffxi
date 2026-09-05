@@ -1111,7 +1111,10 @@ async fn main() -> Result<()> {
     let relay_handles = if let Some(addr) = relay_addr {
         let (state_tx, state_rx) = tokio::sync::watch::channel(SessionState::default());
         let folder_rx = event_tx.subscribe();
-        let folder_h = tokio::spawn(session::run_event_folder(folder_rx, state_tx));
+        // The relay path has no translator: change batches are drained
+        // by the folder but never consumed.
+        let (changes_tx, _entity_changes_rx) = tokio::sync::mpsc::unbounded_channel();
+        let folder_h = tokio::spawn(session::run_event_folder(folder_rx, state_tx, changes_tx));
         let relay_event_tx = event_tx.clone();
         let relay_cmd_tx = cmd_tx.clone();
         let serve_h = tokio::spawn(async move {

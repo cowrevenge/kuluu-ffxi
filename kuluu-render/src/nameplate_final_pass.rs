@@ -56,15 +56,14 @@ use bevy::render::render_resource::{
         sampler as smp_entry, texture_2d, texture_depth_2d, texture_depth_2d_multisampled,
         uniform_buffer,
     },
-    BindGroup, BindGroupEntries, BindGroupLayout, BindGroupLayoutDescriptor, BindGroupLayoutEntries,
-    BlendComponent,
-    BlendFactor, BlendOperation, BlendState, Buffer, BufferBinding, BufferDescriptor,
-    BufferInitDescriptor, BufferUsages, CachedRenderPipelineId, ColorTargetState, ColorWrites,
-    CompareFunction, DepthBiasState, DepthStencilState, FragmentState, FrontFace, IndexFormat,
-    MultisampleState, PipelineCache, PolygonMode, PrimitiveState, PrimitiveTopology,
-    RenderPassDescriptor, RenderPipelineDescriptor, SamplerBindingType, ShaderStages, ShaderType,
-    StencilFaceState, StencilState, StoreOp, TextureFormat, TextureSampleType, TextureViewId,
-    VertexFormat, VertexState, VertexStepMode,
+    BindGroup, BindGroupEntries, BindGroupLayout, BindGroupLayoutDescriptor,
+    BindGroupLayoutEntries, BlendComponent, BlendFactor, BlendOperation, BlendState, Buffer,
+    BufferBinding, BufferDescriptor, BufferInitDescriptor, BufferUsages, CachedRenderPipelineId,
+    ColorTargetState, ColorWrites, CompareFunction, DepthBiasState, DepthStencilState,
+    FragmentState, FrontFace, IndexFormat, MultisampleState, PipelineCache, PolygonMode,
+    PrimitiveState, PrimitiveTopology, RenderPassDescriptor, RenderPipelineDescriptor,
+    SamplerBindingType, ShaderStages, ShaderType, StencilFaceState, StencilState, StoreOp,
+    TextureFormat, TextureSampleType, TextureViewId, VertexFormat, VertexState, VertexStepMode,
 };
 use bevy::render::renderer::{RenderContext, RenderDevice, RenderQueue, ViewQuery};
 use bevy::render::{

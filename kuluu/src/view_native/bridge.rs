@@ -50,7 +50,7 @@ struct ResyncTracker {
 
 impl ResyncTracker {
     fn needs_full_snapshot(&mut self, s: &SessionState) -> bool {
-        let reconnect_at = s.last_reconnect.map(|r| r.at_unix_ms).unwrap_or(0);
+        let reconnect_at = s.last_reconnect.as_ref().map(|r| r.at_unix_ms).unwrap_or(0);
         let full = !self.primed
             || s.zone_generation != self.last_zone_generation
             || s.char_id != self.last_char_id

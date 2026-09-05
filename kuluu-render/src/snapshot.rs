@@ -3,6 +3,7 @@ use kuluu_snapshot::{
     ChatChannel, ChatLine, Entity, PartyMember, SceneDelta, SceneSnapshot, ViewerEvent,
 };
 
+use crate::entity_table::EntityTable;
 use crate::source::SceneSource;
 
 pub const CHAT_HISTORY_CAP: usize = 256;
@@ -134,6 +135,7 @@ pub fn ingest_system<
     mut source: ResMut<S>,
     mut state: ResMut<SceneState>,
     mut events: ResMut<EventLog>,
+    mut table: ResMut<EntityTable>,
 ) {
     // Clearing through the tracked ResMut would tick SceneState every frame,
     // poisoning is_changed()/resource_changed gating for every consumer.
@@ -143,12 +145,16 @@ pub fn ingest_system<
         state.snapshot = *snap;
         state.observe_server_chat();
         state.dirty = true;
+        // Piece 2: mirror the authoritative frame into the entity table.
+        table.apply_snapshot(&state.snapshot);
     }
 
     for delta in source.drain_deltas() {
         apply_delta(&mut state.snapshot, &delta);
         state.observe_server_chat();
         state.dirty = true;
+        // Piece 2: mirror the O(changed) frame into the entity table.
+        table.apply_delta(&delta);
     }
 
     for ev in source.drain_events() {
@@ -623,6 +629,7 @@ mod tests {
         app.init_resource::<TestSource>();
         app.init_resource::<SceneState>();
         app.init_resource::<EventLog>();
+        app.init_resource::<EntityTable>();
         app.add_systems(Update, ingest_system::<TestSource>);
 
         app.world_mut()
@@ -685,6 +692,7 @@ mod tests {
         app.init_resource::<TestSource>();
         app.init_resource::<SceneState>();
         app.init_resource::<EventLog>();
+        app.init_resource::<EntityTable>();
         app.add_systems(Update, ingest_system::<TestSource>);
 
         let s = SceneSnapshot {
@@ -731,6 +739,7 @@ mod tests {
         app.init_resource::<SceneState>();
         app.init_resource::<EventLog>();
         app.init_resource::<ChangedProbe>();
+        app.init_resource::<EntityTable>();
         app.add_systems(Update, (ingest_system::<TestSource>, probe).chain());
 
         app.world_mut().resource_mut::<TestSource>().next_snapshot =

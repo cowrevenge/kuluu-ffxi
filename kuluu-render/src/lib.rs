@@ -21,6 +21,7 @@ pub mod dat_mzb;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod dat_vos2;
 pub mod debug_chat;
+pub mod entity_table;
 pub mod equip_slot;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod ffxi_actor_render;
@@ -104,6 +105,7 @@ pub use components::{
 };
 pub use cursor::{system_cursor_icon, CursorPlugin, CursorRequests, CursorStyle};
 pub use cutscene::{CutsceneMode, CutscenePlugin, ScreenFade};
+pub use entity_table::{EntityRecord, EntityTable};
 pub use graphics_settings::{
     AaMode, CharacterRenderPath, DlssQuality, DynamicLights, GraphicsField, GraphicsSettings,
     QualityPreset, TextureFiltering, ZoneLineDisplay, DLSS_CONFIG_FIELDS, GRAPHICS_FIELDS,
@@ -250,6 +252,9 @@ impl<S: SceneSource + Resource + Component<Mutability = bevy::ecs::component::Mu
             .init_resource::<sun_moon::DatCelestials>()
             .init_resource::<EventLog>()
             .init_resource::<TrackedEntities>()
+            // Piece 2 of the entity-table refactor: ingest mirrors every
+            // snapshot/delta here; nothing reads it until piece 4.
+            .init_resource::<EntityTable>()
             .init_resource::<Target>()
             .init_resource::<InputMode>()
             .init_resource::<ChatHistory>()

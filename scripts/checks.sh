@@ -179,6 +179,19 @@ run_harness() {
       ':!ffxi-agent/**' ':!.agents/AGENTS.md' ':!.agents/CLAUDE.md' \
     | grep -vE '\.claude/(settings\.json|settings\.local\.json|skills|agents|worktrees)\b' || true)
 
+  # Cargo records path overrides that no longer match the resolved dependency
+  # graph here. Fail before an engine upgrade can silently bypass a required
+  # vendor fix while leaving its [patch.crates-io] declaration in place.
+  if grep -q '^\[\[patch\.unused\]\]' Cargo.lock; then
+    echo "checks: harness - Cargo.lock contains unused [patch.crates-io] overrides:" >&2
+    awk '
+      /^\[\[patch\.unused\]\]$/ { unused=1; next }
+      /^\[\[/ { unused=0 }
+      unused && /^(name|version) = / { print "  " $0 }
+    ' Cargo.lock >&2
+    bad=1
+  fi
+
   return $bad
 }
 

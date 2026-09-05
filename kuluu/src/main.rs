@@ -2,7 +2,7 @@
 
 #[cfg(feature = "relay")]
 use kuluu_session::state;
-use kuluu_session::{agent_io, auth_client, lobby_client, session};
+use kuluu_session::{agent_io, auth_client, lobby_client, reactor, session};
 
 use anyhow::{self, bail, Context, Result};
 use clap::{Parser, Subcommand};
@@ -356,7 +356,12 @@ async fn run_command_async(args: Args, auth: auth_client::AuthClient) -> Result<
             };
             let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel(64);
             let (event_tx, event_rx) = tokio::sync::broadcast::channel(1024);
-            let session_task = tokio::spawn(session::run(cfg, cmd_rx, event_tx.clone()));
+            let session_task = tokio::spawn(reactor::run(
+                cfg,
+                cmd_rx,
+                event_tx.clone(),
+                reactor::ReactorConfig::agent(),
+            ));
             let agent_task = tokio::spawn(agent_io::run(cmd_tx.clone(), event_rx));
 
             #[cfg(unix)]

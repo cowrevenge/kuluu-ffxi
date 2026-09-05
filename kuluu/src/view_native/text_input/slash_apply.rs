@@ -531,6 +531,31 @@ pub(super) fn apply_slash_outcome(
             };
             push_system_chat_line(scene_state, chat);
         }
+        SlashOutcome::ActorDiag { use_target } => {
+            let id = if use_target {
+                target.id
+            } else {
+                scene_state.snapshot.self_char_id
+            };
+            let lines = match id {
+                None if use_target => vec!["/actordiag: no target selected".to_string()],
+                None => vec!["/actordiag: self id unknown (not in game yet?)".to_string()],
+                Some(id) => match scene_state.snapshot.entities.iter().find(|e| e.id == id) {
+                    None => vec![format!("/actordiag: entity {id} not in the snapshot")],
+                    Some(e) => match &e.look {
+                        None => vec![format!("/actordiag: entity {id} carries no look data")],
+                        Some(look) => kuluu_render::actor_diag::report(
+                            id,
+                            e.name.as_deref().unwrap_or("?"),
+                            look,
+                        ),
+                    },
+                },
+            };
+            for line in lines {
+                push_system_chat_line(scene_state, line);
+            }
+        }
         SlashOutcome::Overlay(op) => {
             use crate::view_native::slash_commands::OverlayOp;
             let chat = match slash_writers.dat_root.0.as_ref() {

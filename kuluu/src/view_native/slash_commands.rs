@@ -790,6 +790,12 @@ const COMMANDS: &[(&str, &[Command])] = &[
                 handler: |c| parse_overlay(c.rest),
             },
             Command {
+                aliases: &["actordiag"],
+                usage: "[target]",
+                summary: "diagnose missing PC body parts (head/face) against the install",
+                handler: |c| parse_actordiag(c.rest),
+            },
+            Command {
                 aliases: &["snapshot"],
                 usage: "",
                 summary: "emit a one-shot scene snapshot",
@@ -1098,6 +1104,13 @@ pub enum SlashOutcome {
     SetCaptureMode(Option<bool>),
 
     DebugHeights,
+
+    /// Chat-report the look -> file-id -> DAT -> mesh -> texture chain for
+    /// self (or the current target), so a field "no head" report is
+    /// diagnosable from a screenshot (kuluu-39fi).
+    ActorDiag {
+        use_target: bool,
+    },
 
     Screenshot {
         path: Option<String>,
@@ -2080,6 +2093,16 @@ fn parse_overlay(rest: &str) -> SlashOutcome {
         }
     };
     SlashOutcome::Overlay(op)
+}
+
+fn parse_actordiag(rest: &str) -> SlashOutcome {
+    match rest.trim().to_ascii_lowercase().as_str() {
+        "" | "self" => SlashOutcome::ActorDiag { use_target: false },
+        "t" | "target" => SlashOutcome::ActorDiag { use_target: true },
+        other => SlashOutcome::SystemMessage(format!(
+            "/actordiag: unknown `{other}` -- usage: /actordiag [target]"
+        )),
+    }
 }
 
 fn parse_zone_change(rest: &str) -> SlashOutcome {
@@ -5236,6 +5259,26 @@ mod tests {
                 "`/overlay {bad}` must explain itself, not act"
             );
         }
+    }
+
+    #[test]
+    fn actordiag_targets_self_by_default_and_the_target_on_request() {
+        for me in ["", "  ", "self"] {
+            assert!(matches!(
+                parse_actordiag(me),
+                SlashOutcome::ActorDiag { use_target: false }
+            ));
+        }
+        for tgt in ["t", "target", "TARGET"] {
+            assert!(matches!(
+                parse_actordiag(tgt),
+                SlashOutcome::ActorDiag { use_target: true }
+            ));
+        }
+        assert!(matches!(
+            parse_actordiag("wat"),
+            SlashOutcome::SystemMessage(_)
+        ));
     }
 
     #[test]

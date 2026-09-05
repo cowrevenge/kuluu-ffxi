@@ -414,7 +414,7 @@ impl Material for FfxiZoneMaterial {
         // (scale.x * scale.y * scale.z < 0). Using Bevy's CCW default here
         // culled every non-mirrored tile: inverted-checkerboard zone geometry.
         // Directional shadow views (UNCLIPPED_DEPTH_ORTHO is set only there —
-        // vendor/bevy_pbr/src/render/light.rs:2230) render single-sided walls
+        // vendor/bevy_pbr/src/render/light.rs:2277) render single-sided walls
         // unculled: from the sun's viewpoint a wall's one sheet of triangles is
         // back-facing, so Face::Back culling writes no shadow-map depth — walls
         // cast nothing and sunlight leaks indoors (kuluu-lchx).

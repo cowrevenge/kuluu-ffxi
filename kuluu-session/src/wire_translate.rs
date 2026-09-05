@@ -114,6 +114,11 @@ pub fn state_to_snapshot(s: &SessionState) -> wire::SceneSnapshot {
         }),
 
         widescan: widescan_to_wire(&s.widescan),
+
+        death_menu_offer: s.death_menu_offer.map(|offer| match offer {
+            ffxi_proto::decode::DeathMenuOffer::Raise => wire::DeathMenuOffer::Raise,
+            ffxi_proto::decode::DeathMenuOffer::Tractor => wire::DeathMenuOffer::Tractor,
+        }),
     }
 }
 

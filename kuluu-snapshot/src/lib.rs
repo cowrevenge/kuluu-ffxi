@@ -2,6 +2,9 @@
 
 use serde::{Deserialize, Serialize};
 
+// v23: SceneSnapshot.death_menu_offer — the durable s2c 0x0F9 Raise/Reraise or
+// Tractor offer shown while dead. (Upstream's "v20"; renumbered on merge because our
+// side had already spent 20-22 on zone_generation / untargetable / name_vis.)
 // v22: Entity.name_vis is now Option<u8> — None until a General-block update carries
 // it. The byte rides UPDATE_HP (entity_update.cpp:357/:408), not the Position block,
 // so a POS-only 0x00E must not clobber the last known value with its zero-filled byte.
@@ -45,7 +48,7 @@ use serde::{Deserialize, Serialize};
 // v5: InventoryItem.charges_remaining + next_use_vana_ts (item recast/charges).
 // v4: SceneSnapshot.delivery_box (dedicated delivery screen) + ViewerCommand::DeliveryBox
 // (postcard frames are not self-describing, so any shape change bumps this).
-pub const PROTOCOL_VERSION: u32 = 22;
+pub const PROTOCOL_VERSION: u32 = 23;
 
 /// Longest countdown `SceneSnapshot::status_icon_expiries` can carry. The
 /// producer rejects anything beyond it as a corrupt 0x063 timestamp, and the HUD
@@ -762,6 +765,18 @@ pub struct SceneSnapshot {
     /// touching `SessionState` (see `ffxi_proto::map::tracking`).
     #[serde(default)]
     pub widescan: WidescanList,
+
+    /// Server-offered alternative to returning to the home point while dead.
+    /// `None` is the ordinary home-point-only menu.
+    #[serde(default)]
+    pub death_menu_offer: Option<DeathMenuOffer>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeathMenuOffer {
+    Raise,
+    Tractor,
 }
 
 /// Mirror of `kuluu`'s wide-scan model across the wire boundary. Entries
@@ -1757,6 +1772,7 @@ mod tests {
             check: None,
             check_message: None,
             widescan: WidescanList::default(),
+            death_menu_offer: None,
         }
     }
 
@@ -2162,6 +2178,7 @@ mod tests {
             "check",
             "check_message",
             "widescan",
+            "death_menu_offer",
         ];
         want.sort();
         assert_eq!(got, want, "SceneSnapshot fields changed: additive-only, update this pin deliberately and rebuild relay consumers together");

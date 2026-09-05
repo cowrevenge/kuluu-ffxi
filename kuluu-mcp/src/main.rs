@@ -1096,7 +1096,7 @@ async fn main() -> Result<()> {
             goal_store: Some(goal_store.clone()),
             ..SupervisorConfig::default()
         };
-        let reactor_cfg = ReactorConfig::default();
+        let reactor_cfg = ReactorConfig::agent();
         tokio::spawn(async move {
             if let Err(e) =
                 supervisor::run(cfg, cmd_rx, event_tx_for_producer, sup_cfg, reactor_cfg).await

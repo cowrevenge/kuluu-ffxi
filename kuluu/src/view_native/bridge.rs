@@ -546,19 +546,25 @@ mod tests {
         changes_tx: &mpsc::UnboundedSender<EntityChanges>,
         event: AgentEvent,
     ) {
-        let changed = state_tx.send_modify(|s| s.apply_event(&event));
-        if changed {
-            let (upserts, removals) = state_tx.borrow_mut().take_pending_entities();
-            if !upserts.is_empty() || !removals.is_empty() {
-                changes_tx
-                    .send(EntityChanges {
-                        upserts,
-                        removals,
-                        other_changed: false,
-                    })
-                    .expect("receiver alive");
+        // Mirror run_event_folder's send_if_modified fold (session/mod.rs):
+        // the apply and the pending-set drain happen inside one closure —
+        // watch hands out at most one &mut per call.
+        state_tx.send_if_modified(|s| {
+            let changed = s.apply_event(&event);
+            if changed {
+                let (upserts, removals) = s.take_pending_entities();
+                if !upserts.is_empty() || !removals.is_empty() {
+                    changes_tx
+                        .send(EntityChanges {
+                            upserts,
+                            removals,
+                            other_changed: false,
+                        })
+                        .expect("receiver alive");
+                }
             }
-        }
+            changed
+        });
     }
 
     #[test]
@@ -570,8 +576,8 @@ mod tests {
             character: "Cow".into(),
             zone_id: 103,
         });
-        let (state_tx, state_rx) = watch::channel(s);
-        let (changes_tx, changes_rx) = mpsc::unbounded_channel();
+        let (state_tx, mut state_rx) = watch::channel(s);
+        let (changes_tx, mut changes_rx) = mpsc::unbounded_channel();
         let mut resync = ResyncTracker::default();
 
         // First cycle is always a full snapshot.
@@ -622,8 +628,8 @@ mod tests {
             character: "Cow".into(),
             zone_id: 103,
         });
-        let (state_tx, state_rx) = watch::channel(s);
-        let (changes_tx, changes_rx) = mpsc::unbounded_channel();
+        let (state_tx, mut state_rx) = watch::channel(s);
+        let (changes_tx, mut changes_rx) = mpsc::unbounded_channel();
         let mut resync = ResyncTracker::default();
         translate_frame(&mut state_rx, &mut changes_rx, &mut resync); // prime
 
@@ -658,13 +664,13 @@ mod tests {
             character: "Cow".into(),
             zone_id: 103,
         });
-        let (state_tx, state_rx) = watch::channel(s);
-        let (changes_tx, changes_rx) = mpsc::unbounded_channel();
+        let (state_tx, mut state_rx) = watch::channel(s);
+        let (changes_tx, mut changes_rx) = mpsc::unbounded_channel();
         let mut resync = ResyncTracker::default();
         translate_frame(&mut state_rx, &mut changes_rx, &mut resync); // prime
 
         // A chat line is not an entity change: the batch flags other_changed.
-        state_tx.send_modify(|s| {
+        state_tx.send_if_modified(|s| {
             s.apply_event(&AgentEvent::ChatLine {
                 line: ChatLine {
                     spans: Vec::new(),
@@ -674,15 +680,16 @@ mod tests {
                     server_ts: 1,
                 },
             });
+            let (upserts, removals) = s.take_pending_entities();
+            changes_tx
+                .send(EntityChanges {
+                    upserts,
+                    removals,
+                    other_changed: true,
+                })
+                .expect("receiver alive");
+            true
         });
-        let (upserts, removals) = state_tx.borrow_mut().take_pending_entities();
-        changes_tx
-            .send(EntityChanges {
-                upserts,
-                removals,
-                other_changed: true,
-            })
-            .expect("receiver alive");
 
         match translate_frame(&mut state_rx, &mut changes_rx, &mut resync).frame {
             TranslatedFrame::Snapshot(snap) => assert_eq!(snap.chat.len(), 1),
@@ -699,8 +706,8 @@ mod tests {
             character: "Cow".into(),
             zone_id: 103,
         });
-        let (state_tx, state_rx) = watch::channel(s);
-        let (changes_tx, changes_rx) = mpsc::unbounded_channel();
+        let (state_tx, mut state_rx) = watch::channel(s);
+        let (changes_tx, mut changes_rx) = mpsc::unbounded_channel();
         let mut resync = ResyncTracker::default();
         translate_frame(&mut state_rx, &mut changes_rx, &mut resync); // prime
 

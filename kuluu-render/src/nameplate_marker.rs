@@ -31,6 +31,13 @@ pub mod glyph {
     pub const GM_7: u8 = 0x98; // GmLevel 6
     pub const GM_8: u8 = 0x99; // GmLevel 7
     pub const BAZAAR: u8 = 0x9C;
+    /// New Adventurer marker — the red question mark. Retail returns it for
+    /// `AUDIT_130.BIT_21` in `GetPrimaryActorNameMarker`, just above bazaar; on
+    /// LSB that state is `Flags3.NewCharacterFlag` (bit 23), which
+    /// `CCharUpdatePacket::updateWith` writes under SendFlg.General from
+    /// `!playerConfig.NewAdventurerOffFlg` — bit 10 of the `chars.settings`
+    /// u32 (vendor/server/src/map/packets/char_update.cpp:347, common/mmo.h).
+    pub const NEW_PLAYER: u8 = 0xA1;
     /// AutoPartyFlag — accepting invites automatically.
     pub const AUTO_PARTY: u8 = 0x9D;
     /// Ballista/besieged nation markers, selected by `Flags3.BallistaTeam`
@@ -160,6 +167,10 @@ fn primary_marker(flags: &CharFlags, monstrosity: bool) -> Option<u8> {
     }
     if flags.lfg {
         return Some(glyph::SEEKING);
+    }
+    // New Adventurer "?" — retail checks it above bazaar (AUDIT_130.BIT_21).
+    if flags.new_character {
+        return Some(glyph::NEW_PLAYER);
     }
     if flags.bazaar {
         return Some(glyph::BAZAAR);
@@ -320,6 +331,25 @@ mod tests {
         e.char_flags.gm_level = 3;
         e.char_flags.gm_icon = true;
         assert_eq!(nameplate_markers(&e), vec![glyph::LINKSHELL]);
+    }
+
+    #[test]
+    fn a_new_adventurer_gets_the_question_mark() {
+        let mut e = pc();
+        e.char_flags.new_character = true;
+        assert_eq!(nameplate_markers(&e), vec![glyph::NEW_PLAYER]);
+
+        // Retail checks the "?" above bazaar and the pearl/nation fallback.
+        e.char_flags.bazaar = true;
+        e.char_flags.linkshell = true;
+        e.char_flags.allegiance = 2;
+        assert_eq!(nameplate_markers(&e), vec![glyph::NEW_PLAYER]);
+
+        // ...but below seeking-party, which retail checks first. (Allegiance back
+        // to 0 so the secondary slot stays shut and only the primary is asserted.)
+        e.char_flags.allegiance = 0;
+        e.char_flags.lfg = true;
+        assert_eq!(nameplate_markers(&e), vec![glyph::SEEKING]);
     }
 
     #[test]

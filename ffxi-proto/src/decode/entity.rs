@@ -97,6 +97,26 @@ impl PosHead {
         Some(((flags6 >> Self::MOUNT_INDEX_SHIFT) & Self::MOUNT_INDEX_MASK) as u8)
     }
 
+    // `GP_SERV_CHAR_PC.MonstrosityFlags` — the int16 at body offset 0x3A, past
+    // `PosHead`, inside the Model block. research/XIClient/.../s2c/0x00D.h pins it:
+    // `static_assert(offsetof(GP_SERV_CHAR_PC, field_3E) == 0x3A)` with PosHead at
+    // 0x00 (our body start), so this is a direct body offset like FLAGS6_OFFSET.
+    const MONSTROSITY_FLAGS_OFFSET: usize = 0x3A;
+
+    /// Whether a 0x0D `CHAR_PC` is a monstrosity, from the Model block's
+    /// `MonstrosityFlags`. LSB writes it only under `SendFlg.Model`
+    /// (vendor/server/src/map/packets/char_update.cpp `CCharUpdatePacket::updateWith`):
+    /// `0x8000 | Species` when the character is a monstrosity, else 0. Retail's
+    /// nameplate reads it as `AUDIT_210 != 0` → the Monstrosity marker
+    /// (research/XIClient/.../ActorTelemetry.cpp `GetPrimaryActorNameMarker`).
+    ///
+    /// Returns `None` when the packet stops short of the field; `Some(false)` is a
+    /// Model-block update that says "not a monstrosity" and clears any prior state.
+    pub fn monstrosity(body: &[u8]) -> Option<bool> {
+        let b = body.get(Self::MONSTROSITY_FLAGS_OFFSET..Self::MONSTROSITY_FLAGS_OFFSET + 2)?;
+        Some(u16::from_le_bytes([b[0], b[1]]) != 0)
+    }
+
     pub fn decode_char_npc(body: &[u8]) -> Result<(Self, u32), DecodeError> {
         let head = Self::decode(body)?;
         Ok((head, head.bt_target_id))
@@ -1309,6 +1329,23 @@ mod pos_head_tests {
         // A position-only update stops before Flags6.
         let short = vec![0u8; PosHead::SIZE_WITH_BT_TARGET];
         assert_eq!(PosHead::mount_index(&short), None);
+    }
+
+    #[test]
+    fn char_pc_monstrosity_reads_the_model_block_flags() {
+        // MonstrosityFlags is the int16 at body 0x3A; LSB writes `0x8000 | Species`
+        // when monstrosity, else leaves it 0 (char_update.cpp Model block). Any
+        // non-zero value means "is a monstrosity" to retail's nameplate.
+        let mut buf = vec![0u8; PosHead::MONSTROSITY_FLAGS_OFFSET + 2];
+        assert_eq!(PosHead::monstrosity(&buf), Some(false));
+
+        // The 0x8000 high bit LSB always sets, with the species in the low bits.
+        buf[PosHead::MONSTROSITY_FLAGS_OFFSET..].copy_from_slice(&0x8005u16.to_le_bytes());
+        assert_eq!(PosHead::monstrosity(&buf), Some(true));
+
+        // A General-only update stops before the Model block's field.
+        let short = vec![0u8; PosHead::SIZE_WITH_BT_TARGET];
+        assert_eq!(PosHead::monstrosity(&short), None);
     }
 
     #[test]

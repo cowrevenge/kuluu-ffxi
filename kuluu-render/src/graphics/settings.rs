@@ -1703,11 +1703,15 @@ pub fn apply_bloom_system(
 /// derives them from the zone fog DAT and time of day.
 pub fn apply_volumetric_fog_system(
     settings: Res<GraphicsSettings>,
+    panels: Res<crate::hud::HudPanels>,
     mut commands: Commands,
     mut q_cam: Query<(Entity, Option<&mut VolumetricFog>), With<OperatorCamera>>,
 ) {
+    // The Debug menu Fog row strips the layer too; weather.rs re-removes it
+    // per frame while off, so a settings change mid-off cannot resurrect it.
+    let on = settings.volumetric_fog && !panels.fog_off;
     for (entity, fog) in q_cam.iter_mut() {
-        match (settings.volumetric_fog, fog) {
+        match (on, fog) {
             (true, Some(mut fog)) => {
                 // Only own the quality knob here; ambient_color/intensity are
                 // zone/time/weather-derived in weather::apply_zone_weather and

@@ -266,6 +266,13 @@ pub const DEBUG_TARGET_CYCLE: &str = "Target Cycle";
 pub const DEBUG_MESH: &str = "Mesh Debug";
 pub const DEBUG_NET_STATUS: &str = "Net Status";
 pub const DEBUG_NOCLIP: &str = "NoClip";
+/// Debug weather gate row: [on] = the active-weather modifier (ambient tint,
+/// sun mul, lightning) and precipitation particles are applied; toggling it
+/// off suppresses them for isolating scene-graphic errors. Default on.
+pub const DEBUG_WEATHER: &str = "Weather";
+/// Debug fog gate row: [on] = every fog layer (DAT distance fog, volumetric
+/// ground haze) renders; toggling it off strips all of them. Default on.
+pub const DEBUG_FOG: &str = "Fog";
 pub const DEBUG_SOUND: &str = "Sound";
 pub const DEBUG_VOLUME: &str = "Volume";
 pub const DEBUG_PRINT_POS: &str = "Print POS";
@@ -298,6 +305,8 @@ const DEBUG_ENTRIES: &[&str] = &[
     DEBUG_MESH,
     DEBUG_NET_STATUS,
     DEBUG_NOCLIP,
+    DEBUG_WEATHER,
+    DEBUG_FOG,
     DEBUG_SOUND,
     DEBUG_VOLUME,
     DEBUG_PRINT_POS,
@@ -1477,6 +1486,10 @@ pub fn debug_panel_state(
         DEBUG_TARGET_CYCLE => panels.target_cycle,
         DEBUG_MESH => panels.mesh_debug,
         DEBUG_NOCLIP => panels.noclip,
+        // The rows read as the feature's live state, so they invert the
+        // "off" flags: Weather [on] = weather effects applied.
+        DEBUG_WEATHER => !panels.weather_off,
+        DEBUG_FOG => !panels.fog_off,
         DEBUG_NET_STATUS => net_status_on,
         DEBUG_SOUND => sound_on,
         DEBUG_STAIR_DRAW => panels.stair_draw,

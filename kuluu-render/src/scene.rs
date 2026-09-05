@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use bevy::ecs::system::SystemParam;
 use bevy::light::FogVolume;
 use bevy::picking::Pickable;
 use bevy::prelude::*;
@@ -216,6 +217,27 @@ pub fn setup_world(
     });
 }
 
+/// Bundled so [`sync_entities_system`] stays under bevy's 16-param SystemParam
+/// ceiling (it was already at it before the floor gate landed).
+#[derive(SystemParam)]
+pub struct EntitySyncQueries<'w, 's> {
+    xform: Query<'w, 's, &'static mut Transform, With<WorldEntity>>,
+    mat: Query<
+        'w,
+        's,
+        &'static mut MeshMaterial3d<StandardMaterial>,
+        (With<WorldEntity>, Without<MorphIn>),
+    >,
+}
+
+/// The two signals that say "this zone's floor has landed" — the same pair the
+/// loading overlay's `ready` reads. Bundled for the 16-param ceiling.
+#[derive(SystemParam)]
+pub struct ZoneFloorGate<'w> {
+    last_auto: Res<'w, crate::dat_mzb::LastAutoLoadedZone>,
+    in_flight: Res<'w, crate::dat_mzb::LoadMzbInFlight>,
+}
+
 pub fn sync_entities_system(
     state: Res<SceneState>,
     mesh: Res<EntityMesh>,
@@ -229,9 +251,9 @@ pub fn sync_entities_system(
     mut motion: ResMut<crate::combat_stance::EntityMotion>,
     mut blends: ResMut<crate::combat_stance::AnimationBlends>,
     mut commands: Commands,
-    mut q_xform: Query<&mut Transform, With<WorldEntity>>,
-    mut q_mat: Query<&mut MeshMaterial3d<StandardMaterial>, (With<WorldEntity>, Without<MorphIn>)>,
+    mut queries: EntitySyncQueries,
     q_nameplates: Query<&Nameplate>,
+    floor_gate: ZoneFloorGate,
     mut prev_zone: Local<Option<Option<u32>>>,
 ) {
     if !state.dirty {
@@ -239,6 +261,18 @@ pub fn sync_entities_system(
     }
 
     let snap = &state.snapshot;
+
+    // Hard load-order gate: no NPC/character visuals may exist before this
+    // zone's floor has landed. The main-zone MZB streams in asynchronously
+    // AFTER the first InZone snapshot, and an actor spawned ahead of it has
+    // nothing to ground against — it falls at walker terminal velocity while
+    // under-floor recovery is deliberately inert mid-load (and the server
+    // echoes back whatever c2s 0x015 reports, so that fall sticks). The
+    // overlay's `ready` reads this same pair of signals, so the gate opens
+    // exactly when the loading screen lifts. Existing entities keep updating
+    // and stale ones still despawn below; only NEW visuals wait.
+    let floor_ready =
+        crate::dat_mzb::main_zone_floor_ready(snap, &floor_gate.last_auto, &floor_gate.in_flight);
 
     // Keyed on the resolved DAT file id, not zone_id: Mog House entry/exit keeps
     // the city zone_id but teleports the player into a different interior.
@@ -282,7 +316,7 @@ pub fn sync_entities_system(
 
         match tracked.by_id.get(&wire.id).copied() {
             Some(existing) => {
-                if let Ok(mut t) = q_xform.get_mut(existing) {
+                if let Ok(mut t) = queries.xform.get_mut(existing) {
                     if is_self {
                         trace!(
                             target: "self_sync",
@@ -319,7 +353,7 @@ pub fn sync_entities_system(
                         t.rotation = heading_to_quat(wire.heading);
                     }
                 }
-                if let Ok(mut m) = q_mat.get_mut(existing) {
+                if let Ok(mut m) = queries.mat.get_mut(existing) {
                     m.0 = mat;
                 }
                 // The spawn arm can only tag self once the id is known, and the
@@ -331,6 +365,9 @@ pub fn sync_entities_system(
                 }
             }
             None => {
+                if !floor_ready {
+                    continue;
+                }
                 // Doors/transports have no client model — their visual is the
                 // zone/MMB geometry — so the placeholder orb would render as a
                 // floating sphere over them (kuluu-nf56). Suppress the orb mesh
@@ -420,7 +457,7 @@ pub fn sync_entities_system(
         if tracked.by_id.contains_key(&id) {
             continue;
         }
-        let rider_tf = q_xform.get(rider_e).copied().unwrap_or_default();
+        let rider_tf = queries.xform.get(rider_e).copied().unwrap_or_default();
         let bevy_e = commands
             .spawn((
                 crate::components::InGameEntity,

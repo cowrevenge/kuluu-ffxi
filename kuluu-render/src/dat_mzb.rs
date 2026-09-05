@@ -3079,6 +3079,26 @@ pub fn auto_load_zone_geometry_system(
     }
 }
 
+/// Hard load-order gate for zone entry: true once the main-zone MZB load has
+/// COMPLETED — success, empty DAT, or parse failure all count, because a
+/// completion is what leaves [`LoadMzbInFlight`], and a zone whose floor never
+/// materializes must not hold its characters hostage behind the loading screen
+/// either. The loading overlay's `ready` reads this same pair of signals, so
+/// the gate opens exactly when that screen lifts. Zones without a DAT mapping
+/// have no floor to wait for and are ready by definition.
+pub fn main_zone_floor_ready(
+    snapshot: &kuluu_snapshot::SceneSnapshot,
+    last: &LastAutoLoadedZone,
+    in_flight: &LoadMzbInFlight,
+) -> bool {
+    match crate::snapshot::effective_zone_file_id(snapshot) {
+        None => true,
+        Some(file_id) => {
+            last.file_id == Some(file_id) && !in_flight.pending_in_slot(ZONE_SLOT_MAIN)
+        }
+    }
+}
+
 /// research/XIClient/src/XIClient/source/Rendering/ZoneRenderer.cpp:1071-1094 —
 /// `RenderChunk2` measures from the camera eye to the placement translation, culls
 /// on the squared Lod far distance when the chunk is flagged `UsesLodRendering`,

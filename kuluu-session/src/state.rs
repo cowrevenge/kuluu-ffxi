@@ -517,15 +517,6 @@ pub struct SessionState {
     #[serde(default)]
     pub logout_countdown: Option<LogoutCountdown>,
 
-    /// Monotonically increasing counter, bumped on every cancel of a LIVE
-    /// `logout_countdown` (stand-up drops LEAVEGAME server-side with no 0x053
-    /// cancel packet). The HUD treats an increase as the explicit "stop
-    /// drawing" signal: a bare `logout_countdown: None` is ambiguous (the
-    /// server may simply not have acknowledged yet), so without this the
-    /// banner's optimistic countdown keeps running after stand-up.
-    #[serde(default)]
-    pub logout_cancel_seq: u64,
-
     #[serde(default)]
     pub death_homepoint_secs: Option<u32>,
 
@@ -1629,14 +1620,9 @@ impl SessionState {
                 changed
             }
             AgentEvent::LogoutCountdownCancelled => {
-                let had_live = self.logout_countdown.take().is_some();
-                // Only a cancel of a live countdown is state-changing: it bumps
-                // the seq the HUD watches. A stand-up with nothing pending stays
-                // a no-op fold (no snapshot churn).
-                if had_live {
-                    self.logout_cancel_seq = self.logout_cancel_seq.wrapping_add(1);
-                }
-                had_live
+                let changed = self.logout_countdown.is_some();
+                self.logout_countdown = None;
+                changed
             }
             AgentEvent::Diagnostics { diagnostics } => {
                 let changed = self.diagnostics != *diagnostics;

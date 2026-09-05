@@ -646,12 +646,6 @@ pub struct SceneSnapshot {
     #[serde(default)]
     pub logout_countdown: Option<LogoutCountdown>,
 
-    /// Monotonic count of server-side leavegame cancels (stand-up). An increase
-    /// is the HUD's explicit "stop drawing the countdown" signal; a bare
-    /// `logout_countdown: None` cannot carry it (ambiguous with "not acked yet").
-    #[serde(default)]
-    pub logout_cancel_seq: u64,
-
     #[serde(default)]
     pub death_homepoint_secs: Option<u32>,
 
@@ -1749,7 +1743,6 @@ mod tests {
             status_icon_expiries: Vec::new(),
             ability_recasts: Vec::new(),
             logout_countdown: None,
-            logout_cancel_seq: 0,
             death_homepoint_secs: None,
             weather: None,
             equipped: [None; 16],
@@ -2159,7 +2152,6 @@ mod tests {
             "status_icon_expiries",
             "ability_recasts",
             "logout_countdown",
-            "logout_cancel_seq",
             "death_homepoint_secs",
             "weather",
             "equipped",

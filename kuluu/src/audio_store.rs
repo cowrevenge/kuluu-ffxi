@@ -198,11 +198,13 @@ mod tests {
         );
     }
 
+    /// A `NaN` master means a corrupt/failed write (our own save() can never
+    /// emit one; serde_json rejects non-finite f32 on serialize), so the whole
+    /// document is rejected: load returns Err, callers fall back to defaults.
     #[test]
     fn load_rejects_nan_master() {
         let path = tmp_path();
         std::fs::write(&path, br#"{"master": NaN}"#).unwrap();
-        let s = AudioStore::new(&path).load().unwrap().expect("present");
-        assert_eq!(s.master, 1.0, "NaN falls back to full volume");
+        assert!(AudioStore::new(&path).load().is_err());
     }
 }

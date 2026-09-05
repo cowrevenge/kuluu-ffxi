@@ -15,6 +15,7 @@ use ffxi_dat::zone_interaction::ZoneInteraction;
 use ffxi_dat::{mmb, mzb, sub_area, walk, ChunkKind, DatRoot};
 
 use crate::components::{IsSelf, WorldEntity};
+use crate::entity_table::EntityTable;
 use crate::snapshot::SceneState;
 use kuluu_snapshot::EntityKind;
 
@@ -3164,6 +3165,7 @@ pub fn cull_mzb_by_distance(
 
 pub fn cull_entities_by_distance(
     draw: Res<DrawDistance>,
+    table: Res<EntityTable>,
     self_q: Query<&GlobalTransform, With<IsSelf>>,
     mut ent_q: Query<(&WorldEntity, &GlobalTransform, &mut Visibility), Without<IsSelf>>,
 ) {
@@ -3174,6 +3176,11 @@ pub fn cull_entities_by_distance(
     let cull_sq = draw.mob * draw.mob;
 
     for (ent, ent_t, mut vis) in ent_q.iter_mut() {
+        // Server-invisible models are owned by sync_entities_system; resetting them to
+        // Inherited would re-show the model every frame. Kind-agnostic on purpose.
+        if table.get(ent.id).is_some_and(|r| r.is_invisible()) {
+            continue;
+        }
         if matches!(ent.kind, EntityKind::Pc) {
             if *vis != Visibility::Inherited {
                 *vis = Visibility::Inherited;
@@ -4336,5 +4343,116 @@ impl MzbCollisionGeometry {
             }
         });
         found
+    }
+}
+
+#[cfg(test)]
+mod cull_tests {
+    use super::*;
+    use kuluu_snapshot::{Entity, Vec3 as WireVec3};
+
+    fn wire_entity(id: u32, status: u8) -> Entity {
+        Entity {
+            id,
+            act_index: 0,
+            kind: EntityKind::Mob,
+            name: None,
+            pos: WireVec3 {
+                x: 0.0,
+                y: 0.0,
+                z: 0.0,
+            },
+            heading: 0,
+            hp_pct: Some(100),
+            bt_target_id: 0,
+            face_target: 0,
+            name_vis: None,
+            claim_id: 0,
+            speed: 0,
+            speed_base: 0,
+            look: None,
+            animation: 0,
+            animationsub: 0,
+            mount: None,
+            status,
+            char_flags: Default::default(),
+        }
+    }
+
+    /// A server-invisible entity (status INVISIBLE) is hidden by sync_entities_system;
+    /// distance-culling must not reset its Visibility back to Inherited every frame, or
+    /// the model re-appears. Visible entities keep normal cull behavior.
+    #[test]
+    fn cull_respects_server_invisible_entities() {
+        let mut app = App::new();
+        app.init_resource::<DrawDistance>()
+            .init_resource::<EntityTable>()
+            .add_systems(Update, cull_entities_by_distance);
+
+        // Self at origin; cull needs exactly one IsSelf.
+        app.world_mut().spawn((
+            IsSelf,
+            GlobalTransform::from(Transform::from_xyz(0.0, 0.0, 0.0)),
+        ));
+
+        let invis = app
+            .world_mut()
+            .spawn((
+                WorldEntity {
+                    id: 1,
+                    act_index: 0,
+                    kind: EntityKind::Mob,
+                },
+                GlobalTransform::from(Transform::from_xyz(5.0, 0.0, 0.0)),
+                Visibility::Hidden,
+            ))
+            .id();
+        let vis_in_range = app
+            .world_mut()
+            .spawn((
+                WorldEntity {
+                    id: 2,
+                    act_index: 0,
+                    kind: EntityKind::Mob,
+                },
+                GlobalTransform::from(Transform::from_xyz(5.0, 0.0, 0.0)),
+                Visibility::Hidden,
+            ))
+            .id();
+        let vis_out_of_range = app
+            .world_mut()
+            .spawn((
+                WorldEntity {
+                    id: 3,
+                    act_index: 0,
+                    kind: EntityKind::Mob,
+                },
+                GlobalTransform::from(Transform::from_xyz(100.0, 0.0, 0.0)),
+                Visibility::Inherited,
+            ))
+            .id();
+
+        let mut table = app.world_mut().resource_mut::<EntityTable>();
+        table.upsert(&wire_entity(1, kuluu_snapshot::status_type::INVISIBLE));
+        table.upsert(&wire_entity(2, 0));
+        table.upsert(&wire_entity(3, 0));
+
+        app.update();
+
+        assert_eq!(
+            *app.world().get::<Visibility>(invis).unwrap(),
+            Visibility::Hidden,
+            "server-invisible entity must stay hidden; cull must not reset it to Inherited"
+        );
+        assert_eq!(
+            *app.world().get::<Visibility>(vis_in_range).unwrap(),
+            Visibility::Inherited,
+            "in-range visible entity is un-hidden by distance-culling (control)"
+        );
+        assert_eq!(
+            *app.world().get::<Visibility>(vis_out_of_range).unwrap(),
+            Visibility::Hidden,
+            "out-of-range visible entity is hidden by distance-culling (control)"
+        );
     }
 }

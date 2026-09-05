@@ -153,6 +153,8 @@ pub struct NameplateBillboardDebug {
     pub hidden_status: u32,
     /// View-depth gate: behind the camera forward plane or within
     /// MIN_VIEW_DEPTH_YALMS of it. This is a half-plane test, not frustum.
+    /// Hidden here still runs the raster-key pass (colour/hp/markers stay
+    /// current while unseen); only transform + pulse are skipped.
     pub hidden_depth: u32,
     /// Plates set Visible + transformed this frame.
     pub visible: u32,
@@ -361,51 +363,63 @@ pub fn update_nameplate_billboards_system(
 
         let head_pos = entity_pos + Vec3::Y * head_y_offset;
         let view_depth = (head_pos - cam_pos).dot(cam_forward);
-        let Some(scale) = legibility_scale_for_view_depth(view_depth) else {
-            hidden_depth += 1;
-            *vis = Visibility::Hidden;
-            continue;
-        };
+        // View-depth gate. Behind the camera forward plane (or inside
+        // MIN_VIEW_DEPTH_YALMS) the plate is hidden and its transform/pulse
+        // are skipped -- but ONLY those. The raster-key pass below still runs
+        // for a hidden plate: an actor that zones in behind the camera used
+        // to keep its white spawn bake until the camera turned, because this
+        // gate `continue`d past the colour logic, and the fix-up then hinged
+        // on the first in-view frame racing the texture swap. Rastering is a
+        // fact about the actor, not about where the camera points; keeping it
+        // view-independent means a plate is already correct the frame it
+        // first becomes visible.
+        match legibility_scale_for_view_depth(view_depth) {
+            None => {
+                hidden_depth += 1;
+                *vis = Visibility::Hidden;
+            }
+            Some(scale) => {
+                let aspect_ratio = aspect.width.max(1) as f32 / aspect.height.max(1) as f32;
+                let plate_to_line = aspect.height.max(1) as f32 / line_px;
+                let viewport_height_yalms = 2.0 * view_depth * half_fov_tan;
+                let world_height = viewport_height_yalms
+                    * NAME_LINE_SCREEN_FRACTION
+                    * plate_to_line
+                    * scale
+                    * NAMEPLATE_LEGIBILITY_SCALE;
+                let world_width = world_height * aspect_ratio;
 
-        let aspect_ratio = aspect.width.max(1) as f32 / aspect.height.max(1) as f32;
-        let plate_to_line = aspect.height.max(1) as f32 / line_px;
-        let viewport_height_yalms = 2.0 * view_depth * half_fov_tan;
-        let world_height = viewport_height_yalms
-            * NAME_LINE_SCREEN_FRACTION
-            * plate_to_line
-            * scale
-            * NAMEPLATE_LEGIBILITY_SCALE;
-        let world_width = world_height * aspect_ratio;
+                let rise = quad_center_rise(
+                    world_height / plate_to_line,
+                    line_px,
+                    aspect.height,
+                    aspect.text_center_y_px,
+                );
+                transform.translation = head_pos + Vec3::from(cam_t.up()) * rise;
+                transform.rotation = cam_t.rotation;
+                transform.scale = Vec3::new(world_width, world_height, 1.0);
+                *vis = Visibility::Visible;
+                visible_n += 1;
 
-        let rise = quad_center_rise(
-            world_height / plate_to_line,
-            line_px,
-            aspect.height,
-            aspect.text_center_y_px,
-        );
-        transform.translation = head_pos + Vec3::from(cam_t.up()) * rise;
-        transform.rotation = cam_t.rotation;
-        transform.scale = Vec3::new(world_width, world_height, 1.0);
-        *vis = Visibility::Visible;
-        visible_n += 1;
-
-        // Pulse is time-driven (steps at RETAIL_FPS via pulse_frame, so the
-        // last_alpha guard bounds writes to 30/s) and runs every frame;
-        // the live-key re-raster below does too — neither waits on a
-        // snapshot.
-        let want_alpha = if target.id == Some(np.entity_id) {
-            target_alpha_pulse(pulse_frame)
-        } else {
-            1.0
-        };
-        if want_alpha != np.last_alpha {
-            if let Some(mut mat_data) = materials.get_mut(&mat.0) {
-                // Premultiplied fade: the whole texel (color and coverage)
-                // scales together, or the pulse would turn additive.
-                mat_data.base_color = Color::LinearRgba(LinearRgba::new(
-                    want_alpha, want_alpha, want_alpha, want_alpha,
-                ));
-                np.last_alpha = want_alpha;
+                // Pulse is time-driven (steps at RETAIL_FPS via pulse_frame, so the
+                // last_alpha guard bounds writes to 30/s) and runs every frame;
+                // the live-key re-raster below does too -- neither waits on a
+                // snapshot.
+                let want_alpha = if target.id == Some(np.entity_id) {
+                    target_alpha_pulse(pulse_frame)
+                } else {
+                    1.0
+                };
+                if want_alpha != np.last_alpha {
+                    if let Some(mut mat_data) = materials.get_mut(&mat.0) {
+                        // Premultiplied fade: the whole texel (color and coverage)
+                        // scales together, or the pulse would turn additive.
+                        mat_data.base_color = Color::LinearRgba(LinearRgba::new(
+                            want_alpha, want_alpha, want_alpha, want_alpha,
+                        ));
+                        np.last_alpha = want_alpha;
+                    }
+                }
             }
         }
 

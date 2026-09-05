@@ -1613,6 +1613,11 @@ impl SessionState {
                 self.logout_countdown = Some(next);
                 changed
             }
+            AgentEvent::LogoutCountdownCancelled => {
+                let changed = self.logout_countdown.is_some();
+                self.logout_countdown = None;
+                changed
+            }
             AgentEvent::Diagnostics { diagnostics } => {
                 let changed = self.diagnostics != *diagnostics;
                 self.diagnostics = diagnostics.clone();
@@ -2499,6 +2504,11 @@ pub enum AgentEvent {
 
         shutdown: bool,
     },
+    /// Stand-up cancels leavegame server-side (`MakeEntityStandUp` drops the
+    /// HEALING effect, `healing.onEffectLose` removes LEAVEGAME) without any
+    /// 0x053 cancel packet — the client sees it as its own CHAR_PC status
+    /// flipping off HEALING and clears the countdown here.
+    LogoutCountdownCancelled,
     EventEnded,
 
     ActionStarted {

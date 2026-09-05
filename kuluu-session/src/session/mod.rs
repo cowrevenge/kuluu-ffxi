@@ -4348,6 +4348,14 @@ async fn keepalive_loop(
                                                 animation = head.server_status,
                                                 "heal state synced from CHAR_PC"
                                             );
+                                            // Stand-up drops the LEAVEGAME effect
+                                            // server-side with no 0x053 cancel packet, so a
+                                            // heal→walk transition is the client-visible
+                                            // "logout/shutdown cancelled" signal.
+                                            if !server_healing {
+                                                let _ =
+                                                    event_tx.send(AgentEvent::LogoutCountdownCancelled);
+                                            }
                                             is_healing = server_healing;
                                         }
                                     }

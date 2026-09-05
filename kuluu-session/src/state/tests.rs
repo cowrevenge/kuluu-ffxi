@@ -32,6 +32,22 @@ fn zone_in_weather_survives_the_zone_change_clear() {
     assert_eq!(s.current_weather, Some(4));
 }
 
+// Stand-up cancels leavegame server-side with no 0x053 cancel packet; the
+// heal→walk transition folds in as LogoutCountdownCancelled and must drop a
+// live countdown. A cancel with nothing active is a no-op fold (no churn).
+#[test]
+fn logout_countdown_cancelled_clears_the_live_countdown() {
+    let mut s = SessionState::default();
+    assert!(!s.apply_event(&AgentEvent::LogoutCountdownCancelled));
+    s.apply_event(&AgentEvent::LogoutCountdown {
+        seconds_remaining: 25,
+        shutdown: true,
+    });
+    assert_eq!(s.logout_countdown.map(|c| c.seconds_remaining), Some(25));
+    assert!(s.apply_event(&AgentEvent::LogoutCountdownCancelled));
+    assert_eq!(s.logout_countdown, None);
+}
+
 #[test]
 fn widescan_list_builds_between_start_and_end_and_clears_on_zone_change() {
     let mut s = SessionState::default();
@@ -2028,6 +2044,7 @@ fn _agentevent_is_additive_only(x: &AgentEvent) {
         AgentEvent::WeatherUpdated { .. } => (),
         AgentEvent::VanaTimeSynced { .. } => (),
         AgentEvent::LogoutCountdown { .. } => (),
+        AgentEvent::LogoutCountdownCancelled { .. } => (),
         AgentEvent::EventEnded { .. } => (),
         AgentEvent::ActionStarted { .. } => (),
         AgentEvent::SelfCastStarted { .. } => (),

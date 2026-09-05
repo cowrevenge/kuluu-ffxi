@@ -202,6 +202,9 @@ fn parse_graphics_settings(bytes: &[u8]) -> Result<GraphicsSettings> {
     if let Some(x) = take(&v, "job_display") {
         s.job_display = x;
     }
+    if let Some(x) = take(&v, "mob_hp_under") {
+        s.mob_hp_under = x;
+    }
 
     Ok(s)
 }

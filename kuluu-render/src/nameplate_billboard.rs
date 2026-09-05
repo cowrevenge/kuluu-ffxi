@@ -250,6 +250,7 @@ pub const NAMEPLATE_FALLBACK_COLOR: Color = Color::WHITE;
 
 pub fn update_nameplate_billboards_system(
     state: Res<SceneState>,
+    settings: Res<crate::graphics::settings::GraphicsSettings>,
     camera_mode: Res<CameraMode>,
     time: Res<Time>,
     target: Res<Target>,
@@ -278,7 +279,6 @@ pub fn update_nameplate_billboards_system(
     icons: Res<crate::nameplate_icons::NameplateIcons>,
     mut commands: Commands,
     mut dbg_out: ResMut<NameplateBillboardDebug>,
-    mut hp_by_id: Local<std::collections::HashMap<u32, Option<u8>>>,
     mut raster_inputs: Local<std::collections::HashMap<u32, RasterKey>>,
 ) {
     let Ok((cam_t, projection)) = cam_q.single() else {
@@ -306,17 +306,22 @@ pub fn update_nameplate_billboards_system(
     // The retail colour table and icon glyphs are read from the DAT a few
     // frames into the session, after the first plates have already rastered
     // against the fallback; their arrival has to re-raster them.
-    let dirty = state.dirty || name_colors.is_changed() || icons.is_changed();
+    // A Retail+ gate flip (mob HP under) must re-raster on the spot, not wait
+    // for the next snapshot: settings changes are user actions, and the key
+    // comparison below keeps unaffected plates from re-running.
+    let dirty =
+        state.dirty || name_colors.is_changed() || icons.is_changed() || settings.is_changed();
     if dirty {
-        hp_by_id.clear();
         raster_inputs.clear();
         let ctx = crate::nameplate_color::SelfContext {
             self_id: self_char_id,
             party: &state.snapshot.party,
         };
         for ent in &state.snapshot.entities {
-            hp_by_id.insert(ent.id, ent.hp_pct);
-            raster_inputs.insert(ent.id, raster_key_for(ent, ctx, &name_colors));
+            raster_inputs.insert(
+                ent.id,
+                raster_key_for(ent, ctx, &name_colors, settings.mob_hp_under),
+            );
         }
     }
 
@@ -444,18 +449,24 @@ pub fn update_nameplate_billboards_system(
 }
 
 /// The full raster input for one entity: retail's name colour, its icon
-/// markers, and the pearl tint those icons draw with.
+/// markers, the pearl tint those icons draw with, and — when the Retail+ gate
+/// is on — the mob/pet HP bar.
 fn raster_key_for(
     ent: &kuluu_snapshot::Entity,
     ctx: crate::nameplate_color::SelfContext<'_>,
     name_colors: &crate::nameplate_color::NameColorTable,
+    show_mob_hp: bool,
 ) -> RasterKey {
     let color = crate::nameplate_color::name_color_choice(ent, ctx)
         .resolve(name_colors)
         .unwrap_or(NAMEPLATE_FALLBACK_COLOR);
-    let hp = matches!(ent.kind, EntityKind::Mob | EntityKind::Pet)
-        .then_some(ent.hp_pct)
-        .flatten();
+    let hp = if show_mob_hp {
+        matches!(ent.kind, EntityKind::Mob | EntityKind::Pet)
+            .then_some(ent.hp_pct)
+            .flatten()
+    } else {
+        None
+    };
     RasterKey {
         text: String::new(),
         color: color_to_rgba8(color),

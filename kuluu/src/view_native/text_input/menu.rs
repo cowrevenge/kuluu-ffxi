@@ -342,9 +342,8 @@ fn activate_current_time(
 
 /// Retail+ section rows (dev-only Debug menu). Returns true when the label is
 /// one of them and it was handled here — the caller must not fall through to
-/// `toggle_debug_panel`. The two live toggles flip GraphicsSettings fields, so
-/// `persist_graphics_on_change` writes graphics.json automatically; Mob HP
-/// Under is an N/A placeholder with no state yet.
+/// `toggle_debug_panel`. The live toggles flip GraphicsSettings fields, so
+/// `persist_graphics_on_change` writes graphics.json automatically.
 fn handle_retail_plus_row(
     label: &str,
     graphics: &mut kuluu_render::GraphicsSettings,
@@ -384,10 +383,13 @@ fn handle_retail_plus_row(
             true
         }
         RETAIL_MOB_HP_UNDER => {
-            // Placeholder: no state yet. A banner so the click doesn't read as dead.
+            graphics.mob_hp_under = !graphics.mob_hp_under;
             push_system_chat_line(
                 scene_state,
-                "[menu] Mob HP Under: N/A (not implemented yet)".into(),
+                format!(
+                    "[menu] {label}: {}",
+                    if graphics.mob_hp_under { "on" } else { "off" }
+                ),
             );
             true
         }

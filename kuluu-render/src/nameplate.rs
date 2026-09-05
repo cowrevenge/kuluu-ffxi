@@ -162,7 +162,13 @@ pub fn update_nameplates_system(
                     node.top = want_top;
                 }
 
-                let hp_pct = hp_by_id.get(&np.entity_id).copied().flatten();
+                // Retail+ gate: the "{name} {pct}%" suffix shares the
+                // billboard bar's toggle (off by default).
+                let hp_pct = if settings.mob_hp_under {
+                    hp_by_id.get(&np.entity_id).copied().flatten()
+                } else {
+                    None
+                };
                 let coord_str = format_coord(world_pos);
                 for child in children.iter() {
                     if let Ok((label, mut text)) = label_q.get_mut(child) {

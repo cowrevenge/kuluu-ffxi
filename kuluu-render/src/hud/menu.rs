@@ -41,10 +41,13 @@ const ROOT_ENTRIES: &[&str] = &[
     ROOT_CURRENT_TIME,
     ROOT_COMMUNICATION,
     "Graphics",
-    // DEV-ONLY: the Debug menu (incl. its Retail+ section) renders in dev/test
-    // builds that pass `--features debug-menu`, and is compiled out of shipped
-    // release builds — retail parity holds by construction.
-    #[cfg(feature = "debug-menu")]
+    // DEV-ONLY: the Debug menu (incl. its Retail+ section) renders only in a
+    // debug build that also passes `--features debug-menu`. The extra
+    // `debug_assertions` term is load-bearing: it is always false in a
+    // `--release` build, so release can never show this entry even if someone
+    // builds with `--features debug-menu` — retail parity holds by construction,
+    // not just by remembering to drop the flag.
+    #[cfg(all(debug_assertions, feature = "debug-menu"))]
     "Debug",
     ROOT_SHUT_DOWN,
     ROOT_LOG_OUT,
@@ -276,14 +279,15 @@ pub const DEBUG_NAMEPLATES: &str = "Nameplate Debug";
 pub const DEBUG_UI_SETTINGS: &str = "UI Settings";
 
 // Retail+ section (dev-only Debug menu): a separator row, the section label,
-// then three toggles. The two live toggles persist in GraphicsSettings (so
-// they survive restarts); Mob HP Under is an N/A placeholder for now.
+// then three toggles. All three persist in GraphicsSettings, so each choice
+// survives restarts.
 pub const DEBUG_RETAIL_SEPARATOR: &str = "────────────────────────────";
 pub const DEBUG_RETAIL_LABEL: &str = "Retail+";
 /// Makes DLSS selectable in the Graphics menu. Does NOT turn DLSS on — with
 /// it off (the default) every DLSS row reads N/A even on capable machines.
 pub const RETAIL_DLSS_MENU: &str = "DLSS On/Off";
-/// Placeholder row: no state yet, always [N/A].
+/// Gates the mob/pet HP readout on nameplates (billboard bar + pct suffix;
+/// default off).
 pub const RETAIL_MOB_HP_UNDER: &str = "Mob HP Under";
 /// Gates the party-frame Job column (retail shows none; default off).
 pub const RETAIL_JOB_DISPLAY: &str = "Job Display";
@@ -1425,8 +1429,10 @@ fn format_row_body(
                     }
                 )
             } else if label == RETAIL_MOB_HP_UNDER {
-                // Placeholder: no state yet, always N/A.
-                format!("{label:<14}[N/A]")
+                format!(
+                    "{label:<14}[{}]",
+                    if settings.mob_hp_under { "on" } else { "off" }
+                )
             } else if label == RETAIL_JOB_DISPLAY {
                 format!(
                     "{label:<14}[{}]",

@@ -457,6 +457,14 @@ pub struct GraphicsSettings {
     #[serde(default)]
     pub job_display: bool,
 
+    /// Retail+ gate for the mob/pet HP readout on nameplates — both the green
+    /// bar under the billboard plate and the "{name} {pct}%" suffix in the UI
+    /// plates. OFF by default: retail shows no mob HP, so ours stays hidden
+    /// unless explicitly enabled in the dev-only Debug menu. Persisted here so
+    /// the choice sticks across runs.
+    #[serde(default)]
+    pub mob_hp_under: bool,
+
     #[serde(default)]
     pub texture_filtering: TextureFiltering,
 
@@ -723,6 +731,7 @@ impl GraphicsSettings {
                 dlss_supported: false,
                 dlss_menu_enabled: false,
                 job_display: false,
+                mob_hp_under: false,
                 texture_filtering: TextureFiltering::Vanilla,
                 bloom_intensity: 0.0,
                 volumetric_fog: false,
@@ -765,6 +774,7 @@ impl GraphicsSettings {
                 dlss_supported: false,
                 dlss_menu_enabled: false,
                 job_display: false,
+                mob_hp_under: false,
                 texture_filtering: TextureFiltering::Vanilla,
                 bloom_intensity: 0.08,
                 volumetric_fog: false,
@@ -807,6 +817,7 @@ impl GraphicsSettings {
                 dlss_supported: false,
                 dlss_menu_enabled: false,
                 job_display: false,
+                mob_hp_under: false,
                 texture_filtering: TextureFiltering::Aniso4x,
                 bloom_intensity: 0.08,
                 volumetric_fog: false,
@@ -853,6 +864,7 @@ impl GraphicsSettings {
                 dlss_supported: false,
                 dlss_menu_enabled: false,
                 job_display: false,
+                mob_hp_under: false,
                 texture_filtering: TextureFiltering::Aniso8x,
                 bloom_intensity: 0.12,
                 volumetric_fog: false,
@@ -1053,7 +1065,8 @@ impl GraphicsSettings {
                 let dlss_quality = self.dlss_quality;
                 let dlss_supported = self.dlss_supported;
                 // Retail+ gates are user choices, not preset-owned.
-                let (dlss_menu_enabled, job_display) = (self.dlss_menu_enabled, self.job_display);
+                let (dlss_menu_enabled, job_display, mob_hp_under) =
+                    (self.dlss_menu_enabled, self.job_display, self.mob_hp_under);
                 // NR is DLSS-family: presets never own it either.
                 let nr = (
                     self.neural_uplift,
@@ -1078,6 +1091,7 @@ impl GraphicsSettings {
                 self.dlss_supported = dlss_supported;
                 self.dlss_menu_enabled = dlss_menu_enabled;
                 self.job_display = job_display;
+                self.mob_hp_under = mob_hp_under;
                 (
                     self.neural_uplift,
                     self.nr_intensity,
@@ -1302,14 +1316,16 @@ impl GraphicsSettings {
         // Capability is runtime-detected, not a preference: a menu reset must
         // not un-detect DLSS support (the availability system only writes it
         // once at startup). The Retail+ gates are user choices too — a reset
-        // returns quality knobs to High but keeps the menu/Job decisions.
+        // returns quality knobs to High but keeps the menu/Job/Mob-HP decisions.
         let dlss_supported = self.dlss_supported;
         let dlss_menu_enabled = self.dlss_menu_enabled;
         let job_display = self.job_display;
+        let mob_hp_under = self.mob_hp_under;
         *self = Self::for_preset(QualityPreset::High);
         self.dlss_supported = dlss_supported;
         self.dlss_menu_enabled = dlss_menu_enabled;
         self.job_display = job_display;
+        self.mob_hp_under = mob_hp_under;
     }
 
     /// Reset only the DLSS Config surface: quality back to Auto, NR toggle off
@@ -2562,16 +2578,17 @@ mod tests {
         let mut s = GraphicsSettings {
             dlss_menu_enabled: true,
             job_display: true,
+            mob_hp_under: true,
             ..Default::default()
         };
         s.cycle(GraphicsField::Preset, 1);
         assert!(
-            s.dlss_menu_enabled && s.job_display,
+            s.dlss_menu_enabled && s.job_display && s.mob_hp_under,
             "preset cycle kept the gates"
         );
         s.reset_to_default();
         assert!(
-            s.dlss_menu_enabled && s.job_display,
+            s.dlss_menu_enabled && s.job_display && s.mob_hp_under,
             "menu reset kept the gates"
         );
     }

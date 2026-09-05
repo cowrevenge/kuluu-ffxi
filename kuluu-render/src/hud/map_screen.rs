@@ -4,6 +4,7 @@ use bevy::prelude::*;
 use kuluu_snapshot::SceneSnapshot;
 
 use crate::components::{InGameEntity, IsSelf, WorldEntity};
+use crate::entity_table::EntityTable;
 use crate::hud::style::{self, theme};
 use crate::hud::zone_flash::ZoneNameResolver;
 use crate::input_mode::{InputMode, MenuKind};
@@ -937,6 +938,7 @@ pub(crate) struct MarkerInputs<'w> {
 pub(crate) fn update_map_screen_markers(
     mode: Res<InputMode>,
     scene_state: Res<SceneState>,
+    table: Res<EntityTable>,
     map_view: Res<MapView>,
     markers: MarkerInputs,
     mut dots: ResMut<MapScreenDots>,
@@ -1039,6 +1041,7 @@ pub(crate) fn update_map_screen_markers(
     };
     let ctx = MarkerContext::new(
         &scene_state,
+        &table,
         &markers.target,
         &markers.lock_on,
         &markers.filters,

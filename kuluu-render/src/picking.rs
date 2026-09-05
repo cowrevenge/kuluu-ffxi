@@ -366,6 +366,7 @@ pub fn click_to_target_system(
     q_nameplate: Query<&Nameplate>,
     pointer: Res<crate::mouse::MousePointer>,
     scene: Res<crate::snapshot::SceneState>,
+    table: Res<crate::entity_table::EntityTable>,
     enabled: Res<WorldPickingEnabled>,
     lock_on: Res<crate::lock_on::LockOn>,
     fishing_spot: Res<crate::fishing_spot::FishingSpot>,
@@ -437,11 +438,13 @@ pub fn click_to_target_system(
                 scene.snapshot.current_goal,
                 Some(kuluu_snapshot::ReactorGoal::Engaged { .. })
             );
+            // Piece 3: self identity for the context comes from the table's
+            // self slot, not a snapshot field read.
             let ctx = action_model::context_for_target(
                 target.id,
                 &scene.snapshot.entities,
                 scene.snapshot.self_pos.pos,
-                scene.snapshot.self_char_id,
+                table.self_id(),
                 engaged,
                 crate::hud::menu::any_usable_item(&scene.snapshot),
                 fishing_spot.0.is_ready(),
@@ -471,6 +474,11 @@ mod tests {
         let mut scene = crate::snapshot::SceneState::default();
         scene.snapshot.self_char_id = Some(7);
         world.insert_resource(scene);
+        // Piece 3: click_to_target_system reads self from the table; stamp it
+        // to match the snapshot field above.
+        let mut table = crate::entity_table::EntityTable::default();
+        table.set_self_id(Some(7));
+        world.insert_resource(table);
         world.insert_resource(WorldPickingEnabled(true));
         world.insert_resource(crate::lock_on::LockOn::default());
         world.insert_resource(crate::fishing_spot::FishingSpot::default());

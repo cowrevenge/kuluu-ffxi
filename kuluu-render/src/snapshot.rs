@@ -147,6 +147,11 @@ pub fn ingest_system<
         state.dirty = true;
         // Piece 2: mirror the authoritative frame into the entity table.
         table.apply_snapshot(&state.snapshot);
+        // Piece 3: keep the self slot in sync with the authoritative frame —
+        // char_id only changes on connect/zone entry, and full snapshots carry
+        // it. `0` is not a valid character id; filtering it keeps is_self()
+        // equivalent to the old `self_char_id != 0 && ...` comparisons.
+        table.set_self_id(state.snapshot.self_char_id.filter(|&c| c != 0));
     }
 
     for delta in source.drain_deltas() {

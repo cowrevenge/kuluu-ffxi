@@ -9,6 +9,7 @@ use kuluu_snapshot::{EntityKind, EntityLook, Vec3 as WireVec3};
 use crate::components::{
     CurrRenderPos, IsSelf, LookComp, MorphIn, Nameplate, PrevRenderPos, WorldEntity,
 };
+use crate::entity_table::EntityTable;
 use crate::graphics_settings::GraphicsSettings;
 use crate::snapshot::SceneState;
 
@@ -229,6 +230,10 @@ pub struct EntitySyncQueries<'w, 's> {
         (With<WorldEntity>, Without<MorphIn>),
     >,
     vis: Query<'w, 's, &'static mut Visibility, With<WorldEntity>>,
+    // Nameplate billboards carry no WorldEntity, so this never overlaps the
+    // mutable queries above; bundling it keeps sync_entities_system under the
+    // 16-param ceiling now that the entity table takes a slot.
+    nameplates: Query<'w, 's, &'static Nameplate>,
 }
 
 /// The two signals that say "this zone's floor has landed" — the same pair the
@@ -241,6 +246,7 @@ pub struct ZoneFloorGate<'w> {
 
 pub fn sync_entities_system(
     state: Res<SceneState>,
+    table: Res<EntityTable>,
     mesh: Res<EntityMesh>,
     mats: Res<EntityMaterials>,
     mut materials: ResMut<Assets<StandardMaterial>>,
@@ -253,7 +259,6 @@ pub fn sync_entities_system(
     mut blends: ResMut<crate::combat_stance::AnimationBlends>,
     mut commands: Commands,
     mut queries: EntitySyncQueries,
-    q_nameplates: Query<&Nameplate>,
     floor_gate: ZoneFloorGate,
     mut prev_zone: Local<Option<Option<u32>>>,
 ) {
@@ -282,18 +287,20 @@ pub fn sync_entities_system(
     *prev_zone = Some(zone_key);
 
     let mut nameplated: std::collections::HashSet<u32> =
-        q_nameplates.iter().map(|n| n.entity_id).collect();
+        queries.nameplates.iter().map(|n| n.entity_id).collect();
 
     let mut seen: std::collections::HashSet<u32> =
         std::collections::HashSet::with_capacity(snap.entities.len() + 1);
     let mut hp_by_id: HashMap<u32, Option<u8>> = HashMap::new();
 
-    let self_char_id = snap.self_char_id.unwrap_or(0);
+    // Piece 3: identity comes from the table's self slot (stamped by ingest
+    // from the same snapshot field), not a per-entity comparison.
+    let self_char_id = table.self_id().unwrap_or(0);
     for wire in &snap.entities {
         seen.insert(wire.id);
         hp_by_id.insert(wire.id, wire.hp_pct);
         let world_pos = ffxi_to_bevy(wire.pos);
-        let is_self = self_char_id != 0 && wire.id == self_char_id;
+        let is_self = table.is_self(wire.id);
 
         if !is_self
             && matches!(
@@ -538,6 +545,7 @@ pub fn pin_mount_actors_system(
 pub fn sync_aggro_system(
     mut commands: Commands,
     state: Res<SceneState>,
+    table: Res<EntityTable>,
     mats: Res<EntityMaterials>,
 
     self_q: Query<&Transform, With<IsSelf>>,
@@ -557,7 +565,8 @@ pub fn sync_aggro_system(
     let self_id = snap.diagnostics.sync_in;
     let Some(self_uid) = self_id else { return };
 
-    let self_char_id = snap.self_char_id.unwrap_or(0);
+    // Piece 3: claim comparison reads the table's self slot.
+    let self_char_id = table.self_id().unwrap_or(0);
 
     // Aggro state derives from the snapshot, so the map rebuild + material
     // reconciliation only run on snapshot frames; the gizmo line still draws

@@ -5,6 +5,7 @@ use bevy::ui::UiTransform;
 use kuluu_snapshot::EntityKind;
 
 use crate::components::{InGameEntity, IsSelf, WorldEntity};
+use crate::entity_table::EntityTable;
 use crate::lock_on::LockOn;
 use crate::nameplate_color::{name_color_choice, NameColorTable, SelfContext};
 use crate::scene::Target;
@@ -265,6 +266,7 @@ pub struct MarkerContext<'a> {
 impl<'a> MarkerContext<'a> {
     pub fn new(
         scene_state: &'a SceneState,
+        table: &'a EntityTable,
         target: &'a Target,
         lock_on: &'a LockOn,
         filters: &'a MarkerFilters,
@@ -272,7 +274,9 @@ impl<'a> MarkerContext<'a> {
     ) -> Self {
         let snapshot = &scene_state.snapshot;
         Self {
-            self_char_id: snapshot.self_char_id.unwrap_or(0),
+            // Piece 3: self identity from the table's self slot (stamped by
+            // ingest from the same snapshot field).
+            self_char_id: table.self_id().unwrap_or(0),
             target,
             lock_on,
             filters,
@@ -329,6 +333,7 @@ pub fn widescan_color(kind: u8) -> Color {
 pub fn update_minimap_overlay(
     view: Res<MinimapView>,
     scene_state: Res<SceneState>,
+    table: Res<EntityTable>,
     target: Res<Target>,
     lock_on: Res<LockOn>,
     filters: Res<MarkerFilters>,
@@ -346,7 +351,14 @@ pub fn update_minimap_overlay(
     let Ok(overlay_layer) = q_overlay_layer.single() else {
         return;
     };
-    let ctx = MarkerContext::new(&scene_state, &target, &lock_on, &filters, &name_colors);
+    let ctx = MarkerContext::new(
+        &scene_state,
+        &table,
+        &target,
+        &lock_on,
+        &filters,
+        &name_colors,
+    );
     sync_marker_layer(
         aabb,
         overlay_layer,
@@ -726,6 +738,7 @@ mod tests {
 
         fn run_layer(
             scene_state: Res<SceneState>,
+            table: Res<EntityTable>,
             filters: Res<MarkerFilters>,
             name_colors: Res<NameColorTable>,
             q_layer: Query<Entity, With<TestLayer>>,
@@ -741,7 +754,14 @@ mod tests {
                 max: Vec2::splat(100.0),
             };
             let (target, lock_on) = (Target::default(), LockOn::default());
-            let ctx = MarkerContext::new(&scene_state, &target, &lock_on, &filters, &name_colors);
+            let ctx = MarkerContext::new(
+                &scene_state,
+                &table,
+                &target,
+                &lock_on,
+                &filters,
+                &name_colors,
+            );
             sync_marker_layer(
                 aabb,
                 layer,
@@ -756,6 +776,7 @@ mod tests {
 
         let mut world = World::new();
         world.init_resource::<SceneState>();
+        world.init_resource::<EntityTable>();
         world.insert_resource(MarkerFilters::default());
         world.init_resource::<NameColorTable>();
         world.init_resource::<TestStore>();

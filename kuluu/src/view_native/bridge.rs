@@ -8,8 +8,8 @@ use tokio::runtime::Handle as RtHandle;
 use tokio::sync::{broadcast, watch};
 use tokio::task::JoinHandle;
 
-use crate::state::{AgentEvent, SessionState};
-use crate::wire_translate::{event_to_viewer_event, state_to_snapshot};
+use kuluu_session::state::{AgentEvent, SessionState};
+use kuluu_session::wire_translate::{event_to_viewer_event, state_to_snapshot};
 
 // The session watch signals per folded packet event — far above frame rate in a
 // crowd — so the off-main-thread translator caps itself near the 120 Hz display
@@ -146,7 +146,7 @@ impl SceneSource for NativeSource {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::{
+    use kuluu_session::state::{
         ChatChannel, ChatLine, ContainerInfo, Entity, EntityKind, EquippedRef, ItemSlot,
         PartyMember, ReactorGoalSnapshot, ReconnectInfo, Stage, Vec3,
     };

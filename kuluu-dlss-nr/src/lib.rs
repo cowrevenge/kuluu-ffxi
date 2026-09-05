@@ -403,7 +403,8 @@ const NGX_VERSION_API: c_int = 0x0000_0015;
 // The "nvngx.dll" calling-module forwarder (build 9 — ffxi_dlss5.md §2.10–§3.5)
 // ---------------------------------------------------------------------------
 
-/// Staged next to kuluu.exe by build-dlss.bat (renamed from kuluu_ngx_fwd.dll).
+/// Staged next to kuluu.exe as nvngx.dll_kuluu.dll (renamed from kuluu_ngx_fwd.dll;
+/// see "Running / distributing" in docs/DLSS.md for the copy step).
 /// The NR runtime gates its Init_Ext/CreateFeature/ReleaseFeature entry points on
 /// the calling module's file name containing "nvngx.dll" (case-insensitive substring);
 /// this name passes without shadowing the driver's real nvngx.dll that nvsdk_ngx_s.lib
@@ -888,7 +889,6 @@ impl NrRuntime {
 /// device loss. Mirrors dlss_wgpu's Drop ordering (wait idle -> ReleaseFeature).
 /// Returns the raw vk::Result code on failure; callers log it and proceed with
 /// the best-effort release anyway.
-#[must_use]
 pub fn wait_device_idle(device: &wgpu::Device) -> Result<(), i32> {
     use wgpu::hal::api::Vulkan;
 

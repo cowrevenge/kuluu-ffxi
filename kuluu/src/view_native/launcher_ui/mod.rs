@@ -18,9 +18,9 @@ mod updater;
 
 use std::sync::{Arc, Mutex};
 
+use crate::launcher_store::{AuthFlavorKind, ServerProfile};
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
-use kuluu::launcher_store::{AuthFlavorKind, ServerProfile};
 use kuluu_session::auth_client::{AuthClient, AuthFlavor};
 use kuluu_session::lobby_client::LobbyClient;
 use tokio::runtime::Handle as RtHandle;
@@ -307,7 +307,7 @@ pub(crate) struct ServerEditForm {
     pub auth_port: String,
     pub data_port: String,
     pub view_port: String,
-    pub flavor: kuluu::launcher_store::AuthFlavorKind,
+    pub flavor: crate::launcher_store::AuthFlavorKind,
 
     pub xiloader_version: String,
     pub version_check_url: String,
@@ -324,7 +324,7 @@ impl Default for ServerEditForm {
             auth_port: String::from("54231"),
             data_port: String::from("54230"),
             view_port: String::from("54001"),
-            flavor: kuluu::launcher_store::AuthFlavorKind::Json,
+            flavor: crate::launcher_store::AuthFlavorKind::Json,
             xiloader_version: String::new(),
             version_check_url: String::new(),
             focus: ServerEditField::default(),
@@ -334,7 +334,7 @@ impl Default for ServerEditForm {
 }
 
 impl ServerEditForm {
-    pub fn from_profile(p: &kuluu::launcher_store::ServerProfile) -> Self {
+    pub fn from_profile(p: &crate::launcher_store::ServerProfile) -> Self {
         Self {
             name: p.name.clone(),
             host: p.host.clone(),
@@ -1069,7 +1069,7 @@ fn decide_initial_screen(
     if overrides.is_some() {
         return;
     }
-    let store = kuluu::launcher_store::load();
+    let store = crate::launcher_store::load();
     if let Some(prefill) = store.login_prefill() {
         form.user = prefill.account.username.clone();
         form.remember_password = prefill.account.remember_password;

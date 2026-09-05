@@ -1174,7 +1174,7 @@ fn handle_sub_packet(
                         // UPDATE_HP-gated like its neighbours: entity_update.cpp:357/:408
                         // write byte 0x2B only inside `if (updatemask & UPDATE_HP)`, and the
                         // packet buffer is zero-filled, so a POS-only update carries no namevis.
-                        name_vis: (send_flag & UPDATE_HP != 0).then(|| (head.flags3 >> 24) as u8),
+                        name_vis: (send_flag & UPDATE_HP != 0).then_some((head.flags3 >> 24) as u8),
                         claim_id,
                         speed: head.speed,
                         speed_base: head.speed_base,

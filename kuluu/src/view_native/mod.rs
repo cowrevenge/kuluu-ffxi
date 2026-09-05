@@ -1,4 +1,3 @@
-pub mod avian_bridge;
 pub mod bridge;
 pub mod camera_collision;
 pub mod collision_bvh;
@@ -26,6 +25,7 @@ pub mod sub_area_report;
 pub mod sun_occlusion;
 pub mod target_list_hud;
 pub mod text_input;
+pub mod walker;
 #[allow(deprecated)]
 pub mod widgets;
 pub mod zone_transition;
@@ -188,7 +188,7 @@ pub enum AppPhase {
 }
 
 #[derive(Resource, Clone)]
-pub(crate) struct SessionPorts {
+pub struct SessionPorts {
     pub auth_port: u16,
     pub data_port: u16,
     pub view_port: u16,
@@ -382,12 +382,7 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
             plugin_group.disable::<bevy::render::pipelined_rendering::PipelinedRenderingPlugin>();
     }
     app.add_plugins(plugin_group);
-    app.add_plugins(avian_bridge::AvianBridgePlugin);
-    // Collider syncs run in FixedUpdate before dispatch_movement_system so
-    // mob/door colliders are present + positioned before the walker sweeps
-    // (avian's own pipeline update is in FixedPostUpdate; this ordering keeps
-    // just-spawned colliders from being walk-through-able their first tick).
-    avian_bridge::add_collider_sync_systems(&mut app);
+    app.add_plugins(walker::WalkerPlugin);
 
     // Persisted audio settings: /debug Sound off (or /sound off) writes to
     // audio.json alongside graphics.json; restarts read it back here. CLI
@@ -525,8 +520,8 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
         .insert_resource(ports)
         .insert_resource(RelayListen(relay_listen));
     insert_dat_roots(&mut app, dat_root);
-    if let Some(store) = kuluu::overlay_store::default_store() {
-        app.insert_resource(kuluu::overlay_store::OverlayStoreRes { store });
+    if let Some(store) = crate::overlay_store::default_store() {
+        app.insert_resource(crate::overlay_store::OverlayStoreRes { store });
     }
     #[cfg(unix)]
     app.insert_resource(AgentListen(agent_listen));
@@ -733,17 +728,6 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
             .before(kuluu_render::firstperson_camera_system)
             .run_if(in_state(AppPhase::InGame))
             .run_if(kuluu_render::cutscene::player_camera_allowed),
-    );
-    app.init_resource::<input::FootprintDebug>();
-    app.init_resource::<input::LastStairDetection>();
-    app.init_resource::<input::StairDebugZoneCache>();
-    app.add_systems(
-        Update,
-        (
-            input::draw_footprint_debug_system,
-            input::update_stair_debug_snapshot_system,
-        )
-            .run_if(in_state(AppPhase::InGame)),
     );
     app.add_systems(
         FixedUpdate,
@@ -1289,5 +1273,5 @@ fn bridge_connecting(
 
 #[derive(Resource)]
 pub(crate) struct SessionEventTx(
-    #[allow(dead_code)] pub tokio::sync::broadcast::Sender<crate::state::AgentEvent>,
+    #[allow(dead_code)] pub tokio::sync::broadcast::Sender<kuluu_session::state::AgentEvent>,
 );

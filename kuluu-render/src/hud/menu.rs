@@ -41,9 +41,9 @@ const ROOT_ENTRIES: &[&str] = &[
     ROOT_CURRENT_TIME,
     ROOT_COMMUNICATION,
     "Graphics",
-    // DEV-ONLY: the Debug menu (incl. its Retail+ section) renders in
-    // testing builds (`debug-menu` feature, build-dlss.bat) but is compiled
-    // out of shipped release builds — retail parity holds by construction.
+    // DEV-ONLY: the Debug menu (incl. its Retail+ section) renders in dev/test
+    // builds that pass `--features debug-menu`, and is compiled out of shipped
+    // release builds — retail parity holds by construction.
     #[cfg(feature = "debug-menu")]
     "Debug",
     ROOT_SHUT_DOWN,

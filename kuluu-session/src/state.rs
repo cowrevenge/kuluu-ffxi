@@ -158,8 +158,8 @@ pub const BASE_PACKET_SPEED: u8 = 50;
 /// retail keeps but never spends on the movement rate — `StepControl` reads only
 /// the doubled-and-clamped `speed`, so scaling by `speed / speed_base` would
 /// under-drive a mounted PC rather than over-drive it.
-pub fn move_speed_yps(packet_speed: u8, mounted: bool) -> f32 {
-    let speed = f32::from(packet_speed) * SPEED_TO_YPS;
+pub const fn move_speed_yps(packet_speed: u8, mounted: bool) -> f32 {
+    let speed = packet_speed as f32 * SPEED_TO_YPS;
     let speed = if mounted {
         speed * MOUNTED_SPEED_MULTIPLIER
     } else {

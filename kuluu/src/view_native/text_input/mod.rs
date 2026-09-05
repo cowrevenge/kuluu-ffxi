@@ -130,10 +130,10 @@ pub struct SlashWriters<'w, 's> {
 
     pub map_view: Res<'w, kuluu_render::hud::map_screen::MapView>,
 
-    pub dat_root: Res<'w, super::DatRootRes>,
+    pub(crate) dat_root: Res<'w, super::DatRootRes>,
 
     /// Absent when no config dir resolved, which makes `/overlay` read-only.
-    pub overlay_store: Option<Res<'w, kuluu::overlay_store::OverlayStoreRes>>,
+    pub overlay_store: Option<Res<'w, crate::overlay_store::OverlayStoreRes>>,
 }
 
 /// Real keyboard events plus the pad-synthesized ones
@@ -159,13 +159,13 @@ pub struct MenuConfirmWriters<'w> {
 use tokio::sync::mpsc::Sender;
 
 use crate::keybinds_store::KeybindsStateRes;
-use crate::state::{ActionKind, AgentCommand, CheckKind, ReqLogoutKind};
 use crate::view_native::input::{CommandTx, SelectTargetMode};
 use crate::view_native::slash_commands::{
     parse_slash, system_chat_line, KeybindUpdate, SlashOutcome, SubAreaOp,
 };
+use kuluu_session::state::{ActionKind, AgentCommand, CheckKind, ReqLogoutKind};
 
-pub fn text_input_system(
+pub(crate) fn text_input_system(
     mut events: KeyEventStreams,
     cmd_tx: Res<CommandTx>,
     mut bindings: ResMut<Bindings>,
@@ -766,7 +766,7 @@ fn apply_chat_action(
                     // does; the other check kinds answer in chat only.
                     SlashOutcome::Command(AgentCommand::CheckTarget {
                         target_id,
-                        kind: crate::state::CheckKind::Check,
+                        kind: kuluu_session::state::CheckKind::Check,
                         ..
                     }) if entities.iter().any(|e| {
                         e.id == *target_id && e.kind == kuluu_snapshot::EntityKind::Pc

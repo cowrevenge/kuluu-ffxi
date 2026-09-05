@@ -432,8 +432,8 @@ pub struct GraphicsSettings {
     pub nr_structure_strength: f32,
 
     /// Runtime capability: true only when the dlss cargo feature is compiled
-    /// in AND the renderer initialized DLSS on this machine (RTX GPU + Vulkan
-    /// + the NVIDIA snippet DLLs present). Set once at startup by
+    /// in AND the renderer initialized DLSS on this machine (RTX GPU, Vulkan,
+    /// and the NVIDIA snippet DLLs present). Set once at startup by
     /// `graphics::dlss::update_dlss_availability_system`; never persisted.
     /// Combined with [`Self::dlss_menu_enabled`] it gates everything
     /// user-facing: the DLSS rows only read/cycle while both are true.
@@ -1909,6 +1909,62 @@ pub fn apply_camera_prepass_system(
     }
 }
 
+/// Resolution-relative HUD scaling: UiScale = (logical height / 1080) x the
+/// user's UI Scale setting, so panels authored against a 1080p baseline grow
+/// and shrink with the window. Reacts to WindowResized events the same tick
+/// they arrive, and marks UiScale mutated even when the numeric value is
+/// unchanged so bevy_ui reflows on layout-affecting changes.
+pub fn apply_ui_scale_system(
+    settings: Res<GraphicsSettings>,
+    windows: bevy::ecs::system::Query<
+        &bevy::window::Window,
+        bevy::ecs::query::With<bevy::window::PrimaryWindow>,
+    >,
+    mut ui: ResMut<bevy::ui::UiScale>,
+    mut prev_size: bevy::ecs::system::Local<bevy::math::UVec2>,
+) {
+    let Ok(w) = windows.single() else {
+        return;
+    };
+    // Frame-over-frame check on BOTH physical axes. A drag on either edge
+    // must trigger relayout: width-only drags feed percent-sized nodes and
+    // pane offsets, height-only drags feed the auto-scale ratio. Physical
+    // (not logical) size updates the same frame the drag lands.
+    let ph = w.physical_size();
+    let resize_fired = *prev_size != ph;
+    *prev_size = ph;
+    // WHOLE-NUMBER EFFECTIVE SCALE, driven by the SMALLER axis so panels
+    // authored against a 1080p landscape frame don't overflow when the
+    // window is wider-than-tall in a way that makes the height-only
+    // multiplier too small (or vice versa when very tall/narrow). Compare
+    // both axes against their 1080p/1920p baselines and take the min:
+    // whichever axis is tightest sets the fit.
+    let logical = bevy::math::Vec2::new(w.width(), w.height());
+    let auto_h = (logical.y / 1080.0).max(0.1);
+    let auto_w = (logical.x / 1920.0).max(0.1);
+    let auto_raw = auto_h.min(auto_w);
+    // SMOOTH fractional scale (standard reference-resolution model, per
+    // Unity CanvasScaler et al). Vector UI with text re-rasterized at final
+    // size handles fractional factors fine; the earlier quarter/integer
+    // quantization was a pixel-art technique misapplied to vector UI and
+    // caused the 50%/75% collapse. Floored so scale can never reach zero.
+    let want = (auto_raw * settings.ui_scale).max(0.25);
+    let changed = (ui.0 - want).abs() > 0.001;
+    if changed {
+        ui.0 = want;
+    } else if resize_fired {
+        // Same scale value at the new size: still touch UiScale so bevy_ui
+        // re-samples the viewport extent for percent-sized nodes. NOTE:
+        // deliberately NO blanket per-node dirtying here. The earlier
+        // all-nodes set_changed() sledgehammer forced full menu rebuilds on
+        // every settings change, which reset the menu cursor mid-input and
+        // let stray presses land on rows the user never selected (the
+        // accidental TAA flip). Retained-mode rule: value changes repaint
+        // row text; they never rebuild the tree.
+        ui.set_changed();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2467,8 +2523,10 @@ mod tests {
         // The Retail+ gate is off by default: even on a capable machine DLSS
         // stays N/A and inert until explicitly enabled in the Debug menu —
         // this is what lets one dlss build serve both audiences.
-        let mut s = GraphicsSettings::default();
-        s.dlss_supported = true;
+        let mut s = GraphicsSettings {
+            dlss_supported: true,
+            ..Default::default()
+        };
         assert!(!s.dlss_selectable(), "gate defaults to off");
         assert_eq!(s.value_label(GraphicsField::Dlss), "N/A");
         assert_eq!(s.value_label(GraphicsField::DlssQuality), "N/A");
@@ -2501,9 +2559,11 @@ mod tests {
 
     #[test]
     fn retail_gates_survive_preset_cycle_and_reset() {
-        let mut s = GraphicsSettings::default();
-        s.dlss_menu_enabled = true;
-        s.job_display = true;
+        let mut s = GraphicsSettings {
+            dlss_menu_enabled: true,
+            job_display: true,
+            ..Default::default()
+        };
         s.cycle(GraphicsField::Preset, 1);
         assert!(
             s.dlss_menu_enabled && s.job_display,
@@ -2519,9 +2579,11 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn dlss_toggle_and_cycler_when_supported() {
-        let mut s = GraphicsSettings::default();
-        s.dlss_supported = true;
-        s.dlss_menu_enabled = true;
+        let mut s = GraphicsSettings {
+            dlss_supported: true,
+            dlss_menu_enabled: true,
+            ..Default::default()
+        };
         assert_eq!(s.value_label(GraphicsField::Dlss), "Off");
 
         s.cycle(GraphicsField::Dlss, 1);
@@ -2551,9 +2613,11 @@ mod tests {
 
     #[test]
     fn dlss_quality_cycles_and_survives_preset_and_reset() {
-        let mut s = GraphicsSettings::default();
-        s.dlss_supported = true;
-        s.dlss_menu_enabled = true;
+        let mut s = GraphicsSettings {
+            dlss_supported: true,
+            dlss_menu_enabled: true,
+            ..Default::default()
+        };
         s.cycle(GraphicsField::Dlss, 1);
         s.cycle(GraphicsField::DlssQuality, 1);
         assert_eq!(s.dlss_quality, DlssQuality::Dlaa); // Auto -> Dlaa is the first step
@@ -2580,8 +2644,10 @@ mod tests {
 
     #[test]
     fn dlss_placeholders_stay_inert() {
-        let mut s = GraphicsSettings::default();
-        s.dlss_supported = true;
+        let mut s = GraphicsSettings {
+            dlss_supported: true,
+            ..Default::default()
+        };
         for &f in DLSS_CONFIG_FIELDS {
             if f.is_dlss_placeholder() {
                 assert_eq!(s.value_label(f), "N/A", "{f:?}");
@@ -2683,61 +2749,5 @@ mod tests {
         assert!(!back.dlss_supported, "serde(skip) field never persists");
         assert!(!back.dlss_active());
         assert_eq!(back.value_label(GraphicsField::AntiAliasing), "DLSS (N/A)");
-    }
-}
-
-/// Resolution-relative HUD scaling: UiScale = (logical height / 1080) x the
-/// user's UI Scale setting, so panels authored against a 1080p baseline grow
-/// and shrink with the window. Reacts to WindowResized events the same tick
-/// they arrive, and marks UiScale mutated even when the numeric value is
-/// unchanged so bevy_ui reflows on layout-affecting changes.
-pub fn apply_ui_scale_system(
-    settings: Res<GraphicsSettings>,
-    windows: bevy::ecs::system::Query<
-        &bevy::window::Window,
-        bevy::ecs::query::With<bevy::window::PrimaryWindow>,
-    >,
-    mut ui: ResMut<bevy::ui::UiScale>,
-    mut prev_size: bevy::ecs::system::Local<bevy::math::UVec2>,
-) {
-    let Ok(w) = windows.single() else {
-        return;
-    };
-    // Frame-over-frame check on BOTH physical axes. A drag on either edge
-    // must trigger relayout: width-only drags feed percent-sized nodes and
-    // pane offsets, height-only drags feed the auto-scale ratio. Physical
-    // (not logical) size updates the same frame the drag lands.
-    let ph = w.physical_size();
-    let resize_fired = *prev_size != ph;
-    *prev_size = ph;
-    // WHOLE-NUMBER EFFECTIVE SCALE, driven by the SMALLER axis so panels
-    // authored against a 1080p landscape frame don't overflow when the
-    // window is wider-than-tall in a way that makes the height-only
-    // multiplier too small (or vice versa when very tall/narrow). Compare
-    // both axes against their 1080p/1920p baselines and take the min:
-    // whichever axis is tightest sets the fit.
-    let logical = bevy::math::Vec2::new(w.width(), w.height());
-    let auto_h = (logical.y / 1080.0).max(0.1);
-    let auto_w = (logical.x / 1920.0).max(0.1);
-    let auto_raw = auto_h.min(auto_w);
-    // SMOOTH fractional scale (standard reference-resolution model, per
-    // Unity CanvasScaler et al). Vector UI with text re-rasterized at final
-    // size handles fractional factors fine; the earlier quarter/integer
-    // quantization was a pixel-art technique misapplied to vector UI and
-    // caused the 50%/75% collapse. Floored so scale can never reach zero.
-    let want = (auto_raw * settings.ui_scale).max(0.25);
-    let changed = (ui.0 - want).abs() > 0.001;
-    if changed {
-        ui.0 = want;
-    } else if resize_fired {
-        // Same scale value at the new size: still touch UiScale so bevy_ui
-        // re-samples the viewport extent for percent-sized nodes. NOTE:
-        // deliberately NO blanket per-node dirtying here. The earlier
-        // all-nodes set_changed() sledgehammer forced full menu rebuilds on
-        // every settings change, which reset the menu cursor mid-input and
-        // let stray presses land on rows the user never selected (the
-        // accidental TAA flip). Retained-mode rule: value changes repaint
-        // row text; they never rebuild the tree.
-        ui.set_changed();
     }
 }

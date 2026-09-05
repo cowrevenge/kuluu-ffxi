@@ -166,7 +166,7 @@ impl NrState {
                     error!("dlss-nr: forwarder received a null Init_Ext pointer (kuluu-dlss-nr load-order bug)");
                 } else if r as u32 == 0xBAD0_0002 {
                     // Still gated: the call did not land inside nvngx.dll_kuluu.dll.
-                    warn!("dlss-nr: still module-gated — confirm nvngx.dll_kuluu.dll sits next to this exe (build-dlss.bat re-stages it every build)");
+                    warn!("dlss-nr: still module-gated — confirm nvngx.dll_kuluu.dll sits next to this exe (staging in docs/DLSS.md)");
                 }
                 false
             }
@@ -435,7 +435,7 @@ pub fn prepare_nr(
                 if r == kuluu_dlss_nr::FWD_NULL_TARGET {
                     error!("dlss-nr: forwarder received a null CreateFeature pointer (kuluu-dlss-nr load-order bug)");
                 } else if r as u32 == 0xBAD0_0002 {
-                    warn!("dlss-nr: still module-gated — confirm nvngx.dll_kuluu.dll sits next to this exe and is current (build-dlss.bat re-stages it every build)");
+                    warn!("dlss-nr: still module-gated — confirm nvngx.dll_kuluu.dll sits next to this exe and is current (staging in docs/DLSS.md)");
                 }
             }
         }

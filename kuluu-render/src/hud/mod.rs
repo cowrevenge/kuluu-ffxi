@@ -214,8 +214,6 @@ impl Plugin for HudPlugin {
                     .in_set(bevy::render::RenderSystems::PrepareViews),
             );
         }
-        app.init_resource::<stair_debug::OrchDecisionLog>();
-
         app.init_resource::<zone_flash::ZoneFlashState>();
 
         app.init_resource::<status_ribbon::StatusIconCache>();

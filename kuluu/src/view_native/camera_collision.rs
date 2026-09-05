@@ -1,7 +1,5 @@
 use bevy::prelude::*;
 
-use avian3d::prelude::*;
-
 use kuluu_render::components::IsSelf;
 use kuluu_render::dat_mzb::{CameraCollisionSource, DrawDistance, ZoneGeomMode};
 use kuluu_render::scene::BakedActor;
@@ -10,7 +8,6 @@ use kuluu_render::{
     third_person_anchor_y, yaw_for_heading, CameraMode, ChaseCamera, OperatorCamera,
 };
 
-use super::avian_bridge::camera_mask;
 use super::collision_bvh::{CollisionBvh, ZoneCollisionBvh};
 
 /// Gap-proportional pull rate (1/sec) for the position spring, HORIZONTAL only.
@@ -66,7 +63,7 @@ pub fn resolve_camera(
     mut follow: ResMut<kuluu_render::camera::AnchorFollow>,
     time: Res<Time>,
     scene_state: Res<SceneState>,
-    sq: SpatialQuery,
+    zone_bvh: Res<ZoneCollisionBvh>,
     self_q: Query<(&Transform, Option<&BakedActor>), (With<IsSelf>, Without<OperatorCamera>)>,
     mut cam_q: Query<&mut Transform, (With<OperatorCamera>, Without<IsSelf>)>,
     mut smoothed_effective: Local<Option<f32>>,
@@ -135,24 +132,18 @@ pub fn resolve_camera(
     let dir = Vec3::new(chase.yaw.sin() * cos_p, sin_p, chase.yaw.cos() * cos_p);
     let wanted = chase.orbit_radius();
 
-    // --- Pass 3: collision pull-in against the AVIAN world ---
-    // Ray from the pivot along the boom; walls+doors block, mobs never do.
-    // Same solid world the walker sweeps. Nearest hit shortens the boom so the
-    // camera never clips through geometry. Cast from the pivot (the player),
-    // not the glide origin, so wall pull-in is measured from where the camera
-    // is actually looking.
+    // --- Pass 3: collision pull-in against the zone MZB BVH ---
+    // Ray from the pivot along the boom; walls block, mobs never do. Same
+    // solid world the walker sweeps (the door triangles join this ray when the
+    // obstacle set lands). Nearest hit shortens the boom so the camera never
+    // clips through geometry. Cast from the pivot (the player), not the glide
+    // origin, so wall pull-in is measured from where the camera is actually
+    // looking. The BVH rebuilds ~1 s after zone geometry goes quiet; until
+    // then there is no ray and the boom runs unclipped.
     let mut hit_t = wanted;
-    if let Ok(ray_dir) = Dir3::new(dir) {
-        if let Some(hit) = sq.cast_ray(
-            pivot,
-            ray_dir,
-            wanted,
-            true,
-            &SpatialQueryFilter::from_mask(camera_mask()),
-        ) {
-            if hit.distance < hit_t {
-                hit_t = hit.distance;
-            }
+    if let Some(bvh) = zone_bvh.0.as_ref() {
+        if let Some(t) = bvh.ray_cast(pivot, dir, wanted) {
+            hit_t = t.min(hit_t);
         }
     }
 
@@ -323,16 +314,10 @@ mod tests {
     fn snap_to_anchor_places_eye_behind_player_without_smoothing() {
         // Migrated from kuluu-render::camera after the WIP camera work retired its
         // chase authority: resolve_camera is now the single eye owner (this crate,
-        // which can reach the avian world). Zone-in snap must land on frame one —
-        // no lerp from wherever the previous zone left the eye.
+        // which can reach the zone collision BVH). Zone-in snap must land on frame
+        // one — no lerp from wherever the previous zone left the eye.
         let mut app = App::new();
-        // A full render app registers the Mesh asset (storage + AssetEvent bus);
-        // avian's collider-cache systems read both, so give them what a real
-        // app has or their params fail validation on frame one.
         app.add_plugins(MinimalPlugins)
-            .add_plugins(bevy::asset::AssetPlugin::default())
-            .init_asset::<bevy::mesh::Mesh>()
-            .add_plugins(PhysicsPlugins::default())
             .insert_resource(CameraMode::Chase)
             .insert_resource(kuluu_render::GraphicsSettings {
                 camera_spring: false,
@@ -409,9 +394,6 @@ mod tests {
         // player anchor (not the lagged follow position).
         let mut app = App::new();
         app.add_plugins(MinimalPlugins)
-            .add_plugins(bevy::asset::AssetPlugin::default())
-            .init_asset::<bevy::mesh::Mesh>()
-            .add_plugins(PhysicsPlugins::default())
             .insert_resource(CameraMode::Chase)
             .insert_resource(kuluu_render::GraphicsSettings {
                 camera_spring: true,

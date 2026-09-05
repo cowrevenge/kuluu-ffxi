@@ -34,7 +34,7 @@ enhanced-cast-bar = []
 
 # DEV-ONLY: renders the "Debug" entry (and its Retail+ section) on page 2 of
 # the Command menu. Shipped release builds never enable this, so retail parity
-# holds by construction; dev/test builds (build-dlss.bat) pass it explicitly.
+# holds by construction; dev/test builds pass `--features debug-menu` explicitly.
 debug-menu = []
 
 # Bevy ECS plugins, world model, camera, and HUD shared by both the native
@@ -83,10 +83,6 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 # is already a transitive dep (bevy_text pulls it in); declaring it
 # directly keeps that path stable across future Bevy version bumps.
 ab_glyph = "0.2"
-# Step-lift accumulator for `wall_clip_wire` (retail field_F4 port): interior
-# mutability under `&self` that survives Bevy's Send+Sync Resource bound —
-# `Cell` is not Sync. Already in the lockfile via arboard; no new download.
-parking_lot = "0.12"
 
 # Native-only: ADPCM/PCM decoders for `.bgw` / `.spw`. The audio plugin
 # (see `audio.rs`) reads BGM tracks from the local install in response

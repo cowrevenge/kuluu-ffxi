@@ -807,6 +807,7 @@ EvaluateFeature (step 5), is verified ungated in v310.8 and stays a direct call.
 
 
 ## 5. Verification plan (user runs) — build 13
+> **Superseded (launchers removed).** The personal launchers referenced below — `build-dlss.bat` / `dlssplay.bat` — have been deleted; DLSS is now a default `kuluu` feature, so a bare `cargo build -p kuluu` includes it. Current build + DLL-staging steps live in docs/DLSS.md. The numbered checks below still describe what to look for in the SL logs / in-game; just run the built exe directly instead of the removed batch files.
 (PowerShell: prefix with `.\` — it won't run batch files from the current dir otherwise.)
 **The exe is already built + synced** (build-dlss.bat was run as this session's pre-test compile check; root
 kuluu.exe hash-verified against target/release, forwarder re-staged). No rebuild needed unless source changes.

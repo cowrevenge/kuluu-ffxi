@@ -144,9 +144,11 @@ targets = [
     "aarch64-apple-darwin",
     "x86_64-pc-windows-msvc",
 ]
-# Mirror the hand-rolled legs' `cargo build -p kuluu --features native-window`.
+# Mirror the hand-rolled legs' `cargo build -p kuluu --no-default-features
+# --features native-window` (dlss is a default feature now; dist's runners have
+# no DLSS SDK, so it stays out of the shipped binaries).
 features = ["native-window"]
-default-features = true
+default-features = false
 # A YAML array of steps injected before `dist build`. The path is resolved
 # relative to .github/workflows/, so `../` keeps the fragment OUT of that dir —
 # GitHub Actions runs every *.yml under .github/workflows/ as a workflow, and a

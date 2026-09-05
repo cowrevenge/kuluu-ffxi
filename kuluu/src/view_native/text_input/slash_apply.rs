@@ -124,7 +124,7 @@ pub(super) fn apply_slash_outcome(
 
                     RestKind::Heal => {
                         let _ = cmd_tx.try_send(AgentCommand::Heal {
-                            mode: crate::state::HealMode::Off,
+                            mode: kuluu_session::state::HealMode::Off,
                         });
                         RestKind::Sit
                     }
@@ -1189,12 +1189,12 @@ fn mirror_heal_stance(cmd: &AgentCommand, rest: &mut kuluu_render::combat_stance
         return;
     };
     let next = match mode {
-        crate::state::HealMode::On => RestKind::Heal,
-        crate::state::HealMode::Off => match rest.kind {
+        kuluu_session::state::HealMode::On => RestKind::Heal,
+        kuluu_session::state::HealMode::Off => match rest.kind {
             RestKind::Heal => RestKind::None,
             other => other,
         },
-        crate::state::HealMode::Toggle => match rest.kind {
+        kuluu_session::state::HealMode::Toggle => match rest.kind {
             RestKind::Heal => RestKind::None,
             _ => RestKind::Heal,
         },

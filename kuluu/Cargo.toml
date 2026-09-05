@@ -21,15 +21,22 @@ path = "src/lib.rs"
 name = "kuluu"
 path = "src/main.rs"
 
+[[example]]
+# Headless replay of the single-authority walker over real MZB geometry
+# (plan §4). Needs the viewer feature: the walker lives in `view_native`.
+name = "zz-field-walk"
+required-features = ["native-window"]
+
 [features]
 # The native windowed viewer is the mode we develop and ship by default, so
 # enable it out of the box: a bare `cargo build`/`cargo test -p kuluu`
 # then compiles `view_native` and runs its tests instead of silently skipping
-# them (its tests only exist under this feature). CI / release / checks.sh
-# still pass `--features native-window` explicitly, so this only affects bare
-# invocations. For the lean headless/relay-only binary (no Bevy), build with
-# `--no-default-features`.
-default = ["native-window"]
+# them (its tests only exist under this feature). DLSS rides along too — it is
+# normal now, not an opt-in experiment. SDK-less environments (CI runners,
+# release legs, Steam Deck docker) build with `--no-default-features
+# --features native-window` so bevy/dlss never enters their link graph; the
+# lean headless/relay-only binary (no Bevy) uses plain `--no-default-features`.
+default = ["native-window", "dlss"]
 # Enable the native windowed viewer (`native` subcommand). Opens a real
 # OS window via bevy_winit. Bevy's winit event loop must run on the OS
 # main thread on macOS, so main.rs handles the dispatch specially when
@@ -67,15 +74,18 @@ trace = ["bevy/trace_chrome", "dep:tracing-chrome"]
 #   cargo run -p kuluu --features=native-window,relay,dynamic_linking
 dynamic_linking = ["bevy/dynamic_linking"]
 # NVIDIA DLSS Super Resolution. Implies the native viewer (DLSS is meaningless
-# without a window) and lights up the DLSS rows in both graphics menus when the
-# runtime supports it. Build-time requirements (DLSS SDK + Vulkan SDK + clang,
-# DLSS_SDK env var) and the runtime DLL story live in docs/DLSS.md. Typical:
-#   cargo run -p kuluu --features=native-window,dlss
+# without a window) and lights up the DLSS rows in both graphics menus when
+# the runtime supports it. It is part of the default build now — a bare
+# `cargo run -p kuluu` includes it; SDK-less environments exclude it with
+# `--no-default-features --features native-window`. Build-time requirements
+# (DLSS SDK + Vulkan SDK + clang; dlss_wgpu's build.rs panics without
+# DLSS_SDK) and the runtime DLL story live in docs/DLSS.md.
 dlss = ["native-window", "kuluu-render/dlss", "bevy/dlss"]
 # DEV-ONLY: the in-game Debug menu (page 2 of Commands, incl. its Retail+
 # section with the DLSS/Job Display gates). Never part of a shipped release
-# build — retail parity holds by construction; build-dlss.bat enables it for
-# testing. See kuluu-render's `debug-menu`.
+# build — retail parity holds by construction; dev builds pass it explicitly,
+# e.g. `cargo build -p kuluu --features debug-menu`. See kuluu-render's
+# `debug-menu`.
 debug-menu = ["kuluu-render?/debug-menu"]
 
 [dependencies]
@@ -85,7 +95,6 @@ ffxi-vocab = { path = "../ffxi-vocab" }
 kuluu-nav = { path = "../kuluu-nav" }
 ffxi-nav-recast = { path = "../ffxi-nav-recast" }
 ffxi-dat = { path = "../ffxi-dat" }
-avian3d = "0.7"
 
 anyhow.workspace = true
 clap.workspace = true

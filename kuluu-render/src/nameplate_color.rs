@@ -336,11 +336,17 @@ pub fn linkshell_tint(flags: &CharFlags) -> Color {
     )
 }
 
-pub fn load_name_colors_system(mut table: ResMut<NameColorTable>, dat_root: Res<UiElementDatRoot>) {
+pub fn load_name_colors_system(
+    mut table: ResMut<NameColorTable>,
+    dat_root: Res<UiElementDatRoot>,
+    mut scanned_without_group: Local<bool>,
+) {
     if table.is_loaded() {
         return;
     }
     let Some(root) = dat_root.0.as_ref() else {
+        // No retail install yet (headless/relay paths): the fallback colour
+        // is the documented behaviour, nothing to warn about.
         return;
     };
     for (id, bytes) in crate::ui_element_atlas::read_ui_dats(root) {
@@ -352,6 +358,17 @@ pub fn load_name_colors_system(mut table: ResMut<NameColorTable>, dat_root: Res<
             );
             return;
         }
+    }
+    // A retail install is present but none of its UI DATs carries the ncol
+    // group (locale mismatch, partial install). Every plate would then hold
+    // the fallback white for the whole session — surface it once instead of
+    // failing silently.
+    if !*scanned_without_group {
+        *scanned_without_group = true;
+        warn!(
+            group = NCOL_GROUP,
+            "retail install present but no UI DAT carries the nameplate colour table; plates stay on the fallback colour"
+        );
     }
 }
 

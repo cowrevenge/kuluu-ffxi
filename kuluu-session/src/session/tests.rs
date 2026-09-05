@@ -561,6 +561,55 @@ fn worm_dive_surface_lifecycle_stays_targetable_after_emerging() {
     );
 }
 
+/// End-to-end HP chain for the delta bridge: when a mob takes damage, LSB sets UPDATE_HP on
+/// its next 0x00E (battleentity.cpp `addHP` -> updatemask |= UPDATE_HP; entity_update.cpp
+/// writes HPP at 0x1E under that bit and broadcasts to every char who spawned the entity).
+/// The fold must mark the entity pending so the O(changed) delta carries the new hpp — this
+/// is what drives the live nameplate HP bar. Regression: "HP bars never move".
+#[test]
+fn hp_update_packet_marks_entity_pending_with_new_hpp() {
+    let mut s = crate::state::SessionState::default();
+
+    // 1. Spawn (UPDATE_ALL_MOB): full block, hpp=100.
+    feed_worm(&mut s, &worm_body(0x0F, 0, 0, 0));
+    assert_eq!(worm_entity(&s).hp_pct, Some(100), "spawn carries hpp");
+    let spawn_pos = worm_entity(&s).pos;
+    let (upserts, _) = s.take_pending_entities();
+    assert!(
+        upserts.contains(&1000),
+        "spawn must be pending for the delta bridge"
+    );
+
+    // 2. Damage tick: UPDATE_HP only (send_flag=0x04) with hpp=42; the position bytes are
+    //    stale and must not move the entity.
+    let mut body = worm_body(0x04, 0, 0, 0);
+    body[26] = 42; // HPP (LSB 0x1E), written under UPDATE_HP
+    feed_worm(&mut s, &body);
+    assert_eq!(
+        worm_entity(&s).hp_pct,
+        Some(42),
+        "UPDATE_HP tick must apply the new hpp"
+    );
+    assert_eq!(
+        worm_entity(&s).pos,
+        spawn_pos,
+        "HP-only tick must not move the entity"
+    );
+    let (upserts, _) = s.take_pending_entities();
+    assert!(
+        upserts.contains(&1000),
+        "the HP change must reach the delta bridge as a pending upsert"
+    );
+
+    // 3. A subsequent POS-only tick zero-fills HPP; the merge must preserve 42.
+    feed_worm(&mut s, &worm_body(0x01, 0, 0, 0));
+    assert_eq!(
+        worm_entity(&s).hp_pct,
+        Some(42),
+        "POS-only tick must not clobber hpp"
+    );
+}
+
 fn v(x: f32, y: f32, z: f32) -> Vec3 {
     Vec3 { x, y, z }
 }

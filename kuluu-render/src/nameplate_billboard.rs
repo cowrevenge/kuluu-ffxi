@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
 use ab_glyph::{Font, FontArc, PxScale, ScaleFont};
-use bevy::ecs::system::SystemParam;
 use bevy::image::{Image, ImageSampler};
 use bevy::light::{NotShadowCaster, NotShadowReceiver};
 use bevy::prelude::*;
@@ -253,21 +252,10 @@ pub fn self_plate_hidden(is_self: bool, mode: CameraMode) -> bool {
 /// meaning the packet did not carry.
 pub const NAMEPLATE_FALLBACK_COLOR: Color = Color::WHITE;
 
-/// Server-hidden cull set (namevis VIS_HIDE_NAME / STATUS_TYPE::INVISIBLE),
-/// rebuilt on snapshot frames by update_nameplate_billboards_system. A
-/// resource rather than a Local: the 16-param ceiling forces it into the
-/// derived BillboardDebugCull param, and Local's fetch lifetime does not
-/// survive that derive.
-#[derive(Resource, Default)]
-pub struct SuppressedNameplates(pub std::collections::HashSet<u32>);
-
-/// The 16-param ceiling is reached; bundle the debug sink with the
-/// server-hidden cull set so the status/namevis gate needs no new slot.
-#[derive(SystemParam)]
-pub struct BillboardDebugCull<'w> {
-    pub dbg_out: ResMut<'w, NameplateBillboardDebug>,
-    pub suppressed: ResMut<'w, SuppressedNameplates>,
-}
+// Piece 7 removed the snapshot-rebuilt `SuppressedNameplates` cull set and
+// its `BillboardDebugCull` SystemParam bundle: the server-hidden gate now
+// reads the live entity-table record inline (below), so it moves with the
+// packet that changed it instead of waiting for a rebuild frame.
 
 pub fn update_nameplate_billboards_system(
     state: Res<SceneState>,
@@ -299,8 +287,8 @@ pub fn update_nameplate_billboards_system(
     name_colors: Res<crate::nameplate_color::NameColorTable>,
     icons: Res<crate::nameplate_icons::NameplateIcons>,
     mut commands: Commands,
-    mut cull: BillboardDebugCull,
-    mut raster_inputs: Local<std::collections::HashMap<u32, RasterKey>>,
+    mut dbg_out: ResMut<NameplateBillboardDebug>,
+    table: Res<crate::entity_table::EntityTable>,
 ) {
     let Ok((cam_t, projection)) = cam_q.single() else {
         return;
@@ -321,36 +309,14 @@ pub fn update_nameplate_billboards_system(
     }
 
     let self_char_id: Option<u32> = state.snapshot.self_char_id;
-    // HP/claim only change with a snapshot, and the re-raster inputs (name,
-    // color, hp) derive from them — so the texture-regen check only runs on
-    // snapshot frames. Billboard orientation/scale below stays per-frame.
-    // The retail colour table and icon glyphs are read from the DAT a few
-    // frames into the session, after the first plates have already rastered
-    // against the fallback; their arrival has to re-raster them.
-    // A Retail+ gate flip (mob HP under) must re-raster on the spot, not wait
-    // for the next snapshot: settings changes are user actions, and the key
-    // comparison below keeps unaffected plates from re-running.
-    let dirty =
-        state.dirty || name_colors.is_changed() || icons.is_changed() || settings.is_changed();
-    if dirty {
-        raster_inputs.clear();
-        // Rebuilt only on snapshot frames: namevis/status change with the
-        // server, and a stale id is harmless (its plate is gone or re-spawned).
-        cull.suppressed.0.clear();
-        let ctx = crate::nameplate_color::SelfContext {
-            self_id: self_char_id,
-            party: &state.snapshot.party,
-        };
-        for ent in &state.snapshot.entities {
-            if ent.name_hidden() || ent.is_invisible() {
-                cull.suppressed.0.insert(ent.id);
-            }
-            raster_inputs.insert(
-                ent.id,
-                raster_key_for(ent, ctx, &name_colors, settings.mob_hp_under),
-            );
-        }
-    }
+    // Piece 7: no dirty gate. The re-raster inputs (colour, hp, markers,
+    // tint) are recomputed from LIVE entity-table records per billboard
+    // below, so a plate can never hold a stale key past the frame its facts
+    // changed — the old Local map only rebuilt on `state.dirty` frames, and
+    // a spawn that raced the billboard pass kept its fallback-white bake
+    // until some unrelated later snapshot. The stored-key comparison keeps
+    // the raster itself off the hot path: only plates whose key actually
+    // moved re-run it.
 
     // Debug breakdown mirrors each gate below; see NameplateBillboardDebug.
     let mut total = 0u32;
@@ -362,9 +328,8 @@ pub fn update_nameplate_billboards_system(
 
     for (ui_entity, mut np, mut aspect, mut transform, mut vis, mat) in &mut billboards {
         total += 1;
-        let self_cull =
-            self_plate_hidden(is_self_billboard(np.entity_id, self_char_id), *camera_mode);
-        if self_cull {
+        let is_self = is_self_billboard(np.entity_id, self_char_id);
+        if self_plate_hidden(is_self, *camera_mode) {
             hide_self += 1;
             *vis = Visibility::Hidden;
             continue;
@@ -373,8 +338,16 @@ pub fn update_nameplate_billboards_system(
         // Server-hidden entities draw no plate — namevis VIS_HIDE_NAME
         // (mannequins, "blank" cutscene actors) or STATUS_TYPE::INVISIBLE
         // (worms underground). Retail shows nothing for either; the model is
-        // hidden by sync_entities_system on the same signals.
-        if cull.suppressed.0.contains(&np.entity_id) {
+        // hidden by sync_entities_system on the same signals. Piece 7 reads
+        // the live record instead of a snapshot-rebuilt set: the cull moves
+        // with the packet that changed it, no rebuild frame required. Self is
+        // exempt — the server never hides players, and a stray byte must not
+        // delete our own plate (same exemption as the model).
+        if !is_self
+            && table
+                .get(np.entity_id)
+                .is_some_and(|r| r.is_invisible() || r.name_hidden())
+        {
             hidden_status += 1;
             *vis = Visibility::Hidden;
             continue;
@@ -417,8 +390,9 @@ pub fn update_nameplate_billboards_system(
         visible_n += 1;
 
         // Pulse is time-driven (steps at RETAIL_FPS via pulse_frame, so the
-        // last_alpha guard bounds writes to 30/s) and must run on non-snapshot
-        // frames; only the snapshot-derived re-raster below is dirty-gated.
+        // last_alpha guard bounds writes to 30/s) and runs every frame;
+        // the live-key re-raster below does too — neither waits on a
+        // snapshot.
         let want_alpha = if target.id == Some(np.entity_id) {
             target_alpha_pulse(pulse_frame)
         } else {
@@ -435,38 +409,55 @@ pub fn update_nameplate_billboards_system(
             }
         }
 
-        if !dirty {
-            continue;
-        }
-
-        // The name lives on the component, not the snapshot: a later update can
-        // drop it and the plate must keep the name it spawned with.
-        let Some(inputs) = raster_inputs.get(&np.entity_id) else {
+        // Piece 7: the key is recomputed from LIVE table facts every frame —
+        // an hp tick, a claim flip or the colour-table load all re-raster on
+        // the next frame without waiting for a dirty rebuild. The name lives
+        // on the component, not the record: a later update can drop it and
+        // the plate must keep the name it spawned with.
+        let Some(rec) = table.get(np.entity_id) else {
             continue;
         };
+        // The retail ncol table must be ready before the first real raster:
+        // until then every colour resolves to the fallback, and a plate baked
+        // against it would need a later frame to fix — on load that frame may
+        // never come (the "white names" report). Hold the spawn placeholder
+        // instead; the key comparison below fires the moment the table lands.
+        if !name_colors.is_loaded() {
+            continue;
+        }
+        let ctx = crate::nameplate_color::SelfContext {
+            self_id: self_char_id,
+            party: &state.snapshot.party,
+        };
+        let key = raster_key_for(&rec.entity, ctx, &name_colors, settings.mob_hp_under);
         if np
             .rastered
             .as_ref()
-            .is_some_and(|done| done.matches(&np.base_name, inputs))
+            .is_some_and(|done| done.matches(&np.base_name, &key))
         {
             continue;
         }
         let want = RasterKey {
             text: np.base_name.clone(),
-            ..inputs.clone()
+            ..key
         };
-        // mob_hp diagnostic: fires only when the re-raster is driven by an hp
-        // change (name/color/marker changes do not log). Paired with the
-        // session-side "0x0E UPDATE_HP" line, this proves or breaks the
-        // snapshot -> billboard link.
-        if np.rastered.as_ref().map(|done| done.hp) != Some(want.hp) {
-            tracing::info!(
-                target: "mob_hp",
-                id = np.entity_id,
-                old = ?np.rastered.as_ref().map(|done| done.hp),
-                new = ?want.hp,
-                "nameplate re-raster (hp change)"
-            );
+        // mob_hp diagnostic: fires only on a real transition — an hp or
+        // colour move off the previously rastered key (first rasters and
+        // marker/tint-only changes stay silent). Paired with the session-side
+        // "0x0E UPDATE_HP" line, this proves or breaks the table -> billboard
+        // link; the white-on-load fix shows up here as a colour move off the
+        // fallback bake.
+        if let Some(done) = np.rastered.as_ref() {
+            if done.hp != want.hp || done.color != want.color {
+                tracing::info!(
+                    target: "mob_hp",
+                    id = np.entity_id,
+                    old_hp = ?done.hp,
+                    new_hp = ?want.hp,
+                    color_moved = done.color != want.color,
+                    "nameplate re-raster (hp/colour change)"
+                );
+            }
         }
         let Some(mat_data) = materials.get_mut(&mat.0) else {
             continue;
@@ -492,12 +483,12 @@ pub fn update_nameplate_billboards_system(
         np.rastered = Some(want.clone());
     }
 
-    cull.dbg_out.total = total;
-    cull.dbg_out.hide_self = hide_self;
-    cull.dbg_out.hidden_status = hidden_status;
-    cull.dbg_out.hidden_depth = hidden_depth;
-    cull.dbg_out.visible = visible_n;
-    cull.dbg_out.despawned = despawned;
+    dbg_out.total = total;
+    dbg_out.hide_self = hide_self;
+    dbg_out.hidden_status = hidden_status;
+    dbg_out.hidden_depth = hidden_depth;
+    dbg_out.visible = visible_n;
+    dbg_out.despawned = despawned;
 }
 
 /// The full raster input for one entity: retail's name colour, its icon

@@ -2,6 +2,7 @@ pub mod bridge;
 pub mod camera_collision;
 pub mod collision_bvh;
 pub mod debug_heights;
+pub mod entity_list_hud;
 pub mod exit_watchdog;
 mod gamepad_input;
 pub mod input;
@@ -515,6 +516,7 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
         .init_resource::<CameraAutoRecenter>()
         .init_resource::<HeadingTurnAccum>()
         .init_resource::<LocalPlayerPrediction>()
+        .init_resource::<entity_list_hud::EntityListScroll>()
         .init_resource::<text_input::CaptureMode>()
         .init_resource::<collision_bvh::ZoneCollisionBvh>()
         .insert_resource(ports)
@@ -572,6 +574,7 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
         (
             target_list_hud::spawn_target_list_hud,
             perf_hud::spawn_perf_hud,
+            entity_list_hud::spawn_entity_list_hud,
         ),
     );
     app.add_systems(
@@ -592,6 +595,7 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
             perf_hud::update_perf_monitor,
             perf_hud::update_perf_graph,
             target_list_hud::update_target_list_hud,
+            entity_list_hud::update_entity_list_hud,
         )
             .chain()
             .run_if(in_state(AppPhase::InGame)),
@@ -601,6 +605,8 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
         (
             perf_hud::apply_perf_visibility,
             target_list_hud::apply_target_list_visibility,
+            entity_list_hud::apply_entity_list_visibility,
+            entity_list_hud::entity_list_wheel_system,
         )
             .run_if(in_state(AppPhase::InGame)),
     );

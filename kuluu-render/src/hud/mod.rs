@@ -98,6 +98,12 @@ pub struct HudPanels {
     /// scene-graphic errors can be isolated. Independent of `weather_off`.
     /// Runtime-only, no persist.
     pub fog_off: bool,
+    /// Debug Entity List overlay (Debug menu "Entity List" row): when true,
+    /// shows a scrollable dump of every live wire entity from the
+    /// EntityTable — id, name, kind, position, status byte, hp%, invis/name-
+    /// hidden/dead flags. Mouse wheel scrolls; default off.
+    /// Runtime-only, no persist.
+    pub entity_list: bool,
 }
 
 #[derive(Component)]

@@ -273,6 +273,10 @@ pub const DEBUG_WEATHER: &str = "Weather";
 /// Debug fog gate row: [on] = every fog layer (DAT distance fog, volumetric
 /// ground haze) renders; toggling it off strips all of them. Default on.
 pub const DEBUG_FOG: &str = "Fog";
+/// Debug Entity List overlay row: [on] = the scrollable live-entity dump
+/// (id/name/kind/pos/status/hp/invis flags from the EntityTable) is shown.
+/// Mouse wheel scrolls. Default off.
+pub const DEBUG_ENTITY_LIST: &str = "Entity List";
 pub const DEBUG_SOUND: &str = "Sound";
 pub const DEBUG_VOLUME: &str = "Volume";
 pub const DEBUG_PRINT_POS: &str = "Print POS";
@@ -307,6 +311,7 @@ const DEBUG_ENTRIES: &[&str] = &[
     DEBUG_NOCLIP,
     DEBUG_WEATHER,
     DEBUG_FOG,
+    DEBUG_ENTITY_LIST,
     DEBUG_SOUND,
     DEBUG_VOLUME,
     DEBUG_PRINT_POS,
@@ -1490,6 +1495,7 @@ pub fn debug_panel_state(
         // "off" flags: Weather [on] = weather effects applied.
         DEBUG_WEATHER => !panels.weather_off,
         DEBUG_FOG => !panels.fog_off,
+        DEBUG_ENTITY_LIST => panels.entity_list,
         DEBUG_NET_STATUS => net_status_on,
         DEBUG_SOUND => sound_on,
         DEBUG_STAIR_DRAW => panels.stair_draw,

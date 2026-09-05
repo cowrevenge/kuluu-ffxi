@@ -2,6 +2,10 @@
 
 use serde::{Deserialize, Serialize};
 
+// v24: Entity.char_flags.invis — flags1 InvisFlag (bit 29), the server's
+// player-invisibility bit. LSB sets it for PCs only (m_isGMHidden or an
+// EFFECTFLAG_INVISIBLE status effect); retail keeps such players targetable but
+// draws nothing. Never gates targeting, unlike untargetable.
 // v23: SceneSnapshot.death_menu_offer — the durable s2c 0x0F9 Raise/Reraise or
 // Tractor offer shown while dead. (Upstream's "v20"; renumbered on merge because our
 // side had already spent 20-22 on zone_generation / untargetable / name_vis.)
@@ -249,6 +253,13 @@ pub struct CharFlags {
     pub new_character: bool,
     pub mentor: bool,
 
+    /// `Flags1.InvisFlag` (bit 29): the server's player-invisibility bit — set
+    /// for PCs only, when a GM hides themselves or an EFFECTFLAG_INVISIBLE
+    /// status effect is active. Retail keeps such players targetable but draws
+    /// nothing: no model, no nameplate.
+    #[serde(default)]
+    pub invis: bool,
+
     /// `Flags1.TargetOffFlag` (bit 19): the server's untargetable bit — LSB
     /// `m_flags & FLAG_UNTARGETABLE` for NPC/MOB, char_update's "Untargetable
     /// player" field for PCs. The targetability authority; see
@@ -379,6 +390,16 @@ impl Entity {
     /// already gated by [`Entity::status_selectable`].
     pub fn is_invisible(&self) -> bool {
         self.status == status_type::INVISIBLE
+    }
+
+    /// LSB `Flags1.InvisFlag` (bit 29): player-invisibility — a GM hiding
+    /// themselves or an EFFECTFLAG_INVISIBLE status effect. The server sets it
+    /// for PCs only (vendor/server/src/map/packets/char_update.cpp:316), so the
+    /// kind gate is part of the fact, not a render preference. Unlike
+    /// [`Entity::is_invisible`] (STATUS_TYPE on mobs) this never gates targeting:
+    /// retail keeps invisible players targetable and draws nothing instead.
+    pub fn invis_flag(&self) -> bool {
+        matches!(self.kind, EntityKind::Pc) && self.char_flags.invis
     }
 
     // Blacklist (not whitelist) so an undecoded byte fails open, staying targetable.

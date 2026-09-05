@@ -28,6 +28,12 @@ impl EntityRecord {
         self.entity.is_invisible()
     }
 
+    /// `Flags1.InvisFlag` (bit 29), PCs only — see [`Entity::invis_flag`] on the
+    /// record's entity.
+    pub fn invis_flag(&self) -> bool {
+        self.entity.invis_flag()
+    }
+
     pub fn name_hidden(&self) -> bool {
         self.entity.name_hidden()
     }

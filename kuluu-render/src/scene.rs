@@ -67,6 +67,11 @@ pub struct EntityMaterials {
     pub mob_claimed_self: Handle<StandardMaterial>,
 
     pub mob_claimed_other: Handle<StandardMaterial>,
+
+    /// Fully transparent stand-in for a placeholder orb whose owner must not be
+    /// drawn (Flags1.InvisFlag). Shared, so blanking an orb is a handle swap,
+    /// never a per-entity asset.
+    pub invis_orb: Handle<StandardMaterial>,
 }
 
 #[derive(Component)]
@@ -160,6 +165,16 @@ pub fn setup_world(
         mob_claimed_self: orb(Color::srgb(0.96, 0.96, 0.96), 6.0, &mut materials),
 
         mob_claimed_other: orb(Color::srgb(0.80, 0.18, 0.18), 7.0, &mut materials),
+
+        invis_orb: {
+            let mut m = StandardMaterial {
+                unlit: true,
+                ..default()
+            };
+            m.base_color = Color::srgba(0.0, 0.0, 0.0, 0.0);
+            m.alpha_mode = AlphaMode::Blend;
+            materials.add(m)
+        },
     });
 
     let orb_mesh = |radius: f32, center_y: f32, m: &mut Assets<Mesh>| {
@@ -518,6 +533,72 @@ pub fn sync_entities_system(
     }
 }
 
+/// LSB `Flags1.InvisFlag` (bit 29): player-invisibility — a GM hiding themselves or an
+/// EFFECTFLAG_INVISIBLE status effect. The server sets it for PCs only
+/// (vendor/server/src/map/packets/char_update.cpp:316). Retail keeps such players
+/// targetable but draws nothing: no model, no nameplate (the plate gate lives in
+/// `update_nameplate_billboards_system`).
+///
+/// Unlike STATUS_TYPE::INVISIBLE mobs — where sync_entities_system hides the wire root and
+/// takes the hitbox child with it (correct there: those entities are untargetable) — an
+/// invisible PC's root must stay visible, or its transparent EntityHitbox child stops being
+/// mouse-pickable. So this hides the actor root and blanks the placeholder orb instead;
+/// targeting is untouched.
+///
+/// Runs every frame; it owns nodes nothing else writes (the actor root's Visibility is set
+/// only at spawn and here, the morph column's at spawn and here), so there is no fight. The
+/// orb material restore is owned by sync_entities_system: the same UPDATE_HP delta that
+/// clears the bit marks state dirty and resets it to the kind handle.
+pub fn apply_invis_flag_system(
+    table: Res<EntityTable>,
+    materials: Res<EntityMaterials>,
+    mut q_roots: Query<(
+        &WorldEntity,
+        Option<&crate::ffxi_actor_render::FfxiRenderRoot>,
+        Option<&MorphIn>,
+        Option<&mut MeshMaterial3d<StandardMaterial>>,
+    )>,
+    mut other_vis: Query<&mut Visibility, Without<WorldEntity>>,
+) {
+    for (ent, root, morph, orb_mat) in &mut q_roots {
+        let hide = table.get(ent.id).is_some_and(|r| r.invis_flag());
+
+        // The skinned model is a separate root synced by world_id; hiding it never
+        // touches the wire entity or its hitbox.
+        if let Some(rr) = root {
+            if let Ok(mut v) = other_vis.get_mut(rr.0) {
+                *v = if hide {
+                    Visibility::Hidden
+                } else {
+                    Visibility::default()
+                };
+            }
+        }
+
+        // The morph-in light column (transient child, <= MORPH_DURATION after model load):
+        // an invisible player's model arriving must not flash a pillar where retail shows
+        // nothing. Spawn value is Inherited, so both directions are owned here.
+        if let Some(orb_e) = morph.and_then(|m| m.orb) {
+            if let Ok(mut v) = other_vis.get_mut(orb_e) {
+                *v = if hide {
+                    Visibility::Hidden
+                } else {
+                    Visibility::Inherited
+                };
+            }
+        }
+
+        // The placeholder orb, present until model load removes Mesh3d. While hidden it is
+        // blanked to the shared transparent handle; sync_entities_system restores the kind
+        // handle on the dirty frame that clears the flag.
+        if let Some(mut mm) = orb_mat {
+            if hide && mm.0 != materials.invis_orb {
+                mm.0 = materials.invis_orb.clone();
+            }
+        }
+    }
+}
+
 /// Holds each mount actor on its rider. Deliberately not part of
 /// `sync_entities_system`: the rider's transform is still being written after
 /// that runs (dead reckoning), and the floor snap that follows must see both
@@ -839,6 +920,7 @@ mod tests {
             aggro: Handle::default(),
             mob_claimed_self: Handle::default(),
             mob_claimed_other: Handle::default(),
+            invis_orb: Handle::default(),
         }
     }
 
@@ -980,6 +1062,162 @@ mod tests {
             app.world().get::<LookComp>(bevy_e).map(|l| l.0),
             Some(look),
             "a look the server stopped reporting must not clear the component"
+        );
+    }
+
+    fn pc_entity(id: u32, invis: bool) -> kuluu_snapshot::Entity {
+        kuluu_snapshot::Entity {
+            id,
+            act_index: 0,
+            kind: EntityKind::Pc,
+            name: None,
+            pos: WireVec3 {
+                x: 0.0,
+                y: 0.0,
+                z: 0.0,
+            },
+            heading: 0,
+            hp_pct: Some(100),
+            bt_target_id: 0,
+            face_target: 0,
+            name_vis: None,
+            claim_id: 0,
+            speed: 0,
+            speed_base: 0,
+            look: None,
+            animation: 0,
+            animationsub: 0,
+            mount: None,
+            status: 0,
+            char_flags: kuluu_snapshot::CharFlags {
+                invis,
+                ..Default::default()
+            },
+        }
+    }
+
+    /// Flags1.InvisFlag (bit 29) hides the actor root and blanks the placeholder orb,
+    /// but must NOT hide the wire root — its transparent EntityHitbox child is what keeps
+    /// an invisible player targetable. Kind-gated: a stray bit on a mob changes nothing.
+    #[test]
+    fn invis_flag_hides_actor_root_but_keeps_wire_root_pickable() {
+        let mut app = App::new();
+        app.init_resource::<EntityTable>();
+        app.insert_resource(Assets::<StandardMaterial>::default());
+        app.add_systems(Update, apply_invis_flag_system);
+
+        let (pc_handle, invis_handle) = {
+            let mut assets = app.world_mut().resource_mut::<Assets<StandardMaterial>>();
+            (
+                assets.add(StandardMaterial::default()),
+                assets.add(StandardMaterial::default()),
+            )
+        };
+        app.insert_resource(EntityMaterials {
+            pc: pc_handle.clone(),
+            invis_orb: invis_handle.clone(),
+            ..dummy_materials()
+        });
+
+        // Another player's wire root, shaped like scene.rs spawns it: visible root,
+        // placeholder orb material, transparent hitbox child with explicit Visible.
+        let root = app
+            .world_mut()
+            .spawn((
+                WorldEntity {
+                    id: 7,
+                    act_index: 0,
+                    kind: EntityKind::Pc,
+                },
+                Visibility::default(),
+                MeshMaterial3d(pc_handle.clone()),
+            ))
+            .id();
+        let hitbox = app
+            .world_mut()
+            .spawn((Visibility::Visible, ChildOf(root)))
+            .id();
+
+        // The skinned model is a separate root (ffxi_actor_render's shape).
+        let actor_root = app.world_mut().spawn(Visibility::default()).id();
+        app.world_mut()
+            .entity_mut(root)
+            .insert(crate::ffxi_actor_render::FfxiRenderRoot(actor_root));
+
+        // A mob carrying the same bit must be untouched (LSB sets InvisFlag for PCs only).
+        let mob_root = app
+            .world_mut()
+            .spawn((
+                WorldEntity {
+                    id: 8,
+                    act_index: 0,
+                    kind: EntityKind::Mob,
+                },
+                Visibility::default(),
+            ))
+            .id();
+        let mob_actor = app.world_mut().spawn(Visibility::default()).id();
+        app.world_mut()
+            .entity_mut(mob_root)
+            .insert(crate::ffxi_actor_render::FfxiRenderRoot(mob_actor));
+
+        {
+            let mut table = app.world_mut().resource_mut::<EntityTable>();
+            table.upsert(&pc_entity(7, true));
+            table.upsert(&kuluu_snapshot::Entity {
+                kind: EntityKind::Mob,
+                char_flags: kuluu_snapshot::CharFlags {
+                    invis: true,
+                    ..Default::default()
+                },
+                ..pc_entity(8, false)
+            });
+        }
+
+        app.update();
+
+        assert_eq!(
+            *app.world().get::<Visibility>(actor_root).unwrap(),
+            Visibility::Hidden,
+            "InvisFlag PC: the actor root must be hidden"
+        );
+        assert_eq!(
+            *app.world().get::<Visibility>(root).unwrap(),
+            Visibility::default(),
+            "InvisFlag PC: the wire root stays visible so its hitbox child remains pickable"
+        );
+        assert_eq!(
+            *app.world().get::<Visibility>(hitbox).unwrap(),
+            Visibility::Visible,
+            "the transparent hitbox must keep its explicit Visible"
+        );
+        let orb_mat = app
+            .world()
+            .get::<MeshMaterial3d<StandardMaterial>>(root)
+            .unwrap();
+        assert_eq!(
+            orb_mat.0.id(),
+            invis_handle.id(),
+            "placeholder orb is blanked to the shared transparent handle"
+        );
+        assert_eq!(
+            *app.world().get::<Visibility>(mob_actor).unwrap(),
+            Visibility::default(),
+            "a stray InvisFlag bit on a mob must not hide it (PCs only)"
+        );
+
+        // Clearing the flag restores the actor root. The orb material restore is owned by
+        // sync_entities_system's dirty frame, so it stays blanked here — that split is the
+        // design, not an oversight.
+        app.world_mut()
+            .resource_mut::<EntityTable>()
+            .upsert(&pc_entity(7, false));
+        app.update();
+
+        assert_eq!(
+            *app.world().get::<Visibility>(actor_root).unwrap(),
+            Visibility::default(),
+            "flag cleared: the actor root comes back"
         );
     }
 

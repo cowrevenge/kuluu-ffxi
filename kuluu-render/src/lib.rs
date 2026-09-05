@@ -305,6 +305,9 @@ impl<S: SceneSource + Resource + Component<Mutability = bevy::ecs::component::Mu
                 (
                     (
                         sync_entities_system,
+                        // Chained after sync: on a dirty frame that sets InvisFlag, sync
+                        // resets the orb material to its kind handle first and this blanks it.
+                        scene::apply_invis_flag_system,
                         sync_entity_looks_system,
                         scene::ensure_self_lookcomp_system,
                         scene::ensure_self_render_pos_system,

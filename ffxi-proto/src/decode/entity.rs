@@ -233,6 +233,12 @@ pub struct CharFlags {
     pub new_character: bool,
     pub mentor: bool,
 
+    /// `Flags1.InvisFlag` (bit 29): the server's player-invisibility bit — set
+    /// for PCs only, when a GM hides themselves or an EFFECTFLAG_INVISIBLE
+    /// status effect is active. Retail keeps such players targetable but draws
+    /// nothing: no model, no nameplate.
+    pub invis: bool,
+
     /// `Flags1.TargetOffFlag` (bit 19): the server's untargetable bit. For
     /// NPC/MOB/PET/TRUST that word carries `m_flags` — LSB writes it at
     /// `ref<uint32>(0x21)` under UPDATE_HP, so ENTITYFLAGS
@@ -271,6 +277,7 @@ impl CharFlags {
             allegiance: field(f3, flags3::BALLISTA_TEAM, flags3::BALLISTA_TEAM_BITS) as u8,
             new_character: bit(f3, flags3::NEW_CHARACTER),
             mentor: bit(f3, flags3::MENTOR),
+            invis: bit(f1, flags1::INVIS),
             untargetable: bit(f1, flags1::TARGET_OFF),
         }
     }
@@ -302,6 +309,11 @@ mod flags1 {
     /// (0x800) lands: LSB writes the u16 at upstream offset 0x21, i.e. bytes
     /// 1-2 of this word.
     pub const TARGET_OFF: u32 = 19;
+    /// `InvisFlag` — bit 29 in char_update.cpp's `flags1_t`. LSB sets it for
+    /// PCs only: `m_isGMHidden || HasStatusEffectByFlag(EFFECTFLAG_INVISIBLE)`
+    /// (vendor/server/src/map/packets/char_update.cpp:316, char_status.cpp:287).
+    /// entity_update declares the same bit but never writes it.
+    pub const INVIS: u32 = 29;
 }
 
 // vendor/server/src/map/packets/char_update.cpp `flags2_t`
@@ -785,7 +797,7 @@ mod char_flags_tests {
     /// one field only. Catches a shift that silently aliases a neighbour.
     #[test]
     fn each_flag1_bit_is_isolated() {
-        let probes: [FlagProbe; 10] = [
+        let probes: [FlagProbe; 11] = [
             (flags1::MONSTER, |f| f.monster),
             (flags1::LFG, |f| f.lfg),
             (flags1::ANONYMOUS, |f| f.anonymous),
@@ -795,6 +807,7 @@ mod char_flags_tests {
             (flags1::LINKSHELL, |f| f.linkshell),
             (flags1::LINKDEAD, |f| f.linkdead),
             (flags1::TARGET_OFF, |f| f.untargetable),
+            (flags1::INVIS, |f| f.invis),
             (flags1::BAZAAR, |f| f.bazaar),
         ];
         for (shift, get) in probes {

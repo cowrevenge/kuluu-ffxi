@@ -672,6 +672,7 @@ pub fn char_flags_to_wire(f: ffxi_proto::decode::CharFlags) -> wire::CharFlags {
         allegiance: f.allegiance,
         new_character: f.new_character,
         mentor: f.mentor,
+        invis: f.invis,
         untargetable: f.untargetable,
     }
 }

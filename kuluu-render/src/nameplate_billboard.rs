@@ -338,17 +338,21 @@ pub fn update_nameplate_billboards_system(
         }
 
         // Server-hidden entities draw no plate — namevis VIS_HIDE_NAME
-        // (mannequins, "blank" cutscene actors) or STATUS_TYPE::INVISIBLE
-        // (worms underground). Retail shows nothing for either; the model is
-        // hidden by sync_entities_system on the same signals. Piece 7 reads
-        // the live record instead of a snapshot-rebuilt set: the cull moves
-        // with the packet that changed it, no rebuild frame required. Self is
-        // exempt — the server never hides players, and a stray byte must not
-        // delete our own plate (same exemption as the model).
-        if !is_self
-            && table
-                .get(np.entity_id)
-                .is_some_and(|r| r.is_invisible() || r.name_hidden())
+        // (mannequins, "blank" cutscene actors), STATUS_TYPE::INVISIBLE
+        // (worms underground), or Flags1.InvisFlag on a PC (GM-hidden /
+        // EFFECTFLAG_INVISIBLE). Retail shows nothing for any of them: the model
+        // is hidden by sync_entities_system / apply_invis_flag_system on the same
+        // signals, and retail's CanBuildActorName returns false while InvisFlag is
+        // set. Piece 7 reads the live record instead of a snapshot-rebuilt set:
+        // the cull moves with the packet that changed it, no rebuild frame
+        // required. Self is exempt from the STATUS/namevis pair — the server never
+        // hides players on those bytes, and a stray byte must not delete our own
+        // plate (same exemption as the model). InvisFlag is NOT exempt: the server
+        // sets it for self too (m_isGMHidden), and retail hides the local player's
+        // name with it.
+        if table
+            .get(np.entity_id)
+            .is_some_and(|r| r.invis_flag() || (!is_self && (r.is_invisible() || r.name_hidden())))
         {
             hidden_status += 1;
             *vis = Visibility::Hidden;

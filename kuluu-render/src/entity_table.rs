@@ -112,7 +112,7 @@ impl EntityTable {
                 out.push(*id);
             }
         }
-        out.extend(self.removed_since_drain.drain(..));
+        out.extend(self.removed_since_drain.drain());
         out
     }
 

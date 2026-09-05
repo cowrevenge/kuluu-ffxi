@@ -77,7 +77,6 @@ pub mod weather;
 pub mod weather_fx;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod weather_particles;
-pub mod wobble_trace;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod zone_clouds;
 #[cfg(not(target_arch = "wasm32"))]
@@ -343,20 +342,6 @@ impl<S: SceneSource + Resource + Component<Mutability = bevy::ecs::component::Mu
                 bevy::prelude::RunFixedMainLoop,
                 scene::interpolate_self_transform_system
                     .in_set(bevy::prelude::RunFixedMainLoopSystems::AfterFixedMainLoop),
-            );
-
-        // Wobble-hunt trace (inert unless FFXI_WOBBLE_TRACE is set): count sim
-        // ticks per render frame, and log final player+camera transforms at the
-        // very end of Update — after resolve_camera (kuluu crate) has written
-        // the eye. `.after()` on a foreign system isn't expressible from here,
-        // so anchor to PostUpdate-adjacent ordering instead: run in PostUpdate
-        // BEFORE transform propagation, which is after every Update writer.
-        app.init_resource::<wobble_trace::WobbleFixedTicks>()
-            .add_systems(FixedUpdate, wobble_trace::count_fixed_tick)
-            .add_systems(
-                PostUpdate,
-                wobble_trace::wobble_trace_system
-                    .before(bevy::transform::TransformSystems::Propagate),
             );
 
         #[cfg(not(target_arch = "wasm32"))]

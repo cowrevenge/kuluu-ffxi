@@ -51,6 +51,8 @@ pub fn state_to_snapshot(s: &SessionState) -> wire::SceneSnapshot {
             shutdown: c.shutdown,
         }),
 
+        logout_cancel_seq: s.logout_cancel_seq,
+
         death_homepoint_secs: s.death_homepoint_secs,
 
         weather: s.current_weather.map(wire::Weather::from_lsb),

@@ -41,13 +41,11 @@ const ROOT_ENTRIES: &[&str] = &[
     ROOT_CURRENT_TIME,
     ROOT_COMMUNICATION,
     "Graphics",
-    // DEV-ONLY: the Debug menu (incl. its Retail+ section) renders only in a
-    // debug build that also passes `--features debug-menu`. The extra
-    // `debug_assertions` term is load-bearing: it is always false in a
-    // `--release` build, so release can never show this entry even if someone
-    // builds with `--features debug-menu` — retail parity holds by construction,
-    // not just by remembering to drop the flag.
-    #[cfg(all(debug_assertions, feature = "debug-menu"))]
+    // DEV-ONLY: the Debug menu (incl. its Retail+ section) renders only when
+    // built with `--features debug-menu` — opt-in and off by default, so retail
+    // parity holds as long as shipped builds never enable the flag. Local test
+    // batches (build_cowland.bat) pass it on RELEASE builds on purpose.
+    #[cfg(feature = "debug-menu")]
     "Debug",
     ROOT_SHUT_DOWN,
     ROOT_LOG_OUT,

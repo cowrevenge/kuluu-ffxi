@@ -72,6 +72,10 @@ pub struct LogoutCountdownAnchor {
     pub server_seconds: Option<u16>,
     pub shutdown: bool,
     pub anchor_secs: f64,
+
+    /// Last `logout_cancel_seq` seen in the snapshot. An increase is the
+    /// explicit stand-up-cancel signal (see SessionState::logout_cancel_seq).
+    pub cancel_seq: u64,
 }
 
 #[derive(Component)]
@@ -186,6 +190,15 @@ pub fn update_logout_countdown(
     mut label_q: Query<&mut Text, With<LogoutCountdownLabel>>,
 ) {
     let now = time.elapsed_secs_f64();
+
+    // Explicit server-side cancel (stand-up drops LEAVEGAME with no 0x053):
+    // a bump of the monotonic seq clears our optimistic countdown so the banner
+    // stops drawing even when no tick ever anchored it. Checked BEFORE request
+    // handling so a /shutdown typed on the same frame as stand-up still arms.
+    if scene_state.snapshot.logout_cancel_seq > anchor.cancel_seq {
+        anchor.cancel_seq = scene_state.snapshot.logout_cancel_seq;
+        optimistic.state = OptimisticState::None;
+    }
 
     let mut latest_request: Option<LogoutRequested> = None;
     for ev in requests.read() {

@@ -35,10 +35,14 @@ fn zone_in_weather_survives_the_zone_change_clear() {
 // Stand-up cancels leavegame server-side with no 0x053 cancel packet; the
 // heal→walk transition folds in as LogoutCountdownCancelled and must drop a
 // live countdown. A cancel with nothing active is a no-op fold (no churn).
+// Only a cancel of a LIVE countdown bumps logout_cancel_seq — that bump is
+// the HUD's explicit stop-drawing signal, so it must not fire on plain
+// stand-ups.
 #[test]
 fn logout_countdown_cancelled_clears_the_live_countdown() {
     let mut s = SessionState::default();
     assert!(!s.apply_event(&AgentEvent::LogoutCountdownCancelled));
+    assert_eq!(s.logout_cancel_seq, 0);
     s.apply_event(&AgentEvent::LogoutCountdown {
         seconds_remaining: 25,
         shutdown: true,
@@ -46,6 +50,10 @@ fn logout_countdown_cancelled_clears_the_live_countdown() {
     assert_eq!(s.logout_countdown.map(|c| c.seconds_remaining), Some(25));
     assert!(s.apply_event(&AgentEvent::LogoutCountdownCancelled));
     assert_eq!(s.logout_countdown, None);
+    assert_eq!(s.logout_cancel_seq, 1);
+    // Second stand-up with nothing pending: no-op fold, seq stays put.
+    assert!(!s.apply_event(&AgentEvent::LogoutCountdownCancelled));
+    assert_eq!(s.logout_cancel_seq, 1);
 }
 
 #[test]

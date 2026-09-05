@@ -4376,6 +4376,7 @@ mod cull_tests {
             mount: None,
             status,
             char_flags: Default::default(),
+            monstrosity: false,
         }
     }
 

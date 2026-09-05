@@ -1525,6 +1525,7 @@ mod tests {
             mount: None,
             status: 0,
             char_flags: Default::default(),
+            monstrosity: false,
         });
         let rows = widescan_rows(&snap);
         assert_eq!(rows[0].label, "Orcish Fodder (Lv12)");

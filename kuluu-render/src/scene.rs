@@ -1093,6 +1093,7 @@ mod tests {
                 invis,
                 ..Default::default()
             },
+            monstrosity: false,
         }
     }
 
@@ -1246,6 +1247,7 @@ mod tests {
             mount: None,
             status: 0,
             char_flags: Default::default(),
+            monstrosity: false,
         }
     }
 }

@@ -417,6 +417,19 @@ pub fn update_nameplate_billboards_system(
             text: np.base_name.clone(),
             ..inputs.clone()
         };
+        // mob_hp diagnostic: fires only when the re-raster is driven by an hp
+        // change (name/color/marker changes do not log). Paired with the
+        // session-side "0x0E UPDATE_HP" line, this proves or breaks the
+        // snapshot -> billboard link.
+        if np.rastered.as_ref().map(|done| done.hp) != Some(want.hp) {
+            tracing::info!(
+                target: "mob_hp",
+                id = np.entity_id,
+                old = ?np.rastered.as_ref().map(|done| done.hp),
+                new = ?want.hp,
+                "nameplate re-raster (hp change)"
+            );
+        }
         let Some(mat_data) = materials.get_mut(&mat.0) else {
             continue;
         };

@@ -1128,6 +1128,22 @@ fn handle_sub_packet(
                 let send_flag = sub.data.get(6).copied().unwrap_or(0);
                 let hp_pct = (send_flag & 0x04 != 0).then_some(head.hpp);
 
+                // mob_hp diagnostic: UPDATE_HP on a Mob/Pet is event-driven —
+                // the server only sets the bit when HP actually changes, so this
+                // logs once per real change. If these lines stop arriving while
+                // you hit a mob, the break is upstream of the fold; if they
+                // arrive but the bar still does not move, it is downstream.
+                if hp_pct.is_some() && matches!(kind, EntityKind::Mob | EntityKind::Pet) {
+                    tracing::info!(
+                        target: "mob_hp",
+                        id = head.unique_no,
+                        ?kind,
+                        send_flag = format!("0x{:02x}", send_flag),
+                        hpp = head.hpp,
+                        "0x0E UPDATE_HP"
+                    );
+                }
+
                 let look = if op == s2c::CHAR_NPC {
                     decode::LookData::decode_char_npc(sub.data)
                 } else if op == s2c::CHAR_PC {

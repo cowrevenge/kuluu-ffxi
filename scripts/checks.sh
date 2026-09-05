@@ -103,7 +103,8 @@ run_harness() {
   # Pure shell, no cargo — runs first in pre-push because it costs ~nothing.
   # ffxi-agent/ is deliberately out of scope: it ships its own real .claude/
   # tree as the runtime playbook for an agent playing the game.
-  local settings=".claude/settings.json" bad=0 link target cmd path doc
+  local settings=".claude/settings.json" codex_hooks=".codex/hooks.json"
+  local codex_config=".codex/config.toml" bad=0 link target cmd path doc
 
   # 1. Every tracked entry under .claude/ is a symlink resolving inside
   #    .agents/, or settings.json itself. Content never lives here.
@@ -143,6 +144,16 @@ run_harness() {
       bad=1
     fi
   done < <(jq -r '.hooks | to_entries[].value[].hooks[]?.command // empty' "$settings" 2>/dev/null)
+
+  if ! grep -qx 'hooks = true' "$codex_config" 2>/dev/null; then
+    echo "checks: harness — $codex_config does not enable native hooks" >&2
+    bad=1
+  fi
+  if ! jq -e '.hooks.SessionStart[0].hooks[0].command == ".agents/hooks/beads-prime-start.sh"' \
+    "$codex_hooks" >/dev/null 2>&1; then
+    echo "checks: harness — $codex_hooks must register the shared Beads context hook" >&2
+    bad=1
+  fi
 
   # 3. No tracked doc points readers at a root .claude/ path that isn't one the
   #    harness really owns — that is exactly the drift this stage exists to kill

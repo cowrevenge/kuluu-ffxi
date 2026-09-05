@@ -571,6 +571,7 @@ fn walk(
             speed_yps,
             dt,
             false,
+            true, // geometry ready: these matrices exercise real floor behavior
         );
         x += res.dx;
         y += res.dy;
@@ -605,7 +606,7 @@ fn walk_with_stops(
                 (0.0, 0.0)
             };
             let res = step(
-                geom, obstacles, &mut state, x, y, z, dx, dy, speed_yps, dt, false,
+                geom, obstacles, &mut state, x, y, z, dx, dy, speed_yps, dt, false, true,
             );
             x += res.dx;
             y += res.dy;

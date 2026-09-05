@@ -239,6 +239,7 @@ pub fn step(
     speed_yps: f32,
     dt: f32,
     noclip: bool,
+    geometry_ready: bool,
 ) -> StepResult {
     let feet_xz = Vec2::new(x, -y);
     let feet_y = -z_wire;
@@ -327,37 +328,60 @@ pub fn step(
     // ---- 3. Vertical --------------------------------------------------------
     let mut y_new = feet_y;
     let decision = if was_airborne {
-        // Gravity (plan §2.3): vy -= g*dt clamped to -v_max, then integrate.
-        let prev_vy = match state.mode {
-            WalkMode::Airborne { vy } => vy,
-            _ => 0.0,
-        };
-        let vy = (prev_vy - state.fall.g * dt).max(-state.fall.v_max);
-        y_new = feet_y + vy * dt;
+        if !geometry_ready {
+            // No floor source for this zone yet (main MZB block not landed):
+            // nothing to fall through — hold the server-seeded height instead of
+            // integrating gravity against an empty column set. y_new stays feet_y.
+            state.mode = if want_len > 1e-6 {
+                WalkMode::Walking
+            } else {
+                WalkMode::Stopped
+            };
+            VerticalDecision::NoGeometry
+        } else {
+            // Gravity (plan §2.3): vy -= g*dt clamped to -v_max, then integrate.
+            let prev_vy = match state.mode {
+                WalkMode::Airborne { vy } => vy,
+                _ => 0.0,
+            };
+            let vy = (prev_vy - state.fall.g * dt).max(-state.fall.v_max);
+            y_new = feet_y + vy * dt;
 
-        // Landing: a floor entered the swept band [y_new, feet_y] under the
-        // footprint. Set y to it, mode by input, vy = 0.
-        match landing_floor(&sampler, new_xz, y_new, feet_y) {
-            Some(floor) => {
-                y_new = floor;
-                state.mode = if want_len > 1e-6 {
-                    WalkMode::Walking
-                } else {
-                    WalkMode::Stopped
-                };
-                VerticalDecision::Landed
-            }
-            None => {
-                state.mode = WalkMode::Airborne { vy };
-                VerticalDecision::Airborne { vy }
+            // Landing: a floor entered the swept band [y_new, feet_y] under the
+            // footprint. Set y to it, mode by input, vy = 0.
+            match landing_floor(&sampler, new_xz, y_new, feet_y) {
+                Some(floor) => {
+                    y_new = floor;
+                    state.mode = if want_len > 1e-6 {
+                        WalkMode::Walking
+                    } else {
+                        WalkMode::Stopped
+                    };
+                    VerticalDecision::Landed
+                }
+                None => {
+                    state.mode = WalkMode::Airborne { vy };
+                    VerticalDecision::Airborne { vy }
+                }
             }
         }
     } else if !grounded_now {
-        // Support missed: no floor within the step band under the footprint —
-        // a ledge, a hole wider than the footprint. Enter Airborne from rest;
-        // this tick holds height (the fall starts next tick).
-        state.mode = WalkMode::Airborne { vy: 0.0 };
-        VerticalDecision::Airborne { vy: 0.0 }
+        if !geometry_ready {
+            // Same hold from rest: a zone whose floor has not landed is not a
+            // ledge — there is simply no geometry to be off of yet.
+            state.mode = if want_len > 1e-6 {
+                WalkMode::Walking
+            } else {
+                WalkMode::Stopped
+            };
+            VerticalDecision::NoGeometry
+        } else {
+            // Support missed: no floor within the step band under the footprint —
+            // a ledge, a hole wider than the footprint. Enter Airborne from rest;
+            // this tick holds height (the fall starts next tick).
+            state.mode = WalkMode::Airborne { vy: 0.0 };
+            VerticalDecision::Airborne { vy: 0.0 }
+        }
     } else {
         // Grounded: merge toward the target at speed_yps * dt per tick — that's
         // the whole blend model (plan §2.3). The field is only sampled when it
@@ -636,6 +660,37 @@ mod tests {
             Vec3::new(1.0, 0.0, 1.0),
         ];
         assert_eq!(tri_hits_column(wall, Vec2::new(1.0, 0.5)), None);
+    }
+
+    #[test]
+    fn missing_geometry_holds_z_instead_of_falling() {
+        // First-load race (kuluu-mo4q class): self enters the snapshot before
+        // this zone's main MZB block lands. With an empty column set every
+        // support probe misses — without the hold, that reads as "no floor in
+        // reach" and gravity integrates from the server seed forever (each
+        // fallen z reported via Move is mirrored into self_pos by the session,
+        // so no resync ever fires). geometry_ready=false must hold wire z at
+        // the seed; once ready flips true with still no floor underfoot, the
+        // fall starts again (a ledge over a hole is not a load race).
+        let dt = 1.0 / 60.0;
+        let geom = MzbCollisionGeometry::default(); // no blocks: empty column set
+        let obstacles = ObstacleSet::default();
+        let mut state = Walker::default();
+
+        // A full second of idle ticks — far past the first tick where the old
+        // code entered Airborne and started integrating gravity.
+        for _ in 0..60 {
+            let res = step(
+                &geom, &obstacles, &mut state, 0.0, 0.0, 12.5, 0.0, 0.0, 5.0, dt, false, false,
+            );
+            assert_eq!(res.feet_z, 12.5, "z must hold while geometry is missing");
+            assert!(matches!(res.decision, VerticalDecision::NoGeometry));
+        }
+
+        let res = step(
+            &geom, &obstacles, &mut state, 0.0, 0.0, 12.5, 0.0, 0.0, 5.0, dt, false, true,
+        );
+        assert!(matches!(res.decision, VerticalDecision::Airborne { .. }));
     }
 
     #[test]

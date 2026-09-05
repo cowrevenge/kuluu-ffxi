@@ -928,6 +928,22 @@ pub fn dispatch_movement_system(
         prediction.pos
     };
 
+    // z-hold gate for the first-load fall (kuluu-mo4q class): the walker's
+    // vertical authority only runs against a collision set that belongs to THIS
+    // zone. Until the main-zone MZB block lands, `MzbCollisionGeometry` is empty
+    // or still the previous zone's — every column query misses, the idle tick
+    // reads "no floor in reach" and integrates gravity from the server seed.
+    // Each fallen z then goes back out via Move (the session mirrors our own
+    // commands into self_pos), so the 5-yalm resync never fires; once we have
+    // passed through the floor the landing band can't catch it, and under-floor
+    // recovery's debounce resets every tick because the reported z keeps moving.
+    // Hold wire z at the server value instead — the same fact scene.rs holds
+    // actor spawns behind and the loading overlay lifts on. A zone with no DAT
+    // mapping (effective id None) also holds: with no geometry there is nothing
+    // to fall onto, so standing at the server's z is the retail answer.
+    let geometry_ready = kuluu_render::snapshot::effective_zone_file_id(&state.snapshot)
+        .is_some_and(|file| env.collision.source_file_id() == Some(file));
+
     let locked_heading: Option<u8> = lock_on.target_id.and_then(|id| {
         state
             .snapshot
@@ -1010,6 +1026,7 @@ pub fn dispatch_movement_system(
             speed_yps,
             time.delta_secs(),
             env.hud_panels.noclip,
+            geometry_ready,
         );
         super::walker::debug::record_tick(
             &mut field_dbg,
@@ -1169,6 +1186,7 @@ pub fn dispatch_movement_system(
         speed_yps,
         time.delta_secs(),
         env.hud_panels.noclip,
+        geometry_ready,
     );
 
     let final_x = basis_pos.x + res.dx;

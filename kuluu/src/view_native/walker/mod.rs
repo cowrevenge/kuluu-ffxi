@@ -131,6 +131,10 @@ pub enum VerticalDecision {
     /// The field saw a wall face ahead capping the chain: held h0, no rise —
     /// the sweep slides on it.
     WallAhead,
+    /// No floor source for this zone yet (main MZB block not landed): gravity
+    /// off, height held. Distinct from Airborne — there is nothing to fall
+    /// through until the geometry can answer column queries.
+    NoGeometry,
 }
 
 impl VerticalDecision {
@@ -159,6 +163,7 @@ impl VerticalDecision {
             Self::Landed => "Landed".into(),
             Self::CeilingHold => "CeilHold".into(),
             Self::WallAhead => "WallAhead".into(),
+            Self::NoGeometry => "Hold(noGeom)".into(),
         }
     }
 }

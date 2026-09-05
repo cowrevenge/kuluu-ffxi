@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::OnceLock;
 use std::time::Instant;
 
@@ -456,6 +456,30 @@ pub struct SessionState {
     pub character: Option<String>,
     pub zone_id: Option<u16>,
     pub entities: Vec<Entity>,
+
+    /// Wire-id → index into [`Self::entities`]. Maintained in lockstep by every
+    /// `apply_event` arm that mutates the Vec, so self/lookup paths are O(1)
+    /// instead of O(N) scans. Transient: not serialized (nothing deserializes
+    /// `SessionState` today); rebuilt from scratch on zone change.
+    #[serde(skip)]
+    pub entity_index: HashMap<u32, usize>,
+
+    /// Entity ids whose records changed since the last drain of this set.
+    /// Stamped by the same `apply_event` arms that mutate [`Self::entities`] —
+    /// only when something actually changed — and drained by the translator to
+    /// build O(changed) scene deltas instead of full snapshots. A zone change
+    /// clears it (the repopulating upserts stamp back in). Transient: not
+    /// serialized.
+    #[serde(skip)]
+    pub pending_entity_upserts: HashSet<u32>,
+
+    /// Entity ids removed since the last drain, plus every live id at a zone
+    /// change (see `pending_entity_upserts`). An id present in both sets was
+    /// upserted then removed within one batch: removal wins — the translator
+    /// must not emit it. Transient: not serialized.
+    #[serde(skip)]
+    pub pending_entity_removals: HashSet<u32>,
+
     pub party: Vec<PartyMember>,
 
     /// Monotonically increasing counter, bumped on every `ZoneChanged`. The
@@ -1388,6 +1412,16 @@ impl SessionState {
         self.check_result.as_mut().expect("just ensured Some")
     }
 
+    /// Takes both pending entity sets (leaving them empty). The translator
+    /// calls this once per translate cycle; ids present in `removals` win over
+    /// `upserts` — an upsert-then-remove within one batch nets to a removal.
+    pub fn take_pending_entities(&mut self) -> (HashSet<u32>, HashSet<u32>) {
+        (
+            std::mem::take(&mut self.pending_entity_upserts),
+            std::mem::take(&mut self.pending_entity_removals),
+        )
+    }
+
     /// Folds `event` into the state, returning `true` only when the state
     /// actually mutated. Paired with `watch::Sender::send_if_modified` in the
     /// session loop so the watch channel only signals real changes and
@@ -1428,6 +1462,13 @@ impl SessionState {
                 self.death_homepoint_secs = None;
                 self.death_menu_offer = None;
 
+                // Every live id is gone: stamp them all as removals so a delta
+                // drained before the repopulating upserts still sees the wipe,
+                // and drop pending upserts (they belong to the old zone). The
+                // index dies with the Vec.
+                self.pending_entity_removals = self.entities.iter().map(|e| e.id).collect();
+                self.pending_entity_upserts.clear();
+                self.entity_index.clear();
                 self.entities.clear();
                 self.party.clear();
                 self.zone_generation = self.zone_generation.wrapping_add(1);
@@ -1465,15 +1506,19 @@ impl SessionState {
             AgentEvent::PositionChanged { pos } => {
                 let mut changed = false;
                 if let Some(char_id) = self.char_id {
-                    if let Some(ent) = self.entities.iter_mut().find(|e| e.id == char_id) {
+                    if let Some(idx) = self.entity_index.get(&char_id).copied() {
+                        let ent = &mut self.entities[idx];
                         changed = ent.pos != pos.pos
                             || ent.heading != pos.heading
                             || ent.speed != pos.speed
                             || ent.speed_base != pos.speed_base;
-                        ent.pos = pos.pos;
-                        ent.heading = pos.heading;
-                        ent.speed = pos.speed;
-                        ent.speed_base = pos.speed_base;
+                        if changed {
+                            ent.pos = pos.pos;
+                            ent.heading = pos.heading;
+                            ent.speed = pos.speed;
+                            ent.speed_base = pos.speed_base;
+                            self.pending_entity_upserts.insert(char_id);
+                        }
                     }
                 }
                 changed
@@ -1490,7 +1535,8 @@ impl SessionState {
                 let latched_self_look = (self.char_id == Some(entity.id))
                     .then_some(self.self_look)
                     .flatten();
-                if let Some(existing) = self.entities.iter_mut().find(|e| e.id == entity.id) {
+                if let Some(idx) = self.entity_index.get(&entity.id).copied() {
+                    let existing = &mut self.entities[idx];
                     let preserved_name = entity.name.clone().or_else(|| existing.name.clone());
                     let merged_kind = merge_kind(existing.kind, entity.kind);
 
@@ -1547,18 +1593,34 @@ impl SessionState {
                         false
                     } else {
                         *existing = merged;
+                        self.pending_entity_upserts.insert(entity.id);
                         true
                     }
                 } else {
                     let mut inserted = entity.clone();
                     inserted.look = inserted.look.or(latched_self_look);
+                    self.entity_index.insert(entity.id, self.entities.len());
                     self.entities.push(inserted);
+                    self.pending_entity_upserts.insert(entity.id);
                     true
                 }
             }
             AgentEvent::EntityRemoved { id } => {
                 let before = self.entities.len();
                 self.entities.retain(|e| e.id != *id);
+                if self.entities.len() != before {
+                    // retain shifted every index after the removed slot, so
+                    // rebuild rather than patch; an upsert pending for this id
+                    // in the same batch is voided — removal wins.
+                    self.entity_index = self
+                        .entities
+                        .iter()
+                        .enumerate()
+                        .map(|(i, e)| (e.id, i))
+                        .collect();
+                    self.pending_entity_upserts.remove(id);
+                    self.pending_entity_removals.insert(*id);
+                }
                 self.entities.len() != before
             }
             AgentEvent::NameExtractionMiss { miss } => {
@@ -1575,10 +1637,14 @@ impl SessionState {
                 kind,
                 hp_pct,
             } => {
-                let existing = self.entities.iter_mut().find(|e| {
-                    id.is_some_and(|target| e.id == target)
-                        || act_index.is_some_and(|target| e.act_index == target)
-                });
+                // Index first (the common case: the patcher knows the wire id);
+                // fall back to a scan when only an act_index was given.
+                let idx = match (id, act_index) {
+                    (Some(wire_id), _) => self.entity_index.get(wire_id).copied(),
+                    (None, Some(act)) => self.entities.iter().position(|e| e.act_index == *act),
+                    _ => None,
+                };
+                let existing = idx.and_then(|i| self.entities.get_mut(i));
                 let mut changed = false;
                 if let Some(existing) = existing {
                     if let Some(n) = name {
@@ -1599,6 +1665,9 @@ impl SessionState {
                             existing.hp_pct = Some(*hp);
                             changed = true;
                         }
+                    }
+                    if changed {
+                        self.pending_entity_upserts.insert(existing.id);
                     }
                 }
                 changed
@@ -1775,10 +1844,14 @@ impl SessionState {
             AgentEvent::ForcedMove { target, .. } => {
                 let mut changed = false;
                 if let Some(char_id) = self.char_id {
-                    if let Some(ent) = self.entities.iter_mut().find(|e| e.id == char_id) {
+                    if let Some(idx) = self.entity_index.get(&char_id).copied() {
+                        let ent = &mut self.entities[idx];
                         changed = ent.pos != target.pos || ent.heading != target.heading;
-                        ent.pos = target.pos;
-                        ent.heading = target.heading;
+                        if changed {
+                            ent.pos = target.pos;
+                            ent.heading = target.heading;
+                            self.pending_entity_upserts.insert(char_id);
+                        }
                     }
                 }
                 changed
@@ -1915,9 +1988,13 @@ impl SessionState {
                 let mut changed = self.self_look != Some(*look);
                 self.self_look = Some(*look);
                 if let Some(char_id) = self.char_id {
-                    if let Some(ent) = self.entities.iter_mut().find(|e| e.id == char_id) {
+                    if let Some(idx) = self.entity_index.get(&char_id).copied() {
+                        let ent = &mut self.entities[idx];
                         changed |= ent.look != Some(*look);
-                        ent.look = Some(*look);
+                        if changed && ent.look != Some(*look) {
+                            ent.look = Some(*look);
+                            self.pending_entity_upserts.insert(char_id);
+                        }
                     }
                 }
                 changed

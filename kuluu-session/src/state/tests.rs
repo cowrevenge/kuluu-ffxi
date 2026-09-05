@@ -2185,3 +2185,153 @@ fn _agentevent_is_additive_only(x: &AgentEvent) {
         AgentEvent::AuctionCancelResult { .. } => (),
     }
 }
+
+// Piece 0 (entity-table): the wire-id index must stay in lockstep with the
+// entities Vec across every mutation path, and the pending sets must carry
+// exactly the ids that changed since the last drain.
+
+#[test]
+fn entity_index_stays_in_lockstep_with_the_vec() {
+    let mut s = SessionState::default();
+    for id in [10u32, 20, 30] {
+        assert!(s.apply_event(&AgentEvent::EntityUpserted {
+            entity: make_test_entity(id, Some("m"), EntityKind::Mob),
+            pos_present: true,
+        }));
+    }
+    for (i, e) in s.entities.iter().enumerate() {
+        assert_eq!(s.entity_index.get(&e.id), Some(&i));
+    }
+
+    // Removing the middle one shifts every later slot; the index must follow.
+    assert!(s.apply_event(&AgentEvent::EntityRemoved { id: 20 }));
+    for (i, e) in s.entities.iter().enumerate() {
+        assert_eq!(s.entity_index.get(&e.id), Some(&i));
+    }
+    assert!(!s.entity_index.contains_key(&20));
+
+    // A fresh insert lands at the tail.
+    assert!(s.apply_event(&AgentEvent::EntityUpserted {
+        entity: make_test_entity(40, None, EntityKind::Npc),
+        pos_present: true,
+    }));
+    for (i, e) in s.entities.iter().enumerate() {
+        assert_eq!(s.entity_index.get(&e.id), Some(&i));
+    }
+
+    // A zone change wipes the Vec and the index together.
+    s.apply_event(&AgentEvent::ZoneChanged {
+        from: None,
+        to: 103,
+        myroom: None,
+        mog_zone_flag: false,
+    });
+    assert!(s.entities.is_empty());
+    assert!(s.entity_index.is_empty());
+}
+
+#[test]
+fn pending_entity_sets_carry_exactly_the_changed_ids() {
+    let mut s = SessionState::default();
+
+    // Insert stamps; an identical re-upsert is a no-op fold and stamps nothing.
+    assert!(s.apply_event(&AgentEvent::EntityUpserted {
+        entity: make_test_entity(1, Some("a"), EntityKind::Mob),
+        pos_present: true,
+    }));
+    let (up, rem) = s.take_pending_entities();
+    assert_eq!(up, std::collections::HashSet::from([1u32]));
+    assert!(rem.is_empty());
+
+    let same = make_test_entity(1, Some("a"), EntityKind::Mob);
+    assert!(!s.apply_event(&AgentEvent::EntityUpserted {
+        entity: same,
+        pos_present: true,
+    }));
+    let (up, rem) = s.take_pending_entities();
+    assert!(up.is_empty(), "no-op upsert must not stamp");
+    assert!(rem.is_empty());
+
+    // A real change stamps again; removing an absent id stamps nothing.
+    let mut moved = make_test_entity(1, Some("a"), EntityKind::Mob);
+    moved.pos.z += 5.0;
+    assert!(s.apply_event(&AgentEvent::EntityUpserted {
+        entity: moved,
+        pos_present: true,
+    }));
+    assert!(!s.apply_event(&AgentEvent::EntityRemoved { id: 999 }));
+    let (up, rem) = s.take_pending_entities();
+    assert_eq!(up, std::collections::HashSet::from([1u32]));
+    assert!(rem.is_empty());
+
+    // Upsert-then-remove in one batch nets to a removal.
+    assert!(s.apply_event(&AgentEvent::EntityUpserted {
+        entity: make_test_entity(2, None, EntityKind::Npc),
+        pos_present: true,
+    }));
+    assert!(s.apply_event(&AgentEvent::EntityRemoved { id: 2 }));
+    let (up, rem) = s.take_pending_entities();
+    assert!(up.is_empty(), "voided upsert must not survive the drain");
+    assert_eq!(rem, std::collections::HashSet::from([2u32]));
+
+    // A zone change marks every live id removed and clears pending upserts.
+    assert!(s.apply_event(&AgentEvent::EntityUpserted {
+        entity: make_test_entity(3, None, EntityKind::Mob),
+        pos_present: true,
+    }));
+    s.apply_event(&AgentEvent::ZoneChanged {
+        from: Some(103),
+        to: 104,
+        myroom: None,
+        mog_zone_flag: false,
+    });
+    let (up, rem) = s.take_pending_entities();
+    assert!(up.is_empty());
+    // Entity 1 is still live at the wipe, so both ids are marked removed.
+    assert_eq!(rem, std::collections::HashSet::from([1u32, 3]));
+
+    // Repopulating upserts after the wipe stamp back in.
+    assert!(s.apply_event(&AgentEvent::EntityUpserted {
+        entity: make_test_entity(4, None, EntityKind::Mob),
+        pos_present: true,
+    }));
+    let (up, rem) = s.take_pending_entities();
+    assert_eq!(up, std::collections::HashSet::from([4u32]));
+    assert!(rem.is_empty());
+}
+
+#[test]
+fn self_position_events_stamp_the_self_id() {
+    let mut s = SessionState::default();
+    s.apply_event(&AgentEvent::Connected {
+        account_id: 1,
+        char_id: 7,
+        character: "Cow".into(),
+        zone_id: 103,
+    });
+    assert!(s.apply_event(&AgentEvent::EntityUpserted {
+        entity: make_test_entity(7, Some("Cow"), EntityKind::Pc),
+        pos_present: true,
+    }));
+    s.take_pending_entities();
+
+    // A moved self position stamps the self id; an identical one does not.
+    let p1 = Position {
+        pos: Vec3 {
+            x: 1.0,
+            y: 2.0,
+            z: 9.0,
+        },
+        heading: 4,
+        speed: 5,
+        speed_base: 5,
+    };
+    assert!(s.apply_event(&AgentEvent::PositionChanged { pos: p1 }));
+    let (up, rem) = s.take_pending_entities();
+    assert_eq!(up, std::collections::HashSet::from([7u32]));
+    assert!(rem.is_empty());
+
+    assert!(!s.apply_event(&AgentEvent::PositionChanged { pos: p1 }));
+    let (up, _) = s.take_pending_entities();
+    assert!(up.is_empty(), "identical self position must not stamp");
+}

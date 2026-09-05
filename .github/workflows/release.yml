@@ -23,10 +23,9 @@ on:
 permissions:
   contents: write
 
-# Every build leg passes --no-default-features: dlss is a default kuluu feature
-# now, but its runners have no DLSS SDK (dlss_wgpu's build.rs panics without
-# DLSS_SDK), so the shipped binaries are built native-window-only. See
-# docs/DLSS.md.
+# Every build leg passes --no-default-features: dlss is opt-in and its runners
+# have no DLSS SDK (dlss_wgpu's build.rs panics without DLSS_SDK), so the
+# shipped binaries are built native-window-only. See docs/DLSS.md.
 
 jobs:
   setup:

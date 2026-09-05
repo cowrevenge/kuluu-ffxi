@@ -541,6 +541,16 @@ pub fn update_party_frame_system(
     // temporal double image ("double box"). The old self_hud updated text in
     // place and never churned entities, which is why it didn't have this.
     let snap = &state.snapshot;
+    // `enhanced-job-display` is the compile-time half of the Retail+ gate:
+    // without it a persisted `job_display` from an enhanced build can never
+    // light the column in a plain one.
+    #[cfg(feature = "enhanced-job-display")]
+    let job_on = graphics.job_display;
+    #[cfg(not(feature = "enhanced-job-display"))]
+    let job_on: bool = {
+        let _ = &graphics;
+        false
+    };
     // Cheap gate before the expensive key build. party_content_key deep-clones
     // the party list and scans every entity per member, so it must not run 60x
     // a second while idle. ingest_system runs in PreUpdate and sets `dirty`
@@ -558,13 +568,13 @@ pub fn update_party_frame_system(
                 && (!snap.treasure_pool.is_empty()) == last.treasure_nonempty
                 && snap.party == last.party
                 && snap.char_name.as_deref() == last.char_name.as_deref()
-                && graphics.job_display == last.job_display;
+                && job_on == last.job_display;
             if cheap_equal && !state.dirty {
                 return;
             }
         }
     }
-    let key = party_content_key(snap, colors.generation(), graphics.job_display);
+    let key = party_content_key(snap, colors.generation(), job_on);
     if !target.is_changed() && !settings.is_changed() && Some(&key) == last_key.as_ref() {
         return;
     }
@@ -705,7 +715,7 @@ pub fn update_party_frame_system(
                             target.id,
                             snap,
                             self_pos,
-                            graphics.job_display,
+                            job_on,
                         );
                     }
                     None => spawn_placeholder_row(host_cb, is_l1, &settings),

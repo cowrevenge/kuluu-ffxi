@@ -452,7 +452,9 @@ pub struct GraphicsSettings {
 
     /// Retail+ gate for the party-frame Job column. OFF by default — retail's
     /// party frame shows no job abbreviations; ours is an enhancement, so it
-    /// stays hidden unless explicitly enabled in the dev-only Debug menu.
+    /// stays hidden unless explicitly enabled in the dev-only Debug menu. The
+    /// `enhanced-job-display` feature is its compile-time half: without it this
+    /// field can never light the column (the row doesn't exist either).
     /// Persisted here so the choice sticks across runs.
     #[serde(default)]
     pub job_display: bool,
@@ -460,8 +462,10 @@ pub struct GraphicsSettings {
     /// Retail+ gate for the mob/pet HP readout on nameplates — both the green
     /// bar under the billboard plate and the "{name} {pct}%" suffix in the UI
     /// plates. OFF by default: retail shows no mob HP, so ours stays hidden
-    /// unless explicitly enabled in the dev-only Debug menu. Persisted here so
-    /// the choice sticks across runs.
+    /// unless explicitly enabled in the dev-only Debug menu. The
+    /// `enhanced-mob-hp-under` feature is its compile-time half: without it this
+    /// field can never light either (the row doesn't exist either). Persisted
+    /// here so the choice sticks across runs.
     #[serde(default)]
     pub mob_hp_under: bool,
 

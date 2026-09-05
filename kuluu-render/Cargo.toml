@@ -32,6 +32,17 @@ enhanced-buff-tooltips = []
 # scraped spell castTime.
 enhanced-cast-bar = []
 
+# Enhanced (non-retail) mob/pet HP readout on nameplates: the green bar under
+# the billboard plate plus the "{name} {pct}%" suffix in the UI plates. Retail
+# shows no mob HP; without this feature a persisted `mob_hp_under` can never
+# light either, and the Debug -> Retail+ row does not exist.
+enhanced-mob-hp-under = []
+
+# Enhanced (non-retail) party-frame Job column: L1 rows gain a job-icon column.
+# Retail's party frame shows no jobs; without this feature a persisted
+# `job_display` can never light it, and the Debug -> Retail+ row does not exist.
+enhanced-job-display = []
+
 # DEV-ONLY: renders the "Debug" entry (and its Retail+ section) on page 2 of
 # the Command menu. Shipped release builds never enable this, so retail parity
 # holds by construction; dev/test builds pass `--features debug-menu` explicitly.

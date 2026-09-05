@@ -32,10 +32,10 @@ cd "$(git rev-parse --show-toplevel)"
 # the release workflow's build flags (which pass --no-default-features because
 # their runners have no DLSS SDK).
 #
-# dlss is a default kuluu feature now, but building bevy/dlss needs the DLSS
-# SDK + Vulkan SDK + libclang in the environment (dlss_wgpu's build.rs panics
-# without them). When this checkout has the in-repo streamline/ SDK and the
-# vars are unset, point at it so bare gate runs keep dlss; anywhere else (CI
+# dlss is opt-in, but building bevy/dlss needs the DLSS SDK + Vulkan SDK +
+# libclang in the environment (dlss_wgpu's build.rs panics without them). When
+# this checkout has the in-repo streamline/ SDK and the vars are unset, point
+# at it so bare gate runs keep dlss in the lint graph; anywhere else (CI
 # runners, release legs, Steam Deck docker) drop default features so kuluu
 # builds without dlss.
 if [ -z "${DLSS_SDK:-}" ] && [ -d "streamline/sdk/include" ]; then
@@ -48,7 +48,7 @@ if [ -z "${LIBCLANG_PATH:-}" ] && [ -d "streamline/llvm/bin" ]; then
   export LIBCLANG_PATH="$PWD/streamline/llvm/bin"
 fi
 if [ -n "${DLSS_SDK:-}" ] && [ -n "${VULKAN_SDK:-}" ]; then
-  FEATURES=(--features native-window)
+  FEATURES=(--features native-window,dlss)
 else
   echo "checks: no DLSS SDK in the environment — building without the dlss feature"
   FEATURES=(--no-default-features --features native-window)

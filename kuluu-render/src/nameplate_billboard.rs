@@ -460,11 +460,20 @@ fn raster_key_for(
     let color = crate::nameplate_color::name_color_choice(ent, ctx)
         .resolve(name_colors)
         .unwrap_or(NAMEPLATE_FALLBACK_COLOR);
+    // `enhanced-mob-hp-under` is the compile-time half of this gate: without
+    // it a persisted `mob_hp_under` from an enhanced build can never light a
+    // bar in a plain one.
+    #[cfg(feature = "enhanced-mob-hp-under")]
     let hp = if show_mob_hp {
         matches!(ent.kind, EntityKind::Mob | EntityKind::Pet)
             .then_some(ent.hp_pct)
             .flatten()
     } else {
+        None
+    };
+    #[cfg(not(feature = "enhanced-mob-hp-under"))]
+    let hp: Option<u8> = {
+        let _ = show_mob_hp;
         None
     };
     RasterKey {

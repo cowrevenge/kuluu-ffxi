@@ -279,17 +279,19 @@ pub const DEBUG_NAMEPLATES: &str = "Nameplate Debug";
 pub const DEBUG_UI_SETTINGS: &str = "UI Settings";
 
 // Retail+ section (dev-only Debug menu): a separator row, the section label,
-// then three toggles. All three persist in GraphicsSettings, so each choice
-// survives restarts.
+// then the DLSS On/Off toggle plus — in enhanced builds only — Mob HP Under /
+// Job Display. All persist in GraphicsSettings, so each choice survives
+// restarts.
 pub const DEBUG_RETAIL_SEPARATOR: &str = "────────────────────────────";
 pub const DEBUG_RETAIL_LABEL: &str = "Retail+";
 /// Makes DLSS selectable in the Graphics menu. Does NOT turn DLSS on — with
 /// it off (the default) every DLSS row reads N/A even on capable machines.
 pub const RETAIL_DLSS_MENU: &str = "DLSS On/Off";
 /// Gates the mob/pet HP readout on nameplates (billboard bar + pct suffix;
-/// default off).
+/// default off). The row exists only with `enhanced-mob-hp-under`.
 pub const RETAIL_MOB_HP_UNDER: &str = "Mob HP Under";
-/// Gates the party-frame Job column (retail shows none; default off).
+/// Gates the party-frame Job column (retail shows none; default off). The row
+/// exists only with `enhanced-job-display`.
 pub const RETAIL_JOB_DISPLAY: &str = "Job Display";
 
 const DEBUG_ENTRIES: &[&str] = &[
@@ -310,7 +312,9 @@ const DEBUG_ENTRIES: &[&str] = &[
     DEBUG_RETAIL_SEPARATOR,
     DEBUG_RETAIL_LABEL,
     RETAIL_DLSS_MENU,
+    #[cfg(feature = "enhanced-mob-hp-under")]
     RETAIL_MOB_HP_UNDER,
+    #[cfg(feature = "enhanced-job-display")]
     RETAIL_JOB_DISPLAY,
 ];
 
@@ -1428,17 +1432,24 @@ fn format_row_body(
                         "off"
                     }
                 )
-            } else if label == RETAIL_MOB_HP_UNDER {
-                format!(
-                    "{label:<14}[{}]",
-                    if settings.mob_hp_under { "on" } else { "off" }
-                )
-            } else if label == RETAIL_JOB_DISPLAY {
-                format!(
-                    "{label:<14}[{}]",
-                    if settings.job_display { "on" } else { "off" }
-                )
             } else {
+                // The Retail+ toggles only exist in enhanced builds —
+                // DEBUG_ENTRIES omits their rows without the feature, so these
+                // labels are unreachable there.
+                #[cfg(feature = "enhanced-mob-hp-under")]
+                if label == RETAIL_MOB_HP_UNDER {
+                    return format!(
+                        "{label:<14}[{}]",
+                        if settings.mob_hp_under { "on" } else { "off" }
+                    );
+                }
+                #[cfg(feature = "enhanced-job-display")]
+                if label == RETAIL_JOB_DISPLAY {
+                    return format!(
+                        "{label:<14}[{}]",
+                        if settings.job_display { "on" } else { "off" }
+                    );
+                }
                 let on = debug_panel_state(label, panels, net_status_on, sound_on);
                 format!("{label:<14}[{}]", if on { "on" } else { "off" })
             }

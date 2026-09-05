@@ -343,16 +343,19 @@ fn activate_current_time(
 /// Retail+ section rows (dev-only Debug menu). Returns true when the label is
 /// one of them and it was handled here — the caller must not fall through to
 /// `toggle_debug_panel`. The live toggles flip GraphicsSettings fields, so
-/// `persist_graphics_on_change` writes graphics.json automatically.
+/// `persist_graphics_on_change` writes graphics.json automatically. Mob HP
+/// Under / Job Display only exist in enhanced builds (their rows are absent
+/// from DEBUG_ENTRIES without their feature).
 fn handle_retail_plus_row(
     label: &str,
     graphics: &mut kuluu_render::GraphicsSettings,
     scene_state: &mut SceneState,
 ) -> bool {
-    use kuluu_render::hud::menu::{
-        DEBUG_RETAIL_LABEL, DEBUG_RETAIL_SEPARATOR, RETAIL_DLSS_MENU, RETAIL_JOB_DISPLAY,
-        RETAIL_MOB_HP_UNDER,
-    };
+    #[cfg(feature = "enhanced-job-display")]
+    use kuluu_render::hud::menu::RETAIL_JOB_DISPLAY;
+    #[cfg(feature = "enhanced-mob-hp-under")]
+    use kuluu_render::hud::menu::RETAIL_MOB_HP_UNDER;
+    use kuluu_render::hud::menu::{DEBUG_RETAIL_LABEL, DEBUG_RETAIL_SEPARATOR, RETAIL_DLSS_MENU};
     match label {
         // Section chrome: no state, no banner.
         DEBUG_RETAIL_SEPARATOR | DEBUG_RETAIL_LABEL => true,
@@ -382,6 +385,7 @@ fn handle_retail_plus_row(
             );
             true
         }
+        #[cfg(feature = "enhanced-mob-hp-under")]
         RETAIL_MOB_HP_UNDER => {
             graphics.mob_hp_under = !graphics.mob_hp_under;
             push_system_chat_line(
@@ -393,6 +397,7 @@ fn handle_retail_plus_row(
             );
             true
         }
+        #[cfg(feature = "enhanced-job-display")]
         RETAIL_JOB_DISPLAY => {
             graphics.job_display = !graphics.job_display;
             push_system_chat_line(

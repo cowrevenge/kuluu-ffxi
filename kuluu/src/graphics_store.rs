@@ -71,9 +71,10 @@ fn take<T: serde::de::DeserializeOwned>(v: &serde_json::Value, key: &str) -> Opt
 /// into illegibility while nothing downstream bounds it.
 ///
 /// `dlss_supported` is deliberately NOT read back — it is `#[serde(skip)]`
-/// runtime capability, set by update_dlss_availability_system at startup. The
-/// Retail+ gates (`dlss_menu_enabled`, `job_display`) DO round-trip: they are
-/// user choices that must survive a restart (default off when absent).
+/// runtime capability, set by update_dlss_availability_system at startup.
+/// The Retail+ gates (`dlss_menu_enabled`, `job_display`, `mob_hp_under`) DO
+/// round-trip: they are user choices that must survive a restart (default off
+/// when absent).
 fn parse_graphics_settings(bytes: &[u8]) -> Result<GraphicsSettings> {
     use kuluu_render::{
         AaMode, CharacterRenderPath, DlssQuality, DynamicLights, QualityPreset, TextureFiltering,

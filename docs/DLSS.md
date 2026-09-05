@@ -1,9 +1,9 @@
 # DLSS Super Resolution
 
 NVIDIA DLSS SR support for the native viewer: upscaling + anti-aliasing in one
-pass, driven from the same graphics menus as every other setting. Part of the
-default build now (`dlss` is a default `kuluu` feature): a bare `cargo build`
-compiles the runtime plumbing and the menu rows go live on capable hardware.
+pass, driven from the same graphics menus as every other setting. OPT-IN via
+the `dlss` kuluu feature (`cargo build -p kuluu --features dlss`): with it on,
+the runtime plumbing compiles and the menu rows go live on capable hardware.
 SDK-less environments (CI runners, release legs, Steam Deck docker) build with
 `--no-default-features --features native-window`; there the plumbing is not
 compiled in and the menu rows permanently read `N/A`.
@@ -72,10 +72,10 @@ feature pulls in; its build.rs panics without the first two):
 4. Install clang (bindgen needs libclang; this repo's dev checkout:
    `LIBCLANG_PATH=<repo>\streamline\llvm\bin`).
 
-Set the three variables once in your user environment and every bare
-`cargo build -p kuluu` / `cargo run -p kuluu` includes DLSS — no feature flag,
-no wrapper script. `scripts/checks.sh` auto-sets them from `streamline/` when
-they are unset, so gate runs work without the user env vars.
+Set the three variables once in your user environment and every local build
+passes `--features dlss` (e.g. `cargo run -p kuluu --features dlss`).
+`scripts/checks.sh` auto-sets them from `streamline/` when they are unset, so
+gate runs work without the user env vars.
 
 SDK-less environments (CI runners, release legs, Steam Deck docker) build with
 `--no-default-features --features native-window`; that keeps bevy/dlss out of
@@ -134,8 +134,8 @@ Unconditional (every build): `AaMode::Dlss`, `DlssQuality`, the
 not on DLSS types). `dlss_supported` can only ever become true when the
 feature is compiled in, so all of it is dead-quiet on SDK-less builds.
 
-`#[cfg(feature = "dlss")]` only (the feature still exists — kuluu's default
-features enable it; SDK-less environments drop it via `--no-default-features`): `kuluu-render/src/graphics/dlss.rs`
+`#[cfg(feature = "dlss")]` only (opt-in: local dev/test builds pass
+`--features dlss`; SDK-less environments simply don't): `kuluu-render/src/graphics/dlss.rs`
 (capability probe, tier mapping, project id), `kuluu-render/src/graphics/dlss_nr.rs`
 (the NR pipeline — gated at runtime by `GraphicsSettings::nr_active`, which
 requires the AA mode to be Dlss as well as support) and its `kuluu-dlss-nr`

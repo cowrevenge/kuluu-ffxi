@@ -162,13 +162,18 @@ pub fn update_nameplates_system(
                     node.top = want_top;
                 }
 
-                // Retail+ gate: the "{name} {pct}%" suffix shares the
-                // billboard bar's toggle (off by default).
+                // Retail+ gate: the "{name} {pct}%" suffix shares the billboard
+                // bar's toggle (off by default); enhanced-mob-hp-under is its
+                // compile-time half, so a persisted on from an enhanced build
+                // can't light it in a plain one.
+                #[cfg(feature = "enhanced-mob-hp-under")]
                 let hp_pct = if settings.mob_hp_under {
                     hp_by_id.get(&np.entity_id).copied().flatten()
                 } else {
                     None
                 };
+                #[cfg(not(feature = "enhanced-mob-hp-under"))]
+                let hp_pct: Option<u8> = None;
                 let coord_str = format_coord(world_pos);
                 for child in children.iter() {
                     if let Ok((label, mut text)) = label_q.get_mut(child) {

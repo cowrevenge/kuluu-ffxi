@@ -228,6 +228,7 @@ pub struct EntitySyncQueries<'w, 's> {
         &'static mut MeshMaterial3d<StandardMaterial>,
         (With<WorldEntity>, Without<MorphIn>),
     >,
+    vis: Query<'w, 's, &'static mut Visibility, With<WorldEntity>>,
 }
 
 /// The two signals that say "this zone's floor has landed" — the same pair the
@@ -356,6 +357,19 @@ pub fn sync_entities_system(
                 if let Ok(mut m) = queries.mat.get_mut(existing) {
                     m.0 = mat;
                 }
+                // LSB STATUS_TYPE::INVISIBLE hides the model entirely (worms
+                // between dive and surface); hiding the root takes the skinned
+                // model child and the placeholder orb with it. The nameplate is
+                // culled on the same signals by update_nameplate_billboards_system.
+                // Self is exempt — the server never sets INVISIBLE on players,
+                // and a stray byte must not delete our own model.
+                if let Ok(mut v) = queries.vis.get_mut(existing) {
+                    *v = if !is_self && wire.is_invisible() {
+                        Visibility::Hidden
+                    } else {
+                        Visibility::default()
+                    };
+                }
                 // The spawn arm can only tag self once the id is known, and the
                 // player's own entity routinely arrives before it — every reader
                 // of this marker (camera, first-person, the self plate) would
@@ -378,6 +392,13 @@ pub fn sync_entities_system(
                     wire.look,
                     Some(EntityLook::Door { .. } | EntityLook::Transport { .. })
                 );
+                // A worm can be underground (INVISIBLE) when we zone in; hide it
+                // from the first frame instead of flashing orb/model for a beat.
+                let spawn_vis = if !is_self && wire.is_invisible() {
+                    Visibility::Hidden
+                } else {
+                    Visibility::default()
+                };
                 let mut spawn = commands.spawn((
                     crate::components::InGameEntity,
                     WorldEntity {
@@ -391,7 +412,7 @@ pub fn sync_entities_system(
                         rotation: heading_to_quat(wire.heading),
                         ..default()
                     },
-                    Visibility::default(),
+                    spawn_vis,
                 ));
                 if !suppress_orb {
                     spawn.insert((Mesh3d(pick_mesh(&mesh, wire.kind)), MeshMaterial3d(mat)));

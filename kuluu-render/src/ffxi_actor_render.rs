@@ -2470,7 +2470,10 @@ pub fn poll_load_actor_tasks(
                         Mesh3d(entity_mesh.morph_orb.clone()),
                         MeshMaterial3d(handle.clone()),
                         Transform::from_xyz(0.0, MORPH_COLUMN_PIVOT_Y, 0.0),
-                        Visibility::Visible,
+                        // Inherited (not Visible): an INVISIBLE entity's root is
+                        // Hidden and must not leak the morph column through it —
+                        // Visible would override the parent hide.
+                        Visibility::Inherited,
                         bevy::light::NotShadowCaster,
                         ChildOf(wire_entity),
                     ))

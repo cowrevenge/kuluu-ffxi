@@ -464,6 +464,103 @@ fn equipped_models_are_npcs_and_furniture_is_other() {
     );
 }
 
+/// A 0x0E CHAR_NPC body crafted exactly as LSB writes it —
+/// vendor/server/src/map/packets/entity_update.cpp `updateWith`, sub.data base = LSB 0x04:
+/// `[26]` hpp (LSB 0x1E), `[27]` animation (LSB 0x1F), `[28]` status (LSB 0x20, written on
+/// EVERY update regardless of mask), `[29..33)` m_flags u32 (LSB 0x21, UPDATE_HP only),
+/// `[39]` namevis (LSB 0x2B, UPDATE_HP only).
+fn worm_body(send_flag: u8, status: u8, m_flags: u32, namevis: u8) -> Vec<u8> {
+    // 48 bytes: PosHead::SIZE_WITH_BT_TARGET (44) plus the look-size word at
+    // sub.data[0x2C..0x2E] (LSB 0x30, entity_update.cpp `ref<uint16>(0x30)`),
+    // which classify_char_npc needs to see Some(0) = standard mob mesh.
+    let mut b = vec![0u8; 48];
+    b[0..4].copy_from_slice(&1000u32.to_le_bytes()); // unique_no
+    b[4..6].copy_from_slice(&DYNAMIC_TARGID.to_le_bytes()); // act_index -> Mob classify
+    b[6] = send_flag;
+    b[8..12].copy_from_slice(&1.5f32.to_le_bytes()); // x
+    b[12..16].copy_from_slice(&(-2.0f32).to_le_bytes()); // z
+    b[16..20].copy_from_slice(&0.0f32.to_le_bytes()); // y
+    b[24] = 5; // speed
+    b[26] = 100; // hpp
+    b[28] = status;
+    b[29..33].copy_from_slice(&m_flags.to_le_bytes());
+    b[39] = namevis;
+    b[0x2C] = 0; // look size: standard mob mesh (classify -> Mob)
+    b[0x2D] = 0;
+    b
+}
+
+fn feed_worm(s: &mut crate::state::SessionState, body: &[u8]) {
+    for ev in sub_packet_events(ffxi_proto::map::s2c::CHAR_NPC, body) {
+        if matches!(ev, AgentEvent::EntityUpserted { .. }) {
+            s.apply_event(&ev);
+        }
+    }
+}
+
+fn worm_entity(s: &crate::state::SessionState) -> &crate::state::Entity {
+    s.entities
+        .iter()
+        .find(|e| e.id == 1000)
+        .expect("worm present")
+}
+
+/// The worm's full dive/surface cycle as LSB drives it (mob_controller.cpp:1176-1290):
+/// spawn above ground -> dive (name hidden + untargetable; status stays NORMAL for the first
+/// 3 s) -> move underground (status INVISIBLE piggybacks on POS ticks) -> surface (one UPDATE_HP
+/// packet carries status=UPDATE(1) with the flag cleared; name stays hidden ~2 more seconds).
+/// The surfaced worm must be targetable again — this is the "stale targeting info" regression.
+#[test]
+fn worm_dive_surface_lifecycle_stays_targetable_after_emerging() {
+    const FLAG_UNTARGETABLE: u32 = 0x800; // ENTITYFLAGS, baseentity.h
+
+    let mut s = crate::state::SessionState::default();
+
+    // 1. Spawn above ground (UPDATE_ALL_MOB): NORMAL, targetable.
+    feed_worm(&mut s, &worm_body(0x0F, 0, 0, 0));
+    assert_eq!(worm_entity(&s).status, 0);
+    assert!(
+        crate::wire_translate::entity_to_wire(worm_entity(&s)).is_targetable(),
+        "spawned worm must be targetable"
+    );
+
+    // 2. Dive: UPDATE_HP carries name hidden + untargetable; status is still NORMAL for 3 s.
+    feed_worm(&mut s, &worm_body(0x04, 0, FLAG_UNTARGETABLE, 0x08));
+    assert!(
+        !crate::wire_translate::entity_to_wire(worm_entity(&s)).is_targetable(),
+        "diving worm must be untargetable"
+    );
+
+    // 3. Moving underground: the POS-only tick now carries status INVISIBLE(3); its flag bytes
+    // are zero-filled and must NOT clobber the preserved untargetable/namevis.
+    feed_worm(&mut s, &worm_body(0x01, 3, 0, 0));
+    assert_eq!(
+        worm_entity(&s).status,
+        3,
+        "POS-only tick must refresh status"
+    );
+    assert!(
+        !crate::wire_translate::entity_to_wire(worm_entity(&s)).is_targetable(),
+        "underground worm must stay untargetable"
+    );
+
+    // 4. Surface: one UPDATE_HP packet sets status=UPDATE(1) and clears the flag; name is still
+    // hidden for ~2 more seconds (HideName(false) carries no updatemask of its own).
+    feed_worm(&mut s, &worm_body(0x04, 1, 0, 0x08));
+    assert_eq!(worm_entity(&s).status, 1);
+    assert!(
+        crate::wire_translate::entity_to_wire(worm_entity(&s)).is_targetable(),
+        "surfaced worm must be targetable again (stale-info regression)"
+    );
+
+    // 5. Surfaced and roaming: POS-only ticks keep status=UPDATE(1).
+    feed_worm(&mut s, &worm_body(0x01, 1, 0, 0));
+    assert!(
+        crate::wire_translate::entity_to_wire(worm_entity(&s)).is_targetable(),
+        "surfaced worm must stay targetable while roaming"
+    );
+}
+
 fn v(x: f32, y: f32, z: f32) -> Vec3 {
     Vec3 { x, y, z }
 }

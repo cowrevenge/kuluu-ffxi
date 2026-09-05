@@ -233,8 +233,13 @@ fn nameplate_snap_line(tag: &str, s: NameplateFrameSnap) -> String {
         // explain.
         if s.bb_total > 0 || s.hidden > 0 {
             tail.push_str(&format!(
-                " bb {} visible of {} | self={} depth-gate={} gone={}",
-                s.bb_visible, s.bb_total, s.bb_hide_self, s.bb_hidden_depth, s.bb_despawned
+                " bb {} visible of {} | self={} status={} depth-gate={} gone={}",
+                s.bb_visible,
+                s.bb_total,
+                s.bb_hide_self,
+                s.bb_hidden_status,
+                s.bb_hidden_depth,
+                s.bb_despawned
             ));
         }
         format!("{}\n      {}", main, tail)

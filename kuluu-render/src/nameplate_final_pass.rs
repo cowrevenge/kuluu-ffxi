@@ -486,6 +486,8 @@ pub struct NameplateFrameSnap {
     pub bb_total: u32,
     /// Self-plate camera-mode cull.
     pub bb_hide_self: u32,
+    /// Server-hidden cull (namevis VIS_HIDE_NAME / STATUS_TYPE::INVISIBLE).
+    pub bb_hidden_status: u32,
     /// Behind-camera-plane / within 1 yalm gate.
     pub bb_hidden_depth: u32,
     /// Plates set Visible this frame (== plates that could be drawn).
@@ -515,6 +517,7 @@ impl Default for NameplateFrameSnap {
             far_alpha: 0.0,
             bb_total: 0,
             bb_hide_self: 0,
+            bb_hidden_status: 0,
             bb_hidden_depth: 0,
             bb_visible: 0,
             bb_despawned: 0,
@@ -552,6 +555,7 @@ const NAMEPLATE_SNAP_ZERO: NameplateFrameSnap = NameplateFrameSnap {
     far_alpha: 0.0,
     bb_total: 0,
     bb_hide_self: 0,
+    bb_hidden_status: 0,
     bb_hidden_depth: 0,
     bb_visible: 0,
     bb_despawned: 0,
@@ -636,6 +640,7 @@ fn extract_nameplates(
         dbg.cur.hidden = hidden;
         dbg.cur.bb_total = bb_debug.total;
         dbg.cur.bb_hide_self = bb_debug.hide_self;
+        dbg.cur.bb_hidden_status = bb_debug.hidden_status;
         dbg.cur.bb_hidden_depth = bb_debug.hidden_depth;
         dbg.cur.bb_visible = bb_debug.visible;
         dbg.cur.bb_despawned = bb_debug.despawned;

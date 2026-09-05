@@ -346,8 +346,10 @@ pub struct Entity {
     pub name_vis: Option<u8>,
 }
 
-// LSB STATUS_TYPE. vendor/server/src/map/entities/baseentity.h
-mod status_type {
+// LSB STATUS_TYPE. vendor/server/src/map/entities/baseentity.h.
+// Public so the renderer can hide models on INVISIBLE without re-declaring
+// the byte (single source of truth).
+pub mod status_type {
     pub const DISAPPEAR: u8 = 2;
     pub const INVISIBLE: u8 = 3;
     pub const STATUS_4: u8 = 4;
@@ -368,6 +370,15 @@ impl Entity {
     /// not name suppression. Suppresses the nameplate only — never targeting.
     pub fn name_hidden(&self) -> bool {
         self.name_vis.is_some_and(|v| v & 0x08 != 0)
+    }
+
+    /// LSB STATUS_TYPE::INVISIBLE: the server hides the model entirely —
+    /// worms between dive and surface (vendor/server/src/map/ai/controllers/
+    /// mob_controller.cpp). The vendored source only sets it on mobs; players
+    /// phase via namevis 0x80 instead. Hides model + nameplate; targeting is
+    /// already gated by [`Entity::status_selectable`].
+    pub fn is_invisible(&self) -> bool {
+        self.status == status_type::INVISIBLE
     }
 
     // Blacklist (not whitelist) so an undecoded byte fails open, staying targetable.
@@ -2184,7 +2195,7 @@ mod tests {
         assert_eq!(got, want, "SceneSnapshot fields changed: additive-only, update this pin deliberately and rebuild relay consumers together");
     }
 
-    const SNAPSHOT_DEFAULT_POSTCARD_HEX: &str = "0000000000000000000000000000000019190000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000";
+    const SNAPSHOT_DEFAULT_POSTCARD_HEX: &str = "000000000000000000000000000000001919000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000";
 
     /// Postcard is positional, not self-describing: field ORDER and TYPES are
     /// the wire format. Any reorder/retype (and any append) changes these

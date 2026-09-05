@@ -278,6 +278,7 @@ impl<S: SceneSource + Resource + Component<Mutability = bevy::ecs::component::Mu
             .init_resource::<scene::SelfAppearance>()
             .init_resource::<nameplate_billboard::BillboardFont>()
             .init_resource::<nameplate_billboard::NameplateBillboardDebug>()
+            .init_resource::<nameplate_billboard::SuppressedNameplates>()
             .init_resource::<ui_font::UiFont>()
             .add_plugins(nameplate_color::NameColorPlugin)
             .add_plugins(nameplate_icons::NameplateIconsPlugin)

@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use ab_glyph::{Font, FontArc, PxScale, ScaleFont};
+use bevy::ecs::system::SystemParam;
 use bevy::image::{Image, ImageSampler};
 use bevy::light::{NotShadowCaster, NotShadowReceiver};
 use bevy::prelude::*;
@@ -147,6 +148,10 @@ pub struct NameplateBillboardDebug {
     pub total: u32,
     /// Self-plate camera-mode cull (overhead self name in first person).
     pub hide_self: u32,
+    /// Server-hidden cull: namevis VIS_HIDE_NAME or STATUS_TYPE::INVISIBLE
+    /// (worms underground, mannequins) — the model is hidden on the same
+    /// signals by sync_entities_system.
+    pub hidden_status: u32,
     /// View-depth gate: behind the camera forward plane or within
     /// MIN_VIEW_DEPTH_YALMS of it. This is a half-plane test, not frustum.
     pub hidden_depth: u32,
@@ -248,6 +253,22 @@ pub fn self_plate_hidden(is_self: bool, mode: CameraMode) -> bool {
 /// meaning the packet did not carry.
 pub const NAMEPLATE_FALLBACK_COLOR: Color = Color::WHITE;
 
+/// Server-hidden cull set (namevis VIS_HIDE_NAME / STATUS_TYPE::INVISIBLE),
+/// rebuilt on snapshot frames by update_nameplate_billboards_system. A
+/// resource rather than a Local: the 16-param ceiling forces it into the
+/// derived BillboardDebugCull param, and Local's fetch lifetime does not
+/// survive that derive.
+#[derive(Resource, Default)]
+pub struct SuppressedNameplates(pub std::collections::HashSet<u32>);
+
+/// The 16-param ceiling is reached; bundle the debug sink with the
+/// server-hidden cull set so the status/namevis gate needs no new slot.
+#[derive(SystemParam)]
+pub struct BillboardDebugCull<'w> {
+    pub dbg_out: ResMut<'w, NameplateBillboardDebug>,
+    pub suppressed: ResMut<'w, SuppressedNameplates>,
+}
+
 pub fn update_nameplate_billboards_system(
     state: Res<SceneState>,
     settings: Res<crate::graphics::settings::GraphicsSettings>,
@@ -278,7 +299,7 @@ pub fn update_nameplate_billboards_system(
     name_colors: Res<crate::nameplate_color::NameColorTable>,
     icons: Res<crate::nameplate_icons::NameplateIcons>,
     mut commands: Commands,
-    mut dbg_out: ResMut<NameplateBillboardDebug>,
+    mut cull: BillboardDebugCull,
     mut raster_inputs: Local<std::collections::HashMap<u32, RasterKey>>,
 ) {
     let Ok((cam_t, projection)) = cam_q.single() else {
@@ -313,11 +334,17 @@ pub fn update_nameplate_billboards_system(
         state.dirty || name_colors.is_changed() || icons.is_changed() || settings.is_changed();
     if dirty {
         raster_inputs.clear();
+        // Rebuilt only on snapshot frames: namevis/status change with the
+        // server, and a stale id is harmless (its plate is gone or re-spawned).
+        cull.suppressed.0.clear();
         let ctx = crate::nameplate_color::SelfContext {
             self_id: self_char_id,
             party: &state.snapshot.party,
         };
         for ent in &state.snapshot.entities {
+            if ent.name_hidden() || ent.is_invisible() {
+                cull.suppressed.0.insert(ent.id);
+            }
             raster_inputs.insert(
                 ent.id,
                 raster_key_for(ent, ctx, &name_colors, settings.mob_hp_under),
@@ -328,6 +355,7 @@ pub fn update_nameplate_billboards_system(
     // Debug breakdown mirrors each gate below; see NameplateBillboardDebug.
     let mut total = 0u32;
     let mut hide_self = 0u32;
+    let mut hidden_status = 0u32;
     let mut hidden_depth = 0u32;
     let mut visible_n = 0u32;
     let mut despawned = 0u32;
@@ -338,6 +366,16 @@ pub fn update_nameplate_billboards_system(
             self_plate_hidden(is_self_billboard(np.entity_id, self_char_id), *camera_mode);
         if self_cull {
             hide_self += 1;
+            *vis = Visibility::Hidden;
+            continue;
+        }
+
+        // Server-hidden entities draw no plate — namevis VIS_HIDE_NAME
+        // (mannequins, "blank" cutscene actors) or STATUS_TYPE::INVISIBLE
+        // (worms underground). Retail shows nothing for either; the model is
+        // hidden by sync_entities_system on the same signals.
+        if cull.suppressed.0.contains(&np.entity_id) {
+            hidden_status += 1;
             *vis = Visibility::Hidden;
             continue;
         }
@@ -454,11 +492,12 @@ pub fn update_nameplate_billboards_system(
         np.rastered = Some(want.clone());
     }
 
-    dbg_out.total = total;
-    dbg_out.hide_self = hide_self;
-    dbg_out.hidden_depth = hidden_depth;
-    dbg_out.visible = visible_n;
-    dbg_out.despawned = despawned;
+    cull.dbg_out.total = total;
+    cull.dbg_out.hide_self = hide_self;
+    cull.dbg_out.hidden_status = hidden_status;
+    cull.dbg_out.hidden_depth = hidden_depth;
+    cull.dbg_out.visible = visible_n;
+    cull.dbg_out.despawned = despawned;
 }
 
 /// The full raster input for one entity: retail's name colour, its icon

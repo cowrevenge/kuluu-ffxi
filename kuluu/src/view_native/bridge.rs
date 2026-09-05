@@ -10,7 +10,9 @@ use tokio::sync::{broadcast, mpsc, watch};
 use tokio::task::JoinHandle;
 
 use kuluu_session::state::{AgentEvent, EntityChanges, SessionState};
-use kuluu_session::wire_translate::{entity_to_wire, event_to_viewer_event, state_to_snapshot};
+use kuluu_session::wire_translate::{
+    entity_to_wire, event_to_viewer_event, position_to_wire, state_to_snapshot,
+};
 
 // The session watch signals per folded packet event — far above frame rate in a
 // crowd — so the off-main-thread translator caps itself near the 120 Hz display
@@ -114,6 +116,17 @@ fn translate_frame(
                         .entities_upserted
                         .push(entity_to_wire(&guard.entities[idx]));
                 }
+            }
+            // `self_pos` is a snapshot scalar derived from the self record, and
+            // PositionChanged/ForcedMove mutate that record in place (stamping it
+            // as an upsert) without touching any other field. Without carrying
+            // it here, snap.self_pos stays frozen at zone entry on every
+            // steady-state movement frame, and the walker's 5-yalm resync
+            // (PREDICTION_RESYNC_YALMS in input.rs) rubber-bands the player
+            // back to spawn. Only carry when the self record actually exists —
+            // a default Position would snap the walker to 0,0,0.
+            if guard.char_id.is_some_and(|cid| upserts.contains(&cid)) {
+                delta.self_pos = guard.self_position().map(position_to_wire);
             }
             delta.entities_removed.extend(removals);
             (TranslatedFrame::Delta(delta), entity_count)
@@ -264,7 +277,7 @@ mod tests {
     use super::*;
     use kuluu_session::state::{
         ChatChannel, ChatLine, ContainerInfo, Entity, EntityKind, EquippedRef, ItemSlot,
-        PartyMember, ReactorGoalSnapshot, ReconnectInfo, Stage, Vec3,
+        PartyMember, Position, ReactorGoalSnapshot, ReconnectInfo, Stage, Vec3,
     };
 
     fn populated_state() -> SessionState {
@@ -675,6 +688,84 @@ mod tests {
             TranslatedFrame::Snapshot(snap) => assert_eq!(snap.chat.len(), 1),
             TranslatedFrame::Delta(_) => panic!("non-entity change must be a full snapshot"),
         }
+    }
+
+    #[test]
+    fn translate_frame_delta_carries_self_pos_when_self_record_changes() {
+        let mut s = SessionState::default();
+        s.apply_event(&AgentEvent::Connected {
+            account_id: 1,
+            char_id: 7,
+            character: "Cow".into(),
+            zone_id: 103,
+        });
+        let (state_tx, state_rx) = watch::channel(s);
+        let (changes_tx, changes_rx) = mpsc::unbounded_channel();
+        let mut resync = ResyncTracker::default();
+        translate_frame(&mut state_rx, &mut changes_rx, &mut resync); // prime
+
+        // Seed the self record so PositionChanged has an index entry to mutate.
+        fold_and_drain(
+            &state_tx,
+            &changes_tx,
+            AgentEvent::EntityUpserted {
+                entity: pc_entity(7),
+                pos_present: true,
+            },
+        );
+
+        // A server position echo mutates the self record in place; the delta
+        // must carry the new scalar or snap.self_pos freezes at zone entry and
+        // the walker rubber-bands back to spawn (PREDICTION_RESYNC_YALMS).
+        fold_and_drain(
+            &state_tx,
+            &changes_tx,
+            AgentEvent::PositionChanged {
+                pos: Position {
+                    pos: Vec3 {
+                        x: 10.0,
+                        y: 2.0,
+                        z: -4.0,
+                    },
+                    heading: 90,
+                    speed: 5,
+                    speed_base: 5,
+                },
+            },
+        );
+        match translate_frame(&mut state_rx, &mut changes_rx, &mut resync).frame {
+            TranslatedFrame::Delta(delta) => {
+                assert_eq!(delta.entities_upserted.len(), 1);
+                let self_pos = delta.self_pos.expect("self echo must carry the scalar");
+                assert_eq!(self_pos.pos.x, 10.0);
+                assert_eq!(self_pos.pos.y, 2.0);
+                assert_eq!(self_pos.pos.z, -4.0);
+                assert_eq!(self_pos.heading, 90);
+            }
+            TranslatedFrame::Snapshot(_) => panic!("steady-state change must be a delta"),
+        }
+
+        // An NPC-only upsert leaves the scalar untouched (None = no change).
+        fold_and_drain(
+            &state_tx,
+            &changes_tx,
+            AgentEvent::EntityUpserted {
+                entity: mob_entity(42),
+                pos_present: true,
+            },
+        );
+        match translate_frame(&mut state_rx, &mut changes_rx, &mut resync).frame {
+            TranslatedFrame::Delta(delta) => assert!(delta.self_pos.is_none()),
+            TranslatedFrame::Snapshot(_) => panic!("steady-state change must be a delta"),
+        }
+    }
+
+    fn pc_entity(id: u32) -> Entity {
+        let mut e = mob_entity(id);
+        e.kind = EntityKind::Pc;
+        e.name = Some("Cow".into());
+        e.hp_pct = None;
+        e
     }
 
     /// The 0x5D master volume is fanned across the music slots, so the count

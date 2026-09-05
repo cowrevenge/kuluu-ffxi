@@ -1511,7 +1511,11 @@ pub fn process_load_vos2_requests_ffxi(
         );
 
         let actor_height = (actor_max - actor_min).max(0.1);
-        commands.entity(bevy_e).try_insert(FfxiActor {
+        // Replace, same as the non-FFXI path above: an outfit's files can land
+        // on different frames, and each arrival rewrites the full cumulative
+        // range read back from q_actor — try_insert would freeze both components
+        // at the FIRST file's extent (its insert wins, later ones silently no-op).
+        commands.entity(bevy_e).insert(FfxiActor {
             skeleton: skeleton.clone(),
 
             dat_id: raw_dat_id_for_skeleton(skeleton),
@@ -1521,7 +1525,7 @@ pub fn process_load_vos2_requests_ffxi(
             min_local_y: actor_min,
             max_local_y: actor_max,
         });
-        commands.entity(bevy_e).try_insert(BakedActor {
+        commands.entity(bevy_e).insert(BakedActor {
             min_mesh_y: actor_min,
             actor_height,
         });

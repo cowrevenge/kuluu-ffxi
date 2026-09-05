@@ -31,6 +31,7 @@ use ffxi_dat::{walk_tree, ChunkKind, ChunkNode, DatRoot};
 
 use crate::combat_stance;
 use crate::dat_vos2::skeleton_file_id_for_race;
+use crate::scene::BakedActor;
 use crate::skinned_ffxi_material::{
     FfxiInstance, FfxiInstanceSlot, FfxiJointMatrices, FfxiLightingUniform, FfxiSkinRegistry,
     FfxiSkinSlot, FfxiSkinnedMaterial, FfxiSkinnedMaterialCache, ATTR_COLOR, ATTR_JOINT0,
@@ -188,6 +189,12 @@ pub struct PreparedParts {
     d3m_built: Vec<BuiltGroup>,
 
     bind_joints: FfxiJointMatrices,
+
+    /// Bind-pose bounds of the assembled actor in bevy space (feet at y≈0),
+    /// computed with the same facing/scale as `bind_joints` — i.e. the mesh as
+    /// drawn. Feeds BakedActor on spawn so nameplate/camera/hitbox anchors are
+    /// per-model instead of the 2.3 fallback (kuluu-81r8).
+    pub bounds: Option<(Vec3, Vec3)>,
 }
 
 pub struct PreparedActor {
@@ -259,6 +266,7 @@ fn prepare_actor_parts(
         skel_built,
         d3m_built,
         bind_joints,
+        bounds: loaded.bind_pose_bounds(facing_dir, scale),
     }
 }
 
@@ -2497,6 +2505,21 @@ pub fn poll_load_actor_tasks(
                 orb_emissive: orb.map(|(_, _, e)| e).unwrap_or(LinearRgba::BLACK),
             },
         ));
+
+        // The live path is the only model source that never reached a BakedActor
+        // write site, so every plate/camera/hitbox anchored at
+        // FALLBACK_ACTOR_HEIGHT (2.3) — one height for a Tarutaru and a Galka
+        // alike (kuluu-81r8). The bind-pose bounds are the mesh as drawn:
+        // actor_root sits at zero translation on the wire entity, so this local
+        // Y range is exactly what nameplate_anchor_y / hitbox_dims /
+        // third_person_anchor_y need. Replace semantics: re-equipping must move
+        // the anchor to the new outfit's extent (same rule as the VOS2 paths).
+        if let Some((lo, hi)) = prepared.parts.bounds {
+            commands.entity(wire_entity).insert(BakedActor {
+                min_mesh_y: lo.y,
+                actor_height: (hi.y - lo.y).max(0.1),
+            });
+        }
     }
 }
 
@@ -3477,6 +3500,7 @@ mod mesh_dedup_tests {
                 skel_built,
                 d3m_built: Vec::new(),
                 bind_joints: FfxiJointMatrices::default(),
+                bounds: None,
             },
         })
     }
@@ -3549,6 +3573,61 @@ mod pose_resolution_tests {
         }
 
         Some(load_pc(1, false, &[], None, None, None).expect("load Hume M"))
+    }
+
+    /// Pins the live-path anchor source against the real DAT (kuluu-81r8):
+    /// bind-pose bounds must put feet at y≈0 and differ per race — that is what
+    /// BakedActor carries to nameplate_anchor_y / hitbox_dims /
+    /// third_person_anchor_y. Before this test's fix the live path never wrote
+    /// BakedActor at all, so every plate anchored at FALLBACK_ACTOR_HEIGHT (2.3):
+    /// one height for a Tarutaru and a Galka alike. Self-skips without an install.
+    #[test]
+    fn bind_pose_bounds_are_feet_origin_and_race_specific() {
+        if DatRoot::from_env_or_default().is_err() {
+            return;
+        }
+        let mut heights: std::collections::HashMap<u8, f32> = std::collections::HashMap::new();
+        for race in 1..=8u8 {
+            let Ok(actor) = load_pc(race, false, &[], None, None, None) else {
+                continue;
+            };
+            let Some((lo, hi)) = actor.bind_pose_bounds(0.0, 1.0) else {
+                panic!("race {race}: no bind-pose bounds");
+            };
+            assert!(
+                lo.y.abs() < 0.05,
+                "race {race} feet not at the origin: min.y={:.3}",
+                lo.y
+            );
+            let h = hi.y - lo.y;
+            assert!(
+                h.is_finite() && h > 0.5,
+                "race {race}: implausible height {h}"
+            );
+            heights.insert(race, h);
+        }
+        // Hume M (1) vs Elvaan M (3): the bead's own anchor — Elvaan bakes to
+        // ~2.08 (vendor/server CharRace order, charentity.h:221).
+        let hume = *heights.get(&1).expect("Hume M loaded");
+        let elvaan = *heights.get(&3).expect("Elvaan M loaded");
+        assert!(
+            (1.5..2.1).contains(&hume),
+            "Hume M height {hume} drifted out of band"
+        );
+        assert!(
+            (1.9..2.4).contains(&elvaan),
+            "Elvaan M height {elvaan} drifted out of the ~2.08 band"
+        );
+        // The whole point: races must not all anchor at one height.
+        let mut hs = heights.values().copied();
+        let (lo_h, hi_h) = (
+            hs.clone().fold(f32::INFINITY, f32::min),
+            hs.fold(f32::NEG_INFINITY, f32::max),
+        );
+        assert!(
+            hi_h - lo_h > 0.5,
+            "races collapsed to one height: {heights:?}"
+        );
     }
 
     #[test]
@@ -4213,6 +4292,7 @@ mod actor_bounds_tests {
             }],
             d3m_built: Vec::new(),
             bind_joints: FfxiJointMatrices::default(),
+            bounds: None,
         };
         let mesh_handles = add_part_meshes(&parts, &mut meshes);
         let skin_slot = registry.alloc_skin();

@@ -56,14 +56,15 @@ use bevy::render::render_resource::{
         sampler as smp_entry, texture_2d, texture_depth_2d, texture_depth_2d_multisampled,
         uniform_buffer,
     },
-    BindGroup, BindGroupEntries, BindGroupLayoutDescriptor, BindGroupLayoutEntries, BlendComponent,
+    BindGroup, BindGroupEntries, BindGroupLayout, BindGroupLayoutDescriptor, BindGroupLayoutEntries,
+    BlendComponent,
     BlendFactor, BlendOperation, BlendState, Buffer, BufferBinding, BufferDescriptor,
     BufferInitDescriptor, BufferUsages, CachedRenderPipelineId, ColorTargetState, ColorWrites,
     CompareFunction, DepthBiasState, DepthStencilState, FragmentState, FrontFace, IndexFormat,
     MultisampleState, PipelineCache, PolygonMode, PrimitiveState, PrimitiveTopology,
     RenderPassDescriptor, RenderPipelineDescriptor, SamplerBindingType, ShaderStages, ShaderType,
-    StencilFaceState, StencilState, StoreOp, TextureFormat, TextureSampleType, VertexFormat,
-    VertexState, VertexStepMode,
+    StencilFaceState, StencilState, StoreOp, TextureFormat, TextureSampleType, TextureViewId,
+    VertexFormat, VertexState, VertexStepMode,
 };
 use bevy::render::renderer::{RenderContext, RenderDevice, RenderQueue, ViewQuery};
 use bevy::render::{
@@ -423,10 +424,20 @@ pub struct PlateDraw {
 
 /// GPU handles for one plate. The uniform buffer contents are rewritten every
 /// frame by `prepare_nameplate_bindings` (matrix/alpha change with movement).
+///
+/// `texture_view` is the id of the GpuImage view the bind group was built
+/// against. A billboard re-raster re-inserts its Image under the SAME asset
+/// handle, and bevy's render-asset prepare answers that with a NEW GpuImage
+/// (new wgpu texture + view) — the old one stays alive only because this bind
+/// group holds it. Keying the cache on entity alone therefore pinned every
+/// plate to its very first bake (the white spawn fallback) until the entity
+/// despawned; `prepare_nameplate_bindings` compares this id against the
+/// handle's current view each tick and rebuilds the bind group on mismatch.
 #[derive(Clone)]
 pub struct PlateBinding {
     uniforms: Buffer,
     bind_group: BindGroup,
+    texture_view: TextureViewId,
 }
 
 /// Render-side description of everything drawable this frame, plus the one view
@@ -458,6 +469,10 @@ pub struct NameplateFrameSnap {
     pub not_had_data: u32,
     /// Plates that got a bind group + uniform write this tick.
     pub bound: u32,
+    /// Plates whose bind group was rebuilt this tick because the texture behind
+    /// their handle changed (a re-raster landed). ~0 in steady state; a burst on
+    /// zone-in as ncol colours arrive is expected; constant nonzero = key flap.
+    pub rebound: u32,
     /// Render world GPU image cache size (texture-churn context).
     pub gpu_images_total: u32,
     /// Quads actually drawn into the operator view this tick.
@@ -662,47 +677,71 @@ fn prepare_nameplate_bindings(
 
     let mut no_gpu_image = 0u32;
     let mut not_had_data = 0u32;
+    let mut rebound = 0u32;
     for plate in &mut data.plates {
-        if cache.get(&plate.entity).is_none() {
-            let Some(img) = gpu_images.get(plate.texture_handle.id()).cloned() else {
-                no_gpu_image += 1; // texture still uploading — retries next frame
-                continue;
-            };
-            if !img.had_data {
+        // Resolve the handle's CURRENT GpuImage every tick, not just on a cache
+        // miss: a re-raster (colour fix, hp move, marker change) swaps the
+        // GpuImage behind the same handle, and a bind group built against the
+        // previous one keeps drawing the previous bake. While the replacement
+        // is still uploading (None / !had_data) the existing binding stays in
+        // use, so the plate never blinks during the swap.
+        let current = match gpu_images.get(plate.texture_handle.id()) {
+            Some(img) if img.had_data => Some(img),
+            Some(_) => {
                 not_had_data += 1;
-                continue;
+                None
             }
-            let uniforms = device.create_buffer(&BufferDescriptor {
-                label: Some("nameplate_plate_uniforms"),
-                size: PLATE_UNIFORM_SIZE as u64,
-                usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
-            let binding = PlateBinding {
-                bind_group: device.create_bind_group(
-                    "nameplate_plate_binding",
-                    &bind_group_layout,
-                    &BindGroupEntries::sequential((
-                        BufferBinding {
-                            buffer: &uniforms,
-                            offset: 0,
-                            size: None,
+            None => {
+                no_gpu_image += 1;
+                None
+            }
+        };
+
+        if let Some(img) = current {
+            let view_id = img.texture_view.id();
+            match cache.get_mut(&plate.entity) {
+                Some(existing) if existing.texture_view == view_id => {}
+                Some(existing) => {
+                    // Same plate, new texture: rebuild only the bind group.
+                    // The uniform buffer is texture-independent, keep it.
+                    existing.bind_group = plate_bind_group(
+                        &device,
+                        &bind_group_layout,
+                        &existing.uniforms,
+                        &gpu.view_uniforms,
+                        img,
+                    );
+                    existing.texture_view = view_id;
+                    rebound += 1;
+                }
+                None => {
+                    let uniforms = device.create_buffer(&BufferDescriptor {
+                        label: Some("nameplate_plate_uniforms"),
+                        size: PLATE_UNIFORM_SIZE as u64,
+                        usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
+                        mapped_at_creation: false,
+                    });
+                    let bind_group = plate_bind_group(
+                        &device,
+                        &bind_group_layout,
+                        &uniforms,
+                        &gpu.view_uniforms,
+                        img,
+                    );
+                    cache.insert(
+                        plate.entity,
+                        PlateBinding {
+                            uniforms,
+                            bind_group,
+                            texture_view: view_id,
                         },
-                        BufferBinding {
-                            buffer: &gpu.view_uniforms,
-                            offset: 0,
-                            size: None,
-                        },
-                        &img.texture_view,
-                        &img.sampler,
-                    )),
-                ),
-                uniforms,
-            };
-            cache.insert(plate.entity, binding);
+                    );
+                }
+            }
         }
-        if let Some(b) = cache.get(&plate.entity).cloned() {
-            plate.binding = Some(b);
+
+        if let Some(b) = cache.get(&plate.entity) {
+            plate.binding = Some(b.clone());
         }
     }
 
@@ -713,16 +752,9 @@ fn prepare_nameplate_bindings(
 
     // Rewrite this frame's uniforms for every plate that has a binding.
     let mut bound = 0u32;
-    for plate in &mut data.plates {
-        if let Some(b) = cache.get(&plate.entity).cloned() {
-            plate.binding = Some(b);
-        }
-        if plate.binding.is_some() {
-            bound += 1;
-        }
-    }
     for plate in &data.plates {
         if let Some(b) = &plate.binding {
+            bound += 1;
             queue_write(
                 &queue,
                 &b.uniforms,
@@ -739,9 +771,40 @@ fn prepare_nameplate_bindings(
         dbg.cur.no_gpu_image = no_gpu_image;
         dbg.cur.not_had_data = not_had_data;
         dbg.cur.bound = bound;
+        dbg.cur.rebound = rebound;
         // RenderAssets has no len in bevy 0.19 — count the GpuImage cache.
         dbg.cur.gpu_images_total = gpu_images.iter().count() as u32;
     }
+}
+
+/// The per-plate bind group: [plate uniforms, view uniforms, plate texture,
+/// plate sampler] in `plate_bgl_descriptor` order. Split out so a texture swap
+/// can rebuild exactly this without touching the uniform buffer.
+fn plate_bind_group(
+    device: &RenderDevice,
+    layout: &BindGroupLayout,
+    uniforms: &Buffer,
+    view_uniforms: &Buffer,
+    img: &GpuImage,
+) -> BindGroup {
+    device.create_bind_group(
+        "nameplate_plate_binding",
+        layout,
+        &BindGroupEntries::sequential((
+            BufferBinding {
+                buffer: uniforms,
+                offset: 0,
+                size: None,
+            },
+            BufferBinding {
+                buffer: view_uniforms,
+                offset: 0,
+                size: None,
+            },
+            &img.texture_view,
+            &img.sampler,
+        )),
+    )
 }
 
 /// [model mat4 (64 B)][fade alpha f32 @ 64][zero pad to 80] — the exact layout

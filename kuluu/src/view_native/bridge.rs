@@ -342,6 +342,7 @@ mod tests {
                 status: 1,
                 char_flags: Default::default(),
                 mount_id: None,
+                monstrosity: None,
             },
             Entity {
                 id: 0x1000_0102,
@@ -370,6 +371,7 @@ mod tests {
                 status: 1,
                 char_flags: Default::default(),
                 mount_id: None,
+                monstrosity: None,
             },
         ];
 
@@ -535,6 +537,7 @@ mod tests {
             status: 1,
             char_flags: Default::default(),
             mount_id: None,
+            monstrosity: None,
         }
     }
 

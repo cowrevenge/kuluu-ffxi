@@ -346,6 +346,12 @@ pub struct Entity {
     #[serde(default)]
     pub char_flags: CharFlags,
 
+    /// `GP_SERV_CHAR_PC.MonstrosityFlags` (body 0x3A) — the character is a
+    /// monstrosity (Feretory). Written in the Model block only; drives the retail
+    /// Monstrosity nameplate marker. See ffxi-proto's `PosHead::monstrosity`.
+    #[serde(default)]
+    pub monstrosity: bool,
+
     /// entity_update byte 0x2B (LSB `namevis`; PosHead `flags3 >> 24`), written
     /// under UPDATE_HP — vendor/server/src/map/packets/entity_update.cpp:357/:408.
     /// `None` until the first General-block update carries it; treated as visible,
@@ -1730,6 +1736,7 @@ mod tests {
                 mount: None,
                 status: 0,
                 char_flags: CharFlags::default(),
+                monstrosity: false,
                 name_vis: None,
             }],
             party: vec![],

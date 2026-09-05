@@ -62,6 +62,7 @@ fn upsert_with_speed(
             status: 0,
             char_flags: Default::default(),
             mount_id: None,
+            monstrosity: None,
         },
         pos_present: true,
     }

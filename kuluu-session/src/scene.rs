@@ -266,6 +266,7 @@ mod tests {
                 status: 0,
                 char_flags: Default::default(),
                 mount_id: None,
+                monstrosity: None,
             },
             pos_present: true,
         });
@@ -294,6 +295,7 @@ mod tests {
                 status: 0,
                 char_flags: Default::default(),
                 mount_id: None,
+                monstrosity: None,
             },
             pos_present: true,
         });
@@ -318,6 +320,7 @@ mod tests {
                 status: 0,
                 char_flags: Default::default(),
                 mount_id: None,
+                monstrosity: None,
             },
             pos_present: true,
         });
@@ -342,6 +345,7 @@ mod tests {
                 status: 0,
                 char_flags: Default::default(),
                 mount_id: None,
+                monstrosity: None,
             },
             pos_present: true,
         });

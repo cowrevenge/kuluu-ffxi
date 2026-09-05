@@ -592,6 +592,7 @@ fn apply_event_folds_in_documented_order() {
             status: 0,
             char_flags: Default::default(),
             mount_id: None,
+            monstrosity: None,
         },
         pos_present: true,
     });
@@ -621,6 +622,7 @@ fn apply_event_folds_in_documented_order() {
             status: 0,
             char_flags: Default::default(),
             mount_id: None,
+            monstrosity: None,
         },
         pos_present: true,
     });
@@ -710,6 +712,7 @@ fn make_test_entity(id: u32, name: Option<&str>, kind: EntityKind) -> Entity {
         status: 0,
         char_flags: Default::default(),
         mount_id: None,
+        monstrosity: None,
     }
 }
 
@@ -1295,6 +1298,7 @@ fn self_position_returns_self_entity_pos() {
             status: 0,
             char_flags: Default::default(),
             mount_id: None,
+            monstrosity: None,
         },
         pos_present: true,
     });
@@ -1850,6 +1854,7 @@ fn apply_event_dedupes_identical_entity_upserts() {
         status: 0,
         char_flags: Default::default(),
         mount_id: None,
+        monstrosity: None,
     };
 
     // First upsert inserts.
@@ -1919,6 +1924,7 @@ fn apply_event_dedupes_identical_self_position() {
             status: 0,
             char_flags: Default::default(),
             mount_id: None,
+            monstrosity: None,
         },
         pos_present: true,
     });

@@ -993,6 +993,7 @@ fn handle_sub_packet(
                             char_flags: None,
                             status: 0,
                             mount_id: None,
+                            monstrosity: None,
                         },
 
                         pos_present: true,
@@ -1172,6 +1173,10 @@ fn handle_sub_packet(
 
                 const UPDATE_POS: u8 = 0x01;
                 let pos_present = send_flag & UPDATE_POS != 0;
+                // sendflags_t.Model (bit 4) — the Model block that carries
+                // MonstrosityFlags. Distinct from General/UPDATE_HP, which does not
+                // refresh it (vendor/server/src/map/packets/entity_update.cpp:44).
+                const UPDATE_MODEL: u8 = 0x10;
                 let _ = event_tx.send(AgentEvent::EntityUpserted {
                     entity: Entity {
                         id: head.unique_no,
@@ -1203,6 +1208,12 @@ fn handle_sub_packet(
                         // once it does not.
                         mount_id: (send_flag & UPDATE_HP != 0)
                             .then(|| decode::PosHead::mount_index(sub.data))
+                            .flatten(),
+                        // MonstrosityFlags rides the Model block, not General —
+                        // char_update.cpp writes it only under `SendFlg.Model`. PC-only:
+                        // 0x0E has no such field.
+                        monstrosity: (op == s2c::CHAR_PC && send_flag & UPDATE_MODEL != 0)
+                            .then(|| decode::PosHead::monstrosity(sub.data))
                             .flatten(),
                     },
                     pos_present,
@@ -6470,6 +6481,7 @@ fn mh_door_entity(model: u16) -> Entity {
         char_flags: None,
         status: 0,
         mount_id: None,
+        monstrosity: None,
     }
 }
 

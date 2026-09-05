@@ -247,6 +247,14 @@ pub struct Entity {
     /// Preserved across pos-only updates like `look`, for the same reason.
     #[serde(skip)]
     pub mount_id: Option<u8>,
+
+    /// `GP_SERV_CHAR_PC.MonstrosityFlags` (body 0x3A) of the last Model-block
+    /// update. Written only under `SendFlg.Model` — vendor/server/src/map/packets/
+    /// char_update.cpp `CCharUpdatePacket::updateWith` — so a General-block update
+    /// does not refresh it; preserved across non-Model updates like `mount_id`.
+    /// Drives the retail Monstrosity nameplate marker (0xAB).
+    #[serde(skip)]
+    pub monstrosity: Option<bool>,
 }
 
 /// Which retail colour a run of a chat line takes. Retail renders some
@@ -1561,6 +1569,9 @@ impl SessionState {
                     let preserved_npc_state = entity.npc_state.or(existing.npc_state);
                     let preserved_char_flags = entity.char_flags.or(existing.char_flags);
                     let preserved_mount_id = entity.mount_id.or(existing.mount_id);
+                    // Model-block-gated at the source (char_update.cpp), so merge
+                    // like mount_id — never off pos_present.
+                    let preserved_monstrosity = entity.monstrosity.or(existing.monstrosity);
                     // UPDATE_HP-gated at the source (entity_update.cpp:357/:408), so
                     // merge like char_flags — never off pos_present.
                     let preserved_name_vis = entity.name_vis.or(existing.name_vis);
@@ -1596,6 +1607,7 @@ impl SessionState {
                         npc_state: preserved_npc_state,
                         char_flags: preserved_char_flags,
                         mount_id: preserved_mount_id,
+                        monstrosity: preserved_monstrosity,
                         pos: preserved_pos,
                         heading: preserved_heading,
                         speed: preserved_speed,

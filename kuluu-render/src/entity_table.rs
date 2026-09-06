@@ -106,16 +106,19 @@ impl EntityTable {
         self.records.is_empty()
     }
 
-    /// Ids upserted or removed since the last call; clears that state. A
-    /// same-window remove-then-upsert reports once, as an upsert (the record
-    /// exists); an upsert-then-remove reports once, as a removal (`get` is
-    /// None for it). Removal order within one drain is unspecified.
+    /// Ids upserted or removed since the last call; clears that state.
+    /// Upserts report in table insertion order. A same-window
+    /// remove-then-upsert reports once, as an upsert (the record exists); an
+    /// upsert-then-remove reports once, as a removal (`get` is None for it).
+    /// Removal order within one drain is unspecified.
     pub fn changed_ids(&mut self) -> Vec<u32> {
         let mut out: Vec<u32> = Vec::new();
-        for (id, rec) in &mut self.records {
-            if rec.dirty {
-                rec.dirty = false;
-                out.push(*id);
+        for &id in &self.live {
+            if let Some(rec) = self.records.get_mut(&id) {
+                if rec.dirty {
+                    rec.dirty = false;
+                    out.push(id);
+                }
             }
         }
         out.extend(self.removed_since_drain.drain());

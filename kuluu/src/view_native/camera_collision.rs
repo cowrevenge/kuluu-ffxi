@@ -326,6 +326,9 @@ mod tests {
             .insert_resource(SceneState::default())
             .insert_resource(kuluu_render::camera::CameraStepSmoothing::default())
             .insert_resource(AnchorFollow::default())
+            // Empty zone BVH — no walls in this test world; resolve_camera's
+            // hard requirement since it raycasts the boom against zone MZB.
+            .init_resource::<ZoneCollisionBvh>()
             .insert_resource(ChaseCamera {
                 snap_to_anchor: true,
                 ..Default::default()
@@ -406,6 +409,9 @@ mod tests {
             .insert_resource(AnchorFollow {
                 pos: Some(Vec3::new(0.0, 1.0, -6.0)),
             })
+            // Empty zone BVH — no walls in this test world; resolve_camera's
+            // hard requirement since it raycasts the boom against zone MZB.
+            .init_resource::<ZoneCollisionBvh>()
             .insert_resource(ChaseCamera {
                 // Not a warp: we want the spring path, not the snap path.
                 snap_to_anchor: false,

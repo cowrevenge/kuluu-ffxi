@@ -140,24 +140,26 @@ fn tri_hits_column(v: [Vec3; 3], xz: Vec2) -> Option<f32> {
     let (a, b, c) = (v[0], v[1], v[2]);
     let e1 = b - a;
     let e2 = c - a;
-    // det = cross(e1, e2).y: zero means the face is vertical — no crossing.
+    // Determinant of the face's xz projection: zero means vertical — no
+    // crossing.
     let det = e1.x * e2.z - e1.z * e2.x;
     if det.abs() < 1e-9 {
         return None;
     }
-    // Möller–Trumbore with dir (0, -1, 0); only xz of the origin matters.
+    // Barycentrics of the column's intersection with the face plane: Cramer's
+    // rule on [e1_xz | e2_xz] · [u v] = q (Möller–Trumbore reduced to dir
+    // (0, -1, 0); only xz of the origin matters).
     let qx = xz.x - a.x;
     let qz = xz.y - a.z;
-    let u = (-qx * e2.z + qz * e2.x) / det; // cross(q, e2).y / det
+    let u = (qx * e2.z - qz * e2.x) / det;
     if u < 0.0 || u > 1.0 {
         return None;
     }
-    let tvec_y = e1.z * e2.x - e1.x * e2.z; // cross(e1, e2).y
-    let v_ = -tvec_y / det; // dir . cross(e1, e2) / det
+    let v_ = (e1.x * qz - e1.z * qx) / det;
     if v_ < 0.0 || u + v_ > 1.0 {
         return None;
     }
-    Some(a.y + u * b.y + v_ * c.y)
+    Some(a.y + u * (b.y - a.y) + v_ * (c.y - a.y))
 }
 
 /// Closest point on triangle (a, b, c) to `p` — Ericson §5.1.3, the same
@@ -508,28 +510,34 @@ mod tests {
 
     #[test]
     fn fall_model_matches_closed_form() {
-        // The plan's feel numbers: 1 yalm ~0.22 s, 3 ~0.39 s, 10 ~0.6 s at
-        // g=40 v_max=30 (terminal speed reached at 0.75 s).
+        // Feel numbers at g=40 v_max=30 (terminal speed reached at 0.75 s):
+        // a 1 yalm drop takes ~0.22 s, 3 yalms ~0.39 s, 10 ~0.71 s — all
+        // pre-terminal, so the closed-form time is sqrt(2d/g).
         let fall = FallModel::default();
         assert!((fall.g - 40.0).abs() < 1e-6);
         assert!((fall.v_max - 30.0).abs() < 1e-6);
 
-        // Euler integration of the same model must track the closed form to
-        // within one tick's worth at production dt.
+        // The closed form itself: past the terminal time it runs at v_max
+        // (at t=1.0: 11.25 yalms of parabola + 30 * 0.25 = 18.75, vy -30).
+        let (d, v) = fall_closed_form(fall.g, fall.v_max, 1.0);
+        assert!((d - (-18.75)).abs() < 1e-4 && (v - -30.0).abs() < 1e-6);
+
+        // Euler integration of the same model must land within one tick of the
+        // closed-form time at production dt.
         let dt = 1.0 / 60.0;
-        for t_target in [0.22, 0.39, 0.6] {
+        for dist in [1.0f32, 3.0, 10.0] {
             let mut y = 0.0f32;
             let mut vy = 0.0f32;
             let mut t = 0.0f32;
-            while t < t_target - 1e-9 {
+            while y > -dist {
                 vy = (vy - fall.g * dt).max(-fall.v_max);
                 y += vy * dt;
                 t += dt;
             }
-            let (y_ref, _) = fall_closed_form(fall.g, fall.v_max, t_target);
+            let t_ref = (2.0 * dist / fall.g).sqrt();
             assert!(
-                (y - y_ref).abs() < 0.5 * fall.g * dt * dt + 1e-3,
-                "t={t_target}: euler {y} vs closed {y_ref}"
+                (t - t_ref).abs() <= dt + 1e-6,
+                "d={dist}: landed at {t}, closed form {t_ref}"
             );
         }
     }
@@ -622,22 +630,26 @@ mod tests {
 
     #[test]
     fn push_through_accrual_excludes_after_threshold() {
-        // 0.8 s of sustained pressure into the same mob excludes it; a release
-        // or a different target resets the clock.
+        // ~0.8 s of sustained pressure into the same mob excludes it; a release
+        // or a different target resets the clock. The crossing is asserted to
+        // within one tick: secs accrues by f32 `+= dt`, so the threshold lands
+        // on neither an exact tick nor exactly PUSH_THROUGH_SECS/dt presses.
         let dt = 1.0 / 60.0;
         let mut pt = PushThrough::default();
-        for i in 0..(PUSH_THROUGH_SECS / dt) as u32 - 1 {
-            assert!(!pt.press(1, dt), "early release at tick {i}");
+        let mut held = 0u32;
+        while !pt.press(1, dt) {
+            held += 1;
         }
-        assert!(pt.press(1, dt), "threshold not reached");
+        assert!(
+            (held as f32 - PUSH_THROUGH_SECS / dt).abs() <= 1.0 + 1e-6,
+            "excluded after {held} ticks (~{} s)",
+            held as f32 * dt
+        );
         pt.release();
         assert!(!pt.press(1, dt), "release did not reset");
-        for _ in 0..(PUSH_THROUGH_SECS / dt) as u32 {
-            pt.press(1, dt);
-        }
         // A different target mid-accrual restarts the clock.
         let mut pt = PushThrough::default();
-        for _ in 0..((PUSH_THROUGH_SECS * 0.5) / dt) as u32 {
+        for _ in 0..((PUSH_THROUGH_SECS * 0.5) / dt).round() as u32 {
             pt.press(1, dt);
         }
         assert!(!pt.press(2, dt), "target switch must reset");

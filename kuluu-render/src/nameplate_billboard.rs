@@ -477,10 +477,7 @@ pub fn update_nameplate_billboards_system(
                 );
             }
         }
-        let Some(mat_data) = materials.get_mut(&mat.0) else {
-            continue;
-        };
-        let Some(handle) = mat_data.base_color_texture.clone() else {
+        let Some(mut mat_data) = materials.get_mut(&mat.0) else {
             continue;
         };
         crate::perf_probe::note_nameplate_raster();
@@ -497,7 +494,19 @@ pub fn update_nameplate_billboards_system(
         aspect.width = new_img.image.width();
         aspect.height = new_img.image.height();
         aspect.text_center_y_px = new_img.text_center_y_px;
-        let _ = images.insert(&handle, new_img.image);
+        // A FRESH handle per raster — never `images.insert` into the existing
+        // one. Bevy's GpuImage prepare reuses a same-size texture and only
+        // re-uploads mip level 0 (write_texture), leaving every upper mip stale
+        // on the previous bake; plates draw minified almost everywhere, so a
+        // colour/hp/claim move kept sampling the old mips — a dead worm stayed
+        // yellow at range while its entity-table record was already grey, and
+        // the HP bar fill looked frozen for the same reason. A new handle gets
+        // a fresh texture with the full CPU-built mip chain (create_texture_
+        // with_data uploads every level), and the final pass's view-mismatch
+        // rebuild picks it up in the SAME frame: PrepareAssets runs before
+        // PrepareBindGroups, so no stale-plate beat. The displaced texture is
+        // unreferenced after this swap and bevy GCs it.
+        mat_data.base_color_texture = Some(images.add(new_img.image));
         np.rastered = Some(want.clone());
     }
 

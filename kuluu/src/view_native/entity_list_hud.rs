@@ -1,9 +1,14 @@
 //! Debug "Entity List" overlay (Debug menu row, default off): a scrollable
 //! dump of every live wire entity from the [`EntityTable`] — id, name, kind,
-//! position, status byte, hp%, and the invis/name-hidden/dead flags. The
-//! point is to eyeball what the packet system actually believes about each
-//! entity (worm-blink class: does `status` flip INVISIBLE when it dives?)
-//! without touching any game state — read-only over the table.
+//! position, status byte, hp%, the nameplate status markers the plate would
+//! draw for that entity, and the invis/name-hidden/dead flags. The point is to
+//! eyeball what the packet system actually believes about each entity (worm-
+//! blink class: does `status` flip INVISIBLE when it dives?; icon class: do
+//! the char-flag bits that drive a nameplate marker arrive at all?) without
+//! touching any game state — read-only over the table.
+//!
+//! The current target's row carries a rectangle while one is set, so the
+//! targeted entity can be found in the list without scanning names.
 //!
 //! Rows are fixed slots paged by a row offset; the mouse wheel scrolls while
 //! the panel is on (in-game the wheel drives nothing else, and this matches
@@ -13,7 +18,7 @@
 use bevy::input::mouse::{MouseScrollUnit, MouseWheel};
 use bevy::prelude::*;
 use kuluu_render::hud::{style::theme, HudPanels};
-use kuluu_render::{EntityTable, InGameEntity};
+use kuluu_render::{nameplate_marker, EntityTable, InGameEntity, Target};
 use kuluu_snapshot::EntityKind;
 
 /// How many row slots the panel shows at once (the scroll window).
@@ -51,7 +56,7 @@ pub fn spawn_entity_list_hud(mut commands: Commands) {
                 position_type: PositionType::Absolute,
                 top: Val::Px(300.0),
                 left: Val::Px(8.0),
-                width: Val::Px(500.0),
+                width: Val::Px(600.0),
                 padding: UiRect::axes(Val::Px(8.0), Val::Px(6.0)),
                 border: UiRect::all(Val::Px(1.0)),
                 flex_direction: FlexDirection::Column,
@@ -105,10 +110,16 @@ pub fn spawn_entity_list_hud(mut commands: Commands) {
                         },
                         TextColor(theme::TEXT),
                         TextLayout::no_wrap(),
+                        // The target rectangle toggles border width per row;
+                        // a 0-width transparent border is the resting state.
                         Node {
                             display: Display::None,
+                            border: UiRect::all(Val::Px(0.0)),
                             ..default()
                         },
+                        // Color::NONE (not a transparent srgba): the resting
+                        // state draws no border at all.
+                        BorderColor::all(Color::NONE),
                     ));
                 }
             });
@@ -168,12 +179,13 @@ pub fn update_entity_list_hud(
     panels: Res<HudPanels>,
     time: Res<Time>,
     table: Res<EntityTable>,
+    target: Res<Target>,
     mut scroll: ResMut<EntityListScroll>,
     mut refresh: Local<f32>,
     // Without keeps the two `&mut Text` queries provably disjoint (B0001):
     // the header row never carries EntityListRow.
     mut header_q: Query<&mut Text, (With<EntityListHeader>, Without<EntityListRow>)>,
-    mut row_q: Query<(&EntityListRow, &mut Text, &mut TextColor, &mut Node)>,
+    mut row_q: Query<(&EntityListRow, &mut Text, &mut TextColor, &mut Node, &mut BorderColor)>,
 ) {
     if !panels.entity_list {
         return;
@@ -208,11 +220,15 @@ pub fn update_entity_list_hud(
     }
 
     let self_id = table.self_id();
-    for (row, mut text, mut color, mut node) in row_q.iter_mut() {
+    // The target rectangle: the row slot holding the targeted entity, if it is
+    // on the visible page. A stale id (target despawned) matches nothing.
+    let target_row = target.id.and_then(|id| ents.iter().position(|r| r.entity.id == id));
+    for (row, mut text, mut color, mut node, mut border_color) in row_q.iter_mut() {
         match ents.get(start + row.0) {
             Some(rec) => {
                 let e = &rec.entity;
                 let is_self = self_id == Some(e.id);
+                let markers = marker_labels(e);
                 let line = format_row(
                     is_self,
                     e.id,
@@ -223,6 +239,7 @@ pub fn update_entity_list_hud(
                     e.pos.z,
                     e.status,
                     e.hp_pct,
+                    &markers,
                     rec.is_invisible(),
                     rec.name_hidden(),
                     rec.is_dead(),
@@ -232,11 +249,20 @@ pub fn update_entity_list_hud(
                 }
                 color.0 = row_color(is_self, rec.is_invisible(), rec.is_dead());
                 node.display = Display::Flex;
+                let is_target = target_row == Some(row.0);
+                node.border = UiRect::all(Val::Px(if is_target { 1.0 } else { 0.0 }));
+                *border_color = BorderColor::all(if is_target {
+                    theme::DANGER
+                } else {
+                    Color::NONE
+                });
             }
             None => {
                 if node.display != Display::None {
                     node.display = Display::None;
                     **text = String::new();
+                    node.border = UiRect::all(Val::Px(0.0));
+                    *border_color = BorderColor::all(Color::NONE);
                 }
             }
         }
@@ -247,13 +273,14 @@ fn column_header() -> String {
     // Plain padding (no `08X`): the row format's hex spec is integer-only, and
     // this header carries labels, not values.
     format!(
-        "  {id:>8}  {name:<12} {kind:<4} {pos:<18}  {st:>3} {hp:>3}  FLAGS",
+        "  {id:>8}  {name:<12} {kind:<4} {pos:<12}  {st:>3} {hp:>3}  {status:<7} FLAGS",
         id = "ID",
         name = "NAME",
         kind = "KIND",
         pos = "X,Y,Z",
         st = "ST",
-        hp = "HP"
+        hp = "HP",
+        status = "STATUS"
     )
 }
 
@@ -267,6 +294,7 @@ fn format_row(
     z: f32,
     status: u8,
     hp_pct: Option<u8>,
+    markers: &str,
     invisible: bool,
     name_hidden: bool,
     dead: bool,
@@ -280,17 +308,58 @@ fn format_row(
     .flatten()
     .collect::<Vec<_>>()
     .join(" ");
-    // X,Y,Z flattened into one column to leave room for ST/HP/FLAGS on the
-    // right (the three separate columns clipped FLAGS at 500px panel width).
-    let pos = format!("{x:.1},{y:.1},{z:.1}");
+    // X,Y,Z flattened into one column to leave room for ST/HP/STATUS/FLAGS on
+    // the right (the three separate columns clipped FLAGS at 500px panel
+    // width). Whole yalms: this is a where-is-it readout, not a survey.
+    let pos = format!("{x:.0},{y:.0},{z:.0}");
     format!(
-        "{} {id:08X}  {} {} {pos:<18}  {status:>3} {}  {}",
+        "{} {id:08X}  {} {:<4} {pos:<12}  {status:>3} {}  {markers:<7} {}",
         if is_self { "*" } else { " " },
         truncate_pad(name.unwrap_or("?"), NAME_WIDTH),
         kind_label(kind),
         hp_str(hp_pct),
         if flags.is_empty() { "-" } else { &flags }
     )
+}
+
+/// The nameplate status markers this entity's plate would draw, as short
+/// labels — the same priority-resolved list `nameplate_markers` feeds the
+/// billboard raster. Empty for kinds that never carry icons (mobs/pets) and
+/// for flag-less players; a `-` there means "no marker-driving state arrived",
+/// which is exactly what the icon debugging needs to see.
+fn marker_labels(e: &kuluu_snapshot::Entity) -> String {
+    let labels = nameplate_marker::nameplate_markers(e)
+        .into_iter()
+        .filter_map(|code| label_for_glyph(code))
+        .collect::<Vec<_>>()
+        .join(" ");
+    if labels.is_empty() { "-".to_string() } else { labels }
+}
+
+fn label_for_glyph(code: u8) -> Option<&'static str> {
+    use nameplate_marker::glyph as g;
+    match code {
+        g::PLAY_ONLINE => Some("POL"),
+        g::LINKDEAD => Some("LD"),
+        g::AWAY => Some("AWY"),
+        g::SEEKING => Some("LFG"),
+        g::LINKSHELL => Some("LS"),
+        g::GM_1 | g::GM_4 | g::GM_5 | g::GM_6 | g::GM_7 | g::GM_8 => Some("GM"),
+        g::BAZAAR => Some("BAZ"),
+        g::AUTO_PARTY => Some("AP"),
+        g::NATION_SAN_DORIA
+        | g::NATION_BASTOK
+        | g::NATION_WINDURST
+        | g::NATION_BEAUFORT
+        | g::NATION_RABANASTRE => Some("NAT"),
+        g::NEW_PLAYER => Some("?"),
+        g::BESIEGED_EVEN | g::BESIEGED_ODD => Some("BSG"),
+        g::MONSTROSITY => Some("MON"),
+        g::JOB_MASTER => Some("JM"),
+        // The half-scale companion of JOB_MASTER: no label of its own.
+        g::JOB_MASTER_TAIL => None,
+        _ => None,
+    }
 }
 
 fn row_color(is_self: bool, invisible: bool, dead: bool) -> Color {
@@ -323,10 +392,12 @@ fn kind_label(kind: EntityKind) -> &'static str {
 }
 
 fn truncate_pad(s: &str, width: usize) -> String {
+    // ASCII ellipsis: the rows rasterize with Bevy's bundled FiraMono subset,
+    // which turns any non-ASCII glyph into a tofu box.
     let count = s.chars().count();
     if count > width {
-        let mut out: String = s.chars().take(width.saturating_sub(1)).collect();
-        out.push('\u{2026}');
+        let mut out: String = s.chars().take(width.saturating_sub(3)).collect();
+        out.push_str("...");
         out
     } else {
         format!("{s:<width$}")

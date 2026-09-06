@@ -341,9 +341,10 @@ mod tests {
     /// emit one; serde_json rejects non-finite f32 on serialize), so the whole
     /// document is rejected: load returns Err, callers fall back to defaults.
     #[test]
-    fn load_rejects_nan_ui_scale() {
+    fn load_rejects_invalid_json_ui_scale() {
         let store = GraphicsStore::new(tmp_path());
         std::fs::write(store.path(), br#"{"ui_scale": NaN}"#).unwrap();
         assert!(store.load().is_err());
+        let _ = std::fs::remove_file(store.path());
     }
 }

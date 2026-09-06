@@ -216,7 +216,7 @@ fn track_weather_particles(
     let Some(cam) = cam.iter().next() else {
         return;
     };
-    sim.set_camera_relative_origins(cam.translation(), cam.rotation());
+    sim.set_camera_relative_origins(cam.translation());
 }
 
 pub struct WeatherParticlesPlugin;

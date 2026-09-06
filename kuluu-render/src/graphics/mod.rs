@@ -9,7 +9,7 @@ pub mod dlss;
 /// DLSS 5 Neural Uplift (NR) pipeline: drives nvngx_dlssnr.dll's Vulkan NGX
 /// API directly (all unsafe FFI lives in the kuluu-dlss-nr crate). Same
 /// gating as `dlss`.
-#[cfg(all(not(target_arch = "wasm32"), feature = "dlss"))]
+#[cfg(all(target_os = "windows", feature = "dlss"))]
 pub mod dlss_nr;
 
 #[cfg(not(target_arch = "wasm32"))]

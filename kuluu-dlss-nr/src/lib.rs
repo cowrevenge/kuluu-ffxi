@@ -9,7 +9,7 @@
 //! object whose first qword is a table of function pointers, called as
 //! `fn(param_ptr, name_str, value_or_out)` — decoded from the SDK's static host
 //! lib (`nvsdk_ngx_parameters_lib.obj`) and cross-checked against the v310.8
-//! runtime parser (see ffxi_dlss5.md §2.3). Consequence: we never hand-build
+//! runtime parser. Consequence: we never hand-build
 //! its layout. We allocate through the host layer's own `AllocateParameters`
 //! and fill it with its own `Set*` accessors, exactly what the RenoDX-DLSS5
 //! addon does with its bundled copy of the same host layer.
@@ -22,6 +22,7 @@
 //! * **NR runtime** — `nvngx_dlssnr.dll`: loaded at runtime via LoadLibraryW
 //!   from next to the executable. Missing => NR unavailable, SR unaffected.
 
+#![cfg(target_os = "windows")]
 #![allow(non_snake_case)] // C ABI names stay verbatim at the FFI boundary
 #![allow(clippy::too_many_arguments)] // evaluate_nr carries the full per-frame knob set
 
@@ -400,11 +401,11 @@ pub const FEATURE_DLSSNR: u32 = 0x12;
 const NGX_VERSION_API: c_int = 0x0000_0015;
 
 // ---------------------------------------------------------------------------
-// The "nvngx.dll" calling-module forwarder (build 9 — ffxi_dlss5.md §2.10–§3.5)
+// The "nvngx.dll" calling-module forwarder
 // ---------------------------------------------------------------------------
 
 /// Staged next to kuluu.exe as nvngx.dll_kuluu.dll (renamed from kuluu_ngx_fwd.dll;
-/// see "Running / distributing" in docs/DLSS.md for the copy step).
+/// see README.md#optional-dlss-builds for the copy step).
 /// The NR runtime gates its Init_Ext/CreateFeature/ReleaseFeature entry points on
 /// the calling module's file name containing "nvngx.dll" (case-insensitive substring);
 /// this name passes without shadowing the driver's real nvngx.dll that nvsdk_ngx_s.lib
@@ -533,8 +534,7 @@ pub struct NrRuntime {
     evaluate_feature: FnEvaluateFeature,
     release_feature: FnReleaseFeature,
     shutdown1: FnShutdown1,
-    /// The forwarder's trampolines for the module-gated entry points (ffxi_dlss5.md
-    /// §2.10): Init_Ext, CreateFeature, ReleaseFeature.
+    /// Trampolines for the module-gated Init_Ext/CreateFeature/ReleaseFeature entries.
     fwd_init_ext: PfnFwdVulkanInitExt,
     fwd_create_feature: PfnFwdCreateFeature,
     fwd_release_feature: PfnFwdReleaseFeature,
@@ -621,8 +621,8 @@ impl NrRuntime {
         }
 
         // The forwarder must be present too: without it the gated entry points
-        // (Init_Ext, CreateFeature, ReleaseFeature) all fail with PlatformError
-        // (ffxi_dlss5.md §2.10). Failing here — not at init time — gives a clear,
+        // (Init_Ext, CreateFeature, ReleaseFeature) all fail with PlatformError.
+        // Failing here — not at init time — gives a clear,
         // one-shot load error instead of a per-second retry loop.
         let fwd = Self::load_forwarder(&exe_dir)?;
 
@@ -640,7 +640,7 @@ impl NrRuntime {
 
     /// Loads the "nvngx.dll" calling-module forwarder from next to the exe and
     /// checks its ABI version. The NR runtime gates its Init_Ext/CreateFeature/
-    /// ReleaseFeature entries on the caller's module name (ffxi_dlss5.md §2.10–§2.11);
+    /// ReleaseFeature entries on the caller's module name;
     /// this DLL is staged as `nvngx.dll_kuluu.dll` so those calls can be made from
     /// inside a module whose file name contains "nvngx.dll".
     fn load_forwarder(exe_dir: &std::path::Path) -> Result<ForwarderExports, LoadError> {
@@ -755,7 +755,7 @@ impl NrRuntime {
         let mut handle = NvngxHandle::default();
         // SAFETY: `cmd` is a valid in-flight VkCommandBuffer; `params` outlives
         // the call; `handle` is a valid out location. CreateFeature is module-gated
-        // like Init_Ext (ffxi_dlss5.md §2.10), so the call goes through the forwarder.
+        // like Init_Ext, so the call goes through the forwarder.
         let r = unsafe {
             (self.fwd_create_feature)(
                 Some(self.create_feature),
@@ -808,10 +808,6 @@ impl NrRuntime {
         match depth {
             Some(depth) => {
                 params.set_void_pointer("DLSSNR.Depth", depth);
-                // The parser defaults DepthInverted to 1 — the D3D near=1/far=0
-                // convention, which the RenoDX addon also sends for its D3D12
-                // games. Bevy's prepass writes standard Vulkan depth (near=0), so
-                // send the flag verbatim: 0 = not inverted.
                 params.set_i("DLSSNR.DepthInverted", i32::from(depth_inverted));
                 // No-dot names, read through the parser's INT getter slot (+0x58)
                 // — verified in this build's disasm; a SetUI value is invisible to
@@ -862,8 +858,8 @@ impl NrRuntime {
     pub fn release_feature(&self, handle: &mut NvngxHandle) -> NvngxResult {
         // SAFETY: `handle.ptr` is the opaque object pointer of a live feature;
         // the runtime dereferences it for its table lookup and does not write
-        // back through it. ReleaseFeature is module-gated like Init_Ext
-        // (ffxi_dlss5.md §2.10), so the call goes through the forwarder.
+        // back through it. ReleaseFeature is module-gated like Init_Ext,
+        // so the call goes through the forwarder.
         let r = unsafe {
             (self.fwd_release_feature)(Some(self.release_feature), handle.ptr as *mut c_void)
         };
@@ -874,7 +870,7 @@ impl NrRuntime {
     }
 
     /// `NVSDK_NGX_VULKAN_Shutdown1` — process teardown, after the device is idle.
-    /// Gated like Init_Ext in v310.8 (ffxi_dlss5.md §2.10): add a forwarder
+    /// Gated like Init_Ext in v310.8: add a forwarder
     /// trampoline before calling this from kuluu.exe.
     pub fn shutdown(&self, handles: &VulkanHandles) -> NvngxResult {
         // SAFETY: `device` is a live VkDevice for the call's duration.

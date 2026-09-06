@@ -140,15 +140,10 @@ fn tri_hits_column(v: [Vec3; 3], xz: Vec2) -> Option<f32> {
     let (a, b, c) = (v[0], v[1], v[2]);
     let e1 = b - a;
     let e2 = c - a;
-    // Determinant of the face's xz projection: zero means vertical — no
-    // crossing.
     let det = e1.x * e2.z - e1.z * e2.x;
     if det.abs() < 1e-9 {
         return None;
     }
-    // Barycentrics of the column's intersection with the face plane: Cramer's
-    // rule on [e1_xz | e2_xz] · [u v] = q (Möller–Trumbore reduced to dir
-    // (0, -1, 0); only xz of the origin matters).
     let qx = xz.x - a.x;
     let qz = xz.y - a.z;
     let u = (qx * e2.z - qz * e2.x) / det;
@@ -159,7 +154,7 @@ fn tri_hits_column(v: [Vec3; 3], xz: Vec2) -> Option<f32> {
     if v_ < 0.0 || u + v_ > 1.0 {
         return None;
     }
-    Some(a.y + u * (b.y - a.y) + v_ * (c.y - a.y))
+    Some(a.y + u * e1.y + v_ * e2.y)
 }
 
 /// Closest point on triangle (a, b, c) to `p` — Ericson §5.1.3, the same
@@ -176,7 +171,7 @@ fn closest_point_on_tri(p: Vec3, a: Vec3, b: Vec3, c: Vec3) -> Vec3 {
     let bp = p - b;
     let d3 = ab.dot(bp);
     let d4 = ac.dot(bp);
-    if d3 >= 0.0 && d4 <= -d3 {
+    if d3 >= 0.0 && d4 <= d3 {
         return b;
     }
     let vc = d1 * d4 - d3 * d2;
@@ -187,7 +182,7 @@ fn closest_point_on_tri(p: Vec3, a: Vec3, b: Vec3, c: Vec3) -> Vec3 {
     let cp = p - c;
     let d5 = ab.dot(cp);
     let d6 = ac.dot(cp);
-    if d6 >= 0.0 && d5 <= -d6 {
+    if d6 >= 0.0 && d5 <= d6 {
         return c;
     }
     let vb = d5 * d2 - d1 * d6;
@@ -397,6 +392,8 @@ pub fn step(
             field::sample_field(&sampler, new_xz, feet_y, m)
         });
 
+        let h0 = field_opt.as_ref().and_then(|f| f.h0).unwrap_or(h0);
+
         // Target + decision: dead band snaps to h0 instantly; a staircase
         // window rides the slewed envelope; everything else targets h0 direct.
         let (target, mut decision) = match &field_opt {
@@ -407,7 +404,13 @@ pub fn step(
                 let g_new = f.g;
                 state.grad.x += (g_new.x - state.grad.x).clamp(-GRAD_SLEW, GRAD_SLEW);
                 state.grad.y += (g_new.y - state.grad.y).clamp(-GRAD_SLEW, GRAD_SLEW);
-                let target = f.target.unwrap();
+                let target = if f.g.x > CHAIN_CEILING_EPS {
+                    f.target.unwrap().max(feet_y)
+                } else if f.g.x < -CHAIN_CEILING_EPS {
+                    f.target.unwrap().min(feet_y)
+                } else {
+                    f.target.unwrap()
+                };
                 (
                     target,
                     VerticalDecision::Ramp {
@@ -438,6 +441,22 @@ pub fn step(
         };
 
         // Rate-limit the merge to speed_yps * dt per tick.
+        let target = if want_len > 1e-6 && state.grad.x > CHAIN_CEILING_EPS {
+            let forward_floor = field_opt.as_ref().and_then(|field| {
+                field
+                    .samples
+                    .iter()
+                    .filter(|sample| sample.along >= 0.0)
+                    .filter_map(|sample| sample.filtered)
+                    .reduce(f32::max)
+            });
+            match forward_floor {
+                Some(ahead) if ahead >= feet_y && h0 <= feet_y => target.max(feet_y),
+                _ => target,
+            }
+        } else {
+            target
+        };
         let delta = (target - feet_y).clamp(-v, v);
         y_new = feet_y + delta;
 
@@ -468,6 +487,13 @@ pub fn step(
             }
         }
 
+        if field_opt
+            .as_ref()
+            .is_none_or(|field| field.target.is_none())
+            && (y_new - h0).abs() <= CHAIN_CEILING_EPS
+        {
+            state.grad = Vec2::ZERO;
+        }
         state.mode = if want_len > 1e-6 {
             WalkMode::Walking
         } else {
@@ -538,6 +564,11 @@ mod tests {
             assert!(
                 (t - t_ref).abs() <= dt + 1e-6,
                 "d={dist}: landed at {t}, closed form {t_ref}"
+            );
+            let (y_ref, _) = fall_closed_form(fall.g, fall.v_max, t);
+            assert!(
+                (y - y_ref).abs() < 0.5 * fall.g * dt * t + 1e-3,
+                "d={dist}: euler {y} vs closed {y_ref}"
             );
         }
     }
@@ -672,6 +703,22 @@ mod tests {
             Vec3::new(1.0, 0.0, 1.0),
         ];
         assert_eq!(tri_hits_column(wall, Vec2::new(1.0, 0.5)), None);
+    }
+
+    #[test]
+    fn tri_hits_column_interpolates_sloped_faces_in_either_winding() {
+        let triangle = [
+            Vec3::new(4.0, 10.0, 6.0),
+            Vec3::new(6.0, 12.0, 6.0),
+            Vec3::new(4.0, 14.0, 8.0),
+        ];
+        let query = Vec2::new(4.5, 6.5);
+        assert_eq!(tri_hits_column(triangle, query), Some(11.5));
+        assert_eq!(
+            tri_hits_column([triangle[0], triangle[2], triangle[1]], query),
+            Some(11.5)
+        );
+        assert_eq!(tri_hits_column(triangle, Vec2::new(6.0, 8.0)), None);
     }
 
     #[test]

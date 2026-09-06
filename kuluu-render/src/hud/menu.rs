@@ -1167,7 +1167,7 @@ pub fn update_main_menu(
     settings: Res<GraphicsSettings>,
     panels: Res<crate::hud::HudPanels>,
     net_status: Res<crate::hud::network_status::NetStatusVisible>,
-    audio_mute: Res<crate::audio::AudioMuteState>,
+    #[cfg(not(target_arch = "wasm32"))] audio_mute: Res<crate::audio::AudioMuteState>,
 
     scene: Res<crate::snapshot::SceneState>,
     dynamic: Res<DynamicMenu>,
@@ -1260,7 +1260,10 @@ pub fn update_main_menu(
                 .unwrap_or("<unknown>")
                 .to_string()
         };
-        let sound_on = !(audio_mute.bgm && audio_mute.sfx);
+        #[cfg(not(target_arch = "wasm32"))]
+        let (sound_on, master_pct) = (!(audio_mute.bgm && audio_mute.sfx), audio_mute.master_pct());
+        #[cfg(target_arch = "wasm32")]
+        let (sound_on, master_pct) = (false, 0);
         let body = format_row_body(
             view.kind,
             list_idx,
@@ -1269,7 +1272,7 @@ pub fn update_main_menu(
             &panels,
             net_status.0,
             sound_on,
-            audio_mute.master_pct(),
+            master_pct,
             &scene.snapshot,
         );
 
@@ -1591,8 +1594,9 @@ mod tests {
             .init_resource::<crate::hud::HudPanels>()
             .init_resource::<NetStatusVisible>()
             .init_resource::<SceneState>()
-            .init_resource::<DynamicMenu>()
-            .init_resource::<crate::audio::AudioMuteState>();
+            .init_resource::<DynamicMenu>();
+        #[cfg(not(target_arch = "wasm32"))]
+        app.init_resource::<crate::audio::AudioMuteState>();
 
         let mut stack = MenuStack::root();
         stack.current_mut().unwrap().cursor = cursor;

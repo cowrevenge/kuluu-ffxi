@@ -326,6 +326,34 @@ fn lerp_rgb(a: (f32, f32, f32), b: (f32, f32, f32), t: f32) -> Color {
     )
 }
 
+fn party_windows(
+    party: &[kuluu_snapshot::PartyMember],
+    self_id: Option<u32>,
+) -> [Vec<&kuluu_snapshot::PartyMember>; 3] {
+    // LSB's PartyNo is alliance-wide: vendor/server/src/map/packets/s2c/0x0dd_group_list.cpp:40.
+    let self_party = party
+        .iter()
+        .find(|m| Some(m.id) == self_id)
+        .map(|m| m.party_no)
+        .filter(|party_no| *party_no < ffxi_proto::decode::NO_PARTY)
+        .unwrap_or(0);
+    let mut windows = [vec![], vec![], vec![]];
+    for member in party {
+        let window = if Some(member.id) == self_id || member.party_no == self_party {
+            0
+        } else if member.party_no < ffxi_proto::decode::NO_PARTY {
+            usize::from(member.party_no) + usize::from(member.party_no < self_party)
+        } else {
+            continue;
+        };
+        windows[window].push(member);
+    }
+    for members in &mut windows {
+        members.sort_by_key(|m| (Some(m.id) != self_id, m.act_index));
+    }
+    windows
+}
+
 fn hp_value_text(m: &kuluu_snapshot::PartyMember, mode: u8) -> String {
     match mode {
         1 => format!("{}%", m.hp_pct),
@@ -568,6 +596,7 @@ pub fn update_party_frame_system(
                 && (!snap.treasure_pool.is_empty()) == last.treasure_nonempty
                 && snap.party == last.party
                 && snap.char_name.as_deref() == last.char_name.as_deref()
+                && snap.self_char_id == last.self_char_id
                 && job_on == last.job_display;
             if cheap_equal && !state.dirty {
                 return;
@@ -588,23 +617,7 @@ pub fn update_party_frame_system(
     let self_id = snap.self_char_id.or(self_member.map(|m| m.id));
     let self_pos = snap.self_pos.pos;
 
-    // Group members by party_no (0/1/2); self is ALWAYS row 0 of window A,
-    // even when the server reports party_no == NO_PARTY for a solo player.
-    let mut windows: [Vec<&kuluu_snapshot::PartyMember>; 3] = [vec![], vec![], vec![]];
-    for m in &snap.party {
-        if Some(m.id) == self_id {
-            windows[0].push(m);
-        } else if (m.party_no as usize) < 3 {
-            windows[m.party_no as usize].push(m);
-        }
-    }
-    for (i, w) in windows.iter_mut().enumerate() {
-        if i == 0 {
-            w.sort_by_key(|m| (Some(m.id) != self_id, m.act_index));
-        } else {
-            w.sort_by_key(|m| m.act_index);
-        }
-    }
+    let windows = party_windows(&snap.party, self_id);
 
     let solo = windows[0].len() <= 1;
     let self_in_party = self_member
@@ -733,6 +746,7 @@ pub fn update_party_frame_system(
 /// Zoning<->InZone flips must re-run the show/hide logic.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PartyContentKey {
+    self_char_id: Option<u32>,
     party: Vec<kuluu_snapshot::PartyMember>,
     char_name: Option<String>,
     flags: Vec<(u32, kuluu_snapshot::CharFlags)>,
@@ -771,6 +785,7 @@ fn party_content_key(
         .collect::<Vec<_>>();
     flags.sort_by_key(|(id, _)| *id);
     PartyContentKey {
+        self_char_id: snap.self_char_id,
         party: snap.party.clone(),
         char_name: snap.char_name.clone(),
         flags,
@@ -1460,8 +1475,14 @@ mod tests {
         assert_ne!(a, b, "late table load must force a rebuild");
     }
 
-    /// Toggling the Retail+ Job Display gate must force an L1 row rebuild even
-    /// when nothing else in the snapshot changed (the column appears/disappears).
+    #[test]
+    fn content_key_tracks_self_identity_for_alliance_grouping() {
+        let mut snap = kuluu_snapshot::SceneSnapshot::default();
+        let unknown = party_content_key(&snap, 0, false);
+        snap.self_char_id = Some(42);
+        assert_ne!(unknown, party_content_key(&snap, 0, false));
+    }
+
     #[test]
     fn content_key_tracks_job_display_gate() {
         let snap = kuluu_snapshot::SceneSnapshot::default();
@@ -1539,9 +1560,43 @@ mod tests {
     }
 
     #[test]
-    fn hp_value_modes() {
-        let m = kuluu_snapshot::PartyMember {
-            id: 1,
+    fn alliance_keeps_self_party_together_in_first_window() {
+        for self_party in 0..3 {
+            let mut party = Vec::new();
+            for party_no in 0..3 {
+                party.push(member(u32::from(party_no) * 10 + 1, party_no));
+                party.push(member(u32::from(party_no) * 10 + 2, party_no));
+            }
+            let self_id = u32::from(self_party) * 10 + 2;
+            let windows = party_windows(&party, Some(self_id));
+            assert_eq!(windows[0][0].id, self_id);
+            assert_eq!(windows.map(|window| window.len()), [2, 2, 2]);
+            let windows = party_windows(&party, Some(self_id));
+            assert!(windows[0].iter().all(|m| m.party_no == self_party));
+            assert!(windows[1]
+                .iter()
+                .all(|m| m.party_no == windows[1][0].party_no));
+            assert!(windows[2]
+                .iter()
+                .all(|m| m.party_no == windows[2][0].party_no));
+            assert_ne!(windows[1][0].party_no, windows[2][0].party_no);
+        }
+    }
+
+    #[test]
+    fn solo_self_and_missing_self_group_safely() {
+        let party = [member(1, ffxi_proto::decode::NO_PARTY)];
+        assert_eq!(party_windows(&party, Some(1))[0][0].id, 1);
+        let party = [member(10, 1), member(20, 2)];
+        let windows = party_windows(&party, Some(99));
+        assert!(windows[0].is_empty());
+        assert_eq!(windows[1][0].id, 10);
+        assert_eq!(windows[2][0].id, 20);
+    }
+
+    fn member(id: u32, party_no: u8) -> kuluu_snapshot::PartyMember {
+        kuluu_snapshot::PartyMember {
+            id,
             act_index: 0,
             name: Some("x".into()),
             hp: 800,
@@ -1556,9 +1611,14 @@ mod tests {
             sub_job_lv: 0,
             is_party_leader: false,
             is_alliance_leader: false,
-            party_no: 0,
+            party_no,
             in_mog_house: false,
-        };
+        }
+    }
+
+    #[test]
+    fn hp_value_modes() {
+        let m = member(1, 0);
         assert_eq!(hp_value_text(&m, 0), "800");
         assert_eq!(hp_value_text(&m, 1), "80%");
         assert_eq!(hp_value_text(&m, 2), "800/1000");

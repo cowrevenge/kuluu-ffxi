@@ -2343,7 +2343,7 @@ fn simple_water_material(texture: Handle<Image>) -> crate::ffxi_zone_material::F
             // the shoreline; the decal polygon-offset pulls the surface toward
             // the camera so it wins the depth test there (replaces the old
             // constant `depth_bias: 1000.0`).
-            z_bias_level: 1,
+            z_bias_level: ffxi_dat::mmb::TRANSPARENT_Z_BIAS_LEVEL,
             depth_write: false,
             // A reconstructed plane over the MZB water height, not a generator mesh.
             generator_stage_chain: false,

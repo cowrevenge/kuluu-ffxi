@@ -165,6 +165,8 @@ use crate::view_native::input::{CommandTx, SelectTargetMode};
 use crate::view_native::slash_commands::{
     parse_slash, system_chat_line, KeybindUpdate, SlashOutcome, SubAreaOp,
 };
+#[cfg(unix)]
+use kuluu_session::state::AgentEvent;
 use kuluu_session::state::{ActionKind, AgentCommand, CheckKind, ReqLogoutKind};
 
 pub(crate) fn text_input_system(

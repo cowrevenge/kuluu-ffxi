@@ -62,8 +62,9 @@ use bevy::render::render_resource::{
     ColorTargetState, ColorWrites, CompareFunction, DepthBiasState, DepthStencilState,
     FragmentState, FrontFace, IndexFormat, MultisampleState, PipelineCache, PolygonMode,
     PrimitiveState, PrimitiveTopology, RenderPassDescriptor, RenderPipelineDescriptor,
-    SamplerBindingType, ShaderStages, ShaderType, StencilFaceState, StencilState, StoreOp,
-    TextureFormat, TextureSampleType, TextureViewId, VertexFormat, VertexState, VertexStepMode,
+    SamplerBindingType, SamplerId, ShaderStages, ShaderType, StencilFaceState, StencilState,
+    StoreOp, TextureFormat, TextureSampleType, TextureViewId, VertexFormat, VertexState,
+    VertexStepMode,
 };
 use bevy::render::renderer::{RenderContext, RenderDevice, RenderQueue, ViewQuery};
 use bevy::render::{
@@ -437,6 +438,7 @@ pub struct PlateBinding {
     uniforms: Buffer,
     bind_group: BindGroup,
     texture_view: TextureViewId,
+    sampler: SamplerId,
 }
 
 /// Render-side description of everything drawable this frame, plus the one view
@@ -700,11 +702,13 @@ fn prepare_nameplate_bindings(
 
         if let Some(img) = current {
             let view_id = img.texture_view.id();
+            let sampler_id = img.sampler.id();
             match cache.get_mut(&plate.entity) {
-                Some(existing) if existing.texture_view == view_id => {}
+                Some(existing)
+                    if existing.texture_view == view_id && existing.sampler == sampler_id => {}
                 Some(existing) => {
-                    // Same plate, new texture: rebuild only the bind group.
-                    // The uniform buffer is texture-independent, keep it.
+                    // Same plate, new texture/sampler: rebuild only the bind
+                    // group. The uniform buffer is texture-independent, keep it.
                     existing.bind_group = plate_bind_group(
                         &device,
                         &bind_group_layout,
@@ -713,6 +717,7 @@ fn prepare_nameplate_bindings(
                         img,
                     );
                     existing.texture_view = view_id;
+                    existing.sampler = sampler_id;
                     rebound += 1;
                 }
                 None => {
@@ -735,6 +740,7 @@ fn prepare_nameplate_bindings(
                             uniforms,
                             bind_group,
                             texture_view: view_id,
+                            sampler: sampler_id,
                         },
                     );
                 }

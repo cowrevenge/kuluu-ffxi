@@ -202,9 +202,10 @@ mod tests {
     /// emit one; serde_json rejects non-finite f32 on serialize), so the whole
     /// document is rejected: load returns Err, callers fall back to defaults.
     #[test]
-    fn load_rejects_nan_master() {
+    fn load_rejects_invalid_json_master() {
         let path = tmp_path();
         std::fs::write(&path, br#"{"master": NaN}"#).unwrap();
         assert!(AudioStore::new(&path).load().is_err());
+        let _ = std::fs::remove_file(path);
     }
 }

@@ -2000,6 +2000,24 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_extensions_survive_the_postcard_relay() {
+        let mut snapshot = sample_snapshot();
+        snapshot.zone_generation = 128;
+        snapshot.entities[0].char_flags.untargetable = true;
+        snapshot.entities[0].name_vis = Some(0x08);
+        snapshot.death_menu_offer = Some(DeathMenuOffer::Tractor);
+        let bytes = postcard::to_allocvec(&Frame::Snapshot(Box::new(snapshot))).unwrap();
+        let Frame::Snapshot(decoded) = postcard::from_bytes(&bytes).unwrap() else {
+            panic!("expected snapshot");
+        };
+        assert_eq!(decoded.zone_generation, 128);
+        assert!(decoded.entities[0].char_flags.untargetable);
+        assert_eq!(decoded.entities[0].name_vis, Some(0x08));
+        assert_eq!(decoded.chat[0].text, "hi");
+        assert_eq!(decoded.death_menu_offer, Some(DeathMenuOffer::Tractor));
+    }
+
+    #[test]
     fn frame_event_postcard_roundtrip() {
         let frame = Frame::Event(ViewerEvent::TellReceived {
             from: "Friend".into(),

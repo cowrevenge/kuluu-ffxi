@@ -41,6 +41,14 @@ pub struct AnchorFollow {
     pub pos: Option<Vec3>,
 }
 
+pub fn reset_camera_follow(
+    mut follow: ResMut<AnchorFollow>,
+    mut step: ResMut<CameraStepSmoothing>,
+) {
+    *follow = AnchorFollow::default();
+    *step = CameraStepSmoothing::default();
+}
+
 const THIRD_PERSON_ANCHOR_FRAC: f32 = 0.55;
 
 const FIRST_PERSON_EYE_FRAC: f32 = 0.92;
@@ -394,14 +402,54 @@ pub fn build_operator_camera(
     }
 }
 
-pub fn chase_camera_system() {
-    // RETIRED. The chase camera is now owned entirely by the single authority
-    // `resolve_camera` (kuluu/src/view_native/camera_collision.rs), which lives
-    // in the crate that can reach the avian world for collision. This fn is kept
-    // only as a scheduling anchor for the systems in mod.rs that order against
-    // `chase_camera_system`; it takes no params and does nothing. Do not add
-    // camera logic here — it belongs in resolve_camera.
+// Native camera collision owns the transform; retain its shared scheduling anchor.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn chase_camera_system() {}
+
+#[cfg(any(target_arch = "wasm32", test))]
+pub fn snapshot_chase_camera_system(
+    mode: Res<CameraMode>,
+    mut chase: ResMut<ChaseCamera>,
+    state: Res<crate::snapshot::SceneState>,
+    q_self: Query<(&Transform, Option<&BakedActor>), (With<IsSelf>, Without<OperatorCamera>)>,
+    mut q_cam: Query<&mut Transform, (With<OperatorCamera>, Without<IsSelf>)>,
+) {
+    if !matches!(*mode, CameraMode::Chase) {
+        return;
+    }
+
+    let Ok((self_t, baked)) = q_self.single() else {
+        return;
+    };
+    let Ok(mut cam_t) = q_cam.single_mut() else {
+        return;
+    };
+
+    if !chase.synced_initial {
+        chase.yaw = yaw_for_heading(state.snapshot.self_pos.heading);
+        chase.synced_initial = true;
+    }
+
+    let cos_p = chase.pitch.cos();
+    let sin_p = chase.pitch.sin();
+    let yaw_dir = Vec3::new(chase.yaw.sin(), 0.0, chase.yaw.cos());
+
+    let anchor_y = third_person_anchor_y(baked);
+    let anchor = self_t.translation + Vec3::Y * anchor_y;
+    let radius = chase.orbit_radius();
+    let desired = anchor + yaw_dir * (radius * cos_p) + Vec3::Y * (radius * sin_p);
+
+    if chase.snap_to_anchor {
+        cam_t.translation = desired;
+        chase.snap_to_anchor = false;
+    } else {
+        cam_t.translation = cam_t.translation.lerp(desired, chase.smoothing);
+    }
+    cam_t.look_at(anchor, Vec3::Y);
 }
+
+#[cfg(target_arch = "wasm32")]
+pub use snapshot_chase_camera_system as chase_camera_system;
 
 pub fn firstperson_camera_system(
     mode: Res<CameraMode>,
@@ -477,6 +525,33 @@ pub fn heading_for_yaw(yaw: f32) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn snapshot_viewer_camera_follows_player_movement() {
+        let mut app = App::new();
+        app.init_resource::<CameraMode>()
+            .init_resource::<crate::snapshot::SceneState>()
+            .insert_resource(ChaseCamera {
+                smoothing: 1.0,
+                ..default()
+            })
+            .add_systems(Update, snapshot_chase_camera_system);
+        let player = app.world_mut().spawn((IsSelf, Transform::default())).id();
+        let camera = app
+            .world_mut()
+            .spawn((OperatorCamera, Transform::default()))
+            .id();
+        app.update();
+        let first = app.world().get::<Transform>(camera).unwrap().translation;
+        let displacement = Vec3::new(1.0, 2.0, 3.0);
+        app.world_mut()
+            .get_mut::<Transform>(player)
+            .unwrap()
+            .translation = displacement;
+        app.update();
+        let second = app.world().get::<Transform>(camera).unwrap().translation;
+        assert!((second - first - displacement).length() < 1e-5);
+    }
 
     #[test]
     fn yaw_heading_roundtrip_cardinals() {

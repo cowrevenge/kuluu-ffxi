@@ -15,7 +15,7 @@ default = []
 # NVIDIA DLSS Super Resolution (native Vulkan/RTX only). Compiles the runtime
 # plumbing in graphics/dlss.rs and chains to bevy's dlss feature (which pulls
 # dlss_wgpu; building it needs the DLSS SDK checked out and DLSS_SDK set — see
-# docs/DLSS.md). The settings/menu surface exists on every build; without this
+# README.md#optional-dlss-builds). The settings/menu surface exists on every build; without this
 # feature it permanently reads N/A.
 # `dep:kuluu-dlss-nr` is the DLSS 5 Neural Uplift FFI crate (safe wrapper
 # around nvngx_dlssnr.dll). It must only ever be built when nvsdk_ngx_s.lib
@@ -104,9 +104,6 @@ ab_glyph = "0.2"
 # over the websocket if/when that's wanted.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 ffxi-audio = { path = "../ffxi-audio" }
-# DLSS 5 Neural Uplift FFI (see the `dlss` feature above). Optional: without
-# the feature it is not in the dependency graph at all.
-kuluu-dlss-nr = { path = "../kuluu-dlss-nr", optional = true }
 # Same pinned copy as bevy's wgpu (29.x in the lockfile — zero new compile):
 # graphics/dlss_nr.rs names a few raw wgpu types that bevy does not re-export
 # (TextureTransition/TextureUses). Native-only; wasm never sees it.
@@ -131,3 +128,7 @@ js-sys = "0.3"
 # the resource itself only needs `serde` derives; serialization is the
 # `kuluu::graphics_store` layer's concern.
 serde_json = { workspace = true }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+# The optional Neural Uplift FFI loads Windows DLLs.
+kuluu-dlss-nr = { path = "../kuluu-dlss-nr", optional = true }

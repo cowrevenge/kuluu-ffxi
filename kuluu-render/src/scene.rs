@@ -6,9 +6,7 @@ use bevy::picking::Pickable;
 use bevy::prelude::*;
 use kuluu_snapshot::{EntityKind, EntityLook, Vec3 as WireVec3};
 
-use crate::components::{
-    CurrRenderPos, IsSelf, LookComp, MorphIn, Nameplate, PrevRenderPos, WorldEntity,
-};
+use crate::components::{CurrRenderPos, IsSelf, LookComp, MorphIn, PrevRenderPos, WorldEntity};
 use crate::entity_table::EntityTable;
 use crate::graphics_settings::GraphicsSettings;
 use crate::snapshot::SceneState;
@@ -245,10 +243,6 @@ pub struct EntitySyncQueries<'w, 's> {
         (With<WorldEntity>, Without<MorphIn>),
     >,
     vis: Query<'w, 's, &'static mut Visibility, With<WorldEntity>>,
-    // Nameplate billboards carry no WorldEntity, so this never overlaps the
-    // mutable queries above; bundling it keeps sync_entities_system under the
-    // 16-param ceiling now that the entity table takes a slot.
-    nameplates: Query<'w, 's, &'static Nameplate>,
 }
 
 /// The two signals that say "this zone's floor has landed" — the same pair the
@@ -264,10 +258,6 @@ pub fn sync_entities_system(
     table: Res<EntityTable>,
     mesh: Res<EntityMesh>,
     mats: Res<EntityMaterials>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut images: ResMut<Assets<Image>>,
-    billboard_font: Res<crate::nameplate_billboard::BillboardFont>,
     mut tracked: ResMut<TrackedEntities>,
     mut prediction: ResMut<crate::combat_stance::EntityPrediction>,
     mut motion: ResMut<crate::combat_stance::EntityMotion>,
@@ -300,9 +290,6 @@ pub fn sync_entities_system(
     let zone_key = crate::snapshot::effective_zone_file_id(snap);
     let zone_changed = matches!(*prev_zone, Some(p) if p != zone_key);
     *prev_zone = Some(zone_key);
-
-    let mut nameplated: std::collections::HashSet<u32> =
-        queries.nameplates.iter().map(|n| n.entity_id).collect();
 
     let mut seen: std::collections::HashSet<u32> =
         std::collections::HashSet::with_capacity(snap.entities.len() + 1);
@@ -456,25 +443,9 @@ pub fn sync_entities_system(
             }
         }
 
-        // Retail draws the local player's own overhead name in the same PC
-        // styling as other PCs (kuluu-hof); the update system hides it in
-        // first-person mode where the plate would sit at the camera eye.
-        if let Some(name) = wire.name.as_deref().filter(|s| !s.is_empty()) {
-            if !nameplated.contains(&wire.id) {
-                crate::nameplate_billboard::spawn_nameplate_billboard(
-                    &mut commands,
-                    &mut meshes,
-                    &mut materials,
-                    &mut images,
-                    &billboard_font.0,
-                    wire.id,
-                    wire.kind,
-                    name,
-                    crate::nameplate_billboard::NAMEPLATE_FALLBACK_COLOR,
-                );
-                nameplated.insert(wire.id);
-            }
-        }
+        // Nameplate billboards are spawned by
+        // update_nameplate_billboards_system's ensure pass (every frame, from
+        // the live entity table) — sync no longer owns plate existence.
     }
 
     // A mount is a second actor standing exactly where its rider stands; the

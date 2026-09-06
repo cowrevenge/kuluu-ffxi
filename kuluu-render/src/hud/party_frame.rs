@@ -875,9 +875,7 @@ fn spawn_member_row(
 
     // Retail party-aware name color: self = PC row, others = PARTY row.
     let is_self = Some(m.id) == self_id;
-    let name_color = colors
-        .color(if is_self { ncol::PC } else { ncol::PARTY })
-        .unwrap_or(Color::WHITE);
+    let name_color = colors.color(if is_self { ncol::PC } else { ncol::PARTY });
 
     // Member distance to self (L1 name line). Self gets none — its distance
     // to itself is always 0.0 (the "weird 0.0" behind the frame).

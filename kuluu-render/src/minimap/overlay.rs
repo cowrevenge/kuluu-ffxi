@@ -295,13 +295,13 @@ impl<'a> MarkerContext<'a> {
         }
     }
 
-    /// The fill for one world dot: the same retail `ncol` colour its nameplate
-    /// draws in, or the per-kind stand-in until that table loads.
+    /// The fill for one world dot: the same `ncol` colour its nameplate draws
+    /// in (retail row once loaded, built-in stand-in until then), or the
+    /// per-kind fallback when there is no live record at all.
     fn fill(&self, entity_id: u32, kind: EntityKind) -> Color {
         self.entities
             .get(&entity_id)
-            .map(|e| name_color_choice(e, self.color_ctx))
-            .and_then(|choice| choice.resolve(self.name_colors))
+            .map(|e| name_color_choice(e, self.color_ctx).resolve(self.name_colors))
             .unwrap_or_else(|| fill_fallback(kind))
     }
 }

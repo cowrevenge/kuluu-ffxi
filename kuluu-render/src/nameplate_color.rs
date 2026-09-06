@@ -90,22 +90,29 @@ impl NameColorTable {
     }
 
     /// The drawn colour for an `ncol` row, already doubled for MODULATE2X.
-    /// `None` until the retail table has been read.
-    pub fn color(&self, index: usize) -> Option<Color> {
-        self.colors.get(index).copied()
+    /// Until the retail table has been read, the built-in [`DEFAULT_ROW`] stands
+    /// in: a plate's colour is a fact about the entity (kind/status from the
+    /// live table), not about whether a DAT read has finished — it must be
+    /// drawable on the first frame. The real table overrides these on load; any
+    /// plate whose row moved re-rasters via its key comparison.
+    pub fn color(&self, index: usize) -> Color {
+        self.colors
+            .get(index)
+            .copied()
+            .unwrap_or_else(|| DEFAULT_ROW.get(index).copied().unwrap_or(Color::WHITE))
     }
 
     /// Retail's alliance-but-other-party claim colour: the average of the two
     /// claim rows. `NameColorSet` halves and adds the packed D3D
     /// colours, which is a per-channel mean.
-    pub fn blend(&self, a: usize, b: usize) -> Option<Color> {
-        let (a, b) = (self.color(a)?.to_srgba(), self.color(b)?.to_srgba());
-        Some(Color::srgba(
+    pub fn blend(&self, a: usize, b: usize) -> Color {
+        let (a, b) = (self.color(a).to_srgba(), self.color(b).to_srgba());
+        Color::srgba(
             (a.red + b.red) * 0.5,
             (a.green + b.green) * 0.5,
             (a.blue + b.blue) * 0.5,
             (a.alpha + b.alpha) * 0.5,
-        ))
+        )
     }
 
     pub fn load_from_dat(&mut self, dat_bytes: &[u8]) -> bool {
@@ -186,13 +193,48 @@ pub enum NameColorChoice {
 }
 
 impl NameColorChoice {
-    pub fn resolve(self, table: &NameColorTable) -> Option<Color> {
+    /// The drawn colour: the retail row once the install's table has loaded,
+    /// the built-in stand-in until then (see [`NameColorTable::color`]).
+    pub fn resolve(self, table: &NameColorTable) -> Color {
         match self {
             Self::Row(i) => table.color(i),
             Self::Blend(a, b) => table.blend(a, b),
         }
     }
 }
+
+/// Built-in stand-ins for every `ncol` row, drawn until (and unless) the
+/// retail table loads from the install's UI DAT. Kind and status come from the
+/// live entity table, so a plate's colour is known on its first frame — it must
+/// never hold a white placeholder waiting on a DAT read. The rows that matter at
+/// a glance follow the per-kind stand-ins the minimap already uses (PC white /
+/// NPC green / MOB yellow); the claim and dead rows match the real table's
+/// pinned values (`real_dat_table_loads_with_retail_claim_colors`).
+const DEFAULT_ROW: [Color; NAME_COLOR_COUNT] = [
+    Color::srgb(1.00, 1.00, 1.00), // 0 PC — plain white
+    Color::srgb(0.45, 0.75, 1.00), // 1 PARTY — pale blue (minimap party stand-in)
+    Color::srgb(1.00, 0.85, 0.35), // 2 SEEKING — gold
+    Color::srgb(0.70, 0.70, 0.70), // 3 ANONYMOUS — grey
+    Color::srgb(0.35, 0.95, 0.45), // 4 NPC — green (minimap npc stand-in)
+    Color::srgb(1.00, 0.95, 0.35), // 5 MOB — yellow (minimap mob stand-in)
+    Color::srgb(1.00, 0.51, 0.51), // 6 CLAIMED_BY_PARTY — retail's #FF8282 claim red
+    Color::srgb(0.75, 0.55, 1.00), // 7 CLAIMED_BY_OTHER — retail's purple
+    Color::srgb(1.00, 0.35, 0.35), // 8 YELL — red
+    Color::srgb(0.55, 0.55, 0.55), // 9 DEAD — neutral grey (the real row is a neutral grey)
+    Color::WHITE,                  // 10 GM level 3-4
+    Color::WHITE,                  // 11 GM level 4
+    Color::WHITE,                  // 12 GM level 5
+    Color::WHITE,                  // 13 GM level 6
+    Color::WHITE,                  // 14 GM level 7
+    Color::WHITE,                  // 15 GM level 8
+    Color::WHITE,                  // 16 GM level 9-10
+    Color::srgb(0.45, 0.65, 1.00), // 17 (unused row — keep the table full)
+    Color::srgb(0.45, 0.65, 1.00), // 18 SAN_DORIA allegiance
+    Color::srgb(1.00, 0.60, 0.35), // 19 BASTOK allegiance
+    Color::srgb(0.45, 0.95, 0.55), // 20 WINDURST allegiance
+    Color::srgb(0.40, 0.85, 0.85), // 21 WYVERNS allegiance
+    Color::srgb(0.75, 0.55, 0.95), // 22 GRIFFONS allegiance
+];
 
 /// Port of `ActorTelemetry::NameColorSet`
 /// (research/XIClient/.../ActorTelemetry.cpp `NameColorSet`),
@@ -360,14 +402,14 @@ pub fn load_name_colors_system(
         }
     }
     // A retail install is present but none of its UI DATs carries the ncol
-    // group (locale mismatch, partial install). Every plate would then hold
-    // the fallback white for the whole session — surface it once instead of
-    // failing silently.
+    // group (locale mismatch, partial install). Plates then draw the built-in
+    // stand-ins for the whole session — surface it once instead of failing
+    // silently.
     if !*scanned_without_group {
         *scanned_without_group = true;
         warn!(
             group = NCOL_GROUP,
-            "retail install present but no UI DAT carries the nameplate colour table; plates stay on the fallback colour"
+            "retail install present but no UI DAT carries the nameplate colour table; plates use the built-in stand-in colours"
         );
     }
 }
@@ -746,14 +788,35 @@ mod tests {
     }
 
     #[test]
-    fn an_unloaded_table_resolves_to_no_colour() {
+    fn an_unloaded_table_resolves_to_the_builtin_rows() {
         let table = NameColorTable::default();
         assert!(!table.is_loaded());
-        assert_eq!(NameColorChoice::Row(ncol::PC).resolve(&table), None);
+        // A plate's colour is a fact about the entity (kind/status from the
+        // live table), not about whether a DAT read has finished: it must
+        // resolve on frame one.
         assert_eq!(
-            NameColorChoice::Blend(ncol::CLAIMED_BY_PARTY, ncol::CLAIMED_BY_OTHER).resolve(&table),
-            None
+            NameColorChoice::Row(ncol::PC).resolve(&table),
+            DEFAULT_ROW[ncol::PC]
         );
+        assert_eq!(
+            NameColorChoice::Row(ncol::NPC).resolve(&table),
+            DEFAULT_ROW[ncol::NPC]
+        );
+        assert_eq!(
+            NameColorChoice::Row(ncol::MOB).resolve(&table),
+            DEFAULT_ROW[ncol::MOB]
+        );
+
+        let blended = NameColorChoice::Blend(ncol::CLAIMED_BY_PARTY, ncol::CLAIMED_BY_OTHER)
+            .resolve(&table)
+            .to_srgba();
+        let (a, b) = (
+            DEFAULT_ROW[ncol::CLAIMED_BY_PARTY].to_srgba(),
+            DEFAULT_ROW[ncol::CLAIMED_BY_OTHER].to_srgba(),
+        );
+        assert!((blended.red - (a.red + b.red) * 0.5).abs() < 1e-6);
+        assert!((blended.green - (a.green + b.green) * 0.5).abs() < 1e-6);
+        assert!((blended.blue - (a.blue + b.blue) * 0.5).abs() < 1e-6);
     }
 
     #[test]
@@ -768,7 +831,6 @@ mod tests {
 
         let blended = table
             .blend(ncol::CLAIMED_BY_PARTY, ncol::CLAIMED_BY_OTHER)
-            .expect("both rows present")
             .to_srgba();
         assert!((blended.red - 1.0).abs() < 1e-6);
         assert!((blended.green - 0.0).abs() < 1e-6);
@@ -792,19 +854,19 @@ mod tests {
         );
         assert_eq!(table.len(), NAME_COLOR_COUNT);
 
-        let party_claim = table.color(ncol::CLAIMED_BY_PARTY).unwrap().to_srgba();
+        let party_claim = table.color(ncol::CLAIMED_BY_PARTY).to_srgba();
         assert!(
             party_claim.red > party_claim.green && party_claim.red > party_claim.blue,
             "an own-party claim is retail's red"
         );
 
-        let other_claim = table.color(ncol::CLAIMED_BY_OTHER).unwrap().to_srgba();
+        let other_claim = table.color(ncol::CLAIMED_BY_OTHER).to_srgba();
         assert!(
             other_claim.red > other_claim.green && other_claim.blue > other_claim.green,
             "another party's claim is retail's purple"
         );
 
-        let dead = table.color(ncol::DEAD).unwrap().to_srgba();
+        let dead = table.color(ncol::DEAD).to_srgba();
         assert!(
             dead.red < 0.75 && dead.red == dead.green && dead.green == dead.blue,
             "the dead row is a neutral grey"

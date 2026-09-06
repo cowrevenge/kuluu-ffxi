@@ -188,7 +188,13 @@ pub fn update_entity_list_hud(
     // Without keeps the two `&mut Text` queries provably disjoint (B0001):
     // the header row never carries EntityListRow.
     mut header_q: Query<&mut Text, (With<EntityListHeader>, Without<EntityListRow>)>,
-    mut row_q: Query<(&EntityListRow, &mut Text, &mut TextColor, &mut Node, &mut BorderColor)>,
+    mut row_q: Query<(
+        &EntityListRow,
+        &mut Text,
+        &mut TextColor,
+        &mut Node,
+        &mut BorderColor,
+    )>,
 ) {
     if !panels.entity_list {
         return;
@@ -225,7 +231,9 @@ pub fn update_entity_list_hud(
     let self_id = table.self_id();
     // The target rectangle: the row slot holding the targeted entity, if it is
     // on the visible page. A stale id (target despawned) matches nothing.
-    let target_row = target.id.and_then(|id| ents.iter().position(|r| r.entity.id == id));
+    let target_row = target
+        .id
+        .and_then(|id| ents.iter().position(|r| r.entity.id == id));
     for (row, mut text, mut color, mut node, mut border_color) in row_q.iter_mut() {
         match ents.get(start + row.0) {
             Some(rec) => {
@@ -368,7 +376,11 @@ fn marker_labels(e: &kuluu_snapshot::Entity) -> String {
         .filter_map(|code| label_for_glyph(code))
         .collect::<Vec<_>>()
         .join(" ");
-    if labels.is_empty() { "-".to_string() } else { labels }
+    if labels.is_empty() {
+        "-".to_string()
+    } else {
+        labels
+    }
 }
 
 fn label_for_glyph(code: u8) -> Option<&'static str> {

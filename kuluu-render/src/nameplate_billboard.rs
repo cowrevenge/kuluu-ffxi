@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use ab_glyph::{Font, FontArc, PxScale, ScaleFont};
+use bevy::ecs::system::SystemParam;
 use bevy::image::{Image, ImageSampler};
 use bevy::light::{NotShadowCaster, NotShadowReceiver};
 use bevy::prelude::*;
@@ -110,6 +111,12 @@ pub struct RasterKey {
     pub text: String,
     pub color: [u8; 4],
     pub hp: Option<u8>,
+    /// The record's raw STATUS_TYPE byte. Today it only reaches the plate via
+    /// `is_dead` (colour) and the live invis cull, but the key must stay a
+    /// complete function of the record: any state transition — including ones
+    /// that happen while the plate is view-culled behind the camera — re-rasters
+    /// on the next frame instead of waiting for some other field to move.
+    pub status: u8,
     pub markers: Vec<u8>,
     pub linkshell_tint: [u8; 4],
 }
@@ -119,6 +126,7 @@ impl RasterKey {
         self.text == text
             && self.color == other.color
             && self.hp == other.hp
+            && self.status == other.status
             && self.markers == other.markers
             && self.linkshell_tint == other.linkshell_tint
     }
@@ -236,6 +244,15 @@ pub fn spawn_nameplate_billboard(
         .id()
 }
 
+/// Bundled so [`update_nameplate_billboards_system`] stays under bevy's 16-param
+/// SystemParam ceiling (the plate-existence ensure pass took the mesh-asset slot).
+#[derive(SystemParam)]
+pub struct RasterInputs<'w> {
+    pub font: Res<'w, BillboardFont>,
+    pub name_colors: Res<'w, crate::nameplate_color::NameColorTable>,
+    pub icons: Res<'w, crate::nameplate_icons::NameplateIcons>,
+}
+
 pub fn is_self_billboard(entity_id: u32, self_char_id: Option<u32>) -> bool {
     self_char_id.is_some_and(|cid| cid != 0 && cid == entity_id)
 }
@@ -247,12 +264,6 @@ pub fn is_self_billboard(entity_id: u32, self_char_id: Option<u32>) -> bool {
 pub fn self_plate_hidden(is_self: bool, mode: CameraMode) -> bool {
     is_self && matches!(mode, CameraMode::FirstPerson)
 }
-
-/// The colour a plate falls back to before the retail `ncol` table is
-/// available — a DAT read that only fails when there is no retail install (the
-/// headless/relay paths). Neutral white so a missing table never invents a
-/// meaning the packet did not carry.
-pub const NAMEPLATE_FALLBACK_COLOR: Color = Color::WHITE;
 
 // Piece 7 removed the snapshot-rebuilt `SuppressedNameplates` cull set and
 // its `BillboardDebugCull` SystemParam bundle: the server-hidden gate now
@@ -283,14 +294,14 @@ pub fn update_nameplate_billboards_system(
         &mut Visibility,
         &MeshMaterial3d<StandardMaterial>,
     )>,
+    mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut images: ResMut<Assets<Image>>,
-    font: Res<BillboardFont>,
-    name_colors: Res<crate::nameplate_color::NameColorTable>,
-    icons: Res<crate::nameplate_icons::NameplateIcons>,
+    raster: RasterInputs,
     mut commands: Commands,
     mut dbg_out: ResMut<NameplateBillboardDebug>,
     table: Res<crate::entity_table::EntityTable>,
+    mut missing_record_warned: Local<std::collections::HashSet<u32>>,
 ) {
     let Ok((cam_t, projection)) = cam_q.single() else {
         return;
@@ -301,7 +312,7 @@ pub fn update_nameplate_billboards_system(
     let cam_pos = cam_t.translation;
     let cam_forward = Vec3::from(cam_t.forward());
     let half_fov_tan = (perspective.fov * 0.5).tan();
-    let line_px = text_line_height_px(&font.0, NAME_PX) as f32;
+    let line_px = text_line_height_px(&raster.font.0, NAME_PX) as f32;
     let pulse_frame = (time.elapsed_secs() * RETAIL_FPS) as u32;
 
     let mut pos_by_id: std::collections::HashMap<u32, (Vec3, f32)> =
@@ -311,6 +322,54 @@ pub fn update_nameplate_billboards_system(
     }
 
     let self_char_id: Option<u32> = state.snapshot.self_char_id;
+    // Plate existence is owned here, not by sync_entities_system (which used to
+    // spawn plates on its dirty-gated clock and could leave a live named entity
+    // without one — e.g. a worm that zones in underground). Every frame: any
+    // table record with a name whose model exists (a position above) but which
+    // has no billboard gets one, read from the same source the Entity List
+    // overlay reads. Gating on pos_by_id keeps this flap-free while the floor
+    // gate holds new models back and during despawn races: no model, no plate
+    // yet. A freshly spawned plate is Hidden at y=-1e6 until next frame's pass
+    // positions and rasters it — one frame later than the old same-frame spawn,
+    // invisible in practice.
+    {
+        let mut have: std::collections::HashSet<u32> = billboards
+            .iter_mut()
+            .map(|(_, np, ..)| np.entity_id)
+            .collect();
+        for rec in table.iter() {
+            let id = rec.entity.id;
+            if have.contains(&id) || !pos_by_id.contains_key(&id) {
+                continue;
+            }
+            let Some(name) = rec.entity.name.as_deref().filter(|s| !s.is_empty()) else {
+                continue;
+            };
+            // The record's kind/status are known right now, so the first bake
+            // already carries its type colour (mob yellow / npc green / pc
+            // white) — no white placeholder waiting on a DAT read. A later
+            // table load or status change re-rasters via the key comparison.
+            let ctx = crate::nameplate_color::SelfContext {
+                self_id: self_char_id,
+                party: &state.snapshot.party,
+            };
+            let color = crate::nameplate_color::name_color_choice(&rec.entity, ctx)
+                .resolve(&raster.name_colors);
+            spawn_nameplate_billboard(
+                &mut commands,
+                &mut meshes,
+                &mut materials,
+                &mut images,
+                &raster.font.0,
+                id,
+                rec.entity.kind,
+                name,
+                color,
+            );
+            have.insert(id);
+        }
+    }
+
     // Piece 7: no dirty gate. The re-raster inputs (colour, hp, markers,
     // tint) are recomputed from LIVE entity-table records per billboard
     // below, so a plate can never hold a stale key past the frame its facts
@@ -432,22 +491,25 @@ pub fn update_nameplate_billboards_system(
         // the next frame without waiting for a dirty rebuild. The name lives
         // on the component, not the record: a later update can drop it and
         // the plate must keep the name it spawned with.
+        // Plates are spawned from this same table (the ensure pass above), so
+        // a live plate with no record is anomalous — surface it instead of
+        // silently holding the last raster. Deduped per id: a despawn race can
+        // drop the record for one or two frames and must not spam.
         let Some(rec) = table.get(np.entity_id) else {
+            if missing_record_warned.insert(np.entity_id) {
+                tracing::error!(
+                    id = np.entity_id,
+                    name = %np.base_name,
+                    "nameplate has no live entity-table record; holding last raster"
+                );
+            }
             continue;
         };
-        // The retail ncol table must be ready before the first real raster:
-        // until then every colour resolves to the fallback, and a plate baked
-        // against it would need a later frame to fix — on load that frame may
-        // never come (the "white names" report). Hold the spawn placeholder
-        // instead; the key comparison below fires the moment the table lands.
-        if !name_colors.is_loaded() {
-            continue;
-        }
         let ctx = crate::nameplate_color::SelfContext {
             self_id: self_char_id,
             party: &state.snapshot.party,
         };
-        let key = raster_key_for(&rec.entity, ctx, &name_colors, settings.mob_hp_under);
+        let key = raster_key_for(&rec.entity, ctx, &raster.name_colors, settings.mob_hp_under);
         if np
             .rastered
             .as_ref()
@@ -455,6 +517,9 @@ pub fn update_nameplate_billboards_system(
         {
             continue;
         }
+        // (status is part of the key: a worm that surfaces or dives behind the
+        // camera re-rasters on this frame even though nothing else in the key
+        // moved — see RasterKey::status.)
         let want = RasterKey {
             text: np.base_name.clone(),
             ..key
@@ -482,14 +547,14 @@ pub fn update_nameplate_billboards_system(
         };
         crate::perf_probe::note_nameplate_raster();
         let new_img = rasterize_plate(
-            &font.0,
+            &raster.font.0,
             &want.text,
             NAME_PX,
             want.color,
             want.hp,
             &want.markers,
             want.linkshell_tint,
-            Some(&icons),
+            Some(&raster.icons),
         );
         aspect.width = new_img.image.width();
         aspect.height = new_img.image.height();
@@ -527,9 +592,9 @@ fn raster_key_for(
     name_colors: &crate::nameplate_color::NameColorTable,
     show_mob_hp: bool,
 ) -> RasterKey {
-    let color = crate::nameplate_color::name_color_choice(ent, ctx)
-        .resolve(name_colors)
-        .unwrap_or(NAMEPLATE_FALLBACK_COLOR);
+    // Infallible: the retail row once the install's table has loaded, the
+    // built-in stand-in until then (NameColorTable::color).
+    let color = crate::nameplate_color::name_color_choice(ent, ctx).resolve(name_colors);
     // `enhanced-mob-hp-under` is the compile-time half of this gate: without
     // it a persisted `mob_hp_under` from an enhanced build can never light a
     // bar in a plain one.
@@ -550,6 +615,7 @@ fn raster_key_for(
         text: String::new(),
         color: color_to_rgba8(color),
         hp,
+        status: ent.status,
         markers: crate::nameplate_marker::nameplate_markers(ent),
         linkshell_tint: color_to_rgba8(crate::nameplate_color::linkshell_tint(&ent.char_flags)),
     }

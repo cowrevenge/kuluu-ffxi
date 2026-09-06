@@ -154,8 +154,7 @@ pub unsafe extern "C" fn kuluu_ngx_fwd_vulkan_init_ext2(
     black_box(r)
 }
 
-/// Forward one call to `NVSDK_NGX_VULKAN_CreateFeature` (gated like Init_Ext —
-/// ffxi_dlss5.md §2.10).
+/// Forward the module-gated `NVSDK_NGX_VULKAN_CreateFeature` call.
 ///
 /// # Safety
 /// See `kuluu_ngx_fwd_vulkan_init_ext`.

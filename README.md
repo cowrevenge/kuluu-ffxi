@@ -107,6 +107,41 @@ cargo run -p kuluu --no-default-features -- play --headless
 If any credential env var is unset, the launcher prompts for it and lists
 characters on the account so you can pick by name.
 
+### Optional DLSS builds
+
+DLSS is opt-in and excluded from the standard release builds. Super Resolution
+(SR) uses an NVIDIA RTX GPU with the Vulkan backend on Windows or Linux; it is
+unavailable on macOS and in the browser viewer.
+
+Install the NVIDIA DLSS SDK, Vulkan SDK, and libclang. Set `DLSS_SDK` and
+`VULKAN_SDK` to their SDK roots, and `LIBCLANG_PATH` if libclang is not found
+automatically. Then build:
+
+```bash
+cargo build -p kuluu --release --features native-window,dlss
+```
+
+Stage the matching SDK runtime beside the executable (`nvngx_dlss.dll` on
+Windows, `libnvidia-ngx-dlss.so.*` on Linux), following the SDK's redistribution
+terms. Select `DLSS` under Graphics > Anti-Aliasing and choose a quality level
+in `DLSS Config`. Unsupported configurations show `N/A`. While DLSS is active,
+it owns anti-aliasing and render resolution; the manual Render Scale control
+is disabled.
+
+**Neural Uplift (NR) is a separate, experimental Windows-only implementation.**
+It additionally requires `nvngx_dlssnr.dll` beside the executable and the
+project's forwarder DLL. Build and stage the forwarder in PowerShell:
+
+```powershell
+cargo build -p kuluu-ngx-fwd --release
+Copy-Item target/release/kuluu_ngx_fwd.dll target/release/nvngx.dll_kuluu.dll
+```
+
+Keep that staged filename: it is distinct from the driver's `nvngx.dll`.
+Enable `Neural Uplift` in `DLSS Config` while DLSS anti-aliasing is active.
+The current NR path supplies zero motion vectors, so camera-motion quality
+still needs validation. Linux SR does not include this Windows NR path.
+
 ### Getting the game files
 
 The FFXI client DATs (geometry, textures, audio, animations) are Square Enix

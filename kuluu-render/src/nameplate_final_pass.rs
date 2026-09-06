@@ -61,9 +61,9 @@ use bevy::render::render_resource::{
     BufferInitDescriptor, BufferUsages, CachedRenderPipelineId, ColorTargetState, ColorWrites,
     CompareFunction, DepthBiasState, DepthStencilState, FragmentState, FrontFace, IndexFormat,
     MultisampleState, PipelineCache, PolygonMode, PrimitiveState, PrimitiveTopology,
-    RenderPassDescriptor, RenderPipelineDescriptor, SamplerBindingType, ShaderStages, ShaderType,
-    StencilFaceState, StencilState, StoreOp, TextureFormat, TextureSampleType, VertexFormat,
-    VertexState, VertexStepMode,
+    RenderPassDescriptor, RenderPipelineDescriptor, SamplerBindingType, SamplerId, ShaderStages,
+    ShaderType, StencilFaceState, StencilState, StoreOp, TextureFormat, TextureSampleType,
+    TextureViewId, VertexFormat, VertexState, VertexStepMode,
 };
 use bevy::render::renderer::{RenderContext, RenderDevice, RenderQueue, ViewQuery};
 use bevy::render::{
@@ -425,6 +425,8 @@ pub struct PlateDraw {
 /// frame by `prepare_nameplate_bindings` (matrix/alpha change with movement).
 #[derive(Clone)]
 pub struct PlateBinding {
+    texture_view: TextureViewId,
+    sampler: SamplerId,
     uniforms: Buffer,
     bind_group: BindGroup,
 }
@@ -658,15 +660,17 @@ fn prepare_nameplate_bindings(
     let mut no_gpu_image = 0u32;
     let mut not_had_data = 0u32;
     for plate in &mut data.plates {
-        if cache.get(&plate.entity).is_none() {
-            let Some(img) = gpu_images.get(plate.texture_handle.id()).cloned() else {
-                no_gpu_image += 1; // texture still uploading — retries next frame
-                continue;
-            };
-            if !img.had_data {
-                not_had_data += 1;
-                continue;
-            }
+        let Some(img) = gpu_images.get(plate.texture_handle.id()) else {
+            no_gpu_image += 1;
+            continue;
+        };
+        if !img.had_data {
+            not_had_data += 1;
+            continue;
+        }
+        if cache.get(&plate.entity).is_none_or(|binding| {
+            binding.texture_view != img.texture_view.id() || binding.sampler != img.sampler.id()
+        }) {
             let uniforms = device.create_buffer(&BufferDescriptor {
                 label: Some("nameplate_plate_uniforms"),
                 size: PLATE_UNIFORM_SIZE as u64,
@@ -674,6 +678,8 @@ fn prepare_nameplate_bindings(
                 mapped_at_creation: false,
             });
             let binding = PlateBinding {
+                texture_view: img.texture_view.id(),
+                sampler: img.sampler.id(),
                 bind_group: device.create_bind_group(
                     "nameplate_plate_binding",
                     &bind_group_layout,
@@ -709,9 +715,6 @@ fn prepare_nameplate_bindings(
     // Rewrite this frame's uniforms for every plate that has a binding.
     let mut bound = 0u32;
     for plate in &mut data.plates {
-        if let Some(b) = cache.get(&plate.entity).cloned() {
-            plate.binding = Some(b);
-        }
         if plate.binding.is_some() {
             bound += 1;
         }

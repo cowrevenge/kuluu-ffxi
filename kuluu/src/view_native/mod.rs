@@ -318,6 +318,9 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
     // (native ⌃⌘F stays Composited); the Metal HUD's Composited/Direct flag then isolates whether
     // the periodic frame spikes are WindowServer compositor pacing.
     let force_exclusive = std::env::var_os("FFXI_FULLSCREEN").is_some();
+    app.insert_resource(kuluu_render::graphics_settings::FullscreenOverride(
+        force_exclusive,
+    ));
     let want_fullscreen = force_exclusive || loaded_graphics.fullscreen;
     let window_mode = if !want_fullscreen {
         bevy::window::WindowMode::Windowed
@@ -515,6 +518,7 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
         .init_resource::<CameraAutoRecenter>()
         .init_resource::<HeadingTurnAccum>()
         .init_resource::<LocalPlayerPrediction>()
+        .init_resource::<input::DispatchLocals>()
         .init_resource::<text_input::CaptureMode>()
         .init_resource::<collision_bvh::ZoneCollisionBvh>()
         .insert_resource(ports)
@@ -610,6 +614,8 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
         (
             despawn_ingame_entities,
             drain_entity_prediction,
+            input::reset_local_movement,
+            kuluu_render::camera::reset_camera_follow,
             drain_mzb_load_state,
             drain_mmb_load_state,
             drain_particle_simulator,

@@ -15,7 +15,7 @@
 //!   lives) encodes one EvaluateFeature per frame into its own command buffer
 //!   and adds it to the render context.
 //!
-//! Full ABI story: `ffxi_dlss5.md` at the repo root.
+//! ABI wrappers live in `kuluu-dlss-nr`.
 
 use std::sync::Mutex;
 
@@ -147,7 +147,7 @@ impl NrState {
         // Same data-path convention as dlss_wgpu's SR init: the OS temp dir.
         let data_path = std::env::temp_dir().to_string_lossy().into_owned();
         // Lower 64 bits of KULUU_DLSS_PROJECT_ID (the u128 UUID) — the NGX API
-        // takes a u64 app id; documented in ffxi_dlss5.md §3.
+        // takes a u64 app id.
         let app_id = KULUU_DLSS_PROJECT_ID as u64;
 
         match runtime.init(app_id, &data_path, &handles, None) {
@@ -166,7 +166,7 @@ impl NrState {
                     error!("dlss-nr: forwarder received a null Init_Ext pointer (kuluu-dlss-nr load-order bug)");
                 } else if r as u32 == 0xBAD0_0002 {
                     // Still gated: the call did not land inside nvngx.dll_kuluu.dll.
-                    warn!("dlss-nr: still module-gated — confirm nvngx.dll_kuluu.dll sits next to this exe (staging in docs/DLSS.md)");
+                    warn!("dlss-nr: still module-gated — confirm nvngx.dll_kuluu.dll sits next to this exe (staging in README.md#optional-dlss-builds)");
                 }
                 false
             }
@@ -435,7 +435,7 @@ pub fn prepare_nr(
                 if r == kuluu_dlss_nr::FWD_NULL_TARGET {
                     error!("dlss-nr: forwarder received a null CreateFeature pointer (kuluu-dlss-nr load-order bug)");
                 } else if r as u32 == 0xBAD0_0002 {
-                    warn!("dlss-nr: still module-gated — confirm nvngx.dll_kuluu.dll sits next to this exe and is current (staging in docs/DLSS.md)");
+                    warn!("dlss-nr: still module-gated — confirm nvngx.dll_kuluu.dll sits next to this exe and is current (staging in README.md#optional-dlss-builds)");
                 }
             }
         }
@@ -575,8 +575,6 @@ pub fn nr_node(
     let reset = inner.last_depth_sig != Some(sig);
     inner.last_depth_sig = Some(sig);
 
-    // Bevy's prepass writes standard (non-inverted) depth; the parser defaults
-    // DepthInverted to 1, so say explicitly that ours is not inverted.
     let r = inner.runtime.evaluate_nr(
         raw_cmd,
         &inner.handle,
@@ -588,7 +586,7 @@ pub fn nr_node(
         nr_enabled.intensity,
         nr_enabled.local_tone_strength,
         nr_enabled.structure_strength,
-        false, // bevy prepass depth is not inverted
+        true, // Bevy PerspectiveProjection::get_clip_from_view uses reverse-Z.
         sub_w,
         sub_h,
         reset,

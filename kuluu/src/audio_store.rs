@@ -199,10 +199,10 @@ mod tests {
     }
 
     #[test]
-    fn load_rejects_nan_master() {
+    fn load_rejects_invalid_json_master() {
         let path = tmp_path();
         std::fs::write(&path, br#"{"master": NaN}"#).unwrap();
-        let s = AudioStore::new(&path).load().unwrap().expect("present");
-        assert_eq!(s.master, 1.0, "NaN falls back to full volume");
+        assert!(AudioStore::new(&path).load().is_err());
+        let _ = std::fs::remove_file(path);
     }
 }

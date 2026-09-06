@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 #![allow(clippy::type_complexity, clippy::too_many_arguments)]
 
+#[cfg(not(target_arch = "wasm32"))]
 pub mod actor_diag;
 pub mod atmosphere;
 #[cfg(not(target_arch = "wasm32"))]
@@ -258,6 +259,7 @@ impl<S: SceneSource + Resource + Component<Mutability = bevy::ecs::component::Mu
             .init_resource::<LockOn>()
             .init_resource::<ZoneLineState>()
             .init_resource::<GraphicsSettings>()
+            .init_resource::<graphics_settings::FullscreenOverride>()
             .init_resource::<graphics_settings::MsaaCaps>()
             .add_systems(PreStartup, graphics_settings::init_msaa_caps_system)
             .init_resource::<atmosphere::ZoneAtmosphereProvider>()
@@ -507,7 +509,7 @@ impl<S: SceneSource + Resource + Component<Mutability = bevy::ecs::component::Mu
         // DLSS 5 Neural Uplift (NR): registers its main-world apply system +
         // component extraction plugin, and the render-world prepare/node
         // systems (see graphics/dlss_nr.rs). No-op without nvngx_dlssnr.dll.
-        #[cfg(all(not(target_arch = "wasm32"), feature = "dlss"))]
+        #[cfg(all(target_os = "windows", feature = "dlss"))]
         graphics::dlss_nr::register(app);
 
         #[cfg(not(target_arch = "wasm32"))]

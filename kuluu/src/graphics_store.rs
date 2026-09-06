@@ -338,10 +338,10 @@ mod tests {
     }
 
     #[test]
-    fn load_rejects_nan_ui_scale() {
+    fn load_rejects_invalid_json_ui_scale() {
         let store = GraphicsStore::new(tmp_path());
         std::fs::write(store.path(), br#"{"ui_scale": NaN}"#).unwrap();
-        let loaded = store.load().unwrap().expect("present");
-        assert_eq!(loaded.ui_scale, 1.0, "NaN falls back to the default scale");
+        assert!(store.load().is_err());
+        let _ = std::fs::remove_file(store.path());
     }
 }

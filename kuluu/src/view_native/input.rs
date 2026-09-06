@@ -20,6 +20,7 @@ pub struct MoveEnvParams<'w> {
     // mob-pathing mesh that flattens stairs, so it is NOT used here — only for
     // /pathto and minimap culling (kuluu-oe8y; see AGENTS.md).
     pub collision: Res<'w, kuluu_render::dat_mzb::MzbCollisionGeometry>,
+    pub floor_gate: kuluu_render::scene::ZoneFloorGate<'w>,
     /// Dynamic obstacles rebuilt every fixed tick before dispatch (plan §2.5):
     /// closed door leaves (walls + floors) and mob circles. Bundled here — this
     /// fn sits at bevy's 16-param SystemParam ceiling.
@@ -45,10 +46,7 @@ pub struct PadEdges {
     back_active: bool,
 }
 
-/// Bundled per-tick locals for [`dispatch_movement_system`]. Kept as a
-/// single `Local<DispatchLocals>` because bevy's `SystemParam` derive tops
-/// out at 16 params per system and this fn was already at the ceiling.
-#[derive(Default)]
+#[derive(Resource, Default)]
 pub struct DispatchLocals {
     /// Latched world-space run heading for pure W/S: (forward sign, motion
     /// heading). Sampled from the camera frame when the key state changes,
@@ -57,9 +55,8 @@ pub struct DispatchLocals {
     pub steer_latch: Option<(i32, u8)>,
     /// Rising-edge memory for pad stick just_pressed emulation.
     pub pad_edges: PadEdges,
-    /// Cross-tick walker state (modes, push-through accrual, fall velocity);
-    /// the stub is stateless until the real step lands.
     pub walker: super::walker::Walker,
+    identity: Option<(Option<u32>, Option<u16>, Option<u32>, u64)>,
 }
 
 #[derive(SystemParam)]
@@ -308,6 +305,7 @@ pub fn autorun_after_toggle(phantom_forward: bool, toggle_just_pressed: bool) ->
 pub struct LocalPlayerPrediction {
     pub pos: Vec3,
     pub initialized: bool,
+    snapshot_driven: bool,
 }
 
 #[derive(Resource, Default)]
@@ -634,6 +632,25 @@ pub fn sync_target_lock_system(
     }
 }
 
+pub fn reset_local_movement(
+    mut prediction: ResMut<LocalPlayerPrediction>,
+    mut locals: ResMut<DispatchLocals>,
+) {
+    *prediction = LocalPlayerPrediction::default();
+    *locals = DispatchLocals::default();
+}
+
+fn snapshot_drives_movement(goal: Option<&kuluu_snapshot::ReactorGoal>) -> bool {
+    matches!(
+        goal,
+        Some(
+            kuluu_snapshot::ReactorGoal::Following { .. }
+                | kuluu_snapshot::ReactorGoal::Pathing { .. }
+                | kuluu_snapshot::ReactorGoal::Banking { .. }
+        )
+    )
+}
+
 pub fn dispatch_movement_system(
     keys: Res<ButtonInput<KeyCode>>,
     bindings: Res<Bindings>,
@@ -646,10 +663,7 @@ pub fn dispatch_movement_system(
     mut autorun: ResMut<AutoRun>,
     mut chase: ResMut<ChaseCamera>,
     mut turn_accum: ResMut<HeadingTurnAccum>,
-    // Bundled per-tick locals (steer_latch + pad_edges + walker state) so this
-    // fn stays under bevy's 16-param SystemParam ceiling. See `DispatchLocals`
-    // for the field-level docs the individual `Local`s used to carry.
-    mut locals: Local<DispatchLocals>,
+    mut locals: ResMut<DispatchLocals>,
     mut prediction: ResMut<LocalPlayerPrediction>,
     env: MoveEnvParams,
     mut stance: StanceParams,
@@ -663,6 +677,37 @@ pub fn dispatch_movement_system(
     let move_intent = &mut stance.move_intent;
     // Default to stopped so every early return below reports no movement.
     **move_intent = kuluu_render::combat_stance::SelfMoveIntent::default();
+
+    let identity = (
+        state.snapshot.self_char_id,
+        state.snapshot.zone_id,
+        kuluu_render::snapshot::effective_zone_file_id(&state.snapshot),
+        state.snapshot.zone_generation,
+    );
+    if locals.identity != Some(identity) {
+        *locals = DispatchLocals {
+            identity: Some(identity),
+            ..default()
+        };
+        *prediction = LocalPlayerPrediction::default();
+    }
+    if !env.floor_gate.ready() {
+        *prediction = LocalPlayerPrediction::default();
+        locals.walker = super::walker::Walker::default();
+        return;
+    }
+
+    let snapshot_driven = snapshot_drives_movement(state.snapshot.current_goal.as_ref());
+    if snapshot_driven || prediction.snapshot_driven {
+        prediction.pos = Vec3::new(
+            state.snapshot.self_pos.pos.x,
+            state.snapshot.self_pos.pos.y,
+            state.snapshot.self_pos.pos.z,
+        );
+        prediction.initialized = true;
+        locals.walker = super::walker::Walker::default();
+    }
+    prediction.snapshot_driven = snapshot_driven;
 
     if mode_cancels_autorun(&mode) {
         autorun.phantom_forward = false;
@@ -923,6 +968,7 @@ pub fn dispatch_movement_system(
     {
         prediction.pos = snap_pos;
         prediction.initialized = true;
+        locals.walker = super::walker::Walker::default();
         snap_pos
     } else {
         prediction.pos
@@ -983,6 +1029,9 @@ pub fn dispatch_movement_system(
     }
 
     if forward == 0 && strafe == 0 && player_rotate_u8 == 0 && !steer_in_chase {
+        if snapshot_driven {
+            return;
+        }
         if let Some(h) = locked_heading {
             if h != self_pos.heading {
                 chase.yaw = kuluu_render::yaw_for_heading(h);
@@ -1726,6 +1775,158 @@ const TAB_SAMPLE_HEIGHTS: [f32; 5] = [0.0, 0.5, 1.0, 1.5, 2.0];
 mod tests {
     use super::*;
     use kuluu_snapshot::{Entity as WireEntity, EntityKind, Vec3 as WireVec3};
+
+    fn movement_app() -> (App, mpsc::Receiver<AgentCommand>) {
+        let mut app = App::new();
+        let (tx, rx) = mpsc::channel(32);
+        app.add_plugins(MinimalPlugins)
+            .init_resource::<ButtonInput<KeyCode>>()
+            .init_resource::<Bindings>()
+            .init_resource::<SceneState>()
+            .insert_resource(CommandTx(tx))
+            .init_resource::<InputMode>()
+            .init_resource::<CameraMode>()
+            .init_resource::<LockOn>()
+            .init_resource::<AutoRun>()
+            .init_resource::<ChaseCamera>()
+            .init_resource::<HeadingTurnAccum>()
+            .init_resource::<DispatchLocals>()
+            .init_resource::<LocalPlayerPrediction>()
+            .init_resource::<kuluu_render::dat_mzb::MzbCollisionGeometry>()
+            .init_resource::<kuluu_render::dat_mzb::LastAutoLoadedZone>()
+            .init_resource::<kuluu_render::dat_mzb::LoadMzbInFlight>()
+            .init_resource::<super::super::walker::obstacles::ObstacleSet>()
+            .init_resource::<kuluu_render::hud::HudPanels>()
+            .init_resource::<kuluu_render::minimap::input::MinimapHoverGate>()
+            .init_resource::<kuluu_render::MousePointer>()
+            .init_resource::<super::super::gamepad_input::PadStickIntent>()
+            .init_resource::<kuluu_render::combat_stance::RestStance>()
+            .init_resource::<kuluu_render::combat_stance::WalkMode>()
+            .init_resource::<kuluu_render::combat_stance::SelfMoveIntent>()
+            .init_resource::<super::super::walker::debug::FieldDebug>()
+            .add_systems(Update, dispatch_movement_system);
+        let mut scene = app.world_mut().resource_mut::<SceneState>();
+        scene.snapshot.self_char_id = Some(1);
+        scene.snapshot.entities.push(ent(1, 0.0, 0.0));
+        (app, rx)
+    }
+
+    #[test]
+    fn movement_waits_for_current_zone_floor_before_sending_positions() {
+        let (mut app, mut commands) = movement_app();
+        app.world_mut()
+            .resource_mut::<SceneState>()
+            .snapshot
+            .zone_id = Some(100);
+        for _ in 0..120 {
+            app.world_mut()
+                .resource_mut::<Time<Fixed>>()
+                .advance_by(Duration::from_secs_f32(1.0 / 60.0));
+            app.update();
+        }
+        assert!(!app.world().resource::<LocalPlayerPrediction>().initialized);
+        assert!(commands.try_recv().is_err());
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::KeyW);
+        app.update();
+        assert!(!app.world().resource::<LocalPlayerPrediction>().initialized);
+        assert!(commands.try_recv().is_err());
+    }
+
+    #[test]
+    fn autonomous_movement_tracks_small_snapshot_steps_without_manual_commands() {
+        let goals = [
+            kuluu_snapshot::ReactorGoal::Following {
+                target_id: 2,
+                distance: 1.0,
+            },
+            kuluu_snapshot::ReactorGoal::Pathing {
+                x: 3.0,
+                y: 0.0,
+                z: 0.0,
+                waypoints_remaining: 1,
+            },
+        ];
+        for goal in goals {
+            let (mut app, mut commands) = movement_app();
+            app.world_mut()
+                .resource_mut::<SceneState>()
+                .snapshot
+                .current_goal = Some(goal);
+            for x in [0.0, 0.25, 0.5] {
+                app.world_mut()
+                    .resource_mut::<SceneState>()
+                    .snapshot
+                    .self_pos
+                    .pos
+                    .x = x;
+                app.update();
+                assert_eq!(app.world().resource::<LocalPlayerPrediction>().pos.x, x);
+                assert!(commands.try_recv().is_err());
+            }
+            let mut scene = app.world_mut().resource_mut::<SceneState>();
+            scene.snapshot.current_goal = Some(kuluu_snapshot::ReactorGoal::Idle);
+            scene.snapshot.self_pos.pos.x = 0.75;
+            app.update();
+            assert_eq!(app.world().resource::<LocalPlayerPrediction>().pos.x, 0.75);
+        }
+    }
+
+    #[test]
+    fn same_zone_generation_change_resets_short_warp_and_fall_state() {
+        let (mut app, _) = movement_app();
+        app.insert_resource(slab_collision(0.0));
+        let file_id = {
+            let mut scene = app.world_mut().resource_mut::<SceneState>();
+            scene.snapshot.zone_id = Some(100);
+            kuluu_render::snapshot::effective_zone_file_id(&scene.snapshot)
+        };
+        app.world_mut()
+            .resource_mut::<kuluu_render::dat_mzb::LastAutoLoadedZone>()
+            .file_id = file_id;
+        app.update();
+        assert!(app.world().resource::<LocalPlayerPrediction>().initialized);
+        {
+            let mut locals = app.world_mut().resource_mut::<DispatchLocals>();
+            locals.walker.mode = super::super::walker::WalkMode::Airborne { vy: -20.0 };
+            locals.walker.grad = Vec2::ONE;
+        }
+        {
+            let mut scene = app.world_mut().resource_mut::<SceneState>();
+            scene.snapshot.zone_generation += 1;
+            scene.snapshot.self_pos.pos.x = 1.0;
+        }
+        app.update();
+        let prediction = app.world().resource::<LocalPlayerPrediction>();
+        assert_eq!(prediction.pos, Vec3::X);
+        let locals = app.world().resource::<DispatchLocals>();
+        assert!(matches!(
+            locals.walker.mode,
+            super::super::walker::WalkMode::Stopped
+        ));
+        assert_eq!(locals.walker.grad, Vec2::ZERO);
+    }
+
+    #[test]
+    fn movement_exit_clears_prediction_and_walker_state() {
+        let mut app = App::new();
+        app.init_resource::<DispatchLocals>()
+            .insert_resource(LocalPlayerPrediction {
+                pos: Vec3::ONE,
+                initialized: true,
+                snapshot_driven: true,
+            })
+            .add_systems(Update, reset_local_movement);
+        app.world_mut().resource_mut::<DispatchLocals>().walker.mode =
+            super::super::walker::WalkMode::Airborne { vy: -20.0 };
+        app.update();
+        assert!(!app.world().resource::<LocalPlayerPrediction>().initialized);
+        assert!(matches!(
+            app.world().resource::<DispatchLocals>().walker.mode,
+            super::super::walker::WalkMode::Stopped
+        ));
+    }
 
     #[test]
     fn recovery_tracker_waits_then_latches_until_the_report_changes() {

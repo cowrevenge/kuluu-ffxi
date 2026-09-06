@@ -1011,28 +1011,28 @@ impl GraphicsSettings {
             // Live NR rows: N/A while not selectable, values otherwise (the
             // knobs stay adjustable before the toggle is flipped on).
             GraphicsField::DlssNeuralUplift => {
-                if !self.dlss_selectable() {
+                if !self.nr_selectable() {
                     "N/A".to_string()
                 } else {
                     bool_label(self.neural_uplift).into()
                 }
             }
             GraphicsField::DlssNrIntensity => {
-                if self.dlss_selectable() {
+                if self.nr_selectable() {
                     format!("{:.2}", self.nr_intensity)
                 } else {
                     "N/A".to_string()
                 }
             }
             GraphicsField::DlssNrLocalTone => {
-                if self.dlss_selectable() {
+                if self.nr_selectable() {
                     format!("{:.2}", self.nr_local_tone_strength)
                 } else {
                     "N/A".to_string()
                 }
             }
             GraphicsField::DlssNrStructure => {
-                if self.dlss_selectable() {
+                if self.nr_selectable() {
                     format!("{:.2}", self.nr_structure_strength)
                 } else {
                     "N/A".to_string()
@@ -1281,27 +1281,27 @@ impl GraphicsSettings {
             }
             // Live NR rows: refuse while not selectable (the row reads "N/A").
             GraphicsField::DlssNeuralUplift => {
-                if !self.dlss_selectable() {
+                if !self.nr_selectable() {
                     return;
                 }
                 self.neural_uplift = !self.neural_uplift;
                 self.preset = QualityPreset::Custom;
             }
             GraphicsField::DlssNrIntensity => {
-                if !self.dlss_selectable() {
+                if !self.nr_selectable() {
                     return;
                 }
                 self.nr_intensity = cycle_slot_f32(self.nr_intensity, NR_INTENSITY_SLOTS, delta);
             }
             GraphicsField::DlssNrLocalTone => {
-                if !self.dlss_selectable() {
+                if !self.nr_selectable() {
                     return;
                 }
                 self.nr_local_tone_strength =
                     cycle_slot_f32(self.nr_local_tone_strength, NR_TONE_STRUCTURE_SLOTS, delta);
             }
             GraphicsField::DlssNrStructure => {
-                if !self.dlss_selectable() {
+                if !self.nr_selectable() {
                     return;
                 }
                 self.nr_structure_strength =
@@ -1390,13 +1390,12 @@ impl GraphicsSettings {
         matches!(self.anti_aliasing, AaMode::Dlss) && self.dlss_selectable()
     }
 
-    /// Neural Uplift (NR) is toggled AND DLSS itself is active. The gate for the
-    /// NR pipeline (graphics/dlss_nr.rs): NR is a DLSS-family post effect, so it
-    /// stands down entirely whenever the AA mode leaves Dlss — cycling to MSAA or
-    /// TAA must stop evaluating, not just change what SR feeds it. Still
-    /// independent of the quality tier: any DlssQuality (incl. Dlaa) keeps NR on.
+    pub fn nr_selectable(&self) -> bool {
+        cfg!(target_os = "windows") && self.dlss_selectable()
+    }
+
     pub fn nr_active(&self) -> bool {
-        self.neural_uplift && self.dlss_active()
+        self.neural_uplift && self.nr_selectable() && self.dlss_active()
     }
 
     /// Clamped render-scale factor (3D-buffer resolution ÷ window resolution).
@@ -1615,7 +1614,7 @@ pub fn apply_anti_aliasing_system(
     // at the new internal resolution, where mutating a live component leans
     // on bevy's prepare-side re-creation that we can't compile-verify here.
     // One extra respawn per menu click is cheap; document as a possible
-    // in-place optimization once a dlss build is in hand (docs/DLSS.md).
+    // in-place optimization once a dlss build is in hand (README.md#optional-dlss-builds).
     let want_dlss = settings.dlss_active();
     let dlss_quality = settings.dlss_quality;
     // volumetric_fog is part of the respawn key because bevy's
@@ -1762,13 +1761,13 @@ pub fn apply_vsync_system(
     }
 }
 
-/// Reflects `GraphicsSettings::fullscreen` onto the primary window's mode.
-/// The initial window mode is chosen at startup (see `view_native/mod.rs`)
-/// from either `FFXI_FULLSCREEN` or the persisted `fullscreen` field; this
-/// system is what makes an in-game toggle actually change the window without
-/// restart.
+/// Process-wide launch override kept outside persisted graphics preferences.
+#[derive(Resource, Default)]
+pub struct FullscreenOverride(pub bool);
+
 pub fn apply_fullscreen_system(
     settings: Res<GraphicsSettings>,
+    override_mode: Res<FullscreenOverride>,
     mut q_window: Query<&mut Window, With<PrimaryWindow>>,
 ) {
     use bevy::window::{MonitorSelection, VideoModeSelection, WindowMode};
@@ -1779,7 +1778,9 @@ pub fn apply_fullscreen_system(
         //   fullscreen &&  windowed_fullscreen -> borderless windowed-fullscreen
         // The Windowed row toggles the last bit and does nothing visible while
         // we're in plain Windowed mode.
-        let target = if !settings.fullscreen {
+        let target = if override_mode.0 {
+            WindowMode::Fullscreen(MonitorSelection::Primary, VideoModeSelection::Current)
+        } else if !settings.fullscreen {
             WindowMode::Windowed
         } else if settings.windowed_fullscreen {
             WindowMode::BorderlessFullscreen(MonitorSelection::Primary)
@@ -2680,6 +2681,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "windows")]
     fn neural_uplift_rows_are_live_when_supported() {
         let mut s = GraphicsSettings::default();
         assert_eq!(s.value_label(GraphicsField::DlssNeuralUplift), "N/A");
@@ -2754,6 +2756,31 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(target_os = "windows"))]
+    fn neural_uplift_is_unavailable_outside_windows() {
+        let mut settings = GraphicsSettings {
+            dlss_supported: true,
+            dlss_menu_enabled: true,
+            anti_aliasing: AaMode::Dlss,
+            neural_uplift: true,
+            ..Default::default()
+        };
+        assert!(settings.dlss_active());
+        assert!(!settings.nr_active());
+        for field in [
+            GraphicsField::DlssNeuralUplift,
+            GraphicsField::DlssNrIntensity,
+            GraphicsField::DlssNrLocalTone,
+            GraphicsField::DlssNrStructure,
+        ] {
+            assert_eq!(settings.value_label(field), "N/A");
+            let before = settings.clone();
+            settings.cycle(field, 1);
+            assert_eq!(settings, before);
+        }
+    }
+
+    #[test]
     fn dlss_mode_in_json_is_inert_on_default_builds() {
         // A graphics.json written by a dlss build round-trips: the mode
         // deserializes, but with capability undetected everything reads N/A
@@ -2770,5 +2797,33 @@ mod tests {
         assert!(!back.dlss_supported, "serde(skip) field never persists");
         assert!(!back.dlss_active());
         assert_eq!(back.value_label(GraphicsField::AntiAliasing), "DLSS (N/A)");
+    }
+    #[test]
+    fn exclusive_override_does_not_change_persisted_preferences() {
+        let mut app = App::new();
+        let settings = GraphicsSettings {
+            fullscreen: false,
+            windowed_fullscreen: true,
+            ..default()
+        };
+        app.insert_resource(settings.clone())
+            .insert_resource(FullscreenOverride(true))
+            .add_systems(Update, apply_fullscreen_system);
+        let window = app
+            .world_mut()
+            .spawn((Window::default(), PrimaryWindow))
+            .id();
+        app.update();
+        assert!(matches!(
+            app.world().get::<Window>(window).unwrap().mode,
+            bevy::window::WindowMode::Fullscreen(..)
+        ));
+        assert_eq!(*app.world().resource::<GraphicsSettings>(), settings);
+        app.world_mut().resource_mut::<FullscreenOverride>().0 = false;
+        app.update();
+        assert!(matches!(
+            app.world().get::<Window>(window).unwrap().mode,
+            bevy::window::WindowMode::Windowed
+        ));
     }
 }

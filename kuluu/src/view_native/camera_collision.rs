@@ -73,6 +73,7 @@ pub fn resolve_camera(
         return;
     }
     let Ok((self_t, baked)) = self_q.single() else {
+        *smoothed_effective = None;
         return;
     };
     let Ok(mut cam_t) = cam_q.single_mut() else {
@@ -152,7 +153,7 @@ pub fn resolve_camera(
     // Boom-LENGTH easing (not position): snap in fast when a wall appears, ease
     // out slow when it clears, so the camera doesn't jitter at wall edges. The
     // position spring is pass 1; this only smooths the pull-in distance.
-    let effective = if !settings.camera_spring {
+    let effective = if !settings.camera_spring || chase.snap_to_anchor {
         target
     } else {
         match *smoothed_effective {
@@ -324,6 +325,7 @@ mod tests {
                 ..Default::default()
             })
             .insert_resource(SceneState::default())
+            .init_resource::<ZoneCollisionBvh>()
             .insert_resource(kuluu_render::camera::CameraStepSmoothing::default())
             .insert_resource(AnchorFollow::default())
             .insert_resource(ChaseCamera {
@@ -400,6 +402,7 @@ mod tests {
                 ..Default::default()
             })
             .insert_resource(SceneState::default())
+            .init_resource::<ZoneCollisionBvh>()
             .insert_resource(kuluu_render::camera::CameraStepSmoothing::default())
             // Seed the follow anchor well behind the player so the glide gap is
             // large this frame — the worst case for off-center rotation.

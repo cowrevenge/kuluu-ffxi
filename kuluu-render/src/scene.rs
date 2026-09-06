@@ -230,12 +230,33 @@ pub struct EntitySyncQueries<'w, 's> {
     >,
 }
 
-/// The two signals that say "this zone's floor has landed" — the same pair the
-/// loading overlay's `ready` reads. Bundled for the 16-param ceiling.
 #[derive(SystemParam)]
 pub struct ZoneFloorGate<'w> {
+    snapshot: Res<'w, SceneState>,
+    #[cfg(not(target_arch = "wasm32"))]
     last_auto: Res<'w, crate::dat_mzb::LastAutoLoadedZone>,
+    #[cfg(not(target_arch = "wasm32"))]
     in_flight: Res<'w, crate::dat_mzb::LoadMzbInFlight>,
+}
+
+impl ZoneFloorGate<'_> {
+    pub fn ready(&self) -> bool {
+        #[cfg(not(target_arch = "wasm32"))]
+        return crate::dat_mzb::main_zone_floor_ready(
+            &self.snapshot.snapshot,
+            &self.last_auto,
+            &self.in_flight,
+        );
+        #[cfg(target_arch = "wasm32")]
+        true
+    }
+
+    fn changed(&self) -> bool {
+        #[cfg(not(target_arch = "wasm32"))]
+        return self.last_auto.is_changed() || self.in_flight.is_changed();
+        #[cfg(target_arch = "wasm32")]
+        self.snapshot.is_changed()
+    }
 }
 
 pub fn sync_entities_system(
@@ -256,23 +277,13 @@ pub fn sync_entities_system(
     floor_gate: ZoneFloorGate,
     mut prev_zone: Local<Option<Option<u32>>>,
 ) {
-    if !state.dirty {
+    if !state.dirty && !floor_gate.changed() {
         return;
     }
 
     let snap = &state.snapshot;
 
-    // Hard load-order gate: no NPC/character visuals may exist before this
-    // zone's floor has landed. The main-zone MZB streams in asynchronously
-    // AFTER the first InZone snapshot, and an actor spawned ahead of it has
-    // nothing to ground against — it falls at walker terminal velocity while
-    // under-floor recovery is deliberately inert mid-load (and the server
-    // echoes back whatever c2s 0x015 reports, so that fall sticks). The
-    // overlay's `ready` reads this same pair of signals, so the gate opens
-    // exactly when the loading screen lifts. Existing entities keep updating
-    // and stale ones still despawn below; only NEW visuals wait.
-    let floor_ready =
-        crate::dat_mzb::main_zone_floor_ready(snap, &floor_gate.last_auto, &floor_gate.in_flight);
+    let floor_ready = floor_gate.ready();
 
     // Keyed on the resolved DAT file id, not zone_id: Mog House entry/exit keeps
     // the city zone_id but teleports the player into a different interior.
@@ -318,29 +329,8 @@ pub fn sync_entities_system(
             Some(existing) => {
                 if let Ok(mut t) = queries.xform.get_mut(existing) {
                     if is_self {
-                        trace!(
-                            target: "self_sync",
-                            echo_x = world_pos.x,
-                            echo_z = world_pos.z,
-                            cur_x = t.translation.x,
-                            cur_z = t.translation.z,
-                            "self ingest"
-                        );
-                        // Self Transform is owned by apply_self_prediction_system
-                        // (FixedUpdate, driven by LocalPlayerPrediction). The
-                        // server just echoes our c2s 0x015, so ingesting the echo
-                        // here would fight the walker and re-introduce the
-                        // horizontal jiggle the smoothing was meant to hide, and
-                        // stall self.y on stairs (held from prev frame).
-                        //
-                        // Zone change is the one case where the wire is
-                        // authoritative: the walker resyncs from snapshot on
-                        // init or big deltas (PREDICTION_RESYNC_YALMS), but
-                        // seeding the Transform here avoids a one-frame flicker
-                        // at the old zone's coords before the next FixedUpdate
-                        // tick lands. Rotation is owned by
-                        // self_visual_yaw_system.
-                        if zone_changed {
+                        // Native fixed-tick prediction owns self; the relay viewer consumes snapshots.
+                        if zone_changed || cfg!(target_arch = "wasm32") {
                             t.translation = world_pos;
                         }
                     } else if matches!(wire.kind, EntityKind::Other) {
@@ -677,6 +667,9 @@ pub fn ensure_self_render_pos_system(
     q: Query<(Entity, &Transform), (With<IsSelf>, Without<CurrRenderPos>)>,
     mut commands: Commands,
 ) {
+    if cfg!(target_arch = "wasm32") {
+        return;
+    }
     for (e, t) in &q {
         commands
             .entity(e)

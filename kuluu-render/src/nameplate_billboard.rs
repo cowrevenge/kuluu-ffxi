@@ -208,6 +208,10 @@ pub fn spawn_nameplate_billboard(
             InGameEntity,
             crate::nameplate_overlay::nameplate_render_layers(),
             Nameplate { entity_id, kind },
+            bevy::picking::Pickable {
+                should_block_lower: false,
+                is_hoverable: true,
+            },
             NameplateBillboard {
                 entity_id,
                 kind,

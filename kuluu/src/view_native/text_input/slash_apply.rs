@@ -36,10 +36,12 @@ pub(super) fn apply_slash_outcome(
     bindings: &mut Bindings,
     keybinds_state: &mut KeybindsStateRes,
     #[cfg(unix)] agent_paused: Option<&crate::view_native::AgentPaused>,
-    _session_event_tx: Option<&crate::view_native::SessionEventTx>,
+    session_event_tx: Option<&crate::view_native::SessionEventTx>,
     slash_writers: &mut SlashWriters,
     draw_distance: &mut kuluu_render::dat_mzb::DrawDistance,
 ) {
+    #[cfg(not(unix))]
+    let _ = session_event_tx;
     match outcome {
         SlashOutcome::Command(cmd) => {
             if let Some(toast) = reqlogout_ack_text(&cmd) {

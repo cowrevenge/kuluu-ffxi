@@ -3619,7 +3619,7 @@ mod pose_resolution_tests {
             "Elvaan M height {elvaan} drifted out of the ~2.08 band"
         );
         // The whole point: races must not all anchor at one height.
-        let mut hs = heights.values().copied();
+        let hs = heights.values().copied();
         let (lo_h, hi_h) = (
             hs.clone().fold(f32::INFINITY, f32::min),
             hs.fold(f32::NEG_INFINITY, f32::max),

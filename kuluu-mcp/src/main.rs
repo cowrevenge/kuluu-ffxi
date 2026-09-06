@@ -1373,6 +1373,8 @@ mod tests {
             npc_state: None,
             status: 0,
             char_flags: Default::default(),
+            monstrosity: None,
+            job_master_display: None,
             mount_id: None,
             name_vis: None,
         });
@@ -1399,6 +1401,8 @@ mod tests {
                 npc_state: None,
                 status: 0,
                 char_flags: Default::default(),
+                monstrosity: None,
+                job_master_display: None,
                 mount_id: None,
                 name_vis: None,
             });
@@ -1433,6 +1437,8 @@ mod tests {
             npc_state: None,
             status: 0,
             char_flags: Default::default(),
+            monstrosity: None,
+            job_master_display: None,
             mount_id: None,
             name_vis: None,
         });
@@ -1457,6 +1463,8 @@ mod tests {
             npc_state: None,
             status: 0,
             char_flags: Default::default(),
+            monstrosity: None,
+            job_master_display: None,
             mount_id: None,
             name_vis: None,
         });

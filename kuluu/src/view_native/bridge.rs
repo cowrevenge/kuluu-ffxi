@@ -343,6 +343,7 @@ mod tests {
                 char_flags: Default::default(),
                 mount_id: None,
                 monstrosity: None,
+                job_master_display: None,
             },
             Entity {
                 id: 0x1000_0102,
@@ -372,6 +373,7 @@ mod tests {
                 char_flags: Default::default(),
                 mount_id: None,
                 monstrosity: None,
+                job_master_display: None,
             },
         ];
 
@@ -538,6 +540,7 @@ mod tests {
             char_flags: Default::default(),
             mount_id: None,
             monstrosity: None,
+            job_master_display: None,
         }
     }
 

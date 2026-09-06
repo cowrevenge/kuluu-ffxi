@@ -2514,11 +2514,21 @@ pub fn poll_load_actor_tasks(
         // Y range is exactly what nameplate_anchor_y / hitbox_dims /
         // third_person_anchor_y need. Replace semantics: re-equipping must move
         // the anchor to the new outfit's extent (same rule as the VOS2 paths).
-        if let Some((lo, hi)) = prepared.parts.bounds {
-            commands.entity(wire_entity).insert(BakedActor {
-                min_mesh_y: lo.y,
-                actor_height: (hi.y - lo.y).max(0.1),
-            });
+        //
+        // NPCs are excluded: mob bind poses do not describe the model as drawn —
+        // the idle/hover routine lifts the body clear of its rest position, so a
+        // span-based anchor lands inside or below the silhouette (Huge Hornet,
+        // dat 1556: bind span 0.68 vs drawn range [1.4, 2.4]; pinned in
+        // pose_resolution_tests). Retail anchors on the AboveHead locator that
+        // moves with the animation; until we track it per frame, mobs keep the
+        // flat fallback.
+        if !matches!(key.as_ref(), Some(ActorPrepKey::Npc { .. })) {
+            if let Some((lo, hi)) = prepared.parts.bounds {
+                commands.entity(wire_entity).insert(BakedActor {
+                    min_mesh_y: lo.y,
+                    actor_height: (hi.y - lo.y).max(0.1),
+                });
+            }
         }
     }
 }
@@ -3627,6 +3637,67 @@ mod pose_resolution_tests {
         assert!(
             hi_h - lo_h > 0.5,
             "races collapsed to one height: {heights:?}"
+        );
+    }
+
+    /// Skinned Y extent of one posed actor, the same skinning as
+    /// `bind_pose_bounds`.
+    fn skinned_y_range(loaded: &LoadedActor, pose: &[Mat4]) -> (f32, f32) {
+        let basis = ffxi_to_bevy_basis();
+        let joint_count = loaded.skeleton.joints.len();
+        let occlusion: std::collections::HashSet<u8> =
+            loaded.skel_meshes.iter().map(|m| m.occlude_type).collect();
+        let (mut lo, mut hi) = (f32::INFINITY, f32::NEG_INFINITY);
+        for skel_mesh in &loaded.skel_meshes {
+            for buffer in &skel_mesh.meshes {
+                if is_occluded(buffer, &occlusion) {
+                    continue;
+                }
+                for v in &buffer.vertices {
+                    let w = v.joint0_weight;
+                    let j0 = clamp_joint(v.joint_index0, joint_count) as usize;
+                    let j1 = clamp_joint(v.joint_index1, joint_count) as usize;
+                    let m0 = pose.get(j0).copied().unwrap_or(Mat4::IDENTITY);
+                    let m1 = pose.get(j1).copied().unwrap_or(Mat4::IDENTITY);
+                    let p = m0 * Vec4::new(v.p0[0], v.p0[1], v.p0[2], w)
+                        + m1 * Vec4::new(v.p1[0], v.p1[1], v.p1[2], 1.0 - w);
+                    let wp = basis * p.truncate();
+                    lo = lo.min(wp.y);
+                    hi = hi.max(wp.y);
+                }
+            }
+        }
+        (lo, hi)
+    }
+
+    /// Why the live path withholds BakedActor from NPCs (kuluu-81r8): a mob's
+    /// bind pose does not describe the model as drawn. Huge Hornet's rest-pose
+    /// span is 0.68, but its idle routine draws the body at [1.4, 2.4] above
+    /// the wire position — a span-based anchor would sit below the silhouette.
+    /// Retail anchors on the AboveHead locator that moves with the animation;
+    /// until we track it per frame, mobs keep the flat fallback. Self-skips
+    /// without an install.
+    #[test]
+    fn npc_bind_pose_does_not_describe_the_drawn_extent() {
+        if DatRoot::from_env_or_default().is_err() {
+            return;
+        }
+        let loaded = load_npc(1556).expect("load Huge Hornet dat 1556");
+        let Some((bind_lo, bind_hi)) = loaded.bind_pose_bounds(0.0, 1.0) else {
+            panic!("Huge Hornet: no bind-pose bounds");
+        };
+        let mut actor = make_render_actor(&loaded, 0, Vec::new(), 1, 0.0, 1.0);
+        // The idle hover bobs between two heights; the lowest drawn point
+        // across sampled frames is what a static anchor must clear.
+        let mut drawn_lo = f32::INFINITY;
+        for frame in [0.0f32, 8.0, 16.0] {
+            advance_actor_pose_standalone(&mut actor, frame, None);
+            let (lo, _) = skinned_y_range(&loaded, actor.world_pose());
+            drawn_lo = drawn_lo.min(lo);
+        }
+        assert!(
+            drawn_lo > bind_hi.y + 0.5,
+            "Huge Hornet idle no longer lifts off its rest pose: drawn lo {drawn_lo:.3} vs bind [{bind_lo:.3}, {bind_hi:.3}]"
         );
     }
 

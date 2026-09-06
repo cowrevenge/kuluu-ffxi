@@ -1,7 +1,8 @@
 //! Debug "Entity List" overlay (Debug menu row, default off): a scrollable
 //! dump of every live wire entity from the [`EntityTable`] — id, name, kind,
-//! position, status byte, hp%, the nameplate status markers the plate would
-//! draw for that entity, and the invis/name-hidden/dead flags. The point is to
+//! position, STATUS_TYPE name, hp%, claim state (ClaimedSelf / ClaimedOther),
+//! the nameplate status markers the plate would draw for that entity, and the
+//! invis/name-hidden/dead flags. The point is to
 //! eyeball what the packet system actually believes about each entity (worm-
 //! blink class: does `status` flip INVISIBLE when it dives?; icon class: do
 //! the char-flag bits that drive a nameplate marker arrive at all?) without
@@ -56,7 +57,9 @@ pub fn spawn_entity_list_hud(mut commands: Commands) {
                 position_type: PositionType::Absolute,
                 top: Val::Px(300.0),
                 left: Val::Px(8.0),
-                width: Val::Px(600.0),
+                // Wide enough for the claim + status-name columns at FiraMono
+                // 12px without clipping FLAGS (the old 600px clipped it).
+                width: Val::Px(750.0),
                 padding: UiRect::axes(Val::Px(8.0), Val::Px(6.0)),
                 border: UiRect::all(Val::Px(1.0)),
                 flex_direction: FlexDirection::Column,
@@ -229,6 +232,16 @@ pub fn update_entity_list_hud(
                 let e = &rec.entity;
                 let is_self = self_id == Some(e.id);
                 let markers = marker_labels(e);
+                // Claim state, live off the table record: it flips on every
+                // UPDATE_STATUS 0x0E and this panel re-reads at 5 Hz, so a flip
+                // shows up within one refresh — no extra tracking needed.
+                let claim_label = if e.claim_id == 0 {
+                    "-"
+                } else if self_id.is_some_and(|s| s == e.claim_id) {
+                    "ClaimedSelf"
+                } else {
+                    "ClaimedOther"
+                };
                 let line = format_row(
                     is_self,
                     e.id,
@@ -239,6 +252,7 @@ pub fn update_entity_list_hud(
                     e.pos.z,
                     e.status,
                     e.hp_pct,
+                    claim_label,
                     &markers,
                     rec.is_invisible(),
                     rec.name_hidden(),
@@ -273,15 +287,34 @@ fn column_header() -> String {
     // Plain padding (no `08X`): the row format's hex spec is integer-only, and
     // this header carries labels, not values.
     format!(
-        "  {id:>8}  {name:<12} {kind:<4} {pos:<12}  {st:>3} {hp:>3}  {status:<7} FLAGS",
+        "  {id:>8}  {name:<12} {kind:<4} {pos:<12}  {st_name:<13} {hp:>3}  {claim:<13} {status:<7} FLAGS",
         id = "ID",
         name = "NAME",
         kind = "KIND",
         pos = "X,Y,Z",
-        st = "ST",
+        st_name = "STATUS",
         hp = "HP",
-        status = "STATUS"
+        claim = "CLAIM",
+        status = "MARKERS"
     )
+}
+
+/// The STATUS_TYPE byte as a name (LSB `STATUS_TYPE`, baseentity.h). A raw 1
+/// reads as "missing" at a glance; an unknown byte reports itself so a new
+/// server state is visible instead of hidden.
+fn status_name(status: u8) -> String {
+    use kuluu_snapshot::status_type as st;
+    match status {
+        0 => "NORMAL".into(),
+        1 => "UPDATE".into(),
+        st::DISAPPEAR => "DISAPPEAR".into(),
+        st::INVISIBLE => "INVISIBLE".into(),
+        st::STATUS_4 => "S4".into(),
+        st::CUTSCENE_ONLY => "CUTSCENE_ONLY".into(),
+        st::STATUS_18 => "S18".into(),
+        st::SHUTDOWN => "SHUTDOWN".into(),
+        _ => format!("?{status}"),
+    }
 }
 
 fn format_row(
@@ -294,6 +327,7 @@ fn format_row(
     z: f32,
     status: u8,
     hp_pct: Option<u8>,
+    claim_label: &str,
     markers: &str,
     invisible: bool,
     name_hidden: bool,
@@ -312,8 +346,9 @@ fn format_row(
     // the right (the three separate columns clipped FLAGS at 500px panel
     // width). Whole yalms: this is a where-is-it readout, not a survey.
     let pos = format!("{x:.0},{y:.0},{z:.0}");
+    let st_name = status_name(status);
     format!(
-        "{} {id:08X}  {} {:<4} {pos:<12}  {status:>3} {}  {markers:<7} {}",
+        "{} {id:08X}  {} {:<4} {pos:<12}  {st_name:<13} {}  {claim_label:<13} {markers:<7} {}",
         if is_self { "*" } else { " " },
         truncate_pad(name.unwrap_or("?"), NAME_WIDTH),
         kind_label(kind),

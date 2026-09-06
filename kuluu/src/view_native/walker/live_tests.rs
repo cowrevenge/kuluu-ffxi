@@ -18,6 +18,9 @@ use super::{VerticalDecision, Walker};
 // Geometry builders (ported from dat_mzb's wall_collision_tests)
 // ---------------------------------------------------------------------------
 
+// The longest trace covers 100 yalms; keep its landing inside the fixture.
+const TEST_FLOOR_EXTENT: f32 = 128.0;
+
 fn quad(b: &mut MzbCollisionBlock, v: [Vec3; 4], n: Vec3, link: u32) {
     let i0 = b.positions.len() as u32;
     b.positions.extend_from_slice(&v);
@@ -28,14 +31,24 @@ fn quad(b: &mut MzbCollisionBlock, v: [Vec3; 4], n: Vec3, link: u32) {
 }
 
 fn staircase(steps: usize, d: f32, r: f32, balustrades: bool) -> MzbCollisionGeometry {
+    staircase_width(steps, d, r, balustrades, 3.0)
+}
+
+fn staircase_width(
+    steps: usize,
+    d: f32,
+    r: f32,
+    balustrades: bool,
+    half_width: f32,
+) -> MzbCollisionGeometry {
     let mut b = MzbCollisionBlock::default();
     quad(
         &mut b,
         [
-            Vec3::new(-10.0, 0.0, -3.0),
-            Vec3::new(0.0, 0.0, -3.0),
-            Vec3::new(0.0, 0.0, 3.0),
-            Vec3::new(-10.0, 0.0, 3.0),
+            Vec3::new(-TEST_FLOOR_EXTENT, 0.0, -half_width),
+            Vec3::new(0.0, 0.0, -half_width),
+            Vec3::new(0.0, 0.0, half_width),
+            Vec3::new(-TEST_FLOOR_EXTENT, 0.0, half_width),
         ],
         Vec3::Y,
         NO_SUB_AREA_LINK,
@@ -47,10 +60,10 @@ fn staircase(steps: usize, d: f32, r: f32, balustrades: bool) -> MzbCollisionGeo
         quad(
             &mut b,
             [
-                Vec3::new(x0, y0, -3.0),
-                Vec3::new(x0, y0, 3.0),
-                Vec3::new(x0, y1, 3.0),
-                Vec3::new(x0, y1, -3.0),
+                Vec3::new(x0, y0, -half_width),
+                Vec3::new(x0, y0, half_width),
+                Vec3::new(x0, y1, half_width),
+                Vec3::new(x0, y1, -half_width),
             ],
             Vec3::new(-1.0, 0.0, 0.0),
             NO_SUB_AREA_LINK,
@@ -58,10 +71,10 @@ fn staircase(steps: usize, d: f32, r: f32, balustrades: bool) -> MzbCollisionGeo
         quad(
             &mut b,
             [
-                Vec3::new(x0, y1, -3.0),
-                Vec3::new(x0 + d, y1, -3.0),
-                Vec3::new(x0 + d, y1, 3.0),
-                Vec3::new(x0, y1, 3.0),
+                Vec3::new(x0, y1, -half_width),
+                Vec3::new(x0 + d, y1, -half_width),
+                Vec3::new(x0 + d, y1, half_width),
+                Vec3::new(x0, y1, half_width),
             ],
             Vec3::Y,
             NO_SUB_AREA_LINK,
@@ -72,10 +85,10 @@ fn staircase(steps: usize, d: f32, r: f32, balustrades: bool) -> MzbCollisionGeo
     quad(
         &mut b,
         [
-            Vec3::new(xt, yt, -3.0),
-            Vec3::new(xt + 10.0, yt, -3.0),
-            Vec3::new(xt + 10.0, yt, 3.0),
-            Vec3::new(xt, yt, 3.0),
+            Vec3::new(xt, yt, -half_width),
+            Vec3::new(xt + TEST_FLOOR_EXTENT, yt, -half_width),
+            Vec3::new(xt + TEST_FLOOR_EXTENT, yt, half_width),
+            Vec3::new(xt, yt, half_width),
         ],
         Vec3::Y,
         NO_SUB_AREA_LINK,
@@ -117,10 +130,10 @@ fn flat_with_wall(wall_x: f32, height: f32, link: u32) -> MzbCollisionGeometry {
     quad(
         &mut b,
         [
-            Vec3::new(-10.0, 0.0, -10.0),
-            Vec3::new(10.0, 0.0, -10.0),
-            Vec3::new(10.0, 0.0, 10.0),
-            Vec3::new(-10.0, 0.0, 10.0),
+            Vec3::new(-TEST_FLOOR_EXTENT, 0.0, -10.0),
+            Vec3::new(TEST_FLOOR_EXTENT, 0.0, -10.0),
+            Vec3::new(TEST_FLOOR_EXTENT, 0.0, 10.0),
+            Vec3::new(-TEST_FLOOR_EXTENT, 0.0, 10.0),
         ],
         Vec3::Y,
         NO_SUB_AREA_LINK,
@@ -144,10 +157,10 @@ fn parapet_platform(wall_x: f32, wall_h: f32, plat_y: f32) -> MzbCollisionGeomet
     quad(
         &mut b,
         [
-            Vec3::new(-10.0, 0.0, -10.0),
+            Vec3::new(-TEST_FLOOR_EXTENT, 0.0, -10.0),
             Vec3::new(wall_x, 0.0, -10.0),
             Vec3::new(wall_x, 0.0, 10.0),
-            Vec3::new(-10.0, 0.0, 10.0),
+            Vec3::new(-TEST_FLOOR_EXTENT, 0.0, 10.0),
         ],
         Vec3::Y,
         NO_SUB_AREA_LINK,
@@ -167,8 +180,8 @@ fn parapet_platform(wall_x: f32, wall_h: f32, plat_y: f32) -> MzbCollisionGeomet
         &mut b,
         [
             Vec3::new(wall_x, plat_y, -10.0),
-            Vec3::new(10.0, plat_y, -10.0),
-            Vec3::new(10.0, plat_y, 10.0),
+            Vec3::new(TEST_FLOOR_EXTENT, plat_y, -10.0),
+            Vec3::new(TEST_FLOOR_EXTENT, plat_y, 10.0),
             Vec3::new(wall_x, plat_y, 10.0),
         ],
         Vec3::Y,
@@ -182,10 +195,10 @@ fn ramp(from_x: f32, to_x: f32, top_y: f32) -> MzbCollisionGeometry {
     quad(
         &mut b,
         [
-            Vec3::new(-10.0, 0.0, -6.0),
+            Vec3::new(-TEST_FLOOR_EXTENT, 0.0, -6.0),
             Vec3::new(from_x, 0.0, -6.0),
             Vec3::new(from_x, 0.0, 6.0),
-            Vec3::new(-10.0, 0.0, 6.0),
+            Vec3::new(-TEST_FLOOR_EXTENT, 0.0, 6.0),
         ],
         Vec3::Y,
         NO_SUB_AREA_LINK,
@@ -208,8 +221,8 @@ fn ramp(from_x: f32, to_x: f32, top_y: f32) -> MzbCollisionGeometry {
         &mut b,
         [
             Vec3::new(to_x, top_y, -6.0),
-            Vec3::new(to_x + 10.0, top_y, -6.0),
-            Vec3::new(to_x + 10.0, top_y, 6.0),
+            Vec3::new(to_x + TEST_FLOOR_EXTENT, top_y, -6.0),
+            Vec3::new(to_x + TEST_FLOOR_EXTENT, top_y, 6.0),
             Vec3::new(to_x, top_y, 6.0),
         ],
         Vec3::Y,
@@ -223,10 +236,10 @@ fn corridor(gap: f32) -> MzbCollisionGeometry {
     quad(
         &mut b,
         [
-            Vec3::new(-10.0, 0.0, -10.0),
-            Vec3::new(10.0, 0.0, -10.0),
-            Vec3::new(10.0, 0.0, 10.0),
-            Vec3::new(-10.0, 0.0, 10.0),
+            Vec3::new(-TEST_FLOOR_EXTENT, 0.0, -10.0),
+            Vec3::new(TEST_FLOOR_EXTENT, 0.0, -10.0),
+            Vec3::new(TEST_FLOOR_EXTENT, 0.0, 10.0),
+            Vec3::new(-TEST_FLOOR_EXTENT, 0.0, 10.0),
         ],
         Vec3::Y,
         NO_SUB_AREA_LINK,
@@ -264,10 +277,10 @@ fn stair_with_ground_under(steps: usize, d: f32, r: f32) -> MzbCollisionGeometry
     quad(
         &mut b,
         [
-            Vec3::new(-10.0, 0.0, -3.0),
+            Vec3::new(-TEST_FLOOR_EXTENT, 0.0, -3.0),
             Vec3::new(steps as f32 * d + 5.0, 0.0, -3.0),
             Vec3::new(steps as f32 * d + 5.0, 0.0, 3.0),
-            Vec3::new(-10.0, 0.0, 3.0),
+            Vec3::new(-TEST_FLOOR_EXTENT, 0.0, 3.0),
         ],
         Vec3::Y,
         NO_SUB_AREA_LINK,
@@ -305,8 +318,8 @@ fn stair_with_ground_under(steps: usize, d: f32, r: f32) -> MzbCollisionGeometry
         &mut b,
         [
             Vec3::new(xt, yt, -3.0),
-            Vec3::new(xt + 10.0, yt, -3.0),
-            Vec3::new(xt + 10.0, yt, 3.0),
+            Vec3::new(xt + TEST_FLOOR_EXTENT, yt, -3.0),
+            Vec3::new(xt + TEST_FLOOR_EXTENT, yt, 3.0),
             Vec3::new(xt, yt, 3.0),
         ],
         Vec3::Y,
@@ -325,10 +338,10 @@ fn ledge(edge_x: f32, drop: f32) -> MzbCollisionGeometry {
     quad(
         &mut b,
         [
-            Vec3::new(-10.0, 0.0, -6.0),
+            Vec3::new(-TEST_FLOOR_EXTENT, 0.0, -6.0),
             Vec3::new(edge_x, 0.0, -6.0),
             Vec3::new(edge_x, 0.0, 6.0),
-            Vec3::new(-10.0, 0.0, 6.0),
+            Vec3::new(-TEST_FLOOR_EXTENT, 0.0, 6.0),
         ],
         Vec3::Y,
         NO_SUB_AREA_LINK,
@@ -337,8 +350,8 @@ fn ledge(edge_x: f32, drop: f32) -> MzbCollisionGeometry {
         &mut b,
         [
             Vec3::new(edge_x, -drop, -6.0),
-            Vec3::new(10.0, -drop, -6.0),
-            Vec3::new(10.0, -drop, 6.0),
+            Vec3::new(TEST_FLOOR_EXTENT, -drop, -6.0),
+            Vec3::new(TEST_FLOOR_EXTENT, -drop, 6.0),
             Vec3::new(edge_x, -drop, 6.0),
         ],
         Vec3::Y,
@@ -367,10 +380,10 @@ fn hole(center_x: f32, width: f32, depth: Option<f32>) -> MzbCollisionGeometry {
     quad(
         &mut b,
         [
-            Vec3::new(-10.0, 0.0, -6.0),
+            Vec3::new(-TEST_FLOOR_EXTENT, 0.0, -6.0),
             Vec3::new(lo, 0.0, -6.0),
             Vec3::new(lo, 0.0, 6.0),
-            Vec3::new(-10.0, 0.0, 6.0),
+            Vec3::new(-TEST_FLOOR_EXTENT, 0.0, 6.0),
         ],
         Vec3::Y,
         NO_SUB_AREA_LINK,
@@ -379,8 +392,8 @@ fn hole(center_x: f32, width: f32, depth: Option<f32>) -> MzbCollisionGeometry {
         &mut b,
         [
             Vec3::new(hi, 0.0, -6.0),
-            Vec3::new(10.0, 0.0, -6.0),
-            Vec3::new(10.0, 0.0, 6.0),
+            Vec3::new(TEST_FLOOR_EXTENT, 0.0, -6.0),
+            Vec3::new(TEST_FLOOR_EXTENT, 0.0, 6.0),
             Vec3::new(hi, 0.0, 6.0),
         ],
         Vec3::Y,
@@ -391,8 +404,8 @@ fn hole(center_x: f32, width: f32, depth: Option<f32>) -> MzbCollisionGeometry {
             &mut b,
             [
                 Vec3::new(lo, -depth, -6.0),
-                Vec3::new(hi, -depth, -6.0),
-                Vec3::new(hi, -depth, 6.0),
+                Vec3::new(TEST_FLOOR_EXTENT, -depth, -6.0),
+                Vec3::new(TEST_FLOOR_EXTENT, -depth, 6.0),
                 Vec3::new(lo, -depth, 6.0),
             ],
             Vec3::Y,
@@ -409,10 +422,10 @@ fn nosing_flight(steps: usize, d: f32, r: f32) -> MzbCollisionGeometry {
     quad(
         &mut b,
         [
-            Vec3::new(-10.0, 0.0, -3.0),
+            Vec3::new(-TEST_FLOOR_EXTENT, 0.0, -3.0),
             Vec3::new(0.0, 0.0, -3.0),
             Vec3::new(0.0, 0.0, 3.0),
-            Vec3::new(-10.0, 0.0, 3.0),
+            Vec3::new(-TEST_FLOOR_EXTENT, 0.0, 3.0),
         ],
         Vec3::Y,
         NO_SUB_AREA_LINK,
@@ -462,8 +475,8 @@ fn nosing_flight(steps: usize, d: f32, r: f32) -> MzbCollisionGeometry {
         &mut b,
         [
             Vec3::new(xt, yt, -3.0),
-            Vec3::new(xt + 10.0, yt, -3.0),
-            Vec3::new(xt + 10.0, yt, 3.0),
+            Vec3::new(xt + TEST_FLOOR_EXTENT, yt, -3.0),
+            Vec3::new(xt + TEST_FLOOR_EXTENT, yt, 3.0),
             Vec3::new(xt, yt, 3.0),
         ],
         Vec3::Y,
@@ -501,7 +514,7 @@ fn door_wall(wall_x: f32) -> ObstacleSet {
         Vec3::new(wall_x, 3.0, 1.0),
         Vec3::new(wall_x, 3.0, -1.0),
     ];
-    let tris = vec![door_tri(v)];
+    let tris = vec![door_tri(v), door_tri([v[0], v[2], v[3], v[0]])];
     let (min, max) = door_bounds(&tris);
     ObstacleSet {
         doors: vec![DoorObstacle { tris, min, max }],
@@ -518,7 +531,7 @@ fn drawbridge(x0: f32, x1: f32, deck_y: f32) -> ObstacleSet {
         Vec3::new(x1, deck_y, -3.0),
         Vec3::new(x0, deck_y, -3.0),
     ];
-    let tris = vec![door_tri(v)];
+    let tris = vec![door_tri(v), door_tri([v[0], v[2], v[3], v[0]])];
     let (min, max) = door_bounds(&tris);
     ObstacleSet {
         doors: vec![DoorObstacle { tris, min, max }],
@@ -597,8 +610,8 @@ fn walk_with_stops(
     let mut out = Vec::new();
     for &(dir, move_secs, stop_secs) in segments {
         let ticks = |secs: f32| (secs * hz).round() as usize;
-        for _ in 0..ticks(move_secs + stop_secs) {
-            let moving = out.len() % ticks(move_secs + stop_secs) < ticks(move_secs);
+        for tick in 0..ticks(move_secs + stop_secs) {
+            let moving = tick < ticks(move_secs);
             let (dx, dy) = if moving {
                 (dir.x * speed_yps * dt, dir.y * speed_yps * dt)
             } else {
@@ -626,7 +639,7 @@ fn reversals(ys: &[f32]) -> u32 {
     let mut last_sign = 0i8;
     for w in ys.windows(2) {
         let dy = w[1] - w[0];
-        if dy.abs() < 1e-6 {
+        if dy.abs() <= super::consts::CHAIN_CEILING_EPS {
             continue;
         }
         let s = if dy > 0.0 { 1 } else { -1 };
@@ -645,14 +658,14 @@ fn max_d2(ys: &[f32]) -> f32 {
         .fold(0.0f32, f32::max)
 }
 
-/// The d2 bound for a flight: merges are straight lines (~0); a fall is a
-/// parabola whose Euler second difference is exactly g*dt^2 per tick.
+// A start, stop, or landing changes velocity in one tick.
 fn d2_bound(r: f32, hz: f32) -> f32 {
-    if r > STEP_MAX + 1e-6 {
-        FallModel::default().g / (hz * hz) + 1e-3
+    let speed = if r > STEP_MAX {
+        FallModel::default().v_max
     } else {
-        0.02
-    }
+        RUN
+    };
+    2.0 * speed / hz + super::consts::CHAIN_CEILING_EPS
 }
 
 const RUN: f32 =
@@ -1116,17 +1129,17 @@ fn oblique_wall_slide_keeps_full_speed() {
     quad(
         &mut b,
         [
-            Vec3::new(-10.0, 0.0, -10.0),
-            Vec3::new(10.0, 0.0, -10.0),
-            Vec3::new(10.0, 0.0, 10.0),
-            Vec3::new(-10.0, 0.0, 10.0),
+            Vec3::new(-TEST_FLOOR_EXTENT, 0.0, -TEST_FLOOR_EXTENT),
+            Vec3::new(TEST_FLOOR_EXTENT, 0.0, -TEST_FLOOR_EXTENT),
+            Vec3::new(TEST_FLOOR_EXTENT, 0.0, TEST_FLOOR_EXTENT),
+            Vec3::new(-TEST_FLOOR_EXTENT, 0.0, TEST_FLOOR_EXTENT),
         ],
         Vec3::Y,
         NO_SUB_AREA_LINK,
     );
     // A wall from (4,-6) to (8,6): 30 degrees off the x axis.
     let a = Vec3::new(4.0, 0.0, -6.0);
-    let c = Vec3::new(8.0, 0.0, 6.0);
+    let c = Vec3::new(4.0 + 12.0 / 30_f32.to_radians().tan(), 0.0, 6.0);
     quad(
         &mut b,
         [a, c, c + Vec3::Y * 3.0, a + Vec3::Y * 3.0],
@@ -1173,7 +1186,10 @@ fn walk_off_a_ledge_falls_and_lands() {
     );
     let ys = ys(&t);
     // The fall starts at the lip: find the first tick below the upper floor.
-    let fall_start = ys.iter().position(|&h| h < -0.05).expect("never fell");
+    let fall_start = t
+        .iter()
+        .position(|(_, decision)| matches!(decision, VerticalDecision::Airborne { .. }))
+        .expect("never fell");
     assert!(fall_start > 0, "fell before reaching the lip");
     let dt = 1.0 / 60.0;
     // Analytic landing: 0.5 g t^2 = 3 (pre-terminal at this height).
@@ -1182,7 +1198,7 @@ fn walk_off_a_ledge_falls_and_lands() {
         .iter()
         .position(|&h| (-h - 3.0).abs() < 0.05)
         .expect("never landed");
-    let t_landed = (landed_at as f32 + 1.0) * dt;
+    let t_landed = landed_at as f32 * dt;
     assert!(
         (t_landed - t_analytic).abs() <= dt + 1e-6,
         "landed at {t_landed:.3}s, analytic {t_analytic:.3}s"
@@ -1232,7 +1248,7 @@ fn ledge_just_past_step_band_falls_just_under_steps() {
     );
     let (x, _y, z) = t.last().unwrap().0;
     assert!(
-        x > 4.0 && (-z - 0.39).abs() < 0.05,
+        x > 4.0 && (-z + 0.39).abs() < 0.05,
         "stepped down: x={x:.2} h={:.2}",
         -z
     );
@@ -1260,7 +1276,7 @@ fn wide_hole_falls_narrow_hole_bridges() {
     );
     let (x, _y, z) = t.last().unwrap().0;
     assert!(
-        x > 3.5 && (-z - 1.0).abs() < 0.05,
+        x > 3.5 && (-z + 1.0).abs() < 0.05,
         "landed on the lower floor: x={x:.2} h={:.2}",
         -z
     );
@@ -1283,6 +1299,27 @@ fn wide_hole_falls_narrow_hole_bridges() {
     );
 }
 
+#[test]
+fn shallow_trench_follows_its_floor() {
+    let geometry = hole(2.0, 0.8, Some(0.3));
+    let trace = walk(
+        &geometry,
+        &ObstacleSet::default(),
+        (0.5, 0.0, 0.0),
+        (1.0, 0.0),
+        1.0,
+        60.0,
+        RUN,
+    );
+    assert!(trace
+        .iter()
+        .any(|((x, _, z), _)| (*x - 2.0).abs() < 0.2 && *z > 0.2));
+    assert!(!trace
+        .iter()
+        .any(|(_, decision)| matches!(decision, VerticalDecision::Airborne { .. })));
+    assert!(trace.last().unwrap().0 .2.abs() < 0.01);
+}
+
 /// A cliff descent is a fall, never a wall: the walker walks off and lands.
 #[test]
 fn cliff_descent_is_never_a_wall() {
@@ -1298,7 +1335,7 @@ fn cliff_descent_is_never_a_wall() {
     );
     let (x, _y, z) = t.last().unwrap().0;
     assert!(
-        x > 4.0 && (-z - 2.0).abs() < 0.05,
+        x > 4.0 && (-z + 2.0).abs() < 0.05,
         "walked off and landed: x={x:.2} h={:.2}",
         -z
     );
@@ -1319,14 +1356,23 @@ fn stop_mid_flight_settles_then_resumes() {
         &ObstacleSet::default(),
         (-2.0, 0.0, 0.0),
         &[
-            (Vec2::new(1.0, 0.0), 1.5, 1.0),
+            (Vec2::new(1.0, 0.0), 0.6, 1.0),
             (Vec2::new(1.0, 0.0), 12.0, 0.0),
         ],
         60.0,
         RUN,
     );
     let ys = ys(&t);
-    assert_eq!(reversals(&ys), 0, "stop/resume zig: {ys:?}");
+    let stop_tick = (0.6 * 60.0) as usize;
+    let resume_tick = stop_tick + 60;
+    assert_eq!(reversals(&ys[..stop_tick]), 0, "ascent before stopping");
+    assert!(
+        ys[stop_tick..resume_tick]
+            .windows(2)
+            .all(|w| w[1] <= w[0] + 1e-4),
+        "stop must settle downward"
+    );
+    assert_eq!(reversals(&ys[resume_tick..]), 0, "ascent after resuming");
     let (x, _y, z) = t.last().unwrap().0;
     assert!(
         (-z - 8.0 * 0.3).abs() < 0.05 && x > 8.0 * 0.5,
@@ -1447,7 +1493,7 @@ fn mob_circle_soft_blocks_then_push_through() {
     let g = flat_with_wall(30.0, 3.0, NO_SUB_AREA_LINK);
     let mobs = mob_circle(1, 4.0, 0.0, 0.5);
     // Phase 1: press into it for just under the push-through threshold.
-    let t = walk(&g, &mobs, (-2.0, 0.0, 0.0), (1.0, 0.0), 3.0, 60.0, RUN);
+    let t = walk(&g, &mobs, (-2.0, 0.0, 0.0), (1.0, 0.0), 1.5, 60.0, RUN);
     assert!(
         t.last().unwrap().0 .0 < 4.0 - 0.85,
         "mob held: x={:.2}",
@@ -1472,7 +1518,7 @@ fn diagonal_ascent() {
     for deg in [30.0f32, 45.0, 60.0] {
         let a = deg.to_radians();
         let dir = (a.cos(), -a.sin()); // wire: +x with a -y component (bevy +z)
-        let g = staircase(10, 0.5, 0.3, false);
+        let g = staircase_width(10, 0.5, 0.3, false, TEST_FLOOR_EXTENT);
         let t = walk(
             &g,
             &ObstacleSet::default(),
@@ -1482,8 +1528,7 @@ fn diagonal_ascent() {
             60.0,
             RUN,
         );
-        // The flight is only 6 wide in z: a diagonal walk exits its side before
-        // the top — assert it climbed at least partway and never zigged.
+        // Keep the full diagonal on the fixture to measure stair motion.
         let z = t.last().unwrap().0 .2;
         let ys = ys(&t);
         assert_eq!(reversals(&ys), 0, "zig on diagonal {deg}");

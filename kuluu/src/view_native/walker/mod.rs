@@ -30,7 +30,7 @@ use bevy::prelude::*;
 #[derive(Default)]
 pub struct PushThrough {
     target: Option<u32>,
-    secs: f32,
+    secs: f64,
 }
 
 impl PushThrough {
@@ -38,13 +38,13 @@ impl PushThrough {
     /// been pressed continuously for PUSH_THROUGH_SECS and should stop blocking.
     pub fn press(&mut self, mob: u32, dt: f32) -> bool {
         match self.target {
-            Some(t) if t == mob => self.secs += dt,
+            Some(t) if t == mob => self.secs += f64::from(dt),
             _ => {
                 self.target = Some(mob);
-                self.secs = dt;
+                self.secs = f64::from(dt);
             }
         }
-        self.secs >= consts::PUSH_THROUGH_SECS
+        self.secs >= f64::from(consts::PUSH_THROUGH_SECS)
     }
 
     /// Pressure released (or a different obstacle took over): reset the clock.
@@ -55,7 +55,7 @@ impl PushThrough {
 
     /// This mob is currently excluded by sustained pressure.
     pub fn excluded(&self, mob: u32) -> bool {
-        self.target == Some(mob) && self.secs >= consts::PUSH_THROUGH_SECS
+        self.target == Some(mob) && self.secs >= f64::from(consts::PUSH_THROUGH_SECS)
     }
 
     /// The mob the clock is running against (None when released).

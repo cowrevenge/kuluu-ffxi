@@ -593,6 +593,7 @@ fn apply_event_folds_in_documented_order() {
             char_flags: Default::default(),
             mount_id: None,
             monstrosity: None,
+            job_master_display: None,
         },
         pos_present: true,
     });
@@ -623,6 +624,7 @@ fn apply_event_folds_in_documented_order() {
             char_flags: Default::default(),
             mount_id: None,
             monstrosity: None,
+            job_master_display: None,
         },
         pos_present: true,
     });
@@ -688,6 +690,54 @@ fn merge_kind_specialized_wins_over_other() {
     assert_eq!(merge_kind(Other, Other), Other);
 }
 
+/// `Flags4.JobMasterFlag` is written on every non-despawn 0x0D outside all
+/// SendFlg blocks (char_update.cpp), so a pos-only upsert (`char_flags: None`)
+/// must still refresh the preserved flags — unlike the General words.
+#[test]
+fn job_master_flag_refreshes_on_pos_only_updates() {
+    let mut s = SessionState::default();
+
+    // A General-block update establishes the flags with the star off...
+    let mut e = make_test_entity(9, Some("Star"), EntityKind::Pc);
+    e.char_flags = Some(ffxi_proto::decode::CharFlags::default());
+    e.job_master_display = Some(false);
+    s.apply_event(&AgentEvent::EntityUpserted {
+        entity: e,
+        pos_present: true,
+    });
+
+    // ...and a later pos-only tick (no General words) turns it on.
+    let mut e = make_test_entity(9, None, EntityKind::Pc);
+    e.char_flags = None;
+    e.job_master_display = Some(true);
+    s.apply_event(&AgentEvent::EntityUpserted {
+        entity: e,
+        pos_present: true,
+    });
+
+    assert!(
+        s.entities[0]
+            .char_flags
+            .expect("the General update materialized the flags")
+            .job_master_display,
+        "a pos-only tick must carry the fresh star"
+    );
+
+    // ...and a later pos-only 'off' clears it again.
+    let mut e = make_test_entity(9, None, EntityKind::Pc);
+    e.char_flags = None;
+    e.job_master_display = Some(false);
+    s.apply_event(&AgentEvent::EntityUpserted {
+        entity: e,
+        pos_present: true,
+    });
+
+    assert!(
+        !s.entities[0].char_flags.unwrap().job_master_display,
+        "a pos-only 'off' must clear the star"
+    );
+}
+
 fn make_test_entity(id: u32, name: Option<&str>, kind: EntityKind) -> Entity {
     Entity {
         id,
@@ -713,6 +763,7 @@ fn make_test_entity(id: u32, name: Option<&str>, kind: EntityKind) -> Entity {
         char_flags: Default::default(),
         mount_id: None,
         monstrosity: None,
+        job_master_display: None,
     }
 }
 
@@ -1299,6 +1350,7 @@ fn self_position_returns_self_entity_pos() {
             char_flags: Default::default(),
             mount_id: None,
             monstrosity: None,
+            job_master_display: None,
         },
         pos_present: true,
     });
@@ -1855,6 +1907,7 @@ fn apply_event_dedupes_identical_entity_upserts() {
         char_flags: Default::default(),
         mount_id: None,
         monstrosity: None,
+        job_master_display: None,
     };
 
     // First upsert inserts.
@@ -1925,6 +1978,7 @@ fn apply_event_dedupes_identical_self_position() {
             char_flags: Default::default(),
             mount_id: None,
             monstrosity: None,
+            job_master_display: None,
         },
         pos_present: true,
     });

@@ -267,6 +267,7 @@ mod tests {
                 char_flags: Default::default(),
                 mount_id: None,
                 monstrosity: None,
+                job_master_display: None,
             },
             pos_present: true,
         });
@@ -296,6 +297,7 @@ mod tests {
                 char_flags: Default::default(),
                 mount_id: None,
                 monstrosity: None,
+                job_master_display: None,
             },
             pos_present: true,
         });
@@ -321,6 +323,7 @@ mod tests {
                 char_flags: Default::default(),
                 mount_id: None,
                 monstrosity: None,
+                job_master_display: None,
             },
             pos_present: true,
         });
@@ -346,6 +349,7 @@ mod tests {
                 char_flags: Default::default(),
                 mount_id: None,
                 monstrosity: None,
+                job_master_display: None,
             },
             pos_present: true,
         });

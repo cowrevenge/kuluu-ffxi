@@ -994,6 +994,7 @@ fn handle_sub_packet(
                             status: 0,
                             mount_id: None,
                             monstrosity: None,
+                            job_master_display: None,
                         },
 
                         pos_present: true,
@@ -1162,8 +1163,17 @@ fn handle_sub_packet(
                     })
                     .flatten();
 
-                let char_flags =
-                    (send_flag & UPDATE_HP != 0).then(|| decode::CharFlags::from_pos_head(&head));
+                // Flags4.JobMasterFlag is a CHAR_PC-only byte — in a 0x0E that
+                // offset sits inside the SubKind/Status word, so it decodes to
+                // "not set" for NPCs.
+                let char_flags = (send_flag & UPDATE_HP != 0).then(|| {
+                    decode::CharFlags::from_pos_head(
+                        &head,
+                        (op == s2c::CHAR_PC)
+                            .then(|| decode::PosHead::flags4_job_master(sub.data))
+                            .flatten(),
+                    )
+                });
 
                 let status = match op {
                     s2c::CHAR_NPC => decode::NpcState::decode_char_npc_status(sub.data),
@@ -1214,6 +1224,14 @@ fn handle_sub_packet(
                         // 0x0E has no such field.
                         monstrosity: (op == s2c::CHAR_PC && send_flag & UPDATE_MODEL != 0)
                             .then(|| decode::PosHead::monstrosity(sub.data))
+                            .flatten(),
+                        // Flags4.JobMasterFlag rides every non-despawn 0x0D outside
+                        // all SendFlg blocks (char_update.cpp "Fields that are always
+                        // checked if this isnt a despawn packet"), so it refreshes even
+                        // on pos-only updates — unlike the General words above. PC-only:
+                        // in a 0x0E that byte is inside the SubKind/Status word.
+                        job_master_display: (op == s2c::CHAR_PC)
+                            .then(|| decode::PosHead::flags4_job_master(sub.data))
                             .flatten(),
                     },
                     pos_present,
@@ -6482,6 +6500,7 @@ fn mh_door_entity(model: u16) -> Entity {
         status: 0,
         mount_id: None,
         monstrosity: None,
+        job_master_display: None,
     }
 }
 

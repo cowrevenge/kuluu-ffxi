@@ -255,6 +255,14 @@ pub struct Entity {
     /// Drives the retail Monstrosity nameplate marker (0xAB).
     #[serde(skip)]
     pub monstrosity: Option<bool>,
+
+    /// `Flags4.JobMasterFlag` of the last non-despawn 0x0D. Unlike the General
+    /// words in `char_flags`, LSB writes it on every update, outside all SendFlg
+    /// blocks (vendor/server/src/map/packets/char_update.cpp "Fields that are
+    /// always checked if this isnt a despawn packet"), so it refreshes even on
+    /// pos-only updates. PC-only; folded into `char_flags` at upsert time.
+    #[serde(skip)]
+    pub job_master_display: Option<bool>,
 }
 
 /// Which retail colour a run of a chat line takes. Retail renders some
@@ -1567,7 +1575,25 @@ impl SessionState {
 
                     let preserved_look = entity.look.or(existing.look).or(latched_self_look);
                     let preserved_npc_state = entity.npc_state.or(existing.npc_state);
-                    let preserved_char_flags = entity.char_flags.or(existing.char_flags);
+                    // Flags4.JobMasterFlag refreshes on every non-despawn 0x0D
+                    // (char_update.cpp), unlike the General words — fold the
+                    // freshest value into the preserved flags so a pos-only tick
+                    // still carries it.
+                    let base_char_flags = entity.char_flags.or(existing.char_flags);
+                    let preserved_char_flags = match (base_char_flags, entity.job_master_display) {
+                        (Some(mut flags), Some(job_master)) => {
+                            flags.job_master_display = job_master;
+                            Some(flags)
+                        }
+                        // No General update has arrived yet (a spawn always
+                        // carries one, so this is defensive): materialize the
+                        // flags with just the star.
+                        (None, Some(true)) => Some(ffxi_proto::decode::CharFlags {
+                            job_master_display: true,
+                            ..Default::default()
+                        }),
+                        _ => base_char_flags,
+                    };
                     let preserved_mount_id = entity.mount_id.or(existing.mount_id);
                     // Model-block-gated at the source (char_update.cpp), so merge
                     // like mount_id — never off pos_present.

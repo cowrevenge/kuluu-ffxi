@@ -253,6 +253,15 @@ pub struct CharFlags {
     pub new_character: bool,
     pub mentor: bool,
 
+    /// `Flags4.JobMasterFlag` (bit 6 of the u8 at body offset 0x2F): LSB's
+    /// job-master display toggle — `SUPERIOR_LEVEL == 5 && m_jobMasterDisplay`
+    /// (vendor/server/src/map/packets/char_update.cpp:441), written on every
+    /// non-despawn 0x0D outside all SendFlg blocks. Drives the same nameplate
+    /// star as `lfg_master`, which retail keys off `Flags3.LfgMasterFlag` — a
+    /// flag LSB hardcodes to 0 (char_update.cpp:339).
+    #[serde(default)]
+    pub job_master_display: bool,
+
     /// `Flags1.InvisFlag` (bit 29): the server's player-invisibility bit — set
     /// for PCs only, when a GM hides themselves or an EFFECTFLAG_INVISIBLE
     /// status effect is active. Retail keeps such players targetable but draws

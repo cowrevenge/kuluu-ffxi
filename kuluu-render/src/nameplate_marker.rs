@@ -54,7 +54,10 @@ pub mod glyph {
     pub const BESIEGED_ODD: u8 = 0xA7;
     /// Monstrosity marker — `MonstrosityFlags != 0` in the Model block.
     pub const MONSTROSITY: u8 = 0xAB;
-    /// LfgMasterFlag — the job-master star, drawn as a pair with its tail.
+    /// The job-master star, drawn as a pair with its tail. Retail keys it off
+    /// `Flags3.LfgMasterFlag` (`AUDIT_140.BIT_3`, research/XIClient/.../s2c/
+    /// 0x00D.cpp:159), which LSB hardcodes to 0 (char_update.cpp:339) — on this
+    /// server the star comes from `Flags4.JobMasterFlag` instead.
     pub const JOB_MASTER: u8 = 0xAC;
     /// The half-scale companion glyph retail appends after JOB_MASTER
     /// (`DrawActorNameText`).
@@ -105,15 +108,22 @@ pub fn nameplate_markers(entity: &Entity) -> Vec<u8> {
     }
     let flags = &entity.char_flags;
 
+    // Retail expands every star in the marker string into a half-scale pair at
+    // draw time (research/XIClient/.../CXiActorNameDraw.cpp:301), so append the
+    // tail after each occurrence — a ballista-allegiance job master carries two.
+    let push_marker = |markers: &mut Vec<u8>, code: u8| {
+        markers.push(code);
+        if code == glyph::JOB_MASTER {
+            markers.push(glyph::JOB_MASTER_TAIL);
+        }
+    };
+
     let Some(primary) = primary_marker(flags, entity.monstrosity) else {
         return markers;
     };
-    markers.push(primary);
-    if primary == glyph::JOB_MASTER {
-        markers.push(glyph::JOB_MASTER_TAIL);
-    }
+    push_marker(&mut markers, primary);
     if let Some(secondary) = secondary_marker(flags) {
-        markers.push(secondary);
+        push_marker(&mut markers, secondary);
     }
     markers
 }
@@ -124,6 +134,18 @@ pub fn nameplate_markers(entity: &Entity) -> Vec<u8> {
 /// vendor/server/src/map), so they are omitted rather than guessed. The away
 /// sub-case for a specific server type (`ServerID & 0xFF000000 == 0x01000000`)
 /// is likewise skipped: it is not the retail NA/LSB path.
+///
+/// Deliberately NOT implemented, with reasons (do not re-derive):
+/// - Glyphs 0x94 (`AUDIT_1DA`), 0xA8 (`AUDIT_130.BIT_23`) and the second 0x93
+///   (`AUDIT_130.BIT_22`) ride only s2c 0x067 RecvActorSupplement, which LSB does
+///   not implement — dead on this wire.
+/// - The 0xA2/0xB1 bazaar check reads `AUDIT_130.BIT_20`, which the client sets
+///   only in the 0x00E NPC path (research/XIClient/.../s2c/0x00E.cpp:301/:305);
+///   the PC bazaar is `AUDIT_128.BIT_9` → glyph 0x9C, which we do draw.
+/// - The campaign special markers (glyphs 0xC8-0xCB/0xCD via
+///   `GetSpecialActorNameMarker`, keyed off Flags4 bits 2-5) are not decodable:
+///   LSB never sets those bits and the glyphs do not exist in the NA `fontshp`
+///   shape group, which ends at 0xB1.
 fn primary_marker(flags: &CharFlags, monstrosity: bool) -> Option<u8> {
     // The seed: an actor in a linkshell starts with the pearl in the primary
     // slot, and every check below may overwrite it (`BuildTelemetryActorName`).
@@ -159,7 +181,10 @@ fn primary_marker(flags: &CharFlags, monstrosity: bool) -> Option<u8> {
             return Some(marker);
         }
     }
-    if flags.lfg_master {
+    // Retail's star check is `Flags3.LfgMasterFlag` alone; LSB hardcodes that
+    // flag to 0 and carries the state in Flags4.JobMasterFlag instead, so both
+    // light the same marker.
+    if flags.lfg_master || flags.job_master_display {
         return Some(glyph::JOB_MASTER);
     }
     if flags.auto_party {
@@ -207,7 +232,8 @@ fn secondary_marker(flags: &CharFlags) -> Option<u8> {
     if !in_range {
         return None;
     }
-    if flags.lfg_master {
+    // Same dual source as the primary slot — see `primary_marker`.
+    if flags.lfg_master || flags.job_master_display {
         return Some(glyph::JOB_MASTER);
     }
     if flags.auto_party {
@@ -381,6 +407,49 @@ mod tests {
         assert_eq!(
             nameplate_markers(&e),
             vec![glyph::JOB_MASTER, glyph::JOB_MASTER_TAIL]
+        );
+    }
+
+    /// LSB's actual job-master state — `Flags4.JobMasterFlag` (the /mastery-
+    /// display toggle) — lights the same star as retail's LfgMasterFlag.
+    #[test]
+    fn the_job_master_display_flag_draws_the_star_too() {
+        let mut e = pc();
+        e.char_flags.job_master_display = true;
+        assert_eq!(
+            nameplate_markers(&e),
+            vec![glyph::JOB_MASTER, glyph::JOB_MASTER_TAIL]
+        );
+
+        // ...and it sits at retail's priority: below away/GM, above auto-party,
+        // seeking and bazaar.
+        e.char_flags.away = true;
+        assert_eq!(nameplate_markers(&e), vec![glyph::AWAY]);
+        e.char_flags.away = false;
+        e.char_flags.auto_party = true;
+        e.char_flags.lfg = true;
+        e.char_flags.bazaar = true;
+        assert_eq!(
+            nameplate_markers(&e),
+            vec![glyph::JOB_MASTER, glyph::JOB_MASTER_TAIL]
+        );
+    }
+
+    /// The secondary slot opens for a ballista-allegiance actor on the LSB flag
+    /// as well — retail carries two stars there, each with its half-scale tail.
+    #[test]
+    fn the_job_master_display_flag_fills_the_secondary_slot() {
+        let mut e = pc();
+        e.char_flags.job_master_display = true;
+        e.char_flags.allegiance = SECONDARY_ALLEGIANCE_MIN;
+        assert_eq!(
+            nameplate_markers(&e),
+            vec![
+                glyph::JOB_MASTER,
+                glyph::JOB_MASTER_TAIL,
+                glyph::JOB_MASTER,
+                glyph::JOB_MASTER_TAIL
+            ]
         );
     }
 

@@ -63,6 +63,7 @@ fn upsert_with_speed(
             char_flags: Default::default(),
             mount_id: None,
             monstrosity: None,
+            job_master_display: None,
         },
         pos_present: true,
     }

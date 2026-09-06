@@ -1614,6 +1614,15 @@ pub enum ViewerCommand {
     DeliveryBox {
         op: DeliveryOp,
     },
+
+    /// Capture the native client's primary window to PNG via Bevy render-target
+    /// readback — no focus or screen-recording permission needed. GUI-side only:
+    /// the relay routes it into `DebugControl`, never the session (which treats
+    /// `AgentCommand::Screenshot` as a no-op). `None` leaves default naming
+    /// (`screenshot-N.png`) to the GUI side.
+    Screenshot {
+        path: Option<String>,
+    },
 }
 
 /// Viewer-issued delivery box operations. A thinner vocabulary than the

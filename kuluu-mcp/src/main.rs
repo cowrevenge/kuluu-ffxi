@@ -1118,7 +1118,10 @@ async fn main() -> Result<()> {
         let relay_event_tx = event_tx.clone();
         let relay_cmd_tx = cmd_tx.clone();
         let serve_h = tokio::spawn(async move {
-            if let Err(err) = relay::serve(addr, state_rx, relay_event_tx, relay_cmd_tx).await {
+            // No GUI in the MCP path: screenshot requests have no
+            // DebugControl to land on (same as the headless main.rs path).
+            if let Err(err) = relay::serve(addr, state_rx, relay_event_tx, relay_cmd_tx, None).await
+            {
                 tracing::warn!(error = %err, "relay listener exited");
             }
         });

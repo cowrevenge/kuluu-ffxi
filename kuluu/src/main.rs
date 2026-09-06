@@ -416,8 +416,10 @@ async fn run_command_async(args: Args, auth: auth_client::AuthClient) -> Result<
                 let relay_event_tx = event_tx.clone();
                 let relay_cmd_tx = cmd_tx.clone();
                 tokio::spawn(async move {
+                    // No GUI in the headless path: screenshot requests have no
+                    // DebugControl to land on.
                     if let Err(err) =
-                        relay::serve(addr, state_rx, relay_event_tx, relay_cmd_tx).await
+                        relay::serve(addr, state_rx, relay_event_tx, relay_cmd_tx, None).await
                     {
                         tracing::warn!(error = %err, "relay listener exited");
                     }

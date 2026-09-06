@@ -1205,14 +1205,28 @@ fn bridge_connecting(
     } = spawn_session_with_reactor(cfg, ReactorConfig::player());
     let event_rx = event_tx.subscribe();
 
+    // Focus-less GUI driving (kuluu-0pof): the socket writes movement/heights
+    // requests into this handle; GUI systems read it. Always present so input
+    // systems can depend on it even when no socket is listening.
+    let debug_ctrl = kuluu_session::debug_control::DebugControl::new_shared();
+    commands.insert_resource(DebugControlHandle(debug_ctrl.clone()));
+
     #[cfg(feature = "relay")]
     if let Some(addr) = relay.0 {
         let state_rx_relay = state_rx.clone();
         let event_tx_relay = event_tx.clone();
         let cmd_tx_relay = cmd_tx.clone();
+        // Viewer Screenshot commands land on the shared handle, not the session.
+        let debug_ctrl_relay = Some(debug_ctrl.clone());
         runtime.0.spawn(async move {
-            if let Err(err) =
-                crate::relay::serve(addr, state_rx_relay, event_tx_relay, cmd_tx_relay).await
+            if let Err(err) = kuluu_session::relay::serve(
+                addr,
+                state_rx_relay,
+                event_tx_relay,
+                cmd_tx_relay,
+                debug_ctrl_relay,
+            )
+            .await
             {
                 tracing::warn!(error = %err, "relay listener exited");
             }
@@ -1220,12 +1234,6 @@ fn bridge_connecting(
     }
     #[cfg(not(feature = "relay"))]
     let _ = relay;
-
-    // Focus-less GUI driving (kuluu-0pof): the socket writes movement/heights
-    // requests into this handle; GUI systems read it. Always present so input
-    // systems can depend on it even when no socket is listening.
-    let debug_ctrl = kuluu_session::debug_control::DebugControl::new_shared();
-    commands.insert_resource(DebugControlHandle(debug_ctrl.clone()));
 
     // Stair-capture drive channel (FFXI_STAIR_DRIVE): always present so the input
     // path can depend on it; only listens when the env var names an address.

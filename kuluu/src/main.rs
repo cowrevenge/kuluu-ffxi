@@ -66,6 +66,9 @@ enum Command {
         nation: u8,
         size: u8,
         face: u8,
+        /// Skip the opening new-character cutscene (matches the GUI default).
+        #[arg(long, default_value_t = true)]
+        skip_intro_cs: bool,
     },
 
     Play {
@@ -244,6 +247,7 @@ async fn run_command_async(args: Args, auth: auth_client::AuthClient) -> Result<
             nation,
             size,
             face,
+            skip_intro_cs,
         } => {
             auth.ensure_account(&user, &password).await.ok();
             let session = auth.login(&user, &password).await.context("login")?;
@@ -256,12 +260,13 @@ async fn run_command_async(args: Args, auth: auth_client::AuthClient) -> Result<
                 nation,
                 size,
                 face,
+                skip_intro_cs: u8::from(skip_intro_cs),
             };
             lobby
                 .create_character(&session, &spec)
                 .await
                 .context("character creation")?;
-            tracing::info!(char_name = %name, race, job, nation, "character created");
+            tracing::info!(char_name = %name, race, job, nation, skip_intro_cs, "character created");
         }
         Command::Play {
             user,

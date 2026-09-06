@@ -187,7 +187,7 @@ async fn send_one(url: &str, cmd: &ViewerCommand) -> Result<()> {
     let (mut sink, mut stream) = ws.split();
     let frame = ClientFrame::Command(cmd.clone());
     let bytes = postcard::to_allocvec(&frame).context("postcard encoding ClientFrame")?;
-    sink.send(Message::Binary(bytes.into()))
+    sink.send(Message::Binary(bytes))
         .await
         .context("sending command")?;
 
@@ -277,7 +277,7 @@ async fn watch(url: &str, filter: Option<&str>, verbose: bool) -> Result<()> {
                 }
                 if stage.as_ref() != Some(&snap.stage) {
                     println!("STAGE -> {:?}", snap.stage);
-                    stage = Some(snap.stage.clone());
+                    stage = Some(snap.stage);
                 }
 
                 let mut now: HashMap<u32, (String, Key)> =

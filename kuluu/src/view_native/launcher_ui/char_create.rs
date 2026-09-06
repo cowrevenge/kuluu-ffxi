@@ -95,7 +95,7 @@ pub(super) fn spawn_ui(
     lobby: Res<OpenedLobby>,
 ) {
     // The row only exists when this lobby connection's char-list reply
-    // advertised CAP_SKIP_INTRO_CS — vanilla servers leave the cap slot zero.
+    // advertised CAP_SKIP_INTRO_CS - vanilla servers leave the cap slot zero.
     let skip_cs_supported = lobby
         .0
         .lock()

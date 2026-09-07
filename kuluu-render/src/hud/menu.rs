@@ -388,10 +388,50 @@ pub const GRAPHICS_DLSS_CONFIG_SLOT: usize = dlss_config_slot();
 /// Slot of "Reset to High": the last row on the page.
 pub const GRAPHICS_RESET_SLOT: usize = GRAPHICS_FIELDS.len() + 1;
 
+/// The Graphics page rows as they appear in this build: when the build can't
+/// run DLSS (`dlss_supported == false`) the "DLSS" row and its "DLSS Config"
+/// action row are dropped entirely — a non-DLSS build doesn't advertise them.
+pub fn graphics_entries(dlss_supported: bool) -> Vec<&'static str> {
+    if dlss_supported {
+        return GRAPHICS_ENTRIES.to_vec();
+    }
+    // The DLSS on/off row sits directly above the config row (pinned by
+    // graphics_entries_match_field_labels); drop both slots.
+    let config_slot = GRAPHICS_DLSS_CONFIG_SLOT;
+    GRAPHICS_ENTRIES
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| *i != config_slot - 1 && *i != config_slot)
+        .map(|(_, e)| *e)
+        .collect()
+}
+
+/// Slot of "Reset to High" in the current layout: always the last row, one
+/// slot earlier when the DLSS rows are dropped.
+pub fn graphics_reset_slot(dlss_supported: bool) -> usize {
+    if dlss_supported {
+        GRAPHICS_RESET_SLOT
+    } else {
+        GRAPHICS_FIELDS.len() - 1
+    }
+}
+
 /// Maps a Graphics-page cursor slot onto its cyclable field, skipping the two
 /// action rows ("DLSS Config" under the DLSS on/off row, "Reset to High" at
-/// the bottom). `None` for those slots.
-pub fn graphics_field_at(slot: usize) -> Option<GraphicsField> {
+/// the bottom). `None` for those slots. When the build can't run DLSS the page
+/// has no DLSS rows: every slot before the reset row is a field in order.
+pub fn graphics_field_at(slot: usize, dlss_supported: bool) -> Option<GraphicsField> {
+    if !dlss_supported {
+        // No action row before reset: slots 0..reset are the fields minus Dlss.
+        if slot >= GRAPHICS_FIELDS.len() - 1 {
+            return None;
+        }
+        return GRAPHICS_FIELDS
+            .iter()
+            .copied()
+            .filter(|f| !matches!(f, GraphicsField::Dlss))
+            .nth(slot);
+    }
     if slot == GRAPHICS_DLSS_CONFIG_SLOT || slot == GRAPHICS_RESET_SLOT {
         return None;
     }
@@ -460,9 +500,11 @@ pub fn is_dynamic(kind: MenuKind) -> bool {
     )
 }
 
-pub fn entry_count(kind: MenuKind, dynamic: &DynamicMenu) -> usize {
+pub fn entry_count(kind: MenuKind, dynamic: &DynamicMenu, dlss_supported: bool) -> usize {
     if is_dynamic(kind) {
         dynamic.rows.len().max(1)
+    } else if kind == MenuKind::Graphics {
+        graphics_entries(dlss_supported).len()
     } else {
         static_entries(kind).len()
     }
@@ -1238,7 +1280,8 @@ pub fn update_main_menu(
         return;
     };
 
-    let (total, viewport_start) = resolve_viewport(view.kind, view.cursor, &dynamic);
+    let (total, viewport_start) =
+        resolve_viewport(view.kind, view.cursor, &dynamic, settings.dlss_supported);
     let window = visible_window(view.kind, total);
 
     for (row, mut row_node, mut text, mut color, mut bg) in row_q.iter_mut() {
@@ -1253,6 +1296,12 @@ pub fn update_main_menu(
 
         let label_owned: String = if is_dynamic(view.kind) {
             entry_label(view.kind, list_idx, &dynamic).to_string()
+        } else if view.kind == MenuKind::Graphics {
+            graphics_entries(settings.dlss_supported)
+                .get(list_idx)
+                .copied()
+                .unwrap_or("<unknown>")
+                .to_string()
         } else {
             static_entries(view.kind)
                 .get(list_idx)
@@ -1314,7 +1363,12 @@ fn visible_window(kind: MenuKind, total: usize) -> usize {
     }
 }
 
-fn resolve_viewport(kind: MenuKind, cursor: usize, dynamic: &DynamicMenu) -> (usize, usize) {
+fn resolve_viewport(
+    kind: MenuKind,
+    cursor: usize,
+    dynamic: &DynamicMenu,
+    dlss_supported: bool,
+) -> (usize, usize) {
     if kind == MenuKind::Root {
         // Show only the page the cursor is on: rows [start, end).
         let (start, end) = root_page_bounds(cursor);
@@ -1322,6 +1376,8 @@ fn resolve_viewport(kind: MenuKind, cursor: usize, dynamic: &DynamicMenu) -> (us
     }
     let total = if is_dynamic(kind) {
         dynamic.rows.len().max(1)
+    } else if kind == MenuKind::Graphics {
+        graphics_entries(dlss_supported).len()
     } else {
         static_entries(kind).len()
     };
@@ -1339,6 +1395,7 @@ fn resolve_viewport(kind: MenuKind, cursor: usize, dynamic: &DynamicMenu) -> (us
 
 pub fn menu_mouse_hover_system(
     mut mode: ResMut<InputMode>,
+    settings: Res<GraphicsSettings>,
     dynamic: Res<DynamicMenu>,
     rows: Query<(&Interaction, &MainMenuRow), Changed<Interaction>>,
 ) {
@@ -1354,7 +1411,8 @@ pub fn menu_mouse_hover_system(
             continue;
         }
         let cursor = stack.levels[level_idx].cursor;
-        let (total, viewport_start) = resolve_viewport(kind, cursor, &dynamic);
+        let (total, viewport_start) =
+            resolve_viewport(kind, cursor, &dynamic, settings.dlss_supported);
         let window = visible_window(kind, total);
         let list_idx = viewport_start + row.slot;
         if list_idx >= total || row.slot >= window {
@@ -1368,6 +1426,7 @@ pub fn menu_mouse_hover_system(
 
 pub fn menu_mouse_click_system(
     mode: Res<InputMode>,
+    settings: Res<GraphicsSettings>,
     dynamic: Res<DynamicMenu>,
     rows: Query<(&Interaction, &MainMenuRow), Changed<Interaction>>,
     mut out: MessageWriter<MenuRowActivated>,
@@ -1383,7 +1442,8 @@ pub fn menu_mouse_click_system(
         if *interaction != Interaction::Pressed {
             continue;
         }
-        let (total, viewport_start) = resolve_viewport(kind, level.cursor, &dynamic);
+        let (total, viewport_start) =
+            resolve_viewport(kind, level.cursor, &dynamic, settings.dlss_supported);
         let window = visible_window(kind, total);
         let list_idx = viewport_start + row.slot;
         if list_idx < total && row.slot < window {
@@ -1404,7 +1464,7 @@ fn format_row_body(
     snapshot: &kuluu_snapshot::SceneSnapshot,
 ) -> String {
     match kind {
-        MenuKind::Graphics => match graphics_field_at(slot) {
+        MenuKind::Graphics => match graphics_field_at(slot, settings.dlss_supported) {
             Some(field) => format!(
                 "{:<16}[{}]",
                 format!("{}:", field.label()),
@@ -1438,10 +1498,13 @@ fn format_row_body(
                 label.to_string()
             } else if label == RETAIL_DLSS_MENU {
                 // Menu gate, not the DLSS on/off itself (that lives in the
-                // Graphics menu): [on] means "DLSS is selectable there".
+                // Graphics menu): [on] means "DLSS is selectable there". When this
+                // build can't run DLSS at all it reads N/A instead of a live toggle.
                 format!(
                     "{label:<14}[{}]",
-                    if settings.dlss_menu_enabled {
+                    if !settings.dlss_supported {
+                        "N/A"
+                    } else if settings.dlss_menu_enabled {
                         "on"
                     } else {
                         "off"
@@ -2034,7 +2097,7 @@ mod tests {
         let dynamic = DynamicMenu::default();
         // Cursor on the last row (Reset to High) must land inside the window.
         let last = total - 1;
-        let (t, start) = resolve_viewport(MenuKind::Graphics, last, &dynamic);
+        let (t, start) = resolve_viewport(MenuKind::Graphics, last, &dynamic, true);
         let window = visible_window(MenuKind::Graphics, t);
         assert!(
             last >= start && last < start + window,
@@ -2211,6 +2274,40 @@ mod tests {
             .position(|f| matches!(f, GraphicsField::Dlss))
             .expect("Dlss in GRAPHICS_FIELDS");
         assert_eq!(GRAPHICS_DLSS_CONFIG_SLOT, dlss_slot + 1);
+    }
+
+    #[test]
+    fn graphics_entries_drop_dlss_rows_when_unsupported() {
+        // The supported layout must be exactly the static list — no drift.
+        assert_eq!(graphics_entries(true), GRAPHICS_ENTRIES.to_vec());
+
+        let bare = graphics_entries(false);
+        assert!(!bare.iter().any(|e| *e == "DLSS" || *e == "DLSS Config"));
+        // One row per field minus the DLSS on/off row, plus the reset row.
+        assert_eq!(bare.len(), GRAPHICS_FIELDS.len());
+        assert_eq!(*bare.last().unwrap(), "Reset to High");
+
+        // Slot mapping: fields keep their order with the DLSS slot removed,
+        // and the reset row maps to no field.
+        let dlss_i = GRAPHICS_FIELDS
+            .iter()
+            .position(|f| matches!(f, GraphicsField::Dlss))
+            .expect("Dlss in GRAPHICS_FIELDS");
+        assert_eq!(graphics_field_at(0, false), Some(GRAPHICS_FIELDS[0]));
+        // The slot that used to be the DLSS row now carries the next field.
+        assert_eq!(
+            graphics_field_at(dlss_i, false),
+            Some(GRAPHICS_FIELDS[dlss_i + 1])
+        );
+        let reset = graphics_reset_slot(false);
+        assert_eq!(reset, GRAPHICS_FIELDS.len() - 1);
+        assert_eq!(graphics_field_at(reset, false), None);
+        // The supported layout is unchanged by the new parameter.
+        assert_eq!(
+            graphics_field_at(GRAPHICS_DLSS_CONFIG_SLOT, true),
+            None
+        );
+        assert_eq!(graphics_reset_slot(true), GRAPHICS_RESET_SLOT);
     }
 
     #[test]

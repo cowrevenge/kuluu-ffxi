@@ -17,7 +17,9 @@ fn apply_graphics_cycle(cursor: usize, delta: i32, graphics: &mut kuluu_render::
     // The page carries two non-field action rows ("DLSS Config" under the DLSS
     // on/off row, "Reset to High" at the bottom), so the cursor slot does not
     // index GRAPHICS_FIELDS directly — resolve through the shared mapping.
-    if let Some(field) = kuluu_render::hud::menu::graphics_field_at(cursor) {
+    if let Some(field) =
+        kuluu_render::hud::menu::graphics_field_at(cursor, graphics.dlss_supported)
+    {
         graphics.cycle(field, delta);
     }
 }
@@ -198,10 +200,13 @@ pub(super) fn confirm_menu_at_cursor(
         return None;
     }
     if matches!(kind, MenuKind::Graphics) {
-        if cursor == kuluu_render::hud::menu::GRAPHICS_RESET_SLOT {
+        let dlss_supported = graphics.dlss_supported;
+        if cursor == kuluu_render::hud::menu::graphics_reset_slot(dlss_supported) {
             graphics.reset_to_default();
             push_system_chat_line(scene_state, "[menu] Graphics reset to High".into());
-        } else if cursor == kuluu_render::hud::menu::GRAPHICS_DLSS_CONFIG_SLOT {
+        } else if dlss_supported
+            && cursor == kuluu_render::hud::menu::GRAPHICS_DLSS_CONFIG_SLOT
+        {
             stack.push(MenuKind::GraphicsDlss);
         } else {
             apply_graphics_cycle(cursor, 1, graphics);
@@ -360,30 +365,29 @@ fn handle_retail_plus_row(
         // Section chrome: no state, no banner.
         DEBUG_RETAIL_SEPARATOR | DEBUG_RETAIL_LABEL => true,
         RETAIL_DLSS_MENU => {
-            graphics.dlss_menu_enabled = !graphics.dlss_menu_enabled;
-            if graphics.dlss_menu_enabled && !graphics.dlss_supported {
-                // The user just asked for DLSS in the Graphics menu on a
-                // machine/build that can't run it (DLLs missing, no RTX/Vulkan,
-                // or built without the dlss feature). Say so loudly — the row
-                // will keep reading N/A until the runtime files are present.
-                tracing::error!(
-                    "[menu] DLSS enabled in menu but the NVIDIA DLSS runtime files were not found \
-                     (DLSS DLLs missing, no RTX/Vulkan support, or this build lacks the dlss feature) — \
-                     Graphics menu will show N/A"
+            // This build can't run DLSS at all (no dlss feature, or no RTX/Vulkan/DLLs):
+            // the row reads N/A and the toggle is inert - don't flip a persisted gate.
+            if !graphics.dlss_supported {
+                push_system_chat_line(
+                    scene_state,
+                    format!("[menu] {label}: N/A (this build can't run DLSS)"),
                 );
+                true
+            } else {
+                graphics.dlss_menu_enabled = !graphics.dlss_menu_enabled;
+                push_system_chat_line(
+                    scene_state,
+                    format!(
+                        "[menu] {label}: {}",
+                        if graphics.dlss_menu_enabled {
+                            "on"
+                        } else {
+                            "off"
+                        }
+                    ),
+                );
+                true
             }
-            push_system_chat_line(
-                scene_state,
-                format!(
-                    "[menu] {label}: {}",
-                    if graphics.dlss_menu_enabled {
-                        "on"
-                    } else {
-                        "off"
-                    }
-                ),
-            );
-            true
         }
         #[cfg(feature = "enhanced-mob-hp-under")]
         RETAIL_MOB_HP_UNDER => {
@@ -580,7 +584,8 @@ pub(super) fn handle_menu_key(
         let level = stack.current()?;
         (level.kind, level.cursor)
     };
-    let entry_count = kuluu_render::hud::menu::entry_count(kind, dynamic);
+    let entry_count =
+        kuluu_render::hud::menu::entry_count(kind, dynamic, graphics.dlss_supported);
 
     // Menu context (not text input), so reading the raw keycode is correct.
     // "-" flips the Command menu's two pages (retail HorizonXI); single-list

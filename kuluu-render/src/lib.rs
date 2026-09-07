@@ -449,8 +449,14 @@ impl<S: SceneSource + Resource + Component<Mutability = bevy::ecs::component::Mu
                 .before(ffxi_actor_render::tick_live_ffxi_actors),
         );
 
+        // After apply_invis_flag_system: it resets every non-WireEntity model root's Visibility
+        // each frame (invis-flag PCs), and the burrow-phase hold in tick_live_ffxi_actors must
+        // win that write for entities digging down.
         #[cfg(not(target_arch = "wasm32"))]
-        app.add_systems(Update, ffxi_actor_render::tick_live_ffxi_actors);
+        app.add_systems(
+            Update,
+            ffxi_actor_render::tick_live_ffxi_actors.after(scene::apply_invis_flag_system),
+        );
 
         #[cfg(not(target_arch = "wasm32"))]
         app.add_systems(

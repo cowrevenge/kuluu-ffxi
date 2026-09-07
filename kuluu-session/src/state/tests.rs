@@ -1137,6 +1137,7 @@ fn entity_patched_by_id_sets_name_on_existing_entity() {
         name: Some("Mihli Aliapoh".into()),
         kind: Some(EntityKind::Pet),
         hp_pct: None,
+        allegiance: None,
     });
     assert_eq!(s.entities[0].name.as_deref(), Some("Mihli Aliapoh"));
     assert_eq!(s.entities[0].kind, EntityKind::Pet);
@@ -1157,10 +1158,57 @@ fn entity_patched_by_act_index_resolves_when_id_unknown() {
         name: Some("Crab Familiar".into()),
         kind: Some(EntityKind::Pet),
         hp_pct: Some(75),
+        allegiance: None,
     });
     assert_eq!(s.entities[0].name.as_deref(), Some("Crab Familiar"));
     assert_eq!(s.entities[0].kind, EntityKind::Pet);
     assert_eq!(s.entities[0].hp_pct, Some(75));
+}
+
+#[test]
+fn entity_patched_allegiance_materializes_flags_and_preserves_the_rest() {
+    let mut s = SessionState::default();
+    // Self's entity carries no flags until its first 0x037 — the patch must
+    // materialize rather than skip.
+    s.apply_event(&AgentEvent::EntityUpserted {
+        entity: make_test_entity(1, None, EntityKind::Pc),
+        pos_present: true,
+    });
+    assert!(s.entities[0].char_flags.is_none());
+
+    let changed = s.apply_event(&AgentEvent::EntityPatched {
+        id: Some(1),
+        act_index: None,
+        name: None,
+        kind: None,
+        hp_pct: None,
+        allegiance: Some(9),
+    });
+    assert!(changed);
+    let flags = s.entities[0].char_flags.expect("materialized by the patch");
+    assert_eq!(flags.allegiance, 9);
+
+    // A repeat of the same value is a no-op (0x037 arrives every non-pos tick).
+    assert!(!s.apply_event(&AgentEvent::EntityPatched {
+        id: Some(1),
+        act_index: None,
+        name: None,
+        kind: None,
+        hp_pct: None,
+        allegiance: Some(9),
+    }));
+
+    // A later value updates in place without zeroing the other flags.
+    s.apply_event(&AgentEvent::EntityPatched {
+        id: Some(1),
+        act_index: None,
+        name: None,
+        kind: None,
+        hp_pct: None,
+        allegiance: Some(3),
+    });
+    let flags = s.entities[0].char_flags.expect("still materialized");
+    assert_eq!(flags.allegiance, 3);
 }
 
 #[test]
@@ -1220,6 +1268,7 @@ fn entity_patched_for_unknown_entity_is_dropped() {
         name: Some("Ghost".into()),
         kind: Some(EntityKind::Pet),
         hp_pct: None,
+        allegiance: None,
     });
     assert!(s.entities.is_empty());
 }

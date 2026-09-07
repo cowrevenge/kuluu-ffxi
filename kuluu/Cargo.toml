@@ -172,6 +172,15 @@ rfd = { version = "0.15", optional = true, default-features = false, features = 
 kuluu-snapshot = { path = "../kuluu-snapshot", optional = true }
 kuluu-render = { path = "../kuluu-render", optional = true }
 
+# Windows-only startup diagnostic: enumerate loaded modules to flag injected overlay DLLs
+# (nvinject*/ngx/reshade) at launch — evidence for the exclusive-fullscreen stale-screenshot bug.
+# 0.61 unifies with the version tokio/mio already pull into the lockfile, so no new crate compiles.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_Threading",
+] }
+
 [dev-dependencies]
 tempfile = "3"
 # bevy_ecs routes failed-command diagnostics through the `log` facade; tests

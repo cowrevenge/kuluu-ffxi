@@ -149,6 +149,82 @@ fn stamp_render_total(s: Res<RenderSpanStamp>) {
     }
 }
 
+/// Warn when ≥ PRESENT_GAP_WARN_S elapses between consecutive frame presents on the render thread.
+/// The main-thread perf HUD only sees frames that reach Update; under pipelined rendering a blocked
+/// present (exclusive-fullscreen driver path) stalls here first, invisible to `perf: frame spike`.
+const PRESENT_GAP_WARN_S: u64 = 2;
+
+fn log_present_gap(mut last_present: Local<Option<std::time::Instant>>) {
+    let now = std::time::Instant::now();
+    if let Some(last) = *last_present {
+        let gap = now - last;
+        if gap.as_secs() >= PRESENT_GAP_WARN_S {
+            warn!(target: "perf", "present gap {gap:?} between frames on render thread");
+        }
+    }
+    *last_present = Some(now);
+}
+
+/// Startup diagnostic (Windows): one line listing any third-party injected DLLs — nvinject*/overlay/
+/// ngx/reshade — loaded in our process. The exclusive-fullscreen stale-screenshot bug suspected a
+/// driver overlay path; this is the evidence for or against it on a given machine/build.
+#[cfg(target_os = "windows")]
+fn log_injected_modules() {
+    use std::ffi::c_void;
+    use windows_sys::Win32::System::Diagnostics::Debug::{
+        EnumProcessModulesEx, GetModuleFileNameExW, LIST_MODULES_32BIT, LIST_MODULES_64BIT,
+    };
+    use windows_sys::Win32::System::Threading::GetCurrentProcess;
+
+    let proc = unsafe { GetCurrentProcess() };
+    let mut modules: Vec<*mut c_void> = vec![std::ptr::null_mut(); 512];
+    let mut needed = 0u32;
+    // SAFETY: `proc` is the current-process pseudo-handle; both calls take it read-only and every
+    // buffer is sized for its declared capacity.
+    if unsafe {
+        EnumProcessModulesEx(
+            proc,
+            modules.as_mut_ptr(),
+            (modules.len() * std::mem::size_of::<*mut c_void>()) as u32,
+            &mut needed,
+            LIST_MODULES_32BIT | LIST_MODULES_64BIT,
+        )
+    } == 0
+    {
+        return;
+    }
+
+    let count = needed as usize / std::mem::size_of::<*mut c_void>();
+    let mut found = Vec::new();
+    for &module in modules.iter().take(count) {
+        let mut buf = [0u16; 32768];
+        let n = unsafe { GetModuleFileNameExW(proc, module, buf.as_mut_ptr(), buf.len() as u32) };
+        if n == 0 {
+            continue;
+        }
+        let path = String::from_utf16_lossy(&buf[..n]);
+        let name = path
+            .rsplit('\\')
+            .next()
+            .unwrap_or(&path)
+            .to_ascii_lowercase();
+        if name.starts_with("nvinject")
+            || name.contains("overlay")
+            || name.contains("ngx")
+            || name.contains("reshade")
+        {
+            found.push(path);
+        }
+    }
+
+    let list = if found.is_empty() {
+        "none".to_string()
+    } else {
+        found.join(", ")
+    };
+    info!(target: "startup", "injected modules at startup: {list}");
+}
+
 fn apply_fps_cap_system(
     settings: Res<kuluu_render::graphics_settings::GraphicsSettings>,
     mut framepace: ResMut<bevy_framepace::FramepaceSettings>,
@@ -304,6 +380,9 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
         agent_listen,
         dat_root,
     } = args;
+
+    #[cfg(target_os = "windows")]
+    log_injected_modules();
 
     let mut app = App::new();
 
@@ -476,6 +555,7 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
                     .after(RenderSystems::Render)
                     .before(RenderSystems::Cleanup),
                 stamp_render_total.in_set(RenderSystems::PostCleanup),
+                log_present_gap.in_set(RenderSystems::PostCleanup),
             ),
         );
     }

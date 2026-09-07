@@ -229,6 +229,17 @@ is precisely the change you would be trying to verify. Confirm with capture.sh
 for sampling a short-lived visual is: capture.sh once to prove the window is
 live, then burst raw screenshot commands, then capture.sh again.
 
+**OS screen-grabs are stale in exclusive fullscreen.** Snipping Tool / WGC (Windows) and
+`screencapture` (macOS) capture the compositor's (DWM/WindowServer) shadow copy of the window, not
+our frame buffer. On Windows with a GPU driver, exclusive-fullscreen presentation bypasses DWM
+composition, so that shadow refreshes on its own slow clock: grabs come back 3–10s stale (first grab
+~30s), occasionally solid black — while the app demonstrably renders current frames. Bisection-
+confirmed 2026-09 on this machine: the identical exclusive-FS setup on lavapipe CPU render gives
+fresh grabs, so it is the NVIDIA driver's present path, not kuluu or DWM itself. Windowed and
+borderless are always composited, so OS grabs there are fine. For capture work in exclusive
+fullscreen use the relay readback above or switch to borderless; never cite an OS grab taken over
+exclusive-fullscreen as evidence.
+
 To sample faster than capture.sh's ~700ms round trip, send the burst down **one**
 socket connection — the client services them back-to-back at roughly frame pace:
 

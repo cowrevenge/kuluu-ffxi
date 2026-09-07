@@ -509,8 +509,11 @@ pub(super) fn redraw_advanced_visibility(
 pub(super) fn redraw_dlss_visibility(
     settings: Res<GraphicsSettings>,
     open: Res<GraphicsDlssOpen>,
-    mut gated: Query<&mut Node, With<DlssGated>>,
-    mut rows: Query<&mut Node, With<DlssRow>>,
+    // The markers are exclusive by construction (top-level surface vs
+    // collapsible sub-row), so the mutual Without keeps these provably
+    // disjoint — Bevy rejects two &mut Node queries that could share an entity.
+    mut gated: Query<&mut Node, (With<DlssGated>, Without<DlssRow>)>,
+    mut rows: Query<&mut Node, (With<DlssRow>, Without<DlssGated>)>,
     mut labels: Query<&mut Text, With<DlssToggleLabel>>,
 ) {
     let supported = settings.dlss_supported;

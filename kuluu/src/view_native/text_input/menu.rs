@@ -17,8 +17,7 @@ fn apply_graphics_cycle(cursor: usize, delta: i32, graphics: &mut kuluu_render::
     // The page carries two non-field action rows ("DLSS Config" under the DLSS
     // on/off row, "Reset to High" at the bottom), so the cursor slot does not
     // index GRAPHICS_FIELDS directly — resolve through the shared mapping.
-    if let Some(field) =
-        kuluu_render::hud::menu::graphics_field_at(cursor, graphics.dlss_supported)
+    if let Some(field) = kuluu_render::hud::menu::graphics_field_at(cursor, graphics.dlss_supported)
     {
         graphics.cycle(field, delta);
     }
@@ -204,9 +203,7 @@ pub(super) fn confirm_menu_at_cursor(
         if cursor == kuluu_render::hud::menu::graphics_reset_slot(dlss_supported) {
             graphics.reset_to_default();
             push_system_chat_line(scene_state, "[menu] Graphics reset to High".into());
-        } else if dlss_supported
-            && cursor == kuluu_render::hud::menu::GRAPHICS_DLSS_CONFIG_SLOT
-        {
+        } else if dlss_supported && cursor == kuluu_render::hud::menu::GRAPHICS_DLSS_CONFIG_SLOT {
             stack.push(MenuKind::GraphicsDlss);
         } else {
             apply_graphics_cycle(cursor, 1, graphics);
@@ -584,8 +581,7 @@ pub(super) fn handle_menu_key(
         let level = stack.current()?;
         (level.kind, level.cursor)
     };
-    let entry_count =
-        kuluu_render::hud::menu::entry_count(kind, dynamic, graphics.dlss_supported);
+    let entry_count = kuluu_render::hud::menu::entry_count(kind, dynamic, graphics.dlss_supported);
 
     // Menu context (not text input), so reading the raw keycode is correct.
     // "-" flips the Command menu's two pages (retail HorizonXI); single-list

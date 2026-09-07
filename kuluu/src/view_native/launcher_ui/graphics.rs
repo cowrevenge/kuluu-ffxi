@@ -511,26 +511,38 @@ pub(super) fn redraw_dlss_visibility(
     open: Res<GraphicsDlssOpen>,
     // The markers are exclusive by construction (top-level surface vs
     // collapsible sub-row), so the mutual Without keeps these provably
-    // disjoint — Bevy rejects two &mut Node queries that could share an entity.
+    // disjoint - Bevy rejects two &mut Node queries that could share an entity.
     mut gated: Query<&mut Node, (With<DlssGated>, Without<DlssRow>)>,
     mut rows: Query<&mut Node, (With<DlssRow>, Without<DlssGated>)>,
     mut labels: Query<&mut Text, With<DlssToggleLabel>>,
 ) {
     let supported = settings.dlss_supported;
     for mut node in gated.iter_mut() {
-        let want = if supported { Display::Flex } else { Display::None };
+        let want = if supported {
+            Display::Flex
+        } else {
+            Display::None
+        };
         if node.display != want {
             node.display = want;
         }
     }
-    let sub_display = if supported && open.0 { Display::Flex } else { Display::None };
+    let sub_display = if supported && open.0 {
+        Display::Flex
+    } else {
+        Display::None
+    };
     for mut node in rows.iter_mut() {
         if node.display != sub_display {
             node.display = sub_display;
         }
     }
     // The disclosure label only matters while its row is visible.
-    let want_label = if open.0 { DLSS_EXPANDED } else { DLSS_COLLAPSED };
+    let want_label = if open.0 {
+        DLSS_EXPANDED
+    } else {
+        DLSS_COLLAPSED
+    };
     for mut text in labels.iter_mut() {
         if text.0 != want_label {
             text.0 = want_label.to_string();

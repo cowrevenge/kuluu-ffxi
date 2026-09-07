@@ -2303,10 +2303,7 @@ mod tests {
         assert_eq!(reset, GRAPHICS_FIELDS.len() - 1);
         assert_eq!(graphics_field_at(reset, false), None);
         // The supported layout is unchanged by the new parameter.
-        assert_eq!(
-            graphics_field_at(GRAPHICS_DLSS_CONFIG_SLOT, true),
-            None
-        );
+        assert_eq!(graphics_field_at(GRAPHICS_DLSS_CONFIG_SLOT, true), None);
         assert_eq!(graphics_reset_slot(true), GRAPHICS_RESET_SLOT);
     }
 

@@ -3580,6 +3580,9 @@ mod tests {
         }
     }
 
+    // The Widescan variant only exists under debug_assertions (the /widescan
+    // command is dev-only), so this guard compiles in the same profile.
+    #[cfg(debug_assertions)]
     #[test]
     fn ws_alias_stays_weaponskill() {
         assert!(

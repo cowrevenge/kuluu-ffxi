@@ -1,0 +1,1602 @@
+
+nvsdk_ngx_vulkan_lib.obj:	file format coff-x86-64
+
+Disassembly of section .text$mn:
+
+0000000000000000 <??$EvaluateFeature@P6A?AW4NVSDK_NGX_Result@@PEAUVkCommandBuffer_T@@PEBUNVSDK_NGX_Handle@@PEBUNVSDK_NGX_Parameter@@P6AXMAEA_N@Z@ZPEAU2@@NGXProgressCallbackHelper@@SA?AW4NVSDK_NGX_Result@@P6A?AW41@PEAUVkCommandBuffer_T@@PEBUNVSDK_NGX_Handle@@PEBUNVSDK_NGX_Parameter@@P6AXMAEA_N@Z@Z012P6AXMPEA_N@Z@Z>:
+       0:      	movq	%rbx, 0x8(%rsp)
+       5:      	movq	%rbp, 0x10(%rsp)
+       a:      	movq	%rsi, 0x18(%rsp)
+       f:      	pushq	%rdi
+      10:      	pushq	%r14
+      12:      	pushq	%r15
+      14:      	subq	$0x20, %rsp
+      18:      	movl	(%rip), %r10d           # 0x1f <??$EvaluateFeature@P6A?AW4NVSDK_NGX_Result@@PEAUVkCommandBuffer_T@@PEBUNVSDK_NGX_Handle@@PEBUNVSDK_NGX_Parameter@@P6AXMAEA_N@Z@ZPEAU2@@NGXProgressCallbackHelper@@SA?AW4NVSDK_NGX_Result@@P6A?AW41@PEAUVkCommandBuffer_T@@PEBUNVSDK_NGX_Handle@@PEBUNVSDK_NGX_Parameter@@P6AXMAEA_N@Z@Z012P6AXMPEA_N@Z@Z+0x1f>
+      1f:      	movq	%rcx, %r15
+      22:      	movq	%gs:0x58, %rax
+      2b:      	xorl	%ebx, %ebx
+      2d:      	movl	$0x0, %ecx
+      32:      	movq	%r9, %rsi
+      35:      	movq	%r8, %rbp
+      38:      	movq	%rdx, %r14
+      3b:      	movq	(%rax,%r10,8), %rdi
+      3f:      	movq	0x60(%rsp), %rax
+      44:      	addq	%rcx, %rdi
+      47:      	testq	%rax, %rax
+      4a:      	leaq	(%rip), %rcx            # 0x51 <??$EvaluateFeature@P6A?AW4NVSDK_NGX_Result@@PEAUVkCommandBuffer_T@@PEBUNVSDK_NGX_Handle@@PEBUNVSDK_NGX_Parameter@@P6AXMAEA_N@Z@ZPEAU2@@NGXProgressCallbackHelper@@SA?AW4NVSDK_NGX_Result@@P6A?AW41@PEAUVkCommandBuffer_T@@PEBUNVSDK_NGX_Handle@@PEBUNVSDK_NGX_Parameter@@P6AXMAEA_N@Z@Z012P6AXMPEA_N@Z@Z+0x51>
+      51:      	cmovneq	%rcx, %rbx
+      55:      	movq	%r15, %rcx
+      58:      	movq	%rax, (%rdi)
+      5b:      	callq	*(%rip)                 # 0x61 <??$EvaluateFeature@P6A?AW4NVSDK_NGX_Result@@PEAUVkCommandBuffer_T@@PEBUNVSDK_NGX_Handle@@PEBUNVSDK_NGX_Parameter@@P6AXMAEA_N@Z@ZPEAU2@@NGXProgressCallbackHelper@@SA?AW4NVSDK_NGX_Result@@P6A?AW41@PEAUVkCommandBuffer_T@@PEBUNVSDK_NGX_Handle@@PEBUNVSDK_NGX_Parameter@@P6AXMAEA_N@Z@Z012P6AXMPEA_N@Z@Z+0x61>
+      61:      	movq	%rbx, %r9
+      64:      	movq	%rsi, %r8
+      67:      	movq	%rbp, %rdx
+      6a:      	movq	%r14, %rcx
+      6d:      	callq	*%r15
+      70:      	movq	0x40(%rsp), %rbx
+      75:      	movq	0x48(%rsp), %rbp
+      7a:      	movq	0x50(%rsp), %rsi
+      7f:      	movq	$0x0, (%rdi)
+      86:      	addq	$0x20, %rsp
+      8a:      	popq	%r15
+      8c:      	popq	%r14
+      8e:      	popq	%rdi
+      8f:      	retq
+
+Disassembly of section .text$mn:
+
+0000000000000000 <??0NGXLock@@QEAA@AEAUNGXMutex@@@Z>:
+       0:      	pushq	%rbx
+       2:      	subq	$0x20, %rsp
+       6:      	movq	%rcx, %rbx
+       9:      	movq	%rdx, (%rcx)
+       c:      	movq	%rdx, %rcx
+       f:      	callq	*(%rip)                 # 0x15 <??0NGXLock@@QEAA@AEAUNGXMutex@@@Z+0x15>
+      15:      	movq	%rbx, %rax
+      18:      	addq	$0x20, %rsp
+      1c:      	popq	%rbx
+      1d:      	retq
+
+Disassembly of section .text$mn:
+
+0000000000000000 <??0NGXMutex@@QEAA@XZ>:
+       0:      	pushq	%rbx
+       2:      	subq	$0x20, %rsp
+       6:      	movq	%rcx, %rbx
+       9:      	callq	*(%rip)                 # 0xf <??0NGXMutex@@QEAA@XZ+0xf>
+       f:      	movq	%rbx, %rax
+      12:      	addq	$0x20, %rsp
+      16:      	popq	%rbx
+      17:      	retq
+
+Disassembly of section .text$mn:
+
+0000000000000000 <??0NGX_API_VULKAN_Lib@@QEAA@XZ>:
+       0:      	xorl	%eax, %eax
+       2:      	movq	%rax, (%rcx)
+       5:      	movq	%rax, 0x8(%rcx)
+       9:      	movq	%rax, 0x10(%rcx)
+       d:      	movq	%rax, 0x18(%rcx)
+      11:      	movq	%rax, 0x20(%rcx)
+      15:      	movq	%rax, 0x28(%rcx)
+      19:      	movq	%rax, 0x30(%rcx)
+      1d:      	movq	%rax, 0x38(%rcx)
+      21:      	movq	%rax, 0x40(%rcx)
+      25:      	movq	%rax, 0x48(%rcx)
+      29:      	movq	%rax, 0x50(%rcx)
+      2d:      	movq	%rax, 0x58(%rcx)
+      31:      	movq	%rax, 0x60(%rcx)
+      35:      	movq	%rax, 0x68(%rcx)
+      39:      	movq	%rax, 0x70(%rcx)
+      3d:      	movq	%rax, 0x78(%rcx)
+      41:      	movq	%rax, 0x80(%rcx)
+      48:      	movq	%rax, 0x88(%rcx)
+      4f:      	movq	%rax, 0x90(%rcx)
+      56:      	movq	%rcx, %rax
+      59:      	retq
+
+Disassembly of section .text$mn:
+
+0000000000000000 <??0NGX_Context_VULKAN_Lib@@QEAA@XZ>:
+       0:      	xorl	%eax, %eax
+       2:      	movq	%rax, (%rcx)
+       5:      	movq	%rax, 0x8(%rcx)
+       9:      	movq	%rax, 0x10(%rcx)
+       d:      	movq	%rax, 0x18(%rcx)
+      11:      	movq	%rax, 0x20(%rcx)
+      15:      	movq	%rax, 0x28(%rcx)
+      19:      	movq	%rax, 0x30(%rcx)
+      1d:      	movq	%rax, 0x38(%rcx)
+      21:      	movq	%rax, 0x40(%rcx)
+      25:      	movq	%rax, 0x48(%rcx)
+      29:      	movq	%rax, 0x50(%rcx)
+      2d:      	movq	%rax, 0x58(%rcx)
+      31:      	movq	%rax, 0x60(%rcx)
+      35:      	movq	%rax, 0x68(%rcx)
+      39:      	movq	%rax, 0x70(%rcx)
+      3d:      	movq	%rax, 0x78(%rcx)
+      41:      	movq	%rax, 0x80(%rcx)
+      48:      	movq	%rax, 0x88(%rcx)
+      4f:      	movq	%rax, 0x90(%rcx)
+      56:      	movq	%rax, 0x98(%rcx)
+      5d:      	movq	%rax, 0xa0(%rcx)
+      64:      	movq	%rcx, %rax
+      67:      	retq
+
+Disassembly of section .text$mn:
+
+0000000000000000 <??0id@locale@std@@QEAA@_K@Z>:
+       0:      	movq	%rdx, (%rcx)
+       3:      	movq	%rcx, %rax
+       6:      	retq
+
+Disassembly of section .text$mn:
+
+0000000000000000 <??1NGXLock@@QEAA@XZ>:
+       0:      	movq	(%rcx), %rcx
+       3:      	jmpq	*(%rip)                 # 0xa <??1NGXLock@@QEAA@XZ+0xa>
+
+Disassembly of section .text$mn:
+
+0000000000000000 <??1NGXMutex@@QEAA@XZ>:
+       0:      	jmpq	*(%rip)                 # 0x7 <??1NGXMutex@@QEAA@XZ+0x7>
+
+Disassembly of section .text$di:
+
+0000000000000000 <??__Eg_sdkLibMutexVk@@YAXXZ>:
+       0:      	subq	$0x28, %rsp
+       4:      	leaq	(%rip), %rcx            # 0xb <??__Eg_sdkLibMutexVk@@YAXXZ+0xb>
+       b:      	callq	*(%rip)                 # 0x11 <??__Eg_sdkLibMutexVk@@YAXXZ+0x11>
+      11:      	leaq	(%rip), %rcx            # 0x18 <??__Eg_sdkLibMutexVk@@YAXXZ+0x18>
+      18:      	addq	$0x28, %rsp
+      1c:      	jmp	0x21 <??__Eg_sdkLibMutexVk@@YAXXZ+0x21>
+
+Disassembly of section .text$yd:
+
+0000000000000000 <??__Fg_sdkLibMutexVk@@YAXXZ>:
+       0:      	leaq	(%rip), %rcx            # 0x7 <??__Fg_sdkLibMutexVk@@YAXXZ+0x7>
+       7:      	jmpq	*(%rip)                 # 0xe <??__Fg_sdkLibMutexVk@@YAXXZ+0xe>
+
+Disassembly of section .text$mn:
+
+0000000000000000 <?GetLUIDFromVkPhysicalDevice@@YA_NPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAU_LUID@@@Z>:
+       0:      	movq	%rbx, 0x20(%rsp)
+       5:      	pushq	%rbp
+       6:      	pushq	%rsi
+       7:      	pushq	%rdi
+       8:      	subq	$0x3c0, %rsp            # imm = 0x3C0
+       f:      	movq	(%rip), %rax            # 0x16 <?GetLUIDFromVkPhysicalDevice@@YA_NPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAU_LUID@@@Z+0x16>
+      16:      	xorq	%rsp, %rax
+      19:      	movq	%rax, 0x3b0(%rsp)
+      21:      	movq	0xa0(%rip), %rbx        # 0xc8 <?GetLUIDFromVkPhysicalDevice@@YA_NPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAU_LUID@@@Z+0xc8>
+      28:      	movq	%rcx, %rdi
+      2b:      	movq	%rbx, %rcx
+      2e:      	movq	%r8, %rsi
+      31:      	movq	%rdx, %rbp
+      34:      	callq	*(%rip)                 # 0x3a <?GetLUIDFromVkPhysicalDevice@@YA_NPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAU_LUID@@@Z+0x3a>
+      3a:      	leaq	(%rip), %rdx            # 0x41 <?GetLUIDFromVkPhysicalDevice@@YA_NPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAU_LUID@@@Z+0x41>
+      41:      	movq	%rdi, %rcx
+      44:      	callq	*%rbx
+      46:      	movq	%rax, %rbx
+      49:      	testq	%rax, %rax
+      4c:      	jne	0x72 <?GetLUIDFromVkPhysicalDevice@@YA_NPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAU_LUID@@@Z+0x72>
+      4e:      	leaq	(%rip), %r9             # 0x55 <?GetLUIDFromVkPhysicalDevice@@YA_NPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAU_LUID@@@Z+0x55>
+      55:      	leaq	(%rip), %r8             # 0x5c <?GetLUIDFromVkPhysicalDevice@@YA_NPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAU_LUID@@@Z+0x5c>
+      5c:      	leal	0x77(%rax), %edx
+      5f:      	leaq	(%rip), %rcx            # 0x66 <?GetLUIDFromVkPhysicalDevice@@YA_NPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAU_LUID@@@Z+0x66>
+      66:      	callq	0x6b <?GetLUIDFromVkPhysicalDevice@@YA_NPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAU_LUID@@@Z+0x6b>
+      6b:      	xorb	%al, %al
+      6d:      	jmp	0x12b <?GetLUIDFromVkPhysicalDevice@@YA_NPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAU_LUID@@@Z+0x12b>
+      72:      	xorl	%eax, %eax
+      74:      	movl	$0x3b9bdf5c, 0x370(%rsp) # imm = 0x3B9BDF5C
+      7f:      	movq	%rax, 0x378(%rsp)
+      87:      	leaq	0x30(%rsp), %rcx
+      8c:      	movq	%rax, 0x380(%rsp)
+      94:      	xorl	%edx, %edx
+      96:      	movq	%rax, 0x388(%rsp)
+      9e:      	movl	$0x338, %r8d            # imm = 0x338
+      a4:      	movq	%rax, 0x390(%rsp)
+      ac:      	movq	%rax, 0x398(%rsp)
+      b4:      	movq	%rax, 0x3a0(%rsp)
+      bc:      	movq	%rax, 0x3a8(%rsp)
+      c4:      	leaq	0x370(%rsp), %rax
+      cc:      	movq	%rax, 0x28(%rsp)
+      d1:      	movl	$0x3b9bb079, 0x20(%rsp) # imm = 0x3B9BB079
+      d9:      	callq	0xde <?GetLUIDFromVkPhysicalDevice@@YA_NPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAU_LUID@@@Z+0xde>
+      de:      	movq	%rbx, %rcx
+      e1:      	callq	*(%rip)                 # 0xe7 <?GetLUIDFromVkPhysicalDevice@@YA_NPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAU_LUID@@@Z+0xe7>
+      e7:      	leaq	0x20(%rsp), %rdx
+      ec:      	movq	%rbp, %rcx
+      ef:      	callq	*%rbx
+      f1:      	cmpl	$0x0, 0x3ac(%rsp)
+      f9:      	jne	0x11e <?GetLUIDFromVkPhysicalDevice@@YA_NPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAU_LUID@@@Z+0x11e>
+      fb:      	leaq	(%rip), %r9             # 0x102 <?GetLUIDFromVkPhysicalDevice@@YA_NPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAU_LUID@@@Z+0x102>
+     102:      	movl	$0x82, %edx
+     107:      	leaq	(%rip), %r8             # 0x10e <?GetLUIDFromVkPhysicalDevice@@YA_NPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAU_LUID@@@Z+0x10e>
+     10e:      	leaq	(%rip), %rcx            # 0x115 <?GetLUIDFromVkPhysicalDevice@@YA_NPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAU_LUID@@@Z+0x115>
+     115:      	callq	0x11a <?GetLUIDFromVkPhysicalDevice@@YA_NPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAU_LUID@@@Z+0x11a>
+     11a:      	xorb	%al, %al
+     11c:      	jmp	0x12b <?GetLUIDFromVkPhysicalDevice@@YA_NPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAU_LUID@@@Z+0x12b>
+     11e:      	movq	0x3a0(%rsp), %rax
+     126:      	movq	%rax, (%rsi)
+     129:      	movb	$0x1, %al
+     12b:      	movq	0x3b0(%rsp), %rcx
+     133:      	xorq	%rsp, %rcx
+     136:      	callq	0x13b <?GetLUIDFromVkPhysicalDevice@@YA_NPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAU_LUID@@@Z+0x13b>
+     13b:      	movq	0x3f8(%rsp), %rbx
+     143:      	addq	$0x3c0, %rsp            # imm = 0x3C0
+     14a:      	popq	%rdi
+     14b:      	popq	%rsi
+     14c:      	popq	%rbp
+     14d:      	retq
+
+Disassembly of section .text$mn:
+
+0000000000000000 <?LoadGLibSimple@@YA?AW4NVSDK_NGX_Result@@PEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@@Z>:
+       0:      	movq	%rbx, 0x8(%rsp)
+       5:      	pushq	%rdi
+       6:      	subq	$0x20, %rsp
+       a:      	cmpq	$0x0, (%rip)            # 0x12 <?LoadGLibSimple@@YA?AW4NVSDK_NGX_Result@@PEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@@Z+0x12>
+      12:      	movq	%rdx, %rbx
+      15:      	movq	%rcx, %rdi
+      18:      	jne	0xf7 <?LoadGLibSimple@@YA?AW4NVSDK_NGX_Result@@PEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@@Z+0xf7>
+      1e:      	movl	$0x2, %edx
+      23:      	leaq	(%rip), %rcx            # 0x2a <?LoadGLibSimple@@YA?AW4NVSDK_NGX_Result@@PEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@@Z+0x2a>
+      2a:      	callq	0x2f <?LoadGLibSimple@@YA?AW4NVSDK_NGX_Result@@PEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@@Z+0x2f>
+      2f:      	testq	%rax, %rax
+      32:      	jne	0x44 <?LoadGLibSimple@@YA?AW4NVSDK_NGX_Result@@PEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@@Z+0x44>
+      34:      	movl	$0xbad00002, %eax       # imm = 0xBAD00002
+      39:      	movq	0x30(%rsp), %rbx
+      3e:      	addq	$0x20, %rsp
+      42:      	popq	%rdi
+      43:      	retq
+      44:      	leaq	(%rip), %rdx            # 0x4b <?LoadGLibSimple@@YA?AW4NVSDK_NGX_Result@@PEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@@Z+0x4b>
+      4b:      	movq	%rax, %rcx
+      4e:      	callq	0x53 <?LoadGLibSimple@@YA?AW4NVSDK_NGX_Result@@PEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@@Z+0x53>
+      53:      	leaq	0x40(%rsp), %r8
+      58:      	movq	%rax, 0xa0(%rip)        # 0xff <?LoadGLibSimple@@YA?AW4NVSDK_NGX_Result@@PEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@@Z+0xff>
+      5f:      	movq	%rbx, %rdx
+      62:      	movq	%rdi, %rcx
+      65:      	callq	0x6a <?LoadGLibSimple@@YA?AW4NVSDK_NGX_Result@@PEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@@Z+0x6a>
+      6a:      	testb	%al, %al
+      6c:      	je	0x34 <?LoadGLibSimple@@YA?AW4NVSDK_NGX_Result@@PEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@@Z+0x34>
+      6e:      	movq	0x40(%rsp), %rcx
+      73:      	callq	0x78 <?LoadGLibSimple@@YA?AW4NVSDK_NGX_Result@@PEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@@Z+0x78>
+      78:      	movq	%rax, (%rip)            # 0x7f <?LoadGLibSimple@@YA?AW4NVSDK_NGX_Result@@PEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@@Z+0x7f>
+      7f:      	testq	%rax, %rax
+      82:      	je	0x34 <?LoadGLibSimple@@YA?AW4NVSDK_NGX_Result@@PEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@@Z+0x34>
+      84:      	leaq	(%rip), %rdx            # 0x8b <?LoadGLibSimple@@YA?AW4NVSDK_NGX_Result@@PEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@@Z+0x8b>
+      8b:      	movq	%rax, %rcx
+      8e:      	callq	0x93 <?LoadGLibSimple@@YA?AW4NVSDK_NGX_Result@@PEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@@Z+0x93>
+      93:      	movq	(%rip), %rcx            # 0x9a <?LoadGLibSimple@@YA?AW4NVSDK_NGX_Result@@PEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@@Z+0x9a>
+      9a:      	leaq	(%rip), %rdx            # 0xa1 <?LoadGLibSimple@@YA?AW4NVSDK_NGX_Result@@PEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@@Z+0xa1>
+      a1:      	movq	%rax, 0x68(%rip)        # 0x110 <?LoadGLibSimple@@YA?AW4NVSDK_NGX_Result@@PEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@@Z+0x110>
+      a8:      	callq	0xad <?LoadGLibSimple@@YA?AW4NVSDK_NGX_Result@@PEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@@Z+0xad>
+      ad:      	movq	(%rip), %rcx            # 0xb4 <?LoadGLibSimple@@YA?AW4NVSDK_NGX_Result@@PEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@@Z+0xb4>
+      b4:      	leaq	(%rip), %rdx            # 0xbb <?LoadGLibSimple@@YA?AW4NVSDK_NGX_Result@@PEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@@Z+0xbb>
+      bb:      	movq	%rax, 0x70(%rip)        # 0x132 <?LoadGLibSimple@@YA?AW4NVSDK_NGX_Result@@PEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@@Z+0x132>
+      c2:      	callq	0xc7 <?LoadGLibSimple@@YA?AW4NVSDK_NGX_Result@@PEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@@Z+0xc7>
+      c7:      	cmpq	$0x0, 0x68(%rip)        # 0x137 <?LoadGLibSimple@@YA?AW4NVSDK_NGX_Result@@PEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@@Z+0x137>
+      cf:      	movq	%rax, 0x78(%rip)        # 0x14e <?LoadGLibSimple@@YA?AW4NVSDK_NGX_Result@@PEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@@Z+0x14e>
+      d6:      	je	0xe7 <?LoadGLibSimple@@YA?AW4NVSDK_NGX_Result@@PEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@@Z+0xe7>
+      d8:      	cmpq	$0x0, 0x70(%rip)        # 0x150 <?LoadGLibSimple@@YA?AW4NVSDK_NGX_Result@@PEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@@Z+0x150>
+      e0:      	je	0xe7 <?LoadGLibSimple@@YA?AW4NVSDK_NGX_Result@@PEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@@Z+0xe7>
+      e2:      	testq	%rax, %rax
+      e5:      	jne	0xf7 <?LoadGLibSimple@@YA?AW4NVSDK_NGX_Result@@PEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@@Z+0xf7>
+      e7:      	movl	$0xbad00012, %eax       # imm = 0xBAD00012
+      ec:      	movq	0x30(%rsp), %rbx
+      f1:      	addq	$0x20, %rsp
+      f5:      	popq	%rdi
+      f6:      	retq
+      f7:      	movl	$0x1, %eax
+      fc:      	movq	0x30(%rsp), %rbx
+     101:      	addq	$0x20, %rsp
+     105:      	popq	%rdi
+     106:      	retq
+
+Disassembly of section .text$mn:
+
+0000000000000000 <?NVSDK_NGX_Parameter_Populate_Unspecified_Defaults@@YAXPEAUNVSDK_NGX_Parameter@@@Z>:
+       0:      	movq	%rbx, 0x8(%rsp)
+       5:      	pushq	%rbp
+       6:      	movq	%rsp, %rbp
+       9:      	subq	$0x20, %rsp
+       d:      	leaq	0x18(%rbp), %r8
+      11:      	movl	$0x0, 0x18(%rbp)
+      18:      	leaq	(%rip), %rdx            # 0x1f <?NVSDK_NGX_Parameter_Populate_Unspecified_Defaults@@YAXPEAUNVSDK_NGX_Parameter@@@Z+0x1f>
+      1f:      	movq	%rcx, %rbx
+      22:      	callq	0x27 <?NVSDK_NGX_Parameter_Populate_Unspecified_Defaults@@YAXPEAUNVSDK_NGX_Parameter@@@Z+0x27>
+      27:      	cmpl	$0x1, %eax
+      2a:      	jne	0x32 <?NVSDK_NGX_Parameter_Populate_Unspecified_Defaults@@YAXPEAUNVSDK_NGX_Parameter@@@Z+0x32>
+      2c:      	cmpl	$0x0, 0x18(%rbp)
+      30:      	jne	0x47 <?NVSDK_NGX_Parameter_Populate_Unspecified_Defaults@@YAXPEAUNVSDK_NGX_Parameter@@@Z+0x47>
+      32:      	movl	$0x8000000b, %r8d       # imm = 0x8000000B
+      38:      	leaq	(%rip), %rdx            # 0x3f <?NVSDK_NGX_Parameter_Populate_Unspecified_Defaults@@YAXPEAUNVSDK_NGX_Parameter@@@Z+0x3f>
+      3f:      	movq	%rbx, %rcx
+      42:      	callq	0x47 <?NVSDK_NGX_Parameter_Populate_Unspecified_Defaults@@YAXPEAUNVSDK_NGX_Parameter@@@Z+0x47>
+      47:      	leaq	0x18(%rbp), %r8
+      4b:      	movq	%rbx, %rcx
+      4e:      	leaq	(%rip), %rdx            # 0x55 <?NVSDK_NGX_Parameter_Populate_Unspecified_Defaults@@YAXPEAUNVSDK_NGX_Parameter@@@Z+0x55>
+      55:      	callq	0x5a <?NVSDK_NGX_Parameter_Populate_Unspecified_Defaults@@YAXPEAUNVSDK_NGX_Parameter@@@Z+0x5a>
+      5a:      	cmpl	$0x1, %eax
+      5d:      	jne	0x65 <?NVSDK_NGX_Parameter_Populate_Unspecified_Defaults@@YAXPEAUNVSDK_NGX_Parameter@@@Z+0x65>
+      5f:      	cmpl	$0x0, 0x18(%rbp)
+      63:      	jne	0x7a <?NVSDK_NGX_Parameter_Populate_Unspecified_Defaults@@YAXPEAUNVSDK_NGX_Parameter@@@Z+0x7a>
+      65:      	movl	$0x8000000b, %r8d       # imm = 0x8000000B
+      6b:      	leaq	(%rip), %rdx            # 0x72 <?NVSDK_NGX_Parameter_Populate_Unspecified_Defaults@@YAXPEAUNVSDK_NGX_Parameter@@@Z+0x72>
+      72:      	movq	%rbx, %rcx
+      75:      	callq	0x7a <?NVSDK_NGX_Parameter_Populate_Unspecified_Defaults@@YAXPEAUNVSDK_NGX_Parameter@@@Z+0x7a>
+      7a:      	leaq	0x18(%rbp), %r8
+      7e:      	movq	%rbx, %rcx
+      81:      	leaq	(%rip), %rdx            # 0x88 <?NVSDK_NGX_Parameter_Populate_Unspecified_Defaults@@YAXPEAUNVSDK_NGX_Parameter@@@Z+0x88>
+      88:      	callq	0x8d <?NVSDK_NGX_Parameter_Populate_Unspecified_Defaults@@YAXPEAUNVSDK_NGX_Parameter@@@Z+0x8d>
+      8d:      	cmpl	$0x1, %eax
+      90:      	jne	0x98 <?NVSDK_NGX_Parameter_Populate_Unspecified_Defaults@@YAXPEAUNVSDK_NGX_Parameter@@@Z+0x98>
+      92:      	cmpl	$0x0, 0x18(%rbp)
+      96:      	jne	0xad <?NVSDK_NGX_Parameter_Populate_Unspecified_Defaults@@YAXPEAUNVSDK_NGX_Parameter@@@Z+0xad>
+      98:      	movl	$0x8000000b, %r8d       # imm = 0x8000000B
+      9e:      	leaq	(%rip), %rdx            # 0xa5 <?NVSDK_NGX_Parameter_Populate_Unspecified_Defaults@@YAXPEAUNVSDK_NGX_Parameter@@@Z+0xa5>
+      a5:      	movq	%rbx, %rcx
+      a8:      	callq	0xad <?NVSDK_NGX_Parameter_Populate_Unspecified_Defaults@@YAXPEAUNVSDK_NGX_Parameter@@@Z+0xad>
+      ad:      	leaq	0x18(%rbp), %r8
+      b1:      	movq	%rbx, %rcx
+      b4:      	leaq	(%rip), %rdx            # 0xbb <?NVSDK_NGX_Parameter_Populate_Unspecified_Defaults@@YAXPEAUNVSDK_NGX_Parameter@@@Z+0xbb>
+      bb:      	callq	0xc0 <?NVSDK_NGX_Parameter_Populate_Unspecified_Defaults@@YAXPEAUNVSDK_NGX_Parameter@@@Z+0xc0>
+      c0:      	cmpl	$0x1, %eax
+      c3:      	jne	0xcb <?NVSDK_NGX_Parameter_Populate_Unspecified_Defaults@@YAXPEAUNVSDK_NGX_Parameter@@@Z+0xcb>
+      c5:      	cmpl	$0x0, 0x18(%rbp)
+      c9:      	jne	0xe0 <?NVSDK_NGX_Parameter_Populate_Unspecified_Defaults@@YAXPEAUNVSDK_NGX_Parameter@@@Z+0xe0>
+      cb:      	movl	$0x8000000d, %r8d       # imm = 0x8000000D
+      d1:      	leaq	(%rip), %rdx            # 0xd8 <?NVSDK_NGX_Parameter_Populate_Unspecified_Defaults@@YAXPEAUNVSDK_NGX_Parameter@@@Z+0xd8>
+      d8:      	movq	%rbx, %rcx
+      db:      	callq	0xe0 <?NVSDK_NGX_Parameter_Populate_Unspecified_Defaults@@YAXPEAUNVSDK_NGX_Parameter@@@Z+0xe0>
+      e0:      	leaq	0x18(%rbp), %r8
+      e4:      	movq	%rbx, %rcx
+      e7:      	leaq	(%rip), %rdx            # 0xee <?NVSDK_NGX_Parameter_Populate_Unspecified_Defaults@@YAXPEAUNVSDK_NGX_Parameter@@@Z+0xee>
+      ee:      	callq	0xf3 <?NVSDK_NGX_Parameter_Populate_Unspecified_Defaults@@YAXPEAUNVSDK_NGX_Parameter@@@Z+0xf3>
+      f3:      	cmpl	$0x1, %eax
+      f6:      	jne	0xfe <?NVSDK_NGX_Parameter_Populate_Unspecified_Defaults@@YAXPEAUNVSDK_NGX_Parameter@@@Z+0xfe>
+      f8:      	cmpl	$0x0, 0x18(%rbp)
+      fc:      	jne	0x113 <?NVSDK_NGX_Parameter_Populate_Unspecified_Defaults@@YAXPEAUNVSDK_NGX_Parameter@@@Z+0x113>
+      fe:      	movl	$0x8000000b, %r8d       # imm = 0x8000000B
+     104:      	leaq	(%rip), %rdx            # 0x10b <?NVSDK_NGX_Parameter_Populate_Unspecified_Defaults@@YAXPEAUNVSDK_NGX_Parameter@@@Z+0x10b>
+     10b:      	movq	%rbx, %rcx
+     10e:      	callq	0x113 <?NVSDK_NGX_Parameter_Populate_Unspecified_Defaults@@YAXPEAUNVSDK_NGX_Parameter@@@Z+0x113>
+     113:      	leaq	0x18(%rbp), %r8
+     117:      	movq	%rbx, %rcx
+     11a:      	leaq	(%rip), %rdx            # 0x121 <?NVSDK_NGX_Parameter_Populate_Unspecified_Defaults@@YAXPEAUNVSDK_NGX_Parameter@@@Z+0x121>
+     121:      	callq	0x126 <?NVSDK_NGX_Parameter_Populate_Unspecified_Defaults@@YAXPEAUNVSDK_NGX_Parameter@@@Z+0x126>
+     126:      	cmpl	$0x1, %eax
+     129:      	jne	0x131 <?NVSDK_NGX_Parameter_Populate_Unspecified_Defaults@@YAXPEAUNVSDK_NGX_Parameter@@@Z+0x131>
+     12b:      	cmpl	$0x0, 0x18(%rbp)
+     12f:      	jne	0x146 <?NVSDK_NGX_Parameter_Populate_Unspecified_Defaults@@YAXPEAUNVSDK_NGX_Parameter@@@Z+0x146>
+     131:      	movl	$0x8000000c, %r8d       # imm = 0x8000000C
+     137:      	leaq	(%rip), %rdx            # 0x13e <?NVSDK_NGX_Parameter_Populate_Unspecified_Defaults@@YAXPEAUNVSDK_NGX_Parameter@@@Z+0x13e>
+     13e:      	movq	%rbx, %rcx
+     141:      	callq	0x146 <?NVSDK_NGX_Parameter_Populate_Unspecified_Defaults@@YAXPEAUNVSDK_NGX_Parameter@@@Z+0x146>
+     146:      	leaq	0x18(%rbp), %r8
+     14a:      	movq	%rbx, %rcx
+     14d:      	leaq	(%rip), %rdx            # 0x154 <?NVSDK_NGX_Parameter_Populate_Unspecified_Defaults@@YAXPEAUNVSDK_NGX_Parameter@@@Z+0x154>
+     154:      	callq	0x159 <?NVSDK_NGX_Parameter_Populate_Unspecified_Defaults@@YAXPEAUNVSDK_NGX_Parameter@@@Z+0x159>
+     159:      	cmpl	$0x1, %eax
+     15c:      	jne	0x164 <?NVSDK_NGX_Parameter_Populate_Unspecified_Defaults@@YAXPEAUNVSDK_NGX_Parameter@@@Z+0x164>
+     15e:      	cmpl	$0x0, 0x18(%rbp)
+     162:      	jne	0x179 <?NVSDK_NGX_Parameter_Populate_Unspecified_Defaults@@YAXPEAUNVSDK_NGX_Parameter@@@Z+0x179>
+     164:      	movl	$0x80000004, %r8d       # imm = 0x80000004
+     16a:      	leaq	(%rip), %rdx            # 0x171 <?NVSDK_NGX_Parameter_Populate_Unspecified_Defaults@@YAXPEAUNVSDK_NGX_Parameter@@@Z+0x171>
+     171:      	movq	%rbx, %rcx
+     174:      	callq	0x179 <?NVSDK_NGX_Parameter_Populate_Unspecified_Defaults@@YAXPEAUNVSDK_NGX_Parameter@@@Z+0x179>
+     179:      	leaq	0x18(%rbp), %r8
+     17d:      	movq	%rbx, %rcx
+     180:      	leaq	(%rip), %rdx            # 0x187 <?NVSDK_NGX_Parameter_Populate_Unspecified_Defaults@@YAXPEAUNVSDK_NGX_Parameter@@@Z+0x187>
+     187:      	callq	0x18c <?NVSDK_NGX_Parameter_Populate_Unspecified_Defaults@@YAXPEAUNVSDK_NGX_Parameter@@@Z+0x18c>
+     18c:      	cmpl	$0x1, %eax
+     18f:      	jne	0x197 <?NVSDK_NGX_Parameter_Populate_Unspecified_Defaults@@YAXPEAUNVSDK_NGX_Parameter@@@Z+0x197>
+     191:      	cmpl	$0x0, 0x18(%rbp)
+     195:      	jne	0x1ac <?NVSDK_NGX_Parameter_Populate_Unspecified_Defaults@@YAXPEAUNVSDK_NGX_Parameter@@@Z+0x1ac>
+     197:      	movl	$0x80000004, %r8d       # imm = 0x80000004
+     19d:      	leaq	(%rip), %rdx            # 0x1a4 <?NVSDK_NGX_Parameter_Populate_Unspecified_Defaults@@YAXPEAUNVSDK_NGX_Parameter@@@Z+0x1a4>
+     1a4:      	movq	%rbx, %rcx
+     1a7:      	callq	0x1ac <?NVSDK_NGX_Parameter_Populate_Unspecified_Defaults@@YAXPEAUNVSDK_NGX_Parameter@@@Z+0x1ac>
+     1ac:      	leaq	0x18(%rbp), %r8
+     1b0:      	movq	%rbx, %rcx
+     1b3:      	leaq	(%rip), %rdx            # 0x1ba <?NVSDK_NGX_Parameter_Populate_Unspecified_Defaults@@YAXPEAUNVSDK_NGX_Parameter@@@Z+0x1ba>
+     1ba:      	callq	0x1bf <?NVSDK_NGX_Parameter_Populate_Unspecified_Defaults@@YAXPEAUNVSDK_NGX_Parameter@@@Z+0x1bf>
+     1bf:      	cmpl	$0x1, %eax
+     1c2:      	jne	0x1ca <?NVSDK_NGX_Parameter_Populate_Unspecified_Defaults@@YAXPEAUNVSDK_NGX_Parameter@@@Z+0x1ca>
+     1c4:      	cmpl	$0x0, 0x18(%rbp)
+     1c8:      	jne	0x1df <?NVSDK_NGX_Parameter_Populate_Unspecified_Defaults@@YAXPEAUNVSDK_NGX_Parameter@@@Z+0x1df>
+     1ca:      	movl	$0x80000004, %r8d       # imm = 0x80000004
+     1d0:      	leaq	(%rip), %rdx            # 0x1d7 <?NVSDK_NGX_Parameter_Populate_Unspecified_Defaults@@YAXPEAUNVSDK_NGX_Parameter@@@Z+0x1d7>
+     1d7:      	movq	%rbx, %rcx
+     1da:      	callq	0x1df <?NVSDK_NGX_Parameter_Populate_Unspecified_Defaults@@YAXPEAUNVSDK_NGX_Parameter@@@Z+0x1df>
+     1df:      	leaq	0x18(%rbp), %r8
+     1e3:      	movq	%rbx, %rcx
+     1e6:      	leaq	(%rip), %rdx            # 0x1ed <?NVSDK_NGX_Parameter_Populate_Unspecified_Defaults@@YAXPEAUNVSDK_NGX_Parameter@@@Z+0x1ed>
+     1ed:      	callq	0x1f2 <?NVSDK_NGX_Parameter_Populate_Unspecified_Defaults@@YAXPEAUNVSDK_NGX_Parameter@@@Z+0x1f2>
+     1f2:      	cmpl	$0x1, %eax
+     1f5:      	jne	0x1fd <?NVSDK_NGX_Parameter_Populate_Unspecified_Defaults@@YAXPEAUNVSDK_NGX_Parameter@@@Z+0x1fd>
+     1f7:      	cmpl	$0x0, 0x18(%rbp)
+     1fb:      	jne	0x212 <?NVSDK_NGX_Parameter_Populate_Unspecified_Defaults@@YAXPEAUNVSDK_NGX_Parameter@@@Z+0x212>
+     1fd:      	movl	$0x80000004, %r8d       # imm = 0x80000004
+     203:      	leaq	(%rip), %rdx            # 0x20a <?NVSDK_NGX_Parameter_Populate_Unspecified_Defaults@@YAXPEAUNVSDK_NGX_Parameter@@@Z+0x20a>
+     20a:      	movq	%rbx, %rcx
+     20d:      	callq	0x212 <?NVSDK_NGX_Parameter_Populate_Unspecified_Defaults@@YAXPEAUNVSDK_NGX_Parameter@@@Z+0x212>
+     212:      	leaq	0x18(%rbp), %r8
+     216:      	movq	%rbx, %rcx
+     219:      	leaq	(%rip), %rdx            # 0x220 <?NVSDK_NGX_Parameter_Populate_Unspecified_Defaults@@YAXPEAUNVSDK_NGX_Parameter@@@Z+0x220>
+     220:      	callq	0x225 <?NVSDK_NGX_Parameter_Populate_Unspecified_Defaults@@YAXPEAUNVSDK_NGX_Parameter@@@Z+0x225>
+     225:      	cmpl	$0x1, %eax
+     228:      	jne	0x230 <?NVSDK_NGX_Parameter_Populate_Unspecified_Defaults@@YAXPEAUNVSDK_NGX_Parameter@@@Z+0x230>
+     22a:      	cmpl	$0x0, 0x18(%rbp)
+     22e:      	jne	0x245 <?NVSDK_NGX_Parameter_Populate_Unspecified_Defaults@@YAXPEAUNVSDK_NGX_Parameter@@@Z+0x245>
+     230:      	movl	$0x80000004, %r8d       # imm = 0x80000004
+     236:      	leaq	(%rip), %rdx            # 0x23d <?NVSDK_NGX_Parameter_Populate_Unspecified_Defaults@@YAXPEAUNVSDK_NGX_Parameter@@@Z+0x23d>
+     23d:      	movq	%rbx, %rcx
+     240:      	callq	0x245 <?NVSDK_NGX_Parameter_Populate_Unspecified_Defaults@@YAXPEAUNVSDK_NGX_Parameter@@@Z+0x245>
+     245:      	leaq	0x18(%rbp), %r8
+     249:      	movq	%rbx, %rcx
+     24c:      	leaq	(%rip), %rdx            # 0x253 <?NVSDK_NGX_Parameter_Populate_Unspecified_Defaults@@YAXPEAUNVSDK_NGX_Parameter@@@Z+0x253>
+     253:      	callq	0x258 <?NVSDK_NGX_Parameter_Populate_Unspecified_Defaults@@YAXPEAUNVSDK_NGX_Parameter@@@Z+0x258>
+     258:      	cmpl	$0x1, %eax
+     25b:      	jne	0x263 <?NVSDK_NGX_Parameter_Populate_Unspecified_Defaults@@YAXPEAUNVSDK_NGX_Parameter@@@Z+0x263>
+     25d:      	cmpl	$0x0, 0x18(%rbp)
+     261:      	jne	0x278 <?NVSDK_NGX_Parameter_Populate_Unspecified_Defaults@@YAXPEAUNVSDK_NGX_Parameter@@@Z+0x278>
+     263:      	movl	$0x80000004, %r8d       # imm = 0x80000004
+     269:      	leaq	(%rip), %rdx            # 0x270 <?NVSDK_NGX_Parameter_Populate_Unspecified_Defaults@@YAXPEAUNVSDK_NGX_Parameter@@@Z+0x270>
+     270:      	movq	%rbx, %rcx
+     273:      	callq	0x278 <?NVSDK_NGX_Parameter_Populate_Unspecified_Defaults@@YAXPEAUNVSDK_NGX_Parameter@@@Z+0x278>
+     278:      	movq	0x30(%rsp), %rbx
+     27d:      	addq	$0x20, %rsp
+     281:      	popq	%rbp
+     282:      	retq
+
+Disassembly of section .text$mn:
+
+0000000000000000 <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z>:
+       0:      	movq	%rsp, %rax
+       3:      	pushq	%rbp
+       4:      	pushq	%r14
+       6:      	pushq	%r15
+       8:      	leaq	-0x3f(%rax), %rbp
+       c:      	subq	$0xf0, %rsp
+      13:      	movq	$-0x2, 0xf(%rbp)
+      1b:      	movq	%rbx, 0x8(%rax)
+      1f:      	movq	%rsi, 0x10(%rax)
+      23:      	movq	%rdi, 0x18(%rax)
+      27:      	movq	%r12, 0x20(%rax)
+      2b:      	movq	%r8, %rdi
+      2e:      	movq	%rdx, %rsi
+      31:      	movq	%rcx, %rbx
+      34:      	leaq	(%rip), %r15            # 0x3b <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0x3b>
+      3b:      	movq	%r15, 0x17(%rbp)
+      3f:      	movq	%r15, %rcx
+      42:      	callq	*(%rip)                 # 0x48 <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0x48>
+      48:      	nop
+      49:      	movq	0x77(%rbp), %r9
+      4d:      	testq	%r9, %r9
+      50:      	je	0x86 <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0x86>
+      52:      	cmpl	$0x14, 0x7f(%rbp)
+      56:      	jl	0x86 <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0x86>
+      58:      	movzbl	0x24(%r9), %eax
+      5d:      	testb	%al, %al
+      5f:      	je	0x68 <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0x68>
+      61:      	cmpq	$0x0, 0x18(%r9)
+      66:      	je	0x72 <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0x72>
+      68:      	movl	0x20(%r9), %r8d
+      6c:      	cmpl	$0x2, %r8d
+      70:      	jbe	0x7c <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0x7c>
+      72:      	movl	$0xbad00005, %ebx       # imm = 0xBAD00005
+      77:      	jmp	0x5a0 <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0x5a0>
+      7c:      	movb	%al, 0x20(%rsp)
+      80:      	movq	0x18(%r9), %r9
+      84:      	jmp	0x91 <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0x91>
+      86:      	movb	$0x0, 0x20(%rsp)
+      8b:      	xorl	%r9d, %r9d
+      8e:      	xorl	%r8d, %r8d
+      91:      	leaq	(%rip), %rdx            # 0x98 <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0x98>
+      98:      	movq	%rbx, %rcx
+      9b:      	callq	0xa0 <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0xa0>
+      a0:      	testb	%al, %al
+      a2:      	jne	0xae <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0xae>
+      a4:      	movl	$0xbad0000f, %ebx       # imm = 0xBAD0000F
+      a9:      	jmp	0x5a0 <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0x5a0>
+      ae:      	cmpq	$0x0, (%rip)            # 0xb6 <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0xb6>
+      b6:      	je	0xfe <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0xfe>
+      b8:      	cmpq	$0x0, 0x28(%rip)        # 0xe8 <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0xe8>
+      c0:      	je	0xfe <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0xfe>
+      c2:      	cmpq	$0x0, 0x40(%rip)        # 0x10a <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0x10a>
+      ca:      	je	0xfe <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0xfe>
+      cc:      	cmpq	$0x0, 0x38(%rip)        # 0x10c <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0x10c>
+      d4:      	je	0xfe <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0xfe>
+      d6:      	cmpq	$0x0, 0x48(%rip)        # 0x126 <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0x126>
+      de:      	je	0xfe <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0xfe>
+      e0:      	cmpq	$0x0, 0x58(%rip)        # 0x140 <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0x140>
+      e8:      	je	0xfe <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0xfe>
+      ea:      	cmpq	$0x0, 0x60(%rip)        # 0x152 <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0x152>
+      f2:      	je	0xfe <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0xfe>
+      f4:      	movl	$0x1, %ebx
+      f9:      	jmp	0x5a0 <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0x5a0>
+      fe:      	xorl	%r14d, %r14d
+     101:      	movq	%r14, 0x30(%rsp)
+     106:      	movq	%r14, 0x38(%rsp)
+     10b:      	movq	%r14, 0x40(%rsp)
+     110:      	movq	%r14, 0x48(%rsp)
+     115:      	movq	%r14, -0x79(%rbp)
+     119:      	movq	%r14, -0x71(%rbp)
+     11d:      	movq	%r14, -0x69(%rbp)
+     121:      	movq	%r14, -0x61(%rbp)
+     125:      	movq	%r14, -0x59(%rbp)
+     129:      	movq	%r14, -0x51(%rbp)
+     12d:      	movq	%r14, -0x49(%rbp)
+     131:      	movq	%r14, -0x41(%rbp)
+     135:      	movq	%r14, -0x39(%rbp)
+     139:      	movq	%r14, -0x31(%rbp)
+     13d:      	movq	%r14, -0x29(%rbp)
+     141:      	movq	%r14, -0x21(%rbp)
+     145:      	movq	%r14, -0x19(%rbp)
+     149:      	movq	%r14, -0x11(%rbp)
+     14d:      	movq	%r14, -0x9(%rbp)
+     151:      	movq	%r14, -0x1(%rbp)
+     155:      	movq	%r14, 0x7(%rbp)
+     159:      	leaq	(%rip), %rbx            # 0x160 <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0x160>
+     160:      	leaq	0x30(%rsp), %rax
+     165:      	movups	(%rax), %xmm0
+     168:      	movups	%xmm0, (%rbx)
+     16b:      	movups	0x10(%rax), %xmm1
+     16f:      	movups	%xmm1, 0x10(%rbx)
+     173:      	movups	0x20(%rax), %xmm0
+     177:      	movups	%xmm0, 0x20(%rbx)
+     17b:      	movups	0x30(%rax), %xmm1
+     17f:      	movups	%xmm1, 0x30(%rbx)
+     183:      	movups	0x40(%rax), %xmm0
+     187:      	movups	%xmm0, 0x40(%rbx)
+     18b:      	movups	0x50(%rax), %xmm1
+     18f:      	movups	%xmm1, 0x50(%rbx)
+     193:      	movups	0x60(%rax), %xmm0
+     197:      	movups	%xmm0, 0x60(%rbx)
+     19b:      	movups	0x70(%rax), %xmm0
+     19f:      	movups	%xmm0, 0x70(%rbx)
+     1a3:      	movups	0x80(%rax), %xmm1
+     1aa:      	movups	%xmm1, 0x80(%rbx)
+     1b1:      	movups	0x90(%rax), %xmm0
+     1b8:      	movups	%xmm0, 0x90(%rbx)
+     1bf:      	movq	0xa0(%rax), %rax
+     1c6:      	movq	%rax, 0xa0(%rbx)
+     1cd:      	movq	0x67(%rbp), %rax
+     1d1:      	movq	%rax, 0xa0(%rip)        # 0x278 <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0x278>
+     1d8:      	testq	%rax, %rax
+     1db:      	jne	0x271 <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0x271>
+     1e1:      	leal	0x2(%rax), %edx
+     1e4:      	leaq	(%rip), %r12            # 0x1eb <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0x1eb>
+     1eb:      	movq	%r12, %rcx
+     1ee:      	callq	0x1f3 <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0x1f3>
+     1f3:      	movq	%rax, 0x98(%rip)        # 0x292 <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0x292>
+     1fa:      	testq	%rax, %rax
+     1fd:      	jne	0x22d <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0x22d>
+     1ff:      	movq	%r12, 0x20(%rsp)
+     204:      	leaq	(%rip), %r9             # 0x20b <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0x20b>
+     20b:      	leaq	(%rip), %r8             # 0x212 <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0x212>
+     212:      	movl	$0xd5, %edx
+     217:      	leaq	(%rip), %rcx            # 0x21e <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0x21e>
+     21e:      	callq	0x223 <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0x223>
+     223:      	movl	$0xbad00002, %ebx       # imm = 0xBAD00002
+     228:      	jmp	0x5a0 <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0x5a0>
+     22d:      	leaq	(%rip), %rdx            # 0x234 <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0x234>
+     234:      	movq	%rax, %rcx
+     237:      	callq	0x23c <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0x23c>
+     23c:      	movq	%rax, 0xa0(%rip)        # 0x2e3 <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0x2e3>
+     243:      	testq	%rax, %rax
+     246:      	jne	0x271 <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0x271>
+     248:      	leaq	(%rip), %r9             # 0x24f <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0x24f>
+     24f:      	leaq	(%rip), %r8             # 0x256 <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0x256>
+     256:      	movl	$0xdc, %edx
+     25b:      	leaq	(%rip), %rcx            # 0x262 <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0x262>
+     262:      	callq	0x267 <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0x267>
+     267:      	movl	$0xbad00002, %ebx       # imm = 0xBAD00002
+     26c:      	jmp	0x5a0 <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0x5a0>
+     271:      	leaq	0x77(%rbp), %r8
+     275:      	movq	%rdi, %rdx
+     278:      	movq	%rsi, %rcx
+     27b:      	callq	0x280 <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0x280>
+     280:      	testb	%al, %al
+     282:      	je	0x267 <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0x267>
+     284:      	movq	(%rip), %rax            # 0x28b <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0x28b>
+     28b:      	testq	%rax, %rax
+     28e:      	jne	0x2a9 <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0x2a9>
+     290:      	movq	0x77(%rbp), %rcx
+     294:      	callq	0x299 <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0x299>
+     299:      	movq	%rax, (%rip)            # 0x2a0 <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0x2a0>
+     2a0:      	testq	%rax, %rax
+     2a3:      	je	0x493 <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0x493>
+     2a9:      	leaq	(%rip), %rdx            # 0x2b0 <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0x2b0>
+     2b0:      	movq	%rax, %rcx
+     2b3:      	callq	0x2b8 <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0x2b8>
+     2b8:      	movq	%rax, (%rip)            # 0x2bf <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0x2bf>
+     2bf:      	leaq	(%rip), %rdx            # 0x2c6 <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0x2c6>
+     2c6:      	movq	(%rip), %rcx            # 0x2cd <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0x2cd>
+     2cd:      	callq	0x2d2 <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0x2d2>
+     2d2:      	movq	%rax, 0x8(%rip)         # 0x2e1 <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0x2e1>
+     2d9:      	leaq	(%rip), %rdx            # 0x2e0 <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0x2e0>
+     2e0:      	movq	(%rip), %rcx            # 0x2e7 <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0x2e7>
+     2e7:      	callq	0x2ec <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0x2ec>
+     2ec:      	movq	%rax, 0x10(%rip)        # 0x303 <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0x303>
+     2f3:      	leaq	(%rip), %rdx            # 0x2fa <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0x2fa>
+     2fa:      	movq	(%rip), %rcx            # 0x301 <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0x301>
+     301:      	callq	0x306 <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0x306>
+     306:      	movq	%rax, 0x18(%rip)        # 0x325 <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0x325>
+     30d:      	leaq	(%rip), %rdx            # 0x314 <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0x314>
+     314:      	movq	(%rip), %rcx            # 0x31b <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0x31b>
+     31b:      	callq	0x320 <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0x320>
+     320:      	movq	%rax, 0x20(%rip)        # 0x347 <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0x347>
+     327:      	leaq	(%rip), %rdx            # 0x32e <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0x32e>
+     32e:      	movq	(%rip), %rcx            # 0x335 <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0x335>
+     335:      	callq	0x33a <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0x33a>
+     33a:      	movq	%rax, 0x28(%rip)        # 0x369 <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0x369>
+     341:      	leaq	(%rip), %rdx            # 0x348 <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0x348>
+     348:      	movq	(%rip), %rcx            # 0x34f <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0x34f>
+     34f:      	callq	0x354 <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0x354>
+     354:      	movq	%rax, 0x30(%rip)        # 0x38b <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0x38b>
+     35b:      	leaq	(%rip), %rdx            # 0x362 <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0x362>
+     362:      	movq	(%rip), %rcx            # 0x369 <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0x369>
+     369:      	callq	0x36e <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0x36e>
+     36e:      	movq	%rax, 0x40(%rip)        # 0x3b5 <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0x3b5>
+     375:      	leaq	(%rip), %rdx            # 0x37c <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0x37c>
+     37c:      	movq	(%rip), %rcx            # 0x383 <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0x383>
+     383:      	callq	0x388 <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0x388>
+     388:      	movq	%rax, 0x38(%rip)        # 0x3c7 <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0x3c7>
+     38f:      	leaq	(%rip), %rdx            # 0x396 <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0x396>
+     396:      	movq	(%rip), %rcx            # 0x39d <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0x39d>
+     39d:      	callq	0x3a2 <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0x3a2>
+     3a2:      	movq	%rax, 0x48(%rip)        # 0x3f1 <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0x3f1>
+     3a9:      	leaq	(%rip), %rdx            # 0x3b0 <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0x3b0>
+     3b0:      	movq	(%rip), %rcx            # 0x3b7 <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0x3b7>
+     3b7:      	callq	0x3bc <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0x3bc>
+     3bc:      	movq	%rax, 0x50(%rip)        # 0x413 <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0x413>
+     3c3:      	leaq	(%rip), %rdx            # 0x3ca <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0x3ca>
+     3ca:      	movq	(%rip), %rcx            # 0x3d1 <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0x3d1>
+     3d1:      	callq	0x3d6 <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0x3d6>
+     3d6:      	movq	%rax, 0x58(%rip)        # 0x435 <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0x435>
+     3dd:      	leaq	(%rip), %rdx            # 0x3e4 <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0x3e4>
+     3e4:      	movq	(%rip), %rcx            # 0x3eb <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0x3eb>
+     3eb:      	callq	0x3f0 <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0x3f0>
+     3f0:      	movq	%rax, 0x60(%rip)        # 0x457 <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0x457>
+     3f7:      	leaq	(%rip), %rdx            # 0x3fe <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0x3fe>
+     3fe:      	movq	(%rip), %rcx            # 0x405 <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0x405>
+     405:      	callq	0x40a <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0x40a>
+     40a:      	movq	%rax, 0x68(%rip)        # 0x479 <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0x479>
+     411:      	leaq	(%rip), %rdx            # 0x418 <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0x418>
+     418:      	movq	(%rip), %rcx            # 0x41f <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0x41f>
+     41f:      	callq	0x424 <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0x424>
+     424:      	movq	%rax, 0x70(%rip)        # 0x49b <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0x49b>
+     42b:      	leaq	(%rip), %rdx            # 0x432 <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0x432>
+     432:      	movq	(%rip), %rcx            # 0x439 <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0x439>
+     439:      	callq	0x43e <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0x43e>
+     43e:      	movq	%rax, 0x78(%rip)        # 0x4bd <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0x4bd>
+     445:      	leaq	(%rip), %rdx            # 0x44c <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0x44c>
+     44c:      	movq	(%rip), %rcx            # 0x453 <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0x453>
+     453:      	callq	0x458 <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0x458>
+     458:      	movq	%rax, 0x80(%rip)        # 0x4df <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0x4df>
+     45f:      	leaq	(%rip), %rdx            # 0x466 <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0x466>
+     466:      	movq	(%rip), %rcx            # 0x46d <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0x46d>
+     46d:      	callq	0x472 <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0x472>
+     472:      	movq	%rax, 0x88(%rip)        # 0x501 <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0x501>
+     479:      	leaq	(%rip), %rdx            # 0x480 <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0x480>
+     480:      	movq	(%rip), %rcx            # 0x487 <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0x487>
+     487:      	callq	0x48c <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0x48c>
+     48c:      	movq	%rax, 0x90(%rip)        # 0x523 <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0x523>
+     493:      	cmpq	%r14, (%rip)            # 0x49a <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0x49a>
+     49a:      	je	0x4d6 <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0x4d6>
+     49c:      	cmpq	%r14, 0x28(%rip)        # 0x4cb <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0x4cb>
+     4a3:      	je	0x4d6 <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0x4d6>
+     4a5:      	cmpq	%r14, 0x40(%rip)        # 0x4ec <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0x4ec>
+     4ac:      	je	0x4d6 <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0x4d6>
+     4ae:      	cmpq	%r14, 0x38(%rip)        # 0x4ed <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0x4ed>
+     4b5:      	je	0x4d6 <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0x4d6>
+     4b7:      	cmpq	%r14, 0x48(%rip)        # 0x506 <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0x506>
+     4be:      	je	0x4d6 <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0x4d6>
+     4c0:      	cmpq	%r14, 0x58(%rip)        # 0x51f <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0x51f>
+     4c7:      	je	0x4d6 <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0x4d6>
+     4c9:      	cmpq	%r14, 0x60(%rip)        # 0x530 <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0x530>
+     4d0:      	jne	0xf4 <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0xf4>
+     4d6:      	movq	%r14, 0x30(%rsp)
+     4db:      	movq	%r14, 0x38(%rsp)
+     4e0:      	movq	%r14, 0x40(%rsp)
+     4e5:      	movq	%r14, 0x48(%rsp)
+     4ea:      	movq	%r14, -0x79(%rbp)
+     4ee:      	movq	%r14, -0x71(%rbp)
+     4f2:      	movq	%r14, -0x69(%rbp)
+     4f6:      	movq	%r14, -0x61(%rbp)
+     4fa:      	movq	%r14, -0x59(%rbp)
+     4fe:      	movq	%r14, -0x51(%rbp)
+     502:      	movq	%r14, -0x49(%rbp)
+     506:      	movq	%r14, -0x41(%rbp)
+     50a:      	movq	%r14, -0x39(%rbp)
+     50e:      	movq	%r14, -0x31(%rbp)
+     512:      	movq	%r14, -0x29(%rbp)
+     516:      	movq	%r14, -0x21(%rbp)
+     51a:      	movq	%r14, -0x19(%rbp)
+     51e:      	movq	%r14, -0x11(%rbp)
+     522:      	movq	%r14, -0x9(%rbp)
+     526:      	movq	%r14, -0x1(%rbp)
+     52a:      	movq	%r14, 0x7(%rbp)
+     52e:      	leaq	0x30(%rsp), %rax
+     533:      	movups	(%rax), %xmm0
+     536:      	movups	%xmm0, (%rbx)
+     539:      	movups	0x10(%rax), %xmm1
+     53d:      	movups	%xmm1, 0x10(%rbx)
+     541:      	movups	0x20(%rax), %xmm0
+     545:      	movups	%xmm0, 0x20(%rbx)
+     549:      	movups	0x30(%rax), %xmm1
+     54d:      	movups	%xmm1, 0x30(%rbx)
+     551:      	movups	0x40(%rax), %xmm0
+     555:      	movups	%xmm0, 0x40(%rbx)
+     559:      	movups	0x50(%rax), %xmm1
+     55d:      	movups	%xmm1, 0x50(%rbx)
+     561:      	movups	0x60(%rax), %xmm0
+     565:      	movups	%xmm0, 0x60(%rbx)
+     569:      	movups	0x70(%rax), %xmm1
+     56d:      	movups	%xmm1, 0x70(%rbx)
+     571:      	movups	0x80(%rax), %xmm0
+     578:      	movups	%xmm0, 0x80(%rbx)
+     57f:      	movups	0x90(%rax), %xmm1
+     586:      	movups	%xmm1, 0x90(%rbx)
+     58d:      	movq	0xa0(%rax), %rax
+     594:      	movq	%rax, 0xa0(%rbx)
+     59b:      	movl	$0xbad00001, %ebx       # imm = 0xBAD00001
+     5a0:      	movq	%r15, %rcx
+     5a3:      	callq	*(%rip)                 # 0x5a9 <?NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z+0x5a9>
+     5a9:      	movl	%ebx, %eax
+     5ab:      	leaq	0xf0(%rsp), %r11
+     5b3:      	movq	0x20(%r11), %rbx
+     5b7:      	movq	0x28(%r11), %rsi
+     5bb:      	movq	0x30(%r11), %rdi
+     5bf:      	movq	0x38(%r11), %r12
+     5c3:      	movq	%r11, %rsp
+     5c6:      	popq	%r15
+     5c8:      	popq	%r14
+     5ca:      	popq	%rbp
+     5cb:      	retq
+
+Disassembly of section .text$x:
+
+0000000000000000 <?dtor$0@?0??NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z@4HA>:
+       0:      	leaq	0xe0(%rdx), %rcx
+       7:      	jmp	0xc <?dtor$0@?0??NVSDK_NGX_VULKAN_Init_Common@@YA?AW4NVSDK_NGX_Result@@PEB_WPEAUVkInstance_T@@PEAUVkPhysicalDevice_T@@PEAUVkDevice_T@@P6AP6AXXZ1PEBD@ZP6AP6AXXZ34@ZPEBUNVSDK_NGX_FeatureCommonInfo@@W4NVSDK_NGX_Version@@@Z@4HA+0xc>
+
+Disassembly of section .text$mn:
+
+0000000000000000 <?NVSDK_NGX_VULKAN_ShutdownCommon@@YA?AW4NVSDK_NGX_Result@@PEAUVkDevice_T@@@Z>:
+       0:      	movq	%rsp, %rax
+       3:      	pushq	%rbp
+       4:      	pushq	%rdi
+       5:      	pushq	%r14
+       7:      	leaq	-0x5f(%rax), %rbp
+       b:      	subq	$0xd0, %rsp
+      12:      	movq	$-0x2, 0x3f(%rbp)
+      1a:      	movq	%rbx, 0x18(%rax)
+      1e:      	movq	%rsi, 0x20(%rax)
+      22:      	movq	%rcx, %rdi
+      25:      	leaq	(%rip), %r14            # 0x2c <?NVSDK_NGX_VULKAN_ShutdownCommon@@YA?AW4NVSDK_NGX_Result@@PEAUVkDevice_T@@@Z+0x2c>
+      2c:      	movq	%r14, 0x6f(%rbp)
+      30:      	movq	%r14, %rcx
+      33:      	callq	*(%rip)                 # 0x39 <?NVSDK_NGX_VULKAN_ShutdownCommon@@YA?AW4NVSDK_NGX_Result@@PEAUVkDevice_T@@@Z+0x39>
+      39:      	nop
+      3a:      	xorl	%esi, %esi
+      3c:      	movl	%esi, 0x67(%rbp)
+      3f:      	testq	%rdi, %rdi
+      42:      	je	0x62 <?NVSDK_NGX_VULKAN_ShutdownCommon@@YA?AW4NVSDK_NGX_Result@@PEAUVkDevice_T@@@Z+0x62>
+      44:      	movq	0x30(%rip), %rbx        # 0x7b <?NVSDK_NGX_VULKAN_ShutdownCommon@@YA?AW4NVSDK_NGX_Result@@PEAUVkDevice_T@@@Z+0x7b>
+      4b:      	testq	%rbx, %rbx
+      4e:      	je	0x18f <?NVSDK_NGX_VULKAN_ShutdownCommon@@YA?AW4NVSDK_NGX_Result@@PEAUVkDevice_T@@@Z+0x18f>
+      54:      	movq	%rbx, %rcx
+      57:      	callq	*(%rip)                 # 0x5d <?NVSDK_NGX_VULKAN_ShutdownCommon@@YA?AW4NVSDK_NGX_Result@@PEAUVkDevice_T@@@Z+0x5d>
+      5d:      	movq	%rdi, %rcx
+      60:      	jmp	0x96 <?NVSDK_NGX_VULKAN_ShutdownCommon@@YA?AW4NVSDK_NGX_Result@@PEAUVkDevice_T@@@Z+0x96>
+      62:      	movq	0x28(%rip), %rbx        # 0x91 <?NVSDK_NGX_VULKAN_ShutdownCommon@@YA?AW4NVSDK_NGX_Result@@PEAUVkDevice_T@@@Z+0x91>
+      69:      	testq	%rbx, %rbx
+      6c:      	je	0x7b <?NVSDK_NGX_VULKAN_ShutdownCommon@@YA?AW4NVSDK_NGX_Result@@PEAUVkDevice_T@@@Z+0x7b>
+      6e:      	movq	%rbx, %rcx
+      71:      	callq	*(%rip)                 # 0x77 <?NVSDK_NGX_VULKAN_ShutdownCommon@@YA?AW4NVSDK_NGX_Result@@PEAUVkDevice_T@@@Z+0x77>
+      77:      	callq	*%rbx
+      79:      	jmp	0x9c <?NVSDK_NGX_VULKAN_ShutdownCommon@@YA?AW4NVSDK_NGX_Result@@PEAUVkDevice_T@@@Z+0x9c>
+      7b:      	movq	0x30(%rip), %rbx        # 0xb2 <?NVSDK_NGX_VULKAN_ShutdownCommon@@YA?AW4NVSDK_NGX_Result@@PEAUVkDevice_T@@@Z+0xb2>
+      82:      	testq	%rbx, %rbx
+      85:      	je	0x18f <?NVSDK_NGX_VULKAN_ShutdownCommon@@YA?AW4NVSDK_NGX_Result@@PEAUVkDevice_T@@@Z+0x18f>
+      8b:      	movq	%rbx, %rcx
+      8e:      	callq	*(%rip)                 # 0x94 <?NVSDK_NGX_VULKAN_ShutdownCommon@@YA?AW4NVSDK_NGX_Result@@PEAUVkDevice_T@@@Z+0x94>
+      94:      	xorl	%ecx, %ecx
+      96:      	leaq	0x67(%rbp), %rdx
+      9a:      	callq	*%rbx
+      9c:      	movl	%eax, %ebx
+      9e:      	cmpl	$0x1, %eax
+      a1:      	jne	0x194 <?NVSDK_NGX_VULKAN_ShutdownCommon@@YA?AW4NVSDK_NGX_Result@@PEAUVkDevice_T@@@Z+0x194>
+      a7:      	cmpl	%esi, 0x67(%rbp)
+      aa:      	jne	0x194 <?NVSDK_NGX_VULKAN_ShutdownCommon@@YA?AW4NVSDK_NGX_Result@@PEAUVkDevice_T@@@Z+0x194>
+      b0:      	callq	0xb5 <?NVSDK_NGX_VULKAN_ShutdownCommon@@YA?AW4NVSDK_NGX_Result@@PEAUVkDevice_T@@@Z+0xb5>
+      b5:      	movq	0x98(%rip), %rcx        # 0x154 <?NVSDK_NGX_VULKAN_ShutdownCommon@@YA?AW4NVSDK_NGX_Result@@PEAUVkDevice_T@@@Z+0x154>
+      bc:      	testq	%rcx, %rcx
+      bf:      	je	0xc6 <?NVSDK_NGX_VULKAN_ShutdownCommon@@YA?AW4NVSDK_NGX_Result@@PEAUVkDevice_T@@@Z+0xc6>
+      c1:      	callq	0xc6 <?NVSDK_NGX_VULKAN_ShutdownCommon@@YA?AW4NVSDK_NGX_Result@@PEAUVkDevice_T@@@Z+0xc6>
+      c6:      	movq	%rsi, -0x69(%rbp)
+      ca:      	movq	%rsi, -0x61(%rbp)
+      ce:      	movq	%rsi, -0x59(%rbp)
+      d2:      	movq	%rsi, -0x51(%rbp)
+      d6:      	movq	%rsi, -0x49(%rbp)
+      da:      	movq	%rsi, -0x41(%rbp)
+      de:      	movq	%rsi, -0x39(%rbp)
+      e2:      	movq	%rsi, -0x31(%rbp)
+      e6:      	movq	%rsi, -0x29(%rbp)
+      ea:      	movq	%rsi, -0x21(%rbp)
+      ee:      	movq	%rsi, -0x19(%rbp)
+      f2:      	movq	%rsi, -0x11(%rbp)
+      f6:      	movq	%rsi, -0x9(%rbp)
+      fa:      	movq	%rsi, -0x1(%rbp)
+      fe:      	movq	%rsi, 0x7(%rbp)
+     102:      	movq	%rsi, 0xf(%rbp)
+     106:      	movq	%rsi, 0x17(%rbp)
+     10a:      	movq	%rsi, 0x1f(%rbp)
+     10e:      	movq	%rsi, 0x27(%rbp)
+     112:      	movq	%rsi, 0x2f(%rbp)
+     116:      	movq	%rsi, 0x37(%rbp)
+     11a:      	leaq	(%rip), %rcx            # 0x121 <?NVSDK_NGX_VULKAN_ShutdownCommon@@YA?AW4NVSDK_NGX_Result@@PEAUVkDevice_T@@@Z+0x121>
+     121:      	leaq	-0x69(%rbp), %rax
+     125:      	movups	(%rax), %xmm0
+     128:      	movups	%xmm0, (%rcx)
+     12b:      	movups	0x10(%rax), %xmm1
+     12f:      	movups	%xmm1, 0x10(%rcx)
+     133:      	movups	0x20(%rax), %xmm0
+     137:      	movups	%xmm0, 0x20(%rcx)
+     13b:      	movups	0x30(%rax), %xmm1
+     13f:      	movups	%xmm1, 0x30(%rcx)
+     143:      	movups	0x40(%rax), %xmm0
+     147:      	movups	%xmm0, 0x40(%rcx)
+     14b:      	movups	0x50(%rax), %xmm1
+     14f:      	movups	%xmm1, 0x50(%rcx)
+     153:      	movups	0x60(%rax), %xmm0
+     157:      	movups	%xmm0, 0x60(%rcx)
+     15b:      	movups	0x70(%rax), %xmm0
+     15f:      	movups	%xmm0, 0x70(%rcx)
+     163:      	movups	0x80(%rax), %xmm1
+     16a:      	movups	%xmm1, 0x80(%rcx)
+     171:      	movups	0x90(%rax), %xmm0
+     178:      	movups	%xmm0, 0x90(%rcx)
+     17f:      	movq	0xa0(%rax), %rax
+     186:      	movq	%rax, 0xa0(%rcx)
+     18d:      	jmp	0x194 <?NVSDK_NGX_VULKAN_ShutdownCommon@@YA?AW4NVSDK_NGX_Result@@PEAUVkDevice_T@@@Z+0x194>
+     18f:      	movl	$0xbad00007, %ebx       # imm = 0xBAD00007
+     194:      	movq	%r14, %rcx
+     197:      	callq	*(%rip)                 # 0x19d <?NVSDK_NGX_VULKAN_ShutdownCommon@@YA?AW4NVSDK_NGX_Result@@PEAUVkDevice_T@@@Z+0x19d>
+     19d:      	movl	%ebx, %eax
+     19f:      	leaq	0xd0(%rsp), %r11
+     1a7:      	movq	0x30(%r11), %rbx
+     1ab:      	movq	0x38(%r11), %rsi
+     1af:      	movq	%r11, %rsp
+     1b2:      	popq	%r14
+     1b4:      	popq	%rdi
+     1b5:      	popq	%rbp
+     1b6:      	retq
+
+Disassembly of section .text$x:
+
+0000000000000000 <?dtor$0@?0??NVSDK_NGX_VULKAN_ShutdownCommon@@YA?AW4NVSDK_NGX_Result@@PEAUVkDevice_T@@@Z@4HA>:
+       0:      	leaq	0xf8(%rdx), %rcx
+       7:      	jmp	0xc <?dtor$0@?0??NVSDK_NGX_VULKAN_ShutdownCommon@@YA?AW4NVSDK_NGX_Result@@PEAUVkDevice_T@@@Z@4HA+0xc>
+
+Disassembly of section .text$mn:
+
+0000000000000000 <?isInited@NGX_API_VULKAN_Lib@@QEBA_NXZ>:
+       0:      	cmpq	$0x0, (%rcx)
+       4:      	je	0x33 <?isInited@NGX_API_VULKAN_Lib@@QEBA_NXZ+0x33>
+       6:      	cmpq	$0x0, 0x28(%rcx)
+       b:      	je	0x33 <?isInited@NGX_API_VULKAN_Lib@@QEBA_NXZ+0x33>
+       d:      	cmpq	$0x0, 0x40(%rcx)
+      12:      	je	0x33 <?isInited@NGX_API_VULKAN_Lib@@QEBA_NXZ+0x33>
+      14:      	cmpq	$0x0, 0x38(%rcx)
+      19:      	je	0x33 <?isInited@NGX_API_VULKAN_Lib@@QEBA_NXZ+0x33>
+      1b:      	cmpq	$0x0, 0x48(%rcx)
+      20:      	je	0x33 <?isInited@NGX_API_VULKAN_Lib@@QEBA_NXZ+0x33>
+      22:      	cmpq	$0x0, 0x58(%rcx)
+      27:      	je	0x33 <?isInited@NGX_API_VULKAN_Lib@@QEBA_NXZ+0x33>
+      29:      	cmpq	$0x0, 0x60(%rcx)
+      2e:      	je	0x33 <?isInited@NGX_API_VULKAN_Lib@@QEBA_NXZ+0x33>
+      30:      	movb	$0x1, %al
+      32:      	retq
+      33:      	xorb	%al, %al
+      35:      	retq
+
+Disassembly of section .text$mn:
+
+0000000000000000 <?lock@NGXMutex@@QEAAXXZ>:
+       0:      	jmpq	*(%rip)                 # 0x7 <?lock@NGXMutex@@QEAAXXZ+0x7>
+
+Disassembly of section .text$mn:
+
+0000000000000000 <?s_ReplacementCallback@NGXProgressCallbackHelper@@SAXMAEA_N@Z>:
+       0:      	movq	%rbx, 0x8(%rsp)
+       5:      	pushq	%rdi
+       6:      	subq	$0x30, %rsp
+       a:      	movl	(%rip), %ecx            # 0x10 <?s_ReplacementCallback@NGXProgressCallbackHelper@@SAXMAEA_N@Z+0x10>
+      10:      	movq	%rdx, %rdi
+      13:      	movq	%gs:0x58, %rax
+      1c:      	movl	$0x0, %ebx
+      21:      	movaps	%xmm6, 0x20(%rsp)
+      26:      	movaps	%xmm0, %xmm6
+      29:      	movq	(%rax,%rcx,8), %rax
+      2d:      	movq	(%rbx,%rax), %rbx
+      31:      	testq	%rbx, %rbx
+      34:      	je	0x47 <?s_ReplacementCallback@NGXProgressCallbackHelper@@SAXMAEA_N@Z+0x47>
+      36:      	movq	%rbx, %rcx
+      39:      	callq	*(%rip)                 # 0x3f <?s_ReplacementCallback@NGXProgressCallbackHelper@@SAXMAEA_N@Z+0x3f>
+      3f:      	movq	%rdi, %rdx
+      42:      	movaps	%xmm6, %xmm0
+      45:      	callq	*%rbx
+      47:      	movq	0x40(%rsp), %rbx
+      4c:      	movaps	0x20(%rsp), %xmm6
+      51:      	addq	$0x30, %rsp
+      55:      	popq	%rdi
+      56:      	retq
+
+Disassembly of section .text$mn:
+
+0000000000000000 <?unlock@NGXMutex@@QEAAXXZ>:
+       0:      	jmpq	*(%rip)                 # 0x7 <?unlock@NGXMutex@@QEAAXXZ+0x7>
+
+Disassembly of section .text$mn:
+
+0000000000000000 <NVSDK_NGX_VULKAN_AllocateParameters>:
+       0:      	pushq	%rdi
+       2:      	subq	$0x20, %rsp
+       6:      	cmpq	$0x0, (%rip)            # 0xe <NVSDK_NGX_VULKAN_AllocateParameters+0xe>
+       e:      	movq	%rcx, %rdi
+      11:      	jne	0x1e <NVSDK_NGX_VULKAN_AllocateParameters+0x1e>
+      13:      	movl	$0xbad00007, %eax       # imm = 0xBAD00007
+      18:      	addq	$0x20, %rsp
+      1c:      	popq	%rdi
+      1d:      	retq
+      1e:      	movq	%rbx, 0x30(%rsp)
+      23:      	movq	0x80(%rip), %rbx        # 0xaa <NVSDK_NGX_VULKAN_AllocateParameters+0xaa>
+      2a:      	testq	%rbx, %rbx
+      2d:      	jne	0x3f <NVSDK_NGX_VULKAN_AllocateParameters+0x3f>
+      2f:      	movl	$0xbad0000c, %eax       # imm = 0xBAD0000C
+      34:      	movq	0x30(%rsp), %rbx
+      39:      	addq	$0x20, %rsp
+      3d:      	popq	%rdi
+      3e:      	retq
+      3f:      	movq	%rbx, %rcx
+      42:      	callq	*(%rip)                 # 0x48 <NVSDK_NGX_VULKAN_AllocateParameters+0x48>
+      48:      	movq	%rdi, %rcx
+      4b:      	movq	%rbx, %rax
+      4e:      	movq	0x30(%rsp), %rbx
+      53:      	addq	$0x20, %rsp
+      57:      	popq	%rdi
+      58:      	jmpq	*%rax
+
+Disassembly of section .text$mn:
+
+0000000000000000 <NVSDK_NGX_VULKAN_CreateFeature>:
+       0:      	movq	%rbp, 0x10(%rsp)
+       5:      	movq	%rsi, 0x18(%rsp)
+       a:      	movq	%rdi, 0x20(%rsp)
+       f:      	pushq	%r14
+      11:      	subq	$0x20, %rsp
+      15:      	cmpq	$0x0, 0x48(%rip)        # 0x65 <NVSDK_NGX_VULKAN_CreateFeature+0x65>
+      1d:      	movq	%r9, %rsi
+      20:      	movq	%r8, %rdi
+      23:      	movl	%edx, %ebp
+      25:      	movq	%rcx, %r14
+      28:      	jne	0x31 <NVSDK_NGX_VULKAN_CreateFeature+0x31>
+      2a:      	movl	$0xbad00007, %eax       # imm = 0xBAD00007
+      2f:      	jmp	0x60 <NVSDK_NGX_VULKAN_CreateFeature+0x60>
+      31:      	movq	%rdi, %rcx
+      34:      	movq	%rbx, 0x30(%rsp)
+      39:      	callq	0x3e <NVSDK_NGX_VULKAN_CreateFeature+0x3e>
+      3e:      	movq	0x48(%rip), %rbx        # 0x8d <NVSDK_NGX_VULKAN_CreateFeature+0x8d>
+      45:      	movq	%rbx, %rcx
+      48:      	callq	*(%rip)                 # 0x4e <NVSDK_NGX_VULKAN_CreateFeature+0x4e>
+      4e:      	movq	%rsi, %r9
+      51:      	movq	%rdi, %r8
+      54:      	movl	%ebp, %edx
+      56:      	movq	%r14, %rcx
+      59:      	callq	*%rbx
+      5b:      	movq	0x30(%rsp), %rbx
+      60:      	movq	0x38(%rsp), %rbp
+      65:      	movq	0x40(%rsp), %rsi
+      6a:      	movq	0x48(%rsp), %rdi
+      6f:      	addq	$0x20, %rsp
+      73:      	popq	%r14
+      75:      	retq
+
+Disassembly of section .text$mn:
+
+0000000000000000 <NVSDK_NGX_VULKAN_CreateFeature1>:
+       0:      	movq	%rbp, 0x10(%rsp)
+       5:      	movq	%rsi, 0x18(%rsp)
+       a:      	movq	%rdi, 0x20(%rsp)
+       f:      	pushq	%r14
+      11:      	subq	$0x30, %rsp
+      15:      	cmpq	$0x0, 0x50(%rip)        # 0x6d <NVSDK_NGX_VULKAN_CreateFeature1+0x6d>
+      1d:      	movq	%r9, %rdi
+      20:      	movl	%r8d, %esi
+      23:      	movq	%rdx, %rbp
+      26:      	movq	%rcx, %r14
+      29:      	jne	0x32 <NVSDK_NGX_VULKAN_CreateFeature1+0x32>
+      2b:      	movl	$0xbad00007, %eax       # imm = 0xBAD00007
+      30:      	jmp	0x6c <NVSDK_NGX_VULKAN_CreateFeature1+0x6c>
+      32:      	movq	%rdi, %rcx
+      35:      	movq	%rbx, 0x40(%rsp)
+      3a:      	callq	0x3f <NVSDK_NGX_VULKAN_CreateFeature1+0x3f>
+      3f:      	movq	0x50(%rip), %rbx        # 0x96 <NVSDK_NGX_VULKAN_CreateFeature1+0x96>
+      46:      	movq	%rbx, %rcx
+      49:      	callq	*(%rip)                 # 0x4f <NVSDK_NGX_VULKAN_CreateFeature1+0x4f>
+      4f:      	movq	0x60(%rsp), %rax
+      54:      	movq	%rdi, %r9
+      57:      	movl	%esi, %r8d
+      5a:      	movq	%rax, 0x20(%rsp)
+      5f:      	movq	%rbp, %rdx
+      62:      	movq	%r14, %rcx
+      65:      	callq	*%rbx
+      67:      	movq	0x40(%rsp), %rbx
+      6c:      	movq	0x48(%rsp), %rbp
+      71:      	movq	0x50(%rsp), %rsi
+      76:      	movq	0x58(%rsp), %rdi
+      7b:      	addq	$0x30, %rsp
+      7f:      	popq	%r14
+      81:      	retq
+
+Disassembly of section .text$mn:
+
+0000000000000000 <NVSDK_NGX_VULKAN_DestroyParameters>:
+       0:      	pushq	%rdi
+       2:      	subq	$0x20, %rsp
+       6:      	cmpq	$0x0, (%rip)            # 0xe <NVSDK_NGX_VULKAN_DestroyParameters+0xe>
+       e:      	movq	%rcx, %rdi
+      11:      	jne	0x1e <NVSDK_NGX_VULKAN_DestroyParameters+0x1e>
+      13:      	movl	$0xbad00007, %eax       # imm = 0xBAD00007
+      18:      	addq	$0x20, %rsp
+      1c:      	popq	%rdi
+      1d:      	retq
+      1e:      	movq	%rbx, 0x30(%rsp)
+      23:      	movq	0x90(%rip), %rbx        # 0xba <NVSDK_NGX_VULKAN_DestroyParameters+0xba>
+      2a:      	testq	%rbx, %rbx
+      2d:      	jne	0x3f <NVSDK_NGX_VULKAN_DestroyParameters+0x3f>
+      2f:      	movl	$0xbad0000c, %eax       # imm = 0xBAD0000C
+      34:      	movq	0x30(%rsp), %rbx
+      39:      	addq	$0x20, %rsp
+      3d:      	popq	%rdi
+      3e:      	retq
+      3f:      	movq	%rbx, %rcx
+      42:      	callq	*(%rip)                 # 0x48 <NVSDK_NGX_VULKAN_DestroyParameters+0x48>
+      48:      	movq	%rdi, %rcx
+      4b:      	movq	%rbx, %rax
+      4e:      	movq	0x30(%rsp), %rbx
+      53:      	addq	$0x20, %rsp
+      57:      	popq	%rdi
+      58:      	jmpq	*%rax
+
+Disassembly of section .text$mn:
+
+0000000000000000 <NVSDK_NGX_VULKAN_EvaluateFeature>:
+       0:      	movq	%rbx, 0x8(%rsp)
+       5:      	movq	%rbp, 0x10(%rsp)
+       a:      	movq	%rsi, 0x18(%rsp)
+       f:      	movq	%rdi, 0x20(%rsp)
+      14:      	pushq	%r14
+      16:      	subq	$0x20, %rsp
+      1a:      	movq	0x58(%rip), %rbx        # 0x79 <NVSDK_NGX_VULKAN_EvaluateFeature+0x79>
+      21:      	movq	%r9, %rdi
+      24:      	movq	%r8, %rsi
+      27:      	movq	%rdx, %rbp
+      2a:      	movq	%rcx, %r14
+      2d:      	testq	%rbx, %rbx
+      30:      	jne	0x39 <NVSDK_NGX_VULKAN_EvaluateFeature+0x39>
+      32:      	movl	$0xbad00007, %eax       # imm = 0xBAD00007
+      37:      	jmp	0x50 <NVSDK_NGX_VULKAN_EvaluateFeature+0x50>
+      39:      	movq	%rbx, %rcx
+      3c:      	callq	*(%rip)                 # 0x42 <NVSDK_NGX_VULKAN_EvaluateFeature+0x42>
+      42:      	movq	%rdi, %r9
+      45:      	movq	%rsi, %r8
+      48:      	movq	%rbp, %rdx
+      4b:      	movq	%r14, %rcx
+      4e:      	callq	*%rbx
+      50:      	movq	0x30(%rsp), %rbx
+      55:      	movq	0x38(%rsp), %rbp
+      5a:      	movq	0x40(%rsp), %rsi
+      5f:      	movq	0x48(%rsp), %rdi
+      64:      	addq	$0x20, %rsp
+      68:      	popq	%r14
+      6a:      	retq
+
+Disassembly of section .text$mn:
+
+0000000000000000 <NVSDK_NGX_VULKAN_EvaluateFeature_C>:
+       0:      	subq	$0x38, %rsp
+       4:      	movq	%rcx, %rax
+       7:      	movq	0x58(%rip), %rcx        # 0x66 <NVSDK_NGX_VULKAN_EvaluateFeature_C+0x66>
+       e:      	testq	%rcx, %rcx
+      11:      	jne	0x1d <NVSDK_NGX_VULKAN_EvaluateFeature_C+0x1d>
+      13:      	movl	$0xbad00007, %eax       # imm = 0xBAD00007
+      18:      	addq	$0x38, %rsp
+      1c:      	retq
+      1d:      	movq	%r9, 0x20(%rsp)
+      22:      	movq	%r8, %r9
+      25:      	movq	%rdx, %r8
+      28:      	movq	%rax, %rdx
+      2b:      	callq	0x30 <NVSDK_NGX_VULKAN_EvaluateFeature_C+0x30>
+      30:      	addq	$0x38, %rsp
+      34:      	retq
+
+Disassembly of section .text$mn:
+
+0000000000000000 <NVSDK_NGX_VULKAN_GetCapabilityParameters>:
+       0:      	pushq	%rdi
+       2:      	subq	$0x20, %rsp
+       6:      	cmpq	$0x0, (%rip)            # 0xe <NVSDK_NGX_VULKAN_GetCapabilityParameters+0xe>
+       e:      	movq	%rcx, %rdi
+      11:      	jne	0x1e <NVSDK_NGX_VULKAN_GetCapabilityParameters+0x1e>
+      13:      	movl	$0xbad00007, %eax       # imm = 0xBAD00007
+      18:      	addq	$0x20, %rsp
+      1c:      	popq	%rdi
+      1d:      	retq
+      1e:      	movq	%rbx, 0x30(%rsp)
+      23:      	movq	0x88(%rip), %rbx        # 0xb2 <NVSDK_NGX_VULKAN_GetCapabilityParameters+0xb2>
+      2a:      	testq	%rbx, %rbx
+      2d:      	jne	0x3f <NVSDK_NGX_VULKAN_GetCapabilityParameters+0x3f>
+      2f:      	movl	$0xbad0000c, %eax       # imm = 0xBAD0000C
+      34:      	movq	0x30(%rsp), %rbx
+      39:      	addq	$0x20, %rsp
+      3d:      	popq	%rdi
+      3e:      	retq
+      3f:      	movq	%rbx, %rcx
+      42:      	callq	*(%rip)                 # 0x48 <NVSDK_NGX_VULKAN_GetCapabilityParameters+0x48>
+      48:      	movq	%rdi, %rcx
+      4b:      	movq	%rbx, %rax
+      4e:      	movq	0x30(%rsp), %rbx
+      53:      	addq	$0x20, %rsp
+      57:      	popq	%rdi
+      58:      	jmpq	*%rax
+
+Disassembly of section .text$mn:
+
+0000000000000000 <NVSDK_NGX_VULKAN_GetFeatureDeviceExtensionRequirements>:
+       0:      	movq	%rbx, 0x8(%rsp)
+       5:      	movq	%rbp, 0x10(%rsp)
+       a:      	movq	%rsi, 0x18(%rsp)
+       f:      	pushq	%rdi
+      10:      	pushq	%r14
+      12:      	pushq	%r15
+      14:      	subq	$0x30, %rsp
+      18:      	cmpq	$0x0, (%rip)            # 0x20 <NVSDK_NGX_VULKAN_GetFeatureDeviceExtensionRequirements+0x20>
+      20:      	movq	%r9, %rdi
+      23:      	movq	0x70(%rsp), %rbx
+      28:      	movq	%r8, %r15
+      2b:      	movq	%rdx, %rbp
+      2e:      	movq	%rcx, %r14
+      31:      	jne	0x42 <NVSDK_NGX_VULKAN_GetFeatureDeviceExtensionRequirements+0x42>
+      33:      	callq	0x38 <NVSDK_NGX_VULKAN_GetFeatureDeviceExtensionRequirements+0x38>
+      38:      	cmpq	$0x0, (%rip)            # 0x40 <NVSDK_NGX_VULKAN_GetFeatureDeviceExtensionRequirements+0x40>
+      40:      	je	0x71 <NVSDK_NGX_VULKAN_GetFeatureDeviceExtensionRequirements+0x71>
+      42:      	movq	0x78(%rip), %rsi        # 0xc1 <NVSDK_NGX_VULKAN_GetFeatureDeviceExtensionRequirements+0xc1>
+      49:      	testq	%rsi, %rsi
+      4c:      	je	0x71 <NVSDK_NGX_VULKAN_GetFeatureDeviceExtensionRequirements+0x71>
+      4e:      	movq	%rsi, %rcx
+      51:      	callq	*(%rip)                 # 0x57 <NVSDK_NGX_VULKAN_GetFeatureDeviceExtensionRequirements+0x57>
+      57:      	movq	%rdi, %r9
+      5a:      	movq	%rbx, 0x20(%rsp)
+      5f:      	movq	%r15, %r8
+      62:      	movq	%rbp, %rdx
+      65:      	movq	%r14, %rcx
+      68:      	callq	*%rsi
+      6a:      	cmpl	$0xbad00012, %eax       # imm = 0xBAD00012
+      6f:      	jne	0x90 <NVSDK_NGX_VULKAN_GetFeatureDeviceExtensionRequirements+0x90>
+      71:      	testq	%rdi, %rdi
+      74:      	je	0x7c <NVSDK_NGX_VULKAN_GetFeatureDeviceExtensionRequirements+0x7c>
+      76:      	movl	$0x4, (%rdi)
+      7c:      	testq	%rbx, %rbx
+      7f:      	je	0x8b <NVSDK_NGX_VULKAN_GetFeatureDeviceExtensionRequirements+0x8b>
+      81:      	leaq	(%rip), %rax            # 0x88 <NVSDK_NGX_VULKAN_GetFeatureDeviceExtensionRequirements+0x88>
+      88:      	movq	%rax, (%rbx)
+      8b:      	movl	$0x1, %eax
+      90:      	movq	0x50(%rsp), %rbx
+      95:      	movq	0x58(%rsp), %rbp
+      9a:      	movq	0x60(%rsp), %rsi
+      9f:      	addq	$0x30, %rsp
+      a3:      	popq	%r15
+      a5:      	popq	%r14
+      a7:      	popq	%rdi
+      a8:      	retq
+
+Disassembly of section .text$mn:
+
+0000000000000000 <NVSDK_NGX_VULKAN_GetFeatureInstanceExtensionRequirements>:
+       0:      	movq	%rbx, 0x8(%rsp)
+       5:      	movq	%rbp, 0x10(%rsp)
+       a:      	movq	%rsi, 0x18(%rsp)
+       f:      	pushq	%rdi
+      10:      	subq	$0x20, %rsp
+      14:      	cmpq	$0x0, (%rip)            # 0x1c <NVSDK_NGX_VULKAN_GetFeatureInstanceExtensionRequirements+0x1c>
+      1c:      	movq	%r8, %rbx
+      1f:      	movq	%rdx, %rdi
+      22:      	movq	%rcx, %rbp
+      25:      	je	0x4e <NVSDK_NGX_VULKAN_GetFeatureInstanceExtensionRequirements+0x4e>
+      27:      	movq	0x70(%rip), %rsi        # 0x9e <NVSDK_NGX_VULKAN_GetFeatureInstanceExtensionRequirements+0x9e>
+      2e:      	testq	%rsi, %rsi
+      31:      	je	0x4e <NVSDK_NGX_VULKAN_GetFeatureInstanceExtensionRequirements+0x4e>
+      33:      	movq	%rsi, %rcx
+      36:      	callq	*(%rip)                 # 0x3c <NVSDK_NGX_VULKAN_GetFeatureInstanceExtensionRequirements+0x3c>
+      3c:      	movq	%rbx, %r8
+      3f:      	movq	%rdi, %rdx
+      42:      	movq	%rbp, %rcx
+      45:      	callq	*%rsi
+      47:      	cmpl	$0xbad00012, %eax       # imm = 0xBAD00012
+      4c:      	jne	0x6d <NVSDK_NGX_VULKAN_GetFeatureInstanceExtensionRequirements+0x6d>
+      4e:      	testq	%rdi, %rdi
+      51:      	je	0x59 <NVSDK_NGX_VULKAN_GetFeatureInstanceExtensionRequirements+0x59>
+      53:      	movl	$0x1, (%rdi)
+      59:      	testq	%rbx, %rbx
+      5c:      	je	0x68 <NVSDK_NGX_VULKAN_GetFeatureInstanceExtensionRequirements+0x68>
+      5e:      	leaq	(%rip), %rcx            # 0x65 <NVSDK_NGX_VULKAN_GetFeatureInstanceExtensionRequirements+0x65>
+      65:      	movq	%rcx, (%rbx)
+      68:      	movl	$0x1, %eax
+      6d:      	movq	0x30(%rsp), %rbx
+      72:      	movq	0x38(%rsp), %rbp
+      77:      	movq	0x40(%rsp), %rsi
+      7c:      	addq	$0x20, %rsp
+      80:      	popq	%rdi
+      81:      	retq
+
+Disassembly of section .text$mn:
+
+0000000000000000 <NVSDK_NGX_VULKAN_GetFeatureRequirements>:
+       0:      	movq	%rbx, 0x8(%rsp)
+       5:      	movq	%rbp, 0x10(%rsp)
+       a:      	movq	%rsi, 0x18(%rsp)
+       f:      	movq	%rdi, 0x20(%rsp)
+      14:      	pushq	%r14
+      16:      	subq	$0x20, %rsp
+      1a:      	cmpq	$0x0, (%rip)            # 0x22 <NVSDK_NGX_VULKAN_GetFeatureRequirements+0x22>
+      22:      	movq	%r9, %rbp
+      25:      	movq	%r8, %r14
+      28:      	movq	%rdx, %rdi
+      2b:      	movq	%rcx, %rsi
+      2e:      	jne	0x35 <NVSDK_NGX_VULKAN_GetFeatureRequirements+0x35>
+      30:      	callq	0x35 <NVSDK_NGX_VULKAN_GetFeatureRequirements+0x35>
+      35:      	movq	0x68(%rip), %rbx        # 0xa4 <NVSDK_NGX_VULKAN_GetFeatureRequirements+0xa4>
+      3c:      	testq	%rbx, %rbx
+      3f:      	jne	0x48 <NVSDK_NGX_VULKAN_GetFeatureRequirements+0x48>
+      41:      	movl	$0xbad00012, %eax       # imm = 0xBAD00012
+      46:      	jmp	0x5f <NVSDK_NGX_VULKAN_GetFeatureRequirements+0x5f>
+      48:      	movq	%rbx, %rcx
+      4b:      	callq	*(%rip)                 # 0x51 <NVSDK_NGX_VULKAN_GetFeatureRequirements+0x51>
+      51:      	movq	%rbp, %r9
+      54:      	movq	%r14, %r8
+      57:      	movq	%rdi, %rdx
+      5a:      	movq	%rsi, %rcx
+      5d:      	callq	*%rbx
+      5f:      	movq	0x30(%rsp), %rbx
+      64:      	movq	0x38(%rsp), %rbp
+      69:      	movq	0x40(%rsp), %rsi
+      6e:      	movq	0x48(%rsp), %rdi
+      73:      	addq	$0x20, %rsp
+      77:      	popq	%r14
+      79:      	retq
+
+Disassembly of section .text$mn:
+
+0000000000000000 <NVSDK_NGX_VULKAN_GetParameters>:
+       0:      	movq	%rbx, 0x8(%rsp)
+       5:      	pushq	%rdi
+       6:      	subq	$0x20, %rsp
+       a:      	movq	0x40(%rip), %rbx        # 0x51 <NVSDK_NGX_VULKAN_GetParameters+0x51>
+      11:      	movq	%rcx, %rdi
+      14:      	testq	%rbx, %rbx
+      17:      	jne	0x29 <NVSDK_NGX_VULKAN_GetParameters+0x29>
+      19:      	movl	$0xbad00007, %eax       # imm = 0xBAD00007
+      1e:      	movq	0x30(%rsp), %rbx
+      23:      	addq	$0x20, %rsp
+      27:      	popq	%rdi
+      28:      	retq
+      29:      	movq	%rbx, %rcx
+      2c:      	callq	*(%rip)                 # 0x32 <NVSDK_NGX_VULKAN_GetParameters+0x32>
+      32:      	movq	%rdi, %rcx
+      35:      	movq	%rbx, %rax
+      38:      	movq	0x30(%rsp), %rbx
+      3d:      	addq	$0x20, %rsp
+      41:      	popq	%rdi
+      42:      	jmpq	*%rax
+
+Disassembly of section .text$mn:
+
+0000000000000000 <NVSDK_NGX_VULKAN_GetScratchBufferSize>:
+       0:      	movq	%rbx, 0x8(%rsp)
+       5:      	movq	%rbp, 0x10(%rsp)
+       a:      	movq	%rsi, 0x18(%rsp)
+       f:      	pushq	%rdi
+      10:      	subq	$0x20, %rsp
+      14:      	movq	0x38(%rip), %rbx        # 0x53 <NVSDK_NGX_VULKAN_GetScratchBufferSize+0x53>
+      1b:      	movq	%r8, %rdi
+      1e:      	movq	%rdx, %rsi
+      21:      	movl	%ecx, %ebp
+      23:      	testq	%rbx, %rbx
+      26:      	jne	0x2f <NVSDK_NGX_VULKAN_GetScratchBufferSize+0x2f>
+      28:      	movl	$0xbad00007, %eax       # imm = 0xBAD00007
+      2d:      	jmp	0x42 <NVSDK_NGX_VULKAN_GetScratchBufferSize+0x42>
+      2f:      	movq	%rbx, %rcx
+      32:      	callq	*(%rip)                 # 0x38 <NVSDK_NGX_VULKAN_GetScratchBufferSize+0x38>
+      38:      	movq	%rdi, %r8
+      3b:      	movq	%rsi, %rdx
+      3e:      	movl	%ebp, %ecx
+      40:      	callq	*%rbx
+      42:      	movq	0x30(%rsp), %rbx
+      47:      	movq	0x38(%rsp), %rbp
+      4c:      	movq	0x40(%rsp), %rsi
+      51:      	addq	$0x20, %rsp
+      55:      	popq	%rdi
+      56:      	retq
+
+Disassembly of section .text$mn:
+
+0000000000000000 <NVSDK_NGX_VULKAN_Init>:
+       0:      	movq	%rsp, %rax
+       3:      	movq	%rbx, 0x18(%rax)
+       7:      	movq	%rbp, 0x20(%rax)
+       b:      	movq	%rcx, 0x8(%rax)
+       f:      	pushq	%rsi
+      10:      	pushq	%r12
+      12:      	pushq	%r13
+      14:      	pushq	%r14
+      16:      	pushq	%r15
+      18:      	subq	$0x50, %rsp
+      1c:      	movl	0xc0(%rsp), %r13d
+      24:      	movq	%r9, %r14
+      27:      	movq	0xb8(%rsp), %rbx
+      2f:      	movq	%r8, %r15
+      32:      	movq	0xb0(%rsp), %rsi
+      3a:      	movq	%rdx, %r12
+      3d:      	movq	0xa8(%rsp), %rbp
+      45:      	movq	%r14, %r8
+      48:      	movq	0xa0(%rsp), %r9
+      50:      	movq	%r15, %rdx
+      53:      	movl	%r13d, -0x40(%rax)
+      57:      	movq	%r12, %rcx
+      5a:      	movq	%rbx, -0x48(%rax)
+      5e:      	movq	%rsi, -0x50(%rax)
+      62:      	movq	%rbp, -0x58(%rax)
+      66:      	callq	0x6b <NVSDK_NGX_VULKAN_Init+0x6b>
+      6b:      	cmpl	$0x1, %eax
+      6e:      	jne	0x197 <NVSDK_NGX_VULKAN_Init+0x197>
+      74:      	movq	%rdi, 0x88(%rsp)
+      7c:      	movq	0x10(%rip), %rdi        # 0x93 <NVSDK_NGX_VULKAN_Init+0x93>
+      83:      	testq	%rdi, %rdi
+      86:      	je	0xca <NVSDK_NGX_VULKAN_Init+0xca>
+      88:      	movq	%rdi, %rcx
+      8b:      	callq	*(%rip)                 # 0x91 <NVSDK_NGX_VULKAN_Init+0x91>
+      91:      	movq	0xa0(%rsp), %rax
+      99:      	movq	%r14, %r9
+      9c:      	movq	0x80(%rsp), %rcx
+      a4:      	movq	%r15, %r8
+      a7:      	movq	%rbx, 0x40(%rsp)
+      ac:      	movq	%r12, %rdx
+      af:      	movl	%r13d, 0x38(%rsp)
+      b4:      	movq	%rsi, 0x30(%rsp)
+      b9:      	movq	%rbp, 0x28(%rsp)
+      be:      	movq	%rax, 0x20(%rsp)
+      c3:      	callq	*%rdi
+      c5:      	jmp	0x18f <NVSDK_NGX_VULKAN_Init+0x18f>
+      ca:      	testq	%rsi, %rsi
+      cd:      	je	0xe2 <NVSDK_NGX_VULKAN_Init+0xe2>
+      cf:      	testq	%rbp, %rbp
+      d2:      	je	0xe2 <NVSDK_NGX_VULKAN_Init+0xe2>
+      d4:      	leaq	(%rip), %r9             # 0xdb <NVSDK_NGX_VULKAN_Init+0xdb>
+      db:      	movl	$0x11e, %edx            # imm = 0x11E
+      e0:      	jmp	0x140 <NVSDK_NGX_VULKAN_Init+0x140>
+      e2:      	movq	0x8(%rip), %rdi         # 0xf1 <NVSDK_NGX_VULKAN_Init+0xf1>
+      e9:      	testq	%rdi, %rdi
+      ec:      	je	0x123 <NVSDK_NGX_VULKAN_Init+0x123>
+      ee:      	movq	%rdi, %rcx
+      f1:      	callq	*(%rip)                 # 0xf7 <NVSDK_NGX_VULKAN_Init+0xf7>
+      f7:      	movq	0xa0(%rsp), %rax
+      ff:      	movq	%r14, %r9
+     102:      	movq	0x80(%rsp), %rcx
+     10a:      	movq	%r15, %r8
+     10d:      	movq	%rbx, 0x30(%rsp)
+     112:      	movq	%r12, %rdx
+     115:      	movl	%r13d, 0x28(%rsp)
+     11a:      	movq	%rax, 0x20(%rsp)
+     11f:      	callq	*%rdi
+     121:      	jmp	0x18f <NVSDK_NGX_VULKAN_Init+0x18f>
+     123:      	testq	%rbx, %rbx
+     126:      	je	0x15a <NVSDK_NGX_VULKAN_Init+0x15a>
+     128:      	cmpq	$0x0, (%rbx)
+     12c:      	je	0x15a <NVSDK_NGX_VULKAN_Init+0x15a>
+     12e:      	cmpl	$0x0, 0x8(%rbx)
+     132:      	jbe	0x15a <NVSDK_NGX_VULKAN_Init+0x15a>
+     134:      	leaq	(%rip), %r9             # 0x13b <NVSDK_NGX_VULKAN_Init+0x13b>
+     13b:      	movl	$0x12c, %edx            # imm = 0x12C
+     140:      	leaq	(%rip), %r8             # 0x147 <NVSDK_NGX_VULKAN_Init+0x147>
+     147:      	leaq	(%rip), %rcx            # 0x14e <NVSDK_NGX_VULKAN_Init+0x14e>
+     14e:      	callq	0x153 <NVSDK_NGX_VULKAN_Init+0x153>
+     153:      	movl	$0xbad0000c, %eax       # imm = 0xBAD0000C
+     158:      	jmp	0x18f <NVSDK_NGX_VULKAN_Init+0x18f>
+     15a:      	movq	(%rip), %rbx            # 0x161 <NVSDK_NGX_VULKAN_Init+0x161>
+     161:      	movq	%rbx, %rcx
+     164:      	callq	*(%rip)                 # 0x16a <NVSDK_NGX_VULKAN_Init+0x16a>
+     16a:      	movq	0xa0(%rsp), %rax
+     172:      	movq	%r14, %r9
+     175:      	movq	0x80(%rsp), %rcx
+     17d:      	movq	%r15, %r8
+     180:      	movl	%r13d, 0x28(%rsp)
+     185:      	movq	%r12, %rdx
+     188:      	movq	%rax, 0x20(%rsp)
+     18d:      	callq	*%rbx
+     18f:      	movq	0x88(%rsp), %rdi
+     197:      	leaq	0x50(%rsp), %r11
+     19c:      	movq	0x40(%r11), %rbx
+     1a0:      	movq	0x48(%r11), %rbp
+     1a4:      	movq	%r11, %rsp
+     1a7:      	popq	%r15
+     1a9:      	popq	%r14
+     1ab:      	popq	%r13
+     1ad:      	popq	%r12
+     1af:      	popq	%rsi
+     1b0:      	retq
+
+Disassembly of section .text$mn:
+
+0000000000000000 <NVSDK_NGX_VULKAN_Init_with_ProjectID>:
+       0:      	movq	%rsp, %rax
+       3:      	movq	%r8, 0x18(%rax)
+       7:      	movl	%edx, 0x10(%rax)
+       a:      	movq	%rcx, 0x8(%rax)
+       e:      	pushq	%rbp
+       f:      	pushq	%rsi
+      10:      	pushq	%rdi
+      11:      	pushq	%r12
+      13:      	pushq	%r13
+      15:      	pushq	%r14
+      17:      	pushq	%r15
+      19:      	subq	$0x60, %rsp
+      1d:      	movl	0xf0(%rsp), %r14d
+      25:      	movq	%r9, %rbp
+      28:      	movq	0xe8(%rsp), %r15
+      30:      	movq	%rbp, %rcx
+      33:      	movq	0xe0(%rsp), %rdi
+      3b:      	movq	0xd0(%rsp), %r12
+      43:      	movq	0xc8(%rsp), %r13
+      4b:      	movq	%r12, %r9
+      4e:      	movq	0xd8(%rsp), %rsi
+      56:      	movq	%r13, %r8
+      59:      	movq	0xc0(%rsp), %rdx
+      61:      	movl	%r14d, -0x60(%rax)
+      65:      	movq	%r15, -0x68(%rax)
+      69:      	movq	%rdi, -0x70(%rax)
+      6d:      	movq	%rsi, -0x78(%rax)
+      71:      	callq	0x76 <NVSDK_NGX_VULKAN_Init_with_ProjectID+0x76>
+      76:      	cmpl	$0x1, %eax
+      79:      	jne	0x180 <NVSDK_NGX_VULKAN_Init_with_ProjectID+0x180>
+      7f:      	movq	%rbx, 0xb8(%rsp)
+      87:      	movq	0x20(%rip), %rbx        # 0xae <NVSDK_NGX_VULKAN_Init_with_ProjectID+0xae>
+      8e:      	testq	%rbx, %rbx
+      91:      	je	0xe8 <NVSDK_NGX_VULKAN_Init_with_ProjectID+0xe8>
+      93:      	movq	%rbx, %rcx
+      96:      	callq	*(%rip)                 # 0x9c <NVSDK_NGX_VULKAN_Init_with_ProjectID+0x9c>
+      9c:      	movq	0xc0(%rsp), %rax
+      a4:      	movq	%rbp, %r9
+      a7:      	movq	0xb0(%rsp), %r8
+      af:      	movl	0xa8(%rsp), %edx
+      b6:      	movq	0xa0(%rsp), %rcx
+      be:      	movq	%r15, 0x50(%rsp)
+      c3:      	movl	%r14d, 0x48(%rsp)
+      c8:      	movq	%rdi, 0x40(%rsp)
+      cd:      	movq	%rsi, 0x38(%rsp)
+      d2:      	movq	%r12, 0x30(%rsp)
+      d7:      	movq	%r13, 0x28(%rsp)
+      dc:      	movq	%rax, 0x20(%rsp)
+      e1:      	callq	*%rbx
+      e3:      	jmp	0x178 <NVSDK_NGX_VULKAN_Init_with_ProjectID+0x178>
+      e8:      	testq	%rdi, %rdi
+      eb:      	je	0x100 <NVSDK_NGX_VULKAN_Init_with_ProjectID+0x100>
+      ed:      	testq	%rsi, %rsi
+      f0:      	je	0x100 <NVSDK_NGX_VULKAN_Init_with_ProjectID+0x100>
+      f2:      	leaq	(%rip), %r9             # 0xf9 <NVSDK_NGX_VULKAN_Init_with_ProjectID+0xf9>
+      f9:      	movl	$0x146, %edx            # imm = 0x146
+      fe:      	jmp	0x160 <NVSDK_NGX_VULKAN_Init_with_ProjectID+0x160>
+     100:      	movq	0x18(%rip), %rbx        # 0x11f <NVSDK_NGX_VULKAN_Init_with_ProjectID+0x11f>
+     107:      	testq	%rbx, %rbx
+     10a:      	je	0x154 <NVSDK_NGX_VULKAN_Init_with_ProjectID+0x154>
+     10c:      	movq	%rbx, %rcx
+     10f:      	callq	*(%rip)                 # 0x115 <NVSDK_NGX_VULKAN_Init_with_ProjectID+0x115>
+     115:      	movq	0xc0(%rsp), %rax
+     11d:      	movq	%rbp, %r9
+     120:      	movq	0xb0(%rsp), %r8
+     128:      	movl	0xa8(%rsp), %edx
+     12f:      	movq	0xa0(%rsp), %rcx
+     137:      	movq	%r15, 0x40(%rsp)
+     13c:      	movl	%r14d, 0x38(%rsp)
+     141:      	movq	%r12, 0x30(%rsp)
+     146:      	movq	%r13, 0x28(%rsp)
+     14b:      	movq	%rax, 0x20(%rsp)
+     150:      	callq	*%rbx
+     152:      	jmp	0x178 <NVSDK_NGX_VULKAN_Init_with_ProjectID+0x178>
+     154:      	leaq	(%rip), %r9             # 0x15b <NVSDK_NGX_VULKAN_Init_with_ProjectID+0x15b>
+     15b:      	movl	$0x151, %edx            # imm = 0x151
+     160:      	leaq	(%rip), %r8             # 0x167 <NVSDK_NGX_VULKAN_Init_with_ProjectID+0x167>
+     167:      	leaq	(%rip), %rcx            # 0x16e <NVSDK_NGX_VULKAN_Init_with_ProjectID+0x16e>
+     16e:      	callq	0x173 <NVSDK_NGX_VULKAN_Init_with_ProjectID+0x173>
+     173:      	movl	$0xbad0000c, %eax       # imm = 0xBAD0000C
+     178:      	movq	0xb8(%rsp), %rbx
+     180:      	addq	$0x60, %rsp
+     184:      	popq	%r15
+     186:      	popq	%r14
+     188:      	popq	%r13
+     18a:      	popq	%r12
+     18c:      	popq	%rdi
+     18d:      	popq	%rsi
+     18e:      	popq	%rbp
+     18f:      	retq
+
+Disassembly of section .text$mn:
+
+0000000000000000 <NVSDK_NGX_VULKAN_ReleaseFeature>:
+       0:      	movq	%rbx, 0x8(%rsp)
+       5:      	pushq	%rdi
+       6:      	subq	$0x20, %rsp
+       a:      	movq	0x60(%rip), %rbx        # 0x71 <NVSDK_NGX_VULKAN_ReleaseFeature+0x71>
+      11:      	movq	%rcx, %rdi
+      14:      	testq	%rbx, %rbx
+      17:      	jne	0x29 <NVSDK_NGX_VULKAN_ReleaseFeature+0x29>
+      19:      	movl	$0xbad00007, %eax       # imm = 0xBAD00007
+      1e:      	movq	0x30(%rsp), %rbx
+      23:      	addq	$0x20, %rsp
+      27:      	popq	%rdi
+      28:      	retq
+      29:      	movq	%rbx, %rcx
+      2c:      	callq	*(%rip)                 # 0x32 <NVSDK_NGX_VULKAN_ReleaseFeature+0x32>
+      32:      	movq	%rdi, %rcx
+      35:      	movq	%rbx, %rax
+      38:      	movq	0x30(%rsp), %rbx
+      3d:      	addq	$0x20, %rsp
+      41:      	popq	%rdi
+      42:      	jmpq	*%rax
+
+Disassembly of section .text$mn:
+
+0000000000000000 <NVSDK_NGX_VULKAN_RequiredExtensions>:
+       0:      	movq	%rbx, 0x8(%rsp)
+       5:      	movq	%rsi, 0x10(%rsp)
+       a:      	movq	%rdi, 0x18(%rsp)
+       f:      	pushq	%r14
+      11:      	subq	$0x20, %rsp
+      15:      	movq	%r9, %r14
+      18:      	movq	%r8, %rsi
+      1b:      	movq	%rdx, %rdi
+      1e:      	leaq	(%rip), %r9             # 0x25 <NVSDK_NGX_VULKAN_RequiredExtensions+0x25>
+      25:      	movq	%rcx, %rbx
+      28:      	leaq	(%rip), %r8             # 0x2f <NVSDK_NGX_VULKAN_RequiredExtensions+0x2f>
+      2f:      	movl	$0x92, %edx
+      34:      	leaq	(%rip), %rcx            # 0x3b <NVSDK_NGX_VULKAN_RequiredExtensions+0x3b>
+      3b:      	callq	0x40 <NVSDK_NGX_VULKAN_RequiredExtensions+0x40>
+      40:      	movl	$0x1, (%rbx)
+      46:      	leaq	(%rip), %rcx            # 0x4d <NVSDK_NGX_VULKAN_RequiredExtensions+0x4d>
+      4d:      	movq	0x30(%rsp), %rbx
+      52:      	movl	$0x1, %eax
+      57:      	movq	%rcx, (%rdi)
+      5a:      	leaq	(%rip), %rcx            # 0x61 <NVSDK_NGX_VULKAN_RequiredExtensions+0x61>
+      61:      	movq	0x40(%rsp), %rdi
+      66:      	movl	$0x4, (%rsi)
+      6c:      	movq	0x38(%rsp), %rsi
+      71:      	movq	%rcx, (%r14)
+      74:      	addq	$0x20, %rsp
+      78:      	popq	%r14
+      7a:      	retq
+
+Disassembly of section .text$mn:
+
+0000000000000000 <NVSDK_NGX_VULKAN_Shutdown>:
+       0:      	xorl	%ecx, %ecx
+       2:      	jmp	0x7 <NVSDK_NGX_VULKAN_Shutdown+0x7>
+
+Disassembly of section .text$mn:
+
+0000000000000000 <NVSDK_NGX_VULKAN_Shutdown1>:
+       0:      	jmp	0x5 <NVSDK_NGX_VULKAN_Shutdown1+0x5>

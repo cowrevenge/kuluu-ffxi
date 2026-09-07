@@ -1,0 +1,516 @@
+
+nvsdk_ngx_parameters_lib.obj:	file format coff-x86-64
+
+Disassembly of section .text$mn:
+
+0000000000000000 <GetNGXResultAsString>:
+       0:      	cmpl	$0x1, %ecx
+       3:      	jg	0xd4 <$LN24+0x10>
+       9:      	je	0xcc <$LN24+0x8>
+       f:      	addl	$0x45300000, %ecx       # imm = 0x45300000
+      15:      	cmpl	$0x12, %ecx
+      18:      	ja	0xd4 <$LN24+0x10>
+      1e:      	movslq	%ecx, %rax
+      21:      	leaq	(%rip), %rdx            # 0x28 <GetNGXResultAsString+0x28>
+      28:      	movl	(%rdx,%rax,4), %ecx
+      2f:      	addq	%rdx, %rcx
+      32:      	jmpq	*%rcx
+
+0000000000000034 <$LN6>:
+      34:      	leaq	(%rip), %rax            # 0x3b <$LN6+0x7>
+      3b:      	retq
+
+000000000000003c <$LN7>:
+      3c:      	leaq	(%rip), %rax            # 0x43 <$LN7+0x7>
+      43:      	retq
+
+0000000000000044 <$LN8>:
+      44:      	leaq	(%rip), %rax            # 0x4b <$LN8+0x7>
+      4b:      	retq
+
+000000000000004c <$LN9>:
+      4c:      	leaq	(%rip), %rax            # 0x53 <$LN9+0x7>
+      53:      	retq
+
+0000000000000054 <$LN10>:
+      54:      	leaq	(%rip), %rax            # 0x5b <$LN10+0x7>
+      5b:      	retq
+
+000000000000005c <$LN11>:
+      5c:      	leaq	(%rip), %rax            # 0x63 <$LN11+0x7>
+      63:      	retq
+
+0000000000000064 <$LN12>:
+      64:      	leaq	(%rip), %rax            # 0x6b <$LN12+0x7>
+      6b:      	retq
+
+000000000000006c <$LN13>:
+      6c:      	leaq	(%rip), %rax            # 0x73 <$LN13+0x7>
+      73:      	retq
+
+0000000000000074 <$LN14>:
+      74:      	leaq	(%rip), %rax            # 0x7b <$LN14+0x7>
+      7b:      	retq
+
+000000000000007c <$LN15>:
+      7c:      	leaq	(%rip), %rax            # 0x83 <$LN15+0x7>
+      83:      	retq
+
+0000000000000084 <$LN16>:
+      84:      	leaq	(%rip), %rax            # 0x8b <$LN16+0x7>
+      8b:      	retq
+
+000000000000008c <$LN17>:
+      8c:      	leaq	(%rip), %rax            # 0x93 <$LN17+0x7>
+      93:      	retq
+
+0000000000000094 <$LN18>:
+      94:      	leaq	(%rip), %rax            # 0x9b <$LN18+0x7>
+      9b:      	retq
+
+000000000000009c <$LN19>:
+      9c:      	leaq	(%rip), %rax            # 0xa3 <$LN19+0x7>
+      a3:      	retq
+
+00000000000000a4 <$LN20>:
+      a4:      	leaq	(%rip), %rax            # 0xab <$LN20+0x7>
+      ab:      	retq
+
+00000000000000ac <$LN21>:
+      ac:      	leaq	(%rip), %rax            # 0xb3 <$LN21+0x7>
+      b3:      	retq
+
+00000000000000b4 <$LN22>:
+      b4:      	leaq	(%rip), %rax            # 0xbb <$LN22+0x7>
+      bb:      	retq
+
+00000000000000bc <$LN23>:
+      bc:      	leaq	(%rip), %rax            # 0xc3 <$LN23+0x7>
+      c3:      	retq
+
+00000000000000c4 <$LN24>:
+      c4:      	leaq	(%rip), %rax            # 0xcb <$LN24+0x7>
+      cb:      	retq
+      cc:      	leaq	(%rip), %rax            # 0xd3 <$LN24+0xf>
+      d3:      	retq
+      d4:      	leaq	(%rip), %rax            # 0xdb <$LN24+0x17>
+      db:      	retq
+
+00000000000000dc <$LN27>:
+		...
+
+Disassembly of section .text$mn:
+
+0000000000000000 <NVSDK_NGX_Parameter_GetD>:
+       0:      	movq	%rbx, 0x8(%rsp)
+       5:      	movq	%rsi, 0x10(%rsp)
+       a:      	movq	%rdi, 0x18(%rsp)
+       f:      	pushq	%r14
+      11:      	subq	$0x20, %rsp
+      15:      	movq	(%rcx), %rax
+      18:      	movq	%rcx, %r14
+      1b:      	movq	%r8, %rdi
+      1e:      	movq	%rdx, %rsi
+      21:      	movq	0x68(%rax), %rbx
+      25:      	movq	%rbx, %rcx
+      28:      	callq	*(%rip)                 # 0x2e <NVSDK_NGX_Parameter_GetD+0x2e>
+      2e:      	movq	%rdi, %r8
+      31:      	movq	%rsi, %rdx
+      34:      	movq	%r14, %rcx
+      37:      	movq	%rbx, %rax
+      3a:      	movq	0x30(%rsp), %rbx
+      3f:      	movq	0x38(%rsp), %rsi
+      44:      	movq	0x40(%rsp), %rdi
+      49:      	addq	$0x20, %rsp
+      4d:      	popq	%r14
+      4f:      	jmpq	*%rax
+
+Disassembly of section .text$mn:
+
+0000000000000000 <NVSDK_NGX_Parameter_GetD3d11Resource>:
+       0:      	movq	%rbx, 0x8(%rsp)
+       5:      	movq	%rsi, 0x10(%rsp)
+       a:      	movq	%rdi, 0x18(%rsp)
+       f:      	pushq	%r14
+      11:      	subq	$0x20, %rsp
+      15:      	movq	(%rcx), %rax
+      18:      	movq	%rcx, %r14
+      1b:      	movq	%r8, %rdi
+      1e:      	movq	%rdx, %rsi
+      21:      	movq	0x50(%rax), %rbx
+      25:      	movq	%rbx, %rcx
+      28:      	callq	*(%rip)                 # 0x2e <NVSDK_NGX_Parameter_GetD3d11Resource+0x2e>
+      2e:      	movq	%rdi, %r8
+      31:      	movq	%rsi, %rdx
+      34:      	movq	%r14, %rcx
+      37:      	movq	%rbx, %rax
+      3a:      	movq	0x30(%rsp), %rbx
+      3f:      	movq	0x38(%rsp), %rsi
+      44:      	movq	0x40(%rsp), %rdi
+      49:      	addq	$0x20, %rsp
+      4d:      	popq	%r14
+      4f:      	jmpq	*%rax
+
+Disassembly of section .text$mn:
+
+0000000000000000 <NVSDK_NGX_Parameter_GetD3d12Resource>:
+       0:      	movq	%rbx, 0x8(%rsp)
+       5:      	movq	%rsi, 0x10(%rsp)
+       a:      	movq	%rdi, 0x18(%rsp)
+       f:      	pushq	%r14
+      11:      	subq	$0x20, %rsp
+      15:      	movq	(%rcx), %rax
+      18:      	movq	%rcx, %r14
+      1b:      	movq	%r8, %rdi
+      1e:      	movq	%rdx, %rsi
+      21:      	movq	0x48(%rax), %rbx
+      25:      	movq	%rbx, %rcx
+      28:      	callq	*(%rip)                 # 0x2e <NVSDK_NGX_Parameter_GetD3d12Resource+0x2e>
+      2e:      	movq	%rdi, %r8
+      31:      	movq	%rsi, %rdx
+      34:      	movq	%r14, %rcx
+      37:      	movq	%rbx, %rax
+      3a:      	movq	0x30(%rsp), %rbx
+      3f:      	movq	0x38(%rsp), %rsi
+      44:      	movq	0x40(%rsp), %rdi
+      49:      	addq	$0x20, %rsp
+      4d:      	popq	%r14
+      4f:      	jmpq	*%rax
+
+Disassembly of section .text$mn:
+
+0000000000000000 <NVSDK_NGX_Parameter_GetF>:
+       0:      	movq	%rbx, 0x8(%rsp)
+       5:      	movq	%rsi, 0x10(%rsp)
+       a:      	movq	%rdi, 0x18(%rsp)
+       f:      	pushq	%r14
+      11:      	subq	$0x20, %rsp
+      15:      	movq	(%rcx), %rax
+      18:      	movq	%rcx, %r14
+      1b:      	movq	%r8, %rdi
+      1e:      	movq	%rdx, %rsi
+      21:      	movq	0x70(%rax), %rbx
+      25:      	movq	%rbx, %rcx
+      28:      	callq	*(%rip)                 # 0x2e <NVSDK_NGX_Parameter_GetF+0x2e>
+      2e:      	movq	%rdi, %r8
+      31:      	movq	%rsi, %rdx
+      34:      	movq	%r14, %rcx
+      37:      	movq	%rbx, %rax
+      3a:      	movq	0x30(%rsp), %rbx
+      3f:      	movq	0x38(%rsp), %rsi
+      44:      	movq	0x40(%rsp), %rdi
+      49:      	addq	$0x20, %rsp
+      4d:      	popq	%r14
+      4f:      	jmpq	*%rax
+
+Disassembly of section .text$mn:
+
+0000000000000000 <NVSDK_NGX_Parameter_GetI>:
+       0:      	movq	%rbx, 0x8(%rsp)
+       5:      	movq	%rsi, 0x10(%rsp)
+       a:      	movq	%rdi, 0x18(%rsp)
+       f:      	pushq	%r14
+      11:      	subq	$0x20, %rsp
+      15:      	movq	(%rcx), %rax
+      18:      	movq	%rcx, %r14
+      1b:      	movq	%r8, %rdi
+      1e:      	movq	%rdx, %rsi
+      21:      	movq	0x58(%rax), %rbx
+      25:      	movq	%rbx, %rcx
+      28:      	callq	*(%rip)                 # 0x2e <NVSDK_NGX_Parameter_GetI+0x2e>
+      2e:      	movq	%rdi, %r8
+      31:      	movq	%rsi, %rdx
+      34:      	movq	%r14, %rcx
+      37:      	movq	%rbx, %rax
+      3a:      	movq	0x30(%rsp), %rbx
+      3f:      	movq	0x38(%rsp), %rsi
+      44:      	movq	0x40(%rsp), %rdi
+      49:      	addq	$0x20, %rsp
+      4d:      	popq	%r14
+      4f:      	jmpq	*%rax
+
+Disassembly of section .text$mn:
+
+0000000000000000 <NVSDK_NGX_Parameter_GetUI>:
+       0:      	movq	%rbx, 0x8(%rsp)
+       5:      	movq	%rsi, 0x10(%rsp)
+       a:      	movq	%rdi, 0x18(%rsp)
+       f:      	pushq	%r14
+      11:      	subq	$0x20, %rsp
+      15:      	movq	(%rcx), %rax
+      18:      	movq	%rcx, %r14
+      1b:      	movq	%r8, %rdi
+      1e:      	movq	%rdx, %rsi
+      21:      	movq	0x60(%rax), %rbx
+      25:      	movq	%rbx, %rcx
+      28:      	callq	*(%rip)                 # 0x2e <NVSDK_NGX_Parameter_GetUI+0x2e>
+      2e:      	movq	%rdi, %r8
+      31:      	movq	%rsi, %rdx
+      34:      	movq	%r14, %rcx
+      37:      	movq	%rbx, %rax
+      3a:      	movq	0x30(%rsp), %rbx
+      3f:      	movq	0x38(%rsp), %rsi
+      44:      	movq	0x40(%rsp), %rdi
+      49:      	addq	$0x20, %rsp
+      4d:      	popq	%r14
+      4f:      	jmpq	*%rax
+
+Disassembly of section .text$mn:
+
+0000000000000000 <NVSDK_NGX_Parameter_GetULL>:
+       0:      	movq	%rbx, 0x8(%rsp)
+       5:      	movq	%rsi, 0x10(%rsp)
+       a:      	movq	%rdi, 0x18(%rsp)
+       f:      	pushq	%r14
+      11:      	subq	$0x20, %rsp
+      15:      	movq	(%rcx), %rax
+      18:      	movq	%rcx, %r14
+      1b:      	movq	%r8, %rdi
+      1e:      	movq	%rdx, %rsi
+      21:      	movq	0x78(%rax), %rbx
+      25:      	movq	%rbx, %rcx
+      28:      	callq	*(%rip)                 # 0x2e <NVSDK_NGX_Parameter_GetULL+0x2e>
+      2e:      	movq	%rdi, %r8
+      31:      	movq	%rsi, %rdx
+      34:      	movq	%r14, %rcx
+      37:      	movq	%rbx, %rax
+      3a:      	movq	0x30(%rsp), %rbx
+      3f:      	movq	0x38(%rsp), %rsi
+      44:      	movq	0x40(%rsp), %rdi
+      49:      	addq	$0x20, %rsp
+      4d:      	popq	%r14
+      4f:      	jmpq	*%rax
+
+Disassembly of section .text$mn:
+
+0000000000000000 <NVSDK_NGX_Parameter_GetVoidPointer>:
+       0:      	movq	%rbx, 0x8(%rsp)
+       5:      	movq	%rsi, 0x10(%rsp)
+       a:      	movq	%rdi, 0x18(%rsp)
+       f:      	pushq	%r14
+      11:      	subq	$0x20, %rsp
+      15:      	movq	(%rcx), %rax
+      18:      	movq	%rcx, %r14
+      1b:      	movq	%r8, %rdi
+      1e:      	movq	%rdx, %rsi
+      21:      	movq	0x40(%rax), %rbx
+      25:      	movq	%rbx, %rcx
+      28:      	callq	*(%rip)                 # 0x2e <NVSDK_NGX_Parameter_GetVoidPointer+0x2e>
+      2e:      	movq	%rdi, %r8
+      31:      	movq	%rsi, %rdx
+      34:      	movq	%r14, %rcx
+      37:      	movq	%rbx, %rax
+      3a:      	movq	0x30(%rsp), %rbx
+      3f:      	movq	0x38(%rsp), %rsi
+      44:      	movq	0x40(%rsp), %rdi
+      49:      	addq	$0x20, %rsp
+      4d:      	popq	%r14
+      4f:      	jmpq	*%rax
+
+Disassembly of section .text$mn:
+
+0000000000000000 <NVSDK_NGX_Parameter_SetD>:
+       0:      	movq	%rbx, 0x8(%rsp)
+       5:      	movq	%rsi, 0x10(%rsp)
+       a:      	pushq	%rdi
+       b:      	subq	$0x30, %rsp
+       f:      	movq	(%rcx), %rax
+      12:      	movq	%rcx, %rsi
+      15:      	movaps	%xmm6, 0x20(%rsp)
+      1a:      	movq	%rdx, %rdi
+      1d:      	movaps	%xmm2, %xmm6
+      20:      	movq	0x28(%rax), %rbx
+      24:      	movq	%rbx, %rcx
+      27:      	callq	*(%rip)                 # 0x2d <NVSDK_NGX_Parameter_SetD+0x2d>
+      2d:      	movaps	%xmm6, %xmm2
+      30:      	movq	%rdi, %rdx
+      33:      	movq	%rsi, %rcx
+      36:      	movq	%rbx, %rax
+      39:      	movq	0x40(%rsp), %rbx
+      3e:      	movq	0x48(%rsp), %rsi
+      43:      	movaps	0x20(%rsp), %xmm6
+      48:      	addq	$0x30, %rsp
+      4c:      	popq	%rdi
+      4d:      	jmpq	*%rax
+
+Disassembly of section .text$mn:
+
+0000000000000000 <NVSDK_NGX_Parameter_SetD3d11Resource>:
+       0:      	movq	%rbx, 0x8(%rsp)
+       5:      	movq	%rsi, 0x10(%rsp)
+       a:      	movq	%rdi, 0x18(%rsp)
+       f:      	pushq	%r14
+      11:      	subq	$0x20, %rsp
+      15:      	movq	(%rcx), %rax
+      18:      	movq	%rcx, %r14
+      1b:      	movq	%r8, %rdi
+      1e:      	movq	%rdx, %rsi
+      21:      	movq	0x10(%rax), %rbx
+      25:      	movq	%rbx, %rcx
+      28:      	callq	*(%rip)                 # 0x2e <NVSDK_NGX_Parameter_SetD3d11Resource+0x2e>
+      2e:      	movq	%rdi, %r8
+      31:      	movq	%rsi, %rdx
+      34:      	movq	%r14, %rcx
+      37:      	movq	%rbx, %rax
+      3a:      	movq	0x30(%rsp), %rbx
+      3f:      	movq	0x38(%rsp), %rsi
+      44:      	movq	0x40(%rsp), %rdi
+      49:      	addq	$0x20, %rsp
+      4d:      	popq	%r14
+      4f:      	jmpq	*%rax
+
+Disassembly of section .text$mn:
+
+0000000000000000 <NVSDK_NGX_Parameter_SetD3d12Resource>:
+       0:      	movq	%rbx, 0x8(%rsp)
+       5:      	movq	%rsi, 0x10(%rsp)
+       a:      	movq	%rdi, 0x18(%rsp)
+       f:      	pushq	%r14
+      11:      	subq	$0x20, %rsp
+      15:      	movq	(%rcx), %rax
+      18:      	movq	%rcx, %r14
+      1b:      	movq	%r8, %rdi
+      1e:      	movq	%rdx, %rsi
+      21:      	movq	0x8(%rax), %rbx
+      25:      	movq	%rbx, %rcx
+      28:      	callq	*(%rip)                 # 0x2e <NVSDK_NGX_Parameter_SetD3d12Resource+0x2e>
+      2e:      	movq	%rdi, %r8
+      31:      	movq	%rsi, %rdx
+      34:      	movq	%r14, %rcx
+      37:      	movq	%rbx, %rax
+      3a:      	movq	0x30(%rsp), %rbx
+      3f:      	movq	0x38(%rsp), %rsi
+      44:      	movq	0x40(%rsp), %rdi
+      49:      	addq	$0x20, %rsp
+      4d:      	popq	%r14
+      4f:      	jmpq	*%rax
+
+Disassembly of section .text$mn:
+
+0000000000000000 <NVSDK_NGX_Parameter_SetF>:
+       0:      	movq	%rbx, 0x8(%rsp)
+       5:      	movq	%rsi, 0x10(%rsp)
+       a:      	pushq	%rdi
+       b:      	subq	$0x30, %rsp
+       f:      	movq	(%rcx), %rax
+      12:      	movq	%rcx, %rsi
+      15:      	movaps	%xmm6, 0x20(%rsp)
+      1a:      	movq	%rdx, %rdi
+      1d:      	movaps	%xmm2, %xmm6
+      20:      	movq	0x30(%rax), %rbx
+      24:      	movq	%rbx, %rcx
+      27:      	callq	*(%rip)                 # 0x2d <NVSDK_NGX_Parameter_SetF+0x2d>
+      2d:      	movaps	%xmm6, %xmm2
+      30:      	movq	%rdi, %rdx
+      33:      	movq	%rsi, %rcx
+      36:      	movq	%rbx, %rax
+      39:      	movq	0x40(%rsp), %rbx
+      3e:      	movq	0x48(%rsp), %rsi
+      43:      	movaps	0x20(%rsp), %xmm6
+      48:      	addq	$0x30, %rsp
+      4c:      	popq	%rdi
+      4d:      	jmpq	*%rax
+
+Disassembly of section .text$mn:
+
+0000000000000000 <NVSDK_NGX_Parameter_SetI>:
+       0:      	movq	%rbx, 0x8(%rsp)
+       5:      	movq	%rsi, 0x10(%rsp)
+       a:      	movq	%rdi, 0x18(%rsp)
+       f:      	pushq	%r14
+      11:      	subq	$0x20, %rsp
+      15:      	movq	(%rcx), %rax
+      18:      	movq	%rcx, %r14
+      1b:      	movl	%r8d, %edi
+      1e:      	movq	%rdx, %rsi
+      21:      	movq	0x18(%rax), %rbx
+      25:      	movq	%rbx, %rcx
+      28:      	callq	*(%rip)                 # 0x2e <NVSDK_NGX_Parameter_SetI+0x2e>
+      2e:      	movl	%edi, %r8d
+      31:      	movq	%rsi, %rdx
+      34:      	movq	%r14, %rcx
+      37:      	movq	%rbx, %rax
+      3a:      	movq	0x30(%rsp), %rbx
+      3f:      	movq	0x38(%rsp), %rsi
+      44:      	movq	0x40(%rsp), %rdi
+      49:      	addq	$0x20, %rsp
+      4d:      	popq	%r14
+      4f:      	jmpq	*%rax
+
+Disassembly of section .text$mn:
+
+0000000000000000 <NVSDK_NGX_Parameter_SetUI>:
+       0:      	movq	%rbx, 0x8(%rsp)
+       5:      	movq	%rsi, 0x10(%rsp)
+       a:      	movq	%rdi, 0x18(%rsp)
+       f:      	pushq	%r14
+      11:      	subq	$0x20, %rsp
+      15:      	movq	(%rcx), %rax
+      18:      	movq	%rcx, %r14
+      1b:      	movl	%r8d, %edi
+      1e:      	movq	%rdx, %rsi
+      21:      	movq	0x20(%rax), %rbx
+      25:      	movq	%rbx, %rcx
+      28:      	callq	*(%rip)                 # 0x2e <NVSDK_NGX_Parameter_SetUI+0x2e>
+      2e:      	movl	%edi, %r8d
+      31:      	movq	%rsi, %rdx
+      34:      	movq	%r14, %rcx
+      37:      	movq	%rbx, %rax
+      3a:      	movq	0x30(%rsp), %rbx
+      3f:      	movq	0x38(%rsp), %rsi
+      44:      	movq	0x40(%rsp), %rdi
+      49:      	addq	$0x20, %rsp
+      4d:      	popq	%r14
+      4f:      	jmpq	*%rax
+
+Disassembly of section .text$mn:
+
+0000000000000000 <NVSDK_NGX_Parameter_SetULL>:
+       0:      	movq	%rbx, 0x8(%rsp)
+       5:      	movq	%rsi, 0x10(%rsp)
+       a:      	movq	%rdi, 0x18(%rsp)
+       f:      	pushq	%r14
+      11:      	subq	$0x20, %rsp
+      15:      	movq	(%rcx), %rax
+      18:      	movq	%rcx, %r14
+      1b:      	movq	%r8, %rdi
+      1e:      	movq	%rdx, %rsi
+      21:      	movq	0x38(%rax), %rbx
+      25:      	movq	%rbx, %rcx
+      28:      	callq	*(%rip)                 # 0x2e <NVSDK_NGX_Parameter_SetULL+0x2e>
+      2e:      	movq	%rdi, %r8
+      31:      	movq	%rsi, %rdx
+      34:      	movq	%r14, %rcx
+      37:      	movq	%rbx, %rax
+      3a:      	movq	0x30(%rsp), %rbx
+      3f:      	movq	0x38(%rsp), %rsi
+      44:      	movq	0x40(%rsp), %rdi
+      49:      	addq	$0x20, %rsp
+      4d:      	popq	%r14
+      4f:      	jmpq	*%rax
+
+Disassembly of section .text$mn:
+
+0000000000000000 <NVSDK_NGX_Parameter_SetVoidPointer>:
+       0:      	movq	%rbx, 0x8(%rsp)
+       5:      	movq	%rsi, 0x10(%rsp)
+       a:      	movq	%rdi, 0x18(%rsp)
+       f:      	pushq	%r14
+      11:      	subq	$0x20, %rsp
+      15:      	movq	(%rcx), %rax
+      18:      	movq	%rcx, %r14
+      1b:      	movq	%r8, %rdi
+      1e:      	movq	%rdx, %rsi
+      21:      	movq	(%rax), %rbx
+      24:      	movq	%rbx, %rcx
+      27:      	callq	*(%rip)                 # 0x2d <NVSDK_NGX_Parameter_SetVoidPointer+0x2d>
+      2d:      	movq	%rdi, %r8
+      30:      	movq	%rsi, %rdx
+      33:      	movq	%r14, %rcx
+      36:      	movq	%rbx, %rax
+      39:      	movq	0x30(%rsp), %rbx
+      3e:      	movq	0x38(%rsp), %rsi
+      43:      	movq	0x40(%rsp), %rdi
+      48:      	addq	$0x20, %rsp
+      4c:      	popq	%r14
+      4e:      	jmpq	*%rax

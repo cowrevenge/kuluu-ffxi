@@ -34,18 +34,18 @@ cd "$(git rev-parse --show-toplevel)"
 #
 # dlss is opt-in, but building bevy/dlss needs the DLSS SDK + Vulkan SDK +
 # libclang in the environment (dlss_wgpu's build.rs panics without them). When
-# this checkout has the in-repo streamline/ SDK and the vars are unset, point
-# at it so bare gate runs keep dlss in the lint graph; anywhere else (CI
+# this checkout has the in-repo Dlss_Nvidia_dll/ SDK and the vars are unset,
+# point at it so bare gate runs keep dlss in the lint graph; anywhere else (CI
 # runners, release legs, Steam Deck docker) drop default features so kuluu
 # builds without dlss.
-if [ -z "${DLSS_SDK:-}" ] && [ -d "streamline/sdk/include" ]; then
-  export DLSS_SDK="$PWD/streamline/sdk"
+if [ -z "${DLSS_SDK:-}" ] && [ -d "Dlss_Nvidia_dll/sdk/include" ]; then
+  export DLSS_SDK="$PWD/Dlss_Nvidia_dll/sdk"
 fi
-if [ -z "${VULKAN_SDK:-}" ] && [ -d "streamline/vulkan-sdk/Include" ]; then
-  export VULKAN_SDK="$PWD/streamline/vulkan-sdk"
+if [ -z "${VULKAN_SDK:-}" ] && [ -d "Dlss_Nvidia_dll/vulkan-sdk/Include" ]; then
+  export VULKAN_SDK="$PWD/Dlss_Nvidia_dll/vulkan-sdk"
 fi
-if [ -z "${LIBCLANG_PATH:-}" ] && [ -d "streamline/llvm/bin" ]; then
-  export LIBCLANG_PATH="$PWD/streamline/llvm/bin"
+if [ -z "${LIBCLANG_PATH:-}" ] && [ -d "Dlss_Nvidia_dll/llvm/bin" ]; then
+  export LIBCLANG_PATH="$PWD/Dlss_Nvidia_dll/llvm/bin"
 fi
 if [ -n "${DLSS_SDK:-}" ] && [ -n "${VULKAN_SDK:-}" ]; then
   FEATURES=(--features native-window,dlss)

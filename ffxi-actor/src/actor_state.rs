@@ -87,7 +87,7 @@ pub const BURROW_INVISIBLE_STATUS: u8 = 3;
 /// carries the still-INVISIBLE status byte) and then flips `status` back to visible
 /// with `animationsub` still set for ~2s before it returns to 0. The status
 /// transition is the reliable discriminator between "digging" and "just surfaced",
-/// because `animationsub != 0` is true in both windows.
+/// because the effect selector is active in both windows.
 ///
 /// Retail semantics (FFXiMain.dll, findings F19-F22): dig = sub set on a live actor,
 /// which runs the DAT's `ini1` routine; its clip ends underground and holds — no
@@ -106,9 +106,10 @@ pub const BURROW_INVISIBLE_STATUS: u8 = 3;
 /// interrupted dig or pop-up settles back to idle instead of holding its pose.
 /// (The dirt/sound routine keeps running out; only the clip selection stops.)
 pub fn next_burrow_phase(prev: BurrowPhase, status: u8, animationsub: u8) -> BurrowPhase {
-    // Bit 2 (0x04) of the raw byte is a spawn flag LSB ORs in on spawn; mask it so
-    // only the bare sub-selector counts as an active effect.
-    let sub = animationsub & !0b100;
+    // FFXiMain.dll 0x1009b280 stores low three bits; 0x1008e5a0 indexes
+    // [init, ini1, ini2, ini3] twice at 0x10356df8, so bit 2 aliases the same routine.
+    const EFFECT_SUB_SELECTOR_MASK: u8 = 0x03;
+    let sub = animationsub & EFFECT_SUB_SELECTOR_MASK;
     match prev {
         BurrowPhase::None => {
             if status == BURROW_INVISIBLE_STATUS {
@@ -713,6 +714,31 @@ mod tests {
             next_burrow_phase(BurrowPhase::None, BURROW_INVISIBLE_STATUS, 1),
             BurrowPhase::Underground
         );
+    }
+
+    #[test]
+    fn burrow_ignores_nonselector_flags_from_ordinary_mobs() {
+        // vendor/server/sql/mob_pools.sql: Damselfly=8, sheep=16;
+        // vendor/server/src/map/packets/entity_update.cpp ORs 4 into spawn packets.
+        for sub in [8, 12, 16, 20] {
+            assert_eq!(
+                next_burrow_phase(BurrowPhase::None, 1, sub),
+                BurrowPhase::None,
+                "raw sub={sub}"
+            );
+            assert_eq!(
+                next_burrow_phase(BurrowPhase::PopUp, 1, sub),
+                BurrowPhase::None,
+                "raw sub={sub}"
+            );
+        }
+        for sub in [1, 5, 9, 13, 17, 21] {
+            assert_eq!(
+                next_burrow_phase(BurrowPhase::None, 1, sub),
+                BurrowPhase::DigDown,
+                "raw sub={sub}"
+            );
+        }
     }
 
     #[test]

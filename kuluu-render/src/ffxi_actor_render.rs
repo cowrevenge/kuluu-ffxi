@@ -2008,12 +2008,12 @@ fn advance_actor_pose(
             })
         });
 
-    // Burrowing-mob dig-down / pop-up clip. Overrides idle/movement/rest the way
-    // fishing does; a worm is never moving or attacking while it burrows, so this
-    // only ever wins for entities actually in a burrow phase. Resolves to `None`
-    // (no override) when the model has no matching sp0?/sp1? clip — i.e. every
-    // non-burrowing actor and any burrower whose DAT lacks the clips.
-    let burrow_clip_id = actor_state::burrow_clip(inputs.burrow);
+    // A missing dedicated motion must not make the looping idle fallback a one-shot.
+    let burrow_clip_id = actor_state::burrow_clip(inputs.burrow).filter(|id| {
+        animations
+            .iter()
+            .any(|clip| clip.id.parameterized_match(id))
+    });
 
     let mut one_shot_rest = false;
     let (selected_id, is_idle) = if let Some(id) = action_id {
@@ -2890,9 +2890,6 @@ pub fn tick_live_ffxi_actors(
         for e in &state.snapshot.entities {
             live_ids.insert(e.id);
             let mounted = state.snapshot.mount_of(e).is_some();
-            // Advance the burrow FSM from last frame's phase to this snapshot's
-            // status/animationsub. A no-op (stays `None`) for every non-burrowing
-            // entity, so it is safe to run for all of them.
             let prev_burrow = burrow_mem.get(&e.id).copied().unwrap_or(BurrowPhase::None);
             let burrow = next_burrow_phase(prev_burrow, e.status, e.animationsub);
             match (prev_burrow, burrow) {
@@ -3799,6 +3796,173 @@ mod pose_resolution_tests {
         }
 
         Some(load_pc(1, false, &[], None, None, None).expect("load Hume M"))
+    }
+
+    #[test]
+    fn live_idle_keeps_animating_with_nonselector_flags() {
+        if DatRoot::from_env_or_default().is_err() {
+            return;
+        }
+        bevy::tasks::ComputeTaskPool::get_or_init(Default::default);
+        let mut results = Vec::new();
+        // vendor/server/sql/mob_pools.sql: Damselfly sub=8, sheep sub=16, hare sub=0.
+        for (name, file_id, animationsub) in [
+            ("Damselfly", 1748, 8),
+            ("Sheep", 1640, 16),
+            ("Hare", 1568, 0),
+            ("Damselfly without a dedicated sp1 clip", 1748, 1),
+        ] {
+            let loaded = load_npc(file_id).expect("installed retail NPC DAT");
+            if animationsub == 1 {
+                let dig = actor_state::burrow_clip(actor_state::BurrowPhase::DigDown).unwrap();
+                assert!(!loaded
+                    .all_animations()
+                    .iter()
+                    .any(|clip| clip.id.parameterized_match(&dig)));
+            }
+            let idle_duration = loaded
+                .all_animations()
+                .iter()
+                .filter(|clip| clip.id.parameterized_match(&DatId::from_str("idl?")))
+                .map(SkeletonAnimation::length_in_frames)
+                .fold(0.0f32, f32::max);
+            assert!(idle_duration > 0.0, "{name} must have idle clips");
+            let mut app = App::new();
+            app.init_resource::<Time>()
+                .init_resource::<crate::snapshot::SceneState>()
+                .init_resource::<combat_stance::EntityMotion>()
+                .init_resource::<combat_stance::RestStance>()
+                .init_resource::<combat_stance::WalkMode>()
+                .init_resource::<combat_stance::SelfMoveIntent>()
+                .init_resource::<FfxiSkinRegistry>()
+                .init_resource::<crate::scene::Target>()
+                .init_resource::<crate::scene::TrackedEntities>()
+                .add_systems(Update, tick_live_ffxi_actors);
+            let skin = app
+                .world_mut()
+                .resource_mut::<FfxiSkinRegistry>()
+                .alloc_skin();
+            let actor_entity = app
+                .world_mut()
+                .spawn((
+                    make_render_actor(&loaded, skin, Vec::new(), 1, 0.0, 1.0),
+                    GlobalTransform::default(),
+                    Visibility::Inherited,
+                ))
+                .id();
+            let snapshot = &mut app
+                .world_mut()
+                .resource_mut::<crate::snapshot::SceneState>()
+                .snapshot;
+            snapshot.zone_id = Some(103);
+            snapshot.entities.push(kuluu_snapshot::Entity {
+                id: 1,
+                act_index: 1,
+                kind: kuluu_snapshot::EntityKind::Mob,
+                name: Some(name.into()),
+                pos: kuluu_snapshot::Vec3 {
+                    x: 0.0,
+                    y: 0.0,
+                    z: 0.0,
+                },
+                heading: 0,
+                hp_pct: Some(100),
+                bt_target_id: 0,
+                face_target: 0,
+                claim_id: 0,
+                speed: 0,
+                speed_base: 0,
+                look: None,
+                animation: 0,
+                animationsub: animationsub | 4,
+                mount: None,
+                status: 1,
+                char_flags: Default::default(),
+                monstrosity: false,
+                name_vis: None,
+            });
+            let tick = |app: &mut App| {
+                app.world_mut()
+                    .resource_mut::<Time>()
+                    .advance_by(std::time::Duration::from_secs_f32(1.0 / FRAME_RATE));
+                app.update();
+            };
+            tick(&mut app);
+            app.world_mut()
+                .resource_mut::<crate::snapshot::SceneState>()
+                .snapshot
+                .entities[0]
+                .animationsub = animationsub;
+            for _ in 0..(idle_duration.ceil() as usize * 2 + 1) {
+                tick(&mut app);
+            }
+            let pose = app
+                .world()
+                .get::<FfxiRenderActor>(actor_entity)
+                .unwrap()
+                .world_pose()
+                .to_vec();
+            let mut moved = false;
+            for _ in 0..(idle_duration.ceil() as usize + 1) {
+                tick(&mut app);
+                let actor = app.world().get::<FfxiRenderActor>(actor_entity).unwrap();
+                moved |= pose
+                    .iter()
+                    .zip(actor.world_pose())
+                    .any(|(a, b)| !a.abs_diff_eq(*b, 1e-5));
+            }
+            let actor = app.world().get::<FfxiRenderActor>(actor_entity).unwrap();
+            let healthy = moved
+                && (animationsub == 1 || actor.inputs.burrow == actor_state::BurrowPhase::None)
+                && !actor.burrow_holding;
+            results.push((
+                healthy,
+                format!(
+                    "{name}: moved={moved}, phase={:?}, selected={:?}, resolved={:?}, frame={}",
+                    actor.inputs.burrow, actor.current_clip, actor.last_clip, actor.last_frame
+                ),
+            ));
+        }
+        assert!(
+            results.iter().all(|(moved, _)| *moved),
+            "{}",
+            results
+                .iter()
+                .map(|(_, detail)| detail.as_str())
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+    }
+
+    #[test]
+    fn worm_dig_keeps_its_dedicated_one_shot() {
+        if DatRoot::from_env_or_default().is_err() {
+            return;
+        }
+        // Installed ROM/5/64.DAT, the F19-F22 worm reference.
+        let loaded =
+            load_npc(crate::look_resolver::npc_dat_id(0x01a8)).expect("installed worm DAT");
+        let dig = actor_state::burrow_clip(actor_state::BurrowPhase::DigDown).unwrap();
+        let duration = loaded
+            .all_animations()
+            .iter()
+            .filter(|clip| clip.id.parameterized_match(&dig))
+            .map(SkeletonAnimation::length_in_frames)
+            .fold(0.0f32, f32::max);
+        assert!(duration > 0.0, "worm has dedicated dig clips");
+        let mut actor = make_render_actor(&loaded, 0, Vec::new(), 1, 0.0, 1.0);
+        actor.inputs.burrow = actor_state::BurrowPhase::DigDown;
+        for _ in 0..(duration.ceil() as usize * 2 + 1) {
+            advance_actor_pose_standalone(&mut actor, 1.0, None);
+        }
+        assert!(actor
+            .last_clip
+            .is_some_and(|id| id.parameterized_match(&dig)));
+        assert!(actor.burrow_holding);
+        let buried_pose = actor.world_pose().to_vec();
+        advance_actor_pose_standalone(&mut actor, duration, None);
+        assert_eq!(actor.world_pose(), buried_pose);
+        assert!(actor.burrow_holding);
     }
 
     #[test]

@@ -105,13 +105,14 @@ run_style() {
 }
 
 run_harness() {
-  # Invariants of the `.agents/` canonical + `.claude/` adapter split
+  # Invariants of the `.agents/` canonical + harness-adapter split
   # (.agents/AGENTS.md holds the mechanism→wiring table this enforces).
   # Pure shell, no cargo — runs first in pre-push because it costs ~nothing.
   # ffxi-agent/ is deliberately out of scope: it ships its own real .claude/
   # tree as the runtime playbook for an agent playing the game.
   local settings=".claude/settings.json" codex_hooks=".codex/hooks.json"
   local codex_config=".codex/config.toml" bad=0 link target cmd path doc
+  local hook hook_file recipe check_output
 
   # 1. Every tracked entry under .claude/ is a symlink resolving inside
   #    .agents/, or settings.json itself. Content never lives here.
@@ -152,17 +153,56 @@ run_harness() {
     fi
   done < <(jq -r '.hooks | to_entries[].value[].hooks[]?.command // empty' "$settings" 2>/dev/null)
 
+  # 3. Beads owns its generated harness adapters. Pin the required shape for
+  #    CI, then ask bd itself to detect version drift when it is installed.
   if ! grep -qx 'hooks = true' "$codex_config" 2>/dev/null; then
     echo "checks: harness — $codex_config does not enable native hooks" >&2
     bad=1
   fi
-  if ! jq -e '.hooks.SessionStart[0].hooks[0].command == ".agents/hooks/beads-prime-start.sh"' \
-    "$codex_hooks" >/dev/null 2>&1; then
-    echo "checks: harness — $codex_hooks must register the shared Beads context hook" >&2
+  if ! jq -e '
+      ([.hooks.SessionStart[]?.hooks[]? | select(.command == "bd codex-hook SessionStart")] | length == 1) and
+      ([.hooks.PreCompact[]?.hooks[]? | select(.command == "bd codex-hook PreCompact")] | length == 1) and
+      ([.hooks.PostCompact[]?.hooks[]? | select(.command == "bd codex-hook PostCompact")] | length == 1) and
+      ([.hooks.UserPromptSubmit[]?.hooks[]? | select(.command == "bd codex-hook UserPromptSubmit")] | length == 1)
+    ' "$codex_hooks" >/dev/null 2>&1; then
+    echo "checks: harness — $codex_hooks does not contain one canonical hook per Beads lifecycle event" >&2
     bad=1
   fi
+  if ! jq -e '
+      [.hooks.SessionStart[]?.hooks[]? | select(.command == "bd prime --hook-json")] | length == 1
+    ' "$settings" >/dev/null 2>&1; then
+    echo "checks: harness — $settings must register exactly one Beads SessionStart hook" >&2
+    bad=1
+  fi
+  if ! grep -q '<!-- BEGIN BEADS CODEX SETUP:' AGENTS.md \
+    || ! grep -q '<!-- BEGIN BEADS INTEGRATION ' AGENTS.md; then
+    echo "checks: harness — AGENTS.md is missing a Beads-managed Codex or AGENTS-aware section" >&2
+    bad=1
+  fi
+  if command -v bd >/dev/null 2>&1; then
+    for recipe in codex claude factory; do
+      if ! check_output=$(bd setup "$recipe" --check 2>&1); then
+        echo "checks: harness — stale Beads $recipe integration:" >&2
+        echo "$check_output" >&2
+        bad=1
+      fi
+    done
+  fi
 
-  # 3. No tracked doc points readers at a root .claude/ path that isn't one the
+  # 4. Git has one core.hooksPath, so the versioned project hooks explicitly
+  #    dispatch every Beads lifecycle event.
+  for hook in pre-commit post-merge pre-push post-checkout prepare-commit-msg; do
+    hook_file=".githooks/$hook"
+    if [[ ! -x "$hook_file" ]]; then
+      echo "checks: harness — missing or non-executable git hook: $hook_file" >&2
+      bad=1
+    elif ! grep -Fq "bd hooks run $hook" "$hook_file"; then
+      echo "checks: harness — $hook_file does not dispatch Beads' $hook lifecycle" >&2
+      bad=1
+    fi
+  done
+
+  # 5. No tracked doc points readers at a root .claude/ path that isn't one the
   #    harness really owns — that is exactly the drift this stage exists to kill
   #    (AGENTS.md long claimed the hooks lived in .claude/hooks/). `~/.claude/…`
   #    is a user-home path, not this adapter, so the regex requires a non-path

@@ -9,12 +9,18 @@
 # Install (per clone): scripts/install-hooks.sh   (sets core.hooksPath=.githooks)
 set -euo pipefail
 
+export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
+
 if [[ "${SKIP_PREPUSH:-}" == "1" ]]; then
   echo "pre-push: skipped (SKIP_PREPUSH=1)"
   exit 0
 fi
 
 cd "$(git rev-parse --show-toplevel)"
+
+if command -v bd >/dev/null 2>&1; then
+  bd hooks run pre-push "$@"
+fi
 
 # Delegate the actual fmt/clippy invocation to the shared script so this gate
 # and CI run byte-identical flags. A green hook therefore proves a green CI

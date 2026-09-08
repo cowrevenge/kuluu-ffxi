@@ -1655,6 +1655,7 @@ impl SessionState {
                     self.entity_index.insert(entity.id, self.entities.len());
                     self.entities.push(inserted);
                     self.pending_entity_upserts.insert(entity.id);
+                    self.pending_entity_removals.remove(&entity.id);
                     true
                 }
             }

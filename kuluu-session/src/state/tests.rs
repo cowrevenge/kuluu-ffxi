@@ -2444,3 +2444,28 @@ fn self_position_events_stamp_the_self_id() {
     let (up, _) = s.take_pending_entities();
     assert!(up.is_empty(), "identical self position must not stamp");
 }
+
+#[test]
+fn respawn_cancels_pending_removal_before_batch_drain() {
+    let mut state = SessionState::default();
+    for event in [
+        AgentEvent::EntityUpserted {
+            entity: make_test_entity(9, Some("old"), EntityKind::Mob),
+            pos_present: true,
+        },
+        AgentEvent::EntityRemoved { id: 9 },
+        AgentEvent::EntityUpserted {
+            entity: make_test_entity(9, Some("new"), EntityKind::Mob),
+            pos_present: true,
+        },
+    ] {
+        assert!(state.apply_event(&event));
+    }
+    let (upserts, removals) = state.take_pending_entities();
+    assert_eq!(upserts, std::collections::HashSet::from([9]));
+    assert!(removals.is_empty());
+    assert_eq!(
+        state.entities[state.entity_index[&9]].name.as_deref(),
+        Some("new")
+    );
+}

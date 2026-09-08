@@ -116,6 +116,20 @@ Bevy systems: scene graph, chase camera + collision, HUD (`hud/`), minimap, pick
 
 Wire decoders/encoders, coord transforms, session-state transitions, shared numeric constants, and lifecycle assumptions are validated against an authoritative upstream (LandSandBoat). Source that crosses this boundary cites the upstream file in a comment (e.g. `vendor/server/...`; `research/Phoenix/...` when a local Phoenix clone supplied the divergence signal). Two review agents exist specifically for it — `protocol-conformance-reviewer` (audit diffs against the authoritative source) and `lsb-invariant-prober` (propose unit tests pinning LSB invariants). Prefer them after non-trivial edits to `ffxi-proto/` or `kuluu-session/src/` (`session/`, `wire_translate.rs`, `map_client.rs`, `reactor.rs`, `state.rs`) or `ffxi-nav-recast/`.
 
+### Retail is the client-behavior oracle
+
+Before implementing or changing vanilla client behavior, use the
+[retail-grounding skill](.agents/skills/retail-grounding/SKILL.md) to establish
+the rule from the strongest relevant evidence available: retail observation,
+client binary/DAT inspection, or the ranked references in `research/AGENTS.md`.
+Reuse applicable verified findings; do not require a fresh disassembly for every
+edit. LSB is authoritative for server semantics, not a substitute for the
+client's rendering, camera, animation or UI policies. Record the decisive source
+and any unverified inference in the bead, then verify the implemented behavior.
+Unavailable retail access should narrow the claim, not silently turn a community
+approximation into vanilla truth or block unrelated work. Product-only tooling
+and explicitly requested enhancements do not acquire a retail-parity gate.
+
 ### Build-time vendor scrape (no hand-maintained tables)
 
 `build.rs` in `ffxi-proto`/`ffxi-vocab`/`ffxi-dat`/`kuluu-nav`/`ffxi-audio` (sharing the `lsb-scrape` helper crate) reads LSB SQL/headers/lua and POLUtils XML out of `vendor/` and emits **compile-time Rust constants** (blowfish subkeys, zlib tables, msg/effect/job/spell/item names, zone-DAT id formulas, ROM file mappings). Never hand-copy these values — update the upstream pin and let the build regenerate them (see the `vendor-scrape` skill). The vendor submodules are **build-only**; nothing under `vendor/` (except a user's `game-files/`) is needed at runtime.

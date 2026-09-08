@@ -294,6 +294,15 @@ fn update_with_parent_override(
     }
 }
 
+// FFXiMain.dll 0x1002b9a0 (SHA256 f4f90fbd080c05448aab3f866b127d7c1675b3cc15c8beaa57bfc584064b7e7c),
+// corroborated by research/XIClient/src/XIClient/source/World/Model/ModelInstance.cpp:
+// locator 2 bypasses animated bones and facing. Scale is in DAT axes (retail Model.Scale.x,z,y).
+pub fn nameplate_locator_offset(skeleton: &Skeleton, dat_axis_scale: Vec3) -> Option<Vec3> {
+    let reference = skeleton.reference_at(ffxi_dat::skel::standard_position::ABOVE_HEAD)?;
+    let offset = arr3(reference.position_offset) * dat_axis_scale;
+    offset.is_finite().then_some(offset)
+}
+
 pub fn standard_joint_world_position(
     world: &[Mat4],
     skeleton: &Skeleton,
@@ -746,6 +755,63 @@ mod tests {
             approx(child_t, Vec3::new(0.0, 5.0, 0.0), 1e-4),
             "child = {child_t}"
         );
+    }
+
+    #[test]
+    fn nameplate_locator_uses_static_translation_without_bone_pose_or_facing() {
+        use ffxi_dat::skel::standard_position::ABOVE_HEAD;
+        let mut skeleton = skel(vec![joint(None, [30.0, -40.0, 50.0])]);
+        skeleton.references.resize(
+            ABOVE_HEAD + 1,
+            JointReference {
+                index: 0,
+                unk_v0: [0.0; 3],
+                position_offset: [1.0, -4.0, 5.0],
+            },
+        );
+        let expected = Vec3::new(2.0, -12.0, 20.0);
+        let scale = Vec3::new(2.0, 3.0, 4.0);
+        for facing_dir in [0.0, 1.0, 2.0] {
+            let world = pose_world(
+                &skeleton,
+                |_| {
+                    Some(KeyFrameTransform {
+                        rotation: [0.0, 0.0, 0.0, 1.0],
+                        translation: [100.0, 200.0, 300.0],
+                        scale: [2.0, 2.0, 2.0],
+                    })
+                },
+                RootTransform {
+                    facing_dir,
+                    scale,
+                    ..RootTransform::identity()
+                },
+                &[],
+            );
+            assert_ne!(
+                standard_joint_world_position(&world, &skeleton, ABOVE_HEAD),
+                Some(expected)
+            );
+            assert_eq!(nameplate_locator_offset(&skeleton, scale), Some(expected));
+        }
+        skeleton.references[ABOVE_HEAD].index = usize::MAX;
+        assert_eq!(nameplate_locator_offset(&skeleton, scale), Some(expected));
+    }
+
+    #[test]
+    fn nameplate_locator_missing_or_nonfinite_is_unavailable() {
+        use ffxi_dat::skel::standard_position::ABOVE_HEAD;
+        let mut skeleton = skel(vec![]);
+        assert_eq!(nameplate_locator_offset(&skeleton, Vec3::ONE), None);
+        skeleton.references.resize(
+            ABOVE_HEAD + 1,
+            JointReference {
+                index: 0,
+                unk_v0: [0.0; 3],
+                position_offset: [0.0, f32::NAN, 0.0],
+            },
+        );
+        assert_eq!(nameplate_locator_offset(&skeleton, Vec3::ONE), None);
     }
 
     #[test]

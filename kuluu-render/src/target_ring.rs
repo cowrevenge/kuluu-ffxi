@@ -2,10 +2,10 @@ use std::f32::consts::TAU;
 
 use bevy::prelude::*;
 
-use crate::camera::{nameplate_anchor_y, OperatorCamera};
+use crate::camera::{nameplate_anchor, OperatorCamera};
 use crate::components::WorldEntity;
 use crate::entity_table::EntityTable;
-use crate::scene::{BakedActor, Target};
+use crate::scene::{BakedActor, NameplateLocator, Target};
 
 const ARROW_COLOR: Color = Color::srgb(1.00, 0.96, 0.60);
 
@@ -119,7 +119,7 @@ pub fn draw_target_arrow_system(
     world_q: Query<(
         &Transform,
         &WorldEntity,
-        Option<&BakedActor>,
+        Option<&NameplateLocator>,
         Has<crate::components::MountedRider>,
     )>,
     mut gizmos: Gizmos,
@@ -134,16 +134,16 @@ pub fn draw_target_arrow_system(
 
     let fill = target_ring_color(engaged_on(&table, target_id));
 
-    for (t, w, baked, mounted) in &world_q {
+    for (t, w, locator, mounted) in &world_q {
         if w.id != target_id {
             continue;
         }
 
-        let tip_y = t.translation.y
-            + nameplate_anchor_y(baked, mounted)
-            + ARROW_TIP_ABOVE_ANCHOR
-            + arrow_bob_offset(time.elapsed_secs());
-        let apex = Vec3::new(t.translation.x, tip_y, t.translation.z);
+        let Some(anchor) = nameplate_anchor(t, locator, mounted) else {
+            continue;
+        };
+        let apex =
+            anchor + Vec3::Y * (ARROW_TIP_ABOVE_ANCHOR + arrow_bob_offset(time.elapsed_secs()));
         draw_camera_facing_arrow(&mut gizmos, apex, cam_pos, fill, ARROW_BORDER_COLOR);
         break;
     }
@@ -166,7 +166,7 @@ pub fn draw_sub_target_cursor_system(
     world_q: Query<(
         &Transform,
         &WorldEntity,
-        Option<&BakedActor>,
+        Option<&NameplateLocator>,
         Has<crate::components::MountedRider>,
     )>,
     mut gizmos: Gizmos,
@@ -191,7 +191,7 @@ pub fn draw_sub_target_cursor_system(
         .find(|(_, w, _, _)| table.is_self(w.id))
         .map(|(t, _, _, _)| t.translation);
 
-    for (t, w, baked, mounted) in &world_q {
+    for (t, w, locator, mounted) in &world_q {
         if w.id != candidate {
             continue;
         }
@@ -205,11 +205,11 @@ pub fn draw_sub_target_cursor_system(
             None => ARROW_COLOR,
         };
 
-        let tip_y = t.translation.y
-            + nameplate_anchor_y(baked, mounted)
-            + ARROW_TIP_ABOVE_ANCHOR
-            + arrow_bob_offset(time.elapsed_secs());
-        let apex = Vec3::new(t.translation.x, tip_y, t.translation.z);
+        let Some(anchor) = nameplate_anchor(t, locator, mounted) else {
+            continue;
+        };
+        let apex =
+            anchor + Vec3::Y * (ARROW_TIP_ABOVE_ANCHOR + arrow_bob_offset(time.elapsed_secs()));
         draw_camera_facing_arrow(&mut gizmos, apex, cam_pos, fill, ARROW_BORDER_COLOR);
         break;
     }

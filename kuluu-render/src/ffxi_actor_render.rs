@@ -206,8 +206,7 @@ pub struct PreparedParts {
 
     /// Bind-pose bounds of the assembled actor in bevy space (feet at y≈0),
     /// computed with the same facing/scale as `bind_joints` — i.e. the mesh as
-    /// drawn. Feeds BakedActor on spawn so nameplate/camera/hitbox anchors are
-    /// per-model instead of the 2.3 fallback (kuluu-81r8).
+    /// drawn. Feeds camera and hitbox bounds.
     pub bounds: Option<(Vec3, Vec3)>,
 }
 
@@ -1601,6 +1600,12 @@ pub fn spawn_live_actor(
     world_id: u32,
     scale: f32,
 ) -> Entity {
+    commands
+        .entity(wire_entity)
+        .insert(crate::scene::NameplateLocator::from_skeleton(
+            &prepared.loaded.skeleton,
+            scale,
+        ));
     let facing_dir = 0.0;
 
     let skin_slot = registry.alloc_skin();
@@ -2602,22 +2607,7 @@ pub fn poll_load_actor_tasks(
             },
         ));
 
-        // The live path is the only model source that never reached a BakedActor
-        // write site, so every plate/camera/hitbox anchored at
-        // FALLBACK_ACTOR_HEIGHT (2.3) — one height for a Tarutaru and a Galka
-        // alike (kuluu-81r8). The bind-pose bounds are the mesh as drawn:
-        // actor_root sits at zero translation on the wire entity, so this local
-        // Y range is exactly what nameplate_anchor_y / hitbox_dims /
-        // third_person_anchor_y need. Replace semantics: re-equipping must move
-        // the anchor to the new outfit's extent (same rule as the VOS2 paths).
-        //
-        // NPCs are excluded: mob bind poses do not describe the model as drawn —
-        // the idle/hover routine lifts the body clear of its rest position, so a
-        // span-based anchor lands inside or below the silhouette (Huge Hornet,
-        // dat 1556: bind span 0.68 vs drawn range [1.4, 2.4]; pinned in
-        // pose_resolution_tests). Retail anchors on the AboveHead locator that
-        // moves with the animation; until we track it per frame, mobs keep the
-        // flat fallback.
+        // Animated mob extents need their own camera/picking policy; locator metadata is independent.
         if !matches!(key.as_ref(), Some(ActorPrepKey::Npc { .. })) {
             if let Some((lo, hi)) = prepared.parts.bounds {
                 commands.entity(wire_entity).insert(BakedActor {
@@ -3811,12 +3801,42 @@ mod pose_resolution_tests {
         Some(load_pc(1, false, &[], None, None, None).expect("load Hume M"))
     }
 
-    /// Pins the live-path anchor source against the real DAT (kuluu-81r8):
-    /// bind-pose bounds must put feet at y≈0 and differ per race — that is what
-    /// BakedActor carries to nameplate_anchor_y / hitbox_dims /
-    /// third_person_anchor_y. Before this test's fix the live path never wrote
-    /// BakedActor at all, so every plate anchored at FALLBACK_ACTOR_HEIGHT (2.3):
-    /// one height for a Tarutaru and a Galka alike. Self-skips without an install.
+    #[test]
+    fn nameplate_locators_match_installed_retail_dat_measurements() {
+        if DatRoot::from_env_or_default().is_err() {
+            return;
+        }
+        // Installed DATs measured alongside FFXiMain.dll 0x1002b9a0 (kuluu-81r8).
+        let models = [
+            (
+                "Tarutaru",
+                load_pc(5, false, &[], None, None, None).unwrap(),
+                1.3,
+            ),
+            (
+                "Galka",
+                load_pc(8, false, &[], None, None, None).unwrap(),
+                2.6,
+            ),
+            ("Damselfly", load_npc(1748).unwrap(), 3.5),
+        ];
+        for (name, loaded, expected_y) in models {
+            let locator = crate::scene::NameplateLocator::from_skeleton(&loaded.skeleton, 1.0);
+            let expected = Vec3::Y * expected_y;
+            assert!(
+                (locator.offset.unwrap() - expected).length() < 1e-5,
+                "{name}"
+            );
+            let mut actor = make_render_actor(&loaded, 0, Vec::new(), 1, 0.0, 1.0);
+            for frame in [0.0, 8.0, 16.0] {
+                advance_actor_pose_standalone(&mut actor, frame, None);
+                let current =
+                    crate::scene::NameplateLocator::from_skeleton(&actor.skeleton, actor.scale);
+                assert_eq!(current.offset, locator.offset, "{name} at {frame}");
+            }
+        }
+    }
+
     #[test]
     fn bind_pose_bounds_are_feet_origin_and_race_specific() {
         if DatRoot::from_env_or_default().is_err() {
@@ -3896,13 +3916,6 @@ mod pose_resolution_tests {
         (lo, hi)
     }
 
-    /// Why the live path withholds BakedActor from NPCs (kuluu-81r8): a mob's
-    /// bind pose does not describe the model as drawn. Huge Hornet's rest-pose
-    /// span is 0.68, but its idle routine draws the body at [1.4, 2.4] above
-    /// the wire position — a span-based anchor would sit below the silhouette.
-    /// Retail anchors on the AboveHead locator that moves with the animation;
-    /// until we track it per frame, mobs keep the flat fallback. Self-skips
-    /// without an install.
     #[test]
     fn npc_bind_pose_does_not_describe_the_drawn_extent() {
         if DatRoot::from_env_or_default().is_err() {

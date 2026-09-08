@@ -7,9 +7,9 @@ use bevy::light::{NotShadowCaster, NotShadowReceiver};
 use bevy::prelude::*;
 use kuluu_snapshot::EntityKind;
 
-use crate::camera::{nameplate_anchor_y, CameraMode, OperatorCamera};
+use crate::camera::{nameplate_anchor, CameraMode, OperatorCamera};
 use crate::components::{InGameEntity, Nameplate, WorldEntity};
-use crate::scene::{BakedActor, Target};
+use crate::scene::{NameplateLocator, Target};
 // Retail advances the targeted-nameplate pulse once per rendered frame.
 use crate::nameplate_icons::REFERENCE_LETTER;
 use crate::scheduler_runtime::RETAIL_FPS;
@@ -285,7 +285,7 @@ pub fn update_nameplate_billboards_system(
         (
             &Transform,
             &WorldEntity,
-            Option<&BakedActor>,
+            Option<&NameplateLocator>,
             Has<crate::components::MountedRider>,
         ),
         Without<NameplateBillboard>,
@@ -319,10 +319,10 @@ pub fn update_nameplate_billboards_system(
     let line_px = text_line_height_px(&raster.font.0, NAME_PX) as f32;
     let pulse_frame = (time.elapsed_secs() * RETAIL_FPS) as u32;
 
-    let mut pos_by_id: std::collections::HashMap<u32, (Vec3, f32)> =
+    let mut pos_by_id: std::collections::HashMap<u32, Option<Vec3>> =
         std::collections::HashMap::with_capacity(world_q.iter().len());
-    for (t, w, baked, mounted) in &world_q {
-        pos_by_id.insert(w.id, (t.translation, nameplate_anchor_y(baked, mounted)));
+    for (t, w, locator, mounted) in &world_q {
+        pos_by_id.insert(w.id, nameplate_anchor(t, locator, mounted));
     }
 
     let self_char_id: Option<u32> = state.snapshot.self_char_id;
@@ -343,7 +343,7 @@ pub fn update_nameplate_billboards_system(
             .collect();
         for rec in table.iter() {
             let id = rec.entity.id;
-            if have.contains(&id) || !pos_by_id.contains_key(&id) {
+            if have.contains(&id) || !pos_by_id.get(&id).is_some_and(Option::is_some) {
                 continue;
             }
             let Some(name) = rec.entity.name.as_deref().filter(|s| !s.is_empty()) else {
@@ -422,13 +422,16 @@ pub fn update_nameplate_billboards_system(
             continue;
         }
 
-        let Some(&(entity_pos, head_y_offset)) = pos_by_id.get(&np.entity_id) else {
+        let Some(&anchor) = pos_by_id.get(&np.entity_id) else {
             despawned += 1;
             commands.entity(ui_entity).try_despawn();
             continue;
         };
 
-        let head_pos = entity_pos + Vec3::Y * head_y_offset;
+        let Some(head_pos) = anchor else {
+            *vis = Visibility::Hidden;
+            continue;
+        };
         let view_depth = (head_pos - cam_pos).dot(cam_forward);
         // View-depth gate. Behind the camera forward plane (or inside
         // MIN_VIEW_DEPTH_YALMS) the plate is hidden and its transform/pulse
@@ -1424,6 +1427,100 @@ mod icon_raster_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn nameplate_system_hides_during_loading_and_restores_without_a_snapshot() {
+        let mut app = App::new();
+        app.init_resource::<SceneState>()
+            .init_resource::<crate::graphics::settings::GraphicsSettings>()
+            .init_resource::<CameraMode>()
+            .init_resource::<Time>()
+            .init_resource::<Target>()
+            .init_resource::<Assets<Mesh>>()
+            .init_resource::<Assets<StandardMaterial>>()
+            .init_resource::<Assets<Image>>()
+            .init_resource::<BillboardFont>()
+            .init_resource::<crate::nameplate_color::NameColorTable>()
+            .init_resource::<crate::nameplate_icons::NameplateIcons>()
+            .init_resource::<NameplateBillboardDebug>()
+            .init_resource::<crate::entity_table::EntityTable>()
+            .add_systems(Update, update_nameplate_billboards_system);
+        app.world_mut().spawn((
+            OperatorCamera,
+            Transform::default(),
+            Projection::Perspective(PerspectiveProjection::default()),
+        ));
+        let actor = app
+            .world_mut()
+            .spawn((
+                Transform::from_xyz(0.0, 0.0, -10.0),
+                WorldEntity {
+                    id: 1,
+                    act_index: 1,
+                    kind: EntityKind::Mob,
+                },
+            ))
+            .id();
+        let plate = app
+            .world_mut()
+            .spawn((
+                NameplateBillboard {
+                    entity_id: 1,
+                    kind: EntityKind::Mob,
+                    base_name: "Damselfly".into(),
+                    rastered: None,
+                    last_alpha: 1.0,
+                },
+                BillboardAspect {
+                    width: 130,
+                    height: 130,
+                    text_center_y_px: 53.0,
+                },
+                Transform::default(),
+                Visibility::Visible,
+                MeshMaterial3d::<StandardMaterial>(Handle::default()),
+            ))
+            .id();
+        app.update();
+        assert_eq!(
+            app.world().get::<Visibility>(plate),
+            Some(&Visibility::Hidden)
+        );
+        app.world_mut().entity_mut(actor).insert(NameplateLocator {
+            offset: Some(Vec3::Y * 3.5),
+            root_attached: true,
+            model_scale: 1.0,
+        });
+        app.update();
+        assert_eq!(
+            app.world().get::<Visibility>(plate),
+            Some(&Visibility::Visible)
+        );
+        let position = app.world().get::<Transform>(plate).unwrap().translation;
+        assert!((position.y - 3.5).abs() < 1e-5);
+        app.world_mut()
+            .entity_mut(actor)
+            .remove::<NameplateLocator>();
+        app.update();
+        assert_eq!(
+            app.world().get::<Visibility>(plate),
+            Some(&Visibility::Hidden)
+        );
+        app.world_mut().entity_mut(actor).insert(NameplateLocator {
+            offset: Some(Vec3::Y * 2.6),
+            root_attached: true,
+            model_scale: 1.0,
+        });
+        app.update();
+        assert_eq!(
+            app.world().get::<Visibility>(plate),
+            Some(&Visibility::Visible)
+        );
+        assert!((app.world().get::<Transform>(plate).unwrap().translation.y - 2.6).abs() < 1e-5);
+        app.world_mut().despawn(actor);
+        app.update();
+        assert!(app.world().get_entity(plate).is_err());
+    }
 
     #[test]
     fn text_line_pins_to_one_anchor_height_with_or_without_icons() {

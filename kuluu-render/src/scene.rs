@@ -39,6 +39,30 @@ pub struct BakedActor {
     pub actor_height: f32,
 }
 
+#[derive(Component, Clone, Copy, Debug)]
+pub struct NameplateLocator {
+    pub offset: Option<Vec3>,
+    pub root_attached: bool,
+    pub model_scale: f32,
+}
+
+impl NameplateLocator {
+    pub fn from_skeleton(skeleton: &ffxi_dat::skel::Skeleton, model_scale: f32) -> Self {
+        let offset = ffxi_actor::skeleton_instance::nameplate_locator_offset(
+            skeleton,
+            Vec3::splat(model_scale),
+        )
+        .map(|p| Vec3::new(p.x, -p.y, -p.z));
+        Self {
+            offset,
+            root_attached: skeleton
+                .reference_at(ffxi_dat::skel::standard_position::ABOVE_HEAD)
+                .is_some_and(|r| r.index == 0),
+            model_scale,
+        }
+    }
+}
+
 const VISUAL_SMOOTH: f32 = 0.4;
 const SNAP_DIST_SQ: f32 = 4.0;
 

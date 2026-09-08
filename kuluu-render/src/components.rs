@@ -16,7 +16,7 @@ pub struct InGameEntity;
 
 /// On an entity currently riding a mount, whose body its animation lifts clear
 /// of the ground the entity Transform still sits on. Anything anchored off that
-/// Transform has to answer for the difference — see [`crate::camera::nameplate_anchor_y`].
+/// Transform has to answer for the difference — see [`crate::camera::nameplate_anchor`].
 #[derive(Component, Debug, Clone, Copy)]
 pub struct MountedRider;
 

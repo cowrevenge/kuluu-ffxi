@@ -75,6 +75,13 @@ const ADVANCED_EXPANDED: &str = "v Advanced - light tuning";
 #[derive(Component)]
 pub(super) struct DlssRow;
 
+/// A top-level DLSS surface (the main "DLSS" on/off row and the "> DLSS configuration"
+/// disclosure button) that vanishes entirely when this build can't run DLSS - distinct from
+/// [`DlssRow`], which additionally collapses under the disclosure. Driven by
+/// [`redraw_dlss_visibility`] off `GraphicsSettings::dlss_supported`.
+#[derive(Component)]
+pub(super) struct DlssGated;
+
 /// The DLSS disclosure row's label text, swapped between `>` and `v`.
 #[derive(Component)]
 pub(super) struct DlssToggleLabel;
@@ -191,8 +198,9 @@ pub(super) fn spawn_ui(
                                     // launcher's face of the in-game DLSS
                                     // Config submenu. Quality is the live
                                     // knob; the rest are the inert RenoDX
-                                    // placeholders (always N/A).
-                                    list.spawn(row()).with_children(|r| {
+                                    // placeholders (always N/A). Hidden entirely when
+                                    // this build can't run DLSS (see redraw_dlss_visibility).
+                                    list.spawn((row(), DlssGated)).with_children(|r| {
                                         r.spawn(button_bundle(
                                             ButtonBundleProps {
                                                 variant: ButtonVariant::Normal,
@@ -361,10 +369,13 @@ fn spawn_field_row(
     dlss_open: bool,
 ) {
     let value_color = Color::srgb(0.92, 0.92, 0.95);
+    // The main "DLSS" on/off row and the whole DLSS-configuration block are absent
+    // (not just N/A) when this build can't run DLSS - see redraw_dlss_visibility.
+    let dlss_supported = settings.dlss_supported;
     let visible = match group {
-        RowGroup::Main => true,
+        RowGroup::Main => !(field == GraphicsField::Dlss && !dlss_supported),
         RowGroup::Advanced => advanced_open,
-        RowGroup::Dlss => dlss_open,
+        RowGroup::Dlss => dlss_open && dlss_supported,
     };
     let mut row_cmd = panel.spawn(Node {
         width: Val::Percent(100.0),
@@ -386,6 +397,9 @@ fn spawn_field_row(
         RowGroup::Dlss => {
             row_cmd.insert(DlssRow);
         }
+    }
+    if field == GraphicsField::Dlss {
+        row_cmd.insert(DlssGated);
     }
     row_cmd.with_children(|rowc| {
         rowc.spawn((
@@ -485,31 +499,53 @@ pub(super) fn redraw_advanced_visibility(
     }
 }
 
-/// Show/hide the DLSS config rows and flip the `>`/`v` disclosure label when
-/// the user toggles the DLSS configuration row - the [`redraw_advanced_visibility`]
-/// twin for [`DlssRow`]/[`GraphicsDlssOpen`].
+/// Show/hide the DLSS surfaces and flip the `>`/`v` disclosure label. Top-level
+/// surfaces ([`DlssGated`: the main "DLSS" row + the "> DLSS configuration" disclosure)
+/// vanish entirely when this build can't run DLSS (`dlss_supported` false - not built with
+/// the feature, or no RTX/Vulkan/DLLs); the config sub-rows ([`DlssRow`]) additionally
+/// collapse under the disclosure. Runs every frame (idempotent writes) so a late
+/// `dlss_supported` flip from `update_dlss_availability_system` is picked up even if it lands
+/// after this system in the frame.
 pub(super) fn redraw_dlss_visibility(
+    settings: Res<GraphicsSettings>,
     open: Res<GraphicsDlssOpen>,
-    mut rows: Query<&mut Node, With<DlssRow>>,
+    // The markers are exclusive by construction (top-level surface vs
+    // collapsible sub-row), so the mutual Without keeps these provably
+    // disjoint - Bevy rejects two &mut Node queries that could share an entity.
+    mut gated: Query<&mut Node, (With<DlssGated>, Without<DlssRow>)>,
+    mut rows: Query<&mut Node, (With<DlssRow>, Without<DlssGated>)>,
     mut labels: Query<&mut Text, With<DlssToggleLabel>>,
 ) {
-    if !open.is_changed() {
-        return;
-    }
-    let display = if open.0 { Display::Flex } else { Display::None };
-    for mut node in rows.iter_mut() {
-        if node.display != display {
-            node.display = display;
+    let supported = settings.dlss_supported;
+    for mut node in gated.iter_mut() {
+        let want = if supported {
+            Display::Flex
+        } else {
+            Display::None
+        };
+        if node.display != want {
+            node.display = want;
         }
     }
-    let want = if open.0 {
+    let sub_display = if supported && open.0 {
+        Display::Flex
+    } else {
+        Display::None
+    };
+    for mut node in rows.iter_mut() {
+        if node.display != sub_display {
+            node.display = sub_display;
+        }
+    }
+    // The disclosure label only matters while its row is visible.
+    let want_label = if open.0 {
         DLSS_EXPANDED
     } else {
         DLSS_COLLAPSED
     };
     for mut text in labels.iter_mut() {
-        if text.0 != want {
-            text.0 = want.to_string();
+        if text.0 != want_label {
+            text.0 = want_label.to_string();
         }
     }
 }

@@ -236,6 +236,7 @@ pub fn step(
     speed_yps: f32,
     dt: f32,
     noclip: bool,
+    geometry_ready: bool,
 ) -> StepResult {
     let feet_xz = Vec2::new(x, -y);
     let feet_y = -z_wire;
@@ -324,37 +325,60 @@ pub fn step(
     // ---- 3. Vertical --------------------------------------------------------
     let mut y_new = feet_y;
     let decision = if was_airborne {
-        // Gravity (plan §2.3): vy -= g*dt clamped to -v_max, then integrate.
-        let prev_vy = match state.mode {
-            WalkMode::Airborne { vy } => vy,
-            _ => 0.0,
-        };
-        let vy = (prev_vy - state.fall.g * dt).max(-state.fall.v_max);
-        y_new = feet_y + vy * dt;
+        if !geometry_ready {
+            // No floor source for this zone yet (main MZB block not landed):
+            // nothing to fall through — hold the server-seeded height instead of
+            // integrating gravity against an empty column set. y_new stays feet_y.
+            state.mode = if want_len > 1e-6 {
+                WalkMode::Walking
+            } else {
+                WalkMode::Stopped
+            };
+            VerticalDecision::NoGeometry
+        } else {
+            // Gravity (plan §2.3): vy -= g*dt clamped to -v_max, then integrate.
+            let prev_vy = match state.mode {
+                WalkMode::Airborne { vy } => vy,
+                _ => 0.0,
+            };
+            let vy = (prev_vy - state.fall.g * dt).max(-state.fall.v_max);
+            y_new = feet_y + vy * dt;
 
-        // Landing: a floor entered the swept band [y_new, feet_y] under the
-        // footprint. Set y to it, mode by input, vy = 0.
-        match landing_floor(&sampler, new_xz, y_new, feet_y) {
-            Some(floor) => {
-                y_new = floor;
-                state.mode = if want_len > 1e-6 {
-                    WalkMode::Walking
-                } else {
-                    WalkMode::Stopped
-                };
-                VerticalDecision::Landed
-            }
-            None => {
-                state.mode = WalkMode::Airborne { vy };
-                VerticalDecision::Airborne { vy }
+            // Landing: a floor entered the swept band [y_new, feet_y] under the
+            // footprint. Set y to it, mode by input, vy = 0.
+            match landing_floor(&sampler, new_xz, y_new, feet_y) {
+                Some(floor) => {
+                    y_new = floor;
+                    state.mode = if want_len > 1e-6 {
+                        WalkMode::Walking
+                    } else {
+                        WalkMode::Stopped
+                    };
+                    VerticalDecision::Landed
+                }
+                None => {
+                    state.mode = WalkMode::Airborne { vy };
+                    VerticalDecision::Airborne { vy }
+                }
             }
         }
     } else if !grounded_now {
-        // Support missed: no floor within the step band under the footprint —
-        // a ledge, a hole wider than the footprint. Enter Airborne from rest;
-        // this tick holds height (the fall starts next tick).
-        state.mode = WalkMode::Airborne { vy: 0.0 };
-        VerticalDecision::Airborne { vy: 0.0 }
+        if !geometry_ready {
+            // Same hold from rest: a zone whose floor has not landed is not a
+            // ledge — there is simply no geometry to be off of yet.
+            state.mode = if want_len > 1e-6 {
+                WalkMode::Walking
+            } else {
+                WalkMode::Stopped
+            };
+            VerticalDecision::NoGeometry
+        } else {
+            // Support missed: no floor within the step band under the footprint —
+            // a ledge, a hole wider than the footprint. Enter Airborne from rest;
+            // this tick holds height (the fall starts next tick).
+            state.mode = WalkMode::Airborne { vy: 0.0 };
+            VerticalDecision::Airborne { vy: 0.0 }
+        }
     } else {
         // Grounded: merge toward the target at speed_yps * dt per tick — that's
         // the whole blend model (plan §2.3). The field is only sampled when it
@@ -512,28 +536,39 @@ mod tests {
 
     #[test]
     fn fall_model_matches_closed_form() {
-        // The plan's feel numbers: 1 yalm ~0.22 s, 3 ~0.39 s, 10 ~0.6 s at
-        // g=40 v_max=30 (terminal speed reached at 0.75 s).
+        // Feel numbers at g=40 v_max=30 (terminal speed reached at 0.75 s):
+        // a 1 yalm drop takes ~0.22 s, 3 yalms ~0.39 s, 10 ~0.71 s — all
+        // pre-terminal, so the closed-form time is sqrt(2d/g).
         let fall = FallModel::default();
         assert!((fall.g - 40.0).abs() < 1e-6);
         assert!((fall.v_max - 30.0).abs() < 1e-6);
 
-        // Euler integration of the same model must track the closed form to
-        // within one tick's worth at production dt.
+        // The closed form itself: past the terminal time it runs at v_max
+        // (at t=1.0: 11.25 yalms of parabola + 30 * 0.25 = 18.75, vy -30).
+        let (d, v) = fall_closed_form(fall.g, fall.v_max, 1.0);
+        assert!((d - (-18.75)).abs() < 1e-4 && (v - -30.0).abs() < 1e-6);
+
+        // Euler integration of the same model must land within one tick of the
+        // closed-form time at production dt.
         let dt = 1.0 / 60.0;
-        for t_target in [0.22, 0.39, 0.6] {
+        for dist in [1.0f32, 3.0, 10.0] {
             let mut y = 0.0f32;
             let mut vy = 0.0f32;
             let mut t = 0.0f32;
-            while t < t_target - 1e-9 {
+            while y > -dist {
                 vy = (vy - fall.g * dt).max(-fall.v_max);
                 y += vy * dt;
                 t += dt;
             }
+            let t_ref = (2.0 * dist / fall.g).sqrt();
+            assert!(
+                (t - t_ref).abs() <= dt + 1e-6,
+                "d={dist}: landed at {t}, closed form {t_ref}"
+            );
             let (y_ref, _) = fall_closed_form(fall.g, fall.v_max, t);
             assert!(
                 (y - y_ref).abs() < 0.5 * fall.g * dt * t + 1e-3,
-                "t={t_target}: euler {y} vs closed {y_ref}"
+                "d={dist}: euler {y} vs closed {y_ref}"
             );
         }
     }
@@ -626,22 +661,26 @@ mod tests {
 
     #[test]
     fn push_through_accrual_excludes_after_threshold() {
-        // 0.8 s of sustained pressure into the same mob excludes it; a release
-        // or a different target resets the clock.
+        // ~0.8 s of sustained pressure into the same mob excludes it; a release
+        // or a different target resets the clock. The crossing is asserted to
+        // within one tick: secs accrues by f32 `+= dt`, so the threshold lands
+        // on neither an exact tick nor exactly PUSH_THROUGH_SECS/dt presses.
         let dt = 1.0 / 60.0;
         let mut pt = PushThrough::default();
-        for i in 0..(PUSH_THROUGH_SECS / dt) as u32 - 1 {
-            assert!(!pt.press(1, dt), "early release at tick {i}");
+        let mut held = 0u32;
+        while !pt.press(1, dt) {
+            held += 1;
         }
-        assert!(pt.press(1, dt), "threshold not reached");
+        assert!(
+            (held as f32 - PUSH_THROUGH_SECS / dt).abs() <= 1.0 + 1e-6,
+            "excluded after {held} ticks (~{} s)",
+            held as f32 * dt
+        );
         pt.release();
         assert!(!pt.press(1, dt), "release did not reset");
-        for _ in 0..(PUSH_THROUGH_SECS / dt) as u32 {
-            pt.press(1, dt);
-        }
         // A different target mid-accrual restarts the clock.
         let mut pt = PushThrough::default();
-        for _ in 0..((PUSH_THROUGH_SECS * 0.5) / dt) as u32 {
+        for _ in 0..((PUSH_THROUGH_SECS * 0.5) / dt).round() as u32 {
             pt.press(1, dt);
         }
         assert!(!pt.press(2, dt), "target switch must reset");
@@ -680,6 +719,37 @@ mod tests {
             Some(11.5)
         );
         assert_eq!(tri_hits_column(triangle, Vec2::new(6.0, 8.0)), None);
+    }
+
+    #[test]
+    fn missing_geometry_holds_z_instead_of_falling() {
+        // First-load race (kuluu-mo4q class): self enters the snapshot before
+        // this zone's main MZB block lands. With an empty column set every
+        // support probe misses — without the hold, that reads as "no floor in
+        // reach" and gravity integrates from the server seed forever (each
+        // fallen z reported via Move is mirrored into self_pos by the session,
+        // so no resync ever fires). geometry_ready=false must hold wire z at
+        // the seed; once ready flips true with still no floor underfoot, the
+        // fall starts again (a ledge over a hole is not a load race).
+        let dt = 1.0 / 60.0;
+        let geom = MzbCollisionGeometry::default(); // no blocks: empty column set
+        let obstacles = ObstacleSet::default();
+        let mut state = Walker::default();
+
+        // A full second of idle ticks — far past the first tick where the old
+        // code entered Airborne and started integrating gravity.
+        for _ in 0..60 {
+            let res = step(
+                &geom, &obstacles, &mut state, 0.0, 0.0, 12.5, 0.0, 0.0, 5.0, dt, false, false,
+            );
+            assert_eq!(res.feet_z, 12.5, "z must hold while geometry is missing");
+            assert!(matches!(res.decision, VerticalDecision::NoGeometry));
+        }
+
+        let res = step(
+            &geom, &obstacles, &mut state, 0.0, 0.0, 12.5, 0.0, 0.0, 5.0, dt, false, true,
+        );
+        assert!(matches!(res.decision, VerticalDecision::Airborne { .. }));
     }
 
     #[test]

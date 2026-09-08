@@ -66,6 +66,7 @@ mod tests {
             mount: None,
             status: 0,
             char_flags: Default::default(),
+            monstrosity: false,
             name_vis: None,
         }
     }

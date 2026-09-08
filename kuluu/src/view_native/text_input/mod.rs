@@ -2161,6 +2161,7 @@ mod quick_action_tests {
             mount: None,
             status: 0,
             char_flags: Default::default(),
+            monstrosity: false,
         }
     }
 

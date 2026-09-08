@@ -337,6 +337,9 @@ mod tests {
         );
     }
 
+    /// A `NaN` ui_scale means a corrupt/failed write (our own save() can never
+    /// emit one; serde_json rejects non-finite f32 on serialize), so the whole
+    /// document is rejected: load returns Err, callers fall back to defaults.
     #[test]
     fn load_rejects_invalid_json_ui_scale() {
         let store = GraphicsStore::new(tmp_path());

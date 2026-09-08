@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::OnceLock;
 use std::time::Instant;
 
@@ -247,6 +247,22 @@ pub struct Entity {
     /// Preserved across pos-only updates like `look`, for the same reason.
     #[serde(skip)]
     pub mount_id: Option<u8>,
+
+    /// `GP_SERV_CHAR_PC.MonstrosityFlags` (body 0x3A) of the last Model-block
+    /// update. Written only under `SendFlg.Model` — vendor/server/src/map/packets/
+    /// char_update.cpp `CCharUpdatePacket::updateWith` — so a General-block update
+    /// does not refresh it; preserved across non-Model updates like `mount_id`.
+    /// Drives the retail Monstrosity nameplate marker (0xAB).
+    #[serde(skip)]
+    pub monstrosity: Option<bool>,
+
+    /// `Flags4.JobMasterFlag` of the last non-despawn 0x0D. Unlike the General
+    /// words in `char_flags`, LSB writes it on every update, outside all SendFlg
+    /// blocks (vendor/server/src/map/packets/char_update.cpp "Fields that are
+    /// always checked if this isnt a despawn packet"), so it refreshes even on
+    /// pos-only updates. PC-only; folded into `char_flags` at upsert time.
+    #[serde(skip)]
+    pub job_master_display: Option<bool>,
 }
 
 /// Which retail colour a run of a chat line takes. Retail renders some
@@ -456,6 +472,30 @@ pub struct SessionState {
     pub character: Option<String>,
     pub zone_id: Option<u16>,
     pub entities: Vec<Entity>,
+
+    /// Wire-id → index into [`Self::entities`]. Maintained in lockstep by every
+    /// `apply_event` arm that mutates the Vec, so self/lookup paths are O(1)
+    /// instead of O(N) scans. Transient: not serialized (nothing deserializes
+    /// `SessionState` today); rebuilt from scratch on zone change.
+    #[serde(skip)]
+    pub entity_index: HashMap<u32, usize>,
+
+    /// Entity ids whose records changed since the last drain of this set.
+    /// Stamped by the same `apply_event` arms that mutate [`Self::entities`] —
+    /// only when something actually changed — and drained by the translator to
+    /// build O(changed) scene deltas instead of full snapshots. A zone change
+    /// clears it (the repopulating upserts stamp back in). Transient: not
+    /// serialized.
+    #[serde(skip)]
+    pub pending_entity_upserts: HashSet<u32>,
+
+    /// Entity ids removed since the last drain, plus every live id at a zone
+    /// change (see `pending_entity_upserts`). An id present in both sets was
+    /// upserted then removed within one batch: removal wins — the translator
+    /// must not emit it. Transient: not serialized.
+    #[serde(skip)]
+    pub pending_entity_removals: HashSet<u32>,
+
     pub party: Vec<PartyMember>,
 
     /// Monotonically increasing counter, bumped on every `ZoneChanged`. The
@@ -1387,6 +1427,31 @@ impl SessionState {
         }
         self.check_result.as_mut().expect("just ensured Some")
     }
+}
+
+/// One drained batch of [`SessionState::pending_entity_upserts`] /
+/// [`SessionState::pending_entity_removals`]. The event folder drains it after
+/// each fold and forwards it to the translator, which merges batches into
+/// O(changed) scene deltas. `other_changed` marks a batch whose triggering
+/// event also mutated non-entity state (chat, party, stage, …); the translator
+/// answers those with a full snapshot instead of an entity-only delta.
+#[derive(Debug, Clone, Default)]
+pub struct EntityChanges {
+    pub upserts: HashSet<u32>,
+    pub removals: HashSet<u32>,
+    pub other_changed: bool,
+}
+
+impl SessionState {
+    /// Takes both pending entity sets (leaving them empty). The event folder
+    /// drains this after each fold; ids present in `removals` win over
+    /// `upserts` — an upsert-then-remove within one batch nets to a removal.
+    pub fn take_pending_entities(&mut self) -> (HashSet<u32>, HashSet<u32>) {
+        (
+            std::mem::take(&mut self.pending_entity_upserts),
+            std::mem::take(&mut self.pending_entity_removals),
+        )
+    }
 
     /// Folds `event` into the state, returning `true` only when the state
     /// actually mutated. Paired with `watch::Sender::send_if_modified` in the
@@ -1428,6 +1493,13 @@ impl SessionState {
                 self.death_homepoint_secs = None;
                 self.death_menu_offer = None;
 
+                // Every live id is gone: stamp them all as removals so a delta
+                // drained before the repopulating upserts still sees the wipe,
+                // and drop pending upserts (they belong to the old zone). The
+                // index dies with the Vec.
+                self.pending_entity_removals = self.entities.iter().map(|e| e.id).collect();
+                self.pending_entity_upserts.clear();
+                self.entity_index.clear();
                 self.entities.clear();
                 self.party.clear();
                 self.zone_generation = self.zone_generation.wrapping_add(1);
@@ -1465,15 +1537,19 @@ impl SessionState {
             AgentEvent::PositionChanged { pos } => {
                 let mut changed = false;
                 if let Some(char_id) = self.char_id {
-                    if let Some(ent) = self.entities.iter_mut().find(|e| e.id == char_id) {
+                    if let Some(idx) = self.entity_index.get(&char_id).copied() {
+                        let ent = &mut self.entities[idx];
                         changed = ent.pos != pos.pos
                             || ent.heading != pos.heading
                             || ent.speed != pos.speed
                             || ent.speed_base != pos.speed_base;
-                        ent.pos = pos.pos;
-                        ent.heading = pos.heading;
-                        ent.speed = pos.speed;
-                        ent.speed_base = pos.speed_base;
+                        if changed {
+                            ent.pos = pos.pos;
+                            ent.heading = pos.heading;
+                            ent.speed = pos.speed;
+                            ent.speed_base = pos.speed_base;
+                            self.pending_entity_upserts.insert(char_id);
+                        }
                     }
                 }
                 changed
@@ -1490,7 +1566,8 @@ impl SessionState {
                 let latched_self_look = (self.char_id == Some(entity.id))
                     .then_some(self.self_look)
                     .flatten();
-                if let Some(existing) = self.entities.iter_mut().find(|e| e.id == entity.id) {
+                if let Some(idx) = self.entity_index.get(&entity.id).copied() {
+                    let existing = &mut self.entities[idx];
                     let preserved_name = entity.name.clone().or_else(|| existing.name.clone());
                     let merged_kind = merge_kind(existing.kind, entity.kind);
 
@@ -1498,8 +1575,29 @@ impl SessionState {
 
                     let preserved_look = entity.look.or(existing.look).or(latched_self_look);
                     let preserved_npc_state = entity.npc_state.or(existing.npc_state);
-                    let preserved_char_flags = entity.char_flags.or(existing.char_flags);
+                    // Flags4.JobMasterFlag refreshes on every non-despawn 0x0D
+                    // (char_update.cpp), unlike the General words — fold the
+                    // freshest value into the preserved flags so a pos-only tick
+                    // still carries it.
+                    let base_char_flags = entity.char_flags.or(existing.char_flags);
+                    let preserved_char_flags = match (base_char_flags, entity.job_master_display) {
+                        (Some(mut flags), Some(job_master)) => {
+                            flags.job_master_display = job_master;
+                            Some(flags)
+                        }
+                        // No General update has arrived yet (a spawn always
+                        // carries one, so this is defensive): materialize the
+                        // flags with just the star.
+                        (None, Some(true)) => Some(ffxi_proto::decode::CharFlags {
+                            job_master_display: true,
+                            ..Default::default()
+                        }),
+                        _ => base_char_flags,
+                    };
                     let preserved_mount_id = entity.mount_id.or(existing.mount_id);
+                    // Model-block-gated at the source (char_update.cpp), so merge
+                    // like mount_id — never off pos_present.
+                    let preserved_monstrosity = entity.monstrosity.or(existing.monstrosity);
                     // UPDATE_HP-gated at the source (entity_update.cpp:357/:408), so
                     // merge like char_flags — never off pos_present.
                     let preserved_name_vis = entity.name_vis.or(existing.name_vis);
@@ -1535,6 +1633,7 @@ impl SessionState {
                         npc_state: preserved_npc_state,
                         char_flags: preserved_char_flags,
                         mount_id: preserved_mount_id,
+                        monstrosity: preserved_monstrosity,
                         pos: preserved_pos,
                         heading: preserved_heading,
                         speed: preserved_speed,
@@ -1547,18 +1646,35 @@ impl SessionState {
                         false
                     } else {
                         *existing = merged;
+                        self.pending_entity_upserts.insert(entity.id);
                         true
                     }
                 } else {
                     let mut inserted = entity.clone();
                     inserted.look = inserted.look.or(latched_self_look);
+                    self.entity_index.insert(entity.id, self.entities.len());
                     self.entities.push(inserted);
+                    self.pending_entity_upserts.insert(entity.id);
+                    self.pending_entity_removals.remove(&entity.id);
                     true
                 }
             }
             AgentEvent::EntityRemoved { id } => {
                 let before = self.entities.len();
                 self.entities.retain(|e| e.id != *id);
+                if self.entities.len() != before {
+                    // retain shifted every index after the removed slot, so
+                    // rebuild rather than patch; an upsert pending for this id
+                    // in the same batch is voided — removal wins.
+                    self.entity_index = self
+                        .entities
+                        .iter()
+                        .enumerate()
+                        .map(|(i, e)| (e.id, i))
+                        .collect();
+                    self.pending_entity_upserts.remove(id);
+                    self.pending_entity_removals.insert(*id);
+                }
                 self.entities.len() != before
             }
             AgentEvent::NameExtractionMiss { miss } => {
@@ -1574,11 +1690,16 @@ impl SessionState {
                 name,
                 kind,
                 hp_pct,
+                allegiance,
             } => {
-                let existing = self.entities.iter_mut().find(|e| {
-                    id.is_some_and(|target| e.id == target)
-                        || act_index.is_some_and(|target| e.act_index == target)
-                });
+                // Index first (the common case: the patcher knows the wire id);
+                // fall back to a scan when only an act_index was given.
+                let idx = match (id, act_index) {
+                    (Some(wire_id), _) => self.entity_index.get(wire_id).copied(),
+                    (None, Some(act)) => self.entities.iter().position(|e| e.act_index == *act),
+                    _ => None,
+                };
+                let existing = idx.and_then(|i| self.entities.get_mut(i));
                 let mut changed = false;
                 if let Some(existing) = existing {
                     if let Some(n) = name {
@@ -1599,6 +1720,18 @@ impl SessionState {
                             existing.hp_pct = Some(*hp);
                             changed = true;
                         }
+                    }
+                    if let Some(a) = allegiance {
+                        // Self's entity may still carry no flags at all (it never
+                        // receives its own 0x0D), so materialize rather than skip.
+                        if existing.char_flags.as_ref().map(|f| f.allegiance) != Some(*a) {
+                            let flags = existing.char_flags.get_or_insert_with(Default::default);
+                            flags.allegiance = *a;
+                            changed = true;
+                        }
+                    }
+                    if changed {
+                        self.pending_entity_upserts.insert(existing.id);
                     }
                 }
                 changed
@@ -1775,10 +1908,14 @@ impl SessionState {
             AgentEvent::ForcedMove { target, .. } => {
                 let mut changed = false;
                 if let Some(char_id) = self.char_id {
-                    if let Some(ent) = self.entities.iter_mut().find(|e| e.id == char_id) {
+                    if let Some(idx) = self.entity_index.get(&char_id).copied() {
+                        let ent = &mut self.entities[idx];
                         changed = ent.pos != target.pos || ent.heading != target.heading;
-                        ent.pos = target.pos;
-                        ent.heading = target.heading;
+                        if changed {
+                            ent.pos = target.pos;
+                            ent.heading = target.heading;
+                            self.pending_entity_upserts.insert(char_id);
+                        }
                     }
                 }
                 changed
@@ -1915,9 +2052,13 @@ impl SessionState {
                 let mut changed = self.self_look != Some(*look);
                 self.self_look = Some(*look);
                 if let Some(char_id) = self.char_id {
-                    if let Some(ent) = self.entities.iter_mut().find(|e| e.id == char_id) {
+                    if let Some(idx) = self.entity_index.get(&char_id).copied() {
+                        let ent = &mut self.entities[idx];
                         changed |= ent.look != Some(*look);
-                        ent.look = Some(*look);
+                        if changed && ent.look != Some(*look) {
+                            ent.look = Some(*look);
+                            self.pending_entity_upserts.insert(char_id);
+                        }
                     }
                 }
                 changed
@@ -2438,6 +2579,10 @@ pub enum AgentEvent {
         kind: Option<EntityKind>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         hp_pct: Option<u8>,
+        /// Self allegiance out of 0x037 `Flags2.BallistaFlg` — the only channel
+        /// for self (the server skips its own 0x0D).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        allegiance: Option<u8>,
     },
     ChatLine {
         line: ChatLine,

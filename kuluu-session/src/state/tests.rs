@@ -592,6 +592,8 @@ fn apply_event_folds_in_documented_order() {
             status: 0,
             char_flags: Default::default(),
             mount_id: None,
+            monstrosity: None,
+            job_master_display: None,
         },
         pos_present: true,
     });
@@ -621,6 +623,8 @@ fn apply_event_folds_in_documented_order() {
             status: 0,
             char_flags: Default::default(),
             mount_id: None,
+            monstrosity: None,
+            job_master_display: None,
         },
         pos_present: true,
     });
@@ -686,6 +690,54 @@ fn merge_kind_specialized_wins_over_other() {
     assert_eq!(merge_kind(Other, Other), Other);
 }
 
+/// `Flags4.JobMasterFlag` is written on every non-despawn 0x0D outside all
+/// SendFlg blocks (char_update.cpp), so a pos-only upsert (`char_flags: None`)
+/// must still refresh the preserved flags — unlike the General words.
+#[test]
+fn job_master_flag_refreshes_on_pos_only_updates() {
+    let mut s = SessionState::default();
+
+    // A General-block update establishes the flags with the star off...
+    let mut e = make_test_entity(9, Some("Star"), EntityKind::Pc);
+    e.char_flags = Some(ffxi_proto::decode::CharFlags::default());
+    e.job_master_display = Some(false);
+    s.apply_event(&AgentEvent::EntityUpserted {
+        entity: e,
+        pos_present: true,
+    });
+
+    // ...and a later pos-only tick (no General words) turns it on.
+    let mut e = make_test_entity(9, None, EntityKind::Pc);
+    e.char_flags = None;
+    e.job_master_display = Some(true);
+    s.apply_event(&AgentEvent::EntityUpserted {
+        entity: e,
+        pos_present: true,
+    });
+
+    assert!(
+        s.entities[0]
+            .char_flags
+            .expect("the General update materialized the flags")
+            .job_master_display,
+        "a pos-only tick must carry the fresh star"
+    );
+
+    // ...and a later pos-only 'off' clears it again.
+    let mut e = make_test_entity(9, None, EntityKind::Pc);
+    e.char_flags = None;
+    e.job_master_display = Some(false);
+    s.apply_event(&AgentEvent::EntityUpserted {
+        entity: e,
+        pos_present: true,
+    });
+
+    assert!(
+        !s.entities[0].char_flags.unwrap().job_master_display,
+        "a pos-only 'off' must clear the star"
+    );
+}
+
 fn make_test_entity(id: u32, name: Option<&str>, kind: EntityKind) -> Entity {
     Entity {
         id,
@@ -710,6 +762,8 @@ fn make_test_entity(id: u32, name: Option<&str>, kind: EntityKind) -> Entity {
         status: 0,
         char_flags: Default::default(),
         mount_id: None,
+        monstrosity: None,
+        job_master_display: None,
     }
 }
 
@@ -1083,6 +1137,7 @@ fn entity_patched_by_id_sets_name_on_existing_entity() {
         name: Some("Mihli Aliapoh".into()),
         kind: Some(EntityKind::Pet),
         hp_pct: None,
+        allegiance: None,
     });
     assert_eq!(s.entities[0].name.as_deref(), Some("Mihli Aliapoh"));
     assert_eq!(s.entities[0].kind, EntityKind::Pet);
@@ -1103,10 +1158,57 @@ fn entity_patched_by_act_index_resolves_when_id_unknown() {
         name: Some("Crab Familiar".into()),
         kind: Some(EntityKind::Pet),
         hp_pct: Some(75),
+        allegiance: None,
     });
     assert_eq!(s.entities[0].name.as_deref(), Some("Crab Familiar"));
     assert_eq!(s.entities[0].kind, EntityKind::Pet);
     assert_eq!(s.entities[0].hp_pct, Some(75));
+}
+
+#[test]
+fn entity_patched_allegiance_materializes_flags_and_preserves_the_rest() {
+    let mut s = SessionState::default();
+    // Self's entity carries no flags until its first 0x037 — the patch must
+    // materialize rather than skip.
+    s.apply_event(&AgentEvent::EntityUpserted {
+        entity: make_test_entity(1, None, EntityKind::Pc),
+        pos_present: true,
+    });
+    assert!(s.entities[0].char_flags.is_none());
+
+    let changed = s.apply_event(&AgentEvent::EntityPatched {
+        id: Some(1),
+        act_index: None,
+        name: None,
+        kind: None,
+        hp_pct: None,
+        allegiance: Some(9),
+    });
+    assert!(changed);
+    let flags = s.entities[0].char_flags.expect("materialized by the patch");
+    assert_eq!(flags.allegiance, 9);
+
+    // A repeat of the same value is a no-op (0x037 arrives every non-pos tick).
+    assert!(!s.apply_event(&AgentEvent::EntityPatched {
+        id: Some(1),
+        act_index: None,
+        name: None,
+        kind: None,
+        hp_pct: None,
+        allegiance: Some(9),
+    }));
+
+    // A later value updates in place without zeroing the other flags.
+    s.apply_event(&AgentEvent::EntityPatched {
+        id: Some(1),
+        act_index: None,
+        name: None,
+        kind: None,
+        hp_pct: None,
+        allegiance: Some(3),
+    });
+    let flags = s.entities[0].char_flags.expect("still materialized");
+    assert_eq!(flags.allegiance, 3);
 }
 
 #[test]
@@ -1166,6 +1268,7 @@ fn entity_patched_for_unknown_entity_is_dropped() {
         name: Some("Ghost".into()),
         kind: Some(EntityKind::Pet),
         hp_pct: None,
+        allegiance: None,
     });
     assert!(s.entities.is_empty());
 }
@@ -1295,6 +1398,8 @@ fn self_position_returns_self_entity_pos() {
             status: 0,
             char_flags: Default::default(),
             mount_id: None,
+            monstrosity: None,
+            job_master_display: None,
         },
         pos_present: true,
     });
@@ -1850,6 +1955,8 @@ fn apply_event_dedupes_identical_entity_upserts() {
         status: 0,
         char_flags: Default::default(),
         mount_id: None,
+        monstrosity: None,
+        job_master_display: None,
     };
 
     // First upsert inserts.
@@ -1919,6 +2026,8 @@ fn apply_event_dedupes_identical_self_position() {
             status: 0,
             char_flags: Default::default(),
             mount_id: None,
+            monstrosity: None,
+            job_master_display: None,
         },
         pos_present: true,
     });
@@ -2184,4 +2293,179 @@ fn _agentevent_is_additive_only(x: &AgentEvent) {
         AgentEvent::AuctionSalesSlot { .. } => (),
         AgentEvent::AuctionCancelResult { .. } => (),
     }
+}
+
+// Piece 0 (entity-table): the wire-id index must stay in lockstep with the
+// entities Vec across every mutation path, and the pending sets must carry
+// exactly the ids that changed since the last drain.
+
+#[test]
+fn entity_index_stays_in_lockstep_with_the_vec() {
+    let mut s = SessionState::default();
+    for id in [10u32, 20, 30] {
+        assert!(s.apply_event(&AgentEvent::EntityUpserted {
+            entity: make_test_entity(id, Some("m"), EntityKind::Mob),
+            pos_present: true,
+        }));
+    }
+    for (i, e) in s.entities.iter().enumerate() {
+        assert_eq!(s.entity_index.get(&e.id), Some(&i));
+    }
+
+    // Removing the middle one shifts every later slot; the index must follow.
+    assert!(s.apply_event(&AgentEvent::EntityRemoved { id: 20 }));
+    for (i, e) in s.entities.iter().enumerate() {
+        assert_eq!(s.entity_index.get(&e.id), Some(&i));
+    }
+    assert!(!s.entity_index.contains_key(&20));
+
+    // A fresh insert lands at the tail.
+    assert!(s.apply_event(&AgentEvent::EntityUpserted {
+        entity: make_test_entity(40, None, EntityKind::Npc),
+        pos_present: true,
+    }));
+    for (i, e) in s.entities.iter().enumerate() {
+        assert_eq!(s.entity_index.get(&e.id), Some(&i));
+    }
+
+    // A zone change wipes the Vec and the index together.
+    s.apply_event(&AgentEvent::ZoneChanged {
+        from: None,
+        to: 103,
+        myroom: None,
+        mog_zone_flag: false,
+    });
+    assert!(s.entities.is_empty());
+    assert!(s.entity_index.is_empty());
+}
+
+#[test]
+fn pending_entity_sets_carry_exactly_the_changed_ids() {
+    let mut s = SessionState::default();
+
+    // Insert stamps; an identical re-upsert is a no-op fold and stamps nothing.
+    assert!(s.apply_event(&AgentEvent::EntityUpserted {
+        entity: make_test_entity(1, Some("a"), EntityKind::Mob),
+        pos_present: true,
+    }));
+    let (up, rem) = s.take_pending_entities();
+    assert_eq!(up, std::collections::HashSet::from([1u32]));
+    assert!(rem.is_empty());
+
+    let same = make_test_entity(1, Some("a"), EntityKind::Mob);
+    assert!(!s.apply_event(&AgentEvent::EntityUpserted {
+        entity: same,
+        pos_present: true,
+    }));
+    let (up, rem) = s.take_pending_entities();
+    assert!(up.is_empty(), "no-op upsert must not stamp");
+    assert!(rem.is_empty());
+
+    // A real change stamps again; removing an absent id stamps nothing.
+    let mut moved = make_test_entity(1, Some("a"), EntityKind::Mob);
+    moved.pos.z += 5.0;
+    assert!(s.apply_event(&AgentEvent::EntityUpserted {
+        entity: moved,
+        pos_present: true,
+    }));
+    assert!(!s.apply_event(&AgentEvent::EntityRemoved { id: 999 }));
+    let (up, rem) = s.take_pending_entities();
+    assert_eq!(up, std::collections::HashSet::from([1u32]));
+    assert!(rem.is_empty());
+
+    // Upsert-then-remove in one batch nets to a removal.
+    assert!(s.apply_event(&AgentEvent::EntityUpserted {
+        entity: make_test_entity(2, None, EntityKind::Npc),
+        pos_present: true,
+    }));
+    assert!(s.apply_event(&AgentEvent::EntityRemoved { id: 2 }));
+    let (up, rem) = s.take_pending_entities();
+    assert!(up.is_empty(), "voided upsert must not survive the drain");
+    assert_eq!(rem, std::collections::HashSet::from([2u32]));
+
+    // A zone change marks every live id removed and clears pending upserts.
+    assert!(s.apply_event(&AgentEvent::EntityUpserted {
+        entity: make_test_entity(3, None, EntityKind::Mob),
+        pos_present: true,
+    }));
+    s.apply_event(&AgentEvent::ZoneChanged {
+        from: Some(103),
+        to: 104,
+        myroom: None,
+        mog_zone_flag: false,
+    });
+    let (up, rem) = s.take_pending_entities();
+    assert!(up.is_empty());
+    // Entity 1 is still live at the wipe, so both ids are marked removed.
+    assert_eq!(rem, std::collections::HashSet::from([1u32, 3]));
+
+    // Repopulating upserts after the wipe stamp back in.
+    assert!(s.apply_event(&AgentEvent::EntityUpserted {
+        entity: make_test_entity(4, None, EntityKind::Mob),
+        pos_present: true,
+    }));
+    let (up, rem) = s.take_pending_entities();
+    assert_eq!(up, std::collections::HashSet::from([4u32]));
+    assert!(rem.is_empty());
+}
+
+#[test]
+fn self_position_events_stamp_the_self_id() {
+    let mut s = SessionState::default();
+    s.apply_event(&AgentEvent::Connected {
+        account_id: 1,
+        char_id: 7,
+        character: "Cow".into(),
+        zone_id: 103,
+    });
+    assert!(s.apply_event(&AgentEvent::EntityUpserted {
+        entity: make_test_entity(7, Some("Cow"), EntityKind::Pc),
+        pos_present: true,
+    }));
+    s.take_pending_entities();
+
+    // A moved self position stamps the self id; an identical one does not.
+    let p1 = Position {
+        pos: Vec3 {
+            x: 1.0,
+            y: 2.0,
+            z: 9.0,
+        },
+        heading: 4,
+        speed: 5,
+        speed_base: 5,
+    };
+    assert!(s.apply_event(&AgentEvent::PositionChanged { pos: p1 }));
+    let (up, rem) = s.take_pending_entities();
+    assert_eq!(up, std::collections::HashSet::from([7u32]));
+    assert!(rem.is_empty());
+
+    assert!(!s.apply_event(&AgentEvent::PositionChanged { pos: p1 }));
+    let (up, _) = s.take_pending_entities();
+    assert!(up.is_empty(), "identical self position must not stamp");
+}
+
+#[test]
+fn respawn_cancels_pending_removal_before_batch_drain() {
+    let mut state = SessionState::default();
+    for event in [
+        AgentEvent::EntityUpserted {
+            entity: make_test_entity(9, Some("old"), EntityKind::Mob),
+            pos_present: true,
+        },
+        AgentEvent::EntityRemoved { id: 9 },
+        AgentEvent::EntityUpserted {
+            entity: make_test_entity(9, Some("new"), EntityKind::Mob),
+            pos_present: true,
+        },
+    ] {
+        assert!(state.apply_event(&event));
+    }
+    let (upserts, removals) = state.take_pending_entities();
+    assert_eq!(upserts, std::collections::HashSet::from([9]));
+    assert!(removals.is_empty());
+    assert_eq!(
+        state.entities[state.entity_index[&9]].name.as_deref(),
+        Some("new")
+    );
 }

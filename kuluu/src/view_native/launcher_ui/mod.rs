@@ -120,6 +120,7 @@ pub(crate) enum CharCreateField {
     Face,
     Hair,
     Size,
+    SkipIntroCs,
 }
 
 #[allow(dead_code)]
@@ -132,18 +133,20 @@ impl CharCreateField {
             Self::Nation => Self::Face,
             Self::Face => Self::Hair,
             Self::Hair => Self::Size,
-            Self::Size => Self::Name,
+            Self::Size => Self::SkipIntroCs,
+            Self::SkipIntroCs => Self::Name,
         }
     }
     pub(crate) fn prev(self) -> Self {
         match self {
-            Self::Name => Self::Size,
+            Self::Name => Self::SkipIntroCs,
             Self::Race => Self::Name,
             Self::Job => Self::Race,
             Self::Nation => Self::Job,
             Self::Face => Self::Nation,
             Self::Hair => Self::Face,
             Self::Size => Self::Hair,
+            Self::SkipIntroCs => Self::Size,
         }
     }
 }
@@ -156,6 +159,10 @@ pub(crate) struct CharCreateForm {
     pub nation: u8,
     pub face: u8,
     pub size: u8,
+    /// Skip the opening new-character cutscene. Default on: the CS is a
+    /// client-side playback that Kuluu does not run yet, and leaving it on
+    /// strands fresh characters in their start zone.
+    pub skip_intro_cs: bool,
     #[allow(dead_code)]
     pub focus: CharCreateField,
 }
@@ -169,6 +176,7 @@ impl Default for CharCreateForm {
             nation: 0,
             face: 0,
             size: 1,
+            skip_intro_cs: true,
             focus: CharCreateField::default(),
         }
     }
@@ -204,6 +212,7 @@ impl CharCreateForm {
             CharCreateField::Face => self.face / 2,
             CharCreateField::Hair => self.face % 2,
             CharCreateField::Size => self.size,
+            CharCreateField::SkipIntroCs => u8::from(self.skip_intro_cs),
         }
     }
 
@@ -216,6 +225,7 @@ impl CharCreateForm {
             CharCreateField::Face => self.face = value * 2 + (self.face % 2),
             CharCreateField::Hair => self.face = (self.face / 2) * 2 + value,
             CharCreateField::Size => self.size = value,
+            CharCreateField::SkipIntroCs => self.skip_intro_cs = value != 0,
         }
     }
 
@@ -229,6 +239,7 @@ impl CharCreateForm {
             CharCreateField::Face => char_create::FACES,
             CharCreateField::Hair => char_create::HAIRS,
             CharCreateField::Size => char_create::SIZES,
+            CharCreateField::SkipIntroCs => char_create::SKIP_OPTIONS,
         };
         let next = cycle_table(table, self.field_selection(self.focus), delta);
         self.set_field(self.focus, next);

@@ -783,6 +783,16 @@ fn first_decode_err(opcode: u16) -> bool {
         .unwrap_or(true)
 }
 
+/// Gated burrow wire diagnostics (`KULUU_BURROW_LOG=1`, same switch as the render-side FSM
+/// log): raw status/sub observations for every CHAR_NPC update that could drive a burrow FSM.
+/// Off by default; read once.
+fn burrow_wire_log_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        matches!(std::env::var("KULUU_BURROW_LOG").as_deref(), Ok(v) if !v.is_empty() && v != "0")
+    })
+}
+
 fn handle_sub_packet(
     sub: &framing::SubPacket<'_>,
     event_tx: &broadcast::Sender<AgentEvent>,
@@ -993,6 +1003,8 @@ fn handle_sub_packet(
                             char_flags: None,
                             status: 0,
                             mount_id: None,
+                            monstrosity: None,
+                            job_master_display: None,
                         },
 
                         pos_present: true,
@@ -1161,8 +1173,17 @@ fn handle_sub_packet(
                     })
                     .flatten();
 
-                let char_flags =
-                    (send_flag & UPDATE_HP != 0).then(|| decode::CharFlags::from_pos_head(&head));
+                // Flags4.JobMasterFlag is a CHAR_PC-only byte — in a 0x0E that
+                // offset sits inside the SubKind/Status word, so it decodes to
+                // "not set" for NPCs.
+                let char_flags = (send_flag & UPDATE_HP != 0).then(|| {
+                    decode::CharFlags::from_pos_head(
+                        &head,
+                        (op == s2c::CHAR_PC)
+                            .then(|| decode::PosHead::flags4_job_master(sub.data))
+                            .flatten(),
+                    )
+                });
 
                 let status = match op {
                     s2c::CHAR_NPC => decode::NpcState::decode_char_npc_status(sub.data),
@@ -1170,8 +1191,34 @@ fn handle_sub_packet(
                 }
                 .unwrap_or(0);
 
+                // Burrow wire probe (KULUU_BURROW_LOG=1): raw status/sub for every update that
+                // could drive a burrow FSM — dig start (sub set while visible), buried ticks
+                // (status INVISIBLE), pop-up/settle. Answers "what does the server actually send?"
+                if op == s2c::CHAR_NPC
+                    && matches!(kind, EntityKind::Mob | EntityKind::Pet)
+                    && burrow_wire_log_enabled()
+                {
+                    if let Some(ns) = decode::NpcState::decode_char_npc(sub.data) {
+                        // 0x04 is the spawn flag LSB ORs into animationsub (see NpcState docs).
+                        if ns.status == 3 || (ns.animationsub & !0b100) != 0 {
+                            tracing::info!(
+                                target: "burrow",
+                                id = head.unique_no,
+                                send_flag = format!("0x{:02x}", send_flag),
+                                status = ns.status,
+                                sub = ns.animationsub,
+                                "wire"
+                            );
+                        }
+                    }
+                }
+
                 const UPDATE_POS: u8 = 0x01;
                 let pos_present = send_flag & UPDATE_POS != 0;
+                // sendflags_t.Model (bit 4) — the Model block that carries
+                // MonstrosityFlags. Distinct from General/UPDATE_HP, which does not
+                // refresh it (vendor/server/src/map/packets/entity_update.cpp:44).
+                const UPDATE_MODEL: u8 = 0x10;
                 let _ = event_tx.send(AgentEvent::EntityUpserted {
                     entity: Entity {
                         id: head.unique_no,
@@ -1204,6 +1251,20 @@ fn handle_sub_packet(
                         mount_id: (send_flag & UPDATE_HP != 0)
                             .then(|| decode::PosHead::mount_index(sub.data))
                             .flatten(),
+                        // MonstrosityFlags rides the Model block, not General —
+                        // char_update.cpp writes it only under `SendFlg.Model`. PC-only:
+                        // 0x0E has no such field.
+                        monstrosity: (op == s2c::CHAR_PC && send_flag & UPDATE_MODEL != 0)
+                            .then(|| decode::PosHead::monstrosity(sub.data))
+                            .flatten(),
+                        // Flags4.JobMasterFlag rides every non-despawn 0x0D outside
+                        // all SendFlg blocks (char_update.cpp "Fields that are always
+                        // checked if this isnt a despawn packet"), so it refreshes even
+                        // on pos-only updates — unlike the General words above. PC-only:
+                        // in a 0x0E that byte is inside the SubKind/Status word.
+                        job_master_display: (op == s2c::CHAR_PC)
+                            .then(|| decode::PosHead::flags4_job_master(sub.data))
+                            .flatten(),
                     },
                     pos_present,
                 });
@@ -1222,6 +1283,7 @@ fn handle_sub_packet(
 
                             kind: None,
                             hp_pct: None,
+                            allegiance: None,
                         });
                     }
                 }
@@ -1253,6 +1315,7 @@ fn handle_sub_packet(
                         name: pet.name,
                         kind: Some(EntityKind::Pet),
                         hp_pct: Some(pet.hp_pct),
+                        allegiance: None,
                     });
                 }
             }
@@ -1379,6 +1442,17 @@ fn handle_sub_packet(
                     let _ = event_tx.send(AgentEvent::SelfServerStatus {
                         status: cs.server_status,
                         mount_id: cs.mount_id,
+                    });
+                    // Self allegiance rides this packet, not 0x0D — the server
+                    // skips its own char update (zone_entities.cpp), and the
+                    // nameplate's belligerence colour keys off Flags2.BallistaFlg.
+                    let _ = event_tx.send(AgentEvent::EntityPatched {
+                        id: Some(self_char_id),
+                        act_index: None,
+                        name: None,
+                        kind: None,
+                        hp_pct: None,
+                        allegiance: Some(cs.allegiance),
                     });
                 }
             }
@@ -4467,6 +4541,7 @@ fn emit_stage(tx: &broadcast::Sender<AgentEvent>, stage: Stage) {
 pub async fn run_event_folder(
     mut event_rx: broadcast::Receiver<AgentEvent>,
     state_tx: tokio::sync::watch::Sender<crate::state::SessionState>,
+    changes_tx: tokio::sync::mpsc::UnboundedSender<crate::state::EntityChanges>,
 ) {
     use tokio::sync::broadcast::error::RecvError;
     let mut total_dropped: u64 = 0;
@@ -4477,7 +4552,38 @@ pub async fn run_event_folder(
             // (e.g. identical PositionChanged / EntityUpserted resends) do not
             // trigger downstream scene rebuilds (kuluu-p09).
             Ok(event) => {
-                state_tx.send_if_modified(|s| s.apply_event(&event));
+                // Entity-only events stamp the pending sets inside apply_event;
+                // drain them here into a batch for the translator's delta path.
+                // Anything else that mutates state flags other_changed so the
+                // translator falls back to a full snapshot (SceneDelta cannot
+                // express clears/evictions of non-entity fields). The send runs
+                // inside the fold closure — before watch bumps its version — so
+                // a translator that observes this event's state is guaranteed
+                // to find its batch already in the channel.
+                let entity_only = matches!(
+                    event,
+                    AgentEvent::EntityUpserted { .. }
+                        | AgentEvent::EntityRemoved { .. }
+                        | AgentEvent::PositionChanged { .. }
+                        | AgentEvent::ForcedMove { .. }
+                        | AgentEvent::SelfLookUpdated { .. }
+                        | AgentEvent::EntityPatched { .. }
+                );
+                let changes_tx = &changes_tx;
+                state_tx.send_if_modified(|s| {
+                    let changed = s.apply_event(&event);
+                    if changed {
+                        let (upserts, removals) = s.take_pending_entities();
+                        if !upserts.is_empty() || !removals.is_empty() || !entity_only {
+                            let _ = changes_tx.send(crate::state::EntityChanges {
+                                upserts,
+                                removals,
+                                other_changed: !entity_only,
+                            });
+                        }
+                    }
+                    changed
+                });
             }
             Err(RecvError::Lagged(n)) => {
                 total_dropped += n;
@@ -6438,6 +6544,8 @@ fn mh_door_entity(model: u16) -> Entity {
         char_flags: None,
         status: 0,
         mount_id: None,
+        monstrosity: None,
+        job_master_display: None,
     }
 }
 

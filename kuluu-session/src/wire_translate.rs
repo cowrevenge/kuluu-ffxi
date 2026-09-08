@@ -647,6 +647,9 @@ pub fn entity_to_wire(e: &Entity) -> wire::Entity {
         ),
         status: e.status,
         char_flags: e.char_flags.map(char_flags_to_wire).unwrap_or_default(),
+        // Preserved across non-Model updates in state.rs, so this is always the
+        // last Model-block value; default to not-a-monstrosity before it arrives.
+        monstrosity: e.monstrosity.unwrap_or(false),
     }
 }
 
@@ -672,6 +675,8 @@ pub fn char_flags_to_wire(f: ffxi_proto::decode::CharFlags) -> wire::CharFlags {
         allegiance: f.allegiance,
         new_character: f.new_character,
         mentor: f.mentor,
+        job_master_display: f.job_master_display,
+        invis: f.invis,
         untargetable: f.untargetable,
     }
 }
@@ -917,6 +922,8 @@ mod tests {
                 char_flags: None,
                 status: 0,
                 mount_id: None,
+                monstrosity: None,
+                job_master_display: None,
             },
             pos_present: true,
         });

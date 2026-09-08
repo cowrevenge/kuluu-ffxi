@@ -413,9 +413,7 @@ pub struct GraphicsSettings {
     #[serde(default)]
     pub dlss_quality: DlssQuality,
 
-    /// DLSS 5 Neural Uplift (NR) master toggle. Live only while `dlss_supported`
-    /// AND the NR runtime DLL is staged next to the exe; N/A otherwise. NOT
-    /// owned by quality presets — preset cycling carries it over untouched.
+    /// Experimental NR preference; activation also requires [`Self::nr_selectable`].
     #[serde(default)]
     pub neural_uplift: bool,
 
@@ -1391,7 +1389,10 @@ impl GraphicsSettings {
     }
 
     pub fn nr_selectable(&self) -> bool {
-        cfg!(target_os = "windows") && self.dlss_selectable()
+        cfg!(all(
+            target_os = "windows",
+            feature = "enhanced-neural-uplift"
+        )) && self.dlss_selectable()
     }
 
     pub fn nr_active(&self) -> bool {
@@ -1702,11 +1703,15 @@ pub fn apply_bloom_system(
 /// derives them from the zone fog DAT and time of day.
 pub fn apply_volumetric_fog_system(
     settings: Res<GraphicsSettings>,
+    panels: Res<crate::hud::HudPanels>,
     mut commands: Commands,
     mut q_cam: Query<(Entity, Option<&mut VolumetricFog>), With<OperatorCamera>>,
 ) {
+    // The Debug menu Fog row strips the layer too; weather.rs re-removes it
+    // per frame while off, so a settings change mid-off cannot resurrect it.
+    let on = settings.volumetric_fog && !panels.fog_off;
     for (entity, fog) in q_cam.iter_mut() {
-        match (settings.volumetric_fog, fog) {
+        match (on, fog) {
             (true, Some(mut fog)) => {
                 // Only own the quality knob here; ambient_color/intensity are
                 // zone/time/weather-derived in weather::apply_zone_weather and
@@ -2681,7 +2686,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(target_os = "windows")]
+    #[cfg(all(target_os = "windows", feature = "enhanced-neural-uplift"))]
     fn neural_uplift_rows_are_live_when_supported() {
         let mut s = GraphicsSettings::default();
         assert_eq!(s.value_label(GraphicsField::DlssNeuralUplift), "N/A");
@@ -2756,8 +2761,8 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(target_os = "windows"))]
-    fn neural_uplift_is_unavailable_outside_windows() {
+    #[cfg(not(all(target_os = "windows", feature = "enhanced-neural-uplift")))]
+    fn neural_uplift_is_unavailable_without_supported_build() {
         let mut settings = GraphicsSettings {
             dlss_supported: true,
             dlss_menu_enabled: true,
@@ -2765,7 +2770,12 @@ mod tests {
             neural_uplift: true,
             ..Default::default()
         };
+        let json = serde_json::to_string(&settings).unwrap();
+        settings = serde_json::from_str(&json).unwrap();
+        settings.dlss_supported = true;
+        assert!(settings.neural_uplift);
         assert!(settings.dlss_active());
+        assert!(!settings.nr_selectable());
         assert!(!settings.nr_active());
         for field in [
             GraphicsField::DlssNeuralUplift,
@@ -2777,6 +2787,21 @@ mod tests {
             let before = settings.clone();
             settings.cycle(field, 1);
             assert_eq!(settings, before);
+        }
+    }
+
+    #[test]
+    fn neural_uplift_is_off_in_every_preset() {
+        for preset in [
+            QualityPreset::Low,
+            QualityPreset::Medium,
+            QualityPreset::High,
+            QualityPreset::Ultra,
+            QualityPreset::Custom,
+        ] {
+            let settings = GraphicsSettings::for_preset(preset);
+            assert!(!settings.neural_uplift, "{preset:?}");
+            assert!(!settings.nr_active(), "{preset:?}");
         }
     }
 

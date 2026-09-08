@@ -2,6 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
+// v24: Entity.monstrosity and CharFlags.{invis, job_master_display}.
 // v23: SceneSnapshot.death_menu_offer — the durable s2c 0x0F9 Raise/Reraise or
 // Tractor offer shown while dead. (Upstream's "v20"; renumbered on merge because our
 // side had already spent 20-22 on zone_generation / untargetable / name_vis.)
@@ -48,7 +49,7 @@ use serde::{Deserialize, Serialize};
 // v5: InventoryItem.charges_remaining + next_use_vana_ts (item recast/charges).
 // v4: SceneSnapshot.delivery_box (dedicated delivery screen) + ViewerCommand::DeliveryBox
 // (postcard frames are not self-describing, so any shape change bumps this).
-pub const PROTOCOL_VERSION: u32 = 23;
+pub const PROTOCOL_VERSION: u32 = 24;
 
 /// Longest countdown `SceneSnapshot::status_icon_expiries` can carry. The
 /// producer rejects anything beyond it as a corrupt 0x063 timestamp, and the HUD
@@ -249,6 +250,22 @@ pub struct CharFlags {
     pub new_character: bool,
     pub mentor: bool,
 
+    /// `Flags4.JobMasterFlag` (bit 6 of the u8 at body offset 0x2F): LSB's
+    /// job-master display toggle — `SUPERIOR_LEVEL == 5 && m_jobMasterDisplay`
+    /// (vendor/server/src/map/packets/char_update.cpp:441), written on every
+    /// non-despawn 0x0D outside all SendFlg blocks. Drives the same nameplate
+    /// star as `lfg_master`, which retail keys off `Flags3.LfgMasterFlag` — a
+    /// flag LSB hardcodes to 0 (char_update.cpp:339).
+    #[serde(default)]
+    pub job_master_display: bool,
+
+    /// `Flags1.InvisFlag` (bit 29): the server's player-invisibility bit — set
+    /// for PCs only, when a GM hides themselves or an EFFECTFLAG_INVISIBLE
+    /// status effect is active. Retail keeps such players targetable but draws
+    /// nothing: no model, no nameplate.
+    #[serde(default)]
+    pub invis: bool,
+
     /// `Flags1.TargetOffFlag` (bit 19): the server's untargetable bit — LSB
     /// `m_flags & FLAG_UNTARGETABLE` for NPC/MOB, char_update's "Untargetable
     /// player" field for PCs. The targetability authority; see
@@ -335,6 +352,12 @@ pub struct Entity {
     #[serde(default)]
     pub char_flags: CharFlags,
 
+    /// `GP_SERV_CHAR_PC.MonstrosityFlags` (body 0x3A) — the character is a
+    /// monstrosity (Feretory). Written in the Model block only; drives the retail
+    /// Monstrosity nameplate marker. See ffxi-proto's `PosHead::monstrosity`.
+    #[serde(default)]
+    pub monstrosity: bool,
+
     /// entity_update byte 0x2B (LSB `namevis`; PosHead `flags3 >> 24`), written
     /// under UPDATE_HP — vendor/server/src/map/packets/entity_update.cpp:357/:408.
     /// `None` until the first General-block update carries it; treated as visible,
@@ -346,8 +369,10 @@ pub struct Entity {
     pub name_vis: Option<u8>,
 }
 
-// LSB STATUS_TYPE. vendor/server/src/map/entities/baseentity.h
-mod status_type {
+// LSB STATUS_TYPE. vendor/server/src/map/entities/baseentity.h.
+// Public so the renderer can hide models on INVISIBLE without re-declaring
+// the byte (single source of truth).
+pub mod status_type {
     pub const DISAPPEAR: u8 = 2;
     pub const INVISIBLE: u8 = 3;
     pub const STATUS_4: u8 = 4;
@@ -368,6 +393,25 @@ impl Entity {
     /// not name suppression. Suppresses the nameplate only — never targeting.
     pub fn name_hidden(&self) -> bool {
         self.name_vis.is_some_and(|v| v & 0x08 != 0)
+    }
+
+    /// LSB STATUS_TYPE::INVISIBLE: the server hides the model entirely —
+    /// worms between dive and surface (vendor/server/src/map/ai/controllers/
+    /// mob_controller.cpp). The vendored source only sets it on mobs; players
+    /// phase via namevis 0x80 instead. Hides model + nameplate; targeting is
+    /// already gated by [`Entity::status_selectable`].
+    pub fn is_invisible(&self) -> bool {
+        self.status == status_type::INVISIBLE
+    }
+
+    /// LSB `Flags1.InvisFlag` (bit 29): player-invisibility — a GM hiding
+    /// themselves or an EFFECTFLAG_INVISIBLE status effect. The server sets it
+    /// for PCs only (vendor/server/src/map/packets/char_update.cpp:316), so the
+    /// kind gate is part of the fact, not a render preference. Unlike
+    /// [`Entity::is_invisible`] (STATUS_TYPE on mobs) this never gates targeting:
+    /// retail keeps invisible players targetable and draws nothing instead.
+    pub fn invis_flag(&self) -> bool {
+        matches!(self.kind, EntityKind::Pc) && self.char_flags.invis
     }
 
     // Blacklist (not whitelist) so an undecoded byte fails open, staying targetable.
@@ -1567,6 +1611,15 @@ pub enum ViewerCommand {
     DeliveryBox {
         op: DeliveryOp,
     },
+
+    /// Capture the native client's primary window to PNG via Bevy render-target
+    /// readback — no focus or screen-recording permission needed. GUI-side only:
+    /// the relay routes it into `DebugControl`, never the session (which treats
+    /// `AgentCommand::Screenshot` as a no-op). `None` leaves default naming
+    /// (`screenshot-N.png`) to the GUI side.
+    Screenshot {
+        path: Option<String>,
+    },
 }
 
 /// Viewer-issued delivery box operations. A thinner vocabulary than the
@@ -1698,6 +1751,7 @@ mod tests {
                 mount: None,
                 status: 0,
                 char_flags: CharFlags::default(),
+                monstrosity: false,
                 name_vis: None,
             }],
             party: vec![],

@@ -344,9 +344,11 @@ pub fn sample_field<S: Sampler>(sampler: &S, feet_xz: Vec2, feet_y: f32, m: Vec2
 
     let poof = !heights.is_empty() && range < POOF_MAX;
 
-    // Envelope: only a staircase (>= 2 risers) rides the upper envelope of a
+    // Envelope: a staircase (>= 2 risers) rides the upper envelope of a
     // least-squares plane over the surviving samples; everything else targets
     // h0 directly (single step / slope / flat / poof all ride h0 at speed).
+    // Monotonic only: a window mixing up- and down-risers straddles a crest
+    // or a trench — fitting the plane there hovers, so target h0 direct.
     let (g, target) = if risers >= 2 && signed_risers.unsigned_abs() == risers && !poof {
         fit_envelope(&samples, &on_line)
     } else {
@@ -378,6 +380,9 @@ fn classify_forward(
     xz: Vec2,
 ) -> SampleStatus {
     let Some(h) = hit else {
+        // No floor under the chain ceiling. A wall face ahead caps the rise:
+        // a second query with reach finds the ledge above it; otherwise this
+        // is just open ground / a hole (Miss).
         if let Some(prev) = prev_h {
             let ceiling = prev + STEP_MAX + CHAIN_CEILING_EPS;
             if sampler
@@ -473,7 +478,30 @@ fn fit_envelope(samples: &[FieldSample], on_line: &[usize]) -> (Vec2, Option<f32
     let det = a11 * (a22 * a33 - a23 * a32) - a12 * (a21 * a33 - a23 * a31)
         + a13 * (a21 * a32 - a22 * a31);
     if det.abs() < 1e-9 {
-        return (Vec2::ZERO, None);
+        // No lateral spread in the surviving set — the usual case, since only
+        // on-line samples carry filtered heights: b and c are confounded and
+        // the plane is singular. The along-m gradient is still estimable as a
+        // plain least-squares slope of h over d; fit that with g.y = 0.
+        let det1d = sdd * n - sum_d * sum_d;
+        if det1d.abs() < 1e-9 {
+            return (Vec2::ZERO, None);
+        }
+        let a = (n * sdh - sum_d * sch) / det1d;
+        let g = Vec2::new(a, 0.0);
+        let mut best = f32::NEG_INFINITY;
+        for &(d, _l, h) in &pts {
+            best = best.max(h - g.x * d);
+        }
+        return if best.is_finite() {
+            // Same no-hover cap as the full-plane path: never above the
+            // highest surviving sample.
+            (
+                g,
+                Some(best.min(pts.iter().map(|p| p.2).reduce(f32::max).unwrap())),
+            )
+        } else {
+            (Vec2::ZERO, None)
+        };
     }
     let b1 = sdh;
     let b2 = slh;
@@ -890,6 +918,8 @@ mod tests {
 
         for (d, min_risers) in [(0.25, 2u32), (0.3, 2), (0.4, 2)] {
             let h = flight(0.3, d, 0.3, 10);
+            // Stand on the tread under x=1.5: its height depends on d, so
+            // derive it from the sampler instead of hardcoding one flight's.
             let feet = Vec2::new(1.5, 0.0);
             let feet_y = h(feet, f32::INFINITY).unwrap();
             let s = sampler(h);
@@ -1022,8 +1052,11 @@ mod tests {
         }
     }
 
-    /// A 50 degree slanted riser is a SLOPE (0 risers, continuous samples); a
-    /// 65 degree face of the same height is a single step (plan §4).
+    /// A continuous ramp reads as a SLOPE (0 risers); a steep face of the
+    /// same height is a single step (plan §4). The slope/step boundary is set
+    /// by the FLOOR_COS angle cutoff: a jump pair counts as a riser only when
+    /// its subdivided samples rise faster than that cutoff, so any continuous
+    /// ramp below ~60 degrees reads 0 risers regardless of LIP_MAX.
     #[test]
     fn slanted_riser_50_is_slope_65_is_step() {
         // Continuous floors below the normal cutoff do not count as risers.
@@ -1048,9 +1081,38 @@ mod tests {
         };
         let s = sampler(h65);
         let f = sample_field(&s, Vec2::ZERO, 0.0, Vec2::X);
-        assert_eq!(
-            f.riser_count, 1,
-            "65 degree face must be a single step: {f:?}"
-        );
+        assert_eq!(f.riser_count, 1, "65 degree face must be a step: {f:?}");
+    }
+
+    /// A gentle ramp reads as a SLOPE (0 risers); a steep face of the same
+    /// height is a single step — the LIP_MAX-scale variant of the angle test.
+    #[test]
+    fn gentle_ramp_reads_zero_risers_steep_face_reads_one() {
+        // Gentle ramp: rise 0.3 over run 1.0 (~17 deg) — per-step 0.045,
+        // endpoint jump 0.09 < LIP_MAX.
+        let h_gentle = |xz: Vec2, _c: f32| -> Option<f32> {
+            Some(if xz.x < 0.45 {
+                0.0
+            } else {
+                ((xz.x - 0.45) * (0.3 / 1.0)).min(0.3)
+            })
+        };
+        let s = sampler(h_gentle);
+        let f = sample_field(&s, Vec2::ZERO, 0.0, Vec2::X);
+        assert_eq!(f.riser_count, 0, "gentle ramp must be a slope: {f:?}");
+
+        // Steep face (~65 deg): rise 0.3 over run 0.143 — one jump in the
+        // window; no sample position falls inside the ramp band [0.45, 0.593),
+        // so exactly one riser regardless of f32 boundary flips.
+        let h_steep = |xz: Vec2, _c: f32| -> Option<f32> {
+            Some(if xz.x < 0.45 {
+                0.0
+            } else {
+                ((xz.x - 0.45) * 65_f32.to_radians().tan()).min(0.3)
+            })
+        };
+        let s = sampler(h_steep);
+        let f = sample_field(&s, Vec2::ZERO, 0.0, Vec2::X);
+        assert_eq!(f.riser_count, 1, "steep face must be a single step: {f:?}");
     }
 }

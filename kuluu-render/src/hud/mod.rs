@@ -87,6 +87,23 @@ pub struct HudPanels {
     /// Party-frame UI Settings panel (Debug menu): layout overrides, bar
     /// toggles, distance readouts, scale. Runtime-only, no persist.
     pub ui_settings: bool,
+    /// Debug weather gate (Debug menu Weather row): when true, suppresses the
+    /// active-weather modifier (ambient tint/brightness, sun mul, lightning)
+    /// and precipitation particles so scene-graphic errors can be isolated.
+    /// The zone DAT environment (sky, base ambient, distance fog) is untouched —
+    /// that is what the Fog row controls. Runtime-only, no persist.
+    pub weather_off: bool,
+    /// Debug fog gate (Debug menu Fog row): when true, strips every fog layer
+    /// (DAT DistanceFog, volumetric ground haze + its volume entity) so
+    /// scene-graphic errors can be isolated. Independent of `weather_off`.
+    /// Runtime-only, no persist.
+    pub fog_off: bool,
+    /// Debug Entity List overlay (Debug menu "Entity List" row): when true,
+    /// shows a scrollable dump of every live wire entity from the
+    /// EntityTable — id, name, kind, position, status byte, hp%, invis/name-
+    /// hidden/dead flags. Mouse wheel scrolls; default off.
+    /// Runtime-only, no persist.
+    pub entity_list: bool,
 }
 
 #[derive(Component)]

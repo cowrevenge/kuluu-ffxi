@@ -233,17 +233,30 @@ fn nameplate_snap_line(tag: &str, s: NameplateFrameSnap) -> String {
         // explain.
         if s.bb_total > 0 || s.hidden > 0 {
             tail.push_str(&format!(
-                " bb {} visible of {} | self={} depth-gate={} gone={}",
-                s.bb_visible, s.bb_total, s.bb_hide_self, s.bb_hidden_depth, s.bb_despawned
+                " bb {} visible of {} | self={} status={} depth-gate={} gone={}",
+                s.bb_visible,
+                s.bb_total,
+                s.bb_hide_self,
+                s.bb_hidden_status,
+                s.bb_hidden_depth,
+                s.bb_despawned
             ));
         }
         format!("{}\n      {}", main, tail)
     };
     format!(
         // {tag} captures the `tag` parameter from scope; the bare specifiers
-        // take the seven counters in order.
-        "{tag}: plates={} hidden={} nogpuimg={} nodata={} bound={} gputex={} | {}",
-        s.plates_total, s.hidden, s.no_gpu_image, s.not_had_data, s.bound, s.gpu_images_total, draw
+        // take the eight counters in order. `rebound` = bind groups rebuilt
+        // this tick because a plate's texture changed under its handle.
+        "{tag}: plates={} hidden={} nogpuimg={} nodata={} bound={} rebound={} gputex={} | {}",
+        s.plates_total,
+        s.hidden,
+        s.no_gpu_image,
+        s.not_had_data,
+        s.bound,
+        s.rebound,
+        s.gpu_images_total,
+        draw
     )
 }
 

@@ -83,6 +83,7 @@ fn main() {
             speed,
             dt,
             false,
+            true, // real zone geometry loaded above: floor source is ready
         );
         x += res.dx;
         y += res.dy;

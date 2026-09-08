@@ -2,6 +2,7 @@ pub mod bridge;
 pub mod camera_collision;
 pub mod collision_bvh;
 pub mod debug_heights;
+pub mod entity_list_hud;
 pub mod exit_watchdog;
 mod gamepad_input;
 pub mod input;
@@ -518,6 +519,7 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
         .init_resource::<CameraAutoRecenter>()
         .init_resource::<HeadingTurnAccum>()
         .init_resource::<LocalPlayerPrediction>()
+        .init_resource::<entity_list_hud::EntityListScroll>()
         .init_resource::<input::DispatchLocals>()
         .init_resource::<text_input::CaptureMode>()
         .init_resource::<collision_bvh::ZoneCollisionBvh>()
@@ -576,6 +578,7 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
         (
             target_list_hud::spawn_target_list_hud,
             perf_hud::spawn_perf_hud,
+            entity_list_hud::spawn_entity_list_hud,
         ),
     );
     app.add_systems(
@@ -596,6 +599,7 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
             perf_hud::update_perf_monitor,
             perf_hud::update_perf_graph,
             target_list_hud::update_target_list_hud,
+            entity_list_hud::update_entity_list_hud,
         )
             .chain()
             .run_if(in_state(AppPhase::InGame)),
@@ -605,6 +609,8 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
         (
             perf_hud::apply_perf_visibility,
             target_list_hud::apply_target_list_visibility,
+            entity_list_hud::apply_entity_list_visibility,
+            entity_list_hud::entity_list_wheel_system,
         )
             .run_if(in_state(AppPhase::InGame)),
     );
@@ -614,6 +620,7 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
         (
             despawn_ingame_entities,
             drain_entity_prediction,
+            drain_entity_table,
             input::reset_local_movement,
             kuluu_render::camera::reset_camera_follow,
             drain_mzb_load_state,
@@ -951,6 +958,10 @@ fn drain_cutscene_state(
     hud_hidden.cutscene = false;
 }
 
+fn drain_entity_table(mut table: ResMut<kuluu_render::entity_table::EntityTable>) {
+    *table = default();
+}
+
 fn drain_entity_prediction(mut prediction: ResMut<kuluu_render::combat_stance::EntityPrediction>) {
     prediction.by_id.clear();
 }
@@ -1127,6 +1138,20 @@ mod zone_teardown_tests {
     }
 
     #[test]
+    fn teardown_clears_entity_table_identity() {
+        let mut world = World::new();
+        world.init_resource::<kuluu_render::entity_table::EntityTable>();
+        world
+            .resource_mut::<kuluu_render::entity_table::EntityTable>()
+            .set_self_id(Some(7));
+        world.run_system_once(super::drain_entity_table).unwrap();
+        let mut table = world.resource_mut::<kuluu_render::entity_table::EntityTable>();
+        assert!(table.is_empty());
+        assert_eq!(table.self_id(), None);
+        assert!(table.changed_ids().is_empty());
+    }
+
+    #[test]
     fn teardown_tolerates_recursively_freed_children_without_warns() {
         let _ = log::set_boxed_logger(Box::new(BevyEcsWarnCounter));
         log::set_max_level(log::LevelFilter::Warn);
@@ -1199,19 +1224,34 @@ fn bridge_connecting(
         state_rx,
         cmd_tx,
         event_tx,
+        entity_changes_rx,
         session_task: _,
         folder_task: _,
     } = spawn_session_with_reactor(cfg, ReactorConfig::player());
     let event_rx = event_tx.subscribe();
+
+    // Focus-less GUI driving (kuluu-0pof): the socket writes movement/heights
+    // requests into this handle; GUI systems read it. Always present so input
+    // systems can depend on it even when no socket is listening.
+    let debug_ctrl = kuluu_session::debug_control::DebugControl::new_shared();
+    commands.insert_resource(DebugControlHandle(debug_ctrl.clone()));
 
     #[cfg(feature = "relay")]
     if let Some(addr) = relay.0 {
         let state_rx_relay = state_rx.clone();
         let event_tx_relay = event_tx.clone();
         let cmd_tx_relay = cmd_tx.clone();
+        // Viewer Screenshot commands land on the shared handle, not the session.
+        let debug_ctrl_relay = Some(debug_ctrl.clone());
         runtime.0.spawn(async move {
-            if let Err(err) =
-                crate::relay::serve(addr, state_rx_relay, event_tx_relay, cmd_tx_relay).await
+            if let Err(err) = kuluu_session::relay::serve(
+                addr,
+                state_rx_relay,
+                event_tx_relay,
+                cmd_tx_relay,
+                debug_ctrl_relay,
+            )
+            .await
             {
                 tracing::warn!(error = %err, "relay listener exited");
             }
@@ -1219,12 +1259,6 @@ fn bridge_connecting(
     }
     #[cfg(not(feature = "relay"))]
     let _ = relay;
-
-    // Focus-less GUI driving (kuluu-0pof): the socket writes movement/heights
-    // requests into this handle; GUI systems read it. Always present so input
-    // systems can depend on it even when no socket is listening.
-    let debug_ctrl = kuluu_session::debug_control::DebugControl::new_shared();
-    commands.insert_resource(DebugControlHandle(debug_ctrl.clone()));
 
     // Stair-capture drive channel (FFXI_STAIR_DRIVE): always present so the input
     // path can depend on it; only listens when the env var names an address.
@@ -1270,7 +1304,12 @@ fn bridge_connecting(
         });
     }
 
-    commands.insert_resource(NativeSource::new(&runtime.0, state_rx, event_rx));
+    commands.insert_resource(NativeSource::new(
+        &runtime.0,
+        state_rx,
+        event_rx,
+        entity_changes_rx,
+    ));
     commands.insert_resource(CommandTx(cmd_tx));
 
     commands.insert_resource(SessionEventTx(event_tx));

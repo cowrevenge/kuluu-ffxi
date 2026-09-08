@@ -447,6 +447,7 @@ pub(super) fn spawn_char_create_task(
         nation: form.nation,
         size: form.size,
         face: form.face,
+        skip_intro_cs: u8::from(form.skip_intro_cs),
     };
 
     let (Some(handle), Some(auth)) = (handle, auth) else {

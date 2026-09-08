@@ -103,7 +103,7 @@ pub const PUSH_THROUGH_SECS: f32 = 0.8;
 
 /// Fall feel: fast and smooth, tuned by walking off ledges — swap for the real
 /// constant if the XiClient source ever turns up one. A 1 yalm drop takes
-/// ~0.22 s, 3 yalms ~0.39 s, 10 yalms ~0.6 s.
+/// ~0.22 s, 3 yalms ~0.39 s, 10 yalms ~0.71 s (all pre-terminal).
 #[derive(Clone, Copy, Debug)]
 pub struct FallModel {
     /// Downward acceleration, yalms/s^2.

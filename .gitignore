@@ -92,7 +92,5 @@ artifacts/
 # Session scratch + crash dumps (rustc ICE logs, saved pre-rewrite file versions) — local only.
 archive/scratch/
 
-# NVIDIA-supplied DLSS material (runtime DLLs + optional SDK/toolchain clones).
-# Not ours — never commit. Only the README is tracked; see Dlss_Nvidia_dll/README.md.
-/Dlss_Nvidia_dll/*
-!/Dlss_Nvidia_dll/README.md
+# Legacy local SDK/runtime downloads; the optional pinned SDK is vendor/DLSS.
+/Dlss_Nvidia_dll/

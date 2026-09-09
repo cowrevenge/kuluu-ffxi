@@ -3230,10 +3230,12 @@ mod tests {
             let mut def = sheet_def();
             def.mesh_id = SMOKE_SHEET_ID;
             let mut images = Assets::<Image>::default();
-            assert!(resolve_mesh(&assets, NO_LOCAL_DIR, &def, &mut images, false)
-                .expect("smok sheet resolves")
-                .2
-                .is_some());
+            assert!(
+                resolve_mesh(&assets, NO_LOCAL_DIR, &def, &mut images, false)
+                    .expect("smok sheet resolves")
+                    .2
+                    .is_some()
+            );
         }
     }
 

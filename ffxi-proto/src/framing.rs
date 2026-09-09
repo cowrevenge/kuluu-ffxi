@@ -7,9 +7,31 @@ pub const MIN_FRAME_SIZE: usize = FFXI_HEADER_SIZE + 4 + MD5_TRAILER_SIZE;
 
 pub const SUBPACKET_OPCODE_MASK: u16 = 0x1FF;
 pub const SUBPACKET_SIZE_WORDS_SHIFT: u32 = 9;
+pub const SUBPACKET_SIZE_WORDS_MASK: u16 = 0x7F;
+pub const SUBPACKET_WORD_BYTES: usize = 4;
+pub const SUBPACKET_HEADER_SIZE: usize = 4;
 
-pub fn subpacket_header_word(opcode: u16, size_words: u16) -> u16 {
-    opcode | (size_words << SUBPACKET_SIZE_WORDS_SHIFT)
+// vendor/server/src/map/packets/basic.h:105-119 setType/setSize: the id is
+// masked to 9 bits, and the byte length is rounded up to a 4-byte multiple then
+// halved into byte 1 -- whose lowest bit belongs to the id -- so the length
+// field is 7 bits wide and a wider value truncates there exactly as `& 0x7F`
+// does here. basic.h:91-99 getType/getSize and
+// vendor/server/src/map/map_networking.cpp:419-423 are the matching decode.
+pub const fn subpacket_header_word(opcode: u16, size_words: u16) -> u16 {
+    (opcode & SUBPACKET_OPCODE_MASK)
+        | ((size_words & SUBPACKET_SIZE_WORDS_MASK) << SUBPACKET_SIZE_WORDS_SHIFT)
+}
+
+pub const fn subpacket_size_words(size_bytes: usize) -> u16 {
+    size_bytes.div_ceil(SUBPACKET_WORD_BYTES) as u16
+}
+
+pub const fn subpacket_opcode(header_word: u16) -> u16 {
+    header_word & SUBPACKET_OPCODE_MASK
+}
+
+pub const fn subpacket_size_bytes(header_word: u16) -> usize {
+    (header_word >> SUBPACKET_SIZE_WORDS_SHIFT) as usize * SUBPACKET_WORD_BYTES
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -55,7 +77,7 @@ impl Header {
     }
 
     pub fn opcode(&self) -> u16 {
-        self.id_and_size & SUBPACKET_OPCODE_MASK
+        subpacket_opcode(self.id_and_size)
     }
 }
 
@@ -89,19 +111,20 @@ impl<'a> Iterator for SubPacketWalker<'a> {
     type Item = Result<SubPacket<'a>, WalkError>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.rest.len() < 4 {
+        if self.rest.len() < SUBPACKET_HEADER_SIZE {
             return if self.rest.is_empty() {
                 None
             } else {
                 Some(Err(WalkError::Truncated {
                     have: self.rest.len(),
-                    want: 4,
+                    want: SUBPACKET_HEADER_SIZE,
                 }))
             };
         }
 
-        let opcode = (self.rest[0] as u16) | (((self.rest[1] as u16) & 0x01) << 8);
-        let size_bytes = ((self.rest[1] as usize) & 0xFE) << 1;
+        let header_word = u16::from_le_bytes([self.rest[0], self.rest[1]]);
+        let opcode = subpacket_opcode(header_word);
+        let size_bytes = subpacket_size_bytes(header_word);
         if size_bytes == 0 {
             return Some(Err(WalkError::ZeroSize));
         }
@@ -115,7 +138,7 @@ impl<'a> Iterator for SubPacketWalker<'a> {
         let sub = SubPacket {
             opcode,
             sequence,
-            data: &self.rest[4..size_bytes],
+            data: &self.rest[SUBPACKET_HEADER_SIZE..size_bytes],
         };
         self.rest = &self.rest[size_bytes..];
         Some(Ok(sub))
@@ -274,11 +297,108 @@ mod tests {
             let word = subpacket_header_word(opcode, size_words);
             assert_eq!(word & SUBPACKET_OPCODE_MASK, opcode);
             assert_eq!(word >> SUBPACKET_SIZE_WORDS_SHIFT, size_words);
+            assert_eq!(subpacket_opcode(word), opcode);
+            assert_eq!(
+                subpacket_size_bytes(word),
+                size_words as usize * SUBPACKET_WORD_BYTES
+            );
             let h = Header {
                 id_and_size: word,
                 ..Header::default()
             };
             assert_eq!(h.opcode(), opcode);
+        }
+    }
+
+    // Independent transcription of vendor/server/src/map/packets/basic.h:105-119
+    // (setType/setSize) and basic.h:91-99 (getType/getSize) as the oracle for the
+    // helpers above.
+    fn lsb_set_type_and_size(opcode: u16, size_bytes: usize) -> [u8; 2] {
+        let mut buf = [0u8; 2];
+        let id = (u16::from_le_bytes(buf) & !0x1FF) | (opcode & 0x1FF);
+        buf = id.to_le_bytes();
+        buf[1] = (buf[1] & 1) | ((((size_bytes + 3) & !3) / 2) as u8);
+        buf
+    }
+
+    fn lsb_get_type_and_size(word: [u8; 2]) -> (u16, usize) {
+        let id_and_size = u16::from_le_bytes(word);
+        (
+            id_and_size & 0x1FF,
+            (2 * (word[1] & !1) as usize).min(0x1FF),
+        )
+    }
+
+    #[test]
+    fn subpacket_header_word_matches_lsb_set_type_set_size() {
+        for opcode in [0x000u16, 0x00A, 0x0FF, 0x100, 0x15D, 0x1FF] {
+            for size_words in [0u16, 1, 2, 19, 23, 38, 0x7F] {
+                let size_bytes = size_words as usize * SUBPACKET_WORD_BYTES;
+                let ours = subpacket_header_word(opcode, size_words).to_le_bytes();
+                assert_eq!(
+                    ours,
+                    lsb_set_type_and_size(opcode, size_bytes),
+                    "opcode {opcode:#05X} size_words {size_words}"
+                );
+                assert_eq!(
+                    lsb_get_type_and_size(ours),
+                    (opcode, size_bytes),
+                    "opcode {opcode:#05X} size_words {size_words}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn subpacket_header_word_truncates_oversized_fields_like_lsb() {
+        for (opcode, size_words) in [(0x2FFu16, 0x80u16), (0xFFFFu16, 0x81u16)] {
+            let ours = subpacket_header_word(opcode, size_words).to_le_bytes();
+            let size_bytes = size_words as usize * SUBPACKET_WORD_BYTES;
+            assert_eq!(ours, lsb_set_type_and_size(opcode, size_bytes));
+            assert_eq!(
+                lsb_get_type_and_size(ours),
+                (
+                    opcode & SUBPACKET_OPCODE_MASK,
+                    (size_words & SUBPACKET_SIZE_WORDS_MASK) as usize * SUBPACKET_WORD_BYTES
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn subpacket_size_words_rounds_up_to_word_multiple() {
+        for (size_bytes, want) in [
+            (0usize, 0u16),
+            (1, 1),
+            (4, 1),
+            (5, 2),
+            (8, 2),
+            (90, 23),
+            (92, 23),
+        ] {
+            assert_eq!(subpacket_size_words(size_bytes), want, "{size_bytes} bytes");
+            assert!(subpacket_size_words(size_bytes) as usize * SUBPACKET_WORD_BYTES >= size_bytes);
+        }
+    }
+
+    #[test]
+    fn sub_packet_walker_decodes_what_the_emitter_writes() {
+        let bodies: [&[u8]; 3] = [&[], &[0xAA, 0xBB, 0xCC, 0xDD], &[0x01; 12]];
+        let opcodes = [0x00Au16, 0x100, 0x1FF];
+        let mut payload = Vec::new();
+        for (opcode, body) in opcodes.iter().zip(bodies.iter()) {
+            let size_words = subpacket_size_words(SUBPACKET_HEADER_SIZE + body.len());
+            payload.extend_from_slice(&subpacket_header_word(*opcode, size_words).to_le_bytes());
+            payload.extend_from_slice(&(0x4321u16).to_le_bytes());
+            payload.extend_from_slice(body);
+        }
+
+        let got: Vec<SubPacket<'_>> = walk_sub_packets(&payload).map(|s| s.unwrap()).collect();
+        assert_eq!(got.len(), opcodes.len());
+        for (i, sub) in got.iter().enumerate() {
+            assert_eq!(sub.opcode, opcodes[i]);
+            assert_eq!(sub.sequence, 0x4321);
+            assert_eq!(sub.data, bodies[i]);
         }
     }
 }

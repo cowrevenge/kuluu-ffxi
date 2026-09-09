@@ -261,7 +261,7 @@ fn build_bootstrap_packet(args: &BootstrapArgs<'_>) -> Result<Vec<u8>> {
 
     let body = &mut frame[framing::FFXI_HEADER_SIZE..framing::FFXI_HEADER_SIZE + GP_CLI_LOGIN_SIZE];
 
-    let size_words: u16 = (GP_CLI_LOGIN_SIZE / 4) as u16;
+    let size_words = framing::subpacket_size_words(GP_CLI_LOGIN_SIZE);
     let header_word = framing::subpacket_header_word(ffxi_proto::map::c2s::LOGIN, size_words);
     body[0..2].copy_from_slice(&header_word.to_le_bytes());
 

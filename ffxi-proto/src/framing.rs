@@ -3,27 +3,36 @@ use crate::blowfish;
 pub const FFXI_HEADER_SIZE: usize = 28;
 pub const MD5_TRAILER_SIZE: usize = 16;
 
-pub const MIN_FRAME_SIZE: usize = FFXI_HEADER_SIZE + 4 + MD5_TRAILER_SIZE;
-
 pub const SUBPACKET_OPCODE_MASK: u16 = 0x1FF;
 pub const SUBPACKET_SIZE_WORDS_SHIFT: u32 = 9;
 pub const SUBPACKET_SIZE_WORDS_MASK: u16 = 0x7F;
 pub const SUBPACKET_WORD_BYTES: usize = 4;
 pub const SUBPACKET_HEADER_SIZE: usize = 4;
 
-// vendor/server/src/map/packets/basic.h:105-119 setType/setSize: the id is
-// masked to 9 bits, and the byte length is rounded up to a 4-byte multiple then
-// halved into byte 1 -- whose lowest bit belongs to the id -- so the length
-// field is 7 bits wide and a wider value truncates there exactly as `& 0x7F`
-// does here. basic.h:91-99 getType/getSize and
-// vendor/server/src/map/map_networking.cpp:419-423 are the matching decode.
+pub const MIN_FRAME_SIZE: usize = FFXI_HEADER_SIZE + SUBPACKET_HEADER_SIZE + MD5_TRAILER_SIZE;
+
+// vendor/server/src/map/packets/basic.h:106-111 setType and basic.h:113-119
+// setSize: the id is masked to 9 bits, and the halved length lands in byte 1
+// whose lowest bit belongs to the id -- so the length field is 7 bits wide and a
+// wider value truncates there exactly as `& 0x7F` does here. basic.h:91-99
+// getType/getSize and vendor/server/src/map/map_networking.cpp:419-423 are the
+// matching decode.
 pub const fn subpacket_header_word(opcode: u16, size_words: u16) -> u16 {
     (opcode & SUBPACKET_OPCODE_MASK)
         | ((size_words & SUBPACKET_SIZE_WORDS_MASK) << SUBPACKET_SIZE_WORDS_SHIFT)
 }
 
+// vendor/server/src/map/packets/basic.h:118 setSize rounds the byte length up to
+// a 4-byte multiple before halving it. The saturation caps at the widest value
+// the 7-bit header field can carry, so an oversized body reports a truncated
+// length instead of a wrapped-around small one.
 pub const fn subpacket_size_words(size_bytes: usize) -> u16 {
-    size_bytes.div_ceil(SUBPACKET_WORD_BYTES) as u16
+    let words = size_bytes.div_ceil(SUBPACKET_WORD_BYTES);
+    if words > SUBPACKET_SIZE_WORDS_MASK as usize {
+        SUBPACKET_SIZE_WORDS_MASK
+    } else {
+        words as u16
+    }
 }
 
 pub const fn subpacket_opcode(header_word: u16) -> u16 {
@@ -378,6 +387,19 @@ mod tests {
         ] {
             assert_eq!(subpacket_size_words(size_bytes), want, "{size_bytes} bytes");
             assert!(subpacket_size_words(size_bytes) as usize * SUBPACKET_WORD_BYTES >= size_bytes);
+        }
+    }
+
+    #[test]
+    fn subpacket_size_words_saturates_at_the_header_field_width() {
+        let widest = SUBPACKET_SIZE_WORDS_MASK as usize * SUBPACKET_WORD_BYTES;
+        assert_eq!(subpacket_size_words(widest), SUBPACKET_SIZE_WORDS_MASK);
+        for size_bytes in [widest + 1, 0x4_0000, usize::MAX] {
+            assert_eq!(
+                subpacket_size_words(size_bytes),
+                SUBPACKET_SIZE_WORDS_MASK,
+                "{size_bytes} bytes"
+            );
         }
     }
 

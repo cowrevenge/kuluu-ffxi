@@ -3079,7 +3079,8 @@ pub fn tick_live_ffxi_actors(
 
     // Self KO is unreliable via the entity hp_pct (only updated when CHAR_PC
     // carries UPDATE_HP) and via the party row (absent/stale when solo).
-    // death_homepoint_secs comes straight from 0x037 CHAR_STATUS hpp==0.
+    // death_homepoint_secs is published from 0x037 CHAR_STATUS and 0x00A LOGIN,
+    // both gated on hpp == 0.
     let self_dead = state.snapshot.death_homepoint_secs.is_some()
         || crate::snapshot::resolve_self(&state.snapshot.party, self_id)
             .map(|m| m.hp_pct == 0)

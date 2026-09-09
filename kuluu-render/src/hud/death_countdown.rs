@@ -1,18 +1,18 @@
 #![cfg(feature = "enhanced-death-countdown")]
 //! Enhanced (non-retail) numeric KO countdown line on the death prompt.
 //!
-//! Retail surfaces the home-point menu and no visible clock: its decompiled
-//! 0x00A/0x037 handlers park the server's death deadline in zone state
-//! (research/XIClient .../Game/State/GC_ZONE.h `field_40D6C`) and nothing
-//! formats it for the HUD, matching the live observation in
-//! `.agents/skills/retail-observe/references/death-ko-behavior.md`. So this
-//! readout is addon-style and opt-in; the timer it renders is still the real
-//! server value.
+//! Retail surfaces the home-point menu and no visible clock, per the dated
+//! observation in `.agents/skills/retail-observe/references/death-ko-behavior.md`.
+//! The XIClient decompile parks the server's death deadline in zone state
+//! (research/XIClient .../Game/State/GC_ZONE.h `field_40D6C`) and leaves its one
+//! read site unimplemented, so it corroborates nothing either way. This readout
+//! is addon-style and opt-in; the timer it renders is the real server value.
 
 use bevy::prelude::*;
 
+use crate::hud::death_prompt::is_dead;
 use crate::hud::style::{self, theme};
-use crate::snapshot::{resolve_self, SceneState};
+use crate::snapshot::SceneState;
 
 #[derive(Component)]
 pub struct DeathCountdownText;
@@ -49,13 +49,10 @@ pub fn update_death_countdown_system(
     mut anchor: Local<DeathCountdownAnchor>,
     mut countdown_q: Query<&mut Text, With<DeathCountdownText>>,
 ) {
-    let snap = &state.snapshot;
-    let dead = resolve_self(&snap.party, snap.self_char_id)
-        .map(|m| m.hp_pct == 0)
-        .unwrap_or(false);
-
     let now = time.elapsed_secs_f64();
-    let server = dead.then_some(snap.death_homepoint_secs).flatten();
+    let server = is_dead(&state)
+        .then_some(state.snapshot.death_homepoint_secs)
+        .flatten();
 
     if anchor.server_secs != server {
         anchor.server_secs = server;

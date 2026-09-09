@@ -206,7 +206,7 @@ impl ServerLogin {
     pub const WEATHER_OFFSET_TIME_OFFSET: usize = 0x70;
 
     /// `DeadCounter`, between `PlayTime` and `MyroomSubMapNumber` in
-    /// vendor/server/src/map/packets/s2c/0x00a_login.h:117-121. The chain from
+    /// vendor/server/src/map/packets/s2c/0x00a_login.h:115-121. The chain from
     /// `LoginState` @0x7C runs name[16], certificate[2], unknown9C, ZoneSubNo,
     /// PlayTime, DeadCounter — landing on
     /// [`ServerLoginMyroom::SUB_MAP_NUMBER_OFFSET`], which the const assert

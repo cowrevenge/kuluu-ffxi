@@ -16,15 +16,20 @@ record**; open work is in beads.
   a live run to settle.)
 - Retail shows the **homepoint menu**, not a visible numeric KO clock. A numeric
   countdown is therefore an Enhanced-flavored addition unless proven otherwise.
-  **Settled 2026-09-08 (kuluu-8t5h): Enhanced.** The retail binary keeps the
-  deadline as zone state and never formats it. `GC_ZONE::field_40D6C` is written
-  by exactly two packet handlers — 0x00A (`Payload.field_A4 / 60 +
-  ntGameTimeGet()`) and 0x037 (`gameTime + dead_counter1 / 60`, or `dead_counter2`
-  when that is already in the future) — and read by exactly one site, the zone-in
-  ResState branch in `GameManager.cpp`; no text/HUD reader exists
-  (research/XIClient, grep `field_40D6C`). Kuluu's "Home Point in M:SS" line now
-  lives behind the `enhanced-death-countdown` cargo feature, off in default and
-  release builds.
+  **Settled 2026-09-08 (kuluu-8t5h): Enhanced**, on the strength of the dated
+  observation above. The XIClient decompile is consistent with that call but does
+  not settle it: `GC_ZONE::field_40D6C` is written by exactly two packet handlers
+  — 0x00A (`Payload.field_A4 / 60 + ntGameTimeGet()`) and 0x037 (`gameTime +
+  dead_counter1 / 60`, or `dead_counter2` when that is already in the future) —
+  and the sole read site found (grep `field_40D6C`) is the zone-in ResState
+  branch in `GameManager.cpp`, which is an **undecompiled stub**:
+  `SPDLOG_ERROR("ResState not implemented")` guarding two empty `<= 360`
+  branches. What retail draws from that value is therefore unknown, and "no HUD
+  reader exists in a partial decompile" is absence of evidence, not evidence of
+  absence — XIClient reconstructions are community evidence until corroborated
+  by the retail binary or observation (research/AGENTS.md). Kuluu's "Home Point
+  in M:SS" line now lives behind the `enhanced-death-countdown` cargo feature,
+  off in default and release builds.
 - Music changes on the homepoint warp; the death-music slot must not survive it.
 - The faithful server signal for the dead pose is `animation == ANIMATION_DEATH (3)`.
 

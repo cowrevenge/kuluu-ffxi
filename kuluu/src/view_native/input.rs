@@ -113,7 +113,10 @@ use kuluu_session::state::{
 // per-tick constants in that same unit
 // (research/XIClient/src/XIClient/source/World/Actor/ControllableActor.cpp,
 // ControllableActor::StepControl, ControllableActor::ChangeVectorLengthByDirection).
-const RETAIL_MOVE_TICKS_PER_SEC: f32 = 60.0;
+// GameManager::SmoothedTimeDeltaScale = 60 / EffectiveFramerate puts every other
+// retail "tick" countdown in this same unit, so the walker's contact budget
+// (walker::consts) imports it rather than re-typing the rate.
+pub(crate) const RETAIL_MOVE_TICKS_PER_SEC: f32 = 60.0;
 const LOCKED_SIDE_STEP_DIVISOR: f32 = 16.0;
 const LOCKED_SIDE_STEP_DIVISOR_MOUNTED: f32 = 8.0;
 // The backward step is the walk speed over the tick rate, and mounted it is the

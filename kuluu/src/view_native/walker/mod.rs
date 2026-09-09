@@ -23,42 +23,52 @@ mod live_tests;
 
 use bevy::prelude::*;
 
-/// Per-entity push-through accrual: which mob the player is currently shoving,
-/// and for how long (plan §2.5). Sustained pressure into the SAME mob past
-/// PUSH_THROUGH_SECS excludes it until the pressure releases. The key is the
-/// mob's wire entity id (`MobObstacle::id`).
+/// Retail's actor-contact state: the contact actor, the tick budget and
+/// whether that budget is still live, from research/XIClient/src/XIClient/source/World/Actor/ControllableActor.cpp
+/// ControllableActor::CheckContactActor.
+///
+/// Contact blocks rather than pushes -- its caller
+/// (ControllableActor::HandleThirdPersonControl) simply skips the frame's
+/// `newPosition += movementDirection` and never depenetrates, so actors may
+/// overlap and a standing player is never shoved. The expiring budget is what
+/// turns sustained input into a walk-through instead of a jam.
 #[derive(Default)]
-pub struct PushThrough {
+pub struct ActorContact {
     target: Option<u32>,
-    secs: f64,
+    ticks_left: f32,
+    live: bool,
 }
 
-impl PushThrough {
-    /// Register a block against `mob` this tick; returns true once the mob has
-    /// been pressed continuously for PUSH_THROUGH_SECS and should stop blocking.
-    pub fn press(&mut self, mob: u32, dt: f32) -> bool {
-        match self.target {
-            Some(t) if t == mob => self.secs += f64::from(dt),
-            _ => {
-                self.target = Some(mob);
-                self.secs = f64::from(dt);
-            }
+impl ActorContact {
+    /// The post-nearest-actor half of the rule: `mob` is the single nearest
+    /// candidate and is confirmed overlapping. True when this tick's movement
+    /// must be dropped.
+    pub fn contact(&mut self, mob: u32, dt: f32) -> bool {
+        if self.target != Some(mob) {
+            self.target = Some(mob);
+            self.ticks_left = consts::CONTACT_BLOCK_TICKS;
+            self.live = true;
+            return true;
         }
-        self.secs >= f64::from(consts::PUSH_THROUGH_SECS)
+        if self.live {
+            self.ticks_left -= dt * consts::CONTACT_TICKS_PER_SEC;
+            if self.ticks_left >= 0.0 {
+                return true;
+            }
+            self.live = false;
+        }
+        false
     }
 
-    /// Pressure released (or a different obstacle took over): reset the clock.
-    pub fn release(&mut self) {
+    /// No candidate overlapping this tick: retail clears all three fields, so
+    /// the next approach gets a fresh budget.
+    pub fn clear(&mut self) {
         self.target = None;
-        self.secs = 0.0;
+        self.ticks_left = 0.0;
+        self.live = false;
     }
 
-    /// This mob is currently excluded by sustained pressure.
-    pub fn excluded(&self, mob: u32) -> bool {
-        self.target == Some(mob) && self.secs >= f64::from(consts::PUSH_THROUGH_SECS)
-    }
-
-    /// The mob the clock is running against (None when released).
+    /// The actor the budget is running against (None when cleared).
     pub fn target(&self) -> Option<u32> {
         self.target
     }
@@ -82,8 +92,8 @@ pub enum WalkMode {
 #[derive(Default)]
 pub struct Walker {
     pub mode: WalkMode,
-    /// Push-through accrual against the mob currently being shoved.
-    pub push_through: PushThrough,
+    /// Retail's contact block against the actor currently being walked into.
+    pub contact: ActorContact,
     /// Fall feel (plan §0 Q3): fast and smooth, tuned by walking off ledges —
     /// swap for the real constant if the XiClient source ever turns up one.
     pub fall: consts::FallModel,

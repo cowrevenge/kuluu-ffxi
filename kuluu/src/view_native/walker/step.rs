@@ -3,8 +3,8 @@
 //!
 //! Wire coordinates at the boundary: x/y horizontal, z grows DOWN; bevy space
 //! inside (xz = (x, -y), y up = -z). The tick is:
-//! 1. horizontal — wall sweep (MZB + closed doors) unless noclip, then mob
-//!    circles with PushThrough accrual;
+//! 1. horizontal — wall sweep (MZB + closed doors) unless noclip, then retail's
+//!    actor-contact check, which drops the tick's move rather than pushing out;
 //! 2. support probe at the NEW xz (five column queries, MZB + door floors);
 //! 3. vertical by mode: Stopped/Walking merge toward h0 or the staircase
 //!    envelope at `speed_yps * dt`; Airborne integrates `FallModel` and lands
@@ -16,9 +16,9 @@ use kuluu_render::dat_mzb::{point_tri_dist_sq, MzbCollisionGeometry};
 
 use super::consts::*;
 use super::field::{self, Sampler};
-use super::obstacles::{DoorObstacle, ObstacleSet};
+use super::obstacles::{DoorObstacle, MobObstacle, ObstacleSet};
 use super::sweep::{self, WallSource};
-use super::{StepResult, VerticalDecision, WalkMode, Walker};
+use super::{ActorContact, StepResult, VerticalDecision, WalkMode, Walker};
 
 /// Floor source for the walker's column queries: MZB zone collision plus
 /// closed-door triangles (a closed drawbridge is a floor, plan §2.1). The
@@ -221,6 +221,42 @@ fn landing_floor(sampler: &impl Sampler, xz: Vec2, y_lo: f32, y_hi: f32) -> Opti
     best
 }
 
+/// Retail's contact test over the tick's mob circles (research/XIClient/src/XIClient/source/World/Actor/ControllableActor.cpp
+/// ControllableActor::CheckContactActor): true when this tick's movement must
+/// be dropped.
+///
+/// `projected` is the position the move would reach, not the current one, so
+/// steering away from an actor releases the contact on the same tick it would
+/// otherwise have hit. Only the nearest candidate is considered; a farther
+/// actor the move also overlaps does not block.
+fn contact_blocks(
+    mobs: &[MobObstacle],
+    projected: Vec2,
+    dt: f32,
+    state: &mut ActorContact,
+) -> bool {
+    let mut closest_d2 = CONTACT_SEARCH_RADIUS * CONTACT_SEARCH_RADIUS;
+    let mut closest: Option<&MobObstacle> = None;
+    for mob in mobs {
+        let d2 = (mob.center - projected).length_squared();
+        if d2 < closest_d2 {
+            closest_d2 = d2;
+            closest = Some(mob);
+        }
+    }
+    let Some(mob) = closest else {
+        return false;
+    };
+    // Retail's own radius is 0.8x the XZ magnitude of model locator 44
+    // (research/XIClient/src/XIClient/source/World/Actor/ControllableActor.cpp ControllableActor::GetCollisionSize);
+    // we parse no locators yet, so the sweep body radius stands in (kuluu-53tn).
+    if closest_d2.sqrt() - BODY_RADIUS - mob.radius >= 0.0 {
+        state.clear();
+        return false;
+    }
+    state.contact(mob.id, dt)
+}
+
 /// One fixed tick of the walker. Wire coordinates throughout at the boundary:
 /// x/y horizontal, z grows DOWN (the frame `AgentCommand::Move` carries).
 /// Pure over its inputs — no ECS — so the test matrices can drive it headless.
@@ -263,53 +299,12 @@ pub fn step(
         sweep::sweep(&walls, feet_xz, feet_y, d_in)
     };
 
-    // Mobs: circle-vs-circle in xz (plan §2.5). A mob the walker is pressing
-    // into accrues PushThrough time; past PUSH_THROUGH_SECS it stops blocking
-    // until the pressure releases. Sustained = overlapping this tick AND still
-    // inside after the push-out.
-    if !noclip {
-        let mut xz_now = feet_xz + d;
-        let mut pressed: Option<u32> = None;
-        for mob in &obstacles.mobs {
-            let delta = xz_now - mob.center;
-            let dist = delta.length();
-            let min_dist = BODY_RADIUS + mob.radius;
-            if dist >= min_dist {
-                continue; // no overlap: no pressure on this mob
-            }
-            // Sustained pressure into this same mob past the threshold excludes
-            // it: pass through while the pressure holds.
-            if state.push_through.excluded(mob.id) {
-                state.push_through.press(mob.id, dt); // keep the clock running
-                pressed = Some(mob.id);
-                continue;
-            }
-            // Push out to the circle boundary along the separation axis.
-            let n2 = if dist > 1e-6 {
-                delta / dist
-            } else {
-                // Centered on top of it: push along the motion (or +x when idle).
-                if want_len > 1e-6 {
-                    d_in / want_len
-                } else {
-                    Vec2::X
-                }
-            };
-            xz_now += n2 * (min_dist - dist);
-            let still = (xz_now - mob.center).length() < min_dist + 1e-4;
-            if still {
-                // Pressing into this mob: accrue against it.
-                state.push_through.press(mob.id, dt);
-                pressed = Some(mob.id);
-            }
-            d = xz_now - feet_xz;
-        }
-        // Release when the previously-pressed mob is no longer being pressed
-        // (moved away, or a different obstacle took over): it blocks again.
-        match state.push_through.target() {
-            Some(t) if Some(t) == pressed => {}
-            _ => state.push_through.release(),
-        }
+    // Actor contact is all-or-nothing against the single nearest actor to the
+    // projected position, and drops the tick's movement instead of
+    // depenetrating: overlap is legal, a standing player is never shoved, and
+    // the expiring budget turns sustained input into a walk-through.
+    if !noclip && contact_blocks(&obstacles.mobs, feet_xz + d, dt, &mut state.contact) {
+        d = Vec2::ZERO;
     }
 
     let new_xz = feet_xz + d;
@@ -520,7 +515,7 @@ pub fn step(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::view_native::walker::PushThrough;
+    use crate::view_native::walker::ActorContact;
 
     // The rate/fall math below is exercised directly rather than through
     // `step` over a synthetic geometry: the MZB side of a default geometry has
@@ -660,30 +655,93 @@ mod tests {
     }
 
     #[test]
-    fn push_through_accrual_excludes_after_threshold() {
-        // ~0.8 s of sustained pressure into the same mob excludes it; a release
-        // or a different target resets the clock. The crossing is asserted to
-        // within one tick: secs accrues by f32 `+= dt`, so the threshold lands
-        // on neither an exact tick nor exactly PUSH_THROUGH_SECS/dt presses.
+    fn contact_budget_expires_after_retail_window() {
+        // field_5AC = 30 decremented by CheckTick() (60 / EffectiveFramerate)
+        // is 30 sixtieths of a second regardless of our tick rate: the same
+        // wall-clock window at 60 Hz and at 30 Hz.
+        for hz in [60.0f32, 30.0] {
+            let dt = 1.0 / hz;
+            let mut c = ActorContact::default();
+            let mut blocked = 0u32;
+            while c.contact(1, dt) {
+                blocked += 1;
+            }
+            let secs = blocked as f32 * dt;
+            let want = CONTACT_BLOCK_TICKS / CONTACT_TICKS_PER_SEC;
+            assert!(
+                (secs - want).abs() <= dt + 1e-6,
+                "at {hz} Hz blocked {blocked} ticks ({secs} s), want ~{want} s"
+            );
+        }
+    }
+
+    #[test]
+    fn contact_budget_rearms_on_target_change_and_clear() {
         let dt = 1.0 / 60.0;
-        let mut pt = PushThrough::default();
-        let mut held = 0u32;
-        while !pt.press(1, dt) {
-            held += 1;
-        }
+        // Exhaust the budget against actor 1.
+        let mut c = ActorContact::default();
+        while c.contact(1, dt) {}
         assert!(
-            (held as f32 - PUSH_THROUGH_SECS / dt).abs() <= 1.0 + 1e-6,
-            "excluded after {held} ticks (~{} s)",
-            held as f32 * dt
+            !c.contact(1, dt),
+            "expired budget must keep passing through"
         );
-        pt.release();
-        assert!(!pt.press(1, dt), "release did not reset");
-        // A different target mid-accrual restarts the clock.
-        let mut pt = PushThrough::default();
-        for _ in 0..((PUSH_THROUGH_SECS * 0.5) / dt).round() as u32 {
-            pt.press(1, dt);
+        // A different nearest actor re-arms the budget: this is what makes a
+        // crowd stutter rather than open up.
+        assert!(c.contact(2, dt), "target switch must re-arm");
+        // Separating clears all three fields, so the next approach blocks again.
+        while c.contact(2, dt) {}
+        c.clear();
+        assert_eq!(c.target(), None);
+        assert!(c.contact(2, dt), "clear must re-arm the same actor");
+    }
+
+    #[test]
+    fn contact_takes_the_nearest_actor_only() {
+        let dt = 1.0 / 60.0;
+        let mobs = [
+            MobObstacle {
+                id: 1,
+                center: Vec2::new(3.0, 0.0),
+                radius: 0.5,
+            },
+            MobObstacle {
+                id: 2,
+                center: Vec2::new(0.5, 0.0),
+                radius: 0.5,
+            },
+        ];
+        let mut c = ActorContact::default();
+        assert!(contact_blocks(&mobs, Vec2::ZERO, dt, &mut c));
+        assert_eq!(c.target(), Some(2), "nearest actor owns the contact");
+
+        // Beyond the 8 yalm scan seed nothing is a candidate, however close the
+        // circles would otherwise be.
+        let far = [MobObstacle {
+            id: 3,
+            center: Vec2::new(CONTACT_SEARCH_RADIUS + 1.0, 0.0),
+            radius: 0.5,
+        }];
+        let mut c = ActorContact::default();
+        assert!(!contact_blocks(&far, Vec2::ZERO, dt, &mut c));
+    }
+
+    #[test]
+    fn contact_never_depenetrates() {
+        // Retail withholds movement; it never pushes the player out. Standing
+        // still overlapping an actor must therefore produce zero displacement,
+        // not a shove to the circle boundary.
+        let dt = 1.0 / 60.0;
+        let mobs = [MobObstacle {
+            id: 1,
+            center: Vec2::new(0.1, 0.0),
+            radius: 0.5,
+        }];
+        let mut c = ActorContact::default();
+        let mut d = Vec2::ZERO;
+        if contact_blocks(&mobs, Vec2::ZERO + d, dt, &mut c) {
+            d = Vec2::ZERO;
         }
-        assert!(!pt.press(2, dt), "target switch must reset");
+        assert_eq!(d, Vec2::ZERO, "overlap must not generate a push-out");
     }
 
     #[test]

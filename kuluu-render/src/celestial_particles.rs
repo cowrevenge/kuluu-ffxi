@@ -97,11 +97,10 @@ fn collect_celestial_defs(
     out
 }
 
-// The celestial billboards are the one generator set drawn magnified enough for FFXI's stored
-// 4-bit alpha dither to resolve into screen-space stipple rather than average away: they cover a
-// fixed slice of screen at CELESTIAL_DISTANCE, and their sheets are 4-bit-alpha DXT3
-// (`dat-sky-alpha-histogram` on zone files 210/331). Same case as the cloud canopy and star dome
-// (kuluu-u5mm, kuluu-d9wv).
+// The celestial billboards hold a fixed on-screen size (they ride a sphere of radius
+// CELESTIAL_DISTANCE around the camera) and their sheets are 4-bit-alpha DXT3
+// (`dat-sky-alpha-histogram` on zone files 210/331), so they take the undithering converter the
+// cloud canopy, star dome and moon material already use (kuluu-u5mm, kuluu-d9wv).
 fn celestial_generator_options() -> ZoneGeneratorOptions {
     ZoneGeneratorOptions {
         resolve_alpha_dither: true,
@@ -292,5 +291,145 @@ mod tests {
                 "hour {hour}: derived {derived:?} != retail {expected:?}"
             );
         }
+    }
+
+    // The two links kuluu-d9wv adds, driven through the production entry point: the celestial
+    // set has to ask for the undither, and `spawn_zone_particle_generator` has to carry that
+    // request through mesh resolution into the sheet it binds on the material. A synthetic
+    // nibble 7/8 sheet - the pattern `weat/<type>/kasa` ships end to end - makes a celestial
+    // spawn distinguishable from every other generator set by alpha alone.
+    #[test]
+    fn the_celestial_spawn_binds_an_undithered_sheet() {
+        use crate::ffxi_particle_material::FfxiParticleMaterial;
+        use crate::particle_sim::spawn_zone_particle_generator;
+        use ffxi_dat::d3m::{D3m, D3mVertex};
+        use ffxi_dat::particle_gen::ParticleMeshKind;
+        use ffxi_dat::texture::{ffxi_alpha_remap, DecodedTexture, TexFormat};
+
+        const MESH_ID: [u8; 4] = *b"kasa";
+        const TEXTURE_NAME: &[u8; 16] = b"moon    kasa    ";
+        const TEXTURE_LOCAL: &str = "kasa";
+        const DITHER_LO: u8 = 0x77;
+        const DITHER_HI: u8 = 0x88;
+        const SIDE: u32 = 8;
+        // 0x80's recovered mean is 127.5, which no 8-bit alpha holds; the remap doubles that to
+        // a 254/255 split. One step is the floor, not a slack tolerance.
+        const RESOLVED_RESIDUAL_MAX: u8 = 1;
+
+        let mut rgba = Vec::with_capacity((SIDE * SIDE * 4) as usize);
+        for y in 0..SIDE {
+            for x in 0..SIDE {
+                let a = if (x + y) % 2 == 0 {
+                    DITHER_LO
+                } else {
+                    DITHER_HI
+                };
+                rgba.extend_from_slice(&[40, 50, 60, a]);
+            }
+        }
+
+        let mut assets = ActionAssets::default();
+        assets.d3ms.insert(
+            MESH_ID,
+            D3m {
+                name: MESH_ID,
+                num_triangles: 1,
+                texture_name: *TEXTURE_NAME,
+                vertices: vec![
+                    D3mVertex {
+                        pos: [0.0; 3],
+                        normal: [0.0, 1.0, 0.0],
+                        color: [1.0; 4],
+                        uv: [0.0, 0.0],
+                    };
+                    3
+                ],
+            },
+        );
+        assets.images_by_name.insert(
+            TEXTURE_LOCAL.to_string(),
+            DecodedTexture {
+                width: SIDE,
+                height: SIDE,
+                format_tag: TexFormat::Dxt3,
+                rgba,
+            },
+        );
+
+        let def = ParticleGeneratorDef {
+            mesh_id: MESH_ID,
+            mesh_kind: ParticleMeshKind::StaticMesh,
+            ..Default::default()
+        };
+
+        let bound_alpha =
+            |mats: &Assets<FfxiParticleMaterial>, images: &Assets<Image>| -> Vec<u8> {
+                let handle = mats
+                    .iter()
+                    .next()
+                    .expect("the spawn adds one material")
+                    .1
+                    .texture
+                    .clone()
+                    .expect("the material binds the sheet");
+                images
+                    .get(&handle)
+                    .and_then(|i| i.data.clone())
+                    .expect("the bound texture carries its texels")
+                    .chunks_exact(4)
+                    .map(|p| p[3])
+                    .collect()
+            };
+
+        let mut world = World::new();
+        let mut meshes = Assets::<Mesh>::default();
+        let mut mats = Assets::<FfxiParticleMaterial>::default();
+        let mut images = Assets::<Image>::default();
+        let mut sim = ParticleSimulator::default();
+        let spawned = {
+            let mut commands = world.commands();
+            spawn_celestial_set(
+                &assets,
+                &[(MESH_ID, def)],
+                &mut meshes,
+                &mut mats,
+                &mut images,
+                &mut sim,
+                &mut commands,
+            )
+        };
+        assert_eq!(spawned.len(), 1, "the synthetic celestial mesh resolves");
+        let celestial = bound_alpha(&mats, &images);
+        let min = *celestial.iter().min().expect("non-empty");
+        let max = *celestial.iter().max().expect("non-empty");
+        assert!(
+            max - min <= RESOLVED_RESIDUAL_MAX && min > ffxi_alpha_remap(DITHER_LO),
+            "the celestial spawn bound a still-dithered sheet: alpha {min}..{max}"
+        );
+
+        let mut plain_mats = Assets::<FfxiParticleMaterial>::default();
+        let mut plain_images = Assets::<Image>::default();
+        {
+            let mut commands = world.commands();
+            spawn_zone_particle_generator(
+                def,
+                &assets,
+                None,
+                Vec3::ZERO,
+                ZoneGeneratorOptions::default(),
+                &mut meshes,
+                &mut plain_mats,
+                &mut plain_images,
+                &mut sim,
+                &mut commands,
+            )
+            .expect("the synthetic mesh resolves for a plain generator too");
+        }
+        let plain = bound_alpha(&plain_mats, &plain_images);
+        assert!(
+            plain.contains(&ffxi_alpha_remap(DITHER_LO))
+                && plain.contains(&ffxi_alpha_remap(DITHER_HI)),
+            "every other generator set must keep the stipple"
+        );
     }
 }

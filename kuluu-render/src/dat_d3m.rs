@@ -49,13 +49,15 @@ pub fn decoded_texture_to_image(t: &ffxi_dat::texture::DecodedTexture) -> Image 
 /// [`decoded_texture_to_image`] plus [`ffxi_dat::texture::resolve_dxt3_alpha_dither`], for the
 /// camera-follow celestial billboards.
 ///
-/// Same magnification argument as `zone_texture::decoded_sky_texture_to_image`: the celestial
-/// set rides a sphere of radius `CELESTIAL_DISTANCE` around the camera and is scaled to cover
-/// a fixed slice of screen, so its texels resolve instead of averaging away, and its sheets are
-/// 4-bit-alpha DXT3 (`dat-sky-alpha-histogram` on zone files 210/331: `weat/<type>/kasa` is 100%
-/// the nibble 7/8 dithered-opaque pair, `moonshap` a nibble ramp). This is the D3M-side twin of
-/// the moon-material and cloud/star-dome calls kuluu-u5mm added; every other D3M particle sheet
-/// samples at or below 1:1 and keeps the plain converter (kuluu-d9wv).
+/// Same case as `zone_texture::decoded_sky_texture_to_image`: the celestial set rides a sphere
+/// of radius `CELESTIAL_DISTANCE` around the camera, so its on-screen size is set by its own
+/// scale rather than by distance, and its sheets are 4-bit-alpha DXT3 (`dat-sky-alpha-histogram`
+/// on zone files 210/331: `weat/<type>/kasa` is 100% the nibble 7/8 dithered-opaque pair,
+/// `moonshap` a nibble ramp). kuluu-u5mm already made this call for `moonshap` on the
+/// moon-material path (moon_material.rs:131), so the two paths agree on the one sheet they share.
+/// Every other D3M particle sheet keeps the plain converter — their on-screen sampling has not
+/// been surveyed, and `resolve_dxt3_alpha_dither` declines non-nibble alpha anyway, so widening
+/// the set is an argument to make per set, not a correctness gap (kuluu-d9wv).
 pub fn decoded_sky_texture_to_image(t: &ffxi_dat::texture::DecodedTexture) -> Image {
     convert(t, true)
 }
@@ -160,8 +162,8 @@ mod tests {
 
     // A DXT3 alpha plane holds nibble multiples only, so an authored half-opaque 0x80 ships as
     // the nibble 7/8 pair stippled across neighbours - what `weat/<type>/kasa` is, end to end.
-    // The celestial converter averages that back out; the shared particle converter, which
-    // every other D3M sheet samples at or below 1:1, must keep leaving it alone (kuluu-d9wv).
+    // The celestial converter averages that back out; the shared particle converter every other
+    // D3M sheet still goes through must keep leaving it alone (kuluu-d9wv).
     #[test]
     fn only_the_sky_converter_resolves_the_dxt3_alpha_stipple() {
         use ffxi_dat::texture::{ffxi_alpha_remap, DecodedTexture, TexFormat};

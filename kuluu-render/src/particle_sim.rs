@@ -287,9 +287,8 @@ const UNSCALED_EMISSION: f32 = 1.0;
 pub struct ZoneGeneratorOptions {
     pub camera_relative: bool,
     pub emit_scale: f32,
-    // Set only by the weat/<type>/ celestial set, whose billboards are magnified enough for
-    // FFXI's stored 4-bit alpha dither to resolve on screen: see
-    // `dat_d3m::decoded_sky_texture_to_image`.
+    // Set only by the weat/<type>/ celestial set, whose sheets carry FFXI's stored 4-bit alpha
+    // dither at a fixed on-screen size: see `dat_d3m::decoded_sky_texture_to_image`.
     pub resolve_alpha_dither: bool,
 }
 
@@ -2721,14 +2720,13 @@ mod tests {
     // multiples of 0x11, and `apply_ffxi_alpha_remap` doubles with saturation. Any other value
     // is a neighbourhood mean, i.e. proof the undither ran.
     fn off_nibble_lattice(alpha: &[u8]) -> usize {
-        alpha
-            .iter()
-            .filter(|&&a| {
-                !(0..=15)
-                    .map(|n| ffxi_dat::texture::ffxi_alpha_remap(n * 0x11))
-                    .any(|lattice| lattice == a)
-            })
-            .count()
+        use ffxi_dat::texture::{ffxi_alpha_remap, DXT3_ALPHA_DITHER_STEP};
+
+        let lattice: Vec<u8> = (0..=u8::MAX)
+            .step_by(DXT3_ALPHA_DITHER_STEP as usize)
+            .map(ffxi_alpha_remap)
+            .collect();
+        alpha.iter().filter(|a| !lattice.contains(a)).count()
     }
 
     fn image_alpha(images: &Assets<Image>, handle: &Handle<Image>) -> Vec<u8> {
@@ -2796,14 +2794,15 @@ mod tests {
         );
     }
 
-    // The other end of the same wire: `celestial_particles` spawns the Sun/Moon set with
-    // `resolve_alpha_dither`, and that flag has to survive the mesh/texture resolution it is
-    // threaded through. f_ro's `moon` generator is the celestial sheet that actually binds a
-    // texture (`moonshap`, a 4-bit-alpha DXT3 the moon-material path already undithers at
-    // moon_material.rs:131), so its texels are where the flag is observable: undithered alpha
-    // leaves the nibble lattice, dithered alpha cannot. Skips without a retail install.
+    // The retail half of the wire: the undither argument has to survive the mesh/texture
+    // resolution it is threaded through, on the sheet the celestial set really binds. f_ro's
+    // `moon` generator draws `moonshap`, a 4-bit-alpha DXT3 the moon-material path already
+    // undithers at moon_material.rs:131, so its texels are where the argument is observable:
+    // undithered alpha leaves the nibble lattice, dithered alpha cannot. Skips without a
+    // retail install. `celestial_particles::tests::the_celestial_spawn_binds_an_undithered_sheet`
+    // pins the two production links this one does not reach.
     #[test]
-    fn the_celestial_flag_reaches_the_moon_sheet_texels() {
+    fn resolve_zone_mesh_undithers_the_moon_sheet_texels() {
         const F_RO: u32 = 210;
         const MOON_GEN: [u8; 4] = *b"moon";
 
@@ -2830,7 +2829,7 @@ mod tests {
         );
         assert!(
             off_nibble_lattice(&alpha(true)) > 0,
-            "the celestial options never reached the texture converter"
+            "the undither argument never reached the texture converter"
         );
     }
 

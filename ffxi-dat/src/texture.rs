@@ -438,7 +438,7 @@ pub fn decode_dxt1_blocks(
 /// magnified, so it reads as a checkerboard over the whole sky (kuluu-u5mm). Measured with
 /// the `dat-sky-alpha-histogram` example, which also confirms the RGB carries no matching
 /// stipple — only alpha is dithered.
-const DXT3_ALPHA_DITHER_STEP: u8 = 0x11;
+pub const DXT3_ALPHA_DITHER_STEP: u8 = 0x11;
 
 /// Average an ordered-dithered DXT3 alpha plane back into the continuous value it encodes.
 ///

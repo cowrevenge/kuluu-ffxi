@@ -1587,6 +1587,26 @@ fn make_render_actor(
     }
 }
 
+// A posed actor with no model behind it, for tests that need the pose/skeleton pair a particle
+// attachment reads and nothing else.
+#[cfg(test)]
+pub(crate) fn render_actor_for_test(skeleton: Skeleton, world_pose: Vec<Mat4>) -> FfxiRenderActor {
+    let loaded = LoadedActor {
+        skeleton: Arc::new(skeleton),
+        skel_meshes: Vec::new(),
+        effect_meshes: Vec::new(),
+        textures: Vec::new(),
+        animations: Arc::default(),
+        battle_clips: Arc::default(),
+        routines: Arc::default(),
+        action_assets: Arc::default(),
+    };
+    FfxiRenderActor {
+        world_pose,
+        ..make_render_actor(&loaded, 0, Vec::new(), 0, 0.0, 1.0)
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn spawn_live_actor(
     commands: &mut Commands,

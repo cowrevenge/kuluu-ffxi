@@ -318,8 +318,12 @@ pub fn standard_joint_world_position(
 // 13..20 ring the actor at torso height. The selector stands for whichever of those eight sits
 // nearest the other actor of the attachment, which is what puts a melee hit spark on the struck
 // side of the victim. How 50 and 51 differ from 49 is not established upstream either.
+//
+// The DAT facts are pinned to the install by the real-DAT tests below. The nearest-of-eight RULE
+// on top of them is xim's, which research/AGENTS.md ranks as pointing at where to look rather than
+// as the answer, and it is unverified against the retail client binary or a retail observation.
 pub const NEAREST_JOINT_REFERENCES: std::ops::RangeInclusive<usize> = 49..=51;
-const RING_JOINT_REFERENCES: std::ops::RangeInclusive<usize> = 13..=20;
+pub const RING_JOINT_REFERENCES: std::ops::RangeInclusive<usize> = 13..=20;
 
 /// Position, in the actor's own pose frame, of the joint reference a particle
 /// generator attaches to. `toward` is the other actor of the attachment in that

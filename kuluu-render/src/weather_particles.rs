@@ -20,7 +20,7 @@ pub const WEAT_DIR: WeatherTypeId = *b"weat";
 // research/XIClient/src/XIClient/source/World/Generator/CYyGenerator.cpp CYyGenerator::Open — Open() walks up
 // to the `taew` (weat) container and ORs field_DE with 0x83, which arms the per-emission count
 // scale in the unbatched arm of the emit loop at :2817-2831 (`v161 *= GetSomeGeneratorScalar() *
-// 0.30000001`; the scalar defaults to 1.0, RegistryConfig.cpp:25).
+// 0.30000001`; the scalar defaults to 1.0, RegistryConfig.cpp MainRegistryConfig::SomeGeneratorScalar).
 //
 // Retail only reaches that arm when CheckFlag29 is clear (:2814); a batched generator — which the
 // precipitation curtains are — instead calls ElemGenerate once and lets the batched elem draw its

@@ -54,7 +54,7 @@ pub fn decoded_texture_to_image(t: &ffxi_dat::texture::DecodedTexture) -> Image 
 /// scale rather than by distance, and its sheets are 4-bit-alpha DXT3 (`dat-sky-alpha-histogram`
 /// on zone files 210/331: `weat/<type>/kasa` is 100% the nibble 7/8 dithered-opaque pair,
 /// `moonshap` a nibble ramp). kuluu-u5mm already made this call for `moonshap` on the
-/// moon-material path (moon_material.rs:131), so the two paths agree on the one sheet they share.
+/// moon-material path (moon_material.rs load_moon_sprite_sheet), so the two paths agree on the one sheet they share.
 /// Every other D3M particle sheet keeps the plain converter — their on-screen sampling has not
 /// been surveyed, and `resolve_dxt3_alpha_dither` declines non-nibble alpha anyway, so widening
 /// the set is an argument to make per set, not a correctness gap (kuluu-d9wv).

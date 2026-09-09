@@ -80,7 +80,7 @@ fn token(raw: &[u8]) -> String {
 
 pub const NAMESPACE_LEN: usize = imginfo::TOKEN_LEN;
 
-// research/xim DatResource.kt:312-315 — a fully qualified 16-char texture name splits into
+// research/xim DatResource.kt TextureName — a fully qualified 16-char texture name splits into
 // a namespace (bytes 0..8) and a local name (bytes 8..16).
 pub fn split_qualified_name(raw16: &[u8]) -> (String, String) {
     (
@@ -109,18 +109,18 @@ mod imginfo {
 
     pub(super) const FLG_PALETTE: u8 = 0x91;
 
-    // research/xim TextureSection.kt:54-61, :73-79 — 0xB1 repeats 0x91's palettised layout with
+    // research/xim TextureSection.kt read textureId, :73-79 — 0xB1 repeats 0x91's palettised layout with
     // one extra header word, which is why its palette/pixel offsets sit 4 bytes later.
     pub(super) const FLG_PALETTE_EXT: u8 = 0xB1;
 
-    // research/XIClient ImageData.h:5-36 — the header is `unsigned char Format;
+    // research/XIClient ImageData.h ImageData — the header is `unsigned char Format;
     // ResourceID TextureName;` with no union or variant, and GameTexture::ConfigureFromImageData
-    // (GameTexture.cpp:194) copies TextureName as its first statement, before the
+    // (GameTexture.cpp GameTexture::ConfigureFromImageData) copies TextureName as its first statement, before the
     // GetTextureFormat() switch at :212-245. The name field is therefore unconditional across
     // type bytes: these two name themselves exactly where the 0x9x/0xAx/0xBx kinds do.
-    // (research/xim TextureSection.kt:28-33 `warn`s on them, but that is an unhandled case, not
+    // (research/xim TextureSection.kt read `warn`s on them, but that is an unhandled case, not
     // evidence of an absent name; XIClient is the stronger tier per research/AGENTS.md.)
-    // ImageData.h:29 and :35 separate the pair: both are GetTextureFormat() 0, and it is
+    // ImageData.h ImageData and :35 separate the pair: both are GetTextureFormat() 0, and it is
     // IsCompressed() = Format >> 7 that tells 0x81 from 0x01.
     pub(super) const FLG_FMT0: u8 = 0x01;
 
@@ -161,7 +161,7 @@ mod imginfo {
 
     pub(super) const PIXELS_OFF: usize = PALETTE_OFF + PALETTE_LEN;
 
-    // research/xim TextureSection.kt:74 — 0xB1 reads one extra header word before the payload.
+    // research/xim TextureSection.kt read — 0xB1 reads one extra header word before the payload.
     pub(super) const EXT_HEADER_WORD: usize = 4;
 
     pub(super) const PALETTE_OFF_EXT: usize = PALETTE_OFF + EXT_HEADER_WORD;
@@ -206,7 +206,7 @@ pub fn decode_texture(body: &[u8]) -> std::result::Result<DecodedTexture, Textur
         imginfo::FLG_PALETTE_EXT => {
             decode_palettized(body, imginfo::PALETTE_OFF_EXT, imginfo::PIXELS_OFF_EXT)
         }
-        // research/XIClient GameTexture.cpp:212-215 — GetTextureFormat() is 0 for both, and
+        // research/XIClient GameTexture.cpp GameTexture::ConfigureFromImageData — GetTextureFormat() is 0 for both, and
         // `case 0: case 1:` falls straight through to the ColorFormat walk at :249. Two gaps
         // there are unimplemented (kuluu-tm7m caveat): decode_palettized assumes the
         // Indexed8Bit/BitDepth-32 arm at :262-272 for every Img, and 0x81's IsCompressed() bit
@@ -633,7 +633,7 @@ pub(crate) mod tests {
     }
 
     // File 3020 (Poison) carries the 16 bytes `venom1  fir     ` in both its 0xA1 Img and its
-    // 0x21 sprite sheet. research/xim DatResource.kt:312-315 splits that into namespace/local.
+    // 0x21 sprite sheet. research/xim DatResource.kt TextureName splits that into namespace/local.
     pub(crate) const QUALIFIED_FIR: &[u8; 16] = b"venom1  fir     ";
 
     pub(crate) fn img_body_named(raw16: &[u8; 16]) -> Vec<u8> {
@@ -657,7 +657,7 @@ pub(crate) mod tests {
         assert_eq!(extract_texture_name(&body).as_deref(), Some("fir"));
     }
 
-    // research/XIClient GameTexture.cpp:194 — TextureName is copied before any format branch,
+    // research/XIClient GameTexture.cpp GameTexture::ConfigureFromImageData — TextureName is copied before any format branch,
     // so a palettised Img names itself exactly like a DXT one and has to enter the name-keyed
     // maps too or it can never be linked by name.
     #[test]
@@ -674,7 +674,7 @@ pub(crate) mod tests {
 
     // The ImageData header at ROM/0/28.DAT offset 3389984 (file 100, chunk `smok`), verbatim:
     // the 0x81 type byte, the qualified name, SubsequentDataSize (0x28, "observed to be
-    // consistently 40" per research/XIClient ImageData.h:9-12), then Width and Height. That
+    // consistently 40" per research/XIClient ImageData.h ImageData), then Width and Height. That
     // file's `smok` 0x21 sprite sheet names this exact texture, so keeping 0x81 out of the name
     // tiers left the sheet -- and every other texture in the zone, all 25 of which are 0x81 --
     // unlinkable.

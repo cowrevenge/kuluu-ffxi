@@ -27,7 +27,7 @@ const HOLD_SECS: f32 = 1.5;
 const FADE_SECS: f32 = 1.0;
 const TOTAL_SECS: f32 = HOLD_SECS + FADE_SECS;
 
-// research/xim .../resource/table/ZoneTables.kt:73-81: inside the Mog House the
+// research/xim resource/table/ZoneTables.kt first: inside the Mog House the
 // retail banner shows the floor name instead of the zone-name table entry.
 const MOG_HOUSE_1F_NAME: &str = "Mog House 1F";
 const MOG_HOUSE_2F_NAME: &str = "Mog House 2F";

@@ -270,7 +270,7 @@ mod tests {
 
     #[test]
     fn camera_distance_never_collapses_into_the_anchor() {
-        // XIM PolarCamera.kt:209: (distance - 0.25).coerceAtLeast(0.5) — a wall
+        // XIM PolarCamera.kt getAdjustedRadiusFromCollision collisionDistance: (distance - 0.25).coerceAtLeast(0.5) — a wall
         // right at the anchor (tiny Mog House rooms) must not pull the camera
         // inside the character model.
         assert_eq!(clamped_camera_distance(0.0, 6.0), CAMERA_MIN_DISTANCE);

@@ -87,7 +87,7 @@ pub struct VanaDate {
 impl VanaDate {
     // vendor/server/src/common/vana_time.h get_hour calendar getters over the
     // vendor/server/src/common/vanadiel_clock.h vanadiel_clock millisecond_ratio ratios. LSB's
-    // get_monthday/get_month ceil partial days/months (vana_time.h:118,126),
+    // get_monthday/get_month ceil partial days/months (vana_time.h,126),
     // which transiently report the prior day/month during the exact boundary
     // second; floor+1 agrees at every other instant.
     pub fn from_earth_unix(earth_unix_secs: u64) -> Self {
@@ -107,8 +107,8 @@ pub fn vana_minutes_since_epoch(earth_unix_secs: u64) -> u64 {
     earth_since_vana.saturating_mul(25) / 60
 }
 
-// research/xim EnvironmentManager.kt:92-94 getFullDayInterpolation: the clock-driven
-// color tracks (ParticleUpdaters.kt:172-183 ClockValueUpdater) sample at the fraction
+// research/xim EnvironmentManager.kt getFullDayInterpolation: the clock-driven
+// color tracks (ParticleUpdaters.kt ClockValueUpdater) sample at the fraction
 // of the Vana'diel day elapsed, in [0, 1). One Vana day = 1440 Vana minutes.
 pub fn full_day_fraction(earth_unix_secs: u64) -> f32 {
     let total_v_min = vana_minutes_since_epoch(earth_unix_secs);

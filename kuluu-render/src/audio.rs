@@ -165,7 +165,7 @@ fn resolve_install_root() -> Option<PathBuf> {
     None
 }
 
-// research/xim .../resource/table/ZoneSettingsTable.kt:42-45: the retail client
+// research/xim resource/table/ZoneSettingsTable.kt getZoneIds: the retail client
 // forces the Mog House theme inside the MH. LSB sends the surrounding town's
 // music in the MH 0x00A (vendor/server/src/map/packets/s2c/0x00a_login.cpp:
 // 177-181), and a 0x05F slot track only arrives when promotional furniture is
@@ -174,7 +174,7 @@ fn resolve_install_root() -> Option<PathBuf> {
 pub const MOG_HOUSE_BGM: u16 = 126;
 
 // `play_index` values in research/XIClient/src/XIClient/source/Game/
-// GameManager.cpp:1584-1619 `NormalMusicPlay`. Slots 0-4 are also the LSB 0x00A
+// GameManager.cpp GameManager::NormalMusicPlay play_index `NormalMusicPlay`. Slots 0-4 are also the LSB 0x00A
 // `MusicNum` layout (vendor/server/src/map/packets/s2c/0x00a_login.cpp GP_SERV_COMMAND_LOGIN::GP_SERV_COMMAND_LOGIN),
 // where 2/3 carry `m_bSongS`/`m_bSongM` (vendor/server/src/map/zone.h).
 const ZONE_DAY_SLOT: u8 = 0;
@@ -194,7 +194,7 @@ fn resolve_audible_slot(slots: &BgmSlots, state: &BgmPlaybackState) -> Option<(u
     };
     // `NormalMusicPlay` tests `play_index` in this order: Mog House (or zone
     // 724), dead, riding, fishing, then the battle/day-night branch. That last
-    // branch is `XICLIENT_CODE_MISSING` at GameManager.cpp:1603; party-over-solo
+    // branch is `XICLIENT_CODE_MISSING` at GameManager.cpp GameManager::NormalMusicPlay; party-over-solo
     // is reconstructed from the LSB slot meanings cited above.
     let candidates: [(u8, bool); SLOT_COUNT] = [
         (MOG_HOUSE_SLOT, state.in_mog_house),
@@ -215,7 +215,7 @@ fn resolve_audible_slot(slots: &BgmSlots, state: &BgmPlaybackState) -> Option<(u
             None if slot == MOG_HOUSE_SLOT => Some(MOG_HOUSE_BGM),
             None => None,
         };
-        // GameManager.cpp:1597-1599: the fishing branch returns outright when
+        // GameManager.cpp GameManager::NormalMusicPlay: the fishing branch returns outright when
         // its slot is empty instead of descending to the battle/day-night
         // slots, so whatever is already playing keeps playing.
         if slot == FISHING_SLOT && track.unwrap_or(0) == 0 {
@@ -712,8 +712,8 @@ pub fn sfx_mix_volume(ev: &SfxEvent, listener: Option<Vec3>) -> f32 {
 pub const SOUND_NEAR_DEFAULT: f32 = 3.0;
 pub const SOUND_FAR_DEFAULT: f32 = 30.0;
 
-// CYySepRes.cpp:38-42 weights the vertical delta 3x unless the elem is unattached
-// (`a8 == 1`). CYyGenerator.cpp:1173-1176 sets that flag exactly when the generator's
+// CYySepRes.cpp CYySepRes::Calc3D weights the vertical delta 3x unless the elem is unattached
+// (`a8 == 1`). CYyGenerator.cpp CYyGenerator::ElemGenerate sets that flag exactly when the generator's
 // attachment code is 0, which every zone-static emitter is.
 pub const ATTACHED_VERTICAL_WEIGHT: f32 = 3.0;
 pub const UNATTACHED_VERTICAL_WEIGHT: f32 = 1.0;
@@ -1069,7 +1069,7 @@ pub const BGM_FADE_SECS: f32 = 1.5;
 ///
 /// research/XIClient/src/XIClient/source/World/Zone/XiZone.cpp XiZone::SysMove hands the current
 /// area's `SoundEffectResource` to `CYySoundElem::SetZoneSound` every frame, and
-/// CYySoundElem.cpp:117-129 (re)plays it at `PAN_CENTER_INDEX` only when the resource
+/// CYySoundElem.cpp CYySoundElem::SetZoneSound (re)plays it at `PAN_CENTER_INDEX` only when the resource
 /// changes — a 2D cue at system volume, not a world emitter.
 #[derive(Resource, Debug, Default)]
 pub struct ZoneAmbientBed {
@@ -1411,7 +1411,7 @@ mod tests {
         );
     }
 
-    /// GameManager.cpp:1597-1599: an empty fishing slot makes `NormalMusicPlay`
+    /// GameManager.cpp GameManager::NormalMusicPlay: an empty fishing slot makes `NormalMusicPlay`
     /// return instead of descending, so the track already playing survives -
     /// it does not drop to the battle or day/night slot.
     #[test]
@@ -2176,7 +2176,7 @@ mod tests {
         }
     }
 
-    // CYySepRes.cpp:24-29 substitutes the class defaults for a DAT-authored 0, which 591 of
+    // CYySepRes.cpp CYySepRes::Calc3D substitutes the class defaults for a DAT-authored 0, which 591 of
     // the 5,895 shipped sound generators rely on.
     #[test]
     fn calc3d_substitutes_the_class_defaults_for_a_zero_range() {
@@ -2210,7 +2210,7 @@ mod tests {
         assert_eq!(at(30.1), 0.0);
     }
 
-    // CYyGenerator.cpp:1173-1176 marks an unattached elem, and Calc3D skips the 3x vertical
+    // CYyGenerator.cpp CYyGenerator::ElemGenerate marks an unattached elem, and Calc3D skips the 3x vertical
     // weight for exactly those. Zone-static emitters are unattached, so a cue 20 yalms
     // overhead is still audible where an actor-attached one would already be culled.
     #[test]

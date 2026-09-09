@@ -8,13 +8,13 @@ use ffxi_dat::kind::ChunkKind;
 use ffxi_dat::scheduler::{Scheduler, StageKind, TimedStage};
 use ffxi_dat::sep::Sep;
 
-// research/xim util/Fps.kt:9 — `internalFps = 60.0` is the clock every effect routine and
-// particle generator is authored against (poc/MainTool.kt:118 feeds the raw elapsed frames to
-// EffectManager). Only the skeleton domain is halved: poc/ActorManager.kt:59-62 "In game,
+// research/xim util/Fps.kt — `internalFps = 60.0` is the clock every effect routine and
+// particle generator is authored against (poc/MainTool.kt internalLoop feeds the raw elapsed frames to
+// EffectManager). Only the skeleton domain is halved: poc/ActorManager.kt updateAll "In game,
 // skeletal animations are only updated every other frame" — see SKELETON_FRAME_DIVISOR.
 pub const ROUTINE_FPS: f32 = 60.0;
 
-// research/xim poc/ActorManager.kt:59-62 — `elapsedFrames / 2f` into updateAnimation.
+// research/xim poc/ActorManager.kt updateAll — `elapsedFrames / 2f` into updateAnimation.
 pub const SKELETON_FRAME_DIVISOR: f32 = 2.0;
 
 // The rate the retail/vanilla client renders at, distinct from the 60 fps routine clock above.
@@ -30,7 +30,7 @@ const POST_FINISH_TTL_SECS: f32 = 2.0;
 #[derive(Component, Debug, Clone, Copy, Default)]
 pub struct ActionTarget(pub Option<Entity>);
 
-// research/xim ParticleGeneratorAttachment.kt:64-111 — Target*/TargetToSourceBasis read the
+// research/xim ParticleGeneratorAttachment.kt updateAssociatedPosition — Target*/TargetToSourceBasis read the
 // primary target's position, every other attach type the source actor's. `None` falls back to
 // the caster so an untracked target never drops the routine.
 pub fn particle_origin_entity(
@@ -58,7 +58,7 @@ pub fn sound_origin_entity(on_caster: bool, caster: Entity, target: Option<Entit
     }
 }
 
-// research/xim poc/MainTool.kt:250 — ROM/0/0.DAT is loaded as XIM's `GlobalDirectory`, the
+// research/xim poc/MainTool.kt resourceDependenciesLoaded systemEffects — ROM/0/0.DAT is loaded as XIM's `GlobalDirectory`, the
 // system-effect resource dir every routine falls back to (the cast aura `ner1` and its `stbk`
 // stop live there, not in the caster's DAT). `DatRoot::resolve(0)` yields exactly that file.
 pub const GLOBAL_EFFECT_DIR_FILE_ID: u32 = 0;
@@ -69,7 +69,7 @@ pub struct GlobalEffectDir {
     pub assets: ActionAssets,
 }
 
-// research/xim EffectRoutineInstance.kt:418-431 findResource — a routine id resolves against the
+// research/xim EffectRoutineInstance.kt appendChildSequences findResource — a routine id resolves against the
 // routine's own DAT, then the actor's own dirs, then the global dir.
 pub enum RoutineSource<'a> {
     Dat(&'a [Scheduler]),
@@ -151,7 +151,7 @@ impl ActiveScheduler {
         Self::flatten(lookup, name, MotionStages::Suppress)
     }
 
-    // research/xim Actor.kt:864-903 — one swing enqueues TWO routines on the attacker: the
+    // research/xim Actor.kt displayAutoAttack — one swing enqueues TWO routines on the attacker: the
     // self-targeted voice routine (`atk0`) and the weapon swing (`ati0`/`bti0`/…). A single-slot
     // ActiveScheduler component cannot hold two, so their timelines are merged.
     pub fn effects_only_merged(lookup: &RoutineLookup, names: &[[u8; 4]]) -> Option<Self> {
@@ -312,7 +312,7 @@ pub struct ActionAssets {
 }
 
 impl ActionAssets {
-    // research/xim EffectRoutineInstance.kt:418-431 — `resource.localDir` first, wider scopes
+    // research/xim EffectRoutineInstance.kt appendChildSequences — `resource.localDir` first, wider scopes
     // after. `local_dir` is the directory of the routine the stage was authored in, carried on
     // the stage because flattening merges routines from several directories into one timeline.
     pub fn particle_def(
@@ -323,7 +323,7 @@ impl ActionAssets {
         self.particle_def_scoped(local_dir, id).map(|(_, d)| d)
     }
 
-    // research/xim ParticleInitializers.kt:145 — a generator's linked mesh resolves against
+    // research/xim ParticleInitializers.kt apply — a generator's linked mesh resolves against
     // `particle.creator.localDir`, the directory the GENERATOR was authored in, which is the
     // caller's routine dir only when the def resolved through the dir-scoped tier.
     pub fn particle_def_scoped(
@@ -343,7 +343,7 @@ impl ActionAssets {
         Some((dir, def))
     }
 
-    // research/xim ParticleLinkedDataProviders.kt:188-196 resolveStaticMeshLink — the effect
+    // research/xim ParticleLinkedDataProviders.kt getParticleMesh resolveStaticMeshLink — the effect
     // directory first, wider scopes after.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn d3m(&self, local_dir: [u8; 4], id: &[u8; 4]) -> Option<&ffxi_dat::d3m::D3m> {
@@ -352,7 +352,7 @@ impl ActionAssets {
             .or_else(|| self.d3ms.get(id))
     }
 
-    // research/xim ParticleLinkedDataProviders.kt:205-211 resolveSpriteSheetLink — same order.
+    // research/xim ParticleLinkedDataProviders.kt resolveStaticMeshLink resolveSpriteSheetLink — same order.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn sprite_sheet(
         &self,
@@ -379,7 +379,7 @@ pub fn lcg_next(state: u64) -> u64 {
         .wrapping_add(LCG_INCREMENT)
 }
 
-// research/xim EffectRoutineParser.kt:275-285 — a random block runs exactly one of its children
+// research/xim EffectRoutineParser.kt parseSection2 — a random block runs exactly one of its children
 // per activation, and which one is not authored in the DAT.
 static RANDOM_PICK_STATE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
@@ -944,7 +944,7 @@ pub fn dispatch_sound_stages(
         ) {
             continue;
         }
-        // research/xim EffectRoutineInstance.kt:418-431,592-604 — routine DAT, then the actor's
+        // research/xim EffectRoutineInstance.kt appendChildSequences,592-604 — routine DAT, then the actor's
         // own resource dirs (weapon `skaz`, face `atk1..4`), then the global dir.
         let actor_assets = q_children
             .get(ev.actor)
@@ -989,7 +989,7 @@ pub fn dispatch_motion_stages(
         if ev.stage.stage.kind != StageKind::Motion {
             continue;
         }
-        // research/xim EffectRoutineInterpolatedEffects.kt:49 — a skill's body motion is
+        // research/xim EffectRoutineInterpolatedEffects.kt SkeletonAnimationInstance animationDirs — a skill's body motion is
         // resolved against the skill DAT's own clips first, then the caster's animation
         // directories. ActionAssets lives on the tracked entity the scheduler runs on; the
         // render actor is its child.
@@ -1047,7 +1047,7 @@ pub fn action_dat_file_id(
     }
 }
 
-// research/xim AbilityTable.kt:103 — WS file id = race base (FFXiMain.dll) + per-skill index.
+// research/xim AbilityTable.kt getAnimationId — WS file id = race base (FFXiMain.dll) + per-skill index.
 // `race` is the FFXI look race byte (HumeM=1..Galka=8), which is XIM's RaceGenderConfig.index.
 fn weapon_skill_file_id(
     animation: u16,
@@ -1195,7 +1195,7 @@ fn actor_render_routines<'a>(
 }
 
 // The routine the caster's cast-start effects were flattened from, so an interrupt can stop the
-// generators it spawned. research/xim Actor.kt:263-266 startCasting enqueues the whole model
+// generators it spawned. research/xim Actor.kt startCasting enqueues the whole model
 // routine, not just its Motion stage.
 // `posed` latches once the caster is observed in the looping cast pose. Cast routines with no
 // Motion stage (retail `caso`/`calg`/`cage`) never set it, so the heuristic teardown below must
@@ -1207,7 +1207,7 @@ pub struct CastRoutine {
     pub posed: bool,
 }
 
-// research/xim Actor.kt:263-266 — a cast start runs the caster's full `ca<suffix>` model routine
+// research/xim Actor.kt startCasting — a cast start runs the caster's full `ca<suffix>` model routine
 // (the `ner1` aura, its sounds, its sub-routines). Only the magic-start category is routed here:
 // the melee `ati0` routine carries its own sub-routines and would change every auto-attack swing.
 #[cfg(not(target_arch = "wasm32"))]
@@ -1246,8 +1246,8 @@ pub fn dispatch_cast_routine_started(
         let Some(&actor_entity) = tracked.by_id.get(&actor_id) else {
             continue;
         };
-        // cmd_arg is the routine FourCC, not a spell id (magic_state.cpp:102); an "sp*" FourCC is
-        // an interrupt on the same category (interrupts.cpp:268-284) and must tear the cast down.
+        // cmd_arg is the routine FourCC, not a spell id (magic_state.cpp CState); an "sp*" FourCC is
+        // an interrupt on the same category (interrupts.cpp MagicInterrupt) and must tear the cast down.
         let magic = ffxi_vocab::magic::magic_start_routine(action_id);
         if magic.is_some_and(|m| m.interrupt) {
             if let Ok(cast) = q_cast.get(actor_entity) {
@@ -1294,7 +1294,7 @@ pub fn dispatch_cast_routine_started(
 // The victim reaction the attacker's routine will hand off at its 0x2B DamageCallback stage.
 // Held on the attacker between the swing dispatch and that stage so the flinch, the impact SE
 // and the hurt grunt land on the frame retail invokes the damage callback, not on packet
-// arrival (research/xim EffectRoutineInstance.kt:956-959).
+// arrival (research/xim EffectRoutineInstance.kt handleDamageCallbackRoutine).
 #[derive(Component, Debug, Clone, Copy)]
 pub struct PendingHitReaction {
     pub routine: [u8; 4],
@@ -1306,10 +1306,10 @@ pub struct PendingHitReaction {
 
 // The global effect dir's `dam0` chunk is the MELEE hit-reaction switch (`dada` tail-calls it;
 // the ranged chain `ldad` uses `daml` instead). Its cases select on `context.hitTypeFlag`
-// (research/xim EffectRoutineInstance.kt:691) and their branch order is byte-for-byte the
+// (research/xim EffectRoutineInstance.kt resolveControlFlowVariable) and their branch order is byte-for-byte the
 // ActionResolution values in vendor/server/src/map/enums/action/resolution.h.
 // research/xim leaves the `damh`-vs-`damg` selector (var 0x3B) unhandled
-// (EffectRoutineInstance.kt:689-701 warns and defaults to 0), which is the `damg` branch.
+// (EffectRoutineInstance.kt resolveControlFlowVariable warns and defaults to 0), which is the `damg` branch.
 pub fn hit_reaction_routine(resolution: ffxi_proto::melee::ActionResolution) -> Option<[u8; 4]> {
     use ffxi_proto::melee::ActionResolution;
     Some(match resolution {
@@ -1321,7 +1321,7 @@ pub fn hit_reaction_routine(resolution: ffxi_proto::melee::ActionResolution) -> 
     })
 }
 
-// research/xim Actor.kt:864-903 — the swing routine is chosen by which limb struck.
+// research/xim Actor.kt displayAutoAttack — the swing routine is chosen by which limb struck.
 // Direction-of-movement variants (atf0/atb0/atl0/atr0) are not selected here; that needs the
 // attacker's locomotion state at swing time.
 pub fn swing_routine(animation: ffxi_proto::melee::AttackAnimation) -> Option<[u8; 4]> {
@@ -1336,7 +1336,7 @@ pub fn swing_routine(animation: ffxi_proto::melee::AttackAnimation) -> Option<[u
 }
 
 // vendor/server/src/map/enums/four_cc.h — BasicAttack's FourCC is "atk0", the self-targeted
-// voice routine research/xim Actor.kt:866 enqueues alongside the swing.
+// voice routine research/xim Actor.kt displayAutoAttack enqueues alongside the swing.
 const MELEE_VOICE_ROUTINE: [u8; 4] = *b"atk0";
 
 // A basic attack's routines live in the attacker's own battle/equipment dirs and the global effect
@@ -1414,7 +1414,7 @@ pub fn dispatch_melee_action_started(
     }
 }
 
-// research/xim EffectRoutineInstance.kt:956-959 — the 0x2B stage is where retail hands control
+// research/xim EffectRoutineInstance.kt handleDamageCallbackRoutine — the 0x2B stage is where retail hands control
 // to the damage callback. That is the frame the victim's reaction routine starts, so the flinch
 // and impact SE line up with the swing instead of with packet arrival.
 #[cfg(not(target_arch = "wasm32"))]
@@ -1452,10 +1452,10 @@ pub fn dispatch_damage_callback_stages(
     }
 }
 
-// research/xim EffectRoutineParser.kt:136-140 + EffectRoutineInstance.kt:387-394 — a 0x09 link
+// research/xim EffectRoutineParser.kt parseSection2 + EffectRoutineInstance.kt createChild newSequences — a 0x09 link
 // runs its child ON the primary target, under a context flipped by `cloneWithOverrideTarget`:
 // the parent becomes the child's target. Resource lookup follows that flip
-// (EffectRoutineInstance.kt:418-431,592-604 searchAssociatedDir), which is the only reason the
+// (EffectRoutineInstance.kt appendChildSequences,592-604 searchAssociatedDir), which is the only reason the
 // melee hit chain resolves at all — the victim's `damg` links `chit` back onto the ATTACKER, so
 // `ef h` is found in the attacker's equipped-weapon DAT and its `hit1` sparks, being
 // AttachType::TargetActor, land on the victim again.
@@ -1587,7 +1587,7 @@ fn em_routine(sub: u16) -> [u8; 4] {
 /// routine). Derived empirically from the retail HumeM emote DATs (dump:
 /// examples/zz-emote-probe.rs; each routine's Motion clip mnemonic names the
 /// emote — bow/poi/sl1-3/kne/lau/wee, den/nod/wav/wel/gla/che/clp, …) and
-/// pinned to XIM's only known points (Actor.kt:1080-1082 HELM: Logging=(5,0),
+/// pinned to XIM's only known points (Actor.kt onGatheringAttempt HELM: Logging=(5,0),
 /// Mining=(6,0), Harvesting=(7,0) — confirmed by the files' Japanese tool
 /// particles: ono0=axe, turu=pickaxe, kama=sickle). Notable non-uniformities
 /// the old id/8 hypothesis missed: Point/Bow are swapped in file 0, Salute
@@ -1714,7 +1714,7 @@ pub fn dispatch_entity_emoted(
 
 // NPC casters (lua sendEmote) and PCs whose emote DAT lacks the routine:
 // play the actor's own em0N clip when it has one; silent no-op
-// otherwise (XIM findLocalAnimationRoutine, Actor.kt:695-697).
+// otherwise (XIM findLocalAnimationRoutine, Actor.kt).
 #[cfg(not(target_arch = "wasm32"))]
 fn play_local_emote_clip(
     routine: &[u8; 4],
@@ -2119,8 +2119,8 @@ mod tests {
         assert_eq!(a.current_frame(), 60);
     }
 
-    // research/xim util/Fps.kt:9 `internalFps = 60.0` is the clock effect routines and particle
-    // generators are authored against; poc/ActorManager.kt:59-62 halves it — and only it — for
+    // research/xim util/Fps.kt `internalFps = 60.0` is the clock effect routines and particle
+    // generators are authored against; poc/ActorManager.kt updateAll halves it — and only it — for
     // skeletal animation. Neither constant may be "fixed" without the other.
     #[test]
     fn routine_clock_is_double_the_skeleton_clock() {
@@ -2155,7 +2155,7 @@ mod tests {
 
     // Retail-byte fixture (skips without an install): Cure's effect DAT (file 2801 = 0xAF1) runs
     // its target routine `tgt0` out to frame 239 — 3.98 s at the authored 60 fps. That frame is
-    // the routine's own `totalDelay` header field (research/xim EffectRoutineParser.kt:46), the
+    // the routine's own `totalDelay` header field (research/xim EffectRoutineParser.kt read), the
     // DAT's independent statement of its length, which the summed stage delays must reproduce.
     #[test]
     fn real_dat_cure_target_routine_completes_in_retail_wall_time() {
@@ -2260,7 +2260,7 @@ mod tests {
 
     /// Pins the empirically-derived emote table against the DAT dump
     /// (examples/zz-emote-probe.rs clip mnemonics) and the XIM HELM points
-    /// (Actor.kt:1080-1082). Point/Bow swap and Salute nation variants are
+    /// (Actor.kt onGatheringAttempt). Point/Bow swap and Salute nation variants are
     /// the file-0 irregularities the old id/8 hypothesis got wrong.
     #[test]
     fn emote_table_matches_dat_clip_mnemonics() {
@@ -2402,7 +2402,7 @@ mod tests {
     // Retail-DAT coupling guard (skips without an install): Poison's 0x21 'fir' sheet names its
     // backing Img with the qualified pair ("venom1", "fir"). Looking the Img up by the sheet's
     // namespace token alone misses, which is what rendered the venom cloud as an untextured
-    // quad (kuluu-7jpq). research/xim DatResource.kt:483-493 matches qualified, then local.
+    // quad (kuluu-7jpq). research/xim DatResource.kt getTextureResourceByNameAs matches qualified, then local.
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn real_dat_poison_sheet_name_indexes_its_backing_img() {
@@ -2449,7 +2449,7 @@ mod tests {
     }
 
     // Retail-DAT guard (skips without an install): the cast aura `ner1` and its `stbk` shutdown
-    // live in ROM/0/0.DAT, XIM's GlobalDirectory (research/xim poc/MainTool.kt:250) — not in the
+    // live in ROM/0/0.DAT, XIM's GlobalDirectory (research/xim poc/MainTool.kt resourceDependenciesLoaded systemEffects) — not in the
     // caster's own DAT — so a DAT-root or resolver change cannot silently un-resolve them.
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
@@ -2581,7 +2581,7 @@ mod tests {
     // The whole point of the melee path: `ati0` (weapon-motion DAT) links `skaz` with 0x57, and
     // `skaz` resolves in the EQUIPPED WEAPON's DAT — three tiers away from the routine that
     // named it. Flattening must carry the link across and keep the frame the whoosh is authored
-    // at (research/xim EffectRoutineParser.kt:371-375).
+    // at (research/xim EffectRoutineParser.kt parseSection2).
     #[test]
     fn melee_swing_flattens_to_the_weapon_swing_sound() {
         const SKAZ_FRAME: u32 = 34;
@@ -2641,7 +2641,7 @@ mod tests {
         );
     }
 
-    // research/xim EffectRoutineParser.kt:275-285 — one alternative per activation. Four
+    // research/xim EffectRoutineParser.kt parseSection2 — one alternative per activation. Four
     // simultaneous `vatk` grunts is the regression this guards.
     #[test]
     fn random_block_contributes_exactly_one_member() {
@@ -2668,7 +2668,7 @@ mod tests {
     }
 
     // `dada` tail-calls `dam0`, ten mutually exclusive additional-effect branches keyed on a
-    // condition we do not evaluate (research/xim EffectRoutineParser.kt:408-427). Inlining it
+    // condition we do not evaluate (research/xim EffectRoutineParser.kt parseSection2). Inlining it
     // would fire every branch at once.
     #[test]
     fn control_flow_switch_is_not_inlined() {
@@ -2708,7 +2708,7 @@ mod tests {
     }
 
     // A 0x09 link stays a stage rather than being inlined, so the runtime can start it on the
-    // VICTIM and resolve the victim's own `sdam`/`vdam` (EffectRoutineParser.kt:136-140).
+    // VICTIM and resolve the victim's own `sdam`/`vdam` (EffectRoutineParser.kt parseSection2).
     #[test]
     fn target_link_is_not_flattened_into_the_caster_timeline() {
         let dat = vec![
@@ -2757,7 +2757,7 @@ mod tests {
         );
     }
 
-    // research/xim EffectRoutineInstance.kt:387-394 — createChild for a 0x09 link builds
+    // research/xim EffectRoutineInstance.kt createChild newSequences — createChild for a 0x09 link builds
     // `ActorAssociation(target, context.cloneWithOverrideTarget(actor.id))`: the child runs on the
     // target and its own target is the parent. Without the flip the melee chain dead-ends on the
     // victim and the weapon's `ef h` sparks are never reached.
@@ -2807,7 +2807,7 @@ mod tests {
     // lives in the victim's skeleton but is reached through the 0x09 flip back onto the ATTACKER,
     // which is why it resolves `ef h` in the equipped-weapon DAT; `ef h` links global `hit1`,
     // whose generators are AttachType::TargetActor and therefore land on the victim again
-    // (research/xim ParticleGeneratorAttachment.kt:64-111). Every tier must be present for a
+    // (research/xim ParticleGeneratorAttachment.kt updateAssociatedPosition). Every tier must be present for a
     // single spark to appear, so this pins all three at once.
     #[test]
     fn melee_hit_chain_flattens_to_target_attached_sparks() {
@@ -2917,7 +2917,7 @@ mod tests {
     }
 
     // vendor/server/src/map/attack.h AttackAnimation -> the limb routine
-    // research/xim Actor.kt:864-903 enqueues.
+    // research/xim Actor.kt displayAutoAttack enqueues.
     #[test]
     fn swing_routines_follow_lsb_attack_animation_order() {
         use ffxi_proto::melee::AttackAnimation;
@@ -3136,7 +3136,7 @@ mod tests {
         );
     }
 
-    // research/xim ParticleLinkedDataProviders.kt:188-211 — a generator's linked mesh resolves
+    // research/xim ParticleLinkedDataProviders.kt getParticleMesh — a generator's linked mesh resolves
     // in the directory the generator was authored in before any wider scope. Names taken from
     // ROM/338/100.DAT, which declares `grw1` in both `geo0` and `run0` (particle_sim.rs
     // `directory_scoped_mesh` pins the retail file itself).

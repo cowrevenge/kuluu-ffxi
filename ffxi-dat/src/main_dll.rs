@@ -12,7 +12,7 @@ const SCAN_WORDS: usize = 0xC000;
 
 const WEAPON_SKILL_HINT: u32 = 0xCB81_CB81;
 const DANCE_SKILL_HINT: u32 = 0xB9E2_B9E2;
-// research/xim MainDll.kt:47 emoteAnimationOffsetHint.
+// research/xim MainDll.kt emoteAnimationOffsetHint.
 const EMOTE_HINT: u32 = 0x4827_4827;
 // research/xim MainDll.kt raceConfigLookupTableOffsetHint / actionAnimationFileTableOffsetHint.
 const RACE_CONFIG_HINT: u32 = 0xA01B_A01B;
@@ -179,7 +179,7 @@ impl MainDll {
     }
 
     /// First emote-animation file id for a race (the look race byte, HumeM=1);
-    /// research/xim MainDll.kt:120-121.
+    /// research/xim MainDll.kt getBaseEmoteAnimationIndex.
     pub fn base_emote_index(&self, race_index: u8) -> Option<u16> {
         self.read16(self.emote_base? + race_index as usize * 2)
     }

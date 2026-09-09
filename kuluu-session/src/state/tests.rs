@@ -908,7 +908,7 @@ fn entity_upserted_preserves_hp_pct_across_position_only_update() {
 
 #[test]
 fn entity_upserted_name_vis_survives_pos_only_tick() {
-    // #512-4: namevis is written under UPDATE_HP (entity_update.cpp:357/:408), and a
+    // #512-4: namevis is written under UPDATE_HP (entity_update.cpp CEntityUpdatePacket::updateWith/:408), and a
     // POS-only 0x00E carries the byte zero-filled. Merging off pos_present would
     // un-hide a hidden entity the moment it moved.
     let mut s = SessionState::default();
@@ -1758,7 +1758,7 @@ fn check_message_is_kept_beside_the_result_and_cleared_with_it() {
     assert_eq!(m.message, "Sneak oil 2k");
 
     // The 0x0CA lands before the 0x0C9 batches
-    // (0x0dd_equip_inspect.cpp:134-136), so a later result must not drop it.
+    // (0x0dd_equip_inspect.cpp GP_CLI_COMMAND_EQUIP_INSPECT::process), so a later result must not drop it.
     s.apply_event(&AgentEvent::CheckEquipReceived {
         target_id: 0xCAFE,
         act_index: 0x123,
@@ -1806,7 +1806,7 @@ fn bazaar_rows_merge_by_slot_and_sold_out_rows_leave() {
     assert_eq!(view.items.len(), 2, "same slot merges");
     assert_eq!(view.items[0].quantity, 4);
 
-    // A depleted slot comes back priced 0 (0x106_bazaar_buy.cpp:198).
+    // A depleted slot comes back priced 0 (0x106_bazaar_buy.cpp GP_CLI_COMMAND_BAZAAR_BUY::process).
     s.apply_event(&row(3, 0, 0));
     let view = s.bazaar.as_ref().expect("open");
     assert_eq!(

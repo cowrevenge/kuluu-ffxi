@@ -50,7 +50,7 @@ pub struct MoonSpriteFrames(pub Option<[Vec4; ffxi_dat::sprite_sheet::MOON_PHASE
 
 // Retail day-of-week (0x4E, 8xRGBA) / moon-phase (0x4F, 12xRGBA) celestial tint tables
 // scraped from the current zone's sun/moon generator, applied 2x-modulate
-// (research/xim Particle.kt:218). None where the zone ships no such generator (then
+// (research/xim Particle.kt getColor). None where the zone ships no such generator (then
 // sun_moon falls back to the WEEKDAY_MOON_TINT constants).
 #[derive(Resource, Default, Clone)]
 pub struct CelestialColorTables {

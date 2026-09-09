@@ -67,7 +67,7 @@ fn assist_packet_retargets_to_assist_no() {
 
 /// LSB builds the packet over a zeroed buffer and leaves `AssistNo` at 0 when
 /// the target went away (`CCharEntity::OnChangeTarget` with a null target,
-/// 0x058_assist.cpp:34-36), so 0 must not be reported as entity 0.
+/// 0x058_assist.cpp GP_SERV_COMMAND_ASSIST::GP_SERV_COMMAND_ASSIST), so 0 must not be reported as entity 0.
 #[test]
 fn assist_packet_reports_a_zero_assist_no_as_no_target() {
     let events = sub_packet_events(
@@ -330,7 +330,7 @@ fn far_carrier_snaps_in_steady_state_but_not_during_settle() {
     );
 }
 
-/// Pins the XIM doorOffset branches (AssetViewer.kt:654-663): 2F interiors
+/// Pins the XIM doorOffset branches (AssetViewer.kt): 2F interiors
 /// shift the door 3.15 yalms along native z, the [S]-city/Adoulin bases shift
 /// along x.
 #[test]
@@ -622,7 +622,7 @@ fn worm_entity(s: &crate::state::SessionState) -> &crate::state::Entity {
         .expect("worm present")
 }
 
-/// The worm's full dive/surface cycle as LSB drives it (mob_controller.cpp:1176-1290):
+/// The worm's full dive/surface cycle as LSB drives it (mob_controller.cpp CMobController::DoRoamTick):
 /// spawn above ground -> dive (name hidden + untargetable; status stays NORMAL for the first
 /// 3 s) -> move underground (status INVISIBLE piggybacks on POS ticks) -> surface (one UPDATE_HP
 /// packet carries status=UPDATE(1) with the flag cleared; name stays hidden ~2 more seconds).
@@ -1046,7 +1046,7 @@ fn event_end_writes_csid_to_event_para_field() {
         &buf[16..18],
         &230u16.to_le_bytes(),
         "EventNum carries the zone id (retail echoes LOGIN EventNum, \
-             0x00a_login.cpp:187); LSB's 0x05B handler never reads it",
+             0x00a_login.cpp GP_SERV_COMMAND_LOGIN::GP_SERV_COMMAND_LOGIN); LSB's 0x05B handler never reads it",
     );
 }
 
@@ -1533,7 +1533,7 @@ fn tell_packet_layout_matches_phoenix_struct() {
     let sync = u16::from_le_bytes([buf[2], buf[3]]);
     assert_eq!(sync, 0xABCD, "sync passed through");
 
-    // The server's PacketValidator requires unknown00 == 3 (0x0b6_chat_name.cpp:60);
+    // The server's PacketValidator requires unknown00 == 3 (0x0b6_chat_name.cpp);
     // a 0 here is what silently dropped every tell / customMenu reply.
     assert_eq!(buf[4], 3, "unknown00 == 3 (server-required)");
     assert_eq!(buf[5], 0, "unknown01");
@@ -1549,7 +1549,7 @@ fn tell_packet_truncates_oversize_inputs() {
     let buf = build_subpacket_tell(0, &long_name, "x");
 
     // sName is char[15] read via asStringFromUntrustedSource(sName,
-    // sizeof(sName)) (0x0b6_chat_name.cpp:76), so a full unterminated
+    // sizeof(sName)) (0x0b6_chat_name.cpp GP_CLI_COMMAND_CHAT_NAME::process recipientName), so a full unterminated
     // 15-byte field is legal on the wire.
     assert_eq!(&buf[6..21], &[b'a'; 15][..], "first 15 chars of name");
     assert_eq!(&buf[21..22], b"x", "message follows the full sName field");
@@ -1675,9 +1675,9 @@ fn event_0x034_extracts_nums_and_param_block() {
     assert_eq!(d.nums[1], 1234);
 }
 
-// The conquest outpost vendor: LSB's conquest.lua:1461 calls
+// The conquest outpost vendor: LSB's conquest.lua canPurchaseItem calls
 // startEvent(32756, nation, fee, 0, fee, getCP(), 0, 0, 0), packed into
-// num[0..7] by 0x034_eventnum.cpp:44-50. Dropping those on the floor leaves
+// num[0..7] by 0x034_eventnum.cpp GP_SERV_COMMAND_EVENTNUM::GP_SERV_COMMAND_EVENTNUM. Dropping those on the floor leaves
 // every {Num:N} marker in the vendor dialog unresolved (kuluu-fldn).
 #[test]
 fn event_trigger_0x034_carries_params_and_the_redirected_text_table() {
@@ -2155,7 +2155,7 @@ fn battle2_mob_tp_move_resolves_name_not_damage() {
 
 #[test]
 fn battle2_mob_readies_resolves_skill_from_param() {
-    // SkillStart (7) puts the skill id in param instead (mobskill_state.cpp:100-104).
+    // SkillStart (7) puts the skill id in param instead (mobskill_state.cpp CState).
     let line = build_battle2_line(43, "Goobbue Farmer", "Oldman", false, true, 584, 0, 7)
         .expect("msg 43 must resolve");
     assert!(line.text.contains("readies Uppercut"), "got: {}", line.text);
@@ -3130,7 +3130,7 @@ fn equip_inspect_packet_layout_matches_server_struct() {
 
 #[test]
 fn bazaar_packet_layouts_match_server_structs() {
-    // GP_CLI_COMMAND_BAZAAR_LIST (c2s/0x105_bazaar_list.h:27-31).
+    // GP_CLI_COMMAND_BAZAAR_LIST (c2s/0x105_bazaar_list.h).
     let list = build_subpacket_bazaar_list(0xABCD, 0x1234_5678, 42);
     assert_eq!(list.len(), 12, "header (4) + body (8)");
     let hdr = u16::from_le_bytes([list[0], list[1]]);
@@ -3153,7 +3153,7 @@ fn bazaar_packet_layouts_match_server_structs() {
     assert_eq!(u16::from_le_bytes([list[8], list[9]]), 42, "ActIndex LE");
     assert_eq!(&list[10..12], &[0u8; 2], "padding00");
 
-    // GP_CLI_COMMAND_BAZAAR_BUY (c2s/0x106_bazaar_buy.h:27-31).
+    // GP_CLI_COMMAND_BAZAAR_BUY (c2s/0x106_bazaar_buy.h).
     let buy = build_subpacket_bazaar_buy(0xBEEF, 7, 12);
     assert_eq!(buy.len(), 12, "header (4) + body (8)");
     let hdr = u16::from_le_bytes([buy[0], buy[1]]);

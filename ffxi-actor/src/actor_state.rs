@@ -240,7 +240,7 @@ pub struct FishingClip {
 
 /// Maps a fishing macro-state phase (0..=6) to its `fsh<n>` model clip. Phases:
 /// 0=cast/wait, 1=fighting, 2=caught fish, 3=rod break, 4=line break, 5=caught monster,
-/// 6=stop/cancel. research/xim Actor.kt:361 (`updateFishingState`).
+/// 6=stop/cancel. research/xim Actor.kt (`updateFishingState`).
 pub fn fishing_clip(phase: u8) -> Option<FishingClip> {
     if phase > 6 {
         return None;

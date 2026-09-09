@@ -27,7 +27,7 @@ static NEXT_ZONE_INSTANCE_ID: AtomicU64 = AtomicU64::new(1);
 
 /// `FfxiMaterialFlags::flags.z` as `zone_ffxi.wgsl` reads it: whether this mesh takes the
 /// camera's `DistanceFog`. Retail gates fog per generator on the CMoElem render-state word
-/// (research/XIClient CMoElem.cpp:542-543, bit 0x2000000 -> `D3DRS_FOGENABLE` false), which
+/// (research/XIClient CMoElem.cpp CMoElem::PrepDX, bit 0x2000000 -> `D3DRS_FOGENABLE` false), which
 /// the weat/ sky canopies mostly set — and must, since they sit thousands of units past every
 /// 0x2F fog distance, where fog would replace their colour outright.
 pub const ZONE_FLAG_FOGGED: f32 = 0.0;
@@ -56,12 +56,12 @@ pub struct ZoneGlobalLighting(pub FfxiLightingUniform);
 /// `MmbRenderState`, decoded from the u16 at subrecord offset 18).
 ///
 /// xim references:
-/// - ZoneMeshSection.kt:120-123 — blended zone meshes render at
+/// - ZoneMeshSection.kt parseMesh — blended zone meshes render at
 ///   `ZBiasLevel.High` (1), opaque at `Normal` (0).
-/// - XIClient ZoneRenderer.cpp:1269-1275 — blended meshes disable depth write and use
+/// - XIClient ZoneRenderer.cpp ZoneRenderer::RenderChunk2 — blended meshes disable depth write and use
 ///   the integer `TransparentZBias` layer to pull decals over the base terrain.
 /// - Bit `0x2000` CLEAR enables back-face culling.
-/// - GLDrawer.kt:186 — front face is `CW` (D3D-era winding), flipped to `CCW`
+/// - GLDrawer.kt — front face is `CW` (D3D-era winding), flipped to `CCW`
 ///   when the instance is mirrored (`scale.x * scale.y * scale.z < 0`).
 ///
 /// These flow into `specialize` via `AsBindGroup::Data`, so each distinct
@@ -69,7 +69,7 @@ pub struct ZoneGlobalLighting(pub FfxiLightingUniform);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
 pub struct FfxiZoneMaterialKey {
     /// Cull back faces (`Face::Back`). FFXI winding is **clockwise** (D3D
-    /// convention, xim GLDrawer.kt:186), not Bevy's CCW default.
+    /// convention, xim GLDrawer.kt drawXim face), not Bevy's CCW default.
     pub back_face_culling: bool,
     /// Placement transform has a negative determinant (mirrored). Flips the
     /// effective winding, so `specialize` flips `front_face` back to CCW.
@@ -83,10 +83,10 @@ pub struct FfxiZoneMaterialKey {
     /// Selects the generator (`CMoD3m`) texture-stage chain over the terrain
     /// (`ZoneRenderer`) one. Retail runs the same MMB vertex data through two
     /// different stage setups: zone placements take a single
-    /// `MODULATE2X(TEXTURE, CURRENT)` (ZoneRenderer.cpp:2453-2455), while a mesh
+    /// `MODULATE2X(TEXTURE, CURRENT)` (ZoneRenderer.cpp ZoneRenderer::ApplyDefaultRenderState), while a mesh
     /// hung off a generator takes `MODULATE2X(DIFFUSE, TEXTURE)` and then
-    /// `MODULATE2X(CURRENT, TFACTOR)` (CMoD3m.cpp:53-70 `NonZeroTwoTSS`, reached
-    /// for MMB links via CMoD3mElem.cpp:57-63 `DoMMBDraw`) — twice the gain, and
+    /// `MODULATE2X(CURRENT, TFACTOR)` (CMoD3m.cpp ZeroOneTSS `NonZeroTwoTSS`, reached
+    /// for MMB links via CMoD3mElem.cpp CMoD3mElem::OnDraw `DoMMBDraw`) — twice the gain, and
     /// its TFACTOR is this material's `tint`.
     pub generator_stage_chain: bool,
 }
@@ -131,7 +131,7 @@ pub struct FfxiZoneMaterial {
     pub base_color_texture: Option<Handle<Image>>,
     pub material_flags: FfxiMaterialFlags,
 
-    // research/xim ParticleGeneratorParser.kt:431-434 ToD color: a per-mesh RGB(setter) +
+    // research/xim ParticleGeneratorParser.kt sec3Handler ToD color: a per-mesh RGB(setter) +
     // alpha(multiplier) the weat/<type>/ ClockValueUpdaters drive over the Vana day. Folded
     // as a final modulate in the fragment shader. White (1,1,1,1) is the no-op default for
     // every other zone mesh — only the cloud/sun layers (zone_clouds.rs) write a live tint.
@@ -429,7 +429,7 @@ impl Material for FfxiZoneMaterial {
 
         // xim renders FFXI zone geometry with back-face culling unless the
         // render-state word sets bit 0x2000 (two-sided decals, fences, foliage
-        // cards). FFXI winding is CLOCKWISE (D3D convention) — GLDrawer.kt:186
+        // cards). FFXI winding is CLOCKWISE (D3D convention) — GLDrawer.kt drawXim face
         // sets frontFace(CW), flipping to CCW for mirrored instances
         // (scale.x * scale.y * scale.z < 0). Using Bevy's CCW default here
         // culled every non-mirrored tile: inverted-checkerboard zone geometry.
@@ -453,7 +453,7 @@ impl Material for FfxiZoneMaterial {
         };
 
         if let Some(ds) = descriptor.depth_stencil.as_mut() {
-            // GLDrawer.kt:198-201 — blended decals never write depth. Bevy's
+            // GLDrawer.kt drawXim — blended decals never write depth. Bevy's
             // transparent pass already disables depth write, but the prepass
             // (enable_prepass = true) would otherwise still write it; AND the
             // flag in rather than overwrite whatever the pass chose.
@@ -506,7 +506,7 @@ fn update_zone_material_lighting(
     // a per-path correction.
     const AMBIENT_FLOOR: f32 = 0.12;
 
-    // research/xim EnvironmentSection.kt:130-131,168: the 0x2F landscape ambient is
+    // research/xim EnvironmentSection.kt getTerrainLightingParams,168: the 0x2F landscape ambient is
     // the authoritative per-hour base (dark at night). Use it directly when the
     // zone ships records; the GlobalAmbientLight amb_k/COLOR_BIAS path is the
     // no-DAT fallback (it re-derives from the atmosphere seed and inflates).
@@ -539,7 +539,7 @@ fn update_zone_material_lighting(
             _ => (Vec4::ZERO, Vec4::ZERO),
         }
     };
-    // research/xim EnvironmentSection.kt:163-164: zone geometry takes both terrain
+    // research/xim EnvironmentSection.kt getLightingParams: zone geometry takes both terrain
     // sun(dir0)+moon(dir1) diffuse lights. The DirectionalLight's `forward` is the
     // -to-celestial direction, so negate the stored to-sun/to-moon vectors to match.
     let (dir0_dir, dir0_color, dir1_dir, dir1_color) =
@@ -680,8 +680,8 @@ mod tests {
     const ZONE_WGSL: &str = include_str!("zone_ffxi.wgsl");
     const ACTOR_WGSL: &str = include_str!("skinned_ffxi.wgsl");
 
-    // research/XIClient Rendering/ZoneRenderer.cpp:2453-2455 over the saturated
-    // fixed-function T&L diffuse of Direct3D8Manager.cpp:373,390,393,395.
+    // research/XIClient Rendering/ZoneRenderer.cpp ZoneRenderer::ApplyDefaultRenderState over the saturated
+    // fixed-function T&L diffuse of Direct3D8Manager.cpp Direct3D8Manager::InitializeRenderStateBlocks,390,393,395.
     fn d3d_zone_stage_chain(vertex_rgb: Vec3, irradiance: Vec3, texel: Vec3) -> Vec3 {
         let gain = wgsl_const(ZONE_WGSL, "D3D_MODULATE_2X");
         ((vertex_rgb * irradiance).min(Vec3::ONE) * texel * gain).min(Vec3::ONE)
@@ -758,7 +758,7 @@ mod tests {
         }
     }
 
-    // Direct3D8Manager.cpp:390,393,395 makes the lit vertex term a D3DCOLOR whichever stage
+    // Direct3D8Manager.cpp Direct3D8Manager::InitializeRenderStateBlocks,393,395 makes the lit vertex term a D3DCOLOR whichever stage
     // chain consumes it, so BOTH branches clamp it before the first texel — the outer
     // saturate the sweep above checks does not, on its own, catch a chain that feeds an
     // over-1.0 vertex colour straight into MODULATE2X.

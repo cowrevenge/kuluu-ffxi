@@ -126,11 +126,11 @@ impl Default for FfxiMaterialFlags {
     }
 }
 
-// research/xim SkeletonMeshSection.kt:61 — skinned meshes alpha-test at 69/255.
+// research/xim SkeletonMeshSection.kt SkeletonMeshSection discardThreshold — skinned meshes alpha-test at 69/255.
 pub const SKINNED_ALPHA_DISCARD: f32 = 69.0 / 255.0;
 
 // FFXI half-color convention: 0x80 is the neutral multiplier (research/xim
-// ByteColor.half; GLDrawer.kt:329-331 feeds the mesh t_factor as uEffectColor).
+// ByteColor.half; GLDrawer.kt drawXimSkinned meshColor feeds the mesh t_factor as uEffectColor).
 pub const T_FACTOR_NEUTRAL: f32 = 128.0;
 
 pub fn t_factor_tint(t_factor: [u8; 4]) -> Vec4 {

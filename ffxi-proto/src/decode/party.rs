@@ -44,7 +44,7 @@ impl GroupTbl {
     ///   [0]      Kind: u8 — PartyKind::Party = 0, PartyKind::Alliance = 5
     ///            (vendor/server/src/map/enums/party_kind.h). A solo/disbanded
     ///            packet is also 0: GP_SERV_PACKET zero-memsets its buffer and
-    ///            DisbandParty sends GROUP_TBL(nullptr) (party.cpp:128), so byte 0
+    ///            DisbandParty sends GROUP_TBL(nullptr) (party.cpp CParty::DisbandParty), so byte 0
     ///            alone cannot tell Party from None — member presence decides.
     ///   [1..4]   padding
     ///   [4..]    array of up to 20 GROUP_TBL entries, 12 bytes each:
@@ -98,7 +98,7 @@ impl GroupTbl {
             // vendor/server/src/map/enums/party_kind.h: Alliance == 5.
             5 => GroupKind::Alliance,
             // Party == 0 — indistinguishable from the solo/disbanded packet
-            // (zero-memset buffer, party.cpp:128), so member presence decides.
+            // (zero-memset buffer, party.cpp CParty::DisbandParty), so member presence decides.
             0 if members.is_empty() => GroupKind::None,
             0 => GroupKind::Party,
             v => GroupKind::Unknown(v),

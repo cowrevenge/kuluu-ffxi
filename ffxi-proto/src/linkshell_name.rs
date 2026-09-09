@@ -2,7 +2,7 @@
 //! linkshell item's exdata and ships in s2c 0x0C9 GENERAL `sComLinkName`.
 //!
 //! Port of `DecodeStringLinkshell` (vendor/server/src/common/utils.cpp)
-//! over `unpackBitsLE` (utils.cpp:446), which is plain little-endian bit-field
+//! over `unpackBitsLE` (utils.cpp), which is plain little-endian bit-field
 //! extraction: the field at `bit_offset` occupies bits
 //! `[bit_offset % 8, bit_offset % 8 + len)` of the LE integer starting at
 //! `bit_offset / 8`.
@@ -13,7 +13,7 @@ pub const PACKED_LEN: usize = 16;
 const BITS_PER_CHAR: usize = 6;
 const CHAR_MASK: u16 = (1 << BITS_PER_CHAR) - 1;
 
-/// Encoder alphabet (utils.cpp:499-521): 1..=26 lowercase, 27..=52 uppercase,
+/// Encoder alphabet (utils.cpp EncodeStringLinkshell): 1..=26 lowercase, 27..=52 uppercase,
 /// 53..=62 digits. 63 is the end marker written into the trailing bits.
 const CODE_LOWER_BASE: u8 = 1;
 const CODE_UPPER_BASE: u8 = 27;
@@ -21,7 +21,7 @@ const CODE_DIGIT_BASE: u8 = 53;
 const CODE_END: u8 = 63;
 
 /// `std::min<size_t>(20u, ...)` — the decoder never emits more than 20
-/// characters regardless of buffer size (utils.cpp:535).
+/// characters regardless of buffer size (utils.cpp DecodeStringLinkshell length).
 const MAX_CHARS: usize = 20;
 
 fn unpack_char(packed: &[u8], bit_offset: usize) -> u8 {
@@ -42,7 +42,7 @@ pub fn decode(packed: &[u8]) -> String {
         match code {
             // A zero code only occurs in padding, and the encoder's partial
             // end marker can leave one bogus character in front of it — hence
-            // LSB dropping the previous character here (utils.cpp:554-558).
+            // LSB dropping the previous character here (utils.cpp DecodeStringLinkshell).
             0 => {
                 out.pop();
                 break;
@@ -57,7 +57,7 @@ pub fn decode(packed: &[u8]) -> String {
     out
 }
 
-/// Mirror of `EncodeStringLinkshell` (utils.cpp:499-529), so tests pin our
+/// Mirror of `EncodeStringLinkshell` (utils.cpp), so tests pin our
 /// decoder against the upstream encoder rather than against our own reading of
 /// it. Test-only: the client never writes a linkshell name.
 #[cfg(test)]

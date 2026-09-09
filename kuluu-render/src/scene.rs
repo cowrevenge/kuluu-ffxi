@@ -164,7 +164,7 @@ pub struct PendingRetarget {
 /// A held lock rides along with the target rather than pinning it: xim keeps the
 /// lock as a flag over the one target slot (research/xim
 /// PlayerTargetSelector.kt's `isTargetLocked` reads `state.targetState.locked`
-/// beside `state.targetState.targetId`, Actor.kt:106,932), so only player
+/// beside `state.targetState.targetId`, Actor.kt createFrom,932), so only player
 /// targeting input is gated on it ([`crate::lock_on::suppresses_retarget`]) and a
 /// server-side target change carries the lock with it.
 ///
@@ -1478,7 +1478,7 @@ mod tests {
     }
 
     /// A held lock is a flag over the one target slot in retail's model
-    /// (research/xim Actor.kt:106), so a server-side target change carries
+    /// (research/xim Actor.kt createFrom), so a server-side target change carries
     /// the lock with it instead of leaving camera and target panel on
     /// different mobs.
     #[test]

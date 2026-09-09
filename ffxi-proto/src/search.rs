@@ -190,7 +190,7 @@ impl SearchCrypto {
     /// this arrives (observation record
     /// .agents/skills/retail-observe/references/auction-house.md). Body is the
     /// original request's — `HandleAuctionHouseRequest` re-reads category and
-    /// sort params for both types (search_handler.cpp:267-268).
+    /// sort params for both types (search_handler.cpp SearchHandler::read_func TCP_AH_REQUEST).
     pub fn encode_ah_list_more_request(
         &mut self,
         category: u8,
@@ -514,7 +514,7 @@ mod tests {
 
     /// The follow-up page request differs from the first only in its type byte:
     /// HandleAuctionHouseRequest reads category/sorts from the same offsets for
-    /// both (search_handler.cpp:267-268).
+    /// both (search_handler.cpp SearchHandler::read_func TCP_AH_REQUEST).
     #[test]
     fn ah_list_more_request_repeats_the_body_under_the_more_type() {
         let mut client = SearchCrypto::new();
@@ -601,7 +601,7 @@ mod tests {
     }
 
     // Response body per auction_list.cpp: total size = body-size field + 28
-    // (CAHItemsListPacket::GetSize, auction_list.cpp:102).
+    // (CAHItemsListPacket::GetSize, auction_list.cpp).
     fn build_list_response(
         total: u16,
         offset: usize,
@@ -816,7 +816,7 @@ mod tests {
         assert_ne!(TCP_AH_REQUEST, TCP_AH_REQUEST_MORE);
         assert_ne!(TCP_AH_HISTORY_SINGLE, TCP_AH_HISTORY_STACK);
         // Retail's response type is the request type with the top bit set
-        // (auction_list.cpp:42 vs TCP_AH_REQUEST; auction_history.cpp:34 vs
+        // (auction_list.cpp m_offset vs TCP_AH_REQUEST; auction_history.cpp CAHHistoryPacket::CAHHistoryPacket vs
         // TCP_AH_HISTORY_SINGLE, "masked as val & 0x1F" per atom0s).
         assert_eq!(
             AH_LIST_RESPONSE_TYPE & AH_RESPONSE_TYPE_REQUEST_MASK,

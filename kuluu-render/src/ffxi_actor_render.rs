@@ -48,7 +48,7 @@ pub enum ActorSubject {
         mounted: bool,
         equipment: Vec<u32>,
         /// Body slot, kept apart from `equipment` because its CIB `waist_type`
-        /// picks the waist motion DAT (SkeletalMeshActor.cpp:1659 collects it
+        /// picks the waist motion DAT (SkeletalMeshActor.cpp SkeletalMeshActor::SetEquipModel collects it
         /// from slot 2 specifically).
         body: Option<u32>,
         main_weapon: Option<u32>,
@@ -77,7 +77,7 @@ pub struct LoadActorRequest {
 #[derive(Component, Debug, Clone, Copy)]
 pub struct FfxiRenderRoot(pub Entity);
 
-// The skeleton domain ticks at half the routine clock (research/xim poc/ActorManager.kt:59-62);
+// The skeleton domain ticks at half the routine clock (research/xim poc/ActorManager.kt updateAll);
 // every `half_frames()`/`* 0.5` conversion in this module is that same 2:1 bridge.
 pub const FRAME_RATE: f32 =
     crate::scheduler_runtime::ROUTINE_FPS / crate::scheduler_runtime::SKELETON_FRAME_DIVISOR;
@@ -132,7 +132,7 @@ pub struct LoadedActor {
     routines: Arc<HashMap<DatId, Scheduler>>,
 
     // Particle generators + their sprite meshes/textures embedded in the actor
-    // DAT; auto-run generators (research/xim Actor.kt:724-734) start at spawn.
+    // DAT; auto-run generators (research/xim Actor.kt startAutoRunParticles) start at spawn.
     action_assets: Arc<crate::scheduler_runtime::ActionAssets>,
 }
 
@@ -164,7 +164,7 @@ fn derive_animation_sets(
     )
 }
 
-// research/xim EffectRoutineInstance.kt:592-604 searchAssociatedDir — a sound id in a routine
+// research/xim EffectRoutineInstance.kt searchAssociatedDir — a sound id in a routine
 // resolves against every one of the actor's resource dirs. For a PC that is where the whole
 // melee sound set lives: `skaz`/`shit` in the equipped weapon's DAT, `atk1..atk4`/`dam1..dam4`
 // in the FACE model DAT. Only Sep and Generator chunks are collected; the Img/D3M/MMB decode
@@ -481,7 +481,7 @@ pub fn load_npc(file_id: u32) -> Result<LoadedActor, String> {
 
     let (_schedulers, action_assets) = crate::scheduler_runtime::parse_action_bytes(&bytes);
     // A D3m referenced by a particle generator is drawn by the particle stream
-    // (XIM ParticleMeshResource, Particle.kt:577) with its own unlit additive/blend
+    // (XIM ParticleMeshResource, Particle.kt shouldSnapAlpha) with its own unlit additive/blend
     // material; rendering it as a static child too would double-draw it through the
     // lit skinned-Mask path (blowing sparse halos to white slabs and back-faces to
     // black — kuluu-xvym). The Home Point crystal is entirely such meshes: even the
@@ -666,7 +666,7 @@ pub fn load_pc(
     }
 
     // Retail loads three motion DATs around the race base, not one. Upper body is
-    // `base + is_shield + 1` (SkeletalMeshActor.cpp:3175) — a shield swaps in a
+    // `base + is_shield + 1` (SkeletalMeshActor.cpp SkeletalMeshActor::GetUpperBodyDatIndex) — a shield swaps in a
     // variant with its own joint count. Waist/skirt is
     // `base + max(waist_type, 1) + 2` (:3165, reached from ReadStdMotionRes at
     // :3014), which drives the hip-hung cloth joints; without it they hold bind
@@ -674,7 +674,7 @@ pub fn load_pc(
     //
     // Both selectors come from equipment CIBs and neither is a fixed offset: the
     // sub slot supplies is_shield and the body slot waist_type
-    // (SkeletalMeshActor.cpp:1659,1682 collect them per slot). Loading a fixed
+    // (SkeletalMeshActor.cpp SkeletalMeshActor::SetEquipModel,1682 collect them per slot). Loading a fixed
     // `+3` instead would give every robed mage trouser motion, and because
     // `dedup_clips` is first-writer-wins, loading both candidates would silently
     // keep whichever came first rather than the authored one.
@@ -828,11 +828,11 @@ fn is_occluded(buffer: &MeshBuffer, occlusion: &std::collections::HashSet<u8>) -
 struct BuiltGroup {
     mesh: Mesh,
     texture_name: String,
-    // Per-mesh t_factor tint, neutral 1.0 (research/xim GLDrawer.kt:329-331; D3M
+    // Per-mesh t_factor tint, neutral 1.0 (research/xim GLDrawer.kt drawXimSkinned meshColor; D3M
     // children carry no RenderProperties record). displayTypeFlag is slot
-    // occlusion (ActorModel.kt:246-259, `is_occluded`), not a blend selector —
+    // occlusion (ActorModel.kt isOccluded renderProperties, `is_occluded`), not a blend selector —
     // skinned meshes always alpha-test at SKINNED_ALPHA_DISCARD
-    // (SkeletonMeshSection.kt:216); translucency/glow comes from the particle
+    // (SkeletonMeshSection.kt parseTriStrip); translucency/glow comes from the particle
     // stream, never the static mesh.
     tint: Vec4,
 
@@ -944,7 +944,7 @@ fn entity_aabb_from_joints(
     any.then(|| Aabb::from_min_max(lo - margin, hi + margin))
 }
 
-// research/XIClient Rendering/Direct3D8Manager.cpp:393 — the skeletal vertex colour reaches
+// research/XIClient Rendering/Direct3D8Manager.cpp Direct3D8Manager::InitializeRenderStateBlocks — the skeletal vertex colour reaches
 // fixed-function T&L as D3DMCS_COLOR1 exactly as the zone MMB one does, so it takes the same
 // D3DCOLOR byte/255 scale (pinned against `mmb::VERTEX_COLOR_DIVISOR` below:
 // `ffxi_zone_material::AMBIENT_FLOOR` is chosen for both paths at once and only holds while
@@ -1151,7 +1151,7 @@ impl FfxiRenderActor {
 
     // The SEP/generator tier a sound stage resolves against when the running routine's own DAT
     // does not hold it: a PC's grunt SEPs ship in the FACE model DAT and the weapon's swing
-    // whoosh in the equipped weapon's DAT (research/xim EffectRoutineInstance.kt:592-604
+    // whoosh in the equipped weapon's DAT (research/xim EffectRoutineInstance.kt searchAssociatedDir
     // searchAssociatedDir over `actor.getAllAnimationDirectories()`).
     pub(crate) fn action_assets(&self) -> &crate::scheduler_runtime::ActionAssets {
         &self.action_assets
@@ -1162,7 +1162,7 @@ impl FfxiRenderActor {
     }
 
     pub fn begin_completion_motion(&mut self, clip_id: DatId, motion: CompletionMotion) {
-        // research/xim EffectRoutineInterpolatedEffects.kt:49 — a skill's body motion is
+        // research/xim EffectRoutineInterpolatedEffects.kt SkeletonAnimationInstance animationDirs — a skill's body motion is
         // resolved against `listOf(localDir) + actor.getAllAnimationDirectories()`: the
         // skill DAT's own clips first, then the caster's. Stash the matching local clips so
         // select_pose_clips_layered finds them ahead of the actor's own pose set.
@@ -1176,7 +1176,7 @@ impl FfxiRenderActor {
         let len = rest_clip_len_frames(&self.action_clips, clip_id)
             .max(rest_clip_len_frames(&self.battle_clips, clip_id))
             .max(rest_clip_len_frames(&self.animations, clip_id));
-        // research/xim EffectRoutineInterpolatedEffects.kt:50-51 — half-frame fields become
+        // research/xim EffectRoutineInterpolatedEffects.kt SkeletonAnimationInstance loopParams — half-frame fields become
         // real frames at rate 1.0 by halving; maxLoops>1 means the motion repeats.
         let num_loops = (motion.max_loops > 1).then_some(motion.max_loops as u32);
         self.action = Some(ActionPlayback {
@@ -1364,7 +1364,7 @@ pub fn spawn_loaded_actor(
     actor_root
 }
 
-// research/xim Actor.kt:127 — auto-run generators start at model-ready.
+// research/xim Actor.kt createFrom — auto-run generators start at model-ready.
 fn insert_auto_run_effects(commands: &mut Commands, actor_root: Entity, loaded: &LoadedActor) {
     if loaded
         .action_assets
@@ -2043,7 +2043,7 @@ fn advance_actor_pose(
         _ => None,
     };
 
-    // research/xim Actor.kt:361 (updateFishingState) — the fishing macro-pose overrides
+    // research/xim Actor.kt (updateFishingState) — the fishing macro-pose overrides
     // locomotion/idle/rest. fsh0 (cast/wait) and fsh1 (fighting) loop; fsh2..fsh6
     // (resolution) play once and hold (see the one-shot handling below).
     //
@@ -2195,7 +2195,7 @@ fn advance_actor_pose(
                 coordinator.register_idle_animation(clip.clone(), true);
             }
         } else {
-            // research/xim EffectRoutineInterpolatedEffects.kt:50-51 — when the pose came from
+            // research/xim EffectRoutineInterpolatedEffects.kt SkeletonAnimationInstance loopParams — when the pose came from
             // a completion motion, honor its parsed transition + loop params; otherwise use the
             // locomotion crossfade defaults.
             let action = action.filter(|a| a.clip_id == selected_id);
@@ -3469,7 +3469,7 @@ pub fn update_ffxi_render_actor_lighting(
     // clamping the model directional to 1.0 cropped that punch and flattened the form.
     const MODEL_DIR_MAX: f32 = 1.5;
 
-    // research/xim EnvironmentSection.kt:134-136,168: actors are lit by the model block's
+    // research/xim EnvironmentSection.kt getModelLightingParams,168: actors are lit by the model block's
     // entity ambient. When the zone ships 0x2F records, use that authored ambient
     // directly — the data already carries the day/night level and a ~2.4:1 sun:ambient
     // ratio, so scaling it by GlobalAmbientLight (amb_k) and the dark-fallback
@@ -3502,7 +3502,7 @@ pub fn update_ffxi_render_actor_lighting(
             _ => (Vec4::ZERO, Vec4::ZERO),
         }
     };
-    // research/xim EnvironmentSection.kt:161-165: actors take a single time-blended
+    // research/xim EnvironmentSection.kt getLightingParams lights: actors take a single time-blended
     // model light (the moon<->sun cross-fade), so dir0 carries the blend and dir1 is
     // unused. The procedural sun/moon DirectionalLights remain the fallback when the
     // zone ships no 0x2F records.
@@ -3616,8 +3616,8 @@ pub fn update_ffxi_actor_point_lights(
     }
     let count = settings.model_light_count as usize;
     // The zone's own bindings are the point lights retail leaves in D3D slots
-    // 2-5 while it draws a model over that chunk (ZoneRenderer.cpp:284-313, :339-353;
-    // ModelPartInstance.cpp:270-280 only rebinds slots 0-1), so they light the
+    // 2-5 while it draws a model over that chunk (ZoneRenderer.cpp ZoneRenderer::UpdateBlockLightSettings, :339-353;
+    // ModelPartInstance.cpp ModelPartInstance::Draw only rebinds slots 0-1), so they light the
     // actor. `/lights` is the explicitly non-vanilla path: its emitters are ours,
     // no chunk names them, so that mode keeps the nearest-N pick.
     let authored = chunk_lights.is_authored() && !settings.dynamic_lights.emitters_enabled();
@@ -4109,7 +4109,7 @@ mod pose_resolution_tests {
             heights.insert(race, h);
         }
         // Hume M (1) vs Elvaan M (3): the bead's own anchor — Elvaan bakes to
-        // ~2.08 (vendor/server CharRace order, charentity.h:221).
+        // ~2.08 (vendor/server CharRace order, charentity.h).
         let hume = *heights.get(&1).expect("Hume M loaded");
         let elvaan = *heights.get(&3).expect("Elvaan M loaded");
         assert!(
@@ -4845,7 +4845,7 @@ mod pose_resolution_tests {
 
     // Retail-DAT guard (skips without an install). The melee hit chain resolves `ef h` (the hit
     // spark) and `se h`/`skaz` (the impact/whoosh) out of the EQUIPPED WEAPON's DAT, and `chit`
-    // out of the skeleton — research/xim EffectRoutineInstance.kt:592-604 searchAssociatedDir
+    // out of the skeleton — research/xim EffectRoutineInstance.kt searchAssociatedDir
     // walks every one of the actor's animation directories. load_pc drops an equipment file whose
     // `collect_skel_meshes()` is empty, so a weapon that stops contributing meshes would silently
     // take the whole spark chain with it.

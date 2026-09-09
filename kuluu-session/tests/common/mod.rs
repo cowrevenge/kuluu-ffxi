@@ -57,7 +57,7 @@ const FIXTURE_SUFFIX_HEX_DIGITS: usize = 6;
 // is resident, LSB answers the lobby's CharZone by refreshing that session
 // instead of creating the pending session a fresh login needs
 // (vendor/server/src/map/ipc_client.cpp IPCClient::handleMessage_CharZone session), so the new client's 0x00A is
-// dropped (map_networking.cpp:270) and it never zones in. The fixture therefore
+// dropped (map_networking.cpp MapNetworking::recv_parse) and it never zones in. The fixture therefore
 // parks its account as a tombstone rather than deleting it, so neither
 // MAX(accounts.id)+1 nor COALESCE(MAX(chars.charid),…)+1 can hand the same ids
 // to the next test while its session may still be resident.

@@ -8,7 +8,7 @@ use super::*;
 /// vendor/server/src/map/packets/s2c/0x058_assist.h: UniqueNo u32 @0 (the local
 /// player), AssistNo u32 @4 (the new target), ActIndex u16 @8, padding u16 @10.
 ///
-/// `ActIndex` carries the *player's* own targid (0x058_assist.cpp:32), not the
+/// `ActIndex` carries the *player's* own targid (0x058_assist.cpp GP_SERV_COMMAND_ASSIST::GP_SERV_COMMAND_ASSIST), not the
 /// target's, and retail's `RecvAssist` ignores it
 /// (research/XiPackets/world/server/0x0058/README.md).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -41,7 +41,7 @@ impl Assist {
     }
 
     /// LSB memsets the packet buffer (s2c/base.h `GP_SERV_PACKET()`) and only
-    /// fills `AssistNo` when a target exists (0x058_assist.cpp:34-36), so
+    /// fills `AssistNo` when a target exists (0x058_assist.cpp GP_SERV_COMMAND_ASSIST::GP_SERV_COMMAND_ASSIST), so
     /// `AssistNo == 0` is "no target", not entity 0.
     pub fn target(&self) -> Option<u32> {
         (self.assist_no != 0).then_some(self.assist_no)

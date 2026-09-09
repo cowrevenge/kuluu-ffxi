@@ -44,7 +44,7 @@ pub fn offset_text(offset: u8) -> Option<&'static str> {
 /// opcode `opcode`. The packet choice is fixed per message
 /// (vendor/server/src/map/utils/fishingutils.cpp — every `pushPacket` /
 /// `PushPacket` call site): TALKNUMWORK2's fishing constructor carries only
-/// the three catch announcements (0x027_talknumwork2.cpp:30 — "this is how
+/// the three catch announcements (0x027_talknumwork2.cpp GP_SERV_COMMAND_TALKNUMWORK2::GP_SERV_COMMAND_TALKNUMWORK2 — "this is how
 /// it's used for Fishing messages currently"), TALKNUMNAME only the monster
 /// and chest broadcasts, TALKNUMWORK only keen angler's sense, and TALKNUM
 /// everything else.

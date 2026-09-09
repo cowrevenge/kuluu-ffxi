@@ -60,7 +60,7 @@ pub fn target_ring_color(engaged_on_target: bool) -> Color {
     }
 }
 
-// research/xim UiState.kt:1289-1300 getSubTargetColorMask: the sub-target cursor is
+// research/xim UiState.kt getSubTargetColorMask: the sub-target cursor is
 // tinted by RANGE, not target type (invalid types are never candidates, so they get no
 // cursor). Three states vs the action's max range: <80% in-range, <100% edge, else out.
 const SUB_TARGET_IN_RANGE: Color = Color::srgb(0.502, 0.502, 1.0);
@@ -196,7 +196,7 @@ pub fn draw_sub_target_cursor_system(
             continue;
         }
 
-        // research/xim UiState.kt:604 — the cursor is tinted by range to the
+        // research/xim UiState.kt drawFrame — the cursor is tinted by range to the
         // candidate; full 3D distance vs the action's max range.
         let fill = match self_pos {
             Some(sp) => {

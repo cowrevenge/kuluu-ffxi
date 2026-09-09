@@ -117,7 +117,7 @@ impl D3m {
             .to_string()
     }
 
-    // research/xim ParticleMeshSection.kt:76-82 — a mesh links its texture by the raw 16-byte
+    // research/xim ParticleMeshSection.kt read textureName — a mesh links its texture by the raw 16-byte
     // qualified name, resolved as (namespace, local) then local-only.
     pub fn texture_name_tokens(&self) -> (String, String) {
         crate::texture::split_qualified_name(&self.texture_name)

@@ -133,7 +133,7 @@ pub struct ItemAttr {
 /// timestamp (Earth seconds since `ffxi_vocab::vana_time::VANA_EPOCH_UNIX`).
 /// Readiness is signaled by `ready` (extdata flags-hi bit 0x40), NOT by a zero
 /// timestamp: LSB only writes Attr[4..8] on the cooldown path and leaves stale
-/// m_extra bytes there when ready (0x020_item_attr.cpp:57-68), so consumers
+/// m_extra bytes there when ready (0x020_item_attr.cpp GP_SERV_COMMAND_ITEM_ATTR::GP_SERV_COMMAND_ITEM_ATTR), so consumers
 /// must gate on `ready` / `ts > now` rather than `ts == 0`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ChargeInfo {
@@ -374,7 +374,7 @@ mod item_tests {
 
     #[test]
     fn charge_info_reads_charges_next_use_and_ready() {
-        // 0x020_item_attr.cpp:47-68 — header 0x01, charges at [1], ready bit
+        // 0x020_item_attr.cpp GP_SERV_COMMAND_ITEM_ATTR::GP_SERV_COMMAND_ITEM_ATTR — header 0x01, charges at [1], ready bit
         // 0x40 in flags-hi [3], next-use vana timestamp at [4..8].
         let mut ext = [0u8; 24];
         ext[0] = 0x01;

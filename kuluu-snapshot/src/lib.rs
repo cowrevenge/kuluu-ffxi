@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 // Tractor offer shown while dead. (Upstream's "v20"; renumbered on merge because our
 // side had already spent 20-22 on zone_generation / untargetable / name_vis.)
 // v22: Entity.name_vis is now Option<u8> — None until a General-block update carries
-// it. The byte rides UPDATE_HP (entity_update.cpp:357/:408), not the Position block,
+// it. The byte rides UPDATE_HP (entity_update.cpp CEntityUpdatePacket::updateWith/:408), not the Position block,
 // so a POS-only 0x00E must not clobber the last known value with its zero-filled byte.
 // v21: Entity.char_flags.untargetable — flags1 TargetOffFlag, the server's
 // targetability authority (LSB m_flags FLAG_UNTARGETABLE for NPC/MOB, the explicit
@@ -179,7 +179,7 @@ impl Weather {
             Gloom,
             Darkness,
         ];
-        // weather.h:46 notes a repeating 0x14-0x27 set whose usage is unknown;
+        // weather.h Weather notes a repeating 0x14-0x27 set whose usage is unknown;
         // do not fabricate a real weather for undefined ids.
         TABLE.get(n as usize).copied().unwrap_or(Weather::None)
     }
@@ -261,7 +261,7 @@ pub struct CharFlags {
     /// (vendor/server/src/map/packets/char_update.cpp CCharUpdatePacket::updateWith), written on every
     /// non-despawn 0x0D outside all SendFlg blocks. Drives the same nameplate
     /// star as `lfg_master`, which retail keys off `Flags3.LfgMasterFlag` — a
-    /// flag LSB hardcodes to 0 (char_update.cpp:339).
+    /// flag LSB hardcodes to 0 (char_update.cpp CCharUpdatePacket::updateWith).
     #[serde(default)]
     pub job_master_display: bool,
 
@@ -367,7 +367,7 @@ pub struct Entity {
     /// entity_update byte 0x2B (LSB `namevis`; PosHead `flags3 >> 24`), written
     /// under UPDATE_HP — vendor/server/src/map/packets/entity_update.cpp CEntityUpdatePacket::updateWith/:408.
     /// `None` until the first General-block update carries it; treated as visible,
-    /// matching the server's VIS_NONE default (baseentity.cpp:45). LSB NAMEVIS
+    /// matching the server's VIS_NONE default (baseentity.cpp CBaseEntity::CBaseEntity). LSB NAMEVIS
     /// (vendor/server/src/map/entities/baseentity.h): 0x01 icon, 0x08 hide-name,
     /// 0x80 ghost-phase — the other bits in the data are render-phase flags on real
     /// NPCs (Survival Guides carry 0x20), so only 0x08 suppresses anything.
@@ -1151,12 +1151,12 @@ pub struct InventoryItem {
     /// Current charges of a charged (usable/enchanted) item; `None` for
     /// non-charged items. From item extdata
     /// (vendor/server/src/map/items/exdata/timer_info.h ItemTimerInfo Header, memcpy'd at
-    /// 0x020_item_attr.cpp:43).
+    /// 0x020_item_attr.cpp GP_SERV_COMMAND_ITEM_ATTR::GP_SERV_COMMAND_ITEM_ATTR).
     #[serde(default)]
     pub charges_remaining: Option<u8>,
     /// Absolute Vana'diel next-use timestamp (Earth seconds since the vanadiel
     /// epoch), `None` for non-charged items. Not zeroed on the ready path — LSB
-    /// only writes it on cooldown (0x020_item_attr.cpp:57-68) — so gate on
+    /// only writes it on cooldown (0x020_item_attr.cpp GP_SERV_COMMAND_ITEM_ATTR::GP_SERV_COMMAND_ITEM_ATTR) — so gate on
     /// `ts > now`, not `ts == 0`.
     #[serde(default)]
     pub next_use_vana_ts: Option<u32>,
@@ -2155,7 +2155,7 @@ mod tests {
 
     #[test]
     fn from_lsb_unknown_ids_are_none() {
-        // weather.h:46 unknown 0x14-0x27 set must not wrap onto real weathers.
+        // weather.h Weather unknown 0x14-0x27 set must not wrap onto real weathers.
         assert_eq!(Weather::from_lsb(20), Weather::None);
         assert_eq!(Weather::from_lsb(26), Weather::None);
         assert_eq!(Weather::from_lsb(39), Weather::None);

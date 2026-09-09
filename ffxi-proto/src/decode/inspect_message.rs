@@ -27,7 +27,7 @@ impl InspectMessage {
     pub const SIZE: usize = Self::TITLE_OFFSET + 4;
 
     // `uint8 BazaarFlag:1; uint8 MyFlag:1; uint8 Race:6` — little-endian
-    // bitfields allocate from the low bit (0x0ca_inspect_message.h:39-41).
+    // bitfields allocate from the low bit (0x0ca_inspect_message.h GP_SERV_COMMAND_INSPECT_MESSAGE).
     const BAZAAR_FLAG: u8 = 1 << 0;
     const RACE_SHIFT: u32 = 2;
 

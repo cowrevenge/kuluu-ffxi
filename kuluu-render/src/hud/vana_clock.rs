@@ -235,7 +235,7 @@ mod tests {
     fn day_orb_index_maps_weekday_to_element_sprite() {
         // Firesday->Fire(106), Earthsday->Earth(109), Watersday->Water(111),
         // Windsday->Wind(108), Iceday->Ice(107), Lightningday->Lightning(110),
-        // Lightsday->Light(112), Darksday->Dark(113). (Compass.kt:43-54)
+        // Lightsday->Light(112), Darksday->Dark(113). (Compass.kt drawClock dayOfWeekIndex)
         let expected = [106, 109, 111, 108, 107, 110, 112, 113];
         for (day, want) in expected.iter().enumerate() {
             let weekday = VanaWeekday::from_vana_day(day as u64);

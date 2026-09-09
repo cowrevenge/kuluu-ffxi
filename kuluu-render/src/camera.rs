@@ -152,7 +152,7 @@ impl ChaseCamera {
 
     pub const FP_PITCH_MAX: f32 = std::f32::consts::FRAC_PI_2 - 0.05;
 
-    /// CameraManager.cpp:830-836 pushes an unobstructed eye back out whenever
+    /// CameraManager.cpp CameraManager::UpdatePlayerFollowingCamera pushes an unobstructed eye back out whenever
     /// the 3D eye→target distance drops below 3.
     pub const DIST_MIN: f32 = 3.0;
 
@@ -173,7 +173,7 @@ impl ChaseCamera {
     /// - Same file:822, the camera-follow easing changes regime above 6.
     /// - research/xim/src/jsMain/kotlin/xim/poc/camera/PolarCamera.kt PolarCamera `maximumRadius = 6f`.
     ///
-    /// The resting distance is nearer still: CameraManager.cpp:95 places the
+    /// The resting distance is nearer still: CameraManager.cpp CameraManager::CalculateDefaultCameraPosition v10 places the
     /// default eye at `{-3, 0, 0}` behind the actor, and :404 falls back to -4.
     ///
     /// This is load-bearing for camera collision, not just feel. Zone collision
@@ -186,7 +186,7 @@ impl ChaseCamera {
 
     /// Retail tilts by lifting the eye's Y, not by orbiting it, so its
     /// horizontal separation never shrinks as you look down — the eye→target
-    /// distance grows instead, and CameraManager.cpp:822 eases it back toward
+    /// distance grows instead, and CameraManager.cpp CameraManager::UpdatePlayerFollowingCamera eases it back toward
     /// [`Self::DIST_MAX`]. A polar eye reproduces that reachable envelope by
     /// growing its radius on demand rather than trading horizontal for
     /// vertical.
@@ -205,7 +205,7 @@ impl Default for ChaseCamera {
 
             pitch: 0.15,
             // Rests fully zoomed out, as XIM does (`previousRadius = radiusMax`,
-            // PolarCamera.kt:46). Was 18.0, which is now past DIST_MAX.
+            // PolarCamera.kt PolarCamera previousRadius). Was 18.0, which is now past DIST_MAX.
             distance: Self::DIST_MAX,
             smoothing: 0.18,
             synced_initial: false,

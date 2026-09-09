@@ -18,7 +18,7 @@ pub struct RenderProperties {
     pub specular_highlight_power: f32,
     pub display_type_flag: u8,
     pub ambient_multiplier: f32,
-    // Undecoded (research/xim SkeletonMeshSection.kt:363-366: flag0, displayType, flag2, flag3).
+    // Undecoded (research/xim SkeletonMeshSection.kt: flag0, displayType, flag2, flag3).
     pub flag0: u8,
     pub flag2: u8,
     pub flag3: u8,

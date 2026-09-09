@@ -123,8 +123,8 @@ mod tests {
 
     #[test]
     fn moghouse_table_spot_pins_and_count() {
-        // One pin per source branch of research/xim ZoneChanger.kt:18-36 ×
-        // vendor/server 0x00a_login.cpp:35-72 (classic low, WoTG high, 2F range),
+        // One pin per source branch of research/xim ZoneChanger.kt MogHouseConfig ×
+        // vendor/server 0x00a_login.cpp GetMogHouseModelID (classic low, WoTG high, 2F range),
         // plus the count — the exhaustive pair list lives only in the table.
         assert_eq!(MOGHOUSE_MODEL_DAT_TABLE.len(), 16);
         assert_eq!(moghouse_model_to_mzb_file_id(256), Some(356), "Jeuno");

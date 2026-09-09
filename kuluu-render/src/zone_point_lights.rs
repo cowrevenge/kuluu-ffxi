@@ -84,7 +84,7 @@ const EMITTER_MIN_INTENSITY: f32 = 1.0;
 
 /// No Generator chunk defines this light, so no MZB chunk can bind it. Zone
 /// FourCCs are never 0 (`LightID == 0` is retail's empty pool slot,
-/// ZoneRenderer.cpp:260).
+/// ZoneRenderer.cpp ZoneRenderer::GetOrAllocateLight).
 pub const UNAUTHORED_LIGHT_ID: mzb::LightId = 0;
 
 #[derive(Debug, Clone, Copy)]
@@ -205,7 +205,7 @@ fn pack_point_light_arrays<'a>(
 /// The chunk's authored light slots as indices into `lights`, in binding order.
 ///
 /// Retail's chunk binding names a `LightID`, and a slot whose light the zone
-/// never defines is left disabled (ZoneRenderer.cpp:299-300 `managedLight ==
+/// never defines is left disabled (ZoneRenderer.cpp ZoneRenderer::UpdateBlockLightSettings `managedLight ==
 /// nullptr`), so an unmatched FourCC drops out rather than shifting the rest.
 /// Never yields more than [`mzb::LIGHT_REFERENCE_COUNT`] — retail's four D3D
 /// slots — however many slots the shader uniform carries.

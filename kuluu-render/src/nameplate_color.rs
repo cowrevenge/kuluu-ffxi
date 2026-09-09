@@ -58,7 +58,7 @@ const ALLEGIANCE_COLORED_MAX: u8 = 99;
 /// The belligerence bit LSB ORs into the allegiance byte while a monstrosity is
 /// outside the Ferretory (`Flags3.BallistaTeam |= 0x08`, char_update.cpp;
 /// `Flags2.BallistaFlg |= 0x08`, char_status.cpp), on top of the base
-/// ALLEGIANCE_TYPE. A player's base is always PLAYER (charentity.cpp:127), so a
+/// ALLEGIANCE_TYPE. A player's base is always PLAYER (charentity.cpp m_PlayTime), so a
 /// belligerent one reads BELLIGERENT_PLAYER_ALLEGIANCE on the wire; the MOB
 /// result only reaches it through an unvalidated `setAllegiance` script call.
 /// The colour logic deliberately does not branch on these — retail maps 8/9 to

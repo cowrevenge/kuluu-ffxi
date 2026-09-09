@@ -579,7 +579,7 @@ pub fn resolve_face(face: u8, race: u8) -> Option<u32> {
     if u16::from(face) >= count {
         // Retail clamp: an id past the slot's table renders model 0, never a
         // missing part ("wrong GRP number", research/XIClient/src/XIClient/
-        // source/World/Actor/SkeletalMeshActor.cpp:489-494). For the face slot
+        // source/World/Actor/SkeletalMeshActor.cpp constexpr). For the face slot
         // that means an out-of-band face byte renders face 0 instead of a
         // decapitated PC. Loud because it means the server sent a face this
         // client's tables don't know -- the wrong-face render needs explaining.
@@ -747,7 +747,7 @@ pub fn dispatch_look_driven_models(
                     race,
                     mounted,
                     equipment: equipment.clone(),
-                    // Slot 2 is the body (SkeletalMeshActor.cpp:1659 takes
+                    // Slot 2 is the body (SkeletalMeshActor.cpp SkeletalMeshActor::SetEquipModel takes
                     // waist_type from that slot's CIB); `equipment` above drops
                     // slot identity, so pass it separately.
                     body: resolve_equipment_model(EQUIP_SLOT_BODY, body, race),
@@ -911,7 +911,7 @@ mod tests {
         assert_eq!(resolve_equipment_slot(0x1260, 1), Some(102961));
 
         // Past the last band: retail clamps to model 0 of the slot ("wrong GRP
-        // number", SkeletalMeshActor.cpp:489-494), so the head slot's base file
+        // number", SkeletalMeshActor.cpp constexpr), so the head slot's base file
         // comes back instead of a dropped body part.
         assert_eq!(resolve_equipment_slot(0x12A0, 1), Some(7112));
     }
@@ -945,7 +945,7 @@ mod tests {
     fn face_band_boundaries() {
         // 32 face entries (0..31); index 31 is the last face file. An
         // out-of-band face clamps to face 0 the way retail does ("wrong GRP
-        // number", SkeletalMeshActor.cpp:489-494) -- never a decapitated PC.
+        // number", SkeletalMeshActor.cpp constexpr) -- never a decapitated PC.
         assert_eq!(resolve_face(31, 1), Some(7111));
         assert_eq!(resolve_face(32, 1), Some(7080));
         assert_eq!(resolve_face(255, 5), Some(19784));

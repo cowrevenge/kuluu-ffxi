@@ -44,19 +44,19 @@ pub struct ZoneWeather {
 
     pub file_id: Option<u32>,
 
-    // research/xim EnvironmentManager.kt:399-451: one interpolated env source per
+    // research/xim EnvironmentManager.kt computeInterpolatedEnvResource: one interpolated env source per
     // frame; skybox/lighting/sun_moon all read this instead of independently
     // re-sampling (was the skybox/lighting drift).
     pub current: Option<WeatherRecord>,
 
     /// The record retail draws the environment *under the player* from — its own
-    /// area's, not the zone's. Distance fog (SkeletalMeshActor.cpp:2749
+    /// area's, not the zone's. Distance fog (SkeletalMeshActor.cpp SkeletalMeshActor::AdjustLighting
     /// `FindAreaByFourCCAndGetFog(..., VirtActor88())`) and terrain lighting
-    /// (ZoneRenderer.cpp:1133-1149, where `positionedBlock->Area` supplies
+    /// (ZoneRenderer.cpp ZoneRenderer::RenderChunk2, where `positionedBlock->Area` supplies
     /// `GetFog`, `GetWeatherDiffuseLights` and `GetAmbient(_, 0)` for every block
     /// it draws) both come off the area. The sky dome, the celestial arc and the
     /// far color stay zone-wide: those are set from the zone's weather condition
-    /// (XiArea.cpp:126-136 `ApplyWeatherCondition` -> `SetFarColor`), not from
+    /// (XiArea.cpp XiArea::ApplyWeatherCondition `ApplyWeatherCondition` -> `SetFarColor`), not from
     /// the block underfoot.
     pub area_current: Option<WeatherRecord>,
 }
@@ -65,7 +65,7 @@ pub struct ZoneWeather {
 // that resolve a weat/<type>/ subtree: not every zone authors every sky family.
 // Retail does exactly one hop, straight to `suny`, when the requested container
 // misses — research/XIClient/src/XIClient/source/World/Weather/
-// WeatherTransition.cpp:52-54.
+// WeatherTransition.cpp WeatherTransition::WeatherTransition.
 pub(crate) fn weather_type_preference(want: WeatherTypeId) -> impl Iterator<Item = WeatherTypeId> {
     std::iter::once(want).chain(std::iter::once(WEATHER_TYPE_FALLBACK))
 }
@@ -86,7 +86,7 @@ impl ZoneWeather {
     /// The ambient beds for the live weather, resolved against the zone's own `weat`
     /// container rather than the area container `select_records` uses for the 0x2F records.
     ///
-    /// WeatherTransition.cpp:432-479 `FindPrevSound` enumerates the beds from
+    /// WeatherTransition.cpp WeatherTransition::FindPrevSound `FindPrevSound` enumerates the beds from
     /// `this->WeatherFile` — the `weat/<tag>` resource — so the bed is a property of the
     /// zone's weather, not of the block the player stands on. The area containers ship no
     /// beds at all (`ffxi_dat::weather` harvests them only from `weat`), so routing this
@@ -105,7 +105,7 @@ impl ZoneWeather {
     /// Always false: no zone-indoor flag is sourced in viewer-core yet, so the
     /// `indoor`-keyed halves of the DAT harvest (`WeatherSet::indoor`,
     /// `WeatherSet::indoor_ambient`) stay unreachable. Retail splits on
-    /// `XiZone::zone->PlaceCode` (WeatherTransition.cpp:454-455) — kuluu-dldr.
+    /// `XiZone::zone->PlaceCode` (WeatherTransition.cpp WeatherTransition::FindPrevSound) — kuluu-dldr.
     pub fn indoor(&self) -> bool {
         self.selected.map(|(_, indoor)| indoor).unwrap_or(false)
     }
@@ -166,7 +166,7 @@ fn select_records(
 #[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct WeatherSampleSet;
 
-// research/xim EnvironmentSection.kt:130-172: the 0x2F record carries two distinct
+// research/xim EnvironmentSection.kt getTerrainLightingParams: the 0x2F record carries two distinct
 // LightConfig blocks — model(entity) lighting for actors and terrain(landscape)
 // lighting for zone geometry. sun_moon_system derives this from ZoneWeather.current
 // each frame so the actor-material and zone-material consumers read one source
@@ -176,7 +176,7 @@ pub struct ZoneDirectionalLighting {
     pub valid: bool,
     pub indoors: bool,
 
-    // Single time-blended model light (research/xim EnvironmentSection.kt:206-225
+    // Single time-blended model light (research/xim EnvironmentSection.kt modelLightMix
     // modelLightMix): moon<->sun cross-fade over minutes 355..365 / 1075..1085.
     pub model_dir: Vec3,
     pub model_color: Vec3,
@@ -184,7 +184,7 @@ pub struct ZoneDirectionalLighting {
     pub ambient_entity: Vec3,
 
     // Terrain block feeds the zone material's sun(dir0)+moon(dir1) slots, resolved
-    // from the area the player stands in (ZoneRenderer.cpp:1133-1149).
+    // from the area the player stands in (ZoneRenderer.cpp ZoneRenderer::RenderChunk2).
     pub sun_dir: Vec3,
     pub sun_color: Vec3,
     pub sun_k: f32,
@@ -225,7 +225,7 @@ impl Plugin for WeatherPlugin {
             Update,
             (
                 sample_zone_weather.in_set(WeatherSampleSet),
-                // research/xim EnvironmentManager.kt:399-445: the 0x2F record is the
+                // research/xim EnvironmentManager.kt computeInterpolatedEnvResource: the 0x2F record is the
                 // authoritative ambient base and weather modulates it. Run AFTER
                 // apply_weather_to_ambient_and_fog (which recomputes ambient from the
                 // hardcoded atmosphere seed) so the DAT base is the final word, not the
@@ -281,11 +281,11 @@ pub fn sample_zone_weather(
 }
 
 /// `AreaResourceId` 0 — retail's "no area", which routes every environment
-/// accessor to the zone's own `XiArea` (XiArea.cpp:377, :434).
+/// accessor to the zone's own `XiArea` (XiArea.cpp XiArea::FindAreaByFourCCAndGetAmbient, :434).
 pub const ZONE_WIDE_AREA: AreaResourceId = 0;
 
 /// Tracks the area the player is standing in, the way retail tracks it from the
-/// ground query each frame (CollidableActor.cpp:218-228). Consumed by the
+/// ground query each frame (CollidableActor.cpp CollidableActor::UpdateGroundNormal). Consumed by the
 /// distance fog, the terrain ambient and the terrain diffuse lights; see
 /// [`ZoneWeather::area_current`].
 #[cfg(not(target_arch = "wasm32"))]
@@ -456,10 +456,10 @@ fn capture_default_clear_color(
 //
 // Retail derives no lighting from the skybox — ambient/sun/fog are
 // independently authored channels of the same weather keyframe
-// (XiArea.cpp:140-220 UpdateLightingColorsFromWeather vs XiZone.cpp:149-206
+// (XiArea.cpp XiArea::ApplyWeatherCondition UpdateLightingColorsFromWeather vs XiZone.cpp DrawSky
 // DrawSky). The one sky->scene coupling is this backdrop: outdoors it is the
-// interpolated horizon slice SkyPalette[0] (XiZone.cpp:191
-// SetBackColor(bsarr[0]); xim EnvironmentManager.kt:139-140), indoors the
+// interpolated horizon slice SkyPalette[0] (XiZone.cpp DrawSky
+// SetBackColor(bsarr[0]); xim EnvironmentManager.kt getClearColor), indoors the
 // record's own background color, which is all a windowless interior ever
 // clears to. Fog deliberately stays a touch darker than the horizon band in
 // the authored data, so terrain fading to `fog_landscape` meets a brighter
@@ -542,8 +542,8 @@ pub fn apply_zone_weather(
     let Some(rec) = zone_weather.current else {
         return;
     };
-    // SkeletalMeshActor.cpp:2749 — the fog an actor is drawn through comes from
-    // the actor's own area; ZoneRenderer.cpp:1133-1149 reads the fog, the two
+    // SkeletalMeshActor.cpp SkeletalMeshActor::AdjustLighting — the fog an actor is drawn through comes from
+    // the actor's own area; ZoneRenderer.cpp ZoneRenderer::RenderChunk2 reads the fog, the two
     // weather diffuse lights and the ambient of every block off that block's own
     // area too. Falls back to `rec` when the player is in the zone-wide
     // environment, so a zone with no areas is byte-identical.
@@ -588,12 +588,12 @@ pub fn apply_zone_weather(
         }
     }
 
-    // research/xim EnvironmentManager.kt:399-445: ambient_landscape is the
+    // research/xim EnvironmentManager.kt computeInterpolatedEnvResource: ambient_landscape is the
     // authoritative base; the active weather modifier tints/scales it rather than
     // replacing it (apply_weather_to_ambient_and_fog already ran on the now-overridden
     // atmosphere seed, so this is the final ambient for the frame).
-    // XiArea.cpp:391-408 `GetAmbient(_, 0)` answers the area's own env2 palette[2]
-    // and XiArea.cpp:798-801 takes the diffuse scale from the area's env2.field_18
+    // XiArea.cpp XiArea::GetAmbient `GetAmbient(_, 0)` answers the area's own env2 palette[2]
+    // and XiArea.cpp XiArea::GetWeatherDiffuseLightScale takes the diffuse scale from the area's env2.field_18
     // (record offsets 52 and 68 in ffxi_dat::weather), so both read the block
     // underfoot rather than the zone.
     let [r, g, b, _a] = area_rec.ambient_landscape;
@@ -609,7 +609,7 @@ pub fn apply_zone_weather(
 
     // The ClearColor backdrop is written above by the unconditional
     // zone_clear_color pass (kuluu-f1hk) and stays on the *zone* record: retail's
-    // far color is set by the weather condition (XiArea.cpp:126-136), not by the
+    // far color is set by the weather condition (XiArea.cpp XiArea::ApplyWeatherCondition), not by the
     // block the actor stands on, so an interior's black fog must not paint the
     // horizon the player can still see out of the doorway.
     let [fr, fg, fb, _] = area_rec.fog_landscape;
@@ -742,7 +742,7 @@ mod tests {
 
     #[test]
     fn outdoor_record_paints_the_sky_horizon_not_the_fog_color() {
-        // XiZone.cpp:191 — the outdoor backdrop is the interpolated horizon
+        // XiZone.cpp DrawSky — the outdoor backdrop is the interpolated horizon
         // slice, deliberately distinct from the (darker) authored fog color.
         let mut rec = rec_with_fog([0.5, 0.6, 0.7, 1.0]);
         rec.skybox_colors[0] = [0.8, 0.7, 0.6, 1.0];
@@ -752,7 +752,7 @@ mod tests {
 
     #[test]
     fn indoor_record_paints_its_own_background_color() {
-        // xim EnvironmentManager.kt:139-140 — indoors never sees the dome, so
+        // xim EnvironmentManager.kt getClearColor — indoors never sees the dome, so
         // the backdrop is the record's background color (@76), not the sky.
         let mut rec = rec_with_fog([0.5, 0.6, 0.7, 1.0]);
         rec.indoors = true;
@@ -800,7 +800,7 @@ mod tests {
         sets
     }
 
-    // ZoneRenderer.cpp:1133-1152 — a block bound to an area is drawn with *that*
+    // ZoneRenderer.cpp ZoneRenderer::RenderChunk2 — a block bound to an area is drawn with *that*
     // area's fog and lights, not the zone's; the interiors that carry one ship a
     // darker, sunless environment.
     #[test]
@@ -814,7 +814,7 @@ mod tests {
         assert_eq!(area[0].fog_landscape[0], 0.1);
     }
 
-    // XiArea.cpp:880-892 — FindAreaByFourCC answers the zone when nothing matches,
+    // XiArea.cpp XiArea::FindAreaByFourCC — FindAreaByFourCC answers the zone when nothing matches,
     // and zones do ship placements naming an area with no container (`ent4`).
     #[test]
     fn area_with_no_container_falls_back_to_the_zone_environment() {
@@ -824,7 +824,7 @@ mod tests {
         assert_eq!(got[0].fog_landscape[0], 0.5);
     }
 
-    // WeatherTransition.cpp:432-479 reads the beds off the zone's own `weat` resource, and
+    // WeatherTransition.cpp WeatherTransition::FindPrevSound reads the beds off the zone's own `weat` resource, and
     // ffxi_dat harvests them from nowhere else, so walking into a modelled sub-area must not
     // take the bed away with the fog.
     #[test]
@@ -856,10 +856,10 @@ mod tests {
         );
     }
 
-    // ZoneRenderer.cpp:1133-1149 — the ambient a block is drawn with is
-    // `positionedBlock->Area->GetAmbient(_, 0)` (XiArea.cpp:391-408, env2
+    // ZoneRenderer.cpp ZoneRenderer::RenderChunk2 — the ambient a block is drawn with is
+    // `positionedBlock->Area->GetAmbient(_, 0)` (XiArea.cpp XiArea::GetAmbient, env2
     // ColorPalette[2]), and the diffuse scale it is lit against is that area's
-    // env2.field_18 (XiArea.cpp:798-801). Walking into an area must therefore move
+    // env2.field_18 (XiArea.cpp XiArea::GetWeatherDiffuseLightScale). Walking into an area must therefore move
     // the ambient off the zone's values, not just the fog.
     #[test]
     fn ambient_follows_the_area_the_player_stands_in() {

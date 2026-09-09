@@ -5,24 +5,24 @@
 //! (research/XIClient/src/XIClient/include/Rendering/ZoneRenderer.h ZoneRenderer MAX_ZONE_LOAD_COUNT,
 //! `MAX_ZONE_LOAD_COUNT = 2`): the main zone plus whichever sub-area the player
 //! stands in, loaded by DAT index in `ZoneRenderer::PreDraw`
-//! (ZoneRenderer.cpp:896-903). While that block is up, `SetRenderTypes`
-//! (ZoneRenderer.cpp:619-641) demotes every placement whose
+//! (ZoneRenderer.cpp ZoneRenderer::PreDraw). While that block is up, `SetRenderTypes`
+//! (ZoneRenderer.cpp ZoneRenderer::SetRenderTypes) demotes every placement whose
 //! [`MmbPlacement::sub_area_link`] equals the active id to a RenderType the draw
 //! passes skip, and the collision manager drops the matching collision objects
-//! (CollisionManager.cpp:146) — the shell disappears in both senses.
+//! (CollisionManager.cpp CollisionManager::KO_CharaCollision) — the shell disappears in both senses.
 
 use crate::mzb::MmbPlacement;
 use crate::zone_interaction::{self, ZoneInteraction};
 use crate::Result;
 
-/// ZoneRenderer.cpp:899-901 — the sub-area's DAT index is its id put through the
-/// same file-table offsets `LoadZoneFile` (ZoneRenderer.cpp:805-807) applies to a
+/// ZoneRenderer.cpp ZoneRenderer::PreDraw — the sub-area's DAT index is its id put through the
+/// same file-table offsets `LoadZoneFile` (ZoneRenderer.cpp ZoneRenderer::LoadZoneFile) applies to a
 /// zone id. research/cexi-docs/zone/subareas.md "3. Resolving the interior DAT" states the same pair.
 pub const SUB_AREA_FILE_ID_OFFSET: u32 = 0x64;
 pub const SUB_AREA_FILE_ID_OFFSET_HIGH: u32 = 0x1_44F7;
 
-/// Which offset applies. cexi-docs subareas.md:99-100 puts the split here; XIClient's
-/// decompiled predicate (`>= 700 || >= 600`, ZoneRenderer.cpp:900) is a collapsed
+/// Which offset applies. cexi-docs subareas.md "3. Resolving the interior DAT" puts the split here; XIClient's
+/// decompiled predicate (`>= 700 || >= 600`, ZoneRenderer.cpp ZoneRenderer::PreDraw) is a collapsed
 /// two-way compare and so is not bit-level authority. The retail install narrows
 /// the boundary to `(0x24E, 0x271]` — of the 280 sub-area ids its zone DATs
 /// declare, every one of the 264 at or below `0x24E` resolves to an MZB-carrying
@@ -103,7 +103,7 @@ impl SubAreaShell {
 /// interior while the player is still in the doorway.
 pub const SUB_AREA_SHELL_CLEAR_MARGIN: f32 = 8.0;
 
-/// Retail's `CollisionMng.field_4` (`-1` = outdoors, ZoneRenderer.cpp:172) kept as
+/// Retail's `CollisionMng.field_4` (`-1` = outdoors, ZoneRenderer.cpp ZoneRenderer::ZoneRenderer) kept as
 /// state over a stream of player positions, because it cannot be a pure function of
 /// position: of the 334 sub-area triggers the shipped zones declare, none lies
 /// inside its own interior (205 straddle it, 129 sit wholly outside), so a
@@ -311,8 +311,8 @@ mod tests {
         assert!(!t.contains([100.0, -5.0, 51.1]), "past half of size.z");
     }
 
-    /// Pins the yaw convention: RidManager.cpp:109 rotates by `-orientation.y`
-    /// with XIClient's row-vector `RotateY` (Matrix4.cpp:167-177), so the box's
+    /// Pins the yaw convention: RidManager.cpp RidManager::Add rotates by `-orientation.y`
+    /// with XIClient's row-vector `RotateY` (Matrix4.cpp Matrix4::RotateY), so the box's
     /// local +x runs along `(cos y, 0, -sin y)` in zone space.
     #[test]
     fn yaw_rotates_the_box_the_way_retail_does() {
@@ -326,7 +326,7 @@ mod tests {
     }
 
     /// Retail divides by `size` rather than comparing against half of it
-    /// (RidManager.cpp:116-121), so a mirrored extent keeps the same volume
+    /// (RidManager.cpp RidManager::Add), so a mirrored extent keeps the same volume
     /// instead of collapsing the box to nothing.
     #[test]
     fn a_mirrored_extent_still_bounds_the_box() {

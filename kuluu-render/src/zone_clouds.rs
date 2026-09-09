@@ -22,7 +22,7 @@ use crate::graphics_settings::GraphicsSettings;
 use crate::scheduler_runtime::RETAIL_FPS;
 use crate::zone_texture::{decoded_sky_texture_to_image, TextureQuality};
 
-// research/xim EnvironmentManager.kt:453-515 updateWeatherEffects reads weat/<type>/.
+// research/xim EnvironmentManager.kt updateWeatherEffects reads weat/<type>/.
 // Only the cld1/cld2 camera-follow canopies are drawn here; the sun (sun1, attach=0xE)
 // is the single additive SunDisc in sun_moon.rs, so it shines through these clouds
 // rather than being a second, opaque blend mesh fighting it.
@@ -41,7 +41,7 @@ use crate::zone_texture::{decoded_sky_texture_to_image, TextureQuality};
 const CLOUD_RIM_MARGIN: f32 = 100.0;
 pub const CLOUD_MIN_RIM: f32 = crate::skybox::SKYBOX_RADIUS - CLOUD_RIM_MARGIN;
 
-// research/xim EnvironmentManager.kt:351-369 switchWeather default 3.33s cross-fade
+// research/xim EnvironmentManager.kt switchWeather default 3.33s cross-fade
 // between the old and new weat/<type>/ effect sets on a 0x0057 weather change.
 const WEATHER_FADE_SECS: f32 = 3.33;
 
@@ -56,7 +56,7 @@ pub(crate) const CLOUD_CANOPY_GENERATOR_NAMES: [[u8; 4]; 2] = [*b"cld1", *b"cld2
 #[derive(Component)]
 pub struct CloudMesh;
 
-// research/xim ParticleUpdaters.kt:172-183 ClockValueUpdater: the cloud/sun mesh RGB
+// research/xim ParticleUpdaters.kt ClockValueUpdater: the cloud/sun mesh RGB
 // (kcr1/kcg1/kcb1, ksr1/ksg1/ksb1) and alpha multiplier are 0x19 keyframe curves
 // sampled at the Vana full-day fraction. White / unit-alpha defaults are no-ops.
 #[derive(Clone, Default)]

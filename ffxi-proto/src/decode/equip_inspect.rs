@@ -98,7 +98,7 @@ impl EquipInspectGeneral {
     }
 
     /// The equipped linkshell's name, or empty when the target wears no pearl
-    /// (LSB leaves `sComLinkName` zeroed — 0x0c9_equip_inspect_general.cpp:36-42).
+    /// (LSB leaves `sComLinkName` zeroed — 0x0c9_equip_inspect_general.cpp GENERAL::GENERAL).
     pub fn linkshell_name(&self) -> String {
         crate::linkshell_name::decode(&self.linkshell_name_raw)
     }
@@ -124,7 +124,7 @@ pub struct EquipInspectEquipment {
 
 impl EquipInspectEquipment {
     pub(crate) const MAX_ITEMS: usize = 8;
-    // SAVE_EQUIP_KIND_END, 0x0c9_equip_inspect_equipment.h:46
+    // SAVE_EQUIP_KIND_END, 0x0c9_equip_inspect_equipment.h
     pub const SLOT_COUNT: usize = 16;
     const UNIQUE_NO_OFFSET: usize = 0;
     const ACT_INDEX_OFFSET: usize = 4;
@@ -176,7 +176,7 @@ mod equip_inspect_tests {
     use super::*;
 
     // GENERAL body is sizeof(PacketData) = 80 bytes
-    // (0x0c9_equip_inspect_general.h:38-60; no setSize override).
+    // (0x0c9_equip_inspect_general.h GP_SERV_COMMAND_EQUIP_INSPECT PacketData; no setSize override).
     fn equip_inspect_general_body() -> Vec<u8> {
         let mut buf = vec![0u8; 80];
         buf[0..4].copy_from_slice(&0x0104_00D2u32.to_le_bytes()); // UniqNo
@@ -217,7 +217,7 @@ mod equip_inspect_tests {
 
     #[test]
     fn equip_inspect_equipment_reads_checkitem_batch() {
-        // Final batch sized 8 + 28*count (0x0c9_equip_inspect_equipment.cpp:100).
+        // Final batch sized 8 + 28*count (0x0c9_equip_inspect_equipment.cpp EQUIPMENT::EQUIPMENT).
         let items: [(u16, u8); 3] = [(17440, 0), (12511, 4), (13465, 9)];
         let mut buf = vec![0u8; 8 + EquipInspectEquipment::ITEM_STRIDE * items.len()];
         buf[0..4].copy_from_slice(&0x0104_00D2u32.to_le_bytes());
@@ -248,7 +248,7 @@ mod equip_inspect_tests {
 
     #[test]
     fn equip_inspect_equipment_full_batch_is_232_bytes() {
-        // 8 + sizeof(checkitem_t)*8 (0x0c9_equip_inspect_equipment.cpp:89).
+        // 8 + sizeof(checkitem_t)*8 (0x0c9_equip_inspect_equipment.cpp EQUIPMENT::EQUIPMENT).
         let mut buf = vec![0u8; 232];
         buf[6] = 0x03;
         buf[7] = EquipInspectEquipment::MAX_ITEMS as u8;
@@ -268,7 +268,7 @@ mod equip_inspect_tests {
     #[test]
     fn equip_inspect_empty_final_batch_decodes_zero_items() {
         // EquipCount can be 0 in the final packet; size stays >= 8 + one stride
-        // (std::max<uint8>(count, 1), 0x0c9_equip_inspect_equipment.cpp:100).
+        // (std::max<uint8>(count, 1), 0x0c9_equip_inspect_equipment.cpp EQUIPMENT::EQUIPMENT).
         let mut buf = vec![0u8; 8 + EquipInspectEquipment::ITEM_STRIDE];
         buf[6] = 0x03;
         let EquipInspect::Equipment(eq) = EquipInspect::decode(&buf).expect("decode") else {

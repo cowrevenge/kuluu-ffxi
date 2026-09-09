@@ -524,9 +524,6 @@ pub fn update_nameplate_billboards_system(
         {
             continue;
         }
-        // (status is part of the key: a worm that surfaces or dives behind the
-        // camera re-rasters on this frame even though nothing else in the key
-        // moved — see RasterKey::status.)
         let want = RasterKey {
             text: np.base_name.clone(),
             ..key
@@ -693,7 +690,7 @@ fn text_line_height_px(font: &FontArc, px: f32) -> u32 {
 const ICON_TRAILING_SCALE: f32 = 0.8;
 const ICON_TRAILING_ADVANCE: f32 = 0.625;
 const ICON_TAIL_SCALE: f32 = 0.5;
-// CXiActorNameDraw.cpp:366-367 — the tail glyph is nudged back over the star.
+// CXiActorNameDraw.cpp DrawActorNameText — the tail glyph is nudged back over the star.
 const ICON_TAIL_OFFSET_UNITS: f32 = -2.0;
 // Retail boxes the status icons at 15 units against the 8-unit line
 // (NAME_LINE_HEIGHT_UNITS), which lands near 1.5x the cap height on the bundled
@@ -701,7 +698,7 @@ const ICON_TAIL_OFFSET_UNITS: f32 = -2.0;
 // NAMEPLATE_LEGIBILITY_SCALE — shrinking the whole icon run uniformly, so
 // icon-to-icon proportions and advances stay retail's.
 const ICON_DRAW_SCALE: f32 = 0.75;
-// CXiActorNameDraw.cpp:623 — the icons' alpha runs through D3DTOP_MODULATE4X
+// CXiActorNameDraw.cpp CXiActorNameDraw::OnMove — the icons' alpha runs through D3DTOP_MODULATE4X
 // against a 0x80 diffuse, i.e. doubled.
 const ICON_ALPHA_MODULATE: u16 = 2;
 
@@ -715,7 +712,7 @@ struct IconPlacement {
     height_px: f32,
 }
 
-/// Retail's marker layout pass (CXiActorNameDraw.cpp:342-376), reduced to the
+/// Retail's marker layout pass (CXiActorNameDraw.cpp DrawActorNameText), reduced to the
 /// icon run that prefixes the name. Returns the placements and the pen advance
 /// the name text starts after.
 ///
@@ -944,7 +941,7 @@ fn rasterize_plate(
                 continue;
             };
             // Only the linkshell pearl keeps a tint; retail forces every other
-            // icon to the neutral diffuse (CXiActorNameDraw.cpp:404-407).
+            // icon to the neutral diffuse (CXiActorNameDraw.cpp DrawActorNameText).
             let tint = if placement.code == crate::nameplate_marker::glyph::LINKSHELL {
                 linkshell_tint
             } else {
@@ -1048,7 +1045,7 @@ fn premultiply_linear(pixels: &mut [u8]) {
 
 /// Scale one icon sprite into the plate and alpha-blend it over what is already
 /// there. Retail filters these glyphs linearly
-/// (CXiActorNameDraw.cpp:618-619), so the resample is bilinear.
+/// (CXiActorNameDraw.cpp CXiActorNameDraw::OnMove), so the resample is bilinear.
 #[allow(clippy::too_many_arguments)]
 fn blit_icon(
     pixels: &mut [u8],

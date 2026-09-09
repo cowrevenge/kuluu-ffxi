@@ -8,7 +8,7 @@ const FLAGS_OFFSET: usize = 0x0C;
 
 // research/XIClient/src/XIClient/source/World/Generator/Effects/CYySoundElem.cpp CYySoundElem::VirtElem1
 // `IsNever()` == `field_3C & 0x80000000`, which is what makes a cue a loop rather than
-// a one-shot: CYyGenerator.cpp:1169-1171 unlinks the generator when it is set.
+// a one-shot: CYyGenerator.cpp CYyGenerator::ElemGenerate unlinks the generator when it is set.
 const SEP_FLAG_LOOP: u32 = 0x8000_0000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -50,7 +50,7 @@ impl Sep {
 }
 
 // research/XIClient/src/XIClient/source/Resource/Derived/CYySepRes.cpp CYySepRes::CheckFourCC
-// `CheckFourCC` plus FileResource.cpp:630-641 `GetActivateTime` as one predicate: four
+// `CheckFourCC` plus FileResource.cpp FileResource::GetActivateTime `GetActivateTime` as one predicate: four
 // ASCII digits with the HHMM tens digits bounded, then hour = n1 + 10*n0 and
 // minute = n3 + 10*n2. Names failing it are not time buckets at all — they are the
 // payloads of the sibling sound generators (`thnd`, `2107`), and 125 shipped Seps are

@@ -15,7 +15,7 @@ const ENTRY_LEN: usize = 64;
 
 const POSITION_OFFSET: usize = 0x00;
 /// Where XIM reads the x component of a rotation vec3
-/// (ZoneInteractionSection.kt:51-113) the retail DATs hold an integer: `0` in 350
+/// (ZoneInteractionSection.kt ZoneInteractionSection) the retail DATs hold an integer: `0` in 350
 /// of the 370 shipped `m`-rects and 500..558 in the other 20. See
 /// [`ZoneInteraction::rect_class`].
 const RECT_CLASS_OFFSET: usize = 0x0C;
@@ -31,7 +31,7 @@ const ELEVATOR_BOTTOM_OFFSET: usize = 0x34;
 const ELEVATOR_TOP_OFFSET: usize = 0x36;
 
 /// Elevator offsets are fixed-point 1/256 y deltas from `position[1]`
-/// (ZoneInteractionSection.kt:89-90).
+/// (ZoneInteractionSection.kt read ev0).
 const ELEVATOR_Y_SCALE: f32 = 256.0;
 
 /// Retail scales a rect's local space by `1/size` and accepts the result on
@@ -44,7 +44,7 @@ const UNIT_BOX_HALF_EXTENT: f32 = 0.5;
 pub const MOG_HOUSE_PREFIX_CLASSIC: &str = "zmr";
 pub const MOG_HOUSE_PREFIX_WOTG: &str = "zms";
 
-/// The [`ZoneInteraction::rect_class`] `RidManager::Add` (RidManager.cpp:100-122)
+/// The [`ZoneInteraction::rect_class`] `RidManager::Add` (RidManager.cpp)
 /// puts in the hit-check array; every other class it drops.
 pub const RECT_CLASS_HIT_CHECKED: u32 = 0;
 
@@ -63,7 +63,7 @@ pub struct ZoneInteraction {
     pub rect_class: u32,
     /// Euler radians, applied ZYX. Component 0 is always `0.0`: those bytes are
     /// [`ZoneInteraction::rect_class`], and retail rotates the box by
-    /// `-orientation.y` alone (RidManager.cpp:109).
+    /// `-orientation.y` alone (RidManager.cpp RidManager::Add).
     pub orientation: [f32; 3],
     /// FULL extents: x,z horizontal, y vertical; box vertically centered on `position`.
     pub size: [f32; 3],
@@ -80,7 +80,7 @@ pub struct ZoneInteraction {
 }
 
 impl ZoneInteraction {
-    /// Classifiers mirror research/xim ZoneInteractionSection.kt:29-47.
+    /// Classifiers mirror research/xim ZoneInteractionSection.kt isZoneLine.
     pub fn is_zone_line(&self) -> bool {
         self.source_id.starts_with("z") && self.dest_id.is_some()
     }
@@ -136,7 +136,7 @@ impl ZoneInteraction {
     }
 
     /// Point-in-box in FFXI zone space. `RidManager::Add`
-    /// (RidManager.cpp:100-122) builds the rect's inverse as
+    /// (RidManager.cpp RidManager::Add) builds the rect's inverse as
     /// `T(-position) · RotateY(-orientation.y) · S(1/size)` and the hit checks
     /// accept the transformed point on `[-0.5, 0.5]` — so only the yaw of
     /// [`ZoneInteraction::orientation`] shapes the box, and [`ZoneInteraction::size`]

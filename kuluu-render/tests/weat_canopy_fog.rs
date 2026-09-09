@@ -48,7 +48,7 @@ fn canopy_fog_enabled(tag: &ChunkNode, name: &[u8; 4]) -> Option<bool> {
         .map(|def| def.fog_enabled)
 }
 
-/// research/XIClient CMoElem.cpp:542-543 gates fog on a per-generator bit, so the fix for
+/// research/XIClient CMoElem.cpp CMoElem::PrepDX gates fog on a per-generator bit, so the fix for
 /// kuluu-grbo is NOT "sky layers skip fog" — the overcast haze sheet is deliberately fogged.
 /// Blanket-exempting the canopy would break exactly the weathers the bead reports.
 #[test]

@@ -55,9 +55,11 @@ pub mod glyph {
     /// Monstrosity marker — `MonstrosityFlags != 0` in the Model block.
     pub const MONSTROSITY: u8 = 0xAB;
     /// The job-master star, drawn as a pair with its tail. Retail keys it off
-    /// `Flags3.LfgMasterFlag` (`AUDIT_140.BIT_3`, research/XIClient/.../s2c/
-    /// 0x00D.cpp:159), which LSB hardcodes to 0 (char_update.cpp:339) — on this
-    /// server the star comes from `Flags4.JobMasterFlag` instead.
+    /// `Flags3.LfgMasterFlag` (`AUDIT_140.BIT_3`,
+    /// research/XIClient/src/XIClient/source/Game/Net/Packets/s2c/0x00D.cpp RecvCharPc),
+    /// which LSB hardcodes to 0 (vendor/server/src/map/packets/char_update.cpp
+    /// CCharUpdatePacket::updateWith) — on this server the star comes from
+    /// `Flags4.JobMasterFlag` instead.
     pub const JOB_MASTER: u8 = 0xAC;
     /// The half-scale companion glyph retail appends after JOB_MASTER
     /// (`DrawActorNameText`).

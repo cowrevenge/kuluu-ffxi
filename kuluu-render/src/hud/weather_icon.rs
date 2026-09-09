@@ -129,7 +129,7 @@ pub fn update_weather_icon(
     };
 
     // Retail shows no indicator at all for the non-elemental weathers
-    // (fine/sunshine/clouds/fog draw nothing, research/xim Compass.kt:70-73).
+    // (fine/sunshine/clouds/fog draw nothing, research/xim Compass.kt drawWeather).
     let Some((index, count)) = weather_sprite(weather) else {
         if panel.display != Display::None {
             panel.display = Display::None;

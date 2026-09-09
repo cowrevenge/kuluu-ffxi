@@ -219,23 +219,23 @@ pub mod pbx {
     pub mod result {
         pub const OK: u8 = 0x01;
         pub const PENDING: u8 = 0x02;
-        /// TakeItemFromCell with a full inventory (dboxutils.cpp:638).
+        /// TakeItemFromCell with a full inventory (dboxutils.cpp dboxutils::TakeItemFromCell).
         pub const INVENTORY_FULL: u8 = 0xB9;
-        /// TakeItemFromCell transaction failure (dboxutils.cpp:686).
+        /// TakeItemFromCell transaction failure (dboxutils.cpp std::runtime_error).
         pub const TAKE_FAILED: u8 = 0xBA;
-        /// SendNewItems/ReturnToSender transaction failure (dboxutils.cpp:477,616).
+        /// SendNewItems/ReturnToSender transaction failure (dboxutils.cpp std::runtime_error,616).
         pub const DB_ERROR: u8 = 0xEB;
-        /// ConfirmNameBeforeSending: recipient account not found (dboxutils.cpp:751).
+        /// ConfirmNameBeforeSending: recipient account not found (dboxutils.cpp dboxutils::ConfirmNameBeforeSending).
         pub const NO_SUCH_CHAR: u8 = 0xFB;
-        /// Recipient's inflight queue at capacity (dboxutils.cpp:236-237,582-583).
+        /// Recipient's inflight queue at capacity (dboxutils.cpp dboxutils::SendConfirmation,582-583).
         pub const RECIPIENT_FULL: u8 = 0xFE;
         /// CancelSendingItem fallback, pushed as -1: "Delivery orders are
-        /// currently backlogged." (dboxutils.cpp:335).
+        /// currently backlogged." (dboxutils.cpp std::runtime_error).
         pub const BACKLOGGED: u8 = 0xFF;
     }
 
     // GP_POST_BOX_STATE::Stat values, vendor/server/src/map/packets/s2c/
-    // 0x04b_pbx_result.cpp:90-117.
+    // 0x04b_pbx_result.cpp GP_SERV_COMMAND_PBX_RESULT::GP_SERV_COMMAND_PBX_RESULT.
     pub mod stat {
         /// Outgoing item staged in a slot, not yet dispatched (Set).
         pub const STAGED: u32 = 0x01;
@@ -348,7 +348,7 @@ pub mod action_id {
 pub mod eventucoff_mode {
     // GP_SERV_COMMAND_EVENTUCOFF_MODE, vendor/server/src/map/packets/s2c/0x052_eventucoff.h.
     // CancelEvent packs the cancelled event id in the high bits
-    // (0x052_eventucoff.cpp:30-34), so match on the low byte.
+    // (0x052_eventucoff.cpp GP_SERV_COMMAND_EVENTUCOFF::GP_SERV_COMMAND_EVENTUCOFF), so match on the low byte.
     pub const MODE_MASK: u32 = 0xFF;
     pub const CANCEL_EVENT: u32 = 2;
     pub const FISHING: u32 = 4;
@@ -374,7 +374,7 @@ pub mod emote {
     pub const HELM_ONLY: [u8; 3] = [40, 41, 42];
 
     /// /bell note Param range (vendor/server/src/map/packets/c2s/
-    /// 0x05d_motion.cpp:82: `Param < 0x06 || Param > 0x1e` is rejected).
+    /// 0x05d_motion.cpp GP_CLI_COMMAND_MOTION::process: `Param < 0x06 || Param > 0x1e` is rejected).
     pub const BELL_NOTE_MIN: u16 = 0x06;
     pub const BELL_NOTE_MAX: u16 = 0x1E;
 
@@ -563,7 +563,7 @@ pub mod s2c {
 
     // GP_SERV_COMMAND_BAZAAR_LIST, vendor/server/src/map/packets/s2c/0x105_bazaar_list.h.
     // One priced row of the bazaar we are browsing; re-pushed per row after each
-    // purchase (0x106_bazaar_buy.cpp:198).
+    // purchase (0x106_bazaar_buy.cpp GP_CLI_COMMAND_BAZAAR_BUY::process).
     pub const BAZAAR_LIST: u16 = 0x105;
 
     // GP_SERV_COMMAND_BAZAAR_BUY, vendor/server/src/map/packets/s2c/0x106_bazaar_buy.h.

@@ -279,14 +279,16 @@ run_comments() {
   comments=$(printf '%s\n' "$lines" | grep -E '//' | grep -vE 'https?://' || true)
 
   local hits
-  hits=$(printf '%s\n' "$comments" | grep -E "$CR_RE_CITE_LINE" || true)
+  # Match only the comment text: in tree mode each line carries grep's own
+  # file:line: prefix, which would otherwise read as a pinned citation.
+  hits=$(printf '%s\n' "$comments" | grep -vE "$CR_RE_VERSIONED" | grep -E "//.*$CR_RE_CITE_LINE" || true)
   if [ -n "$hits" ]; then
     echo "checks: comments - citation pinned to a line number; anchor on the symbol (path + function/struct/enumerator):" >&2
     printf '%s\n' "$hits" | cut -c1-200 | sed 's/^/  /' >&2
     bad=1
   fi
 
-  hits=$(printf '%s\n' "$comments" | grep -E "$CR_RE_ELIDED_PATH|$CR_RE_FINDING_ID" || true)
+  hits=$(printf '%s\n' "$comments" | grep -E "//.*($CR_RE_ELIDED_PATH|$CR_RE_FINDING_ID)" || true)
   if [ -n "$hits" ]; then
     echo "checks: comments - citation nobody can open: an elided .../ path or an out-of-tree finding id. Cite the full in-tree path + symbol:" >&2
     printf '%s\n' "$hits" | cut -c1-200 | sed 's/^/  /' >&2
@@ -307,8 +309,15 @@ run_comments() {
         root=$(printf '%s' "$path" | cut -d/ -f1-2)
         [ -d "$root" ] && [ -n "$(ls -A "$root" 2>/dev/null)" ] || continue ;;
     esac
-    [ -e "$path" ] || missing+="  $path"$'\n'
-  done < <(printf '%s\n' "$comments" | grep -oE '(vendor|research|docs|\.agents)/[A-Za-z0-9._/-]+' | sort -u)
+    case "$path" in *..*) continue ;; esac
+    [ -e "$path" ] && continue
+    # A path wrapped at a line break, or one with spaces in it, reaches here
+    # truncated; accept it when the truncation is a prefix of a real entry.
+    [ -z "$(ls -d "$path"* 2>/dev/null)" ] || continue
+    missing+="  $path"$'\n'
+  done < <(printf '%s\n' "$comments" \
+    | grep -oE '(^|[^A-Za-z0-9._/-])(vendor|research|docs|\.agents)/[A-Za-z0-9._/-]+' \
+    | sed -E 's#^[^A-Za-z0-9._/-]##' | sort -u)
   if [ -n "$missing" ]; then
     echo "checks: comments - cited path does not exist in this tree (moved upstream, a private note, or the retired docs/ tree); fix or drop the citation:" >&2
     printf '%s' "$missing" >&2

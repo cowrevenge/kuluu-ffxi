@@ -18,7 +18,7 @@ fn lookup(table: &[(u16, u16)], id: u16) -> Option<u16> {
 
 // Every completion effect is `<table base> + animation index`, and s2c 0x028 carries that index
 // per result — LSB fills it straight from the action's own animation column (magic_state.cpp,
-// charentity.cpp:1602/1923). The scraped `*_ANIMATION` tables hold the same column keyed by
+// charentity.cpp CCharEntity::OnWeaponSkillFinished/1923). The scraped `*_ANIMATION` tables hold the same column keyed by
 // action id, and stand in only when a truncated body carried no result to read it from.
 //
 // The action id is NOT the index. research/xim AbilityTable.kt getAnimationId adds

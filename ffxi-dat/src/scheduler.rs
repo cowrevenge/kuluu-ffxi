@@ -4,25 +4,25 @@ use crate::{DatError, Result};
 // fallback for chunks whose section table reads implausibly — see `effect_section_start`.
 pub const SCHEDULER_HEADER_LEN: usize = 64;
 
-// research/xim EffectRoutineParser.kt:41-57 — after four zero dwords the routine header holds
+// research/xim EffectRoutineParser.kt read — after four zero dwords the routine header holds
 // three u32 section offsets (section 1 = control-flow setup, 2 = the effect list, 3 = trailer),
 // each measured from the CHUNK header, which begins `CHUNK_HEADER_LEN` before `body`.
 const SECTION_TABLE_OFFSET: usize = 0x10;
 const SECTION2_SLOT: usize = SECTION_TABLE_OFFSET + 4;
 const CHUNK_HEADER_LEN: usize = 0x10;
-// Three section offsets plus `totalDelay` (EffectRoutineParser.kt:43-46).
+// Three section offsets plus `totalDelay` (EffectRoutineParser.kt read sec1Offset).
 const SECTION_TABLE_LEN: usize = 0x10;
 
-// research/xim EffectRoutineParser.kt:64 — `numInputs = (unkCombo and 0x1F) - 1`, counted from
+// research/xim EffectRoutineParser.kt — `numInputs = (unkCombo and 0x1F) - 1`, counted from
 // the dword that carries the opcode, so the stage spans `unkCombo & 0x1F` dwords in total.
 const STAGE_LENGTH_MASK: u16 = 0x1F;
 
-// research/xim EffectRoutineParser.kt:79,96-98 / :275-285.
+// research/xim EffectRoutineParser.kt parseSection,96-98 / :275-285.
 const END_ROUTINE_OPCODE: u8 = 0x00;
 const RANDOM_BLOCK_OPEN: u8 = 0x3D;
 const RANDOM_BLOCK_CLOSE: u8 = 0x3E;
 
-// research/xim EffectRoutineParser.kt:408-427 — 0x64/0x67 ControlFlowBranch, 0x69/0x6A
+// research/xim EffectRoutineParser.kt parseSection2 — 0x64/0x67 ControlFlowBranch, 0x69/0x6A
 // ControlFlowBlock, 0x6B ControlFlowCondition.
 const CONTROL_FLOW_BRANCH_TRUE: u8 = 0x64;
 const CONTROL_FLOW_BRANCH_FALSE: u8 = 0x67;
@@ -30,7 +30,7 @@ const CONTROL_FLOW_BLOCK_OPEN: u8 = 0x69;
 const CONTROL_FLOW_BLOCK_CLOSE: u8 = 0x6A;
 const CONTROL_FLOW_CONDITION: u8 = 0x6B;
 
-// research/xim EffectRoutineParser.kt:92-93 — parseSection2 reads delay(+4) and duration(+6)
+// research/xim EffectRoutineParser.kt — parseSection2 reads delay(+4) and duration(+6)
 // for EVERY opcode before dispatching, so the shortest stage the encoding admits is 8 bytes.
 // Opcodes that take an id argument (+8) are 12 bytes or longer.
 const STAGE_HEADER_LEN: usize = 8;
@@ -39,7 +39,7 @@ const DELAY_OFFSET: usize = 4;
 const DURATION_OFFSET: usize = 6;
 const ID_OFFSET: usize = 8;
 
-// research/xim EffectRoutineParser.kt:115-130: after id(+8), a zero32(+12) and two floats
+// research/xim EffectRoutineParser.kt parseSection2: after id(+8), a zero32(+12) and two floats
 // (+16,+20), the 0x05 motion payload carries transitionIn(+24), a zero u16(+26),
 // transitionOut(+28), maxLoop(+30).
 const MOTION_PAYLOAD_LEN: usize = 32;
@@ -128,7 +128,7 @@ pub struct SchedulerStage {
 
     pub id: [u8; 4],
 
-    // research/xim EffectRoutineParser.kt:115-130 (opcode 0x05). Half-frame units (divide
+    // research/xim EffectRoutineParser.kt parseSection2 (opcode 0x05). Half-frame units (divide
     // by 2 for real frames). Zero when the stage is shorter than the motion payload.
     pub max_loops: u16,
     pub transition_in: u16,
@@ -144,13 +144,13 @@ pub struct SchedulerStage {
     // so `id` is `NO_STAGE_ID` there for the same reason as a model transform.
     pub screen_color: Option<ScreenColor>,
 
-    // research/xim EffectRoutineParser.kt:275-285,553-559 — stages between a 0x3D and its 0x3E
+    // research/xim EffectRoutineParser.kt parseSection2,553-559 — stages between a 0x3D and its 0x3E
     // are children of one RandomChildRoutine, not siblings on the timeline: retail runs exactly
     // one of them per activation (`vatk`'s four atk1..atk4 grunts). Members of the same block
     // share a group index; `None` is an ordinary unconditional stage.
     pub random_group: Option<u16>,
 
-    // research/xim EffectRoutineInstance.kt:418-431 findResource — a stage's ids resolve against
+    // research/xim EffectRoutineInstance.kt appendChildSequences findResource — a stage's ids resolve against
     // `resource.localDir`, the chunk directory the routine itself lives in, BEFORE any wider
     // scope. Retail relies on that: ROM/0/0.DAT holds four generators named `g010` in four
     // different directories, and only the one beside the routine that names it is meant. Carried
@@ -188,7 +188,7 @@ pub enum StageKind {
 
     SubRoutine,
 
-    // research/xim EffectRoutineParser.kt:136-140 — LinkedEffectRoutine(useTarget = true): the
+    // research/xim EffectRoutineParser.kt parseSection2 — LinkedEffectRoutine(useTarget = true): the
     // child sequence's source actor is the primary target, so it resolves its ids against the
     // TARGET's resource dirs (the victim's own hit grunt / flinch), not the caster's.
     SubRoutineOnTarget,
@@ -202,7 +202,7 @@ pub enum StageKind {
     Unknown,
 }
 
-// research/xim EffectRoutineParser.kt:64,141-154 — opcode 0x0A is overloaded: a
+// research/xim EffectRoutineParser.kt parseSection numInputs,141-154 — opcode 0x0A is overloaded: a
 // 32-byte stage (length_words 8, XIM numArgs 7) is a Source (caster) sound emitter,
 // while any other length is a LinkedEffectRoutine sub-routine. Disambiguate by length.
 const SOUND_EMITTER_LENGTH_WORDS: usize = 8;
@@ -216,7 +216,7 @@ impl StageKind {
             0x02 => Self::Particle,
             0x03 => Self::SubRoutine,
             0x05 => Self::Motion,
-            // research/xim EffectRoutineParser.kt:136-140.
+            // research/xim EffectRoutineParser.kt parseSection2.
             0x09 => Self::SubRoutineOnTarget,
             0x0A if length_words == SOUND_EMITTER_LENGTH_WORDS => Self::SoundOnCaster,
             0x0A => Self::SubRoutine,
@@ -224,19 +224,19 @@ impl StageKind {
             0x0C if length_words * 4 >= MODEL_TRANSFORM_PAYLOAD_LEN => Self::ModelTranslation,
             0x0D if length_words * 4 >= MODEL_TRANSFORM_PAYLOAD_LEN => Self::ModelRotation,
             0x0F => Self::ScreenColorDrive,
-            // research/xim EffectRoutineParser.kt:253-257 — StopParticleGeneratorRoutine, id =
+            // research/xim EffectRoutineParser.kt parseSection2 — StopParticleGeneratorRoutine, id =
             // the generator DatId to stop (ROM/0/0.DAT `stbk` stops the cast aura's gn10..gn13).
             0x2D => Self::StopParticle,
-            // research/xim EffectRoutineParser.kt:219-222 — DamageCallbackRoutine, the stage the
-            // damage/battle-message callback is invoked on (EffectRoutineInstance.kt:956-959).
+            // research/xim EffectRoutineParser.kt parseSection2 — DamageCallbackRoutine, the stage the
+            // damage/battle-message callback is invoked on (EffectRoutineInstance.kt handleDamageCallbackRoutine).
             // Every spell routine tail-calls a `mdam` sub-routine that holds exactly this stage.
             0x2B => Self::DamageCallback,
-            // research/xim EffectRoutineParser.kt:270-274 — LinkedEffectRoutine with
+            // research/xim EffectRoutineParser.kt parseSection2 — LinkedEffectRoutine with
             // `blocking = true`: the same sub-routine call as 0x03, except the parent stalls
-            // until the child finishes (EffectRoutineInstance.kt:400 `blockers += newSequences`).
+            // until the child finishes (EffectRoutineInstance.kt createChild `blockers += newSequences`).
             0x3B | 0x3C => Self::BlockingSubRoutine,
             0x53 => Self::SoundOnCaster,
-            // research/xim EffectRoutineParser.kt:337 (0x4A -> PlayerOnly) and :405
+            // research/xim EffectRoutineParser.kt parseSection2 (0x4A -> PlayerOnly) and :405
             // (0x60 -> Global): the same sound-emitter payload as 0x0A/0x0B, mixed
             // at the listener instead of at a world position. Both render dry from
             // one client's seat, so they share a kind; `raw_type` keeps them apart
@@ -244,7 +244,7 @@ impl StageKind {
             // fall to `Unknown` and never fire — eight effect DATs in 2800-3300 have
             // no other sound stage and are completely silent.
             0x4A | 0x60 => Self::SoundNonPositional,
-            // research/xim EffectRoutineParser.kt:371-375 — a plain LinkedEffectRoutine, the
+            // research/xim EffectRoutineParser.kt parseSection2 — a plain LinkedEffectRoutine, the
             // form every melee routine uses (`ati0` links the weapon's `skaz` whoosh, `atk0`
             // the race/face `vatk` grunt).
             0x57 => Self::SubRoutine,
@@ -292,7 +292,7 @@ impl Scheduler {
 
         while cursor + 4 <= body.len() {
             let raw_type = body[cursor];
-            // research/xim EffectRoutineParser.kt:63-68 — opcode(8), unkCombo(16), unk0(8); the
+            // research/xim EffectRoutineParser.kt parseSection — opcode(8), unkCombo(16), unk0(8); the
             // stage spans `(unkCombo & 0x1F)` dwords including the opcode dword itself.
             let length_words = (u16::from_le_bytes([body[cursor + 1], body[cursor + 2]])
                 & STAGE_LENGTH_MASK) as usize;
@@ -301,7 +301,7 @@ impl Scheduler {
                 break;
             }
 
-            // research/xim EffectRoutineParser.kt:275-285 — the closer is not a member of the
+            // research/xim EffectRoutineParser.kt parseSection2 — the closer is not a member of the
             // block it ends (`addEffectRoutine` is never called for it), so `open_group` must
             // already be cleared when the stage below is pushed.
             if raw_type == RANDOM_BLOCK_CLOSE {
@@ -319,7 +319,7 @@ impl Scheduler {
                         body[cursor + off + 3],
                     ])
                 };
-                // research/xim EffectRoutineParser.kt:413-418 — ControlFlowBlock is constructed
+                // research/xim EffectRoutineParser.kt parseSection2 — ControlFlowBlock is constructed
                 // with `delay = 0` whatever the bytes say.
                 let delay = match raw_type {
                     CONTROL_FLOW_BLOCK_OPEN | CONTROL_FLOW_BLOCK_CLOSE => 0,
@@ -388,7 +388,7 @@ impl Scheduler {
                     },
                 });
                 // A random block's children are collected into the 0x3D marker rather than
-                // appended to the parent timeline (EffectRoutineParser.kt:553-559), so only
+                // appended to the parent timeline (EffectRoutineParser.kt addEffectRoutine), so only
                 // the marker's own delay advances the parent clock.
                 if open_group.is_none() {
                     running_frame = running_frame.saturating_add(delay as u32);
@@ -399,7 +399,7 @@ impl Scheduler {
                 next_group = next_group.saturating_add(1);
             }
             cursor += stage_bytes;
-            // EffectRoutineParser.kt:79 — opcode 0x00 ends the section; section 3 follows it in
+            // EffectRoutineParser.kt parseSection — opcode 0x00 ends the section; section 3 follows it in
             // the same chunk and would otherwise be misread as more effect stages.
             if raw_type == END_ROUTINE_OPCODE {
                 break;
@@ -675,7 +675,7 @@ mod tests {
         }
     }
 
-    // research/xim EffectRoutineParser.kt:219-222 (0x2B DamageCallbackRoutine) and :270-274
+    // research/xim EffectRoutineParser.kt parseSection2 (0x2B DamageCallbackRoutine) and :270-274
     // (0x3B/0x3C LinkedEffectRoutine with blocking = true, unlike the 0x03 link).
     #[test]
     fn damage_callback_and_blocking_subroutine_opcodes() {
@@ -995,7 +995,7 @@ mod tests {
         assert_eq!(s.stages.len(), 0);
     }
 
-    // research/xim EffectRoutineParser.kt:41-57 — the effect list starts where the section-2
+    // research/xim EffectRoutineParser.kt read — the effect list starts where the section-2
     // offset at body +0x14 says it does. Routines with a populated control-flow section put it
     // at raw 0x3C (body 0x2C); the old fixed 64-byte start read past it and found nothing.
     #[test]
@@ -1018,7 +1018,7 @@ mod tests {
         );
     }
 
-    // research/xim EffectRoutineParser.kt:136-140 (0x09 useTarget) and :371-375 (0x57). Both were
+    // research/xim EffectRoutineParser.kt parseSection2 (0x09 useTarget) and :371-375 (0x57). Both were
     // dropped as Unknown, which is what muted every melee routine's linked sound.
     #[test]
     fn opcode_57_and_09_are_subroutine_links() {
@@ -1034,7 +1034,7 @@ mod tests {
         );
     }
 
-    // research/xim EffectRoutineParser.kt:64 — the stage length is `unkCombo & 0x1F` dwords, so
+    // research/xim EffectRoutineParser.kt parseSection numInputs — the stage length is `unkCombo & 0x1F` dwords, so
     // the high bits of the u16 must not be read as length.
     #[test]
     fn stage_length_masks_the_high_combo_bits() {
@@ -1053,7 +1053,7 @@ mod tests {
         assert_eq!(&s.stages[1].stage.id, b"skaz");
     }
 
-    // research/xim EffectRoutineParser.kt:275-285,553-559 — 0x3D opens a block whose children
+    // research/xim EffectRoutineParser.kt parseSection2,553-559 — 0x3D opens a block whose children
     // are alternatives, not siblings; retail runs exactly one per activation.
     #[test]
     fn random_block_tags_its_children_with_one_group() {
@@ -1093,7 +1093,7 @@ mod tests {
 
     // Retail-byte guard (skips without an install). `daml` in the global effect dir is the hit
     // reaction switch: four `context.hitTypeFlag` cases (research/xim
-    // EffectRoutineInstance.kt:691) whose branch order pins ActionResolution
+    // EffectRoutineInstance.kt resolveControlFlowVariable) whose branch order pins ActionResolution
     // Hit/Miss/Guard/Parry (vendor/server/src/map/enums/action/resolution.h) against the DAT.
     // Parsed to ZERO stages before the section table was read.
     #[test]
@@ -1235,7 +1235,7 @@ mod tests {
         );
     }
 
-    // research/xim EffectRoutineParser.kt:132-134 AnimationLockEffect — an argument-less opcode,
+    // research/xim EffectRoutineParser.kt parseSection2 AnimationLockEffect — an argument-less opcode,
     // so the stage is 8 bytes and carries only delay/duration.
     const ANIMATION_LOCK_OPCODE: u8 = 0x07;
     const ARGLESS_STAGE_WORDS: u8 = (STAGE_HEADER_LEN / 4) as u8;
@@ -1247,7 +1247,7 @@ mod tests {
         b
     }
 
-    // research/xim EffectRoutineParser.kt:92-93 — delay is read for EVERY opcode, so an 8-byte
+    // research/xim EffectRoutineParser.kt parseSection2 — delay is read for EVERY opcode, so an 8-byte
     // argument-less stage still advances the routine clock for the stages after it.
     #[test]
     fn argless_stage_still_advances_the_routine_clock() {
@@ -1315,7 +1315,7 @@ mod tests {
         assert_eq!(ScreenColor { rgba: [0; 4] }.tint(), [0.0; 4]);
     }
 
-    // research/xim EffectRoutineParser.kt:408-412 — ControlFlowBranch takes no argument, so a
+    // research/xim EffectRoutineParser.kt parseSection2 — ControlFlowBranch takes no argument, so a
     // switch is built entirely out of 8-byte stages.
     #[test]
     fn control_flow_is_seen_through_argless_branch_opcodes() {
@@ -1334,7 +1334,7 @@ mod tests {
         assert_eq!(s.stages[1].stage.kind, StageKind::SubRoutineOnTarget);
     }
 
-    // research/xim EffectRoutineParser.kt:413-418 — ControlFlowBlock is built with `delay = 0`.
+    // research/xim EffectRoutineParser.kt parseSection2 — ControlFlowBlock is built with `delay = 0`.
     #[test]
     fn control_flow_block_delay_is_forced_to_zero() {
         let mut body = vec![0u8; SCHEDULER_HEADER_LEN];
@@ -1352,7 +1352,7 @@ mod tests {
         assert_eq!(s.stages[1].frame, 0);
     }
 
-    // research/xim EffectRoutineParser.kt:282-285 — the closer calls no `addEffectRoutine`, so it
+    // research/xim EffectRoutineParser.kt parseSection2 — the closer calls no `addEffectRoutine`, so it
     // is not one of the block's alternatives. Tagged as a member it could be the pick, and the
     // whole block would run nothing.
     #[test]

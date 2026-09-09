@@ -30,7 +30,7 @@ pub fn lookup(id: u16) -> u32 {
 /// Whether the delivery-box send picker should offer this item at all.
 ///
 /// Mirrors dboxutils::AddItemsToBeSent (vendor/server/src/map/utils/
-/// dboxutils.cpp:147): NoDelivery blocks staging unless the item also carries
+/// dboxutils.cpp dboxutils::AddItemsToBeSent): NoDelivery blocks staging unless the item also carries
 /// CanSendAccount — in which case the server still requires the recipient to
 /// be on the sender's account, which only it can verify.
 pub fn deliverable(id: u16) -> bool {

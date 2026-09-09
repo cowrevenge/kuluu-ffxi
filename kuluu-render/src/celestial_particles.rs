@@ -13,7 +13,7 @@ use crate::scheduler_runtime::{parse_action_bytes, ActionAssets};
 use crate::snapshot::{effective_zone_file_id, SceneState};
 use crate::sun_moon::{moon_phase_frame, sun_direction, vana_day_index, DatCelestials, VanaSky};
 
-// research/xim EnvironmentManager.kt:235 `sunMoonDistance = 900f // Measured in E. Saru`.
+// research/xim EnvironmentManager.kt `sunMoonDistance = 900f // Measured in E. Saru`.
 // The celestial billboards ride a sphere of this radius centred on the camera, so their
 // on-screen size is set purely by the generator's own scale and mesh — there is no
 // disc-radius constant on our side.
@@ -82,7 +82,7 @@ fn collect_celestial_defs(
                 continue;
             }
             // A lens-flare generator is Sun-attached too, but it is drawn in screen space
-            // from the projected sun position (research/xim ZoneDrawer.kt:219-245) and is
+            // from the projected sun position (research/xim ZoneDrawer.kt drawLensFlare) and is
             // owned by lens_flare.rs, not by this world-space path.
             if let Ok(Some(def)) = ParticleGeneratorDef::parse(c.data) {
                 if matches!(def.attach_type, AttachType::Sun | AttachType::Moon) {
@@ -269,7 +269,7 @@ impl Plugin for CelestialParticlesPlugin {
 mod tests {
     use super::*;
 
-    // research/xim EnvironmentManager.kt:371-382 — the moon rides the sun's circle offset by
+    // research/xim EnvironmentManager.kt getMoonPosition — the moon rides the sun's circle offset by
     // pi. track_celestial_bodies derives the moon origin as the sun direction negated, which
     // only equals retail's `Vector3f(sin(a+pi), cos(a+pi), 0)` while the sun arc itself stays
     // in the XY plane (no z tilt) and unit-length.

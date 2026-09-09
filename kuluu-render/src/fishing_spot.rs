@@ -115,7 +115,7 @@ mod tests {
     use kuluu_snapshot::SceneSnapshot;
 
     /// vendor/server/sql/fishing_rod.sql fishing_rod 17011 "Ebisu Fishing Rod" and
-    /// fishing_bait.sql:44 "Slice of Bluetail". Both are SKILL_FISHING in
+    /// fishing_bait.sql fishing_bait 16992 "Slice of Bluetail". Both are SKILL_FISHING in
     /// item_weapon.sql, which is what the gate actually reads.
     const ROD: u16 = 17011;
     const BAIT: u16 = 16992;

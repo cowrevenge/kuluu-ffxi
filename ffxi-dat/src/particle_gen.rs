@@ -7,7 +7,7 @@ use crate::{DatError, Result};
 // (which already excludes the 16-byte chunk header, so a ByteReader `sectionStart + X` maps to
 // body index `X - 0x10`):
 //   body[0x00] u16  attachFlags           (XIM reads these two via offsetFromDataStart, i.e. body
-//   body[0x02] u16  additionalAttachFlags  index 0 — ParticleGeneratorParser.kt:21-33)
+//   body[0x02] u16  additionalAttachFlags  index 0 — ParticleGeneratorParser.kt read)
 //   body[0x64] u16  emissionVariance
 //   body[0x66] u16  framesPerEmission - 1
 //   body[0x68] u32  flags (particle count in the low 9 bits, XIM's genFlags in byte 0x69)
@@ -21,15 +21,15 @@ const OPCODE_MASK: u32 = 0xFF;
 pub(crate) const OPCODE_END: u8 = 0x00;
 pub(crate) const OPCODE_STANDARD_SETUP: u8 = 0x01;
 pub(crate) const SIZE_WORDS_MASK: u8 = 0x1F;
-// research/xim ParticleGeneratorSettings.kt:187 — the StandardParticleSetup linked_data_type
+// research/xim ParticleGeneratorSettings.kt LinkedDataType — the StandardParticleSetup linked_data_type
 // (setup byte payload+29) selects the particle's mesh source: 0x0B StaticMesh (a D3M billboard),
 // 0x0E SpriteSheet (a 0x21 flipbook quad). 0x57 Null / 0x47 PointLight and any other value are
 // non-visual particle types and are rejected (parse returns None).
 const LINKED_DATA_STATIC_MESH: u8 = 0x0B;
 const LINKED_DATA_SPRITE_SHEET: u8 = 0x0E;
 
-// research/xim ParticleGeneratorSettings.kt:187 (mesh source) + Particle.kt:72 (the per-particle
-// spriteSheetIndex cursor) + ParticleUpdaters.kt:196-211 (SpriteSheetFrameUpdater advances it over
+// research/xim ParticleGeneratorSettings.kt LinkedDataType (mesh source) + Particle.kt Particle spriteSheetIndex (the per-particle
+// spriteSheetIndex cursor) + ParticleUpdaters.kt (SpriteSheetFrameUpdater advances it over
 // life). StaticMesh binds a D3M; SpriteSheet binds a 0x21 sprite-sheet whose frames flipbook
 // across the particle's lifetime.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -38,7 +38,7 @@ pub enum ParticleMeshKind {
     StaticMesh,
     SpriteSheet,
 }
-// research/xim ParticleGeneratorSettings.kt:154 `enum class AttachType(val flag: Int)` — which
+// research/xim ParticleGeneratorSettings.kt `enum class AttachType(val flag: Int)` — which
 // actor (and whose facing) a generator's emission origin is bound to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AttachType {
@@ -79,7 +79,7 @@ impl AttachType {
     }
 }
 
-// research/xim ParticleGeneratorParser.kt:23-33 — attachFlags bit layout, then
+// research/xim ParticleGeneratorParser.kt — attachFlags bit layout, then
 // additionalAttachFlags bit 0x0001 = attachSourceOriented.
 const ATTACH_TYPE_MASK: u16 = 0x000F;
 const ATTACH_JOINT0_MASK: u16 = 0x03F0;
@@ -88,23 +88,23 @@ const ATTACH_JOINT1_MASK: u16 = 0xFC00;
 const ATTACH_JOINT1_SHIFT: u32 = 10;
 const ATTACH_SOURCE_ORIENTED: u16 = 0x0001;
 
-// research/xim ParticleInitializers.kt:105-116 — the StandardParticleSetup renderStateFlags u16
+// research/xim ParticleInitializers.kt — the StandardParticleSetup renderStateFlags u16
 // sits directly after the billboard flags. Bit 0x1000 (`ignoreTextureAlpha`) is the same bit
 // retail tests as `field_10C & 0x10000000` to pick the D3m element's texture-stage table.
 // research/XIClient/src/XIClient/source/Resource/Derived/CMoD3m.cpp CMoD3m::Draw
 const RENDER_STATE_IGNORE_TEXTURE_ALPHA: u16 = 0x1000;
-// research/xim ParticleInitializers.kt:114 `cameraAttachedBasePosition`.
+// research/xim ParticleInitializers.kt read `cameraAttachedBasePosition`.
 const RENDER_STATE_CAMERA_ATTACHED_BASE: u16 = 0x0400;
 
-// research/xim ParticleInitializers.kt:84 `followCamera` — orthogonal to the billboard-type bits
+// research/xim ParticleInitializers.kt read `followCamera` — orthogonal to the billboard-type bits
 // in the same word. The weat/ precipitation curtains ride it (La Theine's `~1ra` is cfg 0x0004:
 // camera-following and NOT billboarded).
 const BILLBOARD_FOLLOW_CAMERA: u16 = 0x0004;
 
-// research/xim ParticleInitializers.kt:90-103 — the billboard-type ladder over the same word,
+// research/xim ParticleInitializers.kt read — the billboard-type ladder over the same word,
 // tested in this order. Retail keeps the modes distinct: a `Camera` particle keeps a world
 // orientation that aims its mesh-local +X at the eye, while `Xyz` replaces the modelview's
-// upper 3x3 with the view basis (research/xim GLDrawer.kt:474-489). Collapsing the two draws an
+// upper 3x3 with the view basis (research/xim GLDrawer.kt drawXimParticle). Collapsing the two draws an
 // axial 3-D mesh (the sun/moon glow domes) as a flat screen sprite.
 const BILLBOARD_CAMERA_MASK: u16 = 0x00C0;
 const BILLBOARD_MOVEMENT_MASK: u16 = 0x0081;
@@ -113,7 +113,7 @@ const BILLBOARD_MOVEMENT: u16 = 0x0040;
 const BILLBOARD_XZ: u16 = 0x4000;
 const BILLBOARD_XYZ: u16 = 0x0001;
 
-/// Retail's `BillBoardType` (research/xim ParticleInitializers.kt:90-103).
+/// Retail's `BillBoardType` (research/xim ParticleInitializers.kt read).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ParticleBillboard {
     #[default]
@@ -165,11 +165,11 @@ impl PositionVariance {
     }
 
     // `unit_radius` in 0..=1 and `yaw`/`pitch` in -PI..=PI are the three draws retail takes
-    // (`ufrand(rmax)`, two `frand(ANGLE_PI)`). The transcription at CYyGenerator.cpp:862-871
+    // (`ufrand(rmax)`, two `frand(ANGLE_PI)`). The transcription at CYyGenerator.cpp CYyGenerator::ElemGenerate v376
     // computes `ufrand(rmax)` and then writes the un-randomised `rmax` into the offset vector —
     // the two cannot both be intended, and a shell of drops at one fixed radius is not what the
     // discarded draw is for, so the random radius wins. research/xim (tier 6) reads it as
-    // `base + variance * u^(1/3)` (ParticleGeneratorSettings.kt:124-150), a solid ball with
+    // `base + variance * u^(1/3)` (ParticleGeneratorSettings.kt getOffset), a solid ball with
     // uniform density rather than uniform radius.
     pub fn offset(&self, unit_radius: f32, yaw: f32, pitch: f32) -> [f32; 3] {
         let r = self.max_radius() * unit_radius;
@@ -190,16 +190,16 @@ impl PositionVariance {
 // section-offset words at body[0x70..0x80], which is what pins the mapping.
 //
 // XIM reads byte 0x68 as an 8-bit particle count and byte 0x69 as `genFlags`
-// (ParticleGeneratorParser.kt:66-70); both are views onto this one word, so the flag bits sit
-// eight higher than XIM's. Continuous-singleton + auto-run semantics: xim Actor.kt:724-734.
+// (ParticleGeneratorParser.kt read); both are views onto this one word, so the flag bits sit
+// eight higher than XIM's. Continuous-singleton + auto-run semantics: xim Actor.kt startAutoRunParticles.
 const GEN_FLAGS_OFFSET: usize = 0x68;
-// CYyGenerator.cpp:2820 `(double)(this->flags & 0x1FF)` — the count is 9 bits, not 8.
+// CYyGenerator.cpp CYyGenerator::Idle v161 `(double)(this->flags & 0x1FF)` — the count is 9 bits, not 8.
 const PARTICLE_COUNT_MASK: u32 = 0x1FF;
 const GEN_FLAG_CONTINUOUS: u32 = 0x0400;
-// The bit retail's WeatherTransition.cpp:22 tests to decide whether a weat/<tag> generator
+// The bit retail's WeatherTransition.cpp ActivateWeatherGenerators tests to decide whether a weat/<tag> generator
 // activates, and the same bit XIM calls genFlags 0x10.
 const GEN_FLAG_AUTO_RUN: u32 = 0x1000;
-// CYyGenerator.cpp:659-661 CheckFlag29 — a batched generator emits one elem per emission (:2814)
+// CYyGenerator.cpp CYyGenerator::CheckFlag29 CheckFlag29 — a batched generator emits one elem per emission (:2814)
 // and that elem is itself a multi-particle batch.
 const GEN_FLAG_BATCHED: u32 = 0x2000_0000;
 const BLEND_FUNC_OPAQUE_BIT: u8 = 0x01;
@@ -253,7 +253,7 @@ pub struct ParticleGeneratorDef {
     // cameraAttachedBasePosition bit (La Theine's rain uses the first for the `~1ra` curtain and
     // the second for the `rai2` mist puff). They place differently — followCamera pins the
     // generator to the camera position outright, cameraAttachedBasePosition rotates the offset
-    // by the view matrix (research/xim Particle.kt:238-254) — so both are kept alongside the
+    // by the view matrix (research/xim Particle.kt updateAssociatedPosition) — so both are kept alongside the
     // union.
     pub camera_relative: bool,
     pub follow_camera: bool,
@@ -290,9 +290,9 @@ pub struct ParticleGeneratorDef {
     pub scale_y_track: Option<[u8; 4]>,
     pub alpha_track: Option<[u8; 4]>,
 
-    // research/xim ParticleUpdaters.kt:289-317 DayOfWeekColorUpdater (0x4E, 8xRGBA) and
+    // research/xim ParticleUpdaters.kt DayOfWeekColorUpdater (0x4E, 8xRGBA) and
     // MoonPhaseColorUpdater (0x4F, 12xRGBA): indexed by day-of-week / moon-phase frame and
-    // applied as a 2x modulate (Particle.kt:217-218). RGBA in 0..=1.
+    // applied as a 2x modulate (Particle.kt getColor). RGBA in 0..=1.
     pub day_of_week_color: Option<[[f32; 4]; DAYS_OF_WEEK]>,
     pub moon_phase_color: Option<[[f32; 4]; MOON_PHASES]>,
 
@@ -301,11 +301,11 @@ pub struct ParticleGeneratorDef {
     // fraction rather than the particle's life progress. This is how retail authors the
     // sun's dawn/noon/dusk ramp and the moon's daytime fade — 0x3F multiplies alpha, the
     // other three assign their channel.
-    // research/xim ParticleGeneratorParser.kt:270-274,431-434
+    // research/xim ParticleGeneratorParser.kt sec2Handler,431-434
     pub tod_color_tracks: [Option<[u8; 4]>; TOD_COLOR_CHANNELS],
     pub tod_color_driven: [bool; TOD_COLOR_CHANNELS],
 
-    // research/xim ParticleGeneratorParser.kt:444 MoonPhaseSpriteSheetUpdater (0x45): the
+    // research/xim ParticleGeneratorParser.kt sec3Handler MoonPhaseSpriteSheetUpdater (0x45): the
     // sprite-sheet frame is the current moon phase, not the particle's life progress.
     pub moon_phase_sprite: bool,
 
@@ -467,7 +467,7 @@ impl ParticleGeneratorDef {
                 0x27 if payload + 8 <= body.len() => scale_x_track = track_id(body, payload + 4),
                 0x28 if payload + 8 <= body.len() => scale_y_track = track_id(body, payload + 4),
                 0x2D if payload + 8 <= body.len() => alpha_track = track_id(body, payload + 4),
-                // research/xim ParticleGeneratorParser.kt:270-274 — 0x60..0x63 are the same
+                // research/xim ParticleGeneratorParser.kt sec2Handler — 0x60..0x63 are the same
                 // KeyFrameValueSetup shape bound to the time-of-day color channels, read back by
                 // the section-3 ClockValueUpdater 0x3C..0x3F.
                 0x60..=0x63 if payload + 8 <= body.len() => {
@@ -531,18 +531,18 @@ impl ParticleGeneratorDef {
                             f32_le(body, payload + 8),
                         ]);
                     }
-                    // research/xim ParticleGeneratorParser.kt:431-434 ClockValueUpdater — these
+                    // research/xim ParticleGeneratorParser.kt sec3Handler ClockValueUpdater — these
                     // carry no payload; they mark which 0x60..0x63 track drives its channel.
                     0x3C..=0x3F => tod_color_driven[(opcode - 0x3C) as usize] = true,
-                    // research/xim ParticleGeneratorParser.kt:444 MoonPhaseSpriteSheetUpdater.
+                    // research/xim ParticleGeneratorParser.kt sec3Handler MoonPhaseSpriteSheetUpdater.
                     0x45 => moon_phase_sprite = true,
-                    // research/xim ParticleUpdaters.kt:289-301 DayOfWeekColorUpdater: expectZero32
+                    // research/xim ParticleUpdaters.kt DayOfWeekColorUpdater: expectZero32
                     // then 8 RGBA quads (u8x4, 0..=255). payload+0 is the zero u32.
                     0x4E if payload + 4 + 4 * DAYS_OF_WEEK <= body.len() => {
                         day_of_week_color =
                             Some(std::array::from_fn(|i| rgba_u8(body, payload + 4 + i * 4)));
                     }
-                    // research/xim ParticleUpdaters.kt:304-316 MoonPhaseColorUpdater: same shape,
+                    // research/xim ParticleUpdaters.kt MoonPhaseColorUpdater: same shape,
                     // 12 quads.
                     0x4F if payload + 4 + 4 * MOON_PHASES <= body.len() => {
                         moon_phase_color =
@@ -601,7 +601,7 @@ impl ParticleGeneratorDef {
 }
 
 // research/XIClient/src/XIClient/include/Resource/ResourceType.h `Sep = 61`, dispatched
-// at CYyGenerator.cpp:117 (`modelType` = the same setup byte payload+29 the particle kinds
+// at CYyGenerator.cpp HandleOne (`modelType` = the same setup byte payload+29 the particle kinds
 // come from) and :193 (`case Sep: elem = new CYySoundElem()`).
 pub(crate) const LINKED_DATA_SOUND: u8 = 0x3D;
 
@@ -620,18 +620,18 @@ pub struct SoundGeneratorDef {
     pub base_position: [f32; 3],
 
     /// Retail's `CYySoundElem::s_far` / `s_near`. A shipped 0.0 is not "silent" — Calc3D
-    /// substitutes the class defaults (CYySepRes.cpp:24-29), which 591 generators rely on.
+    /// substitutes the class defaults (CYySepRes.cpp CYySepRes::Calc3D), which 591 generators rely on.
     pub far: f32,
     pub near: f32,
 
-    /// CYyGenerator.cpp:2834-2836 — the re-emission period is
+    /// CYyGenerator.cpp CYyGenerator::Idle — the re-emission period is
     /// `frames_per_emission + uirand(emission_variance)`.
     pub frames_per_emission: f32,
     pub emission_variance: f32,
 
     pub auto_run: bool,
 
-    /// CYyGenerator.cpp:2260-2263 `IsNever()` — `flags & 0x400` (continuous) or a zero
+    /// CYyGenerator.cpp CYyGenerator::IsNever `IsNever()` — `flags & 0x400` (continuous) or a zero
     /// life. Such a generator never runs the timed emission loop at all: :2789-2794 emits a
     /// single elem and only re-emits once that one is gone.
     pub continuous: bool,
@@ -725,7 +725,7 @@ impl SoundGeneratorDef {
         self.base_position != [0.0, 0.0, 0.0]
     }
 
-    /// CYyGenerator.cpp:2260-2263 + :2789-2794 — a "never" generator holds exactly one live
+    /// CYyGenerator.cpp CYyGenerator::IsNever + :2789-2794 — a "never" generator holds exactly one live
     /// elem and re-emits only once it is gone, instead of running the timed emission loop.
     pub fn is_singleton(&self) -> bool {
         self.continuous || self.max_life_frames == 0.0
@@ -972,7 +972,7 @@ mod tests {
 
     // The celestial opcodes live in the section-3 updater stream (body[0x78]), NOT the
     // section-2 initializer stream, where 0x4E/0x4F mean FixedPointPositionVarianceSetup and
-    // 0x45 means ParentPositionCopyConfig (research/xim ParticleGeneratorParser.kt:248-249,
+    // 0x45 means ParentPositionCopyConfig (research/xim ParticleGeneratorParser.kt sec2Handler,
     // 239 vs 444, 454-455). Reading them from the wrong stream silently yields None on every
     // real DAT, which is what left the moon on hand-tuned fallback tints.
     #[test]
@@ -1022,7 +1022,7 @@ mod tests {
         assert!((mp[11][2] - 11.0 / 255.0).abs() < 1e-6);
     }
 
-    // research/xim ParticleGeneratorParser.kt:270-274 — 0x60..0x63 are KeyFrameValueSetup
+    // research/xim ParticleGeneratorParser.kt sec2Handler — 0x60..0x63 are KeyFrameValueSetup
     // (track id at payload+4, same shape as the 0x27/0x28/0x2D life tracks) naming the
     // time-of-day RGBA curves; the section-3 ClockValueUpdater 0x3C..0x3F arms each channel.
     #[test]
@@ -1133,7 +1133,7 @@ mod tests {
         assert!(!def.continuous);
     }
 
-    // The count is 9 bits wide (CYyGenerator.cpp:2820 `flags & 0x1FF`), so its top bit is bit 0
+    // The count is 9 bits wide (CYyGenerator.cpp CYyGenerator::Idle v161 `flags & 0x1FF`), so its top bit is bit 0
     // of the byte XIM calls genFlags. Reading either as a byte truncates the primary weather
     // curtains: La Theine's `~1ra` authors 299 and an 8-bit read yields 43.
     #[test]
@@ -1178,8 +1178,8 @@ mod tests {
         assert_eq!(def.max_life_frames, 24.0);
     }
 
-    // research/xim ParticleInitializers.kt:105-116 — renderStateFlags is the u16 after the
-    // billboard flags; 0x1000 picks retail's NonZeroOneTSS element (CMoD3m.cpp:363-370).
+    // research/xim ParticleInitializers.kt — renderStateFlags is the u16 after the
+    // billboard flags; 0x1000 picks retail's NonZeroOneTSS element (CMoD3m.cpp CMoD3m::Draw).
     #[test]
     fn render_state_flag_selects_ignore_texture_alpha_element() {
         let element = |render_state: u16| {
@@ -1198,7 +1198,7 @@ mod tests {
         assert!(element(0x1200), "other render-state bits do not mask it");
     }
 
-    // CMoD3m.cpp:345-349 keys the TEXTUREFACTOR-alpha promotion on the exact blend byte, which
+    // CMoD3m.cpp CMoD3m::Draw keys the TEXTUREFACTOR-alpha promotion on the exact blend byte, which
     // the ParticleBlend collapse (0x03/0x44/0x64 all -> Blend) cannot express.
     #[test]
     fn blend_byte_survives_the_blend_func_collapse() {
@@ -1235,7 +1235,7 @@ mod tests {
         assert!(def.is_singleton());
     }
 
-    // Pins the XIM attachFlags bit layout (ParticleGeneratorParser.kt:23-33) against the
+    // Pins the XIM attachFlags bit layout (ParticleGeneratorParser.kt) against the
     // ground-truth word 0x5402 read out of Poison's effect DAT (file 3020).
     #[test]
     fn attach_flags_split_type_and_joints() {
@@ -1304,7 +1304,7 @@ mod tests {
     }
 
     // kuluu-ln1q was filed on the premise that retail gates weat/<tag> activation on a predicate
-    // other than the auto-run bit we test. It does not: WeatherTransition.cpp:22 reads
+    // other than the auto-run bit we test. It does not: WeatherTransition.cpp ActivateWeatherGenerators reads
     // `gen->flags & 0x1000`, and the ConstructFromData offset mapping puts that bit on the byte
     // XIM calls genFlags. Pin the two views onto one field so nobody re-derives it.
     #[test]
@@ -1409,7 +1409,7 @@ mod tests {
         assert!(found, "DAT {LA_THEINE_ZONE_DAT} defines weat/rain/~1h1");
     }
 
-    // CYyGenerator.cpp:1179-1180 assigns far from the FIRST 0x4C word and near from the
+    // CYyGenerator.cpp CYyGenerator::ElemGenerate assigns far from the FIRST 0x4C word and near from the
     // second, and 25 shipped generators author near > far — swapping them would make those
     // silent everywhere instead of loud everywhere inside far.
     #[test]
@@ -1578,7 +1578,7 @@ mod tests {
 
     // The two modes must not re-collapse into one bool: `sun0`/`kasa` are BillBoardType::Camera,
     // an axially-oriented solid whose mesh-local +X aims at the eye, while the moon sprite is
-    // BillBoardType::XYZ, a flat screen billboard (research/xim GLDrawer.kt:474-489). Drawing
+    // BillBoardType::XYZ, a flat screen billboard (research/xim GLDrawer.kt drawXimParticle). Drawing
     // the first as the second flattens the sun/moon glow domes into sky-filling sails.
     #[test]
     fn real_dat_celestial_billboard_modes_split() {

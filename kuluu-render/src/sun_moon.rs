@@ -27,7 +27,7 @@ pub const SUN_DISC_RADIUS: f32 = 120.0;
 /// Angular radius of the drawn sun disc as seen from the camera. The lens-flare occlusion
 /// query samples exactly this cone: retail tests visibility by drawing the sun particle's own
 /// quad with colour writes off and taking the fraction of pixels that pass
-/// (research/xim src/jsMain/kotlin/xim/poc/ParticleDrawer.kt:239-248).
+/// (research/xim src/jsMain/kotlin/xim/poc/ParticleDrawer.kt renderHazeTexture).
 pub fn sun_angular_radius() -> f32 {
     (SUN_DISC_RADIUS / SKY_RADIUS).atan()
 }
@@ -50,11 +50,11 @@ const MOON_PHASE_OFFSET: u64 = (886u64 * 360 + 26) % MOON_CYCLE_VANA_DAYS;
 
 const LIGHT_DISTANCE: f32 = 200.0;
 
-// research/XIClient Rendering/ShadowRenderer.cpp:96-101 — retail never lets a shadow rake:
+// research/XIClient Rendering/ShadowRenderer.cpp ShadowRenderer::Init — retail never lets a shadow rake:
 // whenever the light's elevation is shallower than ANGLE_PI_OVER_3 it rewrites the vertical
 // component to `-(sin(ANGLE_PI_OVER_3) * |xz|)` and renormalises, and :75-79 snaps a
 // below-horizon light to a fixed steep vector outright. Without it a low sun stretches every
-// cast shadow across the whole zone at dawn and dusk. Constants/Floats.cpp:14.
+// cast shadow across the whole zone at dawn and dusk. research/XIClient/src/XIClient/source/Constants/Floats.cpp Values::ANGLE_PI_OVER_3.
 const SHADOW_ELEVATION_SIN_ARG: f32 = PI / 3.0;
 
 /// Elevation retail's rewrite actually settles at: `sin(ANGLE_PI_OVER_3) * |xz|` over an
@@ -67,7 +67,7 @@ pub fn shadow_min_elevation() -> f32 {
 /// (`ZoneDirectionalLighting`) alone — this feeds only the cascade the sun entity casts.
 ///
 /// The test is on ANGLE_PI_OVER_3 but the rewrite lands at `shadow_min_elevation()`, so a sun
-/// between the two is *flattened*, not steepened; ShadowRenderer.cpp:99-102 has one predicate
+/// between the two is *flattened*, not steepened; ShadowRenderer.cpp ShadowRenderer::Init has one predicate
 /// and one assignment, not a clamp.
 pub fn shadow_cast_direction(to_light: Vec3) -> Vec3 {
     let horizontal = Vec2::new(to_light.x, to_light.z).length();
@@ -108,7 +108,7 @@ pub fn vana_sky_from_clock(clock: &crate::vana_time::VanaClock) -> VanaSky {
 }
 
 // The sun direction shared by the sun DirectionalLight, the lens flare, and the Sun-attached
-// weather generators. research/xim EnvironmentManager.kt:378-382 getSunPosition:
+// weather generators. research/xim EnvironmentManager.kt getSunPosition:
 // `Vector3f(sin a, cos a, 0)` with `a = timeOfDaySeconds * (0.5pi / 6h)` — one full turn per
 // Vana'diel day, in the XY plane, then mapped FFXI -> Bevy as (x, -y, -z).
 pub fn sun_direction(hour: f32) -> Vec3 {
@@ -254,7 +254,7 @@ pub fn spawn_sun_and_moon(
     let sphere = meshes.add(Sphere::new(1.0).mesh().ico(3).unwrap());
     // Both celestial bodies ride SKY_RADIUS, far past every measured 0x2F fog distance,
     // and their DAT generators clear fog (measured sun0/sun1 and moon/kasa = 0x02C400C0;
-    // research/XIClient CMoElem.cpp:542-543). Bevy fogs unlit StandardMaterials too, so
+    // research/XIClient CMoElem.cpp CMoElem::PrepDX). Bevy fogs unlit StandardMaterials too, so
     // without this the disc renders as a flat horizon-coloured blob.
     let sun_mat = materials.add(StandardMaterial {
         base_color: Color::linear_rgb(20.0, 18.0, 10.0),
@@ -361,13 +361,13 @@ struct LandscapeLighting {
     ambient: Vec3,
 }
 
-// ZoneRenderer.cpp:1133-1149 draws each block through `positionedBlock->Area`:
-// `GetWeatherDiffuseLights` (XiArea.cpp:232-279 - env2 ColorPalette[0]/[1], the terrain
-// block's sun/moon diffuse) and `GetAmbient(_, 0)` (XiArea.cpp:391-408 - env2
+// ZoneRenderer.cpp ZoneRenderer::RenderChunk2 draws each block through `positionedBlock->Area`:
+// `GetWeatherDiffuseLights` (XiArea.cpp XiArea::GetWeatherDiffuseLights - env2 ColorPalette[0]/[1], the terrain
+// block's sun/moon diffuse) and `GetAmbient(_, 0)` (XiArea.cpp XiArea::GetAmbient - env2
 // ColorPalette[2]) are both read off that area, so the record fed here is the area's and
 // not the zone's. Its OWN indoor flag decides how the moon slot is read: indoors the arc
 // is replaced by one static diffuse and the moon bytes are a signed direction rather than
-// a color (research/xim EnvironmentSection.kt:139-149).
+// a color (research/xim EnvironmentSection.kt getLightingParams).
 fn landscape_lighting(
     rec: &ffxi_dat::weather::WeatherRecord,
     sun_dir: Vec3,
@@ -415,7 +415,7 @@ fn landscape_lighting(
     }
 }
 
-// research/xim EnvironmentSection.kt:206-225 modelLightMix: models swap moon->sun
+// research/xim EnvironmentSection.kt modelLightMix: models swap moon->sun
 // at 06:00 (minute 360) and sun->moon at 18:00 (minute 1080), with a short blend
 // window on either side; t=1 means pure sun, t=0 means pure moon.
 fn model_light_mix(time_minutes: u32) -> f32 {
@@ -491,7 +491,7 @@ pub fn moon_phase_frame(moon_phase: f32) -> usize {
 }
 
 // No-DAT fallback only. The authoritative tints are the parsed 0x4E DayOfWeekColor /
-// 0x4F MoonPhaseColor generator opcodes (research/xim ParticleUpdaters.kt:289-317),
+// 0x4F MoonPhaseColor generator opcodes (research/xim ParticleUpdaters.kt DayOfWeekColorUpdater),
 // resolved by celestial_moon_tint below.
 const WEEKDAY_MOON_TINT: [[f32; 3]; 8] = [
     [1.00, 0.82, 0.78],
@@ -504,7 +504,7 @@ const WEEKDAY_MOON_TINT: [[f32; 3]; 8] = [
     [0.78, 0.72, 0.85],
 ];
 
-// research/xim Particle.kt:217-218: getColor() applies colorDayOfWeek then colorMoonPhase
+// research/xim Particle.kt: getColor() applies colorDayOfWeek then colorMoonPhase
 // each via modulateInPlace(it, 2f) — a 2x modulate (out *= 2*c, clamped). Returns the
 // combined moon tint in RGB. Falls back to WEEKDAY_MOON_TINT when the zone ships no
 // 0x4E/0x4F tables (so the celestial look degrades to the hand-tuned constants).
@@ -642,7 +642,7 @@ pub fn sun_moon_system(
 
     let sun_dir = sun_direction(sky.hour);
 
-    // research/xim EnvironmentSection.kt:151-159: the 0x2F terrain block's sun/moon
+    // research/xim EnvironmentSection.kt: the 0x2F terrain block's sun/moon
     // diffuse colors are authoritative when the zone ships records; the synthetic
     // sun_color_for_hour/moon_color_for_phase path is the records.is_empty() fallback.
     let dat = render_cfg.zone_weather.current;
@@ -650,7 +650,7 @@ pub fn sun_moon_system(
 
     let indoors = dat.is_some_and(|rec| rec.indoors);
 
-    // research/xim EnvironmentSection.kt:139-149: indoors, the sun/moon arc is
+    // research/xim EnvironmentSection.kt getLightingParams: indoors, the sun/moon arc is
     // replaced by ONE static diffuse light (direction from the moon-color bytes,
     // color from the sun diffuse) and cascade shadow-mapping has no retail
     // equivalent inside — the sun must not reach through walls.
@@ -754,15 +754,15 @@ pub fn sun_moon_system(
 
     // Publish the entity(model) + landscape(terrain) split for the actor- and
     // zone-material lighting consumers. The model light is a single moon<->sun
-    // blend (research/xim EnvironmentSection.kt:206-225); landscape feeds both
+    // blend (research/xim EnvironmentSection.kt modelLightMix); landscape feeds both
     // sun(dir0) and moon(dir1) slots from the terrain block.
     //
     // The terrain half reads the record of the AREA the player stands in, the way
-    // ZoneRenderer.cpp:1133-1149 lights each block from `positionedBlock->Area`; one
+    // ZoneRenderer.cpp ZoneRenderer::RenderChunk2 lights each block from `positionedBlock->Area`; one
     // global light set here means the player's area stands in for the blocks around
     // them, the same approximation the distance fog already makes. The entity half
     // stays zone-wide: retail resolves it per actor from that actor's own area
-    // (CMoElem.cpp:513 `FindAreaByFourCCAndGetWeatherDiffuseLights`), which one shared
+    // (CMoElem.cpp CMoElem::PrepDX `FindAreaByFourCCAndGetWeatherDiffuseLights`), which one shared
     // model light cannot express.
     let sun_up = sky.sun_altitude > 0.0;
     let moon_up = sky.moon_altitude > 0.0;
@@ -775,7 +775,7 @@ pub fn sun_moon_system(
     let zone_sun_k = zone_land.map_or(0.0, |z| z.sun_k);
 
     if let Some((rec, land)) = dat.zip(land).filter(|(r, _)| r.indoors) {
-        // research/xim EnvironmentSection.kt:139-149: the model block collapses to one
+        // research/xim EnvironmentSection.kt getLightingParams: the model block collapses to one
         // static indoor diffuse — direction from the block's moon-color bytes, color
         // from its sun diffuse, no time gating.
         let model_dir = ffxi_dir_to_bevy(rec.indoor_light_dir_entity);
@@ -1025,7 +1025,7 @@ mod tests {
         }
     }
 
-    // research/xim EnvironmentSection.kt:206-225: pure moon before 355, ramp to pure
+    // research/xim EnvironmentSection.kt modelLightMix: pure moon before 355, ramp to pure
     // sun by 365, pure sun until 1075, ramp back to pure moon by 1085.
     #[test]
     fn model_light_mix_matches_xim_thresholds() {
@@ -1073,8 +1073,8 @@ mod tests {
         }
     }
 
-    // ZoneRenderer.cpp:1133-1149 — `positionedBlock->Area->GetWeatherDiffuseLights`
-    // (XiArea.cpp:232-279) and `GetAmbient(_, 0)` (XiArea.cpp:391-408) are the block's
+    // ZoneRenderer.cpp ZoneRenderer::RenderChunk2 — `positionedBlock->Area->GetWeatherDiffuseLights`
+    // (XiArea.cpp XiArea::GetWeatherDiffuseLights) and `GetAmbient(_, 0)` (XiArea.cpp XiArea::GetAmbient) are the block's
     // AREA's env2 palette, so the terrain lights must move when the area does.
     #[test]
     fn landscape_lighting_reads_the_terrain_block_it_is_given() {
@@ -1106,7 +1106,7 @@ mod tests {
         );
     }
 
-    // xim EnvironmentSection.kt:139-149 — indoors the moon slot holds a signed direction,
+    // xim EnvironmentSection.kt getLightingParams — indoors the moon slot holds a signed direction,
     // not a color, so the indoor/outdoor split has to follow the record the terrain is
     // read from. Taking the zone's flag while reading an interior area's block would
     // publish those direction bytes as a moon color.
@@ -1135,10 +1135,10 @@ mod tests {
         assert!(lit.moon_k > 0.0);
     }
 
-    // ZoneRenderer.cpp:1133-1149 resolves the block's lights through
+    // ZoneRenderer.cpp ZoneRenderer::RenderChunk2 resolves the block's lights through
     // `positionedBlock->Area`, so the published terrain lighting has to move when the
     // player's area does while the entity(model) half stays on the zone record
-    // (CMoElem.cpp:513 resolves that one per actor, which one shared light cannot
+    // (CMoElem.cpp CMoElem::PrepDX resolves that one per actor, which one shared light cannot
     // express). This pins the wiring, not just `landscape_lighting`.
     #[test]
     fn published_terrain_lighting_follows_the_players_area() {
@@ -1288,7 +1288,7 @@ mod tests {
         assert_eq!(k0, 0.0);
     }
 
-    // research/xim EnvironmentManager.kt:378-382 — the arc is a unit circle in the FFXI XY
+    // research/xim EnvironmentManager.kt getSunPosition — the arc is a unit circle in the FFXI XY
     // plane. An earlier revision carried a +0.25 z tilt, which pushed the sun (and the
     // lens flare and the Sun-attached weather generators, which all read this) off retail's
     // path and out of the plane the moon shares.
@@ -1373,7 +1373,7 @@ mod tests {
 
     #[test]
     fn shadow_direction_never_rakes_below_retails_minimum_elevation() {
-        // research/XIClient ShadowRenderer.cpp:99-102 rewrites any light shallower than
+        // research/XIClient ShadowRenderer.cpp ShadowRenderer::Init rewrites any light shallower than
         // ANGLE_PI_OVER_3 to sit at atan(sin(ANGLE_PI_OVER_3)) ~= 40.9 degrees, in either
         // hemisphere.
         for hour in 0..24 {

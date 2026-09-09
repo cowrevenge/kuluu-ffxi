@@ -173,7 +173,7 @@ impl PosHead {
     /// `sendflags_t.Name` — `UPDATE_NAME`, the ordinary "a name follows" bit
     /// (vendor/server/src/map/entities/baseentity.h UPDATETYPE UPDATE_NAME).
     const SEND_NAME: u8 = 0x08;
-    /// `sendflags_t.Name2` (entity_update.cpp:52). Set on every equipped-model
+    /// `sendflags_t.Name2` (entity_update.cpp). Set on every equipped-model
     /// spawn, which is why it alone does not imply a name is present.
     const SEND_NAME2: u8 = 0x40;
 
@@ -201,7 +201,7 @@ impl PosHead {
         // UPDATE_NAME *clear* — so gating on UPDATE_NAME alone drops it. Name2
         // rides every equipped spawn though, so the real discriminator is the
         // `ref<uint8>(0x18) = 0x01` marker plus the growth: a plain equipped
-        // spawn is `setSize(0x48)` (entity_update.cpp:463) and stops short of
+        // spawn is `setSize(0x48)` (entity_update.cpp CEntityUpdatePacket::updateWith) and stops short of
         // the name field.
         //
         // Every other rename writes 0x34, shifted to 0x35 for targid < 1024, and
@@ -306,7 +306,7 @@ pub struct CharFlags {
     /// `FLAG_UNTARGETABLE = 0x800` (vendor/server/src/map/entities/baseentity.h)
     /// lands exactly on this bit; for CHAR_PC it is char_update's explicit
     /// "Untargetable player" field. vendor/server/src/map/packets/
-    /// entity_update.cpp `flags1_t`, char_update.cpp:312.
+    /// entity_update.cpp `flags1_t`, char_update.cpp CCharUpdatePacket::updateWith.
     pub untargetable: bool,
 }
 
@@ -376,7 +376,7 @@ mod flags1 {
     pub const TARGET_OFF: u32 = 19;
     /// `InvisFlag` — bit 29 in char_update.cpp's `flags1_t`. LSB sets it for
     /// PCs only: `m_isGMHidden || HasStatusEffectByFlag(EFFECTFLAG_INVISIBLE)`
-    /// (vendor/server/src/map/packets/char_update.cpp CCharUpdatePacket::updateWith, char_status.cpp:287).
+    /// (vendor/server/src/map/packets/char_update.cpp CCharUpdatePacket::updateWith, char_status.cpp CCharStatusPacket::CCharStatusPacket).
     /// entity_update declares the same bit but never writes it.
     pub const INVIS: u32 = 29;
 }
@@ -1555,7 +1555,7 @@ mod pos_head_tests {
         assert!(PosHead::try_extract_name(s2c::CHAR_PC, &buf).is_none());
     }
 
-    /// entity_update.cpp:539-560 — a renamed dynamic entity (targid >= 0x700)
+    /// entity_update.cpp CEntityUpdatePacket::updateWith — a renamed dynamic entity (targid >= 0x700)
     /// spawning with an equipment model grows to `setSize(0x56)`, gets `look_t`
     /// memcpy'd over packet 0x30 and its name pushed to packet 0x44, flagged by
     /// `ref<uint8>(0x18) = 0x01`. Its mask is the literal 0x57, which carries

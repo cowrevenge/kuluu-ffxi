@@ -81,7 +81,7 @@ impl ParticleSimulator {
         }
     }
 
-    // research/xim EffectRoutineParser.kt:253-258 StopParticleGeneratorRoutine — emission ceases
+    // research/xim EffectRoutineParser.kt parseSection2 StopParticleGeneratorRoutine — emission ceases
     // but the already-live particles play out their lifetime.
     pub fn stop_generator(&mut self, owner: Entity, gen_id: [u8; 4]) {
         self.stop_where(|o| o.owner == owner && o.gen_id == gen_id);
@@ -161,10 +161,10 @@ enum D3mDrawPath {
     Mmb,
 }
 
-// CMoD3mElem.cpp:108-112 — DoMMBDraw forces the ignore-texture-alpha table at this blend byte,
+// CMoD3mElem.cpp CMoD3mElem::DoMMBDraw — DoMMBDraw forces the ignore-texture-alpha table at this blend byte,
 // whatever the render-state bit says.
 const D3M_MMB_FORCE_IGNORE_TEXTURE_ALPHA_BLEND_BYTE: u8 = 0x64;
-// CMoD3m.cpp:345-349 — at blend byte 0x44 a TEXTUREFACTOR alpha at or above 0x7F is promoted to
+// CMoD3m.cpp CMoD3m::Draw — at blend byte 0x44 a TEXTUREFACTOR alpha at or above 0x7F is promoted to
 // 0xFF before the stage math. DoMMBDraw carries no such promotion.
 const D3M_TFACTOR_PROMOTE_BLEND_BYTE: u8 = 0x44;
 const D3M_TFACTOR_PROMOTE_MIN: f32 = 0x7F as f32 / u8::MAX as f32;
@@ -197,7 +197,7 @@ fn resolve_tod_tracks(
         .map(|id| id.and_then(|i| assets.keyframes.get(&i).cloned()))
 }
 
-// research/xim Particle.kt:217-218 — the day-of-week / moon-phase tints are applied with
+// research/xim Particle.kt getColor — the day-of-week / moon-phase tints are applied with
 // Color.modulateInPlace(c, 2f), a 2x modulate.
 const CELESTIAL_MODULATE: f32 = 2.0;
 // Index of the alpha channel in the 0x60..0x63 time-of-day track array (0x63 -> 0x3F).
@@ -229,7 +229,7 @@ struct LiveGenerator {
     draw_path: D3mDrawPath,
     // SpriteSheet (0x0E) flipbook frames; empty for a StaticMesh (0x0B) generator. When
     // non-empty each particle picks a frame by life progress in rebuild_mesh (research/xim
-    // ParticleUpdaters.kt:196-211 SpriteSheetFrameUpdater).
+    // ParticleUpdaters.kt SpriteSheetFrameUpdater).
     sprite_frames: Vec<SpriteTemplate>,
     scale_x: Option<KeyFrameTrack>,
     scale_y: Option<KeyFrameTrack>,
@@ -245,7 +245,7 @@ struct LiveGenerator {
     emit_window_frames: f32,
     mesh: Handle<Mesh>,
     entity: Entity,
-    // research/xim ParticleGenerator.kt:56 — auto-run generators never finish
+    // research/xim ParticleGenerator.kt isDoneEmitting — auto-run generators never finish
     // emitting; they live until their mesh entity (a child of the actor root)
     // is despawned.
     auto_run: bool,
@@ -304,7 +304,7 @@ impl Default for ZoneGeneratorOptions {
 }
 
 // Auto-run particle generators embedded in an actor DAT (research/xim
-// Actor.kt:724-734 startAutoRunParticles), attached at actor spawn by
+// Actor.kt startAutoRunParticles), attached at actor spawn by
 // ffxi_actor_render and started by `spawn_actor_auto_run_particles`.
 #[derive(Component)]
 pub struct ActorAutoRunEffects {
@@ -313,7 +313,7 @@ pub struct ActorAutoRunEffects {
 
 struct Particle {
     pos: Vec3,
-    // research/xim Particle.kt:238-241 — cameraAttachedBasePosition resolves the offset from the
+    // research/xim Particle.kt updateAssociatedPosition — cameraAttachedBasePosition resolves the offset from the
     // camera only while `age == 0`, so the particle is placed in front of the viewer once and
     // then lives in world space. Carrying the live generator origin instead glues the whole
     // emission to the camera as one rigid sheet that swings out of view on a pitch.
@@ -325,12 +325,12 @@ struct Particle {
     scale: Vec2,
 }
 
-// research/xim ParticleGeneratorAttachment.kt:307 resolveExtendedJoints — a source joint naming
+// research/xim ParticleGeneratorAttachment.kt resolveExtendedJoints — a source joint naming
 // one of a mount's two footstep points is rewritten to reference 0 before it is ever resolved.
 const MOUNT_FOOTSTEP_JOINTS: std::ops::RangeInclusive<u8> = 52..=53;
 const MOUNT_FOOTSTEP_REFERENCE: usize = 0;
 
-// research/xim ParticleGeneratorAttachment.kt:87-96,103,111,125 updateAssociatedPosition — an
+// research/xim ParticleGeneratorAttachment.kt updateAssociatedPosition jointRefIdx,103,111,125 updateAssociatedPosition — an
 // actor-attached generator emits from the attach actor's position PLUS the position of the joint
 // reference the def names: attachedJoint0 for the source-side attach types, attachedJoint1 for the
 // target-side ones. The celestial and unattached types read neither. The field indexes the
@@ -414,7 +414,7 @@ fn attach_pose<'a>(
 
 // World-space delta from the attach actor's root to the joint the generator hangs off.
 // `other_world` is the other actor of the attachment, which is what a 49..51 nearest-joint
-// selector measures against (research/xim ParticleGeneratorAttachment.kt:314-330
+// selector measures against (research/xim ParticleGeneratorAttachment.kt resolveNearestJointSnapshot
 // resolveNearestJointSnapshot).
 fn attach_joint_offset(
     def: &ParticleGeneratorDef,
@@ -483,7 +483,7 @@ pub fn spawn_particle_generators(
         } else {
             q_xf.get(origin_entity).unwrap_or(actor_xf)
         };
-        // research/xim SkeletonInstance.kt:73-90 getStandardJointExtended has no source-vs-target
+        // research/xim SkeletonInstance.kt getStandardJointExtended has no source-vs-target
         // guard: it always walks the ring and keeps the reference nearest the other actor. On a
         // self-targeted action both sides ARE the same actor, and the winner is the ring point
         // nearest the actor's own origin — torso height, which is the whole point of this bead.
@@ -572,7 +572,7 @@ pub fn spawn_particle_generators(
     }
 }
 
-// research/xim Actor.kt:127-734 — at model-ready, every generator in the
+// research/xim Actor.kt createFrom — at model-ready, every generator in the
 // actor DAT flagged auto-run starts immediately and emits forever. The mesh
 // entity is a child of the actor root (which carries the FFXI->Bevy basis), so
 // particle math stays in the DAT's own FFXI-local frame and the effect follows
@@ -784,7 +784,7 @@ pub fn tick_particle_simulator(time: Res<Time>, mut sim: ResMut<ParticleSimulato
 fn advance_generator(g: &mut LiveGenerator, frames: f32) {
     g.age_frames += frames;
 
-    // research/xim ParticleGenerator.kt:66 — completed particles are swept
+    // research/xim ParticleGenerator.kt emit — completed particles are swept
     // before emission, so a continuous singleton re-emits the same tick its
     // predecessor expires.
     g.particles.retain(|p| p.age_frames < p.life_frames);
@@ -803,7 +803,7 @@ fn advance_generator(g: &mut LiveGenerator, frames: f32) {
         // gate it: a long frame (the blocking action-DAT read precedes these) makes age_frames
         // exceed a dur=0 stage's 1-frame window on that very tick and the singleton never fires.
         if !g.stopped && g.particles.is_empty() && g.age_frames <= frames {
-            // research/xim ParticleInitializers.kt:130-131 — a maxLifeSpan of 0 is rewritten
+            // research/xim ParticleInitializers.kt read — a maxLifeSpan of 0 is rewritten
             // to POSITIVE_INFINITY, "used for 'singleton' particles, like the sea and such":
             // the auto-run zone/weather billboards that stand as long as the zone does (the
             // sun, the moon, the sea). A 1-frame life made those vanish on the tick after
@@ -821,7 +821,7 @@ fn advance_generator(g: &mut LiveGenerator, frames: f32) {
     } else if emitting {
         g.emit_accum += frames;
         while g.emit_accum >= g.def.frames_per_emission {
-            // research/xim ParticleGenerator.kt:80 — a continuous-singleton
+            // research/xim ParticleGenerator.kt emit — a continuous-singleton
             // generator holds one live particle and re-emits the moment it
             // expires (the accumulator stays primed, capped to one period).
             if g.def.continuous && !g.particles.is_empty() {
@@ -856,7 +856,7 @@ fn advance_generator(g: &mut LiveGenerator, frames: f32) {
     g.particles.retain(|p| p.age_frames < p.life_frames);
 
     // A continuous generator re-emits "the moment its particle expires"
-    // (research/xim ParticleGenerator.kt:80). The aging above can push the lone
+    // (research/xim ParticleGenerator.kt emit). The aging above can push the lone
     // particle past its life within this same tick, after the pre-emit sweep
     // already ran — replace it now so the mesh is never empty at render and the
     // body does not blink out for a frame.
@@ -1000,8 +1000,8 @@ struct ParticleDraw {
 fn particle_draw(g: &LiveGenerator, p: &Particle, clock: &CelestialClock) -> ParticleDraw {
     let progress = (p.age_frames / p.life_frames).clamp(0.0, 1.0);
     // A SpriteSheet particle flipbooks its frames over life (research/xim
-    // ParticleUpdaters.kt:196-211), except under MoonPhaseSpriteSheetUpdater
-    // (ParticleUpdaters.kt:319-324, opcode 0x45 at ParticleGeneratorParser.kt:444), which pins
+    // ParticleUpdaters.kt SpriteSheetFrameUpdater), except under MoonPhaseSpriteSheetUpdater
+    // (ParticleUpdaters.kt MoonPhaseSpriteSheetUpdater, opcode 0x45 at ParticleGeneratorParser.kt sec3Handler), which pins
     // the frame to the moon phase; a StaticMesh particle keeps its single template.
     let flipbook_frame = if g.def.moon_phase_sprite {
         clock
@@ -1034,7 +1034,7 @@ fn particle_draw(g: &LiveGenerator, p: &Particle, clock: &CelestialClock) -> Par
         } else {
             1.0 - progress
         });
-    // research/xim ParticleGeneratorParser.kt:431-434 ClockValueUpdater — 0x3C/0x3D/0x3E
+    // research/xim ParticleGeneratorParser.kt sec3Handler ClockValueUpdater — 0x3C/0x3D/0x3E
     // assign the particle's colour channel from a time-of-day curve, 0x3F multiplies alpha.
     // This is the sun's authored dawn/noon/dusk ramp: the disc is not tinted by a formula.
     let mut rgb = p.rgb;
@@ -1049,10 +1049,10 @@ fn particle_draw(g: &LiveGenerator, p: &Particle, clock: &CelestialClock) -> Par
             _ => rgb[channel] = v,
         }
     }
-    // research/xim Particle.kt:217-218 getColor() — the day-of-week tint is applied first,
+    // research/xim Particle.kt getColor() — the day-of-week tint is applied first,
     // then the moon-phase tint, each as a 2x modulate (out = min(1, out * 2 * c)). Both use
-    // Color.modulateInPlace (Color.kt:102-108), which scales alpha too, and NOT the rgb-only
-    // Color.modulateRgbInPlace (Color.kt:95-100) sitting next to it: the tables' alpha lane is
+    // Color.modulateInPlace (Color.kt), which scales alpha too, and NOT the rgb-only
+    // Color.modulateRgbInPlace (Color.kt) sitting next to it: the tables' alpha lane is
     // what gates the lunar halo off outside the full-moon phases.
     for table in [
         g.def
@@ -1201,7 +1201,7 @@ fn needs_rebuild(built: &MeshKey, next: &MeshKey) -> bool {
     built != next
 }
 
-// research/xim Particle.kt:326-334 + GLDrawer.kt:474-489 — BillBoardType::Camera is not a screen
+// research/xim Particle.kt computeParticleSpaceOrientationTransform + GLDrawer.kt drawXimParticle — BillBoardType::Camera is not a screen
 // billboard: retail leaves the modelview alone and gives the particle a world orientation that
 // aims its mesh-local +X at the eye, so the mesh stays a solid with all three axes scaled. Only
 // BillBoardType::XYZ replaces the modelview basis with the view basis. `solid_mesh` is what
@@ -1229,8 +1229,8 @@ fn is_solid_mesh(template: &SpriteTemplate) -> bool {
     (hi - lo).cmpgt(Vec3::ZERO).all()
 }
 
-// research/xim Particle.kt:548-569 `applyMovementOrientation`, with the direction supplied by
-// Particle.kt:330 (`camera position - particle position`). `vel_basis` is an involution, so the
+// research/xim Particle.kt `applyMovementOrientation`, with the direction supplied by
+// Particle.kt computeParticleSpaceOrientationTransform (`camera position - particle position`). `vel_basis` is an involution, so the
 // same fold carries the Bevy-space direction into the DAT frame the template lives in.
 fn axial_camera_rotation(particle_world: Vec3, cam_pos: Vec3, vel_basis: Vec3) -> Quat {
     const AXIS_ALIGNED_Y: f32 = 0.999;
@@ -1403,7 +1403,7 @@ fn to_image(t: &ffxi_dat::texture::DecodedTexture, undither: bool) -> Image {
 }
 
 // `local_dir` is the directory the generator DEF was authored in (research/xim
-// ParticleInitializers.kt:145 `particle.creator.localDir`), not the routine's: mesh ids repeat
+// ParticleInitializers.kt apply `particle.creator.localDir`), not the routine's: mesh ids repeat
 // across effect directories, so the flat maps alone bind whichever copy the walk saw last.
 fn resolve_mesh(
     assets: &ActionAssets,
@@ -1417,7 +1417,7 @@ fn resolve_mesh(
             let d3m = assets.d3m(local_dir, &def.mesh_id)?;
             let template = sprite_template(d3m)?;
             let (namespace, local) = d3m.texture_name_tokens();
-            // research/xim DatResource.kt:488-493 — qualified (namespace, local) match, then
+            // research/xim DatResource.kt getTextureResourceByNameAs — qualified (namespace, local) match, then
             // local-only. The truncated DatId stays as a last tier: a few meshes name a
             // texture whose local token outruns the Img chunk id (`kumori` vs `kumo`) and
             // resolve only that way.
@@ -1437,7 +1437,7 @@ fn resolve_mesh(
             let ss = assets.sprite_sheet(local_dir, &def.mesh_id)?;
             let frames = sprite_sheet_templates(ss);
             let first = frames.first().cloned()?;
-            // research/xim DatResource.kt:483-493 — try the qualified (namespace, local) pair
+            // research/xim DatResource.kt getTextureResourceByNameAs — try the qualified (namespace, local) pair
             // first, then fall back to a local-name-only match.
             let tex = assets
                 .images_by_qualified_name
@@ -1475,7 +1475,7 @@ fn sprite_sheet_templates(ss: &ParticleSpriteSheet) -> Vec<SpriteTemplate> {
         .collect()
 }
 
-// research/xim ParticleUpdaters.kt:196-211 — the spriteSheetIndex advances the flipbook across
+// research/xim ParticleUpdaters.kt SpriteSheetFrameUpdater — the spriteSheetIndex advances the flipbook across
 // the particle's lifetime. StaticMesh particles carry no frames and use the single template.
 fn flipbook_index(g: &LiveGenerator, progress: f32) -> usize {
     let n = g.sprite_frames.len();
@@ -1618,7 +1618,7 @@ mod tests {
         Vec4::from_array(vertex_color(g, &draw, g.template.colors[0]))
     }
 
-    // A generator stage's duration is authored in 60 fps frames (research/xim util/Fps.kt:9),
+    // A generator stage's duration is authored in 60 fps frames (research/xim util/Fps.kt Fps internalFps),
     // so a 30-frame emit window is half a second of wall time, not a whole one.
     #[test]
     fn emit_window_is_duration_frames_at_60fps() {
@@ -1643,9 +1643,9 @@ mod tests {
         );
     }
 
-    // research/xim MainTool.kt:64 turns wall ms into frames at the single 60 fps internal
-    // clock (util/Fps.kt:9), MainTool.kt:118 hands that one value to EffectManager.update,
-    // and Scene.kt:125-126 registers the zone DAT's autoRun generators (braziers,
+    // research/xim MainTool.kt loop currentLogicalFrameIncrement turns wall ms into frames at the single 60 fps internal
+    // clock (util/Fps.kt Fps internalFps), MainTool.kt internalLoop hands that one value to EffectManager.update,
+    // and Scene.kt registerEffectsRecursively registers the zone DAT's autoRun generators (braziers,
     // campfires) into that same manager — zone ambients share the ROUTINE_FPS clock with
     // action routines, with no half-rate zone clock (kuluu-rf4h).
     #[test]
@@ -1729,7 +1729,7 @@ mod tests {
         );
     }
 
-    // research/xim Particle.kt:238-241 — a cameraAttachedBasePosition particle reads the offset
+    // research/xim Particle.kt updateAssociatedPosition — a cameraAttachedBasePosition particle reads the offset
     // from the camera only at age 0. Re-reading it every frame drags the whole live emission
     // along as one rigid sheet: the dust storm sits pinned in front of the player and swings off
     // screen the moment the camera pitches. New emissions still follow the camera.
@@ -1876,7 +1876,7 @@ mod tests {
             assert_eq!(alpha, D3M_STAGE1_ALPHA_GAIN);
         }
 
-        // CMoD3mElem.cpp:108-112 — DoMMBDraw forces the ignore-texture-alpha table at blend byte
+        // CMoD3mElem.cpp CMoD3mElem::DoMMBDraw — DoMMBDraw forces the ignore-texture-alpha table at blend byte
         // 0x64; CMoD3m::Draw has no such override.
         #[test]
         fn blend_byte_64_forces_the_one_tss_table_on_the_mmb_path_only() {
@@ -1890,7 +1890,7 @@ mod tests {
             assert!(ignores_texture_alpha(&d, D3mDrawPath::D3m));
         }
 
-        // CMoD3m.cpp:345-349 — blend byte 0x44 only, and only on the CMoD3m::Draw path.
+        // CMoD3m.cpp — blend byte 0x44 only, and only on the CMoD3m::Draw path.
         #[test]
         fn tfactor_alpha_promotes_at_half_only_for_blend_byte_44() {
             let promote = |byte: u8, path: D3mDrawPath, a: f32| {
@@ -2238,7 +2238,7 @@ mod tests {
         assert!(g.particles.is_empty());
     }
 
-    // research/xim EffectRoutineParser.kt:253-258 StopParticleGeneratorRoutine: the cast aura's
+    // research/xim EffectRoutineParser.kt parseSection2 StopParticleGeneratorRoutine: the cast aura's
     // authored emit window is 1800 frames (60 s), so retail's 0x2D stop is what ends it at the
     // end of the cast — emission ceases at once, live particles still play out their life.
     #[test]
@@ -2309,7 +2309,7 @@ mod tests {
         );
     }
 
-    // research/xim ParticleInitializers.kt:130-131 — maxLifeSpan 0 means POSITIVE_INFINITY
+    // research/xim ParticleInitializers.kt read — maxLifeSpan 0 means POSITIVE_INFINITY
     // for the auto-run zone billboards ("the sea and such"): the sun, the moon and the sea
     // must stand for as long as the zone does. The counterpart above pins that a SCHEDULED
     // dur=0 singleton still expires, so the two populations cannot be collapsed.
@@ -2480,7 +2480,7 @@ mod tests {
         )
     }
 
-    // research/xim Particle.kt:330 + 548-569 — BillBoardType::Camera orients the particle in the
+    // research/xim Particle.kt computeParticleSpaceOrientationTransform + 548-569 — BillBoardType::Camera orients the particle in the
     // world so mesh-local +X points at the eye. Drawing it as a screen billboard instead turns
     // the sun/moon glow dome's symmetry axis sideways (kuluu-fjd3).
     #[test]
@@ -2510,7 +2510,7 @@ mod tests {
     }
 
     // The authored z-scale is a real third axis on a camera billboard — retail's
-    // ScaleInitializer writes all three (research/xim ParticleInitializers.kt:846-857) and file
+    // ScaleInitializer writes all three (research/xim ParticleInitializers.kt) and file
     // 104's `weat/suny/sun1` authors [40, 30, 100]. A screen sprite drops it; an axial dome
     // must not.
     #[test]
@@ -2679,7 +2679,7 @@ mod tests {
         }
     }
 
-    // research/xim ParticleGeneratorParser.kt:431-434 — the ClockValueUpdater curves are
+    // research/xim ParticleGeneratorParser.kt sec3Handler — the ClockValueUpdater curves are
     // sampled at the Vana'diel day fraction, so a celestial particle's colour tracks the
     // clock, NOT its own life progress. This is the sun's authored dawn/noon/dusk ramp;
     // sampling it by life would freeze the disc at the curve's opening value forever, since
@@ -2711,7 +2711,7 @@ mod tests {
         );
     }
 
-    // research/xim Particle.kt:217-218 — day-of-week first, then moon phase, each a 2x
+    // research/xim Particle.kt getColor — day-of-week first, then moon phase, each a 2x
     // modulate that saturates at 1. Order matters because the modulate clamps: applying the
     // brighter table second cannot recover what the first one crushed.
     #[test]
@@ -2740,7 +2740,7 @@ mod tests {
         );
     }
 
-    // research/xim Particle.kt:217-218 modulates with Color.modulateInPlace (Color.kt:102-108),
+    // research/xim Particle.kt getColor modulates with Color.modulateInPlace (Color.kt),
     // which scales all four channels — dropping the tables' alpha lane leaves the lunar halo
     // lit at every moon phase instead of only around full moon.
     #[test]
@@ -2943,7 +2943,7 @@ mod tests {
     // The retail half of the wire: the undither argument has to survive the mesh/texture
     // resolution it is threaded through, on the sheet the celestial set really binds. f_ro's
     // `moon` generator draws `moonshap`, a 4-bit-alpha DXT3 the moon-material path already
-    // undithers at moon_material.rs:131, so its texels are where the argument is observable:
+    // undithers at moon_material.rs load_moon_sprite_sheet, so its texels are where the argument is observable:
     // undithered alpha leaves the nibble lattice, dithered alpha cannot. Skips without a
     // retail install. `celestial_particles::tests::the_celestial_spawn_binds_an_undithered_sheet`
     // pins the two production links this one does not reach.
@@ -2994,7 +2994,7 @@ mod tests {
         def
     }
 
-    // research/xim ParticleGeneratorParser.kt:444 MoonPhaseSpriteSheetUpdater — the moon's
+    // research/xim ParticleGeneratorParser.kt sec3Handler MoonPhaseSpriteSheetUpdater — the moon's
     // sheet frame is the phase index, so it must NOT flipbook over the particle's life the
     // way every other sprite-sheet particle does.
     #[test]
@@ -3189,7 +3189,7 @@ mod tests {
                 .2
         }
 
-        // research/xim DatResource.kt:483-493 — qualified (namespace, local) match first.
+        // research/xim DatResource.kt getTextureResourceByNameAs — qualified (namespace, local) match first.
         #[test]
         fn sprite_sheet_texture_resolves_by_qualified_name() {
             assert!(resolved_texture(&sheet_assets(true, false, false)).is_some());
@@ -3243,7 +3243,7 @@ mod tests {
     // repeat across directories INSIDE a single DAT, and the generator defs that link one of
     // those names resolve to different geometry (134 D3M, 46 SpriteSheet) or a different texture
     // (422 D3M, 107 SpriteSheet) depending on the directory, so the flat last-writer-wins maps
-    // hand them another directory's mesh. research/xim ParticleLinkedDataProviders.kt:188-211
+    // hand them another directory's mesh. research/xim ParticleLinkedDataProviders.kt getParticleMesh
     // resolves a linked mesh in the generator's own directory first.
     #[cfg(not(target_arch = "wasm32"))]
     mod directory_scoped_mesh {
@@ -3425,7 +3425,7 @@ mod tests {
                 .2
         }
 
-        // research/xim DatResource.kt:488-493 — qualified (namespace, local) match first.
+        // research/xim DatResource.kt getTextureResourceByNameAs — qualified (namespace, local) match first.
         #[test]
         fn static_mesh_texture_resolves_by_qualified_name() {
             assert!(resolved_texture(&mesh_assets(true, false, false)).is_some());
@@ -3527,7 +3527,7 @@ mod tests {
         }
     }
 
-    // research/xim ParticleGeneratorAttachment.kt:87-96,103,111,125 — which of the def's two joint
+    // research/xim ParticleGeneratorAttachment.kt updateAssociatedPosition jointRefIdx,103,111,125 — which of the def's two joint
     // fields an attach type reads is fixed by the type, and the celestial/unattached ones read
     // neither.
     #[test]
@@ -3577,7 +3577,7 @@ mod tests {
         }
     }
 
-    // research/xim ParticleGeneratorAttachment.kt:307 — a mount's two footstep joints are rewritten
+    // research/xim ParticleGeneratorAttachment.kt resolveExtendedJoints — a mount's two footstep joints are rewritten
     // to reference 0 before resolution, and :284-303 takes SourceActorWeapon out of the joint path
     // entirely (its remap is PC-model-gated upstream and we carry no PC-model flag).
     #[test]
@@ -3881,7 +3881,7 @@ mod tests {
                 "{name} spawned at {origin:?}, not on the attacker's side of the victim"
             );
 
-            // research/xim SkeletonInstance.kt:73-90 runs the same selector when source and target
+            // research/xim SkeletonInstance.kt getStandardJointExtended runs the same selector when source and target
             // are one actor (a self-cast Cure), so a self-targeted def still leaves the feet.
             let self_origin = run_hit_spark_stage(
                 &skeleton,

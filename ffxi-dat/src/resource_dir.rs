@@ -274,7 +274,7 @@ mod tests {
         assert_eq!(cib.motion_option, 1);
     }
 
-    // research/xim EffectRoutineInstance.kt:418-431 — a routine's ids resolve against the chunk
+    // research/xim EffectRoutineInstance.kt appendChildSequences — a routine's ids resolve against the chunk
     // directory it lives in first. Retail reuses generator names across directories (ROM/0/0.DAT
     // has several `g010`), so the directory has to travel with the parsed stages.
     #[test]

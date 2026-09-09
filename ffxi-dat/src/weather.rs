@@ -12,12 +12,12 @@ use crate::{
 pub struct WeatherRecord {
     pub time_minutes: u32,
 
-    // research/xim EnvironmentSection.kt:275-277 indoorFlag@0 (==1 => indoors).
+    // research/xim EnvironmentSection.kt indoorFlag@0 (==1 => indoors).
     pub indoors: bool,
 
     pub sunlight_diffuse_entity: [f32; 4],
     pub moonlight_diffuse_entity: [f32; 4],
-    // research/xim EnvironmentSection.kt:251-256 getDirectionOfIndoorDiffuseLight:
+    // research/xim EnvironmentSection.kt getDirectionOfIndoorDiffuseLight:
     // when indoors, the block's moonLightColor bytes are not a color but a SIGNED
     // to-light direction (byte as i8 / 128, normalized, negated), and the single
     // static indoor DiffuseLight replaces the sun/moon arc. FFXI (Y-down) space.
@@ -26,7 +26,7 @@ pub struct WeatherRecord {
     pub fog_entity: [f32; 4],
     pub max_fog_dist_entity: f32,
     pub min_fog_dist_entity: f32,
-    // research/xim EnvironmentSection.kt:248 LightConfig.diffuseMultiplier (model block @36).
+    // research/xim EnvironmentSection.kt read LightConfig.diffuseMultiplier (model block @36).
     pub diffuse_mul_entity: f32,
 
     pub sunlight_diffuse_landscape: [f32; 4],
@@ -36,17 +36,17 @@ pub struct WeatherRecord {
     pub fog_landscape: [f32; 4],
     pub max_fog_dist_landscape: f32,
     pub min_fog_dist_landscape: f32,
-    // research/xim EnvironmentSection.kt:248 LightConfig.diffuseMultiplier (terrain block @68).
+    // research/xim EnvironmentSection.kt read LightConfig.diffuseMultiplier (terrain block @68).
     pub diffuse_mul_landscape: f32,
 
     pub fog_offset: f32,
     pub max_far_clip: f32,
 
-    // research/xim EnvironmentSection.kt:290 clearColor@76 == XIClient
+    // research/xim EnvironmentSection.kt clearColor@76 == XIClient
     // WorldParameters.BackgroundColor: the record's own backdrop. Retail's
     // DrawSky overrides it outdoors with the interpolated horizon slice
-    // (XiZone.cpp:191 SetBackColor(bsarr[0])), so this only shows through
-    // indoors, where the dome is not drawn (xim EnvironmentManager.kt:139-140).
+    // (XiZone.cpp DrawSky SetBackColor(bsarr[0])), so this only shows through
+    // indoors, where the dome is not drawn (xim EnvironmentManager.kt getClearColor).
     pub background_color: [f32; 4],
 
     pub skybox_colors: [[f32; 4]; 8],
@@ -144,12 +144,12 @@ fn u32_to_rgba(c: u32) -> [f32; 4] {
     [r, g, b, a]
 }
 
-// research/xim EnvironmentSection.kt:123-127,184-204.
+// research/xim EnvironmentSection.kt EnvironmentLighting biasThreshold,184-204.
 const COLOR_BIAS: [f32; 3] = [1.4, 1.36, 1.45];
 const BIAS_THRESHOLD_BYTE: u32 = 0xCC;
 const BIAS_THRESHOLD_F: f32 = 0xCC as f32 / 0xFF as f32;
 
-// research/xim EnvironmentSection.kt:184-193 diffuseToColor: byte/255*mul, then
+// research/xim EnvironmentSection.kt diffuseToColor: byte/255*mul, then
 // channel-wise colorBias iff every multiplied channel < 0xCC/0xFF, clamped [0,1]
 // only when bias applied.
 pub fn diffuse_to_color(byte_rgba: u32, mul: f32) -> [f32; 4] {
@@ -167,7 +167,7 @@ pub fn diffuse_to_color(byte_rgba: u32, mul: f32) -> [f32; 4] {
     [r, g, b, a]
 }
 
-// research/xim EnvironmentSection.kt:195-204 ambientToColor: bias iff every RAW
+// research/xim EnvironmentSection.kt ambientToColor: bias iff every RAW
 // byte < 0xCC, channel = bias*byte/510, then upper-ceiling 0.5 (Color.clamp(0.5)
 // == coerceIn(0,0.5), a max not a min).
 pub fn ambient_to_color(byte_rgba: u32) -> [f32; 4] {
@@ -189,7 +189,7 @@ pub fn ambient_to_color(byte_rgba: u32) -> [f32; 4] {
     [r, g, b, a]
 }
 
-// research/xim EnvironmentSection.kt:251-256: signed bytes / 128, normalized,
+// research/xim EnvironmentSection.kt getDirectionOfIndoorDiffuseLight: signed bytes / 128, normalized,
 // negated. Degenerate (all-zero) input yields the zero vector; consumers treat a
 // zero direction as "no indoor diffuse light".
 pub fn indoor_light_direction(byte_rgba: u32) -> [f32; 3] {
@@ -245,7 +245,7 @@ pub type WeatherTypeId = [u8; 4];
 
 // Retail indexes this table with the raw server weather number and does not
 // bounds-check it: research/XIClient/src/XIClient/source/World/Weather/
-// WeatherCondition.cpp:9-13 (`WeatherTable1`), read by XiZone.cpp:400-403
+// WeatherCondition.cpp (`WeatherTable1`), read by XiZone.cpp XiZone::GetWeatherResourceID
 // `GetWeatherResourceID`. Rows are transcribed in DAT byte order; XIClient
 // writes them as reversed multi-char int literals ('enif' == b"fine").
 // The LSB id ordering (vendor/server/src/map/enums/weather.h Weather, None=0 ..
@@ -278,7 +278,7 @@ const WEATHER_TYPE_IDS: [WeatherTypeId; 20] = [
 ];
 
 // XIClient ships a second, `1`-suffixed table selected per zone
-// (WeatherCondition.cpp:14-18, chosen by XiZone.cpp:344-350 `SetWeatherTable`).
+// (WeatherCondition.cpp WeatherTable2, chosen by XiZone.cpp XiZone::SetWeatherTable `SetWeatherTable`).
 // Those containers really ship — ROM4/0/11.DAT and siblings carry sun1/clo1/
 // mis1/thd1/win1 as `weat/` children — but nothing here selects a table yet.
 
@@ -342,10 +342,10 @@ impl WeatherSet {
 
 /// The bed retail would be playing at `time_minutes`.
 ///
-/// WeatherTransition.cpp:453-470: the greatest activate time earlier than now, and when
+/// WeatherTransition.cpp WeatherTransition::FindPrevSound: the greatest activate time earlier than now, and when
 /// nothing is earlier the LAST candidate enumerated — not the latest-keyed one, so `cues`
 /// must stay in DAT order. Retail's `<` is on sub-minute tick times against a key whose
-/// seconds are always zero (FileResource.cpp:630-641), so at whole-minute resolution the
+/// seconds are always zero (FileResource.cpp FileResource::GetActivateTime), so at whole-minute resolution the
 /// key that just took over is `<=` rather than `<`.
 pub fn select_ambient(cues: &[AmbientCue], time_minutes: u32) -> Option<&AmbientCue> {
     let now = time_minutes % 1440;
@@ -359,7 +359,7 @@ pub fn select_ambient(cues: &[AmbientCue], time_minutes: u32) -> Option<&Ambient
 /// `weat/<type>` DatId subdirectory.
 pub type WeatherSetsByType = HashMap<WeatherTypeId, WeatherSet>;
 
-// research/xim EnvironmentManager.kt:509-515 getAreaEnvironmentDirectories keys
+// research/xim EnvironmentManager.kt getAreaEnvironmentDirectories keys
 // the per-weather environment sets by the weather DatId subdirectory under the
 // zone root's `weat` directory; each carries its own per-hour 0x2F record set and
 // an `indo` indoor variant. We mirror that grouping here instead of the flat
@@ -373,12 +373,12 @@ pub struct ZoneWeatherSets {
     pub flat: Vec<WeatherRecord>,
 
     /// Per-area environments, keyed by the [`AreaResourceId`] the zone's MZB
-    /// placements bind to (XiArea.cpp:26-38: each area loads its own container,
+    /// placements bind to (XiArea.cpp XiArea::XiArea: each area loads its own container,
     /// found in the zone container under its FourCC). Sibling directories of
     /// `weat` under the zone root — `ev01`, `ev02`, `subl` — hold the same
     /// `<type>/<hhmm>` record shape as `weat` itself, and are where retail gets
     /// the darker, sunless fog and diffuse lights it draws building interiors
-    /// with (ZoneRenderer.cpp:1133-1152).
+    /// with (ZoneRenderer.cpp ZoneRenderer::RenderChunk2).
     pub by_area: HashMap<AreaResourceId, WeatherSetsByType>,
 }
 
@@ -389,10 +389,10 @@ impl ZoneWeatherSets {
 
     /// The environment retail draws with for `area`.
     ///
-    /// XiArea.cpp:432-445 (`FindAreaByFourCCAndGetFog`, and the identical
+    /// XiArea.cpp XiArea::FindAreaByFourCCAndGetFog (`FindAreaByFourCCAndGetFog`, and the identical
     /// ambient/diffuse-light accessors): a zero FourCC uses the zone's own area,
     /// and so does a FourCC that matches no loaded area — `FindAreaByFourCC`
-    /// returns the zone on a miss (XiArea.cpp:880-892). Zones do ship
+    /// returns the zone on a miss (XiArea.cpp XiArea::FindAreaByFourCC). Zones do ship
     /// placements naming an area with no container (`ent4`, `ex02`), so the
     /// miss path is load-bearing, not defensive.
     pub fn area_by_type(&self, area: AreaResourceId) -> &WeatherSetsByType {
@@ -405,7 +405,7 @@ impl ZoneWeatherSets {
 
 const WEAT_DIR: WeatherTypeId = *b"weat";
 const INDO_DIR: WeatherTypeId = *b"indo";
-// CYySepRes.cpp:189-190 rejects any Sep whose parent container FourCC is 'rtxe', which is
+// CYySepRes.cpp CYySepRes::CheckFourCC false rejects any Sep whose parent container FourCC is 'rtxe', which is
 // `extr` in DAT byte order.
 const EXTR_DIR: WeatherTypeId = *b"extr";
 
@@ -447,7 +447,7 @@ fn find_weat_dirs(
     by_area: &mut HashMap<AreaResourceId, WeatherSetsByType>,
 ) {
     // A dir holding `weat` is a zone root, so its *other* dir children are the
-    // area containers retail resolves by FourCC (XiArea.cpp:32-38). Keying off
+    // area containers retail resolves by FourCC (XiArea.cpp XiArea::XiArea). Keying off
     // the `weat` sibling instead of the record shape keeps `weat/suny` — itself
     // a dir of dirs of 0x2F records, via `indo`/`lf01` — from registering as an
     // area of its own.
@@ -508,10 +508,10 @@ fn harvest_weat_dir(weat: &ChunkNode, by_type: &mut WeatherSetsByType, ambient: 
     }
 }
 
-// WeatherTransition.cpp:446-448 enumerates Seps with `PrepareFromResource(.., Sep, 0, -1)`,
+// WeatherTransition.cpp WeatherTransition::FindPrevSound enumerates Seps with `PrepareFromResource(.., Sep, 0, -1)`,
 // which descends the whole container, so a bed nested below the weather tag is in scope.
 // :450-455 then splits them on whether their immediate parent is the `indo` child, and
-// CYySepRes.cpp:186-192 drops anything parented by `extr` outright.
+// CYySepRes.cpp CYySepRes::CheckFourCC drops anything parented by `extr` outright.
 fn push_ambient_cues(node: &ChunkNode, parent: WeatherTypeId, set: &mut WeatherSet) {
     for child in &node.children {
         if child.chunk.kind == ChunkKind::Rmp as u8 || !child.children.is_empty() {
@@ -551,7 +551,7 @@ fn push_weather_records(dir: &ChunkNode, out: &mut Vec<WeatherRecord>) {
     }
 }
 
-// research/xim EnvironmentManager.kt:425-438: env resources are keyed by whole
+// research/xim EnvironmentManager.kt computeInterpolatedEnvResource currentHour: env resources are keyed by whole
 // hour buckets; floorEntry is the max key <= current hour, ceilEntry the min key
 // > current hour (wrapping to the first), and the blend spans [floorKey*60,
 // (ceilKey==0 ? 24 : ceilKey)*60].
@@ -737,7 +737,7 @@ mod tests {
 
     #[test]
     fn unknown_and_zero_areas_fall_back_to_the_zone_environment() {
-        // XiArea.cpp:434-444: fourCC 0 short-circuits to the zone's own area, and
+        // XiArea.cpp XiArea::FindAreaByFourCCAndGetFog: fourCC 0 short-circuits to the zone's own area, and
         // FindAreaByFourCC returns the zone on a miss — zones ship placements
         // naming areas with no container (`ent4`, `ex02`).
         let sets = collect_zone_weather_sets(&zone_root_with_area());
@@ -935,7 +935,7 @@ mod tests {
         assert!((out2[2] - 0.5).abs() < 1e-6);
     }
 
-    // research/xim EnvironmentSection.kt:251-256: signed byte components / 128,
+    // research/xim EnvironmentSection.kt getDirectionOfIndoorDiffuseLight: signed byte components / 128,
     // normalized, negated; zero input is the "no indoor light" sentinel.
     #[test]
     fn indoor_direction_reads_signed_bytes() {
@@ -1117,7 +1117,7 @@ mod tests {
     // Pins the weather.h id ordering -> weat subdir rows.
     #[test]
     fn weather_type_id_maps_lsb_ids_to_subdirs() {
-        // Every row of XIClient WeatherCondition.cpp:9-13 `WeatherTable1`, in
+        // Every row of XIClient WeatherCondition.cpp `WeatherTable1`, in
         // DAT byte order. All 20 are distinct: retail authors one `weat/<tag>`
         // subtree per weather id, it does not collapse them onto a smaller set.
         const EXPECTED: [WeatherTypeId; 20] = [
@@ -1159,7 +1159,7 @@ mod tests {
         }
     }
 
-    // WeatherTransition.cpp:453-470 picks the greatest activate time strictly earlier than
+    // WeatherTransition.cpp WeatherTransition::FindPrevSound picks the greatest activate time strictly earlier than
     // now and otherwise the LAST candidate enumerated, which is what makes a 06:00/18:00
     // pair wrap: before dawn the night bed is the trailing key, not the nearest one.
     #[test]

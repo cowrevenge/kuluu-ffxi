@@ -1076,7 +1076,7 @@ fn load_mh_rects(
 /// (`orientation[1]`): every observed zmr*/zms* rect has zero X/Z Euler, so this
 /// is the X=Z=0 reduction of XIM's box-to-world ZYX matrix (column-major, local =
 /// Rᵀ·(p − center); research/xim/src/jsMain/kotlin/xim/poc/CollisionShapes.kt:
-/// 242-247 + xim/math/Matrix4f.kt:132-160) — a counterexample warns at rect-load.
+/// 242-247 + xim/math/Matrix4f.kt rotateZYXInPlace) — a counterexample warns at rect-load.
 /// Inside iff |local| ≤ size/2 per axis.
 fn is_inside_dat_obb(player: Vec3, rect: &ffxi_dat::zone_interaction::ZoneInteraction) -> bool {
     let dx = player.x - rect.position[0];

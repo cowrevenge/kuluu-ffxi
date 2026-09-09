@@ -313,7 +313,7 @@ pub fn standard_joint_world_position(
     Some(mat.transform_point3(arr3(reference.position_offset)))
 }
 
-// research/xim SkeletonInstance.kt:73-90 getStandardJointExtended — references 49..51 are
+// research/xim SkeletonInstance.kt getStandardJointExtended — references 49..51 are
 // selectors, not placed points: retail files joint 0 with a zero offset there, while references
 // 13..20 ring the actor at torso height. The selector stands for whichever of those eight sits
 // nearest the other actor of the attachment, which is what puts a melee hit spark on the struck

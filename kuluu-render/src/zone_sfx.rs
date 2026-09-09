@@ -32,7 +32,7 @@ use crate::zone_clouds::find_weat_type;
 pub struct ZonePlacedSfx {
     se_id: u32,
     loops: bool,
-    /// CYyGenerator.cpp:2789-2794 — a "never" generator holds one live cue and re-emits only
+    /// CYyGenerator.cpp CYyGenerator::Idle — a "never" generator holds one live cue and re-emits only
     /// once it is gone. Every shipped one-shot emitter with a sub-10-frame period is one of
     /// these (58 corpus-wide, most authoring a 1-frame period), so without it they would
     /// re-fire 30 times a second.
@@ -65,7 +65,7 @@ impl ZoneSfx {
     }
 }
 
-// WeatherTransition.cpp:22 gates activation on the generator's auto-run bit. The rest is
+// WeatherTransition.cpp ActivateWeatherGenerators gates activation on the generator's auto-run bit. The rest is
 // ours: an emitter with no base position has no world placement to mix from (those are the
 // scheduler-driven cues, e.g. `s_ju/weat/clod/tobi/naki`), and an actor-attached emitter
 // rides a target this module does not own.
@@ -274,7 +274,7 @@ fn update_zone_sfx(
     let Some(install) = slots.install_root.clone() else {
         return;
     };
-    // Calc3D measures from `CameraManager::CachedEyePosition` (CYySepRes.cpp:36), not from
+    // Calc3D measures from `CameraManager::CachedEyePosition` (CYySepRes.cpp CYySepRes::Calc3D), not from
     // the player — unlike the entity-swing cues, whose cutoff is LSB's player-measured
     // streaming radius (see `sfx_attenuation`).
     let Some(eye) = listener.iter().next().map(|t| t.translation()) else {
@@ -502,7 +502,7 @@ mod tests {
     }
 
     // The re-emission period is `frames_per_emission + uirand(emission_variance)`
-    // (CYyGenerator.cpp:2834), so the jitter draw must stay in the unit interval or a bird
+    // (CYyGenerator.cpp CYyGenerator::Idle), so the jitter draw must stay in the unit interval or a bird
     // call lands outside the authored window.
     #[test]
     fn emission_jitter_draw_stays_in_the_unit_interval() {

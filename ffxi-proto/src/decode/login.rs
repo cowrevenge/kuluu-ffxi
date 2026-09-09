@@ -3,7 +3,7 @@ use super::*;
 /// s2c 0x00A Mog House cluster. Body offsets follow
 /// vendor/server/src/map/packets/s2c/0x00a_login.h GP_SERV_COMMAND_LOGIN LoginState; `login_state` values are
 /// the SAVE_LOGIN_STATE enum (h:50-59). `map_number` is the MH interior MODEL id
-/// (GetMogHouseModelID, 0x00a_login.cpp:35-72), NOT a zone id; `mog_zone_flag` is
+/// (GetMogHouseModelID, 0x00a_login.cpp), NOT a zone id; `mog_zone_flag` is
 /// only assigned in the non-MH branch (.cpp: CanUseMisc(MISC_MOGMENU)).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ServerLoginMyroom {
@@ -26,7 +26,7 @@ impl ServerLoginMyroom {
 
     /// LSB reuses LoginState MYROOM + this MyroomMapNumber for ZONE_FERETORY
     /// (Monstrosity), which is not a Mog House server-side
-    /// (0x00a_login.cpp:234-239 sets it with no m_moghouseID).
+    /// (0x00a_login.cpp GP_SERV_COMMAND_LOGIN::GP_SERV_COMMAND_LOGIN sets it with no m_moghouseID).
     pub(crate) const MYROOM_FERETORY: u16 = 0x02D9;
 
     pub(crate) const LOGIN_STATE_OFFSET: usize = 0x7C;
@@ -95,7 +95,7 @@ pub struct ServerLogin {
     /// The character's own appearance. LSB never sends a 0x00D CHAR_PC about a
     /// player to that player (vendor/server/src/map/zone_entities.cpp
     /// `CZoneEntities::UpdateEntityPacket` skips `PCurrentChar == PEntity`), so
-    /// this `GrapIDTbl` — written at 0x00a_login.cpp:167-175 with the same slot
+    /// this `GrapIDTbl` — written at 0x00a_login.cpp GP_SERV_COMMAND_LOGIN::GP_SERV_COMMAND_LOGIN with the same slot
     /// tagging as CHAR_PC — plus 0x051 GRAP_LIST are self's only look sources.
     pub look: Option<LookData>,
 
@@ -131,17 +131,17 @@ pub struct ZoneInWeather {
     /// whose `field_NN` names run +4 ahead of the true payload offsets).
     pub previous_weather_number: u16,
     /// `WeatherTime` — `zone->GetWeatherChangeTime()`, retail's
-    /// `CurrentWeatherStartTime` (0x00A.cpp:91), in **Earth seconds since the
-    /// Vana'diel epoch**: 0x00a_login.cpp:154 assigns
-    /// `zone->GetWeatherChangeTime()`, which zone.cpp:670 sets from
+    /// `CurrentWeatherStartTime` (0x00A.cpp S2C::RecvLogin), in **Earth seconds since the
+    /// Vana'diel epoch**: 0x00a_login.cpp GP_SERV_COMMAND_LOGIN::GP_SERV_COMMAND_LOGIN assigns
+    /// `zone->GetWeatherChangeTime()`, which zone.cpp CZone::SetWeather sets from
     /// `earth_time::vanadiel_timestamp()`
     /// (vendor/server/src/common/earth_time.h timestamp).
     pub weather_time: u32,
-    /// `WeatherTime2` — retail's `PreviousWeatherStartTime` (0x00A.cpp:95).
+    /// `WeatherTime2` — retail's `PreviousWeatherStartTime` (0x00A.cpp S2C::RecvLogin).
     pub previous_weather_time: u32,
     /// `WeatherOffsetTime` — two packed u16s: the low half is retail's
     /// `CurrentWeatherOffsetTime`, the high half its `PreviousWeatherOffsetTime`
-    /// (0x00A.cpp:92,96; `FUNC_ZoneSetUp` feeds `HIWORD` to the previous pass).
+    /// (0x00A.cpp S2C::RecvLogin,96; `FUNC_ZoneSetUp` feeds `HIWORD` to the previous pass).
     pub offset_time: u32,
 }
 
@@ -221,7 +221,7 @@ impl ServerLogin {
     /// `PosHead.server_status` while a zone-in event is pending — the packet's
     /// event fields are only written then, and event id 0 is a real cutscene
     /// (Bastok Markets intro), so presence keys off the status byte
-    /// (0x00a_login.cpp:191, ANIMATION_EVENT in
+    /// (0x00a_login.cpp GP_SERV_COMMAND_LOGIN::GP_SERV_COMMAND_LOGIN, ANIMATION_EVENT in
     /// vendor/server/src/map/entities/baseentity.h ANIMATIONTYPE ANIMATION_EVENT).
     pub(crate) const SERVER_STATUS_EVENT: u8 = 4;
 
@@ -728,7 +728,7 @@ mod server_login_tests {
     #[test]
     fn server_login_carries_self_look_from_grap_id_tbl() {
         let mut buf = vec![0u8; ServerLogin::MUSIC_NUM_OFFSET];
-        // 0x00a_login.cpp:167-175 — slot0 = face | race << 8, slot i tagged +0x{i}000.
+        // 0x00a_login.cpp GP_SERV_COMMAND_LOGIN::GP_SERV_COMMAND_LOGIN — slot0 = face | race << 8, slot i tagged +0x{i}000.
         let slots: [u16; LookData::GRAP_ID_TBL_SLOTS] = [
             0x0507, 0x1011, 0x2022, 0x3033, 0x4044, 0x5055, 0x6066, 0x7077, 0x8088,
         ];

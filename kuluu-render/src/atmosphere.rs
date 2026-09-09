@@ -79,7 +79,7 @@ impl ZoneAtmosphere {
 pub struct ZoneAtmosphereProvider(pub Box<dyn Fn(u16) -> ZoneAtmosphere + Send + Sync>);
 
 // The zone-id indoor/cave heuristic was retired in favor of the F1 (0x2F) indoor
-// flag (research/xim EnvironmentSection.kt:275-277). apply_zone_atmosphere_system
+// flag (research/xim EnvironmentSection.kt read indoorFlag). apply_zone_atmosphere_system
 // selects indoor vs outdoor from the loaded ZoneWeather records; this provider is
 // the record-less fallback seed (outdoor), kept so zones without 0x2F don't go
 // black before apply_zone_weather can take authority.

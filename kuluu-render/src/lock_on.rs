@@ -26,7 +26,7 @@ impl LockOn {
 }
 
 // A held lock pins the target: it must be released before ordinary targeting
-// input can move or drop it (research/xim PlayerTargetSelector.kt:62,74,92,225
+// input can move or drop it (research/xim PlayerTargetSelector.kt clearTarget,74,92,225
 // — clear, party-slot, tab-cycle and click-target all return early while
 // isTargetLocked(), with a sub-target carve-out at :74,:92). Losing the entity
 // and zoning still clear it; those are not player targeting input.

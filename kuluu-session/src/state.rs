@@ -1510,7 +1510,7 @@ impl SessionState {
                 // The seller is a zone-local entity, so a bazaar cannot survive
                 // the warp: LSB resolves the browsed bazaar through
                 // `GetEntity(BazaarID.targid)` and drops any request once that
-                // lookup fails (0x106_bazaar_buy.cpp:46-56).
+                // lookup fails (0x106_bazaar_buy.cpp GP_CLI_COMMAND_BAZAAR_BUY::process).
                 self.bazaar = None;
                 // The AH counter is likewise zone-local (sendMenu from the NPC;
                 // GP_CLI_COMMAND_AUC::validate gates on the zone's MISC_AH).
@@ -1598,7 +1598,7 @@ impl SessionState {
                     // Model-block-gated at the source (char_update.cpp), so merge
                     // like mount_id — never off pos_present.
                     let preserved_monstrosity = entity.monstrosity.or(existing.monstrosity);
-                    // UPDATE_HP-gated at the source (entity_update.cpp:357/:408), so
+                    // UPDATE_HP-gated at the source (entity_update.cpp CEntityUpdatePacket::updateWith/:408), so
                     // merge like char_flags — never off pos_present.
                     let preserved_name_vis = entity.name_vis.or(existing.name_vis);
 
@@ -1942,7 +1942,7 @@ impl SessionState {
                         // Zeros apply too: 0 is LSB's "container disabled"
                         // sentinel (e.g. an expired Mog Locker lease across a
                         // zone change) — sticky grants would keep offering a
-                        // bag the server rejects (s2c/0x01c_item_max.cpp:52).
+                        // bag the server rejects (s2c/0x01c_item_max.cpp GP_SERV_COMMAND_ITEM_MAX::GP_SERV_COMMAND_ITEM_MAX).
                         for (id, cap) in capacities.iter().enumerate() {
                             self.inventory
                                 .containers
@@ -2031,7 +2031,7 @@ impl SessionState {
                 let mut changed = false;
                 if let Some(cell) = self.equipment.get_mut(*slot as usize) {
                     // The server reports an empty/unequipped slot as inventory
-                    // index 0 (charutils.cpp:2268 queueEquipChange(LOC_INVENTORY,
+                    // index 0 (charutils.cpp UnequipItem queueEquipChange(LOC_INVENTORY,
                     // 0, ...)). Index 0 is reserved (Gil in LOC_INVENTORY) and is
                     // never a real equipped item, so treat it as cleared — else
                     // resolve_equipment joins it to Gil.

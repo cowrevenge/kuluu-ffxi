@@ -28,7 +28,7 @@ pub struct MmbHandleCache {
     pub mesh: std::collections::HashMap<(u32, usize, usize), bevy::asset::Handle<Mesh>>,
     /// Keyed by (file_id, chunk_idx, sub_index, mirrored). The mirror bit is
     /// part of the pipeline key (front-face flip for negative-determinant
-    /// placements — xim GLDrawer.kt:186), so the same submesh placed both
+    /// placements — xim GLDrawer.kt drawXim face), so the same submesh placed both
     /// ways needs two material instances.
     pub material:
         std::collections::HashMap<(u32, usize, usize, bool), bevy::asset::Handle<FfxiZoneMaterial>>,
@@ -703,7 +703,7 @@ pub fn process_load_mmb_requests(
                     // (negative-determinant transforms, ubiquitous for zone
                     // tiles) flip effective winding, so the front-face choice
                     // must ride the pipeline key per placement — xim
-                    // GLDrawer.kt:186 does the same via glFrontFace.
+                    // GLDrawer.kt drawXim face does the same via glFrontFace.
                     let rs = ffxi_dat::mmb::MmbRenderState::from_blending(sub.blending);
                     let mirrored = req.world_transform.is_some_and(|m| m.determinant() < 0.0);
                     let render_key = crate::ffxi_zone_material::FfxiZoneMaterialKey {

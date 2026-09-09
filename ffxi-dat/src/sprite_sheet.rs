@@ -28,10 +28,10 @@ pub struct MoonSpriteSheet {
 }
 
 // A lens-flare sprite sheet (0x21 with the lens_flare flag set). Each frame carries
-// the per-mesh `offset` fraction (research/xim SpriteSheetSection.kt:52-58, the first
+// the per-mesh `offset` fraction (research/xim SpriteSheetSection.kt read distance, the first
 // of the four floats) that places the flare element along the sun->screen-centre
-// axis at lineStart*(1-offset)+lineEnd*offset (ZoneDrawer.kt:233-236), plus that mesh's
-// own quad half-extent, which is what sizes the element on screen (ZoneDrawer.kt:231).
+// axis at lineStart*(1-offset)+lineEnd*offset (ZoneDrawer.kt drawLensFlare), plus that mesh's
+// own quad half-extent, which is what sizes the element on screen (ZoneDrawer.kt drawLensFlare scale).
 #[derive(Debug, Clone)]
 pub struct LensFlareSheet {
     pub frames: Vec<UvRect>,
@@ -55,7 +55,7 @@ fn rd_f32(b: &[u8], o: usize) -> f32 {
 // The vertex diffuse is a D3DCOLOR (the sprite vertex is the D3DFVF_XYZ|DIFFUSE|TEX1 layout,
 // hence the 24-byte stride), i.e. ARGB packed little-endian, so the file bytes run B,G,R,A --
 // research/XIClient/src/XIClient/include/Rendering/Color/ARGBByte.h, the same order
-// `crate::d3m` unpacks. (research/xim SpriteSheetSection.kt:67 reads this one field as RGBA,
+// `crate::d3m` unpacks. (research/xim SpriteSheetSection.kt read reads this one field as RGBA,
 // against its own nextBGRA everywhere else it walks a vertex buffer.)
 fn rd_d3dcolor(b: &[u8], o: usize) -> [u8; 4] {
     [b[o + 2], b[o + 1], b[o], b[o + 3]]
@@ -72,7 +72,7 @@ struct SheetMeshes {
 }
 
 // Parse the per-mesh frames and (for lens-flare sheets) per-mesh offset fractions.
-// research/xim SpriteSheetSection.kt:44-79: each mesh is { u16==1, u8 num_quads, u8,
+// research/xim SpriteSheetSection.kt read: each mesh is { u16==1, u8 num_quads, u8,
 // [lens_flare: f32 offset + 3 discarded floats], 6*num_quads verts }.
 fn parse_frames_offsets(b: &[u8]) -> Option<SheetMeshes> {
     if b.len() < 24 {
@@ -176,7 +176,7 @@ impl ParticleSpriteSheet {
     }
 }
 
-// Same mesh walk as parse_frames_offsets (research/xim SpriteSheetSection.kt:44-79), but
+// Same mesh walk as parse_frames_offsets (research/xim SpriteSheetSection.kt read), but
 // retains each vertex's { vec3 pos, D3DCOLOR u32, f32 u, f32 v } instead of collapsing to a
 // UV bounding rect.
 fn parse_particle_frames(b: &[u8]) -> Option<Vec<SpriteFrame>> {
@@ -287,7 +287,7 @@ pub fn extract_lens_flare_sheet(dat_bytes: &[u8]) -> Option<LensFlareSheet> {
 }
 
 // The moon disc's day-of-week (0x4E, 8xRGBA) and moon-phase (0x4F, 12xRGBA) color tables.
-// research/xim ParticleUpdaters.kt:289-317.
+// research/xim ParticleUpdaters.kt DayOfWeekColorUpdater.
 pub struct CelestialColorTables {
     pub day_of_week: Option<[[f32; 4]; DAYS_OF_WEEK]>,
     pub moon_phase: Option<[[f32; 4]; MOON_PHASES]>,
@@ -419,7 +419,7 @@ mod tests {
 
     #[test]
     fn lens_flare_captures_first_offset_float() {
-        // research/xim SpriteSheetSection.kt:52-58: the first of four floats is the
+        // research/xim SpriteSheetSection.kt read distance: the first of four floats is the
         // per-mesh offset; the next three are discarded.
         let mut b = header(2, true, "lf0a", "flar");
         b.extend(mesh(1, Some(0.25), (0.0, 0.0, 0.5, 0.5)));

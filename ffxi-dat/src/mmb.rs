@@ -153,11 +153,11 @@ pub struct MmbVertex {
     pub uv: [f32; 2],
 }
 
-// research/XIClient Rendering/Direct3D8Manager.cpp:393,395 — the MMB vertex colour reaches
+// research/XIClient Rendering/Direct3D8Manager.cpp Direct3D8Manager::InitializeRenderStateBlocks,395 — the MMB vertex colour reaches
 // fixed-function T&L as D3DMCS_COLOR1, i.e. a D3DCOLOR, so its natural scale is byte/255 and
-// the stage-0 MODULATE2X (ZoneRenderer.cpp:2453) lives in the shader, not in this decode.
+// the stage-0 MODULATE2X (ZoneRenderer.cpp ZoneRenderer::ApplyDefaultRenderState) lives in the shader, not in this decode.
 pub const VERTEX_COLOR_DIVISOR: f32 = u8::MAX as f32;
-// ZoneRenderer.cpp:2456 pairs that MODULATE2X with an ALPHAOP of MODULATE4X, so the alpha
+// ZoneRenderer.cpp ZoneRenderer::ApplyDefaultRenderState pairs that MODULATE2X with an ALPHAOP of MODULATE4X, so the alpha
 // channel carries one extra doubling. `zone_texture::ffxi_alpha_remap` supplies the other,
 // which is why alpha alone normalises against a half-scale divisor.
 pub const VERTEX_ALPHA_DIVISOR: f32 = VERTEX_COLOR_DIVISOR / 2.0;
@@ -171,7 +171,7 @@ pub const D3DCOLOR_CHANNEL_MASK: u32 = 0xFF;
 // The MMB vertex diffuse is a D3DCOLOR, i.e. ARGB packed little-endian, so the file bytes run
 // B,G,R,A (research/XIClient/src/XIClient/include/Rendering/Color/ARGBByte.h). `crate::d3m`
 // unpacks the identical record that way, and xim walks this same 36-byte vertex with
-// `nextBGRA` (research/xim ParticleMeshSection.kt:69, WeightedMeshSection.kt:157).
+// `nextBGRA` (research/xim ParticleMeshSection.kt read color, WeightedMeshSection.kt read).
 fn d3dcolor_rgba(b: &[u8], off: usize) -> [u8; 4] {
     [b[off + 2], b[off + 1], b[off], b[off + 3]]
 }
@@ -394,15 +394,15 @@ fn is_ascii_variant(b: &[u8]) -> bool {
 ///
 /// Derived state (not stored in the DAT, reproduced from xim):
 /// - depth bias: `blendEnabled` -> `ZBiasLevel.High`, else `Normal`
-///   (ZoneMeshSection.kt:120-123), applied by the GL layer as
-///   `polygonOffset(zBias * -1, 1)` (GLDrawer.kt:219, :363).
-/// - depth write: disabled for blended meshes (GLDrawer.kt:198-201, :332-342).
+///   (ZoneMeshSection.kt parseMesh), applied by the GL layer as
+///   `polygonOffset(zBias * -1, 1)` (GLDrawer.kt drawXim, :363).
+/// - depth write: disabled for blended meshes (GLDrawer.kt drawXim, :332-342).
 /// - discard threshold: 0.375 when the zone-mesh *name* starts with `_`
-///   (ZoneMeshSection.kt:119) — i.e. the name-prefix heuristic in
+///   (ZoneMeshSection.kt parseMesh discardThreshold) — i.e. the name-prefix heuristic in
 ///   `dat_mmb.rs::submesh_alpha_mode` is retail-faithful, not a guess.
 ///
 /// NOTE: `vertexBlendEnabled` is NOT in this word. It is the section-level
-/// config bit `0x2` (ZoneMeshSection.kt:35), which for SMMB corresponds to
+/// config bit `0x2` (ZoneMeshSection.kt read vertexBlendEnabled), which for SMMB corresponds to
 /// `d3 == 2` / vertex stride 48 (`MmbModel::vertex_blend_enabled`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MmbRenderState {
@@ -413,7 +413,7 @@ pub struct MmbRenderState {
     pub back_face_culling: bool,
 }
 
-// research/XIClient Rendering/ZoneRenderer.cpp:198-200, 1269-1275 — blended terrain
+// research/XIClient Rendering/ZoneRenderer.cpp ZoneRenderer::ZoneRenderer, 1269-1275 — blended terrain
 // uses the legacy D3D8 integer Z-bias layer 8 so it stays in front of its coplanar base.
 pub const TRANSPARENT_Z_BIAS_LEVEL: u8 = 8;
 
@@ -428,7 +428,7 @@ impl MmbRenderState {
         }
     }
 
-    /// XIClient ZoneRenderer.cpp:198-200, 1269-1275 — blended zone meshes use
+    /// XIClient ZoneRenderer.cpp ZoneRenderer::ZoneRenderer, 1269-1275 — blended zone meshes use
     /// `TransparentZBias` (8), opaque meshes use `OpaqueZBias` (0).
     pub fn z_bias_level(&self) -> u8 {
         if self.blend_enabled {
@@ -438,7 +438,7 @@ impl MmbRenderState {
         }
     }
 
-    /// GLDrawer.kt:198-201 — blended meshes do not write depth.
+    /// GLDrawer.kt drawXim — blended meshes do not write depth.
     pub fn depth_write(&self) -> bool {
         !self.blend_enabled
     }
@@ -451,14 +451,14 @@ pub struct MmbModel {
     /// Decoded view of `blending`; see [`MmbRenderState`].
     pub render_state: MmbRenderState,
     /// Section-level vertex-blend flag (`d3 == 2`, stride-48 layout).
-    /// Mirrors xim's `vertexBlendEnabled` (ZoneMeshSection.kt:35).
+    /// Mirrors xim's `vertexBlendEnabled` (ZoneMeshSection.kt).
     pub vertex_blend_enabled: bool,
     pub vertices: Vec<MmbVertex>,
 
     pub indices: Vec<u16>,
 }
 
-// research/xim ZoneMeshSection.kt:73-100 — the section vertex record is 16-byte texture name,
+// research/xim ZoneMeshSection.kt parseMesh — the section vertex record is 16-byte texture name,
 // u16 count, u16 flags, then pos vec3 + normal vec3 + BGRA + uv (36 bytes), with a second vec3
 // interleaved when the section's vertex-blend config is set (48).
 const VERTEX_STRIDE_PLAIN: usize = 36;
@@ -860,7 +860,7 @@ mod tests {
 
     #[test]
     fn render_state_decodes_blend_and_cull_bits() {
-        // ZoneMeshSection.kt:79-81 — 0x8000 = blend, 0x2000 = cull DISABLED.
+        // ZoneMeshSection.kt parseMesh blendEnabled — 0x8000 = blend, 0x2000 = cull DISABLED.
         let opaque = MmbRenderState::from_blending(0x0000);
         assert!(!opaque.blend_enabled);
         assert!(opaque.back_face_culling);

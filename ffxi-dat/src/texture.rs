@@ -330,10 +330,15 @@ fn decode_palettized(
     })
 }
 
+const RGB565_5BIT_MASK: u16 = 0x1F;
+const RGB565_6BIT_MASK: u16 = 0x3F;
+const DXT_TEXEL_INDEX_MASK: u32 = 0x3;
+const DXT3_ALPHA_NIBBLE_MASK: u8 = 0x0F;
+
 fn rgb565_to_rgb888(c: u16) -> (u8, u8, u8) {
-    let r5 = ((c >> 11) & 0x1F) as u8;
-    let g6 = ((c >> 5) & 0x3F) as u8;
-    let b5 = (c & 0x1F) as u8;
+    let r5 = ((c >> 11) & RGB565_5BIT_MASK) as u8;
+    let g6 = ((c >> 5) & RGB565_6BIT_MASK) as u8;
+    let b5 = (c & RGB565_5BIT_MASK) as u8;
 
     let r = (r5 << 3) | (r5 >> 2);
     let g = (g6 << 2) | (g6 >> 4);
@@ -382,7 +387,7 @@ fn decode_color_block(block: &[u8; 8], out: &mut [u8; 64], punchthrough_alpha: b
     for py in 0..4 {
         for px in 0..4 {
             let i = py * 4 + px;
-            let sel = ((idx_word >> (2 * i)) & 0x3) as usize;
+            let sel = ((idx_word >> (2 * i)) & DXT_TEXEL_INDEX_MASK) as usize;
             let dst = i * 4;
             out[dst..dst + 4].copy_from_slice(&palette[sel]);
         }
@@ -524,7 +529,7 @@ pub fn decode_dxt3_blocks(
         decode_color_block(color, out, false);
         for i in 0..8 {
             let a_byte = src[i];
-            let a_lo_4 = (a_byte & 0x0F) as u16;
+            let a_lo_4 = (a_byte & DXT3_ALPHA_NIBBLE_MASK) as u16;
             let a_hi_4 = (a_byte >> 4) as u16;
 
             let a_lo = ((a_lo_4 << 4) | a_lo_4) as u8;
@@ -815,7 +820,7 @@ pub(crate) mod tests {
                 let block = (y / 4) as usize * blocks_x + (x / 4) as usize;
                 let texel = (y % 4) * 4 + (x % 4);
                 let byte = block * 16 + (texel / 2) as usize;
-                let nibble = f(x, y) & 0x0F;
+                let nibble = f(x, y) & DXT3_ALPHA_NIBBLE_MASK;
                 out[byte] |= nibble << (4 * (texel % 2));
             }
         }

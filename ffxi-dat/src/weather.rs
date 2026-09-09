@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use crate::{
     chunk::{self, ChunkNode},
     kind::ChunkKind,
+    mmb::D3DCOLOR_CHANNEL_MASK,
     mzb::AreaResourceId,
     DatError, Result,
 };
@@ -136,10 +137,10 @@ pub fn parse_weather_record(name: &[u8; 4], body: &[u8]) -> Result<WeatherRecord
 }
 
 fn u32_to_rgba(c: u32) -> [f32; 4] {
-    let r = (c & 0xFF) as f32 / 255.0;
-    let g = ((c >> 8) & 0xFF) as f32 / 255.0;
-    let b = ((c >> 16) & 0xFF) as f32 / 255.0;
-    let a = ((c >> 24) & 0xFF) as f32 / 128.0;
+    let r = (c & D3DCOLOR_CHANNEL_MASK) as f32 / 255.0;
+    let g = ((c >> 8) & D3DCOLOR_CHANNEL_MASK) as f32 / 255.0;
+    let b = ((c >> 16) & D3DCOLOR_CHANNEL_MASK) as f32 / 255.0;
+    let a = ((c >> 24) & D3DCOLOR_CHANNEL_MASK) as f32 / 128.0;
     [r, g, b, a]
 }
 
@@ -152,10 +153,10 @@ const BIAS_THRESHOLD_F: f32 = 0xCC as f32 / 0xFF as f32;
 // channel-wise colorBias iff every multiplied channel < 0xCC/0xFF, clamped [0,1]
 // only when bias applied.
 pub fn diffuse_to_color(byte_rgba: u32, mul: f32) -> [f32; 4] {
-    let mut r = (byte_rgba & 0xFF) as f32 / 255.0 * mul;
-    let mut g = ((byte_rgba >> 8) & 0xFF) as f32 / 255.0 * mul;
-    let mut b = ((byte_rgba >> 16) & 0xFF) as f32 / 255.0 * mul;
-    let a = ((byte_rgba >> 24) & 0xFF) as f32 / 128.0;
+    let mut r = (byte_rgba & D3DCOLOR_CHANNEL_MASK) as f32 / 255.0 * mul;
+    let mut g = ((byte_rgba >> 8) & D3DCOLOR_CHANNEL_MASK) as f32 / 255.0 * mul;
+    let mut b = ((byte_rgba >> 16) & D3DCOLOR_CHANNEL_MASK) as f32 / 255.0 * mul;
+    let a = ((byte_rgba >> 24) & D3DCOLOR_CHANNEL_MASK) as f32 / 128.0;
 
     let apply_bias = r < BIAS_THRESHOLD_F && g < BIAS_THRESHOLD_F && b < BIAS_THRESHOLD_F;
     if apply_bias {
@@ -170,10 +171,10 @@ pub fn diffuse_to_color(byte_rgba: u32, mul: f32) -> [f32; 4] {
 // byte < 0xCC, channel = bias*byte/510, then upper-ceiling 0.5 (Color.clamp(0.5)
 // == coerceIn(0,0.5), a max not a min).
 pub fn ambient_to_color(byte_rgba: u32) -> [f32; 4] {
-    let rb = byte_rgba & 0xFF;
-    let gb = (byte_rgba >> 8) & 0xFF;
-    let bb = (byte_rgba >> 16) & 0xFF;
-    let ab = (byte_rgba >> 24) & 0xFF;
+    let rb = byte_rgba & D3DCOLOR_CHANNEL_MASK;
+    let gb = (byte_rgba >> 8) & D3DCOLOR_CHANNEL_MASK;
+    let bb = (byte_rgba >> 16) & D3DCOLOR_CHANNEL_MASK;
+    let ab = (byte_rgba >> 24) & D3DCOLOR_CHANNEL_MASK;
 
     let bias = if rb < BIAS_THRESHOLD_BYTE && gb < BIAS_THRESHOLD_BYTE && bb < BIAS_THRESHOLD_BYTE {
         COLOR_BIAS
@@ -192,9 +193,9 @@ pub fn ambient_to_color(byte_rgba: u32) -> [f32; 4] {
 // negated. Degenerate (all-zero) input yields the zero vector; consumers treat a
 // zero direction as "no indoor diffuse light".
 pub fn indoor_light_direction(byte_rgba: u32) -> [f32; 3] {
-    let x = (byte_rgba & 0xFF) as u8 as i8 as f32 / 128.0;
-    let y = ((byte_rgba >> 8) & 0xFF) as u8 as i8 as f32 / 128.0;
-    let z = ((byte_rgba >> 16) & 0xFF) as u8 as i8 as f32 / 128.0;
+    let x = (byte_rgba & D3DCOLOR_CHANNEL_MASK) as u8 as i8 as f32 / 128.0;
+    let y = ((byte_rgba >> 8) & D3DCOLOR_CHANNEL_MASK) as u8 as i8 as f32 / 128.0;
+    let z = ((byte_rgba >> 16) & D3DCOLOR_CHANNEL_MASK) as u8 as i8 as f32 / 128.0;
     let len = (x * x + y * y + z * z).sqrt();
     if len <= f32::EPSILON {
         return [0.0, 0.0, 0.0];
@@ -456,7 +457,7 @@ fn find_weat_dirs(
         .any(|c| c.chunk.kind == ChunkKind::Rmp as u8 && c.chunk.name == WEAT_DIR);
 
     for child in &node.children {
-        if child.chunk.kind != 0x01 {
+        if child.chunk.kind != ChunkKind::Rmp as u8 {
             continue;
         }
         if child.chunk.name == WEAT_DIR {
@@ -491,7 +492,7 @@ enum HarvestAmbient {
 
 fn harvest_weat_dir(weat: &ChunkNode, by_type: &mut WeatherSetsByType, ambient: HarvestAmbient) {
     for type_node in &weat.children {
-        if type_node.chunk.kind != 0x01 {
+        if type_node.chunk.kind != ChunkKind::Rmp as u8 {
             continue;
         }
         let set = by_type.entry(type_node.chunk.name).or_default();
@@ -1021,7 +1022,7 @@ mod tests {
         let padded_total = total.div_ceil(16) * 16;
         let pad = padded_total - total;
         let size_units = (padded_total / 16) as u32;
-        let value = (size_units << 7) | (kind as u32 & 0x7F);
+        let value = (size_units << 7) | (kind as u32 & crate::chunk::CHUNK_KIND_MASK);
 
         let mut out = Vec::with_capacity(padded_total);
         out.extend_from_slice(name);

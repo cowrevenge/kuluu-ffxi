@@ -57,6 +57,7 @@ const ENCRYPTED_MIN_VERSION: u8 = 27;
 /// ZoneBlockResource.cpp:25 — "the first 8 bytes are never encrypted", so the
 /// pass-1 region is `[8, 8 + encryptedByteCount)`.
 const ENCRYPTED_REGION_START: usize = 8;
+const DECRYPT_INDEX_XOR: u8 = 0xFF;
 
 /// Pass 2 XORs the name of every placement record.
 /// research/cexi-docs/zone/format.md:101-103 — 0x64-byte records start at 0x20.
@@ -89,7 +90,7 @@ pub fn decrypt_in_place(data: &mut [u8]) -> Result<()> {
     let decrypt_index = data[HDR_CHUNK_COUNT_AND_DECRYPT_INDEX + 3];
 
     if version >= ENCRYPTED_MIN_VERSION {
-        let mut key: i32 = KEY_TABLE[(decrypt_index ^ 0xFF) as usize] as i32;
+        let mut key: i32 = KEY_TABLE[(decrypt_index ^ DECRYPT_INDEX_XOR) as usize] as i32;
         let mut key_count: i32 = 0;
         // ZoneBlockResource.cpp:25-40 — `position` counts from 0 while the run
         // it inverts starts at byte 8, so the encrypted region is
@@ -337,6 +338,9 @@ const TRI_CAMERA_TRANSPARENT: u16 = 0x4000;
 /// nothing in those zones would block. Parsed, unused, semantics unresolved.
 const TRI_SECOND_WORD_FLAG: u16 = 0x4000;
 
+const TRI_INDEX_MASK: u16 = 0x7FFF;
+const TRI_FLAGGED_INDEX_MASK: u16 = 0x3FFF;
+
 /// research/XIClient/src/XIClient/include/World/Zone/Terrain/CollisionQuery.hpp
 /// `DoubleSidedSkipPolicy::SkipTriangle`:
 /// `header->Flags != 0 && (triangle->VertexIndex3 & 0x4000) != 0`.
@@ -572,10 +576,10 @@ fn parse_one_mesh(body: &[u8], pos: usize) -> Result<MzbMesh> {
         let v1_raw = u16::from_le_bytes([body[o + 2], body[o + 3]]);
         let v2_raw = u16::from_le_bytes([body[o + 4], body[o + 5]]);
         let n0_raw = u16::from_le_bytes([body[o + 6], body[o + 7]]);
-        let v0 = (v0_raw & 0x7FFF) as u32;
-        let v1 = (v1_raw & 0x3FFF) as u32;
-        let v2 = (v2_raw & 0x3FFF) as u32;
-        let n0 = (n0_raw & 0x7FFF) as u32;
+        let v0 = (v0_raw & TRI_INDEX_MASK) as u32;
+        let v1 = (v1_raw & TRI_FLAGGED_INDEX_MASK) as u32;
+        let v2 = (v2_raw & TRI_FLAGGED_INDEX_MASK) as u32;
+        let n0 = (n0_raw & TRI_INDEX_MASK) as u32;
         let m0 = ((v0_raw >> 15) & 1) as u8;
         let m1 = ((v1_raw >> 15) & 1) as u8;
         let m2 = ((v2_raw >> 15) & 1) as u8;
@@ -1584,6 +1588,11 @@ pub fn infer_zone_prefix(mmb_asset_names: &[String]) -> String {
 mod tests {
     use super::*;
 
+    const TRI_TERRAIN_BIT: u16 = 0x8000;
+    const PLAINTEXT_VERSION: u8 = 0x10;
+    const SYNTH_GEOMETRY_OFFSET: u32 = 0x40;
+    const SPECIAL_EFFECTS_UNRELATED_BIT: u8 = 0x04;
+
     fn synth_mzb() -> Vec<u8> {
         let mut buf = vec![0u8; 0x8C];
 
@@ -1621,8 +1630,13 @@ mod tests {
         buf[0x78..0x7C].copy_from_slice(&0.0f32.to_le_bytes());
 
         let tris: [[u16; 4]; 2] = [
-            [0x8000, 1 | 0x4000, 2, 0],
-            [0, 2, 3 | 0x4000 | 0x8000, 0x8000],
+            [TRI_TERRAIN_BIT, 1 | TRI_SECOND_WORD_FLAG, 2, 0],
+            [
+                0,
+                2,
+                3 | TRI_CAMERA_TRANSPARENT | TRI_TERRAIN_BIT,
+                TRI_TERRAIN_BIT,
+            ],
         ];
         for (i, t) in tris.iter().enumerate() {
             let o = 0x7C + i * 8;
@@ -1639,7 +1653,10 @@ mod tests {
         let orig = synth_mzb();
         let mut buf = orig.clone();
         decrypt_in_place(&mut buf).unwrap();
-        assert_eq!(buf, orig, "version < 0x1B should bypass pass 1 entirely");
+        assert_eq!(
+            buf, orig,
+            "version below ENCRYPTED_MIN_VERSION bypasses pass 1 entirely"
+        );
     }
 
     #[test]
@@ -1793,19 +1810,22 @@ mod tests {
 
     #[test]
     fn pass2_node_xor_runs() {
+        const FILL: u8 = 0xAA;
         let mut buf = vec![0u8; 0x20 + 0x64];
-        buf[0..4].copy_from_slice(&((0x10u32 << 24) | 0x20).to_le_bytes());
+        buf[0..4].copy_from_slice(
+            &((u32::from(PLAINTEXT_VERSION) << 24) | MZB_HEADER_LEN as u32).to_le_bytes(),
+        );
         buf[4..8].copy_from_slice(&1u32.to_le_bytes());
 
         buf[8..12].copy_from_slice(&0x20u32.to_le_bytes());
         for b in &mut buf[0x20..0x30] {
-            *b = 0xAA;
+            *b = FILL;
         }
         decrypt_in_place(&mut buf).unwrap();
         for b in &buf[0x20..0x30] {
             assert_eq!(
                 *b,
-                0xAA ^ 0x55,
+                FILL ^ PLACEMENT_NAME_XOR,
                 "pass 2 should XOR first 16 bytes of each node with 0x55"
             );
         }
@@ -1865,7 +1885,7 @@ mod tests {
 
         buf[0x210..0x214].copy_from_slice(&0xDEADu32.to_le_bytes());
         buf[0x214..0x218].copy_from_slice(&0x220u32.to_le_bytes());
-        buf[0x218..0x21C].copy_from_slice(&0x40u32.to_le_bytes());
+        buf[0x218..0x21C].copy_from_slice(&SYNTH_GEOMETRY_OFFSET.to_le_bytes());
         buf[0x21C..0x220].copy_from_slice(&0u32.to_le_bytes());
 
         let mut m = [0.0f32; 16];
@@ -1899,7 +1919,7 @@ mod tests {
             "exactly one (mat,geo) pair in cell (0,0)"
         );
         let p = placements[0];
-        assert_eq!(p.geometry_offset, 0x40);
+        assert_eq!(p.geometry_offset, SYNTH_GEOMETRY_OFFSET);
         assert_eq!(p.grid_x, 0);
         assert_eq!(p.grid_y, 0);
         assert!(
@@ -1951,9 +1971,9 @@ mod tests {
 
         let placements = parse_placements(&body, &h).unwrap();
         assert!(
-            placements
-                .iter()
-                .any(|p| p.grid_x == 0 && p.grid_y == 1 && p.geometry_offset == 0x40),
+            placements.iter().any(|p| p.grid_x == 0
+                && p.grid_y == 1
+                && p.geometry_offset == SYNTH_GEOMETRY_OFFSET),
             "row-1 cell must be reached at stride 20, got {:?}",
             placements
                 .iter()
@@ -2107,7 +2127,8 @@ mod tests {
         put_f32(&mut body, PL_LOD_NEAR, 10.0);
         put_f32(&mut body, PL_LOD_MID, 20.0);
         put_f32(&mut body, PL_LOD_FAR, 30.0);
-        body[rec + PL_SPECIAL_EFFECTS] = SPECIAL_EFFECTS_LOD_RENDERING | 0x04;
+        body[rec + PL_SPECIAL_EFFECTS] =
+            SPECIAL_EFFECTS_LOD_RENDERING | SPECIAL_EFFECTS_UNRELATED_BIT;
         put_u32(&mut body, PL_AREA_RESOURCE_ID, 0x1234_5678);
         put_u32(&mut body, PL_SUB_AREA_LINK, 0x1CE);
         for k in 0..LIGHT_REFERENCE_COUNT {
@@ -2129,7 +2150,10 @@ mod tests {
         assert_eq!(p.scale[0], 5.0);
         assert_eq!(p.block_id, 0xAABB_CCDD);
         assert_eq!((p.lod_near, p.lod_mid, p.lod_far), (10.0, 20.0, 30.0));
-        assert_eq!(p.special_effects, SPECIAL_EFFECTS_LOD_RENDERING | 0x04);
+        assert_eq!(
+            p.special_effects,
+            SPECIAL_EFFECTS_LOD_RENDERING | SPECIAL_EFFECTS_UNRELATED_BIT
+        );
         assert!(p.uses_lod_rendering());
         assert_eq!(p.area_resource_id, 0x1234_5678);
         assert_eq!(p.sub_area_link, 0x1CE);

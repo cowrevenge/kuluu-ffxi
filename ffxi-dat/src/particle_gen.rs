@@ -16,6 +16,11 @@ use crate::{DatError, Result};
 // allocationOffset = cfg>>0xD; the block is size_words*4 bytes; a 0 opcode/size terminates.
 // Only section 2 (particle initializers) is needed for the visible stream.
 const HEADER_LEN: usize = 0x80;
+const CHUNK_HEADER_LEN: usize = 0x10;
+const OPCODE_MASK: u32 = 0xFF;
+pub(crate) const OPCODE_END: u8 = 0x00;
+pub(crate) const OPCODE_STANDARD_SETUP: u8 = 0x01;
+pub(crate) const SIZE_WORDS_MASK: u8 = 0x1F;
 // research/xim ParticleGeneratorSettings.kt:187 — the StandardParticleSetup linked_data_type
 // (setup byte payload+29) selects the particle's mesh source: 0x0B StaticMesh (a D3M billboard),
 // 0x0E SpriteSheet (a 0x21 flipbook quad). 0x57 Null / 0x47 PointLight and any other value are
@@ -197,6 +202,8 @@ const GEN_FLAG_AUTO_RUN: u32 = 0x1000;
 // CYyGenerator.cpp:659-661 CheckFlag29 — a batched generator emits one elem per emission (:2814)
 // and that elem is itself a multi-particle batch.
 const GEN_FLAG_BATCHED: u32 = 0x2000_0000;
+const BLEND_FUNC_OPAQUE_BIT: u8 = 0x01;
+const BLEND_FUNC_MODE_MASK: u8 = 0x0F;
 
 // Vana'diel's elemental week (research/xim EnvironmentManager.kt DayOfWeek) and the
 // 12 moon-phase buckets the 0x45/0x4F celestial opcodes index.
@@ -341,10 +348,10 @@ impl ParticleGeneratorDef {
 
         // Section 2 = particle initializers.
         let sec2_raw = u32_le(body, 0x74) as usize;
-        if sec2_raw < 0x10 || sec2_raw - 0x10 >= body.len() {
+        if sec2_raw < CHUNK_HEADER_LEN || sec2_raw - CHUNK_HEADER_LEN >= body.len() {
             return Ok(None);
         }
-        let mut cursor = sec2_raw - 0x10;
+        let mut cursor = sec2_raw - CHUNK_HEADER_LEN;
 
         let mut mesh_id = [0u8; 4];
         let mut mesh_kind = ParticleMeshKind::StaticMesh;
@@ -371,9 +378,9 @@ impl ParticleGeneratorDef {
 
         while cursor + 4 <= body.len() {
             let cfg = u32_le(body, cursor);
-            let opcode = (cfg & 0xFF) as u8;
-            let size_words = ((cfg >> 8) & 0x1F) as usize;
-            if opcode == 0x00 || size_words == 0 {
+            let opcode = (cfg & OPCODE_MASK) as u8;
+            let size_words = ((cfg >> 8) & u32::from(SIZE_WORDS_MASK)) as usize;
+            if opcode == OPCODE_END || size_words == 0 {
                 break;
             }
             let block_len = size_words * 4;
@@ -471,10 +478,10 @@ impl ParticleGeneratorDef {
                 0x1E if payload < body.len() => {
                     let p0 = body[payload];
                     blend_byte = p0;
-                    blend = if (p0 >> 4) & 0x01 != 0 {
+                    blend = if (p0 >> 4) & BLEND_FUNC_OPAQUE_BIT != 0 {
                         ParticleBlend::Blend
                     } else {
-                        match p0 & 0x0F {
+                        match p0 & BLEND_FUNC_MODE_MASK {
                             0x8 => ParticleBlend::Additive,
                             0x1 | 0x2 => ParticleBlend::Subtract,
                             _ => ParticleBlend::Blend,
@@ -500,13 +507,13 @@ impl ParticleGeneratorDef {
         let mut moon_phase_sprite = false;
         let mut tod_color_driven = [false; TOD_COLOR_CHANNELS];
         let sec3_raw = u32_le(body, 0x78) as usize;
-        if sec3_raw >= 0x10 && sec3_raw - 0x10 < body.len() {
-            let mut cursor = sec3_raw - 0x10;
+        if sec3_raw >= CHUNK_HEADER_LEN && sec3_raw - CHUNK_HEADER_LEN < body.len() {
+            let mut cursor = sec3_raw - CHUNK_HEADER_LEN;
             while cursor + 4 <= body.len() {
                 let cfg = u32_le(body, cursor);
-                let opcode = (cfg & 0xFF) as u8;
-                let size_words = ((cfg >> 8) & 0x1F) as usize;
-                if opcode == 0x00 || size_words == 0 {
+                let opcode = (cfg & OPCODE_MASK) as u8;
+                let size_words = ((cfg >> 8) & u32::from(SIZE_WORDS_MASK)) as usize;
+                if opcode == OPCODE_END || size_words == 0 {
                     break;
                 }
                 let block_len = size_words * 4;
@@ -596,7 +603,7 @@ impl ParticleGeneratorDef {
 // research/XIClient/src/XIClient/include/Resource/ResourceType.h `Sep = 61`, dispatched
 // at CYyGenerator.cpp:117 (`modelType` = the same setup byte payload+29 the particle kinds
 // come from) and :193 (`case Sep: elem = new CYySoundElem()`).
-const LINKED_DATA_SOUND: u8 = 0x3D;
+pub(crate) const LINKED_DATA_SOUND: u8 = 0x3D;
 
 // research/XIClient/src/XIClient/source/World/Generator/CYyGenerator.cpp CYyGenerator::ElemGenerate 0x4Cu —
 // initializer 0x4C is the sound elem's setup: `s_far = fpos[1]`, `s_near = fpos[2]`, and
@@ -647,10 +654,10 @@ impl SoundGeneratorDef {
         let flags = u32_le(body, GEN_FLAGS_OFFSET);
 
         let sec2_raw = u32_le(body, 0x74) as usize;
-        if sec2_raw < 0x10 || sec2_raw - 0x10 >= body.len() {
+        if sec2_raw < CHUNK_HEADER_LEN || sec2_raw - CHUNK_HEADER_LEN >= body.len() {
             return Ok(None);
         }
-        let mut cursor = sec2_raw - 0x10;
+        let mut cursor = sec2_raw - CHUNK_HEADER_LEN;
 
         let mut is_sound = false;
         let mut sep_id = [0u8; 4];
@@ -661,9 +668,9 @@ impl SoundGeneratorDef {
 
         while cursor + 4 <= body.len() {
             let cfg = u32_le(body, cursor);
-            let opcode = (cfg & 0xFF) as u8;
-            let size_words = ((cfg >> 8) & 0x1F) as usize;
-            if opcode == 0x00 || size_words == 0 {
+            let opcode = (cfg & OPCODE_MASK) as u8;
+            let size_words = ((cfg >> 8) & u32::from(SIZE_WORDS_MASK)) as usize;
+            if opcode == OPCODE_END || size_words == 0 {
                 break;
             }
             let block_len = size_words * 4;

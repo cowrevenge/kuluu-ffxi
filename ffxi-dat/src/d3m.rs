@@ -1,3 +1,4 @@
+use crate::mmb::D3DCOLOR_CHANNEL_MASK;
 use crate::{DatError, Result};
 
 pub const D3M_MAGIC: u32 = 6;
@@ -83,10 +84,10 @@ impl D3m {
                 body[off + 27],
             ]);
             let color = [
-                ((raw >> 16) & 0xFF) as f32 / VERTEX_COLOR_DIVISOR,
-                ((raw >> 8) & 0xFF) as f32 / VERTEX_COLOR_DIVISOR,
-                (raw & 0xFF) as f32 / VERTEX_COLOR_DIVISOR,
-                ((raw >> 24) & 0xFF) as f32 / VERTEX_COLOR_DIVISOR,
+                ((raw >> 16) & D3DCOLOR_CHANNEL_MASK) as f32 / VERTEX_COLOR_DIVISOR,
+                ((raw >> 8) & D3DCOLOR_CHANNEL_MASK) as f32 / VERTEX_COLOR_DIVISOR,
+                (raw & D3DCOLOR_CHANNEL_MASK) as f32 / VERTEX_COLOR_DIVISOR,
+                ((raw >> 24) & D3DCOLOR_CHANNEL_MASK) as f32 / VERTEX_COLOR_DIVISOR,
             ];
             let uv = [f32_le(body, off + 28), f32_le(body, off + 32)];
             vertices.push(D3mVertex {

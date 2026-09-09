@@ -1,4 +1,7 @@
+use crate::particle_gen::{LINKED_DATA_SOUND, OPCODE_END, OPCODE_STANDARD_SETUP, SIZE_WORDS_MASK};
 use crate::{DatError, Result};
+
+const SETUP_SIZE_NIBBLE_MASK: u8 = 0x0F;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Generator {
@@ -11,7 +14,7 @@ pub struct Generator {
 
 impl Generator {
     pub fn is_sound(&self) -> bool {
-        self.effect_type == 0x3D
+        self.effect_type == LINKED_DATA_SOUND
     }
 
     pub fn parse(name: [u8; 4], body: &[u8]) -> Result<Option<Self>> {
@@ -39,12 +42,13 @@ impl Generator {
         let mut cursor = creation_start;
         while cursor + 4 <= creation_end {
             let data_type = body[cursor];
-            let data_size_nibble = (body[cursor + 1] & 0x0F) as usize;
+            let data_size_nibble = (body[cursor + 1] & SETUP_SIZE_NIBBLE_MASK) as usize;
             let advance = data_size_nibble.saturating_mul(4);
-            if data_type == 0x00 {
+            if data_type == OPCODE_END {
                 break;
             }
-            if data_type == 0x01 && advance >= 32 && cursor + 4 + 32 <= body.len() {
+            if data_type == OPCODE_STANDARD_SETUP && advance >= 32 && cursor + 4 + 32 <= body.len()
+            {
                 let payload = cursor + 4;
                 let id = [
                     body[payload + 8],
@@ -122,6 +126,7 @@ pub struct CloudGeneratorDef {
 }
 
 impl Generator {
+    const ATTACH_NIBBLE_MASK: u8 = 0x0F;
     const ATTACH_NONE: u8 = 0x0;
     const ATTACH_SUN: u8 = 0xE;
     // research/XIClient CYyGenerator.cpp:244 `elem->field_10C = pos[1]` — the CMoElem
@@ -143,7 +148,7 @@ impl Generator {
                 available: body.len(),
             });
         }
-        let attach = body[0] & 0x0F;
+        let attach = body[0] & Self::ATTACH_NIBBLE_MASK;
         let creation_offset = u32_le(body, 0x74) as usize;
         if creation_offset < 16 || creation_offset - 16 >= body.len() {
             return Ok(None);
@@ -157,10 +162,10 @@ impl Generator {
         let mut scale = [1.0f32; 3];
         while cursor + 4 <= body.len() {
             let opcode = body[cursor];
-            if opcode == 0x00 {
+            if opcode == OPCODE_END {
                 break;
             }
-            let size_words = (body[cursor + 1] & 0x1F) as usize;
+            let size_words = (body[cursor + 1] & SIZE_WORDS_MASK) as usize;
             if size_words == 0 {
                 break;
             }
@@ -232,10 +237,10 @@ impl Generator {
             let mut cursor = sec3 - 16;
             while cursor + 4 <= body.len() {
                 let opcode = body[cursor];
-                if opcode == 0x00 {
+                if opcode == OPCODE_END {
                     break;
                 }
-                let size_words = (body[cursor + 1] & 0x1F) as usize;
+                let size_words = (body[cursor + 1] & SIZE_WORDS_MASK) as usize;
                 if size_words == 0 {
                     break;
                 }
@@ -321,10 +326,10 @@ impl Generator {
 
         while cursor + 4 <= body.len() {
             let opcode = body[cursor];
-            if opcode == 0x00 {
+            if opcode == OPCODE_END {
                 break;
             }
-            let size_words = (body[cursor + 1] & 0x1F) as usize;
+            let size_words = (body[cursor + 1] & SIZE_WORDS_MASK) as usize;
             if size_words == 0 {
                 break;
             }
@@ -456,10 +461,10 @@ impl Generator {
 
         while cursor + 4 <= body.len() {
             let opcode = body[cursor];
-            if opcode == 0x00 {
+            if opcode == OPCODE_END {
                 break;
             }
-            let size_words = (body[cursor + 1] & 0x1F) as usize;
+            let size_words = (body[cursor + 1] & SIZE_WORDS_MASK) as usize;
             if size_words == 0 {
                 break;
             }
@@ -517,10 +522,10 @@ impl Generator {
             let mut cursor = sec3 - 16;
             while cursor + 4 <= body.len() {
                 let opcode = body[cursor];
-                if opcode == 0x00 {
+                if opcode == OPCODE_END {
                     break;
                 }
-                let size_words = (body[cursor + 1] & 0x1F) as usize;
+                let size_words = (body[cursor + 1] & SIZE_WORDS_MASK) as usize;
                 if size_words == 0 {
                     break;
                 }
@@ -575,10 +580,10 @@ impl Generator {
 
         while cursor + 4 <= body.len() {
             let opcode = body[cursor];
-            if opcode == 0x00 {
+            if opcode == OPCODE_END {
                 break;
             }
-            let size_words = (body[cursor + 1] & 0x1F) as usize;
+            let size_words = (body[cursor + 1] & SIZE_WORDS_MASK) as usize;
             if size_words == 0 {
                 break;
             }

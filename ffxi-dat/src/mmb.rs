@@ -2,6 +2,11 @@ use crate::{DatError, Result};
 
 pub(crate) mod keys;
 
+const KEY_INDEX_XOR: u8 = 0xF0;
+const KEY_BYTE_MASK: i32 = 0xFF;
+const BLOCK_SWAP_MARKER: u8 = 0xFF;
+const VERTEX_SIZE_MAX: u32 = u16::MAX as u32;
+
 #[derive(Debug, thiserror::Error)]
 pub enum MmbError {
     #[error("MMB buffer too small: need at least 8 bytes for header, got {0}")]
@@ -20,19 +25,19 @@ pub fn decrypt_in_place(data: &mut [u8]) -> Result<()> {
     }
 
     if data[3] >= 5 {
-        let key_seed = keys::KEY_TABLE[(data[5] ^ 0xf0) as usize] as i32;
+        let key_seed = keys::KEY_TABLE[(data[5] ^ KEY_INDEX_XOR) as usize] as i32;
         let mut key: i32 = key_seed;
         let mut key_count: i32 = 0;
 
         for byte in data.iter_mut().skip(8) {
-            let key_low = key & 0xFF;
+            let key_low = key & KEY_BYTE_MASK;
             let x = (key_low << 8) | key_low;
             key_count = key_count.wrapping_add(1);
             key = key.wrapping_add(key_count);
 
             let shift = (key & 7) as u32;
 
-            let mask = ((x >> shift) & 0xFF) as u8;
+            let mask = ((x >> shift) & KEY_BYTE_MASK) as u8;
             *byte ^= mask;
 
             key_count = key_count.wrapping_add(1);
@@ -40,9 +45,9 @@ pub fn decrypt_in_place(data: &mut [u8]) -> Result<()> {
         }
     }
 
-    if data[6] == 0xFF && data[7] == 0xFF {
+    if data[6] == BLOCK_SWAP_MARKER && data[7] == BLOCK_SWAP_MARKER {
         let len = data.len();
-        let mut key1: i32 = (data[5] ^ 0xf0) as i32;
+        let mut key1: i32 = (data[5] ^ KEY_INDEX_XOR) as i32;
         let mut key2: i32 = keys::KEY_TABLE_2[key1 as usize] as i32;
 
         let len2 = (((len - 8) & !0xf) >> 1) as i32;
@@ -161,6 +166,8 @@ pub const VERTEX_ALPHA_DIVISOR: f32 = VERTEX_COLOR_DIVISOR / 2.0;
 /// generated mesh that wants to defer entirely to its texture/tint must use this value.
 pub const VERTEX_COLOR_NEUTRAL_BYTE: u8 = 128;
 
+pub const D3DCOLOR_CHANNEL_MASK: u32 = 0xFF;
+
 // The MMB vertex diffuse is a D3DCOLOR, i.e. ARGB packed little-endian, so the file bytes run
 // B,G,R,A (research/XIClient/src/XIClient/include/Rendering/Color/ARGBByte.h). `crate::d3m`
 // unpacks the identical record that way, and xim walks this same 36-byte vertex with
@@ -209,7 +216,7 @@ impl<'a> MmbSubRecord<'a> {
             if is_ascii_tag(tag_word)
                 && is_ascii_variant(variant)
                 && vertexsize > 0
-                && vertexsize <= 0xFFFF
+                && vertexsize <= VERTEX_SIZE_MAX
             {
                 starts.push(i);
                 i += 20;
@@ -410,11 +417,14 @@ pub struct MmbRenderState {
 // uses the legacy D3D8 integer Z-bias layer 8 so it stays in front of its coplanar base.
 pub const TRANSPARENT_Z_BIAS_LEVEL: u8 = 8;
 
+const BLEND_ENABLED_BIT: u16 = 0x8000;
+const BACK_FACE_CULL_DISABLED_BIT: u16 = 0x2000;
+
 impl MmbRenderState {
     pub fn from_blending(blending: u16) -> Self {
         Self {
-            blend_enabled: blending & 0x8000 != 0,
-            back_face_culling: blending & 0x2000 == 0,
+            blend_enabled: blending & BLEND_ENABLED_BIT != 0,
+            back_face_culling: blending & BACK_FACE_CULL_DISABLED_BIT == 0,
         }
     }
 

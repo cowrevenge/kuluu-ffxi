@@ -1,5 +1,8 @@
 use crate::{DatError, Result};
 
+pub const CHUNK_KIND_MASK: u32 = 0x7F;
+const CHUNK_SIZE_UNITS_MASK: u32 = 0x7FFFF;
+
 #[derive(Debug, Clone, Copy)]
 pub struct Chunk<'a> {
     pub name: [u8; 4],
@@ -59,8 +62,8 @@ impl<'a> Iterator for ChunkWalker<'a> {
         // Retail chunk walker: 7-bit kind, 19-bit size in 16-byte units
         // (FFXiMain .text 0x100732C0: shr 7 / and 0x7FFFF). Not 20 bits —
         // bit 26 is is_shadow; xim's 20-bit walk is a known latent bug.
-        let kind = (value & 0x7F) as u8;
-        let size_units = (value >> 7) & 0x7FFFF;
+        let kind = (value & CHUNK_KIND_MASK) as u8;
+        let size_units = (value >> 7) & CHUNK_SIZE_UNITS_MASK;
         let total_bytes = (size_units as usize).saturating_mul(16);
 
         if total_bytes < 16 {
@@ -161,7 +164,7 @@ mod tests {
         let padded_total = total.div_ceil(16) * 16;
         let pad = padded_total - total;
         let size_units = (padded_total / 16) as u32;
-        let value = (size_units << 7) | (kind as u32 & 0x7F);
+        let value = (size_units << 7) | (kind as u32 & CHUNK_KIND_MASK);
 
         let mut out = Vec::with_capacity(padded_total);
         out.extend_from_slice(name);

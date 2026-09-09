@@ -1,4 +1,9 @@
 use crate::datid::DatId;
+use crate::vos2::{BONE_INDEX_MASK, MIRROR_AXIS_MASK};
+
+const FLAG3_CLOTH_EFFECT: u8 = 0x01;
+const FLAG3_USE_JOINT_ARRAY: u8 = 0x80;
+const FLAG5_SYMMETRIC: u8 = 0x01;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MeshType {
@@ -43,9 +48,9 @@ struct JointRef {
 
 fn unpack_joint_ref(data: u16) -> JointRef {
     JointRef {
-        index: (data & 0x7F) as usize,
-        flipped_index: ((data >> 7) & 0x7F) as usize,
-        flip_axis: ((data >> 14) & 0x3) as u8,
+        index: (data & BONE_INDEX_MASK) as usize,
+        flipped_index: ((data >> 7) & BONE_INDEX_MASK) as usize,
+        flip_axis: ((data >> 14) & MIRROR_AXIS_MASK) as u8,
     }
 }
 
@@ -161,14 +166,14 @@ pub fn parse(id: DatId, data: &[u8]) -> SkelMesh {
     let _f1 = c.next8();
     let _f2 = c.next8();
     let f3 = c.next8();
-    let cloth_effect = (f3 & 0x01) != 0;
-    let use_joint_array = (f3 & 0x80) != 0;
+    let cloth_effect = (f3 & FLAG3_CLOTH_EFFECT) != 0;
+    let use_joint_array = (f3 & FLAG3_USE_JOINT_ARRAY) != 0;
     let has_normals = !cloth_effect;
 
     let f4 = c.next8();
     let occlude_type = f4;
     let f5 = c.next8();
-    let symmetric = f5 == 0x01;
+    let symmetric = f5 == FLAG5_SYMMETRIC;
     let _f6 = c.next8();
 
     let instruction_offset = 2 * c.next32() as usize;
@@ -771,11 +776,14 @@ mod tests {
 
     #[test]
     fn unpack_joint_ref_fields() {
-        let data: u16 = (2 << 14) | (0x0A << 7) | 0x05;
+        const INDEX: u16 = 0x05;
+        const FLIPPED_INDEX: u16 = 0x0A;
+        const FLIP_AXIS: u16 = 2;
+        let data: u16 = (FLIP_AXIS << 14) | (FLIPPED_INDEX << 7) | INDEX;
         let r = unpack_joint_ref(data);
-        assert_eq!(r.index, 0x05);
-        assert_eq!(r.flipped_index, 0x0A);
-        assert_eq!(r.flip_axis, 2);
+        assert_eq!(r.index, usize::from(INDEX));
+        assert_eq!(r.flipped_index, usize::from(FLIPPED_INDEX));
+        assert_eq!(r.flip_axis, FLIP_AXIS as u8);
     }
 
     #[test]

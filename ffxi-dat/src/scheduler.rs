@@ -626,6 +626,7 @@ mod tests {
     fn real_dat_spell_main_links_caster_finish_routine() {
         const POISON_FILE: u32 = 3020;
         const GLOBAL_EFFECT_DIR_FILE: u32 = 0;
+        const BLOCKING_LINK_OPCODE: u8 = 0x3C;
 
         let Ok(root) = crate::DatRoot::from_env_or_default() else {
             return;
@@ -647,7 +648,7 @@ mod tests {
         let link = main
             .stages
             .iter()
-            .find(|t| t.stage.raw_type == 0x3C)
+            .find(|t| t.stage.raw_type == BLOCKING_LINK_OPCODE)
             .expect("main links a caster routine with 0x3C");
         assert_eq!(link.stage.kind, StageKind::BlockingSubRoutine);
         assert_eq!(&link.stage.id, b"shbk");

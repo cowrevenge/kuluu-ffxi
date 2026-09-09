@@ -293,7 +293,7 @@ mod tests {
         let total = 16 + body.len();
         let padded = total.div_ceil(16) * 16;
         let size_units = (padded / 16) as u32;
-        let value = (size_units << 7) | (kind as u32 & 0x7F);
+        let value = (size_units << 7) | (kind as u32 & crate::chunk::CHUNK_KIND_MASK);
         let mut out = Vec::with_capacity(padded);
         out.extend_from_slice(name);
         out.extend_from_slice(&value.to_le_bytes());

@@ -53,6 +53,7 @@ const ZONE_MAP_SIZE_NUMERATOR: u16 = 2560;
 /// The record's low nibble at byte 4 picks which file-table base its
 /// `file_table_offset` counts from. research/xim `ZoneMapTable.getFileTableOffset`.
 const ZONE_MAP_FILE_TABLE_BASES: [u32; 4] = [0x14C0, 0xD02F, 0xD147, 0x1592];
+const ZONE_MAP_FILE_TABLE_BASE_MASK: u8 = 0x0F;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ZoneMapRecord {
@@ -260,7 +261,8 @@ fn parse_zone_map(rec: &[u8]) -> Option<ZoneMapRecord> {
     if divisor == 0 {
         return None;
     }
-    let base = *ZONE_MAP_FILE_TABLE_BASES.get(usize::from(rec[4] & 0x0F))?;
+    let base =
+        *ZONE_MAP_FILE_TABLE_BASES.get(usize::from(rec[4] & ZONE_MAP_FILE_TABLE_BASE_MASK))?;
     let file_table_offset = i16::from_le_bytes([rec[8], rec[9]]);
     Some(ZoneMapRecord {
         zone_id: u16::from_le_bytes([rec[0], rec[1]]),

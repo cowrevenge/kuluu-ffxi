@@ -455,7 +455,6 @@ mod server_login_tests {
     #[test]
     fn server_login_dead_counter_only_reads_as_a_timer_while_ko() {
         let mut buf = vec![0u8; 0x100];
-        buf[44..48].copy_from_slice(&241u32.to_le_bytes());
         const REMAINING_SECS: u32 = 1800;
         buf[ServerLogin::DEAD_COUNTER_OFFSET..ServerLogin::DEAD_COUNTER_OFFSET + 4]
             .copy_from_slice(

@@ -15,7 +15,7 @@ use bevy::core_pipeline::prepass::DepthPrepass;
 use bevy::post_process::dof::{DepthOfField, DepthOfFieldMode};
 
 use crate::camera::OperatorCamera;
-use crate::sun_moon::IsSun;
+use crate::sun_moon::{IsMoon, IsSun};
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum QualityPreset {
@@ -1660,9 +1660,9 @@ pub fn apply_shadow_map_size_system(settings: Res<GraphicsSettings>, mut command
 
 pub fn apply_cascade_config_system(
     settings: Res<GraphicsSettings>,
-    mut q_sun: Query<&mut CascadeShadowConfig, With<IsSun>>,
+    mut q_lights: Query<&mut CascadeShadowConfig, Or<(With<IsSun>, With<IsMoon>)>>,
 ) {
-    for mut cfg in q_sun.iter_mut() {
+    for mut cfg in q_lights.iter_mut() {
         *cfg = cascade_config_from_settings(&settings);
     }
 }

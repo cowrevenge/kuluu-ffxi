@@ -654,6 +654,7 @@ pub struct FfxiZoneMaterialPlugin;
 
 impl Plugin for FfxiZoneMaterialPlugin {
     fn build(&self, app: &mut App) {
+        bevy::shader::load_shader_library!(app, "directional_shadow.wgsl");
         embedded_asset!(app, "zone_ffxi.wgsl");
         embedded_asset!(app, "zone_ffxi_prepass.wgsl");
         app.add_plugins(MaterialPlugin::<FfxiZoneMaterial>::default())

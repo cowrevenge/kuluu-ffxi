@@ -172,20 +172,37 @@ fn resolve_install_root() -> Option<PathBuf> {
 // installed (vendor/server/scripts/globals/moghouse.lua:181-229) — so this is
 // the client-side base and any received MH-slot track overrides it.
 pub const MOG_HOUSE_BGM: u16 = 126;
+
+// `play_index` values in research/XIClient/src/XIClient/source/Game/
+// GameManager.cpp:1584-1619 `NormalMusicPlay`. Slots 0-4 are also the LSB 0x00A
+// `MusicNum` layout (vendor/server/src/map/packets/s2c/0x00a_login.cpp:177-181),
+// where 2/3 carry `m_bSongS`/`m_bSongM` (vendor/server/src/map/zone.h:500-501).
+const ZONE_DAY_SLOT: u8 = 0;
+const ZONE_NIGHT_SLOT: u8 = 1;
+const BATTLE_SOLO_SLOT: u8 = 2;
+const BATTLE_PARTY_SLOT: u8 = 3;
+const RIDING_SLOT: u8 = 4;
+const DEAD_SLOT: u8 = 5;
 const MOG_HOUSE_SLOT: u8 = 6;
+const FISHING_SLOT: u8 = 7;
 
 fn resolve_audible_slot(slots: &BgmSlots, state: &BgmPlaybackState) -> Option<(u8, u16)> {
-    let zone_pref: [u8; 2] = if state.is_night { [1, 0] } else { [0, 1] };
-    // research/XIClient/src/XIClient/source/Game/GameManager.cpp:1584-1619
-    // `NormalMusicPlay` picks `play_index` in exactly this order: Mog House
-    // (or zone 724), dead, riding, fishing, then the battle/day-night branch.
+    let zone_pref: [u8; 2] = if state.is_night {
+        [ZONE_NIGHT_SLOT, ZONE_DAY_SLOT]
+    } else {
+        [ZONE_DAY_SLOT, ZONE_NIGHT_SLOT]
+    };
+    // `NormalMusicPlay` tests `play_index` in this order: Mog House (or zone
+    // 724), dead, riding, fishing, then the battle/day-night branch. That last
+    // branch is `XICLIENT_CODE_MISSING` at GameManager.cpp:1603; party-over-solo
+    // is reconstructed from the LSB slot meanings cited above.
     let candidates: [(u8, bool); SLOT_COUNT] = [
         (MOG_HOUSE_SLOT, state.in_mog_house),
-        (5, state.dead),
-        (4, state.mounted),
-        (7, state.fishing),
-        (3, state.engaged_party),
-        (2, state.engaged_solo),
+        (DEAD_SLOT, state.dead),
+        (RIDING_SLOT, state.mounted),
+        (FISHING_SLOT, state.fishing),
+        (BATTLE_PARTY_SLOT, state.engaged_party),
+        (BATTLE_SOLO_SLOT, state.engaged_solo),
         (zone_pref[0], true),
         (zone_pref[1], true),
     ];
@@ -198,6 +215,12 @@ fn resolve_audible_slot(slots: &BgmSlots, state: &BgmPlaybackState) -> Option<(u
             None if slot == MOG_HOUSE_SLOT => Some(MOG_HOUSE_BGM),
             None => None,
         };
+        // GameManager.cpp:1597-1599: the fishing branch returns outright when
+        // its slot is empty instead of descending to the battle/day-night
+        // slots, so whatever is already playing keeps playing.
+        if slot == FISHING_SLOT && track.unwrap_or(0) == 0 {
+            return slots.active;
+        }
         if let Some(track) = track {
             if track == 0 {
                 return None;
@@ -1372,17 +1395,54 @@ mod tests {
     #[test]
     fn fishing_outranks_battle_music() {
         let mut slots = BgmSlots::default();
-        slots.tracks[0] = Some(101);
-        slots.tracks[2] = Some(98);
-        slots.tracks[3] = Some(99);
-        slots.tracks[7] = Some(88);
+        slots.tracks[ZONE_DAY_SLOT as usize] = Some(101);
+        slots.tracks[BATTLE_SOLO_SLOT as usize] = Some(98);
+        slots.tracks[BATTLE_PARTY_SLOT as usize] = Some(99);
+        slots.tracks[FISHING_SLOT as usize] = Some(88);
         let state = BgmPlaybackState {
             fishing: true,
             engaged_party: true,
             engaged_solo: true,
             ..Default::default()
         };
-        assert_eq!(resolve_audible_slot(&slots, &state), Some((7, 88)));
+        assert_eq!(
+            resolve_audible_slot(&slots, &state),
+            Some((FISHING_SLOT, 88))
+        );
+    }
+
+    /// GameManager.cpp:1597-1599: an empty fishing slot makes `NormalMusicPlay`
+    /// return instead of descending, so the track already playing survives -
+    /// it does not drop to the battle or day/night slot.
+    #[test]
+    fn fishing_without_slot_track_holds_current_track() {
+        let mut slots = BgmSlots::default();
+        slots.tracks[ZONE_DAY_SLOT as usize] = Some(101);
+        slots.tracks[BATTLE_PARTY_SLOT as usize] = Some(99);
+        slots.active = Some((MOG_HOUSE_SLOT, MOG_HOUSE_BGM));
+        let state = BgmPlaybackState {
+            fishing: true,
+            engaged_party: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            resolve_audible_slot(&slots, &state),
+            Some((MOG_HOUSE_SLOT, MOG_HOUSE_BGM))
+        );
+
+        slots.tracks[FISHING_SLOT as usize] = Some(0);
+        assert_eq!(
+            resolve_audible_slot(&slots, &state),
+            Some((MOG_HOUSE_SLOT, MOG_HOUSE_BGM)),
+            "MusicBuff[7] == 0 is the exact retail early-return condition"
+        );
+
+        slots.active = None;
+        assert_eq!(
+            resolve_audible_slot(&slots, &state),
+            None,
+            "holding silence is still holding"
+        );
     }
 
     /// The Mog House is the first `play_index` `NormalMusicPlay` tests, ahead
@@ -1390,8 +1450,8 @@ mod tests {
     #[test]
     fn mog_house_outranks_dead_and_mounted() {
         let mut slots = BgmSlots::default();
-        slots.tracks[4] = Some(77);
-        slots.tracks[5] = Some(70);
+        slots.tracks[RIDING_SLOT as usize] = Some(77);
+        slots.tracks[DEAD_SLOT as usize] = Some(70);
         slots.tracks[MOG_HOUSE_SLOT as usize] = Some(215);
         let state = BgmPlaybackState {
             in_mog_house: true,
@@ -1409,23 +1469,26 @@ mod tests {
     #[test]
     fn dead_outranks_mounted_and_mounted_outranks_fishing() {
         let mut slots = BgmSlots::default();
-        slots.tracks[4] = Some(77);
-        slots.tracks[5] = Some(70);
-        slots.tracks[7] = Some(88);
+        slots.tracks[RIDING_SLOT as usize] = Some(77);
+        slots.tracks[DEAD_SLOT as usize] = Some(70);
+        slots.tracks[FISHING_SLOT as usize] = Some(88);
         let state = BgmPlaybackState {
             dead: true,
             mounted: true,
             fishing: true,
             ..Default::default()
         };
-        assert_eq!(resolve_audible_slot(&slots, &state), Some((5, 70)));
+        assert_eq!(resolve_audible_slot(&slots, &state), Some((DEAD_SLOT, 70)));
 
         let state = BgmPlaybackState {
             mounted: true,
             fishing: true,
             ..Default::default()
         };
-        assert_eq!(resolve_audible_slot(&slots, &state), Some((4, 77)));
+        assert_eq!(
+            resolve_audible_slot(&slots, &state),
+            Some((RIDING_SLOT, 77))
+        );
     }
 
     const SELF_ID: u32 = 0x0100_0001;
@@ -1601,9 +1664,12 @@ mod tests {
         assert!(!state.engaged_solo);
 
         let mut slots = BgmSlots::default();
-        slots.tracks[0] = Some(101);
-        slots.tracks[3] = Some(99);
-        assert_eq!(resolve_audible_slot(&slots, &state), Some((3, 99)));
+        slots.tracks[ZONE_DAY_SLOT as usize] = Some(101);
+        slots.tracks[BATTLE_PARTY_SLOT as usize] = Some(99);
+        assert_eq!(
+            resolve_audible_slot(&slots, &state),
+            Some((BATTLE_PARTY_SLOT, 99))
+        );
     }
 
     #[test]
@@ -1624,13 +1690,13 @@ mod tests {
         assert!(state.fishing);
 
         let mut slots = BgmSlots::default();
-        slots.tracks[0] = Some(101);
-        slots.tracks[3] = Some(99);
-        slots.tracks[7] = Some(88);
+        slots.tracks[ZONE_DAY_SLOT as usize] = Some(101);
+        slots.tracks[BATTLE_PARTY_SLOT as usize] = Some(99);
+        slots.tracks[FISHING_SLOT as usize] = Some(88);
         assert_eq!(
             resolve_audible_slot(&slots, &state),
-            Some((7, 88)),
-            "retail returns from the fishing branch before it can pick a battle track"
+            Some((FISHING_SLOT, 88)),
+            "retail reaches play_index 7 before the branch that can pick a battle track"
         );
     }
 

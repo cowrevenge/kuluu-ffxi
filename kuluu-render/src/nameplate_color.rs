@@ -62,9 +62,10 @@ const ALLEGIANCE_COLORED_MAX: u8 = 99;
 /// belligerent one reads BELLIGERENT_PLAYER_ALLEGIANCE on the wire; the MOB
 /// result only reaches it through an unvalidated `setAllegiance` script call.
 /// The colour logic deliberately does not branch on these — retail maps 8/9 to
-/// the PC row without returning, and every later check overwrites or matches
-/// that white, so falling through is equivalent; they exist to name the wire
-/// values in the tests pinning that behaviour.
+/// the PC row without returning, and for a belligerent player the claim/party/
+/// yell checks that follow, or the PC row itself, land on that same white, so
+/// falling through is equivalent; they exist to name the wire values in the
+/// tests pinning that behaviour.
 #[allow(dead_code)] // test fixture + wire documentation; see doc comment
 const BELLIGERENT_MOB_ALLEGIANCE: u8 = 0b1_000;
 #[allow(dead_code)] // ditto
@@ -273,9 +274,13 @@ const DEFAULT_ROW: [Color; NAME_COLOR_COUNT] = [
 ///
 /// Belligerence (8/9) does have a live wire source — char_update.cpp /
 /// char_status.cpp OR in 0x08 outside the Ferretory — but retail's block maps it
-/// to the PC row *without returning*, so every check that runs after it here
-/// (GM, claim, party, yell) overwrites or matches that white anyway; falling
-/// through is the faithful port. Self receives its own byte via 0x037
+/// to the PC row *without returning*, and for the belligerent *player* LSB
+/// actually produces, the checks that run after it here (claim, party, yell) and
+/// the PC row this function ends on land on that same white; falling through is
+/// the faithful port. Retail's GM rows sit between the allegiance block and the
+/// claim branch; this port hoists them into `pre_claim_color`, ahead of the
+/// allegiance block, and a GM takes the same row either way.
+/// Self receives its own byte via 0x037
 /// `Flags2.BallistaFlg` (the server skips its own 0x0D), decoded into this same
 /// field.
 pub fn name_color_choice(entity: &Entity, ctx: SelfContext<'_>) -> NameColorChoice {
@@ -289,9 +294,11 @@ pub fn name_color_choice(entity: &Entity, ctx: SelfContext<'_>) -> NameColorChoi
         return choice;
     }
 
-    // 8/9 (belligerence) deliberately fall through: retail maps them to the PC
-    // row without returning, and every check below overwrites or matches that
-    // white — see `BELLIGERENT_PLAYER_ALLEGIANCE`.
+    // 8/9 (belligerence) take no row here: they are absent from
+    // ALLEGIANCE_COLOR_INDICES and fall through, as retail's block does - it
+    // writes the PC row without returning. The claim/party/yell checks below and
+    // the final PC row reproduce that white for the only case LSB can produce, a
+    // belligerent player - see `BELLIGERENT_PLAYER_ALLEGIANCE`.
     //
     // The nation/ballista rows do not return in retail either: the block writes
     // the colour and keeps walking into the claim branch. Returning here is a

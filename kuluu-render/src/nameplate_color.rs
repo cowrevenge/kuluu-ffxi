@@ -2,7 +2,7 @@
 //! retail menu DAT, plus the per-actor index selection retail runs every idle
 //! tick.
 //!
-//! research/XIClient/.../ActorTelemetry.cpp — `InitializeNameColors` (table
+//! research/XIClient/src/XIClient/source/World/Actor/ActorTelemetry.cpp — `InitializeNameColors` (table
 //! load) and `NameColorSet` (selection).
 
 use bevy::prelude::*;
@@ -13,7 +13,7 @@ use crate::ui_element_atlas::UiElementDatRoot;
 
 const NCOL_GROUP: &str = "menu    ncol    ";
 
-// research/XIClient/.../ActorTelemetry.h `NAME_COLOR_COUNT` — retail
+// research/XIClient/src/XIClient/include/World/Actor/ActorTelemetry.h `NAME_COLOR_COUNT` — retail
 // reads only the first 23 quads of the group even though the DAT ships more.
 pub const NAME_COLOR_COUNT: usize = 23;
 
@@ -40,7 +40,7 @@ pub mod ncol {
     pub const DEAD: usize = 9;
 }
 
-// research/XIClient/.../ActorTelemetry.cpp `NameColorIndicesByState` —
+// research/XIClient/src/XIClient/source/World/Actor/ActorTelemetry.cpp `NameColorIndicesByState` —
 // GmLevel indexes this from 3 upward; levels 0..2 fall through to the normal
 // selection instead of taking a GM colour.
 const GM_COLOR_INDICES: [usize; 8] = [10, 10, 11, 12, 13, 14, 15, 16];
@@ -156,7 +156,7 @@ impl NameColorTable {
 }
 
 /// One menu-shape quad vertex colour → the drawn nameplate colour.
-/// research/XIClient/.../UIShapeQuad.cpp `ParseFromResource` nudges every
+/// research/XIClient/src/XIClient/source/UI/UIShapeQuad.cpp `ParseFromResource` nudges every
 /// non-saturated RGB channel up by one and rescales partial alpha by 1.5 on
 /// load; `InitializeNameColors` then reads those adjusted values.
 fn quad_color(raw: [u8; 4]) -> Color {
@@ -173,7 +173,7 @@ fn quad_color(raw: [u8; 4]) -> Color {
     )
 }
 
-// research/XIClient/.../UIShapeQuad.cpp `ParseFromResource`
+// research/XIClient/src/XIClient/source/UI/UIShapeQuad.cpp `ParseFromResource`
 const ALPHA_LEGACY_SCALE: f32 = 1.5;
 
 /// Everything the colour rule needs about the viewer's own situation.
@@ -253,7 +253,7 @@ const DEFAULT_ROW: [Color; NAME_COLOR_COUNT] = [
 ];
 
 /// Port of `ActorTelemetry::NameColorSet`
-/// (research/XIClient/.../ActorTelemetry.cpp `NameColorSet`),
+/// (research/XIClient/src/XIClient/source/World/Actor/ActorTelemetry.cpp `NameColorSet`),
 /// keeping retail's precedence. The branches with no live LSB wire source are
 /// skipped, not guessed:
 /// - the forced `AUDIT_1D8` colour index — an event/cutscene override; no s2c
@@ -365,7 +365,7 @@ pub fn name_color_choice(entity: &Entity, ctx: SelfContext<'_>) -> NameColorChoi
 /// Retail reaches the same place from the other side: its 0x0E handler *zeroes*
 /// LfgFlag, AutoPartyFlag, AnonymousFlag, PlayOnelineFlag, LinkShellFlag and
 /// LinkDeadFlag rather than reading them off the packet
-/// (research/XIClient/.../0x00E.cpp `RecvCharNpc`).
+/// (research/XIClient/src/XIClient/source/Game/Net/Packets/s2c/0x00E.cpp `RecvCharNpc`).
 ///
 /// `allegiance` (0x29), `charm` (0x27 bit 3), `trust` and `pet` (0x28) survive:
 /// LSB writes those explicitly on 0x0E.
@@ -449,7 +449,7 @@ fn claim_color(entity: &Entity, ctx: SelfContext<'_>) -> Option<NameColorChoice>
 
 /// The icon glyphs draw with a neutral diffuse so the sprite's own colours come
 /// through MODULATE2X unchanged; only the linkshell pearl is tinted.
-/// research/XIClient/.../CXiActorNameDraw.cpp `DrawActorNameText`.
+/// research/XIClient/src/XIClient/source/Rendering/Active/CXiActorNameDraw.cpp `DrawActorNameText`.
 pub const ICON_NEUTRAL_DIFFUSE: u8 = 0x80;
 
 /// The pearl tint for an actor's linkshell icon.

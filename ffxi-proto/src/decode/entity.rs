@@ -103,7 +103,7 @@ impl PosHead {
     }
 
     // `GP_SERV_CHAR_PC.MonstrosityFlags` — the int16 at body offset 0x3A, past
-    // `PosHead`, inside the Model block. research/XIClient/.../s2c/0x00D.h pins it:
+    // `PosHead`, inside the Model block. research/XIClient/src/XIClient/include/Game/Net/Packets/s2c/0x00D.h pins it:
     // `static_assert(offsetof(GP_SERV_CHAR_PC, field_3E) == 0x3A)` with PosHead at
     // 0x00 (our body start), so this is a direct body offset like FLAGS6_OFFSET.
     const MONSTROSITY_FLAGS_OFFSET: usize = 0x3A;
@@ -113,7 +113,7 @@ impl PosHead {
     /// (vendor/server/src/map/packets/char_update.cpp `CCharUpdatePacket::updateWith`):
     /// `0x8000 | Species` when the character is a monstrosity, else 0. Retail's
     /// nameplate reads it as `AUDIT_210 != 0` → the Monstrosity marker
-    /// (research/XIClient/.../ActorTelemetry.cpp `GetPrimaryActorNameMarker`).
+    /// (research/XIClient/src/XIClient/source/World/Actor/ActorTelemetry.cpp `GetPrimaryActorNameMarker`).
     ///
     /// Returns `None` when the packet stops short of the field; `Some(false)` is a
     /// Model-block update that says "not a monstrosity" and clears any prior state.
@@ -127,7 +127,7 @@ impl PosHead {
     // always checked if this isnt a despawn packet"
     // (vendor/server/src/map/packets/char_update.cpp `CCharUpdatePacket::updateWith`),
     // and the minimum non-despawn size already covers it. Retail reads it
-    // unconditionally too — research/XIClient/.../s2c/0x00D.h pins the byte:
+    // unconditionally too — research/XIClient/src/XIClient/include/Game/Net/Packets/s2c/0x00D.h pins the byte:
     // `static_assert(offsetof(GP_SERV_CHAR_PC, Field33Flags) == 0x2F)` with PosHead at
     // 0x00 (our body start). PC-only: in a 0x0E CHAR_NPC that offset is inside the
     // SubKind/Status word (vendor/server/src/map/packets/entity_update.cpp
@@ -140,7 +140,7 @@ impl PosHead {
     /// (vendor/server/src/map/packets/c2s/0x11b_mastery_display.cpp).
     ///
     /// Retail's nameplate star is keyed off `Flags3.LfgMasterFlag`
-    /// (`AUDIT_140.BIT_3`, research/XIClient/.../ActorTelemetry.cpp
+    /// (`AUDIT_140.BIT_3`, research/XIClient/src/XIClient/source/World/Actor/ActorTelemetry.cpp
     /// `GetPrimaryActorNameMarker`), which LSB hardcodes to 0 in char_update — so on
     /// this server the star only ever comes from this bit. The same byte's bits 2-5
     /// are the campaign special-marker index (retail `AUDIT_13C.BIT_2..5`,
@@ -247,9 +247,9 @@ impl PosHead {
 /// (0x04) is set — the server refreshes the words in that block alone.
 ///
 /// Drives the retail nameplate: colour selection
-/// (research/XIClient/.../ActorTelemetry.cpp `NameColorSet`) and the icon
+/// (research/XIClient/src/XIClient/source/World/Actor/ActorTelemetry.cpp `NameColorSet`) and the icon
 /// markers prefixed to the name
-/// (research/XIClient/.../ActorTelemetry.cpp `GetPrimaryActorNameMarker`).
+/// (research/XIClient/src/XIClient/source/World/Actor/ActorTelemetry.cpp `GetPrimaryActorNameMarker`).
 /// `untargetable` is the targetability authority, not a nameplate concern.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct CharFlags {
@@ -412,7 +412,7 @@ mod flags4 {
 
 /// The FourCC a `MODEL_DOOR` entity carries in `CHAR_NPC` (0x0E) —
 /// `GP_SERV_CHAR_NPC` `packet_data_2.DoorId`
-/// (research/XIClient/.../Game/Net/Packets/s2c/0x00E.h `CharNpcTypeFields`).
+/// (research/XIClient/src/XIClient/include/Game/Net/Packets/s2c/0x00E.h `CharNpcTypeFields`).
 /// LSB fills it with the entity's `npc_list.name`
 /// (vendor/server/src/map/packets/entity_update.cpp
 /// `CEntityUpdatePacket::updateWith`, `case MODEL_DOOR`).
@@ -442,7 +442,7 @@ impl DoorId {
 
     /// The MZB `BlockID` form. Retail reads the FourCC as a little-endian
     /// `int32` and tests `(unsigned char)BlockID` for the group prefix
-    /// (research/XIClient/.../World/Zone/Terrain/ZoneLayoutData.cpp
+    /// (research/XIClient/src/XIClient/source/World/Zone/Terrain/ZoneLayoutData.cpp
     /// `InitUnderscoreAtStructs`), so this compares directly against
     /// `MmbPlacement::block_id`.
     pub const fn block_id(self) -> u32 {
@@ -498,7 +498,7 @@ impl LookData {
     /// `CharNpcTypeFields::field_30`, whose retail struct offsets are relative
     /// to `GP_SERV_POS_HEAD` — exactly this `body` — so
     /// `offsetof(GP_SERV_CHAR_NPC, Data) + offsetof(CharNpcGenericData, Extra)
-    /// == 0x30` (research/XIClient/.../s2c/0x00E.h) is this constant verbatim.
+    /// == 0x30` (research/XIClient/src/XIClient/include/Game/Net/Packets/s2c/0x00E.h) is this constant verbatim.
     /// LSB writes the same bytes at packet 0x34, four past the `look.size` it
     /// puts at packet 0x30.
     pub(crate) const DOOR_ID_BODY_OFFSET: usize = 0x30;

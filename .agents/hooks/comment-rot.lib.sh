@@ -42,7 +42,7 @@ CR_RE_DOC='^[[:space:]]*//[/!]'
 # survives upstream edits and is greppable; a line number is a promise the
 # submodule pin does not keep. Matched BEFORE the allow-list strip, since the
 # allow-list is what would otherwise exempt these.
-CR_RE_CITE_LINE='(vendor|research)/[A-Za-z0-9._/-]+\.(cpp|h|hpp|c|cs|lua|sql|py|rs|xml|json):[0-9]+'
+CR_RE_CITE_LINE='(vendor|research)/[A-Za-z0-9._/-]+\.(cpp|h|hpp|c|cs|lua|sql|py|rs|xml|json|kt|md):[0-9]+'
 
 # Citations nobody in this tree can open. An elided `.../` path can't be
 # checked for existence, and a `(F37)`-style finding id points at a note that

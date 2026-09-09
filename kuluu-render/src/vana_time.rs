@@ -61,7 +61,7 @@ impl VanaWeekday {
     // Index of this day's element in the canonical FFXI element order
     // Fire, Ice, Wind, Earth, Lightning, Water, Light, Dark (ffxi-proto
     // decode.rs def_elem). The day-of-week orb sprite is
-    // DAY_ORB_BASE_INDEX + this (research/xim/.../ui/Compass.kt:43-54).
+    // DAY_ORB_BASE_INDEX + this (research/xim/src/jsMain/kotlin/xim/poc/ui/Compass.kt drawClock dayOfWeekIndex).
     pub fn element_index(self) -> usize {
         match self {
             Self::Firesday => 0,

@@ -12,7 +12,7 @@ pub fn zone_id_to_mzb_file_id(zone_id: u16) -> Option<u32> {
 /// GetMogHouseModelID — vendor/server/src/map/packets/s2c/0x00a_login.cpp)
 /// → MZB DAT file id. Model ids are NOT zone ids; never feed them to
 /// [`zone_id_to_mzb_file_id`]. File ids verified against
-/// research/xim/src/jsMain/kotlin/xim/poc/tools/ZoneChanger.kt:18-36; an explicit
+/// research/xim/src/jsMain/kotlin/xim/poc/tools/ZoneChanger.kt MogHouseConfig; an explicit
 /// table because the model interval between the classic and WoTG blocks is
 /// unobserved and XIM hard-codes the high entries. The Feretory alias model
 /// (ffxi-proto `MYROOM_FERETORY`) is excluded: no verified file id.

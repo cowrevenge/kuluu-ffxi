@@ -123,7 +123,7 @@ pub struct ZoneInWeather {
     /// `WeatherNumber` — the LSB weather id, same discriminant order as 0x057.
     /// This is the weather actually in force: retail's `FUNC_ZoneSetUp` calls
     /// `XiArea_SetWeather` twice, with the `*2` slot first and this one second
-    /// (research/XiPackets/world/server/0x000A/README.md:221-250).
+    /// (research/XiPackets/world/server/0x000A/README.md "WeatherNumber`, `WeatherNumber2`, `WeatherTime`, `WeatherTime2`, `WeatherOffsetTime").
     pub weather_number: u16,
     /// `WeatherNumber2` — the weather being transitioned *from*, not the
     /// incoming side: retail assigns it to `PreviousWeatherNumber`

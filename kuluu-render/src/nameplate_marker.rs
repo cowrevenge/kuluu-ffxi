@@ -3,7 +3,7 @@
 //! Retail builds the plate as one string — icon markers, then a space, then the
 //! name — and the icon glyphs live in the same `font    fontshp ` shape group
 //! as the letters, at codes 0x8E..0xB1, cropped off the `menu    ustatshd`
-//! sheet. research/XIClient/.../ActorTelemetry.cpp
+//! sheet. research/XIClient/src/XIClient/source/World/Actor/ActorTelemetry.cpp
 //! `BuildTelemetryActorName` assembles the prefix; :204
 //! `GetPrimaryActorNameMarker` and :296 `GetSecondaryActorNameMarker` choose it.
 
@@ -99,7 +99,7 @@ const SECONDARY_ALLEGIANCE_GAP: std::ops::RangeInclusive<u8> = 0x28..=0x2B;
 /// Only players carry icons. On `CHAR_NPC` (0x0E) retail clears the flags every
 /// one of these markers reads — LFG, auto-party, anonymous, PlayOnline,
 /// linkshell and linkdead are all forced to 0
-/// (research/XIClient/.../0x00E.cpp `RecvCharNpc`) — so NPCs, mobs, pets and trusts
+/// (research/XIClient/src/XIClient/source/Game/Net/Packets/s2c/0x00E.cpp `RecvCharNpc`) — so NPCs, mobs, pets and trusts
 /// draw a bare name.
 pub fn nameplate_markers(entity: &Entity) -> Vec<u8> {
     let mut markers = Vec::new();

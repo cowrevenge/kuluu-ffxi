@@ -8,7 +8,7 @@ use crate::ui_element_atlas::{UiElementAtlas, UiElementDatRoot};
 // Retail's weather indicator: "font    usgaiji " elements 0-7 are the eight
 // element icons (textures elfire..eldark, ROM/119/51.DAT); the single weather
 // of an element draws one icon, its double draws two
-// (research/xim/src/jsMain/kotlin/xim/poc/ui/Compass.kt:69-96).
+// (research/xim/src/jsMain/kotlin/xim/poc/ui/Compass.kt drawWeather indices).
 const USGAIJI_GROUP: &str = "font    usgaiji ";
 const ICON_SIZE_PX: f32 = 14.0;
 const MAX_ICONS: usize = 2;
@@ -179,7 +179,7 @@ mod tests {
 
     #[test]
     fn elemental_weathers_pair_single_and_double_on_one_index() {
-        // research/xim/src/jsMain/kotlin/xim/poc/ui/Compass.kt:74-89
+        // research/xim/src/jsMain/kotlin/xim/poc/ui/Compass.kt drawWeather
         let pairs = [
             (Weather::HotSpell, Weather::HeatWave, 0),
             (Weather::Snow, Weather::Blizzards, 1),

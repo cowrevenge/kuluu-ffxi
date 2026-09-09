@@ -171,7 +171,7 @@ impl ChaseCamera {
     /// - research/XIClient/src/XIClient/source/World/Camera/CameraManager.cpp CameraManager::UpdatePlayerFollowingCamera normalises the
     ///   orbit rate against it — `angle = 6.0f / eyeToTargetDistance * angle`.
     /// - Same file:822, the camera-follow easing changes regime above 6.
-    /// - research/xim/.../camera/PolarCamera.kt:24 `maximumRadius = 6f`.
+    /// - research/xim/src/jsMain/kotlin/xim/poc/camera/PolarCamera.kt PolarCamera `maximumRadius = 6f`.
     ///
     /// The resting distance is nearer still: CameraManager.cpp:95 places the
     /// default eye at `{-3, 0, 0}` behind the actor, and :404 falls back to -4.

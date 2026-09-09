@@ -387,7 +387,7 @@ fn is_ascii_variant(b: &[u8]) -> bool {
 /// offset 18 (`MmbSubRecord::blending` / `MmbModel::blending`).
 ///
 /// Bit layout follows xim's zone-mesh parser
-/// (research/xim/src/jsMain/kotlin/xim/resource/ZoneMeshSection.kt:79-81):
+/// (research/xim/src/jsMain/kotlin/xim/resource/ZoneMeshSection.kt parseMesh blendEnabled):
 /// - `0x8000`: alpha blending enabled (`blendEnabled`)
 /// - `0x2000`: back-face culling DISABLED (culling defaults to on/CCW;
 ///   the set bit turns it off)

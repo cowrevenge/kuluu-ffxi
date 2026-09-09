@@ -43,7 +43,7 @@ pub fn camera_collides_with_mmb(source: CameraCollisionSource, in_mog_house: boo
     source.uses_mmb() || in_mog_house
 }
 
-// research/xim/src/jsMain/kotlin/xim/poc/camera/PolarCamera.kt:209 —
+// research/xim/src/jsMain/kotlin/xim/poc/camera/PolarCamera.kt getAdjustedRadiusFromCollision collisionDistance —
 // `(distance - 0.25f).coerceAtLeast(0.5f)`: pad off the wall, but never pull the
 // camera closer than 0.5 to the anchor (tiny interiors like the Mog House would
 // otherwise collapse it inside the character model).

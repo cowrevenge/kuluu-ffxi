@@ -60,7 +60,7 @@ const ENCRYPTED_REGION_START: usize = 8;
 const DECRYPT_INDEX_XOR: u8 = 0xFF;
 
 /// Pass 2 XORs the name of every placement record.
-/// research/cexi-docs/zone/format.md:101-103 — 0x64-byte records start at 0x20.
+/// research/cexi-docs/zone/format.md "ZoneDef placement (`0x1C`)" — 0x64-byte records start at 0x20.
 pub const PLACEMENT_RECORD_LEN: usize = 0x64;
 const PLACEMENT_NAME_LEN: usize = 16;
 const PLACEMENT_NAME_XOR: u8 = 0x55;
@@ -332,7 +332,7 @@ impl MzbTriangleInfo {
 /// `DoubleSidedSkipPolicy::SkipTriangle`.
 const TRI_CAMERA_TRANSPARENT: u16 = 0x4000;
 
-/// Second index word, same bit position. research/cexi-docs/zone/collision.md:204
+/// Second index word, same bit position. research/cexi-docs/zone/collision.md "Technical notes"
 /// claims player movement keys off it, but it measures 0 across Lower Jeuno,
 /// Port Jeuno, Southern San d'Oria and West Ronfaure — if it gated blocking,
 /// nothing in those zones would block. Parsed, unused, semantics unresolved.
@@ -354,7 +354,7 @@ const TRI_FLAGGED_INDEX_MASK: u16 = 0x3FFF;
 ///
 /// Movement uses `BacksideCullingPolicy`, whose `SkipTriangle` is
 /// unconditionally false — grounding must never consult this.
-/// Corroborated: research/cexi-docs/zone/collision.md:201-209.
+/// Corroborated: research/cexi-docs/zone/collision.md "Technical notes".
 pub fn double_sided_skip(mesh_flags: u16, camera_transparent: bool) -> bool {
     mesh_flags != 0 && camera_transparent
 }
@@ -861,7 +861,7 @@ pub fn apply_placement(m: &[f32; 16], v: [f32; 3]) -> [f32; 3] {
 
 /// research/XIClient/src/XIClient/include/Resource/Derived/ZoneBlockFormat.h ZoneBlockHeader
 /// — `PositionedMeshBlockData`, one 0x64-byte record per placed MMB.
-/// Corroborated field-by-field by research/cexi-docs/zone/format.md:103-121.
+/// Corroborated field-by-field by research/cexi-docs/zone/format.md "ZoneDef placement (`0x1C`)".
 const PL_MESH_BLOCK_NAME: usize = 0x00;
 const PL_TRANSLATION: usize = 0x10;
 const PL_ROTATION: usize = 0x1C;
@@ -927,7 +927,7 @@ pub struct MmbPlacement {
     /// The sub-area (building interior) whose geometry replaces this placeholder,
     /// 0 when there is none. Retail hides the chunk while that sub-area is the
     /// active collision map — RenderType 1 (ZoneRenderer.cpp:635-636,
-    /// research/cexi-docs/zone/subareas.md:76-84).
+    /// research/cexi-docs/zone/subareas.md "2. The placeholder link (`0x1C` object `0x50`)").
     pub sub_area_link: u32,
 
     /// 1-based indices into the header's light-binding table; 0 = unused. Zeroed
@@ -942,7 +942,7 @@ const BLOCK_ID_UNDERSCORE_GROUP: u8 = b'_';
 const BLOCK_ID_AT_GROUP: u8 = b'@';
 
 /// `UnderscoreAtStruct::Subchunks` is a fixed array of four
-/// (research/XIClient/.../World/Zone/Terrain/UnderscoreAtStruct.h); members past
+/// (research/XIClient/src/XIClient/include/World/Zone/Terrain/UnderscoreAtStruct.h); members past
 /// the fourth are counted by `ZoneLayoutData::InitUnderscoreAtStructs` and then
 /// dropped, and `SubchunkCount` is clamped to the array, so nothing can draw or
 /// address them.
@@ -1253,7 +1253,7 @@ const MMB_RENDER_TYPE_DRAW_MIN: u8 = 2;
 /// its owner is the placeholder the interior is standing in for. Retail keeps the
 /// active id in `CollisionManager::field_4`, sentinel `-1` for "none"
 /// (ZoneRenderer.cpp:172, :666), so a link of `0` — "not a placeholder"
-/// (research/cexi-docs/zone/subareas.md:76-84) — must never match, the way the
+/// (research/cexi-docs/zone/subareas.md "2. The placeholder link (`0x1C` object `0x50`)") — must never match, the way the
 /// `-1` sentinel cannot.
 ///
 /// The render pass ([`MmbRenderType::classify`]) and the collision pass
@@ -1264,7 +1264,7 @@ pub fn is_suppressed_placeholder(sub_area_link: u32, active_sub_area: Option<u32
 
 /// A [`MzbPlacement::sub_area_link`] / [`MmbPlacement::sub_area_link`] of `0`:
 /// ordinary zone geometry, standing in for no interior
-/// (research/cexi-docs/zone/subareas.md:76-84).
+/// (research/cexi-docs/zone/subareas.md "2. The placeholder link (`0x1C` object `0x50`)").
 pub const NO_SUB_AREA_LINK: u32 = 0;
 
 impl MmbRenderType {
@@ -1287,7 +1287,7 @@ impl MmbRenderType {
 }
 
 /// One `_`/`@` FourCC family of placements — retail's `UnderscoreAtStruct`
-/// (research/XIClient/.../World/Zone/Terrain/UnderscoreAtStruct.h).
+/// (research/XIClient/src/XIClient/include/World/Zone/Terrain/UnderscoreAtStruct.h).
 ///
 /// A door entity's `DoorId` FourCC, the DAT directory holding its `open`/`clos`
 /// Scheduler routines, and this `four_cc` are the same four bytes, so the group is
@@ -1314,7 +1314,7 @@ impl UnderscoreAtGroup {
 
 /// The zone's `_`/`@` FourCC groups, re-expressing
 /// `ZoneLayoutData::InitUnderscoreAtStructs`
-/// (research/XIClient/.../World/Zone/Terrain/ZoneLayoutData.cpp).
+/// (research/XIClient/src/XIClient/source/World/Zone/Terrain/ZoneLayoutData.cpp).
 ///
 /// Retail walks the placement table once to open a group at each FourCC's first
 /// member, then walks it again per group collecting every placement with that

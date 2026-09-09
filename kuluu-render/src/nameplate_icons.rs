@@ -2,7 +2,7 @@
 //! `font    fontshp ` shape group and kept as raw RGBA so they can be composited
 //! straight into the billboard texture.
 //!
-//! research/XIClient/.../CXiActorNameDraw.cpp `GetActorNameGlyphData` — the
+//! research/XIClient/src/XIClient/source/Rendering/Active/CXiActorNameDraw.cpp `GetActorNameGlyphData` — the
 //! on-screen size of a glyph is its quad's vertex
 //! span, not the texture crop, and the crop comes off a separate sheet.
 

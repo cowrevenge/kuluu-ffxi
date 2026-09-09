@@ -104,7 +104,7 @@ impl MinimapView {
     }
 }
 
-// research/xim/.../ui/MapDrawer.kt:59-60 indexes a 512-px map by floor(15f * pos / 512f),
+// research/xim/src/jsMain/kotlin/xim/poc/ui/MapDrawer.kt getPlayerMapCoordinates mapPosX indexes a 512-px map by floor(15f * pos / 512f),
 // i.e. a 16×16 grid whose last cell index is 15.
 const MAP_GRID_LAST_INDEX: f32 = 15.0;
 

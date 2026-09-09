@@ -17,7 +17,7 @@ use crate::Result;
 
 /// ZoneRenderer.cpp:899-901 — the sub-area's DAT index is its id put through the
 /// same file-table offsets `LoadZoneFile` (ZoneRenderer.cpp:805-807) applies to a
-/// zone id. research/cexi-docs/zone/subareas.md:99-100 states the same pair.
+/// zone id. research/cexi-docs/zone/subareas.md "3. Resolving the interior DAT" states the same pair.
 pub const SUB_AREA_FILE_ID_OFFSET: u32 = 0x64;
 pub const SUB_AREA_FILE_ID_OFFSET_HIGH: u32 = 0x1_44F7;
 
@@ -479,7 +479,7 @@ mod tests {
     }
 
     /// Gated on a retail install (self-skips without one). Lower Jeuno is the
-    /// worked example in research/cexi-docs/zone/subareas.md:120-135; this pins
+    /// worked example in research/cexi-docs/zone/subareas.md "Worked example — Lower Jeuno (`ROM/1/41`, zone 245)"; this pins
     /// our resolution against the shipped DATs rather than against that doc.
     #[test]
     fn lower_jeuno_sub_areas_resolve_to_real_interior_dats() {

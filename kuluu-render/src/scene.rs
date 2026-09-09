@@ -137,6 +137,32 @@ pub fn auto_clear_target_system(
     }
 }
 
+/// Snapshot frames a server retarget waits for its entity to appear. The 0x058
+/// reaches the viewer on the event channel while the entity reaches it in the
+/// snapshot, so a retarget onto a mob spawning into view can beat its own
+/// entity by a frame; expiring keeps a retarget whose entity never arrives from
+/// firing much later.
+const RETARGET_ENTITY_WAIT_FRAMES: u8 = 3;
+
+#[derive(Clone, Copy)]
+pub struct PendingRetarget {
+    id: u32,
+    frames_left: u8,
+}
+
+/// The target the server believes we have: what it last pushed (s2c 0x058) or
+/// what the client last sent as c2s 0x01A ChangeTarget. Echoing the server's own
+/// retarget back as ChangeTarget would force an engage - LSB routes ChangeTarget
+/// to `CAIContainer::Internal_ChangeTarget`, which calls `Engage(targetid)` for a
+/// not-yet-engaged player (vendor/server/src/map/ai/ai_container.cpp:239-249),
+/// while `battleutils::assistTarget` only pushes 0x058 and never engages
+/// (vendor/server/src/map/utils/battleutils.cpp:5058-5078), i.e. retail `/assist`
+/// inherits the target without starting a fight.
+#[derive(Resource, Default)]
+pub struct ServerTarget {
+    pub id: Option<u32>,
+}
+
 /// Applies the server's retarget push (s2c 0x058 ASSIST, reaching us as
 /// [`kuluu_snapshot::ViewerEvent::TargetChanged`]). LSB sends it whenever it
 /// moves our battle target - `/assist`, engaging, and the
@@ -147,10 +173,21 @@ pub fn auto_clear_target_system(
 /// `CCharEntity::OnChangeTarget` when the target went away) is left alone:
 /// [`auto_clear_target_system`] already drops a target whose entity is gone,
 /// and retail's `RecvAssist` behaviour for a zero id is not established.
+///
+/// A held lock rides along with the target rather than pinning it: xim keeps the
+/// lock as a flag over the one target slot (research/xim
+/// PlayerTargetSelector.kt's `isTargetLocked` reads `state.targetState.locked`
+/// beside `state.targetState.targetId`, Actor.kt:106,932), so only player
+/// targeting input is gated on it ([`crate::lock_on::suppresses_retarget`]) and a
+/// server-side target change carries the lock with it.
 pub fn apply_server_retarget_system(
     events: Res<crate::snapshot::EventLog>,
+    state: Res<SceneState>,
     mut cursor: Local<u64>,
+    mut pending: Local<Option<PendingRetarget>>,
     mut target: ResMut<Target>,
+    mut lock_on: ResMut<crate::lock_on::LockOn>,
+    mut server_target: ResMut<ServerTarget>,
 ) {
     let total = events.pushed_total;
     let first_global = total.saturating_sub(events.recent.len() as u64);
@@ -159,10 +196,39 @@ pub fn apply_server_retarget_system(
             target_id: Some(id),
         } = events.recent[(g - first_global) as usize]
         {
-            target.id = Some(id);
+            *pending = Some(PendingRetarget {
+                id,
+                frames_left: RETARGET_ENTITY_WAIT_FRAMES,
+            });
         }
     }
     *cursor = total;
+
+    let Some(p) = *pending else {
+        return;
+    };
+
+    let landed = state
+        .snapshot
+        .entities
+        .iter()
+        .any(|e| e.id == p.id && e.is_targetable());
+    if !landed {
+        if state.dirty {
+            let frames_left = p.frames_left.saturating_sub(1);
+            *pending = (frames_left > 0).then_some(PendingRetarget { frames_left, ..p });
+        }
+        return;
+    }
+
+    *pending = None;
+    server_target.id = Some(p.id);
+    if target.id != Some(p.id) {
+        target.id = Some(p.id);
+    }
+    if lock_on.target_id.is_some() && lock_on.target_id != Some(p.id) {
+        lock_on.target_id = Some(p.id);
+    }
 }
 
 #[derive(Resource, Default)]
@@ -1301,9 +1367,22 @@ mod tests {
     fn retarget_app() -> App {
         let mut app = App::new();
         app.init_resource::<crate::snapshot::EventLog>()
+            .init_resource::<SceneState>()
             .init_resource::<Target>()
+            .init_resource::<ServerTarget>()
+            .init_resource::<crate::lock_on::LockOn>()
             .add_systems(Update, apply_server_retarget_system);
         app
+    }
+
+    /// A fresh authoritative frame carrying `ids`, as ingest would leave it.
+    fn push_snapshot(app: &mut App, ids: &[u32]) {
+        let mut state = app.world_mut().resource_mut::<SceneState>();
+        state.snapshot.entities = ids
+            .iter()
+            .map(|&id| entity_with_hp(id, Some(100)))
+            .collect();
+        state.dirty = true;
     }
 
     fn push_event(app: &mut App, ev: kuluu_snapshot::ViewerEvent) {
@@ -1312,18 +1391,20 @@ mod tests {
             .push(ev);
     }
 
+    fn retarget_to(id: u32) -> kuluu_snapshot::ViewerEvent {
+        kuluu_snapshot::ViewerEvent::TargetChanged {
+            target_id: Some(id),
+        }
+    }
+
     /// The server-pushed retarget (s2c 0x058 ASSIST) is what makes `/assist`
     /// and auto-target-after-kill move the cursor.
     #[test]
     fn server_retarget_moves_the_target() {
         let mut app = retarget_app();
+        push_snapshot(&mut app, &[11, 22]);
         app.world_mut().resource_mut::<Target>().id = Some(11);
-        push_event(
-            &mut app,
-            kuluu_snapshot::ViewerEvent::TargetChanged {
-                target_id: Some(22),
-            },
-        );
+        push_event(&mut app, retarget_to(22));
         app.update();
         assert_eq!(app.world().resource::<Target>().id, Some(22));
     }
@@ -1335,6 +1416,7 @@ mod tests {
     #[test]
     fn zero_assist_no_leaves_the_target_alone() {
         let mut app = retarget_app();
+        push_snapshot(&mut app, &[11]);
         app.world_mut().resource_mut::<Target>().id = Some(11);
         push_event(
             &mut app,
@@ -1349,12 +1431,8 @@ mod tests {
     #[test]
     fn retarget_is_edge_triggered_not_reapplied() {
         let mut app = retarget_app();
-        push_event(
-            &mut app,
-            kuluu_snapshot::ViewerEvent::TargetChanged {
-                target_id: Some(22),
-            },
-        );
+        push_snapshot(&mut app, &[22, 33]);
+        push_event(&mut app, retarget_to(22));
         app.update();
         assert_eq!(app.world().resource::<Target>().id, Some(22));
 
@@ -1365,6 +1443,134 @@ mod tests {
             Some(33),
             "an already-drained event must not re-fire"
         );
+    }
+
+    /// `dispatch_target_change_system` sends c2s ChangeTarget on any `Target`
+    /// change, and LSB turns that into an `Engage` for a disengaged player
+    /// (vendor/server/src/map/ai/ai_container.cpp:239-249). The applied id has
+    /// to land in `ServerTarget` so the echo is suppressed.
+    #[test]
+    fn applying_a_retarget_records_what_the_server_already_knows() {
+        let mut app = retarget_app();
+        push_snapshot(&mut app, &[22]);
+        push_event(&mut app, retarget_to(22));
+        app.update();
+        assert_eq!(app.world().resource::<ServerTarget>().id, Some(22));
+    }
+
+    #[derive(Resource, Default)]
+    struct TargetChanges(u32);
+
+    fn count_target_changes(target: Res<Target>, mut changes: ResMut<TargetChanges>) {
+        if target.is_changed() {
+            changes.0 += 1;
+        }
+    }
+
+    /// `ResMut` marks the resource changed on any deref, so a repeat 0x058 for
+    /// the target we already have must not touch `Target` at all - LSB pushes
+    /// one from `CPlayerController::Engage` and one per `CAttackState::
+    /// UpdateTarget` auto-target, and every touch costs a c2s ChangeTarget.
+    #[test]
+    fn a_repeat_retarget_does_not_touch_the_target() {
+        let mut app = retarget_app();
+        app.init_resource::<TargetChanges>().add_systems(
+            Update,
+            count_target_changes.after(apply_server_retarget_system),
+        );
+        push_snapshot(&mut app, &[22]);
+        app.world_mut().resource_mut::<Target>().id = Some(22);
+        app.update();
+        let before = app.world().resource::<TargetChanges>().0;
+
+        push_event(&mut app, retarget_to(22));
+        app.update();
+        assert_eq!(
+            app.world().resource::<TargetChanges>().0,
+            before,
+            "the same target re-pushed must not tick change detection"
+        );
+    }
+
+    /// A held lock is a flag over the one target slot in retail's model
+    /// (research/xim Actor.kt:106,932), so a server-side target change carries
+    /// the lock with it instead of leaving camera and target panel on
+    /// different mobs.
+    #[test]
+    fn a_held_lock_follows_the_server_retarget() {
+        let mut app = retarget_app();
+        push_snapshot(&mut app, &[11, 22]);
+        app.world_mut().resource_mut::<Target>().id = Some(11);
+        app.world_mut()
+            .resource_mut::<crate::lock_on::LockOn>()
+            .target_id = Some(11);
+        push_event(&mut app, retarget_to(22));
+        app.update();
+        assert_eq!(
+            app.world().resource::<crate::lock_on::LockOn>().target_id,
+            Some(22)
+        );
+    }
+
+    #[test]
+    fn an_unlocked_camera_stays_unlocked_through_a_retarget() {
+        let mut app = retarget_app();
+        push_snapshot(&mut app, &[22]);
+        push_event(&mut app, retarget_to(22));
+        app.update();
+        assert_eq!(
+            app.world().resource::<crate::lock_on::LockOn>().target_id,
+            None
+        );
+    }
+
+    /// The 0x058 rides the event channel while the entity rides the snapshot,
+    /// so the retarget can arrive first. Applying it straight away would hand
+    /// `auto_clear_target_system` a target with no entity, which drops it for
+    /// good.
+    #[test]
+    fn a_retarget_waits_for_its_entity_to_arrive() {
+        let mut app = retarget_app();
+        push_snapshot(&mut app, &[11]);
+        app.world_mut().resource_mut::<Target>().id = Some(11);
+        push_event(&mut app, retarget_to(22));
+        app.update();
+        assert_eq!(app.world().resource::<Target>().id, Some(11));
+
+        push_snapshot(&mut app, &[11, 22]);
+        app.update();
+        assert_eq!(app.world().resource::<Target>().id, Some(22));
+    }
+
+    #[test]
+    fn a_retarget_whose_entity_never_arrives_expires() {
+        let mut app = retarget_app();
+        push_event(&mut app, retarget_to(22));
+        for _ in 0..RETARGET_ENTITY_WAIT_FRAMES {
+            push_snapshot(&mut app, &[11]);
+            app.update();
+        }
+
+        push_snapshot(&mut app, &[11, 22]);
+        app.update();
+        assert_eq!(
+            app.world().resource::<Target>().id,
+            None,
+            "a stale retarget must not fire once its entity finally shows up"
+        );
+    }
+
+    /// An entity present but not targetable is one `auto_clear_target_system`
+    /// would clear right after, so it does not count as arrived.
+    #[test]
+    fn an_untargetable_entity_does_not_satisfy_a_retarget() {
+        let mut app = retarget_app();
+        push_event(&mut app, retarget_to(22));
+        let mut state = app.world_mut().resource_mut::<SceneState>();
+        state.snapshot.entities = vec![entity_with_hp(22, Some(0))];
+        state.dirty = true;
+        app.update();
+        assert_eq!(app.world().resource::<Target>().id, None);
     }
 
     fn entity_with_hp(id: u32, hp_pct: Option<u8>) -> kuluu_snapshot::Entity {

@@ -83,7 +83,7 @@ pub struct CameraInputParams<'w> {
 use kuluu_render::{
     heading_for_yaw, yaw_for_heading, Action, Bindings, CameraMode, CameraTransition, ChaseCamera,
     ChatBuffer, CursorLockRequest, InputMode, IsSelf, LockOn, LockOnToggle, MenuStack,
-    OperatorCamera, PassiveCursorState, SceneState, Target, WorldEntity,
+    OperatorCamera, PassiveCursorState, SceneState, ServerTarget, Target, WorldEntity,
 };
 use kuluu_snapshot::{Entity as WireEntity, EntityKind, Vec3 as WireVec3};
 use tokio::sync::mpsc;
@@ -693,8 +693,17 @@ pub fn dispatch_target_change_system(
     state: Res<SceneState>,
     cmd_tx: Res<CommandTx>,
     mode: Res<InputMode>,
+    mut server_target: ResMut<ServerTarget>,
 ) {
     if !target.is_changed() {
+        return;
+    }
+
+    // The server already has this target: it pushed it (s2c 0x058) or we sent
+    // it. Echoing it back would ask LSB to change target again, which
+    // force-engages a disengaged player
+    // (vendor/server/src/map/ai/ai_container.cpp:239-249).
+    if target.id == server_target.id {
         return;
     }
 
@@ -718,11 +727,17 @@ pub fn dispatch_target_change_system(
         None => (0, 0),
     };
 
-    let _ = cmd_tx.0.try_send(AgentCommand::Action {
-        target_id,
-        target_index,
-        kind: ActionKind::ChangeTarget,
-    });
+    if cmd_tx
+        .0
+        .try_send(AgentCommand::Action {
+            target_id,
+            target_index,
+            kind: ActionKind::ChangeTarget,
+        })
+        .is_ok()
+    {
+        server_target.id = target.id;
+    }
 }
 
 /// Mirror the viewer's lock-on state into the reactor so it only squares the
@@ -2405,6 +2420,82 @@ mod tests {
             radius_for_wire_kind(EntityKind::Pet),
             kuluu_session::state::MODEL_RADIUS_PET
         );
+    }
+
+    fn target_dispatch_app() -> (App, mpsc::Receiver<AgentCommand>) {
+        let mut app = App::new();
+        let (tx, rx) = mpsc::channel(32);
+        app.init_resource::<kuluu_render::EventLog>()
+            .init_resource::<SceneState>()
+            .init_resource::<Target>()
+            .init_resource::<ServerTarget>()
+            .init_resource::<LockOn>()
+            .init_resource::<InputMode>()
+            .insert_resource(CommandTx(tx))
+            .add_systems(
+                Update,
+                (
+                    kuluu_render::scene::apply_server_retarget_system,
+                    dispatch_target_change_system,
+                )
+                    .chain(),
+            );
+        let mut state = app.world_mut().resource_mut::<SceneState>();
+        state.snapshot.entities = vec![ent(11, 0.0, 0.0), ent(22, 0.0, 0.0)];
+        state.dirty = true;
+        (app, rx)
+    }
+
+    /// The server's own retarget (s2c 0x058) must not come back as c2s 0x01A
+    /// ChangeTarget: LSB routes that to `CAIContainer::Internal_ChangeTarget`,
+    /// which engages a disengaged player
+    /// (vendor/server/src/map/ai/ai_container.cpp:239-249), while
+    /// `battleutils::assistTarget` only pushes 0x058 and never engages
+    /// (vendor/server/src/map/utils/battleutils.cpp:5058-5078). `/assist` while
+    /// disengaged inherits the target, it does not start a fight.
+    #[test]
+    fn a_server_retarget_is_not_echoed_back_as_change_target() {
+        let (mut app, mut commands) = target_dispatch_app();
+        app.world_mut().resource_mut::<Target>().id = Some(11);
+        app.update();
+        while commands.try_recv().is_ok() {}
+
+        app.world_mut()
+            .resource_mut::<kuluu_render::EventLog>()
+            .push(kuluu_snapshot::ViewerEvent::TargetChanged {
+                target_id: Some(22),
+            });
+        app.update();
+        app.update();
+
+        assert_eq!(app.world().resource::<Target>().id, Some(22));
+        assert!(
+            commands.try_recv().is_err(),
+            "the server's retarget must not be sent back"
+        );
+    }
+
+    #[test]
+    fn a_local_retarget_after_a_server_retarget_is_still_sent() {
+        let (mut app, mut commands) = target_dispatch_app();
+        app.world_mut()
+            .resource_mut::<kuluu_render::EventLog>()
+            .push(kuluu_snapshot::ViewerEvent::TargetChanged {
+                target_id: Some(22),
+            });
+        app.update();
+        while commands.try_recv().is_ok() {}
+
+        app.world_mut().resource_mut::<Target>().id = Some(11);
+        app.update();
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(AgentCommand::Action {
+                target_id: 11,
+                kind: ActionKind::ChangeTarget,
+                ..
+            })
+        ));
     }
 
     fn ent(id: u32, x: f32, y: f32) -> WireEntity {

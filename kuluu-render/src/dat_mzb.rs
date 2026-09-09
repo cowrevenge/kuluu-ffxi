@@ -317,7 +317,11 @@ impl ZoneGeomCache {
 
 pub const MZB_GRID_CELL: f32 = 8.0;
 
-pub const FLOOR_NORMAL_MIN: f32 = 0.5;
+/// research/XIClient/src/XIClient/source/World/Zone/Terrain/CollisionManager.cpp
+/// CollisionManager::InterpolatePosition splits collision candidates at
+/// `|ObjectNormal.y| <= 0.708`: a steeper face pushes the movement sphere
+/// out sideways, a flatter one carries the height. cos(45 deg).
+pub const FLOOR_NORMAL_MIN: f32 = 0.708;
 
 /// Below this the placement matrix is singular and its inverse-transpose is all
 /// NaN, which would silently make every triangle in the placement non-grounding.
@@ -2366,6 +2370,7 @@ pub fn scroll_water_uv(
     time: Res<Time>,
     water_mat: Res<ZoneWaterMaterial>,
     mut materials: ResMut<Assets<crate::ffxi_zone_material::FfxiZoneMaterial>>,
+    mut touched: ResMut<crate::ffxi_zone_material::ZoneMaterialTouched>,
 ) {
     let Some(handle) = water_mat.0.as_ref() else {
         return;
@@ -2383,6 +2388,7 @@ pub fn scroll_water_uv(
             (t * WATER_SCROLL_WORLD.y / WATER_TEX_TILE).fract(),
         );
         material.uv_offset = Vec4::new(uv.x, uv.y, 0.0, 0.0);
+        touched.mark(handle.id());
     }
 }
 
@@ -4218,8 +4224,8 @@ mod real_dat_sub_area_tests {
 // primitive. The sweep that consumes them lives in kuluu::view_native::walker.
 
 impl MzbCollisionBlock {
-    /// Nearest wall-class triangle (authored normal.y < FLOOR_NORMAL_MIN — the
-    /// 60 degree floor/wall rule) within `r` of `center`, by full
+    /// Nearest wall-class triangle (authored normal.y < FLOOR_NORMAL_MIN —
+    /// retail's 45 degree floor/wall rule) within `r` of `center`, by full
     /// point-to-triangle distance. Suppressed shell triangles are walked past,
     /// same as every collision query. Returns `(dist_sq, normal)` for the
     /// walker sweep's slide re-projection.
@@ -4353,6 +4359,23 @@ impl MzbCollisionGeometry {
             }
         });
         found
+    }
+
+    /// Highest up-facing triangle of any steepness crossing `[lo_y, hi_y]` at
+    /// `xz`. The walker's landing test reaches for this once its floor-class
+    /// search misses: retail's movement sphere collides with every polygon
+    /// (research/XIClient/src/XIClient/source/World/Zone/Terrain/CollisionManager.cpp
+    /// CollisionManager::KO_CharaCollision), so a fall stops on a bank too
+    /// steep to stand on instead of passing through it. Down-facing faces stay
+    /// out: the underside of a roof is not a landing surface (kuluu-0nnl).
+    pub fn highest_up_facing_hit_in_slab(&self, xz: Vec2, lo_y: f32, hi_y: f32) -> Option<f32> {
+        let mut best: Option<f32> = None;
+        self.for_each_hit_in_column(xz, |_, _, hit_y, normal| {
+            if normal.y > 0.0 && hit_y >= lo_y && hit_y <= hi_y && best.is_none_or(|b| hit_y > b) {
+                best = Some(hit_y);
+            }
+        });
+        best
     }
 }
 

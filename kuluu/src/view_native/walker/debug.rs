@@ -35,6 +35,8 @@ pub struct FieldDebug {
     pub mode: WalkMode,
     /// Fall velocity (yalms/s, negative = down); 0 when grounded.
     pub vy: f32,
+    /// Set while a stair panel is showing; recording is skipped otherwise.
+    pub enabled: bool,
     /// Last two ticks' vertical decisions, oldest first (panel header).
     decisions: [Option<VerticalDecision>; 2],
     ring: [Option<(Option<f32>, Option<f32>, f32)>; RING_LEN], // (h0, target, y)
@@ -52,6 +54,7 @@ impl Default for FieldDebug {
             speed_yps: 0.0,
             mode: WalkMode::default(),
             vy: 0.0,
+            enabled: false,
             decisions: [None, None],
             ring: std::array::from_fn(|_| None),
             head: 0,
@@ -122,6 +125,9 @@ pub fn record_tick(
     speed_yps: f32,
     res: &StepResult,
 ) {
+    if !dbg.enabled {
+        return;
+    }
     let p = ffxi_to_bevy(WireVec3 {
         x: x_wire,
         y: y_wire,
@@ -154,6 +160,16 @@ pub fn record_tick(
     let prev = dbg.decisions[1];
     dbg.decisions[0] = prev;
     dbg.decisions[1] = Some(res.decision);
+}
+
+pub fn sync_field_debug_enabled(
+    panels: Res<kuluu_render::hud::HudPanels>,
+    mut dbg: ResMut<FieldDebug>,
+) {
+    let want = panels.stair_draw || panels.stair_debug;
+    if dbg.enabled != want {
+        dbg.enabled = want;
+    }
 }
 
 /// In-world ramp-field gizmos behind the `stair_draw` toggle. bevy_gizmos has
@@ -417,4 +433,30 @@ pub fn update_stair_debug_snapshot_system(
         reversals_120: dbg.reversals(),
         max_d2y_120: dbg.max_d2y(),
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn record_tick_is_a_no_op_until_a_stair_panel_enables_it() {
+        let geom = MzbCollisionGeometry::default();
+        let res = StepResult {
+            dx: 0.0,
+            dy: 0.0,
+            feet_z: 0.0,
+            mode: WalkMode::default(),
+            decision: VerticalDecision::Flat,
+        };
+        let mut dbg = FieldDebug::default();
+        record_tick(&mut dbg, &geom, 0.0, 0.0, 0.0, 0, 0.0, &res);
+        assert!(dbg.field.is_none());
+        assert_eq!(dbg.count, 0);
+
+        dbg.enabled = true;
+        record_tick(&mut dbg, &geom, 0.0, 0.0, 0.0, 0, 0.0, &res);
+        assert!(dbg.field.is_some());
+        assert_eq!(dbg.count, 1);
+    }
 }

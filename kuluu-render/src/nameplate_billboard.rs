@@ -111,12 +111,6 @@ pub struct RasterKey {
     pub text: String,
     pub color: [u8; 4],
     pub hp: Option<u8>,
-    /// The record's raw STATUS_TYPE byte. Today it only reaches the plate via
-    /// `is_dead` (colour) and the live invis cull, but the key must stay a
-    /// complete function of the record: any state transition — including ones
-    /// that happen while the plate is view-culled behind the camera — re-rasters
-    /// on the next frame instead of waiting for some other field to move.
-    pub status: u8,
     pub markers: Vec<u8>,
     pub linkshell_tint: [u8; 4],
 }
@@ -126,7 +120,6 @@ impl RasterKey {
         self.text == text
             && self.color == other.color
             && self.hp == other.hp
-            && self.status == other.status
             && self.markers == other.markers
             && self.linkshell_tint == other.linkshell_tint
     }
@@ -619,7 +612,6 @@ fn raster_key_for(
         text: String::new(),
         color: color_to_rgba8(color),
         hp,
-        status: ent.status,
         markers: crate::nameplate_marker::nameplate_markers(ent),
         linkshell_tint: color_to_rgba8(crate::nameplate_color::linkshell_tint(&ent.char_flags)),
     }
@@ -1424,6 +1416,58 @@ mod icon_raster_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn keyed_entity(status: u8, hp_pct: Option<u8>) -> kuluu_snapshot::Entity {
+        kuluu_snapshot::Entity {
+            id: 1,
+            act_index: 1,
+            kind: EntityKind::Mob,
+            name: Some("Damselfly".into()),
+            pos: kuluu_snapshot::Vec3 {
+                x: 0.0,
+                y: 0.0,
+                z: 0.0,
+            },
+            heading: 0,
+            hp_pct,
+            bt_target_id: 0,
+            face_target: 0,
+            claim_id: 0,
+            speed: 0,
+            speed_base: 0,
+            look: None,
+            animation: 0,
+            animationsub: 0,
+            mount: None,
+            status,
+            char_flags: Default::default(),
+            monstrosity: false,
+            name_vis: None,
+        }
+    }
+
+    #[test]
+    fn raster_key_ignores_status_flips_but_tracks_death() {
+        let colors = crate::nameplate_color::NameColorTable::default();
+        let key = |e: &kuluu_snapshot::Entity| {
+            let ctx = crate::nameplate_color::SelfContext {
+                self_id: None,
+                party: &[],
+            };
+            raster_key_for(e, ctx, &colors, false)
+        };
+        let idle = key(&keyed_entity(0, Some(100)));
+        assert_eq!(
+            idle,
+            key(&keyed_entity(1, Some(100))),
+            "an engage/disengage status flip must not re-raster"
+        );
+        assert_ne!(
+            idle,
+            key(&keyed_entity(0, Some(0))),
+            "death recolours the plate"
+        );
+    }
 
     #[test]
     fn nameplate_system_hides_during_loading_and_restores_without_a_snapshot() {

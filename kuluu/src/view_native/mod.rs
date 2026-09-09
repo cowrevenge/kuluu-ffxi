@@ -393,6 +393,10 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
     }
     app.add_plugins(plugin_group);
     app.add_plugins(walker::WalkerPlugin);
+    app.add_systems(
+        Update,
+        walker::debug::sync_field_debug_enabled.run_if(in_state(AppPhase::InGame)),
+    );
 
     // Persisted audio settings: /debug Sound off (or /sound off) writes to
     // audio.json alongside graphics.json; restarts read it back here. CLI

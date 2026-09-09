@@ -306,7 +306,7 @@ pub fn move_vec_dir_id(forward: f32, strafe: f32) -> MoveDirId {
 /// normalizes the vector and re-multiplies by its now-unit magnitude, which
 /// would make every locked-on forward step a whole yalm per tick (60 y/s). It
 /// is read as the length-preserving save/normalize/restore the same file spells
-/// out explicitly a few blocks up (ControllableActor.cpp:275-286), which is
+/// out explicitly a few blocks up (ControllableActor.cpp ControllableActor::HandleThirdPersonControl), which is
 /// also what retail plays: locked-on forward is the ordinary run speed.
 pub fn move_step_speed_yps(
     locked_dir: Option<MoveDirId>,

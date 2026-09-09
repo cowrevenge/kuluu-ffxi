@@ -353,6 +353,8 @@ pub struct EntitySyncQueries<'w, 's> {
         (With<WorldEntity>, Without<MorphIn>),
     >,
     vis: Query<'w, 's, &'static mut Visibility, (With<WorldEntity>, Without<IsSelf>)>,
+    self_tagged: Query<'w, 's, Has<IsSelf>, With<WorldEntity>>,
+    mounted: Query<'w, 's, Has<crate::components::MountedRider>, With<WorldEntity>>,
 }
 
 #[derive(SystemParam)]
@@ -464,7 +466,9 @@ pub fn sync_entities_system(
                     }
                 }
                 if let Ok(mut m) = queries.mat.get_mut(existing) {
-                    m.0 = mat;
+                    if m.0 != mat {
+                        m.0 = mat;
+                    }
                 }
                 // LSB STATUS_TYPE::INVISIBLE hides the model entirely (worms
                 // between dive and surface); hiding the root takes the skinned
@@ -473,17 +477,20 @@ pub fn sync_entities_system(
                 // Self is exempt — the server never sets INVISIBLE on players,
                 // and a stray byte must not delete our own model.
                 if let Ok(mut v) = queries.vis.get_mut(existing) {
-                    *v = if !is_self && wire.is_invisible() {
+                    let want = if !is_self && wire.is_invisible() {
                         Visibility::Hidden
                     } else {
                         Visibility::default()
                     };
+                    if *v != want {
+                        *v = want;
+                    }
                 }
                 // The spawn arm can only tag self once the id is known, and the
                 // player's own entity routinely arrives before it — every reader
                 // of this marker (camera, first-person, the self plate) would
                 // then treat the player as somebody else for the whole session.
-                if is_self {
+                if is_self && !queries.self_tagged.get(existing).unwrap_or(false) {
                     commands.entity(existing).insert(IsSelf);
                 }
             }
@@ -557,15 +564,20 @@ pub fn sync_entities_system(
         let Some(&rider_e) = tracked.by_id.get(&wire.id) else {
             continue;
         };
+        let mounted = queries.mounted.get(rider_e).unwrap_or(false);
         if snap.mount_of(wire).is_none() {
-            commands
-                .entity(rider_e)
-                .remove::<crate::components::MountedRider>();
+            if mounted {
+                commands
+                    .entity(rider_e)
+                    .remove::<crate::components::MountedRider>();
+            }
             continue;
         }
-        commands
-            .entity(rider_e)
-            .insert(crate::components::MountedRider);
+        if !mounted {
+            commands
+                .entity(rider_e)
+                .insert(crate::components::MountedRider);
+        }
         let id = mount_actor_id(wire.id);
         seen.insert(id);
         if tracked.by_id.contains_key(&id) {
@@ -642,11 +654,14 @@ pub fn apply_invis_flag_system(
         #[cfg(not(target_arch = "wasm32"))]
         if let Ok(rr) = model_roots.get(_bevy_entity) {
             if let Ok(mut v) = other_vis.get_mut(rr.0) {
-                *v = if hide {
+                let want = if hide {
                     Visibility::Hidden
                 } else {
                     Visibility::default()
                 };
+                if *v != want {
+                    *v = want;
+                }
             }
         }
 
@@ -655,11 +670,14 @@ pub fn apply_invis_flag_system(
         // nothing. Spawn value is Inherited, so both directions are owned here.
         if let Some(orb_e) = morph.and_then(|m| m.orb) {
             if let Ok(mut v) = other_vis.get_mut(orb_e) {
-                *v = if hide {
+                let want = if hide {
                     Visibility::Hidden
                 } else {
                     Visibility::Inherited
                 };
+                if *v != want {
+                    *v = want;
+                }
             }
         }
 

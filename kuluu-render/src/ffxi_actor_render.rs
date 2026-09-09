@@ -3309,11 +3309,14 @@ pub fn tick_live_ffxi_actors(
             if !matches!(burrow, ffxi_actor::actor_state::BurrowPhase::None) {
                 let hide = matches!(burrow, ffxi_actor::actor_state::BurrowPhase::Underground)
                     || actor.burrow_holding;
-                *vis = if hide {
+                let want = if hide {
                     Visibility::Hidden
                 } else {
                     Visibility::default()
                 };
+                if *vis != want {
+                    *vis = want;
+                }
             }
         });
 

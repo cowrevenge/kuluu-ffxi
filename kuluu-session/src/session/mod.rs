@@ -910,6 +910,16 @@ fn handle_sub_packet(
                     let _ = event_tx.send(AgentEvent::VanaTimeSynced { game_time });
                 }
 
+                // 0x037 CHAR_STATUS is only re-sent on a status *change*, so a
+                // character who zoned in still KO'd would carry no homepoint
+                // timer until then. Emitted after ZoneChanged, which clears it.
+                if let Some(secs) = login.seconds_until_homepoint() {
+                    tracing::info!(seconds_until_homepoint = secs, "0x00A LOGIN zoned in KO'd");
+                    let _ = event_tx.send(AgentEvent::DeathTimerUpdated {
+                        seconds_until_homepoint: Some(secs),
+                    });
+                }
+
                 // 0x057 WEATHER is only broadcast on a weather *change*
                 // (vendor/server/src/map/zone.cpp:672 is its sole construction
                 // site), so without this a zoning character renders the default

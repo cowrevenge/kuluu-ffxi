@@ -99,6 +99,14 @@ pub struct ServerLogin {
     /// tagging as CHAR_PC — plus 0x051 GRAP_LIST are self's only look sources.
     pub look: Option<LookData>,
 
+    /// `DeadCounter` — the same `60 * (6min + GetTimeUntilDeathHomepoint())`
+    /// encoding 0x037 puts in `dead_counter1`
+    /// (vendor/server/src/map/packets/s2c/0x00a_login.cpp:125,163). `None` only
+    /// when the body stopped short of the field. Read it through
+    /// [`Self::seconds_until_homepoint`], which applies the `hpp == 0` KO gate
+    /// the raw counter needs.
+    pub dead_counter: Option<u32>,
+
     /// Weather in force as the character zones in.
     ///
     /// The server sends 0x057 WEATHER only when the weather *changes*
@@ -197,6 +205,19 @@ impl ServerLogin {
     pub const WEATHER_TIME2_OFFSET: usize = 0x6C;
     pub const WEATHER_OFFSET_TIME_OFFSET: usize = 0x70;
 
+    /// `DeadCounter`, between `PlayTime` and `MyroomSubMapNumber` in
+    /// vendor/server/src/map/packets/s2c/0x00a_login.h:117-121. The chain from
+    /// `LoginState` @0x7C runs name[16], certificate[2], unknown9C, ZoneSubNo,
+    /// PlayTime, DeadCounter — landing on
+    /// [`ServerLoginMyroom::SUB_MAP_NUMBER_OFFSET`], which the const assert
+    /// below pins. Retail's own struct agrees: `field_A4` (its names run +4
+    /// ahead of the payload offsets, per
+    /// `static_assert(offsetof(GP_SERV_LOGIN, field_A8) == 0xA4)`) is the u32 it
+    /// divides by 60 into the death deadline
+    /// (research/XIClient/src/XIClient/source/Game/Net/Packets/s2c/0x00A.cpp:98,
+    /// .../include/Game/Net/Packets/s2c/0x00A.h).
+    pub const DEAD_COUNTER_OFFSET: usize = 0xA0;
+
     /// `PosHead.server_status` while a zone-in event is pending — the packet's
     /// event fields are only written then, and event id 0 is a real cutscene
     /// (Bastok Markets intro), so presence keys off the status byte
@@ -259,6 +280,13 @@ impl ServerLogin {
                         .unwrap(),
                 ),
             });
+        let dead_counter = (body.len() >= Self::DEAD_COUNTER_OFFSET + 4).then(|| {
+            u32::from_le_bytes(
+                body[Self::DEAD_COUNTER_OFFSET..Self::DEAD_COUNTER_OFFSET + 4]
+                    .try_into()
+                    .unwrap(),
+            )
+        });
         let weather = (body.len() >= Self::WEATHER_OFFSET_TIME_OFFSET + 4).then(|| {
             let u16_at = |off: usize| u16::from_le_bytes(body[off..off + 2].try_into().unwrap());
             let u32_at = |off: usize| u32::from_le_bytes(body[off..off + 4].try_into().unwrap());
@@ -281,10 +309,30 @@ impl ServerLogin {
             sub_area,
             zone_in_event,
             look: LookData::decode_grap_id_tbl(body, Self::GRAP_ID_TBL_OFFSET),
+            dead_counter,
             weather,
         })
     }
+
+    /// Seconds until the forced home-point warp, or `None` when the character is
+    /// not KO'd (or the body stopped short of `DeadCounter`).
+    ///
+    /// `PosHead.HpMax` is `PChar->GetHPP()`
+    /// (vendor/server/src/map/packets/s2c/0x00a_login.cpp:147), and `GetHPP()`
+    /// clamps a living character to at least 1, so `hpp == 0` is the same true KO
+    /// sentinel the 0x037 path uses — and just as load-bearing, since LSB fills
+    /// `DeadCounter` for a living character too.
+    pub fn seconds_until_homepoint(&self) -> Option<u32> {
+        self.dead_counter
+            .filter(|_| self.pos_head.hpp == 0)
+            .map(dead_counter_seconds_until_homepoint)
+    }
 }
+
+const _: () = assert!(
+    ServerLogin::DEAD_COUNTER_OFFSET + 4 == ServerLoginMyroom::SUB_MAP_NUMBER_OFFSET,
+    "DeadCounter abuts MyroomSubMapNumber in GP_SERV_COMMAND_LOGIN"
+);
 
 #[derive(Debug, Clone, Copy)]
 pub struct ServerLogout {
@@ -386,6 +434,85 @@ mod server_login_tests {
                 event_mode: 32,
             })
         );
+    }
+
+    /// The dead-counter field is only readable if the offset chain from the
+    /// already-pinned LoginState is intact, so pin the chain LSB declares
+    /// (vendor/server/src/map/packets/s2c/0x00a_login.h:117-125): LoginState u32,
+    /// name[16], certificate[2] i32, unknown9C u16, ZoneSubNo u16, PlayTime u32,
+    /// DeadCounter u32, MyroomSubMapNumber u8.
+    #[test]
+    fn dead_counter_offset_sits_between_login_state_and_myroom_sub_map() {
+        use super::ServerLogin as L;
+        use super::ServerLoginMyroom as M;
+        assert_eq!(
+            L::DEAD_COUNTER_OFFSET,
+            M::LOGIN_STATE_OFFSET + 4 + 16 + 8 + 2 + 2 + 4
+        );
+        assert_eq!(L::DEAD_COUNTER_OFFSET + 4, M::SUB_MAP_NUMBER_OFFSET);
+    }
+
+    #[test]
+    fn server_login_dead_counter_only_reads_as_a_timer_while_ko() {
+        let mut buf = vec![0u8; 0x100];
+        buf[44..48].copy_from_slice(&241u32.to_le_bytes());
+        const REMAINING_SECS: u32 = 1800;
+        buf[ServerLogin::DEAD_COUNTER_OFFSET..ServerLogin::DEAD_COUNTER_OFFSET + 4]
+            .copy_from_slice(
+                &(DEAD_COUNTER_UNITS_PER_SECOND * (DEAD_COUNTER_PADDING_SECS + REMAINING_SECS))
+                    .to_le_bytes(),
+            );
+        // Neighbouring PlayTime / MyroomSubMapNumber must not bleed in.
+        buf[ServerLogin::DEAD_COUNTER_OFFSET - 4..ServerLogin::DEAD_COUNTER_OFFSET]
+            .copy_from_slice(&0xDEAD_BEEFu32.to_le_bytes());
+        buf[ServerLoginMyroom::SUB_MAP_NUMBER_OFFSET] = 0xAB;
+
+        // PosHead.HpMax is GetHPP(); a living character carries the very same
+        // counter, so hpp alone decides whether it means anything.
+        const FULL_HP_PCT: u8 = 100;
+        buf[PosHead::HPP_OFFSET] = FULL_HP_PCT;
+        let alive = ServerLogin::decode(&buf).unwrap();
+        assert_eq!(
+            alive.dead_counter,
+            Some(DEAD_COUNTER_UNITS_PER_SECOND * (DEAD_COUNTER_PADDING_SECS + REMAINING_SECS))
+        );
+        assert_eq!(alive.seconds_until_homepoint(), None);
+
+        buf[PosHead::HPP_OFFSET] = 0;
+        let ko = ServerLogin::decode(&buf).unwrap();
+        assert_eq!(ko.seconds_until_homepoint(), Some(REMAINING_SECS));
+    }
+
+    /// Both carriers of the counter share one encoding, so the 0x00A value must
+    /// convert exactly like the 0x037 one
+    /// (vendor/server/src/map/packets/char_status.cpp:237 vs
+    /// vendor/server/src/map/packets/s2c/0x00a_login.cpp:125,163).
+    #[test]
+    fn server_login_dead_counter_matches_char_status_conversion() {
+        for remaining in [0u32, 1, 599, 3600] {
+            let raw = DEAD_COUNTER_UNITS_PER_SECOND * (DEAD_COUNTER_PADDING_SECS + remaining);
+            let mut buf = vec![0u8; 0x100];
+            buf[ServerLogin::DEAD_COUNTER_OFFSET..ServerLogin::DEAD_COUNTER_OFFSET + 4]
+                .copy_from_slice(&raw.to_le_bytes());
+            let login = ServerLogin::decode(&buf).unwrap();
+            let mut status_body = vec![0u8; CharStatus::MIN_LEN];
+            status_body[CharStatus::DEAD_COUNTER1_OFFSET..CharStatus::DEAD_COUNTER1_OFFSET + 4]
+                .copy_from_slice(&raw.to_le_bytes());
+            let status = CharStatus::decode(&status_body).unwrap();
+            assert_eq!(
+                login.seconds_until_homepoint(),
+                Some(status.seconds_until_homepoint())
+            );
+            assert_eq!(login.seconds_until_homepoint(), Some(remaining));
+        }
+    }
+
+    #[test]
+    fn server_login_dead_counter_absent_when_body_stops_short() {
+        let buf = vec![0u8; ServerLogin::DEAD_COUNTER_OFFSET + 3];
+        let l = ServerLogin::decode(&buf).unwrap();
+        assert_eq!(l.dead_counter, None);
+        assert_eq!(l.seconds_until_homepoint(), None);
     }
 
     #[test]

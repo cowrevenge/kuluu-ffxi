@@ -83,15 +83,39 @@ impl CharStatus {
         })
     }
 
-    /// Seconds until the server force-warps a KO'd player home. LSB sends
-    /// dead_counter1 = 60 * (6min + (60min - timeSinceDeath)); the leading 6min is fixed
-    /// padding, so stripping it (`dead_counter1/60 - 360`) yields the real time left,
-    /// which hits 0 when the server-side CDeathState completes at death + 60min.
-    /// vendor/server/src/map/packets/char_status.cpp,
-    /// charentity.cpp::GetTimeUntilDeathHomepoint, ai/states/death_state.cpp
+    /// Seconds until the server force-warps a KO'd player home. Meaningless
+    /// unless `hpp == 0`; see [`dead_counter_seconds_until_homepoint`].
     pub fn seconds_until_homepoint(&self) -> u32 {
-        (self.dead_counter1 / 60).saturating_sub(360)
+        dead_counter_seconds_until_homepoint(self.dead_counter1)
     }
+}
+
+/// The scale LSB applies to the second count in every dead-counter carrier
+/// (`60 * deadRemaining` in vendor/server/src/map/packets/char_status.cpp and
+/// vendor/server/src/map/packets/s2c/0x00a_login.cpp). Retail divides straight
+/// back out: `Payload.field_A4 / 60`
+/// (research/XIClient/src/XIClient/source/Game/Net/Packets/s2c/0x00A.cpp:98).
+pub(crate) const DEAD_COUNTER_UNITS_PER_SECOND: u32 = 60;
+
+/// The fixed padding LSB prepends to the real remaining time (`6min +
+/// PChar->GetTimeUntilDeathHomepoint()`), whose own comment records that the
+/// client treats 66min as the death maximum and force-homepoints once the value
+/// drops below 6min. vendor/server/src/map/packets/char_status.cpp.
+pub(crate) const DEAD_COUNTER_PADDING_SECS: u32 = 6 * 60;
+
+/// Seconds until the server force-warps a KO'd player home, from the raw counter
+/// both 0x037 (`dead_counter1`) and 0x00A (`DeadCounter`) carry with the same
+/// encoding. Stripping the fixed padding yields the real time left, which hits 0
+/// when the server-side CDeathState completes at death + 60min
+/// (vendor/server/src/map/entities/charentity.cpp::GetTimeUntilDeathHomepoint,
+/// vendor/server/src/map/ai/states/death_state.cpp).
+///
+/// The counter alone cannot tell a corpse from a living character: LSB computes
+/// it unconditionally and `GetTimeSinceDeath()` returns 0s while alive, so a
+/// living character is byte-identical to a fresh corpse. Callers must gate on the
+/// carrier's `hpp == 0`.
+pub fn dead_counter_seconds_until_homepoint(dead_counter: u32) -> u32 {
+    (dead_counter / DEAD_COUNTER_UNITS_PER_SECOND).saturating_sub(DEAD_COUNTER_PADDING_SECS)
 }
 
 const _: () = assert!(CharStatus::SPEED_OFFSET + 2 <= CharStatus::MIN_LEN);

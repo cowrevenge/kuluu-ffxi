@@ -36,6 +36,11 @@ pub struct PosHead {
 impl PosHead {
     pub(crate) const SIZE: usize = 40;
 
+    /// `HpMax` in GP_SERV_POS_HEAD
+    /// (vendor/server/src/map/packets/s2c/0x00a_login.h:41). The name is a
+    /// misnomer: every carrier fills it from `PChar->GetHPP()`, a percentage.
+    pub const HPP_OFFSET: usize = 26;
+
     pub(crate) const SIZE_WITH_BT_TARGET: usize = 44;
 
     pub fn decode(body: &[u8]) -> Result<Self, DecodeError> {
@@ -58,7 +63,7 @@ impl PosHead {
             flags0: u32::from_le_bytes(body[20..24].try_into().unwrap()),
             speed: body[24],
             speed_base: body[25],
-            hpp: body[26],
+            hpp: body[Self::HPP_OFFSET],
             server_status: body[27],
             flags1: u32::from_le_bytes(body[28..32].try_into().unwrap()),
             flags2: u32::from_le_bytes(body[32..36].try_into().unwrap()),

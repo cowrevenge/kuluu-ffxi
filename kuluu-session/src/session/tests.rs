@@ -152,6 +152,55 @@ fn login_emits_zone_in_weather_after_the_zone_change() {
     );
 }
 
+/// `ZoneChanged` clears `SessionState::death_homepoint_secs`, and 0x037
+/// CHAR_STATUS only arrives on a status *change*, so a character who zoned in
+/// still KO'd depends on the LOGIN arm re-publishing the timer afterwards.
+#[test]
+fn login_emits_the_homepoint_timer_after_the_zone_change_only_while_ko() {
+    use ffxi_proto::decode::{dead_counter_seconds_until_homepoint, PosHead, ServerLogin};
+
+    // An arbitrary counter, converted by the decoder's own formula rather than a
+    // second copy of it here.
+    const DEAD_COUNTER: u32 = 129_600;
+    const FULL_HP_PCT: u8 = 100;
+    let remaining = dead_counter_seconds_until_homepoint(DEAD_COUNTER);
+    assert!(remaining > 0, "the fixture must describe a live countdown");
+
+    let mut body = vec![0u8; ServerLogin::DEAD_COUNTER_OFFSET + 4];
+    body[ServerLogin::DEAD_COUNTER_OFFSET..ServerLogin::DEAD_COUNTER_OFFSET + 4]
+        .copy_from_slice(&DEAD_COUNTER.to_le_bytes());
+
+    body[PosHead::HPP_OFFSET] = FULL_HP_PCT;
+    assert!(
+        !sub_packet_events(ffxi_proto::map::s2c::LOGIN, &body)
+            .iter()
+            .any(|e| matches!(e, AgentEvent::DeathTimerUpdated { .. })),
+        "a living character carries the same counter and must publish no timer"
+    );
+
+    body[PosHead::HPP_OFFSET] = 0;
+    let events = sub_packet_events(ffxi_proto::map::s2c::LOGIN, &body);
+    let zone_at = events
+        .iter()
+        .position(|e| matches!(e, AgentEvent::ZoneChanged { .. }))
+        .expect("LOGIN emits ZoneChanged");
+    let timer_at = events
+        .iter()
+        .position(|e| {
+            matches!(
+                e,
+                AgentEvent::DeathTimerUpdated {
+                    seconds_until_homepoint: Some(secs),
+                } if *secs == remaining
+            )
+        })
+        .expect("LOGIN emits the zone-in homepoint timer");
+    assert!(
+        timer_at > zone_at,
+        "DeathTimerUpdated must follow ZoneChanged, got {events:?}"
+    );
+}
+
 /// A 0x051 body whose GrapIDTbl does not decode must go through
 /// [`warn_decode_err`] like every sibling arm — dropped silently, a wrong
 /// body-offset assumption looks exactly like "self kept the launcher seed"

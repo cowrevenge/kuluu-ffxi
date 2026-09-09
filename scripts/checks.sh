@@ -217,6 +217,27 @@ run_harness() {
       ':!ffxi-agent/**' ':!.agents/AGENTS.md' ':!.agents/CLAUDE.md' \
     | grep -vE '\.claude/(settings\.json|settings\.local\.json|skills|agents|worktrees)\b' || true)
 
+  # 6. Generated bundles stay out of the index. trunk (kuluu-viewer-wasm) and
+  #    jacq (ffxi-agent) each write a sibling dist/, and release.yml /
+  #    release-wasm.yml always rebuild it from source before zipping — so a
+  #    committed copy is stale by construction and costs only clone bandwidth.
+  #    GITHUB_MAX_BLOB_BYTES is where GitHub starts warning on push (it hard-
+  #    rejects at twice that); the pre-rename wasm bundle here was 58MB.
+  local -r GITHUB_MAX_BLOB_BYTES=$((50 * 1024 * 1024))
+  local size
+  while IFS= read -r path; do
+    echo "checks: harness — generated bundle is tracked: $path" >&2
+    echo "checks:   dist/ is build output (trunk/jacq); CI rebuilds it and .gitignore covers it" >&2
+    bad=1
+  done < <(git ls-files -- 'dist/*' '*/dist/*')
+  while read -r size path; do
+    (( size > GITHUB_MAX_BLOB_BYTES )) || continue
+    echo "checks: harness — tracked file over GitHub's $((GITHUB_MAX_BLOB_BYTES / 1024 / 1024))MB blob warning: $path ($size bytes)" >&2
+    bad=1
+  done < <(git ls-files -s \
+    | sed -E -n 's/^(100644|100755|120000) ([0-9a-f]+) [0-3]'$'\t''/\2 /p' \
+    | git cat-file --batch-check='%(objectsize) %(rest)')
+
   # Cargo records path overrides that no longer match the resolved dependency
   # graph here. Fail before an engine upgrade can silently bypass a required
   # vendor fix while leaving its [patch.crates-io] declaration in place.

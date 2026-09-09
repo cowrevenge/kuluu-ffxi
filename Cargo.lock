@@ -3159,7 +3159,9 @@ dependencies = [
 name = "ffxi-audio"
 version = "0.6.0"
 dependencies = [
+ "anyhow",
  "hound",
+ "lsb-scrape",
  "thiserror 2.0.20",
 ]
 

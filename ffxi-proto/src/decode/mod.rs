@@ -42,6 +42,8 @@ mod treasure;
 pub use treasure::*;
 mod auction;
 pub use auction::*;
+mod assist;
+pub use assist::*;
 
 #[derive(Debug, thiserror::Error)]
 pub enum DecodeError {

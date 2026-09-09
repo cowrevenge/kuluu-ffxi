@@ -137,6 +137,34 @@ pub fn auto_clear_target_system(
     }
 }
 
+/// Applies the server's retarget push (s2c 0x058 ASSIST, reaching us as
+/// [`kuluu_snapshot::ViewerEvent::TargetChanged`]). LSB sends it whenever it
+/// moves our battle target - `/assist`, engaging, and the
+/// auto-target-after-kill scan in `CAttackState::UpdateTarget` - so it is the
+/// only channel that can move the target cursor for those.
+///
+/// A `None` target_id (wire `AssistNo` 0, which LSB emits from
+/// `CCharEntity::OnChangeTarget` when the target went away) is left alone:
+/// [`auto_clear_target_system`] already drops a target whose entity is gone,
+/// and retail's `RecvAssist` behaviour for a zero id is not established.
+pub fn apply_server_retarget_system(
+    events: Res<crate::snapshot::EventLog>,
+    mut cursor: Local<u64>,
+    mut target: ResMut<Target>,
+) {
+    let total = events.pushed_total;
+    let first_global = total.saturating_sub(events.recent.len() as u64);
+    for g in (*cursor).max(first_global)..total {
+        if let kuluu_snapshot::ViewerEvent::TargetChanged {
+            target_id: Some(id),
+        } = events.recent[(g - first_global) as usize]
+        {
+            target.id = Some(id);
+        }
+    }
+    *cursor = total;
+}
+
 #[derive(Resource, Default)]
 pub struct TrackedEntities {
     pub by_id: HashMap<u32, Entity>,
@@ -1267,6 +1295,75 @@ mod tests {
             *app.world().get::<Visibility>(actor_root).unwrap(),
             Visibility::default(),
             "flag cleared: the actor root comes back"
+        );
+    }
+
+    fn retarget_app() -> App {
+        let mut app = App::new();
+        app.init_resource::<crate::snapshot::EventLog>()
+            .init_resource::<Target>()
+            .add_systems(Update, apply_server_retarget_system);
+        app
+    }
+
+    fn push_event(app: &mut App, ev: kuluu_snapshot::ViewerEvent) {
+        app.world_mut()
+            .resource_mut::<crate::snapshot::EventLog>()
+            .push(ev);
+    }
+
+    /// The server-pushed retarget (s2c 0x058 ASSIST) is what makes `/assist`
+    /// and auto-target-after-kill move the cursor.
+    #[test]
+    fn server_retarget_moves_the_target() {
+        let mut app = retarget_app();
+        app.world_mut().resource_mut::<Target>().id = Some(11);
+        push_event(
+            &mut app,
+            kuluu_snapshot::ViewerEvent::TargetChanged {
+                target_id: Some(22),
+            },
+        );
+        app.update();
+        assert_eq!(app.world().resource::<Target>().id, Some(22));
+    }
+
+    /// LSB emits `AssistNo` 0 from `CCharEntity::OnChangeTarget` when the
+    /// target went away; dropping the cursor there is not established
+    /// behaviour, and `auto_clear_target_system` already handles the entity
+    /// actually leaving the scene.
+    #[test]
+    fn zero_assist_no_leaves_the_target_alone() {
+        let mut app = retarget_app();
+        app.world_mut().resource_mut::<Target>().id = Some(11);
+        push_event(
+            &mut app,
+            kuluu_snapshot::ViewerEvent::TargetChanged { target_id: None },
+        );
+        app.update();
+        assert_eq!(app.world().resource::<Target>().id, Some(11));
+    }
+
+    /// The cursor is a global index, so an event the ring already evicted must
+    /// not be replayed and a later local retarget must not be undone.
+    #[test]
+    fn retarget_is_edge_triggered_not_reapplied() {
+        let mut app = retarget_app();
+        push_event(
+            &mut app,
+            kuluu_snapshot::ViewerEvent::TargetChanged {
+                target_id: Some(22),
+            },
+        );
+        app.update();
+        assert_eq!(app.world().resource::<Target>().id, Some(22));
+
+        app.world_mut().resource_mut::<Target>().id = Some(33);
+        app.update();
+        assert_eq!(
+            app.world().resource::<Target>().id,
+            Some(33),
+            "an already-drained event must not re-fire"
         );
     }
 

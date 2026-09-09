@@ -397,6 +397,9 @@ pub fn event_to_viewer_event(ev: AgentEvent) -> Option<wire::ViewerEvent> {
         AgentEvent::Disconnected { reason } => Some(wire::ViewerEvent::Disconnected { reason }),
         AgentEvent::LowHp { pct } => Some(wire::ViewerEvent::LowHp { pct }),
         AgentEvent::EngagedBy { entity_id } => Some(wire::ViewerEvent::EngagedBy { entity_id }),
+        AgentEvent::TargetChanged { target_id } => {
+            Some(wire::ViewerEvent::TargetChanged { target_id })
+        }
         AgentEvent::TellReceived { from, text } => {
             Some(wire::ViewerEvent::TellReceived { from, text })
         }

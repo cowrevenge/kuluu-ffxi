@@ -1362,6 +1362,15 @@ fn handle_sub_packet(
                 let _ = event_tx.send(AgentEvent::ChatLine { line });
             }
         }
+        s2c::ASSIST => {
+            if let Ok(a) =
+                decode::Assist::decode(sub.data).inspect_err(|e| warn_decode_err(sub.opcode, e))
+            {
+                let _ = event_tx.send(AgentEvent::TargetChanged {
+                    target_id: a.target(),
+                });
+            }
+        }
         s2c::MOTIONMES => {
             if let Ok(m) =
                 decode::MotionMes::decode(sub.data).inspect_err(|e| warn_decode_err(sub.opcode, e))

@@ -1923,6 +1923,7 @@ impl SessionState {
             AgentEvent::LowHp { .. }
             | AgentEvent::PartyMemberLowHp { .. }
             | AgentEvent::EngagedBy { .. }
+            | AgentEvent::TargetChanged { .. }
             | AgentEvent::TellReceived { .. }
             | AgentEvent::SceneSummary { .. }
             | AgentEvent::ActionStarted { .. }
@@ -2755,6 +2756,14 @@ pub enum AgentEvent {
 
     EngagedBy {
         entity_id: u32,
+    },
+
+    /// s2c 0x058 ASSIST: the server retargeted us. `target_id` is the wire
+    /// `AssistNo`; `None` is LSB's zeroed `AssistNo`
+    /// (vendor/server/src/map/packets/s2c/0x058_assist.cpp:34-36), i.e. the
+    /// target went away rather than moved.
+    TargetChanged {
+        target_id: Option<u32>,
     },
 
     ForcedMove {

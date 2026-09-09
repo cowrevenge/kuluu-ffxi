@@ -2237,6 +2237,7 @@ fn _agentevent_is_additive_only(x: &AgentEvent) {
         AgentEvent::LowHp { .. } => (),
         AgentEvent::PartyMemberLowHp { .. } => (),
         AgentEvent::EngagedBy { .. } => (),
+        AgentEvent::TargetChanged { .. } => (),
         AgentEvent::ForcedMove { .. } => (),
         AgentEvent::SetFps { .. } => (),
         AgentEvent::TellReceived { .. } => (),

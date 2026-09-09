@@ -2,6 +2,9 @@
 
 use serde::{Deserialize, Serialize};
 
+// v25: ViewerEvent::TargetChanged - the server-pushed retarget (s2c 0x058 ASSIST).
+// Nothing in the snapshot carries the server's chosen target, so /assist and
+// auto-target-after-kill had no way to move the client's target cursor.
 // v24: Entity.monstrosity and CharFlags.{invis, job_master_display}.
 // v23: SceneSnapshot.death_menu_offer — the durable s2c 0x0F9 Raise/Reraise or
 // Tractor offer shown while dead. (Upstream's "v20"; renumbered on merge because our
@@ -49,7 +52,7 @@ use serde::{Deserialize, Serialize};
 // v5: InventoryItem.charges_remaining + next_use_vana_ts (item recast/charges).
 // v4: SceneSnapshot.delivery_box (dedicated delivery screen) + ViewerCommand::DeliveryBox
 // (postcard frames are not self-describing, so any shape change bumps this).
-pub const PROTOCOL_VERSION: u32 = 24;
+pub const PROTOCOL_VERSION: u32 = 25;
 
 /// Longest countdown `SceneSnapshot::status_icon_expiries` can carry. The
 /// producer rejects anything beyond it as a corrupt 0x063 timestamp, and the HUD
@@ -1412,6 +1415,14 @@ pub enum ViewerEvent {
     },
     EngagedBy {
         entity_id: u32,
+    },
+
+    /// s2c 0x058 ASSIST: the server moved our target. `None` is the wire's
+    /// zero `AssistNo` (the target went away), which leaves the local target
+    /// alone rather than clearing it - retail's `RecvAssist` behaviour for a
+    /// zero id is not established.
+    TargetChanged {
+        target_id: Option<u32>,
     },
     TellReceived {
         from: String,

@@ -441,6 +441,12 @@ pub mod s2c {
     // Emote broadcast (vendor/server/src/map/packets/s2c/0x05a_motionmes.h).
     pub const MOTIONMES: u16 = 0x05A;
 
+    // GP_SERV_COMMAND_ASSIST, vendor/server/src/map/enums/packet_s2c.h:93.
+    // Server-pushed retarget: the answer to a c2s ASSIST request and to every
+    // other server-side target change (vendor/server/src/map/packets/s2c/
+    // 0x058_assist.h, [`crate::decode::Assist`]).
+    pub const ASSIST: u16 = 0x058;
+
     // GP_SERV_COMMAND_EMOTE_LIST, vendor/server/src/map/enums/packet_s2c.h:177.
     // Job-emote (u32) + chair (u16) unlock bitfields
     // (vendor/server/src/map/packets/s2c/0x11a_emote_list.h).

@@ -38,6 +38,60 @@ fn sub_packet_events(opcode: u16, body: &[u8]) -> Vec<AgentEvent> {
     out
 }
 
+/// s2c 0x058 ASSIST is the server's retarget push (`/assist`, engage,
+/// auto-target-after-kill); the dispatch must turn `AssistNo` into the client's
+/// new target (vendor/server/src/map/packets/s2c/0x058_assist.h).
+#[test]
+fn assist_packet_retargets_to_assist_no() {
+    use ffxi_proto::decode::Assist;
+
+    let mut body = vec![0u8; Assist::MIN_LEN];
+    body[Assist::UNIQUE_NO_OFFSET..Assist::UNIQUE_NO_OFFSET + 4]
+        .copy_from_slice(&0x0100_0F42u32.to_le_bytes());
+    body[Assist::ASSIST_NO_OFFSET..Assist::ASSIST_NO_OFFSET + 4]
+        .copy_from_slice(&0x0100_07D1u32.to_le_bytes());
+    body[Assist::ACT_INDEX_OFFSET..Assist::ACT_INDEX_OFFSET + 2]
+        .copy_from_slice(&0x0442u16.to_le_bytes());
+
+    let events = sub_packet_events(ffxi_proto::map::s2c::ASSIST, &body);
+    assert!(
+        matches!(
+            events.as_slice(),
+            [AgentEvent::TargetChanged {
+                target_id: Some(0x0100_07D1),
+            }]
+        ),
+        "{events:?}"
+    );
+}
+
+/// LSB builds the packet over a zeroed buffer and leaves `AssistNo` at 0 when
+/// the target went away (`CCharEntity::OnChangeTarget` with a null target,
+/// 0x058_assist.cpp:34-36), so 0 must not be reported as entity 0.
+#[test]
+fn assist_packet_reports_a_zero_assist_no_as_no_target() {
+    let events = sub_packet_events(
+        ffxi_proto::map::s2c::ASSIST,
+        &[0u8; ffxi_proto::decode::Assist::MIN_LEN],
+    );
+    assert!(
+        matches!(
+            events.as_slice(),
+            [AgentEvent::TargetChanged { target_id: None }]
+        ),
+        "{events:?}"
+    );
+}
+
+#[test]
+fn assist_packet_rejects_a_truncated_body() {
+    let events = sub_packet_events(
+        ffxi_proto::map::s2c::ASSIST,
+        &[0u8; ffxi_proto::decode::Assist::MIN_LEN - 1],
+    );
+    assert!(events.is_empty(), "{events:?}");
+}
+
 #[test]
 fn death_menu_packet_emits_the_server_offer() {
     use ffxi_proto::decode::DeathMenuOffer;

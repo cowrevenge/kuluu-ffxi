@@ -479,7 +479,12 @@ impl<S: SceneSource + Resource + Component<Mutability = bevy::ecs::component::Mu
 
         app.add_systems(
             Update,
-            scene::auto_clear_target_system.before(sync_entities_system),
+            (
+                scene::apply_server_retarget_system,
+                scene::auto_clear_target_system,
+            )
+                .chain()
+                .before(sync_entities_system),
         );
 
         app.add_systems(

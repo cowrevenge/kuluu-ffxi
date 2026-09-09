@@ -122,65 +122,31 @@ pub struct StatusChip {
 #[derive(Component)]
 pub struct StatusChipFallback;
 
-#[derive(Component)]
-pub struct StatusChipTimer;
-
 const MAX_VISIBLE: usize = 32;
 
 const ICON_SIZE_PX: f32 = 20.0;
 
-/// Retail packs the ribbon tight, but our countdown labels are wider than the
-/// art they sit under, so the pitch is driven by the label. This is only the
-/// floor that applies if a label ever gets narrower than the icon.
+/// Retail packs the ribbon tight, so this is the whole gap between chips; only
+/// the enhanced countdown ([`timers`]) widens the pitch past it.
 const MIN_ICON_GAP_PX: f32 = 2.0;
 
-const TIMER_FONT_PX: f32 = 8.0;
-
-/// Blank space kept between two neighbouring countdowns at their widest, so a
-/// full row of long timers still reads as one number per icon.
-const TIMER_LABEL_GAP_PX: f32 = 4.0;
-
-/// Clearance between a countdown and the next wrapped row of icons.
-const TIMER_ROW_CLEARANCE_PX: f32 = 2.0;
-
-/// The widest string [`ribbon_timer`] emits, which is what the chip pitch
-/// reserves room for; `ribbon_timer_never_exceeds_reserved_width` pins it.
-const WIDEST_RIBBON_TIMER: &str = "59:59";
+/// Clearance between two wrapped rows of icons, on top of whatever line the
+/// enhanced countdown adds.
+const ROW_CLEARANCE_PX: f32 = 2.0;
 
 pub const ICONS_PER_ROW: usize = 16;
 
-/// Past this many hours even the minutes are noise, and dropping them is what
-/// holds the label inside the reserved width for expiries out at
-/// [`kuluu_snapshot::MAX_STATUS_TIMER_SECS`].
-const COARSE_TIMER_HOURS: u32 = 10;
+#[cfg(feature = "enhanced-buff-timers")]
+use timers::{cell_pitch_px, timer_line_px};
 
-/// Countdown text for a 20px chip. Retail draws no timer here at all, so the
-/// format is ours: seconds are what matter on a 30-second debuff and noise on a
-/// 3-hour food buff, and shedding precision as the duration grows is what keeps
-/// every label inside one chip pitch instead of running into its neighbour.
-fn ribbon_timer(remaining_secs: u32) -> String {
-    let (h, m, s) = (
-        remaining_secs / 3600,
-        (remaining_secs % 3600) / 60,
-        remaining_secs % 60,
-    );
-    match h {
-        0 => format!("{m}:{s:02}"),
-        _ if h < COARSE_TIMER_HOURS => format!("{h}h{m:02}"),
-        _ => format!("{h}h"),
-    }
-}
-
-/// Horizontal pitch of one chip: wide enough for the icon and for a full-width
-/// countdown centred under it, so neither the art nor the label can collide with
-/// the neighbouring slot.
+#[cfg(not(feature = "enhanced-buff-timers"))]
 fn cell_pitch_px() -> f32 {
-    let label = crate::ui_font::text_width_px(WIDEST_RIBBON_TIMER, TIMER_FONT_PX);
-    (ICON_SIZE_PX + MIN_ICON_GAP_PX).max(label + TIMER_LABEL_GAP_PX)
+    ICON_SIZE_PX + MIN_ICON_GAP_PX
 }
 
+#[cfg(not(feature = "enhanced-buff-timers"))]
 fn timer_line_px() -> f32 {
-    crate::ui_font::line_height_px(TIMER_FONT_PX)
+    0.0
 }
 
 pub fn spawn_status_ribbon(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
@@ -188,9 +154,6 @@ pub fn spawn_status_ribbon(mut commands: Commands, mut images: ResMut<Assets<Ima
     let pitch = cell_pitch_px();
     let icon_gap = pitch - ICON_SIZE_PX;
     let timer_line = timer_line_px();
-    // The label is centred on the chip pitch, not on the icon, so it overhangs
-    // evenly into the gap either side.
-    let timer_overhang = icon_gap / 2.0;
     let row_width = ICONS_PER_ROW as f32 * pitch;
 
     commands
@@ -209,7 +172,7 @@ pub fn spawn_status_ribbon(mut commands: Commands, mut images: ResMut<Assets<Ima
                 align_items: AlignItems::FlexStart,
                 align_content: AlignContent::FlexStart,
                 column_gap: Val::Px(icon_gap),
-                row_gap: Val::Px(timer_line + TIMER_ROW_CLEARANCE_PX),
+                row_gap: Val::Px(timer_line + ROW_CLEARANCE_PX),
                 border: UiRect::all(Val::Px(1.0)),
                 ..default()
             },
@@ -240,23 +203,8 @@ pub fn spawn_status_ribbon(mut commands: Commands, mut images: ResMut<Assets<Ima
                         style::text_font(10.0),
                         TextColor(theme::TEXT),
                     ));
-                    chip.spawn((
-                        StatusChipTimer,
-                        Node {
-                            position_type: PositionType::Absolute,
-                            bottom: Val::Px(-timer_line),
-                            left: Val::Px(-timer_overhang),
-                            width: Val::Px(pitch),
-                            ..default()
-                        },
-                        Text::new(""),
-                        TextLayout {
-                            justify: Justify::Center,
-                            linebreak: LineBreak::NoWrap,
-                        },
-                        style::text_font(TIMER_FONT_PX),
-                        TextColor(theme::TITLE),
-                    ));
+                    #[cfg(feature = "enhanced-buff-timers")]
+                    timers::spawn_chip_timer(chip, pitch);
                 });
             }
         });
@@ -384,29 +332,197 @@ fn set_fallback_text(
     }
 }
 
-pub fn update_status_timers(
-    state: Res<SceneState>,
-    clock: Res<crate::vana_time::VanaClock>,
-    chips: Query<(&StatusChip, &Children)>,
-    mut timer_q: Query<&mut Text, With<StatusChipTimer>>,
-) {
-    let now = clock.earth_unix_secs_now() as u32;
-    let expiries = &state.snapshot.status_icon_expiries;
-    for (chip, children) in chips.iter() {
-        let want = expiries
-            .get(chip.slot)
-            .copied()
-            .filter(|&e| e != 0)
-            .map(|e| e.saturating_sub(now))
-            .filter(|&r| r > 0)
-            .map(ribbon_timer)
-            .unwrap_or_default();
-        for child in children.iter() {
-            if let Ok(mut text) = timer_q.get_mut(child) {
-                if **text != want {
-                    **text = want.clone();
+/// Enhanced (non-retail) countdown under every status chip. Retail draws no
+/// remaining-time text on the ribbon at all, so both the format and the extra
+/// chip pitch the label needs are gated here.
+#[cfg(feature = "enhanced-buff-timers")]
+pub mod timers {
+    use super::*;
+
+    #[derive(Component)]
+    pub struct StatusChipTimer;
+
+    const TIMER_FONT_PX: f32 = 8.0;
+
+    /// Blank space kept between two neighbouring countdowns at their widest, so a
+    /// full row of long timers still reads as one number per icon.
+    const TIMER_LABEL_GAP_PX: f32 = 4.0;
+
+    /// The widest string [`ribbon_timer`] emits, which is what the chip pitch
+    /// reserves room for; `ribbon_timer_never_exceeds_reserved_width` pins it.
+    const WIDEST_RIBBON_TIMER: &str = "59:59";
+
+    /// Past this many hours even the minutes are noise, and dropping them is what
+    /// holds the label inside the reserved width for expiries out at
+    /// [`kuluu_snapshot::MAX_STATUS_TIMER_SECS`].
+    const COARSE_TIMER_HOURS: u32 = 10;
+
+    /// Countdown text for a 20px chip: seconds are what matter on a 30-second
+    /// debuff and noise on a 3-hour food buff, and shedding precision as the
+    /// duration grows is what keeps every label inside one chip pitch instead of
+    /// running into its neighbour.
+    fn ribbon_timer(remaining_secs: u32) -> String {
+        let (h, m, s) = (
+            remaining_secs / 3600,
+            (remaining_secs % 3600) / 60,
+            remaining_secs % 60,
+        );
+        match h {
+            0 => format!("{m}:{s:02}"),
+            _ if h < COARSE_TIMER_HOURS => format!("{h}h{m:02}"),
+            _ => format!("{h}h"),
+        }
+    }
+
+    /// Horizontal pitch of one chip: wide enough for the icon and for a
+    /// full-width countdown centred under it, so neither the art nor the label
+    /// can collide with the neighbouring slot.
+    pub(super) fn cell_pitch_px() -> f32 {
+        let label = crate::ui_font::text_width_px(WIDEST_RIBBON_TIMER, TIMER_FONT_PX);
+        (ICON_SIZE_PX + MIN_ICON_GAP_PX).max(label + TIMER_LABEL_GAP_PX)
+    }
+
+    pub(super) fn timer_line_px() -> f32 {
+        crate::ui_font::line_height_px(TIMER_FONT_PX)
+    }
+
+    pub(super) fn spawn_chip_timer(chip: &mut ChildSpawnerCommands, pitch: f32) {
+        // The label is centred on the chip pitch, not on the icon, so it
+        // overhangs evenly into the gap either side.
+        let overhang = (pitch - ICON_SIZE_PX) / 2.0;
+        chip.spawn((
+            StatusChipTimer,
+            Node {
+                position_type: PositionType::Absolute,
+                bottom: Val::Px(-timer_line_px()),
+                left: Val::Px(-overhang),
+                width: Val::Px(pitch),
+                ..default()
+            },
+            Text::new(""),
+            TextLayout {
+                justify: Justify::Center,
+                linebreak: LineBreak::NoWrap,
+            },
+            style::text_font(TIMER_FONT_PX),
+            TextColor(theme::TITLE),
+        ));
+    }
+
+    pub fn update_status_timers(
+        state: Res<SceneState>,
+        clock: Res<crate::vana_time::VanaClock>,
+        chips: Query<(&StatusChip, &Children)>,
+        mut timer_q: Query<&mut Text, With<StatusChipTimer>>,
+    ) {
+        let now = clock.earth_unix_secs_now() as u32;
+        let expiries = &state.snapshot.status_icon_expiries;
+        for (chip, children) in chips.iter() {
+            let want = expiries
+                .get(chip.slot)
+                .copied()
+                .filter(|&e| e != 0)
+                .map(|e| e.saturating_sub(now))
+                .filter(|&r| r > 0)
+                .map(ribbon_timer)
+                .unwrap_or_default();
+            for child in children.iter() {
+                if let Ok(mut text) = timer_q.get_mut(child) {
+                    if **text != want {
+                        **text = want.clone();
+                    }
                 }
             }
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use bevy::ecs::system::RunSystemOnce;
+
+        // Every countdown the pipeline can deliver has to fit the width the chip
+        // pitch reserves, or neighbouring labels run together (kuluu-nxmi).
+        #[test]
+        fn ribbon_timer_never_exceeds_reserved_width() {
+            let reserved = WIDEST_RIBBON_TIMER.chars().count();
+            for secs in 1..=kuluu_snapshot::MAX_STATUS_TIMER_SECS {
+                let label = ribbon_timer(secs);
+                assert!(
+                    label.chars().count() <= reserved,
+                    "{secs}s renders as {label:?}, wider than {WIDEST_RIBBON_TIMER:?}"
+                );
+            }
+        }
+
+        #[test]
+        fn ribbon_timer_drops_seconds_past_the_hour() {
+            assert_eq!(ribbon_timer(84), "1:24");
+            assert_eq!(ribbon_timer(602), "10:02");
+            assert_eq!(ribbon_timer(3599), "59:59");
+            assert_eq!(ribbon_timer(3600), "1h00");
+            assert_eq!(ribbon_timer(7_245), "2h00");
+            assert_eq!(ribbon_timer(10_800), "3h00");
+            assert_eq!(ribbon_timer(kuluu_snapshot::MAX_STATUS_TIMER_SECS), "100h");
+        }
+
+        #[test]
+        fn cell_pitch_fits_the_widest_label_and_the_icon() {
+            let pitch = cell_pitch_px();
+            let label = crate::ui_font::text_width_px(WIDEST_RIBBON_TIMER, TIMER_FONT_PX);
+            assert!(
+                pitch >= label + TIMER_LABEL_GAP_PX,
+                "pitch {pitch} leaves no gap between {label}px labels"
+            );
+            assert!(pitch >= ICON_SIZE_PX + MIN_ICON_GAP_PX, "pitch {pitch}");
+            // Centring the label on the pitch must not push it off its own icon.
+            assert!(
+                pitch < ICON_SIZE_PX * 2.0,
+                "pitch {pitch} orphans the label"
+            );
+        }
+
+        #[test]
+        fn enhanced_build_draws_a_countdown_under_each_chip() {
+            let clock = crate::vana_time::VanaClock::anchored_at_hour(12.0);
+            let now = clock.earth_unix_secs_now() as u32;
+            let mut app = App::new();
+            app.init_resource::<Assets<Image>>()
+                .init_resource::<SceneState>()
+                .insert_resource(clock);
+            app.world_mut()
+                .run_system_once(spawn_status_ribbon)
+                .unwrap();
+
+            let mut state = app.world_mut().resource_mut::<SceneState>();
+            state.snapshot.status_icons = vec![10, 20];
+            state.snapshot.status_icon_expiries = vec![now + 90, 0];
+            app.world_mut()
+                .run_system_once(update_status_timers)
+                .unwrap();
+
+            assert_eq!(chip_timer_texts(app.world_mut())[..2], ["1:30", ""]);
+        }
+
+        fn chip_timer_texts(world: &mut World) -> Vec<String> {
+            let labels: HashMap<Entity, String> = world
+                .query_filtered::<(Entity, &Text), With<StatusChipTimer>>()
+                .iter(world)
+                .map(|(e, text)| (e, text.0.clone()))
+                .collect();
+            let mut by_slot: Vec<(usize, String)> = world
+                .query::<(&StatusChip, &Children)>()
+                .iter(world)
+                .map(|(chip, children)| {
+                    let label = children
+                        .iter()
+                        .find_map(|child| labels.get(&child).cloned())
+                        .expect("every chip carries a countdown label");
+                    (chip.slot, label)
+                })
+                .collect();
+            by_slot.sort_by_key(|(slot, _)| *slot);
+            by_slot.into_iter().map(|(_, label)| label).collect()
         }
     }
 }
@@ -519,44 +635,42 @@ mod tests {
         }
     }
 
-    // Every countdown the pipeline can deliver has to fit the width the chip
-    // pitch reserves, or neighbouring labels run together (kuluu-nxmi).
+    // Retail draws no countdown on the ribbon, so a build without
+    // `enhanced-buff-timers` must spawn no label under a chip and must not
+    // reserve the pitch/row space one would need (kuluu-m9hj).
+    #[cfg(not(feature = "enhanced-buff-timers"))]
     #[test]
-    fn ribbon_timer_never_exceeds_reserved_width() {
-        let reserved = WIDEST_RIBBON_TIMER.chars().count();
-        for secs in 1..=kuluu_snapshot::MAX_STATUS_TIMER_SECS {
-            let label = ribbon_timer(secs);
-            assert!(
-                label.chars().count() <= reserved,
-                "{secs}s renders as {label:?}, wider than {WIDEST_RIBBON_TIMER:?}"
-            );
-        }
-    }
+    fn default_build_packs_the_ribbon_tight_with_no_countdown() {
+        use bevy::ecs::system::RunSystemOnce;
 
-    #[test]
-    fn ribbon_timer_drops_seconds_past_the_hour() {
-        assert_eq!(ribbon_timer(84), "1:24");
-        assert_eq!(ribbon_timer(602), "10:02");
-        assert_eq!(ribbon_timer(3599), "59:59");
-        assert_eq!(ribbon_timer(3600), "1h00");
-        assert_eq!(ribbon_timer(7_245), "2h00");
-        assert_eq!(ribbon_timer(10_800), "3h00");
-        assert_eq!(ribbon_timer(kuluu_snapshot::MAX_STATUS_TIMER_SECS), "100h");
-    }
+        let mut app = App::new();
+        app.init_resource::<Assets<Image>>();
+        app.world_mut()
+            .run_system_once(spawn_status_ribbon)
+            .unwrap();
 
-    #[test]
-    fn cell_pitch_fits_the_widest_label_and_the_icon() {
-        let pitch = cell_pitch_px();
-        let label = crate::ui_font::text_width_px(WIDEST_RIBBON_TIMER, TIMER_FONT_PX);
-        assert!(
-            pitch >= label + TIMER_LABEL_GAP_PX,
-            "pitch {pitch} leaves no gap between {label}px labels"
+        let world = app.world_mut();
+        let ribbon = world
+            .query_filtered::<&Node, With<StatusRibbon>>()
+            .iter(world)
+            .next()
+            .expect("ribbon spawned")
+            .clone();
+        assert_eq!(ribbon.column_gap, Val::Px(MIN_ICON_GAP_PX));
+        assert_eq!(ribbon.row_gap, Val::Px(ROW_CLEARANCE_PX));
+        assert_eq!(
+            ribbon.width,
+            Val::Px(ICONS_PER_ROW as f32 * (ICON_SIZE_PX + MIN_ICON_GAP_PX))
         );
-        assert!(pitch >= ICON_SIZE_PX + MIN_ICON_GAP_PX, "pitch {pitch}");
-        // Centring the label on the pitch must not push it off its own icon.
-        assert!(
-            pitch < ICON_SIZE_PX * 2.0,
-            "pitch {pitch} orphans the label"
+
+        let texts: Vec<Entity> = world
+            .query_filtered::<Entity, With<Text>>()
+            .iter(world)
+            .collect();
+        assert_eq!(
+            texts.len(),
+            MAX_VISIBLE,
+            "only the icon-id fallback text belongs under a chip"
         );
     }
 

@@ -21,6 +21,11 @@ enhanced-neural-uplift = ["dlss", "dep:kuluu-dlss-nr"]
 # status-effect name table.
 enhanced-buff-tooltips = []
 
+# Enhanced (non-retail) countdown text under each status-ribbon chip, plus the
+# wider chip pitch the label needs. Retail's ribbon is icons only, with no
+# remaining-time readout.
+enhanced-buff-timers = []
+
 # Enhanced (non-retail) spell cast bar: an addon-style filling progress bar
 # shown while the player casts. Retail's classic client has no built-in cast
 # bar (players get one via Windower/Ashita); this reproduces it from the

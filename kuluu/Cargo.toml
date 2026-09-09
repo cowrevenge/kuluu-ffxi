@@ -54,6 +54,9 @@ native-window = [
 # vanilla parity is the project default (AGENTS.md). The `?` keeps these from
 # force-enabling the viewer dep outside native-window builds.
 enhanced-buff-tooltips = ["kuluu-render?/enhanced-buff-tooltips"]
+# Enhanced (non-retail) countdown text under each status-ribbon chip. Retail's
+# ribbon is icons only, with no remaining-time readout.
+enhanced-buff-timers = ["kuluu-render?/enhanced-buff-timers"]
 enhanced-cast-bar = ["kuluu-render?/enhanced-cast-bar"]
 # Enhanced (non-retail) mob/pet HP readout on nameplates: the green bar under
 # the billboard plate plus the "{name} {pct}%" suffix in the UI plates. Retail

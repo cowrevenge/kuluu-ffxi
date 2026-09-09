@@ -313,7 +313,8 @@ impl Plugin for HudPlugin {
                 self_fishing::update_fishing_hud,
                 (
                     status_ribbon::update_status_ribbon,
-                    status_ribbon::update_status_timers,
+                    #[cfg(feature = "enhanced-buff-timers")]
+                    status_ribbon::timers::update_status_timers,
                     status_ribbon::update_status_ribbon_selection,
                 ),
                 (

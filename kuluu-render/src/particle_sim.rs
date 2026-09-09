@@ -15,7 +15,7 @@ use crate::ffxi_particle_material::FfxiParticleMaterial;
 use crate::scheduler_runtime::{
     assets_holding, ActionAssets, GlobalEffectDir, MmbSpriteMesh, SchedulerStageEvent, ROUTINE_FPS,
 };
-use ffxi_dat::scheduler::StageKind;
+use ffxi_dat::scheduler::{StageKind, NO_LOCAL_DIR};
 
 // CPU particle simulation. research/xim ParticleGenerator + Particle: a Particle stage (0x02)
 // spawns a `LiveGenerator` that streams billboard particles over its window, each integrating
@@ -464,10 +464,14 @@ pub fn spawn_particle_generators(
         }) else {
             continue;
         };
-        let Some(def) = assets.particle_def(local_dir, &ev.stage.stage.id).copied() else {
+        let Some((def_dir, def)) = assets
+            .particle_def_scoped(local_dir, &ev.stage.stage.id)
+            .map(|(dir, def)| (dir, *def))
+        else {
             continue;
         };
-        let Some((template, sprite_frames, tex)) = resolve_mesh(assets, &def, &mut images, false)
+        let Some((template, sprite_frames, tex)) =
+            resolve_mesh(assets, def_dir, &def, &mut images, false)
         else {
             continue;
         };
@@ -587,8 +591,14 @@ pub fn spawn_actor_auto_run_particles(
                 continue;
             }
             let def = *def;
+            let def_dir = fx
+                .assets
+                .particle_def_dirs
+                .get(name)
+                .copied()
+                .unwrap_or(NO_LOCAL_DIR);
             let Some((template, sprite_frames, tex)) =
-                resolve_mesh(&fx.assets, &def, &mut images, false)
+                resolve_mesh(&fx.assets, def_dir, &def, &mut images, false)
             else {
                 continue;
             };
@@ -1355,7 +1365,11 @@ fn resolve_zone_mesh(
     Option<Handle<Image>>,
     D3mDrawPath,
 )> {
-    if let Some((template, frames, tex)) = resolve_mesh(assets, def, images, undither) {
+    // Zone and weather generators are collected by chunk name without their directory
+    // (zone_particles.rs `zone_static_defs`), so there is no scope to resolve the mesh in and
+    // the lookup falls through to the flat tier.
+    if let Some((template, frames, tex)) = resolve_mesh(assets, NO_LOCAL_DIR, def, images, undither)
+    {
         return Some((template, frames, tex, D3mDrawPath::D3m));
     }
     let mmb = assets.mmbs.get(&def.mesh_id)?;
@@ -1388,15 +1402,19 @@ fn to_image(t: &ffxi_dat::texture::DecodedTexture, undither: bool) -> Image {
     }
 }
 
+// `local_dir` is the directory the generator DEF was authored in (research/xim
+// ParticleInitializers.kt:145 `particle.creator.localDir`), not the routine's: mesh ids repeat
+// across effect directories, so the flat maps alone bind whichever copy the walk saw last.
 fn resolve_mesh(
     assets: &ActionAssets,
+    local_dir: [u8; 4],
     def: &ParticleGeneratorDef,
     images: &mut Assets<Image>,
     undither: bool,
 ) -> Option<(SpriteTemplate, Vec<SpriteTemplate>, Option<Handle<Image>>)> {
     match def.mesh_kind {
         ParticleMeshKind::StaticMesh => {
-            let d3m = assets.d3ms.get(&def.mesh_id)?;
+            let d3m = assets.d3m(local_dir, &def.mesh_id)?;
             let template = sprite_template(d3m)?;
             let (namespace, local) = d3m.texture_name_tokens();
             // research/xim DatResource.kt:488-493 — qualified (namespace, local) match, then
@@ -1416,7 +1434,7 @@ fn resolve_mesh(
             Some((template, Vec::new(), tex))
         }
         ParticleMeshKind::SpriteSheet => {
-            let ss = assets.sprite_sheets.get(&def.mesh_id)?;
+            let ss = assets.sprite_sheet(local_dir, &def.mesh_id)?;
             let frames = sprite_sheet_templates(ss);
             let first = frames.first().cloned()?;
             // research/xim DatResource.kt:483-493 — try the qualified (namespace, local) pair
@@ -3166,7 +3184,7 @@ mod tests {
 
         fn resolved_texture(assets: &ActionAssets) -> Option<Handle<Image>> {
             let mut images = Assets::<Image>::default();
-            resolve_mesh(assets, &sheet_def(), &mut images, false)
+            resolve_mesh(assets, NO_LOCAL_DIR, &sheet_def(), &mut images, false)
                 .expect("sheet mesh resolves")
                 .2
         }
@@ -3212,10 +3230,125 @@ mod tests {
             let mut def = sheet_def();
             def.mesh_id = SMOKE_SHEET_ID;
             let mut images = Assets::<Image>::default();
-            assert!(resolve_mesh(&assets, &def, &mut images, false)
+            assert!(resolve_mesh(&assets, NO_LOCAL_DIR, &def, &mut images, false)
                 .expect("smok sheet resolves")
                 .2
                 .is_some());
+        }
+    }
+
+    // Retail-DAT survey over this install (53,244 DATs): 258 D3M and 123 SpriteSheet chunk names
+    // repeat across directories INSIDE a single DAT, and the generator defs that link one of
+    // those names resolve to different geometry (134 D3M, 46 SpriteSheet) or a different texture
+    // (422 D3M, 107 SpriteSheet) depending on the directory, so the flat last-writer-wins maps
+    // hand them another directory's mesh. research/xim ParticleLinkedDataProviders.kt:188-211
+    // resolves a linked mesh in the generator's own directory first.
+    #[cfg(not(target_arch = "wasm32"))]
+    mod directory_scoped_mesh {
+        use super::*;
+
+        fn first_position(
+            assets: &ActionAssets,
+            local_dir: [u8; 4],
+            def: &ParticleGeneratorDef,
+        ) -> Vec3 {
+            let mut images = Assets::<Image>::default();
+            resolve_mesh(assets, local_dir, def, &mut images, false)
+                .expect("the linked mesh resolves")
+                .0
+                .positions[0]
+        }
+
+        // ROM/338/100.DAT declares the D3M `grw1` in both `geo0` and `run0`; `geo0/gl02` links
+        // it, and the two copies are a different width with a different texture.
+        #[test]
+        fn real_dat_static_mesh_resolves_in_the_generators_own_directory() {
+            const GEO_EFFECT_FILE_ID: u32 = 13259;
+            const GEO_DIR: [u8; 4] = *b"geo0";
+            const GEO_GEN: [u8; 4] = *b"gl02";
+            const GEO0_FIRST_VERTEX_X: f32 = -10.0;
+            const RUN0_FIRST_VERTEX_X: f32 = -5.0;
+            let Some(assets) = retail_assets(GEO_EFFECT_FILE_ID) else {
+                return;
+            };
+            let def = *assets
+                .particle_defs_by_dir
+                .get(&(GEO_DIR, GEO_GEN))
+                .expect("ROM/338/100.DAT declares geo0/gl02");
+            assert_eq!(
+                assets
+                    .particle_def_scoped(NO_LOCAL_DIR, &GEO_GEN)
+                    .map(|(dir, _)| dir),
+                Some(GEO_DIR),
+                "a def reached through the flat tier still reports its authoring directory"
+            );
+            assert_eq!(
+                assets
+                    .d3m(GEO_DIR, &def.mesh_id)
+                    .map(|d| d.texture_name_tokens()),
+                Some(("eff1".to_string(), "grw1".to_string()))
+            );
+            assert_eq!(
+                assets
+                    .d3ms
+                    .get(&def.mesh_id)
+                    .map(|d| d.texture_name_tokens()),
+                Some(("eff".to_string(), "grh1".to_string())),
+                "the flat map keeps run0's `grw1`, the last one the walk saw"
+            );
+
+            assert_eq!(
+                first_position(&assets, GEO_DIR, &def).x,
+                GEO0_FIRST_VERTEX_X
+            );
+            assert_eq!(
+                first_position(&assets, NO_LOCAL_DIR, &def).x,
+                RUN0_FIRST_VERTEX_X,
+                "resolving geo0/gl02's mesh outside its directory draws run0's half-width quad"
+            );
+        }
+
+        // ROM/1/33.DAT declares the 0x21 sprite sheet `ligh` in `ligh`, `tour` and `fire`;
+        // `ligh/lt05` links it, and the `fire` copy the flat map keeps is a different quad
+        // backed by a different texture.
+        #[test]
+        fn real_dat_sprite_sheet_resolves_in_the_generators_own_directory() {
+            const LIGHT_EFFECT_FILE_ID: u32 = 333;
+            const LIGH_DIR: [u8; 4] = *b"ligh";
+            const LIGH_GEN: [u8; 4] = *b"lt05";
+            const LIGH_FIRST_VERTEX_Y: f32 = -2.0625;
+            const FIRE_FIRST_VERTEX_Y: f32 = -2.0;
+            let Some(assets) = retail_assets(LIGHT_EFFECT_FILE_ID) else {
+                return;
+            };
+            let def = *assets
+                .particle_defs_by_dir
+                .get(&(LIGH_DIR, LIGH_GEN))
+                .expect("ROM/1/33.DAT declares ligh/lt05");
+            assert_eq!(
+                assets
+                    .sprite_sheet(LIGH_DIR, &def.mesh_id)
+                    .map(|s| (s.category.clone(), s.id.clone())),
+                Some(("effect".to_string(), "light".to_string()))
+            );
+            assert_eq!(
+                assets
+                    .sprite_sheets
+                    .get(&def.mesh_id)
+                    .map(|s| (s.category.clone(), s.id.clone())),
+                Some(("fireefc".to_string(), "light2".to_string())),
+                "the flat map keeps fire's `ligh`, the last one the walk saw"
+            );
+
+            assert_eq!(
+                first_position(&assets, LIGH_DIR, &def).y,
+                LIGH_FIRST_VERTEX_Y
+            );
+            assert_eq!(
+                first_position(&assets, NO_LOCAL_DIR, &def).y,
+                FIRE_FIRST_VERTEX_Y,
+                "resolving ligh/lt05's sheet outside its directory draws fire's quad"
+            );
         }
     }
 
@@ -3285,7 +3418,7 @@ mod tests {
 
         fn resolved_texture(assets: &ActionAssets) -> Option<Handle<Image>> {
             let mut images = Assets::<Image>::default();
-            resolve_mesh(assets, &mesh_def(), &mut images, false)
+            resolve_mesh(assets, NO_LOCAL_DIR, &mesh_def(), &mut images, false)
                 .expect("static mesh resolves")
                 .2
         }
@@ -3342,7 +3475,7 @@ mod tests {
 
         fn texture_for(assets: &ActionAssets, def: &ParticleGeneratorDef) -> Option<Handle<Image>> {
             let mut images = Assets::<Image>::default();
-            resolve_mesh(assets, def, &mut images, false)
+            resolve_mesh(assets, NO_LOCAL_DIR, def, &mut images, false)
                 .expect("mesh resolves")
                 .2
         }

@@ -273,12 +273,19 @@ pub struct ActionAssets {
     pub generators: HashMap<[u8; 4], Generator>,
     #[cfg(not(target_arch = "wasm32"))]
     pub d3ms: HashMap<[u8; 4], ffxi_dat::d3m::D3m>,
+    // The same meshes keyed by (containing directory, name), the tier a generator's linked mesh
+    // resolves against before the flat, last-writer-wins map.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub d3ms_by_dir: HashMap<([u8; 4], [u8; 4]), ffxi_dat::d3m::D3m>,
     #[cfg(not(target_arch = "wasm32"))]
     pub mmbs: HashMap<[u8; 4], MmbSpriteMesh>,
     // SpriteSheet (0x0E) particle meshes, keyed by the 0x21 chunk DatId a generator's
     // mesh_id references (e.g. Poison's `fir ` → 0x21 `fir`).
     #[cfg(not(target_arch = "wasm32"))]
     pub sprite_sheets: HashMap<[u8; 4], ffxi_dat::sprite_sheet::ParticleSpriteSheet>,
+    #[cfg(not(target_arch = "wasm32"))]
+    pub sprite_sheets_by_dir:
+        HashMap<([u8; 4], [u8; 4]), ffxi_dat::sprite_sheet::ParticleSpriteSheet>,
     pub seps: HashMap<[u8; 4], Sep>,
     pub animations: Vec<ffxi_dat::skel_anim::SkeletonAnimation>,
     #[cfg(not(target_arch = "wasm32"))]
@@ -297,6 +304,10 @@ pub struct ActionAssets {
     // generators called `g010`, one per effect directory; the flat map keeps only the last.
     pub particle_defs_by_dir:
         HashMap<([u8; 4], [u8; 4]), ffxi_dat::particle_gen::ParticleGeneratorDef>,
+    // The directory each entry of the flat `particle_defs` map came from, so a def that only
+    // resolves through that last-writer-wins tier still knows the scope its own linked mesh,
+    // sprite sheet and texture must resolve in.
+    pub particle_def_dirs: HashMap<[u8; 4], [u8; 4]>,
     pub keyframes: HashMap<[u8; 4], ffxi_dat::particle_gen::KeyFrameTrack>,
 }
 
@@ -309,9 +320,48 @@ impl ActionAssets {
         local_dir: [u8; 4],
         id: &[u8; 4],
     ) -> Option<&ffxi_dat::particle_gen::ParticleGeneratorDef> {
-        self.particle_defs_by_dir
+        self.particle_def_scoped(local_dir, id).map(|(_, d)| d)
+    }
+
+    // research/xim ParticleInitializers.kt:145 — a generator's linked mesh resolves against
+    // `particle.creator.localDir`, the directory the GENERATOR was authored in, which is the
+    // caller's routine dir only when the def resolved through the dir-scoped tier.
+    pub fn particle_def_scoped(
+        &self,
+        local_dir: [u8; 4],
+        id: &[u8; 4],
+    ) -> Option<([u8; 4], &ffxi_dat::particle_gen::ParticleGeneratorDef)> {
+        if let Some(def) = self.particle_defs_by_dir.get(&(local_dir, *id)) {
+            return Some((local_dir, def));
+        }
+        let def = self.particle_defs.get(id)?;
+        let dir = self
+            .particle_def_dirs
+            .get(id)
+            .copied()
+            .unwrap_or(ffxi_dat::scheduler::NO_LOCAL_DIR);
+        Some((dir, def))
+    }
+
+    // research/xim ParticleLinkedDataProviders.kt:188-196 resolveStaticMeshLink — the effect
+    // directory first, wider scopes after.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn d3m(&self, local_dir: [u8; 4], id: &[u8; 4]) -> Option<&ffxi_dat::d3m::D3m> {
+        self.d3ms_by_dir
             .get(&(local_dir, *id))
-            .or_else(|| self.particle_defs.get(id))
+            .or_else(|| self.d3ms.get(id))
+    }
+
+    // research/xim ParticleLinkedDataProviders.kt:205-211 resolveSpriteSheetLink — same order.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn sprite_sheet(
+        &self,
+        local_dir: [u8; 4],
+        id: &[u8; 4],
+    ) -> Option<&ffxi_dat::sprite_sheet::ParticleSpriteSheet> {
+        self.sprite_sheets_by_dir
+            .get(&(local_dir, *id))
+            .or_else(|| self.sprite_sheets.get(id))
     }
 }
 
@@ -472,6 +522,7 @@ pub fn parse_action_tree(node: &ffxi_dat::chunk::ChunkNode<'_>) -> (Vec<Schedule
                 }
                 if let Ok(Some(d)) = ffxi_dat::particle_gen::ParticleGeneratorDef::parse(c.data) {
                     assets.particle_defs.insert(c.name, d);
+                    assets.particle_def_dirs.insert(c.name, dir);
                     assets.particle_defs_by_dir.insert((dir, c.name), d);
                 }
             }
@@ -483,6 +534,7 @@ pub fn parse_action_tree(node: &ffxi_dat::chunk::ChunkNode<'_>) -> (Vec<Schedule
             #[cfg(not(target_arch = "wasm32"))]
             ChunkKind::D3m => {
                 if let Ok(d) = ffxi_dat::d3m::D3m::parse(c.name, c.data) {
+                    assets.d3ms_by_dir.insert((dir, c.name), d.clone());
                     assets.d3ms.insert(c.name, d);
                 }
             }
@@ -495,6 +547,9 @@ pub fn parse_action_tree(node: &ffxi_dat::chunk::ChunkNode<'_>) -> (Vec<Schedule
             #[cfg(not(target_arch = "wasm32"))]
             ChunkKind::SpriteSheet => {
                 if let Some(ss) = ffxi_dat::sprite_sheet::ParticleSpriteSheet::parse(c.data) {
+                    assets
+                        .sprite_sheets_by_dir
+                        .insert((dir, c.name), ss.clone());
                     assets.sprite_sheets.insert(c.name, ss);
                 }
             }
@@ -3078,6 +3133,100 @@ mod tests {
                 .base_weapon_skill_index(HUME_MALE_LOOK_RACE)
                 .is_some(),
             "the race bases the dispatchers key on are actually populated"
+        );
+    }
+
+    // research/xim ParticleLinkedDataProviders.kt:188-211 — a generator's linked mesh resolves
+    // in the directory the generator was authored in before any wider scope. Names taken from
+    // ROM/338/100.DAT, which declares `grw1` in both `geo0` and `run0` (particle_sim.rs
+    // `directory_scoped_mesh` pins the retail file itself).
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn linked_mesh_lookups_prefer_the_generator_directory() {
+        const MESH: [u8; 4] = *b"grw1";
+        const DIR_A: [u8; 4] = *b"geo0";
+        const DIR_B: [u8; 4] = *b"run0";
+        const OTHER: [u8; 4] = *b"zzzz";
+
+        fn d3m(texture: &[u8; 16]) -> ffxi_dat::d3m::D3m {
+            ffxi_dat::d3m::D3m {
+                name: MESH,
+                num_triangles: 0,
+                texture_name: *texture,
+                vertices: Vec::new(),
+            }
+        }
+
+        let a = d3m(b"eff1    grw1    ");
+        let b = d3m(b"eff     grh1    ");
+        let mut assets = ActionAssets::default();
+        assets.d3ms_by_dir.insert((DIR_A, MESH), a.clone());
+        assets.d3ms_by_dir.insert((DIR_B, MESH), b.clone());
+        assets.d3ms.insert(MESH, b.clone());
+
+        assert_eq!(
+            assets.d3m(DIR_A, &MESH).map(|d| d.texture_name),
+            Some(a.texture_name)
+        );
+        assert_eq!(
+            assets.d3m(DIR_B, &MESH).map(|d| d.texture_name),
+            Some(b.texture_name)
+        );
+        assert_eq!(
+            assets.d3m(OTHER, &MESH).map(|d| d.texture_name),
+            Some(b.texture_name),
+            "an unscoped caller still falls back to the flat map"
+        );
+        assert!(assets.d3m(DIR_A, b"none").is_none());
+    }
+
+    // Same tier order for the 0x21 sprite sheets, whose texture tokens are the whole payload a
+    // wrong-directory match gets wrong. Names from ROM/1/33.DAT's `ligh` and `fire` copies of
+    // the `ligh` sheet.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn sprite_sheet_lookups_prefer_the_generator_directory() {
+        const SHEET: [u8; 4] = *b"ligh";
+        const DIR_A: [u8; 4] = *b"ligh";
+        const DIR_B: [u8; 4] = *b"fire";
+
+        fn sheet(category: &str, id: &str) -> ffxi_dat::sprite_sheet::ParticleSpriteSheet {
+            ffxi_dat::sprite_sheet::ParticleSpriteSheet {
+                frames: Vec::new(),
+                category: category.to_string(),
+                id: id.to_string(),
+            }
+        }
+
+        let mut assets = ActionAssets::default();
+        assets
+            .sprite_sheets_by_dir
+            .insert((DIR_A, SHEET), sheet("effect", "light"));
+        assets
+            .sprite_sheets_by_dir
+            .insert((DIR_B, SHEET), sheet("fireefc", "light2"));
+        assets
+            .sprite_sheets
+            .insert(SHEET, sheet("fireefc", "light2"));
+
+        assert_eq!(
+            assets
+                .sprite_sheet(DIR_A, &SHEET)
+                .map(|s| s.category.as_str()),
+            Some("effect")
+        );
+        assert_eq!(
+            assets
+                .sprite_sheet(DIR_B, &SHEET)
+                .map(|s| s.category.as_str()),
+            Some("fireefc")
+        );
+        assert_eq!(
+            assets
+                .sprite_sheet(ffxi_dat::scheduler::NO_LOCAL_DIR, &SHEET)
+                .map(|s| s.category.as_str()),
+            Some("fireefc"),
+            "an unscoped caller still falls back to the flat map"
         );
     }
 }

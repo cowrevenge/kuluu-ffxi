@@ -7,8 +7,9 @@
 # the *exact* fmt/clippy invocation CI will, and vice versa.
 #
 # Usage: scripts/checks.sh <stage>...
-#   stage ∈ {harness, fmt, clippy, style, test, enhanced, build, wasm, doc}
-#   scripts/checks.sh harness fmt clippy      # pre-push default
+#   stage ∈ {harness, comments, fmt, clippy, style, test, enhanced, build, wasm, doc}
+#   scripts/checks.sh harness comments fmt clippy  # pre-push default
+#   COMMENTS_DIFF=staged scripts/checks.sh comments  # pre-commit (staged hunks)
 #   scripts/checks.sh harness fmt clippy test # the CI gate (ci.yml runs these)
 #   scripts/checks.sh enhanced                # the opt-in feature family (CI)
 #   scripts/checks.sh build                   # local-only: see run_build below
@@ -254,6 +255,88 @@ run_harness() {
   return $bad
 }
 
+run_comments() {
+  # Comment discipline, harness-neutral. The Claude/Codex hooks under
+  # .agents/hooks only nudge the agent that registered them; this stage is the
+  # gate every contributor, git client, and CI run shares. Hard gates are the
+  # families that need no judgment call (a line-pinned citation, a cited path
+  # that does not exist in this tree, a finding id with no in-tree record);
+  # the heuristic families print as advisory over the lines being added.
+  #   COMMENTS_DIFF=staged   scan only the staged hunks (what .githooks/pre-commit runs)
+  #   COMMENTS_BASE=<rev>    advisory diff base (default: merge-base with origin/main)
+  # shellcheck source=../.agents/hooks/comment-rot.lib.sh
+  . .agents/hooks/comment-rot.lib.sh
+  local bad=0 lines text
+  if [ "${COMMENTS_DIFF:-}" = "staged" ]; then
+    lines=$(for f in $(git diff --cached --name-only --diff-filter=AM -- '*.rs'); do
+      git diff --cached -U0 -- "$f" | grep -E '^\+[^+]' | sed -E "s#^\+#$f: #"
+    done)
+  else
+    lines=$(git ls-files '*.rs' | grep -vE '^(vendor|research|target|ffxi-agent)/' \
+      | xargs grep -nHE '//' 2>/dev/null || true)
+  fi
+  local comments
+  comments=$(printf '%s\n' "$lines" | grep -E '//' | grep -vE 'https?://' || true)
+
+  local hits
+  hits=$(printf '%s\n' "$comments" | grep -E "$CR_RE_CITE_LINE" || true)
+  if [ -n "$hits" ]; then
+    echo "checks: comments - citation pinned to a line number; anchor on the symbol (path + function/struct/enumerator):" >&2
+    printf '%s\n' "$hits" | cut -c1-200 | sed 's/^/  /' >&2
+    bad=1
+  fi
+
+  hits=$(printf '%s\n' "$comments" | grep -E "$CR_RE_ELIDED_PATH|$CR_RE_FINDING_ID" || true)
+  if [ -n "$hits" ]; then
+    echo "checks: comments - citation nobody can open: an elided .../ path or an out-of-tree finding id. Cite the full in-tree path + symbol:" >&2
+    printf '%s\n' "$hits" | cut -c1-200 | sed 's/^/  /' >&2
+    bad=1
+  fi
+
+  # Every cited in-tree path must exist. vendor/ and research/ roots are only
+  # checked when that submodule (or local clone) is populated; docs/ never
+  # exists (the tree was retired), so any docs/ citation is dangling.
+  local missing=''
+  while IFS= read -r tok; do
+    [ -z "$tok" ] && continue
+    local path root
+    path=$(printf '%s' "$tok" | sed -E 's/[.,;:)]+$//; s#/$##')
+    case "$path" in
+      vendor/game-files*) continue ;;
+      vendor/*|research/*)
+        root=$(printf '%s' "$path" | cut -d/ -f1-2)
+        [ -d "$root" ] && [ -n "$(ls -A "$root" 2>/dev/null)" ] || continue ;;
+    esac
+    [ -e "$path" ] || missing+="  $path"$'\n'
+  done < <(printf '%s\n' "$comments" | grep -oE '(vendor|research|docs|\.agents)/[A-Za-z0-9._/-]+' | sort -u)
+  if [ -n "$missing" ]; then
+    echo "checks: comments - cited path does not exist in this tree (moved upstream, a private note, or the retired docs/ tree); fix or drop the citation:" >&2
+    printf '%s' "$missing" >&2
+    bad=1
+  fi
+
+  # Advisory: the judgment-call families over the lines being added. Never fails.
+  if [ "${COMMENTS_DIFF:-}" = "staged" ]; then
+    text=$(printf '%s\n' "$lines" | sed -E 's/^[^:]+: //')
+  else
+    local base
+    base=${COMMENTS_BASE:-$(git merge-base HEAD origin/main 2>/dev/null || true)}
+    text=''
+    [ -n "$base" ] && text=$(git diff -U0 "$base" -- '*.rs' | grep -E '^\+[^+]' | sed -E 's/^\+//' || true)
+  fi
+  if [ -n "$text" ]; then
+    local findings
+    findings=$( { printf '%s\n' "$text" | scan_comment_rot || true; \
+                  printf '%s\n' "$text" | scan_code_magic || true; } | grep -v '^[[:space:]]*$' || true)
+    if [ -n "$findings" ]; then
+      echo "checks: comments (advisory) - new comments/literals to judge before this lands:"
+      printf '%s\n' "$findings"
+      echo "checks:   keep a comment only for a WHY you cannot encode, a vendor/spec citation, or a SAFETY note; name a literal as a const."
+    fi
+  fi
+  return $bad
+}
+
 run_test() {
   # Integration tests that need a live LSB server self-skip when unreachable,
   # so this is safe on a network-isolated runner.
@@ -331,6 +414,7 @@ for stage in "$@"; do
     fmt)    echo "checks: fmt";    run_fmt ;;
     clippy) echo "checks: clippy"; run_clippy ;;
     style)  echo "checks: style";  run_style ;;
+    comments) echo "checks: comments"; run_comments ;;
     harness) echo "checks: harness"; run_harness ;;
     test)   echo "checks: test";   run_test ;;
     enhanced) echo "checks: enhanced"; run_enhanced ;;

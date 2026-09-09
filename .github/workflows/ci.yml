@@ -43,6 +43,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - run: scripts/checks.sh harness
+      - run: scripts/checks.sh comments
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt

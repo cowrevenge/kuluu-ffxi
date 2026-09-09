@@ -11,8 +11,9 @@ Kuluu is a faithful, open-source FINAL FANTASY XI **client** rebuilt in Rust + B
 `scripts/checks.sh` is the **single source of truth** for check commands — both the `pre-push` hook and CI call it, so they can't drift. Prefer it over spelling out cargo flags:
 
 ```bash
-scripts/checks.sh fmt clippy            # what the pre-push hook runs
-scripts/checks.sh fmt clippy test build # the full CI gate
+scripts/checks.sh harness comments fmt clippy   # what the pre-push hook runs
+scripts/checks.sh fmt clippy test build         # the full CI gate
+COMMENTS_DIFF=staged scripts/checks.sh comments # what pre-commit runs on the staged hunks
 cargo fmt --all                         # autofix formatting
 ```
 
@@ -61,6 +62,10 @@ native adapters and generated integration state. Reference project content by
 its `.agents/...` path, and regenerate tool-owned content with that tool rather
 than editing it by hand. `scripts/checks.sh harness` enforces the boundary.
 The wiring rules and the `ffxi-agent/` carve-out live in `.agents/AGENTS.md`.
+A harness with no adapter here (LM Studio Bionic, Cursor, Aider, ...) still
+hits every gate through `.githooks` and `scripts/checks.sh`; register
+`.agents/skills/comment-discipline/SKILL.md` in that harness's skill settings
+so its model sees the comment rule before it writes, not at commit time.
 
 ## Architecture
 
@@ -143,7 +148,7 @@ and explicitly requested enhancements do not acquire a retail-parity gate.
 - Dev build-speed knobs live in `.cargo/config.toml` / `Cargo.toml` (Cranelift, `lld`, `dynamic_linking` feature). `CXXFLAGS` for the Recast C++ bridge is set per-platform by CI/docker (`.github/build-setup.yml`, `docker/build-linux.sh`), not in shared cargo config; a dev whose macOS Command Line Tools layout needs an `-isysroot` override sets it in their personal `~/.cargo/config.toml` (see the note atop `.cargo/config.toml`).
 - **UI text is printable ASCII (U+0020–007E) unless it renders with a font you control.** Everything drawn with Bevy's bundled default font (FiraMono-subset — the whole `launcher_ui/` tree, plus `hud::style::text_font` users) rasterizes any non-ASCII glyph (arrows, em/en dashes, ellipses, `·`, `×`) as a tofu box. Use ASCII substitutes (`<` `>` `->` `...` `-` `|` `x`). `checks.sh style` hard-fails on a non-ASCII byte anywhere under `kuluu/src/view_native/launcher_ui/`. Server-sourced chat text is the exception: it goes through the FFXI text pipeline, not this rule.
 - **No magic numbers.** A literal that carries meaning — a threshold, scale, offset, frame rate — gets a named `const`, never an inline value. If it derives from upstream (LSB/POLUtils/XIM), scrape it at build time (the `vendor-scrape` skill); never hand-copy. If it's a deliberate tuning the data can't supply, name the `const` and let a one-line comment cite the WHY (e.g. `RETAIL_FPS` because retail runs at 30 fps; a `weather_opacity` table because the cloud generators ship no alpha keyframe to read). A literal that's a **contract between modules** — a wire tag, text marker, or format prefix one side *emits* and another *matches* — lives as an exported `const`/helper with the **emitter** and is imported by consumers; never re-type it (a locally-named copy in the consumer is still a second source), and pin the coupling with a guard test asserting the emitter still produces what the matcher expects.
-- **No narrative code comments.** Names, types, and asserts carry WHAT/HOW; default to no comment. Keep one only for a WHY you can't encode, a citation to a vendor/protocol/spec source (the LSB-boundary convention), or a `// SAFETY:` justification. Doc comments (`///` `//!`) are *not* exempt — they rot and ramble like any prose, so keep them tight and accurate or prune them. The `comment-rot` hooks (`.agents/hooks/comment-rot-reminder.sh` on Edit, `.agents/hooks/stop.d/30-comments.sh` at Stop) nudge and gate off one shared heuristic (`comment-rot.lib.sh`). The Stop nudge suggests a session-scoped bulk strip with `rmcm` (the `comment-remover` crate) — install it pinned via `scripts/install-tools.sh` (it's git-only at the version we use, so not on crates.io). `rmcm` strips *all* comments, including the doc/SAFETY/citation carve-outs, so use it only as a `--diff`-reviewed sweep, never wired to run automatically. (A more general, better-maintained alternative is `srgn` if the low-traffic crate becomes a concern.)
+- **No narrative code comments.** Names, types, and asserts carry WHAT/HOW; default to no comment. Keep one only for a WHY you can't encode, a citation to a vendor/protocol/spec source (the LSB-boundary convention), or a `// SAFETY:` justification. Doc comments (`///` `//!`) are *not* exempt — they rot and ramble like any prose, so keep them tight and accurate or prune them. The `comment-rot` hooks (`.agents/hooks/comment-rot-reminder.sh` on Edit, `.agents/hooks/stop.d/30-comments.sh` at Stop) nudge and gate off one shared heuristic (`comment-rot.lib.sh`). The Stop nudge suggests a session-scoped bulk strip with `rmcm` (the `comment-remover` crate) — install it pinned via `scripts/install-tools.sh` (it's git-only at the version we use, so not on crates.io). `rmcm` strips *all* comments, including the doc/SAFETY/citation carve-outs, so use it only as a `--diff`-reviewed sweep, never wired to run automatically. (A more general, better-maintained alternative is `srgn` if the low-traffic crate becomes a concern.) **A citation anchors on a symbol, never a line number** (`vendor/server/src/map/attack.h AttackAnimation`, not `attack.h:52`), and names a path that exists in this tree: no private notes, no retired `docs/`, no elided `.../`, no finding ids like `(F37)`. `scripts/checks.sh comments` hard-fails on each of those (staged hunks at pre-commit, the whole tree at pre-push and in CI) and prints the heuristic families as advisory. The `.agents/hooks` nudges are Claude/Codex adapters layered on that gate; a harness without them gets the rule from the [comment-discipline skill](.agents/skills/comment-discipline/SKILL.md).
 
 <!-- BEGIN BEADS CODEX SETUP: generated by bd setup codex -->
 ## Beads Issue Tracker

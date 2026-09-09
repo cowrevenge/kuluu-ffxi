@@ -31,6 +31,11 @@ if ! scripts/checks.sh harness; then
   exit 1
 fi
 
+if ! scripts/checks.sh comments; then
+  echo "pre-push: ✗ comments — line-pinned or dangling citations; see .agents/skills/comment-discipline/SKILL.md (or 'git push --no-verify' to bypass)" >&2
+  exit 1
+fi
+
 if ! scripts/checks.sh fmt; then
   echo "pre-push: ✗ formatting — run 'cargo fmt --all' (or 'git push --no-verify' to bypass)" >&2
   exit 1

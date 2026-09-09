@@ -3060,6 +3060,35 @@ mod tests {
         fn sprite_sheet_texture_does_not_resolve_by_namespace_alone() {
             assert!(resolved_texture(&sheet_assets(false, false, true)).is_none());
         }
+
+        // ROM/0/28.DAT (file 100) carries 25 Imgs and every one of them is type byte 0x81; its
+        // `smok` 0x21 sheet names `effect  smoke01 `, which only that 0x81 Img (offset 3389984)
+        // supplies. While extract_texture_tokens rejected 0x81 the sheet resolved no texture at
+        // all -- 105 of the install's 113 name-unresolvable sheets are this case.
+        #[test]
+        fn real_dat_sprite_sheet_resolves_a_format0_texture() {
+            const SMOKE_FILE_ID: u32 = 100;
+            const SMOKE_SHEET_ID: [u8; 4] = *b"smok";
+            let Some(assets) = retail_assets(SMOKE_FILE_ID) else {
+                return;
+            };
+            let sheet = assets
+                .sprite_sheets
+                .get(&SMOKE_SHEET_ID)
+                .expect("file 100 ships a smok sheet");
+            assert_eq!(
+                (sheet.category.as_str(), sheet.id.as_str()),
+                ("effect", "smoke01")
+            );
+
+            let mut def = sheet_def();
+            def.mesh_id = SMOKE_SHEET_ID;
+            let mut images = Assets::<Image>::default();
+            assert!(resolve_mesh(&assets, &def, &mut images)
+                .expect("smok sheet resolves")
+                .2
+                .is_some());
+        }
     }
 
     #[cfg(not(target_arch = "wasm32"))]

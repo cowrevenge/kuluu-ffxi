@@ -285,33 +285,23 @@ pub fn name_color_choice(entity: &Entity, ctx: SelfContext<'_>) -> NameColorChoi
     // real on CHAR_PC. See `pc_flags_are_real`.
     let is_pc = pc_flags_are_real(entity.kind);
 
-    if entity.is_door()
-        || matches!(
-            entity.look,
-            Some(kuluu_snapshot::EntityLook::Transport { .. })
-        )
-    {
-        return Row(ncol::NPC);
-    }
-
-    if entity.is_dead() {
-        return Row(ncol::DEAD);
+    if let Some(choice) = pre_claim_color(entity) {
+        return choice;
     }
 
     // 8/9 (belligerence) deliberately fall through: retail maps them to the PC
     // row without returning, and every check below overwrites or matches that
     // white — see `BELLIGERENT_PLAYER_ALLEGIANCE`.
+    //
+    // The nation/ballista rows do not return in retail either: the block writes
+    // the colour and keeps walking into the claim branch. Returning here is a
+    // known kuluu divergence for the *colour*; `is_party_claimed` does not
+    // inherit it, so an allegiance-carrying claim still raises battle music.
     if (ALLEGIANCE_COLORED_MIN..=ALLEGIANCE_COLORED_MAX).contains(&flags.allegiance) {
         if let Some(&(_, row)) = ALLEGIANCE_COLOR_INDICES
             .iter()
             .find(|(a, _)| *a == flags.allegiance)
         {
-            return Row(row);
-        }
-    }
-
-    if is_pc && flags.gm_level >= MIN_GM_LEVEL {
-        if let Some(&row) = GM_COLOR_INDICES.get(usize::from(flags.gm_level)) {
             return Row(row);
         }
     }
@@ -376,18 +366,54 @@ fn pc_flags_are_real(kind: EntityKind) -> bool {
     matches!(kind, EntityKind::Pc)
 }
 
-/// Whether this actor's plate draws in the claimed-by-party colour - the exact
+/// The `NameColorSet` branches that return before retail reaches the
+/// claimed-monster block: doors/lifts/models and the dead
+/// (research/XIClient/.../World/Actor/ActorTelemetry.cpp:1572-1582), then the
+/// GM rows, whose `state >= 3` lookup (:1663-1668) returns ahead of the claim
+/// branch at :1678 - and therefore also ahead of the allegiance colour, which
+/// retail merely writes on its way past.
+fn pre_claim_color(entity: &Entity) -> Option<NameColorChoice> {
+    use NameColorChoice::Row;
+    if entity.is_door()
+        || matches!(
+            entity.look,
+            Some(kuluu_snapshot::EntityLook::Transport { .. })
+        )
+    {
+        return Some(Row(ncol::NPC));
+    }
+
+    if entity.is_dead() {
+        return Some(Row(ncol::DEAD));
+    }
+
+    let flags = &entity.char_flags;
+    if pc_flags_are_real(entity.kind) && flags.gm_level >= MIN_GM_LEVEL {
+        if let Some(&row) = GM_COLOR_INDICES.get(usize::from(flags.gm_level)) {
+            return Some(Row(row));
+        }
+    }
+
+    None
+}
+
+/// Whether this actor is claimed by the player's party or alliance - the exact
 /// decision retail hangs its battle-music flag off: `NameColorSet` raises
 /// `GameManager::SomeMusicByte` from inside the branch that paints a
 /// party- or alliance-claimed monster
-/// (research/XIClient/.../World/Actor/ActorTelemetry.cpp:1717-1723), so the
-/// door/dead early-outs above gate the music the same way they gate the colour.
+/// (research/XIClient/.../World/Actor/ActorTelemetry.cpp:1717-1723). Only the
+/// returns that precede that branch gate the music; it is deliberately not
+/// derived from [`name_color_choice`], whose allegiance early return has no
+/// retail counterpart.
 pub fn is_party_claimed(entity: &Entity, ctx: SelfContext<'_>) -> bool {
-    matches!(
-        name_color_choice(entity, ctx),
-        NameColorChoice::Row(ncol::CLAIMED_BY_PARTY)
-            | NameColorChoice::Blend(ncol::CLAIMED_BY_PARTY, ncol::CLAIMED_BY_OTHER)
-    )
+    pre_claim_color(entity).is_none()
+        && matches!(
+            claim_color(entity, ctx),
+            Some(
+                NameColorChoice::Row(ncol::CLAIMED_BY_PARTY)
+                    | NameColorChoice::Blend(ncol::CLAIMED_BY_PARTY, ncol::CLAIMED_BY_OTHER)
+            )
+        )
 }
 
 /// The claimed-monster block of `NameColorSet`. A claim only
@@ -585,6 +611,62 @@ mod tests {
         assert_eq!(
             name_color_choice(&mob(MATE_ID), solo(&party)),
             NameColorChoice::Blend(ncol::CLAIMED_BY_PARTY, ncol::CLAIMED_BY_OTHER)
+        );
+    }
+
+    /// `NameColorSet` writes the nation/ballista colour and keeps walking into
+    /// the claim branch, so a claimed monster carrying an allegiance still
+    /// raises the battle-music flag even though our colour precedence returns
+    /// the allegiance row early.
+    #[test]
+    fn an_allegiance_carrying_claim_is_still_party_claimed() {
+        let party = [member(SELF_ID, 0), member(MATE_ID, 0)];
+        for (allegiance, row) in ALLEGIANCE_COLOR_INDICES {
+            let mut m = mob(MATE_ID);
+            m.char_flags.allegiance = allegiance;
+            assert_eq!(
+                name_color_choice(&m, solo(&party)),
+                NameColorChoice::Row(row),
+                "allegiance {allegiance}"
+            );
+            assert!(
+                is_party_claimed(&m, solo(&party)),
+                "allegiance {allegiance}"
+            );
+        }
+    }
+
+    #[test]
+    fn only_a_party_or_alliance_claim_counts_as_party_claimed() {
+        let party = [member(SELF_ID, 0), member(MATE_ID, 1)];
+        assert!(is_party_claimed(&mob(SELF_ID), solo(&[])));
+        assert!(
+            is_party_claimed(&mob(MATE_ID), solo(&party)),
+            "an alliance claim blends the two rows and still raises music"
+        );
+        assert!(!is_party_claimed(&mob(STRANGER_ID), solo(&[])));
+        assert!(!is_party_claimed(&mob(0), solo(&[])));
+
+        let mut dead = mob(MATE_ID);
+        dead.hp_pct = Some(0);
+        assert!(
+            !is_party_claimed(&dead, solo(&party)),
+            "NameColorSet returns the dead colour before the claim branch"
+        );
+    }
+
+    /// Retail's `state >= 3` GM lookup returns, and it sits after the
+    /// allegiance block that only writes its colour - so a GM in a nation
+    /// allegiance draws the GM row.
+    #[test]
+    fn gm_rows_outrank_a_nation_allegiance() {
+        let (allegiance, _) = ALLEGIANCE_COLOR_INDICES[0];
+        let mut gm = entity(EntityKind::Pc, STRANGER_ID);
+        gm.char_flags.allegiance = allegiance;
+        gm.char_flags.gm_level = MIN_GM_LEVEL;
+        assert_eq!(
+            name_color_choice(&gm, solo(&[])),
+            NameColorChoice::Row(GM_COLOR_INDICES[usize::from(MIN_GM_LEVEL)])
         );
     }
 

@@ -176,13 +176,16 @@ const MOG_HOUSE_SLOT: u8 = 6;
 
 fn resolve_audible_slot(slots: &BgmSlots, state: &BgmPlaybackState) -> Option<(u8, u16)> {
     let zone_pref: [u8; 2] = if state.is_night { [1, 0] } else { [0, 1] };
+    // research/XIClient/src/XIClient/source/Game/GameManager.cpp:1584-1619
+    // `NormalMusicPlay` picks `play_index` in exactly this order: Mog House
+    // (or zone 724), dead, riding, fishing, then the battle/day-night branch.
     let candidates: [(u8, bool); SLOT_COUNT] = [
+        (MOG_HOUSE_SLOT, state.in_mog_house),
         (5, state.dead),
         (4, state.mounted),
-        (MOG_HOUSE_SLOT, state.in_mog_house),
+        (7, state.fishing),
         (3, state.engaged_party),
         (2, state.engaged_solo),
-        (7, state.fishing),
         (zone_pref[0], true),
         (zone_pref[1], true),
     ];
@@ -308,6 +311,9 @@ fn party_claim_in_music_range(snap: &kuluu_snapshot::SceneSnapshot) -> bool {
     })
 }
 
+const EFFECT_FISHING_IMAGERY: u16 = 235;
+const EFFECT_MOUNTED: u16 = 252;
+
 fn self_engaged(snap: &kuluu_snapshot::SceneSnapshot) -> bool {
     let self_bt_target = snap
         .self_char_id
@@ -327,9 +333,6 @@ pub fn derive_bgm_playback_state(
     mut state: ResMut<BgmPlaybackState>,
     mut last_engage_log: Local<Option<(bool, u32, u8, bool, bool, bool)>>,
 ) {
-    const EFFECT_FISHING_IMAGERY: u16 = 235;
-    const EFFECT_MOUNTED: u16 = 252;
-
     let snap = &scene.snapshot;
     let self_id = snap.self_char_id;
     let self_entity = self_id.and_then(|id| snap.entities.iter().find(|e| e.id == id));
@@ -1363,6 +1366,68 @@ mod tests {
         assert_eq!(resolve_audible_slot(&slots, &state), None);
     }
 
+    /// `NormalMusicPlay` reaches `play_index = 7` before the branch that can
+    /// pick a battle track, so a party mate's claim inside the music radius
+    /// must not pull the fishing track out from under the player.
+    #[test]
+    fn fishing_outranks_battle_music() {
+        let mut slots = BgmSlots::default();
+        slots.tracks[0] = Some(101);
+        slots.tracks[2] = Some(98);
+        slots.tracks[3] = Some(99);
+        slots.tracks[7] = Some(88);
+        let state = BgmPlaybackState {
+            fishing: true,
+            engaged_party: true,
+            engaged_solo: true,
+            ..Default::default()
+        };
+        assert_eq!(resolve_audible_slot(&slots, &state), Some((7, 88)));
+    }
+
+    /// The Mog House is the first `play_index` `NormalMusicPlay` tests, ahead
+    /// of the dead and riding branches.
+    #[test]
+    fn mog_house_outranks_dead_and_mounted() {
+        let mut slots = BgmSlots::default();
+        slots.tracks[4] = Some(77);
+        slots.tracks[5] = Some(70);
+        slots.tracks[MOG_HOUSE_SLOT as usize] = Some(215);
+        let state = BgmPlaybackState {
+            in_mog_house: true,
+            dead: true,
+            mounted: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            resolve_audible_slot(&slots, &state),
+            Some((MOG_HOUSE_SLOT, 215))
+        );
+    }
+
+    /// Riding is `play_index = 4`, below the dead branch and above fishing.
+    #[test]
+    fn dead_outranks_mounted_and_mounted_outranks_fishing() {
+        let mut slots = BgmSlots::default();
+        slots.tracks[4] = Some(77);
+        slots.tracks[5] = Some(70);
+        slots.tracks[7] = Some(88);
+        let state = BgmPlaybackState {
+            dead: true,
+            mounted: true,
+            fishing: true,
+            ..Default::default()
+        };
+        assert_eq!(resolve_audible_slot(&slots, &state), Some((5, 70)));
+
+        let state = BgmPlaybackState {
+            mounted: true,
+            fishing: true,
+            ..Default::default()
+        };
+        assert_eq!(resolve_audible_slot(&slots, &state), Some((4, 77)));
+    }
+
     const SELF_ID: u32 = 0x0100_0001;
     const MATE_ID: u32 = 0x0100_0002;
     const STRANGER_ID: u32 = 0x0100_0003;
@@ -1539,6 +1604,34 @@ mod tests {
         slots.tracks[0] = Some(101);
         slots.tracks[3] = Some(99);
         assert_eq!(resolve_audible_slot(&slots, &state), Some((3, 99)));
+    }
+
+    #[test]
+    fn fishing_in_a_party_keeps_the_fishing_track_while_a_mate_holds_a_claim() {
+        let mut app = App::new();
+        app.init_resource::<crate::snapshot::SceneState>()
+            .init_resource::<BgmPlaybackState>()
+            .insert_resource(crate::vana_time::VanaClock::anchored_at_hour(12.0))
+            .add_systems(Update, derive_bgm_playback_state);
+        let mut snap = snapshot_with(mob_at(MATE_ID, 1.0), vec![mate(SELF_ID), mate(MATE_ID)]);
+        snap.status_icons = vec![EFFECT_FISHING_IMAGERY];
+        app.world_mut()
+            .resource_mut::<crate::snapshot::SceneState>()
+            .snapshot = snap;
+        app.update();
+
+        let state = *app.world().resource::<BgmPlaybackState>();
+        assert!(state.fishing);
+
+        let mut slots = BgmSlots::default();
+        slots.tracks[0] = Some(101);
+        slots.tracks[3] = Some(99);
+        slots.tracks[7] = Some(88);
+        assert_eq!(
+            resolve_audible_slot(&slots, &state),
+            Some((7, 88)),
+            "retail returns from the fishing branch before it can pick a battle track"
+        );
     }
 
     #[test]

@@ -456,10 +456,6 @@ pub fn sync_entities_system(
                             t.translation = world_pos;
                         }
                     } else if matches!(wire.kind, EntityKind::Other) {
-                        // Doors/transports and other non-actor entities keep the
-                        // simple visual lerp; pathed NPCs are dead-reckoned by
-                        // predict_entities_system alongside mobs/PCs/pets so the
-                        // two systems never fight over the same Transform.
                         let smoothed = apply_visual_smoothing(t.translation, world_pos);
                         t.translation = Vec3::new(smoothed.x, t.translation.y, smoothed.z);
                         t.rotation = heading_to_quat(wire.heading);
@@ -692,10 +688,6 @@ pub fn apply_invis_flag_system(
     }
 }
 
-/// Holds each mount actor on its rider. Deliberately not part of
-/// `sync_entities_system`: the rider's transform is still being written after
-/// that runs (dead reckoning), and the floor snap that follows must see both
-/// actors already agreeing, or the mount grounds against a stale position.
 pub fn pin_mount_actors_system(
     tracked: Res<TrackedEntities>,
     mut q_xform: Query<&mut Transform, With<WorldEntity>>,

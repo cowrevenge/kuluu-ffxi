@@ -480,15 +480,9 @@ pub struct PredictSample {
 
     pub server_pos: Vec3,
 
-    pub last_server_pos: Vec3,
-
-    pub dr_velocity: Vec3,
-
     pub target_heading: u8,
 
     pub rendered_heading_rad: f32,
-
-    pub secs_since_update: f32,
 
     pub sample_dirty: bool,
 
@@ -500,11 +494,8 @@ impl PredictSample {
         PredictSample {
             rendered_pos: server_pos,
             server_pos,
-            last_server_pos: server_pos,
-            dr_velocity: Vec3::ZERO,
             target_heading: heading,
             rendered_heading_rad: heading_to_rad(heading),
-            secs_since_update: 0.0,
             sample_dirty: false,
             initialized: true,
         }
@@ -519,21 +510,12 @@ pub struct EntityPrediction {
 impl EntityPrediction {
     pub const SNAP_DIST_SQ: f32 = 4.0;
 
-    pub const VEL_BLEND_TAU: f32 = 0.20;
-
+    // Engineering choice: a short chase lag smooths packet cadence without inventing destinations.
     pub const CORRECT_TAU: f32 = 0.12;
 
     pub const Y_TAU: f32 = 0.15;
 
     pub const HEADING_TAU: f32 = 0.10;
-
-    pub const DECEL_TAU: f32 = 0.25;
-
-    pub const STALE_VEL_SECS: f32 = 0.6;
-
-    pub const MAX_DR_SPEED: f32 = 7.0;
-
-    pub const DT_SERVER_CEIL: f32 = 1.0;
 
     const SAMPLE_EPSILON_SQ: f32 = 1e-4;
 
@@ -579,45 +561,31 @@ fn advance_prediction(s: &mut PredictSample, dt: f32) -> (Vec3, f32) {
 
     if s.sample_dirty {
         s.sample_dirty = false;
-        let dt_server = s.secs_since_update;
-        let discontinuity = dt_server > EntityPrediction::DT_SERVER_CEIL
-            || s.server_pos.distance_squared(s.rendered_pos) >= EntityPrediction::SNAP_DIST_SQ;
-        if discontinuity {
+        if s.server_pos.distance_squared(s.rendered_pos) >= EntityPrediction::SNAP_DIST_SQ {
             s.rendered_pos = s.server_pos;
-            s.dr_velocity = Vec3::ZERO;
-        } else {
-            let dt_eff = dt_server.max(1e-3);
-            let mut v_meas = (s.server_pos - s.last_server_pos) / dt_eff;
-            v_meas.y = 0.0;
-            let alpha = 1.0 - (-dt_eff / EntityPrediction::VEL_BLEND_TAU).exp();
-            s.dr_velocity += (v_meas - s.dr_velocity) * alpha;
-            s.dr_velocity.y = 0.0;
-            let speed = s.dr_velocity.length();
-            if speed > EntityPrediction::MAX_DR_SPEED {
-                s.dr_velocity *= EntityPrediction::MAX_DR_SPEED / speed;
-            }
         }
-        s.last_server_pos = s.server_pos;
-        s.secs_since_update = 0.0;
     }
 
-    let mut pos = s.rendered_pos + s.dr_velocity * dt;
-    let server_track = s.server_pos + s.dr_velocity * s.secs_since_update;
-
-    pos.x = exp_approach(pos.x, server_track.x, EntityPrediction::CORRECT_TAU, dt);
-    pos.z = exp_approach(pos.z, server_track.z, EntityPrediction::CORRECT_TAU, dt);
-    pos.y = exp_approach(
-        s.rendered_pos.y,
-        s.server_pos.y,
-        EntityPrediction::Y_TAU,
-        dt,
+    s.rendered_pos = Vec3::new(
+        exp_approach(
+            s.rendered_pos.x,
+            s.server_pos.x,
+            EntityPrediction::CORRECT_TAU,
+            dt,
+        ),
+        exp_approach(
+            s.rendered_pos.y,
+            s.server_pos.y,
+            EntityPrediction::Y_TAU,
+            dt,
+        ),
+        exp_approach(
+            s.rendered_pos.z,
+            s.server_pos.z,
+            EntityPrediction::CORRECT_TAU,
+            dt,
+        ),
     );
-    s.rendered_pos = pos;
-
-    s.secs_since_update += dt;
-    if s.secs_since_update > EntityPrediction::STALE_VEL_SECS {
-        s.dr_velocity *= (-dt / EntityPrediction::DECEL_TAU).exp();
-    }
 
     let target = heading_to_rad(s.target_heading);
     let mut dh = target - s.rendered_heading_rad;
@@ -870,88 +838,200 @@ mod tests {
         assert!(!infers_walk_gait(6.0), "runner runs, not walks");
     }
 
-    fn dirty_sample(server: Vec3, prev: Vec3, age: f32) -> PredictSample {
-        PredictSample {
-            rendered_pos: prev,
-            server_pos: server,
-            last_server_pos: prev,
-            dr_velocity: Vec3::ZERO,
-            target_heading: 0,
-            rendered_heading_rad: 0.0,
-            secs_since_update: age,
-            sample_dirty: true,
-            initialized: true,
+    #[test]
+    fn remote_motion_at_five_hz_stops_without_overshoot_and_returns_to_idle() {
+        const FRAME_SECS: f32 = 1.0 / 60.0;
+        const FRAMES_PER_UPDATE: usize = 12;
+        const RUN_SPEED: f32 = 4.8;
+        const RUN_FRAMES: usize = 120;
+        const STOP_FRAMES: usize = 180;
+        const ENTITY_ID: u32 = 7;
+        let mut app = App::new();
+        app.init_resource::<Time>()
+            .init_resource::<SceneState>()
+            .init_resource::<EntityPrediction>()
+            .init_resource::<EntityMotion>()
+            .add_systems(
+                Update,
+                (predict_entities_system, track_entity_motion_system).chain(),
+            );
+        let actor = app
+            .world_mut()
+            .spawn((
+                WorldEntity {
+                    id: ENTITY_ID,
+                    act_index: 1,
+                    kind: EntityKind::Pc,
+                },
+                Transform::default(),
+            ))
+            .id();
+        app.world_mut()
+            .resource_mut::<EntityPrediction>()
+            .observe(ENTITY_ID, Vec3::ZERO, 0);
+        let mut last_confirmed_x = 0.0;
+        let mut previous_x = 0.0;
+        for frame in 0..(RUN_FRAMES + STOP_FRAMES) {
+            if frame < RUN_FRAMES && frame % FRAMES_PER_UPDATE == 0 {
+                last_confirmed_x = frame as f32 * FRAME_SECS * RUN_SPEED;
+                app.world_mut().resource_mut::<EntityPrediction>().observe(
+                    ENTITY_ID,
+                    Vec3::X * last_confirmed_x,
+                    0,
+                );
+            }
+            app.world_mut()
+                .resource_mut::<Time>()
+                .advance_by(std::time::Duration::from_secs_f32(FRAME_SECS));
+            app.update();
+            let x = app.world().get::<Transform>(actor).unwrap().translation.x;
+            assert!(x >= previous_x && x <= last_confirmed_x);
+            previous_x = x;
+            if frame == RUN_FRAMES - 1 {
+                assert!(app.world().resource::<EntityMotion>().is_moving(ENTITY_ID));
+            }
         }
+        assert!((previous_x - last_confirmed_x).abs() < 1e-5);
+        assert!(!app.world().resource::<EntityMotion>().is_moving(ENTITY_ID));
     }
 
     #[test]
-    fn prediction_ingest_seeds_velocity_from_displacement() {
-        let mut s = dirty_sample(Vec3::new(1.0, 0.0, 0.0), Vec3::ZERO, 0.2);
-        advance_prediction(&mut s, 1.0 / 30.0);
-        assert!(
-            s.dr_velocity.x > 0.5,
-            "x velocity seeded: {}",
-            s.dr_velocity.x
-        );
-        assert!(s.dr_velocity.y.abs() < 1e-6 && s.dr_velocity.z.abs() < 1e-6);
-        assert!(!s.sample_dirty, "sample consumed by ingest");
-    }
-
-    #[test]
-    fn prediction_clamps_velocity_to_max() {
-        let mut s = dirty_sample(Vec3::new(100.0, 0.0, 0.0), Vec3::ZERO, 0.1);
-        let (pos, _) = advance_prediction(&mut s, 1.0 / 30.0);
-        assert!(s.dr_velocity.length() < 1e-6, "snap zeroes velocity");
-        assert!(
-            (pos.x - 100.0).abs() < 0.5,
-            "snapped onto server: {}",
-            pos.x
-        );
-    }
-
-    #[test]
-    fn prediction_extrapolates_between_updates() {
-        let mut s = PredictSample::seed(Vec3::ZERO, 0);
-        s.dr_velocity = Vec3::new(5.0, 0.0, 0.0);
-        let start = s.rendered_pos.x;
-        for _ in 0..10 {
-            advance_prediction(&mut s, 1.0 / 30.0);
+    fn remote_motion_stops_at_confirmed_position_during_packet_silence() {
+        let mut prediction = EntityPrediction::default();
+        prediction.observe(7, Vec3::ZERO, 0);
+        prediction.observe(7, Vec3::X, 0);
+        let sample = prediction.by_id.get_mut(&7).unwrap();
+        let mut previous = sample.rendered_pos.x;
+        for _ in 0..240 {
+            let (position, _) = advance_prediction(sample, 1.0 / 60.0);
+            assert!(position.x >= previous && position.x <= 1.0);
+            previous = position.x;
         }
-        assert!(
-            s.rendered_pos.x > start + 0.5,
-            "dead-reckons forward between updates: {} -> {}",
-            start,
-            s.rendered_pos.x
-        );
+        assert!((sample.rendered_pos - Vec3::X).length() < 1e-5);
     }
 
     #[test]
-    fn prediction_velocity_decays_when_stale() {
-        let mut s = PredictSample::seed(Vec3::ZERO, 0);
-        s.dr_velocity = Vec3::new(5.0, 0.0, 0.0);
+    fn remote_motion_repeated_snapshots_do_not_restart_smoothing() {
+        let mut prediction = EntityPrediction::default();
+        prediction.observe(7, Vec3::ZERO, 0);
+        prediction.observe(7, Vec3::X, 0);
+        let mut silence = prediction.by_id[&7];
         for _ in 0..120 {
-            advance_prediction(&mut s, 1.0 / 30.0);
+            prediction.observe(7, Vec3::X, 0);
+            advance_prediction(prediction.by_id.get_mut(&7).unwrap(), 1.0 / 60.0);
+            advance_prediction(&mut silence, 1.0 / 60.0);
+            assert_eq!(prediction.by_id[&7].rendered_pos, silence.rendered_pos);
         }
-        assert!(
-            s.dr_velocity.length() < 0.5,
-            "stale velocity coasts to a stop: {}",
-            s.dr_velocity.length()
-        );
     }
 
     #[test]
-    fn prediction_static_actor_does_not_drift() {
-        let anchor = Vec3::new(3.0, 1.0, 2.0);
-        let mut s = PredictSample::seed(anchor, 64);
-        for _ in 0..60 {
-            advance_prediction(&mut s, 1.0 / 30.0);
+    fn remote_motion_turn_does_not_carry_old_velocity_past_the_corner() {
+        let mut prediction = EntityPrediction::default();
+        prediction.observe(7, Vec3::ZERO, 0);
+        prediction.observe(7, Vec3::X, 0);
+        for _ in 0..12 {
+            advance_prediction(prediction.by_id.get_mut(&7).unwrap(), 1.0 / 60.0);
         }
-        assert!(
-            (s.rendered_pos - anchor).length() < 0.05,
-            "stays put: {:?}",
-            s.rendered_pos
-        );
-        assert!(s.dr_velocity.length() < 1e-3);
+        let corner = Vec3::new(1.0, 0.0, 1.0);
+        prediction.observe(7, corner, 64);
+        for _ in 0..120 {
+            let (position, _) =
+                advance_prediction(prediction.by_id.get_mut(&7).unwrap(), 1.0 / 60.0);
+            assert!(position.x <= corner.x);
+            assert!((0.0..=corner.z).contains(&position.z));
+        }
+        assert!((prediction.by_id[&7].rendered_pos - corner).length() < 1e-5);
+    }
+
+    #[test]
+    fn remote_motion_jitter_and_missing_updates_stay_between_confirmed_endpoints() {
+        const FRAME_SECS: f32 = 1.0 / 60.0;
+        const RUN_SPEED: f32 = 4.8;
+        let mut prediction = EntityPrediction::default();
+        prediction.observe(7, Vec3::ZERO, 0);
+        let mut elapsed = 0.0;
+        for frames in [12, 9, 15, 24, 6, 18] {
+            let target = Vec3::X * elapsed * RUN_SPEED;
+            prediction.observe(7, target, 0);
+            let sample = prediction.by_id.get_mut(&7).unwrap();
+            let mut previous = sample.rendered_pos.x;
+            for _ in 0..frames {
+                let (position, _) = advance_prediction(sample, FRAME_SECS);
+                assert!(position.x >= previous && position.x <= target.x);
+                previous = position.x;
+            }
+            elapsed += frames as f32 * FRAME_SECS;
+        }
+    }
+
+    #[test]
+    fn remote_motion_reverses_toward_the_confirmed_position_without_coasting() {
+        let mut prediction = EntityPrediction::default();
+        prediction.observe(7, Vec3::ZERO, 0);
+        prediction.observe(7, Vec3::X, 0);
+        for _ in 0..12 {
+            advance_prediction(prediction.by_id.get_mut(&7).unwrap(), 1.0 / 60.0);
+        }
+        let before_turn = prediction.by_id[&7].rendered_pos.x;
+        prediction.observe(7, Vec3::ZERO, 128);
+        let (position, _) = advance_prediction(prediction.by_id.get_mut(&7).unwrap(), 1.0 / 60.0);
+        assert!(position.x < before_turn && position.x >= 0.0);
+    }
+
+    #[test]
+    fn remote_motion_resumes_smoothly_after_a_long_stationary_period() {
+        let mut prediction = EntityPrediction::default();
+        prediction.observe(7, Vec3::ZERO, 0);
+        for _ in 0..240 {
+            advance_prediction(prediction.by_id.get_mut(&7).unwrap(), 1.0 / 60.0);
+        }
+        prediction.observe(7, Vec3::X, 0);
+        let (position, _) = advance_prediction(prediction.by_id.get_mut(&7).unwrap(), 1.0 / 60.0);
+        assert!(position.x > 0.0 && position.x < 1.0);
+    }
+
+    #[test]
+    fn remote_motion_teleport_snaps_and_does_not_drift() {
+        let mut prediction = EntityPrediction::default();
+        prediction.observe(7, Vec3::ZERO, 0);
+        let destination = Vec3::splat(100.0);
+        prediction.observe(7, destination, 0);
+        for _ in 0..120 {
+            let (position, _) =
+                advance_prediction(prediction.by_id.get_mut(&7).unwrap(), 1.0 / 60.0);
+            assert_eq!(position, destination);
+        }
+    }
+
+    #[test]
+    fn remote_motion_smoothing_is_frame_rate_independent() {
+        let mut prediction = EntityPrediction::default();
+        prediction.observe(7, Vec3::ZERO, 0);
+        prediction.observe(7, Vec3::ONE, 64);
+        let mut slow = prediction.by_id[&7];
+        let mut fast = slow;
+        for _ in 0..30 {
+            advance_prediction(&mut slow, 1.0 / 30.0);
+        }
+        for _ in 0..144 {
+            advance_prediction(&mut fast, 1.0 / 144.0);
+        }
+        assert!((slow.rendered_pos - fast.rendered_pos).length() < 1e-5);
+        assert!((slow.rendered_heading_rad - fast.rendered_heading_rad).abs() < 1e-5);
+    }
+
+    #[test]
+    fn remote_motion_stationary_heading_change_does_not_translate() {
+        let mut prediction = EntityPrediction::default();
+        let anchor = Vec3::new(3.0, 1.0, 2.0);
+        prediction.observe(7, anchor, 0);
+        prediction.observe(7, anchor, 64);
+        let sample = prediction.by_id.get_mut(&7).unwrap();
+        for _ in 0..60 {
+            advance_prediction(sample, 1.0 / 30.0);
+            assert_eq!(sample.rendered_pos, anchor);
+        }
+        assert!((sample.rendered_heading_rad - heading_to_rad(64)).abs() < 1e-5);
     }
 
     #[test]

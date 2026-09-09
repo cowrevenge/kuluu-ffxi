@@ -3,7 +3,7 @@
 //! Retail builds the plate as one string — icon markers, then a space, then the
 //! name — and the icon glyphs live in the same `font    fontshp ` shape group
 //! as the letters, at codes 0x8E..0xB1, cropped off the `menu    ustatshd`
-//! sheet. research/XIClient/.../ActorTelemetry.cpp
+//! sheet. research/XIClient/src/XIClient/source/World/Actor/ActorTelemetry.cpp
 //! `BuildTelemetryActorName` assembles the prefix; :204
 //! `GetPrimaryActorNameMarker` and :296 `GetSecondaryActorNameMarker` choose it.
 
@@ -36,7 +36,7 @@ pub mod glyph {
     /// LSB that state is `Flags3.NewCharacterFlag` (bit 23), which
     /// `CCharUpdatePacket::updateWith` writes under SendFlg.General from
     /// `!playerConfig.NewAdventurerOffFlg` — bit 10 of the `chars.settings`
-    /// u32 (vendor/server/src/map/packets/char_update.cpp:347, common/mmo.h).
+    /// u32 (vendor/server/src/map/packets/char_update.cpp CCharUpdatePacket::updateWith, common/mmo.h).
     pub const NEW_PLAYER: u8 = 0xA1;
     /// AutoPartyFlag — accepting invites automatically.
     pub const AUTO_PARTY: u8 = 0x9D;
@@ -55,9 +55,11 @@ pub mod glyph {
     /// Monstrosity marker — `MonstrosityFlags != 0` in the Model block.
     pub const MONSTROSITY: u8 = 0xAB;
     /// The job-master star, drawn as a pair with its tail. Retail keys it off
-    /// `Flags3.LfgMasterFlag` (`AUDIT_140.BIT_3`, research/XIClient/.../s2c/
-    /// 0x00D.cpp:159), which LSB hardcodes to 0 (char_update.cpp:339) — on this
-    /// server the star comes from `Flags4.JobMasterFlag` instead.
+    /// `Flags3.LfgMasterFlag` (`AUDIT_140.BIT_3`,
+    /// research/XIClient/src/XIClient/source/Game/Net/Packets/s2c/0x00D.cpp RecvCharPc),
+    /// which LSB hardcodes to 0 (vendor/server/src/map/packets/char_update.cpp
+    /// CCharUpdatePacket::updateWith) — on this server the star comes from
+    /// `Flags4.JobMasterFlag` instead.
     pub const JOB_MASTER: u8 = 0xAC;
     /// The half-scale companion glyph retail appends after JOB_MASTER
     /// (`DrawActorNameText`).
@@ -99,7 +101,7 @@ const SECONDARY_ALLEGIANCE_GAP: std::ops::RangeInclusive<u8> = 0x28..=0x2B;
 /// Only players carry icons. On `CHAR_NPC` (0x0E) retail clears the flags every
 /// one of these markers reads — LFG, auto-party, anonymous, PlayOnline,
 /// linkshell and linkdead are all forced to 0
-/// (research/XIClient/.../0x00E.cpp `RecvCharNpc`) — so NPCs, mobs, pets and trusts
+/// (research/XIClient/src/XIClient/source/Game/Net/Packets/s2c/0x00E.cpp `RecvCharNpc`) — so NPCs, mobs, pets and trusts
 /// draw a bare name.
 pub fn nameplate_markers(entity: &Entity) -> Vec<u8> {
     let mut markers = Vec::new();
@@ -109,7 +111,7 @@ pub fn nameplate_markers(entity: &Entity) -> Vec<u8> {
     let flags = &entity.char_flags;
 
     // Retail expands every star in the marker string into a half-scale pair at
-    // draw time (research/XIClient/.../CXiActorNameDraw.cpp:301), so append the
+    // draw time (research/XIClient/src/XIClient/source/Rendering/Active/CXiActorNameDraw.cpp DrawActorNameText), so append the
     // tail after each occurrence — a ballista-allegiance job master carries two.
     let push_marker = |markers: &mut Vec<u8>, code: u8| {
         markers.push(code);
@@ -140,7 +142,7 @@ pub fn nameplate_markers(entity: &Entity) -> Vec<u8> {
 ///   (`AUDIT_130.BIT_22`) ride only s2c 0x067 RecvActorSupplement, which LSB does
 ///   not implement — dead on this wire.
 /// - The 0xA2/0xB1 bazaar check reads `AUDIT_130.BIT_20`, which the client sets
-///   only in the 0x00E NPC path (research/XIClient/.../s2c/0x00E.cpp:301/:305);
+///   only in the 0x00E NPC path (research/XIClient/src/XIClient/source/Game/Net/Packets/s2c/0x00E.cpp ActorTelemetry::IsOnChair/:305);
 ///   the PC bazaar is `AUDIT_128.BIT_9` → glyph 0x9C, which we do draw.
 /// - The campaign special markers (glyphs 0xC8-0xCB/0xCD via
 ///   `GetSpecialActorNameMarker`, keyed off Flags4 bits 2-5) are not decodable:

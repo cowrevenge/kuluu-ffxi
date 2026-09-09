@@ -49,7 +49,7 @@ pub enum ActorSubject {
         mounted: bool,
         equipment: Vec<u32>,
         /// Body slot, kept apart from `equipment` because its CIB `waist_type`
-        /// picks the waist motion DAT (SkeletalMeshActor.cpp:1659 collects it
+        /// picks the waist motion DAT (SkeletalMeshActor.cpp SkeletalMeshActor::SetEquipModel collects it
         /// from slot 2 specifically).
         body: Option<u32>,
         main_weapon: Option<u32>,
@@ -78,7 +78,7 @@ pub struct LoadActorRequest {
 #[derive(Component, Debug, Clone, Copy)]
 pub struct FfxiRenderRoot(pub Entity);
 
-// The skeleton domain ticks at half the routine clock (research/xim poc/ActorManager.kt:59-62);
+// The skeleton domain ticks at half the routine clock (research/xim poc/ActorManager.kt updateAll);
 // every `half_frames()`/`* 0.5` conversion in this module is that same 2:1 bridge.
 pub const FRAME_RATE: f32 =
     crate::scheduler_runtime::ROUTINE_FPS / crate::scheduler_runtime::SKELETON_FRAME_DIVISOR;
@@ -181,7 +181,7 @@ pub fn infers_walk_gait(speed: f32) -> bool {
     speed > combat_stance::EntityMotion::MOVE_EXIT && speed < WALK_RUN_BOUNDARY
 }
 
-fn ffxi_to_bevy_basis() -> Quat {
+pub(crate) fn ffxi_to_bevy_basis() -> Quat {
     Quat::from_rotation_x(std::f32::consts::PI)
 }
 
@@ -206,7 +206,7 @@ pub struct LoadedActor {
     routines: Arc<HashMap<DatId, Scheduler>>,
 
     // Particle generators + their sprite meshes/textures embedded in the actor
-    // DAT; auto-run generators (research/xim Actor.kt:724-734) start at spawn.
+    // DAT; auto-run generators (research/xim Actor.kt startAutoRunParticles) start at spawn.
     action_assets: Arc<crate::scheduler_runtime::ActionAssets>,
 
     /// Motion chunks present in this model's DAT walk whose parse yielded no usable frames
@@ -284,7 +284,7 @@ fn model_dat_label(root: &DatRoot, file_id: u32) -> String {
     }
 }
 
-// research/xim EffectRoutineInstance.kt:592-604 searchAssociatedDir — a sound id in a routine
+// research/xim EffectRoutineInstance.kt searchAssociatedDir — a sound id in a routine
 // resolves against every one of the actor's resource dirs. For a PC that is where the whole
 // melee sound set lives: `skaz`/`shit` in the equipped weapon's DAT, `atk1..atk4`/`dam1..dam4`
 // in the FACE model DAT. Only Sep and Generator chunks are collected; the Img/D3M/MMB decode
@@ -326,8 +326,7 @@ pub struct PreparedParts {
 
     /// Bind-pose bounds of the assembled actor in bevy space (feet at y≈0),
     /// computed with the same facing/scale as `bind_joints` — i.e. the mesh as
-    /// drawn. Feeds BakedActor on spawn so nameplate/camera/hitbox anchors are
-    /// per-model instead of the 2.3 fallback (kuluu-81r8).
+    /// drawn. Feeds camera and hitbox bounds.
     pub bounds: Option<(Vec3, Vec3)>,
 }
 
@@ -606,7 +605,7 @@ pub fn load_npc(file_id: u32) -> Result<LoadedActor, String> {
 
     let (_schedulers, action_assets) = crate::scheduler_runtime::parse_action_bytes(&bytes);
     // A D3m referenced by a particle generator is drawn by the particle stream
-    // (XIM ParticleMeshResource, Particle.kt:577) with its own unlit additive/blend
+    // (XIM ParticleMeshResource, Particle.kt shouldSnapAlpha) with its own unlit additive/blend
     // material; rendering it as a static child too would double-draw it through the
     // lit skinned-Mask path (blowing sparse halos to white slabs and back-faces to
     // black — kuluu-xvym). The Home Point crystal is entirely such meshes: even the
@@ -751,9 +750,10 @@ fn default_pc_equipment(race: u8) -> Vec<u32> {
     out
 }
 
-// research/XIClient/src/XIClient/source/World/Actor/SkeletalMeshActor.cpp:3175
+// research/XIClient/src/XIClient/source/World/Actor/SkeletalMeshActor.cpp SkeletalMeshActor::GetUpperBodyDatIndex
 // and :3165 — the two companion motion DATs sit at fixed offsets from the race
 // skeleton base, indexed by a CIB byte.
+const CIB_MOTION_INDEX_NONE: u8 = 0xFF;
 const UPPER_BODY_MOTION_OFFSET: u32 = 1;
 const WAIST_MOTION_OFFSET: u32 = 2;
 // `GetWaistDatIndex` floors waist_type at 1 before using it (:3134-3136), so an
@@ -795,8 +795,8 @@ pub fn load_pc(
     let mut anim_dirs = vec![ResourceDir::from_bytes(skel_bytes.clone())];
 
     // The race skeleton DAT's Info chunk is the PC's movement info: retail copies its
-    // movementType but drops the scale byte (research/xim poc/Model.kt:293-298
-    // PcModel.getMovementInfo), so a PC never renders at the race CIB's 82-95 percent.
+    // movementType but drops the scale byte (research/xim poc/Model.kt PcModel.getMovementInfo),
+    // so a PC never renders at the race CIB's 82-95 percent.
     let race_cib;
     {
         let dir = ResourceDir::from_bytes(skel_bytes.clone());
@@ -806,7 +806,7 @@ pub fn load_pc(
     }
 
     // Retail loads three motion DATs around the race base, not one. Upper body is
-    // `base + is_shield + 1` (SkeletalMeshActor.cpp:3175) — a shield swaps in a
+    // `base + is_shield + 1` (SkeletalMeshActor.cpp SkeletalMeshActor::GetUpperBodyDatIndex) — a shield swaps in a
     // variant with its own joint count. Waist/skirt is
     // `base + max(waist_type, 1) + 2` (:3165, reached from ReadStdMotionRes at
     // :3014), which drives the hip-hung cloth joints; without it they hold bind
@@ -814,7 +814,7 @@ pub fn load_pc(
     //
     // Both selectors come from equipment CIBs and neither is a fixed offset: the
     // sub slot supplies is_shield and the body slot waist_type
-    // (SkeletalMeshActor.cpp:1659,1682 collect them per slot). Loading a fixed
+    // (SkeletalMeshActor.cpp SkeletalMeshActor::SetEquipModel,1682 collect them per slot). Loading a fixed
     // `+3` instead would give every robed mage trouser motion, and because
     // `dedup_clips` is first-writer-wins, loading both candidates would silently
     // keep whichever came first rather than the authored one.
@@ -903,7 +903,7 @@ pub fn load_pc(
         .unwrap_or(0);
     let mut battle_dirs = Vec::new();
     if let Some(base) = combat_stance::motion_dat_for_skel(skel_file_id) {
-        if weapon_anim_type != 0 && weapon_anim_type != 0xFF {
+        if weapon_anim_type != 0 && weapon_anim_type != CIB_MOTION_INDEX_NONE {
             if let Some(dir) = read_dat(&root, base + weapon_anim_type as u32)
                 .map(ResourceDir::from_bytes)
                 .filter(|d| {
@@ -972,11 +972,11 @@ fn is_occluded(buffer: &MeshBuffer, occlusion: &std::collections::HashSet<u8>) -
 struct BuiltGroup {
     mesh: Mesh,
     texture_name: String,
-    // Per-mesh t_factor tint, neutral 1.0 (research/xim GLDrawer.kt:329-331; D3M
+    // Per-mesh t_factor tint, neutral 1.0 (research/xim GLDrawer.kt drawXimSkinned meshColor; D3M
     // children carry no RenderProperties record). displayTypeFlag is slot
-    // occlusion (ActorModel.kt:246-259, `is_occluded`), not a blend selector —
+    // occlusion (ActorModel.kt isOccluded renderProperties, `is_occluded`), not a blend selector —
     // skinned meshes always alpha-test at SKINNED_ALPHA_DISCARD
-    // (SkeletonMeshSection.kt:216); translucency/glow comes from the particle
+    // (SkeletonMeshSection.kt parseTriStrip); translucency/glow comes from the particle
     // stream, never the static mesh.
     tint: Vec4,
 
@@ -1088,7 +1088,7 @@ fn entity_aabb_from_joints(
     any.then(|| Aabb::from_min_max(lo - margin, hi + margin))
 }
 
-// research/XIClient Rendering/Direct3D8Manager.cpp:393,395 — the skeletal vertex colour reaches
+// research/XIClient Rendering/Direct3D8Manager.cpp Direct3D8Manager::InitializeRenderStateBlocks — the skeletal vertex colour reaches
 // fixed-function T&L as D3DMCS_COLOR1 exactly as the zone MMB one does, so it takes the same
 // D3DCOLOR byte/255 scale (pinned against `mmb::VERTEX_COLOR_DIVISOR` below:
 // `ffxi_zone_material::AMBIENT_FLOOR` is chosen for both paths at once and only holds while
@@ -1255,6 +1255,8 @@ pub struct FfxiRenderActor {
 
     rest_phase: RestPlayback,
 
+    death_phase: actor_state::DeathPhase,
+
     engage: EngageMachine,
 
     action: Option<ActionPlayback>,
@@ -1310,7 +1312,7 @@ impl FfxiRenderActor {
 
     // The SEP/generator tier a sound stage resolves against when the running routine's own DAT
     // does not hold it: a PC's grunt SEPs ship in the FACE model DAT and the weapon's swing
-    // whoosh in the equipped weapon's DAT (research/xim EffectRoutineInstance.kt:592-604
+    // whoosh in the equipped weapon's DAT (research/xim EffectRoutineInstance.kt searchAssociatedDir
     // searchAssociatedDir over `actor.getAllAnimationDirectories()`).
     pub(crate) fn action_assets(&self) -> &crate::scheduler_runtime::ActionAssets {
         &self.action_assets
@@ -1363,7 +1365,7 @@ impl FfxiRenderActor {
     }
 
     pub fn begin_completion_motion(&mut self, clip_id: DatId, motion: CompletionMotion) {
-        // research/xim EffectRoutineInterpolatedEffects.kt:49 — a skill's body motion is
+        // research/xim EffectRoutineInterpolatedEffects.kt SkeletonAnimationInstance animationDirs — a skill's body motion is
         // resolved against `listOf(localDir) + actor.getAllAnimationDirectories()`: the
         // skill DAT's own clips first, then the caster's. Stash the matching local clips so
         // select_pose_clips_layered finds them ahead of the actor's own pose set.
@@ -1377,11 +1379,9 @@ impl FfxiRenderActor {
         let len = rest_clip_len_frames(&self.action_clips, clip_id)
             .max(rest_clip_len_frames(&self.battle_clips, clip_id))
             .max(rest_clip_len_frames(&self.animations, clip_id));
-        // research/xim EffectRoutineInterpolatedEffects.kt:50 - maxLoops passes through to the
-        // coordinator verbatim: 0 loops until the effect ends, N ≥ 1 plays N times and pins the
-        // end frame (SkeletonAnimator.kt applyLoopBounds). The old `> 1` test collapsed 1 into
-        // "loop forever", which is what made the worm's one-shot sp0?/sp1? clips need a pose-pass
-        // override instead of holding under their AnimationLock.
+        // research/xim EffectRoutineInterpolatedEffects.kt SkeletonAnimationInstance - maxLoops
+        // passes through to the coordinator verbatim: 0 loops until the effect ends, N ≥ 1 plays
+        // N times and pins the end frame (SkeletonAnimator.kt applyLoopBounds).
         let num_loops = (motion.max_loops != 0).then_some(motion.max_loops as u32);
         self.action = Some(ActionPlayback {
             clip_id,
@@ -1576,7 +1576,7 @@ pub fn spawn_loaded_actor(
     actor_root
 }
 
-// research/xim Actor.kt:127 — auto-run generators start at model-ready.
+// research/xim Actor.kt createFrom — auto-run generators start at model-ready.
 fn insert_auto_run_effects(commands: &mut Commands, actor_root: Entity, loaded: &LoadedActor) {
     if loaded
         .action_assets
@@ -1795,6 +1795,7 @@ pub fn make_render_actor(
             .unwrap_or(MovementType::Unset),
         current_clip: None,
         rest_phase: RestPlayback::Inactive,
+        death_phase: actor_state::DeathPhase::Unobserved,
         engage: EngageMachine::NotEngaged,
         action: None,
         action_clips: Vec::new(),
@@ -1806,6 +1807,29 @@ pub fn make_render_actor(
         world_pose: Vec::new(),
         pose_work: PoseScratch::default(),
         point_light_selection: None,
+    }
+}
+
+// A posed actor with no model behind it, for tests that need the pose/skeleton pair a particle
+// attachment reads and nothing else.
+#[cfg(test)]
+pub(crate) fn render_actor_for_test(skeleton: Skeleton, world_pose: Vec<Mat4>) -> FfxiRenderActor {
+    let loaded = LoadedActor {
+        skeleton: Arc::new(skeleton),
+        skel_meshes: Vec::new(),
+        effect_meshes: Vec::new(),
+        textures: Vec::new(),
+        animations: Arc::default(),
+        battle_clips: Arc::default(),
+        routines: Arc::default(),
+        action_assets: Arc::default(),
+        rejected_clips: Vec::new(),
+        model_dat: String::new(),
+        cib: None,
+    };
+    FfxiRenderActor {
+        world_pose,
+        ..make_render_actor(&loaded, 0, Vec::new(), 0, 0.0, 1.0)
     }
 }
 
@@ -1822,6 +1846,12 @@ pub fn spawn_live_actor(
     world_id: u32,
     scale: f32,
 ) -> Entity {
+    commands
+        .entity(wire_entity)
+        .insert(crate::scene::NameplateLocator::from_skeleton(
+            &prepared.loaded.skeleton,
+            scale,
+        ));
     let facing_dir = 0.0;
 
     let skin_slot = registry.alloc_skin();
@@ -2033,12 +2063,33 @@ fn routine_motion_clip_last(routines: &HashMap<DatId, Scheduler>, routine: DatId
         .map(|t| DatId::from_name(&t.stage.id))
 }
 
+/// The `ded?` collapse clip and the routine-authored frames retail plays it for
+/// before swapping to the held `cor?` corpse pose. Both are Motion stages of the
+/// `dead` routine (`dat-routine-stages 7072 dead`: `ded?` dur=116 half-frames at
+/// frame 0, `cor?` at frame 116), and the duration is per race - 68..156
+/// half-frames across the seven PC skeletons - so it is read, never assumed.
+fn death_collapse_clip(routines: &HashMap<DatId, Scheduler>) -> Option<(DatId, f32)> {
+    let sched = routines.get(&actor_state::death_routine_id())?;
+    let mut motions = sched
+        .stages
+        .iter()
+        .filter(|t| t.stage.kind == StageKind::Motion);
+    let collapse = motions.next()?;
+    // A routine with a single Motion stage has no corpse pose to fall through to;
+    // treat it as having no collapse rather than holding `ded?` forever.
+    motions.next()?;
+    Some((
+        DatId::from_name(&collapse.stage.id),
+        half_frames(collapse.stage.duration_frames),
+    ))
+}
+
 pub(crate) use ffxi_vocab::magic::CATEGORY_MAGIC_START as MAGIC_START_CATEGORY;
 
-// vendor/server/src/map/enums/four_cc.h:31-36 - SkillStart/ItemStart/RangedStart carry the
+// vendor/server/src/map/enums/four_cc.h FourCC - SkillUse/ItemUse/RangedStart carry the
 // routine's FourCC in BATTLE2 cmd_arg ("cate"/"cait"/"calg"); "sp??" is that category's
 // interrupt. A payload that is not such a FourCC falls back to the category's hard-coded retail
-// default (F51, F56). Category 8 keeps its spell-table suffix path for unknown payloads.
+// default (findings F51/F56). Category 8 keeps its spell-table suffix path for unknown payloads.
 pub(crate) fn action_routine(
     action_kind: u8,
     cmd_arg: u32,
@@ -2048,7 +2099,7 @@ pub(crate) fn action_routine(
     let fourcc = ffxi_vocab::magic::magic_start_routine(cmd_arg);
     Some(match action_kind {
         // kuluu-df9t D6 - BATTLE2's per-result `animation` picks the limb routine
-        // (vendor/server/src/map/attack.h:52-59): RightAttack→ati0 / LeftAttack→bti0 /
+        // (vendor/server/src/map/attack.h AttackAnimation): RightAttack→ati0 / LeftAttack→bti0 /
         // RightKick→cti0 / LeftKick→dti0. Absent or out-of-range values fall back to ati0, the
         // only swing every armed race base is known to carry.
         1 => (
@@ -2171,12 +2222,34 @@ fn advance_engage(
 // from a miss on the base tiers.
 #[derive(Clone, Copy, PartialEq)]
 enum PoseTier {
+    Death,
     Action,
     EngageOverlay,
     Fishing,
     Special,
     Rest,
     Locomotion,
+}
+
+// `animation_locked` is always false here: the action was just cleared above, so no lock can
+// be in effect on the re-pose.
+fn reset_actor_pose_state(
+    actor: &mut FfxiRenderActor,
+    elapsed_frames: f32,
+    name: Option<&str>,
+) {
+    actor.inputs = ActorAnimInputs::default();
+    actor.rest_phase = RestPlayback::Inactive;
+
+    actor.action = None;
+    actor.engage = EngageMachine::NotEngaged;
+    actor.coordinator.clear();
+    actor.current_clip = None;
+    advance_actor_pose(actor, elapsed_frames, None, None, false, name);
+    // Ordered after the re-pose, whose default (alive) inputs would otherwise read
+    // as having watched this actor alive: retail only plays `ded?` for a death it
+    // saw, so a KO'd zone-in resumes on the held corpse frame.
+    actor.death_phase = actor_state::DeathPhase::Unobserved;
 }
 
 // Runs inside the parallel per-actor pass: it touches only the actor's own
@@ -2200,6 +2273,7 @@ fn advance_actor_pose(
         scale,
         current_clip,
         rest_phase,
+        death_phase,
         engage,
         action,
         action_clips,
@@ -2241,7 +2315,7 @@ fn advance_actor_pose(
         _ => None,
     };
 
-    // research/xim Actor.kt:361 (updateFishingState) — the fishing macro-pose overrides
+    // research/xim Actor.kt (updateFishingState) — the fishing macro-pose overrides
     // locomotion/idle/rest. fsh0 (cast/wait) and fsh1 (fighting) loop; fsh2..fsh6
     // (resolution) play once and hold (see the one-shot handling below).
     //
@@ -2278,6 +2352,32 @@ fn advance_actor_pose(
         .active_routine
         .and_then(|name| routine_motion_clip(routines, DatId::from_name(&name)));
 
+    // Retail's `dead` routine outranks locomotion and any in-flight action, so the collapse
+    // heads the selection chain; when its timer expires the held `cor?` takes over through the
+    // locomotion tier.
+    let dead = actor_state::corpse_pose_selected(inputs);
+    // A missing collapse clip must not stall the corpse in Collapsing behind a pose that never
+    // draws: filter to clips this model ships, so a dead actor without `ded?` settles straight
+    // to the held `cor?`.
+    let collapse = dead
+        .then(|| death_collapse_clip(routines))
+        .flatten()
+        .filter(|(id, _)| {
+            animations
+                .iter()
+                .any(|clip| clip.id.parameterized_match(id))
+        });
+    *death_phase = actor_state::next_death_phase(
+        *death_phase,
+        dead,
+        collapse.map_or(0.0, |(_, frames)| frames),
+        elapsed_frames,
+    );
+    let collapse_id = match *death_phase {
+        actor_state::DeathPhase::Collapsing { .. } => collapse.map(|(id, _)| id),
+        _ => None,
+    };
+
     let use_battle = action.is_some()
         || !matches!(*engage, EngageMachine::NotEngaged)
         || inputs.engage_state.is_battle_idle();
@@ -2292,9 +2392,10 @@ fn advance_actor_pose(
     };
     let usable = |matches: &[&SkeletonAnimation]| matches.iter().any(|a| is_usable_clip(a));
 
-    // Walk the precedence tiers in order (action > engage overlay > fishing > special > rest >
-    // locomotion). A tier claims the pose only when its clip resolves to at least one usable chunk
-    // in this model's sets; a requested clip the model does not ship warns once and falls through
+    // Walk the precedence tiers in order (death collapse > action > engage overlay > fishing >
+    // special > rest > locomotion). A tier claims the pose only when its clip resolves to at
+    // least one usable chunk in this model's sets; a requested clip the model does not ship warns
+    // once and falls through
     // to the next tier instead of pinning current_clip. That is what keeps an entity whose named
     // routine the model does not ship out of the special override: its clip never resolves, so
     // selection drops to locomotion and the walk/idle clip loops normally rather than registering
@@ -2303,9 +2404,11 @@ fn advance_actor_pose(
     let mut one_shot_rest = false;
     let mut chosen: Option<(DatId, bool, PoseTier)> = None;
 
-    if let Some(id) = action_id {
+    if let Some(id) = collapse_id {
+        // One-shot: `ded?` plays once; when the phase timer expires the held `cor?` takes over
+        // through the locomotion tier.
         if usable(&resolve(id)) {
-            chosen = Some((id, false, PoseTier::Action));
+            chosen = Some((id, false, PoseTier::Death));
         } else {
             clip_miss(
                 actor.world_id,
@@ -2313,8 +2416,24 @@ fn advance_actor_pose(
                 model_dat,
                 &id,
                 rejected_clips,
-                PoseTier::Action,
+                PoseTier::Death,
             );
+        }
+    }
+    if chosen.is_none() {
+        if let Some(id) = action_id {
+            if usable(&resolve(id)) {
+                chosen = Some((id, false, PoseTier::Action));
+            } else {
+                clip_miss(
+                    actor.world_id,
+                    name.unwrap_or("-"),
+                    model_dat,
+                    &id,
+                    rejected_clips,
+                    PoseTier::Action,
+                );
+            }
         }
     }
     if chosen.is_none() {
@@ -2498,7 +2617,7 @@ fn advance_actor_pose(
                 coordinator.register_idle_animation(clip.clone(), true);
             }
         } else {
-            // research/xim EffectRoutineInterpolatedEffects.kt:50-51 — when the pose came from
+            // research/xim EffectRoutineInterpolatedEffects.kt SkeletonAnimationInstance loopParams — when the pose came from
             // a completion motion, honor its parsed transition + loop params; otherwise use the
             // locomotion crossfade defaults.
             let action = action.filter(|a| a.clip_id == selected_id);
@@ -2513,13 +2632,15 @@ fn advance_actor_pose(
             // actually won: a fall-through from it plays a lower-tier clip that loops normally.
             let one_shot_fishing = matches!(selected_tier, PoseTier::Fishing)
                 && matches!(fishing, Some(fc) if !fc.looping);
-            // Special-pose clips are always one-shots (the routine's motion clip holds its end
-            // frame until the wire state settles). Keyed on the winning tier so an entity whose
-            // named routine does not resolve loops its locomotion clip instead of pinning it.
+            // Special-pose and death-collapse clips are always one-shots (the routine's motion
+            // clip holds its end frame until the wire state settles). Keyed on the winning tier so
+            // an entity whose named routine does not resolve loops its locomotion clip instead of
+            // pinning it.
             let loop_params = LoopParams {
                 loop_duration: None,
                 num_loops: action.and_then(|a| a.num_loops).or((one_shot_fishing
                     || one_shot_rest
+                    || matches!(selected_tier, PoseTier::Death)
                     || matches!(selected_tier, PoseTier::Special))
                 .then_some(1)),
                 low_priority: false,
@@ -2845,8 +2966,9 @@ pub fn kick_load_actor_tasks(
         }
         let subject = req.subject.clone();
         // Retail applies the 0x45 Info `scale` byte to NPC models only: NpcModel.getScale
-        // divides it by 100 (research/xim poc/Model.kt:532-536), PcModel drops the byte
-        // entirely (:293-298) and the mount layout has no scale field at all. The same value
+        // divides it by 100 (research/xim poc/Model.kt NpcModel.getScale), PcModel drops the
+        // byte entirely (PcModel.getMovementInfo) and the mount layout has no scale field at all.
+        // The same value
         // bakes the bind pose/bounds here and rides along to spawn_live_actor's per-frame
         // RootTransform, so both see one number.
         let is_npc = matches!(subject, ActorSubject::Npc { .. });
@@ -3019,22 +3141,7 @@ pub fn poll_load_actor_tasks(
             },
         ));
 
-        // The live path is the only model source that never reached a BakedActor
-        // write site, so every plate/camera/hitbox anchored at
-        // FALLBACK_ACTOR_HEIGHT (2.3) — one height for a Tarutaru and a Galka
-        // alike (kuluu-81r8). The bind-pose bounds are the mesh as drawn:
-        // actor_root sits at zero translation on the wire entity, so this local
-        // Y range is exactly what nameplate_anchor_y / hitbox_dims /
-        // third_person_anchor_y need. Replace semantics: re-equipping must move
-        // the anchor to the new outfit's extent (same rule as the VOS2 paths).
-        //
-        // NPCs are excluded: mob bind poses do not describe the model as drawn —
-        // the idle/hover routine lifts the body clear of its rest position, so a
-        // span-based anchor lands inside or below the silhouette (Huge Hornet,
-        // dat 1556: bind span 0.68 vs drawn range [1.4, 2.4]; pinned in
-        // pose_resolution_tests). Retail anchors on the AboveHead locator that
-        // moves with the animation; until we track it per frame, mobs keep the
-        // flat fallback.
+        // Animated mob extents need their own camera/picking policy; locator metadata is independent.
         if !matches!(key.as_ref(), Some(ActorPrepKey::Npc { .. })) {
             if let Some((lo, hi)) = prepared.parts.bounds {
                 commands.entity(wire_entity).insert(BakedActor {
@@ -3288,7 +3395,7 @@ pub fn tick_live_ffxi_actors(
     tracked: Res<crate::scene::TrackedEntities>,
     // Model-root Visibility is written here only for entities with an active special state;
     // every other entity's root stays owned by scene::apply_invis_flag_system (invis-flag PCs).
-    // The fourth slot is the Defeated latch (F49): a killing result starts the death path on
+    // The fourth slot is the Defeated latch (finding F49): a killing result starts the death path on
     // this frame instead of waiting for the next 0x0E hp_pct.
     mut q_actors: Query<(
         &mut FfxiRenderActor,
@@ -3583,7 +3690,8 @@ pub fn tick_live_ffxi_actors(
 
     // Self KO is unreliable via the entity hp_pct (only updated when CHAR_PC
     // carries UPDATE_HP) and via the party row (absent/stale when solo).
-    // death_homepoint_secs comes straight from 0x037 CHAR_STATUS hpp==0.
+    // death_homepoint_secs is published from 0x037 CHAR_STATUS and 0x00A LOGIN,
+    // both gated on hpp == 0.
     let self_dead = state.snapshot.death_homepoint_secs.is_some()
         || crate::snapshot::resolve_self(&state.snapshot.party, self_id)
             .map(|m| m.hp_pct == 0)
@@ -3602,20 +3710,9 @@ pub fn tick_live_ffxi_actors(
             let snap = index.by_id.get(&world_id);
 
             if zone_changed || (!is_self && snap.is_none()) {
-                actor.inputs = ActorAnimInputs::default();
-                actor.rest_phase = RestPlayback::Inactive;
-
-                actor.action = None;
-                actor.engage = EngageMachine::NotEngaged;
-                actor.coordinator.clear();
-                actor.current_clip = None;
-                // The action was just cleared above, so the lock state is moot here.
-                advance_actor_pose(
+                reset_actor_pose_state(
                     &mut actor,
                     elapsed_frames,
-                    None,
-                    None,
-                    false,
                     snap.and_then(|s| s.name.as_deref()),
                 );
                 return;
@@ -3856,7 +3953,7 @@ pub fn dispatch_action_overlay(
         };
 
         // An interrupt arrives on any start category carrying a "sp*" FourCC
-        // (vendor/server/src/map/action/interrupts.cpp:268-284); treating it as a start would
+        // (vendor/server/src/map/action/interrupts.cpp MagicInterrupt); treating it as a start would
         // re-arm the looping pose for CAST_TIMEOUT_FRAMES instead of dropping it.
         let start = matches!(action_kind, 7 | 9 | 10 | 12 | MAGIC_START_CATEGORY)
             .then(|| ffxi_vocab::magic::magic_start_routine(action_id))
@@ -3950,7 +4047,7 @@ pub fn update_ffxi_render_actor_lighting(
     // clamping the model directional to 1.0 cropped that punch and flattened the form.
     const MODEL_DIR_MAX: f32 = 1.5;
 
-    // research/xim EnvironmentSection.kt:134-136,168: actors are lit by the model block's
+    // research/xim EnvironmentSection.kt getModelLightingParams,168: actors are lit by the model block's
     // entity ambient. When the zone ships 0x2F records, use that authored ambient
     // directly — the data already carries the day/night level and a ~2.4:1 sun:ambient
     // ratio, so scaling it by GlobalAmbientLight (amb_k) and the dark-fallback
@@ -3983,7 +4080,7 @@ pub fn update_ffxi_render_actor_lighting(
             _ => (Vec4::ZERO, Vec4::ZERO),
         }
     };
-    // research/xim EnvironmentSection.kt:161-165: actors take a single time-blended
+    // research/xim EnvironmentSection.kt getLightingParams lights: actors take a single time-blended
     // model light (the moon<->sun cross-fade), so dir0 carries the blend and dir1 is
     // unused. The procedural sun/moon DirectionalLights remain the fallback when the
     // zone ships no 0x2F records.
@@ -4097,8 +4194,8 @@ pub fn update_ffxi_actor_point_lights(
     }
     let count = settings.model_light_count as usize;
     // The zone's own bindings are the point lights retail leaves in D3D slots
-    // 2-5 while it draws a model over that chunk (ZoneRenderer.cpp:284-313, :339-353;
-    // ModelPartInstance.cpp:270-280 only rebinds slots 0-1), so they light the
+    // 2-5 while it draws a model over that chunk (ZoneRenderer.cpp ZoneRenderer::UpdateBlockLightSettings, :339-353;
+    // ModelPartInstance.cpp ModelPartInstance::Draw only rebinds slots 0-1), so they light the
     // actor. `/lights` is the explicitly non-vanilla path: its emitters are ours,
     // no chunk names them, so that mode keeps the nearest-N pick.
     let authored = chunk_lights.is_authored() && !settings.dynamic_lights.emitters_enabled();
@@ -4368,12 +4465,214 @@ mod pose_resolution_tests {
         Some(load_pc(1, false, &[], None, None, None).expect("load Hume M"))
     }
 
-    /// Pins the live-path anchor source against the real DAT (kuluu-81r8):
-    /// bind-pose bounds must put feet at y≈0 and differ per race — that is what
-    /// BakedActor carries to nameplate_anchor_y / hitbox_dims /
-    /// third_person_anchor_y. Before this test's fix the live path never wrote
-    /// BakedActor at all, so every plate anchored at FALLBACK_ACTOR_HEIGHT (2.3):
-    /// one height for a Tarutaru and a Galka alike. Self-skips without an install.
+    #[test]
+    fn live_idle_keeps_animating_with_nonselector_flags() {
+        if DatRoot::from_env_or_default().is_err() {
+            return;
+        }
+        bevy::tasks::ComputeTaskPool::get_or_init(Default::default);
+        let mut results = Vec::new();
+        // vendor/server/sql/mob_pools.sql: Damselfly sub=8, sheep sub=16, hare sub=0.
+        for (name, file_id, animationsub) in [
+            ("Damselfly", 1748, 8),
+            ("Sheep", 1640, 16),
+            ("Hare", 1568, 0),
+            ("Damselfly without a dedicated sp1 clip", 1748, 1),
+        ] {
+            let loaded = load_npc(file_id).expect("installed retail NPC DAT");
+            if animationsub == 1 {
+                // sub=1 names the ini1 routine; on burrowing models its dig motion clip is sp1?,
+                // and this model ships no such clip, so the override falls through to idle.
+                let dig = DatId::from_str("sp1?");
+                assert!(!loaded
+                    .all_animations()
+                    .iter()
+                    .any(|clip| clip.id.parameterized_match(&dig)));
+            }
+            let idle_duration = loaded
+                .all_animations()
+                .iter()
+                .filter(|clip| clip.id.parameterized_match(&DatId::from_str("idl?")))
+                .map(SkeletonAnimation::length_in_frames)
+                .fold(0.0f32, f32::max);
+            assert!(idle_duration > 0.0, "{name} must have idle clips");
+            let mut app = App::new();
+            app.init_resource::<Time>()
+                .init_resource::<crate::snapshot::SceneState>()
+                .init_resource::<combat_stance::EntityMotion>()
+                .init_resource::<combat_stance::RestStance>()
+                .init_resource::<combat_stance::WalkMode>()
+                .init_resource::<combat_stance::SelfMoveIntent>()
+                .init_resource::<FfxiSkinRegistry>()
+                .init_resource::<crate::scene::Target>()
+                .init_resource::<crate::scene::TrackedEntities>()
+                .add_systems(Update, tick_live_ffxi_actors);
+            let skin = app
+                .world_mut()
+                .resource_mut::<FfxiSkinRegistry>()
+                .alloc_skin();
+            let actor_entity = app
+                .world_mut()
+                .spawn((
+                    make_render_actor(&loaded, skin, Vec::new(), 1, 0.0, 1.0),
+                    GlobalTransform::default(),
+                    Visibility::Inherited,
+                ))
+                .id();
+            let snapshot = &mut app
+                .world_mut()
+                .resource_mut::<crate::snapshot::SceneState>()
+                .snapshot;
+            snapshot.zone_id = Some(103);
+            snapshot.entities.push(kuluu_snapshot::Entity {
+                id: 1,
+                act_index: 1,
+                kind: kuluu_snapshot::EntityKind::Mob,
+                name: Some(name.into()),
+                pos: kuluu_snapshot::Vec3 {
+                    x: 0.0,
+                    y: 0.0,
+                    z: 0.0,
+                },
+                heading: 0,
+                hp_pct: Some(100),
+                bt_target_id: 0,
+                face_target: 0,
+                claim_id: 0,
+                speed: 0,
+                speed_base: 0,
+                look: None,
+                animation: 0,
+                animationsub: animationsub | 4,
+                mount: None,
+                status: 1,
+                char_flags: Default::default(),
+                monstrosity: false,
+                name_vis: None,
+            });
+            let tick = |app: &mut App| {
+                app.world_mut()
+                    .resource_mut::<Time>()
+                    .advance_by(std::time::Duration::from_secs_f32(1.0 / FRAME_RATE));
+                app.update();
+            };
+            tick(&mut app);
+            app.world_mut()
+                .resource_mut::<crate::snapshot::SceneState>()
+                .snapshot
+                .entities[0]
+                .animationsub = animationsub;
+            for _ in 0..(idle_duration.ceil() as usize * 2 + 1) {
+                tick(&mut app);
+            }
+            let pose = app
+                .world()
+                .get::<FfxiRenderActor>(actor_entity)
+                .unwrap()
+                .world_pose()
+                .to_vec();
+            let mut moved = false;
+            for _ in 0..(idle_duration.ceil() as usize + 1) {
+                tick(&mut app);
+                let actor = app.world().get::<FfxiRenderActor>(actor_entity).unwrap();
+                moved |= pose
+                    .iter()
+                    .zip(actor.world_pose())
+                    .any(|(a, b)| !a.abs_diff_eq(*b, 1e-5));
+            }
+            let actor = app.world().get::<FfxiRenderActor>(actor_entity).unwrap();
+            // sub=1 keeps the ini1 override active (the model ships no clip for it); every other
+            // sub here settles to plain locomotion.
+            let healthy = moved && (animationsub == 1 || actor.inputs.special.active_routine.is_none());
+            results.push((
+                healthy,
+                format!(
+                    "{name}: moved={moved}, special={:?}, selected={:?}, resolved={:?}, frame={}",
+                    actor.inputs.special, actor.current_clip, actor.last_clip, actor.last_frame
+                ),
+            ));
+        }
+        assert!(
+            results.iter().all(|(moved, _)| *moved),
+            "{}",
+            results
+                .iter()
+                .map(|(_, detail)| detail.as_str())
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+    }
+
+    #[test]
+    fn worm_dig_keeps_its_dedicated_one_shot() {
+        if DatRoot::from_env_or_default().is_err() {
+            return;
+        }
+        // Installed ROM/5/64.DAT, the F19-F22 worm reference.
+        let loaded =
+            load_npc(crate::look_resolver::npc_dat_id(0x01a8)).expect("installed worm DAT");
+        let mut actor = make_render_actor(&loaded, 0, Vec::new(), 1, 0.0, 1.0);
+        // sub=1 names the ini1 routine; its first Motion stage is the dig clip (F46: the clip
+        // comes from the routine record, not a hard-coded mapping).
+        let dig = routine_motion_clip(&actor.routines, DatId::from_name(b"ini1"))
+            .expect("worm ini1 routine carries a motion stage");
+        assert!(dig.parameterized_match(&DatId::from_str("sp1?")), "worm dig clip is sp1?");
+        let duration = actor
+            .animations
+            .iter()
+            .filter(|clip| clip.id.parameterized_match(&dig))
+            .map(SkeletonAnimation::length_in_frames)
+            .fold(0.0f32, f32::max);
+        assert!(duration > 0.0, "worm has dedicated dig clips");
+        actor.inputs.special.active_routine = Some(*b"ini1");
+        for _ in 0..(duration.ceil() as usize * 2 + 1) {
+            advance_actor_pose_standalone(&mut actor, 1.0, None);
+        }
+        assert!(actor
+            .last_clip
+            .is_some_and(|id| id.parameterized_match(&dig)));
+        let buried_pose = actor.world_pose().to_vec();
+        // The one-shot holds its end frame: no further advance moves the pose.
+        advance_actor_pose_standalone(&mut actor, duration, None);
+        assert_eq!(actor.world_pose(), buried_pose);
+    }
+
+    #[test]
+    fn nameplate_locators_match_installed_retail_dat_measurements() {
+        if DatRoot::from_env_or_default().is_err() {
+            return;
+        }
+        // Installed DATs measured alongside FFXiMain.dll 0x1002b9a0 (kuluu-81r8).
+        let models = [
+            (
+                "Tarutaru",
+                load_pc(5, false, &[], None, None, None).unwrap(),
+                1.3,
+            ),
+            (
+                "Galka",
+                load_pc(8, false, &[], None, None, None).unwrap(),
+                2.6,
+            ),
+            ("Damselfly", load_npc(1748).unwrap(), 3.5),
+        ];
+        for (name, loaded, expected_y) in models {
+            let locator = crate::scene::NameplateLocator::from_skeleton(&loaded.skeleton, 1.0);
+            let expected = Vec3::Y * expected_y;
+            assert!(
+                (locator.offset.unwrap() - expected).length() < 1e-5,
+                "{name}"
+            );
+            let mut actor = make_render_actor(&loaded, 0, Vec::new(), 1, 0.0, 1.0);
+            for frame in [0.0, 8.0, 16.0] {
+                advance_actor_pose_standalone(&mut actor, frame, None);
+                let current =
+                    crate::scene::NameplateLocator::from_skeleton(&actor.skeleton, actor.scale);
+                assert_eq!(current.offset, locator.offset, "{name} at {frame}");
+            }
+        }
+    }
+
     #[test]
     fn bind_pose_bounds_are_feet_origin_and_race_specific() {
         if DatRoot::from_env_or_default().is_err() {
@@ -4400,7 +4699,7 @@ mod pose_resolution_tests {
             heights.insert(race, h);
         }
         // Hume M (1) vs Elvaan M (3): the bead's own anchor — Elvaan bakes to
-        // ~2.08 (vendor/server CharRace order, charentity.h:221).
+        // ~2.08 (vendor/server CharRace order, charentity.h).
         let hume = *heights.get(&1).expect("Hume M loaded");
         let elvaan = *heights.get(&3).expect("Elvaan M loaded");
         assert!(
@@ -4453,13 +4752,6 @@ mod pose_resolution_tests {
         (lo, hi)
     }
 
-    /// Why the live path withholds BakedActor from NPCs (kuluu-81r8): a mob's
-    /// bind pose does not describe the model as drawn. Huge Hornet's rest-pose
-    /// span is 0.68, but its idle routine draws the body at [1.4, 2.4] above
-    /// the wire position — a span-based anchor would sit below the silhouette.
-    /// Retail anchors on the AboveHead locator that moves with the animation;
-    /// until we track it per frame, mobs keep the flat fallback. Self-skips
-    /// without an install.
     #[test]
     fn npc_bind_pose_does_not_describe_the_drawn_extent() {
         if DatRoot::from_env_or_default().is_err() {
@@ -4829,6 +5121,272 @@ mod pose_resolution_tests {
         }
     }
 
+    fn synth_death_routine(stages: &[(&[u8; 4], u16, u32)]) -> HashMap<DatId, Scheduler> {
+        use ffxi_dat::scheduler::{SchedulerStage, TimedStage};
+        let name = *b"dead";
+        let mut out = HashMap::new();
+        out.insert(
+            DatId::from_name(&name),
+            Scheduler {
+                name,
+                stages: stages
+                    .iter()
+                    .map(|&(clip, duration_frames, frame)| TimedStage {
+                        frame,
+                        stage: SchedulerStage {
+                            kind: StageKind::Motion,
+                            raw_type: 0x05,
+                            delay_frames: 0,
+                            duration_frames,
+                            id: *clip,
+                            max_loops: 1,
+                            transition_in: 0,
+                            transition_out: 0,
+                            random_group: None,
+                            local_dir: ffxi_dat::scheduler::NO_LOCAL_DIR,
+                            model_transform: None,
+                            screen_color: None,
+                            actor_fade: None,
+                            idle_transition_time: None,
+                            flinch_duration: None,
+                        },
+                    })
+                    .collect(),
+            },
+        );
+        out
+    }
+
+    #[test]
+    fn death_collapse_clip_reads_the_dead_routine_stages() {
+        let routines = synth_death_routine(&[(b"ded?", 116, 0), (b"cor?", 2, 116)]);
+        let (clip, frames) = death_collapse_clip(&routines).expect("collapse stage");
+        assert_eq!(clip.as_str(), "ded?");
+        assert_eq!(frames, 58.0, "duration_frames is in half-frame units");
+    }
+
+    #[test]
+    fn death_collapse_clip_needs_a_corpse_stage_to_settle_on() {
+        let routines = synth_death_routine(&[(b"ded?", 116, 0)]);
+        assert_eq!(death_collapse_clip(&routines), None);
+        assert_eq!(death_collapse_clip(&HashMap::new()), None);
+    }
+
+    #[test]
+    fn death_phase_selects_the_collapse_then_releases_to_the_corpse_pose() {
+        let routines = synth_death_routine(&[(b"ded?", 116, 0), (b"cor?", 2, 116)]);
+        let (collapse_id, collapse_frames) = death_collapse_clip(&routines).unwrap();
+
+        let mut phase = actor_state::DeathPhase::Unobserved;
+        let mut step = |dead: bool| {
+            phase = actor_state::next_death_phase(phase, dead, collapse_frames, 1.0);
+            match phase {
+                actor_state::DeathPhase::Collapsing { .. } => Some(collapse_id.as_str()),
+                _ => None,
+            }
+        };
+
+        assert_eq!(step(false), None);
+        for _ in 0..collapse_frames as u32 {
+            assert_eq!(step(true).as_deref(), Some("ded?"));
+        }
+        for _ in 0..600 {
+            assert_eq!(
+                step(true),
+                None,
+                "the collapse must not replay under the held corpse pose"
+            );
+        }
+    }
+
+    // `dat-routine-stages <pc skeleton> dead`, half-frames halved, over races 1..=8
+    // (skeletons 7072/10248/13424/16600/19776 shared by both Tarutaru/23176/26352):
+    // the collapse length is authored per race, so it has to be read from the routine.
+    const PC_COLLAPSE_FRAMES: [(u8, f32); 8] = [
+        (1, 58.0),
+        (2, 78.0),
+        (3, 43.0),
+        (4, 68.0),
+        (5, 34.0),
+        (6, 34.0),
+        (7, 60.0),
+        (8, 60.0),
+    ];
+
+    // Retail-DAT guard (skips without an install) for the oracle the phase machine is
+    // built on: every PC `dead` routine is a one-shot `ded?` collapse followed by
+    // `cor?`, and `cor?` is itself static -- so what retail holds forever is the corpse
+    // frame, never the collapse.
+    #[test]
+    fn retail_dead_routine_is_a_one_shot_collapse_into_a_static_corpse_pose() {
+        if DatRoot::from_env_or_default().is_err() {
+            eprintln!("skipping: no retail DAT root");
+            return;
+        }
+
+        for (race, expected_frames) in PC_COLLAPSE_FRAMES {
+            let actor = load_pc(race, false, &[], None, None, None).expect("load PC race");
+            let routines = actor.all_routines();
+
+            let (collapse_id, collapse_frames) =
+                death_collapse_clip(&routines).expect("PC dead routine");
+            assert_eq!(collapse_id.as_str(), "ded?");
+            assert_eq!(
+                collapse_frames, expected_frames,
+                "race {race} collapse length"
+            );
+            assert_eq!(
+                routine_motion_clip_last(&routines, actor_state::death_routine_id())
+                    .map(|d| d.as_str()),
+                Some("cor?".to_string()),
+                "race {race} dead routine settles on the corpse pose"
+            );
+
+            let animations = actor.all_animations();
+            let clips = |id: DatId| -> Vec<&SkeletonAnimation> {
+                animations
+                    .iter()
+                    .filter(|a| a.id.parameterized_match(&id))
+                    .collect()
+            };
+
+            let collapse = clips(collapse_id);
+            assert!(
+                !collapse.is_empty(),
+                "race {race} collapse clip is loadable"
+            );
+            for a in &collapse {
+                assert!(
+                    a.length_in_frames() > 1.0,
+                    "race {race} {} is a motion, not a pose",
+                    a.id.as_str()
+                );
+            }
+
+            let corpse = clips(actor_state::corpse_pose_id());
+            assert!(!corpse.is_empty(), "race {race} corpse pose is loadable");
+            for a in &corpse {
+                for set in a.key_frame_sets.values() {
+                    let first = set[0];
+                    let last = set[a.num_frames - 1];
+                    assert!(
+                        same_orientation(first.rotation, last.rotation),
+                        "race {race} {} rotates between its first and last keyframe",
+                        a.id.as_str()
+                    );
+                    assert!(
+                        same_component(first.translation, last.translation),
+                        "race {race} {} translates between its first and last keyframe",
+                        a.id.as_str()
+                    );
+                    assert!(
+                        same_component(first.scale, last.scale),
+                        "race {race} {} scales between its first and last keyframe",
+                        a.id.as_str()
+                    );
+                }
+            }
+        }
+    }
+
+    // Retail stores `cor?` as compressed keyframes, so its first and last frame
+    // decode to the same pose only up to f32 round-off: measured over all seven PC
+    // skeletons the worst gap is 2.4e-7 on a translation and 2.4e-7 on |q1.q2| - 1.
+    const STATIC_POSE_TOLERANCE: f32 = 1e-6;
+
+    fn same_component(a: [f32; 3], b: [f32; 3]) -> bool {
+        a.iter()
+            .zip(b.iter())
+            .all(|(x, y)| (x - y).abs() <= STATIC_POSE_TOLERANCE)
+    }
+
+    // A quaternion and its negation name the same orientation, and retail's `cor?`
+    // does store one bone's identity rotation as `[0,0,0,1]` on the first keyframe
+    // and `[0,0,0,-1]` on the last, so the static-pose check compares orientations
+    // rather than raw components.
+    fn same_orientation(a: [f32; 4], b: [f32; 4]) -> bool {
+        let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
+        (dot.abs() - 1.0).abs() <= STATIC_POSE_TOLERANCE
+    }
+
+    // Retail-DAT end-to-end (skips without an install) for
+    // .agents/skills/retail-observe/references/death-ko-behavior.md: "Death plays a
+    // collapse motion once and holds the final corpse frame -- it is not a looping
+    // idle."
+    #[test]
+    fn death_collapse_plays_once_then_holds_the_corpse_frame() {
+        let Some(loaded) = load_hume_m() else {
+            return;
+        };
+        let routines = loaded.all_routines();
+        let (collapse_id, collapse_frames) =
+            death_collapse_clip(&routines).expect("HumeM dead routine");
+        let corpse_id = actor_state::corpse_pose_id();
+        let is = |actor: &FfxiRenderActor, id: &DatId| {
+            actor.last_clip.is_some_and(|c| c.parameterized_match(id))
+        };
+
+        let mut actor = make_render_actor(&loaded, 0, Vec::new(), 1, 0.0, 1.0);
+        advance_actor_pose_standalone(&mut actor, 1.0, None);
+        actor.inputs.dead = true;
+
+        let mut collapse_frames_seen = 0;
+        for _ in 0..collapse_frames as usize {
+            advance_actor_pose_standalone(&mut actor, 1.0, None);
+            collapse_frames_seen += usize::from(is(&actor, &collapse_id));
+        }
+        assert_eq!(
+            collapse_frames_seen, collapse_frames as usize,
+            "the collapse runs for the routine stage's whole duration"
+        );
+
+        for _ in 0..collapse_frames as usize {
+            advance_actor_pose_standalone(&mut actor, 1.0, None);
+        }
+        assert!(is(&actor, &corpse_id), "the collapse settles on `cor?`");
+
+        let held = actor.world_pose().to_vec();
+        for _ in 0..600 {
+            advance_actor_pose_standalone(&mut actor, 1.0, None);
+            assert!(!is(&actor, &collapse_id), "the collapse must not replay");
+        }
+        assert_eq!(
+            actor.world_pose(),
+            held,
+            "the corpse frame is held, not re-animated"
+        );
+    }
+
+    // A homepoint warp is a zone change, and zoning in while still KO'd is the one
+    // case where the client sees `dead` without having watched the death
+    // (death-ko-behavior.md, "0x00A LOGIN carries a DeadCounter").
+    #[test]
+    fn a_death_the_client_never_watched_holds_the_corpse_frame() {
+        let Some(loaded) = load_hume_m() else {
+            return;
+        };
+        let (collapse_id, _) =
+            death_collapse_clip(&loaded.all_routines()).expect("HumeM dead routine");
+
+        let mut actor = make_render_actor(&loaded, 0, Vec::new(), 1, 0.0, 1.0);
+        advance_actor_pose_standalone(&mut actor, 1.0, None);
+        reset_actor_pose_state(&mut actor, 1.0, None);
+        actor.inputs.dead = true;
+
+        for _ in 0..600 {
+            advance_actor_pose_standalone(&mut actor, 1.0, None);
+            assert!(
+                !actor
+                    .last_clip
+                    .is_some_and(|c| c.parameterized_match(&collapse_id)),
+                "a death the client never watched must not replay the collapse"
+            );
+        }
+        assert!(actor
+            .last_clip
+            .is_some_and(|c| c.parameterized_match(&actor_state::corpse_pose_id())));
+    }
+
     #[test]
     fn routine_motion_clip_resolves_first_motion_stage() {
         let routines = synth_routines(&[(b"ati0", b"at0?"), (b"in 0", b"ind?")]);
@@ -4883,7 +5441,7 @@ mod pose_resolution_tests {
 
     // Retail-DAT guard (skips without an install). The melee hit chain resolves `ef h` (the hit
     // spark) and `se h`/`skaz` (the impact/whoosh) out of the EQUIPPED WEAPON's DAT, and `chit`
-    // out of the skeleton — research/xim EffectRoutineInstance.kt:592-604 searchAssociatedDir
+    // out of the skeleton — research/xim EffectRoutineInstance.kt searchAssociatedDir
     // walks every one of the actor's animation directories. load_pc drops an equipment file whose
     // `collect_skel_meshes()` is empty, so a weapon that stops contributing meshes would silently
     // take the whole spark chain with it.

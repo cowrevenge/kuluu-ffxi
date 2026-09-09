@@ -98,7 +98,7 @@ pub struct EventTrigger {
     pub event_zone: u16,
     /// Zone whose dialog DAT holds the strings. Usually the same as
     /// `event_zone`, but 0x34 can redirect it (`EventNum2` = `eventInfo->
-    /// textTable`, vendor/server/src/map/packets/s2c/0x034_eventnum.cpp:56-64).
+    /// textTable`, vendor/server/src/map/packets/s2c/0x034_eventnum.cpp GP_SERV_COMMAND_EVENTNUM::GP_SERV_COMMAND_EVENTNUM).
     pub text_zone: u16,
     pub unique_no: u32,
     pub act_index: u16,
@@ -1255,6 +1255,9 @@ mod tests {
     /// duplicate `StringDat::parse`'s (TEXT_XOR / OFFSET_XOR / MAGIC_BASE),
     /// which are pub(crate) to ffxi-dat — ffxi-dat's tests pin the format.
     fn synth_dat(entries: &[&[u8]]) -> Vec<u8> {
+        const STRING_DAT_MAGIC_BASE: u32 = 0x1000_0000;
+        const STRING_DAT_OFFSET_XOR: u32 = 0x8080_8080;
+        const STRING_DAT_TEXT_XOR: u8 = 0x80;
         let count = entries.len();
         let table_size = 4 * count;
         let mut offsets = Vec::with_capacity(count);
@@ -1265,12 +1268,12 @@ mod tests {
         }
         let data_len = table_size as u32 + entries.iter().map(|e| e.len() as u32).sum::<u32>();
         let mut buf = Vec::new();
-        buf.extend_from_slice(&(0x1000_0000u32.wrapping_add(data_len)).to_le_bytes());
+        buf.extend_from_slice(&(STRING_DAT_MAGIC_BASE.wrapping_add(data_len)).to_le_bytes());
         for off in &offsets {
-            buf.extend_from_slice(&(off ^ 0x8080_8080).to_le_bytes());
+            buf.extend_from_slice(&(off ^ STRING_DAT_OFFSET_XOR).to_le_bytes());
         }
         for e in entries {
-            buf.extend(e.iter().map(|b| b ^ 0x80));
+            buf.extend(e.iter().map(|b| b ^ STRING_DAT_TEXT_XOR));
         }
         buf
     }

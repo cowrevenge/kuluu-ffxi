@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use bevy::prelude::*;
 use kuluu_snapshot::SceneSnapshot;
@@ -438,6 +438,7 @@ fn panel_rows(
     state: &MapScreenState,
     snap: &SceneSnapshot,
     markers: &[MapMarker],
+    catalog: &ChangeMapCatalog,
     zone_name: &dyn Fn(u16) -> Option<String>,
 ) -> Vec<PanelRow> {
     let cursor = state.cursor;
@@ -496,7 +497,7 @@ fn panel_rows(
                 })
                 .collect()
         }
-        MapSubMode::ChangeMap => change_map_rows(state, snap, zone_name)
+        MapSubMode::ChangeMap => change_map_rows(state, snap, catalog, zone_name)
             .into_iter()
             .enumerate()
             .map(|(i, (text, _))| PanelRow {
@@ -508,22 +509,92 @@ fn panel_rows(
     }
 }
 
+/// What the Change Map list may offer: for each zone, how many maps the retail
+/// DLL's zone-map table describes.
+///
+/// Both the roster and the counts come from the DLL rather than from POLUtils'
+/// map table, because [`load_viewed_map`] resolves a row by indexing
+/// `MainDll::zone_maps` and the two tables disagree in both directions. On the
+/// retail install POLUtils names 197 zones and the DLL 231 (its remaining 153
+/// keys are the client-only band `zone_map_counts` drops): POLUtils lists
+/// pre-CoP maps the DLL dropped (zone 238: 3 vs 2), misses maps the DLL has
+/// (zone 50: 1 vs 2), omits 36 zones whose maps do ship (Middle Delkfutt's
+/// Tower, the WotG [S] zones, the Horutoto Ruins...), and names two zones the DLL
+/// has no record for (14, 77). A POLUtils-built list therefore both hides
+/// resolvable maps and offers rows that preview blank (kuluu-u8p1).
+#[derive(Resource, Default)]
+pub struct ChangeMapCatalog {
+    zones: BTreeMap<u16, u8>,
+}
+
+impl ChangeMapCatalog {
+    pub fn from_dll(dll: &ffxi_dat::main_dll::MainDll) -> Self {
+        Self {
+            zones: dll
+                .zone_map_counts()
+                .into_iter()
+                .filter_map(|(zone, count)| Some((zone, u8::try_from(count).ok()?)))
+                .collect(),
+        }
+    }
+
+    pub fn map_count(&self, zone: u16) -> u8 {
+        self.zones.get(&zone).copied().unwrap_or(0)
+    }
+
+    pub fn zones(&self) -> impl Iterator<Item = u16> + '_ {
+        self.zones.keys().copied()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.zones.is_empty()
+    }
+}
+
+/// Fill the catalog once the map DLL resolves, and again if the DAT root is
+/// re-pointed — `insert_dat_roots` re-inserts `MinimapDatRoot` and a fresh
+/// `MapCalibration`, so `ensure_dll` reloads from the new install.
+pub(crate) fn refresh_change_map_catalog(
+    dat_root: Res<crate::minimap::retail::MinimapDatRoot>,
+    mut calib: ResMut<crate::minimap::retail::MapCalibration>,
+    mut catalog: ResMut<ChangeMapCatalog>,
+) {
+    let root_changed = dat_root.is_changed();
+    if !catalog.is_empty() && !root_changed {
+        return;
+    }
+    if root_changed {
+        *catalog = ChangeMapCatalog::default();
+    }
+    let Some(root) = dat_root.0.as_ref() else {
+        return;
+    };
+    let Some(dll) = calib.ensure_dll(root.root()) else {
+        return;
+    };
+    *catalog = ChangeMapCatalog::from_dll(&dll);
+}
+
 /// The `(zone, map_index)` each Change Map row selects, in display order: this
 /// zone's floors first, then every other zone that ships a map (index 0). The
 /// display builder (`change_map_rows`) and the client's confirm handler both
 /// index this, so the visible list and the dispatched target stay in lockstep.
-pub fn change_map_targets(state: &MapScreenState, snap: &SceneSnapshot) -> Vec<(u16, u8)> {
+pub fn change_map_targets(
+    state: &MapScreenState,
+    snap: &SceneSnapshot,
+    catalog: &ChangeMapCatalog,
+) -> Vec<(u16, u8)> {
     let live_zone = snap.zone_id.unwrap_or(0);
     let (viewed_zone, _) = state.viewed.unwrap_or((live_zone, 0));
     let mut targets = Vec::new();
 
-    let floors = ffxi_dat::map_image::map_count_for_zone(viewed_zone);
+    let floors = catalog.map_count(viewed_zone);
     if floors > 1 {
         for idx in 0..floors {
-            targets.push((viewed_zone, idx as u8));
+            targets.push((viewed_zone, idx));
         }
     }
-    for zone in ffxi_dat::map_image::zones_with_maps() {
+    for zone in catalog.zones() {
         if zone != viewed_zone {
             targets.push((zone, 0));
         }
@@ -536,11 +607,12 @@ pub fn change_map_targets(state: &MapScreenState, snap: &SceneSnapshot) -> Vec<(
 pub fn change_map_rows(
     state: &MapScreenState,
     snap: &SceneSnapshot,
+    catalog: &ChangeMapCatalog,
     zone_name: &dyn Fn(u16) -> Option<String>,
 ) -> Vec<(String, (u16, u8))> {
     let live_zone = snap.zone_id.unwrap_or(0);
     let (viewed_zone, viewed_idx) = state.viewed.unwrap_or((live_zone, 0));
-    change_map_targets(state, snap)
+    change_map_targets(state, snap, catalog)
         .into_iter()
         .map(|(zone, idx)| {
             let label = if zone == viewed_zone {
@@ -1282,6 +1354,7 @@ pub(crate) fn update_map_panel(
     map_state: Res<MapScreenState>,
     scene_state: Res<SceneState>,
     map_markers: Res<MapMarkers>,
+    catalog: Res<ChangeMapCatalog>,
     resolver: Option<Res<ZoneNameResolver>>,
     mut panel_root_q: Query<&mut Node, (With<MapPanelRoot>, Without<MapPanelRow>)>,
     mut title_q: Query<
@@ -1368,7 +1441,7 @@ pub(crate) fn update_map_panel(
     }
 
     let markers = map_markers.for_zone(zone);
-    let rows = panel_rows(&map_state, snap, markers, &zone_name);
+    let rows = panel_rows(&map_state, snap, markers, &catalog, &zone_name);
 
     let start = panel_scroll_start(map_state.cursor);
 
@@ -1531,6 +1604,107 @@ mod tests {
         assert_eq!(rows[0].label, "Orcish Fodder (Lv12)");
     }
 
+    fn catalog(zones: &[(u16, u8)]) -> ChangeMapCatalog {
+        ChangeMapCatalog {
+            zones: zones.iter().copied().collect(),
+        }
+    }
+
+    fn change_map_state(viewed: (u16, u8)) -> MapScreenState {
+        MapScreenState {
+            mode: MapSubMode::ChangeMap,
+            viewed: Some(viewed),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn change_map_lists_the_viewed_zones_floors_then_every_other_zone() {
+        let catalog = catalog(&[(100, 1), (238, 2), (240, 3)]);
+        let snap = SceneSnapshot::default();
+
+        assert_eq!(
+            change_map_targets(&change_map_state((238, 0)), &snap, &catalog),
+            vec![(238, 0), (238, 1), (100, 0), (240, 0)],
+            "floors of the viewed zone first, then the other zones at index 0"
+        );
+        assert_eq!(
+            change_map_targets(&change_map_state((100, 0)), &snap, &catalog),
+            vec![(238, 0), (240, 0)],
+            "a one-map zone contributes no floor rows"
+        );
+        assert_eq!(
+            change_map_targets(&change_map_state((999, 0)), &snap, &catalog),
+            vec![(100, 0), (238, 0), (240, 0)],
+            "a zone the catalog does not name contributes no floor rows"
+        );
+    }
+
+    #[test]
+    fn change_map_rows_label_each_floor_and_mark_the_viewed_one() {
+        let catalog = catalog(&[(100, 1), (238, 2)]);
+        let snap = SceneSnapshot::default();
+        let rows = change_map_rows(&change_map_state((238, 1)), &snap, &catalog, &|_| None);
+        assert_eq!(
+            rows.iter().map(|(l, _)| l.as_str()).collect::<Vec<_>>(),
+            vec!["  Floor 1", "* Floor 2", "Zone #100"]
+        );
+    }
+
+    /// Gated on a retail install (self-skips). The acceptance oracle for
+    /// kuluu-u8p1: every row the Change Map list offers must resolve the same
+    /// way `load_viewed_map` resolves it -- by indexing the zone's DLL records --
+    /// or it previews blank.
+    #[test]
+    fn every_change_map_row_resolves_to_a_dll_record_on_a_retail_install() {
+        let Some(root) = ffxi_dat::archive::open_test_install() else {
+            return;
+        };
+        let Ok(dll) = ffxi_dat::main_dll::MainDll::load(root.root()) else {
+            return;
+        };
+        let catalog = ChangeMapCatalog::from_dll(&dll);
+        assert!(!catalog.is_empty(), "the retail DLL names zones with maps");
+
+        // The defect: POLUtils lists a third Windurst Waters map (the pre-CoP
+        // one) that the DLL table dropped, so the old floor count put a row on
+        // screen the loader cannot resolve.
+        assert_eq!(ffxi_dat::map_image::map_count_for_zone(238), 3);
+        assert_eq!(catalog.map_count(238), 2);
+        assert!(
+            dll.zone_maps(238).get(2).is_none(),
+            "the row POLUtils' third map would select has no DLL record"
+        );
+        // And the other direction: the DLL knows a second map POLUtils misses.
+        assert_eq!(ffxi_dat::map_image::map_count_for_zone(50), 1);
+        assert_eq!(catalog.map_count(50), 2);
+        // Whole zones POLUtils omits: standing in Middle Delkfutt's Tower the
+        // list must still offer its six floors.
+        assert_eq!(ffxi_dat::map_image::map_count_for_zone(157), 0);
+        assert_eq!(catalog.map_count(157), 6);
+        // And zones POLUtils names that the DLL has no record for cannot be
+        // offered -- the preview would be blank.
+        assert_eq!(ffxi_dat::map_image::map_count_for_zone(77), 8);
+        assert_eq!(catalog.map_count(77), 0);
+        assert!(!catalog.zones().any(|zone| zone == 77));
+
+        let snap = SceneSnapshot::default();
+        for viewed in [238u16, 50, 157, 162] {
+            let rows = change_map_targets(&change_map_state((viewed, 0)), &snap, &catalog);
+            for (zone, idx) in rows.iter().copied() {
+                assert!(
+                    dll.zone_maps(zone).get(usize::from(idx)).is_some(),
+                    "row {zone}/{idx} (viewing {viewed}) has no DLL record to preview"
+                );
+            }
+            assert_eq!(
+                rows.iter().filter(|(zone, _)| *zone == viewed).count(),
+                usize::from(catalog.map_count(viewed)),
+                "every floor of the viewed zone is offered"
+            );
+        }
+    }
+
     #[test]
     fn command_submode_lists_three_rows_with_cursor() {
         let state = MapScreenState {
@@ -1538,7 +1712,7 @@ mod tests {
             ..Default::default()
         };
         let snap = SceneSnapshot::default();
-        let rows = panel_rows(&state, &snap, &[], &|_| None);
+        let rows = panel_rows(&state, &snap, &[], &ChangeMapCatalog::default(), &|_| None);
         assert_eq!(rows.len(), 3);
         assert_eq!(rows[0].text, "Markers");
         assert!(rows[1].is_cursor, "cursor on Wide Scan");
@@ -1566,7 +1740,7 @@ mod tests {
             ..Default::default()
         };
         let snap = SceneSnapshot::default();
-        let rows = panel_rows(&state, &snap, &[], &|_| None);
+        let rows = panel_rows(&state, &snap, &[], &ChangeMapCatalog::default(), &|_| None);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].text, "Name: Camp_");
     }
@@ -1578,7 +1752,7 @@ mod tests {
             ..Default::default()
         };
         let snap = SceneSnapshot::default();
-        let rows = panel_rows(&state, &snap, &[], &|_| None);
+        let rows = panel_rows(&state, &snap, &[], &ChangeMapCatalog::default(), &|_| None);
         assert_eq!(rows.len(), 1);
         assert!(!rows[0].is_cursor);
     }

@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
+cd "$(git rev-parse --show-toplevel)"
+
+# Comment discipline over the staged hunks only: grep-speed and harness-neutral,
+# so an agent without the .agents/hooks adapters still cannot commit a
+# line-pinned or dangling citation. Bypass once: git commit --no-verify
+if ! COMMENTS_DIFF=staged scripts/checks.sh comments; then
+  echo "pre-commit: ✗ comments — see .agents/skills/comment-discipline/SKILL.md (or 'git commit --no-verify' to bypass)" >&2
+  exit 1
+fi
+
+command -v bd >/dev/null 2>&1 || exit 0
+exec bd hooks run pre-commit "$@"

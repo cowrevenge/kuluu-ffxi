@@ -95,7 +95,7 @@ pub mod zone_texture;
 
 pub use camera::{
     camera_transition_system, chase_camera_system, configure_gizmo_render_layer,
-    first_person_eye_y, firstperson_camera_system, heading_for_yaw, nameplate_anchor_y,
+    first_person_eye_y, firstperson_camera_system, heading_for_yaw, nameplate_anchor,
     self_visibility_for_camera_mode_system, spawn_camera, third_person_anchor_y,
     toggle_camera_mode, yaw_for_heading, CameraMode, CameraTransition, ChaseCamera, OperatorCamera,
     WORLD_GIZMO_LAYER,
@@ -109,7 +109,8 @@ pub use cutscene::{CutsceneMode, CutscenePlugin, ScreenFade};
 pub use entity_table::{EntityRecord, EntityTable};
 pub use graphics_settings::{
     AaMode, CharacterRenderPath, DlssQuality, DynamicLights, GraphicsField, GraphicsSettings,
-    QualityPreset, TextureFiltering, ZoneLineDisplay, DLSS_CONFIG_FIELDS, GRAPHICS_FIELDS,
+    MinimapRadar, QualityPreset, TextureFiltering, ZoneLineDisplay, DLSS_CONFIG_FIELDS,
+    GRAPHICS_FIELDS,
 };
 pub use hud::{add_hud_spawners, HudPlugin};
 pub use input_mode::{
@@ -479,7 +480,12 @@ impl<S: SceneSource + Resource + Component<Mutability = bevy::ecs::component::Mu
 
         app.add_systems(
             Update,
-            scene::auto_clear_target_system.before(sync_entities_system),
+            (
+                scene::apply_server_retarget_system,
+                scene::auto_clear_target_system,
+            )
+                .chain()
+                .before(sync_entities_system),
         );
 
         app.add_systems(

@@ -168,6 +168,8 @@ const BIT_TEST_TARGET_OFS: usize = 5;
 const BIT_TEST_WORD_SHIFT: i32 = 5;
 const BIT_TEST_BIT_MASK: i32 = 0x1F;
 
+const IF_KIND_MASK: u8 = 0x0F;
+
 const MESSAGE_OPEN_NONE: u8 = 0;
 const MESSAGE_OPEN_AWAITING: u8 = 1;
 // CliEventMessOpenFlag = 2 is the invalid-open state MESWAIT force-cancels on
@@ -507,14 +509,18 @@ impl EventVm {
                     self.exec_pointer += 5;
                 }
                 // Sets one bit in a work-slot bit array: operand 3 is the flat
-                // bit index, so `>> 5` picks the slot and `& 0x1F` the bit, and
+                // bit index, split into slot and bit the same way as BITTEST, and
                 // operand 5 bounds the array (XiEvents OpCodes/0x003C.md).
                 OP_BITARRAY_SET => {
                     let bit = self.getworkofs(3, 0);
-                    let slot = bit >> 5;
+                    let slot = bit >> BIT_TEST_WORD_SHIFT;
                     if slot < self.getworkofs(5, 0) {
                         let prev = self.getworkofs(1, slot);
-                        self.setworkofs(1, 1i32.wrapping_shl((bit & 0x1F) as u32) | prev, slot);
+                        self.setworkofs(
+                            1,
+                            1i32.wrapping_shl((bit & BIT_TEST_BIT_MASK) as u32) | prev,
+                            slot,
+                        );
                     }
                     self.exec_pointer += 7;
                 }
@@ -1002,7 +1008,7 @@ impl EventVm {
 
     /// `XiEvent::CodeIF` (0x0002): conditional branch with 11 comparison kinds.
     fn op_if(&mut self) {
-        let kind = self.byte_at(5) & 0x0F;
+        let kind = self.byte_at(5) & IF_KIND_MASK;
         let target = self.eventgetcode(6) as usize;
         let v1 = self.getworkofs(1, 0);
         let v2 = self.getworkofs(3, 0);

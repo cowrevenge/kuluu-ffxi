@@ -23,8 +23,6 @@ pub struct CompassTrackPointer;
 
 const PANEL_SIZE_PX: f32 = 32.0;
 
-const OVERLAY_BG: Color = Color::srgba(0.04, 0.04, 0.04, 0.66);
-
 /// Track pointer pin size and its gap from the compass chip's right edge.
 const TRACK_POINTER_PX: f32 = 11.0;
 const TRACK_POINTER_GAP_PX: f32 = 3.0;
@@ -53,36 +51,6 @@ fn spawn_track_pointer_as_child(p: &mut ChildSpawnerCommands) {
     ));
 }
 
-pub fn spawn_compass_overlay_as_child(p: &mut ChildSpawnerCommands) {
-    p.spawn((
-        CompassPanel,
-        Node {
-            position_type: PositionType::Absolute,
-            top: Val::Px(3.0),
-            left: Val::Px(3.0),
-            min_width: Val::Px(20.0),
-            padding: UiRect::axes(Val::Px(4.0), Val::Px(1.0)),
-            border: UiRect::all(Val::Px(1.0)),
-            justify_content: JustifyContent::Center,
-            align_items: AlignItems::Center,
-            ..default()
-        },
-        ZIndex(15),
-        BackgroundColor(OVERLAY_BG),
-        BorderColor::all(theme::FRAME_EDGE),
-    ))
-    .with_children(|p| {
-        p.spawn((
-            CompassLabel,
-            Text::new("—"),
-            style::text_font(13.0),
-            TextColor(theme::TITLE),
-        ));
-        #[cfg(not(target_arch = "wasm32"))]
-        spawn_track_pointer_as_child(p);
-    });
-}
-
 pub fn spawn_compass_as_child(p: &mut ChildSpawnerCommands) {
     p.spawn((
         CompassPanel,
@@ -102,7 +70,7 @@ pub fn spawn_compass_as_child(p: &mut ChildSpawnerCommands) {
     .with_children(|p| {
         p.spawn((
             CompassLabel,
-            Text::new("—"),
+            Text::new("-"),
             style::text_font(14.0),
             TextColor(theme::TITLE),
         ));

@@ -77,8 +77,8 @@ fn take<T: serde::de::DeserializeOwned>(v: &serde_json::Value, key: &str) -> Opt
 /// when absent).
 fn parse_graphics_settings(bytes: &[u8]) -> Result<GraphicsSettings> {
     use kuluu_render::{
-        AaMode, CharacterRenderPath, DlssQuality, DynamicLights, QualityPreset, TextureFiltering,
-        ZoneLineDisplay,
+        AaMode, CharacterRenderPath, DlssQuality, DynamicLights, MinimapRadar, QualityPreset,
+        TextureFiltering, ZoneLineDisplay,
     };
 
     let v: serde_json::Value = serde_json::from_slice(bytes)?;
@@ -187,6 +187,9 @@ fn parse_graphics_settings(bytes: &[u8]) -> Result<GraphicsSettings> {
     if let Some(x) = take::<ZoneLineDisplay>(&v, "zone_line_display") {
         s.zone_line_display = x;
     }
+    if let Some(x) = take::<MinimapRadar>(&v, "minimap_radar") {
+        s.minimap_radar = x;
+    }
     if let Some(x) = take(&v, "render_scale") {
         s.render_scale = x;
     }
@@ -252,7 +255,7 @@ pub fn persist_graphics_on_change(settings: Res<GraphicsSettings>, state: Res<Gr
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kuluu_render::{GraphicsField, QualityPreset};
+    use kuluu_render::{GraphicsField, MinimapRadar, QualityPreset};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn tmp_path() -> PathBuf {
@@ -335,6 +338,30 @@ mod tests {
             loaded.ui_scale, 2.0,
             "ui_scale clamps into the menu slot range"
         );
+    }
+
+    /// The Enhanced radar is an opt-in the player must not have to re-pick
+    /// every launch, and a file predating the setting stays vanilla.
+    #[test]
+    fn minimap_radar_roundtrips_and_defaults_vanilla() {
+        let store = GraphicsStore::new(tmp_path());
+        let mut settings = GraphicsSettings::default();
+        settings.cycle(GraphicsField::MinimapRadar, 1);
+        assert_eq!(settings.minimap_radar, MinimapRadar::Enhanced);
+
+        store.save(&settings).unwrap();
+        assert_eq!(
+            store.load().unwrap().expect("present").minimap_radar,
+            MinimapRadar::Enhanced
+        );
+
+        std::fs::write(store.path(), br#"{"preset": "Low"}"#).unwrap();
+        assert_eq!(
+            store.load().unwrap().expect("present").minimap_radar,
+            MinimapRadar::Vanilla,
+            "a pre-setting graphics.json keeps the retail default"
+        );
+        std::fs::remove_file(store.path()).ok();
     }
 
     /// A `NaN` ui_scale means a corrupt/failed write (our own save() can never

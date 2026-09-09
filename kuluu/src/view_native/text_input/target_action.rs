@@ -322,7 +322,7 @@ pub(super) fn confirm_target_action_at_cursor(
                 Some(e) => {
                     // Doors are TYPE_NPC server-side (look.size == 0x02) and
                     // trigger through the same Talk action_id as any other
-                    // NPC — vendor/server/src/map/packets/c2s/0x01a_action.cpp:198,213.
+                    // NPC — vendor/server/src/map/packets/c2s/0x01a_action.cpp GP_CLI_COMMAND_ACTION::process.
                     // The server's own door script drives the yes/no confirm
                     // and zone change; nothing door-specific is needed here.
                     let cmd = AgentCommand::Action {

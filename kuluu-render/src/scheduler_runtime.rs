@@ -8,13 +8,13 @@ use ffxi_dat::kind::ChunkKind;
 use ffxi_dat::scheduler::{Scheduler, StageKind, TimedStage};
 use ffxi_dat::sep::Sep;
 
-// research/xim util/Fps.kt:9 — `internalFps = 60.0` is the clock every effect routine and
-// particle generator is authored against (poc/MainTool.kt:118 feeds the raw elapsed frames to
-// EffectManager). Only the skeleton domain is halved: poc/ActorManager.kt:59-62 "In game,
+// research/xim util/Fps.kt — `internalFps = 60.0` is the clock every effect routine and
+// particle generator is authored against (poc/MainTool.kt internalLoop feeds the raw elapsed frames to
+// EffectManager). Only the skeleton domain is halved: poc/ActorManager.kt updateAll "In game,
 // skeletal animations are only updated every other frame" — see SKELETON_FRAME_DIVISOR.
 pub const ROUTINE_FPS: f32 = 60.0;
 
-// research/xim poc/ActorManager.kt:59-62 — `elapsedFrames / 2f` into updateAnimation.
+// research/xim poc/ActorManager.kt updateAll — `elapsedFrames / 2f` into updateAnimation.
 pub const SKELETON_FRAME_DIVISOR: f32 = 2.0;
 
 // The rate the retail/vanilla client renders at, distinct from the 60 fps routine clock above.
@@ -31,7 +31,7 @@ const POST_FINISH_TTL_SECS: f32 = 2.0;
 #[derive(Component, Debug, Clone, Copy, Default)]
 pub struct ActionTarget(pub Option<Entity>);
 
-// research/xim ParticleGeneratorAttachment.kt:64-111 — Target*/TargetToSourceBasis read the
+// research/xim ParticleGeneratorAttachment.kt updateAssociatedPosition — Target*/TargetToSourceBasis read the
 // primary target's position, every other attach type the source actor's. `None` falls back to
 // the caster so an untracked target never drops the routine.
 pub fn particle_origin_entity(
@@ -59,7 +59,7 @@ pub fn sound_origin_entity(on_caster: bool, caster: Entity, target: Option<Entit
     }
 }
 
-// research/xim poc/MainTool.kt:250 — ROM/0/0.DAT is loaded as XIM's `GlobalDirectory`, the
+// research/xim poc/MainTool.kt resourceDependenciesLoaded systemEffects — ROM/0/0.DAT is loaded as XIM's `GlobalDirectory`, the
 // system-effect resource dir every routine falls back to (the cast aura `ner1` and its `stbk`
 // stop live there, not in the caster's DAT). `DatRoot::resolve(0)` yields exactly that file.
 pub const GLOBAL_EFFECT_DIR_FILE_ID: u32 = 0;
@@ -70,7 +70,7 @@ pub struct GlobalEffectDir {
     pub assets: ActionAssets,
 }
 
-// research/xim EffectRoutineInstance.kt:418-431 findResource — a routine id resolves against the
+// research/xim EffectRoutineInstance.kt appendChildSequences findResource — a routine id resolves against the
 // routine's own DAT, then the actor's own dirs, then the global dir.
 pub enum RoutineSource<'a> {
     Dat(&'a [Scheduler]),
@@ -156,7 +156,7 @@ impl ActiveScheduler {
         Self::flatten(lookup, name, MotionStages::Suppress)
     }
 
-    // research/xim Actor.kt:864-903 — one swing enqueues TWO routines on the attacker: the
+    // research/xim Actor.kt displayAutoAttack — one swing enqueues TWO routines on the attacker: the
     // self-targeted voice routine (`atk0`) and the weapon swing (`ati0`/`bti0`/…). Their timelines
     // are merged into one entry so the swing's 0x2B DamageCallback reports a single scheduler
     // name - the value PendingHitReaction arms with.
@@ -210,7 +210,7 @@ impl ActiveScheduler {
     }
 
     /// True while this routine's AnimationLock interval covers `frame`: any 0x07/0x59 stage with
-    /// `stage.frame <= frame < stage.frame + duration_frames` (F49, F55, F57). A routine with no
+    /// `stage.frame <= frame < stage.frame + duration_frames` (findings F49/F55/F57). A routine with no
     /// lock stage never locks.
     pub fn locks_at(&self, frame: u32) -> bool {
         self.stages.iter().any(|t| {
@@ -261,8 +261,8 @@ impl ActiveSchedulers {
     }
 
     /// 0x5F StopRoutine: drop every entry named `name`. xim stops each matching sequence on the
-    /// same actor (EffectRoutineInstance.kt:910-915); stop() just clears the remaining queue - it
-    /// does not run the stopped routine's 0x2D StopParticle stages (:276-281), so no particle
+    /// same actor (EffectRoutineInstance.kt handleStopRoutineEffect); stop() just clears the remaining queue - it
+    /// does not run the stopped routine's 0x2D StopParticle stages, so no particle
     /// cleanup happens here either.
     pub fn remove_routine_named(&mut self, name: &[u8; 4]) {
         self.routines.retain(|r| r.name != *name);
@@ -350,10 +350,10 @@ pub fn tick_active_schedulers(
 }
 
 // 0x5F StopRoutine - the worm's dig (`ini1`) stops `init` and its pop-up stops `ini1` this way
-// (F46, F57). xim stops every sequence named by the stage on the same actor; here that is a plain
+// (findings F46/F57). xim stops every sequence named by the stage on the same actor; here that is a plain
 // removal from the vec. The stopped routine's remaining stages simply never fire - including any
 // 0x2D StopParticle, which retail does not run for a stopped sequence either
-// (EffectRoutineInstance.kt:276-281).
+// (EffectRoutineInstance.kt stop).
 pub fn dispatch_stop_routine_stages(
     mut events: MessageReader<SchedulerStageEvent>,
     mut q: Query<&mut ActiveSchedulers>,
@@ -389,12 +389,19 @@ pub struct ActionAssets {
     pub generators: HashMap<[u8; 4], Generator>,
     #[cfg(not(target_arch = "wasm32"))]
     pub d3ms: HashMap<[u8; 4], ffxi_dat::d3m::D3m>,
+    // The same meshes keyed by (containing directory, name), the tier a generator's linked mesh
+    // resolves against before the flat, last-writer-wins map.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub d3ms_by_dir: HashMap<([u8; 4], [u8; 4]), ffxi_dat::d3m::D3m>,
     #[cfg(not(target_arch = "wasm32"))]
     pub mmbs: HashMap<[u8; 4], MmbSpriteMesh>,
     // SpriteSheet (0x0E) particle meshes, keyed by the 0x21 chunk DatId a generator's
     // mesh_id references (e.g. Poison's `fir ` → 0x21 `fir`).
     #[cfg(not(target_arch = "wasm32"))]
     pub sprite_sheets: HashMap<[u8; 4], ffxi_dat::sprite_sheet::ParticleSpriteSheet>,
+    #[cfg(not(target_arch = "wasm32"))]
+    pub sprite_sheets_by_dir:
+        HashMap<([u8; 4], [u8; 4]), ffxi_dat::sprite_sheet::ParticleSpriteSheet>,
     pub seps: HashMap<[u8; 4], Sep>,
     pub animations: Vec<ffxi_dat::skel_anim::SkeletonAnimation>,
     #[cfg(not(target_arch = "wasm32"))]
@@ -413,11 +420,15 @@ pub struct ActionAssets {
     // generators called `g010`, one per effect directory; the flat map keeps only the last.
     pub particle_defs_by_dir:
         HashMap<([u8; 4], [u8; 4]), ffxi_dat::particle_gen::ParticleGeneratorDef>,
+    // The directory each entry of the flat `particle_defs` map came from, so a def that only
+    // resolves through that last-writer-wins tier still knows the scope its own linked mesh,
+    // sprite sheet and texture must resolve in.
+    pub particle_def_dirs: HashMap<[u8; 4], [u8; 4]>,
     pub keyframes: HashMap<[u8; 4], ffxi_dat::particle_gen::KeyFrameTrack>,
 }
 
 impl ActionAssets {
-    // research/xim EffectRoutineInstance.kt:418-431 — `resource.localDir` first, wider scopes
+    // research/xim EffectRoutineInstance.kt appendChildSequences — `resource.localDir` first, wider scopes
     // after. `local_dir` is the directory of the routine the stage was authored in, carried on
     // the stage because flattening merges routines from several directories into one timeline.
     pub fn particle_def(
@@ -425,9 +436,48 @@ impl ActionAssets {
         local_dir: [u8; 4],
         id: &[u8; 4],
     ) -> Option<&ffxi_dat::particle_gen::ParticleGeneratorDef> {
-        self.particle_defs_by_dir
+        self.particle_def_scoped(local_dir, id).map(|(_, d)| d)
+    }
+
+    // research/xim ParticleInitializers.kt apply — a generator's linked mesh resolves against
+    // `particle.creator.localDir`, the directory the GENERATOR was authored in, which is the
+    // caller's routine dir only when the def resolved through the dir-scoped tier.
+    pub fn particle_def_scoped(
+        &self,
+        local_dir: [u8; 4],
+        id: &[u8; 4],
+    ) -> Option<([u8; 4], &ffxi_dat::particle_gen::ParticleGeneratorDef)> {
+        if let Some(def) = self.particle_defs_by_dir.get(&(local_dir, *id)) {
+            return Some((local_dir, def));
+        }
+        let def = self.particle_defs.get(id)?;
+        let dir = self
+            .particle_def_dirs
+            .get(id)
+            .copied()
+            .unwrap_or(ffxi_dat::scheduler::NO_LOCAL_DIR);
+        Some((dir, def))
+    }
+
+    // research/xim ParticleLinkedDataProviders.kt getParticleMesh resolveStaticMeshLink — the effect
+    // directory first, wider scopes after.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn d3m(&self, local_dir: [u8; 4], id: &[u8; 4]) -> Option<&ffxi_dat::d3m::D3m> {
+        self.d3ms_by_dir
             .get(&(local_dir, *id))
-            .or_else(|| self.particle_defs.get(id))
+            .or_else(|| self.d3ms.get(id))
+    }
+
+    // research/xim ParticleLinkedDataProviders.kt resolveStaticMeshLink resolveSpriteSheetLink — same order.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn sprite_sheet(
+        &self,
+        local_dir: [u8; 4],
+        id: &[u8; 4],
+    ) -> Option<&ffxi_dat::sprite_sheet::ParticleSpriteSheet> {
+        self.sprite_sheets_by_dir
+            .get(&(local_dir, *id))
+            .or_else(|| self.sprite_sheets.get(id))
     }
 }
 
@@ -452,7 +502,7 @@ pub fn lcg_next(state: u64) -> u64 {
         .wrapping_add(LCG_INCREMENT)
 }
 
-// research/xim EffectRoutineParser.kt:275-285 — a random block runs exactly one of its children
+// research/xim EffectRoutineParser.kt parseSection2 — a random block runs exactly one of its children
 // per activation, and which one is not authored in the DAT.
 static RANDOM_PICK_STATE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
@@ -604,6 +654,7 @@ pub fn parse_action_tree(node: &ffxi_dat::chunk::ChunkNode<'_>) -> (Vec<Schedule
                 }
                 if let Ok(Some(d)) = ffxi_dat::particle_gen::ParticleGeneratorDef::parse(c.data) {
                     assets.particle_defs.insert(c.name, d);
+                    assets.particle_def_dirs.insert(c.name, dir);
                     assets.particle_defs_by_dir.insert((dir, c.name), d);
                 }
             }
@@ -615,6 +666,7 @@ pub fn parse_action_tree(node: &ffxi_dat::chunk::ChunkNode<'_>) -> (Vec<Schedule
             #[cfg(not(target_arch = "wasm32"))]
             ChunkKind::D3m => {
                 if let Ok(d) = ffxi_dat::d3m::D3m::parse(c.name, c.data) {
+                    assets.d3ms_by_dir.insert((dir, c.name), d.clone());
                     assets.d3ms.insert(c.name, d);
                 }
             }
@@ -627,6 +679,9 @@ pub fn parse_action_tree(node: &ffxi_dat::chunk::ChunkNode<'_>) -> (Vec<Schedule
             #[cfg(not(target_arch = "wasm32"))]
             ChunkKind::SpriteSheet => {
                 if let Some(ss) = ffxi_dat::sprite_sheet::ParticleSpriteSheet::parse(c.data) {
+                    assets
+                        .sprite_sheets_by_dir
+                        .insert((dir, c.name), ss.clone());
                     assets.sprite_sheets.insert(c.name, ss);
                 }
             }
@@ -704,6 +759,26 @@ fn mmb_sprite_mesh(data: &[u8]) -> Option<MmbSpriteMesh> {
     })
 }
 
+// Every action/emote DAT read resolves through one shared root: `DatRoot::open` re-reads and
+// re-parses all 20 VTABLE/FTABLE files (3.3 MB on a retail install), so opening one per event or
+// per cache miss is pure repeat work. Wired by kuluu's `insert_dat_roots` like every other
+// `*DatRoot`.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Resource, Default, Clone)]
+pub struct ActionDatRoot(pub Option<Arc<ffxi_dat::DatRoot>>);
+
+// A `None` root is the host saying it has no install (kuluu wires one either way), so there is
+// deliberately no env re-open here: the wired root carries the launcher's overlays and DAT-path
+// setting, and a root opened behind the host's back would not.
+#[cfg(not(target_arch = "wasm32"))]
+fn read_dat_bytes(root: Option<Arc<ffxi_dat::DatRoot>>, file_id: u32) -> Vec<u8> {
+    root.and_then(|root| {
+        let loc = root.resolve(file_id).ok()?;
+        std::fs::read(loc.path_under(&root)).ok()
+    })
+    .unwrap_or_default()
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Resource)]
 pub(crate) struct GlobalEffectDirTask(bevy::tasks::Task<(Vec<Scheduler>, ActionAssets)>);
@@ -712,17 +787,10 @@ pub(crate) struct GlobalEffectDirTask(bevy::tasks::Task<(Vec<Scheduler>, ActionA
 // thread reproduces the actor-load hitch, so it loads once off-thread and every lookup falls
 // back to the pre-global behaviour until it lands.
 #[cfg(not(target_arch = "wasm32"))]
-pub(crate) fn load_global_effect_dir(mut commands: Commands) {
-    let task = bevy::tasks::AsyncComputeTaskPool::get().spawn(async move {
-        let bytes = ffxi_dat::DatRoot::from_env_or_default()
-            .ok()
-            .and_then(|root| {
-                let loc = root.resolve(GLOBAL_EFFECT_DIR_FILE_ID).ok()?;
-                std::fs::read(loc.path_under(&root)).ok()
-            })
-            .unwrap_or_default();
-        parse_action_bytes(&bytes)
-    });
+pub(crate) fn load_global_effect_dir(root: Res<ActionDatRoot>, mut commands: Commands) {
+    let root = root.0.clone();
+    let task = bevy::tasks::AsyncComputeTaskPool::get()
+        .spawn(async move { parse_action_bytes(&read_dat_bytes(root, GLOBAL_EFFECT_DIR_FILE_ID)) });
     commands.insert_resource(GlobalEffectDirTask(task));
 }
 
@@ -797,6 +865,7 @@ enum PendingActionDispatch {
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Resource, Default)]
 pub struct ActionDatCache {
+    root: Option<Arc<ffxi_dat::DatRoot>>,
     lru: ActionDatLru,
     tasks: HashMap<u32, bevy::tasks::Task<ParsedActionDat>>,
     pending: Vec<(u32, PendingActionDispatch)>,
@@ -804,12 +873,23 @@ pub struct ActionDatCache {
 
 #[cfg(not(target_arch = "wasm32"))]
 impl ActionDatCache {
+    // Every cached parse, in-flight load and deferred dispatch belongs to the install it was
+    // read from, so a launcher DAT-path change drops all three rather than serving the next cast
+    // from the old one.
+    fn adopt_root(&mut self, root: Option<Arc<ffxi_dat::DatRoot>>) {
+        self.root = root;
+        self.lru = ActionDatLru::default();
+        self.tasks.clear();
+        self.pending.clear();
+    }
+
     fn request(&mut self, file_id: u32) {
         if self.tasks.contains_key(&file_id) {
             return;
         }
-        let task =
-            bevy::tasks::AsyncComputeTaskPool::get().spawn(async move { load_action_dat(file_id) });
+        let root = self.root.clone();
+        let task = bevy::tasks::AsyncComputeTaskPool::get()
+            .spawn(async move { load_action_dat(root, file_id) });
         self.tasks.insert(file_id, task);
     }
 
@@ -822,15 +902,8 @@ impl ActionDatCache {
 // An unresolvable/unreadable file caches as an empty parse, so a broken DAT path degrades to the
 // pre-existing "no effect" behaviour instead of re-spawning a load per cast.
 #[cfg(not(target_arch = "wasm32"))]
-fn load_action_dat(file_id: u32) -> ParsedActionDat {
-    let bytes = ffxi_dat::DatRoot::from_env_or_default()
-        .ok()
-        .and_then(|root| {
-            let loc = root.resolve(file_id).ok()?;
-            std::fs::read(loc.path_under(&root)).ok()
-        })
-        .unwrap_or_default();
-    let (schedulers, assets) = parse_action_bytes(&bytes);
+fn load_action_dat(root: Option<Arc<ffxi_dat::DatRoot>>, file_id: u32) -> ParsedActionDat {
+    let (schedulers, assets) = parse_action_bytes(&read_dat_bytes(root, file_id));
     ParsedActionDat { schedulers, assets }
 }
 
@@ -1023,7 +1096,7 @@ pub fn dispatch_sound_stages(
         ) {
             continue;
         }
-        // research/xim EffectRoutineInstance.kt:418-431,592-604 — routine DAT, then the actor's
+        // research/xim EffectRoutineInstance.kt appendChildSequences,592-604 — routine DAT, then the actor's
         // own resource dirs (weapon `skaz`, face `atk1..4`), then the global dir.
         let actor_assets = q_children
             .get(ev.actor)
@@ -1068,7 +1141,7 @@ pub fn dispatch_motion_stages(
         if ev.stage.stage.kind != StageKind::Motion {
             continue;
         }
-        // research/xim EffectRoutineInterpolatedEffects.kt:49 — a skill's body motion is
+        // research/xim EffectRoutineInterpolatedEffects.kt SkeletonAnimationInstance animationDirs — a skill's body motion is
         // resolved against the skill DAT's own clips first, then the caster's animation
         // directories. ActionAssets lives on the tracked entity the scheduler runs on; the
         // render actor is its child.
@@ -1105,7 +1178,7 @@ pub fn dispatch_motion_stages(
     }
 }
 
-// research/xim EffectRoutineInterpolatedEffects.kt:62 - the 0x21/0x25 flinch stage plays the
+// research/xim EffectRoutineInterpolatedEffects.kt FlinchAnimationInstance - the 0x21/0x25 flinch stage plays the
 // model's flinch clip ONCE (dfm? for PCs, dfi? otherwise), overwriting idle clips only and
 // skipping when the model is animation-locked. This is the visual half of a hit reaction: the
 // victim's `damg`/`ldam` routines are sound-only, so without this consumer a hit lands as SE +
@@ -1198,15 +1271,15 @@ pub fn action_dat_file_id(
         3 => weapon_skill_file_id(animation?, race?, main_dll?),
         4 => ffxi_vocab::action_anim::spell_file_id(action_id, animation),
         6 => ffxi_vocab::action_anim::ability_file_id(action_id, animation),
-        // research/xim MobAbilityTable.kt:58-72 - mob skills (category 11) and pet skills
-        // (category 13) key the effect DAT by the result's animation index with a range-
-        // dependent base; that DAT's `main` plays the caster's own sp?? clip (F51, F58).
+        // research/xim MobAbilityTable.kt getFileTableOffset - mob skills (category 11) and pet
+        // skills (category 13) key the effect DAT by the result's animation index with a range-
+        // dependent base; that DAT's `main` plays the caster's own sp?? clip (findings F51/F58).
         11 | 13 => Some(ffxi_vocab::action_anim::mob_skill_file_id(animation?)),
         _ => None,
     }
 }
 
-// research/xim AbilityTable.kt:103 — WS file id = race base (FFXiMain.dll) + per-skill index.
+// research/xim AbilityTable.kt getAnimationId — WS file id = race base (FFXiMain.dll) + per-skill index.
 // `race` is the FFXI look race byte (HumeM=1..Galka=8), which is XIM's RaceGenderConfig.index.
 fn weapon_skill_file_id(
     animation: u16,
@@ -1217,11 +1290,49 @@ fn weapon_skill_file_id(
     Some(base as u32 + animation as u32)
 }
 
+// FFXiMain.dll is ~2.8 MB read whole and then scanned for several table markers
+// (ffxi-dat/src/main_dll.rs::load), which is why it loads off-thread once per DAT root instead
+// of on the first weaponskill or emote to reach the render thread.
 #[cfg(not(target_arch = "wasm32"))]
-#[derive(Default)]
-pub struct MainDllCache {
-    loaded: bool,
-    dll: Option<ffxi_dat::main_dll::MainDll>,
+#[derive(Resource, Default)]
+pub struct ActionMainDll(pub Option<Arc<ffxi_dat::main_dll::MainDll>>);
+
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Resource)]
+pub(crate) struct ActionMainDllTask(bevy::tasks::Task<Option<ffxi_dat::main_dll::MainDll>>);
+
+// Both halves of a DAT-root change: the parsed-DAT cache re-keys onto the new install and the
+// dll re-loads from it. The dll is dropped along with the cache rather than kept warm, because
+// it is what turns an action into a *file id* -- serving the previous install's base tables
+// while resolving them through the new root mixes the two installs. Until the new one lands the
+// dispatchers take their existing no-dll paths.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn adopt_action_dat_root(
+    root: Res<ActionDatRoot>,
+    mut cache: ResMut<ActionDatCache>,
+    mut commands: Commands,
+) {
+    cache.adopt_root(root.0.clone());
+    let root = root.0.clone();
+    let task = bevy::tasks::AsyncComputeTaskPool::get().spawn(async move {
+        root.and_then(|root| ffxi_dat::main_dll::MainDll::load(root.root()).ok())
+    });
+    commands.remove_resource::<ActionMainDll>();
+    commands.insert_resource(ActionMainDllTask(task));
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn poll_action_main_dll(
+    task: Option<ResMut<ActionMainDllTask>>,
+    mut commands: Commands,
+) {
+    use bevy::tasks::futures_lite::future;
+    let Some(mut task) = task else { return };
+    let Some(dll) = future::block_on(future::poll_once(&mut task.0)) else {
+        return;
+    };
+    commands.remove_resource::<ActionMainDllTask>();
+    commands.insert_resource(ActionMainDll(dll.map(Arc::new)));
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -1240,7 +1351,7 @@ pub fn dispatch_action_started(
     q_children: Query<&Children>,
     q_render: Query<&crate::ffxi_actor_render::FfxiRenderActor>,
     global: Option<Res<GlobalEffectDir>>,
-    mut dll_cache: Local<MainDllCache>,
+    dll: Option<Res<ActionMainDll>>,
     mut cache: ResMut<ActionDatCache>,
     mut q_scheds: Query<&mut ActiveSchedulers>,
     mut commands: Commands,
@@ -1269,19 +1380,12 @@ pub fn dispatch_action_started(
         };
         let target_entity = target_id.and_then(|id| tracked.by_id.get(&id).copied());
         let race = q_look.get(actor_entity).ok().and_then(|l| look_race(&l.0));
-        // FFXiMain.dll is only needed for weaponskill base indices; load it lazily once.
-        if action_kind == 3 && !dll_cache.loaded {
-            dll_cache.loaded = true;
-            if let Ok(root) = ffxi_dat::DatRoot::from_env_or_default() {
-                dll_cache.dll = ffxi_dat::main_dll::MainDll::load(root.root()).ok();
-            }
-        }
         let Some(file_id) = action_dat_file_id(
             action_id,
             animation,
             action_kind,
             race,
-            dll_cache.dll.as_ref(),
+            dll.as_ref().and_then(|d| d.0.as_deref()),
         ) else {
             continue;
         };
@@ -1325,7 +1429,7 @@ fn actor_render_routines<'a>(
 }
 
 // The routine the caster's cast-start effects were flattened from, so an interrupt can stop the
-// generators it spawned. research/xim Actor.kt:263-266 startCasting enqueues the whole model
+// generators it spawned. research/xim Actor.kt startCasting enqueues the whole model
 // routine, not just its Motion stage.
 // `posed` latches once the caster is observed in the looping cast pose. Cast routines with no
 // Motion stage (retail `caso`/`calg`/`cage`) never set it, so the heuristic teardown below must
@@ -1337,7 +1441,7 @@ pub struct CastRoutine {
     pub posed: bool,
 }
 
-// research/xim Actor.kt:263-266 — a cast start runs the caster's full `ca<suffix>` model routine
+// research/xim Actor.kt startCasting — a cast start runs the caster's full `ca<suffix>` model routine
 // (the `ner1` aura, its sounds, its sub-routines). Only the magic-start category is routed here:
 // the melee `ati0` routine carries its own sub-routines and would change every auto-attack swing.
 #[cfg(not(target_arch = "wasm32"))]
@@ -1377,8 +1481,8 @@ pub fn dispatch_cast_routine_started(
         let Some(&actor_entity) = tracked.by_id.get(&actor_id) else {
             continue;
         };
-        // cmd_arg is the routine FourCC, not a spell id (magic_state.cpp:102); an "sp*" FourCC is
-        // an interrupt on the same category (interrupts.cpp:268-284) and must tear the cast down.
+        // cmd_arg is the routine FourCC, not a spell id (magic_state.cpp CState); an "sp*" FourCC is
+        // an interrupt on the same category (interrupts.cpp MagicInterrupt) and must tear the cast down.
         let magic = ffxi_vocab::magic::magic_start_routine(action_id);
         if magic.is_some_and(|m| m.interrupt) {
             if let Ok(cast) = q_cast.get(actor_entity) {
@@ -1436,13 +1540,13 @@ pub fn dispatch_cast_routine_started(
 // The victim reaction the attacker's routine will hand off at its 0x2B DamageCallback stage.
 // Held on the attacker between the swing dispatch and that stage so the flinch, the impact SE
 // and the hurt grunt land on the frame retail invokes the damage callback, not on packet
-// arrival (research/xim EffectRoutineInstance.kt:956-959). The outcome bits are stored raw
+// arrival (research/xim EffectRoutineInstance.kt handleDamageCallbackRoutine). The outcome bits are stored raw
 // because the reaction is only fully decidable at callback time - `shld`/`gur1` selection
-// depends on what the VICTIM's model ships, which is not known until then (F54/F58).
+// depends on what the VICTIM's model ships, which is not known until then (findings F54/F58).
 #[derive(Component, Debug, Clone, Copy)]
 pub struct PendingHitReaction {
     pub resolution: ffxi_proto::melee::ActionResolution,
-    // 0x028_battle2.cpp:74-76 - hitDistortion(2): 3 (Heavy) is the crit case; knockback(3):
+    // GP_SERV_COMMAND_BATTLE2::pack - hitDistortion(2): 3 (Heavy) is the crit case; knockback(3):
     // any non-zero level adds `sway` alongside the damage reaction.
     pub hit_distortion: u8,
     pub knockback: u8,
@@ -1461,14 +1565,14 @@ pub struct DeadFromAction;
 
 // The global effect dir's `dam0` chunk is the MELEE hit-reaction switch (`dada` tail-calls it;
 // the ranged chain `ldad` uses `daml` instead). Its cases select on `context.hitTypeFlag`
-// (research/xim EffectRoutineInstance.kt:691) and their branch order is byte-for-byte the
+// (research/xim EffectRoutineInstance.kt resolveControlFlowVariable) and their branch order is byte-for-byte the
 // ActionResolution values in vendor/server/src/map/enums/action/resolution.h. The Hit branches
 // are `damh`/`damg`, and BOTH carry a 0x21 FlinchOnCaster stage (ROM/0/0.DAT: damh = chih + sdam
 // + flinch + vdam; damg = chit + sdam + flinch + vdam) - retail ALWAYS flinches on a hit. `sdam`
 // is never a top-level reaction choice: it is only the internal sound call inside dam*/ldam, so
 // picking it for models that ship it (as this table used to) made normal hits sound-only with no
 // flinch - the "animations not playing" symptom. research/xim leaves the `damh`-vs-`damg`
-// selector (var 0x3B) unhandled (EffectRoutineInstance.kt:689-701 warns and defaults to 0),
+// selector (var 0x3B) unhandled (EffectRoutineInstance.kt resolveControlFlowVariable warns and defaults to 0),
 // which is the `damg` branch - so every non-crit Hit routes to `damg`. A crit (hitDistortion
 // Heavy) routes to `ldam` when the lookup resolves it, else back to `damg`; lookup still
 // resolves victim-own-first, then global.
@@ -1482,11 +1586,12 @@ pub fn hit_reaction_routine(
     let out = match resolution {
         // F54 - the hitDistortion level splits the Hit case. Heavy (3) is the crit and plays
         // `ldam` when the lookup resolves it, else falls back to the normal `damg` reaction
-        // (same pattern as Block -> shld/gur1). The crit flag is LSB's entities/battle_entity.cpp
-        // ~3736: on attack.IsCritical() the server sets actionResult.info |= CriticalHit AND
-        // recordDamage(isCritical=true), which writes hitDistortion = Heavy(3); both come from
-        // the same bool, so hit_distortion == 3 IS the crit. It rides the VICTIM's result block;
-        // wire order per packets/s2c/0x028_battle2.cpp ~70-80: resolution(3) kind(2)
+        // (same pattern as Block -> shld/gur1). The crit flag is LSB's CBattleEntity::OnAttack
+        // (vendor/server/src/map/entities/battleentity.cpp): on attack.IsCritical() the server sets
+        // actionResult.info |= CriticalHit AND recordDamage(isCritical=true), which writes
+        // hitDistortion = Heavy(3); both come from the same bool, so hit_distortion == 3 IS the crit.
+        // It rides the VICTIM's result block; wire order per GP_SERV_COMMAND_BATTLE2::pack
+        // (vendor/server/src/map/packets/s2c/0x028_battle2.cpp): resolution(3) kind(2)
         // animation(12) info(5) hitDistortion(2) knockback(3) param(17) messageID(10)
         // modifier(31). None/Light/Medium all play `damg` per retail's dam0 branch table - never
         // sdam, which flinches nothing on its own.
@@ -1509,11 +1614,12 @@ pub fn hit_reaction_routine(
     routines
 }
 
-// research/xim Actor.kt:864-903 — the swing routine is chosen by which limb struck.
+// research/xim Actor.kt displayAutoAttack — the swing routine is chosen by which limb struck.
 // Direction-of-movement variants (atf0/atb0/atl0/atr0) are not selected here; that needs the
 // attacker's locomotion state at swing time. No attacker-side crit swing exists on purpose: LSB
-// flags the crit only in the VICTIM's result block (battle_entity.cpp ~3736 sets info CriticalHit
-// + hitDistortion Heavy from one bool) and this `animation` field is limb-selected, never
+// flags the crit only in the VICTIM's result block (CBattleEntity::OnAttack sets info CriticalHit
+// + hitDistortion Heavy from one bool; vendor/server/src/map/entities/battleentity.cpp) and this
+// `animation` field is limb-selected, never
 // crit-selected - do not re-add a crit variant here.
 pub fn swing_routine(animation: ffxi_proto::melee::AttackAnimation) -> Option<[u8; 4]> {
     use ffxi_proto::melee::AttackAnimation;
@@ -1526,8 +1632,8 @@ pub fn swing_routine(animation: ffxi_proto::melee::AttackAnimation) -> Option<[u
     })
 }
 
-// vendor/server/src/map/enums/four_cc.h:30 — BasicAttack's FourCC is "atk0", the self-targeted
-// voice routine research/xim Actor.kt:866 enqueues alongside the swing.
+// vendor/server/src/map/enums/four_cc.h — BasicAttack's FourCC is "atk0", the self-targeted
+// voice routine research/xim Actor.kt displayAutoAttack enqueues alongside the swing.
 const MELEE_VOICE_ROUTINE: [u8; 4] = *b"atk0";
 
 // KULUU_COMBAT_LOG=1 - live trace for kuluu-df9t patch-7: which BATTLE2 results reach the
@@ -1560,7 +1666,7 @@ fn fourcc(name: [u8; 4]) -> String {
 // A basic attack's routines live in the attacker's own battle/equipment dirs and the global effect
 // dir, keyed by the swing animation rather than by a DAT file id, which is why the category is
 // dispatched here rather than through `action_dat_file_id`. BATTLE2 cmd_arg does carry a FourCC —
-// vendor/server/src/map/action/action.cpp:111 normalize() sets actionid = FourCC::BasicAttack —
+// vendor/server/src/map/action/action.cpp action_t::normalize normalize() sets actionid = FourCC::BasicAttack —
 // but it is the same constant for every swing, so it selects nothing.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn dispatch_melee_action_started(
@@ -1752,7 +1858,7 @@ fn latch_dead_from_action(
     }
 }
 
-// research/xim EffectRoutineInstance.kt:956-959 — the 0x2B stage is where retail hands control
+// research/xim EffectRoutineInstance.kt handleDamageCallbackRoutine — the 0x2B stage is where retail hands control
 // to the damage callback. That is the frame the victim's reaction routine starts, so the flinch
 // and impact SE line up with the swing instead of with packet arrival.
 #[cfg(not(target_arch = "wasm32"))]
@@ -1857,10 +1963,10 @@ pub fn dispatch_damage_callback_stages(
     flush_pending_routine_inserts(&mut pending_inserts, &mut q_active, &mut commands);
 }
 
-// research/xim EffectRoutineParser.kt:136-140 + EffectRoutineInstance.kt:387-394 — a 0x09 link
+// research/xim EffectRoutineParser.kt parseSection2 + EffectRoutineInstance.kt createChild newSequences — a 0x09 link
 // runs its child ON the primary target, under a context flipped by `cloneWithOverrideTarget`:
 // the parent becomes the child's target. Resource lookup follows that flip
-// (EffectRoutineInstance.kt:418-431,592-604 searchAssociatedDir), which is the only reason the
+// (EffectRoutineInstance.kt appendChildSequences,592-604 searchAssociatedDir), which is the only reason the
 // melee hit chain resolves at all — the victim's `damg` links `chit` back onto the ATTACKER, so
 // `ef h` is found in the attacker's equipped-weapon DAT and its `hit1` sparks, being
 // AttachType::TargetActor, land on the victim again.
@@ -2032,7 +2138,7 @@ fn em_routine(sub: u16) -> [u8; 4] {
 /// routine). Derived empirically from the retail HumeM emote DATs (dump:
 /// examples/zz-emote-probe.rs; each routine's Motion clip mnemonic names the
 /// emote — bow/poi/sl1-3/kne/lau/wee, den/nod/wav/wel/gla/che/clp, …) and
-/// pinned to XIM's only known points (Actor.kt:1080-1082 HELM: Logging=(5,0),
+/// pinned to XIM's only known points (Actor.kt onGatheringAttempt HELM: Logging=(5,0),
 /// Mining=(6,0), Harvesting=(7,0) — confirmed by the files' Japanese tool
 /// particles: ono0=axe, turu=pickaxe, kama=sickle). Notable non-uniformities
 /// the old id/8 hypothesis missed: Point/Bow are swapped in file 0, Salute
@@ -2078,7 +2184,7 @@ pub fn dispatch_entity_emoted(
     q_look: Query<&crate::components::LookComp>,
     q_children: Query<&Children>,
     mut q_actors: Query<&mut crate::ffxi_actor_render::FfxiRenderActor>,
-    mut dll_cache: Local<MainDllCache>,
+    dll: Option<Res<ActionMainDll>>,
     mut cache: ResMut<ActionDatCache>,
     mut q_scheds: Query<&mut ActiveSchedulers>,
     mut commands: Commands,
@@ -2120,15 +2226,9 @@ pub fn dispatch_entity_emoted(
         let race = q_look.get(actor_entity).ok().and_then(|l| look_race(&l.0));
 
         if let Some(race) = race {
-            if !dll_cache.loaded {
-                dll_cache.loaded = true;
-                if let Ok(root) = ffxi_dat::DatRoot::from_env_or_default() {
-                    dll_cache.dll = ffxi_dat::main_dll::MainDll::load(root.root()).ok();
-                }
-            }
-            let base = dll_cache
-                .dll
+            let base = dll
                 .as_ref()
+                .and_then(|d| d.0.as_deref())
                 .and_then(|d| d.base_emote_index(race));
             if let Some(base) = base {
                 let file_id = base as u32 + file_offset;
@@ -2167,7 +2267,7 @@ pub fn dispatch_entity_emoted(
 
 // NPC casters (lua sendEmote) and PCs whose emote DAT lacks the routine:
 // play the actor's own em0N clip when it has one; silent no-op
-// otherwise (XIM findLocalAnimationRoutine, Actor.kt:695-697).
+// otherwise (XIM findLocalAnimationRoutine, Actor.kt).
 #[cfg(not(target_arch = "wasm32"))]
 fn play_local_emote_clip(
     routine: &[u8; 4],
@@ -2211,11 +2311,22 @@ impl Plugin for SchedulerRuntimePlugin {
         {
             app.init_resource::<crate::particle_sim::ParticleSimulator>();
             app.init_resource::<ActionDatCache>();
+            app.init_resource::<ActionDatRoot>();
             app.add_systems(Startup, load_global_effect_dir);
+            // Ordered ahead of the poll so a root change landing on the same frame as an
+            // in-flight dll cannot have the poll's `remove_resource::<ActionMainDllTask>` applied
+            // over the freshly spawned one, which has no retry path.
+            app.add_systems(
+                Update,
+                adopt_action_dat_root
+                    .run_if(resource_exists_and_changed::<ActionDatRoot>)
+                    .before(poll_action_main_dll),
+            );
             app.add_systems(
                 Update,
                 (
                     poll_global_effect_dir,
+                    poll_action_main_dll,
                     dispatch_action_started,
                     dispatch_cast_routine_started,
                     dispatch_melee_action_started,
@@ -2260,7 +2371,7 @@ mod tests {
     use ffxi_dat::scheduler::{SchedulerStage, StageKind};
 
     // Foot Kick (mob skill 259) arrives as category 11 with animation 3; the effect DAT's file id
-    // is the range-dependent base plus that index (research/xim MobAbilityTable.kt:62-72).
+    // is the range-dependent base plus that index (research/xim MobAbilityTable.kt getFileTableOffset).
     #[test]
     fn mob_skill_categories_key_the_effect_dat_by_animation() {
         assert_eq!(
@@ -2659,7 +2770,7 @@ mod tests {
     }
 
     // The lock test is per-routine and interval-based: a routine with no 0x07/0x59 stage never
-    // locks (F55), and an overlapping second routine keeps the entity locked past either one's
+    // locks (finding F55), and an overlapping second routine keeps the entity locked past either one's
     // own interval end - the refcount>0 behaviour retail measured on ActionTimer1 (F49/F57).
     #[test]
     fn animation_lock_is_refcounted_across_concurrent_routines() {
@@ -2870,8 +2981,8 @@ mod tests {
         assert_eq!(a.current_frame(), 60);
     }
 
-    // research/xim util/Fps.kt:9 `internalFps = 60.0` is the clock effect routines and particle
-    // generators are authored against; poc/ActorManager.kt:59-62 halves it — and only it — for
+    // research/xim util/Fps.kt `internalFps = 60.0` is the clock effect routines and particle
+    // generators are authored against; poc/ActorManager.kt updateAll halves it — and only it — for
     // skeletal animation. Neither constant may be "fixed" without the other.
     #[test]
     fn routine_clock_is_double_the_skeleton_clock() {
@@ -2906,7 +3017,7 @@ mod tests {
 
     // Retail-byte fixture (skips without an install): Cure's effect DAT (file 2801 = 0xAF1) runs
     // its target routine `tgt0` out to frame 239 — 3.98 s at the authored 60 fps. That frame is
-    // the routine's own `totalDelay` header field (research/xim EffectRoutineParser.kt:46), the
+    // the routine's own `totalDelay` header field (research/xim EffectRoutineParser.kt read), the
     // DAT's independent statement of its length, which the summed stage delays must reproduce.
     #[test]
     fn real_dat_cure_target_routine_completes_in_retail_wall_time() {
@@ -3011,7 +3122,7 @@ mod tests {
 
     /// Pins the empirically-derived emote table against the DAT dump
     /// (examples/zz-emote-probe.rs clip mnemonics) and the XIM HELM points
-    /// (Actor.kt:1080-1082). Point/Bow swap and Salute nation variants are
+    /// (Actor.kt onGatheringAttempt). Point/Bow swap and Salute nation variants are
     /// the file-0 irregularities the old id/8 hypothesis got wrong.
     #[test]
     fn emote_table_matches_dat_clip_mnemonics() {
@@ -3153,7 +3264,7 @@ mod tests {
     // Retail-DAT coupling guard (skips without an install): Poison's 0x21 'fir' sheet names its
     // backing Img with the qualified pair ("venom1", "fir"). Looking the Img up by the sheet's
     // namespace token alone misses, which is what rendered the venom cloud as an untextured
-    // quad (kuluu-7jpq). research/xim DatResource.kt:483-493 matches qualified, then local.
+    // quad (kuluu-7jpq). research/xim DatResource.kt getTextureResourceByNameAs matches qualified, then local.
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn real_dat_poison_sheet_name_indexes_its_backing_img() {
@@ -3200,7 +3311,7 @@ mod tests {
     }
 
     // Retail-DAT guard (skips without an install): the cast aura `ner1` and its `stbk` shutdown
-    // live in ROM/0/0.DAT, XIM's GlobalDirectory (research/xim poc/MainTool.kt:250) — not in the
+    // live in ROM/0/0.DAT, XIM's GlobalDirectory (research/xim poc/MainTool.kt resourceDependenciesLoaded systemEffects) — not in the
     // caster's own DAT — so a DAT-root or resolver change cannot silently un-resolve them.
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
@@ -3332,7 +3443,7 @@ mod tests {
     // The whole point of the melee path: `ati0` (weapon-motion DAT) links `skaz` with 0x57, and
     // `skaz` resolves in the EQUIPPED WEAPON's DAT — three tiers away from the routine that
     // named it. Flattening must carry the link across and keep the frame the whoosh is authored
-    // at (research/xim EffectRoutineParser.kt:371-375).
+    // at (research/xim EffectRoutineParser.kt parseSection2).
     #[test]
     fn melee_swing_flattens_to_the_weapon_swing_sound() {
         const SKAZ_FRAME: u32 = 34;
@@ -3392,7 +3503,7 @@ mod tests {
         );
     }
 
-    // research/xim EffectRoutineParser.kt:275-285 — one alternative per activation. Four
+    // research/xim EffectRoutineParser.kt parseSection2 — one alternative per activation. Four
     // simultaneous `vatk` grunts is the regression this guards.
     #[test]
     fn random_block_contributes_exactly_one_member() {
@@ -3419,7 +3530,7 @@ mod tests {
     }
 
     // `dada` tail-calls `dam0`, ten mutually exclusive additional-effect branches keyed on a
-    // condition we do not evaluate (research/xim EffectRoutineParser.kt:408-427). Inlining it
+    // condition we do not evaluate (research/xim EffectRoutineParser.kt parseSection2). Inlining it
     // would fire every branch at once.
     #[test]
     fn control_flow_switch_is_not_inlined() {
@@ -3544,7 +3655,7 @@ mod tests {
     }
 
     // A 0x09 link stays a stage rather than being inlined, so the runtime can start it on the
-    // VICTIM and resolve the victim's own `sdam`/`vdam` (EffectRoutineParser.kt:136-140).
+    // VICTIM and resolve the victim's own `sdam`/`vdam` (EffectRoutineParser.kt parseSection2).
     #[test]
     fn target_link_is_not_flattened_into_the_caster_timeline() {
         let dat = vec![
@@ -3593,7 +3704,7 @@ mod tests {
         );
     }
 
-    // research/xim EffectRoutineInstance.kt:387-394 — createChild for a 0x09 link builds
+    // research/xim EffectRoutineInstance.kt createChild newSequences — createChild for a 0x09 link builds
     // `ActorAssociation(target, context.cloneWithOverrideTarget(actor.id))`: the child runs on the
     // target and its own target is the parent. Without the flip the melee chain dead-ends on the
     // victim and the weapon's `ef h` sparks are never reached.
@@ -3643,7 +3754,7 @@ mod tests {
     // lives in the victim's skeleton but is reached through the 0x09 flip back onto the ATTACKER,
     // which is why it resolves `ef h` in the equipped-weapon DAT; `ef h` links global `hit1`,
     // whose generators are AttachType::TargetActor and therefore land on the victim again
-    // (research/xim ParticleGeneratorAttachment.kt:64-111). Every tier must be present for a
+    // (research/xim ParticleGeneratorAttachment.kt updateAssociatedPosition). Every tier must be present for a
     // single spark to appear, so this pins all three at once.
     #[test]
     fn melee_hit_chain_flattens_to_target_attached_sparks() {
@@ -3846,8 +3957,8 @@ mod tests {
         );
     }
 
-    // vendor/server/src/map/attack.h:52-59 AttackAnimation -> the limb routine
-    // research/xim Actor.kt:864-903 enqueues.
+    // vendor/server/src/map/attack.h AttackAnimation -> the limb routine
+    // research/xim Actor.kt displayAutoAttack enqueues.
     #[test]
     fn swing_routines_follow_lsb_attack_animation_order() {
         use ffxi_proto::melee::AttackAnimation;
@@ -3970,5 +4081,244 @@ mod tests {
             "the re-insert refreshed 7's recency"
         );
         assert!(lru.get_and_promote(999).is_some());
+    }
+
+    // A launcher DAT-path change re-inserts every `*DatRoot`; the parses already in hand belong
+    // to the previous install, so serving them after the swap renders the old game's effects.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn adopting_a_root_drops_the_previous_installs_parses() {
+        const FILE_ID: u32 = 4242;
+        let mut cache = ActionDatCache::default();
+        cache.lru.insert(FILE_ID, empty_parsed());
+        assert!(cache.lru.get_and_promote(FILE_ID).is_some());
+
+        cache.adopt_root(None);
+        assert!(
+            cache.lru.get_and_promote(FILE_ID).is_none(),
+            "a parse from the previous root must not survive the swap"
+        );
+    }
+
+    // `adopt_action_dat_root` and `poll_action_main_dll` only reach a real client through
+    // `SchedulerRuntimePlugin`, and the tests around them register their own copies -- so without
+    // this pin the plugin's registrations can be deleted with every test still green while
+    // `ActionMainDll` never exists: every weaponskill file-id lookup returns None and every emote
+    // degrades to `play_local_emote_clip`. The kuluu side pins the other half of the wiring
+    // (`insert_dat_roots_hands_the_scheduler_runtime_the_shared_root`).
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn the_plugin_loads_the_main_dll_from_the_wired_root() {
+        bevy::tasks::AsyncComputeTaskPool::get_or_init(Default::default);
+        let mut app = App::new();
+        // The two wiring systems need nothing but the resources the plugin itself installs; the
+        // dispatchers sharing their schedule need a live session's, so their missing-parameter
+        // errors are noise here.
+        app.set_error_handler(bevy::ecs::error::ignore);
+        app.add_plugins(SchedulerRuntimePlugin);
+
+        for _ in 0..MAIN_DLL_TASK_POLLS {
+            app.update();
+            if app.world().get_resource::<ActionMainDll>().is_some() {
+                return;
+            }
+            std::thread::sleep(MAIN_DLL_POLL_INTERVAL);
+        }
+        panic!("SchedulerRuntimePlugin must load ActionMainDll from the wired ActionDatRoot");
+    }
+
+    // The dispatchers must see the root the host wired, not one they open themselves: a cache
+    // keyed to a different install is exactly the launcher-reload bug above.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn adopt_action_dat_root_hands_the_wired_root_to_the_cache() {
+        let Some(root) = ffxi_dat::archive::open_test_install() else {
+            return;
+        };
+        bevy::tasks::AsyncComputeTaskPool::get_or_init(Default::default);
+        let root = Arc::new(root);
+        let mut app = App::new();
+        app.init_resource::<ActionDatCache>()
+            .insert_resource(ActionDatRoot(Some(root.clone())))
+            .add_systems(
+                Update,
+                adopt_action_dat_root.run_if(resource_exists_and_changed::<ActionDatRoot>),
+            );
+        app.update();
+
+        let adopted = app
+            .world()
+            .resource::<ActionDatCache>()
+            .root
+            .clone()
+            .expect("the wired root reaches the cache");
+        assert!(
+            Arc::ptr_eq(&adopted, &root),
+            "the cache must load through the wired root, not its own"
+        );
+    }
+
+    // Bounded so a never-landing task fails the test instead of hanging it; the load is one
+    // ~2.8 MB read plus a handful of marker scans, so this is orders of magnitude of slack.
+    #[cfg(not(target_arch = "wasm32"))]
+    const MAIN_DLL_TASK_POLLS: usize = 600;
+    // The playable look race the dispatchers key on most; HumeM=1 per
+    // ffxi-dat/src/main_dll.rs::base_emote_index.
+    #[cfg(not(target_arch = "wasm32"))]
+    const HUME_MALE_LOOK_RACE: u8 = 1;
+    #[cfg(not(target_arch = "wasm32"))]
+    const MAIN_DLL_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(10);
+
+    // The tables `dispatch_action_started` (weaponskill file ids) and `dispatch_entity_emoted`
+    // (emote file ids) read must survive the move off the render thread: what lands in
+    // `ActionMainDll` has to answer identically to a direct `MainDll::load` of the same root.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn real_dat_action_main_dll_lands_off_thread_with_the_same_tables() {
+        let Some(root) = ffxi_dat::archive::open_test_install() else {
+            return;
+        };
+        let direct = ffxi_dat::main_dll::MainDll::load(root.root()).expect("FFXiMain.dll loads");
+        bevy::tasks::AsyncComputeTaskPool::get_or_init(Default::default);
+
+        let mut app = App::new();
+        app.init_resource::<ActionDatCache>()
+            .insert_resource(ActionDatRoot(Some(Arc::new(root))))
+            .add_systems(
+                Update,
+                (
+                    adopt_action_dat_root.run_if(resource_exists_and_changed::<ActionDatRoot>),
+                    poll_action_main_dll,
+                )
+                    .chain(),
+            );
+
+        let mut landed = None;
+        for _ in 0..MAIN_DLL_TASK_POLLS {
+            app.update();
+            if let Some(dll) = app.world().get_resource::<ActionMainDll>() {
+                landed = dll.0.clone();
+                break;
+            }
+            std::thread::sleep(MAIN_DLL_POLL_INTERVAL);
+        }
+        let landed = landed.expect("FFXiMain.dll lands as ActionMainDll");
+
+        // Swept over the whole index space rather than the playable races: the same index space
+        // is reached by non-playable look bytes too (ffxi-dat `MainDll::base_race_config_index`,
+        // 32..=36 ridden chocobo), and an out-of-range index has to read `None` on both sides
+        // just the same.
+        for race in u8::MIN..=u8::MAX {
+            assert_eq!(
+                landed.base_weapon_skill_index(race),
+                direct.base_weapon_skill_index(race),
+                "weaponskill base for race {race}"
+            );
+            assert_eq!(
+                landed.base_emote_index(race),
+                direct.base_emote_index(race),
+                "emote base for race {race}"
+            );
+        }
+        assert!(
+            landed
+                .base_weapon_skill_index(HUME_MALE_LOOK_RACE)
+                .is_some(),
+            "the race bases the dispatchers key on are actually populated"
+        );
+    }
+
+    // research/xim ParticleLinkedDataProviders.kt getParticleMesh — a generator's linked mesh resolves
+    // in the directory the generator was authored in before any wider scope. Names taken from
+    // ROM/338/100.DAT, which declares `grw1` in both `geo0` and `run0` (particle_sim.rs
+    // `directory_scoped_mesh` pins the retail file itself).
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn linked_mesh_lookups_prefer_the_generator_directory() {
+        const MESH: [u8; 4] = *b"grw1";
+        const DIR_A: [u8; 4] = *b"geo0";
+        const DIR_B: [u8; 4] = *b"run0";
+        const OTHER: [u8; 4] = *b"zzzz";
+
+        fn d3m(texture: &[u8; 16]) -> ffxi_dat::d3m::D3m {
+            ffxi_dat::d3m::D3m {
+                name: MESH,
+                num_triangles: 0,
+                texture_name: *texture,
+                vertices: Vec::new(),
+            }
+        }
+
+        let a = d3m(b"eff1    grw1    ");
+        let b = d3m(b"eff     grh1    ");
+        let mut assets = ActionAssets::default();
+        assets.d3ms_by_dir.insert((DIR_A, MESH), a.clone());
+        assets.d3ms_by_dir.insert((DIR_B, MESH), b.clone());
+        assets.d3ms.insert(MESH, b.clone());
+
+        assert_eq!(
+            assets.d3m(DIR_A, &MESH).map(|d| d.texture_name),
+            Some(a.texture_name)
+        );
+        assert_eq!(
+            assets.d3m(DIR_B, &MESH).map(|d| d.texture_name),
+            Some(b.texture_name)
+        );
+        assert_eq!(
+            assets.d3m(OTHER, &MESH).map(|d| d.texture_name),
+            Some(b.texture_name),
+            "an unscoped caller still falls back to the flat map"
+        );
+        assert!(assets.d3m(DIR_A, b"none").is_none());
+    }
+
+    // Same tier order for the 0x21 sprite sheets, whose texture tokens are the whole payload a
+    // wrong-directory match gets wrong. Names from ROM/1/33.DAT's `ligh` and `fire` copies of
+    // the `ligh` sheet.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn sprite_sheet_lookups_prefer_the_generator_directory() {
+        const SHEET: [u8; 4] = *b"ligh";
+        const DIR_A: [u8; 4] = *b"ligh";
+        const DIR_B: [u8; 4] = *b"fire";
+
+        fn sheet(category: &str, id: &str) -> ffxi_dat::sprite_sheet::ParticleSpriteSheet {
+            ffxi_dat::sprite_sheet::ParticleSpriteSheet {
+                frames: Vec::new(),
+                category: category.to_string(),
+                id: id.to_string(),
+            }
+        }
+
+        let mut assets = ActionAssets::default();
+        assets
+            .sprite_sheets_by_dir
+            .insert((DIR_A, SHEET), sheet("effect", "light"));
+        assets
+            .sprite_sheets_by_dir
+            .insert((DIR_B, SHEET), sheet("fireefc", "light2"));
+        assets
+            .sprite_sheets
+            .insert(SHEET, sheet("fireefc", "light2"));
+
+        assert_eq!(
+            assets
+                .sprite_sheet(DIR_A, &SHEET)
+                .map(|s| s.category.as_str()),
+            Some("effect")
+        );
+        assert_eq!(
+            assets
+                .sprite_sheet(DIR_B, &SHEET)
+                .map(|s| s.category.as_str()),
+            Some("fireefc")
+        );
+        assert_eq!(
+            assets
+                .sprite_sheet(ffxi_dat::scheduler::NO_LOCAL_DIR, &SHEET)
+                .map(|s| s.category.as_str()),
+            Some("fireefc"),
+            "an unscoped caller still falls back to the flat map"
+        );
     }
 }

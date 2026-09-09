@@ -12,7 +12,7 @@ use crate::sun_moon::VanaSky;
 // headroom; extra slots stay inert (count gates them).
 pub const MAX_FLARE_ELEMENTS: usize = 32;
 
-// research/xim ZoneDrawer.kt:231 `scale = Vector3f(width/32, height/32, 1)` — a flare
+// research/xim ZoneDrawer.kt `scale = Vector3f(width/32, height/32, 1)` — a flare
 // mesh's local units are screen fractions of 1/32, so a quad spanning 32 units covers the
 // whole screen. Dividing the parsed quad half-extent by this yields the element's half-size
 // in screen-UV directly, which is what the shader consumes.
@@ -25,7 +25,7 @@ pub struct LensFlareUniform {
     pub sun_dir: Vec4,
 
     /// The stage-1 TEXTUREFACTOR F. In retail this is the lf0x particle's own colour
-    /// (research/xim ZoneDrawer.kt:238 `effectColor = effect.textureFactor`), which the
+    /// (research/xim ZoneDrawer.kt drawLensFlare `effectColor = effect.textureFactor`), which the
     /// generator's time-of-day curves drive; until those generators run (kuluu-b98u) the
     /// neutral F is the honest stand-in, leaving the sheet's own colours in charge.
     pub texture_factor: Vec4,

@@ -20,6 +20,7 @@ const OFF_SPELL_ID: usize = 0x00;
 const OFF_MAGIC_TYPE: usize = 0x02;
 const OFF_CAST_TIME: usize = 0x0C;
 const OFF_RECAST: usize = 0x0D;
+const ROTATE_KEY_BYTES: [usize; 3] = [0x02, 0x0B, 0x0C];
 
 // research/xim SpellListSection.kt MagicType — the client's own cast-animation class,
 // distinct from the LSB magic *skill*. Enfeebling is split across White/Black here.
@@ -88,7 +89,7 @@ fn decode_block(block: &mut [u8]) {
         _ => 0,
     };
     for (i, b) in block.iter_mut().enumerate() {
-        if i == 0x02 || i == 0x0B || i == 0x0C {
+        if ROTATE_KEY_BYTES.contains(&i) {
             continue;
         }
         *b = b.rotate_right(rotate);
@@ -192,7 +193,7 @@ mod tests {
         };
         let mut enc = plain.clone();
         for (i, b) in enc.iter_mut().enumerate() {
-            if i == 0x02 || i == 0x0B || i == 0x0C {
+            if ROTATE_KEY_BYTES.contains(&i) {
                 continue;
             }
             *b = b.rotate_left(rotate);

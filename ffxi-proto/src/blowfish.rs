@@ -59,12 +59,15 @@ impl State {
     }
 }
 
+// vendor/server/src/common/blowfish.cpp tt
+const SBOX_INDEX_MASK: usize = 0xff;
+
 #[inline]
 fn tt(working: u32, s: &[u32; 1024]) -> u32 {
-    let a = (s[256 + ((working >> 8) as usize & 0xff)] & 1) ^ 32;
+    let a = (s[256 + ((working >> 8) as usize & SBOX_INDEX_MASK)] & 1) ^ 32;
     let b = (s[768 + ((working >> 24) as usize)] & 1) ^ 32;
-    let c = s[512 + ((working >> 16) as usize & 0xff)];
-    let d = s[(working as usize) & 0xff];
+    let c = s[512 + ((working >> 16) as usize & SBOX_INDEX_MASK)];
+    let d = s[(working as usize) & SBOX_INDEX_MASK];
     a.wrapping_add(b).wrapping_add(c).wrapping_add(d)
 }
 

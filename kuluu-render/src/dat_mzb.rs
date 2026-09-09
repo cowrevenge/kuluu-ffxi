@@ -24,6 +24,7 @@ pub const DEFAULT_MOB_DRAW_DISTANCE: f32 = 50.0;
 
 pub const MMB_LOAD_DISTANCE_MARGIN: f32 = 1.25;
 
+const MZB_TERRAIN_PALETTE_INDEX_MASK: u8 = 0x0F;
 const MZB_TERRAIN_PALETTE: [[f32; 3]; 16] = [
     [0.85, 0.55, 0.40],
     [0.75, 0.65, 0.45],
@@ -135,7 +136,7 @@ impl Default for DrawDistance {
 #[derive(Component)]
 pub struct MzbCollisionMesh;
 
-/// research/XIClient/src/XIClient/include/Rendering/ZoneRenderer.h:45
+/// research/XIClient/src/XIClient/include/Rendering/ZoneRenderer.h ZoneRenderer MAX_ZONE_LOAD_COUNT
 /// `MAX_ZONE_LOAD_COUNT = 2` — retail keeps the main zone block and the one
 /// sub-area interior the player stands in loaded at the same time.
 pub const ZONE_BLOCK_SLOTS: usize = 2;
@@ -1246,7 +1247,7 @@ const AREA_FOOT_SLACK: f32 = MAX_GROUND_STEP_UP;
 /// One chunk's authored light binding with the footprint it lights.
 ///
 /// Retail resolves `LightReferences[4]` once at load and holds the four D3D
-/// slots for the whole chunk (ZoneRenderer.cpp:284-313), so the set is a
+/// slots for the whole chunk (ZoneRenderer.cpp ZoneRenderer::UpdateBlockLightSettings), so the set is a
 /// property of the geometry, never of the camera.
 #[derive(Debug, Clone, Copy)]
 pub struct ZoneChunkLightBox {
@@ -1280,9 +1281,9 @@ pub struct ZoneMmbBuild {
 ///
 /// Retail asks the collision map for the FourCC of the block under the actor and
 /// draws that actor's fog and ambient from the matching `XiArea`
-/// (CollidableActor.cpp:218-228, SkeletalMeshActor.cpp:2743-2749). Our MZB
+/// (CollidableActor.cpp CollidableActor::UpdateGroundNormal, SkeletalMeshActor.cpp SkeletalMeshActor::AdjustLighting). Our MZB
 /// collision section carries no area id — only the render placements do
-/// (ZoneBlockFormat.h:99) — so the block is found by its own bounds instead.
+/// (ZoneBlockFormat.h PositionedMeshBlockData) — so the block is found by its own bounds instead.
 /// The areas that differ from the zone environment are building interiors and
 /// the blocks that floor them, so [`ZoneAreaBox::holds`] answers the same
 /// question the ground query does.
@@ -1340,7 +1341,7 @@ impl ZoneAreaMap {
 /// Which lights each point of the zone is authored to receive.
 ///
 /// Retail binds a chunk's `LightReferences[4]` into D3D light slots 2-5 once at
-/// load (research/XIClient/src/XIClient/source/Rendering/ZoneRenderer.cpp:284-313,
+/// load (research/XIClient/src/XIClient/source/Rendering/ZoneRenderer.cpp ZoneRenderer::UpdateBlockLightSettings,
 /// :339-353) and every model drawn over that chunk keeps those slots, so the
 /// point lights on an actor are the ones its chunk authors — not the ones that
 /// happen to be nearest. `boxes` is empty for a zone that ships no light-binding
@@ -1397,7 +1398,7 @@ impl ZoneChunkLightMap {
 }
 
 /// The per-frame mesh-variant pick retail makes in `RenderChunk2`
-/// (research/XIClient/src/XIClient/source/Rendering/ZoneRenderer.cpp:1085-1094).
+/// (research/XIClient/src/XIClient/source/Rendering/ZoneRenderer.cpp ZoneRenderer::RenderChunk2).
 /// One placement spawns one entity per *distinct* mesh in its
 /// [`mzb::MmbLodSet`]; `level_mask` says which distance bands that entity serves.
 #[derive(Component, Debug, Clone, Copy)]
@@ -1420,11 +1421,11 @@ impl ZoneMeshLod {
 ///
 /// Retail composes Identity -> scale -> RotateX -> RotateY -> RotateZ ->
 /// translate in D3D row-vector convention (research/XIClient/src/XIClient/
-/// source/Rendering/ZoneRenderer.cpp:430-443, with Matrix4.cpp:200-204
+/// source/Rendering/ZoneRenderer.cpp ZoneRenderer::OpenMzb, with Matrix4.cpp Matrix4::MultiplyRight
 /// `MultiplyRight` = this*r and :508-511 `out = v*M`), which transposes to
 /// column-vector T*Rz*Ry*Rx*S — glam's *extrinsic* XYZ. The intrinsic
 /// `EulerRot::XYZ` is Rx*Ry*Rz, the reverse. Self-proven by the
-/// order-reversed inverse chain at ZoneRenderer.cpp:459-466.
+/// order-reversed inverse chain at ZoneRenderer.cpp ZoneRenderer::OpenMzb.
 ///
 /// `UnderscoreAtStruct::InitMatrix` rebuilds an animated `_`/`@` block's matrix
 /// from its own copy of the same three vectors in the same order, so a door leaf
@@ -1582,7 +1583,7 @@ pub fn build_zone_mmb_spawns(
         // placement's own name advances that cursor, so the LOD sibling lookups
         // cannot shuffle which duplicate a later placement gets. Advance it even
         // for gated placements: retail resolves every chunk's mesh LOD before
-        // SetRenderTypes classifies it (ZoneRenderer.cpp:406 ResolveMeshReference ->
+        // SetRenderTypes classifies it (ZoneRenderer.cpp ZoneRenderer::OpenMzb ResolveMeshReference ->
         // InitializeMeshLOD :100-143, then :572).
         let mut base_pick: Option<Option<usize>> = None;
         let lod_set = mzb::resolve_mmb_lod_set_with(id, |name| {
@@ -1607,7 +1608,7 @@ pub fn build_zone_mmb_spawns(
         );
 
         // Built before the render gate: retail binds every positioned block to
-        // its area (ZoneRenderer.cpp:710-718) and the interiors that carry one
+        // its area (ZoneRenderer.cpp ZoneRenderer::AllocateAndLinkAreas) and the interiors that carry one
         // are `_`-keyed blocks the *second* draw pass owns, so a gate-filtered
         // list would drop exactly the areas we need.
         let area_id = p.effective_area_resource_id();
@@ -1712,7 +1713,7 @@ pub fn build_zone_mmb_spawns(
         if c.kind != ChunkKind::Generator as u8 {
             continue;
         }
-        // research/xim EnvironmentManager.updateWeatherEffects + Particle.kt:232-258:
+        // research/xim EnvironmentManager.updateWeatherEffects + Particle.kt updateAssociatedPosition:
         // the weat/<type>/ sky generators (cloud canopies cld1/cld2 and per-weather
         // variants like ~4cl) set the follow_camera config bit (0x0004) — they are
         // camera-relative sky registered through EffectManager, NOT world geometry.
@@ -2266,15 +2267,23 @@ pub fn poll_load_mzb_tasks(
     let init_vis = compute_init_visibility(draw.zone_geom_mode);
 
     let mut completed: Vec<(ZoneGeomKey, Vec<LoadMzbRequest>, LoadedZoneGeom)> = Vec::new();
-    in_flight.tasks.retain(
-        |key, (reqs, task)| match future::block_on(future::poll_once(task)) {
-            Some(geom) => {
-                completed.push((*key, std::mem::take(reqs), geom));
-                false
-            }
-            None => true,
-        },
-    );
+    // ZoneFloorGate::changed() reads this resource's change tick as "a floor
+    // landed", so an idle poll must not tick it.
+    in_flight
+        .bypass_change_detection()
+        .tasks
+        .retain(
+            |key, (reqs, task)| match future::block_on(future::poll_once(task)) {
+                Some(geom) => {
+                    completed.push((*key, std::mem::take(reqs), geom));
+                    false
+                }
+                None => true,
+            },
+        );
+    if !completed.is_empty() {
+        in_flight.set_changed();
+    }
     for (key, reqs, geom) in completed {
         let cache_eligible = !geom.submeshes.is_empty() && !geom.instances.is_empty();
         if cache_eligible {
@@ -2724,7 +2733,7 @@ fn spawn_mzb_overlay(
                 .zip(vert_mat.iter())
                 .map(|(n, &m)| {
                     let shade = 0.4 + 0.6 * (n[1] * 0.5 + 0.5);
-                    let pal = MZB_TERRAIN_PALETTE[(m & 0x0F) as usize];
+                    let pal = MZB_TERRAIN_PALETTE[(m & MZB_TERRAIN_PALETTE_INDEX_MASK) as usize];
                     [pal[0] * shade, pal[1] * shade, pal[2] * shade, 1.0]
                 })
                 .collect();
@@ -2953,7 +2962,7 @@ impl ZoneBlockRetire<'_, '_> {
 
 /// Retail's `SetRenderTypes` demotes the placements standing in for the active
 /// interior to a type the draw passes skip
-/// (research/XIClient/src/XIClient/source/Rendering/ZoneRenderer.cpp:619-641).
+/// (research/XIClient/src/XIClient/source/Rendering/ZoneRenderer.cpp ZoneRenderer::SetRenderTypes).
 /// Doing it as visibility rather than as a build-time gate is what lets the
 /// shell come back when the player walks out, without reloading the zone.
 /// Placements that also carry [`ZoneMeshLod`] are left to
@@ -3100,7 +3109,7 @@ pub fn main_zone_floor_ready(
     }
 }
 
-/// research/XIClient/src/XIClient/source/Rendering/ZoneRenderer.cpp:1071-1094 —
+/// research/XIClient/src/XIClient/source/Rendering/ZoneRenderer.cpp ZoneRenderer::RenderChunk2 —
 /// `RenderChunk2` measures from the camera eye to the placement translation, culls
 /// on the squared Lod far distance when the chunk is flagged `UsesLodRendering`,
 /// and then hands the device whichever of the h/m/l variants the squared distance
@@ -3808,7 +3817,7 @@ mod lod_tests {
         }
     }
 
-    // ZoneRenderer.cpp:1057-1064 — the far cull only applies to chunks that opted
+    // ZoneRenderer.cpp ZoneRenderer::RenderChunk2 — the far cull only applies to chunks that opted
     // into LOD rendering, and it outranks the band pick.
     #[test]
     fn the_far_cull_applies_only_to_lod_flagged_chunks() {
@@ -4454,6 +4463,44 @@ mod cull_tests {
             *app.world().get::<Visibility>(vis_out_of_range).unwrap(),
             Visibility::Hidden,
             "out-of-range visible entity is hidden by distance-culling (control)"
+        );
+    }
+}
+
+#[cfg(test)]
+mod poll_change_detection_tests {
+    use super::*;
+
+    #[derive(Resource, Default)]
+    struct InFlightChangedProbe(Vec<bool>);
+
+    fn probe(in_flight: Res<LoadMzbInFlight>, mut out: ResMut<InFlightChangedProbe>) {
+        out.0.push(in_flight.is_changed());
+    }
+
+    #[test]
+    fn idle_poll_does_not_tick_in_flight() {
+        let mut app = App::new();
+        app.init_resource::<Assets<Mesh>>()
+            .init_resource::<Assets<StandardMaterial>>()
+            .add_message::<crate::snapshot::ToastEvent>()
+            .add_message::<crate::dat_mmb::LoadMmbRequest>()
+            .init_resource::<DrawDistance>()
+            .init_resource::<MzbCollisionGeometry>()
+            .init_resource::<ZoneAreaMap>()
+            .init_resource::<ZoneChunkLightMap>()
+            .init_resource::<PendingWaterSpawns>()
+            .init_resource::<LoadMzbInFlight>()
+            .init_resource::<ZoneGeomCache>()
+            .init_resource::<crate::sub_area_activation::SubAreaActivation>()
+            .init_resource::<InFlightChangedProbe>()
+            .add_systems(Update, (poll_load_mzb_tasks, probe).chain());
+        app.update();
+        app.update();
+        assert_eq!(
+            app.world().resource::<InFlightChangedProbe>().0,
+            vec![true, false],
+            "first frame observes the insertion; an idle poll must not re-tick"
         );
     }
 }

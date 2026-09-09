@@ -1,5 +1,5 @@
 //! Enumerates the "font    usgaiji " UI-element group (retail weather icons,
-//! research/xim Compass.kt:95) across the four static menu UI DATs.
+//! research/xim Compass.kt drawWeather) across the four static menu UI DATs.
 
 use ffxi_dat::ui_element::{find_ui_element_group, ui_sprite};
 

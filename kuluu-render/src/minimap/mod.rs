@@ -4,6 +4,7 @@ use bevy::asset::RenderAssetUsages;
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 
+use crate::graphics_settings::{GraphicsSettings, MinimapRadar};
 use crate::hud::style::theme;
 
 pub mod input;
@@ -28,7 +29,7 @@ pub struct MinimapVisible(pub bool);
 
 impl Default for MinimapVisible {
     fn default() -> Self {
-        Self(true)
+        Self(MinimapRadar::default().panel_visible())
     }
 }
 
@@ -103,7 +104,7 @@ impl MinimapView {
     }
 }
 
-// research/xim/.../ui/MapDrawer.kt:59-60 indexes a 512-px map by floor(15f * pos / 512f),
+// research/xim/src/jsMain/kotlin/xim/poc/ui/MapDrawer.kt getPlayerMapCoordinates mapPosX indexes a 512-px map by floor(15f * pos / 512f),
 // i.e. a 16×16 grid whose last cell index is 15.
 const MAP_GRID_LAST_INDEX: f32 = 15.0;
 
@@ -258,6 +259,7 @@ impl Plugin for MinimapPlugin {
                     input::handle_minimap_drag_input,
                     input::recenter_minimap_view,
                     update_minimap_view,
+                    apply_minimap_radar_setting,
                     (
                         update_minimap_image_source,
                         update_minimap_image_placement,
@@ -362,8 +364,6 @@ pub fn spawn_minimap_as_child(p: &mut ChildSpawnerCommands, images: &mut Assets<
             },
         ))
         .with_children(overlay::spawn_minimap_placed_markers);
-
-        crate::hud::compass::spawn_compass_overlay_as_child(p);
 
         p.spawn((
             Button,
@@ -551,13 +551,40 @@ impl MapImagePlacement {
     }
 }
 
+/// The persisted [`MinimapRadar`] mode owns the widget's open/closed state and
+/// the marker categories, but only when it *changes* (startup included): a
+/// later `/minimap` toggle is the player's own override and must survive every
+/// unrelated graphics-settings write (kuluu-7cqw). `MarkerFilters` has no other
+/// writer yet, so this is its sole owner until a per-category UI exists.
+pub fn apply_minimap_radar_setting(
+    settings: Res<GraphicsSettings>,
+    mut applied: Local<Option<MinimapRadar>>,
+    mut visible: ResMut<MinimapVisible>,
+    mut filters: ResMut<overlay::MarkerFilters>,
+) {
+    let radar = settings.minimap_radar;
+    if *applied == Some(radar) {
+        return;
+    }
+    *applied = Some(radar);
+    if visible.0 != radar.panel_visible() {
+        visible.0 = radar.panel_visible();
+    }
+    let want = overlay::MarkerFilters::for_radar(radar);
+    if *filters != want {
+        *filters = want;
+    }
+}
+
 pub fn update_minimap_visibility(
     visible: Res<MinimapVisible>,
     mut q: Query<&mut Node, With<MinimapRoot>>,
 ) {
-    if !visible.is_changed() {
-        return;
-    }
+    // Re-evaluated every frame, NOT gated on is_changed(): MinimapRoot spawns
+    // Display::Flex on OnEnter(InGame), long after apply_minimap_radar_setting
+    // consumed the startup change edge, so a gated system would leave the
+    // Vanilla widget open until the next manual toggle (the kuluu-9og /
+    // kuluu-j22 consumed-edge class). The `!=` assign keeps this churn-free.
     let Ok(mut node) = q.single_mut() else {
         return;
     };
@@ -784,6 +811,89 @@ mod tests {
         assert_eq!(
             aabb.world_to_grid(Vec3::new(9999.0, 0.0, 9999.0)),
             ('P', 16)
+        );
+    }
+
+    /// Retail has no persistent radar, so the shipped default keeps the widget
+    /// closed and the entity categories off; flipping the setting opens both,
+    /// and an unrelated graphics edit must never undo a manual `/minimap`.
+    #[test]
+    fn radar_setting_owns_the_defaults_but_not_the_manual_toggle() {
+        let mut world = World::new();
+        world.init_resource::<GraphicsSettings>();
+        world.init_resource::<MinimapVisible>();
+        world.init_resource::<overlay::MarkerFilters>();
+        let apply = world.register_system(apply_minimap_radar_setting);
+
+        world.run_system(apply).unwrap();
+        assert!(!world.resource::<MinimapVisible>().0, "vanilla is closed");
+        assert_eq!(
+            *world.resource::<overlay::MarkerFilters>(),
+            overlay::MarkerFilters::for_radar(MinimapRadar::Vanilla)
+        );
+
+        world.resource_mut::<GraphicsSettings>().minimap_radar = MinimapRadar::Enhanced;
+        world.run_system(apply).unwrap();
+        assert!(world.resource::<MinimapVisible>().0, "enhanced opens it");
+        assert_eq!(
+            *world.resource::<overlay::MarkerFilters>(),
+            overlay::MarkerFilters::for_radar(MinimapRadar::Enhanced)
+        );
+
+        world.resource_mut::<MinimapVisible>().0 = false;
+        world
+            .resource_mut::<overlay::MarkerFilters>()
+            .set(overlay::MarkerCategory::Mob, false);
+        world.resource_mut::<GraphicsSettings>().fov_deg += 1.0;
+        world.run_system(apply).unwrap();
+        assert!(
+            !world.resource::<MinimapVisible>().0,
+            "an unrelated settings write must not reopen the widget"
+        );
+        assert!(
+            !world
+                .resource::<overlay::MarkerFilters>()
+                .is_visible(overlay::MarkerCategory::Mob),
+            "nor clobber the category bitset"
+        );
+
+        world.resource_mut::<GraphicsSettings>().minimap_radar = MinimapRadar::Vanilla;
+        world.run_system(apply).unwrap();
+        assert_eq!(
+            *world.resource::<overlay::MarkerFilters>(),
+            overlay::MarkerFilters::for_radar(MinimapRadar::Vanilla),
+            "switching back re-applies the mode"
+        );
+    }
+
+    /// The widget node spawns Display::Flex on zone-in, after the startup
+    /// MinimapVisible edge is gone; the vanilla default only sticks because
+    /// this system reads the resource unconditionally (kuluu-7cqw).
+    #[test]
+    fn minimap_root_closes_after_the_visibility_change_edge_is_consumed() {
+        let mut world = World::new();
+        world.insert_resource(MinimapVisible(false));
+        let system = world.register_system(update_minimap_visibility);
+
+        world.run_system(system).unwrap();
+        world.clear_trackers();
+
+        let root = world
+            .spawn((
+                MinimapRoot,
+                Node {
+                    display: Display::Flex,
+                    ..default()
+                },
+            ))
+            .id();
+        world.clear_trackers();
+        world.run_system(system).unwrap();
+
+        assert_eq!(
+            world.get::<Node>(root).unwrap().display,
+            Display::None,
+            "a node spawned after the change edge still honours the setting"
         );
     }
 }

@@ -18,13 +18,13 @@ const SKY_FAR_MARGIN: f32 = 100.0;
 /// front.
 ///
 /// Bevy ranks `Transparent3d` by the mesh AABB centre's view-space Z
-/// (bevy_core_pipeline core_3d/mod.rs:485-492), which increases toward the
+/// (bevy_core_pipeline-0.19.0 src/core_3d/mod.rs TransparentSortingInfo3d), which increases toward the
 /// camera. A layer that rides the camera has its centre *on* it, so that rank is
 /// 0 — the nearest value there is — and it draws over every other transparent
 /// object rather than behind them. Transparent draws leave the depth buffer
 /// alone, so against sky the canopy still passed the depth test and blended over
 /// the nameplates and particles already there (kuluu-w4jf). Each layer overrides
-/// the rank with a `Material::depth_bias` (bevy_pbr material.rs:173-179 — added
+/// the rank with a `Material::depth_bias` (bevy_pbr material.rs opaque_render_method — added
 /// to the sort distance and used for nothing else); the opaque dome bounds
 /// everything visible, so a depth at its radius cannot be beaten by world
 /// geometry.
@@ -40,12 +40,12 @@ const SKY_LAYER_SORT_STEP: f32 = 1.0;
 /// the DAT fog — so the frustum reaches past the dome even at the 200 the menu
 /// offers. Costs nothing: bevy's perspective is
 /// `Mat4::perspective_infinite_reverse_rh(fov, aspect, near)`
-/// (bevy_camera projection.rs:337-339), so `far` feeds frustum culling only and
+/// (bevy_camera-0.19.0 src/projection.rs `impl CameraProjection for PerspectiveProjection`), so `far` feeds frustum culling only and
 /// never the depth range.
 ///
 /// Sizing the sky off the frustum instead — retail's
 /// `(FarClipPlane - NearClipPlane) * 0.8` (research/XIClient World/Zone/
-/// XiZone.cpp:187-189) — is only right in a renderer that draws the sky in its
+/// XiZone.cpp DrawSky v17) — is only right in a renderer that draws the sky in its
 /// own pass. Sharing the world's depth buffer and fog the way we do, it
 /// collapsed the canopy onto the camera at 200 (`layer_scale`'s rim factor
 /// clamps at 1.0, so one cloud tile filled the sky) and left the discs behind
@@ -208,7 +208,7 @@ fn update_skybox(
 
     // Single shared per-frame sample (weather::sample_zone_weather) avoids the
     // skybox/lighting drift from independently re-sampling. research/xim
-    // EnvironmentManager.kt:399-451.
+    // EnvironmentManager.kt computeInterpolatedEnvResource.
     let gradient: Option<([Vec4; 8], [Vec4; 2])> = zone_weather.current.map(|rec| {
         let sky = crate::sun_moon::vana_sky_from_clock(&vana_clock);
         let v_minutes = (sky.hour * 60.0).rem_euclid(1440.0) as u32;

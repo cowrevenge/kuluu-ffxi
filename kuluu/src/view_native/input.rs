@@ -105,11 +105,30 @@ const PITCH_STEP_HELD: f32 = 0.015;
 const STRAFE_CANCEL_MS: u64 = 300;
 
 use kuluu_session::state::{
-    ground_correction_matches, move_speed_yps, GROUND_CORRECTION_XY_EPSILON_YALMS,
+    ground_correction_matches, move_speed_yps, GROUND_CORRECTION_XY_EPSILON_YALMS, SPEED_TO_YPS,
 };
 
-const BACKPEDAL_SCALE: f32 = 0.5;
-const STRAFE_SCALE: f32 = 0.75;
+// Retail's movement tick: StepControl turns the actor's yalms/second speed into
+// a per-tick step by dividing by 60, and the locked-on side-step lengths are
+// per-tick constants in that same unit
+// (research/XIClient/src/XIClient/source/World/Actor/ControllableActor.cpp,
+// ControllableActor::StepControl, ControllableActor::ChangeVectorLengthByDirection).
+// GameManager::SmoothedTimeDeltaScale = 60 / EffectiveFramerate puts every other
+// retail "tick" countdown in this same unit, so the walker's contact budget
+// (walker::consts) imports it rather than re-typing the rate.
+pub(crate) const RETAIL_MOVE_TICKS_PER_SEC: f32 = 60.0;
+const LOCKED_SIDE_STEP_DIVISOR: f32 = 16.0;
+const LOCKED_SIDE_STEP_DIVISOR_MOUNTED: f32 = 8.0;
+// The backward step is the walk speed over the tick rate, and mounted it is the
+// same walk speed over half of it - the only place the mount doubling comes
+// from, since BaseActor::GetWalkSpeed() is neither doubled nor clamped the way
+// StepControl's run speed is.
+const LOCKED_BACK_STEP_DIVISOR: f32 = 60.0;
+const LOCKED_BACK_STEP_DIVISOR_MOUNTED: f32 = 30.0;
+// BaseActor::GetWalkSpeed() is the raw packet speed over three
+// (research/XIClient/src/XIClient/source/World/Actor/BaseActor.cpp,
+// BaseActor::GetWalkSpeed).
+const WALK_SPEED_DIVISOR: f32 = 3.0;
 
 // A stick pulled this far toward the camera cancels autorun, like a tapped S;
 // gentler deflections only carve (retail autorun is steerable).
@@ -231,6 +250,105 @@ pub fn resolve_move_inputs(
         steer,
         rotate_dir,
     }
+}
+
+/// Which quadrant, relative to the direction the actor is aimed at, a movement
+/// vector falls in. Retail rotates the aim direction by +/-45 degrees and reads
+/// the two dot-product signs; its two side ids (2 and 4) take the same step
+/// length, so they share one variant here
+/// (research/XIClient/src/XIClient/source/World/Actor/ControllableActor.cpp,
+/// ControllableActor::GetMoveVecDirId).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MoveDirId {
+    Forward,
+    Side,
+    Backward,
+}
+
+const MOVE_DIR_MIN_MAGNITUDE: f32 = 0.001;
+
+/// `forward`/`strafe` are the movement vector in the actor's own frame, the
+/// frame retail buckets in: `forward` along the aim, `strafe` along body-right.
+/// There the two rotated dot products reduce exactly to `forward - strafe` and
+/// `forward + strafe` (up to the positive `cos 45` both share), which keeps an
+/// exact 45-degree diagonal on retail's `>= 0` side of the tie instead of
+/// letting it fall out of float noise in an aim that round-tripped through a u8
+/// heading. Retail's id 0 (a vector too short to classify) falls through to the
+/// forward case, so a standstill returns [`MoveDirId::Forward`].
+pub fn move_vec_dir_id(forward: f32, strafe: f32) -> MoveDirId {
+    if (forward * forward + strafe * strafe).sqrt() < MOVE_DIR_MIN_MAGNITUDE {
+        return MoveDirId::Forward;
+    }
+    match (forward - strafe >= 0.0, forward + strafe >= 0.0) {
+        (true, true) => MoveDirId::Forward,
+        (false, false) => MoveDirId::Backward,
+        _ => MoveDirId::Side,
+    }
+}
+
+/// Speed for this tick's step, in yalms/second. Retail scales movement by
+/// direction only while locked on ("parallel move"), so free-running is full
+/// speed in every direction; `locked_dir` is `None` when not locked on.
+/// `walk_scale` is the walk-lock analog multiplier, which retail normalizes
+/// away for the side and backward buckets: those take absolute lengths (a
+/// sixteenth of a yalm per tick, an eighth mounted, and the walk speed
+/// backwards, doubled mounted). The forward bucket keeps the mounted and
+/// clamped run speed the vector arrived with - the backward one is
+/// `GetWalkSpeed()`, a third of the raw packet speed with neither the mount
+/// doubling nor the 30 y/s cap
+/// (research/XIClient/src/XIClient/source/World/Actor/ControllableActor.cpp,
+/// ControllableActor::HandleThirdPersonControl gate on IsParallelMove,
+/// ControllableActor::ChangeVectorLengthByDirection;
+/// research/XIClient/src/XIClient/source/World/Actor/BaseActor.cpp,
+/// BaseActor::GetWalkSpeed).
+///
+/// Forward is an inference, not a literal read: the decompiled forward case
+/// normalizes the vector and re-multiplies by its now-unit magnitude, which
+/// would make every locked-on forward step a whole yalm per tick (60 y/s). It
+/// is read as the length-preserving save/normalize/restore the same file spells
+/// out explicitly a few blocks up (ControllableActor.cpp ControllableActor::HandleThirdPersonControl), which is
+/// also what retail plays: locked-on forward is the ordinary run speed.
+pub fn move_step_speed_yps(
+    locked_dir: Option<MoveDirId>,
+    packet_speed: u8,
+    walk_scale: f32,
+    mounted: bool,
+) -> f32 {
+    // A held-in-place actor (speed 0) has a zero movement vector, and retail's
+    // direction lengths are a multiply or a divide on it, so it stays zero: the
+    // absolute side step must not conjure movement out of a bind.
+    if packet_speed == 0 {
+        return 0.0;
+    }
+    match locked_dir {
+        None | Some(MoveDirId::Forward) => move_speed_yps(packet_speed, mounted) * walk_scale,
+        Some(MoveDirId::Side) => {
+            let divisor = if mounted {
+                LOCKED_SIDE_STEP_DIVISOR_MOUNTED
+            } else {
+                LOCKED_SIDE_STEP_DIVISOR
+            };
+            RETAIL_MOVE_TICKS_PER_SEC / divisor
+        }
+        Some(MoveDirId::Backward) => {
+            let divisor = if mounted {
+                LOCKED_BACK_STEP_DIVISOR_MOUNTED
+            } else {
+                LOCKED_BACK_STEP_DIVISOR
+            };
+            (packet_speed as f32 * SPEED_TO_YPS / WALK_SPEED_DIVISOR) * RETAIL_MOVE_TICKS_PER_SEC
+                / divisor
+        }
+    }
+}
+
+/// Rate the walker paces its vertical merge with, in yalms/second. It is
+/// normally the run/walk speed, but the locked-on side and backward steps are
+/// absolute lengths that can exceed it (walk-locked strafing is 3.75 y/s of
+/// feet against a 1.25 y/s merge), and a merge slower than the feet travel
+/// leaves them behind the floor on a staircase.
+pub fn ground_merge_pace_yps(move_yps: f32, step_yps: f32) -> f32 {
+    move_yps.max(step_yps)
 }
 
 /// World-space run heading for a camera-relative move: `forward` along the
@@ -950,8 +1068,9 @@ pub fn dispatch_movement_system(
 
     // The one speed variable (yalms/s): paces the horizontal step and every
     // vertical move inside the step band (walk mode merges slower than run).
-    let speed_yps =
-        move_speed_yps(self_pos.speed, state.snapshot.self_mount.is_some()) * walk_mode.scale();
+    let mounted = state.snapshot.self_mount.is_some();
+    let run_yps = move_speed_yps(self_pos.speed, mounted);
+    let speed_yps = run_yps * walk_mode.scale();
 
     let self_present = state
         .snapshot
@@ -1181,16 +1300,25 @@ pub fn dispatch_movement_system(
         chase.yaw = kuluu_render::yaw_for_heading(h);
     }
 
-    let dir_scale = if forward > 0 && strafe != 0 {
+    // Retail buckets the movement vector against the actor's own resolved
+    // rotation - a point one unit ahead of itself, never the target's position
+    // (research/XIClient/src/XIClient/source/World/Actor/ControllableActor.cpp,
+    // ControllableActor::HandleThirdPersonControl) - behind the IsParallelMove
+    // flag alone. `forward`/`strafe` are that vector in the actor frame, which
+    // lock-on has aimed at the target, so the flag that picks the strafe pose
+    // above picks the scaling here; a target the snapshot has dropped leaves
+    // the last aimed heading, still the frame we move along.
+    let locked_dir = locked.then(|| move_vec_dir_id(forward as f32, strafe as f32));
+    // Holding both axes adds two body-aligned components below, so each takes
+    // 1/sqrt(2) of the direction's speed to leave the resultant at that speed.
+    let diagonal_scale = if forward != 0 && strafe != 0 {
         std::f32::consts::FRAC_1_SQRT_2
-    } else if forward < 0 {
-        BACKPEDAL_SCALE
-    } else if forward == 0 && strafe != 0 {
-        STRAFE_SCALE
     } else {
         1.0
     };
-    let step = raw_step * dir_scale;
+    let step_yps = move_step_speed_yps(locked_dir, self_pos.speed, walk_mode.scale(), mounted);
+    let step = step_yps * time.delta_secs() * diagonal_scale;
+    let ground_pace_yps = ground_merge_pace_yps(speed_yps, step_yps);
     let mut x = basis_pos.x;
     let mut y = basis_pos.y;
 
@@ -1232,7 +1360,7 @@ pub fn dispatch_movement_system(
         basis_pos.z,
         wall_dx,
         wall_dy,
-        speed_yps,
+        ground_pace_yps,
         time.delta_secs(),
         env.hud_panels.noclip,
         geometry_ready,
@@ -1249,7 +1377,7 @@ pub fn dispatch_movement_system(
         final_y,
         final_z,
         heading,
-        speed_yps,
+        ground_pace_yps,
         &res,
     );
 
@@ -1792,6 +1920,7 @@ const TAB_SAMPLE_HEIGHTS: [f32; 5] = [0.0, 0.5, 1.0, 1.5, 2.0];
 #[cfg(test)]
 mod tests {
     use super::*;
+    use kuluu_render::KeyBind;
     use kuluu_snapshot::{Entity as WireEntity, EntityKind, Vec3 as WireVec3};
 
     fn movement_app() -> (App, mpsc::Receiver<AgentCommand>) {
@@ -2281,6 +2410,109 @@ mod tests {
         );
     }
 
+    fn target_dispatch_app() -> (App, mpsc::Receiver<AgentCommand>) {
+        let mut app = App::new();
+        let (tx, rx) = mpsc::channel(32);
+        app.init_resource::<kuluu_render::EventLog>()
+            .init_resource::<SceneState>()
+            .init_resource::<Target>()
+            .init_resource::<LockOn>()
+            .init_resource::<InputMode>()
+            .insert_resource(CommandTx(tx))
+            .add_systems(
+                Update,
+                (
+                    kuluu_render::scene::apply_server_retarget_system,
+                    dispatch_target_change_system,
+                )
+                    .chain(),
+            );
+        let mut state = app.world_mut().resource_mut::<SceneState>();
+        state.snapshot.entities = vec![ent(11, 0.0, 0.0), ent(22, 0.0, 0.0)];
+        state.dirty = true;
+        (app, rx)
+    }
+
+    /// `/assist` is the case that needs the round trip: `battleutils::
+    /// assistTarget` pushes s2c 0x058 without touching `m_battleTarget`
+    /// (vendor/server/src/map/utils/battleutils.cpp assistTarget), so the c2s 0x01A
+    /// ChangeTarget this dispatch sends back is what actually moves the server's
+    /// battle target (vendor/server/src/map/ai/ai_container.cpp CAIContainer::Internal_ChangeTarget calls
+    /// `SetBattleTargetID` for an engaged player). Swallowing it would leave
+    /// `CAttackState` swinging at the old mob.
+    #[test]
+    fn a_server_retarget_is_forwarded_as_change_target() {
+        let (mut app, mut commands) = target_dispatch_app();
+        app.world_mut().resource_mut::<Target>().id = Some(11);
+        app.update();
+        while commands.try_recv().is_ok() {}
+
+        app.world_mut()
+            .resource_mut::<kuluu_render::EventLog>()
+            .push(kuluu_snapshot::ViewerEvent::TargetChanged {
+                target_id: Some(22),
+            });
+        app.update();
+
+        assert_eq!(app.world().resource::<Target>().id, Some(22));
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(AgentCommand::Action {
+                target_id: 22,
+                kind: ActionKind::ChangeTarget,
+                ..
+            })
+        ));
+    }
+
+    /// A repeat 0x058 for the target we already have must not deref `Target` at
+    /// all: LSB pushes one per `CPlayerController::Engage` and one per
+    /// `CAttackState::UpdateTarget` auto-target, and every change-detection tick
+    /// costs a c2s ChangeTarget.
+    #[test]
+    fn a_repeat_server_retarget_sends_nothing() {
+        let (mut app, mut commands) = target_dispatch_app();
+        app.world_mut().resource_mut::<Target>().id = Some(22);
+        app.update();
+        while commands.try_recv().is_ok() {}
+
+        app.world_mut()
+            .resource_mut::<kuluu_render::EventLog>()
+            .push(kuluu_snapshot::ViewerEvent::TargetChanged {
+                target_id: Some(22),
+            });
+        app.update();
+
+        assert!(
+            commands.try_recv().is_err(),
+            "a retarget onto the current target must not resend ChangeTarget"
+        );
+    }
+
+    /// Player targeting input after a server retarget still reaches the wire.
+    #[test]
+    fn a_local_retarget_after_a_server_retarget_is_still_sent() {
+        let (mut app, mut commands) = target_dispatch_app();
+        app.world_mut()
+            .resource_mut::<kuluu_render::EventLog>()
+            .push(kuluu_snapshot::ViewerEvent::TargetChanged {
+                target_id: Some(22),
+            });
+        app.update();
+        while commands.try_recv().is_ok() {}
+
+        app.world_mut().resource_mut::<Target>().id = Some(11);
+        app.update();
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(AgentCommand::Action {
+                target_id: 11,
+                kind: ActionKind::ChangeTarget,
+                ..
+            })
+        ));
+    }
+
     fn ent(id: u32, x: f32, y: f32) -> WireEntity {
         ent_xyz(id, x, y, 0.0)
     }
@@ -2346,6 +2578,332 @@ mod tests {
             k.autorun,
             k.locked,
         )
+    }
+
+    /// The movement vector `deg` degrees off the aim, in the actor's own frame.
+    fn move_at(deg: f32) -> (f32, f32) {
+        let (sin, cos) = deg.to_radians().sin_cos();
+        (cos, sin)
+    }
+
+    #[test]
+    fn move_dir_buckets_split_at_the_retail_45_degree_quadrants() {
+        for deg in [0.0, 20.0, -20.0, 44.0, -44.0] {
+            let (f, s) = move_at(deg);
+            assert_eq!(
+                move_vec_dir_id(f, s),
+                MoveDirId::Forward,
+                "{deg} degrees off the aim is the forward quadrant"
+            );
+        }
+        for deg in [46.0, 90.0, 134.0, -46.0, -90.0, -134.0] {
+            let (f, s) = move_at(deg);
+            assert_eq!(
+                move_vec_dir_id(f, s),
+                MoveDirId::Side,
+                "{deg} degrees off the aim is a side quadrant"
+            );
+        }
+        for deg in [136.0, 180.0, -136.0] {
+            let (f, s) = move_at(deg);
+            assert_eq!(
+                move_vec_dir_id(f, s),
+                MoveDirId::Backward,
+                "{deg} degrees off the aim is the backward quadrant"
+            );
+        }
+        assert_eq!(move_vec_dir_id(0.0, 0.0), MoveDirId::Forward);
+    }
+
+    #[test]
+    fn diagonal_holds_land_on_retail_side_of_the_bucket_tie() {
+        // Both keyboard diagonals sit exactly on retail's `>= 0` tie-break, so
+        // the bucket must be decided by the sign pair, not by float noise: the
+        // forward ones take the run speed, the backward ones the side step.
+        for strafe in [1.0, -1.0] {
+            assert_eq!(
+                move_vec_dir_id(1.0, strafe),
+                MoveDirId::Forward,
+                "an exact 45-degree diagonal is retail's id 1"
+            );
+            assert_eq!(
+                move_vec_dir_id(-1.0, strafe),
+                MoveDirId::Side,
+                "an exact 135-degree diagonal is retail's id 2 or 4"
+            );
+        }
+    }
+
+    /// The wire speed LSB sends an unmounted PC: a 5 y/s run.
+    const BASE_SPEED: u8 = kuluu_session::state::BASE_PACKET_SPEED;
+    const BASE_RUN_YPS: f32 = 5.0;
+
+    fn close(got: f32, want: f32) -> bool {
+        (got - want).abs() < 1e-4
+    }
+
+    #[test]
+    fn free_run_is_full_speed_in_every_direction() {
+        assert_eq!(move_speed_yps(BASE_SPEED, false), BASE_RUN_YPS);
+        assert_eq!(move_step_speed_yps(None, BASE_SPEED, 1.0, false), 5.0);
+        assert_eq!(move_step_speed_yps(None, BASE_SPEED, 1.0, true), 10.0);
+        for dir in [MoveDirId::Side, MoveDirId::Backward] {
+            assert!(
+                move_step_speed_yps(Some(dir), BASE_SPEED, 1.0, false) < BASE_RUN_YPS,
+                "the locked-on {dir:?} step is the only one retail slows"
+            );
+        }
+        // Walk lock is the one thing that still slows a free run: a quarter of
+        // the 5 y/s run.
+        let walk = kuluu_render::combat_stance::WalkMode::WALK_SCALE;
+        assert_eq!(move_step_speed_yps(None, BASE_SPEED, walk, false), 1.25);
+    }
+
+    #[test]
+    fn locked_steps_pace_the_vertical_merge_when_they_outrun_the_walk() {
+        let walk = kuluu_render::combat_stance::WalkMode::WALK_SCALE;
+        let merge = BASE_RUN_YPS * walk;
+        let side = move_step_speed_yps(Some(MoveDirId::Side), BASE_SPEED, walk, false);
+        assert!(
+            side > merge,
+            "the absolute side step outruns the walk-locked merge: {side} vs {merge}"
+        );
+        assert_eq!(ground_merge_pace_yps(merge, side), side);
+        // A free run never loses its own pace to a slower step.
+        assert_eq!(
+            ground_merge_pace_yps(
+                BASE_RUN_YPS,
+                move_step_speed_yps(None, BASE_SPEED, 1.0, false)
+            ),
+            BASE_RUN_YPS
+        );
+    }
+
+    #[test]
+    fn locked_on_directional_speeds_match_retail() {
+        assert_eq!(
+            move_step_speed_yps(Some(MoveDirId::Forward), BASE_SPEED, 1.0, false),
+            BASE_RUN_YPS
+        );
+        // A sixteenth of a yalm per 1/60 s tick: 3.75 y/s, three quarters of the
+        // 5 y/s base run.
+        assert_eq!(
+            move_step_speed_yps(Some(MoveDirId::Side), BASE_SPEED, 1.0, false),
+            3.75
+        );
+        // Backwards is GetWalkSpeed(), a third of the run: 1.667 y/s.
+        let back = move_step_speed_yps(Some(MoveDirId::Backward), BASE_SPEED, 1.0, false);
+        assert!(
+            close(back, 1.666_666_7),
+            "locked backpedal is 1.667 y/s, got {back}"
+        );
+
+        // Mounted doubles the run and halves the side divisor, so the side step
+        // keeps the same three-quarter ratio; the backward step doubles out of
+        // its /30 tick divisor.
+        assert_eq!(move_speed_yps(BASE_SPEED, true), 10.0);
+        assert_eq!(
+            move_step_speed_yps(Some(MoveDirId::Forward), BASE_SPEED, 1.0, true),
+            10.0
+        );
+        assert_eq!(
+            move_step_speed_yps(Some(MoveDirId::Side), BASE_SPEED, 1.0, true),
+            7.5
+        );
+        let back_mounted = move_step_speed_yps(Some(MoveDirId::Backward), BASE_SPEED, 1.0, true);
+        assert!(
+            close(back_mounted, 3.333_333_3),
+            "mounted backpedal is 3.333 y/s, got {back_mounted}"
+        );
+
+        // The side step is an absolute per-tick length, so a speed buff does not
+        // widen it the way it widens the run.
+        const BUFFED_SPEED: u8 = 80;
+        assert_eq!(move_speed_yps(BUFFED_SPEED, false), 8.0);
+        assert_eq!(
+            move_step_speed_yps(Some(MoveDirId::Side), BUFFED_SPEED, 1.0, false),
+            3.75
+        );
+
+        // Bound sets speed 0: the absolute side step must not walk out of it.
+        for dir in [MoveDirId::Forward, MoveDirId::Side, MoveDirId::Backward] {
+            assert_eq!(move_step_speed_yps(Some(dir), 0, 1.0, false), 0.0);
+        }
+    }
+
+    #[test]
+    fn mounted_backpedal_is_the_uncapped_walk_speed() {
+        // StepControl doubles the run and clamps it at 30 y/s, but the backward
+        // case reads GetWalkSpeed(), which neither the doubling nor the clamp
+        // touches - only its /30 mounted tick divisor doubles it. A wire speed
+        // whose mounted run clamps therefore still backpedals at 2 * 25.5/3.
+        const CLAMPING_SPEED: u8 = 255;
+        assert_eq!(
+            move_speed_yps(CLAMPING_SPEED, true),
+            kuluu_session::state::MAX_MOVE_SPEED_YPS
+        );
+        let back = move_step_speed_yps(Some(MoveDirId::Backward), CLAMPING_SPEED, 1.0, true);
+        assert!(close(back, 17.0), "mounted backpedal is 17 y/s, got {back}");
+    }
+
+    /// Retail's per-tick lengths, restated independently of the constants under
+    /// test: a 5 y/s run over a 60 Hz movement tick is a twelfth of a yalm, and
+    /// a locked-on side step is a flat sixteenth.
+    const RUN_STEP: f32 = 5.0 / 60.0;
+    const LOCKED_SIDE_STEP: f32 = 1.0 / 16.0;
+    /// The locked-on backpedal is the walk speed, a third of the run.
+    const LOCKED_BACK_STEP: f32 = (5.0 / 3.0) / 60.0;
+
+    /// Far enough that `lock_forward_allowance` never clamps the step under test.
+    const DRIVE_TARGET_DIST: f32 = 30.0;
+    /// Strafe has no default binding; the drive harness gives it a free key.
+    const DRIVE_STRAFE_LEFT: KeyCode = KeyCode::KeyX;
+
+    fn held_tick_yalms(locked: bool, keys: &[KeyCode]) -> f32 {
+        held_tick_yalms_toward(locked, keys, 0)
+    }
+
+    /// Yalms the real movement system advances the player over one retail tick
+    /// with `keys` held, standing on a flat floor at the base run speed, with
+    /// the lock-on target `DRIVE_TARGET_DIST` away along `target_heading`.
+    fn held_tick_yalms_toward(locked: bool, keys: &[KeyCode], target_heading: u8) -> f32 {
+        let (mut app, _rx) = movement_app();
+        app.insert_resource(slab_collision(0.0));
+        // Pin the fixed clock to the tick this harness advances by: bevy's own
+        // 64 Hz default otherwise overwrites the delta whenever wall-clock time
+        // lets a fixed step run inside `app.update()`.
+        app.insert_resource(Time::<Fixed>::from_hz(RETAIL_MOVE_TICKS_PER_SEC as f64));
+        app.world_mut()
+            .resource_mut::<Bindings>()
+            .insert(Action::StrafeLeft, KeyBind::new(DRIVE_STRAFE_LEFT));
+        let file_id = {
+            let mut scene = app.world_mut().resource_mut::<SceneState>();
+            scene.snapshot.zone_id = Some(100);
+            scene.snapshot.self_pos.speed = kuluu_session::state::BASE_PACKET_SPEED;
+            let (tx, ty) = heading_to_forward(target_heading);
+            scene
+                .snapshot
+                .entities
+                .push(ent(2, tx * DRIVE_TARGET_DIST, ty * DRIVE_TARGET_DIST));
+            kuluu_render::snapshot::effective_zone_file_id(&scene.snapshot)
+        };
+        app.world_mut()
+            .resource_mut::<kuluu_render::dat_mzb::LastAutoLoadedZone>()
+            .file_id = file_id;
+        if locked {
+            app.world_mut().resource_mut::<LockOn>().target_id = Some(2);
+        }
+        fn tick(app: &mut App) {
+            app.world_mut()
+                .resource_mut::<Time<Fixed>>()
+                .advance_by(Duration::from_secs_f32(1.0 / RETAIL_MOVE_TICKS_PER_SEC));
+            app.update();
+        }
+        tick(&mut app);
+        for key in keys {
+            app.world_mut()
+                .resource_mut::<ButtonInput<KeyCode>>()
+                .press(*key);
+        }
+        // The first held tick turns the body onto the run heading; sample the
+        // settled one after it.
+        tick(&mut app);
+        let before = app.world().resource::<LocalPlayerPrediction>().pos;
+        tick(&mut app);
+        let after = app.world().resource::<LocalPlayerPrediction>().pos;
+        Vec2::new(after.x - before.x, after.y - before.y).length()
+    }
+
+    #[test]
+    fn directional_scaling_applies_only_while_locked_on() {
+        for keys in [
+            vec![KeyCode::KeyW],
+            vec![KeyCode::KeyS],
+            vec![DRIVE_STRAFE_LEFT],
+        ] {
+            let got = held_tick_yalms(false, &keys);
+            assert!(
+                close(got, RUN_STEP),
+                "free run is full speed in every direction: {keys:?} moved {got}, want {RUN_STEP}"
+            );
+        }
+
+        let forward = held_tick_yalms(true, &[KeyCode::KeyW]);
+        assert!(
+            close(forward, RUN_STEP),
+            "locked forward keeps the run speed, got {forward}"
+        );
+        let side = held_tick_yalms(true, &[KeyCode::KeyA]);
+        assert!(
+            close(side, LOCKED_SIDE_STEP),
+            "locked side-step is a sixteenth of a yalm per tick, got {side}"
+        );
+        let back = held_tick_yalms(true, &[KeyCode::KeyS]);
+        assert!(
+            close(back, LOCKED_BACK_STEP),
+            "locked backpedal is the walk speed, got {back}"
+        );
+    }
+
+    #[test]
+    fn locked_diagonals_keep_one_speed_whatever_the_heading() {
+        // Both keyboard diagonals sit exactly on retail's bucket tie-break, so
+        // the travel must not depend on where the target - and with it the body
+        // heading the movement vector is built from - happens to sit: W+A is
+        // the forward bucket at the full run, S+A a side one at the flat
+        // sixteenth. A heading-dependent answer here is the float-noise bug.
+        for heading in [0u8, 37, 96, 200] {
+            let ahead = held_tick_yalms_toward(true, &[KeyCode::KeyW, KeyCode::KeyA], heading);
+            assert!(
+                close(ahead, RUN_STEP),
+                "locked W+A is the run step from heading {heading}, got {ahead}"
+            );
+            let behind = held_tick_yalms_toward(true, &[KeyCode::KeyS, KeyCode::KeyA], heading);
+            assert!(
+                close(behind, LOCKED_SIDE_STEP),
+                "locked S+A is the side step from heading {heading}, got {behind}"
+            );
+        }
+    }
+
+    #[test]
+    fn directional_scaling_follows_the_lock_flag_not_the_snapshot_target() {
+        // Retail gates the bucket on the IsParallelMove flag and measures the
+        // move vector against the actor's own resolved rotation, never the
+        // target's position, so a lock on an entity the snapshot has dropped
+        // still backpedals at the walk speed off the last aimed heading.
+        let (mut app, _rx) = movement_app();
+        app.insert_resource(slab_collision(0.0));
+        app.insert_resource(Time::<Fixed>::from_hz(RETAIL_MOVE_TICKS_PER_SEC as f64));
+        let file_id = {
+            let mut scene = app.world_mut().resource_mut::<SceneState>();
+            scene.snapshot.zone_id = Some(100);
+            scene.snapshot.self_pos.speed = kuluu_session::state::BASE_PACKET_SPEED;
+            kuluu_render::snapshot::effective_zone_file_id(&scene.snapshot)
+        };
+        app.world_mut()
+            .resource_mut::<kuluu_render::dat_mzb::LastAutoLoadedZone>()
+            .file_id = file_id;
+        app.world_mut().resource_mut::<LockOn>().target_id = Some(2);
+        let tick = |app: &mut App| {
+            app.world_mut()
+                .resource_mut::<Time<Fixed>>()
+                .advance_by(Duration::from_secs_f32(1.0 / RETAIL_MOVE_TICKS_PER_SEC));
+            app.update();
+        };
+        tick(&mut app);
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::KeyS);
+        tick(&mut app);
+        let before = app.world().resource::<LocalPlayerPrediction>().pos;
+        tick(&mut app);
+        let after = app.world().resource::<LocalPlayerPrediction>().pos;
+        let got = Vec2::new(after.x - before.x, after.y - before.y).length();
+        assert!(
+            close(got, LOCKED_BACK_STEP),
+            "a lock on a missing entity still scales the step, got {got}"
+        );
     }
 
     #[test]

@@ -3,9 +3,9 @@ use std::collections::HashMap;
 use bevy::prelude::*;
 use kuluu_snapshot::EntityKind;
 
-use crate::camera::{nameplate_anchor_y, OperatorCamera};
+use crate::camera::{nameplate_anchor, OperatorCamera};
 use crate::components::{Nameplate, WorldEntity};
-use crate::scene::BakedActor;
+use crate::scene::NameplateLocator;
 use crate::snapshot::SceneState;
 
 #[derive(Component)]
@@ -88,7 +88,7 @@ pub fn update_nameplates_system(
         (
             &Transform,
             &WorldEntity,
-            Option<&BakedActor>,
+            Option<&NameplateLocator>,
             Has<crate::components::MountedRider>,
         ),
         Without<Nameplate>,
@@ -108,9 +108,9 @@ pub fn update_nameplates_system(
     // render scale; rescale to the native-res HUD (1.0 → no-op).
     let viewport_to_window = 1.0 / settings.render_scale();
 
-    let mut pos_by_id: HashMap<u32, (Vec3, f32)> = HashMap::new();
-    for (t, w, baked, mounted) in &world_q {
-        pos_by_id.insert(w.id, (t.translation, nameplate_anchor_y(baked, mounted)));
+    let mut pos_by_id: HashMap<u32, (Vec3, Option<Vec3>)> = HashMap::new();
+    for (t, w, locator, mounted) in &world_q {
+        pos_by_id.insert(w.id, (t.translation, nameplate_anchor(t, locator, mounted)));
     }
 
     // Doors and namevis-hidden helpers never keep a plate: retail shows no
@@ -148,8 +148,8 @@ pub fn update_nameplates_system(
             continue;
         }
         match pos_by_id.get(&np.entity_id) {
-            Some(&(world_pos, label_y)) => {
-                let head = world_pos + Vec3::Y * label_y;
+            Some(&(world_pos, Some(head))) => {
+                node.display = Display::Flex;
                 let (want_left, want_top) = match camera.world_to_viewport(&cam_global, head) {
                     Ok(screen) => (
                         Val::Px(screen.x * viewport_to_window - 40.0),
@@ -189,6 +189,9 @@ pub fn update_nameplates_system(
                         }
                     }
                 }
+            }
+            Some(&(_, None)) => {
+                node.display = Display::None;
             }
             None => {
                 commands.entity(ui_entity).try_despawn();

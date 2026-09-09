@@ -21,6 +21,11 @@ enhanced-neural-uplift = ["dlss", "dep:kuluu-dlss-nr"]
 # status-effect name table.
 enhanced-buff-tooltips = []
 
+# Enhanced (non-retail) countdown text under each status-ribbon chip, plus the
+# wider chip pitch the label needs. Retail's ribbon is icons only, with no
+# remaining-time readout.
+enhanced-buff-timers = []
+
 # Enhanced (non-retail) spell cast bar: an addon-style filling progress bar
 # shown while the player casts. Retail's classic client has no built-in cast
 # bar (players get one via Windower/Ashita); this reproduces it from the
@@ -32,6 +37,15 @@ enhanced-cast-bar = []
 # shows no mob HP; without this feature a persisted `mob_hp_under` can never
 # light either, and the Debug -> Retail+ row does not exist.
 enhanced-mob-hp-under = []
+
+# Enhanced (non-retail) numeric KO countdown: the "Home Point in M:SS" line on
+# the death prompt. The call rests on the dated 2026-06-12 HorizonXI
+# observation in .agents/skills/retail-observe/references/death-ko-behavior.md:
+# retail surfaces the home-point menu and no visible clock, so the readout is an
+# addon-style addition. The XIClient decompile parks the same server deadline in
+# zone state (GC_ZONE field_40D6C) but leaves its one read site an undecompiled
+# stub, so it is corroborating context only and settles nothing either way.
+enhanced-death-countdown = []
 
 # Enhanced (non-retail) party-frame Job column: L1 rows gain a job-icon column.
 # Retail's party frame shows no jobs; without this feature a persisted

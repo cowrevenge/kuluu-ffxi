@@ -1,5 +1,5 @@
 //! Auction House queries against the LSB search server: one TCP connection per
-//! request (vendor/server/src/search/tcp_server.cpp accepts, handles, closes),
+//! request (vendor/server/src/search/search_application.cpp SearchApplication accepts, handles, closes),
 //! frames encoded/decrypted by [`ffxi_proto::search::SearchCrypto`].
 
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -150,7 +150,7 @@ mod tests {
     use ffxi_proto::{blowfish, md5};
 
     /// Independent reimplementation of SearchHandler::decrypt/encrypt
-    /// (vendor/server/src/search/search_handler.cpp:134-178) plus
+    /// (vendor/server/src/search/search_handler.cpp SearchHandler::decrypt) plus
     /// CAHItemsListPacket (packets/auction_list.cpp), so the paging loop is
     /// checked against the server algorithm rather than against our own codec.
     struct FakeSearchServer {

@@ -1,4 +1,4 @@
-// vendor/server/src/map/enums/action/category.h:31 — `action.cmd_no`, 4 bits.
+// vendor/server/src/map/enums/action/category.h ActionCategory BasicAttack — `action.cmd_no`, 4 bits.
 pub const CATEGORY_BASIC_ATTACK: u8 = 1;
 
 // vendor/server/src/map/enums/action/info.h - the per-result `info` bits. Defeated means the
@@ -8,7 +8,7 @@ pub const INFO_DEFEATED: u8 = 1;
 pub const INFO_CRITICAL_HIT: u8 = 2;
 
 // vendor/server/src/map/enums/action/resolution.h — `result.resolution`, 3 bits in
-// vendor/server/src/map/packets/s2c/0x028_battle2.cpp:71.
+// vendor/server/src/map/packets/s2c/0x028_battle2.cpp GP_SERV_COMMAND_BATTLE2::pack.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ActionResolution {
     Hit,
@@ -41,8 +41,8 @@ impl ActionResolution {
     }
 }
 
-// vendor/server/src/map/attack.h:52-59. Set from `attack.GetAnimationID()` into
-// `actionResult.animation` (vendor/server/src/map/entities/battleentity.cpp:3007) — for a basic
+// vendor/server/src/map/attack.h AttackAnimation. Set from `attack.GetAnimationID()` into
+// `actionResult.animation` (vendor/server/src/map/entities/battleentity.cpp CBattleEntity::OnAttack) — for a basic
 // attack this is the swing slot, not a skill id.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum AttackAnimation {
@@ -76,23 +76,23 @@ impl AttackAnimation {
     }
 }
 
-// vendor/server/src/map/packets/s2c/0x028_battle2.cpp:71-76 - one result block's bits:
-// resolution(3), kind(2), animation(12), info(5), hitDistortion(2), knockback(3). A body that
-// carries no result block, or that ends mid-block, has none of them at all: `resolution == 0`
-// is `Hit`, so absence must not be spelled as zero.
+// vendor/server/src/map/packets/s2c/0x028_battle2.cpp GP_SERV_COMMAND_BATTLE2::pack - one
+// result block's bits: resolution(3), kind(2), animation(12), info(5), hitDistortion(2),
+// knockback(3). A body that carries no result block, or that ends mid-block, has none of them
+// at all: `resolution == 0` is `Hit`, so absence must not be spelled as zero.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct MeleeResult {
     pub resolution: ActionResolution,
     pub animation: AttackAnimation,
     /// vendor/server/src/map/enums/action/info.h - bit 1 `Defeated` (the action killed the
     /// target), bit 2 `CriticalHit`. Retail flips StatusServer on the same frame as the HP
-    /// packet when Defeated is set (F49).
+    /// packet when Defeated is set; finding F49.
     pub info: u8,
     /// vendor/server/src/map/enums/action/hit_distortion.h - 0 None, 1 Light, 2 Medium,
     /// 3 Heavy (the crit case; drives `ldam`, F54).
     pub hit_distortion: u8,
     /// vendor/server/src/map/enums/action/knockback.h - 0 none .. 7 level 7. Any non-zero
-    /// level plays `sway` alongside the damage reaction (F52).
+    /// level plays `sway` alongside the damage reaction; finding F52.
     pub knockback: u8,
     /// The result's `kind` bits, uninterpreted.
     pub kind: u8,

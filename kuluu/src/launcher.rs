@@ -6,6 +6,9 @@ use kuluu_session::auth_client::{AuthClient, AuthSession};
 use kuluu_session::lobby_client::{CharSlot, LobbyClient};
 use kuluu_session::session::InitialState;
 
+pub const KEY3_MUL: u8 = 0x37;
+pub const KEY3_XOR: u8 = 0x5a;
+
 pub struct Selection {
     pub user: String,
     pub password: String,
@@ -61,7 +64,7 @@ pub async fn run(
 
     let mut key3 = [0u8; 20];
     for (i, b) in key3.iter_mut().enumerate() {
-        *b = ((i as u8).wrapping_mul(0x37)) ^ 0x5a;
+        *b = ((i as u8).wrapping_mul(KEY3_MUL)) ^ KEY3_XOR;
     }
     let handoff = handle
         .select(slot.char_id, &slot.name, key3)

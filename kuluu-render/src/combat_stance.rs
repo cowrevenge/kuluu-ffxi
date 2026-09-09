@@ -895,7 +895,7 @@ pub struct EntityPrediction {
 
 impl EntityPrediction {
     /// Per-AI-tick step distance a moving mob advances, in yalms, from the wire speed byte.
-    /// vendor/server/src/map/ai/helpers/pathfind/pathfind.cpp StepToInternal:
+    /// vendor/server/src/map/ai/helpers/pathfind.cpp CPathFind::StepTo:
     /// `stepDistance = speed / (run ? 50.0 : 40.0)`, then markPositionDirty() -> exactly one POS
     /// update per tick. The run flag comes from PATHFLAG_RUN, which mob_controller.cpp sets for
     /// chase/follow/return-home and leaves clear while roaming: roam = walk (/40), engaged = run
@@ -984,7 +984,7 @@ pub fn heading_forward(heading: u8) -> Vec3 {
 
 /// Per-AI-tick step distance in yalms for the incoming wire speed bytes.
 ///
-/// vendor/server/src/map/ai/helpers/pathfind/pathfind.cpp StepToInternal advances a moving mob by
+/// vendor/server/src/map/ai/helpers/pathfind.cpp CPathFind::StepTo advances a moving mob by
 /// `speed / (run ? 50.0 : 40.0)` each tick; entity_path_owner.cpp updateSpeed(run) multiplies only
 /// the movement speed, never animationSpeed, so the run/walk split is read straight off the wire as
 /// `speed > speed_base` (the same comparison the gait rule uses). No mount or retail-yps factor:

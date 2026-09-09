@@ -289,13 +289,20 @@ mod tests {
 mod doorway_tests {
     use super::tests::*;
     use super::*;
-    use crate::dat_mmb::MmbLoadQueue;
+    use crate::dat_mmb::{LoadMmbRequest, MmbLoadQueue};
     use crate::dat_mzb::ground_tests::slab_block_at;
     use crate::dat_mzb::{
-        AutoMzbOverlay, LoadMzbInFlight, MzbCollisionGeometry, PendingWaterSpawns, ZoneAreaMap,
-        ZoneBlockSlot, ZoneChunkLightMap, MAX_GROUND_STEP_UP, ZONE_SLOT_MAIN,
+        AutoMzbOverlay, DrawDistance, LoadMzbInFlight, MzbCollisionBlock, MzbCollisionGeometry,
+        PendingWaterSpawns, ZoneAreaMap, ZoneBlockSlot, ZoneChunkLightMap, ZoneGeomCache,
+        MAX_GROUND_STEP_UP, ZONE_SLOT_MAIN,
     };
+    use crate::ffxi_actor_render::LoadActorRequest;
+    use crate::graphics_settings::GraphicsSettings;
+    use crate::scene::TrackedEntities;
+    use crate::snapshot::ToastEvent;
     use bevy::ecs::message::Messages;
+    use bevy::ecs::schedule::{LogLevel, ScheduleBuildSettings};
+    use bevy::tasks::{AsyncComputeTaskPool, TaskPool};
 
     /// Bevy-space collision columns. The town block floors the doorway approach
     /// and nothing else; the interior block floors only its own room — the
@@ -304,6 +311,19 @@ mod doorway_tests {
     const INTERIOR_COLUMN: Vec2 = Vec2::new(40.0, 0.0);
     const TOWN_FLOOR_Y: f32 = 1.0;
     const INTERIOR_FLOOR_Y: f32 = 3.0;
+    /// The closed-up placeholder's surface, standing where the interior's own
+    /// floor will be once the load lands.
+    const SHELL_FLOOR_Y: f32 = 2.0;
+
+    /// Main-block surface linked to the interior, i.e. the closed-up box the
+    /// zone ships where the room will be: activating the sub-area suppresses it
+    /// (`ffxi_dat::mzb::is_suppressed_placeholder`), so the column it floored
+    /// keeps no floor until the interior lands.
+    fn shell_placeholder_block() -> MzbCollisionBlock {
+        let mut block = slab_block_at(INTERIOR_COLUMN, SHELL_FLOOR_Y);
+        block.tri_sub_area = vec![SUB_AREA; block.indices.len() / 3];
+        block
+    }
 
     struct Doorway {
         app: App,
@@ -312,7 +332,50 @@ mod doorway_tests {
     }
 
     impl Doorway {
+        /// Just the driver, with the load requests it writes left on the queue.
         fn new() -> Self {
+            let mut d = Self::bare();
+            d.app.add_systems(Update, drive_sub_area_activation);
+            d
+        }
+
+        /// The driver plus the rest of the plugin's request-to-task segment, run
+        /// off the one ordering declaration production registers
+        /// ([`crate::dat_mmb::zone_load_dispatch_systems`]), and with the main
+        /// block reduced to the shell placeholder the interior stands in for.
+        fn streaming() -> Self {
+            AsyncComputeTaskPool::get_or_init(TaskPool::default);
+            let mut d = Self::bare();
+            d.app
+                .add_message::<ToastEvent>()
+                .add_message::<LoadMmbRequest>()
+                .add_message::<LoadActorRequest>()
+                .init_resource::<DrawDistance>()
+                .init_resource::<ZoneGeomCache>()
+                .init_resource::<TrackedEntities>()
+                .init_resource::<GraphicsSettings>()
+                .add_plugins(bevy::asset::AssetPlugin::default())
+                .init_asset::<Mesh>()
+                .init_asset::<StandardMaterial>()
+                .add_systems(Update, crate::dat_mmb::zone_load_dispatch_systems());
+            // The declaration has to *order* the segment, not merely contain it:
+            // an unordered write-then-read of `LoadMzbRequest` is exactly the
+            // deferred spawn this pins against, and the executor is free to run
+            // it either way.
+            d.app.edit_schedule(Update, |schedule| {
+                schedule.set_build_settings(ScheduleBuildSettings {
+                    ambiguity_detection: LogLevel::Error,
+                    ..default()
+                });
+            });
+            d.app
+                .world_mut()
+                .resource_mut::<MzbCollisionGeometry>()
+                .set_block(ZONE_SLOT_MAIN, shell_placeholder_block());
+            d
+        }
+
+        fn bare() -> Self {
             let mut app = App::new();
             app.add_message::<LoadMzbRequest>()
                 .add_message::<SubAreaChanged>()
@@ -323,8 +386,7 @@ mod doorway_tests {
                 .init_resource::<ZoneChunkLightMap>()
                 .init_resource::<PendingWaterSpawns>()
                 .init_resource::<MmbLoadQueue>()
-                .init_resource::<LoadMzbInFlight>()
-                .add_systems(Update, drive_sub_area_activation);
+                .init_resource::<LoadMzbInFlight>();
 
             app.insert_resource(armed_activation());
             app.world_mut()
@@ -418,6 +480,10 @@ mod doorway_tests {
             (parent, child)
         }
 
+        fn any_pending(&self) -> bool {
+            self.app.world().resource::<LoadMzbInFlight>().any_pending()
+        }
+
         fn ground_at(&self, column: Vec2, feet_y: f32) -> Option<f32> {
             self.app
                 .world()
@@ -500,6 +566,40 @@ mod doorway_tests {
             d.ground_at(INTERIOR_COLUMN, INTERIOR_FLOOR_Y),
             None,
             "the interior's collision is gone with it"
+        );
+    }
+
+    /// The retire and the load have to land in one schedule run.
+    /// `ground_recovery_candidate` (kuluu/src/view_native/input.rs) reads
+    /// `LoadMzbInFlight::any_pending()` to tell a streaming hole from a wedge; a
+    /// frame with the shell suppressed and nothing in flight is a column with no
+    /// floor that the recovery is free to act on, which is the kuluu-0nnl roof
+    /// snap.
+    #[test]
+    fn the_interior_load_is_in_flight_the_frame_the_shell_stops_colliding() {
+        let mut d = Doorway::streaming();
+        assert_eq!(
+            d.ground_at(INTERIOR_COLUMN, SHELL_FLOOR_Y),
+            Some(SHELL_FLOOR_Y),
+            "outside, the placeholder floors the column"
+        );
+        assert!(!d.any_pending(), "nothing is streaming out in the street");
+
+        d.walk_to(DOORWAY_CENTRE);
+
+        assert_eq!(
+            d.app.world().resource::<SubAreaActivation>().active(),
+            Some(SUB_AREA),
+            "the doorway latched"
+        );
+        assert_eq!(
+            d.ground_at(INTERIOR_COLUMN, SHELL_FLOOR_Y),
+            None,
+            "the placeholder is suppressed and the interior has not landed"
+        );
+        assert!(
+            d.any_pending(),
+            "the load must be in flight in the same run that took the floor away"
         );
     }
 

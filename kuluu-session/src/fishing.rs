@@ -18,7 +18,7 @@
 use crate::state::{FishParams, FishingArrow, FishingInput, FishingMode};
 
 /// Seconds the resolution animation (caught / break / stop) plays before the client asks
-/// the server to release the fishing lock. research/xim FishingAttemptInstance.kt:133.
+/// the server to release the fishing lock. research/xim FishingAttemptInstance.kt handleSuccessFish.
 const FINISH_SECS: f32 = 3.25;
 
 /// Seconds a single arrow stays on screen before it counts as a miss. Scaled from the

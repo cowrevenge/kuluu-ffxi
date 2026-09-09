@@ -908,7 +908,7 @@ fn entity_upserted_preserves_hp_pct_across_position_only_update() {
 
 #[test]
 fn entity_upserted_name_vis_survives_pos_only_tick() {
-    // #512-4: namevis is written under UPDATE_HP (entity_update.cpp:357/:408), and a
+    // #512-4: namevis is written under UPDATE_HP (entity_update.cpp CEntityUpdatePacket::updateWith/:408), and a
     // POS-only 0x00E carries the byte zero-filled. Merging off pos_present would
     // un-hide a hidden entity the moment it moved.
     let mut s = SessionState::default();
@@ -1213,6 +1213,7 @@ fn entity_patched_allegiance_materializes_flags_and_preserves_the_rest() {
 
 #[test]
 fn name_extraction_miss_appends_to_ring_buffer_with_cap() {
+    const BODY_BYTE_MASK: u32 = 0xFF;
     let mut s = SessionState::default();
 
     for i in 0..(NAME_MISSES_CAP as u32 + 5) {
@@ -1223,7 +1224,7 @@ fn name_extraction_miss_appends_to_ring_buffer_with_cap() {
                 act_index: i as u16,
                 send_flag: 0,
                 body_len: 64,
-                body_hex: format!("{:02x}", i & 0xFF),
+                body_hex: format!("{:02x}", i & BODY_BYTE_MASK),
                 miss_kind: NameMissKind::NameBitClear,
                 at_unix_ms: 1000 + u64::from(i),
             },
@@ -1757,7 +1758,7 @@ fn check_message_is_kept_beside_the_result_and_cleared_with_it() {
     assert_eq!(m.message, "Sneak oil 2k");
 
     // The 0x0CA lands before the 0x0C9 batches
-    // (0x0dd_equip_inspect.cpp:134-136), so a later result must not drop it.
+    // (0x0dd_equip_inspect.cpp GP_CLI_COMMAND_EQUIP_INSPECT::process), so a later result must not drop it.
     s.apply_event(&AgentEvent::CheckEquipReceived {
         target_id: 0xCAFE,
         act_index: 0x123,
@@ -1805,7 +1806,7 @@ fn bazaar_rows_merge_by_slot_and_sold_out_rows_leave() {
     assert_eq!(view.items.len(), 2, "same slot merges");
     assert_eq!(view.items[0].quantity, 4);
 
-    // A depleted slot comes back priced 0 (0x106_bazaar_buy.cpp:198).
+    // A depleted slot comes back priced 0 (0x106_bazaar_buy.cpp GP_CLI_COMMAND_BAZAAR_BUY::process).
     s.apply_event(&row(3, 0, 0));
     let view = s.bazaar.as_ref().expect("open");
     assert_eq!(
@@ -2237,6 +2238,7 @@ fn _agentevent_is_additive_only(x: &AgentEvent) {
         AgentEvent::LowHp { .. } => (),
         AgentEvent::PartyMemberLowHp { .. } => (),
         AgentEvent::EngagedBy { .. } => (),
+        AgentEvent::TargetChanged { .. } => (),
         AgentEvent::ForcedMove { .. } => (),
         AgentEvent::SetFps { .. } => (),
         AgentEvent::TellReceived { .. } => (),

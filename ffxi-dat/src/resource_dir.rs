@@ -136,7 +136,7 @@ mod tests {
         let padded = total.div_ceil(16) * 16;
         let pad = padded - total;
         let size_units = (padded / 16) as u32;
-        let value = (size_units << 7) | (kind as u32 & 0x7F);
+        let value = (size_units << 7) | (kind as u32 & crate::chunk::CHUNK_KIND_MASK);
         let mut out = Vec::with_capacity(padded);
         out.extend_from_slice(name);
         out.extend_from_slice(&value.to_le_bytes());
@@ -274,7 +274,7 @@ mod tests {
         assert_eq!(cib.motion_option, 1);
     }
 
-    // research/xim EffectRoutineInstance.kt:418-431 — a routine's ids resolve against the chunk
+    // research/xim EffectRoutineInstance.kt appendChildSequences — a routine's ids resolve against the chunk
     // directory it lives in first. Retail reuses generator names across directories (ROM/0/0.DAT
     // has several `g010`), so the directory has to travel with the parsed stages.
     #[test]

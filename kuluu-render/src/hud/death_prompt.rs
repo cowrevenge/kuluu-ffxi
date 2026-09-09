@@ -8,9 +8,6 @@ use crate::snapshot::SceneState;
 pub struct DeathPromptPanel;
 
 #[derive(Component)]
-pub struct DeathCountdownText;
-
-#[derive(Component)]
 pub struct DeathPromptInstructionText;
 
 #[derive(Component)]
@@ -84,39 +81,22 @@ pub fn spawn_death_prompt(mut commands: Commands) {
                 style::text_font(13.0),
                 TextColor(theme::TEXT),
             ));
-            p.spawn((
-                DeathCountdownText,
-                Text::new(String::new()),
-                style::text_font(13.0),
-                TextColor(theme::DANGER),
-            ));
+            // The numeric clock is Enhanced: retail shows the home-point menu
+            // and no visible KO countdown
+            // (.agents/skills/retail-observe/references/death-ko-behavior.md).
+            #[cfg(feature = "enhanced-death-countdown")]
+            p.spawn(crate::hud::death_countdown::countdown_bundle());
         });
 }
 
-fn format_mmss(secs: u32) -> String {
-    format!("{}:{:02}", secs / 60, secs % 60)
-}
-
-/// The server only re-sends 0x037 char_status on status changes, not every second,
-/// so the KO countdown is anchored to the last server value and ticked down locally.
-#[derive(Default)]
-pub struct DeathCountdownAnchor {
-    server_secs: Option<u32>,
-    anchor_elapsed: f64,
-}
-
 pub fn update_death_prompt_system(
-    time: Res<Time>,
     state: Res<SceneState>,
     mut selection: ResMut<DeathPromptSelection>,
-    mut anchor: Local<DeathCountdownAnchor>,
     mut panel_q: Query<&mut Node, With<DeathPromptPanel>>,
-    mut countdown_q: Query<&mut Text, With<DeathCountdownText>>,
     mut instruction_q: Query<
         &mut Text,
         (
             With<DeathPromptInstructionText>,
-            Without<DeathCountdownText>,
             Without<DeathPromptChoicesText>,
         ),
     >,
@@ -124,7 +104,6 @@ pub fn update_death_prompt_system(
         &mut Text,
         (
             With<DeathPromptChoicesText>,
-            Without<DeathCountdownText>,
             Without<DeathPromptInstructionText>,
         ),
     >,
@@ -142,12 +121,6 @@ pub fn update_death_prompt_system(
         }
     }
 
-    let now = time.elapsed_secs_f64();
-    let server = if dead {
-        snap.death_homepoint_secs
-    } else {
-        None
-    };
     let offer = dead.then_some(snap.death_menu_offer).flatten();
     selection.sync(offer);
 
@@ -159,24 +132,6 @@ pub fn update_death_prompt_system(
     }
     if let Ok(mut text) = choices_q.single_mut() {
         let label = prompt_choices(offer, selection.accepts_offer());
-        if **text != label {
-            **text = label;
-        }
-    }
-
-    if anchor.server_secs != server {
-        anchor.server_secs = server;
-        anchor.anchor_elapsed = now;
-    }
-
-    if let Ok(mut text) = countdown_q.single_mut() {
-        let label = match anchor.server_secs {
-            Some(secs) => {
-                let ticked = (now - anchor.anchor_elapsed).max(0.0) as u32;
-                format!("Home Point in {}", format_mmss(secs.saturating_sub(ticked)))
-            }
-            None => String::new(),
-        };
         if **text != label {
             **text = label;
         }
@@ -268,6 +223,38 @@ mod tests {
         state.snapshot.self_char_id = None;
         state.snapshot.party = vec![member(99, 0)];
         assert!(is_dead(&state));
+    }
+
+    /// The panel's vanilla rows: the "You were defeated." header, the
+    /// instruction line, and the Yes/No choices. Retail shows the home-point
+    /// menu and no numeric KO clock
+    /// (.agents/skills/retail-observe/references/death-ko-behavior.md), so the
+    /// countdown row exists only in an `enhanced-death-countdown` build.
+    const VANILLA_PROMPT_ROWS: usize = 3;
+
+    #[test]
+    fn the_numeric_countdown_row_exists_only_in_an_enhanced_build() {
+        use bevy::ecs::system::RunSystemOnce;
+
+        let mut world = World::new();
+        world
+            .run_system_once(spawn_death_prompt)
+            .expect("spawner runs");
+
+        let panel = world
+            .query_filtered::<Entity, With<DeathPromptPanel>>()
+            .single(&world)
+            .expect("one death prompt panel");
+        let rows = world
+            .entity(panel)
+            .get::<Children>()
+            .map(|c| c.len())
+            .unwrap_or(0);
+
+        assert_eq!(
+            rows,
+            VANILLA_PROMPT_ROWS + cfg!(feature = "enhanced-death-countdown") as usize
+        );
     }
 
     #[test]

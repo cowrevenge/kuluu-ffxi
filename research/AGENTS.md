@@ -47,7 +47,9 @@ the higher tier:
    questions (field widths, masks, flags) are settled here, nowhere else.
 2. **`XIClient/`** — disassembly-grounded; the best community reference for
    **bit-level format accuracy** (field widths, in-memory-only bits). No
-   license: read-only. Its value is not only field widths: it carries retail's
+   license: read-only. Its reconstructions remain community evidence; cite them
+   as such until corroborated by the relevant retail binary or observation.
+   Its value is not only field widths: it carries retail's
    runtime *policies* named and intact, so prefer it over XIM whenever the
    question is "what exactly does retail do here", not just "what does the
    struct look like". `World/Zone/Terrain/` is the worked example — retail's

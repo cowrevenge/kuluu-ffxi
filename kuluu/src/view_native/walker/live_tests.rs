@@ -1487,25 +1487,48 @@ fn door_leaf_is_a_floor() {
     );
 }
 
-/// A mob circle soft-blocks at standoff...
+/// Retail's actor contact: the move is withheld for the budget, then released.
 #[test]
-fn mob_circle_soft_blocks_then_push_through() {
+fn mob_circle_blocks_then_walks_through() {
     // Backstop wall far ahead: the MOB is what must stop phase 1.
     let g = flat_with_wall(30.0, 3.0, NO_SUB_AREA_LINK);
     let mobs = mob_circle(1, 4.0, 0.0, 0.5);
-    // Phase 1: press into it for just under the push-through threshold.
+    // 1.5 s of travel reaches the mob with the block budget still live.
     let t = walk(&g, &mobs, (-2.0, 0.0, 0.0), (1.0, 0.0), 1.5, 60.0, RUN);
     assert!(
         t.last().unwrap().0 .0 < 4.0 - 0.85,
         "mob held: x={:.2}",
         t.last().unwrap().0 .0
     );
-    // Phase 2: keep pressing past the threshold — it stops blocking and we pass.
+    // 6.0 s outlasts the budget: the block expires and the path crosses the
+    // mob rather than skirting it.
     let t = walk(&g, &mobs, (-2.0, 0.0, 0.0), (1.0, 0.0), 6.0, 60.0, RUN);
+    let (x, y, _) = t.last().unwrap().0;
+    assert!(x > 4.5, "contact budget did not expire: x={x:.2}");
     assert!(
-        t.last().unwrap().0 .0 > 4.5,
-        "push-through passed the mob: x={:.2}",
-        t.last().unwrap().0 .0
+        y.abs() < 0.05,
+        "retail withholds the move; it must not deflect sideways: y={y:.2}"
+    );
+    assert!(
+        t.iter()
+            .any(|((px, py, _), _)| (px - 4.0).abs() < 0.2 && py.abs() < 0.2),
+        "walked around the mob instead of through it"
+    );
+}
+
+/// Retail never depenetrates: standing still inside an actor's circle must not
+/// shove the player out. research/XIClient/src/XIClient/source/World/Actor/ControllableActor.cpp
+/// ControllableActor::HandleThirdPersonControl only withholds the move.
+#[test]
+fn mob_circle_does_not_shove_an_idle_player() {
+    let g = flat_with_wall(30.0, 3.0, NO_SUB_AREA_LINK);
+    // Mob circle centered a hair away: deeply overlapping at standoff.
+    let mobs = mob_circle(1, 0.1, 0.0, 0.5);
+    let t = walk(&g, &mobs, (0.0, 0.0, 0.0), (0.0, 0.0), 2.0, 60.0, RUN);
+    let (x, y, _) = t.last().unwrap().0;
+    assert!(
+        x.abs() < 1e-3 && y.abs() < 1e-3,
+        "idle player was pushed out of the overlap: ({x:.3}, {y:.3})"
     );
 }
 

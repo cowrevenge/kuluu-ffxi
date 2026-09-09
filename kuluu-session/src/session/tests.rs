@@ -38,6 +38,60 @@ fn sub_packet_events(opcode: u16, body: &[u8]) -> Vec<AgentEvent> {
     out
 }
 
+/// s2c 0x058 ASSIST is the server's retarget push (`/assist`, engage,
+/// auto-target-after-kill); the dispatch must turn `AssistNo` into the client's
+/// new target (vendor/server/src/map/packets/s2c/0x058_assist.h).
+#[test]
+fn assist_packet_retargets_to_assist_no() {
+    use ffxi_proto::decode::Assist;
+
+    let mut body = vec![0u8; Assist::SIZE];
+    body[Assist::UNIQUE_NO_OFFSET..Assist::UNIQUE_NO_OFFSET + 4]
+        .copy_from_slice(&0x0100_0F42u32.to_le_bytes());
+    body[Assist::ASSIST_NO_OFFSET..Assist::ASSIST_NO_OFFSET + 4]
+        .copy_from_slice(&0x0100_07D1u32.to_le_bytes());
+    body[Assist::ACT_INDEX_OFFSET..Assist::ACT_INDEX_OFFSET + 2]
+        .copy_from_slice(&0x0442u16.to_le_bytes());
+
+    let events = sub_packet_events(ffxi_proto::map::s2c::ASSIST, &body);
+    assert!(
+        matches!(
+            events.as_slice(),
+            [AgentEvent::TargetChanged {
+                target_id: Some(0x0100_07D1),
+            }]
+        ),
+        "{events:?}"
+    );
+}
+
+/// LSB builds the packet over a zeroed buffer and leaves `AssistNo` at 0 when
+/// the target went away (`CCharEntity::OnChangeTarget` with a null target,
+/// 0x058_assist.cpp GP_SERV_COMMAND_ASSIST::GP_SERV_COMMAND_ASSIST), so 0 must not be reported as entity 0.
+#[test]
+fn assist_packet_reports_a_zero_assist_no_as_no_target() {
+    let events = sub_packet_events(
+        ffxi_proto::map::s2c::ASSIST,
+        &[0u8; ffxi_proto::decode::Assist::SIZE],
+    );
+    assert!(
+        matches!(
+            events.as_slice(),
+            [AgentEvent::TargetChanged { target_id: None }]
+        ),
+        "{events:?}"
+    );
+}
+
+#[test]
+fn assist_packet_rejects_a_truncated_body() {
+    let events = sub_packet_events(
+        ffxi_proto::map::s2c::ASSIST,
+        &[0u8; ffxi_proto::decode::Assist::SIZE - 1],
+    );
+    assert!(events.is_empty(), "{events:?}");
+}
+
 #[test]
 fn death_menu_packet_emits_the_server_offer() {
     use ffxi_proto::decode::DeathMenuOffer;
@@ -71,7 +125,7 @@ fn death_menu_packet_rejects_a_truncated_body() {
 /// `ZoneChanged` clears `SessionState::current_weather`, so the LOGIN arm
 /// must emit the 0x00A zone-in weather *after* it. Reversed, a zoning
 /// character renders the default sky until the next 0x057 — which LSB only
-/// sends on a weather change (vendor/server/src/map/zone.cpp:672).
+/// sends on a weather change (vendor/server/src/map/zone.cpp CZone::SetWeather).
 #[test]
 fn login_emits_zone_in_weather_after_the_zone_change() {
     const WEATHER_NUMBER: u16 = 4;
@@ -95,6 +149,55 @@ fn login_emits_zone_in_weather_after_the_zone_change() {
     assert!(
         weather_at > zone_at,
         "WeatherUpdated must follow ZoneChanged, got {events:?}"
+    );
+}
+
+/// `ZoneChanged` clears `SessionState::death_homepoint_secs`, and 0x037
+/// CHAR_STATUS only arrives on a status *change*, so a character who zoned in
+/// still KO'd depends on the LOGIN arm re-publishing the timer afterwards.
+#[test]
+fn login_emits_the_homepoint_timer_after_the_zone_change_only_while_ko() {
+    use ffxi_proto::decode::{dead_counter_seconds_until_homepoint, PosHead, ServerLogin};
+
+    // An arbitrary counter, converted by the decoder's own formula rather than a
+    // second copy of it here.
+    const DEAD_COUNTER: u32 = 129_600;
+    const FULL_HP_PCT: u8 = 100;
+    let remaining = dead_counter_seconds_until_homepoint(DEAD_COUNTER);
+    assert!(remaining > 0, "the fixture must describe a live countdown");
+
+    let mut body = vec![0u8; ServerLogin::DEAD_COUNTER_OFFSET + 4];
+    body[ServerLogin::DEAD_COUNTER_OFFSET..ServerLogin::DEAD_COUNTER_OFFSET + 4]
+        .copy_from_slice(&DEAD_COUNTER.to_le_bytes());
+
+    body[PosHead::HPP_OFFSET] = FULL_HP_PCT;
+    assert!(
+        !sub_packet_events(ffxi_proto::map::s2c::LOGIN, &body)
+            .iter()
+            .any(|e| matches!(e, AgentEvent::DeathTimerUpdated { .. })),
+        "a living character carries the same counter and must publish no timer"
+    );
+
+    body[PosHead::HPP_OFFSET] = 0;
+    let events = sub_packet_events(ffxi_proto::map::s2c::LOGIN, &body);
+    let zone_at = events
+        .iter()
+        .position(|e| matches!(e, AgentEvent::ZoneChanged { .. }))
+        .expect("LOGIN emits ZoneChanged");
+    let timer_at = events
+        .iter()
+        .position(|e| {
+            matches!(
+                e,
+                AgentEvent::DeathTimerUpdated {
+                    seconds_until_homepoint: Some(secs),
+                } if *secs == remaining
+            )
+        })
+        .expect("LOGIN emits the zone-in homepoint timer");
+    assert!(
+        timer_at > zone_at,
+        "DeathTimerUpdated must follow ZoneChanged, got {events:?}"
     );
 }
 
@@ -177,7 +280,7 @@ fn origin_fallback_does_not_replace_origin_seed() {
 
 #[test]
 fn myroom_login_keeps_forced_origin_seed() {
-    // vendor/server/scripts/globals/moghouse.lua:290 setPos(0, 0, 0, 192):
+    // vendor/server/scripts/globals/moghouse.lua moghouseZoneLines setPos(0, 0, 0, 192):
     // the MH origin spawn is authoritative, not a bad seed to repair.
     let town_side = v(162.591, -4.103, 162.423);
     assert_eq!(
@@ -227,7 +330,7 @@ fn far_carrier_snaps_in_steady_state_but_not_during_settle() {
     );
 }
 
-/// Pins the XIM doorOffset branches (AssetViewer.kt:654-663): 2F interiors
+/// Pins the XIM doorOffset branches (AssetViewer.kt): 2F interiors
 /// shift the door 3.15 yalms along native z, the [S]-city/Adoulin bases shift
 /// along x.
 #[test]
@@ -253,7 +356,11 @@ fn myroom_job_packet_layout_matches_lsb_struct() {
     let buf = build_subpacket_myroom_job(0xBEEF, Some(5), Some(13));
     assert_eq!(buf.len(), 8, "4 hdr + MainJobIndex + SupportJobIndex + pad");
     let id_and_size = u16::from_le_bytes([buf[0], buf[1]]);
-    assert_eq!(id_and_size & 0x1FF, 0x100, "opcode MYROOM_JOB");
+    assert_eq!(
+        id_and_size & framing::SUBPACKET_OPCODE_MASK,
+        ffxi_proto::map::c2s::MYROOM_JOB,
+        "opcode MYROOM_JOB"
+    );
     assert_eq!(id_and_size >> 9, 2, "size_words");
     assert_eq!(u16::from_le_bytes([buf[2], buf[3]]), 0xBEEF, "sync");
     assert_eq!(buf[4], 5, "MainJobIndex");
@@ -285,7 +392,11 @@ fn motion_packet_layout_matches_lsb_struct() {
         "hdr + UniqueNo + ActIndex + Number/Mode/Param/pad"
     );
     let id_and_size = u16::from_le_bytes([buf[0], buf[1]]);
-    assert_eq!(id_and_size & 0x1FF, ffxi_proto::map::c2s::MOTION, "opcode");
+    assert_eq!(
+        id_and_size & framing::SUBPACKET_OPCODE_MASK,
+        ffxi_proto::map::c2s::MOTION,
+        "opcode"
+    );
     assert_eq!(id_and_size >> 9, 4, "size_words");
     assert_eq!(u16::from_le_bytes([buf[2], buf[3]]), 0xBEEF, "sync");
     assert_eq!(
@@ -310,7 +421,10 @@ fn emote_list_req_is_header_only() {
     let buf = build_subpacket_emote_list_req(0x1234);
     assert_eq!(buf.len(), 4);
     let id_and_size = u16::from_le_bytes([buf[0], buf[1]]);
-    assert_eq!(id_and_size & 0x1FF, ffxi_proto::map::c2s::EMOTE_LIST);
+    assert_eq!(
+        id_and_size & framing::SUBPACKET_OPCODE_MASK,
+        ffxi_proto::map::c2s::EMOTE_LIST
+    );
     assert_eq!(id_and_size >> 9, 1, "size_words");
     assert_eq!(u16::from_le_bytes([buf[2], buf[3]]), 0x1234, "sync");
 }
@@ -324,7 +438,10 @@ fn tracking_list_req_carries_sendflg_one() {
     let buf = build_subpacket_tracking_list(0x1234);
     assert_eq!(buf.len(), 8);
     let id_and_size = u16::from_le_bytes([buf[0], buf[1]]);
-    assert_eq!(id_and_size & 0x1FF, ffxi_proto::map::c2s::TRACKING_LIST);
+    assert_eq!(
+        id_and_size & framing::SUBPACKET_OPCODE_MASK,
+        ffxi_proto::map::c2s::TRACKING_LIST
+    );
     assert_eq!(id_and_size >> 9, 2, "size_words");
     assert_eq!(u16::from_le_bytes([buf[2], buf[3]]), 0x1234, "sync");
     assert_eq!(
@@ -505,7 +622,7 @@ fn worm_entity(s: &crate::state::SessionState) -> &crate::state::Entity {
         .expect("worm present")
 }
 
-/// The worm's full dive/surface cycle as LSB drives it (mob_controller.cpp:1176-1290):
+/// The worm's full dive/surface cycle as LSB drives it (mob_controller.cpp CMobController::DoRoamTick):
 /// spawn above ground -> dive (name hidden + untargetable; status stays NORMAL for the first
 /// 3 s) -> move underground (status INVISIBLE piggybacks on POS ticks) -> surface (one UPDATE_HP
 /// packet carries status=UPDATE(1) with the flag cleared; name stays hidden ~2 more seconds).
@@ -632,6 +749,7 @@ fn walkaway_release_only_user_driven_past_threshold() {
 }
 
 const PINNED_EVENT: (u32, u16, u16) = (0x0100_02FF, 7, 0x0123);
+const ID_FLIP: u16 = 0xFF;
 const FLUSH_ZONE: u16 = 230;
 const FLUSH_SEQ: u16 = 0x0044;
 
@@ -724,7 +842,11 @@ fn walking_away_clears_the_vm_dialog_it_released() {
     .expect("walking away releases the pinned event");
     assert!(flush.clear_dialog);
 
-    let other = (PINNED_EVENT.0 ^ 0xFF, PINNED_EVENT.1, PINNED_EVENT.2);
+    let other = (
+        PINNED_EVENT.0 ^ u32::from(ID_FLIP),
+        PINNED_EVENT.1,
+        PINNED_EVENT.2,
+    );
     let mut pending = vec![PINNED_EVENT];
     let flush = flush_pending_event_end(
         flush_inputs(true, false, true),
@@ -751,7 +873,7 @@ fn a_pinned_event_is_owed_exactly_one_event_end() {
     assert!(!take_pending_event_end(
         &mut pending,
         unique_no,
-        event_id ^ 0xFF
+        event_id ^ ID_FLIP
     ));
     assert_eq!(pending, vec![(unique_no, act_index, event_id)]);
 }
@@ -924,7 +1046,7 @@ fn event_end_writes_csid_to_event_para_field() {
         &buf[16..18],
         &230u16.to_le_bytes(),
         "EventNum carries the zone id (retail echoes LOGIN EventNum, \
-             0x00a_login.cpp:187); LSB's 0x05B handler never reads it",
+             0x00a_login.cpp GP_SERV_COMMAND_LOGIN::GP_SERV_COMMAND_LOGIN); LSB's 0x05B handler never reads it",
     );
 }
 
@@ -940,7 +1062,10 @@ fn scenario_item_packet_layout_matches_lsb_struct() {
     assert_eq!(buf.len(), 76, "header(4) + body(72)");
 
     let id_and_size = u16::from_le_bytes([buf[0], buf[1]]);
-    assert_eq!(id_and_size & 0x1FF, ffxi_proto::map::c2s::SCENARIO_ITEM);
+    assert_eq!(
+        id_and_size & framing::SUBPACKET_OPCODE_MASK,
+        ffxi_proto::map::c2s::SCENARIO_ITEM
+    );
     assert_eq!(id_and_size >> 9, 19, "size_words = 76/4");
     assert_eq!(u16::from_le_bytes([buf[2], buf[3]]), 0x1234, "sync");
 
@@ -955,7 +1080,7 @@ fn scenario_item_packet_layout_matches_lsb_struct() {
     assert_eq!(&buf[74..76], &6u16.to_le_bytes(), "TableIndex");
 }
 
-/// vendor/server/src/map/packets/c2s/0x064_scenarioitem.cpp:44 —
+/// vendor/server/src/map/packets/c2s/0x064_scenarioitem.cpp GP_CLI_COMMAND_SCENARIOITEM::process keyItemId —
 /// keyItemId = TableIndex*512 + i*32 + bit; the fold must be its inverse.
 #[test]
 fn mark_seen_bits_round_trip_through_ids_from_flags() {
@@ -978,7 +1103,7 @@ fn mark_seen_bits_round_trip_through_ids_from_flags() {
     );
 }
 
-/// vendor/server/src/map/packets/c2s/0x064_scenarioitem.cpp:31-33 —
+/// vendor/server/src/map/packets/c2s/0x064_scenarioitem.cpp PacketValidator —
 /// UniqueNo must equal char id and ActIndex must equal targid, ActIndex 0
 /// is always rejected, and the send is blocked while InEvent; every
 /// blocked case must skip without mutating local seen-state.
@@ -1127,9 +1252,9 @@ fn battle2_self(action_kind: u8, cmd_arg: u32) -> Battle2Header {
 }
 
 /// The bar is armed at send but unstarted; it only starts when the server's
-/// own MagicStart arrives (vendor/server/src/map/ai/states/magic_state.cpp:127),
+/// own MagicStart arrives (vendor/server/src/map/ai/states/magic_state.cpp CMagicState::CMagicState),
 /// so it cannot lead the cast pose and the "starts casting" line by a round trip.
-/// The FourCCs are the literal LSB constants (vendor/server/src/map/enums/four_cc.h:40).
+/// The FourCCs are the literal LSB constants (vendor/server/src/map/enums/four_cc.h FourCC BlueMagicCast).
 #[test]
 fn self_cast_bar_starts_on_magic_start_not_on_send() {
     const CABK: u32 = 0x6B626163;
@@ -1311,7 +1436,7 @@ fn talknumwork2_substitutes_the_caught_item() {
 }
 
 /// The Esc cancel EndPara crosses the wire exactly as LSB's
-/// utils.EVENT_CANCELLED_OPTION (vendor/server/scripts/utils/utils.lua:8).
+/// utils.EVENT_CANCELLED_OPTION (vendor/server/scripts/utils/utils.lua).
 #[test]
 fn event_end_cancel_writes_lsb_cancel_option() {
     let buf = build_subpacket_event_end(
@@ -1387,7 +1512,7 @@ fn eventucoff_fishing_emits_fishing_ended_and_keeps_pending() {
 }
 
 /// EventRecvPending follows every processed 0x05B
-/// (vendor/server/src/map/packets/c2s/0x05b_eventend.cpp:71) and can land
+/// (vendor/server/src/map/packets/c2s/0x05b_eventend.cpp GP_CLI_COMMAND_EVENTEND::process) and can land
 /// after a chained event's 0x032 trigger — it must not clear anything.
 #[test]
 fn eventucoff_recv_pending_ack_is_inert() {
@@ -1410,12 +1535,16 @@ fn tell_packet_layout_matches_phoenix_struct() {
     assert_eq!(buf.len(), 24, "total = 4 hdr + 20 body, padded to mul-of-4");
 
     let id_and_size = u16::from_le_bytes([buf[0], buf[1]]);
-    assert_eq!(id_and_size & 0x1FF, 0x0B6, "opcode");
+    assert_eq!(
+        id_and_size & framing::SUBPACKET_OPCODE_MASK,
+        codec::CHAT_NAME,
+        "opcode"
+    );
     assert_eq!(id_and_size >> 9, 6, "size_words");
     let sync = u16::from_le_bytes([buf[2], buf[3]]);
     assert_eq!(sync, 0xABCD, "sync passed through");
 
-    // The server's PacketValidator requires unknown00 == 3 (0x0b6_chat_name.cpp:60);
+    // The server's PacketValidator requires unknown00 == 3 (0x0b6_chat_name.cpp);
     // a 0 here is what silently dropped every tell / customMenu reply.
     assert_eq!(buf[4], 3, "unknown00 == 3 (server-required)");
     assert_eq!(buf[5], 0, "unknown01");
@@ -1431,7 +1560,7 @@ fn tell_packet_truncates_oversize_inputs() {
     let buf = build_subpacket_tell(0, &long_name, "x");
 
     // sName is char[15] read via asStringFromUntrustedSource(sName,
-    // sizeof(sName)) (0x0b6_chat_name.cpp:76), so a full unterminated
+    // sizeof(sName)) (0x0b6_chat_name.cpp GP_CLI_COMMAND_CHAT_NAME::process recipientName), so a full unterminated
     // 15-byte field is legal on the wire.
     assert_eq!(&buf[6..21], &[b'a'; 15][..], "first 15 chars of name");
     assert_eq!(&buf[21..22], b"x", "message follows the full sName field");
@@ -1454,7 +1583,11 @@ fn item_use_packet_layout_matches_phoenix_struct() {
     assert_eq!(buf.len(), 20);
 
     let id_and_size = u16::from_le_bytes([buf[0], buf[1]]);
-    assert_eq!(id_and_size & 0x1FF, 0x037, "opcode");
+    assert_eq!(
+        id_and_size & framing::SUBPACKET_OPCODE_MASK,
+        codec::ITEM_USE,
+        "opcode"
+    );
     assert_eq!(id_and_size >> 9, 5, "size_words");
     let sync = u16::from_le_bytes([buf[2], buf[3]]);
     assert_eq!(sync, 0xBEEF, "sync passed through");
@@ -1553,9 +1686,9 @@ fn event_0x034_extracts_nums_and_param_block() {
     assert_eq!(d.nums[1], 1234);
 }
 
-// The conquest outpost vendor: LSB's conquest.lua:1461 calls
+// The conquest outpost vendor: LSB's conquest.lua canPurchaseItem calls
 // startEvent(32756, nation, fee, 0, fee, getCP(), 0, 0, 0), packed into
-// num[0..7] by 0x034_eventnum.cpp:44-50. Dropping those on the floor leaves
+// num[0..7] by 0x034_eventnum.cpp GP_SERV_COMMAND_EVENTNUM::GP_SERV_COMMAND_EVENTNUM. Dropping those on the floor leaves
 // every {Num:N} marker in the vendor dialog unresolved (kuluu-fldn).
 #[test]
 fn event_trigger_0x034_carries_params_and_the_redirected_text_table() {
@@ -1774,7 +1907,7 @@ fn is_fresh_bundle_dedups_retransmits_and_survives_wrap() {
 }
 
 /// Model of LSB's c2s dispatch window
-/// (vendor/server/src/map/map_networking.cpp:419-428,471): subpacket
+/// (vendor/server/src/map/map_networking.cpp MapNetworking::parse): subpacket
 /// dispatched iff `client_packet_id < sync <= header`, then
 /// `client_packet_id = header`. Feeds it bundles built the way the
 /// session builds them (one sync per subpacket, header from
@@ -2033,7 +2166,7 @@ fn battle2_mob_tp_move_resolves_name_not_damage() {
 
 #[test]
 fn battle2_mob_readies_resolves_skill_from_param() {
-    // SkillStart (7) puts the skill id in param instead (mobskill_state.cpp:100-104).
+    // SkillStart (7) puts the skill id in param instead (mobskill_state.cpp CState).
     let line = build_battle2_line(43, "Goobbue Farmer", "Oldman", false, true, 584, 0, 7)
         .expect("msg 43 must resolve");
     assert!(line.text.contains("readies Uppercut"), "got: {}", line.text);
@@ -2079,8 +2212,9 @@ impl BattleBitWriter {
         };
         let shifted = (value & mask) << bit_in_byte;
         let cover = total_bits.div_ceil(8);
+        const BYTE_MASK: u64 = 0xFF;
         for i in 0..cover {
-            self.data[byte_offset + i] |= ((shifted >> (i * 8)) & 0xFF) as u8;
+            self.data[byte_offset + i] |= ((shifted >> (i * 8)) & BYTE_MASK) as u8;
         }
         self.pos += bits as usize;
     }
@@ -2090,7 +2224,7 @@ impl BattleBitWriter {
     }
 }
 
-// vendor/server/src/map/packets/s2c/0x028_battle2.cpp:41-58 — an off-by-one-field read here
+// vendor/server/src/map/packets/s2c/0x028_battle2.cpp GP_SERV_COMMAND_BATTLE2::pack — an off-by-one-field read here
 // silently hands the recast timer ("Action info") back as an entity id.
 #[test]
 fn battle2_header_reports_primary_target() {
@@ -2126,9 +2260,9 @@ fn battle2_header_reports_primary_target() {
     assert_eq!(h.primary_target_id, None);
 }
 
-// vendor/server/src/map/packets/s2c/0x028_battle2.cpp:71-73 — resolution(3), kind(2),
+// vendor/server/src/map/packets/s2c/0x028_battle2.cpp GP_SERV_COMMAND_BATTLE2::pack — resolution(3), kind(2),
 // animation(12) open every result block. A basic attack never sets `action.actionid`
-// (vendor/server/src/map/entities/battleentity.cpp:2989), so these bits are the ONLY
+// (vendor/server/src/map/entities/battleentity.cpp CBattleEntity::OnAttack), so these bits are the ONLY
 // per-swing data: an off-by-one here picks the wrong swing routine and the wrong hit
 // reaction, i.e. the wrong sound or none.
 const BATTLE2_PARRIED_LEFT_ATTACK: ffxi_proto::melee::MeleeResult =
@@ -2713,7 +2847,7 @@ fn check_impossible_to_gauge_uses_mob_placeholder() {
 }
 
 // 0x009 body: UniqueNo u32 @0, ActIndex u16 @4, MesNo u16 @6, Attr u8 @8
-// (vendor/server/src/map/packets/s2c/0x009_message.h:37-41).
+// (vendor/server/src/map/packets/s2c/0x009_message.h GP_SERV_COMMAND_MESSAGE UniqueNo).
 fn std_message_body(unique_no: u32, mes_no: u16) -> Vec<u8> {
     let mut data = vec![0u8; 12];
     data[0..4].copy_from_slice(&unique_no.to_le_bytes());
@@ -2829,8 +2963,16 @@ fn buffcancel_packet_layout_matches_server_struct() {
     let buf = build_subpacket_buffcancel(0x1234, 40);
     assert_eq!(buf.len(), 8);
     let hdr = u16::from_le_bytes([buf[0], buf[1]]);
-    assert_eq!(hdr & 0x01FF, 0x0F1, "opcode");
-    assert_eq!((hdr >> 9) & 0x7F, 2, "size in words");
+    assert_eq!(
+        hdr & framing::SUBPACKET_OPCODE_MASK,
+        codec::BUFFCANCEL,
+        "opcode"
+    );
+    assert_eq!(
+        (hdr >> framing::SUBPACKET_SIZE_WORDS_SHIFT) & framing::SUBPACKET_SIZE_WORDS_MASK,
+        2,
+        "size in words"
+    );
     assert_eq!(
         u16::from_le_bytes(buf[4..6].try_into().unwrap()),
         40,
@@ -2844,8 +2986,14 @@ fn shop_buy_packet_layout_matches_server_struct() {
     let buf = build_subpacket_shop_buy(0xABCD, 5, 12, 3);
     assert_eq!(buf.len(), 16);
     let hdr = u16::from_le_bytes([buf[0], buf[1]]);
-    assert_eq!(hdr & 0x01FF, 0x083);
-    assert_eq!((hdr >> 9) & 0x7F, 4);
+    assert_eq!(
+        hdr & framing::SUBPACKET_OPCODE_MASK,
+        ffxi_proto::map::c2s::SHOP_BUY
+    );
+    assert_eq!(
+        (hdr >> framing::SUBPACKET_SIZE_WORDS_SHIFT) & framing::SUBPACKET_SIZE_WORDS_MASK,
+        4
+    );
     assert_eq!(u32::from_le_bytes(buf[4..8].try_into().unwrap()), 5, "qty");
     assert_eq!(
         u16::from_le_bytes(buf[8..10].try_into().unwrap()),
@@ -2866,8 +3014,16 @@ fn shop_sell_req_packet_layout_matches_server_struct() {
     let buf = build_subpacket_shop_sell_req(0xABCD, 7, 4096, 11);
     assert_eq!(buf.len(), 12, "header (4) + body (8)");
     let hdr = u16::from_le_bytes([buf[0], buf[1]]);
-    assert_eq!(hdr & 0x01FF, 0x084, "opcode in low 9 bits");
-    assert_eq!((hdr >> 9) & 0x7F, 3, "size_words=3");
+    assert_eq!(
+        hdr & framing::SUBPACKET_OPCODE_MASK,
+        ffxi_proto::map::c2s::SHOP_SELL_REQ,
+        "opcode in low 9 bits"
+    );
+    assert_eq!(
+        (hdr >> framing::SUBPACKET_SIZE_WORDS_SHIFT) & framing::SUBPACKET_SIZE_WORDS_MASK,
+        3,
+        "size_words=3"
+    );
     assert_eq!(
         u16::from_le_bytes([buf[2], buf[3]]),
         0xABCD,
@@ -2892,8 +3048,16 @@ fn shop_sell_set_packet_layout_matches_server_struct() {
     let buf = build_subpacket_shop_sell_set(0xBEEF);
     assert_eq!(buf.len(), 8, "header (4) + body (4)");
     let hdr = u16::from_le_bytes([buf[0], buf[1]]);
-    assert_eq!(hdr & 0x01FF, 0x085, "opcode in low 9 bits");
-    assert_eq!((hdr >> 9) & 0x7F, 2, "size_words=2");
+    assert_eq!(
+        hdr & framing::SUBPACKET_OPCODE_MASK,
+        ffxi_proto::map::c2s::SHOP_SELL_SET,
+        "opcode in low 9 bits"
+    );
+    assert_eq!(
+        (hdr >> framing::SUBPACKET_SIZE_WORDS_SHIFT) & framing::SUBPACKET_SIZE_WORDS_MASK,
+        2,
+        "size_words=2"
+    );
     assert_eq!(
         u16::from_le_bytes([buf[2], buf[3]]),
         0xBEEF,
@@ -2934,8 +3098,16 @@ fn camp_packet_layout_matches_server_struct() {
         let buf = build_subpacket_camp(0xBEEF, mode);
         assert_eq!(buf.len(), 8, "header (4) + body (4)");
         let hdr_word = u16::from_le_bytes([buf[0], buf[1]]);
-        assert_eq!(hdr_word & 0x01FF, 0x0E8, "opcode in low 9 bits");
-        assert_eq!((hdr_word >> 9) & 0x7F, 2, "size_words=2");
+        assert_eq!(
+            hdr_word & framing::SUBPACKET_OPCODE_MASK,
+            codec::CAMP,
+            "opcode in low 9 bits"
+        );
+        assert_eq!(
+            (hdr_word >> framing::SUBPACKET_SIZE_WORDS_SHIFT) & framing::SUBPACKET_SIZE_WORDS_MASK,
+            2,
+            "size_words=2"
+        );
         assert_eq!(
             u16::from_le_bytes([buf[2], buf[3]]),
             0xBEEF,
@@ -2954,8 +3126,16 @@ fn gameok_packet_layout_matches_server_struct() {
     let buf = build_subpacket_gameok(0xBEEF);
     assert_eq!(buf.len(), 12, "header (4) + body (8)");
     let hdr_word = u16::from_le_bytes([buf[0], buf[1]]);
-    assert_eq!(hdr_word & 0x01FF, 0x00C, "opcode in low 9 bits");
-    assert_eq!((hdr_word >> 9) & 0x7F, 3, "size_words=3");
+    assert_eq!(
+        hdr_word & framing::SUBPACKET_OPCODE_MASK,
+        ffxi_proto::map::c2s::GAMEOK,
+        "opcode in low 9 bits"
+    );
+    assert_eq!(
+        (hdr_word >> framing::SUBPACKET_SIZE_WORDS_SHIFT) & framing::SUBPACKET_SIZE_WORDS_MASK,
+        3,
+        "size_words=3"
+    );
     assert_eq!(
         u16::from_le_bytes([buf[2], buf[3]]),
         0xBEEF,
@@ -2979,8 +3159,16 @@ fn equip_inspect_packet_layout_matches_server_struct() {
     assert_eq!(buf.len(), 16, "header (4) + body (12)");
 
     let hdr_word = u16::from_le_bytes([buf[0], buf[1]]);
-    assert_eq!(hdr_word & 0x01FF, 0x0DD, "opcode in low 9 bits");
-    assert_eq!((hdr_word >> 9) & 0x7F, 4, "size_words=4");
+    assert_eq!(
+        hdr_word & framing::SUBPACKET_OPCODE_MASK,
+        codec::EQUIP_INSPECT,
+        "opcode in low 9 bits"
+    );
+    assert_eq!(
+        (hdr_word >> framing::SUBPACKET_SIZE_WORDS_SHIFT) & framing::SUBPACKET_SIZE_WORDS_MASK,
+        4,
+        "size_words=4"
+    );
     assert_eq!(
         u32::from_le_bytes(buf[4..8].try_into().unwrap()),
         0x1234_5678,
@@ -2997,12 +3185,20 @@ fn equip_inspect_packet_layout_matches_server_struct() {
 
 #[test]
 fn bazaar_packet_layouts_match_server_structs() {
-    // GP_CLI_COMMAND_BAZAAR_LIST (c2s/0x105_bazaar_list.h:27-31).
+    // GP_CLI_COMMAND_BAZAAR_LIST (c2s/0x105_bazaar_list.h).
     let list = build_subpacket_bazaar_list(0xABCD, 0x1234_5678, 42);
     assert_eq!(list.len(), 12, "header (4) + body (8)");
     let hdr = u16::from_le_bytes([list[0], list[1]]);
-    assert_eq!(hdr & 0x01FF, 0x105, "opcode = 0x105 BAZAAR_LIST");
-    assert_eq!((hdr >> 9) & 0x7F, 3, "size_words=3");
+    assert_eq!(
+        hdr & framing::SUBPACKET_OPCODE_MASK,
+        ffxi_proto::map::c2s::BAZAAR_LIST,
+        "opcode BAZAAR_LIST"
+    );
+    assert_eq!(
+        (hdr >> framing::SUBPACKET_SIZE_WORDS_SHIFT) & framing::SUBPACKET_SIZE_WORDS_MASK,
+        3,
+        "size_words=3"
+    );
     assert_eq!(u16::from_le_bytes([list[2], list[3]]), 0xABCD, "sync");
     assert_eq!(
         u32::from_le_bytes(list[4..8].try_into().unwrap()),
@@ -3012,11 +3208,15 @@ fn bazaar_packet_layouts_match_server_structs() {
     assert_eq!(u16::from_le_bytes([list[8], list[9]]), 42, "ActIndex LE");
     assert_eq!(&list[10..12], &[0u8; 2], "padding00");
 
-    // GP_CLI_COMMAND_BAZAAR_BUY (c2s/0x106_bazaar_buy.h:27-31).
+    // GP_CLI_COMMAND_BAZAAR_BUY (c2s/0x106_bazaar_buy.h).
     let buy = build_subpacket_bazaar_buy(0xBEEF, 7, 12);
     assert_eq!(buy.len(), 12, "header (4) + body (8)");
     let hdr = u16::from_le_bytes([buy[0], buy[1]]);
-    assert_eq!(hdr & 0x01FF, 0x106, "opcode = 0x106 BAZAAR_BUY");
+    assert_eq!(
+        hdr & framing::SUBPACKET_OPCODE_MASK,
+        ffxi_proto::map::c2s::BAZAAR_BUY,
+        "opcode BAZAAR_BUY"
+    );
     assert_eq!(buy[4], 7, "BazaarItemIndex");
     assert_eq!(&buy[5..8], &[0u8; 3], "padding00");
     assert_eq!(
@@ -3029,8 +3229,16 @@ fn bazaar_packet_layouts_match_server_structs() {
     let exit = build_subpacket_bazaar_exit(0x0042);
     assert_eq!(exit.len(), 4, "header only");
     let hdr = u16::from_le_bytes([exit[0], exit[1]]);
-    assert_eq!(hdr & 0x01FF, 0x104, "opcode = 0x104 BAZAAR_EXIT");
-    assert_eq!((hdr >> 9) & 0x7F, 1, "size_words=1");
+    assert_eq!(
+        hdr & framing::SUBPACKET_OPCODE_MASK,
+        ffxi_proto::map::c2s::BAZAAR_EXIT,
+        "opcode BAZAAR_EXIT"
+    );
+    assert_eq!(
+        (hdr >> framing::SUBPACKET_SIZE_WORDS_SHIFT) & framing::SUBPACKET_SIZE_WORDS_MASK,
+        1,
+        "size_words=1"
+    );
     assert_eq!(u16::from_le_bytes([exit[2], exit[3]]), 0x0042, "sync");
 }
 
@@ -3041,7 +3249,11 @@ fn equip_set_packet_layout_matches_server_struct() {
     let buf = build_subpacket_equip_set(0xBEEF, 7, 10, 0);
     assert_eq!(buf.len(), 8, "header (4) + body (4)");
     let hdr_word = u16::from_le_bytes([buf[0], buf[1]]);
-    assert_eq!(hdr_word & 0x01FF, 0x050, "opcode = 0x050 EQUIP_SET");
+    assert_eq!(
+        hdr_word & framing::SUBPACKET_OPCODE_MASK,
+        ffxi_proto::map::c2s::EQUIP_SET,
+        "opcode EQUIP_SET"
+    );
     assert_eq!(u16::from_le_bytes([buf[2], buf[3]]), 0xBEEF, "sync");
     assert_eq!(buf[4], 7, "PropertyItemIndex = container_index (slotID)");
     assert_eq!(buf[5], 10, "EquipKind = equip_slot (Waist)");
@@ -3055,8 +3267,16 @@ fn item_stack_packet_layout_matches_server_struct() {
     let buf = build_subpacket_item_stack(0xCAFE, 0);
     assert_eq!(buf.len(), 8, "header (4) + Category u32 (4)");
     let hdr_word = u16::from_le_bytes([buf[0], buf[1]]);
-    assert_eq!(hdr_word & 0x01FF, 0x03A, "opcode = 0x03A ITEM_STACK");
-    assert_eq!((hdr_word >> 9) & 0x7F, 2, "size_words = 2 (8 bytes)");
+    assert_eq!(
+        hdr_word & framing::SUBPACKET_OPCODE_MASK,
+        ffxi_proto::map::c2s::ITEM_STACK,
+        "opcode ITEM_STACK"
+    );
+    assert_eq!(
+        (hdr_word >> framing::SUBPACKET_SIZE_WORDS_SHIFT) & framing::SUBPACKET_SIZE_WORDS_MASK,
+        2,
+        "size_words = 2 (8 bytes)"
+    );
     assert_eq!(u16::from_le_bytes([buf[2], buf[3]]), 0xCAFE, "sync");
     assert_eq!(
         u32::from_le_bytes(buf[4..8].try_into().unwrap()),
@@ -3075,8 +3295,16 @@ fn item_move_packet_layout_matches_server_struct() {
     let buf = build_subpacket_item_move(0xBEEF, 12, 0, 1, 7, None);
     assert_eq!(buf.len(), 12, "header (4) + ItemNum (4) + 4 bytes");
     let hdr_word = u16::from_le_bytes([buf[0], buf[1]]);
-    assert_eq!(hdr_word & 0x01FF, 0x029, "opcode = 0x029 ITEM_MOVE");
-    assert_eq!((hdr_word >> 9) & 0x7F, 3, "size_words = 3 (12 bytes)");
+    assert_eq!(
+        hdr_word & framing::SUBPACKET_OPCODE_MASK,
+        ffxi_proto::map::c2s::ITEM_MOVE,
+        "opcode ITEM_MOVE"
+    );
+    assert_eq!(
+        (hdr_word >> framing::SUBPACKET_SIZE_WORDS_SHIFT) & framing::SUBPACKET_SIZE_WORDS_MASK,
+        3,
+        "size_words = 3 (12 bytes)"
+    );
     assert_eq!(u16::from_le_bytes([buf[2], buf[3]]), 0xBEEF, "sync");
     assert_eq!(
         u32::from_le_bytes(buf[4..8].try_into().unwrap()),
@@ -3107,8 +3335,16 @@ fn pbx_packet_layout_matches_lsb_validator() {
         let buf = build_subpacket_pbx(0xBEEF, op);
         assert_eq!(buf.len(), 32, "GP_CLI_COMMAND_PBX is 32 bytes");
         let hdr = u16::from_le_bytes(buf[0..2].try_into().unwrap());
-        assert_eq!(hdr & 0x01FF, 0x04D, "opcode = 0x04D PBX");
-        assert_eq!((hdr >> 9) & 0x7F, 8, "size_words = 8");
+        assert_eq!(
+            hdr & framing::SUBPACKET_OPCODE_MASK,
+            ffxi_proto::map::c2s::PBX,
+            "opcode PBX"
+        );
+        assert_eq!(
+            (hdr >> framing::SUBPACKET_SIZE_WORDS_SHIFT) & framing::SUBPACKET_SIZE_WORDS_MASK,
+            8,
+            "size_words = 8"
+        );
         assert_eq!(&buf[12..16], &[0, 0, 0, 0], "Result/ResParam1-3 zero");
         (
             buf[4],
@@ -3248,7 +3484,7 @@ fn item_stack_interval_clears_server_window() {
 #[test]
 fn equip_set_unequip_uses_zero_slot_index() {
     // LSB unequips a slot when PropertyItemIndex (slotID) is 0, regardless of
-    // container: vendor/server/src/map/utils/charutils.cpp:3147
+    // container: vendor/server/src/map/utils/charutils.cpp EquipItem
     // ("slotID of zero = unequip"). The re-select-to-unequip path encodes this.
     let buf = build_subpacket_equip_set(0, 0, 10, 0);
     assert_eq!(buf[4], 0, "slotID 0 = unequip");

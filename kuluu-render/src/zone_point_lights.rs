@@ -45,8 +45,10 @@ pub fn lamp_night_factor(sun_altitude: f32) -> f32 {
 /// around the clock; so do zones whose DAT sun diffuse is black in daylight
 /// (Upper Jeuno's covered streets — retail 2026-07-19 capture: lamps lit at
 /// 08:14). Only true open-sky zones follow the dusk/dawn ramp.
-/// `day_sun_k` is the zone record's daytime landscape sun brightness (None when
-/// no record is loaded).
+/// `day_sun_k` is the ZONE record's daytime landscape sun brightness (None when
+/// no record is loaded) — deliberately not the player's area's: this gate lights
+/// every Generator light in the zone at once, so an interior area's black sun
+/// diffuse must not switch the whole zone's lamps on as the player walks in.
 pub fn lamp_lit_factor(indoors: bool, day_sun_k: Option<f32>, sun_altitude: f32) -> f32 {
     if indoors {
         return 1.0;
@@ -82,7 +84,7 @@ const EMITTER_MIN_INTENSITY: f32 = 1.0;
 
 /// No Generator chunk defines this light, so no MZB chunk can bind it. Zone
 /// FourCCs are never 0 (`LightID == 0` is retail's empty pool slot,
-/// ZoneRenderer.cpp:260).
+/// ZoneRenderer.cpp ZoneRenderer::GetOrAllocateLight).
 pub const UNAUTHORED_LIGHT_ID: mzb::LightId = 0;
 
 #[derive(Debug, Clone, Copy)]
@@ -134,7 +136,7 @@ pub fn build_active_scene_lights(
     let (indoors, day_sun_k) = zone_lighting
         .as_deref()
         .filter(|z| z.valid)
-        .map(|z| (z.indoors, Some(z.sun_k)))
+        .map(|z| (z.indoors, Some(z.zone_sun_k)))
         .unwrap_or((false, None));
     let night = lamp_lit_factor(indoors, day_sun_k, sky.sun_altitude);
     if night <= LAMP_OFF_EPSILON {
@@ -203,7 +205,7 @@ fn pack_point_light_arrays<'a>(
 /// The chunk's authored light slots as indices into `lights`, in binding order.
 ///
 /// Retail's chunk binding names a `LightID`, and a slot whose light the zone
-/// never defines is left disabled (ZoneRenderer.cpp:299-300 `managedLight ==
+/// never defines is left disabled (ZoneRenderer.cpp ZoneRenderer::UpdateBlockLightSettings `managedLight ==
 /// nullptr`), so an unmatched FourCC drops out rather than shifting the rest.
 /// Never yields more than [`mzb::LIGHT_REFERENCE_COUNT`] — retail's four D3D
 /// slots — however many slots the shader uniform carries.
@@ -387,7 +389,7 @@ fn animate_faithful_zone_lights(
     let (indoors, day_sun_k) = zone_lighting
         .as_deref()
         .filter(|z| z.valid)
-        .map(|z| (z.indoors, Some(z.sun_k)))
+        .map(|z| (z.indoors, Some(z.zone_sun_k)))
         .unwrap_or((false, None));
     let night = lamp_lit_factor(indoors, day_sun_k, sky.sun_altitude);
     let t = time.elapsed_secs_wrapped();
@@ -567,6 +569,53 @@ mod tests {
             "no record: day gate"
         );
         assert_eq!(lamp_lit_factor(false, Some(0.8), -1.0), 1.0);
+    }
+
+    // The gate is whole-zone: `build_active_scene_lights` either feeds every
+    // Generator light or none. Reading the area-resolved `sun_k` (which follows the
+    // player into a sunless interior area) would switch the entire zone's lamps on
+    // at noon the moment the player crossed that area's boundary, so it reads
+    // `zone_sun_k`.
+    #[test]
+    fn lamps_stay_out_when_only_the_players_area_is_sunless() {
+        const NOON_VANA_HOUR: f32 = 12.0;
+        const ZONE_DAYLIGHT_SUN_K: f32 = 0.9;
+
+        fn active_lamp_count(sun_k: f32, zone_sun_k: f32) -> usize {
+            let mut app = App::new();
+            app.add_plugins(MinimalPlugins)
+                .init_resource::<ActiveSceneLights>()
+                .init_resource::<crate::graphics_settings::GraphicsSettings>()
+                .insert_resource(crate::vana_time::VanaClock::anchored_at_hour(
+                    NOON_VANA_HOUR,
+                ))
+                .insert_resource(ZonePointLights {
+                    file_id: None,
+                    lights: vec![light(Vec3::ZERO, 10.0)],
+                })
+                .insert_resource(crate::weather::ZoneDirectionalLighting {
+                    valid: true,
+                    indoors: false,
+                    sun_k,
+                    zone_sun_k,
+                    ..Default::default()
+                })
+                .add_systems(Update, build_active_scene_lights);
+            app.update();
+            app.world().resource::<ActiveSceneLights>().lights.len()
+        }
+
+        assert_eq!(
+            active_lamp_count(0.0, ZONE_DAYLIGHT_SUN_K),
+            0,
+            "an open-sky zone's lamps must stay out at noon while the player stands \
+             in a sunless area"
+        );
+        assert_eq!(
+            active_lamp_count(0.0, 0.0),
+            1,
+            "a zone whose own daytime sun diffuse is black still burns all day"
+        );
     }
 
     #[test]

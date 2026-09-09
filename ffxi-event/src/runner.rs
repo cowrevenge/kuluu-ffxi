@@ -11,7 +11,7 @@ use crate::vm::{EventVm, StepResult};
 
 /// 0x05B `EndPara` the client returns for a cancelled event in place of
 /// `Work_Zone[1]` (research/XiPackets/world/client/0x005B); LSB scripts match
-/// it as `utils.EVENT_CANCELLED_OPTION` (vendor/server/scripts/utils/utils.lua:8).
+/// it as `utils.EVENT_CANCELLED_OPTION` (vendor/server/scripts/utils/utils.lua).
 pub const EVENT_CANCELLED_END_PARA: u32 = 1 << 30;
 
 /// One renderable dialog frame: NPC speech (and, for a menu, the selectable
@@ -434,10 +434,12 @@ mod tests {
     /// header layout ([`StringDat::parse`] validating it pins the format —
     /// magic = 0x1000_0000 + data_len, offsets XOR 0x8080_8080).
     fn empty_strings() -> StringDat {
+        const DMSG_MAGIC_BASE: u32 = 0x1000_0000;
+        const DMSG_OFFSET_XOR: u32 = 0x8080_8080;
         let data_len = 4u32;
         let mut buf = Vec::new();
-        buf.extend_from_slice(&(0x1000_0000u32 + data_len).to_le_bytes());
-        buf.extend_from_slice(&(4u32 ^ 0x8080_8080).to_le_bytes());
+        buf.extend_from_slice(&(DMSG_MAGIC_BASE + data_len).to_le_bytes());
+        buf.extend_from_slice(&(4u32 ^ DMSG_OFFSET_XOR).to_le_bytes());
         StringDat::parse(&buf).expect("synthetic DialogTable")
     }
 
@@ -487,7 +489,7 @@ mod tests {
 
     /// Guard: the cancel sentinel is the exact value LSB scripts branch on
     /// (utils.EVENT_CANCELLED_OPTION = bit.lshift(1, 30),
-    /// vendor/server/scripts/utils/utils.lua:8).
+    /// vendor/server/scripts/utils/utils.lua utils.EVENT_CANCELLED_OPTION).
     #[test]
     fn cancel_sentinel_is_lsb_event_cancelled_option() {
         assert_eq!(EVENT_CANCELLED_END_PARA, 0x4000_0000);

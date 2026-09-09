@@ -25,14 +25,14 @@ use crate::zone_clouds::find_weat_type;
 
 /// A DAT-placed sound emitter.
 ///
-/// research/XIClient/src/XIClient/source/World/Generator/Effects/CYySoundElem.cpp:425-490
+/// research/XIClient/src/XIClient/source/World/Generator/Effects/CYySoundElem.cpp CYySoundElem::OnPlayUpdate
 /// `OnPlayUpdate` re-runs Calc3D every frame; a looping cue is stopped rather than
 /// destroyed when the listener leaves `far`, so it can start again on the way back.
 #[derive(Component, Debug)]
 pub struct ZonePlacedSfx {
     se_id: u32,
     loops: bool,
-    /// CYyGenerator.cpp:2789-2794 — a "never" generator holds one live cue and re-emits only
+    /// CYyGenerator.cpp CYyGenerator::Idle — a "never" generator holds one live cue and re-emits only
     /// once it is gone. Every shipped one-shot emitter with a sub-10-frame period is one of
     /// these (58 corpus-wide, most authoring a 1-frame period), so without it they would
     /// re-fire 30 times a second.
@@ -47,7 +47,7 @@ pub struct ZonePlacedSfx {
     audio: Option<Entity>,
 }
 
-/// research/XIClient/.../World/Weather/WeatherTransition.cpp:94 activates the generators
+/// research/XIClient/src/XIClient/source/World/Weather/WeatherTransition.cpp WeatherTransition::WeatherTransition activates the generators
 /// under the live `weat/<tag>` container and the destructor (:122-145) deactivates them, so
 /// those emitters exist only while that weather does. The zone's own generators live as
 /// long as the zone.
@@ -65,7 +65,7 @@ impl ZoneSfx {
     }
 }
 
-// WeatherTransition.cpp:22 gates activation on the generator's auto-run bit. The rest is
+// WeatherTransition.cpp ActivateWeatherGenerators gates activation on the generator's auto-run bit. The rest is
 // ours: an emitter with no base position has no world placement to mix from (those are the
 // scheduler-driven cues, e.g. `s_ju/weat/clod/tobi/naki`), and an actor-attached emitter
 // rides a target this module does not own.
@@ -274,7 +274,7 @@ fn update_zone_sfx(
     let Some(install) = slots.install_root.clone() else {
         return;
     };
-    // Calc3D measures from `CameraManager::CachedEyePosition` (CYySepRes.cpp:36), not from
+    // Calc3D measures from `CameraManager::CachedEyePosition` (CYySepRes.cpp CYySepRes::Calc3D), not from
     // the player — unlike the entity-swing cues, whose cutoff is LSB's player-measured
     // streaming radius (see `sfx_attenuation`).
     let Some(eye) = listener.iter().next().map(|t| t.translation()) else {
@@ -502,7 +502,7 @@ mod tests {
     }
 
     // The re-emission period is `frames_per_emission + uirand(emission_variance)`
-    // (CYyGenerator.cpp:2834), so the jitter draw must stay in the unit interval or a bird
+    // (CYyGenerator.cpp CYyGenerator::Idle), so the jitter draw must stay in the unit interval or a bird
     // call lands outside the authored window.
     #[test]
     fn emission_jitter_draw_stays_in_the_unit_interval() {

@@ -18,7 +18,7 @@ use kuluu_render::scene::mzb_to_bevy;
 /// radial areas to check against.
 const ZONE_CARPENTERS_LANDING: u16 = 2;
 
-/// `fishing_area` rows for zone 2 (vendor/server/sql/fishing_area.sql:49-54):
+/// `fishing_area` rows for zone 2 (vendor/server/sql/fishing_area.sql):
 /// centre x/z and radius, in the same coordinate space as the raw MZB.
 const CARPENTERS_AREAS: &[(&str, f32, f32, f32)] = &[
     ("South Landing", 172.250, -475.286, 150.0),

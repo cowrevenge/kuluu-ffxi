@@ -165,24 +165,44 @@ fn resolve_install_root() -> Option<PathBuf> {
     None
 }
 
-// research/xim .../resource/table/ZoneSettingsTable.kt:42-45: the retail client
+// research/xim resource/table/ZoneSettingsTable.kt getZoneIds: the retail client
 // forces the Mog House theme inside the MH. LSB sends the surrounding town's
 // music in the MH 0x00A (vendor/server/src/map/packets/s2c/0x00a_login.cpp:
 // 177-181), and a 0x05F slot track only arrives when promotional furniture is
-// installed (vendor/server/scripts/globals/moghouse.lua:181-229) — so this is
+// installed (vendor/server/scripts/globals/moghouse.lua moghouseZoneLines xi.moghouse.getAvailableMusic) — so this is
 // the client-side base and any received MH-slot track overrides it.
 pub const MOG_HOUSE_BGM: u16 = 126;
+
+// `play_index` values in research/XIClient/src/XIClient/source/Game/
+// GameManager.cpp GameManager::NormalMusicPlay play_index `NormalMusicPlay`. Slots 0-4 are also the LSB 0x00A
+// `MusicNum` layout (vendor/server/src/map/packets/s2c/0x00a_login.cpp GP_SERV_COMMAND_LOGIN::GP_SERV_COMMAND_LOGIN),
+// where 2/3 carry `m_bSongS`/`m_bSongM` (vendor/server/src/map/zone.h).
+const ZONE_DAY_SLOT: u8 = 0;
+const ZONE_NIGHT_SLOT: u8 = 1;
+const BATTLE_SOLO_SLOT: u8 = 2;
+const BATTLE_PARTY_SLOT: u8 = 3;
+const RIDING_SLOT: u8 = 4;
+const DEAD_SLOT: u8 = 5;
 const MOG_HOUSE_SLOT: u8 = 6;
+const FISHING_SLOT: u8 = 7;
 
 fn resolve_audible_slot(slots: &BgmSlots, state: &BgmPlaybackState) -> Option<(u8, u16)> {
-    let zone_pref: [u8; 2] = if state.is_night { [1, 0] } else { [0, 1] };
+    let zone_pref: [u8; 2] = if state.is_night {
+        [ZONE_NIGHT_SLOT, ZONE_DAY_SLOT]
+    } else {
+        [ZONE_DAY_SLOT, ZONE_NIGHT_SLOT]
+    };
+    // `NormalMusicPlay` tests `play_index` in this order: Mog House (or zone
+    // 724), dead, riding, fishing, then the battle/day-night branch. That last
+    // branch is `XICLIENT_CODE_MISSING` at GameManager.cpp GameManager::NormalMusicPlay; party-over-solo
+    // is reconstructed from the LSB slot meanings cited above.
     let candidates: [(u8, bool); SLOT_COUNT] = [
-        (5, state.dead),
-        (4, state.mounted),
         (MOG_HOUSE_SLOT, state.in_mog_house),
-        (3, state.engaged_party),
-        (2, state.engaged_solo),
-        (7, state.fishing),
+        (DEAD_SLOT, state.dead),
+        (RIDING_SLOT, state.mounted),
+        (FISHING_SLOT, state.fishing),
+        (BATTLE_PARTY_SLOT, state.engaged_party),
+        (BATTLE_SOLO_SLOT, state.engaged_solo),
         (zone_pref[0], true),
         (zone_pref[1], true),
     ];
@@ -195,6 +215,12 @@ fn resolve_audible_slot(slots: &BgmSlots, state: &BgmPlaybackState) -> Option<(u
             None if slot == MOG_HOUSE_SLOT => Some(MOG_HOUSE_BGM),
             None => None,
         };
+        // GameManager.cpp GameManager::NormalMusicPlay: the fishing branch returns outright when
+        // its slot is empty instead of descending to the battle/day-night
+        // slots, so whatever is already playing keeps playing.
+        if slot == FISHING_SLOT && track.unwrap_or(0) == 0 {
+            return slots.active;
+        }
         if let Some(track) = track {
             if track == 0 {
                 return None;
@@ -264,6 +290,53 @@ pub struct BgmPlaybackState {
     pub is_night: bool,
 }
 
+// research/XIClient/src/XIClient/source/World/Actor/ActorTelemetry.cpp NameColorMusicDistance
+// `NameColorMusicDistance` - the party-claim branch of `NameColorSet` raises
+// `GameManager::SomeMusicByte` for any party-claimed monster closer than this,
+// which is what puts battle music on before the player personally engages.
+const PARTY_CLAIM_MUSIC_RADIUS_YALMS: f32 = 45.0;
+
+// research/XIClient/src/XIClient/source/Game/GameManager.cpp GameManager::NormalMusicPlay
+// `NormalMusicPlay` - the zone slot is `play_index = gamehour < 6 || gamehour
+// >= 18`, i.e. the day track over the Vana'diel hours [6, 18) and the night
+// track everywhere else.
+const DAY_MUSIC_START_HOUR: u64 = 6;
+const DAY_MUSIC_END_HOUR: u64 = 18;
+
+fn is_night_music_hour(vana_hour: u64) -> bool {
+    !(DAY_MUSIC_START_HOUR..DAY_MUSIC_END_HOUR).contains(&vana_hour)
+}
+
+/// Retail's battle-music trigger that does not need the local player engaged:
+/// any monster whose plate draws in the party-claim colour and that sits inside
+/// [`PARTY_CLAIM_MUSIC_RADIUS_YALMS`] of the player.
+/// research/XIClient/src/XIClient/source/World/Actor/ActorTelemetry.cpp ActorTelemetry::NameColorSet.
+fn party_claim_in_music_range(snap: &kuluu_snapshot::SceneSnapshot) -> bool {
+    let Some(self_pos) = snap
+        .self_char_id
+        .and_then(|id| snap.entities.iter().find(|e| e.id == id))
+        .map(|e| e.pos)
+    else {
+        return false;
+    };
+    let ctx = crate::nameplate_color::SelfContext {
+        self_id: snap.self_char_id,
+        party: &snap.party,
+    };
+    snap.entities.iter().any(|e| {
+        let (dx, dy, dz) = (
+            e.pos.x - self_pos.x,
+            e.pos.y - self_pos.y,
+            e.pos.z - self_pos.z,
+        );
+        (dx * dx + dy * dy + dz * dz).sqrt() < PARTY_CLAIM_MUSIC_RADIUS_YALMS
+            && crate::nameplate_color::is_party_claimed(e, ctx)
+    })
+}
+
+const EFFECT_FISHING_IMAGERY: u16 = 235;
+const EFFECT_MOUNTED: u16 = 252;
+
 fn self_engaged(snap: &kuluu_snapshot::SceneSnapshot) -> bool {
     let self_bt_target = snap
         .self_char_id
@@ -279,13 +352,10 @@ fn self_engaged(snap: &kuluu_snapshot::SceneSnapshot) -> bool {
 
 pub fn derive_bgm_playback_state(
     scene: Res<crate::snapshot::SceneState>,
-    sky: Res<crate::sun_moon::VanaSky>,
+    clock: Res<crate::vana_time::VanaClock>,
     mut state: ResMut<BgmPlaybackState>,
-    mut last_engage_log: Local<Option<(bool, u32, u8, bool, bool)>>,
+    mut last_engage_log: Local<Option<(bool, u32, u8, bool, bool, bool)>>,
 ) {
-    const EFFECT_FISHING_IMAGERY: u16 = 235;
-    const EFFECT_MOUNTED: u16 = 252;
-
     let snap = &scene.snapshot;
     let self_id = snap.self_char_id;
     let self_entity = self_id.and_then(|id| snap.entities.iter().find(|e| e.id == id));
@@ -296,6 +366,8 @@ pub fn derive_bgm_playback_state(
         Some(kuluu_snapshot::ReactorGoal::Engaged { .. })
     );
     let engaged = self_engaged(snap);
+    let party_claim_near = party_claim_in_music_range(snap);
+    let battle = engaged || party_claim_near;
     let in_party = snap.party.len() > 1;
 
     // snapshot.myroom is atomic with the MH 0x00A zone-in; the party-attr
@@ -308,28 +380,36 @@ pub fn derive_bgm_playback_state(
     let mounted = icons.contains(&EFFECT_MOUNTED);
     let fishing = icons.contains(&EFFECT_FISHING_IMAGERY);
 
-    let is_night = sky.sun_altitude < 0.0;
+    let is_night = is_night_music_hour(crate::vana_time::vana_hour(clock.earth_unix_secs_now()));
 
-    let engage_key = (engaged, self_bt_target, self_status, goal_engaged, dead);
+    let engage_key = (
+        battle,
+        self_bt_target,
+        self_status,
+        goal_engaged,
+        dead,
+        party_claim_near,
+    );
     if *last_engage_log != Some(engage_key) {
         *last_engage_log = Some(engage_key);
         info!(
             target: "audio::bgm",
             self_id = ?self_id,
             engaged_signal = engaged,
+            party_claim_near,
             self_bt_target_id = self_bt_target,
             self_status_byte = self_status,
             reactor_goal_engaged = goal_engaged,
             dead,
             death_homepoint_secs = ?snap.death_homepoint_secs,
             in_party,
-            "engage signals: battle music driven by reactor goal OR bt_target"
+            "engage signals: battle music driven by reactor goal OR bt_target OR a nearby party claim"
         );
     }
 
     *state = BgmPlaybackState {
-        engaged_solo: engaged && !in_party,
-        engaged_party: engaged && in_party,
+        engaged_solo: battle && !in_party,
+        engaged_party: battle && in_party,
         mounted,
         in_mog_house,
         dead,
@@ -593,7 +673,7 @@ pub fn sfx_attenuation(listener: Vec3, emitter: Vec3) -> f32 {
 
 // Distance is measured from the PLAYER, never the chase camera. LSB's streaming radius — the
 // bound SFX_CUTOFF_YALMS is — is itself measured player-to-entity
-// (vendor/server/src/map/zone_entities.cpp:155), and a camera-anchored distance would swing SE
+// (vendor/server/src/map/zone_entities.cpp CZoneEntities::TryAddToNearbySpawnLists isInRange), and a camera-anchored distance would swing SE
 // loudness with the mouse wheel and silence on-screen emitters at full pullback. The camera is
 // still the correct ear for left/right placement, but this function carries no pan term (see
 // `sfx_attenuation`), so nothing here reads it. Falls back to the camera where there is no
@@ -626,19 +706,19 @@ pub fn sfx_mix_volume(ev: &SfxEvent, listener: Option<Vec3>) -> f32 {
     (ev.volume * attenuation).clamp(0.0, 1.0)
 }
 
-// research/XIClient/src/XIClient/source/World/Generator/Effects/CYySoundElem.cpp:36-37 —
+// research/XIClient/src/XIClient/source/World/Generator/Effects/CYySoundElem.cpp CYySoundElem::zone_volume —
 // the class defaults Calc3D substitutes for a DAT-authored 0. Load-bearing, not defensive:
 // 591 of the 5,895 shipped sound generators author (far 0, near 0).
 pub const SOUND_NEAR_DEFAULT: f32 = 3.0;
 pub const SOUND_FAR_DEFAULT: f32 = 30.0;
 
-// CYySepRes.cpp:38-42 weights the vertical delta 3x unless the elem is unattached
-// (`a8 == 1`). CYyGenerator.cpp:1173-1176 sets that flag exactly when the generator's
+// CYySepRes.cpp CYySepRes::Calc3D weights the vertical delta 3x unless the elem is unattached
+// (`a8 == 1`). CYyGenerator.cpp CYyGenerator::ElemGenerate sets that flag exactly when the generator's
 // attachment code is 0, which every zone-static emitter is.
 pub const ATTACHED_VERTICAL_WEIGHT: f32 = 3.0;
 pub const UNATTACHED_VERTICAL_WEIGHT: f32 = 1.0;
 
-// research/XIClient/src/XIClient/source/Resource/Derived/CYySepRes.cpp:16-60 `Calc3D`:
+// research/XIClient/src/XIClient/source/Resource/Derived/CYySepRes.cpp CYySepRes::Calc3D `Calc3D`:
 // full inside `near`, a linear ramp to silence at `far`, and a hard cull past it. The
 // shipped `near > far` generators fall out of the ordering — everything inside far is
 // full volume. Retail's pan term is not reproduced: this mixer carries no pan (see
@@ -987,9 +1067,9 @@ pub const BGM_FADE_SECS: f32 = 1.5;
 
 /// The zone's 2D ambient bed.
 ///
-/// research/XIClient/src/XIClient/source/World/Zone/XiZone.cpp:388-396 hands the current
+/// research/XIClient/src/XIClient/source/World/Zone/XiZone.cpp XiZone::SysMove hands the current
 /// area's `SoundEffectResource` to `CYySoundElem::SetZoneSound` every frame, and
-/// CYySoundElem.cpp:117-129 (re)plays it at `PAN_CENTER_INDEX` only when the resource
+/// CYySoundElem.cpp CYySoundElem::SetZoneSound (re)plays it at `PAN_CENTER_INDEX` only when the resource
 /// changes — a 2D cue at system volume, not a world emitter.
 #[derive(Resource, Debug, Default)]
 pub struct ZoneAmbientBed {
@@ -1188,7 +1268,7 @@ impl Plugin for AudioPlugin {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kuluu_snapshot::ViewerEvent;
+    use kuluu_snapshot::{SceneSnapshot, ViewerEvent};
 
     #[test]
     fn default_state_picks_zone_not_combat_when_both_filled() {
@@ -1307,6 +1387,317 @@ mod tests {
         let slots = BgmSlots::default();
         let state = BgmPlaybackState::default();
         assert_eq!(resolve_audible_slot(&slots, &state), None);
+    }
+
+    /// `NormalMusicPlay` reaches `play_index = 7` before the branch that can
+    /// pick a battle track, so a party mate's claim inside the music radius
+    /// must not pull the fishing track out from under the player.
+    #[test]
+    fn fishing_outranks_battle_music() {
+        let mut slots = BgmSlots::default();
+        slots.tracks[ZONE_DAY_SLOT as usize] = Some(101);
+        slots.tracks[BATTLE_SOLO_SLOT as usize] = Some(98);
+        slots.tracks[BATTLE_PARTY_SLOT as usize] = Some(99);
+        slots.tracks[FISHING_SLOT as usize] = Some(88);
+        let state = BgmPlaybackState {
+            fishing: true,
+            engaged_party: true,
+            engaged_solo: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            resolve_audible_slot(&slots, &state),
+            Some((FISHING_SLOT, 88))
+        );
+    }
+
+    /// GameManager.cpp GameManager::NormalMusicPlay: an empty fishing slot makes `NormalMusicPlay`
+    /// return instead of descending, so the track already playing survives -
+    /// it does not drop to the battle or day/night slot.
+    #[test]
+    fn fishing_without_slot_track_holds_current_track() {
+        let mut slots = BgmSlots::default();
+        slots.tracks[ZONE_DAY_SLOT as usize] = Some(101);
+        slots.tracks[BATTLE_PARTY_SLOT as usize] = Some(99);
+        slots.active = Some((MOG_HOUSE_SLOT, MOG_HOUSE_BGM));
+        let state = BgmPlaybackState {
+            fishing: true,
+            engaged_party: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            resolve_audible_slot(&slots, &state),
+            Some((MOG_HOUSE_SLOT, MOG_HOUSE_BGM))
+        );
+
+        slots.tracks[FISHING_SLOT as usize] = Some(0);
+        assert_eq!(
+            resolve_audible_slot(&slots, &state),
+            Some((MOG_HOUSE_SLOT, MOG_HOUSE_BGM)),
+            "MusicBuff[7] == 0 is the exact retail early-return condition"
+        );
+
+        slots.active = None;
+        assert_eq!(
+            resolve_audible_slot(&slots, &state),
+            None,
+            "holding silence is still holding"
+        );
+    }
+
+    /// The Mog House is the first `play_index` `NormalMusicPlay` tests, ahead
+    /// of the dead and riding branches.
+    #[test]
+    fn mog_house_outranks_dead_and_mounted() {
+        let mut slots = BgmSlots::default();
+        slots.tracks[RIDING_SLOT as usize] = Some(77);
+        slots.tracks[DEAD_SLOT as usize] = Some(70);
+        slots.tracks[MOG_HOUSE_SLOT as usize] = Some(215);
+        let state = BgmPlaybackState {
+            in_mog_house: true,
+            dead: true,
+            mounted: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            resolve_audible_slot(&slots, &state),
+            Some((MOG_HOUSE_SLOT, 215))
+        );
+    }
+
+    /// Riding is `play_index = 4`, below the dead branch and above fishing.
+    #[test]
+    fn dead_outranks_mounted_and_mounted_outranks_fishing() {
+        let mut slots = BgmSlots::default();
+        slots.tracks[RIDING_SLOT as usize] = Some(77);
+        slots.tracks[DEAD_SLOT as usize] = Some(70);
+        slots.tracks[FISHING_SLOT as usize] = Some(88);
+        let state = BgmPlaybackState {
+            dead: true,
+            mounted: true,
+            fishing: true,
+            ..Default::default()
+        };
+        assert_eq!(resolve_audible_slot(&slots, &state), Some((DEAD_SLOT, 70)));
+
+        let state = BgmPlaybackState {
+            mounted: true,
+            fishing: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            resolve_audible_slot(&slots, &state),
+            Some((RIDING_SLOT, 77))
+        );
+    }
+
+    const SELF_ID: u32 = 0x0100_0001;
+    const MATE_ID: u32 = 0x0100_0002;
+    const STRANGER_ID: u32 = 0x0100_0003;
+
+    fn mob_at(claim_id: u32, distance: f32) -> kuluu_snapshot::Entity {
+        use kuluu_snapshot::{CharFlags, Entity, EntityKind, Vec3};
+        Entity {
+            id: 0x0200_0001,
+            act_index: 2,
+            kind: EntityKind::Mob,
+            name: Some("Mob".into()),
+            pos: Vec3 {
+                x: distance,
+                y: 0.0,
+                z: 0.0,
+            },
+            heading: 0,
+            hp_pct: Some(100),
+            bt_target_id: 0,
+            name_vis: None,
+            face_target: 0,
+            claim_id,
+            speed: 25,
+            speed_base: 25,
+            look: None,
+            animation: 0,
+            animationsub: 0,
+            mount: None,
+            status: 0,
+            char_flags: CharFlags {
+                monster: true,
+                ..Default::default()
+            },
+            monstrosity: false,
+        }
+    }
+
+    fn player() -> kuluu_snapshot::Entity {
+        use kuluu_snapshot::EntityKind;
+        let mut e = mob_at(0, 0.0);
+        e.id = SELF_ID;
+        e.act_index = 1;
+        e.kind = EntityKind::Pc;
+        e.char_flags = kuluu_snapshot::CharFlags::default();
+        e
+    }
+
+    fn mate(id: u32) -> kuluu_snapshot::PartyMember {
+        kuluu_snapshot::PartyMember {
+            id,
+            act_index: 0,
+            name: Some("Mate".into()),
+            hp: 1,
+            mp: 0,
+            tp: 0,
+            hp_pct: 100,
+            mp_pct: 100,
+            zone_no: 0,
+            main_job: 1,
+            main_job_lv: 1,
+            sub_job: 0,
+            sub_job_lv: 0,
+            is_party_leader: false,
+            is_alliance_leader: false,
+            party_no: 0,
+            in_mog_house: false,
+        }
+    }
+
+    fn snapshot_with(
+        mob: kuluu_snapshot::Entity,
+        party: Vec<kuluu_snapshot::PartyMember>,
+    ) -> SceneSnapshot {
+        SceneSnapshot {
+            self_char_id: Some(SELF_ID),
+            entities: vec![player(), mob],
+            party,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_party_mates_claim_inside_the_music_radius_is_battle_music() {
+        let party = vec![mate(SELF_ID), mate(MATE_ID)];
+        let inside = PARTY_CLAIM_MUSIC_RADIUS_YALMS - 1.0;
+        let snap = snapshot_with(mob_at(MATE_ID, inside), party.clone());
+        assert!(!self_engaged(&snap), "the player has not engaged anything");
+        assert!(party_claim_in_music_range(&snap));
+
+        let outside = PARTY_CLAIM_MUSIC_RADIUS_YALMS;
+        let snap = snapshot_with(mob_at(MATE_ID, outside), party);
+        assert!(
+            !party_claim_in_music_range(&snap),
+            "the radius is exclusive: retail compares `< NameColorMusicDistance`"
+        );
+    }
+
+    #[test]
+    fn an_unrelated_players_claim_never_raises_battle_music() {
+        let snap = snapshot_with(mob_at(STRANGER_ID, 1.0), vec![mate(SELF_ID)]);
+        assert!(!party_claim_in_music_range(&snap));
+    }
+
+    #[test]
+    fn the_players_own_claim_inside_the_radius_is_battle_music() {
+        let snap = snapshot_with(mob_at(SELF_ID, 1.0), vec![]);
+        assert!(party_claim_in_music_range(&snap));
+    }
+
+    #[test]
+    fn a_dead_claimed_mob_stops_raising_battle_music() {
+        let mut mob = mob_at(MATE_ID, 1.0);
+        mob.hp_pct = Some(0);
+        let snap = snapshot_with(mob, vec![mate(SELF_ID), mate(MATE_ID)]);
+        assert!(
+            !party_claim_in_music_range(&snap),
+            "NameColorSet returns the dead colour before it ever reaches the claim branch"
+        );
+    }
+
+    #[test]
+    fn the_night_music_slot_is_chosen_by_vanadiel_hour() {
+        for hour in 0..24u64 {
+            // research/XIClient/src/XIClient/source/Game/GameManager.cpp GameManager::NormalMusicPlay selects the
+            // night slot for `gamehour < 6 || gamehour >= 18`.
+            assert_eq!(
+                is_night_music_hour(hour),
+                matches!(hour, 0..=5 | 18..=23),
+                "vana hour {hour}"
+            );
+        }
+    }
+
+    #[test]
+    fn derived_night_flag_follows_the_clock_not_the_sun_mesh() {
+        fn is_night_at(hour: f32) -> bool {
+            let mut app = App::new();
+            app.init_resource::<crate::snapshot::SceneState>()
+                .init_resource::<BgmPlaybackState>()
+                .insert_resource(crate::vana_time::VanaClock::anchored_at_hour(hour))
+                .add_systems(Update, derive_bgm_playback_state);
+            app.update();
+            app.world().resource::<BgmPlaybackState>().is_night
+        }
+        assert!(!is_night_at(6.0));
+        assert!(!is_night_at(12.0));
+        assert!(!is_night_at(17.5));
+        assert!(is_night_at(18.0));
+        assert!(is_night_at(23.0));
+        assert!(is_night_at(0.0));
+        assert!(is_night_at(5.9));
+    }
+
+    #[test]
+    fn a_nearby_party_claim_lights_the_battle_slot_without_self_engagement() {
+        let mut app = App::new();
+        app.init_resource::<crate::snapshot::SceneState>()
+            .init_resource::<BgmPlaybackState>()
+            .insert_resource(crate::vana_time::VanaClock::anchored_at_hour(12.0))
+            .add_systems(Update, derive_bgm_playback_state);
+        app.world_mut()
+            .resource_mut::<crate::snapshot::SceneState>()
+            .snapshot = snapshot_with(mob_at(MATE_ID, 1.0), vec![mate(SELF_ID), mate(MATE_ID)]);
+        app.update();
+
+        let state = *app.world().resource::<BgmPlaybackState>();
+        assert!(
+            state.engaged_party,
+            "two party members: the party battle slot"
+        );
+        assert!(!state.engaged_solo);
+
+        let mut slots = BgmSlots::default();
+        slots.tracks[ZONE_DAY_SLOT as usize] = Some(101);
+        slots.tracks[BATTLE_PARTY_SLOT as usize] = Some(99);
+        assert_eq!(
+            resolve_audible_slot(&slots, &state),
+            Some((BATTLE_PARTY_SLOT, 99))
+        );
+    }
+
+    #[test]
+    fn fishing_in_a_party_keeps_the_fishing_track_while_a_mate_holds_a_claim() {
+        let mut app = App::new();
+        app.init_resource::<crate::snapshot::SceneState>()
+            .init_resource::<BgmPlaybackState>()
+            .insert_resource(crate::vana_time::VanaClock::anchored_at_hour(12.0))
+            .add_systems(Update, derive_bgm_playback_state);
+        let mut snap = snapshot_with(mob_at(MATE_ID, 1.0), vec![mate(SELF_ID), mate(MATE_ID)]);
+        snap.status_icons = vec![EFFECT_FISHING_IMAGERY];
+        app.world_mut()
+            .resource_mut::<crate::snapshot::SceneState>()
+            .snapshot = snap;
+        app.update();
+
+        let state = *app.world().resource::<BgmPlaybackState>();
+        assert!(state.fishing);
+
+        let mut slots = BgmSlots::default();
+        slots.tracks[ZONE_DAY_SLOT as usize] = Some(101);
+        slots.tracks[BATTLE_PARTY_SLOT as usize] = Some(99);
+        slots.tracks[FISHING_SLOT as usize] = Some(88);
+        assert_eq!(
+            resolve_audible_slot(&slots, &state),
+            Some((FISHING_SLOT, 88)),
+            "retail reaches play_index 7 before the branch that can pick a battle track"
+        );
     }
 
     #[test]
@@ -1755,7 +2146,7 @@ mod tests {
         );
     }
 
-    // research/XIClient/.../Resource/Derived/CYySepRes.cpp:44-58 — full inside `near`,
+    // research/XIClient/src/XIClient/source/Resource/Derived/CYySepRes.cpp CYySepRes::Calc3D — full inside `near`,
     // linear to silence at `far`, hard cull past it.
     #[test]
     fn calc3d_ramps_linearly_between_near_and_far() {
@@ -1785,7 +2176,7 @@ mod tests {
         }
     }
 
-    // CYySepRes.cpp:24-29 substitutes the class defaults for a DAT-authored 0, which 591 of
+    // CYySepRes.cpp CYySepRes::Calc3D substitutes the class defaults for a DAT-authored 0, which 591 of
     // the 5,895 shipped sound generators rely on.
     #[test]
     fn calc3d_substitutes_the_class_defaults_for_a_zero_range() {
@@ -1819,7 +2210,7 @@ mod tests {
         assert_eq!(at(30.1), 0.0);
     }
 
-    // CYyGenerator.cpp:1173-1176 marks an unattached elem, and Calc3D skips the 3x vertical
+    // CYyGenerator.cpp CYyGenerator::ElemGenerate marks an unattached elem, and Calc3D skips the 3x vertical
     // weight for exactly those. Zone-static emitters are unattached, so a cue 20 yalms
     // overhead is still audible where an actor-attached one would already be culled.
     #[test]

@@ -156,6 +156,37 @@ impl DynamicLights {
     }
 }
 
+/// Retail summons a static map from the menu: no persistent corner widget and
+/// no live NPC/mob/PC radar. `Vanilla` therefore keeps the minimap panel closed
+/// and plots only your own position plus party (an unverified inference, see
+/// kuluu-7cqw); `Enhanced` opts into the always-on widget with every dot
+/// category. `/minimap show|hide|toggle` stays the manual override in both.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum MinimapRadar {
+    #[default]
+    Vanilla,
+    Enhanced,
+}
+
+impl MinimapRadar {
+    pub const fn label(self) -> &'static str {
+        match self {
+            MinimapRadar::Vanilla => "Vanilla",
+            MinimapRadar::Enhanced => "Enhanced",
+        }
+    }
+
+    /// Whether the minimap widget starts open.
+    pub const fn panel_visible(self) -> bool {
+        matches!(self, MinimapRadar::Enhanced)
+    }
+
+    /// Whether the map surfaces plot live dots beyond self and party.
+    pub const fn entity_radar(self) -> bool {
+        matches!(self, MinimapRadar::Enhanced)
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum CharacterRenderPath {
     BevyStandard,
@@ -254,6 +285,8 @@ pub enum GraphicsField {
 
     ZoneLineDisplay,
 
+    MinimapRadar,
+
     RenderScale,
 
     /// DLSS on/off toggle in the main graphics list (a mirror of
@@ -320,6 +353,7 @@ impl GraphicsField {
             GraphicsField::DepthOfField => "Depth of Field",
             GraphicsField::DofAperture => "DoF Aperture",
             GraphicsField::ZoneLineDisplay => "Zone Lines",
+            GraphicsField::MinimapRadar => "Minimap",
             GraphicsField::RenderScale => "Render Scale",
             GraphicsField::Dlss => "DLSS",
             GraphicsField::DlssQuality => "DLSS Quality",
@@ -539,6 +573,9 @@ pub struct GraphicsSettings {
     #[serde(default)]
     pub zone_line_display: ZoneLineDisplay,
 
+    #[serde(default)]
+    pub minimap_radar: MinimapRadar,
+
     #[serde(default = "default_render_scale")]
     pub render_scale: f32,
 
@@ -576,9 +613,9 @@ pub const DEFAULT_RENDER_SCALE: f32 = 1.0;
 
 // Retail derives its vertical fov from a projection focal length over a fixed
 // half-height: fovy = 2*atan2f(192, ProjectionFocalLength)
-// (research/XIClient/src/XIClient/source/World/Generator/Effects/CMoElem.cpp:274).
+// (research/XIClient/src/XIClient/source/World/Generator/Effects/CMoElem.cpp CMoElem::VirtOt1 fovy).
 pub const RETAIL_PROJECTION_HALF_HEIGHT: f32 = 192.0;
-// research/XIClient/src/XIClient/source/World/Camera/CameraManager.cpp:318:
+// research/XIClient/src/XIClient/source/World/Camera/CameraManager.cpp CameraManager::ResetCameraState:
 // SetProjectionFocalLength(350.0f) is the default; cutscene/zoom effects animate it.
 pub const RETAIL_DEFAULT_FOCAL_LENGTH: f32 = 350.0;
 // = retail_default_fov_deg(); f32::atan is not const fn, so the derived value is
@@ -699,6 +736,8 @@ const ZONE_LINE_DISPLAY_CYCLE: &[ZoneLineDisplay] = &[
     ZoneLineDisplay::Gate,
 ];
 
+const MINIMAP_RADAR_CYCLE: &[MinimapRadar] = &[MinimapRadar::Vanilla, MinimapRadar::Enhanced];
+
 const DOF_APERTURE_SLOTS: &[f32] = &[1.4, 2.0, 2.8, 4.0, 5.6, 8.0];
 
 // NR menu slots (RenoDX addon parity): intensity starts at the parser's no-op
@@ -758,6 +797,7 @@ impl GraphicsSettings {
                 depth_of_field: false,
                 dof_aperture_f_stops: DEFAULT_DOF_APERTURE,
                 zone_line_display: ZoneLineDisplay::Off,
+                minimap_radar: MinimapRadar::Vanilla,
                 render_scale: DEFAULT_RENDER_SCALE,
                 fullscreen: false,
                 windowed_fullscreen: false,
@@ -801,6 +841,7 @@ impl GraphicsSettings {
                 depth_of_field: false,
                 dof_aperture_f_stops: DEFAULT_DOF_APERTURE,
                 zone_line_display: ZoneLineDisplay::Off,
+                minimap_radar: MinimapRadar::Vanilla,
                 render_scale: DEFAULT_RENDER_SCALE,
                 fullscreen: false,
                 windowed_fullscreen: false,
@@ -844,6 +885,7 @@ impl GraphicsSettings {
                 depth_of_field: false,
                 dof_aperture_f_stops: DEFAULT_DOF_APERTURE,
                 zone_line_display: ZoneLineDisplay::Off,
+                minimap_radar: MinimapRadar::Vanilla,
                 render_scale: DEFAULT_RENDER_SCALE,
                 fullscreen: false,
                 windowed_fullscreen: false,
@@ -891,6 +933,7 @@ impl GraphicsSettings {
                 depth_of_field: false,
                 dof_aperture_f_stops: DEFAULT_DOF_APERTURE,
                 zone_line_display: ZoneLineDisplay::Off,
+                minimap_radar: MinimapRadar::Vanilla,
                 render_scale: DEFAULT_RENDER_SCALE,
                 fullscreen: false,
                 windowed_fullscreen: false,
@@ -979,6 +1022,7 @@ impl GraphicsSettings {
             GraphicsField::DepthOfField => bool_label(self.depth_of_field).into(),
             GraphicsField::DofAperture => format!("f/{:.1}", self.dof_aperture_f_stops),
             GraphicsField::ZoneLineDisplay => self.zone_line_display.label().to_string(),
+            GraphicsField::MinimapRadar => self.minimap_radar.label().to_string(),
             GraphicsField::RenderScale => {
                 if self.dlss_active() {
                     // DLSS owns internal resolution (the quality tier picks
@@ -1057,6 +1101,7 @@ impl GraphicsSettings {
                 let realistic = self.realistic_character_lighting;
                 let receive = self.faithful_shadow_receive;
                 let zld = self.zone_line_display;
+                let minimap_radar = self.minimap_radar;
                 let vsync = self.vsync;
                 let fps_cap = self.fps_cap;
                 // Presets never own DLSS (kuluu decision, 2026-09): no preset
@@ -1087,6 +1132,7 @@ impl GraphicsSettings {
                 self.realistic_character_lighting = realistic;
                 self.faithful_shadow_receive = receive;
                 self.zone_line_display = zld;
+                self.minimap_radar = minimap_radar;
                 self.vsync = vsync;
                 self.fps_cap = fps_cap;
                 self.dlss_quality = dlss_quality;
@@ -1239,6 +1285,10 @@ impl GraphicsSettings {
                 self.zone_line_display =
                     cycle_slot(self.zone_line_display, ZONE_LINE_DISPLAY_CYCLE, delta)
                         .unwrap_or(ZoneLineDisplay::Off);
+            }
+            GraphicsField::MinimapRadar => {
+                self.minimap_radar = cycle_slot(self.minimap_radar, MINIMAP_RADAR_CYCLE, delta)
+                    .unwrap_or(MinimapRadar::Vanilla);
             }
             GraphicsField::RenderScale => {
                 // DLSS owns internal resolution while active; the row reads
@@ -1511,6 +1561,7 @@ pub const GRAPHICS_FIELDS: &[GraphicsField] = &[
     GraphicsField::DepthOfField,
     GraphicsField::DofAperture,
     GraphicsField::ZoneLineDisplay,
+    GraphicsField::MinimapRadar,
     GraphicsField::DynamicLights,
     GraphicsField::LightThreshold,
     GraphicsField::LightIntensity,
@@ -2245,6 +2296,48 @@ mod tests {
                 "preset {preset:?} must pin the faithful-only light mode"
             );
         }
+    }
+
+    /// Retail summons a static map with no live radar, so no preset may ship
+    /// the minimap widget open, and picking a preset must not revoke the
+    /// player's opt-in (kuluu-7cqw).
+    #[test]
+    fn presets_pin_minimap_radar_vanilla_and_preset_cycle_preserves_it() {
+        for &preset in PRESET_CYCLE {
+            assert_eq!(
+                GraphicsSettings::for_preset(preset).minimap_radar,
+                MinimapRadar::Vanilla,
+                "preset {preset:?} must pin the retail map mode"
+            );
+        }
+
+        let mut s = GraphicsSettings::default();
+        s.cycle(GraphicsField::MinimapRadar, 1);
+        assert_eq!(s.minimap_radar, MinimapRadar::Enhanced);
+        s.cycle(GraphicsField::Preset, 1);
+        assert_eq!(
+            s.minimap_radar,
+            MinimapRadar::Enhanced,
+            "preset cycle kept the opt-in"
+        );
+    }
+
+    #[test]
+    fn minimap_radar_cycles_vanilla_enhanced() {
+        let mut s = GraphicsSettings::default();
+        assert_eq!(s.value_label(GraphicsField::MinimapRadar), "Vanilla");
+        assert!(!s.minimap_radar.panel_visible());
+        assert!(!s.minimap_radar.entity_radar());
+
+        s.cycle(GraphicsField::MinimapRadar, 1);
+        assert_eq!(s.value_label(GraphicsField::MinimapRadar), "Enhanced");
+        assert!(s.minimap_radar.panel_visible());
+        assert!(s.minimap_radar.entity_radar());
+
+        s.cycle(GraphicsField::MinimapRadar, 1);
+        assert_eq!(s.minimap_radar, MinimapRadar::Vanilla, "wrapped");
+        s.cycle(GraphicsField::MinimapRadar, -1);
+        assert_eq!(s.minimap_radar, MinimapRadar::Enhanced, "wraps backwards");
     }
 
     #[test]

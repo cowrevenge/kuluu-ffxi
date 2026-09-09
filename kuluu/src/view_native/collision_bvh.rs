@@ -377,6 +377,9 @@ pub fn build_zone_collision_bvh_system(
 
 fn build_bvh_with_leaf_offsets(triangles: Vec<[Vec3; 3]>) -> CollisionBvh {
     let mut bvh = CollisionBvh::build(triangles);
+    if bvh.nodes.is_empty() {
+        return bvh;
+    }
 
     let mut offset: u32 = 0;
     patch_leaf_offsets(&mut bvh.nodes, 0, &mut offset);
@@ -470,5 +473,99 @@ mod bvh_tests {
             CollisionBvh::from_world_triangles(geom.camera_triangles()).tri_count(),
             geom.tri_count() - skipped
         );
+    }
+
+    /// A zone whose triangles are all filtered out by the camera skip set must
+    /// yield a BVH that simply never hits, not a panic.
+    #[test]
+    fn empty_triangle_list_builds_a_bvh_that_never_hits() {
+        let bvh = CollisionBvh::from_world_triangles(Vec::new());
+        assert_eq!(bvh.tri_count(), 0);
+        assert!(bvh.root_aabb().is_none());
+        assert_eq!(bvh.ray_cast(Vec3::ZERO, Vec3::Z, 100.0), None);
+        assert_eq!(bvh.ray_cast_brute_force(Vec3::ZERO, Vec3::Z, 100.0), None);
+    }
+
+    /// Traversal must agree with brute force on the smallest non-empty build,
+    /// where the tree is a single leaf covering the whole triangle list.
+    #[test]
+    fn single_triangle_bvh_hits_at_the_brute_force_distance() {
+        let tri = [
+            Vec3::new(-1.0, -1.0, 5.0),
+            Vec3::new(1.0, -1.0, 5.0),
+            Vec3::new(0.0, 1.0, 5.0),
+        ];
+        let bvh = CollisionBvh::from_world_triangles(vec![tri]);
+        assert_eq!(bvh.tri_count(), 1);
+        let fast = bvh.ray_cast(Vec3::ZERO, Vec3::Z, 100.0).expect("hit");
+        let brute = bvh
+            .ray_cast_brute_force(Vec3::ZERO, Vec3::Z, 100.0)
+            .expect("hit");
+        assert!((fast - 5.0).abs() < 1e-4, "unexpected distance {fast}");
+        assert!((fast - brute).abs() < 1e-6);
+        assert_eq!(bvh.ray_cast(Vec3::ZERO, -Vec3::Z, 100.0), None);
+    }
+
+    /// Only leaves after the first get a nonzero triangle-slice offset from
+    /// `patch_leaf_offsets`, so more than `LEAF_THRESHOLD` triangles is the
+    /// smallest build where dropping that patch mis-slices the reordered
+    /// triangle array. Brute force reads the array directly, so it stays the
+    /// oracle for what each ray should hit.
+    #[test]
+    fn multi_leaf_bvh_traversal_agrees_with_brute_force() {
+        const GRID: usize = 8;
+        const CELL_PITCH: f32 = 4.0;
+        const NEAR_Z: f32 = 5.0;
+        const MAX_T: f32 = 100.0;
+
+        let mut triangles = Vec::new();
+        for gx in 0..GRID {
+            for gy in 0..GRID {
+                let (cx, cy) = (gx as f32 * CELL_PITCH, gy as f32 * CELL_PITCH);
+                let z = NEAR_Z + (gx + gy) as f32;
+                triangles.push([
+                    Vec3::new(cx - 1.0, cy - 1.0, z),
+                    Vec3::new(cx + 1.0, cy - 1.0, z),
+                    Vec3::new(cx, cy + 1.0, z),
+                ]);
+            }
+        }
+        assert!(
+            triangles.len() > LEAF_THRESHOLD,
+            "{} triangles fits in one leaf; no offsets get patched",
+            triangles.len()
+        );
+
+        let bvh = CollisionBvh::from_world_triangles(triangles);
+        assert!(bvh.nodes.len() > 1, "expected a split tree, not one leaf");
+
+        let mut mismatches = Vec::new();
+        for gx in 0..GRID {
+            for gy in 0..GRID {
+                let (cx, cy) = (gx as f32 * CELL_PITCH, gy as f32 * CELL_PITCH);
+                let origin = Vec3::new(cx, cy, 0.0);
+                let fast = bvh.ray_cast(origin, Vec3::Z, MAX_T);
+                let brute = bvh.ray_cast_brute_force(origin, Vec3::Z, MAX_T);
+                let expected = NEAR_Z + (gx + gy) as f32;
+                if brute.is_none_or(|b| (b - expected).abs() > 1e-4) {
+                    mismatches.push((gx, gy, fast, brute));
+                    continue;
+                }
+                if fast.is_none_or(|f| (f - expected).abs() > 1e-4) {
+                    mismatches.push((gx, gy, fast, brute));
+                }
+            }
+        }
+        assert!(
+            mismatches.is_empty(),
+            "{} of {} cell rays disagreed; first: {:?}",
+            mismatches.len(),
+            GRID * GRID,
+            mismatches.first()
+        );
+
+        let off_grid = Vec3::new(-CELL_PITCH, -CELL_PITCH, 0.0);
+        assert_eq!(bvh.ray_cast(off_grid, Vec3::Z, MAX_T), None);
+        assert_eq!(bvh.ray_cast_brute_force(off_grid, Vec3::Z, MAX_T), None);
     }
 }

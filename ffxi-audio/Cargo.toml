@@ -5,6 +5,10 @@ edition.workspace = true
 license.workspace = true
 description = "FFXI audio container parsing (.bgw / .spw) and ADPCM/PCM decoding. Ported from vendor/lotus-ffxi/ffxi/audio."
 
+[build-dependencies]
+anyhow.workspace = true
+lsb-scrape = { path = "../lsb-scrape" }
+
 [dependencies]
 thiserror = { workspace = true }
 

@@ -21,7 +21,12 @@ pub struct WidescanEntry {
 impl WidescanEntry {
     pub(crate) const SIZE: usize = 24;
 
-    /// Type occupies 3 bits of the packed u32 (0x0f4_tracking_list.h Type:3).
+    /// Packed u32 layout ActIndex:16, Level:8, Type:3
+    /// (vendor/server/src/map/packets/s2c/0x0f4_tracking_list.h PacketData).
+    const ACT_INDEX_MASK: u32 = 0xFFFF;
+    const LEVEL_SHIFT: u32 = 16;
+    const LEVEL_MASK: u32 = 0xFF;
+    const TYPE_SHIFT: u32 = 24;
     const TYPE_MASK: u32 = 0x07;
 
     pub fn decode(body: &[u8]) -> Result<Self, DecodeError> {
@@ -35,9 +40,9 @@ impl WidescanEntry {
             .position(|&b| b == 0)
             .unwrap_or(name_bytes.len());
         Ok(Self {
-            act_index: (packed & 0xFFFF) as u16,
-            level: ((packed >> 16) & 0xFF) as u8,
-            kind: ((packed >> 24) & Self::TYPE_MASK) as u8,
+            act_index: (packed & Self::ACT_INDEX_MASK) as u16,
+            level: ((packed >> Self::LEVEL_SHIFT) & Self::LEVEL_MASK) as u8,
+            kind: ((packed >> Self::TYPE_SHIFT) & Self::TYPE_MASK) as u8,
             rel_x: i16::from_le_bytes([body[4], body[5]]),
             rel_z: i16::from_le_bytes([body[6], body[7]]),
             name: String::from_utf8_lossy(&name_bytes[..n]).into_owned(),
@@ -107,7 +112,9 @@ mod widescan_tests {
 
     fn entry_bytes(act: u16, level: u8, kind: u8, rx: i16, rz: i16, name: &str) -> Vec<u8> {
         let mut body = vec![0u8; WidescanEntry::SIZE];
-        let packed = (act as u32) | ((level as u32) << 16) | ((kind as u32 & 0x07) << 24);
+        let packed = (act as u32)
+            | ((level as u32) << WidescanEntry::LEVEL_SHIFT)
+            | ((kind as u32 & WidescanEntry::TYPE_MASK) << WidescanEntry::TYPE_SHIFT);
         body[0..4].copy_from_slice(&packed.to_le_bytes());
         body[4..6].copy_from_slice(&rx.to_le_bytes());
         body[6..8].copy_from_slice(&rz.to_le_bytes());

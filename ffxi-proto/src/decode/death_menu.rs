@@ -15,7 +15,7 @@ pub enum DeathMenuOffer {
 ///
 /// LSB's `PacketData` is exactly eight body bytes: `UniqueNo` u32 @ 0,
 /// `ActIndex` u16 @ 4, and `type` u16 @ 6
-/// (`vendor/server/src/map/packets/s2c/0x0f9_res.h:38-45`).
+/// (`vendor/server/src/map/packets/s2c/0x0f9_res.h GP_SERV_COMMAND_RES`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DeathMenu {
     pub unique_no: u32,

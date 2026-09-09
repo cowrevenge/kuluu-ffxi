@@ -3,6 +3,8 @@
 use std::fs;
 
 use bevy::asset::RenderAssetUsages;
+use bevy::ecs::schedule::ScheduleConfigs;
+use bevy::ecs::system::ScheduleSystem;
 use bevy::image::Image;
 use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
@@ -26,7 +28,7 @@ pub struct MmbHandleCache {
     pub mesh: std::collections::HashMap<(u32, usize, usize), bevy::asset::Handle<Mesh>>,
     /// Keyed by (file_id, chunk_idx, sub_index, mirrored). The mirror bit is
     /// part of the pipeline key (front-face flip for negative-determinant
-    /// placements — xim GLDrawer.kt:186), so the same submesh placed both
+    /// placements — xim GLDrawer.kt drawXim face), so the same submesh placed both
     /// ways needs two material instances.
     pub material:
         std::collections::HashMap<(u32, usize, usize, bool), bevy::asset::Handle<FfxiZoneMaterial>>,
@@ -168,6 +170,22 @@ pub fn scroll_gen_water_uv(
     }
 }
 
+/// `drive_sub_area_activation` suppresses the doorway shell's collision and only
+/// *writes* the replacement `LoadMzbRequest`; nothing is in flight until
+/// `kick_load_mzb_tasks` reads it. Split across schedule runs, that leaves a
+/// frame with the floor gone and `LoadMzbInFlight::any_pending()` false — the
+/// gate `kuluu::view_native::input::ground_recovery_candidate` reads before
+/// recovering the player upward (kuluu-oubj). Registered as one ordered unit and
+/// driven whole by `sub_area_activation::doorway_tests`.
+pub fn zone_load_dispatch_systems() -> ScheduleConfigs<ScheduleSystem> {
+    (
+        crate::sub_area_activation::drive_sub_area_activation,
+        dispatch_look_driven_models,
+        crate::dat_mzb::kick_load_mzb_tasks,
+    )
+        .chain()
+}
+
 pub struct DatOverlayPlugin;
 
 impl Plugin for DatOverlayPlugin {
@@ -200,9 +218,7 @@ impl Plugin for DatOverlayPlugin {
                 Update,
                 (
                     crate::dat_mzb::auto_load_zone_geometry_system,
-                    crate::sub_area_activation::drive_sub_area_activation,
-                    dispatch_look_driven_models,
-                    crate::dat_mzb::kick_load_mzb_tasks,
+                    zone_load_dispatch_systems(),
                     crate::dat_mzb::poll_load_mzb_tasks,
                     crate::dat_mzb::spawn_zone_water,
                     process_load_mmb_requests,
@@ -687,7 +703,7 @@ pub fn process_load_mmb_requests(
                     // (negative-determinant transforms, ubiquitous for zone
                     // tiles) flip effective winding, so the front-face choice
                     // must ride the pipeline key per placement — xim
-                    // GLDrawer.kt:186 does the same via glFrontFace.
+                    // GLDrawer.kt drawXim face does the same via glFrontFace.
                     let rs = ffxi_dat::mmb::MmbRenderState::from_blending(sub.blending);
                     let mirrored = req.world_transform.is_some_and(|m| m.determinant() < 0.0);
                     let render_key = crate::ffxi_zone_material::FfxiZoneMaterialKey {
@@ -898,7 +914,7 @@ fn submesh_alpha_mode(zone_mesh_name: &str, blending: u16, has_texture: bool) ->
         (AlphaMode::Opaque, 0.0)
     } else if zone_mesh_name.starts_with('_') {
         (AlphaMode::Mask(0.375), 0.375)
-    } else if (blending & 0x8000) != 0 {
+    } else if mmb::MmbRenderState::from_blending(blending).blend_enabled {
         (AlphaMode::Blend, 0.0)
     } else {
         (AlphaMode::Opaque, 0.0)

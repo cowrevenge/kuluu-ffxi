@@ -17,9 +17,9 @@ is unclear — menu layout, HUD timing, animation, camera feel, spell effects �
 observe it in the real client, capture evidence, translate into the remake,
 then `/verify` the remake side against the same observation.
 
-Everything runs host-side through `scripts/hxi.sh` (this machine has
+Everything runs host-side through `.agents/skills/retail-observe/scripts/hxi.sh` (this machine has
 Parallels **Standard**: no `prlctl exec`/`prlctl capture`; the VM is reached
-via the macOS window server instead). Run `hxi.sh` with no args for the
+via the macOS window server instead). Run `hxi.sh` (shorthand below for that path) with no args for the
 command table.
 
 ## Session flow
@@ -226,7 +226,7 @@ here: read the returned captures yourself before citing them for parity.
   only, never committed (see `.gitignore` on `vendor/game-files/`). Keep
   captures local; quote paths, not pixels, in reports/beads.
 - For animated behavior, capture a burst: `for i in 1 2 3 4 5; do
-  scripts/hxi.sh capture; sleep 0.5; done`.
+  .agents/skills/retail-observe/scripts/hxi.sh capture; sleep 0.5; done`.
 
 ## Troubleshooting
 
@@ -276,7 +276,7 @@ Logout: main menu (`-` key) → Log Out → confirm dialog **defaults to No** �
 
 Observation loops are screenshot-heavy and burn main-agent context. Delegate them:
 
-- Use the Agent tool with `model: "haiku"` (haiku-4-5) for mechanical capture loops — press key / capture / read image / report what changed. Give it the exact `scripts/hxi.sh` invocations and key codes it needs.
+- Use the Agent tool with `model: "haiku"` (haiku-4-5) for mechanical capture loops — press key / capture / read image / report what changed. Give it the exact `.agents/skills/retail-observe/scripts/hxi.sh` invocations and key codes it needs.
 - Use `model: "sonnet"` (sonnet-5) when the loop requires judgment (navigating unfamiliar menus, deciding next action from what's on screen, comparing against expected retail behavior).
 - The main agent should only receive the subagent's *findings* (text + paths to the few decisive screenshots), never the full capture stream.
 - Subagent prompts must include: window/scale info (`capture` prints it), the "divide px coords by scale for click" rule, key codes (36=Enter, up/down arrows), and hard limits on what game actions are allowed (which items/menus may be touched).

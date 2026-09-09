@@ -128,7 +128,7 @@ pub struct Cib {
 
     /// `is_shield` — read from the SUB slot's CIB. Selects the upper-body motion
     /// DAT as `base + is_shield + 1` (research/XIClient/src/XIClient/source/
-    /// World/Actor/SkeletalMeshActor.cpp:3175), so a shield swaps in a variant
+    /// World/Actor/SkeletalMeshActor.cpp SkeletalMeshActor::GetUpperBodyDatIndex), so a shield swaps in a variant
     /// with its own joint count.
     pub is_shield: u8,
     pub weapon_constrain: u8,
@@ -136,17 +136,17 @@ pub struct Cib {
     pub weapon_unknown3: u8,
 
     /// `waist_type` — read from the BODY slot's CIB. Selects the waist/skirt
-    /// motion DAT as `base + max(waist_type, 1) + 2` (SkeletalMeshActor.cpp:3165,
+    /// motion DAT as `base + max(waist_type, 1) + 2` (SkeletalMeshActor.cpp SkeletalMeshActor::GetWaistDatIndex,
     /// via `ReadStdMotionRes` at :3014), which is how a robe gets skirt motion
     /// where plate legs get trousers.
     pub body_armour_waist: u8,
 
     /// Model scale in percent (viewer parseInspectInfo b[10], "Scale"). Retail divides by 100
-    /// with only 0xFF meaning default (research/xim poc/Model.kt:532-536 NpcModel.getScale).
+    /// with only 0xFF meaning default (research/xim poc/Model.kt NpcModel.getScale).
     pub scale: u8,
 
     /// Scale in percent for static NPCs that are not sitting in a chair; retail swaps it in
-    /// for `scale` there (research/xim poc/Actor.kt:974-980 getScale).
+    /// for `scale` there (research/xim poc/Actor.kt getScale).
     pub static_npc_scale: u8,
     pub unknown7: u8,
     pub unknown8: u8,
@@ -185,8 +185,8 @@ impl Cib {
     }
 
     /// The Info `scale` byte as a model multiplier. Retail divides by 100 with only 0xFF
-    /// meaning "default" (research/xim poc/Model.kt:532-536 NpcModel.getScale, Actor.kt:974-980
-    /// getScale; xim's nullIf0FF at resource/InfoSection.kt:151). 100 therefore lands on 1.0 by
+    /// meaning "default" (research/xim poc/Model.kt NpcModel.getScale, poc/Actor.kt getScale;
+    /// xim's nullIf0FF in research/xim resource/InfoSection.kt). 100 therefore lands on 1.0 by
     /// the division itself, and a shipped 0 renders at zero size exactly as retail would.
     pub fn scale_factor(&self) -> f32 {
         if self.scale == 0xFF {

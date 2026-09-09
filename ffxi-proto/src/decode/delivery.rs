@@ -1,7 +1,7 @@
 use super::*;
 
 /// GP_POST_BOX_STATE item payload of the full-form s2c 0x04B
-/// (vendor/server/src/map/packets/s2c/0x04b_pbx_result.h:57-67). `counterpart`
+/// (vendor/server/src/map/packets/s2c/0x04b_pbx_result.h GC_PBOX). `counterpart`
 /// is the GC_PBOX name field: sender (Incoming box) or recipient (Outgoing).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PbxBoxState {
@@ -15,7 +15,7 @@ pub struct PbxBoxState {
 }
 
 /// GP_SERV_COMMAND_PBX_RESULT (vendor/server/src/map/packets/s2c/
-/// 0x04b_pbx_result.h:71-94). `state` is present only in the full 0x58 form;
+/// 0x04b_pbx_result.h GP_SERV_COMMAND_PBX_RESULT). `state` is present only in the full 0x58 form;
 /// the short 0x14 form carries just the header fields.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PbxResult {
@@ -32,9 +32,9 @@ pub struct PbxResult {
 }
 
 impl PbxResult {
-    /// setSize(0x14) minus the 4-byte subpacket header (0x04b_pbx_result.cpp:31).
+    /// setSize(0x14) minus the 4-byte subpacket header (0x04b_pbx_result.cpp GP_SERV_COMMAND_PBX_RESULT::GP_SERV_COMMAND_PBX_RESULT).
     pub(crate) const SHORT_SIZE: usize = 16;
-    /// setSize(0x58) minus the header (0x04b_pbx_result.cpp:67).
+    /// setSize(0x58) minus the header (0x04b_pbx_result.cpp GP_SERV_COMMAND_PBX_RESULT::GP_SERV_COMMAND_PBX_RESULT).
     pub(crate) const FULL_SIZE: usize = 84;
 
     pub fn decode(body: &[u8]) -> Result<Self, DecodeError> {
@@ -121,7 +121,7 @@ mod pbx_result_tests {
 
     /// The short 0x14 form (4-arg LSB ctor) has no box state; a Check response
     /// carries the new-item count in ResParam2 (Incoming) / ResParam3 (Outgoing)
-    /// (0x04b_pbx_result.cpp:44-54).
+    /// (0x04b_pbx_result.cpp GP_SERV_COMMAND_PBX_RESULT::GP_SERV_COMMAND_PBX_RESULT).
     #[test]
     fn pbx_result_short_form_check_counts() {
         let mut buf = vec![0u8; PbxResult::SHORT_SIZE];

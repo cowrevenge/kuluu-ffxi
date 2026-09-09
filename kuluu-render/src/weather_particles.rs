@@ -17,10 +17,10 @@ use crate::zone_clouds::{find_weat_type, CLOUD_CANOPY_GENERATOR_NAMES};
 // The directory holding a zone's per-weather environment subtrees.
 pub const WEAT_DIR: WeatherTypeId = *b"weat";
 
-// research/XIClient/src/XIClient/source/World/Generator/CYyGenerator.cpp:418-434 — Open() walks up
+// research/XIClient/src/XIClient/source/World/Generator/CYyGenerator.cpp CYyGenerator::Open — Open() walks up
 // to the `taew` (weat) container and ORs field_DE with 0x83, which arms the per-emission count
 // scale in the unbatched arm of the emit loop at :2817-2831 (`v161 *= GetSomeGeneratorScalar() *
-// 0.30000001`; the scalar defaults to 1.0, RegistryConfig.cpp:25).
+// 0.30000001`; the scalar defaults to 1.0, RegistryConfig.cpp MainRegistryConfig::SomeGeneratorScalar).
 //
 // Retail only reaches that arm when CheckFlag29 is clear (:2814); a batched generator — which the
 // precipitation curtains are — instead calls ElemGenerate once and lets the batched elem draw its
@@ -41,7 +41,7 @@ fn owned_elsewhere(subdir: WeatherTypeId) -> bool {
     subdir.starts_with(LENS_FLARE_SUBDIR_PREFIX) || OTHER_MODULE_SUBDIRS.contains(&subdir)
 }
 
-// research/XIClient/src/XIClient/source/World/Weather/WeatherTransition.cpp:22,95 — activation
+// research/XIClient/src/XIClient/source/World/Weather/WeatherTransition.cpp ActivateWeatherGenerators — activation
 // walks the weat/<tag> container for Generator resources and takes every one whose
 // `flags & 0x1000` is set, which is the bit we parse as `auto_run`. The rest is ours, not retail's:
 // it keeps this module off surfaces another one already draws. A life of 0 marks a persistent
@@ -54,7 +54,7 @@ fn is_precipitation(name: [u8; 4], def: &ParticleGeneratorDef) -> bool {
         && !CLOUD_CANOPY_GENERATOR_NAMES.contains(&name)
 }
 
-// research/XIClient/src/XIClient/source/Resource/FileResource.cpp:578-624 — the container walk is
+// research/XIClient/src/XIClient/source/Resource/FileResource.cpp FileResource::SearchCurrentContainerWithCallback — the container walk is
 // sequential over everything nested below the starting container, so weat/rain/kino and
 // weat/rain/hamo/kawa are in scope, not just the tag's direct children. An excluded subtree stays
 // excluded all the way down: the lens-flare dirs hold their generators one level further in.
@@ -178,6 +178,7 @@ fn sync_weather_particles(
         let opts = ZoneGeneratorOptions {
             camera_relative: def.camera_relative,
             emit_scale: WEATHER_EMIT_SCALE,
+            ..Default::default()
         };
         let entity = spawn_zone_particle_generator(
             *def,

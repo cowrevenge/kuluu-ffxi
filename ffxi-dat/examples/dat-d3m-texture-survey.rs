@@ -8,7 +8,7 @@ const DEFAULT_LAST_FILE_ID: u32 = 12_000;
 const SAMPLE_ROWS: usize = 20;
 
 // Score how a StaticMesh particle's 16-byte qualified texture name resolves against the Img
-// chunks sharing its DAT file. research/xim DatResource.kt:488-493 is the authority: full
+// chunks sharing its DAT file. research/xim DatResource.kt getTextureResourceByNameAs is the authority: full
 // (namespace, local) match, then local-only; never the chunk DatId. A link is scored by the
 // *identity* of the Img chunk each key lands on — its ordinal within the file — because two
 // keys can both hit and still point at different textures, which is the case that changes what

@@ -2,7 +2,7 @@
 //! rebuilt on top of the view pipeline instead of as a second camera.
 //!
 //! Retail draws names to the backbuffer AFTER the scene and its effects
-//! (research/XIClient/.../CXiActorNameDraw.cpp). The old kuluu equivalent was
+//! (research/XIClient/src/XIClient/source/Rendering/Active/CXiActorNameDraw.cpp). The old kuluu equivalent was
 //! a second `Camera3d` sharing the operator's render target: correct pixel
 //! order, but in Bevy 0.19 every camera owns its own Core3d schedule run
 //! against the target's shared A/B main-texture double buffer — so plates cost

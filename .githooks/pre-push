@@ -9,6 +9,8 @@
 # Install (per clone): scripts/install-hooks.sh   (sets core.hooksPath=.githooks)
 set -euo pipefail
 
+export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
+
 if [[ "${SKIP_PREPUSH:-}" == "1" ]]; then
   echo "pre-push: skipped (SKIP_PREPUSH=1)"
   exit 0
@@ -16,12 +18,21 @@ fi
 
 cd "$(git rev-parse --show-toplevel)"
 
+if command -v bd >/dev/null 2>&1; then
+  bd hooks run pre-push "$@"
+fi
+
 # Delegate the actual fmt/clippy invocation to the shared script so this gate
 # and CI run byte-identical flags. A green hook therefore proves a green CI
 # fmt/clippy. (The hook stops at clippy for speed; clippy --all-targets still
 # compiles the tests, so broken constructors surface — it just doesn't run them.)
 if ! scripts/checks.sh harness; then
   echo "pre-push: ✗ harness config — see .agents/AGENTS.md (or 'git push --no-verify' to bypass)" >&2
+  exit 1
+fi
+
+if ! scripts/checks.sh comments; then
+  echo "pre-push: ✗ comments — line-pinned or dangling citations; see .agents/skills/comment-discipline/SKILL.md (or 'git push --no-verify' to bypass)" >&2
   exit 1
 fi
 

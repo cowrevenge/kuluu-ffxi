@@ -9,64 +9,66 @@ include!(concat!(env!("OUT_DIR"), "/search_handler_table.rs"));
 
 pub const FRAME_LEN_OFFSET: usize = 0x00;
 pub const MAGIC_OFFSET: usize = 0x04;
-// vendor/server/src/search/search_handler.cpp:162 — "IXFF"
+// vendor/server/src/search/search_handler.cpp SearchHandler::encrypt — "IXFF"
 pub const MAGIC_IXFF: u32 = 0x4646_5849;
 pub const REQUEST_TYPE_OFFSET: usize = 0x0B;
 
 pub const FRAME_HEADER_SIZE: usize = 8;
 pub const INTEGRITY_HASH_SIZE: usize = 16;
 pub const TRAILER_KEY_SIZE: usize = 4;
-// vendor/server/src/search/search_handler.cpp:235 — `length < 28`
+// vendor/server/src/search/search_handler.cpp SearchHandler::read_func — `length < 28`
 pub const MIN_FRAME_LEN: usize = 28;
 
-// vendor/server/src/search/search_handler.cpp:198 — hash at `length - 0x14`
+// vendor/server/src/search/search_handler.cpp SearchHandler::validatePacket — hash at `length - 0x14`
 pub const HASH_FROM_END: usize = 0x14;
-// vendor/server/src/search/search_handler.cpp:154 — response-key word at `length - 0x18`
+// vendor/server/src/search/search_handler.cpp SearchHandler::decrypt — response-key word at `length - 0x18`
 pub const SERVER_KEY_FROM_END: usize = 0x18;
 
-// vendor/server/src/search/search_handler.cpp:139/154/164 — key splice offsets
+// vendor/server/src/search/search_handler.cpp SearchHandler::decrypt — key splice offsets
 pub const CLIENT_KEY_SPLICE: usize = 16;
 pub const SERVER_KEY_SPLICE: usize = 20;
 pub const REQUEST_KEY_HASH_LEN: usize = 20;
 pub const FULL_KEY_LEN: usize = 24;
 
-// vendor/server/src/search/search_handler.cpp:146/170 — `(length - 12) / 4` words,
+// vendor/server/src/search/search_handler.cpp SearchHandler::decrypt — `(length - 12) / 4` words,
 // rounded down to an even count, enciphered from word offset 2
 const CIPHER_SKIP: usize = FRAME_HEADER_SIZE + TRAILER_KEY_SIZE;
 
-// vendor/server/src/search/search_handler.cpp:456-470
+// vendor/server/src/search/search_handler.cpp SearchHandler::HandleAuctionHouseRequest AHCatID
 pub const AH_LIST_SORT_COUNT_OFFSET: usize = 0x12;
 pub const AH_LIST_CATEGORY_OFFSET: usize = 0x16;
 pub const AH_LIST_PARAMS_OFFSET: usize = 0x18;
 pub const AH_LIST_PARAM_STRIDE: usize = 8;
 
-// vendor/server/src/search/search_handler.cpp:472-486 — the only sort ids the
+// vendor/server/src/search/search_handler.cpp SearchHandler::HandleAuctionHouseRequest — the only sort ids the
 // server acts on (3=race, 4=job, 7=defense, 8=resistance are listed but ignored)
 pub const SORT_LEVEL_DESC: u32 = 2;
 pub const SORT_DAMAGE_DESC: u32 = 5;
 pub const SORT_DELAY_DESC: u32 = 6;
 pub const SORT_NAME: u32 = 9;
 
-// vendor/server/src/search/search_handler.cpp:518-519
+// vendor/server/src/search/search_handler.cpp SearchHandler::HandleAuctionHouseHistory ItemID
 pub const AH_HISTORY_ITEM_ID_OFFSET: usize = 0x12;
 pub const AH_HISTORY_STACK_OFFSET: usize = 0x15;
 const AH_HISTORY_REQUEST_PAYLOAD_END: usize = 0x18;
 
 pub const RESPONSE_BODY_SIZE_OFFSET: usize = 0x08;
 pub const RESPONSE_FLAGS_OFFSET: usize = 0x0A;
-// vendor/server/src/search/packets/auction_list.cpp:74 — final-packet marker
+// vendor/server/src/search/packets/auction_list.cpp CAHItemsListPacket::SetItemCount — final-packet marker
 pub const RESPONSE_FINAL_FLAG: u8 = 0x80;
 pub const RESPONSE_TYPE_OFFSET: usize = 0x0B;
 
-// vendor/server/src/search/packets/auction_list.cpp:42
+// vendor/server/src/search/packets/auction_list.cpp m_offset
 pub const AH_LIST_RESPONSE_TYPE: u8 = 0x95;
 pub const AH_LIST_TOTAL_COUNT_OFFSET: usize = 0x0E;
 pub const AH_LIST_ITEMS_OFFSET: usize = 0x18;
 pub const AH_LIST_ITEM_SIZE: usize = 0x0A;
 pub const AH_LIST_ITEMS_PER_PACKET: usize = 20;
 
-// vendor/server/src/search/packets/auction_history.cpp:30-55
+// vendor/server/src/search/packets/auction_history.cpp CAHHistoryPacket::CAHHistoryPacket
 pub const AH_HISTORY_RESPONSE_TYPE: u8 = 0x85;
+// vendor/server/src/search/packets/auction_history.cpp CAHHistoryPacket::CAHHistoryPacket ("masked as val & 0x1F")
+pub const AH_RESPONSE_TYPE_REQUEST_MASK: u8 = 0x1F;
 pub const AH_HISTORY_ITEM_OFFSET: usize = 0x18;
 pub const AH_HISTORY_OPEN_LISTINGS_OFFSET: usize = 0x1A;
 pub const AH_HISTORY_CATEGORY_OFFSET: usize = 0x1E;
@@ -121,7 +123,7 @@ fn cipher_words(frame: &mut [u8], state: &blowfish::State, decrypt: bool) {
 }
 
 /// Per-connection key state. Mirrors the server's `SearchHandler::key` evolution
-/// (vendor/server/src/search/search_handler.cpp:139/154): each request splices the
+/// (vendor/server/src/search/search_handler.cpp SearchHandler::decrypt): each request splices the
 /// client trailer key at [16..20) and the request's `len-0x18` word at [20..24),
 /// and the response is enciphered under MD5 of the full 24 bytes.
 pub struct SearchCrypto {
@@ -188,7 +190,7 @@ impl SearchCrypto {
     /// this arrives (observation record
     /// .agents/skills/retail-observe/references/auction-house.md). Body is the
     /// original request's — `HandleAuctionHouseRequest` re-reads category and
-    /// sort params for both types (search_handler.cpp:267-268).
+    /// sort params for both types (search_handler.cpp SearchHandler::read_func TCP_AH_REQUEST).
     pub fn encode_ah_list_more_request(
         &mut self,
         category: u8,
@@ -378,7 +380,7 @@ pub fn parse_ah_history(body: &[u8]) -> Result<AhHistory, SearchError> {
         });
     }
     let body_size = rd_u16(body, RESPONSE_BODY_SIZE_OFFSET);
-    // vendor/server/src/search/packets/auction_history.cpp:55 — the size field is
+    // vendor/server/src/search/packets/auction_history.cpp CAHHistoryPacket::AddItem — the size field is
     // only written once a row is added; a zero-sale response leaves it 0.
     let rows_bytes = (body_size as usize).saturating_sub(AH_HISTORY_ROWS_OFFSET);
     let count = rows_bytes / AH_HISTORY_ROW_SIZE;
@@ -415,7 +417,7 @@ mod tests {
     use super::*;
 
     // Independent reimplementation of SearchHandler::decrypt/encrypt/validatePacket
-    // (vendor/server/src/search/search_handler.cpp:134-206) so the client-side
+    // (vendor/server/src/search/search_handler.cpp SearchHandler::decrypt) so the client-side
     // codec is checked against the server algorithm, not against itself.
     struct LsbServer {
         key: [u8; 24],
@@ -512,7 +514,7 @@ mod tests {
 
     /// The follow-up page request differs from the first only in its type byte:
     /// HandleAuctionHouseRequest reads category/sorts from the same offsets for
-    /// both (search_handler.cpp:267-268).
+    /// both (search_handler.cpp SearchHandler::read_func TCP_AH_REQUEST).
     #[test]
     fn ah_list_more_request_repeats_the_body_under_the_more_type() {
         let mut client = SearchCrypto::new();
@@ -599,7 +601,7 @@ mod tests {
     }
 
     // Response body per auction_list.cpp: total size = body-size field + 28
-    // (CAHItemsListPacket::GetSize, auction_list.cpp:102).
+    // (CAHItemsListPacket::GetSize, auction_list.cpp).
     fn build_list_response(
         total: u16,
         offset: usize,
@@ -814,9 +816,15 @@ mod tests {
         assert_ne!(TCP_AH_REQUEST, TCP_AH_REQUEST_MORE);
         assert_ne!(TCP_AH_HISTORY_SINGLE, TCP_AH_HISTORY_STACK);
         // Retail's response type is the request type with the top bit set
-        // (auction_list.cpp:42 vs TCP_AH_REQUEST; auction_history.cpp:34 vs
+        // (auction_list.cpp m_offset vs TCP_AH_REQUEST; auction_history.cpp CAHHistoryPacket::CAHHistoryPacket vs
         // TCP_AH_HISTORY_SINGLE, "masked as val & 0x1F" per atom0s).
-        assert_eq!(AH_LIST_RESPONSE_TYPE & 0x1F, TCP_AH_REQUEST);
-        assert_eq!(AH_HISTORY_RESPONSE_TYPE & 0x1F, TCP_AH_HISTORY_SINGLE);
+        assert_eq!(
+            AH_LIST_RESPONSE_TYPE & AH_RESPONSE_TYPE_REQUEST_MASK,
+            TCP_AH_REQUEST
+        );
+        assert_eq!(
+            AH_HISTORY_RESPONSE_TYPE & AH_RESPONSE_TYPE_REQUEST_MASK,
+            TCP_AH_HISTORY_SINGLE
+        );
     }
 }

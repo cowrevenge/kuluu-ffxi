@@ -6,7 +6,7 @@ use bevy::camera::visibility::RenderLayers;
 /// in-view pass after all post effects, before upscaling. That pass replaced
 /// the second-camera design this file used to host (`NameplateOverlayCamera`,
 /// removed 2026-08): same retail rationale — names go to the backbuffer AFTER
-/// the scene and its effects (research/XIClient/.../CXiActorNameDraw.cpp), no
+/// the scene and its effects (research/XIClient/src/XIClient/source/Rendering/Active/CXiActorNameDraw.cpp), no
 /// bloom, no fog, no tonemap — but without a second camera riding the shared
 /// A/B main-texture flip of one view target.
 pub const NAMEPLATE_RENDER_LAYER: usize = 4;

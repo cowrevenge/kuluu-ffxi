@@ -15,6 +15,12 @@ const IXFF_HEADER_SIZE: usize = 28;
 const DATA_CMD_CHAR_LIST: u8 = 0xA1;
 const DATA_CMD_HANDOFF: u8 = 0xA2;
 
+// vendor/server/src/login/view_session.cpp view_session::read_func, the
+// VIEW_CMD_SELECT branch's ack on the data socket.
+const DATA_RESP_SELECT_ACK: u8 = 0x02;
+// vendor/server/src/login/data_session.cpp data_session::read_func uList[0]
+const DATA_RESP_CHAR_LIST: u8 = 0x03;
+
 /// Capability marker + word in bytes [2..10) of the 0xA1 char-list response.
 /// vendor/server/src/login/data_session.cpp zero-inits `uList[500]` and only
 /// writes [0], [1] and entries at 16*(i+1), so vanilla LSB always sends zeros
@@ -270,7 +276,7 @@ impl LobbyHandle {
             Ok(())
         })
         .await?;
-        if ack[0] != 0x02 {
+        if ack[0] != DATA_RESP_SELECT_ACK {
             bail!("expected 0x02 ack after view select, got {ack:?}");
         }
         tracing::info!("lobby: 0x02 ack received");
@@ -298,7 +304,7 @@ impl LobbyHandle {
 /// Build the 0x07 view-select for `char_id`, taking the name from the account's
 /// own chr_info2 slots. LSB looks the selection up with
 /// `WHERE charid = ? AND charname = ?` and closes the socket on a mismatch
-/// (vendor/server/src/login/view_session.cpp:62-75), so an id the account does
+/// (vendor/server/src/login/view_session.cpp view_session::read_func), so an id the account does
 /// not own fails here rather than on the wire — there is no caller-supplied
 /// name to fall back to.
 fn build_view_select_by_id(
@@ -493,14 +499,16 @@ fn build_data_a2(key3: &[u8; 20]) -> Vec<u8> {
     buf
 }
 
-/// vendor/server/src/login/view_session.cpp:56-58 reads the selected char id at
+/// vendor/server/src/login/view_session.cpp view_session::read_func requestedCharacterID reads the selected char id at
 /// buffer offset 28 and copies `PacketNameLength - 1` name bytes from offset 36
-/// (`PacketNameLength = 16`, vendor/server/src/common/utils.h:71).
+/// (`PacketNameLength = 16`, vendor/server/src/common/utils.h).
 const VIEW_SELECT_PACKET_SIZE: u32 = 0x44;
 const VIEW_SELECT_CHAR_ID_OFFSET: usize = 28;
 const VIEW_SELECT_WORLD_CHAR_ID_OFFSET: usize = 32;
 const VIEW_SELECT_NAME_OFFSET: usize = 36;
 const VIEW_SELECT_NAME_LEN: usize = 15;
+// vendor/server/src/login/data_session.cpp data_session::read_func ffxi_id_world
+const WORLD_CHAR_ID_MASK: u32 = 0xFFFF;
 
 fn build_view_select(char_id: u32, char_name: &str, session_hash: &[u8; 16]) -> Vec<u8> {
     let mut buf = vec![0u8; VIEW_SELECT_PACKET_SIZE as usize];
@@ -512,7 +520,7 @@ fn build_view_select(char_id: u32, char_name: &str, session_hash: &[u8; 16]) -> 
         .copy_from_slice(&char_id.to_le_bytes());
 
     buf[VIEW_SELECT_WORLD_CHAR_ID_OFFSET..VIEW_SELECT_WORLD_CHAR_ID_OFFSET + 4]
-        .copy_from_slice(&(char_id & 0xFFFF).to_le_bytes());
+        .copy_from_slice(&(char_id & WORLD_CHAR_ID_MASK).to_le_bytes());
     let name_bytes = char_name.as_bytes();
     let n = name_bytes.len().min(VIEW_SELECT_NAME_LEN);
     buf[VIEW_SELECT_NAME_OFFSET..VIEW_SELECT_NAME_OFFSET + n].copy_from_slice(&name_bytes[..n]);
@@ -597,6 +605,11 @@ fn build_view_register_char(
     buf
 }
 
+// vendor/server/src/login/view_session.cpp view_session::read_func: the ixff
+// result reply on success, loginHelpers::generateErrorMessage otherwise.
+const VIEW_REPLY_RESULT_SIZE: usize = 0x20;
+const VIEW_REPLY_ERROR_SIZE: usize = 0x24;
+
 async fn read_create_reply(stream: &mut TcpStream, stage: &str) -> Result<()> {
     let mut size_bytes = [0u8; 4];
     stream
@@ -604,7 +617,7 @@ async fn read_create_reply(stream: &mut TcpStream, stage: &str) -> Result<()> {
         .await
         .with_context(|| format!("reading {stage} reply size (server may have closed socket)"))?;
     let size = u32::from_le_bytes(size_bytes) as usize;
-    if size != 0x20 && size != 0x24 {
+    if size != VIEW_REPLY_RESULT_SIZE && size != VIEW_REPLY_ERROR_SIZE {
         bail!("{stage}: implausible reply size {size:#x} (want 0x20 or 0x24)");
     }
     let mut rest = vec![0u8; size - 4];
@@ -650,7 +663,7 @@ async fn read_data_charlist(stream: &mut TcpStream) -> Result<(CharList, u32)> {
         .read_exact(&mut buf)
         .await
         .context("reading 0xA1 char list")?;
-    if buf[0] != 0x03 {
+    if buf[0] != DATA_RESP_CHAR_LIST {
         bail!("expected 0x03 char-list response code, got {:#x}", buf[0]);
     }
     let count = buf[1] as usize;
@@ -689,6 +702,13 @@ const CHR_INFO2_SLOTS_OFFSET: usize = 28;
 const CHR_INFO2_SLOT_SIZE: usize = 140;
 const CHR_INFO2_SLOT_NAME_OFFSET: usize = 12;
 const CHR_INFO2_SLOT_NAME_LEN: usize = 16;
+// vendor/server/src/login/login_packets.h TC_OPERATION_MAKE (mon_no, face_no,
+// GrapIDTbl, zone_no2 field widths).
+const CHR_INFO2_RACE_MASK: u16 = 0x00FF;
+const CHR_INFO2_FACE_MASK: u16 = 0x00FF;
+const GRAP_ID_MODEL_MASK: u16 = 0x0FFF;
+const GRAP_ID_SLOT_SHIFT: u32 = 12;
+const ZONE_NO2_HIGH_BIT: u8 = 0x01;
 
 async fn parse_view_chr_info2(stream: &mut TcpStream) -> Result<Vec<CharSlot>> {
     tracing::debug!("lobby: waiting for chr_info2 packet on view socket");
@@ -755,15 +775,17 @@ async fn parse_view_chr_info2(stream: &mut TcpStream) -> Result<Vec<CharSlot>> {
 
         let tc = off + 44;
         let mon_no = u16::from_le_bytes(rest[tc..tc + 2].try_into().unwrap());
-        let race = (mon_no & 0xFF) as u8;
+        let race = (mon_no & CHR_INFO2_RACE_MASK) as u8;
         let face_u16 = u16::from_le_bytes(rest[tc + 4..tc + 6].try_into().unwrap());
-        let face = (face_u16 & 0xFF) as u8;
+        let face = (face_u16 & CHR_INFO2_FACE_MASK) as u8;
         let grap = |i: usize| -> u16 {
             let o = tc + 12 + i * 2;
             u16::from_le_bytes(rest[o..o + 2].try_into().unwrap())
         };
 
-        let tag = |slot_idx: u16, raw: u16| -> u16 { (slot_idx << 12) | (raw & 0x0FFF) };
+        let tag = |slot_idx: u16, raw: u16| -> u16 {
+            (slot_idx << GRAP_ID_SLOT_SHIFT) | (raw & GRAP_ID_MODEL_MASK)
+        };
 
         let head = tag(1, grap(1));
         let body = tag(2, grap(2));
@@ -777,7 +799,7 @@ async fn parse_view_chr_info2(stream: &mut TcpStream) -> Result<Vec<CharSlot>> {
 
         let zone_no = rest[tc + 28];
         let zone_no2 = rest[tc + 34];
-        let zone_id = (zone_no as u16) | (((zone_no2 & 0x01) as u16) << 8);
+        let zone_id = (zone_no as u16) | (((zone_no2 & ZONE_NO2_HIGH_BIT) as u16) << 8);
 
         slots.push(CharSlot {
             char_id,
@@ -802,7 +824,7 @@ async fn parse_view_chr_info2(stream: &mut TcpStream) -> Result<Vec<CharSlot>> {
 /// Field offsets of the 0x0B lpkt_next_login the view socket answers the select
 /// with: a 28-byte packet_t header then ffxi_id, ffxi_id_world,
 /// character_name[16], server_id, server_ip, server_port
-/// (vendor/server/src/login/login_packets.h:68-82).
+/// (vendor/server/src/login/login_packets.h lpkt_next_login).
 const NEXT_LOGIN_CHAR_ID_OFFSET: usize = 28;
 const NEXT_LOGIN_NAME_OFFSET: usize = 36;
 const NEXT_LOGIN_NAME_LEN: usize = 16;
@@ -879,12 +901,14 @@ mod tests {
     use tokio::net::TcpListener;
 
     const ROSTER_CHAR_ID: u32 = 0x0100_1234;
+    const CHAR_ID_FLIP: u32 = 0xFF;
+    const UNOWNED_CHAR_ID: u32 = ROSTER_CHAR_ID ^ CHAR_ID_FLIP;
     const ROSTER_CHAR_NAME: &str = "Bravo";
     const SESSION_HASH: [u8; 16] = [0x5A; 16];
     const KEY3: [u8; 20] = [0x11; 20];
     const HANDOFF_SERVER_IP: u32 = 0x0100_007F;
     const HANDOFF_SERVER_PORT: u16 = 54230;
-    const DATA_ACK_SELECT: [u8; 5] = [0x02, 0, 0, 0, 0];
+    const DATA_ACK_SELECT: [u8; 5] = [DATA_RESP_SELECT_ACK, 0, 0, 0, 0];
 
     fn slot(char_id: u32, name: &str) -> CharSlot {
         CharSlot {
@@ -1029,7 +1053,7 @@ mod tests {
     /// The regression kuluu-3nd2 fixed: `CharSelection::Id` has no name to pass
     /// (session.rs calls `handshake` with the id alone), and LSB closes the
     /// socket when the 0x07's name doesn't match the id
-    /// (vendor/server/src/login/view_session.cpp:62-75).
+    /// (vendor/server/src/login/view_session.cpp view_session::read_func).
     #[tokio::test]
     async fn handshake_by_id_puts_the_roster_name_on_the_wire() {
         let view = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1038,7 +1062,7 @@ mod tests {
         let data_port = data.local_addr().unwrap().port();
 
         let roster = vec![
-            slot(ROSTER_CHAR_ID ^ 0xFF, "Alpha"),
+            slot(UNOWNED_CHAR_ID, "Alpha"),
             slot(ROSTER_CHAR_ID, ROSTER_CHAR_NAME),
         ];
         let server = tokio::spawn(fake_lobby(view, data, roster));
@@ -1077,11 +1101,11 @@ mod tests {
             session_hash: SESSION_HASH,
         };
         let err = LobbyClient::new("127.0.0.1", data_port, view_port)
-            .handshake(&auth, ROSTER_CHAR_ID ^ 0xFF, 0, KEY3)
+            .handshake(&auth, UNOWNED_CHAR_ID, 0, KEY3)
             .await
             .expect_err("an id the account does not own must not reach the 0x07");
         let err = err.to_string();
-        assert!(err.contains(&(ROSTER_CHAR_ID ^ 0xFF).to_string()), "{err}");
+        assert!(err.contains(&UNOWNED_CHAR_ID.to_string()), "{err}");
         assert!(err.contains(ROSTER_CHAR_NAME), "{err}");
         assert!(
             server.await.unwrap().is_none(),

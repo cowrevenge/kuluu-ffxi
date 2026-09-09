@@ -7,9 +7,9 @@ use bevy::light::{NotShadowCaster, NotShadowReceiver};
 use bevy::prelude::*;
 use kuluu_snapshot::EntityKind;
 
-use crate::camera::{nameplate_anchor_y, CameraMode, OperatorCamera};
+use crate::camera::{nameplate_anchor, CameraMode, OperatorCamera};
 use crate::components::{InGameEntity, Nameplate, WorldEntity};
-use crate::scene::{BakedActor, Target};
+use crate::scene::{NameplateLocator, Target};
 // Retail advances the targeted-nameplate pulse once per rendered frame.
 use crate::nameplate_icons::REFERENCE_LETTER;
 use crate::scheduler_runtime::RETAIL_FPS;
@@ -31,37 +31,37 @@ const NAMEPLATE_LEGIBILITY_SCALE: f32 = 1.3;
 // plate keeps at least this fraction of full size. Reached near ~13 yalms.
 const NAMEPLATE_MIN_DEPTH_SCALE: f32 = 0.45;
 
-// research/XIClient/src/XIClient/source/Game/GameManager.cpp:798-799 — retail's clip planes
+// research/XIClient/src/XIClient/source/Game/GameManager.cpp GameManager::InitializeProjection — retail's clip planes
 // are fixed, so the nameplate ramp below must not read our camera's user-tunable projection.
 const RETAIL_NEAR_CLIP_YALMS: f32 = 0.1;
 const RETAIL_FAR_CLIP_YALMS: f32 = 65535.0;
 
-// research/XIClient/src/XIClient/source/Rendering/Active/CXiActorNameDraw.cpp:75
+// research/XIClient/src/XIClient/source/Rendering/Active/CXiActorNameDraw.cpp PrepareActorNamePosition FixedPointScale
 const NDC_DEPTH_FIXED_POINT_SCALE: u32 = 4096;
-// research/XIClient/src/XIClient/source/Rendering/Active/CXiActorNameDraw.cpp:261-262 rejects
+// research/XIClient/src/XIClient/source/Rendering/Active/CXiActorNameDraw.cpp DrawActorNameText rejects
 // z >= 1.0, so the deepest drawable fixed-point depth is one step short of the scale.
 const MAX_DRAWABLE_DEPTH_FIXED: u32 = NDC_DEPTH_FIXED_POINT_SCALE - 1;
-// research/XIClient/src/XIClient/source/Rendering/Active/CXiActorNameDraw.cpp:90-91
+// research/XIClient/src/XIClient/source/Rendering/Active/CXiActorNameDraw.cpp PrepareActorNameDrawData FadeStartDistance
 const FADE_START_DEPTH_FIXED: u32 = 0xFB4;
 const FADE_END_DEPTH_FIXED: u32 = 0x1004;
-// research/XIClient/src/XIClient/source/Rendering/Active/CXiActorNameDraw.cpp:72-73 — the
+// research/XIClient/src/XIClient/source/Rendering/Active/CXiActorNameDraw.cpp PrepareActorNamePosition — the
 // reciprocal-w gate (1/depth < 1) drops names inside one yalm of the view plane.
 const MIN_VIEW_DEPTH_YALMS: f32 = 1.0;
 
-// research/XIClient/src/XIClient/source/Rendering/Active/CXiActorNameDraw.cpp:31 — glyph units
+// research/XIClient/src/XIClient/source/Rendering/Active/CXiActorNameDraw.cpp ActorNameScreenScale — glyph units
 // to viewport fraction, applied to a pre-transformed (RHW=1) screen-space quad.
 const NAME_SCREEN_SCALE: f32 = 0.002_343_75;
-// research/XIClient/src/XIClient/source/Rendering/Active/CXiActorNameDraw.cpp:35 — one name
+// research/XIClient/src/XIClient/source/Rendering/Active/CXiActorNameDraw.cpp ActorNameLineHeight — one name
 // line is one glyph cell tall.
 pub const NAME_LINE_HEIGHT_UNITS: f32 = 8.0;
 const NAME_LINE_SCREEN_FRACTION: f32 = NAME_SCREEN_SCALE * NAME_LINE_HEIGHT_UNITS;
 
-// research/XIClient/src/XIClient/source/Rendering/Active/CXiActorNameDraw.cpp:111-112
+// research/XIClient/src/XIClient/source/Rendering/Active/CXiActorNameDraw.cpp PrepareActorNameDrawData angle
 const TARGET_PULSE_DEGREES_PER_FRAME: u32 = 16;
 const FULL_TURN_DEGREES: u32 = 360;
 const TARGET_PULSE_AMPLITUDE: f32 = 32.0;
 const TARGET_PULSE_BIAS: f32 = 96.0;
-// research/XIClient/src/XIClient/source/Rendering/Active/CXiActorNameDraw.cpp:115 repacks
+// research/XIClient/src/XIClient/source/Rendering/Active/CXiActorNameDraw.cpp PrepareActorNameDrawData repacks
 // the product as `(scaledAlpha & 0xFFFFFF80) << 17`, i.e. a shift right by 7.
 const TARGET_PULSE_DIVISOR: f32 = 128.0;
 
@@ -111,12 +111,6 @@ pub struct RasterKey {
     pub text: String,
     pub color: [u8; 4],
     pub hp: Option<u8>,
-    /// The record's raw STATUS_TYPE byte. Today it only reaches the plate via
-    /// `is_dead` (colour) and the live invis cull, but the key must stay a
-    /// complete function of the record: any state transition — including ones
-    /// that happen while the plate is view-culled behind the camera — re-rasters
-    /// on the next frame instead of waiting for some other field to move.
-    pub status: u8,
     pub markers: Vec<u8>,
     pub linkshell_tint: [u8; 4],
 }
@@ -126,7 +120,6 @@ impl RasterKey {
         self.text == text
             && self.color == other.color
             && self.hp == other.hp
-            && self.status == other.status
             && self.markers == other.markers
             && self.linkshell_tint == other.linkshell_tint
     }
@@ -285,7 +278,7 @@ pub fn update_nameplate_billboards_system(
         (
             &Transform,
             &WorldEntity,
-            Option<&BakedActor>,
+            Option<&NameplateLocator>,
             Has<crate::components::MountedRider>,
         ),
         Without<NameplateBillboard>,
@@ -319,10 +312,10 @@ pub fn update_nameplate_billboards_system(
     let line_px = text_line_height_px(&raster.font.0, NAME_PX) as f32;
     let pulse_frame = (time.elapsed_secs() * RETAIL_FPS) as u32;
 
-    let mut pos_by_id: std::collections::HashMap<u32, (Vec3, f32)> =
+    let mut pos_by_id: std::collections::HashMap<u32, Option<Vec3>> =
         std::collections::HashMap::with_capacity(world_q.iter().len());
-    for (t, w, baked, mounted) in &world_q {
-        pos_by_id.insert(w.id, (t.translation, nameplate_anchor_y(baked, mounted)));
+    for (t, w, locator, mounted) in &world_q {
+        pos_by_id.insert(w.id, nameplate_anchor(t, locator, mounted));
     }
 
     let self_char_id: Option<u32> = state.snapshot.self_char_id;
@@ -343,7 +336,7 @@ pub fn update_nameplate_billboards_system(
             .collect();
         for rec in table.iter() {
             let id = rec.entity.id;
-            if have.contains(&id) || !pos_by_id.contains_key(&id) {
+            if have.contains(&id) || !pos_by_id.get(&id).is_some_and(Option::is_some) {
                 continue;
             }
             let Some(name) = rec.entity.name.as_deref().filter(|s| !s.is_empty()) else {
@@ -422,13 +415,16 @@ pub fn update_nameplate_billboards_system(
             continue;
         }
 
-        let Some(&(entity_pos, head_y_offset)) = pos_by_id.get(&np.entity_id) else {
+        let Some(&anchor) = pos_by_id.get(&np.entity_id) else {
             despawned += 1;
             commands.entity(ui_entity).try_despawn();
             continue;
         };
 
-        let head_pos = entity_pos + Vec3::Y * head_y_offset;
+        let Some(head_pos) = anchor else {
+            *vis = Visibility::Hidden;
+            continue;
+        };
         let view_depth = (head_pos - cam_pos).dot(cam_forward);
         // View-depth gate. Behind the camera forward plane (or inside
         // MIN_VIEW_DEPTH_YALMS) the plate is hidden and its transform/pulse
@@ -521,9 +517,6 @@ pub fn update_nameplate_billboards_system(
         {
             continue;
         }
-        // (status is part of the key: a worm that surfaces or dives behind the
-        // camera re-rasters on this frame even though nothing else in the key
-        // moved — see RasterKey::status.)
         let want = RasterKey {
             text: np.base_name.clone(),
             ..key
@@ -619,7 +612,6 @@ fn raster_key_for(
         text: String::new(),
         color: color_to_rgba8(color),
         hp,
-        status: ent.status,
         markers: crate::nameplate_marker::nameplate_markers(ent),
         linkshell_tint: color_to_rgba8(crate::nameplate_color::linkshell_tint(&ent.char_flags)),
     }
@@ -684,13 +676,13 @@ fn text_line_height_px(font: &FontArc, px: f32) -> u32 {
     (scaled.ascent() - scaled.descent()).ceil().max(1.0) as u32
 }
 
-// research/XIClient/.../CXiActorNameDraw.cpp:32-34 — an icon that is not the
+// research/XIClient/src/XIClient/source/Rendering/Active/CXiActorNameDraw.cpp ActorNameSpecialCharacterScale — an icon that is not the
 // leftmost glyph draws at 0.8 and advances the pen by 0.625; the job-master
 // tail draws at half scale and does not advance at all.
 const ICON_TRAILING_SCALE: f32 = 0.8;
 const ICON_TRAILING_ADVANCE: f32 = 0.625;
 const ICON_TAIL_SCALE: f32 = 0.5;
-// CXiActorNameDraw.cpp:366-367 — the tail glyph is nudged back over the star.
+// CXiActorNameDraw.cpp DrawActorNameText — the tail glyph is nudged back over the star.
 const ICON_TAIL_OFFSET_UNITS: f32 = -2.0;
 // Retail boxes the status icons at 15 units against the 8-unit line
 // (NAME_LINE_HEIGHT_UNITS), which lands near 1.5x the cap height on the bundled
@@ -698,7 +690,7 @@ const ICON_TAIL_OFFSET_UNITS: f32 = -2.0;
 // NAMEPLATE_LEGIBILITY_SCALE — shrinking the whole icon run uniformly, so
 // icon-to-icon proportions and advances stay retail's.
 const ICON_DRAW_SCALE: f32 = 0.75;
-// CXiActorNameDraw.cpp:623 — the icons' alpha runs through D3DTOP_MODULATE4X
+// CXiActorNameDraw.cpp CXiActorNameDraw::OnMove — the icons' alpha runs through D3DTOP_MODULATE4X
 // against a 0x80 diffuse, i.e. doubled.
 const ICON_ALPHA_MODULATE: u16 = 2;
 
@@ -712,7 +704,7 @@ struct IconPlacement {
     height_px: f32,
 }
 
-/// Retail's marker layout pass (CXiActorNameDraw.cpp:342-376), reduced to the
+/// Retail's marker layout pass (CXiActorNameDraw.cpp DrawActorNameText), reduced to the
 /// icon run that prefixes the name. Returns the placements and the pen advance
 /// the name text starts after.
 ///
@@ -810,7 +802,7 @@ fn rasterize_plate(
 
     let letter_advance_px = scaled.h_advance(scaled.glyph_id(char::from(REFERENCE_LETTER)));
     let (placements, icon_strip) = layout_icons(markers, icons, letter_advance_px, line_h as f32);
-    // research/XIClient/.../ActorTelemetry.cpp:397-398 — retail separates the
+    // research/XIClient/src/XIClient/source/World/Actor/ActorTelemetry.cpp ActorTelemetry::BuildTelemetryActorName — retail separates the
     // marker run from the name with a space, so the icon never crowds the text.
     let separator_px = if placements.is_empty() {
         0.0
@@ -941,7 +933,7 @@ fn rasterize_plate(
                 continue;
             };
             // Only the linkshell pearl keeps a tint; retail forces every other
-            // icon to the neutral diffuse (CXiActorNameDraw.cpp:404-407).
+            // icon to the neutral diffuse (CXiActorNameDraw.cpp DrawActorNameText).
             let tint = if placement.code == crate::nameplate_marker::glyph::LINKSHELL {
                 linkshell_tint
             } else {
@@ -1045,7 +1037,7 @@ fn premultiply_linear(pixels: &mut [u8]) {
 
 /// Scale one icon sprite into the plate and alpha-blend it over what is already
 /// there. Retail filters these glyphs linearly
-/// (CXiActorNameDraw.cpp:618-619), so the resample is bilinear.
+/// (CXiActorNameDraw.cpp CXiActorNameDraw::OnMove), so the resample is bilinear.
 #[allow(clippy::too_many_arguments)]
 fn blit_icon(
     pixels: &mut [u8],
@@ -1424,6 +1416,152 @@ mod icon_raster_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn keyed_entity(status: u8, hp_pct: Option<u8>) -> kuluu_snapshot::Entity {
+        kuluu_snapshot::Entity {
+            id: 1,
+            act_index: 1,
+            kind: EntityKind::Mob,
+            name: Some("Damselfly".into()),
+            pos: kuluu_snapshot::Vec3 {
+                x: 0.0,
+                y: 0.0,
+                z: 0.0,
+            },
+            heading: 0,
+            hp_pct,
+            bt_target_id: 0,
+            face_target: 0,
+            claim_id: 0,
+            speed: 0,
+            speed_base: 0,
+            look: None,
+            animation: 0,
+            animationsub: 0,
+            mount: None,
+            status,
+            char_flags: Default::default(),
+            monstrosity: false,
+            name_vis: None,
+        }
+    }
+
+    #[test]
+    fn raster_key_ignores_status_flips_but_tracks_death() {
+        let colors = crate::nameplate_color::NameColorTable::default();
+        let key = |e: &kuluu_snapshot::Entity| {
+            let ctx = crate::nameplate_color::SelfContext {
+                self_id: None,
+                party: &[],
+            };
+            raster_key_for(e, ctx, &colors, false)
+        };
+        let idle = key(&keyed_entity(0, Some(100)));
+        assert_eq!(
+            idle,
+            key(&keyed_entity(1, Some(100))),
+            "an engage/disengage status flip must not re-raster"
+        );
+        assert_ne!(
+            idle,
+            key(&keyed_entity(0, Some(0))),
+            "death recolours the plate"
+        );
+    }
+
+    #[test]
+    fn nameplate_system_hides_during_loading_and_restores_without_a_snapshot() {
+        let mut app = App::new();
+        app.init_resource::<SceneState>()
+            .init_resource::<crate::graphics::settings::GraphicsSettings>()
+            .init_resource::<CameraMode>()
+            .init_resource::<Time>()
+            .init_resource::<Target>()
+            .init_resource::<Assets<Mesh>>()
+            .init_resource::<Assets<StandardMaterial>>()
+            .init_resource::<Assets<Image>>()
+            .init_resource::<BillboardFont>()
+            .init_resource::<crate::nameplate_color::NameColorTable>()
+            .init_resource::<crate::nameplate_icons::NameplateIcons>()
+            .init_resource::<NameplateBillboardDebug>()
+            .init_resource::<crate::entity_table::EntityTable>()
+            .add_systems(Update, update_nameplate_billboards_system);
+        app.world_mut().spawn((
+            OperatorCamera,
+            Transform::default(),
+            Projection::Perspective(PerspectiveProjection::default()),
+        ));
+        let actor = app
+            .world_mut()
+            .spawn((
+                Transform::from_xyz(0.0, 0.0, -10.0),
+                WorldEntity {
+                    id: 1,
+                    act_index: 1,
+                    kind: EntityKind::Mob,
+                },
+            ))
+            .id();
+        let plate = app
+            .world_mut()
+            .spawn((
+                NameplateBillboard {
+                    entity_id: 1,
+                    kind: EntityKind::Mob,
+                    base_name: "Damselfly".into(),
+                    rastered: None,
+                    last_alpha: 1.0,
+                },
+                BillboardAspect {
+                    width: 130,
+                    height: 130,
+                    text_center_y_px: 53.0,
+                },
+                Transform::default(),
+                Visibility::Visible,
+                MeshMaterial3d::<StandardMaterial>(Handle::default()),
+            ))
+            .id();
+        app.update();
+        assert_eq!(
+            app.world().get::<Visibility>(plate),
+            Some(&Visibility::Hidden)
+        );
+        app.world_mut().entity_mut(actor).insert(NameplateLocator {
+            offset: Some(Vec3::Y * 3.5),
+            root_attached: true,
+            model_scale: 1.0,
+        });
+        app.update();
+        assert_eq!(
+            app.world().get::<Visibility>(plate),
+            Some(&Visibility::Visible)
+        );
+        let position = app.world().get::<Transform>(plate).unwrap().translation;
+        assert!((position.y - 3.5).abs() < 1e-5);
+        app.world_mut()
+            .entity_mut(actor)
+            .remove::<NameplateLocator>();
+        app.update();
+        assert_eq!(
+            app.world().get::<Visibility>(plate),
+            Some(&Visibility::Hidden)
+        );
+        app.world_mut().entity_mut(actor).insert(NameplateLocator {
+            offset: Some(Vec3::Y * 2.6),
+            root_attached: true,
+            model_scale: 1.0,
+        });
+        app.update();
+        assert_eq!(
+            app.world().get::<Visibility>(plate),
+            Some(&Visibility::Visible)
+        );
+        assert!((app.world().get::<Transform>(plate).unwrap().translation.y - 2.6).abs() < 1e-5);
+        app.world_mut().despawn(actor);
+        app.update();
+        assert!(app.world().get_entity(plate).is_err());
+    }
 
     #[test]
     fn text_line_pins_to_one_anchor_height_with_or_without_icons() {

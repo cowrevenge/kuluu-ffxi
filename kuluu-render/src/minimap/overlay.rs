@@ -6,6 +6,7 @@ use kuluu_snapshot::EntityKind;
 
 use crate::components::{InGameEntity, IsSelf, WorldEntity};
 use crate::entity_table::EntityTable;
+use crate::graphics_settings::MinimapRadar;
 use crate::lock_on::LockOn;
 use crate::nameplate_color::{name_color_choice, NameColorTable, SelfContext};
 use crate::scene::Target;
@@ -84,7 +85,7 @@ impl MarkerCategory {
         }
     }
 
-    fn bit(self) -> u8 {
+    const fn bit(self) -> u8 {
         let idx = match self {
             MarkerCategory::SelfMarker => 0,
             MarkerCategory::Party => 1,
@@ -115,23 +116,41 @@ impl MarkerCategory {
 
 const ALL_CATEGORIES_MASK: u8 = (1 << MarkerCategory::ALL.len()) - 1;
 
+/// The grounded retail fact is a negative: the summoned map is not a live
+/// entity radar, so every kind-keyed dot and the current-target/lock-on
+/// highlight are Enhanced. `Party` is an unverified inference pending a retail
+/// map-screen observation (kuluu-7cqw); `SelfMarker` is the floor. The 0x0F5
+/// tracked marker and the 0x0F4 wide-scan hits are separate nodes in
+/// `hud::map_screen` that this mask does not gate.
+const VANILLA_CATEGORIES_MASK: u8 = MarkerCategory::SelfMarker.bit() | MarkerCategory::Party.bit();
+
 /// Session-persistent per-category visibility bitset; a cleared bit hides that
 /// category on BOTH the minimap and the Map screen through the shared
-/// `sync_marker_layer`. Every category starts visible.
-#[derive(Resource, Debug, Clone, Copy)]
+/// `sync_marker_layer`. Which categories start set is the [`MinimapRadar`]
+/// mode's call, and until a per-category UI exists that is the only writer:
+/// `set`/`toggle` are the surface such a UI would use.
+#[derive(Resource, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MarkerFilters {
     bits: u8,
 }
 
 impl Default for MarkerFilters {
     fn default() -> Self {
-        Self {
-            bits: ALL_CATEGORIES_MASK,
-        }
+        Self::for_radar(MinimapRadar::default())
     }
 }
 
 impl MarkerFilters {
+    pub const fn for_radar(radar: MinimapRadar) -> Self {
+        Self {
+            bits: if radar.entity_radar() {
+                ALL_CATEGORIES_MASK
+            } else {
+                VANILLA_CATEGORIES_MASK
+            },
+        }
+    }
+
     pub fn is_visible(&self, category: MarkerCategory) -> bool {
         self.bits & category.bit() != 0
     }
@@ -149,8 +168,8 @@ impl MarkerFilters {
     }
 }
 
-/// Which legend/filter bucket a world dot belongs to. Role overlays win over
-/// kind so a locked party mob still filters and colors as Target.
+/// Which filter bucket a world dot belongs to. Role overlays win over kind so a
+/// locked party mob colors as Target.
 fn marker_category(kind: EntityKind, is_party: bool, is_role_target: bool) -> MarkerCategory {
     if is_role_target {
         return MarkerCategory::Target;
@@ -164,6 +183,20 @@ fn marker_category(kind: EntityKind, is_party: bool, is_role_target: bool) -> Ma
         EntityKind::Mob => MarkerCategory::Mob,
         EntityKind::Pet => MarkerCategory::Pet,
     }
+}
+
+/// Whether a world dot is drawn at all. The `Target` role is an additive
+/// highlight, never a reclassification: selecting or locking on an actor can
+/// only add its dot, so a party member keeps hers under the vanilla mask the
+/// moment she is targeted (kuluu-7cqw).
+fn marker_visible(
+    filters: &MarkerFilters,
+    kind: EntityKind,
+    is_party: bool,
+    is_role_target: bool,
+) -> bool {
+    filters.is_visible(marker_category(kind, is_party, false))
+        || (is_role_target && filters.is_visible(MarkerCategory::Target))
 }
 
 #[derive(Resource, Default)]
@@ -410,8 +443,12 @@ pub fn sync_marker_layer<F>(
         let is_target = ctx.target.id == Some(world_entity.id);
         let is_locked = ctx.lock_on.target_id == Some(world_entity.id);
         let is_party = ctx.party_ids.contains(&world_entity.id);
-        let category = marker_category(world_entity.kind, is_party, is_target || is_locked);
-        if !ctx.filters.is_visible(category) {
+        if !marker_visible(
+            ctx.filters,
+            world_entity.kind,
+            is_party,
+            is_target || is_locked,
+        ) {
             continue;
         }
         let (ring, ring_px) = ring_for(false, is_target, is_locked);
@@ -661,8 +698,8 @@ mod tests {
     }
 
     #[test]
-    fn marker_filters_default_all_visible_and_toggle_hides_one() {
-        let mut filters = MarkerFilters::default();
+    fn marker_filters_enhanced_all_visible_and_toggle_hides_one() {
+        let mut filters = MarkerFilters::for_radar(MinimapRadar::Enhanced);
         for category in MarkerCategory::ALL {
             assert!(filters.is_visible(category), "{category:?} starts visible");
         }
@@ -676,6 +713,28 @@ mod tests {
         }
         filters.toggle(MarkerCategory::Mob);
         assert!(filters.is_visible(MarkerCategory::Mob));
+    }
+
+    /// The live NPC/mob/PC radar and the current-target highlight are the
+    /// Enhanced opt-in; `Target` here is whatever the player has selected or
+    /// locked on, not the 0x0F5 tracked entity, so it is not a vanilla mark.
+    #[test]
+    fn vanilla_radar_marks_only_self_and_party() {
+        let vanilla = MarkerFilters::for_radar(MinimapRadar::Vanilla);
+        for category in MarkerCategory::ALL {
+            let retail_marked =
+                matches!(category, MarkerCategory::SelfMarker | MarkerCategory::Party);
+            assert_eq!(
+                vanilla.is_visible(category),
+                retail_marked,
+                "{category:?} under MinimapRadar::Vanilla"
+            );
+        }
+        assert_eq!(
+            MarkerFilters::default(),
+            vanilla,
+            "the default mode is the vanilla one"
+        );
     }
 
     /// The heading an actor's `Transform` encodes and the heading the camera
@@ -741,6 +800,8 @@ mod tests {
             table: Res<EntityTable>,
             filters: Res<MarkerFilters>,
             name_colors: Res<NameColorTable>,
+            target: Res<Target>,
+            lock_on: Res<LockOn>,
             q_layer: Query<Entity, With<TestLayer>>,
             q_self: Query<&Transform, With<IsSelf>>,
             q_transform: Query<(&Transform, &WorldEntity), Without<IsSelf>>,
@@ -753,7 +814,6 @@ mod tests {
                 min: Vec2::splat(-100.0),
                 max: Vec2::splat(100.0),
             };
-            let (target, lock_on) = (Target::default(), LockOn::default());
             let ctx = MarkerContext::new(
                 &scene_state,
                 &table,
@@ -777,8 +837,10 @@ mod tests {
         let mut world = World::new();
         world.init_resource::<SceneState>();
         world.init_resource::<EntityTable>();
-        world.insert_resource(MarkerFilters::default());
+        world.insert_resource(MarkerFilters::for_radar(MinimapRadar::Enhanced));
         world.init_resource::<NameColorTable>();
+        world.init_resource::<Target>();
+        world.init_resource::<LockOn>();
         world.init_resource::<TestStore>();
         world.spawn(TestLayer);
         world.spawn((
@@ -805,5 +867,111 @@ mod tests {
             world.resource::<TestStore>().0.is_empty(),
             "filtering Mob off skips the dot in the shared helper (stale-cleaned)"
         );
+
+        world.insert_resource(MarkerFilters::for_radar(MinimapRadar::Enhanced));
+        world.run_system_once(run_layer).unwrap();
+        assert_eq!(world.resource::<TestStore>().0.len(), 1, "radar back on");
+
+        world.insert_resource(MarkerFilters::for_radar(MinimapRadar::Vanilla));
+        world.run_system_once(run_layer).unwrap();
+        assert!(
+            world.resource::<TestStore>().0.is_empty(),
+            "the vanilla mode plots no mob dot on either map surface"
+        );
+
+        world.resource_mut::<Target>().id = Some(42);
+        world.run_system_once(run_layer).unwrap();
+        assert!(
+            world.resource::<TestStore>().0.is_empty(),
+            "selecting the mob must not re-plot it as a Target dot"
+        );
+
+        world.resource_mut::<Target>().id = None;
+        world.resource_mut::<LockOn>().target_id = Some(42);
+        world.run_system_once(run_layer).unwrap();
+        assert!(
+            world.resource::<TestStore>().0.is_empty(),
+            "nor must locking on to it"
+        );
+
+        world.resource_mut::<LockOn>().target_id = None;
+        world.spawn((
+            Transform::from_xyz(-10.0, 0.0, -10.0),
+            WorldEntity {
+                id: PARTY_ID,
+                act_index: 2,
+                kind: EntityKind::Pc,
+            },
+        ));
+        world
+            .resource_mut::<SceneState>()
+            .snapshot
+            .party
+            .push(party_member(PARTY_ID));
+        world.run_system_once(run_layer).unwrap();
+        assert!(
+            world.resource::<TestStore>().0.contains_key(&PARTY_ID),
+            "the vanilla mask still plots a party member"
+        );
+
+        world.resource_mut::<Target>().id = Some(PARTY_ID);
+        world.run_system_once(run_layer).unwrap();
+        assert!(
+            world.resource::<TestStore>().0.contains_key(&PARTY_ID),
+            "targeting her must not despawn her dot (the healer flow)"
+        );
+
+        world.resource_mut::<Target>().id = None;
+        world.resource_mut::<LockOn>().target_id = Some(PARTY_ID);
+        world.run_system_once(run_layer).unwrap();
+        assert!(
+            world.resource::<TestStore>().0.contains_key(&PARTY_ID),
+            "nor must locking on to her"
+        );
+    }
+
+    const PARTY_ID: u32 = 7;
+
+    fn party_member(id: u32) -> kuluu_snapshot::PartyMember {
+        kuluu_snapshot::PartyMember {
+            id,
+            act_index: 2,
+            name: Some("Mate".into()),
+            hp: 1,
+            mp: 0,
+            tp: 0,
+            hp_pct: 100,
+            mp_pct: 100,
+            zone_no: 0,
+            main_job: 1,
+            main_job_lv: 1,
+            sub_job: 0,
+            sub_job_lv: 0,
+            is_party_leader: false,
+            is_alliance_leader: false,
+            party_no: 0,
+            in_mog_house: false,
+        }
+    }
+
+    /// Role overlays are additive, so no selection can subtract a dot the
+    /// player's own category filter already shows (kuluu-7cqw).
+    #[test]
+    fn targeting_never_hides_a_dot_its_own_category_shows() {
+        let vanilla = MarkerFilters::for_radar(MinimapRadar::Vanilla);
+        assert!(marker_visible(&vanilla, EntityKind::Pc, true, false));
+        assert!(
+            marker_visible(&vanilla, EntityKind::Pc, true, true),
+            "a targeted party member stays plotted under the vanilla mask"
+        );
+        assert!(!marker_visible(&vanilla, EntityKind::Mob, false, true));
+
+        let mut enhanced = MarkerFilters::for_radar(MinimapRadar::Enhanced);
+        enhanced.set(MarkerCategory::Mob, false);
+        assert!(
+            marker_visible(&enhanced, EntityKind::Mob, false, true),
+            "Target still adds a dot the kind filter hides"
+        );
+        assert!(!marker_visible(&enhanced, EntityKind::Mob, false, false));
     }
 }

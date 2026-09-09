@@ -1,8 +1,11 @@
 use super::*;
 
 /// `GAttr.PartyNo` sentinel for "not in a party of the alliance".
-/// vendor/server/src/map/packets/s2c/0x0dd_group_list.cpp:40.
+/// vendor/server/src/map/packets/s2c/0x0dd_group_list.cpp GP_SERV_COMMAND_GROUP_LIST::GP_SERV_COMMAND_GROUP_LIST.
 pub const NO_PARTY: u8 = 3;
+
+/// `GROUP_TBL.PartyNo : 2` (vendor/server/src/map/packets/s2c/0x0c8_group_tbl.h GROUP_TBL).
+pub const PARTY_NO_MASK: u8 = 0x03;
 
 // ---- GROUP_TBL (0x0C8) — party definition -----------------------------------
 
@@ -41,7 +44,7 @@ impl GroupTbl {
     ///   [0]      Kind: u8 — PartyKind::Party = 0, PartyKind::Alliance = 5
     ///            (vendor/server/src/map/enums/party_kind.h). A solo/disbanded
     ///            packet is also 0: GP_SERV_PACKET zero-memsets its buffer and
-    ///            DisbandParty sends GROUP_TBL(nullptr) (party.cpp:128), so byte 0
+    ///            DisbandParty sends GROUP_TBL(nullptr) (party.cpp CParty::DisbandParty), so byte 0
     ///            alone cannot tell Party from None — member presence decides.
     ///   [1..4]   padding
     ///   [4..]    array of up to 20 GROUP_TBL entries, 12 bytes each:
@@ -77,7 +80,7 @@ impl GroupTbl {
             }
             let act_index = u16::from_le_bytes(e[4..6].try_into().unwrap());
             let flags = e[6];
-            let party_no = flags & 0x03;
+            let party_no = flags & PARTY_NO_MASK;
             let is_party_leader = (flags >> 2) & 1 == 1;
             let is_alliance_leader = (flags >> 3) & 1 == 1;
             let zone_no = u16::from_le_bytes(e[8..10].try_into().unwrap());
@@ -95,7 +98,7 @@ impl GroupTbl {
             // vendor/server/src/map/enums/party_kind.h: Alliance == 5.
             5 => GroupKind::Alliance,
             // Party == 0 — indistinguishable from the solo/disbanded packet
-            // (zero-memset buffer, party.cpp:128), so member presence decides.
+            // (zero-memset buffer, party.cpp CParty::DisbandParty), so member presence decides.
             0 if members.is_empty() => GroupKind::None,
             0 => GroupKind::Party,
             v => GroupKind::Unknown(v),
@@ -133,9 +136,9 @@ pub struct PartyListExtra {
     pub is_alliance_leader: bool,
 
     /// `GAttr.PartyNo`: which party of the alliance this member sits in — 0..2,
-    /// or 3 for "no party". vendor/server/src/map/packets/s2c/0x0dd_group_list.cpp:40.
+    /// or 3 for "no party". vendor/server/src/map/packets/s2c/0x0dd_group_list.cpp GP_SERV_COMMAND_GROUP_LIST::GP_SERV_COMMAND_GROUP_LIST.
     /// Retail compares it against the first member's to tell an alliance-mate's
-    /// claim from a party-mate's (research/XIClient/.../ActorTelemetry.cpp:1706).
+    /// claim from a party-mate's (research/XIClient/src/XIClient/source/World/Actor/ActorTelemetry.cpp ActorTelemetry::NameColorSet).
     pub party_no: u8,
 
     pub name: Option<String>,

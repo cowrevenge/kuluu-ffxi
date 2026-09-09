@@ -131,6 +131,8 @@ pub struct SlashWriters<'w, 's> {
 
     pub map_view: Res<'w, kuluu_render::hud::map_screen::MapView>,
 
+    pub change_map_catalog: Res<'w, kuluu_render::hud::map_screen::ChangeMapCatalog>,
+
     pub death_prompt: ResMut<'w, kuluu_render::hud::death_prompt::DeathPromptSelection>,
 
     pub(crate) dat_root: Res<'w, super::DatRootRes>,
@@ -343,6 +345,7 @@ pub(crate) fn text_input_system(
                     slash_writers.map_markers.reborrow(),
                     &slash_writers.map_view,
                     &slash_writers.minimap_state,
+                    &slash_writers.change_map_catalog,
                 ) {
                     *mode = next;
                 }
@@ -1394,7 +1397,7 @@ fn dispatch_dynamic_menu_action(
             if already_equipped {
                 // Re-selecting the item already in this slot toggles it off.
                 // LSB unequips when slotID (container_index) is 0, regardless of
-                // container: vendor/server/src/map/utils/charutils.cpp:3147
+                // container: vendor/server/src/map/utils/charutils.cpp EquipItem
                 // ("slotID of zero = unequip"). LOC_INVENTORY (0) always passes
                 // the equip_set container validation.
                 (

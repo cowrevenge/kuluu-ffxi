@@ -36,8 +36,8 @@ pub enum RestKind {
 
 /// Retail's sub->routine table @RVA 0x35AF60 (.data, FFXiMain.dll; finding F37): the raw
 /// animationsub byte indexes [init, ini1, ini2, ini3] with a mod-4 wrap that absorbs LSB's
-/// spawn flag (F47). The client plays the named routine from the model DAT through its generic
-/// named-play slots (F44); a model that does not ship it simply gets nothing. No interpretation
+/// spawn flag (finding F47). The client plays the named routine from the model DAT through its generic
+/// named-play slots (finding F44); a model that does not ship it simply gets nothing. No interpretation
 /// of what any particular model does with a sub value lives in the engine: the DAT decides.
 pub const SPECIAL_ROUTINE_TABLE: [&str; 8] = [
     "init", "ini1", "ini2", "ini3", "init", "ini1", "ini2", "ini3",
@@ -58,7 +58,7 @@ pub fn special_routine(animationsub: u8) -> Option<&'static str> {
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct SpecialPose {
     /// Raw animationsub byte as last seen on the wire. Retail indexes its table with the raw
-    /// 3-bit value and lets the mod-4 wrap absorb the spawn flag (F47), so no masking here.
+    /// 3-bit value and lets the mod-4 wrap absorb the spawn flag (finding F47), so no masking here.
     pub sub: u8,
 
     /// status == INVISIBLE(3): the actor is hidden. Retail destroys it; we keep one hidden
@@ -232,7 +232,7 @@ pub struct FishingClip {
 
 /// Maps a fishing macro-state phase (0..=6) to its `fsh<n>` model clip. Phases:
 /// 0=cast/wait, 1=fighting, 2=caught fish, 3=rod break, 4=line break, 5=caught monster,
-/// 6=stop/cancel. research/xim Actor.kt:361 (`updateFishingState`).
+/// 6=stop/cancel. research/xim Actor.kt (`updateFishingState`).
 pub fn fishing_clip(phase: u8) -> Option<FishingClip> {
     if phase > 6 {
         return None;
@@ -274,7 +274,7 @@ pub fn idle_animation_id(inputs: &ActorAnimInputs) -> Vec<DatId> {
     }
 
     if inputs.dead && inputs.owner_is_none {
-        return animation_mode_variant(DatId::from_str("cor?"), inputs.idle_mode, "cr");
+        return animation_mode_variant(corpse_pose_id(), inputs.idle_mode, "cr");
     }
 
     if inputs.engage_state.is_battle_idle() {
@@ -350,8 +350,77 @@ pub fn rest_animation_id(rest: RestKind) -> Option<DatId> {
     rest_animation_id_phase(rest, RestPhase::In)
 }
 
+pub fn corpse_pose_id() -> DatId {
+    DatId::from_str("cor?")
+}
+
+/// Mount, pose-type and static-NPC idles outrank `dead` in [`idle_animation_id`],
+/// so the collapse asks that resolution rather than re-testing `dead` on its own.
+pub fn corpse_pose_selected(inputs: &ActorAnimInputs) -> bool {
+    inputs.dead && idle_animation_id(inputs).last() == Some(&corpse_pose_id())
+}
+
 pub fn corpse_routine_id() -> DatId {
     DatId::from_str("corp")
+}
+
+pub fn death_routine_id() -> DatId {
+    DatId::from_str("dead")
+}
+
+/// Playback of retail's `dead` model routine: the `ded?` collapse played once,
+/// then `cor?` held (PC skeleton DATs 7072 / 10248 / 13424 / 16600 / 19776 /
+/// 23176 / 26352, via `ffxi-dat --example dat-routine-stages <id> dead`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum DeathPhase {
+    /// No observation yet, so a first sighting cannot be attributed to a death
+    /// that happened in view.
+    Unobserved,
+
+    Alive,
+
+    Collapsing {
+        remaining: f32,
+    },
+
+    Corpse,
+}
+
+pub fn next_death_phase(
+    prev: DeathPhase,
+    dead: bool,
+    collapse_frames: f32,
+    elapsed_frames: f32,
+) -> DeathPhase {
+    if !dead {
+        return DeathPhase::Alive;
+    }
+
+    match prev {
+        // Already dead on first sighting (zone-in on a corpse, a KO'd player
+        // streaming into range). Inference rather than an observed capture, recorded
+        // as such in .agents/skills/retail-observe/references/death-ko-behavior.md:
+        // replaying `ded?` would pop the corpse upright to fall over again.
+        DeathPhase::Unobserved => DeathPhase::Corpse,
+        DeathPhase::Alive => {
+            if collapse_frames > 0.0 {
+                DeathPhase::Collapsing {
+                    remaining: collapse_frames,
+                }
+            } else {
+                DeathPhase::Corpse
+            }
+        }
+        DeathPhase::Collapsing { remaining } => {
+            let remaining = remaining - elapsed_frames;
+            if remaining <= 0.0 {
+                DeathPhase::Corpse
+            } else {
+                DeathPhase::Collapsing { remaining }
+            }
+        }
+        DeathPhase::Corpse => DeathPhase::Corpse,
+    }
 }
 
 pub fn selected_animation(inputs: &ActorAnimInputs) -> SelectedAnimation {
@@ -634,6 +703,100 @@ mod tests {
         assert_eq!(idstr(rest_animation_id(RestKind::Heal).unwrap()), "rx0?");
         assert_eq!(idstr(rest_animation_id(RestKind::Kneel).unwrap()), "rx0?");
         assert_eq!(idstr(corpse_routine_id()), "corp");
+        assert_eq!(idstr(death_routine_id()), "dead");
+    }
+
+    // Routine timings dumped from the retail PC skeleton DATs
+    // (`dat-routine-stages 7072 dead`): `ded?` for 116 half-frames = 58 real
+    // frames, then `cor?`.
+    const HUME_M_COLLAPSE_FRAMES: f32 = 58.0;
+
+    #[test]
+    fn collapse_plays_once_then_holds_the_corpse_pose() {
+        let mut phase = next_death_phase(DeathPhase::Unobserved, false, 0.0, 0.0);
+        assert_eq!(phase, DeathPhase::Alive);
+
+        phase = next_death_phase(phase, true, HUME_M_COLLAPSE_FRAMES, 1.0);
+        assert_eq!(
+            phase,
+            DeathPhase::Collapsing {
+                remaining: HUME_M_COLLAPSE_FRAMES
+            }
+        );
+
+        let mut ticks = 0;
+        while matches!(phase, DeathPhase::Collapsing { .. }) {
+            phase = next_death_phase(phase, true, HUME_M_COLLAPSE_FRAMES, 1.0);
+            ticks += 1;
+            assert!(ticks <= HUME_M_COLLAPSE_FRAMES as u32 + 1);
+        }
+        assert_eq!(ticks, HUME_M_COLLAPSE_FRAMES as u32);
+        assert_eq!(phase, DeathPhase::Corpse);
+
+        for _ in 0..600 {
+            phase = next_death_phase(phase, true, HUME_M_COLLAPSE_FRAMES, 1.0);
+            assert_eq!(phase, DeathPhase::Corpse);
+        }
+    }
+
+    #[test]
+    fn corpse_pose_selected_matches_idle_resolution() {
+        let mut i = ActorAnimInputs {
+            dead: true,
+            ..Default::default()
+        };
+        assert!(corpse_pose_selected(&i));
+
+        i.idle_mode = 3;
+        assert!(corpse_pose_selected(&i));
+        i.idle_mode = 0;
+
+        i.owner_is_none = false;
+        assert!(!corpse_pose_selected(&i));
+        i.owner_is_none = true;
+
+        i.mount_or_chocobo = true;
+        assert!(!corpse_pose_selected(&i));
+        i.mount_or_chocobo = false;
+
+        i.mount_pose_type = Some(2);
+        assert!(!corpse_pose_selected(&i));
+        i.mount_pose_type = None;
+
+        i.static_npc = true;
+        i.has_dft_idle = true;
+        assert!(!corpse_pose_selected(&i));
+        i.static_npc = false;
+        i.has_dft_idle = false;
+
+        i.dead = false;
+        assert!(!corpse_pose_selected(&i));
+    }
+
+    #[test]
+    fn first_sighting_of_a_corpse_skips_the_collapse() {
+        let phase = next_death_phase(DeathPhase::Unobserved, true, HUME_M_COLLAPSE_FRAMES, 1.0);
+        assert_eq!(phase, DeathPhase::Corpse);
+    }
+
+    #[test]
+    fn raise_resets_so_a_later_death_collapses_again() {
+        let phase = next_death_phase(DeathPhase::Corpse, false, HUME_M_COLLAPSE_FRAMES, 1.0);
+        assert_eq!(phase, DeathPhase::Alive);
+
+        let phase = next_death_phase(phase, true, HUME_M_COLLAPSE_FRAMES, 1.0);
+        assert_eq!(
+            phase,
+            DeathPhase::Collapsing {
+                remaining: HUME_M_COLLAPSE_FRAMES
+            }
+        );
+    }
+
+    #[test]
+    fn missing_collapse_clip_falls_straight_to_the_corpse_pose() {
+        let phase = next_death_phase(DeathPhase::Alive, true, 0.0, 1.0);
+        assert_eq!(phase, DeathPhase::Corpse);
     }
 
     #[test]
@@ -708,7 +871,7 @@ mod tests {
     #[test]
     fn special_routine_table_matches_retail() {
         // F37's table @0x35AF60 verbatim: sub 4..7 wraps mod-4, which is what absorbs LSB's
-        // spawn flag (F47) without any client-side masking.
+        // spawn flag (finding F47) without any client-side masking.
         assert_eq!(special_routine(0), None);
         assert_eq!(special_routine(1), Some("ini1"));
         assert_eq!(special_routine(2), Some("ini2"));
@@ -735,7 +898,7 @@ mod tests {
             assert_eq!(s.pose.active_routine, Some(fourcc(name)));
             assert_eq!(s.triggered, Some(name));
         }
-        // Spawn-flagged selector: the raw byte indexes the table; no masking (F47).
+        // Spawn-flagged selector: the raw byte indexes the table; no masking (finding F47).
         let s = step(&SpecialPose::default(), 0, 5);
         assert_eq!(s.pose.active_routine, Some(*b"ini1"));
         assert_eq!(s.triggered, Some("ini1"));

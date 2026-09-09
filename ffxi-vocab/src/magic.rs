@@ -33,15 +33,15 @@ pub fn cast_suffix(spell_id: u32) -> Option<&'static str> {
     skill_to_suffix(SPELL_MAGIC_SKILL[i].1)
 }
 
-// vendor/server/src/map/ai/states/magic_state.cpp:101 packs the spell's FourCC — not its id —
+// vendor/server/src/map/ai/states/magic_state.cpp CMagicState::CMagicState packs the spell's FourCC — not its id —
 // into BATTLE2 cmd_arg for ActionCategory::MagicStart; the spell id rides in the first result's
-// `param` (:109). vendor/server/src/map/action/interrupts.cpp:268-284 reuses the SAME category
-// for an interrupt, distinguished only by the FourCC. vendor/server/src/map/enums/four_cc.h:39-54
+// `param` (:109). vendor/server/src/map/action/interrupts.cpp MagicInterrupt reuses the SAME category
+// for an interrupt, distinguished only by the FourCC. vendor/server/src/map/enums/four_cc.h FourCC BlackMagicCast
 // names both families: casts are "ca"+suffix, interrupts "sp"+suffix.
 const MAGIC_CAST_PREFIX: [u8; 2] = *b"ca";
 const MAGIC_INTERRUPT_PREFIX: [u8; 2] = *b"sp";
 
-// vendor/server/src/map/enums/action/category.h:35,39 — `action.cmd_no`, 4 bits.
+// vendor/server/src/map/enums/action/category.h ActionCategory ItemFinish — `action.cmd_no`, 4 bits.
 pub const CATEGORY_MAGIC_FINISH: u8 = 4;
 pub const CATEGORY_MAGIC_START: u8 = 8;
 
@@ -80,7 +80,7 @@ mod tests {
         assert_eq!(cast_suffix(0xFFFF), None);
     }
 
-    // vendor/server/src/map/enums/four_cc.h:40,39,44,47,48 — the literal constants LSB sends.
+    // vendor/server/src/map/enums/four_cc.h FourCC BlueMagicCast — the literal constants LSB sends.
     #[test]
     fn magic_start_fourcc_decodes_to_its_routine_dat_id() {
         let black = magic_start_routine(0x6B626163).unwrap();

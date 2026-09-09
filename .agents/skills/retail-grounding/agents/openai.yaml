@@ -1,0 +1,3 @@
+interface:
+  display_name: "Retail Grounding"
+  short_description: "Ground vanilla behavior in retail client evidence"

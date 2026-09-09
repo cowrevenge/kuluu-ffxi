@@ -28,21 +28,33 @@
 # clippy::undocumented_unsafe_blocks), citations to the vendored
 # authoritative sources (the LSB-boundary convention), and SPDX /
 # copyright headers. Doc comments are deliberately absent — see above.
-CR_RE_ALLOWED='(SAFETY|#[[:space:]]*Safety|SPDX-|[Cc]opyright|\bvendor/|\bresearch/|\bLSB\b|Phoenix|POLUtils|XiEvents|XiPackets|atom0s|\bRFC[ -]?[0-9])'
+CR_RE_ALLOWED='(SAFETY|#[[:space:]]*Safety|SPDX-|[Cc]opyright|\bvendor/|\bresearch/|\bLSB\b|Phoenix|POLUtils|XiEvents|XiPackets|atom0s|FFXiMain|\bxim\b|\bRFC[ -]?[0-9])'
 
 # Doc-comment lines (/// //!). Scanned by the rot families above, but
 # excluded from the blanket catch-all so a clean one-line API doc isn't
 # treated as a banned narrative comment.
 CR_RE_DOC='^[[:space:]]*//[/!]'
 
-# Vendor/research citation pinned to a LINE NUMBER. The citation itself is
+# A pin into a dependency named with its version (`rodio-0.22.2 src/x.rs:56`)
+# does not rot: the version fixes the line. Lines carrying a semver are exempt.
+CR_RE_VERSIONED='[0-9]+\.[0-9]+\.[0-9]+'
+
+# Any source citation pinned to a LINE NUMBER, full path or bare basename
+# (`research/xim Actor.kt:361`, `char_update.cpp:339`). The citation itself is
 # required by the LSB-boundary convention (hence CR_RE_ALLOWED keeps it) — but
 # the `:NNN` suffix silently decays the moment the submodule advances, and
 # nothing in the build catches it. A symbol anchor (function/struct/enum name)
 # survives upstream edits and is greppable; a line number is a promise the
 # submodule pin does not keep. Matched BEFORE the allow-list strip, since the
 # allow-list is what would otherwise exempt these.
-CR_RE_CITE_LINE='(vendor|research)/[A-Za-z0-9._/-]+\.(cpp|h|hpp|c|cs|lua|sql|py|rs|xml|json):[0-9]+'
+CR_RE_CITE_LINE='(^|[^A-Za-z0-9_])[A-Za-z0-9_.-]+\.(cpp|h|hpp|c|cs|lua|sql|py|rs|xml|json|kt|md):[0-9]+'
+
+# Citations nobody in this tree can open. An elided `.../` path can't be
+# checked for existence, and a `(F37)`-style finding id points at a note that
+# lives outside the repo; both are what a handoff written against private
+# research produces. scripts/checks.sh comments hard-fails on these.
+CR_RE_ELIDED_PATH='(vendor|research)/[A-Za-z0-9._-]+/\.\.\./'
+CR_RE_FINDING_ID='\(F[0-9]{1,3}([,;][[:space:]]?F[0-9]{1,3})*\)'
 
 # Narrative / session-history / temporal — describes how the code got
 # here or a passing moment, not what is true now.
@@ -92,9 +104,16 @@ scan_comment_rot() {
   # Line-pinned vendor citations are flagged from the FULL comment set: the
   # allow-list below is precisely what exempts them, so this must run first.
   local pinned
-  pinned=$(printf '%s\n' "$comments" | grep -oE "$CR_RE_CITE_LINE" | sort -u | head -4 || true)
+  pinned=$(printf '%s\n' "$comments" | grep -vE "$CR_RE_VERSIONED" | grep -oE "$CR_RE_CITE_LINE" | sort -u | head -4 || true)
   if [ -n "$pinned" ]; then
     printf '%s\n' "$pinned" | sed -E 's#^#  [citation pinned to a line number] #'
+    found=0
+  fi
+
+  local dangling
+  dangling=$(printf '%s\n' "$comments" | grep -E "$CR_RE_ELIDED_PATH|$CR_RE_FINDING_ID" | head -4 || true)
+  if [ -n "$dangling" ]; then
+    printf '%s\n' "$dangling" | sed -E 's#^[[:space:]]*#  [citation nobody can open: elided path / out-of-tree finding id] #'
     found=0
   fi
 

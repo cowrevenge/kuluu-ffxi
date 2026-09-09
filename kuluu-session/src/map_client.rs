@@ -11,7 +11,7 @@ pub const BOOTSTRAP_DATAGRAM_SIZE: usize = framing::FFXI_HEADER_SIZE + GP_CLI_LO
 
 /// Sync of the bootstrap subpacket (`ffxi_proto::map::c2s::LOGIN`), and
 /// thus the bootstrap datagram header. The server's `client_packet_id`
-/// starts at 0 (vendor/server/src/map/map_session.h:45) and advances here,
+/// starts at 0 (vendor/server/src/map/map_session.h MapSession client_packet_id) and advances here,
 /// so the first post-bootstrap subpacket must use the next sync.
 pub const BOOTSTRAP_SUB_SYNC: u16 = 1;
 
@@ -46,8 +46,8 @@ pub struct MapClient {
 impl MapClient {
     pub async fn connect(server: SocketAddr, seed: [u8; 20]) -> Result<Self> {
         // FFXI_MAP_LOCAL_PORT pins the local UDP port: under Docker Desktop/WSL2 the s2c return
-        // path needs a one-shot DNAT in cow-map's netns (see the CowEngine repo's
-        // docs/RUNBOOK.md §3 step 4 — cross-repo, not part of this tree),
+        // path needs a one-shot DNAT in cow-map's netns (the CowEngine repo's
+        // runbook covers it; that repo is not part of this tree),
         // and an ephemeral bind changes its target on every run.
         let local = match std::env::var("FFXI_MAP_LOCAL_PORT") {
             Ok(port) => format!("0.0.0.0:{port}"),
@@ -86,7 +86,7 @@ impl MapClient {
     /// `sub_packets_payload`: the server dispatches a subpacket only when its
     /// sync falls in `(client_packet_id, header_u16[0]]` and then advances
     /// `client_packet_id` to the header value — anything outside the window is
-    /// skipped with no log (vendor/server/src/map/map_networking.cpp:419-428,471).
+    /// skipped with no log (vendor/server/src/map/map_networking.cpp MapNetworking::parse).
     pub async fn send_encrypted(
         &self,
         sub_packets_payload: &[u8],
@@ -261,7 +261,7 @@ fn build_bootstrap_packet(args: &BootstrapArgs<'_>) -> Result<Vec<u8>> {
 
     let body = &mut frame[framing::FFXI_HEADER_SIZE..framing::FFXI_HEADER_SIZE + GP_CLI_LOGIN_SIZE];
 
-    let size_words: u16 = (GP_CLI_LOGIN_SIZE / 4) as u16;
+    let size_words = framing::subpacket_size_words(GP_CLI_LOGIN_SIZE);
     let header_word = framing::subpacket_header_word(ffxi_proto::map::c2s::LOGIN, size_words);
     body[0..2].copy_from_slice(&header_word.to_le_bytes());
 

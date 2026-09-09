@@ -42,6 +42,7 @@ impl AudioHeader {
 
 const SPW_MAGIC: &[u8; 6] = b"SeWave";
 const BGW_MAGIC: &[u8; 8] = b"BGMStrea";
+const SAMPLE_RATE_MASK: u32 = 0x7FFF_FFFF;
 
 pub fn parse_any(bytes: &[u8]) -> Result<(AudioHeader, usize)> {
     if bytes.len() < 48 {
@@ -103,7 +104,7 @@ pub fn parse_bgw(bytes: &[u8]) -> Result<AudioHeader> {
 
 #[inline]
 fn decode_sample_rate(high: u32, low: u32) -> f32 {
-    (high.wrapping_add(low) & 0x7FFF_FFFF) as f32
+    (high.wrapping_add(low) & SAMPLE_RATE_MASK) as f32
 }
 
 fn validate(channels: u8, block_size: u32) -> Result<()> {

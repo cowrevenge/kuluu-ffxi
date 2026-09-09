@@ -7,6 +7,8 @@ pub mod chat_input;
 pub mod chat_panel;
 pub mod check_view;
 pub mod compass;
+#[cfg(feature = "enhanced-death-countdown")]
+pub mod death_countdown;
 pub mod death_prompt;
 pub mod delivery;
 pub mod diagnostics;
@@ -157,7 +159,9 @@ pub fn spawn_bottom_left_stack(
                     #[cfg(not(target_arch = "wasm32"))]
                     crate::minimap::spawn_minimap_as_child(col, &mut images);
 
-                    #[cfg(target_arch = "wasm32")]
+                    // Sole CompassLabel spawn on every target: update_compass
+                    // resolves it with single_mut(), which a second chip would
+                    // break.
                     compass::spawn_compass_as_child(col);
 
                     col.spawn(Node {
@@ -250,6 +254,7 @@ impl Plugin for HudPlugin {
             app.init_resource::<map_screen::MapMarkers>();
             app.init_resource::<map_screen::ViewedMap>();
             app.init_resource::<map_screen::MapView>();
+            app.init_resource::<map_screen::ChangeMapCatalog>();
         }
 
         app.init_resource::<check_view::CheckTarget>();
@@ -317,7 +322,8 @@ impl Plugin for HudPlugin {
                 self_fishing::update_fishing_hud,
                 (
                     status_ribbon::update_status_ribbon,
-                    status_ribbon::update_status_timers,
+                    #[cfg(feature = "enhanced-buff-timers")]
+                    status_ribbon::timers::update_status_timers,
                     status_ribbon::update_status_ribbon_selection,
                 ),
                 (
@@ -382,6 +388,7 @@ impl Plugin for HudPlugin {
             Update,
             (
                 map_screen::reset_map_screen_on_open,
+                map_screen::refresh_change_map_catalog,
                 map_screen::load_viewed_map,
                 map_screen::update_map_view,
                 map_screen::update_map_screen_image,
@@ -404,6 +411,8 @@ impl Plugin for HudPlugin {
         app.add_systems(Update, status_ribbon::tooltip::update_buff_tooltip);
         #[cfg(feature = "enhanced-cast-bar")]
         app.add_systems(Update, cast_bar::update_cast_bar);
+        #[cfg(feature = "enhanced-death-countdown")]
+        app.add_systems(Update, death_countdown::update_death_countdown_system);
 
         app.add_systems(Update, chat_panel::chat_tab_click_system);
         app.add_systems(Update, chat_panel::chat_auto_switch_click_system);
@@ -523,4 +532,23 @@ pub fn add_hud_spawners<L: bevy::ecs::schedule::ScheduleLabel + Clone>(app: &mut
     // Depends on `crate::minimap` (wasm-gated).
     #[cfg(not(target_arch = "wasm32"))]
     app.add_systems(schedule, map_screen::spawn_map_screen);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bevy::ecs::system::RunSystemOnce;
+
+    #[test]
+    fn bottom_left_stack_spawns_exactly_one_compass_label() {
+        let mut world = World::new();
+        #[cfg(not(target_arch = "wasm32"))]
+        world.init_resource::<Assets<bevy::image::Image>>();
+        world.run_system_once(spawn_bottom_left_stack).unwrap();
+
+        assert_eq!(
+            world.query::<&compass::CompassLabel>().iter(&world).count(),
+            1
+        );
+    }
 }

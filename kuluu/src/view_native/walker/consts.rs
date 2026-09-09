@@ -94,8 +94,24 @@ pub const DEPEN_MAX_PUSH: f32 = 0.15;
 // Dynamic obstacles (plan §2.5)
 // ---------------------------------------------------------------------------
 
-/// Sustained pressure into the same mob before it stops blocking (PushThrough).
-pub const PUSH_THROUGH_SECS: f32 = 0.8;
+// Actor contact, from research/XIClient/src/XIClient/source/World/Actor/ControllableActor.cpp
+// ControllableActor::CheckContactActor.
+
+/// Search radius for the contact candidate: retail seeds its nearest-actor
+/// scan with a squared distance of 64, so only actors within 8 yalms of the
+/// projected position are ever candidates.
+pub const CONTACT_SEARCH_RADIUS: f32 = 8.0;
+
+/// Retail's contact block budget, decremented each tick by
+/// research/XIClient/src/XIClient/source/Game/GameManager.cpp
+/// GameManager::CheckTick, which returns `60 / EffectiveFramerate` -- so the
+/// unit is a sixtieth of a second and the window holds at ~0.5 s on any
+/// framerate.
+pub const CONTACT_BLOCK_TICKS: f32 = 30.0;
+
+/// The tick unit `CONTACT_BLOCK_TICKS` counts in, imported from the movement
+/// side rather than re-typed.
+pub const CONTACT_TICKS_PER_SEC: f32 = crate::view_native::input::RETAIL_MOVE_TICKS_PER_SEC;
 
 // ---------------------------------------------------------------------------
 // Falling (plan §0 Q3)

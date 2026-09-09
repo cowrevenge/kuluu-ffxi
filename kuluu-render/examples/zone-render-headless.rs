@@ -246,11 +246,13 @@ fn main() {
                     .chain(),
             )
             // Owns Assets<FfxiParticleMaterial>, which both particle plugins below write
-            // every frame; without it they panic on the missing resource (lib.rs:201 adds
+            // every frame; without it they panic on the missing resource (kuluu-render/src/lib.rs KuluuRenderPlugin adds
             // it ahead of them for the same reason).
             .add_plugins(kuluu_render::ffxi_particle_material::FfxiParticleMaterialPlugin)
             .add_plugins(kuluu_render::celestial_particles::CelestialParticlesPlugin)
-            // The weat/<tag> precipitation set, drawn by the same simulator.
+            // The weat/<tag> precipitation set, drawn by the same simulator. Its sync system
+            // reads the HUD's mesh-debug flag, which only the full viewer inserts.
+            .init_resource::<kuluu_render::hud::HudPanels>()
             .add_plugins(kuluu_render::weather_particles::WeatherParticlesPlugin)
             .init_resource::<VanaSky>()
             .init_resource::<ZoneDirectionalLighting>()

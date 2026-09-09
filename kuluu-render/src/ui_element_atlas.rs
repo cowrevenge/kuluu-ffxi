@@ -13,7 +13,7 @@ use ffxi_dat::ui_element::{ui_sprite, UiSprite};
 use ffxi_dat::DatRoot;
 
 // The four "static resource" menu UI DATs. XIM hardcodes their ROM paths
-// (research/xim/.../UiResourceManager.kt:21-26 — ROM/0/13, ROM/119/51,
+// (research/xim/src/jsMain/kotlin/xim/poc/UiResourceManager.kt UiResourceManager uiDats — ROM/0/13, ROM/119/51,
 // ROM/280/15, ROM/324/95); these are those paths reverse-mapped through
 // VTABLE/FTABLE to file ids, the version-stable handle, so an install whose
 // patch level shuffles the physical ROM layout still resolves. The
@@ -85,7 +85,7 @@ impl UiElementAtlas {
 }
 
 // HorizonXI/US ships "menu    framesus" where the JP client uses
-// "menu    frames  "; XIM aliases the two (UiResourceManager.kt:60-62).
+// "menu    frames  "; XIM aliases the two (UiResourceManager.kt register).
 fn resolve_sprite(bytes: &[u8], group: &str, index: usize) -> Option<UiSprite> {
     ui_sprite(bytes, group, index).or_else(|| {
         if group == FRAMES_JP {

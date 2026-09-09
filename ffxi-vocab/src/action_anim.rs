@@ -18,7 +18,7 @@ fn lookup(table: &[(u16, u16)], id: u16) -> Option<u16> {
 
 // Every completion effect is `<table base> + animation index`, and s2c 0x028 carries that index
 // per result — LSB fills it straight from the action's own animation column (magic_state.cpp,
-// charentity.cpp:1602/1923). The scraped `*_ANIMATION` tables hold the same column keyed by
+// charentity.cpp CCharEntity::OnWeaponSkillFinished/1923). The scraped `*_ANIMATION` tables hold the same column keyed by
 // action id, and stand in only when a truncated body carried no result to read it from.
 //
 // The action id is NOT the index. research/xim AbilityTable.kt getAnimationId adds
@@ -38,10 +38,10 @@ pub fn ability_file_id(ability_id: u32, animation: Option<u16>) -> Option<u32> {
     Some(ABILITY_FILE_TABLE_OFFSET + index as u32)
 }
 
-// research/xim MobAbilityTable.kt:58-72 getFileTableOffset - a mob skill's `animation` id (LSB
+// research/xim MobAbilityTable.kt getFileTableOffset - a mob skill's `animation` id (LSB
 // mob_skills.animation, carried per result in s2c 0x028 category 11) is an FTABLE index with a
 // range-dependent base. The DAT at that index holds the skill's `main` routine, whose 0x05 stage
-// names the caster's own `sp??` clip (F51, F58). Pet skills (category 13) share the table.
+// names the caster's own `sp??` clip (findings F51/F58). Pet skills (category 13) share the table.
 pub fn mob_skill_file_id(animation: u16) -> u32 {
     let a = animation as u32;
     a + if a < 0x200 {

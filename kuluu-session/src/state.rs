@@ -172,7 +172,7 @@ pub struct Entity {
     pub face_target: u16,
 
     /// entity_update namevis byte (PosHead flags3 top byte), written under
-    /// UPDATE_HP — vendor/server/src/map/packets/entity_update.cpp:357/:408 put
+    /// UPDATE_HP — vendor/server/src/map/packets/entity_update.cpp CEntityUpdatePacket::updateWith/:408 put
     /// `ref<uint8>(0x2B) = PEntity->namevis` inside `if (updatemask & UPDATE_HP)`.
     /// The packet buffer is zero-filled, so a POS-only update carries no namevis:
     /// `None` until the first General-block update does, preserved across
@@ -339,7 +339,7 @@ pub enum ChatChannel {
 
     /// Chat kind 8 MESSAGE_EMOTION: canned-emote lines the client composes
     /// from its DAT, plus free-form /em text
-    /// (vendor/server/src/map/enums/chat_message_type.h:35).
+    /// (vendor/server/src/map/enums/chat_message_type.h CHAT_MESSAGE_TYPE MESSAGE_EMOTION).
     Emote,
 }
 
@@ -400,7 +400,7 @@ pub struct CharStatsRaw {
 
 /// s2c 0x00A myroom cluster; present only while inside a Mog House. `model`
 /// is an interior model id, not a zone id
-/// (vendor/server/src/map/packets/s2c/0x00a_login.cpp:32-34).
+/// (vendor/server/src/map/packets/s2c/0x00a_login.cpp GetMogHouseModelID).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MyRoomInfo {
     pub model: u16,
@@ -603,7 +603,7 @@ pub struct SessionState {
     pub job_info: Option<JobInfoState>,
 
     /// 2F-unlock bit from the self 0x067 CharSync
-    /// (vendor/server/src/map/packets/char_sync.cpp:61); `None` until one lands.
+    /// (vendor/server/src/map/packets/char_sync.cpp CCharSyncPacket::CCharSyncPacket); `None` until one lands.
     #[serde(default)]
     pub mh_2f_unlocked: Option<bool>,
 
@@ -650,7 +650,7 @@ pub struct CheckMessage {
 
 /// A bazaar being browsed. Rows are keyed by the seller's LOC_INVENTORY slot
 /// because the server refreshes single rows in place after each purchase
-/// (vendor/server/src/map/packets/c2s/0x106_bazaar_buy.cpp:198).
+/// (vendor/server/src/map/packets/c2s/0x106_bazaar_buy.cpp GP_CLI_COMMAND_BAZAAR_BUY::process).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BazaarView {
     pub seller_id: u32,
@@ -809,7 +809,7 @@ pub struct AhFeeQuote {
 }
 
 /// Faithful wide-scan model: the server owns membership, order, and gating
-/// (job/range/floor — vendor/server/src/map/zone_entities.cpp:1578 WideScan).
+/// (job/range/floor — vendor/server/src/map/zone_entities.cpp CZoneEntities::WideScan WideScan).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct WidescanList {
     pub entries: Vec<WidescanEntry>,
@@ -871,7 +871,7 @@ impl From<ffxi_proto::decode::WidescanPos> for WidescanPos {
 
 /// Accumulated s2c 0x0C9 EQUIP_INSPECT answer for the latest /check on a PC:
 /// EQUIPMENT batches and the GENERAL packet merge here keyed on `target_id`
-/// (vendor/server/src/map/packets/c2s/0x0dd_equip_inspect.cpp:135-136).
+/// (vendor/server/src/map/packets/c2s/0x0dd_equip_inspect.cpp GP_CLI_COMMAND_EQUIP_INSPECT::process).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CheckResult {
     pub target_id: u32,
@@ -1099,7 +1099,7 @@ pub enum InventoryUpdate {
     },
 }
 
-/// GP_CLI_COMMAND_PBX_BOXNO (vendor/server/src/map/packets/c2s/0x04d_pbx.h:45).
+/// GP_CLI_COMMAND_PBX_BOXNO (vendor/server/src/map/packets/c2s/0x04d_pbx.h).
 /// Incoming = the inbox ("Delivery Box"), Outgoing = the send box ("Deliveries").
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1333,7 +1333,7 @@ pub struct PartyMember {
     pub is_alliance_leader: bool,
 
     /// Which party of the alliance this member sits in (0..2, or 3 for
-    /// "no party"). vendor/server/src/map/packets/s2c/0x0dd_group_list.cpp:40.
+    /// "no party"). vendor/server/src/map/packets/s2c/0x0dd_group_list.cpp GP_SERV_COMMAND_GROUP_LIST::GP_SERV_COMMAND_GROUP_LIST.
     #[serde(default)]
     pub party_no: u8,
 
@@ -1478,7 +1478,7 @@ impl SessionState {
                 // The seller is a zone-local entity, so a bazaar cannot survive
                 // the warp: LSB resolves the browsed bazaar through
                 // `GetEntity(BazaarID.targid)` and drops any request once that
-                // lookup fails (0x106_bazaar_buy.cpp:46-56).
+                // lookup fails (0x106_bazaar_buy.cpp GP_CLI_COMMAND_BAZAAR_BUY::process).
                 self.bazaar = None;
                 // The AH counter is likewise zone-local (sendMenu from the NPC;
                 // GP_CLI_COMMAND_AUC::validate gates on the zone's MISC_AH).
@@ -1566,7 +1566,7 @@ impl SessionState {
                     // Model-block-gated at the source (char_update.cpp), so merge
                     // like mount_id — never off pos_present.
                     let preserved_monstrosity = entity.monstrosity.or(existing.monstrosity);
-                    // UPDATE_HP-gated at the source (entity_update.cpp:357/:408), so
+                    // UPDATE_HP-gated at the source (entity_update.cpp CEntityUpdatePacket::updateWith/:408), so
                     // merge like char_flags — never off pos_present.
                     let preserved_name_vis = entity.name_vis.or(existing.name_vis);
 
@@ -1891,6 +1891,7 @@ impl SessionState {
             AgentEvent::LowHp { .. }
             | AgentEvent::PartyMemberLowHp { .. }
             | AgentEvent::EngagedBy { .. }
+            | AgentEvent::TargetChanged { .. }
             | AgentEvent::TellReceived { .. }
             | AgentEvent::SceneSummary { .. }
             | AgentEvent::ActionStarted { .. }
@@ -1909,7 +1910,7 @@ impl SessionState {
                         // Zeros apply too: 0 is LSB's "container disabled"
                         // sentinel (e.g. an expired Mog Locker lease across a
                         // zone change) — sticky grants would keep offering a
-                        // bag the server rejects (s2c/0x01c_item_max.cpp:52).
+                        // bag the server rejects (s2c/0x01c_item_max.cpp GP_SERV_COMMAND_ITEM_MAX::GP_SERV_COMMAND_ITEM_MAX).
                         for (id, cap) in capacities.iter().enumerate() {
                             self.inventory
                                 .containers
@@ -1998,7 +1999,7 @@ impl SessionState {
                 let mut changed = false;
                 if let Some(cell) = self.equipment.get_mut(*slot as usize) {
                     // The server reports an empty/unequipped slot as inventory
-                    // index 0 (charutils.cpp:2268 queueEquipChange(LOC_INVENTORY,
+                    // index 0 (charutils.cpp UnequipItem queueEquipChange(LOC_INVENTORY,
                     // 0, ...)). Index 0 is reserved (Gil in LOC_INVENTORY) and is
                     // never a real equipped item, so treat it as cleared — else
                     // resolve_equipment joins it to Gil.
@@ -2646,7 +2647,8 @@ pub enum AgentEvent {
         target_id: Option<u32>,
         result: Option<ffxi_proto::melee::MeleeResult>,
         animation: Option<u16>,
-        /// First result's outcome bits (0x028_battle2.cpp:74-76), read for every category:
+        /// First result's outcome bits (vendor/server/src/map/packets/s2c/0x028_battle2.cpp
+        /// GP_SERV_COMMAND_BATTLE2::pack), read for every category:
         /// `info` carries Defeated/CriticalHit (enums/action/info.h), `hit_distortion`
         /// 0..3 and `knockback` 0..7 drive the victim reaction, `kind` is uninterpreted.
         /// Zero when no result block was read.
@@ -2731,6 +2733,14 @@ pub enum AgentEvent {
 
     EngagedBy {
         entity_id: u32,
+    },
+
+    /// s2c 0x058 ASSIST: the server retargeted us. `target_id` is the wire
+    /// `AssistNo`; `None` is LSB's zeroed `AssistNo`
+    /// (vendor/server/src/map/packets/s2c/0x058_assist.cpp GP_SERV_COMMAND_ASSIST::GP_SERV_COMMAND_ASSIST), i.e. the
+    /// target went away rather than moved.
+    TargetChanged {
+        target_id: Option<u32>,
     },
 
     ForcedMove {

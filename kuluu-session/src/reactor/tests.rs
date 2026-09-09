@@ -1445,7 +1445,7 @@ fn zoneline_trigger_seeds_on_zone_change_no_immediate_refire() {
 #[test]
 fn mog_house_prefix_sets_agree_across_crates() {
     // ffxi-dat and kuluu-nav each classify MH lines from their own copy of the
-    // LSB prefix pair (0x05e_maprect.cpp:74-75); check_zoneline_trigger
+    // LSB prefix pair (0x05e_maprect.cpp GP_CLI_COMMAND_MAPRECT::process mogEntrancePrefix); check_zoneline_trigger
     // correlates the two by rect_id == line_id, so the sets must stay equal.
     assert_eq!(
         [

@@ -11,8 +11,9 @@ Kuluu is a faithful, open-source FINAL FANTASY XI **client** rebuilt in Rust + B
 `scripts/checks.sh` is the **single source of truth** for check commands — both the `pre-push` hook and CI call it, so they can't drift. Prefer it over spelling out cargo flags:
 
 ```bash
-scripts/checks.sh fmt clippy            # what the pre-push hook runs
-scripts/checks.sh fmt clippy test build # the full CI gate
+scripts/checks.sh harness comments fmt clippy   # what the pre-push hook runs
+scripts/checks.sh fmt clippy test build         # the full CI gate
+COMMENTS_DIFF=staged scripts/checks.sh comments # what pre-commit runs on the staged hunks
 cargo fmt --all                         # autofix formatting
 ```
 
@@ -45,7 +46,7 @@ cargo run -p kuluu --no-default-features -- play --headless  # JSON event-stream
 
 `.beads/issues.jsonl` is the diffable, PR-reviewable export — that's the file that crosses into git, so review it like code.
 
-There is no `docs/` tree — it was removed as a redundant hand-kept projection of beads (a scoreboard plus three plan/status notes that had all gone stale). The grounded parity backlog is the `roadmap`-labelled beads, each citing `file:line` evidence and carrying `vanilla`/`enhanced` plus an area label (`hud`, `combat-action`, …). MEMORY.md auto-memory sits alongside beads and is **not** replaced by it — do **not** migrate it into `bd remember`.
+There is no `docs/` tree — it was removed as a redundant hand-kept projection of beads (a scoreboard plus three plan/status notes that had all gone stale). The grounded parity backlog is the `roadmap`-labelled beads, each citing `file:line` evidence and carrying `vanilla`/`enhanced` plus an area label (`hud`, `combat-action`, …). Durable project memory belongs in Beads (`bd remember` / `bd memories`) so it follows the repository across coding-agent harnesses; ephemeral execution notes stay in the active session.
 
 **Don't reintroduce free-floating `.md` notes.** Every kind of prose has a home that keeps it honest, so route by audience rather than starting a new file: *what work is open* → a bead (`--design`/`--notes` hold the plan; a plan that isn't a bead has no one to close it); *how retail behaves* → `.agents/skills/retail-observe/references/` as a dated observation record; *how to do a recurring task* → a skill under `.agents/skills/`; *what we already fixed* → the commit message, which git keeps accurate for free; *contributor-facing orientation* → `README.md`. Anything that survives none of those tests is a session note and belongs in the bead you're working, not the tree.
 
@@ -55,12 +56,16 @@ GitHub Issues are a **generated projection of beads** for contributors, not a se
 
 ## Harness configuration
 
-New agent-facing content (skills, subagents, hooks) goes under `.agents/`;
-`.claude/` holds only Claude-specific wiring plus symlinks. Reference the
-`.agents/...` path in docs and hook messages, not the symlink —
-`scripts/checks.sh harness` fails on a `.claude/` path that isn't one of the
-three tracked entries. The rule deciding symlink-vs-path-pointer, the wire
-protocol, and the `ffxi-agent/` carve-out: `.agents/AGENTS.md`.
+Project-authored agent content (skills, subagents, hooks) goes under
+`.agents/`; harness directories such as `.claude/` and `.codex/` contain only
+native adapters and generated integration state. Reference project content by
+its `.agents/...` path, and regenerate tool-owned content with that tool rather
+than editing it by hand. `scripts/checks.sh harness` enforces the boundary.
+The wiring rules and the `ffxi-agent/` carve-out live in `.agents/AGENTS.md`.
+A harness with no adapter here (LM Studio Bionic, Cursor, Aider, ...) still
+hits every gate through `.githooks` and `scripts/checks.sh`; register
+`.agents/skills/comment-discipline/SKILL.md` in that harness's skill settings
+so its model sees the comment rule before it writes, not at commit time.
 
 ## Architecture
 
@@ -116,6 +121,20 @@ Bevy systems: scene graph, chase camera + collision, HUD (`hud/`), minimap, pick
 
 Wire decoders/encoders, coord transforms, session-state transitions, shared numeric constants, and lifecycle assumptions are validated against an authoritative upstream (LandSandBoat). Source that crosses this boundary cites the upstream file in a comment (e.g. `vendor/server/...`; `research/Phoenix/...` when a local Phoenix clone supplied the divergence signal). Two review agents exist specifically for it — `protocol-conformance-reviewer` (audit diffs against the authoritative source) and `lsb-invariant-prober` (propose unit tests pinning LSB invariants). Prefer them after non-trivial edits to `ffxi-proto/` or `kuluu-session/src/` (`session/`, `wire_translate.rs`, `map_client.rs`, `reactor.rs`, `state.rs`) or `ffxi-nav-recast/`.
 
+### Retail is the client-behavior oracle
+
+Before implementing or changing vanilla client behavior, use the
+[retail-grounding skill](.agents/skills/retail-grounding/SKILL.md) to establish
+the rule from the strongest relevant evidence available: retail observation,
+client binary/DAT inspection, or the ranked references in `research/AGENTS.md`.
+Reuse applicable verified findings; do not require a fresh disassembly for every
+edit. LSB is authoritative for server semantics, not a substitute for the
+client's rendering, camera, animation or UI policies. Record the decisive source
+and any unverified inference in the bead, then verify the implemented behavior.
+Unavailable retail access should narrow the claim, not silently turn a community
+approximation into vanilla truth or block unrelated work. Product-only tooling
+and explicitly requested enhancements do not acquire a retail-parity gate.
+
 ### Build-time vendor scrape (no hand-maintained tables)
 
 `build.rs` in `ffxi-proto`/`ffxi-vocab`/`ffxi-dat`/`kuluu-nav`/`ffxi-audio` (sharing the `lsb-scrape` helper crate) reads LSB SQL/headers/lua and POLUtils XML out of `vendor/` and emits **compile-time Rust constants** (blowfish subkeys, zlib tables, msg/effect/job/spell/item names, zone-DAT id formulas, ROM file mappings). Never hand-copy these values — update the upstream pin and let the build regenerate them (see the `vendor-scrape` skill). The vendor submodules are **build-only**; nothing under `vendor/` (except a user's `game-files/`) is needed at runtime.
@@ -129,14 +148,161 @@ Wire decoders/encoders, coord transforms, session-state transitions, shared nume
 - Dev build-speed knobs live in `.cargo/config.toml` / `Cargo.toml` (Cranelift, `lld`, `dynamic_linking` feature). `CXXFLAGS` for the Recast C++ bridge is set per-platform by CI/docker (`.github/build-setup.yml`, `docker/build-linux.sh`), not in shared cargo config; a dev whose macOS Command Line Tools layout needs an `-isysroot` override sets it in their personal `~/.cargo/config.toml` (see the note atop `.cargo/config.toml`).
 - **UI text is printable ASCII (U+0020–007E) unless it renders with a font you control.** Everything drawn with Bevy's bundled default font (FiraMono-subset — the whole `launcher_ui/` tree, plus `hud::style::text_font` users) rasterizes any non-ASCII glyph (arrows, em/en dashes, ellipses, `·`, `×`) as a tofu box. Use ASCII substitutes (`<` `>` `->` `...` `-` `|` `x`). `checks.sh style` hard-fails on a non-ASCII byte anywhere under `kuluu/src/view_native/launcher_ui/`. Server-sourced chat text is the exception: it goes through the FFXI text pipeline, not this rule.
 - **No magic numbers.** A literal that carries meaning — a threshold, scale, offset, frame rate — gets a named `const`, never an inline value. If it derives from upstream (LSB/POLUtils/XIM), scrape it at build time (the `vendor-scrape` skill); never hand-copy. If it's a deliberate tuning the data can't supply, name the `const` and let a one-line comment cite the WHY (e.g. `RETAIL_FPS` because retail runs at 30 fps; a `weather_opacity` table because the cloud generators ship no alpha keyframe to read). A literal that's a **contract between modules** — a wire tag, text marker, or format prefix one side *emits* and another *matches* — lives as an exported `const`/helper with the **emitter** and is imported by consumers; never re-type it (a locally-named copy in the consumer is still a second source), and pin the coupling with a guard test asserting the emitter still produces what the matcher expects.
-- **No narrative code comments.** Names, types, and asserts carry WHAT/HOW; default to no comment. Keep one only for a WHY you can't encode, a citation to a vendor/protocol/spec source (the LSB-boundary convention), or a `// SAFETY:` justification. Doc comments (`///` `//!`) are *not* exempt — they rot and ramble like any prose, so keep them tight and accurate or prune them. The `comment-rot` hooks (`.agents/hooks/comment-rot-reminder.sh` on Edit, `.agents/hooks/stop.d/30-comments.sh` at Stop) nudge and gate off one shared heuristic (`comment-rot.lib.sh`). The Stop nudge suggests a session-scoped bulk strip with `rmcm` (the `comment-remover` crate) — install it pinned via `scripts/install-tools.sh` (it's git-only at the version we use, so not on crates.io). `rmcm` strips *all* comments, including the doc/SAFETY/citation carve-outs, so use it only as a `--diff`-reviewed sweep, never wired to run automatically. (A more general, better-maintained alternative is `srgn` if the low-traffic crate becomes a concern.)
+- **No narrative code comments.** Names, types, and asserts carry WHAT/HOW; default to no comment. Keep one only for a WHY you can't encode, a citation to a vendor/protocol/spec source (the LSB-boundary convention), or a `// SAFETY:` justification. Doc comments (`///` `//!`) are *not* exempt — they rot and ramble like any prose, so keep them tight and accurate or prune them. The `comment-rot` hooks (`.agents/hooks/comment-rot-reminder.sh` on Edit, `.agents/hooks/stop.d/30-comments.sh` at Stop) nudge and gate off one shared heuristic (`comment-rot.lib.sh`). The Stop nudge suggests a session-scoped bulk strip with `rmcm` (the `comment-remover` crate) — install it pinned via `scripts/install-tools.sh` (it's git-only at the version we use, so not on crates.io). `rmcm` strips *all* comments, including the doc/SAFETY/citation carve-outs, so use it only as a `--diff`-reviewed sweep, never wired to run automatically. (A more general, better-maintained alternative is `srgn` if the low-traffic crate becomes a concern.) **A citation anchors on a symbol, never a line number** (`vendor/server/src/map/attack.h AttackAnimation`, not `attack.h:52`), and names a path that exists in this tree: no private notes, no retired `docs/`, no elided `.../`, no finding ids like `(F37)`. `scripts/checks.sh comments` hard-fails on each of those (staged hunks at pre-commit, the whole tree at pre-push and in CI) and prints the heuristic families as advisory. The `.agents/hooks` nudges are Claude/Codex adapters layered on that gate; a harness without them gets the rule from the [comment-discipline skill](.agents/skills/comment-discipline/SKILL.md).
 
 <!-- BEGIN BEADS CODEX SETUP: generated by bd setup codex -->
-## Beads Codex integration
+## Beads Issue Tracker
 
-The project-local `beads` skill lives in `.agents/skills/beads/SKILL.md`; the
-native Codex session hook is registered in `.codex/hooks.json`. The canonical
-Issue tracking section above is the policy: use `bd` for durable work, use
-`bd ready` for a compact starting view, keep `MEMORY.md` and in-session todos
-separate, and do not use raw `bd prime` output as a replacement for them.
+Use Beads (`bd`) for durable task tracking in repositories that include it. Use the `beads` skill at `.agents/skills/beads/SKILL.md` (project install) or `~/.agents/skills/beads/SKILL.md` (global install) for Beads workflow guidance, then use the `bd` CLI for issue operations.
+
+### Quick Reference
+
+```bash
+bd ready                # Find available work
+bd show <id>            # View issue details
+bd update <id> --claim  # Claim work
+bd close <id>           # Complete work
+bd prime                # Refresh Beads context
+```
+
+### Rules
+
+- Use `bd` for all task tracking; do not create markdown TODO lists.
+- Run `bd prime` when Beads context is missing or stale. Codex 0.129.0+ can load Beads context automatically through native hooks; use `/hooks` to inspect or toggle them.
+- Keep persistent project memory in Beads via `bd remember`; do not create ad hoc memory files.
+
+**Architecture in one line:** issues live in a local Dolt DB; sync uses `refs/dolt/data` on your git remote; `.beads/issues.jsonl` is a passive export. See https://github.com/gastownhall/beads/blob/main/docs/SYNC_CONCEPTS.md for details and anti-patterns.
 <!-- END BEADS CODEX SETUP -->
+
+
+<!-- BEGIN BEADS INTEGRATION v:1 profile:full hash:19cc25d9 -->
+## Issue Tracking with bd (beads)
+
+**IMPORTANT**: This project uses **bd (beads)** for ALL issue tracking. Do NOT use markdown TODOs, task lists, or other tracking methods.
+
+### Why bd?
+
+- Dependency-aware: Track blockers and relationships between issues
+- Git-friendly: Dolt-powered version control with native sync
+- Agent-optimized: JSON output, ready work detection, discovered-from links
+- Prevents duplicate tracking systems and confusion
+
+### Quick Start
+
+**Check for ready work:**
+
+```bash
+bd ready --json
+```
+
+**Create new issues:**
+
+```bash
+bd create "Issue title" --description="Detailed context" -t bug|feature|task -p 0-4 --json
+bd create "Issue title" --description="What this issue is about" -p 1 --deps discovered-from:bd-123 --json
+```
+
+**Claim and update:**
+
+```bash
+bd update <id> --claim --json
+bd update bd-42 --priority 1 --json
+```
+
+**Complete work:**
+
+```bash
+bd close bd-42 --reason "Completed" --json
+```
+
+### Issue Types
+
+- `bug` - Something broken
+- `feature` - New functionality
+- `task` - Work item (tests, docs, refactoring)
+- `epic` - Large feature with subtasks
+- `chore` - Maintenance (dependencies, tooling)
+
+### Priorities
+
+- `0` - Critical (security, data loss, broken builds)
+- `1` - High (major features, important bugs)
+- `2` - Medium (default, nice-to-have)
+- `3` - Low (polish, optimization)
+- `4` - Backlog (future ideas)
+
+### Workflow for AI Agents
+
+1. **Check ready work**: `bd ready` shows unblocked issues
+2. **Claim your task atomically**: `bd update <id> --claim`
+3. **Work on it**: Implement, test, document
+4. **Discover new work?** Create linked issue:
+   - `bd create "Found bug" --description="Details about what was found" -p 1 --deps discovered-from:<parent-id>`
+5. **Complete**: `bd close <id> --reason "Done"`
+
+### Quality
+- Use `--acceptance` and `--design` fields when creating issues
+- Use `--validate` to check description completeness
+
+### Lifecycle
+- `bd defer <id>` / `bd supersede <id>` for issue management
+- `bd stale` / `bd orphans` / `bd lint` for hygiene
+- `bd human <id>` to flag for human decisions
+- `bd formula list` / `bd mol pour <name>` for structured workflows
+
+### Sync
+
+bd stores issue history in Dolt:
+
+- Each write auto-commits to Dolt history
+- Use `bd dolt push`/`bd dolt pull` for remote sync
+- Do not treat `.beads/issues.jsonl` as the sync protocol
+
+**Architecture in one line:** issues live in a local Dolt DB; sync uses `refs/dolt/data` on your git remote; `.beads/issues.jsonl` is a passive export. See https://github.com/gastownhall/beads/blob/main/docs/SYNC_CONCEPTS.md for details and anti-patterns.
+
+### Important Rules
+
+- ✅ Use bd for ALL task tracking
+- ✅ Always use `--json` flag for programmatic use
+- ✅ Link discovered work with `discovered-from` dependencies
+- ✅ Check `bd ready` before asking "what should I work on?"
+- ❌ Do NOT create markdown TODO lists
+- ❌ Do NOT use external issue trackers
+- ❌ Do NOT duplicate tracking systems
+
+For more details, see README.md and docs/QUICKSTART.md.
+
+## Agent Context Profiles
+
+The managed Beads block is task-tracking guidance, not permission to override repository, user, or orchestrator instructions.
+
+- **Conservative (default)**: Use `bd` for task tracking. Do not run git commits, git pushes, or Dolt remote sync unless explicitly asked. At handoff, report changed files, validation, and suggested next commands.
+- **Minimal**: Keep tool instruction files as pointers to `bd prime`; use the same conservative git policy unless active instructions say otherwise.
+- **Team-maintainer**: Only when the repository explicitly opts in, agents may close beads, run quality gates, commit, and push as part of session close. A current "do not commit" or "do not push" instruction still wins.
+
+## Session Completion
+
+This protocol applies when ending a Beads implementation workflow. It is subordinate to explicit user, repository, and orchestrator instructions.
+
+1. **File issues for remaining work** - Create beads for anything that needs follow-up
+2. **Run quality gates** (if code changed) - Tests, linters, builds
+3. **Update issue status** - Close finished work, update in-progress items
+4. **Handle git/sync by active profile**:
+   ```bash
+   # Conservative/minimal/default: report status and proposed commands; wait for approval.
+   git status
+
+   # Team-maintainer opt-in only, unless current instructions forbid it:
+   git pull --rebase
+   bd dolt push
+   git push
+   git status
+   ```
+5. **Hand off** - Summarize changes, validation, issue status, and any blocked sync/commit/push step
+
+**Critical rules:**
+- Explicit user or orchestrator instructions override this Beads block.
+- Do not commit or push without clear authority from the active profile or the current user request.
+- If a required sync or push is blocked, stop and report the exact command and error.
+
+<!-- END BEADS INTEGRATION -->

@@ -37,7 +37,7 @@ pub fn to_pos_for_line(line_id: u32) -> Option<[f32; 3]> {
 }
 
 // Mog House residence-entrance tag prefixes; LSB matches the same prefixes on the
-// c2s 0x05E RectID (vendor/server/src/map/packets/c2s/0x05e_maprect.cpp:74-75:
+// c2s 0x05E RectID (vendor/server/src/map/packets/c2s/0x05e_maprect.cpp GP_CLI_COMMAND_MAPRECT::process mogEntrancePrefix:
 // "zmr* classic cities; zms* WoTG [S] + Adoulin"). The zonelines.sql primary key IS
 // the trigger's fourcc as a LE u32, so the prefix test works on `line_id` directly.
 pub const MOG_HOUSE_TAG_PREFIXES: [&[u8; 3]; 2] = [b"zmr", b"zms"];
@@ -125,7 +125,7 @@ mod tests {
                 "MH tag not ASCII: {:?}",
                 tag
             );
-            // vendor/server/src/map/packets/c2s/0x05e_maprect.cpp:234-243 — MH
+            // vendor/server/src/map/packets/c2s/0x05e_maprect.cpp GP_CLI_COMMAND_MAPRECT::process — MH
             // entrances keep the player in the same zone.
             assert_eq!(
                 line.from_zone, line.to_zone,

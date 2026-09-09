@@ -1,5 +1,13 @@
 use crate::{DatError, Result};
 
+pub const VOS2_HEADER_LEN: usize = 0x40;
+const KIND_TYPE_USE_BONE_TABLE: u16 = 0x80;
+pub(crate) const BONE_INDEX_MASK: u16 = 0x7F;
+pub(crate) const MIRROR_AXIS_MASK: u16 = 0x03;
+const POLY_BLOCK_CLASS_MASK: u16 = 0x80F0;
+const POLY_BLOCK_SPECULAR: u16 = 0x8010;
+const POLY_BLOCK_TEXTURE_NAME: u16 = 0x8000;
+
 #[derive(Debug, thiserror::Error)]
 pub enum Vos2Error {
     #[error("VertexOs2 chunk too small for header: need {needed}, got {got}")]
@@ -42,9 +50,9 @@ pub struct Vos2Header {
 
 impl Vos2Header {
     pub fn parse(body: &[u8]) -> Result<Self> {
-        if body.len() < 0x40 {
+        if body.len() < VOS2_HEADER_LEN {
             return Err(Vos2Error::HeaderTooSmall {
-                needed: 0x40,
+                needed: VOS2_HEADER_LEN,
                 got: body.len(),
             }
             .into());
@@ -69,7 +77,7 @@ impl Vos2Header {
     }
 
     pub fn use_bone_table(&self) -> bool {
-        (self.kind_type & 0x80) != 0
+        (self.kind_type & KIND_TYPE_USE_BONE_TABLE) != 0
     }
 }
 
@@ -83,9 +91,9 @@ pub struct Vos2BoneIndices {
 impl Vos2BoneIndices {
     pub fn from_u16(w: u16) -> Self {
         Self {
-            bone_index1: (w & 0x7F) as u8,
-            bone_index2: ((w >> 7) & 0x7F) as u8,
-            mirror_axis: ((w >> 14) & 0x03) as u8,
+            bone_index1: (w & BONE_INDEX_MASK) as u8,
+            bone_index2: ((w >> 7) & BONE_INDEX_MASK) as u8,
+            mirror_axis: ((w >> 14) & MIRROR_AXIS_MASK) as u8,
         }
     }
 }
@@ -298,7 +306,7 @@ fn parse_poly_block(body: &[u8], start: usize) -> Result<Vec<Vos2Group>> {
         let wf = u16::from_le_bytes([body[p], body[p + 1]]);
         let ws = u16::from_le_bytes([body[p + 2], body[p + 3]]) as usize;
 
-        if wf & 0x80F0 == 0x8010 {
+        if wf & POLY_BLOCK_CLASS_MASK == POLY_BLOCK_SPECULAR {
             if p + 0x2E > body.len() {
                 return Err(Vos2Error::PolyOob.into());
             }
@@ -312,7 +320,7 @@ fn parse_poly_block(body: &[u8], start: usize) -> Result<Vec<Vos2Group>> {
             p += 0x2E;
             continue;
         }
-        if wf & 0x80F0 == 0x8000 {
+        if wf & POLY_BLOCK_CLASS_MASK == POLY_BLOCK_TEXTURE_NAME {
             if p + 0x12 > body.len() {
                 return Err(Vos2Error::PolyOob.into());
             }

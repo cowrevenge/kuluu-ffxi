@@ -42,7 +42,7 @@ pub struct DoorObstacle {
 /// walker tests circles in xz only (plan §2.5).
 #[derive(Clone, Copy, Debug)]
 pub struct MobObstacle {
-    /// The wire entity id — stable identity for PushThrough accrual.
+    /// The wire entity id — stable identity for the contact budget.
     pub id: u32,
     pub center: Vec2,
     pub radius: f32,

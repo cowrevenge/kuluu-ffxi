@@ -41,7 +41,8 @@ fn blocker_diagnostic(snap: &SceneSnapshot) -> String {
 /// the request: onEffectGain adds the LEAVEGAME effect and immediately calls
 /// messageSystem(kind, 30) (vendor/server/scripts/effects/leavegame.lua).
 /// Subsequent ticks are 5s apart - the effect is created with a 5s tick at
-/// vendor/server/src/map/packets/c2s/0x0e7_reqlogout.cpp:50. If no tick has
+/// vendor/server/src/map/packets/c2s/0x0e7_reqlogout.cpp GP_CLI_COMMAND_REQLOGOUT::process.
+/// If no tick has
 /// arrived within this window, the request was silently rejected by the 0x0e7
 /// validator (InEvent / AbnormalStatus / Crafting / PreventAction) and nothing
 /// will ever arrive.

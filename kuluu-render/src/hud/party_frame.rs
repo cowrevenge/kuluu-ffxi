@@ -4,7 +4,7 @@
 //! so there is exactly ONE panel drawing player/party state. This module owns
 //! the ROSTER column slot.
 //!
-//! Geometry (docs/PARTY_FRAME.md §4/§5):
+//! Geometry:
 //! - Party A = L1 "compact vertical": no name row — the name overlays the HP
 //!   bar's top edge, bars start right of a fixed job-icon slot, MP bar is
 //!   right-aligned under the HP bar.
@@ -13,7 +13,7 @@
 //!   right-aligned in the box; MP bar tucked up under the HP bar.
 //!
 //! Runtime knobs live in `PartyFrameSettings`, edited only from the Debug
-//! menu "UI Settings" panel (docs/PARTY_FRAME.md §9). No user-facing settings UI.
+//! menu "UI Settings" panel. No user-facing settings UI.
 //!
 //! Data: SceneSnapshot.party (GROUP_LIST 0x0DD / GROUP_ATTR 0x0DF), Res<Target>,
 //! NameColorTable, ZoneNameResolver. Buffs/casts/sync are later steps.
@@ -28,7 +28,7 @@ use crate::nameplate_color::{ncol, NameColorTable};
 use crate::scene::Target;
 use crate::snapshot::SceneState;
 
-// ---- geometry constants (docs/PARTY_FRAME.md §4/§5) -----------------------
+// ---- geometry constants -----------------------
 
 /// XIUI PARTY_BAR_BASE_WIDTH_MULT: applied to every template width.
 const BASE_MULT: f32 = 0.8;
@@ -206,7 +206,7 @@ pub struct PartyRowsHost {
 }
 
 /// Clickable member row: click sets Res<Target> to this entity
-/// (docs/PARTY_FRAME.md §6.7).
+///.
 #[derive(Component)]
 pub struct PartyRowTarget(pub u32);
 
@@ -302,7 +302,7 @@ fn cycle_setting(key: UiSettingKey, s: &mut PartyFrameSettings) {
     }
 }
 
-// ---- HP color ramp (docs/PARTY_FRAME.md §6.1) -----------------------------
+// ---- HP color ramp -----------------------------
 
 pub fn hp_ramp(pct: u8) -> Color {
     let p = pct as f32;
@@ -330,7 +330,7 @@ fn party_windows(
     party: &[kuluu_snapshot::PartyMember],
     self_id: Option<u32>,
 ) -> [Vec<&kuluu_snapshot::PartyMember>; 3] {
-    // LSB's PartyNo is alliance-wide: vendor/server/src/map/packets/s2c/0x0dd_group_list.cpp:40.
+    // LSB's PartyNo is alliance-wide: vendor/server/src/map/packets/s2c/0x0dd_group_list.cpp GP_SERV_COMMAND_GROUP_LIST::GP_SERV_COMMAND_GROUP_LIST.
     let self_party = party
         .iter()
         .find(|m| Some(m.id) == self_id)
@@ -377,7 +377,7 @@ fn max_from_pct(m: &kuluu_snapshot::PartyMember) -> u32 {
 pub fn spawn_party_frames(mut commands: Commands) {
     for party_no in 0u8..3 {
         let is_l1_default = party_no == 0;
-        // Window padding per layout (docs/PARTY_FRAME.md §4/§5): L1 {10,6}, L2 {3,3}.
+        // Window padding per layout: L1 {10,6}, L2 {3,3}.
         let pad_x = if is_l1_default { 10.0 } else { 3.0 };
         let top_pad = if is_l1_default {
             TITLE_PX * 0.75 + 3.0
@@ -1298,7 +1298,7 @@ fn bar_track(w: f32, h: f32) -> Node {
 }
 
 /// Fills a bar track with the percent fill + right-aligned value text, or an
-/// opaque black block when out of zone (docs/PARTY_FRAME.md §6.3).
+/// opaque black block when out of zone.
 /// `value_font_px == 0`
 /// suppresses the value text (L2 HP value lives in the text row instead).
 fn fill_or_block(
@@ -1367,7 +1367,7 @@ fn dot_node(color: Color) -> (Node, BackgroundColor) {
 
 /// XIUI shortenZoneName over the resolved zone display name; falls back to a
 /// stable "Z{id}" placeholder when no name is known
-/// (docs/PARTY_FRAME.md §6.3).
+///.
 fn short_zone(zone_no: u16, resolver: Option<&crate::hud::zone_flash::ZoneNameResolver>) -> String {
     let Some(name) = resolver.and_then(|r| r.0(zone_no)) else {
         return format!("Z{zone_no}");
@@ -1396,7 +1396,7 @@ fn short_zone(zone_no: u16, resolver: Option<&crate::hud::zone_flash::ZoneNameRe
     }
 }
 
-// ---- click-to-target (docs/PARTY_FRAME.md §6.7) ------------------------------
+// ---- click-to-target ------------------------------
 
 /// Clicking a member row targets that entity — same path as world picking.
 pub fn party_row_click_system(

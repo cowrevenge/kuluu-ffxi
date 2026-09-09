@@ -2,9 +2,10 @@ use std::{fs, path::PathBuf};
 
 use anyhow::{bail, Context, Result};
 use lsb_scrape::{
-    parse_cpp_enum_class, parse_lua_indexed_pair_table, parse_sql_insert_rows, parse_u16_pair_rows,
-    parse_u32_pair_rows, parse_xi_ident_table, rust_string_literal, split_sql_fields,
-    split_sql_tuple, write_u16_table, write_u16_u16_table, write_u16_u32_table, write_u16_u8_table,
+    check_scrape_count, parse_cpp_enum_class, parse_lua_indexed_pair_table, parse_sql_insert_rows,
+    parse_u16_pair_rows, parse_u32_pair_rows, parse_xi_ident_table, rust_string_literal,
+    split_sql_fields, split_sql_tuple, write_u16_table, write_u16_u16_table, write_u16_u32_table,
+    write_u16_u8_table,
 };
 
 const LSB_MSG_BASIC_H: &str = "../vendor/server/src/map/enums/msg_basic.h";
@@ -22,6 +23,43 @@ const LSB_ITEM_USABLE_SQL: &str = "../vendor/server/sql/item_usable.sql";
 const LSB_ITEM_WEAPON_SQL: &str = "../vendor/server/sql/item_weapon.sql";
 const LSB_STATUS_EFFECTS_SQL: &str = "../vendor/server/sql/status_effects.sql";
 const LSB_EMOTE_H: &str = "../vendor/server/src/map/enums/emote.h";
+
+/// Smallest row count each scrape can return and still plausibly have parsed
+/// its source; the argument is the count the pinned vendor tree yields today
+/// (kuluu-m4yk).
+mod floor {
+    use lsb_scrape::scrape_floor;
+
+    pub const MSG_BASIC: usize = scrape_floor(243);
+    pub const MSG_CHANNEL: usize = scrape_floor(13);
+    pub const MSG_AREA: usize = scrape_floor(6);
+    /// The actionModifier table has two rows, so half of it still passes when
+    /// the walker matched only one; its full count is the only floor that
+    /// detects a partial drift.
+    pub const MSG_ACTION_MODIFIER: usize = 2;
+    pub const MSG_SYSTEM: usize = scrape_floor(9);
+    pub const STATUS_EFFECT: usize = scrape_floor(657);
+    pub const KEY_ITEM: usize = scrape_floor(3206);
+    pub const JOB_NAME: usize = scrape_floor(23);
+    pub const SPELL: usize = scrape_floor(890);
+    pub const SPELL_SKILL: usize = scrape_floor(771);
+    pub const SPELL_VALID_TARGET: usize = scrape_floor(891);
+    pub const SPELL_ANIMATION: usize = scrape_floor(891);
+    pub const SPELL_CAST_TIME: usize = scrape_floor(891);
+    pub const SPELL_RECAST_TIME: usize = scrape_floor(891);
+    pub const ABILITY: usize = scrape_floor(616);
+    pub const ABILITY_VALID_TARGET: usize = scrape_floor(616);
+    pub const ABILITY_RECAST_ID: usize = scrape_floor(616);
+    pub const ABILITY_ANIMATION: usize = scrape_floor(616);
+    pub const TP_MOVE: usize = scrape_floor(2652);
+    pub const ITEM: usize = scrape_floor(23233);
+    pub const ITEM_FLAGS: usize = scrape_floor(23187);
+    pub const STATUS_EFFECT_FLAGS: usize = scrape_floor(630);
+    pub const EQUIP_INFO: usize = scrape_floor(15378);
+    pub const ITEM_USABLE: usize = scrape_floor(3075);
+    pub const WEAPON_SKILL: usize = scrape_floor(4681);
+    pub const EMOTE: usize = scrape_floor(51);
+}
 
 fn main() -> Result<()> {
     println!("cargo:rerun-if-changed=build.rs");
@@ -55,19 +93,35 @@ fn main() -> Result<()> {
     }
     out.push_str("];\n");
     fs::write(out_dir.join("msg_basic_table.rs"), &out)?;
-    println!("ffxi-vocab: scraped {} msg_basic entries", entries.len());
+    check_scrape_count(
+        "msg_basic entries",
+        LSB_MSG_BASIC_H,
+        entries.len(),
+        floor::MSG_BASIC,
+    )?;
 
     let lua_src =
         fs::read_to_string(LSB_MSG_LUA).with_context(|| format!("reading {LSB_MSG_LUA}"))?;
-    for (lua_table, out_const, out_file) in [
-        ("channel", "MSG_CHANNEL", "msg_channel_table.rs"),
-        ("area", "MSG_AREA", "msg_area_table.rs"),
+    for (lua_table, out_const, out_file, min_rows) in [
+        (
+            "channel",
+            "MSG_CHANNEL",
+            "msg_channel_table.rs",
+            floor::MSG_CHANNEL,
+        ),
+        ("area", "MSG_AREA", "msg_area_table.rs", floor::MSG_AREA),
         (
             "actionModifier",
             "MSG_ACTION_MODIFIER",
             "msg_action_modifier_table.rs",
+            floor::MSG_ACTION_MODIFIER,
         ),
-        ("system", "MSG_SYSTEM", "msg_system_table.rs"),
+        (
+            "system",
+            "MSG_SYSTEM",
+            "msg_system_table.rs",
+            floor::MSG_SYSTEM,
+        ),
     ] {
         let entries = parse_lua_table(&lua_src, lua_table)?;
         let mut out = String::new();
@@ -79,11 +133,12 @@ fn main() -> Result<()> {
         }
         out.push_str("];\n");
         fs::write(out_dir.join(out_file), &out)?;
-        println!(
-            "ffxi-vocab: scraped {} {} entries",
+        check_scrape_count(
+            &format!("{} entries", lua_table_label(lua_table)),
+            LSB_MSG_LUA,
             entries.len(),
-            lua_table_warning_label(lua_table),
-        );
+            min_rows,
+        )?;
     }
 
     let effect_src =
@@ -95,10 +150,12 @@ fn main() -> Result<()> {
         LSB_EFFECT_LUA,
         &effect_entries,
     )?;
-    println!(
-        "ffxi-vocab: scraped {} status_effect entries",
+    check_scrape_count(
+        "status_effect entries",
+        LSB_EFFECT_LUA,
         effect_entries.len(),
-    );
+        floor::STATUS_EFFECT,
+    )?;
 
     let key_item_src = fs::read_to_string(LSB_KEY_ITEM_LUA)
         .with_context(|| format!("reading {LSB_KEY_ITEM_LUA}"))?;
@@ -109,10 +166,12 @@ fn main() -> Result<()> {
         LSB_KEY_ITEM_LUA,
         &key_item_entries,
     )?;
-    println!(
-        "ffxi-vocab: scraped {} key_item entries",
+    check_scrape_count(
+        "key_item entries",
+        LSB_KEY_ITEM_LUA,
         key_item_entries.len(),
-    );
+        floor::KEY_ITEM,
+    )?;
 
     let job_src = fs::read_to_string(LSB_JOB_NAME_LUA)
         .with_context(|| format!("reading {LSB_JOB_NAME_LUA}"))?;
@@ -130,7 +189,18 @@ fn main() -> Result<()> {
         LSB_JOB_NAME_LUA,
         &job_abbrevs,
     )?;
-    println!("ffxi-vocab: scraped {} job_name entries", job_entries.len(),);
+    check_scrape_count(
+        "job_name entries",
+        LSB_JOB_NAME_LUA,
+        job_entries.len(),
+        floor::JOB_NAME,
+    )?;
+    check_scrape_count(
+        "job_name abbreviations",
+        LSB_JOB_NAME_LUA,
+        job_abbrevs.len(),
+        floor::JOB_NAME,
+    )?;
 
     let spell_src = fs::read_to_string(LSB_SPELL_LIST_SQL)
         .with_context(|| format!("reading {LSB_SPELL_LIST_SQL}"))?;
@@ -141,7 +211,12 @@ fn main() -> Result<()> {
         LSB_SPELL_LIST_SQL,
         &spell_entries,
     )?;
-    println!("ffxi-vocab: scraped {} spell entries", spell_entries.len(),);
+    check_scrape_count(
+        "spell entries",
+        LSB_SPELL_LIST_SQL,
+        spell_entries.len(),
+        floor::SPELL,
+    )?;
 
     let spell_skill_entries = parse_spell_skill_rows(&spell_src)?;
     write_u16_u8_table(
@@ -150,10 +225,12 @@ fn main() -> Result<()> {
         LSB_SPELL_LIST_SQL,
         &spell_skill_entries,
     )?;
-    println!(
-        "ffxi-vocab: scraped {} spell-skill entries",
+    check_scrape_count(
+        "spell-skill entries",
+        LSB_SPELL_LIST_SQL,
         spell_skill_entries.len(),
-    );
+        floor::SPELL_SKILL,
+    )?;
 
     let spell_target_entries = parse_u16_pair_rows(&spell_src, "spell_list", 7)?;
     write_u16_u16_table(
@@ -162,10 +239,12 @@ fn main() -> Result<()> {
         LSB_SPELL_LIST_SQL,
         &spell_target_entries,
     )?;
-    println!(
-        "ffxi-vocab: scraped {} spell validTarget entries",
+    check_scrape_count(
+        "spell validTarget entries",
+        LSB_SPELL_LIST_SQL,
         spell_target_entries.len(),
-    );
+        floor::SPELL_VALID_TARGET,
+    )?;
 
     let spell_anim_entries = parse_u16_pair_rows(&spell_src, "spell_list", 14)?;
     write_u16_u16_table(
@@ -174,10 +253,12 @@ fn main() -> Result<()> {
         LSB_SPELL_LIST_SQL,
         &spell_anim_entries,
     )?;
-    println!(
-        "ffxi-vocab: scraped {} spell animation entries",
+    check_scrape_count(
+        "spell animation entries",
+        LSB_SPELL_LIST_SQL,
         spell_anim_entries.len(),
-    );
+        floor::SPELL_ANIMATION,
+    )?;
 
     // vendor/server/sql/spell_list.sql fields 10 castTime / 11 recastTime (ms).
     let spell_cast_entries = parse_u16_pair_rows(&spell_src, "spell_list", 10)?;
@@ -187,10 +268,12 @@ fn main() -> Result<()> {
         LSB_SPELL_LIST_SQL,
         &spell_cast_entries,
     )?;
-    println!(
-        "ffxi-vocab: scraped {} spell castTime entries",
+    check_scrape_count(
+        "spell castTime entries",
+        LSB_SPELL_LIST_SQL,
         spell_cast_entries.len(),
-    );
+        floor::SPELL_CAST_TIME,
+    )?;
 
     let spell_recast_entries = parse_u32_pair_rows(&spell_src, "spell_list", 11)?;
     write_u16_u32_table(
@@ -199,10 +282,12 @@ fn main() -> Result<()> {
         LSB_SPELL_LIST_SQL,
         &spell_recast_entries,
     )?;
-    println!(
-        "ffxi-vocab: scraped {} spell recastTime entries",
+    check_scrape_count(
+        "spell recastTime entries",
+        LSB_SPELL_LIST_SQL,
         spell_recast_entries.len(),
-    );
+        floor::SPELL_RECAST_TIME,
+    )?;
 
     let abil_src = fs::read_to_string(LSB_ABILITIES_SQL)
         .with_context(|| format!("reading {LSB_ABILITIES_SQL}"))?;
@@ -213,7 +298,12 @@ fn main() -> Result<()> {
         LSB_ABILITIES_SQL,
         &abil_entries,
     )?;
-    println!("ffxi-vocab: scraped {} ability entries", abil_entries.len(),);
+    check_scrape_count(
+        "ability entries",
+        LSB_ABILITIES_SQL,
+        abil_entries.len(),
+        floor::ABILITY,
+    )?;
 
     let abil_target_entries = parse_u16_pair_rows(&abil_src, "abilities", 4)?;
     write_u16_u16_table(
@@ -222,10 +312,12 @@ fn main() -> Result<()> {
         LSB_ABILITIES_SQL,
         &abil_target_entries,
     )?;
-    println!(
-        "ffxi-vocab: scraped {} ability validTarget entries",
+    check_scrape_count(
+        "ability validTarget entries",
+        LSB_ABILITIES_SQL,
         abil_target_entries.len(),
-    );
+        floor::ABILITY_VALID_TARGET,
+    )?;
 
     let abil_recast_entries = parse_u16_pair_rows(&abil_src, "abilities", 6)?;
     write_u16_u16_table(
@@ -234,10 +326,12 @@ fn main() -> Result<()> {
         LSB_ABILITIES_SQL,
         &abil_recast_entries,
     )?;
-    println!(
-        "ffxi-vocab: scraped {} ability recastId entries",
+    check_scrape_count(
+        "ability recastId entries",
+        LSB_ABILITIES_SQL,
         abil_recast_entries.len(),
-    );
+        floor::ABILITY_RECAST_ID,
+    )?;
 
     let abil_anim_entries = parse_u16_pair_rows(&abil_src, "abilities", 9)?;
     write_u16_u16_table(
@@ -246,10 +340,12 @@ fn main() -> Result<()> {
         LSB_ABILITIES_SQL,
         &abil_anim_entries,
     )?;
-    println!(
-        "ffxi-vocab: scraped {} ability animation entries",
+    check_scrape_count(
+        "ability animation entries",
+        LSB_ABILITIES_SQL,
         abil_anim_entries.len(),
-    );
+        floor::ABILITY_ANIMATION,
+    )?;
 
     let ws_src = fs::read_to_string(LSB_WEAPON_SKILLS_SQL)
         .with_context(|| format!("reading {LSB_WEAPON_SKILLS_SQL}"))?;
@@ -267,10 +363,12 @@ fn main() -> Result<()> {
         &format!("{LSB_MOB_SKILLS_SQL} + {LSB_WEAPON_SKILLS_SQL}"),
         &tp_move_entries,
     )?;
-    println!(
-        "ffxi-vocab: scraped {} TP-move name entries",
+    check_scrape_count(
+        "TP-move name entries",
+        &format!("{LSB_MOB_SKILLS_SQL} + {LSB_WEAPON_SKILLS_SQL}"),
         tp_move_entries.len(),
-    );
+        floor::TP_MOVE,
+    )?;
 
     let item_src = fs::read_to_string(LSB_ITEM_BASIC_SQL)
         .with_context(|| format!("reading {LSB_ITEM_BASIC_SQL}"))?;
@@ -281,7 +379,12 @@ fn main() -> Result<()> {
         LSB_ITEM_BASIC_SQL,
         &item_entries,
     )?;
-    println!("ffxi-vocab: scraped {} item entries", item_entries.len(),);
+    check_scrape_count(
+        "item entries",
+        LSB_ITEM_BASIC_SQL,
+        item_entries.len(),
+        floor::ITEM,
+    )?;
 
     let item_flag_entries = parse_sql_item_flags(&item_src)?;
     write_u16_u32_table(
@@ -290,10 +393,12 @@ fn main() -> Result<()> {
         LSB_ITEM_BASIC_SQL,
         &item_flag_entries,
     )?;
-    println!(
-        "ffxi-vocab: scraped {} nonzero item-flag entries",
+    check_scrape_count(
+        "nonzero item-flag entries",
+        LSB_ITEM_BASIC_SQL,
         item_flag_entries.len(),
-    );
+        floor::ITEM_FLAGS,
+    )?;
 
     let status_effects_src = fs::read_to_string(LSB_STATUS_EFFECTS_SQL)
         .with_context(|| format!("reading {LSB_STATUS_EFFECTS_SQL}"))?;
@@ -304,28 +409,34 @@ fn main() -> Result<()> {
         LSB_STATUS_EFFECTS_SQL,
         &status_flag_entries,
     )?;
-    println!(
-        "ffxi-vocab: scraped {} nonzero status-effect flag entries",
+    check_scrape_count(
+        "nonzero status-effect flag entries",
+        LSB_STATUS_EFFECTS_SQL,
         status_flag_entries.len(),
-    );
+        floor::STATUS_EFFECT_FLAGS,
+    )?;
 
     let equip_src = fs::read_to_string(LSB_ITEM_EQUIPMENT_SQL)
         .with_context(|| format!("reading {LSB_ITEM_EQUIPMENT_SQL}"))?;
     let equip_entries = parse_sql_equip_rows(&equip_src)?;
     write_equip_info_table(&out_dir.join("equip_info_table.rs"), &equip_entries)?;
-    println!(
-        "ffxi-vocab: scraped {} equip_info entries",
+    check_scrape_count(
+        "equip_info entries",
+        LSB_ITEM_EQUIPMENT_SQL,
         equip_entries.len(),
-    );
+        floor::EQUIP_INFO,
+    )?;
 
     let usable_src = fs::read_to_string(LSB_ITEM_USABLE_SQL)
         .with_context(|| format!("reading {LSB_ITEM_USABLE_SQL}"))?;
     let usable_entries = parse_sql_usable_rows(&usable_src)?;
     write_item_usable_table(&out_dir.join("item_usable_table.rs"), &usable_entries)?;
-    println!(
-        "cargo:warning=ffxi-vocab: scraped {} item_usable entries",
+    check_scrape_count(
+        "item_usable entries",
+        LSB_ITEM_USABLE_SQL,
         usable_entries.len(),
-    );
+        floor::ITEM_USABLE,
+    )?;
 
     let weapon_src = fs::read_to_string(LSB_ITEM_WEAPON_SQL)
         .with_context(|| format!("reading {LSB_ITEM_WEAPON_SQL}"))?;
@@ -336,10 +447,12 @@ fn main() -> Result<()> {
         LSB_ITEM_WEAPON_SQL,
         &weapon_skill_entries,
     )?;
-    println!(
-        "ffxi-vocab: scraped {} item_weapon skill entries",
+    check_scrape_count(
+        "item_weapon skill entries",
+        LSB_ITEM_WEAPON_SQL,
         weapon_skill_entries.len(),
-    );
+        floor::WEAPON_SKILL,
+    )?;
 
     let emote_src =
         fs::read_to_string(LSB_EMOTE_H).with_context(|| format!("reading {LSB_EMOTE_H}"))?;
@@ -360,7 +473,12 @@ fn main() -> Result<()> {
     }
     out.push_str("];\n");
     fs::write(out_dir.join("emote_table.rs"), &out)?;
-    println!("ffxi-vocab: scraped {} emote entries", emote_entries.len());
+    check_scrape_count(
+        "emote entries",
+        LSB_EMOTE_H,
+        emote_entries.len(),
+        floor::EMOTE,
+    )?;
 
     Ok(())
 }
@@ -516,7 +634,7 @@ fn write_equip_info_table(out_path: &PathBuf, entries: &[EquipRow]) -> Result<()
     Ok(())
 }
 
-fn lua_table_warning_label(table: &str) -> &'static str {
+fn lua_table_label(table: &str) -> &'static str {
     match table {
         "channel" => "msg_channel",
         "area" => "msg_area",

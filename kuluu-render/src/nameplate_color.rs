@@ -2,7 +2,7 @@
 //! retail menu DAT, plus the per-actor index selection retail runs every idle
 //! tick.
 //!
-//! research/XIClient/.../ActorTelemetry.cpp — `InitializeNameColors` (table
+//! research/XIClient/src/XIClient/source/World/Actor/ActorTelemetry.cpp — `InitializeNameColors` (table
 //! load) and `NameColorSet` (selection).
 
 use bevy::prelude::*;
@@ -13,7 +13,7 @@ use crate::ui_element_atlas::UiElementDatRoot;
 
 const NCOL_GROUP: &str = "menu    ncol    ";
 
-// research/XIClient/.../ActorTelemetry.h `NAME_COLOR_COUNT` — retail
+// research/XIClient/src/XIClient/include/World/Actor/ActorTelemetry.h `NAME_COLOR_COUNT` — retail
 // reads only the first 23 quads of the group even though the DAT ships more.
 pub const NAME_COLOR_COUNT: usize = 23;
 
@@ -40,7 +40,7 @@ pub mod ncol {
     pub const DEAD: usize = 9;
 }
 
-// research/XIClient/.../ActorTelemetry.cpp `NameColorIndicesByState` —
+// research/XIClient/src/XIClient/source/World/Actor/ActorTelemetry.cpp `NameColorIndicesByState` —
 // GmLevel indexes this from 3 upward; levels 0..2 fall through to the normal
 // selection instead of taking a GM colour.
 const GM_COLOR_INDICES: [usize; 8] = [10, 10, 11, 12, 13, 14, 15, 16];
@@ -58,13 +58,14 @@ const ALLEGIANCE_COLORED_MAX: u8 = 99;
 /// The belligerence bit LSB ORs into the allegiance byte while a monstrosity is
 /// outside the Ferretory (`Flags3.BallistaTeam |= 0x08`, char_update.cpp;
 /// `Flags2.BallistaFlg |= 0x08`, char_status.cpp), on top of the base
-/// ALLEGIANCE_TYPE. A player's base is always PLAYER (charentity.cpp:127), so a
+/// ALLEGIANCE_TYPE. A player's base is always PLAYER (charentity.cpp m_PlayTime), so a
 /// belligerent one reads BELLIGERENT_PLAYER_ALLEGIANCE on the wire; the MOB
 /// result only reaches it through an unvalidated `setAllegiance` script call.
 /// The colour logic deliberately does not branch on these — retail maps 8/9 to
-/// the PC row without returning, and every later check overwrites or matches
-/// that white, so falling through is equivalent; they exist to name the wire
-/// values in the tests pinning that behaviour.
+/// the PC row without returning, and for a belligerent player the claim/party/
+/// yell checks that follow, or the PC row itself, land on that same white, so
+/// falling through is equivalent; they exist to name the wire values in the
+/// tests pinning that behaviour.
 #[allow(dead_code)] // test fixture + wire documentation; see doc comment
 const BELLIGERENT_MOB_ALLEGIANCE: u8 = 0b1_000;
 #[allow(dead_code)] // ditto
@@ -155,7 +156,7 @@ impl NameColorTable {
 }
 
 /// One menu-shape quad vertex colour → the drawn nameplate colour.
-/// research/XIClient/.../UIShapeQuad.cpp `ParseFromResource` nudges every
+/// research/XIClient/src/XIClient/source/UI/UIShapeQuad.cpp `ParseFromResource` nudges every
 /// non-saturated RGB channel up by one and rescales partial alpha by 1.5 on
 /// load; `InitializeNameColors` then reads those adjusted values.
 fn quad_color(raw: [u8; 4]) -> Color {
@@ -172,7 +173,7 @@ fn quad_color(raw: [u8; 4]) -> Color {
     )
 }
 
-// research/XIClient/.../UIShapeQuad.cpp `ParseFromResource`
+// research/XIClient/src/XIClient/source/UI/UIShapeQuad.cpp `ParseFromResource`
 const ALPHA_LEGACY_SCALE: f32 = 1.5;
 
 /// Everything the colour rule needs about the viewer's own situation.
@@ -252,7 +253,7 @@ const DEFAULT_ROW: [Color; NAME_COLOR_COUNT] = [
 ];
 
 /// Port of `ActorTelemetry::NameColorSet`
-/// (research/XIClient/.../ActorTelemetry.cpp `NameColorSet`),
+/// (research/XIClient/src/XIClient/source/World/Actor/ActorTelemetry.cpp `NameColorSet`),
 /// keeping retail's precedence. The branches with no live LSB wire source are
 /// skipped, not guessed:
 /// - the forced `AUDIT_1D8` colour index — an event/cutscene override; no s2c
@@ -273,9 +274,13 @@ const DEFAULT_ROW: [Color; NAME_COLOR_COUNT] = [
 ///
 /// Belligerence (8/9) does have a live wire source — char_update.cpp /
 /// char_status.cpp OR in 0x08 outside the Ferretory — but retail's block maps it
-/// to the PC row *without returning*, so every check that runs after it here
-/// (GM, claim, party, yell) overwrites or matches that white anyway; falling
-/// through is the faithful port. Self receives its own byte via 0x037
+/// to the PC row *without returning*, and for the belligerent *player* LSB
+/// actually produces, the checks that run after it here (claim, party, yell) and
+/// the PC row this function ends on land on that same white; falling through is
+/// the faithful port. Retail's GM rows sit between the allegiance block and the
+/// claim branch; this port hoists them into `pre_claim_color`, ahead of the
+/// allegiance block, and a GM takes the same row either way.
+/// Self receives its own byte via 0x037
 /// `Flags2.BallistaFlg` (the server skips its own 0x0D), decoded into this same
 /// field.
 pub fn name_color_choice(entity: &Entity, ctx: SelfContext<'_>) -> NameColorChoice {
@@ -285,33 +290,25 @@ pub fn name_color_choice(entity: &Entity, ctx: SelfContext<'_>) -> NameColorChoi
     // real on CHAR_PC. See `pc_flags_are_real`.
     let is_pc = pc_flags_are_real(entity.kind);
 
-    if entity.is_door()
-        || matches!(
-            entity.look,
-            Some(kuluu_snapshot::EntityLook::Transport { .. })
-        )
-    {
-        return Row(ncol::NPC);
+    if let Some(choice) = pre_claim_color(entity) {
+        return choice;
     }
 
-    if entity.is_dead() {
-        return Row(ncol::DEAD);
-    }
-
-    // 8/9 (belligerence) deliberately fall through: retail maps them to the PC
-    // row without returning, and every check below overwrites or matches that
-    // white — see `BELLIGERENT_PLAYER_ALLEGIANCE`.
+    // 8/9 (belligerence) take no row here: they are absent from
+    // ALLEGIANCE_COLOR_INDICES and fall through, as retail's block does - it
+    // writes the PC row without returning. The claim/party/yell checks below and
+    // the final PC row reproduce that white for the only case LSB can produce, a
+    // belligerent player - see `BELLIGERENT_PLAYER_ALLEGIANCE`.
+    //
+    // The nation/ballista rows do not return in retail either: the block writes
+    // the colour and keeps walking into the claim branch. Returning here is a
+    // known kuluu divergence for the *colour*; `is_party_claimed` does not
+    // inherit it, so an allegiance-carrying claim still raises battle music.
     if (ALLEGIANCE_COLORED_MIN..=ALLEGIANCE_COLORED_MAX).contains(&flags.allegiance) {
         if let Some(&(_, row)) = ALLEGIANCE_COLOR_INDICES
             .iter()
             .find(|(a, _)| *a == flags.allegiance)
         {
-            return Row(row);
-        }
-    }
-
-    if is_pc && flags.gm_level >= MIN_GM_LEVEL {
-        if let Some(&row) = GM_COLOR_INDICES.get(usize::from(flags.gm_level)) {
             return Row(row);
         }
     }
@@ -368,12 +365,62 @@ pub fn name_color_choice(entity: &Entity, ctx: SelfContext<'_>) -> NameColorChoi
 /// Retail reaches the same place from the other side: its 0x0E handler *zeroes*
 /// LfgFlag, AutoPartyFlag, AnonymousFlag, PlayOnelineFlag, LinkShellFlag and
 /// LinkDeadFlag rather than reading them off the packet
-/// (research/XIClient/.../0x00E.cpp `RecvCharNpc`).
+/// (research/XIClient/src/XIClient/source/Game/Net/Packets/s2c/0x00E.cpp `RecvCharNpc`).
 ///
 /// `allegiance` (0x29), `charm` (0x27 bit 3), `trust` and `pet` (0x28) survive:
 /// LSB writes those explicitly on 0x0E.
 fn pc_flags_are_real(kind: EntityKind) -> bool {
     matches!(kind, EntityKind::Pc)
+}
+
+/// The `NameColorSet` branches that return before retail reaches the
+/// claimed-monster block: doors/lifts/models and the dead
+/// (research/XIClient/src/XIClient/source/World/Actor/ActorTelemetry.cpp ActorTelemetry::NameColorSet), then the
+/// GM rows, whose `state >= 3` lookup (:1663-1668) returns ahead of the claim
+/// branch at :1678 - and therefore also ahead of the allegiance colour, which
+/// retail merely writes on its way past.
+fn pre_claim_color(entity: &Entity) -> Option<NameColorChoice> {
+    use NameColorChoice::Row;
+    if entity.is_door()
+        || matches!(
+            entity.look,
+            Some(kuluu_snapshot::EntityLook::Transport { .. })
+        )
+    {
+        return Some(Row(ncol::NPC));
+    }
+
+    if entity.is_dead() {
+        return Some(Row(ncol::DEAD));
+    }
+
+    let flags = &entity.char_flags;
+    if pc_flags_are_real(entity.kind) && flags.gm_level >= MIN_GM_LEVEL {
+        if let Some(&row) = GM_COLOR_INDICES.get(usize::from(flags.gm_level)) {
+            return Some(Row(row));
+        }
+    }
+
+    None
+}
+
+/// Whether this actor is claimed by the player's party or alliance - the exact
+/// decision retail hangs its battle-music flag off: `NameColorSet` raises
+/// `GameManager::SomeMusicByte` from inside the branch that paints a
+/// party- or alliance-claimed monster
+/// (research/XIClient/src/XIClient/source/World/Actor/ActorTelemetry.cpp ActorTelemetry::NameColorSet). Only the
+/// returns that precede that branch gate the music; it is deliberately not
+/// derived from [`name_color_choice`], whose allegiance early return has no
+/// retail counterpart.
+pub fn is_party_claimed(entity: &Entity, ctx: SelfContext<'_>) -> bool {
+    pre_claim_color(entity).is_none()
+        && matches!(
+            claim_color(entity, ctx),
+            Some(
+                NameColorChoice::Row(ncol::CLAIMED_BY_PARTY)
+                    | NameColorChoice::Blend(ncol::CLAIMED_BY_PARTY, ncol::CLAIMED_BY_OTHER)
+            )
+        )
 }
 
 /// The claimed-monster block of `NameColorSet`. A claim only
@@ -402,7 +449,7 @@ fn claim_color(entity: &Entity, ctx: SelfContext<'_>) -> Option<NameColorChoice>
 
 /// The icon glyphs draw with a neutral diffuse so the sprite's own colours come
 /// through MODULATE2X unchanged; only the linkshell pearl is tinted.
-/// research/XIClient/.../CXiActorNameDraw.cpp `DrawActorNameText`.
+/// research/XIClient/src/XIClient/source/Rendering/Active/CXiActorNameDraw.cpp `DrawActorNameText`.
 pub const ICON_NEUTRAL_DIFFUSE: u8 = 0x80;
 
 /// The pearl tint for an actor's linkshell icon.
@@ -571,6 +618,62 @@ mod tests {
         assert_eq!(
             name_color_choice(&mob(MATE_ID), solo(&party)),
             NameColorChoice::Blend(ncol::CLAIMED_BY_PARTY, ncol::CLAIMED_BY_OTHER)
+        );
+    }
+
+    /// `NameColorSet` writes the nation/ballista colour and keeps walking into
+    /// the claim branch, so a claimed monster carrying an allegiance still
+    /// raises the battle-music flag even though our colour precedence returns
+    /// the allegiance row early.
+    #[test]
+    fn an_allegiance_carrying_claim_is_still_party_claimed() {
+        let party = [member(SELF_ID, 0), member(MATE_ID, 0)];
+        for (allegiance, row) in ALLEGIANCE_COLOR_INDICES {
+            let mut m = mob(MATE_ID);
+            m.char_flags.allegiance = allegiance;
+            assert_eq!(
+                name_color_choice(&m, solo(&party)),
+                NameColorChoice::Row(row),
+                "allegiance {allegiance}"
+            );
+            assert!(
+                is_party_claimed(&m, solo(&party)),
+                "allegiance {allegiance}"
+            );
+        }
+    }
+
+    #[test]
+    fn only_a_party_or_alliance_claim_counts_as_party_claimed() {
+        let party = [member(SELF_ID, 0), member(MATE_ID, 1)];
+        assert!(is_party_claimed(&mob(SELF_ID), solo(&[])));
+        assert!(
+            is_party_claimed(&mob(MATE_ID), solo(&party)),
+            "an alliance claim blends the two rows and still raises music"
+        );
+        assert!(!is_party_claimed(&mob(STRANGER_ID), solo(&[])));
+        assert!(!is_party_claimed(&mob(0), solo(&[])));
+
+        let mut dead = mob(MATE_ID);
+        dead.hp_pct = Some(0);
+        assert!(
+            !is_party_claimed(&dead, solo(&party)),
+            "NameColorSet returns the dead colour before the claim branch"
+        );
+    }
+
+    /// Retail's `state >= 3` GM lookup returns, and it sits after the
+    /// allegiance block that only writes its colour - so a GM in a nation
+    /// allegiance draws the GM row.
+    #[test]
+    fn gm_rows_outrank_a_nation_allegiance() {
+        let (allegiance, _) = ALLEGIANCE_COLOR_INDICES[0];
+        let mut gm = entity(EntityKind::Pc, STRANGER_ID);
+        gm.char_flags.allegiance = allegiance;
+        gm.char_flags.gm_level = MIN_GM_LEVEL;
+        assert_eq!(
+            name_color_choice(&gm, solo(&[])),
+            NameColorChoice::Row(GM_COLOR_INDICES[usize::from(MIN_GM_LEVEL)])
         );
     }
 

@@ -433,7 +433,14 @@ pub fn sync_entities_system(
                 EntityKind::Mob | EntityKind::Pc | EntityKind::Pet | EntityKind::Npc
             )
         {
-            prediction.observe(wire.id, world_pos, wire.heading);
+            prediction.observe(
+                wire.id,
+                world_pos,
+                wire.heading,
+                wire.speed,
+                wire.speed_base,
+                wire.mount.is_some(),
+            );
         }
 
         let mat = if is_self {

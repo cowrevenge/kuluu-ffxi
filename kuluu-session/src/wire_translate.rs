@@ -424,6 +424,10 @@ pub fn event_to_viewer_event(ev: AgentEvent) -> Option<wire::ViewerEvent> {
             target_id,
             result,
             animation,
+            info,
+            hit_distortion,
+            knockback,
+            kind,
         } => Some(wire::ViewerEvent::ActionStarted {
             actor_id,
             action_id,
@@ -431,6 +435,10 @@ pub fn event_to_viewer_event(ev: AgentEvent) -> Option<wire::ViewerEvent> {
             target_id,
             result: result.map(ffxi_proto::melee::MeleeResult::to_wire),
             animation,
+            info,
+            hit_distortion,
+            knockback,
+            kind,
         }),
         AgentEvent::EntityEmoted {
             actor_id,
@@ -960,6 +968,10 @@ mod tests {
                 target_id,
                 result: None,
                 animation: None,
+                info: 0,
+                hit_distortion: 0,
+                knockback: 0,
+                kind: 0,
             });
             assert!(matches!(
                 mapped,
@@ -973,6 +985,10 @@ mod tests {
         let hit_right = ffxi_proto::melee::MeleeResult {
             resolution: ffxi_proto::melee::ActionResolution::Hit,
             animation: ffxi_proto::melee::AttackAnimation::RightAttack,
+            info: 0,
+            hit_distortion: 0,
+            knockback: 0,
+            kind: 0,
         };
         for result in [None, Some(hit_right)] {
             let mapped = event_to_viewer_event(AgentEvent::ActionStarted {
@@ -982,11 +998,21 @@ mod tests {
                 target_id: Some(0xBEEF),
                 result,
                 animation: None,
+                info: 2,
+                hit_distortion: 3,
+                knockback: 2,
+                kind: 1,
             });
             assert!(matches!(
                 mapped,
-                Some(wire::ViewerEvent::ActionStarted { result: r, .. })
-                    if r == result.map(ffxi_proto::melee::MeleeResult::to_wire)
+                Some(wire::ViewerEvent::ActionStarted {
+                    result: r,
+                    info: 2,
+                    hit_distortion: 3,
+                    knockback: 2,
+                    kind: 1,
+                    ..
+                }) if r == result.map(ffxi_proto::melee::MeleeResult::to_wire)
             ));
         }
     }

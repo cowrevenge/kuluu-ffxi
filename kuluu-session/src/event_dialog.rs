@@ -36,7 +36,10 @@ pub enum Advance {
     Frame(DialogState),
     /// The event is over — the caller sends EVENT_END with `end_para` as the
     /// 0x05B `EndPara` (the VM's `Work_Zone[1]`, or a cancel sentinel).
-    Ended { end_para: u32 },
+    Ended {
+        end_para: u32,
+        final_position: Option<ffxi_event::vm::scene::EventPosition>,
+    },
     /// The scene is holding on a timed wait: no frame to show, and the event
     /// stays open. The caller must not send EVENT_END on this.
     Waiting,
@@ -264,19 +267,32 @@ impl DialogSession {
         }
     }
 
+    pub(crate) fn step(
+        &mut self,
+        drive: crate::session::event_transport::Drive,
+        _permit: &crate::session::event_transport::DrivePermit,
+    ) -> Advance {
+        use crate::session::event_transport::Drive;
+        match drive {
+            Drive::Cancel => self.cancel(),
+            Drive::Choice(choice) => self.advance(Some(choice)),
+            Drive::Tick(seconds) => self.tick(seconds),
+        }
+    }
+
     /// Apply the player's response (dismiss, or `Some(index)` choice) and return
     /// the next frame or [`Advance::Ended`]. Call only while [`active_end`] is
     /// `Some`.
     ///
     /// [`active_end`]: Self::active_end
-    pub fn advance(&mut self, choice: Option<u32>) -> Advance {
+    fn advance(&mut self, choice: Option<u32>) -> Advance {
         self.drive(|runner, strings| runner.advance(choice, strings))
     }
 
     /// Cancel the in-progress event from any frame (the Esc path): the VM
     /// reports the frame's cancel result and ends with
     /// [`ffxi_event::EVENT_CANCELLED_END_PARA`].
-    pub fn cancel(&mut self) -> Advance {
+    fn cancel(&mut self) -> Advance {
         self.scene_actions.clear();
         self.drive(|runner, strings| runner.cancel(strings))
     }
@@ -287,7 +303,7 @@ impl DialogSession {
     /// desynced call releases the event rather than wedging it open.
     ///
     /// [`active_end`]: Self::active_end
-    pub fn tick(&mut self, dt_secs: f32) -> Advance {
+    fn tick(&mut self, dt_secs: f32) -> Advance {
         self.drive(|runner, strings| runner.tick(dt_secs, strings))
     }
 
@@ -298,10 +314,14 @@ impl DialogSession {
             self.active.as_ref(),
         ) else {
             self.finish();
-            return Advance::Ended { end_para: 0 };
+            return Advance::Ended {
+                end_para: 0,
+                final_position: None,
+            };
         };
         let event_entity = active.unique_no;
         let outcome = step(runner, strings);
+        let final_position = runner.controlled_position();
         self.scene_actions.extend(runner.take_scene_actions());
         let cues: Vec<ResolvedCue> = runner
             .take_cues()
@@ -312,13 +332,19 @@ impl DialogSession {
             DialogStep::Frame(frame) => {
                 Advance::Frame(frame_to_dialog(active, frame, &self.player_name))
             }
-            DialogStep::Ended { end_para } => Advance::Ended { end_para },
+            DialogStep::Ended { end_para } => Advance::Ended {
+                end_para,
+                final_position,
+            },
             DialogStep::Stopped(op) => {
                 tracing::warn!(
                     op = format!("0x{op:02X}"),
                     "event VM stopped mid-dialog; releasing with end_para 0"
                 );
-                Advance::Ended { end_para: 0 }
+                Advance::Ended {
+                    end_para: 0,
+                    final_position: None,
+                }
             }
             DialogStep::Waiting => Advance::Waiting,
         };
@@ -339,13 +365,26 @@ impl DialogSession {
             .is_some_and(|r| r.controls_player_position())
     }
 
-    pub fn take_scene_actions(&mut self) -> Vec<ffxi_event::vm::scene::SceneAction> {
+    pub(crate) fn drain_scene_actions(
+        &mut self,
+        _permit: &crate::session::event_transport::DrivePermit,
+    ) -> Vec<ffxi_event::vm::scene::SceneAction> {
+        self.take_scene_actions()
+    }
+
+    fn take_scene_actions(&mut self) -> Vec<ffxi_event::vm::scene::SceneAction> {
         std::mem::take(&mut self.scene_actions)
     }
 
     pub fn acknowledge_position(&mut self, position: ffxi_event::vm::scene::EventPosition) {
         if let Some(runner) = &mut self.runner {
             runner.acknowledge_position(position);
+        }
+    }
+
+    pub fn reject_position(&mut self) {
+        if let Some(runner) = &mut self.runner {
+            runner.reject_position();
         }
     }
 
@@ -1081,7 +1120,7 @@ fn load_strings(root: Option<&DatRoot>, zone: u16) -> Option<StringDat> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     /// A miniature fishing block: offsets relative to a base, mirroring the
@@ -1321,6 +1360,26 @@ mod tests {
         buf
     }
 
+    pub(crate) fn contract_session(
+        dat: EventDat,
+        event_zone: u16,
+        text_zone: u16,
+    ) -> DialogSession {
+        let mut session = DialogSession::new(None, "Test".into());
+        session.loaded_event_zone = Some(event_zone);
+        session.loaded_string_zone = Some(text_zone);
+        session.event_dat = Some(Arc::new(dat));
+        session.strings = Some(
+            StringDat::parse(&synth_dat(&[
+                b"Balance {Num:0}, fare {Num:1}\0",
+                b"Accepted: {Num:0}, fare {Num:1}\0",
+                b"Insufficient: {Num:0}, fare {Num:1}\0",
+            ]))
+            .unwrap(),
+        );
+        session
+    }
+
     fn position_update_session() -> (DialogSession, EventTrigger) {
         const ZONE: u16 = 248;
         const ACTOR: u32 = 17_793_078;
@@ -1365,7 +1424,13 @@ mod tests {
         session.acknowledge_position(*position);
         assert!(matches!(session.tick(0.2), Advance::Waiting));
         session.acknowledge_event();
-        assert!(matches!(session.tick(0.2), Advance::Ended { end_para: 0 }));
+        assert!(matches!(
+            session.tick(0.2),
+            Advance::Ended {
+                end_para: 0,
+                final_position: Some(final_position)
+            } if final_position == *position
+        ));
         assert!(session.active_end().is_none());
     }
 

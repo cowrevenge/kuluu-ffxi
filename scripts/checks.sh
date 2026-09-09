@@ -7,8 +7,8 @@
 # the *exact* fmt/clippy invocation CI will, and vice versa.
 #
 # Usage: scripts/checks.sh <stage>...
-#   stage ∈ {harness, comments, fmt, clippy, style, test, enhanced, build, wasm, doc}
-#   scripts/checks.sh harness comments fmt clippy  # pre-push default
+#   stage ∈ {harness, comments, fmt, clippy, style, contracts, test, enhanced, build, wasm, doc}
+#   scripts/checks.sh harness comments fmt contracts clippy  # pre-push default
 #   COMMENTS_DIFF=staged scripts/checks.sh comments  # pre-commit (staged hunks)
 #   scripts/checks.sh harness fmt clippy test # the CI gate (ci.yml runs these)
 #   scripts/checks.sh enhanced                # the opt-in feature family (CI)
@@ -346,7 +346,18 @@ run_comments() {
   return $bad
 }
 
+run_contracts() {
+  local contract="session::event_transport::contracts::event_state_contract" listing
+  listing=$(cargo test -p kuluu-session --lib --locked -- --list)
+  if ! grep -Fxq "$contract: test" <<< "$listing"; then
+    echo "checks: contracts — mandatory event state contract is missing" >&2
+    return 1
+  fi
+  cargo test -p kuluu-session --lib --locked "$contract" -- --exact --include-ignored
+}
+
 run_test() {
+  run_contracts
   # Integration tests that need a live LSB server self-skip when unreachable,
   # so this is safe on a network-isolated runner.
   #
@@ -414,7 +425,7 @@ run_doc() {
 }
 
 if [[ $# -eq 0 ]]; then
-  echo "checks: no stage given (expected one or more of: fmt clippy style harness test enhanced build wasm doc)" >&2
+  echo "checks: no stage given (expected one or more of: fmt clippy style harness contracts test enhanced build wasm doc)" >&2
   exit 2
 fi
 
@@ -425,6 +436,7 @@ for stage in "$@"; do
     style)  echo "checks: style";  run_style ;;
     comments) echo "checks: comments"; run_comments ;;
     harness) echo "checks: harness"; run_harness ;;
+    contracts) echo "checks: contracts"; run_contracts ;;
     test)   echo "checks: test";   run_test ;;
     enhanced) echo "checks: enhanced"; run_enhanced ;;
     build)  echo "checks: build";  run_build ;;

@@ -256,9 +256,7 @@ pub struct EventVm {
     jump_table: [u16; JUMP_STACK_LEN],
     jump_index: usize,
     speaker_index: u16,
-    /// Event numeric parameters from the trigger packet — see
-    /// [`EventMessage::params`].
-    params: Vec<i32>,
+    param_len: usize,
     /// `CliEventMessOpenFlag`: 0 none, 1 awaiting dismissal, 2 invalid.
     message_open: u8,
     pending_message: Option<EventMessage>,
@@ -375,7 +373,7 @@ impl EventVm {
             jump_table: [0; JUMP_STACK_LEN],
             jump_index: 0,
             speaker_index,
-            params,
+            param_len: params.len().min(EVENT_PARAM_COUNT),
             message_open: MESSAGE_OPEN_NONE,
             pending_message: None,
             pending_choice: None,
@@ -386,6 +384,13 @@ impl EventVm {
             wait: None,
             oob_reads: std::cell::Cell::new(0),
         }
+    }
+
+    fn params(&self) -> Vec<i32> {
+        self.work_zone[EVENT_PARAM_WORK_BASE..][..self.param_len]
+            .iter()
+            .map(|&value| value as i32)
+            .collect()
     }
 
     /// Clear the open-dialog flag after the player dismisses a message, so the
@@ -711,7 +716,7 @@ impl EventVm {
                         message_id: self.getworkofs(1, 0) as u32,
                         speaker_index: self.speaker_index,
                         default_index: self.getworkofs(3, 0) as u32,
-                        params: self.params.clone(),
+                        params: self.params(),
                     });
                     self.selection_made = false;
                     self.exec_pointer += 7;
@@ -901,7 +906,7 @@ impl EventVm {
         self.pending_message = Some(EventMessage {
             message_id,
             speaker_index,
-            params: self.params.clone(),
+            params: self.params(),
         });
     }
 
@@ -1047,9 +1052,7 @@ impl EventVm {
             let index = (val - WORK_ZONE_BASE) as usize;
             self.work_zone[index] = value as u32;
             if (EVENT_PARAM_WORK_BASE..EVENT_PARAM_WORK_BASE + EVENT_PARAM_COUNT).contains(&index) {
-                self.params
-                    .resize(self.params.len().max(index - EVENT_PARAM_WORK_BASE + 1), 0);
-                self.params[index - EVENT_PARAM_WORK_BASE] = value;
+                self.param_len = self.param_len.max(index - EVENT_PARAM_WORK_BASE + 1);
             }
         }
     }

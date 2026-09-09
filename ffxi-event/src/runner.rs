@@ -96,12 +96,20 @@ impl DialogRunner {
         self.vm.controls_player_position()
     }
 
+    pub fn controlled_position(&self) -> Option<crate::vm::scene::EventPosition> {
+        self.vm.controlled_position()
+    }
+
     pub fn take_scene_actions(&mut self) -> Vec<crate::vm::scene::SceneAction> {
         self.vm.take_scene_actions()
     }
 
     pub fn acknowledge_position(&mut self, position: crate::vm::scene::EventPosition) {
         self.vm.acknowledge_position(position);
+    }
+
+    pub fn reject_position(&mut self) {
+        self.vm.reject_position();
     }
 
     pub fn acknowledge_event(&mut self) {

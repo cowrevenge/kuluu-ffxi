@@ -87,6 +87,13 @@ impl EventVm {
         })
     }
 
+    pub fn controlled_position(&self) -> Option<EventPosition> {
+        self.scene
+            .as_ref()
+            .filter(|_| self.controls_player_position())
+            .map(|scene| scene.player)
+    }
+
     pub fn take_scene_actions(&mut self) -> Vec<SceneAction> {
         std::mem::take(&mut self.scene_actions)
     }
@@ -102,6 +109,12 @@ impl EventVm {
             if let Some(child) = &mut scene.child {
                 child.acknowledge_position(position);
             }
+        }
+    }
+
+    pub fn reject_position(&mut self) {
+        if let Some(scene) = &self.scene {
+            self.acknowledge_position(scene.player);
         }
     }
 
@@ -133,7 +146,7 @@ impl EventVm {
         self.cues.extend(child.take_cues());
         self.scene_actions.extend(child.take_scene_actions());
         self.work_zone = child.work_zone;
-        self.params.clone_from(&child.params);
+        self.param_len = child.param_len;
         if let Some(child_scene) = &child.scene {
             scene.player = child_scene.player;
             scene.controls_position |= child_scene.controls_position;
@@ -217,12 +230,8 @@ impl EventVm {
                     if scene.depth >= REQUEST_STACK_LIMIT {
                         return Some(StepResult::Spun(op));
                     }
-                    let mut child = EventVm::start_at(
-                        block,
-                        entry as usize,
-                        self.speaker_index,
-                        self.params.clone(),
-                    );
+                    let mut child =
+                        EventVm::start_at(block, entry as usize, self.speaker_index, self.params());
                     child.work_zone = self.work_zone;
                     child.attach_scene(scene.dat.clone(), actor, scene.player);
                     child.scene.as_mut().unwrap().depth = scene.depth + 1;

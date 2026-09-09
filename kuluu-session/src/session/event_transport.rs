@@ -2,8 +2,129 @@ use ffxi_event::vm::scene::{EventPosition, SceneAction, EVENT_COORD_UNITS, EVENT
 use tokio::sync::broadcast;
 
 use super::codec::{build_subpacket_event_position, build_subpacket_pos};
-use crate::event_dialog::DialogSession;
+use crate::event_dialog::{Advance, DialogSession, ResolvedCue};
+use crate::map_client::MapClient;
 use crate::state::{AgentEvent, Position, Vec3};
+
+pub(crate) enum Drive {
+    Cancel,
+    Choice(u32),
+    Tick(f32),
+}
+
+pub(crate) struct DrivePermit(());
+
+#[must_use = "an event step must transmit its complete packet before exposing its outcome"]
+pub(super) struct PreparedStep {
+    advance: Advance,
+    cues: Vec<ResolvedCue>,
+    payload: Vec<u8>,
+    datagram_id: u16,
+}
+
+impl PreparedStep {
+    pub(super) async fn send(
+        self,
+        map: &mut MapClient,
+        server_last_seq: u16,
+    ) -> anyhow::Result<(Advance, Vec<ResolvedCue>)> {
+        if !self.payload.is_empty() {
+            map.send_encrypted(&self.payload, self.datagram_id, server_last_seq)
+                .await?;
+        }
+        Ok((self.advance, self.cues))
+    }
+}
+
+pub(super) fn prepare(
+    dialog: &mut DialogSession,
+    drive: Drive,
+    zone: u16,
+    pending: &mut Vec<(u32, u16, u16)>,
+    sequence: &mut u16,
+    position: &mut Position,
+    events: &broadcast::Sender<AgentEvent>,
+) -> Option<PreparedStep> {
+    let (actor, index, event) = dialog.active_end()?;
+    let advance = dialog.step(drive, &DrivePermit(()));
+    let cues = dialog.take_cues();
+    let mut actions = dialog.drain_scene_actions(&DrivePermit(()));
+    if let Advance::Ended {
+        final_position: Some(final_position),
+        ..
+    } = &advance
+    {
+        if !matches!(actions.last(), Some(SceneAction::PlayerPosition(last)) if last == final_position)
+        {
+            actions.push(SceneAction::PlayerPosition(*final_position));
+        }
+    }
+    let mut payload = encode_scene_actions(
+        actions,
+        (actor, index, event),
+        zone,
+        sequence,
+        position,
+        events,
+    );
+    if let Advance::Ended { end_para, .. } = &advance {
+        if super::take_pending_event_end(pending, actor, event) {
+            // vendor/server/src/map/map_networking.cpp MapNetworking::parse dispatches in payload order.
+            payload.extend(super::build_subpacket_event_end(
+                *sequence, actor, index, zone, event, *end_para,
+            ));
+            *sequence = sequence.wrapping_add(1);
+        }
+    }
+    Some(PreparedStep {
+        advance,
+        cues,
+        payload,
+        datagram_id: super::datagram_header_id(*sequence),
+    })
+}
+
+pub(super) fn receive(
+    dialog: &mut DialogSession,
+    sub: &ffxi_proto::framing::SubPacket<'_>,
+    player: u32,
+    position: Position,
+) {
+    use ffxi_proto::{decode, map};
+    match sub.opcode {
+        map::s2c::WPOS2 => {
+            if let Ok(movement) = decode::ForcedMove::decode(sub.data) {
+                if movement.unique_no == player
+                    && matches!(
+                        movement.mode,
+                        decode::PosMode::Event | decode::PosMode::Clear
+                    )
+                {
+                    if movement.mode == decode::PosMode::Event {
+                        let accepted = Position {
+                            pos: Vec3 {
+                                x: movement.x,
+                                y: movement.y,
+                                z: movement.z,
+                            },
+                            heading: movement.heading,
+                            ..position
+                        };
+                        dialog.acknowledge_position(event_position(accepted));
+                    } else {
+                        dialog.reject_position();
+                    }
+                }
+            }
+        }
+        map::s2c::EVENTUCOFF => match super::eventucoff_mode_of(sub.data) {
+            Some(map::event_position_wire::EVENT_RECV_PENDING) => dialog.acknowledge_event(),
+            Some(map::eventucoff_mode::CANCEL_EVENT) => dialog.clear(),
+            _ => {}
+        },
+        _ => {}
+    }
+}
 
 const WIRE_HEADING_UNITS: f32 = (u8::MAX as u16 + 1) as f32;
 
@@ -28,8 +149,8 @@ pub(super) fn session_position(position: EventPosition, previous: Position) -> P
     }
 }
 
-pub(super) fn drain_scene_actions(
-    dialog: &mut DialogSession,
+fn encode_scene_actions(
+    actions: Vec<SceneAction>,
     identity: (u32, u16, u16),
     zone: u16,
     sequence: &mut u16,
@@ -37,7 +158,7 @@ pub(super) fn drain_scene_actions(
     events: &broadcast::Sender<AgentEvent>,
 ) -> Vec<u8> {
     let mut payload = Vec::new();
-    for action in dialog.take_scene_actions() {
+    for action in actions {
         match action {
             SceneAction::PlayerPosition(next) => {
                 *position = session_position(next, *position);
@@ -130,3 +251,6 @@ mod tests {
         assert_eq!(packet[31], 192);
     }
 }
+
+#[cfg(test)]
+mod contracts;

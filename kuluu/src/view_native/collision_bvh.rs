@@ -377,6 +377,9 @@ pub fn build_zone_collision_bvh_system(
 
 fn build_bvh_with_leaf_offsets(triangles: Vec<[Vec3; 3]>) -> CollisionBvh {
     let mut bvh = CollisionBvh::build(triangles);
+    if bvh.nodes.is_empty() {
+        return bvh;
+    }
 
     let mut offset: u32 = 0;
     patch_leaf_offsets(&mut bvh.nodes, 0, &mut offset);
@@ -470,5 +473,36 @@ mod bvh_tests {
             CollisionBvh::from_world_triangles(geom.camera_triangles()).tri_count(),
             geom.tri_count() - skipped
         );
+    }
+
+    /// A zone with every triangle filtered out (or a `CameraOccluder` mesh with
+    /// no indices) must yield a BVH that simply never hits, not a panic.
+    #[test]
+    fn empty_triangle_list_builds_a_bvh_that_never_hits() {
+        let bvh = CollisionBvh::from_world_triangles(Vec::new());
+        assert_eq!(bvh.tri_count(), 0);
+        assert!(bvh.root_aabb().is_none());
+        assert_eq!(bvh.ray_cast(Vec3::ZERO, Vec3::Z, 100.0), None);
+        assert_eq!(bvh.ray_cast_brute_force(Vec3::ZERO, Vec3::Z, 100.0), None);
+    }
+
+    /// The leaf-offset patch the empty-list guard skips still has to run for the
+    /// smallest non-empty build, so traversal must agree with brute force there.
+    #[test]
+    fn single_triangle_bvh_hits_at_the_brute_force_distance() {
+        let tri = [
+            Vec3::new(-1.0, -1.0, 5.0),
+            Vec3::new(1.0, -1.0, 5.0),
+            Vec3::new(0.0, 1.0, 5.0),
+        ];
+        let bvh = CollisionBvh::from_world_triangles(vec![tri]);
+        assert_eq!(bvh.tri_count(), 1);
+        let fast = bvh.ray_cast(Vec3::ZERO, Vec3::Z, 100.0).expect("hit");
+        let brute = bvh
+            .ray_cast_brute_force(Vec3::ZERO, Vec3::Z, 100.0)
+            .expect("hit");
+        assert!((fast - 5.0).abs() < 1e-4, "unexpected distance {fast}");
+        assert!((fast - brute).abs() < 1e-6);
+        assert_eq!(bvh.ray_cast(Vec3::ZERO, -Vec3::Z, 100.0), None);
     }
 }

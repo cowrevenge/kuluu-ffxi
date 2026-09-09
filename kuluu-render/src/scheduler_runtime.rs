@@ -580,21 +580,16 @@ fn mmb_sprite_mesh(data: &[u8]) -> Option<MmbSpriteMesh> {
 #[derive(Resource, Default, Clone)]
 pub struct ActionDatRoot(pub Option<Arc<ffxi_dat::DatRoot>>);
 
-// A `None` root means no host wired [`ActionDatRoot`]; opening the env root keeps that path
-// working. Only ever called from inside a task, so the fallback never costs a frame.
-#[cfg(not(target_arch = "wasm32"))]
-fn resolved_root(root: Option<Arc<ffxi_dat::DatRoot>>) -> Option<Arc<ffxi_dat::DatRoot>> {
-    root.or_else(|| ffxi_dat::DatRoot::from_env_or_default().ok().map(Arc::new))
-}
-
+// A `None` root is the host saying it has no install (kuluu wires one either way), so there is
+// deliberately no env re-open here: the wired root carries the launcher's overlays and DAT-path
+// setting, and a root opened behind the host's back would not.
 #[cfg(not(target_arch = "wasm32"))]
 fn read_dat_bytes(root: Option<Arc<ffxi_dat::DatRoot>>, file_id: u32) -> Vec<u8> {
-    resolved_root(root)
-        .and_then(|root| {
-            let loc = root.resolve(file_id).ok()?;
-            std::fs::read(loc.path_under(&root)).ok()
-        })
-        .unwrap_or_default()
+    root.and_then(|root| {
+        let loc = root.resolve(file_id).ok()?;
+        std::fs::read(loc.path_under(&root)).ok()
+    })
+    .unwrap_or_default()
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -691,12 +686,14 @@ pub struct ActionDatCache {
 
 #[cfg(not(target_arch = "wasm32"))]
 impl ActionDatCache {
-    // Every cached parse and every in-flight load belongs to the install it was read from, so a
-    // launcher DAT-path change drops both rather than serving the next cast from the old one.
+    // Every cached parse, in-flight load and deferred dispatch belongs to the install it was
+    // read from, so a launcher DAT-path change drops all three rather than serving the next cast
+    // from the old one.
     fn adopt_root(&mut self, root: Option<Arc<ffxi_dat::DatRoot>>) {
         self.root = root;
         self.lru = ActionDatLru::default();
         self.tasks.clear();
+        self.pending.clear();
     }
 
     fn request(&mut self, file_id: u32) {
@@ -1018,8 +1015,10 @@ pub struct ActionMainDll(pub Option<Arc<ffxi_dat::main_dll::MainDll>>);
 pub(crate) struct ActionMainDllTask(bevy::tasks::Task<Option<ffxi_dat::main_dll::MainDll>>);
 
 // Both halves of a DAT-root change: the parsed-DAT cache re-keys onto the new install and the
-// dll re-loads from it. `ActionMainDll` is left in place until the new one lands so a reload
-// degrades to stale tables for a few frames rather than to no weaponskill effects at all.
+// dll re-loads from it. The dll is dropped along with the cache rather than kept warm, because
+// it is what turns an action into a *file id* -- serving the previous install's base tables
+// while resolving them through the new root mixes the two installs. Until the new one lands the
+// dispatchers take their existing no-dll paths.
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn adopt_action_dat_root(
     root: Res<ActionDatRoot>,
@@ -1029,8 +1028,9 @@ pub(crate) fn adopt_action_dat_root(
     cache.adopt_root(root.0.clone());
     let root = root.0.clone();
     let task = bevy::tasks::AsyncComputeTaskPool::get().spawn(async move {
-        resolved_root(root).and_then(|root| ffxi_dat::main_dll::MainDll::load(root.root()).ok())
+        root.and_then(|root| ffxi_dat::main_dll::MainDll::load(root.root()).ok())
     });
+    commands.remove_resource::<ActionMainDll>();
     commands.insert_resource(ActionMainDllTask(task));
 }
 
@@ -1702,9 +1702,14 @@ impl Plugin for SchedulerRuntimePlugin {
             app.init_resource::<ActionDatCache>();
             app.init_resource::<ActionDatRoot>();
             app.add_systems(Startup, load_global_effect_dir);
+            // Ordered ahead of the poll so a root change landing on the same frame as an
+            // in-flight dll cannot have the poll's `remove_resource::<ActionMainDllTask>` applied
+            // over the freshly spawned one, which has no retry path.
             app.add_systems(
                 Update,
-                adopt_action_dat_root.run_if(resource_exists_and_changed::<ActionDatRoot>),
+                adopt_action_dat_root
+                    .run_if(resource_exists_and_changed::<ActionDatRoot>)
+                    .before(poll_action_main_dll),
             );
             app.add_systems(
                 Update,
@@ -2948,6 +2953,33 @@ mod tests {
         );
     }
 
+    // `adopt_action_dat_root` and `poll_action_main_dll` only reach a real client through
+    // `SchedulerRuntimePlugin`, and the tests around them register their own copies -- so without
+    // this pin the plugin's registrations can be deleted with every test still green while
+    // `ActionMainDll` never exists: every weaponskill file-id lookup returns None and every emote
+    // degrades to `play_local_emote_clip`. The kuluu side pins the other half of the wiring
+    // (`insert_dat_roots_hands_the_scheduler_runtime_the_shared_root`).
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn the_plugin_loads_the_main_dll_from_the_wired_root() {
+        bevy::tasks::AsyncComputeTaskPool::get_or_init(Default::default);
+        let mut app = App::new();
+        // The two wiring systems need nothing but the resources the plugin itself installs; the
+        // dispatchers sharing their schedule need a live session's, so their missing-parameter
+        // errors are noise here.
+        app.set_error_handler(bevy::ecs::error::ignore);
+        app.add_plugins(SchedulerRuntimePlugin);
+
+        for _ in 0..MAIN_DLL_TASK_POLLS {
+            app.update();
+            if app.world().get_resource::<ActionMainDll>().is_some() {
+                return;
+            }
+            std::thread::sleep(MAIN_DLL_POLL_INTERVAL);
+        }
+        panic!("SchedulerRuntimePlugin must load ActionMainDll from the wired ActionDatRoot");
+    }
+
     // The dispatchers must see the root the host wired, not one they open themselves: a cache
     // keyed to a different install is exactly the launcher-reload bug above.
     #[cfg(not(target_arch = "wasm32"))]
@@ -2983,11 +3015,10 @@ mod tests {
     // ~2.8 MB read plus a handful of marker scans, so this is orders of magnitude of slack.
     #[cfg(not(target_arch = "wasm32"))]
     const MAIN_DLL_TASK_POLLS: usize = 600;
-    // The look-race bytes MainDll indexes its per-race bases by; see `weapon_skill_file_id`.
+    // The playable look race the dispatchers key on most; HumeM=1 per
+    // ffxi-dat/src/main_dll.rs::base_emote_index.
     #[cfg(not(target_arch = "wasm32"))]
-    const FIRST_LOOK_RACE: u8 = 1;
-    #[cfg(not(target_arch = "wasm32"))]
-    const LAST_LOOK_RACE: u8 = 8;
+    const HUME_MALE_LOOK_RACE: u8 = 1;
     #[cfg(not(target_arch = "wasm32"))]
     const MAIN_DLL_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(10);
 
@@ -3026,7 +3057,11 @@ mod tests {
         }
         let landed = landed.expect("FFXiMain.dll lands as ActionMainDll");
 
-        for race in FIRST_LOOK_RACE..=LAST_LOOK_RACE {
+        // Swept over the whole index space rather than the playable races: the same index space
+        // is reached by non-playable look bytes too (ffxi-dat `MainDll::base_race_config_index`,
+        // 32..=36 ridden chocobo), and an out-of-range index has to read `None` on both sides
+        // just the same.
+        for race in u8::MIN..=u8::MAX {
             assert_eq!(
                 landed.base_weapon_skill_index(race),
                 direct.base_weapon_skill_index(race),
@@ -3039,7 +3074,9 @@ mod tests {
             );
         }
         assert!(
-            landed.base_weapon_skill_index(FIRST_LOOK_RACE).is_some(),
+            landed
+                .base_weapon_skill_index(HUME_MALE_LOOK_RACE)
+                .is_some(),
             "the race bases the dispatchers key on are actually populated"
         );
     }

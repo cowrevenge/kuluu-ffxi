@@ -311,6 +311,7 @@ fn compass_art_uses_all_dat_quadrants_and_north_tint_when_available() {
     for (label, children) in labels.iter(&world) {
         let image = world.get::<ImageNode>(children[0]).unwrap();
         let color = image.color.to_srgba();
+        assert_eq!(color.alpha, 1.0, "DAT opacity is baked into the DXT3 image");
         if label.direction == Vec2::NEG_Y {
             assert!(color.red > color.green && color.red > color.blue);
         } else {

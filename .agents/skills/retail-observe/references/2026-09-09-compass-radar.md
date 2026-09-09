@@ -128,3 +128,23 @@ were not isolated. The visible references support an ellipse and upright
 cardinals; a fixed 0.5 vertical scale is an implementation approximation until
 a controlled camera comparison or binary trace settles it. Passing a build or
 rendering a plausible dial does not close these parity questions.
+
+## Opacity follow-up
+
+The user's follow-up identified excessive transparency. A direct comparison of
+the base and xiview DATs found byte-identical compass component metadata, all
+six sprite crops, and the complete `menu compass`, `menu news`, and `menu marker`
+texture chunks. The containers differ elsewhere. Evidence and hashes are in
+`artifacts/verify/compass-opacity/comparison.json`.
+
+The dial and letters use DXT3: decoded alpha is the raw nibble expanded by 17,
+with maxima of 102 and 136 respectively. `UIManager::InitDraw` in
+`research/XIClient/src/XIClient/source/UI/UIManager.cpp` sets alpha modulation
+to MODULATE2X. `UIShapeQuad::ParseFromResource` supplies the adjusted vertex
+alpha; `Handle_0_1_1` uses ordinary source-alpha blending for these components.
+This is community reconstruction evidence, without a fresh binary trace.
+
+Kuluu omitted that factor of two for composed DXT3 UI art. The correction bakes
+twice the texture-times-vertex alpha into the uploaded image, saturating after
+the product; the ImageNode then uses unit alpha. Transparent texels stay clear,
+RGB stays unchanged, and palette decoding keeps its existing alpha conversion.

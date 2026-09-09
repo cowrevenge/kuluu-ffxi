@@ -186,7 +186,7 @@ fn texture_section_name(body: &[u8]) -> Option<String> {
     Some(normalize_name(body.get(1..1 + NAME_LEN)?))
 }
 
-fn find_texture(dat_bytes: &[u8], name: &str) -> Option<DecodedTexture> {
+pub fn find_texture(dat_bytes: &[u8], name: &str) -> Option<DecodedTexture> {
     walk(dat_bytes)
         .flatten()
         .filter(|c| c.kind == TEXTURE_KIND)

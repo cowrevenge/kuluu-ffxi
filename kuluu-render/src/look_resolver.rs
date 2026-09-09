@@ -19,6 +19,10 @@ const EQUIP_SLOT_SUB: u8 = 7;
 const EQUIP_SLOT_RANGED: u8 = 8;
 const WEAPON_SLOTS: [u8; 3] = [EQUIP_SLOT_MAIN, EQUIP_SLOT_SUB, EQUIP_SLOT_RANGED];
 
+const EQUIP_SLOT_ID_SHIFT: u32 = 12;
+const EQUIP_SLOT_ID_SLOT_MASK: u16 = 0xF;
+const EQUIP_SLOT_ID_MODEL_MASK: u16 = 0x0FFF;
+
 // FFXiMain `.text` VA 0x100C513D (retail client disassembly; the full quote
 // lives in out-of-tree cexi research notes, not in this repo): four ranges
 // split at 1500 / 3000 / 3500, the top one computed as `(m - 3500) + 101739`.
@@ -46,8 +50,8 @@ pub fn npc_dat_id(modelid: u16) -> u32 {
 }
 
 pub fn resolve_equipment_slot(slot_id: u16, race: u8) -> Option<u32> {
-    let slot = u32::from((slot_id >> 12) & 0xF);
-    let id = u32::from(slot_id & 0x0FFF);
+    let slot = u32::from((slot_id >> EQUIP_SLOT_ID_SHIFT) & EQUIP_SLOT_ID_SLOT_MASK);
+    let id = u32::from(slot_id & EQUIP_SLOT_ID_MODEL_MASK);
 
     if slot == 0 || slot > 8 || race == 0 || race > 8 {
         return None;
@@ -82,7 +86,8 @@ pub fn resolve_equipment_model(slot_index: u8, model_id: u16, race: u8) -> Optio
     if slot_index == 0 || slot_index > 8 {
         return None;
     }
-    let slot_id = (u16::from(slot_index) << 12) | (model_id & 0x0FFF);
+    let slot_id =
+        (u16::from(slot_index) << EQUIP_SLOT_ID_SHIFT) | (model_id & EQUIP_SLOT_ID_MODEL_MASK);
     resolve_equipment_slot(slot_id, race)
 }
 

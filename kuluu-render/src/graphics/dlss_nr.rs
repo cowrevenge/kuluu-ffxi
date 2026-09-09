@@ -47,6 +47,8 @@ use wgpu::{
 };
 
 use super::dlss::KULUU_DLSS_PROJECT_ID;
+
+const NGX_FAIL_PLATFORM_ERROR: u32 = 0xBAD0_0002;
 use super::settings::GraphicsSettings;
 use crate::camera::OperatorCamera;
 
@@ -164,7 +166,7 @@ impl NrState {
                 if r == kuluu_dlss_nr::FWD_NULL_TARGET {
                     // Forwarder got a null target — our load-order bug, not NGX.
                     error!("dlss-nr: forwarder received a null Init_Ext pointer (kuluu-dlss-nr load-order bug)");
-                } else if r as u32 == 0xBAD0_0002 {
+                } else if r as u32 == NGX_FAIL_PLATFORM_ERROR {
                     // Still gated: the call did not land inside nvngx.dll_kuluu.dll.
                     warn!("dlss-nr: still module-gated — confirm nvngx.dll_kuluu.dll sits next to this exe (staging in README.md#optional-dlss-builds)");
                 }
@@ -434,7 +436,7 @@ pub fn prepare_nr(
                 );
                 if r == kuluu_dlss_nr::FWD_NULL_TARGET {
                     error!("dlss-nr: forwarder received a null CreateFeature pointer (kuluu-dlss-nr load-order bug)");
-                } else if r as u32 == 0xBAD0_0002 {
+                } else if r as u32 == NGX_FAIL_PLATFORM_ERROR {
                     warn!("dlss-nr: still module-gated — confirm nvngx.dll_kuluu.dll sits next to this exe and is current (staging in README.md#optional-dlss-builds)");
                 }
             }

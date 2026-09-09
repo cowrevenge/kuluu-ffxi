@@ -24,6 +24,7 @@ pub const DEFAULT_MOB_DRAW_DISTANCE: f32 = 50.0;
 
 pub const MMB_LOAD_DISTANCE_MARGIN: f32 = 1.25;
 
+const MZB_TERRAIN_PALETTE_INDEX_MASK: u8 = 0x0F;
 const MZB_TERRAIN_PALETTE: [[f32; 3]; 16] = [
     [0.85, 0.55, 0.40],
     [0.75, 0.65, 0.45],
@@ -2724,7 +2725,7 @@ fn spawn_mzb_overlay(
                 .zip(vert_mat.iter())
                 .map(|(n, &m)| {
                     let shade = 0.4 + 0.6 * (n[1] * 0.5 + 0.5);
-                    let pal = MZB_TERRAIN_PALETTE[(m & 0x0F) as usize];
+                    let pal = MZB_TERRAIN_PALETTE[(m & MZB_TERRAIN_PALETTE_INDEX_MASK) as usize];
                     [pal[0] * shade, pal[1] * shade, pal[2] * shade, 1.0]
                 })
                 .collect();

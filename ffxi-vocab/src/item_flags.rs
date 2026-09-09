@@ -54,11 +54,18 @@ pub fn auctionable(id: u16) -> bool {
 mod tests {
     use super::*;
 
+    // vendor/server/sql/item_basic.sql @FLAG_MYSTERY_BOX / @FLAG_INSCRIBABLE
+    const MYSTERY_BOX: u32 = 0x00004;
+    const INSCRIBABLE: u32 = 0x00020;
+
     #[test]
     fn chocobo_bedding_is_account_bound() {
         // item 1: @FLAG_MYSTERY_BOX | @FLAG_CAN_SEND_ACCT | @FLAG_NOAUCTION |
         // @FLAG_NODELIVERY | @FLAG_EX (item_basic.sql).
-        assert_eq!(lookup(1), 0x4 | 0x10 | NOAUCTION | 0x2000 | 0x4000);
+        assert_eq!(
+            lookup(1),
+            MYSTERY_BOX | CAN_SEND_ACCT | NOAUCTION | NODELIVERY | EX
+        );
         assert!(deliverable(1), "CanSendAccount overrides NoDelivery");
         assert!(account_bound(1));
         assert!(!auctionable(1), "NoAuction blocks the AH sell picker");
@@ -67,7 +74,7 @@ mod tests {
     #[test]
     fn simple_bed_is_freely_deliverable() {
         // item 2: @FLAG_MYSTERY_BOX | @FLAG_INSCRIBABLE.
-        assert_eq!(lookup(2), 0x4 | 0x20);
+        assert_eq!(lookup(2), MYSTERY_BOX | INSCRIBABLE);
         assert!(deliverable(2));
         assert!(!account_bound(2));
     }

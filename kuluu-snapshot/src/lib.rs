@@ -60,6 +60,9 @@ pub const PROTOCOL_VERSION: u32 = 25;
 /// cannot drift into a countdown nothing has room to draw.
 pub const MAX_STATUS_TIMER_SECS: u32 = 100 * 3600;
 
+/// vendor/server/src/map/entities/baseentity.h NAMEVIS VIS_HIDE_NAME
+pub const NAMEVIS_HIDE_NAME: u8 = 0x08;
+
 /// The one clock for `ability_recasts` math: local wall-clock Unix seconds.
 /// The producer stamps expiries with it and every gate/display computes
 /// remaining time against it — reading a different clock (e.g. the
@@ -395,7 +398,7 @@ impl Entity {
     /// defines only 0x01/0x08/0x80, so the other bits are render-phase flags,
     /// not name suppression. Suppresses the nameplate only — never targeting.
     pub fn name_hidden(&self) -> bool {
-        self.name_vis.is_some_and(|v| v & 0x08 != 0)
+        self.name_vis.is_some_and(|v| v & NAMEVIS_HIDE_NAME != 0)
     }
 
     /// LSB STATUS_TYPE::INVISIBLE: the server hides the model entirely —

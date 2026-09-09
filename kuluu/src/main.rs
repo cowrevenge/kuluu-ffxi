@@ -313,7 +313,8 @@ async fn run_command_async(args: Args, auth: auth_client::AuthClient) -> Result<
                             })?;
                         let mut key3 = [0u8; 20];
                         for (i, b) in key3.iter_mut().enumerate() {
-                            *b = ((i as u8).wrapping_mul(0x37)) ^ 0x5a;
+                            *b = ((i as u8).wrapping_mul(kuluu::launcher::KEY3_MUL))
+                                ^ kuluu::launcher::KEY3_XOR;
                         }
                         let handoff = handle
                             .select(slot.char_id, &slot.name, key3)

@@ -165,7 +165,7 @@ fn find_weat_type_exact<'a>(
     want: WeatherTypeId,
 ) -> Option<&'a ChunkNode<'a>> {
     for child in &node.children {
-        if child.chunk.kind != 0x01 {
+        if child.chunk.kind != ChunkKind::Rmp as u8 {
             continue;
         }
         if child.chunk.name == *b"weat" {

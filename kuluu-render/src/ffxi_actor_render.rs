@@ -618,6 +618,7 @@ fn default_pc_equipment(race: u8) -> Vec<u32> {
 // research/XIClient/src/XIClient/source/World/Actor/SkeletalMeshActor.cpp SkeletalMeshActor::GetUpperBodyDatIndex
 // and :3165 — the two companion motion DATs sit at fixed offsets from the race
 // skeleton base, indexed by a CIB byte.
+const CIB_MOTION_INDEX_NONE: u8 = 0xFF;
 const UPPER_BODY_MOTION_OFFSET: u32 = 1;
 const WAIST_MOTION_OFFSET: u32 = 2;
 // `GetWaistDatIndex` floors waist_type at 1 before using it (:3134-3136), so an
@@ -762,7 +763,7 @@ pub fn load_pc(
         .unwrap_or(0);
     let mut battle_dirs = Vec::new();
     if let Some(base) = combat_stance::motion_dat_for_skel(skel_file_id) {
-        if weapon_anim_type != 0 && weapon_anim_type != 0xFF {
+        if weapon_anim_type != 0 && weapon_anim_type != CIB_MOTION_INDEX_NONE {
             if let Some(dir) = read_dat(&root, base + weapon_anim_type as u32)
                 .map(ResourceDir::from_bytes)
                 .filter(|d| {

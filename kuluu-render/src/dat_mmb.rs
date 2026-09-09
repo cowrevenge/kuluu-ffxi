@@ -914,7 +914,7 @@ fn submesh_alpha_mode(zone_mesh_name: &str, blending: u16, has_texture: bool) ->
         (AlphaMode::Opaque, 0.0)
     } else if zone_mesh_name.starts_with('_') {
         (AlphaMode::Mask(0.375), 0.375)
-    } else if (blending & 0x8000) != 0 {
+    } else if mmb::MmbRenderState::from_blending(blending).blend_enabled {
         (AlphaMode::Blend, 0.0)
     } else {
         (AlphaMode::Opaque, 0.0)

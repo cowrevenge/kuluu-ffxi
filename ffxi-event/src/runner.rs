@@ -434,10 +434,12 @@ mod tests {
     /// header layout ([`StringDat::parse`] validating it pins the format —
     /// magic = 0x1000_0000 + data_len, offsets XOR 0x8080_8080).
     fn empty_strings() -> StringDat {
+        const DMSG_MAGIC_BASE: u32 = 0x1000_0000;
+        const DMSG_OFFSET_XOR: u32 = 0x8080_8080;
         let data_len = 4u32;
         let mut buf = Vec::new();
-        buf.extend_from_slice(&(0x1000_0000u32 + data_len).to_le_bytes());
-        buf.extend_from_slice(&(4u32 ^ 0x8080_8080).to_le_bytes());
+        buf.extend_from_slice(&(DMSG_MAGIC_BASE + data_len).to_le_bytes());
+        buf.extend_from_slice(&(4u32 ^ DMSG_OFFSET_XOR).to_le_bytes());
         StringDat::parse(&buf).expect("synthetic DialogTable")
     }
 

@@ -1017,7 +1017,14 @@ mod tests {
     #[test]
     fn mount_actor_id_is_reversible_and_disjoint_from_server_ids() {
         // Largest unique_no LSB can build: (4<<28) | (zone<<12) | targid.
-        let max_server_id = (4u32 << 28) | (0xFFFF << 12) | 0xFFF;
+        const SERVER_ID_TYPE_SHIFT: u32 = 28;
+        const SERVER_ID_ZONE_SHIFT: u32 = 12;
+        const SERVER_ID_MAX_TYPE: u32 = 4;
+        const SERVER_ID_MAX_ZONE: u32 = 0xFFFF;
+        const SERVER_ID_MAX_TARGID: u32 = 0xFFF;
+        let max_server_id = (SERVER_ID_MAX_TYPE << SERVER_ID_TYPE_SHIFT)
+            | (SERVER_ID_MAX_ZONE << SERVER_ID_ZONE_SHIFT)
+            | SERVER_ID_MAX_TARGID;
         assert_eq!(max_server_id & MOUNT_ACTOR_ID_BIT, 0);
         assert_eq!(mount_actor_rider(max_server_id), None);
 

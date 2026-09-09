@@ -731,6 +731,8 @@ async fn read_resource(
 }
 
 const SCENE_ENTITIES_CAP: usize = 30;
+// vendor/server/src/map/entities/baseentity.h UPDATETYPE UPDATE_NAME
+const SEND_FLAG_NAME: u8 = 0x08;
 
 fn entities_view(state: &SessionState) -> serde_json::Value {
     let self_pos_p = state.self_position().unwrap_or_default();
@@ -788,7 +790,7 @@ fn name_misses_view(state: &SessionState) -> serde_json::Value {
                 "unique_no": format!("0x{:08x}", m.unique_no),
                 "act_index": format!("0x{:04x}", m.act_index),
                 "send_flag": format!("0x{:02x}", m.send_flag),
-                "name_bit_set": m.send_flag & 0x08 != 0,
+                "name_bit_set": m.send_flag & SEND_FLAG_NAME != 0,
                 "body_len": m.body_len,
                 "body_hex": m.body_hex,
                 "miss_kind": m.miss_kind,

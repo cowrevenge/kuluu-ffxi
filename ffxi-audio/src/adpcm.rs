@@ -3,6 +3,8 @@ use crate::{AudioError, Result};
 
 const FILTER0: [i32; 5] = [0x0000, 0x00F0, 0x01CC, 0x0188, 0x01E8];
 const FILTER1: [i32; 5] = [0x0000, 0x0000, -0x00D0, -0x00DC, -0x00F0];
+const NIBBLE_MASK: u8 = 0x0F;
+const MAX_SHIFT: i32 = 0x0C;
 
 #[derive(Debug, Clone, Default)]
 pub struct ChannelState {
@@ -25,7 +27,7 @@ pub fn decode_block_into(
         });
     }
     let hdr = block[0];
-    let scale = 0x0Ci32 - (hdr & 0x0F) as i32;
+    let scale = MAX_SHIFT - (hdr & NIBBLE_MASK) as i32;
     let filter_index = (hdr >> 4) as usize;
     if filter_index >= 5 {
         return Ok(());
@@ -36,7 +38,7 @@ pub fn decode_block_into(
     for sample_i in 0..half {
         let sample_byte = block[1 + sample_i];
         for nibble in 0..2 {
-            let mut value = ((sample_byte >> (4 * nibble)) & 0x0F) as i32;
+            let mut value = ((sample_byte >> (4 * nibble)) & NIBBLE_MASK) as i32;
             if value >= 8 {
                 value -= 16;
             }

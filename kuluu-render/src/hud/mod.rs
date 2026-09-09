@@ -7,6 +7,8 @@ pub mod chat_input;
 pub mod chat_panel;
 pub mod check_view;
 pub mod compass;
+#[cfg(feature = "enhanced-death-countdown")]
+pub mod death_countdown;
 pub mod death_prompt;
 pub mod delivery;
 pub mod diagnostics;
@@ -404,6 +406,8 @@ impl Plugin for HudPlugin {
         app.add_systems(Update, status_ribbon::tooltip::update_buff_tooltip);
         #[cfg(feature = "enhanced-cast-bar")]
         app.add_systems(Update, cast_bar::update_cast_bar);
+        #[cfg(feature = "enhanced-death-countdown")]
+        app.add_systems(Update, death_countdown::update_death_countdown_system);
 
         app.add_systems(Update, chat_panel::chat_tab_click_system);
         app.add_systems(Update, chat_panel::chat_auto_switch_click_system);

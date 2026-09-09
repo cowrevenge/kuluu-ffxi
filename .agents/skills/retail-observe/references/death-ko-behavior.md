@@ -16,6 +16,15 @@ record**; open work is in beads.
   a live run to settle.)
 - Retail shows the **homepoint menu**, not a visible numeric KO clock. A numeric
   countdown is therefore an Enhanced-flavored addition unless proven otherwise.
+  **Settled 2026-09-08 (kuluu-8t5h): Enhanced.** The retail binary keeps the
+  deadline as zone state and never formats it. `GC_ZONE::field_40D6C` is written
+  by exactly two packet handlers — 0x00A (`Payload.field_A4 / 60 +
+  ntGameTimeGet()`) and 0x037 (`gameTime + dead_counter1 / 60`, or `dead_counter2`
+  when that is already in the future) — and read by exactly one site, the zone-in
+  ResState branch in `GameManager.cpp`; no text/HUD reader exists
+  (research/XIClient, grep `field_40D6C`). Kuluu's "Home Point in M:SS" line now
+  lives behind the `enhanced-death-countdown` cargo feature, off in default and
+  release builds.
 - Music changes on the homepoint warp; the death-music slot must not survive it.
 - The faithful server signal for the dead pose is `animation == ANIMATION_DEATH (3)`.
 
@@ -32,7 +41,13 @@ record**; open work is in beads.
 - The server only re-sends `0x037` on status changes, so a displayed countdown has
   to tick locally between packets and re-anchor on each fresh value.
 - `0x00A LOGIN` carries a `DeadCounter` at body offset **0xA0** with the same
-  encoding — relevant only when zoning in while still KO'd.
+  encoding — relevant only when zoning in while still KO'd. Decoded as of
+  kuluu-8t5h (`ffxi-proto` `ServerLogin::dead_counter`), gated on the same KO
+  sentinel: `PosHead.HpMax` is `GetHPP()`, so `hpp == 0` works there too. Retail
+  agrees on the offset — its `GP_SERV_LOGIN.field_A4` (the struct's names run +4
+  ahead of the payload offsets, pinned by
+  `static_assert(offsetof(GP_SERV_LOGIN, field_A8) == 0xA4)`) is the u32 it
+  divides by 60.
 
 Offsets/formula confirmed against `vendor/server/.../char_status.cpp`,
 `charentity.cpp::GetTimeUntilDeathHomepoint`, `ai/states/death_state.cpp`.

@@ -38,6 +38,14 @@ enhanced-cast-bar = []
 # light either, and the Debug -> Retail+ row does not exist.
 enhanced-mob-hp-under = []
 
+# Enhanced (non-retail) numeric KO countdown: the "Home Point in M:SS" line on
+# the death prompt. Retail surfaces the home-point menu and no visible clock —
+# its decompiled 0x00A/0x037 handlers keep the server's death deadline as zone
+# state only (research/XIClient .../Game/State/GC_ZONE.h field_40D6C), with no
+# reader that formats it — so the readout is an addon-style addition.
+# .agents/skills/retail-observe/references/death-ko-behavior.md
+enhanced-death-countdown = []
+
 # Enhanced (non-retail) party-frame Job column: L1 rows gain a job-icon column.
 # Retail's party frame shows no jobs; without this feature a persisted
 # `job_display` can never light it, and the Debug -> Retail+ row does not exist.

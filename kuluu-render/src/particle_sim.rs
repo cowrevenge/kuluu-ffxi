@@ -3084,7 +3084,7 @@ mod tests {
             let mut def = sheet_def();
             def.mesh_id = SMOKE_SHEET_ID;
             let mut images = Assets::<Image>::default();
-            assert!(resolve_mesh(&assets, &def, &mut images)
+            assert!(resolve_mesh(&assets, &def, &mut images, false)
                 .expect("smok sheet resolves")
                 .2
                 .is_some());

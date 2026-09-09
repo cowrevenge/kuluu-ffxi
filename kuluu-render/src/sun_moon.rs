@@ -654,6 +654,14 @@ pub fn sun_moon_system(
     // replaced by ONE static diffuse light (direction from the moon-color bytes,
     // color from the sun diffuse) and cascade shadow-mapping has no retail
     // equivalent inside — the sun must not reach through walls.
+    //
+    // These two Bevy DirectionalLights stay on the ZONE record even though the
+    // published terrain lighting below follows the player's area: they drive the
+    // shadow cascade (a zone-wide directional whose retail counterpart is not the
+    // per-block palette at all) and the no-record fallback in
+    // ffxi_zone_material::update_zone_material_lighting, which the FFXI materials
+    // reach only when the zone ships no 0x2F records — and then there is no area
+    // record either.
     let (sun_color, sun_lux, sun_to_dir) = match dat {
         Some(rec) if rec.indoors => {
             let d = rec.sunlight_diffuse_entity;
@@ -758,11 +766,13 @@ pub fn sun_moon_system(
     // model light cannot express.
     let sun_up = sky.sun_altitude > 0.0;
     let moon_up = sky.moon_altitude > 0.0;
+    let zone_land = dat.map(|rec| landscape_lighting(&rec, sun_dir, moon_dir, sun_up, moon_up));
     let land = render_cfg
         .zone_weather
         .area_current
-        .or(dat)
-        .map(|rec| landscape_lighting(&rec, sun_dir, moon_dir, sun_up, moon_up));
+        .map(|rec| landscape_lighting(&rec, sun_dir, moon_dir, sun_up, moon_up))
+        .or(zone_land);
+    let zone_sun_k = zone_land.map_or(0.0, |z| z.sun_k);
 
     if let Some((rec, land)) = dat.zip(land).filter(|(r, _)| r.indoors) {
         // research/xim EnvironmentSection.kt:139-149: the model block collapses to one
@@ -804,6 +814,7 @@ pub fn sun_moon_system(
             moon_color: land.moon_color,
             moon_k: land.moon_k,
             ambient_landscape: land.ambient,
+            zone_sun_k,
         };
     } else if let Some((rec, land)) = dat.zip(land) {
         let (e_sun_hue, e_sun_k) = diffuse_to_light([
@@ -850,6 +861,7 @@ pub fn sun_moon_system(
             moon_color: land.moon_color,
             moon_k: land.moon_k,
             ambient_landscape: land.ambient,
+            zone_sun_k,
         };
     } else {
         render_cfg.zone_lighting.valid = false;
@@ -1047,6 +1059,11 @@ mod tests {
         }
     }
 
+    // The outdoor terrain lights are horizon-gated, so every test that asserts on
+    // them anchors the clock instead of letting `VanaClock::default()` read the
+    // wall clock.
+    const NOON_VANA_HOUR: f32 = 12.0;
+
     fn terrain_rec(sun: [f32; 4], moon: [f32; 4], ambient: [f32; 4]) -> WeatherRecord {
         WeatherRecord {
             sunlight_diffuse_landscape: sun,
@@ -1137,7 +1154,9 @@ mod tests {
             .init_asset::<crate::moon_material::MoonMaterial>()
             .add_message::<crate::snapshot::ToastEvent>()
             .init_resource::<VanaSky>()
-            .init_resource::<crate::vana_time::VanaClock>()
+            .insert_resource(crate::vana_time::VanaClock::anchored_at_hour(
+                NOON_VANA_HOUR,
+            ))
             .init_resource::<crate::graphics_settings::GraphicsSettings>()
             .init_resource::<crate::moon_material::MoonSpriteFrames>()
             .init_resource::<crate::moon_material::CelestialColorTables>()
@@ -1199,6 +1218,61 @@ mod tests {
         );
         assert_eq!(area_lit.model_color, zone_lit.model_color);
         assert_eq!(area_lit.model_k, zone_lit.model_k);
+        assert_eq!(
+            area_lit.zone_sun_k, zone_lit.zone_sun_k,
+            "the whole-zone lamp gate must stay on the zone record"
+        );
+    }
+
+    // `lamp_lit_factor` treats a black daytime sun diffuse as "covered zone, lamps
+    // burn all day" and switches EVERY Generator light in the zone together, so it
+    // reads `zone_sun_k` rather than the area-resolved `sun_k`; standing in a
+    // sunless interior area must not light the lamps three streets away
+    // (zone_point_lights::tests::lamps_stay_out_when_only_the_players_area_is_sunless
+    // pins the consumer).
+    #[test]
+    fn zone_sun_k_stays_on_the_zone_record_inside_a_sunless_area() {
+        const ZONE_SUN: [f32; 4] = [0.9, 0.88, 0.8, 1.0];
+        const SUNLESS: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
+
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, AssetPlugin::default()))
+            .init_asset::<StandardMaterial>()
+            .init_asset::<crate::moon_material::MoonMaterial>()
+            .add_message::<crate::snapshot::ToastEvent>()
+            .init_resource::<VanaSky>()
+            .insert_resource(crate::vana_time::VanaClock::anchored_at_hour(
+                NOON_VANA_HOUR,
+            ))
+            .init_resource::<crate::graphics_settings::GraphicsSettings>()
+            .init_resource::<crate::moon_material::MoonSpriteFrames>()
+            .init_resource::<crate::moon_material::CelestialColorTables>()
+            .init_resource::<crate::weather::ZoneWeather>()
+            .init_resource::<crate::weather::ZoneDirectionalLighting>()
+            .init_resource::<DatCelestials>()
+            .add_systems(Update, sun_moon_system);
+
+        let zone = terrain_rec(ZONE_SUN, [0.2, 0.2, 0.4, 1.0], [0.7; 4]);
+        let mut area = zone;
+        area.sunlight_diffuse_landscape = SUNLESS;
+        {
+            let mut weather = app
+                .world_mut()
+                .resource_mut::<crate::weather::ZoneWeather>();
+            weather.current = Some(zone);
+            weather.area_current = Some(area);
+        }
+        app.update();
+
+        let lit = *app
+            .world()
+            .resource::<crate::weather::ZoneDirectionalLighting>();
+        assert_eq!(lit.sun_k, 0.0, "terrain sun follows the sunless area");
+        assert!(
+            (lit.zone_sun_k - ZONE_SUN[0]).abs() < 1e-6,
+            "the whole-zone lamp gate must still see the zone's daylight sun: {}",
+            lit.zone_sun_k
+        );
     }
 
     #[test]

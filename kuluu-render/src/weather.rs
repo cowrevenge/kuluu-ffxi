@@ -183,7 +183,8 @@ pub struct ZoneDirectionalLighting {
     pub model_k: f32,
     pub ambient_entity: Vec3,
 
-    // Terrain block feeds the zone material's sun(dir0)+moon(dir1) slots.
+    // Terrain block feeds the zone material's sun(dir0)+moon(dir1) slots, resolved
+    // from the area the player stands in (ZoneRenderer.cpp:1133-1149).
     pub sun_dir: Vec3,
     pub sun_color: Vec3,
     pub sun_k: f32,
@@ -191,6 +192,13 @@ pub struct ZoneDirectionalLighting {
     pub moon_color: Vec3,
     pub moon_k: f32,
     pub ambient_landscape: Vec3,
+
+    /// The ZONE record's landscape sun brightness, held apart from `sun_k` for
+    /// consumers whose decision is whole-zone rather than per-block: the lamp
+    /// day/night gate ([`crate::zone_point_lights::lamp_lit_factor`]) lights every
+    /// Generator light in the zone at once, so it must not flip because the player
+    /// stepped into one dark area.
+    pub zone_sun_k: f32,
 }
 
 pub struct WeatherPlugin;
@@ -296,12 +304,16 @@ pub fn resolve_zone_area(
     }
     let label = crate::dat_mzb::area_id_label(&area);
     if area == ZONE_WIDE_AREA || zone_weather.sets.by_area.contains_key(&area) {
-        debug!(area = label, "zone area changed; distance fog follows it");
+        debug!(
+            area = label,
+            "zone area changed; distance fog, terrain ambient and terrain diffuse lights follow it"
+        );
     } else {
         info!(
             area = label,
             "placements name an area the zone DAT ships no environment for; \
-             distance fog stays on the zone-wide records"
+             distance fog, terrain ambient and terrain diffuse lights stay on the \
+             zone-wide records"
         );
     }
     zone_weather.area = area;
@@ -855,12 +867,17 @@ mod tests {
         const AREA_AMBIENT: [f32; 4] = [0.14, 0.11, 0.19, 1.0];
         const ZONE_DIFFUSE_MUL: f32 = 1.5;
         const AREA_DIFFUSE_MUL: f32 = 0.4;
+        // Pinned so the daylight-driven fog terms cannot make the run wall-clock
+        // dependent.
+        const NOON_VANA_HOUR: f32 = 12.0;
 
         let mut app = App::new();
         app.init_resource::<ZoneWeather>()
             .init_resource::<crate::weather_fx::ActiveWeatherModifier>()
             .init_resource::<GlobalAmbientLight>()
-            .init_resource::<crate::vana_time::VanaClock>()
+            .insert_resource(crate::vana_time::VanaClock::anchored_at_hour(
+                NOON_VANA_HOUR,
+            ))
             .init_resource::<GraphicsSettings>()
             .init_resource::<crate::hud::HudPanels>()
             .init_resource::<ClearColor>()

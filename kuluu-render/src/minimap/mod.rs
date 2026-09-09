@@ -553,8 +553,9 @@ impl MapImagePlacement {
 
 /// The persisted [`MinimapRadar`] mode owns the widget's open/closed state and
 /// the marker categories, but only when it *changes* (startup included): a
-/// later `/minimap` toggle or legend edit is the player's own override and
-/// must survive every unrelated graphics-settings write (kuluu-7cqw).
+/// later `/minimap` toggle is the player's own override and must survive every
+/// unrelated graphics-settings write (kuluu-7cqw). `MarkerFilters` has no other
+/// writer yet, so this is its sole owner until a per-category UI exists.
 pub fn apply_minimap_radar_setting(
     settings: Res<GraphicsSettings>,
     mut applied: Local<Option<MinimapRadar>>,
@@ -853,7 +854,7 @@ mod tests {
             !world
                 .resource::<overlay::MarkerFilters>()
                 .is_visible(overlay::MarkerCategory::Mob),
-            "nor undo a legend filter"
+            "nor clobber the category bitset"
         );
 
         world.resource_mut::<GraphicsSettings>().minimap_radar = MinimapRadar::Vanilla;

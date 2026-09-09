@@ -157,8 +157,8 @@ pub fn spawn_bottom_left_stack(
                     crate::minimap::spawn_minimap_as_child(col, &mut images);
 
                     // Sole CompassLabel spawn on every target: update_compass
-                    // and update_compass_track_pointer resolve it with
-                    // single_mut(), which a second chip would break.
+                    // resolves it with single_mut(), which a second chip would
+                    // break.
                     compass::spawn_compass_as_child(col);
 
                     col.spawn(Node {

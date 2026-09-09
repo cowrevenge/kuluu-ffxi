@@ -294,14 +294,16 @@ pub struct CelestialColorTables {
 }
 
 // Scoped to the generator that also carries MoonPhaseSpriteSheetUpdater (0x45) -- the moon
-// sprite itself. The lunar halo `kasa` precedes it in the chunk order of every environment DAT
-// and carries its own, dimmer pair (file 201 f_ro/weat/fine/moon/kasa dow[6]=(0.50,0.50,0.50)
-// against the moon's (0.70,0.70,0.70)), so a first-match scrape tints the disc with the halo's
-// table. The walk is flat and weather-blind, unlike the weather-scoped
-// kuluu-render::celestial_particles::collect_celestial_defs: every DAT that ships more than one
-// weather's moon generator repeats byte-identical 0x4E/0x4F tables across them (survey of all
-// resolvable ids 1..4000, kuluu-xxqy; pinned by real_dat_moon_tables_do_not_vary_by_weather),
-// so the first 0x45 generator in file order carries the active weather's tables too.
+// sprite itself. In 164 of the 181 shipped DATs that carry these tables a generator without
+// 0x45 precedes the moon's, and none of the 164 repeats the moon's values: file 201's lunar
+// halo f_ro/weat/fine/moon/kasa has dow[6]=(0.50,0.50,0.50) against the moon's
+// (0.70,0.70,0.70), so a first-match scrape tints the disc with the halo's dimmer table.
+// The walk is flat and weather-blind, unlike the weather-scoped
+// kuluu-render::celestial_particles::collect_celestial_defs: of the 143 DATs shipping more
+// than one weather's moon generator, none varies its 0x4E/0x4F tables across weathers (survey
+// of all resolvable ids 1..4000, kuluu-xxqy; pinned by
+// real_dat_moon_tables_do_not_vary_by_weather), so the first 0x45 generator in file order
+// carries the active weather's tables too.
 pub fn extract_celestial_color_tables(dat_bytes: &[u8]) -> Option<CelestialColorTables> {
     for c in walk(dat_bytes).filter_map(Result::ok) {
         if ChunkKind::from_u8(c.kind) != Some(ChunkKind::Generator) {

@@ -161,6 +161,14 @@ pub const VERTEX_ALPHA_DIVISOR: f32 = VERTEX_COLOR_DIVISOR / 2.0;
 /// generated mesh that wants to defer entirely to its texture/tint must use this value.
 pub const VERTEX_COLOR_NEUTRAL_BYTE: u8 = 128;
 
+// The MMB vertex diffuse is a D3DCOLOR, i.e. ARGB packed little-endian, so the file bytes run
+// B,G,R,A (research/XIClient/src/XIClient/include/Rendering/Color/ARGBByte.h). `crate::d3m`
+// unpacks the identical record that way, and xim walks this same 36-byte vertex with
+// `nextBGRA` (research/xim ParticleMeshSection.kt:69, WeightedMeshSection.kt:157).
+fn d3dcolor_rgba(b: &[u8], off: usize) -> [u8; 4] {
+    [b[off + 2], b[off + 1], b[off], b[off + 3]]
+}
+
 pub fn vertex_color_to_linear(rgba: [u8; 4]) -> [f32; 4] {
     [
         rgba[0] as f32 / VERTEX_COLOR_DIVISOR,
@@ -304,12 +312,7 @@ impl<'a> MmbSubRecord<'a> {
                 f32::from_le_bytes(self.body[off + 16..off + 20].try_into().ok()?),
                 f32::from_le_bytes(self.body[off + 20..off + 24].try_into().ok()?),
             ];
-            let rgba = [
-                self.body[off + 24],
-                self.body[off + 25],
-                self.body[off + 26],
-                self.body[off + 27],
-            ];
+            let rgba = d3dcolor_rgba(self.body, off + 24);
             let uv = [
                 f32::from_le_bytes(self.body[off + 28..off + 32].try_into().ok()?),
                 f32::from_le_bytes(self.body[off + 32..off + 36].try_into().ok()?),
@@ -627,12 +630,7 @@ pub fn parse_models(decrypted: &[u8]) -> Vec<MmbModel> {
                     ]),
                 ];
                 let color_base = normal_base + 12;
-                let rgba = [
-                    decrypted[color_base],
-                    decrypted[color_base + 1],
-                    decrypted[color_base + 2],
-                    decrypted[color_base + 3],
-                ];
+                let rgba = d3dcolor_rgba(decrypted, color_base);
                 let uv_base = color_base + 4;
                 let uv = [
                     f32::from_le_bytes([
@@ -1013,6 +1011,121 @@ mod tests {
             vertex_stride(CONFIG_VERTEX_BLEND),
             VERTEX_STRIDE_VERTEX_BLEND
         );
+    }
+
+    // An authored D3DCOLOR lands in the file as B,G,R,A, and every consumer of `MmbVertex::rgba`
+    // indexes it as (r,g,b,a) -- `vertex_color_to_linear`, and through it kuluu-render's
+    // zone/cloud meshes. The fixture is deliberately asymmetric in every channel so a swapped
+    // pair cannot pass.
+    const AUTHORED_ARGB: u32 = 0x6040_80C0;
+    const EXPECTED_RGBA: [u8; 4] = [0x40, 0x80, 0xC0, 0x60];
+
+    fn plain_vertex(pos: [f32; 3], argb: u32, uv: [f32; 2]) -> Vec<u8> {
+        let mut v = Vec::with_capacity(VERTEX_STRIDE_PLAIN);
+        for c in pos {
+            v.extend_from_slice(&c.to_le_bytes());
+        }
+        for c in [0.0f32, 1.0, 0.0] {
+            v.extend_from_slice(&c.to_le_bytes());
+        }
+        v.extend_from_slice(&argb.to_le_bytes());
+        for c in uv {
+            v.extend_from_slice(&c.to_le_bytes());
+        }
+        assert_eq!(v.len(), VERTEX_STRIDE_PLAIN);
+        v
+    }
+
+    #[test]
+    fn sub_record_vertex_colour_unpacks_the_d3dcolor_word_as_rgba() {
+        let body = plain_vertex([1.0, 2.0, 3.0], AUTHORED_ARGB, [0.25, 0.75]);
+        let rec = MmbSubRecord {
+            offset: 0,
+            tag: b"mmb\0\0\0\0\0",
+            variant_name: b"tam3    ",
+            count: 1,
+            blending: 0,
+            body: &body,
+        };
+
+        let v = rec.parse_vertices().expect("one plain-stride vertex");
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0].pos, [1.0, 2.0, 3.0]);
+        assert_eq!(v[0].uv, [0.25, 0.75]);
+        assert_eq!(v[0].rgba, EXPECTED_RGBA);
+    }
+
+    // SMMB with one piece holding one model of three plain-stride vertices and a 3-index strip.
+    fn smmb_one_triangle(argb: u32) -> Vec<u8> {
+        const HEAD: usize = 16;
+        const PIECE_OFF: usize = 64;
+        const NUM_VERTS: u16 = 3;
+        let mut b = vec![0u8; PIECE_OFF];
+        b[0..4].copy_from_slice(b"SMMB");
+        b[HEAD + 16..HEAD + 20].copy_from_slice(&1u32.to_le_bytes());
+        b[HEAD + 44..HEAD + 48].copy_from_slice(&(PIECE_OFF as u32).to_le_bytes());
+
+        b.extend_from_slice(&1u32.to_le_bytes());
+        b.extend_from_slice(&[0u8; 28]);
+
+        b.extend_from_slice(&[0u8; 8]);
+        b.extend_from_slice(b"stone   ");
+        b.extend_from_slice(&NUM_VERTS.to_le_bytes());
+        b.extend_from_slice(&0u16.to_le_bytes());
+        for i in 0..NUM_VERTS {
+            b.extend(plain_vertex([i as f32, 0.0, 0.0], argb, [0.0, 0.0]));
+        }
+        b.extend_from_slice(&NUM_VERTS.to_le_bytes());
+        b.extend_from_slice(&[0u8; 2]);
+        for i in 0..NUM_VERTS {
+            b.extend_from_slice(&i.to_le_bytes());
+        }
+        b.extend_from_slice(&[0u8; 2]);
+        b
+    }
+
+    #[test]
+    fn model_vertex_colour_unpacks_the_d3dcolor_word_as_rgba() {
+        let models = parse_models(&smmb_one_triangle(AUTHORED_ARGB));
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].vertices.len(), 3);
+        for v in &models[0].vertices {
+            assert_eq!(v.rgba, EXPECTED_RGBA);
+        }
+    }
+
+    // Cross-parser oracle: d3m.rs already unpacks the identical 36-byte
+    // pos/normal/D3DCOLOR/uv record, so the two decoders must agree channel for channel on the
+    // same four file bytes.
+    #[test]
+    fn mmb_and_d3m_agree_on_the_same_d3dcolor_bytes() {
+        const D3M_VERTS_PER_TRI: usize = 3;
+        let vertex = plain_vertex([0.0, 0.0, 0.0], AUTHORED_ARGB, [0.0, 0.0]);
+        let mut d3m_body = vec![0u8; crate::d3m::D3M_VERTEX_OFFSET];
+        d3m_body[0..4].copy_from_slice(&crate::d3m::D3M_MAGIC.to_le_bytes());
+        d3m_body[0x06..0x08].copy_from_slice(&1u16.to_le_bytes());
+        for _ in 0..D3M_VERTS_PER_TRI {
+            d3m_body.extend_from_slice(&vertex);
+        }
+        let d3m = crate::d3m::D3m::parse(*b"d3m0", &d3m_body).unwrap();
+
+        let rec = MmbSubRecord {
+            offset: 0,
+            tag: b"mmb\0\0\0\0\0",
+            variant_name: b"tam3    ",
+            count: 1,
+            blending: 0,
+            body: &vertex,
+        };
+        let mmb = rec.parse_vertices().unwrap();
+
+        for ch in 0..4 {
+            assert_eq!(
+                mmb[0].rgba[ch] as f32 / crate::d3m::VERTEX_COLOR_DIVISOR,
+                d3m.vertices[0].color[ch],
+                "channel {ch}",
+            );
+        }
     }
 
     #[test]

@@ -207,9 +207,9 @@ impl ServerLogin {
 
     /// `DeadCounter`, between `PlayTime` and `MyroomSubMapNumber` in
     /// vendor/server/src/map/packets/s2c/0x00a_login.h:115-121. The chain from
-    /// `LoginState` @0x7C runs name[16], certificate[2], unknown9C, ZoneSubNo,
-    /// PlayTime, DeadCounter — landing on
-    /// [`ServerLoginMyroom::SUB_MAP_NUMBER_OFFSET`], which the const assert
+    /// `LoginState` @0x7C runs `name[16]`, `certificate[2]`, `unknown9C`,
+    /// `ZoneSubNo`, `PlayTime`, `DeadCounter` — landing on
+    /// `ServerLoginMyroom::SUB_MAP_NUMBER_OFFSET`, which the const assert
     /// below pins. Retail's own struct agrees: `field_A4` (its names run +4
     /// ahead of the payload offsets, per
     /// `static_assert(offsetof(GP_SERV_LOGIN, field_A8) == 0xA4)`) is the u32 it
@@ -438,7 +438,7 @@ mod server_login_tests {
 
     /// The dead-counter field is only readable if the offset chain from the
     /// already-pinned LoginState is intact, so pin the chain LSB declares
-    /// (vendor/server/src/map/packets/s2c/0x00a_login.h:117-125): LoginState u32,
+    /// (vendor/server/src/map/packets/s2c/0x00a_login.h:115-122): LoginState u32,
     /// name[16], certificate[2] i32, unknown9C u16, ZoneSubNo u16, PlayTime u32,
     /// DeadCounter u32, MyroomSubMapNumber u8.
     #[test]

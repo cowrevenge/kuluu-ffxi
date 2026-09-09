@@ -26,15 +26,16 @@ const MIN_PLAUSIBLE_YALMS: f32 = 1.0;
 const MAX_PLAUSIBLE_YALMS: f32 = 1000.0;
 
 /// Smallest row count each scrape can return and still plausibly have parsed
-/// its source. Each floor is roughly half the count the pinned vendor tree
-/// yields, so LSB adding or retiring rows never trips one, while a format drift
-/// the walker silently absorbs does (kuluu-m4yk).
+/// its source; the argument is the count the pinned vendor tree yields today
+/// (kuluu-m4yk).
 mod floor {
-    pub const FISHING_ZONE_OFFSET: usize = 50;
-    pub const FISHING_MESSAGE_KIND: usize = 20;
-    pub const PACKET_NAMES_S2C: usize = 70;
-    pub const PACKET_NAMES_C2S: usize = 60;
-    pub const TCP_REQUEST_TYPE: usize = 4;
+    use lsb_scrape::scrape_floor;
+
+    pub const FISHING_ZONE_OFFSET: usize = scrape_floor(115);
+    pub const FISHING_MESSAGE_KIND: usize = scrape_floor(41);
+    pub const PACKET_NAMES_S2C: usize = scrape_floor(148);
+    pub const PACKET_NAMES_C2S: usize = scrape_floor(130);
+    pub const TCP_REQUEST_TYPE: usize = scrape_floor(8);
 }
 
 fn main() -> Result<()> {

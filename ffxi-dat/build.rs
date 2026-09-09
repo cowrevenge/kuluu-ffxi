@@ -4,6 +4,7 @@ use std::{
 };
 
 use anyhow::{bail, Context, Result};
+use lsb_scrape::check_scrape_count;
 
 const ZONE_DAT_FORMULA: Formula = Formula {
     threshold: 256,
@@ -16,6 +17,17 @@ const ZONE_SETTINGS_SQL: &str = "../vendor/server/sql/zone_settings.sql";
 const ROM_FILE_MAPPINGS_XML: &str =
     "../vendor/POLUtils/PlayOnline.FFXI.Utils.DataBrowser/ROMFileMappings.xml";
 
+/// Smallest row count each scrape can return and still plausibly have parsed
+/// its source; the argument is the count the pinned vendor tree yields today
+/// (kuluu-m4yk).
+mod floor {
+    use lsb_scrape::scrape_floor;
+
+    pub const ZONE_SETTINGS: usize = scrape_floor(299);
+    pub const MAP_ENTRY: usize = scrape_floor(569);
+    pub const DIALOG_STRING: usize = scrape_floor(280);
+}
+
 fn main() -> Result<()> {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed={ZONE_SETTINGS_SQL}");
@@ -24,9 +36,26 @@ fn main() -> Result<()> {
     let formula = ZONE_DAT_FORMULA;
     let zones = parse_zone_ids(Path::new(ZONE_SETTINGS_SQL))
         .with_context(|| format!("parsing zone-ids from {ZONE_SETTINGS_SQL}"))?;
+    check_scrape_count(
+        "zone_settings rows",
+        ZONE_SETTINGS_SQL,
+        zones.len(),
+        floor::ZONE_SETTINGS,
+    )?;
 
+    // An unreadable or wholly unrecognizable vendor/POLUtils is a deinitialized
+    // submodule, so its table degrades to empty; a subtree that walks but yields
+    // few rows is drift, and fails the build.
     let map_entries = match parse_map_table(Path::new(ROM_FILE_MAPPINGS_XML)) {
-        Ok(v) => v,
+        Ok(v) => {
+            check_scrape_count(
+                "map entries",
+                ROM_FILE_MAPPINGS_XML,
+                v.len(),
+                floor::MAP_ENTRY,
+            )?;
+            v
+        }
         Err(e) => {
             println!(
                 "cargo:warning=ffxi-dat: skipping map_dat_table.rs scrape ({e}); \
@@ -38,7 +67,15 @@ fn main() -> Result<()> {
     emit_map_table(&map_entries)?;
 
     let string_entries = match parse_string_dat_table(Path::new(ROM_FILE_MAPPINGS_XML)) {
-        Ok(v) => v,
+        Ok(v) => {
+            check_scrape_count(
+                "dialog string entries",
+                ROM_FILE_MAPPINGS_XML,
+                v.len(),
+                floor::DIALOG_STRING,
+            )?;
+            v
+        }
         Err(e) => {
             println!(
                 "cargo:warning=ffxi-dat: skipping string_dat_table.rs scrape ({e}); \
@@ -133,12 +170,6 @@ fn parse_zone_ids(path: &Path) -> Result<Vec<u16>> {
         }
         out.push(zid);
     }
-    if out.is_empty() {
-        bail!(
-            "parsed zero rows from {} — schema may have changed",
-            path.display()
-        );
-    }
     Ok(out)
 }
 
@@ -211,12 +242,6 @@ fn parse_map_table(path: &Path) -> Result<Vec<MapEntry>> {
         }
     }
 
-    if entries.is_empty() {
-        bail!(
-            "extracted zero map entries from {} — XML structure may have changed",
-            path.display()
-        );
-    }
     Ok(entries)
 }
 
@@ -254,12 +279,6 @@ fn parse_string_dat_table(path: &Path) -> Result<Vec<(u16, u32)>> {
         if entered && depth <= 0 {
             break;
         }
-    }
-    if entries.is_empty() {
-        bail!(
-            "extracted zero dialog string entries from {} — XML structure may have changed",
-            path.display()
-        );
     }
     Ok(entries)
 }

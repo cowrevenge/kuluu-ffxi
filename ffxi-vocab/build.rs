@@ -25,36 +25,40 @@ const LSB_STATUS_EFFECTS_SQL: &str = "../vendor/server/sql/status_effects.sql";
 const LSB_EMOTE_H: &str = "../vendor/server/src/map/enums/emote.h";
 
 /// Smallest row count each scrape can return and still plausibly have parsed
-/// its source. Each floor is roughly half the count the pinned vendor tree
-/// yields, so LSB adding or retiring rows never trips one, while a format drift
-/// the walker silently absorbs does (kuluu-m4yk).
+/// its source; the argument is the count the pinned vendor tree yields today
+/// (kuluu-m4yk).
 mod floor {
-    pub const MSG_BASIC: usize = 120;
-    pub const MSG_CHANNEL: usize = 6;
-    pub const MSG_AREA: usize = 3;
-    pub const MSG_ACTION_MODIFIER: usize = 1;
-    pub const MSG_SYSTEM: usize = 4;
-    pub const STATUS_EFFECT: usize = 300;
-    pub const KEY_ITEM: usize = 1500;
-    pub const JOB_NAME: usize = 11;
-    pub const SPELL: usize = 400;
-    pub const SPELL_SKILL: usize = 350;
-    pub const SPELL_VALID_TARGET: usize = 400;
-    pub const SPELL_ANIMATION: usize = 400;
-    pub const SPELL_CAST_TIME: usize = 400;
-    pub const SPELL_RECAST_TIME: usize = 400;
-    pub const ABILITY: usize = 300;
-    pub const ABILITY_VALID_TARGET: usize = 300;
-    pub const ABILITY_RECAST_ID: usize = 300;
-    pub const ABILITY_ANIMATION: usize = 300;
-    pub const TP_MOVE: usize = 1300;
-    pub const ITEM: usize = 11000;
-    pub const ITEM_FLAGS: usize = 11000;
-    pub const STATUS_EFFECT_FLAGS: usize = 300;
-    pub const EQUIP_INFO: usize = 7000;
-    pub const ITEM_USABLE: usize = 1500;
-    pub const WEAPON_SKILL: usize = 2000;
-    pub const EMOTE: usize = 25;
+    use lsb_scrape::scrape_floor;
+
+    pub const MSG_BASIC: usize = scrape_floor(243);
+    pub const MSG_CHANNEL: usize = scrape_floor(13);
+    pub const MSG_AREA: usize = scrape_floor(6);
+    /// The actionModifier table has two rows, so half of it still passes when
+    /// the walker matched only one; its full count is the only floor that
+    /// detects a partial drift.
+    pub const MSG_ACTION_MODIFIER: usize = 2;
+    pub const MSG_SYSTEM: usize = scrape_floor(9);
+    pub const STATUS_EFFECT: usize = scrape_floor(657);
+    pub const KEY_ITEM: usize = scrape_floor(3206);
+    pub const JOB_NAME: usize = scrape_floor(23);
+    pub const SPELL: usize = scrape_floor(890);
+    pub const SPELL_SKILL: usize = scrape_floor(771);
+    pub const SPELL_VALID_TARGET: usize = scrape_floor(891);
+    pub const SPELL_ANIMATION: usize = scrape_floor(891);
+    pub const SPELL_CAST_TIME: usize = scrape_floor(891);
+    pub const SPELL_RECAST_TIME: usize = scrape_floor(891);
+    pub const ABILITY: usize = scrape_floor(616);
+    pub const ABILITY_VALID_TARGET: usize = scrape_floor(616);
+    pub const ABILITY_RECAST_ID: usize = scrape_floor(616);
+    pub const ABILITY_ANIMATION: usize = scrape_floor(616);
+    pub const TP_MOVE: usize = scrape_floor(2652);
+    pub const ITEM: usize = scrape_floor(23233);
+    pub const ITEM_FLAGS: usize = scrape_floor(23187);
+    pub const STATUS_EFFECT_FLAGS: usize = scrape_floor(630);
+    pub const EQUIP_INFO: usize = scrape_floor(15378);
+    pub const ITEM_USABLE: usize = scrape_floor(3075);
+    pub const WEAPON_SKILL: usize = scrape_floor(4681);
+    pub const EMOTE: usize = scrape_floor(51);
 }
 
 fn main() -> Result<()> {

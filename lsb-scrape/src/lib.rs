@@ -430,6 +430,18 @@ fn generated_header(source_path: &str) -> String {
     )
 }
 
+/// The floor for a scrape whose source yields `pinned_count` rows in the vendor
+/// tree we pin today: half of it, so LSB adding or retiring rows never trips a
+/// floor while a format drift the walker silently absorbs does. Passing the
+/// observed count keeps the floor auditable without a build (kuluu-m4yk).
+///
+/// A table small enough that half of it is a single row needs its full count
+/// spelled out instead -- half of two rows still passes when the walker matched
+/// only one.
+pub const fn scrape_floor(pinned_count: usize) -> usize {
+    pinned_count / 2
+}
+
 /// Prints a scrape's row count on plain build-script stdout, failing the build
 /// when it lands under `floor`.
 ///
@@ -566,6 +578,13 @@ mod tests {
         );
         assert_eq!(prettify_snake_case("BLAZE_SPIKES"), "Blaze Spikes");
         assert_eq!(prettify_snake_case("mighty_strikes"), "Mighty Strikes");
+    }
+
+    #[test]
+    fn scrape_floor_is_half_the_pinned_count() {
+        assert_eq!(scrape_floor(243), 121);
+        assert_eq!(scrape_floor(8), 4);
+        assert_eq!(scrape_floor(2), 1);
     }
 
     #[test]

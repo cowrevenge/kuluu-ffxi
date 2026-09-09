@@ -3170,6 +3170,7 @@ name = "ffxi-dat"
 version = "0.6.0"
 dependencies = [
  "anyhow",
+ "lsb-scrape",
  "rayon",
  "tempfile",
  "thiserror 2.0.20",
@@ -4336,6 +4337,7 @@ dependencies = [
  "bincode",
  "glam",
  "image",
+ "lsb-scrape",
  "pathfinding",
  "serde",
  "tempfile",

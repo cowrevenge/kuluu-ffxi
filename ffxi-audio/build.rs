@@ -2,14 +2,14 @@ use std::fs;
 use std::path::PathBuf;
 
 use anyhow::Result;
-use lsb_scrape::check_scrape_count;
+use lsb_scrape::{check_scrape_count, scrape_floor};
 
 const ALTANA_TRACKS: &str = "../vendor/AltanaListener/AltanaListener/track_names.json";
 
 /// Smallest row count the scrape can return and still plausibly have parsed
-/// track_names.json -- roughly half what the pinned vendor tree yields, so
-/// AltanaListener adding or retiring tracks never trips it (kuluu-m4yk).
-const MIN_CATALOG_ENTRIES: usize = 100;
+/// track_names.json; the argument is the count the pinned vendor tree yields
+/// today (kuluu-m4yk).
+const MIN_CATALOG_ENTRIES: usize = scrape_floor(220);
 
 fn main() -> Result<()> {
     println!("cargo:rerun-if-changed={ALTANA_TRACKS}");

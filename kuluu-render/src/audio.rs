@@ -264,6 +264,50 @@ pub struct BgmPlaybackState {
     pub is_night: bool,
 }
 
+// research/XIClient/src/XIClient/source/World/Actor/ActorTelemetry.cpp:37
+// `NameColorMusicDistance` - the party-claim branch of `NameColorSet` raises
+// `GameManager::SomeMusicByte` for any party-claimed monster closer than this,
+// which is what puts battle music on before the player personally engages.
+const PARTY_CLAIM_MUSIC_RADIUS_YALMS: f32 = 45.0;
+
+// research/XIClient/src/XIClient/source/Game/GameManager.cpp:1611-1618
+// `NormalMusicPlay` - the zone slot is `play_index = gamehour < 6 || gamehour
+// >= 18`, i.e. the day track over the Vana'diel hours [6, 18) and the night
+// track everywhere else.
+const DAY_MUSIC_START_HOUR: u64 = 6;
+const DAY_MUSIC_END_HOUR: u64 = 18;
+
+fn is_night_music_hour(vana_hour: u64) -> bool {
+    !(DAY_MUSIC_START_HOUR..DAY_MUSIC_END_HOUR).contains(&vana_hour)
+}
+
+/// Retail's battle-music trigger that does not need the local player engaged:
+/// any monster whose plate draws in the party-claim colour and that sits inside
+/// [`PARTY_CLAIM_MUSIC_RADIUS_YALMS`] of the player.
+/// research/XIClient/.../World/Actor/ActorTelemetry.cpp:1717-1723.
+fn party_claim_in_music_range(snap: &kuluu_snapshot::SceneSnapshot) -> bool {
+    let Some(self_pos) = snap
+        .self_char_id
+        .and_then(|id| snap.entities.iter().find(|e| e.id == id))
+        .map(|e| e.pos)
+    else {
+        return false;
+    };
+    let ctx = crate::nameplate_color::SelfContext {
+        self_id: snap.self_char_id,
+        party: &snap.party,
+    };
+    snap.entities.iter().any(|e| {
+        let (dx, dy, dz) = (
+            e.pos.x - self_pos.x,
+            e.pos.y - self_pos.y,
+            e.pos.z - self_pos.z,
+        );
+        (dx * dx + dy * dy + dz * dz).sqrt() < PARTY_CLAIM_MUSIC_RADIUS_YALMS
+            && crate::nameplate_color::is_party_claimed(e, ctx)
+    })
+}
+
 fn self_engaged(snap: &kuluu_snapshot::SceneSnapshot) -> bool {
     let self_bt_target = snap
         .self_char_id
@@ -279,9 +323,9 @@ fn self_engaged(snap: &kuluu_snapshot::SceneSnapshot) -> bool {
 
 pub fn derive_bgm_playback_state(
     scene: Res<crate::snapshot::SceneState>,
-    sky: Res<crate::sun_moon::VanaSky>,
+    clock: Res<crate::vana_time::VanaClock>,
     mut state: ResMut<BgmPlaybackState>,
-    mut last_engage_log: Local<Option<(bool, u32, u8, bool, bool)>>,
+    mut last_engage_log: Local<Option<(bool, u32, u8, bool, bool, bool)>>,
 ) {
     const EFFECT_FISHING_IMAGERY: u16 = 235;
     const EFFECT_MOUNTED: u16 = 252;
@@ -296,6 +340,8 @@ pub fn derive_bgm_playback_state(
         Some(kuluu_snapshot::ReactorGoal::Engaged { .. })
     );
     let engaged = self_engaged(snap);
+    let party_claim_near = party_claim_in_music_range(snap);
+    let battle = engaged || party_claim_near;
     let in_party = snap.party.len() > 1;
 
     // snapshot.myroom is atomic with the MH 0x00A zone-in; the party-attr
@@ -308,28 +354,36 @@ pub fn derive_bgm_playback_state(
     let mounted = icons.contains(&EFFECT_MOUNTED);
     let fishing = icons.contains(&EFFECT_FISHING_IMAGERY);
 
-    let is_night = sky.sun_altitude < 0.0;
+    let is_night = is_night_music_hour(crate::vana_time::vana_hour(clock.earth_unix_secs_now()));
 
-    let engage_key = (engaged, self_bt_target, self_status, goal_engaged, dead);
+    let engage_key = (
+        battle,
+        self_bt_target,
+        self_status,
+        goal_engaged,
+        dead,
+        party_claim_near,
+    );
     if *last_engage_log != Some(engage_key) {
         *last_engage_log = Some(engage_key);
         info!(
             target: "audio::bgm",
             self_id = ?self_id,
             engaged_signal = engaged,
+            party_claim_near,
             self_bt_target_id = self_bt_target,
             self_status_byte = self_status,
             reactor_goal_engaged = goal_engaged,
             dead,
             death_homepoint_secs = ?snap.death_homepoint_secs,
             in_party,
-            "engage signals: battle music driven by reactor goal OR bt_target"
+            "engage signals: battle music driven by reactor goal OR bt_target OR a nearby party claim"
         );
     }
 
     *state = BgmPlaybackState {
-        engaged_solo: engaged && !in_party,
-        engaged_party: engaged && in_party,
+        engaged_solo: battle && !in_party,
+        engaged_party: battle && in_party,
         mounted,
         in_mog_house,
         dead,
@@ -1188,7 +1242,7 @@ impl Plugin for AudioPlugin {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kuluu_snapshot::ViewerEvent;
+    use kuluu_snapshot::{SceneSnapshot, ViewerEvent};
 
     #[test]
     fn default_state_picks_zone_not_combat_when_both_filled() {
@@ -1307,6 +1361,184 @@ mod tests {
         let slots = BgmSlots::default();
         let state = BgmPlaybackState::default();
         assert_eq!(resolve_audible_slot(&slots, &state), None);
+    }
+
+    const SELF_ID: u32 = 0x0100_0001;
+    const MATE_ID: u32 = 0x0100_0002;
+    const STRANGER_ID: u32 = 0x0100_0003;
+
+    fn mob_at(claim_id: u32, distance: f32) -> kuluu_snapshot::Entity {
+        use kuluu_snapshot::{CharFlags, Entity, EntityKind, Vec3};
+        Entity {
+            id: 0x0200_0001,
+            act_index: 2,
+            kind: EntityKind::Mob,
+            name: Some("Mob".into()),
+            pos: Vec3 {
+                x: distance,
+                y: 0.0,
+                z: 0.0,
+            },
+            heading: 0,
+            hp_pct: Some(100),
+            bt_target_id: 0,
+            name_vis: None,
+            face_target: 0,
+            claim_id,
+            speed: 25,
+            speed_base: 25,
+            look: None,
+            animation: 0,
+            animationsub: 0,
+            mount: None,
+            status: 0,
+            char_flags: CharFlags {
+                monster: true,
+                ..Default::default()
+            },
+            monstrosity: false,
+        }
+    }
+
+    fn player() -> kuluu_snapshot::Entity {
+        use kuluu_snapshot::EntityKind;
+        let mut e = mob_at(0, 0.0);
+        e.id = SELF_ID;
+        e.act_index = 1;
+        e.kind = EntityKind::Pc;
+        e.char_flags = kuluu_snapshot::CharFlags::default();
+        e
+    }
+
+    fn mate(id: u32) -> kuluu_snapshot::PartyMember {
+        kuluu_snapshot::PartyMember {
+            id,
+            act_index: 0,
+            name: Some("Mate".into()),
+            hp: 1,
+            mp: 0,
+            tp: 0,
+            hp_pct: 100,
+            mp_pct: 100,
+            zone_no: 0,
+            main_job: 1,
+            main_job_lv: 1,
+            sub_job: 0,
+            sub_job_lv: 0,
+            is_party_leader: false,
+            is_alliance_leader: false,
+            party_no: 0,
+            in_mog_house: false,
+        }
+    }
+
+    fn snapshot_with(
+        mob: kuluu_snapshot::Entity,
+        party: Vec<kuluu_snapshot::PartyMember>,
+    ) -> SceneSnapshot {
+        SceneSnapshot {
+            self_char_id: Some(SELF_ID),
+            entities: vec![player(), mob],
+            party,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_party_mates_claim_inside_the_music_radius_is_battle_music() {
+        let party = vec![mate(SELF_ID), mate(MATE_ID)];
+        let inside = PARTY_CLAIM_MUSIC_RADIUS_YALMS - 1.0;
+        let snap = snapshot_with(mob_at(MATE_ID, inside), party.clone());
+        assert!(!self_engaged(&snap), "the player has not engaged anything");
+        assert!(party_claim_in_music_range(&snap));
+
+        let outside = PARTY_CLAIM_MUSIC_RADIUS_YALMS;
+        let snap = snapshot_with(mob_at(MATE_ID, outside), party);
+        assert!(
+            !party_claim_in_music_range(&snap),
+            "the radius is exclusive: retail compares `< NameColorMusicDistance`"
+        );
+    }
+
+    #[test]
+    fn an_unrelated_players_claim_never_raises_battle_music() {
+        let snap = snapshot_with(mob_at(STRANGER_ID, 1.0), vec![mate(SELF_ID)]);
+        assert!(!party_claim_in_music_range(&snap));
+    }
+
+    #[test]
+    fn the_players_own_claim_inside_the_radius_is_battle_music() {
+        let snap = snapshot_with(mob_at(SELF_ID, 1.0), vec![]);
+        assert!(party_claim_in_music_range(&snap));
+    }
+
+    #[test]
+    fn a_dead_claimed_mob_stops_raising_battle_music() {
+        let mut mob = mob_at(MATE_ID, 1.0);
+        mob.hp_pct = Some(0);
+        let snap = snapshot_with(mob, vec![mate(SELF_ID), mate(MATE_ID)]);
+        assert!(
+            !party_claim_in_music_range(&snap),
+            "NameColorSet returns the dead colour before it ever reaches the claim branch"
+        );
+    }
+
+    #[test]
+    fn the_night_music_slot_is_chosen_by_vanadiel_hour() {
+        for hour in 0..24u64 {
+            // research/XIClient/.../Game/GameManager.cpp:1611-1618 selects the
+            // night slot for `gamehour < 6 || gamehour >= 18`.
+            assert_eq!(
+                is_night_music_hour(hour),
+                matches!(hour, 0..=5 | 18..=23),
+                "vana hour {hour}"
+            );
+        }
+    }
+
+    #[test]
+    fn derived_night_flag_follows_the_clock_not_the_sun_mesh() {
+        fn is_night_at(hour: f32) -> bool {
+            let mut app = App::new();
+            app.init_resource::<crate::snapshot::SceneState>()
+                .init_resource::<BgmPlaybackState>()
+                .insert_resource(crate::vana_time::VanaClock::anchored_at_hour(hour))
+                .add_systems(Update, derive_bgm_playback_state);
+            app.update();
+            app.world().resource::<BgmPlaybackState>().is_night
+        }
+        assert!(!is_night_at(6.0));
+        assert!(!is_night_at(12.0));
+        assert!(!is_night_at(17.5));
+        assert!(is_night_at(18.0));
+        assert!(is_night_at(23.0));
+        assert!(is_night_at(0.0));
+        assert!(is_night_at(5.9));
+    }
+
+    #[test]
+    fn a_nearby_party_claim_lights_the_battle_slot_without_self_engagement() {
+        let mut app = App::new();
+        app.init_resource::<crate::snapshot::SceneState>()
+            .init_resource::<BgmPlaybackState>()
+            .insert_resource(crate::vana_time::VanaClock::anchored_at_hour(12.0))
+            .add_systems(Update, derive_bgm_playback_state);
+        app.world_mut()
+            .resource_mut::<crate::snapshot::SceneState>()
+            .snapshot = snapshot_with(mob_at(MATE_ID, 1.0), vec![mate(SELF_ID), mate(MATE_ID)]);
+        app.update();
+
+        let state = *app.world().resource::<BgmPlaybackState>();
+        assert!(
+            state.engaged_party,
+            "two party members: the party battle slot"
+        );
+        assert!(!state.engaged_solo);
+
+        let mut slots = BgmSlots::default();
+        slots.tracks[0] = Some(101);
+        slots.tracks[3] = Some(99);
+        assert_eq!(resolve_audible_slot(&slots, &state), Some((3, 99)));
     }
 
     #[test]

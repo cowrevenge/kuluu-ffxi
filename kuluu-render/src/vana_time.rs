@@ -116,10 +116,16 @@ pub fn full_day_fraction(earth_unix_secs: u64) -> f32 {
     (total_v_min % VANA_MINUTES_PER_DAY) as f32 / VANA_MINUTES_PER_DAY as f32
 }
 
+// research/XIClient/src/XIClient/source/World/XiDateTime.cpp:41-45
+// ConvertEarthSecondsToVanaHour — `(seconds % EARTH_SECONDS_PER_GAME_DAY) /
+// EARTH_SECONDS_PER_GAME_HOUR`, which is this same floor division.
+pub fn vana_hour(earth_unix_secs: u64) -> u64 {
+    (vana_minutes_since_epoch(earth_unix_secs) / 60) % 24
+}
+
 pub fn format_vana_time(earth_unix_secs: u64) -> String {
-    let total_v_min = vana_minutes_since_epoch(earth_unix_secs);
-    let v_minute = total_v_min % 60;
-    let v_hour = (total_v_min / 60) % 24;
+    let v_minute = vana_minutes_since_epoch(earth_unix_secs) % 60;
+    let v_hour = vana_hour(earth_unix_secs);
     format!("{v_hour}:{v_minute:02}")
 }
 
@@ -251,6 +257,19 @@ mod tests {
         // Always strictly below 1.0.
         let late = EARTH_EPOCH_UNIX + 23 * EARTH_SECS_PER_VANA_HOUR;
         assert!(full_day_fraction(late) < 1.0);
+    }
+
+    #[test]
+    fn vana_hour_matches_the_retail_floor_division() {
+        // research/XIClient/src/XIClient/source/World/XiDateTime.cpp:41-45.
+        for game_time in [0u64, 143, 144, 3455, 3456, 100_000, 1_234_567] {
+            let retail = (game_time % EARTH_SECS_PER_VANA_DAY) / EARTH_SECS_PER_VANA_HOUR;
+            assert_eq!(
+                vana_hour(EARTH_EPOCH_UNIX + game_time),
+                retail,
+                "game_time {game_time}"
+            );
+        }
     }
 
     #[test]

@@ -376,6 +376,20 @@ fn pc_flags_are_real(kind: EntityKind) -> bool {
     matches!(kind, EntityKind::Pc)
 }
 
+/// Whether this actor's plate draws in the claimed-by-party colour - the exact
+/// decision retail hangs its battle-music flag off: `NameColorSet` raises
+/// `GameManager::SomeMusicByte` from inside the branch that paints a
+/// party- or alliance-claimed monster
+/// (research/XIClient/.../World/Actor/ActorTelemetry.cpp:1717-1723), so the
+/// door/dead early-outs above gate the music the same way they gate the colour.
+pub fn is_party_claimed(entity: &Entity, ctx: SelfContext<'_>) -> bool {
+    matches!(
+        name_color_choice(entity, ctx),
+        NameColorChoice::Row(ncol::CLAIMED_BY_PARTY)
+            | NameColorChoice::Blend(ncol::CLAIMED_BY_PARTY, ncol::CLAIMED_BY_OTHER)
+    )
+}
+
 /// The claimed-monster block of `NameColorSet`. A claim only
 /// colours something retail treats as a monster.
 fn claim_color(entity: &Entity, ctx: SelfContext<'_>) -> Option<NameColorChoice> {

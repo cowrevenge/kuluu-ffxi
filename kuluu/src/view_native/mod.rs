@@ -251,6 +251,9 @@ pub(crate) fn insert_dat_roots(
     sink.put(kuluu_render::cutscene::CutsceneFadeDatRoot(
         dat_root.clone(),
     ));
+    sink.put(kuluu_render::scheduler_runtime::ActionDatRoot(
+        dat_root.clone(),
+    ));
     // Re-arm the latched spell-DAT load so a settings-screen DAT reload doesn't
     // serve suffixes from the previous install (kuluu-08rh).
     sink.put(kuluu_render::ffxi_actor_render::SpellSuffixCache::default());
@@ -1059,6 +1062,57 @@ fn return_to_launcher_on_disconnect(
     }
     tracing::info!(?kind, "disconnect-watcher: returning AppPhase to Launcher");
     next_phase.set(AppPhase::Launcher);
+}
+
+// `insert_dat_roots` is the one place a consumer's root is wired; a consumer that is missing
+// from it silently keeps reading whatever it opened for itself (kuluu-1tr2, kuluu-051). The
+// scheduler runtime's root is the load-bearing case: without it every action/emote DAT read
+// falls back to re-opening the install per cache miss.
+#[cfg(test)]
+mod dat_root_wiring_tests {
+    use super::{insert_dat_roots, DatRootRes};
+    use bevy::prelude::*;
+    use std::sync::Arc;
+
+    #[test]
+    fn insert_dat_roots_hands_the_scheduler_runtime_the_shared_root() {
+        let mut app = App::new();
+        insert_dat_roots(&mut app, None);
+        assert!(
+            app.world()
+                .get_resource::<kuluu_render::scheduler_runtime::ActionDatRoot>()
+                .is_some(),
+            "ActionDatRoot must be wired even when there is no install"
+        );
+
+        let Some(root) = ffxi_dat::archive::open_test_install() else {
+            return;
+        };
+        let root = Arc::new(root);
+        insert_dat_roots(&mut app, Some(root.clone()));
+
+        let action_root = app
+            .world()
+            .resource::<kuluu_render::scheduler_runtime::ActionDatRoot>()
+            .0
+            .clone()
+            .expect("the wired root reaches the scheduler runtime");
+        assert!(
+            Arc::ptr_eq(&action_root, &root),
+            "the scheduler runtime must share the launcher's root, not open its own"
+        );
+
+        let shared = app
+            .world()
+            .resource::<DatRootRes>()
+            .0
+            .clone()
+            .expect("DatRootRes is wired");
+        assert!(
+            Arc::ptr_eq(&action_root, &shared),
+            "every consumer reads one install"
+        );
+    }
 }
 
 #[cfg(test)]

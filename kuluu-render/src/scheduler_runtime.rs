@@ -572,6 +572,31 @@ fn mmb_sprite_mesh(data: &[u8]) -> Option<MmbSpriteMesh> {
     })
 }
 
+// Every action/emote DAT read resolves through one shared root: `DatRoot::open` re-reads and
+// re-parses all 20 VTABLE/FTABLE files (3.3 MB on a retail install), so opening one per event or
+// per cache miss is pure repeat work. Wired by kuluu's `insert_dat_roots` like every other
+// `*DatRoot`.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Resource, Default, Clone)]
+pub struct ActionDatRoot(pub Option<Arc<ffxi_dat::DatRoot>>);
+
+// A `None` root means no host wired [`ActionDatRoot`]; opening the env root keeps that path
+// working. Only ever called from inside a task, so the fallback never costs a frame.
+#[cfg(not(target_arch = "wasm32"))]
+fn resolved_root(root: Option<Arc<ffxi_dat::DatRoot>>) -> Option<Arc<ffxi_dat::DatRoot>> {
+    root.or_else(|| ffxi_dat::DatRoot::from_env_or_default().ok().map(Arc::new))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn read_dat_bytes(root: Option<Arc<ffxi_dat::DatRoot>>, file_id: u32) -> Vec<u8> {
+    resolved_root(root)
+        .and_then(|root| {
+            let loc = root.resolve(file_id).ok()?;
+            std::fs::read(loc.path_under(&root)).ok()
+        })
+        .unwrap_or_default()
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Resource)]
 pub(crate) struct GlobalEffectDirTask(bevy::tasks::Task<(Vec<Scheduler>, ActionAssets)>);
@@ -580,17 +605,10 @@ pub(crate) struct GlobalEffectDirTask(bevy::tasks::Task<(Vec<Scheduler>, ActionA
 // thread reproduces the actor-load hitch, so it loads once off-thread and every lookup falls
 // back to the pre-global behaviour until it lands.
 #[cfg(not(target_arch = "wasm32"))]
-pub(crate) fn load_global_effect_dir(mut commands: Commands) {
-    let task = bevy::tasks::AsyncComputeTaskPool::get().spawn(async move {
-        let bytes = ffxi_dat::DatRoot::from_env_or_default()
-            .ok()
-            .and_then(|root| {
-                let loc = root.resolve(GLOBAL_EFFECT_DIR_FILE_ID).ok()?;
-                std::fs::read(loc.path_under(&root)).ok()
-            })
-            .unwrap_or_default();
-        parse_action_bytes(&bytes)
-    });
+pub(crate) fn load_global_effect_dir(root: Res<ActionDatRoot>, mut commands: Commands) {
+    let root = root.0.clone();
+    let task = bevy::tasks::AsyncComputeTaskPool::get()
+        .spawn(async move { parse_action_bytes(&read_dat_bytes(root, GLOBAL_EFFECT_DIR_FILE_ID)) });
     commands.insert_resource(GlobalEffectDirTask(task));
 }
 
@@ -665,6 +683,7 @@ enum PendingActionDispatch {
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Resource, Default)]
 pub struct ActionDatCache {
+    root: Option<Arc<ffxi_dat::DatRoot>>,
     lru: ActionDatLru,
     tasks: HashMap<u32, bevy::tasks::Task<ParsedActionDat>>,
     pending: Vec<(u32, PendingActionDispatch)>,
@@ -672,12 +691,21 @@ pub struct ActionDatCache {
 
 #[cfg(not(target_arch = "wasm32"))]
 impl ActionDatCache {
+    // Every cached parse and every in-flight load belongs to the install it was read from, so a
+    // launcher DAT-path change drops both rather than serving the next cast from the old one.
+    fn adopt_root(&mut self, root: Option<Arc<ffxi_dat::DatRoot>>) {
+        self.root = root;
+        self.lru = ActionDatLru::default();
+        self.tasks.clear();
+    }
+
     fn request(&mut self, file_id: u32) {
         if self.tasks.contains_key(&file_id) {
             return;
         }
-        let task =
-            bevy::tasks::AsyncComputeTaskPool::get().spawn(async move { load_action_dat(file_id) });
+        let root = self.root.clone();
+        let task = bevy::tasks::AsyncComputeTaskPool::get()
+            .spawn(async move { load_action_dat(root, file_id) });
         self.tasks.insert(file_id, task);
     }
 
@@ -690,15 +718,8 @@ impl ActionDatCache {
 // An unresolvable/unreadable file caches as an empty parse, so a broken DAT path degrades to the
 // pre-existing "no effect" behaviour instead of re-spawning a load per cast.
 #[cfg(not(target_arch = "wasm32"))]
-fn load_action_dat(file_id: u32) -> ParsedActionDat {
-    let bytes = ffxi_dat::DatRoot::from_env_or_default()
-        .ok()
-        .and_then(|root| {
-            let loc = root.resolve(file_id).ok()?;
-            std::fs::read(loc.path_under(&root)).ok()
-        })
-        .unwrap_or_default();
-    let (schedulers, assets) = parse_action_bytes(&bytes);
+fn load_action_dat(root: Option<Arc<ffxi_dat::DatRoot>>, file_id: u32) -> ParsedActionDat {
+    let (schedulers, assets) = parse_action_bytes(&read_dat_bytes(root, file_id));
     ParsedActionDat { schedulers, assets }
 }
 
@@ -985,11 +1006,46 @@ fn weapon_skill_file_id(
     Some(base as u32 + animation as u32)
 }
 
+// FFXiMain.dll is ~2.8 MB read whole and then scanned for several table markers
+// (ffxi-dat/src/main_dll.rs::load), which is why it loads off-thread once per DAT root instead
+// of on the first weaponskill or emote to reach the render thread.
 #[cfg(not(target_arch = "wasm32"))]
-#[derive(Default)]
-pub struct MainDllCache {
-    loaded: bool,
-    dll: Option<ffxi_dat::main_dll::MainDll>,
+#[derive(Resource, Default)]
+pub struct ActionMainDll(pub Option<Arc<ffxi_dat::main_dll::MainDll>>);
+
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Resource)]
+pub(crate) struct ActionMainDllTask(bevy::tasks::Task<Option<ffxi_dat::main_dll::MainDll>>);
+
+// Both halves of a DAT-root change: the parsed-DAT cache re-keys onto the new install and the
+// dll re-loads from it. `ActionMainDll` is left in place until the new one lands so a reload
+// degrades to stale tables for a few frames rather than to no weaponskill effects at all.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn adopt_action_dat_root(
+    root: Res<ActionDatRoot>,
+    mut cache: ResMut<ActionDatCache>,
+    mut commands: Commands,
+) {
+    cache.adopt_root(root.0.clone());
+    let root = root.0.clone();
+    let task = bevy::tasks::AsyncComputeTaskPool::get().spawn(async move {
+        resolved_root(root).and_then(|root| ffxi_dat::main_dll::MainDll::load(root.root()).ok())
+    });
+    commands.insert_resource(ActionMainDllTask(task));
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn poll_action_main_dll(
+    task: Option<ResMut<ActionMainDllTask>>,
+    mut commands: Commands,
+) {
+    use bevy::tasks::futures_lite::future;
+    let Some(mut task) = task else { return };
+    let Some(dll) = future::block_on(future::poll_once(&mut task.0)) else {
+        return;
+    };
+    commands.remove_resource::<ActionMainDllTask>();
+    commands.insert_resource(ActionMainDll(dll.map(Arc::new)));
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -1008,7 +1064,7 @@ pub fn dispatch_action_started(
     q_children: Query<&Children>,
     q_render: Query<&crate::ffxi_actor_render::FfxiRenderActor>,
     global: Option<Res<GlobalEffectDir>>,
-    mut dll_cache: Local<MainDllCache>,
+    dll: Option<Res<ActionMainDll>>,
     mut cache: ResMut<ActionDatCache>,
     mut commands: Commands,
     mut last_seen: Local<u64>,
@@ -1036,19 +1092,12 @@ pub fn dispatch_action_started(
         };
         let target_entity = target_id.and_then(|id| tracked.by_id.get(&id).copied());
         let race = q_look.get(actor_entity).ok().and_then(|l| look_race(&l.0));
-        // FFXiMain.dll is only needed for weaponskill base indices; load it lazily once.
-        if action_kind == 3 && !dll_cache.loaded {
-            dll_cache.loaded = true;
-            if let Ok(root) = ffxi_dat::DatRoot::from_env_or_default() {
-                dll_cache.dll = ffxi_dat::main_dll::MainDll::load(root.root()).ok();
-            }
-        }
         let Some(file_id) = action_dat_file_id(
             action_id,
             animation,
             action_kind,
             race,
-            dll_cache.dll.as_ref(),
+            dll.as_ref().and_then(|d| d.0.as_deref()),
         ) else {
             continue;
         };
@@ -1529,7 +1578,7 @@ pub fn dispatch_entity_emoted(
     q_look: Query<&crate::components::LookComp>,
     q_children: Query<&Children>,
     mut q_actors: Query<&mut crate::ffxi_actor_render::FfxiRenderActor>,
-    mut dll_cache: Local<MainDllCache>,
+    dll: Option<Res<ActionMainDll>>,
     mut cache: ResMut<ActionDatCache>,
     mut commands: Commands,
     mut last_seen: Local<u64>,
@@ -1570,15 +1619,9 @@ pub fn dispatch_entity_emoted(
         let race = q_look.get(actor_entity).ok().and_then(|l| look_race(&l.0));
 
         if let Some(race) = race {
-            if !dll_cache.loaded {
-                dll_cache.loaded = true;
-                if let Ok(root) = ffxi_dat::DatRoot::from_env_or_default() {
-                    dll_cache.dll = ffxi_dat::main_dll::MainDll::load(root.root()).ok();
-                }
-            }
-            let base = dll_cache
-                .dll
+            let base = dll
                 .as_ref()
+                .and_then(|d| d.0.as_deref())
                 .and_then(|d| d.base_emote_index(race));
             if let Some(base) = base {
                 let file_id = base as u32 + file_offset;
@@ -1657,11 +1700,17 @@ impl Plugin for SchedulerRuntimePlugin {
         {
             app.init_resource::<crate::particle_sim::ParticleSimulator>();
             app.init_resource::<ActionDatCache>();
+            app.init_resource::<ActionDatRoot>();
             app.add_systems(Startup, load_global_effect_dir);
+            app.add_systems(
+                Update,
+                adopt_action_dat_root.run_if(resource_exists_and_changed::<ActionDatRoot>),
+            );
             app.add_systems(
                 Update,
                 (
                     poll_global_effect_dir,
+                    poll_action_main_dll,
                     dispatch_action_started,
                     dispatch_cast_routine_started,
                     dispatch_melee_action_started,
@@ -2880,5 +2929,118 @@ mod tests {
             "the re-insert refreshed 7's recency"
         );
         assert!(lru.get_and_promote(999).is_some());
+    }
+
+    // A launcher DAT-path change re-inserts every `*DatRoot`; the parses already in hand belong
+    // to the previous install, so serving them after the swap renders the old game's effects.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn adopting_a_root_drops_the_previous_installs_parses() {
+        const FILE_ID: u32 = 4242;
+        let mut cache = ActionDatCache::default();
+        cache.lru.insert(FILE_ID, empty_parsed());
+        assert!(cache.lru.get_and_promote(FILE_ID).is_some());
+
+        cache.adopt_root(None);
+        assert!(
+            cache.lru.get_and_promote(FILE_ID).is_none(),
+            "a parse from the previous root must not survive the swap"
+        );
+    }
+
+    // The dispatchers must see the root the host wired, not one they open themselves: a cache
+    // keyed to a different install is exactly the launcher-reload bug above.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn adopt_action_dat_root_hands_the_wired_root_to_the_cache() {
+        let Some(root) = ffxi_dat::archive::open_test_install() else {
+            return;
+        };
+        bevy::tasks::AsyncComputeTaskPool::get_or_init(Default::default);
+        let root = Arc::new(root);
+        let mut app = App::new();
+        app.init_resource::<ActionDatCache>()
+            .insert_resource(ActionDatRoot(Some(root.clone())))
+            .add_systems(
+                Update,
+                adopt_action_dat_root.run_if(resource_exists_and_changed::<ActionDatRoot>),
+            );
+        app.update();
+
+        let adopted = app
+            .world()
+            .resource::<ActionDatCache>()
+            .root
+            .clone()
+            .expect("the wired root reaches the cache");
+        assert!(
+            Arc::ptr_eq(&adopted, &root),
+            "the cache must load through the wired root, not its own"
+        );
+    }
+
+    // Bounded so a never-landing task fails the test instead of hanging it; the load is one
+    // ~2.8 MB read plus a handful of marker scans, so this is orders of magnitude of slack.
+    #[cfg(not(target_arch = "wasm32"))]
+    const MAIN_DLL_TASK_POLLS: usize = 600;
+    // The look-race bytes MainDll indexes its per-race bases by; see `weapon_skill_file_id`.
+    #[cfg(not(target_arch = "wasm32"))]
+    const FIRST_LOOK_RACE: u8 = 1;
+    #[cfg(not(target_arch = "wasm32"))]
+    const LAST_LOOK_RACE: u8 = 8;
+    #[cfg(not(target_arch = "wasm32"))]
+    const MAIN_DLL_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(10);
+
+    // The tables `dispatch_action_started` (weaponskill file ids) and `dispatch_entity_emoted`
+    // (emote file ids) read must survive the move off the render thread: what lands in
+    // `ActionMainDll` has to answer identically to a direct `MainDll::load` of the same root.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn real_dat_action_main_dll_lands_off_thread_with_the_same_tables() {
+        let Some(root) = ffxi_dat::archive::open_test_install() else {
+            return;
+        };
+        let direct = ffxi_dat::main_dll::MainDll::load(root.root()).expect("FFXiMain.dll loads");
+        bevy::tasks::AsyncComputeTaskPool::get_or_init(Default::default);
+
+        let mut app = App::new();
+        app.init_resource::<ActionDatCache>()
+            .insert_resource(ActionDatRoot(Some(Arc::new(root))))
+            .add_systems(
+                Update,
+                (
+                    adopt_action_dat_root.run_if(resource_exists_and_changed::<ActionDatRoot>),
+                    poll_action_main_dll,
+                )
+                    .chain(),
+            );
+
+        let mut landed = None;
+        for _ in 0..MAIN_DLL_TASK_POLLS {
+            app.update();
+            if let Some(dll) = app.world().get_resource::<ActionMainDll>() {
+                landed = dll.0.clone();
+                break;
+            }
+            std::thread::sleep(MAIN_DLL_POLL_INTERVAL);
+        }
+        let landed = landed.expect("FFXiMain.dll lands as ActionMainDll");
+
+        for race in FIRST_LOOK_RACE..=LAST_LOOK_RACE {
+            assert_eq!(
+                landed.base_weapon_skill_index(race),
+                direct.base_weapon_skill_index(race),
+                "weaponskill base for race {race}"
+            );
+            assert_eq!(
+                landed.base_emote_index(race),
+                direct.base_emote_index(race),
+                "emote base for race {race}"
+            );
+        }
+        assert!(
+            landed.base_weapon_skill_index(FIRST_LOOK_RACE).is_some(),
+            "the race bases the dispatchers key on are actually populated"
+        );
     }
 }

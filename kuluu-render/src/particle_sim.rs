@@ -1,3 +1,5 @@
+use std::sync::OnceLock;
+
 use bevy::asset::RenderAssetUsages;
 use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
@@ -904,17 +906,43 @@ fn emit(g: &mut LiveGenerator, life_frames: f32) {
     });
 }
 
+fn env_flag(cell: &'static OnceLock<bool>, name: &str) -> bool {
+    *cell.get_or_init(|| std::env::var_os(name).is_some())
+}
+
+fn trace_celestial() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    env_flag(&ON, "FFXI_TRACE_CELESTIAL")
+}
+
+/// `FFXI_TRACE_PARTICLE_REBUILDS`: once a second, which generators rebuilt
+/// their mesh and how many vertices each pushed — the per-frame `Assets<Mesh>`
+/// churn the perf log counts as `mesh+N`.
+fn trace_particle_rebuilds() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    env_flag(&ON, "FFXI_TRACE_PARTICLE_REBUILDS")
+}
+
+#[derive(Default)]
+pub struct RebuildTrace {
+    since_secs: f32,
+    per_generator: std::collections::HashMap<String, (u32, usize)>,
+}
+
 pub fn sync_particle_meshes(
     cam: Query<&GlobalTransform, With<OperatorCamera>>,
     q_mesh_xf: Query<&GlobalTransform, With<Mesh3d>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut sim: ResMut<ParticleSimulator>,
     mut commands: Commands,
+    time: Res<Time>,
+    mut trace: Local<RebuildTrace>,
 ) {
     let cam_xf = cam.iter().next().copied().unwrap_or_default();
     let (cam_rot, cam_pos) = (cam_xf.rotation(), cam_xf.translation());
     let clock = sim.clock;
-    let trace_celestial = std::env::var_os("FFXI_TRACE_CELESTIAL").is_some();
+    let trace_celestial = trace_celestial();
+    let trace_rebuilds = trace_particle_rebuilds();
 
     // (index, despawn-needed); indices ascending so the reverse sweep below can
     // swap_remove safely.
@@ -965,6 +993,14 @@ pub fn sync_particle_meshes(
             if let Some(mut mesh) = meshes.get_mut(&g.mesh) {
                 rebuild_mesh(g, view, &clock, &mut mesh);
                 g.built_key = key;
+                if trace_rebuilds {
+                    let row = trace
+                        .per_generator
+                        .entry(String::from_utf8_lossy(&g.def.mesh_id).into_owned())
+                        .or_default();
+                    row.0 += 1;
+                    row.1 = g.particles.len() * g.template.positions.len();
+                }
             }
         }
         let window_over =
@@ -980,6 +1016,22 @@ pub fn sync_particle_meshes(
         if despawn {
             commands.entity(g.entity).try_despawn();
         }
+    }
+
+    if trace_rebuilds && time.elapsed_secs() - trace.since_secs >= 1.0 {
+        let mut rows: Vec<(String, (u32, usize))> = trace.per_generator.drain().collect();
+        rows.sort_by_key(|(_, (rebuilds, _))| std::cmp::Reverse(*rebuilds));
+        let summary: Vec<String> = rows
+            .iter()
+            .map(|(name, (rebuilds, verts))| format!("{name}x{rebuilds}({verts}v)"))
+            .collect();
+        info!(
+            target: "perf",
+            generators = sim.generators.len(),
+            "particle mesh rebuilds/s: {}",
+            summary.join(" ")
+        );
+        trace.since_secs = time.elapsed_secs();
     }
 }
 

@@ -2539,6 +2539,7 @@ pub fn spawn_zone_water(
             MeshMaterial3d(simple_mat.clone()),
             Transform::IDENTITY,
             water_vis,
+            bevy::light::NotShadowCaster,
             bevy::light::NotShadowReceiver,
             ChildOf(spec.parent),
         ));

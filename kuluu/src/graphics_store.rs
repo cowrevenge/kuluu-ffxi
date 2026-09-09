@@ -178,6 +178,9 @@ fn parse_graphics_settings(bytes: &[u8]) -> Result<GraphicsSettings> {
     if let Some(x) = take(&v, "character_shadow_cast") {
         s.character_shadow_cast = x;
     }
+    if let Some(x) = take(&v, "zone_shadow_cast") {
+        s.zone_shadow_cast = x;
+    }
     if let Some(x) = take(&v, "depth_of_field") {
         s.depth_of_field = x;
     }

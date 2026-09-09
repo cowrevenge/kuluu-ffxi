@@ -366,6 +366,7 @@ const GRAPHICS_ENTRIES: &[&str] = &[
     "Shading",
     "Model Shadow Receiving",
     "Model Shadow Casting",
+    "Zone Shadow Casting",
     "Reset to High",
 ];
 

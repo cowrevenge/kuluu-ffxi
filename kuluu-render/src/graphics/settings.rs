@@ -273,6 +273,7 @@ pub enum GraphicsField {
 
     CharacterShadowReceive,
     CharacterShadowCast,
+    ZoneShadowCast,
 
     DepthOfField,
     DofAperture,
@@ -344,6 +345,7 @@ impl GraphicsField {
             GraphicsField::CharacterLighting => "Shading",
             GraphicsField::CharacterShadowReceive => "Model Shadow Receiving",
             GraphicsField::CharacterShadowCast => "Model Shadow Casting",
+            GraphicsField::ZoneShadowCast => "Zone Shadow Casting",
             GraphicsField::DepthOfField => "Depth of Field",
             GraphicsField::DofAperture => "DoF Aperture",
             GraphicsField::ZoneLineDisplay => "Zone Lines",
@@ -557,6 +559,17 @@ pub struct GraphicsSettings {
 
     #[serde(default = "default_character_shadow_cast")]
     pub character_shadow_cast: bool,
+
+    /// Enhanced: zone placements draw into the sun's cascade shadow map.
+    /// Retail casts no shadow map over zone geometry: its ShadowRenderer is a
+    /// per-model-instance actor decal
+    /// (research/XIClient/src/XIClient/include/World/Model/ModelInstance.h
+    /// ModelInstance::shadowRenderer, reached from
+    /// research/XIClient/src/XIClient/source/Rendering/ModelRenderer.cpp
+    /// ModelRenderer::Draw54). Every visible placement re-drawn per cascade
+    /// is the dominant render-thread cost in a town, so no preset turns it on.
+    #[serde(default)]
+    pub zone_shadow_cast: bool,
 
     #[serde(default)]
     pub depth_of_field: bool,
@@ -788,6 +801,7 @@ impl GraphicsSettings {
                 realistic_character_lighting: false,
                 faithful_shadow_receive: true,
                 character_shadow_cast: false,
+                zone_shadow_cast: false,
                 depth_of_field: false,
                 dof_aperture_f_stops: DEFAULT_DOF_APERTURE,
                 zone_line_display: ZoneLineDisplay::Off,
@@ -832,6 +846,7 @@ impl GraphicsSettings {
                 realistic_character_lighting: false,
                 faithful_shadow_receive: true,
                 character_shadow_cast: false,
+                zone_shadow_cast: false,
                 depth_of_field: false,
                 dof_aperture_f_stops: DEFAULT_DOF_APERTURE,
                 zone_line_display: ZoneLineDisplay::Off,
@@ -876,6 +891,7 @@ impl GraphicsSettings {
                 realistic_character_lighting: false,
                 faithful_shadow_receive: true,
                 character_shadow_cast: true,
+                zone_shadow_cast: false,
                 depth_of_field: false,
                 dof_aperture_f_stops: DEFAULT_DOF_APERTURE,
                 zone_line_display: ZoneLineDisplay::Off,
@@ -924,6 +940,7 @@ impl GraphicsSettings {
                 realistic_character_lighting: false,
                 faithful_shadow_receive: true,
                 character_shadow_cast: true,
+                zone_shadow_cast: false,
                 depth_of_field: false,
                 dof_aperture_f_stops: DEFAULT_DOF_APERTURE,
                 zone_line_display: ZoneLineDisplay::Off,
@@ -1013,6 +1030,7 @@ impl GraphicsSettings {
                 bool_label(self.faithful_shadow_receive).into()
             }
             GraphicsField::CharacterShadowCast => bool_label(self.character_shadow_cast).into(),
+            GraphicsField::ZoneShadowCast => bool_label(self.zone_shadow_cast).into(),
             GraphicsField::DepthOfField => bool_label(self.depth_of_field).into(),
             GraphicsField::DofAperture => format!("f/{:.1}", self.dof_aperture_f_stops),
             GraphicsField::ZoneLineDisplay => self.zone_line_display.label().to_string(),
@@ -1094,6 +1112,7 @@ impl GraphicsSettings {
                 );
                 let realistic = self.realistic_character_lighting;
                 let receive = self.faithful_shadow_receive;
+                let zone_cast = self.zone_shadow_cast;
                 let zld = self.zone_line_display;
                 let minimap_radar = self.minimap_radar;
                 let vsync = self.vsync;
@@ -1125,6 +1144,7 @@ impl GraphicsSettings {
                 self.light_flicker = lf;
                 self.realistic_character_lighting = realistic;
                 self.faithful_shadow_receive = receive;
+                self.zone_shadow_cast = zone_cast;
                 self.zone_line_display = zld;
                 self.minimap_radar = minimap_radar;
                 self.vsync = vsync;
@@ -1265,6 +1285,9 @@ impl GraphicsSettings {
             GraphicsField::CharacterShadowCast => {
                 self.character_shadow_cast = !self.character_shadow_cast;
                 self.preset = QualityPreset::Custom;
+            }
+            GraphicsField::ZoneShadowCast => {
+                self.zone_shadow_cast = !self.zone_shadow_cast;
             }
             GraphicsField::DepthOfField => {
                 self.depth_of_field = !self.depth_of_field;
@@ -1565,6 +1588,7 @@ pub const GRAPHICS_FIELDS: &[GraphicsField] = &[
     GraphicsField::CharacterLighting,
     GraphicsField::CharacterShadowReceive,
     GraphicsField::CharacterShadowCast,
+    GraphicsField::ZoneShadowCast,
 ];
 
 /// The DLSS Config surface, top to bottom: the live quality knob first, then
@@ -2447,6 +2471,28 @@ mod tests {
             s.character_shadow_cast,
             "preset cycle reset casting to the Ultra tier default, not the toggled-off value"
         );
+    }
+
+    #[test]
+    fn zone_shadow_casting_is_off_in_every_preset_and_sticky() {
+        for preset in PRESET_CYCLE {
+            assert!(
+                !GraphicsSettings::for_preset(*preset).zone_shadow_cast,
+                "{preset:?} must not draw zone geometry into the shadow map"
+            );
+        }
+        let mut s = GraphicsSettings::default();
+        assert_eq!(s.value_label(GraphicsField::ZoneShadowCast), "Off");
+        s.cycle(GraphicsField::ZoneShadowCast, 1);
+        assert!(s.zone_shadow_cast);
+        assert_eq!(s.value_label(GraphicsField::ZoneShadowCast), "On");
+        assert_eq!(
+            s.preset,
+            QualityPreset::High,
+            "an enhanced knob is not a quality-tier lever"
+        );
+        s.cycle(GraphicsField::Preset, 1);
+        assert!(s.zone_shadow_cast, "preset cycle kept zone casting on");
     }
 
     #[test]

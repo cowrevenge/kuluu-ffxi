@@ -394,6 +394,9 @@ impl<S: SceneSource + Resource + Component<Mutability = bevy::ecs::component::Mu
         app.add_systems(Update, ffxi_actor_render::apply_character_shadow_cast);
 
         #[cfg(not(target_arch = "wasm32"))]
+        app.add_systems(Update, dat_mmb::apply_zone_shadow_cast);
+
+        #[cfg(not(target_arch = "wasm32"))]
         app.add_systems(
             PostUpdate,
             ffxi_actor_render::update_actor_mesh_aabbs

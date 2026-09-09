@@ -10,6 +10,7 @@ use ffxi_dat::sprite_sheet::ParticleSpriteSheet;
 use crate::camera::OperatorCamera;
 use crate::components::InGameEntity;
 use crate::dat_d3m::{decoded_sky_texture_to_image, decoded_texture_to_image, D3mBlendMode};
+use crate::ffxi_actor_render::FfxiRenderActor;
 use crate::ffxi_particle_material::FfxiParticleMaterial;
 use crate::scheduler_runtime::{
     assets_holding, ActionAssets, GlobalEffectDir, MmbSpriteMesh, SchedulerStageEvent, ROUTINE_FPS,
@@ -324,11 +325,90 @@ struct Particle {
     scale: Vec2,
 }
 
+// research/xim ParticleGeneratorAttachment.kt:87-96,103,111,125 updateAssociatedPosition — an
+// actor-attached generator emits from the attach actor's position PLUS the position of the joint
+// reference the def names: attachedJoint0 for the source-side attach types, attachedJoint1 for the
+// target-side ones. The celestial and unattached types read neither. The field indexes the
+// skeleton's reference table (ffxi_dat::skel::JointReference), not its joint array.
+fn attach_joint_reference(def: &ParticleGeneratorDef) -> Option<usize> {
+    use ffxi_dat::particle_gen::AttachType;
+    let reference = match def.attach_type {
+        AttachType::SourceActor
+        | AttachType::SourceActorWeapon
+        | AttachType::SourceActorTargetFacing
+        | AttachType::SourceToTargetBasis
+        | AttachType::ZoneActorA
+        | AttachType::ZoneActorB
+        | AttachType::ZoneActorC => def.attach_joint_source,
+        AttachType::TargetActor
+        | AttachType::TargetActorSourceFacing
+        | AttachType::TargetToSourceBasis => def.attach_joint_target,
+        AttachType::None | AttachType::Sun | AttachType::Moon => return None,
+    };
+    Some(reference as usize)
+}
+
+// The pose an attach actor was last drawn in, plus the transform carrying its pose frame (FFXI
+// axes, -Y up) into Bevy world space.
+struct AttachPose<'a> {
+    pose: &'a [Mat4],
+    skeleton: &'a ffxi_dat::skel::Skeleton,
+    root: bevy::math::Affine3A,
+}
+
+// The entity a routine runs on and the actor root holding the posed skeleton are not the same
+// entity on the live path — ffxi_actor_render::spawn_live_actor parents the root under the wire
+// entity — while the offline harnesses run the routine on the root itself. Doors and any actor
+// whose model has not loaded have no pose at all.
+fn attach_pose<'a>(
+    entity: Entity,
+    q_children: &Query<&Children>,
+    q_render: &'a Query<(&FfxiRenderActor, &GlobalTransform)>,
+) -> Option<AttachPose<'a>> {
+    let (actor, root_xf) = q_render.get(entity).ok().or_else(|| {
+        q_children
+            .get(entity)
+            .ok()?
+            .iter()
+            .find_map(|child| q_render.get(child).ok())
+    })?;
+    Some(AttachPose {
+        pose: actor.world_pose(),
+        skeleton: &actor.skeleton,
+        root: root_xf.affine(),
+    })
+}
+
+// World-space delta from the attach actor's root to the joint the generator hangs off.
+// `other_world` is the other actor of the attachment, which is what a 49..51 nearest-joint
+// selector measures against (research/xim ParticleGeneratorAttachment.kt:314-330
+// resolveNearestJointSnapshot).
+fn attach_joint_offset(
+    def: &ParticleGeneratorDef,
+    attach: Option<AttachPose<'_>>,
+    other_world: Option<Vec3>,
+) -> Vec3 {
+    let (Some(reference), Some(attach)) = (attach_joint_reference(def), attach) else {
+        return Vec3::ZERO;
+    };
+    let toward = other_world.map(|w| attach.root.inverse().transform_point3(w));
+    ffxi_actor::skeleton_instance::attach_joint_position(
+        attach.pose,
+        attach.skeleton,
+        reference,
+        toward,
+    )
+    .map(|local| attach.root.transform_vector3(local))
+    .unwrap_or(Vec3::ZERO)
+}
+
 pub fn spawn_particle_generators(
     mut events: MessageReader<SchedulerStageEvent>,
     q_actors: Query<(&Transform, Option<&ActionAssets>)>,
     q_action_target: Query<&crate::scheduler_runtime::ActionTarget>,
     q_xf: Query<&Transform>,
+    q_children: Query<&Children>,
+    q_render: Query<(&FfxiRenderActor, &GlobalTransform)>,
     global: Option<Res<GlobalEffectDir>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut mats: ResMut<Assets<FfxiParticleMaterial>>,
@@ -358,16 +438,29 @@ pub fn spawn_particle_generators(
         else {
             continue;
         };
-        let origin_entity = crate::scheduler_runtime::particle_origin_entity(
-            def.attach_type,
-            ev.actor,
-            q_action_target.get(ev.actor).ok().and_then(|t| t.0),
-        );
+        let target = q_action_target.get(ev.actor).ok().and_then(|t| t.0);
+        let origin_entity =
+            crate::scheduler_runtime::particle_origin_entity(def.attach_type, ev.actor, target);
         let origin_xf = if origin_entity == ev.actor {
             actor_xf
         } else {
             q_xf.get(origin_entity).unwrap_or(actor_xf)
         };
+        // A nearest-joint selector is measured from the other actor in the attachment; with the
+        // attach actor on both sides it has nothing to resolve against and falls back to the root.
+        let other_world = if origin_entity == ev.actor {
+            target
+        } else {
+            Some(ev.actor)
+        }
+        .filter(|e| *e != origin_entity)
+        .and_then(|e| q_xf.get(e).ok())
+        .map(|xf| xf.translation);
+        let joint_offset = attach_joint_offset(
+            &def,
+            attach_pose(origin_entity, &q_children, &q_render),
+            other_world,
+        );
         let blend = match def.blend {
             ffxi_dat::particle_gen::ParticleBlend::Additive => D3mBlendMode::Additive,
             ffxi_dat::particle_gen::ParticleBlend::Blend => D3mBlendMode::Blended,
@@ -414,7 +507,7 @@ pub fn spawn_particle_generators(
             draw_path: D3mDrawPath::D3m,
             sprite_frames,
             def,
-            origin: origin_xf.translation + Vec3::Y * def.base_position[1],
+            origin: origin_xf.translation + joint_offset + Vec3::Y * def.base_position[1],
             particles: Vec::new(),
             emit_accum: 0.0,
             age_frames: 0.0,
@@ -3262,5 +3355,213 @@ mod tests {
             def.mesh_kind = ffxi_dat::particle_gen::ParticleMeshKind::SpriteSheet;
             assert!(texture_for(&assets, &def).is_some());
         }
+    }
+
+    // research/xim ParticleGeneratorAttachment.kt:87-96,103,111,125 — which of the def's two joint
+    // fields an attach type reads is fixed by the type, and the celestial/unattached ones read
+    // neither.
+    #[test]
+    fn attach_joint_reference_follows_the_attach_type() {
+        use ffxi_dat::particle_gen::AttachType;
+        const SOURCE_JOINT: u8 = 48;
+        const TARGET_JOINT: u8 = 49;
+        let mut d = def(1.0, 1.0, 1);
+        d.attach_joint_source = SOURCE_JOINT;
+        d.attach_joint_target = TARGET_JOINT;
+
+        for attach in [
+            AttachType::SourceActor,
+            AttachType::SourceActorWeapon,
+            AttachType::SourceActorTargetFacing,
+            AttachType::SourceToTargetBasis,
+            AttachType::ZoneActorA,
+            AttachType::ZoneActorB,
+            AttachType::ZoneActorC,
+        ] {
+            d.attach_type = attach;
+            assert_eq!(
+                attach_joint_reference(&d),
+                Some(SOURCE_JOINT as usize),
+                "{attach:?}"
+            );
+        }
+        for attach in [
+            AttachType::TargetActor,
+            AttachType::TargetActorSourceFacing,
+            AttachType::TargetToSourceBasis,
+        ] {
+            d.attach_type = attach;
+            assert_eq!(
+                attach_joint_reference(&d),
+                Some(TARGET_JOINT as usize),
+                "{attach:?}"
+            );
+        }
+        for attach in [AttachType::None, AttachType::Sun, AttachType::Moon] {
+            d.attach_type = attach;
+            assert_eq!(attach_joint_reference(&d), None, "{attach:?}");
+        }
+    }
+
+    // ROM/27/82.DAT `hm_s`, the HumeM skeleton whose reaction routines the melee chain walks
+    // (kuluu-render::scheduler_runtime tests).
+    const HUME_M_SKELETON_FILE: u32 = 7072;
+
+    fn retail_hume_m_skeleton() -> Option<ffxi_dat::skel::Skeleton> {
+        let root = ffxi_dat::archive::open_test_install()?;
+        let loc = root.resolve(HUME_M_SKELETON_FILE).ok()?;
+        let bytes = std::fs::read(loc.path_under(&root)).ok()?;
+        ffxi_dat::resource_dir::ResourceDir::from_bytes(bytes)
+            .collect_skeletons()
+            .into_iter()
+            .next()
+    }
+
+    // The bead's retail dump of ROM/0/0.DAT (kuluu-w7xd, 2026-07-31): the melee hit sparks the
+    // `chit` chain reaches, each attaching to the victim at a nearest-joint selector.
+    const HIT_SPARK_DIR: [u8; 4] = *b"hit1";
+    const HIT_SPARK_JOINT_REFERENCE: u8 = 49;
+    const HIT_SPARK_GENERATORS: [([u8; 4], ffxi_dat::particle_gen::AttachType); 4] = [
+        (*b"g010", ffxi_dat::particle_gen::AttachType::TargetActor),
+        (*b"g011", ffxi_dat::particle_gen::AttachType::TargetActor),
+        (
+            *b"g012",
+            ffxi_dat::particle_gen::AttachType::TargetActorSourceFacing,
+        ),
+        (*b"g013", ffxi_dat::particle_gen::AttachType::TargetActor),
+    ];
+
+    // Directory-scoped, because ROM/0/0.DAT defines `g010` several times over and only the `hit1`
+    // copy is the spark (kuluu-render::scheduler_runtime tests).
+    fn retail_hit_spark_defs() -> Option<Vec<([u8; 4], ParticleGeneratorDef)>> {
+        let root = ffxi_dat::archive::open_test_install()?;
+        let loc = root
+            .resolve(crate::scheduler_runtime::GLOBAL_EFFECT_DIR_FILE_ID)
+            .ok()?;
+        let bytes = std::fs::read(loc.path_under(&root)).ok()?;
+        let (_, assets) = crate::scheduler_runtime::parse_action_bytes(&bytes);
+        Some(
+            HIT_SPARK_GENERATORS
+                .iter()
+                .map(|(name, _)| {
+                    let def = assets.particle_def(HIT_SPARK_DIR, name).unwrap_or_else(|| {
+                        panic!("ROM/0/0.DAT hit1 defines {}", String::from_utf8_lossy(name))
+                    });
+                    (*name, *def)
+                })
+                .collect(),
+        )
+    }
+
+    // The bead's premise, pinned against the install: every `hit1` spark generator attaches to the
+    // TARGET actor and names a nearest-joint selector there, so the spawn origin cannot be the
+    // victim's root transform alone.
+    #[test]
+    fn real_dat_hit_sparks_name_a_target_joint_reference() {
+        let Some(defs) = retail_hit_spark_defs() else {
+            return;
+        };
+        for ((name, def), (_, attach)) in defs.iter().zip(HIT_SPARK_GENERATORS) {
+            let name = String::from_utf8_lossy(name).to_string();
+            assert_eq!(def.attach_type, attach, "{name}");
+            assert_eq!(def.attach_joint_target, HIT_SPARK_JOINT_REFERENCE, "{name}");
+            assert_eq!(
+                attach_joint_reference(def),
+                Some(HIT_SPARK_JOINT_REFERENCE as usize),
+                "{name} reads the target-side joint field"
+            );
+            assert_eq!(def.base_position, [0.0; 3], "{name}");
+        }
+    }
+
+    // The coordinate-space half of the fix: the joint the def names is resolved in the actor's
+    // pose frame (FFXI axes, -Y up) and must arrive in Bevy world space, i.e. ABOVE the victim's
+    // feet and on the side the attacker stands on -- the whole point of kuluu-w7xd.
+    #[test]
+    fn real_dat_hit_spark_offset_lands_on_the_struck_side_in_bevy_space() {
+        let (Some(skeleton), Some(defs)) = (retail_hume_m_skeleton(), retail_hit_spark_defs())
+        else {
+            return;
+        };
+        let pose = ffxi_actor::skeleton_instance::pose_world(
+            &skeleton,
+            |_| None,
+            ffxi_actor::skeleton_instance::RootTransform::identity(),
+            &[],
+        );
+        const VICTIM_WORLD: Vec3 = Vec3::new(30.0, 2.0, -14.0);
+        const ATTACKER_REACH: f32 = 3.0;
+        // Retail files the HumeM ring 1.1 above the root (ffxi-actor::skeleton_instance tests);
+        // anything at or below 0 is the feet bug this bead is about.
+        const RING_HEIGHT_ABOVE_ROOT: f32 = 1.1;
+
+        for victim_facing in [0.0, 1.0, 2.5, -2.0] {
+            let root = Transform {
+                translation: VICTIM_WORLD,
+                rotation: Quat::from_rotation_y(victim_facing)
+                    * crate::ffxi_actor_render::ffxi_to_bevy_basis(),
+                scale: Vec3::ONE,
+            }
+            .compute_affine();
+            for bearing in 0..8 {
+                let a = bearing as f32 * std::f32::consts::TAU / 8.0;
+                let toward = Vec3::new(a.cos(), 0.0, a.sin());
+                let attacker = VICTIM_WORLD + toward * ATTACKER_REACH;
+                for (name, def) in &defs {
+                    let offset = attach_joint_offset(
+                        def,
+                        Some(AttachPose {
+                            pose: &pose,
+                            skeleton: &skeleton,
+                            root,
+                        }),
+                        Some(attacker),
+                    );
+                    let name = String::from_utf8_lossy(name).to_string();
+                    assert!(
+                        (offset.y - RING_HEIGHT_ABOVE_ROOT).abs() < 1e-3,
+                        "{name} spawned {offset:?}, not {RING_HEIGHT_ABOVE_ROOT} above the root"
+                    );
+                    assert!(
+                        offset.dot(toward) > 0.0,
+                        "{name} spawned {offset:?} away from the attacker at {attacker:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    // With no second actor the selector has nothing to measure against, and with no posed skeleton
+    // (a door, or a model still loading) there is no joint at all: both must fall back to the plain
+    // root origin rather than throwing the effect somewhere arbitrary.
+    #[test]
+    fn attach_joint_offset_falls_back_to_the_root() {
+        let Some(skeleton) = retail_hume_m_skeleton() else {
+            return;
+        };
+        let pose = ffxi_actor::skeleton_instance::pose_world(
+            &skeleton,
+            |_| None,
+            ffxi_actor::skeleton_instance::RootTransform::identity(),
+            &[],
+        );
+        let mut d = def(1.0, 1.0, 1);
+        d.attach_type = ffxi_dat::particle_gen::AttachType::TargetActor;
+        d.attach_joint_target =
+            *ffxi_actor::skeleton_instance::NEAREST_JOINT_REFERENCES.start() as u8;
+
+        assert_eq!(attach_joint_offset(&d, None, Some(Vec3::X)), Vec3::ZERO);
+        assert_eq!(
+            attach_joint_offset(
+                &d,
+                Some(AttachPose {
+                    pose: &pose,
+                    skeleton: &skeleton,
+                    root: bevy::math::Affine3A::IDENTITY,
+                }),
+                None,
+            ),
+            Vec3::ZERO
+        );
     }
 }

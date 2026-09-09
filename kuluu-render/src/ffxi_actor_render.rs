@@ -107,7 +107,7 @@ pub fn infers_walk_gait(speed: f32) -> bool {
     speed > combat_stance::EntityMotion::MOVE_EXIT && speed < WALK_RUN_BOUNDARY
 }
 
-fn ffxi_to_bevy_basis() -> Quat {
+pub(crate) fn ffxi_to_bevy_basis() -> Quat {
     Quat::from_rotation_x(std::f32::consts::PI)
 }
 

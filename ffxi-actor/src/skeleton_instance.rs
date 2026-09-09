@@ -313,6 +313,43 @@ pub fn standard_joint_world_position(
     Some(mat.transform_point3(arr3(reference.position_offset)))
 }
 
+// research/xim SkeletonInstance.kt:73-90 getStandardJointExtended — references 49..51 are
+// selectors, not placed points: retail files joint 0 with a zero offset there, while references
+// 13..20 ring the actor at torso height. The selector stands for whichever of those eight sits
+// nearest the other actor of the attachment, which is what puts a melee hit spark on the struck
+// side of the victim. How 50 and 51 differ from 49 is not established upstream either.
+pub const NEAREST_JOINT_REFERENCES: std::ops::RangeInclusive<usize> = 49..=51;
+const RING_JOINT_REFERENCES: std::ops::RangeInclusive<usize> = 13..=20;
+
+/// Position, in the actor's own pose frame, of the joint reference a particle
+/// generator attaches to. `toward` is the other actor of the attachment in that
+/// same frame; without it a 49..51 selector cannot resolve and falls through to
+/// the table, which yields the actor root.
+pub fn attach_joint_position(
+    world: &[Mat4],
+    skeleton: &Skeleton,
+    reference: usize,
+    toward: Option<Vec3>,
+) -> Option<Vec3> {
+    let reference = match toward {
+        Some(toward) if NEAREST_JOINT_REFERENCES.contains(&reference) => {
+            nearest_ring_reference(world, skeleton, toward).unwrap_or(reference)
+        }
+        _ => reference,
+    };
+    standard_joint_world_position(world, skeleton, reference)
+}
+
+fn nearest_ring_reference(world: &[Mat4], skeleton: &Skeleton, toward: Vec3) -> Option<usize> {
+    RING_JOINT_REFERENCES
+        .filter_map(|reference| {
+            let pos = standard_joint_world_position(world, skeleton, reference)?;
+            Some((reference, pos.distance_squared(toward)))
+        })
+        .min_by(|a, b| a.1.total_cmp(&b.1))
+        .map(|(reference, _)| reference)
+}
+
 pub fn find_head_neck(skeleton: &Skeleton) -> Option<(usize, usize)> {
     let n = skeleton.joints.len();
     let lh = skeleton.references.get(126)?.index;
@@ -831,5 +868,194 @@ mod tests {
         assert!(approx(p, Vec3::new(10.0, 1.0, 0.0), 1e-4));
 
         assert!(standard_joint_world_position(&world, &s, 5).is_none());
+    }
+
+    // Ring geometry transcribed from the retail HumeM skeleton (ROM/27/82.DAT `hm_s`, dumped
+    // 2026-09-09), as posed positions rather than raw offsets so the fixture root can stay
+    // unrotated: references 13..20 are filed on joint 0 around a torso-sized, front/back-
+    // asymmetric ellipse 1.1 above the root (pose space is -Y up), and 49..53 carry a zero
+    // offset there. `real_dat_retail_skeleton_resolves_the_nearest_joint_selector_onto_its_ring`
+    // holds this table to the install.
+    const RING_HEIGHT: f32 = -1.1;
+    const REFERENCE_TABLE_LEN: usize = 128;
+    const ABOVE_HEAD_HEIGHT: f32 = -1.81;
+    const RETAIL_RING_POSITIONS: [[f32; 3]; 8] = [
+        [0.24, RING_HEIGHT, 0.0],
+        [0.2, RING_HEIGHT, -0.2],
+        [0.0, RING_HEIGHT, -0.32],
+        [-0.14, RING_HEIGHT, -0.14],
+        [-0.17, RING_HEIGHT, 0.0],
+        [-0.14, RING_HEIGHT, 0.14],
+        [0.0, RING_HEIGHT, 0.32],
+        [0.2, RING_HEIGHT, 0.2],
+    ];
+
+    fn ringed_skel() -> Skeleton {
+        let mut s = skel(vec![joint(None, [0.0, 0.0, 0.0])]);
+        s.references = (0..REFERENCE_TABLE_LEN).map(jref_at_root).collect();
+        s.references[ffxi_dat::skel::standard_position::ABOVE_HEAD].position_offset =
+            [0.0, ABOVE_HEAD_HEIGHT, 0.0];
+        for (offset, reference) in RETAIL_RING_POSITIONS.iter().zip(RING_JOINT_REFERENCES) {
+            s.references[reference].position_offset = *offset;
+        }
+        s
+    }
+
+    fn jref_at_root(_: usize) -> JointReference {
+        JointReference {
+            index: 0,
+            unk_v0: [0.0; 3],
+            position_offset: [0.0; 3],
+        }
+    }
+
+    // Independent oracle for the nearest-of-eight rule, stated as a projection rather than a
+    // distance: with the other actor at R*dir, |p - R*dir|^2 = |p|^2 - 2R(p.dir) + R^2, so for R
+    // far outside the ring the nearest point is the one reaching furthest along `dir`.
+    const OTHER_ACTOR_REACH: f32 = 20.0;
+
+    fn ring_positions(world: &[Mat4], s: &Skeleton) -> Vec<Vec3> {
+        RING_JOINT_REFERENCES
+            .map(|r| standard_joint_world_position(world, s, r).unwrap())
+            .collect()
+    }
+
+    fn most_forward_ring_point(world: &[Mat4], s: &Skeleton, dir: Vec3) -> Vec3 {
+        ring_positions(world, s)
+            .into_iter()
+            .max_by(|a, b| a.dot(dir).total_cmp(&b.dot(dir)))
+            .unwrap()
+    }
+
+    // Bearings for the other actor: the eight authored ring directions plus off-axis ones, so the
+    // selector is exercised where the answer is not simply the ring point it points at.
+    fn other_actor_bearings() -> Vec<Vec3> {
+        (0..16)
+            .map(|i| {
+                let a = i as f32 * std::f32::consts::TAU / 16.0;
+                Vec3::new(a.cos(), 0.0, a.sin())
+            })
+            .collect()
+    }
+
+    fn assert_selector_tracks_the_other_actor(world: &[Mat4], s: &Skeleton) {
+        for dir in other_actor_bearings() {
+            let expected = most_forward_ring_point(world, s, dir);
+            assert!(
+                expected.dot(dir) > 0.0,
+                "the struck side must face the other actor: {dir:?} -> {expected:?}"
+            );
+            for reference in NEAREST_JOINT_REFERENCES {
+                assert_eq!(
+                    attach_joint_position(world, s, reference, Some(dir * OTHER_ACTOR_REACH)),
+                    Some(expected),
+                    "reference {reference} toward {dir:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn nearest_joint_reference_picks_the_ring_point_facing_the_other_actor() {
+        let s = ringed_skel();
+        let world = pose_world(&s, |_| None, RootTransform::identity(), &[]);
+        assert_selector_tracks_the_other_actor(&world, &s);
+    }
+
+    #[test]
+    fn nearest_joint_reference_without_a_second_actor_falls_back_to_the_root() {
+        let s = ringed_skel();
+        let world = pose_world(&s, |_| None, RootTransform::identity(), &[]);
+        for reference in NEAREST_JOINT_REFERENCES {
+            assert_eq!(
+                attach_joint_position(&world, &s, reference, None),
+                Some(Vec3::ZERO),
+                "reference {reference}"
+            );
+        }
+    }
+
+    #[test]
+    fn ordinary_joint_references_ignore_the_nearest_selector() {
+        use ffxi_dat::skel::standard_position::ABOVE_HEAD;
+        let s = ringed_skel();
+        let world = pose_world(&s, |_| None, RootTransform::identity(), &[]);
+        let toward = Vec3::new(0.0, 0.0, OTHER_ACTOR_REACH);
+        assert_eq!(
+            attach_joint_position(&world, &s, ABOVE_HEAD, Some(toward)),
+            Some(Vec3::new(0.0, ABOVE_HEAD_HEIGHT, 0.0))
+        );
+    }
+
+    #[test]
+    fn attach_joint_ring_turns_with_the_actor() {
+        let s = ringed_skel();
+        for facing_dir in [0.0, 0.5, 1.0, 2.0, 3.0] {
+            let world = pose_world(
+                &s,
+                |_| None,
+                RootTransform {
+                    facing_dir,
+                    ..RootTransform::identity()
+                },
+                &[],
+            );
+            assert_selector_tracks_the_other_actor(&world, &s);
+        }
+    }
+
+    // Real-DAT oracle for the fixture above and for the whole selector rule: the retail HumeM
+    // skeleton, posed, must put a j1=49 attach (the ROM/0/0.DAT hit sparks g010/g011/g013) on the
+    // ring point nearest the attacker -- never at the actor root, which is what reference 49's own
+    // table entry resolves to.
+    // ROM/27/82.DAT `hm_s`, the same skeleton kuluu-render's melee-hit-chain test walks.
+    const HUME_M_SKELETON_FILE: u32 = 7072;
+
+    #[test]
+    fn real_dat_retail_skeleton_resolves_the_nearest_joint_selector_onto_its_ring() {
+        let Some(root) = ffxi_dat::archive::open_test_install() else {
+            return;
+        };
+        let Ok(loc) = root.resolve(HUME_M_SKELETON_FILE) else {
+            eprintln!("SKIP: skeleton file unresolvable");
+            return;
+        };
+        let Ok(bytes) = std::fs::read(loc.path_under(&root)) else {
+            eprintln!("SKIP: skeleton file unreadable");
+            return;
+        };
+        let dir = ffxi_dat::resource_dir::ResourceDir::from_bytes(bytes);
+        let Some(s) = dir.collect_skeletons().into_iter().next() else {
+            eprintln!("SKIP: no skeleton chunk");
+            return;
+        };
+        let world = pose_world(&s, |_| None, RootTransform::identity(), &[]);
+
+        for reference in NEAREST_JOINT_REFERENCES {
+            assert_eq!(
+                standard_joint_world_position(&world, &s, reference),
+                Some(Vec3::ZERO),
+                "retail reference {reference} is a selector, not a placed point"
+            );
+        }
+        for (ring, pos) in RING_JOINT_REFERENCES.zip(ring_positions(&world, &s)) {
+            assert!(
+                pos.length() > 0.0,
+                "retail ring reference {ring} is unplaced"
+            );
+        }
+        let fixture = ringed_skel();
+        let fixture_world = pose_world(&fixture, |_| None, RootTransform::identity(), &[]);
+        for (retail, transcribed) in ring_positions(&world, &s)
+            .into_iter()
+            .zip(ring_positions(&fixture_world, &fixture))
+        {
+            assert!(
+                approx(retail, transcribed, 1e-4),
+                "the fixture above must stay a transcription of the retail ring: {retail:?} vs {transcribed:?}"
+            );
+        }
+
+        assert_selector_tracks_the_other_actor(&world, &s);
     }
 }

@@ -61,7 +61,7 @@ research/Phoenix/
 /xim/
 
 # WASM build outputs — ~150MB, over GitHub blob limit. Regenerate locally.
-ffxi-viewer-wasm/dist/
+kuluu-viewer-wasm/dist/
 profile.json.gz
 
 # Container-built Linux binaries (docker/build-linux.sh)

@@ -6,6 +6,7 @@ use kuluu_snapshot::EntityKind;
 
 use crate::components::{InGameEntity, IsSelf, WorldEntity};
 use crate::entity_table::EntityTable;
+use crate::graphics_settings::MinimapRadar;
 use crate::lock_on::LockOn;
 use crate::nameplate_color::{name_color_choice, NameColorTable, SelfContext};
 use crate::scene::Target;
@@ -84,7 +85,7 @@ impl MarkerCategory {
         }
     }
 
-    fn bit(self) -> u8 {
+    const fn bit(self) -> u8 {
         let idx = match self {
             MarkerCategory::SelfMarker => 0,
             MarkerCategory::Party => 1,
@@ -115,23 +116,37 @@ impl MarkerCategory {
 
 const ALL_CATEGORIES_MASK: u8 = (1 << MarkerCategory::ALL.len()) - 1;
 
+/// What retail's summoned map marks: you, your party, and the wide-scan
+/// tracked target. Live NPC/mob/PC dots are the Enhanced radar (kuluu-7cqw).
+const VANILLA_CATEGORIES_MASK: u8 =
+    MarkerCategory::SelfMarker.bit() | MarkerCategory::Party.bit() | MarkerCategory::Target.bit();
+
 /// Session-persistent per-category visibility bitset; a cleared bit hides that
 /// category on BOTH the minimap and the Map screen through the shared
-/// `sync_marker_layer`. Every category starts visible.
-#[derive(Resource, Debug, Clone, Copy)]
+/// `sync_marker_layer`. Which categories start set is the
+/// [`MinimapRadar`] mode's call; the legend toggles override it by hand.
+#[derive(Resource, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MarkerFilters {
     bits: u8,
 }
 
 impl Default for MarkerFilters {
     fn default() -> Self {
-        Self {
-            bits: ALL_CATEGORIES_MASK,
-        }
+        Self::for_radar(MinimapRadar::default())
     }
 }
 
 impl MarkerFilters {
+    pub const fn for_radar(radar: MinimapRadar) -> Self {
+        Self {
+            bits: if radar.entity_radar() {
+                ALL_CATEGORIES_MASK
+            } else {
+                VANILLA_CATEGORIES_MASK
+            },
+        }
+    }
+
     pub fn is_visible(&self, category: MarkerCategory) -> bool {
         self.bits & category.bit() != 0
     }
@@ -661,8 +676,8 @@ mod tests {
     }
 
     #[test]
-    fn marker_filters_default_all_visible_and_toggle_hides_one() {
-        let mut filters = MarkerFilters::default();
+    fn marker_filters_enhanced_all_visible_and_toggle_hides_one() {
+        let mut filters = MarkerFilters::for_radar(MinimapRadar::Enhanced);
         for category in MarkerCategory::ALL {
             assert!(filters.is_visible(category), "{category:?} starts visible");
         }
@@ -676,6 +691,29 @@ mod tests {
         }
         filters.toggle(MarkerCategory::Mob);
         assert!(filters.is_visible(MarkerCategory::Mob));
+    }
+
+    /// Retail's map marks you, your party and the wide-scan tracked target and
+    /// nothing else; the live NPC/mob/PC radar is the Enhanced opt-in.
+    #[test]
+    fn vanilla_radar_marks_only_self_party_and_target() {
+        let vanilla = MarkerFilters::for_radar(MinimapRadar::Vanilla);
+        for category in MarkerCategory::ALL {
+            let retail_marked = matches!(
+                category,
+                MarkerCategory::SelfMarker | MarkerCategory::Party | MarkerCategory::Target
+            );
+            assert_eq!(
+                vanilla.is_visible(category),
+                retail_marked,
+                "{category:?} under MinimapRadar::Vanilla"
+            );
+        }
+        assert_eq!(
+            MarkerFilters::default(),
+            vanilla,
+            "the default mode is the vanilla one"
+        );
     }
 
     /// The heading an actor's `Transform` encodes and the heading the camera
@@ -777,7 +815,7 @@ mod tests {
         let mut world = World::new();
         world.init_resource::<SceneState>();
         world.init_resource::<EntityTable>();
-        world.insert_resource(MarkerFilters::default());
+        world.insert_resource(MarkerFilters::for_radar(MinimapRadar::Enhanced));
         world.init_resource::<NameColorTable>();
         world.init_resource::<TestStore>();
         world.spawn(TestLayer);
@@ -804,6 +842,17 @@ mod tests {
         assert!(
             world.resource::<TestStore>().0.is_empty(),
             "filtering Mob off skips the dot in the shared helper (stale-cleaned)"
+        );
+
+        world.insert_resource(MarkerFilters::for_radar(MinimapRadar::Enhanced));
+        world.run_system_once(run_layer).unwrap();
+        assert_eq!(world.resource::<TestStore>().0.len(), 1, "radar back on");
+
+        world.insert_resource(MarkerFilters::for_radar(MinimapRadar::Vanilla));
+        world.run_system_once(run_layer).unwrap();
+        assert!(
+            world.resource::<TestStore>().0.is_empty(),
+            "the vanilla mode plots no mob dot on either map surface"
         );
     }
 }

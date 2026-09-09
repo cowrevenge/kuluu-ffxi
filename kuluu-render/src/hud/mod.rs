@@ -156,7 +156,9 @@ pub fn spawn_bottom_left_stack(
                     #[cfg(not(target_arch = "wasm32"))]
                     crate::minimap::spawn_minimap_as_child(col, &mut images);
 
-                    #[cfg(target_arch = "wasm32")]
+                    // The only compass spawn: update_compass resolves a
+                    // single CompassLabel, and the minimap panel that used to
+                    // carry a second one is closed by default (kuluu-7cqw).
                     compass::spawn_compass_as_child(col);
 
                     col.spawn(Node {

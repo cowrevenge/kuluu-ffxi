@@ -356,6 +356,7 @@ const GRAPHICS_ENTRIES: &[&str] = &[
     "Depth of Field",
     "DoF Aperture",
     "Zone Lines",
+    "Minimap",
     "Dynamic Lights",
     "  Emitter Threshold",
     "  Emitter Intensity",

@@ -4,6 +4,7 @@ use bevy::asset::RenderAssetUsages;
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 
+use crate::graphics_settings::{GraphicsSettings, MinimapRadar};
 use crate::hud::style::theme;
 
 pub mod input;
@@ -28,7 +29,7 @@ pub struct MinimapVisible(pub bool);
 
 impl Default for MinimapVisible {
     fn default() -> Self {
-        Self(true)
+        Self(MinimapRadar::default().panel_visible())
     }
 }
 
@@ -258,6 +259,7 @@ impl Plugin for MinimapPlugin {
                     input::handle_minimap_drag_input,
                     input::recenter_minimap_view,
                     update_minimap_view,
+                    apply_minimap_radar_setting,
                     (
                         update_minimap_image_source,
                         update_minimap_image_placement,
@@ -362,8 +364,6 @@ pub fn spawn_minimap_as_child(p: &mut ChildSpawnerCommands, images: &mut Assets<
             },
         ))
         .with_children(overlay::spawn_minimap_placed_markers);
-
-        crate::hud::compass::spawn_compass_overlay_as_child(p);
 
         p.spawn((
             Button,
@@ -551,13 +551,34 @@ impl MapImagePlacement {
     }
 }
 
+/// The persisted [`MinimapRadar`] mode owns the widget's open/closed state and
+/// the marker categories, but only when it *changes* (startup included): a
+/// later `/minimap` toggle or legend edit is the player's own override and
+/// must survive every unrelated graphics-settings write (kuluu-7cqw).
+pub fn apply_minimap_radar_setting(
+    settings: Res<GraphicsSettings>,
+    mut applied: Local<Option<MinimapRadar>>,
+    mut visible: ResMut<MinimapVisible>,
+    mut filters: ResMut<overlay::MarkerFilters>,
+) {
+    let radar = settings.minimap_radar;
+    if *applied == Some(radar) {
+        return;
+    }
+    *applied = Some(radar);
+    if visible.0 != radar.panel_visible() {
+        visible.0 = radar.panel_visible();
+    }
+    let want = overlay::MarkerFilters::for_radar(radar);
+    if *filters != want {
+        *filters = want;
+    }
+}
+
 pub fn update_minimap_visibility(
     visible: Res<MinimapVisible>,
     mut q: Query<&mut Node, With<MinimapRoot>>,
 ) {
-    if !visible.is_changed() {
-        return;
-    }
     let Ok(mut node) = q.single_mut() else {
         return;
     };
@@ -784,6 +805,58 @@ mod tests {
         assert_eq!(
             aabb.world_to_grid(Vec3::new(9999.0, 0.0, 9999.0)),
             ('P', 16)
+        );
+    }
+
+    /// Retail has no persistent radar, so the shipped default keeps the widget
+    /// closed and the entity categories off; flipping the setting opens both,
+    /// and an unrelated graphics edit must never undo a manual `/minimap`.
+    #[test]
+    fn radar_setting_owns_the_defaults_but_not_the_manual_toggle() {
+        let mut world = World::new();
+        world.init_resource::<GraphicsSettings>();
+        world.init_resource::<MinimapVisible>();
+        world.init_resource::<overlay::MarkerFilters>();
+        let apply = world.register_system(apply_minimap_radar_setting);
+
+        world.run_system(apply).unwrap();
+        assert!(!world.resource::<MinimapVisible>().0, "vanilla is closed");
+        assert_eq!(
+            *world.resource::<overlay::MarkerFilters>(),
+            overlay::MarkerFilters::for_radar(MinimapRadar::Vanilla)
+        );
+
+        world.resource_mut::<GraphicsSettings>().minimap_radar = MinimapRadar::Enhanced;
+        world.run_system(apply).unwrap();
+        assert!(world.resource::<MinimapVisible>().0, "enhanced opens it");
+        assert_eq!(
+            *world.resource::<overlay::MarkerFilters>(),
+            overlay::MarkerFilters::for_radar(MinimapRadar::Enhanced)
+        );
+
+        world.resource_mut::<MinimapVisible>().0 = false;
+        world
+            .resource_mut::<overlay::MarkerFilters>()
+            .set(overlay::MarkerCategory::Mob, false);
+        world.resource_mut::<GraphicsSettings>().fov_deg += 1.0;
+        world.run_system(apply).unwrap();
+        assert!(
+            !world.resource::<MinimapVisible>().0,
+            "an unrelated settings write must not reopen the widget"
+        );
+        assert!(
+            !world
+                .resource::<overlay::MarkerFilters>()
+                .is_visible(overlay::MarkerCategory::Mob),
+            "nor undo a legend filter"
+        );
+
+        world.resource_mut::<GraphicsSettings>().minimap_radar = MinimapRadar::Vanilla;
+        world.run_system(apply).unwrap();
+        assert_eq!(
+            *world.resource::<overlay::MarkerFilters>(),
+            overlay::MarkerFilters::for_radar(MinimapRadar::Vanilla),
+            "switching back re-applies the mode"
         );
     }
 }

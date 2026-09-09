@@ -304,6 +304,11 @@ pub fn resolve_zone_area(
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+fn zone_weather_loaded_toast(file_id: u32, summary: &str) -> crate::snapshot::ToastEvent {
+    crate::snapshot::ToastEvent::debug(format!("⛅ Zone weather loaded: DAT {file_id} ({summary})"))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 pub fn load_zone_weather(
     scene_state: Res<SceneState>,
     mut zone_weather: ResMut<ZoneWeather>,
@@ -350,9 +355,7 @@ pub fn load_zone_weather(
             format!("types [{}]", types.join(", "))
         };
         info!(file_id, "zone weather loaded: {}", summary);
-        toasts.write(crate::snapshot::ToastEvent::system(format!(
-            "⛅ Zone weather loaded: DAT {file_id} ({summary})"
-        )));
+        toasts.write(zone_weather_loaded_toast(file_id, &summary));
     }
 }
 
@@ -639,6 +642,21 @@ pub fn apply_zone_weather(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn zone_weather_loaded_toast_is_devhud_only() {
+        let toast = zone_weather_loaded_toast(102, "types [rain]");
+        assert_eq!(
+            toast.line.text,
+            "⛅ Zone weather loaded: DAT 102 (types [rain])"
+        );
+        assert!(!crate::snapshot::chat_line_visible(
+            toast.line.channel,
+            false
+        ));
+        assert!(crate::snapshot::chat_line_visible(toast.line.channel, true));
+    }
 
     const DEFAULT: Color = Color::srgb(0.1, 0.2, 0.3);
 

@@ -66,6 +66,14 @@ pub fn spawn_vana_clock_as_child(p: &mut ChildSpawnerCommands) {
     });
 }
 
+fn vana_day_rollover_toast(total_vana_days: u64) -> crate::snapshot::ToastEvent {
+    crate::snapshot::ToastEvent::debug(format!(
+        "📅 Vana day {} — {}",
+        total_vana_days,
+        VanaWeekday::from_vana_day(total_vana_days).name(),
+    ))
+}
+
 pub fn update_vana_clock(
     mut q: Query<&mut Text, With<VanaClockLabel>>,
     mut orb_q: Query<(&mut Node, &mut ImageNode), With<VanaClockOrb>>,
@@ -97,11 +105,7 @@ pub fn update_vana_clock(
     if *prev_vana_day != Some(total_vana_days) {
         if let Some(prev) = *prev_vana_day {
             if prev != total_vana_days {
-                let weekday = VanaWeekday::from_vana_day(total_vana_days).name();
-                toasts.write(crate::snapshot::ToastEvent::system(format!(
-                    "📅 Vana day {} — {}",
-                    total_vana_days, weekday,
-                )));
+                toasts.write(vana_day_rollover_toast(total_vana_days));
             }
         }
         update_day_orb(&mut orb_q, total_vana_days, atlas, dat_root, &mut images);
@@ -215,6 +219,17 @@ fn player_grid_cell(
 mod tests {
     use super::*;
     use crate::vana_time::{EARTH_SECS_PER_VANA_HOUR, VANA_DAYS_PER_MONTH};
+
+    #[test]
+    fn day_rollover_toast_is_devhud_only() {
+        let toast = vana_day_rollover_toast(2);
+        assert_eq!(toast.line.text, "📅 Vana day 2 — Watersday");
+        assert!(!crate::snapshot::chat_line_visible(
+            toast.line.channel,
+            false
+        ));
+        assert!(crate::snapshot::chat_line_visible(toast.line.channel, true));
+    }
 
     #[test]
     fn day_orb_index_maps_weekday_to_element_sprite() {

@@ -388,6 +388,34 @@ const MOON_PHASE_NAMES: [&str; 8] = [
     "Waxing Gibbous",
 ];
 
+fn sun_transition_toast(sun_up: bool) -> crate::snapshot::ToastEvent {
+    crate::snapshot::ToastEvent::debug(if sun_up { "☀ Sunrise" } else { "☀ Sunset" }.to_string())
+}
+
+fn moon_transition_toast(moon_up: bool) -> crate::snapshot::ToastEvent {
+    crate::snapshot::ToastEvent::debug(
+        if moon_up {
+            "☾ Moonrise"
+        } else {
+            "☾ Moonset"
+        }
+        .to_string(),
+    )
+}
+
+fn moon_phase_toast(
+    phase_bucket: u8,
+    illumination: f32,
+    weekday: &str,
+) -> crate::snapshot::ToastEvent {
+    crate::snapshot::ToastEvent::debug(format!(
+        "☾ Moon: {} ({:.0}% illuminated) — {}",
+        MOON_PHASE_NAMES[phase_bucket as usize],
+        illumination * 100.0,
+        weekday,
+    ))
+}
+
 // Map our moon phase (0 = full, 0.5 = new; daysmod/84) to the retail 12-frame
 // sprite index, where 0 = New and 6 = Full (research/xim EnvironmentManager.MoonPhase).
 pub fn moon_phase_frame(moon_phase: f32) -> usize {
@@ -518,14 +546,7 @@ pub fn sun_moon_system(
     let sun_up_now = sky.sun_altitude > 0.0;
     if let Some(prev) = *prev_sun_up {
         if prev != sun_up_now {
-            toasts.write(crate::snapshot::ToastEvent::system(
-                if sun_up_now {
-                    "☀ Sunrise"
-                } else {
-                    "☀ Sunset"
-                }
-                .to_string(),
-            ));
+            toasts.write(sun_transition_toast(sun_up_now));
         }
     }
     *prev_sun_up = Some(sun_up_now);
@@ -533,14 +554,7 @@ pub fn sun_moon_system(
     let moon_up_now = sky.moon_altitude > 0.0;
     if let Some(prev) = *prev_moon_up {
         if prev != moon_up_now {
-            toasts.write(crate::snapshot::ToastEvent::system(
-                if moon_up_now {
-                    "☾ Moonrise"
-                } else {
-                    "☾ Moonset"
-                }
-                .to_string(),
-            ));
+            toasts.write(moon_transition_toast(moon_up_now));
         }
     }
     *prev_moon_up = Some(moon_up_now);
@@ -550,12 +564,11 @@ pub fn sun_moon_system(
         if prev != phase_bucket {
             let weekday =
                 crate::vana_time::VanaWeekday::from_vana_day(vana_day_index(&vana_clock)).name();
-            toasts.write(crate::snapshot::ToastEvent::system(format!(
-                "☾ Moon: {} ({:.0}% illuminated) — {}",
-                MOON_PHASE_NAMES[phase_bucket as usize],
-                sky.moon_illumination * 100.0,
+            toasts.write(moon_phase_toast(
+                phase_bucket,
+                sky.moon_illumination,
                 weekday,
-            )));
+            ));
         }
     }
     *prev_phase_bucket = Some(phase_bucket);
@@ -921,6 +934,28 @@ pub fn sun_moon_system(
 mod tests {
     use super::*;
     use crate::vana_time::EARTH_SECS_PER_VANA_DAY;
+
+    #[test]
+    fn celestial_transition_toasts_are_devhud_only() {
+        let toasts = [
+            (sun_transition_toast(true), "☀ Sunrise"),
+            (sun_transition_toast(false), "☀ Sunset"),
+            (moon_transition_toast(true), "☾ Moonrise"),
+            (moon_transition_toast(false), "☾ Moonset"),
+            (
+                moon_phase_toast(0, 1.0, "Firesday"),
+                "☾ Moon: Full (100% illuminated) — Firesday",
+            ),
+        ];
+        for (toast, want_text) in toasts {
+            assert_eq!(toast.line.text, want_text);
+            assert!(
+                !crate::snapshot::chat_line_visible(toast.line.channel, false),
+                "{want_text} must stay out of player chat"
+            );
+            assert!(crate::snapshot::chat_line_visible(toast.line.channel, true));
+        }
+    }
 
     // research/xim EnvironmentSection.kt:206-225: pure moon before 355, ramp to pure
     // sun by 365, pure sun until 1075, ramp back to pure moon by 1085.

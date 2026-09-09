@@ -41,7 +41,7 @@ pub fn report_engagement_events_system(
             _ => None,
         };
         if let Some(text) = line {
-            toasts.write(crate::snapshot::ToastEvent::system(text));
+            toasts.write(crate::snapshot::ToastEvent::debug(text));
         }
     }
     cursor.pos = len;
@@ -80,7 +80,7 @@ pub fn report_speed_state_system(
     latch.prev_suppressed = Some(suppressed_now);
 
     if let Some(text) = line {
-        toasts.write(crate::snapshot::ToastEvent::system(text));
+        toasts.write(crate::snapshot::ToastEvent::debug(text));
     }
 }
 
@@ -94,5 +94,118 @@ impl Plugin for DebugChatPlugin {
                 Update,
                 (report_engagement_events_system, report_speed_state_system),
             );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::snapshot::{chat_line_visible, drain_toast_events, ToastEvent};
+    use kuluu_snapshot::{Entity as SnapEntity, EntityKind, SceneSnapshot, Vec3};
+
+    fn app() -> App {
+        let mut app = App::new();
+        app.add_message::<ToastEvent>()
+            .init_resource::<EventLog>()
+            .init_resource::<SceneState>()
+            .init_resource::<EngagementChatCursor>()
+            .init_resource::<SpeedSuppressionLatch>()
+            .add_systems(
+                Update,
+                (
+                    report_engagement_events_system,
+                    report_speed_state_system,
+                    drain_toast_events,
+                )
+                    .chain(),
+            );
+        app
+    }
+
+    fn self_entity(id: u32, speed: u8) -> SnapEntity {
+        SnapEntity {
+            id,
+            act_index: 1,
+            kind: EntityKind::Pc,
+            name: Some("Self".into()),
+            pos: Vec3 {
+                x: 0.0,
+                y: 0.0,
+                z: 0.0,
+            },
+            heading: 0,
+            hp_pct: Some(100),
+            bt_target_id: 0,
+            face_target: 0,
+            name_vis: None,
+            claim_id: 0,
+            speed,
+            speed_base: 40,
+            look: None,
+            animation: 0,
+            animationsub: 0,
+            mount: None,
+            status: 0,
+            char_flags: Default::default(),
+            monstrosity: false,
+        }
+    }
+
+    fn emitted(app: &App) -> Vec<&kuluu_snapshot::ChatLine> {
+        app.world()
+            .resource::<SceneState>()
+            .local_toasts
+            .iter()
+            .collect()
+    }
+
+    #[test]
+    fn engagement_lines_are_suppressed_without_dev_hud() {
+        let mut app = app();
+        {
+            let mut events = app.world_mut().resource_mut::<EventLog>();
+            events.push(ViewerEvent::EngagedBy { entity_id: 0x1234 });
+            events.push(ViewerEvent::LowHp { pct: 12 });
+            events.push(ViewerEvent::ZoneChanged {
+                from: Some(0x0100),
+                to: 0x0101,
+            });
+        }
+        app.update();
+
+        let lines = emitted(&app);
+        assert_eq!(lines.len(), 3, "got {lines:?}");
+        for line in lines {
+            assert!(
+                !chat_line_visible(line.channel, false),
+                "{:?} must stay out of player chat",
+                line.text
+            );
+            assert!(chat_line_visible(line.channel, true));
+        }
+    }
+
+    #[test]
+    fn speed_transition_lines_are_suppressed_without_dev_hud() {
+        let mut app = app();
+        let mut snap = SceneSnapshot {
+            self_char_id: Some(7),
+            ..Default::default()
+        };
+        snap.entities.push(self_entity(7, 40));
+        app.world_mut().resource_mut::<SceneState>().snapshot = snap;
+        app.update();
+        assert!(emitted(&app).is_empty(), "first frame only latches");
+
+        {
+            let mut state = app.world_mut().resource_mut::<SceneState>();
+            state.snapshot.entities[0].speed = 0;
+        }
+        app.update();
+
+        let lines = emitted(&app);
+        assert_eq!(lines.len(), 1, "got {lines:?}");
+        assert!(!chat_line_visible(lines[0].channel, false));
+        assert!(chat_line_visible(lines[0].channel, true));
     }
 }

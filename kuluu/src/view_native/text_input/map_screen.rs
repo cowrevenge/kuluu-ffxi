@@ -15,6 +15,7 @@ pub(super) fn handle_map_key(
     map_markers: Mut<kuluu_render::hud::map_screen::MapMarkers>,
     map_view: &kuluu_render::hud::map_screen::MapView,
     minimap_state: &kuluu_render::minimap::MinimapState,
+    change_map_catalog: &kuluu_render::hud::map_screen::ChangeMapCatalog,
 ) -> Option<InputMode> {
     use kuluu_render::hud::map_screen::{
         change_map_targets, widescan_rows, MapSubMode, COMMAND_ROWS,
@@ -95,7 +96,7 @@ pub(super) fn handle_map_key(
             map_view.visible_aabb,
         ),
         MapSubMode::ChangeMap => {
-            let targets = change_map_targets(map_state, &scene_state.snapshot);
+            let targets = change_map_targets(map_state, &scene_state.snapshot, change_map_catalog);
             if let Some(dir) = nav_dir(bindings, key) {
                 map_state.cursor = wrap_cursor(map_state.cursor, targets.len(), dir);
                 return None;

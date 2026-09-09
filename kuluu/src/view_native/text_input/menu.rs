@@ -549,6 +549,7 @@ pub(super) fn handle_menu_key(
     map_markers: Mut<kuluu_render::hud::map_screen::MapMarkers>,
     map_view: &kuluu_render::hud::map_screen::MapView,
     minimap_state: &kuluu_render::minimap::MinimapState,
+    change_map_catalog: &kuluu_render::hud::map_screen::ChangeMapCatalog,
 ) -> Option<InputMode> {
     let top_kind = stack.current()?.kind;
 
@@ -575,6 +576,7 @@ pub(super) fn handle_menu_key(
             map_markers,
             map_view,
             minimap_state,
+            change_map_catalog,
         );
     }
     let (kind, cursor) = {
@@ -823,7 +825,9 @@ mod menu_key_tests {
     use super::*;
     use crate::keybinds_store::KeybindsStore;
     use bevy::ecs::world::World;
-    use kuluu_render::hud::map_screen::{MapMarkers, MapScreenState, MapSubMode, MapView};
+    use kuluu_render::hud::map_screen::{
+        ChangeMapCatalog, MapMarkers, MapScreenState, MapSubMode, MapView,
+    };
     use kuluu_render::input_mode::Pane;
     use kuluu_render::minimap::{MinimapAabb, MinimapState};
 
@@ -845,6 +849,7 @@ mod menu_key_tests {
         map_state: MapScreenState,
         map_view: MapView,
         minimap_state: MinimapState,
+        change_map_catalog: ChangeMapCatalog,
         cmd_tx: Sender<AgentCommand>,
         _cmd_rx: tokio::sync::mpsc::Receiver<AgentCommand>,
     }
@@ -875,6 +880,7 @@ mod menu_key_tests {
                 map_state: MapScreenState::default(),
                 map_view: MapView::default(),
                 minimap_state: MinimapState::default(),
+                change_map_catalog: ChangeMapCatalog::default(),
                 cmd_tx,
                 _cmd_rx,
             }
@@ -912,6 +918,7 @@ mod menu_key_tests {
                 map_markers,
                 &self.map_view,
                 &self.minimap_state,
+                &self.change_map_catalog,
             )
         }
     }
@@ -993,6 +1000,47 @@ mod menu_key_tests {
         let markers = world.resource::<MapMarkers>();
         assert_eq!(markers.for_zone(ZONE).len(), 1);
         assert_eq!(markers.for_zone(ZONE)[0].label, "Camp");
+    }
+
+    /// kuluu-u8p1: the Change Map list the key handler indexes and the one the
+    /// panel draws must be the same list, and it must only offer floors the
+    /// zone's DLL records describe -- POLUtils lists a third Windurst Waters map
+    /// that the loader cannot resolve. Gated on a retail install (self-skips).
+    #[test]
+    fn change_map_confirm_selects_a_floor_the_dll_describes() {
+        const WINDURST_WATERS: u16 = 238;
+        let Some(root) = ffxi_dat::archive::open_test_install() else {
+            return;
+        };
+        let Ok(dll) = ffxi_dat::main_dll::MainDll::load(root.root()) else {
+            return;
+        };
+
+        let mut harness = Harness::new();
+        harness.change_map_catalog = ChangeMapCatalog::from_dll(&dll);
+        let mut world = marker_world();
+        let mut stack = MenuStack::root();
+        stack.push(MenuKind::Map);
+        stack.take_absorb_open_minus();
+
+        harness.scene_state.snapshot.zone_id = Some(WINDURST_WATERS);
+        harness.map_state.mode = MapSubMode::ChangeMap;
+
+        let markers = world.resource_mut::<MapMarkers>();
+        harness.key(&Key::ArrowDown, KeyCode::ArrowDown, &mut stack, markers);
+        let markers = world.resource_mut::<MapMarkers>();
+        harness.key(&Key::Enter, KeyCode::Enter, &mut stack, markers);
+
+        assert_eq!(
+            harness.map_state.viewed,
+            Some((WINDURST_WATERS, 1)),
+            "the second row is the zone's second floor"
+        );
+        assert_eq!(
+            dll.zone_maps(WINDURST_WATERS).len(),
+            2,
+            "and the zone has no third floor row to land on"
+        );
     }
 
     /// kuluu-kzxp: Period/Comma zoom the full-screen map on default binds. The

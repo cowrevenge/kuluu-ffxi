@@ -1,13 +1,13 @@
 //! Linkshell-name codec: the packed 6-bit encoding retail stores in a
 //! linkshell item's exdata and ships in s2c 0x0C9 GENERAL `sComLinkName`.
 //!
-//! Port of `DecodeStringLinkshell` (vendor/server/src/common/utils.cpp:532-570)
+//! Port of `DecodeStringLinkshell` (vendor/server/src/common/utils.cpp)
 //! over `unpackBitsLE` (utils.cpp:446), which is plain little-endian bit-field
 //! extraction: the field at `bit_offset` occupies bits
 //! `[bit_offset % 8, bit_offset % 8 + len)` of the LE integer starting at
 //! `bit_offset / 8`.
 
-/// Bytes of `sComLinkName` (vendor/server/src/map/packets/s2c/0x0c9_equip_inspect_general.h:47).
+/// Bytes of `sComLinkName` (vendor/server/src/map/packets/s2c/0x0c9_equip_inspect_general.h GP_SERV_COMMAND_EQUIP_INSPECT job).
 pub const PACKED_LEN: usize = 16;
 
 const BITS_PER_CHAR: usize = 6;

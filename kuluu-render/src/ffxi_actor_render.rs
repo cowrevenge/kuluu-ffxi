@@ -615,7 +615,7 @@ fn default_pc_equipment(race: u8) -> Vec<u32> {
     out
 }
 
-// research/XIClient/src/XIClient/source/World/Actor/SkeletalMeshActor.cpp:3175
+// research/XIClient/src/XIClient/source/World/Actor/SkeletalMeshActor.cpp SkeletalMeshActor::GetUpperBodyDatIndex
 // and :3165 — the two companion motion DATs sit at fixed offsets from the race
 // skeleton base, indexed by a CIB byte.
 const UPPER_BODY_MOTION_OFFSET: u32 = 1;
@@ -943,7 +943,7 @@ fn entity_aabb_from_joints(
     any.then(|| Aabb::from_min_max(lo - margin, hi + margin))
 }
 
-// research/XIClient Rendering/Direct3D8Manager.cpp:393,395 — the skeletal vertex colour reaches
+// research/XIClient Rendering/Direct3D8Manager.cpp:393 — the skeletal vertex colour reaches
 // fixed-function T&L as D3DMCS_COLOR1 exactly as the zone MMB one does, so it takes the same
 // D3DCOLOR byte/255 scale (pinned against `mmb::VERTEX_COLOR_DIVISOR` below:
 // `ffxi_zone_material::AMBIENT_FLOOR` is chosen for both paths at once and only holds while
@@ -3386,7 +3386,7 @@ pub fn dispatch_action_overlay(
         };
 
         // An interrupt arrives on the cast-start category carrying an "sp*" FourCC
-        // (vendor/server/src/map/action/interrupts.cpp:268-284); treating it as a start would
+        // (vendor/server/src/map/action/interrupts.cpp MagicInterrupt); treating it as a start would
         // re-arm the looping pose for CAST_TIMEOUT_FRAMES instead of dropping it.
         let magic = (action_kind == MAGIC_START_CATEGORY)
             .then(|| ffxi_vocab::magic::magic_start_routine(action_id))

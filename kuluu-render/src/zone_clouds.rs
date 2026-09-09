@@ -147,7 +147,7 @@ fn ffxi_to_bevy_basis() -> Quat {
 // 16 zones against `suny`'s 130 — so an exact-match-or-nothing lookup leaves the
 // sky bare for every weather the zone does not carry. Retail searches the
 // container for the requested tag and falls back to `suny` on a miss
-// (research/XIClient/src/XIClient/source/World/Weather/WeatherTransition.cpp:52-54),
+// (research/XIClient/src/XIClient/source/World/Weather/WeatherTransition.cpp WeatherTransition::WeatherTransition),
 // which is the same single hop the 0x2F record selection takes.
 pub(crate) fn find_weat_type<'a>(
     node: &'a ChunkNode<'a>,

@@ -123,7 +123,7 @@ pub enum BlowfishStatus {
     PendingZone,
 }
 
-// vendor/server/src/map/enums/weather.h:24-46 (None=0..Darkness=19)
+// vendor/server/src/map/enums/weather.h Weather (None=0..Darkness=19)
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum Weather {
@@ -153,7 +153,7 @@ pub enum Weather {
 impl Weather {
     pub fn from_lsb(n: u16) -> Self {
         use Weather::*;
-        // vendor/server/src/map/enums/weather.h:24-46
+        // vendor/server/src/map/enums/weather.h Weather
         const TABLE: [Weather; 20] = [
             None,
             Sunshine,
@@ -255,7 +255,7 @@ pub struct CharFlags {
 
     /// `Flags4.JobMasterFlag` (bit 6 of the u8 at body offset 0x2F): LSB's
     /// job-master display toggle — `SUPERIOR_LEVEL == 5 && m_jobMasterDisplay`
-    /// (vendor/server/src/map/packets/char_update.cpp:441), written on every
+    /// (vendor/server/src/map/packets/char_update.cpp CCharUpdatePacket::updateWith), written on every
     /// non-despawn 0x0D outside all SendFlg blocks. Drives the same nameplate
     /// star as `lfg_master`, which retail keys off `Flags3.LfgMasterFlag` — a
     /// flag LSB hardcodes to 0 (char_update.cpp:339).
@@ -362,7 +362,7 @@ pub struct Entity {
     pub monstrosity: bool,
 
     /// entity_update byte 0x2B (LSB `namevis`; PosHead `flags3 >> 24`), written
-    /// under UPDATE_HP — vendor/server/src/map/packets/entity_update.cpp:357/:408.
+    /// under UPDATE_HP — vendor/server/src/map/packets/entity_update.cpp CEntityUpdatePacket::updateWith/:408.
     /// `None` until the first General-block update carries it; treated as visible,
     /// matching the server's VIS_NONE default (baseentity.cpp:45). LSB NAMEVIS
     /// (vendor/server/src/map/entities/baseentity.h): 0x01 icon, 0x08 hide-name,
@@ -390,7 +390,7 @@ impl Entity {
     }
 
     /// Retail-hidden helper NPC: VIS_HIDE_NAME set — mannequins, "blank"
-    /// cutscene actors. vendor/server/src/map/entities/baseentity.cpp:159
+    /// cutscene actors. vendor/server/src/map/entities/baseentity.cpp CBaseEntity::IsNameHidden
     /// `IsNameHidden() = namevis & FLAG_HIDE_NAME` (0x08); the NAMEVIS enum
     /// defines only 0x01/0x08/0x80, so the other bits are render-phase flags,
     /// not name suppression. Suppresses the nameplate only — never targeting.
@@ -409,7 +409,7 @@ impl Entity {
 
     /// LSB `Flags1.InvisFlag` (bit 29): player-invisibility — a GM hiding
     /// themselves or an EFFECTFLAG_INVISIBLE status effect. The server sets it
-    /// for PCs only (vendor/server/src/map/packets/char_update.cpp:316), so the
+    /// for PCs only (vendor/server/src/map/packets/char_update.cpp CCharUpdatePacket::updateWith), so the
     /// kind gate is part of the fact, not a render preference. Unlike
     /// [`Entity::is_invisible`] (STATUS_TYPE on mobs) this never gates targeting:
     /// retail keeps invisible players targetable and draws nothing instead.
@@ -430,7 +430,7 @@ impl Entity {
     /// interactable: retail sends a Talk (0x01A, action 0x00) on the door's
     /// act_index and the door's onTrigger lua drives open/confirm/zone-change.
     /// LSB gates doors on `look.size == 0x02`
-    /// (vendor/server/src/map/packets/c2s/0x01a_action.cpp:213); size 3/4 decode
+    /// (vendor/server/src/map/packets/c2s/0x01a_action.cpp GP_CLI_COMMAND_ACTION::process); size 3/4 decode
     /// to `Transport` (elevators/airships), which stay non-interactable.
     pub fn is_door(&self) -> bool {
         matches!(self.look, Some(EntityLook::Door { .. }))
@@ -568,7 +568,7 @@ pub struct PartyMember {
     pub is_alliance_leader: bool,
 
     /// Which party of the alliance this member sits in (0..2, or 3 for
-    /// "no party"). vendor/server/src/map/packets/s2c/0x0dd_group_list.cpp:40.
+    /// "no party"). vendor/server/src/map/packets/s2c/0x0dd_group_list.cpp GP_SERV_COMMAND_GROUP_LIST::GP_SERV_COMMAND_GROUP_LIST.
     #[serde(default)]
     pub party_no: u8,
 
@@ -751,7 +751,7 @@ pub struct SceneSnapshot {
     pub self_fishing: Option<SelfFishing>,
 
     /// The server's animation byte for self, from 0x037 CHAR_STATUS
-    /// (`vendor/server/src/map/packets/char_status.cpp:221` — `PChar->animation`).
+    /// (`vendor/server/src/map/packets/char_status.cpp CCharStatusPacket::CCharStatusPacket` — `PChar->animation`).
     /// Authoritative for the rest stance: CHAR_PC carries `Entity::animation` for
     /// other players, but self's own state only arrives here.
     #[serde(default)]
@@ -925,7 +925,7 @@ impl SceneSnapshot {
 
 /// s2c 0x00A myroom cluster; `model` is an interior model id, not a zone id —
 /// resolve via `ffxi_dat::zone_dat::effective_zone_dat_file_id`
-/// (vendor/server/src/map/packets/s2c/0x00a_login.cpp:32-34).
+/// (vendor/server/src/map/packets/s2c/0x00a_login.cpp GetMogHouseModelID).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MyRoom {
     pub model: u16,
@@ -1039,7 +1039,7 @@ pub struct BazaarEntry {
 impl BazaarEntry {
     /// Gil charged for `quantity` units, tax included. Mirrors
     /// `kuluu::state::BazaarItem::total_price` (LSB
-    /// vendor/server/src/map/packets/c2s/0x106_bazaar_buy.cpp:103).
+    /// vendor/server/src/map/packets/c2s/0x106_bazaar_buy.cpp GP_CLI_COMMAND_BAZAAR_BUY::process totalPrice).
     pub fn total_price(&self, quantity: u32) -> u32 {
         const TAX_DIVISOR: u64 = 10_000;
         let base = u64::from(self.price) * u64::from(quantity);
@@ -1147,7 +1147,7 @@ pub struct InventoryItem {
     pub locked: bool,
     /// Current charges of a charged (usable/enchanted) item; `None` for
     /// non-charged items. From item extdata
-    /// (vendor/server/src/map/items/exdata/timer_info.h:31-32, memcpy'd at
+    /// (vendor/server/src/map/items/exdata/timer_info.h ItemTimerInfo Header, memcpy'd at
     /// 0x020_item_attr.cpp:43).
     #[serde(default)]
     pub charges_remaining: Option<u8>,

@@ -1,7 +1,7 @@
 use super::*;
 
 /// GP_POST_BOX_STATE item payload of the full-form s2c 0x04B
-/// (vendor/server/src/map/packets/s2c/0x04b_pbx_result.h:57-67). `counterpart`
+/// (vendor/server/src/map/packets/s2c/0x04b_pbx_result.h GC_PBOX). `counterpart`
 /// is the GC_PBOX name field: sender (Incoming box) or recipient (Outgoing).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PbxBoxState {

@@ -8,7 +8,7 @@
 include!(concat!(env!("OUT_DIR"), "/status_effect_flags_table.rs"));
 
 /// EFFECTFLAG_NO_CANCEL — "CAN NOT CLICK IT OFF IN CLIENT"
-/// (vendor/server/src/map/status_effect.h:69). Retail's client hides the cancel
+/// (vendor/server/src/map/status_effect.h EFFECTFLAG_NO_CANCEL). Retail's client hides the cancel
 /// affordance for these; LSB's 0x0F1 handler does NOT re-check it
 /// (vendor/server/src/map/packets/c2s/0x0f1_buffcancel.cpp `// TODO`), so the
 /// client is the only gate — a cancel we send for a NO_CANCEL buff would be

@@ -1,6 +1,6 @@
 use super::*;
 
-/// Slots in one treasure pool (vendor/server/src/map/treasure_pool.h:38
+/// Slots in one treasure pool (vendor/server/src/map/treasure_pool.h TREASUREPOOL_SIZE
 /// `TREASUREPOOL_SIZE`).
 pub const TREASURE_POOL_SIZE: usize = 10;
 

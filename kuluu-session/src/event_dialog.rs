@@ -98,7 +98,7 @@ pub struct EventTrigger {
     pub event_zone: u16,
     /// Zone whose dialog DAT holds the strings. Usually the same as
     /// `event_zone`, but 0x34 can redirect it (`EventNum2` = `eventInfo->
-    /// textTable`, vendor/server/src/map/packets/s2c/0x034_eventnum.cpp:56-64).
+    /// textTable`, vendor/server/src/map/packets/s2c/0x034_eventnum.cpp GP_SERV_COMMAND_EVENTNUM::GP_SERV_COMMAND_EVENTNUM).
     pub text_zone: u16,
     pub unique_no: u32,
     pub act_index: u16,

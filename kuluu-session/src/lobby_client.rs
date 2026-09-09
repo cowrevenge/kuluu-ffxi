@@ -298,7 +298,7 @@ impl LobbyHandle {
 /// Build the 0x07 view-select for `char_id`, taking the name from the account's
 /// own chr_info2 slots. LSB looks the selection up with
 /// `WHERE charid = ? AND charname = ?` and closes the socket on a mismatch
-/// (vendor/server/src/login/view_session.cpp:62-75), so an id the account does
+/// (vendor/server/src/login/view_session.cpp view_session::read_func), so an id the account does
 /// not own fails here rather than on the wire — there is no caller-supplied
 /// name to fall back to.
 fn build_view_select_by_id(
@@ -493,9 +493,9 @@ fn build_data_a2(key3: &[u8; 20]) -> Vec<u8> {
     buf
 }
 
-/// vendor/server/src/login/view_session.cpp:56-58 reads the selected char id at
+/// vendor/server/src/login/view_session.cpp view_session::read_func requestedCharacterID reads the selected char id at
 /// buffer offset 28 and copies `PacketNameLength - 1` name bytes from offset 36
-/// (`PacketNameLength = 16`, vendor/server/src/common/utils.h:71).
+/// (`PacketNameLength = 16`, vendor/server/src/common/utils.h).
 const VIEW_SELECT_PACKET_SIZE: u32 = 0x44;
 const VIEW_SELECT_CHAR_ID_OFFSET: usize = 28;
 const VIEW_SELECT_WORLD_CHAR_ID_OFFSET: usize = 32;
@@ -802,7 +802,7 @@ async fn parse_view_chr_info2(stream: &mut TcpStream) -> Result<Vec<CharSlot>> {
 /// Field offsets of the 0x0B lpkt_next_login the view socket answers the select
 /// with: a 28-byte packet_t header then ffxi_id, ffxi_id_world,
 /// character_name[16], server_id, server_ip, server_port
-/// (vendor/server/src/login/login_packets.h:68-82).
+/// (vendor/server/src/login/login_packets.h lpkt_next_login).
 const NEXT_LOGIN_CHAR_ID_OFFSET: usize = 28;
 const NEXT_LOGIN_NAME_OFFSET: usize = 36;
 const NEXT_LOGIN_NAME_LEN: usize = 16;
@@ -1029,7 +1029,7 @@ mod tests {
     /// The regression kuluu-3nd2 fixed: `CharSelection::Id` has no name to pass
     /// (session.rs calls `handshake` with the id alone), and LSB closes the
     /// socket when the 0x07's name doesn't match the id
-    /// (vendor/server/src/login/view_session.cpp:62-75).
+    /// (vendor/server/src/login/view_session.cpp view_session::read_func).
     #[tokio::test]
     async fn handshake_by_id_puts_the_roster_name_on_the_wire() {
         let view = TcpListener::bind("127.0.0.1:0").await.unwrap();

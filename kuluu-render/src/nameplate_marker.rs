@@ -36,7 +36,7 @@ pub mod glyph {
     /// LSB that state is `Flags3.NewCharacterFlag` (bit 23), which
     /// `CCharUpdatePacket::updateWith` writes under SendFlg.General from
     /// `!playerConfig.NewAdventurerOffFlg` — bit 10 of the `chars.settings`
-    /// u32 (vendor/server/src/map/packets/char_update.cpp:347, common/mmo.h).
+    /// u32 (vendor/server/src/map/packets/char_update.cpp CCharUpdatePacket::updateWith, common/mmo.h).
     pub const NEW_PLAYER: u8 = 0xA1;
     /// AutoPartyFlag — accepting invites automatically.
     pub const AUTO_PARTY: u8 = 0x9D;
@@ -109,7 +109,7 @@ pub fn nameplate_markers(entity: &Entity) -> Vec<u8> {
     let flags = &entity.char_flags;
 
     // Retail expands every star in the marker string into a half-scale pair at
-    // draw time (research/XIClient/.../CXiActorNameDraw.cpp:301), so append the
+    // draw time (research/XIClient/src/XIClient/source/Rendering/Active/CXiActorNameDraw.cpp DrawActorNameText), so append the
     // tail after each occurrence — a ballista-allegiance job master carries two.
     let push_marker = |markers: &mut Vec<u8>, code: u8| {
         markers.push(code);
@@ -140,7 +140,7 @@ pub fn nameplate_markers(entity: &Entity) -> Vec<u8> {
 ///   (`AUDIT_130.BIT_22`) ride only s2c 0x067 RecvActorSupplement, which LSB does
 ///   not implement — dead on this wire.
 /// - The 0xA2/0xB1 bazaar check reads `AUDIT_130.BIT_20`, which the client sets
-///   only in the 0x00E NPC path (research/XIClient/.../s2c/0x00E.cpp:301/:305);
+///   only in the 0x00E NPC path (research/XIClient/src/XIClient/source/Game/Net/Packets/s2c/0x00E.cpp ActorTelemetry::IsOnChair/:305);
 ///   the PC bazaar is `AUDIT_128.BIT_9` → glyph 0x9C, which we do draw.
 /// - The campaign special markers (glyphs 0xC8-0xCB/0xCD via
 ///   `GetSpecialActorNameMarker`, keyed off Flags4 bits 2-5) are not decodable:

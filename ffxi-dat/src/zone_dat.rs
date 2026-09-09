@@ -9,7 +9,7 @@ pub fn zone_id_to_mzb_file_id(zone_id: u16) -> Option<u32> {
 }
 
 /// Mog House interior MODEL id (the 0x00A `MyroomMapNumber`, produced by
-/// GetMogHouseModelID — vendor/server/src/map/packets/s2c/0x00a_login.cpp:35-72)
+/// GetMogHouseModelID — vendor/server/src/map/packets/s2c/0x00a_login.cpp)
 /// → MZB DAT file id. Model ids are NOT zone ids; never feed them to
 /// [`zone_id_to_mzb_file_id`]. File ids verified against
 /// research/xim/src/jsMain/kotlin/xim/poc/tools/ZoneChanger.kt:18-36; an explicit
@@ -181,7 +181,7 @@ mod tests {
     fn unmapped_myroom_model_falls_back_to_zone_dat() {
         // LSB sends LoginState MYROOM plus the Feretory alias model (ffxi-proto
         // `MYROOM_FERETORY`) for ZONE_FERETORY, a zone with no real Mog House
-        // (vendor/server/src/map/packets/s2c/0x00a_login.cpp:234-239); the model
+        // (vendor/server/src/map/packets/s2c/0x00a_login.cpp GP_SERV_COMMAND_LOGIN::GP_SERV_COMMAND_LOGIN); the model
         // is deliberately unmapped, so the zone fallback is what keeps a MYROOM
         // login renderable.
         let feretory = effective_zone_dat_file_id(Some(285), Some(729));

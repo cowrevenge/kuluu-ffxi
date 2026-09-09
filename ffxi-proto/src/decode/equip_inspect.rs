@@ -3,12 +3,12 @@ use super::*;
 // s2c 0x0C9 GP_SERV_COMMAND_EQUIP_INSPECT — the /check answer for a PC target.
 // LSB pushes up to three EQUIPMENT batches (OptionFlag 0x03, 8 checkitems each)
 // followed by one GENERAL packet (OptionFlag 0x01), all carrying the target's
-// UniqNo/ActIndex (vendor/server/src/map/packets/c2s/0x0dd_equip_inspect.cpp:135-136).
+// UniqNo/ActIndex (vendor/server/src/map/packets/c2s/0x0dd_equip_inspect.cpp GP_CLI_COMMAND_EQUIP_INSPECT::process).
 // Offsets are into the subpacket body (4-byte GP_SERV_HEADER stripped).
 
-// vendor/server/src/map/packets/s2c/0x0c9_equip_inspect_general.cpp:33
+// vendor/server/src/map/packets/s2c/0x0c9_equip_inspect_general.cpp GENERAL::GENERAL
 pub(crate) const EQUIP_INSPECT_OPTION_GENERAL: u8 = 0x01;
-// vendor/server/src/map/packets/s2c/0x0c9_equip_inspect_equipment.cpp:37
+// vendor/server/src/map/packets/s2c/0x0c9_equip_inspect_equipment.cpp EQUIPMENT::EQUIPMENT
 pub(crate) const EQUIP_INSPECT_OPTION_EQUIPMENT: u8 = 0x03;
 
 const EQUIP_INSPECT_OPTION_FLAG_OFFSET: usize = 6;
@@ -38,7 +38,7 @@ impl EquipInspect {
 }
 
 /// Mode 0x01: jobs/levels (zeroed while the target is /anon) and linkshell.
-/// vendor/server/src/map/packets/s2c/0x0c9_equip_inspect_general.h:38-60.
+/// vendor/server/src/map/packets/s2c/0x0c9_equip_inspect_general.h GP_SERV_COMMAND_EQUIP_INSPECT PacketData.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EquipInspectGeneral {
     pub unique_no: u32,
@@ -106,7 +106,7 @@ impl EquipInspectGeneral {
 
 /// One `checkitem_t`; `equip_kind` is SAVE_EQUIP_KIND, whose 0..=15 order equals
 /// LSB SLOTTYPE (the EQUIPMENT constructor casts the slot loop index directly).
-/// vendor/server/src/map/packets/s2c/0x0c9_equip_inspect_equipment.h:28-56.
+/// vendor/server/src/map/packets/s2c/0x0c9_equip_inspect_equipment.h SAVE_EQUIP_KIND.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EquipInspectItem {
     pub item_no: u16,
@@ -114,7 +114,7 @@ pub struct EquipInspectItem {
 }
 
 /// Mode 0x03: one batch of up to 8 equipped items.
-/// vendor/server/src/map/packets/s2c/0x0c9_equip_inspect_equipment.h:65-78.
+/// vendor/server/src/map/packets/s2c/0x0c9_equip_inspect_equipment.h EQUIPMENT.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EquipInspectEquipment {
     pub unique_no: u32,

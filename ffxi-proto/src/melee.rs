@@ -1,8 +1,8 @@
-// vendor/server/src/map/enums/action/category.h:31 — `action.cmd_no`, 4 bits.
+// vendor/server/src/map/enums/action/category.h ActionCategory BasicAttack — `action.cmd_no`, 4 bits.
 pub const CATEGORY_BASIC_ATTACK: u8 = 1;
 
 // vendor/server/src/map/enums/action/resolution.h — `result.resolution`, 3 bits in
-// vendor/server/src/map/packets/s2c/0x028_battle2.cpp:71.
+// vendor/server/src/map/packets/s2c/0x028_battle2.cpp GP_SERV_COMMAND_BATTLE2::pack.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ActionResolution {
     Hit,
@@ -35,8 +35,8 @@ impl ActionResolution {
     }
 }
 
-// vendor/server/src/map/attack.h:52-59. Set from `attack.GetAnimationID()` into
-// `actionResult.animation` (vendor/server/src/map/entities/battleentity.cpp:3007) — for a basic
+// vendor/server/src/map/attack.h AttackAnimation. Set from `attack.GetAnimationID()` into
+// `actionResult.animation` (vendor/server/src/map/entities/battleentity.cpp CBattleEntity::OnAttack) — for a basic
 // attack this is the swing slot, not a skill id.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum AttackAnimation {
@@ -70,7 +70,7 @@ impl AttackAnimation {
     }
 }
 
-// vendor/server/src/map/packets/s2c/0x028_battle2.cpp:71-73 — one result block's
+// vendor/server/src/map/packets/s2c/0x028_battle2.cpp GP_SERV_COMMAND_BATTLE2::pack — one result block's
 // resolution(3)/animation(12) pair. A body that carries no result block, or that ends mid-block,
 // has no pair at all: `resolution == 0` is `Hit`, so absence must not be spelled as zero.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

@@ -1028,7 +1028,7 @@ mod tests {
     }
 
     /// Pins the LSB MYROOMEXITBIT/MYROOMEXITMODE contract
-    /// (vendor/server/src/map/packets/c2s/0x05e_maprect.h:26-50).
+    /// (vendor/server/src/map/packets/c2s/0x05e_maprect.h GP_CLI_COMMAND_MAPRECT_MYROOMEXITBIT).
     #[test]
     fn terminal_exit_rows_map_to_lsb_wire_pairs() {
         assert_eq!(MogHouseExit::Home { exit_bit: 1 }.wire_pair(), (1, 0));
@@ -1111,7 +1111,7 @@ mod tests {
     /// LSB's destination-zone formulas — row order IS the destination, including
     /// the three irregular ones (Jeuno's Ru'Lude-first base, Whitegate's split
     /// Al Zahbi/Whitegate base, Adoulin's mode-2 Eastern special case)
-    /// (vendor/server/src/map/packets/c2s/0x05e_maprect.cpp:88-135 + zone.h) —
+    /// (vendor/server/src/map/packets/c2s/0x05e_maprect.cpp GP_CLI_COMMAND_MAPRECT::process + zone.h) —
     /// plus the `from_bit_slot` inverse and membership in the PacketValidator
     /// oneOf enums (0x05e_maprect.h:26-50), whose rejection is a silent drop.
     #[test]

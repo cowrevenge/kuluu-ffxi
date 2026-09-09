@@ -35,7 +35,7 @@ pub fn is_mounted(animation: u8) -> bool {
     animation == CHOCOBO || animation == MOUNT
 }
 
-// ANIMATIONTYPE, vendor/server/src/map/entities/baseentity.h:60. The server writes
+// ANIMATIONTYPE, vendor/server/src/map/entities/baseentity.h. The server writes
 // these into the entity's server_status (the 0x0D/0x37 animation byte) and broadcasts
 // them; the client maps each to the matching fsh* model clip (research/xim Actor.kt:361).
 // The pre-overhaul (38-43,50) and current (56-62) fishing systems share fsh0..fsh6.

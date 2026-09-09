@@ -2,7 +2,7 @@
 //! place of its closed-up exterior shells without a server-side zone change.
 //!
 //! Retail keeps two zone blocks live at once
-//! (research/XIClient/src/XIClient/include/Rendering/ZoneRenderer.h:45,
+//! (research/XIClient/src/XIClient/include/Rendering/ZoneRenderer.h ZoneRenderer MAX_ZONE_LOAD_COUNT,
 //! `MAX_ZONE_LOAD_COUNT = 2`): the main zone plus whichever sub-area the player
 //! stands in, loaded by DAT index in `ZoneRenderer::PreDraw`
 //! (ZoneRenderer.cpp:896-903). While that block is up, `SetRenderTypes`

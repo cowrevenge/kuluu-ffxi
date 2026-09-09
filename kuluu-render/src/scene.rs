@@ -171,9 +171,9 @@ pub struct PendingRetarget {
 /// The `Target` write deliberately reaches `dispatch_target_change_system` and
 /// goes back out as c2s 0x01A ChangeTarget: `battleutils::assistTarget` pushes
 /// 0x058 without touching `m_battleTarget`
-/// (vendor/server/src/map/utils/battleutils.cpp:5058-5078), so that echo is what
+/// (vendor/server/src/map/utils/battleutils.cpp assistTarget), so that echo is what
 /// actually moves the server's battle target for `/assist`
-/// (vendor/server/src/map/ai/ai_container.cpp:244-246 `SetBattleTargetID`).
+/// (vendor/server/src/map/ai/ai_container.cpp CAIContainer::Internal_ChangeTarget `SetBattleTargetID`).
 pub fn apply_server_retarget_system(
     events: Res<crate::snapshot::EventLog>,
     state: Res<SceneState>,
@@ -606,7 +606,7 @@ pub fn sync_entities_system(
 
 /// LSB `Flags1.InvisFlag` (bit 29): player-invisibility — a GM hiding themselves or an
 /// EFFECTFLAG_INVISIBLE status effect. The server sets it for PCs only
-/// (vendor/server/src/map/packets/char_update.cpp:316). Retail keeps such players
+/// (vendor/server/src/map/packets/char_update.cpp CCharUpdatePacket::updateWith). Retail keeps such players
 /// targetable but draws nothing: no model, no nameplate (the plate gate lives in
 /// `update_nameplate_billboards_system`).
 ///
@@ -1471,7 +1471,7 @@ mod tests {
     }
 
     /// A held lock is a flag over the one target slot in retail's model
-    /// (research/xim Actor.kt:106,932), so a server-side target change carries
+    /// (research/xim Actor.kt:106), so a server-side target change carries
     /// the lock with it instead of leaving camera and target panel on
     /// different mobs.
     #[test]

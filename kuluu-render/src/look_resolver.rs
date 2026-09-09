@@ -10,7 +10,7 @@ use crate::snapshot::SceneState;
 const EQUIP_SLOT_ORDER_LEN: usize = 8;
 
 // Slot numbering retail switches on when collecting per-slot CIB bytes
-// (research/XIClient/src/XIClient/source/World/Actor/SkeletalMeshActor.cpp:1656-1688:
+// (research/XIClient/src/XIClient/source/World/Actor/SkeletalMeshActor.cpp SkeletalMeshActor::SetEquipModel:
 // 2 = body, 5 = feet, 6 = main, 7 = sub, 8 = ranged), matching the order of
 // `slot_models` below.
 const EQUIP_SLOT_BODY: u8 = 2;
@@ -66,7 +66,7 @@ pub fn resolve_equipment_slot(slot_id: u16, race: u8) -> Option<u32> {
     if base == 0 {
         // Retail clamps a model id past the slot's table to model 0 instead of
         // dropping the part ("wrong GRP number",
-        // research/XIClient/src/XIClient/source/World/Actor/SkeletalMeshActor.cpp:489-494),
+        // research/XIClient/src/XIClient/source/World/Actor/SkeletalMeshActor.cpp constexpr),
         // so an out-of-band id renders the slot's base model, never a missing
         // body part.
         let (_, first_base) = bps.first()?;

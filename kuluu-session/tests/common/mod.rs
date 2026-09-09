@@ -51,12 +51,12 @@ const FIXTURE_ACCOUNT_PREFIX: &str = "it_";
 const FIXTURE_CHARNAME_PREFIX: &str = "It";
 const FIXTURE_SUFFIX_HEX_DIGITS: usize = 6;
 
-// vendor/server/settings/default/map.lua:18 `MAX_TIME_LASTUPDATE = 60`: a map
+// vendor/server/settings/default/map.lua `MAX_TIME_LASTUPDATE = 60`: a map
 // session — and the charid it pins — outlives the client's last packet by this
-// many seconds (vendor/server/src/map/map_session_container.cpp:222). While it
+// many seconds (vendor/server/src/map/map_session_container.cpp MapSessionContainer::cleanupSessions). While it
 // is resident, LSB answers the lobby's CharZone by refreshing that session
 // instead of creating the pending session a fresh login needs
-// (vendor/server/src/map/ipc_client.cpp:196), so the new client's 0x00A is
+// (vendor/server/src/map/ipc_client.cpp IPCClient::handleMessage_CharZone session), so the new client's 0x00A is
 // dropped (map_networking.cpp:270) and it never zones in. The fixture therefore
 // parks its account as a tombstone rather than deleting it, so neither
 // MAX(accounts.id)+1 nor COALESCE(MAX(chars.charid),…)+1 can hand the same ids
@@ -220,7 +220,7 @@ impl EphemeralChar {
         let mut conn = self.pool.get_conn().await.context("DB conn for cleanup")?;
 
         // Must go: LSB refuses the next login for an accid that still has a
-        // session row (vendor/server/src/login/data_session.cpp:427).
+        // session row (vendor/server/src/login/data_session.cpp data_session::read_func).
         "DELETE FROM accounts_sessions WHERE accid = ?"
             .with((self.accid,))
             .ignore(&mut conn)
@@ -321,7 +321,7 @@ async fn sweep_expired_tombstones(conn: &mut Conn) -> Result<()> {
 }
 
 // LSB's map server REPLACEs into char_history on save well after the client
-// drops (vendor/server/src/map/utils/charutils.cpp:7727), and a panicking test
+// drops (vendor/server/src/map/utils/charutils.cpp db::preparedStmt), and a panicking test
 // never reaches cleanup() at all, so a previous run can leave child rows whose
 // `chars` row is gone. Sweeping them here is what keeps the `char_insert`
 // trigger from colliding when their charid comes back around.

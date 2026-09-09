@@ -11,7 +11,7 @@ use crate::vm::{EventVm, StepResult};
 
 /// 0x05B `EndPara` the client returns for a cancelled event in place of
 /// `Work_Zone[1]` (research/XiPackets/world/client/0x005B); LSB scripts match
-/// it as `utils.EVENT_CANCELLED_OPTION` (vendor/server/scripts/utils/utils.lua:8).
+/// it as `utils.EVENT_CANCELLED_OPTION` (vendor/server/scripts/utils/utils.lua).
 pub const EVENT_CANCELLED_END_PARA: u32 = 1 << 30;
 
 /// One renderable dialog frame: NPC speech (and, for a menu, the selectable
@@ -487,7 +487,7 @@ mod tests {
 
     /// Guard: the cancel sentinel is the exact value LSB scripts branch on
     /// (utils.EVENT_CANCELLED_OPTION = bit.lshift(1, 30),
-    /// vendor/server/scripts/utils/utils.lua:8).
+    /// vendor/server/scripts/utils/utils.lua utils.EVENT_CANCELLED_OPTION).
     #[test]
     fn cancel_sentinel_is_lsb_event_cancelled_option() {
         assert_eq!(EVENT_CANCELLED_END_PARA, 0x4000_0000);

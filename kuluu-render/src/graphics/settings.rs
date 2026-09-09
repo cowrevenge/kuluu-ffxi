@@ -613,9 +613,9 @@ pub const DEFAULT_RENDER_SCALE: f32 = 1.0;
 
 // Retail derives its vertical fov from a projection focal length over a fixed
 // half-height: fovy = 2*atan2f(192, ProjectionFocalLength)
-// (research/XIClient/src/XIClient/source/World/Generator/Effects/CMoElem.cpp:274).
+// (research/XIClient/src/XIClient/source/World/Generator/Effects/CMoElem.cpp CMoElem::VirtOt1 fovy).
 pub const RETAIL_PROJECTION_HALF_HEIGHT: f32 = 192.0;
-// research/XIClient/src/XIClient/source/World/Camera/CameraManager.cpp:318:
+// research/XIClient/src/XIClient/source/World/Camera/CameraManager.cpp CameraManager::ResetCameraState:
 // SetProjectionFocalLength(350.0f) is the default; cutscene/zoom effects animate it.
 pub const RETAIL_DEFAULT_FOCAL_LENGTH: f32 = 350.0;
 // = retail_default_fov_deg(); f32::atan is not const fn, so the derived value is

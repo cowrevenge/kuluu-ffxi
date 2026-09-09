@@ -129,13 +129,13 @@ struct SpriteTemplate {
     colors: Vec<Vec4>,
 }
 
-// research/XIClient/src/XIClient/source/Resource/Derived/CMoD3m.cpp:16-104 — the D3m texture-stage
+// research/XIClient/src/XIClient/source/Resource/Derived/CMoD3m.cpp ZeroOneTSS — the D3m texture-stage
 // tables, with D = diffuse/vertex, T = texture, F = TEXTUREFACTOR (the generator's particle
 // colour). NonZeroTwoTSS is the textured default: stage 0 is MODULATE2X(D,T) for both channels,
 // stage 1 MODULATE2X(CURRENT,F) for rgb and MODULATE4X(CURRENT,F) for alpha — totals 4 and 8.
 // NonZeroOneTSS (renderStateFlags 0x1000) replaces stage 0's alpha with SELECTARG1(D.a), halving
 // the alpha total to 4. The MMB-mesh branch
-// (research/XIClient/src/XIClient/source/Rendering/ZoneRenderer.cpp:1396-1433 DoD3mDraw) reaches
+// (research/XIClient/src/XIClient/source/Rendering/ZoneRenderer.cpp ZoneRenderer::DoD3mDraw DoD3mDraw) reaches
 // the same per-stage ops, so every template kind goes through `d3m_stage_chain`.
 const D3M_STAGE1_RGB_GAIN: f32 = 2.0;
 const D3M_STAGE1_ALPHA_GAIN: f32 = 4.0;
@@ -152,7 +152,7 @@ const D3M_VERTEX_BAKED_GAIN: f32 = 2.0;
 // `kori` texel) drew at bare texture alpha and let the ground show through.
 const D3M_STAGE_CLAMP: f32 = 1.0;
 
-// research/XIClient/src/XIClient/source/World/Generator/Effects/CMoD3mElem.cpp:57-63 — `OnDraw`
+// research/XIClient/src/XIClient/source/World/Generator/Effects/CMoD3mElem.cpp CMoD3mElem::OnDraw — `OnDraw`
 // sends the element through `DoMMBDraw` when its link is an MMB and `CMoD3m::Draw` otherwise. The
 // two paths share the stage tables but not the blend bytes they honour.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -268,7 +268,7 @@ struct LiveGenerator {
     stopped: bool,
     // `origin` is rewritten from the camera each frame rather than fixed at spawn.
     camera_relative: bool,
-    // research/XIClient/src/XIClient/source/World/Generator/CYyGenerator.cpp:2817-2831 —
+    // research/XIClient/src/XIClient/source/World/Generator/CYyGenerator.cpp CYyGenerator::Idle —
     // `GetSomeGeneratorScalar() * 0.3` scales the per-emission count whenever field_DE bit 0 is
     // set, which Open() arms for every generator under the `taew` (weat) container (:418-434).
     // See weather_particles::WEATHER_EMIT_SCALE for why it is applied to batched generators too.
@@ -572,7 +572,7 @@ pub fn spawn_particle_generators(
     }
 }
 
-// research/xim Actor.kt:127,724-734 — at model-ready, every generator in the
+// research/xim Actor.kt:127-734 — at model-ready, every generator in the
 // actor DAT flagged auto-run starts immediately and emits forever. The mesh
 // entity is a child of the actor root (which carries the FFXI->Bevy basis), so
 // particle math stays in the DAT's own FFXI-local frame and the effect follows
@@ -740,7 +740,7 @@ pub fn spawn_zone_particle_generator(
     Some(entity)
 }
 
-// research/XIClient/src/XIClient/source/World/Generator/CYyGenerator.cpp:158 — a batched
+// research/XIClient/src/XIClient/source/World/Generator/CYyGenerator.cpp HandleOne — a batched
 // (CheckFlag29) D3a generator is the one element retail's reimplementation leaves as
 // SPDLOG_ERROR("0x11"), so what a batched sprite sheet actually draws is not transcribable. Its
 // sub-particles are camera-billboarded here: the precipitation curtains are what use the
@@ -869,7 +869,7 @@ fn continuous_active(g: &LiveGenerator) -> bool {
     !g.stopped && (g.auto_run || g.age_frames <= g.emit_window_frames.max(1.0))
 }
 
-// research/XIClient/src/XIClient/source/World/Generator/CYyGenerator.cpp:2818-2830 — the emit loop
+// research/XIClient/src/XIClient/source/World/Generator/CYyGenerator.cpp CYyGenerator::Idle counter — the emit loop
 // runs `for counter in 0..=floor(v161)` over `v161 = (flags & 0x1FF) * scale`, i.e. floor + 1. That
 // trailing +1 is deliberately not reproduced: it would raise every already-tuned non-weather
 // population (10740 shipped generators author a non-zero count) by one particle, so the floor of 1
@@ -880,7 +880,7 @@ fn emission_count(g: &LiveGenerator) -> u32 {
 }
 
 fn emit(g: &mut LiveGenerator, life_frames: f32) {
-    // research/XIClient/.../CYyGenerator.cpp:857-871 applies the sec2 0x06/0x07 spawn spread to the
+    // research/XIClient/src/XIClient/source/World/Generator/CYyGenerator.cpp CYyGenerator::ElemGenerate applies the sec2 0x06/0x07 spawn spread to the
     // elem, skipping it when CheckFlag29 is set because a batched elem carries its own
     // sub-particles. Our Particle models the sub-particle in that case, so the spread applies
     // either way — without it every drop of a rain curtain spawns on one point.
@@ -1831,7 +1831,7 @@ mod tests {
         assert!(centroid.length() < RADIUS * 0.2, "off-centre: {centroid}");
     }
 
-    // research/XIClient/src/XIClient/source/Resource/Derived/CMoD3m.cpp:16-104. A template
+    // research/XIClient/src/XIClient/source/Resource/Derived/CMoD3m.cpp ZeroOneTSS. A template
     // colour already carries stage 0's MODULATE2X (the /128 normalise), so an input of 0.25
     // here stands for a retail D of 0.125.
     mod stage_chain {

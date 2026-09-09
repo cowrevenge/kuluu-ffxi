@@ -268,7 +268,7 @@ mod tests {
     #[test]
     fn earth_chat_line_formats_a_civil_datetime() {
         // The Vana'diel epoch is 2001-12-31 15:00:00 UTC (2002-01-01 00:00 JST,
-        // vendor/server/src/common/earth_time.h:40).
+        // vendor/server/src/common/earth_time.h vanadiel_epoch).
         assert_eq!(
             earth_time_text(&chrono::Utc, EARTH_EPOCH_UNIX),
             "2001/12/31 15:00:00"

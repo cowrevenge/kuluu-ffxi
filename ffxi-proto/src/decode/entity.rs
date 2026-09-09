@@ -37,7 +37,7 @@ impl PosHead {
     pub(crate) const SIZE: usize = 40;
 
     /// `HpMax` in GP_SERV_POS_HEAD
-    /// (vendor/server/src/map/packets/s2c/0x00a_login.h:41). The name is a
+    /// (vendor/server/src/map/packets/s2c/0x00a_login.h GP_SERV_POS_HEAD HpMax). The name is a
     /// misnomer: every carrier fills it from `PChar->GetHPP()`, a percentage.
     pub const HPP_OFFSET: usize = 26;
 
@@ -166,12 +166,12 @@ impl PosHead {
                 .is_some_and(|mask| mask & Self::UPDATE_DESPAWN != 0)
     }
 
-    /// `PacketNameLength` (vendor/server/src/common/utils.h:71) — 15 chars plus
+    /// `PacketNameLength` (vendor/server/src/common/utils.h) — 15 chars plus
     /// the terminator, the cap on every name LSB copies into 0x0D/0x0E.
     const NAME_LEN: usize = 16;
 
     /// `sendflags_t.Name` — `UPDATE_NAME`, the ordinary "a name follows" bit
-    /// (vendor/server/src/map/entities/baseentity.h:173).
+    /// (vendor/server/src/map/entities/baseentity.h UPDATETYPE UPDATE_NAME).
     const SEND_NAME: u8 = 0x08;
     /// `sendflags_t.Name2` (entity_update.cpp:52). Set on every equipped-model
     /// spawn, which is why it alone does not imply a name is present.
@@ -193,7 +193,7 @@ impl PosHead {
         }
 
         // Two layouts, and they are flagged by different bits
-        // (vendor/server/src/map/packets/entity_update.cpp:539-587).
+        // (vendor/server/src/map/packets/entity_update.cpp CEntityUpdatePacket::updateWith).
         //
         // A renamed dynamic entity (targid >= 0x700) spawning with an equipment
         // model grows the packet, memcpy's `look_t` over 0x30 and puts the name
@@ -288,7 +288,7 @@ pub struct CharFlags {
 
     /// `Flags4.JobMasterFlag` (bit 6 of the u8 at body offset 0x2F): LSB's
     /// job-master display toggle — `SUPERIOR_LEVEL == 5 && m_jobMasterDisplay`
-    /// (vendor/server/src/map/packets/char_update.cpp:441). Written on every
+    /// (vendor/server/src/map/packets/char_update.cpp CCharUpdatePacket::updateWith). Written on every
     /// non-despawn 0x0D, outside all SendFlg blocks. Drives the same nameplate
     /// star as `lfg_master` (retail keys it off `Flags3.LfgMasterFlag`, which LSB
     /// hardcodes to 0 — see [`PosHead::flags4_job_master`]).
@@ -376,7 +376,7 @@ mod flags1 {
     pub const TARGET_OFF: u32 = 19;
     /// `InvisFlag` — bit 29 in char_update.cpp's `flags1_t`. LSB sets it for
     /// PCs only: `m_isGMHidden || HasStatusEffectByFlag(EFFECTFLAG_INVISIBLE)`
-    /// (vendor/server/src/map/packets/char_update.cpp:316, char_status.cpp:287).
+    /// (vendor/server/src/map/packets/char_update.cpp CCharUpdatePacket::updateWith, char_status.cpp:287).
     /// entity_update declares the same bit but never writes it.
     pub const INVIS: u32 = 29;
 }
@@ -558,7 +558,7 @@ impl LookData {
     pub const GRAP_ID_TBL_LEN: usize = Self::GRAP_ID_TBL_SLOTS * 2;
 
     /// Slot tag stripped from `GrapIDTbl[i]`: LSB writes `look.<slot> + 0x{i}000`
-    /// (vendor/server/src/map/packets/s2c/0x051_grap_list.cpp:32-39 and
+    /// (vendor/server/src/map/packets/s2c/0x051_grap_list.cpp GP_SERV_COMMAND_GRAP_LIST::GP_SERV_COMMAND_GRAP_LIST and
     /// vendor/server/src/map/packets/char_update.cpp), the same encoding in all
     /// three carriers of the table (0x00D CHAR_PC, 0x00A LOGIN, 0x051 GRAP_LIST).
     const GRAP_ID_MODEL_MASK: u16 = 0x0FFF;
@@ -744,7 +744,7 @@ pub struct CharSync {
     pub targid: u16,
     pub id: u32,
     /// MogExpansionFlag: MH second floor unlocked (`mhflag & 0x20`), byte 0x27 of the
-    /// full packet = body 0x23. vendor/server/src/map/packets/char_sync.cpp:61.
+    /// full packet = body 0x23. vendor/server/src/map/packets/char_sync.cpp CCharSyncPacket::CCharSyncPacket.
     /// `None` when the packet is too short to carry it.
     pub mh_2f_unlocked: Option<bool>,
 }
@@ -903,7 +903,7 @@ mod char_flags_tests {
     #[test]
     fn mob_m_flags_untargetable_lands_on_target_off() {
         let mut body = vec![0u8; PosHead::SIZE];
-        // vendor/server/src/map/packets/entity_update.cpp:348/:387
+        // vendor/server/src/map/packets/entity_update.cpp CEntityUpdatePacket::updateWith/:387
         // `ref<uint32>(0x21) = m_flags` under UPDATE_HP.
         const M_FLAGS_OFFSET: usize = 0x1D;
         body[M_FLAGS_OFFSET..M_FLAGS_OFFSET + 4].copy_from_slice(&0x800u32.to_le_bytes());
@@ -1621,7 +1621,7 @@ mod char_sync_tests {
     use super::*;
 
     /// Pins the 2F-unlock byte to LSB's full-packet offset 0x27 minus the 4-byte
-    /// sub-packet header (vendor/server/src/map/packets/char_sync.cpp:61).
+    /// sub-packet header (vendor/server/src/map/packets/char_sync.cpp CCharSyncPacket::CCharSyncPacket).
     #[test]
     fn char_sync_2f_flag_sits_at_lsb_packet_byte_0x27() {
         assert_eq!(CharSync::MH_2F_UNLOCKED_OFFSET, 0x27 - 4);

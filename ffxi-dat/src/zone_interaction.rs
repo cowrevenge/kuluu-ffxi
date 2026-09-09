@@ -39,7 +39,7 @@ const ELEVATOR_Y_SCALE: f32 = 256.0;
 const UNIT_BOX_HALF_EXTENT: f32 = 0.5;
 
 /// Mog House residence zone-line tag prefixes, the emitter side of the contract LSB
-/// matches at vendor/server/src/map/packets/c2s/0x05e_maprect.cpp:74-75
+/// matches at vendor/server/src/map/packets/c2s/0x05e_maprect.cpp GP_CLI_COMMAND_MAPRECT::process mogEntrancePrefix
 /// ("zmr* classic cities; zms* WoTG [S] + Adoulin").
 pub const MOG_HOUSE_PREFIX_CLASSIC: &str = "zmr";
 pub const MOG_HOUSE_PREFIX_WOTG: &str = "zms";
@@ -56,7 +56,7 @@ pub struct ZoneInteraction {
     pub position: [f32; 3],
     /// Which record class the entry belongs to; `0` is the hit-checked one.
     /// `RidManager::Add`
-    /// (research/XIClient/src/XIClient/source/World/Zone/Triggers/RidManager.cpp:100-122)
+    /// (research/XIClient/src/XIClient/source/World/Zone/Triggers/RidManager.cpp RidManager::Add)
     /// puts only the class-0 rects in the array the per-frame checks walk, and in
     /// the shipped DATs the non-zero classes are coarse sub-map regions (boxes of
     /// 200-1400 units whose ids resolve to Img chunks), not trigger volumes.
@@ -108,7 +108,7 @@ impl ZoneInteraction {
     }
 
     /// A trigger volume that latches a sub-area. `RidManager::InitSubModels`
-    /// (research/XIClient/src/XIClient/source/World/Zone/Triggers/RidManager.cpp:611-647)
+    /// (research/XIClient/src/XIClient/source/World/Zone/Triggers/RidManager.cpp RidManager::InitSubModels)
     /// keeps the `m`-prefixed rects whose dest fourcc is non-zero, and
     /// `RidManager::Add` hit-checks only [`RECT_CLASS_HIT_CHECKED`].
     pub fn is_sub_area_trigger(&self) -> bool {
@@ -483,7 +483,7 @@ mod tests {
     }
 
     /// Pins the coupling with the kuluu-nav zonelines scrape: LSB stores the trigger's
-    /// source fourcc as the zonelines.sql primary key (vendor/server/sql/zonelines.sql:748).
+    /// source fourcc as the zonelines.sql primary key (vendor/server/sql/zonelines.sql zonelines 812805498).
     #[test]
     fn rect_id_matches_lsb_zonelines_primary_key() {
         assert_eq!(u32::from_le_bytes(*b"zmr0"), 812805498);

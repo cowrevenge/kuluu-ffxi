@@ -169,14 +169,14 @@ fn resolve_install_root() -> Option<PathBuf> {
 // forces the Mog House theme inside the MH. LSB sends the surrounding town's
 // music in the MH 0x00A (vendor/server/src/map/packets/s2c/0x00a_login.cpp:
 // 177-181), and a 0x05F slot track only arrives when promotional furniture is
-// installed (vendor/server/scripts/globals/moghouse.lua:181-229) — so this is
+// installed (vendor/server/scripts/globals/moghouse.lua moghouseZoneLines xi.moghouse.getAvailableMusic) — so this is
 // the client-side base and any received MH-slot track overrides it.
 pub const MOG_HOUSE_BGM: u16 = 126;
 
 // `play_index` values in research/XIClient/src/XIClient/source/Game/
 // GameManager.cpp:1584-1619 `NormalMusicPlay`. Slots 0-4 are also the LSB 0x00A
-// `MusicNum` layout (vendor/server/src/map/packets/s2c/0x00a_login.cpp:177-181),
-// where 2/3 carry `m_bSongS`/`m_bSongM` (vendor/server/src/map/zone.h:500-501).
+// `MusicNum` layout (vendor/server/src/map/packets/s2c/0x00a_login.cpp GP_SERV_COMMAND_LOGIN::GP_SERV_COMMAND_LOGIN),
+// where 2/3 carry `m_bSongS`/`m_bSongM` (vendor/server/src/map/zone.h).
 const ZONE_DAY_SLOT: u8 = 0;
 const ZONE_NIGHT_SLOT: u8 = 1;
 const BATTLE_SOLO_SLOT: u8 = 2;
@@ -290,13 +290,13 @@ pub struct BgmPlaybackState {
     pub is_night: bool,
 }
 
-// research/XIClient/src/XIClient/source/World/Actor/ActorTelemetry.cpp:37
+// research/XIClient/src/XIClient/source/World/Actor/ActorTelemetry.cpp NameColorMusicDistance
 // `NameColorMusicDistance` - the party-claim branch of `NameColorSet` raises
 // `GameManager::SomeMusicByte` for any party-claimed monster closer than this,
 // which is what puts battle music on before the player personally engages.
 const PARTY_CLAIM_MUSIC_RADIUS_YALMS: f32 = 45.0;
 
-// research/XIClient/src/XIClient/source/Game/GameManager.cpp:1611-1618
+// research/XIClient/src/XIClient/source/Game/GameManager.cpp GameManager::NormalMusicPlay
 // `NormalMusicPlay` - the zone slot is `play_index = gamehour < 6 || gamehour
 // >= 18`, i.e. the day track over the Vana'diel hours [6, 18) and the night
 // track everywhere else.
@@ -310,7 +310,7 @@ fn is_night_music_hour(vana_hour: u64) -> bool {
 /// Retail's battle-music trigger that does not need the local player engaged:
 /// any monster whose plate draws in the party-claim colour and that sits inside
 /// [`PARTY_CLAIM_MUSIC_RADIUS_YALMS`] of the player.
-/// research/XIClient/.../World/Actor/ActorTelemetry.cpp:1717-1723.
+/// research/XIClient/src/XIClient/source/World/Actor/ActorTelemetry.cpp ActorTelemetry::NameColorSet.
 fn party_claim_in_music_range(snap: &kuluu_snapshot::SceneSnapshot) -> bool {
     let Some(self_pos) = snap
         .self_char_id
@@ -673,7 +673,7 @@ pub fn sfx_attenuation(listener: Vec3, emitter: Vec3) -> f32 {
 
 // Distance is measured from the PLAYER, never the chase camera. LSB's streaming radius — the
 // bound SFX_CUTOFF_YALMS is — is itself measured player-to-entity
-// (vendor/server/src/map/zone_entities.cpp:155), and a camera-anchored distance would swing SE
+// (vendor/server/src/map/zone_entities.cpp CZoneEntities::TryAddToNearbySpawnLists isInRange), and a camera-anchored distance would swing SE
 // loudness with the mouse wheel and silence on-screen emitters at full pullback. The camera is
 // still the correct ear for left/right placement, but this function carries no pan term (see
 // `sfx_attenuation`), so nothing here reads it. Falls back to the camera where there is no
@@ -706,7 +706,7 @@ pub fn sfx_mix_volume(ev: &SfxEvent, listener: Option<Vec3>) -> f32 {
     (ev.volume * attenuation).clamp(0.0, 1.0)
 }
 
-// research/XIClient/src/XIClient/source/World/Generator/Effects/CYySoundElem.cpp:36-37 —
+// research/XIClient/src/XIClient/source/World/Generator/Effects/CYySoundElem.cpp CYySoundElem::zone_volume —
 // the class defaults Calc3D substitutes for a DAT-authored 0. Load-bearing, not defensive:
 // 591 of the 5,895 shipped sound generators author (far 0, near 0).
 pub const SOUND_NEAR_DEFAULT: f32 = 3.0;
@@ -718,7 +718,7 @@ pub const SOUND_FAR_DEFAULT: f32 = 30.0;
 pub const ATTACHED_VERTICAL_WEIGHT: f32 = 3.0;
 pub const UNATTACHED_VERTICAL_WEIGHT: f32 = 1.0;
 
-// research/XIClient/src/XIClient/source/Resource/Derived/CYySepRes.cpp:16-60 `Calc3D`:
+// research/XIClient/src/XIClient/source/Resource/Derived/CYySepRes.cpp CYySepRes::Calc3D `Calc3D`:
 // full inside `near`, a linear ramp to silence at `far`, and a hard cull past it. The
 // shipped `near > far` generators fall out of the ordering — everything inside far is
 // full volume. Retail's pan term is not reproduced: this mixer carries no pan (see
@@ -1067,7 +1067,7 @@ pub const BGM_FADE_SECS: f32 = 1.5;
 
 /// The zone's 2D ambient bed.
 ///
-/// research/XIClient/src/XIClient/source/World/Zone/XiZone.cpp:388-396 hands the current
+/// research/XIClient/src/XIClient/source/World/Zone/XiZone.cpp XiZone::SysMove hands the current
 /// area's `SoundEffectResource` to `CYySoundElem::SetZoneSound` every frame, and
 /// CYySoundElem.cpp:117-129 (re)plays it at `PAN_CENTER_INDEX` only when the resource
 /// changes — a 2D cue at system volume, not a world emitter.
@@ -1614,7 +1614,7 @@ mod tests {
     #[test]
     fn the_night_music_slot_is_chosen_by_vanadiel_hour() {
         for hour in 0..24u64 {
-            // research/XIClient/.../Game/GameManager.cpp:1611-1618 selects the
+            // research/XIClient/src/XIClient/source/Game/GameManager.cpp GameManager::NormalMusicPlay selects the
             // night slot for `gamehour < 6 || gamehour >= 18`.
             assert_eq!(
                 is_night_music_hour(hour),
@@ -2146,7 +2146,7 @@ mod tests {
         );
     }
 
-    // research/XIClient/.../Resource/Derived/CYySepRes.cpp:44-58 — full inside `near`,
+    // research/XIClient/src/XIClient/source/Resource/Derived/CYySepRes.cpp CYySepRes::Calc3D — full inside `near`,
     // linear to silence at `far`, hard cull past it.
     #[test]
     fn calc3d_ramps_linearly_between_near_and_far() {

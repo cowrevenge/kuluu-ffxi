@@ -81,7 +81,7 @@ pub fn build_subpacket_action(
 
 // c2s 0x05D GP_CLI_COMMAND_MOTION: UniqueNo u32 @4, ActIndex u16 @8, Number u8
 // @10 (emote id), Mode u8 @11, Param u16 @12, pad u16 @14
-// (vendor/server/src/map/packets/c2s/0x05d_motion.h:28-35). Note the c2s Mode
+// (vendor/server/src/map/packets/c2s/0x05d_motion.h GP_CLI_COMMAND_MOTION). Note the c2s Mode
 // byte precedes Param, unlike the s2c 0x05A layout.
 pub fn build_subpacket_motion(
     sync: u16,
@@ -192,7 +192,7 @@ pub fn build_subpacket_equip_inspect(
     buf
 }
 
-// GP_CLI_COMMAND_BAZAAR_LIST, vendor/server/src/map/packets/c2s/0x105_bazaar_list.h:27-31:
+// GP_CLI_COMMAND_BAZAAR_LIST, vendor/server/src/map/packets/c2s/0x105_bazaar_list.h:
 // UniqueNo u32, ActIndex u16, padding u16. The server rejects it while we still
 // hold a BazaarID, so leave the previous bazaar first (0x105_bazaar_list.cpp validate).
 pub fn build_subpacket_bazaar_list(sync: u16, unique_no: u32, act_index: u16) -> Vec<u8> {
@@ -207,7 +207,7 @@ pub fn build_subpacket_bazaar_list(sync: u16, unique_no: u32, act_index: u16) ->
     buf
 }
 
-// GP_CLI_COMMAND_BAZAAR_BUY, vendor/server/src/map/packets/c2s/0x106_bazaar_buy.h:27-31:
+// GP_CLI_COMMAND_BAZAAR_BUY, vendor/server/src/map/packets/c2s/0x106_bazaar_buy.h:
 // BazaarItemIndex u8, padding u8[3], BuyNum u32. `index` is the seller-side
 // LOC_INVENTORY slot from the s2c 0x105 row.
 pub fn build_subpacket_bazaar_buy(sync: u16, index: u8, quantity: u32) -> Vec<u8> {
@@ -508,7 +508,7 @@ pub fn build_subpacket_auc_lot_check(sync: u16, work_index: i8) -> Vec<u8> {
 
 // c2s 0x100 GP_CLI_COMMAND_MYROOM_JOB: MainJobIndex u8 @4, SupportJobIndex u8 @5,
 // u16 pad; 0 = keep the current job
-// (vendor/server/src/map/packets/c2s/0x100_myroom_job.h:27-31).
+// (vendor/server/src/map/packets/c2s/0x100_myroom_job.h GP_CLI_COMMAND_MYROOM_JOB).
 pub fn build_subpacket_myroom_job(sync: u16, main_job: Option<u8>, sub_job: Option<u8>) -> Vec<u8> {
     let mut buf = vec![0u8; 8];
     buf[0..4].copy_from_slice(&build_subpacket_header(
@@ -789,7 +789,7 @@ pub(crate) fn build_subpacket_maprect(
 }
 
 /// The RectID fourcc LSB matches for the universal MH exit
-/// (vendor/server/src/map/packets/c2s/0x05e_maprect.cpp:72). Emitted by
+/// (vendor/server/src/map/packets/c2s/0x05e_maprect.cpp GP_CLI_COMMAND_MAPRECT::process isMogHouseExit). Emitted by
 /// [`build_subpacket_maprect_mh_exit`]; also the `pending_maprect` line id.
 pub(crate) const ZMRQ_LE: u32 = u32::from_le_bytes(*b"zmrq");
 

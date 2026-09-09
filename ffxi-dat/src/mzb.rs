@@ -29,7 +29,7 @@ impl From<MzbError> for DatError {
     }
 }
 
-/// research/XIClient/src/XIClient/include/Resource/Derived/ZoneBlockFormat.h:20-67
+/// research/XIClient/src/XIClient/include/Resource/Derived/ZoneBlockFormat.h ZoneBlockHeader
 /// — `ZoneBlockHeader`, a packed 0x20-byte struct.
 const HDR_SIZE_AND_VERSION: usize = 0x00;
 const HDR_CHUNK_COUNT_AND_DECRYPT_INDEX: usize = 0x04;
@@ -49,7 +49,7 @@ pub const MZB_HEADER_LEN: usize = 0x20;
 /// version / decrypt-table index respectively (ZoneBlockFormat.h:48-66).
 const HDR_COUNT_MASK: u32 = 0x00FF_FFFF;
 
-/// research/XIClient/src/XIClient/source/Resource/Derived/ZoneBlockResource.cpp:12
+/// research/XIClient/src/XIClient/source/Resource/Derived/ZoneBlockResource.cpp ZoneBlockResource::Decrypt
 /// — `if (GetFormatVersion() < 27) return;`, i.e. only version 27 files carry
 /// the pass-1 XOR at all.
 const ENCRYPTED_MIN_VERSION: u8 = 27;
@@ -369,7 +369,7 @@ pub struct MzbMesh {
     pub flags: u16,
 }
 
-/// research/XIClient/src/XIClient/include/Resource/Derived/ZoneBlockFormat.h:145-153
+/// research/XIClient/src/XIClient/include/Resource/Derived/ZoneBlockFormat.h CollisionDataHeader
 /// — `CollisionDataHeader`, the seven dwords the header's 0x08 offset points at.
 const COLL_MESH_COUNT: usize = 0x00;
 const COLL_MESH_DATA_OFFSET: usize = 0x04;
@@ -855,7 +855,7 @@ pub fn apply_placement(m: &[f32; 16], v: [f32; 3]) -> [f32; 3] {
     ]
 }
 
-/// research/XIClient/src/XIClient/include/Resource/Derived/ZoneBlockFormat.h:76-104
+/// research/XIClient/src/XIClient/include/Resource/Derived/ZoneBlockFormat.h ZoneBlockHeader
 /// — `PositionedMeshBlockData`, one 0x64-byte record per placed MMB.
 /// Corroborated field-by-field by research/cexi-docs/zone/format.md:103-121.
 const PL_MESH_BLOCK_NAME: usize = 0x00;
@@ -1223,7 +1223,7 @@ fn resolve_mmb_index_exact(
         .position(|n| n.trim_end() == prefixed)
 }
 
-/// research/XIClient/src/XIClient/source/Rendering/ZoneRenderer.cpp:619-641
+/// research/XIClient/src/XIClient/source/Rendering/ZoneRenderer.cpp ZoneRenderer::SetRenderTypes
 /// — `ZoneRenderer::SetRenderTypes`. The static zone pass draws a chunk only when
 /// `RenderType > 1` (ZoneRenderer.cpp:990 quadtree leaf, :2662 flat block list).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1413,7 +1413,7 @@ pub fn parse_mmb_placements(body: &[u8], header: &MzbHeader) -> Result<Vec<MmbPl
     Ok(out)
 }
 
-/// research/XIClient/src/XIClient/include/Resource/Derived/ZoneBlockFormat.h:139-143
+/// research/XIClient/src/XIClient/include/Resource/Derived/ZoneBlockFormat.h LightBindingEntry
 /// — `LightBindingEntry` is `{ int LightID; ManagedLight* Light; char more[68]; }`.
 /// Only `LightID` is authored; the rest is runtime state retail fills in place
 /// after load, and it measures zero in the shipped files.

@@ -1,7 +1,7 @@
 use super::*;
 
 /// s2c 0x00A Mog House cluster. Body offsets follow
-/// vendor/server/src/map/packets/s2c/0x00a_login.h:115-127; `login_state` values are
+/// vendor/server/src/map/packets/s2c/0x00a_login.h GP_SERV_COMMAND_LOGIN LoginState; `login_state` values are
 /// the SAVE_LOGIN_STATE enum (h:50-59). `map_number` is the MH interior MODEL id
 /// (GetMogHouseModelID, 0x00a_login.cpp:35-72), NOT a zone id; `mog_zone_flag` is
 /// only assigned in the non-MH branch (.cpp: CanUseMisc(MISC_MOGMENU)).
@@ -101,7 +101,7 @@ pub struct ServerLogin {
 
     /// `DeadCounter` — the same `60 * (6min + GetTimeUntilDeathHomepoint())`
     /// encoding 0x037 puts in `dead_counter1`
-    /// (vendor/server/src/map/packets/s2c/0x00a_login.cpp:125,163). `None` only
+    /// (vendor/server/src/map/packets/s2c/0x00a_login.cpp GP_SERV_COMMAND_LOGIN::GP_SERV_COMMAND_LOGIN deadRemaining). `None` only
     /// when the body stopped short of the field. Read it through
     /// [`Self::seconds_until_homepoint`], which applies the `hpp == 0` KO gate
     /// the raw counter needs.
@@ -110,7 +110,7 @@ pub struct ServerLogin {
     /// Weather in force as the character zones in.
     ///
     /// The server sends 0x057 WEATHER only when the weather *changes*
-    /// (vendor/server/src/map/zone.cpp:672 is its sole construction site, a
+    /// (vendor/server/src/map/zone.cpp CZone::SetWeather is its sole construction site, a
     /// CHAR_INZONE broadcast), so this is the only weather a zoning character
     /// receives until the next change — which on a Vana'diel schedule can be a
     /// long wait.
@@ -127,7 +127,7 @@ pub struct ZoneInWeather {
     pub weather_number: u16,
     /// `WeatherNumber2` — the weather being transitioned *from*, not the
     /// incoming side: retail assigns it to `PreviousWeatherNumber`
-    /// (research/XIClient/src/XIClient/source/Game/Net/Packets/s2c/0x00A.cpp:90-96,
+    /// (research/XIClient/src/XIClient/source/Game/Net/Packets/s2c/0x00A.cpp S2C::RecvLogin,
     /// whose `field_NN` names run +4 ahead of the true payload offsets).
     pub previous_weather_number: u16,
     /// `WeatherTime` — `zone->GetWeatherChangeTime()`, retail's
@@ -135,7 +135,7 @@ pub struct ZoneInWeather {
     /// Vana'diel epoch**: 0x00a_login.cpp:154 assigns
     /// `zone->GetWeatherChangeTime()`, which zone.cpp:670 sets from
     /// `earth_time::vanadiel_timestamp()`
-    /// (vendor/server/src/common/earth_time.h:304-308).
+    /// (vendor/server/src/common/earth_time.h timestamp).
     pub weather_time: u32,
     /// `WeatherTime2` — retail's `PreviousWeatherStartTime` (0x00A.cpp:95).
     pub previous_weather_time: u32,
@@ -147,7 +147,7 @@ pub struct ZoneInWeather {
 
 impl ZoneInWeather {
     /// LSB never writes the previous-weather slots —
-    /// vendor/server/src/map/packets/s2c/0x00a_login.cpp:153-155 sets only
+    /// vendor/server/src/map/packets/s2c/0x00a_login.cpp GP_SERV_COMMAND_LOGIN::GP_SERV_COMMAND_LOGIN sets only
     /// `WeatherNumber`/`WeatherTime` under a `// TODO: Previous weather` — so
     /// they arrive zeroed. Weather id 0 is a real weather (`fine`), so a
     /// consumer must gate on this rather than read 0 as clear skies.
@@ -159,7 +159,7 @@ impl ZoneInWeather {
 /// Zone-in cutscene carried inside s2c 0x00A LOGIN: when `currentEvent` is
 /// already set at zone-in (e.g. the new-character intro, a Mog House 2F unlock
 /// CS), LSB delivers it via the login packet instead of a 0x032/0x034 push
-/// (vendor/server/src/map/packets/s2c/0x00a_login.cpp:183-192). The client
+/// (vendor/server/src/map/packets/s2c/0x00a_login.cpp GP_SERV_COMMAND_LOGIN::GP_SERV_COMMAND_LOGIN csid). The client
 /// must answer with 0x05B `End` (`EventPara` = this `event_para`) or the char
 /// stays InEvent server-side — zonelines/logout rejected — and the CS re-fires
 /// on every subsequent login.
@@ -181,7 +181,7 @@ impl ServerLogin {
 
     pub(crate) const GAME_TIME_OFFSET: usize = 0x38;
 
-    // vendor/server/src/map/packets/s2c/0x00a_login.h:99 — GrapIDTbl[9] u16
+    // vendor/server/src/map/packets/s2c/0x00a_login.h GP_SERV_COMMAND_LOGIN EventNo — GrapIDTbl[9] u16
     // runs to MusicNum[5] u16 at MUSIC_NUM_OFFSET, which lands SubMapNumber
     // immediately before EVENT_NUM_OFFSET below; pinning the neighbours proves
     // both offsets (see `grap_id_tbl_offset_abuts_music_num` and
@@ -193,7 +193,7 @@ impl ServerLogin {
     pub(crate) const EVENT_NUM_OFFSET: usize = 0x5E;
     pub(crate) const EVENT_PARA_OFFSET: usize = 0x60;
     pub(crate) const EVENT_MODE_OFFSET: usize = 0x62;
-    // vendor/server/src/map/packets/s2c/0x00A_login.h:107-111 — WeatherNumber,
+    // vendor/server/src/map/packets/s2c/0x00A_login.h — WeatherNumber,
     // WeatherNumber2, WeatherTime, WeatherTime2, WeatherOffsetTime, immediately
     // after EventMode. The offset chain is pinned at both ends by constants this
     // decoder already uses: MusicNum[5] at 0x52 runs to SubMapNumber at 0x5C,
@@ -206,7 +206,7 @@ impl ServerLogin {
     pub const WEATHER_OFFSET_TIME_OFFSET: usize = 0x70;
 
     /// `DeadCounter`, between `PlayTime` and `MyroomSubMapNumber` in
-    /// vendor/server/src/map/packets/s2c/0x00a_login.h:115-121. The chain from
+    /// vendor/server/src/map/packets/s2c/0x00a_login.h GP_SERV_COMMAND_LOGIN LoginState. The chain from
     /// `LoginState` @0x7C runs `name[16]`, `certificate[2]`, `unknown9C`,
     /// `ZoneSubNo`, `PlayTime`, `DeadCounter` — landing on
     /// `ServerLoginMyroom::SUB_MAP_NUMBER_OFFSET`, which the const assert
@@ -214,7 +214,7 @@ impl ServerLogin {
     /// ahead of the payload offsets, per
     /// `static_assert(offsetof(GP_SERV_LOGIN, field_A8) == 0xA4)`) is the u32 it
     /// divides by 60 into the death deadline
-    /// (research/XIClient/src/XIClient/source/Game/Net/Packets/s2c/0x00A.cpp:98,
+    /// (research/XIClient/src/XIClient/source/Game/Net/Packets/s2c/0x00A.cpp S2C::RecvLogin,
     /// .../include/Game/Net/Packets/s2c/0x00A.h).
     pub const DEAD_COUNTER_OFFSET: usize = 0xA0;
 
@@ -222,7 +222,7 @@ impl ServerLogin {
     /// event fields are only written then, and event id 0 is a real cutscene
     /// (Bastok Markets intro), so presence keys off the status byte
     /// (0x00a_login.cpp:191, ANIMATION_EVENT in
-    /// vendor/server/src/map/entities/baseentity.h:66).
+    /// vendor/server/src/map/entities/baseentity.h ANIMATIONTYPE ANIMATION_EVENT).
     pub(crate) const SERVER_STATUS_EVENT: u8 = 4;
 
     pub fn decode(body: &[u8]) -> Result<Self, DecodeError> {
@@ -318,7 +318,7 @@ impl ServerLogin {
     /// not KO'd (or the body stopped short of `DeadCounter`).
     ///
     /// `PosHead.HpMax` is `PChar->GetHPP()`
-    /// (vendor/server/src/map/packets/s2c/0x00a_login.cpp:147), and `GetHPP()`
+    /// (vendor/server/src/map/packets/s2c/0x00a_login.cpp GP_SERV_COMMAND_LOGIN::GP_SERV_COMMAND_LOGIN), and `GetHPP()`
     /// clamps a living character to at least 1, so `hpp == 0` is the same true KO
     /// sentinel the 0x037 path uses — and just as load-bearing, since LSB fills
     /// `DeadCounter` for a living character too.
@@ -365,7 +365,7 @@ impl ServerLogout {
 #[cfg(test)]
 mod server_login_tests {
     // The weather block sits between EventMode and ShipStart in
-    // vendor/server/src/map/packets/s2c/0x00A_login.h:107-111. Pin the offsets
+    // vendor/server/src/map/packets/s2c/0x00A_login.h GP_SERV_COMMAND_LOGIN WeatherNumber. Pin the offsets
     // against the two constants that bracket it, so a future field insertion
     // cannot silently slide weather onto the ship or event fields.
     #[test]
@@ -385,7 +385,7 @@ mod server_login_tests {
 
     /// Pins SUB_AREA_OFFSET against the two already-pinned neighbours it sits
     /// between in GP_SERV_COMMAND_LOGIN::PacketData
-    /// (vendor/server/src/map/packets/s2c/0x00a_login.h:96-105): MusicNum[5]
+    /// (vendor/server/src/map/packets/s2c/0x00a_login.h GP_SERV_COMMAND_LOGIN ntTime): MusicNum[5]
     /// (MUSIC_NUM_OFFSET, 10 bytes) then SubMapNumber (u16) then EventNum
     /// (EVENT_NUM_OFFSET). If a field were inserted ahead of SubMapNumber,
     /// this chain — not just the standalone constant — would break.
@@ -438,7 +438,7 @@ mod server_login_tests {
 
     /// The dead-counter field is only readable if the offset chain from the
     /// already-pinned LoginState is intact, so pin the chain LSB declares
-    /// (vendor/server/src/map/packets/s2c/0x00a_login.h:115-122): LoginState u32,
+    /// (vendor/server/src/map/packets/s2c/0x00a_login.h): LoginState u32,
     /// name[16], certificate[2] i32, unknown9C u16, ZoneSubNo u16, PlayTime u32,
     /// DeadCounter u32, MyroomSubMapNumber u8.
     #[test]
@@ -484,8 +484,8 @@ mod server_login_tests {
 
     /// Both carriers of the counter share one encoding, so the 0x00A value must
     /// convert exactly like the 0x037 one
-    /// (vendor/server/src/map/packets/char_status.cpp:237 vs
-    /// vendor/server/src/map/packets/s2c/0x00a_login.cpp:125,163).
+    /// (vendor/server/src/map/packets/char_status.cpp CCharStatusPacket::CCharStatusPacket deadRemaining vs
+    /// vendor/server/src/map/packets/s2c/0x00a_login.cpp GP_SERV_COMMAND_LOGIN::GP_SERV_COMMAND_LOGIN deadRemaining).
     #[test]
     fn server_login_dead_counter_matches_char_status_conversion() {
         for remaining in [0u32, 1, 599, 3600] {
@@ -603,7 +603,7 @@ mod server_login_tests {
         assert!(w.has_previous());
     }
 
-    // vendor/server/src/map/packets/s2c/0x00a_login.cpp:153-155 writes only
+    // vendor/server/src/map/packets/s2c/0x00a_login.cpp GP_SERV_COMMAND_LOGIN::GP_SERV_COMMAND_LOGIN writes only
     // WeatherNumber/WeatherTime, so the previous slots arrive zeroed and a
     // cross-fade must not read 0 as weather id 0 (`fine`).
     #[test]
@@ -674,7 +674,7 @@ mod server_login_tests {
     }
 
     /// Pins the myroom cluster to LSB's GP_SERV_COMMAND_LOGIN PacketData layout
-    /// (vendor/server/src/map/packets/s2c/0x00a_login.h:96-131; body offsets, no
+    /// (vendor/server/src/map/packets/s2c/0x00a_login.h GP_SERV_COMMAND_LOGIN ntTime; body offsets, no
     /// sub-packet header) so an offset edit can't pass the roundtrip tests, which
     /// build buffers through these same consts.
     #[test]
@@ -712,7 +712,7 @@ mod server_login_tests {
         assert_eq!(l.pos_head.speed_base, 40);
     }
 
-    // vendor/server/src/map/packets/s2c/0x00a_login.h:99 — GrapIDTbl[9] sits
+    // vendor/server/src/map/packets/s2c/0x00a_login.h GP_SERV_COMMAND_LOGIN EventNo — GrapIDTbl[9] sits
     // immediately before MusicNum[5]; pin the abutment so a field insertion
     // cannot slide the table without failing here.
     #[test]

@@ -9,8 +9,8 @@ pub const EARTH_SECS_PER_VANA_HOUR: u64 = 144;
 
 pub const EARTH_SECS_PER_VANA_DAY: u64 = EARTH_SECS_PER_VANA_HOUR * 24;
 
-// vendor/server/src/common/vanadiel_clock.h:40-42 — week = 8 Vana days,
-// month = 30, year = 360; vendor/server/src/common/vana_time.h:129-135 —
+// vendor/server/src/common/vanadiel_clock.h vanadiel_clock week_ratio — week = 8 Vana days,
+// month = 30, year = 360; vendor/server/src/common/vana_time.h get_month —
 // get_year counts years since 886.
 pub const VANA_DAYS_PER_WEEK: u64 = 8;
 pub const VANA_DAYS_PER_MONTH: u64 = 30;
@@ -85,8 +85,8 @@ pub struct VanaDate {
 }
 
 impl VanaDate {
-    // vendor/server/src/common/vana_time.h:106-143 calendar getters over the
-    // vendor/server/src/common/vanadiel_clock.h:35-42 ratios. LSB's
+    // vendor/server/src/common/vana_time.h get_hour calendar getters over the
+    // vendor/server/src/common/vanadiel_clock.h vanadiel_clock millisecond_ratio ratios. LSB's
     // get_monthday/get_month ceil partial days/months (vana_time.h:118,126),
     // which transiently report the prior day/month during the exact boundary
     // second; floor+1 agrees at every other instant.
@@ -116,7 +116,7 @@ pub fn full_day_fraction(earth_unix_secs: u64) -> f32 {
     (total_v_min % VANA_MINUTES_PER_DAY) as f32 / VANA_MINUTES_PER_DAY as f32
 }
 
-// research/XIClient/src/XIClient/source/World/XiDateTime.cpp:41-45
+// research/XIClient/src/XIClient/source/World/XiDateTime.cpp XiDateTime::ConvertEarthSecondsToVanaHour
 // ConvertEarthSecondsToVanaHour — `(seconds % EARTH_SECONDS_PER_GAME_DAY) /
 // EARTH_SECONDS_PER_GAME_HOUR`, which is this same floor division.
 pub fn vana_hour(earth_unix_secs: u64) -> u64 {
@@ -261,7 +261,7 @@ mod tests {
 
     #[test]
     fn vana_hour_matches_the_retail_floor_division() {
-        // research/XIClient/src/XIClient/source/World/XiDateTime.cpp:41-45.
+        // research/XIClient/src/XIClient/source/World/XiDateTime.cpp XiDateTime::ConvertEarthSecondsToVanaHour.
         for game_time in [0u64, 143, 144, 3455, 3456, 100_000, 1_234_567] {
             let retail = (game_time % EARTH_SECS_PER_VANA_DAY) / EARTH_SECS_PER_VANA_HOUR;
             assert_eq!(
@@ -304,7 +304,7 @@ mod tests {
 
     #[test]
     fn one_vana_day_advances_the_monthday() {
-        // vendor/server/scripts/globals/chocobo_raising.lua:52 — one Vana'diel
+        // vendor/server/scripts/globals/chocobo_raising.lua xi.chocoboRaising.dayLength — one Vana'diel
         // day is 3456 Earth seconds.
         assert_eq!(EARTH_SECS_PER_VANA_DAY, 3456);
         let date = VanaDate::from_earth_unix(EARTH_EPOCH_UNIX + EARTH_SECS_PER_VANA_DAY);
@@ -314,7 +314,7 @@ mod tests {
 
     #[test]
     fn one_vana_week_wraps_the_weekday() {
-        // vendor/server/scripts/globals/chocobo_raising.lua:51 — one Vana'diel
+        // vendor/server/scripts/globals/chocobo_raising.lua xi.chocoboRaising.dayLength — one Vana'diel
         // week is 27648 Earth seconds (8 days).
         let week_secs = VANA_DAYS_PER_WEEK * EARTH_SECS_PER_VANA_DAY;
         assert_eq!(week_secs, 27_648);

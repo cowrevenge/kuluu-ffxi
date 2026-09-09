@@ -94,7 +94,7 @@ impl CharStatus {
 /// (`60 * deadRemaining` in vendor/server/src/map/packets/char_status.cpp and
 /// vendor/server/src/map/packets/s2c/0x00a_login.cpp). Retail divides straight
 /// back out: `Payload.field_A4 / 60`
-/// (research/XIClient/src/XIClient/source/Game/Net/Packets/s2c/0x00A.cpp:98).
+/// (research/XIClient/src/XIClient/source/Game/Net/Packets/s2c/0x00A.cpp S2C::RecvLogin).
 pub(crate) const DEAD_COUNTER_UNITS_PER_SECOND: u32 = 60;
 
 /// The fixed padding LSB prepends to the real remaining time (`6min +
@@ -146,7 +146,7 @@ pub struct CliStatus {
 }
 
 impl CliStatus {
-    // vendor/server/src/map/packets/s2c/0x061_clistatus.h:45-82 — the four job bytes
+    // vendor/server/src/map/packets/s2c/0x061_clistatus.h CLISTATUS — the four job bytes
     // sit between mpmax (@4) and exp_now (@12).
     const MJOB_NO_OFFSET: usize = 8;
     const MJOB_LV_OFFSET: usize = 9;
@@ -191,7 +191,7 @@ impl CliStatus {
 
 /// s2c 0x01B GP_SERV_COMMAND_JOB_INFO — per-job levels + unlocked-jobs bitmask for
 /// the self character. Body offsets follow the GP_MYROOM_DANCER struct in
-/// vendor/server/src/map/packets/s2c/0x01b_job_info.h:28-62 (filled in .cpp:30-57).
+/// vendor/server/src/map/packets/s2c/0x01b_job_info.h GP_MYROOM_DANCER (filled in .cpp:30-57).
 /// `job_levels` reads `job_lev2` (the full `jobs.job[24]` memcpy, index = JOBTYPE);
 /// the legacy `job_lev[16]` @0x0C truncates at 16 jobs and is skipped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -296,9 +296,9 @@ mod job_info_tests {
     use super::*;
 
     /// Pins JobInfo to LSB's GP_MYROOM_DANCER layout
-    /// (vendor/server/src/map/packets/s2c/0x01b_job_info.h:28-45; job_lev2, not
+    /// (vendor/server/src/map/packets/s2c/0x01b_job_info.h GP_MYROOM_DANCER; job_lev2, not
     /// the legacy job_lev[16] @0x0C) and MAX_JOBTYPE
-    /// (vendor/server/src/map/entities/battleentity.h:100), since the decode
+    /// (vendor/server/src/map/entities/battleentity.h MAX_JOBTYPE), since the decode
     /// tests build buffers through these same consts.
     #[test]
     fn job_info_offsets_match_gp_myroom_dancer_layout() {

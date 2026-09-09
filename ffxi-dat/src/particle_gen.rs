@@ -86,7 +86,7 @@ const ATTACH_SOURCE_ORIENTED: u16 = 0x0001;
 // research/xim ParticleInitializers.kt:105-116 — the StandardParticleSetup renderStateFlags u16
 // sits directly after the billboard flags. Bit 0x1000 (`ignoreTextureAlpha`) is the same bit
 // retail tests as `field_10C & 0x10000000` to pick the D3m element's texture-stage table.
-// research/XIClient/src/XIClient/source/Resource/Derived/CMoD3m.cpp:363-370
+// research/XIClient/src/XIClient/source/Resource/Derived/CMoD3m.cpp CMoD3m::Draw
 const RENDER_STATE_IGNORE_TEXTURE_ALPHA: u16 = 0x1000;
 // research/xim ParticleInitializers.kt:114 `cameraAttachedBasePosition`.
 const RENDER_STATE_CAMERA_ATTACHED_BASE: u16 = 0x0400;
@@ -140,7 +140,7 @@ impl ParticleBillboard {
     }
 }
 
-// research/XIClient/src/XIClient/source/World/Generator/CYyGenerator.cpp:857-901 — sec2 0x06/0x07
+// research/XIClient/src/XIClient/source/World/Generator/CYyGenerator.cpp CYyGenerator::ElemGenerate — sec2 0x06/0x07
 // offset each new elem by a random direction (two rng angles) at a radius derived from
 // `fpos[1] + fpos[2]`. 0x07 additionally scales that offset per axis, which is how the
 // ground-splash rings (`~1h*`, scale [1.3, 0.0, 1.2]) spread as flat ellipses instead of balls.
@@ -178,7 +178,7 @@ impl PositionVariance {
     }
 }
 
-// research/XIClient/src/XIClient/source/World/Generator/CYyGenerator.cpp:378-379 — the resource
+// research/XIClient/src/XIClient/source/World/Generator/CYyGenerator.cpp CYyGenerator::ConstructFromData size — the resource
 // body from byte 0x60 is memcpy'd onto the object at `field_C0`, so object offset X reads back at
 // body index X - 0x70 (our `body` already drops the 16-byte chunk header). `flags` (CYyGenerator.h
 // object 0xD8) is therefore the u32 at body[0x68], and Script1..4 (0xE0..0xEC) land on the four
@@ -270,12 +270,12 @@ pub struct ParticleGeneratorDef {
     pub blend: ParticleBlend,
     // The raw BlendFuncInitializer p0 (retail `field_16C & 0xFF`), kept alongside the collapsed
     // `blend` because the TEXTUREFACTOR-alpha promotion is keyed on byte 0x44 exactly.
-    // research/XIClient/src/XIClient/source/Resource/Derived/CMoD3m.cpp:345-349
+    // research/XIClient/src/XIClient/source/Resource/Derived/CMoD3m.cpp CMoD3m::Draw
     pub blend_byte: u8,
 
     // Selects the D3m texture-stage table: set = NonZeroOneTSS (texture alpha ignored,
     // alpha = 4*D.a*F.a), clear = NonZeroTwoTSS (alpha = 8*D.a*T.a*F.a).
-    // research/XIClient/src/XIClient/source/Resource/Derived/CMoD3m.cpp:16-104
+    // research/XIClient/src/XIClient/source/Resource/Derived/CMoD3m.cpp ZeroOneTSS
     pub ignore_texture_alpha: bool,
 
     // Per-particle keyframe tracks referenced by DAT-id (resolved against the action's 0x19 chunks).
@@ -593,12 +593,12 @@ impl ParticleGeneratorDef {
     }
 }
 
-// research/XIClient/src/XIClient/include/Resource/ResourceType.h:66 `Sep = 61`, dispatched
+// research/XIClient/src/XIClient/include/Resource/ResourceType.h `Sep = 61`, dispatched
 // at CYyGenerator.cpp:117 (`modelType` = the same setup byte payload+29 the particle kinds
 // come from) and :193 (`case Sep: elem = new CYySoundElem()`).
 const LINKED_DATA_SOUND: u8 = 0x3D;
 
-// research/XIClient/src/XIClient/source/World/Generator/CYyGenerator.cpp:1167-1185 —
+// research/XIClient/src/XIClient/source/World/Generator/CYyGenerator.cpp CYyGenerator::ElemGenerate 0x4Cu —
 // initializer 0x4C is the sound elem's setup: `s_far = fpos[1]`, `s_near = fpos[2]`, and
 // `s_width = 0.0` unconditionally, so the third shipped word (non-zero in 22 of the 5,895
 // generators) is discarded rather than read.

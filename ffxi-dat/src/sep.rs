@@ -1,12 +1,12 @@
 use crate::{DatError, Result};
 
-// research/XIClient/src/XIClient/include/Resource/Derived/CYySepRes.h:9-13
+// research/XIClient/src/XIClient/include/Resource/Derived/CYySepRes.h CYySepRes
 // `struct SepHeader { char SepTag[8]; int FileID; unsigned int field_3C; }` — the
 // tag is never read back, FileID is the se id and field_3C carries the flags.
 const SE_ID_OFFSET: usize = 8;
 const FLAGS_OFFSET: usize = 0x0C;
 
-// research/XIClient/src/XIClient/source/World/Generator/Effects/CYySoundElem.cpp:325-345
+// research/XIClient/src/XIClient/source/World/Generator/Effects/CYySoundElem.cpp CYySoundElem::VirtElem1
 // `IsNever()` == `field_3C & 0x80000000`, which is what makes a cue a loop rather than
 // a one-shot: CYyGenerator.cpp:1169-1171 unlinks the generator when it is set.
 const SEP_FLAG_LOOP: u32 = 0x8000_0000;
@@ -49,7 +49,7 @@ impl Sep {
     }
 }
 
-// research/XIClient/src/XIClient/source/Resource/Derived/CYySepRes.cpp:183-207
+// research/XIClient/src/XIClient/source/Resource/Derived/CYySepRes.cpp CYySepRes::CheckFourCC
 // `CheckFourCC` plus FileResource.cpp:630-641 `GetActivateTime` as one predicate: four
 // ASCII digits with the HHMM tens digits bounded, then hour = n1 + 10*n0 and
 // minute = n3 + 10*n2. Names failing it are not time buckets at all — they are the

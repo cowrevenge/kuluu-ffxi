@@ -31,37 +31,37 @@ const NAMEPLATE_LEGIBILITY_SCALE: f32 = 1.3;
 // plate keeps at least this fraction of full size. Reached near ~13 yalms.
 const NAMEPLATE_MIN_DEPTH_SCALE: f32 = 0.45;
 
-// research/XIClient/src/XIClient/source/Game/GameManager.cpp:798-799 — retail's clip planes
+// research/XIClient/src/XIClient/source/Game/GameManager.cpp GameManager::InitializeProjection — retail's clip planes
 // are fixed, so the nameplate ramp below must not read our camera's user-tunable projection.
 const RETAIL_NEAR_CLIP_YALMS: f32 = 0.1;
 const RETAIL_FAR_CLIP_YALMS: f32 = 65535.0;
 
-// research/XIClient/src/XIClient/source/Rendering/Active/CXiActorNameDraw.cpp:75
+// research/XIClient/src/XIClient/source/Rendering/Active/CXiActorNameDraw.cpp PrepareActorNamePosition FixedPointScale
 const NDC_DEPTH_FIXED_POINT_SCALE: u32 = 4096;
-// research/XIClient/src/XIClient/source/Rendering/Active/CXiActorNameDraw.cpp:261-262 rejects
+// research/XIClient/src/XIClient/source/Rendering/Active/CXiActorNameDraw.cpp DrawActorNameText rejects
 // z >= 1.0, so the deepest drawable fixed-point depth is one step short of the scale.
 const MAX_DRAWABLE_DEPTH_FIXED: u32 = NDC_DEPTH_FIXED_POINT_SCALE - 1;
-// research/XIClient/src/XIClient/source/Rendering/Active/CXiActorNameDraw.cpp:90-91
+// research/XIClient/src/XIClient/source/Rendering/Active/CXiActorNameDraw.cpp PrepareActorNameDrawData FadeStartDistance
 const FADE_START_DEPTH_FIXED: u32 = 0xFB4;
 const FADE_END_DEPTH_FIXED: u32 = 0x1004;
-// research/XIClient/src/XIClient/source/Rendering/Active/CXiActorNameDraw.cpp:72-73 — the
+// research/XIClient/src/XIClient/source/Rendering/Active/CXiActorNameDraw.cpp PrepareActorNamePosition — the
 // reciprocal-w gate (1/depth < 1) drops names inside one yalm of the view plane.
 const MIN_VIEW_DEPTH_YALMS: f32 = 1.0;
 
-// research/XIClient/src/XIClient/source/Rendering/Active/CXiActorNameDraw.cpp:31 — glyph units
+// research/XIClient/src/XIClient/source/Rendering/Active/CXiActorNameDraw.cpp ActorNameScreenScale — glyph units
 // to viewport fraction, applied to a pre-transformed (RHW=1) screen-space quad.
 const NAME_SCREEN_SCALE: f32 = 0.002_343_75;
-// research/XIClient/src/XIClient/source/Rendering/Active/CXiActorNameDraw.cpp:35 — one name
+// research/XIClient/src/XIClient/source/Rendering/Active/CXiActorNameDraw.cpp ActorNameLineHeight — one name
 // line is one glyph cell tall.
 pub const NAME_LINE_HEIGHT_UNITS: f32 = 8.0;
 const NAME_LINE_SCREEN_FRACTION: f32 = NAME_SCREEN_SCALE * NAME_LINE_HEIGHT_UNITS;
 
-// research/XIClient/src/XIClient/source/Rendering/Active/CXiActorNameDraw.cpp:111-112
+// research/XIClient/src/XIClient/source/Rendering/Active/CXiActorNameDraw.cpp PrepareActorNameDrawData angle
 const TARGET_PULSE_DEGREES_PER_FRAME: u32 = 16;
 const FULL_TURN_DEGREES: u32 = 360;
 const TARGET_PULSE_AMPLITUDE: f32 = 32.0;
 const TARGET_PULSE_BIAS: f32 = 96.0;
-// research/XIClient/src/XIClient/source/Rendering/Active/CXiActorNameDraw.cpp:115 repacks
+// research/XIClient/src/XIClient/source/Rendering/Active/CXiActorNameDraw.cpp PrepareActorNameDrawData repacks
 // the product as `(scaledAlpha & 0xFFFFFF80) << 17`, i.e. a shift right by 7.
 const TARGET_PULSE_DIVISOR: f32 = 128.0;
 
@@ -687,7 +687,7 @@ fn text_line_height_px(font: &FontArc, px: f32) -> u32 {
     (scaled.ascent() - scaled.descent()).ceil().max(1.0) as u32
 }
 
-// research/XIClient/.../CXiActorNameDraw.cpp:32-34 — an icon that is not the
+// research/XIClient/src/XIClient/source/Rendering/Active/CXiActorNameDraw.cpp ActorNameSpecialCharacterScale — an icon that is not the
 // leftmost glyph draws at 0.8 and advances the pen by 0.625; the job-master
 // tail draws at half scale and does not advance at all.
 const ICON_TRAILING_SCALE: f32 = 0.8;
@@ -813,7 +813,7 @@ fn rasterize_plate(
 
     let letter_advance_px = scaled.h_advance(scaled.glyph_id(char::from(REFERENCE_LETTER)));
     let (placements, icon_strip) = layout_icons(markers, icons, letter_advance_px, line_h as f32);
-    // research/XIClient/.../ActorTelemetry.cpp:397-398 — retail separates the
+    // research/XIClient/src/XIClient/source/World/Actor/ActorTelemetry.cpp ActorTelemetry::BuildTelemetryActorName — retail separates the
     // marker run from the name with a space, so the icon never crowds the text.
     let separator_px = if placements.is_empty() {
         0.0

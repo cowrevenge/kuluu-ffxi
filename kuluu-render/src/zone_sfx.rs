@@ -25,7 +25,7 @@ use crate::zone_clouds::find_weat_type;
 
 /// A DAT-placed sound emitter.
 ///
-/// research/XIClient/src/XIClient/source/World/Generator/Effects/CYySoundElem.cpp:425-490
+/// research/XIClient/src/XIClient/source/World/Generator/Effects/CYySoundElem.cpp CYySoundElem::OnPlayUpdate
 /// `OnPlayUpdate` re-runs Calc3D every frame; a looping cue is stopped rather than
 /// destroyed when the listener leaves `far`, so it can start again on the way back.
 #[derive(Component, Debug)]
@@ -47,7 +47,7 @@ pub struct ZonePlacedSfx {
     audio: Option<Entity>,
 }
 
-/// research/XIClient/.../World/Weather/WeatherTransition.cpp:94 activates the generators
+/// research/XIClient/src/XIClient/source/World/Weather/WeatherTransition.cpp WeatherTransition::WeatherTransition activates the generators
 /// under the live `weat/<tag>` container and the destructor (:122-145) deactivates them, so
 /// those emitters exist only while that weather does. The zone's own generators live as
 /// long as the zone.

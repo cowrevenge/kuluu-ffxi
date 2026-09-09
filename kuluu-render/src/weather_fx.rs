@@ -18,7 +18,7 @@ pub fn sync_current_weather_from_snapshot(
     mut current: ResMut<CurrentWeather>,
 ) {
     // LSB sends the surrounding town's weather in the MH 0x00A
-    // (vendor/server/src/map/packets/s2c/0x00a_login.cpp:154); interiors show none.
+    // (vendor/server/src/map/packets/s2c/0x00a_login.cpp GP_SERV_COMMAND_LOGIN::GP_SERV_COMMAND_LOGIN); interiors show none.
     let next = if state.snapshot.myroom.is_some() {
         None
     } else {

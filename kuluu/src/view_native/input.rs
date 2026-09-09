@@ -2432,9 +2432,9 @@ mod tests {
 
     /// `/assist` is the case that needs the round trip: `battleutils::
     /// assistTarget` pushes s2c 0x058 without touching `m_battleTarget`
-    /// (vendor/server/src/map/utils/battleutils.cpp:5058-5078), so the c2s 0x01A
+    /// (vendor/server/src/map/utils/battleutils.cpp assistTarget), so the c2s 0x01A
     /// ChangeTarget this dispatch sends back is what actually moves the server's
-    /// battle target (vendor/server/src/map/ai/ai_container.cpp:244-246 calls
+    /// battle target (vendor/server/src/map/ai/ai_container.cpp CAIContainer::Internal_ChangeTarget calls
     /// `SetBattleTargetID` for an engaged player). Swallowing it would leave
     /// `CAttackState` swinging at the old mob.
     #[test]

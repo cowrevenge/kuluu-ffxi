@@ -375,7 +375,7 @@ fn pc_flags_are_real(kind: EntityKind) -> bool {
 
 /// The `NameColorSet` branches that return before retail reaches the
 /// claimed-monster block: doors/lifts/models and the dead
-/// (research/XIClient/.../World/Actor/ActorTelemetry.cpp:1572-1582), then the
+/// (research/XIClient/src/XIClient/source/World/Actor/ActorTelemetry.cpp ActorTelemetry::NameColorSet), then the
 /// GM rows, whose `state >= 3` lookup (:1663-1668) returns ahead of the claim
 /// branch at :1678 - and therefore also ahead of the allegiance colour, which
 /// retail merely writes on its way past.
@@ -408,7 +408,7 @@ fn pre_claim_color(entity: &Entity) -> Option<NameColorChoice> {
 /// decision retail hangs its battle-music flag off: `NameColorSet` raises
 /// `GameManager::SomeMusicByte` from inside the branch that paints a
 /// party- or alliance-claimed monster
-/// (research/XIClient/.../World/Actor/ActorTelemetry.cpp:1717-1723). Only the
+/// (research/XIClient/src/XIClient/source/World/Actor/ActorTelemetry.cpp ActorTelemetry::NameColorSet). Only the
 /// returns that precede that branch gate the music; it is deliberately not
 /// derived from [`name_color_choice`], whose allegiance early return has no
 /// retail counterpart.

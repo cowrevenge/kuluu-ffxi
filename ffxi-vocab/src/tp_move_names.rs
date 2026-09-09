@@ -3,7 +3,7 @@
 //! One id space split across two LSB tables: ids < 256 are weapon skills PCs and mobs share
 //! (`weapon_skills`), ids >= 256 are monster-only TP moves (`mob_skills`). LSB itself makes
 //! that split — a mob skill under 256 finishes as `ActionCategory::SkillFinish`, at or above
-//! it as `MobSkillFinish` (vendor/server/src/map/entities/battleentity.cpp:2655-2662).
+//! it as `MobSkillFinish` (vendor/server/src/map/entities/battleentity.cpp CBattleEntity::OnMobSkillFinished).
 //!
 //! Retail reads these from its own table (`ROM/27/80.DAT`, a xor-0x80 string table — see
 //! research/xim `MobAbilityTable.kt`), which differs from LSB's snake_case identifiers in

@@ -1,6 +1,6 @@
 //! UI-element groups (DAT section kind 0x31) and sprite extraction.
 //! Component records are retail menu-shape quads
-//! (research/XIClient/src/XIClient/include/UI/MenuShapeFormat.h:24-45); the menu
+//! (research/XIClient/src/XIClient/include/UI/MenuShapeFormat.h QuadData); the menu
 //! UI DATs address sprites by (group-name, index) — e.g. the Vana'diel clock day
 //! orb is group "menu    frames  ", index 106 + element.
 
@@ -12,7 +12,7 @@ pub const TEXTURE_KIND: u8 = 0x20;
 
 const NAME_LEN: usize = 0x10;
 
-// Packed QuadData layout (research/XIClient/src/XIClient/include/UI/MenuShapeFormat.h:24-45).
+// Packed QuadData layout (research/XIClient/src/XIClient/include/UI/MenuShapeFormat.h).
 mod comp {
     pub const UV_WIDTH: usize = 16;
     pub const UV_HEIGHT: usize = 18;
@@ -28,12 +28,12 @@ mod comp {
     pub const LEN: usize = 61;
 }
 
-// TexCoordFlags (research/XIClient/src/XIClient/include/UI/MenuShapeFormat.h:8-12).
+// TexCoordFlags (research/XIClient/src/XIClient/include/UI/MenuShapeFormat.h TexCoordFlags NONE).
 const FLIP_HORIZONTAL: u8 = 1;
 const FLIP_VERTICAL: u8 = 2;
 const FLIP_BOTH: u8 = 3;
 
-// research/XIClient/src/XIClient/include/UI/MenuShapeFormat.h:14-18
+// research/XIClient/src/XIClient/include/UI/MenuShapeFormat.h BlendFactor
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum BlendFactor {

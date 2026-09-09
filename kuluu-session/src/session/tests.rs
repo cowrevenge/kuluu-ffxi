@@ -125,7 +125,7 @@ fn death_menu_packet_rejects_a_truncated_body() {
 /// `ZoneChanged` clears `SessionState::current_weather`, so the LOGIN arm
 /// must emit the 0x00A zone-in weather *after* it. Reversed, a zoning
 /// character renders the default sky until the next 0x057 — which LSB only
-/// sends on a weather change (vendor/server/src/map/zone.cpp:672).
+/// sends on a weather change (vendor/server/src/map/zone.cpp CZone::SetWeather).
 #[test]
 fn login_emits_zone_in_weather_after_the_zone_change() {
     const WEATHER_NUMBER: u16 = 4;
@@ -280,7 +280,7 @@ fn origin_fallback_does_not_replace_origin_seed() {
 
 #[test]
 fn myroom_login_keeps_forced_origin_seed() {
-    // vendor/server/scripts/globals/moghouse.lua:290 setPos(0, 0, 0, 192):
+    // vendor/server/scripts/globals/moghouse.lua moghouseZoneLines setPos(0, 0, 0, 192):
     // the MH origin spawn is authoritative, not a bad seed to repair.
     let town_side = v(162.591, -4.103, 162.423);
     assert_eq!(
@@ -1058,7 +1058,7 @@ fn scenario_item_packet_layout_matches_lsb_struct() {
     assert_eq!(&buf[74..76], &6u16.to_le_bytes(), "TableIndex");
 }
 
-/// vendor/server/src/map/packets/c2s/0x064_scenarioitem.cpp:44 —
+/// vendor/server/src/map/packets/c2s/0x064_scenarioitem.cpp GP_CLI_COMMAND_SCENARIOITEM::process keyItemId —
 /// keyItemId = TableIndex*512 + i*32 + bit; the fold must be its inverse.
 #[test]
 fn mark_seen_bits_round_trip_through_ids_from_flags() {
@@ -1081,7 +1081,7 @@ fn mark_seen_bits_round_trip_through_ids_from_flags() {
     );
 }
 
-/// vendor/server/src/map/packets/c2s/0x064_scenarioitem.cpp:31-33 —
+/// vendor/server/src/map/packets/c2s/0x064_scenarioitem.cpp PacketValidator —
 /// UniqueNo must equal char id and ActIndex must equal targid, ActIndex 0
 /// is always rejected, and the send is blocked while InEvent; every
 /// blocked case must skip without mutating local seen-state.
@@ -1219,9 +1219,9 @@ fn battle2_self(action_kind: u8, cmd_arg: u32) -> Battle2Header {
 }
 
 /// The bar is armed at send but unstarted; it only starts when the server's
-/// own MagicStart arrives (vendor/server/src/map/ai/states/magic_state.cpp:127),
+/// own MagicStart arrives (vendor/server/src/map/ai/states/magic_state.cpp CMagicState::CMagicState),
 /// so it cannot lead the cast pose and the "starts casting" line by a round trip.
-/// The FourCCs are the literal LSB constants (vendor/server/src/map/enums/four_cc.h:40).
+/// The FourCCs are the literal LSB constants (vendor/server/src/map/enums/four_cc.h FourCC BlueMagicCast).
 #[test]
 fn self_cast_bar_starts_on_magic_start_not_on_send() {
     const CABK: u32 = 0x6B626163;
@@ -1403,7 +1403,7 @@ fn talknumwork2_substitutes_the_caught_item() {
 }
 
 /// The Esc cancel EndPara crosses the wire exactly as LSB's
-/// utils.EVENT_CANCELLED_OPTION (vendor/server/scripts/utils/utils.lua:8).
+/// utils.EVENT_CANCELLED_OPTION (vendor/server/scripts/utils/utils.lua).
 #[test]
 fn event_end_cancel_writes_lsb_cancel_option() {
     let buf = build_subpacket_event_end(
@@ -1479,7 +1479,7 @@ fn eventucoff_fishing_emits_fishing_ended_and_keeps_pending() {
 }
 
 /// EventRecvPending follows every processed 0x05B
-/// (vendor/server/src/map/packets/c2s/0x05b_eventend.cpp:71) and can land
+/// (vendor/server/src/map/packets/c2s/0x05b_eventend.cpp GP_CLI_COMMAND_EVENTEND::process) and can land
 /// after a chained event's 0x032 trigger — it must not clear anything.
 #[test]
 fn eventucoff_recv_pending_ack_is_inert() {
@@ -1866,7 +1866,7 @@ fn is_fresh_bundle_dedups_retransmits_and_survives_wrap() {
 }
 
 /// Model of LSB's c2s dispatch window
-/// (vendor/server/src/map/map_networking.cpp:419-428,471): subpacket
+/// (vendor/server/src/map/map_networking.cpp MapNetworking::parse): subpacket
 /// dispatched iff `client_packet_id < sync <= header`, then
 /// `client_packet_id = header`. Feeds it bundles built the way the
 /// session builds them (one sync per subpacket, header from
@@ -2182,7 +2182,7 @@ impl BattleBitWriter {
     }
 }
 
-// vendor/server/src/map/packets/s2c/0x028_battle2.cpp:41-58 — an off-by-one-field read here
+// vendor/server/src/map/packets/s2c/0x028_battle2.cpp GP_SERV_COMMAND_BATTLE2::pack — an off-by-one-field read here
 // silently hands the recast timer ("Action info") back as an entity id.
 #[test]
 fn battle2_header_reports_primary_target() {
@@ -2218,9 +2218,9 @@ fn battle2_header_reports_primary_target() {
     assert_eq!(h.primary_target_id, None);
 }
 
-// vendor/server/src/map/packets/s2c/0x028_battle2.cpp:71-73 — resolution(3), kind(2),
+// vendor/server/src/map/packets/s2c/0x028_battle2.cpp GP_SERV_COMMAND_BATTLE2::pack — resolution(3), kind(2),
 // animation(12) open every result block. A basic attack never sets `action.actionid`
-// (vendor/server/src/map/entities/battleentity.cpp:2989), so these bits are the ONLY
+// (vendor/server/src/map/entities/battleentity.cpp CBattleEntity::OnAttack), so these bits are the ONLY
 // per-swing data: an off-by-one here picks the wrong swing routine and the wrong hit
 // reaction, i.e. the wrong sound or none.
 const BATTLE2_PARRIED_LEFT_ATTACK: ffxi_proto::melee::MeleeResult =
@@ -2761,7 +2761,7 @@ fn check_impossible_to_gauge_uses_mob_placeholder() {
 }
 
 // 0x009 body: UniqueNo u32 @0, ActIndex u16 @4, MesNo u16 @6, Attr u8 @8
-// (vendor/server/src/map/packets/s2c/0x009_message.h:37-41).
+// (vendor/server/src/map/packets/s2c/0x009_message.h GP_SERV_COMMAND_MESSAGE UniqueNo).
 fn std_message_body(unique_no: u32, mes_no: u16) -> Vec<u8> {
     let mut data = vec![0u8; 12];
     data[0..4].copy_from_slice(&unique_no.to_le_bytes());
@@ -3296,7 +3296,7 @@ fn item_stack_interval_clears_server_window() {
 #[test]
 fn equip_set_unequip_uses_zero_slot_index() {
     // LSB unequips a slot when PropertyItemIndex (slotID) is 0, regardless of
-    // container: vendor/server/src/map/utils/charutils.cpp:3147
+    // container: vendor/server/src/map/utils/charutils.cpp EquipItem
     // ("slotID of zero = unequip"). The re-select-to-unequip path encodes this.
     let buf = build_subpacket_equip_set(0, 0, 10, 0);
     assert_eq!(buf[4], 0, "slotID 0 = unequip");

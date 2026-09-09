@@ -3,9 +3,9 @@ use super::*;
 /// s2c 0x0CA GP_SERV_COMMAND_INSPECT_MESSAGE — the checked PC's bazaar message
 /// and title. LSB pushes it immediately before the 0x0C9 EQUIPMENT/GENERAL
 /// batches, so it carries no target id of its own
-/// (vendor/server/src/map/packets/c2s/0x0dd_equip_inspect.cpp:134-136); the
+/// (vendor/server/src/map/packets/c2s/0x0dd_equip_inspect.cpp GP_CLI_COMMAND_EQUIP_INSPECT::process); the
 /// caller correlates it with the /check it just sent.
-/// vendor/server/src/map/packets/s2c/0x0ca_inspect_message.h:36-44.
+/// vendor/server/src/map/packets/s2c/0x0ca_inspect_message.h GP_SERV_COMMAND_INSPECT_MESSAGE.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InspectMessage {
     pub message: String,

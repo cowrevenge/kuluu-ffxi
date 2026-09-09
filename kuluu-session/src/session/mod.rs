@@ -359,7 +359,7 @@ async fn run_map_session(
     // c2s (:499) — never per s2c sent. Breaking on the fresh stamp instead of
     // waiting for socket idle keeps each inter-c2s gap to milliseconds; a full
     // 8 s cap drain in a busy zone would exceed LSB's 5 s link-dead window
-    // (vendor/server/src/map/map_session_container.cpp:206-220) and mark us
+    // (vendor/server/src/map/map_session_container.cpp MapSessionContainer::cleanupSessions) and mark us
     // disconnecting mid-zone-in.
     const FLOOD_DRAIN_CAP: std::time::Duration = std::time::Duration::from_secs(8);
     let flood_deadline = std::time::Instant::now() + FLOOD_DRAIN_CAP;
@@ -700,7 +700,7 @@ async fn drain_zone_flood(
                     );
                 }
                 // Post-send quiesce: the server's id only advances when it accepts one of our c2s
-                // (vendor/server/src/map/map_networking.cpp:499), so any datagram stamped differently
+                // (vendor/server/src/map/map_networking.cpp MapNetworking::parse), so any datagram stamped differently
                 // from the ack we just sent proves acceptance — break instead of waiting for idle.
                 // Waiting for idle in a busy zone runs the full FLOOD_DRAIN_CAP with zero c2s sent,
                 // and LSB flips isLinkDead at 5 s of c2s silence (vendor/server/src/map/
@@ -921,7 +921,7 @@ fn handle_sub_packet(
                 }
 
                 // 0x057 WEATHER is only broadcast on a weather *change*
-                // (vendor/server/src/map/zone.cpp:672 is its sole construction
+                // (vendor/server/src/map/zone.cpp CZone::SetWeather is its sole construction
                 // site), so without this a zoning character renders the default
                 // sky until the next change lands. Emitted after ZoneChanged,
                 // which clears current_weather.
@@ -1227,7 +1227,7 @@ fn handle_sub_packet(
                 let pos_present = send_flag & UPDATE_POS != 0;
                 // sendflags_t.Model (bit 4) — the Model block that carries
                 // MonstrosityFlags. Distinct from General/UPDATE_HP, which does not
-                // refresh it (vendor/server/src/map/packets/entity_update.cpp:44).
+                // refresh it (vendor/server/src/map/packets/entity_update.cpp sendflags_t).
                 const UPDATE_MODEL: u8 = 0x10;
                 let _ = event_tx.send(AgentEvent::EntityUpserted {
                     entity: Entity {
@@ -1303,7 +1303,7 @@ fn handle_sub_packet(
                     .inspect_err(|e| warn_decode_err(sub.opcode, e))
                 {
                     // The 2F bit is meaningful only on the SELF sync
-                    // (vendor/server/src/map/packets/char_sync.cpp:61).
+                    // (vendor/server/src/map/packets/char_sync.cpp CCharSyncPacket::CCharSyncPacket).
                     if sync.id == self_char_id {
                         if let Some(unlocked) = sync.mh_2f_unlocked {
                             mog.mh_2f_unlocked = Some(unlocked);
@@ -2204,7 +2204,7 @@ fn begin_server_event(
 /// next-unused subpacket sync: the sync of the last subpacket placed in the
 /// bundle. LSB dispatches a subpacket only when its sync falls in
 /// `(client_packet_id, header_id]`, then advances `client_packet_id` to the
-/// header (vendor/server/src/map/map_networking.cpp:419-428,471) — a header
+/// header (vendor/server/src/map/map_networking.cpp MapNetworking::parse) — a header
 /// counter that drifts from the subpacket syncs silently kills the session
 /// (subpackets skipped, keepalive/entity flow still healthy). The server's
 /// compares are not wrap-aware, so the one datagram straddling u16 wrap
@@ -2233,12 +2233,12 @@ struct CastBar {
 
 /// Drives the self cast bar from the server's own BATTLE2 action packets.
 ///
-/// vendor/server/src/map/ai/states/magic_state.cpp:127 pushes the MagicStart
+/// vendor/server/src/map/ai/states/magic_state.cpp CMagicState::CMagicState pushes the MagicStart
 /// action_t from the `CMagicState` constructor, i.e. synchronously inside the
 /// 0x1A action handler (player_controller.cpp:50-59 → ai_container.cpp:225-234),
 /// so this packet is the server's cast-start instant and carries the same cast
 /// pose and "starts casting" line. An interrupt reuses the MagicStart category
-/// with an "sp*" FourCC (vendor/server/src/map/action/interrupts.cpp:268-284).
+/// with an "sp*" FourCC (vendor/server/src/map/action/interrupts.cpp MagicInterrupt).
 fn apply_self_battle2_to_cast(
     header: &Battle2Header,
     cast_in_flight: &mut Option<CastInFlight>,
@@ -2328,7 +2328,7 @@ async fn keepalive_loop(
 
     // ITEM_STACK is rate-limited server-side: a second sort of the same container
     // within 1s trips LSB's lightluggage counter and can force-logout the char
-    // (vendor/server/src/map/packets/c2s/0x03a_item_stack.cpp:40). Throttle here
+    // (vendor/server/src/map/packets/c2s/0x03a_item_stack.cpp GP_CLI_COMMAND_ITEM_STACK::process). Throttle here
     // so mashing the Sort key can never reach that.
     let mut last_item_stack: std::collections::HashMap<u8, std::time::Instant> =
         std::collections::HashMap::new();
@@ -4121,7 +4121,7 @@ async fn keepalive_loop(
                     server_seq_applied = Some(server_last_seq);
                     // datagram byte[2..4] (sync_in) on an inbound packet is the server's
                     // ack of our client seq (LSB MapSession::client_packet_id, written by
-                    // preparePacket at vendor/server/src/map/map_networking.cpp:654).
+                    // preparePacket at vendor/server/src/map/map_networking.cpp MapNetworking::preparePacket).
                     net_health.on_recv(server_last_seq, header.sync_in);
                     for sub in framing::walk_sub_packets(&buf[framing::FFXI_HEADER_SIZE..]).flatten() {
                         if sub.opcode == ffxi_proto::map::s2c::LOGOUT {
@@ -4975,7 +4975,7 @@ impl<'a> BattleBitReader<'a> {
     }
 }
 
-// vendor/server/src/map/packets/s2c/0x028_battle2.cpp:41-58 — header packs actorId(32),
+// vendor/server/src/map/packets/s2c/0x028_battle2.cpp GP_SERV_COMMAND_BATTLE2::pack — header packs actorId(32),
 // trg_sum(6), res_sum(4), cmd_no(4), cmd_arg(32), info(32), then per target actorId(32) +
 // resultCount(4). Only the first target is read: walking the rest requires re-walking the
 // variable-length result blocks, and XIM likewise attaches to `context.primaryTargetId`
@@ -5205,12 +5205,12 @@ fn template_for_id(message_num: u16) -> Option<&'static str> {
     ffxi_vocab::msg_basic::lookup(message_num)
 }
 
-// vendor/server/src/map/enums/msg_std.h:48 — "<name> examines you.", sent to
-// the checked PC via 0x009 (vendor/server/src/map/packets/c2s/0x0dd_equip_inspect.cpp:131).
+// vendor/server/src/map/enums/msg_std.h MsgStd Examine — "<name> examines you.", sent to
+// the checked PC via 0x009 (vendor/server/src/map/packets/c2s/0x0dd_equip_inspect.cpp GP_CLI_COMMAND_EQUIP_INSPECT::process).
 const MSG_STD_EXAMINE: u16 = 89;
 
 // s2c 0x009 GP_SERV_COMMAND_MESSAGE body: UniqueNo u32 @0, ActIndex u16 @4,
-// MesNo u16 @6, Attr u8 @8 (vendor/server/src/map/packets/s2c/0x009_message.h:37-41).
+// MesNo u16 @6, Attr u8 @8 (vendor/server/src/map/packets/s2c/0x009_message.h GP_SERV_COMMAND_MESSAGE UniqueNo).
 fn decode_std_message_examine(
     data: &[u8],
     name_cache: &std::collections::HashMap<u32, String>,
@@ -5330,7 +5330,7 @@ fn render_check_mob(message_num: u16, data1: u32, data2: u32, tar_name: &str) ->
 // to know which value belongs there — 100/101 are what an ability with message1=0 falls back
 // to (charentity.cpp:1945), so every plain job ability logged "<player> uses ..".
 // Retail's full mesbasic table (ROM/27/72.DAT) carries the real strings; until that is
-// scraped, pin the wording here. vendor/server/src/map/enums/msg_basic.h:46-185.
+// scraped, pin the wording here. vendor/server/src/map/enums/msg_basic.h MsgBasic CounterAbsByShadow.
 // The 420-427 Corsair roll family is deliberately absent: those need two numbers and a
 // status effect that data1/data2 alone cannot supply.
 const TEMPLATE_OVERRIDES: &[(u16, &str)] = &[
@@ -5367,9 +5367,9 @@ const TEMPLATE_OVERRIDES: &[(u16, &str)] = &[
     ),
     (324, "The <player> uses <ability>, but misses <target>."),
     // 565 (MsgBasic::Obtains) is only ever sent with gil as the argument —
-    // vendor/server/src/map/utils/charutils.cpp:4756 (party split) and :4763
+    // vendor/server/src/map/utils/charutils.cpp DistributeGil (party split) and :4763
     // (solo) both push gil into GP_SERV_COMMAND_BATTLE_MESSAGE, and
-    // vendor/server/scripts/globals/regimes.lua:1480 names it FOV_OBTAINS_GIL —
+    // vendor/server/scripts/globals/regimes.lua xi.regime.checkRegime names it FOV_OBTAINS_GIL —
     // so the scraped "<target> obtains <amount>." is rendered with the gil
     // unit (retail wording tracked in kuluu-us91).
     (565, "<target> obtains <amount> gil."),
@@ -5389,12 +5389,12 @@ fn subject_is_tar(message_num: u16) -> bool {
 
 // The `<skill>` token is overloaded across msg_basic. These three are the skill-up lines,
 // where the id is a *combat* skill (Dagger, Evasion) carried in the message's own data1.
-// vendor/server/src/map/enums/msg_basic.h:65,74,176.
+// vendor/server/src/map/enums/msg_basic.h MsgBasic SkillGain.
 const COMBAT_SKILL_MESSAGES: &[u16] = &[38, 53, 310];
 
 // The one `<skill>` line whose id is an ability, not a weapon skill: only ability_state and
 // petskill_state emit it, both with `param = ability id`
-// (vendor/server/src/map/ai/states/ability_state.cpp:137-140).
+// (vendor/server/src/map/ai/states/ability_state.cpp CAbilityState::CAbilityState).
 const READIES_ABILITY_MESSAGE: u16 = 326;
 
 fn skill_name(message_num: u16, data1: u32, action_id: u32) -> String {
@@ -5945,17 +5945,17 @@ fn emit_event_speech_to_chat(
 
 /// Mode low byte of s2c 0x052 EVENTUCOFF (u32 right after the 4-byte
 /// sub-header); CancelEvent packs the cancelled event id in the high bits
-/// (vendor/server/src/map/packets/s2c/0x052_eventucoff.cpp:30-34).
+/// (vendor/server/src/map/packets/s2c/0x052_eventucoff.cpp GP_SERV_COMMAND_EVENTUCOFF::GP_SERV_COMMAND_EVENTUCOFF).
 fn eventucoff_mode_of(data: &[u8]) -> Option<u32> {
     let bytes: [u8; 4] = data.get(0..4)?.try_into().ok()?;
     Some(u32::from_le_bytes(bytes) & ffxi_proto::map::eventucoff_mode::MODE_MASK)
 }
 
 /// s2c 0x052 EVENTUCOFF releases the client from an event user-control lock
-/// (vendor/server/src/map/packets/s2c/0x052_eventucoff.h:26-33). CancelEvent
+/// (vendor/server/src/map/packets/s2c/0x052_eventucoff.h GP_SERV_COMMAND_EVENTUCOFF_MODE). CancelEvent
 /// arrives only after the server already dropped the event (release()/skipEvent
-/// call endCurrentEvent — vendor/server/src/map/lua/lua_baseentity.cpp:1374-1385,
-/// vendor/server/src/map/entities/charentity.cpp:3319-3336), so no 0x05B goes
+/// call endCurrentEvent — vendor/server/src/map/lua/lua_baseentity.cpp CLuaBaseEntity::release,
+/// vendor/server/src/map/entities/charentity.cpp CCharEntity::skipEvent), so no 0x05B goes
 /// back; the local event state is dropped instead. Fishing release = a rejected
 /// cast (no rod / bait / fishing spot) or the end of fishing. EventRecvPending —
 /// the ack after every processed 0x05B (0x05b_eventend.cpp:71) — must NOT clear
@@ -6009,7 +6009,7 @@ fn decode_chat_std(data: &[u8]) -> Option<ChatLine> {
     // "NS" chat kinds mean "No speaker object displayed" — retail renders the
     // text with no speaker attribution (used for unattributed NPC narration like
     // the Home Point description). Blank the sender so the HUD omits the prefix
-    // (vendor/server/src/map/enums/chat_message_type.h:38-41,53).
+    // (vendor/server/src/map/enums/chat_message_type.h CHAT_MESSAGE_TYPE MESSAGE_NS_SAY).
     let sender = if is_no_speaker_chat_kind(kind) {
         String::new()
     } else {
@@ -6039,12 +6039,12 @@ fn is_no_speaker_chat_kind(kind: u8) -> bool {
 // Server customMenu prompt (home point Set/Yes/No, quest confirmations, …):
 // GP_SERV_COMMAND_CHAT_STD with type MESSAGE_GMPROMPT and sender name
 // `_CUSTOM_MENU`, message = quoted-concat `"Title""Opt1""Opt2"…`
-// (vendor/server/src/map/lua/lua_baseentity.cpp:615 customMenu +
+// (vendor/server/src/map/lua/lua_baseentity.cpp CLuaBaseEntity::customMenu customMenu +
 // luautils.cpp:5288 SetCustomMenuContext). The reply round-trips as a
 // `_CUSTOM_MENU` tell the server routes to HandleCustomMenu
 // (0x0b6_chat_name.cpp:79-:82).
 const CUSTOM_MENU_SENDER: &str = "_CUSTOM_MENU";
-const MESSAGE_GMPROMPT: u8 = 12; // vendor/server/src/map/enums/chat_message_type.h:37
+const MESSAGE_GMPROMPT: u8 = 12; // vendor/server/src/map/enums/chat_message_type.h
                                  // HandleCustomMenu (luautils.cpp:5323) extracts the result after this marker and
                                  // drops the trailing `)`; the "Canceled." payload takes the onCancelled branch
                                  // (luautils.cpp:5368 NA).
@@ -6189,7 +6189,7 @@ async fn send_pbx(
 }
 
 // LSB kicks a character whose ITEM_STACK requests for one container arrive faster
-// than 1/sec (vendor/server/src/map/packets/c2s/0x03a_item_stack.cpp:40); 1.1s
+// than 1/sec (vendor/server/src/map/packets/c2s/0x03a_item_stack.cpp GP_CLI_COMMAND_ITEM_STACK::process); 1.1s
 // keeps a margin over that window.
 const ITEM_STACK_MIN_INTERVAL: std::time::Duration = std::time::Duration::from_millis(1100);
 
@@ -6497,7 +6497,7 @@ fn flush_pending_event_end(
 /// for, so taking the entry is the authorization to send one. A VM session that
 /// outlived the keepalive auto-release must end locally without resending: LSB
 /// drops an EVENT_END whose EventPara no longer matches `currentEvent`
-/// (vendor/server/src/map/packets/c2s/validation.cpp:58-77).
+/// (vendor/server/src/map/packets/c2s/validation.cpp PacketValidator::isInEvent).
 fn take_pending_event_end(
     pending_event_end: &mut Vec<(u32, u16, u16)>,
     unique_no: u32,
@@ -6509,7 +6509,7 @@ fn take_pending_event_end(
 }
 
 /// LSB force-places the player at exactly (0,0,0) rot 192 on Mog House zone-in
-/// (vendor/server/scripts/globals/moghouse.lua:290), so a MYROOM login's origin
+/// (vendor/server/scripts/globals/moghouse.lua moghouseZoneLines), so a MYROOM login's origin
 /// seed is authoritative and the near-origin "repair" must not fire.
 fn spawn_seed_pos(seed: Vec3, fallback: Option<Vec3>, in_myroom: bool) -> Vec3 {
     if in_myroom {
@@ -6522,7 +6522,7 @@ fn spawn_seed_pos(seed: Vec3, fallback: Option<Vec3>, in_myroom: bool) -> Vec3 {
 // doorOffset (research/xim/src/jsMain/kotlin/xim/poc/game/configuration/
 // assetviewer/AssetViewer.kt:651-671, model ids per xim/poc/tools/ZoneChanger.kt:
 // 18-36); wire entity order swaps the vertical into `z` (GP_SERV_POS_HEAD x/z/y
-// "Not a typo", vendor/server/src/map/packets/s2c/0x00a_login.cpp:142-144).
+// "Not a typo", vendor/server/src/map/packets/s2c/0x00a_login.cpp GP_SERV_COMMAND_LOGIN::GP_SERV_COMMAND_LOGIN).
 fn mh_door_pos(model: u16) -> Vec3 {
     const MH_2F_MODELS: std::ops::RangeInclusive<u16> = 615..=618;
     const SANDORIA_S: u16 = 745;

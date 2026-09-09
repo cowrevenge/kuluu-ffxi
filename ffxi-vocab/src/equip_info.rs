@@ -35,7 +35,7 @@ pub fn fits_slot(info: &EquipInfo, slot_id: u8) -> bool {
 
 pub fn fits_job(info: &EquipInfo, job_id: u8) -> bool {
     // LSB item_equipment.jobs is 1-indexed: a job occupies bit (job - 1).
-    // vendor/server/src/map/utils/charutils.cpp:2313 — getJobs() & (1 << (GetMJob() - 1))
+    // vendor/server/src/map/utils/charutils.cpp EquipArmor — getJobs() & (1 << (GetMJob() - 1))
     if job_id == 0 || job_id > 32 {
         return false;
     }

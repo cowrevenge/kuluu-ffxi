@@ -204,7 +204,7 @@ pub struct Entity {
     pub face_target: u16,
 
     /// entity_update namevis byte (PosHead flags3 top byte), written under
-    /// UPDATE_HP — vendor/server/src/map/packets/entity_update.cpp:357/:408 put
+    /// UPDATE_HP — vendor/server/src/map/packets/entity_update.cpp CEntityUpdatePacket::updateWith/:408 put
     /// `ref<uint8>(0x2B) = PEntity->namevis` inside `if (updatemask & UPDATE_HP)`.
     /// The packet buffer is zero-filled, so a POS-only update carries no namevis:
     /// `None` until the first General-block update does, preserved across
@@ -371,7 +371,7 @@ pub enum ChatChannel {
 
     /// Chat kind 8 MESSAGE_EMOTION: canned-emote lines the client composes
     /// from its DAT, plus free-form /em text
-    /// (vendor/server/src/map/enums/chat_message_type.h:35).
+    /// (vendor/server/src/map/enums/chat_message_type.h CHAT_MESSAGE_TYPE MESSAGE_EMOTION).
     Emote,
 }
 
@@ -432,7 +432,7 @@ pub struct CharStatsRaw {
 
 /// s2c 0x00A myroom cluster; present only while inside a Mog House. `model`
 /// is an interior model id, not a zone id
-/// (vendor/server/src/map/packets/s2c/0x00a_login.cpp:32-34).
+/// (vendor/server/src/map/packets/s2c/0x00a_login.cpp GetMogHouseModelID).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MyRoomInfo {
     pub model: u16,
@@ -635,7 +635,7 @@ pub struct SessionState {
     pub job_info: Option<JobInfoState>,
 
     /// 2F-unlock bit from the self 0x067 CharSync
-    /// (vendor/server/src/map/packets/char_sync.cpp:61); `None` until one lands.
+    /// (vendor/server/src/map/packets/char_sync.cpp CCharSyncPacket::CCharSyncPacket); `None` until one lands.
     #[serde(default)]
     pub mh_2f_unlocked: Option<bool>,
 
@@ -682,7 +682,7 @@ pub struct CheckMessage {
 
 /// A bazaar being browsed. Rows are keyed by the seller's LOC_INVENTORY slot
 /// because the server refreshes single rows in place after each purchase
-/// (vendor/server/src/map/packets/c2s/0x106_bazaar_buy.cpp:198).
+/// (vendor/server/src/map/packets/c2s/0x106_bazaar_buy.cpp GP_CLI_COMMAND_BAZAAR_BUY::process).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BazaarView {
     pub seller_id: u32,
@@ -841,7 +841,7 @@ pub struct AhFeeQuote {
 }
 
 /// Faithful wide-scan model: the server owns membership, order, and gating
-/// (job/range/floor — vendor/server/src/map/zone_entities.cpp:1578 WideScan).
+/// (job/range/floor — vendor/server/src/map/zone_entities.cpp CZoneEntities::WideScan WideScan).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct WidescanList {
     pub entries: Vec<WidescanEntry>,
@@ -903,7 +903,7 @@ impl From<ffxi_proto::decode::WidescanPos> for WidescanPos {
 
 /// Accumulated s2c 0x0C9 EQUIP_INSPECT answer for the latest /check on a PC:
 /// EQUIPMENT batches and the GENERAL packet merge here keyed on `target_id`
-/// (vendor/server/src/map/packets/c2s/0x0dd_equip_inspect.cpp:135-136).
+/// (vendor/server/src/map/packets/c2s/0x0dd_equip_inspect.cpp GP_CLI_COMMAND_EQUIP_INSPECT::process).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CheckResult {
     pub target_id: u32,
@@ -1131,7 +1131,7 @@ pub enum InventoryUpdate {
     },
 }
 
-/// GP_CLI_COMMAND_PBX_BOXNO (vendor/server/src/map/packets/c2s/0x04d_pbx.h:45).
+/// GP_CLI_COMMAND_PBX_BOXNO (vendor/server/src/map/packets/c2s/0x04d_pbx.h).
 /// Incoming = the inbox ("Delivery Box"), Outgoing = the send box ("Deliveries").
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1365,7 +1365,7 @@ pub struct PartyMember {
     pub is_alliance_leader: bool,
 
     /// Which party of the alliance this member sits in (0..2, or 3 for
-    /// "no party"). vendor/server/src/map/packets/s2c/0x0dd_group_list.cpp:40.
+    /// "no party"). vendor/server/src/map/packets/s2c/0x0dd_group_list.cpp GP_SERV_COMMAND_GROUP_LIST::GP_SERV_COMMAND_GROUP_LIST.
     #[serde(default)]
     pub party_no: u8,
 
@@ -2760,7 +2760,7 @@ pub enum AgentEvent {
 
     /// s2c 0x058 ASSIST: the server retargeted us. `target_id` is the wire
     /// `AssistNo`; `None` is LSB's zeroed `AssistNo`
-    /// (vendor/server/src/map/packets/s2c/0x058_assist.cpp:34-36), i.e. the
+    /// (vendor/server/src/map/packets/s2c/0x058_assist.cpp GP_SERV_COMMAND_ASSIST::GP_SERV_COMMAND_ASSIST), i.e. the
     /// target went away rather than moved.
     TargetChanged {
         target_id: Option<u32>,

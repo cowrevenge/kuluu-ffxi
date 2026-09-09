@@ -135,7 +135,7 @@ impl Default for DrawDistance {
 #[derive(Component)]
 pub struct MzbCollisionMesh;
 
-/// research/XIClient/src/XIClient/include/Rendering/ZoneRenderer.h:45
+/// research/XIClient/src/XIClient/include/Rendering/ZoneRenderer.h ZoneRenderer MAX_ZONE_LOAD_COUNT
 /// `MAX_ZONE_LOAD_COUNT = 2` — retail keeps the main zone block and the one
 /// sub-area interior the player stands in loaded at the same time.
 pub const ZONE_BLOCK_SLOTS: usize = 2;
@@ -1340,7 +1340,7 @@ impl ZoneAreaMap {
 /// Which lights each point of the zone is authored to receive.
 ///
 /// Retail binds a chunk's `LightReferences[4]` into D3D light slots 2-5 once at
-/// load (research/XIClient/src/XIClient/source/Rendering/ZoneRenderer.cpp:284-313,
+/// load (research/XIClient/src/XIClient/source/Rendering/ZoneRenderer.cpp ZoneRenderer::UpdateBlockLightSettings,
 /// :339-353) and every model drawn over that chunk keeps those slots, so the
 /// point lights on an actor are the ones its chunk authors — not the ones that
 /// happen to be nearest. `boxes` is empty for a zone that ships no light-binding
@@ -1397,7 +1397,7 @@ impl ZoneChunkLightMap {
 }
 
 /// The per-frame mesh-variant pick retail makes in `RenderChunk2`
-/// (research/XIClient/src/XIClient/source/Rendering/ZoneRenderer.cpp:1085-1094).
+/// (research/XIClient/src/XIClient/source/Rendering/ZoneRenderer.cpp ZoneRenderer::RenderChunk2).
 /// One placement spawns one entity per *distinct* mesh in its
 /// [`mzb::MmbLodSet`]; `level_mask` says which distance bands that entity serves.
 #[derive(Component, Debug, Clone, Copy)]
@@ -2953,7 +2953,7 @@ impl ZoneBlockRetire<'_, '_> {
 
 /// Retail's `SetRenderTypes` demotes the placements standing in for the active
 /// interior to a type the draw passes skip
-/// (research/XIClient/src/XIClient/source/Rendering/ZoneRenderer.cpp:619-641).
+/// (research/XIClient/src/XIClient/source/Rendering/ZoneRenderer.cpp ZoneRenderer::SetRenderTypes).
 /// Doing it as visibility rather than as a build-time gate is what lets the
 /// shell come back when the player walks out, without reloading the zone.
 /// Placements that also carry [`ZoneMeshLod`] are left to
@@ -3100,7 +3100,7 @@ pub fn main_zone_floor_ready(
     }
 }
 
-/// research/XIClient/src/XIClient/source/Rendering/ZoneRenderer.cpp:1071-1094 —
+/// research/XIClient/src/XIClient/source/Rendering/ZoneRenderer.cpp ZoneRenderer::RenderChunk2 —
 /// `RenderChunk2` measures from the camera eye to the placement translation, culls
 /// on the squared Lod far distance when the chunk is flagged `UsesLodRendering`,
 /// and then hands the device whichever of the h/m/l variants the squared distance

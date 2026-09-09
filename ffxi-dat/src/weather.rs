@@ -247,7 +247,7 @@ pub type WeatherTypeId = [u8; 4];
 // WeatherCondition.cpp:9-13 (`WeatherTable1`), read by XiZone.cpp:400-403
 // `GetWeatherResourceID`. Rows are transcribed in DAT byte order; XIClient
 // writes them as reversed multi-char int literals ('enif' == b"fine").
-// The LSB id ordering (vendor/server/src/map/enums/weather.h:24-46, None=0 ..
+// The LSB id ordering (vendor/server/src/map/enums/weather.h Weather, None=0 ..
 // Darkness=19) lines up 1:1 with the table index, so row 0 is `fine` — retail
 // has no `None` special case. Do NOT source these from
 // WeatherCondition.cpp's sibling `WeatherKeyframeLibrary.cpp`: that array is a
@@ -303,7 +303,7 @@ pub fn weather_type_id(lsb_weather_id: u16) -> WeatherTypeId {
 
 /// One ambient bed keyed by the Vana'diel minute it takes over at.
 ///
-/// research/XIClient/src/XIClient/source/World/Weather/WeatherTransition.cpp:432-479
+/// research/XIClient/src/XIClient/source/World/Weather/WeatherTransition.cpp WeatherTransition::FindPrevSound
 /// `FindPrevSound` — the 0x3D Seps nested under a `weat/<type>` container whose name
 /// passes [`crate::sep::activate_time_minutes`] are the per-time-of-day zone ambience;
 /// the ones that fail it are the payloads of the sibling sound generators, not beds.

@@ -7,7 +7,7 @@ pub struct ItemMax {
 
 impl ItemMax {
     /// One capacity per LSB CONTAINER_ID (LOC_INVENTORY..=LOC_RECYCLEBIN),
-    /// vendor/server/src/map/item_container.h:32-49.
+    /// vendor/server/src/map/item_container.h CONTAINER_ID LOC_INVENTORY.
     pub const CONTAINER_COUNT: usize = 18;
     pub(crate) const SIZE: usize = 96;
     pub fn decode(body: &[u8]) -> Result<Self, DecodeError> {
@@ -19,7 +19,7 @@ impl ItemMax {
         // absent (pre-widening servers). A per-slot fallback would erase LSB's
         // "container disabled" sentinel — ItemNum2 = 0 while the legacy byte
         // stays sized, e.g. a lapsed Mog Locker lease
-        // (vendor/server/src/map/packets/s2c/0x01c_item_max.cpp:52-57).
+        // (vendor/server/src/map/packets/s2c/0x01c_item_max.cpp GP_SERV_COMMAND_ITEM_MAX::GP_SERV_COMMAND_ITEM_MAX).
         let wide_at = |i: usize| {
             let off = 18 + 14 + i * 2;
             u16::from_le_bytes(body[off..off + 2].try_into().unwrap())
@@ -143,8 +143,8 @@ pub struct ChargeInfo {
 }
 
 /// Item extdata byte layout for charged items.
-/// vendor/server/src/map/items/exdata/timer_info.h:29-41 and
-/// vendor/server/src/map/packets/s2c/0x020_item_attr.cpp:47-82.
+/// vendor/server/src/map/items/exdata/timer_info.h ItemTimerInfo and
+/// vendor/server/src/map/packets/s2c/0x020_item_attr.cpp GP_SERV_COMMAND_ITEM_ATTR::GP_SERV_COMMAND_ITEM_ATTR.
 mod extdata {
     use core::ops::Range;
     pub(crate) const HEADER_CHARGED: u8 = 0x01;
@@ -245,7 +245,7 @@ mod item_tests {
     /// LSB's only ItemNum2 = 0 emitter is a DISABLED container (a lapsed Mog
     /// Locker lease keeps its legacy byte sized), so once any wide value is
     /// present a zero must stay zero rather than fall back per-slot
-    /// (vendor/server/src/map/packets/s2c/0x01c_item_max.cpp:52-57).
+    /// (vendor/server/src/map/packets/s2c/0x01c_item_max.cpp GP_SERV_COMMAND_ITEM_MAX::GP_SERV_COMMAND_ITEM_MAX).
     #[test]
     fn item_max_wide_zero_is_the_disable_sentinel_not_a_fallback() {
         let mut buf = vec![0u8; ItemMax::SIZE];

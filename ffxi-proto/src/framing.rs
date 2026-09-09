@@ -11,18 +11,18 @@ pub const SUBPACKET_HEADER_SIZE: usize = 4;
 
 pub const MIN_FRAME_SIZE: usize = FFXI_HEADER_SIZE + SUBPACKET_HEADER_SIZE + MD5_TRAILER_SIZE;
 
-// vendor/server/src/map/packets/basic.h:106-111 setType and basic.h:113-119
+// vendor/server/src/map/packets/basic.h getSequence setType and basic.h:113-119
 // setSize: the id is masked to 9 bits, and the halved length lands in byte 1
 // whose lowest bit belongs to the id -- so the length field is 7 bits wide and a
 // wider value truncates there exactly as `& 0x7F` does here. basic.h:91-99
-// getType/getSize and vendor/server/src/map/map_networking.cpp:419-423 are the
+// getType/getSize and vendor/server/src/map/map_networking.cpp MapNetworking::parse are the
 // matching decode.
 pub const fn subpacket_header_word(opcode: u16, size_words: u16) -> u16 {
     (opcode & SUBPACKET_OPCODE_MASK)
         | ((size_words & SUBPACKET_SIZE_WORDS_MASK) << SUBPACKET_SIZE_WORDS_SHIFT)
 }
 
-// vendor/server/src/map/packets/basic.h:118 setSize rounds the byte length up to
+// vendor/server/src/map/packets/basic.h setSize rounds the byte length up to
 // a 4-byte multiple before halving it. The saturation caps at the widest value
 // the 7-bit header field can carry, so an oversized body reports a truncated
 // length instead of a wrapped-around small one.
@@ -223,7 +223,7 @@ mod tests {
 
     #[test]
     fn datagram_header_field_offsets_match_lsb_layout() {
-        // LSB preparePacket (vendor/server/src/map/map_networking.cpp:653-654) writes a
+        // LSB preparePacket (vendor/server/src/map/map_networking.cpp MapNetworking::preparePacket) writes a
         // server->client datagram header as byte[0..2]=server seq, byte[2..4]=the server's
         // ack of the client (MapSession::client_packet_id). Pin those offsets so the
         // network-health metric's reading of `sync_in` as "server ack of us" can't drift.
@@ -319,7 +319,7 @@ mod tests {
         }
     }
 
-    // Independent transcription of vendor/server/src/map/packets/basic.h:105-119
+    // Independent transcription of vendor/server/src/map/packets/basic.h getSequence
     // (setType/setSize) and basic.h:91-99 (getType/getSize) as the oracle for the
     // helpers above.
     fn lsb_set_type_and_size(opcode: u16, size_bytes: usize) -> [u8; 2] {

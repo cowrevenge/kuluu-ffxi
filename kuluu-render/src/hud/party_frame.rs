@@ -330,7 +330,7 @@ fn party_windows(
     party: &[kuluu_snapshot::PartyMember],
     self_id: Option<u32>,
 ) -> [Vec<&kuluu_snapshot::PartyMember>; 3] {
-    // LSB's PartyNo is alliance-wide: vendor/server/src/map/packets/s2c/0x0dd_group_list.cpp:40.
+    // LSB's PartyNo is alliance-wide: vendor/server/src/map/packets/s2c/0x0dd_group_list.cpp GP_SERV_COMMAND_GROUP_LIST::GP_SERV_COMMAND_GROUP_LIST.
     let self_party = party
         .iter()
         .find(|m| Some(m.id) == self_id)

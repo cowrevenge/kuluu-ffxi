@@ -1,7 +1,7 @@
 use super::*;
 
 /// `GAttr.PartyNo` sentinel for "not in a party of the alliance".
-/// vendor/server/src/map/packets/s2c/0x0dd_group_list.cpp:40.
+/// vendor/server/src/map/packets/s2c/0x0dd_group_list.cpp GP_SERV_COMMAND_GROUP_LIST::GP_SERV_COMMAND_GROUP_LIST.
 pub const NO_PARTY: u8 = 3;
 
 // ---- GROUP_TBL (0x0C8) — party definition -----------------------------------
@@ -133,9 +133,9 @@ pub struct PartyListExtra {
     pub is_alliance_leader: bool,
 
     /// `GAttr.PartyNo`: which party of the alliance this member sits in — 0..2,
-    /// or 3 for "no party". vendor/server/src/map/packets/s2c/0x0dd_group_list.cpp:40.
+    /// or 3 for "no party". vendor/server/src/map/packets/s2c/0x0dd_group_list.cpp GP_SERV_COMMAND_GROUP_LIST::GP_SERV_COMMAND_GROUP_LIST.
     /// Retail compares it against the first member's to tell an alliance-mate's
-    /// claim from a party-mate's (research/XIClient/.../ActorTelemetry.cpp:1706).
+    /// claim from a party-mate's (research/XIClient/src/XIClient/source/World/Actor/ActorTelemetry.cpp ActorTelemetry::NameColorSet).
     pub party_no: u8,
 
     pub name: Option<String>,

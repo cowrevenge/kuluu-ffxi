@@ -1335,14 +1335,14 @@ pub fn swing_routine(animation: ffxi_proto::melee::AttackAnimation) -> Option<[u
     })
 }
 
-// vendor/server/src/map/enums/four_cc.h:30 — BasicAttack's FourCC is "atk0", the self-targeted
+// vendor/server/src/map/enums/four_cc.h — BasicAttack's FourCC is "atk0", the self-targeted
 // voice routine research/xim Actor.kt:866 enqueues alongside the swing.
 const MELEE_VOICE_ROUTINE: [u8; 4] = *b"atk0";
 
 // A basic attack's routines live in the attacker's own battle/equipment dirs and the global effect
 // dir, keyed by the swing animation rather than by a DAT file id, which is why the category is
 // dispatched here rather than through `action_dat_file_id`. BATTLE2 cmd_arg does carry a FourCC —
-// vendor/server/src/map/action/action.cpp:111 normalize() sets actionid = FourCC::BasicAttack —
+// vendor/server/src/map/action/action.cpp action_t::normalize normalize() sets actionid = FourCC::BasicAttack —
 // but it is the same constant for every swing, so it selects nothing.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn dispatch_melee_action_started(
@@ -2916,7 +2916,7 @@ mod tests {
         );
     }
 
-    // vendor/server/src/map/attack.h:52-59 AttackAnimation -> the limb routine
+    // vendor/server/src/map/attack.h AttackAnimation -> the limb routine
     // research/xim Actor.kt:864-903 enqueues.
     #[test]
     fn swing_routines_follow_lsb_attack_animation_order() {

@@ -1,6 +1,6 @@
 //! Item flags scraped from LSB's `item_basic.sql` `flags` column.
 //!
-//! Bit values mirror `SET @FLAG_*` in vendor/server/sql/item_basic.sql:115-132
+//! Bit values mirror `SET @FLAG_*` in vendor/server/sql/item_basic.sql item_basic
 //! (and `ItemFlag` in the server source). Only the bits the client needs so
 //! far get named constants; the raw word is available via [`lookup`].
 

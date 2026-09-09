@@ -135,7 +135,7 @@ impl ChaseCamera {
 
     /// Retail has no pitch clamp, because retail has no pitch: tilting adds to
     /// the eye's world Y (`CurrentEyePosition.y += offset`,
-    /// research/XIClient/.../World/Camera/CameraManager.cpp:527-529) and leaves
+    /// research/XIClient/src/XIClient/source/World/Camera/CameraManager.cpp CameraManager::UpdatePlayerFollowingCamera) and leaves
     /// the horizontal offset alone. What bounds the tilt is
     /// [`Self::MIN_XZ_STANDOFF`] against [`Self::DIST_MAX`], and for a polar eye
     /// that is `acos(3/6)` — exactly 60°, against the 80° an uncited 1.40 used
@@ -168,7 +168,7 @@ impl ChaseCamera {
     /// Three independent references put the nominal radius at 6, and none of
     /// them admits anything like a 20-yalm pull-back:
     ///
-    /// - research/XIClient/.../World/Camera/CameraManager.cpp:506 normalises the
+    /// - research/XIClient/src/XIClient/source/World/Camera/CameraManager.cpp CameraManager::UpdatePlayerFollowingCamera normalises the
     ///   orbit rate against it — `angle = 6.0f / eyeToTargetDistance * angle`.
     /// - Same file:822, the camera-follow easing changes regime above 6.
     /// - research/xim/.../camera/PolarCamera.kt:24 `maximumRadius = 6f`.

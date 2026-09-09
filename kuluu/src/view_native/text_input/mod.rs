@@ -1396,7 +1396,7 @@ fn dispatch_dynamic_menu_action(
             if already_equipped {
                 // Re-selecting the item already in this slot toggles it off.
                 // LSB unequips when slotID (container_index) is 0, regardless of
-                // container: vendor/server/src/map/utils/charutils.cpp:3147
+                // container: vendor/server/src/map/utils/charutils.cpp EquipItem
                 // ("slotID of zero = unequip"). LOC_INVENTORY (0) always passes
                 // the equip_set container validation.
                 (

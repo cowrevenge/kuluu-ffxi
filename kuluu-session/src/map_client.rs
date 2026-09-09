@@ -11,7 +11,7 @@ pub const BOOTSTRAP_DATAGRAM_SIZE: usize = framing::FFXI_HEADER_SIZE + GP_CLI_LO
 
 /// Sync of the bootstrap subpacket (`ffxi_proto::map::c2s::LOGIN`), and
 /// thus the bootstrap datagram header. The server's `client_packet_id`
-/// starts at 0 (vendor/server/src/map/map_session.h:45) and advances here,
+/// starts at 0 (vendor/server/src/map/map_session.h MapSession client_packet_id) and advances here,
 /// so the first post-bootstrap subpacket must use the next sync.
 pub const BOOTSTRAP_SUB_SYNC: u16 = 1;
 
@@ -86,7 +86,7 @@ impl MapClient {
     /// `sub_packets_payload`: the server dispatches a subpacket only when its
     /// sync falls in `(client_packet_id, header_u16[0]]` and then advances
     /// `client_packet_id` to the header value — anything outside the window is
-    /// skipped with no log (vendor/server/src/map/map_networking.cpp:419-428,471).
+    /// skipped with no log (vendor/server/src/map/map_networking.cpp MapNetworking::parse).
     pub async fn send_encrypted(
         &self,
         sub_packets_payload: &[u8],

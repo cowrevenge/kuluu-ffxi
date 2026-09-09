@@ -562,6 +562,10 @@ impl LookData {
     /// vendor/server/src/map/packets/char_update.cpp), the same encoding in all
     /// three carriers of the table (0x00D CHAR_PC, 0x00A LOGIN, 0x051 GRAP_LIST).
     const GRAP_ID_MODEL_MASK: u16 = 0x0FFF;
+    /// `GrapIDTbl[0] = face | race << 8`
+    /// (vendor/server/src/map/packets/s2c/0x051_grap_list.cpp GP_SERV_COMMAND_GRAP_LIST::GP_SERV_COMMAND_GRAP_LIST).
+    const GRAP_ID_FACE_RACE_MASK: u16 = 0x00FF;
+    const GRAP_ID_RACE_SHIFT: u32 = 8;
 
     pub fn decode_char_pc(body: &[u8]) -> Option<Self> {
         Self::decode_grap_id_tbl(body, Self::CHAR_PC_GRAP_OFFSET)
@@ -579,8 +583,8 @@ impl LookData {
         if slot0 == 0 {
             return None;
         }
-        let face = (slot0 & 0x00FF) as u8;
-        let race = ((slot0 >> 8) & 0x00FF) as u8;
+        let face = (slot0 & Self::GRAP_ID_FACE_RACE_MASK) as u8;
+        let race = ((slot0 >> Self::GRAP_ID_RACE_SHIFT) & Self::GRAP_ID_FACE_RACE_MASK) as u8;
 
         let read_slot = |i: usize| -> u16 {
             let p = off + 2 * i;
@@ -1405,8 +1409,9 @@ mod pos_head_tests {
     fn char_pc_mount_index_reads_flags6_and_needs_the_general_block() {
         // Flags6.MountIndex is bits 4..11; GateId occupies the low nibble and must
         // not bleed in (flags6_t, vendor/server/src/map/packets/char_update.cpp).
+        const GATE_ID_MASK: u32 = (1 << PosHead::MOUNT_INDEX_SHIFT) - 1;
         let mut buf = vec![0u8; PosHead::FLAGS6_OFFSET + 4];
-        let flags6 = (u32::from(34u8) << PosHead::MOUNT_INDEX_SHIFT) | 0x0F;
+        let flags6 = (u32::from(34u8) << PosHead::MOUNT_INDEX_SHIFT) | GATE_ID_MASK;
         buf[PosHead::FLAGS6_OFFSET..PosHead::FLAGS6_OFFSET + 4]
             .copy_from_slice(&flags6.to_le_bytes());
         assert_eq!(PosHead::mount_index(&buf), Some(34));
@@ -1456,8 +1461,9 @@ mod pos_head_tests {
     fn pos_head_extracts_facetarget_from_flags0() {
         // facetarget occupies Flags0 bits 17..31; targid 0x1A2 must round-trip
         // and not bleed into the low MovTime/RunMode/GroundFlag/KingFlag bits.
+        const BELOW_FACETARGET_MASK: u32 = (1 << PosHead::FACETARGET_SHIFT) - 1;
         let mut buf = vec![0u8; PosHead::SIZE_WITH_BT_TARGET];
-        let flags0 = (0x01A2u32 << 17) | 0x0001_FFFF;
+        let flags0 = (0x01A2u32 << PosHead::FACETARGET_SHIFT) | BELOW_FACETARGET_MASK;
         buf[20..24].copy_from_slice(&flags0.to_le_bytes());
         let h = PosHead::decode(&buf).unwrap();
         assert_eq!(h.facetarget(), 0x01A2);
@@ -1592,7 +1598,7 @@ mod pos_head_tests {
         use crate::map::s2c;
 
         let mut buf = vec![0u8; 0x54];
-        buf[6] = 0x08 | 0x40;
+        buf[6] = PosHead::SEND_NAME | PosHead::SEND_NAME2;
         buf[0x18 - 4] = 0x01;
         buf[0x30..0x30 + 9].copy_from_slice(b"Sigli-Sea");
         assert_eq!(

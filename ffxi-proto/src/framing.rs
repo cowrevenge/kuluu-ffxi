@@ -319,12 +319,17 @@ mod tests {
         }
     }
 
+    // vendor/server/src/map/packets/basic.h setType/getType, kept separate from
+    // SUBPACKET_OPCODE_MASK so the oracle stays independent of the code under test.
+    const LSB_PACKET_TYPE_MASK: u16 = 0x1FF;
+
     // Independent transcription of vendor/server/src/map/packets/basic.h getSequence
     // (setType/setSize) and basic.h:91-99 (getType/getSize) as the oracle for the
     // helpers above.
     fn lsb_set_type_and_size(opcode: u16, size_bytes: usize) -> [u8; 2] {
         let mut buf = [0u8; 2];
-        let id = (u16::from_le_bytes(buf) & !0x1FF) | (opcode & 0x1FF);
+        let id =
+            (u16::from_le_bytes(buf) & !LSB_PACKET_TYPE_MASK) | (opcode & LSB_PACKET_TYPE_MASK);
         buf = id.to_le_bytes();
         buf[1] = (buf[1] & 1) | ((((size_bytes + 3) & !3) / 2) as u8);
         buf
@@ -333,7 +338,7 @@ mod tests {
     fn lsb_get_type_and_size(word: [u8; 2]) -> (u16, usize) {
         let id_and_size = u16::from_le_bytes(word);
         (
-            id_and_size & 0x1FF,
+            id_and_size & LSB_PACKET_TYPE_MASK,
             (2 * (word[1] & !1) as usize).min(0x1FF),
         )
     }

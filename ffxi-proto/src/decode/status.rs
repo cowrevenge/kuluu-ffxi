@@ -39,6 +39,9 @@ pub struct CharStatus {
 impl CharStatus {
     pub(crate) const UNIQUE_NO_OFFSET: usize = 0x20;
     pub(crate) const FLAGS0_OFFSET: usize = 0x24;
+    /// `flags0_t.hpp : 8` at bits 16..24 (vendor/server/src/map/packets/char_status.cpp flags0_t).
+    pub(crate) const HPP_SHIFT: u32 = 16;
+    pub(crate) const HPP_MASK: u32 = 0xFF;
     pub(crate) const SPEED_OFFSET: usize = 0x28;
     pub(crate) const SERVER_STATUS_OFFSET: usize = 0x2C;
     pub(crate) const DEAD_COUNTER1_OFFSET: usize = 0x38;
@@ -54,6 +57,7 @@ impl CharStatus {
     /// `BallistaFlg`'s position inside the Flags2 word (bits 21..28),
     /// char_status.cpp `flags2_t`.
     pub(crate) const BALLISTA_FLG_SHIFT: u32 = 21;
+    pub(crate) const BALLISTA_FLG_MASK: u32 = 0xFF;
     /// `field_57`, the byte the disassembly's own struct puts right before
     /// `Field58Flags` (research/XIClient .../Game/Net/Packets/s2c/0x037.h
     /// static_asserts), which LSB fills from the mount effect's power.
@@ -70,8 +74,7 @@ impl CharStatus {
         let flags0 = rd(Self::FLAGS0_OFFSET);
         Ok(Self {
             unique_no: rd(Self::UNIQUE_NO_OFFSET),
-            // flags0_t bitfield: hpp occupies bits 16..24.
-            hpp: ((flags0 >> 16) & 0xFF) as u8,
+            hpp: ((flags0 >> Self::HPP_SHIFT) & Self::HPP_MASK) as u8,
             dead_counter1: rd(Self::DEAD_COUNTER1_OFFSET),
             dead_counter2: rd(Self::DEAD_COUNTER2_OFFSET),
             server_status: body[Self::SERVER_STATUS_OFFSET],
@@ -79,7 +82,8 @@ impl CharStatus {
             speed: u16::from_le_bytes([body[Self::SPEED_OFFSET], body[Self::SPEED_OFFSET + 1]])
                 & Self::SPEED_MASK,
             mount_id: body.get(Self::MOUNT_ID_OFFSET).copied().unwrap_or(0),
-            allegiance: ((rd(Self::FLAGS2_OFFSET) >> Self::BALLISTA_FLG_SHIFT) & 0xFF) as u8,
+            allegiance: ((rd(Self::FLAGS2_OFFSET) >> Self::BALLISTA_FLG_SHIFT)
+                & Self::BALLISTA_FLG_MASK) as u8,
         })
     }
 
@@ -509,18 +513,20 @@ mod char_status_tests {
 
     #[test]
     fn char_status_decodes_allegiance_from_flags2_ballista_flg() {
+        const PET_INDEX_NOISE: u32 = 0x1234;
         let mut body = vec![0u8; CharStatus::MIN_LEN];
         // BallistaFlg at bits 21..28, with a PetIndex (bits 3..18) that must
         // not leak into the byte.
-        let flags2 = (5u32 << 21) | 0x1234;
+        let flags2 = (5u32 << CharStatus::BALLISTA_FLG_SHIFT) | PET_INDEX_NOISE;
         body[CharStatus::FLAGS2_OFFSET..CharStatus::FLAGS2_OFFSET + 4]
             .copy_from_slice(&flags2.to_le_bytes());
         assert_eq!(CharStatus::decode(&body).unwrap().allegiance, 5);
 
         // The belligerence case: base allegiance OR'd with the 0x08 bit that
         // char_status.cpp sets outside the Ferretory.
-        body[CharStatus::FLAGS2_OFFSET..CharStatus::FLAGS2_OFFSET + 4]
-            .copy_from_slice(&((9u32 << 21) | 0x1234).to_le_bytes());
+        body[CharStatus::FLAGS2_OFFSET..CharStatus::FLAGS2_OFFSET + 4].copy_from_slice(
+            &((9u32 << CharStatus::BALLISTA_FLG_SHIFT) | PET_INDEX_NOISE).to_le_bytes(),
+        );
         assert_eq!(CharStatus::decode(&body).unwrap().allegiance, 9);
     }
 }

@@ -67,6 +67,8 @@ pub const AH_LIST_ITEMS_PER_PACKET: usize = 20;
 
 // vendor/server/src/search/packets/auction_history.cpp CAHHistoryPacket::CAHHistoryPacket
 pub const AH_HISTORY_RESPONSE_TYPE: u8 = 0x85;
+// vendor/server/src/search/packets/auction_history.cpp CAHHistoryPacket::CAHHistoryPacket ("masked as val & 0x1F")
+pub const AH_RESPONSE_TYPE_REQUEST_MASK: u8 = 0x1F;
 pub const AH_HISTORY_ITEM_OFFSET: usize = 0x18;
 pub const AH_HISTORY_OPEN_LISTINGS_OFFSET: usize = 0x1A;
 pub const AH_HISTORY_CATEGORY_OFFSET: usize = 0x1E;
@@ -816,7 +818,13 @@ mod tests {
         // Retail's response type is the request type with the top bit set
         // (auction_list.cpp:42 vs TCP_AH_REQUEST; auction_history.cpp:34 vs
         // TCP_AH_HISTORY_SINGLE, "masked as val & 0x1F" per atom0s).
-        assert_eq!(AH_LIST_RESPONSE_TYPE & 0x1F, TCP_AH_REQUEST);
-        assert_eq!(AH_HISTORY_RESPONSE_TYPE & 0x1F, TCP_AH_HISTORY_SINGLE);
+        assert_eq!(
+            AH_LIST_RESPONSE_TYPE & AH_RESPONSE_TYPE_REQUEST_MASK,
+            TCP_AH_REQUEST
+        );
+        assert_eq!(
+            AH_HISTORY_RESPONSE_TYPE & AH_RESPONSE_TYPE_REQUEST_MASK,
+            TCP_AH_HISTORY_SINGLE
+        );
     }
 }

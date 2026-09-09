@@ -4,6 +4,9 @@ use super::*;
 /// vendor/server/src/map/packets/s2c/0x0dd_group_list.cpp GP_SERV_COMMAND_GROUP_LIST::GP_SERV_COMMAND_GROUP_LIST.
 pub const NO_PARTY: u8 = 3;
 
+/// `GROUP_TBL.PartyNo : 2` (vendor/server/src/map/packets/s2c/0x0c8_group_tbl.h GROUP_TBL).
+pub const PARTY_NO_MASK: u8 = 0x03;
+
 // ---- GROUP_TBL (0x0C8) — party definition -----------------------------------
 
 /// One entry in the GROUP_TBL packet (12 bytes each, up to 20 entries).
@@ -77,7 +80,7 @@ impl GroupTbl {
             }
             let act_index = u16::from_le_bytes(e[4..6].try_into().unwrap());
             let flags = e[6];
-            let party_no = flags & 0x03;
+            let party_no = flags & PARTY_NO_MASK;
             let is_party_leader = (flags >> 2) & 1 == 1;
             let is_alliance_leader = (flags >> 3) & 1 == 1;
             let zone_no = u16::from_le_bytes(e[8..10].try_into().unwrap());

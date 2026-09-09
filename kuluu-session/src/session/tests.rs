@@ -45,7 +45,7 @@ fn sub_packet_events(opcode: u16, body: &[u8]) -> Vec<AgentEvent> {
 fn assist_packet_retargets_to_assist_no() {
     use ffxi_proto::decode::Assist;
 
-    let mut body = vec![0u8; Assist::MIN_LEN];
+    let mut body = vec![0u8; Assist::SIZE];
     body[Assist::UNIQUE_NO_OFFSET..Assist::UNIQUE_NO_OFFSET + 4]
         .copy_from_slice(&0x0100_0F42u32.to_le_bytes());
     body[Assist::ASSIST_NO_OFFSET..Assist::ASSIST_NO_OFFSET + 4]
@@ -72,7 +72,7 @@ fn assist_packet_retargets_to_assist_no() {
 fn assist_packet_reports_a_zero_assist_no_as_no_target() {
     let events = sub_packet_events(
         ffxi_proto::map::s2c::ASSIST,
-        &[0u8; ffxi_proto::decode::Assist::MIN_LEN],
+        &[0u8; ffxi_proto::decode::Assist::SIZE],
     );
     assert!(
         matches!(
@@ -87,7 +87,7 @@ fn assist_packet_reports_a_zero_assist_no_as_no_target() {
 fn assist_packet_rejects_a_truncated_body() {
     let events = sub_packet_events(
         ffxi_proto::map::s2c::ASSIST,
-        &[0u8; ffxi_proto::decode::Assist::MIN_LEN - 1],
+        &[0u8; ffxi_proto::decode::Assist::SIZE - 1],
     );
     assert!(events.is_empty(), "{events:?}");
 }

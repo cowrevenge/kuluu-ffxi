@@ -83,7 +83,7 @@ pub struct CameraInputParams<'w> {
 use kuluu_render::{
     heading_for_yaw, yaw_for_heading, Action, Bindings, CameraMode, CameraTransition, ChaseCamera,
     ChatBuffer, CursorLockRequest, InputMode, IsSelf, LockOn, LockOnToggle, MenuStack,
-    OperatorCamera, PassiveCursorState, SceneState, ServerTarget, Target, WorldEntity,
+    OperatorCamera, PassiveCursorState, SceneState, Target, WorldEntity,
 };
 use kuluu_snapshot::{Entity as WireEntity, EntityKind, Vec3 as WireVec3};
 use tokio::sync::mpsc;
@@ -693,17 +693,8 @@ pub fn dispatch_target_change_system(
     state: Res<SceneState>,
     cmd_tx: Res<CommandTx>,
     mode: Res<InputMode>,
-    mut server_target: ResMut<ServerTarget>,
 ) {
     if !target.is_changed() {
-        return;
-    }
-
-    // The server already has this target: it pushed it (s2c 0x058) or we sent
-    // it. Echoing it back would ask LSB to change target again, which
-    // force-engages a disengaged player
-    // (vendor/server/src/map/ai/ai_container.cpp:239-249).
-    if target.id == server_target.id {
         return;
     }
 
@@ -727,17 +718,11 @@ pub fn dispatch_target_change_system(
         None => (0, 0),
     };
 
-    if cmd_tx
-        .0
-        .try_send(AgentCommand::Action {
-            target_id,
-            target_index,
-            kind: ActionKind::ChangeTarget,
-        })
-        .is_ok()
-    {
-        server_target.id = target.id;
-    }
+    let _ = cmd_tx.0.try_send(AgentCommand::Action {
+        target_id,
+        target_index,
+        kind: ActionKind::ChangeTarget,
+    });
 }
 
 /// Mirror the viewer's lock-on state into the reactor so it only squares the
@@ -2428,7 +2413,6 @@ mod tests {
         app.init_resource::<kuluu_render::EventLog>()
             .init_resource::<SceneState>()
             .init_resource::<Target>()
-            .init_resource::<ServerTarget>()
             .init_resource::<LockOn>()
             .init_resource::<InputMode>()
             .insert_resource(CommandTx(tx))
@@ -2446,15 +2430,15 @@ mod tests {
         (app, rx)
     }
 
-    /// The server's own retarget (s2c 0x058) must not come back as c2s 0x01A
-    /// ChangeTarget: LSB routes that to `CAIContainer::Internal_ChangeTarget`,
-    /// which engages a disengaged player
-    /// (vendor/server/src/map/ai/ai_container.cpp:239-249), while
-    /// `battleutils::assistTarget` only pushes 0x058 and never engages
-    /// (vendor/server/src/map/utils/battleutils.cpp:5058-5078). `/assist` while
-    /// disengaged inherits the target, it does not start a fight.
+    /// `/assist` is the case that needs the round trip: `battleutils::
+    /// assistTarget` pushes s2c 0x058 without touching `m_battleTarget`
+    /// (vendor/server/src/map/utils/battleutils.cpp:5058-5078), so the c2s 0x01A
+    /// ChangeTarget this dispatch sends back is what actually moves the server's
+    /// battle target (vendor/server/src/map/ai/ai_container.cpp:244-246 calls
+    /// `SetBattleTargetID` for an engaged player). Swallowing it would leave
+    /// `CAttackState` swinging at the old mob.
     #[test]
-    fn a_server_retarget_is_not_echoed_back_as_change_target() {
+    fn a_server_retarget_is_forwarded_as_change_target() {
         let (mut app, mut commands) = target_dispatch_app();
         app.world_mut().resource_mut::<Target>().id = Some(11);
         app.update();
@@ -2466,15 +2450,43 @@ mod tests {
                 target_id: Some(22),
             });
         app.update();
-        app.update();
 
         assert_eq!(app.world().resource::<Target>().id, Some(22));
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(AgentCommand::Action {
+                target_id: 22,
+                kind: ActionKind::ChangeTarget,
+                ..
+            })
+        ));
+    }
+
+    /// A repeat 0x058 for the target we already have must not deref `Target` at
+    /// all: LSB pushes one per `CPlayerController::Engage` and one per
+    /// `CAttackState::UpdateTarget` auto-target, and every change-detection tick
+    /// costs a c2s ChangeTarget.
+    #[test]
+    fn a_repeat_server_retarget_sends_nothing() {
+        let (mut app, mut commands) = target_dispatch_app();
+        app.world_mut().resource_mut::<Target>().id = Some(22);
+        app.update();
+        while commands.try_recv().is_ok() {}
+
+        app.world_mut()
+            .resource_mut::<kuluu_render::EventLog>()
+            .push(kuluu_snapshot::ViewerEvent::TargetChanged {
+                target_id: Some(22),
+            });
+        app.update();
+
         assert!(
             commands.try_recv().is_err(),
-            "the server's retarget must not be sent back"
+            "a retarget onto the current target must not resend ChangeTarget"
         );
     }
 
+    /// Player targeting input after a server retarget still reaches the wire.
     #[test]
     fn a_local_retarget_after_a_server_retarget_is_still_sent() {
         let (mut app, mut commands) = target_dispatch_app();

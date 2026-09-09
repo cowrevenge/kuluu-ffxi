@@ -22,11 +22,12 @@ impl Assist {
     pub const UNIQUE_NO_OFFSET: usize = 0;
     pub const ASSIST_NO_OFFSET: usize = 4;
     pub const ACT_INDEX_OFFSET: usize = 8;
-    pub const MIN_LEN: usize = 12;
+    pub const PADDING_OFFSET: usize = 10;
+    pub const SIZE: usize = Self::PADDING_OFFSET + 2;
 
     pub fn decode(body: &[u8]) -> Result<Self, DecodeError> {
-        if body.len() < Self::MIN_LEN {
-            return Err(DecodeError::Truncated(Self::MIN_LEN, body.len()));
+        if body.len() < Self::SIZE {
+            return Err(DecodeError::Truncated(Self::SIZE, body.len()));
         }
         let rd32 = |o: usize| u32::from_le_bytes([body[o], body[o + 1], body[o + 2], body[o + 3]]);
         Ok(Self {
@@ -54,7 +55,7 @@ mod tests {
     /// Body laid out field-by-field at the LSB struct offsets
     /// (vendor/server/src/map/packets/s2c/0x058_assist.h).
     fn body() -> Vec<u8> {
-        let mut b = vec![0u8; Assist::MIN_LEN];
+        let mut b = vec![0u8; Assist::SIZE];
         b[Assist::UNIQUE_NO_OFFSET..Assist::UNIQUE_NO_OFFSET + 4]
             .copy_from_slice(&0x0100_0F42u32.to_le_bytes());
         b[Assist::ASSIST_NO_OFFSET..Assist::ASSIST_NO_OFFSET + 4]
@@ -91,14 +92,14 @@ mod tests {
         assert_eq!(Assist::decode(&b).unwrap().target(), None);
     }
 
-    /// Trailing `padding0E` is not required to be present beyond MIN_LEN, but
-    /// anything shorter than the three decoded fields must fail loudly.
+    /// A body shorter than the LSB struct must fail loudly rather than decode a
+    /// half-read target.
     #[test]
     fn truncated_body_is_error() {
         assert!(matches!(
-            Assist::decode(&[0u8; Assist::MIN_LEN - 1]),
+            Assist::decode(&[0u8; Assist::SIZE - 1]),
             Err(DecodeError::Truncated(n, have))
-                if n == Assist::MIN_LEN && have == Assist::MIN_LEN - 1
+                if n == Assist::SIZE && have == Assist::SIZE - 1
         ));
     }
 }

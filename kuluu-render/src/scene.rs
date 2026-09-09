@@ -150,19 +150,6 @@ pub struct PendingRetarget {
     frames_left: u8,
 }
 
-/// The target the server believes we have: what it last pushed (s2c 0x058) or
-/// what the client last sent as c2s 0x01A ChangeTarget. Echoing the server's own
-/// retarget back as ChangeTarget would force an engage - LSB routes ChangeTarget
-/// to `CAIContainer::Internal_ChangeTarget`, which calls `Engage(targetid)` for a
-/// not-yet-engaged player (vendor/server/src/map/ai/ai_container.cpp:239-249),
-/// while `battleutils::assistTarget` only pushes 0x058 and never engages
-/// (vendor/server/src/map/utils/battleutils.cpp:5058-5078), i.e. retail `/assist`
-/// inherits the target without starting a fight.
-#[derive(Resource, Default)]
-pub struct ServerTarget {
-    pub id: Option<u32>,
-}
-
 /// Applies the server's retarget push (s2c 0x058 ASSIST, reaching us as
 /// [`kuluu_snapshot::ViewerEvent::TargetChanged`]). LSB sends it whenever it
 /// moves our battle target - `/assist`, engaging, and the
@@ -180,6 +167,13 @@ pub struct ServerTarget {
 /// beside `state.targetState.targetId`, Actor.kt:106,932), so only player
 /// targeting input is gated on it ([`crate::lock_on::suppresses_retarget`]) and a
 /// server-side target change carries the lock with it.
+///
+/// The `Target` write deliberately reaches `dispatch_target_change_system` and
+/// goes back out as c2s 0x01A ChangeTarget: `battleutils::assistTarget` pushes
+/// 0x058 without touching `m_battleTarget`
+/// (vendor/server/src/map/utils/battleutils.cpp:5058-5078), so that echo is what
+/// actually moves the server's battle target for `/assist`
+/// (vendor/server/src/map/ai/ai_container.cpp:244-246 `SetBattleTargetID`).
 pub fn apply_server_retarget_system(
     events: Res<crate::snapshot::EventLog>,
     state: Res<SceneState>,
@@ -187,7 +181,6 @@ pub fn apply_server_retarget_system(
     mut pending: Local<Option<PendingRetarget>>,
     mut target: ResMut<Target>,
     mut lock_on: ResMut<crate::lock_on::LockOn>,
-    mut server_target: ResMut<ServerTarget>,
 ) {
     let total = events.pushed_total;
     let first_global = total.saturating_sub(events.recent.len() as u64);
@@ -222,7 +215,6 @@ pub fn apply_server_retarget_system(
     }
 
     *pending = None;
-    server_target.id = Some(p.id);
     if target.id != Some(p.id) {
         target.id = Some(p.id);
     }
@@ -1369,7 +1361,6 @@ mod tests {
         app.init_resource::<crate::snapshot::EventLog>()
             .init_resource::<SceneState>()
             .init_resource::<Target>()
-            .init_resource::<ServerTarget>()
             .init_resource::<crate::lock_on::LockOn>()
             .add_systems(Update, apply_server_retarget_system);
         app
@@ -1443,19 +1434,6 @@ mod tests {
             Some(33),
             "an already-drained event must not re-fire"
         );
-    }
-
-    /// `dispatch_target_change_system` sends c2s ChangeTarget on any `Target`
-    /// change, and LSB turns that into an `Engage` for a disengaged player
-    /// (vendor/server/src/map/ai/ai_container.cpp:239-249). The applied id has
-    /// to land in `ServerTarget` so the echo is suppressed.
-    #[test]
-    fn applying_a_retarget_records_what_the_server_already_knows() {
-        let mut app = retarget_app();
-        push_snapshot(&mut app, &[22]);
-        push_event(&mut app, retarget_to(22));
-        app.update();
-        assert_eq!(app.world().resource::<ServerTarget>().id, Some(22));
     }
 
     #[derive(Resource, Default)]

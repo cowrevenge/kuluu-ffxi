@@ -15,29 +15,18 @@ pub fn map_dat_for(zone_id: u16, map_index: u8) -> Option<u32> {
         .map(|i| MAP_DAT_TABLE[i].2)
 }
 
-/// How many map DATs POLUtils catalogues for the zone. This is not the number
-/// of maps the client offers: POLUtils lists maps the DLL's zone-map table
-/// dropped (zone 238: 3 vs 2) and misses ones it added (zone 50: 1 vs 2), so a
-/// caller deciding what to *show* wants
+/// How many map DATs POLUtils catalogues for the zone. This is neither the
+/// number of maps the client offers nor a roster of the zones that have one:
+/// against the DLL's zone-map table POLUtils lists maps the DLL dropped (zone
+/// 238: 3 vs 2), misses maps it has (zone 50: 1 vs 2), omits 36 zones outright
+/// (157 Middle Delkfutt's Tower: 0 vs 6) and names two the DLL has no record
+/// for (14, 77). A caller deciding what to *show* wants
 /// [`crate::main_dll::MainDll::zone_map_counts`] (kuluu-u8p1).
 pub fn map_count_for_zone(zone_id: u16) -> usize {
     MAP_DAT_TABLE
         .iter()
         .filter(|(z, _, _)| *z == zone_id)
         .count()
-}
-
-/// Every zone id that ships at least one map DAT, ascending and deduplicated.
-/// `MAP_DAT_TABLE` is sorted by `(zone, map_index)`, so equal zone ids are
-/// contiguous and dropping consecutive duplicates yields each zone once.
-pub fn zones_with_maps() -> Vec<u16> {
-    let mut out = Vec::new();
-    for (zone, _, _) in MAP_DAT_TABLE.iter() {
-        if out.last() != Some(zone) {
-            out.push(*zone);
-        }
-    }
-    out
 }
 
 pub const STATUS_ICON_FILE_ID: u32 = 87;

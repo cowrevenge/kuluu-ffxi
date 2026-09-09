@@ -254,6 +254,9 @@ pub(crate) fn insert_dat_roots(
     // Re-arm the latched spell-DAT load so a settings-screen DAT reload doesn't
     // serve suffixes from the previous install (kuluu-08rh).
     sink.put(kuluu_render::ffxi_actor_render::SpellSuffixCache::default());
+    // Same latch on the map DLL: without this the map calibration and the
+    // Change Map catalog keep answering from the previous install (kuluu-u8p1).
+    sink.put(kuluu_render::minimap::retail::MapCalibration::default());
     sink.put(DatRootRes(dat_root));
 }
 

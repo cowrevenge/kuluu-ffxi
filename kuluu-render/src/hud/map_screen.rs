@@ -497,39 +497,31 @@ fn panel_rows(
                 })
                 .collect()
         }
-        MapSubMode::ChangeMap => {
-            let rows = change_map_rows(state, snap, catalog, zone_name);
-            if rows.is_empty() {
-                return vec![PanelRow {
-                    text: "(no maps available)".to_string(),
-                    color: theme::MUTED,
-                    is_cursor: false,
-                }];
-            }
-            rows.into_iter()
-                .enumerate()
-                .map(|(i, (text, _))| PanelRow {
-                    text,
-                    color: theme::TEXT,
-                    is_cursor: i == cursor,
-                })
-                .collect()
-        }
+        MapSubMode::ChangeMap => change_map_rows(state, snap, catalog, zone_name)
+            .into_iter()
+            .enumerate()
+            .map(|(i, (text, _))| PanelRow {
+                text,
+                color: theme::TEXT,
+                is_cursor: i == cursor,
+            })
+            .collect(),
     }
 }
 
 /// What the Change Map list may offer: for each zone, how many maps the retail
 /// DLL's zone-map table describes.
 ///
-/// The counts come from the DLL and not from POLUtils' map table because
-/// [`load_viewed_map`] resolves a row by indexing `MainDll::zone_maps`, and the
-/// two tables disagree in both directions — POLUtils lists pre-CoP maps the DLL
-/// dropped (zone 238: 3 vs 2) and misses maps the DLL has (zone 50: 1 vs 2), so
-/// a POLUtils-built row can point at a map the loader cannot resolve and preview
-/// blank (kuluu-u8p1).
-///
-/// The zone roster stays POLUtils': its table names the zones that ship a map
-/// DAT, whereas the DLL table also carries rows under ids no zone uses.
+/// Both the roster and the counts come from the DLL rather than from POLUtils'
+/// map table, because [`load_viewed_map`] resolves a row by indexing
+/// `MainDll::zone_maps` and the two tables disagree in both directions. On the
+/// retail install POLUtils names 197 zones and the DLL 231 (its remaining 153
+/// keys are the client-only band `zone_map_counts` drops): POLUtils lists
+/// pre-CoP maps the DLL dropped (zone 238: 3 vs 2), misses maps the DLL has
+/// (zone 50: 1 vs 2), omits 36 zones whose maps do ship (Middle Delkfutt's
+/// Tower, the WotG [S] zones, the Horutoto Ruins...), and names two zones the DLL
+/// has no record for (14, 77). A POLUtils-built list therefore both hides
+/// resolvable maps and offers rows that preview blank (kuluu-u8p1).
 #[derive(Resource, Default)]
 pub struct ChangeMapCatalog {
     zones: BTreeMap<u16, u8>,
@@ -537,14 +529,11 @@ pub struct ChangeMapCatalog {
 
 impl ChangeMapCatalog {
     pub fn from_dll(dll: &ffxi_dat::main_dll::MainDll) -> Self {
-        let counts = dll.zone_map_counts();
         Self {
-            zones: ffxi_dat::map_image::zones_with_maps()
+            zones: dll
+                .zone_map_counts()
                 .into_iter()
-                .filter_map(|zone| {
-                    let count = u8::try_from(*counts.get(&zone)?).ok()?;
-                    (count > 0).then_some((zone, count))
-                })
+                .filter_map(|(zone, count)| Some((zone, u8::try_from(count).ok()?)))
                 .collect(),
         }
     }
@@ -563,14 +552,19 @@ impl ChangeMapCatalog {
 }
 
 /// Fill the catalog once the map DLL resolves, and again if the DAT root is
-/// re-pointed (a settings reload replaces `MinimapDatRoot`).
+/// re-pointed — `insert_dat_roots` re-inserts `MinimapDatRoot` and a fresh
+/// `MapCalibration`, so `ensure_dll` reloads from the new install.
 pub(crate) fn refresh_change_map_catalog(
     dat_root: Res<crate::minimap::retail::MinimapDatRoot>,
     mut calib: ResMut<crate::minimap::retail::MapCalibration>,
     mut catalog: ResMut<ChangeMapCatalog>,
 ) {
-    if !catalog.is_empty() && !dat_root.is_changed() {
+    let root_changed = dat_root.is_changed();
+    if !catalog.is_empty() && !root_changed {
         return;
+    }
+    if root_changed {
+        *catalog = ChangeMapCatalog::default();
     }
     let Some(root) = dat_root.0.as_ref() else {
         return;
@@ -1657,15 +1651,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn change_map_panel_says_so_when_no_maps_resolved() {
-        let state = change_map_state((238, 0));
-        let snap = SceneSnapshot::default();
-        let rows = panel_rows(&state, &snap, &[], &ChangeMapCatalog::default(), &|_| None);
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].text, "(no maps available)");
-    }
-
     /// Gated on a retail install (self-skips). The acceptance oracle for
     /// kuluu-u8p1: every row the Change Map list offers must resolve the same
     /// way `load_viewed_map` resolves it -- by indexing the zone's DLL records --
@@ -1693,15 +1678,30 @@ mod tests {
         // And the other direction: the DLL knows a second map POLUtils misses.
         assert_eq!(ffxi_dat::map_image::map_count_for_zone(50), 1);
         assert_eq!(catalog.map_count(50), 2);
+        // Whole zones POLUtils omits: standing in Middle Delkfutt's Tower the
+        // list must still offer its six floors.
+        assert_eq!(ffxi_dat::map_image::map_count_for_zone(157), 0);
+        assert_eq!(catalog.map_count(157), 6);
+        // And zones POLUtils names that the DLL has no record for cannot be
+        // offered -- the preview would be blank.
+        assert_eq!(ffxi_dat::map_image::map_count_for_zone(77), 8);
+        assert_eq!(catalog.map_count(77), 0);
+        assert!(!catalog.zones().any(|zone| zone == 77));
 
         let snap = SceneSnapshot::default();
-        for viewed in [238u16, 50, 162] {
-            for (zone, idx) in change_map_targets(&change_map_state((viewed, 0)), &snap, &catalog) {
+        for viewed in [238u16, 50, 157, 162] {
+            let rows = change_map_targets(&change_map_state((viewed, 0)), &snap, &catalog);
+            for (zone, idx) in rows.iter().copied() {
                 assert!(
                     dll.zone_maps(zone).get(usize::from(idx)).is_some(),
                     "row {zone}/{idx} (viewing {viewed}) has no DLL record to preview"
                 );
             }
+            assert_eq!(
+                rows.iter().filter(|(zone, _)| *zone == viewed).count(),
+                usize::from(catalog.map_count(viewed)),
+                "every floor of the viewed zone is offered"
+            );
         }
     }
 

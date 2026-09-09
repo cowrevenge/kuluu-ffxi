@@ -1026,20 +1026,24 @@ mod menu_key_tests {
         harness.scene_state.snapshot.zone_id = Some(WINDURST_WATERS);
         harness.map_state.mode = MapSubMode::ChangeMap;
 
-        let markers = world.resource_mut::<MapMarkers>();
-        harness.key(&Key::ArrowDown, KeyCode::ArrowDown, &mut stack, markers);
+        for _ in 0..2 {
+            let markers = world.resource_mut::<MapMarkers>();
+            harness.key(&Key::ArrowDown, KeyCode::ArrowDown, &mut stack, markers);
+        }
         let markers = world.resource_mut::<MapMarkers>();
         harness.key(&Key::Enter, KeyCode::Enter, &mut stack, markers);
 
+        // POLUtils counts three Windurst Waters maps and the DLL two, so under
+        // the old roster the third row was this zone's phantom third floor.
+        let viewed = harness.map_state.viewed.expect("a row was confirmed");
+        assert_ne!(viewed, (WINDURST_WATERS, 2));
         assert_eq!(
-            harness.map_state.viewed,
-            Some((WINDURST_WATERS, 1)),
-            "the second row is the zone's second floor"
+            viewed.1, 0,
+            "past the zone's floors the list moves on to other zones at map 0"
         );
-        assert_eq!(
-            dll.zone_maps(WINDURST_WATERS).len(),
-            2,
-            "and the zone has no third floor row to land on"
+        assert!(
+            !dll.zone_maps(viewed.0).is_empty(),
+            "and that zone has a DLL record to preview"
         );
     }
 

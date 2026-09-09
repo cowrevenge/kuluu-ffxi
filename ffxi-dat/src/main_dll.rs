@@ -129,12 +129,22 @@ impl MainDll {
         out
     }
 
-    /// How many maps each zone in the table ships, ascending by zone id. One
-    /// walk, so a caller that needs every zone's count (the Change Map list)
-    /// does not re-walk the table per zone (kuluu-u8p1).
+    /// How many maps each zone ships, ascending by zone id. One walk, so a
+    /// caller that needs every zone's count (the Change Map list) does not
+    /// re-walk the table per zone (kuluu-u8p1).
+    ///
+    /// Rows whose key is negative are skipped: the field is signed (research/xim
+    /// ZoneMapTable.kt reads it with `next16Signed`) and xim only reaches those
+    /// rows through a zone's `customDefinition.zoneMapId`, never through a zone
+    /// id the server sends. On the retail install they are the 0xFF07..0xFFFF
+    /// band -- 153 keys, none of them a zone.
     pub fn zone_map_counts(&self) -> BTreeMap<u16, usize> {
         let mut counts: BTreeMap<u16, usize> = BTreeMap::new();
-        self.for_each_zone_map(|rec| *counts.entry(rec.zone_id).or_default() += 1);
+        self.for_each_zone_map(|rec| {
+            if rec.zone_id as i16 >= 0 {
+                *counts.entry(rec.zone_id).or_default() += 1;
+            }
+        });
         counts
     }
 
@@ -398,16 +408,21 @@ mod tests {
     }
 
     #[test]
-    fn zone_map_counts_tallies_every_zone_in_the_table() {
-        let mut bytes = vec![0u8; ZONE_MAP_STRIDE * 4];
-        for (slot, zone, sub) in [(0usize, 238u16, 1u8), (1, 238, 2), (2, 100, 0)] {
+    fn zone_map_counts_tallies_every_zone_and_skips_the_client_only_keys() {
+        let mut bytes = vec![0u8; ZONE_MAP_STRIDE * 5];
+        for (slot, zone, sub) in [
+            (0usize, 238u16, 1u8),
+            (1, 238, 2),
+            (2, 100, 0),
+            (3, 0xFF07, 0),
+        ] {
             let at = slot * ZONE_MAP_STRIDE;
             bytes[at..at + 2].copy_from_slice(&zone.to_le_bytes());
             bytes[at + 2] = sub;
             bytes[at + 5] = 4;
             bytes[at + ZONE_MAP_NEXT_DIVISOR] = 1;
         }
-        bytes[2 * ZONE_MAP_STRIDE + ZONE_MAP_NEXT_DIVISOR] = 0;
+        bytes[3 * ZONE_MAP_STRIDE + ZONE_MAP_NEXT_DIVISOR] = 0;
         let dll = MainDll {
             zone_map_base: Some(0),
             ..blank(bytes)
@@ -416,7 +431,7 @@ mod tests {
         assert_eq!(
             dll.zone_map_counts(),
             BTreeMap::from([(238, 2), (100, 1)]),
-            "one pass tallies each zone's rows"
+            "one pass tallies each zone's rows, and the negative key is not a zone"
         );
         assert_eq!(dll.zone_map_counts().get(&999), None);
     }
@@ -439,6 +454,15 @@ mod tests {
             assert_eq!(dll.zone_maps(zone).len(), count, "zone {zone}");
         }
         assert_eq!(counts.get(&238).copied(), Some(2), "Windurst Waters");
+        assert!(
+            counts.keys().all(|&zone| zone as i16 >= 0),
+            "the 0xFF07.. band is keyed by client map ids, not zones"
+        );
+        assert_eq!(
+            counts.get(&157).copied(),
+            Some(6),
+            "Middle Delkfutt's Tower, a zone POLUtils' map table omits"
+        );
     }
 
     #[test]

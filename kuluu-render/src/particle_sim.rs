@@ -270,6 +270,10 @@ struct LiveGenerator {
     stopped: bool,
     // `origin` is rewritten from the camera each frame rather than fixed at spawn.
     camera_relative: bool,
+    // research/XIClient/src/XIClient/source/World/Generator/CYyGenerator.cpp CYyGenerator::Idle case 0x0A —
+    // outside the generator's authored camera-distance band the frame's emission is skipped.
+    // Decided by sync_particle_meshes (the system that sees the camera), read by the next tick.
+    emit_culled: bool,
     // research/XIClient/src/XIClient/source/World/Generator/CYyGenerator.cpp CYyGenerator::Idle —
     // `GetSomeGeneratorScalar() * 0.3` scales the per-emission count whenever field_DE bit 0 is
     // set, which Open() arms for every generator under the `taew` (weat) container (:418-434).
@@ -567,6 +571,7 @@ pub fn spawn_particle_generators(
             }),
             stopped: false,
             camera_relative: false,
+            emit_culled: false,
             emit_scale: UNSCALED_EMISSION,
             emit_rng: emit_seed(entity),
             built_key: MeshKey::Empty,
@@ -659,6 +664,7 @@ pub fn spawn_actor_auto_run_particles(
                 origin_routine: None,
                 stopped: false,
                 camera_relative: false,
+                emit_culled: false,
                 emit_scale: UNSCALED_EMISSION,
                 emit_rng: emit_seed(entity),
                 built_key: MeshKey::Empty,
@@ -734,6 +740,9 @@ pub fn spawn_zone_particle_generator(
         origin_routine: None,
         stopped: false,
         camera_relative: opts.camera_relative,
+        // Starts culled so a zone-in does not burst every out-of-band emitter once; the first
+        // sync settles the in-band ones a frame later.
+        emit_culled: def.emit_cull.is_some(),
         emit_scale: opts.emit_scale,
         emit_rng: emit_seed(entity),
         built_key: MeshKey::Empty,
@@ -799,7 +808,9 @@ fn advance_generator(g: &mut LiveGenerator, frames: f32) {
 
     // research/xim: a maxLifeSpan of 0 marks a singleton — emit one particle once.
     let singleton = g.def.is_singleton();
-    let emitting = !g.stopped && (g.auto_run || g.age_frames <= g.emit_window_frames.max(1.0));
+    let emitting = !g.stopped
+        && !g.emit_culled
+        && (g.auto_run || g.age_frames <= g.emit_window_frames.max(1.0));
     if singleton {
         // `age_frames <= frames` already pins this to the first tick, so the emit window must not
         // gate it: a long frame (the blocking action-DAT read precedes these) makes age_frames
@@ -862,7 +873,7 @@ fn advance_generator(g: &mut LiveGenerator, frames: f32) {
     // particle past its life within this same tick, after the pre-emit sweep
     // already ran — replace it now so the mesh is never empty at render and the
     // body does not blink out for a frame.
-    if g.def.continuous && g.particles.is_empty() && continuous_active(g) {
+    if g.def.continuous && g.particles.is_empty() && !g.emit_culled && continuous_active(g) {
         emit(g, g.def.max_life_frames);
     }
 }
@@ -936,10 +947,15 @@ pub fn sync_particle_meshes(
     mut sim: ResMut<ParticleSimulator>,
     mut commands: Commands,
     time: Res<Time>,
+    draw: Option<Res<crate::dat_mzb::DrawDistance>>,
     mut trace: Local<RebuildTrace>,
 ) {
     let cam_xf = cam.iter().next().copied().unwrap_or_default();
     let (cam_rot, cam_pos) = (cam_xf.rotation(), cam_xf.translation());
+    // XiZone::GetDrawDistance, the band a 0x0A block with no authored maximum falls back to.
+    let zone_draw = draw
+        .map(|d| d.world)
+        .unwrap_or(crate::dat_mzb::DEFAULT_WORLD_DRAW_DISTANCE);
     let clock = sim.clock;
     let trace_celestial = trace_celestial();
     let trace_rebuilds = trace_particle_rebuilds();
@@ -954,6 +970,15 @@ pub fn sync_particle_meshes(
             reap.push((i, false));
             continue;
         };
+        // A camera-pinned generator sits at the eye by construction, inside every band.
+        if let Some(cull) = g.def.emit_cull.filter(|_| !g.camera_relative) {
+            let emitter = if g.actor_local {
+                entity_xf.transform_point(g.origin)
+            } else {
+                g.origin
+            };
+            g.emit_culled = cull.out_of_range(cam_pos.distance(emitter), zone_draw);
+        }
         // In the actor-local frame a billboard must cancel the parent's
         // FFXI->Bevy basis: parent_rot * rot == cam_rot. Fixed-orientation
         // meshes use their DAT rotation directly in the local frame.
@@ -1612,6 +1637,7 @@ mod tests {
             moon_phase_color: None,
             uv_scroll: [0.0, 0.0],
             accel: None,
+            emit_cull: None,
         }
     }
 
@@ -1646,6 +1672,7 @@ mod tests {
             origin_routine: None,
             stopped: false,
             camera_relative: false,
+            emit_culled: false,
             emit_scale: UNSCALED_EMISSION,
             emit_rng: emit_seed(Entity::PLACEHOLDER),
             built_key: MeshKey::Empty,
@@ -1655,6 +1682,65 @@ mod tests {
     // Drive the emission math directly (no Bevy world), one tick's worth of frames per call.
     fn advance(g: &mut LiveGenerator, frames: f32) {
         advance_generator(g, frames);
+    }
+
+    #[test]
+    fn emit_culled_generator_ages_without_emitting() {
+        let mut g = live(def(600.0, 1.0, 1), 0.0);
+        g.auto_run = true;
+        g.emit_culled = true;
+        advance(&mut g, 30.0);
+        assert!(g.particles.is_empty(), "culled: nothing emitted");
+        assert_eq!(g.age_frames, 30.0, "but the clock still runs");
+        g.emit_culled = false;
+        advance(&mut g, 30.0);
+        assert_eq!(g.particles.len(), 30, "back in band: emits again");
+    }
+
+    #[test]
+    fn sync_culls_emitters_outside_their_authored_camera_band() {
+        use bevy::ecs::system::RunSystemOnce;
+
+        let mut world = World::new();
+        world.insert_resource(Time::<()>::default());
+        world.insert_resource(Assets::<Mesh>::default());
+        let cam = world
+            .spawn((
+                OperatorCamera,
+                GlobalTransform::from_translation(Vec3::ZERO),
+            ))
+            .id();
+        let mesh_entity = world
+            .spawn((Mesh3d(Handle::default()), GlobalTransform::IDENTITY))
+            .id();
+
+        let mut d = def(600.0, 1.0, 1);
+        d.emit_cull = Some(ffxi_dat::particle_gen::EmitCull {
+            max_distance: 40.0,
+            min_distance: 0.0,
+            unlink_out_of_range: false,
+        });
+        let mut g = live(d, 0.0);
+        g.auto_run = true;
+        g.entity = mesh_entity;
+        g.origin = Vec3::new(50.0, 0.0, 0.0);
+        let mut sim = ParticleSimulator::default();
+        sim.generators.push(g);
+        world.insert_resource(sim);
+
+        world.run_system_once(sync_particle_meshes).unwrap();
+        assert!(
+            world.resource::<ParticleSimulator>().generators[0].emit_culled,
+            "50 units out on a 40-unit band"
+        );
+
+        *world.get_mut::<GlobalTransform>(cam).unwrap() =
+            GlobalTransform::from_translation(Vec3::new(20.0, 0.0, 0.0));
+        world.run_system_once(sync_particle_meshes).unwrap();
+        assert!(
+            !world.resource::<ParticleSimulator>().generators[0].emit_culled,
+            "30 units: back in band"
+        );
     }
 
     // One colour on every template vertex, so a stage-chain expectation is a single number

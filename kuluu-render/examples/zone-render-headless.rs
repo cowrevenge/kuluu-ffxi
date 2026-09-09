@@ -58,6 +58,7 @@ struct P {
     // LSB weather id driving the weat/<tag> canopy under --sky. None = whatever
     // an unset CurrentWeather resolves to, i.e. the client's own zone-in default.
     weather: Option<u16>,
+    zone_particles: bool,
 }
 #[derive(Resource, Default)]
 struct FC(u32);
@@ -85,6 +86,7 @@ fn main() {
         hour: 12.0,
         client_sun: false,
         weather: None,
+        zone_particles: true,
     };
     let f3 = |a: &[String], i: usize| {
         Vec3::new(
@@ -156,11 +158,16 @@ fn main() {
                 p.weather = Some(a[i + 1].parse().unwrap());
                 i += 2;
             }
+            "--no-zone-particles" => {
+                p.zone_particles = false;
+                i += 1;
+            }
             _ => {
                 i += 1;
             }
         }
     }
+    let zone_particles = p.zone_particles;
     let mut app = App::new();
     app.insert_resource(VanaClock::anchored_at_hour(p.hour))
         .insert_resource(p)
@@ -254,6 +261,9 @@ fn main() {
             // reads the HUD's mesh-debug flag, which only the full viewer inserts.
             .init_resource::<kuluu_render::hud::HudPanels>()
             .add_plugins(kuluu_render::weather_particles::WeatherParticlesPlugin)
+            // The zone's own timed auto-run emitters (lantern flames/glows, chimney smoke);
+            // --no-zone-particles leaves them out for an A/B frame-time read.
+            .add_plugins(ZoneParticlesGate(zone_particles))
             .init_resource::<VanaSky>()
             .init_resource::<ZoneDirectionalLighting>()
             // The weat/<tag> cloud canopy + star dome, the layers whose per-generator
@@ -490,6 +500,16 @@ fn load_weather(
     // without it load_moon_sprite_sheet and load_lens_flare_sheet bail on the first line and
     // the harness silently renders the no-sprite fallbacks instead of the retail assets.
     c.insert_resource(kuluu_render::moon_material::MoonDatRoot(Some(root.clone())));
+    // The client loads this off-thread (scheduler_runtime load_global_effect_dir); the harness
+    // reads it inline so zone generators whose mesh ships in syst/effe/ resolve.
+    if let Some(global) = root
+        .resolve(kuluu_render::scheduler_runtime::GLOBAL_EFFECT_DIR_FILE_ID)
+        .ok()
+        .and_then(|l| std::fs::read(l.path_under(&root)).ok())
+    {
+        let (schedulers, assets) = kuluu_render::scheduler_runtime::parse_action_bytes(&global);
+        c.insert_resource(kuluu_render::scheduler_runtime::GlobalEffectDir { schedulers, assets });
+    }
     let Ok(location) = root.resolve(p.file_id) else {
         return;
     };
@@ -516,15 +536,20 @@ fn cap(
     queue: Res<MmbLoadQueue>,
     water: Res<PendingWaterSpawns>,
     target: Res<CapTarget>,
+    time: Res<Time>,
+    mut frame_secs: Local<f32>,
 ) {
     f.0 += 1;
+    *frame_secs += time.delta_secs();
     if f.0.is_multiple_of(40) {
         eprintln!(
-            "frame {} pending={} water_pending={}",
+            "frame {} pending={} water_pending={} avg_frame_ms={:.2}",
             f.0,
             queue.pending.len(),
-            water.specs.len()
+            water.specs.len(),
+            *frame_secs / 40.0 * 1000.0
         );
+        *frame_secs = 0.0;
     }
     if !s.0 && f.0 >= p.cap {
         c.spawn(Screenshot::image(target.0.clone()))
@@ -534,5 +559,14 @@ fn cap(
     }
     if s.0 && q.is_empty() && f.0 >= p.cap + 5 {
         e.write(AppExit::Success);
+    }
+}
+
+struct ZoneParticlesGate(bool);
+impl Plugin for ZoneParticlesGate {
+    fn build(&self, app: &mut App) {
+        if self.0 {
+            app.add_plugins(kuluu_render::zone_particles::ZoneParticlesPlugin);
+        }
     }
 }

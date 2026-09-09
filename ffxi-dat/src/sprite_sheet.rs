@@ -1,6 +1,7 @@
 use crate::chunk::walk;
 use crate::kind::ChunkKind;
 use crate::map_image::{scan_graphics, GraphicImage};
+use crate::particle_gen::{DAYS_OF_WEEK, MOON_PHASES};
 
 // Section 0x21 (SpriteSheetMesh). Layout, re-expressed from LandSandBoat-era
 // retail DATs (cross-checked against research/xim SpriteSheetSection.kt):
@@ -285,40 +286,38 @@ pub fn extract_lens_flare_sheet(dat_bytes: &[u8]) -> Option<LensFlareSheet> {
     None
 }
 
-// Scrape the day-of-week (0x4E, 8xRGBA) and moon-phase (0x4F, 12xRGBA) color tables
-// from the first particle generator in a DAT that carries them (the sun/moon billboard
-// generator). research/xim ParticleUpdaters.kt:289-317.
+// The moon disc's day-of-week (0x4E, 8xRGBA) and moon-phase (0x4F, 12xRGBA) color tables.
+// research/xim ParticleUpdaters.kt:289-317.
 pub struct CelestialColorTables {
-    pub day_of_week: Option<[[f32; 4]; 8]>,
-    pub moon_phase: Option<[[f32; 4]; 12]>,
+    pub day_of_week: Option<[[f32; 4]; DAYS_OF_WEEK]>,
+    pub moon_phase: Option<[[f32; 4]; MOON_PHASES]>,
 }
 
+// Scoped to the generator that also carries MoonPhaseSpriteSheetUpdater (0x45) -- the moon
+// sprite itself -- the way kuluu-render::celestial_particles::collect_celestial_defs scopes the
+// billboards. The lunar halo `kasa` precedes it in the chunk order of every environment DAT and
+// carries its own, dimmer pair (file 201 f_ro/weat/fine/moon/kasa dow[1]=(0.50,0.50,0.20,a0.16)
+// against the moon's (0.50,0.46,0.27,a0.50)), so a first-match scrape tints the disc with the
+// halo's table.
 pub fn extract_celestial_color_tables(dat_bytes: &[u8]) -> Option<CelestialColorTables> {
-    let mut day_of_week = None;
-    let mut moon_phase = None;
     for c in walk(dat_bytes).filter_map(Result::ok) {
         if ChunkKind::from_u8(c.kind) != Some(ChunkKind::Generator) {
             continue;
         }
-        if let Ok(Some(def)) = crate::particle_gen::ParticleGeneratorDef::parse(c.data) {
-            if day_of_week.is_none() {
-                day_of_week = def.day_of_week_color;
-            }
-            if moon_phase.is_none() {
-                moon_phase = def.moon_phase_color;
-            }
+        let Ok(Some(def)) = crate::particle_gen::ParticleGeneratorDef::parse(c.data) else {
+            continue;
+        };
+        if !def.moon_phase_sprite
+            || (def.day_of_week_color.is_none() && def.moon_phase_color.is_none())
+        {
+            continue;
         }
-        if day_of_week.is_some() && moon_phase.is_some() {
-            break;
-        }
+        return Some(CelestialColorTables {
+            day_of_week: def.day_of_week_color,
+            moon_phase: def.moon_phase_color,
+        });
     }
-    if day_of_week.is_none() && moon_phase.is_none() {
-        return None;
-    }
-    Some(CelestialColorTables {
-        day_of_week,
-        moon_phase,
-    })
+    None
 }
 
 #[cfg(test)]
@@ -543,5 +542,119 @@ mod tests {
         assert!((ss.frames[0].uvs[2][0] - 0.2).abs() < 1e-6);
         assert_eq!(ss.frames[1].positions[1], [-1.0, 0.0, 5.0]);
         assert_eq!(ss.frames[0].colors[0], GEOM_MESH_RGBA);
+    }
+
+    fn synth_chunk(name: &[u8; 4], kind: u8, body: &[u8]) -> Vec<u8> {
+        let total = 16 + body.len();
+        let padded_total = total.div_ceil(16) * 16;
+        let size_units = (padded_total / 16) as u32;
+        let value = (size_units << 7) | (kind as u32 & 0x7F);
+        let mut out = name.to_vec();
+        out.extend_from_slice(&value.to_le_bytes());
+        out.extend(std::iter::repeat_n(0u8, 8));
+        out.extend_from_slice(body);
+        out.resize(padded_total, 0);
+        out
+    }
+
+    // The halo `kasa` is the earlier Moon-attached generator in every environment DAT and carries
+    // its own 0x4E/0x4F pair; only the moon sprite's own (0x45-carrying) generator tints the disc.
+    #[test]
+    fn celestial_tables_come_from_the_moon_sprite_generator_not_the_earlier_halo() {
+        const HALO_DOW: [[u8; 4]; DAYS_OF_WEEK] = [[128, 128, 51, 41]; DAYS_OF_WEEK];
+        const HALO_PHASE: [[u8; 4]; MOON_PHASES] = [[128, 128, 128, 0]; MOON_PHASES];
+        const MOON_DOW: [[u8; 4]; DAYS_OF_WEEK] = [[128, 117, 69, 128]; DAYS_OF_WEEK];
+        const MOON_PHASE: [[u8; 4]; MOON_PHASES] = [[128, 128, 128, 107]; MOON_PHASES];
+
+        let mut dat = synth_chunk(
+            b"kasa",
+            ChunkKind::Generator as u8,
+            &crate::particle_gen::test_support::celestial_generator_body(
+                false,
+                &HALO_DOW,
+                &HALO_PHASE,
+            ),
+        );
+        dat.extend(synth_chunk(
+            b"moon",
+            ChunkKind::Generator as u8,
+            &crate::particle_gen::test_support::celestial_generator_body(
+                true,
+                &MOON_DOW,
+                &MOON_PHASE,
+            ),
+        ));
+
+        let t = extract_celestial_color_tables(&dat).expect("moon generator carries both tables");
+        let dow = t.day_of_week.expect("0x4E scraped");
+        let phase = t.moon_phase.expect("0x4F scraped");
+        assert!((dow[0][1] - 117.0 / 255.0).abs() < 1e-6, "moon 0x4E green");
+        assert!((dow[0][3] - 128.0 / 255.0).abs() < 1e-6, "moon 0x4E alpha");
+        assert!(
+            (phase[0][3] - 107.0 / 255.0).abs() < 1e-6,
+            "moon 0x4F alpha"
+        );
+    }
+
+    // Without a moon sprite generator there is no disc tint to scrape: the halo's tables must not
+    // stand in for it (sun_moon falls back to its own constants on None).
+    #[test]
+    fn celestial_tables_absent_when_only_the_halo_carries_them() {
+        const HALO_DOW: [[u8; 4]; DAYS_OF_WEEK] = [[128, 128, 51, 41]; DAYS_OF_WEEK];
+        const HALO_PHASE: [[u8; 4]; MOON_PHASES] = [[128, 128, 128, 0]; MOON_PHASES];
+
+        let dat = synth_chunk(
+            b"kasa",
+            ChunkKind::Generator as u8,
+            &crate::particle_gen::test_support::celestial_generator_body(
+                false,
+                &HALO_DOW,
+                &HALO_PHASE,
+            ),
+        );
+
+        assert!(extract_celestial_color_tables(&dat).is_none());
+    }
+
+    // Real-DAT pin: West Ronfaure's fine-weather moon (f_ro/weat/fine/moon/moon) carries
+    // 0x4E alpha 0.50 and a 0x4F alpha of 0.42 outside the full moon, where the halo
+    // (f_ro/weat/fine/moon/kasa) that precedes it in chunk order carries 0.16 and 0.00 -- the
+    // halo only lights up around frames 5-7. Scraping the halo is therefore observable as a
+    // near-transparent disc tint.
+    #[test]
+    fn real_dat_west_ronfaure_scrapes_the_moon_tables_not_the_halos() {
+        const MOON_DOW_ALPHA: f32 = 0.50;
+        const MOON_PHASE_NEW_ALPHA: f32 = 0.42;
+        const HALO_DOW_ALPHA: f32 = 0.16;
+        const HALO_PHASE_NEW_ALPHA: f32 = 0.0;
+        const BYTE_QUANTUM: f32 = 1.0 / 255.0;
+
+        let Ok(root) = crate::DatRoot::from_env_or_default() else {
+            eprintln!("skipping: no DAT root");
+            return;
+        };
+        let Ok(loc) = root.resolve(201) else {
+            eprintln!("skipping: file 201 unresolvable");
+            return;
+        };
+        let Ok(bytes) = std::fs::read(loc.path_under(&root)) else {
+            eprintln!("skipping: file 201 unreadable");
+            return;
+        };
+
+        let t = extract_celestial_color_tables(&bytes).expect("file 201 ships a moon generator");
+        let dow = t.day_of_week.expect("0x4E scraped");
+        let phase = t.moon_phase.expect("0x4F scraped");
+        assert!(
+            (dow[1][3] - MOON_DOW_ALPHA).abs() < BYTE_QUANTUM,
+            "0x4E alpha is the moon's {MOON_DOW_ALPHA}, not the halo's {HALO_DOW_ALPHA}: {}",
+            dow[1][3]
+        );
+        assert!(
+            (phase[0][3] - MOON_PHASE_NEW_ALPHA).abs() < BYTE_QUANTUM,
+            "0x4F new-moon alpha is the moon's {MOON_PHASE_NEW_ALPHA}, not the halo's \
+             {HALO_PHASE_NEW_ALPHA}: {}",
+            phase[0][3]
+        );
     }
 }

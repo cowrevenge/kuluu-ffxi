@@ -806,17 +806,17 @@ fn f32_le(b: &[u8], off: usize) -> f32 {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod test_support {
     use super::*;
 
     // Build a generator body matching the real layout: header at 0x64, section-2 offset word at
     // body[0x74] (value = body_index + 0x10), then the initializer opcode stream. `flags` is the
     // whole u32 at body[0x68] — particle count in the low 9 bits, gen flags above it.
-    fn build(sec2: &[u8], frames_per_em: u16, flags: u32) -> Vec<u8> {
+    pub(crate) fn build(sec2: &[u8], frames_per_em: u16, flags: u32) -> Vec<u8> {
         build_attached(sec2, frames_per_em, flags, 0, 0)
     }
 
-    fn build_attached(
+    pub(crate) fn build_attached(
         sec2: &[u8],
         frames_per_em: u16,
         flags: u32,
@@ -834,12 +834,49 @@ mod tests {
         body
     }
 
-    fn op(opcode: u8, size_words: u8, payload: &[u8]) -> Vec<u8> {
+    pub(crate) fn op(opcode: u8, size_words: u8, payload: &[u8]) -> Vec<u8> {
         let mut v = vec![opcode, size_words, 0, 0];
         v.extend_from_slice(payload);
         v.resize(size_words as usize * 4, 0);
         v
     }
+
+    // A generator whose section-3 stream carries the celestial updaters: 0x45
+    // MoonPhaseSpriteSheetUpdater when `moon_phase_sprite`, then the 0x4E/0x4F color tables
+    // (each an expectZero32 followed by RGBA u8 quads).
+    pub(crate) fn celestial_generator_body(
+        moon_phase_sprite: bool,
+        day_of_week: &[[u8; 4]; DAYS_OF_WEEK],
+        moon_phase: &[[u8; 4]; MOON_PHASES],
+    ) -> Vec<u8> {
+        let mut sec2 = op(0x01, 12, &[]);
+        sec2[4 + 29] = LINKED_DATA_STATIC_MESH;
+        let mut body = build(&sec2, 1, 1);
+        body.extend_from_slice(&[0u8; 4]);
+        let sec3_at = body.len();
+        body[0x78..0x7C].copy_from_slice(&((sec3_at + 0x10) as u32).to_le_bytes());
+
+        let table = |opcode: u8, quads: &[[u8; 4]]| {
+            let mut p = vec![0u8; 4];
+            p.extend(quads.iter().flatten());
+            let size_words = (4 + p.len()).div_ceil(4) as u8;
+            op(opcode, size_words, &p)
+        };
+        let mut sec3 = Vec::new();
+        if moon_phase_sprite {
+            sec3.extend(op(0x45, 1, &[]));
+        }
+        sec3.extend(table(0x4E, day_of_week));
+        sec3.extend(table(0x4F, moon_phase));
+        body.extend_from_slice(&sec3);
+        body
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::test_support::*;
+    use super::*;
 
     #[test]
     fn parses_particle_generator_header_and_setup() {

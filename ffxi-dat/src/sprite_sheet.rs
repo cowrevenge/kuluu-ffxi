@@ -294,11 +294,14 @@ pub struct CelestialColorTables {
 }
 
 // Scoped to the generator that also carries MoonPhaseSpriteSheetUpdater (0x45) -- the moon
-// sprite itself -- the way kuluu-render::celestial_particles::collect_celestial_defs scopes the
-// billboards. The lunar halo `kasa` precedes it in the chunk order of every environment DAT and
-// carries its own, dimmer pair (file 201 f_ro/weat/fine/moon/kasa dow[1]=(0.50,0.50,0.20,a0.16)
-// against the moon's (0.50,0.46,0.27,a0.50)), so a first-match scrape tints the disc with the
-// halo's table.
+// sprite itself. The lunar halo `kasa` precedes it in the chunk order of every environment DAT
+// and carries its own, dimmer pair (file 201 f_ro/weat/fine/moon/kasa dow[6]=(0.50,0.50,0.50)
+// against the moon's (0.70,0.70,0.70)), so a first-match scrape tints the disc with the halo's
+// table. The walk is flat and weather-blind, unlike the weather-scoped
+// kuluu-render::celestial_particles::collect_celestial_defs: every DAT that ships more than one
+// weather's moon generator repeats byte-identical 0x4E/0x4F tables across them (survey of all
+// resolvable ids 1..4000, kuluu-xxqy; pinned by real_dat_moon_tables_do_not_vary_by_weather),
+// so the first 0x45 generator in file order carries the active weather's tables too.
 pub fn extract_celestial_color_tables(dat_bytes: &[u8]) -> Option<CelestialColorTables> {
     for c in walk(dat_bytes).filter_map(Result::ok) {
         if ChunkKind::from_u8(c.kind) != Some(ChunkKind::Generator) {
@@ -616,35 +619,55 @@ mod tests {
         assert!(extract_celestial_color_tables(&dat).is_none());
     }
 
+    // West Ronfaure's environment DAT, or None on a machine without the retail install.
+    fn west_ronfaure_env_dat() -> Option<Vec<u8>> {
+        const WEST_RONFAURE_ENV_DAT: u32 = 201;
+        let Ok(root) = crate::DatRoot::from_env_or_default() else {
+            eprintln!("skipping: no DAT root");
+            return None;
+        };
+        let Ok(loc) = root.resolve(WEST_RONFAURE_ENV_DAT) else {
+            eprintln!("skipping: file 201 unresolvable");
+            return None;
+        };
+        match std::fs::read(loc.path_under(&root)) {
+            Ok(b) => Some(b),
+            Err(_) => {
+                eprintln!("skipping: file 201 unreadable");
+                None
+            }
+        }
+    }
+
     // Real-DAT pin: West Ronfaure's fine-weather moon (f_ro/weat/fine/moon/moon) carries
-    // 0x4E alpha 0.50 and a 0x4F alpha of 0.42 outside the full moon, where the halo
-    // (f_ro/weat/fine/moon/kasa) that precedes it in chunk order carries 0.16 and 0.00 -- the
-    // halo only lights up around frames 5-7. Scraping the halo is therefore observable as a
-    // near-transparent disc tint.
+    // dow[6]=(0.70,0.70,0.70) at alpha 0.50 where the halo (f_ro/weat/fine/moon/kasa) that
+    // precedes it in chunk order carries (0.50,0.50,0.50) at alpha 0.16. Only the RGB reaches
+    // the drawn disc -- kuluu-render::sun_moon::celestial_moon_tint returns RGB and
+    // MoonMaterial's tint.w carries the sprite-vs-procedural mode flag -- so the halo's table
+    // shows up as a washed-out weekday hue, not as a transparency change.
     #[test]
     fn real_dat_west_ronfaure_scrapes_the_moon_tables_not_the_halos() {
+        const MOON_DOW_LIGHT_RED: f32 = 0.70;
+        const HALO_DOW_LIGHT_RED: f32 = 0.50;
         const MOON_DOW_ALPHA: f32 = 0.50;
         const MOON_PHASE_NEW_ALPHA: f32 = 0.42;
         const HALO_DOW_ALPHA: f32 = 0.16;
         const HALO_PHASE_NEW_ALPHA: f32 = 0.0;
         const BYTE_QUANTUM: f32 = 1.0 / 255.0;
+        const LIGHT_DAY: usize = 6;
 
-        let Ok(root) = crate::DatRoot::from_env_or_default() else {
-            eprintln!("skipping: no DAT root");
-            return;
-        };
-        let Ok(loc) = root.resolve(201) else {
-            eprintln!("skipping: file 201 unresolvable");
-            return;
-        };
-        let Ok(bytes) = std::fs::read(loc.path_under(&root)) else {
-            eprintln!("skipping: file 201 unreadable");
+        let Some(bytes) = west_ronfaure_env_dat() else {
             return;
         };
 
         let t = extract_celestial_color_tables(&bytes).expect("file 201 ships a moon generator");
         let dow = t.day_of_week.expect("0x4E scraped");
         let phase = t.moon_phase.expect("0x4F scraped");
+        assert!(
+            (dow[LIGHT_DAY][0] - MOON_DOW_LIGHT_RED).abs() < BYTE_QUANTUM,
+            "0x4E red is the moon's {MOON_DOW_LIGHT_RED}, not the halo's {HALO_DOW_LIGHT_RED}: {}",
+            dow[LIGHT_DAY][0]
+        );
         assert!(
             (dow[1][3] - MOON_DOW_ALPHA).abs() < BYTE_QUANTUM,
             "0x4E alpha is the moon's {MOON_DOW_ALPHA}, not the halo's {HALO_DOW_ALPHA}: {}",
@@ -655,6 +678,37 @@ mod tests {
             "0x4F new-moon alpha is the moon's {MOON_PHASE_NEW_ALPHA}, not the halo's \
              {HALO_PHASE_NEW_ALPHA}: {}",
             phase[0][3]
+        );
+    }
+
+    // The scrape takes the first 0x45 generator in file order rather than the active weather's;
+    // this pins the shipped-data invariant that makes the two the same tables.
+    #[test]
+    fn real_dat_moon_tables_do_not_vary_by_weather() {
+        let Some(bytes) = west_ronfaure_env_dat() else {
+            return;
+        };
+
+        let tables: Vec<_> = walk(&bytes)
+            .filter_map(Result::ok)
+            .filter(|c| ChunkKind::from_u8(c.kind) == Some(ChunkKind::Generator))
+            .filter_map(|c| {
+                crate::particle_gen::ParticleGeneratorDef::parse(c.data)
+                    .ok()
+                    .flatten()
+            })
+            .filter(|d| d.moon_phase_sprite)
+            .map(|d| (d.day_of_week_color, d.moon_phase_color))
+            .collect();
+
+        assert!(
+            tables.len() > 1,
+            "file 201 ships one moon sprite generator per weather, found {}",
+            tables.len()
+        );
+        assert!(
+            tables.windows(2).all(|w| w[0] == w[1]),
+            "0x4E/0x4F tables differ between weathers: {tables:?}"
         );
     }
 }

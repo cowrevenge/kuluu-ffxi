@@ -115,19 +115,23 @@ mod imginfo {
 
     // research/XIClient ImageData.h:5-36 — the header is `unsigned char Format;
     // ResourceID TextureName;` with no union or variant, and GameTexture::ConfigureFromImageData
-    // (GameTexture.cpp:191) copies TextureName as its first statement, before the
-    // GetTextureFormat() switch at :211-244. The name field is therefore unconditional across
+    // (GameTexture.cpp:194) copies TextureName as its first statement, before the
+    // GetTextureFormat() switch at :212-245. The name field is therefore unconditional across
     // type bytes: these two name themselves exactly where the 0x9x/0xAx/0xBx kinds do.
     // (research/xim TextureSection.kt:28-33 `warn`s on them, but that is an unhandled case, not
     // evidence of an absent name; XIClient is the stronger tier per research/AGENTS.md.)
-    pub(super) const FLG_PALETTE_FMT0: [u8; 2] = [0x01, 0x81];
+    // ImageData.h:29 and :35 separate the pair: both are GetTextureFormat() 0, and it is
+    // IsCompressed() = Format >> 7 that tells 0x81 from 0x01.
+    pub(super) const FLG_FMT0: u8 = 0x01;
+
+    pub(super) const FLG_FMT0_COMPRESSED: u8 = 0x81;
 
     pub(super) const NAMED_HEADER_FLAGS: [u8; 5] = [
         FLG_DXT,
         FLG_PALETTE,
         FLG_PALETTE_EXT,
-        FLG_PALETTE_FMT0[0],
-        FLG_PALETTE_FMT0[1],
+        FLG_FMT0,
+        FLG_FMT0_COMPRESSED,
     ];
 
     pub(super) const NAME_END: usize = 0x11;
@@ -202,11 +206,12 @@ pub fn decode_texture(body: &[u8]) -> std::result::Result<DecodedTexture, Textur
         imginfo::FLG_PALETTE_EXT => {
             decode_palettized(body, imginfo::PALETTE_OFF_EXT, imginfo::PIXELS_OFF_EXT)
         }
-        // research/XIClient GameTexture.cpp:211-213 — GetTextureFormat() is 0 for both, and
-        // `case 0: case 1:` falls straight through to the palettised ColorFormat walk at :247.
-        // 0x81's IsCompressed() bit additionally sends retail to the fourcc check at :289-300,
-        // which this shared palettised path does not implement (kuluu-tm7m caveat).
-        flag if imginfo::FLG_PALETTE_FMT0.contains(&flag) => {
+        // research/XIClient GameTexture.cpp:212-215 — GetTextureFormat() is 0 for both, and
+        // `case 0: case 1:` falls straight through to the ColorFormat walk at :249. Two gaps
+        // there are unimplemented (kuluu-tm7m caveat): decode_palettized assumes the
+        // Indexed8Bit/BitDepth-32 arm at :262-272 for every Img, and 0x81's IsCompressed() bit
+        // additionally sends retail to the trailing-fourcc check at :291-300.
+        imginfo::FLG_FMT0 | imginfo::FLG_FMT0_COMPRESSED => {
             decode_palettized(body, imginfo::PALETTE_OFF, imginfo::PIXELS_OFF)
         }
         _ => Err(TextureError::NoMagic),
@@ -647,7 +652,7 @@ pub(crate) mod tests {
         assert_eq!(extract_texture_name(&body).as_deref(), Some("fir"));
     }
 
-    // research/XIClient GameTexture.cpp:191 — TextureName is copied before any format branch,
+    // research/XIClient GameTexture.cpp:194 — TextureName is copied before any format branch,
     // so a palettised Img names itself exactly like a DXT one and has to enter the name-keyed
     // maps too or it can never be linked by name.
     #[test]
@@ -664,7 +669,7 @@ pub(crate) mod tests {
 
     // The ImageData header at ROM/0/28.DAT offset 3389984 (file 100, chunk `smok`), verbatim:
     // the 0x81 type byte, the qualified name, SubsequentDataSize (0x28, "observed to be
-    // consistently 40" per research/XIClient ImageData.h:10-13), then Width and Height. That
+    // consistently 40" per research/XIClient ImageData.h:9-12), then Width and Height. That
     // file's `smok` 0x21 sprite sheet names this exact texture, so keeping 0x81 out of the name
     // tiers left the sheet -- and every other texture in the zone, all 25 of which are 0x81 --
     // unlinkable.

@@ -1104,6 +1104,8 @@ pub struct FfxiRenderActor {
 
     rest_phase: RestPlayback,
 
+    death_phase: actor_state::DeathPhase,
+
     engage: EngageMachine,
 
     action: Option<ActionPlayback>,
@@ -1572,6 +1574,7 @@ fn make_render_actor(
         scale,
         current_clip: None,
         rest_phase: RestPlayback::Inactive,
+        death_phase: actor_state::DeathPhase::Unobserved,
         engage: EngageMachine::NotEngaged,
         action: None,
         action_clips: Vec::new(),
@@ -1841,6 +1844,27 @@ fn routine_motion_clip_last(routines: &HashMap<DatId, Scheduler>, routine: DatId
         .map(|t| DatId::from_name(&t.stage.id))
 }
 
+/// The `ded?` collapse clip and the routine-authored frames retail plays it for
+/// before swapping to the held `cor?` corpse pose. Both are Motion stages of the
+/// `dead` routine (`dat-routine-stages 7072 dead`: `ded?` dur=116 half-frames at
+/// frame 0, `cor?` at frame 116), and the duration is per race - 68..156
+/// half-frames across the seven PC skeletons - so it is read, never assumed.
+fn death_collapse_clip(routines: &HashMap<DatId, Scheduler>) -> Option<(DatId, f32)> {
+    let sched = routines.get(&actor_state::death_routine_id())?;
+    let mut motions = sched
+        .stages
+        .iter()
+        .filter(|t| t.stage.kind == StageKind::Motion);
+    let collapse = motions.next()?;
+    // A routine with a single Motion stage has no corpse pose to fall through to;
+    // treat it as having no collapse rather than holding `ded?` forever.
+    motions.next()?;
+    Some((
+        DatId::from_name(&collapse.stage.id),
+        half_frames(collapse.stage.duration_frames),
+    ))
+}
+
 pub(crate) use ffxi_vocab::magic::CATEGORY_MAGIC_START as MAGIC_START_CATEGORY;
 
 pub(crate) fn action_routine(action_kind: u8, cast_suffix: Option<&str>) -> Option<(DatId, bool)> {
@@ -1948,6 +1972,21 @@ fn advance_engage(
     }
 }
 
+fn reset_actor_pose_state(actor: &mut FfxiRenderActor, elapsed_frames: f32) {
+    actor.inputs = ActorAnimInputs::default();
+    actor.rest_phase = RestPlayback::Inactive;
+
+    actor.action = None;
+    actor.engage = EngageMachine::NotEngaged;
+    actor.coordinator.clear();
+    actor.current_clip = None;
+    advance_actor_pose(actor, elapsed_frames, None, None);
+    // Ordered after the re-pose, whose default (alive) inputs would otherwise read
+    // as having watched this actor alive: retail only plays `ded?` for a death it
+    // saw, so a KO'd zone-in resumes on the held corpse frame.
+    actor.death_phase = actor_state::DeathPhase::Unobserved;
+}
+
 // Runs inside the parallel per-actor pass: it touches only the actor's own
 // fields, leaving the pose in `world_pose` for the serial registry copy.
 fn advance_actor_pose(
@@ -1967,6 +2006,7 @@ fn advance_actor_pose(
         scale,
         current_clip,
         rest_phase,
+        death_phase,
         engage,
         action,
         action_clips,
@@ -2035,8 +2075,34 @@ fn advance_actor_pose(
             .any(|clip| clip.id.parameterized_match(id))
     });
 
+    // Retail's `dead` routine outranks locomotion and any in-flight action, so the
+    // collapse heads the selection chain; the held `cor?` then falls through to idle.
+    let dead = actor_state::corpse_pose_selected(inputs);
+    // A missing collapse clip must not stall the corpse behind a pose that never
+    // draws, the same guard `burrow_clip_id` applies.
+    let collapse = dead
+        .then(|| death_collapse_clip(routines))
+        .flatten()
+        .filter(|(id, _)| {
+            animations
+                .iter()
+                .any(|clip| clip.id.parameterized_match(id))
+        });
+    *death_phase = actor_state::next_death_phase(
+        *death_phase,
+        dead,
+        collapse.map_or(0.0, |(_, frames)| frames),
+        elapsed_frames,
+    );
+    let collapse_id = match *death_phase {
+        actor_state::DeathPhase::Collapsing { .. } => collapse.map(|(id, _)| id),
+        _ => None,
+    };
+
     let mut one_shot_rest = false;
-    let (selected_id, is_idle) = if let Some(id) = action_id {
+    let (selected_id, is_idle) = if let Some(id) = collapse_id {
+        (id, false)
+    } else if let Some(id) = action_id {
         (id, false)
     } else if let Some(id) = engage_overlay {
         (id, false)
@@ -2147,7 +2213,8 @@ fn advance_actor_pose(
                 loop_duration: None,
                 num_loops: action.and_then(|a| a.num_loops).or((one_shot_fishing
                     || one_shot_rest
-                    || burrow_clip_id.is_some())
+                    || burrow_clip_id.is_some()
+                    || collapse_id.is_some())
                 .then_some(1)),
                 low_priority: false,
             };
@@ -3119,14 +3186,7 @@ pub fn tick_live_ffxi_actors(
             let snap = index.by_id.get(&world_id);
 
             if zone_changed || (!is_self && snap.is_none()) {
-                actor.inputs = ActorAnimInputs::default();
-                actor.rest_phase = RestPlayback::Inactive;
-
-                actor.action = None;
-                actor.engage = EngageMachine::NotEngaged;
-                actor.coordinator.clear();
-                actor.current_clip = None;
-                advance_actor_pose(&mut actor, elapsed_frames, None, None);
+                reset_actor_pose_state(&mut actor, elapsed_frames);
                 return;
             }
 
@@ -4465,6 +4525,269 @@ mod pose_resolution_tests {
             key_frame_duration: 1.0,
             key_frame_sets: Default::default(),
         }
+    }
+
+    fn synth_death_routine(stages: &[(&[u8; 4], u16, u32)]) -> HashMap<DatId, Scheduler> {
+        use ffxi_dat::scheduler::{SchedulerStage, TimedStage};
+        let name = *b"dead";
+        let mut out = HashMap::new();
+        out.insert(
+            DatId::from_name(&name),
+            Scheduler {
+                name,
+                stages: stages
+                    .iter()
+                    .map(|&(clip, duration_frames, frame)| TimedStage {
+                        frame,
+                        stage: SchedulerStage {
+                            kind: StageKind::Motion,
+                            raw_type: 0x05,
+                            delay_frames: 0,
+                            duration_frames,
+                            id: *clip,
+                            max_loops: 1,
+                            transition_in: 0,
+                            transition_out: 0,
+                            random_group: None,
+                            local_dir: ffxi_dat::scheduler::NO_LOCAL_DIR,
+                            model_transform: None,
+                            screen_color: None,
+                        },
+                    })
+                    .collect(),
+            },
+        );
+        out
+    }
+
+    #[test]
+    fn death_collapse_clip_reads_the_dead_routine_stages() {
+        let routines = synth_death_routine(&[(b"ded?", 116, 0), (b"cor?", 2, 116)]);
+        let (clip, frames) = death_collapse_clip(&routines).expect("collapse stage");
+        assert_eq!(clip.as_str(), "ded?");
+        assert_eq!(frames, 58.0, "duration_frames is in half-frame units");
+    }
+
+    #[test]
+    fn death_collapse_clip_needs_a_corpse_stage_to_settle_on() {
+        let routines = synth_death_routine(&[(b"ded?", 116, 0)]);
+        assert_eq!(death_collapse_clip(&routines), None);
+        assert_eq!(death_collapse_clip(&HashMap::new()), None);
+    }
+
+    #[test]
+    fn death_phase_selects_the_collapse_then_releases_to_the_corpse_pose() {
+        let routines = synth_death_routine(&[(b"ded?", 116, 0), (b"cor?", 2, 116)]);
+        let (collapse_id, collapse_frames) = death_collapse_clip(&routines).unwrap();
+
+        let mut phase = actor_state::DeathPhase::Unobserved;
+        let mut step = |dead: bool| {
+            phase = actor_state::next_death_phase(phase, dead, collapse_frames, 1.0);
+            match phase {
+                actor_state::DeathPhase::Collapsing { .. } => Some(collapse_id.as_str()),
+                _ => None,
+            }
+        };
+
+        assert_eq!(step(false), None);
+        for _ in 0..collapse_frames as u32 {
+            assert_eq!(step(true).as_deref(), Some("ded?"));
+        }
+        for _ in 0..600 {
+            assert_eq!(
+                step(true),
+                None,
+                "the collapse must not replay under the held corpse pose"
+            );
+        }
+    }
+
+    // `dat-routine-stages <pc skeleton> dead`, half-frames halved, over races 1..=8
+    // (skeletons 7072/10248/13424/16600/19776 shared by both Tarutaru/23176/26352):
+    // the collapse length is authored per race, so it has to be read from the routine.
+    const PC_COLLAPSE_FRAMES: [(u8, f32); 8] = [
+        (1, 58.0),
+        (2, 78.0),
+        (3, 43.0),
+        (4, 68.0),
+        (5, 34.0),
+        (6, 34.0),
+        (7, 60.0),
+        (8, 60.0),
+    ];
+
+    // Retail-DAT guard (skips without an install) for the oracle the phase machine is
+    // built on: every PC `dead` routine is a one-shot `ded?` collapse followed by
+    // `cor?`, and `cor?` is itself static -- so what retail holds forever is the corpse
+    // frame, never the collapse.
+    #[test]
+    fn retail_dead_routine_is_a_one_shot_collapse_into_a_static_corpse_pose() {
+        if DatRoot::from_env_or_default().is_err() {
+            eprintln!("skipping: no retail DAT root");
+            return;
+        }
+
+        for (race, expected_frames) in PC_COLLAPSE_FRAMES {
+            let actor = load_pc(race, false, &[], None, None, None).expect("load PC race");
+            let routines = actor.all_routines();
+
+            let (collapse_id, collapse_frames) =
+                death_collapse_clip(&routines).expect("PC dead routine");
+            assert_eq!(collapse_id.as_str(), "ded?");
+            assert_eq!(
+                collapse_frames, expected_frames,
+                "race {race} collapse length"
+            );
+            assert_eq!(
+                routine_motion_clip_last(&routines, actor_state::death_routine_id())
+                    .map(|d| d.as_str()),
+                Some("cor?".to_string()),
+                "race {race} dead routine settles on the corpse pose"
+            );
+
+            let animations = actor.all_animations();
+            let clips = |id: DatId| -> Vec<&SkeletonAnimation> {
+                animations
+                    .iter()
+                    .filter(|a| a.id.parameterized_match(&id))
+                    .collect()
+            };
+
+            let collapse = clips(collapse_id);
+            assert!(
+                !collapse.is_empty(),
+                "race {race} collapse clip is loadable"
+            );
+            for a in &collapse {
+                assert!(
+                    a.length_in_frames() > 1.0,
+                    "race {race} {} is a motion, not a pose",
+                    a.id.as_str()
+                );
+            }
+
+            let corpse = clips(actor_state::corpse_pose_id());
+            assert!(!corpse.is_empty(), "race {race} corpse pose is loadable");
+            for a in &corpse {
+                for set in a.key_frame_sets.values() {
+                    let first = set[0];
+                    let last = set[a.num_frames - 1];
+                    assert!(
+                        same_orientation(first.rotation, last.rotation),
+                        "race {race} {} rotates between its first and last keyframe",
+                        a.id.as_str()
+                    );
+                    assert!(
+                        same_component(first.translation, last.translation),
+                        "race {race} {} translates between its first and last keyframe",
+                        a.id.as_str()
+                    );
+                    assert!(
+                        same_component(first.scale, last.scale),
+                        "race {race} {} scales between its first and last keyframe",
+                        a.id.as_str()
+                    );
+                }
+            }
+        }
+    }
+
+    // Retail stores `cor?` as compressed keyframes, so its first and last frame
+    // decode to the same pose only up to f32 round-off: measured over all seven PC
+    // skeletons the worst gap is 2.4e-7 on a translation and 2.4e-7 on |q1.q2| - 1.
+    const STATIC_POSE_TOLERANCE: f32 = 1e-6;
+
+    fn same_component(a: [f32; 3], b: [f32; 3]) -> bool {
+        a.iter()
+            .zip(b.iter())
+            .all(|(x, y)| (x - y).abs() <= STATIC_POSE_TOLERANCE)
+    }
+
+    // A quaternion and its negation name the same orientation, and retail's `cor?`
+    // does store one bone's identity rotation as `[0,0,0,1]` on the first keyframe
+    // and `[0,0,0,-1]` on the last, so the static-pose check compares orientations
+    // rather than raw components.
+    fn same_orientation(a: [f32; 4], b: [f32; 4]) -> bool {
+        let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
+        (dot.abs() - 1.0).abs() <= STATIC_POSE_TOLERANCE
+    }
+
+    // Retail-DAT end-to-end (skips without an install) for
+    // .agents/skills/retail-observe/references/death-ko-behavior.md: "Death plays a
+    // collapse motion once and holds the final corpse frame -- it is not a looping
+    // idle."
+    #[test]
+    fn death_collapse_plays_once_then_holds_the_corpse_frame() {
+        let Some(loaded) = load_hume_m() else {
+            return;
+        };
+        let routines = loaded.all_routines();
+        let (collapse_id, collapse_frames) =
+            death_collapse_clip(&routines).expect("HumeM dead routine");
+        let corpse_id = actor_state::corpse_pose_id();
+        let is = |actor: &FfxiRenderActor, id: &DatId| {
+            actor.last_clip.is_some_and(|c| c.parameterized_match(id))
+        };
+
+        let mut actor = make_render_actor(&loaded, 0, Vec::new(), 1, 0.0, 1.0);
+        advance_actor_pose_standalone(&mut actor, 1.0, None);
+        actor.inputs.dead = true;
+
+        let mut collapse_frames_seen = 0;
+        for _ in 0..collapse_frames as usize {
+            advance_actor_pose_standalone(&mut actor, 1.0, None);
+            collapse_frames_seen += usize::from(is(&actor, &collapse_id));
+        }
+        assert_eq!(
+            collapse_frames_seen, collapse_frames as usize,
+            "the collapse runs for the routine stage's whole duration"
+        );
+
+        for _ in 0..collapse_frames as usize {
+            advance_actor_pose_standalone(&mut actor, 1.0, None);
+        }
+        assert!(is(&actor, &corpse_id), "the collapse settles on `cor?`");
+
+        let held = actor.world_pose().to_vec();
+        for _ in 0..600 {
+            advance_actor_pose_standalone(&mut actor, 1.0, None);
+            assert!(!is(&actor, &collapse_id), "the collapse must not replay");
+        }
+        assert_eq!(
+            actor.world_pose(),
+            held,
+            "the corpse frame is held, not re-animated"
+        );
+    }
+
+    // A homepoint warp is a zone change, and zoning in while still KO'd is the one
+    // case where the client sees `dead` without having watched the death
+    // (death-ko-behavior.md, "0x00A LOGIN carries a DeadCounter").
+    #[test]
+    fn a_death_the_client_never_watched_holds_the_corpse_frame() {
+        let Some(loaded) = load_hume_m() else {
+            return;
+        };
+        let (collapse_id, _) =
+            death_collapse_clip(&loaded.all_routines()).expect("HumeM dead routine");
+
+        let mut actor = make_render_actor(&loaded, 0, Vec::new(), 1, 0.0, 1.0);
+        advance_actor_pose_standalone(&mut actor, 1.0, None);
+        reset_actor_pose_state(&mut actor, 1.0);
+        actor.inputs.dead = true;
+
+        for _ in 0..600 {
+            advance_actor_pose_standalone(&mut actor, 1.0, None);
+            assert!(
+                !actor
+                    .last_clip
+                    .is_some_and(|c| c.parameterized_match(&collapse_id)),
+                "a death the client never watched must not replay the collapse"
+            );
+        }
+        assert!(actor
+            .last_clip
+            .is_some_and(|c| c.parameterized_match(&actor_state::corpse_pose_id())));
     }
 
     #[test]

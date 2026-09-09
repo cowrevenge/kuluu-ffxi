@@ -10,10 +10,19 @@ record**; open work is in beads.
 ## Retail behavior
 
 - Death plays a **collapse motion once** and holds the final corpse frame — it is
-  not a looping idle. (Kuluu resolves the corpse pose to `cor?` via
-  `ffxi-actor` `idle_animation_id` under `dead && owner_is_none`, registered as a
-  looping idle; whether `cor?` is itself a collapse motion or a static pose needs
-  a live run to settle.)
+  not a looping idle. Settled from the installed DATs, no live run needed: the PC
+  skeletons' `dead` routine is two Motion stages, `ded?` (116 half-frames = 58
+  frames on Hume M; 68..156 half-frames across the seven PC skeletons) followed by
+  `cor?`, and `cor?` is a **static** pose whose first and last keyframes place
+  every bone in the same spot (worst measured gap over the seven skeletons:
+  2.4e-7 on a translation, 2.4e-7 on `|q1.q2| - 1`, with one bone's identity
+  rotation stored sign-flipped). So the collapse is the one-shot and the corpse
+  frame is what persists — `dat-routine-stages 7072 dead`, pinned by
+  `retail_dead_routine_is_a_one_shot_collapse_into_a_static_corpse_pose`.
+- **Inference, not observed:** a death the client never watched (zoning in still
+  KO'd, or a corpse already dead when it streams into view) starts on the held
+  corpse frame rather than replaying `ded?`, which would pop the corpse upright to
+  fall over again. Wants a retail capture of walking up to an already-dead player.
 - Retail shows the **homepoint menu**, not a visible numeric KO clock. A numeric
   countdown is therefore an Enhanced-flavored addition unless proven otherwise.
   **Settled 2026-09-08 (kuluu-8t5h): Enhanced**, on the strength of the dated

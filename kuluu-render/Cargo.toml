@@ -123,6 +123,9 @@ js-sys = "0.3"
 # the resource itself only needs `serde` derives; serialization is the
 # `kuluu::graphics_store` layer's concern.
 serde_json = { workspace = true }
+# The rabbit tester (tests/rabbit_tester.rs) hand-packs BATTLE2 bytes and runs them through
+# the real session decoder. No cycle: kuluu-session does not depend on kuluu-render.
+kuluu-session = { path = "../kuluu-session" }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 # The optional Neural Uplift FFI loads Windows DLLs.

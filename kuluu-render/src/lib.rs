@@ -409,6 +409,7 @@ impl<S: SceneSource + Resource + Component<Mutability = bevy::ecs::component::Mu
 
         app.init_resource::<combat_stance::EntityMotion>();
         app.init_resource::<combat_stance::EntityPrediction>();
+        app.insert_resource(combat_stance::MotionProbe::init());
         app.init_resource::<combat_stance::RestStance>();
         app.init_resource::<combat_stance::AnimationBlends>();
         app.init_resource::<combat_stance::WalkMode>();
@@ -447,9 +448,9 @@ impl<S: SceneSource + Resource + Component<Mutability = bevy::ecs::component::Mu
                 .before(ffxi_actor_render::tick_live_ffxi_actors),
         );
 
-        // After apply_invis_flag_system: it resets every non-WireEntity model root's Visibility
-        // each frame (invis-flag PCs), and the burrow-phase hold in tick_live_ffxi_actors must
-        // win that write for entities digging down.
+        // After apply_invis_flag_system: it resets every skinned model root's Visibility from
+        // the invis flag each frame, and tick_live_ffxi_actors must win that write for entities
+        // the server has hidden via status INVISIBLE (buried mobs).
         #[cfg(not(target_arch = "wasm32"))]
         app.add_systems(
             Update,

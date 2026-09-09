@@ -23,7 +23,9 @@ use kuluu_snapshot::EntityLook;
 
 use crate::dat_mzb::placement_bevy_transform;
 use crate::scene::TrackedEntities;
-use crate::scheduler_runtime::{ActionAssets, ActiveScheduler, SchedulerStageEvent, ROUTINE_FPS};
+use crate::scheduler_runtime::{
+    ActionAssets, ActiveScheduler, ActiveSchedulers, SchedulerStageEvent, ROUTINE_FPS,
+};
 use crate::snapshot::{effective_zone_file_id, SceneState};
 
 // The two door states LSB broadcasts (`ANIMATION_OPEN_DOOR` = 8 /
@@ -369,6 +371,7 @@ pub fn trigger_zone_doors(
     tracked: Res<TrackedEntities>,
     mut doors: ResMut<ZoneDoors>,
     mut q_npc: Query<&mut ZoneDoorNpc>,
+    mut q_scheds: Query<&mut ActiveSchedulers>,
     mut commands: Commands,
 ) {
     if doors.dirs.is_empty() {
@@ -431,13 +434,21 @@ pub fn trigger_zone_doors(
         let Some(active) = ActiveScheduler::from_main(&dir.routines, &routine) else {
             continue;
         };
-        commands
-            .entity(entity)
-            .try_insert(active)
-            .try_insert(ActionAssets {
-                seps: dir.seps.clone(),
-                ..Default::default()
-            });
+        // Insert-or-push like the other dispatchers: a door swing alongside another running
+        // routine on the same entity runs concurrently; the push path leaves the first writer's
+        // ActionAssets alone.
+        match q_scheds.get_mut(entity) {
+            Ok(mut scheds) => scheds.push(active),
+            Err(_) => {
+                commands
+                    .entity(entity)
+                    .insert(ActiveSchedulers::one(active))
+                    .try_insert(ActionAssets {
+                        seps: dir.seps.clone(),
+                        ..Default::default()
+                    });
+            }
+        };
         info!(
             "zone_doors: {label} runs {}",
             String::from_utf8_lossy(&routine)
@@ -593,6 +604,9 @@ mod tests {
                     subchunk,
                 }),
                 screen_color: None,
+                actor_fade: None,
+                idle_transition_time: None,
+                flinch_duration: None,
                 random_group: None,
                 local_dir: ffxi_dat::scheduler::NO_LOCAL_DIR,
             },

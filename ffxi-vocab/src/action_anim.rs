@@ -38,6 +38,23 @@ pub fn ability_file_id(ability_id: u32, animation: Option<u16>) -> Option<u32> {
     Some(ABILITY_FILE_TABLE_OFFSET + index as u32)
 }
 
+// research/xim MobAbilityTable.kt:58-72 getFileTableOffset - a mob skill's `animation` id (LSB
+// mob_skills.animation, carried per result in s2c 0x028 category 11) is an FTABLE index with a
+// range-dependent base. The DAT at that index holds the skill's `main` routine, whose 0x05 stage
+// names the caster's own `sp??` clip (F51, F58). Pet skills (category 13) share the table.
+pub fn mob_skill_file_id(animation: u16) -> u32 {
+    let a = animation as u32;
+    a + if a < 0x200 {
+        0x0F3C
+    } else if a < 0x600 {
+        0xC1EF
+    } else if a < 0x800 {
+        0xE739
+    } else {
+        0x14B07
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -85,5 +102,17 @@ mod tests {
     fn out_of_range_is_none() {
         assert_eq!(spell_file_id(0xF_FFFF, None), None);
         assert_eq!(ability_file_id(0xF_FFFF, None), None);
+    }
+
+    // Foot Kick is mob skill 259 with animation 3: the first range's base plus the index.
+    #[test]
+    fn mob_skill_file_id_uses_the_range_dependent_base() {
+        assert_eq!(mob_skill_file_id(3), 0x0F3C + 3);
+        assert_eq!(mob_skill_file_id(0x1FF), 0x0F3C + 0x1FF);
+        assert_eq!(mob_skill_file_id(0x200), 0xC1EF + 0x200);
+        assert_eq!(mob_skill_file_id(0x5FF), 0xC1EF + 0x5FF);
+        assert_eq!(mob_skill_file_id(0x600), 0xE739 + 0x600);
+        assert_eq!(mob_skill_file_id(0x7FF), 0xE739 + 0x7FF);
+        assert_eq!(mob_skill_file_id(0x800), 0x14B07 + 0x800);
     }
 }

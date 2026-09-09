@@ -1,6 +1,12 @@
 // vendor/server/src/map/enums/action/category.h:31 — `action.cmd_no`, 4 bits.
 pub const CATEGORY_BASIC_ATTACK: u8 = 1;
 
+// vendor/server/src/map/enums/action/info.h - the per-result `info` bits. Defeated means the
+// action killed the target (retail flips StatusServer on the same frame as the HP packet, F49);
+// CriticalHit is the crit flag that pairs with hitDistortion Heavy.
+pub const INFO_DEFEATED: u8 = 1;
+pub const INFO_CRITICAL_HIT: u8 = 2;
+
 // vendor/server/src/map/enums/action/resolution.h — `result.resolution`, 3 bits in
 // vendor/server/src/map/packets/s2c/0x028_battle2.cpp:71.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -70,20 +76,44 @@ impl AttackAnimation {
     }
 }
 
-// vendor/server/src/map/packets/s2c/0x028_battle2.cpp:71-73 — one result block's
-// resolution(3)/animation(12) pair. A body that carries no result block, or that ends mid-block,
-// has no pair at all: `resolution == 0` is `Hit`, so absence must not be spelled as zero.
+// vendor/server/src/map/packets/s2c/0x028_battle2.cpp:71-76 - one result block's bits:
+// resolution(3), kind(2), animation(12), info(5), hitDistortion(2), knockback(3). A body that
+// carries no result block, or that ends mid-block, has none of them at all: `resolution == 0`
+// is `Hit`, so absence must not be spelled as zero.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct MeleeResult {
     pub resolution: ActionResolution,
     pub animation: AttackAnimation,
+    /// vendor/server/src/map/enums/action/info.h - bit 1 `Defeated` (the action killed the
+    /// target), bit 2 `CriticalHit`. Retail flips StatusServer on the same frame as the HP
+    /// packet when Defeated is set (F49).
+    pub info: u8,
+    /// vendor/server/src/map/enums/action/hit_distortion.h - 0 None, 1 Light, 2 Medium,
+    /// 3 Heavy (the crit case; drives `ldam`, F54).
+    pub hit_distortion: u8,
+    /// vendor/server/src/map/enums/action/knockback.h - 0 none .. 7 level 7. Any non-zero
+    /// level plays `sway` alongside the damage reaction (F52).
+    pub knockback: u8,
+    /// The result's `kind` bits, uninterpreted.
+    pub kind: u8,
 }
 
 impl MeleeResult {
-    pub fn from_wire(resolution: u8, animation: u16) -> Option<Self> {
+    pub fn from_wire(
+        resolution: u8,
+        animation: u16,
+        info: u8,
+        hit_distortion: u8,
+        knockback: u8,
+        kind: u8,
+    ) -> Option<Self> {
         Some(Self {
             resolution: ActionResolution::from_wire(resolution)?,
             animation: AttackAnimation::from_wire(animation)?,
+            info,
+            hit_distortion,
+            knockback,
+            kind,
         })
     }
 
@@ -100,12 +130,26 @@ mod tests {
     fn wire_roundtrips_through_melee_result() {
         for resolution in 0..=4u8 {
             for animation in 0..=4u16 {
-                let r = MeleeResult::from_wire(resolution, animation).expect("in-range bits");
+                let r = MeleeResult::from_wire(resolution, animation, 0, 0, 0, 0)
+                    .expect("in-range bits");
                 assert_eq!(r.to_wire(), (resolution, animation));
             }
         }
-        assert_eq!(MeleeResult::from_wire(5, 0), None);
-        assert_eq!(MeleeResult::from_wire(0, 5), None);
+        assert_eq!(MeleeResult::from_wire(5, 0, 0, 0, 0, 0), None);
+        assert_eq!(MeleeResult::from_wire(0, 5, 0, 0, 0, 0), None);
+    }
+
+    // The outcome bits ride through unvalidated: the bit reader already bounds them to their
+    // field widths (info 5, hitDistortion 2, knockback 3, kind 2).
+    #[test]
+    fn outcome_bits_roundtrip() {
+        let r = MeleeResult::from_wire(0, 1, 2, 3, 2, 1).expect("in-range bits");
+        assert_eq!(r.resolution, ActionResolution::Hit);
+        assert_eq!(r.animation, AttackAnimation::LeftAttack);
+        assert_eq!(r.info, 2, "CriticalHit bit");
+        assert_eq!(r.hit_distortion, 3, "Heavy");
+        assert_eq!(r.knockback, 2, "level 2");
+        assert_eq!(r.kind, 1);
     }
 
     #[test]

@@ -4353,6 +4353,7 @@ dependencies = [
  "ffxi-vocab",
  "js-sys",
  "kuluu-dlss-nr",
+ "kuluu-session",
  "kuluu-snapshot",
  "serde",
  "serde_json",

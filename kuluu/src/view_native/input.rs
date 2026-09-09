@@ -122,8 +122,9 @@ const LOCKED_SIDE_STEP_DIVISOR_MOUNTED: f32 = 8.0;
 // StepControl's run speed is.
 const LOCKED_BACK_STEP_DIVISOR: f32 = 60.0;
 const LOCKED_BACK_STEP_DIVISOR_MOUNTED: f32 = 30.0;
-// BaseActor::GetWalkSpeed() is the run speed over three, which is also the cap
-// AdjustAnalogKeyLength puts on the walk-lock analog multiplier.
+// BaseActor::GetWalkSpeed() is the raw packet speed over three
+// (research/XIClient/src/XIClient/source/World/Actor/BaseActor.cpp,
+// BaseActor::GetWalkSpeed).
 const WALK_SPEED_DIVISOR: f32 = 3.0;
 
 // A stick pulled this far toward the camera cancels autorun, like a tapped S;
@@ -288,14 +289,22 @@ pub fn move_vec_dir_id(forward: f32, strafe: f32) -> MoveDirId {
 /// `walk_scale` is the walk-lock analog multiplier, which retail normalizes
 /// away for the side and backward buckets: those take absolute lengths (a
 /// sixteenth of a yalm per tick, an eighth mounted, and the walk speed
-/// backwards, doubled mounted). Only the forward bucket reads the mounted and
-/// clamped run speed - the backward one is `GetWalkSpeed()`, a third of the raw
-/// packet speed with neither the mount doubling nor the 30 y/s cap
+/// backwards, doubled mounted). The forward bucket keeps the mounted and
+/// clamped run speed the vector arrived with - the backward one is
+/// `GetWalkSpeed()`, a third of the raw packet speed with neither the mount
+/// doubling nor the 30 y/s cap
 /// (research/XIClient/src/XIClient/source/World/Actor/ControllableActor.cpp,
-/// ControllableActor::StepControl gate on IsParallelMove,
+/// ControllableActor::HandleThirdPersonControl gate on IsParallelMove,
 /// ControllableActor::ChangeVectorLengthByDirection;
 /// research/XIClient/src/XIClient/source/World/Actor/BaseActor.cpp,
 /// BaseActor::GetWalkSpeed).
+///
+/// Forward is an inference, not a literal read: the decompiled forward case
+/// normalizes the vector and re-multiplies by its now-unit magnitude, which
+/// would make every locked-on forward step a whole yalm per tick (60 y/s). It
+/// is read as the length-preserving save/normalize/restore the same file spells
+/// out explicitly a few blocks up (ControllableActor.cpp:275-286), which is
+/// also what retail plays: locked-on forward is the ordinary run speed.
 pub fn move_step_speed_yps(
     locked_dir: Option<MoveDirId>,
     packet_speed: u8,
@@ -328,6 +337,15 @@ pub fn move_step_speed_yps(
                 / divisor
         }
     }
+}
+
+/// Rate the walker paces its vertical merge with, in yalms/second. It is
+/// normally the run/walk speed, but the locked-on side and backward steps are
+/// absolute lengths that can exceed it (walk-locked strafing is 3.75 y/s of
+/// feet against a 1.25 y/s merge), and a merge slower than the feet travel
+/// leaves them behind the floor on a staircase.
+pub fn ground_merge_pace_yps(move_yps: f32, step_yps: f32) -> f32 {
+    move_yps.max(step_yps)
 }
 
 /// World-space run heading for a camera-relative move: `forward` along the
@@ -1279,13 +1297,15 @@ pub fn dispatch_movement_system(
         chase.yaw = kuluu_render::yaw_for_heading(h);
     }
 
-    // Retail buckets the movement vector against the actor's resolved rotation,
-    // which lock-on has aimed at the target: `heading` is `locked_heading`, and
-    // `forward`/`strafe` are the movement vector in that aimed frame, so this is
-    // target-relative. IsParallelMove implies a live target, so a lock on an
-    // entity the snapshot no longer carries (no aim to bucket against) scales
-    // nothing.
-    let locked_dir = locked_heading.map(|_| move_vec_dir_id(forward as f32, strafe as f32));
+    // Retail buckets the movement vector against the actor's own resolved
+    // rotation - a point one unit ahead of itself, never the target's position
+    // (research/XIClient/src/XIClient/source/World/Actor/ControllableActor.cpp,
+    // ControllableActor::HandleThirdPersonControl) - behind the IsParallelMove
+    // flag alone. `forward`/`strafe` are that vector in the actor frame, which
+    // lock-on has aimed at the target, so the flag that picks the strafe pose
+    // above picks the scaling here; a target the snapshot has dropped leaves
+    // the last aimed heading, still the frame we move along.
+    let locked_dir = locked.then(|| move_vec_dir_id(forward as f32, strafe as f32));
     // Holding both axes adds two body-aligned components below, so each takes
     // 1/sqrt(2) of the direction's speed to leave the resultant at that speed.
     let diagonal_scale = if forward != 0 && strafe != 0 {
@@ -1293,9 +1313,9 @@ pub fn dispatch_movement_system(
     } else {
         1.0
     };
-    let step = move_step_speed_yps(locked_dir, self_pos.speed, walk_mode.scale(), mounted)
-        * time.delta_secs()
-        * diagonal_scale;
+    let step_yps = move_step_speed_yps(locked_dir, self_pos.speed, walk_mode.scale(), mounted);
+    let step = step_yps * time.delta_secs() * diagonal_scale;
+    let ground_pace_yps = ground_merge_pace_yps(speed_yps, step_yps);
     let mut x = basis_pos.x;
     let mut y = basis_pos.y;
 
@@ -1337,7 +1357,7 @@ pub fn dispatch_movement_system(
         basis_pos.z,
         wall_dx,
         wall_dy,
-        speed_yps,
+        ground_pace_yps,
         time.delta_secs(),
         env.hud_panels.noclip,
         geometry_ready,
@@ -1354,7 +1374,7 @@ pub fn dispatch_movement_system(
         final_y,
         final_z,
         heading,
-        speed_yps,
+        ground_pace_yps,
         &res,
     );
 
@@ -2534,6 +2554,26 @@ mod tests {
     }
 
     #[test]
+    fn locked_steps_pace_the_vertical_merge_when_they_outrun_the_walk() {
+        let walk = kuluu_render::combat_stance::WalkMode::WALK_SCALE;
+        let merge = BASE_RUN_YPS * walk;
+        let side = move_step_speed_yps(Some(MoveDirId::Side), BASE_SPEED, walk, false);
+        assert!(
+            side > merge,
+            "the absolute side step outruns the walk-locked merge: {side} vs {merge}"
+        );
+        assert_eq!(ground_merge_pace_yps(merge, side), side);
+        // A free run never loses its own pace to a slower step.
+        assert_eq!(
+            ground_merge_pace_yps(
+                BASE_RUN_YPS,
+                move_step_speed_yps(None, BASE_SPEED, 1.0, false)
+            ),
+            BASE_RUN_YPS
+        );
+    }
+
+    #[test]
     fn locked_on_directional_speeds_match_retail() {
         assert_eq!(
             move_step_speed_yps(Some(MoveDirId::Forward), BASE_SPEED, 1.0, false),
@@ -2605,6 +2645,8 @@ mod tests {
     /// a locked-on side step is a flat sixteenth.
     const RUN_STEP: f32 = 5.0 / 60.0;
     const LOCKED_SIDE_STEP: f32 = 1.0 / 16.0;
+    /// The locked-on backpedal is the walk speed, a third of the run.
+    const LOCKED_BACK_STEP: f32 = (5.0 / 3.0) / 60.0;
 
     /// Far enough that `lock_forward_allowance` never clamps the step under test.
     const DRIVE_TARGET_DIST: f32 = 30.0;
@@ -2668,9 +2710,6 @@ mod tests {
 
     #[test]
     fn directional_scaling_applies_only_while_locked_on() {
-        // A locked-on backpedal is the walk speed, a third of the run.
-        const LOCKED_BACK_STEP: f32 = (5.0 / 3.0) / 60.0;
-
         for keys in [
             vec![KeyCode::KeyW],
             vec![KeyCode::KeyS],
@@ -2722,10 +2761,11 @@ mod tests {
     }
 
     #[test]
-    fn directional_scaling_needs_a_target_in_the_snapshot() {
-        // Retail's IsParallelMove implies a live target; a lock on an entity the
-        // snapshot has dropped leaves no aim to bucket against, so movement
-        // stays at the free-run speed instead of scaling off a stale heading.
+    fn directional_scaling_follows_the_lock_flag_not_the_snapshot_target() {
+        // Retail gates the bucket on the IsParallelMove flag and measures the
+        // move vector against the actor's own resolved rotation, never the
+        // target's position, so a lock on an entity the snapshot has dropped
+        // still backpedals at the walk speed off the last aimed heading.
         let (mut app, _rx) = movement_app();
         app.insert_resource(slab_collision(0.0));
         app.insert_resource(Time::<Fixed>::from_hz(RETAIL_MOVE_TICKS_PER_SEC as f64));
@@ -2755,8 +2795,8 @@ mod tests {
         let after = app.world().resource::<LocalPlayerPrediction>().pos;
         let got = Vec2::new(after.x - before.x, after.y - before.y).length();
         assert!(
-            close(got, RUN_STEP),
-            "a lock on a missing entity must not slow the step, got {got}"
+            close(got, LOCKED_BACK_STEP),
+            "a lock on a missing entity still scales the step, got {got}"
         );
     }
 

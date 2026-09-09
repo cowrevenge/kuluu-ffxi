@@ -9,7 +9,7 @@ use bevy::asset::RenderAssetUsages;
 use bevy::image::ImageSampler;
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
-use ffxi_dat::ui_element::{ui_sprite, UiSprite};
+use ffxi_dat::ui_element::{find_ui_element_group, ui_component_sprite, ui_sprite, UiSprite};
 use ffxi_dat::DatRoot;
 
 // The four "static resource" menu UI DATs. XIM hardcodes their ROM paths
@@ -43,9 +43,60 @@ pub struct UiElementAtlas {
     loaded: bool,
     unavailable: bool,
     sprites: HashMap<(String, usize), Option<Handle<Image>>>,
+    elements: HashMap<(String, usize), Option<Vec<UiElementQuad>>>,
+}
+
+#[derive(Clone)]
+pub struct UiElementQuad {
+    pub image: Handle<Image>,
+    pub rect: Rect,
+    pub color: Color,
 }
 
 impl UiElementAtlas {
+    pub fn ensure_element(
+        &mut self,
+        group: &str,
+        index: usize,
+        dat_root: &UiElementDatRoot,
+        images: &mut Assets<Image>,
+    ) -> Option<Vec<UiElementQuad>> {
+        let key = (group.to_string(), index);
+        if let Some(slot) = self.elements.get(&key) {
+            return slot.clone();
+        }
+        let quads = self.ensure_dats(dat_root).iter().find_map(|bytes| {
+            let resource = find_ui_element_group(bytes, group)?;
+            resource
+                .elements
+                .get(index)?
+                .components
+                .iter()
+                .enumerate()
+                .map(|(component_index, component)| {
+                    let sprite = ui_component_sprite(bytes, group, index, component_index)?;
+                    let points = component
+                        .positions
+                        .map(|(x, y)| Vec2::new(f32::from(x), f32::from(y)));
+                    Some(UiElementQuad {
+                        image: upload_sprite(sprite, images),
+                        rect: Rect::from_corners(
+                            points
+                                .into_iter()
+                                .fold(Vec2::splat(f32::INFINITY), Vec2::min),
+                            points
+                                .into_iter()
+                                .fold(Vec2::splat(f32::NEG_INFINITY), Vec2::max),
+                        ),
+                        color: crate::nameplate_color::quad_color(component.colors[0]),
+                    })
+                })
+                .collect::<Option<Vec<_>>>()
+        });
+        self.elements.insert(key, quads.clone());
+        quads
+    }
+
     pub fn ensure(
         &mut self,
         group: &str,

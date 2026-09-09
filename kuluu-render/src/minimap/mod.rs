@@ -814,9 +814,6 @@ mod tests {
         );
     }
 
-    /// Retail has no persistent radar, so the shipped default keeps the widget
-    /// closed and the entity categories off; flipping the setting opens both,
-    /// and an unrelated graphics edit must never undo a manual `/minimap`.
     #[test]
     fn radar_setting_owns_the_defaults_but_not_the_manual_toggle() {
         let mut world = World::new();

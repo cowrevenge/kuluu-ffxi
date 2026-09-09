@@ -156,11 +156,7 @@ impl DynamicLights {
     }
 }
 
-/// Retail summons a static map from the menu: no persistent corner widget and
-/// no live NPC/mob/PC radar. `Vanilla` therefore keeps the minimap panel closed
-/// and plots only your own position plus party (an unverified inference, see
-/// kuluu-7cqw); `Enhanced` opts into the always-on widget with every dot
-/// category. `/minimap show|hide|toggle` stays the manual override in both.
+/// Controls terrain map surfaces; the vanilla compass radar is independent.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum MinimapRadar {
     #[default]
@@ -176,12 +172,10 @@ impl MinimapRadar {
         }
     }
 
-    /// Whether the minimap widget starts open.
     pub const fn panel_visible(self) -> bool {
         matches!(self, MinimapRadar::Enhanced)
     }
 
-    /// Whether the map surfaces plot live dots beyond self and party.
     pub const fn entity_radar(self) -> bool {
         matches!(self, MinimapRadar::Enhanced)
     }
@@ -2298,9 +2292,6 @@ mod tests {
         }
     }
 
-    /// Retail summons a static map with no live radar, so no preset may ship
-    /// the minimap widget open, and picking a preset must not revoke the
-    /// player's opt-in (kuluu-7cqw).
     #[test]
     fn presets_pin_minimap_radar_vanilla_and_preset_cycle_preserves_it() {
         for &preset in PRESET_CYCLE {

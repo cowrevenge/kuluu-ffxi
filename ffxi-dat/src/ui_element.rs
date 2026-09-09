@@ -228,9 +228,18 @@ pub fn crop_sprite(
 }
 
 pub fn ui_sprite(dat_bytes: &[u8], group_name: &str, index: usize) -> Option<UiSprite> {
+    ui_component_sprite(dat_bytes, group_name, index, 0)
+}
+
+pub fn ui_component_sprite(
+    dat_bytes: &[u8],
+    group_name: &str,
+    index: usize,
+    component_index: usize,
+) -> Option<UiSprite> {
     let group = find_ui_element_group(dat_bytes, group_name)?;
     let element = group.elements.get(index)?;
-    let component = element.components.first()?;
+    let component = element.components.get(component_index)?;
     let tex = find_texture(dat_bytes, &component.texture_ref)?;
     crop_sprite(
         &tex,

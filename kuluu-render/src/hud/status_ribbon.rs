@@ -127,7 +127,7 @@ const MAX_VISIBLE: usize = 32;
 const ICON_SIZE_PX: f32 = 20.0;
 
 /// Retail packs the ribbon tight, so this is the whole gap between chips; only
-/// the enhanced countdown ([`timers`]) widens the pitch past it.
+/// the enhanced countdown (the `timers` module) widens the pitch past it.
 const MIN_ICON_GAP_PX: f32 = 2.0;
 
 /// Clearance between two wrapped rows of icons, on top of whatever line the
@@ -482,6 +482,12 @@ pub mod timers {
             );
         }
 
+        // `update_status_timers` reads the clock again after this test does, so
+        // the expiry sits mid-bucket: every remaining time in 2h00..2h01 renders
+        // identically, leaving 30s of slack for wall clock passing in between.
+        const MID_BUCKET_REMAINING_SECS: u32 = 2 * 3600 + 30;
+        const MID_BUCKET_LABEL: &str = "2h00";
+
         #[test]
         fn enhanced_build_draws_a_countdown_under_each_chip() {
             let clock = crate::vana_time::VanaClock::anchored_at_hour(12.0);
@@ -496,12 +502,15 @@ pub mod timers {
 
             let mut state = app.world_mut().resource_mut::<SceneState>();
             state.snapshot.status_icons = vec![10, 20];
-            state.snapshot.status_icon_expiries = vec![now + 90, 0];
+            state.snapshot.status_icon_expiries = vec![now + MID_BUCKET_REMAINING_SECS, 0];
             app.world_mut()
                 .run_system_once(update_status_timers)
                 .unwrap();
 
-            assert_eq!(chip_timer_texts(app.world_mut())[..2], ["1:30", ""]);
+            assert_eq!(
+                chip_timer_texts(app.world_mut())[..2],
+                [MID_BUCKET_LABEL, ""]
+            );
         }
 
         fn chip_timer_texts(world: &mut World) -> Vec<String> {

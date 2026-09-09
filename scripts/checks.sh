@@ -6,9 +6,11 @@
 # cargo flags themselves, so the two can't drift: a green pre-push run uses
 # the *exact* fmt/clippy invocation CI will, and vice versa.
 #
-# Usage: scripts/checks.sh <stage>...   stage ∈ {harness, fmt, clippy, test, build, wasm, doc}
+# Usage: scripts/checks.sh <stage>...
+#   stage ∈ {harness, fmt, clippy, style, test, enhanced, build, wasm, doc}
 #   scripts/checks.sh harness fmt clippy      # pre-push default
 #   scripts/checks.sh harness fmt clippy test # the CI gate (ci.yml runs these)
+#   scripts/checks.sh enhanced                # the opt-in feature family (CI)
 #   scripts/checks.sh build                   # local-only: see run_build below
 #
 # Each stage is a separate argument so callers (notably CI) can run them as
@@ -244,6 +246,26 @@ run_test() {
   cargo test --workspace --locked "${FEATURES[@]}"
 }
 
+run_enhanced() {
+  # The Enhanced (non-retail) family is opt-in, so FEATURES above — the vanilla
+  # gate every other stage runs — never even type-checks it, and code under
+  # `#[cfg(feature = "enhanced-…")]` (with its tests) rots unseen. This stage is
+  # that family's compile+test leg. The list is read out of kuluu's manifest so
+  # a newly declared feature is covered without editing a second list here;
+  # enhanced-neural-uplift is the one exclusion, because it implies dlss and so
+  # needs the SDK that KULUU_CHECK_DLSS gates.
+  local enhanced
+  enhanced=$(grep -oE '^enhanced-[a-z-]+' kuluu/Cargo.toml \
+    | grep -v '^enhanced-neural-uplift$' | paste -sd, - || true)
+  if [[ -z "$enhanced" ]]; then
+    echo "checks: enhanced — no enhanced-* features found in kuluu/Cargo.toml" >&2
+    return 1
+  fi
+  local features=(--no-default-features --features "native-window,$enhanced")
+  cargo clippy --workspace --all-targets --locked "${features[@]}" -- -D warnings
+  cargo test --workspace --locked "${features[@]}"
+}
+
 run_build() {
   # Local-only convenience: a dev-profile, non-test compile+link of the whole
   # workspace. CI does NOT run this — `cargo test` already compiles and links
@@ -279,7 +301,7 @@ run_doc() {
 }
 
 if [[ $# -eq 0 ]]; then
-  echo "checks: no stage given (expected one or more of: fmt clippy style harness test build doc)" >&2
+  echo "checks: no stage given (expected one or more of: fmt clippy style harness test enhanced build wasm doc)" >&2
   exit 2
 fi
 
@@ -290,6 +312,7 @@ for stage in "$@"; do
     style)  echo "checks: style";  run_style ;;
     harness) echo "checks: harness"; run_harness ;;
     test)   echo "checks: test";   run_test ;;
+    enhanced) echo "checks: enhanced"; run_enhanced ;;
     build)  echo "checks: build";  run_build ;;
     wasm)   echo "checks: wasm";   run_wasm ;;
     doc)    echo "checks: doc";    run_doc ;;

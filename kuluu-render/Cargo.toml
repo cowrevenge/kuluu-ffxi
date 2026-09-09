@@ -38,6 +38,13 @@ enhanced-mob-hp-under = []
 # `job_display` can never light it, and the Debug -> Retail+ row does not exist.
 enhanced-job-display = []
 
+# Enhanced (non-retail) on-screen shutdown/logout countdown banner: the centered
+# "Logout in Xs" / "Shutdown in Xs" panel driven by the 0x053 ticks. Retail's
+# client shows only the system chat lines for those same ticks; without this
+# feature no banner node spawns and no countdown system runs (the chat lines
+# are unaffected - they come from kuluu-session).
+enhanced-shutdown-counter = []
+
 # DEV-ONLY: renders the "Debug" entry (and its Retail+ section) on page 2 of
 # the Command menu. Shipped release builds never enable this, so retail parity
 # holds by construction; dev/test builds pass `--features debug-menu` explicitly.

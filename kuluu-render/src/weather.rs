@@ -49,12 +49,15 @@ pub struct ZoneWeather {
     // re-sampling (was the skybox/lighting drift).
     pub current: Option<WeatherRecord>,
 
-    /// The record retail draws the *actor's* distance fog from — its own area's,
-    /// not the zone's (SkeletalMeshActor.cpp:2749
-    /// `FindAreaByFourCCAndGetFog(..., VirtActor88())`). Everything else on this
-    /// resource stays zone-wide: the sky dome, the celestial arc and the far
-    /// color are set from the zone's weather condition (XiArea.cpp:126-136
-    /// `ApplyWeatherCondition` -> `SetFarColor`), not from the block underfoot.
+    /// The record retail draws the environment *under the player* from — its own
+    /// area's, not the zone's. Distance fog (SkeletalMeshActor.cpp:2749
+    /// `FindAreaByFourCCAndGetFog(..., VirtActor88())`) and terrain lighting
+    /// (ZoneRenderer.cpp:1133-1149, where `positionedBlock->Area` supplies
+    /// `GetFog`, `GetWeatherDiffuseLights` and `GetAmbient(_, 0)` for every block
+    /// it draws) both come off the area. The sky dome, the celestial arc and the
+    /// far color stay zone-wide: those are set from the zone's weather condition
+    /// (XiArea.cpp:126-136 `ApplyWeatherCondition` -> `SetFarColor`), not from
+    /// the block underfoot.
     pub area_current: Option<WeatherRecord>,
 }
 
@@ -275,7 +278,8 @@ pub const ZONE_WIDE_AREA: AreaResourceId = 0;
 
 /// Tracks the area the player is standing in, the way retail tracks it from the
 /// ground query each frame (CollidableActor.cpp:218-228). Consumed by the
-/// distance fog; see [`ZoneWeather::area_current`].
+/// distance fog, the terrain ambient and the terrain diffuse lights; see
+/// [`ZoneWeather::area_current`].
 #[cfg(not(target_arch = "wasm32"))]
 pub fn resolve_zone_area(
     mut zone_weather: ResMut<ZoneWeather>,
@@ -527,9 +531,11 @@ pub fn apply_zone_weather(
         return;
     };
     // SkeletalMeshActor.cpp:2749 — the fog an actor is drawn through comes from
-    // the actor's own area. Falls back to `rec` when the player is in the
-    // zone-wide environment, so a zone with no areas is byte-identical.
-    let fog_rec = zone_weather.area_current.unwrap_or(rec);
+    // the actor's own area; ZoneRenderer.cpp:1133-1149 reads the fog, the two
+    // weather diffuse lights and the ambient of every block off that block's own
+    // area too. Falls back to `rec` when the player is in the zone-wide
+    // environment, so a zone with no areas is byte-identical.
+    let area_rec = zone_weather.area_current.unwrap_or(rec);
 
     if !panels.fog_off {
         if let Some((mut fog, mut fog_tf, vis_slot)) = fog_q.iter_mut().next() {
@@ -546,7 +552,7 @@ pub fn apply_zone_weather(
                 fog_tf.translation.x = c.x;
                 fog_tf.translation.z = c.z;
             }
-            let [r, g, b, _a] = fog_rec.fog_landscape;
+            let [r, g, b, _a] = area_rec.fog_landscape;
             fog.fog_color = Color::srgb(r, g, b);
             // Tint the in-scattered light with the zone fog palette so the volume
             // reads as the zone's atmosphere rather than a neutral gray wall.
@@ -562,7 +568,7 @@ pub fn apply_zone_weather(
             // renders black instead of fog-colored. Cap density so the light term
             // survives (R ~= 1470 for the 2000x800x2000 volume) and let the haze
             // scale gently with the zone's DAT fog range.
-            let dist = fog_rec.max_fog_dist_landscape.max(50.0);
+            let dist = area_rec.max_fog_dist_landscape.max(50.0);
             fog.density_factor = (0.9 / dist).clamp(0.0008, 0.0018);
             // Recover the bounding-radius attenuation (~e^-1.3 at ground density)
             // so the haze reads as lit fog, not soot.
@@ -574,22 +580,27 @@ pub fn apply_zone_weather(
     // authoritative base; the active weather modifier tints/scales it rather than
     // replacing it (apply_weather_to_ambient_and_fog already ran on the now-overridden
     // atmosphere seed, so this is the final ambient for the frame).
-    let [r, g, b, _a] = rec.ambient_landscape;
+    // XiArea.cpp:391-408 `GetAmbient(_, 0)` answers the area's own env2 palette[2]
+    // and XiArea.cpp:798-801 takes the diffuse scale from the area's env2.field_18
+    // (record offsets 52 and 68 in ffxi_dat::weather), so both read the block
+    // underfoot rather than the zone.
+    let [r, g, b, _a] = area_rec.ambient_landscape;
     let tint = active.modifier.ambient_tint.to_linear();
     ambient.color = Color::srgb(
         (r * tint.red).max(0.05),
         (g * tint.green).max(0.05),
         (b * tint.blue).max(0.05),
     );
-    ambient.brightness =
-        500.0 * rec.diffuse_mul_landscape.clamp(0.4, 1.5) * active.modifier.ambient_brightness_mul;
+    ambient.brightness = 500.0
+        * area_rec.diffuse_mul_landscape.clamp(0.4, 1.5)
+        * active.modifier.ambient_brightness_mul;
 
     // The ClearColor backdrop is written above by the unconditional
     // zone_clear_color pass (kuluu-f1hk) and stays on the *zone* record: retail's
     // far color is set by the weather condition (XiArea.cpp:126-136), not by the
     // block the actor stands on, so an interior's black fog must not paint the
     // horizon the player can still see out of the doorway.
-    let [fr, fg, fb, _] = fog_rec.fog_landscape;
+    let [fr, fg, fb, _] = area_rec.fog_landscape;
     let fog_color = Color::srgb(fr, fg, fb);
 
     // DistanceFog is the authoritative DAT distance fog in BOTH modes. The
@@ -606,7 +617,7 @@ pub fn apply_zone_weather(
                 (fg * 1.06).min(1.0),
                 (fb * 1.02).min(1.0),
             );
-            let visibility = fog_visibility_dist(&fog_rec);
+            let visibility = fog_visibility_dist(&area_rec);
             let want = DistanceFog {
                 color: fog_color,
                 directional_light_color: inscatter,
@@ -830,6 +841,72 @@ mod tests {
             zone_weather.ambient_cues()[0].se_id,
             BED_SE,
             "the area container ships no beds; falling through to it silences the zone"
+        );
+    }
+
+    // ZoneRenderer.cpp:1133-1149 — the ambient a block is drawn with is
+    // `positionedBlock->Area->GetAmbient(_, 0)` (XiArea.cpp:391-408, env2
+    // ColorPalette[2]), and the diffuse scale it is lit against is that area's
+    // env2.field_18 (XiArea.cpp:798-801). Walking into an area must therefore move
+    // the ambient off the zone's values, not just the fog.
+    #[test]
+    fn ambient_follows_the_area_the_player_stands_in() {
+        const ZONE_AMBIENT: [f32; 4] = [0.80, 0.78, 0.72, 1.0];
+        const AREA_AMBIENT: [f32; 4] = [0.14, 0.11, 0.19, 1.0];
+        const ZONE_DIFFUSE_MUL: f32 = 1.5;
+        const AREA_DIFFUSE_MUL: f32 = 0.4;
+
+        let mut app = App::new();
+        app.init_resource::<ZoneWeather>()
+            .init_resource::<crate::weather_fx::ActiveWeatherModifier>()
+            .init_resource::<GlobalAmbientLight>()
+            .init_resource::<crate::vana_time::VanaClock>()
+            .init_resource::<GraphicsSettings>()
+            .init_resource::<crate::hud::HudPanels>()
+            .init_resource::<ClearColor>()
+            .init_resource::<DefaultClearColor>()
+            .add_systems(Update, apply_zone_weather);
+
+        let zone_rec = WeatherRecord {
+            ambient_landscape: ZONE_AMBIENT,
+            diffuse_mul_landscape: ZONE_DIFFUSE_MUL,
+            ..Default::default()
+        };
+        app.world_mut().resource_mut::<ZoneWeather>().current = Some(zone_rec);
+        app.update();
+
+        let zone_brightness = app.world().resource::<GlobalAmbientLight>().brightness;
+        assert_color_close(
+            app.world().resource::<GlobalAmbientLight>().color,
+            Color::srgb(ZONE_AMBIENT[0], ZONE_AMBIENT[1], ZONE_AMBIENT[2]),
+        );
+
+        let area_rec = WeatherRecord {
+            ambient_landscape: AREA_AMBIENT,
+            diffuse_mul_landscape: AREA_DIFFUSE_MUL,
+            ..zone_rec
+        };
+        app.world_mut().resource_mut::<ZoneWeather>().area_current = Some(area_rec);
+        app.update();
+
+        assert_color_close(
+            app.world().resource::<GlobalAmbientLight>().color,
+            Color::srgb(AREA_AMBIENT[0], AREA_AMBIENT[1], AREA_AMBIENT[2]),
+        );
+        let area_brightness = app.world().resource::<GlobalAmbientLight>().brightness;
+        assert!(
+            area_brightness < zone_brightness,
+            "area diffuse multiplier {AREA_DIFFUSE_MUL} must dim the ambient below the \
+             zone's {ZONE_DIFFUSE_MUL} (got {area_brightness} vs {zone_brightness})"
+        );
+
+        // Zone-wide environment again: the ambient snaps back to the zone record
+        // rather than sticking on the area it just left.
+        app.world_mut().resource_mut::<ZoneWeather>().area_current = None;
+        app.update();
+        assert_color_close(
+            app.world().resource::<GlobalAmbientLight>().color,
+            Color::srgb(ZONE_AMBIENT[0], ZONE_AMBIENT[1], ZONE_AMBIENT[2]),
         );
     }
 

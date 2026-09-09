@@ -348,6 +348,73 @@ fn diffuse_to_light(rgb: [f32; 3]) -> (Vec3, f32) {
     }
 }
 
+/// The terrain(landscape) half of [`crate::weather::ZoneDirectionalLighting`]: retail's two
+/// weather diffuse lights plus the ambient a block is drawn with.
+#[derive(Clone, Copy)]
+struct LandscapeLighting {
+    sun_dir: Vec3,
+    sun_color: Vec3,
+    sun_k: f32,
+    moon_dir: Vec3,
+    moon_color: Vec3,
+    moon_k: f32,
+    ambient: Vec3,
+}
+
+// ZoneRenderer.cpp:1133-1149 draws each block through `positionedBlock->Area`:
+// `GetWeatherDiffuseLights` (XiArea.cpp:232-279 - env2 ColorPalette[0]/[1], the terrain
+// block's sun/moon diffuse) and `GetAmbient(_, 0)` (XiArea.cpp:391-408 - env2
+// ColorPalette[2]) are both read off that area, so the record fed here is the area's and
+// not the zone's. Its OWN indoor flag decides how the moon slot is read: indoors the arc
+// is replaced by one static diffuse and the moon bytes are a signed direction rather than
+// a color (research/xim EnvironmentSection.kt:139-149).
+fn landscape_lighting(
+    rec: &ffxi_dat::weather::WeatherRecord,
+    sun_dir: Vec3,
+    moon_dir: Vec3,
+    sun_up: bool,
+    moon_up: bool,
+) -> LandscapeLighting {
+    let ambient = Vec3::new(
+        rec.ambient_landscape[0],
+        rec.ambient_landscape[1],
+        rec.ambient_landscape[2],
+    );
+    let (s_hue, s_k) = diffuse_to_light([
+        rec.sunlight_diffuse_landscape[0],
+        rec.sunlight_diffuse_landscape[1],
+        rec.sunlight_diffuse_landscape[2],
+    ]);
+
+    if rec.indoors {
+        let land_dir = ffxi_dir_to_bevy(rec.indoor_light_dir_landscape);
+        return LandscapeLighting {
+            sun_dir: land_dir,
+            sun_color: s_hue,
+            sun_k: if land_dir == Vec3::ZERO { 0.0 } else { s_k },
+            moon_dir,
+            moon_color: Vec3::ZERO,
+            moon_k: 0.0,
+            ambient,
+        };
+    }
+
+    let (m_hue, m_k) = diffuse_to_light([
+        rec.moonlight_diffuse_landscape[0],
+        rec.moonlight_diffuse_landscape[1],
+        rec.moonlight_diffuse_landscape[2],
+    ]);
+    LandscapeLighting {
+        sun_dir,
+        sun_color: s_hue,
+        sun_k: if sun_up { s_k } else { 0.0 },
+        moon_dir,
+        moon_color: m_hue,
+        moon_k: if moon_up { m_k } else { 0.0 },
+        ambient,
+    }
+}
+
 // research/xim EnvironmentSection.kt:206-225 modelLightMix: models swap moon->sun
 // at 06:00 (minute 360) and sun->moon at 18:00 (minute 1080), with a short blend
 // window on either side; t=1 means pure sun, t=0 means pure moon.
@@ -681,10 +748,26 @@ pub fn sun_moon_system(
     // zone-material lighting consumers. The model light is a single moon<->sun
     // blend (research/xim EnvironmentSection.kt:206-225); landscape feeds both
     // sun(dir0) and moon(dir1) slots from the terrain block.
-    if let Some(rec) = dat.filter(|r| r.indoors) {
-        // research/xim EnvironmentSection.kt:139-149: both the model and terrain
-        // blocks collapse to one static indoor diffuse each — direction from the
-        // block's moon-color bytes, color from its sun diffuse, no time gating.
+    //
+    // The terrain half reads the record of the AREA the player stands in, the way
+    // ZoneRenderer.cpp:1133-1149 lights each block from `positionedBlock->Area`; one
+    // global light set here means the player's area stands in for the blocks around
+    // them, the same approximation the distance fog already makes. The entity half
+    // stays zone-wide: retail resolves it per actor from that actor's own area
+    // (CMoElem.cpp:513 `FindAreaByFourCCAndGetWeatherDiffuseLights`), which one shared
+    // model light cannot express.
+    let sun_up = sky.sun_altitude > 0.0;
+    let moon_up = sky.moon_altitude > 0.0;
+    let land = render_cfg
+        .zone_weather
+        .area_current
+        .or(dat)
+        .map(|rec| landscape_lighting(&rec, sun_dir, moon_dir, sun_up, moon_up));
+
+    if let Some((rec, land)) = dat.zip(land).filter(|(r, _)| r.indoors) {
+        // research/xim EnvironmentSection.kt:139-149: the model block collapses to one
+        // static indoor diffuse — direction from the block's moon-color bytes, color
+        // from its sun diffuse, no time gating.
         let model_dir = ffxi_dir_to_bevy(rec.indoor_light_dir_entity);
         let model_rgb = Vec3::new(
             rec.sunlight_diffuse_entity[0],
@@ -698,13 +781,6 @@ pub fn sun_moon_system(
         } else {
             Vec3::ZERO
         };
-
-        let (s_hue, s_k) = diffuse_to_light([
-            rec.sunlight_diffuse_landscape[0],
-            rec.sunlight_diffuse_landscape[1],
-            rec.sunlight_diffuse_landscape[2],
-        ]);
-        let land_dir = ffxi_dir_to_bevy(rec.indoor_light_dir_landscape);
 
         *render_cfg.zone_lighting = crate::weather::ZoneDirectionalLighting {
             valid: true,
@@ -721,22 +797,15 @@ pub fn sun_moon_system(
                 rec.ambient_entity[1],
                 rec.ambient_entity[2],
             ),
-            sun_dir: land_dir,
-            sun_color: s_hue,
-            sun_k: if land_dir == Vec3::ZERO { 0.0 } else { s_k },
-            moon_dir,
-            moon_color: Vec3::ZERO,
-            moon_k: 0.0,
-            ambient_landscape: Vec3::new(
-                rec.ambient_landscape[0],
-                rec.ambient_landscape[1],
-                rec.ambient_landscape[2],
-            ),
+            sun_dir: land.sun_dir,
+            sun_color: land.sun_color,
+            sun_k: land.sun_k,
+            moon_dir: land.moon_dir,
+            moon_color: land.moon_color,
+            moon_k: land.moon_k,
+            ambient_landscape: land.ambient,
         };
-    } else if let Some(rec) = dat {
-        let sun_up = sky.sun_altitude > 0.0;
-        let moon_up = sky.moon_altitude > 0.0;
-
+    } else if let Some((rec, land)) = dat.zip(land) {
         let (e_sun_hue, e_sun_k) = diffuse_to_light([
             rec.sunlight_diffuse_entity[0],
             rec.sunlight_diffuse_entity[1],
@@ -763,17 +832,6 @@ pub fn sun_moon_system(
             Vec3::ZERO
         };
 
-        let (s_hue, s_k) = diffuse_to_light([
-            rec.sunlight_diffuse_landscape[0],
-            rec.sunlight_diffuse_landscape[1],
-            rec.sunlight_diffuse_landscape[2],
-        ]);
-        let (m_hue, m_k) = diffuse_to_light([
-            rec.moonlight_diffuse_landscape[0],
-            rec.moonlight_diffuse_landscape[1],
-            rec.moonlight_diffuse_landscape[2],
-        ]);
-
         *render_cfg.zone_lighting = crate::weather::ZoneDirectionalLighting {
             valid: true,
             indoors: rec.indoors,
@@ -785,17 +843,13 @@ pub fn sun_moon_system(
                 rec.ambient_entity[1],
                 rec.ambient_entity[2],
             ),
-            sun_dir,
-            sun_color: s_hue,
-            sun_k: if sun_up { s_k } else { 0.0 },
-            moon_dir,
-            moon_color: m_hue,
-            moon_k: if moon_up { m_k } else { 0.0 },
-            ambient_landscape: Vec3::new(
-                rec.ambient_landscape[0],
-                rec.ambient_landscape[1],
-                rec.ambient_landscape[2],
-            ),
+            sun_dir: land.sun_dir,
+            sun_color: land.sun_color,
+            sun_k: land.sun_k,
+            moon_dir: land.moon_dir,
+            moon_color: land.moon_color,
+            moon_k: land.moon_k,
+            ambient_landscape: land.ambient,
         };
     } else {
         render_cfg.zone_lighting.valid = false;
@@ -932,6 +986,8 @@ pub fn sun_moon_system(
 
 #[cfg(test)]
 mod tests {
+    use ffxi_dat::weather::WeatherRecord;
+
     use super::*;
     use crate::vana_time::EARTH_SECS_PER_VANA_DAY;
 
@@ -989,6 +1045,160 @@ mod tests {
                 "quad normal {quad_normal} faces away from the camera ({to_cam})"
             );
         }
+    }
+
+    fn terrain_rec(sun: [f32; 4], moon: [f32; 4], ambient: [f32; 4]) -> WeatherRecord {
+        WeatherRecord {
+            sunlight_diffuse_landscape: sun,
+            moonlight_diffuse_landscape: moon,
+            ambient_landscape: ambient,
+            ..Default::default()
+        }
+    }
+
+    // ZoneRenderer.cpp:1133-1149 — `positionedBlock->Area->GetWeatherDiffuseLights`
+    // (XiArea.cpp:232-279) and `GetAmbient(_, 0)` (XiArea.cpp:391-408) are the block's
+    // AREA's env2 palette, so the terrain lights must move when the area does.
+    #[test]
+    fn landscape_lighting_reads_the_terrain_block_it_is_given() {
+        let sun_dir = Vec3::Y;
+        let moon_dir = Vec3::NEG_Y;
+
+        let zone = terrain_rec(
+            [0.9, 0.85, 0.7, 1.0],
+            [0.2, 0.2, 0.4, 1.0],
+            [0.6, 0.6, 0.6, 1.0],
+        );
+        let area = terrain_rec(
+            [0.3, 0.1, 0.05, 1.0],
+            [0.1, 0.0, 0.0, 1.0],
+            [0.12, 0.08, 0.05, 1.0],
+        );
+
+        let zone_lit = landscape_lighting(&zone, sun_dir, moon_dir, true, true);
+        let area_lit = landscape_lighting(&area, sun_dir, moon_dir, true, true);
+
+        assert!((zone_lit.sun_k - 0.9).abs() < 1e-6);
+        assert!((area_lit.sun_k - 0.3).abs() < 1e-6);
+        assert!((area_lit.sun_color * area_lit.sun_k).distance(Vec3::new(0.3, 0.1, 0.05)) < 1e-6);
+        assert!((area_lit.moon_color * area_lit.moon_k).distance(Vec3::new(0.1, 0.0, 0.0)) < 1e-6);
+        assert!(area_lit.ambient.distance(Vec3::new(0.12, 0.08, 0.05)) < 1e-6);
+        assert!(
+            area_lit.ambient.length() < zone_lit.ambient.length(),
+            "the darker area record must darken terrain ambient"
+        );
+    }
+
+    // xim EnvironmentSection.kt:139-149 — indoors the moon slot holds a signed direction,
+    // not a color, so the indoor/outdoor split has to follow the record the terrain is
+    // read from. Taking the zone's flag while reading an interior area's block would
+    // publish those direction bytes as a moon color.
+    #[test]
+    fn landscape_lighting_takes_the_indoor_flag_from_its_own_record() {
+        let sun_dir = Vec3::Y;
+        let moon_dir = Vec3::NEG_Y;
+        let mut indoor = terrain_rec([0.4, 0.4, 0.45, 1.0], [0.9, 0.0, 0.0, 1.0], [0.1; 4]);
+        indoor.indoors = true;
+        indoor.indoor_light_dir_landscape = [0.0, 1.0, 0.0];
+
+        let lit = landscape_lighting(&indoor, sun_dir, moon_dir, true, true);
+        assert_eq!(lit.moon_color, Vec3::ZERO);
+        assert_eq!(lit.moon_k, 0.0);
+        assert_eq!(lit.sun_dir, ffxi_dir_to_bevy([0.0, 1.0, 0.0]));
+        assert!((lit.sun_k - 0.45).abs() < 1e-6);
+    }
+
+    // The celestial arc still gates the outdoor lights: a light below the horizon
+    // contributes nothing, whatever area the player stands in.
+    #[test]
+    fn landscape_lighting_gates_outdoor_lights_on_the_horizon() {
+        let rec = terrain_rec([0.9, 0.9, 0.9, 1.0], [0.3, 0.3, 0.5, 1.0], [0.2; 4]);
+        let lit = landscape_lighting(&rec, Vec3::Y, Vec3::NEG_Y, false, true);
+        assert_eq!(lit.sun_k, 0.0);
+        assert!(lit.moon_k > 0.0);
+    }
+
+    // ZoneRenderer.cpp:1133-1149 resolves the block's lights through
+    // `positionedBlock->Area`, so the published terrain lighting has to move when the
+    // player's area does while the entity(model) half stays on the zone record
+    // (CMoElem.cpp:513 resolves that one per actor, which one shared light cannot
+    // express). This pins the wiring, not just `landscape_lighting`.
+    #[test]
+    fn published_terrain_lighting_follows_the_players_area() {
+        const ZONE_SUN: [f32; 4] = [0.9, 0.88, 0.8, 1.0];
+        const AREA_SUN: [f32; 4] = [0.25, 0.1, 0.05, 1.0];
+        const ZONE_AMBIENT: [f32; 4] = [0.7, 0.7, 0.68, 1.0];
+        const AREA_AMBIENT: [f32; 4] = [0.09, 0.06, 0.11, 1.0];
+        const ENTITY_SUN: [f32; 4] = [0.5, 0.5, 0.5, 1.0];
+
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, AssetPlugin::default()))
+            .init_asset::<StandardMaterial>()
+            .init_asset::<crate::moon_material::MoonMaterial>()
+            .add_message::<crate::snapshot::ToastEvent>()
+            .init_resource::<VanaSky>()
+            .init_resource::<crate::vana_time::VanaClock>()
+            .init_resource::<crate::graphics_settings::GraphicsSettings>()
+            .init_resource::<crate::moon_material::MoonSpriteFrames>()
+            .init_resource::<crate::moon_material::CelestialColorTables>()
+            .init_resource::<crate::weather::ZoneWeather>()
+            .init_resource::<crate::weather::ZoneDirectionalLighting>()
+            .init_resource::<DatCelestials>()
+            .add_systems(Update, sun_moon_system);
+
+        let mut zone = terrain_rec(ZONE_SUN, [0.2, 0.2, 0.4, 1.0], ZONE_AMBIENT);
+        zone.sunlight_diffuse_entity = ENTITY_SUN;
+        app.world_mut()
+            .resource_mut::<crate::weather::ZoneWeather>()
+            .current = Some(zone);
+        app.update();
+
+        let zone_lit = *app
+            .world()
+            .resource::<crate::weather::ZoneDirectionalLighting>();
+        assert!(zone_lit.valid);
+        assert!(
+            zone_lit.ambient_landscape.distance(Vec3::new(
+                ZONE_AMBIENT[0],
+                ZONE_AMBIENT[1],
+                ZONE_AMBIENT[2]
+            )) < 1e-6
+        );
+
+        let mut area = zone;
+        area.sunlight_diffuse_landscape = AREA_SUN;
+        area.ambient_landscape = AREA_AMBIENT;
+        app.world_mut()
+            .resource_mut::<crate::weather::ZoneWeather>()
+            .area_current = Some(area);
+        app.update();
+
+        let area_lit = *app
+            .world()
+            .resource::<crate::weather::ZoneDirectionalLighting>();
+        assert!(
+            area_lit.ambient_landscape.distance(Vec3::new(
+                AREA_AMBIENT[0],
+                AREA_AMBIENT[1],
+                AREA_AMBIENT[2]
+            )) < 1e-6,
+            "terrain ambient stayed on the zone record: {}",
+            area_lit.ambient_landscape
+        );
+        assert!(
+            (area_lit.sun_color * area_lit.sun_k).distance(Vec3::new(
+                AREA_SUN[0],
+                AREA_SUN[1],
+                AREA_SUN[2]
+            )) < 1e-6,
+            "terrain sun diffuse stayed on the zone record"
+        );
+        assert_eq!(
+            area_lit.ambient_entity, zone_lit.ambient_entity,
+            "the entity half is resolved per actor in retail and must stay zone-wide here"
+        );
+        assert_eq!(area_lit.model_color, zone_lit.model_color);
+        assert_eq!(area_lit.model_k, zone_lit.model_k);
     }
 
     #[test]

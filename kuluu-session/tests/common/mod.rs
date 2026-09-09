@@ -359,7 +359,10 @@ mod xidb_conn_tests {
     // (0 for the server's first packet). A server that refuses before the
     // handshake sends an ERR packet - 0xFF, LE u16 code, message - with no
     // SQL-state field, because no capabilities have been negotiated yet.
-    // https://mariadb.com/kb/en/0-packet/
+    // https://mariadb.com/docs/server/reference/clientserver-protocol/0-packet
+    // https://mariadb.com/docs/server/reference/clientserver-protocol/4-server-response-packets/err_packet
+    // The pre-handshake SQL-state omission is what mysql_async 0.37
+    // src/conn/mod.rs handle_packet parses against (empty capabilities).
     const PACKET_LENGTH_BYTES: usize = 3;
     const SERVER_FIRST_PACKET_SEQ: u8 = 0;
     const ERR_PACKET_TAG: u8 = 0xFF;

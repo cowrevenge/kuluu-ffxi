@@ -43,9 +43,32 @@ pub fn d3m_to_mesh(d3m: &D3m) -> Mesh {
 }
 
 pub fn decoded_texture_to_image(t: &ffxi_dat::texture::DecodedTexture) -> Image {
+    convert(t, false)
+}
+
+/// [`decoded_texture_to_image`] plus [`ffxi_dat::texture::resolve_dxt3_alpha_dither`], for the
+/// camera-follow celestial billboards.
+///
+/// Same magnification argument as `zone_texture::decoded_sky_texture_to_image`: the celestial
+/// set rides a sphere of radius `CELESTIAL_DISTANCE` around the camera and is scaled to cover
+/// a fixed slice of screen, so its texels resolve instead of averaging away, and its sheets are
+/// 4-bit-alpha DXT3 (`dat-sky-alpha-histogram` on zone files 210/331: `weat/<type>/kasa` is 100%
+/// the nibble 7/8 dithered-opaque pair, `moonshap` a nibble ramp). This is the D3M-side twin of
+/// the moon-material and cloud/star-dome calls kuluu-u5mm added; every other D3M particle sheet
+/// samples at or below 1:1 and keeps the plain converter (kuluu-d9wv).
+pub fn decoded_sky_texture_to_image(t: &ffxi_dat::texture::DecodedTexture) -> Image {
+    convert(t, true)
+}
+
+fn convert(t: &ffxi_dat::texture::DecodedTexture, undither: bool) -> Image {
     use bevy::image::{ImageAddressMode, ImageFilterMode, ImageSampler, ImageSamplerDescriptor};
     use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
     let mut rgba = t.rgba.clone();
+    // Before the remap, which doubles whatever it is handed — see the note on
+    // `resolve_dxt3_alpha_dither`.
+    if undither {
+        ffxi_dat::texture::resolve_dxt3_alpha_dither(&mut rgba, t.width, t.height);
+    }
     ffxi_dat::texture::apply_ffxi_alpha_remap(&mut rgba);
     let mut image = Image::new(
         Extent3d {
@@ -132,6 +155,64 @@ mod tests {
                 .map(|a| a.len())
                 .unwrap_or(0),
             0
+        );
+    }
+
+    // A DXT3 alpha plane holds nibble multiples only, so an authored half-opaque 0x80 ships as
+    // the nibble 7/8 pair stippled across neighbours - what `weat/<type>/kasa` is, end to end.
+    // The celestial converter averages that back out; the shared particle converter, which
+    // every other D3M sheet samples at or below 1:1, must keep leaving it alone (kuluu-d9wv).
+    #[test]
+    fn only_the_sky_converter_resolves_the_dxt3_alpha_stipple() {
+        use ffxi_dat::texture::{ffxi_alpha_remap, DecodedTexture, TexFormat};
+
+        const DITHER_LO: u8 = 0x77;
+        const DITHER_HI: u8 = 0x88;
+        const SIDE: u32 = 8;
+        // 0x80's recovered mean is 127.5, which no 8-bit alpha holds; the remap doubles that
+        // to a 254/255 split. One step is the floor, not a slack tolerance.
+        const RESOLVED_RESIDUAL_MAX: u8 = 1;
+
+        let mut rgba = Vec::with_capacity((SIDE * SIDE * 4) as usize);
+        for y in 0..SIDE {
+            for x in 0..SIDE {
+                let a = if (x + y) % 2 == 0 {
+                    DITHER_LO
+                } else {
+                    DITHER_HI
+                };
+                rgba.extend_from_slice(&[40, 50, 60, a]);
+            }
+        }
+        let t = DecodedTexture {
+            width: SIDE,
+            height: SIDE,
+            format_tag: TexFormat::Dxt3,
+            rgba,
+        };
+
+        let spread = |img: Image| {
+            let alpha: Vec<u8> = img
+                .data
+                .expect("converted image carries its texels")
+                .chunks_exact(4)
+                .map(|p| p[3])
+                .collect();
+            let lo = *alpha.iter().min().expect("non-empty");
+            let hi = *alpha.iter().max().expect("non-empty");
+            (lo, hi - lo)
+        };
+
+        let stipple = ffxi_alpha_remap(DITHER_HI) - ffxi_alpha_remap(DITHER_LO);
+        assert_eq!(
+            spread(decoded_texture_to_image(&t)),
+            (ffxi_alpha_remap(DITHER_LO), stipple),
+            "the shared particle converter must not undither"
+        );
+        let (sky_lo, sky_spread) = spread(decoded_sky_texture_to_image(&t));
+        assert!(
+            sky_spread <= RESOLVED_RESIDUAL_MAX && sky_lo > ffxi_alpha_remap(DITHER_LO),
+            "celestial converter left alpha spread {sky_spread} from {sky_lo}"
         );
     }
 }

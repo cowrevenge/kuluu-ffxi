@@ -97,6 +97,18 @@ fn collect_celestial_defs(
     out
 }
 
+// The celestial billboards are the one generator set drawn magnified enough for FFXI's stored
+// 4-bit alpha dither to resolve into screen-space stipple rather than average away: they cover a
+// fixed slice of screen at CELESTIAL_DISTANCE, and their sheets are 4-bit-alpha DXT3
+// (`dat-sky-alpha-histogram` on zone files 210/331). Same case as the cloud canopy and star dome
+// (kuluu-u5mm, kuluu-d9wv).
+fn celestial_generator_options() -> ZoneGeneratorOptions {
+    ZoneGeneratorOptions {
+        resolve_alpha_dither: true,
+        ..Default::default()
+    }
+}
+
 fn spawn_celestial_set(
     assets: &ActionAssets,
     defs: &[([u8; 4], ParticleGeneratorDef)],
@@ -115,7 +127,7 @@ fn spawn_celestial_set(
                 // Placeholder: track_celestial_bodies rewrites this from the camera before
                 // the first mesh rebuild.
                 Vec3::ZERO,
-                ZoneGeneratorOptions::default(),
+                celestial_generator_options(),
                 meshes,
                 mats,
                 images,

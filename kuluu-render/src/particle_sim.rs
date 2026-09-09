@@ -9,7 +9,7 @@ use ffxi_dat::sprite_sheet::ParticleSpriteSheet;
 
 use crate::camera::OperatorCamera;
 use crate::components::InGameEntity;
-use crate::dat_d3m::{decoded_texture_to_image, D3mBlendMode};
+use crate::dat_d3m::{decoded_sky_texture_to_image, decoded_texture_to_image, D3mBlendMode};
 use crate::ffxi_particle_material::FfxiParticleMaterial;
 use crate::scheduler_runtime::{
     assets_holding, ActionAssets, GlobalEffectDir, MmbSpriteMesh, SchedulerStageEvent, ROUTINE_FPS,
@@ -282,11 +282,15 @@ struct LiveGenerator {
 const UNSCALED_EMISSION: f32 = 1.0;
 
 // Spawn-time knobs a zone/weather caller sets that the generator body cannot carry: retail derives
-// both from where the chunk sits in the DAT tree, not from its own fields.
+// each of them from where the chunk sits in the DAT tree, not from its own fields.
 #[derive(Clone, Copy)]
 pub struct ZoneGeneratorOptions {
     pub camera_relative: bool,
     pub emit_scale: f32,
+    // Set only by the weat/<type>/ celestial set, whose billboards are magnified enough for
+    // FFXI's stored 4-bit alpha dither to resolve on screen: see
+    // `dat_d3m::decoded_sky_texture_to_image`.
+    pub resolve_alpha_dither: bool,
 }
 
 impl Default for ZoneGeneratorOptions {
@@ -294,6 +298,7 @@ impl Default for ZoneGeneratorOptions {
         Self {
             camera_relative: false,
             emit_scale: UNSCALED_EMISSION,
+            resolve_alpha_dither: false,
         }
     }
 }
@@ -350,7 +355,8 @@ pub fn spawn_particle_generators(
         let Some(def) = assets.particle_def(local_dir, &ev.stage.stage.id).copied() else {
             continue;
         };
-        let Some((template, sprite_frames, tex)) = resolve_mesh(assets, &def, &mut images) else {
+        let Some((template, sprite_frames, tex)) = resolve_mesh(assets, &def, &mut images, false)
+        else {
             continue;
         };
         let origin_entity = crate::scheduler_runtime::particle_origin_entity(
@@ -454,7 +460,8 @@ pub fn spawn_actor_auto_run_particles(
                 continue;
             }
             let def = *def;
-            let Some((template, sprite_frames, tex)) = resolve_mesh(&fx.assets, &def, &mut images)
+            let Some((template, sprite_frames, tex)) =
+                resolve_mesh(&fx.assets, &def, &mut images, false)
             else {
                 continue;
             };
@@ -538,8 +545,10 @@ pub fn spawn_zone_particle_generator(
     sim: &mut ParticleSimulator,
     commands: &mut Commands,
 ) -> Option<Entity> {
-    let (template, sprite_frames, tex, draw_path) = resolve_zone_mesh(assets, &def, images)
-        .or_else(|| global.and_then(|g| resolve_zone_mesh(g, &def, images)))?;
+    let undither = opts.resolve_alpha_dither;
+    let (template, sprite_frames, tex, draw_path) =
+        resolve_zone_mesh(assets, &def, images, undither)
+            .or_else(|| global.and_then(|g| resolve_zone_mesh(g, &def, images, undither)))?;
     let blend = match def.blend {
         ffxi_dat::particle_gen::ParticleBlend::Additive => D3mBlendMode::Additive,
         ffxi_dat::particle_gen::ParticleBlend::Blend => D3mBlendMode::Blended,
@@ -1212,13 +1221,14 @@ fn resolve_zone_mesh(
     assets: &ActionAssets,
     def: &ParticleGeneratorDef,
     images: &mut Assets<Image>,
+    undither: bool,
 ) -> Option<(
     SpriteTemplate,
     Vec<SpriteTemplate>,
     Option<Handle<Image>>,
     D3mDrawPath,
 )> {
-    if let Some((template, frames, tex)) = resolve_mesh(assets, def, images) {
+    if let Some((template, frames, tex)) = resolve_mesh(assets, def, images, undither) {
         return Some((template, frames, tex, D3mDrawPath::D3m));
     }
     let mmb = assets.mmbs.get(&def.mesh_id)?;
@@ -1226,7 +1236,7 @@ fn resolve_zone_mesh(
     let tex = assets
         .images_by_name
         .get(&mmb.texture_name)
-        .map(|t| images.add(decoded_texture_to_image(t)));
+        .map(|t| images.add(to_image(t, undither)));
     Some((template, Vec::new(), tex, D3mDrawPath::Mmb))
 }
 
@@ -1243,10 +1253,19 @@ fn keyframe(
         .cloned()
 }
 
+fn to_image(t: &ffxi_dat::texture::DecodedTexture, undither: bool) -> Image {
+    if undither {
+        decoded_sky_texture_to_image(t)
+    } else {
+        decoded_texture_to_image(t)
+    }
+}
+
 fn resolve_mesh(
     assets: &ActionAssets,
     def: &ParticleGeneratorDef,
     images: &mut Assets<Image>,
+    undither: bool,
 ) -> Option<(SpriteTemplate, Vec<SpriteTemplate>, Option<Handle<Image>>)> {
     match def.mesh_kind {
         ParticleMeshKind::StaticMesh => {
@@ -1266,7 +1285,7 @@ fn resolve_mesh(
             let tex = by_name
                 .flatten()
                 .or_else(|| assets.images.get(&d3m.texture_dat_id()))
-                .map(|t| images.add(decoded_texture_to_image(t)));
+                .map(|t| images.add(to_image(t, undither)));
             Some((template, Vec::new(), tex))
         }
         ParticleMeshKind::SpriteSheet => {
@@ -1279,7 +1298,7 @@ fn resolve_mesh(
                 .images_by_qualified_name
                 .get(&(ss.category.clone(), ss.id.clone()))
                 .or_else(|| assets.images_by_name.get(&ss.id))
-                .map(|t| images.add(decoded_texture_to_image(t)));
+                .map(|t| images.add(to_image(t, undither)));
             Some((first, frames, tex))
         }
     }
@@ -2372,7 +2391,7 @@ mod tests {
             .expect("the zone DAT declares the generator");
         let mut images = Assets::<Image>::default();
         let (template, sprite_frames, _, draw_path) =
-            resolve_zone_mesh(assets, &def, &mut images).expect("its linked mesh resolves");
+            resolve_zone_mesh(assets, &def, &mut images, false).expect("its linked mesh resolves");
         let mut g = celestial(def);
         g.solid_mesh = is_solid_mesh(&template);
         g.template = template;
@@ -2698,6 +2717,123 @@ mod tests {
         }
     }
 
+    // The alpha lattice a decoded-then-remapped DXT3 texture can sit on: the 4-bit plane holds
+    // multiples of 0x11, and `apply_ffxi_alpha_remap` doubles with saturation. Any other value
+    // is a neighbourhood mean, i.e. proof the undither ran.
+    fn off_nibble_lattice(alpha: &[u8]) -> usize {
+        alpha
+            .iter()
+            .filter(|&&a| {
+                !(0..=15)
+                    .map(|n| ffxi_dat::texture::ffxi_alpha_remap(n * 0x11))
+                    .any(|lattice| lattice == a)
+            })
+            .count()
+    }
+
+    fn image_alpha(images: &Assets<Image>, handle: &Handle<Image>) -> Vec<u8> {
+        images
+            .get(handle)
+            .and_then(|i| i.data.clone())
+            .expect("the loaded texture carries its texels")
+            .chunks_exact(4)
+            .map(|p| p[3])
+            .collect()
+    }
+
+    // The premise kuluu-d9wv rests on, read off the shipped f_ro DAT rather than assumed: the
+    // lunar halo sheet `kasa` is a DXT3 whose alpha is entirely the nibble 7/8 dithered-opaque
+    // pair (`dat-sky-alpha-histogram` on zone files 210/331), so the plain particle converter
+    // hands the GPU a 238/255 per-texel stipple and only the celestial converter averages it
+    // back to the authored half-step. Skips without a retail install.
+    #[test]
+    fn zone_210_halo_sheet_is_dithered_and_only_the_celestial_converter_resolves_it() {
+        const F_RO: u32 = 210;
+        const HALO_TEX: [u8; 4] = *b"kasa";
+        const DITHER_LO: u8 = 0x77;
+        const DITHER_HI: u8 = 0x88;
+        // 0x80's recovered mean is 127.5, which no 8-bit alpha holds; the remap doubles that to
+        // a 254/255 split.
+        const RESOLVED_RESIDUAL_MAX: u8 = 1;
+
+        let Some(bytes) = zone_bytes(F_RO) else {
+            eprintln!("skipping: no retail DAT root (set FFXI_DAT_PATH)");
+            return;
+        };
+        let tex = ffxi_dat::chunk::walk(&bytes)
+            .flatten()
+            .filter(|c| {
+                c.name == HALO_TEX
+                    && ffxi_dat::ChunkKind::from_u8(c.kind) == Some(ffxi_dat::ChunkKind::Img)
+            })
+            .find_map(|c| ffxi_dat::texture::decode_texture(c.data).ok())
+            .expect("f_ro ships the lunar halo sheet");
+        assert!(
+            tex.rgba
+                .chunks_exact(4)
+                .all(|p| p[3] == DITHER_LO || p[3] == DITHER_HI),
+            "the shipped halo sheet is the nibble 7/8 dithered-opaque pair"
+        );
+
+        let mut images = Assets::<Image>::default();
+        let plain = images.add(decoded_texture_to_image(&tex));
+        let sky = images.add(decoded_sky_texture_to_image(&tex));
+
+        let plain_alpha = image_alpha(&images, &plain);
+        let lo = ffxi_dat::texture::ffxi_alpha_remap(DITHER_LO);
+        let hi = ffxi_dat::texture::ffxi_alpha_remap(DITHER_HI);
+        assert!(
+            plain_alpha.contains(&lo) && plain_alpha.contains(&hi),
+            "the shared particle converter keeps the stipple"
+        );
+
+        let sky_alpha = image_alpha(&images, &sky);
+        let spread =
+            sky_alpha.iter().max().expect("non-empty") - sky_alpha.iter().min().expect("non-empty");
+        assert!(
+            spread <= RESOLVED_RESIDUAL_MAX && *sky_alpha.iter().min().expect("non-empty") > lo,
+            "the celestial converter left alpha spread {spread}"
+        );
+    }
+
+    // The other end of the same wire: `celestial_particles` spawns the Sun/Moon set with
+    // `resolve_alpha_dither`, and that flag has to survive the mesh/texture resolution it is
+    // threaded through. f_ro's `moon` generator is the celestial sheet that actually binds a
+    // texture (`moonshap`, a 4-bit-alpha DXT3 the moon-material path already undithers at
+    // moon_material.rs:131), so its texels are where the flag is observable: undithered alpha
+    // leaves the nibble lattice, dithered alpha cannot. Skips without a retail install.
+    #[test]
+    fn the_celestial_flag_reaches_the_moon_sheet_texels() {
+        const F_RO: u32 = 210;
+        const MOON_GEN: [u8; 4] = *b"moon";
+
+        let Some(assets) = retail_assets(F_RO) else {
+            return;
+        };
+        let def = *assets
+            .particle_defs
+            .get(&MOON_GEN)
+            .expect("f_ro declares the moon generator");
+
+        let alpha = |undither: bool| {
+            let mut images = Assets::<Image>::default();
+            let (_, _, tex, _) = resolve_zone_mesh(&assets, &def, &mut images, undither)
+                .expect("the moon mesh resolves");
+            let handle = tex.expect("the moon mesh links a texture");
+            image_alpha(&images, &handle)
+        };
+
+        assert_eq!(
+            off_nibble_lattice(&alpha(false)),
+            0,
+            "the shared particle converter only ever emits remapped nibble alpha"
+        );
+        assert!(
+            off_nibble_lattice(&alpha(true)) > 0,
+            "the celestial options never reached the texture converter"
+        );
+    }
+
     // A tint table that is the identity everywhere except `target`, where it halves red.
     fn halves_red_at<const N: usize>(target: usize) -> [[f32; 4]; N] {
         std::array::from_fn(|i| {
@@ -2903,7 +3039,7 @@ mod tests {
 
         fn resolved_texture(assets: &ActionAssets) -> Option<Handle<Image>> {
             let mut images = Assets::<Image>::default();
-            resolve_mesh(assets, &sheet_def(), &mut images)
+            resolve_mesh(assets, &sheet_def(), &mut images, false)
                 .expect("sheet mesh resolves")
                 .2
         }
@@ -2993,7 +3129,7 @@ mod tests {
 
         fn resolved_texture(assets: &ActionAssets) -> Option<Handle<Image>> {
             let mut images = Assets::<Image>::default();
-            resolve_mesh(assets, &mesh_def(), &mut images)
+            resolve_mesh(assets, &mesh_def(), &mut images, false)
                 .expect("static mesh resolves")
                 .2
         }
@@ -3050,7 +3186,7 @@ mod tests {
 
         fn texture_for(assets: &ActionAssets, def: &ParticleGeneratorDef) -> Option<Handle<Image>> {
             let mut images = Assets::<Image>::default();
-            resolve_mesh(assets, def, &mut images)
+            resolve_mesh(assets, def, &mut images, false)
                 .expect("mesh resolves")
                 .2
         }

@@ -178,6 +178,7 @@ fn sync_weather_particles(
         let opts = ZoneGeneratorOptions {
             camera_relative: def.camera_relative,
             emit_scale: WEATHER_EMIT_SCALE,
+            ..Default::default()
         };
         let entity = spawn_zone_particle_generator(
             *def,

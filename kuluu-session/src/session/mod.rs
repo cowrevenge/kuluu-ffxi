@@ -190,7 +190,7 @@ pub async fn run(
             let lobby = LobbyClient::new(cfg.server.clone(), cfg.data_port, cfg.view_port);
             let mut key3 = [0u8; 20];
             for (i, b) in key3.iter_mut().enumerate() {
-                *b = ((i as u8).wrapping_mul(0x37)) ^ 0x5a;
+                *b = ((i as u8).wrapping_mul(KEY3_SEED_MULTIPLIER)) ^ KEY3_SEED_XOR;
             }
             let (char_id, handoff) = match &cfg.char_selection {
                 CharSelection::Id(cid) => {
@@ -214,10 +214,10 @@ pub async fn run(
 
     let lobby_ip = format!(
         "{}.{}.{}.{}",
-        handoff.server_ip & 0xFF,
-        (handoff.server_ip >> 8) & 0xFF,
-        (handoff.server_ip >> 16) & 0xFF,
-        (handoff.server_ip >> 24) & 0xFF,
+        handoff.server_ip & IPV4_OCTET_MASK,
+        (handoff.server_ip >> 8) & IPV4_OCTET_MASK,
+        (handoff.server_ip >> 16) & IPV4_OCTET_MASK,
+        (handoff.server_ip >> 24) & IPV4_OCTET_MASK,
     );
     let server_addr: std::net::SocketAddr = match cfg.map_host_override.as_deref() {
         Some(host) => tokio::net::lookup_host((host, handoff.server_port))
@@ -1046,10 +1046,12 @@ fn handle_sub_packet(
                         .data
                         .get(LOOK_SIZE_OFFSET..LOOK_SIZE_OFFSET + 2)
                         .map(|s| u16::from_le_bytes([s[0], s[1]]));
-                    let owned_by_pc = head.send_flag & 0x04 != 0
-                        && (sub.data.get(35).copied().unwrap_or(0) & 0x08) != 0;
+                    let owned_by_pc = head.send_flag & UPDATE_HP != 0
+                        && (sub.data.get(PET_OWNER_FLAGS_OFFSET).copied().unwrap_or(0)
+                            & PET_OWNED_BY_PC)
+                            != 0;
                     let monster_flag =
-                        sub.data.get(MONSTER_FLAG_OFFSET).copied().unwrap_or(0) & 0x01 != 0;
+                        sub.data.get(MONSTER_FLAG_OFFSET).copied().unwrap_or(0) & MONSTER_FLAG != 0;
                     let kind =
                         classify_char_npc(look_size, head.act_index, owned_by_pc, monster_flag);
                     if matches!(look_size, Some(0) | Some(5) | Some(6)) {
@@ -1148,7 +1150,7 @@ fn handle_sub_packet(
                 };
 
                 let send_flag = sub.data.get(6).copied().unwrap_or(0);
-                let hp_pct = (send_flag & 0x04 != 0).then_some(head.hpp);
+                let hp_pct = (send_flag & UPDATE_HP != 0).then_some(head.hpp);
 
                 // mob_hp diagnostic: UPDATE_HP on a Mob/Pet is event-driven —
                 // the server only sets the bit when HP actually changes, so this
@@ -2039,6 +2041,23 @@ fn handle_sub_packet(
 
 const NAME_MISS_DEDUP_WINDOW: std::time::Duration = std::time::Duration::from_secs(30);
 
+// vendor/server/src/map/entities/baseentity.h UPDATETYPE
+const UPDATE_HP: u8 = 0x04;
+const UPDATE_NAME: u8 = 0x08;
+
+// vendor/server/src/map/packets/entity_update.cpp flags1_t MonsterFlag
+const MONSTER_FLAG: u8 = 0x01;
+
+// vendor/server/src/map/packets/entity_update.cpp CEntityUpdatePacket::updateWith
+// (UPDATE_HP block, PMaster of TYPE_PC); packet offsets include the sub-header.
+const PET_OWNER_FLAGS_OFFSET: usize = 0x27 - framing::SUBPACKET_HEADER_SIZE;
+const PET_OWNED_BY_PC: u8 = 0x08;
+
+const IPV4_OCTET_MASK: u32 = 0xFF;
+
+const KEY3_SEED_MULTIPLIER: u8 = 0x37;
+const KEY3_SEED_XOR: u8 = 0x5a;
+
 const PENDING_EVENT_END_GRACE: std::time::Duration = std::time::Duration::from_secs(10);
 
 // Retail locks movement during events, so there is no upstream value: player
@@ -2061,7 +2080,7 @@ fn record_name_miss(
 ) {
     use crate::state::NameMissKind;
     let send_flag = body.get(6).copied().unwrap_or(0);
-    let miss_kind = if send_flag & 0x08 == 0 {
+    let miss_kind = if send_flag & UPDATE_NAME == 0 {
         NameMissKind::NameBitClear
     } else {
         NameMissKind::NameBitSetExtractionFailed
@@ -4465,7 +4484,7 @@ async fn keepalive_loop(
                             if sub.opcode == ffxi_proto::map::s2c::CHAR_PC {
                                 if let Ok(head) = decode::PosHead::decode(sub.data) {
                                     let send_flag = sub.data.get(6).copied().unwrap_or(0);
-                                    if head.unique_no == self_char_id && (send_flag & 0x04) != 0 {
+                                    if head.unique_no == self_char_id && (send_flag & UPDATE_HP) != 0 {
                                         let server_healing =
                                             head.server_status == decode::animation::HEALING;
                                         if is_healing != server_healing {
@@ -4536,10 +4555,10 @@ fn parse_logout_addr(
     }
     let candidate: std::net::SocketAddr = format!(
         "{}.{}.{}.{}:{}",
-        new_ip & 0xFF,
-        (new_ip >> 8) & 0xFF,
-        (new_ip >> 16) & 0xFF,
-        (new_ip >> 24) & 0xFF,
+        new_ip & IPV4_OCTET_MASK,
+        (new_ip >> 8) & IPV4_OCTET_MASK,
+        (new_ip >> 16) & IPV4_OCTET_MASK,
+        (new_ip >> 24) & IPV4_OCTET_MASK,
         new_port,
     )
     .parse()
@@ -5867,12 +5886,14 @@ fn decode_miscdata_status_icons(data: &[u8]) -> Option<(Vec<u16>, Vec<u32>)> {
     const ICONS_BYTES: usize = ICONS_COUNT * 2;
     const TS_OFFSET: usize = ICONS_OFFSET + ICONS_BYTES;
     const PLACEHOLDER: u16 = 0x00FF;
+    // vendor/server/src/map/packets/s2c/0x063_miscdata_status_icons.h GP_SERV_COMMAND_MISCDATA::STATUS_ICONS
+    const KIND_STATUS_ICONS: u16 = 0x0009;
 
     if data.len() < ICONS_OFFSET + ICONS_BYTES {
         return None;
     }
     let kind = u16::from_le_bytes(data[TYPE_OFFSET..TYPE_OFFSET + 2].try_into().unwrap());
-    if kind != 0x0009 {
+    if kind != KIND_STATUS_ICONS {
         return None;
     }
     let now_unix = now_unix_secs();

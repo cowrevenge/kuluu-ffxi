@@ -22,7 +22,7 @@ pub const MH_DOOR_ENTITY_ID: u32 = 0xFFFF_FF01;
 pub const MOG_MENU_ID: u32 = 0xFFFF_FF02;
 
 /// Nameplate/dialog speaker for the synthesized exit door, matching XIM's
-/// re-creation: research/xim/src/jsMain/kotlin/xim/poc/game/configuration/assetviewer/AssetViewer.kt:666
+/// re-creation: research/xim/src/jsMain/kotlin/xim/poc/game/configuration/assetviewer/AssetViewer.kt createMogHouseActors
 /// (LSB spawns no door NPC, so there is no server-side name to echo).
 pub const MH_DOOR_NAME: &str = "Door: To Town";
 pub const MOG_MENU_NPC_NAME: &str = "Moogle";
@@ -1019,8 +1019,14 @@ mod tests {
 
     #[test]
     fn synthetic_ids_stay_outside_lsb_unique_no_space() {
-        // Largest LSB unique_no shape: (4<<28)|(zone<<12)|targid.
-        let lsb_ceiling = (4u32 << 28) | (0xFFFu32 << 12) | 0xFFF;
+        const LSB_DYNAMIC_KIND: u32 = 4;
+        const LSB_KIND_SHIFT: u32 = 28;
+        const LSB_ZONE_SHIFT: u32 = 12;
+        const LSB_ZONE_MAX: u32 = 0xFFF;
+        const LSB_TARGID_MAX: u32 = 0xFFF;
+        let lsb_ceiling = (LSB_DYNAMIC_KIND << LSB_KIND_SHIFT)
+            | (LSB_ZONE_MAX << LSB_ZONE_SHIFT)
+            | LSB_TARGID_MAX;
         for id in [MH_DOOR_ENTITY_ID, MOG_MENU_ID] {
             assert!(id > lsb_ceiling, "0x{id:08X} collides with server id space");
         }

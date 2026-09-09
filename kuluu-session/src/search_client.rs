@@ -1,5 +1,5 @@
 //! Auction House queries against the LSB search server: one TCP connection per
-//! request (vendor/server/src/search/tcp_server.cpp accepts, handles, closes),
+//! request (vendor/server/src/search/search_application.cpp SearchApplication accepts, handles, closes),
 //! frames encoded/decrypted by [`ffxi_proto::search::SearchCrypto`].
 
 use std::sync::atomic::{AtomicU32, Ordering};

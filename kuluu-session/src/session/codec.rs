@@ -1,5 +1,12 @@
 use super::*;
 
+// vendor/server/src/map/enums/packet_c2s.h GP_CLI_COMMAND_*
+pub(crate) const ITEM_USE: u16 = 0x037;
+pub(crate) const CHAT_NAME: u16 = 0x0B6;
+pub(crate) const EQUIP_INSPECT: u16 = 0x0DD;
+pub(crate) const CAMP: u16 = 0x0E8;
+pub(crate) const BUFFCANCEL: u16 = 0x0F1;
+
 // GP_CLI_COMMAND_BUFFCANCEL, vendor/server/src/map/packets/c2s/0x0f1_buffcancel.h:
 // BuffNo u16 (the status icon id), padding u16. The server runs
 // DelStatusEffectsByIcon(BuffNo) and blocks the packet only while InEvent
@@ -7,7 +14,7 @@ use super::*;
 // gates on ffxi_vocab::status_effects::is_cancelable.
 pub fn build_subpacket_buffcancel(sync: u16, buff_no: u16) -> Vec<u8> {
     let mut buf = vec![0u8; 8];
-    buf[0..4].copy_from_slice(&build_subpacket_header(0x0F1, 2, sync));
+    buf[0..4].copy_from_slice(&build_subpacket_header(BUFFCANCEL, 2, sync));
     buf[4..6].copy_from_slice(&buff_no.to_le_bytes());
     buf
 }
@@ -183,7 +190,7 @@ pub fn build_subpacket_equip_inspect(
     kind: u8,
 ) -> Vec<u8> {
     let mut buf = vec![0u8; 16];
-    buf[0..4].copy_from_slice(&build_subpacket_header(0x0DD, 4, sync));
+    buf[0..4].copy_from_slice(&build_subpacket_header(EQUIP_INSPECT, 4, sync));
     buf[4..8].copy_from_slice(&unique_no.to_le_bytes());
 
     buf[8..12].copy_from_slice(&(act_index as u32).to_le_bytes());
@@ -248,7 +255,7 @@ pub fn build_subpacket_reqlogout(sync: u16, mode: u16, kind: u16) -> Vec<u8> {
 
 pub fn build_subpacket_camp(sync: u16, mode: HealMode) -> Vec<u8> {
     let mut buf = vec![0u8; 8];
-    buf[0..4].copy_from_slice(&build_subpacket_header(0x0E8, 2, sync));
+    buf[0..4].copy_from_slice(&build_subpacket_header(CAMP, 2, sync));
     buf[4..8].copy_from_slice(&mode.as_u32().to_le_bytes());
     buf
 }
@@ -261,7 +268,7 @@ pub fn build_subpacket_item_use(
     slot: u8,
 ) -> Vec<u8> {
     let mut buf = vec![0u8; 20];
-    buf[0..4].copy_from_slice(&build_subpacket_header(0x037, 5, sync));
+    buf[0..4].copy_from_slice(&build_subpacket_header(ITEM_USE, 5, sync));
     buf[4..8].copy_from_slice(&unique_no.to_le_bytes());
 
     buf[12..14].copy_from_slice(&act_index.to_le_bytes());
@@ -642,7 +649,7 @@ pub(crate) fn build_subpacket_tell(sync: u16, recipient: &str, text: &str) -> Ve
     let size_words = (total / 4) as u16;
 
     let mut buf = vec![0u8; total];
-    buf[0..4].copy_from_slice(&build_subpacket_header(0x0B6, size_words, sync));
+    buf[0..4].copy_from_slice(&build_subpacket_header(CHAT_NAME, size_words, sync));
     // GP_CLI_COMMAND_CHAT_NAME.unknown00 must be 3 or the server rejects the
     // packet (PacketValidator .mustEqual(unknown00, 3), 0x0b6_chat_name.cpp:60);
     // the retail client always sends 3. Without it every tell — and the
@@ -859,7 +866,7 @@ pub(crate) fn build_subpacket_pos(
     buf[8..12].copy_from_slice(&z.to_le_bytes());
     buf[12..16].copy_from_slice(&y.to_le_bytes());
     buf[20] = heading;
-    // GP_CLI_COMMAND_POS.facetarget (vendor/server/.../c2s/0x015_pos.h): the targid
+    // GP_CLI_COMMAND_POS.facetarget (vendor/server/src/map/packets/c2s/0x015_pos.h): the targid
     // we're looking at, relayed by the server so other clients turn our head. +21
     // is the TargetMode/RunMode/GroundMode bitfield, left 0.
     buf[22..24].copy_from_slice(&face_target.to_le_bytes());

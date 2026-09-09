@@ -356,7 +356,11 @@ fn myroom_job_packet_layout_matches_lsb_struct() {
     let buf = build_subpacket_myroom_job(0xBEEF, Some(5), Some(13));
     assert_eq!(buf.len(), 8, "4 hdr + MainJobIndex + SupportJobIndex + pad");
     let id_and_size = u16::from_le_bytes([buf[0], buf[1]]);
-    assert_eq!(id_and_size & 0x1FF, 0x100, "opcode MYROOM_JOB");
+    assert_eq!(
+        id_and_size & framing::SUBPACKET_OPCODE_MASK,
+        ffxi_proto::map::c2s::MYROOM_JOB,
+        "opcode MYROOM_JOB"
+    );
     assert_eq!(id_and_size >> 9, 2, "size_words");
     assert_eq!(u16::from_le_bytes([buf[2], buf[3]]), 0xBEEF, "sync");
     assert_eq!(buf[4], 5, "MainJobIndex");
@@ -388,7 +392,11 @@ fn motion_packet_layout_matches_lsb_struct() {
         "hdr + UniqueNo + ActIndex + Number/Mode/Param/pad"
     );
     let id_and_size = u16::from_le_bytes([buf[0], buf[1]]);
-    assert_eq!(id_and_size & 0x1FF, ffxi_proto::map::c2s::MOTION, "opcode");
+    assert_eq!(
+        id_and_size & framing::SUBPACKET_OPCODE_MASK,
+        ffxi_proto::map::c2s::MOTION,
+        "opcode"
+    );
     assert_eq!(id_and_size >> 9, 4, "size_words");
     assert_eq!(u16::from_le_bytes([buf[2], buf[3]]), 0xBEEF, "sync");
     assert_eq!(
@@ -413,7 +421,10 @@ fn emote_list_req_is_header_only() {
     let buf = build_subpacket_emote_list_req(0x1234);
     assert_eq!(buf.len(), 4);
     let id_and_size = u16::from_le_bytes([buf[0], buf[1]]);
-    assert_eq!(id_and_size & 0x1FF, ffxi_proto::map::c2s::EMOTE_LIST);
+    assert_eq!(
+        id_and_size & framing::SUBPACKET_OPCODE_MASK,
+        ffxi_proto::map::c2s::EMOTE_LIST
+    );
     assert_eq!(id_and_size >> 9, 1, "size_words");
     assert_eq!(u16::from_le_bytes([buf[2], buf[3]]), 0x1234, "sync");
 }
@@ -427,7 +438,10 @@ fn tracking_list_req_carries_sendflg_one() {
     let buf = build_subpacket_tracking_list(0x1234);
     assert_eq!(buf.len(), 8);
     let id_and_size = u16::from_le_bytes([buf[0], buf[1]]);
-    assert_eq!(id_and_size & 0x1FF, ffxi_proto::map::c2s::TRACKING_LIST);
+    assert_eq!(
+        id_and_size & framing::SUBPACKET_OPCODE_MASK,
+        ffxi_proto::map::c2s::TRACKING_LIST
+    );
     assert_eq!(id_and_size >> 9, 2, "size_words");
     assert_eq!(u16::from_le_bytes([buf[2], buf[3]]), 0x1234, "sync");
     assert_eq!(
@@ -735,6 +749,7 @@ fn walkaway_release_only_user_driven_past_threshold() {
 }
 
 const PINNED_EVENT: (u32, u16, u16) = (0x0100_02FF, 7, 0x0123);
+const ID_FLIP: u16 = 0xFF;
 const FLUSH_ZONE: u16 = 230;
 const FLUSH_SEQ: u16 = 0x0044;
 
@@ -827,7 +842,11 @@ fn walking_away_clears_the_vm_dialog_it_released() {
     .expect("walking away releases the pinned event");
     assert!(flush.clear_dialog);
 
-    let other = (PINNED_EVENT.0 ^ 0xFF, PINNED_EVENT.1, PINNED_EVENT.2);
+    let other = (
+        PINNED_EVENT.0 ^ u32::from(ID_FLIP),
+        PINNED_EVENT.1,
+        PINNED_EVENT.2,
+    );
     let mut pending = vec![PINNED_EVENT];
     let flush = flush_pending_event_end(
         flush_inputs(true, false, true),
@@ -854,7 +873,7 @@ fn a_pinned_event_is_owed_exactly_one_event_end() {
     assert!(!take_pending_event_end(
         &mut pending,
         unique_no,
-        event_id ^ 0xFF
+        event_id ^ ID_FLIP
     ));
     assert_eq!(pending, vec![(unique_no, act_index, event_id)]);
 }
@@ -1043,7 +1062,10 @@ fn scenario_item_packet_layout_matches_lsb_struct() {
     assert_eq!(buf.len(), 76, "header(4) + body(72)");
 
     let id_and_size = u16::from_le_bytes([buf[0], buf[1]]);
-    assert_eq!(id_and_size & 0x1FF, ffxi_proto::map::c2s::SCENARIO_ITEM);
+    assert_eq!(
+        id_and_size & framing::SUBPACKET_OPCODE_MASK,
+        ffxi_proto::map::c2s::SCENARIO_ITEM
+    );
     assert_eq!(id_and_size >> 9, 19, "size_words = 76/4");
     assert_eq!(u16::from_le_bytes([buf[2], buf[3]]), 0x1234, "sync");
 
@@ -1502,7 +1524,11 @@ fn tell_packet_layout_matches_phoenix_struct() {
     assert_eq!(buf.len(), 24, "total = 4 hdr + 20 body, padded to mul-of-4");
 
     let id_and_size = u16::from_le_bytes([buf[0], buf[1]]);
-    assert_eq!(id_and_size & 0x1FF, 0x0B6, "opcode");
+    assert_eq!(
+        id_and_size & framing::SUBPACKET_OPCODE_MASK,
+        codec::CHAT_NAME,
+        "opcode"
+    );
     assert_eq!(id_and_size >> 9, 6, "size_words");
     let sync = u16::from_le_bytes([buf[2], buf[3]]);
     assert_eq!(sync, 0xABCD, "sync passed through");
@@ -1546,7 +1572,11 @@ fn item_use_packet_layout_matches_phoenix_struct() {
     assert_eq!(buf.len(), 20);
 
     let id_and_size = u16::from_le_bytes([buf[0], buf[1]]);
-    assert_eq!(id_and_size & 0x1FF, 0x037, "opcode");
+    assert_eq!(
+        id_and_size & framing::SUBPACKET_OPCODE_MASK,
+        codec::ITEM_USE,
+        "opcode"
+    );
     assert_eq!(id_and_size >> 9, 5, "size_words");
     let sync = u16::from_le_bytes([buf[2], buf[3]]);
     assert_eq!(sync, 0xBEEF, "sync passed through");
@@ -2171,8 +2201,9 @@ impl BattleBitWriter {
         };
         let shifted = (value & mask) << bit_in_byte;
         let cover = total_bits.div_ceil(8);
+        const BYTE_MASK: u64 = 0xFF;
         for i in 0..cover {
-            self.data[byte_offset + i] |= ((shifted >> (i * 8)) & 0xFF) as u8;
+            self.data[byte_offset + i] |= ((shifted >> (i * 8)) & BYTE_MASK) as u8;
         }
         self.pos += bits as usize;
     }
@@ -2877,8 +2908,16 @@ fn buffcancel_packet_layout_matches_server_struct() {
     let buf = build_subpacket_buffcancel(0x1234, 40);
     assert_eq!(buf.len(), 8);
     let hdr = u16::from_le_bytes([buf[0], buf[1]]);
-    assert_eq!(hdr & 0x01FF, 0x0F1, "opcode");
-    assert_eq!((hdr >> 9) & 0x7F, 2, "size in words");
+    assert_eq!(
+        hdr & framing::SUBPACKET_OPCODE_MASK,
+        codec::BUFFCANCEL,
+        "opcode"
+    );
+    assert_eq!(
+        (hdr >> framing::SUBPACKET_SIZE_WORDS_SHIFT) & framing::SUBPACKET_SIZE_WORDS_MASK,
+        2,
+        "size in words"
+    );
     assert_eq!(
         u16::from_le_bytes(buf[4..6].try_into().unwrap()),
         40,
@@ -2892,8 +2931,14 @@ fn shop_buy_packet_layout_matches_server_struct() {
     let buf = build_subpacket_shop_buy(0xABCD, 5, 12, 3);
     assert_eq!(buf.len(), 16);
     let hdr = u16::from_le_bytes([buf[0], buf[1]]);
-    assert_eq!(hdr & 0x01FF, 0x083);
-    assert_eq!((hdr >> 9) & 0x7F, 4);
+    assert_eq!(
+        hdr & framing::SUBPACKET_OPCODE_MASK,
+        ffxi_proto::map::c2s::SHOP_BUY
+    );
+    assert_eq!(
+        (hdr >> framing::SUBPACKET_SIZE_WORDS_SHIFT) & framing::SUBPACKET_SIZE_WORDS_MASK,
+        4
+    );
     assert_eq!(u32::from_le_bytes(buf[4..8].try_into().unwrap()), 5, "qty");
     assert_eq!(
         u16::from_le_bytes(buf[8..10].try_into().unwrap()),
@@ -2914,8 +2959,16 @@ fn shop_sell_req_packet_layout_matches_server_struct() {
     let buf = build_subpacket_shop_sell_req(0xABCD, 7, 4096, 11);
     assert_eq!(buf.len(), 12, "header (4) + body (8)");
     let hdr = u16::from_le_bytes([buf[0], buf[1]]);
-    assert_eq!(hdr & 0x01FF, 0x084, "opcode in low 9 bits");
-    assert_eq!((hdr >> 9) & 0x7F, 3, "size_words=3");
+    assert_eq!(
+        hdr & framing::SUBPACKET_OPCODE_MASK,
+        ffxi_proto::map::c2s::SHOP_SELL_REQ,
+        "opcode in low 9 bits"
+    );
+    assert_eq!(
+        (hdr >> framing::SUBPACKET_SIZE_WORDS_SHIFT) & framing::SUBPACKET_SIZE_WORDS_MASK,
+        3,
+        "size_words=3"
+    );
     assert_eq!(
         u16::from_le_bytes([buf[2], buf[3]]),
         0xABCD,
@@ -2940,8 +2993,16 @@ fn shop_sell_set_packet_layout_matches_server_struct() {
     let buf = build_subpacket_shop_sell_set(0xBEEF);
     assert_eq!(buf.len(), 8, "header (4) + body (4)");
     let hdr = u16::from_le_bytes([buf[0], buf[1]]);
-    assert_eq!(hdr & 0x01FF, 0x085, "opcode in low 9 bits");
-    assert_eq!((hdr >> 9) & 0x7F, 2, "size_words=2");
+    assert_eq!(
+        hdr & framing::SUBPACKET_OPCODE_MASK,
+        ffxi_proto::map::c2s::SHOP_SELL_SET,
+        "opcode in low 9 bits"
+    );
+    assert_eq!(
+        (hdr >> framing::SUBPACKET_SIZE_WORDS_SHIFT) & framing::SUBPACKET_SIZE_WORDS_MASK,
+        2,
+        "size_words=2"
+    );
     assert_eq!(
         u16::from_le_bytes([buf[2], buf[3]]),
         0xBEEF,
@@ -2982,8 +3043,16 @@ fn camp_packet_layout_matches_server_struct() {
         let buf = build_subpacket_camp(0xBEEF, mode);
         assert_eq!(buf.len(), 8, "header (4) + body (4)");
         let hdr_word = u16::from_le_bytes([buf[0], buf[1]]);
-        assert_eq!(hdr_word & 0x01FF, 0x0E8, "opcode in low 9 bits");
-        assert_eq!((hdr_word >> 9) & 0x7F, 2, "size_words=2");
+        assert_eq!(
+            hdr_word & framing::SUBPACKET_OPCODE_MASK,
+            codec::CAMP,
+            "opcode in low 9 bits"
+        );
+        assert_eq!(
+            (hdr_word >> framing::SUBPACKET_SIZE_WORDS_SHIFT) & framing::SUBPACKET_SIZE_WORDS_MASK,
+            2,
+            "size_words=2"
+        );
         assert_eq!(
             u16::from_le_bytes([buf[2], buf[3]]),
             0xBEEF,
@@ -3002,8 +3071,16 @@ fn gameok_packet_layout_matches_server_struct() {
     let buf = build_subpacket_gameok(0xBEEF);
     assert_eq!(buf.len(), 12, "header (4) + body (8)");
     let hdr_word = u16::from_le_bytes([buf[0], buf[1]]);
-    assert_eq!(hdr_word & 0x01FF, 0x00C, "opcode in low 9 bits");
-    assert_eq!((hdr_word >> 9) & 0x7F, 3, "size_words=3");
+    assert_eq!(
+        hdr_word & framing::SUBPACKET_OPCODE_MASK,
+        ffxi_proto::map::c2s::GAMEOK,
+        "opcode in low 9 bits"
+    );
+    assert_eq!(
+        (hdr_word >> framing::SUBPACKET_SIZE_WORDS_SHIFT) & framing::SUBPACKET_SIZE_WORDS_MASK,
+        3,
+        "size_words=3"
+    );
     assert_eq!(
         u16::from_le_bytes([buf[2], buf[3]]),
         0xBEEF,
@@ -3027,8 +3104,16 @@ fn equip_inspect_packet_layout_matches_server_struct() {
     assert_eq!(buf.len(), 16, "header (4) + body (12)");
 
     let hdr_word = u16::from_le_bytes([buf[0], buf[1]]);
-    assert_eq!(hdr_word & 0x01FF, 0x0DD, "opcode in low 9 bits");
-    assert_eq!((hdr_word >> 9) & 0x7F, 4, "size_words=4");
+    assert_eq!(
+        hdr_word & framing::SUBPACKET_OPCODE_MASK,
+        codec::EQUIP_INSPECT,
+        "opcode in low 9 bits"
+    );
+    assert_eq!(
+        (hdr_word >> framing::SUBPACKET_SIZE_WORDS_SHIFT) & framing::SUBPACKET_SIZE_WORDS_MASK,
+        4,
+        "size_words=4"
+    );
     assert_eq!(
         u32::from_le_bytes(buf[4..8].try_into().unwrap()),
         0x1234_5678,
@@ -3049,8 +3134,16 @@ fn bazaar_packet_layouts_match_server_structs() {
     let list = build_subpacket_bazaar_list(0xABCD, 0x1234_5678, 42);
     assert_eq!(list.len(), 12, "header (4) + body (8)");
     let hdr = u16::from_le_bytes([list[0], list[1]]);
-    assert_eq!(hdr & 0x01FF, 0x105, "opcode = 0x105 BAZAAR_LIST");
-    assert_eq!((hdr >> 9) & 0x7F, 3, "size_words=3");
+    assert_eq!(
+        hdr & framing::SUBPACKET_OPCODE_MASK,
+        ffxi_proto::map::c2s::BAZAAR_LIST,
+        "opcode BAZAAR_LIST"
+    );
+    assert_eq!(
+        (hdr >> framing::SUBPACKET_SIZE_WORDS_SHIFT) & framing::SUBPACKET_SIZE_WORDS_MASK,
+        3,
+        "size_words=3"
+    );
     assert_eq!(u16::from_le_bytes([list[2], list[3]]), 0xABCD, "sync");
     assert_eq!(
         u32::from_le_bytes(list[4..8].try_into().unwrap()),
@@ -3064,7 +3157,11 @@ fn bazaar_packet_layouts_match_server_structs() {
     let buy = build_subpacket_bazaar_buy(0xBEEF, 7, 12);
     assert_eq!(buy.len(), 12, "header (4) + body (8)");
     let hdr = u16::from_le_bytes([buy[0], buy[1]]);
-    assert_eq!(hdr & 0x01FF, 0x106, "opcode = 0x106 BAZAAR_BUY");
+    assert_eq!(
+        hdr & framing::SUBPACKET_OPCODE_MASK,
+        ffxi_proto::map::c2s::BAZAAR_BUY,
+        "opcode BAZAAR_BUY"
+    );
     assert_eq!(buy[4], 7, "BazaarItemIndex");
     assert_eq!(&buy[5..8], &[0u8; 3], "padding00");
     assert_eq!(
@@ -3077,8 +3174,16 @@ fn bazaar_packet_layouts_match_server_structs() {
     let exit = build_subpacket_bazaar_exit(0x0042);
     assert_eq!(exit.len(), 4, "header only");
     let hdr = u16::from_le_bytes([exit[0], exit[1]]);
-    assert_eq!(hdr & 0x01FF, 0x104, "opcode = 0x104 BAZAAR_EXIT");
-    assert_eq!((hdr >> 9) & 0x7F, 1, "size_words=1");
+    assert_eq!(
+        hdr & framing::SUBPACKET_OPCODE_MASK,
+        ffxi_proto::map::c2s::BAZAAR_EXIT,
+        "opcode BAZAAR_EXIT"
+    );
+    assert_eq!(
+        (hdr >> framing::SUBPACKET_SIZE_WORDS_SHIFT) & framing::SUBPACKET_SIZE_WORDS_MASK,
+        1,
+        "size_words=1"
+    );
     assert_eq!(u16::from_le_bytes([exit[2], exit[3]]), 0x0042, "sync");
 }
 
@@ -3089,7 +3194,11 @@ fn equip_set_packet_layout_matches_server_struct() {
     let buf = build_subpacket_equip_set(0xBEEF, 7, 10, 0);
     assert_eq!(buf.len(), 8, "header (4) + body (4)");
     let hdr_word = u16::from_le_bytes([buf[0], buf[1]]);
-    assert_eq!(hdr_word & 0x01FF, 0x050, "opcode = 0x050 EQUIP_SET");
+    assert_eq!(
+        hdr_word & framing::SUBPACKET_OPCODE_MASK,
+        ffxi_proto::map::c2s::EQUIP_SET,
+        "opcode EQUIP_SET"
+    );
     assert_eq!(u16::from_le_bytes([buf[2], buf[3]]), 0xBEEF, "sync");
     assert_eq!(buf[4], 7, "PropertyItemIndex = container_index (slotID)");
     assert_eq!(buf[5], 10, "EquipKind = equip_slot (Waist)");
@@ -3103,8 +3212,16 @@ fn item_stack_packet_layout_matches_server_struct() {
     let buf = build_subpacket_item_stack(0xCAFE, 0);
     assert_eq!(buf.len(), 8, "header (4) + Category u32 (4)");
     let hdr_word = u16::from_le_bytes([buf[0], buf[1]]);
-    assert_eq!(hdr_word & 0x01FF, 0x03A, "opcode = 0x03A ITEM_STACK");
-    assert_eq!((hdr_word >> 9) & 0x7F, 2, "size_words = 2 (8 bytes)");
+    assert_eq!(
+        hdr_word & framing::SUBPACKET_OPCODE_MASK,
+        ffxi_proto::map::c2s::ITEM_STACK,
+        "opcode ITEM_STACK"
+    );
+    assert_eq!(
+        (hdr_word >> framing::SUBPACKET_SIZE_WORDS_SHIFT) & framing::SUBPACKET_SIZE_WORDS_MASK,
+        2,
+        "size_words = 2 (8 bytes)"
+    );
     assert_eq!(u16::from_le_bytes([buf[2], buf[3]]), 0xCAFE, "sync");
     assert_eq!(
         u32::from_le_bytes(buf[4..8].try_into().unwrap()),
@@ -3123,8 +3240,16 @@ fn item_move_packet_layout_matches_server_struct() {
     let buf = build_subpacket_item_move(0xBEEF, 12, 0, 1, 7, None);
     assert_eq!(buf.len(), 12, "header (4) + ItemNum (4) + 4 bytes");
     let hdr_word = u16::from_le_bytes([buf[0], buf[1]]);
-    assert_eq!(hdr_word & 0x01FF, 0x029, "opcode = 0x029 ITEM_MOVE");
-    assert_eq!((hdr_word >> 9) & 0x7F, 3, "size_words = 3 (12 bytes)");
+    assert_eq!(
+        hdr_word & framing::SUBPACKET_OPCODE_MASK,
+        ffxi_proto::map::c2s::ITEM_MOVE,
+        "opcode ITEM_MOVE"
+    );
+    assert_eq!(
+        (hdr_word >> framing::SUBPACKET_SIZE_WORDS_SHIFT) & framing::SUBPACKET_SIZE_WORDS_MASK,
+        3,
+        "size_words = 3 (12 bytes)"
+    );
     assert_eq!(u16::from_le_bytes([buf[2], buf[3]]), 0xBEEF, "sync");
     assert_eq!(
         u32::from_le_bytes(buf[4..8].try_into().unwrap()),
@@ -3155,8 +3280,16 @@ fn pbx_packet_layout_matches_lsb_validator() {
         let buf = build_subpacket_pbx(0xBEEF, op);
         assert_eq!(buf.len(), 32, "GP_CLI_COMMAND_PBX is 32 bytes");
         let hdr = u16::from_le_bytes(buf[0..2].try_into().unwrap());
-        assert_eq!(hdr & 0x01FF, 0x04D, "opcode = 0x04D PBX");
-        assert_eq!((hdr >> 9) & 0x7F, 8, "size_words = 8");
+        assert_eq!(
+            hdr & framing::SUBPACKET_OPCODE_MASK,
+            ffxi_proto::map::c2s::PBX,
+            "opcode PBX"
+        );
+        assert_eq!(
+            (hdr >> framing::SUBPACKET_SIZE_WORDS_SHIFT) & framing::SUBPACKET_SIZE_WORDS_MASK,
+            8,
+            "size_words = 8"
+        );
         assert_eq!(&buf[12..16], &[0, 0, 0, 0], "Result/ResParam1-3 zero");
         (
             buf[4],

@@ -1213,6 +1213,7 @@ fn entity_patched_allegiance_materializes_flags_and_preserves_the_rest() {
 
 #[test]
 fn name_extraction_miss_appends_to_ring_buffer_with_cap() {
+    const BODY_BYTE_MASK: u32 = 0xFF;
     let mut s = SessionState::default();
 
     for i in 0..(NAME_MISSES_CAP as u32 + 5) {
@@ -1223,7 +1224,7 @@ fn name_extraction_miss_appends_to_ring_buffer_with_cap() {
                 act_index: i as u16,
                 send_flag: 0,
                 body_len: 64,
-                body_hex: format!("{:02x}", i & 0xFF),
+                body_hex: format!("{:02x}", i & BODY_BYTE_MASK),
                 miss_kind: NameMissKind::NameBitClear,
                 at_unix_ms: 1000 + u64::from(i),
             },

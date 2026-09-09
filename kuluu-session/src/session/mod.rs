@@ -1,3 +1,4 @@
+mod event_transport;
 use anyhow::{anyhow, Context, Result};
 use ffxi_proto::{decode, framing};
 use tokio::sync::{broadcast, mpsc};
@@ -2518,19 +2519,26 @@ async fn keepalive_loop(
                             for cue in dialog_session.take_cues() {
                                 cutscene.push(cue, &event_tx);
                             }
+                            let mut scene_payload = event_transport::drain_scene_actions(
+                                &mut dialog_session, (u, a, n), current_zone_id, &mut sub_seq, &mut self_pos, &event_tx,
+                            );
+                            if let crate::event_dialog::Advance::Ended { end_para } = &advance {
+                                if take_pending_event_end(&mut pending_event_end, u, n) {
+                                    scene_payload.extend(build_subpacket_event_end(sub_seq, u, a, current_zone_id, n, *end_para));
+                                    sub_seq = sub_seq.wrapping_add(1);
+                                }
+                            }
+                            if !scene_payload.is_empty() {
+                                if let Err(error) = map.send_encrypted(&scene_payload, datagram_header_id(sub_seq), server_last_seq).await {
+                                    tracing::warn!(%error, "event scene send failed");
+                                }
+                            }
                             match advance {
                                 crate::event_dialog::Advance::Frame(dialog) => {
                                     emit_event_speech_to_chat(&event_tx, &dialog);
                                     let _ = event_tx.send(AgentEvent::EventDialog { dialog });
                                 }
-                                crate::event_dialog::Advance::Ended { end_para } => {
-                                    if take_pending_event_end(&mut pending_event_end, u, n) {
-                                        let payload = build_subpacket_event_end(sub_seq, u, a, current_zone_id, n, end_para);
-                                        sub_seq = sub_seq.wrapping_add(1);
-                                        if let Err(e) = map.send_encrypted(&payload, datagram_header_id(sub_seq), server_last_seq).await {
-                                            tracing::warn!(error = %e, "EVENT_END (vm) send failed");
-                                        }
-                                    }
+                                crate::event_dialog::Advance::Ended { .. } => {
                                     cutscene.end(crate::event_dialog::EventSessionExit::Cancelled, &event_tx);
                                     let _ = event_tx.send(AgentEvent::EventEnded);
                                 }
@@ -2689,19 +2697,26 @@ async fn keepalive_loop(
                             for cue in dialog_session.take_cues() {
                                 cutscene.push(cue, &event_tx);
                             }
+                            let mut scene_payload = event_transport::drain_scene_actions(
+                                &mut dialog_session, (u, a, n), current_zone_id, &mut sub_seq, &mut self_pos, &event_tx,
+                            );
+                            if let crate::event_dialog::Advance::Ended { end_para } = &advance {
+                                if take_pending_event_end(&mut pending_event_end, u, n) {
+                                    scene_payload.extend(build_subpacket_event_end(sub_seq, u, a, current_zone_id, n, *end_para));
+                                    sub_seq = sub_seq.wrapping_add(1);
+                                }
+                            }
+                            if !scene_payload.is_empty() {
+                                if let Err(error) = map.send_encrypted(&scene_payload, datagram_header_id(sub_seq), server_last_seq).await {
+                                    tracing::warn!(%error, "event scene send failed");
+                                }
+                            }
                             match advance {
                                 crate::event_dialog::Advance::Frame(dialog) => {
                                     emit_event_speech_to_chat(&event_tx, &dialog);
                                     let _ = event_tx.send(AgentEvent::EventDialog { dialog });
                                 }
-                                crate::event_dialog::Advance::Ended { end_para } => {
-                                    if take_pending_event_end(&mut pending_event_end, u, n) {
-                                        let payload = build_subpacket_event_end(sub_seq, u, a, current_zone_id, n, end_para);
-                                        sub_seq = sub_seq.wrapping_add(1);
-                                        if let Err(e) = map.send_encrypted(&payload, datagram_header_id(sub_seq), server_last_seq).await {
-                                            tracing::warn!(error = %e, "EVENT_END (vm choice) send failed");
-                                        }
-                                    }
+                                crate::event_dialog::Advance::Ended { .. } => {
                                     cutscene.end(crate::event_dialog::EventSessionExit::ScriptEnded, &event_tx);
                                     let _ = event_tx.send(AgentEvent::EventEnded);
                                 }
@@ -3829,19 +3844,26 @@ async fn keepalive_loop(
                     for cue in dialog_session.take_cues() {
                         cutscene.push(cue, &event_tx);
                     }
+                    let mut scene_payload = event_transport::drain_scene_actions(
+                        &mut dialog_session, (u, a, n), current_zone_id, &mut sub_seq, &mut self_pos, &event_tx,
+                    );
+                    if let crate::event_dialog::Advance::Ended { end_para } = &advance {
+                        if take_pending_event_end(&mut pending_event_end, u, n) {
+                            scene_payload.extend(build_subpacket_event_end(sub_seq, u, a, current_zone_id, n, *end_para));
+                            sub_seq = sub_seq.wrapping_add(1);
+                        }
+                    }
+                    if !scene_payload.is_empty() {
+                        if let Err(error) = map.send_encrypted(&scene_payload, datagram_header_id(sub_seq), server_last_seq).await {
+                            tracing::warn!(%error, "event scene send failed");
+                        }
+                    }
                     match advance {
                         crate::event_dialog::Advance::Frame(dialog) => {
                             emit_event_speech_to_chat(&event_tx, &dialog);
                             let _ = event_tx.send(AgentEvent::EventDialog { dialog });
                         }
-                        crate::event_dialog::Advance::Ended { end_para } => {
-                            if take_pending_event_end(&mut pending_event_end, u, n) {
-                                let payload = build_subpacket_event_end(sub_seq, u, a, current_zone_id, n, end_para);
-                                sub_seq = sub_seq.wrapping_add(1);
-                                if let Err(e) = map.send_encrypted(&payload, datagram_header_id(sub_seq), server_last_seq).await {
-                                    tracing::warn!(error = %e, "EVENT_END (vm wait) send failed");
-                                }
-                            }
+                        crate::event_dialog::Advance::Ended { .. } => {
                             cutscene.end(crate::event_dialog::EventSessionExit::ScriptEnded, &event_tx);
                             let _ = event_tx.send(AgentEvent::EventEnded);
                         }
@@ -3930,7 +3952,8 @@ async fn keepalive_loop(
                     let dz = self_pos.pos.z - anchor.z;
                     (dx * dx + dy * dy + dz * dz).sqrt()
                 });
-                let walked_away = should_release_on_walkaway(user_driven_events, walk_dist);
+                let walked_away = !dialog_session.controls_player_position()
+                    && should_release_on_walkaway(user_driven_events, walk_dist);
 
                 let mut payload = Vec::new();
 
@@ -3946,6 +3969,7 @@ async fn keepalive_loop(
 
                 if zone_transition_sent {
                     if let Some(ev) = mog.zone_in_event.take() {
+                        dialog_session.set_player_position(event_transport::event_position(self_pos));
                         begin_server_event(
                             &mut dialog_session,
                             EventTrigger {
@@ -4330,6 +4354,7 @@ async fn keepalive_loop(
                                                 .lookup(unique_no)
                                                 .map(|s| s.replace('_', " "))
                                         });
+                                    dialog_session.set_player_position(event_transport::event_position(self_pos));
                                     begin_server_event(
                                         &mut dialog_session,
                                         trigger,
@@ -4340,6 +4365,22 @@ async fn keepalive_loop(
                                     );
                                     continue;
                                 }
+                            }
+
+                            if sub.opcode == ffxi_proto::map::s2c::WPOS2 {
+                                if let Ok(movement) = decode::ForcedMove::decode(sub.data) {
+                                    if movement.unique_no == self_char_id && matches!(movement.mode, decode::PosMode::Event | decode::PosMode::Clear) {
+                                        let accepted = if movement.mode == decode::PosMode::Event {
+                                            Position { pos: Vec3 { x: movement.x, y: movement.y, z: movement.z }, heading: movement.heading, ..self_pos }
+                                        } else { self_pos };
+                                        dialog_session.acknowledge_position(event_transport::event_position(accepted));
+                                    }
+                                }
+                            }
+                            if sub.opcode == ffxi_proto::map::s2c::EVENTUCOFF
+                                && eventucoff_mode_of(sub.data) == Some(ffxi_proto::map::event_position_wire::EVENT_RECV_PENDING)
+                            {
+                                dialog_session.acknowledge_event();
                             }
 
                             if sub.opcode == ffxi_proto::map::s2c::EVENTUCOFF
@@ -6474,10 +6515,8 @@ struct EventEndFlush {
 ///
 /// The drained 0x05B ends the event server-side, so only the walk-away path —
 /// where the player abandoned the frame — clears the VM session that owns it.
-/// Every other path (notably `!user_driven`: agent_io, agent_socket, kuluu-mcp,
-/// headless) keeps the session alive so the consumer can still walk the dialog
-/// tree locally; [`take_pending_event_end`] is what stops that walk from
-/// sending a second EVENT_END.
+/// A live VM retains the server event until its script finishes, including in
+/// headless sessions; EVENTENDXZY validation requires that event to remain active.
 fn flush_pending_event_end(
     inputs: EventEndFlushInputs,
     pending_event_end: &mut Vec<(u32, u16, u16)>,
@@ -6487,7 +6526,7 @@ fn flush_pending_event_end(
 ) -> Option<EventEndFlush> {
     let dialog_open = active_dialog.is_some();
     let flush =
-        !inputs.user_driven || inputs.walked_away || (inputs.watchdog_fires && !dialog_open);
+        inputs.walked_away || ((!inputs.user_driven || inputs.watchdog_fires) && !dialog_open);
     if !flush || pending_event_end.is_empty() {
         return None;
     }

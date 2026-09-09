@@ -783,7 +783,10 @@ fn grace_watchdog_spares_a_dialog_the_player_is_reading() {
 
     for active in [None, open] {
         for watchdog in [false, true] {
-            assert!(flushes(flush_inputs(!USER, watchdog, !WALKED), active));
+            assert_eq!(
+                flushes(flush_inputs(!USER, watchdog, !WALKED), active),
+                active.is_none()
+            );
         }
     }
 
@@ -799,34 +802,22 @@ fn grace_watchdog_spares_a_dialog_the_player_is_reading() {
 }
 
 #[test]
-fn agent_mode_auto_release_keeps_the_vm_dialog_walkable() {
+fn agent_mode_keeps_the_server_event_until_the_vm_finishes() {
     let mut pending = vec![PINNED_EVENT];
-    let flush = flush_pending_event_end(
+    assert!(flush_pending_event_end(
         flush_inputs(false, false, false),
         &mut pending,
         Some(PINNED_EVENT),
         FLUSH_ZONE,
         FLUSH_SEQ,
     )
-    .expect("a non-user-driven session auto-releases the pinned event");
-
-    assert!(
-        !flush.clear_dialog,
-        "agent/headless dialog must survive the auto-release so frames 2..N still play"
-    );
-    assert_eq!(flush.released, 1);
-    assert_eq!(flush.next_sub_seq, FLUSH_SEQ.wrapping_add(1));
-    assert!(pending.is_empty());
-
-    let (unique_no, act_index, event_id) = PINNED_EVENT;
-    let expected =
-        build_subpacket_event_end(FLUSH_SEQ, unique_no, act_index, FLUSH_ZONE, event_id, 0);
-    assert_eq!(flush.payload, expected);
-
-    assert!(
-        !take_pending_event_end(&mut pending, unique_no, event_id),
-        "the surviving VM session must not resend the 0x05B the flush already sent"
-    );
+    .is_none());
+    assert_eq!(pending, vec![PINNED_EVENT]);
+    assert!(take_pending_event_end(
+        &mut pending,
+        PINNED_EVENT.0,
+        PINNED_EVENT.2
+    ));
 }
 
 #[test]

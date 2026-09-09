@@ -815,7 +815,8 @@ pub fn dispatch_movement_system(
         return;
     }
 
-    let snapshot_driven = snapshot_drives_movement(state.snapshot.current_goal.as_ref());
+    let snapshot_driven = snapshot_drives_movement(state.snapshot.current_goal.as_ref())
+        || matches!(*mode, InputMode::Dialog(_));
     if snapshot_driven || prediction.snapshot_driven {
         prediction.pos = Vec3::new(
             state.snapshot.self_pos.pos.x,
@@ -2018,6 +2019,32 @@ mod tests {
             app.update();
             assert_eq!(app.world().resource::<LocalPlayerPrediction>().pos.x, 0.75);
         }
+    }
+
+    #[test]
+    fn dialog_movement_tracks_scripted_positions_and_keeps_the_final_position() {
+        let (mut app, mut commands) = movement_app();
+        app.insert_resource(InputMode::Dialog(kuluu_render::DialogCursor::default()));
+        for x in [0.0, 0.25, 0.5] {
+            app.world_mut()
+                .resource_mut::<SceneState>()
+                .snapshot
+                .self_pos
+                .pos
+                .x = x;
+            app.update();
+            assert_eq!(app.world().resource::<LocalPlayerPrediction>().pos.x, x);
+            assert!(commands.try_recv().is_err());
+        }
+        app.insert_resource(InputMode::default());
+        app.world_mut()
+            .resource_mut::<SceneState>()
+            .snapshot
+            .self_pos
+            .pos
+            .x = 0.75;
+        app.update();
+        assert_eq!(app.world().resource::<LocalPlayerPrediction>().pos.x, 0.75);
     }
 
     #[test]

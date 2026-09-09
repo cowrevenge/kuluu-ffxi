@@ -150,6 +150,56 @@ pub enum EventCue {
     },
 }
 
+impl EventCue {
+    pub(crate) fn resolve_event_actor(self, actor: ActorLookup) -> Self {
+        let resolve = |target: ActorLookup| {
+            if target.is_event_entity() {
+                actor
+            } else {
+                target
+            }
+        };
+        match self {
+            Self::ActorMotion {
+                actor1,
+                actor2,
+                key,
+            } => Self::ActorMotion {
+                actor1: resolve(actor1),
+                actor2: resolve(actor2),
+                key,
+            },
+            Self::Scheduler {
+                dat_id,
+                actor1,
+                actor2,
+                tag,
+                duration,
+            } => Self::Scheduler {
+                dat_id,
+                actor1: resolve(actor1),
+                actor2: resolve(actor2),
+                tag,
+                duration,
+            },
+            Self::ActorHide { target, hide } => Self::ActorHide {
+                target: resolve(target),
+                hide,
+            },
+            Self::Mount {
+                target,
+                status_event,
+                mount_id,
+            } => Self::Mount {
+                target: resolve(target),
+                status_event,
+                mount_id,
+            },
+            other => other,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

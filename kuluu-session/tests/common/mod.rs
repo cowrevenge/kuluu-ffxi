@@ -89,14 +89,44 @@ pub struct EphemeralChar {
     pool: Pool,
 }
 
-// Ok(None) = xidb is effectively unreachable (timed out mid-handshake, or the
-// accept-then-drop / refused IO class) and the caller should self-skip; any
-// other failure is a real provisioning error and still propagates.
+// A saturated or shutting-down mysqld still accepts the TCP connection and
+// then refuses the handshake with an ERR packet, so it arrives here as
+// Error::Server, not Error::Io. These are the codes that mean "the daemon is
+// up but cannot serve anyone right now", as opposed to a credential/schema
+// mistake this fixture is responsible for (1045 access denied, 1049 unknown
+// database), which must still fail the test.
+// https://mariadb.com/kb/en/mariadb-error-code-reference/
+const ER_CON_COUNT_ERROR: u16 = 1040;
+const ER_SERVER_SHUTDOWN: u16 = 1053;
+const ER_HOST_IS_BLOCKED: u16 = 1129;
+const ER_TOO_MANY_USER_CONNECTIONS: u16 = 1203;
+const ER_USER_LIMIT_REACHED: u16 = 1226;
+const XIDB_UNAVAILABLE_SERVER_CODES: &[u16] = &[
+    ER_CON_COUNT_ERROR,
+    ER_SERVER_SHUTDOWN,
+    ER_HOST_IS_BLOCKED,
+    ER_TOO_MANY_USER_CONNECTIONS,
+    ER_USER_LIMIT_REACHED,
+];
+
+fn xidb_unavailable(err: &mysql_async::Error) -> bool {
+    match err {
+        mysql_async::Error::Io(_) => true,
+        mysql_async::Error::Server(server) => XIDB_UNAVAILABLE_SERVER_CODES.contains(&server.code),
+        _ => false,
+    }
+}
+
+// Ok(None) = xidb cannot hand out a usable session (timed out mid-handshake,
+// the accept-then-drop / refused IO class, or a server that answered the
+// handshake with a capacity/availability error) and the caller should
+// self-skip; any other failure is a real provisioning error and still
+// propagates.
 async fn xidb_conn(db_url: &str, connect_timeout: Duration) -> Result<Option<(Pool, Conn)>> {
     let pool = Pool::new(db_url);
     match tokio::time::timeout(connect_timeout, pool.get_conn()).await {
         Ok(Ok(conn)) => Ok(Some((pool, conn))),
-        Ok(Err(mysql_async::Error::Io(err))) => {
+        Ok(Err(err)) if xidb_unavailable(&err) => {
             eprintln!("xidb at {db_url}: handshake failed ({err}); treating as unreachable");
             let _ = pool.disconnect().await;
             Ok(None)
@@ -317,10 +347,47 @@ async fn sweep_orphaned_child_rows(conn: &mut Conn) -> Result<()> {
 mod xidb_conn_tests {
     use super::*;
 
+    use tokio::io::AsyncWriteExt;
+
     const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(2);
 
     fn db_url(port: u16) -> String {
         format!("mysql://user:pass@127.0.0.1:{port}/xidb")
+    }
+
+    // MySQL/MariaDB wire packet: 3-byte LE payload length, 1-byte sequence id
+    // (0 for the server's first packet). A server that refuses before the
+    // handshake sends an ERR packet - 0xFF, LE u16 code, message - with no
+    // SQL-state field, because no capabilities have been negotiated yet.
+    // https://mariadb.com/kb/en/0-packet/
+    const PACKET_LENGTH_BYTES: usize = 3;
+    const SERVER_FIRST_PACKET_SEQ: u8 = 0;
+    const ERR_PACKET_TAG: u8 = 0xFF;
+
+    fn err_packet(code: u16, message: &str) -> Vec<u8> {
+        let mut payload = vec![ERR_PACKET_TAG];
+        payload.extend_from_slice(&code.to_le_bytes());
+        payload.extend_from_slice(message.as_bytes());
+
+        let mut framed = (payload.len() as u32).to_le_bytes()[..PACKET_LENGTH_BYTES].to_vec();
+        framed.push(SERVER_FIRST_PACKET_SEQ);
+        framed.extend_from_slice(&payload);
+        framed
+    }
+
+    async fn spawn_refusing_server(packet: Vec<u8>) -> u16 {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            while let Ok((mut sock, _)) = listener.accept().await {
+                let packet = packet.clone();
+                tokio::spawn(async move {
+                    let _ = sock.write_all(&packet).await;
+                    let _ = sock.shutdown().await;
+                });
+            }
+        });
+        port
     }
 
     #[tokio::test]
@@ -337,6 +404,41 @@ mod xidb_conn_tests {
             .await
             .expect("accept-then-drop must self-skip, not error");
         assert!(got.is_none());
+    }
+
+    // A TCP-reachability gate reads a saturated mysqld as healthy and fails
+    // the live test; only the handshake result distinguishes the two.
+    #[tokio::test]
+    async fn saturated_server_self_skips() {
+        let port =
+            spawn_refusing_server(err_packet(ER_CON_COUNT_ERROR, "Too many connections")).await;
+
+        let got = xidb_conn(&db_url(port), HANDSHAKE_TIMEOUT)
+            .await
+            .expect("a server-side connection-limit refusal must self-skip, not error");
+        assert!(got.is_none());
+    }
+
+    // The other half of the gate: a handshake refusal this fixture caused is
+    // not an unhealthy server, and must still fail the test loudly.
+    #[tokio::test]
+    async fn access_denied_still_errors() {
+        const ER_ACCESS_DENIED_ERROR: u16 = 1045;
+        assert!(!XIDB_UNAVAILABLE_SERVER_CODES.contains(&ER_ACCESS_DENIED_ERROR));
+
+        let port = spawn_refusing_server(err_packet(
+            ER_ACCESS_DENIED_ERROR,
+            "Access denied for user 'user'@'localhost' (using password: YES)",
+        ))
+        .await;
+
+        let err = xidb_conn(&db_url(port), HANDSHAKE_TIMEOUT)
+            .await
+            .expect_err("a credential failure must propagate, not self-skip");
+        assert!(
+            format!("{err:#}").contains(&ER_ACCESS_DENIED_ERROR.to_string()),
+            "expected the server error code in the propagated chain, got: {err:#}"
+        );
     }
 
     #[tokio::test]

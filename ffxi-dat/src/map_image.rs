@@ -15,6 +15,11 @@ pub fn map_dat_for(zone_id: u16, map_index: u8) -> Option<u32> {
         .map(|i| MAP_DAT_TABLE[i].2)
 }
 
+/// How many map DATs POLUtils catalogues for the zone. This is not the number
+/// of maps the client offers: POLUtils lists maps the DLL's zone-map table
+/// dropped (zone 238: 3 vs 2) and misses ones it added (zone 50: 1 vs 2), so a
+/// caller deciding what to *show* wants
+/// [`crate::main_dll::MainDll::zone_map_counts`] (kuluu-u8p1).
 pub fn map_count_for_zone(zone_id: u16) -> usize {
     MAP_DAT_TABLE
         .iter()

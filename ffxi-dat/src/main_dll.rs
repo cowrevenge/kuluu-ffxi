@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use crate::{DatError, Result};
@@ -120,20 +121,39 @@ impl MainDll {
     /// sub-zone 0 exists (kuluu-bqm5).
     pub fn zone_maps(&self, zone_id: u16) -> Vec<ZoneMapRecord> {
         let mut out = Vec::new();
+        self.for_each_zone_map(|rec| {
+            if rec.zone_id == zone_id {
+                out.push(rec);
+            }
+        });
+        out
+    }
+
+    /// How many maps each zone in the table ships, ascending by zone id. One
+    /// walk, so a caller that needs every zone's count (the Change Map list)
+    /// does not re-walk the table per zone (kuluu-u8p1).
+    pub fn zone_map_counts(&self) -> BTreeMap<u16, usize> {
+        let mut counts: BTreeMap<u16, usize> = BTreeMap::new();
+        self.for_each_zone_map(|rec| *counts.entry(rec.zone_id).or_default() += 1);
+        counts
+    }
+
+    /// The zone-map table is a flat run of records ending at the first zero
+    /// `has_next` byte, so every read of it costs the same walk (research/xim
+    /// src/jsMain/kotlin/xim/resource/table/ZoneMapTable.kt, `parse`).
+    fn for_each_zone_map(&self, mut f: impl FnMut(ZoneMapRecord)) {
         let Some(mut base) = self.zone_map_base else {
-            return out;
+            return;
         };
         loop {
             let Some(rec) = self.bytes.get(base..base + ZONE_MAP_STRIDE) else {
-                return out;
+                return;
             };
-            if u16::from_le_bytes([rec[0], rec[1]]) == zone_id {
-                if let Some(parsed) = parse_zone_map(rec) {
-                    out.push(parsed);
-                }
+            if let Some(parsed) = parse_zone_map(rec) {
+                f(parsed);
             }
             match self.bytes.get(base + ZONE_MAP_NEXT_DIVISOR) {
-                Some(0) | None => return out,
+                Some(0) | None => return,
                 Some(_) => base += ZONE_MAP_STRIDE,
             }
         }
@@ -375,6 +395,50 @@ mod tests {
         assert_eq!((rec.x_offset, rec.y_offset), (10, -20));
         assert_eq!(dll.zone_map(230, 0).map(|r| r.size), Some(320));
         assert_eq!(dll.zone_map(999, 0), None);
+    }
+
+    #[test]
+    fn zone_map_counts_tallies_every_zone_in_the_table() {
+        let mut bytes = vec![0u8; ZONE_MAP_STRIDE * 4];
+        for (slot, zone, sub) in [(0usize, 238u16, 1u8), (1, 238, 2), (2, 100, 0)] {
+            let at = slot * ZONE_MAP_STRIDE;
+            bytes[at..at + 2].copy_from_slice(&zone.to_le_bytes());
+            bytes[at + 2] = sub;
+            bytes[at + 5] = 4;
+            bytes[at + ZONE_MAP_NEXT_DIVISOR] = 1;
+        }
+        bytes[2 * ZONE_MAP_STRIDE + ZONE_MAP_NEXT_DIVISOR] = 0;
+        let dll = MainDll {
+            zone_map_base: Some(0),
+            ..blank(bytes)
+        };
+
+        assert_eq!(
+            dll.zone_map_counts(),
+            BTreeMap::from([(238, 2), (100, 1)]),
+            "one pass tallies each zone's rows"
+        );
+        assert_eq!(dll.zone_map_counts().get(&999), None);
+    }
+
+    /// Gated on a retail install (self-skips). The Change Map list is built from
+    /// `zone_map_counts`, so a count that disagrees with the per-zone walk the
+    /// loader indexes would put a row on screen that previews blank (kuluu-u8p1).
+    #[test]
+    fn real_dll_zone_map_counts_agree_with_the_per_zone_walk() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join(crate::archive::DEFAULT_INSTALL_DIR);
+        let Ok(dll) = MainDll::load(&root) else {
+            return;
+        };
+
+        let counts = dll.zone_map_counts();
+        assert!(!counts.is_empty(), "the retail table names zones");
+        for (&zone, &count) in counts.iter() {
+            assert_eq!(dll.zone_maps(zone).len(), count, "zone {zone}");
+        }
+        assert_eq!(counts.get(&238).copied(), Some(2), "Windurst Waters");
     }
 
     #[test]

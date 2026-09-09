@@ -116,10 +116,13 @@ impl MarkerCategory {
 
 const ALL_CATEGORIES_MASK: u8 = (1 << MarkerCategory::ALL.len()) - 1;
 
-/// What retail's summoned map marks: you, your party, and the wide-scan
-/// tracked target. Live NPC/mob/PC dots are the Enhanced radar (kuluu-7cqw).
-const VANILLA_CATEGORIES_MASK: u8 =
-    MarkerCategory::SelfMarker.bit() | MarkerCategory::Party.bit() | MarkerCategory::Target.bit();
+/// The grounded retail fact is a negative: the summoned map is not a live
+/// entity radar, so every kind-keyed dot and the current-target/lock-on
+/// highlight are Enhanced. `Party` is an unverified inference pending a retail
+/// map-screen observation (kuluu-7cqw); `SelfMarker` is the floor. The 0x0F5
+/// tracked marker and the 0x0F4 wide-scan hits are separate nodes in
+/// `hud::map_screen` that this mask does not gate.
+const VANILLA_CATEGORIES_MASK: u8 = MarkerCategory::SelfMarker.bit() | MarkerCategory::Party.bit();
 
 /// Session-persistent per-category visibility bitset; a cleared bit hides that
 /// category on BOTH the minimap and the Map screen through the shared
@@ -693,16 +696,15 @@ mod tests {
         assert!(filters.is_visible(MarkerCategory::Mob));
     }
 
-    /// Retail's map marks you, your party and the wide-scan tracked target and
-    /// nothing else; the live NPC/mob/PC radar is the Enhanced opt-in.
+    /// The live NPC/mob/PC radar and the current-target highlight are the
+    /// Enhanced opt-in; `Target` here is whatever the player has selected or
+    /// locked on, not the 0x0F5 tracked entity, so it is not a vanilla mark.
     #[test]
-    fn vanilla_radar_marks_only_self_party_and_target() {
+    fn vanilla_radar_marks_only_self_and_party() {
         let vanilla = MarkerFilters::for_radar(MinimapRadar::Vanilla);
         for category in MarkerCategory::ALL {
-            let retail_marked = matches!(
-                category,
-                MarkerCategory::SelfMarker | MarkerCategory::Party | MarkerCategory::Target
-            );
+            let retail_marked =
+                matches!(category, MarkerCategory::SelfMarker | MarkerCategory::Party);
             assert_eq!(
                 vanilla.is_visible(category),
                 retail_marked,
@@ -779,6 +781,8 @@ mod tests {
             table: Res<EntityTable>,
             filters: Res<MarkerFilters>,
             name_colors: Res<NameColorTable>,
+            target: Res<Target>,
+            lock_on: Res<LockOn>,
             q_layer: Query<Entity, With<TestLayer>>,
             q_self: Query<&Transform, With<IsSelf>>,
             q_transform: Query<(&Transform, &WorldEntity), Without<IsSelf>>,
@@ -791,7 +795,6 @@ mod tests {
                 min: Vec2::splat(-100.0),
                 max: Vec2::splat(100.0),
             };
-            let (target, lock_on) = (Target::default(), LockOn::default());
             let ctx = MarkerContext::new(
                 &scene_state,
                 &table,
@@ -817,6 +820,8 @@ mod tests {
         world.init_resource::<EntityTable>();
         world.insert_resource(MarkerFilters::for_radar(MinimapRadar::Enhanced));
         world.init_resource::<NameColorTable>();
+        world.init_resource::<Target>();
+        world.init_resource::<LockOn>();
         world.init_resource::<TestStore>();
         world.spawn(TestLayer);
         world.spawn((
@@ -853,6 +858,21 @@ mod tests {
         assert!(
             world.resource::<TestStore>().0.is_empty(),
             "the vanilla mode plots no mob dot on either map surface"
+        );
+
+        world.resource_mut::<Target>().id = Some(42);
+        world.run_system_once(run_layer).unwrap();
+        assert!(
+            world.resource::<TestStore>().0.is_empty(),
+            "selecting the mob must not re-plot it as a Target dot"
+        );
+
+        world.resource_mut::<Target>().id = None;
+        world.resource_mut::<LockOn>().target_id = Some(42);
+        world.run_system_once(run_layer).unwrap();
+        assert!(
+            world.resource::<TestStore>().0.is_empty(),
+            "nor must locking on to it"
         );
     }
 }

@@ -579,6 +579,11 @@ pub fn update_minimap_visibility(
     visible: Res<MinimapVisible>,
     mut q: Query<&mut Node, With<MinimapRoot>>,
 ) {
+    // Re-evaluated every frame, NOT gated on is_changed(): MinimapRoot spawns
+    // Display::Flex on OnEnter(InGame), long after apply_minimap_radar_setting
+    // consumed the startup change edge, so a gated system would leave the
+    // Vanilla widget open until the next manual toggle (the kuluu-9og /
+    // kuluu-j22 consumed-edge class). The `!=` assign keeps this churn-free.
     let Ok(mut node) = q.single_mut() else {
         return;
     };
@@ -857,6 +862,37 @@ mod tests {
             *world.resource::<overlay::MarkerFilters>(),
             overlay::MarkerFilters::for_radar(MinimapRadar::Vanilla),
             "switching back re-applies the mode"
+        );
+    }
+
+    /// The widget node spawns Display::Flex on zone-in, after the startup
+    /// MinimapVisible edge is gone; the vanilla default only sticks because
+    /// this system reads the resource unconditionally (kuluu-7cqw).
+    #[test]
+    fn minimap_root_closes_after_the_visibility_change_edge_is_consumed() {
+        let mut world = World::new();
+        world.insert_resource(MinimapVisible(false));
+        let system = world.register_system(update_minimap_visibility);
+
+        world.run_system(system).unwrap();
+        world.clear_trackers();
+
+        let root = world
+            .spawn((
+                MinimapRoot,
+                Node {
+                    display: Display::Flex,
+                    ..default()
+                },
+            ))
+            .id();
+        world.clear_trackers();
+        world.run_system(system).unwrap();
+
+        assert_eq!(
+            world.get::<Node>(root).unwrap().display,
+            Display::None,
+            "a node spawned after the change edge still honours the setting"
         );
     }
 }

@@ -156,12 +156,11 @@ impl DynamicLights {
     }
 }
 
-/// Retail summons a static map from the menu and marks it with your own
-/// position, your party, and the wide-scan tracked target -- it has no
-/// persistent corner widget and no live NPC/mob/PC radar. `Vanilla` therefore
-/// keeps the minimap panel closed and those radar categories off; `Enhanced`
-/// opts into the always-on widget with every dot category (kuluu-7cqw).
-/// `/minimap show|hide|toggle` stays the manual override in both modes.
+/// Retail summons a static map from the menu: no persistent corner widget and
+/// no live NPC/mob/PC radar. `Vanilla` therefore keeps the minimap panel closed
+/// and plots only your own position plus party (an unverified inference, see
+/// kuluu-7cqw); `Enhanced` opts into the always-on widget with every dot
+/// category. `/minimap show|hide|toggle` stays the manual override in both.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum MinimapRadar {
     #[default]
@@ -182,7 +181,7 @@ impl MinimapRadar {
         matches!(self, MinimapRadar::Enhanced)
     }
 
-    /// Whether the map surfaces plot live dots beyond self/party/target.
+    /// Whether the map surfaces plot live dots beyond self and party.
     pub const fn entity_radar(self) -> bool {
         matches!(self, MinimapRadar::Enhanced)
     }

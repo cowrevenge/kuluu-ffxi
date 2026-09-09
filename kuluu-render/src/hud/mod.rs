@@ -156,9 +156,9 @@ pub fn spawn_bottom_left_stack(
                     #[cfg(not(target_arch = "wasm32"))]
                     crate::minimap::spawn_minimap_as_child(col, &mut images);
 
-                    // The only compass spawn: update_compass resolves a
-                    // single CompassLabel, and the minimap panel that used to
-                    // carry a second one is closed by default (kuluu-7cqw).
+                    // Sole CompassLabel spawn on every target: update_compass
+                    // and update_compass_track_pointer resolve it with
+                    // single_mut(), which a second chip would break.
                     compass::spawn_compass_as_child(col);
 
                     col.spawn(Node {
@@ -522,4 +522,23 @@ pub fn add_hud_spawners<L: bevy::ecs::schedule::ScheduleLabel + Clone>(app: &mut
     // Depends on `crate::minimap` (wasm-gated).
     #[cfg(not(target_arch = "wasm32"))]
     app.add_systems(schedule, map_screen::spawn_map_screen);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bevy::ecs::system::RunSystemOnce;
+
+    #[test]
+    fn bottom_left_stack_spawns_exactly_one_compass_label() {
+        let mut world = World::new();
+        #[cfg(not(target_arch = "wasm32"))]
+        world.init_resource::<Assets<bevy::image::Image>>();
+        world.run_system_once(spawn_bottom_left_stack).unwrap();
+
+        assert_eq!(
+            world.query::<&compass::CompassLabel>().iter(&world).count(),
+            1
+        );
+    }
 }

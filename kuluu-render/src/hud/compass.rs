@@ -70,7 +70,7 @@ pub fn spawn_compass_as_child(p: &mut ChildSpawnerCommands) {
     .with_children(|p| {
         p.spawn((
             CompassLabel,
-            Text::new("—"),
+            Text::new("-"),
             style::text_font(14.0),
             TextColor(theme::TITLE),
         ));

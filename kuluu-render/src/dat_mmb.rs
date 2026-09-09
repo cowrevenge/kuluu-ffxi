@@ -3,6 +3,8 @@
 use std::fs;
 
 use bevy::asset::RenderAssetUsages;
+use bevy::ecs::schedule::ScheduleConfigs;
+use bevy::ecs::system::ScheduleSystem;
 use bevy::image::Image;
 use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
@@ -168,6 +170,22 @@ pub fn scroll_gen_water_uv(
     }
 }
 
+/// `drive_sub_area_activation` suppresses the doorway shell's collision and only
+/// *writes* the replacement `LoadMzbRequest`; nothing is in flight until
+/// `kick_load_mzb_tasks` reads it. Split across schedule runs, that leaves a
+/// frame with the floor gone and `LoadMzbInFlight::any_pending()` false — the
+/// gate `kuluu::view_native::input::ground_recovery_candidate` reads before
+/// recovering the player upward (kuluu-oubj). Registered as one ordered unit and
+/// driven whole by `sub_area_activation::doorway_tests`.
+pub fn zone_load_dispatch_systems() -> ScheduleConfigs<ScheduleSystem> {
+    (
+        crate::sub_area_activation::drive_sub_area_activation,
+        dispatch_look_driven_models,
+        crate::dat_mzb::kick_load_mzb_tasks,
+    )
+        .chain()
+}
+
 pub struct DatOverlayPlugin;
 
 impl Plugin for DatOverlayPlugin {
@@ -200,9 +218,7 @@ impl Plugin for DatOverlayPlugin {
                 Update,
                 (
                     crate::dat_mzb::auto_load_zone_geometry_system,
-                    crate::sub_area_activation::drive_sub_area_activation,
-                    dispatch_look_driven_models,
-                    crate::dat_mzb::kick_load_mzb_tasks,
+                    zone_load_dispatch_systems(),
                     crate::dat_mzb::poll_load_mzb_tasks,
                     crate::dat_mzb::spawn_zone_water,
                     process_load_mmb_requests,

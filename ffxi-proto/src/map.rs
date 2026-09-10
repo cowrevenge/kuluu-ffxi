@@ -20,6 +20,23 @@ pub mod c2s {
     pub const ACTION: u16 = 0x01A;
     pub const EVENT_END: u16 = 0x05B;
 
+    // GP_CLI_COMMAND_EVENTENDXZY, vendor/server/src/map/packets/c2s/
+    // 0x05c_eventendxzy.h: x/y/z f32, UniqueNo u32, EndPara u32 (Work_Zone[1]),
+    // EventNum/EventPara/ActIndex u16, Mode u8, dir i8. The validator accepts
+    // only Mode 1 (UpdatePending); this packet never ends an event
+    // (0x05c_eventendxzy.cpp GP_CLI_COMMAND_EVENTENDXZY::validate).
+    pub const EVENT_END_XZY: u16 = 0x05C;
+
+    /// The `Mode` field of the c2s event-end packets.
+    /// GP_CLI_COMMAND_EVENTEND_MODE, vendor/server/src/map/packets/c2s/0x05b_eventend.h.
+    pub mod event_end_mode {
+        /// End the event (OnEventFinish).
+        pub const END: u16 = 0;
+        /// Update a pending event state (OnEventUpdate); also the only Mode
+        /// the 0x05C validator accepts.
+        pub const UPDATE_PENDING: u16 = 1;
+    }
+
     // GP_CLI_COMMAND_MOTION, vendor/server/src/map/enums/packet_c2s.h.
     // Emote request: UniqueNo u32, ActIndex u16, Number u8 (emote id), Mode u8,
     // Param u16 (vendor/server/src/map/packets/c2s/0x05d_motion.h GP_CLI_COMMAND_MOTION).
@@ -350,6 +367,10 @@ pub mod eventucoff_mode {
     // CancelEvent packs the cancelled event id in the high bits
     // (0x052_eventucoff.cpp GP_SERV_COMMAND_EVENTUCOFF::GP_SERV_COMMAND_EVENTUCOFF), so match on the low byte.
     pub const MODE_MASK: u32 = 0xFF;
+    /// The ack both c2s event-end process() functions push after handling a
+    /// tag; clears the client's pending flag (0x05b_eventend.cpp,
+    /// 0x05c_eventendxzy.cpp GP_CLI_COMMAND_EVENTEND*::process).
+    pub const EVENT_RECV_PENDING: u32 = 1;
     pub const CANCEL_EVENT: u32 = 2;
     pub const FISHING: u32 = 4;
 }
@@ -529,6 +550,23 @@ pub mod s2c {
     pub const GRAP_LIST: u16 = 0x051;
 
     pub const WPOS: u16 = 0x05B;
+
+    // These event opcodes are wire packet numbers, one namespace per direction:
+    // c2s EVENT_END/EVENT_END_XZY (0x05B/0x05C) and s2c PENDINGNUM/PENDINGSTR
+    // (0x05C/0x05D). The cross-direction hex collisions are intentional, and the
+    // values are unrelated to the in-script bytecode opcodes OP_LOADEXTSCHEDULER
+    // (0x5B) / OP_LOADEXTSCHEDULER2 (0x66) that ffxi-event::vm executes.
+
+    // GP_SERV_PENDINGNUM, research/XiPackets/world/server/0x005C: int32 num[8]
+    // the client copies into Work_Zone from index 2. The opcode number collides
+    // with c2s EVENT_END_XZY; different directions, intentional.
+    pub const PENDINGNUM: u16 = 0x05C;
+
+    // GP_SERV_PENDINGSTR (repurposed), research/XiPackets/world/server/0x005D:
+    // int32 num[9] the client ignores plus four 16-byte strings copied into
+    // PTR_EventStrings. The opcode number collides with c2s MOTION; different
+    // directions, intentional.
+    pub const PENDINGSTR: u16 = 0x05D;
 
     pub const WPOS2: u16 = 0x065;
 

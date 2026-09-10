@@ -1584,16 +1584,27 @@ pub fn hit_reaction_routine(
 ) -> Vec<[u8; 4]> {
     use ffxi_proto::melee::ActionResolution;
     let out = match resolution {
-        // F54 - the hitDistortion level splits the Hit case. Heavy (3) is the crit and plays
-        // `ldam` when the lookup resolves it, else falls back to the normal `damg` reaction
-        // (same pattern as Block -> shld/gur1). The crit flag is LSB's entities/battle_entity.cpp
-        // ~3736: on attack.IsCritical() the server sets actionResult.info |= CriticalHit AND
-        // recordDamage(isCritical=true), which writes hitDistortion = Heavy(3); both come from
-        // the same bool, so hit_distortion == 3 IS the crit. It rides the VICTIM's result block;
-        // wire order per packets/s2c/0x028_battle2.cpp ~70-80: resolution(3) kind(2)
-        // animation(12) info(5) hitDistortion(2) knockback(3) param(17) messageID(10)
-        // modifier(31). None/Light/Medium all play `damg` per retail's dam0 branch table - never
-        // sdam, which flinches nothing on its own.
+        // F54 - the hitDistortion level splits the Hit case by recoil size only. recordDamage
+        // derives it purely from damage as a percent of target max HP (>=20 Heavy, >=10 Medium,
+        // >0 Light; vendor/server/src/map/action/action.cpp action_result_t::recordDamage), so it
+        // is independent of the crit bit: the server sets info |= ActionInfo::CriticalHit from
+        // outcome.isCritical in CBattleEntity::OnAttack (vendor/server/src/map/entities/
+        // battleentity.cpp) and recordDamage, with no coupling to distortion. Heavy plays `ldam`
+        // when the lookup resolves it, else falls back to the normal `damg` reaction (same
+        // pattern as Block -> shld/gur1). The crit bit itself has no Kuluu visual consumer:
+        // retail's impact effect is chosen by a control-flow switch in the global effect dir that
+        // `dada` tail-calls at its 0x2B frame (ROM/0/0.DAT: dada calls atpr @0, then crtl +
+        // 0x2B + dam0 all @4; crtl branches to hi14, the g14s/g140-g144 particle set ending ~40
+        // frames in, or hi29, the g29s/g290-g297 set ending ~80 frames in), and Kuluu does not
+        // evaluate control-flow children: has_control_flow keeps such a call as an inert marker
+        // stage (control_flow_call_survives_flattening_as_a_marker asserts no branch of an
+        // unevaluated switch is taken), so neither particle set plays. xim's own evaluation of a
+        // switch's compare op is marked "made up for now" (research/xim EffectRoutineInstance.kt).
+        // It rides the VICTIM's result block; wire order per packets/s2c/0x028_battle2.cpp
+        // GP_SERV_COMMAND_BATTLE2::pack: resolution(3) kind(2) animation(12) info(5)
+        // hitDistortion(2) knockback(3) param(17) messageID(10) modifier(31).
+        // None/Light/Medium all play `damg` per retail's dam0 branch table - never sdam, which
+        // flinches nothing on its own.
         ActionResolution::Hit if hit_distortion == 3 && model_has(b"ldam") => *b"ldam",
         ActionResolution::Hit => *b"damg",
         ActionResolution::Miss => *b"sway",
@@ -1613,12 +1624,14 @@ pub fn hit_reaction_routine(
     routines
 }
 
-// research/xim Actor.kt displayAutoAttack — the swing routine is chosen by which limb struck.
+// research/xim Actor.kt displayAutoAttack: the swing routine is chosen by which limb struck.
 // Direction-of-movement variants (atf0/atb0/atl0/atr0) are not selected here; that needs the
 // attacker's locomotion state at swing time. No attacker-side crit swing exists on purpose: LSB
-// flags the crit only in the VICTIM's result block (battle_entity.cpp ~3736 sets info CriticalHit
-// + hitDistortion Heavy from one bool) and this `animation` field is limb-selected, never
-// crit-selected - do not re-add a crit variant here.
+// flags the crit only in the VICTIM's result block - info |= ActionInfo::CriticalHit from
+// outcome.isCritical (vendor/server/src/map/entities/battleentity.cpp CBattleEntity::OnAttack,
+// mirrored by action_result_t::recordDamage) - and this `animation` field is limb-selected, never
+// crit-selected; hitDistortion rides the same victim block but is derived independently from
+// damage HPP. Do not re-add a crit variant here.
 pub fn swing_routine(animation: ffxi_proto::melee::AttackAnimation) -> Option<[u8; 4]> {
     use ffxi_proto::melee::AttackAnimation;
     Some(match animation {
@@ -2883,7 +2896,7 @@ mod tests {
         use ffxi_proto::melee::ActionResolution as R;
         let has = |names: Vec<[u8; 4]>| move |name: &[u8; 4]| names.iter().any(|n| n == name);
 
-        // Heavy distortion is the crit case: ldam when the lookup resolves it...
+        // Heavy distortion plays ldam when the lookup resolves it...
         assert_eq!(
             hit_reaction_routine(R::Hit, 3, 0, has(vec![*b"ldam"])),
             vec![*b"ldam"]

@@ -52,8 +52,8 @@ const LIMB_MODEL_FILE: u32 = 101806;
 const WORM_FILE: u32 = 1724;
 /// ROM/172/67.DAT - one of exactly three retail models that ship `damg` without `ldam`
 /// (verified against the install: routines shot/damg/chit/cate/cast/pop0/init/corp/dead/setr/
-/// kil0/bom0/kil1/efon). The S6c/S6d victim: a crit on it must fall back to damg, and only
-/// when the global dir's ldam is out of reach.
+/// kil0/bom0/kil1/efon). The S6c/S6d victim: a heavy recoil on it must fall back to damg, and
+/// only when the global dir's ldam is out of reach.
 const NOLDA_FILE: u32 = 52087;
 /// ROM/4/106.DAT - flying bat; its 0x45 Info chunk carries movement byte 3 (Flying) and scale
 /// byte 85, so the live pipeline must load it at 85 percent with no wire stride scale.
@@ -597,13 +597,15 @@ fn s5b_mob_victim_normal_hit_runs_damg_and_flinches() {
 }
 
 // ---------------------------------------------------------------------------
-// S6/S6b - crits: ldam + flinch, no sway at kb=0
+// S6/S6b - heavy recoil: ldam + flinch, no sway at kb=0
 // ---------------------------------------------------------------------------
 
-/// S6: Hit with hit_distortion=3 (Heavy) runs `ldam` on HumeM and its
-/// flinch stage starts dfm?; kb=0 adds no sway.
+/// S6: Hit with hit_distortion=3 (Heavy) runs `ldam` on HumeM and its flinch stage starts dfm?;
+/// kb=0 adds no sway. The crit bit is NOT set here: heavy recoil stands on its own, and no
+/// other damage reaction may fire alongside it at impact (no crit visual exists to add; see
+/// hit_reaction_routine).
 #[test]
-fn s6_crit_runs_ldam_and_flinches_the_pc() {
+fn s6_heavy_recoil_runs_ldam_and_flinches_the_pc() {
     let (Some(rarab), Some(humem)) = (load_rarab(), load_humem()) else {
         return;
     };
@@ -612,34 +614,39 @@ fn s6_crit_runs_ldam_and_flinches_the_pc() {
     let (vic_parent, vic_child) = spawn_actor(&mut app, HUMEM_W, EntityKind::Pc, &humem);
     step_n(&mut app, 10);
 
-    // res=Hit(0), anim=RightAttack(0), info=0, dist=3 (Heavy/crit), kb=0.
+    // res=Hit(0), anim=RightAttack(0), info=0 (no crit bit), dist=3 (Heavy), kb=0.
     push_battle2(&mut app, RARAB_W, 1, Some(HUMEM_W), Some((0, 0, 0, 3, 0)));
 
     let (impact_at, _) = watch(&mut app, 45, |_i, w| {
-        routines(w, vic_parent).contains(b"ldam")
+        let r = routines(w, vic_parent);
+        r.contains(b"ldam")
+            && !r.contains(b"damg")
+            && !r.contains(b"sdam")
             && active_clip(w, vic_child).is_some_and(|c| c.starts_with("dfm"))
     });
     assert!(
         impact_at.is_some(),
-        "crit runs ldam + dfm? flinch at the impact frame"
+        "heavy recoil runs ldam + dfm? flinch at the impact frame, with no other damage \
+         reaction alongside"
     );
 
     let sway = routines(app.world(), vic_parent).contains(b"sway");
-    assert!(!sway, "kb=0 adds no sway alongside the crit reaction");
+    assert!(!sway, "kb=0 adds no sway alongside the heavy reaction");
     // The attacker still swung (sanity: the chain armed from this swing's 0x2B).
     assert!(active_clip(app.world(), atk_child).is_some());
 }
 
-/// S6b: same crit on a Rarab victim - ldam's flinch stage starts dfi? on the mob host. This is
-/// the "crits animations do not play" case from the field report.
+/// S6b: same heavy recoil on a Rarab victim - ldam's flinch stage starts dfi? on the mob host.
+/// This is the "crits animations do not play" case from the field report.
 #[test]
-fn s6b_crit_flinches_the_mob_with_dfi() {
+fn s6b_heavy_recoil_flinches_the_mob_with_dfi() {
     let Some(rarab) = load_rarab() else { return };
     let mut app = build_app();
     let (_, atk_child) = spawn_actor(&mut app, RARAB_W, EntityKind::Mob, &rarab);
     let (vic_parent, vic_child) = spawn_actor(&mut app, RARAB2_W, EntityKind::Mob, &rarab);
     step_n(&mut app, 10);
 
+    // res=Hit(0), anim=RightAttack(0), info=0 (no crit bit), dist=3 (Heavy), kb=0.
     push_battle2(&mut app, RARAB_W, 1, Some(RARAB2_W), Some((0, 0, 0, 3, 0)));
 
     let (impact_at, _) = watch(&mut app, 45, |_i, w| {
@@ -648,20 +655,20 @@ fn s6b_crit_flinches_the_mob_with_dfi() {
     });
     assert!(
         impact_at.is_some(),
-        "crit flinches the mob victim with dfi?"
+        "heavy recoil flinches the mob victim with dfi?"
     );
     // The attacker still swung (sanity: the chain armed from this swing's 0x2B).
     assert!(active_clip(app.world(), atk_child).is_some());
 }
 
-/// S6c: crit on a victim whose DAT ships no `ldam` of its own (ROM/172/67.DAT), with the global
-/// effect dir removed so ROM/0/0.DAT's ldam cannot rescue it. The ldam guard must fall back to
-/// the normal `damg` reaction instead of arming an unresolvable ldam, which post Step 1 falls
-/// through to nothing. All eight retail PC skeletons ship their own ldam (verified against the
-/// install), so this fallback is reachable only on mob victims; S6 covers the PC side of the
-/// matrix.
+/// S6c: heavy recoil on a victim whose DAT ships no `ldam` of its own (ROM/172/67.DAT), with
+/// the global effect dir removed so ROM/0/0.DAT's ldam cannot rescue it. The ldam guard must
+/// fall back to the normal `damg` reaction instead of arming an unresolvable ldam, which post
+/// Step 1 falls through to nothing. All eight retail PC skeletons ship their own ldam (verified
+/// against the install), so this fallback is reachable only on mob victims; S6 covers the PC
+/// side of the matrix.
 #[test]
-fn s6c_crit_without_ldam_falls_back_to_damg() {
+fn s6c_heavy_recoil_without_ldam_falls_back_to_damg() {
     let (Some(rarab), Some(nolda)) = (load_rarab(), load_nolda()) else {
         return;
     };
@@ -671,7 +678,7 @@ fn s6c_crit_without_ldam_falls_back_to_damg() {
     step_n(&mut app, 10);
     drop_global_effect_dir(&mut app);
 
-    // res=Hit(0), anim=RightAttack(0), info=0, dist=3 (Heavy/crit), kb=0.
+    // res=Hit(0), anim=RightAttack(0), info=0 (no crit bit), dist=3 (Heavy), kb=0.
     push_battle2(&mut app, RARAB_W, 1, Some(NOLDA_W), Some((0, 0, 0, 3, 0)));
 
     let (impact_at, _) = watch(&mut app, 45, |_i, w| {
@@ -679,15 +686,15 @@ fn s6c_crit_without_ldam_falls_back_to_damg() {
     });
     assert!(
         impact_at.is_some(),
-        "crit on a no-ldam victim runs the damg fallback at the impact frame, not an \
+        "heavy recoil on a no-ldam victim runs the damg fallback at the impact frame, not an \
          unresolvable ldam"
     );
     // The attacker still swung (sanity: the chain armed from this swing's 0x2B).
     assert!(active_clip(app.world(), atk_child).is_some());
 }
 
-/// S6d: same rig (no ldam anywhere), non-crit Medium hit still routes to damg - the crit guard
-/// must not leak into the None/Light/Medium cases.
+/// S6d: same rig (no ldam anywhere), Medium hit still routes to damg - the heavy-recoil
+/// selection must not leak into the None/Light/Medium cases.
 #[test]
 fn s6d_medium_hit_without_ldam_still_runs_damg() {
     let (Some(rarab), Some(nolda)) = (load_rarab(), load_nolda()) else {
@@ -707,8 +714,70 @@ fn s6d_medium_hit_without_ldam_still_runs_damg() {
     });
     assert!(
         impact_at.is_some(),
-        "non-crit hits on a no-ldam victim still run damg (the crit guard does not leak into \
-         dist 0/1/2)"
+        "hits below Heavy on a no-ldam victim still run damg (recoil size selection does not \
+         leak into dist 0/1/2)"
+    );
+}
+
+/// S6e: the crit bit set with a LIGHT distortion, on HumeM which ships ldam. The recoil must be
+/// damg (light), never ldam: hitDistortion drives the recoil size and the crit bit drives
+/// nothing in Kuluu today - retail's crit visual is a control-flow branch Kuluu does not
+/// evaluate (see hit_reaction_routine). End to end through the real decoder.
+#[test]
+fn s6e_crit_bit_light_distortion_runs_damg_not_ldam() {
+    let (Some(rarab), Some(humem)) = (load_rarab(), load_humem()) else {
+        return;
+    };
+    let mut app = build_app();
+    let (_, atk_child) = spawn_actor(&mut app, RARAB_W, EntityKind::Mob, &rarab);
+    let (vic_parent, vic_child) = spawn_actor(&mut app, HUMEM_W, EntityKind::Pc, &humem);
+    step_n(&mut app, 10);
+
+    // res=Hit(0), anim=RightAttack(0), info=CriticalHit(2), dist=1 (Light), kb=0.
+    push_battle2(&mut app, RARAB_W, 1, Some(HUMEM_W), Some((0, 0, 2, 1, 0)));
+
+    let (impact_at, _) = watch(&mut app, 45, |_i, w| {
+        let r = routines(w, vic_parent);
+        r.contains(b"damg")
+            && !r.contains(b"ldam")
+            && !r.contains(b"sdam")
+            && active_clip(w, vic_child).is_some_and(|c| c.starts_with("dfm"))
+    });
+    assert!(
+        impact_at.is_some(),
+        "crit bit + light distortion runs exactly damg (light recoil) with flinch: the crit \
+         bit has no visual consumer, and ldam must not fire on a light hit"
+    );
+
+    let sway = routines(app.world(), vic_parent).contains(b"sway");
+    assert!(!sway, "kb=0 adds no sway alongside the light reaction");
+    // The attacker still swung (sanity: the chain armed from this swing's 0x2B).
+    assert!(active_clip(app.world(), atk_child).is_some());
+}
+
+/// S6f: same crit-bit/light-distortion packet on a victim whose DAT ships no ldam anywhere
+/// (ROM/172/67.DAT, global dir removed): damg again - identical to S6d's non-crit medium case,
+/// which is the point: nothing about the crit bit changes what plays.
+#[test]
+fn s6f_crit_bit_light_distortion_without_ldam_runs_damg() {
+    let (Some(rarab), Some(nolda)) = (load_rarab(), load_nolda()) else {
+        return;
+    };
+    let mut app = build_app();
+    spawn_actor(&mut app, RARAB_W, EntityKind::Mob, &rarab);
+    let (vic_parent, _) = spawn_actor(&mut app, NOLDA_W, EntityKind::Mob, &nolda);
+    step_n(&mut app, 10);
+    drop_global_effect_dir(&mut app);
+
+    // res=Hit(0), anim=RightAttack(0), info=CriticalHit(2), dist=1 (Light), kb=0.
+    push_battle2(&mut app, RARAB_W, 1, Some(NOLDA_W), Some((0, 0, 2, 1, 0)));
+
+    let (impact_at, _) = watch(&mut app, 45, |_i, w| {
+        routines(w, vic_parent).contains(b"damg") && !routines(w, vic_parent).contains(b"ldam")
+    });
+    assert!(
+        impact_at.is_some(),
+        "crit bit + light distortion on a no-ldam victim runs damg, same as the non-crit case"
     );
 }
 

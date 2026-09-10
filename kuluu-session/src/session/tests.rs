@@ -2508,6 +2508,87 @@ fn battle2_result_outcome_bits_roundtrip() {
     );
 }
 
+// C2 - the outcome fields are independent inputs on the wire: recordDamage derives hitDistortion
+// from damage HPP alone and CBattleEntity::OnAttack sets the crit bit from outcome.isCritical
+// alone (vendor/server/src/map/action/action.cpp action_result_t::recordDamage, vendor/server/
+// src/map/entities/battleentity.cpp). A heavy recoil without the crit bit must decode with
+// first_info clear...
+#[test]
+fn battle2_heavy_distortion_without_crit_bit_decodes_independently() {
+    let mut w = BattleBitWriter::new(8);
+    w.write(0xCAFEu64, 32);
+    w.write(1, 6);
+    w.write(1, 4);
+    w.write(ffxi_proto::melee::CATEGORY_BASIC_ATTACK as u64, 4);
+    w.write(0, 32);
+    w.write(0, 32);
+    w.write(0xBEEFu64, 32);
+    w.write(1, 4);
+    w.write(0, 3); // resolution: Hit
+    w.write(0, 2); // kind
+    w.write(0, 12); // animation: RightAttack
+    w.write(0, 5); // info: no bits
+    w.write(3, 2); // hitDistortion: Heavy
+    w.write(0, 3); // knockback: none
+    w.write(0, 17); // param
+    w.write(0, 10); // messageID
+    w.write(0, 31); // modifier
+    w.write(0, 1); // no proc block
+    w.write(0, 1); // no reaction block
+
+    let h = decode_battle2_header(&w.into_bytes()).unwrap();
+    assert_eq!(
+        h.first_info & ffxi_proto::melee::INFO_CRITICAL_HIT,
+        0,
+        "no crit bit"
+    );
+    assert_eq!(h.first_hit_distortion, 3, "Heavy recoil stands on its own");
+    let r = h.first_result.expect("a basic-attack result decodes");
+    assert_eq!((r.info, r.hit_distortion), (0, 3));
+}
+
+// ...and a crit with light distortion must keep both: the bit rides info(5), the level rides
+// hitDistortion(2).
+#[test]
+fn battle2_crit_bit_with_light_distortion_decodes_independently() {
+    let mut w = BattleBitWriter::new(8);
+    w.write(0xCAFEu64, 32);
+    w.write(1, 6);
+    w.write(1, 4);
+    w.write(ffxi_proto::melee::CATEGORY_BASIC_ATTACK as u64, 4);
+    w.write(0, 32);
+    w.write(0, 32);
+    w.write(0xBEEFu64, 32);
+    w.write(1, 4);
+    w.write(0, 3); // resolution: Hit
+    w.write(0, 2); // kind
+    w.write(0, 12); // animation: RightAttack
+    w.write(ffxi_proto::melee::INFO_CRITICAL_HIT as u64, 5); // info: CriticalHit only
+    w.write(1, 2); // hitDistortion: Light
+    w.write(0, 3); // knockback: none
+    w.write(0, 17); // param
+    w.write(0, 10); // messageID
+    w.write(0, 31); // modifier
+    w.write(0, 1); // no proc block
+    w.write(0, 1); // no reaction block
+
+    let h = decode_battle2_header(&w.into_bytes()).unwrap();
+    assert_eq!(
+        h.first_info & ffxi_proto::melee::INFO_CRITICAL_HIT,
+        ffxi_proto::melee::INFO_CRITICAL_HIT,
+        "crit bit present"
+    );
+    assert_eq!(
+        h.first_hit_distortion, 1,
+        "Light recoil despite the crit bit"
+    );
+    let r = h.first_result.expect("a basic-attack result decodes");
+    assert_eq!(
+        (r.info, r.hit_distortion),
+        (ffxi_proto::melee::INFO_CRITICAL_HIT, 1)
+    );
+}
+
 // A non-basic-attack category whose result block happens to carry low resolution/animation
 // bits (e.g. a spell's animation id 1) must not decode as a melee swing — the gate is the
 // category, not the bit ranges.

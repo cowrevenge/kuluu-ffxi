@@ -1356,9 +1356,19 @@ fn rebuild_mesh(g: &LiveGenerator, cam: CameraView, clock: &CelestialClock, mesh
         // instead of standing up above the emitter (kuluu-czc6). Screen billboards
         // orient in Bevy already; actor-local generators integrate in the actor frame.
         let world_basis = (g.orientation.is_some() || axial) && !g.actor_local;
+        // A screen billboard's template is DAT-frame geometry too (Y down: the campfire flame
+        // `hi12` rises toward negative y). An actor-local generator inherits the FFXI->Bevy basis
+        // from its parent transform; a world-space one folds it into the template before the
+        // view rotation, or the flame hangs below its wick.
+        let screen_basis = g.orientation.is_none() && !axial && !g.actor_local;
         let base = positions.len() as u32;
         for ((tp, uv), vertex) in tpl.positions.iter().zip(&tpl.uvs).zip(&tpl.colors) {
             let local = Vec3::new(tp.x * draw.scale.x, tp.y * draw.scale.y, tp.z * sz);
+            let local = if screen_basis {
+                local * g.vel_basis
+            } else {
+                local
+            };
             let oriented = rot * local;
             let oriented = if world_basis {
                 oriented * g.vel_basis
@@ -1682,6 +1692,50 @@ mod tests {
     // Drive the emission math directly (no Bevy world), one tick's worth of frames per call.
     fn advance(g: &mut LiveGenerator, frames: f32) {
         advance_generator(g, frames);
+    }
+
+    // The campfire flame `hi12` rises toward negative DAT y; a world-space screen billboard has
+    // to fold the FFXI->Bevy basis into that template itself, while an actor-local one leaves
+    // it to the parent transform.
+    #[test]
+    fn world_space_screen_billboard_folds_the_dat_basis_into_its_template() {
+        fn built_vertex(actor_local: bool) -> [f32; 3] {
+            let d = ParticleGeneratorDef {
+                auto_run: true,
+                max_life_frames: 60.0,
+                frames_per_emission: 1.0,
+                particles_per_emission: 1,
+                init_scale: [1.0; 3],
+                init_color: [1.0; 4],
+                ..Default::default()
+            };
+            let mut g = live(d, 0.0);
+            g.template.positions = vec![Vec3::new(0.5, -1.0, -2.0); 3];
+            g.orientation = None;
+            g.solid_mesh = false;
+            g.actor_local = actor_local;
+            g.vel_basis = if actor_local {
+                Vec3::ONE
+            } else {
+                Vec3::new(1.0, -1.0, -1.0)
+            };
+            emit(&mut g, 60.0);
+            let mut mesh = empty_mesh();
+            let view = CameraView {
+                rot: Quat::IDENTITY,
+                pos: Vec3::ZERO,
+            };
+            rebuild_mesh(&g, view, &ParticleSimulator::default().clock, &mut mesh);
+            mesh.attribute(Mesh::ATTRIBUTE_POSITION)
+                .and_then(|a| a.as_float3())
+                .expect("positions")[0]
+        }
+        assert_eq!(built_vertex(false), [0.5, 1.0, 2.0], "zone flame rises");
+        assert_eq!(
+            built_vertex(true),
+            [0.5, -1.0, -2.0],
+            "actor-local template stays in the actor's DAT frame"
+        );
     }
 
     #[test]

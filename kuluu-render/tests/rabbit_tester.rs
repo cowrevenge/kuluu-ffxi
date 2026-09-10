@@ -76,7 +76,13 @@ const WALKER_W: u32 = 9_000_007;
 const HUME_M_MAIN_WEAPON_FILE: u32 = 8392;
 
 fn install() -> Option<ffxi_dat::DatRoot> {
-    ffxi_dat::archive::open_test_install()
+    match ffxi_dat::archive::open_test_install() {
+        Some(root) => Some(root),
+        None => {
+            eprintln!("skipping rabbit_tester: no retail DAT install available");
+            None
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -309,16 +315,28 @@ fn spawn_actor(
     (parent, child)
 }
 
+/// Load a fixture DAT, or None with the reason on stderr: a silent skip here reads as a pass.
+fn load_fixture(label: &str, file: u32) -> Option<LoadedActor> {
+    install()?;
+    match load_npc(file) {
+        Ok(loaded) => Some(loaded),
+        Err(e) => {
+            eprintln!("skipping rabbit_tester: {label} DAT failed to load: {e}");
+            None
+        }
+    }
+}
+
 fn load_rarab() -> Option<LoadedActor> {
-    install().and_then(|_| load_npc(RARAB_FILE).ok())
+    load_fixture("Rarab", RARAB_FILE)
 }
 
 fn load_worm() -> Option<LoadedActor> {
-    install().and_then(|_| load_npc(WORM_FILE).ok())
+    load_fixture("Carrion Worm", WORM_FILE)
 }
 
 fn load_nolda() -> Option<LoadedActor> {
-    install().and_then(|_| load_npc(NOLDA_FILE).ok())
+    load_fixture("Noldablet", NOLDA_FILE)
 }
 
 /// HumeM skeleton with a main-hand weapon: the armed-race base whose motion DAT ships ati0..2
@@ -330,15 +348,20 @@ fn load_humem() -> Option<LoadedActor> {
         (1u16..=5)
             .filter_map(|slot| kuluu_render::look_resolver::resolve_equipment_slot(slot << 12, 1)),
     );
-    load_pc(
+    match load_pc(
         1,
         false,
         &equipment,
         None,
         Some(HUME_M_MAIN_WEAPON_FILE),
         None,
-    )
-    .ok()
+    ) {
+        Ok(loaded) => Some(loaded),
+        Err(e) => {
+            eprintln!("skipping rabbit_tester: HumeM PC failed to load: {e}");
+            None
+        }
+    }
 }
 
 fn step(app: &mut App) {
@@ -434,6 +457,19 @@ fn watch(
         }
     }
     (first, samples)
+}
+
+/// The inlined 0x2B impact effect fires at routine frame ~36 for ati0 (dada @32, +4 delay), so a
+/// victim reaction that lands before this frame is reacting to packet arrival, not the swing.
+const IMPACT_MIN_FRAME: u32 = 30;
+
+fn assert_impact_at(impact_at: Option<u32>, msg: &str) {
+    assert!(
+        impact_at.is_some_and(|f| f >= IMPACT_MIN_FRAME),
+        "{msg} (first hit at frame {:?}, expected {} or later)",
+        impact_at,
+        IMPACT_MIN_FRAME
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -550,22 +586,33 @@ fn s5_swing_impact_runs_damg_and_flinches_the_pc() {
     // res=Hit(0), anim=RightAttack(0), info=0, dist=0, kb=0.
     push_battle2(&mut app, RARAB_W, 1, Some(HUMEM_W), Some((0, 0, 0, 0, 0)));
 
-    // The overlay/pose path picks the swing clip from BATTLE2's animation field (D6).
-    let (swing_at, _) = watch(&mut app, 5, |i, w| {
-        i >= 1 && active_clip(w, atk_child).is_some_and(|c| c.starts_with("at0"))
-    });
-    assert!(swing_at.is_some(), "attacker plays the at0? swing clip");
-
-    // Impact: damg queued on the victim AND its flinch stage started dfm?. The inlined 0x2B
-    // fires at routine frame 36 (ati0 calls dada @32, +4 delay); allow dispatch slack.
-    let (impact_at, _) = watch(&mut app, 45, |_i, w| {
-        routines(w, vic_parent).contains(b"damg")
+    // The overlay/pose path picks the swing clip from BATTLE2's animation field (D6). Swing
+    // start and impact are measured from one origin so the impact lower bound stays valid:
+    // the inlined 0x2B fires at routine frame ~36 (ati0 calls dada @32, +4 delay), allow
+    // dispatch slack.
+    let mut swing_at = None;
+    let mut impact_at = None;
+    for i in 1..=45u32 {
+        step(&mut app);
+        let w = app.world();
+        if swing_at.is_none() && active_clip(w, atk_child).is_some_and(|c| c.starts_with("at0")) {
+            swing_at = Some(i);
+        }
+        if impact_at.is_none()
+            && routines(w, vic_parent).contains(b"damg")
             && active_clip(w, vic_child).is_some_and(|c| c.starts_with("dfm"))
-    });
+        {
+            impact_at = Some(i);
+        }
+    }
     assert!(
-        impact_at.is_some(),
+        swing_at.is_some_and(|f| f <= 5),
+        "attacker plays the at0? swing clip within a few frames"
+    );
+    assert_impact_at(
+        impact_at,
         "victim reaction (damg + dfm? flinch) fired at the inlined-0x2B frame (~36), not on \
-         packet arrival"
+         packet arrival",
     );
 }
 
@@ -587,9 +634,9 @@ fn s5b_mob_victim_normal_hit_runs_damg_and_flinches() {
         routines(w, vic_parent).contains(b"damg")
             && active_clip(w, vic_child).is_some_and(|c| c.starts_with("dfi"))
     });
-    assert!(
-        impact_at.is_some(),
-        "normal hit runs damg + dfi? flinch on the mob victim"
+    assert_impact_at(
+        impact_at,
+        "normal hit runs damg + dfi? flinch on the mob victim",
     );
     // The attacker still swung (sanity: the chain armed from this swing's 0x2B).
     assert!(active_clip(app.world(), atk_child).is_some());
@@ -623,10 +670,10 @@ fn s6_heavy_recoil_runs_ldam_and_flinches_the_pc() {
             && !r.contains(b"sdam")
             && active_clip(w, vic_child).is_some_and(|c| c.starts_with("dfm"))
     });
-    assert!(
-        impact_at.is_some(),
+    assert_impact_at(
+        impact_at,
         "heavy recoil runs ldam + dfm? flinch at the impact frame, with no other damage \
-         reaction alongside"
+         reaction alongside",
     );
 
     let sway = routines(app.world(), vic_parent).contains(b"sway");
@@ -652,10 +699,7 @@ fn s6b_heavy_recoil_flinches_the_mob_with_dfi() {
         routines(w, vic_parent).contains(b"ldam")
             && active_clip(w, vic_child).is_some_and(|c| c.starts_with("dfi"))
     });
-    assert!(
-        impact_at.is_some(),
-        "heavy recoil flinches the mob victim with dfi?"
-    );
+    assert_impact_at(impact_at, "heavy recoil flinches the mob victim with dfi?");
     // The attacker still swung (sanity: the chain armed from this swing's 0x2B).
     assert!(active_clip(app.world(), atk_child).is_some());
 }
@@ -683,10 +727,10 @@ fn s6c_heavy_recoil_without_ldam_falls_back_to_damg() {
     let (impact_at, _) = watch(&mut app, 45, |_i, w| {
         routines(w, vic_parent).contains(b"damg") && !routines(w, vic_parent).contains(b"ldam")
     });
-    assert!(
-        impact_at.is_some(),
+    assert_impact_at(
+        impact_at,
         "heavy recoil on a no-ldam victim runs the damg fallback at the impact frame, not an \
-         unresolvable ldam"
+         unresolvable ldam",
     );
     // The attacker still swung (sanity: the chain armed from this swing's 0x2B).
     assert!(active_clip(app.world(), atk_child).is_some());
@@ -711,10 +755,10 @@ fn s6d_medium_hit_without_ldam_still_runs_damg() {
     let (impact_at, _) = watch(&mut app, 45, |_i, w| {
         routines(w, vic_parent).contains(b"damg")
     });
-    assert!(
-        impact_at.is_some(),
+    assert_impact_at(
+        impact_at,
         "hits below Heavy on a no-ldam victim still run damg (recoil size selection does not \
-         leak into dist 0/1/2)"
+         leak into dist 0/1/2)",
     );
 }
 
@@ -742,10 +786,10 @@ fn s6e_crit_bit_light_distortion_runs_damg_not_ldam() {
             && !r.contains(b"sdam")
             && active_clip(w, vic_child).is_some_and(|c| c.starts_with("dfm"))
     });
-    assert!(
-        impact_at.is_some(),
+    assert_impact_at(
+        impact_at,
         "crit bit + light distortion runs exactly damg (light recoil) with flinch: the crit \
-         bit has no visual consumer, and ldam must not fire on a light hit"
+         bit has no visual consumer, and ldam must not fire on a light hit",
     );
 
     let sway = routines(app.world(), vic_parent).contains(b"sway");
@@ -774,9 +818,9 @@ fn s6f_crit_bit_light_distortion_without_ldam_runs_damg() {
     let (impact_at, _) = watch(&mut app, 45, |_i, w| {
         routines(w, vic_parent).contains(b"damg") && !routines(w, vic_parent).contains(b"ldam")
     });
-    assert!(
-        impact_at.is_some(),
-        "crit bit + light distortion on a no-ldam victim runs damg, same as the non-crit case"
+    assert_impact_at(
+        impact_at,
+        "crit bit + light distortion on a no-ldam victim runs damg, same as the non-crit case",
     );
 }
 
@@ -805,10 +849,10 @@ fn live_root_probe(
 /// the actor; the walker's scale byte (100) must leave it at exactly 1.0 with Walking.
 #[test]
 fn s8_info_chunk_scale_and_movement_reach_the_live_actor() {
-    let Some(bat) = install().and_then(|_| load_npc(BAT_FILE).ok()) else {
+    let Some(bat) = load_fixture("bat", BAT_FILE) else {
         return;
     };
-    let Some(walker) = install().and_then(|_| load_npc(WALKER_FILE).ok()) else {
+    let Some(walker) = load_fixture("walker", WALKER_FILE) else {
         return;
     };
 
@@ -918,9 +962,9 @@ fn s7a_miss_runs_sway() {
     let (impact_at, _) = watch(&mut app, 45, |_i, w| {
         routines(w, vic_parent).contains(b"sway")
     });
-    assert!(
-        impact_at.is_some(),
-        "miss runs sway on the victim at the impact frame"
+    assert_impact_at(
+        impact_at,
+        "miss runs sway on the victim at the impact frame",
     );
 }
 
@@ -940,9 +984,9 @@ fn s7b_guard_plays_gud_clip() {
         routines(w, vic_parent).contains(b"gurd")
             && active_clip(w, vic_child).is_some_and(|c| c.starts_with("gud"))
     });
-    assert!(
-        impact_at.is_some(),
-        "guard plays the gud? clip via gurd's Motion stage"
+    assert_impact_at(
+        impact_at,
+        "guard plays the gud? clip via gurd's Motion stage",
     );
 }
 
@@ -962,9 +1006,9 @@ fn s7c_parry_plays_gud_clip() {
         routines(w, vic_parent).contains(b"pary")
             && active_clip(w, vic_child).is_some_and(|c| c.starts_with("gud"))
     });
-    assert!(
-        impact_at.is_some(),
-        "parry plays the gud? clip via pary's Motion stage"
+    assert_impact_at(
+        impact_at,
+        "parry plays the gud? clip via pary's Motion stage",
     );
 }
 
@@ -985,10 +1029,7 @@ fn s7d_knockback_adds_sway_alongside_the_damage_reaction() {
     let (impact_at, _) = watch(&mut app, 45, |_i, w| {
         routines(w, vic_parent).contains(b"damg") && routines(w, vic_parent).contains(b"sway")
     });
-    assert!(
-        impact_at.is_some(),
-        "kb>0 runs the damage reaction and sway together"
-    );
+    assert_impact_at(impact_at, "kb>0 runs the damage reaction and sway together");
 }
 
 // ---------------------------------------------------------------------------
@@ -1056,19 +1097,26 @@ fn s9_defeated_runs_dead_routine_and_holds_idle_across_the_gap() {
     );
 
     // No cor? flash across the gap: from the event through the fall-over start the pose stays
-    // off the corpse clip, and the ded? fall-over starts within a few frames.
-    let (ded_at, samples) = watch(&mut app, 12, |_i, w| {
-        active_clip(w, vic_child).is_some_and(|c| c.starts_with("ded"))
-    });
+    // off the corpse clip, and the ded? fall-over starts within a few frames. Both are sampled
+    // on each frame's own world - a transient flash is invisible in the final state.
+    let mut ded_at = None;
+    let mut cor_flashed = false;
+    for i in 1..=12u32 {
+        step(&mut app);
+        let w = app.world();
+        if !cor_flashed && pose_clip(w, vic_child).is_some_and(|c| c.starts_with("cor")) {
+            cor_flashed = true;
+        }
+        if ded_at.is_none() && active_clip(w, vic_child).is_some_and(|c| c.starts_with("ded")) {
+            ded_at = Some(i);
+        }
+    }
     assert!(
         ded_at.is_some(),
         "the ded? fall-over clip starts within a few frames"
     );
-    let no_cor_flash = samples
-        .iter()
-        .all(|_| !pose_clip(app.world(), vic_child).is_some_and(|c| c.starts_with("cor")));
     assert!(
-        no_cor_flash,
+        !cor_flashed,
         "the pose pass held idle across the fall-over gap - no cor? flash"
     );
 }
@@ -1108,7 +1156,7 @@ fn s10_left_attack_without_bti0_falls_back_to_ati0() {
 /// bti0 rather than falling back.
 #[test]
 fn s10b_left_attack_with_bti0_plays_the_limb_clip() {
-    let Some(loaded) = install().and_then(|_| load_npc(LIMB_MODEL_FILE).ok()) else {
+    let Some(loaded) = load_fixture("limb model", LIMB_MODEL_FILE) else {
         return;
     };
     // The limb model must actually carry bti0 with a Motion clip, or the scenario is void.

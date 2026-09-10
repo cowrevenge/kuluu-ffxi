@@ -886,6 +886,18 @@ mod tests {
         assert_eq!(special_routine(5), Some("ini1"), "spawn flag wraps to ini1");
         assert_eq!(special_routine(6), Some("ini2"));
         assert_eq!(special_routine(7), Some("ini3"));
+
+        // Real spawn bytes the server actually ships: mob_pools.sql carries Damselfly with
+        // animationsub 8 and the sheep family (Brutal_Sheep and kin) at 16, and entity_update.cpp
+        // CEntityUpdatePacket::updateWith sets ref<uint8>(0x2A) = 4 on spawn when the sub is
+        // nonzero, so the wire form of those two is 12 and 20. All four must read as plain.
+        for sub in [8u8, 12, 16, 20] {
+            assert_eq!(
+                special_routine(sub),
+                None,
+                "raw sub={sub} is a non-selector spawn byte"
+            );
+        }
     }
 
     #[test]

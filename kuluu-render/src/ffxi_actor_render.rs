@@ -30,6 +30,7 @@ use ffxi_dat::texture::{decode_texture, DecodedTexture};
 use ffxi_dat::{walk_tree, ChunkKind, ChunkNode, DatRoot};
 
 use crate::combat_stance;
+pub use crate::combat_stance::{infers_walk_gait, WALK_RUN_BOUNDARY};
 use crate::dat_vos2::skeleton_file_id_for_race;
 use crate::scene::BakedActor;
 use crate::skinned_ffxi_material::{
@@ -99,13 +100,6 @@ fn burrow_log_enabled() -> bool {
 // Tick counter for the gated hold probe below; advanced once per snapshot tick in
 // `tick_live_ffxi_actors` (serial section), read from the parallel pose pass.
 static BURROW_LOG_TICK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
-pub const WALK_RUN_BOUNDARY: f32 = 3.0;
-
-#[inline]
-pub fn infers_walk_gait(speed: f32) -> bool {
-    speed > combat_stance::EntityMotion::MOVE_EXIT && speed < WALK_RUN_BOUNDARY
-}
 
 pub(crate) fn ffxi_to_bevy_basis() -> Quat {
     Quat::from_rotation_x(std::f32::consts::PI)
@@ -3160,7 +3154,7 @@ pub fn tick_live_ffxi_actors(
         .self_casting
         .as_ref()
         .is_some_and(|c| !c.interrupted);
-    let self_walking = walk_mode.walking;
+    let self_walking = self_move.walking(walk_mode.walking);
     let self_target_id = target.id;
     let (self_move_forward, self_move_strafe, self_move_moving) =
         (self_move.forward, self_move.strafe, self_move.moving);

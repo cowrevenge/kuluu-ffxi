@@ -361,6 +361,8 @@ run_contracts() {
   listing=$(cargo test -p kuluu-render -p kuluu --lib --locked "${FEATURES[@]}" -- --list)
   for contract in \
     transport::tests::transport_state_contract \
+    view_native::input::tests::scripted_walk_render_contract \
+    view_native::walker::obstacles::tests::transport_dock_collision_contract \
     view_native::navmesh_overlay::tests::remote_passenger_keeps_reported_height_under_unloaded_interior_shell \
     zone_point_lights::tests::active_interior_lights_join_main_and_leave_on_deactivation_or_disconnect; do
     if ! grep -Fxq "$contract: test" <<< "$listing"; then

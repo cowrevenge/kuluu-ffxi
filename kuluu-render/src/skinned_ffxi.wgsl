@@ -29,6 +29,7 @@
 }
 
 #import kuluu_render::directional_shadow::directional_shadow_factor
+#import kuluu_render::point_shadow::point_shadow_factor
 
 // Distance fog — see zone_ffxi.wgsl for the rationale. Applied so a distant
 // actor fades into the same horizon backdrop as the terrain behind it; near
@@ -143,7 +144,7 @@ fn vertex(v: Vertex) -> VertexOutput {
     return out;
 }
 
-fn scene_irradiance(si: u32, n: vec3<f32>, p: vec3<f32>, wrap: f32, shadow_scale: vec2<f32>) -> vec3<f32> {
+fn scene_irradiance(si: u32, n: vec3<f32>, p: vec3<f32>, wrap: f32, shadow_scale: vec2<f32>, point_shadows: bool, frag_coord: vec2<f32>) -> vec3<f32> {
     var rgb = skins[si].lighting.ambient.rgb;
     let nl0 = max((dot(n, -skins[si].lighting.dir0_dir.xyz) + wrap) / (1.0 + wrap), 0.0);
     rgb += shadow_scale.x * nl0 * skins[si].lighting.dir0_color.rgb * skins[si].lighting.dir0_color.w;
@@ -166,7 +167,14 @@ fn scene_irradiance(si: u32, n: vec3<f32>, p: vec3<f32>, wrap: f32, shadow_scale
                 let denom = a.x + a.y * dist + a.z * dist * dist;
                 let dist_factor = select(1.0 / denom, 0.0, denom <= 0.0);
                 let nl = max(dot(n, to_light / max(dist, 1e-5)), 0.0);
-                rgb += nl * dist_factor * skins[si].lighting.point_color[i].rgb;
+                // Enhanced Dynamic Lights: the slot's light may carry a cube shadow map
+                // (zone_point_lights.rs select_shadowed_zone_lights); no floor, matching
+                // zone_ffxi.wgsl so the shadow reads the same on the character and the deck.
+                var shadow = 1.0;
+                if (point_shadows) {
+                    shadow = point_shadow_factor(p, n, skins[si].lighting.point_pos[i].xyz, frag_coord);
+                }
+                rgb += shadow * nl * dist_factor * skins[si].lighting.point_color[i].rgb;
             }
         }
     }
@@ -202,7 +210,7 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     let has_texture = rec.flags.x > 0.5;
     // flags.y selects the realistic (Bevy-scene-driven) lighting model.
     let realistic = rec.flags.y > 0.5;
-    // flags.z gates directional cast-shadow / self-shadow RECEIVE (the
+    // flags.z gates shadow RECEIVE from the sun/moon and from Enhanced point lights (the
     // "Model Shadow Receiving" graphics setting). When off, both branches light the
     // model with no shadow attenuation (sun term at full strength).
     let receive_shadows = rec.flags.z > 0.5;
@@ -245,7 +253,7 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
         let EXPOSURE = 1.7;
         let AMBIENT_FLOOR = 0.10;
         let albedo = texel.rgb * in.color.rgb * rec.tint.rgb;
-        let irr = scene_irradiance(si, n, in.world_position, 0.3, shadow_scale);
+        let irr = scene_irradiance(si, n, in.world_position, 0.3, shadow_scale, receive_shadows, in.clip_position.xy);
         let rgb = albedo * (irr * EXPOSURE + vec3<f32>(AMBIENT_FLOOR));
         // Opaque output (AlphaMode::Mask already discarded cut-out texels). A
         // sub-1 alpha here would let the preview camera composite the character
@@ -259,7 +267,7 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     // and emits a D3DCOLOR, so the lit vertex term saturates before the stage.
     //
     shadow_scale = mix(vec2<f32>(FFXI_SHADOW_FLOOR), vec2<f32>(1.0), shadow_scale);
-    let lit = saturate(scene_irradiance(si, n, in.world_position, 0.0, shadow_scale) * in.color.rgb);
+    let lit = saturate(scene_irradiance(si, n, in.world_position, 0.0, shadow_scale, receive_shadows, in.clip_position.xy) * in.color.rgb);
     let rgb = saturate(D3D_MODULATE_2X * lit * texel.rgb * rec.tint.rgb);
     // Opaque output (AlphaMode::Mask already discarded cut-out texels). A sub-1
     // alpha here would let the preview camera composite the character see-

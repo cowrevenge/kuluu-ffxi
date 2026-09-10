@@ -30,6 +30,14 @@ const SHADOW_NORMAL_BIAS: f32 = 0.1;
 const SHADOW_DISTANCE: f32 = 20.0;
 const AMBIENT: f32 = 0.08;
 const DIFFUSE: f32 = 0.25;
+// The point modes light the plate from a single lamp on the camera side of the blocker.
+const POINT_LIGHT_DISTANCE: f32 = 2.5;
+const POINT_LIGHT_RANGE: f32 = 10.0;
+// FAITHFUL_LIGHT_INTENSITY (zone_point_lights.rs) x DIFFUSE, so the --zone plate's
+// clustered feed lands at the same brightness as the skinned plate's uniform slot.
+const POINT_LIGHT_INTENSITY: f32 = 6250.0;
+// Flat falloff (const term only) keeps the lit/shadowed contrast a single step.
+const POINT_LIGHT_CONST_ATTEN: f32 = 1.0;
 const ALBEDO: f32 = 0.6;
 const CAPTURE_FRAME: u32 = 80;
 const EXIT_DELAY: u32 = 10;
@@ -50,7 +58,7 @@ fn main() {
     let mut args = std::env::args().skip(1);
     let mode = args
         .next()
-        .expect("mode: off, active, inactive, opposing, valid, valid-off");
+        .expect("mode: off, active, inactive, opposing, valid, valid-off, point, point-off, point-unshadowed");
     let out = args.next().expect("output PNG path");
     let flags: Vec<String> = args.collect();
     let mut app = App::new();
@@ -153,6 +161,21 @@ fn setup(
     ));
 
     let to_light = LIGHT_DIRECTION.normalize();
+    let point = run.mode.starts_with("point");
+    let point_pos = Vec3::new(BLOCKER_OFFSET, BLOCKER_OFFSET, POINT_LIGHT_DISTANCE);
+    if point {
+        commands.spawn((
+            PointLight {
+                intensity: POINT_LIGHT_INTENSITY,
+                range: POINT_LIGHT_RANGE,
+                shadow_maps_enabled: run.mode != "point-unshadowed",
+                shadow_depth_bias: SHADOW_DEPTH_BIAS,
+                shadow_normal_bias: SHADOW_NORMAL_BIAS,
+                ..default()
+            },
+            Transform::from_translation(point_pos),
+        ));
+    }
     let primary = DirectionalLight {
         illuminance: LIGHT_LUX,
         shadow_maps_enabled: true,
@@ -165,11 +188,13 @@ fn setup(
         ..default()
     }
     .build();
-    commands.spawn((
-        primary,
-        Transform::from_translation(to_light).looking_at(Vec3::ZERO, Vec3::Y),
-        cascade.clone(),
-    ));
+    if !point {
+        commands.spawn((
+            primary,
+            Transform::from_translation(to_light).looking_at(Vec3::ZERO, Vec3::Y),
+            cascade.clone(),
+        ));
+    }
     if matches!(run.mode.as_str(), "inactive" | "opposing") {
         commands.spawn((
             DirectionalLight {
@@ -188,11 +213,21 @@ fn setup(
     registry.skin_mut(skin).lighting = FfxiLightingUniform {
         ambient: Vec4::splat(AMBIENT),
         dir0_dir: (-to_light).extend(0.0),
-        dir0_color: Vec4::new(DIFFUSE, DIFFUSE, DIFFUSE, 1.0),
+        dir0_color: if point {
+            Vec4::ZERO
+        } else {
+            Vec4::new(DIFFUSE, DIFFUSE, DIFFUSE, 1.0)
+        },
         dir1_dir: Vec4::ZERO,
         dir1_color: Vec4::ZERO,
         ..default()
     };
+    if point {
+        let lighting = &mut registry.skin_mut(skin).lighting;
+        lighting.point_pos[0] = point_pos.extend(0.0);
+        lighting.point_color[0] = Vec4::new(DIFFUSE, DIFFUSE, DIFFUSE, POINT_LIGHT_RANGE);
+        lighting.point_atten[0] = Vec4::new(POINT_LIGHT_CONST_ATTEN, 0.0, 0.0, 0.0);
+    }
     if run.secondary {
         let lighting = &mut registry.skin_mut(skin).lighting;
         lighting.dir1_dir = lighting.dir0_dir;
@@ -205,7 +240,7 @@ fn setup(
         ambient_landscape: Vec3::splat(AMBIENT),
         sun_dir: if run.secondary { Vec3::ZERO } else { to_light },
         sun_color: Vec3::splat(DIFFUSE),
-        sun_k: if run.secondary { 0.0 } else { 1.0 },
+        sun_k: if run.secondary || point { 0.0 } else { 1.0 },
         moon_dir: if run.secondary { to_light } else { Vec3::ZERO },
         moon_color: Vec3::splat(DIFFUSE),
         moon_k: if run.secondary { 1.0 } else { 0.0 },
@@ -222,8 +257,8 @@ fn setup(
     let material = materials.add(FfxiSkinnedMaterial {
         base_color_texture: None,
     });
-    let receive = !matches!(run.mode.as_str(), "off" | "valid-off");
-    let front = run.mode.starts_with("valid");
+    let receive = !matches!(run.mode.as_str(), "off" | "valid-off" | "point-off");
+    let front = run.mode.starts_with("valid") || point;
     for (size, position) in [
         (
             Vec3::new(RECEIVER_SIDE, RECEIVER_SIDE, RECEIVER_THICKNESS),

@@ -684,6 +684,45 @@ mod tests {
         );
     }
 
+    // point_shadow.wgsl resolves a per-actor slot to its shadow map by matching the
+    // slot's position against the clustered light's, so the uniform pack and the
+    // PointLight entity must carry the same f32s for the same light.
+    #[test]
+    fn packed_slot_position_is_the_spawned_light_s_translation() {
+        const NIGHT_VANA_HOUR: f32 = 22.0;
+        let pos = Vec3::new(123.456_79, -7.891_011, 0.123_456_79);
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .init_resource::<ActiveSceneLights>()
+            .init_resource::<crate::graphics_settings::GraphicsSettings>()
+            .insert_resource(crate::vana_time::VanaClock::anchored_at_hour(
+                NIGHT_VANA_HOUR,
+            ))
+            .insert_resource(ZonePointLights {
+                file_id: None,
+                sub_area_file_id: None,
+                lights: vec![light(pos, 10.0)],
+            })
+            .add_systems(
+                Update,
+                (sync_faithful_zone_light_entities, build_active_scene_lights),
+            );
+        app.update();
+
+        let spawned: Vec<[u32; 3]> = app
+            .world_mut()
+            .query_filtered::<&Transform, With<FaithfulZoneLight>>()
+            .iter(app.world())
+            .map(|t| t.translation.to_array().map(f32::to_bits))
+            .collect();
+        let active = app.world().resource::<ActiveSceneLights>();
+        let (point_pos, _, _) = point_light_arrays_for(&active.lights, &[0]);
+        assert_eq!(
+            spawned,
+            vec![point_pos[0].xyz().to_array().map(f32::to_bits)]
+        );
+    }
+
     #[test]
     fn lamp_flicker_bounded_and_never_dark() {
         for i in 0..400 {

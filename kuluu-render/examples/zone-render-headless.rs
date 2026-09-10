@@ -61,7 +61,26 @@ struct P {
     zone_particles: bool,
     // Some(n): Enhanced Dynamic Lights with n shadowed lamps, zone geometry casting.
     enhanced_lights: Option<u32>,
+    // Skinned NPC actors placed in the zone (needs --sky), for reading how the
+    // lamps light and shadow a character standing in their pool.
+    npcs: Vec<NpcPlacement>,
+    // Model Shadow Receiving off: the A/B against a default run isolates what the
+    // shadow maps change on the placed actors, since the zone reads identically.
+    no_receive: bool,
 }
+#[derive(Clone, Copy)]
+enum ActorSubject {
+    Npc(u32),
+    Pc(u8),
+}
+#[derive(Clone, Copy)]
+struct NpcPlacement {
+    subject: ActorSubject,
+    pos: Vec3,
+    yaw: f32,
+}
+#[derive(Component)]
+struct NpcGrounded(bool);
 #[derive(Resource, Default)]
 struct FC(u32);
 #[derive(Resource, Default)]
@@ -90,6 +109,8 @@ fn main() {
         weather: None,
         zone_particles: true,
         enhanced_lights: None,
+        npcs: Vec::new(),
+        no_receive: false,
     };
     let f3 = |a: &[String], i: usize| {
         Vec3::new(
@@ -163,6 +184,23 @@ fn main() {
             }
             "--no-zone-particles" => {
                 p.zone_particles = false;
+                i += 1;
+            }
+            "--npc" | "--pc" => {
+                let subject = if a[i] == "--npc" {
+                    ActorSubject::Npc(a[i + 1].parse().unwrap())
+                } else {
+                    ActorSubject::Pc(a[i + 1].parse().unwrap())
+                };
+                p.npcs.push(NpcPlacement {
+                    subject,
+                    pos: f3(&a, i + 1),
+                    yaw: a[i + 5].parse().unwrap(),
+                });
+                i += 6;
+            }
+            "--no-receive" => {
+                p.no_receive = true;
                 i += 1;
             }
             "--enhanced-lights" => {
@@ -243,7 +281,10 @@ fn main() {
     // after sun_moon_system, exactly as ViewerCorePlugin orders them.
     let sky = app.world().resource::<P>().sky;
     if sky {
-        let mut gfx = GraphicsSettings::default();
+        let mut gfx = GraphicsSettings {
+            faithful_shadow_receive: !app.world().resource::<P>().no_receive,
+            ..GraphicsSettings::default()
+        };
         if let Some(n) = enhanced_lights {
             gfx.dynamic_lights = kuluu_render::graphics::settings::DynamicLights::Enhanced;
             gfx.shadowed_lights = n;
@@ -292,7 +333,109 @@ fn main() {
             weather.map(kuluu_snapshot::Weather::from_lsb),
         ));
     }
+    let npcs = app.world().resource::<P>().npcs.clone();
+    if !npcs.is_empty() {
+        assert!(
+            sky,
+            "--npc needs --sky: actor lighting reads the zone's 0x2F records"
+        );
+        app.add_plugins(kuluu_render::skinned_ffxi_material::FfxiMaterialPlugin)
+            .add_systems(Startup, spawn_npcs)
+            .add_systems(
+                Update,
+                (
+                    ground_npcs,
+                    kuluu_render::ffxi_actor_render::update_ffxi_render_actor_lighting,
+                    kuluu_render::ffxi_actor_render::update_ffxi_actor_point_lights
+                        .after(kuluu_render::zone_point_lights::build_active_scene_lights),
+                    kuluu_render::ffxi_actor_render::tick_ffxi_render_actors,
+                )
+                    .chain(),
+            );
+    }
     app.run();
+}
+fn spawn_npcs(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<kuluu_render::skinned_ffxi_material::FfxiSkinnedMaterial>>,
+    mut material_cache: ResMut<kuluu_render::skinned_ffxi_material::FfxiSkinnedMaterialCache>,
+    mut registry: ResMut<kuluu_render::skinned_ffxi_material::FfxiSkinRegistry>,
+    mut images: ResMut<Assets<Image>>,
+    p: Res<P>,
+) {
+    for npc in &p.npcs {
+        let loaded = match npc.subject {
+            ActorSubject::Npc(id) => kuluu_render::ffxi_actor_render::load_npc(id),
+            ActorSubject::Pc(race) => {
+                kuluu_render::ffxi_actor_render::load_pc(race, false, &[], None, None, None)
+            }
+        };
+        let loaded = match loaded {
+            Ok(loaded) => loaded,
+            Err(e) => {
+                eprintln!("actor: {e}");
+                continue;
+            }
+        };
+        let entity = kuluu_render::ffxi_actor_render::spawn_loaded_actor(
+            &mut commands,
+            &mut meshes,
+            &mut materials,
+            &mut material_cache,
+            &mut registry,
+            &mut images,
+            &loaded,
+            npc.pos,
+            npc.yaw,
+            1.0,
+            kuluu_render::zone_texture::TextureQuality {
+                mipmaps: true,
+                anisotropy: 8,
+            },
+        );
+        commands.entity(entity).insert(NpcGrounded(false));
+    }
+}
+// The harness has no player grounding, so each actor snaps to the MZB floor once
+// the collision blocks have streamed in. The nearest DAT lamps are printed with it,
+// which is what places a character in a chosen lantern pool.
+fn ground_npcs(
+    collision: Res<MzbCollisionGeometry>,
+    lamps: Res<kuluu_render::zone_point_lights::ZonePointLights>,
+    mut q: Query<(&mut Transform, &mut NpcGrounded)>,
+) {
+    const NEAREST_LAMPS_REPORTED: usize = 3;
+    for (mut t, mut grounded) in &mut q {
+        if grounded.0 {
+            continue;
+        }
+        let Some(y) = collision.ground_nearest(t.translation.xz(), t.translation.y) else {
+            continue;
+        };
+        t.translation.y = y;
+        grounded.0 = true;
+        let mut nearest: Vec<(f32, Vec3, f32)> = lamps
+            .lights
+            .iter()
+            .map(|l| (l.world_pos.distance(t.translation), l.world_pos, l.range))
+            .collect();
+        nearest.sort_by(|a, b| a.0.total_cmp(&b.0));
+        eprintln!(
+            "npc grounded at ({:.2}, {:.2}, {:.2}); nearest lamps: {:?}",
+            t.translation.x,
+            y,
+            t.translation.z,
+            nearest
+                .iter()
+                .take(NEAREST_LAMPS_REPORTED)
+                .map(|(d, p, r)| format!(
+                    "d={d:.1} at ({:.1},{:.1},{:.1}) range={r:.1}",
+                    p.x, p.y, p.z
+                ))
+                .collect::<Vec<_>>()
+        );
+    }
 }
 fn print_toasts(mut rx: MessageReader<ToastEvent>) {
     for t in rx.read() {

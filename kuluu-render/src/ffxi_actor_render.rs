@@ -3372,11 +3372,19 @@ pub struct LiveSnapshotIndex {
 /// Per-frame scratch maps rebuilt every tick by [`tick_live_ffxi_actors`]. Grouped into one
 /// `Local` so the system stays within Bevy's 16-parameter fn-item arity limit. `pub` like
 /// [`LiveSnapshotIndex`]: a Local parameter type must be visible to modules that schedule this
-/// system with `.before()`/`.after()`.
+/// system with `.before()`/`.after()`. The two `prev_` fields are cross-snapshot memory, not
+/// per-frame scratch: they persist across frames and are pruned only on despawn.
 #[derive(Default)]
 pub struct FrameScratch {
     actor_world: HashMap<u32, Vec3>,
     mount_attach: HashMap<u32, MountAttach>,
+    // The 0x0E hp_pct last observed per entity id. A 0 -> >0 transition on the next snapshot is
+    // a Raise and clears that entity's Defeated latch (DeadFromAction).
+    prev_hp: HashMap<u32, Option<u8>>,
+    // Self's deadness as of the previous snapshot (party row / homepoint timer channel; self's
+    // own entity hp_pct only updates when CHAR_PC carries UPDATE_HP). A true -> false transition
+    // is a Raise of self.
+    prev_self_dead: Option<bool>,
 }
 
 pub fn tick_live_ffxi_actors(
@@ -3392,8 +3400,9 @@ pub fn tick_live_ffxi_actors(
     // Model-root Visibility is written here only for entities with an active special state;
     // every other entity's root stays owned by scene::apply_invis_flag_system (invis-flag PCs).
     // The fourth slot is the Defeated latch: a killing result starts the death path on
-    // this frame instead of waiting for the next 0x0E hp_pct.
+    // this frame instead of waiting for the next 0x0E hp_pct; a raise clears it.
     mut q_actors: Query<(
+        Entity,
         &mut FfxiRenderActor,
         &GlobalTransform,
         &mut Visibility,
@@ -3420,6 +3429,16 @@ pub fn tick_live_ffxi_actors(
     let elapsed_frames = time.delta_secs() * FRAME_RATE;
     let self_id = state.snapshot.self_char_id;
 
+    // Self KO is unreliable via the entity hp_pct (only updated when CHAR_PC
+    // carries UPDATE_HP) and via the party row (absent/stale when solo).
+    // death_homepoint_secs is published from 0x037 CHAR_STATUS and 0x00A LOGIN,
+    // both gated on hpp == 0. Hoisted above the snapshot-change block so a raise
+    // transition can be detected there; the pose pass below reads the same value.
+    let self_dead = state.snapshot.death_homepoint_secs.is_some()
+        || crate::snapshot::resolve_self(&state.snapshot.party, self_id)
+            .map(|m| m.hp_pct == 0)
+            .unwrap_or(false);
+
     // Special-pose effect routines queued by this frame's wire-state transitions, mirroring
     // retail: a sub change on a live actor plays table[sub] on the model
     // (a worm's `ini1` = Motion sp1? + dirt generators + sound); a hidden -> visible transition
@@ -3437,8 +3456,17 @@ pub fn tick_live_ffxi_actors(
         index.by_id.clear();
         index.id_by_targid.clear();
         let mut live_ids = std::collections::HashSet::new();
+        // World ids whose 0x0E hp_pct just went 0 -> >0 on this snapshot (a Raise): the wire
+        // owns death state again, so their Defeated latch is cleared below.
+        let mut raised: std::collections::HashSet<u32> = std::collections::HashSet::new();
         for e in &state.snapshot.entities {
             live_ids.insert(e.id);
+            // A Raise is a 0 -> >0 transition of this entity's 0x0E hp_pct on this snapshot.
+            let prev_hp = frame_scratch.prev_hp.get(&e.id).copied();
+            frame_scratch.prev_hp.insert(e.id, e.hp_pct);
+            if matches!(prev_hp, Some(Some(0))) && e.hp_pct.is_some_and(|p| p > 0) {
+                raised.insert(e.id);
+            }
             let mounted = state.snapshot.mount_of(e).is_some();
             // Advance the special-pose wire state from last frame to this snapshot's
             // status/animationsub. A no-op (stays plain) for entities with no sub and a visible
@@ -3535,8 +3563,29 @@ pub fn tick_live_ffxi_actors(
                 );
             }
         }
+        // Self's raise arrives through the party row / homepoint timer channel instead of an
+        // entity hp_pct (see self_dead above): a true -> false transition of self-deadness.
+        if let Some(sid) = self_id {
+            if frame_scratch.prev_self_dead == Some(true) && !self_dead {
+                raised.insert(sid);
+            }
+        }
+        frame_scratch.prev_self_dead = Some(self_dead);
+
+        // Clear the Defeated latch on raised entities (see DeadFromAction). Commands apply at
+        // end of system, so this frame's pose pass still sees the latch for one more frame;
+        // from the next frame the wire's hp_pct owns death state again.
+        if !raised.is_empty() {
+            for (entity, actor, _, _, latch) in q_actors.iter() {
+                if latch.is_some() && raised.contains(&actor.world_id) {
+                    commands.entity(entity).remove::<crate::scheduler_runtime::DeadFromAction>();
+                }
+            }
+        }
+
         // Drop states for entities that despawned so the cache stays bounded.
         special_mem.retain(|id, _| live_ids.contains(id));
+        frame_scratch.prev_hp.retain(|id, _| live_ids.contains(id));
     }
 
     // Fire the queued routines on their wire entities: it carries a world-space Transform (the
@@ -3549,7 +3598,8 @@ pub fn tick_live_ffxi_actors(
         };
         // Model not loaded yet: the clip still plays from the pose pass; only the dirt and
         // sound are lost. Acceptable degradation — the load lands within a few frames.
-        let Some((actor, _, _, _)) = q_actors.iter().find(|(a, _, _, _)| a.world_id == world_id)
+        let Some((_, actor, _, _, _)) =
+            q_actors.iter().find(|(_, a, _, _, _)| a.world_id == world_id)
         else {
             continue;
         };
@@ -3593,7 +3643,7 @@ pub fn tick_live_ffxi_actors(
     actor_world_scratch.extend(
         q_actors
             .iter()
-            .map(|(a, gt, _, _)| (a.world_id, gt.translation())),
+            .map(|(_, a, gt, _, _)| (a.world_id, gt.translation())),
     );
     let actor_world_by_id: &HashMap<u32, Vec3> = actor_world_scratch;
 
@@ -3604,7 +3654,7 @@ pub fn tick_live_ffxi_actors(
     // the two actors are posed in the same pass and a frame of lag on a seat is
     // not visible.
     mount_attach_scratch.clear();
-    for (a, _, _, _) in &q_actors {
+    for (_, a, _, _, _) in &q_actors {
         let Some(rider_id) = crate::scene::mount_actor_rider(a.world_id) else {
             continue;
         };
@@ -3684,19 +3734,10 @@ pub fn tick_live_ffxi_actors(
     let (self_move_forward, self_move_strafe, self_move_moving) =
         (self_move.forward, self_move.strafe, self_move.moving);
 
-    // Self KO is unreliable via the entity hp_pct (only updated when CHAR_PC
-    // carries UPDATE_HP) and via the party row (absent/stale when solo).
-    // death_homepoint_secs is published from 0x037 CHAR_STATUS and 0x00A LOGIN,
-    // both gated on hpp == 0.
-    let self_dead = state.snapshot.death_homepoint_secs.is_some()
-        || crate::snapshot::resolve_self(&state.snapshot.party, self_id)
-            .map(|m| m.hp_pct == 0)
-            .unwrap_or(false);
-
     let motion = &*motion;
     q_actors
         .par_iter_mut()
-        .for_each(|(mut actor, actor_global, mut vis, dead_from_action)| {
+        .for_each(|(_entity, mut actor, actor_global, mut vis, dead_from_action)| {
             let world_id = actor.world_id;
             if world_id == 0 {
                 return;
@@ -3878,7 +3919,7 @@ pub fn tick_live_ffxi_actors(
             }
         });
 
-    for (actor, _, _, _) in &q_actors {
+    for (_, actor, _, _, _) in &q_actors {
         registry
             .skin_mut(actor.skin_slot)
             .joints
@@ -3886,7 +3927,9 @@ pub fn tick_live_ffxi_actors(
     }
 
     if let Some(self_id) = self_id {
-        if let Some((actor, _, _, _)) = q_actors.iter().find(|(a, _, _, _)| a.world_id == self_id) {
+        if let Some((_, actor, _, _, _)) =
+            q_actors.iter().find(|(_, a, _, _, _)| a.world_id == self_id)
+        {
             rest.observe_exit_clip(matches!(actor.rest_phase, RestPlayback::Stopping { .. }));
         }
     }
@@ -5386,6 +5429,262 @@ mod pose_resolution_tests {
         assert!(actor
             .last_clip
             .is_some_and(|c| c.parameterized_match(&actor_state::corpse_pose_id())));
+    }
+
+    // A Raise is a 0 -> >0 transition of that entity's 0x0E hp_pct on the snapshot: the wire
+    // owns death state again, so tick_live_ffxi_actors clears the Defeated latch that a killing
+    // result started (DeadFromAction) and the pose falls back to idle. Self's raise arrives
+    // through the party row / homepoint timer channel instead of an entity hp_pct. The `dead`
+    // routine is dispatched only by dispatch_melee_action_started on INFO_DEFEATED, so a raise
+    // must not re-fire it: no ActiveScheduler named `dead` may exist after the raise tick.
+    #[test]
+    fn a_raise_clears_the_defeated_latch_and_returns_to_idle() {
+        if DatRoot::from_env_or_default().is_err() {
+            eprintln!("skipping: no retail DAT root");
+            return;
+        }
+        bevy::tasks::ComputeTaskPool::get_or_init(Default::default);
+
+        let mut app = App::new();
+        app.init_resource::<Time>()
+            .init_resource::<crate::snapshot::SceneState>()
+            .init_resource::<combat_stance::EntityMotion>()
+            .init_resource::<combat_stance::RestStance>()
+            .init_resource::<combat_stance::WalkMode>()
+            .init_resource::<combat_stance::SelfMoveIntent>()
+            .init_resource::<FfxiSkinRegistry>()
+            .init_resource::<crate::scene::Target>()
+            .init_resource::<crate::scene::TrackedEntities>()
+            .add_systems(Update, tick_live_ffxi_actors);
+
+        let tick = |app: &mut App| {
+            app.world_mut()
+                .resource_mut::<Time>()
+                .advance_by(std::time::Duration::from_secs_f32(1.0 / FRAME_RATE));
+            app.update();
+        };
+        let set_hp = |app: &mut App, id: u32, hp_pct: Option<u8>| {
+            for e in &mut app
+                .world_mut()
+                .resource_mut::<crate::snapshot::SceneState>()
+                .snapshot
+                .entities
+            {
+                if e.id == id {
+                    e.hp_pct = hp_pct;
+                }
+            }
+        };
+        let no_dead_routine = |app: &App| {
+            app.world()
+                .query::<&crate::scheduler_runtime::ActiveSchedulers>()
+                .iter()
+                .all(|s| !s.routine_names().any(|n| n == *b"dead"))
+        };
+
+        // Mob case: the latch is what dispatch_melee_action_started inserts on a Defeated
+        // result; here it is inserted directly and the wire hp_pct owns death state.
+        let loaded = load_npc(1568).expect("installed retail NPC DAT"); // Hare
+        let skin = app.world_mut().resource_mut::<FfxiSkinRegistry>().alloc_skin();
+        let actor_entity = app
+            .world_mut()
+            .spawn((
+                make_render_actor(&loaded, skin, Vec::new(), 1, 0.0, 1.0),
+                GlobalTransform::default(),
+                Visibility::Inherited,
+            ))
+            .id();
+        let snapshot = &mut app
+            .world_mut()
+            .resource_mut::<crate::snapshot::SceneState>()
+            .snapshot;
+        snapshot.zone_id = Some(103);
+        snapshot.entities.push(kuluu_snapshot::Entity {
+            id: 1,
+            act_index: 1,
+            kind: kuluu_snapshot::EntityKind::Mob,
+            name: Some("Hare".into()),
+            pos: kuluu_snapshot::Vec3 {
+                x: 0.0,
+                y: 0.0,
+                z: 0.0,
+            },
+            heading: 0,
+            hp_pct: Some(0),
+            bt_target_id: 0,
+            face_target: 0,
+            claim_id: 0,
+            speed: 0,
+            speed_base: 0,
+            look: None,
+            animation: 0,
+            animationsub: 0,
+            mount: None,
+            status: 1,
+            char_flags: Default::default(),
+            monstrosity: false,
+            name_vis: None,
+        });
+        app.world_mut()
+            .entity(actor_entity)
+            .insert(crate::scheduler_runtime::DeadFromAction);
+
+        tick(&mut app);
+        let actor = app.world().get::<FfxiRenderActor>(actor_entity).unwrap();
+        assert!(actor.inputs.dead, "the Defeated latch holds the death pose");
+        assert!(app
+            .world()
+            .entity(actor_entity)
+            .contains::<crate::scheduler_runtime::DeadFromAction>());
+
+        // Raise: the wire hp_pct goes 0 -> >0. The removal is a command, so it lands after this
+        // frame's pose pass; from the next frame the latch must be gone and dead false.
+        set_hp(&mut app, 1, Some(50));
+        tick(&mut app);
+        tick(&mut app);
+        assert!(
+            !app
+                .world()
+                .entity(actor_entity)
+                .contains::<crate::scheduler_runtime::DeadFromAction>(),
+            "the raise clears the Defeated latch"
+        );
+        let actor = app.world().get::<FfxiRenderActor>(actor_entity).unwrap();
+        assert!(!actor.inputs.dead, "the wire hp_pct owns death state again");
+        assert!(no_dead_routine(&app), "a raise must not re-fire the dead routine");
+
+        // Idle within the death-clip length: with no collapse clip to play (or once it has run),
+        // the pose resolves back to the idle family.
+        let bound = death_collapse_clip(&actor.routines)
+            .map_or(1.0, |(_, f)| f.max(1.0))
+            .ceil() as usize
+            + 2;
+        for _ in 0..bound {
+            tick(&mut app);
+        }
+        let actor = app.world().get::<FfxiRenderActor>(actor_entity).unwrap();
+        assert!(
+            actor
+                .last_clip
+                .is_some_and(|c| c.parameterized_match(&DatId::from_str("idl?"))),
+            "the raised mob returns to idle within the death-clip length"
+        );
+
+        // Self case: self's entity hp_pct stays 100 (it only updates when CHAR_PC carries
+        // UPDATE_HP), so death and raise both arrive through the party row / homepoint timer
+        // channel that self_dead reads.
+        let loaded = load_pc(1, false, &[], None, None, None).expect("installed retail PC DAT");
+        let skin = app.world_mut().resource_mut::<FfxiSkinRegistry>().alloc_skin();
+        let self_entity = app
+            .world_mut()
+            .spawn((
+                make_render_actor(&loaded, skin, Vec::new(), 42, 0.0, 1.0),
+                GlobalTransform::default(),
+                Visibility::Inherited,
+            ))
+            .id();
+        let snapshot = &mut app
+            .world_mut()
+            .resource_mut::<crate::snapshot::SceneState>()
+            .snapshot;
+        snapshot.self_char_id = Some(42);
+        snapshot.entities.push(kuluu_snapshot::Entity {
+            id: 42,
+            act_index: 42,
+            kind: kuluu_snapshot::EntityKind::Pc,
+            name: Some("Self".into()),
+            pos: kuluu_snapshot::Vec3 {
+                x: 0.0,
+                y: 0.0,
+                z: 0.0,
+            },
+            heading: 0,
+            hp_pct: Some(100),
+            bt_target_id: 0,
+            face_target: 0,
+            claim_id: 0,
+            speed: 0,
+            speed_base: 0,
+            look: None,
+            animation: 0,
+            animationsub: 0,
+            mount: None,
+            status: 1,
+            char_flags: Default::default(),
+            monstrosity: false,
+            name_vis: None,
+        });
+        snapshot.party.push(kuluu_snapshot::PartyMember {
+            id: 42,
+            act_index: 42,
+            name: Some("Self".into()),
+            hp: 0,
+            mp: 0,
+            tp: 0,
+            hp_pct: 0,
+            mp_pct: 0,
+            zone_no: 103,
+            main_job: 1,
+            main_job_lv: 1,
+            sub_job: 0,
+            sub_job_lv: 0,
+            is_party_leader: false,
+            is_alliance_leader: false,
+            in_mog_house: false,
+            party_no: 0,
+        });
+        snapshot.death_homepoint_secs = Some(30);
+        app.world_mut()
+            .entity(self_entity)
+            .insert(crate::scheduler_runtime::DeadFromAction);
+
+        tick(&mut app);
+        let actor = app.world().get::<FfxiRenderActor>(self_entity).unwrap();
+        assert!(actor.inputs.dead, "the party row / homepoint channel holds self's death pose");
+
+        // Raise: the party row recovers and the homepoint timer clears.
+        for m in &mut app
+            .world_mut()
+            .resource_mut::<crate::snapshot::SceneState>()
+            .snapshot
+            .party
+        {
+            if m.id == 42 {
+                m.hp = 500;
+                m.hp_pct = 50;
+            }
+        }
+        app.world_mut()
+            .resource_mut::<crate::snapshot::SceneState>()
+            .snapshot
+            .death_homepoint_secs = None;
+        tick(&mut app);
+        tick(&mut app);
+        assert!(
+            !app
+                .world()
+                .entity(self_entity)
+                .contains::<crate::scheduler_runtime::DeadFromAction>(),
+            "the raise clears self's Defeated latch"
+        );
+        let actor = app.world().get::<FfxiRenderActor>(self_entity).unwrap();
+        assert!(!actor.inputs.dead, "the party row / homepoint channel owns self's death state");
+        assert!(no_dead_routine(&app), "a raise must not re-fire the dead routine for self");
+
+        let bound = death_collapse_clip(&actor.routines)
+            .map_or(1.0, |(_, f)| f.max(1.0))
+            .ceil() as usize
+            + 2;
+        for _ in 0..bound {
+            tick(&mut app);
+        }
+        let actor = app.world().get::<FfxiRenderActor>(self_entity).unwrap();
+        assert!(
+            actor
+                .last_clip
+                .is_some_and(|c| c.parameterized_match(&DatId::from_str("idl?"))),
+            "the raised self returns to idle within the death-clip length"
+        );
     }
 
     #[test]

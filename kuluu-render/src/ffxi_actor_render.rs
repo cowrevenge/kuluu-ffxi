@@ -2960,7 +2960,7 @@ pub fn tick_live_ffxi_actors(
     let self_id = state.snapshot.self_char_id;
 
     // Burrow effect routines queued by this frame's FSM transitions, mirroring retail
-    // (FFXiMain.dll F19-F22): dig = sub set on a live actor -> the DAT's `ini1` routine
+    // (FFXiMain.dll): dig = sub set on a live actor -> the DAT's `ini1` routine
     // (Motion sp1? + dirt generators + sound); pop-up = visible status with no actor ->
     // fresh model load running `init` (Motion sp0? + dirt generators + sound). We keep one
     // hidden actor instead of destroying/rebuilding it, so both fire on the same entity.
@@ -4023,7 +4023,7 @@ mod pose_resolution_tests {
         if DatRoot::from_env_or_default().is_err() {
             return;
         }
-        // Installed ROM/5/64.DAT, the F19-F22 worm reference.
+        // Installed ROM/5/64.DAT, the tunnel worm reference.
         let loaded =
             load_npc(crate::look_resolver::npc_dat_id(0x01a8)).expect("installed worm DAT");
         let dig = actor_state::burrow_clip(actor_state::BurrowPhase::DigDown).unwrap();

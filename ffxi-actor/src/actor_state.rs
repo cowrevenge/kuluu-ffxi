@@ -58,7 +58,7 @@ pub enum BurrowPhase {
 /// Maps a burrow phase to its model clip. FFXI burrowing mobs (tunnel worms and
 /// kin) ship two dedicated clips in their model DAT: `sp1?` drives the body down
 /// into the ground, `sp0?` raises it back out (verified against ROM/5/64.DAT joint
-/// deltas and the retail client's parsed records — F19-F22).
+/// deltas and the retail client's parsed records).
 ///
 /// Retail runs these via the DAT's effect routines. Dig is a sub set on a live
 /// actor, which plays `ini1` (Motion sp1? + dirt generators + sound); pop-up is a
@@ -89,7 +89,7 @@ pub const BURROW_INVISIBLE_STATUS: u8 = 3;
 /// transition is the reliable discriminator between "digging" and "just surfaced",
 /// because the effect selector is active in both windows.
 ///
-/// Retail semantics (FFXiMain.dll, findings F19-F22): dig = sub set on a live actor,
+/// Retail semantics (FFXiMain.dll): dig = sub set on a live actor,
 /// which runs the DAT's `ini1` routine; its clip ends underground and holds — no
 /// status byte is needed to hide. `status == INVISIBLE` destroys the actor outright.
 /// Pop-up = visible status on an entity with *no* actor: the client constructs a

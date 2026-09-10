@@ -224,7 +224,7 @@ impl ServerLogin {
     pub(crate) const EVENT_NUM_OFFSET: usize = 0x5E;
     pub(crate) const EVENT_PARA_OFFSET: usize = 0x60;
     pub(crate) const EVENT_MODE_OFFSET: usize = 0x62;
-    // vendor/server/src/map/packets/s2c/0x00A_login.h — WeatherNumber,
+    // vendor/server/src/map/packets/s2c/0x00a_login.h — WeatherNumber,
     // WeatherNumber2, WeatherTime, WeatherTime2, WeatherOffsetTime, immediately
     // after EventMode. The offset chain is pinned at both ends by constants this
     // decoder already uses: MusicNum[5] at 0x52 runs to SubMapNumber at 0x5C,
@@ -397,7 +397,7 @@ impl ServerLogout {
 #[cfg(test)]
 mod server_login_tests {
     // The weather block sits between EventMode and ShipStart in
-    // vendor/server/src/map/packets/s2c/0x00A_login.h GP_SERV_COMMAND_LOGIN WeatherNumber. Pin the offsets
+    // vendor/server/src/map/packets/s2c/0x00a_login.h GP_SERV_COMMAND_LOGIN WeatherNumber. Pin the offsets
     // against the two constants that bracket it, so a future field insertion
     // cannot silently slide weather onto the ship or event fields.
     #[test]

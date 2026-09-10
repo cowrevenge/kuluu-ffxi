@@ -310,13 +310,17 @@ run_comments() {
         [ -d "$root" ] && [ -n "$(ls -A "$root" 2>/dev/null)" ] || continue ;;
     esac
     case "$path" in *..*) continue ;; esac
-    [ -e "$path" ] && continue
     # A path wrapped at a line break, or one with spaces in it, reaches here
-    # truncated; accept it when the truncation is a prefix of a real entry.
-    [ -z "$(ls -d "$path"* 2>/dev/null)" ] || continue
+    # truncated, so a prefix match of a real entry is accepted too. Outside
+    # the submodule roots the entry has to be tracked: an untracked local
+    # note passes a filesystem test on its author's machine and nowhere else.
+    case "$path" in
+      vendor/*|research/*) [ -n "$(ls -d "$path"* 2>/dev/null)" ] && continue ;;
+      *) [ -n "$(git ls-files -- "$path*" 2>/dev/null)" ] && continue ;;
+    esac
     missing+="  $path"$'\n'
   done < <(printf '%s\n' "$comments" \
-    | grep -oE '(^|[^A-Za-z0-9._/-])(vendor|research|docs|\.agents)/[A-Za-z0-9._/-]+' \
+    | grep -oE '(^|[^A-Za-z0-9._/-])(vendor|research|docs|artifacts|\.agents)/[A-Za-z0-9._/-]+' \
     | sed -E 's#^[^A-Za-z0-9._/-]##' | sort -u)
   if [ -n "$missing" ]; then
     echo "checks: comments - cited path does not exist in this tree (moved upstream, a private note, or the retired docs/ tree); fix or drop the citation:" >&2

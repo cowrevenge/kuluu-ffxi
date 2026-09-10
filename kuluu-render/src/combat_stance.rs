@@ -1313,7 +1313,7 @@ pub fn ground_remote_movers_system(
         // 0x45 Info movement byte from the loaded model (Unset when the DAT carries no CIB, or no
         // render actor exists yet): Flying keeps server Y; everything else grounds.
         let flying = q_children.get(entity).is_ok_and(|children| {
-            children.iter().any(|&child| {
+            children.iter().any(|child| {
                 q_render.get(child).is_ok_and(|actor| {
                     actor.movement_type() == ffxi_dat::cib::MovementType::Flying
                 })

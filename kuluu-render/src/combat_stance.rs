@@ -489,7 +489,7 @@ pub struct PredictSample {
     pub initialized: bool,
 
     sample_age: f32,
-    sample_interval: f32,
+    sample_intervals: [f32; EntityPrediction::JITTER_HISTORY_SAMPLES],
     segment_elapsed: f32,
     segment_duration: f32,
     snap_pending: bool,
@@ -505,7 +505,8 @@ impl PredictSample {
             sample_dirty: false,
             initialized: true,
             sample_age: 0.0,
-            sample_interval: EntityPrediction::DEFAULT_INTERVAL,
+            sample_intervals: [EntityPrediction::DEFAULT_INTERVAL;
+                EntityPrediction::JITTER_HISTORY_SAMPLES],
             segment_elapsed: 0.0,
             segment_duration: EntityPrediction::DEFAULT_INTERVAL
                 * EntityPrediction::INTERVAL_HEADROOM,
@@ -531,6 +532,9 @@ impl EntityPrediction {
     // A small buffer keeps packet-arrival jitter from ending each run segment early.
     const INTERVAL_HEADROOM: f32 = 1.25;
 
+    // Short arrival bursts must not immediately erase a recent long gap from the buffer budget.
+    const JITTER_HISTORY_SAMPLES: usize = 8;
+
     // Render lag is not a teleport; only large changes between confirmed positions bypass tweening.
     const TELEPORT_DIST_SQ: f32 = 20.0 * 20.0;
 
@@ -551,9 +555,10 @@ impl EntityPrediction {
                     let idle_interval = Self::MAX_INTERVAL * Self::IDLE_INTERVAL_MULTIPLIER;
                     if e.sample_age > 0.0 && e.sample_age <= idle_interval {
                         let interval = e.sample_age.clamp(Self::MIN_INTERVAL, Self::MAX_INTERVAL);
-                        e.segment_duration =
-                            interval.max(e.sample_interval) * Self::INTERVAL_HEADROOM;
-                        e.sample_interval = interval;
+                        e.sample_intervals.rotate_left(1);
+                        e.sample_intervals[Self::JITTER_HISTORY_SAMPLES - 1] = interval;
+                        e.segment_duration = e.sample_intervals.iter().copied().fold(0.0, f32::max)
+                            * Self::INTERVAL_HEADROOM;
                     }
                     e.sample_age = 0.0;
                     e.segment_elapsed = 0.0;
@@ -993,6 +998,74 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn remote_running_keeps_gait_across_captured_lsb_arrival_jitter() {
+        const FRAME_SECS: f32 = 1.0 / 60.0;
+        const PACKET_STEP: f32 = 2.4;
+        const RUN_SPEED: f32 = 4.8;
+        const MAX_SPEED_MULTIPLIER: f32 = 2.0;
+        const WARMUP_FRAMES: usize = 180;
+        const STOP_FRAMES: usize = 180;
+        // Arrival jitter changes timing without changing the sender's half-second position steps.
+        const ARRIVAL_FRAMES: [usize; 10] = [24, 48, 66, 114, 138, 162, 192, 234, 264, 288];
+        let mut app = App::new();
+        app.init_resource::<Time>()
+            .init_resource::<SceneState>()
+            .init_resource::<EntityPrediction>()
+            .init_resource::<EntityMotion>()
+            .add_systems(
+                Update,
+                (predict_entities_system, track_entity_motion_system).chain(),
+            );
+        let actor = app
+            .world_mut()
+            .spawn((
+                WorldEntity {
+                    id: 7,
+                    act_index: 1,
+                    kind: EntityKind::Pc,
+                },
+                Transform::default(),
+            ))
+            .id();
+        app.world_mut()
+            .resource_mut::<EntityPrediction>()
+            .observe(7, Vec3::ZERO, 0);
+        let mut packet = 0;
+        let mut confirmed = 0.0;
+        let mut previous = 0.0;
+        let last_arrival = *ARRIVAL_FRAMES.last().unwrap();
+        for frame in 0..last_arrival + STOP_FRAMES {
+            if ARRIVAL_FRAMES.get(packet) == Some(&frame) {
+                packet += 1;
+                confirmed = packet as f32 * PACKET_STEP;
+                app.world_mut().resource_mut::<EntityPrediction>().observe(
+                    7,
+                    Vec3::X * confirmed,
+                    0,
+                );
+            }
+            app.world_mut()
+                .resource_mut::<Time>()
+                .advance_by(std::time::Duration::from_secs_f32(FRAME_SECS));
+            app.update();
+            let x = app.world().get::<Transform>(actor).unwrap().translation.x;
+            assert!(x >= previous && x <= confirmed);
+            assert!(x - previous <= RUN_SPEED * FRAME_SECS * MAX_SPEED_MULTIPLIER);
+            previous = x;
+            if (WARMUP_FRAMES..last_arrival).contains(&frame) {
+                let sample = app.world().resource::<EntityMotion>().sample(7).unwrap();
+                assert!(sample.moving);
+                assert!(
+                    !crate::ffxi_actor_render::infers_walk_gait(sample.speed),
+                    "run restarted at frame {frame}"
+                );
+            }
+        }
+        assert_eq!(previous, confirmed);
+        assert!(!app.world().resource::<EntityMotion>().is_moving(7));
     }
 
     #[test]

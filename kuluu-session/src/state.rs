@@ -627,6 +627,8 @@ pub struct SessionState {
     /// describes the zone currently loaded.
     #[serde(default)]
     pub sub_area: Option<u16>,
+    #[serde(default)]
+    pub voyage: Option<kuluu_snapshot::Voyage>,
 
     #[serde(default)]
     pub mog_zone_flag: bool,
@@ -1488,6 +1490,7 @@ impl SessionState {
                 self.myroom = *myroom;
                 self.mog_zone_flag = *mog_zone_flag;
                 self.sub_area = None;
+                self.voyage = None;
 
                 self.logout_countdown = None;
                 self.death_homepoint_secs = None;
@@ -1527,6 +1530,10 @@ impl SessionState {
                 // party; the server replays the pool on zone-in
                 // (research/XiPackets/world/server/0x00D2).
                 self.treasure_pool.clear();
+                true
+            }
+            AgentEvent::VoyageSynced { voyage } => {
+                self.voyage = Some(*voyage);
                 true
             }
             AgentEvent::SubAreaSynced { sub_area } => {
@@ -1776,11 +1783,13 @@ impl SessionState {
                 let changed = self.stage != Stage::Disconnected
                     || self.diagnostics.stage != Some(Stage::Disconnected)
                     || self.logout_countdown.is_some()
+                    || self.voyage.is_some()
                     || self.widescan != WidescanList::default();
                 self.stage = Stage::Disconnected;
                 self.diagnostics.stage = Some(Stage::Disconnected);
 
                 self.logout_countdown = None;
+                self.voyage = None;
                 self.widescan = WidescanList::default();
                 changed
             }
@@ -2543,6 +2552,9 @@ pub enum AgentEvent {
 
         #[serde(default)]
         mog_zone_flag: bool,
+    },
+    VoyageSynced {
+        voyage: kuluu_snapshot::Voyage,
     },
     /// `SubMapNumber` out of 0x00A LOGIN, emitted right after the
     /// [`AgentEvent::ZoneChanged`] that clears it.

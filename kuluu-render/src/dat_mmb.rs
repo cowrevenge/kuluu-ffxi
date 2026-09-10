@@ -115,6 +115,7 @@ pub struct GenWater {
 
 #[derive(Message, Debug, Clone, Copy)]
 pub struct LoadMmbRequest {
+    pub voyage_backdrop: bool,
     pub file_id: u32,
     pub chunk_idx: usize,
 
@@ -403,6 +404,9 @@ fn is_zone_placement(req: &LoadMmbRequest) -> bool {
 }
 
 fn mmb_dist_sq_xz(req: &LoadMmbRequest, self_pos: Vec3) -> f32 {
+    if req.voyage_backdrop {
+        return 0.0;
+    }
     let p = req
         .world_transform
         .map(|m| m.w_axis.truncate())
@@ -633,6 +637,12 @@ pub fn process_load_mmb_requests(
                     );
                 }
 
+                if req
+                    .entity_id
+                    .is_some_and(|id| !tracked.by_id.contains_key(&id))
+                {
+                    continue;
+                }
                 let is_static_placement = req
                     .entity_id
                     .and_then(|id| tracked.by_id.get(&id))
@@ -643,16 +653,6 @@ pub fn process_load_mmb_requests(
                         bevy_e
                     }
                     None => {
-                        if let Some(missing) = req.entity_id {
-                            push_system_msg(
-                                &mut toasts,
-                                format!(
-                            "/load_mmb_on {missing} {} {}: no tracked entity for id {missing} \
-                             — spawning at world_pos instead",
-                            req.file_id, req.chunk_idx,
-                        ),
-                            );
-                        }
                         let parent_transform = match req.world_transform {
                             Some(m) => Transform::from_matrix(m),
                             None => Transform::from_translation(req.world_pos),
@@ -674,6 +674,11 @@ pub fn process_load_mmb_requests(
                             if req.sub_area_link != 0 {
                                 e.insert(crate::dat_mzb::ZoneSubAreaLink(req.sub_area_link));
                             }
+                        }
+                        if req.voyage_backdrop {
+                            e.insert(crate::transport::VoyageBackdrop(
+                                req.world_transform.unwrap_or(Mat4::IDENTITY),
+                            ));
                         }
                         if let Some(lod) = req.lod {
                             e.insert(lod);
@@ -1050,6 +1055,7 @@ mod tests {
             door: None,
             slot: crate::dat_mzb::ZONE_SLOT_MAIN,
             sub_area_link: NO_SUB_AREA_LINK,
+            voyage_backdrop: false,
         }
     }
 
@@ -1065,6 +1071,7 @@ mod tests {
             door: None,
             slot: crate::dat_mzb::ZONE_SLOT_MAIN,
             sub_area_link: NO_SUB_AREA_LINK,
+            voyage_backdrop: false,
         }
     }
 

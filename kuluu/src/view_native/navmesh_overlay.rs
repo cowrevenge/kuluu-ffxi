@@ -157,6 +157,7 @@ impl RemoteGroundPose {
 
 fn snap_entities_to_mzb_floor_system(
     collision_geom: Res<kuluu_render::dat_mzb::MzbCollisionGeometry>,
+    interiors: Res<kuluu_render::sub_area_activation::SubAreaActivation>,
     scene: Res<SceneState>,
     tracked: Res<kuluu_render::scene::TrackedEntities>,
     mut commands: Commands,
@@ -185,6 +186,13 @@ fn snap_entities_to_mzb_floor_system(
     }
     for (entity, world, mut t, is_self, previous) in &mut q {
         if is_self || kuluu_render::scene::mount_actor_rider(world.id).is_some() {
+            continue;
+        }
+        // Unloaded interior shells cannot supply a passenger's floor; retain the reported pose.
+        if interiors.unloaded_interior_at([t.translation.x, -t.translation.y, -t.translation.z]) {
+            if previous.is_some() {
+                commands.entity(entity).remove::<RemoteGroundPose>();
+            }
             continue;
         }
         if matches!(world.kind, kuluu_snapshot::EntityKind::Other) {
@@ -280,6 +288,7 @@ mod tests {
             .init_resource::<SceneState>()
             .init_resource::<EntityPrediction>()
             .init_resource::<TrackedEntities>()
+            .init_resource::<kuluu_render::sub_area_activation::SubAreaActivation>()
             .insert_resource(geometry)
             .add_systems(
                 Update,
@@ -487,5 +496,118 @@ mod tests {
             10.0,
             10.0 - GROUND_SNAP_EPSILON_YALMS * 2.0
         ));
+    }
+    const BOARDING_INTERIOR: u32 = 485;
+    const BOARDING_ZONE: u16 = 108;
+    const BOARDING_POSITION: Vec3 = Vec3::new(0.5, TEST_WIRE_HEIGHT, 0.0);
+
+    fn boarding_activation() -> kuluu_render::sub_area_activation::SubAreaActivation {
+        let mut activation = kuluu_render::sub_area_activation::SubAreaActivation::default();
+        let file_id =
+            ffxi_dat::zone_dat::effective_zone_dat_file_id(Some(BOARDING_ZONE), None).unwrap();
+        activation.install_zone(
+            file_id,
+            &[],
+            vec![ffxi_dat::sub_area::SubAreaShell {
+                id: BOARDING_INTERIOR,
+                min: [0.0, -TEST_UPPER_FLOOR, -1.0],
+                max: [2.0, -1.0, 1.0],
+            }],
+            vec![BOARDING_INTERIOR],
+        );
+        activation
+    }
+
+    #[test]
+    fn remote_passenger_keeps_reported_height_under_unloaded_interior_shell() {
+        let (mut app, passenger) =
+            remote_app(floors(&[(0.0, 4.0, TEST_UPPER_FLOOR)]), EntityKind::Pc);
+        assert_eq!(
+            frame(&mut app, passenger, BOARDING_POSITION).y,
+            TEST_UPPER_FLOOR
+        );
+        assert!(app.world().get::<RemoteGroundPose>(passenger).is_some());
+        app.insert_resource(boarding_activation());
+        assert_eq!(
+            frame(&mut app, passenger, BOARDING_POSITION),
+            BOARDING_POSITION
+        );
+        assert!(app.world().get::<RemoteGroundPose>(passenger).is_none());
+        let moved = BOARDING_POSITION + Vec3::X * TEST_STEP_RISE;
+        assert_eq!(frame(&mut app, passenger, moved), moved);
+    }
+
+    #[test]
+    fn remote_passenger_grounding_resumes_after_leaving_shell_or_zone_reset() {
+        let (mut app, passenger) =
+            remote_app(floors(&[(0.0, 4.0, TEST_FLOOR_HEIGHT)]), EntityKind::Pc);
+        app.insert_resource(boarding_activation());
+        assert_eq!(
+            frame(&mut app, passenger, BOARDING_POSITION),
+            BOARDING_POSITION
+        );
+        let outside = Vec3::new(3.0, TEST_WIRE_HEIGHT, 0.0);
+        assert_eq!(frame(&mut app, passenger, outside).y, TEST_FLOOR_HEIGHT);
+        assert!(app.world().get::<RemoteGroundPose>(passenger).is_some());
+        assert_eq!(
+            frame(&mut app, passenger, BOARDING_POSITION),
+            BOARDING_POSITION
+        );
+        app.insert_resource(kuluu_render::sub_area_activation::SubAreaActivation::default());
+        assert_eq!(
+            frame(&mut app, passenger, BOARDING_POSITION).y,
+            TEST_FLOOR_HEIGHT
+        );
+        assert!(app.world().get::<RemoteGroundPose>(passenger).is_some());
+    }
+
+    #[test]
+    fn remote_passenger_grounds_on_loaded_interior_floor() {
+        use bevy::ecs::system::RunSystemOnce;
+        use kuluu_render::dat_mzb::{
+            LoadMzbInFlight, LoadMzbRequest, PendingWaterSpawns, ZoneAreaMap, ZoneChunkLightMap,
+        };
+        use kuluu_render::sub_area_activation::{
+            drive_sub_area_activation, SetSubArea, SubAreaActivation, SubAreaChanged,
+        };
+        let (mut app, passenger) =
+            remote_app(floors(&[(0.0, 4.0, TEST_UPPER_FLOOR)]), EntityKind::Pc);
+        app.add_message::<SetSubArea>()
+            .add_message::<SubAreaChanged>()
+            .add_message::<LoadMzbRequest>()
+            .init_resource::<ZoneAreaMap>()
+            .init_resource::<ZoneChunkLightMap>()
+            .init_resource::<PendingWaterSpawns>()
+            .init_resource::<kuluu_render::dat_mmb::MmbLoadQueue>()
+            .init_resource::<LoadMzbInFlight>()
+            .insert_resource(boarding_activation());
+        {
+            let mut scene = app.world_mut().resource_mut::<SceneState>();
+            scene.snapshot.zone_id = Some(BOARDING_ZONE);
+            scene.snapshot.self_pos.pos = kuluu_snapshot::Vec3 {
+                x: BOARDING_POSITION.x,
+                y: -BOARDING_POSITION.z,
+                z: -BOARDING_POSITION.y,
+            };
+            scene.snapshot.sub_area = Some(BOARDING_INTERIOR as u16);
+        }
+        app.world_mut()
+            .run_system_once(drive_sub_area_activation)
+            .unwrap();
+        assert_eq!(
+            app.world().resource::<SubAreaActivation>().active(),
+            Some(BOARDING_INTERIOR)
+        );
+        let interior = floors(&[(0.0, 4.0, TEST_FLOOR_HEIGHT)])
+            .block(kuluu_render::dat_mzb::ZONE_SLOT_MAIN)
+            .clone();
+        app.world_mut()
+            .resource_mut::<MzbCollisionGeometry>()
+            .set_block(kuluu_render::dat_mzb::ZONE_SLOT_SUB_AREA, interior);
+        assert_eq!(
+            frame(&mut app, passenger, BOARDING_POSITION).y,
+            TEST_FLOOR_HEIGHT
+        );
+        assert!(app.world().get::<RemoteGroundPose>(passenger).is_some());
     }
 }

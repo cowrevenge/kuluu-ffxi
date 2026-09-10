@@ -592,6 +592,7 @@ mod tests {
                     final_value: [0.0, y, 0.0],
                     subchunk,
                 }),
+                follow_points: None,
                 screen_color: None,
                 random_group: None,
                 local_dir: ffxi_dat::scheduler::NO_LOCAL_DIR,
@@ -1030,7 +1031,14 @@ mod tests {
             })),
             None
         );
-        assert_eq!(door_four_cc(Some(&EntityLook::Transport { size: 3 })), None);
+        assert_eq!(
+            door_four_cc(Some(&EntityLook::Transport {
+                size: 3,
+                model_id: None,
+                animation_start: None
+            })),
+            None
+        );
     }
 
     #[test]

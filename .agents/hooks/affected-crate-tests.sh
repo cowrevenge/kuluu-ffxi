@@ -3,7 +3,7 @@
 # that crate's lib tests so an assertion regression surfaces on the next turn
 # instead of at the next push.
 #
-# Event/protocol/session edits run the shared state contract; other crates
+# Event, protocol, DAT, session and viewer edits run shared state contracts; other crates
 # run their lib tests. Full builds stay outside this per-edit hook.
 #
 # WHY `-p <crate>` with no --features, even though checks.sh warns that a
@@ -45,7 +45,7 @@ file=$(printf '%s' "$payload" | /usr/bin/python3 -c \
 # terminates the s/// early and BSD sed aborts with "parentheses not balanced",
 # leaving $crate empty so the hook silently no-ops. It shipped that way and
 # never once ran on macOS.
-crate=$(printf '%s' "$file" | sed -nE 's#.*/((ffxi|kuluu)-[^/]+)/(src|tests)/.*#\1#p')
+crate=$(printf '%s' "$file" | sed -nE 's#.*/((ffxi|kuluu)-[^/]+|kuluu)/(src|tests)/.*#\1#p')
 [ -n "$crate" ] || exit 0
 
 repo=$(git -C "$(dirname "$file")" rev-parse --show-toplevel 2>/dev/null) || exit 0
@@ -64,7 +64,7 @@ fi
 printf '%s' "$now_secs" > "$stamp"
 
 case "$crate" in
-  ffxi-event|ffxi-proto|kuluu-session)
+  ffxi-event|ffxi-proto|ffxi-dat|ffxi-vocab|kuluu-session|kuluu-render|kuluu-snapshot|kuluu)
     output=$(cd "$repo" && CARGO_GUARD_TIMEOUT=$HOOK_TIMEOUT_SECS \
       CARGO_GUARD_STALL=$HOOK_STALL_SECS scripts/checks.sh contracts 2>&1)
     status=$?

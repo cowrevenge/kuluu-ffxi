@@ -101,6 +101,7 @@ pub struct ZonePointLight {
 #[derive(Resource, Default)]
 pub struct ZonePointLights {
     pub file_id: Option<u32>,
+    pub sub_area_file_id: Option<u32>,
     pub lights: Vec<ZonePointLight>,
 }
 
@@ -247,59 +248,76 @@ pub fn nearest_point_light_arrays(
     point_light_arrays_for(lights, &nearest_point_light_indices(pos, lights, count))
 }
 
-fn load_zone_point_lights(scene_state: Res<SceneState>, mut store: ResMut<ZonePointLights>) {
+impl ZonePointLights {
+    fn refresh(
+        &mut self,
+        main: Option<u32>,
+        active_sub_area: Option<u32>,
+        mut load: impl FnMut(u32) -> Vec<ZonePointLight>,
+    ) {
+        let interior = main.and(active_sub_area.map(ffxi_dat::sub_area::sub_area_file_id));
+        if self.file_id == main && self.sub_area_file_id == interior {
+            return;
+        }
+        self.file_id = main;
+        self.sub_area_file_id = interior;
+        self.lights.clear();
+        for file_id in [main, interior].into_iter().flatten() {
+            self.lights.extend(load(file_id));
+        }
+    }
+}
+
+fn point_lights_from_dat(bytes: &[u8]) -> Vec<ZonePointLight> {
+    walk(bytes)
+        .flatten()
+        .filter(|c| ChunkKind::from_u8(c.kind) == Some(ChunkKind::Generator))
+        .filter_map(|c| {
+            let pl = Generator::parse_point_light(c.data).ok()??;
+            if pl.range <= 0.0 {
+                return None;
+            }
+            let world_pos = mzb_to_bevy(WireVec3 {
+                x: pl.base_position[0],
+                y: pl.base_position[1],
+                z: pl.base_position[2],
+            });
+            Some(ZonePointLight {
+                light_id: u32::from_le_bytes(c.name),
+                world_pos,
+                color: Vec3::new(pl.color[0], pl.color[1], pl.color[2]),
+                range: pl.range,
+                attenuation: pl.attenuation,
+            })
+        })
+        .collect()
+}
+
+fn load_zone_point_lights(
+    scene_state: Res<SceneState>,
+    activation: Option<Res<crate::sub_area_activation::SubAreaActivation>>,
+    mut store: ResMut<ZonePointLights>,
+) {
     let current = crate::snapshot::effective_zone_file_id(&scene_state.snapshot);
-    if current == store.file_id {
+    let interior = activation.as_deref().and_then(|a| a.active());
+    let interior_file = current.and(interior.map(ffxi_dat::sub_area::sub_area_file_id));
+    if store.file_id == current && store.sub_area_file_id == interior_file {
         return;
     }
-    store.file_id = current;
-    store.lights.clear();
-
-    let Some(file_id) = current else {
-        return;
-    };
-    let Ok(root) = DatRoot::from_env_or_default() else {
-        return;
-    };
-    let Ok(loc) = root.resolve(file_id) else {
-        return;
-    };
-    let path = loc.path_under(&root);
-    let Ok(bytes) = std::fs::read(&path) else {
-        return;
-    };
-
-    for c in walk(&bytes) {
-        let Ok(c) = c else { continue };
-        if ChunkKind::from_u8(c.kind) != Some(ChunkKind::Generator) {
-            continue;
-        }
-        let Ok(Some(pl)) = Generator::parse_point_light(c.data) else {
-            continue;
+    store.refresh(current, interior, |file_id| {
+        let Ok(root) = DatRoot::from_env_or_default() else {
+            return Vec::new();
         };
-
-        if pl.range <= 0.0 {
-            continue;
-        }
-        let bp = WireVec3 {
-            x: pl.base_position[0],
-            y: pl.base_position[1],
-            z: pl.base_position[2],
+        let Ok(loc) = root.resolve(file_id) else {
+            return Vec::new();
         };
-        let world_pos = mzb_to_bevy(bp);
-        store.lights.push(ZonePointLight {
-            light_id: u32::from_le_bytes(c.name),
-            world_pos,
-            color: Vec3::new(pl.color[0], pl.color[1], pl.color[2]),
-            range: pl.range,
-            attenuation: pl.attenuation,
-        });
-    }
-
-    info!(
-        "zone_point_lights: DAT {file_id} → {} faithful point light(s)",
-        store.lights.len()
-    );
+        let Ok(bytes) = std::fs::read(loc.path_under(&root)) else {
+            return Vec::new();
+        };
+        let lights = point_lights_from_dat(&bytes);
+        info!(file_id, count = lights.len(), "loaded zone point lights");
+        lights
+    });
 }
 
 #[derive(Component)]
@@ -470,7 +488,8 @@ impl Plugin for ZonePointLightsPlugin {
             .add_systems(
                 Update,
                 (
-                    load_zone_point_lights,
+                    load_zone_point_lights
+                        .after(crate::sub_area_activation::drive_sub_area_activation),
                     sync_faithful_zone_light_entities,
                     animate_faithful_zone_lights,
                     build_active_scene_lights,
@@ -483,6 +502,78 @@ impl Plugin for ZonePointLightsPlugin {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn active_interior_lights_join_main_and_leave_on_deactivation_or_disconnect() {
+        const MAIN_FILE: u32 = 348;
+        const FERRY_SUB_AREA: u32 = 485;
+        let interior_file = ffxi_dat::sub_area::sub_area_file_id(FERRY_SUB_AREA);
+        let mut store = ZonePointLights::default();
+        let source = |file_id| {
+            vec![ZonePointLight {
+                light_id: file_id,
+                ..light(Vec3::ZERO, 10.0)
+            }]
+        };
+        store.refresh(Some(MAIN_FILE), None, source);
+        assert_eq!(store.lights.len(), 1);
+        store.refresh(Some(MAIN_FILE), Some(FERRY_SUB_AREA), source);
+        assert_eq!(
+            store.lights.iter().map(|l| l.light_id).collect::<Vec<_>>(),
+            [MAIN_FILE, interior_file]
+        );
+        store.refresh(Some(MAIN_FILE), Some(FERRY_SUB_AREA), |_| {
+            panic!("unchanged active sources must not reload")
+        });
+        store.refresh(Some(MAIN_FILE), None, source);
+        assert_eq!(store.sub_area_file_id, None);
+        assert_eq!(store.lights.len(), 1);
+        assert_eq!(store.lights[0].light_id, MAIN_FILE);
+        store.refresh(Some(MAIN_FILE), Some(FERRY_SUB_AREA), source);
+        store.refresh(None, Some(FERRY_SUB_AREA), |_| {
+            panic!("a stale activation must not load an interior without a zone")
+        });
+        assert_eq!(store.file_id, None);
+        assert_eq!(store.sub_area_file_id, None);
+        assert!(store.lights.is_empty());
+    }
+
+    #[test]
+    fn unchanged_sources_do_not_mark_lights_changed() {
+        let mut app = App::new();
+        app.init_resource::<SceneState>()
+            .init_resource::<ZonePointLights>()
+            .add_systems(Update, load_zone_point_lights);
+        app.update();
+        app.world_mut().clear_trackers();
+        app.update();
+        assert!(!app.world().resource_ref::<ZonePointLights>().is_changed());
+    }
+
+    #[test]
+    fn selbina_ferry_dat_supplies_interior_lamps() {
+        const SELBINA_FILE: u32 = 348;
+        const FERRY_SUB_AREA: u32 = 485;
+        let Ok(root) = DatRoot::from_env_or_default() else {
+            return;
+        };
+        let read =
+            |file_id| std::fs::read(root.resolve(file_id).unwrap().path_under(&root)).unwrap();
+        let main = point_lights_from_dat(&read(SELBINA_FILE));
+        let interior =
+            point_lights_from_dat(&read(ffxi_dat::sub_area::sub_area_file_id(FERRY_SUB_AREA)));
+        let interior_ids = interior.iter().map(|l| l.light_id).collect::<Vec<_>>();
+        assert_eq!(
+            interior_ids,
+            [u32::from_le_bytes(*b"l_01"), u32::from_le_bytes(*b"l_02")]
+        );
+        assert!(interior_ids
+            .iter()
+            .all(|id| main.iter().all(|l| l.light_id != *id)));
+        assert!(interior
+            .iter()
+            .all(|l| l.range > 0.0 && l.color.max_element() > 0.0));
+    }
 
     fn light(pos: Vec3, range: f32) -> ZonePointLight {
         ZonePointLight {
@@ -657,6 +748,7 @@ mod tests {
                 ))
                 .insert_resource(ZonePointLights {
                     file_id: None,
+                    sub_area_file_id: None,
                     lights: vec![light(Vec3::ZERO, 10.0)],
                 })
                 .insert_resource(crate::weather::ZoneDirectionalLighting {

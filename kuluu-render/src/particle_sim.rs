@@ -3978,6 +3978,7 @@ mod tests {
                 random_group: None,
                 local_dir: HIT_SPARK_DIR,
                 model_transform: None,
+                follow_points: None,
                 screen_color: None,
             },
         }

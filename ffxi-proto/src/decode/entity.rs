@@ -489,6 +489,10 @@ pub enum LookData {
 
     Transport {
         size: u16,
+        #[serde(default)]
+        model_id: Option<u32>,
+        #[serde(default)]
+        animation_start: Option<u32>,
     },
 }
 
@@ -542,7 +546,20 @@ impl LookData {
                 size,
                 door_id: Self::door_id(body),
             }),
-            3 | 4 => Some(LookData::Transport { size }),
+            ffxi_vocab::transport::MODEL_ELEVATOR | ffxi_vocab::transport::MODEL_SHIP => {
+                // vendor/server/src/map/packets/entity_update.cpp getTransportNPCName
+                const MODEL_OFFSET: usize = 0x30;
+                const TIME_OFFSET: usize = 0x34;
+                let word = |offset| {
+                    body.get(offset..offset + 4)
+                        .map(|b| u32::from_le_bytes(b.try_into().unwrap()))
+                };
+                Some(LookData::Transport {
+                    size,
+                    model_id: word(MODEL_OFFSET),
+                    animation_start: word(TIME_OFFSET),
+                })
+            }
             _ => None,
         }
     }
@@ -1758,5 +1775,49 @@ mod pet_sync_tests {
             PetSync::decode(&buf),
             Err(DecodeError::Truncated(_, _))
         ));
+    }
+}
+
+#[cfg(test)]
+mod transport_tests {
+    use super::LookData;
+
+    #[test]
+    fn transport_binary_words_preserve_zero_and_partial_presence() {
+        const MODEL: usize = 44;
+        const SELECTOR: usize = 48;
+        const START: usize = 52;
+        const FULL: usize = 56;
+        const STAMP: u32 = 0x1200_3400;
+        for size in [3u16, 4] {
+            let mut body = [0u8; FULL];
+            body[MODEL..MODEL + 2].copy_from_slice(&size.to_le_bytes());
+            body[SELECTOR] = 14;
+            body[START..].copy_from_slice(&STAMP.to_le_bytes());
+            for length in 0..=FULL {
+                let decoded = LookData::decode_char_npc(&body[..length]);
+                if length < SELECTOR {
+                    assert_eq!(decoded, None);
+                } else {
+                    assert_eq!(
+                        decoded,
+                        Some(LookData::Transport {
+                            size,
+                            model_id: (length >= START).then_some(14),
+                            animation_start: (length == FULL).then_some(STAMP),
+                        })
+                    );
+                }
+            }
+            body[SELECTOR..].fill(0);
+            assert_eq!(
+                LookData::decode_char_npc(&body),
+                Some(LookData::Transport {
+                    size,
+                    model_id: Some(0),
+                    animation_start: Some(0),
+                })
+            );
+        }
     }
 }

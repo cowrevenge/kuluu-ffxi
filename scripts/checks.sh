@@ -354,6 +354,27 @@ run_contracts() {
     return 1
   fi
   cargo test -p kuluu-session --lib --locked "$contract" -- --exact --include-ignored
+  listing=$(cargo test -p kuluu-render -p kuluu --lib --locked "${FEATURES[@]}" -- --list)
+  for contract in \
+    transport::tests::transport_state_contract \
+    view_native::navmesh_overlay::tests::remote_passenger_keeps_reported_height_under_unloaded_interior_shell \
+    zone_point_lights::tests::active_interior_lights_join_main_and_leave_on_deactivation_or_disconnect; do
+    if ! grep -Fxq "$contract: test" <<< "$listing"; then
+      echo "checks: contracts — mandatory transport render contract is missing: $contract" >&2
+      return 1
+    fi
+    cargo test -p kuluu-render -p kuluu --lib --locked "${FEATURES[@]}" "$contract" -- --exact --include-ignored
+  done
+  listing=$(cargo test -p ffxi-dat --lib --locked -- --list)
+  for contract in \
+    mmb::tests::legacy_mmb_static_canopy_preserves_strip_connectivity_and_winding \
+    vehicle::tests::nonuniform_spline_matches_retail_weighted_basis_and_endpoint_extension; do
+    if ! grep -Fxq "$contract: test" <<< "$listing"; then
+      echo "checks: contracts — mandatory vehicle DAT contract is missing: $contract" >&2
+      return 1
+    fi
+    cargo test -p ffxi-dat --lib --locked "$contract" -- --exact --include-ignored
+  done
 }
 
 run_test() {

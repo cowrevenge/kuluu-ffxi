@@ -2484,7 +2484,7 @@ fn render_debug_entity(arg: &str, entities: &[WireEntity], self_pos: WireVec3) -
             ));
         }
         Some(EntityLook::Door { size, .. }) => s.push_str(&format!(" door size={size}")),
-        Some(EntityLook::Transport { size }) => s.push_str(&format!(" transport size={size}")),
+        Some(EntityLook::Transport { size, .. }) => s.push_str(&format!(" transport size={size}")),
     }
     // n/a = no General-block update has carried the byte yet (it rides UPDATE_HP).
     let namevis = e
@@ -2982,7 +2982,7 @@ fn parse_look(
              main=0x{main:04X} sub=0x{sub:04X} ranged=0x{ranged:04X}"
         ),
         Some(EntityLook::Door { size, .. }) => format!("look: DOOR (size={size})"),
-        Some(EntityLook::Transport { size }) => format!("look: TRANSPORT (size={size})"),
+        Some(EntityLook::Transport { size, .. }) => format!("look: TRANSPORT (size={size})"),
     };
     SlashOutcome::SystemMessage(format!("/look [{name}] {body}"))
 }

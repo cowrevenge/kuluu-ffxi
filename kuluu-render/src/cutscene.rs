@@ -523,6 +523,7 @@ mod tests {
                     transition_in: 0,
                     transition_out: 0,
                     model_transform: None,
+                    follow_points: None,
                     screen_color: Some(ScreenColor { rgba }),
                     random_group: None,
                     local_dir: ffxi_dat::scheduler::NO_LOCAL_DIR,

@@ -280,18 +280,12 @@ impl LoadMzbInFlight {
     }
 }
 
-/// LRU of parsed zone blocks.
-///
-/// Keyed on `(file_id, active_sub_area)`, not `file_id` alone: the cached
-/// [`LoadedZoneGeom::mmb_spawns`] is already latched to the sub-area that was
-/// active when it was built, so a one-key cache serves a shell-visible build to
-/// a shell-suppressed request.
 #[derive(Resource, Default)]
 pub struct ZoneGeomCache {
     pub entries: VecDeque<(ZoneGeomKey, LoadedZoneGeom)>,
 }
 
-pub type ZoneGeomKey = (u32, Option<u32>);
+pub type ZoneGeomKey = (u32, Option<usize>, Option<u32>);
 
 pub const ZONE_GEOM_CACHE_CAP: usize = 4;
 
@@ -948,7 +942,7 @@ pub struct LoadMzbRequest {
 
 impl LoadMzbRequest {
     pub fn cache_key(&self) -> ZoneGeomKey {
-        (self.file_id, self.active_sub_area)
+        (self.file_id, self.chunk_idx, self.active_sub_area)
     }
 }
 
@@ -991,8 +985,7 @@ pub fn load_mzb_placed(
     let (header, plain, _chunks) = load_decrypted(file_id, chunk_idx)?;
 
     // A zero CollisionDataOffset is a legal state, not a degraded parse: the
-    // moving-vehicle zones ship no static collision at all and retail skips the
-    // whole path (ffxi-dat mzb::MzbHeader::has_collision_data).
+    // voyage scenery has none; the passenger hull occupies a separate MZB.
     if !header.has_collision_data() {
         info!(
             "MZB {file_id}: no collision section (substructure type {}); zone has no static collision",
@@ -1154,10 +1147,8 @@ fn load_decrypted(
                 .get(i)
                 .ok_or_else(|| format!("chunk_idx {i} out of range ({} chunks)", chunks.len()))?,
         ),
-        None => chunks
-            .iter()
-            .enumerate()
-            .find(|(_, c)| c.kind == ChunkKind::Mzb as u8)
+        None => ffxi_dat::vehicle::collision_mzb_index(&bytes)
+            .and_then(|i| chunks.get(i).map(|c| (i, c)))
             .ok_or_else(|| {
                 format!(
                     "no MZB (kind 0x1C) chunk in file_id {file_id} ({} chunks)",
@@ -1180,6 +1171,7 @@ fn load_decrypted(
 
 #[derive(Debug, Clone, Copy)]
 pub struct ZoneMmbSpawn {
+    pub voyage_backdrop: bool,
     pub chunk_idx: usize,
     pub bevy_transform: Mat4,
     // Set for generator-driven water sheets (sea1/sea2): translucent tint +
@@ -1262,6 +1254,7 @@ pub struct ZoneChunkLightBox {
 
 #[derive(Clone)]
 pub struct ZoneMmbBuild {
+    pub voyage_routes: Vec<([u8; 4], ffxi_dat::vehicle::VoyageRoute)>,
     pub spawns: Vec<ZoneMmbSpawn>,
     pub area_boxes: Vec<ZoneAreaBox>,
     pub light_boxes: Vec<ZoneChunkLightBox>,
@@ -1463,12 +1456,50 @@ pub fn build_zone_mmb_spawns(
     let path = location.path_under(&root);
     let bytes = fs::read(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
     let chunks: Vec<_> = walk(&bytes).filter_map(Result::ok).collect();
+    let voyage_layout = ffxi_dat::vehicle::voyage_layout(&bytes);
+    if chunk_idx.is_none() {
+        if let Some(layout) = voyage_layout {
+            let mut ship = build_zone_mmb_spawns(file_id, Some(layout.ship_mzb), active_sub_area)?;
+            let mut scenery =
+                build_zone_mmb_spawns(file_id, Some(layout.scenery_mzb), active_sub_area)?;
+            for spawn in &mut scenery.spawns {
+                spawn.voyage_backdrop = true;
+                spawn.lod = None;
+            }
+            ship.spawns.extend(scenery.spawns);
+            ship.voyage_routes = chunks
+                .iter()
+                .filter(|c| c.kind == ffxi_dat::vehicle::VOYAGE_ROUTE_KIND)
+                .filter_map(|c| {
+                    ffxi_dat::vehicle::VoyageRoute::parse(c.data).map(|route| (c.name, route))
+                })
+                .collect();
+            return Ok(ship);
+        }
+    }
 
+    let mut parents = Vec::with_capacity(chunks.len());
+    let mut directories = Vec::new();
+    for (index, chunk) in chunks.iter().enumerate() {
+        parents.push(directories.last().copied());
+        match ChunkKind::from_u8(chunk.kind) {
+            Some(ChunkKind::Rmp) => directories.push(index),
+            Some(ChunkKind::Terminate) => {
+                directories.pop();
+            }
+            _ => {}
+        }
+    }
+    let selected_parent = chunk_idx
+        .and_then(|index| parents.get(index).copied())
+        .flatten();
+    let in_model_scope =
+        |index: usize| voyage_layout.is_none() || parents[index] == selected_parent;
     let pool = AsyncComputeTaskPool::get();
     let mmb_chunk_refs: Vec<(usize, &[u8])> = chunks
         .iter()
         .enumerate()
-        .filter(|(_, c)| c.kind == ChunkKind::Mmb as u8)
+        .filter(|(index, c)| c.kind == ChunkKind::Mmb as u8 && in_model_scope(*index))
         .map(|(idx, c)| (idx, c.data))
         .collect();
     type ParsedMmb = (usize, String, Option<([f32; 3], [f32; 3])>);
@@ -1507,7 +1538,7 @@ pub fn build_zone_mmb_spawns(
     // so it maps straight to ZoneMmbSpawn.chunk_idx.
     let mut datid_to_chunk_idx: HashMap<String, usize> = HashMap::new();
     for (idx, c) in chunks.iter().enumerate() {
-        if c.kind != ChunkKind::Mmb as u8 {
+        if c.kind != ChunkKind::Mmb as u8 || !in_model_scope(idx) {
             continue;
         }
         let id = String::from_utf8_lossy(&c.name)
@@ -1526,10 +1557,8 @@ pub fn build_zone_mmb_spawns(
                 .get(i)
                 .ok_or_else(|| format!("chunk_idx {i} out of range ({} chunks)", chunks.len()))?,
         ),
-        None => chunks
-            .iter()
-            .enumerate()
-            .find(|(_, c)| c.kind == ChunkKind::Mzb as u8)
+        None => ffxi_dat::vehicle::collision_mzb_index(&bytes)
+            .and_then(|i| chunks.get(i).map(|c| (i, c)))
             .ok_or_else(|| {
                 format!(
                     "no MZB chunk in file_id {file_id} ({} chunks)",
@@ -1693,6 +1722,7 @@ pub fn build_zone_mmb_spawns(
                     level_mask: lod_set.level_mask(local),
                     uses_lod_rendering,
                 }),
+                voyage_backdrop: false,
             });
         }
     }
@@ -1714,6 +1744,9 @@ pub fn build_zone_mmb_spawns(
     // ffxi-dat Generator::parse_model_spawn.
     let zone_prefix = mzb::infer_zone_prefix(&mmb_names);
     for c in &chunks {
+        if voyage_layout.is_some_and(|v| chunk_idx == Some(v.ship_mzb)) {
+            break;
+        }
         if c.kind != ChunkKind::Generator as u8 {
             continue;
         }
@@ -1805,6 +1838,7 @@ pub fn build_zone_mmb_spawns(
             lod: None,
             door: None,
             sub_area_link: 0,
+            voyage_backdrop: false,
         });
     }
 
@@ -1982,6 +2016,7 @@ pub fn build_zone_mmb_spawns(
     loadable_sub_areas.dedup();
 
     Ok(ZoneMmbBuild {
+        voyage_routes: Vec::new(),
         spawns: out,
         area_boxes,
         light_boxes,
@@ -2144,10 +2179,8 @@ pub fn load_mzb(file_id: u32, chunk_idx: Option<usize>) -> Result<Vec<MzbSubMesh
                 .get(i)
                 .ok_or_else(|| format!("chunk_idx {i} out of range ({} chunks)", chunks.len()))?,
         ),
-        None => chunks
-            .iter()
-            .enumerate()
-            .find(|(_, c)| c.kind == ChunkKind::Mzb as u8)
+        None => ffxi_dat::vehicle::collision_mzb_index(&bytes)
+            .and_then(|i| chunks.get(i).map(|c| (i, c)))
             .ok_or_else(|| {
                 format!(
                     "no MZB (kind 0x1C) chunk in file_id {file_id} ({} chunks)",
@@ -2582,6 +2615,10 @@ fn spawn_mzb_overlay(
         // Only the main block declares interiors: a sub-area DAT is a block
         // within a zone, not a zone that can hold blocks of its own.
         if req.slot == ZONE_SLOT_MAIN {
+            commands.insert_resource(crate::transport::VoyageState::new(
+                req.file_id,
+                build.voyage_routes.clone(),
+            ));
             activation.install_zone(
                 req.file_id,
                 &build.sub_area_triggers,
@@ -2910,6 +2947,7 @@ fn spawn_mzb_overlay(
                     door: s.door.map(|d| d.with_world_offset(req.world_pos)),
                     slot: req.slot,
                     sub_area_link: s.sub_area_link,
+                    voyage_backdrop: s.voyage_backdrop,
                 });
             }
             push_system_msg(
@@ -4079,6 +4117,9 @@ mod zone_block_slot_tests {
         let open = request(ZONE_FILE_ID, ZONE_SLOT_MAIN, None);
         let inside = request(ZONE_FILE_ID, ZONE_SLOT_MAIN, Some(SUB_AREA));
         assert_ne!(open.cache_key(), inside.cache_key());
+        let mut ship = request(ZONE_FILE_ID, ZONE_SLOT_MAIN, None);
+        ship.chunk_idx = Some(220);
+        assert_ne!(open.cache_key(), ship.cache_key());
 
         let mut cache = ZoneGeomCache::default();
         cache.insert(open.cache_key(), geom(SHELL_VISIBLE));

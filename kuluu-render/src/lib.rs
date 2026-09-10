@@ -183,7 +183,7 @@ impl<S: SceneSource + Resource + Component<Mutability = bevy::ecs::component::Mu
         app.set_error_handler(tolerate_command_entity_despawn);
 
         #[cfg(not(target_arch = "wasm32"))]
-        app.add_plugins(dat_mmb::DatOverlayPlugin);
+        app.add_plugins((dat_mmb::DatOverlayPlugin, transport::TransportPlugin));
 
         #[cfg(not(target_arch = "wasm32"))]
         app.add_plugins(audio::AudioPlugin);
@@ -557,3 +557,6 @@ impl<S: SceneSource + Resource + Component<Mutability = bevy::ecs::component::Mu
         );
     }
 }
+
+#[cfg(not(target_arch = "wasm32"))]
+pub mod transport;

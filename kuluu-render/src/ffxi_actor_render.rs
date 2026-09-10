@@ -4511,6 +4511,7 @@ mod pose_resolution_tests {
                             random_group: None,
                             local_dir: ffxi_dat::scheduler::NO_LOCAL_DIR,
                             model_transform: None,
+                            follow_points: None,
                             screen_color: None,
                         },
                     }],
@@ -4554,6 +4555,7 @@ mod pose_resolution_tests {
                             random_group: None,
                             local_dir: ffxi_dat::scheduler::NO_LOCAL_DIR,
                             model_transform: None,
+                            follow_points: None,
                             screen_color: None,
                         },
                     })

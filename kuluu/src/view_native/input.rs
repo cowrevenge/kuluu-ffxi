@@ -2193,7 +2193,7 @@ mod tests {
             }
         });
         let mut in_flight = LoadMzbInFlight::default();
-        in_flight.tasks.insert((0, None), (Vec::new(), task));
+        in_flight.tasks.insert((0, None, None), (Vec::new(), task));
         in_flight
     }
 

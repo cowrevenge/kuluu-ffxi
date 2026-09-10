@@ -13,6 +13,7 @@ pub fn state_to_snapshot(s: &SessionState) -> wire::SceneSnapshot {
         char_name: s.character.clone(),
         zone_id: s.zone_id,
         sub_area: s.sub_area,
+        voyage: s.voyage,
         self_pos,
         entities: s.entities.iter().map(entity_to_wire).collect(),
         party: s.party.iter().map(party_to_wire).collect(),
@@ -589,7 +590,15 @@ pub fn look_to_wire(l: ffxi_proto::decode::LookData) -> wire::EntityLook {
             size,
             door_id: door_id.map(DoorId::bytes),
         },
-        LookData::Transport { size } => wire::EntityLook::Transport { size },
+        LookData::Transport {
+            size,
+            model_id,
+            animation_start,
+        } => wire::EntityLook::Transport {
+            size,
+            model_id,
+            animation_start,
+        },
     }
 }
 

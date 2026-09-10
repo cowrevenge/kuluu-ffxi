@@ -401,7 +401,7 @@ async fn run_map_session(
     let mut mog = SelfMogState::default();
 
     let mut flood_zone_messages: Vec<(u16, Vec<u8>)> = Vec::new();
-    drain_zone_flood(
+    let self_login_received = drain_zone_flood(
         map,
         flood_deadline,
         false,
@@ -438,15 +438,11 @@ async fn run_map_session(
         self_pos_seeded,
         "zone-in flood drained"
     );
-    if !self_pos_seeded {
-        tracing::warn!(
-            iteration,
-            current_zone_id,
-            "zone-in flood ended without a self-position seed (no 0x00A LOGIN \
-             for self before deadline) — outbound POS suppressed until a \
-             CHAR_PC for self lands"
-        );
-    }
+    // vendor/server/src/map/packets/c2s/0x00a_login.cpp GP_CLI_COMMAND_LOGIN::process.
+    anyhow::ensure!(
+        self_login_received && self_pos_seeded,
+        "map bootstrap failed: required self LOGIN/position missing (login={self_login_received}, position={self_pos_seeded}, received_subpackets={total_subs}, server_sync={server_last_seq})"
+    );
 
     let mut sub_seq: u16 = map_client::BOOTSTRAP_SUB_SYNC.wrapping_add(1);
 
@@ -608,17 +604,17 @@ async fn run_map_session(
 /// vendor/server/scripts/zones/Attohwa_Chasm/Zone.lua).
 const FLOOD_ZONE_MESSAGE_MAX: usize = 32;
 
-/// Whether the zone-in flood drain should stop on an idle recv window. Unconditional
-/// when `break_on_idle` (the short post-send quiescence drains), otherwise only once
-/// the self position seed has landed — so the pre-GAMEOK drain keeps reading until it
-/// holds our authoritative spawn before letting the next c2s fire.
-fn should_break_flood(break_on_idle: bool, self_pos_seeded: bool) -> bool {
-    break_on_idle || self_pos_seeded
+fn should_break_flood(
+    break_on_idle: bool,
+    self_pos_seeded: bool,
+    self_login_received: bool,
+) -> bool {
+    break_on_idle || (self_pos_seeded && self_login_received)
 }
 
 /// Drains and processes zone-in traffic until `deadline`, or earlier once the
 /// socket has been idle for one recv window: unconditionally when
-/// `break_on_idle`, otherwise only after the self position seed has landed.
+/// `break_on_idle`, otherwise only after self LOGIN and its position have landed.
 /// When `ack_at_send` is Some (post-send quiescence), also breaks as soon as a
 /// datagram stamped differently from that ack arrives — the server's id only
 /// advances when it accepts one of our c2s, so any post-acceptance stamp is
@@ -657,7 +653,8 @@ async fn drain_zone_flood(
     mog: &mut SelfMogState,
     zoneline_spawn_fallback: Option<Vec3>,
     flood_zone_messages: &mut Vec<(u16, Vec<u8>)>,
-) {
+) -> bool {
+    let mut self_login_received = false;
     while std::time::Instant::now() < deadline {
         match tokio::time::timeout(std::time::Duration::from_millis(500), map.recv_decrypted())
             .await
@@ -677,6 +674,10 @@ async fn drain_zone_flood(
                             );
                         }
                         continue;
+                    }
+                    if sub.opcode == ffxi_proto::map::s2c::LOGIN {
+                        self_login_received |= decode::ServerLogin::decode(sub.data)
+                            .is_ok_and(|login| login.unique_no == self_char_id);
                     }
                     handle_sub_packet(
                         &sub,
@@ -716,12 +717,13 @@ async fn drain_zone_flood(
             Ok(Err(_)) => break,
 
             Err(_) => {
-                if should_break_flood(break_on_idle, *self_pos_seeded) {
+                if should_break_flood(break_on_idle, *self_pos_seeded, self_login_received) {
                     break;
                 }
             }
         }
     }
+    self_login_received
 }
 
 fn classify_char_npc(
@@ -894,6 +896,17 @@ fn handle_sub_packet(
                     myroom: mog.myroom,
                     mog_zone_flag: mog.mog_zone_flag,
                 });
+
+                if let Some(v) = login.voyage {
+                    let _ = event_tx.send(AgentEvent::VoyageSynced {
+                        voyage: kuluu_snapshot::Voyage {
+                            start: v.start,
+                            duration: v.duration,
+                            reverse: v.reverse,
+                            route: v.route,
+                        },
+                    });
+                }
 
                 // After ZoneChanged, which clears it: the renderer's sub-area
                 // latch seeds from this so a character who logged out inside a

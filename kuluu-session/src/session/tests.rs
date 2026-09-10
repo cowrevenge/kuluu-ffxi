@@ -38,6 +38,116 @@ fn sub_packet_events(opcode: u16, body: &[u8]) -> Vec<AgentEvent> {
     out
 }
 
+#[test]
+// vendor/server/src/map/packets/entity_update.cpp CEntityUpdatePacket::updateWith
+// vendor/server/src/map/packets/s2c/0x00a_login.h GP_SERV_COMMAND_LOGIN
+pub(super) fn ferry_packet_state_contract() {
+    use crate::state::SessionState;
+    use crate::wire_translate::state_to_snapshot;
+    use kuluu_snapshot::{EntityLook, Voyage};
+
+    const SHIP: u32 = 17_793_088;
+    const SHIP_INDEX: u16 = 64;
+    const BODY_LEN: usize = 68;
+    const SEND_FLAGS: usize = 6;
+    const UPDATE_COMBAT: u8 = 7;
+    const STATUS: usize = 28;
+    const ANIMATION: usize = 27;
+    const LOOK: usize = 44;
+    const SELECTOR: usize = 48;
+    const ANIMATION_START: usize = 52;
+    const SHIP_MODEL: u16 = 4;
+    const SELECTOR_VALUE: u32 = 14;
+    const TIMESTAMP: u32 = 0x1200_3400;
+    const ARRIVE: u8 = 18;
+    const DEPART: u8 = 19;
+    const DISAPPEAR: u8 = 2;
+    const LOGIN_LEN: usize = 122;
+    const LOGIN_ZONE: usize = 44;
+    const VOYAGE_START: usize = 116;
+    const VOYAGE_DURATION: usize = 120;
+    const VOYAGE_FLAGS: usize = 35;
+    const ROUTE_FLAGS: usize = 38;
+    const REVERSE: u8 = 4;
+    const ROUTE: u8 = 2;
+    const ROUTE_SHIFT: u8 = 3;
+    const JOURNEY_ZONE: u32 = 228;
+    const DURATION: u16 = 897;
+
+    let mut body = [0u8; BODY_LEN];
+    body[..4].copy_from_slice(&SHIP.to_le_bytes());
+    body[4..6].copy_from_slice(&SHIP_INDEX.to_le_bytes());
+    body[SEND_FLAGS] = UPDATE_COMBAT;
+    body[LOOK..LOOK + 2].copy_from_slice(&SHIP_MODEL.to_le_bytes());
+    body[SELECTOR..SELECTOR + 4].copy_from_slice(&SELECTOR_VALUE.to_le_bytes());
+    let mut state = SessionState::default();
+    for (animation, status, timestamp) in
+        [(ARRIVE, 0, TIMESTAMP), (DEPART, DISAPPEAR, TIMESTAMP + 1)]
+    {
+        body[ANIMATION] = animation;
+        body[STATUS] = status;
+        body[ANIMATION_START..ANIMATION_START + 4].copy_from_slice(&timestamp.to_le_bytes());
+        let events = sub_packet_events(ffxi_proto::map::s2c::CHAR_NPC, &body);
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::EntityRemoved { .. })));
+        for event in events {
+            state.apply_event(&event);
+        }
+        let snapshot = state_to_snapshot(&state);
+        let ship = snapshot
+            .entities
+            .iter()
+            .find(|entity| entity.id == SHIP)
+            .unwrap();
+        assert_eq!(
+            ship.look,
+            Some(EntityLook::Transport {
+                size: SHIP_MODEL,
+                model_id: Some(SELECTOR_VALUE),
+                animation_start: Some(timestamp),
+            })
+        );
+        assert_eq!(ship.animation, animation);
+        assert_eq!(ship.is_invisible(), status == DISAPPEAR);
+    }
+
+    let mut login = [0u8; LOGIN_LEN];
+    login[LOGIN_ZONE..LOGIN_ZONE + 4].copy_from_slice(&JOURNEY_ZONE.to_le_bytes());
+    login[VOYAGE_START..VOYAGE_START + 4].copy_from_slice(&TIMESTAMP.to_le_bytes());
+    login[VOYAGE_DURATION..VOYAGE_DURATION + 2].copy_from_slice(&DURATION.to_le_bytes());
+    login[VOYAGE_FLAGS] = REVERSE;
+    login[ROUTE_FLAGS] = ROUTE << ROUTE_SHIFT;
+    let events = sub_packet_events(ffxi_proto::map::s2c::LOGIN, &login);
+    let zone_at = events
+        .iter()
+        .position(|event| matches!(event, AgentEvent::ZoneChanged { .. }))
+        .unwrap();
+    let voyage_at = events
+        .iter()
+        .position(|event| matches!(event, AgentEvent::VoyageSynced { .. }))
+        .unwrap();
+    assert!(voyage_at > zone_at);
+    for event in events {
+        state.apply_event(&event);
+    }
+    assert_eq!(
+        state_to_snapshot(&state).voyage,
+        Some(Voyage {
+            start: TIMESTAMP,
+            duration: DURATION,
+            reverse: true,
+            route: ROUTE,
+        })
+    );
+    assert!(state.entities.iter().all(|entity| entity.id != SHIP));
+    login[VOYAGE_START..].fill(0);
+    for event in sub_packet_events(ffxi_proto::map::s2c::LOGIN, &login) {
+        state.apply_event(&event);
+    }
+    assert_eq!(state_to_snapshot(&state).voyage, None);
+}
+
 /// s2c 0x058 ASSIST is the server's retarget push (`/assist`, engage,
 /// auto-target-after-kill); the dispatch must turn `AssistNo` into the client's
 /// new target (vendor/server/src/map/packets/s2c/0x058_assist.h).
@@ -917,16 +1027,18 @@ fn should_emit_pos_bypasses_rate_limit_on_heading_change() {
 fn flood_drain_waits_for_self_pos_seed() {
     // Pre-GAMEOK drain (break_on_idle=false): keep reading until the seed lands.
     assert!(
-        !should_break_flood(false, false),
+        !should_break_flood(false, false, false)
+            && !should_break_flood(false, true, false)
+            && !should_break_flood(false, false, true),
         "unseeded pre-GAMEOK drain must wait"
     );
     assert!(
-        should_break_flood(false, true),
+        should_break_flood(false, true, true),
         "seeded pre-GAMEOK drain may break on idle"
     );
     // Quiescence drains (break_on_idle=true): stop on idle regardless of seed.
     assert!(
-        should_break_flood(true, false),
+        should_break_flood(true, false, false),
         "quiescence drain breaks on idle unconditionally"
     );
 }
@@ -3594,4 +3706,237 @@ fn system_message_executing_logout_full_line() {
         line.text
     );
     assert!(matches!(line.channel, ChatChannel::System));
+}
+
+#[test]
+pub(super) fn bootstrap_acceptance_contract() {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            for scenario in [
+                BootstrapReply::Silent,
+                BootstrapReply::MalformedLogin,
+                BootstrapReply::OtherLoginWithSelfPosition,
+                BootstrapReply::SelfPositionOnly,
+                BootstrapReply::SelfLogin,
+                BootstrapReply::DelayedSelfLogin,
+            ] {
+                bootstrap_scenario(scenario).await;
+            }
+        });
+}
+
+#[derive(Debug, Clone, Copy)]
+enum BootstrapReply {
+    Silent,
+    MalformedLogin,
+    OtherLoginWithSelfPosition,
+    SelfPositionOnly,
+    SelfLogin,
+    DelayedSelfLogin,
+}
+
+async fn bootstrap_scenario(scenario: BootstrapReply) {
+    use ffxi_proto::map::s2c;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+    use std::time::Duration;
+
+    const PLAYER: u32 = 17_455_719;
+    const SEED: [u8; 20] = [0; 20];
+    const LOGIN_BODY_LEN: usize = 48;
+    const SEND_FLAGS: usize = 6;
+    const POSITION_X: usize = 8;
+    const POSITION_HEIGHT: usize = 12;
+    const POSITION_NORTH: usize = 16;
+    const POSITION: [f32; 3] = [2.15, -2.1, 3.25];
+    const EXPECTED_BOOTSTRAPS: usize = 2;
+    const CASE_TIMEOUT: Duration = Duration::from_secs(20);
+    const DELAYED_LOGIN: Duration = Duration::from_millis(900);
+
+    fn packet(opcode: u16, body: &[u8]) -> Vec<u8> {
+        let words = framing::subpacket_size_words(body.len() + framing::SUBPACKET_HEADER_SIZE);
+        let mut out = build_subpacket_header(opcode, words, 1).to_vec();
+        out.extend(body);
+        out
+    }
+    let accepted = matches!(
+        scenario,
+        BootstrapReply::SelfLogin | BootstrapReply::DelayedSelfLogin
+    );
+    let mut self_body = vec![0; LOGIN_BODY_LEN];
+    self_body[..4].copy_from_slice(&PLAYER.to_le_bytes());
+    self_body[SEND_FLAGS] = 1;
+    for (offset, value) in [POSITION_X, POSITION_HEIGHT, POSITION_NORTH]
+        .into_iter()
+        .zip(POSITION)
+    {
+        self_body[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+    }
+    let login = packet(s2c::LOGIN, &self_body);
+    let self_position = packet(s2c::CHAR_PC, &self_body);
+    let initial = match scenario {
+        BootstrapReply::Silent => None,
+        BootstrapReply::MalformedLogin => Some(packet(s2c::LOGIN, &[0; 4])),
+        BootstrapReply::OtherLoginWithSelfPosition => {
+            let mut wrong = self_body.clone();
+            wrong[..4].copy_from_slice(&(PLAYER + 1).to_le_bytes());
+            let mut payload = packet(s2c::LOGIN, &wrong);
+            payload.extend(&self_position);
+            Some(payload)
+        }
+        BootstrapReply::SelfPositionOnly | BootstrapReply::DelayedSelfLogin => Some(self_position),
+        BootstrapReply::SelfLogin => Some(login.clone()),
+    };
+    let server = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let address = server.local_addr().unwrap();
+    let outgoing = Arc::new(AtomicUsize::new(0));
+    let observed = outgoing.clone();
+    let fake = tokio::spawn(async move {
+        let mut bytes = vec![0; ffxi_proto::map::MAX_DATAGRAM];
+        let mut peer = None;
+        loop {
+            let (size, client) = server.recv_from(&mut bytes).await.unwrap();
+            let count = observed.fetch_add(1, Ordering::SeqCst) + 1;
+            if count <= EXPECTED_BOOTSTRAPS {
+                assert_eq!(size, map_client::BOOTSTRAP_DATAGRAM_SIZE);
+                let payload = &bytes[framing::FFXI_HEADER_SIZE
+                    ..framing::FFXI_HEADER_SIZE + map_client::GP_CLI_LOGIN_SIZE];
+                let sent = framing::walk_sub_packets(payload).next().unwrap().unwrap();
+                assert_eq!(sent.opcode, ffxi_proto::map::c2s::LOGIN);
+            }
+            if count == 1 {
+                peer = Some(MapClient::connect(client, SEED).await.unwrap());
+                if let Some(ref payload) = initial {
+                    peer.as_ref()
+                        .unwrap()
+                        .send_encrypted(payload, 1, 0)
+                        .await
+                        .unwrap();
+                }
+                if matches!(scenario, BootstrapReply::DelayedSelfLogin) {
+                    tokio::time::sleep(DELAYED_LOGIN).await;
+                    peer.as_ref()
+                        .unwrap()
+                        .send_encrypted(&login, 2, 0)
+                        .await
+                        .unwrap();
+                }
+            } else if !matches!(scenario, BootstrapReply::Silent) {
+                if accepted {
+                    peer.as_ref()
+                        .unwrap()
+                        .send_encrypted(&[], count as u16 + 1, 0)
+                        .await
+                        .unwrap();
+                } else {
+                    server.send_to(&[0], client).await.unwrap();
+                }
+            }
+        }
+    });
+    let mut map = MapClient::connect(address, SEED).await.unwrap();
+    let cfg = Config {
+        server: "127.0.0.1".into(),
+        map_host_override: None,
+        auth_port: 0,
+        data_port: 0,
+        view_port: 0,
+        user: "bootstrap-fixture".into(),
+        password: String::new(),
+        char_selection: CharSelection::Id(PLAYER),
+        initial_state: None,
+        user_driven_events: true,
+        dat_root: None,
+    };
+    let auth = crate::auth_client::AuthSession {
+        account_id: 1,
+        session_hash: [0; 16],
+    };
+    let bootstrap = BootstrapArgs {
+        char_id: PLAYER,
+        char_name: "Bootstrap",
+        account_name: "bootstrap-fixture",
+        ticket: [0; 16],
+        version: 0,
+        platform: *b"WIN\0",
+        cli_lang: 0,
+    };
+    let (commands, mut command_rx) = mpsc::channel(1);
+    commands.send(AgentCommand::Disconnect).await.unwrap();
+    let (events, mut event_rx) = broadcast::channel(256);
+    let outcome = tokio::time::timeout(
+        CASE_TIMEOUT,
+        run_map_session(
+            &cfg,
+            &auth,
+            &bootstrap,
+            &mut map,
+            None,
+            1,
+            None,
+            &mut command_rx,
+            &events,
+            None,
+        ),
+    )
+    .await
+    .expect("bootstrap must complete within its bounded deadline");
+    tokio::task::yield_now().await;
+    fake.abort();
+    assert!(
+        fake.await.unwrap_err().is_cancelled(),
+        "fake map server panicked"
+    );
+    assert_eq!(outcome.is_ok(), accepted, "{scenario:?}: {outcome:?}");
+    let mut saw_in_zone = false;
+    let mut saw_accepted = false;
+    let mut saw_seed = false;
+    while let Ok(event) = event_rx.try_recv() {
+        match event {
+            AgentEvent::StageChanged {
+                stage: Stage::InZone,
+            } => saw_in_zone = true,
+            AgentEvent::Diagnostics { diagnostics } => {
+                saw_accepted |= diagnostics.blowfish_status == Some(BlowfishStatus::Accepted);
+            }
+            AgentEvent::EntityUpserted {
+                entity,
+                pos_present: true,
+            } if entity.id == PLAYER => {
+                saw_seed |= entity.pos
+                    == Vec3 {
+                        x: POSITION[0],
+                        y: POSITION[2],
+                        z: POSITION[1],
+                    };
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(saw_in_zone, accepted, "{scenario:?}");
+    assert_eq!(saw_accepted, accepted, "{scenario:?}");
+    if matches!(
+        scenario,
+        BootstrapReply::OtherLoginWithSelfPosition | BootstrapReply::SelfPositionOnly
+    ) {
+        assert!(
+            saw_seed,
+            "{scenario:?}: CHAR_PC fixture must seed a position without granting acceptance"
+        );
+    }
+    if accepted {
+        assert!(saw_seed, "{scenario:?}: missing authoritative position");
+        assert!(outgoing.load(Ordering::SeqCst) > EXPECTED_BOOTSTRAPS);
+    } else {
+        assert_eq!(
+            outgoing.load(Ordering::SeqCst),
+            EXPECTED_BOOTSTRAPS,
+            "{scenario:?}: no post-bootstrap packet may precede self LOGIN"
+        );
+    }
 }

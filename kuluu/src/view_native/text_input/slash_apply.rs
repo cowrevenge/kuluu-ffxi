@@ -165,6 +165,7 @@ pub(super) fn apply_slash_outcome(
                 door: None,
                 slot: kuluu_render::dat_mzb::ZONE_SLOT_MAIN,
                 sub_area_link: 0,
+                voyage_backdrop: false,
             });
             let label = match entity_id {
                 Some(id) => format!("/load_mmb_on {id} {file_id} {chunk_idx}: spawning…"),

@@ -52,7 +52,7 @@ use serde::{Deserialize, Serialize};
 // v5: InventoryItem.charges_remaining + next_use_vana_ts (item recast/charges).
 // v4: SceneSnapshot.delivery_box (dedicated delivery screen) + ViewerCommand::DeliveryBox
 // (postcard frames are not self-describing, so any shape change bumps this).
-pub const PROTOCOL_VERSION: u32 = 25;
+pub const PROTOCOL_VERSION: u32 = 26;
 
 /// Longest countdown `SceneSnapshot::status_icon_expiries` can carry. The
 /// producer rejects anything beyond it as a corrupt 0x063 timestamp, and the HUD
@@ -195,8 +195,7 @@ pub enum EntityKind {
     Other,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EntityLook {
     Standard {
         modelid: u16,
@@ -222,12 +221,59 @@ pub enum EntityLook {
         /// `BlockID` of the leaves those routines swing, so it is the only
         /// join from this entity to its geometry. `None` when the server sent
         /// an all-zero id (`DoorId::new`'s reject).
-        #[serde(default)]
         door_id: Option<[u8; 4]>,
     },
     Transport {
         size: u16,
+        model_id: Option<u32>,
+        animation_start: Option<u32>,
     },
+}
+
+macro_rules! entity_look_codecs {
+    ($($variants:tt)*) => {
+        #[derive(Serialize, Deserialize)]
+        #[serde(remote = "EntityLook", tag = "kind", rename_all = "snake_case")]
+        enum HumanEntityLook { $($variants)* }
+
+        #[derive(Serialize, Deserialize)]
+        #[serde(remote = "EntityLook")]
+        enum BinaryEntityLook { $($variants)* }
+    };
+}
+
+entity_look_codecs! {
+    Standard { modelid: u16 },
+    Equipped {
+        face: u8, race: u8, head: u16, body: u16, hands: u16, legs: u16,
+        feet: u16, main: u16, sub: u16, ranged: u16,
+    },
+    Door { size: u16, #[serde(default)] door_id: Option<[u8; 4]> },
+    Transport {
+        size: u16,
+        #[serde(default)] model_id: Option<u32>,
+        #[serde(default)] animation_start: Option<u32>,
+    },
+}
+
+impl Serialize for EntityLook {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        if serializer.is_human_readable() {
+            HumanEntityLook::serialize(self, serializer)
+        } else {
+            BinaryEntityLook::serialize(self, serializer)
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for EntityLook {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        if deserializer.is_human_readable() {
+            HumanEntityLook::deserialize(deserializer)
+        } else {
+            BinaryEntityLook::deserialize(deserializer)
+        }
+    }
 }
 
 /// Scene-side mirror of `ffxi_proto::decode::CharFlags` — the 0x0D/0x0E
@@ -408,6 +454,8 @@ impl Entity {
     /// already gated by [`Entity::status_selectable`].
     pub fn is_invisible(&self) -> bool {
         self.status == status_type::INVISIBLE
+            || (self.status == status_type::DISAPPEAR
+                && matches!(self.look, Some(EntityLook::Transport { .. })))
     }
 
     /// LSB `Flags1.InvisFlag` (bit 29): player-invisibility — a GM hiding
@@ -788,6 +836,8 @@ pub struct SceneSnapshot {
     /// renderer's sub-area latch seeds from. `None` until a login lands.
     #[serde(default)]
     pub sub_area: Option<u16>,
+    #[serde(default)]
+    pub voyage: Option<Voyage>,
 
     /// Job-emote unlock bitfield from s2c 0x11A (bit = job id - 1, bit 0 =
     /// WAR); `None` until the server answers a 0x119 request. Gates the
@@ -1835,6 +1885,7 @@ mod tests {
             }),
             mh_2f_unlocked: None,
             sub_area: None,
+            voyage: None,
             emote_jobs: None,
             emote_chairs: None,
             check: None,
@@ -1939,7 +1990,11 @@ mod tests {
 
         let transport = Entity {
             kind: EntityKind::Other,
-            look: Some(EntityLook::Transport { size: 3 }),
+            look: Some(EntityLook::Transport {
+                size: 3,
+                model_id: None,
+                animation_start: None,
+            }),
             ..base.clone()
         };
         assert!(
@@ -1969,6 +2024,95 @@ mod tests {
                 "STATUS_TYPE {status} must not be targetable"
             );
         }
+    }
+
+    #[test]
+    fn entity_look_codecs_preserve_every_variant() {
+        const TRANSPORT_POSTCARD: &[u8] = &[3, 4, 1, 14, 1, 192, 196, 7];
+        let variants = [
+            (EntityLook::Standard { modelid: 321 }, "standard"),
+            (
+                EntityLook::Equipped {
+                    face: 1,
+                    race: 2,
+                    head: 3,
+                    body: 4,
+                    hands: 5,
+                    legs: 6,
+                    feet: 7,
+                    main: 8,
+                    sub: 9,
+                    ranged: 10,
+                },
+                "equipped",
+            ),
+            (
+                EntityLook::Door {
+                    size: 2,
+                    door_id: Some(*b"_6ww"),
+                },
+                "door",
+            ),
+            (
+                EntityLook::Transport {
+                    size: 4,
+                    model_id: Some(14),
+                    animation_start: Some(123_456),
+                },
+                "transport",
+            ),
+        ];
+        for (look, tag) in variants {
+            let json = serde_json::to_value(look).unwrap();
+            assert_eq!(json["kind"], tag);
+            assert_eq!(serde_json::from_value::<EntityLook>(json).unwrap(), look);
+            let bytes = postcard::to_allocvec(&look).unwrap();
+            assert_eq!(postcard::from_bytes::<EntityLook>(&bytes).unwrap(), look);
+            if matches!(look, EntityLook::Transport { .. }) {
+                assert_eq!(bytes, TRANSPORT_POSTCARD);
+            }
+        }
+    }
+
+    #[test]
+    fn ferry_protocol_26_preserves_transport_and_voyage_fields() {
+        const VERSION: u32 = 26;
+        const STAMP: u32 = 0x1200_3400;
+        assert_eq!(PROTOCOL_VERSION, VERSION);
+        let mut snapshot = sample_snapshot();
+        snapshot.voyage = Some(Voyage {
+            start: STAMP,
+            duration: 897,
+            reverse: true,
+            route: 2,
+        });
+        snapshot.entities[0].look = Some(EntityLook::Transport {
+            size: 4,
+            model_id: Some(14),
+            animation_start: Some(STAMP),
+        });
+        let bytes = postcard::to_allocvec(&snapshot).unwrap();
+        let decoded: SceneSnapshot = postcard::from_bytes(&bytes).unwrap();
+        assert_eq!(decoded.voyage, snapshot.voyage);
+        assert_eq!(decoded.entities[0].look, snapshot.entities[0].look);
+        let mut legacy = serde_json::to_value(&snapshot).unwrap();
+        legacy.as_object_mut().unwrap().remove("voyage");
+        assert_eq!(
+            serde_json::from_value::<SceneSnapshot>(legacy)
+                .unwrap()
+                .voyage,
+            None
+        );
+        let old_look: EntityLook =
+            serde_json::from_value(serde_json::json!({"kind": "transport", "size": 4})).unwrap();
+        assert_eq!(
+            old_look,
+            EntityLook::Transport {
+                size: 4,
+                model_id: None,
+                animation_start: None
+            }
+        );
     }
 
     #[test]
@@ -2259,6 +2403,7 @@ mod tests {
             "myroom",
             "mh_2f_unlocked",
             "sub_area",
+            "voyage",
             "emote_jobs",
             "emote_chairs",
             "check",
@@ -2270,7 +2415,7 @@ mod tests {
         assert_eq!(got, want, "SceneSnapshot fields changed: additive-only, update this pin deliberately and rebuild relay consumers together");
     }
 
-    const SNAPSHOT_DEFAULT_POSTCARD_HEX: &str = "000000000000000000000000000000001919000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000";
+    const SNAPSHOT_DEFAULT_POSTCARD_HEX: &str = "00000000000000000000000000000000191900000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000";
 
     /// Postcard is positional, not self-describing: field ORDER and TYPES are
     /// the wire format. Any reorder/retype (and any append) changes these
@@ -2285,4 +2430,12 @@ mod tests {
             "SceneSnapshot postcard encoding changed: update the pin deliberately and rebuild relay consumers together"
         );
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Voyage {
+    pub start: u32,
+    pub duration: u16,
+    pub reverse: bool,
+    pub route: u8,
 }

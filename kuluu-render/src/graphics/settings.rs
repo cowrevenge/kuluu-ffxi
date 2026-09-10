@@ -135,9 +135,6 @@ pub enum DynamicLights {
     Enhanced,
 }
 
-/// Clustered-lighting budget for the heuristic emitters.
-pub const DYNAMIC_LIGHTS_MAX_TOTAL: u32 = 48;
-
 impl DynamicLights {
     pub const fn label(self) -> &'static str {
         match self {
@@ -151,7 +148,9 @@ impl DynamicLights {
         !matches!(self, DynamicLights::Off)
     }
 
-    pub const fn emitters_enabled(self) -> bool {
+    // Retail casts no shadow map at all (see `zone_shadow_cast`), so shadows thrown by the
+    // DAT's point lights are the Enhanced half of this setting.
+    pub const fn point_shadows_enabled(self) -> bool {
         matches!(self, DynamicLights::Enhanced)
     }
 }
@@ -263,9 +262,7 @@ pub enum GraphicsField {
     Windowed,
 
     DynamicLights,
-    LightThreshold,
-    LightIntensity,
-    LightRange,
+    ShadowedLights,
     LightFlicker,
     ModelLightCount,
 
@@ -337,9 +334,7 @@ impl GraphicsField {
             GraphicsField::Fullscreen => "Fullscreen",
             GraphicsField::Windowed => "Windowed",
             GraphicsField::DynamicLights => "Dynamic Lights",
-            GraphicsField::LightThreshold => "  Emitter Threshold",
-            GraphicsField::LightIntensity => "  Emitter Intensity",
-            GraphicsField::LightRange => "  Emitter Range",
+            GraphicsField::ShadowedLights => "  Shadowed Lights",
             GraphicsField::LightFlicker => "  Flicker",
             GraphicsField::ModelLightCount => "  Lights per Model",
             GraphicsField::CharacterLighting => "Shading",
@@ -401,9 +396,7 @@ impl GraphicsField {
     pub const fn is_advanced(self) -> bool {
         matches!(
             self,
-            GraphicsField::LightThreshold
-                | GraphicsField::LightIntensity
-                | GraphicsField::LightRange
+            GraphicsField::ShadowedLights
                 | GraphicsField::LightFlicker
                 | GraphicsField::ModelLightCount
         )
@@ -531,14 +524,10 @@ pub struct GraphicsSettings {
     #[serde(default)]
     pub dynamic_lights: DynamicLights,
 
-    #[serde(default = "default_light_threshold")]
-    pub light_threshold: f32,
-
-    #[serde(default = "default_light_intensity")]
-    pub light_intensity: f32,
-
-    #[serde(default = "default_light_range")]
-    pub light_range: f32,
+    /// Enhanced only: how many of the lit DAT point lights nearest the camera render
+    /// shadow maps. Each one is six cube faces of shadow casters per frame.
+    #[serde(default = "default_shadowed_lights")]
+    pub shadowed_lights: u32,
 
     #[serde(default = "default_light_flicker")]
     pub light_flicker: bool,
@@ -598,9 +587,8 @@ pub struct GraphicsSettings {
     pub windowed_fullscreen: bool,
 }
 
-pub const DEFAULT_LIGHT_THRESHOLD: f32 = 1.15;
-pub const DEFAULT_LIGHT_INTENSITY: f32 = 25_000.0;
-pub const DEFAULT_LIGHT_RANGE: f32 = 8.0;
+pub const DEFAULT_SHADOWED_LIGHTS: u32 = 2;
+pub const SHADOWED_LIGHTS_SLOTS: &[u32] = &[0, 1, 2, 3, 4];
 pub const DEFAULT_LIGHT_FLICKER: bool = true;
 // How many dynamic point lights illuminate zone/actor surfaces at once (the
 // nearest N to the viewer/actor). The old fixed cap was 4; more lights let a
@@ -633,14 +621,8 @@ pub fn retail_default_fov_deg() -> f32 {
     (2.0 * (RETAIL_PROJECTION_HALF_HEIGHT / RETAIL_DEFAULT_FOCAL_LENGTH).atan()).to_degrees()
 }
 
-fn default_light_threshold() -> f32 {
-    DEFAULT_LIGHT_THRESHOLD
-}
-fn default_light_intensity() -> f32 {
-    DEFAULT_LIGHT_INTENSITY
-}
-fn default_light_range() -> f32 {
-    DEFAULT_LIGHT_RANGE
+fn default_shadowed_lights() -> u32 {
+    DEFAULT_SHADOWED_LIGHTS
 }
 fn default_light_flicker() -> bool {
     DEFAULT_LIGHT_FLICKER
@@ -727,10 +709,6 @@ const TEXTURE_FILTERING_CYCLE: &[TextureFiltering] = &[
     TextureFiltering::Aniso16x,
 ];
 
-const LIGHT_THRESHOLD_SLOTS: &[f32] = &[1.05, 1.15, 1.30, 1.50, 1.80];
-const LIGHT_INTENSITY_SLOTS: &[f32] = &[5_000.0, 10_000.0, 25_000.0, 50_000.0, 100_000.0];
-const LIGHT_RANGE_SLOTS: &[f32] = &[4.0, 6.0, 8.0, 12.0, 16.0, 24.0, 32.0];
-
 const DYNAMIC_LIGHTS_CYCLE: &[DynamicLights] = &[
     DynamicLights::Off,
     DynamicLights::Vanilla,
@@ -792,9 +770,7 @@ impl GraphicsSettings {
                 camera_spring: false,
                 menu_scale: true,
                 dynamic_lights: DynamicLights::Vanilla,
-                light_threshold: DEFAULT_LIGHT_THRESHOLD,
-                light_intensity: DEFAULT_LIGHT_INTENSITY,
-                light_range: DEFAULT_LIGHT_RANGE,
+                shadowed_lights: DEFAULT_SHADOWED_LIGHTS,
                 light_flicker: DEFAULT_LIGHT_FLICKER,
                 model_light_count: DEFAULT_MODEL_LIGHT_COUNT,
                 character_render_path: CharacterRenderPath::FfxiFaithful,
@@ -837,9 +813,7 @@ impl GraphicsSettings {
                 camera_spring: false,
                 menu_scale: true,
                 dynamic_lights: DynamicLights::Vanilla,
-                light_threshold: DEFAULT_LIGHT_THRESHOLD,
-                light_intensity: DEFAULT_LIGHT_INTENSITY,
-                light_range: DEFAULT_LIGHT_RANGE,
+                shadowed_lights: DEFAULT_SHADOWED_LIGHTS,
                 light_flicker: DEFAULT_LIGHT_FLICKER,
                 model_light_count: DEFAULT_MODEL_LIGHT_COUNT,
                 character_render_path: CharacterRenderPath::FfxiFaithful,
@@ -882,9 +856,7 @@ impl GraphicsSettings {
                 camera_spring: false,
                 menu_scale: true,
                 dynamic_lights: DynamicLights::Vanilla,
-                light_threshold: DEFAULT_LIGHT_THRESHOLD,
-                light_intensity: DEFAULT_LIGHT_INTENSITY,
-                light_range: DEFAULT_LIGHT_RANGE,
+                shadowed_lights: DEFAULT_SHADOWED_LIGHTS,
                 light_flicker: DEFAULT_LIGHT_FLICKER,
                 model_light_count: DEFAULT_MODEL_LIGHT_COUNT,
                 character_render_path: CharacterRenderPath::FfxiFaithful,
@@ -931,9 +903,7 @@ impl GraphicsSettings {
                 camera_spring: false,
                 menu_scale: true,
                 dynamic_lights: DynamicLights::Vanilla,
-                light_threshold: DEFAULT_LIGHT_THRESHOLD,
-                light_intensity: DEFAULT_LIGHT_INTENSITY,
-                light_range: DEFAULT_LIGHT_RANGE,
+                shadowed_lights: DEFAULT_SHADOWED_LIGHTS,
                 light_flicker: DEFAULT_LIGHT_FLICKER,
                 model_light_count: DEFAULT_MODEL_LIGHT_COUNT,
                 character_render_path: CharacterRenderPath::FfxiFaithful,
@@ -1014,9 +984,7 @@ impl GraphicsSettings {
                     self.dynamic_lights.label().to_string()
                 }
             }
-            GraphicsField::LightThreshold => format!("{:.2}", self.light_threshold),
-            GraphicsField::LightIntensity => format!("{:.0}", self.light_intensity),
-            GraphicsField::LightRange => format!("{:.0}m", self.light_range),
+            GraphicsField::ShadowedLights => format!("{}", self.shadowed_lights),
             GraphicsField::LightFlicker => bool_label(self.light_flicker).into(),
             GraphicsField::ModelLightCount => format!("{}", self.model_light_count),
 
@@ -1104,12 +1072,7 @@ impl GraphicsSettings {
         match field {
             GraphicsField::Preset => {
                 let lights = self.dynamic_lights;
-                let (lt, li, lr, lf) = (
-                    self.light_threshold,
-                    self.light_intensity,
-                    self.light_range,
-                    self.light_flicker,
-                );
+                let (sl, lf) = (self.shadowed_lights, self.light_flicker);
                 let realistic = self.realistic_character_lighting;
                 let receive = self.faithful_shadow_receive;
                 let zone_cast = self.zone_shadow_cast;
@@ -1138,9 +1101,7 @@ impl GraphicsSettings {
                     cycle_slot(self.preset, PRESET_CYCLE, delta).unwrap_or(QualityPreset::High);
                 *self = Self::for_preset(next);
                 self.dynamic_lights = lights;
-                self.light_threshold = lt;
-                self.light_intensity = li;
-                self.light_range = lr;
+                self.shadowed_lights = sl;
                 self.light_flicker = lf;
                 self.realistic_character_lighting = realistic;
                 self.faithful_shadow_receive = receive;
@@ -1253,21 +1214,12 @@ impl GraphicsSettings {
             GraphicsField::DynamicLights => {
                 self.dynamic_lights = cycle_slot(self.dynamic_lights, DYNAMIC_LIGHTS_CYCLE, delta)
                     .unwrap_or(DynamicLights::Vanilla);
-                self.light_threshold = DEFAULT_LIGHT_THRESHOLD;
-                self.light_intensity = DEFAULT_LIGHT_INTENSITY;
-                self.light_range = DEFAULT_LIGHT_RANGE;
+                self.shadowed_lights = DEFAULT_SHADOWED_LIGHTS;
                 self.light_flicker = DEFAULT_LIGHT_FLICKER;
             }
-            GraphicsField::LightThreshold => {
-                self.light_threshold =
-                    cycle_slot_f32(self.light_threshold, LIGHT_THRESHOLD_SLOTS, delta);
-            }
-            GraphicsField::LightIntensity => {
-                self.light_intensity =
-                    cycle_slot_f32(self.light_intensity, LIGHT_INTENSITY_SLOTS, delta);
-            }
-            GraphicsField::LightRange => {
-                self.light_range = cycle_slot_f32(self.light_range, LIGHT_RANGE_SLOTS, delta);
+            GraphicsField::ShadowedLights => {
+                self.shadowed_lights =
+                    cycle_slot_u32(self.shadowed_lights, SHADOWED_LIGHTS_SLOTS, delta);
             }
             GraphicsField::LightFlicker => {
                 self.light_flicker = !self.light_flicker;
@@ -1415,9 +1367,7 @@ impl GraphicsSettings {
     }
 
     fn lights_fine_is_default(&self) -> bool {
-        (self.light_threshold - DEFAULT_LIGHT_THRESHOLD).abs() < 1e-3
-            && (self.light_intensity - DEFAULT_LIGHT_INTENSITY).abs() < 1.0
-            && (self.light_range - DEFAULT_LIGHT_RANGE).abs() < 1e-3
+        self.shadowed_lights == DEFAULT_SHADOWED_LIGHTS
             && self.light_flicker == DEFAULT_LIGHT_FLICKER
     }
 
@@ -1580,9 +1530,7 @@ pub const GRAPHICS_FIELDS: &[GraphicsField] = &[
     GraphicsField::ZoneLineDisplay,
     GraphicsField::MinimapRadar,
     GraphicsField::DynamicLights,
-    GraphicsField::LightThreshold,
-    GraphicsField::LightIntensity,
-    GraphicsField::LightRange,
+    GraphicsField::ShadowedLights,
     GraphicsField::LightFlicker,
     GraphicsField::ModelLightCount,
     GraphicsField::CharacterLighting,
@@ -2209,11 +2157,11 @@ mod tests {
     fn tuning_a_light_knob_marks_custom_only_in_enhanced() {
         let mut s = GraphicsSettings::default();
         assert_eq!(s.value_label(GraphicsField::DynamicLights), "Vanilla");
-        s.cycle(GraphicsField::LightIntensity, 1);
+        s.cycle(GraphicsField::ShadowedLights, 1);
         assert_eq!(
             s.value_label(GraphicsField::DynamicLights),
             "Vanilla",
-            "emitter knobs are inert in Vanilla, so the mode label must not read Custom"
+            "the shadow count is inert in Vanilla, so the mode label must not read Custom"
         );
         assert_eq!(s.preset, QualityPreset::High, "light knob ⟂ quality tier");
 
@@ -2225,7 +2173,7 @@ mod tests {
         );
         assert_eq!(s.value_label(GraphicsField::DynamicLights), "Enhanced");
 
-        s.cycle(GraphicsField::LightIntensity, 1);
+        s.cycle(GraphicsField::ShadowedLights, 1);
         assert_eq!(s.value_label(GraphicsField::DynamicLights), "Custom");
         assert_eq!(
             s.dynamic_lights,
@@ -2236,15 +2184,8 @@ mod tests {
 
     #[test]
     fn light_defaults_are_slot_aligned() {
-        assert!(LIGHT_THRESHOLD_SLOTS
-            .iter()
-            .any(|x| (x - DEFAULT_LIGHT_THRESHOLD).abs() < 1e-3));
-        assert!(LIGHT_INTENSITY_SLOTS
-            .iter()
-            .any(|x| (x - DEFAULT_LIGHT_INTENSITY).abs() < 1.0));
-        assert!(LIGHT_RANGE_SLOTS
-            .iter()
-            .any(|x| (x - DEFAULT_LIGHT_RANGE).abs() < 1e-3));
+        assert!(SHADOWED_LIGHTS_SLOTS.contains(&DEFAULT_SHADOWED_LIGHTS));
+        assert!(MODEL_LIGHT_COUNT_SLOTS.contains(&DEFAULT_MODEL_LIGHT_COUNT));
     }
 
     #[test]
@@ -2279,18 +2220,18 @@ mod tests {
         let mut s = GraphicsSettings::default();
         assert_eq!(s.dynamic_lights, DynamicLights::Vanilla);
         assert!(s.dynamic_lights.faithful_enabled());
-        assert!(!s.dynamic_lights.emitters_enabled());
+        assert!(!s.dynamic_lights.point_shadows_enabled());
 
         s.cycle(GraphicsField::DynamicLights, 1);
         assert_eq!(s.dynamic_lights, DynamicLights::Enhanced);
         assert_eq!(s.preset, QualityPreset::High, "lights must not flip preset");
         assert!(s.dynamic_lights.faithful_enabled());
-        assert!(s.dynamic_lights.emitters_enabled());
+        assert!(s.dynamic_lights.point_shadows_enabled());
 
         s.cycle(GraphicsField::DynamicLights, 1);
         assert_eq!(s.dynamic_lights, DynamicLights::Off, "wrapped");
         assert!(!s.dynamic_lights.faithful_enabled());
-        assert!(!s.dynamic_lights.emitters_enabled());
+        assert!(!s.dynamic_lights.point_shadows_enabled());
 
         s.cycle(GraphicsField::DynamicLights, 1);
         assert_eq!(s.dynamic_lights, DynamicLights::Vanilla, "full cycle");
@@ -2573,8 +2514,8 @@ mod tests {
             .copied()
             .filter(|f| f.is_advanced())
             .collect();
-        // The 5 dynamic-light tuning knobs (threshold/intensity/range/flicker/count).
-        assert_eq!(advanced.len(), 5, "advanced set drifted: {advanced:?}");
+        // The 3 dynamic-light tuning knobs (shadowed count/flicker/lights per model).
+        assert_eq!(advanced.len(), 3, "advanced set drifted: {advanced:?}");
         // Every advanced field is an indented child row ("  …"); no basic field is.
         for &f in GRAPHICS_FIELDS {
             assert_eq!(

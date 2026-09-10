@@ -59,6 +59,8 @@ struct P {
     // an unset CurrentWeather resolves to, i.e. the client's own zone-in default.
     weather: Option<u16>,
     zone_particles: bool,
+    // Some(n): Enhanced Dynamic Lights with n shadowed lamps, zone geometry casting.
+    enhanced_lights: Option<u32>,
 }
 #[derive(Resource, Default)]
 struct FC(u32);
@@ -87,6 +89,7 @@ fn main() {
         client_sun: false,
         weather: None,
         zone_particles: true,
+        enhanced_lights: None,
     };
     let f3 = |a: &[String], i: usize| {
         Vec3::new(
@@ -162,12 +165,17 @@ fn main() {
                 p.zone_particles = false;
                 i += 1;
             }
+            "--enhanced-lights" => {
+                p.enhanced_lights = Some(a[i + 1].parse().unwrap());
+                i += 2;
+            }
             _ => {
                 i += 1;
             }
         }
     }
     let zone_particles = p.zone_particles;
+    let enhanced_lights = p.enhanced_lights;
     let mut app = App::new();
     app.insert_resource(VanaClock::anchored_at_hour(p.hour))
         .insert_resource(p)
@@ -235,7 +243,15 @@ fn main() {
     // after sun_moon_system, exactly as ViewerCorePlugin orders them.
     let sky = app.world().resource::<P>().sky;
     if sky {
-        app.insert_resource(GraphicsSettings::default())
+        let mut gfx = GraphicsSettings::default();
+        if let Some(n) = enhanced_lights {
+            gfx.dynamic_lights = kuluu_render::graphics::settings::DynamicLights::Enhanced;
+            gfx.shadowed_lights = n;
+            gfx.zone_shadow_cast = true;
+        }
+        app.insert_resource(gfx)
+            // The DAT's 0x47 point lights, and under --enhanced-lights their shadow maps.
+            .add_plugins(kuluu_render::zone_point_lights::ZonePointLightsPlugin)
             .add_plugins(SkyboxPlugin)
             .add_plugins(MoonMaterialPlugin)
             .add_plugins(LensFlarePlugin)

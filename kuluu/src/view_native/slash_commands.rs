@@ -961,8 +961,8 @@ const COMMANDS: &[(&str, &[Command])] = &[
             },
             Command {
                 aliases: &["lights", "lanterns"],
-                usage: "[on|off | threshold N | intensity N | range N | flicker on|off]",
-                summary: "tune dynamic lantern/fire lights (from over-bright vertices); bare `/lights` lists state",
+                usage: "[on|off | shadowed N | flicker on|off]",
+                summary: "Enhanced dynamic lights: shadow maps from the N nearest DAT lamps; bare `/lights` lists state",
                 handler: |c| parse_lights(c.rest),
             },
         ],
@@ -2647,11 +2647,7 @@ pub enum LightsOp {
 
     Enable(Option<bool>),
 
-    Threshold(f32),
-
-    Intensity(f32),
-
-    Range(f32),
+    Shadowed(u32),
 
     Flicker(Option<bool>),
 }
@@ -2673,31 +2669,22 @@ fn parse_lights(rest: &str) -> SlashOutcome {
             _ => Err(()),
         }
     };
-    let num = |a: &str| a.parse::<f32>().ok().filter(|v| v.is_finite() && *v >= 0.0);
 
     match verb.as_str() {
         "on" | "off" | "toggle" => match toggle(&verb) {
             Ok(v) => SlashOutcome::SetLights(LightsOp::Enable(v)),
             Err(()) => unreachable!(),
         },
-        "threshold" | "thresh" => match num(arg) {
-            Some(v) => SlashOutcome::SetLights(LightsOp::Threshold(v)),
-            None => SlashOutcome::SystemMessage(format!("/lights threshold: bad value `{arg}`")),
-        },
-        "intensity" | "int" => match num(arg) {
-            Some(v) => SlashOutcome::SetLights(LightsOp::Intensity(v)),
-            None => SlashOutcome::SystemMessage(format!("/lights intensity: bad value `{arg}`")),
-        },
-        "range" => match num(arg) {
-            Some(v) => SlashOutcome::SetLights(LightsOp::Range(v)),
-            None => SlashOutcome::SystemMessage(format!("/lights range: bad value `{arg}`")),
+        "shadowed" | "shadows" => match arg.parse::<u32>() {
+            Ok(v) => SlashOutcome::SetLights(LightsOp::Shadowed(v)),
+            Err(_) => SlashOutcome::SystemMessage(format!("/lights shadowed: bad value `{arg}`")),
         },
         "flicker" => match toggle(arg) {
             Ok(v) => SlashOutcome::SetLights(LightsOp::Flicker(v)),
             Err(()) => SlashOutcome::SystemMessage(format!("/lights flicker: bad value `{arg}`")),
         },
         other => SlashOutcome::SystemMessage(format!(
-            "/lights: unknown `{other}` (use on|off|threshold N|intensity N|range N|flicker on|off)"
+            "/lights: unknown `{other}` (use on|off|shadowed N|flicker on|off)"
         )),
     }
 }
@@ -5281,6 +5268,22 @@ mod tests {
         }
         assert!(matches!(
             parse_actordiag("wat"),
+            SlashOutcome::SystemMessage(_)
+        ));
+    }
+
+    #[test]
+    fn lights_shadowed_takes_a_count_and_rejects_junk() {
+        assert!(matches!(
+            parse_lights("shadowed 3"),
+            SlashOutcome::SetLights(LightsOp::Shadowed(3))
+        ));
+        assert!(matches!(
+            parse_lights("shadowed lots"),
+            SlashOutcome::SystemMessage(_)
+        ));
+        assert!(matches!(
+            parse_lights("threshold 1.2"),
             SlashOutcome::SystemMessage(_)
         ));
     }

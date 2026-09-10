@@ -83,7 +83,6 @@ pub mod weather_particles;
 pub mod zone_clouds;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod zone_doors;
-pub mod zone_lights;
 pub mod zone_lines;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod zone_particles;
@@ -219,8 +218,6 @@ impl<S: SceneSource + Resource + Component<Mutability = bevy::ecs::component::Mu
 
         // Nameplates: final in-view pass (replaces the retired overlay camera).
         app.add_plugins(nameplate_final_pass::NameplateFinalPassPlugin);
-
-        app.add_plugins(zone_lights::ZoneLightsPlugin);
 
         #[cfg(not(target_arch = "wasm32"))]
         app.add_plugins(zone_point_lights::ZonePointLightsPlugin);

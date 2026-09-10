@@ -3621,9 +3621,8 @@ pub fn update_ffxi_actor_point_lights(
     // The zone's own bindings are the point lights retail leaves in D3D slots
     // 2-5 while it draws a model over that chunk (ZoneRenderer.cpp ZoneRenderer::UpdateBlockLightSettings, :339-353;
     // ModelPartInstance.cpp ModelPartInstance::Draw only rebinds slots 0-1), so they light the
-    // actor. `/lights` is the explicitly non-vanilla path: its emitters are ours,
-    // no chunk names them, so that mode keeps the nearest-N pick.
-    let authored = chunk_lights.is_authored() && !settings.dynamic_lights.emitters_enabled();
+    // actor.
+    let authored = chunk_lights.is_authored();
 
     for (mut actor, gt) in &mut q_actors {
         let pos = gt.translation();

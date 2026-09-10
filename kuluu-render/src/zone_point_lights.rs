@@ -77,11 +77,6 @@ pub fn lamp_flicker(t: f32, seed: f32) -> f32 {
         + LAMP_FLICKER_FAST_AMP
             * (t * LAMP_FLICKER_FAST_RATE + seed * LAMP_FLICKER_PHASE_STRIDE).sin()
 }
-// `/lights` emitters are Bevy PointLights with lumen intensity; fold intensity
-// into colour magnitude against the faithful reference so a default-intensity
-// emitter reads like a colour~1 Generator light.
-const EMITTER_MIN_INTENSITY: f32 = 1.0;
-
 /// No Generator chunk defines this light, so no MZB chunk can bind it. Zone
 /// FourCCs are never 0 (`LightID == 0` is retail's empty pool slot,
 /// ZoneRenderer.cpp ZoneRenderer::GetOrAllocateLight).
@@ -90,8 +85,8 @@ pub const UNAUTHORED_LIGHT_ID: mzb::LightId = 0;
 #[derive(Debug, Clone, Copy)]
 pub struct ZonePointLight {
     /// FourCC of the Generator chunk that defines this light — the `LightID` an
-    /// MZB chunk binding names. [`UNAUTHORED_LIGHT_ID`] for the `/lights`
-    /// emitters, which no zone authors.
+    /// MZB chunk binding names; [`UNAUTHORED_LIGHT_ID`] for a light no zone
+    /// authors.
     pub light_id: mzb::LightId,
 
     pub world_pos: Vec3,
@@ -109,11 +104,10 @@ pub struct ZonePointLights {
     pub lights: Vec<ZonePointLight>,
 }
 
-/// Per-frame merge of every dynamic point light that the FFXI custom materials
-/// (zone geometry + skinned actors) consume: the faithful Generator lights and
-/// the `/lights` over-bright vertex emitters, expressed in the shared shader
-/// convention. The faithful lights come first and keep their `light_id`, so a
-/// chunk's authored binding resolves against this list.
+/// Per-frame feed of the faithful Generator lights the FFXI custom materials
+/// (zone geometry + skinned actors) consume, in the shared shader convention;
+/// each keeps its `light_id`, so a chunk's authored binding resolves against
+/// this list.
 #[derive(Resource, Default)]
 pub struct ActiveSceneLights {
     pub lights: Vec<ZonePointLight>,
@@ -121,7 +115,6 @@ pub struct ActiveSceneLights {
 
 pub fn build_active_scene_lights(
     faithful: Res<ZonePointLights>,
-    q_emitters: Query<(&GlobalTransform, &PointLight), With<crate::zone_lights::ZoneLightEmitter>>,
     vana_clock: Res<crate::vana_time::VanaClock>,
     zone_lighting: Option<Res<crate::weather::ZoneDirectionalLighting>>,
     time: Res<bevy::time::Time>,
@@ -155,21 +148,6 @@ pub fn build_active_scene_lights(
             light_id: l.light_id,
             world_pos: l.world_pos,
             color: l.color * night * flick,
-            range,
-            attenuation: SCENE_LIGHT_FALLOFF_K / (range * range),
-        });
-    }
-    for (gt, pl) in &q_emitters {
-        if pl.intensity <= EMITTER_MIN_INTENSITY {
-            continue;
-        }
-        let lin = pl.color.to_linear();
-        let mag = pl.intensity / FAITHFUL_LIGHT_INTENSITY * night;
-        let range = pl.range.max(1e-3) * ZONE_LIGHT_REACH_SCALE;
-        active.lights.push(ZonePointLight {
-            light_id: UNAUTHORED_LIGHT_ID,
-            world_pos: gt.translation(),
-            color: Vec3::new(lin.red, lin.green, lin.blue) * mag,
             range,
             attenuation: SCENE_LIGHT_FALLOFF_K / (range * range),
         });
@@ -420,10 +398,73 @@ fn animate_faithful_zone_lights(
     }
 }
 
+// Retail casts no shadow map at all (graphics/settings.rs `zone_shadow_cast`), so this is the
+// Enhanced half of Dynamic Lights: the lit lights nearest the camera render Bevy cube shadow
+// maps. A member keeps its map until an outsider is closer by this margin, so a lamp on the
+// boundary does not flap six cube faces on and off as the camera drifts.
+const SHADOW_HANDOVER_MARGIN: f32 = 1.5;
+
+pub(crate) fn pick_shadowed(
+    candidates: &mut [(Entity, f32, bool)],
+    count: usize,
+    margin: f32,
+) -> Vec<Entity> {
+    let key = |c: &(Entity, f32, bool)| c.1 - if c.2 { margin } else { 0.0 };
+    candidates.sort_by(|a, b| key(a).total_cmp(&key(b)));
+    candidates.iter().take(count).map(|c| c.0).collect()
+}
+
+fn select_shadowed_zone_lights(
+    settings: Res<crate::graphics_settings::GraphicsSettings>,
+    cam: Query<&GlobalTransform, With<crate::camera::OperatorCamera>>,
+    mut q: Query<(Entity, &GlobalTransform, &Visibility, &mut PointLight), With<FaithfulZoneLight>>,
+) {
+    let count = if settings.dynamic_lights.point_shadows_enabled() {
+        settings.shadowed_lights as usize
+    } else {
+        0
+    };
+    let mut candidates: Vec<(Entity, f32, bool)> = Vec::new();
+    if let Some(cam_pos) = cam
+        .iter()
+        .next()
+        .map(|c| c.translation())
+        .filter(|_| count > 0)
+    {
+        for (e, gt, vis, pl) in &q {
+            if *vis == Visibility::Hidden {
+                continue;
+            }
+            candidates.push((
+                e,
+                gt.translation().distance(cam_pos),
+                pl.shadow_maps_enabled,
+            ));
+        }
+    }
+    let chosen = pick_shadowed(&mut candidates, count, SHADOW_HANDOVER_MARGIN);
+    let mut switched = 0usize;
+    for (e, _, _, mut pl) in &mut q {
+        let want = chosen.contains(&e);
+        if pl.shadow_maps_enabled != want {
+            pl.shadow_maps_enabled = want;
+            switched += 1;
+        }
+    }
+    if switched > 0 {
+        info!(
+            "zone_point_lights: {} of {} lit light(s) carry shadow maps",
+            chosen.len(),
+            candidates.len()
+        );
+    }
+}
+
 pub struct ZonePointLightsPlugin;
 
 impl Plugin for ZonePointLightsPlugin {
     fn build(&self, app: &mut App) {
+        app.add_systems(Update, select_shadowed_zone_lights);
         app.init_resource::<ZonePointLights>()
             .init_resource::<ActiveSceneLights>()
             .add_systems(
@@ -484,6 +525,31 @@ mod tests {
             nearest_point_light_indices(Vec3::ZERO, &lights, 4),
             vec![1],
             "the distance pick would have taken the unbound lamp instead"
+        );
+    }
+
+    #[test]
+    fn shadowed_pick_holds_a_member_until_an_outsider_beats_the_margin() {
+        let mut world = World::new();
+        let (a, b, c) = (
+            world.spawn_empty().id(),
+            world.spawn_empty().id(),
+            world.spawn_empty().id(),
+        );
+        let margin = 1.5;
+        let mut cands = [(a, 10.0, true), (b, 9.0, false), (c, 30.0, false)];
+        assert_eq!(
+            pick_shadowed(&mut cands, 1, margin),
+            vec![a],
+            "9 does not beat a member at 10 - 1.5"
+        );
+        let mut cands = [(a, 10.0, true), (b, 8.0, false), (c, 30.0, false)];
+        assert_eq!(pick_shadowed(&mut cands, 1, margin), vec![b], "8 beats 8.5");
+        assert_eq!(pick_shadowed(&mut cands, 0, margin), Vec::<Entity>::new());
+        assert_eq!(
+            pick_shadowed(&mut cands, 5, margin).len(),
+            3,
+            "the count clamps to the lit set"
         );
     }
 

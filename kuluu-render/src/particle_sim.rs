@@ -1353,8 +1353,8 @@ fn rebuild_mesh(g: &LiveGenerator, cam: CameraView, clock: &CelestialClock, mesh
         // Fixed-orientation zone sheets carry raw FFXI-frame geometry; apply the
         // generator's FFXI->Bevy basis (the same flip on origin/velocity, matching
         // dat_mzb.rs to_bevy) so a falling water sheet hangs down into the basin
-        // instead of standing up above the emitter (kuluu-czc6). Screen billboards
-        // orient in Bevy already; actor-local generators integrate in the actor frame.
+        // instead of standing up above the emitter (kuluu-czc6). Actor-local generators
+        // integrate in the actor frame.
         let world_basis = (g.orientation.is_some() || axial) && !g.actor_local;
         // A screen billboard's template is DAT-frame geometry too (Y down: the campfire flame
         // `hi12` rises toward negative y). An actor-local generator inherits the FFXI->Bevy basis
@@ -2393,8 +2393,11 @@ mod tests {
         );
     }
 
+    // kuluu-czc6 assumed screen billboards needed no flip; the Selbina lantern showed
+    // otherwise (kuluu-3v98): the campfire ribbon hi12 rises toward DAT -y and hung below its
+    // wick, so a world-space screen billboard folds the same basis into its template.
     #[test]
-    fn camera_billboard_sheet_not_flipped() {
+    fn camera_billboard_sheet_flipped_into_the_bevy_frame() {
         let g = sheet_gen(None);
         let mut mesh = empty_mesh();
         rebuild_mesh(
@@ -2403,10 +2406,9 @@ mod tests {
             &CelestialClock::default(),
             &mut mesh,
         );
-        // Billboard: no basis flip, so the same +Y geometry rises above the emitter.
         assert!(
-            max_sheet_y(&mesh) > 10.0 + 1.0,
-            "camera billboards must keep their unflipped local frame"
+            max_sheet_y(&mesh) <= 10.0 + 1.0e-4,
+            "a screen billboard's DAT +Y (down) must not rise above the emitter"
         );
     }
 

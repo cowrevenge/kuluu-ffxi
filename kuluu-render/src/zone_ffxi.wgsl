@@ -22,6 +22,7 @@
     mesh_view_bindings as view_bindings,
     mesh_view_types,
     clustered_forward as clustering,
+    shadows,
 }
 
 #import kuluu_render::directional_shadow::directional_shadow_factor
@@ -159,7 +160,13 @@ fn clustered_point_irradiance(n: vec3<f32>, p: vec3<f32>, frag_coord: vec2<f32>)
         let t = dist / range;
         let window = 1.0 - t * t;
         let nl = max(dot(n, to_light / max(dist, 1e-5)), 0.0);
-        rgb += nl * inv * window * window * color;
+        // Enhanced Dynamic Lights: the lit lights nearest the camera carry cube shadow maps
+        // (zone_point_lights.rs select_shadowed_zone_lights); the rest stay unshadowed.
+        var shadow = 1.0;
+        if ((lo.flags & mesh_view_types::POINT_LIGHT_FLAGS_SHADOWS_ENABLED_BIT) != 0u) {
+            shadow = shadows::fetch_point_shadow(light_id, vec4<f32>(p, 1.0), n, frag_coord);
+        }
+        rgb += shadow * nl * inv * window * window * color;
     }
     return rgb;
 }

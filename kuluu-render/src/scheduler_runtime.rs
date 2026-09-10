@@ -1799,13 +1799,13 @@ pub fn dispatch_melee_action_started(
         }
         // F49 - info bit 1 (Defeated): retail flips StatusServer on the same frame as the HP
         // packet, so start the victim's death path now instead of waiting for the next 0x0E.
-        if outcome.is_some_and(|o| o.info.is_defeated()) {
+        if let Some(outcome) = outcome.filter(|o| o.info.is_defeated()) {
             if combat_log_enabled() {
                 println!(
                     "COMBAT_DEAD actor={} target={:?} info=0x{:X}",
                     actor_id,
                     victim,
-                    outcome.map(|o| o.info.bits()).unwrap_or(0)
+                    outcome.info.bits()
                 );
             }
             latch_dead_from_action(victim, &q_children, &q_render, &mut commands);

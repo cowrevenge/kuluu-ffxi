@@ -497,7 +497,16 @@ pub mod speed {
     /// rate. Retail's AnimationSpeed = SpeedBase * 0.1 yps (research/XiPackets world/server/0x000E)
     /// and the clips are authored at AUTHORED_ANIM_RATE, so the ratio is the playback multiplier:
     /// a slower base walks in slow motion, a faster one in fast forward.
+    ///
+    /// A byte of 0 means "no authored rate", not zero speed: vendor/server/sql/npc_list.sql ships
+    /// NPCs with `speedsub` = 0 (Resistance_Fighter runs at speed 100 / speedsub 0), and both
+    /// instance_loader.cpp CInstanceLoader::LoadInstance and zoneutils.cpp LoadNPCList assign that
+    /// column straight to animationSpeed, so a real moving mob carries the byte. A zero playback
+    /// scale would freeze its walk clip; those mobs play at the authored rate.
     pub const fn anim_rate_scale(speed_base: u8) -> f32 {
+        if speed_base == 0 {
+            return 1.0;
+        }
         (speed_base as f32 * SPEED_TO_YPS) / AUTHORED_ANIM_RATE
     }
 }
@@ -2513,6 +2522,12 @@ mod tests {
         assert!(
             (speed::anim_rate_scale(50) - 1.0).abs() < 1e-6,
             "authored base plays at unity"
+        );
+        // speedsub = 0 NPCs exist in vendor/server/sql/npc_list.sql (Resistance_Fighter
+        // 100/0); the byte means no authored rate, so they play at the authored rate.
+        assert!(
+            (speed::anim_rate_scale(0) - 1.0).abs() < 1e-6,
+            "a zero base is no authored rate, not a frozen clip"
         );
         assert!((speed::anim_rate_scale(25) - 0.5).abs() < 1e-6);
         assert!(speed::anim_rate_scale(75) > speed::anim_rate_scale(50));

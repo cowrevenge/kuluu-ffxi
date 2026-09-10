@@ -84,7 +84,7 @@ pub const SCHEDULER_TAG_FADE_IN: FourCc = *b"fdi0";
 pub const SCHEDULER_DURATION_FROM_DAT: u16 = 0;
 
 /// `GameStatus` values opcode 0x7E writes to the target's `StatusEvent`
-/// (research/XIClient .../World/Actor/GameStatus.h; the case-to-value mapping is
+/// (research/XIClient/src/XIClient/include/World/Actor/GameStatus.h; the case-to-value mapping is
 /// research/XiEvents/OpCodes/0x007E.md).
 pub const STATUS_EVENT_IDLE: u8 = 0;
 pub const STATUS_EVENT_CHOCOBO: u8 = 5;

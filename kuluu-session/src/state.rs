@@ -135,7 +135,7 @@ pub fn model_radius(kind: EntityKind) -> f32 {
 }
 
 /// Retail's own decode of the wire speed byte
-/// (research/XIClient .../Game/Net/Packets/s2c, RecvCharPc and RecvServerStatus).
+/// (research/XIClient/src/XIClient/source/Game/Net/Packets/s2c, RecvCharPc and RecvServerStatus).
 pub const SPEED_TO_YPS: f32 = 0.1;
 
 // The server does not send a faster speed to a mounted player — LSB caps its
@@ -143,7 +143,7 @@ pub const SPEED_TO_YPS: f32 = 0.1;
 // (vendor/server/src/map/entities/battleentity.cpp, CBattleEntity::UpdateSpeed).
 // Retail makes up the difference in the client, doubling the decoded speed while
 // mounted and then clamping
-// (research/XIClient .../World/Actor/ControllableActor.cpp,
+// (research/XIClient/src/XIClient/source/World/Actor/ControllableActor.cpp,
 // ControllableActor::StepControl). Taking the packet at face value therefore
 // makes mounting *slower*.
 pub const MOUNTED_SPEED_MULTIPLIER: f32 = 2.0;

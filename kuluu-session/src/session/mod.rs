@@ -735,7 +735,7 @@ fn classify_char_npc(
     let dynamic_targid = (0x700..=0x8FF).contains(&act_index);
     match look_size {
         // Standard monster meshes split mob/NPC the same way the retail client
-        // does: Flags1.MonsterFlag (see research/XiPackets .../0x000E). LSB has
+        // does: Flags1.MonsterFlag (see research/XiPackets/world/server/0x000E). LSB has
         // no literal flag — vendor/server/src/map/packets/entity_update.cpp writes
         // the STATUS_TYPE enum into that byte, so the bit reads set for mobs
         // (allegiance MOB spawn as STATUS_TYPE::UPDATE) and clear for NPCs

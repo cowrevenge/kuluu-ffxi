@@ -69,7 +69,7 @@ impl ParticleSimulator {
         }
     }
 
-    // research/xim ParticleGeneratorAttachment / cexi-viewer particle/runtime.js:517-524 —
+    // research/xim ParticleGeneratorAttachment / cexi-viewer particle/runtime.js updateAssociatedPosition —
     // a Sun/Moon-attached generator's associated position is the celestial body's position
     // offset by the camera, refreshed every frame so the sky rides with the viewer.
     pub fn set_celestial_origins(&mut self, sun: Vec3, moon: Vec3) {

@@ -2826,7 +2826,7 @@ const CHOCOBO_BACK_JOINT: usize = 3;
 
 /// How far above that joint the rider's hip belongs. A chocobo declares no seat
 /// of its own — the whole per-race saddle block is dead — and retail hard-codes
-/// the height too (research/XIClient .../World/Actor/SkeletalMeshActor.cpp,
+/// the height too (research/XIClient/src/XIClient/source/World/Actor/SkeletalMeshActor.cpp,
 /// `SkeletalMeshActor::GetElem`, a flat 1.3 for `IsOnChocobo`), but against the
 /// actor root rather than the animated back, so the magnitude does not
 /// transplant. Calibrated against retail footage (Rolanberry Fields,

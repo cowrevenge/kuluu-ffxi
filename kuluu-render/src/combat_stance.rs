@@ -2136,13 +2136,16 @@ mod tests {
     /// Port of vendor/server/src/common/utils.cpp worldAngle (pinned vendor/server), byte for
     /// byte: f32 math, truncating i16 cast, double-mod into [0, 256). The 0.1 yalms gate is the
     /// XZ form of utils.h isWithinDistance(A, B, 0.1f, true); A.rotation is assumed 0 here.
+    /// Inputs are Bevy-space positions: ffxi_to_bevy maps (lsb.x, lsb.z) to (x, -z), so the LSB
+    /// horizontal delta this formula needs is (dx, -dz). Feeding a raw Bevy delta would compute
+    /// the mirrored byte.
     fn world_angle_byte(a: Vec3, b: Vec3) -> u8 {
         let dx = b.x - a.x;
-        let dz = b.z - a.z;
-        if dx * dx + dz * dz <= 0.1 * 0.1 {
+        let dz_lsb = -(b.z - a.z);
+        if dx * dx + dz_lsb * dz_lsb <= 0.1 * 0.1 {
             return 0;
         }
-        let radians = dz.atan2(dx);
+        let radians = dz_lsb.atan2(dx);
         let raw = (radians * -(128.0 / std::f32::consts::PI)) as i16;
         ((raw % 256 + 256) % 256) as u8
     }
@@ -2155,9 +2158,11 @@ mod tests {
 
     #[test]
     fn heading_forward_points_along_the_world_angle_direction() {
-        // For a grid of displacements, the byte LSB would write for a -> b must make kuluu's
-        // forward point from a toward b in wire space. One quantization step is 1.4 deg, so even
-        // an off-by-one byte passes dot > 0.99; a convention error (a quarter turn) fails by ~90.
+        // For a grid of Bevy-space displacements, the byte LSB would write for a -> b must make
+        // kuluu's forward point from a toward b in wire space. One quantization step is 1.4 deg,
+        // so even an off-by-one byte passes dot > 0.99; a convention error (a quarter turn) fails
+        // by ~90. The want vector is the true wire delta: ffxi_to_bevy maps (lsb.x, lsb.z) to
+        // (x, -z), so a Bevy step (dx, dz) is the wire step (dx, -dz).
         let origin = Vec3::ZERO;
         for dx in [-4.0f32, -1.5, 0.7, 2.0, 4.0] {
             for dz in [-4.0f32, -2.0, -0.5, 1.5, 3.0] {
@@ -2166,7 +2171,7 @@ mod tests {
                 }
                 let byte = world_angle_byte(origin, Vec3::new(dx, 0.0, dz));
                 let wire_fwd = bevy_forward_to_wire(heading_forward(byte));
-                let want = Vec2::new(dx, dz).normalize();
+                let want = Vec2::new(dx, -dz).normalize();
                 assert!(
                     wire_fwd.dot(want) > 0.99,
                     "a->b ({dx}, {dz}): byte {byte} points the wrong way"
@@ -2180,11 +2185,10 @@ mod tests {
         // Encoding kuluu's forward for byte b through the ported worldAngle must land on b or a
         // neighbor: LSB's own truncating i16 cast quantizes to 256 steps, so exact identity is
         // not what the pinned formula gives; a convention error would show up as a constant
-        // offset (a quarter turn is 64 bytes).
+        // offset (a quarter turn is 64 bytes). heading_forward(b) is Bevy space, which is what
+        // world_angle_byte expects.
         for b in 0u8..=255 {
-            let th = heading_to_rad(b);
-            let wire_fwd = Vec3::new(th.cos(), -th.sin(), 0.0);
-            let got = world_angle_byte(Vec3::ZERO, wire_fwd);
+            let got = world_angle_byte(Vec3::ZERO, heading_forward(b));
             let diff = ((got as i32 - b as i32 + 128) % 256 + 256) % 256 - 128;
             assert!(diff.abs() <= 1, "byte {b} encodes back to {got}");
         }
@@ -2213,36 +2217,60 @@ mod tests {
         // loc.p.rotation, then updatemask |= UPDATE_POS. A remote actor receiving a POS update
         // with the byte for its travel direction must start facing that direction on the same
         // frame: observe() stores target_heading together with the position and
-        // advance_prediction eases toward it immediately (no one-snapshot lag).
+        // advance_prediction eases toward it immediately (no one-snapshot lag). The assertions
+        // read the actor's actual Transform, not just the prediction resource.
         let mut app = grounding_app(0.0);
-        spawn_remote_mob(&mut app, 950);
+        let mob = spawn_remote_mob(&mut app, 950);
         // Settle at a heading far from the next step's travel direction.
         app.world_mut()
             .resource_mut::<EntityPrediction>()
             .observe(950, Vec3::ZERO, 128, 40, 40);
         tick_frames(&mut app, 60);
-        let before = app.world().resource::<EntityPrediction>().by_id[&950].rendered_heading_rad;
 
         let a = Vec3::new(1.0, 0.0, 2.0);
         let b = Vec3::new(5.0, 0.0, 9.0);
         let byte = world_angle_byte(a, b);
+        let target = heading_to_rad(byte);
+        let dist = |h: f32| {
+            let mut d = (target - h).rem_euclid(std::f32::consts::TAU);
+            if d > std::f32::consts::PI {
+                d -= TAU;
+            }
+            d.abs()
+        };
+
+        let before_h = app.world().resource::<EntityPrediction>().by_id[&950].rendered_heading_rad;
+        let t_before = *app.world().get::<Transform>(mob).unwrap();
+
         app.world_mut()
             .resource_mut::<EntityPrediction>()
             .observe(950, a, byte, 40, 40);
         tick_frames(&mut app, 1);
 
-        let after = app.world().resource::<EntityPrediction>().by_id[&950].rendered_heading_rad;
-        let target = heading_to_rad(byte);
-        let dist = |h: f32| {
-            let mut d = (target - h).rem_euclid(std::f32::consts::TAU);
-            if d > std::f32::consts::PI {
-                d -= std::f32::consts::TAU;
-            }
-            d.abs()
-        };
+        let t_after = *app.world().get::<Transform>(mob).unwrap();
+        // Same snapshot: the position tween starts on this frame and closes the gap.
         assert!(
-            dist(after) < dist(before),
+            t_after.translation.distance(t_before.translation) > 1e-6,
+            "the position update must move the actor on the same frame"
+        );
+        assert!(
+            t_after.translation.distance(a) < t_before.translation.distance(a),
+            "the tween closes the gap toward the new server position on the first frame"
+        );
+        // Same snapshot: the heading turn starts on this frame (exponential approach, no lag).
+        let after_h = app.world().resource::<EntityPrediction>().by_id[&950].rendered_heading_rad;
+        assert!(
+            dist(after_h) < dist(before_h),
             "the first frame after the POS update already turns toward the travel direction"
+        );
+
+        // And it converges on the travel direction: run out the HEADING_TAU easing.
+        tick_frames(&mut app, 240);
+        let settled = *app.world().get::<Transform>(mob).unwrap();
+        let yaw = settled.rotation.to_euler(Axis::Y).y;
+        assert!(
+            dist(-yaw) < 1e-3,
+            "the actor ends facing its travel direction (rotation is from_rotation_y(-heading))"
         );
     }
 

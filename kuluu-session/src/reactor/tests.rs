@@ -2038,3 +2038,35 @@ fn follow_suppresses_step_when_server_speed_is_zero() {
         }
     }
 }
+
+#[test]
+fn self_heading_byte_matches_world_angle() {
+    // The byte kuluu sends for a facing (heading_toward) must be what LSB's worldAngle would
+    // produce for the same displacement: heading_toward is a port of utils.cpp worldAngle over
+    // snapshot-space deltas, which are LSB horizontal x/z. It rounds to the nearest step where
+    // worldAngle truncates, so allow one byte; the direction check catches any convention error.
+    let origin = Vec3::default();
+    for dx in [-4.0f32, -1.5, 0.7, 2.0, 4.0] {
+        for dy in [-4.0f32, -2.0, -0.5, 1.5, 3.0] {
+            if dx.abs() < 1e-6 && dy.abs() < 1e-6 {
+                continue;
+            }
+            let sent = heading_toward(origin, Vec3 { x: dx, y: dy, z: 0.0 });
+            let radians = dy.atan2(dx);
+            let raw = (radians * -(128.0 / std::f32::consts::PI)) as i16;
+            let lsb = ((raw % 256 + 256) % 256) as u8;
+            let diff = ((sent as i32 - lsb as i32 + 128) % 256 + 256) % 256 - 128;
+            assert!(
+                diff.abs() <= 1,
+                "a->b ({dx}, {dy}): sent {sent} vs worldAngle {lsb}"
+            );
+            let (fx, fy) = crate::state::heading_to_forward(sent);
+            let len = (dx * dx + dy * dy).sqrt();
+            let dot = fx * dx / len + fy * dy / len;
+            assert!(
+                dot > 0.99,
+                "a->b ({dx}, {dy}): sent byte {sent} faces the wrong way"
+            );
+        }
+    }
+}

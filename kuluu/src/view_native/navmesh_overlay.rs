@@ -110,12 +110,12 @@ fn ground_snap_needed(current_y: f32, ground_y: f32) -> bool {
     (current_y - ground_y).abs() > GROUND_SNAP_EPSILON_YALMS
 }
 
-// Remote Mob/Pc/Pet/Npc Y is server-resolved: LSB grounds it in the path step
-// (vendor/server/src/map/ai/helpers/pathfind.cpp CPathFind::StepTo) and
-// combat_stance assigns rendered.y = server_pos.y on every update, so this system
-// no longer re-grounds them. It keeps two jobs: snapping self onto its wire Y when
-// no collision is loaded, and grounding the static Other kind (doors/transports),
-// whose wire position is an authored placement rather than a pathfind step.
+// Remote Mob/Pc/Pet/Npc ground movers are grounded by combat_stance::ground_remote_movers_system
+// on the MZB collision mesh every frame: LSB grounds them to the Detour navmesh (pathfind.cpp
+// CPathFind::StepTo walks Y to a waypoint from navmesh.cpp), so the POS packet Y only picks the
+// level. This system keeps two jobs: snapping self onto its wire Y when no collision is loaded,
+// and grounding the static Other kind (doors/transports), whose wire position is an authored
+// placement rather than a pathfind step.
 fn snap_entities_to_mzb_floor_system(
     collision_geom: Res<kuluu_render::dat_mzb::MzbCollisionGeometry>,
     interiors: Res<kuluu_render::sub_area_activation::SubAreaActivation>,

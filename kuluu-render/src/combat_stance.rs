@@ -756,14 +756,14 @@ pub fn track_entity_motion_system(
 /// Which snap band a POS update fell into (see `EntityPrediction::SNAP_*_RATIO`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SnapBand {
-    /// jump <= 1.0 * step: an ordinary tick; chase.
+    /// jump <= 1.0 * step (+ the float-boundary epsilon): an ordinary tick; chase.
     Normal,
 
     /// 1.0*step < jump <= 2.0*step: plausible (path re-eval or a late tick); chase, no snap.
     Stretch,
 
-    /// jump > 2.0*step, or the measured inter-update interval exceeds MAX_INTERVAL (two and a
-    /// half AI ticks): pop rendered XZ onto the server.
+    /// jump > 2.0 * step: pop rendered XZ onto the server. Distance-only: staleness is a timing
+    /// event that resets the cadence ring in observe() instead of snapping; the position tweens.
     Pop,
 }
 
@@ -954,8 +954,9 @@ impl EntityPrediction {
     /// Shortest interval the ring records (half an AI tick).
     const MIN_INTERVAL: f32 = Self::MIN_INTERVAL_TICKS * Self::TICK_SECS;
 
-    /// Longest interval the ring records (two and a half AI ticks). A sample older than this is
-    /// stale even for a small jump: the Pop band snaps it onto the server position.
+    /// Longest interval the ring records (two and a half AI ticks). Gaps beyond
+    /// STALE_INTERVAL (= 2x this) are stale: observe() resets the ring to its seed instead of
+    /// recording them; the band itself is distance-only.
     const MAX_INTERVAL: f32 = Self::MAX_INTERVAL_TICKS * Self::TICK_SECS;
 
     // Engineering bound, not LSB-derived: intervals up to this many times MAX_INTERVAL are still
@@ -963,10 +964,10 @@ impl EntityPrediction {
     // the entity was stationary and the ring keeps its last budget.
     const IDLE_INTERVAL_MULTIPLIER: f32 = 2.0;
 
-    /// Staleness horizon for the Pop band, in seconds: the ring's own recording horizon (five AI
-    /// ticks). Gaps up to here are late ticks, not teleports: they widen the budget and still
-    /// chase; beyond it a sample is stale even for a small jump. One boundary serves both the
-    /// ring-recording test in observe() and the band's staleness check.
+    /// Staleness horizon, in seconds: the ring's own recording horizon (five AI ticks). Gaps up
+    /// to here are late ticks: they widen the budget and still chase. Beyond it the measured
+    /// cadence is untrustworthy and observe() resets the ring to its kLogicUpdateRate seed; the
+    /// band itself is distance-only, so a stale sample with a small jump still tweens.
     const STALE_INTERVAL: f32 = Self::MAX_INTERVAL * Self::IDLE_INTERVAL_MULTIPLIER;
 
     // Engineering bound, not LSB-derived: a small buffer on top of the widest recent interval so
@@ -1006,6 +1007,12 @@ impl EntityPrediction {
     pub const SNAP_NORMAL_RATIO: f32 = 1.0;
 
     pub const SNAP_STRETCH_RATIO: f32 = 2.0;
+
+    /// Float-boundary tolerance on the Normal/Stretch edge, in ratio space (jump/step): a
+    /// one-step tick measured through wire + sqrt noise lands at 1.0 +/- ~1e-7, and without this
+    /// healthy updates split across the boundary. Engineering bound for float noise, not
+    /// LSB-derived; it moves the edge by a fraction of a milliyalm at most.
+    pub const SNAP_NORMAL_EPS_RATIO: f32 = 1e-3;
 
     pub const HEADING_TAU: f32 = 0.10;
 
@@ -1048,6 +1055,14 @@ impl EntityPrediction {
                         e.sample_intervals[Self::JITTER_HISTORY_SAMPLES - 1] = interval;
                         e.segment_duration = e.sample_intervals.iter().copied().fold(0.0, f32::max)
                             * Self::INTERVAL_HEADROOM;
+                    } else if e.sample_age > Self::STALE_INTERVAL {
+                        // A stale gap (idle/resume): the measured cadence is no longer
+                        // trustworthy, so reset the ring to its kLogicUpdateRate seed and let the
+                        // next segment budget be one tick plus headroom. The position still tweens:
+                        // staleness is a timing event, not a distance event (the band is
+                        // distance-only).
+                        e.sample_intervals = [Self::TICK_SECS; Self::JITTER_HISTORY_SAMPLES];
+                        e.segment_duration = Self::TICK_SECS * Self::INTERVAL_HEADROOM;
                     }
                     // What LSB actually moved on this tick in XZ: the distance between consecutive
                     // confirmed positions. Upstream main's snap rule measured this same pair ("render
@@ -1131,23 +1146,24 @@ fn advance_prediction(s: &mut PredictSample, dt: f32) -> (Vec3, f32) {
         // StepTo advanced this tick (vendor/server/src/map/ai/helpers/pathfind.cpp CPathFind::StepTo).
         // The bands are a ratio to that step, never a flat distance, so a fast mob's legitimate
         // per-tick move no longer reads as a teleport. XZ only: Y is assigned directly below and
-        // must not inflate the jump with a floor-height change. A sample older than STALE_INTERVAL
-        // (the ring's recording horizon) is stale even for a small jump: pop it; gaps up to that
-        // horizon are late ticks, which widen the budget instead of snapping.
+        // must not inflate the jump with a floor-height change. Distance-only: a stale sample
+        // (idle past STALE_INTERVAL) resets the cadence ring in observe() instead of snapping --
+        // staleness is a timing event, and the position still tweens. The Normal edge carries a
+        // float-boundary epsilon so one-step ticks do not split across it.
         let jump = s.wire_jump_sq.sqrt();
-        let band = if dt_server > EntityPrediction::STALE_INTERVAL
-            || jump > EntityPrediction::SNAP_STRETCH_RATIO * step
-        {
+        let band = if jump > EntityPrediction::SNAP_STRETCH_RATIO * step {
             SnapBand::Pop
-        } else if jump > EntityPrediction::SNAP_NORMAL_RATIO * step {
+        } else if jump
+            > (EntityPrediction::SNAP_NORMAL_RATIO + EntityPrediction::SNAP_NORMAL_EPS_RATIO) * step
+        {
             SnapBand::Stretch
         } else {
             SnapBand::Normal
         };
 
         if band == SnapBand::Pop {
-            // Teleport, zone-in, or a stale sample: snap XZ onto the server position. The tween
-            // below then has nothing left to cover for this update.
+            // Teleport or zone-in: snap XZ onto the server position. The tween below then has
+            // nothing left to cover for this update.
             s.rendered_pos.x = s.server_pos.x;
             s.rendered_pos.z = s.server_pos.z;
         }
@@ -1253,6 +1269,80 @@ pub fn predict_entities_system(
         transform.rotation = Quat::from_rotation_y(-heading_rad);
     }
     probe.maybe_summary(time.elapsed_secs());
+}
+
+// Once-per-entity dedupe for the off-mesh debug line (same pattern as CLIP_WARN_SEEN in
+// ffxi_actor_render): an entity that stays off-mesh would otherwise log every frame.
+static GROUND_OFF_MESH_SEEN: OnceLock<Mutex<std::collections::HashSet<u32>>> = OnceLock::new();
+
+/// Per-frame remote grounding, run after the prediction tween.
+///
+/// LSB grounds mobs to the Detour navmesh, not the render mesh: waypoints come from Detour
+/// (vendor/server/src/map/navmesh.cpp CNavMesh::findPath / findRandomPosition over
+/// DetourNavMeshQuery) and vendor/server/src/map/ai/helpers/pathfind.cpp CPathFind::StepTo walks Y
+/// to that waypoint. Detour poly heights differ from the MZB collision surface by up to a navmesh
+/// cell height, so the POS packet Y is approximate: it picks the level, and this system places
+/// remote ground movers on their own collision mesh. Kuluu inference from the LSB navmesh model,
+/// not an observed retail client behavior.
+///
+/// Runs every frame on the RENDERED (x,z) so the model rides the slope during interpolation; no
+/// history, no distance test, no snap constant: the SnapBand bands own the jump decision already.
+/// Self is unchanged. The 0x45 Info movement byte from the loaded model gates it: Flying keeps
+/// server Y (no ground to stand on); Walking/Large/Sliding/Unset ground. A None answer (off-mesh,
+/// unloaded interior) keeps server Y and logs once per entity at debug.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn ground_remote_movers_system(
+    collision: Res<crate::dat_mzb::MzbCollisionGeometry>,
+    prediction: Res<EntityPrediction>,
+    mut q: Query<(Entity, &WorldEntity, &mut Transform), Without<IsSelf>>,
+    q_children: Query<&Children>,
+    q_render: Query<&crate::ffxi_actor_render::FfxiRenderActor>,
+) {
+    for (entity, world, mut transform) in &mut q {
+        if !matches!(
+            world.kind,
+            EntityKind::Mob | EntityKind::Pc | EntityKind::Pet | EntityKind::Npc
+        ) {
+            continue;
+        }
+        // Only entities routed through the prediction model: mount actors and Other kinds carry no
+        // sample (mounts are pinned to their rider by pin_mount_actors_system).
+        let Some(sample) = prediction.by_id.get(&world.id) else {
+            continue;
+        };
+        // 0x45 Info movement byte from the loaded model (Unset when the DAT carries no CIB, or no
+        // render actor exists yet): Flying keeps server Y; everything else grounds.
+        let flying = q_children.get(entity).is_ok_and(|children| {
+            children.iter().any(|&child| {
+                q_render.get(child).is_ok_and(|actor| {
+                    actor.movement_type() == ffxi_dat::cib::MovementType::Flying
+                })
+            })
+        });
+        if flying {
+            continue;
+        }
+        let xz = Vec2::new(transform.translation.x, transform.translation.z);
+        match collision.ground_nearest(xz, sample.server_pos.y) {
+            Some(ground_y) => transform.translation.y = ground_y,
+            None => {
+                if GROUND_OFF_MESH_SEEN
+                    .get_or_init(Default::default)
+                    .lock()
+                    .ok()
+                    .is_some_and(|mut seen| seen.insert(world.id))
+                {
+                    tracing::debug!(
+                        target: "motion",
+                        id = world.id,
+                        ?xz,
+                        ref_y = sample.server_pos.y,
+                        "remote grounding off-mesh; keeping server Y"
+                    );
+                }
+            }
+        }
+    }
 }
 
 #[derive(Resource, Debug, Clone)]
@@ -1564,15 +1654,59 @@ mod tests {
     }
 
     #[test]
-    fn prediction_band_pop_on_stale_sample() {
-        // A measured interval older than STALE_INTERVAL (five AI ticks) is stale even for a small
-        // jump: Pop it.
-        let mut s = chase_sample(Vec3::new(0.5, 0.0, 0.0), Vec3::ZERO, 3.0, 40);
+    fn prediction_stale_gap_resets_the_ring_and_tweens() {
+        // Idle 10s then a one-step move: staleness is a timing event, not a distance event. The
+        // band stays Normal (distance-only), the position tweens instead of snapping, and the
+        // cadence ring resets to its kLogicUpdateRate seed so the next budget is one tick plus
+        // headroom rather than the stale gap.
+        let mut s = chase_sample(Vec3::new(0.5, 0.0, 0.0), Vec3::ZERO, 10.0, 40);
         advance_prediction(&mut s, 1.0 / 60.0);
-        assert_eq!(s.last_update.unwrap().band, SnapBand::Pop);
         assert_eq!(
-            s.rendered_pos.x, 0.5,
-            "a stale sample pops onto the server position"
+            s.last_update.unwrap().band,
+            SnapBand::Normal,
+            "a one-step move after a long idle is Normal"
+        );
+        // Not snapped: the rendered position is still short of the server target and closes in
+        // over the reset budget.
+        assert!(
+            s.rendered_pos.x > 1e-3,
+            "a stale one-step move chases rather than snapping: {}",
+            s.rendered_pos.x
+        );
+        let ring_max = s.sample_intervals.iter().copied().fold(0.0f32, f32::max);
+        assert!(
+            (ring_max - EntityPrediction::TICK_SECS).abs() < 1e-6,
+            "the stale gap reset the ring to its seed: {ring_max}"
+        );
+        assert!(
+            (s.segment_duration
+                - EntityPrediction::TICK_SECS * EntityPrediction::INTERVAL_HEADROOM)
+                .abs()
+                < 1e-6,
+            "the budget is one tick plus headroom again: {}",
+            s.segment_duration
+        );
+    }
+
+    #[test]
+    fn prediction_normal_band_tolerates_the_float_boundary() {
+        // A one-step tick measured through wire + sqrt noise can land marginally above the exact
+        // step (ratio 1.0 + ~1e-7): without SNAP_NORMAL_EPS_RATIO healthy updates split across
+        // the Normal/Stretch edge. Marginally over the epsilon is still Stretch.
+        let mut s = chase_sample(Vec3::new(1.0004, 0.0, 0.0), Vec3::ZERO, 0.4, 40);
+        advance_prediction(&mut s, 1.0 / 60.0);
+        assert_eq!(
+            s.last_update.unwrap().band,
+            SnapBand::Normal,
+            "ratio 1.0004 is inside the float-boundary epsilon"
+        );
+
+        let mut s = chase_sample(Vec3::new(1.002, 0.0, 0.0), Vec3::ZERO, 0.4, 40);
+        advance_prediction(&mut s, 1.0 / 60.0);
+        assert_eq!(
+            s.last_update.unwrap().band,
+            SnapBand::Stretch,
+            "ratio 1.002 is past the epsilon"
         );
     }
 
@@ -1590,6 +1724,151 @@ mod tests {
         );
         // The XZ jump (1.0) is within one step, so the floor-height change did not force a Pop.
         assert_eq!(s.last_update.unwrap().band, SnapBand::Normal);
+    }
+
+    // --- Per-frame remote grounding on the MZB collision mesh -------------------------------
+
+    /// A minimal app running the prediction tween and the per-frame remote grounding against a
+    /// single slab floor at `floor_y` (x/z in -4..4).
+    fn grounding_app(floor_y: f32) -> App {
+        let mut app = App::new();
+        app.init_resource::<Time>()
+            .init_resource::<EntityPrediction>()
+            .insert_resource(MotionProbe::init())
+            .insert_resource(crate::dat_mzb::MzbCollisionGeometry::from_block(
+                crate::dat_mzb::ground_tests::slab_block(&[(floor_y, Vec3::Y)]),
+            ))
+            .add_systems(
+                Update,
+                (predict_entities_system, ground_remote_movers_system).chain(),
+            );
+        app
+    }
+
+    fn spawn_remote_mob(app: &mut App, id: u32) -> Entity {
+        app.world_mut()
+            .spawn((
+                WorldEntity {
+                    id,
+                    act_index: 1,
+                    kind: EntityKind::Mob,
+                },
+                Transform::default(),
+            ))
+            .id()
+    }
+
+    fn tick_frames(app: &mut App, frames: usize) {
+        for _ in 0..frames {
+            app.world_mut()
+                .resource_mut::<Time>()
+                .advance_by(std::time::Duration::from_secs_f32(1.0 / 60.0));
+            app.update();
+        }
+    }
+
+    #[test]
+    fn grounded_remote_mover_rides_the_collision_mesh() {
+        // The POS packet Y is a Detour waypoint height (1.5 here), not the render surface: the
+        // floor sits at 2.0 and grounding must place the mover on it, every frame.
+        let mut app = grounding_app(2.0);
+        let mob = spawn_remote_mob(&mut app, 900);
+        app.world_mut()
+            .resource_mut::<EntityPrediction>()
+            .observe(900, Vec3::new(0.5, 1.5, 0.0), 0, 40, 40, false);
+        tick_frames(&mut app, 5);
+        let t = app.world().get::<Transform>(mob).unwrap();
+        assert!((t.translation.y - 2.0).abs() < 1e-4, "mesh Y, not the wire Y");
+        assert_ne!(t.translation.y, 1.5);
+        assert!((t.translation.x - 0.5).abs() < 1e-4);
+    }
+
+    #[test]
+    fn grounding_runs_on_the_tweened_intermediate_position() {
+        // A one-update move from x=0 to x=1.5 (a Stretch-band jump for the walk step of 1.0)
+        // tweens over the segment budget; on every mid-tween frame the rendered XZ is between
+        // the confirmed endpoints, and grounding must already hold the mesh Y there, not only at
+        // update time.
+        let mut app = grounding_app(2.0);
+        let mob = spawn_remote_mob(&mut app, 901);
+        app.world_mut()
+            .resource_mut::<EntityPrediction>()
+            .observe(901, Vec3::new(0.0, 1.5, 0.0), 0, 40, 40, false);
+        tick_frames(&mut app, 30); // one AI tick of sample_age before the move
+        app.world_mut()
+            .resource_mut::<EntityPrediction>()
+            .observe(901, Vec3::new(1.5, 1.5, 0.0), 0, 40, 40, false);
+        let mut next = 0;
+        for offset in [2usize, 8, 16] {
+            tick_frames(&mut app, offset - next);
+            next = offset;
+            let t = app.world().get::<Transform>(mob).unwrap();
+            assert!(
+                (0.0..1.5).contains(&t.translation.x),
+                "frame +{offset}: mid-tween, x={}",
+                t.translation.x
+            );
+            assert!(
+                (t.translation.y - 2.0).abs() < 1e-4,
+                "frame +{offset}: grounded on the interpolated XZ"
+            );
+        }
+        tick_frames(&mut app, 60); // run out the segment budget
+        let t = app.world().get::<Transform>(mob).unwrap();
+        assert!(
+            (t.translation.x - 1.5).abs() < 1e-4,
+            "arrived at the confirmed endpoint"
+        );
+        assert!((t.translation.y - 2.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn off_mesh_remote_mover_keeps_server_y() {
+        // No floor in this column (x=100 is far outside the slab footprint): grounding has no
+        // answer, so the wire Y stands and nothing snaps.
+        let mut app = grounding_app(2.0);
+        let mob = spawn_remote_mob(&mut app, 902);
+        app.world_mut()
+            .resource_mut::<EntityPrediction>()
+            .observe(902, Vec3::new(100.0, 1.5, 0.0), 0, 40, 40, false);
+        tick_frames(&mut app, 5);
+        let t = app.world().get::<Transform>(mob).unwrap();
+        assert!((t.translation.y - 1.5).abs() < 1e-6, "server Y kept off-mesh");
+        assert!((t.translation.x - 100.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn flying_remote_mover_keeps_server_y() {
+        // The 0x45 Info movement byte gates grounding: a Flying model has no ground to stand on,
+        // so it keeps the wire Y even inside the slab footprint.
+        let mut app = grounding_app(2.0);
+        let mob = spawn_remote_mob(&mut app, 903);
+        let skeleton = ffxi_dat::skel::Skeleton {
+            id: ffxi_dat::datid::DatId::from_name(b"skel"),
+            joints: Vec::new(),
+            references: Vec::new(),
+            bounding_boxes: Vec::new(),
+        };
+        let child = app
+            .world_mut()
+            .spawn(crate::ffxi_actor_render::render_actor_with_movement_for_test(
+                skeleton,
+                Vec::new(),
+                ffxi_dat::cib::MovementType::Flying,
+            ))
+            .id();
+        app.world_mut().entity(mob).add_child(child);
+        app.world_mut()
+            .resource_mut::<EntityPrediction>()
+            .observe(903, Vec3::new(0.5, 1.5, 0.0), 0, 40, 40, false);
+        tick_frames(&mut app, 5);
+        let t = app.world().get::<Transform>(mob).unwrap();
+        assert!(
+            (t.translation.y - 1.5).abs() < 1e-6,
+            "Flying keeps the wire Y: {}",
+            t.translation.y
+        );
+        assert!((t.translation.x - 0.5).abs() < 1e-4);
     }
 
     #[test]

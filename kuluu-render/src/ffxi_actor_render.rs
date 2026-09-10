@@ -1835,6 +1835,37 @@ pub(crate) fn render_actor_for_test(skeleton: Skeleton, world_pose: Vec<Mat4>) -
     }
 }
 
+// A render actor with no model behind it, carrying an explicit 0x45 Info movement byte, for the
+// remote-grounding test that gates on MovementType and needs nothing else.
+#[cfg(test)]
+pub(crate) fn render_actor_with_movement_for_test(
+    skeleton: Skeleton,
+    world_pose: Vec<Mat4>,
+    movement_type: MovementType,
+) -> FfxiRenderActor {
+    let cib = Cib {
+        movement_type,
+        ..Cib::parse(*b"cib0", &[0u8; ffxi_dat::cib::CIB_LEN]).unwrap()
+    };
+    let loaded = LoadedActor {
+        skeleton: Arc::new(skeleton),
+        skel_meshes: Vec::new(),
+        effect_meshes: Vec::new(),
+        textures: Vec::new(),
+        animations: Arc::default(),
+        battle_clips: Arc::default(),
+        routines: Arc::default(),
+        action_assets: Arc::default(),
+        rejected_clips: Vec::new(),
+        model_dat: String::new(),
+        cib: Some(cib),
+    };
+    FfxiRenderActor {
+        world_pose,
+        ..make_render_actor(&loaded, 0, Vec::new(), 0, 0.0, 1.0)
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn spawn_live_actor(
     commands: &mut Commands,

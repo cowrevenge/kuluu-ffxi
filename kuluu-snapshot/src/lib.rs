@@ -469,10 +469,12 @@ pub mod speed {
     /// calibrated against (vendor/server/src/map/entities/battleentity.cpp CBattleEntity::UpdateSpeed).
     pub const BASE_PACKET_SPEED: u8 = 50;
 
-    /// The movement rate a walk/run clip is authored at: the base packet speed decoded to yalms per
-    /// second. Retail's AnimationSpeed (SpeedBase * 0.1) scales clip playback relative to this, so a
-    /// slower mob walks in slow motion and a faster one in fast forward (research/XiPackets
-    /// world/server/0x000E).
+    /// The movement rate a walk/run clip is assumed to be authored at: the base packet speed
+    /// decoded to yalms per second (5.0). Kuluu inference, not an LSB or retail fact: XiPackets
+    /// gives only AnimationSpeed = SpeedBase * 0.1 as the playback scale (research/XiPackets
+    /// world/server/0x000E), so we assume clips are authored at the unmounted PC's movement rate
+    /// and read that byte as a multiplier against it: a slower mob walks in slow motion, a faster
+    /// one in fast forward.
     pub const AUTHORED_ANIM_RATE: f32 = BASE_PACKET_SPEED as f32 * SPEED_TO_YPS;
 
     /// Yalms per second for a decoded packet speed. `speed_base` is a separate value retail keeps but

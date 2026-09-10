@@ -3563,6 +3563,15 @@ pub struct FrameScratch {
     // own entity hp_pct only updates when CHAR_PC carries UPDATE_HP). A true -> false transition
     // is a Raise of self.
     prev_self_dead: Option<bool>,
+    // This pass's live entity ids and raised set, cleared at the top of each changed-snapshot
+    // pass instead of allocated per frame (the actor_world/mount_attach pattern below).
+    live_ids: std::collections::HashSet<u32>,
+    raised: std::collections::HashSet<u32>,
+    // Routines queued this frame onto entities that had no ActiveSchedulers yet; flushed after
+    // the special-pose loop so same-batch queues merge instead of overwriting. The system sits
+    // at Bevy's 16-parameter limit, so this rides in FrameScratch rather than as a Local.
+    pending_routine_inserts:
+        std::collections::HashMap<Entity, Vec<crate::scheduler_runtime::ActiveScheduler>>,
 }
 
 pub fn tick_live_ffxi_actors(
@@ -3604,6 +3613,7 @@ pub fn tick_live_ffxi_actors(
 ) {
     use ffxi_actor::actor_state::RestKind;
 
+    frame_scratch.pending_routine_inserts.clear();
     let elapsed_frames = time.delta_secs() * FRAME_RATE;
     let self_id = state.snapshot.self_char_id;
 
@@ -3633,17 +3643,17 @@ pub fn tick_live_ffxi_actors(
 
         index.by_id.clear();
         index.id_by_targid.clear();
-        let mut live_ids = std::collections::HashSet::new();
+        frame_scratch.live_ids.clear();
         // World ids whose 0x0E hp_pct just went 0 -> >0 on this snapshot (a Raise): the wire
         // owns death state again, so their Defeated latch is cleared below.
-        let mut raised: std::collections::HashSet<u32> = std::collections::HashSet::new();
+        frame_scratch.raised.clear();
         for e in &state.snapshot.entities {
-            live_ids.insert(e.id);
+            frame_scratch.live_ids.insert(e.id);
             // A Raise is a 0 -> >0 transition of this entity's 0x0E hp_pct on this snapshot.
             let prev_hp = frame_scratch.prev_hp.get(&e.id).copied();
             frame_scratch.prev_hp.insert(e.id, e.hp_pct);
             if matches!(prev_hp, Some(Some(0))) && e.hp_pct.is_some_and(|p| p > 0) {
-                raised.insert(e.id);
+                frame_scratch.raised.insert(e.id);
             }
             let mounted = state.snapshot.mount_of(e).is_some();
             // Advance the special-pose wire state from last frame to this snapshot's
@@ -3745,7 +3755,7 @@ pub fn tick_live_ffxi_actors(
         // entity hp_pct (see self_dead above): a true -> false transition of self-deadness.
         if let Some(sid) = self_id {
             if frame_scratch.prev_self_dead == Some(true) && !self_dead {
-                raised.insert(sid);
+                frame_scratch.raised.insert(sid);
             }
         }
         frame_scratch.prev_self_dead = Some(self_dead);
@@ -3753,9 +3763,9 @@ pub fn tick_live_ffxi_actors(
         // Clear the Defeated latch on raised entities (see DeadFromAction). Commands apply at
         // end of system, so this frame's pose pass still sees the latch for one more frame;
         // from the next frame the wire's hp_pct owns death state again.
-        if !raised.is_empty() {
+        if !frame_scratch.raised.is_empty() {
             for (entity, actor, _, _, latch) in q_actors.iter() {
-                if latch.is_some() && raised.contains(&actor.world_id) {
+                if latch.is_some() && frame_scratch.raised.contains(&actor.world_id) {
                     commands
                         .entity(entity)
                         .remove::<crate::scheduler_runtime::DeadFromAction>();
@@ -3763,9 +3773,15 @@ pub fn tick_live_ffxi_actors(
             }
         }
 
-        // Drop states for entities that despawned so the cache stays bounded.
+        // Drop states for entities that despawned so the cache stays bounded. Field borrows go
+        // through a materialized &mut (the mount_attach_scratch pattern below): split borrows do
+        // not propagate through Bevy's Local deref when one side is captured by a closure.
+        let frame_scratch = &mut *frame_scratch;
+        let live_ids = &frame_scratch.live_ids;
         special_mem.retain(|id, _| live_ids.contains(id));
-        frame_scratch.prev_hp.retain(|id, _| live_ids.contains(id));
+        let mut prev_hp = std::mem::take(&mut frame_scratch.prev_hp);
+        prev_hp.retain(|id, _| live_ids.contains(id));
+        frame_scratch.prev_hp = prev_hp;
     }
 
     // Fire the queued routines on their wire entities: it carries a world-space Transform (the
@@ -3777,7 +3793,7 @@ pub fn tick_live_ffxi_actors(
             continue;
         };
         // Model not loaded yet: the clip still plays from the pose pass; only the dirt and
-        // sound are lost. Acceptable degradation — the load lands within a few frames.
+        // sound are lost. Acceptable degradation - the load lands within a few frames.
         let Some((_, actor, _, _, _)) = q_actors
             .iter()
             .find(|(_, a, _, _, _)| a.world_id == world_id)
@@ -3793,18 +3809,26 @@ pub fn tick_live_ffxi_actors(
         // Insert-or-push like the other dispatchers: a pop-up `init` alongside a still-running
         // dig `ini1` (or vice versa) runs concurrently in retail; each carries the 0x5F that
         // stops the other, so the overlap resolves through StopRoutine. The push path leaves the
-        // first writer's ActionAssets/ActionTarget alone.
-        match q_scheds.get_mut(wire_e) {
-            Ok(mut scheds) => scheds.push(active),
-            Err(_) => {
-                commands
-                    .entity(wire_e)
-                    .insert(crate::scheduler_runtime::ActiveSchedulers::one(active))
-                    .try_insert(actor.action_assets().clone())
-                    .try_insert(crate::scheduler_runtime::ActionTarget(None));
-            }
-        };
+        // first writer's ActionAssets/ActionTarget alone (the keep form - Bevy 0.19's plain
+        // insert/try_insert replace).
+        let fresh = crate::scheduler_runtime::queue_active_scheduler(
+            wire_e,
+            active,
+            &mut q_scheds,
+            &mut frame_scratch.pending_routine_inserts,
+        );
+        if fresh {
+            commands
+                .entity(wire_e)
+                .insert_if_new(actor.action_assets().clone())
+                .insert_if_new(crate::scheduler_runtime::ActionTarget(None));
+        }
     }
+    crate::scheduler_runtime::flush_active_scheduler_inserts(
+        &mut frame_scratch.pending_routine_inserts,
+        &mut q_scheds,
+        &mut commands,
+    );
 
     if special_log_enabled() {
         SPECIAL_LOG_TICK.fetch_add(1, std::sync::atomic::Ordering::Relaxed);

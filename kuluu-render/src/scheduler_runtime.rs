@@ -928,6 +928,7 @@ fn apply_action_dispatch(
     actor_entity: Entity,
     target_entity: Option<Entity>,
     q_scheds: &mut Query<&mut ActiveSchedulers>,
+    pending_inserts: &mut HashMap<Entity, Vec<ActiveScheduler>>,
     commands: &mut Commands,
 ) {
     // A spell DAT's `main` links the caster's own finish routine (0x3C `shbk`), which in turn
@@ -947,17 +948,16 @@ fn apply_action_dispatch(
     });
     let Some(active) = active else { return };
     // A completion effect alongside a running cast (or vice versa) is normal retail behaviour -
-    // push instead of replacing. The first writer's ActionAssets/ActionTarget stay put, matching
-    // the old try_insert semantics when the component was already present.
-    match q_scheds.get_mut(actor_entity) {
-        Ok(mut scheds) => scheds.push(active),
-        Err(_) => {
-            commands
-                .entity(actor_entity)
-                .insert(ActiveSchedulers::one(active))
-                .try_insert(parsed.assets.clone())
-                .try_insert(ActionTarget(target_entity));
-        }
+    // push instead of replacing.
+    let fresh = queue_active_scheduler(actor_entity, active, q_scheds, pending_inserts);
+    if fresh {
+        // First-writer-wins for the entity-level side components: Bevy 0.19's plain insert and
+        // try_insert both replace, so only the keep form (insert_if_new) leaves an earlier event's
+        // value in place when two events hit this fresh entity in one batch.
+        commands
+            .entity(actor_entity)
+            .insert_if_new(parsed.assets.clone())
+            .insert_if_new(ActionTarget(target_entity));
     }
 }
 
@@ -968,6 +968,7 @@ fn apply_emote_dispatch(
     actor_entity: Entity,
     target_entity: Option<Entity>,
     q_scheds: &mut Query<&mut ActiveSchedulers>,
+    pending_inserts: &mut HashMap<Entity, Vec<ActiveScheduler>>,
     commands: &mut Commands,
 ) -> bool {
     let Some(active) = ActiveScheduler::from_main(&parsed.schedulers, routine) else {
@@ -975,15 +976,12 @@ fn apply_emote_dispatch(
     };
     // Same insert-or-push as apply_action_dispatch: an emote mid-cast (or a cast mid-emote)
     // runs alongside the other instead of replacing it.
-    match q_scheds.get_mut(actor_entity) {
-        Ok(mut scheds) => scheds.push(active),
-        Err(_) => {
-            commands
-                .entity(actor_entity)
-                .insert(ActiveSchedulers::one(active))
-                .try_insert(parsed.assets.clone())
-                .try_insert(ActionTarget(target_entity));
-        }
+    let fresh = queue_active_scheduler(actor_entity, active, q_scheds, pending_inserts);
+    if fresh {
+        commands
+            .entity(actor_entity)
+            .insert_if_new(parsed.assets.clone())
+            .insert_if_new(ActionTarget(target_entity));
     };
     true
 }
@@ -1013,6 +1011,7 @@ pub fn poll_action_dat_tasks(
     mut q_actors: Query<&mut crate::ffxi_actor_render::FfxiRenderActor>,
     global: Option<Res<GlobalEffectDir>>,
     mut q_scheds: Query<&mut ActiveSchedulers>,
+    mut pending_inserts: Local<HashMap<Entity, Vec<ActiveScheduler>>>,
     mut commands: Commands,
 ) {
     use bevy::tasks::futures_lite::future;
@@ -1059,6 +1058,7 @@ pub fn poll_action_dat_tasks(
                     actor_entity,
                     target_entity,
                     &mut q_scheds,
+                    &mut pending_inserts,
                     &mut commands,
                 );
             }
@@ -1077,6 +1077,7 @@ pub fn poll_action_dat_tasks(
                     actor_entity,
                     target_entity,
                     &mut q_scheds,
+                    &mut pending_inserts,
                     &mut commands,
                 ) {
                     play_local_emote_clip(&routine, actor_entity, &q_children, &mut q_actors);
@@ -1084,6 +1085,7 @@ pub fn poll_action_dat_tasks(
             }
         }
     }
+    flush_active_scheduler_inserts(&mut pending_inserts, &mut q_scheds, &mut commands);
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -1384,6 +1386,7 @@ pub fn dispatch_action_started(
     dll: Option<Res<ActionMainDll>>,
     mut cache: ResMut<ActionDatCache>,
     mut q_scheds: Query<&mut ActiveSchedulers>,
+    mut pending_inserts: Local<HashMap<Entity, Vec<ActiveScheduler>>>,
     mut commands: Commands,
     mut last_seen: Local<u64>,
 ) {
@@ -1430,6 +1433,7 @@ pub fn dispatch_action_started(
                     actor_entity,
                     target_entity,
                     &mut q_scheds,
+                    &mut pending_inserts,
                     &mut commands,
                 );
             }
@@ -1442,6 +1446,7 @@ pub fn dispatch_action_started(
             ),
         }
     }
+    flush_active_scheduler_inserts(&mut pending_inserts, &mut q_scheds, &mut commands);
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -1485,6 +1490,7 @@ pub fn dispatch_cast_routine_started(
     mut sim: ResMut<crate::particle_sim::ParticleSimulator>,
     mut spell_suffix: ResMut<crate::ffxi_actor_render::SpellSuffixCache>,
     mut q_scheds: Query<&mut ActiveSchedulers>,
+    mut pending_inserts: Local<HashMap<Entity, Vec<ActiveScheduler>>>,
     mut commands: Commands,
     mut last_seen: Local<u64>,
 ) {
@@ -1547,14 +1553,7 @@ pub fn dispatch_cast_routine_started(
         };
         // A cast alongside a running completion effect (or vice versa) runs concurrently in
         // retail; the push path leaves the first writer's ActionTarget alone.
-        match q_scheds.get_mut(actor_entity) {
-            Ok(mut scheds) => scheds.push(active),
-            Err(_) => {
-                commands
-                    .entity(actor_entity)
-                    .insert(ActiveSchedulers::one(active));
-            }
-        }
+        queue_active_scheduler(actor_entity, active, &mut q_scheds, &mut pending_inserts);
         commands
             .entity(actor_entity)
             .try_insert(CastRoutine {
@@ -1565,6 +1564,7 @@ pub fn dispatch_cast_routine_started(
                 target_id.and_then(|id| tracked.by_id.get(&id).copied()),
             ));
     }
+    flush_active_scheduler_inserts(&mut pending_inserts, &mut q_scheds, &mut commands);
 }
 
 // The victim reaction the attacker's routine will hand off at its 0x2B DamageCallback stage.
@@ -1787,16 +1787,8 @@ pub fn dispatch_melee_action_started(
         };
         let armed_by = active.name();
         // A swing alongside a running cast/completion effect runs concurrently in retail; the
-        // push path leaves the first writer's
-        // ActionTarget alone.
-        match q_scheds.get_mut(actor_entity) {
-            Ok(mut scheds) => scheds.push(active),
-            Err(_) => {
-                commands
-                    .entity(actor_entity)
-                    .insert(ActiveSchedulers::one(active));
-            }
-        }
+        // push path leaves the first writer's ActionTarget alone.
+        queue_active_scheduler(actor_entity, active, &mut q_scheds, &mut pending_inserts);
         let victim = target_id.and_then(|id| tracked.by_id.get(&id).copied());
         let mut entity = commands.entity(actor_entity);
         entity.try_insert(ActionTarget(victim));
@@ -1857,7 +1849,7 @@ pub fn dispatch_melee_action_started(
             }
         }
     }
-    flush_pending_routine_inserts(&mut pending_inserts, &mut q_scheds, &mut commands);
+    flush_active_scheduler_inserts(&mut pending_inserts, &mut q_scheds, &mut commands);
 }
 
 // Latch the victim's death path on its render-actor child (see DeadFromAction). No-op when the
@@ -1991,7 +1983,7 @@ pub fn dispatch_damage_callback_stages(
             );
         }
     }
-    flush_pending_routine_inserts(&mut pending_inserts, &mut q_active, &mut commands);
+    flush_active_scheduler_inserts(&mut pending_inserts, &mut q_active, &mut commands);
 }
 
 // research/xim EffectRoutineParser.kt parseSection2 + EffectRoutineInstance.kt createChild newSequences — a 0x09 link
@@ -2042,7 +2034,7 @@ pub fn dispatch_target_routine_stages(
             &mut commands,
         );
     }
-    flush_pending_routine_inserts(&mut pending_inserts, &mut q_active, &mut commands);
+    flush_active_scheduler_inserts(&mut pending_inserts, &mut q_active, &mut commands);
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -2067,37 +2059,54 @@ fn run_routine_on(
     let Some(active) = ActiveScheduler::from_routine(&lookup, routine) else {
         return;
     };
-    // A victim mid-routine gets the reaction pushed alongside it: retail runs both
-    // (rabbit_tester s7d). When the entity has no ActiveSchedulers yet the insert is a deferred
-    // command - a second routine queued on the same
-    // entity in this batch would overwrite it (last insert wins), so buffer it and let the caller
-    // merge at flush time instead (kuluu-df9t: a knockback hit on a fresh victim lost its damage
-    // reaction to the sway insert).
-    match q_active.get_mut(entity) {
-        Ok(mut scheds) => scheds.push(active),
-        Err(_) => pending_inserts.entry(entity).or_default().push(active),
-    }
-    // ActionTarget stays a single entity-level component: first writer wins, stripped when the
-    // last routine finishes. Retail's per-sequence target context (cloneWithOverrideTarget) is a
-    // known simplification - out of scope here.
+    queue_active_scheduler(entity, active, q_active, pending_inserts);
+    // ActionTarget stays a single entity-level component: first writer wins (the keep form,
+    // since Bevy 0.19's plain insert/try_insert replace), stripped when the last routine
+    // finishes. Retail's per-sequence target context (cloneWithOverrideTarget) is a known
+    // simplification - out of scope here.
     commands
         .entity(entity)
-        .try_insert(ActionTarget(flipped_target));
+        .insert_if_new(ActionTarget(flipped_target));
 }
 
-// Apply the inserts buffered by `run_routine_on`'s Err branch (see there for why): re-check for
-// an ActiveSchedulers that appeared since the call and merge into it, otherwise insert every
-// queued routine at once so none is lost to a deferred-command overwrite. Commands apply per
-// system, so within one batch only our own buffered inserts can change the answer between the
-// call and this flush.
-#[cfg(not(target_arch = "wasm32"))]
-fn flush_pending_routine_inserts(
+/// Insert-or-push an ActiveScheduler onto `entity`. Push when the component already exists;
+/// otherwise buffer into `pending_inserts` instead of issuing a deferred insert: two routines
+/// queued on the same fresh entity in one batch would overwrite each other (last insert wins),
+/// which is how kuluu-df9t lost a knockback hit's damage reaction to the sway insert. The caller
+/// must run [`flush_active_scheduler_inserts`] after all of its queueing.
+///
+/// Returns true when `entity` had no ActiveSchedulers yet (the insert was buffered), so sites
+/// that attach entity-level side components can keep first-writer-wins for them.
+pub fn queue_active_scheduler(
+    entity: Entity,
+    active: ActiveScheduler,
+    q_scheds: &mut Query<&mut ActiveSchedulers>,
+    pending_inserts: &mut HashMap<Entity, Vec<ActiveScheduler>>,
+) -> bool {
+    match q_scheds.get_mut(entity) {
+        Ok(mut scheds) => {
+            scheds.push(active);
+            false
+        }
+        Err(_) => {
+            pending_inserts.entry(entity).or_default().push(active);
+            true
+        }
+    }
+}
+
+// Apply the inserts buffered by `queue_active_scheduler` (see there for why): re-check for an
+// ActiveSchedulers that appeared since the call and merge into it, otherwise insert every queued
+// routine at once so none is lost to a deferred-command overwrite. Commands apply per system, so
+// within one batch only our own buffered inserts can change the answer between the call and this
+// flush.
+pub fn flush_active_scheduler_inserts(
     pending: &mut HashMap<Entity, Vec<ActiveScheduler>>,
-    q_active: &mut Query<&mut ActiveSchedulers>,
+    q_scheds: &mut Query<&mut ActiveSchedulers>,
     commands: &mut Commands,
 ) {
     for (entity, entries) in std::mem::take(pending) {
-        match q_active.get_mut(entity) {
+        match q_scheds.get_mut(entity) {
             Ok(mut scheds) => {
                 for entry in entries {
                     scheds.push(entry);
@@ -2217,6 +2226,7 @@ pub fn dispatch_entity_emoted(
     dll: Option<Res<ActionMainDll>>,
     mut cache: ResMut<ActionDatCache>,
     mut q_scheds: Query<&mut ActiveSchedulers>,
+    mut pending_inserts: Local<HashMap<Entity, Vec<ActiveScheduler>>>,
     mut commands: Commands,
     mut last_seen: Local<u64>,
 ) {
@@ -2270,6 +2280,7 @@ pub fn dispatch_entity_emoted(
                             actor_entity,
                             tracked.by_id.get(&target_id).copied(),
                             &mut q_scheds,
+                            &mut pending_inserts,
                             &mut commands,
                         ) {
                             continue;
@@ -2293,6 +2304,7 @@ pub fn dispatch_entity_emoted(
 
         play_local_emote_clip(&routine, actor_entity, &q_children, &mut q_actors);
     }
+    flush_active_scheduler_inserts(&mut pending_inserts, &mut q_scheds, &mut commands);
 }
 
 // NPC casters (lua sendEmote) and PCs whose emote DAT lacks the routine:

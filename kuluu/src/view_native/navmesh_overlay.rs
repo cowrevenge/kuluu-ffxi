@@ -260,7 +260,7 @@ mod tests {
         let mut prediction = app.world_mut().resource_mut::<EntityPrediction>();
         // These synthetic updates carry no wire speed byte; zero-speed-with-move is the case
         // CPathFind::StepTo substitutes its own speed for, so nothing here is invented.
-        prediction.observe(REMOTE_ID, incoming, 0, 0, 0, false);
+        prediction.observe(REMOTE_ID, incoming, 0, 0, 0);
         prediction.by_id.get_mut(&REMOTE_ID).unwrap().rendered_pos = incoming;
         app.update();
         app.world().get::<Transform>(entity).unwrap().translation

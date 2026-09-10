@@ -24,7 +24,8 @@ use kuluu_snapshot::EntityLook;
 use crate::dat_mzb::placement_bevy_transform;
 use crate::scene::TrackedEntities;
 use crate::scheduler_runtime::{
-    ActionAssets, ActiveScheduler, ActiveSchedulers, SchedulerStageEvent, ROUTINE_FPS,
+    flush_active_scheduler_inserts, queue_active_scheduler, ActionAssets, ActiveScheduler,
+    ActiveSchedulers, SchedulerStageEvent, ROUTINE_FPS,
 };
 use crate::snapshot::{effective_zone_file_id, SceneState};
 
@@ -369,6 +370,7 @@ pub fn sync_zone_door_dirs(scene_state: Res<SceneState>, mut doors: ResMut<ZoneD
 pub fn trigger_zone_doors(
     scene_state: Res<SceneState>,
     tracked: Res<TrackedEntities>,
+    mut pending_inserts: Local<std::collections::HashMap<Entity, Vec<ActiveScheduler>>>,
     mut doors: ResMut<ZoneDoors>,
     mut q_npc: Query<&mut ZoneDoorNpc>,
     mut q_scheds: Query<&mut ActiveSchedulers>,
@@ -436,24 +438,20 @@ pub fn trigger_zone_doors(
         };
         // Insert-or-push like the other dispatchers: a door swing alongside another running
         // routine on the same entity runs concurrently; the push path leaves the first writer's
-        // ActionAssets alone.
-        match q_scheds.get_mut(entity) {
-            Ok(mut scheds) => scheds.push(active),
-            Err(_) => {
-                commands
-                    .entity(entity)
-                    .insert(ActiveSchedulers::one(active))
-                    .try_insert(ActionAssets {
-                        seps: dir.seps.clone(),
-                        ..Default::default()
-                    });
-            }
+        // ActionAssets alone (the keep form - Bevy 0.19's plain insert/try_insert replace).
+        let fresh = queue_active_scheduler(entity, active, &mut q_scheds, &mut pending_inserts);
+        if fresh {
+            commands.entity(entity).insert_if_new(ActionAssets {
+                seps: dir.seps.clone(),
+                ..Default::default()
+            });
         };
         info!(
             "zone_doors: {label} runs {}",
             String::from_utf8_lossy(&routine)
         );
     }
+    flush_active_scheduler_inserts(&mut pending_inserts, &mut q_scheds, &mut commands);
 }
 
 /// The pose a routine ends at, per addressed slot — what an on-arrival door

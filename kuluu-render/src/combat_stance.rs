@@ -424,6 +424,14 @@ impl MotionProbe {
     /// Below this dead-reckoned speed the travel direction is noise, not intent.
     const MIN_MEANINGFUL_SPEED_SQ: f32 = 0.01; // (0.1 yps)^2
 
+    /// OnExit(InGame) teardown, mirroring drain_entity_prediction / the entity_motion clear in
+    /// despawn_ingame_entities: a long session's counters and interval history must not carry
+    /// across the game boundary.
+    pub fn drain(&mut self) {
+        self.per_id.clear();
+        self.all_intervals.clear();
+    }
+
     /// Test-only: an always-enabled probe (init() reads KULUU_MOTION_LOG).
     #[cfg(test)]
     pub fn enabled_for_test() -> Self {
@@ -873,16 +881,14 @@ pub struct PredictSample {
 
     pub initialized: bool,
 
-    /// Set by the most recent `advance_prediction` call that consumed a server update; cleared on
-    /// frames without one.
+    /// Set by the most recent `advance_prediction(record_outcome = true)` call that consumed a
+    /// server update; cleared on frames without one. Written only while the MotionProbe is
+    /// enabled (its sole production reader); tests pass record_outcome = true.
     pub last_update: Option<UpdateOutcome>,
 }
 
 impl PredictSample {
-    fn seed(server_pos: Vec3, heading: u8, speed: u8, speed_base: u8, _mounted: bool) -> Self {
-        // The step model paces from the wire speed byte and the measured inter-update cadence,
-        // not mount state (see expected_step_yalms), so `_mounted` is retained only to keep the
-        // observe() call-site contract stable.
+    fn seed(server_pos: Vec3, heading: u8, speed: u8, speed_base: u8) -> Self {
         PredictSample {
             rendered_pos: server_pos,
             server_pos,
@@ -1024,20 +1030,12 @@ impl EntityPrediction {
 
     const SAMPLE_EPSILON_SQ: f32 = 1e-4;
 
-    pub fn observe(
-        &mut self,
-        id: u32,
-        server_pos: Vec3,
-        heading: u8,
-        speed: u8,
-        speed_base: u8,
-        mounted: bool,
-    ) {
+    pub fn observe(&mut self, id: u32, server_pos: Vec3, heading: u8, speed: u8, speed_base: u8) {
         match self.by_id.get_mut(&id) {
             None => {
                 self.by_id.insert(
                     id,
-                    PredictSample::seed(server_pos, heading, speed, speed_base, mounted),
+                    PredictSample::seed(server_pos, heading, speed, speed_base),
                 );
             }
             Some(e) => {
@@ -1129,7 +1127,9 @@ pub fn expected_step_yalms(speed: u8, speed_base: u8) -> f32 {
     effective_speed / divisor
 }
 
-fn advance_prediction(s: &mut PredictSample, dt: f32) -> (Vec3, f32) {
+/// `record_outcome` gates the write of [`PredictSample::last_update`]: it exists for the
+/// MotionProbe, so a disabled probe pays nothing per entity per frame.
+fn advance_prediction(s: &mut PredictSample, dt: f32, record_outcome: bool) -> (Vec3, f32) {
     use std::f32::consts::{PI, TAU};
 
     // sample_age accumulates from the previous update's observe() reset; at the next moved
@@ -1222,7 +1222,7 @@ fn advance_prediction(s: &mut PredictSample, dt: f32) -> (Vec3, f32) {
     let alpha_h = 1.0 - (-dt / EntityPrediction::HEADING_TAU).exp();
     s.rendered_heading_rad += dh * alpha_h;
 
-    s.last_update = outcome;
+    s.last_update = if record_outcome { outcome } else { None };
 
     (s.rendered_pos, s.rendered_heading_rad)
 }
@@ -1247,7 +1247,7 @@ pub fn predict_entities_system(
         if !sample.initialized {
             continue;
         }
-        let (pos, heading_rad) = advance_prediction(sample, dt);
+        let (pos, heading_rad) = advance_prediction(sample, dt, probe.enabled);
         if probe.enabled {
             if let Some(u) = sample.last_update {
                 probe.record_update(world.id, world.kind, u);
@@ -1566,7 +1566,7 @@ mod tests {
     /// divisor applies). Mirrors what observe() leaves behind after consuming a moved update:
     /// last_interval holds the measured gap, sample_age is back to zero.
     fn chase_sample(server: Vec3, rendered: Vec3, age: f32, speed_byte: u8) -> PredictSample {
-        let mut s = PredictSample::seed(rendered, 0, speed_byte, speed_byte, false);
+        let mut s = PredictSample::seed(rendered, 0, speed_byte, speed_byte);
         // The post-move state observe() leaves behind after a real position change: the arrival
         // segment is running (clock already zeroed by seed), so is_chasing can hold on target.
         s.segment_started = true;
@@ -1590,7 +1590,7 @@ mod tests {
         speed_byte: u8,
         base_byte: u8,
     ) -> PredictSample {
-        let mut s = PredictSample::seed(rendered, 0, speed_byte, base_byte, false);
+        let mut s = PredictSample::seed(rendered, 0, speed_byte, base_byte);
         // Same post-move state as chase_sample (see there).
         s.segment_started = true;
         let dxw = server.x - rendered.x;
@@ -1623,7 +1623,7 @@ mod tests {
     fn prediction_band_normal_within_one_step() {
         // jump (1.0) == step (40/40): within one step -> Normal, no snap; the chase runs on.
         let mut s = chase_sample(Vec3::new(1.0, 0.0, 0.0), Vec3::ZERO, 0.4, 40);
-        advance_prediction(&mut s, 1.0 / 60.0);
+        advance_prediction(&mut s, 1.0 / 60.0, true);
         assert_eq!(s.last_update.unwrap().band, SnapBand::Normal);
         // Not snapped: the rendered position is still short of the server target.
         assert!(
@@ -1637,7 +1637,7 @@ mod tests {
     fn prediction_band_stretch_between_one_and_two_steps() {
         // jump (1.5) is between one step (1.0) and two steps (2.0): Stretch, still no snap.
         let mut s = chase_sample(Vec3::new(1.5, 0.0, 0.0), Vec3::ZERO, 0.4, 40);
-        advance_prediction(&mut s, 1.0 / 60.0);
+        advance_prediction(&mut s, 1.0 / 60.0, true);
         assert_eq!(s.last_update.unwrap().band, SnapBand::Stretch);
         assert!(
             (s.rendered_pos.x - 1.5).abs() > 1e-3,
@@ -1650,7 +1650,7 @@ mod tests {
     fn prediction_band_pop_beyond_two_steps_snaps_xz() {
         // jump (3.0) exceeds two steps (2.0): Pop, XZ snaps onto the server position.
         let mut s = chase_sample(Vec3::new(3.0, 0.0, 0.0), Vec3::ZERO, 0.4, 40);
-        let (pos, _) = advance_prediction(&mut s, 1.0 / 60.0);
+        let (pos, _) = advance_prediction(&mut s, 1.0 / 60.0, true);
         assert_eq!(s.last_update.unwrap().band, SnapBand::Pop);
         assert_eq!(pos.x, 3.0, "a Pop band snaps XZ onto the server position");
     }
@@ -1662,7 +1662,7 @@ mod tests {
         // cadence ring resets to its kLogicUpdateRate seed so the next budget is one tick plus
         // headroom rather than the stale gap.
         let mut s = chase_sample(Vec3::new(0.5, 0.0, 0.0), Vec3::ZERO, 10.0, 40);
-        advance_prediction(&mut s, 1.0 / 60.0);
+        advance_prediction(&mut s, 1.0 / 60.0, true);
         assert_eq!(
             s.last_update.unwrap().band,
             SnapBand::Normal,
@@ -1696,7 +1696,7 @@ mod tests {
         // step (ratio 1.0 + ~1e-7): without SNAP_NORMAL_EPS_RATIO healthy updates split across
         // the Normal/Stretch edge. Marginally over the epsilon is still Stretch.
         let mut s = chase_sample(Vec3::new(1.0004, 0.0, 0.0), Vec3::ZERO, 0.4, 40);
-        advance_prediction(&mut s, 1.0 / 60.0);
+        advance_prediction(&mut s, 1.0 / 60.0, true);
         assert_eq!(
             s.last_update.unwrap().band,
             SnapBand::Normal,
@@ -1704,7 +1704,7 @@ mod tests {
         );
 
         let mut s = chase_sample(Vec3::new(1.002, 0.0, 0.0), Vec3::ZERO, 0.4, 40);
-        advance_prediction(&mut s, 1.0 / 60.0);
+        advance_prediction(&mut s, 1.0 / 60.0, true);
         assert_eq!(
             s.last_update.unwrap().band,
             SnapBand::Stretch,
@@ -1719,7 +1719,7 @@ mod tests {
         // snaps it onto target.y on arrival): it lands on server.y in one update with no exp
         // smoothing. A floor-height change must not inflate the XZ jump into a Pop either.
         let mut s = chase_sample(Vec3::new(1.0, 5.0, 0.0), Vec3::new(0.0, 0.0, 0.0), 0.4, 40);
-        advance_prediction(&mut s, 1.0 / 60.0);
+        advance_prediction(&mut s, 1.0 / 60.0, true);
         assert_eq!(
             s.rendered_pos.y, 5.0,
             "Y is assigned directly from the server"
@@ -1781,7 +1781,6 @@ mod tests {
             0,
             40,
             40,
-            false,
         );
         tick_frames(&mut app, 5);
         let t = app.world().get::<Transform>(mob).unwrap();
@@ -1807,7 +1806,6 @@ mod tests {
             0,
             40,
             40,
-            false,
         );
         tick_frames(&mut app, 30); // one AI tick of sample_age before the move
         app.world_mut().resource_mut::<EntityPrediction>().observe(
@@ -1816,7 +1814,6 @@ mod tests {
             0,
             40,
             40,
-            false,
         );
         let mut next = 0;
         for offset in [2usize, 8, 16] {
@@ -1854,7 +1851,6 @@ mod tests {
             0,
             40,
             40,
-            false,
         );
         tick_frames(&mut app, 5);
         let t = app.world().get::<Transform>(mob).unwrap();
@@ -1896,7 +1892,6 @@ mod tests {
             0,
             40,
             40,
-            false,
         );
         tick_frames(&mut app, 5);
         let t = app.world().get::<Transform>(mob).unwrap();
@@ -1914,12 +1909,12 @@ mod tests {
         // the ring, the segment budget is max(ring) * INTERVAL_HEADROOM, and the tween closes the
         // gap at jump/budget per frame -- paced to the tick, not a flat yps constant.
         let mut p = EntityPrediction::default();
-        p.observe(1, Vec3::ZERO, 0, 40, 40, false);
+        p.observe(1, Vec3::ZERO, 0, 40, 40);
         for _ in 0..24 {
             // 24 frames at 60 fps: one AI tick of sample_age
-            advance_prediction(p.by_id.get_mut(&1).unwrap(), 1.0 / 60.0);
+            advance_prediction(p.by_id.get_mut(&1).unwrap(), 1.0 / 60.0, true);
         }
-        p.observe(1, Vec3::new(1.5, 0.0, 0.0), 0, 40, 40, false);
+        p.observe(1, Vec3::new(1.5, 0.0, 0.0), 0, 40, 40);
         let s = p.by_id.get_mut(&1).unwrap();
         assert!(s.sample_dirty, "the moved update is pending consumption");
         // The measured interval is in the ring and sets the budget with headroom on top.
@@ -1935,7 +1930,7 @@ mod tests {
         );
         // One frame of the linear close-in shrinks the gap by jump/budget.
         let dt = 1.0 / 60.0;
-        advance_prediction(s, dt);
+        advance_prediction(s, dt, true);
         assert_eq!(
             s.last_update.unwrap().band,
             SnapBand::Stretch,
@@ -1956,7 +1951,7 @@ mod tests {
         // step. The pace is set by the arrival segment; the divisor choice shows up in the band:
         // the same 1.7 yalms jump stretches the walk step but exceeds two run steps.
         let mut walker = chase_sample(Vec3::new(1.7, 0.0, 0.0), Vec3::ZERO, 0.4, 40);
-        advance_prediction(&mut walker, 1.0 / 60.0);
+        advance_prediction(&mut walker, 1.0 / 60.0, true);
         assert_eq!(
             walker.last_update.unwrap().band,
             SnapBand::Stretch,
@@ -1964,7 +1959,7 @@ mod tests {
         );
 
         let mut runner = chase_sample_gait(Vec3::new(1.7, 0.0, 0.0), Vec3::ZERO, 0.4, 40, 39);
-        advance_prediction(&mut runner, 1.0 / 60.0);
+        advance_prediction(&mut runner, 1.0 / 60.0, true);
         let run_step = expected_step_yalms(40, 39); // 40/50 = 0.8
         assert!((run_step - 0.8).abs() < 1e-6);
         assert_eq!(
@@ -1980,7 +1975,7 @@ mod tests {
         // hold on every single frame and land exactly on target.
         let mut s = chase_sample(Vec3::new(1.5, 0.0, 0.0), Vec3::ZERO, 0.4, 40);
         for _ in 0..600 {
-            advance_prediction(&mut s, 1.0 / 60.0);
+            advance_prediction(&mut s, 1.0 / 60.0, true);
             assert!(
                 s.rendered_pos.x <= 1.5 + 1e-6,
                 "chase must not run past the target: {}",
@@ -1997,7 +1992,7 @@ mod tests {
             if !s.is_chasing() {
                 break;
             }
-            advance_prediction(&mut s, dt);
+            advance_prediction(&mut s, dt, true);
         }
         assert!(
             !s.is_chasing(),
@@ -2010,7 +2005,7 @@ mod tests {
         );
         // Idle holds: no slide back or forward for a second of frames.
         for _ in 0..60 {
-            advance_prediction(&mut s, dt);
+            advance_prediction(&mut s, dt, true);
         }
         assert!(!s.is_chasing());
         assert!(
@@ -2026,10 +2021,10 @@ mod tests {
         // the last target at the segment's constant rate (jump/budget) instead of coasting on a
         // velocity, landing exactly when the budget lapses and holding there.
         let mut s = chase_sample(Vec3::new(1.5, 0.0, 0.0), Vec3::ZERO, 0.4, 40);
-        advance_prediction(&mut s, 1.0 / 60.0); // consumes the dirty update
+        advance_prediction(&mut s, 1.0 / 60.0, true); // consumes the dirty update
         let dt = 1.0 / 60.0;
         for _ in 0..14 {
-            advance_prediction(&mut s, dt);
+            advance_prediction(&mut s, dt, true);
         }
         assert_eq!(s.idle_frames, 14, "frames without an update count");
         // Fifteen advances (the consuming one plus these fourteen) is half the seeded budget
@@ -2041,7 +2036,7 @@ mod tests {
             s.rendered_pos.x
         );
         for _ in 0..45 {
-            advance_prediction(&mut s, dt);
+            advance_prediction(&mut s, dt, true);
         }
         assert_eq!(s.idle_frames, 59);
         assert!(
@@ -2059,7 +2054,7 @@ mod tests {
         // budget, so the entity sits on target inside its own segment.
         let mut s = chase_sample(Vec3::new(0.02, 0.0, 0.0), Vec3::ZERO, 0.4, 40);
         let dt = 1.0 / 60.0;
-        advance_prediction(&mut s, dt); // consumes the update; the segment starts here
+        advance_prediction(&mut s, dt, true); // consumes the update; the segment starts here
         assert!(
             s.segment_elapsed < s.segment_duration,
             "the segment extends past this frame"
@@ -2068,7 +2063,7 @@ mod tests {
         // segment: that is exactly when a late packet would otherwise have dropped the gait.
         let mut held = false;
         for _ in 0..240 {
-            advance_prediction(&mut s, dt);
+            advance_prediction(&mut s, dt, true);
             let on_target = (s.rendered_pos.x - 0.02).abs() < 1e-3;
             if on_target && s.segment_elapsed < s.segment_duration {
                 held = true;
@@ -2080,7 +2075,7 @@ mod tests {
         assert!(s.is_chasing(), "the moving flag holds across a late packet");
         // Past the budget with no new update, it finally reports idle.
         for _ in 0..240 {
-            advance_prediction(&mut s, dt);
+            advance_prediction(&mut s, dt, true);
             if !s.is_chasing() {
                 break;
             }
@@ -2092,7 +2087,7 @@ mod tests {
     fn prediction_heading_eases_toward_the_target() {
         // A heading change on an update must ease in over frames (HEADING_TAU), not snap: the
         // first frame moves partway toward the target and the rest converges on it.
-        let mut s = PredictSample::seed(Vec3::ZERO, 0, 40, 40, false);
+        let mut s = PredictSample::seed(Vec3::ZERO, 0, 40, 40);
         let start = s.rendered_heading_rad;
         s.target_heading = 16; // a quarter turn from the seeded heading
         let target = heading_to_rad(16);
@@ -2107,7 +2102,7 @@ mod tests {
             }
             d.abs()
         };
-        advance_prediction(&mut s, 1.0 / 60.0);
+        advance_prediction(&mut s, 1.0 / 60.0, true);
         assert_ne!(
             s.rendered_heading_rad, target,
             "the first frame must not snap the heading"
@@ -2117,7 +2112,7 @@ mod tests {
             "heading moves toward the target"
         );
         for _ in 0..600 {
-            advance_prediction(&mut s, 1.0 / 60.0);
+            advance_prediction(&mut s, 1.0 / 60.0, true);
         }
         assert!(
             dist(s.rendered_heading_rad) < 1e-3,
@@ -2128,9 +2123,9 @@ mod tests {
     #[test]
     fn prediction_static_actor_does_not_drift() {
         let anchor = Vec3::new(3.0, 1.0, 2.0);
-        let mut s = PredictSample::seed(anchor, 64, 0, 0, false);
+        let mut s = PredictSample::seed(anchor, 64, 0, 0);
         for _ in 0..60 {
-            advance_prediction(&mut s, 1.0 / 30.0);
+            advance_prediction(&mut s, 1.0 / 30.0, true);
         }
         assert!(
             (s.rendered_pos - anchor).length() < 0.05,
@@ -2142,7 +2137,7 @@ mod tests {
     #[test]
     fn observe_seeds_then_flags_only_on_real_move() {
         let mut p = EntityPrediction::default();
-        p.observe(7, Vec3::new(1.0, 0.0, 0.0), 10, 25, 40, false);
+        p.observe(7, Vec3::new(1.0, 0.0, 0.0), 10, 25, 40);
         let s = p.by_id[&7];
         assert!(
             s.initialized && !s.sample_dirty,
@@ -2153,13 +2148,13 @@ mod tests {
         assert_eq!(s.packet_speed_base, 40);
         assert!(!s.is_chasing(), "a fresh sample is already on target");
 
-        p.observe(7, Vec3::new(1.0, 0.0, 0.0), 10, 25, 40, false);
+        p.observe(7, Vec3::new(1.0, 0.0, 0.0), 10, 25, 40);
         assert!(
             !p.by_id[&7].sample_dirty,
             "unchanged position must not re-ingest"
         );
 
-        p.observe(7, Vec3::new(2.0, 0.0, 0.0), 20, 40, 50, false);
+        p.observe(7, Vec3::new(2.0, 0.0, 0.0), 20, 40, 50);
         assert!(p.by_id[&7].sample_dirty, "moved position raises dirty");
         assert_eq!(p.by_id[&7].target_heading, 20);
         assert_eq!(p.by_id[&7].packet_speed, 40, "speed byte tracks the update");
@@ -2172,7 +2167,7 @@ mod tests {
         // measured inter-update cadence, so observe() leaves the segment budget at its seeded value
         // regardless of mount.
         let seeded_budget = EntityPrediction::TICK_SECS * EntityPrediction::INTERVAL_HEADROOM;
-        p.observe(7, Vec3::new(2.0, 0.0, 0.0), 20, 40, 50, true);
+        p.observe(7, Vec3::new(2.0, 0.0, 0.0), 20, 40, 50);
         assert!(
             (p.by_id[&7].segment_duration - seeded_budget).abs() < 1e-6,
             "observe does not re-budget the segment: {} vs seeded {}",
@@ -2222,7 +2217,6 @@ mod tests {
             0,
             SPEED_BYTE,
             BASE_BYTE,
-            false,
         );
         let mut packet = 0;
         let mut confirmed = 0.0;
@@ -2238,7 +2232,6 @@ mod tests {
                     0,
                     SPEED_BYTE,
                     BASE_BYTE,
-                    false,
                 );
             }
             app.world_mut()
@@ -2269,15 +2262,15 @@ mod tests {
         // Walk bytes whose /40 step (2.0 yalms) covers the trace's per-update jump (0.72), so no
         // update reads as a teleport.
         let mut prediction = EntityPrediction::default();
-        prediction.observe(7, Vec3::ZERO, 0, 80, 80, false);
+        prediction.observe(7, Vec3::ZERO, 0, 80, 80);
         let mut elapsed = 0.0;
         for frames in [12, 9, 15, 24, 6, 18] {
             let target = Vec3::X * elapsed * RUN_SPEED;
-            prediction.observe(7, target, 0, 80, 80, false);
+            prediction.observe(7, target, 0, 80, 80);
             let sample = prediction.by_id.get_mut(&7).unwrap();
             let mut previous = sample.rendered_pos.x;
             for _ in 0..frames {
-                let (position, _) = advance_prediction(sample, FRAME_SECS);
+                let (position, _) = advance_prediction(sample, FRAME_SECS, true);
                 assert!(position.x >= previous && position.x <= target.x);
                 previous = position.x;
             }
@@ -2298,15 +2291,15 @@ mod tests {
             "the worm substitute step is 20/40"
         );
         let mut p = EntityPrediction::default();
-        p.observe(9, Vec3::ZERO, 0, 0, 0, false);
+        p.observe(9, Vec3::ZERO, 0, 0, 0);
         for hop in 1..=6 {
             // One AI tick of sample_age between updates: the measured interval lands in the ring.
             for _ in 0..24 {
-                advance_prediction(p.by_id.get_mut(&9).unwrap(), 1.0 / 60.0);
+                advance_prediction(p.by_id.get_mut(&9).unwrap(), 1.0 / 60.0, true);
             }
-            p.observe(9, Vec3::new(hop as f32 * 0.5, 0.0, 0.0), 0, 0, 0, false);
+            p.observe(9, Vec3::new(hop as f32 * 0.5, 0.0, 0.0), 0, 0, 0);
             let s = p.by_id.get_mut(&9).unwrap();
-            advance_prediction(s, 1.0 / 60.0); // consumes the update
+            advance_prediction(s, 1.0 / 60.0, true); // consumes the update
             let u = s.last_update.unwrap();
             assert_eq!(
                 u.band,
@@ -2325,7 +2318,7 @@ mod tests {
         // consume-advance between observes), i.e. ~31.25 frames; 40 covers it with margin.
         let s = p.by_id.get_mut(&9).unwrap();
         for _ in 0..39 {
-            advance_prediction(s, 1.0 / 60.0);
+            advance_prediction(s, 1.0 / 60.0, true);
         }
         assert_eq!(
             s.rendered_pos.x, 3.0,
@@ -2340,15 +2333,15 @@ mod tests {
         // position change must not start a segment, band anything, or drift the rendered pose.
         let anchor = Vec3::new(12.0, -4.0, 7.5);
         let mut p = EntityPrediction::default();
-        p.observe(9, anchor, 0, 0, 0, false);
+        p.observe(9, anchor, 0, 0, 0);
         for _ in 0..600 {
-            advance_prediction(p.by_id.get_mut(&9).unwrap(), 1.0 / 60.0);
+            advance_prediction(p.by_id.get_mut(&9).unwrap(), 1.0 / 60.0, true);
         }
         // Re-sent identical positions (a server re-broadcasting an unchanged pose) must not
         // churn either: observe() gates on a real move.
         for _ in 0..5 {
-            p.observe(9, anchor, 0, 0, 0, false);
-            advance_prediction(p.by_id.get_mut(&9).unwrap(), 1.0 / 60.0);
+            p.observe(9, anchor, 0, 0, 0);
+            advance_prediction(p.by_id.get_mut(&9).unwrap(), 1.0 / 60.0, true);
         }
         let s = &p.by_id[&9];
         assert!(!s.is_chasing(), "an idle worm has no segment to hold");
@@ -2370,7 +2363,7 @@ mod tests {
         const SPEED_BYTE: u8 = 120;
         const BASE_BYTE: u8 = 48; // run gait, /50 step = 2.4 = the trace's per-update jump
         let mut p = EntityPrediction::default();
-        p.observe(7, Vec3::ZERO, 0, SPEED_BYTE, BASE_BYTE, false);
+        p.observe(7, Vec3::ZERO, 0, SPEED_BYTE, BASE_BYTE);
         // One gap is 72 frames = three ticks; the rest are one tick apart.
         let arrivals: [usize; 6] = [24, 48, 120, 144, 168, 192];
         let mut arrived = 0;
@@ -2381,10 +2374,10 @@ mod tests {
             if arrived < arrivals.len() && arrivals[arrived] == frame {
                 arrived += 1;
                 confirmed += PACKET_STEP;
-                p.observe(7, Vec3::X * confirmed, 0, SPEED_BYTE, BASE_BYTE, false);
+                p.observe(7, Vec3::X * confirmed, 0, SPEED_BYTE, BASE_BYTE);
             }
             let s = p.by_id.get_mut(&7).unwrap();
-            advance_prediction(s, FRAME_SECS);
+            advance_prediction(s, FRAME_SECS, true);
             if let Some(u) = s.last_update {
                 last_update = Some(u);
                 assert_eq!(

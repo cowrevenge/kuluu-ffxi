@@ -427,7 +427,6 @@ pub fn sync_entities_system(
                 wire.heading,
                 wire.speed,
                 wire.speed_base,
-                wire.mount.is_some(),
             );
         }
 

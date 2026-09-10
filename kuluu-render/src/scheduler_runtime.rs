@@ -11,7 +11,7 @@ use ffxi_dat::sep::Sep;
 // research/xim util/Fps.kt — `internalFps = 60.0` is the clock every effect routine and
 // particle generator is authored against (poc/MainTool.kt internalLoop feeds the raw elapsed frames to
 // EffectManager). Only the skeleton domain is halved: poc/ActorManager.kt updateAll "In game,
-// skeletal animations are only updated every other frame" — see SKELETON_FRAME_DIVISOR. DAT stage
+// skeletal animations are only updated every other frame", see SKELETON_FRAME_DIVISOR. DAT stage
 // durations count whole frames of this clock; DAT transition fields (CompletionMotion's HalfFrames)
 // count half-frames, so a stored V plays as V/2 whole frames at ROUTINE_FPS.
 pub const ROUTINE_FPS: f32 = 60.0;
@@ -560,7 +560,7 @@ fn flatten_routine(
     for t in &s.stages {
         if let Some(g) = t.stage.random_group {
             let i = index_in_group.entry(g).or_insert(0);
-            let is_pick = chosen.get(&g) == Some(i);
+            let is_pick = chosen.get(&g).is_some_and(|&pick| pick == *i);
             *i += 1;
             if !is_pick {
                 continue;

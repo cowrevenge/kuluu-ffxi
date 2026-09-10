@@ -502,7 +502,7 @@ fn s1_spawn_settles_on_idle() {
 
 fn moving_sample(speed: f32) -> MotionSample {
     // Only `moving` drives the pose pass in this rig (track_entity_motion_system is not
-    // registered); the speed value no longer feeds gait selection.
+    // registered); gait selection reads speed > speed_base, not this value.
     MotionSample {
         speed,
         moving: true,

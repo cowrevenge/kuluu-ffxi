@@ -97,7 +97,7 @@ pub struct SpecialPoseStep {
 ///   * animationsub changing while the actor is visible plays table[sub] on that model;
 ///   * a hidden->visible transition runs 'init' (the DAT's load routine).
 ///     A sub change to zero settles back to locomotion. While hidden nothing triggers: retail has no
-///     live actor to run it on, and the resurface replays 'init' instead of re-firing the old special.
+///     live actor to run it on; the resurface replays 'init'.
 ///
 /// The server (vendor/server/src/map/ai/controllers/mob_controller.cpp) drives the worm cycle:
 /// dig sets `animationsub = 1` while still visible, then flips `status -> INVISIBLE` ~3s later;

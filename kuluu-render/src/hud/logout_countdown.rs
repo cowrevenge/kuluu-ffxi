@@ -231,7 +231,7 @@ fn step_anchor(
         // Value-changed guard: state.rs level-holds the last tick between the
         // 5s server ticks, so a value that was already processed is not a new
         // tick. This must compare against last_seen_tick, NOT server_seconds:
-        // a within-tolerance tick keeps the OLD anchor, so for the next 5s the
+        // a within-tolerance tick keeps the current anchor, so for the next 5s the
         // held value differs from server_seconds and comparing them would run
         // the resync math every frame, re-anchoring once the implied remaining
         // drifts RESYNC_TOLERANCE_SECS past the held value (the oscillation).
@@ -479,8 +479,7 @@ mod tests {
             shutdown: false,
         };
 
-        // 10s after the request with no tick: still hidden (the old code would
-        // have shown "Logout in 20s" here).
+        // 10s after the request with no tick: still hidden.
         assert_eq!(compute_display(10.0, None, pending), DisplayMode::Hidden);
 
         // The first tick (para=30, leavegame.lua onEffectGain) starts it:

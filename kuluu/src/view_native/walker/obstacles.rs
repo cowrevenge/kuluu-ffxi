@@ -10,9 +10,8 @@
 //! displacement means open or mid-swing and the leaf drops out of the set.
 //!
 //! Mobs: horizontal circles in xz from the model AABB's wider ground-plane
-//! half-extent, with the old body-block rules: dead entities (wire 0x0E hp 0)
-//! never block, `EntityKind::Other` never blocks, undrawn actors never block,
-//! self is never in the set.
+//! half-extent. Dead entities (wire 0x0E hp 0) never block, `EntityKind::Other`
+//! never blocks, undrawn actors never block, self is never in the set.
 
 use std::collections::HashSet;
 
@@ -212,10 +211,10 @@ pub fn rebuild_obstacles_system(
         doors.push(DoorObstacle { tris, min, max });
     }
 
-    // Mobs: the old body-block rules (old `mob_body_blocks`), in order. Dead
-    // entities drop out on the tick they die, no grace period: the wire 0x0E
-    // hp_pct is the server's HP truth (Entity::is_dead == Some(0)), so a
-    // corpse never enters the set and the contact budget cannot latch onto it.
+    // Mobs: body-block rules, in order. Dead entities drop out on the tick
+    // they die, no grace period: the wire 0x0E hp_pct is the server's HP truth
+    // (Entity::is_dead == Some(0)), so a corpse never enters the set and the
+    // contact budget cannot latch onto it.
     let mut mobs = Vec::new();
     dead_ids.clear();
     for e in &scene.snapshot.entities {
@@ -228,7 +227,7 @@ pub fn rebuild_obstacles_system(
         if dead_ids.contains(&we.id) {
             continue;
         }
-        // 2. EntityKind::Other — the HUD's "[obj]": door objects, "???" points,
+        // 2. EntityKind::Other, the HUD's "[obj]": door objects, "???" points,
         //    event triggers. These NEVER body-block, whatever mesh they carry.
         if matches!(we.kind, kuluu_snapshot::EntityKind::Other) {
             continue;
@@ -283,7 +282,7 @@ mod tests {
     }
 
     /// A drawn mob root (WorldEntity + block radius) with one visible mesh
-    /// child, so it passes the old body-block rules up to the dead check.
+    /// child, so it passes the body-block rules up to the dead check.
     fn spawn_drawn_mob(world: &mut World, id: u32, xz: Vec2) {
         world
             .spawn((

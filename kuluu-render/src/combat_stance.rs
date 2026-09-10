@@ -1059,8 +1059,8 @@ impl EntityPrediction {
                         e.segment_duration = e.sample_intervals.iter().copied().fold(0.0, f32::max)
                             * Self::INTERVAL_HEADROOM;
                     } else if e.sample_age > Self::STALE_INTERVAL {
-                        // A stale gap (idle/resume): the measured cadence is no longer
-                        // trustworthy, so reset the ring to its kLogicUpdateRate seed and let the
+                        // A stale gap (idle/resume): the measured cadence does not describe the
+                        // next segment, so reset the ring to its kLogicUpdateRate seed and let the
                         // next segment budget be one tick plus headroom. The position still tweens:
                         // staleness is a timing event, not a distance event (the band is
                         // distance-only).
@@ -1160,7 +1160,7 @@ fn advance_prediction(s: &mut PredictSample, dt: f32, record_outcome: bool) -> (
         // stores it), never where we are rendering -- render lag is not a teleport. step is what
         // StepTo advanced this tick (vendor/server/src/map/ai/helpers/pathfind.cpp CPathFind::StepTo).
         // The bands are a ratio to that step, never a flat distance, so a fast mob's legitimate
-        // per-tick move no longer reads as a teleport. XZ only: Y is assigned directly below and
+        // per-tick move stays in Normal. XZ only: Y is assigned directly below and
         // must not inflate the jump with a floor-height change. Distance-only: a stale sample
         // (idle past STALE_INTERVAL) resets the cadence ring in observe() instead of snapping --
         // staleness is a timing event, and the position still tweens. The Normal edge carries a
@@ -2342,7 +2342,7 @@ mod tests {
         let dist = |h: f32| {
             let mut d = (target - h).rem_euclid(std::f32::consts::TAU);
             if d > std::f32::consts::PI {
-                d -= TAU;
+                d -= std::f32::consts::TAU;
             }
             d.abs()
         };
@@ -2375,7 +2375,9 @@ mod tests {
         // And it converges on the travel direction: run out the HEADING_TAU easing.
         tick_frames(&mut app, 240);
         let settled = *app.world().get::<Transform>(mob).unwrap();
-        let yaw = settled.rotation.to_euler(Axis::Y).y;
+        // The rotation is set every frame via from_rotation_y(-heading), so it is a pure Y
+        // rotation and the angle comes straight off the quaternion components.
+        let yaw = 2.0 * settled.rotation.y.atan2(settled.rotation.w);
         assert!(
             dist(-yaw) < 1e-3,
             "the actor ends facing its travel direction (rotation is from_rotation_y(-heading))"

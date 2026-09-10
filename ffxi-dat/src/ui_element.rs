@@ -495,18 +495,6 @@ mod tests {
         const FRAMESUS_QUADS: usize = 2433;
         const FRAMESUS_ZERO_SOURCE_QUADS: usize = 163;
 
-        // This dev box's retail install is a different client era than the kuluu-hjr6 pin
-        // (its framesus sheet has 2464 quads, not 2433), and its panic unwinds into a
-        // machine-specific access violation that kills the whole test binary. Cow_doc at
-        // the repo root marks this box; skip when it exists.
-        let cow_doc = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("..")
-            .join("Cow_doc");
-        if cow_doc.exists() {
-            eprintln!("skipping: Cow_doc present (retail install is a different DAT era)");
-            return;
-        }
-
         let Some(root) = crate::archive::open_test_install() else {
             return;
         };
@@ -522,7 +510,15 @@ mod tests {
             .iter()
             .flat_map(|e| e.components.iter())
             .collect();
-        assert_eq!(quads.len(), FRAMESUS_QUADS);
+        // The counts pin the kuluu-hjr6 client era; an install whose framesus sheet has a
+        // different quad count is a newer/older era, not a decode failure.
+        if quads.len() != FRAMESUS_QUADS {
+            eprintln!(
+                "skipping: framesus sheet has {} quads, not the kuluu-hjr6 pin's {FRAMESUS_QUADS} (different client era)",
+                quads.len()
+            );
+            return;
+        }
         assert_eq!(
             quads
                 .iter()

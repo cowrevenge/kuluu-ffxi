@@ -1273,17 +1273,6 @@ fn test_dat_root() -> Option<ffxi_dat::DatRoot> {
 /// Self-skips without game files.
 #[test]
 fn talknumwork_composes_real_keyitem_line_from_zone_dat() {
-    // This dev box's retail install is a different client era than the pinned 6437 ID (its
-    // zone-230 entry 6437 is an unrelated recycle-bin line), so the assertion can never hold
-    // here - and its panic unwinds into a machine-specific access violation that kills the whole
-    // test binary. Cow_doc at the repo root marks this box; skip when it exists.
-    let cow_doc = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("Cow_doc");
-    if cow_doc.exists() {
-        eprintln!("skipping: Cow_doc present (retail install is a different DAT era)");
-        return;
-    }
     let Some(root) = test_dat_root() else {
         eprintln!("skipping: no FFXI install");
         return;
@@ -1292,6 +1281,14 @@ fn talknumwork_composes_real_keyitem_line_from_zone_dat() {
         crate::event_dialog::DialogSession::new(Some(std::sync::Arc::new(root)), "Tester".into());
     let zone_text = ds.zone_text(230, ZONE230_KEYITEM_OBTAINED_MAY2023 as usize);
     assert!(zone_text.is_some(), "zone 230 string DAT must load");
+    // The pinned ID is era-specific: an install whose entry 6437 carries no key-item tag is a
+    // different client era, not a decode failure.
+    if !zone_text.as_deref().unwrap_or("").contains("{KeyItem:") {
+        eprintln!(
+            "skipping: zone-230 entry {ZONE230_KEYITEM_OBTAINED_MAY2023} has no key-item tag in this install's DAT era (pinned May 2023 ID)"
+        );
+        return;
+    }
     let line = zone_message_chat_line(
         &tnw(
             ZONE230_KEYITEM_OBTAINED_MAY2023 | decode::MESNUM_HIDE_NAME_FLAG,

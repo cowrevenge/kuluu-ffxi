@@ -1527,6 +1527,68 @@ fn talknumwork2_substitutes_the_caught_item() {
     );
 }
 
+#[test]
+#[ignore = "requires the installed retail dialog DATs"]
+fn ferry_fishing_chat_replays_reported_catches_with_installed_dat() {
+    const FERRY_ZONE: u16 = 220;
+    const REPORTED_CATCH: u16 = 7288;
+    const SERVER_BASE: u16 = 7249;
+    const NUM1_START: usize = 12;
+    const STRING1_START: usize = 28;
+    const MESNUM_START: usize = 6;
+    let root = std::sync::Arc::new(ffxi_dat::DatRoot::from_env_or_default().unwrap());
+    let mut dialog = crate::event_dialog::DialogSession::new(Some(root), "Observer".into());
+    let (tx, mut rx) = broadcast::channel(16);
+    for (item, name) in [(4451i32, "Silver Shark"), (5128, "Cone Calamary")] {
+        let mut body = vec![0; decode::TalkNumWork2::SIZE];
+        body[MESNUM_START..MESNUM_START + 2].copy_from_slice(
+            &(REPORTED_CATCH | decode::TalkNumWork::MESNUM_HIDE_NAME_FLAG).to_le_bytes(),
+        );
+        body[NUM1_START..NUM1_START + 4].copy_from_slice(&item.to_le_bytes());
+        body[NUM1_START + 4..NUM1_START + 8].copy_from_slice(&1i32.to_le_bytes());
+        body[STRING1_START..STRING1_START + 6].copy_from_slice(b"Angler");
+        emit_zone_message_chat(
+            ffxi_proto::map::s2c::TALKNUMWORK2,
+            &body,
+            &mut dialog,
+            FERRY_ZONE,
+            "Observer",
+            &tx,
+        );
+        let AgentEvent::ChatLine { line } = rx.try_recv().unwrap() else {
+            panic!("catch must emit chat")
+        };
+        assert!(line.text.starts_with("Angler caught "), "{}", line.text);
+        assert!(line.text.contains(name), "{}", line.text);
+        assert!(!line.text.contains('{'), "{}", line.text);
+        assert!(line
+            .spans
+            .iter()
+            .any(|s| s.kind == crate::state::ChatSpanKind::Item));
+        println!("{}", line.text);
+    }
+    let crate::event_dialog::FishingChat::Line { text, .. } = dialog.fishing_chat(
+        FERRY_ZONE,
+        SERVER_BASE + u16::from(ffxi_proto::fishing_messages::kind::KEEN_ANGLERS_SENSE),
+        ffxi_proto::map::s2c::TALKNUMWORK,
+    ) else {
+        panic!("keen angler message must use the learned server base")
+    };
+    let line = zone_message_chat_line(
+        &ZoneMessage {
+            message_index: SERVER_BASE,
+            speaker: None,
+            actor: None,
+            nums: vec![4451, 3, 3, 3],
+        },
+        Some(text),
+        "Observer",
+    );
+    assert!(line.text.contains("Silver Shark"), "{}", line.text);
+    assert!(!line.text.contains('{'), "{}", line.text);
+    println!("{}", line.text);
+}
+
 /// The Esc cancel EndPara crosses the wire exactly as LSB's
 /// utils.EVENT_CANCELLED_OPTION (vendor/server/scripts/utils/utils.lua).
 #[test]

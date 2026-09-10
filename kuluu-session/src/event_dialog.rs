@@ -762,11 +762,33 @@ fn resolve_fishing(
     let unknown = |candidates: Option<Vec<u16>>| -> (FishingChat, ServerBase) {
         let mut verified = Vec::new();
         for base in [install_base, pin_base] {
+            if candidates.as_ref().is_some_and(|c| !c.contains(&base)) {
+                continue;
+            }
             if verified.iter().any(|&(b, _, _)| b == base) {
                 continue;
             }
             if let Some((offset, text)) = hypothesis(base) {
                 verified.push((base, offset, text));
+            }
+        }
+        // Catch opcodes distinguish the sparse catch entries; TALKNUM's dense
+        // status entries cannot identify an adjacent text-table revision.
+        // vendor/server/src/map/utils/fishingutils.cpp CatchFish
+        if verified.is_empty() && opcode == ffxi_proto::map::s2c::TALKNUMWORK2 {
+            for base in [install_base, pin_base].into_iter().flat_map(|base| {
+                [base.checked_sub(1), base.checked_add(1)]
+                    .into_iter()
+                    .flatten()
+            }) {
+                if verified.iter().any(|&(b, _, _)| b == base)
+                    || candidates.as_ref().is_some_and(|c| !c.contains(&base))
+                {
+                    continue;
+                }
+                if let Some((offset, text)) = hypothesis(base) {
+                    verified.push((base, offset, text));
+                }
             }
         }
         if verified.len() == 1 {
@@ -1198,6 +1220,34 @@ pub(crate) mod tests {
             PIN,
             INSTALL,
             PIN + kind::NOCATCH as u16,
+            s2c::TALKNUM,
+            server,
+        );
+        assert_eq!(line_text(&chat), Some("You didn't catch anything."));
+    }
+
+    #[test]
+    fn ferry_catch_from_adjacent_server_revision_resolves_before_local_fishing() {
+        const FERRY_PIN: u16 = 7250;
+        const FERRY_INSTALL: u16 = 7241;
+        const FERRY_SERVER: u16 = 7249;
+        const REPORTED_CATCH: u16 = 7288;
+        let dat = FakeDat::new();
+        let (chat, server) = resolve_fishing(
+            &dat.printable(),
+            FERRY_PIN,
+            FERRY_INSTALL,
+            REPORTED_CATCH,
+            s2c::TALKNUMWORK2,
+            ServerBase::Unknown,
+        );
+        assert_eq!(line_text(&chat), Some("{ChocoboName:0} caught  {Item:0}!"));
+        assert!(matches!(server, ServerBase::Known(FERRY_SERVER)));
+        let (chat, _) = resolve_fishing(
+            &dat.printable(),
+            FERRY_PIN,
+            FERRY_INSTALL,
+            FERRY_SERVER + u16::from(kind::NOCATCH),
             s2c::TALKNUM,
             server,
         );

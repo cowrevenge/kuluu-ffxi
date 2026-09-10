@@ -13,7 +13,10 @@
 //! documented size when safe, or stop the VM ([`StepResult::Unimplemented`])
 //! when they would otherwise desync the exec pointer. The staging opcodes that
 //! do not yield (fade, actor motion, camera lock, …) report through
-//! [`EventCue`] instead — see [`cue`].
+//! [`EventCue`] instead; see [`cue`]. Mid-event server round-trips (the
+//! send-tag and position-tag opcode pairs) hold execution on their case-1 poll
+//! opcode until the host acks via [`EventVm::ack_server`], carrying the c2s
+//! payload in [`PendingTag`].
 
 pub mod cue;
 pub mod opcode_meta;
@@ -26,4 +29,4 @@ pub use cue::{
     SCHEDULER_TAG_FADE_OUT, STATUS_EVENT_CHOCOBO, STATUS_EVENT_IDLE, STATUS_EVENT_MOUNT,
 };
 pub use runner::{clean_display, DialogFrame, DialogRunner, DialogStep, EVENT_CANCELLED_END_PARA};
-pub use vm::{EventChoice, EventMessage, EventVm, StepResult};
+pub use vm::{EventChoice, EventMessage, EventVm, PendingTag, StepResult, OPCODE_BUDGET_PER_STEP};

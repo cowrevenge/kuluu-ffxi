@@ -40,9 +40,29 @@ pub struct EventChoice {
     pub params: Vec<i32>,
 }
 
+/// A mid-event tag the VM has sent to the server and holds execution on until
+/// the s2c ack (PENDINGNUM/PENDINGSTR) arrives. The two shapes are the c2s
+/// packets retail's pending-tag functions build: EVENTEND for a send-tag,
+/// EVENTENDXZY for a position tag (research/XiPackets/world/client/0x005B, 0x005C).
+#[derive(Debug, Clone, PartialEq)]
+pub enum PendingTag {
+    /// `FUNC_SendPendingTag`: the client returns `Work_Zone[1]` as the 0x05B
+    /// `EndPara` (research/XiPackets/world/client/0x005B).
+    SendTag { end_para: u32 },
+    /// `FUNC_SendPendingXzyTag`: the opcode-scaled position values and the
+    /// heading already on the wire's 0..=255 scale. The opcode scales its
+    /// work-slot raw values to radians (research/XiEvents/OpCodes/0x0047.md);
+    /// LSB stores the c2s `dir` byte into `position_t.rotation`, whose
+    /// documented radian conversion is `radianToRotation`
+    /// (vendor/server/src/common/mmo.h, vendor/server/src/common/utils.cpp),
+    /// so the tag carries the converted byte rather than the float.
+    SendXzy { x: f32, y: f32, z: f32, dir: u8 },
+}
+
 /// Outcome of running the VM until it next needs the host (one `XiEvent::EventIdle`
-/// tick: opcodes execute until `RetFlag`).
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// tick: opcodes execute until `RetFlag`). Not `Eq`: [`PendingTag::SendXzy`]
+/// carries floats.
+#[derive(Debug, Clone, PartialEq)]
 pub enum StepResult {
     /// A message was shown (0x1D/0x2B/0x48/0x49/0xB0) and the VM is blocked on
     /// MESWAIT (0x23). The host displays it, then calls
@@ -74,6 +94,10 @@ pub enum StepResult {
     /// would block on state this VM never models, turning a dropped scene into a
     /// hung client.
     Waiting,
+    /// A mid-event tag was sent to the server (the send-tag or position-tag
+    /// opcode) and execution is held on its case-1 poll until the s2c ack
+    /// arrives; the host calls [`EventVm::ack_server`] when it does.
+    AwaitServerAck(PendingTag),
 }
 
 pub(crate) const OP_END: u8 = 0x00;
@@ -127,6 +151,9 @@ const OP_CHOCOBO: u8 = 0x7E;
 const OP_SETBITWORK: u8 = 0x40;
 const OP_GETBITWORK: u8 = 0x41;
 const OP_SENDTAG: u8 = 0x43;
+/// The position-tag opcodes scale their work-slot raw values by this to get
+/// the c2s float coordinates (research/XiEvents/OpCodes/0x0047.md).
+const XZY_COORD_SCALE: f32 = 0.001;
 const OP_SLEEP: u8 = 0x6F;
 const OP_TURNWAIT: u8 = 0x70;
 const OP_LOADWAIT: u8 = 0x80;
@@ -233,7 +260,7 @@ const CHOICE_CANCELLED_QUERYWAIT2: u32 = 255;
 /// Opcodes one [`EventVm::step`] may run before it gives up — see the check
 /// itself. Far above any authored run between yields, so it only ever fires on
 /// a loop this VM cannot leave.
-const OPCODE_BUDGET_PER_STEP: u32 = 100_000;
+pub const OPCODE_BUDGET_PER_STEP: u32 = 100_000;
 
 /// `XiEvent` runtime for a single event, simplified to the linear+jump+message
 /// flow (the full 16-entry priority `ReqStack` is a Stage 2 concern). Mirrors the
@@ -272,6 +299,10 @@ pub struct EventVm {
     /// how far to step once it runs out. Armed by the opcode, drained by
     /// [`Self::tick`].
     wait: Option<Wait>,
+    /// A tag sent to the server mid-event (retail's `RecPendingFlag` and its
+    /// position-tag counterpart), held until [`Self::ack_server`]. While set,
+    /// execution stays parked on the sending opcode's case-1 poll.
+    pending_ack: Option<PendingTag>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -319,6 +350,7 @@ impl EventVm {
             finished: false,
             ran_past_end: false,
             wait: None,
+            pending_ack: None,
             oob_reads: std::cell::Cell::new(0),
         })
     }
@@ -404,6 +436,18 @@ impl EventVm {
         self.wait.is_some()
     }
 
+    /// The server acknowledged the pending tag (s2c PENDINGNUM/PENDINGSTR):
+    /// clear it and step past the case-1 poll opcode execution is parked on.
+    /// Retail's next tick sees `RecPendingFlag` cleared, advances +2, and
+    /// yields; doing that advance here instead of re-running the poll is
+    /// behaviorally identical one frame earlier (research/XiEvents/OpCodes/
+    /// 0x0043.md, 0x0047.md). No-op if nothing is pending.
+    pub fn ack_server(&mut self) {
+        if self.pending_ack.take().is_some() {
+            self.exec_pointer += 2;
+        }
+    }
+
     /// Run opcodes until the VM yields (one `EventIdle` tick).
     pub fn step(&mut self) -> StepResult {
         if self.finished {
@@ -411,6 +455,9 @@ impl EventVm {
         }
         if self.wait.is_some() {
             return StepResult::Waiting;
+        }
+        if let Some(tag) = &self.pending_ack {
+            return StepResult::AwaitServerAck(tag.clone());
         }
         let mut budget = OPCODE_BUDGET_PER_STEP;
         loop {
@@ -541,11 +588,51 @@ impl EventVm {
                     let units = self.getworkofs(1, 0) as f32;
                     return self.arm_wait(units, 3);
                 }
-                // 0x43 asks the host to send the pending 0x05B tag to the server
-                // and advances +2 on success. The actual mid-event send is a
-                // session-level refinement; locally we advance so the script runs
-                // on (XiEvents OpCodes/0x0043.md).
-                OP_SENDTAG => self.exec_pointer += 2,
+                // Case 0 sends the pending EVENTEND tag (EndPara = Work_Zone[1])
+                // and sets RecPendingFlag; execution continues into the following
+                // case-1 poll, which yields until the server acks. Case 1 with no
+                // outstanding tag skips past (+2); retail spins on any other case
+                // byte, so authored data cannot hold one (research/XiEvents/OpCodes/0x0043.md).
+                OP_SENDTAG => match self.byte_at(1) {
+                    0 => {
+                        self.pending_ack = Some(PendingTag::SendTag {
+                            end_para: self.work_zone(1) as u32,
+                        });
+                        self.exec_pointer += 2;
+                    }
+                    1 => match &self.pending_ack {
+                        Some(tag) => return StepResult::AwaitServerAck(tag.clone()),
+                        None => self.exec_pointer += 2,
+                    },
+                    _ => self.exec_pointer += 2,
+                },
+                // Case 0 sends the position tag: c2s EVENTENDXZY with x/y/z
+                // scaled from work-slot raw values and the heading byte on LSB's
+                // 0..=255 rotation scale (research/XiEvents/OpCodes/0x0047.md;
+                // vendor/server/src/common/utils.cpp radianToRotation).
+                // Execution continues into the following case-1 poll, which
+                // yields until the server acks; case 1 with no outstanding tag
+                // skips past.
+                OP_EVENTPOSSET => match self.byte_at(1) {
+                    0 => {
+                        // Retail evaluates left-to-right with its own literals
+                        // (research/XiEvents/OpCodes/0x0047.md); the fold order
+                        // is load-bearing at the last ulp.
+                        let radians = self.getworkofs(8, 0) as f32 * 6.283 * 0.00024414062;
+                        self.pending_ack = Some(PendingTag::SendXzy {
+                            x: self.getworkofs(2, 0) as f32 * XZY_COORD_SCALE,
+                            y: self.getworkofs(4, 0) as f32 * XZY_COORD_SCALE,
+                            z: self.getworkofs(6, 0) as f32 * XZY_COORD_SCALE,
+                            dir: ((radians / (2.0 * std::f32::consts::PI)) * 256.0) as u8,
+                        });
+                        self.exec_pointer += 10;
+                    }
+                    1 => match &self.pending_ack {
+                        Some(tag) => return StepResult::AwaitServerAck(tag.clone()),
+                        None => self.exec_pointer += 2,
+                    },
+                    _ => self.exec_pointer += 2,
+                },
                 OP_JUMP => {
                     if self.jump_index == JUMP_STACK_LEN {
                         self.finished = true;
@@ -758,9 +845,9 @@ impl EventVm {
                 // The sub-byte-dispatched families. Their width is the case's,
                 // not the table's widest, so an undocumented sub stops the VM
                 // rather than falling back and landing mid-instruction.
-                OP_LOOKSET | OP_EVENTPOSSET | OP_LOADROOM | OP_ITEMINFO | OP_ENTITYSPEED
-                | OP_MOVE | OP_WINDOW | OP_MENU | OP_RENDERFLAG | OP_REQRESET | OP_STRINGOPS
-                | OP_NAMESET | OP_SUBSCHED | OP_STATUSSET => {
+                OP_LOOKSET | OP_LOADROOM | OP_ITEMINFO | OP_ENTITYSPEED | OP_MOVE | OP_WINDOW
+                | OP_MENU | OP_RENDERFLAG | OP_REQRESET | OP_STRINGOPS | OP_NAMESET
+                | OP_SUBSCHED | OP_STATUSSET => {
                     let Some(&sub) = self.event_data.get(self.exec_pointer + 1) else {
                         return StepResult::Unimplemented(op);
                     };
@@ -1427,12 +1514,7 @@ mod tests {
         // [20..23] WZ[2] = 1; [23] END.
         let mut data = seed().to_vec();
         data.extend_from_slice(&[
-            OP_IF,
-            DST[0],
-            DST[1],
-            SRC[0],
-            SRC[1],
-            0x01, // case 1: jump when equal
+            OP_IF, DST[0], DST[1], SRC[0], SRC[1], 0x01, // case 1: jump when equal
             0x14, // val3 = 20 (absolute into EventData)
             0x00,
         ]);
@@ -1443,7 +1525,11 @@ mod tests {
 
         assert_eq!(e.step(), StepResult::Done);
         assert_eq!(e.exec_pointer(), 23, "must land on END past the SET_ONE");
-        assert_eq!(e.work_zone(2), 1, "the absolute target's instruction must run");
+        assert_eq!(
+            e.work_zone(2),
+            1,
+            "the absolute target's instruction must run"
+        );
     }
 
     #[test]
@@ -2187,6 +2273,80 @@ mod tests {
             ]
         );
         assert!(e.take_cues().is_empty(), "a drained cue is not replayed");
+    }
+
+    /// The send-tag pair: case 0 sends the tag with EndPara = Work_Zone[1] and holds
+    /// execution on the following case-1 poll; ack_server releases it past the
+    /// pair (research/XiEvents/OpCodes/0x0043.md).
+    #[test]
+    fn sendtag_pair_holds_until_ack() {
+        // WZ[1] = refs[1], then the `43 00` / `43 01` pair.
+        let mut data = vec![OP_GET_STORE, 0x01, 0x10, SRC[0], SRC[1]];
+        data.extend_from_slice(&[OP_SENDTAG, 0x00, OP_SENDTAG, 0x01, OP_END]);
+        let mut e = vm(data, vec![0, 42]);
+
+        assert_eq!(
+            e.step(),
+            StepResult::AwaitServerAck(PendingTag::SendTag { end_para: 42 })
+        );
+        assert_eq!(
+            e.step(),
+            StepResult::AwaitServerAck(PendingTag::SendTag { end_para: 42 }),
+            "a second step must not resend"
+        );
+
+        e.ack_server();
+        assert_eq!(e.step(), StepResult::Done);
+    }
+
+    /// A bare case-1 poll of the send-tag opcode with no outstanding tag takes
+    /// retail's acknowledged path: skip past and run on.
+    #[test]
+    fn sendtag_poll_without_pending_tag_skips() {
+        let data = vec![OP_SENDTAG, 0x01, OP_END];
+        let mut e = vm(data, vec![]);
+        assert_eq!(e.step(), StepResult::Done);
+    }
+
+    /// The position-tag pair: case 0 scales its work-slot raw values into the c2s payload
+    /// (coordinates times 0.001; heading through LSB's radianToRotation scale)
+    /// and holds on the following case-1 poll until ack_server releases it
+    /// (research/XiEvents/OpCodes/0x0047.md).
+    #[test]
+    fn xzy_tag_pair_scales_work_slots_and_holds_until_ack() {
+        // refs[1..5] hold the raw work values: x, y, z, dir (1/4096-turn units).
+        let mut data = vec![OP_EVENTPOSSET, 0x00];
+        for i in 1u16..=4 {
+            // refs[i] operand: index with the REFERENCE_FLAG marker byte.
+            data.extend_from_slice(&[i as u8, (REFERENCE_FLAG >> 8) as u8]);
+        }
+        data.extend_from_slice(&[OP_EVENTPOSSET, 0x01, OP_END]);
+        let mut e = vm(data, vec![0, 2048, (-512i32) as u32, 3072, 1024]);
+
+        assert_eq!(
+            e.step(),
+            StepResult::AwaitServerAck(PendingTag::SendXzy {
+                x: 2.048,
+                y: -0.512,
+                z: 3.072,
+                // A quarter turn lands at 63.998 on the wire's 0..=255 scale:
+                // retail's f32 literals fall just short of exactly a quarter
+                // and the conversion truncates rather than rounds.
+                dir: 63,
+            })
+        );
+
+        e.ack_server();
+        assert_eq!(e.step(), StepResult::Done);
+    }
+
+    /// A bare case-1 poll of the position-tag opcode with no outstanding tag
+    /// skips past, like its send-tag twin.
+    #[test]
+    fn xzy_tag_poll_without_pending_tag_skips() {
+        let data = vec![OP_EVENTPOSSET, 0x01, OP_END];
+        let mut e = vm(data, vec![]);
+        assert_eq!(e.step(), StepResult::Done);
     }
 
     /// Trigger-packet parameters ride along on every message opcode.

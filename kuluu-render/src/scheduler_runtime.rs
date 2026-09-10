@@ -219,8 +219,17 @@ impl ActiveScheduler {
         })
     }
 
-    pub fn last_frame(&self) -> u32 {
-        self.stages.last().map(|t| t.frame).unwrap_or(0)
+    /// The frame at which this routine's effects end: the max over all stages of
+    /// `stage.frame + stage.duration_frames`, a half-open bound like `locks_at`'s. A plain
+    /// stage ends on its own fire frame; an AnimationLock keeps holding until
+    /// `frame + duration_frames`, so retiring on the last stage's fire time would drop a long
+    /// lock early (the post-finish TTL then counts from the wrong start).
+    pub fn end_frame(&self) -> u32 {
+        self.stages
+            .iter()
+            .map(|t| t.frame + t.stage.duration_frames as u32)
+            .max()
+            .unwrap_or(0)
     }
 }
 
@@ -332,13 +341,15 @@ pub fn tick_active_schedulers(
             }
         }
 
-        // Retire entries that finished more than the TTL ago (their last stages may still be in
-        // flight on consumers); strip the component and its assets once none remain.
+        // Retire entries whose effects ended more than the TTL ago (their last stages may still
+        // be in flight on consumers); strip the component and its assets once none remain.
+        // `end_frame` includes each stage's duration, so a trailing AnimationLock holds until
+        // its own end frame instead of lapsing at fire time + TTL.
         scheds.routines.retain(|sched| {
             if !sched.finished() {
                 return true;
             }
-            let finish_secs = sched.last_frame() as f32 / ROUTINE_FPS;
+            let finish_secs = sched.end_frame() as f32 / ROUTINE_FPS;
             sched.elapsed < finish_secs + POST_FINISH_TTL_SECS
         });
         if scheds.routines.is_empty() {
@@ -3083,7 +3094,62 @@ mod tests {
         let sched = make_scheduler(*b"main", vec![]);
         let a = ActiveScheduler::from_scheduler(&sched);
         assert!(a.finished());
-        assert_eq!(a.last_frame(), 0);
+        assert_eq!(a.end_frame(), 0);
+    }
+
+    // A trailing AnimationLock must hold until its own end frame, not lapse when the entry's
+    // post-finish TTL runs out from the lock stage's fire time. This routine locks [0, 130):
+    // under the old retirement (last stage frame + 2 s TTL) the entry was gone by tick 120,
+    // releasing the lock ten ticks early.
+    #[test]
+    fn trailing_lock_holds_until_its_end_frame_not_the_ttl() {
+        let mut lk = stage(0, StageKind::AnimationLock, 0x07, *b"lk01");
+        lk.stage.duration_frames = 130;
+        let sched = make_scheduler(*b"lock", vec![lk]);
+
+        // Exact integer bounds: locked through tick 129, released at 130.
+        let a = ActiveScheduler::from_scheduler(&sched);
+        assert_eq!(a.end_frame(), 130);
+        assert!(a.locks_at(129), "tick 129 is inside [0, 130)");
+        assert!(!a.locks_at(130), "the lock ends at tick 130");
+
+        // And the entry must still be alive when the clock reaches that window: the old code
+        // retired it at elapsed >= 2 s (tick 120), so is_locked_now could no longer see it.
+        let mut app = App::new();
+        app.add_message::<SchedulerStageEvent>()
+            .init_resource::<Time>()
+            .add_systems(Update, tick_active_schedulers);
+        let actor = app
+            .world_mut()
+            .spawn(ActiveSchedulers::one(ActiveScheduler::from_scheduler(
+                &sched,
+            )))
+            .id();
+
+        app.world_mut()
+            .resource_mut::<Time>()
+            .advance_by(std::time::Duration::from_secs_f32(125.0 / ROUTINE_FPS));
+        app.update();
+        let scheds = app
+            .world()
+            .entity(actor)
+            .get::<ActiveSchedulers>()
+            .expect("the entry must survive to tick 125, inside its lock window");
+        assert!(scheds.is_locked_now(), "tick 125 is locked");
+
+        app.world_mut()
+            .resource_mut::<Time>()
+            .advance_by(std::time::Duration::from_secs_f32(15.0 / ROUTINE_FPS));
+        app.update();
+        let scheds = app
+            .world()
+            .entity(actor)
+            .get::<ActiveSchedulers>()
+            .expect("the entry retires only after end_frame + TTL, not at the lock's end");
+        assert!(
+            !scheds.is_locked_now(),
+            "tick 140 is past the [0, 130) window"
+        );
     }
 
     /// End-to-end against the installed retail DATs (skips without them):

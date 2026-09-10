@@ -910,7 +910,7 @@ mod tests {
 
     #[test]
     fn special_pose_sub_change_triggers_the_named_routine() {
-        // A sub change while visible plays table[sub] on the model (F37's change detector).
+        // A sub change while visible plays table[sub] on the model (.agents/skills/retail-observe/references/2026-09-08-ffximain-animation-dispatch.md "Normalizer and change detector").
         for (sub, name) in [(1u8, "ini1"), (2, "ini2"), (3, "ini3")] {
             let s = step(&SpecialPose::default(), 0, sub);
             assert_eq!(s.pose.active_routine, Some(fourcc(name)));

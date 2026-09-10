@@ -293,7 +293,7 @@ impl ActiveSchedulers {
     /// True while an entry named `dead` has a Motion stage in its timeline but none has fired
     /// yet (the cursor has not passed the first one): the gap between the Defeated latch and
     /// the ded? fall-over starting. The pose pass holds idle across that window instead of
-    /// flashing cor? (kuluu-df9t D5). A `dead` routine with no Motion stage never reports.
+    /// flashing cor?. A `dead` routine with no Motion stage never reports.
     pub fn dead_fall_over_pending(&self) -> bool {
         self.routines.iter().any(|r| {
             r.name == *b"dead"
@@ -499,8 +499,7 @@ const MAX_SUBROUTINE_DEPTH: usize = 6;
 // The global effect dir's `dada` is the swing impact carrier: every melee swing calls it at its
 // impact frame, and it holds the 0x2B DamageCallback that hands off to the victim reaction.
 // When flattening cannot inline it (the global dir degraded to empty), the CALL survives as a
-// marker stage so `dispatch_damage_callback_stages` still fires on that frame instead of never
-// (kuluu-df9t D1/D2).
+// marker stage so `dispatch_damage_callback_stages` still fires on that frame instead of never.
 const DADA_IMPACT_MARKER: [u8; 4] = *b"dada";
 
 // Knuth's MMIX LCG. Every DAT-driven choice the format leaves unauthored (random routine
@@ -575,7 +574,7 @@ fn flatten_routine(
                 // branch. Callers that know the condition dispatch the branch itself - but the
                 // CALL still survives flattening as a marker stage: `dada`, the swing's impact
                 // carrier, tail-calls such switches, and with a degraded global dir its 0x2B
-                // would otherwise vanish from the timeline entirely (kuluu-df9t D1/D2).
+                // would otherwise vanish from the timeline entirely.
                 match lookup.get(&t.stage.id) {
                     Some(c) if c.has_control_flow() => out.push(TimedStage {
                         frame,
@@ -1202,7 +1201,7 @@ pub fn dispatch_motion_stages(
 // idle clips only and
 // skipping when the model is animation-locked. This is the visual half of a hit reaction: the
 // victim's `damg`/`ldam` routines are sound-only, so without this consumer a hit lands as SE +
-// attacker-side sparks while the victim stands still (kuluu-df9t D3).
+// attacker-side sparks while the victim stands still.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn dispatch_flinch_stages(
     mut events: MessageReader<SchedulerStageEvent>,
@@ -1587,8 +1586,8 @@ pub struct PendingHitReaction {
     pub armed_by: [u8; 4],
 }
 
-// F49 - when the result's info bit carries Defeated, retail flips StatusServer on the same frame
-// as the HP packet: the victim's death path starts immediately instead of waiting for the next
+// When the result's info bit carries Defeated, retail flips StatusServer on the same frame as the
+// HP packet (.agents/skills/retail-observe/references/2026-09-09-wormwatch-runtime.md "First non-burrow routines"): the victim's death path starts immediately instead of waiting for the next
 // 0x0E to report hp_pct 0. Latched on the render-actor child (the pose pass reads it there); it
 // dies with the model on despawn/zone change, which is when a fresh `init` would run anyway.
 #[derive(Component, Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -1613,7 +1612,7 @@ pub fn hit_reaction_routine(
 ) -> Vec<[u8; 4]> {
     use ffxi_proto::melee::{ActionResolution, HitDistortion};
     let out = match resolution {
-        // F54 - the hitDistortion level splits the Hit case by recoil size only. recordDamage
+        // The hitDistortion level splits the Hit case by recoil size only. recordDamage
         // derives it purely from damage as a percent of target max HP (>=20 Heavy, >=10 Medium,
         // >0 Light; vendor/server/src/map/action/action.cpp action_result_t::recordDamage), so it
         // is independent of the crit bit: the server sets info |= ActionInfo::CriticalHit from
@@ -1641,14 +1640,14 @@ pub fn hit_reaction_routine(
         ActionResolution::Miss => *b"sway",
         ActionResolution::Guard => *b"gurd",
         ActionResolution::Parry => *b"pary",
-        // F58 - `shld` is the model's block reaction; `gur1` (the PC gear variant) is the
-        // fallback when it is absent.
+        // `shld` is the model's block reaction; `gur1` (the PC gear variant) is the fallback
+        // when it is absent.
         ActionResolution::Block if model_has(b"shld") => *b"shld",
         ActionResolution::Block => *b"gur1",
     };
     let mut routines = vec![out];
-    // F52 - retail plays the swy1..3 voice + 0x5E knockback stage alongside the damage reaction
-    // whenever a knockback level is set.
+    // Retail plays the sway voice + 0x5E knockback stage alongside the damage reaction whenever a
+    // knockback level is set (.agents/skills/retail-observe/references/2026-09-09-wormwatch-runtime.md "Target-side reactions").
     if !knockback.is_none() && out != *b"sway" {
         routines.push(*b"sway");
     }
@@ -1678,7 +1677,7 @@ pub fn swing_routine(animation: ffxi_proto::melee::AttackAnimation) -> Option<[u
 // voice routine research/xim Actor.kt displayAutoAttack enqueues alongside the swing.
 const MELEE_VOICE_ROUTINE: [u8; 4] = *b"atk0";
 
-// KULUU_COMBAT_LOG=1 - live trace for kuluu-df9t patch-7: which BATTLE2 results reach the
+// KULUU_COMBAT_LOG=1 - live trace of which BATTLE2 results reach the
 // render, what gets armed on the attacker, whether the DamageCallback fires and where the
 // victim's reaction routine resolves. Read-only; no state, no behaviour change (same pattern
 // as KULUU_MOTION_LOG).
@@ -1816,8 +1815,9 @@ pub fn dispatch_melee_action_started(
                 fourcc(armed_by)
             );
         }
-        // F49 - info bit 1 (Defeated): retail flips StatusServer on the same frame as the HP
-        // packet, so start the victim's death path now instead of waiting for the next 0x0E.
+        // Info bit 1 (Defeated): retail flips StatusServer on the same frame as the HP packet
+        // (.agents/skills/retail-observe/references/2026-09-09-wormwatch-runtime.md "First non-burrow routines"),
+        // so start the victim's death path now instead of waiting for the next 0x0E.
         if let Some(outcome) = outcome.filter(|o| o.info.is_defeated()) {
             if combat_log_enabled() {
                 tracing::debug!(
@@ -1829,7 +1829,7 @@ pub fn dispatch_melee_action_started(
                 );
             }
             latch_dead_from_action(victim, &q_children, &q_render, &mut commands);
-            // kuluu-df9t D5 - XIM's onDisplayDeath enqueues the model's `dead` routine with
+            // XIM's onDisplayDeath enqueues the model's `dead` routine with
             // displayDead=true on the Defeated frame: ded? fall-over at its first Motion stage,
             // cor0 hold after. Play mode so those Motion stages fire through
             // dispatch_motion_stages; models without a `dead` routine keep today's
@@ -1896,10 +1896,10 @@ pub fn dispatch_damage_callback_stages(
     mut commands: Commands,
 ) {
     for ev in events.read() {
-        // The 0x2B itself, or a surviving call to `dada` - the impact marker that stands in
-        // when flattening kept the call instead of inlining it (degraded global dir,
-        // kuluu-df9t D1/D2). Steady state is unchanged: an inlined dada contributes its 0x2B
-        // and no marker, so exactly one stage fires per swing.
+        // The 0x2B itself, or a surviving call to `dada` - the impact marker that stands in when
+        // flattening kept the call instead of inlining it (degraded global dir). Steady state is
+        // unchanged: an inlined dada contributes its 0x2B and no marker, so exactly one stage fires
+        // per swing.
         let stage = &ev.stage.stage;
         if !(stage.kind == StageKind::DamageCallback
             || matches!(
@@ -2072,7 +2072,7 @@ fn run_routine_on(
 /// Insert-or-push an ActiveScheduler onto `entity`. Push when the component already exists;
 /// otherwise buffer into `pending_inserts` instead of issuing a deferred insert: two routines
 /// queued on the same fresh entity in one batch would overwrite each other (last insert wins),
-/// which is how kuluu-df9t lost a knockback hit's damage reaction to the sway insert. The caller
+/// which would drop a queued knockback hit's damage reaction to the sway insert. The caller
 /// must run [`flush_active_scheduler_inserts`] after all of its queueing.
 ///
 /// Returns true when `entity` had no ActiveSchedulers yet (the insert was buffered), so sites
@@ -2708,8 +2708,10 @@ mod tests {
     }
 
     // The whole point of the vec: a hit reaction that lands mid-swing runs on the same entity
-    // without touching the swing's cursor or frame (retail's ActionTimer1 counted 2 and 3, F49/
-    // F52). Each entry keeps its own clock; entries retire on their OWN finish+TTL, so a short
+    // without touching the swing's cursor or frame (retail's ActionTimer1 counted 2 and 3;
+    // .agents/skills/retail-observe/references/2026-09-09-wormwatch-runtime.md "First non-burrow routines"
+    // and "Target-side reactions"). Each entry keeps its own clock; entries retire on their OWN
+    // finish+TTL, so a short
     // reaction can lapse while the swing still runs.
     #[test]
     fn concurrent_routines_keep_separate_cursors_and_strip_together() {
@@ -2876,7 +2878,7 @@ mod tests {
         );
     }
 
-    // kuluu-df9t D5 - the fall-over window: pending from insertion until the first Motion
+    // The fall-over window: pending from insertion until the first Motion
     // stage fires, never reported for routines without one (instant-corpse fallback models)
     // or under any other name.
     #[test]
@@ -2938,8 +2940,7 @@ mod tests {
         );
         // None/Light/Medium all route to damg per retail's dam0 branch table - never sdam, even
         // when the model ships it: ROM/0/0.DAT's damh/damg both carry the 0x21 flinch stage,
-        // while sdam is sound-only (kuluu-df9t: the old sdam preference made normal hits on
-        // sdam-shipping models invisible).
+        // while sdam is sound-only and would leave normal hits on sdam-shipping models invisible.
         assert_eq!(
             hit_reaction_routine(R::Hit, D::None, K::None, has(vec![*b"sdam"])),
             vec![*b"damg"]
@@ -3129,10 +3130,9 @@ mod tests {
         assert_eq!(a.end_frame(), 0);
     }
 
-    // A trailing AnimationLock must hold until its own end frame, not lapse when the entry's
-    // post-finish TTL runs out from the lock stage's fire time. This routine locks [0, 130):
-    // under the old retirement (last stage frame + 2 s TTL) the entry was gone by frame 120,
-    // releasing the lock ten frames early.
+    // A trailing AnimationLock holds until its own end frame: `end_frame` is the max over all
+    // stages of fire time + duration_frames, so this routine locks [0, 130) and retirement
+    // (which counts down from that end frame plus the post-finish TTL) cannot release it early.
     #[test]
     fn trailing_lock_holds_until_its_end_frame_not_the_ttl() {
         let mut lk = stage(0, StageKind::AnimationLock, 0x07, *b"lk01");
@@ -3145,8 +3145,9 @@ mod tests {
         assert!(a.locks_at(129), "frame 129 is inside [0, 130)");
         assert!(!a.locks_at(130), "the lock ends at frame 130");
 
-        // And the entry must still be alive when the clock reaches that window: the old code
-        // retired it at elapsed >= 2 s (frame 120), so is_locked_now could no longer see it.
+        // The entry must still be alive when the clock reaches that window: retirement counts
+        // down from end_frame plus the post-finish TTL, so at tick 125 both the entry and its
+        // lock are visible to is_locked_now.
         let mut app = App::new();
         app.add_message::<SchedulerStageEvent>()
             .init_resource::<Time>()
@@ -3668,7 +3669,7 @@ mod tests {
         );
     }
 
-    // kuluu-df9t D1/D2 - a control-flow child survives flattening as a marker stage at its call
+    // A control-flow child survives flattening as a marker stage at its call
     // frame: with a degraded global dir, `call dada` (the impact carrier) must still fire the
     // reaction instead of vanishing. The inlined 0x2B and the dam0 marker both land at call +
     // delay; no branch of the switch is taken.
@@ -3721,7 +3722,7 @@ mod tests {
         );
     }
 
-    // kuluu-df9t D1/D2 - with the global dir degraded to empty, `call dada` cannot resolve; the
+    // With the global dir degraded to empty, `call dada` cannot resolve; the
     // call still survives as a marker so dispatch_damage_callback_stages fires at the impact
     // frame instead of never.
     #[test]
@@ -3944,11 +3945,10 @@ mod tests {
         );
     }
 
-    // kuluu-df9t D3 (skips without an install): Rarab's `damg` flinch stage carries the
-    // retail-authored animationDuration, and dispatch_flinch_stages plays it on a pose-idle
-    // host - dfi? for the mob itself, dfm? when the same model is tracked as a PC. Before this
-    // consumer existed the stage was parsed and dropped: hits landed as sound while the victim
-    // stood still.
+    // (skips without an install): Rarab's `damg` flinch stage carries the retail-authored
+    // animationDuration, and dispatch_flinch_stages plays it on a pose-idle host - dfi? for the
+    // mob itself, dfm? when the same model is tracked as a PC. Without this consumer the stage
+    // would be parsed and dropped: hits land as sound while the victim stands still.
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn real_dat_rarab_flinch_stage_plays_the_idle_clip() {

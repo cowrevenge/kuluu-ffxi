@@ -5040,9 +5040,9 @@ pub struct Battle2Header {
     pub first_outcome: Option<ffxi_proto::melee::ResultOutcome>,
 }
 
-// KULUU_COMBAT_LOG=1 - ground-truth trace of BATTLE2 packets for the kuluu-df9t patch-7 live
-// check: re-reads the header bits independently (same order as vendor/server/src/map/packets/
-// s2c/0x028_battle2.cpp) so "the packet carries no result block" is distinguishable from
+// KULUU_COMBAT_LOG=1 - ground-truth trace of BATTLE2 packets: re-reads the header bits
+// independently (same order as vendor/server/src/map/packets/s2c/0x028_battle2.cpp) so "the
+// packet carries no result block" is distinguishable from
 // "our parser dropped it". Read-only; no behaviour change.
 fn combat_log_enabled() -> bool {
     static ONCE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();

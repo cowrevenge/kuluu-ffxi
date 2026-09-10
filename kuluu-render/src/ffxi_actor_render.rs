@@ -2226,7 +2226,7 @@ pub(crate) fn action_routine(
     };
     let fourcc = ffxi_vocab::magic::magic_start_routine(cmd_arg);
     Some(match action_kind {
-        // kuluu-df9t D6 - BATTLE2's per-result `animation` picks the limb routine
+        // BATTLE2's per-result `animation` picks the limb routine
         // (vendor/server/src/map/attack.h AttackAnimation): RightAttack→ati0 / LeftAttack→bti0 /
         // RightKick→cti0 / LeftKick→dti0. Absent or out-of-range values fall back to ati0, the
         // only swing every armed race base is known to carry.
@@ -3897,7 +3897,7 @@ pub fn tick_live_ffxi_actors(
         .map(|(id, _)| *id)
         .collect();
 
-    // kuluu-df9t D5 - world ids whose Defeated latch is up but the `dead` routine's fall-over
+    // World ids whose Defeated latch is up but the `dead` routine's fall-over
     // Motion has not fired yet: hold idle across that gap instead of flashing cor?. Same
     // serial-build/read-in-parallel pattern as animation_locked.
     let dead_fall_pending: std::collections::HashSet<u32> = tracked
@@ -3967,8 +3967,8 @@ pub fn tick_live_ffxi_actors(
 
             let engaged =
                 snap.map(|s| s.engaged).unwrap_or(false) || (is_self && self_engaged_predicted);
-            // F49 - a Defeated result latches the death path on this frame; the 0x0E hp_pct
-            // takes over from there. kuluu-df9t D5 - while the `dead` routine is queued but its
+            // A Defeated result latches the death path on this frame (.agents/skills/retail-observe/references/2026-09-09-wormwatch-runtime.md "First non-burrow routines"); the 0x0E hp_pct
+            // takes over from there. While the `dead` routine is queued but its
             // fall-over has not started, hold idle instead of flashing cor? for the gap frame;
             // once ded? owns the pose via the completion motion, dead may be true again.
             let dead = ((is_self && self_dead)
@@ -4244,7 +4244,7 @@ pub fn dispatch_action_overlay(
                 }
             }
             Some((mut routine, mut looping)) => {
-                // kuluu-df9t D6 - a limb this model does not carry (no bti0/cti0/dti0 Motion
+                // A limb this model does not carry (no bti0/cti0/dti0 Motion
                 // clip in its DAT) falls back to ati0 before the silent skip below.
                 if action_kind == ffxi_proto::melee::CATEGORY_BASIC_ATTACK
                     && routine_motion_clip(&actor.routines, &actor.rejected_routines, routine)
@@ -6038,7 +6038,7 @@ mod pose_resolution_tests {
 
         assert_eq!(r(1, 0, None, None), Some(("ati0".to_string(), false)));
 
-        // kuluu-df9t D6 - BATTLE2's animation field picks the limb routine; absent or
+        // BATTLE2's animation field picks the limb routine; absent or
         // out-of-range values (and Throw, which has no limb routine) fall back to ati0.
         assert_eq!(r(1, 0, None, Some(0)), Some(("ati0".to_string(), false)));
         assert_eq!(r(1, 0, None, Some(1)), Some(("bti0".to_string(), false)));

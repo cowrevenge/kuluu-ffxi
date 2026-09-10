@@ -2465,9 +2465,9 @@ fn battle2_basic_attack_reports_resolution_and_swing_animation() {
     assert_eq!(h.first_result, Some(BATTLE2_PARRIED_LEFT_ATTACK));
 }
 
-// F58 - the outcome bits after animation(12): info(5), hitDistortion(2), knockback(3) in LSB
-// write order. A hand-packed critical left-attack with level-2 knockback must come back split,
-// not lumped into one 5-bit "scale".
+// The outcome bits after animation(12): info(5), hitDistortion(2), knockback(3) in LSB write
+// order (vendor/server/src/map/packets/s2c/0x028_battle2.cpp). A hand-packed critical left-attack
+// with level-2 knockback must come back split, not lumped into one 5-bit "scale".
 #[test]
 fn battle2_result_outcome_bits_roundtrip() {
     let mut w = BattleBitWriter::new(8);

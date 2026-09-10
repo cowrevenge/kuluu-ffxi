@@ -13,7 +13,8 @@ pub const CATEGORY_RANGED_START: u8 = 12;
 pub const CATEGORY_PET_SKILL_FINISH: u8 = 13;
 
 // vendor/server/src/map/enums/action/info.h - the per-result `info` bits. Defeated means the
-// action killed the target (retail flips StatusServer on the same frame as the HP packet, F49);
+// action killed the target (retail flips StatusServer on the same frame as the HP packet;
+// .agents/skills/retail-observe/references/2026-09-09-wormwatch-runtime.md "First non-burrow routines");
 // CriticalHit marks a critical hit. It is set from outcome.isCritical and is independent of
 // hitDistortion: vendor/server/src/map/action/action.cpp action_result_t::recordDamage derives
 // hitDistortion purely from damage as a percent of target max HP (>=20 Heavy, >=10 Medium, >0

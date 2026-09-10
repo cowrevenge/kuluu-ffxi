@@ -374,16 +374,16 @@ pub struct EntityMotion {
     pub by_id: HashMap<u32, MotionSample>,
 }
 
-/// KULUU_MOTION_LOG=1 gated probe for the kuluu-df9t Part B locomotion diagnosis.
+/// KULUU_MOTION_LOG=1 gated probe for the remote locomotion model.
 ///
 /// Measures, per entity: server-update spacing (seconds between 0x0E position
-/// updates), jump distance and which branch `advance_prediction` took (snap vs
-/// blend), remaining chase distance when a packet lands, idle frames between
-/// packets, moving-toggle rate on the transform-delta fallback path (the chase
-/// model's entities toggle without hysteresis: reached target or not), and
-/// heading-vs-travel-direction mismatch events. Prints one line per event plus
-/// a rolling summary every few seconds; redirect stdout to a file when capturing
-/// a roaming-area log. Observation only - no constant changes.
+/// updates), jump distance and which snap band `advance_prediction` took,
+/// remaining chase distance when a packet lands, idle frames between packets,
+/// moving-toggle rate on the transform-delta fallback path (the chase model's
+/// entities toggle without hysteresis: reached target or not), and
+/// heading-vs-travel-direction mismatch events. Emits one tracing::debug! line
+/// per event on target "motion" plus a rolling summary every few seconds.
+/// Observation only - no constant changes.
 #[derive(Resource)]
 pub struct MotionProbe {
     enabled: bool,
@@ -1065,9 +1065,9 @@ impl EntityPrediction {
                         e.segment_duration = Self::TICK_SECS * Self::INTERVAL_HEADROOM;
                     }
                     // What LSB actually moved on this tick in XZ: the distance between consecutive
-                    // confirmed positions. Upstream main's snap rule measured this same pair ("render
-                    // lag is not a teleport"); the step-relative bands keep that reference point and
-                    // replace its fixed 20 yalms with one StepTo step.
+                    // confirmed positions. Render lag is not a teleport, so the band measures this
+                    // pair, never where we are rendering; its threshold is one StepTo step, not a
+                    // fixed distance.
                     let dxw = server_pos.x - e.server_pos.x;
                     let dzw = server_pos.z - e.server_pos.z;
                     e.last_interval = e.sample_age;
@@ -1604,7 +1604,7 @@ mod tests {
 
     #[test]
     fn expected_step_uses_the_lsb_divisors() {
-        // walk (speed <= speed_base): /40; run (speed > speed_base): /50. StepToInternal.
+        // walk (speed <= speed_base): /40; run (speed > speed_base): /50, per CPathFind::StepTo.
         assert!(
             (expected_step_yalms(40, 40) - 1.0).abs() < 1e-6,
             "walk step = 40/40"

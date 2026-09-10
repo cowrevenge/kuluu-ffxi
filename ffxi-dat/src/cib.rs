@@ -160,9 +160,9 @@ impl Cib {
 
     /// The Info `scale` byte as a model multiplier. Retail divides by 100 with only UNSET_BYTE
     /// meaning "default" (research/xim poc/Model.kt NpcModel.getScale, poc/Actor.kt getScale;
-    /// resource/InfoSection.kt readInfoDefinition maps that byte to null through its private
-    /// nullIf0FF helper). 100 therefore lands on 1.0 by the division itself, and a shipped 0
-    /// renders at zero size exactly as retail would.
+    /// resource/InfoSection.kt readInfoDefinition reads the scale and staticNpcScale bytes as
+    /// null when they are 0xFF). 100 therefore lands on 1.0 by the division itself, and a
+    /// shipped 0 renders at zero size exactly as retail would.
     pub fn scale_factor(&self) -> f32 {
         if self.scale == UNSET_BYTE {
             1.0

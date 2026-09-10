@@ -933,13 +933,6 @@ pub struct EntityPrediction {
 }
 
 impl EntityPrediction {
-    // Squared continuity threshold (2 yalms) for view_native/navmesh_overlay's MZB ground-snap
-    // carry-over: a grounded Y tracked by delta between updates is only reused while the incoming
-    // position stays within this radius, and a missed ground probe falls back to the previous
-    // grounded pose under the same bound. It is an engineering threshold inherited from upstream
-    // main for that system, not part of the step-relative prediction bands below.
-    pub const SNAP_DIST_SQ: f32 = 4.0;
-
     /// AI logic tick rate in Hz. vendor/server/src/map/map_constants.h kLogicUpdateRate = 2.5f,
     /// with kLogicUpdateInterval = 1000 / kLogicUpdateRate ms (one 400 ms tick). A moving mob's
     /// path step runs on that tick and ends in updatemask |= UPDATE_POS exactly once per step

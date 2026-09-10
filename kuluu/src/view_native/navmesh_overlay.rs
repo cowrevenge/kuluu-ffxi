@@ -110,89 +110,43 @@ fn ground_snap_needed(current_y: f32, ground_y: f32) -> bool {
     (current_y - ground_y).abs() > GROUND_SNAP_EPSILON_YALMS
 }
 
-#[derive(Component, Clone, Copy)]
-struct RemoteGroundPose {
-    incoming: Vec3,
-    grounded: Vec3,
-    source_file_id: Option<u32>,
-}
-
-impl RemoteGroundPose {
-    fn resolve(
-        previous: Option<Self>,
-        incoming: Vec3,
-        collision: &kuluu_render::dat_mzb::MzbCollisionGeometry,
-    ) -> Option<Self> {
-        let source_file_id = collision.source_file_id();
-        let previous = previous.filter(|previous| {
-            previous.source_file_id == source_file_id
-                && previous.incoming.distance_squared(incoming)
-                    < kuluu_render::combat_stance::EntityPrediction::SNAP_DIST_SQ
-        });
-        let reference_y = previous.map_or(incoming.y, |previous| {
-            previous.grounded.y + incoming.y - previous.incoming.y
-        });
-        let ground = collision.ground_nearest(Vec2::new(incoming.x, incoming.z), reference_y);
-        // research/XIClient/src/XIClient/source/World/Actor/CollidableActor.cpp CollidableActor::OnMove
-        let grounded = match ground {
-            Some(y) => Vec3::new(incoming.x, y, incoming.z),
-            None => {
-                let previous = previous?;
-                if Vec2::new(incoming.x, incoming.z)
-                    .distance_squared(Vec2::new(previous.grounded.x, previous.grounded.z))
-                    >= kuluu_render::combat_stance::EntityPrediction::SNAP_DIST_SQ
-                {
-                    return None;
-                }
-                previous.grounded
-            }
-        };
-        Some(Self {
-            incoming,
-            grounded,
-            source_file_id,
-        })
-    }
-}
-
+// Remote Mob/Pc/Pet/Npc Y is server-resolved: LSB grounds it in the path step
+// (vendor/server/src/map/ai/helpers/pathfind.cpp CPathFind::StepTo) and
+// combat_stance assigns rendered.y = server_pos.y on every update, so this system
+// no longer re-grounds them. It keeps two jobs: snapping self onto its wire Y when
+// no collision is loaded, and grounding the static Other kind (doors/transports),
+// whose wire position is an authored placement rather than a pathfind step.
 fn snap_entities_to_mzb_floor_system(
     collision_geom: Res<kuluu_render::dat_mzb::MzbCollisionGeometry>,
     interiors: Res<kuluu_render::sub_area_activation::SubAreaActivation>,
     scene: Res<SceneState>,
     tracked: Res<kuluu_render::scene::TrackedEntities>,
-    mut commands: Commands,
     mut q: Query<
         (
             Entity,
             &WorldEntity,
             &mut Transform,
             Has<kuluu_render::components::IsSelf>,
-            Option<&mut RemoteGroundPose>,
         ),
         With<WorldEntity>,
     >,
 ) {
     if collision_geom.tri_count() == 0 {
         let wire_self_y = kuluu_render::ffxi_to_bevy(scene.snapshot.self_pos.pos).y;
-        for (entity, _world, mut t, is_self, previous) in &mut q {
-            if previous.is_some() {
-                commands.entity(entity).remove::<RemoteGroundPose>();
-            }
+        for (_entity, _world, mut t, is_self) in &mut q {
             if is_self && ground_snap_needed(t.translation.y, wire_self_y) {
                 t.translation.y = wire_self_y;
             }
         }
         return;
     }
-    for (entity, world, mut t, is_self, previous) in &mut q {
+    for (_entity, world, mut t, is_self) in &mut q {
         if is_self || kuluu_render::scene::mount_actor_rider(world.id).is_some() {
             continue;
         }
-        // Unloaded interior shells cannot supply a passenger's floor; retain the reported pose.
+        // Unloaded interior shells cannot supply a floor for what stands under
+        // them; retain the reported pose.
         if interiors.unloaded_interior_at([t.translation.x, -t.translation.y, -t.translation.z]) {
-            if previous.is_some() {
-                commands.entity(entity).remove::<RemoteGroundPose>();
-            }
             continue;
         }
         if matches!(world.kind, kuluu_snapshot::EntityKind::Other) {
@@ -203,27 +157,6 @@ fn snap_entities_to_mzb_floor_system(
                     t.translation.y = ground;
                 }
             }
-            continue;
-        }
-        let resolved =
-            RemoteGroundPose::resolve(previous.as_deref().copied(), t.translation, &collision_geom);
-        let Some(resolved) = resolved else {
-            if previous.is_some() {
-                commands.entity(entity).remove::<RemoteGroundPose>();
-            }
-            continue;
-        };
-        if t.translation.x != resolved.grounded.x
-            || t.translation.z != resolved.grounded.z
-            || ground_snap_needed(t.translation.y, resolved.grounded.y)
-        {
-            t.translation = resolved.grounded;
-        }
-        match previous {
-            Some(mut previous) => *previous = resolved,
-            None => {
-                commands.entity(entity).insert(resolved);
-            }
         }
     }
     for (&id, &mount) in &tracked.by_id {
@@ -233,11 +166,11 @@ fn snap_entities_to_mzb_floor_system(
         let Some(&rider) = tracked.by_id.get(&rider_id) else {
             continue;
         };
-        let Ok((_, _, rider_transform, _, _)) = q.get(rider) else {
+        let Ok((_, _, rider_transform, _)) = q.get(rider) else {
             continue;
         };
         let rider_transform = *rider_transform;
-        if let Ok((_, _, mut mount_transform, _, _)) = q.get_mut(mount) {
+        if let Ok((_, _, mut mount_transform, _)) = q.get_mut(mount) {
             if *mount_transform != rider_transform {
                 *mount_transform = rider_transform;
             }
@@ -334,69 +267,6 @@ mod tests {
     }
 
     #[test]
-    fn remote_stair_pipeline_retains_grounded_pose_across_missing_columns() {
-        let (mut app, entity) = remote_app(
-            floors(&[
-                (0.0, 0.9, TEST_FLOOR_HEIGHT),
-                (1.1, 1.9, TEST_FLOOR_HEIGHT + TEST_STEP_RISE),
-                (2.1, 3.0, TEST_FLOOR_HEIGHT + TEST_STEP_RISE * 2.0),
-            ]),
-            EntityKind::Pc,
-        );
-        let mut previous = frame(&mut app, entity, Vec3::new(0.5, TEST_WIRE_HEIGHT, 0.0));
-        for (x, expected_y) in [
-            (1.0, TEST_FLOOR_HEIGHT),
-            (1.5, TEST_FLOOR_HEIGHT + TEST_STEP_RISE),
-            (2.0, TEST_FLOOR_HEIGHT + TEST_STEP_RISE),
-            (2.5, TEST_FLOOR_HEIGHT + TEST_STEP_RISE * 2.0),
-        ] {
-            let actual = frame(&mut app, entity, Vec3::new(x, TEST_WIRE_HEIGHT, 0.0));
-            assert!((actual.y - expected_y).abs() < GROUND_SNAP_EPSILON_YALMS);
-            assert!(actual.y >= previous.y);
-            if x == 1.0 || x == 2.0 {
-                assert_eq!(actual, previous);
-            }
-            previous = actual;
-        }
-    }
-
-    #[test]
-    fn remote_floor_gap_hold_releases_after_leaving_the_grounded_position() {
-        let (mut app, entity) =
-            remote_app(floors(&[(0.0, 0.9, TEST_FLOOR_HEIGHT)]), EntityKind::Pc);
-        frame(&mut app, entity, Vec3::new(0.5, TEST_WIRE_HEIGHT, 0.0));
-        for x in [1.0, 1.5, 2.0] {
-            let held = frame(&mut app, entity, Vec3::new(x, TEST_WIRE_HEIGHT, 0.0));
-            assert!((held.y - TEST_FLOOR_HEIGHT).abs() < GROUND_SNAP_EPSILON_YALMS);
-        }
-        let incoming = Vec3::new(2.5, TEST_WIRE_HEIGHT, 0.0);
-        assert_eq!(frame(&mut app, entity, incoming), incoming);
-        assert!(app.world().get::<RemoteGroundPose>(entity).is_none());
-    }
-
-    #[test]
-    fn remote_floor_reference_preserves_level_after_wire_height_jitter() {
-        let (mut app, entity) = remote_app(
-            floors(&[(0.0, 2.0, 0.0), (0.0, 2.0, TEST_FLOOR_HEIGHT)]),
-            EntityKind::Pc,
-        );
-        frame(&mut app, entity, Vec3::new(0.5, TEST_WIRE_HEIGHT, 0.0));
-        let actual = frame(&mut app, entity, Vec3::new(0.6, 1.4, 0.0));
-        assert!((actual.y - TEST_FLOOR_HEIGHT).abs() < GROUND_SNAP_EPSILON_YALMS);
-    }
-
-    #[test]
-    fn remote_vertical_teleport_reseeds_the_floor() {
-        let (mut app, entity) = remote_app(
-            floors(&[(0.0, 2.0, TEST_FLOOR_HEIGHT), (0.0, 2.0, TEST_UPPER_FLOOR)]),
-            EntityKind::Pc,
-        );
-        frame(&mut app, entity, Vec3::new(0.5, TEST_WIRE_HEIGHT, 0.0));
-        let actual = frame(&mut app, entity, Vec3::new(0.5, TEST_UPPER_FLOOR, 0.0));
-        assert!((actual.y - TEST_UPPER_FLOOR).abs() < GROUND_SNAP_EPSILON_YALMS);
-    }
-
-    #[test]
     fn other_entities_keep_their_grounded_height_without_accumulating_offsets() {
         let (mut app, entity) = remote_app(
             floors(&[(0.0, 2.0, TEST_FLOOR_HEIGHT), (0.0, 2.0, TEST_UPPER_FLOOR)]),
@@ -413,12 +283,11 @@ mod tests {
                     .abs()
                     < GROUND_SNAP_EPSILON_YALMS
             );
-            assert!(app.world().get::<RemoteGroundPose>(entity).is_none());
         }
     }
 
     #[test]
-    fn rider_and_mount_hold_the_same_pose_over_a_floor_gap() {
+    fn rider_and_mount_share_the_server_resolved_pose() {
         let (mut app, rider) = remote_app(floors(&[(0.0, 0.9, TEST_FLOOR_HEIGHT)]), EntityKind::Pc);
         let mount_id = mount_actor_id(REMOTE_ID);
         let mount = app
@@ -439,13 +308,18 @@ mod tests {
         frame(&mut app, rider, Vec3::new(0.5, TEST_WIRE_HEIGHT, 0.0));
         let held = frame(&mut app, rider, Vec3::new(1.0, TEST_WIRE_HEIGHT, 0.0));
         assert_eq!(
+            held.y, TEST_WIRE_HEIGHT,
+            "Y is server-resolved: no client re-grounding"
+        );
+        assert_eq!(
             held,
-            app.world().get::<Transform>(mount).unwrap().translation
+            app.world().get::<Transform>(mount).unwrap().translation,
+            "the mount copies the rider's pose"
         );
     }
 
     #[test]
-    fn newly_spawned_mount_uses_riders_held_floor_pose() {
+    fn newly_spawned_mount_copies_the_rider_pose() {
         let (mut app, rider) = remote_app(floors(&[(0.0, 0.9, TEST_FLOOR_HEIGHT)]), EntityKind::Pc);
         frame(&mut app, rider, Vec3::new(0.5, TEST_WIRE_HEIGHT, 0.0));
         frame(&mut app, rider, Vec3::new(1.0, TEST_WIRE_HEIGHT, 0.0));
@@ -467,22 +341,13 @@ mod tests {
             .insert(mount_id, mount);
         let held = frame(&mut app, rider, Vec3::new(1.2, TEST_WIRE_HEIGHT, 0.0));
         assert_eq!(
+            held.y, TEST_WIRE_HEIGHT,
+            "Y is server-resolved: no client re-grounding"
+        );
+        assert_eq!(
             held,
             app.world().get::<Transform>(mount).unwrap().translation
         );
-    }
-
-    #[test]
-    fn cleared_collision_drops_cached_pose_before_reloading() {
-        let (mut app, entity) =
-            remote_app(floors(&[(0.0, 2.0, TEST_FLOOR_HEIGHT)]), EntityKind::Pc);
-        frame(&mut app, entity, Vec3::new(0.5, TEST_WIRE_HEIGHT, 0.0));
-        app.insert_resource(MzbCollisionGeometry::default());
-        frame(&mut app, entity, Vec3::new(0.5, TEST_WIRE_HEIGHT, 0.0));
-        assert!(app.world().get::<RemoteGroundPose>(entity).is_none());
-        app.insert_resource(floors(&[(0.0, 2.0, 0.0), (0.0, 2.0, TEST_FLOOR_HEIGHT)]));
-        let actual = frame(&mut app, entity, Vec3::new(0.5, 1.4, 0.0));
-        assert!(actual.y.abs() < GROUND_SNAP_EPSILON_YALMS);
     }
 
     #[test]
@@ -522,51 +387,69 @@ mod tests {
         activation
     }
 
+    // Pinned by scripts/checks.sh run_contracts (the ferry passenger guarantee from
+    // main): a remote passenger under an unloaded interior shell keeps its reported pose.
     #[test]
     fn remote_passenger_keeps_reported_height_under_unloaded_interior_shell() {
         let (mut app, passenger) =
             remote_app(floors(&[(0.0, 4.0, TEST_UPPER_FLOOR)]), EntityKind::Pc);
+        // Y is server-resolved: the wire height holds even over a loaded floor; no client
+        // re-grounding happens for the battle kinds anymore.
         assert_eq!(
             frame(&mut app, passenger, BOARDING_POSITION).y,
-            TEST_UPPER_FLOOR
+            TEST_WIRE_HEIGHT
         );
-        assert!(app.world().get::<RemoteGroundPose>(passenger).is_some());
         app.insert_resource(boarding_activation());
         assert_eq!(
             frame(&mut app, passenger, BOARDING_POSITION),
             BOARDING_POSITION
         );
-        assert!(app.world().get::<RemoteGroundPose>(passenger).is_none());
         let moved = BOARDING_POSITION + Vec3::X * TEST_STEP_RISE;
         assert_eq!(frame(&mut app, passenger, moved), moved);
     }
 
     #[test]
-    fn remote_passenger_grounding_resumes_after_leaving_shell_or_zone_reset() {
-        let (mut app, passenger) =
-            remote_app(floors(&[(0.0, 4.0, TEST_FLOOR_HEIGHT)]), EntityKind::Pc);
+    fn other_entity_keeps_reported_pose_under_unloaded_interior_shell() {
+        let (mut app, door) =
+            remote_app(floors(&[(0.0, 4.0, TEST_UPPER_FLOOR)]), EntityKind::Other);
+        // sync_entities_system owns the Other kind's x/z; this harness runs only the snap
+        // system, so seed the transform the way sync writes it on ingest.
+        app.world_mut()
+            .get_mut::<Transform>(door)
+            .unwrap()
+            .translation = BOARDING_POSITION;
+        // Outside the shell: grounded onto the upper floor by the direct probe.
+        app.update();
+        assert_eq!(
+            app.world().get::<Transform>(door).unwrap().translation.y,
+            TEST_UPPER_FLOOR
+        );
         app.insert_resource(boarding_activation());
+        // Under the unloaded shell: a fresh ingest must retain the reported (wire) pose
+        // instead of probing a floor the observer does not have loaded.
+        let seed = |app: &mut App, door: Entity, pose: Vec3| {
+            app.world_mut()
+                .get_mut::<Transform>(door)
+                .unwrap()
+                .translation = pose;
+        };
+        seed(&mut app, door, BOARDING_POSITION);
+        app.update();
         assert_eq!(
-            frame(&mut app, passenger, BOARDING_POSITION),
+            app.world().get::<Transform>(door).unwrap().translation,
             BOARDING_POSITION
         );
-        let outside = Vec3::new(3.0, TEST_WIRE_HEIGHT, 0.0);
-        assert_eq!(frame(&mut app, passenger, outside).y, TEST_FLOOR_HEIGHT);
-        assert!(app.world().get::<RemoteGroundPose>(passenger).is_some());
+        let moved = BOARDING_POSITION + Vec3::X * TEST_STEP_RISE;
+        seed(&mut app, door, moved);
+        app.update();
         assert_eq!(
-            frame(&mut app, passenger, BOARDING_POSITION),
-            BOARDING_POSITION
+            app.world().get::<Transform>(door).unwrap().translation,
+            moved
         );
-        app.insert_resource(kuluu_render::sub_area_activation::SubAreaActivation::default());
-        assert_eq!(
-            frame(&mut app, passenger, BOARDING_POSITION).y,
-            TEST_FLOOR_HEIGHT
-        );
-        assert!(app.world().get::<RemoteGroundPose>(passenger).is_some());
     }
 
     #[test]
-    fn remote_passenger_grounds_on_loaded_interior_floor() {
+    fn other_entity_grounds_on_loaded_interior_floor() {
         use bevy::ecs::system::RunSystemOnce;
         use kuluu_render::dat_mzb::{
             LoadMzbInFlight, LoadMzbRequest, PendingWaterSpawns, ZoneAreaMap, ZoneChunkLightMap,
@@ -574,8 +457,14 @@ mod tests {
         use kuluu_render::sub_area_activation::{
             drive_sub_area_activation, SetSubArea, SubAreaActivation, SubAreaChanged,
         };
-        let (mut app, passenger) =
-            remote_app(floors(&[(0.0, 4.0, TEST_UPPER_FLOOR)]), EntityKind::Pc);
+        let (mut app, door) =
+            remote_app(floors(&[(0.0, 4.0, TEST_UPPER_FLOOR)]), EntityKind::Other);
+        // sync_entities_system owns the Other kind's x/z; this harness runs only the snap
+        // system, so seed the transform the way sync writes it on ingest.
+        app.world_mut()
+            .get_mut::<Transform>(door)
+            .unwrap()
+            .translation = BOARDING_POSITION;
         app.add_message::<SetSubArea>()
             .add_message::<SubAreaChanged>()
             .add_message::<LoadMzbRequest>()
@@ -608,10 +497,10 @@ mod tests {
         app.world_mut()
             .resource_mut::<MzbCollisionGeometry>()
             .set_block(kuluu_render::dat_mzb::ZONE_SLOT_SUB_AREA, interior);
+        app.update();
         assert_eq!(
-            frame(&mut app, passenger, BOARDING_POSITION).y,
+            app.world().get::<Transform>(door).unwrap().translation.y,
             TEST_FLOOR_HEIGHT
         );
-        assert!(app.world().get::<RemoteGroundPose>(passenger).is_some());
     }
 }

@@ -291,6 +291,14 @@ timestamps; inspect frame count, changing actor poses, and the relevant motion
 intervals before calling the recording evidence. A protocol trace alone cannot
 prove rendered motion. Stop visual retries if the bounded video is also stale.
 
+For remote movement, vary both speed and packet spacing: include ordinary
+running steps larger than any correction/snap threshold, sparse updates, stops,
+and stairs. Record received position-change intervals as well as sent commands;
+server coalescing can change the cadence. Inspect travel and gait throughout
+each interval, not just endpoints: repeated run/walk/idle selection can restart
+the animation even when position stays within confirmed bounds. Pair the video
+with frame-level regressions that bound displacement and count gait changes.
+
 For two-PC checks, use two separate local fixtures and retain both process IDs
 and sockets. Disconnect only those sessions during teardown. A readiness
 failure is not a failed login: disconnect through an already-created socket

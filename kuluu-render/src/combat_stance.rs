@@ -487,6 +487,12 @@ pub struct PredictSample {
     pub sample_dirty: bool,
 
     pub initialized: bool,
+
+    sample_age: f32,
+    sample_interval: f32,
+    segment_elapsed: f32,
+    segment_duration: f32,
+    snap_pending: bool,
 }
 
 impl PredictSample {
@@ -498,6 +504,12 @@ impl PredictSample {
             rendered_heading_rad: heading_to_rad(heading),
             sample_dirty: false,
             initialized: true,
+            sample_age: 0.0,
+            sample_interval: EntityPrediction::DEFAULT_INTERVAL,
+            segment_elapsed: 0.0,
+            segment_duration: EntityPrediction::DEFAULT_INTERVAL
+                * EntityPrediction::INTERVAL_HEADROOM,
+            snap_pending: false,
         }
     }
 }
@@ -510,10 +522,17 @@ pub struct EntityPrediction {
 impl EntityPrediction {
     pub const SNAP_DIST_SQ: f32 = 4.0;
 
-    // Engineering choice: a short chase lag smooths packet cadence without inventing destinations.
-    pub const CORRECT_TAU: f32 = 0.12;
+    // Engineering bounds: cover sparse movement packets without replaying a long idle as movement.
+    const DEFAULT_INTERVAL: f32 = 0.2;
+    const MIN_INTERVAL: f32 = 0.1;
+    const MAX_INTERVAL: f32 = 1.0;
+    const IDLE_INTERVAL_MULTIPLIER: f32 = 2.0;
 
-    pub const Y_TAU: f32 = 0.15;
+    // A small buffer keeps packet-arrival jitter from ending each run segment early.
+    const INTERVAL_HEADROOM: f32 = 1.25;
+
+    // Render lag is not a teleport; only large changes between confirmed positions bypass tweening.
+    const TELEPORT_DIST_SQ: f32 = 20.0 * 20.0;
 
     pub const HEADING_TAU: f32 = 0.10;
 
@@ -527,6 +546,17 @@ impl EntityPrediction {
             }
             Some(e) => {
                 if e.server_pos.distance_squared(server_pos) > Self::SAMPLE_EPSILON_SQ {
+                    e.snap_pending |=
+                        e.server_pos.distance_squared(server_pos) >= Self::TELEPORT_DIST_SQ;
+                    let idle_interval = Self::MAX_INTERVAL * Self::IDLE_INTERVAL_MULTIPLIER;
+                    if e.sample_age > 0.0 && e.sample_age <= idle_interval {
+                        let interval = e.sample_age.clamp(Self::MIN_INTERVAL, Self::MAX_INTERVAL);
+                        e.segment_duration =
+                            interval.max(e.sample_interval) * Self::INTERVAL_HEADROOM;
+                        e.sample_interval = interval;
+                    }
+                    e.sample_age = 0.0;
+                    e.segment_elapsed = 0.0;
                     e.server_pos = server_pos;
                     e.sample_dirty = true;
                 }
@@ -551,41 +581,22 @@ pub fn heading_forward(heading: u8) -> Vec3 {
 }
 
 #[inline]
-fn exp_approach(from: f32, to: f32, tau: f32, dt: f32) -> f32 {
-    let alpha = 1.0 - (-dt / tau.max(1e-4)).exp();
-    from + alpha * (to - from)
-}
-
 fn advance_prediction(s: &mut PredictSample, dt: f32) -> (Vec3, f32) {
     use std::f32::consts::{PI, TAU};
 
-    if s.sample_dirty {
-        s.sample_dirty = false;
-        if s.server_pos.distance_squared(s.rendered_pos) >= EntityPrediction::SNAP_DIST_SQ {
-            s.rendered_pos = s.server_pos;
-        }
+    s.sample_age += dt;
+    s.sample_dirty = false;
+    if s.snap_pending {
+        s.snap_pending = false;
+        s.rendered_pos = s.server_pos;
     }
-
-    s.rendered_pos = Vec3::new(
-        exp_approach(
-            s.rendered_pos.x,
-            s.server_pos.x,
-            EntityPrediction::CORRECT_TAU,
-            dt,
-        ),
-        exp_approach(
-            s.rendered_pos.y,
-            s.server_pos.y,
-            EntityPrediction::Y_TAU,
-            dt,
-        ),
-        exp_approach(
-            s.rendered_pos.z,
-            s.server_pos.z,
-            EntityPrediction::CORRECT_TAU,
-            dt,
-        ),
-    );
+    let remaining = s.segment_duration - s.segment_elapsed;
+    if remaining > dt {
+        s.rendered_pos += (s.server_pos - s.rendered_pos) * (dt / remaining);
+    } else {
+        s.rendered_pos = s.server_pos;
+    }
+    s.segment_elapsed = (s.segment_elapsed + dt).min(s.segment_duration);
 
     let target = heading_to_rad(s.target_heading);
     let mut dh = target - s.rendered_heading_rad;
@@ -893,6 +904,95 @@ mod tests {
         }
         assert!((previous_x - last_confirmed_x).abs() < 1e-5);
         assert!(!app.world().resource::<EntityMotion>().is_moving(ENTITY_ID));
+    }
+
+    #[test]
+    fn remote_running_tweens_sparse_updates_without_changing_gait() {
+        use ffxi_actor::actor_state::{selected_animation, ActorAnimInputs};
+        const FRAME_SECS: f32 = 1.0 / 60.0;
+        const UPDATE_COUNT: usize = 8;
+        const WARMUP_UPDATES: usize = 3;
+        const MAX_SPEED_MULTIPLIER: f32 = 1.5;
+        for (update_frames, jitter_frames) in
+            [(12, 0), (30, 0), (60, 0), (12, 2), (30, 6), (60, 12)]
+        {
+            for speed in [1.5, 4.8, 6.0] {
+                let mut app = App::new();
+                app.init_resource::<Time>()
+                    .init_resource::<SceneState>()
+                    .init_resource::<EntityPrediction>()
+                    .init_resource::<EntityMotion>()
+                    .add_systems(
+                        Update,
+                        (predict_entities_system, track_entity_motion_system).chain(),
+                    );
+                let entity = app
+                    .world_mut()
+                    .spawn((
+                        WorldEntity {
+                            id: 7,
+                            act_index: 1,
+                            kind: EntityKind::Pc,
+                        },
+                        Transform::default(),
+                    ))
+                    .id();
+                app.world_mut()
+                    .resource_mut::<EntityPrediction>()
+                    .observe(7, Vec3::ZERO, 0);
+                let expected_clip = selected_animation(&ActorAnimInputs {
+                    moving: true,
+                    walking: crate::ffxi_actor_render::infers_walk_gait(speed),
+                    ..Default::default()
+                })
+                .id;
+                let mut previous = 0.0;
+                let mut confirmed = 0.0;
+                let mut next_update = 0;
+                let mut update_count = 0;
+                for frame in 0..update_frames * UPDATE_COUNT {
+                    if frame == next_update {
+                        next_update += if update_count % 2 == 0 {
+                            update_frames + jitter_frames
+                        } else {
+                            update_frames - jitter_frames
+                        };
+                        update_count += 1;
+                        confirmed = frame as f32 * FRAME_SECS * speed;
+                        app.world_mut().resource_mut::<EntityPrediction>().observe(
+                            7,
+                            Vec3::X * confirmed,
+                            0,
+                        );
+                    }
+                    app.world_mut()
+                        .resource_mut::<Time>()
+                        .advance_by(std::time::Duration::from_secs_f32(FRAME_SECS));
+                    app.update();
+                    let x = app.world().get::<Transform>(entity).unwrap().translation.x;
+                    assert!(x >= previous && x <= confirmed);
+                    assert!(
+                        x - previous <= speed * FRAME_SECS * MAX_SPEED_MULTIPLIER,
+                        "cadence={update_frames} speed={speed} frame={frame}: jumped {}",
+                        x - previous
+                    );
+                    previous = x;
+                    if frame >= update_frames * WARMUP_UPDATES {
+                        let motion = app.world().resource::<EntityMotion>().sample(7).unwrap();
+                        let clip = selected_animation(&ActorAnimInputs {
+                            moving: motion.moving,
+                            walking: crate::ffxi_actor_render::infers_walk_gait(motion.speed),
+                            ..Default::default()
+                        })
+                        .id;
+                        assert_eq!(
+                            clip, expected_clip,
+                            "cadence={update_frames} speed={speed} frame={frame}"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]

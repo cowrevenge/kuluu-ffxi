@@ -2434,14 +2434,14 @@ const BATTLE2_PARRIED_LEFT_ATTACK: ffxi_proto::melee::MeleeResult =
     ffxi_proto::melee::MeleeResult {
         resolution: ffxi_proto::melee::ActionResolution::Parry,
         animation: ffxi_proto::melee::AttackAnimation::LeftAttack,
-        info: 0,
-        hit_distortion: 0,
-        knockback: 0,
-        kind: 0,
+        info: ffxi_proto::melee::ActionInfo::NONE,
+        hit_distortion: ffxi_proto::melee::HitDistortion::None,
+        knockback: ffxi_proto::melee::KnockbackLevel::None,
     };
 
 fn battle2_single_result_body() -> Vec<u8> {
-    let (resolution, animation) = BATTLE2_PARRIED_LEFT_ATTACK.to_wire();
+    let (resolution, animation, _info, _hit_distortion, _knockback) =
+        BATTLE2_PARRIED_LEFT_ATTACK.to_wire();
     let mut w = BattleBitWriter::new(8);
     w.write(0xCAFEu64, 32);
     w.write(1, 6);
@@ -2495,24 +2495,28 @@ fn battle2_result_outcome_bits_roundtrip() {
     w.write(0, 1); // no reaction block
 
     let h = decode_battle2_header(&w.into_bytes()).unwrap();
-    assert_eq!(h.first_info, 2, "CriticalHit bit");
-    assert_eq!(h.first_hit_distortion, 3, "Heavy");
-    assert_eq!(h.first_knockback, 2, "level 2");
-    assert_eq!(h.first_kind, 1);
+    assert_eq!(
+        h.first_outcome,
+        Some(ffxi_proto::melee::ResultOutcome {
+            resolution: ffxi_proto::melee::ActionResolution::Hit,
+            info: ffxi_proto::melee::ActionInfo::CRITICAL_HIT,
+            hit_distortion: ffxi_proto::melee::HitDistortion::Heavy,
+            knockback: ffxi_proto::melee::KnockbackLevel::Level2,
+        }),
+    );
     let r = h.first_result.expect("a basic-attack result decodes");
     assert_eq!(r.resolution, ffxi_proto::melee::ActionResolution::Hit);
     assert_eq!(r.animation, ffxi_proto::melee::AttackAnimation::LeftAttack);
-    assert_eq!(
-        (r.info, r.hit_distortion, r.knockback, r.kind),
-        (2, 3, 2, 1)
-    );
+    assert_eq!(r.info, ffxi_proto::melee::ActionInfo::CRITICAL_HIT);
+    assert_eq!(r.hit_distortion, ffxi_proto::melee::HitDistortion::Heavy);
+    assert_eq!(r.knockback, ffxi_proto::melee::KnockbackLevel::Level2);
 }
 
 // C2 - the outcome fields are independent inputs on the wire: recordDamage derives hitDistortion
 // from damage HPP alone and CBattleEntity::OnAttack sets the crit bit from outcome.isCritical
 // alone (vendor/server/src/map/action/action.cpp action_result_t::recordDamage, vendor/server/
-// src/map/entities/battleentity.cpp). A heavy recoil without the crit bit must decode with
-// first_info clear...
+// src/map/entities/battleentity.cpp). A heavy recoil without the crit bit must decode with no
+// CriticalHit in first_outcome's info bits...
 #[test]
 fn battle2_heavy_distortion_without_crit_bit_decodes_independently() {
     let mut w = BattleBitWriter::new(8);
@@ -2537,14 +2541,21 @@ fn battle2_heavy_distortion_without_crit_bit_decodes_independently() {
     w.write(0, 1); // no reaction block
 
     let h = decode_battle2_header(&w.into_bytes()).unwrap();
+    let o = h.first_outcome.expect("the outcome block decodes");
+    assert!(!o.info.is_critical_hit(), "no crit bit");
     assert_eq!(
-        h.first_info & ffxi_proto::melee::INFO_CRITICAL_HIT,
-        0,
-        "no crit bit"
+        o.hit_distortion,
+        ffxi_proto::melee::HitDistortion::Heavy,
+        "Heavy recoil stands on its own"
     );
-    assert_eq!(h.first_hit_distortion, 3, "Heavy recoil stands on its own");
     let r = h.first_result.expect("a basic-attack result decodes");
-    assert_eq!((r.info, r.hit_distortion), (0, 3));
+    assert_eq!(
+        (r.info, r.hit_distortion),
+        (
+            ffxi_proto::melee::ActionInfo::NONE,
+            ffxi_proto::melee::HitDistortion::Heavy
+        )
+    );
 }
 
 // ...and a crit with light distortion must keep both: the bit rides info(5), the level rides
@@ -2573,19 +2584,20 @@ fn battle2_crit_bit_with_light_distortion_decodes_independently() {
     w.write(0, 1); // no reaction block
 
     let h = decode_battle2_header(&w.into_bytes()).unwrap();
+    let o = h.first_outcome.expect("the outcome block decodes");
+    assert!(o.info.is_critical_hit(), "crit bit present");
     assert_eq!(
-        h.first_info & ffxi_proto::melee::INFO_CRITICAL_HIT,
-        ffxi_proto::melee::INFO_CRITICAL_HIT,
-        "crit bit present"
-    );
-    assert_eq!(
-        h.first_hit_distortion, 1,
+        o.hit_distortion,
+        ffxi_proto::melee::HitDistortion::Light,
         "Light recoil despite the crit bit"
     );
     let r = h.first_result.expect("a basic-attack result decodes");
     assert_eq!(
         (r.info, r.hit_distortion),
-        (ffxi_proto::melee::INFO_CRITICAL_HIT, 1)
+        (
+            ffxi_proto::melee::ActionInfo::CRITICAL_HIT,
+            ffxi_proto::melee::HitDistortion::Light
+        )
     );
 }
 
@@ -2594,7 +2606,8 @@ fn battle2_crit_bit_with_light_distortion_decodes_independently() {
 // category, not the bit ranges.
 #[test]
 fn battle2_non_basic_category_reports_no_melee_result() {
-    let (resolution, animation) = BATTLE2_PARRIED_LEFT_ATTACK.to_wire();
+    let (resolution, animation, _info, _hit_distortion, _knockback) =
+        BATTLE2_PARRIED_LEFT_ATTACK.to_wire();
     let mut w = BattleBitWriter::new(8);
     w.write(0xCAFEu64, 32);
     w.write(1, 6);
@@ -2614,6 +2627,16 @@ fn battle2_non_basic_category_reports_no_melee_result() {
     assert_eq!(h.action_kind, 4);
     assert_eq!(h.primary_target_id, Some(0xBEEF));
     assert_eq!(h.first_result, None);
+    // The outcome is read for every category even though the swing pair is gated off.
+    assert_eq!(
+        h.first_outcome,
+        Some(ffxi_proto::melee::ResultOutcome {
+            resolution: ffxi_proto::melee::ActionResolution::Parry,
+            info: ffxi_proto::melee::ActionInfo::NONE,
+            hit_distortion: ffxi_proto::melee::HitDistortion::None,
+            knockback: ffxi_proto::melee::KnockbackLevel::None,
+        }),
+    );
 }
 
 // The same 12 bits, uninterpreted, key the caster's effect DAT for every non-attack

@@ -1550,8 +1550,8 @@ pub struct PendingHitReaction {
     // vendor/server/src/map/packets/s2c/0x028_battle2.cpp GP_SERV_COMMAND_BATTLE2::pack -
     // hitDistortion(2) drives the recoil clip size (Heavy -> ldam when the model ships it);
     // knockback(3): any non-zero level adds `sway` alongside the damage reaction.
-    pub hit_distortion: u8,
-    pub knockback: u8,
+    pub hit_distortion: ffxi_proto::melee::HitDistortion,
+    pub knockback: ffxi_proto::melee::KnockbackLevel,
     // The scheduler whose DamageCallback stage is allowed to fire this reaction. Every completion
     // routine ends in a 0x2B (a spell's `mdam`), so an unqualified pending reaction would be
     // consumed by whichever routine happened to reach its callback first.
@@ -1578,11 +1578,11 @@ pub struct DeadFromAction;
 // victim-own-first, then global.
 pub fn hit_reaction_routine(
     resolution: ffxi_proto::melee::ActionResolution,
-    hit_distortion: u8,
-    knockback: u8,
+    hit_distortion: ffxi_proto::melee::HitDistortion,
+    knockback: ffxi_proto::melee::KnockbackLevel,
     model_has: impl Fn(&[u8; 4]) -> bool,
 ) -> Vec<[u8; 4]> {
-    use ffxi_proto::melee::ActionResolution;
+    use ffxi_proto::melee::{ActionResolution, HitDistortion};
     let out = match resolution {
         // F54 - the hitDistortion level splits the Hit case by recoil size only. recordDamage
         // derives it purely from damage as a percent of target max HP (>=20 Heavy, >=10 Medium,
@@ -1605,7 +1605,11 @@ pub fn hit_reaction_routine(
         // hitDistortion(2) knockback(3) param(17) messageID(10) modifier(31).
         // None/Light/Medium all play `damg` per retail's dam0 branch table - never sdam, which
         // flinches nothing on its own.
-        ActionResolution::Hit if hit_distortion == 3 && model_has(b"ldam") => *b"ldam",
+        ActionResolution::Hit
+            if hit_distortion == HitDistortion::Heavy && model_has(b"ldam") =>
+        {
+            *b"ldam"
+        }
         ActionResolution::Hit => *b"damg",
         ActionResolution::Miss => *b"sway",
         ActionResolution::Guard => *b"gurd",
@@ -1618,7 +1622,7 @@ pub fn hit_reaction_routine(
     let mut routines = vec![out];
     // F52 - retail plays the swy1..3 voice + 0x5E knockback stage alongside the damage reaction
     // whenever a knockback level is set.
-    if knockback > 0 && out != *b"sway" {
+    if !knockback.is_none() && out != *b"sway" {
         routines.push(*b"sway");
     }
     routines
@@ -1706,9 +1710,7 @@ pub fn dispatch_melee_action_started(
             action_kind,
             target_id,
             result,
-            info,
-            hit_distortion,
-            knockback,
+            outcome,
             ..
         } = *ev
         else {
@@ -1716,8 +1718,8 @@ pub fn dispatch_melee_action_started(
         };
         if combat_log_enabled() {
             println!(
-                "COMBAT_ACT kind={} actor={} target={:?} result={:?} info={} dist={} kb={}",
-                action_kind, actor_id, target_id, result, info, hit_distortion, knockback
+                "COMBAT_ACT kind={} actor={} target={:?} result={:?} outcome={:?}",
+                action_kind, actor_id, target_id, result, outcome
             );
         }
         if action_kind != ffxi_proto::melee::CATEGORY_BASIC_ATTACK {
@@ -1741,25 +1743,11 @@ pub fn dispatch_melee_action_started(
             lookup = lookup.with_dat(&g.schedulers);
         }
         // An off-hand/kick routine is absent from some weapon-motion DATs; the main-hand swing
-        // is the only routine every armed race base is known to carry. The event carries the
-        // outcome bits (info/hitDistortion/knockback) separately from the (resolution,
-        // animation) pair.
-        let raw_result = result;
-        let result = raw_result.and_then(|(resolution, animation)| {
-            Some((
-                ffxi_proto::melee::ActionResolution::from_wire(resolution)?,
-                ffxi_proto::melee::AttackAnimation::from_wire(animation)?,
-            ))
-        });
-        if combat_log_enabled() && result.is_none() {
-            println!(
-                "COMBAT_DROP actor={} result-none raw={:?}",
-                actor_id, raw_result
-            );
-        }
-        let resolution = result.map(|(r, _)| r);
+        // is the only routine every armed race base is known to carry. The swing slot comes from
+        // the raw (resolution, animation) pair; the reaction data comes from the typed outcome.
         let swing = result
-            .and_then(|(_, animation)| swing_routine(animation))
+            .and_then(|(_, animation)| ffxi_proto::melee::AttackAnimation::from_wire(animation))
+            .and_then(swing_routine)
             .filter(|r| lookup.get(r).is_some())
             .unwrap_or(*b"ati0");
         let merged = [MELEE_VOICE_ROUTINE, swing];
@@ -1788,12 +1776,12 @@ pub fn dispatch_melee_action_started(
         let victim = target_id.and_then(|id| tracked.by_id.get(&id).copied());
         let mut entity = commands.entity(actor_entity);
         entity.try_insert(ActionTarget(victim));
-        match resolution {
-            Some(resolution) => {
+        match outcome {
+            Some(outcome) => {
                 entity.try_insert(PendingHitReaction {
-                    resolution,
-                    hit_distortion,
-                    knockback,
+                    resolution: outcome.resolution,
+                    hit_distortion: outcome.hit_distortion,
+                    knockback: outcome.knockback,
                     armed_by,
                 });
             }
@@ -1801,24 +1789,21 @@ pub fn dispatch_melee_action_started(
                 entity.remove::<PendingHitReaction>();
             }
         }
-        if combat_log_enabled() && resolution.is_some() {
+        if combat_log_enabled() && outcome.is_some() {
             println!(
-                "COMBAT_ARM actor={} target={:?} dist={} kb={} swing={} armed_by={}",
-                actor_id,
-                victim,
-                hit_distortion,
-                knockback,
-                fourcc(swing),
-                fourcc(armed_by)
+                "COMBAT_ARM actor={} target={:?} outcome={:?} swing={} armed_by={}",
+                actor_id, victim, outcome, fourcc(swing), fourcc(armed_by)
             );
         }
         // F49 - info bit 1 (Defeated): retail flips StatusServer on the same frame as the HP
         // packet, so start the victim's death path now instead of waiting for the next 0x0E.
-        if (info & ffxi_proto::melee::INFO_DEFEATED) != 0 {
+        if outcome.is_some_and(|o| o.info.is_defeated()) {
             if combat_log_enabled() {
                 println!(
                     "COMBAT_DEAD actor={} target={:?} info=0x{:X}",
-                    actor_id, victim, info
+                    actor_id,
+                    victim,
+                    outcome.map(|o| o.info.bits()).unwrap_or(0)
                 );
             }
             latch_dead_from_action(victim, &q_children, &q_render, &mut commands);
@@ -1951,7 +1936,7 @@ pub fn dispatch_damage_callback_stages(
         for routine in &chosen {
             if combat_log_enabled() {
                 println!(
-                    "COMBAT_RX victim={} res={:?} dist={} kb={} routine={} found={}",
+                    "COMBAT_RX victim={} res={:?} dist={:?} kb={:?} routine={} found={}",
                     victim.index(),
                     pending.resolution,
                     pending.hit_distortion,
@@ -2835,8 +2820,8 @@ mod tests {
     fn pending_hit_reaction_is_bound_to_the_scheduler_that_armed_it() {
         let pending = PendingHitReaction {
             resolution: ffxi_proto::melee::ActionResolution::Hit,
-            hit_distortion: 0,
-            knockback: 0,
+            hit_distortion: ffxi_proto::melee::HitDistortion::None,
+            knockback: ffxi_proto::melee::KnockbackLevel::None,
             armed_by: *b"atk0",
         };
         assert_eq!(pending.armed_by, *b"atk0");
@@ -2893,17 +2878,17 @@ mod tests {
     // The outcome bits split the Hit case; a knockback level adds sway alongside.
     #[test]
     fn hit_reaction_routine_table() {
-        use ffxi_proto::melee::ActionResolution as R;
+        use ffxi_proto::melee::{ActionResolution as R, HitDistortion as D, KnockbackLevel as K};
         let has = |names: Vec<[u8; 4]>| move |name: &[u8; 4]| names.iter().any(|n| n == name);
 
         // Heavy distortion plays ldam when the lookup resolves it...
         assert_eq!(
-            hit_reaction_routine(R::Hit, 3, 0, has(vec![*b"ldam"])),
+            hit_reaction_routine(R::Hit, D::Heavy, K::None, has(vec![*b"ldam"])),
             vec![*b"ldam"]
         );
         // ...and back to damg when nothing in the lookup ships ldam (the pre-global fallback).
         assert_eq!(
-            hit_reaction_routine(R::Hit, 3, 0, has(vec![])),
+            hit_reaction_routine(R::Hit, D::Heavy, K::None, has(vec![])),
             vec![*b"damg"]
         );
         // None/Light/Medium all route to damg per retail's dam0 branch table - never sdam, even
@@ -2911,55 +2896,55 @@ mod tests {
         // while sdam is sound-only (kuluu-df9t: the old sdam preference made normal hits on
         // sdam-shipping models invisible).
         assert_eq!(
-            hit_reaction_routine(R::Hit, 0, 0, has(vec![*b"sdam"])),
+            hit_reaction_routine(R::Hit, D::None, K::None, has(vec![*b"sdam"])),
             vec![*b"damg"]
         );
         assert_eq!(
-            hit_reaction_routine(R::Hit, 1, 0, has(vec![*b"sdam"])),
+            hit_reaction_routine(R::Hit, D::Light, K::None, has(vec![*b"sdam"])),
             vec![*b"damg"]
         );
         // ...and damg when the model ships nothing; Medium stays on damg.
         assert_eq!(
-            hit_reaction_routine(R::Hit, 0, 0, has(vec![])),
+            hit_reaction_routine(R::Hit, D::None, K::None, has(vec![])),
             vec![*b"damg"]
         );
         assert_eq!(
-            hit_reaction_routine(R::Hit, 2, 0, has(vec![*b"sdam"])),
+            hit_reaction_routine(R::Hit, D::Medium, K::None, has(vec![*b"sdam"])),
             vec![*b"damg"]
         );
         // The guard/parry/block cases; block prefers shld when present.
         assert_eq!(
-            hit_reaction_routine(R::Guard, 0, 0, has(vec![])),
+            hit_reaction_routine(R::Guard, D::None, K::None, has(vec![])),
             vec![*b"gurd"]
         );
         assert_eq!(
-            hit_reaction_routine(R::Parry, 0, 0, has(vec![])),
+            hit_reaction_routine(R::Parry, D::None, K::None, has(vec![])),
             vec![*b"pary"]
         );
         assert_eq!(
-            hit_reaction_routine(R::Block, 0, 0, has(vec![*b"shld"])),
+            hit_reaction_routine(R::Block, D::None, K::None, has(vec![*b"shld"])),
             vec![*b"shld"]
         );
         assert_eq!(
-            hit_reaction_routine(R::Block, 0, 0, has(vec![])),
+            hit_reaction_routine(R::Block, D::None, K::None, has(vec![])),
             vec![*b"gur1"]
         );
         // Miss is sway; a knockback level adds sway alongside the damage routine but never twice.
         assert_eq!(
-            hit_reaction_routine(R::Miss, 0, 0, has(vec![])),
+            hit_reaction_routine(R::Miss, D::None, K::None, has(vec![])),
             vec![*b"sway"]
         );
         assert_eq!(
-            hit_reaction_routine(R::Miss, 0, 2, has(vec![])),
+            hit_reaction_routine(R::Miss, D::None, K::Level2, has(vec![])),
             vec![*b"sway"]
         );
         assert_eq!(
-            hit_reaction_routine(R::Hit, 3, 1, has(vec![*b"ldam"])),
+            hit_reaction_routine(R::Hit, D::Heavy, K::Level1, has(vec![*b"ldam"])),
             vec![*b"ldam", *b"sway"]
         );
         // ...and the fallback keeps sway alongside damg.
         assert_eq!(
-            hit_reaction_routine(R::Hit, 3, 1, has(vec![])),
+            hit_reaction_routine(R::Hit, D::Heavy, K::Level1, has(vec![])),
             vec![*b"damg", *b"sway"]
         );
     }
@@ -3704,7 +3689,14 @@ mod tests {
             ActionResolution::Block,
         ]
         .into_iter()
-        .map(|r| hit_reaction_routine(r, 0, 0, |_| false))
+        .map(|r| {
+            hit_reaction_routine(
+                r,
+                ffxi_proto::melee::HitDistortion::None,
+                ffxi_proto::melee::KnockbackLevel::None,
+                |_| false,
+            )
+        })
         .collect();
         assert_eq!(
             order,

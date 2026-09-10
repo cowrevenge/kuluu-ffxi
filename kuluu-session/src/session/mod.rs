@@ -1390,10 +1390,7 @@ fn handle_sub_packet(
                     target_id: h.primary_target_id,
                     result: h.first_result,
                     animation: h.animation,
-                    info: h.first_info,
-                    hit_distortion: h.first_hit_distortion,
-                    knockback: h.first_knockback,
-                    kind: h.first_kind,
+                    outcome: h.first_outcome,
                 });
             }
             for line in decode_battle2_action(sub.data, name_cache, kind_cache) {
@@ -5032,14 +5029,11 @@ pub struct Battle2Header {
     pub animation: Option<u16>,
 
     // vendor/server/src/map/packets/s2c/0x028_battle2.cpp GP_SERV_COMMAND_BATTLE2::pack - the
-    // first result block's outcome bits, read for EVERY category (unlike `first_result`, which is
-    // gated to basic attacks): info(5) carries Defeated / CriticalHit
-    // (vendor/server/src/map/enums/action/info.h), hitDistortion(2) and knockback(3) drive the
-    // victim's reaction choice. Zero when no result block was read.
-    pub first_info: u8,
-    pub first_hit_distortion: u8,
-    pub first_knockback: u8,
-    pub first_kind: u8,
+    // first result block's outcome (resolution + info(5) Defeated/CriticalHit bits from
+    // vendor/server/src/map/enums/action/info.h, hitDistortion(2), knockback(3)), read for EVERY
+    // category (unlike `first_result`, which is gated to basic attacks). None when no result
+    // block was read: resolution 0 is Hit, so absence must not be spelled as zero.
+    pub first_outcome: Option<ffxi_proto::melee::ResultOutcome>,
 }
 
 // KULUU_COMBAT_LOG=1 - ground-truth trace of BATTLE2 packets for the kuluu-df9t patch-7 live
@@ -5066,7 +5060,7 @@ fn battle2_debug_dump(data: &[u8]) {
     let _info = br.read(32);
     let target = br.read(32).map(|v| v as u32);
     let nres = br.read(4);
-    let first = (nres.unwrap_or(0) > 0).then(|| {
+    let first = matches!(nres, Some(n) if n > 0).then(|| {
         (
             br.read(3),  // resolution
             br.read(2),  // kind
@@ -5119,17 +5113,23 @@ pub fn decode_battle2_header(data: &[u8]) -> Option<Battle2Header> {
     let first_result = first
         .filter(|_| action_kind == ffxi_proto::melee::CATEGORY_BASIC_ATTACK)
         .and_then(
-            |(resolution, kind, animation, info, hit_distortion, knockback)| {
+            |(resolution, _kind, animation, info, hit_distortion, knockback)| {
                 ffxi_proto::melee::MeleeResult::from_wire(
                     resolution,
                     animation,
                     info,
                     hit_distortion,
                     knockback,
-                    kind,
                 )
             },
         );
+    // The outcome is read for every category (the swing gate above only shapes first_result):
+    // None when no result block was read, never a zeroed value.
+    let first_outcome = first.and_then(
+        |(resolution, _kind, _animation, info, hit_distortion, knockback)| {
+            ffxi_proto::melee::ResultOutcome::from_wire(resolution, info, hit_distortion, knockback)
+        },
+    );
     Some(Battle2Header {
         actor_id,
         action_id,
@@ -5137,14 +5137,7 @@ pub fn decode_battle2_header(data: &[u8]) -> Option<Battle2Header> {
         primary_target_id,
         first_result,
         animation: first.map(|(_, _, animation, ..)| animation),
-        first_info: first.map(|(_, _, _, info, ..)| info).unwrap_or(0),
-        first_hit_distortion: first
-            .map(|(_, _, _, _, hit_distortion, ..)| hit_distortion)
-            .unwrap_or(0),
-        first_knockback: first
-            .map(|(_, _, _, _, _, knockback)| knockback)
-            .unwrap_or(0),
-        first_kind: first.map(|(_, kind, ..)| kind).unwrap_or(0),
+        first_outcome,
     })
 }
 

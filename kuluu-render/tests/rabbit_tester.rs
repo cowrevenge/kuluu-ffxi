@@ -162,12 +162,11 @@ fn action_event(bytes: &[u8]) -> ViewerEvent {
         action_id: h.action_id,
         action_kind: h.action_kind,
         target_id: h.primary_target_id,
-        result: h.first_result.map(|r| r.to_wire()),
+        result: h
+            .first_result
+            .map(|r| (r.resolution.to_wire(), r.animation.to_wire())),
         animation: h.animation,
-        info: h.first_info,
-        hit_distortion: h.first_hit_distortion,
-        knockback: h.first_knockback,
-        kind: h.first_kind,
+        outcome: h.first_outcome,
     }
 }
 

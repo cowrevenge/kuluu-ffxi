@@ -1857,7 +1857,9 @@ mod tests {
                 ffxi_dat::cib::MovementType::Flying,
             ))
             .id();
-        app.world_mut().entity(mob).add_child(child);
+        // Bevy 0.19's EntityRef is read-only; entity_mut's add_child keeps both sides of the
+        // link (the parent's Children and child's ChildOf).
+        app.world_mut().entity_mut(mob).add_child(child);
         app.world_mut()
             .resource_mut::<EntityPrediction>()
             .observe(903, Vec3::new(0.5, 1.5, 0.0), 0, 40, 40, false);
@@ -2283,9 +2285,11 @@ mod tests {
             );
         }
         // Let the last segment run out: the tween clamps exactly onto the server position at
-        // budget end, so a worm that keeps ticking arrives for good by segment end.
+        // budget end, so a worm that keeps ticking arrives for good by segment end. The budget is
+        // max(ring) * INTERVAL_HEADROOM and the ring's widest sample here is 25 frames (the
+        // consume-advance between observes), i.e. ~31.25 frames; 40 covers it with margin.
         let s = p.by_id.get_mut(&9).unwrap();
-        for _ in 0..29 {
+        for _ in 0..39 {
             advance_prediction(s, 1.0 / 60.0);
         }
         assert_eq!(

@@ -5506,10 +5506,11 @@ mod pose_resolution_tests {
                 }
             }
         };
-        let no_dead_routine = |app: &App| {
-            app.world()
-                .query::<&crate::scheduler_runtime::ActiveSchedulers>()
-                .iter()
+        let no_dead_routine = |app: &mut App| {
+            // Bevy 0.19: World::query takes &mut self (archetype refresh) and QueryState::iter
+            // takes the world separately.
+            let mut q = app.world_mut().query::<&crate::scheduler_runtime::ActiveSchedulers>();
+            q.iter(app.world())
                 .all(|s| !s.routine_names().any(|n| n == *b"dead"))
         };
 
@@ -5557,7 +5558,7 @@ mod pose_resolution_tests {
             name_vis: None,
         });
         app.world_mut()
-            .entity(actor_entity)
+            .entity_mut(actor_entity)
             .insert(crate::scheduler_runtime::DeadFromAction);
 
         tick(&mut app);
@@ -5580,9 +5581,12 @@ mod pose_resolution_tests {
                 .contains::<crate::scheduler_runtime::DeadFromAction>(),
             "the raise clears the Defeated latch"
         );
+        assert!(
+            no_dead_routine(&mut app),
+            "a raise must not re-fire the dead routine"
+        );
         let actor = app.world().get::<FfxiRenderActor>(actor_entity).unwrap();
         assert!(!actor.inputs.dead, "the wire hp_pct owns death state again");
-        assert!(no_dead_routine(&app), "a raise must not re-fire the dead routine");
 
         // Idle within the death-clip length: with no collapse clip to play (or once it has run),
         // the pose resolves back to the idle family.
@@ -5666,7 +5670,7 @@ mod pose_resolution_tests {
         });
         snapshot.death_homepoint_secs = Some(30);
         app.world_mut()
-            .entity(self_entity)
+            .entity_mut(self_entity)
             .insert(crate::scheduler_runtime::DeadFromAction);
 
         tick(&mut app);
@@ -5698,9 +5702,12 @@ mod pose_resolution_tests {
                 .contains::<crate::scheduler_runtime::DeadFromAction>(),
             "the raise clears self's Defeated latch"
         );
+        assert!(
+            no_dead_routine(&mut app),
+            "a raise must not re-fire the dead routine for self"
+        );
         let actor = app.world().get::<FfxiRenderActor>(self_entity).unwrap();
         assert!(!actor.inputs.dead, "the party row / homepoint channel owns self's death state");
-        assert!(no_dead_routine(&app), "a raise must not re-fire the dead routine for self");
 
         let bound = death_collapse_clip(&actor.routines)
             .map_or(1.0, |(_, f)| f.max(1.0))

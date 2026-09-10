@@ -2,6 +2,11 @@
 
 use serde::{Deserialize, Serialize};
 
+// v28: ViewerEvent::ActionStarted.outcome - the first result block as one typed
+// Option<ResultOutcome> (resolution + info bits + hitDistortion + knockback, ffxi-proto enums
+// from the pinned vendor/server headers) instead of four parallel u8 fields that spelled "no
+// result block" as zero. None means no result block was read; resolution 0 is Hit, so absence
+// must not be a value.
 // v27: ViewerEvent::ActionStarted.{info, hit_distortion, knockback, kind} - the first
 // result's per-result outcome bits packed by BATTLE2 (s2c 0x028): Defeated/CriticalHit
 // flags, the hit-distortion level and the knockback level that drive the victim's reaction
@@ -56,7 +61,7 @@ use serde::{Deserialize, Serialize};
 // v5: InventoryItem.charges_remaining + next_use_vana_ts (item recast/charges).
 // v4: SceneSnapshot.delivery_box (dedicated delivery screen) + ViewerCommand::DeliveryBox
 // (postcard frames are not self-describing, so any shape change bumps this).
-pub const PROTOCOL_VERSION: u32 = 27;
+pub const PROTOCOL_VERSION: u32 = 28;
 
 /// Longest countdown `SceneSnapshot::status_icon_expiries` can carry. The
 /// producer rejects anything beyond it as a corrupt 0x063 timestamp, and the HUD
@@ -1577,18 +1582,15 @@ pub enum ViewerEvent {
         /// `animation` (attack.h AttackAnimation) bits; only a `CATEGORY_BASIC_ATTACK` body
         /// carries them, absent otherwise.
         result: Option<(u8, u16)>,
-        /// First result's raw `animation` index, for every category — the file-table key of
+        /// First result's raw `animation` index, for every category: the file-table key of
         /// the caster's effect DAT. Absent on a result-less or truncated body.
         animation: Option<u16>,
-        /// First result's outcome bits in the 0x028 per-result order (vendor/server/src/map/
-        /// packets/s2c/0x028_battle2.cpp GP_SERV_COMMAND_BATTLE2::pack), read for every category:
-        /// `info` carries Defeated/CriticalHit (vendor/server enums/action/info.h - bit 1 /
-        /// bit 2), `hit_distortion` 0..3 and `knockback` 0..7 pick the victim's reaction
-        /// routine, `kind` is uninterpreted. Zero when no result block was read.
-        info: u8,
-        hit_distortion: u8,
-        knockback: u8,
-        kind: u8,
+        /// The first result block as one typed outcome (ffxi_proto::melee::ResultOutcome):
+        /// resolution + info bits (Defeated/CriticalHit) + hitDistortion + knockback, read for
+        /// every category in the 0x028 per-result order (vendor/server/src/map/packets/s2c/
+        /// 0x028_battle2.cpp GP_SERV_COMMAND_BATTLE2::pack). None means no result block was
+        /// read: resolution 0 is Hit, so absence must not be spelled as zero.
+        outcome: Option<ffxi_proto::melee::ResultOutcome>,
     },
 
     /// One-shot emote broadcast (s2c 0x05A MOTIONMES): `emote_id` is the wire
@@ -2149,7 +2151,7 @@ mod tests {
 
     #[test]
     fn ferry_protocol_preserves_transport_and_voyage_fields() {
-        const VERSION: u32 = 27;
+        const VERSION: u32 = 28;
         const STAMP: u32 = 0x1200_3400;
         assert_eq!(PROTOCOL_VERSION, VERSION);
         let mut snapshot = sample_snapshot();

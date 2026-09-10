@@ -2003,6 +2003,42 @@ mod tests {
                 s.rendered_pos.x
             );
         }
+        // Let the last segment run out: the tween clamps exactly onto the server position at
+        // budget end, so a worm that keeps ticking arrives for good by segment end.
+        let s = p.by_id.get_mut(&9).unwrap();
+        for _ in 0..29 {
+            advance_prediction(s, 1.0 / 60.0);
+        }
+        assert_eq!(
+            s.rendered_pos.x, 3.0,
+            "arrives exactly at segment end: {}",
+            s.rendered_pos.x
+        );
+    }
+
+    #[test]
+    fn worm_speed_zero_idle_produces_no_chase_and_no_band_churn() {
+        // A burrowed worm that does not move sends no POS updates at all: a 0 speed byte with no
+        // position change must not start a segment, band anything, or drift the rendered pose.
+        let anchor = Vec3::new(12.0, -4.0, 7.5);
+        let mut p = EntityPrediction::default();
+        p.observe(9, anchor, 0, 0, 0, false);
+        for _ in 0..600 {
+            advance_prediction(p.by_id.get_mut(&9).unwrap(), 1.0 / 60.0);
+        }
+        // Re-sent identical positions (a server re-broadcasting an unchanged pose) must not
+        // churn either: observe() gates on a real move.
+        for _ in 0..5 {
+            p.observe(9, anchor, 0, 0, 0, false);
+            advance_prediction(p.by_id.get_mut(&9).unwrap(), 1.0 / 60.0);
+        }
+        let s = &p.by_id[&9];
+        assert!(!s.is_chasing(), "an idle worm has no segment to hold");
+        assert!(
+            s.last_update.is_none(),
+            "no update was ever consumed: no band churn"
+        );
+        assert_eq!(s.rendered_pos, anchor, "the rendered pose does not drift");
     }
 
     #[test]

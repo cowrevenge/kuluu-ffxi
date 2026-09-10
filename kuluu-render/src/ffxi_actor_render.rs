@@ -3609,7 +3609,9 @@ pub fn tick_live_ffxi_actors(
         if !raised.is_empty() {
             for (entity, actor, _, _, latch) in q_actors.iter() {
                 if latch.is_some() && raised.contains(&actor.world_id) {
-                    commands.entity(entity).remove::<crate::scheduler_runtime::DeadFromAction>();
+                    commands
+                        .entity(entity)
+                        .remove::<crate::scheduler_runtime::DeadFromAction>();
                 }
             }
         }
@@ -3629,8 +3631,9 @@ pub fn tick_live_ffxi_actors(
         };
         // Model not loaded yet: the clip still plays from the pose pass; only the dirt and
         // sound are lost. Acceptable degradation — the load lands within a few frames.
-        let Some((_, actor, _, _, _)) =
-            q_actors.iter().find(|(_, a, _, _, _)| a.world_id == world_id)
+        let Some((_, actor, _, _, _)) = q_actors
+            .iter()
+            .find(|(_, a, _, _, _)| a.world_id == world_id)
         else {
             continue;
         };
@@ -3766,9 +3769,8 @@ pub fn tick_live_ffxi_actors(
         (self_move.forward, self_move.strafe, self_move.moving);
 
     let motion = &*motion;
-    q_actors
-        .par_iter_mut()
-        .for_each(|(_entity, mut actor, actor_global, mut vis, dead_from_action)| {
+    q_actors.par_iter_mut().for_each(
+        |(_entity, mut actor, actor_global, mut vis, dead_from_action)| {
             let world_id = actor.world_id;
             if world_id == 0 {
                 return;
@@ -3948,7 +3950,8 @@ pub fn tick_live_ffxi_actors(
             if special.hidden {
                 *vis = Visibility::Hidden;
             }
-        });
+        },
+    );
 
     for (_, actor, _, _, _) in &q_actors {
         registry
@@ -3958,8 +3961,9 @@ pub fn tick_live_ffxi_actors(
     }
 
     if let Some(self_id) = self_id {
-        if let Some((_, actor, _, _, _)) =
-            q_actors.iter().find(|(_, a, _, _, _)| a.world_id == self_id)
+        if let Some((_, actor, _, _, _)) = q_actors
+            .iter()
+            .find(|(_, a, _, _, _)| a.world_id == self_id)
         {
             rest.observe_exit_clip(matches!(actor.rest_phase, RestPlayback::Stopping { .. }));
         }
@@ -5509,7 +5513,9 @@ mod pose_resolution_tests {
         let no_dead_routine = |app: &mut App| {
             // Bevy 0.19: World::query takes &mut self (archetype refresh) and QueryState::iter
             // takes the world separately.
-            let mut q = app.world_mut().query::<&crate::scheduler_runtime::ActiveSchedulers>();
+            let mut q = app
+                .world_mut()
+                .query::<&crate::scheduler_runtime::ActiveSchedulers>();
             q.iter(app.world())
                 .all(|s| !s.routine_names().any(|n| n == *b"dead"))
         };
@@ -5517,7 +5523,10 @@ mod pose_resolution_tests {
         // Mob case: the latch is what dispatch_melee_action_started inserts on a Defeated
         // result; here it is inserted directly and the wire hp_pct owns death state.
         let loaded = load_npc(1568).expect("installed retail NPC DAT"); // Hare
-        let skin = app.world_mut().resource_mut::<FfxiSkinRegistry>().alloc_skin();
+        let skin = app
+            .world_mut()
+            .resource_mut::<FfxiSkinRegistry>()
+            .alloc_skin();
         let actor_entity = app
             .world_mut()
             .spawn((
@@ -5575,8 +5584,7 @@ mod pose_resolution_tests {
         tick(&mut app);
         tick(&mut app);
         assert!(
-            !app
-                .world()
+            !app.world()
                 .entity(actor_entity)
                 .contains::<crate::scheduler_runtime::DeadFromAction>(),
             "the raise clears the Defeated latch"
@@ -5609,7 +5617,10 @@ mod pose_resolution_tests {
         // UPDATE_HP), so death and raise both arrive through the party row / homepoint timer
         // channel that self_dead reads.
         let loaded = load_pc(1, false, &[], None, None, None).expect("installed retail PC DAT");
-        let skin = app.world_mut().resource_mut::<FfxiSkinRegistry>().alloc_skin();
+        let skin = app
+            .world_mut()
+            .resource_mut::<FfxiSkinRegistry>()
+            .alloc_skin();
         let self_entity = app
             .world_mut()
             .spawn((
@@ -5675,7 +5686,10 @@ mod pose_resolution_tests {
 
         tick(&mut app);
         let actor = app.world().get::<FfxiRenderActor>(self_entity).unwrap();
-        assert!(actor.inputs.dead, "the party row / homepoint channel holds self's death pose");
+        assert!(
+            actor.inputs.dead,
+            "the party row / homepoint channel holds self's death pose"
+        );
 
         // Raise: the party row recovers and the homepoint timer clears.
         for m in &mut app
@@ -5696,8 +5710,7 @@ mod pose_resolution_tests {
         tick(&mut app);
         tick(&mut app);
         assert!(
-            !app
-                .world()
+            !app.world()
                 .entity(self_entity)
                 .contains::<crate::scheduler_runtime::DeadFromAction>(),
             "the raise clears self's Defeated latch"
@@ -5707,7 +5720,10 @@ mod pose_resolution_tests {
             "a raise must not re-fire the dead routine for self"
         );
         let actor = app.world().get::<FfxiRenderActor>(self_entity).unwrap();
-        assert!(!actor.inputs.dead, "the party row / homepoint channel owns self's death state");
+        assert!(
+            !actor.inputs.dead,
+            "the party row / homepoint channel owns self's death state"
+        );
 
         let bound = death_collapse_clip(&actor.routines)
             .map_or(1.0, |(_, f)| f.max(1.0))

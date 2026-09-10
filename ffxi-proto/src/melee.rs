@@ -278,8 +278,8 @@ mod tests {
     fn wire_roundtrips_through_melee_result() {
         for resolution in 0..=4u8 {
             for animation in 0..=4u16 {
-                let r = MeleeResult::from_wire(resolution, animation, 0, 0, 0)
-                    .expect("in-range bits");
+                let r =
+                    MeleeResult::from_wire(resolution, animation, 0, 0, 0).expect("in-range bits");
                 assert_eq!(r.to_wire(), (resolution, animation, 0, 0, 0));
             }
         }

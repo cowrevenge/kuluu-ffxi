@@ -2659,8 +2659,8 @@ pub enum AgentEvent {
         target_id: Option<u32>,
         result: Option<ffxi_proto::melee::MeleeResult>,
         animation: Option<u16>,
-        /// The first result block as one typed outcome (resolution + info bits + hitDistortion
-        /// + knockback), read for every category in the 0x028 per-result order (vendor/server/
+        /// The first result block as one typed outcome (resolution, info bits, hitDistortion,
+        /// and knockback), read for every category in the 0x028 per-result order (vendor/server/
         /// src/map/packets/s2c/0x028_battle2.cpp GP_SERV_COMMAND_BATTLE2::pack). None means no
         /// result block was read: resolution 0 is Hit, so absence must not be spelled as zero.
         outcome: Option<ffxi_proto::melee::ResultOutcome>,

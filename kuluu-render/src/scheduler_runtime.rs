@@ -1605,9 +1605,7 @@ pub fn hit_reaction_routine(
         // hitDistortion(2) knockback(3) param(17) messageID(10) modifier(31).
         // None/Light/Medium all play `damg` per retail's dam0 branch table - never sdam, which
         // flinches nothing on its own.
-        ActionResolution::Hit
-            if hit_distortion == HitDistortion::Heavy && model_has(b"ldam") =>
-        {
+        ActionResolution::Hit if hit_distortion == HitDistortion::Heavy && model_has(b"ldam") => {
             *b"ldam"
         }
         ActionResolution::Hit => *b"damg",
@@ -1792,7 +1790,11 @@ pub fn dispatch_melee_action_started(
         if combat_log_enabled() && outcome.is_some() {
             println!(
                 "COMBAT_ARM actor={} target={:?} outcome={:?} swing={} armed_by={}",
-                actor_id, victim, outcome, fourcc(swing), fourcc(armed_by)
+                actor_id,
+                victim,
+                outcome,
+                fourcc(swing),
+                fourcc(armed_by)
             );
         }
         // F49 - info bit 1 (Defeated): retail flips StatusServer on the same frame as the HP

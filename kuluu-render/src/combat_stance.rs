@@ -1314,9 +1314,9 @@ pub fn ground_remote_movers_system(
         // render actor exists yet): Flying keeps server Y; everything else grounds.
         let flying = q_children.get(entity).is_ok_and(|children| {
             children.iter().any(|child| {
-                q_render.get(child).is_ok_and(|actor| {
-                    actor.movement_type() == ffxi_dat::cib::MovementType::Flying
-                })
+                q_render
+                    .get(child)
+                    .is_ok_and(|actor| actor.movement_type() == ffxi_dat::cib::MovementType::Flying)
             })
         });
         if flying {
@@ -1773,12 +1773,20 @@ mod tests {
         // floor sits at 2.0 and grounding must place the mover on it, every frame.
         let mut app = grounding_app(2.0);
         let mob = spawn_remote_mob(&mut app, 900);
-        app.world_mut()
-            .resource_mut::<EntityPrediction>()
-            .observe(900, Vec3::new(0.5, 1.5, 0.0), 0, 40, 40, false);
+        app.world_mut().resource_mut::<EntityPrediction>().observe(
+            900,
+            Vec3::new(0.5, 1.5, 0.0),
+            0,
+            40,
+            40,
+            false,
+        );
         tick_frames(&mut app, 5);
         let t = app.world().get::<Transform>(mob).unwrap();
-        assert!((t.translation.y - 2.0).abs() < 1e-4, "mesh Y, not the wire Y");
+        assert!(
+            (t.translation.y - 2.0).abs() < 1e-4,
+            "mesh Y, not the wire Y"
+        );
         assert_ne!(t.translation.y, 1.5);
         assert!((t.translation.x - 0.5).abs() < 1e-4);
     }
@@ -1791,13 +1799,23 @@ mod tests {
         // update time.
         let mut app = grounding_app(2.0);
         let mob = spawn_remote_mob(&mut app, 901);
-        app.world_mut()
-            .resource_mut::<EntityPrediction>()
-            .observe(901, Vec3::new(0.0, 1.5, 0.0), 0, 40, 40, false);
+        app.world_mut().resource_mut::<EntityPrediction>().observe(
+            901,
+            Vec3::new(0.0, 1.5, 0.0),
+            0,
+            40,
+            40,
+            false,
+        );
         tick_frames(&mut app, 30); // one AI tick of sample_age before the move
-        app.world_mut()
-            .resource_mut::<EntityPrediction>()
-            .observe(901, Vec3::new(1.5, 1.5, 0.0), 0, 40, 40, false);
+        app.world_mut().resource_mut::<EntityPrediction>().observe(
+            901,
+            Vec3::new(1.5, 1.5, 0.0),
+            0,
+            40,
+            40,
+            false,
+        );
         let mut next = 0;
         for offset in [2usize, 8, 16] {
             tick_frames(&mut app, offset - next);
@@ -1828,12 +1846,20 @@ mod tests {
         // answer, so the wire Y stands and nothing snaps.
         let mut app = grounding_app(2.0);
         let mob = spawn_remote_mob(&mut app, 902);
-        app.world_mut()
-            .resource_mut::<EntityPrediction>()
-            .observe(902, Vec3::new(100.0, 1.5, 0.0), 0, 40, 40, false);
+        app.world_mut().resource_mut::<EntityPrediction>().observe(
+            902,
+            Vec3::new(100.0, 1.5, 0.0),
+            0,
+            40,
+            40,
+            false,
+        );
         tick_frames(&mut app, 5);
         let t = app.world().get::<Transform>(mob).unwrap();
-        assert!((t.translation.y - 1.5).abs() < 1e-6, "server Y kept off-mesh");
+        assert!(
+            (t.translation.y - 1.5).abs() < 1e-6,
+            "server Y kept off-mesh"
+        );
         assert!((t.translation.x - 100.0).abs() < 1e-4);
     }
 
@@ -1851,18 +1877,25 @@ mod tests {
         };
         let child = app
             .world_mut()
-            .spawn(crate::ffxi_actor_render::render_actor_with_movement_for_test(
-                skeleton,
-                Vec::new(),
-                ffxi_dat::cib::MovementType::Flying,
-            ))
+            .spawn(
+                crate::ffxi_actor_render::render_actor_with_movement_for_test(
+                    skeleton,
+                    Vec::new(),
+                    ffxi_dat::cib::MovementType::Flying,
+                ),
+            )
             .id();
         // Bevy 0.19's EntityRef is read-only; entity_mut's add_child keeps both sides of the
         // link (the parent's Children and child's ChildOf).
         app.world_mut().entity_mut(mob).add_child(child);
-        app.world_mut()
-            .resource_mut::<EntityPrediction>()
-            .observe(903, Vec3::new(0.5, 1.5, 0.0), 0, 40, 40, false);
+        app.world_mut().resource_mut::<EntityPrediction>().observe(
+            903,
+            Vec3::new(0.5, 1.5, 0.0),
+            0,
+            40,
+            40,
+            false,
+        );
         tick_frames(&mut app, 5);
         let t = app.world().get::<Transform>(mob).unwrap();
         assert!(

@@ -11,11 +11,13 @@
 //! ROM/4/109.DAT (zone 115 entity 17248272, no weapon; ships dfi?/dfm?, wlk0/idl0/run0/ded0/cor0,
 //! routines ati0..2/atf0/dead/corp/damg/sdam/ldam/gurd/pary/sway + degenerate `init`); HumeM
 //! skeleton 7072 (ROM/27/82.DAT) with main-hand weapon 8392 whose motion base is 9672
-//! (ROM/32/13.DAT - ships ati0..2, NO bti0). XIM: EffectRoutineInterpolatedEffects.kt:62
-//! FlinchAnimationInstance, poc/Actor.kt onDisplayDeath ~860. LSB: vendor/server/src/map/packets/
-//! s2c/0x028_battle2.cpp (wire layout), attack.h:52-59 (limb). Scenarios S1–S10 per
+//! (ROM/32/13.DAT - ships ati0..2, NO bti0). XIM: EffectRoutineInterpolatedEffects.kt
+//! FlinchAnimationInstance, poc/Actor.kt onDisplayDeath. LSB: vendor/server/src/map/packets/
+//! s2c/0x028_battle2.cpp GP_SERV_COMMAND_BATTLE2::pack (wire layout), attack.h AttackAnimation
+//! (limb). Scenarios S1–S10 per
 //! artifacts/rabbit_tester/plan.md §4; assertions are ordering/ranges, not exact frames.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use bevy::prelude::*;
@@ -33,7 +35,9 @@ use kuluu_render::ffxi_actor_render::{
 use kuluu_render::scene::{
     apply_invis_flag_system, EntityMaterials, EntityMesh, Target, TrackedEntities,
 };
-use kuluu_render::scheduler_runtime::{ActiveSchedulers, GlobalEffectDir, SchedulerRuntimePlugin};
+use kuluu_render::scheduler_runtime::{
+    ActionDatRoot, ActiveSchedulers, GlobalEffectDir, SchedulerRuntimePlugin,
+};
 use kuluu_render::skinned_ffxi_material::{FfxiSkinRegistry, FfxiSkinnedMaterialCache};
 use kuluu_render::snapshot::{EventLog, SceneState};
 use kuluu_render::EntityTable;
@@ -77,7 +81,7 @@ fn install() -> Option<ffxi_dat::DatRoot> {
 }
 
 // ---------------------------------------------------------------------------
-// BATTLE2 wire packing - vendor/server/src/map/packets/s2c/0x028_battle2.cpp:41-76, from bit 8,
+// BATTLE2 wire packing - vendor/server/src/map/packets/s2c/0x028_battle2.cpp GP_SERV_COMMAND_BATTLE2::pack, from bit 8,
 // LSB-first per byte: actor_id(32), trg_sum(6), res_sum(4), action_kind(4), action_id(32),
 // info(32); if trg_sum>0: target(32), nres(4); if nres>0: resolution(3), kind(2), animation(12),
 // info(5), hit_distortion(2), knockback(3). Wire values: resolution 0=Hit/1=Miss/2=Guard/
@@ -108,7 +112,7 @@ impl Bits {
         self.pos += nbits;
     }
 
-    /// LSB rounds the body to a 4-byte size (basic.h:118).
+    /// LSB rounds the body to a 4-byte size (vendor/server/src/map/packets/basic.h CBasicPacket::setSize).
     fn finish(self) -> Vec<u8> {
         let end = (self.pos + 7).div_ceil(8) * 4;
         let end = end.max(4);
@@ -180,6 +184,11 @@ fn build_app() -> App {
     // dat_mzb/zone_doors tests do.
     bevy::tasks::AsyncComputeTaskPool::get_or_init(Default::default);
     let mut app = App::new();
+    // Every action-DAT read (ROM/0/0.DAT's global effect dir included) resolves through the
+    // shared root the host wires; without one here Bevy auto-inserts the default None and the
+    // global dir lands empty, so S6c/S6d's ldam precondition can never hold. Wire it from the
+    // same test install load_npc/load_pc use.
+    app.insert_resource(ActionDatRoot(install().map(Arc::new)));
     app.init_resource::<Time>();
     // The plugin's particle systems take asset stores as ResMut; a bare app has none of them.
     app.init_resource::<bevy::asset::Assets<bevy::prelude::Mesh>>();
@@ -754,7 +763,7 @@ fn s8_info_chunk_scale_and_movement_reach_the_live_actor() {
     );
 
     // Live pipeline: build_app lacks the load-pipeline resources; add exactly what production's
-    // dat_mmb chain (dat_mmb.rs:200-213) registers for kick/poll.
+    // dat_mmb chain (kuluu-render/src/dat_mmb.rs DatOverlayPlugin) registers for kick/poll.
     let mut app = build_app();
     app.init_resource::<bevy::asset::Assets<kuluu_render::skinned_ffxi_material::FfxiSkinnedMaterial>>();
     app.init_resource::<FfxiSkinnedMaterialCache>();
@@ -777,8 +786,9 @@ fn s8_info_chunk_scale_and_movement_reach_the_live_actor() {
     let (bat_parent, _) = spawn_actor(&mut app, BAT_W, EntityKind::Mob, &bat);
     let (walker_parent, _) = spawn_actor(&mut app, WALKER_W, EntityKind::Mob, &walker);
 
-    // The production request shape (look_resolver.rs:796 writes the same message; picking.rs:651
-    // shows the World-side write through the Messages resource).
+    // The production request shape (kuluu-render/src/look_resolver.rs dispatch_look_driven_models
+    // writes the same message; kuluu-render/src/picking.rs send_click shows the World-side write
+    // through the Messages resource).
     for (id, file) in [(BAT_W, BAT_FILE), (WALKER_W, WALKER_FILE)] {
         app.world_mut()
             .resource_mut::<bevy::ecs::message::Messages<LoadActorRequest>>()
@@ -890,7 +900,7 @@ fn s7c_parry_plays_gud_clip() {
     );
 }
 
-/// S7d: Hit with knockback level 2 runs the damage reaction AND `sway` alongside (F52). The
+/// S7d: Hit with knockback level 2 runs the damage reaction AND `sway` alongside (finding F52). The
 /// victim is fresh - no ActiveSchedulers yet - so both routines land in one same-batch insert;
 /// this pins the merge fix that kept the sway insert from overwriting the damage reaction.
 #[test]
@@ -933,7 +943,7 @@ fn s8_resultless_body_arms_nothing() {
     step_n(&mut app, 60);
 
     // The only routine the victim may carry is `init`, the create-time load routine: first
-    // observation takes the hidden->visible resurface path (F53) and every model that ships an
+    // observation takes the hidden->visible resurface path (finding F53) and every model that ships an
     // init runs it on spawn, Rarab's degenerate one included. That is not a reaction to this
     // BATTLE2; anything else would be.
     let got = routines(app.world(), vic_parent);
@@ -950,7 +960,7 @@ fn s8_resultless_body_arms_nothing() {
 // S9 - Defeated: the dead routine falls over instead of popping to a corpse
 // ---------------------------------------------------------------------------
 
-/// S9: Hit with info=Defeated on a Rarab victim. The `dead` routine runs immediately (F49):
+/// S9: Hit with info=Defeated on a Rarab victim. The `dead` routine runs immediately (finding F49):
 /// ded? fall-over at its first Motion stage, and the pose pass holds idle across the gap -
 /// never flashing cor? before ded? owns the pose (D5). build_app pins the pose pass between
 /// dispatch_melee_action_started and tick_active_schedulers so the D5 hold path runs on the
@@ -1070,7 +1080,7 @@ fn s10b_left_attack_with_bti0_plays_the_limb_clip() {
 
 /// S11: the frozen-mob regression. A nonzero animationsub names a special routine on the wire
 /// (sub 1 -> `ini1`, FFXiMain.dll F37); retail plays that name on the model and no-ops when the
-/// model does not ship it (F44). Rarab's DAT ships no `ini1` routine, so the special tier must
+/// model does not ship it (finding F44). Rarab's DAT ships no `ini1` routine, so the special tier must
 /// fall through to locomotion instead of pinning current_clip: a not-moving mob idles on idl?
 /// and keeps animating. Before the fall-through fix the miss registered the idle fallback as a
 /// one-shot, which held its end frame forever (the spawn-pose freeze).
@@ -1086,7 +1096,7 @@ fn s11_missing_routine_falls_through_on_a_model_without_ini1() {
     let mut app = build_app();
     let (_, child) = spawn_actor(&mut app, RARAB_W, EntityKind::Mob, &loaded);
 
-    // First observation at sub 0: retail's create path runs 'init' on the new actor (F53).
+    // First observation at sub 0: retail's create path runs 'init' on the new actor (finding F53).
     // Rarab ships no usable init motion, so the pose stays on idle; stepping also establishes
     // the prev state that makes the sub change below a genuine F37 trigger instead of another
     // create.
@@ -1135,7 +1145,7 @@ fn s11_missing_routine_falls_through_on_a_model_without_ini1() {
 // ---------------------------------------------------------------------------
 
 /// S12: the full special-pose lifecycle on a model that ships both routines (ROM/5/64.DAT).
-/// First observation is a retail actor create and runs 'init' (F53): the pop-up sp0? plays once
+/// First observation is a retail actor create and runs 'init' (finding F53): the pop-up sp0? plays once
 /// and holds its end frame while the wire state stays up, with the model root visible throughout.
 /// Retail hides only on status INVISIBLE, never on clip completion. A sub change then fires ini1
 /// (dig-down sp1?), the buried window hides on status, resurface replays init instead of re-firing

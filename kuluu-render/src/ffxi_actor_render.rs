@@ -1825,6 +1825,9 @@ pub(crate) fn render_actor_for_test(skeleton: Skeleton, world_pose: Vec<Mat4>) -
         battle_clips: Arc::default(),
         routines: Arc::default(),
         action_assets: Arc::default(),
+        rejected_clips: Vec::new(),
+        model_dat: String::new(),
+        cib: None,
     };
     FfxiRenderActor {
         world_pose,
@@ -2216,7 +2219,23 @@ fn advance_engage(
     }
 }
 
-fn reset_actor_pose_state(actor: &mut FfxiRenderActor, elapsed_frames: f32) {
+// The precedence tier that owns a frame's pose selection. CLIP_WARN names the tier so a miss
+// on an override (special/fishing asking for a clip the model does not ship) is distinguishable
+// from a miss on the base tiers.
+#[derive(Clone, Copy, PartialEq)]
+enum PoseTier {
+    Death,
+    Action,
+    EngageOverlay,
+    Fishing,
+    Special,
+    Rest,
+    Locomotion,
+}
+
+// `animation_locked` is always false here: the action was just cleared above, so no lock can
+// be in effect on the re-pose.
+fn reset_actor_pose_state(actor: &mut FfxiRenderActor, elapsed_frames: f32, name: Option<&str>) {
     actor.inputs = ActorAnimInputs::default();
     actor.rest_phase = RestPlayback::Inactive;
 
@@ -2224,24 +2243,11 @@ fn reset_actor_pose_state(actor: &mut FfxiRenderActor, elapsed_frames: f32) {
     actor.engage = EngageMachine::NotEngaged;
     actor.coordinator.clear();
     actor.current_clip = None;
-    advance_actor_pose(actor, elapsed_frames, None, None, false, None);
+    advance_actor_pose(actor, elapsed_frames, None, None, false, name);
     // Ordered after the re-pose, whose default (alive) inputs would otherwise read
     // as having watched this actor alive: retail only plays `ded?` for a death it
     // saw, so a KO'd zone-in resumes on the held corpse frame.
     actor.death_phase = actor_state::DeathPhase::Unobserved;
-}
-
-// The precedence tier that owns a frame's pose selection. CLIP_WARN names the tier so a miss
-// on an override (special/fishing asking for a clip the model does not ship) is distinguishable
-// from a miss on the base tiers.
-#[derive(Clone, Copy, PartialEq)]
-enum PoseTier {
-    Action,
-    EngageOverlay,
-    Fishing,
-    Special,
-    Rest,
-    Locomotion,
 }
 
 // Runs inside the parallel per-actor pass: it touches only the actor's own
@@ -2288,8 +2294,8 @@ fn advance_actor_pose(
             act.remaining -= elapsed_frames;
             // While an AnimationLock is held, the routine's Motion stage owns the clip: keep it
             // selected past its own length instead of releasing to idle. One-shots pin their end
-            // frame in the coordinator (num_loops = 1), so this is what holds a buried/emerged
-            // pose until the lock lapses - the general form of the old burrow_holding flag.
+            // frame in the coordinator (num_loops = 1), so this holds a buried/emerged pose until
+            // the lock lapses.
             if act.remaining <= 0.0 && !animation_locked {
                 *action = None;
                 action_clips.clear();
@@ -2344,6 +2350,32 @@ fn advance_actor_pose(
         .active_routine
         .and_then(|name| routine_motion_clip(routines, DatId::from_name(&name)));
 
+    // Retail's `dead` routine outranks locomotion and any in-flight action, so the collapse
+    // heads the selection chain; when its timer expires the held `cor?` takes over through the
+    // locomotion tier.
+    let dead = actor_state::corpse_pose_selected(inputs);
+    // A missing collapse clip must not stall the corpse in Collapsing behind a pose that never
+    // draws: filter to clips this model ships, so a dead actor without `ded?` settles straight
+    // to the held `cor?`.
+    let collapse = dead
+        .then(|| death_collapse_clip(routines))
+        .flatten()
+        .filter(|(id, _)| {
+            animations
+                .iter()
+                .any(|clip| clip.id.parameterized_match(id))
+        });
+    *death_phase = actor_state::next_death_phase(
+        *death_phase,
+        dead,
+        collapse.map_or(0.0, |(_, frames)| frames),
+        elapsed_frames,
+    );
+    let collapse_id = match *death_phase {
+        actor_state::DeathPhase::Collapsing { .. } => collapse.map(|(id, _)| id),
+        _ => None,
+    };
+
     let use_battle = action.is_some()
         || !matches!(*engage, EngageMachine::NotEngaged)
         || inputs.engage_state.is_battle_idle();
@@ -2358,9 +2390,10 @@ fn advance_actor_pose(
     };
     let usable = |matches: &[&SkeletonAnimation]| matches.iter().any(|a| is_usable_clip(a));
 
-    // Walk the precedence tiers in order (action > engage overlay > fishing > special > rest >
-    // locomotion). A tier claims the pose only when its clip resolves to at least one usable chunk
-    // in this model's sets; a requested clip the model does not ship warns once and falls through
+    // Walk the precedence tiers in order (death collapse > action > engage overlay > fishing >
+    // special > rest > locomotion). A tier claims the pose only when its clip resolves to at
+    // least one usable chunk in this model's sets; a requested clip the model does not ship warns
+    // once and falls through
     // to the next tier instead of pinning current_clip. That is what keeps an entity whose named
     // routine the model does not ship out of the special override: its clip never resolves, so
     // selection drops to locomotion and the walk/idle clip loops normally rather than registering
@@ -2369,9 +2402,11 @@ fn advance_actor_pose(
     let mut one_shot_rest = false;
     let mut chosen: Option<(DatId, bool, PoseTier)> = None;
 
-    if let Some(id) = action_id {
+    if let Some(id) = collapse_id {
+        // One-shot: `ded?` plays once; when the phase timer expires the held `cor?` takes over
+        // through the locomotion tier.
         if usable(&resolve(id)) {
-            chosen = Some((id, false, PoseTier::Action));
+            chosen = Some((id, false, PoseTier::Death));
         } else {
             clip_miss(
                 actor.world_id,
@@ -2379,8 +2414,24 @@ fn advance_actor_pose(
                 model_dat,
                 &id,
                 rejected_clips,
-                PoseTier::Action,
+                PoseTier::Death,
             );
+        }
+    }
+    if chosen.is_none() {
+        if let Some(id) = action_id {
+            if usable(&resolve(id)) {
+                chosen = Some((id, false, PoseTier::Action));
+            } else {
+                clip_miss(
+                    actor.world_id,
+                    name.unwrap_or("-"),
+                    model_dat,
+                    &id,
+                    rejected_clips,
+                    PoseTier::Action,
+                );
+            }
         }
     }
     if chosen.is_none() {
@@ -2586,6 +2637,7 @@ fn advance_actor_pose(
                 loop_duration: None,
                 num_loops: action.and_then(|a| a.num_loops).or((one_shot_fishing
                     || one_shot_rest
+                    || matches!(selected_tier, PoseTier::Death)
                     || matches!(selected_tier, PoseTier::Special))
                 .then_some(1)),
                 low_priority: false,
@@ -3654,7 +3706,11 @@ pub fn tick_live_ffxi_actors(
             let snap = index.by_id.get(&world_id);
 
             if zone_changed || (!is_self && snap.is_none()) {
-                reset_actor_pose_state(&mut actor, elapsed_frames);
+                reset_actor_pose_state(
+                    &mut actor,
+                    elapsed_frames,
+                    snap.and_then(|s| s.name.as_deref()),
+                );
                 return;
             }
 
@@ -4420,7 +4476,9 @@ mod pose_resolution_tests {
         ] {
             let loaded = load_npc(file_id).expect("installed retail NPC DAT");
             if animationsub == 1 {
-                let dig = actor_state::burrow_clip(actor_state::BurrowPhase::DigDown).unwrap();
+                // sub=1 names the ini1 routine; on burrowing models its dig motion clip is sp1?,
+                // and this model ships no such clip, so the override falls through to idle.
+                let dig = DatId::from_str("sp1?");
                 assert!(!loaded
                     .all_animations()
                     .iter()
@@ -4518,14 +4576,15 @@ mod pose_resolution_tests {
                     .any(|(a, b)| !a.abs_diff_eq(*b, 1e-5));
             }
             let actor = app.world().get::<FfxiRenderActor>(actor_entity).unwrap();
-            let healthy = moved
-                && (animationsub == 1 || actor.inputs.burrow == actor_state::BurrowPhase::None)
-                && !actor.burrow_holding;
+            // sub=1 keeps the ini1 override active (the model ships no clip for it); every other
+            // sub here settles to plain locomotion.
+            let healthy =
+                moved && (animationsub == 1 || actor.inputs.special.active_routine.is_none());
             results.push((
                 healthy,
                 format!(
-                    "{name}: moved={moved}, phase={:?}, selected={:?}, resolved={:?}, frame={}",
-                    actor.inputs.burrow, actor.current_clip, actor.last_clip, actor.last_frame
+                    "{name}: moved={moved}, special={:?}, selected={:?}, resolved={:?}, frame={}",
+                    actor.inputs.special, actor.current_clip, actor.last_clip, actor.last_frame
                 ),
             ));
         }
@@ -4548,27 +4607,33 @@ mod pose_resolution_tests {
         // Installed ROM/5/64.DAT, the tunnel worm reference.
         let loaded =
             load_npc(crate::look_resolver::npc_dat_id(0x01a8)).expect("installed worm DAT");
-        let dig = actor_state::burrow_clip(actor_state::BurrowPhase::DigDown).unwrap();
-        let duration = loaded
-            .all_animations()
+        let mut actor = make_render_actor(&loaded, 0, Vec::new(), 1, 0.0, 1.0);
+        // sub=1 names the ini1 routine; its first Motion stage is the dig clip: the clip comes
+        // from the routine record, not a hard-coded mapping.
+        let dig = routine_motion_clip(&actor.routines, DatId::from_name(b"ini1"))
+            .expect("worm ini1 routine carries a motion stage");
+        assert!(
+            dig.parameterized_match(&DatId::from_str("sp1?")),
+            "worm dig clip is sp1?"
+        );
+        let duration = actor
+            .animations
             .iter()
             .filter(|clip| clip.id.parameterized_match(&dig))
             .map(SkeletonAnimation::length_in_frames)
             .fold(0.0f32, f32::max);
         assert!(duration > 0.0, "worm has dedicated dig clips");
-        let mut actor = make_render_actor(&loaded, 0, Vec::new(), 1, 0.0, 1.0);
-        actor.inputs.burrow = actor_state::BurrowPhase::DigDown;
+        actor.inputs.special.active_routine = Some(*b"ini1");
         for _ in 0..(duration.ceil() as usize * 2 + 1) {
             advance_actor_pose_standalone(&mut actor, 1.0, None);
         }
         assert!(actor
             .last_clip
             .is_some_and(|id| id.parameterized_match(&dig)));
-        assert!(actor.burrow_holding);
         let buried_pose = actor.world_pose().to_vec();
+        // The one-shot holds its end frame: no further advance moves the pose.
         advance_actor_pose_standalone(&mut actor, duration, None);
         assert_eq!(actor.world_pose(), buried_pose);
-        assert!(actor.burrow_holding);
     }
 
     #[test]
@@ -5082,6 +5147,9 @@ mod pose_resolution_tests {
                             model_transform: None,
                             follow_points: None,
                             screen_color: None,
+                            actor_fade: None,
+                            idle_transition_time: None,
+                            flinch_duration: None,
                         },
                     })
                     .collect(),
@@ -5303,7 +5371,7 @@ mod pose_resolution_tests {
 
         let mut actor = make_render_actor(&loaded, 0, Vec::new(), 1, 0.0, 1.0);
         advance_actor_pose_standalone(&mut actor, 1.0, None);
-        reset_actor_pose_state(&mut actor, 1.0);
+        reset_actor_pose_state(&mut actor, 1.0, None);
         actor.inputs.dead = true;
 
         for _ in 0..600 {

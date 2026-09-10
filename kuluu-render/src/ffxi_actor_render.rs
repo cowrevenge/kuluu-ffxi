@@ -2233,11 +2233,7 @@ enum PoseTier {
 
 // `animation_locked` is always false here: the action was just cleared above, so no lock can
 // be in effect on the re-pose.
-fn reset_actor_pose_state(
-    actor: &mut FfxiRenderActor,
-    elapsed_frames: f32,
-    name: Option<&str>,
-) {
+fn reset_actor_pose_state(actor: &mut FfxiRenderActor, elapsed_frames: f32, name: Option<&str>) {
     actor.inputs = ActorAnimInputs::default();
     actor.rest_phase = RestPlayback::Inactive;
 
@@ -4583,7 +4579,8 @@ mod pose_resolution_tests {
             let actor = app.world().get::<FfxiRenderActor>(actor_entity).unwrap();
             // sub=1 keeps the ini1 override active (the model ships no clip for it); every other
             // sub here settles to plain locomotion.
-            let healthy = moved && (animationsub == 1 || actor.inputs.special.active_routine.is_none());
+            let healthy =
+                moved && (animationsub == 1 || actor.inputs.special.active_routine.is_none());
             results.push((
                 healthy,
                 format!(
@@ -4616,7 +4613,10 @@ mod pose_resolution_tests {
         // comes from the routine record, not a hard-coded mapping).
         let dig = routine_motion_clip(&actor.routines, DatId::from_name(b"ini1"))
             .expect("worm ini1 routine carries a motion stage");
-        assert!(dig.parameterized_match(&DatId::from_str("sp1?")), "worm dig clip is sp1?");
+        assert!(
+            dig.parameterized_match(&DatId::from_str("sp1?")),
+            "worm dig clip is sp1?"
+        );
         let duration = actor
             .animations
             .iter()

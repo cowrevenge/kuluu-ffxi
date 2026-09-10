@@ -666,8 +666,9 @@ pub(crate) fn build_subpacket_tell(sync: u16, recipient: &str, text: &str) -> Ve
 pub(crate) const CHAT_NAME_UNKNOWN00: u8 = 3;
 
 // c2s 0x05B GP_CLI_COMMAND_EVENTEND (vendor/server/src/map/packets/c2s/
-// 0x05b_eventend.h GP_CLI_COMMAND_EVENTEND): UniqueNo u32, EndPara u32, ActIndex u16, Mode u16
-// (0 = End), EventNum u16 (zone id — retail echoes GP_SERV LOGIN EventNum,
+// 0x05b_eventend.h GP_CLI_COMMAND_EVENTEND): UniqueNo u32, EndPara u32, ActIndex u16,
+// Mode u16 (GP_CLI_COMMAND_EVENTEND_MODE: 0 = End, 1 = UpdatePending),
+// EventNum u16 (zone id; retail echoes the GP_SERV LOGIN EventNum,
 // 0x00a_login.cpp GP_SERV_COMMAND_LOGIN::GP_SERV_COMMAND_LOGIN), EventPara u16 (the event id the validator matches
 // against currentEvent->eventId, validation.cpp PacketValidator::isInEvent).
 pub(crate) fn build_subpacket_event_end(
@@ -677,6 +678,7 @@ pub(crate) fn build_subpacket_event_end(
     event_zone: u16,
     event_id: u16,
     choice: u32,
+    mode: u16,
 ) -> Vec<u8> {
     let mut buf = vec![0u8; 20];
     buf[0..4].copy_from_slice(&build_subpacket_header(
@@ -687,9 +689,47 @@ pub(crate) fn build_subpacket_event_end(
     buf[4..8].copy_from_slice(&unique_no.to_le_bytes());
     buf[8..12].copy_from_slice(&choice.to_le_bytes());
     buf[12..14].copy_from_slice(&act_index.to_le_bytes());
+    buf[14..16].copy_from_slice(&mode.to_le_bytes());
 
     buf[16..18].copy_from_slice(&event_zone.to_le_bytes());
     buf[18..20].copy_from_slice(&event_id.to_le_bytes());
+    buf
+}
+
+// c2s 0x05C GP_CLI_COMMAND_EVENTENDXZY (vendor/server/src/map/packets/c2s/
+// 0x05c_eventendxzy.h): x/y/z f32, UniqueNo u32, EndPara u32, EventNum u16,
+// EventPara u16, ActIndex u16, Mode u8, dir i8. The validator accepts only
+// Mode 1 (UpdatePending) (GP_CLI_COMMAND_EVENTENDXZY::validate), and the
+// server stores dir into position_t.rotation on its 0..=255 scale
+// (GP_CLI_COMMAND_EVENTENDXZY::process).
+pub(crate) fn build_subpacket_event_end_xzy(
+    sync: u16,
+    unique_no: u32,
+    x: f32,
+    y: f32,
+    z: f32,
+    dir: u8,
+    end_para: u32,
+    act_index: u16,
+    event_zone: u16,
+    event_id: u16,
+) -> Vec<u8> {
+    let mut buf = vec![0u8; 32];
+    buf[0..4].copy_from_slice(&build_subpacket_header(
+        ffxi_proto::map::c2s::EVENT_END_XZY,
+        8,
+        sync,
+    ));
+    buf[4..8].copy_from_slice(&x.to_le_bytes());
+    buf[8..12].copy_from_slice(&y.to_le_bytes());
+    buf[12..16].copy_from_slice(&z.to_le_bytes());
+    buf[16..20].copy_from_slice(&unique_no.to_le_bytes());
+    buf[20..24].copy_from_slice(&end_para.to_le_bytes());
+    buf[24..26].copy_from_slice(&event_zone.to_le_bytes());
+    buf[26..28].copy_from_slice(&event_id.to_le_bytes());
+    buf[28..30].copy_from_slice(&act_index.to_le_bytes());
+    buf[30] = ffxi_proto::map::c2s::event_end_mode::UPDATE_PENDING as u8;
+    buf[31] = dir;
     buf
 }
 

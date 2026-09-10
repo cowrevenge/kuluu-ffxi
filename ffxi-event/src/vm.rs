@@ -56,7 +56,16 @@ pub enum PendingTag {
     /// documented radian conversion is `radianToRotation`
     /// (vendor/server/src/common/mmo.h, vendor/server/src/common/utils.cpp),
     /// so the tag carries the converted byte rather than the float.
-    SendXzy { x: f32, y: f32, z: f32, dir: u8 },
+    /// `end_para` is Work_Zone[1] at send time: the c2s packet's EndPara field
+    /// (research/XiPackets/world/client/0x005C) and the server's OnEventUpdate
+    /// result (vendor/server/src/map/packets/c2s/0x05c_eventendxzy.cpp).
+    SendXzy {
+        x: f32,
+        y: f32,
+        z: f32,
+        dir: u8,
+        end_para: u32,
+    },
 }
 
 /// Outcome of running the VM until it next needs the host (one `XiEvent::EventIdle`
@@ -154,6 +163,9 @@ const OP_SENDTAG: u8 = 0x43;
 /// The position-tag opcodes scale their work-slot raw values by this to get
 /// the c2s float coordinates (research/XiEvents/OpCodes/0x0047.md).
 const XZY_COORD_SCALE: f32 = 0.001;
+/// s2c PENDINGNUM's num[8] lands in Work_Zone starting at this index
+/// (research/XiPackets/world/server/0x005C GP_SERV_PENDINGNUM).
+const PENDING_NUM_WORK_ZONE_BASE: usize = 2;
 const OP_SLEEP: u8 = 0x6F;
 const OP_TURNWAIT: u8 = 0x70;
 const OP_LOADWAIT: u8 = 0x80;
@@ -448,6 +460,23 @@ impl EventVm {
         }
     }
 
+    /// s2c PENDINGNUM's num[8] copied into Work_Zone starting at index 2
+    /// (research/XiPackets/world/server/0x005C GP_SERV_PENDINGNUM). The event
+    /// system reads these slots as its loop conditions, so the write lands
+    /// before the next step even while a tag is held.
+    pub fn apply_pending_num(&mut self, num: &[i32; 8]) {
+        for (slot, value) in num.iter().enumerate() {
+            if let Some(cell) = self.work_zone.get_mut(PENDING_NUM_WORK_ZONE_BASE + slot) {
+                *cell = *value as u32;
+            }
+        }
+    }
+
+    /// The tag held on its case-1 poll, if any.
+    pub fn pending_tag(&self) -> Option<&PendingTag> {
+        self.pending_ack.as_ref()
+    }
+
     /// Run opcodes until the VM yields (one `EventIdle` tick).
     pub fn step(&mut self) -> StepResult {
         if self.finished {
@@ -624,6 +653,7 @@ impl EventVm {
                             y: self.getworkofs(4, 0) as f32 * XZY_COORD_SCALE,
                             z: self.getworkofs(6, 0) as f32 * XZY_COORD_SCALE,
                             dir: ((radians / (2.0 * std::f32::consts::PI)) * 256.0) as u8,
+                            end_para: self.work_zone(1) as u32,
                         });
                         self.exec_pointer += 10;
                     }
@@ -2333,11 +2363,73 @@ mod tests {
                 // retail's f32 literals fall just short of exactly a quarter
                 // and the conversion truncates rather than rounds.
                 dir: 63,
+                end_para: 0,
             })
         );
 
         e.ack_server();
         assert_eq!(e.step(), StepResult::Done);
+    }
+
+    /// PENDINGNUM's num[8] lands in Work_Zone from index 2 and a later read
+    /// sees it (research/XiPackets/world/server/0x005C).
+    #[test]
+    fn pending_num_writes_work_zone_from_index_two() {
+        let mut e = vm(vec![OP_END], vec![]);
+        e.apply_pending_num(&[7, 8, 9, 10, 11, 12, 13, 14]);
+        for (index, value) in (2..10).zip([7, 8, 9, 10, 11, 12, 13, 14]) {
+            assert_eq!(e.work_zone(index), value);
+        }
+        assert_eq!(e.work_zone(0), 0);
+        assert_eq!(e.work_zone(1), 0);
+    }
+
+    /// The full pending-tag round trip as the signet scripts use it: case 0
+    /// sends the tag and holds; s2c PENDINGNUM updates Work_Zone[2] while still
+    /// held; ack_server releases past the pair, and the script's loop test reads
+    /// the updated value (research/XiPackets/world/server/0x005C).
+    #[test]
+    fn pending_num_lands_while_held_and_ack_runs_on() {
+        // [0..5) WZ[1] = refs[0]; [5..7) 43 00 send+hold; [7..9) 43 01 poll;
+        // [9..17) IF case 1: jump when WZ[2] == refs[1], target absolute 20;
+        // [17..20) fall-through poison; [20..23) WZ[3] = 1; [23] END.
+        let mut data = vec![OP_GET_STORE, 0x01, 0x10, REF0[0], REF0[1]];
+        data.extend_from_slice(&[OP_SENDTAG, 0x00, OP_SENDTAG, 0x01]);
+        data.extend_from_slice(&[
+            OP_IF, 0x02, // v1 = WZ slot 2
+            0x10, SRC[0], // v2 = refs[1]
+            SRC[1], 0x01, // case 1: jump when equal
+            0x14, // val3 = 20 (absolute into EventData)
+            0x00,
+        ]);
+        data.extend_from_slice(&[0xFF; 3]);
+        data.extend_from_slice(&[OP_SET_ONE, 0x03, 0x10]);
+        data.push(OP_END);
+        let mut e = vm(data, vec![42, 7]);
+
+        assert_eq!(
+            e.step(),
+            StepResult::AwaitServerAck(PendingTag::SendTag { end_para: 42 })
+        );
+        // The PENDINGNUM write lands while the tag is still held: num[0] is
+        // Work_Zone[2], where this script's loop condition lives.
+        let mut num = [0i32; 8];
+        num[0] = 7;
+        e.apply_pending_num(&num);
+        assert_eq!(
+            e.work_zone(2),
+            7,
+            "the loop condition must see it before the next step"
+        );
+
+        e.ack_server();
+        assert_eq!(e.step(), StepResult::Done);
+        assert_eq!(e.exec_pointer(), 23, "must land on END past the SET_ONE");
+        assert_eq!(
+            e.work_zone(3),
+            1,
+            "the branch must have taken the updated value"
+        );
     }
 
     /// A bare case-1 poll of the position-tag opcode with no outstanding tag

@@ -1,4 +1,5 @@
 use anyhow::{anyhow, Context, Result};
+use ffxi_event::PendingTag;
 use ffxi_proto::{decode, framing};
 use tokio::sync::{broadcast, mpsc};
 
@@ -2143,11 +2144,69 @@ fn is_fresh_bundle(last_applied: Option<u16>, incoming: u16) -> bool {
     }
 }
 
+/// Send the c2s half of a pending tag round-trip: an EVENT_END subpacket with
+/// Mode=UpdatePending for a plain tag, or the position-tag packet (the only
+/// mode its validator accepts). Both process() functions push s2c EVENTUCOFF
+/// EventRecvPending back; the keepalive intercept on that ack calls
+/// [`crate::event_dialog::DialogSession::ack_server`] to release the VM's hold
+/// and run on (vendor/server/src/map/packets/c2s/0x05b_eventend.cpp,
+/// 0x05c_eventendxzy.cpp GP_CLI_COMMAND_EVENTEND*::process).
+async fn send_pending_tag(
+    map: &mut MapClient,
+    sub_seq: &mut u16,
+    server_last_seq: u16,
+    current_zone_id: u16,
+    unique_no: u32,
+    act_index: u16,
+    event_id: u16,
+    tag: &PendingTag,
+) {
+    let payload = match tag {
+        PendingTag::SendTag { end_para } => build_subpacket_event_end(
+            *sub_seq,
+            unique_no,
+            act_index,
+            current_zone_id,
+            event_id,
+            *end_para,
+            ffxi_proto::map::c2s::event_end_mode::UPDATE_PENDING,
+        ),
+        PendingTag::SendXzy {
+            x,
+            y,
+            z,
+            dir,
+            end_para,
+        } => build_subpacket_event_end_xzy(
+            *sub_seq,
+            unique_no,
+            *x,
+            *y,
+            *z,
+            *dir,
+            *end_para,
+            act_index,
+            current_zone_id,
+            event_id,
+        ),
+    };
+    let header = datagram_header_id(*sub_seq);
+    *sub_seq = sub_seq.wrapping_add(1);
+    if let Err(e) = map.send_encrypted(&payload, header, server_last_seq).await {
+        tracing::warn!(error = %e, "pending-tag c2s send failed");
+    }
+}
+
 /// Route a server-initiated event into the event VM: display it when the VM
 /// can drive it (EVENT_END goes out when the script ends), auto-release it
 /// otherwise so the char never sticks server-side InEvent (which rejects
 /// zonelines, logout, and ~100 other c2s until 0x05B lands).
-fn begin_server_event(
+#[allow(clippy::too_many_arguments)]
+async fn begin_server_event(
+    map: &mut MapClient,
+    sub_seq: &mut u16,
+    server_last_seq: u16,
+    current_zone_id: u16,
     dialog_session: &mut crate::event_dialog::DialogSession,
     trigger: EventTrigger,
     event_tx: &broadcast::Sender<AgentEvent>,
@@ -2194,6 +2253,26 @@ fn begin_server_event(
             cutscene.start(id, event_tx);
             let _ = event_tx.send(AgentEvent::EventStart { event_id: id });
             pending_event_end.push((unique_no, act_index, event_id));
+        }
+        crate::event_dialog::Begin::AwaitServerAck(tag) => {
+            // The script opened on a pending tag (0x43/0x47 case 0): the event
+            // is live server-side and owes its first frame to the s2c ack, so
+            // it tracks like Waiting until then.
+            let id = crate::event_dialog::agent_event_id(unique_no, event_id);
+            cutscene.start(id, event_tx);
+            let _ = event_tx.send(AgentEvent::EventStart { event_id: id });
+            pending_event_end.push((unique_no, act_index, event_id));
+            send_pending_tag(
+                map,
+                sub_seq,
+                server_last_seq,
+                current_zone_id,
+                unique_no,
+                act_index,
+                event_id,
+                &tag,
+            )
+            .await;
         }
         crate::event_dialog::Begin::Undriveable { stopped_op, reason } => {
             tracing::warn!(
@@ -2534,7 +2613,7 @@ async fn keepalive_loop(
                                 }
                                 crate::event_dialog::Advance::Ended { end_para } => {
                                     if take_pending_event_end(&mut pending_event_end, u, n) {
-                                        let payload = build_subpacket_event_end(sub_seq, u, a, current_zone_id, n, end_para);
+                                        let payload = build_subpacket_event_end(sub_seq, u, a, current_zone_id, n, end_para, ffxi_proto::map::c2s::event_end_mode::END);
                                         sub_seq = sub_seq.wrapping_add(1);
                                         if let Err(e) = map.send_encrypted(&payload, datagram_header_id(sub_seq), server_last_seq).await {
                                             tracing::warn!(error = %e, "EVENT_END (vm) send failed");
@@ -2547,11 +2626,24 @@ async fn keepalive_loop(
                                 // next message wait; if none follows, the scene
                                 // just plays out (kuluu-bxts: cancel latch).
                                 crate::event_dialog::Advance::Waiting => {}
+                                crate::event_dialog::Advance::AwaitServerAck(tag) => {
+                                    send_pending_tag(
+                                        map,
+                                        &mut sub_seq,
+                                        server_last_seq,
+                                        current_zone_id,
+                                        u,
+                                        a,
+                                        n,
+                                        &tag,
+                                    )
+                                    .await;
+                                }
                             }
                         } else if !pending_event_end.is_empty() {
                             let mut payload = Vec::new();
                             for (unique_no, act_index, event_num) in pending_event_end.drain(..) {
-                                payload.extend(build_subpacket_event_end(sub_seq, unique_no, act_index, current_zone_id, event_num, 0));
+                                payload.extend(build_subpacket_event_end(sub_seq, unique_no, act_index, current_zone_id, event_num, 0, ffxi_proto::map::c2s::event_end_mode::END));
                                 sub_seq = sub_seq.wrapping_add(1);
                             }
                             if let Err(e) = map.send_encrypted(&payload, datagram_header_id(sub_seq), server_last_seq).await {
@@ -2705,7 +2797,7 @@ async fn keepalive_loop(
                                 }
                                 crate::event_dialog::Advance::Ended { end_para } => {
                                     if take_pending_event_end(&mut pending_event_end, u, n) {
-                                        let payload = build_subpacket_event_end(sub_seq, u, a, current_zone_id, n, end_para);
+                                        let payload = build_subpacket_event_end(sub_seq, u, a, current_zone_id, n, end_para, ffxi_proto::map::c2s::event_end_mode::END);
                                         sub_seq = sub_seq.wrapping_add(1);
                                         if let Err(e) = map.send_encrypted(&payload, datagram_header_id(sub_seq), server_last_seq).await {
                                             tracing::warn!(error = %e, "EVENT_END (vm choice) send failed");
@@ -2715,6 +2807,19 @@ async fn keepalive_loop(
                                     let _ = event_tx.send(AgentEvent::EventEnded);
                                 }
                                 crate::event_dialog::Advance::Waiting => {}
+                                crate::event_dialog::Advance::AwaitServerAck(tag) => {
+                                    send_pending_tag(
+                                        map,
+                                        &mut sub_seq,
+                                        server_last_seq,
+                                        current_zone_id,
+                                        u,
+                                        a,
+                                        n,
+                                        &tag,
+                                    )
+                                    .await;
+                                }
                             }
                         } else {
                             let payload = build_subpacket_event_end(
@@ -2724,6 +2829,7 @@ async fn keepalive_loop(
                                 current_zone_id,
                                 event_num,
                                 choice,
+                                ffxi_proto::map::c2s::event_end_mode::END,
                             );
                             sub_seq = sub_seq.wrapping_add(1);
                             if let Err(e) = map
@@ -3845,7 +3951,7 @@ async fn keepalive_loop(
                         }
                         crate::event_dialog::Advance::Ended { end_para } => {
                             if take_pending_event_end(&mut pending_event_end, u, n) {
-                                let payload = build_subpacket_event_end(sub_seq, u, a, current_zone_id, n, end_para);
+                                let payload = build_subpacket_event_end(sub_seq, u, a, current_zone_id, n, end_para, ffxi_proto::map::c2s::event_end_mode::END);
                                 sub_seq = sub_seq.wrapping_add(1);
                                 if let Err(e) = map.send_encrypted(&payload, datagram_header_id(sub_seq), server_last_seq).await {
                                     tracing::warn!(error = %e, "EVENT_END (vm wait) send failed");
@@ -3855,6 +3961,19 @@ async fn keepalive_loop(
                             let _ = event_tx.send(AgentEvent::EventEnded);
                         }
                         crate::event_dialog::Advance::Waiting => {}
+                        crate::event_dialog::Advance::AwaitServerAck(tag) => {
+                            send_pending_tag(
+                                map,
+                                &mut sub_seq,
+                                server_last_seq,
+                                current_zone_id,
+                                u,
+                                a,
+                                n,
+                                &tag,
+                            )
+                            .await;
+                        }
                     }
                 }
 
@@ -3956,6 +4075,10 @@ async fn keepalive_loop(
                 if zone_transition_sent {
                     if let Some(ev) = mog.zone_in_event.take() {
                         begin_server_event(
+                            map,
+                            &mut sub_seq,
+                            server_last_seq,
+                            current_zone_id,
                             &mut dialog_session,
                             EventTrigger {
                                 event_zone: ev.event_num,
@@ -3970,7 +4093,8 @@ async fn keepalive_loop(
                             &mut cutscene,
                             &mut pending_event_end,
                             &mut auto_event_end,
-                        );
+                        )
+                        .await;
                     }
                 }
                 for (unique_no, act_index, event_num, end_para) in auto_event_end.drain(..) {
@@ -3981,6 +4105,7 @@ async fn keepalive_loop(
                         current_zone_id,
                         event_num,
                         end_para,
+                        ffxi_proto::map::c2s::event_end_mode::END,
                     ));
                     sub_seq = sub_seq.wrapping_add(1);
                 }
@@ -4007,6 +4132,7 @@ async fn keepalive_loop(
                         user_driven: user_driven_events,
                         watchdog_fires,
                         walked_away,
+                        tag_in_flight: dialog_session.has_pending_tag(),
                     },
                     &mut pending_event_end,
                     dialog_session.active_end(),
@@ -4340,22 +4466,93 @@ async fn keepalive_loop(
                                                 .map(|s| s.replace('_', " "))
                                         });
                                     begin_server_event(
+                                        map,
+                                        &mut sub_seq,
+                                        server_last_seq,
+                                        current_zone_id,
                                         &mut dialog_session,
                                         trigger,
                                         &event_tx,
                                         &mut cutscene,
                                         &mut pending_event_end,
                                         &mut auto_event_end,
-                                    );
+                                    )
+                                    .await;
                                     continue;
                                 }
                             }
 
-                            if sub.opcode == ffxi_proto::map::s2c::EVENTUCOFF
-                                && eventucoff_mode_of(sub.data)
-                                    == Some(ffxi_proto::map::eventucoff_mode::CANCEL_EVENT)
-                            {
-                                dialog_session.clear();
+                            // s2c PENDINGNUM writes the event VM's Work_Zone loop
+                            // conditions from index 2; it must land before the next
+                            // step even while a tag is held (research/XiPackets/
+                            // world/server/0x005C GP_SERV_PENDINGNUM).
+                            if sub.opcode == ffxi_proto::map::s2c::PENDINGNUM {
+                                match decode::PendingNum::decode(sub.data) {
+                                    Ok(p) => dialog_session.apply_pending_num(&p.num),
+                                    Err(e) => warn_decode_err(sub.opcode, e),
+                                }
+                                continue;
+                            }
+
+                            // s2c PENDINGSTR copies four 16-byte strings into
+                            // PTR_EventStrings; the only opcode that reads them
+                            // (0xB4 case 1) is skipped by width in our VM, so there
+                            // is nothing to store: a named no-op, not an unknown-
+                            // opcode fallthrough (research/XiPackets/world/server/
+                            // 0x005D).
+                            if sub.opcode == ffxi_proto::map::s2c::PENDINGSTR {
+                                continue;
+                            }
+
+                            if sub.opcode == ffxi_proto::map::s2c::EVENTUCOFF {
+                                match eventucoff_mode_of(sub.data) {
+                                    Some(ffxi_proto::map::eventucoff_mode::CANCEL_EVENT) => {
+                                        dialog_session.clear();
+                                    }
+                                    // The ack both c2s event-end process() functions
+                                    // push after handling a pending tag: release the
+                                    // VM's hold and run on to the next frame. Gated
+                                    // on has_pending_tag so an EventRecvPending with
+                                    // no held tag falls through to handle_sub_packet
+                                    // unchanged (a no-op there).
+                                    Some(ffxi_proto::map::eventucoff_mode::EVENT_RECV_PENDING)
+                                        if dialog_session.has_pending_tag() =>
+                                    {
+                                        let Some((u, a, n)) = dialog_session.active_end()
+                                        else {
+                                            continue;
+                                        };
+                                        let advance = dialog_session.ack_server();
+                                        for cue in dialog_session.take_cues() {
+                                            cutscene.push(cue, &event_tx);
+                                        }
+                                        match advance {
+                                            crate::event_dialog::Advance::Frame(dialog) => {
+                                                emit_event_speech_to_chat(&event_tx, &dialog);
+                                                let _ = event_tx.send(AgentEvent::EventDialog { dialog });
+                                            }
+                                            crate::event_dialog::Advance::Ended { end_para } => {
+                                                if take_pending_event_end(&mut pending_event_end, u, n) {
+                                                    let payload = build_subpacket_event_end(sub_seq, u, a, current_zone_id, n, end_para, ffxi_proto::map::c2s::event_end_mode::END);
+                                                    sub_seq = sub_seq.wrapping_add(1);
+                                                    if let Err(e) = map.send_encrypted(&payload, datagram_header_id(sub_seq), server_last_seq).await {
+                                                        tracing::warn!(error = %e, "EVENT_END (vm ack) send failed");
+                                                    }
+                                                }
+                                                cutscene.end(crate::event_dialog::EventSessionExit::ScriptEnded, &event_tx);
+                                                let _ = event_tx.send(AgentEvent::EventEnded);
+                                            }
+                                            // Chained tag: the next hold in the same
+                                            // script. Send it now; its own
+                                            // EventRecvPending drives the next ack.
+                                            crate::event_dialog::Advance::AwaitServerAck(tag) => {
+                                                send_pending_tag(map, &mut sub_seq, server_last_seq, current_zone_id, u, a, n, &tag).await;
+                                            }
+                                            crate::event_dialog::Advance::Waiting => {}
+                                        }
+                                    }
+                                    _ => {}
+                                }
                             }
 
                             // Keep the LOC_INVENTORY mirror for the delivery-box
@@ -6545,6 +6742,9 @@ struct EventEndFlushInputs {
     user_driven: bool,
     watchdog_fires: bool,
     walked_away: bool,
+    /// A VM pending tag is in flight: its event must stay open server-side for
+    /// OnEventUpdate, so no Mode-0 END may drain it this tick.
+    tag_in_flight: bool,
 }
 
 /// What the tick owes the rest of the loop once the pinned events are drained.
@@ -6576,8 +6776,11 @@ fn flush_pending_event_end(
     sub_seq: u16,
 ) -> Option<EventEndFlush> {
     let dialog_open = active_dialog.is_some();
-    let flush =
-        !inputs.user_driven || inputs.walked_away || (inputs.watchdog_fires && !dialog_open);
+    // A pending tag in flight owns the server-side event until its s2c ack: a
+    // Mode-0 END here would kill it mid-transaction and OnEventUpdate would
+    // find no currentEvent (vendor/server/src/map/packets/c2s/0x05b_eventend.cpp).
+    let flush = !inputs.tag_in_flight
+        && (!inputs.user_driven || inputs.walked_away || (inputs.watchdog_fires && !dialog_open));
     if !flush || pending_event_end.is_empty() {
         return None;
     }
@@ -6596,6 +6799,7 @@ fn flush_pending_event_end(
             event_zone,
             event_id,
             0,
+            ffxi_proto::map::c2s::event_end_mode::END,
         ));
         out.next_sub_seq = out.next_sub_seq.wrapping_add(1);
         out.released += 1;

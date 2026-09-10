@@ -127,6 +127,17 @@ impl DialogRunner {
         self.run(strings)
     }
 
+    /// s2c PENDINGNUM's num[8] into the VM's Work_Zone from index 2; lands
+    /// before the next step even while a tag is held.
+    pub fn apply_pending_num(&mut self, num: &[i32; 8]) {
+        self.vm.apply_pending_num(num);
+    }
+
+    /// The pending tag the VM holds on its case-1 poll, if any.
+    pub fn pending_tag(&self) -> Option<&PendingTag> {
+        self.vm.pending_tag()
+    }
+
     /// Cancel out of the current frame (the Esc path): a menu reports the
     /// cancel selection, a message invalidates the open dialog; either way the
     /// VM ends the event with [`EVENT_CANCELLED_END_PARA`].

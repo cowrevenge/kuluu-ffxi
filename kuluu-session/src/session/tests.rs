@@ -758,7 +758,39 @@ fn flush_inputs(user_driven: bool, watchdog_fires: bool, walked_away: bool) -> E
         user_driven,
         watchdog_fires,
         walked_away,
+        tag_in_flight: false,
     }
+}
+
+#[test]
+fn a_tag_in_flight_holds_the_flush_even_in_agent_mode() {
+    // The auto-release that would otherwise fire every tick in !user_driven
+    // must not drain the event whose pending tag is mid-transaction.
+    let flushes = |tag_in_flight: bool| {
+        let mut pending = vec![PINNED_EVENT];
+        flush_pending_event_end(
+            EventEndFlushInputs {
+                user_driven: false,
+                watchdog_fires: true,
+                walked_away: true,
+                tag_in_flight,
+            },
+            &mut pending,
+            Some(PINNED_EVENT),
+            FLUSH_ZONE,
+            FLUSH_SEQ,
+        )
+        .is_some()
+    };
+
+    assert!(
+        flushes(false),
+        "no tag in flight: the release policy is unchanged"
+    );
+    assert!(
+        !flushes(true),
+        "a tag in flight holds the event open for OnEventUpdate"
+    );
 }
 
 #[test]
@@ -819,8 +851,15 @@ fn agent_mode_auto_release_keeps_the_vm_dialog_walkable() {
     assert!(pending.is_empty());
 
     let (unique_no, act_index, event_id) = PINNED_EVENT;
-    let expected =
-        build_subpacket_event_end(FLUSH_SEQ, unique_no, act_index, FLUSH_ZONE, event_id, 0);
+    let expected = build_subpacket_event_end(
+        FLUSH_SEQ,
+        unique_no,
+        act_index,
+        FLUSH_ZONE,
+        event_id,
+        0,
+        ffxi_proto::map::c2s::event_end_mode::END,
+    );
     assert_eq!(flush.payload, expected);
 
     assert!(
@@ -1028,7 +1067,15 @@ fn lerp_toward_clamps_to_target_on_overshoot() {
 
 #[test]
 fn event_end_writes_csid_to_event_para_field() {
-    let buf = build_subpacket_event_end(0x1234, 0xDEADBEEF, 0x4242, 230, 535, 0);
+    let buf = build_subpacket_event_end(
+        0x1234,
+        0xDEADBEEF,
+        0x4242,
+        230,
+        535,
+        0,
+        ffxi_proto::map::c2s::event_end_mode::END,
+    );
     assert_eq!(buf.len(), 20, "header(4) + body(16)");
 
     assert_eq!(&buf[4..8], &0xDEADBEEFu32.to_le_bytes(), "UniqueNo");
@@ -1048,6 +1095,66 @@ fn event_end_writes_csid_to_event_para_field() {
         "EventNum carries the zone id (retail echoes LOGIN EventNum, \
              0x00a_login.cpp GP_SERV_COMMAND_LOGIN::GP_SERV_COMMAND_LOGIN); LSB's 0x05B handler never reads it",
     );
+}
+
+/// The UpdatePending mode byte of a pending-tag round-trip: same 0x05B shape
+/// as End, Mode=1 instead of 0 (GP_CLI_COMMAND_EVENTEND_MODE,
+/// vendor/server/src/map/packets/c2s/0x05b_eventend.h).
+#[test]
+fn event_end_writes_update_pending_mode_byte() {
+    let buf = build_subpacket_event_end(
+        0x1234,
+        0xDEADBEEF,
+        0x4242,
+        230,
+        535,
+        7,
+        ffxi_proto::map::c2s::event_end_mode::UPDATE_PENDING,
+    );
+    assert_eq!(
+        &buf[8..12],
+        &7u32.to_le_bytes(),
+        "EndPara (Work_Zone[1] at send time)"
+    );
+    assert_eq!(
+        &buf[14..16],
+        &ffxi_proto::map::c2s::event_end_mode::UPDATE_PENDING.to_le_bytes(),
+        "Mode = UpdatePending"
+    );
+}
+
+/// Pins the c2s 0x05C GP_CLI_COMMAND_EVENTENDXZY layout against
+/// vendor/server/src/map/packets/c2s/0x05c_eventendxzy.h: x/y/z f32, UniqueNo
+/// u32, EndPara u32, EventNum u16, EventPara u16, ActIndex u16, Mode u8,
+/// dir i8. Note EventNum/EventPara precede ActIndex here, unlike 0x05B.
+#[test]
+fn event_end_xzy_writes_lsb_layout() {
+    let buf = build_subpacket_event_end_xzy(
+        0x1234, 0xDEADBEEF, 1.5, -2.25, 3.75, 63, 9, 0x4242, 230, 535,
+    );
+    assert_eq!(buf.len(), 32, "header(4) + body(28)");
+
+    let id_and_size = u16::from_le_bytes([buf[0], buf[1]]);
+    assert_eq!(
+        id_and_size & framing::SUBPACKET_OPCODE_MASK,
+        ffxi_proto::map::c2s::EVENT_END_XZY
+    );
+    assert_eq!(id_and_size >> 9, 8, "size_words = 32/4");
+    assert_eq!(u16::from_le_bytes([buf[2], buf[3]]), 0x1234, "sync");
+
+    assert_eq!(&buf[4..8], &1.5f32.to_le_bytes(), "x");
+    assert_eq!(&buf[8..12], &(-2.25f32).to_le_bytes(), "y");
+    assert_eq!(&buf[12..16], &3.75f32.to_le_bytes(), "z");
+    assert_eq!(&buf[16..20], &0xDEADBEEFu32.to_le_bytes(), "UniqueNo");
+    assert_eq!(&buf[20..24], &9u32.to_le_bytes(), "EndPara (Work_Zone[1])");
+    assert_eq!(&buf[24..26], &230u16.to_le_bytes(), "EventNum (zone)");
+    assert_eq!(&buf[26..28], &535u16.to_le_bytes(), "EventPara (event id)");
+    assert_eq!(&buf[28..30], &0x4242u16.to_le_bytes(), "ActIndex");
+    assert_eq!(
+        buf[30], 1,
+        "Mode = UpdatePending (the only mode the validator accepts)"
+    );
+    assert_eq!(buf[31], 63, "dir");
 }
 
 /// Pins the c2s 0x064 GP_CLI_COMMAND_SCENARIOITEM layout against
@@ -1446,6 +1553,7 @@ fn event_end_cancel_writes_lsb_cancel_option() {
         230,
         535,
         ffxi_event::EVENT_CANCELLED_END_PARA,
+        ffxi_proto::map::c2s::event_end_mode::END,
     );
     assert_eq!(&buf[8..12], &0x4000_0000u32.to_le_bytes(), "EndPara");
 }

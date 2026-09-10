@@ -1,15 +1,14 @@
-// The named-but-unparsed variants (Route, WeightedMesh, PointList, SpellList, Path,
-// AbilityList, WeaponTrace, BumpMap, Blur, UiMenu, UiElementGroup) exist so CLIP_WARN and
-// the loader's rejected-chunk lists can name a chunk instead of printing an unknown code.
-// Their names follow research/xim DatResource.kt SectionType (the S06_Route..S5E_Blur codes);
-// ffxi-dat deliberately ships no parser for them yet.
+// Chunk kinds ffxi-dat parses. Retail ships other chunk codes too (Route 0x06, WeightedMesh
+// 0x25, UiMenu 0x30, UiElementGroup 0x31, PointList 0x3E, SpellList 0x49, Path 0x4A,
+// AbilityList 0x53, WeaponTrace 0x54, BumpMap 0x5D, Blur 0x5E; research/xim DatResource.kt
+// SectionType); they have no parser here and stay out of the enum until one lands. `label`
+// still names them from the raw code for diagnostics.
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChunkKind {
     Terminate = 0x00,
     Rmp = 0x01,
     Generator = 0x05,
-    Route = 0x06,
     Scheduler = 0x07,
     Tim = 0x09,
     KeyFrame = 0x19,
@@ -17,24 +16,14 @@ pub enum ChunkKind {
     D3m = 0x1F,
     Img = 0x20,
     SpriteSheet = 0x21,
-    WeightedMesh = 0x25,
     Bone = 0x29,
     VertexOs2 = 0x2A,
     AnimMo2 = 0x2B,
     Mmb = 0x2E,
     Weather = 0x2F,
-    UiMenu = 0x30,
-    UiElementGroup = 0x31,
     Rid = 0x36,
     Sep = 0x3D,
-    PointList = 0x3E,
     Cib = 0x45,
-    SpellList = 0x49,
-    Path = 0x4A,
-    AbilityList = 0x53,
-    WeaponTrace = 0x54,
-    BumpMap = 0x5D,
-    Blur = 0x5E,
 }
 
 impl ChunkKind {
@@ -43,7 +32,6 @@ impl ChunkKind {
             0x00 => Self::Terminate,
             0x01 => Self::Rmp,
             0x05 => Self::Generator,
-            0x06 => Self::Route,
             0x07 => Self::Scheduler,
             0x09 => Self::Tim,
             0x19 => Self::KeyFrame,
@@ -51,24 +39,14 @@ impl ChunkKind {
             0x1F => Self::D3m,
             0x20 => Self::Img,
             0x21 => Self::SpriteSheet,
-            0x25 => Self::WeightedMesh,
             0x29 => Self::Bone,
             0x2A => Self::VertexOs2,
             0x2B => Self::AnimMo2,
             0x2E => Self::Mmb,
             0x2F => Self::Weather,
-            0x30 => Self::UiMenu,
-            0x31 => Self::UiElementGroup,
             0x36 => Self::Rid,
             0x3D => Self::Sep,
-            0x3E => Self::PointList,
             0x45 => Self::Cib,
-            0x49 => Self::SpellList,
-            0x4A => Self::Path,
-            0x53 => Self::AbilityList,
-            0x54 => Self::WeaponTrace,
-            0x5D => Self::BumpMap,
-            0x5E => Self::Blur,
             _ => return None,
         })
     }
@@ -115,8 +93,12 @@ mod tests {
 
     #[test]
     fn kind_roundtrip() {
-        for raw in [0x01u8, 0x06, 0x09, 0x20, 0x25, 0x2A, 0x2B, 0x3E, 0x45, 0x54] {
+        for raw in [0x01u8, 0x07, 0x09, 0x20, 0x2A, 0x2B, 0x45] {
             assert_eq!(ChunkKind::from_u8(raw).unwrap() as u8, raw);
+        }
+        // Parser-less retail codes stay out of the enum; label still names them.
+        for raw in [0x06u8, 0x25, 0x3E, 0x49, 0x4A, 0x53, 0x54, 0x5D, 0x5E] {
+            assert_eq!(ChunkKind::from_u8(raw), None);
         }
     }
 

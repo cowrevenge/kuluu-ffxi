@@ -89,39 +89,6 @@ impl RangeType {
     }
 }
 
-/// The weapon-anim-style byte of the 0x45 Info chunk (viewer WEAPON_ANIM_STYLE :1344-1347).
-/// Interpretation only: the loader still reads the raw `motion_index` byte as a DAT offset.
-#[repr(u8)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WeaponAnimStyle {
-    ClubStaff = 0,
-    Sword = 1,
-    HandToHand = 2,
-    Dagger = 3,
-    GreatSword = 4,
-    AxeScythe = 5,
-    Katana = 6,
-    Kunai = 7,
-    Polearm = 8,
-}
-
-impl WeaponAnimStyle {
-    pub fn from_u8(b: u8) -> Option<Self> {
-        Some(match b {
-            0 => Self::ClubStaff,
-            1 => Self::Sword,
-            2 => Self::HandToHand,
-            3 => Self::Dagger,
-            4 => Self::GreatSword,
-            5 => Self::AxeScythe,
-            6 => Self::Katana,
-            7 => Self::Kunai,
-            8 => Self::Polearm,
-            _ => return None,
-        })
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Cib {
     pub name: [u8; 4],
@@ -151,13 +118,11 @@ pub struct Cib {
     /// where plate legs get trousers.
     pub body_armour_waist: u8,
 
-    /// Model scale in percent. Retail divides it by 100 with only 0xFF meaning default
-    /// (research/xim poc/Model.kt NpcModel.getScale).
+    /// Model scale in percent. Retail divides it by 100 with only UNSET_BYTE meaning default
+    /// (research/xim poc/Model.kt NpcModel.getScale). The byte after it is the static-NPC
+    /// variant retail swaps in for non-seated NPCs (poc/Actor.kt getScale); kuluu has no seated
+    /// NPC path, so it stays uninterpreted.
     pub scale: u8,
-
-    /// Scale in percent for static NPCs that are not sitting in a chair; retail swaps it in
-    /// for `scale` there (research/xim poc/Actor.kt getScale).
-    pub static_npc_scale: u8,
     pub unknown7: u8,
     pub unknown8: u8,
 
@@ -187,7 +152,6 @@ impl Cib {
             weapon_unknown3: body[0x08],
             body_armour_waist: body[0x09],
             scale: body[0x0A],
-            static_npc_scale: body[0x0B],
             unknown7: body[0x0C],
             unknown8: body[0x0D],
             motion_range_index: RangeType::from_u8(body[0x0E]),
@@ -264,7 +228,6 @@ mod tests {
         let c = Cib::parse(*b"cib0", &body).unwrap();
         assert_eq!(c.movement_type, MovementType::Flying);
         assert_eq!(c.scale, 85);
-        assert_eq!(c.static_npc_scale, 100);
         assert_eq!(c.motion_range_index, RangeType::Unset);
         assert!((c.scale_factor() - 0.85).abs() < f32::EPSILON);
     }
@@ -297,12 +260,5 @@ mod tests {
         // The documented gaps keep their raw value, not Unset: this install ships 0x08 CIBs.
         assert_eq!(RangeType::from_u8(0x07), RangeType::Unknown(0x07));
         assert_eq!(RangeType::from_u8(0x08), RangeType::Unknown(0x08));
-
-        assert_eq!(
-            WeaponAnimStyle::from_u8(0),
-            Some(WeaponAnimStyle::ClubStaff)
-        );
-        assert_eq!(WeaponAnimStyle::from_u8(8), Some(WeaponAnimStyle::Polearm));
-        assert_eq!(WeaponAnimStyle::from_u8(9), None);
     }
 }

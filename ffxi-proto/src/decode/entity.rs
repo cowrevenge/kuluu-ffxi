@@ -17,6 +17,11 @@ pub struct PosHead {
 
     pub y: f32,
 
+    /// POS block word 0x18. Bits 17..31 carry the head-look target (see `facetarget`); the low
+    /// 13 bits are LSB's moving step counter: entity_update.cpp CEntityUpdatePacket::updateWith
+    /// writes `ref<uint16>(0x18) = PEntity->loc.p.moving`, and pathfind.cpp CPathFind::StepTo
+    /// advances it by 0x35 per step (0x28 on a speed change), mod 0x2000. Retail phases walk/run
+    /// cycles off the delta between two POS updates.
     pub flags0: u32,
 
     pub speed: u8,
@@ -81,24 +86,6 @@ impl PosHead {
 
     pub fn facetarget(&self) -> u16 {
         ((self.flags0 >> Self::FACETARGET_SHIFT) & Self::FACETARGET_MASK) as u16
-    }
-
-    // `Flags0.MovTime`: the low 13 bits of the POS block's moving u16. LSB writes
-    // `ref<uint16>(0x18) = PEntity->loc.p.moving` (vendor/server/src/map/packets/
-    // entity_update.cpp CEntityUpdatePacket::updateWith), and the pathfinder advances that
-    // counter per step:
-    // `+= 0x35`, or `0x28` on a speed change, mod 0x2000 (vendor/server/src/map/ai/helpers/
-    // pathfind.cpp StepTo). So the delta between two POS updates counts server steps since
-    // the last one. XiPackets world/server/0x000E: UpdateMoveTime(Flags0 & 0x1FFF); retail
-    // phases walk/run cycles off it so foot timing matches, instead of re-deriving a phase
-    // from position deltas.
-    //
-    // Reserved accessor for that follow-up (phasing the walk/run cycle off the delta);
-    // nothing consumes it yet, and it is deliberately not threaded through the snapshot.
-    const MOV_TIME_MASK: u32 = 0x1FFF;
-
-    pub fn mov_time(&self) -> u16 {
-        (self.flags0 & Self::MOV_TIME_MASK) as u16
     }
 
     // `Flags6.MountIndex` — the MOUNTTYPE this character last mounted. LSB's own
@@ -1509,29 +1496,6 @@ mod pos_head_tests {
         let buf = vec![0u8; PosHead::SIZE];
         let h = PosHead::decode(&buf).unwrap();
         assert_eq!(h.facetarget(), 0);
-    }
-
-    #[test]
-    fn pos_head_mov_time_is_flags0_low_13_bits() {
-        // LSB's moving u16 (entity_update.cpp CEntityUpdatePacket::updateWith) carries
-        // MovTime in its low 13 bits; the counter wraps mod 0x2000, so a value at the top
-        // of the range must decode
-        // without bleeding into facetarget (bits 17..31).
-        let mut buf = vec![0u8; PosHead::SIZE];
-        let flags0 = (0x01A2u32 << 17) | 0x1FFF;
-        buf[20..24].copy_from_slice(&flags0.to_le_bytes());
-        let h = PosHead::decode(&buf).unwrap();
-        assert_eq!(h.mov_time(), 0x1FFF);
-        assert_eq!(
-            h.facetarget(),
-            0x01A2,
-            "MovTime must not bleed into facetarget"
-        );
-
-        // A step delta the pathfinder would produce: 0x35 per step (pathfind.cpp StepTo).
-        let mut buf = vec![0u8; PosHead::SIZE];
-        buf[20..24].copy_from_slice(&0x35u32.to_le_bytes());
-        assert_eq!(PosHead::decode(&buf).unwrap().mov_time(), 0x35);
     }
 
     #[test]

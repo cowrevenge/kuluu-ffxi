@@ -91,6 +91,13 @@ pub struct LogoutCountdownAnchor {
     pub shutdown: bool,
     pub anchor_secs: f64,
 
+    /// The last snapshot value the anchor logic has processed. state.rs
+    /// level-holds that value until a new 0x053 tick arrives, so only a change
+    /// against it is a new tick; re-running the resync math on an already
+    /// processed value would re-anchor it once the implied remaining drifts
+    /// RESYNC_TOLERANCE_SECS past it (the oscillation).
+    pub last_seen_tick: Option<u16>,
+
     /// The last tick value captured at a local stand-up. Stand-up cancels
     /// leavegame server-side WITHOUT any cancel packet, so that stale tick
     /// keeps sitting in the snapshot — suppress exactly that value until a NEW
@@ -182,6 +189,85 @@ fn compute_display(
     }
 }
 
+/// One frame of anchor decision for the logout/shutdown countdown.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AnchorStep {
+    /// The new (server_seconds, anchor_secs) pair; None clears the countdown.
+    pub server: Option<(u16, f64)>,
+    /// The kind flag to store alongside it.
+    pub shutdown: bool,
+    /// True when a live tick anchored this frame (first anchor or re-anchor):
+    /// the caller spends suppress_stale and resolves any AwaitingTick request.
+    pub anchored_tick: bool,
+}
+
+/// One frame of anchor decision, extracted so the system and the tests run the
+/// same code. `snapshot` is the value kuluu-session holds (state.rs level-holds
+/// the last 0x053 tick until a new one arrives), `suppress_stale` is the
+/// stand-up-suppressed value, `last_seen_tick` is the last snapshot value this
+/// logic processed, and `server`/`anchor_secs` are the current anchor.
+fn step_anchor(
+    snapshot: Option<LogoutCountdown>,
+    suppress_stale: Option<LogoutCountdown>,
+    server: Option<u16>,
+    shutdown: bool,
+    last_seen_tick: Option<u16>,
+    anchor_secs: f64,
+    now: f64,
+) -> AnchorStep {
+    // The stand-up-suppressed stale tick must not re-anchor.
+    let live = match snapshot {
+        Some(c) if suppress_stale == Some(c) => None,
+        other => other,
+    };
+    match (live, server) {
+        // No value this frame: clear the anchor and forget what was seen (the
+        // ZoneChanged / Disconnected folds in state.rs drop it).
+        (None, _) => AnchorStep {
+            server: None,
+            shutdown,
+            anchored_tick: false,
+        },
+        // Value-changed guard: state.rs level-holds the last tick between the
+        // 5s server ticks, so a value that was already processed is not a new
+        // tick. This must compare against last_seen_tick, NOT server_seconds:
+        // a within-tolerance tick keeps the OLD anchor, so for the next 5s the
+        // held value differs from server_seconds and comparing them would run
+        // the resync math every frame, re-anchoring once the implied remaining
+        // drifts RESYNC_TOLERANCE_SECS past the held value (the oscillation).
+        (Some(c), _) if last_seen_tick == Some(c.seconds_remaining) => AnchorStep {
+            server: server.map(|prev| (prev, anchor_secs)),
+            shutdown,
+            anchored_tick: false,
+        },
+        // First live tick: always anchors.
+        (Some(c), None) => AnchorStep {
+            server: Some((c.seconds_remaining, now)),
+            shutdown: c.shutdown,
+            anchored_tick: true,
+        },
+        // A new value against a live anchor: the +-2s resync rule.
+        (Some(c), Some(prev)) => {
+            let implied = prev as f64 - (now - anchor_secs);
+            if (implied - c.seconds_remaining as f64).abs() <= RESYNC_TOLERANCE_SECS {
+                // Same countdown, different clock: keep the running anchor. The
+                // kind may have switched mid-countdown; refresh the label flag.
+                AnchorStep {
+                    server: Some((prev, anchor_secs)),
+                    shutdown: c.shutdown,
+                    anchored_tick: false,
+                }
+            } else {
+                AnchorStep {
+                    server: Some((c.seconds_remaining, now)),
+                    shutdown: c.shutdown,
+                    anchored_tick: true,
+                }
+            }
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn update_logout_countdown(
     mut requests: MessageReader<LogoutRequested>,
@@ -248,49 +334,48 @@ pub fn update_logout_countdown(
         };
     }
 
-    // The stand-up-suppressed stale tick must not re-anchor; any other value is
-    // a live tick. A live tick within RESYNC_TOLERANCE_SECS of what the current
-    // anchor already implies is the same countdown seen from a slightly
-    // different clock: keep the running anchor so the display does not jump,
-    // but refresh the kind flag - /shutdown during a /logout (or vice versa)
-    // just re-powers the existing effect and keeps ticking (0x0e7_reqlogout.cpp
-    // SetPower branch). Anything further away is a fresh countdown: re-anchor.
-    let live = match scene_state.snapshot.logout_countdown {
-        Some(c) if anchor.suppress_stale == Some(c) => None,
-        other => other,
-    };
-    match live {
-        Some(c) => match anchor.server_seconds {
-            None => {
-                anchor.server_seconds = Some(c.seconds_remaining);
-                anchor.shutdown = c.shutdown;
-                anchor.anchor_secs = now;
-                anchor.suppress_stale = None;
-
-                if matches!(pending.state, LogoutRequestState::AwaitingTick { .. }) {
-                    pending.state = LogoutRequestState::None;
-                }
+    // One frame of anchor logic, shared verbatim with the tests (step_anchor):
+    // a stand-up-suppressed stale tick never re-anchors; a value that
+    // state.rs is still level-holding from the last 0x053 tick keeps the
+    // running anchor untouched; only a CHANGED value runs the +-2s resync rule,
+    // where a live tick within RESYNC_TOLERANCE_SECS of what the current anchor
+    // already implies is the same countdown seen from a slightly different
+    // clock (keep the running anchor so the display does not jump, but refresh
+    // the kind flag - /shutdown during a /logout just re-powers the existing
+    // effect and keeps ticking, 0x0e7_reqlogout.cpp SetPower branch) and
+    // anything further away is a fresh countdown (re-anchor).
+    let step = step_anchor(
+        scene_state.snapshot.logout_countdown,
+        anchor.suppress_stale,
+        anchor.server_seconds,
+        anchor.shutdown,
+        anchor.last_seen_tick,
+        anchor.anchor_secs,
+        now,
+    );
+    match step.server {
+        Some((secs, anchored_at)) => {
+            anchor.server_seconds = Some(secs);
+            anchor.anchor_secs = anchored_at;
+            // This frame processed a live tick (new or held): remember its
+            // value so the level-held repeats do not re-run the resync math.
+            if let Some(c) = scene_state.snapshot.logout_countdown {
+                anchor.last_seen_tick = Some(c.seconds_remaining);
             }
-            Some(prev) => {
-                let implied = prev as f64 - (now - anchor.anchor_secs);
-                if (implied - c.seconds_remaining as f64).abs() <= RESYNC_TOLERANCE_SECS {
-                    // Same countdown, different clock: no re-anchor. The kind
-                    // may have switched mid-countdown; refresh the label flag.
-                    anchor.shutdown = c.shutdown;
-                } else {
-                    anchor.server_seconds = Some(c.seconds_remaining);
-                    anchor.shutdown = c.shutdown;
-                    anchor.anchor_secs = now;
-                    anchor.suppress_stale = None;
-
-                    if matches!(pending.state, LogoutRequestState::AwaitingTick { .. }) {
-                        pending.state = LogoutRequestState::None;
-                    }
-                }
-            }
-        },
+        }
         None => {
             anchor.server_seconds = None;
+            anchor.last_seen_tick = None;
+        }
+    }
+    anchor.shutdown = step.shutdown;
+    if step.anchored_tick {
+        // A live tick just anchored: the stand-up suppression is spent, and a
+        // request that was awaiting its first tick has been acknowledged.
+        anchor.suppress_stale = None;
+
+        if matches!(pending.state, LogoutRequestState::AwaitingTick { .. }) {
+            pending.state = LogoutRequestState::None;
         }
     }
 
@@ -374,28 +459,6 @@ mod tests {
         LogoutCountdown {
             seconds_remaining: secs,
             shutdown,
-        }
-    }
-
-    /// The anchoring decision for one live tick against the current anchor.
-    /// Mirrors update_logout_countdown's match arm so the +-2s rule is testable
-    /// without a Bevy world. Returns (new_anchor_secs, new_shutdown).
-    fn apply_tick(
-        now: f64,
-        c: LogoutCountdown,
-        anchor_secs: Option<(u16, bool, f64)>,
-    ) -> (Option<u16>, bool, f64) {
-        match anchor_secs {
-            None => (Some(c.seconds_remaining), c.shutdown, now),
-            Some((prev, _shutdown, anchored_at)) => {
-                let implied = prev as f64 - (now - anchored_at);
-                if (implied - c.seconds_remaining as f64).abs() <= RESYNC_TOLERANCE_SECS {
-                    // Same countdown, different clock: keep the running anchor.
-                    (Some(prev), c.shutdown, anchored_at)
-                } else {
-                    (Some(c.seconds_remaining), c.shutdown, now)
-                }
-            }
         }
     }
 
@@ -486,16 +549,21 @@ mod tests {
     fn tick_within_tolerance_keeps_the_running_anchor() {
         // Anchor 30 @ t=0. The next server tick carries 25 but arrives late at
         // t=6: implied = 24, |24 - 25| = 1 <= 2 -> keep the anchor.
-        let (secs, _shutdown, anchored_at) =
-            apply_tick(6.0, tick(25, false), Some((30, false, 0.0)));
-        assert_eq!(secs, Some(30));
-        assert_eq!(anchored_at, 0.0);
+        let s = step_anchor(Some(tick(25, false)), None, Some(30), false, None, 0.0, 6.0);
+        assert_eq!(s.server, Some((30, 0.0)));
+        assert!(!s.anchored_tick);
 
         // And the one after: carries 20 at t=11 (implied = 19, diff 1) -> keep.
-        let (secs, _shutdown, anchored_at) =
-            apply_tick(11.0, tick(20, false), Some((30, false, 0.0)));
-        assert_eq!(secs, Some(30));
-        assert_eq!(anchored_at, 0.0);
+        let s = step_anchor(
+            Some(tick(20, false)),
+            None,
+            Some(30),
+            false,
+            None,
+            0.0,
+            11.0,
+        );
+        assert_eq!(s.server, Some((30, 0.0)));
 
         // Display consequence: at t=6 the counter reads off the original anchor
         // (24) instead of jumping back up to 25 on the late tick.
@@ -515,10 +583,9 @@ mod tests {
     fn tick_beyond_tolerance_reanchors() {
         // Anchor 15 @ t=0; at t=2 a brand-new countdown's first tick arrives:
         // implied = 13, |13 - 30| = 17 > 2 -> re-anchor to 30 @ now.
-        let (secs, _shutdown, anchored_at) =
-            apply_tick(2.0, tick(30, false), Some((15, false, 0.0)));
-        assert_eq!(secs, Some(30));
-        assert_eq!(anchored_at, 2.0);
+        let s = step_anchor(Some(tick(30, false)), None, Some(15), false, None, 0.0, 2.0);
+        assert_eq!(s.server, Some((30, 2.0)));
+        assert!(s.anchored_tick);
     }
 
     /// The +-2s boundary itself: exactly 2 apart keeps the anchor (the rule is
@@ -527,15 +594,11 @@ mod tests {
     fn tick_exactly_at_tolerance_keeps_the_anchor() {
         // Anchor 30 @ t=0; at t=4.5 implied = 25.5, incoming 23 -> diff 2.5 > 2:
         // re-anchor. At t=4.0 implied = 26, incoming 24 -> diff exactly 2: keep.
-        let (secs, _shutdown, anchored_at) =
-            apply_tick(4.0, tick(24, false), Some((30, false, 0.0)));
-        assert_eq!(secs, Some(30));
-        assert_eq!(anchored_at, 0.0);
+        let s = step_anchor(Some(tick(24, false)), None, Some(30), false, None, 0.0, 4.0);
+        assert_eq!(s.server, Some((30, 0.0)));
 
-        let (secs, _shutdown, anchored_at) =
-            apply_tick(4.5, tick(23, false), Some((30, false, 0.0)));
-        assert_eq!(secs, Some(23));
-        assert_eq!(anchored_at, 4.5);
+        let s = step_anchor(Some(tick(23, false)), None, Some(30), false, None, 0.0, 4.5);
+        assert_eq!(s.server, Some((23, 4.5)));
     }
 
     /// /shutdown during a /logout (or vice versa) re-powers the existing effect
@@ -545,10 +608,10 @@ mod tests {
     fn kind_switch_within_tolerance_refreshes_flag_without_reanchor() {
         // Anchor 30/logout @ t=0; at t=5 a shutdown-kind tick carries 25
         // (implied = 25, diff 0) -> same anchor, flag flips to shutdown.
-        let (_secs, shutdown, anchored_at) =
-            apply_tick(5.0, tick(25, true), Some((30, false, 0.0)));
-        assert!(shutdown);
-        assert_eq!(anchored_at, 0.0);
+        let s = step_anchor(Some(tick(25, true)), None, Some(30), false, None, 0.0, 5.0);
+        assert!(s.shutdown);
+        assert_eq!(s.server, Some((30, 0.0)));
+        assert!(!s.anchored_tick);
 
         // And the display carries the new label off the unchanged anchor.
         let mode = compute_display(5.0, Some((30u16, true, 0.0)), LogoutRequestState::None);
@@ -564,10 +627,121 @@ mod tests {
     /// The first tick after a request always anchors, whatever it carries.
     #[test]
     fn first_tick_always_anchors() {
-        let (secs, shutdown, anchored_at) = apply_tick(0.4, tick(30, true), None);
-        assert_eq!(secs, Some(30));
-        assert!(shutdown);
-        assert_eq!(anchored_at, 0.4);
+        let s = step_anchor(Some(tick(30, true)), None, None, false, None, 0.0, 0.4);
+        assert_eq!(s.server, Some((30, 0.4)));
+        assert!(s.shutdown);
+        assert!(s.anchored_tick);
+    }
+
+    /// The oscillation regression: state.rs level-holds the last 0x053 tick,
+    /// so between two server ticks every frame sees the SAME value. Feeding
+    /// that held value through the anchor logic must never move the anchor;
+    /// without the value-changed guard the resync math re-anchored it once the
+    /// implied remaining drifted RESYNC_TOLERANCE_SECS past the held value and
+    /// the display bounced back up on a loop.
+    #[test]
+    fn held_tick_200_frames_never_moves_the_anchor() {
+        let frame = 1.0 / 60.0;
+        // The first tick anchors at t=0; the system then remembers it as seen.
+        let s = step_anchor(Some(tick(30, false)), None, None, false, None, 0.0, 0.0);
+        assert_eq!(s.server, Some((30, 0.0)));
+
+        for i in 1..=200 {
+            let now = i as f64 * frame;
+            // The snapshot still holds the t=0 tick (no new server tick yet),
+            // and it was already processed: last_seen_tick matches.
+            let s = step_anchor(
+                Some(tick(30, false)),
+                None,
+                Some(30),
+                false,
+                Some(30),
+                0.0,
+                now,
+            );
+            assert_eq!(
+                s.server,
+                Some((30, 0.0)),
+                "frame {i}: anchor moved on a held tick"
+            );
+            assert!(
+                !s.anchored_tick,
+                "frame {i}: held tick reported as an anchor"
+            );
+        }
+    }
+
+    /// A real countdown: para=30 at t=0 (onEffectGain), then the server's 5s
+    /// ticks. The display must count down smoothly through both held segments,
+    /// with no re-anchor bounce when the 25 tick lands.
+    #[test]
+    fn thirty_to_twenty_five_sequence_counts_down_without_reanchor_bounce() {
+        let frame = 1.0 / 60.0;
+        // The anchor state exactly as update_logout_countdown applies it.
+        let mut server_seconds: Option<u16> = None;
+        let mut last_seen_tick: Option<u16> = None;
+        let mut anchor_secs = 0.0_f64;
+        let mut shutdown = false;
+
+        for i in 0..=540 {
+            let now = i as f64 * frame;
+            // The snapshot holds the last tick that actually arrived: 30 until
+            // t=5, then 25.
+            let held = if now >= 5.0 {
+                Some(tick(25, false))
+            } else {
+                Some(tick(30, false))
+            };
+            let s = step_anchor(
+                held,
+                None,
+                server_seconds,
+                shutdown,
+                last_seen_tick,
+                anchor_secs,
+                now,
+            );
+            match s.server {
+                Some((secs, at)) => {
+                    server_seconds = Some(secs);
+                    anchor_secs = at;
+                    if let Some(c) = held {
+                        last_seen_tick = Some(c.seconds_remaining);
+                    }
+                }
+                None => {
+                    server_seconds = None;
+                    last_seen_tick = None;
+                }
+            }
+            shutdown = s.shutdown;
+
+            // Sample once per second: the display must render 30,29,28,27,26,
+            // 25, ... with no re-anchor bounce when the 25 tick lands at t=5.
+            if i % 60 == 0 {
+                let mode = compute_display(
+                    now,
+                    server_seconds.map(|v| (v, shutdown, anchor_secs)),
+                    LogoutRequestState::None,
+                );
+                match (i / 60, &mode) {
+                    // t=0..4s: the held-30 segment renders 30 down to 26.
+                    (0, DisplayMode::Counting { seconds: 30, .. })
+                    | (1, DisplayMode::Counting { seconds: 29, .. })
+                    | (2, DisplayMode::Counting { seconds: 28, .. })
+                    | (3, DisplayMode::Counting { seconds: 27, .. })
+                    | (4, DisplayMode::Counting { seconds: 26, .. }) => {}
+                    // t=5..9s: the held-25 segment continues 25 down to 21
+                    // with no bounce back up when the tick lands.
+                    (5, DisplayMode::Counting { seconds: 25, .. })
+                    | (6, DisplayMode::Counting { seconds: 24, .. })
+                    | (7, DisplayMode::Counting { seconds: 23, .. })
+                    | (8, DisplayMode::Counting { seconds: 22, .. })
+                    | (9, DisplayMode::Counting { seconds: 21, .. }) => {}
+                    _ => panic!("frame {i} (t={now}s): unexpected display {mode:?}"),
+                }
+            }
+        }
     }
 
     /// Inside a Mog House the server disconnects immediately with no ticks at

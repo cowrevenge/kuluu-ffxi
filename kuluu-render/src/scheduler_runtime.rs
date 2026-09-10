@@ -1831,7 +1831,9 @@ pub fn dispatch_melee_action_started(
 }
 
 // Latch the victim's death path on its render-actor child (see DeadFromAction). No-op when the
-// victim has no loaded model yet - the 0x0E hp_pct will still take over later.
+// victim has no loaded model yet - the 0x0E hp_pct will still take over later. Only caller is
+// dispatch_melee_action_started, which is native-only; gate matches so wasm compiles.
+#[cfg(not(target_arch = "wasm32"))]
 fn latch_dead_from_action(
     victim: Option<Entity>,
     q_children: &Query<&Children>,

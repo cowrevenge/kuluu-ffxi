@@ -108,8 +108,8 @@ pub use cutscene::{CutsceneMode, CutscenePlugin, ScreenFade};
 pub use entity_table::{EntityRecord, EntityTable};
 pub use graphics_settings::{
     AaMode, CharacterRenderPath, DlssQuality, DynamicLights, GraphicsField, GraphicsSettings,
-    MinimapRadar, QualityPreset, TextureFiltering, ZoneLineDisplay, DLSS_CONFIG_FIELDS,
-    GRAPHICS_FIELDS,
+    MinimapRadar, QualityPreset, TextureFiltering, ZoneLineDisplay, CONFIG_FIELDS,
+    DLSS_CONFIG_FIELDS, GRAPHICS_FIELDS,
 };
 pub use hud::{add_hud_spawners, HudPlugin};
 pub use input_mode::{

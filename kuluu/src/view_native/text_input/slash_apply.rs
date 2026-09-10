@@ -821,6 +821,7 @@ pub(super) fn apply_slash_outcome(
                 kuluu_render::MenuKind::Equipment => "Equipment".into(),
                 kuluu_render::MenuKind::Root => "Root".into(),
                 kuluu_render::MenuKind::Config => "Config".into(),
+                kuluu_render::MenuKind::Controls => "Controls".into(),
                 kuluu_render::MenuKind::Debug => "Debug".into(),
                 kuluu_render::MenuKind::Graphics => "Graphics".into(),
                 kuluu_render::MenuKind::GraphicsDlss => "DLSS Config".into(),

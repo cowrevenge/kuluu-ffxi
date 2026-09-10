@@ -155,7 +155,6 @@ impl DynamicLights {
     }
 }
 
-/// Controls terrain map surfaces; the vanilla compass radar is independent.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum MinimapRadar {
     #[default]
@@ -166,8 +165,8 @@ pub enum MinimapRadar {
 impl MinimapRadar {
     pub const fn label(self) -> &'static str {
         match self {
-            MinimapRadar::Vanilla => "Vanilla",
-            MinimapRadar::Enhanced => "Enhanced",
+            MinimapRadar::Vanilla => "Compass",
+            MinimapRadar::Enhanced => "Terrain Map",
         }
     }
 
@@ -1078,6 +1077,7 @@ impl GraphicsSettings {
                 let zone_cast = self.zone_shadow_cast;
                 let zld = self.zone_line_display;
                 let minimap_radar = self.minimap_radar;
+                let (ui_scale, menu_scale) = (self.ui_scale, self.menu_scale);
                 let vsync = self.vsync;
                 let fps_cap = self.fps_cap;
                 // Presets never own DLSS (kuluu decision, 2026-09): no preset
@@ -1108,6 +1108,8 @@ impl GraphicsSettings {
                 self.zone_shadow_cast = zone_cast;
                 self.zone_line_display = zld;
                 self.minimap_radar = minimap_radar;
+                self.ui_scale = ui_scale;
+                self.menu_scale = menu_scale;
                 self.vsync = vsync;
                 self.fps_cap = fps_cap;
                 self.dlss_quality = dlss_quality;
@@ -1342,7 +1344,9 @@ impl GraphicsSettings {
         let dlss_menu_enabled = self.dlss_menu_enabled;
         let job_display = self.job_display;
         let mob_hp_under = self.mob_hp_under;
+        let config = (self.minimap_radar, self.ui_scale, self.menu_scale);
         *self = Self::for_preset(QualityPreset::High);
+        (self.minimap_radar, self.ui_scale, self.menu_scale) = config;
         self.dlss_supported = dlss_supported;
         self.dlss_menu_enabled = dlss_menu_enabled;
         self.job_display = job_display;
@@ -1512,8 +1516,6 @@ pub const GRAPHICS_FIELDS: &[GraphicsField] = &[
     GraphicsField::FrameRateCap,
     GraphicsField::RenderScale,
     GraphicsField::Fov,
-    GraphicsField::UiScale,
-    GraphicsField::MenuScale,
     GraphicsField::CameraSpring,
     GraphicsField::AntiAliasing,
     GraphicsField::Dlss,
@@ -1528,7 +1530,6 @@ pub const GRAPHICS_FIELDS: &[GraphicsField] = &[
     GraphicsField::DepthOfField,
     GraphicsField::DofAperture,
     GraphicsField::ZoneLineDisplay,
-    GraphicsField::MinimapRadar,
     GraphicsField::DynamicLights,
     GraphicsField::ShadowedLights,
     GraphicsField::LightFlicker,
@@ -1537,6 +1538,12 @@ pub const GRAPHICS_FIELDS: &[GraphicsField] = &[
     GraphicsField::CharacterShadowReceive,
     GraphicsField::CharacterShadowCast,
     GraphicsField::ZoneShadowCast,
+];
+
+pub const CONFIG_FIELDS: &[GraphicsField] = &[
+    GraphicsField::MinimapRadar,
+    GraphicsField::UiScale,
+    GraphicsField::MenuScale,
 ];
 
 /// The DLSS Config surface, top to bottom: the live quality knob first, then
@@ -2281,12 +2288,12 @@ mod tests {
     #[test]
     fn minimap_radar_cycles_vanilla_enhanced() {
         let mut s = GraphicsSettings::default();
-        assert_eq!(s.value_label(GraphicsField::MinimapRadar), "Vanilla");
+        assert_eq!(s.value_label(GraphicsField::MinimapRadar), "Compass");
         assert!(!s.minimap_radar.panel_visible());
         assert!(!s.minimap_radar.entity_radar());
 
         s.cycle(GraphicsField::MinimapRadar, 1);
-        assert_eq!(s.value_label(GraphicsField::MinimapRadar), "Enhanced");
+        assert_eq!(s.value_label(GraphicsField::MinimapRadar), "Terrain Map");
         assert!(s.minimap_radar.panel_visible());
         assert!(s.minimap_radar.entity_radar());
 
@@ -2434,6 +2441,40 @@ mod tests {
         );
         s.cycle(GraphicsField::Preset, 1);
         assert!(s.zone_shadow_cast, "preset cycle kept zone casting on");
+    }
+
+    #[test]
+    fn config_preferences_survive_graphics_presets_and_reset() {
+        let mut settings = GraphicsSettings::default();
+        for &field in CONFIG_FIELDS {
+            assert!(!GRAPHICS_FIELDS.contains(&field));
+            settings.cycle(field, 1);
+        }
+        let preferences = (
+            settings.minimap_radar,
+            settings.ui_scale,
+            settings.menu_scale,
+        );
+        assert_eq!(settings.preset, QualityPreset::High);
+        settings.cycle(GraphicsField::Preset, 1);
+        assert_eq!(
+            (
+                settings.minimap_radar,
+                settings.ui_scale,
+                settings.menu_scale
+            ),
+            preferences
+        );
+        settings.reset_to_default();
+        assert_eq!(settings.preset, QualityPreset::High);
+        assert_eq!(
+            (
+                settings.minimap_radar,
+                settings.ui_scale,
+                settings.menu_scale
+            ),
+            preferences
+        );
     }
 
     #[test]

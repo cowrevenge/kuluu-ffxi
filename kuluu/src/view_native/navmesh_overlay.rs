@@ -253,7 +253,7 @@ fn detour_to_bevy(d: [f32; 3]) -> Vec3 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kuluu_render::combat_stance::{predict_entities_system, EntityPrediction};
+    use kuluu_render::combat_stance::{predict_entities_system, EntityPrediction, MotionProbe};
     use kuluu_render::dat_mzb::{MzbCollisionBlock, MzbCollisionGeometry};
     use kuluu_render::scene::{mount_actor_id, pin_mount_actors_system, TrackedEntities};
     use kuluu_snapshot::EntityKind;
@@ -289,6 +289,8 @@ mod tests {
             .init_resource::<EntityPrediction>()
             .init_resource::<TrackedEntities>()
             .init_resource::<kuluu_render::sub_area_activation::SubAreaActivation>()
+            // predict_entities_system reads the probe; production inserts it in the render plugin.
+            .insert_resource(MotionProbe::init())
             .insert_resource(geometry)
             .add_systems(
                 Update,
@@ -323,7 +325,9 @@ mod tests {
             .resource_mut::<Time>()
             .advance_by(std::time::Duration::from_secs_f32(1.0 / 60.0));
         let mut prediction = app.world_mut().resource_mut::<EntityPrediction>();
-        prediction.observe(REMOTE_ID, incoming, 0);
+        // These synthetic updates carry no wire speed byte; zero-speed-with-move is the case
+        // CPathFind::StepTo substitutes its own speed for, so nothing here is invented.
+        prediction.observe(REMOTE_ID, incoming, 0, 0, 0, false);
         prediction.by_id.get_mut(&REMOTE_ID).unwrap().rendered_pos = incoming;
         app.update();
         app.world().get::<Transform>(entity).unwrap().translation

@@ -38,10 +38,10 @@ pub fn ability_file_id(ability_id: u32, animation: Option<u16>) -> Option<u32> {
     Some(ABILITY_FILE_TABLE_OFFSET + index as u32)
 }
 
-// research/xim MobAbilityTable.kt:58-72 getFileTableOffset - a mob skill's `animation` id (LSB
-// mob_skills.animation, carried per result in s2c 0x028 category 11) is an FTABLE index with a
-// range-dependent base. The DAT at that index holds the skill's `main` routine, whose 0x05 stage
-// names the caster's own `sp??` clip (F51, F58). Pet skills (category 13) share the table.
+// research/xim resource/table/MobAbilityTable.kt getFileTableOffset - a mob skill's animation id
+// (LSB mob_skills.mob_anim_id, carried per result in s2c 0x028 category 11) is an FTABLE index
+// with a range-dependent base. The DAT at that index holds the skill's `main` routine, whose
+// 0x05 stage names the caster's own `sp??` clip. Pet skills (category 13) share the table.
 pub fn mob_skill_file_id(animation: u16) -> u32 {
     let a = animation as u32;
     a + if a < 0x200 {
@@ -104,7 +104,8 @@ mod tests {
         assert_eq!(ability_file_id(0xF_FFFF, None), None);
     }
 
-    // Foot Kick is mob skill 259 with animation 3: the first range's base plus the index.
+    // whirl_claws is mob skill 259 with animation 3 (foot_kick is 257 / 1): the first
+    // range's base plus the index.
     #[test]
     fn mob_skill_file_id_uses_the_range_dependent_base() {
         assert_eq!(mob_skill_file_id(3), 0x0F3C + 3);

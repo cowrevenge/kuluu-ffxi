@@ -85,14 +85,16 @@ pub struct MeleeResult {
     pub resolution: ActionResolution,
     pub animation: AttackAnimation,
     /// vendor/server/src/map/enums/action/info.h - bit 1 `Defeated` (the action killed the
-    /// target), bit 2 `CriticalHit`. Retail flips StatusServer on the same frame as the HP
-    /// packet when Defeated is set (F49).
+    /// target), bit 2 `CriticalHit`. Defeated latches the death path on this frame
+    /// (rabbit_tester s9).
     pub info: u8,
     /// vendor/server/src/map/enums/action/hit_distortion.h - 0 None, 1 Light, 2 Medium,
-    /// 3 Heavy (the crit case; drives `ldam`, F54).
+    /// 3 Heavy. recordDamage sets it from damage as a percent of the target's max HP
+    /// (>=20 Heavy, >=10 Medium, >0 Light; vendor/server/src/map/action/action.cpp
+    /// action_result_t::recordDamage), independent of the crit bit in `info`.
     pub hit_distortion: u8,
     /// vendor/server/src/map/enums/action/knockback.h - 0 none .. 7 level 7. Any non-zero
-    /// level plays `sway` alongside the damage reaction (F52).
+    /// level plays `sway` alongside the damage reaction (rabbit_tester s7d).
     pub knockback: u8,
     /// The result's `kind` bits, uninterpreted.
     pub kind: u8,

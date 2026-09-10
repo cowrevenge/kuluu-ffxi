@@ -14,8 +14,7 @@
 //! (ROM/32/13.DAT - ships ati0..2, NO bti0). XIM: EffectRoutineInterpolatedEffects.kt
 //! FlinchAnimationInstance, poc/Actor.kt onDisplayDeath. LSB: vendor/server/src/map/packets/
 //! s2c/0x028_battle2.cpp GP_SERV_COMMAND_BATTLE2::pack (wire layout), attack.h AttackAnimation
-//! (limb). Scenarios S1–S10 per
-//! artifacts/rabbit_tester/plan.md §4; assertions are ordering/ranges, not exact frames.
+//! (limb). Scenarios S1-S12 below; assertions are ordering/ranges, not exact frames.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -537,7 +536,8 @@ fn s4_run_gait_selects_run_clip() {
 
 /// Rarab swings RightAttack at HumeM (Hit, dist=0, kb=0). Expect: at0? on the attacker from
 /// ~frame 1; at the inlined-0x2B impact (~36 for ati0) HumeM runs `damg` (it ships no sdam of
-/// its own - F54 table falls through to damg) and its flinch stage starts dfm? on the PC host.
+/// its own; the reaction guard falls through to damg) and its flinch stage starts dfm? on the
+/// PC host.
 #[test]
 fn s5_swing_impact_runs_damg_and_flinches_the_pc() {
     let (Some(rarab), Some(humem)) = (load_rarab(), load_humem()) else {
@@ -600,7 +600,7 @@ fn s5b_mob_victim_normal_hit_runs_damg_and_flinches() {
 // S6/S6b - crits: ldam + flinch, no sway at kb=0
 // ---------------------------------------------------------------------------
 
-/// S6: Hit with hit_distortion=3 (Heavy = the crit case, F54) runs `ldam` on HumeM and its
+/// S6: Hit with hit_distortion=3 (Heavy) runs `ldam` on HumeM and its
 /// flinch stage starts dfm?; kb=0 adds no sway.
 #[test]
 fn s6_crit_runs_ldam_and_flinches_the_pc() {
@@ -655,7 +655,7 @@ fn s6b_crit_flinches_the_mob_with_dfi() {
 }
 
 /// S6c: crit on a victim whose DAT ships no `ldam` of its own (ROM/172/67.DAT), with the global
-/// effect dir removed so ROM/0/0.DAT's ldam cannot rescue it. The F54 guard must fall back to
+/// effect dir removed so ROM/0/0.DAT's ldam cannot rescue it. The ldam guard must fall back to
 /// the normal `damg` reaction instead of arming an unresolvable ldam, which post Step 1 falls
 /// through to nothing. All eight retail PC skeletons ship their own ldam (verified against the
 /// install), so this fallback is reachable only on mob victims; S6 covers the PC side of the
@@ -900,7 +900,7 @@ fn s7c_parry_plays_gud_clip() {
     );
 }
 
-/// S7d: Hit with knockback level 2 runs the damage reaction AND `sway` alongside (finding F52). The
+/// S7d: Hit with knockback level 2 runs the damage reaction AND `sway` alongside. The
 /// victim is fresh - no ActiveSchedulers yet - so both routines land in one same-batch insert;
 /// this pins the merge fix that kept the sway insert from overwriting the damage reaction.
 #[test]
@@ -919,7 +919,7 @@ fn s7d_knockback_adds_sway_alongside_the_damage_reaction() {
     });
     assert!(
         impact_at.is_some(),
-        "kb>0 runs the damage reaction and sway together (F52)"
+        "kb>0 runs the damage reaction and sway together"
     );
 }
 
@@ -943,7 +943,7 @@ fn s8_resultless_body_arms_nothing() {
     step_n(&mut app, 60);
 
     // The only routine the victim may carry is `init`, the create-time load routine: first
-    // observation takes the hidden->visible resurface path (finding F53) and every model that ships an
+    // observation takes the hidden->visible resurface path, and every model that ships an
     // init runs it on spawn, Rarab's degenerate one included. That is not a reaction to this
     // BATTLE2; anything else would be.
     let got = routines(app.world(), vic_parent);
@@ -960,7 +960,7 @@ fn s8_resultless_body_arms_nothing() {
 // S9 - Defeated: the dead routine falls over instead of popping to a corpse
 // ---------------------------------------------------------------------------
 
-/// S9: Hit with info=Defeated on a Rarab victim. The `dead` routine runs immediately (finding F49):
+/// S9: Hit with info=Defeated on a Rarab victim. The `dead` routine runs immediately:
 /// ded? fall-over at its first Motion stage, and the pose pass holds idle across the gap -
 /// never flashing cor? before ded? owns the pose (D5). build_app pins the pose pass between
 /// dispatch_melee_action_started and tick_active_schedulers so the D5 hold path runs on the
@@ -978,13 +978,13 @@ fn s9_defeated_runs_dead_routine_and_holds_idle_across_the_gap() {
     // res=Hit(0), info bit1 = Defeated.
     push_battle2(&mut app, RARAB_W, 1, Some(RARAB2_W), Some((0, 0, 1, 0, 0)));
 
-    // The dead routine is queued on the event's frame (F49: same-frame death path).
+    // The dead routine is queued on the event's frame.
     let (queued_at, _) = watch(&mut app, 3, |i, w| {
         i >= 1 && routines(w, vic_parent).contains(b"dead")
     });
     assert!(
         queued_at.is_some(),
-        "Defeated latches the death path on this frame (F49)"
+        "Defeated latches the death path on this frame"
     );
 
     // No cor? flash across the gap: from the event through the fall-over start the pose stays
@@ -1079,8 +1079,8 @@ fn s10b_left_attack_with_bti0_plays_the_limb_clip() {
 // ---------------------------------------------------------------------------
 
 /// S11: the frozen-mob regression. A nonzero animationsub names a special routine on the wire
-/// (sub 1 -> `ini1`, FFXiMain.dll F37); retail plays that name on the model and no-ops when the
-/// model does not ship it (finding F44). Rarab's DAT ships no `ini1` routine, so the special tier must
+/// (sub 1 -> `ini1`; FFXiMain.dll .data @RVA 0x35AF60); retail plays that name on the model and
+/// no-ops when the model does not ship it. Rarab's DAT ships no `ini1` routine, so the special tier must
 /// fall through to locomotion instead of pinning current_clip: a not-moving mob idles on idl?
 /// and keeps animating. Before the fall-through fix the miss registered the idle fallback as a
 /// one-shot, which held its end frame forever (the spawn-pose freeze).
@@ -1096,9 +1096,9 @@ fn s11_missing_routine_falls_through_on_a_model_without_ini1() {
     let mut app = build_app();
     let (_, child) = spawn_actor(&mut app, RARAB_W, EntityKind::Mob, &loaded);
 
-    // First observation at sub 0: retail's create path runs 'init' on the new actor (finding F53).
+    // First observation at sub 0: retail's create path runs 'init' on the new actor.
     // Rarab ships no usable init motion, so the pose stays on idle; stepping also establishes
-    // the prev state that makes the sub change below a genuine F37 trigger instead of another
+    // the prev state that makes the sub change below a genuine table[sub] trigger instead of another
     // create.
     step_n(&mut app, 2);
 
@@ -1145,7 +1145,7 @@ fn s11_missing_routine_falls_through_on_a_model_without_ini1() {
 // ---------------------------------------------------------------------------
 
 /// S12: the full special-pose lifecycle on a model that ships both routines (ROM/5/64.DAT).
-/// First observation is a retail actor create and runs 'init' (finding F53): the pop-up sp0? plays once
+/// First observation is a retail actor create and runs 'init': the pop-up sp0? plays once
 /// and holds its end frame while the wire state stays up, with the model root visible throughout.
 /// Retail hides only on status INVISIBLE, never on clip completion. A sub change then fires ini1
 /// (dig-down sp1?), the buried window hides on status, resurface replays init instead of re-firing

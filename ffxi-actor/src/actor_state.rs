@@ -34,10 +34,11 @@ pub enum RestKind {
     Kneel,
 }
 
-/// Retail's sub->routine table @RVA 0x35AF60 (.data, FFXiMain.dll; finding F37): the raw
-/// animationsub byte indexes [init, ini1, ini2, ini3] with a mod-4 wrap that absorbs LSB's
-/// spawn flag (F47). The client plays the named routine from the model DAT through its generic
-/// named-play slots (F44); a model that does not ship it simply gets nothing. No interpretation
+/// Retail's sub->routine table (FFXiMain.dll v3.0.0.0 installed 2026-09-09 .data @RVA
+/// 0x35AF60): the raw animationsub byte indexes [init, ini1, ini2, ini3] with a mod-4 wrap that
+/// absorbs LSB's spawn flag (special_routine_table_matches_retail pins the table verbatim).
+/// The client plays the named routine from the model DAT through its generic named-play slots;
+/// a model that does not ship it simply gets nothing. No interpretation
 /// of what any particular model does with a sub value lives in the engine: the DAT decides.
 pub const SPECIAL_ROUTINE_TABLE: [&str; 8] = [
     "init", "ini1", "ini2", "ini3", "init", "ini1", "ini2", "ini3",
@@ -50,7 +51,8 @@ pub fn special_routine(animationsub: u8) -> Option<&'static str> {
     (name != "init").then_some(name)
 }
 
-/// The wire state retail's special-pose mechanism consumes (FFXiMain.dll F37/F44): the raw
+/// The wire state retail's special-pose mechanism consumes (FFXiMain.dll .data @RVA 0x35AF60):
+/// the raw
 /// animationsub byte, whether status hides the actor, and which routine was last triggered.
 /// No per-mob interpretation: what a sub value does is defined by the model DAT's routine of
 /// that name if it ships one at all (worms use ini1/init for their dig/pop special poses; other
@@ -58,7 +60,7 @@ pub fn special_routine(animationsub: u8) -> Option<&'static str> {
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct SpecialPose {
     /// Raw animationsub byte as last seen on the wire. Retail indexes its table with the raw
-    /// 3-bit value and lets the mod-4 wrap absorb the spawn flag (F47), so no masking here.
+    /// 3-bit value and lets the mod-4 wrap absorb the spawn flag, so no masking here.
     pub sub: u8,
 
     /// status == INVISIBLE(3): the actor is hidden. Retail destroys it; we keep one hidden
@@ -87,7 +89,7 @@ pub struct SpecialPoseStep {
 }
 
 /// Advance one entity's special-pose state from last frame to this snapshot, mirroring retail's
-/// two triggers (FFXiMain.dll F37/F44):
+/// two triggers (FFXiMain.dll .data @RVA 0x35AF60):
 ///   * animationsub changing while the actor is visible plays table[sub] on that model;
 ///   * a hidden->visible transition runs 'init' (the DAT's load routine).
 ///     A sub change to zero settles back to locomotion. While hidden nothing triggers: retail has no
@@ -121,7 +123,7 @@ pub fn next_special_pose(prev: &SpecialPose, status: u8, animationsub: u8) -> Sp
         // (or spawn-flagged zero) settles; anything else triggers that model's special routine.
         match special_routine(animationsub) {
             Some(name) => {
-                // F37 table names are fourccs (init/iniN); the checked cast turns a bad name
+                // The table names are fourccs (init/iniN); the checked cast turns a bad name
                 // into a loud panic instead of a silent truncation.
                 pose.active_routine = Some(name.as_bytes().try_into().unwrap());
                 Some(name)
@@ -232,7 +234,7 @@ pub struct FishingClip {
 
 /// Maps a fishing macro-state phase (0..=6) to its `fsh<n>` model clip. Phases:
 /// 0=cast/wait, 1=fighting, 2=caught fish, 3=rod break, 4=line break, 5=caught monster,
-/// 6=stop/cancel. research/xim Actor.kt:361 (`updateFishingState`).
+/// 6=stop/cancel. research/xim poc/Actor.kt updateFishingState.
 pub fn fishing_clip(phase: u8) -> Option<FishingClip> {
     if phase > 6 {
         return None;
@@ -870,8 +872,8 @@ mod tests {
 
     #[test]
     fn special_routine_table_matches_retail() {
-        // F37's table @0x35AF60 verbatim: sub 4..7 wraps mod-4, which is what absorbs LSB's
-        // spawn flag (F47) without any client-side masking.
+        // The retail table at .data @RVA 0x35AF60 verbatim: sub 4..7 wraps mod-4, which is what
+        // absorbs LSB's spawn flag without any client-side masking.
         assert_eq!(special_routine(0), None);
         assert_eq!(special_routine(1), Some("ini1"));
         assert_eq!(special_routine(2), Some("ini2"));
@@ -898,7 +900,7 @@ mod tests {
             assert_eq!(s.pose.active_routine, Some(fourcc(name)));
             assert_eq!(s.triggered, Some(name));
         }
-        // Spawn-flagged selector: the raw byte indexes the table; no masking (F47).
+        // Spawn-flagged selector: the raw byte indexes the table; no masking.
         let s = step(&SpecialPose::default(), 0, 5);
         assert_eq!(s.pose.active_routine, Some(*b"ini1"));
         assert_eq!(s.triggered, Some("ini1"));

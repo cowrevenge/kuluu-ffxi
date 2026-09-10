@@ -115,9 +115,8 @@ pub enum MotionStages {
 }
 
 // One running routine. Not a component on its own anymore: an entity can run several routines at
-// once - retail runs a hit reaction alongside the swing that caused it (ActionTimer1 counted 2 and
-// 3, F49/F52) - so the runtime keeps them in `ActiveSchedulers`, one entry per routine with its own
-// frame clock.
+// once - retail runs a hit reaction alongside the swing that caused it (rabbit_tester s7d) - so
+// the runtime keeps them in `ActiveSchedulers`, one entry per routine with its own frame clock.
 #[derive(Debug, Clone)]
 pub struct ActiveScheduler {
     pub stages: Vec<TimedStage>,
@@ -210,8 +209,8 @@ impl ActiveScheduler {
     }
 
     /// True while this routine's AnimationLock interval covers `frame`: any 0x07/0x59 stage with
-    /// `stage.frame <= frame < stage.frame + duration_frames` (F49, F55, F57). A routine with no
-    /// lock stage never locks.
+    /// `stage.frame <= frame < stage.frame + duration_frames`. A routine with no lock stage never
+    /// locks.
     pub fn locks_at(&self, frame: u32) -> bool {
         self.stages.iter().any(|t| {
             t.stage.kind == StageKind::AnimationLock
@@ -225,7 +224,7 @@ impl ActiveScheduler {
     }
 }
 
-/// The routines an entity is running right now - one entry per routine (F49/F52). Retail's
+/// The routines an entity is running right now - one entry per routine. Retail's
 // AnimationLock is a refcount across overlapping routines, so the lock test is "any entry holds
 // its interval at its own current frame" rather than a separate counter. Stripped with
 // `ActionAssets`/`ActionTarget` when the last entry finishes.
@@ -249,21 +248,22 @@ impl ActiveSchedulers {
         Self { routines: entries }
     }
 
-    /// Enqueue a routine alongside the running ones instead of replacing them (F49/F52).
+    /// Enqueue a routine alongside the running ones instead of replacing them.
     pub fn push(&mut self, active: ActiveScheduler) {
         self.routines.push(active);
     }
 
     /// True while any entry's AnimationLock interval covers its own current frame - the refcount>0
-    /// test itself (ActionTimer1 reached 2 and 3 when a hit reaction overlapped a swing, F49/F57).
+    /// test itself (animation_lock_is_refcounted_across_concurrent_routines pins it).
     pub fn is_locked_now(&self) -> bool {
         self.routines.iter().any(|r| r.locks_at(r.current_frame()))
     }
 
     /// 0x5F StopRoutine: drop every entry named `name`. xim stops each matching sequence on the
-    /// same actor (EffectRoutineInstance.kt:910-915); stop() just clears the remaining queue - it
-    /// does not run the stopped routine's 0x2D StopParticle stages (:276-281), so no particle
-    /// cleanup happens here either.
+    /// same actor (research/xim EffectRoutineInstance.kt handleStopRoutineEffect); stop() just
+    /// clears the remaining queue - it does not run the stopped routine's 0x2D StopParticle stages
+    /// (research/xim EffectRoutineInstance.kt EffectSequence.stop), so no particle cleanup happens
+    /// here either.
     pub fn remove_routine_named(&mut self, name: &[u8; 4]) {
         self.routines.retain(|r| r.name != *name);
     }
@@ -349,11 +349,11 @@ pub fn tick_active_schedulers(
     }
 }
 
-// 0x5F StopRoutine - the worm's dig (`ini1`) stops `init` and its pop-up stops `ini1` this way
-// (F46, F57). xim stops every sequence named by the stage on the same actor; here that is a plain
-// removal from the vec. The stopped routine's remaining stages simply never fire - including any
-// 0x2D StopParticle, which retail does not run for a stopped sequence either
-// (EffectRoutineInstance.kt:276-281).
+// 0x5F StopRoutine - the worm's dig (`ini1`) stops `init` and its pop-up stops `ini1` this way.
+// xim stops every sequence named by the stage on the same actor; here that is a plain removal
+// from the vec. The stopped routine's remaining stages simply never fire - including any 0x2D
+// StopParticle, which retail does not run for a stopped sequence either (research/xim
+// EffectRoutineInstance.kt EffectSequence.stop).
 pub fn dispatch_stop_routine_stages(
     mut events: MessageReader<SchedulerStageEvent>,
     mut q: Query<&mut ActiveSchedulers>,
@@ -1178,8 +1178,9 @@ pub fn dispatch_motion_stages(
     }
 }
 
-// research/xim EffectRoutineInterpolatedEffects.kt:62 - the 0x21/0x25 flinch stage plays the
-// model's flinch clip ONCE (dfm? for PCs, dfi? otherwise), overwriting idle clips only and
+// research/xim EffectRoutineInterpolatedEffects.kt FlinchAnimationInstance - the 0x21/0x25
+// flinch stage plays the model's flinch clip ONCE (dfm? for PCs, dfi? otherwise), overwriting
+// idle clips only and
 // skipping when the model is animation-locked. This is the visual half of a hit reaction: the
 // victim's `damg`/`ldam` routines are sound-only, so without this consumer a hit lands as SE +
 // attacker-side sparks while the victim stands still (kuluu-df9t D3).
@@ -1271,9 +1272,9 @@ pub fn action_dat_file_id(
         3 => weapon_skill_file_id(animation?, race?, main_dll?),
         4 => ffxi_vocab::action_anim::spell_file_id(action_id, animation),
         6 => ffxi_vocab::action_anim::ability_file_id(action_id, animation),
-        // research/xim MobAbilityTable.kt:58-72 - mob skills (category 11) and pet skills
-        // (category 13) key the effect DAT by the result's animation index with a range-
-        // dependent base; that DAT's `main` plays the caster's own sp?? clip (F51, F58).
+        // research/xim resource/table/MobAbilityTable.kt getFileTableOffset - mob skills
+        // (category 11) and pet skills (category 13) key the effect DAT by the result's animation
+        // index with a range-dependent base; that DAT's `main` plays the caster's own sp?? clip.
         11 | 13 => Some(ffxi_vocab::action_anim::mob_skill_file_id(animation?)),
         _ => None,
     }
@@ -1546,8 +1547,9 @@ pub fn dispatch_cast_routine_started(
 #[derive(Component, Debug, Clone, Copy)]
 pub struct PendingHitReaction {
     pub resolution: ffxi_proto::melee::ActionResolution,
-    // 0x028_battle2.cpp:74-76 - hitDistortion(2): 3 (Heavy) is the crit case; knockback(3):
-    // any non-zero level adds `sway` alongside the damage reaction.
+    // vendor/server/src/map/packets/s2c/0x028_battle2.cpp GP_SERV_COMMAND_BATTLE2::pack -
+    // hitDistortion(2) drives the recoil clip size (Heavy -> ldam when the model ships it);
+    // knockback(3): any non-zero level adds `sway` alongside the damage reaction.
     pub hit_distortion: u8,
     pub knockback: u8,
     // The scheduler whose DamageCallback stage is allowed to fire this reaction. Every completion
@@ -1728,7 +1730,7 @@ pub fn dispatch_melee_action_started(
         // An off-hand/kick routine is absent from some weapon-motion DATs; the main-hand swing
         // is the only routine every armed race base is known to carry. The event carries the
         // outcome bits (info/hitDistortion/knockback) separately from the (resolution,
-        // animation) pair - F54/F58.
+        // animation) pair.
         let raw_result = result;
         let result = raw_result.and_then(|(resolution, animation)| {
             Some((
@@ -1759,8 +1761,8 @@ pub fn dispatch_melee_action_started(
             continue;
         };
         let armed_by = active.name();
-        // A swing alongside a running cast/completion effect runs concurrently in retail
-        // (ActionTimer1 refcount, F49/F52); the push path leaves the first writer's
+        // A swing alongside a running cast/completion effect runs concurrently in retail; the
+        // push path leaves the first writer's
         // ActionTarget alone.
         match q_scheds.get_mut(actor_entity) {
             Ok(mut scheds) => scheds.push(active),
@@ -1915,8 +1917,8 @@ pub fn dispatch_damage_callback_stages(
             }
             continue;
         };
-        // The reaction is decided against the VICTIM's model (F54/F58): `shld` is only picked
-        // when that DAT ships it, and a knockback level adds `sway` alongside.
+        // The reaction is decided against the VICTIM's model (rabbit_tester s6c): `shld` is
+        // only picked when that DAT ships it, and a knockback level adds `sway` alongside.
         let Some(victim_routines) = actor_render_routines(victim, &q_children, &q_render) else {
             if combat_log_enabled() {
                 println!("COMBAT_CB victim={} no-victim-routines", victim.index());
@@ -2034,10 +2036,9 @@ fn run_routine_on(
     let Some(active) = ActiveScheduler::from_routine(&lookup, routine) else {
         return;
     };
-    // A victim mid-routine gets the reaction pushed alongside it: retail runs both (the
-    // ActionTimer1 lock counted 2 and 3 when a hit reaction overlapped a swing, F49/F52). The old
-    // single-slot guard dropped the lower-priority routine instead. When the entity has no
-    // ActiveSchedulers yet the insert is a deferred command - a second routine queued on the same
+    // A victim mid-routine gets the reaction pushed alongside it: retail runs both
+    // (rabbit_tester s7d). When the entity has no ActiveSchedulers yet the insert is a deferred
+    // command - a second routine queued on the same
     // entity in this batch would overwrite it (last insert wins), so buffer it and let the caller
     // merge at flush time instead (kuluu-df9t: a knockback hit on a fresh victim lost its damage
     // reaction to the sway insert).
@@ -2368,8 +2369,9 @@ mod tests {
     use super::*;
     use ffxi_dat::scheduler::{SchedulerStage, StageKind};
 
-    // Foot Kick (mob skill 259) arrives as category 11 with animation 3; the effect DAT's file id
-    // is the range-dependent base plus that index (research/xim MobAbilityTable.kt:62-72).
+    // whirl_claws (mob skill 259) arrives as category 11 with animation 3; the effect DAT's file
+    // id is the range-dependent base plus that index (research/xim resource/table/MobAbilityTable.kt
+    // getFileTableOffset).
     #[test]
     fn mob_skill_categories_key_the_effect_dat_by_animation() {
         assert_eq!(
@@ -2769,8 +2771,8 @@ mod tests {
     }
 
     // The lock test is per-routine and interval-based: a routine with no 0x07/0x59 stage never
-    // locks (F55), and an overlapping second routine keeps the entity locked past either one's
-    // own interval end - the refcount>0 behaviour retail measured on ActionTimer1 (F49/F57).
+    // locks, and an overlapping second routine keeps the entity locked past either one's own
+    // interval end - the refcount>0 behaviour this test pins.
     #[test]
     fn animation_lock_is_refcounted_across_concurrent_routines() {
         let lock_stage = |frame: u32, raw: u8, dur: u16| -> TimedStage {
@@ -2875,7 +2877,7 @@ mod tests {
         );
     }
 
-    // F54/F58 - the outcome bits split the Hit case; a knockback level adds sway alongside.
+    // The outcome bits split the Hit case; a knockback level adds sway alongside.
     #[test]
     fn hit_reaction_routine_table() {
         use ffxi_proto::melee::ActionResolution as R;
@@ -3969,8 +3971,8 @@ mod tests {
     }
 
     // Retail-DAT guard (skips without an install): the Carrion Worm's dig (`ini1`) locks for 112
-    // ticks and its pop-up (`init`) for 188 - the retail-measured intervals F46/F57 pin, which
-    // patch 3's pose-pass hold keys on. Each also carries the 0x5F that stops the other (the worm
+    // ticks and its pop-up (`init`) for 188 - the retail-measured intervals this test pins. Each
+    // also carries the 0x5F that stops the other (the worm
     // dig stops `init`, the pop stops `ini1`), so both halves of StopRoutine are exercised by one
     // file. Read straight off disk: which VTABLE app claims the file id is not the point here.
     #[test]

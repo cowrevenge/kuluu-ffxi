@@ -2659,10 +2659,11 @@ pub enum AgentEvent {
         target_id: Option<u32>,
         result: Option<ffxi_proto::melee::MeleeResult>,
         animation: Option<u16>,
-        /// First result's outcome bits (0x028_battle2.cpp:74-76), read for every category:
-        /// `info` carries Defeated/CriticalHit (enums/action/info.h), `hit_distortion`
-        /// 0..3 and `knockback` 0..7 drive the victim reaction, `kind` is uninterpreted.
-        /// Zero when no result block was read.
+        /// First result's outcome bits in the 0x028 per-result order (vendor/server/src/map/
+        /// packets/s2c/0x028_battle2.cpp GP_SERV_COMMAND_BATTLE2::pack), read for every category:
+        /// `info` carries Defeated/CriticalHit (vendor/server/src/map/enums/action/info.h),
+        /// `hit_distortion` 0..3 and `knockback` 0..7 drive the victim reaction, `kind` is
+        /// uninterpreted. Zero when no result block was read.
         info: u8,
         hit_distortion: u8,
         knockback: u8,

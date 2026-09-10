@@ -85,7 +85,8 @@ impl PosHead {
 
     // `Flags0.MovTime`: the low 13 bits of the POS block's moving u16. LSB writes
     // `ref<uint16>(0x18) = PEntity->loc.p.moving` (vendor/server/src/map/packets/
-    // entity_update.cpp:320), and the pathfinder advances that counter per step:
+    // entity_update.cpp CEntityUpdatePacket::updateWith), and the pathfinder advances that
+    // counter per step:
     // `+= 0x35`, or `0x28` on a speed change, mod 0x2000 (vendor/server/src/map/ai/helpers/
     // pathfind.cpp StepTo). So the delta between two POS updates counts server steps since
     // the last one. XiPackets world/server/0x000E: UpdateMoveTime(Flags0 & 0x1FFF); retail
@@ -1512,8 +1513,9 @@ mod pos_head_tests {
 
     #[test]
     fn pos_head_mov_time_is_flags0_low_13_bits() {
-        // LSB's moving u16 (entity_update.cpp:320) carries MovTime in its low 13 bits;
-        // the counter wraps mod 0x2000, so a value at the top of the range must decode
+        // LSB's moving u16 (entity_update.cpp CEntityUpdatePacket::updateWith) carries
+        // MovTime in its low 13 bits; the counter wraps mod 0x2000, so a value at the top
+        // of the range must decode
         // without bleeding into facetarget (bits 17..31).
         let mut buf = vec![0u8; PosHead::SIZE];
         let flags0 = (0x01A2u32 << 17) | 0x1FFF;

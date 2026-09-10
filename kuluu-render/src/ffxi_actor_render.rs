@@ -89,7 +89,7 @@ pub const LOCOMOTION_XFADE_OUT: f32 = 7.5;
 
 // Gated special-pose diagnostics (`KULUU_SPECIAL_LOG=1`): wire-state transitions plus clip
 // selection for entities with an active special routine (the animationsub -> init/iniN table,
-// FFXiMain.dll F37/F44). Off by default; read once.
+// FFXiMain.dll .data @RVA 0x35AF60). Off by default; read once.
 fn special_log_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ENABLED.get_or_init(|| {
@@ -795,8 +795,8 @@ pub fn load_pc(
     let mut anim_dirs = vec![ResourceDir::from_bytes(skel_bytes.clone())];
 
     // The race skeleton DAT's Info chunk is the PC's movement info: retail copies its
-    // movementType but drops the scale byte (research/xim poc/Model.kt:293-298
-    // PcModel.getMovementInfo), so a PC never renders at the race CIB's 82-95 percent.
+    // movementType but drops the scale byte (research/xim poc/Model.kt PcModel.getMovementInfo),
+    // so a PC never renders at the race CIB's 82-95 percent.
     let race_cib;
     {
         let dir = ResourceDir::from_bytes(skel_bytes.clone());
@@ -2088,10 +2088,10 @@ fn death_collapse_clip(routines: &HashMap<DatId, Scheduler>) -> Option<(DatId, f
 
 pub(crate) use ffxi_vocab::magic::CATEGORY_MAGIC_START as MAGIC_START_CATEGORY;
 
-// vendor/server/src/map/enums/four_cc.h:31-36 - SkillStart/ItemStart/RangedStart carry the
-// routine's FourCC in BATTLE2 cmd_arg ("cate"/"cait"/"calg"); "sp??" is that category's
+// vendor/server/src/map/enums/four_cc.h FourCC - SkillUse/ItemUse/RangedStart ("cate"/
+// "cait"/"calg") carry the routine's FourCC in BATTLE2 cmd_arg; "sp??" is that category's
 // interrupt. A payload that is not such a FourCC falls back to the category's hard-coded retail
-// default (F51, F56). Category 8 keeps its spell-table suffix path for unknown payloads.
+// default. Category 8 keeps its spell-table suffix path for unknown payloads.
 pub(crate) fn action_routine(
     action_kind: u8,
     cmd_arg: u32,
@@ -2101,7 +2101,7 @@ pub(crate) fn action_routine(
     let fourcc = ffxi_vocab::magic::magic_start_routine(cmd_arg);
     Some(match action_kind {
         // kuluu-df9t D6 - BATTLE2's per-result `animation` picks the limb routine
-        // (vendor/server/src/map/attack.h:52-59): RightAttack→ati0 / LeftAttack→bti0 /
+        // (vendor/server/src/map/attack.h AttackAnimation): RightAttack→ati0 / LeftAttack→bti0 /
         // RightKick→cti0 / LeftKick→dti0. Absent or out-of-range values fall back to ati0, the
         // only swing every armed race base is known to carry.
         1 => (
@@ -2584,11 +2584,11 @@ fn advance_actor_pose(
     // The coordinator cursor resets ONLY when the selected clip actually changes (wlk<->run,
     // moving<->idle, or a tier/clip-set change such as casual->battle on engage). A new POS update
     // within the same gait is NOT a clip change: it must not re-register here or call
-    // register_animation again, or the walk clip would restart from frame 0 on every packet (the
-    // stop-and-go stutter of B). The chase model keeps `moving` up across a late update via its
-    // hold-until grace window (combat_stance::PredictSample), so an unchanged gait never reaches this
-    // branch. There is no per-frame or per-update re-registration path for an unchanged locomotion
-    // clip: coordinator.update below advances the cursor monotonically instead.
+    // register_animation again, or the walk clip would restart from frame 0 on every packet. The
+    // chase model keeps `moving` up across a late update via its arrival-segment hold
+    // (combat_stance::PredictSample::is_chasing), so an unchanged gait never reaches this branch.
+    // There is no per-frame or per-update re-registration path for an unchanged locomotion clip:
+    // coordinator.update below advances the cursor monotonically instead.
     if !matches.is_empty() && *current_clip != Some((selected_id, use_battle)) {
         // KULUU_CLIP_LOG=1: the requested clip actually resolved; one line per transition into
         // current_clip, naming the chunk that won and its frame count.
@@ -2963,8 +2963,8 @@ pub fn kick_load_actor_tasks(
         }
         let subject = req.subject.clone();
         // Retail applies the 0x45 Info `scale` byte to NPC models only: NpcModel.getScale
-        // divides it by 100 (research/xim poc/Model.kt:532-536), PcModel drops the byte
-        // entirely (:293-298) and the mount layout has no scale field at all. The same value
+        // divides it by 100 (research/xim poc/Model.kt), while PcModel.getMovementInfo drops
+        // the byte entirely and the mount layout has no scale field at all. The same value
         // bakes the bind pose/bounds here and rides along to spawn_live_actor's per-frame
         // RootTransform, so both see one number.
         let is_npc = matches!(subject, ActorSubject::Npc { .. });
@@ -3391,7 +3391,7 @@ pub fn tick_live_ffxi_actors(
     tracked: Res<crate::scene::TrackedEntities>,
     // Model-root Visibility is written here only for entities with an active special state;
     // every other entity's root stays owned by scene::apply_invis_flag_system (invis-flag PCs).
-    // The fourth slot is the Defeated latch (F49): a killing result starts the death path on
+    // The fourth slot is the Defeated latch: a killing result starts the death path on
     // this frame instead of waiting for the next 0x0E hp_pct.
     mut q_actors: Query<(
         &mut FfxiRenderActor,
@@ -3410,7 +3410,7 @@ pub fn tick_live_ffxi_actors(
     // the transition can advance from the previous snapshot's state; rebuilt entries read their
     // prior state here rather than resetting to plain on every change.
     mut special_mem: Local<HashMap<u32, ffxi_actor::actor_state::SpecialPose>>,
-    // The entity-level routine vecs (F49/F52): the special-pose routine firing below and the
+    // The entity-level routine vecs: the special-pose routine firing below and the
     // AnimationLock set built before the parallel pass both read through this one query. Sixteen
     // parameters (Bevy's fn-item arity limit); new state goes into FrameScratch, not here.
     mut q_scheds: Query<&mut crate::scheduler_runtime::ActiveSchedulers>,
@@ -3631,7 +3631,7 @@ pub fn tick_live_ffxi_actors(
     }
     let mount_attach_by_rider: &HashMap<u32, MountAttach> = mount_attach_scratch;
 
-    // World ids whose running routine currently holds an AnimationLock (F49/F57): while locked
+    // World ids whose running routine currently holds an AnimationLock: while locked
     // the pose pass must not release the routine's Motion clip - a one-shot pins its end frame in
     // the coordinator, so this is what holds buried/emerged poses until the lock lapses. Built
     // serially before the parallel pass; the set is read-only inside it.
@@ -3795,9 +3795,9 @@ pub fn tick_live_ffxi_actors(
             // the authored rate; only chase-owned moving entities get a non-unity scale, and
             // advance_actor_pose applies it to the locomotion tier alone.
             //
-            // The stride scale matches a ground stride: the 0x45 Info movement byte (vekien/
-            // xi-model-viewer ui/js/dat/inspect.js MOVEMENT_TYPE :1348-1350) says Flying and
-            // Sliding mobs have no walk/run stride to match, so their locomotion clips play at
+            // The stride scale matches a ground stride: the 0x45 Info movement byte (research/xim
+            // resource/InfoSection.kt MovementType) says Flying and Sliding mobs have no
+            // walk/run stride to match, so their locomotion clips play at
             // the authored rate. Walking/Large carry the wire scale; Unset (no CIB or 0xFF)
             // keeps today's behavior.
             let playback_rate = if moving_flag {
@@ -5507,7 +5507,7 @@ mod pose_resolution_tests {
 
         assert_eq!(r(8, 0, None, None), Some(("cast".to_string(), true)));
 
-        // F51/F56 - the start categories play the packet's FourCC; a payload that is not one
+        // The start categories play the packet's FourCC; a payload that is not one
         // falls back to the category's hard-coded retail default.
         const CATE: u32 = 0x65746163;
         const CAIT: u32 = 0x74696163;

@@ -1229,7 +1229,8 @@ fn handle_sub_packet(
                     if let Some(ns) = decode::NpcState::decode_char_npc(sub.data) {
                         // 0x04 is the spawn flag LSB ORs into animationsub (see NpcState docs);
                         // stripping it leaves a nonzero selector exactly when the sub byte names
-                        // a routine (sub 5 wraps to ini1, FFXiMain.dll F37/F47).
+                        // a routine (sub 5 wraps to ini1; ffxi-actor
+                        // special_routine_table_matches_retail).
                         if ns.status == 3 || (ns.animationsub & !0b100) != 0 {
                             tracing::info!(
                                 target: "special",
@@ -5030,10 +5031,11 @@ pub struct Battle2Header {
     // is what the client resolves against its file table rather than the action id.
     pub animation: Option<u16>,
 
-    // 0x028_battle2.cpp:74-76 - the first result block's outcome bits, read for EVERY category
-    // (unlike `first_result`, which is gated to basic attacks): info(5) carries Defeated /
-    // CriticalHit (enums/action/info.h), hitDistortion(2) and knockback(3) drive the victim's
-    // reaction choice. Zero when no result block was read.
+    // vendor/server/src/map/packets/s2c/0x028_battle2.cpp GP_SERV_COMMAND_BATTLE2::pack - the
+    // first result block's outcome bits, read for EVERY category (unlike `first_result`, which is
+    // gated to basic attacks): info(5) carries Defeated / CriticalHit
+    // (vendor/server/src/map/enums/action/info.h), hitDistortion(2) and knockback(3) drive the
+    // victim's reaction choice. Zero when no result block was read.
     pub first_info: u8,
     pub first_hit_distortion: u8,
     pub first_knockback: u8,
@@ -5099,9 +5101,9 @@ pub fn decode_battle2_header(data: &[u8]) -> Option<Battle2Header> {
     // end the body before these trailing reads. Degrade to "no target" rather than dropping the
     // whole action — the sibling decode_battle2_action tolerates the same short payload.
     let primary_target_id = br.read(32).filter(|_| trg_sum > 0).map(|id| id as u32);
-    // 0x028_battle2.cpp:71-76 - resolution(3), kind(2), animation(12), info(5),
-    // hitDistortion(2), knockback(3) in LSB write order. The old reader stopped after
-    // `animation`; the chat path lumped the last two into one 5-bit "scale" - split them (F58).
+    // vendor/server/src/map/packets/s2c/0x028_battle2.cpp GP_SERV_COMMAND_BATTLE2::pack -
+    // resolution(3), kind(2), animation(12), info(5), hitDistortion(2), knockback(3) in LSB
+    // write order.
     let first = primary_target_id
         .and_then(|_| br.read(4))
         .filter(|count| *count > 0)

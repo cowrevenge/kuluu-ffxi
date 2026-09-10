@@ -451,9 +451,10 @@ pub mod speed {
     // The server does not send a faster speed to a mounted player; LSB caps its mount speed at
     // map.MOUNT_SPEED/2 = 40, below the 50 it sends on foot (vendor/server/src/map/entities/
     // battleentity.cpp CBattleEntity::UpdateSpeed). Retail makes up the difference in the client,
-    // doubling the decoded speed while mounted and then clamping (research/XIClient .../World/
-    // Actor/ControllableActor.cpp ControllableActor::StepControl). Taking the packet at face value
-    // therefore makes mounting slower.
+    // doubling the decoded speed while mounted and then clamping
+    // (research/XIClient/src/XIClient/source/World/Actor/ControllableActor.cpp
+    // ControllableActor::StepControl). Taking the packet at face value therefore makes mounting
+    // slower.
     pub const MOUNTED_SPEED_MULTIPLIER: f32 = 2.0;
 
     /// The retail client's movement ceiling in yalms per second (ControllableActor::StepControl).
@@ -1579,7 +1580,8 @@ pub enum ViewerEvent {
         /// First result's raw `animation` index, for every category — the file-table key of
         /// the caster's effect DAT. Absent on a result-less or truncated body.
         animation: Option<u16>,
-        /// First result's outcome bits (0x028_battle2.cpp:74-76), read for every category:
+        /// First result's outcome bits in the 0x028 per-result order (vendor/server/src/map/
+        /// packets/s2c/0x028_battle2.cpp GP_SERV_COMMAND_BATTLE2::pack), read for every category:
         /// `info` carries Defeated/CriticalHit (vendor/server enums/action/info.h - bit 1 /
         /// bit 2), `hit_distortion` 0..3 and `knockback` 0..7 pick the victim's reaction
         /// routine, `kind` is uninterpreted. Zero when no result block was read.

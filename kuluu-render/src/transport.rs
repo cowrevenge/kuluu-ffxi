@@ -380,6 +380,9 @@ mod tests {
                 screen_color: None,
                 random_group: None,
                 local_dir: [0; 4],
+                actor_fade: None,
+                idle_transition_time: None,
+                flinch_duration: None,
             },
         }
     }

@@ -11,7 +11,9 @@ use ffxi_dat::sep::Sep;
 // research/xim util/Fps.kt — `internalFps = 60.0` is the clock every effect routine and
 // particle generator is authored against (poc/MainTool.kt internalLoop feeds the raw elapsed frames to
 // EffectManager). Only the skeleton domain is halved: poc/ActorManager.kt updateAll "In game,
-// skeletal animations are only updated every other frame" — see SKELETON_FRAME_DIVISOR.
+// skeletal animations are only updated every other frame" — see SKELETON_FRAME_DIVISOR. DAT stage
+// durations count whole frames of this clock; DAT transition fields (CompletionMotion's HalfFrames)
+// count half-frames, so a stored V plays as V/2 whole frames at ROUTINE_FPS.
 pub const ROUTINE_FPS: f32 = 60.0;
 
 // research/xim poc/ActorManager.kt updateAll — `elapsedFrames / 2f` into updateAnimation.
@@ -1180,8 +1182,12 @@ pub fn dispatch_motion_stages(
                         local_clips,
                         duration_frames: stage.duration_frames as f32,
                         max_loops: stage.max_loops,
-                        transition_in: stage.transition_in,
-                        transition_out: stage.transition_out,
+                        transition_in: crate::ffxi_actor_render::HalfFrames::from_dat(
+                            stage.transition_in,
+                        ),
+                        transition_out: crate::ffxi_actor_render::HalfFrames::from_dat(
+                            stage.transition_out,
+                        ),
                     },
                 );
             }
@@ -1242,8 +1248,9 @@ pub fn dispatch_flinch_stages(
                 }
                 continue;
             };
-            // animationDuration drives the transition in/out - half-frame u16 units, so passing
-            // it whole yields XIM's animationDuration/2 frames each side; None payload → 0 s.
+            // XIM splits a flinch's animationDuration across its two transitions (each side plays
+            // duration/2 whole frames), so each half-frame field stores the total itself; no payload
+            // means zero-length transitions.
             let anim_dur = ev.stage.stage.flinch_duration.unwrap_or(0.0).max(0.0);
             if combat_log_enabled() {
                 println!(
@@ -1258,8 +1265,12 @@ pub fn dispatch_flinch_stages(
                     local_clips: &[],
                     duration_frames: anim_dur,
                     max_loops: 1,
-                    transition_in: anim_dur as u16,
-                    transition_out: anim_dur as u16,
+                    transition_in: crate::ffxi_actor_render::HalfFrames::from_flinch_total(
+                        anim_dur,
+                    ),
+                    transition_out: crate::ffxi_actor_render::HalfFrames::from_flinch_total(
+                        anim_dur,
+                    ),
                 },
             );
         }
@@ -2297,8 +2308,8 @@ fn play_local_emote_clip(
                     local_clips: &[],
                     duration_frames: 0.0,
                     max_loops: 1,
-                    transition_in: 0,
-                    transition_out: 0,
+                    transition_in: crate::ffxi_actor_render::HalfFrames::ZERO,
+                    transition_out: crate::ffxi_actor_render::HalfFrames::ZERO,
                 },
             );
         }
@@ -3099,22 +3110,22 @@ mod tests {
 
     // A trailing AnimationLock must hold until its own end frame, not lapse when the entry's
     // post-finish TTL runs out from the lock stage's fire time. This routine locks [0, 130):
-    // under the old retirement (last stage frame + 2 s TTL) the entry was gone by tick 120,
-    // releasing the lock ten ticks early.
+    // under the old retirement (last stage frame + 2 s TTL) the entry was gone by frame 120,
+    // releasing the lock ten frames early.
     #[test]
     fn trailing_lock_holds_until_its_end_frame_not_the_ttl() {
         let mut lk = stage(0, StageKind::AnimationLock, 0x07, *b"lk01");
         lk.stage.duration_frames = 130;
         let sched = make_scheduler(*b"lock", vec![lk]);
 
-        // Exact integer bounds: locked through tick 129, released at 130.
+        // Exact integer bounds: locked through frame 129, released at 130.
         let a = ActiveScheduler::from_scheduler(&sched);
         assert_eq!(a.end_frame(), 130);
-        assert!(a.locks_at(129), "tick 129 is inside [0, 130)");
-        assert!(!a.locks_at(130), "the lock ends at tick 130");
+        assert!(a.locks_at(129), "frame 129 is inside [0, 130)");
+        assert!(!a.locks_at(130), "the lock ends at frame 130");
 
         // And the entry must still be alive when the clock reaches that window: the old code
-        // retired it at elapsed >= 2 s (tick 120), so is_locked_now could no longer see it.
+        // retired it at elapsed >= 2 s (frame 120), so is_locked_now could no longer see it.
         let mut app = App::new();
         app.add_message::<SchedulerStageEvent>()
             .init_resource::<Time>()
@@ -4044,7 +4055,7 @@ mod tests {
     }
 
     // Retail-DAT guard (skips without an install): the Carrion Worm's dig (`ini1`) locks for 112
-    // ticks and its pop-up (`init`) for 188 - the retail-measured intervals this test pins. Each
+    // frames and its pop-up (`init`) for 188 - the retail-measured intervals this test pins. Each
     // also carries the 0x5F that stops the other (the worm
     // dig stops `init`, the pop stops `ini1`), so both halves of StopRoutine are exercised by one
     // file. Read straight off disk: which VTABLE app claims the file id is not the point here.
@@ -4078,7 +4089,7 @@ mod tests {
             assert_eq!(lock.frame, 0, "{name:?} locks from frame 0");
             assert_eq!(
                 lock.stage.duration_frames, lock_dur,
-                "retail measures the {name:?} lock at {lock_dur} ticks"
+                "retail measures the {name:?} lock at {lock_dur} frames"
             );
             let stop = routine
                 .stages

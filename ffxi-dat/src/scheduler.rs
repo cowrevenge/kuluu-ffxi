@@ -237,7 +237,8 @@ pub enum StageKind {
 
     FollowPoints,
 
-    /// 0x07 / 0x59 - AnimationLock for `duration_frames` ticks (SE: `BondageActor` /
+    /// 0x07 / 0x59 - AnimationLock for `duration_frames` frames of the routine clock
+    /// (SE: `BondageActor` /
     /// `LockCasterMagic`; xim treats both as AnimationLockEffect). Retail's ActionTimer1
     /// lock; refcounted across overlapping routines, and a routine without a lock stage does
     /// not lock.
@@ -1449,14 +1450,14 @@ mod tests {
     #[test]
     fn mob_routine_opcodes_decode_lock_stop_and_fade() {
         let mut body = vec![0u8; SCHEDULER_HEADER_LEN];
-        // 0x07, 3 words: AnimationLock held for 0x70 ticks (the worm's dig hold).
+        // 0x07, 3 words: AnimationLock held for 0x70 frames (the worm's dig hold).
         body.extend(timed_stage_bytes(0x07, 0x03, 0, 0x70));
         body.extend_from_slice(&0u32.to_le_bytes()); // xim expectZero32
                                                      // 0x5F, 4 words: stop the running routine named `init`.
         body.extend(timed_stage_bytes(0x5F, 0x04, 0, 0));
         body.extend_from_slice(b"init");
         body.extend_from_slice(&0u32.to_le_bytes()); // xim expectZero32
-                                                     // 0x29, 4 words: fade the caster to neutral over 60 ticks.
+                                                     // 0x29, 4 words: fade the caster to neutral over 60 frames.
         body.extend(timed_stage_bytes(0x29, 0x04, 0, 60));
         body.extend_from_slice(&[0x80; 4]);
         body.extend_from_slice(&0u32.to_le_bytes()); // xim expectZero32

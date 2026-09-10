@@ -1405,8 +1405,8 @@ impl FfxiRenderActor {
             looping: num_loops.is_some(),
             remaining: len.max(motion.duration_frames * 0.5).max(1.0),
             num_loops,
-            transition_in: half_frames(motion.transition_in),
-            transition_out: half_frames(motion.transition_out),
+            transition_in: motion.transition_in.whole_frames(),
+            transition_out: motion.transition_out.whole_frames(),
             cast_pose: false,
         });
     }
@@ -1422,12 +1422,39 @@ enum EngageMachine {
     Sheathing { remaining: f32 },
 }
 
+/// DAT transition fields are authored in half-frames: a stored value V plays as V/2 whole frames.
+/// research/xim EffectRoutineInterpolatedEffects.kt divides the parsed u16 by 2 before handing it
+/// to the skeleton domain, which ticks at half the routine clock (FRAME_RATE above).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HalfFrames(u16);
+
+impl HalfFrames {
+    pub const ZERO: Self = Self(0);
+
+    /// A DAT-parsed transition field is already in this unit.
+    pub const fn from_dat(v: u16) -> Self {
+        Self(v)
+    }
+
+    /// A flinch transition derived from its stage's animationDuration in whole frames. XIM plays
+    /// each side for duration/2 (EffectRoutineInterpolatedEffects.kt FlinchAnimationInstance), and
+    /// V half-frames play as V/2, so the stored value is the total itself.
+    pub fn from_flinch_total(total_whole_frames: f32) -> Self {
+        Self((total_whole_frames.max(0.0)) as u16)
+    }
+
+    /// Whole-frame count this value plays as.
+    pub const fn whole_frames(self) -> f32 {
+        self.0 as f32 * 0.5
+    }
+}
+
 pub struct CompletionMotion<'a> {
     pub local_clips: &'a [SkeletonAnimation],
     pub duration_frames: f32,
     pub max_loops: u16,
-    pub transition_in: u16,
-    pub transition_out: u16,
+    pub transition_in: HalfFrames,
+    pub transition_out: HalfFrames,
 }
 
 fn half_frames(v: u16) -> f32 {

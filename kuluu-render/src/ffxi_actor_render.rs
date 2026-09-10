@@ -215,6 +215,12 @@ pub struct LoadedActor {
     /// apart from "the model ships no such clip at all" (not_found).
     rejected_clips: Vec<DatId>,
 
+    /// Scheduler chunks present in this model's DAT walk whose parse was rejected, with the
+    /// parse error. Same split as `rejected_clips`, for routines: CLIP_WARN must tell
+    /// "the routine chunk is there but broken" (routine_seq_load_error) apart from "the model
+    /// ships no such routine at all" (routine_not_found).
+    rejected_routines: Vec<ffxi_dat::resource_dir::RejectedRoutine>,
+
     /// The primary model DAT as `{rom_dir}/{dir}/{file}.DAT` (e.g. ROM/4/109.DAT), for the
     /// CLIP_WARN line's `model=` field.
     model_dat: String,
@@ -236,8 +242,8 @@ fn is_usable_clip(anim: &SkeletonAnimation) -> bool {
 
 // Clip/scheduler parsing is the expensive tail of an actor load; deriving it here
 // keeps it on the loader task instead of the render main thread, and the Arcs let
-// consumers share the parsed sets without deep-cloning keyframe data. The fourth
-// return value lists the motion chunks seen in the DAT walk but rejected by parse,
+// consumers share the parsed sets without deep-cloning keyframe data. The fourth and
+// fifth return values list the chunks seen in the DAT walk but rejected by parse,
 // so CLIP_WARN can name a seq_load_error instead of a not_found.
 fn derive_animation_sets(
     anim_dirs: &[ResourceDir],
@@ -247,6 +253,7 @@ fn derive_animation_sets(
     Arc<Vec<SkeletonAnimation>>,
     Arc<HashMap<DatId, Scheduler>>,
     Vec<DatId>,
+    Vec<ffxi_dat::resource_dir::RejectedRoutine>,
 ) {
     let animations = dedup_clips(anim_dirs.iter());
     let battle_clips = dedup_clips(battle_dirs.iter());
@@ -257,8 +264,11 @@ fn derive_animation_sets(
         .map(|a| a.id)
         .collect();
     let mut routines: HashMap<DatId, Scheduler> = HashMap::new();
+    let mut rejected_routines: Vec<ffxi_dat::resource_dir::RejectedRoutine> = Vec::new();
     for dir in battle_dirs.iter().chain(anim_dirs.iter()) {
-        for sched in dir.collect_schedulers() {
+        let (scheds, rejected) = dir.collect_schedulers_with_rejections();
+        rejected_routines.extend(rejected);
+        for sched in scheds {
             routines
                 .entry(DatId::from_name(&sched.name))
                 .or_insert(sched);
@@ -269,6 +279,7 @@ fn derive_animation_sets(
         Arc::new(battle_clips),
         Arc::new(routines),
         rejected_clips,
+        rejected_routines,
     )
 }
 
@@ -619,7 +630,7 @@ pub fn load_npc(file_id: u32) -> Result<LoadedActor, String> {
     effect_meshes.retain(|d| !particle_meshes.contains(&d.name));
 
     let anim_dirs = vec![ResourceDir::from_bytes(bytes)];
-    let (animations, battle_clips, routines, rejected_clips) =
+    let (animations, battle_clips, routines, rejected_clips, rejected_routines) =
         derive_animation_sets(&anim_dirs, &[]);
     Ok(LoadedActor {
         skeleton: Arc::new(skeleton),
@@ -631,6 +642,7 @@ pub fn load_npc(file_id: u32) -> Result<LoadedActor, String> {
         routines,
         action_assets: Arc::new(action_assets),
         rejected_clips,
+        rejected_routines,
         model_dat: model_dat_label(&root, file_id),
         cib: dir.first_cib(),
     })
@@ -715,7 +727,7 @@ pub fn load_mount_race(race: u8) -> Result<LoadedActor, String> {
         return Err(format!("no body meshes for mount race {race}"));
     }
 
-    let (animations, battle_clips, routines, rejected_clips) =
+    let (animations, battle_clips, routines, rejected_clips, rejected_routines) =
         derive_animation_sets(&anim_dirs, &[]);
     Ok(LoadedActor {
         skeleton: Arc::new(skeleton),
@@ -727,6 +739,7 @@ pub fn load_mount_race(race: u8) -> Result<LoadedActor, String> {
         routines,
         action_assets: Arc::new(collect_sound_assets(&[&anim_dirs])),
         rejected_clips,
+        rejected_routines,
         model_dat: model_dat_label(&root, skel_file_id),
         // The mount's own Info chunk uses the `mount` layout (rotation/poseType at +0x02/+0x0A,
         // research/xim resource/InfoSection.kt readMountDefinition); parsing it with the info
@@ -930,7 +943,7 @@ pub fn load_pc(
         ));
     }
 
-    let (animations, battle_clips, routines, rejected_clips) =
+    let (animations, battle_clips, routines, rejected_clips, rejected_routines) =
         derive_animation_sets(&anim_dirs, &battle_dirs);
     Ok(LoadedActor {
         skeleton: Arc::new(skeleton),
@@ -943,6 +956,7 @@ pub fn load_pc(
         routines,
         action_assets: Arc::new(collect_sound_assets(&[&anim_dirs, &battle_dirs])),
         rejected_clips,
+        rejected_routines,
         model_dat: model_dat_label(&root, skel_file_id),
         cib: race_cib,
     })
@@ -1234,6 +1248,7 @@ pub struct FfxiRenderActor {
     routines: Arc<HashMap<DatId, Scheduler>>,
     action_assets: Arc<crate::scheduler_runtime::ActionAssets>,
     rejected_clips: Vec<DatId>,
+    rejected_routines: Vec<ffxi_dat::resource_dir::RejectedRoutine>,
     model_dat: String,
     coordinator: SkeletonAnimationCoordinator,
     skin_slot: u32,
@@ -1783,6 +1798,7 @@ pub fn make_render_actor(
         routines: loaded.all_routines(),
         action_assets: Arc::clone(&loaded.action_assets),
         rejected_clips: loaded.rejected_clips.clone(),
+        rejected_routines: loaded.rejected_routines.clone(),
         model_dat: loaded.model_dat.clone(),
         coordinator: SkeletonAnimationCoordinator::new(),
         skin_slot,
@@ -1826,6 +1842,7 @@ pub(crate) fn render_actor_for_test(skeleton: Skeleton, world_pose: Vec<Mat4>) -
         routines: Arc::default(),
         action_assets: Arc::default(),
         rejected_clips: Vec::new(),
+        rejected_routines: Vec::new(),
         model_dat: String::new(),
         cib: None,
     };
@@ -1857,6 +1874,7 @@ pub(crate) fn render_actor_with_movement_for_test(
         routines: Arc::default(),
         action_assets: Arc::default(),
         rejected_clips: Vec::new(),
+        rejected_routines: Vec::new(),
         model_dat: String::new(),
         cib: Some(cib),
     };
@@ -2073,27 +2091,75 @@ fn advance_rest_phase(
     }
 }
 
-fn routine_motion_clip(routines: &HashMap<DatId, Scheduler>, routine: DatId) -> Option<DatId> {
-    let sched = routines.get(&routine)?;
-    sched
-        .stages
-        .iter()
-        .find(|t| t.stage.kind == StageKind::Motion)
-        .map(|t| DatId::from_name(&t.stage.id))
+// Why a requested routine yielded no motion clip. Each case gets its own CLIP_WARN reason so
+// the miss names itself instead of degrading to locomotion silently: the pose path used to
+// return None for both "no such routine" and "no Motion stage", and neither reached CLIP_WARN.
+#[derive(Debug)]
+enum RoutineMiss {
+    /// No scheduler chunk with this name in the model's sets: retail is a no-op here too.
+    NotFound,
+    /// A chunk with this name was seen in the DAT walk but its parse was rejected; the parse
+    /// reason itself lives on `LoadedActor.rejected_routines`.
+    SeqLoadError,
+    /// The routine parsed fine but carries no Motion stage.
+    NoMotionStage,
 }
 
-/// The routine's *last* Motion stage. Every `fsh<n>` routine carries two — a
-/// wind-up and the pose it settles into (`fsh0` = `fh0?` cast then `fh1?` wait,
-/// `fsh1` = `fh8?` set-the-hook then `fh2?` fight). A phase the client holds for
-/// an indefinite time has to loop the settled stage; looping the wind-up instead
-/// replays the cast over and over.
-fn routine_motion_clip_last(routines: &HashMap<DatId, Scheduler>, routine: DatId) -> Option<DatId> {
-    let sched = routines.get(&routine)?;
-    sched
-        .stages
-        .iter()
-        .rfind(|t| t.stage.kind == StageKind::Motion)
-        .map(|t| DatId::from_name(&t.stage.id))
+/// `last_stage` picks which Motion stage the caller wants. Every `fsh<n>` routine carries two
+/// (a wind-up and the pose it settles into; `fsh0` = `fh0?` cast then `fh1?` wait, `fsh1` =
+/// `fh8?` set-the-hook then `fh2?` fight). A phase the client holds for an indefinite time has to
+/// loop the settled stage; looping the wind-up instead replays the cast over and over.
+fn routine_motion_lookup(
+    routines: &HashMap<DatId, Scheduler>,
+    rejected_routines: &[ffxi_dat::resource_dir::RejectedRoutine],
+    routine: DatId,
+    last_stage: bool,
+) -> Result<Option<DatId>, RoutineMiss> {
+    let Some(sched) = routines.get(&routine) else {
+        return Err(if rejected_routines.iter().any(|r| r.name == routine.0) {
+            RoutineMiss::SeqLoadError
+        } else {
+            RoutineMiss::NotFound
+        });
+    };
+    let motion = if last_stage {
+        sched
+            .stages
+            .iter()
+            .rev()
+            .find(|t| t.stage.kind == StageKind::Motion)
+    } else {
+        sched
+            .stages
+            .iter()
+            .find(|t| t.stage.kind == StageKind::Motion)
+    };
+    match motion {
+        Some(t) => Ok(Some(DatId::from_name(&t.stage.id))),
+        None => Err(RoutineMiss::NoMotionStage),
+    }
+}
+
+fn routine_motion_clip(
+    routines: &HashMap<DatId, Scheduler>,
+    rejected_routines: &[ffxi_dat::resource_dir::RejectedRoutine],
+    routine: DatId,
+) -> Option<DatId> {
+    routine_motion_lookup(routines, rejected_routines, routine, false)
+        .ok()
+        .flatten()
+}
+
+// CLIP_WARN for a requested routine that yielded no motion clip; the routine name stands in for
+// the clip field because there is no motion clip to name. As with `clip_miss`, the reason stays
+// in the dedupe key so two distinct misses on one pair both print.
+fn routine_motion_miss(id: u32, name: &str, model: &str, routine: DatId, miss: &RoutineMiss) {
+    let reason = match miss {
+        RoutineMiss::NotFound => "routine_not_found",
+        RoutineMiss::SeqLoadError => "routine_seq_load_error",
+        RoutineMiss::NoMotionStage => "routine_no_motion_stage",
+    };
+    clip_warn_once(id, name, model, &routine, reason);
 }
 
 /// The `ded?` collapse clip and the routine-authored frames retail plays it for
@@ -2171,13 +2237,14 @@ fn advance_engage(
     machine: &mut EngageMachine,
     want_engaged: bool,
     routines: &HashMap<DatId, Scheduler>,
+    rejected_routines: &[ffxi_dat::resource_dir::RejectedRoutine],
     animations: &[SkeletonAnimation],
     elapsed_frames: f32,
 ) -> actor_state::EngageAnimationState {
     use actor_state::EngageAnimationState as S;
 
     let transition_len = |routine: &str| -> f32 {
-        routine_motion_clip(routines, DatId::from_str(routine))
+        routine_motion_clip(routines, rejected_routines, DatId::from_str(routine))
             .map(|clip| rest_clip_len_frames(animations, clip))
             .unwrap_or(0.0)
     };
@@ -2314,6 +2381,7 @@ fn advance_actor_pose(
         world_pose,
         pose_work,
         rejected_clips,
+        rejected_routines,
         model_dat,
         ..
     } = actor;
@@ -2339,8 +2407,26 @@ fn advance_actor_pose(
     };
 
     let engage_overlay = match *engage {
-        EngageMachine::Drawing { .. } => routine_motion_clip(routines, DatId::from_str("in 0")),
-        EngageMachine::Sheathing { .. } => routine_motion_clip(routines, DatId::from_str("out0")),
+        EngageMachine::Drawing { .. } | EngageMachine::Sheathing { .. } => {
+            let routine = if matches!(*engage, EngageMachine::Drawing { .. }) {
+                DatId::from_str("in 0")
+            } else {
+                DatId::from_str("out0")
+            };
+            match routine_motion_lookup(routines, rejected_routines, routine, false) {
+                Ok(clip) => clip,
+                Err(miss) => {
+                    routine_motion_miss(
+                        actor.world_id,
+                        name.unwrap_or("-"),
+                        model_dat,
+                        routine,
+                        &miss,
+                    );
+                    None
+                }
+            }
+        }
         _ => None,
     };
 
@@ -2359,10 +2445,22 @@ fn advance_actor_pose(
             // A looping phase (cast/wait, fighting) is held for an indefinite
             // time, so it settles on the routine's last Motion stage; a
             // resolution phase plays its wind-up once and holds.
-            let motion = if fc.looping {
-                routine_motion_clip_last(routines, fc.id)
+            let motion = match if fc.looping {
+                routine_motion_lookup(routines, rejected_routines, fc.id, true)
             } else {
-                routine_motion_clip(routines, fc.id)
+                routine_motion_lookup(routines, rejected_routines, fc.id, false)
+            } {
+                Ok(clip) => clip,
+                Err(miss) => {
+                    routine_motion_miss(
+                        actor.world_id,
+                        name.unwrap_or("-"),
+                        model_dat,
+                        fc.id,
+                        &miss,
+                    );
+                    None
+                }
             };
             motion.map(|id| actor_state::FishingClip {
                 id,
@@ -2376,10 +2474,22 @@ fn advance_actor_pose(
     // asks for that routine's first Motion stage clip; models without the routine (or without a
     // usable chunk for it) fall through to locomotion like any other miss. No per-mob
     // interpretation: what the sub value does on this model is defined by its DAT alone.
-    let special_clip_id = inputs
-        .special
-        .active_routine
-        .and_then(|name| routine_motion_clip(routines, DatId::from_name(&name)));
+    let special_clip_id = inputs.special.active_routine.and_then(|routine_name| {
+        let routine = DatId::from_name(&routine_name);
+        match routine_motion_lookup(routines, rejected_routines, routine, false) {
+            Ok(clip) => clip,
+            Err(miss) => {
+                routine_motion_miss(
+                    actor.world_id,
+                    name.unwrap_or("-"),
+                    model_dat,
+                    routine,
+                    &miss,
+                );
+                None
+            }
+        }
+    });
 
     // Retail's `dead` routine outranks locomotion and any in-flight action, so the collapse
     // heads the selection chain; when its timer expires the held `cor?` takes over through the
@@ -3855,6 +3965,7 @@ pub fn tick_live_ffxi_actors(
                     &mut actor.engage,
                     engaged,
                     &actor.routines,
+                    &actor.rejected_routines,
                     &actor.battle_clips,
                     elapsed_frames,
                 )
@@ -3873,12 +3984,15 @@ pub fn tick_live_ffxi_actors(
             // resource/InfoSection.kt MovementType) says Flying and Sliding mobs have no
             // walk/run stride to match, so their locomotion clips play at
             // the authored rate. Walking/Large carry the wire scale; Unset (no CIB or 0xFF)
-            // keeps today's behavior.
+            // and Unknown (out-of-table byte) keep today's behavior.
             let playback_rate = if moving_flag {
                 snap.and_then(|s| s.wire_gait)
                     .map_or(1.0, |(_, speed_base)| match actor.movement_type {
                         MovementType::Flying | MovementType::Sliding => 1.0,
-                        MovementType::Walking | MovementType::Large | MovementType::Unset => {
+                        MovementType::Walking
+                        | MovementType::Large
+                        | MovementType::Unset
+                        | MovementType::Unknown(_) => {
                             kuluu_snapshot::speed::anim_rate_scale(speed_base)
                         }
                     })
@@ -4061,11 +4175,14 @@ pub fn dispatch_action_overlay(
                 // kuluu-df9t D6 - a limb this model does not carry (no bti0/cti0/dti0 Motion
                 // clip in its DAT) falls back to ati0 before the silent skip below.
                 if action_kind == ffxi_proto::melee::CATEGORY_BASIC_ATTACK
-                    && routine_motion_clip(&actor.routines, routine).is_none()
+                    && routine_motion_clip(&actor.routines, &actor.rejected_routines, routine)
+                        .is_none()
                 {
                     (routine, looping) = (DatId::from_str("ati0"), false);
                 }
-                let Some(clip_id) = routine_motion_clip(&actor.routines, routine) else {
+                let Some(clip_id) =
+                    routine_motion_clip(&actor.routines, &actor.rejected_routines, routine)
+                else {
                     continue;
                 };
 
@@ -4438,6 +4555,7 @@ mod mesh_dedup_tests {
             routines: Arc::new(HashMap::new()),
             action_assets: Arc::new(crate::scheduler_runtime::ActionAssets::default()),
             rejected_clips: Vec::new(),
+            rejected_routines: Vec::new(),
             model_dat: "test.DAT".to_string(),
             cib: None,
         };
@@ -4688,8 +4806,12 @@ mod pose_resolution_tests {
         let mut actor = make_render_actor(&loaded, 0, Vec::new(), 1, 0.0, 1.0);
         // sub=1 names the ini1 routine; its first Motion stage is the dig clip: the clip comes
         // from the routine record, not a hard-coded mapping.
-        let dig = routine_motion_clip(&actor.routines, DatId::from_name(b"ini1"))
-            .expect("worm ini1 routine carries a motion stage");
+        let dig = routine_motion_clip(
+            &actor.routines,
+            &actor.rejected_routines,
+            DatId::from_name(b"ini1"),
+        )
+        .expect("worm ini1 routine carries a motion stage");
         assert!(
             dig.parameterized_match(&DatId::from_str("sp1?")),
             "worm dig clip is sp1?"
@@ -5315,8 +5437,15 @@ mod pose_resolution_tests {
                 "race {race} collapse length"
             );
             assert_eq!(
-                routine_motion_clip_last(&routines, actor_state::death_routine_id())
-                    .map(|d| d.as_str()),
+                routine_motion_lookup(
+                    &routines,
+                    &actor.rejected_routines,
+                    actor_state::death_routine_id(),
+                    true,
+                )
+                .ok()
+                .flatten()
+                .map(|d| d.as_str()),
                 Some("cor?".to_string()),
                 "race {race} dead routine settles on the corpse pose"
             );
@@ -5745,17 +5874,17 @@ mod pose_resolution_tests {
     fn routine_motion_clip_resolves_first_motion_stage() {
         let routines = synth_routines(&[(b"ati0", b"at0?"), (b"in 0", b"ind?")]);
         assert_eq!(
-            routine_motion_clip(&routines, DatId::from_str("ati0")).map(|d| d.as_str()),
+            routine_motion_clip(&routines, &[], DatId::from_str("ati0")).map(|d| d.as_str()),
             Some("at0?".to_string())
         );
 
         assert_eq!(
-            routine_motion_clip(&routines, DatId::from_str("in 0")).map(|d| d.as_str()),
+            routine_motion_clip(&routines, &[], DatId::from_str("in 0")).map(|d| d.as_str()),
             Some("ind?".to_string())
         );
 
         assert_eq!(
-            routine_motion_clip(&routines, DatId::from_str("cawh")),
+            routine_motion_clip(&routines, &[], DatId::from_str("cawh")),
             None
         );
     }
@@ -5787,7 +5916,7 @@ mod pose_resolution_tests {
             .map(|s| (DatId::from_name(&s.name), s))
             .collect();
         assert_eq!(
-            routine_motion_clip(&routines, routine).map(|d| d.as_str()),
+            routine_motion_clip(&routines, &[], routine).map(|d| d.as_str()),
             Some("mb0?".to_string()),
             "the cast pose clip is still resolved from the caster's own routine"
         );
@@ -5906,7 +6035,8 @@ mod pose_resolution_tests {
 
         let anims = vec![synth_anim(b"ind0", 2), synth_anim(b"otd0", 1)];
         let mut m = EngageMachine::NotEngaged;
-        let step = |m: &mut EngageMachine, want| advance_engage(m, want, &routines, &anims, 1.0);
+        let step =
+            |m: &mut EngageMachine, want| advance_engage(m, want, &routines, &[], &anims, 1.0);
 
         assert_eq!(step(&mut m, true), S::Engaging);
         assert_eq!(step(&mut m, true), S::Engaging);
@@ -5926,11 +6056,11 @@ mod pose_resolution_tests {
         let anims: Vec<SkeletonAnimation> = Vec::new();
         let mut m = EngageMachine::NotEngaged;
         assert_eq!(
-            advance_engage(&mut m, true, &routines, &anims, 1.0),
+            advance_engage(&mut m, true, &routines, &[], &anims, 1.0),
             S::Engaged
         );
         assert_eq!(
-            advance_engage(&mut m, false, &routines, &anims, 1.0),
+            advance_engage(&mut m, false, &routines, &[], &anims, 1.0),
             S::NotEngaged
         );
     }
@@ -5940,7 +6070,12 @@ mod pose_resolution_tests {
         let Some(actor) = load_hume_m() else { return };
         let routines = actor.all_routines();
         let clip = |routine: &str| {
-            routine_motion_clip(&routines, DatId::from_str(routine)).map(|d| d.as_str())
+            routine_motion_clip(
+                &routines,
+                &actor.rejected_routines,
+                DatId::from_str(routine),
+            )
+            .map(|d| d.as_str())
         };
 
         assert_eq!(clip("ati0").as_deref(), Some("at0?"), "swing routine");
@@ -5952,7 +6087,9 @@ mod pose_resolution_tests {
             "white-magic cast routine"
         );
 
-        let swing = routine_motion_clip(&routines, DatId::from_str("ati0")).unwrap();
+        let swing =
+            routine_motion_clip(&routines, &actor.rejected_routines, DatId::from_str("ati0"))
+                .unwrap();
         let anims = actor.all_animations();
         let battle = actor.all_battle_clips();
         let ids: Vec<String> = pose_clip_matches(&anims, battle.iter(), swing)
@@ -6192,6 +6329,7 @@ mod actor_bounds_tests {
             routines: Arc::new(HashMap::new()),
             action_assets: Arc::new(crate::scheduler_runtime::ActionAssets::default()),
             rejected_clips: Vec::new(),
+            rejected_routines: Vec::new(),
             model_dat: "test.DAT".to_string(),
             cib: None,
         };

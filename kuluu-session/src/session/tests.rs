@@ -4031,7 +4031,13 @@ async fn bootstrap_scenario(scenario: BootstrapReply) {
                 assert_eq!(sent.opcode, ffxi_proto::map::c2s::LOGIN);
             }
             if count == 1 {
-                peer = Some(MapClient::connect(client, SEED).await.unwrap());
+                // Ephemeral local port: tests must not inherit FFXI_MAP_LOCAL_PORT (the
+                // Docker/WSL2 DNAT pin), or parallel scenarios collide on the pinned port.
+                peer = Some(
+                    MapClient::connect_with_local(client, SEED, "0.0.0.0:0")
+                        .await
+                        .unwrap(),
+                );
                 if let Some(ref payload) = initial {
                     peer.as_ref()
                         .unwrap()
@@ -4060,7 +4066,11 @@ async fn bootstrap_scenario(scenario: BootstrapReply) {
             }
         }
     });
-    let mut map = MapClient::connect(address, SEED).await.unwrap();
+    // Ephemeral local port: tests must not inherit FFXI_MAP_LOCAL_PORT (the Docker/WSL2 DNAT
+    // pin), or parallel scenarios collide on the pinned port.
+    let mut map = MapClient::connect_with_local(address, SEED, "0.0.0.0:0")
+        .await
+        .unwrap();
     let cfg = Config {
         server: "127.0.0.1".into(),
         map_host_override: None,

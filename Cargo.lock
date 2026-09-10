@@ -4407,6 +4407,7 @@ dependencies = [
 name = "kuluu-snapshot"
 version = "0.6.0"
 dependencies = [
+ "ffxi-proto",
  "postcard",
  "serde",
  "serde_json",

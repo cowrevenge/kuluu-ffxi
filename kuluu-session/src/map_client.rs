@@ -338,7 +338,11 @@ mod tests {
         let server_b: SocketAddr = "127.0.0.2:2".parse().unwrap();
         let seed_a = [1u8; 20];
         let seed_b = [2u8; 20];
-        let mut client = MapClient::connect(server_a, seed_a).await.unwrap();
+        // Ephemeral local port: tests must not inherit FFXI_MAP_LOCAL_PORT (the Docker/WSL2
+        // DNAT pin), or parallel test tasks collide on the pinned port.
+        let mut client = MapClient::connect_with_local(server_a, seed_a, "0.0.0.0:0")
+            .await
+            .unwrap();
         let local_before = client.socket.local_addr().unwrap();
         client.retarget(server_b, seed_b);
         let local_after = client.socket.local_addr().unwrap();

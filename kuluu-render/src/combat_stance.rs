@@ -1303,8 +1303,9 @@ static GROUND_OFF_MESH_SEEN: OnceLock<Mutex<std::collections::HashSet<u32>>> = O
 /// Runs every frame on the RENDERED (x,z) so the model rides the slope during interpolation; no
 /// history, no distance test, no snap constant: the SnapBand bands own the jump decision already.
 /// Self is unchanged. The 0x45 Info movement byte from the loaded model gates it: Flying keeps
-/// server Y (no ground to stand on); Walking/Large/Sliding/Unset ground. A None answer (off-mesh,
-/// unloaded interior) keeps server Y and logs once per entity at debug.
+/// server Y while alive (no ground to stand on); Walking/Large/Sliding/Unset ground. A dead
+/// entity grounds regardless of movement type (see the block in the body for why). A None answer
+/// (off-mesh, unloaded interior) keeps server Y and logs once per entity at debug.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn ground_remote_movers_system(
     collision: Res<crate::dat_mzb::MzbCollisionGeometry>,
@@ -1312,6 +1313,7 @@ pub fn ground_remote_movers_system(
     mut q: Query<(Entity, &WorldEntity, &mut Transform), Without<IsSelf>>,
     q_children: Query<&Children>,
     q_render: Query<&crate::ffxi_actor_render::FfxiRenderActor>,
+    q_dead: Query<(), With<crate::scheduler_runtime::DeadFromAction>>,
 ) {
     for (entity, world, mut transform) in &mut q {
         if !matches!(
@@ -1326,15 +1328,24 @@ pub fn ground_remote_movers_system(
             continue;
         };
         // 0x45 Info movement byte from the loaded model (Unset when the DAT carries no CIB, or no
-        // render actor exists yet): Flying keeps server Y; everything else grounds.
-        let flying = q_children.get(entity).is_ok_and(|children| {
-            children.iter().any(|child| {
-                q_render
-                    .get(child)
-                    .is_ok_and(|actor| actor.movement_type() == ffxi_dat::cib::MovementType::Flying)
-            })
-        });
-        if flying {
+        // render actor exists yet): Flying keeps server Y while alive. Death overrides the
+        // exemption: LSB never writes Y on the KO transition (vendor/server entity_update.cpp sets
+        // Y only under UPDATE_POS; the death path raises UPDATE_HP with Hpp = GetHPP() == 0 and
+        // leaves loc.p untouched), so a dead flyer's last POS Y is wherever it was hovering and it
+        // would sit in the air forever. Movement type describes locomotion, not corpses; a corpse
+        // grounds like everything else. DeadFromAction is latched on the render child (cleared on
+        // raise), so a raised flyer lifts back to server Y on its own.
+        let mut flying = false;
+        let mut dead = false;
+        if let Ok(children) = q_children.get(entity) {
+            for child in children.iter() {
+                if let Ok(actor) = q_render.get(child) {
+                    flying |= actor.movement_type() == ffxi_dat::cib::MovementType::Flying;
+                }
+                dead |= q_dead.get(child).is_ok();
+            }
+        }
+        if flying && !dead {
             continue;
         }
         let xz = Vec2::new(transform.translation.x, transform.translation.z);
@@ -1914,6 +1925,103 @@ mod tests {
             t.translation.y
         );
         assert!((t.translation.x - 0.5).abs() < 1e-4);
+    }
+
+    #[test]
+    fn dead_flying_remote_mover_grounds() {
+        // Death overrides the Flying exemption: LSB never writes Y on the KO transition, so a
+        // dead flyer's last POS Y is its hover height; the corpse grounds like everything else.
+        let mut app = grounding_app(2.0);
+        let mob = spawn_remote_mob(&mut app, 904);
+        let skeleton = ffxi_dat::skel::Skeleton {
+            id: ffxi_dat::datid::DatId::from_name(b"skel"),
+            joints: Vec::new(),
+            references: Vec::new(),
+            bounding_boxes: Vec::new(),
+        };
+        let child = app
+            .world_mut()
+            .spawn(
+                crate::ffxi_actor_render::render_actor_with_movement_for_test(
+                    skeleton,
+                    Vec::new(),
+                    ffxi_dat::cib::MovementType::Flying,
+                ),
+            )
+            .id();
+        app.world_mut().entity_mut(mob).add_child(child);
+        app.world_mut()
+            .entity_mut(child)
+            .insert(crate::scheduler_runtime::DeadFromAction);
+        app.world_mut().resource_mut::<EntityPrediction>().observe(
+            904,
+            Vec3::new(0.5, 1.5, 0.0),
+            0,
+            40,
+            40,
+        );
+        tick_frames(&mut app, 1);
+        let t = app.world().get::<Transform>(mob).unwrap();
+        assert!(
+            (t.translation.y - 2.0).abs() < 1e-6,
+            "a dead flyer grounds on the slab, not its hover Y: {}",
+            t.translation.y
+        );
+    }
+
+    #[test]
+    fn raised_flying_remote_mover_returns_to_server_y() {
+        // Raise clears the latch (C4): a Flying model keeps server Y again and lifts off the mesh.
+        let mut app = grounding_app(2.0);
+        let mob = spawn_remote_mob(&mut app, 905);
+        let skeleton = ffxi_dat::skel::Skeleton {
+            id: ffxi_dat::datid::DatId::from_name(b"skel"),
+            joints: Vec::new(),
+            references: Vec::new(),
+            bounding_boxes: Vec::new(),
+        };
+        let child = app
+            .world_mut()
+            .spawn(
+                crate::ffxi_actor_render::render_actor_with_movement_for_test(
+                    skeleton,
+                    Vec::new(),
+                    ffxi_dat::cib::MovementType::Flying,
+                ),
+            )
+            .id();
+        app.world_mut().entity_mut(mob).add_child(child);
+        app.world_mut()
+            .entity_mut(child)
+            .insert(crate::scheduler_runtime::DeadFromAction);
+        app.world_mut().resource_mut::<EntityPrediction>().observe(
+            905,
+            Vec3::new(0.5, 1.5, 0.0),
+            0,
+            40,
+            40,
+        );
+        // Dead: grounded on the slab; long enough that the arrival segment budget runs out and
+        // the prediction holds exactly at server_pos from then on.
+        tick_frames(&mut app, 60);
+        let t = app.world().get::<Transform>(mob).unwrap();
+        assert!(
+            (t.translation.y - 2.0).abs() < 1e-6,
+            "dead flyer stays grounded: {}",
+            t.translation.y
+        );
+        // Raise: the latch is gone, the Flying exemption applies again, and one frame later the
+        // prediction owns Y at its server value.
+        app.world_mut()
+            .entity_mut(child)
+            .remove::<crate::scheduler_runtime::DeadFromAction>();
+        tick_frames(&mut app, 1);
+        let t = app.world().get::<Transform>(mob).unwrap();
+        assert!(
+            (t.translation.y - 1.5).abs() < 1e-6,
+            "a raised flyer lifts back to server Y: {}",
+            t.translation.y
+        );
     }
 
     #[test]

@@ -3647,6 +3647,10 @@ pub fn tick_live_ffxi_actors(
         // World ids whose 0x0E hp_pct just went 0 -> >0 on this snapshot (a Raise): the wire
         // owns death state again, so their Defeated latch is cleared below.
         frame_scratch.raised.clear();
+        // World ids whose 0x0E hp_pct is 0 on this snapshot: a kill that did not arrive as a
+        // BATTLE2 Defeated result still latches the death path below (the wire byte is the only
+        // signal; see the latch block after the loop).
+        let mut dead_now = std::collections::HashSet::<u32>::new();
         for e in &state.snapshot.entities {
             frame_scratch.live_ids.insert(e.id);
             // A Raise is a 0 -> >0 transition of this entity's 0x0E hp_pct on this snapshot.
@@ -3654,6 +3658,9 @@ pub fn tick_live_ffxi_actors(
             frame_scratch.prev_hp.insert(e.id, e.hp_pct);
             if matches!(prev_hp, Some(Some(0))) && e.hp_pct.is_some_and(|p| p > 0) {
                 frame_scratch.raised.insert(e.id);
+            }
+            if e.hp_pct == Some(0) {
+                dead_now.insert(e.id);
             }
             let mounted = state.snapshot.mount_of(e).is_some();
             // Advance the special-pose wire state from last frame to this snapshot's
@@ -3759,6 +3766,20 @@ pub fn tick_live_ffxi_actors(
             }
         }
         frame_scratch.prev_self_dead = Some(self_dead);
+
+        // Latch the death path on entities whose 0x0E hp_pct is 0 on this snapshot: consumers of
+        // DeadFromAction beyond the pose pass (remote grounding) read the latch, and a kill that
+        // did not arrive as a BATTLE2 Defeated result has no other signal. Mount actors carry
+        // synthetic ids disjoint from server ids, so they never match dead_now.
+        if !dead_now.is_empty() {
+            for (entity, actor, _, _, latch) in q_actors.iter() {
+                if latch.is_none() && dead_now.contains(&actor.world_id) {
+                    commands
+                        .entity(entity)
+                        .insert(crate::scheduler_runtime::DeadFromAction);
+                }
+            }
+        }
 
         // Clear the Defeated latch on raised entities (see DeadFromAction). Commands apply at
         // end of system, so this frame's pose pass still sees the latch for one more frame;

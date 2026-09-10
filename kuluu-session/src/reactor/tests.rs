@@ -2051,7 +2051,14 @@ fn self_heading_byte_matches_world_angle() {
             if dx.abs() < 1e-6 && dy.abs() < 1e-6 {
                 continue;
             }
-            let sent = heading_toward(origin, Vec3 { x: dx, y: dy, z: 0.0 });
+            let sent = heading_toward(
+                origin,
+                Vec3 {
+                    x: dx,
+                    y: dy,
+                    z: 0.0,
+                },
+            );
             let radians = dy.atan2(dx);
             let raw = (radians * -(128.0 / std::f32::consts::PI)) as i16;
             let lsb = ((raw % 256 + 256) % 256) as u8;

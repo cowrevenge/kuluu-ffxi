@@ -1112,6 +1112,13 @@ impl EventVm {
     }
 
     /// `XiEvent::CodeIF` (0x0002): conditional branch with 11 comparison kinds.
+    /// The taken-branch target at +6 is an absolute offset into EventData, like
+    /// GOTO/JUMP: retail assigns `ExecPointer = FUNC_XiEvent_eventgetcode(this, 6)`
+    /// (research/XiEvents/OpCodes/0x0002.md pseudo-code; 0x0001.md, 0x001A.md).
+    /// The case tables in the same doc print `ExecPointer += val3`; retail
+    /// bytecode refutes that reading (ffxi-event/examples/zz-jump-check.rs: across
+    /// zones 77, 234 and 241 every IF target lands on an instruction boundary only
+    /// when read absolute).
     fn op_if(&mut self) {
         let kind = self.byte_at(5) & IF_KIND_MASK;
         let target = self.eventgetcode(6) as usize;
@@ -1540,13 +1547,43 @@ mod tests {
     fn if_equal_case1_branches_to_target() {
         // case 1: jump to target when references[0]==references[0]. Layout:
         // [0]=0x02 op, [1..3]=v1 ref idx 0x8000, [3..5]=v2 ref idx 0x8000,
-        // [5]=kind 1, [6..8]=target=9, [8]=0xFF(skip), [9]=END.
+        // [5]=kind 1, [6..8]=val3=9 (absolute into EventData),
+        // [8]=0xFF(skip), [9]=END.
         let data = vec![
             OP_IF, 0x00, 0x80, 0x00, 0x80, 0x01, 0x09, 0x00, 0xFF, OP_END,
         ];
         let mut e = vm(data, vec![42]);
         assert_eq!(e.step(), StepResult::Done);
         assert_eq!(e.exec_pointer(), 9);
+    }
+
+    /// The taken-branch target is absolute into EventData, not relative to the
+    /// IF: with the IF at 5 and val3 = 20, retail lands on 20; a relative read
+    /// would land on 25, past this program's END.
+    #[test]
+    fn if_taken_branch_target_is_absolute_into_event_data() {
+        // [0..5] WZ[0] = ref[0] (=5); [5..13] IF case 1 (jump when equal),
+        // v1 = WZ[0], v2 = ref[1] (=5), val3 = 20; [13..20) fall-through poison;
+        // [20..23] WZ[2] = 1; [23] END.
+        let mut data = seed().to_vec();
+        data.extend_from_slice(&[
+            OP_IF,
+            DST[0],
+            DST[1],
+            SRC[0],
+            SRC[1],
+            0x01, // case 1: jump when equal
+            0x14, // val3 = 20 (absolute into EventData)
+            0x00,
+        ]);
+        data.extend_from_slice(&[0xFF; 7]); // 13..20: fall-through poison
+        data.extend_from_slice(&[OP_SET_ONE, 0x02, 0x10]);
+        data.push(OP_END);
+        let mut e = vm(data, vec![5, 5]);
+
+        assert_eq!(e.step(), StepResult::Done);
+        assert_eq!(e.exec_pointer(), 23, "must land on END past the SET_ONE");
+        assert_eq!(e.work_zone(2), 1, "the absolute target's instruction must run");
     }
 
     #[test]
@@ -1965,7 +2002,7 @@ mod tests {
             0x80,
             0x07,
             0x13,
-            0x00, // 8..15: if work_zone[0]==ref2 -> 19
+            0x00, // 8..15: if work_zone[0]==ref2 -> END at 19 (absolute target)
             0xFF,
             0xFF,
             0xFF,   // 16..18: fall-through poison (must not run)

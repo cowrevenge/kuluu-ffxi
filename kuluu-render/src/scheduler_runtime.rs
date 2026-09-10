@@ -1222,7 +1222,7 @@ pub fn dispatch_flinch_stages(
         // swing/cast/death clip owns the pose then, and overwriting it would fight the lock.
         if q_scheds.get(host).is_ok_and(|s| s.is_locked_now()) {
             if combat_log_enabled() {
-                println!("COMBAT_FLINCH host={} skip-locked", host.index());
+                tracing::debug!(target: "combat", "COMBAT_FLINCH host={} skip-locked", host.index());
             }
             continue;
         }
@@ -1238,13 +1238,13 @@ pub fn dispatch_flinch_stages(
             };
             if !actor.is_pose_idle() {
                 if combat_log_enabled() {
-                    println!("COMBAT_FLINCH host={} skip-not-idle", host.index());
+                    tracing::debug!(target: "combat", "COMBAT_FLINCH host={} skip-not-idle", host.index());
                 }
                 continue;
             }
             let Some(clip) = actor.flinch_clip(pc) else {
                 if combat_log_enabled() {
-                    println!("COMBAT_FLINCH host={} no-flinch-clip pc={pc}", host.index());
+                    tracing::debug!(target: "combat", "COMBAT_FLINCH host={} no-flinch-clip pc={pc}", host.index());
                 }
                 continue;
             };
@@ -1253,7 +1253,8 @@ pub fn dispatch_flinch_stages(
             // means zero-length transitions.
             let anim_dur = ev.stage.stage.flinch_duration.unwrap_or(0.0).max(0.0);
             if combat_log_enabled() {
-                println!(
+                tracing::debug!(
+                    target: "combat",
                     "COMBAT_FLINCH host={} clip={} pc={pc} dur={anim_dur}",
                     host.index(),
                     clip.as_str()
@@ -1290,14 +1291,20 @@ pub fn action_dat_file_id(
     // start categories drive the caster's cast-loop motion instead (see
     // ffxi_actor_render::action_routine). vendor/server enums/action/category.h:
     // 3 = weaponskill finish, 4 = magic finish, 6 = job-ability finish.
+    use ffxi_proto::melee::{
+        CATEGORY_ABILITY_FINISH, CATEGORY_MAGIC_FINISH, CATEGORY_MOB_SKILL_FINISH,
+        CATEGORY_PET_SKILL_FINISH, CATEGORY_SKILL_FINISH,
+    };
     match action_kind {
-        3 => weapon_skill_file_id(animation?, race?, main_dll?),
-        4 => ffxi_vocab::action_anim::spell_file_id(action_id, animation),
-        6 => ffxi_vocab::action_anim::ability_file_id(action_id, animation),
+        CATEGORY_SKILL_FINISH => weapon_skill_file_id(animation?, race?, main_dll?),
+        CATEGORY_MAGIC_FINISH => ffxi_vocab::action_anim::spell_file_id(action_id, animation),
+        CATEGORY_ABILITY_FINISH => ffxi_vocab::action_anim::ability_file_id(action_id, animation),
         // research/xim resource/table/MobAbilityTable.kt getFileTableOffset - mob skills
         // (category 11) and pet skills (category 13) key the effect DAT by the result's animation
         // index with a range-dependent base; that DAT's `main` plays the caster's own sp?? clip.
-        11 | 13 => Some(ffxi_vocab::action_anim::mob_skill_file_id(animation?)),
+        CATEGORY_MOB_SKILL_FINISH | CATEGORY_PET_SKILL_FINISH => {
+            Some(ffxi_vocab::action_anim::mob_skill_file_id(animation?))
+        }
         _ => None,
     }
 }
@@ -1677,12 +1684,7 @@ const MELEE_VOICE_ROUTINE: [u8; 4] = *b"atk0";
 // as KULUU_MOTION_LOG).
 fn combat_log_enabled() -> bool {
     static ONCE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ONCE.get_or_init(|| {
-        matches!(
-            std::env::var("KULUU_COMBAT_LOG").as_deref(),
-            Ok(v) if !v.is_empty() && v != "0"
-        )
-    })
+    crate::particle_sim::env_flag(&ONCE, "KULUU_COMBAT_LOG")
 }
 
 /// Printable form of a FourCC for COMBAT_ log lines.
@@ -1737,7 +1739,8 @@ pub fn dispatch_melee_action_started(
             continue;
         };
         if combat_log_enabled() {
-            println!(
+            tracing::debug!(
+                target: "combat",
                 "COMBAT_ACT kind={} actor={} target={:?} result={:?} outcome={:?}",
                 action_kind, actor_id, target_id, result, outcome
             );
@@ -1747,14 +1750,14 @@ pub fn dispatch_melee_action_started(
         }
         let Some(&actor_entity) = tracked.by_id.get(&actor_id) else {
             if combat_log_enabled() {
-                println!("COMBAT_DROP actor={} not-tracked", actor_id);
+                tracing::debug!(target: "combat", "COMBAT_DROP actor={} not-tracked", actor_id);
             }
             continue;
         };
         let Some(actor_routines) = actor_render_routines(actor_entity, &q_children, &q_render)
         else {
             if combat_log_enabled() {
-                println!("COMBAT_DROP actor={} no-actor-routines", actor_id);
+                tracing::debug!(target: "combat", "COMBAT_DROP actor={} no-actor-routines", actor_id);
             }
             continue;
         };
@@ -1773,7 +1776,8 @@ pub fn dispatch_melee_action_started(
         let merged = [MELEE_VOICE_ROUTINE, swing];
         let Some(active) = ActiveScheduler::effects_only_merged(&lookup, &merged) else {
             if combat_log_enabled() {
-                println!(
+                tracing::debug!(
+                    target: "combat",
                     "COMBAT_DROP actor={} merged-none swing={}",
                     actor_id,
                     fourcc(swing)
@@ -1810,7 +1814,8 @@ pub fn dispatch_melee_action_started(
             }
         }
         if combat_log_enabled() && outcome.is_some() {
-            println!(
+            tracing::debug!(
+                target: "combat",
                 "COMBAT_ARM actor={} target={:?} outcome={:?} swing={} armed_by={}",
                 actor_id,
                 victim,
@@ -1823,7 +1828,8 @@ pub fn dispatch_melee_action_started(
         // packet, so start the victim's death path now instead of waiting for the next 0x0E.
         if let Some(outcome) = outcome.filter(|o| o.info.is_defeated()) {
             if combat_log_enabled() {
-                println!(
+                tracing::debug!(
+                    target: "combat",
                     "COMBAT_DEAD actor={} target={:?} info=0x{:X}",
                     actor_id,
                     victim,
@@ -1876,7 +1882,7 @@ fn latch_dead_from_action(
         }
     }
     if combat_log_enabled() && latched {
-        println!("COMBAT_DEAD_LATCH victim={}", victim.index());
+        tracing::debug!(target: "combat", "COMBAT_DEAD_LATCH victim={}", victim.index());
     }
 }
 
@@ -1913,7 +1919,8 @@ pub fn dispatch_damage_callback_stages(
         }
         let Ok((pending, target)) = q_pending.get(ev.actor) else {
             if combat_log_enabled() {
-                println!(
+                tracing::debug!(
+                    target: "combat",
                     "COMBAT_CB actor={} sched={} no-pending",
                     ev.actor.index(),
                     fourcc(ev.scheduler)
@@ -1923,7 +1930,8 @@ pub fn dispatch_damage_callback_stages(
         };
         if pending.armed_by != ev.scheduler {
             if combat_log_enabled() {
-                println!(
+                tracing::debug!(
+                    target: "combat",
                     "COMBAT_CB actor={} sched={} armed_by={} mismatch",
                     ev.actor.index(),
                     fourcc(ev.scheduler),
@@ -1935,7 +1943,7 @@ pub fn dispatch_damage_callback_stages(
         commands.entity(ev.actor).remove::<PendingHitReaction>();
         let Some(victim) = target.0 else {
             if combat_log_enabled() {
-                println!("COMBAT_CB actor={} no-victim", ev.actor.index());
+                tracing::debug!(target: "combat", "COMBAT_CB actor={} no-victim", ev.actor.index());
             }
             continue;
         };
@@ -1943,7 +1951,7 @@ pub fn dispatch_damage_callback_stages(
         // only picked when that DAT ships it, and a knockback level adds `sway` alongside.
         let Some(victim_routines) = actor_render_routines(victim, &q_children, &q_render) else {
             if combat_log_enabled() {
-                println!("COMBAT_CB victim={} no-victim-routines", victim.index());
+                tracing::debug!(target: "combat", "COMBAT_CB victim={} no-victim-routines", victim.index());
             }
             continue;
         };
@@ -1959,7 +1967,8 @@ pub fn dispatch_damage_callback_stages(
         );
         for routine in &chosen {
             if combat_log_enabled() {
-                println!(
+                tracing::debug!(
+                    target: "combat",
                     "COMBAT_RX victim={} res={:?} dist={:?} kb={:?} routine={} found={}",
                     victim.index(),
                     pending.resolution,

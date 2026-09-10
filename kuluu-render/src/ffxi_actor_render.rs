@@ -87,28 +87,25 @@ pub const LOCOMOTION_XFADE_IN: f32 = 9.0;
 
 pub const LOCOMOTION_XFADE_OUT: f32 = 7.5;
 
-// Gated special-pose diagnostics (`KULUU_SPECIAL_LOG=1`): wire-state transitions plus clip
+// Gated special-pose diagnostics (`KULUU_SPECIAL_LOG`): wire-state transitions plus clip
 // selection for entities with an active special routine (the animationsub -> init/iniN table,
 // FFXiMain.dll .data @RVA 0x35AF60). Off by default; read once.
 fn special_log_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        matches!(std::env::var("KULUU_SPECIAL_LOG").as_deref(), Ok(v) if !v.is_empty() && v != "0")
-    })
+    crate::particle_sim::env_flag(&ENABLED, "KULUU_SPECIAL_LOG")
 }
 
 // Tick counter for the gated hold probe below; advanced once per snapshot tick in
 // `tick_live_ffxi_actors` (serial section), read from the parallel pose pass.
 static SPECIAL_LOG_TICK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-// CLIP_WARN is on by default: a selected clip that resolves to nothing in the model DAT is
-// always worth one line (it is how a frozen-mob regression announces itself). KULUU_CLIP_LOG=1
-// additionally prints CLIP_OK for successful resolutions, which is chatty enough to stay gated.
+// CLIP_WARN is a tracing::debug! event on target "clip": a selected clip that resolves to nothing
+// in the model DAT is always worth one line (it is how a frozen-mob regression announces itself),
+// visible under RUST_LOG=clip or =debug. KULUU_CLIP_LOG additionally prints CLIP_OK for successful
+// resolutions, which is chatty enough to stay gated.
 fn clip_log_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ENABLED.get_or_init(
-        || matches!(std::env::var("KULUU_CLIP_LOG").as_deref(), Ok(v) if !v.is_empty() && v != "0"),
-    )
+    crate::particle_sim::env_flag(&ENABLED, "KULUU_CLIP_LOG")
 }
 
 // Once-per-(world_id, clip, reason) dedupe for CLIP_WARN: a miss repeats every frame while the
@@ -129,7 +126,8 @@ fn clip_warn_once(id: u32, name: &str, model: &str, clip: &DatId, reason: &'stat
     if !guard.insert((id, clip.as_str(), reason)) {
         return false;
     }
-    println!(
+    tracing::debug!(
+        target: "clip",
         "CLIP_WARN id={id:#x} name={} model={} clip={} reason={}",
         name,
         model,
@@ -165,7 +163,8 @@ fn clip_ok(id: u32, asked: &DatId, resolved: &SkeletonAnimation, movement_type: 
     if !clip_log_enabled() {
         return;
     }
-    println!(
+    tracing::debug!(
+        target: "clip",
         "CLIP_OK id={id:#x} clip={} -> {} frames={} move={}",
         asked.as_str(),
         resolved.id.as_str(),
@@ -2119,8 +2118,7 @@ fn advance_rest_phase(
 }
 
 // Why a requested routine yielded no motion clip. Each case gets its own CLIP_WARN reason so
-// the miss names itself instead of degrading to locomotion silently: the pose path used to
-// return None for both "no such routine" and "no Motion stage", and neither reached CLIP_WARN.
+// the miss names itself instead of degrading to locomotion silently.
 #[derive(Debug)]
 enum RoutineMiss {
     /// No scheduler chunk with this name in the model's sets: retail is a no-op here too.
@@ -2222,13 +2220,17 @@ pub(crate) fn action_routine(
     cast_suffix: Option<&str>,
     animation: Option<u16>,
 ) -> Option<(DatId, bool)> {
+    use ffxi_proto::melee::{
+        CATEGORY_ABILITY_START, CATEGORY_BASIC_ATTACK, CATEGORY_ITEM_START, CATEGORY_RANGED_START,
+        CATEGORY_SKILL_START,
+    };
     let fourcc = ffxi_vocab::magic::magic_start_routine(cmd_arg);
     Some(match action_kind {
         // kuluu-df9t D6 - BATTLE2's per-result `animation` picks the limb routine
         // (vendor/server/src/map/attack.h AttackAnimation): RightAttack→ati0 / LeftAttack→bti0 /
         // RightKick→cti0 / LeftKick→dti0. Absent or out-of-range values fall back to ati0, the
         // only swing every armed race base is known to carry.
-        1 => (
+        CATEGORY_BASIC_ATTACK => (
             animation
                 .and_then(ffxi_proto::melee::AttackAnimation::from_wire)
                 .and_then(crate::scheduler_runtime::swing_routine)
@@ -2237,17 +2239,25 @@ pub(crate) fn action_routine(
             false,
         ),
 
-        7 | 9 | 10 | 12 => match fourcc.as_ref().filter(|m| !m.interrupt) {
-            // A valid "ca??" start keeps its category's looping semantics: the generic
-            // `cast`/`calg` holds loop until resolution, while `cate`/`cait` play once.
-            Some(m) => (DatId::from_name(&m.id), matches!(action_kind, 10 | 12)),
-            None => match action_kind {
-                7 => (DatId::from_str("cate"), false),
-                9 => (DatId::from_str("cait"), false),
-                10 => (DatId::from_str("cast"), true),
-                _ => (DatId::from_str("calg"), true),
-            },
-        },
+        CATEGORY_SKILL_START
+        | CATEGORY_ITEM_START
+        | CATEGORY_ABILITY_START
+        | CATEGORY_RANGED_START => {
+            match fourcc.as_ref().filter(|m| !m.interrupt) {
+                // A valid "ca??" start keeps its category's looping semantics: the generic
+                // `cast`/`calg` holds loop until resolution, while `cate`/`cait` play once.
+                Some(m) => (
+                    DatId::from_name(&m.id),
+                    matches!(action_kind, CATEGORY_ABILITY_START | CATEGORY_RANGED_START),
+                ),
+                None => match action_kind {
+                    CATEGORY_SKILL_START => (DatId::from_str("cate"), false),
+                    CATEGORY_ITEM_START => (DatId::from_str("cait"), false),
+                    CATEGORY_ABILITY_START => (DatId::from_str("cast"), true),
+                    _ => (DatId::from_str("calg"), true),
+                },
+            }
+        }
 
         MAGIC_START_CATEGORY => {
             let id = cast_suffix
@@ -4170,9 +4180,20 @@ pub fn dispatch_action_overlay(
         // An interrupt arrives on any start category carrying an "sp*" FourCC
         // (vendor/server/src/map/action/interrupts.cpp MagicInterrupt); treating it as a start would
         // re-arm the looping pose for CAST_TIMEOUT_FRAMES instead of dropping it.
-        let start = matches!(action_kind, 7 | 9 | 10 | 12 | MAGIC_START_CATEGORY)
-            .then(|| ffxi_vocab::magic::magic_start_routine(action_id))
-            .flatten();
+        use ffxi_proto::melee::{
+            CATEGORY_ABILITY_START, CATEGORY_ITEM_START, CATEGORY_RANGED_START,
+            CATEGORY_SKILL_START,
+        };
+        let start = matches!(
+            action_kind,
+            CATEGORY_SKILL_START
+                | CATEGORY_ITEM_START
+                | CATEGORY_ABILITY_START
+                | CATEGORY_RANGED_START
+                | MAGIC_START_CATEGORY
+        )
+        .then(|| ffxi_vocab::magic::magic_start_routine(action_id))
+        .flatten();
         if start.is_some_and(|m| m.interrupt) {
             // Only a pose that is still held (looping) needs dropping; one-shot starts have
             // already finished by the time an interrupt could matter.

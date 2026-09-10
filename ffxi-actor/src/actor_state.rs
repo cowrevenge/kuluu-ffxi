@@ -44,10 +44,14 @@ pub const SPECIAL_ROUTINE_TABLE: [&str; 8] = [
     "init", "ini1", "ini2", "ini3", "init", "ini1", "ini2", "ini3",
 ];
 
+// The selector bits retail keeps for the special-pose table: the low three of the raw
+// animationsub byte. Bit 2 is LSB's spawn flag; SPECIAL_ROUTINE_TABLE's mod-4 wrap absorbs it.
+const EFFECT_SUB_SELECTOR_MASK: u8 = 0b111;
+
 /// The active special-pose routine for a raw animationsub byte. Sub 0 (and the spawn-flagged 4)
 /// means no active special: 'init' is the load routine, not an override.
 pub fn special_routine(animationsub: u8) -> Option<&'static str> {
-    let name = SPECIAL_ROUTINE_TABLE[(animationsub & 0b111) as usize];
+    let name = SPECIAL_ROUTINE_TABLE[(animationsub & EFFECT_SUB_SELECTOR_MASK) as usize];
     (name != "init").then_some(name)
 }
 

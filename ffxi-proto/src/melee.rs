@@ -1,5 +1,16 @@
-// vendor/server/src/map/enums/action/category.h ActionCategory BasicAttack — `action.cmd_no`, 4 bits.
+// vendor/server/src/map/enums/action/category.h ActionCategory - `action.cmd_no`, 4 bits.
 pub const CATEGORY_BASIC_ATTACK: u8 = 1;
+// The finish categories that key a completion effect DAT (scheduler_runtime's
+// action_dat_file_id) and the start categories that carry a cast-loop routine (the "ca??" family).
+pub const CATEGORY_SKILL_FINISH: u8 = 3;
+pub const CATEGORY_MAGIC_FINISH: u8 = 4;
+pub const CATEGORY_ABILITY_FINISH: u8 = 6;
+pub const CATEGORY_SKILL_START: u8 = 7;
+pub const CATEGORY_ITEM_START: u8 = 9;
+pub const CATEGORY_ABILITY_START: u8 = 10;
+pub const CATEGORY_MOB_SKILL_FINISH: u8 = 11;
+pub const CATEGORY_RANGED_START: u8 = 12;
+pub const CATEGORY_PET_SKILL_FINISH: u8 = 13;
 
 // vendor/server/src/map/enums/action/info.h - the per-result `info` bits. Defeated means the
 // action killed the target (retail flips StatusServer on the same frame as the HP packet, F49);

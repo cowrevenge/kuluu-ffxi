@@ -2,6 +2,10 @@ use crate::{DatError, Result};
 
 pub const CIB_LEN: usize = 15;
 
+// The Info byte that means "no value": retail writes it where a field is absent (movement and
+// range type) or default (scale).
+const UNSET_BYTE: u8 = 0xFF;
+
 // The movement byte of the 0x45 Info chunk (vekien/xi-model-viewer ui/js/dat/inspect.js
 // MOVEMENT_TYPE). Retail ships only 0/1/2/3/0xFF in this install's ROMs (full scan:
 // 1102/50/178/304/16494 CIBs), so Unknown is unreachable for shipped data; it keeps an odd
@@ -39,7 +43,7 @@ impl MovementType {
             1 => Self::Sliding,
             2 => Self::Large,
             3 => Self::Flying,
-            0xFF => Self::Unset,
+            UNSET_BYTE => Self::Unset,
             _ => Self::Unknown(b),
         }
     }
@@ -79,7 +83,7 @@ impl RangeType {
             0x06 => Self::Archery,
             0x0a => Self::HandbellIndi,
             0x0b => Self::HandbellGeo,
-            0xFF => Self::Unset,
+            UNSET_BYTE => Self::Unset,
             _ => Self::Unknown(b),
         }
     }
@@ -190,12 +194,13 @@ impl Cib {
         })
     }
 
-    /// The Info `scale` byte as a model multiplier. Retail divides by 100 with only 0xFF
+    /// The Info `scale` byte as a model multiplier. Retail divides by 100 with only UNSET_BYTE
     /// meaning "default" (research/xim poc/Model.kt NpcModel.getScale, poc/Actor.kt getScale;
-    /// xim's nullIf0FF in resource/InfoSection.kt). 100 therefore lands on 1.0 by
-    /// the division itself, and a shipped 0 renders at zero size exactly as retail would.
+    /// resource/InfoSection.kt readInfoDefinition maps that byte to null through its private
+    /// nullIf0FF helper). 100 therefore lands on 1.0 by the division itself, and a shipped 0
+    /// renders at zero size exactly as retail would.
     pub fn scale_factor(&self) -> f32 {
-        if self.scale == 0xFF {
+        if self.scale == UNSET_BYTE {
             1.0
         } else {
             self.scale as f32 / 100.0

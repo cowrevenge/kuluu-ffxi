@@ -433,10 +433,8 @@ impl MotionProbe {
     }
 
     pub fn init() -> Self {
-        let enabled = matches!(
-            std::env::var("KULUU_MOTION_LOG").as_deref(),
-            Ok(v) if !v.is_empty() && v != "0"
-        );
+        static ONCE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        let enabled = crate::particle_sim::env_flag(&ONCE, "KULUU_MOTION_LOG");
         Self {
             enabled,
             per_id: HashMap::new(),
@@ -476,7 +474,8 @@ impl MotionProbe {
         } else {
             f32::INFINITY
         };
-        println!(
+        tracing::debug!(
+            target: "motion",
             "MOTION_UPD id={id:#x} kind={} band={} dt_srv={:.3}s jump={:.2}y step={:.2} ratio={:.2} speed_pkt={} speed_base={} idle_fr={} rem={:.2} seg={:.3}s ring_max={:.3}s",
             e.kind_name,
             match u.band {
@@ -504,7 +503,8 @@ impl MotionProbe {
         }
         let e = self.entry(id, kind);
         e.toggles += 1;
-        println!(
+        tracing::debug!(
+            target: "motion",
             "MOTION_TGL id={id:#x} kind={} moving={} speed={:.2}",
             e.kind_name, now_moving, speed
         );
@@ -532,7 +532,8 @@ impl MotionProbe {
         let e = self.entry(id, kind);
         if sideways && !e.in_mismatch {
             e.mismatch_events += 1;
-            println!(
+            tracing::debug!(
+                target: "motion",
                 "MOTION_MIS id={id:#x} heading={:.0}deg travel={:.0}deg diff={:.0}deg speed={:.2}",
                 heading_rad.to_degrees(),
                 travel.to_degrees(),
@@ -560,7 +561,8 @@ impl MotionProbe {
             mis += e.mismatch_events;
         }
         let (median, p90) = quantiles(&self.all_intervals);
-        println!(
+        tracing::debug!(
+            target: "motion",
             "MOTION_SUM t={:.1}s ents={} upd={} normal={} stretch={} pop={} tgl={} mis={} med_dt_srv={} p90_dt_srv={}",
             now_secs,
             self.per_id.len(),

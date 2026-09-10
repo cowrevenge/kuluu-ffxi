@@ -917,7 +917,9 @@ fn emit(g: &mut LiveGenerator, life_frames: f32) {
     });
 }
 
-fn env_flag(cell: &'static OnceLock<bool>, name: &str) -> bool {
+// Shared read-once env switch for the gated diagnostics in this crate (the KULUU_* probes and
+// the FFXI_TRACE_* particle traces): any value enables, unset disables.
+pub(crate) fn env_flag(cell: &'static OnceLock<bool>, name: &str) -> bool {
     *cell.get_or_init(|| std::env::var_os(name).is_some())
 }
 

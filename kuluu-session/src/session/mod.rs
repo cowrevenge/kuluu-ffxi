@@ -788,14 +788,18 @@ fn first_decode_err(opcode: u16) -> bool {
         .unwrap_or(true)
 }
 
-/// Gated special-pose wire diagnostics (`KULUU_SPECIAL_LOG=1`, same switch as the render-side
+// Read-once env switch for the gated diagnostics in this module (same pattern as
+// kuluu-render's particle_sim::env_flag): any value enables, unset disables.
+fn env_flag(cell: &'static std::sync::OnceLock<bool>, name: &str) -> bool {
+    *cell.get_or_init(|| std::env::var_os(name).is_some())
+}
+
+/// Gated special-pose wire diagnostics (`KULUU_SPECIAL_LOG`, same switch as the render-side
 /// state log): raw status/sub observations for every CHAR_NPC update that could drive a
 /// special-pose transition. Off by default; read once.
 fn special_wire_log_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        matches!(std::env::var("KULUU_SPECIAL_LOG").as_deref(), Ok(v) if !v.is_empty() && v != "0")
-    })
+    env_flag(&ENABLED, "KULUU_SPECIAL_LOG")
 }
 
 fn handle_sub_packet(
@@ -5042,12 +5046,7 @@ pub struct Battle2Header {
 // "our parser dropped it". Read-only; no behaviour change.
 fn combat_log_enabled() -> bool {
     static ONCE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ONCE.get_or_init(|| {
-        matches!(
-            std::env::var("KULUU_COMBAT_LOG").as_deref(),
-            Ok(v) if !v.is_empty() && v != "0"
-        )
-    })
+    env_flag(&ONCE, "KULUU_COMBAT_LOG")
 }
 
 fn battle2_debug_dump(data: &[u8]) {
@@ -5070,7 +5069,8 @@ fn battle2_debug_dump(data: &[u8]) {
             br.read(3),  // knockback
         )
     });
-    println!(
+    tracing::debug!(
+        target: "combat",
         "COMBAT_B2 len={} actor={:?} trg_sum={:?} kind={:?} actid={:?} target={:?} nres={:?} first=(res,kind,anim,info,dist,kb)={:?}",
         data.len(),
         actor_id,

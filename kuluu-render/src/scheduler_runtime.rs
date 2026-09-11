@@ -2544,10 +2544,25 @@ impl Plugin for SchedulerRuntimePlugin {
                     dispatch_entity_emoted,
                     dispatch_cutscene_motion,
                     poll_action_dat_tasks,
-                    // Chained between the routine inserters and the stage consumers so a
-                    // routine's frame-0 stages fire on the frame it is inserted, and every
-                    // stage is consumed the same frame it is written. StopRoutine removal runs
-                    // right after the tick that emits its 0x5F stage.
+                )
+                    .chain()
+                    // The overlay and this chain both drain EventLog with private cursors; the
+                    // overlay's "no routine for this action" branch clears the looping action, so
+                    // it must run before a completion routine's Motion stage begins here.
+                    .after(crate::ffxi_actor_render::dispatch_action_overlay)
+                    // Bevy chains tuples of at most 20 systems (bevy_ecs schedule/config.rs,
+                    // IntoScheduleConfigs tuple impls), so the inserters and the stage
+                    // consumers are two chained halves pinned together: every inserter runs
+                    // before tick_active_schedulers, which keeps a routine's frame-0 stages
+                    // firing on the frame it is inserted.
+                    .before(tick_active_schedulers),
+            );
+            app.add_systems(
+                Update,
+                (
+                    // Chained after the inserter half so every stage is consumed the same
+                    // frame it is written. StopRoutine removal runs right after the tick that
+                    // emits its 0x5F stage.
                     tick_active_schedulers,
                     dispatch_stop_routine_stages,
                     crate::particle_sim::spawn_actor_auto_run_particles,
@@ -2562,11 +2577,7 @@ impl Plugin for SchedulerRuntimePlugin {
                     dispatch_damage_callback_stages,
                     dispatch_target_routine_stages,
                 )
-                    .chain()
-                    // The overlay and this chain both drain EventLog with private cursors; the
-                    // overlay's "no routine for this action" branch clears the looping action, so
-                    // it must run before a completion routine's Motion stage begins here.
-                    .after(crate::ffxi_actor_render::dispatch_action_overlay),
+                    .chain(),
             );
             app.add_systems(
                 Update,

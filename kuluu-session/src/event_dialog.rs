@@ -13,8 +13,10 @@ use ffxi_dat::dmsg::{
     MARKER_PLAYER_NAME, MARKER_SPEAKER_NAME,
 };
 use ffxi_dat::event_dat::{EventBlockSource, EventDat};
+use ffxi_dat::kind::ChunkKind;
+use ffxi_dat::scheduler::Scheduler;
 use ffxi_dat::DatRoot;
-use ffxi_event::{ActorLookup, DialogRunner, DialogStep, EventCue, PendingTag};
+use ffxi_event::{ActorLookup, DialogRunner, DialogStep, EventCue, FourCc, PendingTag};
 use tokio::sync::broadcast;
 
 use crate::state::{AgentEvent, CutsceneActor, CutsceneCue, DialogState};
@@ -139,6 +141,10 @@ pub struct DialogSession {
     /// Per-zone fishing-era reconciliation state, built lazily on the first
     /// TALKNUM-family message of the zone.
     fishing: std::collections::HashMap<u16, FishingEra>,
+    /// Authored routine lengths the WAIT* holds arm from, cached per (dat id,
+    /// tag) with misses included so a re-issued routine does not re-read its
+    /// file.
+    routine_lengths: std::collections::HashMap<(u32, FourCc), Option<f32>>,
 }
 
 impl DialogSession {
@@ -156,6 +162,7 @@ impl DialogSession {
             active: None,
             cues: Vec::new(),
             fishing: std::collections::HashMap::new(),
+            routine_lengths: std::collections::HashMap::new(),
         }
     }
 
@@ -236,12 +243,15 @@ impl DialogSession {
         }
         let step = runner.advance(None, strings);
         self.scene_actions.extend(runner.take_scene_actions());
-        self.cues.extend(
-            runner
-                .take_cues()
-                .into_iter()
-                .map(|c| resolve_cue(c, unique_no)),
+        let raw_cues = runner.take_cues();
+        arm_motion_holds(
+            &mut runner,
+            &raw_cues,
+            self.dat_root.as_deref(),
+            &mut self.routine_lengths,
         );
+        self.cues
+            .extend(raw_cues.into_iter().map(|c| resolve_cue(c, unique_no)));
         let active = ActiveEvent {
             unique_no,
             act_index,
@@ -366,8 +376,14 @@ impl DialogSession {
         let outcome = step(runner, strings);
         let final_position = runner.controlled_position();
         self.scene_actions.extend(runner.take_scene_actions());
-        let cues: Vec<ResolvedCue> = runner
-            .take_cues()
+        let raw_cues = runner.take_cues();
+        arm_motion_holds(
+            runner,
+            &raw_cues,
+            self.dat_root.as_deref(),
+            &mut self.routine_lengths,
+        );
+        let cues: Vec<ResolvedCue> = raw_cues
             .into_iter()
             .map(|c| resolve_cue(c, event_entity))
             .collect();
@@ -579,6 +595,19 @@ pub fn resolve_cue(cue: EventCue, event_entity: u32) -> ResolvedCue {
             partner: actor(actor2),
             tag,
             duration,
+        },
+        EventCue::ExtScheduler {
+            motion_dat_id,
+            tpc,
+            actor1,
+            actor2,
+            key,
+        } => CutsceneCue::ExtScheduler {
+            motion_dat_id,
+            tpc,
+            actor: actor(actor1),
+            partner: actor(actor2),
+            key,
         },
         EventCue::ActorHide { target, hide } => CutsceneCue::ActorHide {
             target: actor(target),
@@ -1137,6 +1166,157 @@ fn load_event_dat(root: Option<&DatRoot>, zone: u16) -> Option<EventDat> {
     }
 }
 
+// 0x45 duration operand: 0 and this value mean "play the authored timing";
+// kuluu-render/src/cutscene.rs scheduler_speed_ratio treats both as ratio 1.
+const SCHEDULER_DURATION_LOOP: u16 = 1;
+
+/// Arm WAIT* holds for motion cues whose authored length this session can read
+/// from a DAT, before their actors are resolved: the hold keys on the VM's own
+/// unresolved ActorLookup. 0x2C arms nothing - its routine lives in the actor's
+/// model DAT, which this session never opens; the renderer plays it and the VM
+/// does not hold on it.
+fn arm_motion_holds(
+    runner: &mut DialogRunner,
+    raw_cues: &[EventCue],
+    root: Option<&DatRoot>,
+    cache: &mut std::collections::HashMap<(u32, FourCc), Option<f32>>,
+) {
+    for cue in raw_cues {
+        match *cue {
+            EventCue::Scheduler {
+                dat_id,
+                actor1,
+                tag,
+                duration,
+                ..
+            } => {
+                if let Some(units) = routine_units(root, cache, dat_id, tag, duration) {
+                    runner.hold_action(actor1, tag, units);
+                }
+            }
+            EventCue::ExtScheduler {
+                motion_dat_id,
+                actor1,
+                key,
+                ..
+            } => {
+                if let Some(units) = routine_units(
+                    root,
+                    cache,
+                    motion_dat_id,
+                    key,
+                    ffxi_event::SCHEDULER_DURATION_FROM_DAT,
+                ) {
+                    runner.hold_action(actor1, key, units);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// The authored length of scheduler `tag` in DAT file `dat_id`, in WAIT* hold
+/// units (1/60 s each; the routine clock and the VM's wait clock are both 60
+/// fps). `duration_override` is the 0x45 operand: 0 or 1 means play the
+/// authored timing, anything else IS the total frame count. Cached per
+/// (dat_id, tag) with misses included so a re-issued routine does not
+/// re-read its file; a missing DAT arms nothing and the wait falls through.
+fn routine_units(
+    root: Option<&DatRoot>,
+    cache: &mut std::collections::HashMap<(u32, FourCc), Option<f32>>,
+    dat_id: u32,
+    tag: FourCc,
+    duration_override: u16,
+) -> Option<f32> {
+    if let Some(units) = cache.get(&(dat_id, tag)) {
+        return *units;
+    }
+    let units = routine_units_uncached(root, dat_id, tag, duration_override);
+    cache.insert((dat_id, tag), units);
+    units
+}
+
+fn routine_units_uncached(
+    root: Option<&DatRoot>,
+    dat_id: u32,
+    tag: FourCc,
+    duration_override: u16,
+) -> Option<f32> {
+    let miss = |reason: &str| {
+        tracing::debug!(
+            target: "kuluu_session::event_dialog",
+            dat_id,
+            tag = %String::from_utf8_lossy(&tag),
+            reason,
+            "no authored routine length; the WAIT* hold falls through"
+        );
+    };
+    let Some(root) = root else {
+        miss("no DAT root");
+        return None;
+    };
+    let loc = match root.resolve(dat_id) {
+        Ok(loc) => loc,
+        Err(e) => {
+            tracing::debug!(
+                target: "kuluu_session::event_dialog",
+                dat_id,
+                tag = %String::from_utf8_lossy(&tag),
+                error = %e,
+                "failed to resolve the motion DAT; the WAIT* hold falls through"
+            );
+            return None;
+        }
+    };
+    let path = loc.path_under(root);
+    let bytes = match std::fs::read(&path) {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::debug!(
+                target: "kuluu_session::event_dialog",
+                dat_id,
+                tag = %String::from_utf8_lossy(&tag),
+                path = %path.display(),
+                error = %e,
+                "failed to read the motion DAT; the WAIT* hold falls through"
+            );
+            return None;
+        }
+    };
+    let chunk = ffxi_dat::chunk::walk(&bytes).find_map(|c| match c {
+        Ok(c) if c.kind == ChunkKind::Scheduler as u8 && c.name == tag => Some(c),
+        Ok(_) => None,
+        Err(e) => {
+            tracing::debug!(
+                target: "kuluu_session::event_dialog",
+                dat_id,
+                error = %e,
+                "truncated chunk while scanning the motion DAT"
+            );
+            None
+        }
+    })?;
+    let scheduler = match Scheduler::parse(chunk.name, chunk.data) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::debug!(
+                target: "kuluu_session::event_dialog",
+                dat_id,
+                tag = %String::from_utf8_lossy(&tag),
+                error = %e,
+                "failed to parse the scheduler chunk; the WAIT* hold falls through"
+            );
+            return None;
+        }
+    };
+    let frames = if duration_override <= SCHEDULER_DURATION_LOOP {
+        scheduler.end_frame()
+    } else {
+        u32::from(duration_override)
+    };
+    Some(frames as f32)
+}
+
 fn load_strings(root: Option<&DatRoot>, zone: u16) -> Option<StringDat> {
     let root = root?;
     let Some(file_id) = ffxi_dat::zone_dat::zone_id_to_string_file_id(zone) else {
@@ -1503,6 +1683,116 @@ pub(crate) mod tests {
             npc_name: None,
         };
         (session, trigger)
+    }
+
+    /// A minimal DAT root that resolves `dat_id` to ROM/21/39.DAT, which holds
+    /// one scheduler chunk named `tag`: a single zero-delay stage of duration
+    /// `frames`, so the authored end frame is exactly `frames`.
+    fn motion_dat_root(dat_id: u32, tag: [u8; 4], frames: u16) -> (tempfile::TempDir, DatRoot) {
+        let dir = tempfile::tempdir().unwrap();
+        // VTABLE.DAT: byte[file_id] is the ROM index that claims it.
+        let mut vtable = vec![0u8; dat_id as usize + 1];
+        vtable[dat_id as usize] = 1;
+        std::fs::write(dir.path().join("VTABLE.DAT"), &vtable).unwrap();
+        // FTABLE.DAT: one u16 word per file id, dir << 7 | file.
+        let mut ftable = vec![0u16; dat_id as usize + 1];
+        ftable[dat_id as usize] = (21u16) << 7 | 39;
+        std::fs::write(
+            dir.path().join("FTABLE.DAT"),
+            ftable
+                .iter()
+                .flat_map(|w| w.to_le_bytes())
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+        // Chunk: a 64-byte scheduler header whose section table points at one
+        // stage, that stage (0x59 AnimationLock, delay 0, duration `frames`),
+        // then the end-of-section opcode.
+        let mut body = vec![0u8; 64];
+        body[0x14..0x18].copy_from_slice(&74u32.to_le_bytes()); // effect list at body offset 64, measured from the chunk header
+        body.extend([0x59, 0x02, 0x00, 0x00]); // stage opcode + length (8 bytes)
+        body.extend(0u16.to_le_bytes()); // delay
+        body.extend(frames.to_le_bytes()); // duration
+                                           // Retail chunks are a 16-byte header plus a body on the same stride.
+        const CHUNK_STRIDE: usize = 16;
+        let total = CHUNK_STRIDE + body.len();
+        let padded = total.div_ceil(CHUNK_STRIDE) * CHUNK_STRIDE;
+        let mut chunk = Vec::with_capacity(padded);
+        chunk.extend_from_slice(&tag);
+        chunk.extend_from_slice(
+            &(((padded / CHUNK_STRIDE) as u32) << 7 | ffxi_dat::ChunkKind::Scheduler as u32)
+                .to_le_bytes(),
+        );
+        chunk.extend(body);
+        chunk.resize(padded, 0);
+        let rom = dir.path().join("ROM").join("21");
+        std::fs::create_dir_all(&rom).unwrap();
+        std::fs::write(rom.join("39.DAT"), &chunk).unwrap();
+        let root = DatRoot::open(dir.path()).unwrap();
+        (dir, root)
+    }
+
+    #[test]
+    fn extscheduler_hold_arms_from_the_dat_routine_length() {
+        const NPC: u32 = 0x010E_6032;
+        const EVENT: u16 = 503;
+        const ZONE: u16 = 248;
+        const KEY: [u8; 4] = *b"abcd";
+        // 0x5B file operand 5 -> band 0 -> dat id 32109.
+        let (dat_id, frames) = (32_109u32, 60u16);
+        let (_dir, root) = motion_dat_root(dat_id, KEY, frames);
+        let mut program = vec![0x5B];
+        program.extend(0x8000u16.to_le_bytes()); // file @1 -> references[0]
+        program.extend(NPC.to_le_bytes()); // actor1 @3
+        program.extend(0u32.to_le_bytes()); // actor2 @7
+        program.extend(KEY); // key @11
+        program.push(0x53); // WAITSCHEDULOR @15
+        program.extend(NPC.to_le_bytes()); // actor1 @16
+        program.extend(0u32.to_le_bytes()); // actor2 @20
+        program.extend(KEY); // key @24
+        program.push(0x21); // END @28
+        let block = ffxi_dat::event_dat::EventBlock {
+            actor: NPC,
+            event_ids: vec![EVENT],
+            event_offsets: vec![0],
+            references: vec![5],
+            event_data: program,
+        };
+        let mut session = DialogSession::new(Some(Arc::new(root)), "Test".into());
+        session.loaded_event_zone = Some(ZONE);
+        session.loaded_string_zone = Some(ZONE);
+        session.event_dat = Some(Arc::new(EventDat {
+            blocks: vec![block],
+        }));
+        session.strings = Some(StringDat::parse(&synth_dat(&[b"test"])).unwrap());
+        let trigger = EventTrigger {
+            event_zone: ZONE,
+            text_zone: ZONE,
+            unique_no: NPC,
+            act_index: 0,
+            event_id: EVENT,
+            params: vec![],
+            npc_name: None,
+        };
+        assert!(matches!(session.begin(trigger), Begin::Waiting));
+        let cues = session.take_cues();
+        let [ResolvedCue::Scene(CutsceneCue::ExtScheduler {
+            motion_dat_id,
+            tpc,
+            actor,
+            key,
+            ..
+        })] = cues.as_slice()
+        else {
+            panic!("expected the ExtScheduler cue");
+        };
+        assert_eq!(*motion_dat_id, dat_id);
+        assert!(!*tpc);
+        assert_eq!(*actor, CutsceneActor::Entity { server_id: NPC });
+        assert_eq!(*key, KEY);
+        // The hold is 60 frames = one second on the VM's clock.
+        assert!(matches!(session.tick(0.5), Advance::Waiting));
+        assert!(matches!(session.tick(0.6), Advance::Ended { .. }));
     }
 
     #[test]

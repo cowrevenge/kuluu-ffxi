@@ -539,6 +539,19 @@ fn cutscene_cue_to_wire(cue: crate::state::CutsceneCue) -> wire::CutsceneCue {
             status_event,
             mount_id,
         },
+        Cue::ExtScheduler {
+            motion_dat_id,
+            tpc,
+            actor,
+            partner,
+            key,
+        } => wire::CutsceneCue::ExtScheduler {
+            motion_dat_id,
+            tpc,
+            actor: cutscene_actor_to_wire(actor),
+            partner: cutscene_actor_to_wire(partner),
+            key,
+        },
     }
 }
 

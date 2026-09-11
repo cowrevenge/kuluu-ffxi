@@ -336,6 +336,12 @@ pub struct EventVm {
     pending_ack: Option<PendingTag>,
     /// Host-armed action holds the WAIT* family parks on; see [`ActionHold`].
     action_holds: Vec<ActionHold>,
+    /// Actions this VM's own 0x45/0x5B opcodes started within the current step
+    /// batch, before the host has drained the cues and armed their holds. They
+    /// bridge an opcode to its WAIT* when both run in one batch; [`Self::take_cues`]
+    /// clears them so an action whose DAT the host cannot read falls through
+    /// instead of holding forever.
+    pending_action_starts: Vec<(ActorLookup, FourCc)>,
     /// Set while execution is parked on a WAIT* opcode whose hold still has
     /// frames left, so [`Self::is_waiting`] keeps the host ticking it down.
     parked_on_action_hold: bool,
@@ -455,6 +461,7 @@ impl EventVm {
             wait: None,
             pending_ack: None,
             action_holds: Vec::new(),
+            pending_action_starts: Vec::new(),
             parked_on_action_hold: false,
             oob_reads: std::cell::Cell::new(0),
         }
@@ -505,6 +512,9 @@ impl EventVm {
     /// per-step return value.
     pub fn take_cues(&mut self) -> Vec<EventCue> {
         let cues = std::mem::take(&mut self.cues);
+        // The host arms holds from these cues now; the same-batch bridge is
+        // spent, and anything it covered that no hold confirms must fall through.
+        self.pending_action_starts.clear();
         if let Some(scene) = &self.scene {
             cues.into_iter()
                 .map(|cue| cue.resolve_event_actor(ActorLookup(scene.actor)))
@@ -554,9 +564,18 @@ impl EventVm {
     /// True while a host-armed hold for `(actor, key)` still has frames left.
     fn action_running(&self, actor: ActorLookup, key: FourCc) -> bool {
         let actor = self.resolve_hold_actor(actor);
-        self.action_holds
+        if self
+            .action_holds
             .iter()
             .any(|h| h.actor == actor && h.key == key && h.remaining_units > 0.0)
+        {
+            return true;
+        }
+        // The same-batch bridge: an action started by this VM's own loader in the
+        // current batch, before the host armed its hold from the cue.
+        self.pending_action_starts
+            .iter()
+            .any(|(a, k)| *a == actor && *k == key)
     }
 
     /// Resolve a hold's actor the way [`Self::take_cues`] resolves cue actors:
@@ -951,10 +970,13 @@ impl EventVm {
                     };
                     let key = self.fourcc_at(LOADEXTSCHEDULER_KEY_OFS);
                     if key != [0; 4] && key != NO_ACTION_KEY {
+                        let actor1 = ActorLookup(self.eventgetcode2(LOADEXTSCHEDULER_ACTOR1_OFS));
+                        self.pending_action_starts
+                            .push((self.resolve_hold_actor(actor1), key));
                         self.cues.push(EventCue::ExtScheduler {
                             motion_dat_id,
                             tpc,
-                            actor1: ActorLookup(self.eventgetcode2(LOADEXTSCHEDULER_ACTOR1_OFS)),
+                            actor1,
                             actor2: ActorLookup(self.eventgetcode2(LOADEXTSCHEDULER_ACTOR2_OFS)),
                             key,
                         });
@@ -999,11 +1021,15 @@ impl EventVm {
                 }
                 OP_LOADEVENTSCHEDULER2 => {
                     let file = dat_id_helper(self.getworkofs(LOADEVENTSCHEDULER2_FILE_OFS, 0));
+                    let actor1 = ActorLookup(self.eventgetcode2(LOADEVENTSCHEDULER2_ACTOR1_OFS));
+                    let tag = self.fourcc_at(LOADEVENTSCHEDULER2_TAG_OFS);
+                    self.pending_action_starts
+                        .push((self.resolve_hold_actor(actor1), tag));
                     self.cues.push(EventCue::Scheduler {
                         dat_id: SCHEDULER_DAT_ID_BASE.wrapping_add(file as u32),
-                        actor1: ActorLookup(self.eventgetcode2(LOADEVENTSCHEDULER2_ACTOR1_OFS)),
+                        actor1,
                         actor2: ActorLookup(self.eventgetcode2(LOADEVENTSCHEDULER2_ACTOR2_OFS)),
-                        tag: self.fourcc_at(LOADEVENTSCHEDULER2_TAG_OFS),
+                        tag,
                         duration: self.getworkofs(LOADEVENTSCHEDULER2_DURATION_OFS, 0) as u16,
                     });
                     self.advance(op);
@@ -1798,6 +1824,60 @@ mod tests {
         let mut e = vm(data, vec![]);
         // No hold armed: the wait advances immediately instead of parking.
         assert_eq!(e.step(), StepResult::Done);
+    }
+
+    fn loadextscheduler_then_wait_program(actor: u32, key: [u8; 4]) -> Vec<u8> {
+        let mut data = vec![OP_LOADEXTSCHEDULER];
+        data.extend_from_slice(&REF0); // file @1 -> references[0]
+        data.extend_from_slice(&actor.to_le_bytes()); // actor1 @3
+        data.extend_from_slice(&0u32.to_le_bytes()); // actor2 @7
+        data.extend_from_slice(&key); // key @11
+        data.push(OP_WAITSCHEDULOR); // offset 15
+        data.extend_from_slice(&actor.to_le_bytes()); // actor1 @16
+        data.extend_from_slice(&0u32.to_le_bytes()); // actor2 @20
+        data.extend_from_slice(&key); // key @24
+        data.push(OP_END); // offset 28
+        data
+    }
+
+    #[test]
+    fn loadextscheduler_and_its_wait_in_one_batch_bridge_until_the_cues_drain() {
+        const ACTOR: u32 = 0x010E_6032; // literal server id, resolves to itself
+        let key: [u8; 4] = *b"abcd";
+        let mut e = vm(loadextscheduler_then_wait_program(ACTOR, key), vec![5]);
+        assert_eq!(
+            e.step(),
+            StepResult::Waiting,
+            "the wait parks on the action its own loader just started"
+        );
+        assert_eq!(e.take_cues().len(), 1);
+        assert_eq!(
+            e.step(),
+            StepResult::Done,
+            "draining without a confirming hold spends the bridge; the wait falls through"
+        );
+    }
+
+    #[test]
+    fn loadextscheduler_bridge_hands_off_to_the_host_armed_hold() {
+        const ACTOR: u32 = 0x010E_6032;
+        let key: [u8; 4] = *b"abcd";
+        let mut e = vm(loadextscheduler_then_wait_program(ACTOR, key), vec![5]);
+        assert_eq!(e.step(), StepResult::Waiting);
+        // The host arms the hold from the drained cue; it takes over from the bridge.
+        assert_eq!(e.take_cues().len(), 1);
+        e.hold_action(ActorLookup(ACTOR), key, WAIT_UNITS_PER_SEC);
+        assert_eq!(
+            e.step(),
+            StepResult::Waiting,
+            "the armed hold keeps the wait parked"
+        );
+        e.tick(1.1); // 66 frames: past the one-second hold
+        assert_eq!(
+            e.step(),
+            StepResult::Done,
+            "an expired hold falls through to END"
+        );
     }
 
     #[test]

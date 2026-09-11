@@ -1033,6 +1033,13 @@ pub enum CutsceneCue {
         status_event: u8,
         mount_id: Option<u16>,
     },
+    ExtScheduler {
+        motion_dat_id: u32,
+        tpc: bool,
+        actor: CutsceneActor,
+        partner: CutsceneActor,
+        key: ffxi_event::FourCc,
+    },
 }
 
 /// Number of music slots [`AgentEvent::MusicVolumeChanged::slot`] can name

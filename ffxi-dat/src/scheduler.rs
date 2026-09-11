@@ -558,6 +558,23 @@ impl Scheduler {
         Ok(Self { name, stages })
     }
 
+    /// The frame at which this routine's effects end: the max over all stages of
+    /// `stage.frame + stage.duration_frames`, a half-open bound. A plain stage ends on its own
+    /// fire frame; an AnimationLock keeps holding until `frame + duration_frames`.
+    pub fn end_frame(&self) -> u32 {
+        Self::end_frame_for(&self.stages)
+    }
+
+    /// The same bound over an arbitrary stage list, for hosts that flatten sub-routine calls
+    /// into one timeline before measuring it (kuluu-render's ActiveScheduler).
+    pub fn end_frame_for(stages: &[TimedStage]) -> u32 {
+        stages
+            .iter()
+            .map(|t| t.frame + t.stage.duration_frames as u32)
+            .max()
+            .unwrap_or(0)
+    }
+
     // A routine built out of these is a switch (`daml` picks one hit reaction, `dam0` one
     // additional effect), so inlining it whole would run every branch at once. We do not
     // evaluate the conditions; callers pick the branch.

@@ -225,13 +225,10 @@ impl ActiveScheduler {
     /// `stage.frame + stage.duration_frames`, a half-open bound like `locks_at`'s. A plain
     /// stage ends on its own fire frame; an AnimationLock keeps holding until
     /// `frame + duration_frames`, so retiring on the last stage's fire time would drop a long
-    /// lock early (the post-finish TTL then counts from the wrong start).
+    /// lock early (the post-finish TTL then counts from the wrong start). Measured over this
+    /// entry's flattened stages, so inlined sub-routine calls count toward it.
     pub fn end_frame(&self) -> u32 {
-        self.stages
-            .iter()
-            .map(|t| t.frame + t.stage.duration_frames as u32)
-            .max()
-            .unwrap_or(0)
+        Scheduler::end_frame_for(&self.stages)
     }
 }
 

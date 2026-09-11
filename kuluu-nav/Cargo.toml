@@ -16,6 +16,7 @@ thiserror = { workspace = true }
 
 [build-dependencies]
 anyhow.workspace = true
+lsb-scrape = { path = "../lsb-scrape" }
 
 [dev-dependencies]
 tempfile = "3"

@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
+cd "$(git rev-parse --show-toplevel)"
+
+command -v bd >/dev/null 2>&1 || exit 0
+exec bd hooks run post-merge "$@"

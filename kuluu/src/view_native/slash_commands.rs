@@ -1,7 +1,7 @@
 use kuluu_render::{MenuKind, Preset};
 use kuluu_snapshot::{Entity as WireEntity, Vec3 as WireVec3};
 
-use crate::state::{ActionKind, AgentCommand, CheckKind, HealMode, ReqLogoutKind};
+use kuluu_session::state::{ActionKind, AgentCommand, CheckKind, HealMode, ReqLogoutKind};
 
 const MAX_ZONE_ID: u16 = 600;
 
@@ -719,7 +719,7 @@ const COMMANDS: &[(&str, &[Command])] = &[
                 usage: "",
                 summary: "set the hook once a fish bites",
                 handler: |_| SlashOutcome::Command(AgentCommand::FishingInput {
-                    input: crate::state::FishingInput::Hook,
+                    input: kuluu_session::state::FishingInput::Hook,
                 }),
             },
             Command {
@@ -727,7 +727,7 @@ const COMMANDS: &[(&str, &[Command])] = &[
                 usage: "",
                 summary: "react to a left fishing arrow",
                 handler: |_| SlashOutcome::Command(AgentCommand::FishingInput {
-                    input: crate::state::FishingInput::Left,
+                    input: kuluu_session::state::FishingInput::Left,
                 }),
             },
             Command {
@@ -735,7 +735,7 @@ const COMMANDS: &[(&str, &[Command])] = &[
                 usage: "",
                 summary: "react to a right fishing arrow",
                 handler: |_| SlashOutcome::Command(AgentCommand::FishingInput {
-                    input: crate::state::FishingInput::Right,
+                    input: kuluu_session::state::FishingInput::Right,
                 }),
             },
             Command {
@@ -743,7 +743,7 @@ const COMMANDS: &[(&str, &[Command])] = &[
                 usage: "",
                 summary: "abandon the cast / mini-game",
                 handler: |_| SlashOutcome::Command(AgentCommand::FishingInput {
-                    input: crate::state::FishingInput::Cancel,
+                    input: kuluu_session::state::FishingInput::Cancel,
                 }),
             },
         ],
@@ -788,6 +788,12 @@ const COMMANDS: &[(&str, &[Command])] = &[
                 usage: "[list|add <dir>|remove <n>|clear|reset]",
                 summary: "inspect and override the DAT overlay search path",
                 handler: |c| parse_overlay(c.rest),
+            },
+            Command {
+                aliases: &["actordiag"],
+                usage: "[target]",
+                summary: "diagnose missing PC body parts (head/face) against the install",
+                handler: |c| parse_actordiag(c.rest),
             },
             Command {
                 aliases: &["snapshot"],
@@ -955,8 +961,8 @@ const COMMANDS: &[(&str, &[Command])] = &[
             },
             Command {
                 aliases: &["lights", "lanterns"],
-                usage: "[on|off | threshold N | intensity N | range N | flicker on|off]",
-                summary: "tune dynamic lantern/fire lights (from over-bright vertices); bare `/lights` lists state",
+                usage: "[on|off | shadowed N | flicker on|off]",
+                summary: "Enhanced dynamic lights: shadow maps from the N nearest DAT lamps; bare `/lights` lists state",
                 handler: |c| parse_lights(c.rest),
             },
         ],
@@ -1098,6 +1104,13 @@ pub enum SlashOutcome {
     SetCaptureMode(Option<bool>),
 
     DebugHeights,
+
+    /// Chat-report the look -> file-id -> DAT -> mesh -> texture chain for
+    /// self (or the current target), so a field "no head" report is
+    /// diagnosable from a screenshot (kuluu-39fi).
+    ActorDiag {
+        use_target: bool,
+    },
 
     Screenshot {
         path: Option<String>,
@@ -2082,6 +2095,16 @@ fn parse_overlay(rest: &str) -> SlashOutcome {
     SlashOutcome::Overlay(op)
 }
 
+fn parse_actordiag(rest: &str) -> SlashOutcome {
+    match rest.trim().to_ascii_lowercase().as_str() {
+        "" | "self" => SlashOutcome::ActorDiag { use_target: false },
+        "t" | "target" => SlashOutcome::ActorDiag { use_target: true },
+        other => SlashOutcome::SystemMessage(format!(
+            "/actordiag: unknown `{other}` -- usage: /actordiag [target]"
+        )),
+    }
+}
+
 fn parse_zone_change(rest: &str) -> SlashOutcome {
     let trimmed = rest.trim();
     if trimmed.is_empty() {
@@ -2100,20 +2123,22 @@ fn parse_mhexit(rest: &str, zone_id: Option<u16>) -> SlashOutcome {
     let slot: u8 = parts.next().and_then(|s| s.parse().ok()).unwrap_or(1);
 
     let kind = match first {
-        None | Some("home") | Some("") => crate::state::MogHouseExit::Home {
+        None | Some("home") | Some("") => kuluu_session::state::MogHouseExit::Home {
             exit_bit: zone_id.and_then(home_region_bit_for_zone).unwrap_or(0),
         },
-        Some("1f") | Some("mog1f") => crate::state::MogHouseExit::Mog1F,
-        Some("2f") | Some("mog2f") => crate::state::MogHouseExit::Mog2F,
-        Some("garden") | Some("moggarden") => crate::state::MogHouseExit::MogGarden,
-        Some("sandoria") | Some("sandy") => crate::state::MogHouseExit::Sandoria { slot },
-        Some("bastok") => crate::state::MogHouseExit::Bastok { slot },
-        Some("windurst") | Some("windy") => crate::state::MogHouseExit::Windurst { slot },
-        Some("jeuno") => crate::state::MogHouseExit::Jeuno { slot },
-        Some("whitegate") | Some("aht_urhgan") => crate::state::MogHouseExit::Whitegate { slot },
-        Some("adoulin") => crate::state::MogHouseExit::Adoulin { slot },
+        Some("1f") | Some("mog1f") => kuluu_session::state::MogHouseExit::Mog1F,
+        Some("2f") | Some("mog2f") => kuluu_session::state::MogHouseExit::Mog2F,
+        Some("garden") | Some("moggarden") => kuluu_session::state::MogHouseExit::MogGarden,
+        Some("sandoria") | Some("sandy") => kuluu_session::state::MogHouseExit::Sandoria { slot },
+        Some("bastok") => kuluu_session::state::MogHouseExit::Bastok { slot },
+        Some("windurst") | Some("windy") => kuluu_session::state::MogHouseExit::Windurst { slot },
+        Some("jeuno") => kuluu_session::state::MogHouseExit::Jeuno { slot },
+        Some("whitegate") | Some("aht_urhgan") => {
+            kuluu_session::state::MogHouseExit::Whitegate { slot }
+        }
+        Some("adoulin") => kuluu_session::state::MogHouseExit::Adoulin { slot },
         Some("auto") => match zone_id.and_then(home_region_bit_for_zone) {
-            Some(bit) => crate::state::MogHouseExit::from_bit_slot(bit, 1),
+            Some(bit) => kuluu_session::state::MogHouseExit::from_bit_slot(bit, 1),
             None => {
                 return SlashOutcome::SystemMessage(format!(
                     "/mhexit auto: zone {} isn't in the home-region table — \
@@ -2459,11 +2484,15 @@ fn render_debug_entity(arg: &str, entities: &[WireEntity], self_pos: WireVec3) -
             ));
         }
         Some(EntityLook::Door { size, .. }) => s.push_str(&format!(" door size={size}")),
-        Some(EntityLook::Transport { size }) => s.push_str(&format!(" transport size={size}")),
+        Some(EntityLook::Transport { size, .. }) => s.push_str(&format!(" transport size={size}")),
     }
+    // n/a = no General-block update has carried the byte yet (it rides UPDATE_HP).
+    let namevis = e
+        .name_vis
+        .map_or_else(|| "n/a".to_string(), |v| v.to_string());
     s.push('\n');
     s.push_str(&format!(
-        "  anim={} animsub={} status={}{}",
+        "  anim={} animsub={} status={} namevis={namevis}{}",
         e.animation,
         e.animationsub,
         e.status,
@@ -2618,11 +2647,7 @@ pub enum LightsOp {
 
     Enable(Option<bool>),
 
-    Threshold(f32),
-
-    Intensity(f32),
-
-    Range(f32),
+    Shadowed(u32),
 
     Flicker(Option<bool>),
 }
@@ -2644,31 +2669,22 @@ fn parse_lights(rest: &str) -> SlashOutcome {
             _ => Err(()),
         }
     };
-    let num = |a: &str| a.parse::<f32>().ok().filter(|v| v.is_finite() && *v >= 0.0);
 
     match verb.as_str() {
         "on" | "off" | "toggle" => match toggle(&verb) {
             Ok(v) => SlashOutcome::SetLights(LightsOp::Enable(v)),
             Err(()) => unreachable!(),
         },
-        "threshold" | "thresh" => match num(arg) {
-            Some(v) => SlashOutcome::SetLights(LightsOp::Threshold(v)),
-            None => SlashOutcome::SystemMessage(format!("/lights threshold: bad value `{arg}`")),
-        },
-        "intensity" | "int" => match num(arg) {
-            Some(v) => SlashOutcome::SetLights(LightsOp::Intensity(v)),
-            None => SlashOutcome::SystemMessage(format!("/lights intensity: bad value `{arg}`")),
-        },
-        "range" => match num(arg) {
-            Some(v) => SlashOutcome::SetLights(LightsOp::Range(v)),
-            None => SlashOutcome::SystemMessage(format!("/lights range: bad value `{arg}`")),
+        "shadowed" | "shadows" => match arg.parse::<u32>() {
+            Ok(v) => SlashOutcome::SetLights(LightsOp::Shadowed(v)),
+            Err(_) => SlashOutcome::SystemMessage(format!("/lights shadowed: bad value `{arg}`")),
         },
         "flicker" => match toggle(arg) {
             Ok(v) => SlashOutcome::SetLights(LightsOp::Flicker(v)),
             Err(()) => SlashOutcome::SystemMessage(format!("/lights flicker: bad value `{arg}`")),
         },
         other => SlashOutcome::SystemMessage(format!(
-            "/lights: unknown `{other}` (use on|off|threshold N|intensity N|range N|flicker on|off)"
+            "/lights: unknown `{other}` (use on|off|shadowed N|flicker on|off)"
         )),
     }
 }
@@ -2966,7 +2982,7 @@ fn parse_look(
              main=0x{main:04X} sub=0x{sub:04X} ranged=0x{ranged:04X}"
         ),
         Some(EntityLook::Door { size, .. }) => format!("look: DOOR (size={size})"),
-        Some(EntityLook::Transport { size }) => format!("look: TRANSPORT (size={size})"),
+        Some(EntityLook::Transport { size, .. }) => format!("look: TRANSPORT (size={size})"),
     };
     SlashOutcome::SystemMessage(format!("/look [{name}] {body}"))
 }
@@ -3287,6 +3303,7 @@ mod tests {
             heading: 0,
             hp_pct: None,
             bt_target_id: 0,
+            name_vis: None,
             face_target: 0,
             claim_id: 0,
             speed: 0,
@@ -3297,6 +3314,7 @@ mod tests {
             mount: None,
             status: 0,
             char_flags: Default::default(),
+            monstrosity: false,
         }
     }
 
@@ -3549,6 +3567,9 @@ mod tests {
         }
     }
 
+    // The Widescan variant only exists under debug_assertions (the /widescan
+    // command is dev-only), so this guard compiles in the same profile.
+    #[cfg(debug_assertions)]
     #[test]
     fn ws_alias_stays_weaponskill() {
         assert!(
@@ -4050,7 +4071,7 @@ mod tests {
         }
 
         // 0x1CE is the Lower Jeuno food-shop interior in
-        // research/cexi-docs/zone/subareas.md:123.
+        // research/cexi-docs/zone/subareas.md "Worked example — Lower Jeuno (`ROM/1/41`, zone 245)".
         for s in ["/subarea 462", "/subarea 0x1CE", "/subareas 0x1ce"] {
             match parse_slash_t(s, &empty_entities(), pos, None, None) {
                 SlashOutcome::SubArea {
@@ -4718,7 +4739,7 @@ mod tests {
             SlashOutcome::Command(AgentCommand::MogHouseExit { kind }) => {
                 assert!(matches!(
                     kind,
-                    crate::state::MogHouseExit::Home { exit_bit: 0 }
+                    kuluu_session::state::MogHouseExit::Home { exit_bit: 0 }
                 ));
                 assert_eq!(kind.wire_pair(), (0, 0));
             }
@@ -4741,7 +4762,7 @@ mod tests {
             SlashOutcome::Command(AgentCommand::MogHouseExit { kind }) => {
                 assert!(matches!(
                     kind,
-                    crate::state::MogHouseExit::Bastok { slot: 2 }
+                    kuluu_session::state::MogHouseExit::Bastok { slot: 2 }
                 ));
                 assert_eq!(kind.wire_pair(), (2, 2));
             }
@@ -4772,7 +4793,7 @@ mod tests {
             SlashOutcome::Command(AgentCommand::MogHouseExit { kind }) => {
                 assert!(matches!(
                     kind,
-                    crate::state::MogHouseExit::Sandoria { slot: 1 }
+                    kuluu_session::state::MogHouseExit::Sandoria { slot: 1 }
                 ));
                 assert_eq!(kind.wire_pair(), (1, 1));
             }
@@ -5229,6 +5250,42 @@ mod tests {
                 "`/overlay {bad}` must explain itself, not act"
             );
         }
+    }
+
+    #[test]
+    fn actordiag_targets_self_by_default_and_the_target_on_request() {
+        for me in ["", "  ", "self"] {
+            assert!(matches!(
+                parse_actordiag(me),
+                SlashOutcome::ActorDiag { use_target: false }
+            ));
+        }
+        for tgt in ["t", "target", "TARGET"] {
+            assert!(matches!(
+                parse_actordiag(tgt),
+                SlashOutcome::ActorDiag { use_target: true }
+            ));
+        }
+        assert!(matches!(
+            parse_actordiag("wat"),
+            SlashOutcome::SystemMessage(_)
+        ));
+    }
+
+    #[test]
+    fn lights_shadowed_takes_a_count_and_rejects_junk() {
+        assert!(matches!(
+            parse_lights("shadowed 3"),
+            SlashOutcome::SetLights(LightsOp::Shadowed(3))
+        ));
+        assert!(matches!(
+            parse_lights("shadowed lots"),
+            SlashOutcome::SystemMessage(_)
+        ));
+        assert!(matches!(
+            parse_lights("threshold 1.2"),
+            SlashOutcome::SystemMessage(_)
+        ));
     }
 
     #[test]

@@ -247,7 +247,7 @@ pub fn target_name(snap: &kuluu_snapshot::SceneSnapshot, target_id: u32) -> Stri
 /// Whether View Wares is live for `target_id`. The target's own bazaar flag is
 /// the retail gate: LSB sets `Flags1.BazaarFlag` from `PChar->hasBazaar()`, i.e.
 /// from having any priced inventory slot
-/// (vendor/server/src/map/packets/char_update.cpp:318). Shared with the input
+/// (vendor/server/src/map/packets/char_update.cpp CCharUpdatePacket::updateWith). Shared with the input
 /// layer so the rendered state and the key that fires cannot disagree.
 pub fn wares_enabled(snap: &kuluu_snapshot::SceneSnapshot, target_id: u32) -> bool {
     snap.entities

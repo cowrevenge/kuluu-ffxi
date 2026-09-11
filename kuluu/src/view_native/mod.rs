@@ -2,9 +2,11 @@ pub mod bridge;
 pub mod camera_collision;
 pub mod collision_bvh;
 pub mod debug_heights;
+pub mod entity_list_hud;
 pub mod exit_watchdog;
 mod gamepad_input;
 pub mod input;
+pub mod key_drive;
 pub mod key_items;
 pub mod launcher_backdrop;
 // 0.19 deprecated the feathers `*_bundle` spawn fns in favor of BSN scenes;
@@ -24,6 +26,7 @@ pub mod sub_area_report;
 pub mod sun_occlusion;
 pub mod target_list_hud;
 pub mod text_input;
+pub mod walker;
 #[allow(deprecated)]
 pub mod widgets;
 pub mod zone_transition;
@@ -186,7 +189,7 @@ pub enum AppPhase {
 }
 
 #[derive(Resource, Clone)]
-pub(crate) struct SessionPorts {
+pub struct SessionPorts {
     pub auth_port: u16,
     pub data_port: u16,
     pub view_port: u16,
@@ -248,9 +251,15 @@ pub(crate) fn insert_dat_roots(
     sink.put(kuluu_render::cutscene::CutsceneFadeDatRoot(
         dat_root.clone(),
     ));
+    sink.put(kuluu_render::scheduler_runtime::ActionDatRoot(
+        dat_root.clone(),
+    ));
     // Re-arm the latched spell-DAT load so a settings-screen DAT reload doesn't
     // serve suffixes from the previous install (kuluu-08rh).
     sink.put(kuluu_render::ffxi_actor_render::SpellSuffixCache::default());
+    // Same latch on the map DLL: without this the map calibration and the
+    // Change Map catalog keep answering from the previous install (kuluu-u8p1).
+    sink.put(kuluu_render::minimap::retail::MapCalibration::default());
     sink.put(DatRootRes(dat_root));
 }
 
@@ -316,6 +325,9 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
     // (native ⌃⌘F stays Composited); the Metal HUD's Composited/Direct flag then isolates whether
     // the periodic frame spikes are WindowServer compositor pacing.
     let force_exclusive = std::env::var_os("FFXI_FULLSCREEN").is_some();
+    app.insert_resource(kuluu_render::graphics_settings::FullscreenOverride(
+        force_exclusive,
+    ));
     let want_fullscreen = force_exclusive || loaded_graphics.fullscreen;
     let window_mode = if !want_fullscreen {
         bevy::window::WindowMode::Windowed
@@ -341,6 +353,13 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
     // Before DefaultPlugins so these pools win get_or_init and TaskPoolPlugin's
     // create_default_pools no-ops (kuluu-3q8t).
     qos::init_task_pools_with_qos();
+    // Bevy's DefaultPlugins add DlssInitPlugin themselves under `dlss` (ahead
+    // of RenderPlugin, whose build consumes its raw-Vulkan callbacks), but it
+    // panics without the project id resource — so insert that first. Runtime
+    // support is reported via DlssSuperResolutionSupported, which kuluu-render's
+    // availability probe folds into the graphics menu.
+    #[cfg(feature = "dlss")]
+    app.insert_resource(kuluu_render::graphics::dlss::project_id());
     let mut plugins = DefaultPlugins.set(WindowPlugin {
         primary_window: Some(Window {
             title: format!("kuluu — {server}"),
@@ -373,6 +392,11 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
             plugin_group.disable::<bevy::render::pipelined_rendering::PipelinedRenderingPlugin>();
     }
     app.add_plugins(plugin_group);
+    app.add_plugins(walker::WalkerPlugin);
+    app.add_systems(
+        Update,
+        walker::debug::sync_field_debug_enabled.run_if(in_state(AppPhase::InGame)),
+    );
 
     // Persisted audio settings: /debug Sound off (or /sound off) writes to
     // audio.json alongside graphics.json; restarts read it back here. CLI
@@ -505,13 +529,15 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
         .init_resource::<CameraAutoRecenter>()
         .init_resource::<HeadingTurnAccum>()
         .init_resource::<LocalPlayerPrediction>()
+        .init_resource::<entity_list_hud::EntityListScroll>()
+        .init_resource::<input::DispatchLocals>()
         .init_resource::<text_input::CaptureMode>()
         .init_resource::<collision_bvh::ZoneCollisionBvh>()
         .insert_resource(ports)
         .insert_resource(RelayListen(relay_listen));
     insert_dat_roots(&mut app, dat_root);
-    if let Some(store) = kuluu::overlay_store::default_store() {
-        app.insert_resource(kuluu::overlay_store::OverlayStoreRes { store });
+    if let Some(store) = crate::overlay_store::default_store() {
+        app.insert_resource(crate::overlay_store::OverlayStoreRes { store });
     }
     #[cfg(unix)]
     app.insert_resource(AgentListen(agent_listen));
@@ -562,6 +588,7 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
         (
             target_list_hud::spawn_target_list_hud,
             perf_hud::spawn_perf_hud,
+            entity_list_hud::spawn_entity_list_hud,
         ),
     );
     app.add_systems(
@@ -582,6 +609,7 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
             perf_hud::update_perf_monitor,
             perf_hud::update_perf_graph,
             target_list_hud::update_target_list_hud,
+            entity_list_hud::update_entity_list_hud,
         )
             .chain()
             .run_if(in_state(AppPhase::InGame)),
@@ -591,6 +619,8 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
         (
             perf_hud::apply_perf_visibility,
             target_list_hud::apply_target_list_visibility,
+            entity_list_hud::apply_entity_list_visibility,
+            entity_list_hud::entity_list_wheel_system,
         )
             .run_if(in_state(AppPhase::InGame)),
     );
@@ -600,12 +630,17 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
         (
             despawn_ingame_entities,
             drain_entity_prediction,
+            drain_motion_probe,
+            drain_entity_table,
+            input::reset_local_movement,
+            kuluu_render::camera::reset_camera_follow,
             drain_mzb_load_state,
             drain_mmb_load_state,
             drain_particle_simulator,
             drain_zone_sfx,
             drain_weather_particles,
             drain_cutscene_state,
+            kuluu_render::hud::death_prompt::drain_death_prompt_selection,
             key_items::drain_key_items_viewed,
         ),
     );
@@ -723,8 +758,13 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
         FixedUpdate,
         (
             input::dispatch_movement_system,
+            // Breaks a persistent wire-z wedge (kuluu-mo4q): runs right after
+            // dispatch so it sees this tick's held height, before the render
+            // smoother follows prediction.
             input::recover_self_ground_system,
             input::apply_self_prediction_system,
+            // FFXI_STAIR_CAPTURE: one JSON position line per tick (no-op unless set).
+            input::stair_capture_system,
         )
             .chain()
             .run_if(in_state(AppPhase::InGame))
@@ -749,7 +789,7 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
     app.add_systems(
         Update,
         collision_bvh::build_zone_collision_bvh_system
-            .before(camera_collision::clamp_chase_camera_to_collision)
+            .before(camera_collision::resolve_camera)
             .run_if(in_state(AppPhase::InGame).or_else(in_state(AppPhase::Launcher))),
     );
     app.add_systems(
@@ -760,8 +800,7 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
     );
     app.add_systems(
         Update,
-        camera_collision::clamp_chase_camera_to_collision
-            .after(kuluu_render::chase_camera_system)
+        camera_collision::resolve_camera
             .before(kuluu_render::nameplate_billboard::update_nameplate_billboards_system)
             .run_if(in_state(AppPhase::InGame)),
     );
@@ -769,14 +808,14 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
     app.add_systems(
         Update,
         camera_collision::draw_camera_collision_debug
-            .after(camera_collision::clamp_chase_camera_to_collision)
+            .after(camera_collision::resolve_camera)
             .run_if(in_state(AppPhase::InGame)),
     );
 
     app.add_systems(
         PostUpdate,
         nameplate_occlude::occlude_nameplates_system
-            .after(camera_collision::clamp_chase_camera_to_collision)
+            .after(camera_collision::resolve_camera)
             .run_if(in_state(AppPhase::InGame)),
     );
 
@@ -859,6 +898,10 @@ fn despawn_ingame_entities(
         ResMut<MzbCollisionGeometry>,
         ResMut<ZoneAreaMap>,
         ResMut<ZoneChunkLightMap>,
+        ResMut<kuluu_render::transport::VoyageState>,
+        ResMut<kuluu_render::zone_point_lights::ZonePointLights>,
+        ResMut<kuluu_render::zone_point_lights::ActiveSceneLights>,
+        ResMut<kuluu_render::zone_doors::ZoneDoors>,
     ),
     mut last_zone: ResMut<LastAutoLoadedZone>,
     mut last_atmo: ResMut<LastAtmosphereZone>,
@@ -887,6 +930,10 @@ fn despawn_ingame_entities(
     *zone_geom.0 = MzbCollisionGeometry::default();
     *zone_geom.1 = ZoneAreaMap::default();
     *zone_geom.2 = ZoneChunkLightMap::default();
+    *zone_geom.3 = kuluu_render::transport::VoyageState::default();
+    *zone_geom.4 = kuluu_render::zone_point_lights::ZonePointLights::default();
+    *zone_geom.5 = kuluu_render::zone_point_lights::ActiveSceneLights::default();
+    *zone_geom.6 = kuluu_render::zone_doors::ZoneDoors::default();
     last_zone.file_id = None;
     last_atmo.file_id = None;
 
@@ -930,8 +977,16 @@ fn drain_cutscene_state(
     hud_hidden.cutscene = false;
 }
 
+fn drain_entity_table(mut table: ResMut<kuluu_render::entity_table::EntityTable>) {
+    *table = default();
+}
+
 fn drain_entity_prediction(mut prediction: ResMut<kuluu_render::combat_stance::EntityPrediction>) {
     prediction.by_id.clear();
+}
+
+fn drain_motion_probe(mut probe: ResMut<kuluu_render::combat_stance::MotionProbe>) {
+    probe.drain();
 }
 
 fn drain_mzb_load_state(
@@ -1026,6 +1081,57 @@ fn return_to_launcher_on_disconnect(
     next_phase.set(AppPhase::Launcher);
 }
 
+// `insert_dat_roots` is the one place a consumer's root is wired; a consumer that is missing
+// from it silently keeps reading whatever it opened for itself (kuluu-1tr2, kuluu-051). The
+// scheduler runtime's root is the load-bearing case: without it every action/emote DAT read
+// falls back to re-opening the install per cache miss.
+#[cfg(test)]
+mod dat_root_wiring_tests {
+    use super::{insert_dat_roots, DatRootRes};
+    use bevy::prelude::*;
+    use std::sync::Arc;
+
+    #[test]
+    fn insert_dat_roots_hands_the_scheduler_runtime_the_shared_root() {
+        let mut app = App::new();
+        insert_dat_roots(&mut app, None);
+        assert!(
+            app.world()
+                .get_resource::<kuluu_render::scheduler_runtime::ActionDatRoot>()
+                .is_some(),
+            "ActionDatRoot must be wired even when there is no install"
+        );
+
+        let Some(root) = ffxi_dat::archive::open_test_install() else {
+            return;
+        };
+        let root = Arc::new(root);
+        insert_dat_roots(&mut app, Some(root.clone()));
+
+        let action_root = app
+            .world()
+            .resource::<kuluu_render::scheduler_runtime::ActionDatRoot>()
+            .0
+            .clone()
+            .expect("the wired root reaches the scheduler runtime");
+        assert!(
+            Arc::ptr_eq(&action_root, &root),
+            "the scheduler runtime must share the launcher's root, not open its own"
+        );
+
+        let shared = app
+            .world()
+            .resource::<DatRootRes>()
+            .0
+            .clone()
+            .expect("DatRootRes is wired");
+        assert!(
+            Arc::ptr_eq(&action_root, &shared),
+            "every consumer reads one install"
+        );
+    }
+}
+
 #[cfg(test)]
 mod disconnect_tests {
     use super::{classify_disconnect_reason, DisconnectKind};
@@ -1092,6 +1198,10 @@ mod zone_teardown_tests {
         world.init_resource::<super::MzbCollisionGeometry>();
         world.init_resource::<super::ZoneAreaMap>();
         world.init_resource::<super::ZoneChunkLightMap>();
+        world.init_resource::<kuluu_render::transport::VoyageState>();
+        world.init_resource::<kuluu_render::zone_point_lights::ZonePointLights>();
+        world.init_resource::<kuluu_render::zone_point_lights::ActiveSceneLights>();
+        world.init_resource::<kuluu_render::zone_doors::ZoneDoors>();
         world.init_resource::<super::LastAutoLoadedZone>();
         world.init_resource::<super::LastAtmosphereZone>();
         world.init_resource::<super::BgmSlots>();
@@ -1103,6 +1213,47 @@ mod zone_teardown_tests {
         world.init_resource::<kuluu_render::combat_stance::EntityMotion>();
         world.init_resource::<kuluu_render::combat_stance::AnimationBlends>();
         world
+    }
+
+    #[test]
+    fn teardown_clears_zone_and_interior_lights() {
+        use kuluu_render::zone_point_lights::{ActiveSceneLights, ZonePointLight, ZonePointLights};
+        let mut world = world_with_teardown_resources();
+        let light = ZonePointLight {
+            light_id: u32::from_le_bytes(*b"l_01"),
+            world_pos: Vec3::ZERO,
+            color: Vec3::ONE,
+            range: 10.0,
+            attenuation: 1.0,
+        };
+        world.insert_resource(ZonePointLights {
+            file_id: Some(348),
+            sub_area_file_id: Some(585),
+            lights: vec![light],
+        });
+        world.insert_resource(ActiveSceneLights {
+            lights: vec![light],
+        });
+        world.run_system_once(despawn_ingame_entities).unwrap();
+        let sources = world.resource::<ZonePointLights>();
+        assert_eq!(sources.file_id, None);
+        assert_eq!(sources.sub_area_file_id, None);
+        assert!(sources.lights.is_empty());
+        assert!(world.resource::<ActiveSceneLights>().lights.is_empty());
+    }
+
+    #[test]
+    fn teardown_clears_entity_table_identity() {
+        let mut world = World::new();
+        world.init_resource::<kuluu_render::entity_table::EntityTable>();
+        world
+            .resource_mut::<kuluu_render::entity_table::EntityTable>()
+            .set_self_id(Some(7));
+        world.run_system_once(super::drain_entity_table).unwrap();
+        let mut table = world.resource_mut::<kuluu_render::entity_table::EntityTable>();
+        assert!(table.is_empty());
+        assert_eq!(table.self_id(), None);
+        assert!(table.changed_ids().is_empty());
     }
 
     #[test]
@@ -1178,19 +1329,34 @@ fn bridge_connecting(
         state_rx,
         cmd_tx,
         event_tx,
+        entity_changes_rx,
         session_task: _,
         folder_task: _,
-    } = spawn_session_with_reactor(cfg, ReactorConfig::default());
+    } = spawn_session_with_reactor(cfg, ReactorConfig::player());
     let event_rx = event_tx.subscribe();
+
+    // Focus-less GUI driving (kuluu-0pof): the socket writes movement/heights
+    // requests into this handle; GUI systems read it. Always present so input
+    // systems can depend on it even when no socket is listening.
+    let debug_ctrl = kuluu_session::debug_control::DebugControl::new_shared();
+    commands.insert_resource(DebugControlHandle(debug_ctrl.clone()));
 
     #[cfg(feature = "relay")]
     if let Some(addr) = relay.0 {
         let state_rx_relay = state_rx.clone();
         let event_tx_relay = event_tx.clone();
         let cmd_tx_relay = cmd_tx.clone();
+        // Viewer Screenshot commands land on the shared handle, not the session.
+        let debug_ctrl_relay = Some(debug_ctrl.clone());
         runtime.0.spawn(async move {
-            if let Err(err) =
-                crate::relay::serve(addr, state_rx_relay, event_tx_relay, cmd_tx_relay).await
+            if let Err(err) = kuluu_session::relay::serve(
+                addr,
+                state_rx_relay,
+                event_tx_relay,
+                cmd_tx_relay,
+                debug_ctrl_relay,
+            )
+            .await
             {
                 tracing::warn!(error = %err, "relay listener exited");
             }
@@ -1199,11 +1365,24 @@ fn bridge_connecting(
     #[cfg(not(feature = "relay"))]
     let _ = relay;
 
-    // Focus-less GUI driving (kuluu-0pof): the socket writes movement/heights
-    // requests into this handle; GUI systems read it. Always present so input
-    // systems can depend on it even when no socket is listening.
-    let debug_ctrl = kuluu_session::debug_control::DebugControl::new_shared();
-    commands.insert_resource(DebugControlHandle(debug_ctrl.clone()));
+    // Stair-capture drive channel (FFXI_STAIR_DRIVE): always present so the input
+    // path can depend on it; only listens when the env var names an address.
+    let stair_drive = std::sync::Arc::new(std::sync::Mutex::new(
+        crate::view_native::input::StairDrive::default(),
+    ));
+    commands.insert_resource(crate::view_native::input::StairDriveHandle(
+        stair_drive.clone(),
+    ));
+    if let Ok(spec) = std::env::var("FFXI_STAIR_DRIVE") {
+        let addr: std::net::SocketAddr = spec.parse().unwrap_or_else(|_| {
+            let port: u16 = spec.trim_start_matches(':').parse().unwrap_or(9537);
+            std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, port))
+        });
+        let drive = stair_drive.clone();
+        runtime.0.spawn(async move {
+            crate::view_native::input::serve_stair_drive(addr, drive).await;
+        });
+    }
 
     #[cfg(unix)]
     if let Some(arg) = agent.0.clone() {
@@ -1230,7 +1409,12 @@ fn bridge_connecting(
         });
     }
 
-    commands.insert_resource(NativeSource::new(&runtime.0, state_rx, event_rx));
+    commands.insert_resource(NativeSource::new(
+        &runtime.0,
+        state_rx,
+        event_rx,
+        entity_changes_rx,
+    ));
     commands.insert_resource(CommandTx(cmd_tx));
 
     commands.insert_resource(SessionEventTx(event_tx));
@@ -1240,5 +1424,5 @@ fn bridge_connecting(
 
 #[derive(Resource)]
 pub(crate) struct SessionEventTx(
-    #[allow(dead_code)] pub tokio::sync::broadcast::Sender<crate::state::AgentEvent>,
+    #[allow(dead_code)] pub tokio::sync::broadcast::Sender<kuluu_session::state::AgentEvent>,
 );

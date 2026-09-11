@@ -9,8 +9,8 @@ pub const EARTH_SECS_PER_VANA_HOUR: u64 = 144;
 
 pub const EARTH_SECS_PER_VANA_DAY: u64 = EARTH_SECS_PER_VANA_HOUR * 24;
 
-// vendor/server/src/common/vanadiel_clock.h:40-42 — week = 8 Vana days,
-// month = 30, year = 360; vendor/server/src/common/vana_time.h:129-135 —
+// vendor/server/src/common/vanadiel_clock.h vanadiel_clock week_ratio — week = 8 Vana days,
+// month = 30, year = 360; vendor/server/src/common/vana_time.h get_month —
 // get_year counts years since 886.
 pub const VANA_DAYS_PER_WEEK: u64 = 8;
 pub const VANA_DAYS_PER_MONTH: u64 = 30;
@@ -61,7 +61,7 @@ impl VanaWeekday {
     // Index of this day's element in the canonical FFXI element order
     // Fire, Ice, Wind, Earth, Lightning, Water, Light, Dark (ffxi-proto
     // decode.rs def_elem). The day-of-week orb sprite is
-    // DAY_ORB_BASE_INDEX + this (research/xim/.../ui/Compass.kt:43-54).
+    // DAY_ORB_BASE_INDEX + this (research/xim/src/jsMain/kotlin/xim/poc/ui/Compass.kt drawClock dayOfWeekIndex).
     pub fn element_index(self) -> usize {
         match self {
             Self::Firesday => 0,
@@ -85,9 +85,9 @@ pub struct VanaDate {
 }
 
 impl VanaDate {
-    // vendor/server/src/common/vana_time.h:106-143 calendar getters over the
-    // vendor/server/src/common/vanadiel_clock.h:35-42 ratios. LSB's
-    // get_monthday/get_month ceil partial days/months (vana_time.h:118,126),
+    // vendor/server/src/common/vana_time.h get_hour calendar getters over the
+    // vendor/server/src/common/vanadiel_clock.h vanadiel_clock millisecond_ratio ratios. LSB's
+    // get_monthday/get_month ceil partial days/months (vana_time.h,126),
     // which transiently report the prior day/month during the exact boundary
     // second; floor+1 agrees at every other instant.
     pub fn from_earth_unix(earth_unix_secs: u64) -> Self {
@@ -107,8 +107,8 @@ pub fn vana_minutes_since_epoch(earth_unix_secs: u64) -> u64 {
     earth_since_vana.saturating_mul(25) / 60
 }
 
-// research/xim EnvironmentManager.kt:92-94 getFullDayInterpolation: the clock-driven
-// color tracks (ParticleUpdaters.kt:172-183 ClockValueUpdater) sample at the fraction
+// research/xim EnvironmentManager.kt getFullDayInterpolation: the clock-driven
+// color tracks (ParticleUpdaters.kt ClockValueUpdater) sample at the fraction
 // of the Vana'diel day elapsed, in [0, 1). One Vana day = 1440 Vana minutes.
 pub fn full_day_fraction(earth_unix_secs: u64) -> f32 {
     let total_v_min = vana_minutes_since_epoch(earth_unix_secs);
@@ -116,10 +116,16 @@ pub fn full_day_fraction(earth_unix_secs: u64) -> f32 {
     (total_v_min % VANA_MINUTES_PER_DAY) as f32 / VANA_MINUTES_PER_DAY as f32
 }
 
+// research/XIClient/src/XIClient/source/World/XiDateTime.cpp XiDateTime::ConvertEarthSecondsToVanaHour
+// ConvertEarthSecondsToVanaHour — `(seconds % EARTH_SECONDS_PER_GAME_DAY) /
+// EARTH_SECONDS_PER_GAME_HOUR`, which is this same floor division.
+pub fn vana_hour(earth_unix_secs: u64) -> u64 {
+    (vana_minutes_since_epoch(earth_unix_secs) / 60) % 24
+}
+
 pub fn format_vana_time(earth_unix_secs: u64) -> String {
-    let total_v_min = vana_minutes_since_epoch(earth_unix_secs);
-    let v_minute = total_v_min % 60;
-    let v_hour = (total_v_min / 60) % 24;
+    let v_minute = vana_minutes_since_epoch(earth_unix_secs) % 60;
+    let v_hour = vana_hour(earth_unix_secs);
     format!("{v_hour}:{v_minute:02}")
 }
 
@@ -254,6 +260,19 @@ mod tests {
     }
 
     #[test]
+    fn vana_hour_matches_the_retail_floor_division() {
+        // research/XIClient/src/XIClient/source/World/XiDateTime.cpp XiDateTime::ConvertEarthSecondsToVanaHour.
+        for game_time in [0u64, 143, 144, 3455, 3456, 100_000, 1_234_567] {
+            let retail = (game_time % EARTH_SECS_PER_VANA_DAY) / EARTH_SECS_PER_VANA_HOUR;
+            assert_eq!(
+                vana_hour(EARTH_EPOCH_UNIX + game_time),
+                retail,
+                "game_time {game_time}"
+            );
+        }
+    }
+
+    #[test]
     fn vana_minutes_since_epoch_matches_formatter() {
         assert_eq!(vana_minutes_since_epoch(EARTH_EPOCH_UNIX), 0);
         assert_eq!(
@@ -285,7 +304,7 @@ mod tests {
 
     #[test]
     fn one_vana_day_advances_the_monthday() {
-        // vendor/server/scripts/globals/chocobo_raising.lua:52 — one Vana'diel
+        // vendor/server/scripts/globals/chocobo_raising.lua xi.chocoboRaising.dayLength — one Vana'diel
         // day is 3456 Earth seconds.
         assert_eq!(EARTH_SECS_PER_VANA_DAY, 3456);
         let date = VanaDate::from_earth_unix(EARTH_EPOCH_UNIX + EARTH_SECS_PER_VANA_DAY);
@@ -295,7 +314,7 @@ mod tests {
 
     #[test]
     fn one_vana_week_wraps_the_weekday() {
-        // vendor/server/scripts/globals/chocobo_raising.lua:51 — one Vana'diel
+        // vendor/server/scripts/globals/chocobo_raising.lua xi.chocoboRaising.dayLength — one Vana'diel
         // week is 27648 Earth seconds (8 days).
         let week_secs = VANA_DAYS_PER_WEEK * EARTH_SECS_PER_VANA_DAY;
         assert_eq!(week_secs, 27_648);

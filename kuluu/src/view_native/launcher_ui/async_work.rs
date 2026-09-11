@@ -7,7 +7,7 @@ use kuluu_session::lobby_client::{LobbyClient, LobbyHandle, MapHandoff};
 use kuluu_session::session::InitialState;
 use tokio::sync::oneshot;
 
-use crate::launcher::Selection;
+use crate::launcher::{Selection, KEY3_MUL, KEY3_XOR};
 
 use super::{
     ChangePasswordForm, CharCreateError, CharCreateForm, CharListData, CreateAccountErrorMsg,
@@ -16,8 +16,8 @@ use super::{
     ServerSelectForm,
 };
 
-use kuluu::launcher_store::{self, keyring_account_key, SavedAccount, KEYRING_SERVICE};
-use kuluu::secret_store::SecretStore;
+use crate::launcher_store::{self, keyring_account_key, SavedAccount, KEYRING_SERVICE};
+use crate::secret_store::SecretStore;
 
 fn save_on_success(server_name: &str, username: &str, password: &str, remember: bool) {
     let mut store = launcher_store::load();
@@ -277,7 +277,7 @@ async fn select_with_existing_handle(
 ) -> std::result::Result<ConnectOk, ConnectErr> {
     let mut key3 = [0u8; 20];
     for (i, b) in key3.iter_mut().enumerate() {
-        *b = ((i as u8).wrapping_mul(0x37)) ^ 0x5a;
+        *b = ((i as u8).wrapping_mul(KEY3_MUL)) ^ KEY3_XOR;
     }
     let handoff = handle
         .select(slot.char_id, &slot.name, key3)
@@ -310,7 +310,7 @@ async fn reopen_and_select(
     })?;
     let mut key3 = [0u8; 20];
     for (i, b) in key3.iter_mut().enumerate() {
-        *b = ((i as u8).wrapping_mul(0x37)) ^ 0x5a;
+        *b = ((i as u8).wrapping_mul(KEY3_MUL)) ^ KEY3_XOR;
     }
     let handoff = handle
         .select(slot.char_id, &slot.name, key3)
@@ -447,6 +447,7 @@ pub(super) fn spawn_char_create_task(
         nation: form.nation,
         size: form.size,
         face: form.face,
+        skip_intro_cs: u8::from(form.skip_intro_cs),
     };
 
     let (Some(handle), Some(auth)) = (handle, auth) else {

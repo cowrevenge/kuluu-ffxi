@@ -3,6 +3,8 @@ use std::path::{Path, PathBuf};
 
 use crate::{DatError, Result};
 
+const SUB_PATH_FILE_MASK: u16 = 0x7F;
+
 #[derive(Debug, Clone)]
 pub struct FTable {
     bytes: Box<[u8]>,
@@ -57,7 +59,7 @@ impl FTable {
         let file_dir = u16::from_le_bytes([raw[0], raw[1]]);
         Ok(SubPath {
             dir: file_dir >> 7,
-            file: (file_dir & 0x7F) as u8,
+            file: (file_dir & SUB_PATH_FILE_MASK) as u8,
         })
     }
 }

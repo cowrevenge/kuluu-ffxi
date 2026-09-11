@@ -16,7 +16,7 @@ pub struct InGameEntity;
 
 /// On an entity currently riding a mount, whose body its animation lifts clear
 /// of the ground the entity Transform still sits on. Anything anchored off that
-/// Transform has to answer for the difference — see [`crate::camera::nameplate_anchor_y`].
+/// Transform has to answer for the difference — see [`crate::camera::nameplate_anchor`].
 #[derive(Component, Debug, Clone, Copy)]
 pub struct MountedRider;
 
@@ -30,8 +30,7 @@ pub struct Nameplate {
 pub struct HpIndicator;
 
 /// Which MMB submesh a zone-geometry mesh entity came from. Attached by
-/// `dat_mmb` at spawn; read by the `hud::mesh_debug` hover panel and by
-/// `zone_lights` diagnostics.
+/// `dat_mmb` at spawn; read by the `hud::mesh_debug` hover panel.
 #[derive(Component, Debug, Clone)]
 pub struct MmbDebugInfo {
     pub file_id: u32,
@@ -77,3 +76,17 @@ pub struct MorphIn {
 
 #[derive(Component, Debug, Clone, Copy)]
 pub struct CameraOccluder;
+
+/// Fixed-tick render-position history used to smooth self movement between
+/// FixedUpdate ticks. `apply_self_prediction_system` writes the authoritative
+/// per-tick render position into `CurrRenderPos` (and rolls the old value
+/// into `PrevRenderPos`) instead of mutating Transform directly.
+/// `interpolate_self_transform_system` runs every render frame and lerps
+/// Transform.translation between the two using `Time<Fixed>::overstep_fraction`,
+/// so the camera (which reads Transform) never sees the 60Hz-quantized wobble
+/// that used to shake the world as you walked up stairs.
+#[derive(Component, Debug, Clone, Copy, Default)]
+pub struct PrevRenderPos(pub Vec3);
+
+#[derive(Component, Debug, Clone, Copy, Default)]
+pub struct CurrRenderPos(pub Vec3);

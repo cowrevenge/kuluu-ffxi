@@ -8,6 +8,7 @@ const RECV_DELTA_WINDOW: usize = 64;
 const SILENCE_GRACE: Duration = Duration::from_secs(3);
 const SEND_ACK_TOLERANCE: u16 = 2;
 const SEND_LAG_SPAN: u16 = 12;
+const SEQ_HALF_RANGE: u16 = 0x8000;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct NetStatsSample {
@@ -82,7 +83,7 @@ impl NetHealth {
 
     fn send_ack_health(&self, last_sent_seq: u16) -> u8 {
         let lag = last_sent_seq.wrapping_sub(self.server_ack_of_us);
-        let lag = if lag > 0x8000 { 0 } else { lag };
+        let lag = if lag > SEQ_HALF_RANGE { 0 } else { lag };
         if lag <= SEND_ACK_TOLERANCE {
             return 100;
         }

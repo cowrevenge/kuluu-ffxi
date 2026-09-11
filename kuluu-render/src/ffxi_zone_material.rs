@@ -9,15 +9,16 @@ use bevy::prelude::*;
 use bevy::render::render_asset::RenderAssets;
 use bevy::render::render_resource::{
     AsBindGroup, AsBindGroupError, BindGroupLayout, BindGroupLayoutEntry, BindingResources,
-    BindingType, Buffer, BufferBindingType, BufferDescriptor, BufferUsages, Face, FrontFace,
-    OwnedBindingResource, RenderPipelineDescriptor, SamplerBindingType, ShaderStages, ShaderType,
-    SpecializedMeshPipelineError, TextureSampleType, TextureViewDimension, UnpreparedBindGroup,
+    BindingType, Buffer, BufferBindingType, BufferDescriptor, BufferUsages, DepthBiasState, Face,
+    FrontFace, OwnedBindingResource, RenderPipelineDescriptor, SamplerBindingType, ShaderStages,
+    ShaderType, SpecializedMeshPipelineError, TextureSampleType, TextureViewDimension,
+    UnpreparedBindGroup,
 };
 use bevy::render::renderer::{RenderDevice, RenderQueue};
 use bevy::render::texture::{FallbackImage, GpuImage};
 use bevy::render::{Extract, ExtractSchedule, RenderApp};
 use bevy::shader::ShaderRef;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::skinned_ffxi_material::{write_uniform, FfxiLightingUniform, FfxiMaterialFlags};
@@ -26,7 +27,7 @@ static NEXT_ZONE_INSTANCE_ID: AtomicU64 = AtomicU64::new(1);
 
 /// `FfxiMaterialFlags::flags.z` as `zone_ffxi.wgsl` reads it: whether this mesh takes the
 /// camera's `DistanceFog`. Retail gates fog per generator on the CMoElem render-state word
-/// (research/XIClient CMoElem.cpp:542-543, bit 0x2000000 -> `D3DRS_FOGENABLE` false), which
+/// (research/XIClient CMoElem.cpp CMoElem::PrepDX, bit 0x2000000 -> `D3DRS_FOGENABLE` false), which
 /// the weat/ sky canopies mostly set — and must, since they sit thousands of units past every
 /// 0x2F fog distance, where fog would replace their colour outright.
 pub const ZONE_FLAG_FOGGED: f32 = 0.0;
@@ -55,12 +56,12 @@ pub struct ZoneGlobalLighting(pub FfxiLightingUniform);
 /// `MmbRenderState`, decoded from the u16 at subrecord offset 18).
 ///
 /// xim references:
-/// - ZoneMeshSection.kt:120-123 — blended zone meshes render at
+/// - ZoneMeshSection.kt parseMesh — blended zone meshes render at
 ///   `ZBiasLevel.High` (1), opaque at `Normal` (0).
-/// - GLDrawer.kt:198-201 — blended meshes disable depth write; GLDrawer.kt:216-219
-///   applies `glPolygonOffset(zBias * -1, 1)` to pull decals over the base terrain.
+/// - XIClient ZoneRenderer.cpp ZoneRenderer::RenderChunk2 — blended meshes disable depth write and use
+///   the integer `TransparentZBias` layer to pull decals over the base terrain.
 /// - Bit `0x2000` CLEAR enables back-face culling.
-/// - GLDrawer.kt:186 — front face is `CW` (D3D-era winding), flipped to `CCW`
+/// - GLDrawer.kt — front face is `CW` (D3D-era winding), flipped to `CCW`
 ///   when the instance is mirrored (`scale.x * scale.y * scale.z < 0`).
 ///
 /// These flow into `specialize` via `AsBindGroup::Data`, so each distinct
@@ -68,24 +69,24 @@ pub struct ZoneGlobalLighting(pub FfxiLightingUniform);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
 pub struct FfxiZoneMaterialKey {
     /// Cull back faces (`Face::Back`). FFXI winding is **clockwise** (D3D
-    /// convention, xim GLDrawer.kt:186), not Bevy's CCW default.
+    /// convention, xim GLDrawer.kt drawXim face), not Bevy's CCW default.
     pub back_face_culling: bool,
     /// Placement transform has a negative determinant (mirrored). Flips the
     /// effective winding, so `specialize` flips `front_face` back to CCW.
     /// Zone tiles are routinely placed mirrored in alternating checkerboard
     /// patterns, so this must be per-placement, not per-chunk.
     pub mirrored: bool,
-    /// 0 = Normal, 1 = High (blended decal layers).
+    /// Legacy D3D8 integer Z-bias layer; 0 for opaque and 8 for blended terrain.
     pub z_bias_level: u8,
     /// `false` for blended decals (they must not occlude later layers).
     pub depth_write: bool,
     /// Selects the generator (`CMoD3m`) texture-stage chain over the terrain
     /// (`ZoneRenderer`) one. Retail runs the same MMB vertex data through two
     /// different stage setups: zone placements take a single
-    /// `MODULATE2X(TEXTURE, CURRENT)` (ZoneRenderer.cpp:2453-2455), while a mesh
+    /// `MODULATE2X(TEXTURE, CURRENT)` (ZoneRenderer.cpp ZoneRenderer::ApplyDefaultRenderState), while a mesh
     /// hung off a generator takes `MODULATE2X(DIFFUSE, TEXTURE)` and then
-    /// `MODULATE2X(CURRENT, TFACTOR)` (CMoD3m.cpp:53-70 `NonZeroTwoTSS`, reached
-    /// for MMB links via CMoD3mElem.cpp:57-63 `DoMMBDraw`) — twice the gain, and
+    /// `MODULATE2X(CURRENT, TFACTOR)` (CMoD3m.cpp ZeroOneTSS `NonZeroTwoTSS`, reached
+    /// for MMB links via CMoD3mElem.cpp CMoD3mElem::OnDraw `DoMMBDraw`) — twice the gain, and
     /// its TFACTOR is this material's `tint`.
     pub generator_stage_chain: bool,
 }
@@ -106,12 +107,31 @@ impl FfxiZoneMaterialKey {
 /// `zone_ffxi.wgsl` matches on it.
 pub const GENERATOR_STAGE_CHAIN_DEF: &str = "FFXI_GENERATOR_STAGE_CHAIN";
 
+const WGPU_FORWARD_DECAL_BIAS: i32 = 1;
+const WGPU_FORWARD_DECAL_SLOPE_SCALE: f32 = 1.0;
+
+fn d3d8_z_bias(level: u8) -> DepthBiasState {
+    DepthBiasState {
+        constant: if level == 0 {
+            0
+        } else {
+            WGPU_FORWARD_DECAL_BIAS
+        },
+        slope_scale: if level == 0 {
+            0.0
+        } else {
+            WGPU_FORWARD_DECAL_SLOPE_SCALE
+        },
+        clamp: 0.0,
+    }
+}
+
 #[derive(Asset, TypePath, Clone, Debug)]
 pub struct FfxiZoneMaterial {
     pub base_color_texture: Option<Handle<Image>>,
     pub material_flags: FfxiMaterialFlags,
 
-    // research/xim ParticleGeneratorParser.kt:431-434 ToD color: a per-mesh RGB(setter) +
+    // research/xim ParticleGeneratorParser.kt sec3Handler ToD color: a per-mesh RGB(setter) +
     // alpha(multiplier) the weat/<type>/ ClockValueUpdaters drive over the Vana day. Folded
     // as a final modulate in the fragment shader. White (1,1,1,1) is the no-op default for
     // every other zone mesh — only the cloud/sun layers (zone_clouds.rs) write a live tint.
@@ -176,6 +196,60 @@ struct ZoneInstanceBuffers {
     last_uv: Vec4,
 }
 
+/// Zone materials whose instance buffers need (re)writing, gathered per frame
+/// in the main world: the tracked asset events plus the untracked tint/uv
+/// writers (`scroll_gen_water_uv`, `scroll_water_uv`, `drive_zone_clouds`) that
+/// skip `Assets::get_mut` to keep their bind groups. The extract-side upload
+/// visits only these instead of every material in the zone.
+#[derive(Resource, Default)]
+pub struct ZoneMaterialTouched {
+    marks: Vec<AssetId<FfxiZoneMaterial>>,
+    pending: Vec<AssetId<FfxiZoneMaterial>>,
+    dropped: Vec<u64>,
+    instance_of: HashMap<AssetId<FfxiZoneMaterial>, u64>,
+}
+
+impl ZoneMaterialTouched {
+    pub fn mark(&mut self, id: AssetId<FfxiZoneMaterial>) {
+        self.marks.push(id);
+    }
+}
+
+/// Folds this frame's marks and asset events into the list the next extract
+/// uploads; runs after `AssetEventSystems` so a material added this frame has
+/// its buffers before its bind group is prepared.
+fn collect_zone_material_touched(
+    mut events: MessageReader<AssetEvent<FfxiZoneMaterial>>,
+    materials: Res<Assets<FfxiZoneMaterial>>,
+    mut touched: ResMut<ZoneMaterialTouched>,
+) {
+    let touched = &mut *touched;
+    touched.dropped.clear();
+    touched.pending.clear();
+    touched.pending.append(&mut touched.marks);
+    for ev in events.read() {
+        match ev {
+            AssetEvent::Added { id } | AssetEvent::Modified { id } => {
+                let Some(mat) = materials.get(*id) else {
+                    continue;
+                };
+                if let Some(previous) = touched.instance_of.insert(*id, mat.instance_id) {
+                    if previous != mat.instance_id {
+                        touched.dropped.push(previous);
+                    }
+                }
+                touched.pending.push(*id);
+            }
+            AssetEvent::Removed { id } | AssetEvent::Unused { id } => {
+                if let Some(instance) = touched.instance_of.remove(id) {
+                    touched.dropped.push(instance);
+                }
+            }
+            AssetEvent::LoadedWithDependencies { .. } => {}
+        }
+    }
+}
+
 #[derive(Resource)]
 pub struct ZoneMaterialBuffers {
     lighting: Buffer,
@@ -200,11 +274,15 @@ impl FromWorld for ZoneMaterialBuffers {
 fn upload_zone_material_buffers(
     lighting: Extract<Res<ZoneGlobalLighting>>,
     materials: Extract<Res<Assets<FfxiZoneMaterial>>>,
+    touched: Extract<Res<ZoneMaterialTouched>>,
     device: Res<RenderDevice>,
     queue: Res<RenderQueue>,
     mut cache: ResMut<ZoneMaterialBuffers>,
 ) {
     write_uniform(&queue, &cache.lighting, &lighting.0);
+    for instance in &touched.dropped {
+        cache.instances.remove(instance);
+    }
 
     let uniform_buffer = |label: &'static str, size: std::num::NonZeroU64| {
         device.create_buffer(&BufferDescriptor {
@@ -215,9 +293,10 @@ fn upload_zone_material_buffers(
         })
     };
 
-    let mut live: HashSet<u64> = HashSet::with_capacity(materials.len());
-    for (_id, mat) in materials.iter() {
-        live.insert(mat.instance_id);
+    for id in &touched.pending {
+        let Some(mat) = materials.get(*id) else {
+            continue;
+        };
         match cache.instances.entry(mat.instance_id) {
             std::collections::hash_map::Entry::Occupied(mut e) => {
                 let inst = e.get_mut();
@@ -252,7 +331,6 @@ fn upload_zone_material_buffers(
             }
         }
     }
-    cache.instances.retain(|id, _| live.contains(id));
 }
 
 impl AsBindGroup for FfxiZoneMaterial {
@@ -409,12 +487,12 @@ impl Material for FfxiZoneMaterial {
 
         // xim renders FFXI zone geometry with back-face culling unless the
         // render-state word sets bit 0x2000 (two-sided decals, fences, foliage
-        // cards). FFXI winding is CLOCKWISE (D3D convention) — GLDrawer.kt:186
+        // cards). FFXI winding is CLOCKWISE (D3D convention) — GLDrawer.kt drawXim face
         // sets frontFace(CW), flipping to CCW for mirrored instances
         // (scale.x * scale.y * scale.z < 0). Using Bevy's CCW default here
         // culled every non-mirrored tile: inverted-checkerboard zone geometry.
         // Directional shadow views (UNCLIPPED_DEPTH_ORTHO is set only there —
-        // vendor/bevy_pbr/src/render/light.rs:2230) render single-sided walls
+        // vendor/bevy_pbr/src/render/light.rs check_views_lights_need_specialization) render single-sided walls
         // unculled: from the sun's viewpoint a wall's one sheet of triangles is
         // back-facing, so Face::Back culling writes no shadow-map depth — walls
         // cast nothing and sunlight leaks indoors (kuluu-lchx).
@@ -433,21 +511,19 @@ impl Material for FfxiZoneMaterial {
         };
 
         if let Some(ds) = descriptor.depth_stencil.as_mut() {
-            // GLDrawer.kt:198-201 — blended decals never write depth. Bevy's
+            // GLDrawer.kt drawXim — blended decals never write depth. Bevy's
             // transparent pass already disables depth write, but the prepass
             // (enable_prepass = true) would otherwise still write it; AND the
             // flag in rather than overwrite whatever the pass chose.
             ds.depth_write_enabled =
                 Some(ds.depth_write_enabled.unwrap_or(false) && rk.depth_write);
 
-            // GLDrawer.kt: glPolygonOffset(zBias * -1, 1) pulls ZBiasLevel::High
-            // decal layers toward the camera over the coplanar base terrain.
-            // Bevy uses a reversed-Z depth buffer (closer = larger depth,
-            // GreaterEqual compare), so both GL terms flip sign: slope +zBias,
-            // constant -1.
+            // D3D8 ZBIAS is a driver-defined ordering level, not a portable WGPU
+            // depth-unit magnitude. Preserve its forward ordering with the minimum
+            // reversed-Z constant and slope terms; applying the raw level pulls
+            // decals through neighboring terrain.
             if rk.z_bias_level > 0 {
-                ds.bias.slope_scale = rk.z_bias_level as f32;
-                ds.bias.constant = -1;
+                ds.bias = d3d8_z_bias(rk.z_bias_level);
             }
         }
 
@@ -488,7 +564,7 @@ fn update_zone_material_lighting(
     // a per-path correction.
     const AMBIENT_FLOOR: f32 = 0.12;
 
-    // research/xim EnvironmentSection.kt:130-131,168: the 0x2F landscape ambient is
+    // research/xim EnvironmentSection.kt getTerrainLightingParams,168: the 0x2F landscape ambient is
     // the authoritative per-hour base (dark at night). Use it directly when the
     // zone ships records; the GlobalAmbientLight amb_k/COLOR_BIAS path is the
     // no-DAT fallback (it re-derives from the atmosphere seed and inflates).
@@ -521,7 +597,7 @@ fn update_zone_material_lighting(
             _ => (Vec4::ZERO, Vec4::ZERO),
         }
     };
-    // research/xim EnvironmentSection.kt:163-164: zone geometry takes both terrain
+    // research/xim EnvironmentSection.kt getLightingParams: zone geometry takes both terrain
     // sun(dir0)+moon(dir1) diffuse lights. The DirectionalLight's `forward` is the
     // -to-celestial direction, so negate the stored to-sun/to-moon vectors to match.
     let (dir0_dir, dir0_color, dir1_dir, dir1_color) =
@@ -578,6 +654,7 @@ pub struct FfxiZoneMaterialPlugin;
 
 impl Plugin for FfxiZoneMaterialPlugin {
     fn build(&self, app: &mut App) {
+        bevy::shader::load_shader_library!(app, "directional_shadow.wgsl");
         embedded_asset!(app, "zone_ffxi.wgsl");
         embedded_asset!(app, "zone_ffxi_prepass.wgsl");
         app.add_plugins(MaterialPlugin::<FfxiZoneMaterial>::default())
@@ -586,8 +663,13 @@ impl Plugin for FfxiZoneMaterialPlugin {
             // (zone-render-headless) add only this plugin, and
             // update_zone_material_lighting reads the resource unconditionally.
             .init_resource::<crate::weather::ZoneDirectionalLighting>()
+            .init_resource::<ZoneMaterialTouched>()
             .add_systems(Update, update_zone_material_lighting)
-            .add_systems(Update, update_zone_material_time);
+            .add_systems(Update, update_zone_material_time)
+            .add_systems(
+                PostUpdate,
+                collect_zone_material_touched.after(bevy::asset::AssetEventSystems),
+            );
         if let Some(render_app) = app.get_sub_app_mut(RenderApp) {
             render_app.add_systems(ExtractSchedule, upload_zone_material_buffers);
         }
@@ -604,10 +686,97 @@ impl Plugin for FfxiZoneMaterialPlugin {
 mod tests {
     use super::*;
 
+    fn bare_material() -> FfxiZoneMaterial {
+        FfxiZoneMaterial::new(
+            None,
+            FfxiMaterialFlags { flags: Vec4::ZERO },
+            Vec4::ONE,
+            Vec4::ZERO,
+            AlphaMode::Opaque,
+            FfxiZoneMaterialKey::default(),
+        )
+    }
+
+    fn touched_app() -> App {
+        bevy::tasks::IoTaskPool::get_or_init(bevy::tasks::TaskPool::default);
+        let mut app = App::new();
+        app.add_plugins(bevy::asset::AssetPlugin::default())
+            .init_asset::<FfxiZoneMaterial>()
+            .init_resource::<ZoneMaterialTouched>()
+            .add_systems(
+                PostUpdate,
+                collect_zone_material_touched.after(bevy::asset::AssetEventSystems),
+            );
+        app
+    }
+
+    #[test]
+    fn touched_list_carries_asset_events_and_untracked_marks_for_one_frame() {
+        let mut app = touched_app();
+        let handle = app
+            .world_mut()
+            .resource_mut::<Assets<FfxiZoneMaterial>>()
+            .add(bare_material());
+        let instance = app
+            .world()
+            .resource::<Assets<FfxiZoneMaterial>>()
+            .get(&handle)
+            .unwrap()
+            .instance_id;
+
+        app.update();
+        let touched = app.world().resource::<ZoneMaterialTouched>();
+        assert_eq!(
+            touched.pending,
+            vec![handle.id()],
+            "Added lands on the list"
+        );
+        assert!(touched.dropped.is_empty());
+
+        app.update();
+        assert!(
+            app.world()
+                .resource::<ZoneMaterialTouched>()
+                .pending
+                .is_empty(),
+            "a quiet frame uploads nothing"
+        );
+
+        app.world_mut()
+            .resource_mut::<ZoneMaterialTouched>()
+            .mark(handle.id());
+        app.update();
+        assert_eq!(
+            app.world().resource::<ZoneMaterialTouched>().pending,
+            vec![handle.id()],
+            "an untracked writer's mark lands on the list"
+        );
+
+        drop(handle);
+        let mut dropped_seen = false;
+        for _ in 0..3 {
+            app.update();
+            dropped_seen |= app
+                .world()
+                .resource::<ZoneMaterialTouched>()
+                .dropped
+                .contains(&instance);
+        }
+        assert!(dropped_seen, "the last handle drop retires the instance");
+    }
+
     #[test]
     fn fog_flag_maps_the_generator_bit() {
         assert_eq!(zone_fog_flag(true), ZONE_FLAG_FOGGED);
         assert_eq!(zone_fog_flag(false), ZONE_FLAG_UNFOGGED);
+    }
+
+    #[test]
+    fn d3d8_transparent_bias_moves_forward_by_one_portable_step() {
+        let bias = d3d8_z_bias(ffxi_dat::mmb::TRANSPARENT_Z_BIAS_LEVEL);
+        assert_eq!(bias.constant, WGPU_FORWARD_DECAL_BIAS);
+        assert_eq!(bias.slope_scale, WGPU_FORWARD_DECAL_SLOPE_SCALE);
+        assert_eq!(bias.clamp, 0.0);
     }
 
     // The lane crosses into WGSL, where no type holds the two sides together: if the
@@ -654,8 +823,8 @@ mod tests {
     const ZONE_WGSL: &str = include_str!("zone_ffxi.wgsl");
     const ACTOR_WGSL: &str = include_str!("skinned_ffxi.wgsl");
 
-    // research/XIClient Rendering/ZoneRenderer.cpp:2453-2455 over the saturated
-    // fixed-function T&L diffuse of Direct3D8Manager.cpp:373,390,393,395.
+    // research/XIClient Rendering/ZoneRenderer.cpp ZoneRenderer::ApplyDefaultRenderState over the saturated
+    // fixed-function T&L diffuse of Direct3D8Manager.cpp Direct3D8Manager::InitializeRenderStateBlocks,390,393,395.
     fn d3d_zone_stage_chain(vertex_rgb: Vec3, irradiance: Vec3, texel: Vec3) -> Vec3 {
         let gain = wgsl_const(ZONE_WGSL, "D3D_MODULATE_2X");
         ((vertex_rgb * irradiance).min(Vec3::ONE) * texel * gain).min(Vec3::ONE)
@@ -732,7 +901,7 @@ mod tests {
         }
     }
 
-    // Direct3D8Manager.cpp:390,393,395 makes the lit vertex term a D3DCOLOR whichever stage
+    // Direct3D8Manager.cpp Direct3D8Manager::InitializeRenderStateBlocks,393,395 makes the lit vertex term a D3DCOLOR whichever stage
     // chain consumes it, so BOTH branches clamp it before the first texel — the outer
     // saturate the sweep above checks does not, on its own, catch a chain that feeds an
     // over-1.0 vertex colour straight into MODULATE2X.

@@ -2,7 +2,8 @@ use std::{fs, path::PathBuf};
 
 use anyhow::{bail, Context, Result};
 use lsb_scrape::{
-    parse_cpp_plain_enum, parse_int_lit, parse_packet_enum, write_u16_table, write_u16_u16_table,
+    check_scrape_count, parse_cpp_plain_enum, parse_int_lit, parse_packet_enum, write_u16_table,
+    write_u16_u16_table,
 };
 
 const LSB_BLOWFISH_CPP: &str = "../vendor/server/src/common/blowfish.cpp";
@@ -23,6 +24,19 @@ const SEARCH_BASE_KEY_LEN: usize = 24;
 // grabbed the wrong token, not that LSB retuned.
 const MIN_PLAUSIBLE_YALMS: f32 = 1.0;
 const MAX_PLAUSIBLE_YALMS: f32 = 1000.0;
+
+/// Smallest row count each scrape can return and still plausibly have parsed
+/// its source; the argument is the count the pinned vendor tree yields today
+/// (kuluu-m4yk).
+mod floor {
+    use lsb_scrape::scrape_floor;
+
+    pub const FISHING_ZONE_OFFSET: usize = scrape_floor(115);
+    pub const FISHING_MESSAGE_KIND: usize = scrape_floor(41);
+    pub const PACKET_NAMES_S2C: usize = scrape_floor(148);
+    pub const PACKET_NAMES_C2S: usize = scrape_floor(130);
+    pub const TCP_REQUEST_TYPE: usize = scrape_floor(8);
+}
 
 fn main() -> Result<()> {
     println!("cargo:rerun-if-changed=build.rs");
@@ -99,11 +113,18 @@ fn main() -> Result<()> {
     let fishing_kinds = parse_fish_message_offset_enum()?;
     write_fish_message_consts(&out_dir.join("fishing_message_consts.rs"), &fishing_kinds)?;
     write_fish_message_tables(&out_dir.join("fishing_message_tables.rs"), &fishing_kinds)?;
-    println!(
-        "ffxi-proto: scraped {} zone fishing-message offsets and {} message kinds",
+    check_scrape_count(
+        "zone fishing-message offsets",
+        LSB_ZONE_SCRIPTS_DIR,
         fishing_offsets.len(),
+        floor::FISHING_ZONE_OFFSET,
+    )?;
+    check_scrape_count(
+        "fishing message kinds",
+        LSB_FISHINGUTILS_H,
         fishing_kinds.len(),
-    );
+        floor::FISHING_MESSAGE_KIND,
+    )?;
 
     let pkt_s2c_src = fs::read_to_string(LSB_PACKET_S2C_H)
         .with_context(|| format!("reading {LSB_PACKET_S2C_H}"))?;
@@ -114,7 +135,12 @@ fn main() -> Result<()> {
         LSB_PACKET_S2C_H,
         &s2c_names,
     )?;
-    println!("ffxi-proto: scraped {} s2c packet names", s2c_names.len(),);
+    check_scrape_count(
+        "s2c packet names",
+        LSB_PACKET_S2C_H,
+        s2c_names.len(),
+        floor::PACKET_NAMES_S2C,
+    )?;
 
     let pkt_c2s_src = fs::read_to_string(LSB_PACKET_C2S_H)
         .with_context(|| format!("reading {LSB_PACKET_C2S_H}"))?;
@@ -125,9 +151,45 @@ fn main() -> Result<()> {
         LSB_PACKET_C2S_H,
         &c2s_names,
     )?;
-    println!("ffxi-proto: scraped {} c2s packet names", c2s_names.len(),);
+    check_scrape_count(
+        "c2s packet names",
+        LSB_PACKET_C2S_H,
+        c2s_names.len(),
+        floor::PACKET_NAMES_C2S,
+    )?;
 
     check_map_opcodes_against_lsb(&s2c_names, &c2s_names)?;
+    let event_position_opcode = c2s_names
+        .iter()
+        .find(|(_, name)| name == "EVENTENDXZY")
+        .context("EVENTENDXZY opcode")?
+        .0;
+    let mut event_wire = format!("pub const OPCODE: u16 = {event_position_opcode};\n");
+    for (path, enum_name, member, constant) in [
+        (
+            "../vendor/server/src/map/packets/c2s/0x05b_eventend.h",
+            "GP_CLI_COMMAND_EVENTEND_MODE",
+            "UpdatePending",
+            "UPDATE_PENDING",
+        ),
+        (
+            "../vendor/server/src/map/packets/s2c/0x052_eventucoff.h",
+            "GP_SERV_COMMAND_EVENTUCOFF_MODE",
+            "EventRecvPending",
+            "EVENT_RECV_PENDING",
+        ),
+    ] {
+        println!("cargo:rerun-if-changed={path}");
+        let source = fs::read_to_string(path)?;
+        let values = lsb_scrape::parse_cpp_enum_class(&source, enum_name)?;
+        let value = values
+            .iter()
+            .find(|(_, name)| name == member)
+            .context(member)?
+            .0;
+        event_wire.push_str(&format!("pub const {constant}: u32 = {value};\n"));
+    }
+    fs::write(out_dir.join("event_position_wire.rs"), event_wire)?;
 
     let auth_session_src = fs::read_to_string(LSB_AUTH_SESSION_H)
         .with_context(|| format!("reading {LSB_AUTH_SESSION_H}"))?;
@@ -178,10 +240,12 @@ fn main() -> Result<()> {
         out.push_str(&format!("pub const {name}: u8 = {id:#04x};\n"));
     }
     fs::write(out_dir.join("search_handler_table.rs"), &out)?;
-    println!(
-        "ffxi-proto: scraped search base key + {} TCPREQUESTTYPE entries",
-        tcp_types.len()
-    );
+    check_scrape_count(
+        "TCPREQUESTTYPE entries (plus the search base key)",
+        LSB_SEARCH_HANDLER_H,
+        tcp_types.len(),
+        floor::TCP_REQUEST_TYPE,
+    )?;
 
     Ok(())
 }

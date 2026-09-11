@@ -11,7 +11,7 @@ use crate::vm::{EventVm, StepResult};
 
 /// 0x05B `EndPara` the client returns for a cancelled event in place of
 /// `Work_Zone[1]` (research/XiPackets/world/client/0x005B); LSB scripts match
-/// it as `utils.EVENT_CANCELLED_OPTION` (vendor/server/scripts/utils/utils.lua:8).
+/// it as `utils.EVENT_CANCELLED_OPTION` (vendor/server/scripts/utils/utils.lua).
 pub const EVENT_CANCELLED_END_PARA: u32 = 1 << 30;
 
 /// One renderable dialog frame: NPC speech (and, for a menu, the selectable
@@ -83,6 +83,39 @@ impl DialogRunner {
         })
     }
 
+    pub fn attach_scene(
+        &mut self,
+        dat: std::sync::Arc<ffxi_dat::event_dat::EventDat>,
+        actor: u32,
+        player: crate::vm::scene::EventPosition,
+    ) {
+        self.vm.attach_scene(dat, actor, player);
+    }
+
+    pub fn controls_player_position(&self) -> bool {
+        self.vm.controls_player_position()
+    }
+
+    pub fn controlled_position(&self) -> Option<crate::vm::scene::EventPosition> {
+        self.vm.controlled_position()
+    }
+
+    pub fn take_scene_actions(&mut self) -> Vec<crate::vm::scene::SceneAction> {
+        self.vm.take_scene_actions()
+    }
+
+    pub fn acknowledge_position(&mut self, position: crate::vm::scene::EventPosition) {
+        self.vm.acknowledge_position(position);
+    }
+
+    pub fn reject_position(&mut self) {
+        self.vm.reject_position();
+    }
+
+    pub fn acknowledge_event(&mut self) {
+        self.vm.acknowledge_event();
+    }
+
     /// Apply the player's response to the previous frame and run to the next one.
     /// `choice` is the selected option index for a menu frame (`None` cancels);
     /// it is ignored for a message frame and on the first call.
@@ -117,6 +150,10 @@ impl DialogRunner {
     /// cancel selection, a message invalidates the open dialog; either way the
     /// VM ends the event with [`EVENT_CANCELLED_END_PARA`].
     pub fn cancel(&mut self, strings: &StringDat) -> DialogStep {
+        if self.vm.controls_player_position() && self.vm.is_waiting() {
+            self.vm.cancel_message();
+            return self.run(strings);
+        }
         match self.pending {
             Pending::Message | Pending::Start => self.vm.cancel_message(),
             Pending::Choice => self.vm.select_choice(None),
@@ -157,7 +194,9 @@ impl DialogRunner {
                         end_para: EVENT_CANCELLED_END_PARA,
                     }
                 }
-                StepResult::Unimplemented(op) => return DialogStep::Stopped(op),
+                StepResult::Unimplemented(op) | StepResult::Spun(op) => {
+                    return DialogStep::Stopped(op)
+                }
                 StepResult::Waiting => return DialogStep::Waiting,
             }
         }
@@ -432,10 +471,12 @@ mod tests {
     /// header layout ([`StringDat::parse`] validating it pins the format —
     /// magic = 0x1000_0000 + data_len, offsets XOR 0x8080_8080).
     fn empty_strings() -> StringDat {
+        const DMSG_MAGIC_BASE: u32 = 0x1000_0000;
+        const DMSG_OFFSET_XOR: u32 = 0x8080_8080;
         let data_len = 4u32;
         let mut buf = Vec::new();
-        buf.extend_from_slice(&(0x1000_0000u32 + data_len).to_le_bytes());
-        buf.extend_from_slice(&(4u32 ^ 0x8080_8080).to_le_bytes());
+        buf.extend_from_slice(&(DMSG_MAGIC_BASE + data_len).to_le_bytes());
+        buf.extend_from_slice(&(4u32 ^ DMSG_OFFSET_XOR).to_le_bytes());
         StringDat::parse(&buf).expect("synthetic DialogTable")
     }
 
@@ -485,7 +526,7 @@ mod tests {
 
     /// Guard: the cancel sentinel is the exact value LSB scripts branch on
     /// (utils.EVENT_CANCELLED_OPTION = bit.lshift(1, 30),
-    /// vendor/server/scripts/utils/utils.lua:8).
+    /// vendor/server/scripts/utils/utils.lua utils.EVENT_CANCELLED_OPTION).
     #[test]
     fn cancel_sentinel_is_lsb_event_cancelled_option() {
         assert_eq!(EVENT_CANCELLED_END_PARA, 0x4000_0000);

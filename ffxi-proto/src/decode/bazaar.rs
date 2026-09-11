@@ -4,8 +4,8 @@ use super::*;
 /// The server pushes one packet per priced LOC_INVENTORY slot when we open the
 /// bazaar, then re-pushes the single affected row after every purchase — so
 /// consumers merge by `index` rather than accumulating
-/// (vendor/server/src/map/packets/c2s/0x106_bazaar_buy.cpp:198).
-/// vendor/server/src/map/packets/s2c/0x105_bazaar_list.h:34-43.
+/// (vendor/server/src/map/packets/c2s/0x106_bazaar_buy.cpp GP_CLI_COMMAND_BAZAAR_BUY::process).
+/// vendor/server/src/map/packets/s2c/0x105_bazaar_list.h GP_SERV_COMMAND_BAZAAR_LIST.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BazaarListItem {
     /// Seller's asking price per unit, before tax (`CItem::getCharPrice`).
@@ -13,7 +13,7 @@ pub struct BazaarListItem {
     pub quantity: u32,
     /// Zone tax in hundredths of a percent: the buyer pays
     /// `price * qty * (10000 + tax_rate) / 10000`
-    /// (vendor/server/src/map/packets/c2s/0x106_bazaar_buy.cpp:103).
+    /// (vendor/server/src/map/packets/c2s/0x106_bazaar_buy.cpp GP_CLI_COMMAND_BAZAAR_BUY::process totalPrice).
     pub tax_rate: u16,
     pub item_no: u16,
     /// Seller-side LOC_INVENTORY slot; the id c2s 0x106 buys by.
@@ -51,7 +51,7 @@ impl BazaarListItem {
     }
 }
 
-/// `GP_BAZAAR_BUY_STATE`, vendor/server/src/map/packets/s2c/0x106_bazaar_buy.h:26-31.
+/// `GP_BAZAAR_BUY_STATE`, vendor/server/src/map/packets/s2c/0x106_bazaar_buy.h.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BazaarBuyState {
     Ok,
@@ -71,7 +71,7 @@ impl BazaarBuyState {
 }
 
 /// Answer to our c2s 0x106 purchase attempt; `seller` is the bazaar owner.
-/// vendor/server/src/map/packets/s2c/0x106_bazaar_buy.h:41-45.
+/// vendor/server/src/map/packets/s2c/0x106_bazaar_buy.h GP_SERV_COMMAND_BAZAAR_BUY.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BazaarBuy {
     pub state: BazaarBuyState,
@@ -99,7 +99,7 @@ impl BazaarBuy {
 }
 
 /// The bazaar we were browsing emptied or closed (s2c 0x107).
-/// vendor/server/src/map/packets/s2c/0x107_bazaar_close.h:36-40.
+/// vendor/server/src/map/packets/s2c/0x107_bazaar_close.h GP_SERV_COMMAND_BAZAAR_CLOSE padding00.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BazaarClose {
     pub seller: String,
@@ -120,7 +120,7 @@ impl BazaarClose {
 
 /// Another customer bought a row out from under us while we browse (s2c 0x109);
 /// a refreshed 0x105 row for `index` follows. `buyer` is the purchasing PC
-/// (vendor/server/src/map/packets/s2c/0x109_bazaar_sell.cpp:26-33).
+/// (vendor/server/src/map/packets/s2c/0x109_bazaar_sell.cpp GP_SERV_COMMAND_BAZAAR_SELL::GP_SERV_COMMAND_BAZAAR_SELL).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BazaarSell {
     pub buyer_id: u32,

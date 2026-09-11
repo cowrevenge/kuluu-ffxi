@@ -5,7 +5,7 @@ use crate::map_image::{self, GraphicImage};
 
 // Retail packs item data into per-type DATs, each a gap-free ascending array of
 // 0xC00 blocks keyed by item id. Paths and split match XIM's InventoryItems
-// (research/xim/.../InventoryItemParser.kt:262-270), itself a port of Windower
+// (research/xim/src/jsMain/kotlin/xim/resource/InventoryItemParser.kt InventoryItems itemListDats), itself a port of Windower
 // POLUtils Item.cs. Block index within a file is `item_id - base_id`, where
 // base_id is the id stored in the file's first block.
 pub const ITEM_DAT_ROM_PATHS: &[&str] = &[

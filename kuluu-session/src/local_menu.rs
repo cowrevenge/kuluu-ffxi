@@ -22,7 +22,7 @@ pub const MH_DOOR_ENTITY_ID: u32 = 0xFFFF_FF01;
 pub const MOG_MENU_ID: u32 = 0xFFFF_FF02;
 
 /// Nameplate/dialog speaker for the synthesized exit door, matching XIM's
-/// re-creation: research/xim/src/jsMain/kotlin/xim/poc/game/configuration/assetviewer/AssetViewer.kt:666
+/// re-creation: research/xim/src/jsMain/kotlin/xim/poc/game/configuration/assetviewer/AssetViewer.kt createMogHouseActors
 /// (LSB spawns no door NPC, so there is no server-side name to echo).
 pub const MH_DOOR_NAME: &str = "Door: To Town";
 pub const MOG_MENU_NPC_NAME: &str = "Moogle";
@@ -35,7 +35,7 @@ pub const SELECT_AREA_ROW: &str = "Select an area to exit to.";
 pub const MOG_GARDEN_ROW: &str = "Mog Garden.";
 
 // Mog Menu labels, order, prompts, and disabled rules follow the retail client
-// as observed on HorizonXI 2026-07-17 (artifacts/retail/moghouse-menu-notes.md).
+// as observed on HorizonXI 2026-07-17 (.agents/skills/retail-observe/references/2026-07-17-moghouse-menu.md).
 pub const MOG_MENU_PROMPT: &str = "Mog Menu";
 pub const STORAGE_ROW: &str = "Storage";
 pub const DELIVERY_BOX_ROW: &str = "Delivery Box";
@@ -68,7 +68,7 @@ pub const DELIVERY_PROMPT: &str = "Use the delivery system.";
 pub const RECEIVE_ROW: &str = "Receive";
 pub const SEND_ROW: &str = "Send";
 
-// Retail Receive panel action buttons, observed order (moghouse-menu-notes.md
+// Retail Receive panel action buttons, observed order (.agents/skills/retail-observe/references/2026-07-17-moghouse-menu.md
 // "Take / Drop / Return"); Return is disabled for auction-house senders.
 pub const TAKE_ROW: &str = "Take";
 pub const DROP_ROW: &str = "Drop";
@@ -78,9 +78,9 @@ pub const TAKE_BACK_ROW: &str = "Take back";
 pub const CANCEL_DELIVERY_ROW: &str = "Cancel delivery";
 
 /// Retail panel headers ("Delivery Box" receive / "Deliveries" send),
-/// artifacts/retail/moghouse-menu-notes.md.
+/// .agents/skills/retail-observe/references/2026-07-17-moghouse-menu.md.
 pub const RECEIVE_PANEL_PROMPT: &str = "Select an item from the delivery box.";
-/// Retail Send-panel header (artifacts/retail/moghouse-menu-notes.md:55).
+/// Retail Send-panel header (.agents/skills/retail-observe/references/2026-07-17-moghouse-menu.md "Send flow").
 pub const SEND_PANEL_PROMPT: &str =
     "Deliveries | After specifying recipient, place items in empty slots to send them to recipient's delivery box.";
 /// Send-panel recipient field, mirroring retail's text box above the grid.
@@ -94,14 +94,14 @@ pub const EMPTY_SLOT_SUFFIX: &str = "(empty)";
 /// Retail delivery panels lay the 8 slots out as a 2-row x 4-column grid.
 pub const DELIVERY_GRID_COLS: u8 = 4;
 /// Retail's item list header once an empty slot is entered
-/// (artifacts/retail/moghouse-menu-notes.md:63 — `Items | Select an item.`).
+/// (.agents/skills/retail-observe/references/2026-07-17-moghouse-menu.md "Send flow" — `Items | Select an item.`).
 pub const PICK_ITEM_PROMPT: &str = "Items | Select an item.";
 pub const QUANTITY_PROMPT: &str = "Select a quantity.";
 pub const BACK_ROW: &str = "Back";
 
 /// LSB marks auction-house mail by a sender starting with "AH"; the retail
 /// client disables Return for it (vendor/server/src/map/packets/s2c/
-/// 0x04b_pbx_result.cpp:91).
+/// 0x04b_pbx_result.cpp GP_SERV_COMMAND_PBX_RESULT::GP_SERV_COMMAND_PBX_RESULT).
 const AH_SENDER_PREFIX: &str = "AH";
 
 pub const MAIN_JOB_ROW: &str = "Main Job";
@@ -113,7 +113,7 @@ const SELECTABLE_JOB_MAX: u8 = 22;
 
 /// District rows per MyRoomExitBit; the slot is the MYROOMEXITMODE Option1-4 value
 /// LSB maps to a destination zone (vendor/server/src/map/packets/c2s/
-/// 0x05e_maprect.cpp:88-135).
+/// 0x05e_maprect.cpp GP_CLI_COMMAND_MAPRECT::process).
 fn district_rows(exit_bit: u8) -> &'static [(&'static str, u8)] {
     match exit_bit {
         1 => &[
@@ -294,7 +294,7 @@ impl LocalMenuSession {
 
     /// The exit-door "Where to?" menu. "Change floors." shows when the player is
     /// on the 2F — LSB forces the full menu there (0x00a_login.cpp MH branch) —
-    /// or when the 2F-unlock bit (char_sync.cpp:61) is known true; the server's
+    /// or when the 2F-unlock bit (char_sync.cpp CCharSyncPacket::CCharSyncPacket) is known true; the server's
     /// rejection of a locked 2F request is log-only, so an ungated row would
     /// fail silently.
     pub fn open_mh_exit(
@@ -790,7 +790,7 @@ fn delivery_menu() -> Menu {
 
 /// Row label for an occupied slot: retail's grid cell (item, count,
 /// counterpart) plus the observed send-state suffixes "(preparing)"/"(sent)"
-/// (artifacts/retail/moghouse-menu-notes.md).
+/// (.agents/skills/retail-observe/references/2026-07-17-moghouse-menu.md).
 /// One sendable LOC_INVENTORY stack offered by the item picker.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PickableItem {
@@ -1019,8 +1019,14 @@ mod tests {
 
     #[test]
     fn synthetic_ids_stay_outside_lsb_unique_no_space() {
-        // Largest LSB unique_no shape: (4<<28)|(zone<<12)|targid.
-        let lsb_ceiling = (4u32 << 28) | (0xFFFu32 << 12) | 0xFFF;
+        const LSB_DYNAMIC_KIND: u32 = 4;
+        const LSB_KIND_SHIFT: u32 = 28;
+        const LSB_ZONE_SHIFT: u32 = 12;
+        const LSB_ZONE_MAX: u32 = 0xFFF;
+        const LSB_TARGID_MAX: u32 = 0xFFF;
+        let lsb_ceiling = (LSB_DYNAMIC_KIND << LSB_KIND_SHIFT)
+            | (LSB_ZONE_MAX << LSB_ZONE_SHIFT)
+            | LSB_TARGID_MAX;
         for id in [MH_DOOR_ENTITY_ID, MOG_MENU_ID] {
             assert!(id > lsb_ceiling, "0x{id:08X} collides with server id space");
         }
@@ -1028,7 +1034,7 @@ mod tests {
     }
 
     /// Pins the LSB MYROOMEXITBIT/MYROOMEXITMODE contract
-    /// (vendor/server/src/map/packets/c2s/0x05e_maprect.h:26-50).
+    /// (vendor/server/src/map/packets/c2s/0x05e_maprect.h GP_CLI_COMMAND_MAPRECT_MYROOMEXITBIT).
     #[test]
     fn terminal_exit_rows_map_to_lsb_wire_pairs() {
         assert_eq!(MogHouseExit::Home { exit_bit: 1 }.wire_pair(), (1, 0));
@@ -1111,9 +1117,9 @@ mod tests {
     /// LSB's destination-zone formulas — row order IS the destination, including
     /// the three irregular ones (Jeuno's Ru'Lude-first base, Whitegate's split
     /// Al Zahbi/Whitegate base, Adoulin's mode-2 Eastern special case)
-    /// (vendor/server/src/map/packets/c2s/0x05e_maprect.cpp:88-135 + zone.h) —
+    /// (vendor/server/src/map/packets/c2s/0x05e_maprect.cpp GP_CLI_COMMAND_MAPRECT::process + zone.h) —
     /// plus the `from_bit_slot` inverse and membership in the PacketValidator
-    /// oneOf enums (0x05e_maprect.h:26-50), whose rejection is a silent drop.
+    /// oneOf enums (0x05e_maprect.h GP_CLI_COMMAND_MAPRECT_MYROOMEXITBIT), whose rejection is a silent drop.
     #[test]
     fn district_rows_match_lsb_destination_zone_formulas() {
         let expected: &[(u8, &[(&str, u8)])] = &[
@@ -1272,7 +1278,7 @@ mod tests {
     }
 
     /// Retail top-level order as observed on HorizonXI 2026-07-17
-    /// (artifacts/retail/moghouse-menu-notes.md).
+    /// (.agents/skills/retail-observe/references/2026-07-17-moghouse-menu.md).
     #[test]
     fn mog_menu_matches_retail_order() {
         let mut s = LocalMenuSession::new();

@@ -2,7 +2,7 @@
 //! `font    fontshp ` shape group and kept as raw RGBA so they can be composited
 //! straight into the billboard texture.
 //!
-//! research/XIClient/.../CXiActorNameDraw.cpp `GetActorNameGlyphData` — the
+//! research/XIClient/src/XIClient/source/Rendering/Active/CXiActorNameDraw.cpp `GetActorNameGlyphData` — the
 //! on-screen size of a glyph is its quad's vertex
 //! span, not the texture crop, and the crop comes off a separate sheet.
 
@@ -122,7 +122,7 @@ impl NameplateIcons {
 
 /// Every glyph `nameplate_marker` can emit. Loading is one pass over the shape
 /// group, so the set is enumerated rather than faulted in per plate.
-fn marker_codes() -> [u8; 9] {
+fn marker_codes() -> [u8; 24] {
     use crate::nameplate_marker::glyph::*;
     [
         PLAY_ONLINE,
@@ -130,8 +130,23 @@ fn marker_codes() -> [u8; 9] {
         AWAY,
         SEEKING,
         LINKSHELL,
+        GM_1,
+        GM_4,
+        GM_5,
+        GM_6,
+        GM_7,
+        GM_8,
         BAZAAR,
+        NEW_PLAYER,
         AUTO_PARTY,
+        NATION_SAN_DORIA,
+        NATION_BASTOK,
+        NATION_WINDURST,
+        NATION_BEAUFORT,
+        NATION_RABANASTRE,
+        BESIEGED_EVEN,
+        BESIEGED_ODD,
+        MONSTROSITY,
         JOB_MASTER,
         JOB_MASTER_TAIL,
     ]

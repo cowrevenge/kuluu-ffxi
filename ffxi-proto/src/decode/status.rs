@@ -26,18 +26,40 @@ pub struct CharStatus {
     /// `packet->mount_id` in CCharStatusPacket's constructor,
     /// vendor/server/src/map/packets/char_status.cpp.
     pub mount_id: u8,
+    /// The allegiance byte retail's own nameplate keys off for self:
+    /// `Flags2.BallistaFlg`. LSB writes `PChar->allegiance` there and ORs in the
+    /// belligerence bit (0x08) while a monstrosity is outside the Ferretory, so 8/9
+    /// are MOB/PLAYER | belligerent. Self never receives its own 0x0D —
+    /// `CZoneEntities::UpdateEntityPacket` skips the sender
+    /// (vendor/server/src/map/zone_entities.cpp) — this packet is the only channel.
+    /// vendor/server/src/map/packets/char_status.cpp.
+    pub allegiance: u8,
 }
 
 impl CharStatus {
     pub(crate) const UNIQUE_NO_OFFSET: usize = 0x20;
     pub(crate) const FLAGS0_OFFSET: usize = 0x24;
+    /// `flags0_t.hpp : 8` at bits 16..24 (vendor/server/src/map/packets/char_status.cpp flags0_t).
+    pub(crate) const HPP_SHIFT: u32 = 16;
+    pub(crate) const HPP_MASK: u32 = 0xFF;
     pub(crate) const SPEED_OFFSET: usize = 0x28;
     pub(crate) const SERVER_STATUS_OFFSET: usize = 0x2C;
     pub(crate) const DEAD_COUNTER1_OFFSET: usize = 0x38;
     pub(crate) const DEAD_COUNTER2_OFFSET: usize = 0x3C;
     pub(crate) const FISHING_TIMER_OFFSET: usize = 0x46;
+    /// The `Flags2` word. Struct layout in char_status.cpp: BufStatus[32] @0x04,
+    /// UniqueNo @0x24, Flags0 @0x28, Flags1 @0x2C, server_status/r/g/b
+    /// @0x30..0x34, Flags2 @0x34 — the "Flags3 starts at 0x38" comment there is
+    /// struct-relative. Retail's 0x037.h static_asserts the same word at body
+    /// 0x30 (`MoreFlags`) and its handler reads `AUDIT_1FF = MoreFlags.dummy & 0xFF`
+    /// (research/XIClient/src/XIClient/source/Game/Net/Packets/s2c/0x037.cpp).
+    pub(crate) const FLAGS2_OFFSET: usize = 0x30;
+    /// `BallistaFlg`'s position inside the Flags2 word (bits 21..28),
+    /// char_status.cpp `flags2_t`.
+    pub(crate) const BALLISTA_FLG_SHIFT: u32 = 21;
+    pub(crate) const BALLISTA_FLG_MASK: u32 = 0xFF;
     /// `field_57`, the byte the disassembly's own struct puts right before
-    /// `Field58Flags` (research/XIClient .../Game/Net/Packets/s2c/0x037.h
+    /// `Field58Flags` (research/XIClient/src/XIClient/include/Game/Net/Packets/s2c/0x037.h
     /// static_asserts), which LSB fills from the mount effect's power.
     pub(crate) const MOUNT_ID_OFFSET: usize = 0x57;
     pub(crate) const SPEED_MASK: u16 = 0x0FFF;
@@ -52,8 +74,7 @@ impl CharStatus {
         let flags0 = rd(Self::FLAGS0_OFFSET);
         Ok(Self {
             unique_no: rd(Self::UNIQUE_NO_OFFSET),
-            // flags0_t bitfield: hpp occupies bits 16..24.
-            hpp: ((flags0 >> 16) & 0xFF) as u8,
+            hpp: ((flags0 >> Self::HPP_SHIFT) & Self::HPP_MASK) as u8,
             dead_counter1: rd(Self::DEAD_COUNTER1_OFFSET),
             dead_counter2: rd(Self::DEAD_COUNTER2_OFFSET),
             server_status: body[Self::SERVER_STATUS_OFFSET],
@@ -61,21 +82,48 @@ impl CharStatus {
             speed: u16::from_le_bytes([body[Self::SPEED_OFFSET], body[Self::SPEED_OFFSET + 1]])
                 & Self::SPEED_MASK,
             mount_id: body.get(Self::MOUNT_ID_OFFSET).copied().unwrap_or(0),
+            allegiance: ((rd(Self::FLAGS2_OFFSET) >> Self::BALLISTA_FLG_SHIFT)
+                & Self::BALLISTA_FLG_MASK) as u8,
         })
     }
 
-    /// Seconds until the server force-warps a KO'd player home. LSB sends
-    /// dead_counter1 = 60 * (6min + (60min - timeSinceDeath)); the leading 6min is fixed
-    /// padding, so stripping it (`dead_counter1/60 - 360`) yields the real time left,
-    /// which hits 0 when the server-side CDeathState completes at death + 60min.
-    /// vendor/server/src/map/packets/char_status.cpp,
-    /// charentity.cpp::GetTimeUntilDeathHomepoint, ai/states/death_state.cpp
+    /// Seconds until the server force-warps a KO'd player home. Meaningless
+    /// unless `hpp == 0`; see [`dead_counter_seconds_until_homepoint`].
     pub fn seconds_until_homepoint(&self) -> u32 {
-        (self.dead_counter1 / 60).saturating_sub(360)
+        dead_counter_seconds_until_homepoint(self.dead_counter1)
     }
 }
 
+/// The scale LSB applies to the second count in every dead-counter carrier
+/// (`60 * deadRemaining` in vendor/server/src/map/packets/char_status.cpp and
+/// vendor/server/src/map/packets/s2c/0x00a_login.cpp). Retail divides straight
+/// back out: `Payload.field_A4 / 60`
+/// (research/XIClient/src/XIClient/source/Game/Net/Packets/s2c/0x00A.cpp S2C::RecvLogin).
+pub(crate) const DEAD_COUNTER_UNITS_PER_SECOND: u32 = 60;
+
+/// The fixed padding LSB prepends to the real remaining time (`6min +
+/// PChar->GetTimeUntilDeathHomepoint()`), whose own comment records that the
+/// client treats 66min as the death maximum and force-homepoints once the value
+/// drops below 6min. vendor/server/src/map/packets/char_status.cpp.
+pub(crate) const DEAD_COUNTER_PADDING_SECS: u32 = 6 * 60;
+
+/// Seconds until the server force-warps a KO'd player home, from the raw counter
+/// both 0x037 (`dead_counter1`) and 0x00A (`DeadCounter`) carry with the same
+/// encoding. Stripping the fixed padding yields the real time left, which hits 0
+/// when the server-side CDeathState completes at death + 60min
+/// (vendor/server/src/map/entities/charentity.cpp::GetTimeUntilDeathHomepoint,
+/// vendor/server/src/map/ai/states/death_state.cpp).
+///
+/// The counter alone cannot tell a corpse from a living character: LSB computes
+/// it unconditionally and `GetTimeSinceDeath()` returns 0s while alive, so a
+/// living character is byte-identical to a fresh corpse. Callers must gate on the
+/// carrier's `hpp == 0`.
+pub fn dead_counter_seconds_until_homepoint(dead_counter: u32) -> u32 {
+    (dead_counter / DEAD_COUNTER_UNITS_PER_SECOND).saturating_sub(DEAD_COUNTER_PADDING_SECS)
+}
+
 const _: () = assert!(CharStatus::SPEED_OFFSET + 2 <= CharStatus::MIN_LEN);
+const _: () = assert!(CharStatus::FLAGS2_OFFSET + 4 <= CharStatus::MIN_LEN);
 
 /// s2c 0x061 GP_SERV_COMMAND_CLISTATUS — the self-character stat block.
 /// Field offsets follow the `CLISTATUS` struct in
@@ -84,7 +132,7 @@ const _: () = assert!(CharStatus::SPEED_OFFSET + 2 <= CharStatus::MIN_LEN);
 /// AGI, INT, MND, CHR in order; `bp_adj` is the signed gear/buff delta retail shows
 /// as the "+N" beside each stat. `def_elem` is Fire, Ice, Wind, Earth, Lightning,
 /// Water, Light, Dark. The struct declares `atk`/`def` as int16_t, but they are
-/// sourced from the non-negative ATT()/DEF() (.cpp:63-64), so we read them as u16.
+/// sourced from the non-negative ATT()/DEF() calls in the packer, so we read them as u16.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CliStatus {
     pub hp_max: u32,
@@ -102,7 +150,7 @@ pub struct CliStatus {
 }
 
 impl CliStatus {
-    // vendor/server/src/map/packets/s2c/0x061_clistatus.h:45-82 — the four job bytes
+    // vendor/server/src/map/packets/s2c/0x061_clistatus.h CLISTATUS — the four job bytes
     // sit between mpmax (@4) and exp_now (@12).
     const MJOB_NO_OFFSET: usize = 8;
     const MJOB_LV_OFFSET: usize = 9;
@@ -147,7 +195,7 @@ impl CliStatus {
 
 /// s2c 0x01B GP_SERV_COMMAND_JOB_INFO — per-job levels + unlocked-jobs bitmask for
 /// the self character. Body offsets follow the GP_MYROOM_DANCER struct in
-/// vendor/server/src/map/packets/s2c/0x01b_job_info.h:28-62 (filled in .cpp:30-57).
+/// vendor/server/src/map/packets/s2c/0x01b_job_info.h GP_MYROOM_DANCER (filled in 0x01b_job_info.cpp).
 /// `job_levels` reads `job_lev2` (the full `jobs.job[24]` memcpy, index = JOBTYPE);
 /// the legacy `job_lev[16]` @0x0C truncates at 16 jobs and is skipped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -252,9 +300,9 @@ mod job_info_tests {
     use super::*;
 
     /// Pins JobInfo to LSB's GP_MYROOM_DANCER layout
-    /// (vendor/server/src/map/packets/s2c/0x01b_job_info.h:28-45; job_lev2, not
+    /// (vendor/server/src/map/packets/s2c/0x01b_job_info.h GP_MYROOM_DANCER; job_lev2, not
     /// the legacy job_lev[16] @0x0C) and MAX_JOBTYPE
-    /// (vendor/server/src/map/entities/battleentity.h:100), since the decode
+    /// (vendor/server/src/map/entities/battleentity.h MAX_JOBTYPE), since the decode
     /// tests build buffers through these same consts.
     #[test]
     fn job_info_offsets_match_gp_myroom_dancer_layout() {
@@ -375,6 +423,7 @@ mod char_status_tests {
                 fishing_timer: 0,
                 speed: 0,
                 mount_id: 0,
+                allegiance: 0,
             }
             .seconds_until_homepoint()
         };
@@ -452,5 +501,32 @@ mod char_status_tests {
     fn char_status_bound_speed_zero_decodes() {
         let body = vec![0u8; CharStatus::MIN_LEN];
         assert_eq!(CharStatus::decode(&body).unwrap().speed, 0);
+    }
+
+    /// Pins allegiance to LSB's Flags2 word and BallistaFlg's bit position,
+    /// since the decode tests build buffers through these same consts.
+    #[test]
+    fn char_status_allegiance_offsets_match_char_status_layout() {
+        assert_eq!(CharStatus::FLAGS2_OFFSET, 0x30);
+        assert_eq!(CharStatus::BALLISTA_FLG_SHIFT, 21);
+    }
+
+    #[test]
+    fn char_status_decodes_allegiance_from_flags2_ballista_flg() {
+        const PET_INDEX_NOISE: u32 = 0x1234;
+        let mut body = vec![0u8; CharStatus::MIN_LEN];
+        // BallistaFlg at bits 21..28, with a PetIndex (bits 3..18) that must
+        // not leak into the byte.
+        let flags2 = (5u32 << CharStatus::BALLISTA_FLG_SHIFT) | PET_INDEX_NOISE;
+        body[CharStatus::FLAGS2_OFFSET..CharStatus::FLAGS2_OFFSET + 4]
+            .copy_from_slice(&flags2.to_le_bytes());
+        assert_eq!(CharStatus::decode(&body).unwrap().allegiance, 5);
+
+        // The belligerence case: base allegiance OR'd with the 0x08 bit that
+        // char_status.cpp sets outside the Ferretory.
+        body[CharStatus::FLAGS2_OFFSET..CharStatus::FLAGS2_OFFSET + 4].copy_from_slice(
+            &((9u32 << CharStatus::BALLISTA_FLG_SHIFT) | PET_INDEX_NOISE).to_le_bytes(),
+        );
+        assert_eq!(CharStatus::decode(&body).unwrap().allegiance, 9);
     }
 }

@@ -1,6 +1,6 @@
 //! Zone-interaction ("RID") chunk parser: the oriented trigger boxes a zone DAT
 //! declares for zone lines, doors, sub-areas, fishing areas and elevators. Layout
-//! mirrors research/xim/src/jsMain/kotlin/xim/resource/ZoneInteractionSection.kt:51-113,
+//! mirrors research/xim/src/jsMain/kotlin/xim/resource/ZoneInteractionSection.kt ZoneInteractionSection,
 //! verified byte-for-byte on retail DATs (zones 230/235) against LSB
 //! vendor/server/sql/zonelines.sql.
 
@@ -15,7 +15,7 @@ const ENTRY_LEN: usize = 64;
 
 const POSITION_OFFSET: usize = 0x00;
 /// Where XIM reads the x component of a rotation vec3
-/// (ZoneInteractionSection.kt:51-113) the retail DATs hold an integer: `0` in 350
+/// (ZoneInteractionSection.kt ZoneInteractionSection) the retail DATs hold an integer: `0` in 350
 /// of the 370 shipped `m`-rects and 500..558 in the other 20. See
 /// [`ZoneInteraction::rect_class`].
 const RECT_CLASS_OFFSET: usize = 0x0C;
@@ -31,7 +31,7 @@ const ELEVATOR_BOTTOM_OFFSET: usize = 0x34;
 const ELEVATOR_TOP_OFFSET: usize = 0x36;
 
 /// Elevator offsets are fixed-point 1/256 y deltas from `position[1]`
-/// (ZoneInteractionSection.kt:89-90).
+/// (ZoneInteractionSection.kt read ev0).
 const ELEVATOR_Y_SCALE: f32 = 256.0;
 
 /// Retail scales a rect's local space by `1/size` and accepts the result on
@@ -39,12 +39,12 @@ const ELEVATOR_Y_SCALE: f32 = 256.0;
 const UNIT_BOX_HALF_EXTENT: f32 = 0.5;
 
 /// Mog House residence zone-line tag prefixes, the emitter side of the contract LSB
-/// matches at vendor/server/src/map/packets/c2s/0x05e_maprect.cpp:74-75
+/// matches at vendor/server/src/map/packets/c2s/0x05e_maprect.cpp GP_CLI_COMMAND_MAPRECT::process mogEntrancePrefix
 /// ("zmr* classic cities; zms* WoTG [S] + Adoulin").
 pub const MOG_HOUSE_PREFIX_CLASSIC: &str = "zmr";
 pub const MOG_HOUSE_PREFIX_WOTG: &str = "zms";
 
-/// The [`ZoneInteraction::rect_class`] `RidManager::Add` (RidManager.cpp:100-122)
+/// The [`ZoneInteraction::rect_class`] `RidManager::Add` (RidManager.cpp)
 /// puts in the hit-check array; every other class it drops.
 pub const RECT_CLASS_HIT_CHECKED: u32 = 0;
 
@@ -56,14 +56,14 @@ pub struct ZoneInteraction {
     pub position: [f32; 3],
     /// Which record class the entry belongs to; `0` is the hit-checked one.
     /// `RidManager::Add`
-    /// (research/XIClient/src/XIClient/source/World/Zone/Triggers/RidManager.cpp:100-122)
+    /// (research/XIClient/src/XIClient/source/World/Zone/Triggers/RidManager.cpp RidManager::Add)
     /// puts only the class-0 rects in the array the per-frame checks walk, and in
     /// the shipped DATs the non-zero classes are coarse sub-map regions (boxes of
     /// 200-1400 units whose ids resolve to Img chunks), not trigger volumes.
     pub rect_class: u32,
     /// Euler radians, applied ZYX. Component 0 is always `0.0`: those bytes are
     /// [`ZoneInteraction::rect_class`], and retail rotates the box by
-    /// `-orientation.y` alone (RidManager.cpp:109).
+    /// `-orientation.y` alone (RidManager.cpp RidManager::Add).
     pub orientation: [f32; 3],
     /// FULL extents: x,z horizontal, y vertical; box vertically centered on `position`.
     pub size: [f32; 3],
@@ -80,7 +80,7 @@ pub struct ZoneInteraction {
 }
 
 impl ZoneInteraction {
-    /// Classifiers mirror research/xim ZoneInteractionSection.kt:29-47.
+    /// Classifiers mirror research/xim ZoneInteractionSection.kt isZoneLine.
     pub fn is_zone_line(&self) -> bool {
         self.source_id.starts_with("z") && self.dest_id.is_some()
     }
@@ -108,7 +108,7 @@ impl ZoneInteraction {
     }
 
     /// A trigger volume that latches a sub-area. `RidManager::InitSubModels`
-    /// (research/XIClient/src/XIClient/source/World/Zone/Triggers/RidManager.cpp:611-647)
+    /// (research/XIClient/src/XIClient/source/World/Zone/Triggers/RidManager.cpp RidManager::InitSubModels)
     /// keeps the `m`-prefixed rects whose dest fourcc is non-zero, and
     /// `RidManager::Add` hit-checks only [`RECT_CLASS_HIT_CHECKED`].
     pub fn is_sub_area_trigger(&self) -> bool {
@@ -129,14 +129,14 @@ impl ZoneInteraction {
     }
 
     /// The interior a sub-area trigger declares, `None` for the leave rects and for
-    /// every non-trigger. research/cexi-docs/zone/subareas.md:65 names `param` as
+    /// every non-trigger. research/cexi-docs/zone/subareas.md "1. Discovery — the `0x36` ZoneInteraction section" names `param` as
     /// the id, which the retail install confirms — see [`crate::sub_area`].
     pub fn sub_area_id(&self) -> Option<u32> {
         self.sub_area_param().filter(|p| *p != 0)
     }
 
     /// Point-in-box in FFXI zone space. `RidManager::Add`
-    /// (RidManager.cpp:100-122) builds the rect's inverse as
+    /// (RidManager.cpp RidManager::Add) builds the rect's inverse as
     /// `T(-position) · RotateY(-orientation.y) · S(1/size)` and the hit checks
     /// accept the transformed point on `[-0.5, 0.5]` — so only the yaw of
     /// [`ZoneInteraction::orientation`] shapes the box, and [`ZoneInteraction::size`]
@@ -483,7 +483,7 @@ mod tests {
     }
 
     /// Pins the coupling with the kuluu-nav zonelines scrape: LSB stores the trigger's
-    /// source fourcc as the zonelines.sql primary key (vendor/server/sql/zonelines.sql:748).
+    /// source fourcc as the zonelines.sql primary key (vendor/server/sql/zonelines.sql zonelines 812805498).
     #[test]
     fn rect_id_matches_lsb_zonelines_primary_key() {
         assert_eq!(u32::from_le_bytes(*b"zmr0"), 812805498);

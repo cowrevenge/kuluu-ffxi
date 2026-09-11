@@ -20,7 +20,8 @@
 //! ## `cargo xtask install-hooks [--check]`
 //!
 //! Activate the versioned git hooks in `.githooks/` for this clone by pointing
-//! `core.hooksPath` at it (the fmt+clippy pre-push gate). Mirrors
+//! `core.hooksPath` at it (the fmt+clippy pre-push gate plus Beads lifecycle
+//! hooks). Mirrors
 //! `scripts/install-hooks.sh`, kept as a compile-free fast path. It's per-clone
 //! because `git config` writes the uncommitted `.git/config` — git won't let a
 //! repo auto-enable its own hooks. `--check` only verifies (non-zero exit when
@@ -28,6 +29,8 @@
 //!
 //! Std-only by design — see Cargo.toml; HTTP and the installer run by shelling
 //! out to `curl` and `wine`.
+
+mod dlss;
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -44,6 +47,13 @@ const SEARCH_DEPTH: usize = 6;
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
+        Some("dlss") => match dlss::run(&args[1..], &workspace_root()) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("error: {e}");
+                ExitCode::FAILURE
+            }
+        },
         Some("game") => match cmd_game(&args[1..]) {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
@@ -84,8 +94,10 @@ fn usage() {
          --region    us (default) or eu, for --download\n\
          --yes       skip the --download confirmation prompt\n\
          \n\
+         DLSS: cargo xtask dlss <check|build>\n\
+         \n\
          Activate the versioned git hooks (.githooks/) for this clone.\n\
-         --check     verify the pre-push gate is active; non-zero exit if not"
+         --check     verify the versioned hooks are active; non-zero exit if not"
     );
 }
 
@@ -213,9 +225,9 @@ fn cmd_game(args: &[String]) -> Result<(), String> {
 const HOOKS_DIR: &str = ".githooks";
 
 /// Activate (or, with `--check`, verify) the versioned git hooks for this clone.
-/// Sets `core.hooksPath=.githooks` so the pre-push fmt/clippy gate runs. The same
-/// effect as `scripts/install-hooks.sh`; both write byte-identical config so they
-/// can't drift.
+/// Sets `core.hooksPath=.githooks` so the pre-push gate and Beads lifecycle hooks
+/// run. The same effect as `scripts/install-hooks.sh`; both write byte-identical
+/// config so they can't drift.
 fn cmd_install_hooks(args: &[String]) -> Result<(), String> {
     let mut check = false;
     for a in args {
@@ -257,7 +269,7 @@ fn cmd_install_hooks(args: &[String]) -> Result<(), String> {
 
     git_config_set(&workspace, "core.hooksPath", HOOKS_DIR)?;
     make_executable(&workspace.join(HOOKS_DIR));
-    println!("installed: core.hooksPath={HOOKS_DIR} (pre-push gate active)");
+    println!("installed: core.hooksPath={HOOKS_DIR} (checks and Beads integration active)");
     println!("bypass a push with: git push --no-verify");
     Ok(())
 }

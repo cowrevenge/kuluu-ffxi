@@ -10,7 +10,7 @@ use crate::snapshot::SceneState;
 const EQUIP_SLOT_ORDER_LEN: usize = 8;
 
 // Slot numbering retail switches on when collecting per-slot CIB bytes
-// (research/XIClient/src/XIClient/source/World/Actor/SkeletalMeshActor.cpp:1656-1688:
+// (research/XIClient/src/XIClient/source/World/Actor/SkeletalMeshActor.cpp SkeletalMeshActor::SetEquipModel:
 // 2 = body, 5 = feet, 6 = main, 7 = sub, 8 = ranged), matching the order of
 // `slot_models` below.
 const EQUIP_SLOT_BODY: u8 = 2;
@@ -19,9 +19,13 @@ const EQUIP_SLOT_SUB: u8 = 7;
 const EQUIP_SLOT_RANGED: u8 = 8;
 const WEAPON_SLOTS: [u8; 3] = [EQUIP_SLOT_MAIN, EQUIP_SLOT_SUB, EQUIP_SLOT_RANGED];
 
-// FFXiMain `.text` VA 0x100C513D, quoted at
-// research/cexi-docs/reference/ffximain.md:288-300: four ranges split at 1500 /
-// 3000 / 3500, the top one computed as `(m - 3500) + 101739`.
+const EQUIP_SLOT_ID_SHIFT: u32 = 12;
+const EQUIP_SLOT_ID_SLOT_MASK: u16 = 0xF;
+const EQUIP_SLOT_ID_MODEL_MASK: u16 = 0x0FFF;
+
+// FFXiMain `.text` VA 0x100C513D (retail client disassembly; the full quote
+// lives in out-of-tree cexi research notes, not in this repo): four ranges
+// split at 1500 / 3000 / 3500, the top one computed as `(m - 3500) + 101739`.
 //
 // The 3000-range is only *registered* for 3000..=3193 — every fid for 3194..3499
 // is VTABLE=0 and no retail mob_pools row uses one — so range 3's extent looks
@@ -46,8 +50,8 @@ pub fn npc_dat_id(modelid: u16) -> u32 {
 }
 
 pub fn resolve_equipment_slot(slot_id: u16, race: u8) -> Option<u32> {
-    let slot = u32::from((slot_id >> 12) & 0xF);
-    let id = u32::from(slot_id & 0x0FFF);
+    let slot = u32::from((slot_id >> EQUIP_SLOT_ID_SHIFT) & EQUIP_SLOT_ID_SLOT_MASK);
+    let id = u32::from(slot_id & EQUIP_SLOT_ID_MODEL_MASK);
 
     if slot == 0 || slot > 8 || race == 0 || race > 8 {
         return None;
@@ -64,7 +68,16 @@ pub fn resolve_equipment_slot(slot_id: u16, race: u8) -> Option<u32> {
     }
     let (thr, base) = chosen?;
     if base == 0 {
-        return None;
+        // Retail clamps a model id past the slot's table to model 0 instead of
+        // dropping the part ("wrong GRP number",
+        // research/XIClient/src/XIClient/source/World/Actor/SkeletalMeshActor.cpp constexpr),
+        // so an out-of-band id renders the slot's base model, never a missing
+        // body part.
+        let (_, first_base) = bps.first()?;
+        if *first_base == 0 {
+            return None;
+        }
+        return Some(*first_base);
     }
     Some(base + id - u32::from(thr))
 }
@@ -73,7 +86,8 @@ pub fn resolve_equipment_model(slot_index: u8, model_id: u16, race: u8) -> Optio
     if slot_index == 0 || slot_index > 8 {
         return None;
     }
-    let slot_id = (u16::from(slot_index) << 12) | (model_id & 0x0FFF);
+    let slot_id =
+        (u16::from(slot_index) << EQUIP_SLOT_ID_SHIFT) | (model_id & EQUIP_SLOT_ID_MODEL_MASK);
     resolve_equipment_slot(slot_id, race)
 }
 
@@ -559,8 +573,18 @@ pub fn resolve_face(face: u8, race: u8) -> Option<u32> {
     let face_band = PC_MODEL_IDS[(race - 1) as usize][0];
     let base = face_band.first()?.1;
     let count = face_band.get(1).map_or(u16::MAX, |&(thr, _)| thr);
-    if base == 0 || u16::from(face) >= count {
+    if base == 0 {
         return None;
+    }
+    if u16::from(face) >= count {
+        // Retail clamp: an id past the slot's table renders model 0, never a
+        // missing part ("wrong GRP number", research/XIClient/src/XIClient/
+        // source/World/Actor/SkeletalMeshActor.cpp constexpr). For the face slot
+        // that means an out-of-band face byte renders face 0 instead of a
+        // decapitated PC. Loud because it means the server sent a face this
+        // client's tables don't know -- the wrong-face render needs explaining.
+        warn!("face {face} out of band for race {race}: clamping to face 0 (retail behavior)");
+        return Some(base);
     }
     Some(base + u32::from(face))
 }
@@ -682,6 +706,14 @@ pub fn dispatch_look_driven_models(
             let mut equipment: Vec<u32> = Vec::new();
             if let Some(file_id) = resolve_face(face, race) {
                 equipment.push(file_id);
+            } else {
+                // Only reachable for a race outside 1..=8; the face DAT carries
+                // the head and hair, so it must be loud enough for a user's
+                // stderr to explain a decapitated screenshot.
+                warn!(
+                    "pc face unresolved (entity {}): race {} is not a PC race (face {}) -- head/hair will not render",
+                    we.id, race, face
+                );
             }
 
             let slot_models = [head, body, hands, legs, feet, main, sub, ranged];
@@ -715,7 +747,7 @@ pub fn dispatch_look_driven_models(
                     race,
                     mounted,
                     equipment: equipment.clone(),
-                    // Slot 2 is the body (SkeletalMeshActor.cpp:1659 takes
+                    // Slot 2 is the body (SkeletalMeshActor.cpp SkeletalMeshActor::SetEquipModel takes
                     // waist_type from that slot's CIB); `equipment` above drops
                     // slot identity, so pass it separately.
                     body: resolve_equipment_model(EQUIP_SLOT_BODY, body, race),
@@ -878,7 +910,10 @@ mod tests {
 
         assert_eq!(resolve_equipment_slot(0x1260, 1), Some(102961));
 
-        assert_eq!(resolve_equipment_slot(0x12A0, 1), None);
+        // Past the last band: retail clamps to model 0 of the slot ("wrong GRP
+        // number", SkeletalMeshActor.cpp constexpr), so the head slot's base file
+        // comes back instead of a dropped body part.
+        assert_eq!(resolve_equipment_slot(0x12A0, 1), Some(7112));
     }
 
     #[test]
@@ -908,10 +943,12 @@ mod tests {
 
     #[test]
     fn face_band_boundaries() {
-        // 32 face entries (0..31); index 31 is the last face file, 32 collides
-        // with the head slot (HumeM head base 7112).
+        // 32 face entries (0..31); index 31 is the last face file. An
+        // out-of-band face clamps to face 0 the way retail does ("wrong GRP
+        // number", SkeletalMeshActor.cpp constexpr) -- never a decapitated PC.
         assert_eq!(resolve_face(31, 1), Some(7111));
-        assert_eq!(resolve_face(32, 1), None);
+        assert_eq!(resolve_face(32, 1), Some(7080));
+        assert_eq!(resolve_face(255, 5), Some(19784));
         assert_eq!(resolve_equipment_slot(0x1000, 1), Some(7112));
         // Invalid races reject.
         assert_eq!(resolve_face(0, 0), None);

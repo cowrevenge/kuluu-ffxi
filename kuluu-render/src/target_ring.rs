@@ -2,10 +2,10 @@ use std::f32::consts::TAU;
 
 use bevy::prelude::*;
 
-use crate::camera::{nameplate_anchor_y, OperatorCamera};
+use crate::camera::{nameplate_anchor, OperatorCamera};
 use crate::components::WorldEntity;
-use crate::scene::{BakedActor, Target};
-use crate::snapshot::SceneState;
+use crate::entity_table::EntityTable;
+use crate::scene::{BakedActor, NameplateLocator, Target};
 
 const ARROW_COLOR: Color = Color::srgb(1.00, 0.96, 0.60);
 
@@ -60,7 +60,7 @@ pub fn target_ring_color(engaged_on_target: bool) -> Color {
     }
 }
 
-// research/xim UiState.kt:1289-1300 getSubTargetColorMask: the sub-target cursor is
+// research/xim UiState.kt getSubTargetColorMask: the sub-target cursor is
 // tinted by RANGE, not target type (invalid types are never candidates, so they get no
 // cursor). Three states vs the action's max range: <80% in-range, <100% edge, else out.
 const SUB_TARGET_IN_RANGE: Color = Color::srgb(0.502, 0.502, 1.0);
@@ -101,24 +101,25 @@ pub fn arrow_bob_offset(seconds: f32) -> f32 {
     (seconds * ARROW_BOB_FREQUENCY).sin() * ARROW_BOB_AMPLITUDE
 }
 
-fn engaged_on(state: &SceneState, target_id: u32) -> bool {
-    state
-        .snapshot
-        .self_char_id
-        .and_then(|sid| state.snapshot.entities.iter().find(|e| e.id == sid))
-        .map(|self_pc| self_pc.bt_target_id == target_id)
-        .unwrap_or(false)
+// Piece 3: the self slot + its record come from the entity table, so this
+// file no longer scans snapshot.entities for "who am I".
+fn engaged_on(table: &EntityTable, target_id: u32) -> bool {
+    table.self_id().is_some_and(|sid| {
+        table
+            .get(sid)
+            .is_some_and(|r| r.entity.bt_target_id == target_id)
+    })
 }
 
 pub fn draw_target_arrow_system(
     target: Res<Target>,
-    state: Res<SceneState>,
+    table: Res<EntityTable>,
     time: Res<Time>,
     cam_q: Query<&Transform, With<OperatorCamera>>,
     world_q: Query<(
         &Transform,
         &WorldEntity,
-        Option<&BakedActor>,
+        Option<&NameplateLocator>,
         Has<crate::components::MountedRider>,
     )>,
     mut gizmos: Gizmos,
@@ -131,18 +132,18 @@ pub fn draw_target_arrow_system(
     };
     let cam_pos = cam_t.translation;
 
-    let fill = target_ring_color(engaged_on(&state, target_id));
+    let fill = target_ring_color(engaged_on(&table, target_id));
 
-    for (t, w, baked, mounted) in &world_q {
+    for (t, w, locator, mounted) in &world_q {
         if w.id != target_id {
             continue;
         }
 
-        let tip_y = t.translation.y
-            + nameplate_anchor_y(baked, mounted)
-            + ARROW_TIP_ABOVE_ANCHOR
-            + arrow_bob_offset(time.elapsed_secs());
-        let apex = Vec3::new(t.translation.x, tip_y, t.translation.z);
+        let Some(anchor) = nameplate_anchor(t, locator, mounted) else {
+            continue;
+        };
+        let apex =
+            anchor + Vec3::Y * (ARROW_TIP_ABOVE_ANCHOR + arrow_bob_offset(time.elapsed_secs()));
         draw_camera_facing_arrow(&mut gizmos, apex, cam_pos, fill, ARROW_BORDER_COLOR);
         break;
     }
@@ -159,13 +160,13 @@ const SUB_TARGET_FLASH_DUTY: f32 = 0.65;
 /// arrow as the lock-on target, but blinking.
 pub fn draw_sub_target_cursor_system(
     mode: Res<crate::InputMode>,
-    state: Res<SceneState>,
+    table: Res<EntityTable>,
     time: Res<Time>,
     cam_q: Query<&Transform, With<OperatorCamera>>,
     world_q: Query<(
         &Transform,
         &WorldEntity,
-        Option<&BakedActor>,
+        Option<&NameplateLocator>,
         Has<crate::components::MountedRider>,
     )>,
     mut gizmos: Gizmos,
@@ -184,18 +185,18 @@ pub fn draw_sub_target_cursor_system(
     };
     let cam_pos = cam_t.translation;
 
-    let self_pos = state
-        .snapshot
-        .self_char_id
-        .and_then(|sid| world_q.iter().find(|(_, w, _, _)| w.id == sid))
+    // Piece 3: self identity via the table's self slot.
+    let self_pos = world_q
+        .iter()
+        .find(|(_, w, _, _)| table.is_self(w.id))
         .map(|(t, _, _, _)| t.translation);
 
-    for (t, w, baked, mounted) in &world_q {
+    for (t, w, locator, mounted) in &world_q {
         if w.id != candidate {
             continue;
         }
 
-        // research/xim UiState.kt:604 — the cursor is tinted by range to the
+        // research/xim UiState.kt drawFrame — the cursor is tinted by range to the
         // candidate; full 3D distance vs the action's max range.
         let fill = match self_pos {
             Some(sp) => {
@@ -204,11 +205,11 @@ pub fn draw_sub_target_cursor_system(
             None => ARROW_COLOR,
         };
 
-        let tip_y = t.translation.y
-            + nameplate_anchor_y(baked, mounted)
-            + ARROW_TIP_ABOVE_ANCHOR
-            + arrow_bob_offset(time.elapsed_secs());
-        let apex = Vec3::new(t.translation.x, tip_y, t.translation.z);
+        let Some(anchor) = nameplate_anchor(t, locator, mounted) else {
+            continue;
+        };
+        let apex =
+            anchor + Vec3::Y * (ARROW_TIP_ABOVE_ANCHOR + arrow_bob_offset(time.elapsed_secs()));
         draw_camera_facing_arrow(&mut gizmos, apex, cam_pos, fill, ARROW_BORDER_COLOR);
         break;
     }
@@ -272,31 +273,31 @@ fn model_ring_radius(baked: Option<&BakedActor>) -> f32 {
 #[cfg(not(target_arch = "wasm32"))]
 pub fn draw_target_ring_system(
     target: Res<Target>,
-    state: Res<SceneState>,
+    table: Res<EntityTable>,
     time: Res<Time>,
     world_q: Query<(&Transform, &WorldEntity, Option<&BakedActor>)>,
     geom: Option<Res<crate::dat_mzb::MzbCollisionGeometry>>,
     mut gizmos: Gizmos,
 ) {
     let ground = |xz: Vec2, ref_y: f32| geom.as_ref().and_then(|g| g.ground_nearest(xz, ref_y));
-    draw_target_ring(&target, &state, &time, &world_q, &ground, &mut gizmos);
+    draw_target_ring(&target, &table, &time, &world_q, &ground, &mut gizmos);
 }
 
 #[cfg(target_arch = "wasm32")]
 pub fn draw_target_ring_system(
     target: Res<Target>,
-    state: Res<SceneState>,
+    table: Res<EntityTable>,
     time: Res<Time>,
     world_q: Query<(&Transform, &WorldEntity, Option<&BakedActor>)>,
     mut gizmos: Gizmos,
 ) {
     let ground = |_xz: Vec2, _ref_y: f32| None;
-    draw_target_ring(&target, &state, &time, &world_q, &ground, &mut gizmos);
+    draw_target_ring(&target, &table, &time, &world_q, &ground, &mut gizmos);
 }
 
 fn draw_target_ring(
     target: &Target,
-    state: &SceneState,
+    table: &EntityTable,
     time: &Time,
     world_q: &Query<(&Transform, &WorldEntity, Option<&BakedActor>)>,
     ground: &impl Fn(Vec2, f32) -> Option<f32>,
@@ -305,7 +306,7 @@ fn draw_target_ring(
     let Some(target_id) = target.id else {
         return;
     };
-    let base = if engaged_on(state, target_id) {
+    let base = if engaged_on(table, target_id) {
         RING_ENGAGED_RGB
     } else {
         RING_NEUTRAL_RGB

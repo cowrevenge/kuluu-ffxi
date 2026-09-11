@@ -183,6 +183,7 @@ struct BakedSkeleton {
     world: Vec<[[f32; 4]; 4]>,
 
     raw: Option<std::sync::Arc<ffxi_dat::bone::Skeleton>>,
+    nameplate_locator: crate::scene::NameplateLocator,
 }
 
 fn baked_skeleton_for_file(file_id: u32) -> Option<BakedSkeleton> {
@@ -251,9 +252,12 @@ fn load_skeleton(file_id: u32) -> Option<BakedSkeleton> {
         max_z,
         max_z - min_z,
     );
+    let locator_skeleton =
+        ffxi_dat::skel::parse(ffxi_dat::datid::DatId::from_name(&chunk.name), chunk.data);
     Some(BakedSkeleton {
         world,
         raw: Some(std::sync::Arc::new(skeleton)),
+        nameplate_locator: crate::scene::NameplateLocator::from_skeleton(&locator_skeleton, 1.0),
     })
 }
 
@@ -484,6 +488,14 @@ pub fn process_load_vos2_requests(
             None => baked_skeleton(req.race),
         };
 
+        if let Some(baked) = baked_owned.as_ref() {
+            commands.entity(bevy_e).insert(baked.nameplate_locator);
+        } else {
+            commands
+                .entity(bevy_e)
+                .remove::<crate::scene::NameplateLocator>();
+        }
+
         if let (Some(_dat_id), Some(baked)) = (req.skeleton_file_id, baked_owned.as_ref()) {
             if let Some(raw) = baked.raw.as_ref() {
                 let fits = skeleton_fits_mesh(baked, &loaded.mesh);
@@ -594,19 +606,17 @@ pub fn process_load_vos2_requests(
 
                 let actor_height = (actor_max_y - actor_min_y).max(0.1);
 
-                commands.entity(bevy_e).try_insert(SkinnedActor {
+                commands.entity(bevy_e).insert(SkinnedActor {
                     dat_id: raw_dat_id_for_skeleton(raw),
                     bone_entities,
                     pivot,
                     min_local_y: actor_min_y,
                     max_local_y: actor_max_y,
                 });
-                commands
-                    .entity(bevy_e)
-                    .try_insert(crate::scene::BakedActor {
-                        min_mesh_y: actor_min_y,
-                        actor_height,
-                    });
+                commands.entity(bevy_e).insert(crate::scene::BakedActor {
+                    min_mesh_y: actor_min_y,
+                    actor_height,
+                });
                 info!(
                     "skinned actor spawn: file_id={} entity_id={} verts={} groups={} \
                      slot=[{:.2}..{:.2}] actor=[{:.2}..{:.2}] actor_height={:.2}",
@@ -659,12 +669,12 @@ pub fn process_load_vos2_requests(
                 let merged_max = prev_max.max(slot_max);
                 cpu_extent.insert(req.entity_id, (merged_min, merged_max));
 
-                commands
-                    .entity(bevy_e)
-                    .try_insert(crate::scene::BakedActor {
-                        min_mesh_y: merged_min,
-                        actor_height: (merged_max - merged_min).max(0.1),
-                    });
+                // Replace, same as the skinned path above: later mesh files for this
+                // entity merge into `cpu_extent`/this range and must be able to move it.
+                commands.entity(bevy_e).insert(crate::scene::BakedActor {
+                    min_mesh_y: merged_min,
+                    actor_height: (merged_max - merged_min).max(0.1),
+                });
             }
         }
     }
@@ -1451,6 +1461,7 @@ pub fn process_load_vos2_requests_ffxi(
         let Some(skeleton) = baked.raw.as_ref() else {
             continue;
         };
+        commands.entity(bevy_e).insert(baked.nameplate_locator);
 
         if despawned.insert(req.entity_id) {
             commands.entity(bevy_e).remove::<Mesh3d>();
@@ -1505,7 +1516,11 @@ pub fn process_load_vos2_requests_ffxi(
         );
 
         let actor_height = (actor_max - actor_min).max(0.1);
-        commands.entity(bevy_e).try_insert(FfxiActor {
+        // Replace, same as the non-FFXI path above: an outfit's files can land
+        // on different frames, and each arrival rewrites the full cumulative
+        // range read back from q_actor — try_insert would freeze both components
+        // at the FIRST file's extent (its insert wins, later ones silently no-op).
+        commands.entity(bevy_e).insert(FfxiActor {
             skeleton: skeleton.clone(),
 
             dat_id: raw_dat_id_for_skeleton(skeleton),
@@ -1515,7 +1530,7 @@ pub fn process_load_vos2_requests_ffxi(
             min_local_y: actor_min,
             max_local_y: actor_max,
         });
-        commands.entity(bevy_e).try_insert(BakedActor {
+        commands.entity(bevy_e).insert(BakedActor {
             min_mesh_y: actor_min,
             actor_height,
         });
@@ -2324,16 +2339,22 @@ pub fn spawn_prepared_equipped(
     }
 
     if spawned > 0 {
+        if let Some(baked) = baked_skeleton(prepared.race) {
+            commands.entity(parent).insert(baked.nameplate_locator);
+        } else {
+            commands
+                .entity(parent)
+                .remove::<crate::scene::NameplateLocator>();
+        }
         let actor_height = (prepared.max_mesh_y - prepared.min_mesh_y).max(0.1);
 
-        // Matches the skinned-actor path's spawn line: actor_height is what the
-        // nameplate anchor, the chase-camera anchor and the pick hitbox all size
-        // themselves from, so it needs to be observable per race/model.
         info!(
             "equipped actor spawn: parent={:?} race={} mesh=[{:.2}..{:.2}] actor_height={:.2}",
             parent, prepared.race, prepared.min_mesh_y, prepared.max_mesh_y, actor_height,
         );
-        commands.entity(parent).try_insert(BakedActor {
+        // Replace, not try-insert: re-equipping/re-spawning must move the anchor
+        // height to the freshly assembled range instead of keeping a stale one.
+        commands.entity(parent).insert(BakedActor {
             min_mesh_y: prepared.min_mesh_y,
             actor_height,
         });
@@ -2374,6 +2395,18 @@ fn pbr_from_specular(exponent: f32, _intensity: f32) -> (f32, f32) {
 #[cfg(test)]
 mod ffxi_skin_tests {
     use super::*;
+
+    #[test]
+    fn nameplate_legacy_loader_retains_authored_locators() {
+        if DatRoot::from_env_or_default().is_err() {
+            return;
+        }
+        for (file_id, expected_y) in [(1748, 3.5), (19776, 1.3), (26352, 2.6)] {
+            let skeleton = load_skeleton(file_id).expect("installed retail skeleton");
+            assert!((skeleton.nameplate_locator.offset.unwrap().y - expected_y).abs() < 1e-5);
+        }
+    }
+
     use ffxi_dat::vos2::{Vos2BoneIndices, Vos2Header, Vos2Vertex};
 
     fn empty_header(flip: u16, kind_type: u16) -> Vos2Header {

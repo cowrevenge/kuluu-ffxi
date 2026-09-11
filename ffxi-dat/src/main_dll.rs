@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use crate::{DatError, Result};
@@ -11,7 +12,7 @@ const SCAN_WORDS: usize = 0xC000;
 
 const WEAPON_SKILL_HINT: u32 = 0xCB81_CB81;
 const DANCE_SKILL_HINT: u32 = 0xB9E2_B9E2;
-// research/xim MainDll.kt:47 emoteAnimationOffsetHint.
+// research/xim MainDll.kt emoteAnimationOffsetHint.
 const EMOTE_HINT: u32 = 0x4827_4827;
 // research/xim MainDll.kt raceConfigLookupTableOffsetHint / actionAnimationFileTableOffsetHint.
 const RACE_CONFIG_HINT: u32 = 0xA01B_A01B;
@@ -52,6 +53,7 @@ const ZONE_MAP_SIZE_NUMERATOR: u16 = 2560;
 /// The record's low nibble at byte 4 picks which file-table base its
 /// `file_table_offset` counts from. research/xim `ZoneMapTable.getFileTableOffset`.
 const ZONE_MAP_FILE_TABLE_BASES: [u32; 4] = [0x14C0, 0xD02F, 0xD147, 0x1592];
+const ZONE_MAP_FILE_TABLE_BASE_MASK: u8 = 0x0F;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ZoneMapRecord {
@@ -120,20 +122,49 @@ impl MainDll {
     /// sub-zone 0 exists (kuluu-bqm5).
     pub fn zone_maps(&self, zone_id: u16) -> Vec<ZoneMapRecord> {
         let mut out = Vec::new();
+        self.for_each_zone_map(|rec| {
+            if rec.zone_id == zone_id {
+                out.push(rec);
+            }
+        });
+        out
+    }
+
+    /// How many maps each zone ships, ascending by zone id. One walk, so a
+    /// caller that needs every zone's count (the Change Map list) does not
+    /// re-walk the table per zone (kuluu-u8p1).
+    ///
+    /// Rows whose key is negative are skipped: the field is signed (research/xim
+    /// ZoneMapTable.kt reads it with `next16Signed`) and xim only reaches those
+    /// rows through a zone's `customDefinition.zoneMapId`, never through a zone
+    /// id the server sends. On the retail install they are the 0xFF07..0xFFFF
+    /// band -- 153 keys, none of them a zone.
+    pub fn zone_map_counts(&self) -> BTreeMap<u16, usize> {
+        let mut counts: BTreeMap<u16, usize> = BTreeMap::new();
+        self.for_each_zone_map(|rec| {
+            if rec.zone_id as i16 >= 0 {
+                *counts.entry(rec.zone_id).or_default() += 1;
+            }
+        });
+        counts
+    }
+
+    /// The zone-map table is a flat run of records ending at the first zero
+    /// `has_next` byte, so every read of it costs the same walk (research/xim
+    /// src/jsMain/kotlin/xim/resource/table/ZoneMapTable.kt, `parse`).
+    fn for_each_zone_map(&self, mut f: impl FnMut(ZoneMapRecord)) {
         let Some(mut base) = self.zone_map_base else {
-            return out;
+            return;
         };
         loop {
             let Some(rec) = self.bytes.get(base..base + ZONE_MAP_STRIDE) else {
-                return out;
+                return;
             };
-            if u16::from_le_bytes([rec[0], rec[1]]) == zone_id {
-                if let Some(parsed) = parse_zone_map(rec) {
-                    out.push(parsed);
-                }
+            if let Some(parsed) = parse_zone_map(rec) {
+                f(parsed);
             }
             match self.bytes.get(base + ZONE_MAP_NEXT_DIVISOR) {
-                Some(0) | None => return out,
+                Some(0) | None => return,
                 Some(_) => base += ZONE_MAP_STRIDE,
             }
         }
@@ -148,7 +179,7 @@ impl MainDll {
     }
 
     /// First emote-animation file id for a race (the look race byte, HumeM=1);
-    /// research/xim MainDll.kt:120-121.
+    /// research/xim MainDll.kt getBaseEmoteAnimationIndex.
     pub fn base_emote_index(&self, race_index: u8) -> Option<u16> {
         self.read16(self.emote_base? + race_index as usize * 2)
     }
@@ -230,7 +261,8 @@ fn parse_zone_map(rec: &[u8]) -> Option<ZoneMapRecord> {
     if divisor == 0 {
         return None;
     }
-    let base = *ZONE_MAP_FILE_TABLE_BASES.get(usize::from(rec[4] & 0x0F))?;
+    let base =
+        *ZONE_MAP_FILE_TABLE_BASES.get(usize::from(rec[4] & ZONE_MAP_FILE_TABLE_BASE_MASK))?;
     let file_table_offset = i16::from_le_bytes([rec[8], rec[9]]);
     Some(ZoneMapRecord {
         zone_id: u16::from_le_bytes([rec[0], rec[1]]),
@@ -375,6 +407,64 @@ mod tests {
         assert_eq!((rec.x_offset, rec.y_offset), (10, -20));
         assert_eq!(dll.zone_map(230, 0).map(|r| r.size), Some(320));
         assert_eq!(dll.zone_map(999, 0), None);
+    }
+
+    #[test]
+    fn zone_map_counts_tallies_every_zone_and_skips_the_client_only_keys() {
+        let mut bytes = vec![0u8; ZONE_MAP_STRIDE * 5];
+        for (slot, zone, sub) in [
+            (0usize, 238u16, 1u8),
+            (1, 238, 2),
+            (2, 100, 0),
+            (3, 0xFF07, 0),
+        ] {
+            let at = slot * ZONE_MAP_STRIDE;
+            bytes[at..at + 2].copy_from_slice(&zone.to_le_bytes());
+            bytes[at + 2] = sub;
+            bytes[at + 5] = 4;
+            bytes[at + ZONE_MAP_NEXT_DIVISOR] = 1;
+        }
+        bytes[3 * ZONE_MAP_STRIDE + ZONE_MAP_NEXT_DIVISOR] = 0;
+        let dll = MainDll {
+            zone_map_base: Some(0),
+            ..blank(bytes)
+        };
+
+        assert_eq!(
+            dll.zone_map_counts(),
+            BTreeMap::from([(238, 2), (100, 1)]),
+            "one pass tallies each zone's rows, and the negative key is not a zone"
+        );
+        assert_eq!(dll.zone_map_counts().get(&999), None);
+    }
+
+    /// Gated on a retail install (self-skips). The Change Map list is built from
+    /// `zone_map_counts`, so a count that disagrees with the per-zone walk the
+    /// loader indexes would put a row on screen that previews blank (kuluu-u8p1).
+    #[test]
+    fn real_dll_zone_map_counts_agree_with_the_per_zone_walk() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join(crate::archive::DEFAULT_INSTALL_DIR);
+        let Ok(dll) = MainDll::load(&root) else {
+            return;
+        };
+
+        let counts = dll.zone_map_counts();
+        assert!(!counts.is_empty(), "the retail table names zones");
+        for (&zone, &count) in counts.iter() {
+            assert_eq!(dll.zone_maps(zone).len(), count, "zone {zone}");
+        }
+        assert_eq!(counts.get(&238).copied(), Some(2), "Windurst Waters");
+        assert!(
+            counts.keys().all(|&zone| zone as i16 >= 0),
+            "the 0xFF07.. band is keyed by client map ids, not zones"
+        );
+        assert_eq!(
+            counts.get(&157).copied(),
+            Some(6),
+            "Middle Delkfutt's Tower, a zone POLUtils' map table omits"
+        );
     }
 
     #[test]

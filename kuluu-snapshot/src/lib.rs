@@ -2,6 +2,32 @@
 
 use serde::{Deserialize, Serialize};
 
+// v28: ViewerEvent::ActionStarted.outcome - the first result block as one typed
+// Option<ResultOutcome> (resolution + info bits + hitDistortion + knockback, ffxi-proto enums
+// from the pinned vendor/server headers) instead of four parallel u8 fields that spelled "no
+// result block" as zero. None means no result block was read; resolution 0 is Hit, so absence
+// must not be a value.
+// v27: ViewerEvent::ActionStarted.{info, hit_distortion, knockback, kind} - the first
+// result's per-result outcome bits packed by BATTLE2 (s2c 0x028): Defeated/CriticalHit
+// flags, the hit-distortion level and the knockback level that drive the victim's reaction
+// routine.
+// v25: ViewerEvent::TargetChanged - the server-pushed retarget (s2c 0x058 ASSIST).
+// Nothing in the snapshot carries the server's chosen target, so /assist and
+// auto-target-after-kill had no way to move the client's target cursor.
+// v24: Entity.monstrosity and CharFlags.{invis, job_master_display}.
+// v23: SceneSnapshot.death_menu_offer — the durable s2c 0x0F9 Raise/Reraise or
+// Tractor offer shown while dead. (Upstream's "v20"; renumbered on merge because our
+// side had already spent 20-22 on zone_generation / untargetable / name_vis.)
+// v22: Entity.name_vis is now Option<u8> — None until a General-block update carries
+// it. The byte rides UPDATE_HP (entity_update.cpp CEntityUpdatePacket::updateWith/:408), not the Position block,
+// so a POS-only 0x00E must not clobber the last known value with its zero-filled byte.
+// v21: Entity.char_flags.untargetable — flags1 TargetOffFlag, the server's
+// targetability authority (LSB m_flags FLAG_UNTARGETABLE for NPC/MOB, the explicit
+// "Untargetable player" bit for PCs). namevis no longer gates targeting.
+// v20: SceneSnapshot.zone_generation — a counter bumped on every zone change so the
+// party frame's content key differs after a transition even when the roster is
+// byte-identical to the previous zone (the fast-path race where the 0x0DD/0x0DF refill
+// lands in the same poll as the ZoneChanged clear).
 // v19: the cutscene channel — ViewerEvent::{CutsceneStarted,CutsceneCue,CutsceneEnded} plus
 // CutsceneCue/CutsceneActor. The event VM's staging opcodes (actor motion, screen fade,
 // camera lock, event-hide, mount) had no way across the boundary at all before this.
@@ -35,13 +61,16 @@ use serde::{Deserialize, Serialize};
 // v5: InventoryItem.charges_remaining + next_use_vana_ts (item recast/charges).
 // v4: SceneSnapshot.delivery_box (dedicated delivery screen) + ViewerCommand::DeliveryBox
 // (postcard frames are not self-describing, so any shape change bumps this).
-pub const PROTOCOL_VERSION: u32 = 19;
+pub const PROTOCOL_VERSION: u32 = 28;
 
 /// Longest countdown `SceneSnapshot::status_icon_expiries` can carry. The
 /// producer rejects anything beyond it as a corrupt 0x063 timestamp, and the HUD
 /// reserves label width for the widest string inside the same bound, so the two
 /// cannot drift into a countdown nothing has room to draw.
 pub const MAX_STATUS_TIMER_SECS: u32 = 100 * 3600;
+
+/// vendor/server/src/map/entities/baseentity.h NAMEVIS VIS_HIDE_NAME
+pub const NAMEVIS_HIDE_NAME: u8 = 0x08;
 
 /// The one clock for `ability_recasts` math: local wall-clock Unix seconds.
 /// The producer stamps expiries with it and every gate/display computes
@@ -106,7 +135,7 @@ pub enum BlowfishStatus {
     PendingZone,
 }
 
-// vendor/server/src/map/enums/weather.h:24-46 (None=0..Darkness=19)
+// vendor/server/src/map/enums/weather.h Weather (None=0..Darkness=19)
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum Weather {
@@ -136,7 +165,7 @@ pub enum Weather {
 impl Weather {
     pub fn from_lsb(n: u16) -> Self {
         use Weather::*;
-        // vendor/server/src/map/enums/weather.h:24-46
+        // vendor/server/src/map/enums/weather.h Weather
         const TABLE: [Weather; 20] = [
             None,
             Sunshine,
@@ -159,7 +188,7 @@ impl Weather {
             Gloom,
             Darkness,
         ];
-        // weather.h:46 notes a repeating 0x14-0x27 set whose usage is unknown;
+        // weather.h Weather notes a repeating 0x14-0x27 set whose usage is unknown;
         // do not fabricate a real weather for undefined ids.
         TABLE.get(n as usize).copied().unwrap_or(Weather::None)
     }
@@ -175,8 +204,7 @@ pub enum EntityKind {
     Other,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EntityLook {
     Standard {
         modelid: u16,
@@ -202,12 +230,59 @@ pub enum EntityLook {
         /// `BlockID` of the leaves those routines swing, so it is the only
         /// join from this entity to its geometry. `None` when the server sent
         /// an all-zero id (`DoorId::new`'s reject).
-        #[serde(default)]
         door_id: Option<[u8; 4]>,
     },
     Transport {
         size: u16,
+        model_id: Option<u32>,
+        animation_start: Option<u32>,
     },
+}
+
+macro_rules! entity_look_codecs {
+    ($($variants:tt)*) => {
+        #[derive(Serialize, Deserialize)]
+        #[serde(remote = "EntityLook", tag = "kind", rename_all = "snake_case")]
+        enum HumanEntityLook { $($variants)* }
+
+        #[derive(Serialize, Deserialize)]
+        #[serde(remote = "EntityLook")]
+        enum BinaryEntityLook { $($variants)* }
+    };
+}
+
+entity_look_codecs! {
+    Standard { modelid: u16 },
+    Equipped {
+        face: u8, race: u8, head: u16, body: u16, hands: u16, legs: u16,
+        feet: u16, main: u16, sub: u16, ranged: u16,
+    },
+    Door { size: u16, #[serde(default)] door_id: Option<[u8; 4]> },
+    Transport {
+        size: u16,
+        #[serde(default)] model_id: Option<u32>,
+        #[serde(default)] animation_start: Option<u32>,
+    },
+}
+
+impl Serialize for EntityLook {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        if serializer.is_human_readable() {
+            HumanEntityLook::serialize(self, serializer)
+        } else {
+            BinaryEntityLook::serialize(self, serializer)
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for EntityLook {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        if deserializer.is_human_readable() {
+            HumanEntityLook::deserialize(deserializer)
+        } else {
+            BinaryEntityLook::deserialize(deserializer)
+        }
+    }
 }
 
 /// Scene-side mirror of `ffxi_proto::decode::CharFlags` — the 0x0D/0x0E
@@ -235,6 +310,29 @@ pub struct CharFlags {
     pub allegiance: u8,
     pub new_character: bool,
     pub mentor: bool,
+
+    /// `Flags4.JobMasterFlag` (bit 6 of the u8 at body offset 0x2F): LSB's
+    /// job-master display toggle — `SUPERIOR_LEVEL == 5 && m_jobMasterDisplay`
+    /// (vendor/server/src/map/packets/char_update.cpp CCharUpdatePacket::updateWith), written on every
+    /// non-despawn 0x0D outside all SendFlg blocks. Drives the same nameplate
+    /// star as `lfg_master`, which retail keys off `Flags3.LfgMasterFlag` — a
+    /// flag LSB hardcodes to 0 (char_update.cpp CCharUpdatePacket::updateWith).
+    #[serde(default)]
+    pub job_master_display: bool,
+
+    /// `Flags1.InvisFlag` (bit 29): the server's player-invisibility bit — set
+    /// for PCs only, when a GM hides themselves or an EFFECTFLAG_INVISIBLE
+    /// status effect is active. Retail keeps such players targetable but draws
+    /// nothing: no model, no nameplate.
+    #[serde(default)]
+    pub invis: bool,
+
+    /// `Flags1.TargetOffFlag` (bit 19): the server's untargetable bit — LSB
+    /// `m_flags & FLAG_UNTARGETABLE` for NPC/MOB, char_update's "Untargetable
+    /// player" field for PCs. The targetability authority; see
+    /// [`Entity::is_targetable`] and ffxi-proto's decode citation.
+    #[serde(default)]
+    pub untargetable: bool,
 }
 
 /// A mount being ridden. Retail draws the two arms from different model families
@@ -314,10 +412,28 @@ pub struct Entity {
 
     #[serde(default)]
     pub char_flags: CharFlags,
+
+    /// `GP_SERV_CHAR_PC.MonstrosityFlags` (body 0x3A) — the character is a
+    /// monstrosity (Feretory). Written in the Model block only; drives the retail
+    /// Monstrosity nameplate marker. See ffxi-proto's `PosHead::monstrosity`.
+    #[serde(default)]
+    pub monstrosity: bool,
+
+    /// entity_update byte 0x2B (LSB `namevis`; PosHead `flags3 >> 24`), written
+    /// under UPDATE_HP — vendor/server/src/map/packets/entity_update.cpp CEntityUpdatePacket::updateWith/:408.
+    /// `None` until the first General-block update carries it; treated as visible,
+    /// matching the server's VIS_NONE default (baseentity.cpp CBaseEntity::CBaseEntity). LSB NAMEVIS
+    /// (vendor/server/src/map/entities/baseentity.h): 0x01 icon, 0x08 hide-name,
+    /// 0x80 ghost-phase — the other bits in the data are render-phase flags on real
+    /// NPCs (Survival Guides carry 0x20), so only 0x08 suppresses anything.
+    #[serde(default)]
+    pub name_vis: Option<u8>,
 }
 
-// LSB STATUS_TYPE. vendor/server/src/map/entities/baseentity.h
-mod status_type {
+// LSB STATUS_TYPE. vendor/server/src/map/entities/baseentity.h.
+// Public so the renderer can hide models on INVISIBLE without re-declaring
+// the byte (single source of truth).
+pub mod status_type {
     pub const DISAPPEAR: u8 = 2;
     pub const INVISIBLE: u8 = 3;
     pub const STATUS_4: u8 = 4;
@@ -326,9 +442,110 @@ mod status_type {
     pub const SHUTDOWN: u8 = 20;
 }
 
+// Retail's decode of the wire movement/animation speed bytes (research/XiPackets
+// world/server/0x000E): MovementSpeed2 = Speed * 0.1 yps drives how fast a model walks toward
+// its target, and AnimationSpeed = SpeedBase * 0.1 scales walk/run clip playback. The two are
+// separate values; the run factor multiplies `speed` only (vendor/server/src/map/entities/
+// battleentity.cpp CBattleEntity::UpdateSpeed), never `animationSpeed`. These live in
+// kuluu-snapshot so both the session reactor and the render layer read one source of truth.
+pub mod speed {
+    /// Retail's own decode of the wire speed byte (research/XiPackets world/server/0x000E,
+    /// MovementSpeed2 = Speed * 0.1 yps).
+    pub const SPEED_TO_YPS: f32 = 0.1;
+
+    // The server does not send a faster speed to a mounted player; LSB caps its mount speed at
+    // map.MOUNT_SPEED/2 = 40, below the 50 it sends on foot (vendor/server/src/map/entities/
+    // battleentity.cpp CBattleEntity::UpdateSpeed). Retail makes up the difference in the client,
+    // doubling the decoded speed while mounted and then clamping
+    // (research/XIClient/src/XIClient/source/World/Actor/ControllableActor.cpp
+    // ControllableActor::StepControl). Taking the packet at face value therefore makes mounting
+    // slower.
+    pub const MOUNTED_SPEED_MULTIPLIER: f32 = 2.0;
+
+    /// The retail client's movement ceiling in yalms per second (ControllableActor::StepControl).
+    pub const MAX_MOVE_SPEED_YPS: f32 = 30.0;
+
+    /// The speed LSB sends an unmounted PC, which every "step per tick" budget in the reactor is
+    /// calibrated against (vendor/server/src/map/entities/battleentity.cpp CBattleEntity::UpdateSpeed).
+    pub const BASE_PACKET_SPEED: u8 = 50;
+
+    /// The movement rate a walk/run clip is assumed to be authored at: the base packet speed
+    /// decoded to yalms per second (5.0). Kuluu inference, not an LSB or retail fact: XiPackets
+    /// gives only AnimationSpeed = SpeedBase * 0.1 as the playback scale (research/XiPackets
+    /// world/server/0x000E), so we assume clips are authored at the unmounted PC's movement rate
+    /// and read that byte as a multiplier against it: a slower mob walks in slow motion, a faster
+    /// one in fast forward.
+    pub const AUTHORED_ANIM_RATE: f32 = BASE_PACKET_SPEED as f32 * SPEED_TO_YPS;
+
+    /// Yalms per second for a decoded packet speed. `speed_base` is a separate value retail keeps but
+    /// never spends on the movement rate; StepControl reads only the doubled-and-clamped `speed`, so
+    /// scaling by `speed / speed_base` would under-drive a mounted PC rather than over-drive it.
+    pub const fn move_speed_yps(packet_speed: u8, mounted: bool) -> f32 {
+        let speed = packet_speed as f32 * SPEED_TO_YPS;
+        let speed = if mounted {
+            speed * MOUNTED_SPEED_MULTIPLIER
+        } else {
+            speed
+        };
+        speed.min(MAX_MOVE_SPEED_YPS)
+    }
+
+    /// Movement rate as a multiple of the unmounted run the callers' per-tick step budgets are sized for.
+    pub fn move_speed_ratio(packet_speed: u8, mounted: bool) -> f32 {
+        move_speed_yps(packet_speed, mounted) / move_speed_yps(BASE_PACKET_SPEED, false)
+    }
+
+    /// Walk/run clip playback scale for a decoded animationSpeed byte, relative to the authored
+    /// rate. Retail's AnimationSpeed = SpeedBase * 0.1 yps (research/XiPackets world/server/0x000E)
+    /// and the clips are authored at AUTHORED_ANIM_RATE, so the ratio is the playback multiplier:
+    /// a slower base walks in slow motion, a faster one in fast forward.
+    ///
+    /// A byte of 0 means "no authored rate", not zero speed: vendor/server/sql/npc_list.sql ships
+    /// NPCs with `speedsub` = 0 (Resistance_Fighter runs at speed 100 / speedsub 0), and both
+    /// instance_loader.cpp CInstanceLoader::LoadInstance and zoneutils.cpp LoadNPCList assign that
+    /// column straight to animationSpeed, so a real moving mob carries the byte. A zero playback
+    /// scale would freeze its walk clip; those mobs play at the authored rate.
+    pub const fn anim_rate_scale(speed_base: u8) -> f32 {
+        if speed_base == 0 {
+            return 1.0;
+        }
+        (speed_base as f32 * SPEED_TO_YPS) / AUTHORED_ANIM_RATE
+    }
+}
+
 impl Entity {
     pub fn is_dead(&self) -> bool {
         self.hp_pct == Some(0)
+    }
+
+    /// Retail-hidden helper NPC: VIS_HIDE_NAME set — mannequins, "blank"
+    /// cutscene actors. vendor/server/src/map/entities/baseentity.cpp CBaseEntity::IsNameHidden
+    /// `IsNameHidden() = namevis & FLAG_HIDE_NAME` (0x08); the NAMEVIS enum
+    /// defines only 0x01/0x08/0x80, so the other bits are render-phase flags,
+    /// not name suppression. Suppresses the nameplate only — never targeting.
+    pub fn name_hidden(&self) -> bool {
+        self.name_vis.is_some_and(|v| v & NAMEVIS_HIDE_NAME != 0)
+    }
+
+    /// LSB STATUS_TYPE::INVISIBLE: the server hides the model entirely —
+    /// worms between dive and surface (vendor/server/src/map/ai/controllers/
+    /// mob_controller.cpp). The vendored source only sets it on mobs; players
+    /// phase via namevis 0x80 instead. Hides model + nameplate; targeting is
+    /// already gated by [`Entity::status_selectable`].
+    pub fn is_invisible(&self) -> bool {
+        self.status == status_type::INVISIBLE
+            || (self.status == status_type::DISAPPEAR
+                && matches!(self.look, Some(EntityLook::Transport { .. })))
+    }
+
+    /// LSB `Flags1.InvisFlag` (bit 29): player-invisibility — a GM hiding
+    /// themselves or an EFFECTFLAG_INVISIBLE status effect. The server sets it
+    /// for PCs only (vendor/server/src/map/packets/char_update.cpp CCharUpdatePacket::updateWith), so the
+    /// kind gate is part of the fact, not a render preference. Unlike
+    /// [`Entity::is_invisible`] (STATUS_TYPE on mobs) this never gates targeting:
+    /// retail keeps invisible players targetable and draws nothing instead.
+    pub fn invis_flag(&self) -> bool {
+        matches!(self.kind, EntityKind::Pc) && self.char_flags.invis
     }
 
     // Blacklist (not whitelist) so an undecoded byte fails open, staying targetable.
@@ -344,7 +561,7 @@ impl Entity {
     /// interactable: retail sends a Talk (0x01A, action 0x00) on the door's
     /// act_index and the door's onTrigger lua drives open/confirm/zone-change.
     /// LSB gates doors on `look.size == 0x02`
-    /// (vendor/server/src/map/packets/c2s/0x01a_action.cpp:213); size 3/4 decode
+    /// (vendor/server/src/map/packets/c2s/0x01a_action.cpp GP_CLI_COMMAND_ACTION::process); size 3/4 decode
     /// to `Transport` (elevators/airships), which stay non-interactable.
     pub fn is_door(&self) -> bool {
         matches!(self.look, Some(EntityLook::Door { .. }))
@@ -353,8 +570,14 @@ impl Entity {
     /// Selectable by click / `<t>`. Dead players stay selectable so a healer can
     /// target them to Raise; dead mobs/NPCs do not. `Other` entities are not
     /// selectable except doors, whose Talk interaction is the retail door flow.
+    /// Targetability authority is the server's untargetable bit (flags1
+    /// TargetOffFlag = LSB m_flags FLAG_UNTARGETABLE for NPC/MOB) — namevis
+    /// never gates targeting upstream.
     pub fn is_targetable(&self) -> bool {
         if !self.status_selectable() {
+            return false;
+        }
+        if self.char_flags.untargetable {
             return false;
         }
         if matches!(self.kind, EntityKind::Other) && !self.is_door() {
@@ -457,7 +680,7 @@ pub struct ChatLine {
     pub spans: Vec<ChatSpan>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PartyMember {
     pub id: u32,
     pub act_index: u16,
@@ -476,7 +699,7 @@ pub struct PartyMember {
     pub is_alliance_leader: bool,
 
     /// Which party of the alliance this member sits in (0..2, or 3 for
-    /// "no party"). vendor/server/src/map/packets/s2c/0x0dd_group_list.cpp:40.
+    /// "no party"). vendor/server/src/map/packets/s2c/0x0dd_group_list.cpp GP_SERV_COMMAND_GROUP_LIST::GP_SERV_COMMAND_GROUP_LIST.
     #[serde(default)]
     pub party_no: u8,
 
@@ -539,6 +762,12 @@ pub struct SceneSnapshot {
     pub self_pos: Position,
     pub entities: Vec<Entity>,
     pub party: Vec<PartyMember>,
+
+    /// Monotonically increasing counter, bumped on every zone change. Forces
+    /// the party-frame content key to differ after a zone transition even when
+    /// the party data is byte-identical.
+    #[serde(default)]
+    pub zone_generation: u64,
 
     pub chat: Vec<ChatLine>,
 
@@ -653,7 +882,7 @@ pub struct SceneSnapshot {
     pub self_fishing: Option<SelfFishing>,
 
     /// The server's animation byte for self, from 0x037 CHAR_STATUS
-    /// (`vendor/server/src/map/packets/char_status.cpp:221` — `PChar->animation`).
+    /// (`vendor/server/src/map/packets/char_status.cpp CCharStatusPacket::CCharStatusPacket` — `PChar->animation`).
     /// Authoritative for the rest stance: CHAR_PC carries `Entity::animation` for
     /// other players, but self's own state only arrives here.
     #[serde(default)]
@@ -687,6 +916,8 @@ pub struct SceneSnapshot {
     /// renderer's sub-area latch seeds from. `None` until a login lands.
     #[serde(default)]
     pub sub_area: Option<u16>,
+    #[serde(default)]
+    pub voyage: Option<Voyage>,
 
     /// Job-emote unlock bitfield from s2c 0x11A (bit = job id - 1, bit 0 =
     /// WAR); `None` until the server answers a 0x119 request. Gates the
@@ -714,6 +945,18 @@ pub struct SceneSnapshot {
     /// touching `SessionState` (see `ffxi_proto::map::tracking`).
     #[serde(default)]
     pub widescan: WidescanList,
+
+    /// Server-offered alternative to returning to the home point while dead.
+    /// `None` is the ordinary home-point-only menu.
+    #[serde(default)]
+    pub death_menu_offer: Option<DeathMenuOffer>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeathMenuOffer {
+    Raise,
+    Tractor,
 }
 
 /// Mirror of `kuluu`'s wide-scan model across the wire boundary. Entries
@@ -815,7 +1058,7 @@ impl SceneSnapshot {
 
 /// s2c 0x00A myroom cluster; `model` is an interior model id, not a zone id —
 /// resolve via `ffxi_dat::zone_dat::effective_zone_dat_file_id`
-/// (vendor/server/src/map/packets/s2c/0x00a_login.cpp:32-34).
+/// (vendor/server/src/map/packets/s2c/0x00a_login.cpp GetMogHouseModelID).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MyRoom {
     pub model: u16,
@@ -929,7 +1172,7 @@ pub struct BazaarEntry {
 impl BazaarEntry {
     /// Gil charged for `quantity` units, tax included. Mirrors
     /// `kuluu::state::BazaarItem::total_price` (LSB
-    /// vendor/server/src/map/packets/c2s/0x106_bazaar_buy.cpp:103).
+    /// vendor/server/src/map/packets/c2s/0x106_bazaar_buy.cpp GP_CLI_COMMAND_BAZAAR_BUY::process totalPrice).
     pub fn total_price(&self, quantity: u32) -> u32 {
         const TAX_DIVISOR: u64 = 10_000;
         let base = u64::from(self.price) * u64::from(quantity);
@@ -1037,13 +1280,13 @@ pub struct InventoryItem {
     pub locked: bool,
     /// Current charges of a charged (usable/enchanted) item; `None` for
     /// non-charged items. From item extdata
-    /// (vendor/server/src/map/items/exdata/timer_info.h:31-32, memcpy'd at
-    /// 0x020_item_attr.cpp:43).
+    /// (vendor/server/src/map/items/exdata/timer_info.h ItemTimerInfo Header, memcpy'd at
+    /// 0x020_item_attr.cpp GP_SERV_COMMAND_ITEM_ATTR::GP_SERV_COMMAND_ITEM_ATTR).
     #[serde(default)]
     pub charges_remaining: Option<u8>,
     /// Absolute Vana'diel next-use timestamp (Earth seconds since the vanadiel
     /// epoch), `None` for non-charged items. Not zeroed on the ready path — LSB
-    /// only writes it on cooldown (0x020_item_attr.cpp:57-68) — so gate on
+    /// only writes it on cooldown (0x020_item_attr.cpp GP_SERV_COMMAND_ITEM_ATTR::GP_SERV_COMMAND_ITEM_ATTR) — so gate on
     /// `ts > now`, not `ts == 0`.
     #[serde(default)]
     pub next_use_vana_ts: Option<u32>,
@@ -1306,6 +1549,14 @@ pub enum ViewerEvent {
     EngagedBy {
         entity_id: u32,
     },
+
+    /// s2c 0x058 ASSIST: the server moved our target. `None` is the wire's
+    /// zero `AssistNo` (the target went away), which leaves the local target
+    /// alone rather than clearing it - retail's `RecvAssist` behaviour for a
+    /// zero id is not established.
+    TargetChanged {
+        target_id: Option<u32>,
+    },
     TellReceived {
         from: String,
         text: String,
@@ -1342,9 +1593,15 @@ pub enum ViewerEvent {
         /// `animation` (attack.h AttackAnimation) bits; only a `CATEGORY_BASIC_ATTACK` body
         /// carries them, absent otherwise.
         result: Option<(u8, u16)>,
-        /// First result's raw `animation` index, for every category — the file-table key of
+        /// First result's raw `animation` index, for every category: the file-table key of
         /// the caster's effect DAT. Absent on a result-less or truncated body.
         animation: Option<u16>,
+        /// The first result block as one typed outcome (ffxi_proto::melee::ResultOutcome):
+        /// resolution + info bits (Defeated/CriticalHit) + hitDistortion + knockback, read for
+        /// every category in the 0x028 per-result order (vendor/server/src/map/packets/s2c/
+        /// 0x028_battle2.cpp GP_SERV_COMMAND_BATTLE2::pack). None means no result block was
+        /// read: resolution 0 is Hit, so absence must not be spelled as zero.
+        outcome: Option<ffxi_proto::melee::ResultOutcome>,
     },
 
     /// One-shot emote broadcast (s2c 0x05A MOTIONMES): `emote_id` is the wire
@@ -1504,6 +1761,15 @@ pub enum ViewerCommand {
     DeliveryBox {
         op: DeliveryOp,
     },
+
+    /// Capture the native client's primary window to PNG via Bevy render-target
+    /// readback — no focus or screen-recording permission needed. GUI-side only:
+    /// the relay routes it into `DebugControl`, never the session (which treats
+    /// `AgentCommand::Screenshot` as a no-op). `None` leaves default naming
+    /// (`screenshot-N.png`) to the GUI side.
+    Screenshot {
+        path: Option<String>,
+    },
 }
 
 /// Viewer-issued delivery box operations. A thinner vocabulary than the
@@ -1635,8 +1901,11 @@ mod tests {
                 mount: None,
                 status: 0,
                 char_flags: CharFlags::default(),
+                monstrosity: false,
+                name_vis: None,
             }],
             party: vec![],
+            zone_generation: 7,
             chat: vec![ChatLine {
                 channel: ChatChannel::Say,
                 sender: "Other".into(),
@@ -1702,11 +1971,13 @@ mod tests {
             }),
             mh_2f_unlocked: None,
             sub_area: None,
+            voyage: None,
             emote_jobs: None,
             emote_chairs: None,
             check: None,
             check_message: None,
             widescan: WidescanList::default(),
+            death_menu_offer: None,
         }
     }
 
@@ -1805,7 +2076,11 @@ mod tests {
 
         let transport = Entity {
             kind: EntityKind::Other,
-            look: Some(EntityLook::Transport { size: 3 }),
+            look: Some(EntityLook::Transport {
+                size: 3,
+                model_id: None,
+                animation_start: None,
+            }),
             ..base.clone()
         };
         assert!(
@@ -1835,6 +2110,95 @@ mod tests {
                 "STATUS_TYPE {status} must not be targetable"
             );
         }
+    }
+
+    #[test]
+    fn entity_look_codecs_preserve_every_variant() {
+        const TRANSPORT_POSTCARD: &[u8] = &[3, 4, 1, 14, 1, 192, 196, 7];
+        let variants = [
+            (EntityLook::Standard { modelid: 321 }, "standard"),
+            (
+                EntityLook::Equipped {
+                    face: 1,
+                    race: 2,
+                    head: 3,
+                    body: 4,
+                    hands: 5,
+                    legs: 6,
+                    feet: 7,
+                    main: 8,
+                    sub: 9,
+                    ranged: 10,
+                },
+                "equipped",
+            ),
+            (
+                EntityLook::Door {
+                    size: 2,
+                    door_id: Some(*b"_6ww"),
+                },
+                "door",
+            ),
+            (
+                EntityLook::Transport {
+                    size: 4,
+                    model_id: Some(14),
+                    animation_start: Some(123_456),
+                },
+                "transport",
+            ),
+        ];
+        for (look, tag) in variants {
+            let json = serde_json::to_value(look).unwrap();
+            assert_eq!(json["kind"], tag);
+            assert_eq!(serde_json::from_value::<EntityLook>(json).unwrap(), look);
+            let bytes = postcard::to_allocvec(&look).unwrap();
+            assert_eq!(postcard::from_bytes::<EntityLook>(&bytes).unwrap(), look);
+            if matches!(look, EntityLook::Transport { .. }) {
+                assert_eq!(bytes, TRANSPORT_POSTCARD);
+            }
+        }
+    }
+
+    #[test]
+    fn ferry_protocol_preserves_transport_and_voyage_fields() {
+        const VERSION: u32 = 28;
+        const STAMP: u32 = 0x1200_3400;
+        assert_eq!(PROTOCOL_VERSION, VERSION);
+        let mut snapshot = sample_snapshot();
+        snapshot.voyage = Some(Voyage {
+            start: STAMP,
+            duration: 897,
+            reverse: true,
+            route: 2,
+        });
+        snapshot.entities[0].look = Some(EntityLook::Transport {
+            size: 4,
+            model_id: Some(14),
+            animation_start: Some(STAMP),
+        });
+        let bytes = postcard::to_allocvec(&snapshot).unwrap();
+        let decoded: SceneSnapshot = postcard::from_bytes(&bytes).unwrap();
+        assert_eq!(decoded.voyage, snapshot.voyage);
+        assert_eq!(decoded.entities[0].look, snapshot.entities[0].look);
+        let mut legacy = serde_json::to_value(&snapshot).unwrap();
+        legacy.as_object_mut().unwrap().remove("voyage");
+        assert_eq!(
+            serde_json::from_value::<SceneSnapshot>(legacy)
+                .unwrap()
+                .voyage,
+            None
+        );
+        let old_look: EntityLook =
+            serde_json::from_value(serde_json::json!({"kind": "transport", "size": 4})).unwrap();
+        assert_eq!(
+            old_look,
+            EntityLook::Transport {
+                size: 4,
+                model_id: None,
+                animation_start: None
+            }
+        );
     }
 
     #[test]
@@ -1874,6 +2238,24 @@ mod tests {
             }
             other => panic!("wrong variant: {other:?}"),
         }
+    }
+
+    #[test]
+    fn snapshot_extensions_survive_the_postcard_relay() {
+        let mut snapshot = sample_snapshot();
+        snapshot.zone_generation = 128;
+        snapshot.entities[0].char_flags.untargetable = true;
+        snapshot.entities[0].name_vis = Some(0x08);
+        snapshot.death_menu_offer = Some(DeathMenuOffer::Tractor);
+        let bytes = postcard::to_allocvec(&Frame::Snapshot(Box::new(snapshot))).unwrap();
+        let Frame::Snapshot(decoded) = postcard::from_bytes(&bytes).unwrap() else {
+            panic!("expected snapshot");
+        };
+        assert_eq!(decoded.zone_generation, 128);
+        assert!(decoded.entities[0].char_flags.untargetable);
+        assert_eq!(decoded.entities[0].name_vis, Some(0x08));
+        assert_eq!(decoded.chat[0].text, "hi");
+        assert_eq!(decoded.death_menu_offer, Some(DeathMenuOffer::Tractor));
     }
 
     #[test]
@@ -2003,7 +2385,7 @@ mod tests {
 
     #[test]
     fn from_lsb_unknown_ids_are_none() {
-        // weather.h:46 unknown 0x14-0x27 set must not wrap onto real weathers.
+        // weather.h Weather unknown 0x14-0x27 set must not wrap onto real weathers.
         assert_eq!(Weather::from_lsb(20), Weather::None);
         assert_eq!(Weather::from_lsb(26), Weather::None);
         assert_eq!(Weather::from_lsb(39), Weather::None);
@@ -2069,6 +2451,7 @@ mod tests {
             "self_pos",
             "entities",
             "party",
+            "zone_generation",
             "chat",
             "chat_base_seq",
             "diagnostics",
@@ -2106,17 +2489,19 @@ mod tests {
             "myroom",
             "mh_2f_unlocked",
             "sub_area",
+            "voyage",
             "emote_jobs",
             "emote_chairs",
             "check",
             "check_message",
             "widescan",
+            "death_menu_offer",
         ];
         want.sort();
         assert_eq!(got, want, "SceneSnapshot fields changed: additive-only, update this pin deliberately and rebuild relay consumers together");
     }
 
-    const SNAPSHOT_DEFAULT_POSTCARD_HEX: &str = "00000000000000000000000000000000191900000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000";
+    const SNAPSHOT_DEFAULT_POSTCARD_HEX: &str = "00000000000000000000000000000000191900000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000";
 
     /// Postcard is positional, not self-describing: field ORDER and TYPES are
     /// the wire format. Any reorder/retype (and any append) changes these
@@ -2131,4 +2516,34 @@ mod tests {
             "SceneSnapshot postcard encoding changed: update the pin deliberately and rebuild relay consumers together"
         );
     }
+
+    #[test]
+    fn anim_rate_scales_with_speed_base() {
+        // The authored base plays at unity; halves of it walk in half-speed slow motion, and a
+        // faster base scales up. No kind or threshold anywhere: the byte is the whole input.
+        assert!(
+            (speed::anim_rate_scale(50) - 1.0).abs() < 1e-6,
+            "authored base plays at unity"
+        );
+        // speedsub = 0 NPCs exist in vendor/server/sql/npc_list.sql (Resistance_Fighter
+        // 100/0); the byte means no authored rate, so they play at the authored rate.
+        assert!(
+            (speed::anim_rate_scale(0) - 1.0).abs() < 1e-6,
+            "a zero base is no authored rate, not a frozen clip"
+        );
+        assert!((speed::anim_rate_scale(25) - 0.5).abs() < 1e-6);
+        assert!(speed::anim_rate_scale(75) > speed::anim_rate_scale(50));
+        assert!(
+            speed::anim_rate_scale(1) > 0.0,
+            "a nonzero base keeps a positive scale"
+        );
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Voyage {
+    pub start: u32,
+    pub duration: u16,
+    pub reverse: bool,
+    pub route: u8,
 }

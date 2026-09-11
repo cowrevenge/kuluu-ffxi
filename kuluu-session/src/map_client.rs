@@ -11,7 +11,7 @@ pub const BOOTSTRAP_DATAGRAM_SIZE: usize = framing::FFXI_HEADER_SIZE + GP_CLI_LO
 
 /// Sync of the bootstrap subpacket (`ffxi_proto::map::c2s::LOGIN`), and
 /// thus the bootstrap datagram header. The server's `client_packet_id`
-/// starts at 0 (vendor/server/src/map/map_session.h:45) and advances here,
+/// starts at 0 (vendor/server/src/map/map_session.h MapSession client_packet_id) and advances here,
 /// so the first post-bootstrap subpacket must use the next sync.
 pub const BOOTSTRAP_SUB_SYNC: u16 = 1;
 
@@ -46,7 +46,8 @@ pub struct MapClient {
 impl MapClient {
     pub async fn connect(server: SocketAddr, seed: [u8; 20]) -> Result<Self> {
         // FFXI_MAP_LOCAL_PORT pins the local UDP port: under Docker Desktop/WSL2 the s2c return
-        // path needs a one-shot DNAT in cow-map's netns (see CowEngine docs/RUNBOOK.md §3 step 4),
+        // path needs a one-shot DNAT in cow-map's netns (the CowEngine repo's
+        // runbook covers it; that repo is not part of this tree),
         // and an ephemeral bind changes its target on every run.
         let local = match std::env::var("FFXI_MAP_LOCAL_PORT") {
             Ok(port) => format!("0.0.0.0:{port}"),
@@ -85,7 +86,7 @@ impl MapClient {
     /// `sub_packets_payload`: the server dispatches a subpacket only when its
     /// sync falls in `(client_packet_id, header_u16[0]]` and then advances
     /// `client_packet_id` to the header value — anything outside the window is
-    /// skipped with no log (vendor/server/src/map/map_networking.cpp:419-428,471).
+    /// skipped with no log (vendor/server/src/map/map_networking.cpp MapNetworking::parse).
     pub async fn send_encrypted(
         &self,
         sub_packets_payload: &[u8],
@@ -198,9 +199,16 @@ impl MapClient {
             .filter_map(|r| r.ok().map(|s| format!("0x{:03x}", s.opcode)))
             .collect();
         if !opcodes.is_empty() {
+            // `stamp` is the server's server_packet_id as stamped on this
+            // datagram (preparePacket, vendor/server/src/map/map_networking.cpp):
+            // our next c2s must ack exactly this value or parse()'s retransmit
+            // guard eats it. Watching stamp vs. the ack we send next is how a
+            // desync shows up in the log.
+            let stamp = u16::from_le_bytes(buf[0..2].try_into().unwrap());
             tracing::info!(
                 bytes = n,
                 src = %src,
+                stamp,
                 sub_count = opcodes.len(),
                 sub_opcodes = opcodes.join(" "),
                 "recv"
@@ -253,7 +261,7 @@ fn build_bootstrap_packet(args: &BootstrapArgs<'_>) -> Result<Vec<u8>> {
 
     let body = &mut frame[framing::FFXI_HEADER_SIZE..framing::FFXI_HEADER_SIZE + GP_CLI_LOGIN_SIZE];
 
-    let size_words: u16 = (GP_CLI_LOGIN_SIZE / 4) as u16;
+    let size_words = framing::subpacket_size_words(GP_CLI_LOGIN_SIZE);
     let header_word = framing::subpacket_header_word(ffxi_proto::map::c2s::LOGIN, size_words);
     body[0..2].copy_from_slice(&header_word.to_le_bytes());
 
@@ -330,7 +338,11 @@ mod tests {
         let server_b: SocketAddr = "127.0.0.2:2".parse().unwrap();
         let seed_a = [1u8; 20];
         let seed_b = [2u8; 20];
-        let mut client = MapClient::connect(server_a, seed_a).await.unwrap();
+        // Ephemeral local port: tests must not inherit FFXI_MAP_LOCAL_PORT (the Docker/WSL2
+        // DNAT pin), or parallel test tasks collide on the pinned port.
+        let mut client = MapClient::connect_with_local(server_a, seed_a, "0.0.0.0:0")
+            .await
+            .unwrap();
         let local_before = client.socket.local_addr().unwrap();
         client.retarget(server_b, seed_b);
         let local_after = client.socket.local_addr().unwrap();

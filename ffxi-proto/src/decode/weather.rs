@@ -1,6 +1,6 @@
 use super::*;
 
-// vendor/server/src/map/packets/s2c/0x057_weather.h:32-37 (StartTime u32, WeatherNumber, WeatherOffsetTime u16)
+// vendor/server/src/map/packets/s2c/0x057_weather.h GP_SERV_COMMAND_WEATHER PacketData (StartTime u32, WeatherNumber, WeatherOffsetTime u16)
 #[derive(Debug, Clone, Copy)]
 pub struct WeatherPacket {
     pub start_time: u32,

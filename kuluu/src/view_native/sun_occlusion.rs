@@ -11,7 +11,7 @@ use kuluu_render::weather::ZoneWeather;
 
 use super::collision_bvh::{CollisionBvh, ZoneCollisionBvh};
 
-// research/xim src/jsMain/kotlin/xim/poc/ParticleDrawer.kt:243-245 - retail's flare occlusion
+// research/xim src/jsMain/kotlin/xim/poc/ParticleDrawer.kt queryLensFlare - retail's flare occlusion
 // draws a screen-space quad the size of the sun particle with colour writes off and takes the
 // PERCENTAGE of pixels that pass, so the sampled set is the sun's own disc, not a jitter around
 // its centre. Equal-area rings make the unoccluded tap count an estimate of that area fraction;
@@ -20,7 +20,7 @@ const SUN_OCCLUSION_RINGS: usize = 3;
 const SUN_OCCLUSION_RING_TAPS: usize = 8;
 const SUN_OCCLUSION_TAP_COUNT: usize = 1 + SUN_OCCLUSION_RINGS * SUN_OCCLUSION_RING_TAPS;
 
-// research/xim ParticleDrawer.kt:239-240 - retail consumes the occlusion query one frame after
+// research/xim ParticleDrawer.kt renderHazeTexture - retail consumes the occlusion query one frame after
 // issuing it, so a short lag is retail-shaped; ours additionally smooths the 1/TAP_COUNT
 // quantization of the disc sample (~150ms time constant).
 const SUN_VISIBILITY_FADE_PER_SEC: f32 = 6.0;
@@ -123,10 +123,10 @@ fn sun_visibility_target(
     unoccluded as f32 / dirs.len() as f32
 }
 
-// research/xim ParticleDrawer.kt:239-248 queryLensFlare: retail's flare visibility is a
+// research/xim ParticleDrawer.kt renderHazeTexture queryLensFlare: retail's flare visibility is a
 // depth-buffer occlusion query, so only geometry actually drawn that frame occludes, while our
 // collision BVH holds the whole zone block. Three bounds decide what the player can see: zone
-// placements are only spawned inside view_distance * MMB_LOAD_DISTANCE_MARGIN (dat_mmb.rs:468),
+// placements are only spawned inside view_distance * MMB_LOAD_DISTANCE_MARGIN (dat_mmb.rs process_load_mmb_requests),
 // DAT distance fog leaves no contrast past its visibility distance while the sky dome is drawn
 // unfogged (weather.rs apply_zone_weather), and the sun billboard itself sits at SKY_RADIUS so
 // anything past it is behind the sun.
@@ -267,7 +267,7 @@ mod tests {
         );
     }
 
-    // research/xim ParticleDrawer.kt:239-248: retail's flare visibility is a depth-buffer query,
+    // research/xim ParticleDrawer.kt renderHazeTexture: retail's flare visibility is a depth-buffer query,
     // so only what was drawn this frame occludes. Collision the player cannot see is invisible
     // to the query. Both walls sit inside SKY_RADIUS so the sun's own sphere is not what
     // rejects the far one.
@@ -359,7 +359,7 @@ mod tests {
         );
     }
 
-    // research/xim ParticleDrawer.kt:243-245: the flare's opacity is the percentage of the sun
+    // research/xim ParticleDrawer.kt queryLensFlare: the flare's opacity is the percentage of the sun
     // quad's pixels that pass the depth test, so half the disc covered is half visibility.
     #[test]
     fn a_wall_covering_half_the_disc_gives_a_half_area_fraction() {

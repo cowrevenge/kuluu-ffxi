@@ -203,9 +203,16 @@ pub enum MenuKind {
 
     Config,
 
+    Controls,
+
     Debug,
 
     Graphics,
+
+    /// DLSS Config submenu pushed from the Graphics list's "DLSS Config" row
+    /// (hud::menu::GRAPHICS_DLSS_CONFIG_SLOT): the quality tier plus the inert
+    /// RenoDX-parity placeholder rows.
+    GraphicsDlss,
 
     Magic,
 

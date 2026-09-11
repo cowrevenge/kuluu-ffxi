@@ -3,9 +3,9 @@ use std::collections::HashMap;
 use bevy::prelude::*;
 use kuluu_snapshot::EntityKind;
 
-use crate::camera::{nameplate_anchor_y, OperatorCamera};
+use crate::camera::{nameplate_anchor, OperatorCamera};
 use crate::components::{Nameplate, WorldEntity};
-use crate::scene::BakedActor;
+use crate::scene::NameplateLocator;
 use crate::snapshot::SceneState;
 
 #[derive(Component)]
@@ -88,7 +88,7 @@ pub fn update_nameplates_system(
         (
             &Transform,
             &WorldEntity,
-            Option<&BakedActor>,
+            Option<&NameplateLocator>,
             Has<crate::components::MountedRider>,
         ),
         Without<Nameplate>,
@@ -108,10 +108,22 @@ pub fn update_nameplates_system(
     // render scale; rescale to the native-res HUD (1.0 → no-op).
     let viewport_to_window = 1.0 / settings.render_scale();
 
-    let mut pos_by_id: HashMap<u32, (Vec3, f32)> = HashMap::new();
-    for (t, w, baked, mounted) in &world_q {
-        pos_by_id.insert(w.id, (t.translation, nameplate_anchor_y(baked, mounted)));
+    let mut pos_by_id: HashMap<u32, (Vec3, Option<Vec3>)> = HashMap::new();
+    for (t, w, locator, mounted) in &world_q {
+        pos_by_id.insert(w.id, (t.translation, nameplate_anchor(t, locator, mounted)));
     }
+
+    // Doors and namevis-hidden helpers never keep a plate: retail shows no
+    // floating name over a door in any state. Cull EXISTING plates here (the
+    // earlier gate only filtered the HP map, which never controlled plate
+    // existence -- that's why door names survived it).
+    let suppressed: std::collections::HashSet<u32> = state
+        .snapshot
+        .entities
+        .iter()
+        .filter(|e| e.is_door() || e.name_hidden())
+        .map(|e| e.id)
+        .collect();
 
     // HP only changes with a snapshot; screen-space repositioning below still
     // runs every frame.
@@ -119,14 +131,25 @@ pub fn update_nameplates_system(
     if dirty {
         hp_by_id.clear();
         for ent in &state.snapshot.entities {
+            // Retail-hidden helpers (namevis hide bits) never get a plate,
+            // and neither do DOORS: retail draws no floating name over a door
+            // in any state (verified against retail 2026-08-26). The door's
+            // name still shows in the target panel when targeted.
+            if ent.name_hidden() || ent.is_door() {
+                continue;
+            }
             hp_by_id.insert(ent.id, ent.hp_pct);
         }
     }
 
     for (ui_entity, np, mut node, children) in &mut nameplate_q {
+        if suppressed.contains(&np.entity_id) {
+            commands.entity(ui_entity).try_despawn();
+            continue;
+        }
         match pos_by_id.get(&np.entity_id) {
-            Some(&(world_pos, label_y)) => {
-                let head = world_pos + Vec3::Y * label_y;
+            Some(&(world_pos, Some(head))) => {
+                node.display = Display::Flex;
                 let (want_left, want_top) = match camera.world_to_viewport(&cam_global, head) {
                     Ok(screen) => (
                         Val::Px(screen.x * viewport_to_window - 40.0),
@@ -139,7 +162,18 @@ pub fn update_nameplates_system(
                     node.top = want_top;
                 }
 
-                let hp_pct = hp_by_id.get(&np.entity_id).copied().flatten();
+                // Retail+ gate: the "{name} {pct}%" suffix shares the billboard
+                // bar's toggle (off by default); enhanced-mob-hp-under is its
+                // compile-time half, so a persisted on from an enhanced build
+                // can't light it in a plain one.
+                #[cfg(feature = "enhanced-mob-hp-under")]
+                let hp_pct = if settings.mob_hp_under {
+                    hp_by_id.get(&np.entity_id).copied().flatten()
+                } else {
+                    None
+                };
+                #[cfg(not(feature = "enhanced-mob-hp-under"))]
+                let hp_pct: Option<u8> = None;
                 let coord_str = format_coord(world_pos);
                 for child in children.iter() {
                     if let Ok((label, mut text)) = label_q.get_mut(child) {
@@ -156,8 +190,11 @@ pub fn update_nameplates_system(
                     }
                 }
             }
+            Some(&(_, None)) => {
+                node.display = Display::None;
+            }
             None => {
-                commands.entity(ui_entity).despawn();
+                commands.entity(ui_entity).try_despawn();
             }
         }
     }

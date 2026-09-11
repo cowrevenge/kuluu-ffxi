@@ -36,15 +36,18 @@ pub(super) fn apply_slash_outcome(
     bindings: &mut Bindings,
     keybinds_state: &mut KeybindsStateRes,
     #[cfg(unix)] agent_paused: Option<&crate::view_native::AgentPaused>,
-    _session_event_tx: Option<&crate::view_native::SessionEventTx>,
+    session_event_tx: Option<&crate::view_native::SessionEventTx>,
     slash_writers: &mut SlashWriters,
     draw_distance: &mut kuluu_render::dat_mzb::DrawDistance,
 ) {
+    #[cfg(not(unix))]
+    let _ = session_event_tx;
     match outcome {
         SlashOutcome::Command(cmd) => {
             if let Some(toast) = reqlogout_ack_text(&cmd) {
                 push_system_chat_line(scene_state, toast.into());
             }
+            #[cfg(feature = "enhanced-shutdown-counter")]
             if let Some(shutdown) = reqlogout_starts_countdown(&cmd) {
                 slash_writers
                     .logout_requested
@@ -68,6 +71,7 @@ pub(super) fn apply_slash_outcome(
                     push_system_chat_line(scene_state, toast.into());
                 }
                 mirror_heal_stance(&cmd, &mut slash_writers.rest_stance);
+                #[cfg(feature = "enhanced-shutdown-counter")]
                 if let Some(shutdown) = reqlogout_starts_countdown(&cmd) {
                     slash_writers
                         .logout_requested
@@ -94,6 +98,7 @@ pub(super) fn apply_slash_outcome(
             if let Some(toast) = reqlogout_ack_text(&req) {
                 push_system_chat_line(scene_state, toast.into());
             }
+            #[cfg(feature = "enhanced-shutdown-counter")]
             if let Some(shutdown) = reqlogout_starts_countdown(&req) {
                 slash_writers
                     .logout_requested
@@ -124,7 +129,7 @@ pub(super) fn apply_slash_outcome(
 
                     RestKind::Heal => {
                         let _ = cmd_tx.try_send(AgentCommand::Heal {
-                            mode: crate::state::HealMode::Off,
+                            mode: kuluu_session::state::HealMode::Off,
                         });
                         RestKind::Sit
                     }
@@ -163,6 +168,7 @@ pub(super) fn apply_slash_outcome(
                 door: None,
                 slot: kuluu_render::dat_mzb::ZONE_SLOT_MAIN,
                 sub_area_link: 0,
+                voyage_backdrop: false,
             });
             let label = match entity_id {
                 Some(id) => format!("/load_mmb_on {id} {file_id} {chunk_idx}: spawning…"),
@@ -388,20 +394,18 @@ pub(super) fn apply_slash_outcome(
         }
         SlashOutcome::SetLights(op) => {
             use crate::view_native::slash_commands::LightsOp;
-            use kuluu_render::graphics_settings::DynamicLights;
+            use kuluu_render::graphics_settings::{DynamicLights, SHADOWED_LIGHTS_SLOTS};
 
             let g = &mut *slash_writers.graphics;
             let chat = match op {
                 LightsOp::Status => format!(
-                    "/lights: {} · threshold {:.2} · intensity {:.0} · range {:.1} · flicker {}",
+                    "/lights: {} · shadowed {} · flicker {}",
                     g.dynamic_lights.label(),
-                    g.light_threshold,
-                    g.light_intensity,
-                    g.light_range,
+                    g.shadowed_lights,
                     if g.light_flicker { "on" } else { "off" },
                 ),
                 LightsOp::Enable(v) => {
-                    let on = v.unwrap_or(!g.dynamic_lights.emitters_enabled());
+                    let on = v.unwrap_or(!g.dynamic_lights.point_shadows_enabled());
                     g.dynamic_lights = if on {
                         DynamicLights::Enhanced
                     } else {
@@ -409,17 +413,10 @@ pub(super) fn apply_slash_outcome(
                     };
                     format!("/lights: {}", g.dynamic_lights.label())
                 }
-                LightsOp::Threshold(v) => {
-                    g.light_threshold = v;
-                    format!("/lights threshold: {v:.2} (re-enter zone to re-detect)")
-                }
-                LightsOp::Intensity(v) => {
-                    g.light_intensity = v;
-                    format!("/lights intensity: {v:.0}")
-                }
-                LightsOp::Range(v) => {
-                    g.light_range = v;
-                    format!("/lights range: {v:.1}")
+                LightsOp::Shadowed(v) => {
+                    let v = v.min(*SHADOWED_LIGHTS_SLOTS.last().unwrap_or(&0));
+                    g.shadowed_lights = v;
+                    format!("/lights shadowed: {v}")
                 }
                 LightsOp::Flicker(v) => {
                     let f = v.unwrap_or(!g.light_flicker);
@@ -530,6 +527,31 @@ pub(super) fn apply_slash_outcome(
                 }
             };
             push_system_chat_line(scene_state, chat);
+        }
+        SlashOutcome::ActorDiag { use_target } => {
+            let id = if use_target {
+                target.id
+            } else {
+                scene_state.snapshot.self_char_id
+            };
+            let lines = match id {
+                None if use_target => vec!["/actordiag: no target selected".to_string()],
+                None => vec!["/actordiag: self id unknown (not in game yet?)".to_string()],
+                Some(id) => match scene_state.snapshot.entities.iter().find(|e| e.id == id) {
+                    None => vec![format!("/actordiag: entity {id} not in the snapshot")],
+                    Some(e) => match &e.look {
+                        None => vec![format!("/actordiag: entity {id} carries no look data")],
+                        Some(look) => kuluu_render::actor_diag::report(
+                            id,
+                            e.name.as_deref().unwrap_or("?"),
+                            look,
+                        ),
+                    },
+                },
+            };
+            for line in lines {
+                push_system_chat_line(scene_state, line);
+            }
         }
         SlashOutcome::Overlay(op) => {
             use crate::view_native::slash_commands::OverlayOp;
@@ -803,8 +825,10 @@ pub(super) fn apply_slash_outcome(
                 kuluu_render::MenuKind::Equipment => "Equipment".into(),
                 kuluu_render::MenuKind::Root => "Root".into(),
                 kuluu_render::MenuKind::Config => "Config".into(),
+                kuluu_render::MenuKind::Controls => "Controls".into(),
                 kuluu_render::MenuKind::Debug => "Debug".into(),
                 kuluu_render::MenuKind::Graphics => "Graphics".into(),
+                kuluu_render::MenuKind::GraphicsDlss => "DLSS Config".into(),
                 kuluu_render::MenuKind::Status => "Status".into(),
 
                 kuluu_render::MenuKind::Communication => "Communication".into(),
@@ -1155,6 +1179,7 @@ fn format_zoom_status(zoom: &kuluu_render::minimap::MinimapZoom) -> String {
     }
 }
 
+#[cfg(feature = "enhanced-shutdown-counter")]
 fn reqlogout_starts_countdown(cmd: &AgentCommand) -> Option<bool> {
     let AgentCommand::ReqLogout { kind } = cmd else {
         return None;
@@ -1188,12 +1213,12 @@ fn mirror_heal_stance(cmd: &AgentCommand, rest: &mut kuluu_render::combat_stance
         return;
     };
     let next = match mode {
-        crate::state::HealMode::On => RestKind::Heal,
-        crate::state::HealMode::Off => match rest.kind {
+        kuluu_session::state::HealMode::On => RestKind::Heal,
+        kuluu_session::state::HealMode::Off => match rest.kind {
             RestKind::Heal => RestKind::None,
             other => other,
         },
-        crate::state::HealMode::Toggle => match rest.kind {
+        kuluu_session::state::HealMode::Toggle => match rest.kind {
             RestKind::Heal => RestKind::None,
             _ => RestKind::Heal,
         },

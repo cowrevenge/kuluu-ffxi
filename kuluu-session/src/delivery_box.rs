@@ -93,7 +93,7 @@ impl DeliveryBoxSession {
                 let slot = r.post_work_no.max(0) as u8;
                 self.set_slot(box_no, slot, item_of(r), &mut out);
                 // The server answers Work with exactly one push per slot, in
-                // order (dboxutils.cpp:105-108); the last slot ends the batch,
+                // order (dboxutils.cpp dboxutils::SendOldItems); the last slot ends the batch,
                 // so a repeated Work still triggers exactly one Check.
                 if slot as usize == pbx::SLOT_COUNT - 1 {
                     out.sends.push(DeliveryBoxOp::Check { box_no });
@@ -101,7 +101,7 @@ impl DeliveryBoxSession {
             }
             pbx::command::CHECK => {
                 // Count lands in ResParam2 (Incoming) / ResParam3 (Outgoing)
-                // (0x04b_pbx_result.cpp:44-54).
+                // (0x04b_pbx_result.cpp GP_SERV_COMMAND_PBX_RESULT::GP_SERV_COMMAND_PBX_RESULT).
                 let count = match box_no {
                     DeliveryBoxNo::Incoming => r.res_param2.max(0) as u8,
                     DeliveryBoxNo::Outgoing => r.res_param3.max(0) as u8,
@@ -152,7 +152,7 @@ impl DeliveryBoxSession {
                 if let Some(item) = item_of(r).or_else(|| self.slots[slot as usize].clone()) {
                     // Retail wording, observed on HorizonXI 2026-07-18: "You
                     // take the <item> out of delivery slot <n>." — 1-based
-                    // slot (artifacts/retail/moghouse-menu-notes.md).
+                    // slot (.agents/skills/retail-observe/references/2026-07-17-moghouse-menu.md).
                     out.notices.push(format!(
                         "You take the {} out of delivery slot {}.",
                         parcel_name(&item),

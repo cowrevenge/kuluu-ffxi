@@ -2,6 +2,11 @@ use crate::{DatError, Result};
 
 pub(crate) mod keys;
 
+const KEY_INDEX_XOR: u8 = 0xF0;
+const KEY_BYTE_MASK: i32 = 0xFF;
+const BLOCK_SWAP_MARKER: u8 = 0xFF;
+const VERTEX_SIZE_MAX: u32 = u16::MAX as u32;
+
 #[derive(Debug, thiserror::Error)]
 pub enum MmbError {
     #[error("MMB buffer too small: need at least 8 bytes for header, got {0}")]
@@ -20,19 +25,19 @@ pub fn decrypt_in_place(data: &mut [u8]) -> Result<()> {
     }
 
     if data[3] >= 5 {
-        let key_seed = keys::KEY_TABLE[(data[5] ^ 0xf0) as usize] as i32;
+        let key_seed = keys::KEY_TABLE[(data[5] ^ KEY_INDEX_XOR) as usize] as i32;
         let mut key: i32 = key_seed;
         let mut key_count: i32 = 0;
 
         for byte in data.iter_mut().skip(8) {
-            let key_low = key & 0xFF;
+            let key_low = key & KEY_BYTE_MASK;
             let x = (key_low << 8) | key_low;
             key_count = key_count.wrapping_add(1);
             key = key.wrapping_add(key_count);
 
             let shift = (key & 7) as u32;
 
-            let mask = ((x >> shift) & 0xFF) as u8;
+            let mask = ((x >> shift) & KEY_BYTE_MASK) as u8;
             *byte ^= mask;
 
             key_count = key_count.wrapping_add(1);
@@ -40,9 +45,9 @@ pub fn decrypt_in_place(data: &mut [u8]) -> Result<()> {
         }
     }
 
-    if data[6] == 0xFF && data[7] == 0xFF {
+    if data[6] == BLOCK_SWAP_MARKER && data[7] == BLOCK_SWAP_MARKER {
         let len = data.len();
-        let mut key1: i32 = (data[5] ^ 0xf0) as i32;
+        let mut key1: i32 = (data[5] ^ KEY_INDEX_XOR) as i32;
         let mut key2: i32 = keys::KEY_TABLE_2[key1 as usize] as i32;
 
         let len2 = (((len - 8) & !0xf) >> 1) as i32;
@@ -148,11 +153,11 @@ pub struct MmbVertex {
     pub uv: [f32; 2],
 }
 
-// research/XIClient Rendering/Direct3D8Manager.cpp:393,395 — the MMB vertex colour reaches
+// research/XIClient Rendering/Direct3D8Manager.cpp Direct3D8Manager::InitializeRenderStateBlocks,395 — the MMB vertex colour reaches
 // fixed-function T&L as D3DMCS_COLOR1, i.e. a D3DCOLOR, so its natural scale is byte/255 and
-// the stage-0 MODULATE2X (ZoneRenderer.cpp:2453) lives in the shader, not in this decode.
+// the stage-0 MODULATE2X (ZoneRenderer.cpp ZoneRenderer::ApplyDefaultRenderState) lives in the shader, not in this decode.
 pub const VERTEX_COLOR_DIVISOR: f32 = u8::MAX as f32;
-// ZoneRenderer.cpp:2456 pairs that MODULATE2X with an ALPHAOP of MODULATE4X, so the alpha
+// ZoneRenderer.cpp ZoneRenderer::ApplyDefaultRenderState pairs that MODULATE2X with an ALPHAOP of MODULATE4X, so the alpha
 // channel carries one extra doubling. `zone_texture::ffxi_alpha_remap` supplies the other,
 // which is why alpha alone normalises against a half-scale divisor.
 pub const VERTEX_ALPHA_DIVISOR: f32 = VERTEX_COLOR_DIVISOR / 2.0;
@@ -160,6 +165,16 @@ pub const VERTEX_ALPHA_DIVISOR: f32 = VERTEX_COLOR_DIVISOR / 2.0;
 /// Neutral (identity) vertex colour: retail authors the unshaded MMB vertex at byte 128, so a
 /// generated mesh that wants to defer entirely to its texture/tint must use this value.
 pub const VERTEX_COLOR_NEUTRAL_BYTE: u8 = 128;
+
+pub const D3DCOLOR_CHANNEL_MASK: u32 = 0xFF;
+
+// The MMB vertex diffuse is a D3DCOLOR, i.e. ARGB packed little-endian, so the file bytes run
+// B,G,R,A (research/XIClient/src/XIClient/include/Rendering/Color/ARGBByte.h). `crate::d3m`
+// unpacks the identical record that way, and xim walks this same 36-byte vertex with
+// `nextBGRA` (research/xim ParticleMeshSection.kt read color, WeightedMeshSection.kt read).
+fn d3dcolor_rgba(b: &[u8], off: usize) -> [u8; 4] {
+    [b[off + 2], b[off + 1], b[off], b[off + 3]]
+}
 
 pub fn vertex_color_to_linear(rgba: [u8; 4]) -> [f32; 4] {
     [
@@ -201,7 +216,7 @@ impl<'a> MmbSubRecord<'a> {
             if is_ascii_tag(tag_word)
                 && is_ascii_variant(variant)
                 && vertexsize > 0
-                && vertexsize <= 0xFFFF
+                && vertexsize <= VERTEX_SIZE_MAX
             {
                 starts.push(i);
                 i += 20;
@@ -304,12 +319,7 @@ impl<'a> MmbSubRecord<'a> {
                 f32::from_le_bytes(self.body[off + 16..off + 20].try_into().ok()?),
                 f32::from_le_bytes(self.body[off + 20..off + 24].try_into().ok()?),
             ];
-            let rgba = [
-                self.body[off + 24],
-                self.body[off + 25],
-                self.body[off + 26],
-                self.body[off + 27],
-            ];
+            let rgba = d3dcolor_rgba(self.body, off + 24);
             let uv = [
                 f32::from_le_bytes(self.body[off + 28..off + 32].try_into().ok()?),
                 f32::from_le_bytes(self.body[off + 32..off + 36].try_into().ok()?),
@@ -377,22 +387,22 @@ fn is_ascii_variant(b: &[u8]) -> bool {
 /// offset 18 (`MmbSubRecord::blending` / `MmbModel::blending`).
 ///
 /// Bit layout follows xim's zone-mesh parser
-/// (research/xim/src/jsMain/kotlin/xim/resource/ZoneMeshSection.kt:79-81):
+/// (research/xim/src/jsMain/kotlin/xim/resource/ZoneMeshSection.kt parseMesh blendEnabled):
 /// - `0x8000`: alpha blending enabled (`blendEnabled`)
 /// - `0x2000`: back-face culling DISABLED (culling defaults to on/CCW;
 ///   the set bit turns it off)
 ///
 /// Derived state (not stored in the DAT, reproduced from xim):
 /// - depth bias: `blendEnabled` -> `ZBiasLevel.High`, else `Normal`
-///   (ZoneMeshSection.kt:120-123), applied by the GL layer as
-///   `polygonOffset(zBias * -1, 1)` (GLDrawer.kt:219, :363).
-/// - depth write: disabled for blended meshes (GLDrawer.kt:198-201, :332-342).
+///   (ZoneMeshSection.kt parseMesh), applied by the GL layer as
+///   `polygonOffset(zBias * -1, 1)` (GLDrawer.kt drawXim, :363).
+/// - depth write: disabled for blended meshes (GLDrawer.kt drawXim, :332-342).
 /// - discard threshold: 0.375 when the zone-mesh *name* starts with `_`
-///   (ZoneMeshSection.kt:119) — i.e. the name-prefix heuristic in
+///   (ZoneMeshSection.kt parseMesh discardThreshold) — i.e. the name-prefix heuristic in
 ///   `dat_mmb.rs::submesh_alpha_mode` is retail-faithful, not a guess.
 ///
 /// NOTE: `vertexBlendEnabled` is NOT in this word. It is the section-level
-/// config bit `0x2` (ZoneMeshSection.kt:35), which for SMMB corresponds to
+/// config bit `0x2` (ZoneMeshSection.kt read vertexBlendEnabled), which for SMMB corresponds to
 /// `d3 == 2` / vertex stride 48 (`MmbModel::vertex_blend_enabled`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MmbRenderState {
@@ -403,25 +413,32 @@ pub struct MmbRenderState {
     pub back_face_culling: bool,
 }
 
+// research/XIClient Rendering/ZoneRenderer.cpp ZoneRenderer::ZoneRenderer, 1269-1275 — blended terrain
+// uses the legacy D3D8 integer Z-bias layer 8 so it stays in front of its coplanar base.
+pub const TRANSPARENT_Z_BIAS_LEVEL: u8 = 8;
+
+const BLEND_ENABLED_BIT: u16 = 0x8000;
+const BACK_FACE_CULL_DISABLED_BIT: u16 = 0x2000;
+
 impl MmbRenderState {
     pub fn from_blending(blending: u16) -> Self {
         Self {
-            blend_enabled: blending & 0x8000 != 0,
-            back_face_culling: blending & 0x2000 == 0,
+            blend_enabled: blending & BLEND_ENABLED_BIT != 0,
+            back_face_culling: blending & BACK_FACE_CULL_DISABLED_BIT == 0,
         }
     }
 
-    /// ZoneMeshSection.kt:120-123 — blended zone meshes render at
-    /// `ZBiasLevel.High` (1), opaque at `Normal` (0).
+    /// XIClient ZoneRenderer.cpp ZoneRenderer::ZoneRenderer, 1269-1275 — blended zone meshes use
+    /// `TransparentZBias` (8), opaque meshes use `OpaqueZBias` (0).
     pub fn z_bias_level(&self) -> u8 {
         if self.blend_enabled {
-            1
+            TRANSPARENT_Z_BIAS_LEVEL
         } else {
             0
         }
     }
 
-    /// GLDrawer.kt:198-201 — blended meshes do not write depth.
+    /// GLDrawer.kt drawXim — blended meshes do not write depth.
     pub fn depth_write(&self) -> bool {
         !self.blend_enabled
     }
@@ -434,18 +451,23 @@ pub struct MmbModel {
     /// Decoded view of `blending`; see [`MmbRenderState`].
     pub render_state: MmbRenderState,
     /// Section-level vertex-blend flag (`d3 == 2`, stride-48 layout).
-    /// Mirrors xim's `vertexBlendEnabled` (ZoneMeshSection.kt:35).
+    /// Mirrors xim's `vertexBlendEnabled` (ZoneMeshSection.kt).
     pub vertex_blend_enabled: bool,
     pub vertices: Vec<MmbVertex>,
 
     pub indices: Vec<u16>,
 }
 
-// research/xim ZoneMeshSection.kt:73-100 — the section vertex record is 16-byte texture name,
+// research/xim ZoneMeshSection.kt parseMesh — the section vertex record is 16-byte texture name,
 // u16 count, u16 flags, then pos vec3 + normal vec3 + BGRA + uv (36 bytes), with a second vec3
 // interleaved when the section's vertex-blend config is set (48).
 const VERTEX_STRIDE_PLAIN: usize = 36;
 const VERTEX_STRIDE_VERTEX_BLEND: usize = 48;
+// research/XIClient/src/XIClient/source/World/Zone/Terrain/MeshBlockManager.cpp MeshBlockManager::AddFromData;
+// FFXiMain.dll SHA-256 f4f90fbd080c05448aab3f866b127d7c1675b3cc15c8beaa57bfc584064b7e7c.
+// RVA 0x16D14B reads the type independently of the signature.
+const MESH_TYPE_OFFSET: usize = 4;
+const MESH_TYPE_STATIC_STRIP: u8 = 1;
 const CONFIG_VERTEX_BLEND: u8 = 2;
 
 fn vertex_stride(config: u8) -> usize {
@@ -464,9 +486,7 @@ pub fn parse_models(decrypted: &[u8]) -> Vec<MmbModel> {
         return Vec::new();
     }
 
-    let is_v1 = &decrypted[0..3] == b"MMB";
-
-    let d3 = if is_v1 { 0 } else { decrypted[4] };
+    let d3 = decrypted[MESH_TYPE_OFFSET];
     let vertex_stride = vertex_stride(d3);
 
     let header_off = SMMB_HEAD_SIZE;
@@ -601,7 +621,11 @@ pub fn parse_models(decrypted: &[u8]) -> Vec<MmbModel> {
                     ]),
                 ];
 
-                let normal_base = if d3 == 2 { vo + 24 } else { vo + 12 };
+                let normal_base = if d3 == CONFIG_VERTEX_BLEND {
+                    vo + 24
+                } else {
+                    vo + 12
+                };
                 let normal = [
                     f32::from_le_bytes([
                         decrypted[normal_base],
@@ -623,12 +647,7 @@ pub fn parse_models(decrypted: &[u8]) -> Vec<MmbModel> {
                     ]),
                 ];
                 let color_base = normal_base + 12;
-                let rgba = [
-                    decrypted[color_base],
-                    decrypted[color_base + 1],
-                    decrypted[color_base + 2],
-                    decrypted[color_base + 3],
-                ];
+                let rgba = d3dcolor_rgba(decrypted, color_base);
                 let uv_base = color_base + 4;
                 let uv = [
                     f32::from_le_bytes([
@@ -660,7 +679,7 @@ pub fn parse_models(decrypted: &[u8]) -> Vec<MmbModel> {
             off += 4;
 
             let mut indices: Vec<u16> = Vec::new();
-            let is_list = is_v1 || d3 == 2;
+            let is_list = d3 != MESH_TYPE_STATIC_STRIP;
             if off + num_indices * 2 > decrypted.len() {
                 break;
             }
@@ -695,7 +714,7 @@ pub fn parse_models(decrypted: &[u8]) -> Vec<MmbModel> {
                     texture_name,
                     blending,
                     render_state: MmbRenderState::from_blending(blending),
-                    vertex_blend_enabled: d3 == 2,
+                    vertex_blend_enabled: d3 == CONFIG_VERTEX_BLEND,
                     vertices,
                     indices,
                 });
@@ -848,7 +867,7 @@ mod tests {
 
     #[test]
     fn render_state_decodes_blend_and_cull_bits() {
-        // ZoneMeshSection.kt:79-81 — 0x8000 = blend, 0x2000 = cull DISABLED.
+        // ZoneMeshSection.kt parseMesh blendEnabled — 0x8000 = blend, 0x2000 = cull DISABLED.
         let opaque = MmbRenderState::from_blending(0x0000);
         assert!(!opaque.blend_enabled);
         assert!(opaque.back_face_culling);
@@ -858,7 +877,7 @@ mod tests {
         let blended = MmbRenderState::from_blending(0x8000);
         assert!(blended.blend_enabled);
         assert!(blended.back_face_culling);
-        assert_eq!(blended.z_bias_level(), 1);
+        assert_eq!(blended.z_bias_level(), TRANSPARENT_Z_BIAS_LEVEL);
         assert!(!blended.depth_write());
 
         let no_cull = MmbRenderState::from_blending(0x2000);
@@ -1011,11 +1030,280 @@ mod tests {
         );
     }
 
+    // An authored D3DCOLOR lands in the file as B,G,R,A, and every consumer of `MmbVertex::rgba`
+    // indexes it as (r,g,b,a) -- `vertex_color_to_linear`, and through it kuluu-render's
+    // zone/cloud meshes. The fixture is deliberately asymmetric in every channel so a swapped
+    // pair cannot pass.
+    const AUTHORED_ARGB: u32 = 0x6040_80C0;
+    const EXPECTED_RGBA: [u8; 4] = [0x40, 0x80, 0xC0, 0x60];
+
+    fn plain_vertex(pos: [f32; 3], argb: u32, uv: [f32; 2]) -> Vec<u8> {
+        let mut v = Vec::with_capacity(VERTEX_STRIDE_PLAIN);
+        for c in pos {
+            v.extend_from_slice(&c.to_le_bytes());
+        }
+        for c in [0.0f32, 1.0, 0.0] {
+            v.extend_from_slice(&c.to_le_bytes());
+        }
+        v.extend_from_slice(&argb.to_le_bytes());
+        for c in uv {
+            v.extend_from_slice(&c.to_le_bytes());
+        }
+        assert_eq!(v.len(), VERTEX_STRIDE_PLAIN);
+        v
+    }
+
+    #[test]
+    fn sub_record_vertex_colour_unpacks_the_d3dcolor_word_as_rgba() {
+        let body = plain_vertex([1.0, 2.0, 3.0], AUTHORED_ARGB, [0.25, 0.75]);
+        let rec = MmbSubRecord {
+            offset: 0,
+            tag: b"mmb\0\0\0\0\0",
+            variant_name: b"tam3    ",
+            count: 1,
+            blending: 0,
+            body: &body,
+        };
+
+        let v = rec.parse_vertices().expect("one plain-stride vertex");
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0].pos, [1.0, 2.0, 3.0]);
+        assert_eq!(v[0].uv, [0.25, 0.75]);
+        assert_eq!(v[0].rgba, EXPECTED_RGBA);
+    }
+
+    // SMMB with one piece holding one model of three plain-stride vertices and a 3-index strip.
+    fn smmb_one_triangle(argb: u32) -> Vec<u8> {
+        const HEAD: usize = 16;
+        const PIECE_OFF: usize = 64;
+        const NUM_VERTS: u16 = 3;
+        let mut b = vec![0u8; PIECE_OFF];
+        b[0..4].copy_from_slice(b"SMMB");
+        b[MESH_TYPE_OFFSET] = MESH_TYPE_STATIC_STRIP;
+        b[HEAD + 16..HEAD + 20].copy_from_slice(&1u32.to_le_bytes());
+        b[HEAD + 44..HEAD + 48].copy_from_slice(&(PIECE_OFF as u32).to_le_bytes());
+
+        b.extend_from_slice(&1u32.to_le_bytes());
+        b.extend_from_slice(&[0u8; 28]);
+
+        b.extend_from_slice(&[0u8; 8]);
+        b.extend_from_slice(b"stone   ");
+        b.extend_from_slice(&NUM_VERTS.to_le_bytes());
+        b.extend_from_slice(&0u16.to_le_bytes());
+        for i in 0..NUM_VERTS {
+            b.extend(plain_vertex([i as f32, 0.0, 0.0], argb, [0.0, 0.0]));
+        }
+        b.extend_from_slice(&NUM_VERTS.to_le_bytes());
+        b.extend_from_slice(&[0u8; 2]);
+        for i in 0..NUM_VERTS {
+            b.extend_from_slice(&i.to_le_bytes());
+        }
+        b.extend_from_slice(&[0u8; 2]);
+        b
+    }
+
+    #[test]
+    fn model_vertex_colour_unpacks_the_d3dcolor_word_as_rgba() {
+        let models = parse_models(&smmb_one_triangle(AUTHORED_ARGB));
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].vertices.len(), 3);
+        for v in &models[0].vertices {
+            assert_eq!(v.rgba, EXPECTED_RGBA);
+        }
+    }
+
+    // Cross-parser oracle: d3m.rs already unpacks the identical 36-byte
+    // pos/normal/D3DCOLOR/uv record, so the two decoders must agree channel for channel on the
+    // same four file bytes.
+    #[test]
+    fn mmb_and_d3m_agree_on_the_same_d3dcolor_bytes() {
+        const D3M_VERTS_PER_TRI: usize = 3;
+        let vertex = plain_vertex([0.0, 0.0, 0.0], AUTHORED_ARGB, [0.0, 0.0]);
+        let mut d3m_body = vec![0u8; crate::d3m::D3M_VERTEX_OFFSET];
+        d3m_body[0..4].copy_from_slice(&crate::d3m::D3M_MAGIC.to_le_bytes());
+        d3m_body[0x06..0x08].copy_from_slice(&1u16.to_le_bytes());
+        for _ in 0..D3M_VERTS_PER_TRI {
+            d3m_body.extend_from_slice(&vertex);
+        }
+        let d3m = crate::d3m::D3m::parse(*b"d3m0", &d3m_body).unwrap();
+
+        let rec = MmbSubRecord {
+            offset: 0,
+            tag: b"mmb\0\0\0\0\0",
+            variant_name: b"tam3    ",
+            count: 1,
+            blending: 0,
+            body: &vertex,
+        };
+        let mmb = rec.parse_vertices().unwrap();
+
+        for ch in 0..4 {
+            assert_eq!(
+                mmb[0].rgba[ch] as f32 / crate::d3m::VERTEX_COLOR_DIVISOR,
+                d3m.vertices[0].color[ch],
+                "channel {ch}",
+            );
+        }
+    }
+
     #[test]
     fn vertex_colour_alpha_carries_one_of_the_two_modulate4x_doublings() {
         assert_eq!(VERTEX_ALPHA_DIVISOR * 2.0, VERTEX_COLOR_DIVISOR);
         let full = vertex_color_to_linear([255, 255, 255, 255]);
         assert_eq!(full[0], 1.0);
         assert_eq!(full[3], 2.0);
+    }
+    const LEGACY_MMB_VERSION: u8 = 4;
+    const LEGACY_FIXTURE_VERTICES: u16 = 8;
+    const STATIC_BUMP_TYPE: u8 = 3;
+    const JOINED_STRIP: [u16; 10] = [0, 1, 2, 3, 3, 4, 4, 5, 6, 7];
+    const JOINED_TRIANGLES: [u16; 12] = [0, 1, 2, 2, 1, 3, 4, 5, 6, 6, 5, 7];
+
+    fn legacy_mmb(mesh_type: u8, indices: &[u16]) -> Vec<u8> {
+        const PIECE_OFFSET: usize = 64;
+        const PIECE_COUNT_OFFSET: usize = 32;
+        const PIECE_POINTER_OFFSET: usize = 60;
+        const PIECE_HEADER_PADDING: usize = 28;
+        let mut bytes = vec![0; PIECE_OFFSET];
+        bytes[..3].copy_from_slice(b"MMB");
+        bytes[3] = LEGACY_MMB_VERSION;
+        bytes[MESH_TYPE_OFFSET] = mesh_type;
+        bytes[PIECE_COUNT_OFFSET..PIECE_COUNT_OFFSET + 4].copy_from_slice(&1u32.to_le_bytes());
+        bytes[PIECE_POINTER_OFFSET..PIECE_POINTER_OFFSET + 4]
+            .copy_from_slice(&(PIECE_OFFSET as u32).to_le_bytes());
+        bytes.extend_from_slice(&1u32.to_le_bytes());
+        bytes.extend_from_slice(&[0; PIECE_HEADER_PADDING]);
+        bytes.extend_from_slice(b"cloud   canopy  ");
+        bytes.extend_from_slice(&LEGACY_FIXTURE_VERTICES.to_le_bytes());
+        bytes.extend_from_slice(&0u16.to_le_bytes());
+        for index in 0..LEGACY_FIXTURE_VERTICES {
+            let position = [f32::from(index / 2), 0.0, f32::from(index % 2)];
+            let vertex = plain_vertex(position, AUTHORED_ARGB, [0.0, 0.0]);
+            if mesh_type == CONFIG_VERTEX_BLEND {
+                const POSITION_BYTES: usize = 12;
+                bytes.extend_from_slice(&vertex[..POSITION_BYTES]);
+                bytes.extend_from_slice(&[0; POSITION_BYTES]);
+                bytes.extend_from_slice(&vertex[POSITION_BYTES..]);
+            } else {
+                bytes.extend(vertex);
+            }
+        }
+        bytes.extend_from_slice(&(indices.len() as u16).to_le_bytes());
+        bytes.extend_from_slice(&0u16.to_le_bytes());
+        for index in indices {
+            bytes.extend_from_slice(&index.to_le_bytes());
+        }
+        if !indices.len().is_multiple_of(2) {
+            bytes.extend_from_slice(&0u16.to_le_bytes());
+        }
+        bytes
+    }
+
+    #[test]
+    fn legacy_mmb_static_canopy_preserves_strip_connectivity_and_winding() {
+        let decoded = parse_models(&legacy_mmb(MESH_TYPE_STATIC_STRIP, &JOINED_STRIP));
+        assert_eq!(decoded.len(), 1);
+        assert_eq!(
+            decoded[0].vertices.len(),
+            usize::from(LEGACY_FIXTURE_VERTICES)
+        );
+        assert_eq!(decoded[0].indices, JOINED_TRIANGLES);
+        assert!(!decoded[0].vertex_blend_enabled);
+        assert_eq!(decoded[0].vertices[0].rgba, EXPECTED_RGBA);
+    }
+
+    #[test]
+    fn legacy_mmb_type_selects_list_topology_and_animated_stride() {
+        const LIST: [u16; 6] = [0, 1, 2, 3, 4, 5];
+        for mesh_type in [CONFIG_VERTEX_BLEND, STATIC_BUMP_TYPE] {
+            let decoded = parse_models(&legacy_mmb(mesh_type, &LIST));
+            assert_eq!(decoded.len(), 1);
+            assert_eq!(decoded[0].indices, LIST);
+            assert_eq!(
+                decoded[0].vertices.len(),
+                usize::from(LEGACY_FIXTURE_VERTICES)
+            );
+            assert_eq!(decoded[0].vertices[7].pos, [3.0, 0.0, 1.0]);
+            assert_eq!(decoded[0].vertices[7].normal, [0.0, 1.0, 0.0]);
+            assert_eq!(decoded[0].vertices[7].rgba, EXPECTED_RGBA);
+            assert_eq!(
+                decoded[0].vertex_blend_enabled,
+                mesh_type == CONFIG_VERTEX_BLEND
+            );
+        }
+    }
+
+    #[test]
+    fn real_dat_ferry_sunny_canopy_has_complete_static_strips() {
+        const FERRY_FILE: u32 = 328;
+        const SUNNY_CANOPY_CHUNK: usize = 410;
+        const EXPECTED_TRIANGLES: [usize; 2] = [116, 552];
+        const EXPECTED_VERTEX_COUNTS: [usize; 2] = [117, 493];
+        let Some(root) = crate::archive::open_test_install() else {
+            return;
+        };
+        let location = root.resolve(FERRY_FILE).unwrap();
+        let bytes = std::fs::read(location.path_under(&root)).unwrap();
+        let chunk = crate::chunk::walk(&bytes)
+            .nth(SUNNY_CANOPY_CHUNK)
+            .unwrap()
+            .unwrap();
+        assert_eq!(chunk.name, *b"suny");
+        assert_eq!(chunk.kind, crate::kind::ChunkKind::Mmb as u8);
+        let bytes = decrypt(chunk.data).unwrap();
+        assert_eq!(&bytes[..3], b"MMB");
+        assert_eq!(bytes[MESH_TYPE_OFFSET], MESH_TYPE_STATIC_STRIP);
+        let models = parse_models(&bytes);
+        assert_eq!(models.len(), EXPECTED_TRIANGLES.len());
+        for (index, model) in models.iter().enumerate() {
+            assert_eq!(model.indices.len(), EXPECTED_TRIANGLES[index] * 3);
+            assert_eq!(model.vertices.len(), EXPECTED_VERTEX_COUNTS[index]);
+            let used: std::collections::BTreeSet<_> = model.indices.iter().copied().collect();
+            assert_eq!(used.len(), model.vertices.len());
+            assert!(model
+                .indices
+                .chunks_exact(3)
+                .all(|t| t[0] != t[1] && t[1] != t[2] && t[0] != t[2]));
+        }
+        assert_eq!(&models[0].indices[..6], &[0, 1, 2, 2, 1, 3]);
+    }
+
+    #[test]
+    fn real_dat_docked_ferry_reaches_its_authored_triangle_count() {
+        const DOCK_FILE: u32 = 31008;
+        const FERRY_CHUNK: usize = 16;
+        const PIECE_POINTER_OFFSET: usize = 60;
+        const PIECE_TRIANGLE_COUNT_OFFSET: usize = 28;
+        let Some(root) = crate::archive::open_test_install() else {
+            return;
+        };
+        let location = root.resolve(DOCK_FILE).unwrap();
+        let bytes = std::fs::read(location.path_under(&root)).unwrap();
+        let chunk = crate::chunk::walk(&bytes)
+            .nth(FERRY_CHUNK)
+            .unwrap()
+            .unwrap();
+        assert_eq!(chunk.name, *b"fune");
+        let bytes = decrypt(chunk.data).unwrap();
+        assert_eq!(&bytes[..3], b"MMB");
+        assert_eq!(bytes[MESH_TYPE_OFFSET], MESH_TYPE_STATIC_STRIP);
+        let piece = u32::from_le_bytes(
+            bytes[PIECE_POINTER_OFFSET..PIECE_POINTER_OFFSET + 4]
+                .try_into()
+                .unwrap(),
+        ) as usize;
+        let count_offset = piece + PIECE_TRIANGLE_COUNT_OFFSET;
+        let authored =
+            u32::from_le_bytes(bytes[count_offset..count_offset + 4].try_into().unwrap()) as usize;
+        let models = parse_models(&bytes);
+        assert!(authored > 0);
+        assert_eq!(
+            models.iter().map(|m| m.indices.len() / 3).sum::<usize>(),
+            authored
+        );
+        assert!(models
+            .iter()
+            .flat_map(|m| m.indices.chunks_exact(3))
+            .all(|t| t[0] != t[1] && t[1] != t[2] && t[0] != t[2]));
     }
 }

@@ -1,30 +1,15 @@
 #![allow(clippy::type_complexity, clippy::too_many_arguments)]
 
-#[cfg(any(feature = "native-window", feature = "relay"))]
-use kuluu_session::state;
-use kuluu_session::{agent_io, auth_client, lobby_client, session};
-
-#[cfg(feature = "native-window")]
-use kuluu::audio_store;
-#[cfg(feature = "native-window")]
-use kuluu::graphics_store;
-#[cfg(feature = "native-window")]
-use kuluu::keybinds_store;
-#[cfg(feature = "native-window")]
-use kuluu::marker_store;
-#[cfg(feature = "native-window")]
-use kuluu::overlay_store;
-use kuluu::padbinds_store;
 #[cfg(feature = "relay")]
-use kuluu_session::relay;
-#[cfg(feature = "native-window")]
-use kuluu_session::wire_translate;
-mod launcher;
-#[cfg(feature = "native-window")]
-mod view_native;
+use kuluu_session::state;
+use kuluu_session::{agent_io, auth_client, lobby_client, reactor, session};
 
 use anyhow::{self, bail, Context, Result};
 use clap::{Parser, Subcommand};
+#[cfg(feature = "native-window")]
+use kuluu::overlay_store;
+#[cfg(feature = "relay")]
+use kuluu_session::relay;
 
 #[derive(Debug, Parser)]
 #[command(name = "kuluu", about = "Agent-drivable FFXI client (LSB/Phoenix).")]
@@ -81,6 +66,9 @@ enum Command {
         nation: u8,
         size: u8,
         face: u8,
+        /// Skip the opening new-character cutscene (matches the GUI default).
+        #[arg(long, default_value_t = true)]
+        skip_intro_cs: bool,
     },
 
     Play {
@@ -195,9 +183,13 @@ fn main() -> Result<()> {
     ) {
         let result = run_gui_main_thread(&rt, args, auth);
         drop(rt);
-        view_native::exit_watchdog::mark(view_native::exit_watchdog::Stage::RuntimeDropped);
-        view_native::exit_watchdog::mark(view_native::exit_watchdog::Stage::MainReturning);
-        view_native::exit_watchdog::note_complete();
+        kuluu::view_native::exit_watchdog::mark(
+            kuluu::view_native::exit_watchdog::Stage::RuntimeDropped,
+        );
+        kuluu::view_native::exit_watchdog::mark(
+            kuluu::view_native::exit_watchdog::Stage::MainReturning,
+        );
+        kuluu::view_native::exit_watchdog::note_complete();
         return result;
     }
     #[cfg(feature = "native-window")]
@@ -255,6 +247,7 @@ async fn run_command_async(args: Args, auth: auth_client::AuthClient) -> Result<
             nation,
             size,
             face,
+            skip_intro_cs,
         } => {
             auth.ensure_account(&user, &password).await.ok();
             let session = auth.login(&user, &password).await.context("login")?;
@@ -267,12 +260,13 @@ async fn run_command_async(args: Args, auth: auth_client::AuthClient) -> Result<
                 nation,
                 size,
                 face,
+                skip_intro_cs: u8::from(skip_intro_cs),
             };
             lobby
                 .create_character(&session, &spec)
                 .await
                 .context("character creation")?;
-            tracing::info!(char_name = %name, race, job, nation, "character created");
+            tracing::info!(char_name = %name, race, job, nation, skip_intro_cs, "character created");
         }
         Command::Play {
             user,
@@ -319,7 +313,8 @@ async fn run_command_async(args: Args, auth: auth_client::AuthClient) -> Result<
                             })?;
                         let mut key3 = [0u8; 20];
                         for (i, b) in key3.iter_mut().enumerate() {
-                            *b = ((i as u8).wrapping_mul(0x37)) ^ 0x5a;
+                            *b = ((i as u8).wrapping_mul(kuluu::launcher::KEY3_MUL))
+                                ^ kuluu::launcher::KEY3_XOR;
                         }
                         let handoff = handle
                             .select(slot.char_id, &slot.name, key3)
@@ -333,12 +328,12 @@ async fn run_command_async(args: Args, auth: auth_client::AuthClient) -> Result<
                         (u, p, slot.char_id, slot.name, initial_state)
                     }
                     (u, p, n) => {
-                        let defaults = launcher::Defaults {
+                        let defaults = kuluu::launcher::Defaults {
                             user: u,
                             password: p,
                             char_name: n,
                         };
-                        let sel = launcher::run(&args.server, &auth, &lobby, defaults)
+                        let sel = kuluu::launcher::run(&args.server, &auth, &lobby, defaults)
                             .await
                             .context("interactive launcher")?;
                         (
@@ -367,7 +362,12 @@ async fn run_command_async(args: Args, auth: auth_client::AuthClient) -> Result<
             };
             let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel(64);
             let (event_tx, event_rx) = tokio::sync::broadcast::channel(1024);
-            let session_task = tokio::spawn(session::run(cfg, cmd_rx, event_tx.clone()));
+            let session_task = tokio::spawn(reactor::run(
+                cfg,
+                cmd_rx,
+                event_tx.clone(),
+                reactor::ReactorConfig::agent(),
+            ));
             let agent_task = tokio::spawn(agent_io::run(cmd_tx.clone(), event_rx));
 
             #[cfg(unix)]
@@ -409,12 +409,18 @@ async fn run_command_async(args: Args, auth: auth_client::AuthClient) -> Result<
                 let (state_tx, state_rx) =
                     tokio::sync::watch::channel(state::SessionState::default());
                 let folder_rx = event_tx.subscribe();
-                let _folder = tokio::spawn(session::run_event_folder(folder_rx, state_tx));
+                // The relay path has no translator: change batches are drained
+                // by the folder but never consumed.
+                let (changes_tx, _entity_changes_rx) = tokio::sync::mpsc::unbounded_channel();
+                let _folder =
+                    tokio::spawn(session::run_event_folder(folder_rx, state_tx, changes_tx));
                 let relay_event_tx = event_tx.clone();
                 let relay_cmd_tx = cmd_tx.clone();
                 tokio::spawn(async move {
+                    // No GUI in the headless path: screenshot requests have no
+                    // DebugControl to land on.
                     if let Err(err) =
-                        relay::serve(addr, state_rx, relay_event_tx, relay_cmd_tx).await
+                        relay::serve(addr, state_rx, relay_event_tx, relay_cmd_tx, None).await
                     {
                         tracing::warn!(error = %err, "relay listener exited");
                     }
@@ -490,7 +496,7 @@ fn run_gui_main_thread(
 
     let direct_mode_autostart = user.is_some() && password.is_some() && char_name.is_some();
 
-    let defaults = launcher::Defaults {
+    let defaults = kuluu::launcher::Defaults {
         user,
         password,
         char_name,
@@ -500,9 +506,9 @@ fn run_gui_main_thread(
 
     let dat_root = resolve_dat_root(args_require_dat)?;
 
-    view_native::run(view_native::NativeRunArgs {
+    kuluu::view_native::run(kuluu::view_native::NativeRunArgs {
         server,
-        ports: view_native::SessionPorts {
+        ports: kuluu::view_native::SessionPorts {
             auth_port,
             data_port,
             view_port,
@@ -543,7 +549,7 @@ fn run_model_viewer_main_thread(args: Args) -> Result<()> {
     else {
         unreachable!("dispatched only when args.command is Command::ModelViewer");
     };
-    view_native::model_viewer::run(view_native::model_viewer::ModelViewerArgs {
+    kuluu::view_native::model_viewer::run(kuluu::view_native::model_viewer::ModelViewerArgs {
         dat_root,
         race,
         face,

@@ -80,7 +80,7 @@ fn token(raw: &[u8]) -> String {
 
 pub const NAMESPACE_LEN: usize = imginfo::TOKEN_LEN;
 
-// research/xim DatResource.kt:312-315 — a fully qualified 16-char texture name splits into
+// research/xim DatResource.kt TextureName — a fully qualified 16-char texture name splits into
 // a namespace (bytes 0..8) and a local name (bytes 8..16).
 pub fn split_qualified_name(raw16: &[u8]) -> (String, String) {
     (
@@ -109,18 +109,30 @@ mod imginfo {
 
     pub(super) const FLG_PALETTE: u8 = 0x91;
 
-    // research/xim TextureSection.kt:54-61, :73-79 — 0xB1 repeats 0x91's palettised layout with
+    // research/xim TextureSection.kt read textureId, :73-79 — 0xB1 repeats 0x91's palettised layout with
     // one extra header word, which is why its palette/pixel offsets sit 4 bytes later.
     pub(super) const FLG_PALETTE_EXT: u8 = 0xB1;
 
-    // research/xim TextureSection.kt:28-33 rejects every other type byte outright, so these are
-    // the only three known to carry a qualified 0x10-char name straight after the flag.
-    pub(super) const NAMED_HEADER_FLAGS: [u8; 3] = [FLG_DXT, FLG_PALETTE, FLG_PALETTE_EXT];
+    // research/XIClient ImageData.h ImageData — the header is `unsigned char Format;
+    // ResourceID TextureName;` with no union or variant, and GameTexture::ConfigureFromImageData
+    // (GameTexture.cpp GameTexture::ConfigureFromImageData) copies TextureName as its first statement, before the
+    // GetTextureFormat() switch at :212-245. The name field is therefore unconditional across
+    // type bytes: these two name themselves exactly where the 0x9x/0xAx/0xBx kinds do.
+    // (research/xim TextureSection.kt read `warn`s on them, but that is an unhandled case, not
+    // evidence of an absent name; XIClient is the stronger tier per research/AGENTS.md.)
+    // ImageData.h ImageData separate the pair: both are GetTextureFormat() 0, and it is
+    // IsCompressed() = Format >> 7 that tells 0x81 from 0x01.
+    pub(super) const FLG_FMT0: u8 = 0x01;
 
-    // research/xim TextureSection.kt:28-33 rejects these two type bytes, so their name field is
-    // unvouched-for and they stay out of NAMED_HEADER_FLAGS even though decode_texture reads
-    // them with FLG_PALETTE's layout.
-    pub(super) const FLG_PALETTE_UNVERIFIED: [u8; 2] = [0x01, 0x81];
+    pub(super) const FLG_FMT0_COMPRESSED: u8 = 0x81;
+
+    pub(super) const NAMED_HEADER_FLAGS: [u8; 5] = [
+        FLG_DXT,
+        FLG_PALETTE,
+        FLG_PALETTE_EXT,
+        FLG_FMT0,
+        FLG_FMT0_COMPRESSED,
+    ];
 
     pub(super) const NAME_END: usize = 0x11;
 
@@ -149,7 +161,7 @@ mod imginfo {
 
     pub(super) const PIXELS_OFF: usize = PALETTE_OFF + PALETTE_LEN;
 
-    // research/xim TextureSection.kt:74 — 0xB1 reads one extra header word before the payload.
+    // research/xim TextureSection.kt read — 0xB1 reads one extra header word before the payload.
     pub(super) const EXT_HEADER_WORD: usize = 4;
 
     pub(super) const PALETTE_OFF_EXT: usize = PALETTE_OFF + EXT_HEADER_WORD;
@@ -194,7 +206,12 @@ pub fn decode_texture(body: &[u8]) -> std::result::Result<DecodedTexture, Textur
         imginfo::FLG_PALETTE_EXT => {
             decode_palettized(body, imginfo::PALETTE_OFF_EXT, imginfo::PIXELS_OFF_EXT)
         }
-        flag if imginfo::FLG_PALETTE_UNVERIFIED.contains(&flag) => {
+        // research/XIClient GameTexture.cpp GameTexture::ConfigureFromImageData — GetTextureFormat() is 0 for both, and
+        // `case 0: case 1:` falls straight through to the ColorFormat walk at :249. Two gaps
+        // there are unimplemented (kuluu-tm7m caveat): decode_palettized assumes the
+        // Indexed8Bit/BitDepth-32 arm at :262-272 for every Img, and 0x81's IsCompressed() bit
+        // additionally sends retail to the trailing-fourcc check at :291-300.
+        imginfo::FLG_FMT0 | imginfo::FLG_FMT0_COMPRESSED => {
             decode_palettized(body, imginfo::PALETTE_OFF, imginfo::PIXELS_OFF)
         }
         _ => Err(TextureError::NoMagic),
@@ -313,10 +330,15 @@ fn decode_palettized(
     })
 }
 
+const RGB565_5BIT_MASK: u16 = 0x1F;
+const RGB565_6BIT_MASK: u16 = 0x3F;
+const DXT_TEXEL_INDEX_MASK: u32 = 0x3;
+const DXT3_ALPHA_NIBBLE_MASK: u8 = 0x0F;
+
 fn rgb565_to_rgb888(c: u16) -> (u8, u8, u8) {
-    let r5 = ((c >> 11) & 0x1F) as u8;
-    let g6 = ((c >> 5) & 0x3F) as u8;
-    let b5 = (c & 0x1F) as u8;
+    let r5 = ((c >> 11) & RGB565_5BIT_MASK) as u8;
+    let g6 = ((c >> 5) & RGB565_6BIT_MASK) as u8;
+    let b5 = (c & RGB565_5BIT_MASK) as u8;
 
     let r = (r5 << 3) | (r5 >> 2);
     let g = (g6 << 2) | (g6 >> 4);
@@ -365,7 +387,7 @@ fn decode_color_block(block: &[u8; 8], out: &mut [u8; 64], punchthrough_alpha: b
     for py in 0..4 {
         for px in 0..4 {
             let i = py * 4 + px;
-            let sel = ((idx_word >> (2 * i)) & 0x3) as usize;
+            let sel = ((idx_word >> (2 * i)) & DXT_TEXEL_INDEX_MASK) as usize;
             let dst = i * 4;
             out[dst..dst + 4].copy_from_slice(&palette[sel]);
         }
@@ -438,7 +460,7 @@ pub fn decode_dxt1_blocks(
 /// magnified, so it reads as a checkerboard over the whole sky (kuluu-u5mm). Measured with
 /// the `dat-sky-alpha-histogram` example, which also confirms the RGB carries no matching
 /// stipple — only alpha is dithered.
-const DXT3_ALPHA_DITHER_STEP: u8 = 0x11;
+pub const DXT3_ALPHA_DITHER_STEP: u8 = 0x11;
 
 /// Average an ordered-dithered DXT3 alpha plane back into the continuous value it encodes.
 ///
@@ -507,7 +529,7 @@ pub fn decode_dxt3_blocks(
         decode_color_block(color, out, false);
         for i in 0..8 {
             let a_byte = src[i];
-            let a_lo_4 = (a_byte & 0x0F) as u16;
+            let a_lo_4 = (a_byte & DXT3_ALPHA_NIBBLE_MASK) as u16;
             let a_hi_4 = (a_byte >> 4) as u16;
 
             let a_lo = ((a_lo_4 << 4) | a_lo_4) as u8;
@@ -611,7 +633,7 @@ pub(crate) mod tests {
     }
 
     // File 3020 (Poison) carries the 16 bytes `venom1  fir     ` in both its 0xA1 Img and its
-    // 0x21 sprite sheet. research/xim DatResource.kt:312-315 splits that into namespace/local.
+    // 0x21 sprite sheet. research/xim DatResource.kt TextureName splits that into namespace/local.
     pub(crate) const QUALIFIED_FIR: &[u8; 16] = b"venom1  fir     ";
 
     pub(crate) fn img_body_named(raw16: &[u8; 16]) -> Vec<u8> {
@@ -635,8 +657,9 @@ pub(crate) mod tests {
         assert_eq!(extract_texture_name(&body).as_deref(), Some("fir"));
     }
 
-    // research/xim TextureSection.kt:28-33 — a palettised Img names itself exactly like a DXT
-    // one, so it has to enter the name-keyed maps too or it can never be linked by name.
+    // research/XIClient GameTexture.cpp GameTexture::ConfigureFromImageData — TextureName is copied before any format branch,
+    // so a palettised Img names itself exactly like a DXT one and has to enter the name-keyed
+    // maps too or it can never be linked by name.
     #[test]
     fn extract_texture_tokens_accepts_every_named_header_flag() {
         for flag in imginfo::NAMED_HEADER_FLAGS {
@@ -649,15 +672,35 @@ pub(crate) mod tests {
         }
     }
 
-    // research/xim TextureSection.kt:28-33 rejects these two, so their name field is untrusted
-    // and they must not enter the name-keyed maps even though decode_texture handles them.
+    // The ImageData header at ROM/0/28.DAT offset 3389984 (file 100, chunk `smok`), verbatim:
+    // the 0x81 type byte, the qualified name, SubsequentDataSize (0x28, "observed to be
+    // consistently 40" per research/XIClient ImageData.h ImageData), then Width and Height. That
+    // file's `smok` 0x21 sprite sheet names this exact texture, so keeping 0x81 out of the name
+    // tiers left the sheet -- and every other texture in the zone, all 25 of which are 0x81 --
+    // unlinkable.
+    const RETAIL_0X81_IMG_HEADER: [u8; 29] = [
+        0x81, b'e', b'f', b'f', b'e', b'c', b't', b' ', b' ', b's', b'm', b'o', b'k', b'e', b'0',
+        b'1', b' ', 0x28, 0x00, 0x00, 0x00, 0x80, 0x00, 0x00, 0x00, 0x80, 0x00, 0x00, 0x00,
+    ];
+
     #[test]
-    fn extract_texture_tokens_rejects_the_unverified_palette_flags() {
-        for flag in imginfo::FLG_PALETTE_UNVERIFIED {
-            let body = img_body_named_with_flag(flag, QUALIFIED_FIR);
-            assert_eq!(extract_texture_tokens(&body), None, "flag {flag:#04x}");
-            assert!(!imginfo::NAMED_HEADER_FLAGS.contains(&flag));
-        }
+    fn extract_texture_tokens_accepts_the_retail_0x81_image_header() {
+        assert_eq!(
+            extract_texture_tokens(&RETAIL_0X81_IMG_HEADER),
+            Some(("effect".to_string(), "smoke01".to_string()))
+        );
+        let dims = |off: usize| {
+            i32::from_le_bytes(
+                RETAIL_0X81_IMG_HEADER[off..off + 4]
+                    .try_into()
+                    .expect("4-byte dimension word"),
+            )
+        };
+        assert_eq!(
+            (dims(imginfo::WIDTH_OFF), dims(imginfo::HEIGHT_OFF)),
+            (128, 128),
+            "the constant offsets must land on the retail Width/Height words"
+        );
     }
 
     #[test]
@@ -777,7 +820,7 @@ pub(crate) mod tests {
                 let block = (y / 4) as usize * blocks_x + (x / 4) as usize;
                 let texel = (y % 4) * 4 + (x % 4);
                 let byte = block * 16 + (texel / 2) as usize;
-                let nibble = f(x, y) & 0x0F;
+                let nibble = f(x, y) & DXT3_ALPHA_NIBBLE_MASK;
                 out[byte] |= nibble << (4 * (texel % 2));
             }
         }

@@ -9,7 +9,7 @@ pub const HEALING: u8 = 33;
 pub const SIT: u8 = 47;
 
 /// A door's swing state. Retail keeps the same value as the door actor's
-/// `GameStatus` (research/XIClient .../World/Actor/GameStatus.h, `D_OPEN` /
+/// `GameStatus` (research/XIClient/src/XIClient/include/World/Actor/GameStatus.h, `D_OPEN` /
 /// `D_CLOSE`), so this one byte is the whole of what the server says about a
 /// door — the swing itself is the client's, driven from the zone DAT's per-door
 /// `open`/`clos` routines (`enum ANIMATIONTYPE`,
@@ -35,9 +35,9 @@ pub fn is_mounted(animation: u8) -> bool {
     animation == CHOCOBO || animation == MOUNT
 }
 
-// ANIMATIONTYPE, vendor/server/src/map/entities/baseentity.h:60. The server writes
+// ANIMATIONTYPE, vendor/server/src/map/entities/baseentity.h. The server writes
 // these into the entity's server_status (the 0x0D/0x37 animation byte) and broadcasts
-// them; the client maps each to the matching fsh* model clip (research/xim Actor.kt:361).
+// them; the client maps each to the matching fsh* model clip (research/xim Actor.kt updateFishingState).
 // The pre-overhaul (38-43,50) and current (56-62) fishing systems share fsh0..fsh6.
 pub const FISHING_FISH_OLD: u8 = 38;
 pub const FISHING_CAUGHT_OLD: u8 = 39;

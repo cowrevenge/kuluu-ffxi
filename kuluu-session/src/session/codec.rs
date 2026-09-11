@@ -1,5 +1,12 @@
 use super::*;
 
+// vendor/server/src/map/enums/packet_c2s.h GP_CLI_COMMAND_*
+pub(crate) const ITEM_USE: u16 = 0x037;
+pub(crate) const CHAT_NAME: u16 = 0x0B6;
+pub(crate) const EQUIP_INSPECT: u16 = 0x0DD;
+pub(crate) const CAMP: u16 = 0x0E8;
+pub(crate) const BUFFCANCEL: u16 = 0x0F1;
+
 // GP_CLI_COMMAND_BUFFCANCEL, vendor/server/src/map/packets/c2s/0x0f1_buffcancel.h:
 // BuffNo u16 (the status icon id), padding u16. The server runs
 // DelStatusEffectsByIcon(BuffNo) and blocks the packet only while InEvent
@@ -7,7 +14,7 @@ use super::*;
 // gates on ffxi_vocab::status_effects::is_cancelable.
 pub fn build_subpacket_buffcancel(sync: u16, buff_no: u16) -> Vec<u8> {
     let mut buf = vec![0u8; 8];
-    buf[0..4].copy_from_slice(&build_subpacket_header(0x0F1, 2, sync));
+    buf[0..4].copy_from_slice(&build_subpacket_header(BUFFCANCEL, 2, sync));
     buf[4..6].copy_from_slice(&buff_no.to_le_bytes());
     buf
 }
@@ -81,7 +88,7 @@ pub fn build_subpacket_action(
 
 // c2s 0x05D GP_CLI_COMMAND_MOTION: UniqueNo u32 @4, ActIndex u16 @8, Number u8
 // @10 (emote id), Mode u8 @11, Param u16 @12, pad u16 @14
-// (vendor/server/src/map/packets/c2s/0x05d_motion.h:28-35). Note the c2s Mode
+// (vendor/server/src/map/packets/c2s/0x05d_motion.h GP_CLI_COMMAND_MOTION). Note the c2s Mode
 // byte precedes Param, unlike the s2c 0x05A layout.
 pub fn build_subpacket_motion(
     sync: u16,
@@ -183,7 +190,7 @@ pub fn build_subpacket_equip_inspect(
     kind: u8,
 ) -> Vec<u8> {
     let mut buf = vec![0u8; 16];
-    buf[0..4].copy_from_slice(&build_subpacket_header(0x0DD, 4, sync));
+    buf[0..4].copy_from_slice(&build_subpacket_header(EQUIP_INSPECT, 4, sync));
     buf[4..8].copy_from_slice(&unique_no.to_le_bytes());
 
     buf[8..12].copy_from_slice(&(act_index as u32).to_le_bytes());
@@ -192,7 +199,7 @@ pub fn build_subpacket_equip_inspect(
     buf
 }
 
-// GP_CLI_COMMAND_BAZAAR_LIST, vendor/server/src/map/packets/c2s/0x105_bazaar_list.h:27-31:
+// GP_CLI_COMMAND_BAZAAR_LIST, vendor/server/src/map/packets/c2s/0x105_bazaar_list.h:
 // UniqueNo u32, ActIndex u16, padding u16. The server rejects it while we still
 // hold a BazaarID, so leave the previous bazaar first (0x105_bazaar_list.cpp validate).
 pub fn build_subpacket_bazaar_list(sync: u16, unique_no: u32, act_index: u16) -> Vec<u8> {
@@ -207,7 +214,7 @@ pub fn build_subpacket_bazaar_list(sync: u16, unique_no: u32, act_index: u16) ->
     buf
 }
 
-// GP_CLI_COMMAND_BAZAAR_BUY, vendor/server/src/map/packets/c2s/0x106_bazaar_buy.h:27-31:
+// GP_CLI_COMMAND_BAZAAR_BUY, vendor/server/src/map/packets/c2s/0x106_bazaar_buy.h:
 // BazaarItemIndex u8, padding u8[3], BuyNum u32. `index` is the seller-side
 // LOC_INVENTORY slot from the s2c 0x105 row.
 pub fn build_subpacket_bazaar_buy(sync: u16, index: u8, quantity: u32) -> Vec<u8> {
@@ -248,7 +255,7 @@ pub fn build_subpacket_reqlogout(sync: u16, mode: u16, kind: u16) -> Vec<u8> {
 
 pub fn build_subpacket_camp(sync: u16, mode: HealMode) -> Vec<u8> {
     let mut buf = vec![0u8; 8];
-    buf[0..4].copy_from_slice(&build_subpacket_header(0x0E8, 2, sync));
+    buf[0..4].copy_from_slice(&build_subpacket_header(CAMP, 2, sync));
     buf[4..8].copy_from_slice(&mode.as_u32().to_le_bytes());
     buf
 }
@@ -261,7 +268,7 @@ pub fn build_subpacket_item_use(
     slot: u8,
 ) -> Vec<u8> {
     let mut buf = vec![0u8; 20];
-    buf[0..4].copy_from_slice(&build_subpacket_header(0x037, 5, sync));
+    buf[0..4].copy_from_slice(&build_subpacket_header(ITEM_USE, 5, sync));
     buf[4..8].copy_from_slice(&unique_no.to_le_bytes());
 
     buf[12..14].copy_from_slice(&act_index.to_le_bytes());
@@ -508,7 +515,7 @@ pub fn build_subpacket_auc_lot_check(sync: u16, work_index: i8) -> Vec<u8> {
 
 // c2s 0x100 GP_CLI_COMMAND_MYROOM_JOB: MainJobIndex u8 @4, SupportJobIndex u8 @5,
 // u16 pad; 0 = keep the current job
-// (vendor/server/src/map/packets/c2s/0x100_myroom_job.h:27-31).
+// (vendor/server/src/map/packets/c2s/0x100_myroom_job.h GP_CLI_COMMAND_MYROOM_JOB).
 pub fn build_subpacket_myroom_job(sync: u16, main_job: Option<u8>, sub_job: Option<u8>) -> Vec<u8> {
     let mut buf = vec![0u8; 8];
     buf[0..4].copy_from_slice(&build_subpacket_header(
@@ -555,6 +562,41 @@ pub(crate) fn build_subpacket_gameok(sync: u16) -> Vec<u8> {
     buf
 }
 
+// c2s 0x061 GP_CLI_COMMAND_CLISTATUS: unknown00 u8 @4 (validated 0..=1), padded
+// to a word. The server answers with SendLocalPlayerPackets — GROUP_ATTR for
+// self, CLISTATUS, ... (vendor/server/src/map/packets/c2s/0x061_clistatus.cpp).
+// Wire size is header(4) + body(4) = 8 bytes per the C++ struct
+// (0x061_clistatus.h: unknown00 u8, padding00 u8, padding01 u16), so
+// size_words must be 2 — declaring 1 makes LSB reject the packet at
+// validation before dispatch.
+pub(crate) fn build_subpacket_clistatus(sync: u16) -> Vec<u8> {
+    let mut buf = vec![0u8; 8];
+    buf[0..4].copy_from_slice(&build_subpacket_header(
+        ffxi_proto::map::c2s::CLISTATUS,
+        2,
+        sync,
+    ));
+    // unknown00 stays 0 (validate: range 0..=1).
+    buf
+}
+
+// c2s 0x076 GP_CLI_COMMAND_GROUP_LIST_REQ: Kind u8 @4 (validated == 0).
+// Requests the full party table; the server answers with GROUP_TBL (0x0C8) +
+// GROUP_LIST (0x0DD) for every member.
+// Wire size is header(4) + body(4) = 8 bytes per the C++ struct
+// (0x076_group_list_req.h: uint8_t Kind), so size_words must be 2 — declaring
+// 1 makes LSB reject the packet at validation before dispatch.
+pub(crate) fn build_subpacket_group_list_req(sync: u16) -> Vec<u8> {
+    let mut buf = vec![0u8; 8];
+    buf[0..4].copy_from_slice(&build_subpacket_header(
+        ffxi_proto::map::c2s::GROUP_LIST_REQ,
+        2,
+        sync,
+    ));
+    // Kind = 0 (the only valid value per LSB's validator).
+    buf
+}
+
 pub(crate) fn build_subpacket_zone_transition(sync: u16) -> Vec<u8> {
     let mut buf = vec![0u8; 8];
     buf[0..4].copy_from_slice(&build_subpacket_header(
@@ -589,8 +631,8 @@ pub(crate) fn build_subpacket_chat(sync: u16, kind: u8, text: &str) -> Vec<u8> {
 }
 
 // GP_CLI_COMMAND_CHAT_NAME.sName is char[15] (vendor/server/src/map/packets/
-// c2s/0x0b6_chat_name.h:31); LSB reads it via asStringFromUntrustedSource(
-// sName, sizeof(sName)) (0x0b6_chat_name.cpp:76), whose strnlen form tolerates
+// c2s/0x0b6_chat_name.h sName); LSB reads it via asStringFromUntrustedSource(
+// sName, sizeof(sName)) (0x0b6_chat_name.cpp GP_CLI_COMMAND_CHAT_NAME::process recipientName), whose strnlen form tolerates
 // a fully-populated unterminated field, so all 15 bytes are usable.
 pub(crate) const CHAT_NAME_SNAME_LEN: usize = 15;
 const CHAT_NAME_MESSAGE_OFFSET: usize = 4 + 1 + 1 + CHAT_NAME_SNAME_LEN;
@@ -607,9 +649,9 @@ pub(crate) fn build_subpacket_tell(sync: u16, recipient: &str, text: &str) -> Ve
     let size_words = (total / 4) as u16;
 
     let mut buf = vec![0u8; total];
-    buf[0..4].copy_from_slice(&build_subpacket_header(0x0B6, size_words, sync));
+    buf[0..4].copy_from_slice(&build_subpacket_header(CHAT_NAME, size_words, sync));
     // GP_CLI_COMMAND_CHAT_NAME.unknown00 must be 3 or the server rejects the
-    // packet (PacketValidator .mustEqual(unknown00, 3), 0x0b6_chat_name.cpp:60);
+    // packet (PacketValidator .mustEqual(unknown00, 3), 0x0b6_chat_name.cpp);
     // the retail client always sends 3. Without it every tell — and the
     // customMenu reply — is silently dropped.
     buf[4] = CHAT_NAME_UNKNOWN00;
@@ -624,10 +666,10 @@ pub(crate) fn build_subpacket_tell(sync: u16, recipient: &str, text: &str) -> Ve
 pub(crate) const CHAT_NAME_UNKNOWN00: u8 = 3;
 
 // c2s 0x05B GP_CLI_COMMAND_EVENTEND (vendor/server/src/map/packets/c2s/
-// 0x05b_eventend.h:34-41): UniqueNo u32, EndPara u32, ActIndex u16, Mode u16
+// 0x05b_eventend.h GP_CLI_COMMAND_EVENTEND): UniqueNo u32, EndPara u32, ActIndex u16, Mode u16
 // (0 = End), EventNum u16 (zone id — retail echoes GP_SERV LOGIN EventNum,
-// 0x00a_login.cpp:187), EventPara u16 (the event id the validator matches
-// against currentEvent->eventId, validation.cpp:71-76).
+// 0x00a_login.cpp GP_SERV_COMMAND_LOGIN::GP_SERV_COMMAND_LOGIN), EventPara u16 (the event id the validator matches
+// against currentEvent->eventId, validation.cpp PacketValidator::isInEvent).
 pub(crate) fn build_subpacket_event_end(
     sync: u16,
     unique_no: u32,
@@ -651,9 +693,39 @@ pub(crate) fn build_subpacket_event_end(
     buf
 }
 
+// vendor/server/src/map/packets/c2s/0x05c_eventendxzy.h GP_CLI_COMMAND_EVENTENDXZY.
+pub(crate) fn build_subpacket_event_position(
+    sync: u16,
+    identity: (u32, u16, u16),
+    event_zone: u16,
+    end_para: u32,
+    position: crate::state::Position,
+) -> Vec<u8> {
+    const PACKET_BYTES: usize = 32;
+    const PACKET_WORDS: u16 = (PACKET_BYTES / 4) as u16;
+    let (unique_no, act_index, event_id) = identity;
+    let mut buf = vec![0; PACKET_BYTES];
+    buf[..4].copy_from_slice(&build_subpacket_header(
+        ffxi_proto::map::event_position_wire::OPCODE,
+        PACKET_WORDS,
+        sync,
+    ));
+    buf[4..8].copy_from_slice(&position.pos.x.to_le_bytes());
+    buf[8..12].copy_from_slice(&position.pos.z.to_le_bytes());
+    buf[12..16].copy_from_slice(&position.pos.y.to_le_bytes());
+    buf[16..20].copy_from_slice(&unique_no.to_le_bytes());
+    buf[20..24].copy_from_slice(&end_para.to_le_bytes());
+    buf[24..26].copy_from_slice(&event_zone.to_le_bytes());
+    buf[26..28].copy_from_slice(&event_id.to_le_bytes());
+    buf[28..30].copy_from_slice(&act_index.to_le_bytes());
+    buf[30] = ffxi_proto::map::event_position_wire::UPDATE_PENDING as u8;
+    buf[31] = position.heading;
+    buf
+}
+
 // Inverse of the s2c 0x055 id decode — LSB reads the bits back as
 // keyItemId = TableIndex*512 + word*32 + bit (vendor/server/src/map/packets/
-// c2s/0x064_scenarioitem.cpp:44). Ids outside `table_index`'s range are
+// c2s/0x064_scenarioitem.cpp GP_CLI_COMMAND_SCENARIOITEM::process keyItemId). Ids outside `table_index`'s range are
 // ignored; returns whether any bit changed.
 pub(crate) fn fold_seen_ids_into_look_flags(
     table_index: u16,
@@ -679,7 +751,7 @@ pub(crate) fn fold_seen_ids_into_look_flags(
 
 // LSB gates c2s 0x064 with blockedBy(InEvent) and silently drops it unless
 // UniqueNo == char id and ActIndex == self targid (vendor/server/src/map/
-// packets/c2s/0x064_scenarioitem.cpp:31-33), so an unseeded targid must skip
+// packets/c2s/0x064_scenarioitem.cpp PacketValidator), so an unseeded targid must skip
 // the send; a table whose s2c 0x055 never arrived has only default-zeroed
 // local flags, so marking against it would report the table empty. Ok carries
 // the validated ActIndex.
@@ -754,7 +826,7 @@ pub(crate) fn build_subpacket_maprect(
 }
 
 /// The RectID fourcc LSB matches for the universal MH exit
-/// (vendor/server/src/map/packets/c2s/0x05e_maprect.cpp:72). Emitted by
+/// (vendor/server/src/map/packets/c2s/0x05e_maprect.cpp GP_CLI_COMMAND_MAPRECT::process isMogHouseExit). Emitted by
 /// [`build_subpacket_maprect_mh_exit`]; also the `pending_maprect` line id.
 pub(crate) const ZMRQ_LE: u32 = u32::from_le_bytes(*b"zmrq");
 
@@ -781,7 +853,7 @@ pub(crate) fn build_subpacket_maprect_mh_exit(
 }
 
 /// Client-side mirror of the LSB 0x05D validator: `blockedBy InEvent`,
-/// `oneOf<EmoteMode>`, `range Number Point..=Aim` (0x05d_motion.cpp:43-49) and
+/// `oneOf<EmoteMode>`, `range Number Point..=Aim` (0x05d_motion.cpp GP_CLI_COMMAND_MOTION::validate) and
 /// the bell note range (:82). `None` = OK to send. The bell-equip and
 /// job-unlock checks stay server-side (the client lacks lockstyle state).
 pub(crate) fn emote_send_block_reason(
@@ -824,7 +896,7 @@ pub(crate) fn build_subpacket_pos(
     buf[8..12].copy_from_slice(&z.to_le_bytes());
     buf[12..16].copy_from_slice(&y.to_le_bytes());
     buf[20] = heading;
-    // GP_CLI_COMMAND_POS.facetarget (vendor/server/.../c2s/0x015_pos.h): the targid
+    // GP_CLI_COMMAND_POS.facetarget (vendor/server/src/map/packets/c2s/0x015_pos.h): the targid
     // we're looking at, relayed by the server so other clients turn our head. +21
     // is the TargetMode/RunMode/GroundMode bitfield, left 0.
     buf[22..24].copy_from_slice(&face_target.to_le_bytes());

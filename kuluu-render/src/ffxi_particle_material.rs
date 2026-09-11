@@ -69,7 +69,7 @@ impl Material for FfxiParticleMaterial {
         _key: MaterialPipelineKey<Self>,
     ) -> Result<(), SpecializedMeshPipelineError> {
         // CMoElem::PrepDX sets D3DRS_CULLMODE to D3DCULL_NONE for every particle element
-        // (research/XIClient/.../CMoElem.cpp:537).
+        // (research/XIClient/src/XIClient/source/World/Generator/Effects/CMoElem.cpp CMoElem::PrepDX).
         descriptor.primitive.cull_mode = None;
         Ok(())
     }

@@ -1,5 +1,5 @@
 use super::*;
-use crate::state::{Entity, EntityKind, PartyMember};
+use crate::state::{Entity, EntityKind, FishParams, FishingInput, PartyMember};
 
 fn step_test_cfg() -> ReactorConfig {
     ReactorConfig {
@@ -53,6 +53,7 @@ fn upsert_with_speed(
             hp_pct: Some(hp_pct),
             bt_target_id,
             face_target: 0,
+            name_vis: None,
             claim_id: 0,
             speed,
             speed_base,
@@ -61,6 +62,8 @@ fn upsert_with_speed(
             status: 0,
             char_flags: Default::default(),
             mount_id: None,
+            monstrosity: None,
+            job_master_display: None,
         },
         pos_present: true,
     }
@@ -97,6 +100,63 @@ fn party_update(id: u32, pct: u8) -> AgentEvent {
             party_no: 0,
         },
     }
+}
+
+fn hooked_reactor(cfg: ReactorConfig) -> Reactor {
+    let mut reactor = Reactor::new(cfg);
+    reactor.handle_command(AgentCommand::Fish);
+    reactor.observe_event(&AgentEvent::FishingCast { hook_delay: 0 });
+    reactor.tick();
+    reactor.observe_event(&AgentEvent::FishHooked {
+        params: FishParams {
+            stamina: 100,
+            arrow_delay: 5,
+            regen: 128,
+            move_frequency: 3,
+            arrow_damage: 5,
+            arrow_regen: 2,
+            time: 30,
+            angler_sense: 0,
+            intuition: 0,
+        },
+    });
+    reactor
+}
+
+fn sees_fishing_arrow(reactor: &mut Reactor) -> bool {
+    (0..30).any(|_| {
+        reactor
+            .tick()
+            .derived_events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::FishingProgress { arrow: Some(_), .. }))
+    })
+}
+
+#[test]
+fn reactor_profiles_make_player_input_policy_explicit() {
+    assert_eq!(ReactorConfig::default().profile, ReactorProfile::Player);
+    assert_eq!(ReactorConfig::player().profile, ReactorProfile::Player);
+    assert_eq!(ReactorConfig::agent().profile, ReactorProfile::Agent);
+
+    let mut player = hooked_reactor(ReactorConfig::player());
+    assert!(
+        !sees_fishing_arrow(&mut player),
+        "player fishing must wait for the player's hook input"
+    );
+    player.handle_command(AgentCommand::FishingInput {
+        input: FishingInput::Hook,
+    });
+    assert!(
+        sees_fishing_arrow(&mut player),
+        "player fishing starts the arrow sequence after manual hook input"
+    );
+
+    let mut agent = hooked_reactor(ReactorConfig::agent());
+    assert!(
+        sees_fishing_arrow(&mut agent),
+        "agent fishing hooks and plays the arrow sequence automatically"
+    );
 }
 
 #[test]
@@ -279,8 +339,8 @@ fn follow_distance_floor_still_honored() {
 }
 
 #[test]
-fn engage_emits_attack_once_then_only_face() {
-    let mut r = Reactor::new(ReactorConfig::default());
+fn agent_engage_emits_attack_once_then_only_face() {
+    let mut r = Reactor::new(ReactorConfig::agent());
     r.observe_event(&connected(1));
     r.observe_event(&upsert(1, Vec3::default(), 100, EntityKind::Pc, 1));
     r.observe_event(&upsert(
@@ -330,8 +390,8 @@ fn engage_emits_attack_once_then_only_face() {
 }
 
 #[test]
-fn unlocking_stops_facing_the_engaged_target() {
-    let mut r = Reactor::new(ReactorConfig::default());
+fn player_engage_starts_unlocked_and_follows_manual_lock_state() {
+    let mut r = Reactor::new(ReactorConfig::player());
     r.observe_event(&connected(1));
     r.observe_event(&upsert(1, Vec3::default(), 100, EntityKind::Pc, 1));
     r.observe_event(&upsert(
@@ -346,15 +406,12 @@ fn unlocking_stops_facing_the_engaged_target() {
         7,
     ));
     r.handle_command(AgentCommand::Engage { target_id: 99 });
-    let _ = r.tick();
-
-    r.handle_command(AgentCommand::SetTargetLock { locked: false });
     let unlocked = r.tick().commands;
     assert!(
         !unlocked
             .iter()
             .any(|c| matches!(c, AgentCommand::Move { .. })),
-        "unlocked engage must not force the heading to face the target"
+        "player engage must not force the heading before manual lock-on"
     );
 
     r.handle_command(AgentCommand::SetTargetLock { locked: true });
@@ -1388,7 +1445,7 @@ fn zoneline_trigger_seeds_on_zone_change_no_immediate_refire() {
 #[test]
 fn mog_house_prefix_sets_agree_across_crates() {
     // ffxi-dat and kuluu-nav each classify MH lines from their own copy of the
-    // LSB prefix pair (0x05e_maprect.cpp:74-75); check_zoneline_trigger
+    // LSB prefix pair (0x05e_maprect.cpp GP_CLI_COMMAND_MAPRECT::process mogEntrancePrefix); check_zoneline_trigger
     // correlates the two by rect_id == line_id, so the sets must stay equal.
     assert_eq!(
         [
@@ -1977,6 +2034,45 @@ fn follow_suppresses_step_when_server_speed_is_zero() {
             assert!(
                 (*x - cur.x).abs() < 1e-3 && (*y - cur.y).abs() < 1e-3 && (*z - cur.z).abs() < 1e-3,
                 "speed=0 follow must not step (only face); got Move to ({x},{y},{z})"
+            );
+        }
+    }
+}
+
+#[test]
+fn self_heading_byte_matches_world_angle() {
+    // The byte kuluu sends for a facing (heading_toward) must be what LSB's worldAngle would
+    // produce for the same displacement: heading_toward is a port of utils.cpp worldAngle over
+    // snapshot-space deltas, which are LSB horizontal x/z. It rounds to the nearest step where
+    // worldAngle truncates, so allow one byte; the direction check catches any convention error.
+    let origin = Vec3::default();
+    for dx in [-4.0f32, -1.5, 0.7, 2.0, 4.0] {
+        for dy in [-4.0f32, -2.0, -0.5, 1.5, 3.0] {
+            if dx.abs() < 1e-6 && dy.abs() < 1e-6 {
+                continue;
+            }
+            let sent = heading_toward(
+                origin,
+                Vec3 {
+                    x: dx,
+                    y: dy,
+                    z: 0.0,
+                },
+            );
+            let radians = dy.atan2(dx);
+            let raw = (radians * -(128.0 / std::f32::consts::PI)) as i16;
+            let lsb = ((raw % 256 + 256) % 256) as u8;
+            let diff = ((sent as i32 - lsb as i32 + 128) % 256 + 256) % 256 - 128;
+            assert!(
+                diff.abs() <= 1,
+                "a->b ({dx}, {dy}): sent {sent} vs worldAngle {lsb}"
+            );
+            let (fx, fy) = crate::state::heading_to_forward(sent);
+            let len = (dx * dx + dy * dy).sqrt();
+            let dot = fx * dx / len + fy * dy / len;
+            assert!(
+                dot > 0.99,
+                "a->b ({dx}, {dy}): sent byte {sent} faces the wrong way"
             );
         }
     }

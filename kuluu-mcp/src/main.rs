@@ -8,9 +8,9 @@ use rmcp::{
     handler::server::wrapper::Parameters,
     model::{
         CallToolResult, ContentBlock, ListResourcesResult, PaginatedRequestParams, ProtocolVersion,
-        ReadResourceRequestParams, ReadResourceResult, Resource, ResourceContents,
-        ResourceUpdatedNotificationParam, ServerCapabilities, ServerInfo, SubscribeRequestParams,
-        UnsubscribeRequestParams,
+        ReadResourceRequestParams, ReadResourceResponse, ReadResourceResult, Resource,
+        ResourceContents, ResourceUpdatedNotificationParam, ServerCapabilities, ServerInfo,
+        SubscribeRequestParams, UnsubscribeRequestParams,
     },
     service::{serve_server, Peer, RequestContext, RoleServer},
     tool, tool_handler, tool_router,
@@ -667,7 +667,7 @@ impl ServerHandler for FfxiServer {
         &self,
         request: ReadResourceRequestParams,
         _ctx: RequestContext<RoleServer>,
-    ) -> Result<ReadResourceResult, McpError> {
+    ) -> Result<ReadResourceResponse, McpError> {
         let uri = request.uri.as_str();
         let started = std::time::Instant::now();
         let state = self.state.read().await;
@@ -676,9 +676,7 @@ impl ServerHandler for FfxiServer {
             .map_err(|e| McpError::internal_error(e, None))?;
         let elapsed_us = started.elapsed().as_micros() as u64;
         tracing::debug!(uri, elapsed_us, "mcp.resource_read");
-        Ok(ReadResourceResult::new(vec![ResourceContents::text(
-            body, uri,
-        )]))
+        Ok(ReadResourceResult::new(vec![ResourceContents::text(body, uri)]).into())
     }
 }
 
@@ -733,6 +731,8 @@ async fn read_resource(
 }
 
 const SCENE_ENTITIES_CAP: usize = 30;
+// vendor/server/src/map/entities/baseentity.h UPDATETYPE UPDATE_NAME
+const SEND_FLAG_NAME: u8 = 0x08;
 
 fn entities_view(state: &SessionState) -> serde_json::Value {
     let self_pos_p = state.self_position().unwrap_or_default();
@@ -790,7 +790,7 @@ fn name_misses_view(state: &SessionState) -> serde_json::Value {
                 "unique_no": format!("0x{:08x}", m.unique_no),
                 "act_index": format!("0x{:04x}", m.act_index),
                 "send_flag": format!("0x{:02x}", m.send_flag),
-                "name_bit_set": m.send_flag & 0x08 != 0,
+                "name_bit_set": m.send_flag & SEND_FLAG_NAME != 0,
                 "body_len": m.body_len,
                 "body_hex": m.body_hex,
                 "miss_kind": m.miss_kind,
@@ -1096,7 +1096,7 @@ async fn main() -> Result<()> {
             goal_store: Some(goal_store.clone()),
             ..SupervisorConfig::default()
         };
-        let reactor_cfg = ReactorConfig::default();
+        let reactor_cfg = ReactorConfig::agent();
         tokio::spawn(async move {
             if let Err(e) =
                 supervisor::run(cfg, cmd_rx, event_tx_for_producer, sup_cfg, reactor_cfg).await
@@ -1111,11 +1111,17 @@ async fn main() -> Result<()> {
     let relay_handles = if let Some(addr) = relay_addr {
         let (state_tx, state_rx) = tokio::sync::watch::channel(SessionState::default());
         let folder_rx = event_tx.subscribe();
-        let folder_h = tokio::spawn(session::run_event_folder(folder_rx, state_tx));
+        // The relay path has no translator: change batches are drained
+        // by the folder but never consumed.
+        let (changes_tx, _entity_changes_rx) = tokio::sync::mpsc::unbounded_channel();
+        let folder_h = tokio::spawn(session::run_event_folder(folder_rx, state_tx, changes_tx));
         let relay_event_tx = event_tx.clone();
         let relay_cmd_tx = cmd_tx.clone();
         let serve_h = tokio::spawn(async move {
-            if let Err(err) = relay::serve(addr, state_rx, relay_event_tx, relay_cmd_tx).await {
+            // No GUI in the MCP path: screenshot requests have no
+            // DebugControl to land on (same as the headless main.rs path).
+            if let Err(err) = relay::serve(addr, state_rx, relay_event_tx, relay_cmd_tx, None).await
+            {
                 tracing::warn!(error = %err, "relay listener exited");
             }
         });
@@ -1171,6 +1177,49 @@ mod tests {
     use kuluu_session::state::{
         ActionKind, Entity, EntityKind, PartyMember, Position, Stage, Vec3,
     };
+
+    #[tokio::test]
+    async fn legacy_mcp_resource_wire_contract() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        const BUFFER_BYTES: usize = 16 * 1024;
+        const DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
+        tokio::time::timeout(DEADLINE, async {
+            let (cmd_tx, _cmd_rx) = mpsc::channel(1);
+            let state = SessionState::default();
+            let expected_party = serde_json::to_string_pretty(&state.party).unwrap();
+            let server = FfxiServer::new(
+                cmd_tx,
+                Arc::new(RwLock::new(state)),
+                GoalStore::new(std::env::temp_dir().join("kuluu-mcp-wire-unused-goal.json")),
+            );
+            let (client_io, server_io) = tokio::io::duplex(BUFFER_BYTES);
+            let task = tokio::spawn(async move {
+                serve_server(server, server_io).await.unwrap().waiting().await.unwrap();
+            });
+            let (reader, mut writer) = tokio::io::split(client_io);
+            let mut reader = BufReader::new(reader).lines();
+            writer.write_all(
+                "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-11-25\",\"capabilities\":{},\"clientInfo\":{\"name\":\"wire-test\",\"version\":\"1\"}}}\n"
+            .as_bytes()).await.unwrap();
+            let init: serde_json::Value = serde_json::from_str(&reader.next_line().await.unwrap().unwrap()).unwrap();
+            assert_eq!(init["result"]["protocolVersion"], "2025-11-25");
+            writer.write_all(concat!(
+                "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n",
+                "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"resources/read\",\"params\":{\"uri\":\"party://members\"}}\n"
+            ).as_bytes()).await.unwrap();
+            let response: serde_json::Value = serde_json::from_str(&reader.next_line().await.unwrap().unwrap()).unwrap();
+            assert_eq!(response, serde_json::json!({
+                "jsonrpc": "2.0", "id": 2,
+                "result": { "contents": [{
+                    "uri": "party://members", "mimeType": "text/plain", "text": expected_party
+                }] }
+            }));
+            drop(writer);
+            drop(reader);
+            task.await.unwrap();
+        }).await.expect("MCP wire exchange timed out");
+    }
 
     #[test]
     fn cmd_kind_label_for_action_surface_tools() {
@@ -1370,7 +1419,10 @@ mod tests {
             npc_state: None,
             status: 0,
             char_flags: Default::default(),
+            monstrosity: None,
+            job_master_display: None,
             mount_id: None,
+            name_vis: None,
         });
 
         for i in 0..35u32 {
@@ -1395,7 +1447,10 @@ mod tests {
                 npc_state: None,
                 status: 0,
                 char_flags: Default::default(),
+                monstrosity: None,
+                job_master_display: None,
                 mount_id: None,
+                name_vis: None,
             });
         }
         let v = entities_view(&s);
@@ -1428,7 +1483,10 @@ mod tests {
             npc_state: None,
             status: 0,
             char_flags: Default::default(),
+            monstrosity: None,
+            job_master_display: None,
             mount_id: None,
+            name_vis: None,
         });
         s.entities.push(Entity {
             id: 100,
@@ -1451,7 +1509,10 @@ mod tests {
             npc_state: None,
             status: 0,
             char_flags: Default::default(),
+            monstrosity: None,
+            job_master_display: None,
             mount_id: None,
+            name_vis: None,
         });
         let v = entities_view(&s);
         assert_eq!(v["entities"][0]["claimed_by"], 4242);

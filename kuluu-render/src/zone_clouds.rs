@@ -22,7 +22,7 @@ use crate::graphics_settings::GraphicsSettings;
 use crate::scheduler_runtime::RETAIL_FPS;
 use crate::zone_texture::{decoded_sky_texture_to_image, TextureQuality};
 
-// research/xim EnvironmentManager.kt:453-515 updateWeatherEffects reads weat/<type>/.
+// research/xim EnvironmentManager.kt updateWeatherEffects reads weat/<type>/.
 // Only the cld1/cld2 camera-follow canopies are drawn here; the sun (sun1, attach=0xE)
 // is the single additive SunDisc in sun_moon.rs, so it shines through these clouds
 // rather than being a second, opaque blend mesh fighting it.
@@ -41,7 +41,7 @@ use crate::zone_texture::{decoded_sky_texture_to_image, TextureQuality};
 const CLOUD_RIM_MARGIN: f32 = 100.0;
 pub const CLOUD_MIN_RIM: f32 = crate::skybox::SKYBOX_RADIUS - CLOUD_RIM_MARGIN;
 
-// research/xim EnvironmentManager.kt:351-369 switchWeather default 3.33s cross-fade
+// research/xim EnvironmentManager.kt switchWeather default 3.33s cross-fade
 // between the old and new weat/<type>/ effect sets on a 0x0057 weather change.
 const WEATHER_FADE_SECS: f32 = 3.33;
 
@@ -56,7 +56,7 @@ pub(crate) const CLOUD_CANOPY_GENERATOR_NAMES: [[u8; 4]; 2] = [*b"cld1", *b"cld2
 #[derive(Component)]
 pub struct CloudMesh;
 
-// research/xim ParticleUpdaters.kt:172-183 ClockValueUpdater: the cloud/sun mesh RGB
+// research/xim ParticleUpdaters.kt ClockValueUpdater: the cloud/sun mesh RGB
 // (kcr1/kcg1/kcb1, ksr1/ksg1/ksb1) and alpha multiplier are 0x19 keyframe curves
 // sampled at the Vana full-day fraction. White / unit-alpha defaults are no-ops.
 #[derive(Clone, Default)]
@@ -147,7 +147,7 @@ fn ffxi_to_bevy_basis() -> Quat {
 // 16 zones against `suny`'s 130 — so an exact-match-or-nothing lookup leaves the
 // sky bare for every weather the zone does not carry. Retail searches the
 // container for the requested tag and falls back to `suny` on a miss
-// (research/XIClient/src/XIClient/source/World/Weather/WeatherTransition.cpp:52-54),
+// (research/XIClient/src/XIClient/source/World/Weather/WeatherTransition.cpp WeatherTransition::WeatherTransition),
 // which is the same single hop the 0x2F record selection takes.
 pub(crate) fn find_weat_type<'a>(
     node: &'a ChunkNode<'a>,
@@ -165,7 +165,7 @@ fn find_weat_type_exact<'a>(
     want: WeatherTypeId,
 ) -> Option<&'a ChunkNode<'a>> {
     for child in &node.children {
-        if child.chunk.kind != 0x01 {
+        if child.chunk.kind != ChunkKind::Rmp as u8 {
             continue;
         }
         if child.chunk.name == *b"weat" {
@@ -518,6 +518,7 @@ fn drive_zone_clouds(
     time: Res<Time>,
     vana_clock: Res<crate::vana_time::VanaClock>,
     mut materials: ResMut<Assets<FfxiZoneMaterial>>,
+    mut touched: ResMut<crate::ffxi_zone_material::ZoneMaterialTouched>,
     mut commands: Commands,
     mut state: ResMut<ZoneCloudState>,
     cam_q: Query<&Transform, (With<crate::camera::OperatorCamera>, Without<CloudLayer>)>,
@@ -556,6 +557,7 @@ fn drive_zone_clouds(
             // TextureCoordinateUpdater integrates UV velocity over elapsed frames.
             let uv = layer.uv_scroll * frames;
             material.uv_offset = Vec4::new(uv.x, uv.y, 0.0, 0.0);
+            touched.mark(mat.0.id());
         }
     }
 }

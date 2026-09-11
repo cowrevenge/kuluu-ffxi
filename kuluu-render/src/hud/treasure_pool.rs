@@ -11,7 +11,7 @@ use kuluu_snapshot::{TreasureEntry, TreasurePoolSlot};
 use crate::hud::style::{self, theme};
 use crate::snapshot::SceneState;
 
-/// `TREASUREPOOL_SIZE` (vendor/server/src/map/treasure_pool.h:38) — the panel
+/// `TREASUREPOOL_SIZE` (vendor/server/src/map/treasure_pool.h) — the panel
 /// pre-spawns one row per slot and hides the empty ones.
 pub const POOL_ROWS: usize = 10;
 

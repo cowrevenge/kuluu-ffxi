@@ -1,6 +1,12 @@
 const COMPRESS_RAW: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/compress.dat"));
 const DECOMPRESS_RAW: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/decompress.dat"));
 
+// vendor/server/src/common/zlib.cpp populate_jump_table: entries above this are node pointers.
+const DECOMPRESS_MAX_LEAF_BYTE: u32 = 0xFF;
+// vendor/server/src/common/zlib.cpp zlib_compress: the code and bit-length tables are each
+// indexed by a signed byte.
+const COMPRESS_TABLE_MIN_ENTRIES: usize = 0x200;
+
 #[derive(Debug, thiserror::Error)]
 pub enum ZlibError {
     #[error("invalid magic byte: expected 0x01, got 0x{0:02x}")]
@@ -30,7 +36,7 @@ impl DecompressTable {
 
         let base = raw[0].wrapping_sub(4);
         for v in raw.iter_mut() {
-            if *v > 0xFF {
+            if *v > DECOMPRESS_MAX_LEAF_BYTE {
                 *v = (v.wrapping_sub(base)) / 4;
             }
         }
@@ -92,7 +98,7 @@ impl CompressTable {
             .chunks_exact(4)
             .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
             .collect();
-        if raw.len() < 0x200 {
+        if raw.len() < COMPRESS_TABLE_MIN_ENTRIES {
             return Err(ZlibError::MalformedTable);
         }
         Ok(Self { raw })

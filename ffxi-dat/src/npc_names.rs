@@ -15,6 +15,9 @@ pub const NAME_LEN: usize = 0x1C;
 const ID_OFFSET: usize = NAME_LEN;
 
 const ID_MARKER: u32 = 0x0100_0000;
+const ID_MARKER_MASK: u32 = 0xFF00_0000;
+const ZONE_FIELD_MASK: u32 = 0xFFF;
+const SLOT_MASK: u16 = 0xFFF;
 
 const MAX_ZONE_ID: u16 = 0x0FFF;
 
@@ -80,10 +83,10 @@ impl NpcNameTable {
     }
 
     pub fn lookup_by_id(&self, npc_id: u32) -> Option<&str> {
-        if (npc_id & 0xFF00_0000) != ID_MARKER {
+        if (npc_id & ID_MARKER_MASK) != ID_MARKER {
             return None;
         }
-        let zone_bits = ((npc_id >> 12) & 0xFFF) as u16;
+        let zone_bits = ((npc_id >> 12) & ZONE_FIELD_MASK) as u16;
         if zone_bits != self.zone_id {
             return None;
         }
@@ -91,7 +94,7 @@ impl NpcNameTable {
             return record_name(&self.bytes, index);
         }
         if self.by_id.is_empty() {
-            return self.lookup_by_slot((npc_id & 0xFFF) as u16);
+            return self.lookup_by_slot((npc_id & u32::from(SLOT_MASK)) as u16);
         }
         None
     }
@@ -142,18 +145,18 @@ fn index_by_embedded_id(bytes: &[u8]) -> HashMap<u32, usize> {
 /// Inverse of [`split_id`]: the full entity unique-no for a zone-static
 /// entity's 12-bit slot (targid), e.g. to name a wide-scan ActIndex.
 pub fn compose_id(zone_id: u16, slot: u16) -> u32 {
-    ID_MARKER | (u32::from(zone_id) << 12) | u32::from(slot & 0xFFF)
+    ID_MARKER | (u32::from(zone_id) << 12) | u32::from(slot & SLOT_MASK)
 }
 
 pub fn split_id(npc_id: u32) -> Option<(u16, u16)> {
-    if (npc_id & 0xFF00_0000) != ID_MARKER {
+    if (npc_id & ID_MARKER_MASK) != ID_MARKER {
         return None;
     }
-    let zone = ((npc_id >> 12) & 0xFFF) as u16;
+    let zone = ((npc_id >> 12) & ZONE_FIELD_MASK) as u16;
     if zone > MAX_ZONE_ID {
         return None;
     }
-    let slot = (npc_id & 0xFFF) as u16;
+    let slot = (npc_id & u32::from(SLOT_MASK)) as u16;
     Some((zone, slot))
 }
 

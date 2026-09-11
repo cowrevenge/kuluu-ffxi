@@ -12,16 +12,57 @@ dist = false
 
 [features]
 default = []
+# SDK/toolchain setup: README.md#optional-dlss-builds.
+dlss = ["bevy/dlss"]
+# Experimental Windows NR requires SR's NGX static library in the link graph.
+enhanced-neural-uplift = ["dlss", "dep:kuluu-dlss-nr"]
 # Enhanced (non-retail) mouse-over tooltips on the status-effect ribbon showing
 # each buff's name. Retail has no such tooltip; the info comes from the scraped
 # status-effect name table.
 enhanced-buff-tooltips = []
+
+# Enhanced (non-retail) countdown text under each status-ribbon chip, plus the
+# wider chip pitch the label needs. Retail's ribbon is icons only, with no
+# remaining-time readout.
+enhanced-buff-timers = []
 
 # Enhanced (non-retail) spell cast bar: an addon-style filling progress bar
 # shown while the player casts. Retail's classic client has no built-in cast
 # bar (players get one via Windower/Ashita); this reproduces it from the
 # scraped spell castTime.
 enhanced-cast-bar = []
+
+# Enhanced (non-retail) mob/pet HP readout on nameplates: the green bar under
+# the billboard plate plus the "{name} {pct}%" suffix in the UI plates. Retail
+# shows no mob HP; without this feature a persisted `mob_hp_under` can never
+# light either, and the Debug -> Retail+ row does not exist.
+enhanced-mob-hp-under = []
+
+# Enhanced (non-retail) numeric KO countdown: the "Home Point in M:SS" line on
+# the death prompt. The call rests on the dated 2026-06-12 HorizonXI
+# observation in .agents/skills/retail-observe/references/death-ko-behavior.md:
+# retail surfaces the home-point menu and no visible clock, so the readout is an
+# addon-style addition. The XIClient decompile parks the same server deadline in
+# zone state (GC_ZONE field_40D6C) but leaves its one read site an undecompiled
+# stub, so it is corroborating context only and settles nothing either way.
+enhanced-death-countdown = []
+
+# Enhanced (non-retail) party-frame Job column: L1 rows gain a job-icon column.
+# Retail's party frame shows no jobs; without this feature a persisted
+# `job_display` can never light it, and the Debug -> Retail+ row does not exist.
+enhanced-job-display = []
+
+# Enhanced (non-retail) on-screen shutdown/logout countdown banner: the centered
+# "Logout in Xs" / "Shutdown in Xs" panel driven by the 0x053 ticks. Retail's
+# client shows only the system chat lines for those same ticks; without this
+# feature no banner node spawns and no countdown system runs (the chat lines
+# are unaffected - they come from kuluu-session).
+enhanced-shutdown-counter = []
+
+# DEV-ONLY: renders the "Debug" entry (and its Retail+ section) on page 2 of
+# the Command menu. Shipped release builds never enable this, so retail parity
+# holds by construction; dev/test builds pass `--features debug-menu` explicitly.
+debug-menu = []
 
 # Bevy ECS plugins, world model, camera, and HUD shared by both the native
 # windowed viewer (kuluu/src/view_native/) and the browser viewer
@@ -58,6 +99,8 @@ ffxi-actor = { path = "../ffxi-actor" }
 ffxi-proto = { path = "../ffxi-proto" }
 ffxi-vocab = { path = "../ffxi-vocab" }
 serde = { workspace = true }
+# Diagnostic lines (target "mob_hp") in the nameplate billboard system.
+tracing = { workspace = true }
 # Local-timezone civil date for the Current Time menu's Earth-time chat line
 # (hud/vana_clock.rs). `clock` only — no serde/oldtime; on wasm (no wasmbind)
 # chrono's Local stubs to UTC, which is acceptable for the browser viewer.
@@ -69,10 +112,6 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 # is already a transitive dep (bevy_text pulls it in); declaring it
 # directly keeps that path stable across future Bevy version bumps.
 ab_glyph = "0.2"
-# Step-lift accumulator for `wall_clip_wire` (retail field_F4 port): interior
-# mutability under `&self` that survives Bevy's Send+Sync Resource bound —
-# `Cell` is not Sync. Already in the lockfile via arboard; no new download.
-parking_lot = "0.12"
 
 # Native-only: ADPCM/PCM decoders for `.bgw` / `.spw`. The audio plugin
 # (see `audio.rs`) reads BGM tracks from the local install in response
@@ -81,6 +120,10 @@ parking_lot = "0.12"
 # over the websocket if/when that's wanted.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 ffxi-audio = { path = "../ffxi-audio" }
+# Same pinned copy as bevy's wgpu (29.x in the lockfile — zero new compile):
+# graphics/dlss_nr.rs names a few raw wgpu types that bevy does not re-export
+# (TextureTransition/TextureUses). Native-only; wasm never sees it.
+wgpu = { version = "29", default-features = false, features = ["std"] }
 # Stable id for the synthetic picking pointer that bridges window-space mouse
 # input onto the off-screen render-scale target (graphics::render_scale, which
 # is itself native-only). from_u128 only — no getrandom needed.
@@ -101,3 +144,10 @@ js-sys = "0.3"
 # the resource itself only needs `serde` derives; serialization is the
 # `kuluu::graphics_store` layer's concern.
 serde_json = { workspace = true }
+# The rabbit tester (tests/rabbit_tester.rs) hand-packs BATTLE2 bytes and runs them through
+# the real session decoder. No cycle: kuluu-session does not depend on kuluu-render.
+kuluu-session = { path = "../kuluu-session" }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+# The optional Neural Uplift FFI loads Windows DLLs.
+kuluu-dlss-nr = { path = "../kuluu-dlss-nr", optional = true }

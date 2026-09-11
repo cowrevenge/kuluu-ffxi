@@ -5,6 +5,13 @@ pub const MAX_DATAGRAM: usize = 2500;
 pub mod c2s {
     pub const LOGIN: u16 = 0x00A;
 
+    // GP_CLI_COMMAND_CLISTATUS, vendor/server/src/map/packets/c2s/0x061_clistatus.h.
+    // Requests the local player's status block; the server answers with
+    // SendLocalPlayerPackets (charutils.cpp) — s2c GROUP_ATTR (0x0DF) for self +
+    // CLISTATUS + ... This is how a solo player gets its own group entry after
+    // zone-in/login: LSB pushes no 0x0DD/0x0DF to players without a party.
+    pub const CLISTATUS: u16 = 0x061;
+
     pub const GAMEOK: u16 = 0x00C;
     pub const NETEND: u16 = 0x00D;
     pub const ZONE_TRANSITION: u16 = 0x011;
@@ -13,12 +20,12 @@ pub mod c2s {
     pub const ACTION: u16 = 0x01A;
     pub const EVENT_END: u16 = 0x05B;
 
-    // GP_CLI_COMMAND_MOTION, vendor/server/src/map/enums/packet_c2s.h:71.
+    // GP_CLI_COMMAND_MOTION, vendor/server/src/map/enums/packet_c2s.h.
     // Emote request: UniqueNo u32, ActIndex u16, Number u8 (emote id), Mode u8,
-    // Param u16 (vendor/server/src/map/packets/c2s/0x05d_motion.h:28-35).
+    // Param u16 (vendor/server/src/map/packets/c2s/0x05d_motion.h GP_CLI_COMMAND_MOTION).
     pub const MOTION: u16 = 0x05D;
 
-    // GP_CLI_COMMAND_EMOTE_LIST, vendor/server/src/map/enums/packet_c2s.h:157.
+    // GP_CLI_COMMAND_EMOTE_LIST, vendor/server/src/map/enums/packet_c2s.h.
     // Header-only request for the job-emote/chair unlock flags; answered by
     // s2c 0x11A (vendor/server/src/map/packets/c2s/0x119_emote_list.h).
     pub const EMOTE_LIST: u16 = 0x119;
@@ -97,12 +104,12 @@ pub mod c2s {
     // (0x105_bazaar_list.cpp validate mustEqual BazaarID.id 0).
     pub const BAZAAR_EXIT: u16 = 0x104;
 
-    // GP_CLI_COMMAND_BAZAAR_LIST, vendor/server/src/map/packets/c2s/0x105_bazaar_list.h:27-31.
+    // GP_CLI_COMMAND_BAZAAR_LIST, vendor/server/src/map/packets/c2s/0x105_bazaar_list.h.
     // View a PC's bazaar: UniqueNo u32, ActIndex u16, padding u16. Answered by
     // one s2c 0x105 per priced slot.
     pub const BAZAAR_LIST: u16 = 0x105;
 
-    // GP_CLI_COMMAND_BAZAAR_BUY, vendor/server/src/map/packets/c2s/0x106_bazaar_buy.h:27-31.
+    // GP_CLI_COMMAND_BAZAAR_BUY, vendor/server/src/map/packets/c2s/0x106_bazaar_buy.h.
     // Buy from the bazaar we are browsing: BazaarItemIndex u8, padding u8[3],
     // BuyNum u32 (validator range 1..=99).
     pub const BAZAAR_BUY: u16 = 0x106;
@@ -120,6 +127,12 @@ pub mod c2s {
     // GP_CLI_COMMAND_AUC, vendor/server/src/map/packets/c2s/0x04e_auc.h.
     // Auction house sub-protocol; command bytes: [`crate::decode::AuctionCommand`].
     pub const AUC: u16 = 0x04E;
+
+    // GP_CLI_COMMAND_GROUP_LIST_REQ, vendor/server/src/map/packets/c2s/0x076_group_list_req.h.
+    // Requests the full party table; the server answers with GROUP_TBL (0x0C8) +
+    // GROUP_LIST (0x0DD) for every member. The retail client sends this on zone-in
+    // to guarantee the party HUD gets a clean refresh.
+    pub const GROUP_LIST_REQ: u16 = 0x076;
 }
 
 /// Wide-scan (tracking) State bytes shared by the s2c 0x0F5/0x0F6 decoders and
@@ -174,7 +187,7 @@ pub mod submap {
 
 /// Delivery box ("post box") wire vocabulary shared by c2s 0x04D and s2c 0x04B.
 pub mod pbx {
-    // GP_CLI_COMMAND_PBX_COMMAND, vendor/server/src/map/packets/c2s/0x04d_pbx.h:26-43.
+    // GP_CLI_COMMAND_PBX_COMMAND, vendor/server/src/map/packets/c2s/0x04d_pbx.h.
     pub mod command {
         pub const WORK: u8 = 0x01;
         pub const SET: u8 = 0x02;
@@ -193,7 +206,7 @@ pub mod pbx {
         pub const POST_CLOSE: u8 = 0x0F;
     }
 
-    // GP_CLI_COMMAND_PBX_BOXNO, vendor/server/src/map/packets/c2s/0x04d_pbx.h:45-50.
+    // GP_CLI_COMMAND_PBX_BOXNO, vendor/server/src/map/packets/c2s/0x04d_pbx.h.
     pub mod boxno {
         pub const NONE: i8 = -1;
         pub const INCOMING: i8 = 1;
@@ -206,23 +219,23 @@ pub mod pbx {
     pub mod result {
         pub const OK: u8 = 0x01;
         pub const PENDING: u8 = 0x02;
-        /// TakeItemFromCell with a full inventory (dboxutils.cpp:638).
+        /// TakeItemFromCell with a full inventory (dboxutils.cpp dboxutils::TakeItemFromCell).
         pub const INVENTORY_FULL: u8 = 0xB9;
-        /// TakeItemFromCell transaction failure (dboxutils.cpp:686).
+        /// TakeItemFromCell transaction failure (dboxutils.cpp std::runtime_error).
         pub const TAKE_FAILED: u8 = 0xBA;
-        /// SendNewItems/ReturnToSender transaction failure (dboxutils.cpp:477,616).
+        /// SendNewItems/ReturnToSender transaction failure (dboxutils.cpp std::runtime_error,616).
         pub const DB_ERROR: u8 = 0xEB;
-        /// ConfirmNameBeforeSending: recipient account not found (dboxutils.cpp:751).
+        /// ConfirmNameBeforeSending: recipient account not found (dboxutils.cpp dboxutils::ConfirmNameBeforeSending).
         pub const NO_SUCH_CHAR: u8 = 0xFB;
-        /// Recipient's inflight queue at capacity (dboxutils.cpp:236-237,582-583).
+        /// Recipient's inflight queue at capacity (dboxutils.cpp dboxutils::SendConfirmation,582-583).
         pub const RECIPIENT_FULL: u8 = 0xFE;
         /// CancelSendingItem fallback, pushed as -1: "Delivery orders are
-        /// currently backlogged." (dboxutils.cpp:335).
+        /// currently backlogged." (dboxutils.cpp std::runtime_error).
         pub const BACKLOGGED: u8 = 0xFF;
     }
 
     // GP_POST_BOX_STATE::Stat values, vendor/server/src/map/packets/s2c/
-    // 0x04b_pbx_result.cpp:90-117.
+    // 0x04b_pbx_result.cpp GP_SERV_COMMAND_PBX_RESULT::GP_SERV_COMMAND_PBX_RESULT.
     pub mod stat {
         /// Outgoing item staged in a slot, not yet dispatched (Set).
         pub const STAGED: u32 = 0x01;
@@ -240,7 +253,7 @@ pub mod pbx {
     pub const SLOT_COUNT: usize = 8;
 }
 
-// LSB CONTAINER_ID, vendor/server/src/map/item_container.h:32-49.
+// LSB CONTAINER_ID, vendor/server/src/map/item_container.h CONTAINER_ID LOC_INVENTORY.
 pub mod container {
     pub const LOC_INVENTORY: u8 = 0;
     pub const LOC_MOGSAFE: u8 = 1;
@@ -293,7 +306,7 @@ pub mod container {
     }
 }
 
-// LSB ITEMID::GIL, vendor/server/src/map/items.h:150 — never movable between
+// LSB ITEMID::GIL, vendor/server/src/map/items.h — never movable between
 // containers (0x029_item_move.cpp isValidMovement).
 pub const GIL_ITEM_NO: u16 = 65535;
 
@@ -333,9 +346,9 @@ pub mod action_id {
 }
 
 pub mod eventucoff_mode {
-    // GP_SERV_COMMAND_EVENTUCOFF_MODE, vendor/server/src/map/packets/s2c/0x052_eventucoff.h:26-33.
+    // GP_SERV_COMMAND_EVENTUCOFF_MODE, vendor/server/src/map/packets/s2c/0x052_eventucoff.h.
     // CancelEvent packs the cancelled event id in the high bits
-    // (0x052_eventucoff.cpp:30-34), so match on the low byte.
+    // (0x052_eventucoff.cpp GP_SERV_COMMAND_EVENTUCOFF::GP_SERV_COMMAND_EVENTUCOFF), so match on the low byte.
     pub const MODE_MASK: u32 = 0xFF;
     pub const CANCEL_EVENT: u32 = 2;
     pub const FISHING: u32 = 4;
@@ -361,17 +374,17 @@ pub mod emote {
     pub const HELM_ONLY: [u8; 3] = [40, 41, 42];
 
     /// /bell note Param range (vendor/server/src/map/packets/c2s/
-    /// 0x05d_motion.cpp:82: `Param < 0x06 || Param > 0x1e` is rejected).
+    /// 0x05d_motion.cpp GP_CLI_COMMAND_MOTION::process: `Param < 0x06 || Param > 0x1e` is rejected).
     pub const BELL_NOTE_MIN: u16 = 0x06;
     pub const BELL_NOTE_MAX: u16 = 0x1E;
 
     /// /jobemote Param = job id + 0x1E, so WAR(1) → 0x1F
-    /// (vendor/server/src/map/packets/c2s/0x05d_motion.cpp:89 checks
+    /// (vendor/server/src/map/packets/c2s/0x05d_motion.cpp GP_CLI_COMMAND_MOTION::process checks
     /// `jobs.unlocked & (1 << (Param - 0x1E))`).
     pub const JOB_PARAM_BASE: u16 = 0x1F;
 
     /// s2c MesNum for a job emote = 74 + (Param - 0x1F), giving 74..=95
-    /// (vendor/server/src/map/packets/s2c/0x05a_motionmes.cpp:37; the 22-job
+    /// (vendor/server/src/map/packets/s2c/0x05a_motionmes.cpp GP_SERV_COMMAND_MOTIONMES::GP_SERV_COMMAND_MOTIONMES; the 22-job
     /// span WAR..RUN mirrors the 0x11A jobemotes_t bitfield).
     pub const JOB_MESNUM_BASE: u16 = 74;
     pub const JOB_MESNUM_MAX: u16 = 95;
@@ -418,17 +431,23 @@ pub mod s2c {
     // Self-character stat block: HP/MP max, base+gear stats, attack/defense, resists, iLv.
     pub const CLISTATUS: u16 = 0x061;
 
-    // GP_SERV_COMMAND_FISH, vendor/server/src/map/enums/packet_s2c.h:172. Sent to start
+    // GP_SERV_COMMAND_FISH, vendor/server/src/map/enums/packet_s2c.h. Sent to start
     // the fishing mini-game with the hooked fish's stats.
     pub const FISH: u16 = 0x115;
 
     pub const CHAT: u16 = 0x017;
 
-    // GP_SERV_COMMAND_MOTIONMES, vendor/server/src/map/enums/packet_s2c.h:95.
+    // GP_SERV_COMMAND_MOTIONMES, vendor/server/src/map/enums/packet_s2c.h.
     // Emote broadcast (vendor/server/src/map/packets/s2c/0x05a_motionmes.h).
     pub const MOTIONMES: u16 = 0x05A;
 
-    // GP_SERV_COMMAND_EMOTE_LIST, vendor/server/src/map/enums/packet_s2c.h:177.
+    // GP_SERV_COMMAND_ASSIST, vendor/server/src/map/enums/packet_s2c.h.
+    // Server-pushed retarget: the answer to a c2s ASSIST request and to every
+    // other server-side target change (vendor/server/src/map/packets/s2c/
+    // 0x058_assist.h, [`crate::decode::Assist`]).
+    pub const ASSIST: u16 = 0x058;
+
+    // GP_SERV_COMMAND_EMOTE_LIST, vendor/server/src/map/enums/packet_s2c.h.
     // Job-emote (u32) + chair (u16) unlock bitfields
     // (vendor/server/src/map/packets/s2c/0x11a_emote_list.h).
     pub const EMOTE_LIST: u16 = 0x11A;
@@ -521,13 +540,20 @@ pub mod s2c {
     pub const ENTITY_UPDATE1: u16 = 0x067;
     pub const ENTITY_UPDATE2: u16 = 0x068;
 
+    // GP_SERV_COMMAND_GROUP_TBL, vendor/server/src/map/packets/s2c/0x0c8_group_tbl.h.
+    // Party definition: member IDs, targids, party numbers, zones, leader flags.
+    // Sent before every GROUP_LIST burst as a "here is the full party roster" header.
+    // The client should clear its party table on receipt and repopulate from the
+    // subsequent GROUP_LIST (0x0DD) packets.
+    pub const GROUP_TBL: u16 = 0x0C8;
+
     pub const GROUP_LIST: u16 = 0x0DD;
 
     pub const GROUP_ATTR: u16 = 0x0DF;
 
-    // GP_SERV_COMMAND_EQUIP_INSPECT, vendor/server/src/map/enums/packet_s2c.h:143.
+    // GP_SERV_COMMAND_EQUIP_INSPECT, vendor/server/src/map/enums/packet_s2c.h.
     // /check answer for a PC target: EQUIPMENT batches then one GENERAL packet
-    // (vendor/server/src/map/packets/c2s/0x0dd_equip_inspect.cpp:135-136).
+    // (vendor/server/src/map/packets/c2s/0x0dd_equip_inspect.cpp GP_CLI_COMMAND_EQUIP_INSPECT::process).
     pub const EQUIP_INSPECT: u16 = 0x0C9;
 
     // GP_SERV_COMMAND_INSPECT_MESSAGE, vendor/server/src/map/packets/s2c/0x0ca_inspect_message.h.
@@ -537,7 +563,7 @@ pub mod s2c {
 
     // GP_SERV_COMMAND_BAZAAR_LIST, vendor/server/src/map/packets/s2c/0x105_bazaar_list.h.
     // One priced row of the bazaar we are browsing; re-pushed per row after each
-    // purchase (0x106_bazaar_buy.cpp:198).
+    // purchase (0x106_bazaar_buy.cpp GP_CLI_COMMAND_BAZAAR_BUY::process).
     pub const BAZAAR_LIST: u16 = 0x105;
 
     // GP_SERV_COMMAND_BAZAAR_BUY, vendor/server/src/map/packets/s2c/0x106_bazaar_buy.h.
@@ -564,12 +590,17 @@ pub mod s2c {
     // Wide-scan list framing (ListStart/ListEnd).
     pub const TRACKING_STATE: u16 = 0x0F6;
 
-    // GP_SERV_COMMAND_TROPHY_LIST, vendor/server/src/map/enums/packet_s2c.h:146.
+    // GP_SERV_COMMAND_RES, vendor/server/src/map/enums/packet_s2c.h.
+    // Updates the death menu to home-point-only, Raise/Reraise, or Tractor
+    // (vendor/server/src/map/packets/s2c/0x0f9_res.h).
+    pub const DEATH_MENU: u16 = 0x0F9;
+
+    // GP_SERV_COMMAND_TROPHY_LIST, vendor/server/src/map/enums/packet_s2c.h.
     // One item (and/or gil) entering the treasure pool
     // (vendor/server/src/map/packets/s2c/0x0d2_trophy_list.h).
     pub const TROPHY_LIST: u16 = 0x0D2;
 
-    // GP_SERV_COMMAND_TROPHY_SOLUTION, vendor/server/src/map/enums/packet_s2c.h:147.
+    // GP_SERV_COMMAND_TROPHY_SOLUTION, vendor/server/src/map/enums/packet_s2c.h.
     // An action taken against a pool item: lot, win, or loss
     // (vendor/server/src/map/packets/s2c/0x0d3_trophy_solution.h).
     pub const TROPHY_SOLUTION: u16 = 0x0D3;
@@ -588,7 +619,7 @@ mod tests {
         );
     }
 
-    /// vendor/server/src/map/packets/s2c/0x05a_motionmes.cpp:37 —
+    /// vendor/server/src/map/packets/s2c/0x05a_motionmes.cpp GP_SERV_COMMAND_MOTIONMES::GP_SERV_COMMAND_MOTIONMES —
     /// `MesNum = Emote::Job + (extra - 0x1F)`, so the s2c job-emote span must
     /// start at the scraped Emote::Job id and cover the 22-job jobemotes_t
     /// width (WAR..RUN, 0x11a_emote_list.h).
@@ -608,4 +639,9 @@ mod tests {
             "RUN (job 22, top jobemotes_t bit) lands on JOB_MESNUM_MAX"
         );
     }
+}
+
+// vendor/server/src/map/packets/c2s/0x05c_eventendxzy.h GP_CLI_COMMAND_EVENTENDXZY.
+pub mod event_position_wire {
+    include!(concat!(env!("OUT_DIR"), "/event_position_wire.rs"));
 }

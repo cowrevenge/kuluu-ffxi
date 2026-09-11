@@ -10,7 +10,7 @@
 use bevy::prelude::*;
 
 /// Snapshot equipment slot ids, LSB `SLOT_RANGED` / `SLOT_AMMO`
-/// (vendor/server/src/map/entities/battleentity.h:179).
+/// (vendor/server/src/map/entities/battleentity.h SLOTTYPE SLOT_RANGED).
 const SLOT_RANGE: usize = crate::equip_slot::EquipmentIndex::Range as usize;
 const SLOT_AMMO: usize = crate::equip_slot::EquipmentIndex::Ammo as usize;
 
@@ -36,7 +36,7 @@ impl FishingGate {
     /// The line retail prints when a cast is refused. The rod/bait wording is
     /// LSB's `FISHMESSAGEOFFSET_NOROD` / `_NOBAIT`; the no-water case never
     /// reaches the server at all, so it borrows `_CANNOTFISH_MOMENT`
-    /// (vendor/server/src/map/utils/fishingutils.h:513-516).
+    /// (vendor/server/src/map/utils/fishingutils.h FISHMESSAGEOFFSET_NOROD).
     pub fn refusal(self) -> Option<&'static str> {
         Some(match self {
             FishingGate::Ready => return None,
@@ -114,8 +114,8 @@ mod tests {
     use super::*;
     use kuluu_snapshot::SceneSnapshot;
 
-    /// vendor/server/sql/fishing_rod.sql:58 "Ebisu Fishing Rod" and
-    /// fishing_bait.sql:44 "Slice of Bluetail". Both are SKILL_FISHING in
+    /// vendor/server/sql/fishing_rod.sql fishing_rod 17011 "Ebisu Fishing Rod" and
+    /// fishing_bait.sql fishing_bait 16992 "Slice of Bluetail". Both are SKILL_FISHING in
     /// item_weapon.sql, which is what the gate actually reads.
     const ROD: u16 = 17011;
     const BAIT: u16 = 16992;

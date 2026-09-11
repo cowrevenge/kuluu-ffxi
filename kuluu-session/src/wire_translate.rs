@@ -13,9 +13,11 @@ pub fn state_to_snapshot(s: &SessionState) -> wire::SceneSnapshot {
         char_name: s.character.clone(),
         zone_id: s.zone_id,
         sub_area: s.sub_area,
+        voyage: s.voyage,
         self_pos,
         entities: s.entities.iter().map(entity_to_wire).collect(),
         party: s.party.iter().map(party_to_wire).collect(),
+        zone_generation: s.zone_generation,
         chat: s.chat.iter().map(chat_to_wire).collect(),
         chat_base_seq: s.chat_dropped,
         diagnostics: diagnostics_to_wire(&s.diagnostics),
@@ -113,6 +115,11 @@ pub fn state_to_snapshot(s: &SessionState) -> wire::SceneSnapshot {
         }),
 
         widescan: widescan_to_wire(&s.widescan),
+
+        death_menu_offer: s.death_menu_offer.map(|offer| match offer {
+            ffxi_proto::decode::DeathMenuOffer::Raise => wire::DeathMenuOffer::Raise,
+            ffxi_proto::decode::DeathMenuOffer::Tractor => wire::DeathMenuOffer::Tractor,
+        }),
     }
 }
 
@@ -391,6 +398,9 @@ pub fn event_to_viewer_event(ev: AgentEvent) -> Option<wire::ViewerEvent> {
         AgentEvent::Disconnected { reason } => Some(wire::ViewerEvent::Disconnected { reason }),
         AgentEvent::LowHp { pct } => Some(wire::ViewerEvent::LowHp { pct }),
         AgentEvent::EngagedBy { entity_id } => Some(wire::ViewerEvent::EngagedBy { entity_id }),
+        AgentEvent::TargetChanged { target_id } => {
+            Some(wire::ViewerEvent::TargetChanged { target_id })
+        }
         AgentEvent::TellReceived { from, text } => {
             Some(wire::ViewerEvent::TellReceived { from, text })
         }
@@ -414,13 +424,17 @@ pub fn event_to_viewer_event(ev: AgentEvent) -> Option<wire::ViewerEvent> {
             target_id,
             result,
             animation,
+            outcome,
         } => Some(wire::ViewerEvent::ActionStarted {
             actor_id,
             action_id,
             action_kind,
             target_id,
-            result: result.map(ffxi_proto::melee::MeleeResult::to_wire),
+            // The swing pair stays raw: the snapshot's `result` is basic-attack-only, and the
+            // typed resolution rides in `outcome`.
+            result: result.map(|r| (r.resolution.to_wire(), r.animation.to_wire())),
             animation,
+            outcome,
         }),
         AgentEvent::EntityEmoted {
             actor_id,
@@ -580,7 +594,15 @@ pub fn look_to_wire(l: ffxi_proto::decode::LookData) -> wire::EntityLook {
             size,
             door_id: door_id.map(DoorId::bytes),
         },
-        LookData::Transport { size } => wire::EntityLook::Transport { size },
+        LookData::Transport {
+            size,
+            model_id,
+            animation_start,
+        } => wire::EntityLook::Transport {
+            size,
+            model_id,
+            animation_start,
+        },
     }
 }
 
@@ -628,6 +650,7 @@ pub fn entity_to_wire(e: &Entity) -> wire::Entity {
         hp_pct: e.hp_pct,
         bt_target_id: e.bt_target_id,
         face_target: e.face_target,
+        name_vis: e.name_vis,
         claim_id: e.claim_id,
         speed: e.speed,
         speed_base: e.speed_base,
@@ -640,6 +663,9 @@ pub fn entity_to_wire(e: &Entity) -> wire::Entity {
         ),
         status: e.status,
         char_flags: e.char_flags.map(char_flags_to_wire).unwrap_or_default(),
+        // Preserved across non-Model updates in state.rs, so this is always the
+        // last Model-block value; default to not-a-monstrosity before it arrives.
+        monstrosity: e.monstrosity.unwrap_or(false),
     }
 }
 
@@ -665,6 +691,9 @@ pub fn char_flags_to_wire(f: ffxi_proto::decode::CharFlags) -> wire::CharFlags {
         allegiance: f.allegiance,
         new_character: f.new_character,
         mentor: f.mentor,
+        job_master_display: f.job_master_display,
+        invis: f.invis,
+        untargetable: f.untargetable,
     }
 }
 
@@ -900,6 +929,7 @@ mod tests {
                 hp_pct: Some(100),
                 bt_target_id: 0,
                 face_target: 0,
+                name_vis: None,
                 claim_id: 0,
                 speed: 0,
                 speed_base: 0,
@@ -908,6 +938,8 @@ mod tests {
                 char_flags: None,
                 status: 0,
                 mount_id: None,
+                monstrosity: None,
+                job_master_display: None,
             },
             pos_present: true,
         });
@@ -932,6 +964,7 @@ mod tests {
                 target_id,
                 result: None,
                 animation: None,
+                outcome: None,
             });
             assert!(matches!(
                 mapped,
@@ -945,8 +978,17 @@ mod tests {
         let hit_right = ffxi_proto::melee::MeleeResult {
             resolution: ffxi_proto::melee::ActionResolution::Hit,
             animation: ffxi_proto::melee::AttackAnimation::RightAttack,
+            info: ffxi_proto::melee::ActionInfo::CRITICAL_HIT,
+            hit_distortion: ffxi_proto::melee::HitDistortion::Heavy,
+            knockback: ffxi_proto::melee::KnockbackLevel::Level2,
         };
-        for result in [None, Some(hit_right)] {
+        let crit_outcome = ffxi_proto::melee::ResultOutcome {
+            resolution: ffxi_proto::melee::ActionResolution::Hit,
+            info: ffxi_proto::melee::ActionInfo::CRITICAL_HIT,
+            hit_distortion: ffxi_proto::melee::HitDistortion::Heavy,
+            knockback: ffxi_proto::melee::KnockbackLevel::Level2,
+        };
+        for (result, outcome) in [(None, None), (Some(hit_right), Some(crit_outcome))] {
             let mapped = event_to_viewer_event(AgentEvent::ActionStarted {
                 actor_id: 0xCAFE,
                 action_id: 0,
@@ -954,11 +996,16 @@ mod tests {
                 target_id: Some(0xBEEF),
                 result,
                 animation: None,
+                outcome,
             });
             assert!(matches!(
                 mapped,
-                Some(wire::ViewerEvent::ActionStarted { result: r, .. })
-                    if r == result.map(ffxi_proto::melee::MeleeResult::to_wire)
+                Some(wire::ViewerEvent::ActionStarted {
+                    result: r,
+                    outcome: o,
+                    ..
+                }) if r == result.map(|r| (r.resolution.to_wire(), r.animation.to_wire()))
+                    && o == outcome
             ));
         }
     }

@@ -66,6 +66,14 @@ pub fn spawn_vana_clock_as_child(p: &mut ChildSpawnerCommands) {
     });
 }
 
+fn vana_day_rollover_toast(total_vana_days: u64) -> crate::snapshot::ToastEvent {
+    crate::snapshot::ToastEvent::debug(format!(
+        "📅 Vana day {} — {}",
+        total_vana_days,
+        VanaWeekday::from_vana_day(total_vana_days).name(),
+    ))
+}
+
 pub fn update_vana_clock(
     mut q: Query<&mut Text, With<VanaClockLabel>>,
     mut orb_q: Query<(&mut Node, &mut ImageNode), With<VanaClockOrb>>,
@@ -97,11 +105,7 @@ pub fn update_vana_clock(
     if *prev_vana_day != Some(total_vana_days) {
         if let Some(prev) = *prev_vana_day {
             if prev != total_vana_days {
-                let weekday = VanaWeekday::from_vana_day(total_vana_days).name();
-                toasts.write(crate::snapshot::ToastEvent::system(format!(
-                    "📅 Vana day {} — {}",
-                    total_vana_days, weekday,
-                )));
+                toasts.write(vana_day_rollover_toast(total_vana_days));
             }
         }
         update_day_orb(&mut orb_q, total_vana_days, atlas, dat_root, &mut images);
@@ -217,10 +221,21 @@ mod tests {
     use crate::vana_time::{EARTH_SECS_PER_VANA_HOUR, VANA_DAYS_PER_MONTH};
 
     #[test]
+    fn day_rollover_toast_is_devhud_only() {
+        let toast = vana_day_rollover_toast(2);
+        assert_eq!(toast.line.text, "📅 Vana day 2 — Watersday");
+        assert!(!crate::snapshot::chat_line_visible(
+            toast.line.channel,
+            false
+        ));
+        assert!(crate::snapshot::chat_line_visible(toast.line.channel, true));
+    }
+
+    #[test]
     fn day_orb_index_maps_weekday_to_element_sprite() {
         // Firesday->Fire(106), Earthsday->Earth(109), Watersday->Water(111),
         // Windsday->Wind(108), Iceday->Ice(107), Lightningday->Lightning(110),
-        // Lightsday->Light(112), Darksday->Dark(113). (Compass.kt:43-54)
+        // Lightsday->Light(112), Darksday->Dark(113). (Compass.kt drawClock dayOfWeekIndex)
         let expected = [106, 109, 111, 108, 107, 110, 112, 113];
         for (day, want) in expected.iter().enumerate() {
             let weekday = VanaWeekday::from_vana_day(day as u64);
@@ -253,7 +268,7 @@ mod tests {
     #[test]
     fn earth_chat_line_formats_a_civil_datetime() {
         // The Vana'diel epoch is 2001-12-31 15:00:00 UTC (2002-01-01 00:00 JST,
-        // vendor/server/src/common/earth_time.h:40).
+        // vendor/server/src/common/earth_time.h vanadiel_epoch).
         assert_eq!(
             earth_time_text(&chrono::Utc, EARTH_EPOCH_UNIX),
             "2001/12/31 15:00:00"

@@ -1,3 +1,4 @@
+use crate::mmb::D3DCOLOR_CHANNEL_MASK;
 use crate::{DatError, Result};
 
 pub const D3M_MAGIC: u32 = 6;
@@ -9,7 +10,7 @@ pub const D3M_VERTEX_OFFSET: usize = 0x1E;
 // D3m vertex colour is normalised by 128 rather than 255, folding the D3m texture-stage-0
 // MODULATE2X into the stored value. Distinct from `mmb::VERTEX_COLOR_DIVISOR`, which is the
 // plain D3DCOLOR byte/255 because the zone shader models that MODULATE2X itself.
-// research/XIClient/src/XIClient/source/Resource/Derived/CMoD3m.cpp:16-104
+// research/XIClient/src/XIClient/source/Resource/Derived/CMoD3m.cpp ZeroOneTSS
 pub const VERTEX_COLOR_DIVISOR: f32 = 128.0;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -83,10 +84,10 @@ impl D3m {
                 body[off + 27],
             ]);
             let color = [
-                ((raw >> 16) & 0xFF) as f32 / VERTEX_COLOR_DIVISOR,
-                ((raw >> 8) & 0xFF) as f32 / VERTEX_COLOR_DIVISOR,
-                (raw & 0xFF) as f32 / VERTEX_COLOR_DIVISOR,
-                ((raw >> 24) & 0xFF) as f32 / VERTEX_COLOR_DIVISOR,
+                ((raw >> 16) & D3DCOLOR_CHANNEL_MASK) as f32 / VERTEX_COLOR_DIVISOR,
+                ((raw >> 8) & D3DCOLOR_CHANNEL_MASK) as f32 / VERTEX_COLOR_DIVISOR,
+                (raw & D3DCOLOR_CHANNEL_MASK) as f32 / VERTEX_COLOR_DIVISOR,
+                ((raw >> 24) & D3DCOLOR_CHANNEL_MASK) as f32 / VERTEX_COLOR_DIVISOR,
             ];
             let uv = [f32_le(body, off + 28), f32_le(body, off + 32)];
             vertices.push(D3mVertex {
@@ -116,7 +117,7 @@ impl D3m {
             .to_string()
     }
 
-    // research/xim ParticleMeshSection.kt:76-82 — a mesh links its texture by the raw 16-byte
+    // research/xim ParticleMeshSection.kt read textureName — a mesh links its texture by the raw 16-byte
     // qualified name, resolved as (namespace, local) then local-only.
     pub fn texture_name_tokens(&self) -> (String, String) {
         crate::texture::split_qualified_name(&self.texture_name)

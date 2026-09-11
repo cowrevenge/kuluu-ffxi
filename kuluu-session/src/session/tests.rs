@@ -38,10 +38,204 @@ fn sub_packet_events(opcode: u16, body: &[u8]) -> Vec<AgentEvent> {
     out
 }
 
+#[test]
+// vendor/server/src/map/packets/entity_update.cpp CEntityUpdatePacket::updateWith
+// vendor/server/src/map/packets/s2c/0x00a_login.h GP_SERV_COMMAND_LOGIN
+pub(super) fn ferry_packet_state_contract() {
+    use crate::state::SessionState;
+    use crate::wire_translate::state_to_snapshot;
+    use kuluu_snapshot::{EntityLook, Voyage};
+
+    const SHIP: u32 = 17_793_088;
+    const SHIP_INDEX: u16 = 64;
+    const BODY_LEN: usize = 68;
+    const SEND_FLAGS: usize = 6;
+    const UPDATE_COMBAT: u8 = 7;
+    const STATUS: usize = 28;
+    const ANIMATION: usize = 27;
+    const LOOK: usize = 44;
+    const SELECTOR: usize = 48;
+    const ANIMATION_START: usize = 52;
+    const SHIP_MODEL: u16 = 4;
+    const SELECTOR_VALUE: u32 = 14;
+    const TIMESTAMP: u32 = 0x1200_3400;
+    const ARRIVE: u8 = 18;
+    const DEPART: u8 = 19;
+    const DISAPPEAR: u8 = 2;
+    const LOGIN_LEN: usize = 122;
+    const LOGIN_ZONE: usize = 44;
+    const VOYAGE_START: usize = 116;
+    const VOYAGE_DURATION: usize = 120;
+    const VOYAGE_FLAGS: usize = 35;
+    const ROUTE_FLAGS: usize = 38;
+    const REVERSE: u8 = 4;
+    const ROUTE: u8 = 2;
+    const ROUTE_SHIFT: u8 = 3;
+    const JOURNEY_ZONE: u32 = 228;
+    const DURATION: u16 = 897;
+
+    let mut body = [0u8; BODY_LEN];
+    body[..4].copy_from_slice(&SHIP.to_le_bytes());
+    body[4..6].copy_from_slice(&SHIP_INDEX.to_le_bytes());
+    body[SEND_FLAGS] = UPDATE_COMBAT;
+    body[LOOK..LOOK + 2].copy_from_slice(&SHIP_MODEL.to_le_bytes());
+    body[SELECTOR..SELECTOR + 4].copy_from_slice(&SELECTOR_VALUE.to_le_bytes());
+    let mut state = SessionState::default();
+    for (animation, status, timestamp) in
+        [(ARRIVE, 0, TIMESTAMP), (DEPART, DISAPPEAR, TIMESTAMP + 1)]
+    {
+        body[ANIMATION] = animation;
+        body[STATUS] = status;
+        body[ANIMATION_START..ANIMATION_START + 4].copy_from_slice(&timestamp.to_le_bytes());
+        let events = sub_packet_events(ffxi_proto::map::s2c::CHAR_NPC, &body);
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::EntityRemoved { .. })));
+        for event in events {
+            state.apply_event(&event);
+        }
+        let snapshot = state_to_snapshot(&state);
+        let ship = snapshot
+            .entities
+            .iter()
+            .find(|entity| entity.id == SHIP)
+            .unwrap();
+        assert_eq!(
+            ship.look,
+            Some(EntityLook::Transport {
+                size: SHIP_MODEL,
+                model_id: Some(SELECTOR_VALUE),
+                animation_start: Some(timestamp),
+            })
+        );
+        assert_eq!(ship.animation, animation);
+        assert_eq!(ship.is_invisible(), status == DISAPPEAR);
+    }
+
+    let mut login = [0u8; LOGIN_LEN];
+    login[LOGIN_ZONE..LOGIN_ZONE + 4].copy_from_slice(&JOURNEY_ZONE.to_le_bytes());
+    login[VOYAGE_START..VOYAGE_START + 4].copy_from_slice(&TIMESTAMP.to_le_bytes());
+    login[VOYAGE_DURATION..VOYAGE_DURATION + 2].copy_from_slice(&DURATION.to_le_bytes());
+    login[VOYAGE_FLAGS] = REVERSE;
+    login[ROUTE_FLAGS] = ROUTE << ROUTE_SHIFT;
+    let events = sub_packet_events(ffxi_proto::map::s2c::LOGIN, &login);
+    let zone_at = events
+        .iter()
+        .position(|event| matches!(event, AgentEvent::ZoneChanged { .. }))
+        .unwrap();
+    let voyage_at = events
+        .iter()
+        .position(|event| matches!(event, AgentEvent::VoyageSynced { .. }))
+        .unwrap();
+    assert!(voyage_at > zone_at);
+    for event in events {
+        state.apply_event(&event);
+    }
+    assert_eq!(
+        state_to_snapshot(&state).voyage,
+        Some(Voyage {
+            start: TIMESTAMP,
+            duration: DURATION,
+            reverse: true,
+            route: ROUTE,
+        })
+    );
+    assert!(state.entities.iter().all(|entity| entity.id != SHIP));
+    login[VOYAGE_START..].fill(0);
+    for event in sub_packet_events(ffxi_proto::map::s2c::LOGIN, &login) {
+        state.apply_event(&event);
+    }
+    assert_eq!(state_to_snapshot(&state).voyage, None);
+}
+
+/// s2c 0x058 ASSIST is the server's retarget push (`/assist`, engage,
+/// auto-target-after-kill); the dispatch must turn `AssistNo` into the client's
+/// new target (vendor/server/src/map/packets/s2c/0x058_assist.h).
+#[test]
+fn assist_packet_retargets_to_assist_no() {
+    use ffxi_proto::decode::Assist;
+
+    let mut body = vec![0u8; Assist::SIZE];
+    body[Assist::UNIQUE_NO_OFFSET..Assist::UNIQUE_NO_OFFSET + 4]
+        .copy_from_slice(&0x0100_0F42u32.to_le_bytes());
+    body[Assist::ASSIST_NO_OFFSET..Assist::ASSIST_NO_OFFSET + 4]
+        .copy_from_slice(&0x0100_07D1u32.to_le_bytes());
+    body[Assist::ACT_INDEX_OFFSET..Assist::ACT_INDEX_OFFSET + 2]
+        .copy_from_slice(&0x0442u16.to_le_bytes());
+
+    let events = sub_packet_events(ffxi_proto::map::s2c::ASSIST, &body);
+    assert!(
+        matches!(
+            events.as_slice(),
+            [AgentEvent::TargetChanged {
+                target_id: Some(0x0100_07D1),
+            }]
+        ),
+        "{events:?}"
+    );
+}
+
+/// LSB builds the packet over a zeroed buffer and leaves `AssistNo` at 0 when
+/// the target went away (`CCharEntity::OnChangeTarget` with a null target,
+/// 0x058_assist.cpp GP_SERV_COMMAND_ASSIST::GP_SERV_COMMAND_ASSIST), so 0 must not be reported as entity 0.
+#[test]
+fn assist_packet_reports_a_zero_assist_no_as_no_target() {
+    let events = sub_packet_events(
+        ffxi_proto::map::s2c::ASSIST,
+        &[0u8; ffxi_proto::decode::Assist::SIZE],
+    );
+    assert!(
+        matches!(
+            events.as_slice(),
+            [AgentEvent::TargetChanged { target_id: None }]
+        ),
+        "{events:?}"
+    );
+}
+
+#[test]
+fn assist_packet_rejects_a_truncated_body() {
+    let events = sub_packet_events(
+        ffxi_proto::map::s2c::ASSIST,
+        &[0u8; ffxi_proto::decode::Assist::SIZE - 1],
+    );
+    assert!(events.is_empty(), "{events:?}");
+}
+
+#[test]
+fn death_menu_packet_emits_the_server_offer() {
+    use ffxi_proto::decode::DeathMenuOffer;
+
+    const DEATH_MENU_BODY_SIZE: usize = 8;
+    const DEATH_MENU_TRACTOR_TYPE: u16 = 2;
+    let mut body = [0u8; DEATH_MENU_BODY_SIZE];
+    body[0..4].copy_from_slice(&0x0102_0304u32.to_le_bytes());
+    body[4..6].copy_from_slice(&0x0506u16.to_le_bytes());
+    body[6..8].copy_from_slice(&DEATH_MENU_TRACTOR_TYPE.to_le_bytes());
+
+    let events = sub_packet_events(ffxi_proto::map::s2c::DEATH_MENU, &body);
+    assert!(matches!(
+        events.as_slice(),
+        [AgentEvent::DeathMenuUpdated {
+            offer: Some(DeathMenuOffer::Tractor),
+        }]
+    ));
+}
+
+#[test]
+fn death_menu_packet_rejects_a_truncated_body() {
+    let events = sub_packet_events(ffxi_proto::map::s2c::DEATH_MENU, &[0; 7]);
+    assert!(events.is_empty());
+    assert!(
+        !first_decode_err(ffxi_proto::map::s2c::DEATH_MENU),
+        "the decode failure must have passed through the warning dedup gate"
+    );
+}
+
 /// `ZoneChanged` clears `SessionState::current_weather`, so the LOGIN arm
 /// must emit the 0x00A zone-in weather *after* it. Reversed, a zoning
 /// character renders the default sky until the next 0x057 — which LSB only
-/// sends on a weather change (vendor/server/src/map/zone.cpp:672).
+/// sends on a weather change (vendor/server/src/map/zone.cpp CZone::SetWeather).
 #[test]
 fn login_emits_zone_in_weather_after_the_zone_change() {
     const WEATHER_NUMBER: u16 = 4;
@@ -65,6 +259,55 @@ fn login_emits_zone_in_weather_after_the_zone_change() {
     assert!(
         weather_at > zone_at,
         "WeatherUpdated must follow ZoneChanged, got {events:?}"
+    );
+}
+
+/// `ZoneChanged` clears `SessionState::death_homepoint_secs`, and 0x037
+/// CHAR_STATUS only arrives on a status *change*, so a character who zoned in
+/// still KO'd depends on the LOGIN arm re-publishing the timer afterwards.
+#[test]
+fn login_emits_the_homepoint_timer_after_the_zone_change_only_while_ko() {
+    use ffxi_proto::decode::{dead_counter_seconds_until_homepoint, PosHead, ServerLogin};
+
+    // An arbitrary counter, converted by the decoder's own formula rather than a
+    // second copy of it here.
+    const DEAD_COUNTER: u32 = 129_600;
+    const FULL_HP_PCT: u8 = 100;
+    let remaining = dead_counter_seconds_until_homepoint(DEAD_COUNTER);
+    assert!(remaining > 0, "the fixture must describe a live countdown");
+
+    let mut body = vec![0u8; ServerLogin::DEAD_COUNTER_OFFSET + 4];
+    body[ServerLogin::DEAD_COUNTER_OFFSET..ServerLogin::DEAD_COUNTER_OFFSET + 4]
+        .copy_from_slice(&DEAD_COUNTER.to_le_bytes());
+
+    body[PosHead::HPP_OFFSET] = FULL_HP_PCT;
+    assert!(
+        !sub_packet_events(ffxi_proto::map::s2c::LOGIN, &body)
+            .iter()
+            .any(|e| matches!(e, AgentEvent::DeathTimerUpdated { .. })),
+        "a living character carries the same counter and must publish no timer"
+    );
+
+    body[PosHead::HPP_OFFSET] = 0;
+    let events = sub_packet_events(ffxi_proto::map::s2c::LOGIN, &body);
+    let zone_at = events
+        .iter()
+        .position(|e| matches!(e, AgentEvent::ZoneChanged { .. }))
+        .expect("LOGIN emits ZoneChanged");
+    let timer_at = events
+        .iter()
+        .position(|e| {
+            matches!(
+                e,
+                AgentEvent::DeathTimerUpdated {
+                    seconds_until_homepoint: Some(secs),
+                } if *secs == remaining
+            )
+        })
+        .expect("LOGIN emits the zone-in homepoint timer");
+    assert!(
+        timer_at > zone_at,
+        "DeathTimerUpdated must follow ZoneChanged, got {events:?}"
     );
 }
 
@@ -147,7 +390,7 @@ fn origin_fallback_does_not_replace_origin_seed() {
 
 #[test]
 fn myroom_login_keeps_forced_origin_seed() {
-    // vendor/server/scripts/globals/moghouse.lua:290 setPos(0, 0, 0, 192):
+    // vendor/server/scripts/globals/moghouse.lua moghouseZoneLines setPos(0, 0, 0, 192):
     // the MH origin spawn is authoritative, not a bad seed to repair.
     let town_side = v(162.591, -4.103, 162.423);
     assert_eq!(
@@ -162,7 +405,42 @@ fn myroom_login_keeps_forced_origin_seed() {
     );
 }
 
-/// Pins the XIM doorOffset branches (AssetViewer.kt:654-663): 2F interiors
+/// A far (>snap) self-position carrier snaps us to the server in steady state, but
+/// during the post-zone-in settle window (`refuse_snap`) it is an out-of-order /
+/// duplicate position from around the transition and must keep our local seed instead
+/// of yanking us into another zone's coordinate space ("same spot, different zone").
+#[test]
+fn far_carrier_snaps_in_steady_state_but_not_during_settle() {
+    let local = v(-15.0, -132.8, -4.2); // where we actually stand (Bastok)
+    let stale = v(579.5, -305.1, -1.9); // an old-zone coordinate (>10 yalms away)
+
+    assert!(
+        matches!(
+            reconcile_self_pos(local, stale, false),
+            SelfPosReconcile::Snap
+        ),
+        "steady state: a far carrier snaps to the server"
+    );
+    assert!(
+        matches!(
+            reconcile_self_pos(local, stale, true),
+            SelfPosReconcile::KeepLocal
+        ),
+        "settle window: a far (out-of-order) carrier keeps our local seed"
+    );
+
+    // A close carrier is unaffected by the settle gate — it still keeps/rubber-bands.
+    let near = v(-14.0, -132.8, -4.2); // ~1 yalm away
+    assert!(
+        matches!(
+            reconcile_self_pos(local, near, true),
+            SelfPosReconcile::KeepLocal
+        ),
+        "close carrier keeps local regardless of settle window"
+    );
+}
+
+/// Pins the XIM doorOffset branches (AssetViewer.kt): 2F interiors
 /// shift the door 3.15 yalms along native z, the [S]-city/Adoulin bases shift
 /// along x.
 #[test]
@@ -188,7 +466,11 @@ fn myroom_job_packet_layout_matches_lsb_struct() {
     let buf = build_subpacket_myroom_job(0xBEEF, Some(5), Some(13));
     assert_eq!(buf.len(), 8, "4 hdr + MainJobIndex + SupportJobIndex + pad");
     let id_and_size = u16::from_le_bytes([buf[0], buf[1]]);
-    assert_eq!(id_and_size & 0x1FF, 0x100, "opcode MYROOM_JOB");
+    assert_eq!(
+        id_and_size & framing::SUBPACKET_OPCODE_MASK,
+        ffxi_proto::map::c2s::MYROOM_JOB,
+        "opcode MYROOM_JOB"
+    );
     assert_eq!(id_and_size >> 9, 2, "size_words");
     assert_eq!(u16::from_le_bytes([buf[2], buf[3]]), 0xBEEF, "sync");
     assert_eq!(buf[4], 5, "MainJobIndex");
@@ -220,7 +502,11 @@ fn motion_packet_layout_matches_lsb_struct() {
         "hdr + UniqueNo + ActIndex + Number/Mode/Param/pad"
     );
     let id_and_size = u16::from_le_bytes([buf[0], buf[1]]);
-    assert_eq!(id_and_size & 0x1FF, ffxi_proto::map::c2s::MOTION, "opcode");
+    assert_eq!(
+        id_and_size & framing::SUBPACKET_OPCODE_MASK,
+        ffxi_proto::map::c2s::MOTION,
+        "opcode"
+    );
     assert_eq!(id_and_size >> 9, 4, "size_words");
     assert_eq!(u16::from_le_bytes([buf[2], buf[3]]), 0xBEEF, "sync");
     assert_eq!(
@@ -245,7 +531,10 @@ fn emote_list_req_is_header_only() {
     let buf = build_subpacket_emote_list_req(0x1234);
     assert_eq!(buf.len(), 4);
     let id_and_size = u16::from_le_bytes([buf[0], buf[1]]);
-    assert_eq!(id_and_size & 0x1FF, ffxi_proto::map::c2s::EMOTE_LIST);
+    assert_eq!(
+        id_and_size & framing::SUBPACKET_OPCODE_MASK,
+        ffxi_proto::map::c2s::EMOTE_LIST
+    );
     assert_eq!(id_and_size >> 9, 1, "size_words");
     assert_eq!(u16::from_le_bytes([buf[2], buf[3]]), 0x1234, "sync");
 }
@@ -259,7 +548,10 @@ fn tracking_list_req_carries_sendflg_one() {
     let buf = build_subpacket_tracking_list(0x1234);
     assert_eq!(buf.len(), 8);
     let id_and_size = u16::from_le_bytes([buf[0], buf[1]]);
-    assert_eq!(id_and_size & 0x1FF, ffxi_proto::map::c2s::TRACKING_LIST);
+    assert_eq!(
+        id_and_size & framing::SUBPACKET_OPCODE_MASK,
+        ffxi_proto::map::c2s::TRACKING_LIST
+    );
     assert_eq!(id_and_size >> 9, 2, "size_words");
     assert_eq!(u16::from_le_bytes([buf[2], buf[3]]), 0x1234, "sync");
     assert_eq!(
@@ -399,6 +691,152 @@ fn equipped_models_are_npcs_and_furniture_is_other() {
     );
 }
 
+/// A 0x0E CHAR_NPC body crafted exactly as LSB writes it —
+/// vendor/server/src/map/packets/entity_update.cpp `updateWith`, sub.data base = LSB 0x04:
+/// `[26]` hpp (LSB 0x1E), `[27]` animation (LSB 0x1F), `[28]` status (LSB 0x20, written on
+/// EVERY update regardless of mask), `[29..33)` m_flags u32 (LSB 0x21, UPDATE_HP only),
+/// `[39]` namevis (LSB 0x2B, UPDATE_HP only).
+fn worm_body(send_flag: u8, status: u8, m_flags: u32, namevis: u8) -> Vec<u8> {
+    // 48 bytes: PosHead::SIZE_WITH_BT_TARGET (44) plus the look-size word at
+    // sub.data[0x2C..0x2E] (LSB 0x30, entity_update.cpp `ref<uint16>(0x30)`),
+    // which classify_char_npc needs to see Some(0) = standard mob mesh.
+    let mut b = vec![0u8; 48];
+    b[0..4].copy_from_slice(&1000u32.to_le_bytes()); // unique_no
+    b[4..6].copy_from_slice(&DYNAMIC_TARGID.to_le_bytes()); // act_index -> Mob classify
+    b[6] = send_flag;
+    b[8..12].copy_from_slice(&1.5f32.to_le_bytes()); // x
+    b[12..16].copy_from_slice(&(-2.0f32).to_le_bytes()); // z
+    b[16..20].copy_from_slice(&0.0f32.to_le_bytes()); // y
+    b[24] = 5; // speed
+    b[26] = 100; // hpp
+    b[28] = status;
+    b[29..33].copy_from_slice(&m_flags.to_le_bytes());
+    b[39] = namevis;
+    b[0x2C] = 0; // look size: standard mob mesh (classify -> Mob)
+    b[0x2D] = 0;
+    b
+}
+
+fn feed_worm(s: &mut crate::state::SessionState, body: &[u8]) {
+    for ev in sub_packet_events(ffxi_proto::map::s2c::CHAR_NPC, body) {
+        if matches!(ev, AgentEvent::EntityUpserted { .. }) {
+            s.apply_event(&ev);
+        }
+    }
+}
+
+fn worm_entity(s: &crate::state::SessionState) -> &crate::state::Entity {
+    s.entities
+        .iter()
+        .find(|e| e.id == 1000)
+        .expect("worm present")
+}
+
+/// The worm's full dive/surface cycle as LSB drives it (mob_controller.cpp CMobController::DoRoamTick):
+/// spawn above ground -> dive (name hidden + untargetable; status stays NORMAL for the first
+/// 3 s) -> move underground (status INVISIBLE piggybacks on POS ticks) -> surface (one UPDATE_HP
+/// packet carries status=UPDATE(1) with the flag cleared; name stays hidden ~2 more seconds).
+/// The surfaced worm must be targetable again — this is the "stale targeting info" regression.
+#[test]
+fn worm_dive_surface_lifecycle_stays_targetable_after_emerging() {
+    const FLAG_UNTARGETABLE: u32 = 0x800; // ENTITYFLAGS, baseentity.h
+
+    let mut s = crate::state::SessionState::default();
+
+    // 1. Spawn above ground (UPDATE_ALL_MOB): NORMAL, targetable.
+    feed_worm(&mut s, &worm_body(0x0F, 0, 0, 0));
+    assert_eq!(worm_entity(&s).status, 0);
+    assert!(
+        crate::wire_translate::entity_to_wire(worm_entity(&s)).is_targetable(),
+        "spawned worm must be targetable"
+    );
+
+    // 2. Dive: UPDATE_HP carries name hidden + untargetable; status is still NORMAL for 3 s.
+    feed_worm(&mut s, &worm_body(0x04, 0, FLAG_UNTARGETABLE, 0x08));
+    assert!(
+        !crate::wire_translate::entity_to_wire(worm_entity(&s)).is_targetable(),
+        "diving worm must be untargetable"
+    );
+
+    // 3. Moving underground: the POS-only tick now carries status INVISIBLE(3); its flag bytes
+    // are zero-filled and must NOT clobber the preserved untargetable/namevis.
+    feed_worm(&mut s, &worm_body(0x01, 3, 0, 0));
+    assert_eq!(
+        worm_entity(&s).status,
+        3,
+        "POS-only tick must refresh status"
+    );
+    assert!(
+        !crate::wire_translate::entity_to_wire(worm_entity(&s)).is_targetable(),
+        "underground worm must stay untargetable"
+    );
+
+    // 4. Surface: one UPDATE_HP packet sets status=UPDATE(1) and clears the flag; name is still
+    // hidden for ~2 more seconds (HideName(false) carries no updatemask of its own).
+    feed_worm(&mut s, &worm_body(0x04, 1, 0, 0x08));
+    assert_eq!(worm_entity(&s).status, 1);
+    assert!(
+        crate::wire_translate::entity_to_wire(worm_entity(&s)).is_targetable(),
+        "surfaced worm must be targetable again (stale-info regression)"
+    );
+
+    // 5. Surfaced and roaming: POS-only ticks keep status=UPDATE(1).
+    feed_worm(&mut s, &worm_body(0x01, 1, 0, 0));
+    assert!(
+        crate::wire_translate::entity_to_wire(worm_entity(&s)).is_targetable(),
+        "surfaced worm must stay targetable while roaming"
+    );
+}
+
+/// End-to-end HP chain for the delta bridge: when a mob takes damage, LSB sets UPDATE_HP on
+/// its next 0x00E (battleentity.cpp `addHP` -> updatemask |= UPDATE_HP; entity_update.cpp
+/// writes HPP at 0x1E under that bit and broadcasts to every char who spawned the entity).
+/// The fold must mark the entity pending so the O(changed) delta carries the new hpp — this
+/// is what drives the live nameplate HP bar. Regression: "HP bars never move".
+#[test]
+fn hp_update_packet_marks_entity_pending_with_new_hpp() {
+    let mut s = crate::state::SessionState::default();
+
+    // 1. Spawn (UPDATE_ALL_MOB): full block, hpp=100.
+    feed_worm(&mut s, &worm_body(0x0F, 0, 0, 0));
+    assert_eq!(worm_entity(&s).hp_pct, Some(100), "spawn carries hpp");
+    let spawn_pos = worm_entity(&s).pos;
+    let (upserts, _) = s.take_pending_entities();
+    assert!(
+        upserts.contains(&1000),
+        "spawn must be pending for the delta bridge"
+    );
+
+    // 2. Damage tick: UPDATE_HP only (send_flag=0x04) with hpp=42; the position bytes are
+    //    stale and must not move the entity.
+    let mut body = worm_body(0x04, 0, 0, 0);
+    body[26] = 42; // HPP (LSB 0x1E), written under UPDATE_HP
+    feed_worm(&mut s, &body);
+    assert_eq!(
+        worm_entity(&s).hp_pct,
+        Some(42),
+        "UPDATE_HP tick must apply the new hpp"
+    );
+    assert_eq!(
+        worm_entity(&s).pos,
+        spawn_pos,
+        "HP-only tick must not move the entity"
+    );
+    let (upserts, _) = s.take_pending_entities();
+    assert!(
+        upserts.contains(&1000),
+        "the HP change must reach the delta bridge as a pending upsert"
+    );
+
+    // 3. A subsequent POS-only tick zero-fills HPP; the merge must preserve 42.
+    feed_worm(&mut s, &worm_body(0x01, 0, 0, 0));
+    assert_eq!(
+        worm_entity(&s).hp_pct,
+        Some(42),
+        "POS-only tick must not clobber hpp"
+    );
+}
+
 fn v(x: f32, y: f32, z: f32) -> Vec3 {
     Vec3 { x, y, z }
 }
@@ -421,6 +859,7 @@ fn walkaway_release_only_user_driven_past_threshold() {
 }
 
 const PINNED_EVENT: (u32, u16, u16) = (0x0100_02FF, 7, 0x0123);
+const ID_FLIP: u16 = 0xFF;
 const FLUSH_ZONE: u16 = 230;
 const FLUSH_SEQ: u16 = 0x0044;
 
@@ -454,7 +893,10 @@ fn grace_watchdog_spares_a_dialog_the_player_is_reading() {
 
     for active in [None, open] {
         for watchdog in [false, true] {
-            assert!(flushes(flush_inputs(!USER, watchdog, !WALKED), active));
+            assert_eq!(
+                flushes(flush_inputs(!USER, watchdog, !WALKED), active),
+                active.is_none()
+            );
         }
     }
 
@@ -470,34 +912,22 @@ fn grace_watchdog_spares_a_dialog_the_player_is_reading() {
 }
 
 #[test]
-fn agent_mode_auto_release_keeps_the_vm_dialog_walkable() {
+fn agent_mode_keeps_the_server_event_until_the_vm_finishes() {
     let mut pending = vec![PINNED_EVENT];
-    let flush = flush_pending_event_end(
+    assert!(flush_pending_event_end(
         flush_inputs(false, false, false),
         &mut pending,
         Some(PINNED_EVENT),
         FLUSH_ZONE,
         FLUSH_SEQ,
     )
-    .expect("a non-user-driven session auto-releases the pinned event");
-
-    assert!(
-        !flush.clear_dialog,
-        "agent/headless dialog must survive the auto-release so frames 2..N still play"
-    );
-    assert_eq!(flush.released, 1);
-    assert_eq!(flush.next_sub_seq, FLUSH_SEQ.wrapping_add(1));
-    assert!(pending.is_empty());
-
-    let (unique_no, act_index, event_id) = PINNED_EVENT;
-    let expected =
-        build_subpacket_event_end(FLUSH_SEQ, unique_no, act_index, FLUSH_ZONE, event_id, 0);
-    assert_eq!(flush.payload, expected);
-
-    assert!(
-        !take_pending_event_end(&mut pending, unique_no, event_id),
-        "the surviving VM session must not resend the 0x05B the flush already sent"
-    );
+    .is_none());
+    assert_eq!(pending, vec![PINNED_EVENT]);
+    assert!(take_pending_event_end(
+        &mut pending,
+        PINNED_EVENT.0,
+        PINNED_EVENT.2
+    ));
 }
 
 #[test]
@@ -513,7 +943,11 @@ fn walking_away_clears_the_vm_dialog_it_released() {
     .expect("walking away releases the pinned event");
     assert!(flush.clear_dialog);
 
-    let other = (PINNED_EVENT.0 ^ 0xFF, PINNED_EVENT.1, PINNED_EVENT.2);
+    let other = (
+        PINNED_EVENT.0 ^ u32::from(ID_FLIP),
+        PINNED_EVENT.1,
+        PINNED_EVENT.2,
+    );
     let mut pending = vec![PINNED_EVENT];
     let flush = flush_pending_event_end(
         flush_inputs(true, false, true),
@@ -540,7 +974,7 @@ fn a_pinned_event_is_owed_exactly_one_event_end() {
     assert!(!take_pending_event_end(
         &mut pending,
         unique_no,
-        event_id ^ 0xFF
+        event_id ^ ID_FLIP
     ));
     assert_eq!(pending, vec![(unique_no, act_index, event_id)]);
 }
@@ -591,8 +1025,22 @@ fn should_emit_pos_bypasses_rate_limit_on_heading_change() {
 
 #[test]
 fn flood_drain_waits_for_self_pos_seed() {
-    assert!(!should_break_flood(false));
-    assert!(should_break_flood(true));
+    // Pre-GAMEOK drain (break_on_idle=false): keep reading until the seed lands.
+    assert!(
+        !should_break_flood(false, false, false)
+            && !should_break_flood(false, true, false)
+            && !should_break_flood(false, false, true),
+        "unseeded pre-GAMEOK drain must wait"
+    );
+    assert!(
+        should_break_flood(false, true, true),
+        "seeded pre-GAMEOK drain may break on idle"
+    );
+    // Quiescence drains (break_on_idle=true): stop on idle regardless of seed.
+    assert!(
+        should_break_flood(true, false, false),
+        "quiescence drain breaks on idle unconditionally"
+    );
 }
 
 #[test]
@@ -623,7 +1071,7 @@ fn reconcile_self_pos_keep_local_under_2_yalms() {
     let local = v(0.0, 0.0, 0.0);
     let server = v(1.0, 1.0, 0.5);
     assert_eq!(
-        reconcile_self_pos(local, server),
+        reconcile_self_pos(local, server, false),
         SelfPosReconcile::KeepLocal,
     );
 }
@@ -632,7 +1080,7 @@ fn reconcile_self_pos_keep_local_under_2_yalms() {
 fn reconcile_self_pos_rubberband_between_2_and_10() {
     let local = v(0.0, 0.0, 0.0);
     let server = v(3.0, 4.0, 0.0);
-    match reconcile_self_pos(local, server) {
+    match reconcile_self_pos(local, server, false) {
         SelfPosReconcile::Rubberband { target } => {
             assert_eq!(target, server);
         }
@@ -644,7 +1092,11 @@ fn reconcile_self_pos_rubberband_between_2_and_10() {
 fn reconcile_self_pos_snap_above_10_yalms() {
     let local = v(0.0, 0.0, 0.0);
     let server = v(12.0, 5.0, 0.0);
-    assert_eq!(reconcile_self_pos(local, server), SelfPosReconcile::Snap,);
+    // Steady state (refuse_snap=false): a far carrier snaps to the server.
+    assert_eq!(
+        reconcile_self_pos(local, server, false),
+        SelfPosReconcile::Snap,
+    );
 }
 
 #[test]
@@ -652,13 +1104,13 @@ fn reconcile_self_pos_boundaries() {
     let local = v(0.0, 0.0, 0.0);
     let just_inside = v(2.0, 0.0, 0.0);
     assert_eq!(
-        reconcile_self_pos(local, just_inside),
+        reconcile_self_pos(local, just_inside, false),
         SelfPosReconcile::KeepLocal,
     );
 
     let edge = v(10.0, 0.0, 0.0);
     assert!(matches!(
-        reconcile_self_pos(local, edge),
+        reconcile_self_pos(local, edge, false),
         SelfPosReconcile::Rubberband { .. },
     ));
 }
@@ -697,7 +1149,7 @@ fn event_end_writes_csid_to_event_para_field() {
         &buf[16..18],
         &230u16.to_le_bytes(),
         "EventNum carries the zone id (retail echoes LOGIN EventNum, \
-             0x00a_login.cpp:187); LSB's 0x05B handler never reads it",
+             0x00a_login.cpp GP_SERV_COMMAND_LOGIN::GP_SERV_COMMAND_LOGIN); LSB's 0x05B handler never reads it",
     );
 }
 
@@ -713,7 +1165,10 @@ fn scenario_item_packet_layout_matches_lsb_struct() {
     assert_eq!(buf.len(), 76, "header(4) + body(72)");
 
     let id_and_size = u16::from_le_bytes([buf[0], buf[1]]);
-    assert_eq!(id_and_size & 0x1FF, ffxi_proto::map::c2s::SCENARIO_ITEM);
+    assert_eq!(
+        id_and_size & framing::SUBPACKET_OPCODE_MASK,
+        ffxi_proto::map::c2s::SCENARIO_ITEM
+    );
     assert_eq!(id_and_size >> 9, 19, "size_words = 76/4");
     assert_eq!(u16::from_le_bytes([buf[2], buf[3]]), 0x1234, "sync");
 
@@ -728,7 +1183,7 @@ fn scenario_item_packet_layout_matches_lsb_struct() {
     assert_eq!(&buf[74..76], &6u16.to_le_bytes(), "TableIndex");
 }
 
-/// vendor/server/src/map/packets/c2s/0x064_scenarioitem.cpp:44 —
+/// vendor/server/src/map/packets/c2s/0x064_scenarioitem.cpp GP_CLI_COMMAND_SCENARIOITEM::process keyItemId —
 /// keyItemId = TableIndex*512 + i*32 + bit; the fold must be its inverse.
 #[test]
 fn mark_seen_bits_round_trip_through_ids_from_flags() {
@@ -751,7 +1206,7 @@ fn mark_seen_bits_round_trip_through_ids_from_flags() {
     );
 }
 
-/// vendor/server/src/map/packets/c2s/0x064_scenarioitem.cpp:31-33 —
+/// vendor/server/src/map/packets/c2s/0x064_scenarioitem.cpp PacketValidator —
 /// UniqueNo must equal char id and ActIndex must equal targid, ActIndex 0
 /// is always rejected, and the send is blocked while InEvent; every
 /// blocked case must skip without mutating local seen-state.
@@ -826,6 +1281,14 @@ fn talknumwork_composes_real_keyitem_line_from_zone_dat() {
         crate::event_dialog::DialogSession::new(Some(std::sync::Arc::new(root)), "Tester".into());
     let zone_text = ds.zone_text(230, ZONE230_KEYITEM_OBTAINED_MAY2023 as usize);
     assert!(zone_text.is_some(), "zone 230 string DAT must load");
+    // The pinned ID is era-specific: an install whose entry 6437 carries no key-item tag is a
+    // different client era, not a decode failure.
+    if !zone_text.as_deref().unwrap_or("").contains("{KeyItem:") {
+        eprintln!(
+            "skipping: zone-230 entry {ZONE230_KEYITEM_OBTAINED_MAY2023} has no key-item tag in this install's DAT era (pinned May 2023 ID)"
+        );
+        return;
+    }
     let line = zone_message_chat_line(
         &tnw(
             ZONE230_KEYITEM_OBTAINED_MAY2023 | decode::MESNUM_HIDE_NAME_FLAG,
@@ -889,9 +1352,9 @@ fn battle2_self(action_kind: u8, cmd_arg: u32) -> Battle2Header {
 }
 
 /// The bar is armed at send but unstarted; it only starts when the server's
-/// own MagicStart arrives (vendor/server/src/map/ai/states/magic_state.cpp:127),
+/// own MagicStart arrives (vendor/server/src/map/ai/states/magic_state.cpp CMagicState::CMagicState),
 /// so it cannot lead the cast pose and the "starts casting" line by a round trip.
-/// The FourCCs are the literal LSB constants (vendor/server/src/map/enums/four_cc.h:40).
+/// The FourCCs are the literal LSB constants (vendor/server/src/map/enums/four_cc.h FourCC BlueMagicCast).
 #[test]
 fn self_cast_bar_starts_on_magic_start_not_on_send() {
     const CABK: u32 = 0x6B626163;
@@ -1072,8 +1535,70 @@ fn talknumwork2_substitutes_the_caught_item() {
     );
 }
 
+#[test]
+#[ignore = "requires the installed retail dialog DATs"]
+fn ferry_fishing_chat_replays_reported_catches_with_installed_dat() {
+    const FERRY_ZONE: u16 = 220;
+    const REPORTED_CATCH: u16 = 7288;
+    const SERVER_BASE: u16 = 7249;
+    const NUM1_START: usize = 12;
+    const STRING1_START: usize = 28;
+    const MESNUM_START: usize = 6;
+    let root = std::sync::Arc::new(ffxi_dat::DatRoot::from_env_or_default().unwrap());
+    let mut dialog = crate::event_dialog::DialogSession::new(Some(root), "Observer".into());
+    let (tx, mut rx) = broadcast::channel(16);
+    for (item, name) in [(4451i32, "Silver Shark"), (5128, "Cone Calamary")] {
+        let mut body = vec![0; decode::TalkNumWork2::SIZE];
+        body[MESNUM_START..MESNUM_START + 2].copy_from_slice(
+            &(REPORTED_CATCH | decode::TalkNumWork::MESNUM_HIDE_NAME_FLAG).to_le_bytes(),
+        );
+        body[NUM1_START..NUM1_START + 4].copy_from_slice(&item.to_le_bytes());
+        body[NUM1_START + 4..NUM1_START + 8].copy_from_slice(&1i32.to_le_bytes());
+        body[STRING1_START..STRING1_START + 6].copy_from_slice(b"Angler");
+        emit_zone_message_chat(
+            ffxi_proto::map::s2c::TALKNUMWORK2,
+            &body,
+            &mut dialog,
+            FERRY_ZONE,
+            "Observer",
+            &tx,
+        );
+        let AgentEvent::ChatLine { line } = rx.try_recv().unwrap() else {
+            panic!("catch must emit chat")
+        };
+        assert!(line.text.starts_with("Angler caught "), "{}", line.text);
+        assert!(line.text.contains(name), "{}", line.text);
+        assert!(!line.text.contains('{'), "{}", line.text);
+        assert!(line
+            .spans
+            .iter()
+            .any(|s| s.kind == crate::state::ChatSpanKind::Item));
+        println!("{}", line.text);
+    }
+    let crate::event_dialog::FishingChat::Line { text, .. } = dialog.fishing_chat(
+        FERRY_ZONE,
+        SERVER_BASE + u16::from(ffxi_proto::fishing_messages::kind::KEEN_ANGLERS_SENSE),
+        ffxi_proto::map::s2c::TALKNUMWORK,
+    ) else {
+        panic!("keen angler message must use the learned server base")
+    };
+    let line = zone_message_chat_line(
+        &ZoneMessage {
+            message_index: SERVER_BASE,
+            speaker: None,
+            actor: None,
+            nums: vec![4451, 3, 3, 3],
+        },
+        Some(text),
+        "Observer",
+    );
+    assert!(line.text.contains("Silver Shark"), "{}", line.text);
+    assert!(!line.text.contains('{'), "{}", line.text);
+    println!("{}", line.text);
+}
+
 /// The Esc cancel EndPara crosses the wire exactly as LSB's
-/// utils.EVENT_CANCELLED_OPTION (vendor/server/scripts/utils/utils.lua:8).
+/// utils.EVENT_CANCELLED_OPTION (vendor/server/scripts/utils/utils.lua).
 #[test]
 fn event_end_cancel_writes_lsb_cancel_option() {
     let buf = build_subpacket_event_end(
@@ -1149,7 +1674,7 @@ fn eventucoff_fishing_emits_fishing_ended_and_keeps_pending() {
 }
 
 /// EventRecvPending follows every processed 0x05B
-/// (vendor/server/src/map/packets/c2s/0x05b_eventend.cpp:71) and can land
+/// (vendor/server/src/map/packets/c2s/0x05b_eventend.cpp GP_CLI_COMMAND_EVENTEND::process) and can land
 /// after a chained event's 0x032 trigger — it must not clear anything.
 #[test]
 fn eventucoff_recv_pending_ack_is_inert() {
@@ -1172,12 +1697,16 @@ fn tell_packet_layout_matches_phoenix_struct() {
     assert_eq!(buf.len(), 24, "total = 4 hdr + 20 body, padded to mul-of-4");
 
     let id_and_size = u16::from_le_bytes([buf[0], buf[1]]);
-    assert_eq!(id_and_size & 0x1FF, 0x0B6, "opcode");
+    assert_eq!(
+        id_and_size & framing::SUBPACKET_OPCODE_MASK,
+        codec::CHAT_NAME,
+        "opcode"
+    );
     assert_eq!(id_and_size >> 9, 6, "size_words");
     let sync = u16::from_le_bytes([buf[2], buf[3]]);
     assert_eq!(sync, 0xABCD, "sync passed through");
 
-    // The server's PacketValidator requires unknown00 == 3 (0x0b6_chat_name.cpp:60);
+    // The server's PacketValidator requires unknown00 == 3 (0x0b6_chat_name.cpp);
     // a 0 here is what silently dropped every tell / customMenu reply.
     assert_eq!(buf[4], 3, "unknown00 == 3 (server-required)");
     assert_eq!(buf[5], 0, "unknown01");
@@ -1193,7 +1722,7 @@ fn tell_packet_truncates_oversize_inputs() {
     let buf = build_subpacket_tell(0, &long_name, "x");
 
     // sName is char[15] read via asStringFromUntrustedSource(sName,
-    // sizeof(sName)) (0x0b6_chat_name.cpp:76), so a full unterminated
+    // sizeof(sName)) (0x0b6_chat_name.cpp GP_CLI_COMMAND_CHAT_NAME::process recipientName), so a full unterminated
     // 15-byte field is legal on the wire.
     assert_eq!(&buf[6..21], &[b'a'; 15][..], "first 15 chars of name");
     assert_eq!(&buf[21..22], b"x", "message follows the full sName field");
@@ -1216,7 +1745,11 @@ fn item_use_packet_layout_matches_phoenix_struct() {
     assert_eq!(buf.len(), 20);
 
     let id_and_size = u16::from_le_bytes([buf[0], buf[1]]);
-    assert_eq!(id_and_size & 0x1FF, 0x037, "opcode");
+    assert_eq!(
+        id_and_size & framing::SUBPACKET_OPCODE_MASK,
+        codec::ITEM_USE,
+        "opcode"
+    );
     assert_eq!(id_and_size >> 9, 5, "size_words");
     let sync = u16::from_le_bytes([buf[2], buf[3]]);
     assert_eq!(sync, 0xBEEF, "sync passed through");
@@ -1315,9 +1848,9 @@ fn event_0x034_extracts_nums_and_param_block() {
     assert_eq!(d.nums[1], 1234);
 }
 
-// The conquest outpost vendor: LSB's conquest.lua:1461 calls
+// The conquest outpost vendor: LSB's conquest.lua canPurchaseItem calls
 // startEvent(32756, nation, fee, 0, fee, getCP(), 0, 0, 0), packed into
-// num[0..7] by 0x034_eventnum.cpp:44-50. Dropping those on the floor leaves
+// num[0..7] by 0x034_eventnum.cpp GP_SERV_COMMAND_EVENTNUM::GP_SERV_COMMAND_EVENTNUM. Dropping those on the floor leaves
 // every {Num:N} marker in the vendor dialog unresolved (kuluu-fldn).
 #[test]
 fn event_trigger_0x034_carries_params_and_the_redirected_text_table() {
@@ -1536,7 +2069,7 @@ fn is_fresh_bundle_dedups_retransmits_and_survives_wrap() {
 }
 
 /// Model of LSB's c2s dispatch window
-/// (vendor/server/src/map/map_networking.cpp:419-428,471): subpacket
+/// (vendor/server/src/map/map_networking.cpp MapNetworking::parse): subpacket
 /// dispatched iff `client_packet_id < sync <= header`, then
 /// `client_packet_id = header`. Feeds it bundles built the way the
 /// session builds them (one sync per subpacket, header from
@@ -1795,7 +2328,7 @@ fn battle2_mob_tp_move_resolves_name_not_damage() {
 
 #[test]
 fn battle2_mob_readies_resolves_skill_from_param() {
-    // SkillStart (7) puts the skill id in param instead (mobskill_state.cpp:100-104).
+    // SkillStart (7) puts the skill id in param instead (mobskill_state.cpp CState).
     let line = build_battle2_line(43, "Goobbue Farmer", "Oldman", false, true, 584, 0, 7)
         .expect("msg 43 must resolve");
     assert!(line.text.contains("readies Uppercut"), "got: {}", line.text);
@@ -1841,8 +2374,9 @@ impl BattleBitWriter {
         };
         let shifted = (value & mask) << bit_in_byte;
         let cover = total_bits.div_ceil(8);
+        const BYTE_MASK: u64 = 0xFF;
         for i in 0..cover {
-            self.data[byte_offset + i] |= ((shifted >> (i * 8)) & 0xFF) as u8;
+            self.data[byte_offset + i] |= ((shifted >> (i * 8)) & BYTE_MASK) as u8;
         }
         self.pos += bits as usize;
     }
@@ -1852,7 +2386,7 @@ impl BattleBitWriter {
     }
 }
 
-// vendor/server/src/map/packets/s2c/0x028_battle2.cpp:41-58 — an off-by-one-field read here
+// vendor/server/src/map/packets/s2c/0x028_battle2.cpp GP_SERV_COMMAND_BATTLE2::pack — an off-by-one-field read here
 // silently hands the recast timer ("Action info") back as an entity id.
 #[test]
 fn battle2_header_reports_primary_target() {
@@ -1888,19 +2422,23 @@ fn battle2_header_reports_primary_target() {
     assert_eq!(h.primary_target_id, None);
 }
 
-// vendor/server/src/map/packets/s2c/0x028_battle2.cpp:71-73 — resolution(3), kind(2),
+// vendor/server/src/map/packets/s2c/0x028_battle2.cpp GP_SERV_COMMAND_BATTLE2::pack — resolution(3), kind(2),
 // animation(12) open every result block. A basic attack never sets `action.actionid`
-// (vendor/server/src/map/entities/battleentity.cpp:2989), so these bits are the ONLY
+// (vendor/server/src/map/entities/battleentity.cpp CBattleEntity::OnAttack), so these bits are the ONLY
 // per-swing data: an off-by-one here picks the wrong swing routine and the wrong hit
 // reaction, i.e. the wrong sound or none.
 const BATTLE2_PARRIED_LEFT_ATTACK: ffxi_proto::melee::MeleeResult =
     ffxi_proto::melee::MeleeResult {
         resolution: ffxi_proto::melee::ActionResolution::Parry,
         animation: ffxi_proto::melee::AttackAnimation::LeftAttack,
+        info: ffxi_proto::melee::ActionInfo::NONE,
+        hit_distortion: ffxi_proto::melee::HitDistortion::None,
+        knockback: ffxi_proto::melee::KnockbackLevel::None,
     };
 
 fn battle2_single_result_body() -> Vec<u8> {
-    let (resolution, animation) = BATTLE2_PARRIED_LEFT_ATTACK.to_wire();
+    let (resolution, animation, _info, _hit_distortion, _knockback) =
+        BATTLE2_PARRIED_LEFT_ATTACK.to_wire();
     let mut w = BattleBitWriter::new(8);
     w.write(0xCAFEu64, 32);
     w.write(1, 6);
@@ -1927,12 +2465,146 @@ fn battle2_basic_attack_reports_resolution_and_swing_animation() {
     assert_eq!(h.first_result, Some(BATTLE2_PARRIED_LEFT_ATTACK));
 }
 
+// The outcome bits after animation(12): info(5), hitDistortion(2), knockback(3) in LSB write
+// order (vendor/server/src/map/packets/s2c/0x028_battle2.cpp). A hand-packed critical left-attack
+// with level-2 knockback must come back split, not lumped into one 5-bit "scale".
+#[test]
+fn battle2_result_outcome_bits_roundtrip() {
+    let mut w = BattleBitWriter::new(8);
+    w.write(0xCAFEu64, 32);
+    w.write(1, 6);
+    w.write(1, 4);
+    w.write(ffxi_proto::melee::CATEGORY_BASIC_ATTACK as u64, 4);
+    w.write(0, 32);
+    w.write(0, 32);
+    w.write(0xBEEFu64, 32);
+    w.write(1, 4);
+    w.write(0, 3); // resolution: Hit
+    w.write(1, 2); // kind
+    w.write(1, 12); // animation: LeftAttack
+    w.write(2, 5); // info: CriticalHit
+    w.write(3, 2); // hitDistortion: Heavy
+    w.write(2, 3); // knockback: level 2
+    w.write(0, 17); // param
+    w.write(67, 10); // messageID: AttackCrit
+    w.write(0, 31); // modifier
+    w.write(0, 1); // no proc block
+    w.write(0, 1); // no reaction block
+
+    let h = decode_battle2_header(&w.into_bytes()).unwrap();
+    assert_eq!(
+        h.first_outcome,
+        Some(ffxi_proto::melee::ResultOutcome {
+            resolution: ffxi_proto::melee::ActionResolution::Hit,
+            info: ffxi_proto::melee::ActionInfo::CRITICAL_HIT,
+            hit_distortion: ffxi_proto::melee::HitDistortion::Heavy,
+            knockback: ffxi_proto::melee::KnockbackLevel::Level2,
+        }),
+    );
+    let r = h.first_result.expect("a basic-attack result decodes");
+    assert_eq!(r.resolution, ffxi_proto::melee::ActionResolution::Hit);
+    assert_eq!(r.animation, ffxi_proto::melee::AttackAnimation::LeftAttack);
+    assert_eq!(r.info, ffxi_proto::melee::ActionInfo::CRITICAL_HIT);
+    assert_eq!(r.hit_distortion, ffxi_proto::melee::HitDistortion::Heavy);
+    assert_eq!(r.knockback, ffxi_proto::melee::KnockbackLevel::Level2);
+}
+
+// C2 - the outcome fields are independent inputs on the wire: recordDamage derives hitDistortion
+// from damage HPP alone and CBattleEntity::OnAttack sets the crit bit from outcome.isCritical
+// alone (vendor/server/src/map/action/action.cpp action_result_t::recordDamage, vendor/server/
+// src/map/entities/battleentity.cpp). A heavy recoil without the crit bit must decode with no
+// CriticalHit in first_outcome's info bits...
+#[test]
+fn battle2_heavy_distortion_without_crit_bit_decodes_independently() {
+    let mut w = BattleBitWriter::new(8);
+    w.write(0xCAFEu64, 32);
+    w.write(1, 6);
+    w.write(1, 4);
+    w.write(ffxi_proto::melee::CATEGORY_BASIC_ATTACK as u64, 4);
+    w.write(0, 32);
+    w.write(0, 32);
+    w.write(0xBEEFu64, 32);
+    w.write(1, 4);
+    w.write(0, 3); // resolution: Hit
+    w.write(0, 2); // kind
+    w.write(0, 12); // animation: RightAttack
+    w.write(0, 5); // info: no bits
+    w.write(3, 2); // hitDistortion: Heavy
+    w.write(0, 3); // knockback: none
+    w.write(0, 17); // param
+    w.write(0, 10); // messageID
+    w.write(0, 31); // modifier
+    w.write(0, 1); // no proc block
+    w.write(0, 1); // no reaction block
+
+    let h = decode_battle2_header(&w.into_bytes()).unwrap();
+    let o = h.first_outcome.expect("the outcome block decodes");
+    assert!(!o.info.is_critical_hit(), "no crit bit");
+    assert_eq!(
+        o.hit_distortion,
+        ffxi_proto::melee::HitDistortion::Heavy,
+        "Heavy recoil stands on its own"
+    );
+    let r = h.first_result.expect("a basic-attack result decodes");
+    assert_eq!(
+        (r.info, r.hit_distortion),
+        (
+            ffxi_proto::melee::ActionInfo::NONE,
+            ffxi_proto::melee::HitDistortion::Heavy
+        )
+    );
+}
+
+// ...and a crit with light distortion must keep both: the bit rides info(5), the level rides
+// hitDistortion(2).
+#[test]
+fn battle2_crit_bit_with_light_distortion_decodes_independently() {
+    let mut w = BattleBitWriter::new(8);
+    w.write(0xCAFEu64, 32);
+    w.write(1, 6);
+    w.write(1, 4);
+    w.write(ffxi_proto::melee::CATEGORY_BASIC_ATTACK as u64, 4);
+    w.write(0, 32);
+    w.write(0, 32);
+    w.write(0xBEEFu64, 32);
+    w.write(1, 4);
+    w.write(0, 3); // resolution: Hit
+    w.write(0, 2); // kind
+    w.write(0, 12); // animation: RightAttack
+    w.write(ffxi_proto::melee::INFO_CRITICAL_HIT as u64, 5); // info: CriticalHit only
+    w.write(1, 2); // hitDistortion: Light
+    w.write(0, 3); // knockback: none
+    w.write(0, 17); // param
+    w.write(0, 10); // messageID
+    w.write(0, 31); // modifier
+    w.write(0, 1); // no proc block
+    w.write(0, 1); // no reaction block
+
+    let h = decode_battle2_header(&w.into_bytes()).unwrap();
+    let o = h.first_outcome.expect("the outcome block decodes");
+    assert!(o.info.is_critical_hit(), "crit bit present");
+    assert_eq!(
+        o.hit_distortion,
+        ffxi_proto::melee::HitDistortion::Light,
+        "Light recoil despite the crit bit"
+    );
+    let r = h.first_result.expect("a basic-attack result decodes");
+    assert_eq!(
+        (r.info, r.hit_distortion),
+        (
+            ffxi_proto::melee::ActionInfo::CRITICAL_HIT,
+            ffxi_proto::melee::HitDistortion::Light
+        )
+    );
+}
+
 // A non-basic-attack category whose result block happens to carry low resolution/animation
 // bits (e.g. a spell's animation id 1) must not decode as a melee swing — the gate is the
 // category, not the bit ranges.
 #[test]
 fn battle2_non_basic_category_reports_no_melee_result() {
-    let (resolution, animation) = BATTLE2_PARRIED_LEFT_ATTACK.to_wire();
+    let (resolution, animation, _info, _hit_distortion, _knockback) =
+        BATTLE2_PARRIED_LEFT_ATTACK.to_wire();
     let mut w = BattleBitWriter::new(8);
     w.write(0xCAFEu64, 32);
     w.write(1, 6);
@@ -1952,6 +2624,16 @@ fn battle2_non_basic_category_reports_no_melee_result() {
     assert_eq!(h.action_kind, 4);
     assert_eq!(h.primary_target_id, Some(0xBEEF));
     assert_eq!(h.first_result, None);
+    // The outcome is read for every category even though the swing pair is gated off.
+    assert_eq!(
+        h.first_outcome,
+        Some(ffxi_proto::melee::ResultOutcome {
+            resolution: ffxi_proto::melee::ActionResolution::Parry,
+            info: ffxi_proto::melee::ActionInfo::NONE,
+            hit_distortion: ffxi_proto::melee::HitDistortion::None,
+            knockback: ffxi_proto::melee::KnockbackLevel::None,
+        }),
+    );
 }
 
 // The same 12 bits, uninterpreted, key the caster's effect DAT for every non-attack
@@ -2431,7 +3113,7 @@ fn check_impossible_to_gauge_uses_mob_placeholder() {
 }
 
 // 0x009 body: UniqueNo u32 @0, ActIndex u16 @4, MesNo u16 @6, Attr u8 @8
-// (vendor/server/src/map/packets/s2c/0x009_message.h:37-41).
+// (vendor/server/src/map/packets/s2c/0x009_message.h GP_SERV_COMMAND_MESSAGE UniqueNo).
 fn std_message_body(unique_no: u32, mes_no: u16) -> Vec<u8> {
     let mut data = vec![0u8; 12];
     data[0..4].copy_from_slice(&unique_no.to_le_bytes());
@@ -2547,8 +3229,16 @@ fn buffcancel_packet_layout_matches_server_struct() {
     let buf = build_subpacket_buffcancel(0x1234, 40);
     assert_eq!(buf.len(), 8);
     let hdr = u16::from_le_bytes([buf[0], buf[1]]);
-    assert_eq!(hdr & 0x01FF, 0x0F1, "opcode");
-    assert_eq!((hdr >> 9) & 0x7F, 2, "size in words");
+    assert_eq!(
+        hdr & framing::SUBPACKET_OPCODE_MASK,
+        codec::BUFFCANCEL,
+        "opcode"
+    );
+    assert_eq!(
+        (hdr >> framing::SUBPACKET_SIZE_WORDS_SHIFT) & framing::SUBPACKET_SIZE_WORDS_MASK,
+        2,
+        "size in words"
+    );
     assert_eq!(
         u16::from_le_bytes(buf[4..6].try_into().unwrap()),
         40,
@@ -2562,8 +3252,14 @@ fn shop_buy_packet_layout_matches_server_struct() {
     let buf = build_subpacket_shop_buy(0xABCD, 5, 12, 3);
     assert_eq!(buf.len(), 16);
     let hdr = u16::from_le_bytes([buf[0], buf[1]]);
-    assert_eq!(hdr & 0x01FF, 0x083);
-    assert_eq!((hdr >> 9) & 0x7F, 4);
+    assert_eq!(
+        hdr & framing::SUBPACKET_OPCODE_MASK,
+        ffxi_proto::map::c2s::SHOP_BUY
+    );
+    assert_eq!(
+        (hdr >> framing::SUBPACKET_SIZE_WORDS_SHIFT) & framing::SUBPACKET_SIZE_WORDS_MASK,
+        4
+    );
     assert_eq!(u32::from_le_bytes(buf[4..8].try_into().unwrap()), 5, "qty");
     assert_eq!(
         u16::from_le_bytes(buf[8..10].try_into().unwrap()),
@@ -2584,8 +3280,16 @@ fn shop_sell_req_packet_layout_matches_server_struct() {
     let buf = build_subpacket_shop_sell_req(0xABCD, 7, 4096, 11);
     assert_eq!(buf.len(), 12, "header (4) + body (8)");
     let hdr = u16::from_le_bytes([buf[0], buf[1]]);
-    assert_eq!(hdr & 0x01FF, 0x084, "opcode in low 9 bits");
-    assert_eq!((hdr >> 9) & 0x7F, 3, "size_words=3");
+    assert_eq!(
+        hdr & framing::SUBPACKET_OPCODE_MASK,
+        ffxi_proto::map::c2s::SHOP_SELL_REQ,
+        "opcode in low 9 bits"
+    );
+    assert_eq!(
+        (hdr >> framing::SUBPACKET_SIZE_WORDS_SHIFT) & framing::SUBPACKET_SIZE_WORDS_MASK,
+        3,
+        "size_words=3"
+    );
     assert_eq!(
         u16::from_le_bytes([buf[2], buf[3]]),
         0xABCD,
@@ -2610,8 +3314,16 @@ fn shop_sell_set_packet_layout_matches_server_struct() {
     let buf = build_subpacket_shop_sell_set(0xBEEF);
     assert_eq!(buf.len(), 8, "header (4) + body (4)");
     let hdr = u16::from_le_bytes([buf[0], buf[1]]);
-    assert_eq!(hdr & 0x01FF, 0x085, "opcode in low 9 bits");
-    assert_eq!((hdr >> 9) & 0x7F, 2, "size_words=2");
+    assert_eq!(
+        hdr & framing::SUBPACKET_OPCODE_MASK,
+        ffxi_proto::map::c2s::SHOP_SELL_SET,
+        "opcode in low 9 bits"
+    );
+    assert_eq!(
+        (hdr >> framing::SUBPACKET_SIZE_WORDS_SHIFT) & framing::SUBPACKET_SIZE_WORDS_MASK,
+        2,
+        "size_words=2"
+    );
     assert_eq!(
         u16::from_le_bytes([buf[2], buf[3]]),
         0xBEEF,
@@ -2652,8 +3364,16 @@ fn camp_packet_layout_matches_server_struct() {
         let buf = build_subpacket_camp(0xBEEF, mode);
         assert_eq!(buf.len(), 8, "header (4) + body (4)");
         let hdr_word = u16::from_le_bytes([buf[0], buf[1]]);
-        assert_eq!(hdr_word & 0x01FF, 0x0E8, "opcode in low 9 bits");
-        assert_eq!((hdr_word >> 9) & 0x7F, 2, "size_words=2");
+        assert_eq!(
+            hdr_word & framing::SUBPACKET_OPCODE_MASK,
+            codec::CAMP,
+            "opcode in low 9 bits"
+        );
+        assert_eq!(
+            (hdr_word >> framing::SUBPACKET_SIZE_WORDS_SHIFT) & framing::SUBPACKET_SIZE_WORDS_MASK,
+            2,
+            "size_words=2"
+        );
         assert_eq!(
             u16::from_le_bytes([buf[2], buf[3]]),
             0xBEEF,
@@ -2672,8 +3392,16 @@ fn gameok_packet_layout_matches_server_struct() {
     let buf = build_subpacket_gameok(0xBEEF);
     assert_eq!(buf.len(), 12, "header (4) + body (8)");
     let hdr_word = u16::from_le_bytes([buf[0], buf[1]]);
-    assert_eq!(hdr_word & 0x01FF, 0x00C, "opcode in low 9 bits");
-    assert_eq!((hdr_word >> 9) & 0x7F, 3, "size_words=3");
+    assert_eq!(
+        hdr_word & framing::SUBPACKET_OPCODE_MASK,
+        ffxi_proto::map::c2s::GAMEOK,
+        "opcode in low 9 bits"
+    );
+    assert_eq!(
+        (hdr_word >> framing::SUBPACKET_SIZE_WORDS_SHIFT) & framing::SUBPACKET_SIZE_WORDS_MASK,
+        3,
+        "size_words=3"
+    );
     assert_eq!(
         u16::from_le_bytes([buf[2], buf[3]]),
         0xBEEF,
@@ -2697,8 +3425,16 @@ fn equip_inspect_packet_layout_matches_server_struct() {
     assert_eq!(buf.len(), 16, "header (4) + body (12)");
 
     let hdr_word = u16::from_le_bytes([buf[0], buf[1]]);
-    assert_eq!(hdr_word & 0x01FF, 0x0DD, "opcode in low 9 bits");
-    assert_eq!((hdr_word >> 9) & 0x7F, 4, "size_words=4");
+    assert_eq!(
+        hdr_word & framing::SUBPACKET_OPCODE_MASK,
+        codec::EQUIP_INSPECT,
+        "opcode in low 9 bits"
+    );
+    assert_eq!(
+        (hdr_word >> framing::SUBPACKET_SIZE_WORDS_SHIFT) & framing::SUBPACKET_SIZE_WORDS_MASK,
+        4,
+        "size_words=4"
+    );
     assert_eq!(
         u32::from_le_bytes(buf[4..8].try_into().unwrap()),
         0x1234_5678,
@@ -2715,12 +3451,20 @@ fn equip_inspect_packet_layout_matches_server_struct() {
 
 #[test]
 fn bazaar_packet_layouts_match_server_structs() {
-    // GP_CLI_COMMAND_BAZAAR_LIST (c2s/0x105_bazaar_list.h:27-31).
+    // GP_CLI_COMMAND_BAZAAR_LIST (c2s/0x105_bazaar_list.h).
     let list = build_subpacket_bazaar_list(0xABCD, 0x1234_5678, 42);
     assert_eq!(list.len(), 12, "header (4) + body (8)");
     let hdr = u16::from_le_bytes([list[0], list[1]]);
-    assert_eq!(hdr & 0x01FF, 0x105, "opcode = 0x105 BAZAAR_LIST");
-    assert_eq!((hdr >> 9) & 0x7F, 3, "size_words=3");
+    assert_eq!(
+        hdr & framing::SUBPACKET_OPCODE_MASK,
+        ffxi_proto::map::c2s::BAZAAR_LIST,
+        "opcode BAZAAR_LIST"
+    );
+    assert_eq!(
+        (hdr >> framing::SUBPACKET_SIZE_WORDS_SHIFT) & framing::SUBPACKET_SIZE_WORDS_MASK,
+        3,
+        "size_words=3"
+    );
     assert_eq!(u16::from_le_bytes([list[2], list[3]]), 0xABCD, "sync");
     assert_eq!(
         u32::from_le_bytes(list[4..8].try_into().unwrap()),
@@ -2730,11 +3474,15 @@ fn bazaar_packet_layouts_match_server_structs() {
     assert_eq!(u16::from_le_bytes([list[8], list[9]]), 42, "ActIndex LE");
     assert_eq!(&list[10..12], &[0u8; 2], "padding00");
 
-    // GP_CLI_COMMAND_BAZAAR_BUY (c2s/0x106_bazaar_buy.h:27-31).
+    // GP_CLI_COMMAND_BAZAAR_BUY (c2s/0x106_bazaar_buy.h).
     let buy = build_subpacket_bazaar_buy(0xBEEF, 7, 12);
     assert_eq!(buy.len(), 12, "header (4) + body (8)");
     let hdr = u16::from_le_bytes([buy[0], buy[1]]);
-    assert_eq!(hdr & 0x01FF, 0x106, "opcode = 0x106 BAZAAR_BUY");
+    assert_eq!(
+        hdr & framing::SUBPACKET_OPCODE_MASK,
+        ffxi_proto::map::c2s::BAZAAR_BUY,
+        "opcode BAZAAR_BUY"
+    );
     assert_eq!(buy[4], 7, "BazaarItemIndex");
     assert_eq!(&buy[5..8], &[0u8; 3], "padding00");
     assert_eq!(
@@ -2747,8 +3495,16 @@ fn bazaar_packet_layouts_match_server_structs() {
     let exit = build_subpacket_bazaar_exit(0x0042);
     assert_eq!(exit.len(), 4, "header only");
     let hdr = u16::from_le_bytes([exit[0], exit[1]]);
-    assert_eq!(hdr & 0x01FF, 0x104, "opcode = 0x104 BAZAAR_EXIT");
-    assert_eq!((hdr >> 9) & 0x7F, 1, "size_words=1");
+    assert_eq!(
+        hdr & framing::SUBPACKET_OPCODE_MASK,
+        ffxi_proto::map::c2s::BAZAAR_EXIT,
+        "opcode BAZAAR_EXIT"
+    );
+    assert_eq!(
+        (hdr >> framing::SUBPACKET_SIZE_WORDS_SHIFT) & framing::SUBPACKET_SIZE_WORDS_MASK,
+        1,
+        "size_words=1"
+    );
     assert_eq!(u16::from_le_bytes([exit[2], exit[3]]), 0x0042, "sync");
 }
 
@@ -2759,7 +3515,11 @@ fn equip_set_packet_layout_matches_server_struct() {
     let buf = build_subpacket_equip_set(0xBEEF, 7, 10, 0);
     assert_eq!(buf.len(), 8, "header (4) + body (4)");
     let hdr_word = u16::from_le_bytes([buf[0], buf[1]]);
-    assert_eq!(hdr_word & 0x01FF, 0x050, "opcode = 0x050 EQUIP_SET");
+    assert_eq!(
+        hdr_word & framing::SUBPACKET_OPCODE_MASK,
+        ffxi_proto::map::c2s::EQUIP_SET,
+        "opcode EQUIP_SET"
+    );
     assert_eq!(u16::from_le_bytes([buf[2], buf[3]]), 0xBEEF, "sync");
     assert_eq!(buf[4], 7, "PropertyItemIndex = container_index (slotID)");
     assert_eq!(buf[5], 10, "EquipKind = equip_slot (Waist)");
@@ -2773,8 +3533,16 @@ fn item_stack_packet_layout_matches_server_struct() {
     let buf = build_subpacket_item_stack(0xCAFE, 0);
     assert_eq!(buf.len(), 8, "header (4) + Category u32 (4)");
     let hdr_word = u16::from_le_bytes([buf[0], buf[1]]);
-    assert_eq!(hdr_word & 0x01FF, 0x03A, "opcode = 0x03A ITEM_STACK");
-    assert_eq!((hdr_word >> 9) & 0x7F, 2, "size_words = 2 (8 bytes)");
+    assert_eq!(
+        hdr_word & framing::SUBPACKET_OPCODE_MASK,
+        ffxi_proto::map::c2s::ITEM_STACK,
+        "opcode ITEM_STACK"
+    );
+    assert_eq!(
+        (hdr_word >> framing::SUBPACKET_SIZE_WORDS_SHIFT) & framing::SUBPACKET_SIZE_WORDS_MASK,
+        2,
+        "size_words = 2 (8 bytes)"
+    );
     assert_eq!(u16::from_le_bytes([buf[2], buf[3]]), 0xCAFE, "sync");
     assert_eq!(
         u32::from_le_bytes(buf[4..8].try_into().unwrap()),
@@ -2793,8 +3561,16 @@ fn item_move_packet_layout_matches_server_struct() {
     let buf = build_subpacket_item_move(0xBEEF, 12, 0, 1, 7, None);
     assert_eq!(buf.len(), 12, "header (4) + ItemNum (4) + 4 bytes");
     let hdr_word = u16::from_le_bytes([buf[0], buf[1]]);
-    assert_eq!(hdr_word & 0x01FF, 0x029, "opcode = 0x029 ITEM_MOVE");
-    assert_eq!((hdr_word >> 9) & 0x7F, 3, "size_words = 3 (12 bytes)");
+    assert_eq!(
+        hdr_word & framing::SUBPACKET_OPCODE_MASK,
+        ffxi_proto::map::c2s::ITEM_MOVE,
+        "opcode ITEM_MOVE"
+    );
+    assert_eq!(
+        (hdr_word >> framing::SUBPACKET_SIZE_WORDS_SHIFT) & framing::SUBPACKET_SIZE_WORDS_MASK,
+        3,
+        "size_words = 3 (12 bytes)"
+    );
     assert_eq!(u16::from_le_bytes([buf[2], buf[3]]), 0xBEEF, "sync");
     assert_eq!(
         u32::from_le_bytes(buf[4..8].try_into().unwrap()),
@@ -2825,8 +3601,16 @@ fn pbx_packet_layout_matches_lsb_validator() {
         let buf = build_subpacket_pbx(0xBEEF, op);
         assert_eq!(buf.len(), 32, "GP_CLI_COMMAND_PBX is 32 bytes");
         let hdr = u16::from_le_bytes(buf[0..2].try_into().unwrap());
-        assert_eq!(hdr & 0x01FF, 0x04D, "opcode = 0x04D PBX");
-        assert_eq!((hdr >> 9) & 0x7F, 8, "size_words = 8");
+        assert_eq!(
+            hdr & framing::SUBPACKET_OPCODE_MASK,
+            ffxi_proto::map::c2s::PBX,
+            "opcode PBX"
+        );
+        assert_eq!(
+            (hdr >> framing::SUBPACKET_SIZE_WORDS_SHIFT) & framing::SUBPACKET_SIZE_WORDS_MASK,
+            8,
+            "size_words = 8"
+        );
         assert_eq!(&buf[12..16], &[0, 0, 0, 0], "Result/ResParam1-3 zero");
         (
             buf[4],
@@ -2966,7 +3750,7 @@ fn item_stack_interval_clears_server_window() {
 #[test]
 fn equip_set_unequip_uses_zero_slot_index() {
     // LSB unequips a slot when PropertyItemIndex (slotID) is 0, regardless of
-    // container: vendor/server/src/map/utils/charutils.cpp:3147
+    // container: vendor/server/src/map/utils/charutils.cpp EquipItem
     // ("slotID of zero = unequip"). The re-select-to-unequip path encodes this.
     let buf = build_subpacket_equip_set(0, 0, 10, 0);
     assert_eq!(buf[4], 0, "slotID 0 = unequip");
@@ -3140,4 +3924,247 @@ fn system_message_executing_logout_full_line() {
         line.text
     );
     assert!(matches!(line.channel, ChatChannel::System));
+}
+
+#[test]
+pub(super) fn bootstrap_acceptance_contract() {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            for scenario in [
+                BootstrapReply::Silent,
+                BootstrapReply::MalformedLogin,
+                BootstrapReply::OtherLoginWithSelfPosition,
+                BootstrapReply::SelfPositionOnly,
+                BootstrapReply::SelfLogin,
+                BootstrapReply::DelayedSelfLogin,
+            ] {
+                bootstrap_scenario(scenario).await;
+            }
+        });
+}
+
+#[derive(Debug, Clone, Copy)]
+enum BootstrapReply {
+    Silent,
+    MalformedLogin,
+    OtherLoginWithSelfPosition,
+    SelfPositionOnly,
+    SelfLogin,
+    DelayedSelfLogin,
+}
+
+async fn bootstrap_scenario(scenario: BootstrapReply) {
+    use ffxi_proto::map::s2c;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+    use std::time::Duration;
+
+    const PLAYER: u32 = 17_455_719;
+    const SEED: [u8; 20] = [0; 20];
+    const LOGIN_BODY_LEN: usize = 48;
+    const SEND_FLAGS: usize = 6;
+    const POSITION_X: usize = 8;
+    const POSITION_HEIGHT: usize = 12;
+    const POSITION_NORTH: usize = 16;
+    const POSITION: [f32; 3] = [2.15, -2.1, 3.25];
+    const EXPECTED_BOOTSTRAPS: usize = 2;
+    const CASE_TIMEOUT: Duration = Duration::from_secs(20);
+    const DELAYED_LOGIN: Duration = Duration::from_millis(900);
+
+    fn packet(opcode: u16, body: &[u8]) -> Vec<u8> {
+        let words = framing::subpacket_size_words(body.len() + framing::SUBPACKET_HEADER_SIZE);
+        let mut out = build_subpacket_header(opcode, words, 1).to_vec();
+        out.extend(body);
+        out
+    }
+    let accepted = matches!(
+        scenario,
+        BootstrapReply::SelfLogin | BootstrapReply::DelayedSelfLogin
+    );
+    let mut self_body = vec![0; LOGIN_BODY_LEN];
+    self_body[..4].copy_from_slice(&PLAYER.to_le_bytes());
+    self_body[SEND_FLAGS] = 1;
+    for (offset, value) in [POSITION_X, POSITION_HEIGHT, POSITION_NORTH]
+        .into_iter()
+        .zip(POSITION)
+    {
+        self_body[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+    }
+    let login = packet(s2c::LOGIN, &self_body);
+    let self_position = packet(s2c::CHAR_PC, &self_body);
+    let initial = match scenario {
+        BootstrapReply::Silent => None,
+        BootstrapReply::MalformedLogin => Some(packet(s2c::LOGIN, &[0; 4])),
+        BootstrapReply::OtherLoginWithSelfPosition => {
+            let mut wrong = self_body.clone();
+            wrong[..4].copy_from_slice(&(PLAYER + 1).to_le_bytes());
+            let mut payload = packet(s2c::LOGIN, &wrong);
+            payload.extend(&self_position);
+            Some(payload)
+        }
+        BootstrapReply::SelfPositionOnly | BootstrapReply::DelayedSelfLogin => Some(self_position),
+        BootstrapReply::SelfLogin => Some(login.clone()),
+    };
+    let server = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let address = server.local_addr().unwrap();
+    let outgoing = Arc::new(AtomicUsize::new(0));
+    let observed = outgoing.clone();
+    let fake = tokio::spawn(async move {
+        let mut bytes = vec![0; ffxi_proto::map::MAX_DATAGRAM];
+        let mut peer = None;
+        loop {
+            let (size, client) = server.recv_from(&mut bytes).await.unwrap();
+            let count = observed.fetch_add(1, Ordering::SeqCst) + 1;
+            if count <= EXPECTED_BOOTSTRAPS {
+                assert_eq!(size, map_client::BOOTSTRAP_DATAGRAM_SIZE);
+                let payload = &bytes[framing::FFXI_HEADER_SIZE
+                    ..framing::FFXI_HEADER_SIZE + map_client::GP_CLI_LOGIN_SIZE];
+                let sent = framing::walk_sub_packets(payload).next().unwrap().unwrap();
+                assert_eq!(sent.opcode, ffxi_proto::map::c2s::LOGIN);
+            }
+            if count == 1 {
+                // Ephemeral local port: tests must not inherit FFXI_MAP_LOCAL_PORT (the
+                // Docker/WSL2 DNAT pin), or parallel scenarios collide on the pinned port.
+                peer = Some(
+                    MapClient::connect_with_local(client, SEED, "0.0.0.0:0")
+                        .await
+                        .unwrap(),
+                );
+                if let Some(ref payload) = initial {
+                    peer.as_ref()
+                        .unwrap()
+                        .send_encrypted(payload, 1, 0)
+                        .await
+                        .unwrap();
+                }
+                if matches!(scenario, BootstrapReply::DelayedSelfLogin) {
+                    tokio::time::sleep(DELAYED_LOGIN).await;
+                    peer.as_ref()
+                        .unwrap()
+                        .send_encrypted(&login, 2, 0)
+                        .await
+                        .unwrap();
+                }
+            } else if !matches!(scenario, BootstrapReply::Silent) {
+                if accepted {
+                    peer.as_ref()
+                        .unwrap()
+                        .send_encrypted(&[], count as u16 + 1, 0)
+                        .await
+                        .unwrap();
+                } else {
+                    server.send_to(&[0], client).await.unwrap();
+                }
+            }
+        }
+    });
+    // Ephemeral local port: tests must not inherit FFXI_MAP_LOCAL_PORT (the Docker/WSL2 DNAT
+    // pin), or parallel scenarios collide on the pinned port.
+    let mut map = MapClient::connect_with_local(address, SEED, "0.0.0.0:0")
+        .await
+        .unwrap();
+    let cfg = Config {
+        server: "127.0.0.1".into(),
+        map_host_override: None,
+        auth_port: 0,
+        data_port: 0,
+        view_port: 0,
+        user: "bootstrap-fixture".into(),
+        password: String::new(),
+        char_selection: CharSelection::Id(PLAYER),
+        initial_state: None,
+        user_driven_events: true,
+        dat_root: None,
+    };
+    let auth = crate::auth_client::AuthSession {
+        account_id: 1,
+        session_hash: [0; 16],
+    };
+    let bootstrap = BootstrapArgs {
+        char_id: PLAYER,
+        char_name: "Bootstrap",
+        account_name: "bootstrap-fixture",
+        ticket: [0; 16],
+        version: 0,
+        platform: *b"WIN\0",
+        cli_lang: 0,
+    };
+    let (commands, mut command_rx) = mpsc::channel(1);
+    commands.send(AgentCommand::Disconnect).await.unwrap();
+    let (events, mut event_rx) = broadcast::channel(256);
+    let outcome = tokio::time::timeout(
+        CASE_TIMEOUT,
+        run_map_session(
+            &cfg,
+            &auth,
+            &bootstrap,
+            &mut map,
+            None,
+            1,
+            None,
+            &mut command_rx,
+            &events,
+            None,
+        ),
+    )
+    .await
+    .expect("bootstrap must complete within its bounded deadline");
+    tokio::task::yield_now().await;
+    fake.abort();
+    assert!(
+        fake.await.unwrap_err().is_cancelled(),
+        "fake map server panicked"
+    );
+    assert_eq!(outcome.is_ok(), accepted, "{scenario:?}: {outcome:?}");
+    let mut saw_in_zone = false;
+    let mut saw_accepted = false;
+    let mut saw_seed = false;
+    while let Ok(event) = event_rx.try_recv() {
+        match event {
+            AgentEvent::StageChanged {
+                stage: Stage::InZone,
+            } => saw_in_zone = true,
+            AgentEvent::Diagnostics { diagnostics } => {
+                saw_accepted |= diagnostics.blowfish_status == Some(BlowfishStatus::Accepted);
+            }
+            AgentEvent::EntityUpserted {
+                entity,
+                pos_present: true,
+            } if entity.id == PLAYER => {
+                saw_seed |= entity.pos
+                    == Vec3 {
+                        x: POSITION[0],
+                        y: POSITION[2],
+                        z: POSITION[1],
+                    };
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(saw_in_zone, accepted, "{scenario:?}");
+    assert_eq!(saw_accepted, accepted, "{scenario:?}");
+    if matches!(
+        scenario,
+        BootstrapReply::OtherLoginWithSelfPosition | BootstrapReply::SelfPositionOnly
+    ) {
+        assert!(
+            saw_seed,
+            "{scenario:?}: CHAR_PC fixture must seed a position without granting acceptance"
+        );
+    }
+    if accepted {
+        assert!(saw_seed, "{scenario:?}: missing authoritative position");
+        assert!(outgoing.load(Ordering::SeqCst) > EXPECTED_BOOTSTRAPS);
+    } else {
+        assert_eq!(
+            outgoing.load(Ordering::SeqCst),
+            EXPECTED_BOOTSTRAPS,
+            "{scenario:?}: no post-bootstrap packet may precede self LOGIN"
+        );
+    }
 }

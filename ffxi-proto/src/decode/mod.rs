@@ -1,5 +1,8 @@
 pub mod animation;
 
+mod death_menu;
+pub use death_menu::*;
+
 mod widescan;
 pub use widescan::*;
 
@@ -39,6 +42,8 @@ mod treasure;
 pub use treasure::*;
 mod auction;
 pub use auction::*;
+mod assist;
+pub use assist::*;
 
 #[derive(Debug, thiserror::Error)]
 pub enum DecodeError {

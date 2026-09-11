@@ -1,7 +1,8 @@
-use bevy::camera::Hdr;
+use bevy::camera::{Camera3dDepthTextureUsage, Hdr};
 use bevy::light::{ShadowFilteringMethod, VolumetricFog};
 use bevy::post_process::bloom::Bloom;
 use bevy::prelude::*;
+use bevy::render::render_resource::TextureUsages;
 
 #[cfg(not(target_arch = "wasm32"))]
 use bevy::anti_alias::taa::TemporalAntiAliasing;
@@ -10,14 +11,47 @@ use crate::components::IsSelf;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::graphics_settings::AaMode;
 use crate::graphics_settings::GraphicsSettings;
-use crate::scene::BakedActor;
-use crate::snapshot::SceneState;
+use crate::scene::{BakedActor, NameplateLocator};
+
+/// Kept for the camera systems and the client's collision clamp, which all
+/// subtract `offset` from the anchor Y. Step smoothing now happens at the
+/// source (the rendered self Transform Y is low-pass filtered in
+/// `apply_self_prediction_system`), so this offset stays 0 — the field exists
+/// so every camera-path anchor stays wired through one place if a camera-side
+/// offset is ever needed again.
+#[derive(Resource, Default)]
+pub struct CameraStepSmoothing {
+    pub offset: f32,
+}
+
+/// Rate-limited follow of the player position, used as the chase-camera anchor
+/// instead of the raw player Transform. When the player starts moving the
+/// anchor lags briefly (hesitates); each tick it moves toward the player at a
+/// speed proportional to the gap (up to a cap). When the player stops, the
+/// gap shrinks and the speed goes to zero — the anchor coasts in and stops
+/// exactly on the player. No overshoot, no oscillation.
+///
+/// Not a spring: a spring's restoring force keeps momentum after target is
+/// reached and produces bounce. Here velocity is DERIVED from the current
+/// gap every tick, so hitting the target is a fixed point.
+#[derive(Resource, Default)]
+pub struct AnchorFollow {
+    /// The smoothed anchor position (world space). None until first sample,
+    /// then set to the player's position and updated each tick.
+    pub pos: Option<Vec3>,
+}
+
+pub fn reset_camera_follow(
+    mut follow: ResMut<AnchorFollow>,
+    mut step: ResMut<CameraStepSmoothing>,
+) {
+    *follow = AnchorFollow::default();
+    *step = CameraStepSmoothing::default();
+}
 
 const THIRD_PERSON_ANCHOR_FRAC: f32 = 0.55;
 
 const FIRST_PERSON_EYE_FRAC: f32 = 0.92;
-
-const NAMEPLATE_OFFSET_ABOVE_CROWN: f32 = 0.1;
 
 const FALLBACK_ACTOR_HEIGHT: f32 = 2.3;
 
@@ -37,23 +71,21 @@ pub fn first_person_eye_y(baked: Option<&BakedActor>) -> f32 {
         * FIRST_PERSON_EYE_FRAC
 }
 
-/// How much higher a mounted actor's overhead furniture rides. Retail anchors a
-/// name on the AboveHead locator, which PC skeletons hang off the root joint —
-/// so it does not follow a body the seat pose has lifted, and retail makes up
-/// the difference with this while the actor is on a chocobo (research/XIClient
-/// .../World/Actor/SkeletalMeshActor.cpp, `SkeletalMeshActor::GetElem` and
-/// `VirtActor148`). The anchor below is root-relative in exactly the same way,
-/// off a baked mesh height rather than that locator, so retail's rise carries
-/// over even though the baseline sits a little lower.
+// research/XIClient/src/XIClient/source/World/Actor/SkeletalMeshActor.cpp::GetElem,
+// root-bone chocobo branch. Other mount/chair policies remain separate parity work.
 const MOUNTED_ANCHOR_RISE: f32 = 1.3;
 
-#[inline]
-pub fn nameplate_anchor_y(baked: Option<&BakedActor>, mounted: bool) -> f32 {
-    baked
-        .map(|b| b.actor_height)
-        .unwrap_or(FALLBACK_ACTOR_HEIGHT)
-        + NAMEPLATE_OFFSET_ABOVE_CROWN
-        + if mounted { MOUNTED_ANCHOR_RISE } else { 0.0 }
+pub fn nameplate_anchor(
+    model: &Transform,
+    locator: Option<&NameplateLocator>,
+    mounted: bool,
+) -> Option<Vec3> {
+    let locator = locator?;
+    let mut offset = locator.offset?;
+    if mounted && locator.root_attached {
+        offset.y += MOUNTED_ANCHOR_RISE * locator.model_scale;
+    }
+    Some(model.translation + offset * model.scale)
 }
 
 #[derive(Component)]
@@ -103,7 +135,7 @@ impl ChaseCamera {
 
     /// Retail has no pitch clamp, because retail has no pitch: tilting adds to
     /// the eye's world Y (`CurrentEyePosition.y += offset`,
-    /// research/XIClient/.../World/Camera/CameraManager.cpp:527-529) and leaves
+    /// research/XIClient/src/XIClient/source/World/Camera/CameraManager.cpp CameraManager::UpdatePlayerFollowingCamera) and leaves
     /// the horizontal offset alone. What bounds the tilt is
     /// [`Self::MIN_XZ_STANDOFF`] against [`Self::DIST_MAX`], and for a polar eye
     /// that is `acos(3/6)` — exactly 60°, against the 80° an uncited 1.40 used
@@ -120,7 +152,7 @@ impl ChaseCamera {
 
     pub const FP_PITCH_MAX: f32 = std::f32::consts::FRAC_PI_2 - 0.05;
 
-    /// CameraManager.cpp:830-836 pushes an unobstructed eye back out whenever
+    /// CameraManager.cpp CameraManager::UpdatePlayerFollowingCamera pushes an unobstructed eye back out whenever
     /// the 3D eye→target distance drops below 3.
     pub const DIST_MIN: f32 = 3.0;
 
@@ -136,12 +168,12 @@ impl ChaseCamera {
     /// Three independent references put the nominal radius at 6, and none of
     /// them admits anything like a 20-yalm pull-back:
     ///
-    /// - research/XIClient/.../World/Camera/CameraManager.cpp:506 normalises the
+    /// - research/XIClient/src/XIClient/source/World/Camera/CameraManager.cpp CameraManager::UpdatePlayerFollowingCamera normalises the
     ///   orbit rate against it — `angle = 6.0f / eyeToTargetDistance * angle`.
     /// - Same file:822, the camera-follow easing changes regime above 6.
-    /// - research/xim/.../camera/PolarCamera.kt:24 `maximumRadius = 6f`.
+    /// - research/xim/src/jsMain/kotlin/xim/poc/camera/PolarCamera.kt PolarCamera `maximumRadius = 6f`.
     ///
-    /// The resting distance is nearer still: CameraManager.cpp:95 places the
+    /// The resting distance is nearer still: CameraManager.cpp CameraManager::CalculateDefaultCameraPosition v10 places the
     /// default eye at `{-3, 0, 0}` behind the actor, and :404 falls back to -4.
     ///
     /// This is load-bearing for camera collision, not just feel. Zone collision
@@ -154,7 +186,7 @@ impl ChaseCamera {
 
     /// Retail tilts by lifting the eye's Y, not by orbiting it, so its
     /// horizontal separation never shrinks as you look down — the eye→target
-    /// distance grows instead, and CameraManager.cpp:822 eases it back toward
+    /// distance grows instead, and CameraManager.cpp CameraManager::UpdatePlayerFollowingCamera eases it back toward
     /// [`Self::DIST_MAX`]. A polar eye reproduces that reachable envelope by
     /// growing its radius on demand rather than trading horizontal for
     /// vertical.
@@ -173,7 +205,7 @@ impl Default for ChaseCamera {
 
             pitch: 0.15,
             // Rests fully zoomed out, as XIM does (`previousRadius = radiusMax`,
-            // PolarCamera.kt:46). Was 18.0, which is now past DIST_MAX.
+            // PolarCamera.kt PolarCamera previousRadius). Was 18.0, which is now past DIST_MAX.
             distance: Self::DIST_MAX,
             smoothing: 0.18,
             synced_initial: false,
@@ -287,6 +319,16 @@ pub fn build_operator_camera(
     settings: &GraphicsSettings,
     restore_transform: Option<Transform>,
 ) {
+    // Depth texture is allocated per (target, msaa) with the OR of every view's usage on
+    // that target (bevy core_3d prepare_core_3d_depth_textures), and re-created when MSAA
+    // toggles — so this flag follows the current sample count for free.
+    let camera_3d = Camera3d {
+        depth_texture_usages: Camera3dDepthTextureUsage::from(
+            TextureUsages::RENDER_ATTACHMENT | TextureUsages::TEXTURE_BINDING,
+        ),
+        ..Default::default()
+    };
+
     let mut camera = commands.spawn((
         crate::components::InGameEntity,
         OperatorCamera,
@@ -295,7 +337,11 @@ pub fn build_operator_camera(
         // both native and off-screen scale.
         bevy::picking::mesh_picking::MeshPickingCamera,
         bevy::camera::visibility::RenderLayers::from_layers(&[0, WORLD_GIZMO_LAYER]),
-        Camera3d::default(),
+        // The nameplate final pass reads this view's depth buffer to occlude plates
+        // against walls. With MSAA on that read is a texture sample of the multi-sample
+        // depth buffer (nameplate_final_pass.rs), which requires TEXTURE_BINDING — Bevy
+        // only adds it for cameras carrying OcclusionCulling, so set it explicitly here.
+        camera_3d,
         Hdr,
         settings.tonemapping(),
         ShadowFilteringMethod::Gaussian,
@@ -333,12 +379,34 @@ pub fn build_operator_camera(
     if matches!(settings.anti_aliasing, AaMode::Taa) {
         camera.insert(TemporalAntiAliasing::default());
     }
+
+    // DLSS SR replaces both MSAA and TAA (settings.msaa() reports Off for
+    // AaMode::Dlss, and dlss_active() can't be true at the same time as
+    // wants_taa()). The component's #[require] pulls in TemporalJitter,
+    // MipBias, DepthPrepass, MotionVectorPrepass and Hdr automatically. Gated
+    // on dlss_active(), not the raw mode: with the runtime unsupported (or on
+    // a default build, where this block doesn't compile at all) the camera
+    // comes up plain and the menu shows DLSS (N/A).
+    #[cfg(all(not(target_arch = "wasm32"), feature = "dlss"))]
+    if settings.dlss_active() {
+        camera.insert(bevy::anti_alias::dlss::Dlss::<
+            bevy::anti_alias::dlss::DlssSuperResolutionFeature,
+        > {
+            perf_quality_mode: crate::graphics::dlss::to_bevy_quality(settings.dlss_quality),
+            ..Default::default()
+        });
+    }
 }
 
-pub fn chase_camera_system(
+// Native camera collision owns the transform; retain its shared scheduling anchor.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn chase_camera_system() {}
+
+#[cfg(any(target_arch = "wasm32", test))]
+pub fn snapshot_chase_camera_system(
     mode: Res<CameraMode>,
     mut chase: ResMut<ChaseCamera>,
-    state: Res<SceneState>,
+    state: Res<crate::snapshot::SceneState>,
     q_self: Query<(&Transform, Option<&BakedActor>), (With<IsSelf>, Without<OperatorCamera>)>,
     mut q_cam: Query<&mut Transform, (With<OperatorCamera>, Without<IsSelf>)>,
 ) {
@@ -376,9 +444,13 @@ pub fn chase_camera_system(
     cam_t.look_at(anchor, Vec3::Y);
 }
 
+#[cfg(target_arch = "wasm32")]
+pub use snapshot_chase_camera_system as chase_camera_system;
+
 pub fn firstperson_camera_system(
     mode: Res<CameraMode>,
     chase: Res<ChaseCamera>,
+    step: Res<CameraStepSmoothing>,
     q_self: Query<(&Transform, Option<&BakedActor>), (With<IsSelf>, Without<OperatorCamera>)>,
     mut q_cam: Query<&mut Transform, (With<OperatorCamera>, Without<IsSelf>)>,
 ) {
@@ -392,7 +464,7 @@ pub fn firstperson_camera_system(
         return;
     };
 
-    let eye = self_t.translation + Vec3::Y * first_person_eye_y(baked);
+    let eye = self_t.translation + Vec3::Y * (first_person_eye_y(baked) - step.offset);
     let cos_p = chase.pitch.cos();
     let look_dir = Vec3::new(
         -chase.yaw.sin() * cos_p,
@@ -449,6 +521,74 @@ pub fn heading_for_yaw(yaw: f32) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn locator_skeleton(bone: usize) -> ffxi_dat::skel::Skeleton {
+        use ffxi_dat::{
+            datid::DatId,
+            skel::{standard_position::ABOVE_HEAD, JointReference, Skeleton},
+        };
+        Skeleton {
+            id: DatId::from_str("test"),
+            joints: Vec::new(),
+            references: vec![
+                JointReference {
+                    index: bone,
+                    unk_v0: [0.0; 3],
+                    position_offset: [1.0, -3.5, 2.0]
+                };
+                ABOVE_HEAD + 1
+            ],
+            bounding_boxes: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn nameplate_anchor_converts_dat_axes_and_ignores_facing() {
+        let locator = NameplateLocator::from_skeleton(&locator_skeleton(0), 2.0);
+        let model = Transform {
+            translation: Vec3::new(10.0, 20.0, 30.0),
+            rotation: Quat::from_rotation_y(1.0),
+            scale: Vec3::new(2.0, 3.0, 4.0),
+        };
+        assert_eq!(
+            nameplate_anchor(&model, Some(&locator), false),
+            Some(Vec3::new(14.0, 41.0, 14.0))
+        );
+        let mounted = nameplate_anchor(&model, Some(&locator), true).unwrap();
+        assert!((mounted.y - 48.8).abs() < 1e-5);
+        let nonroot = NameplateLocator::from_skeleton(&locator_skeleton(1), 2.0);
+        assert_eq!(
+            nameplate_anchor(&model, Some(&nonroot), true),
+            nameplate_anchor(&model, Some(&nonroot), false)
+        );
+    }
+
+    #[test]
+    fn snapshot_viewer_camera_follows_player_movement() {
+        let mut app = App::new();
+        app.init_resource::<CameraMode>()
+            .init_resource::<crate::snapshot::SceneState>()
+            .insert_resource(ChaseCamera {
+                smoothing: 1.0,
+                ..default()
+            })
+            .add_systems(Update, snapshot_chase_camera_system);
+        let player = app.world_mut().spawn((IsSelf, Transform::default())).id();
+        let camera = app
+            .world_mut()
+            .spawn((OperatorCamera, Transform::default()))
+            .id();
+        app.update();
+        let first = app.world().get::<Transform>(camera).unwrap().translation;
+        let displacement = Vec3::new(1.0, 2.0, 3.0);
+        app.world_mut()
+            .get_mut::<Transform>(player)
+            .unwrap()
+            .translation = displacement;
+        app.update();
+        let second = app.world().get::<Transform>(camera).unwrap().translation;
+        assert!((second - first - displacement).length() < 1e-5);
+    }
 
     #[test]
     fn yaw_heading_roundtrip_cardinals() {
@@ -540,60 +680,9 @@ mod tests {
         );
     }
 
-    #[test]
-    fn snap_to_anchor_places_eye_behind_player_without_smoothing() {
-        let mut app = App::new();
-        app.add_plugins(MinimalPlugins)
-            .insert_resource(CameraMode::Chase)
-            .insert_resource(SceneState::default())
-            .insert_resource(ChaseCamera {
-                snap_to_anchor: true,
-                ..Default::default()
-            })
-            .add_systems(Update, chase_camera_system);
-        let player_pos = Vec3::new(10.0, 1.0, -4.0);
-        app.world_mut()
-            .spawn((IsSelf, Transform::from_translation(player_pos)));
-        let cam = app
-            .world_mut()
-            .spawn((OperatorCamera, Transform::from_xyz(999.0, 500.0, -999.0)))
-            .id();
-
-        app.update();
-
-        let chase = app.world().resource::<ChaseCamera>();
-        assert!(!chase.snap_to_anchor, "snap flag consumed by the update");
-        let expected_yaw = yaw_for_heading(
-            app.world()
-                .resource::<SceneState>()
-                .snapshot
-                .self_pos
-                .heading,
-        );
-        assert_eq!(
-            chase.yaw, expected_yaw,
-            "zone-in yaw follows player heading"
-        );
-
-        let anchor = player_pos + Vec3::Y * third_person_anchor_y(None);
-        let radius = chase.orbit_radius();
-        let yaw_dir = Vec3::new(expected_yaw.sin(), 0.0, expected_yaw.cos());
-        let expected_eye = anchor
-            + yaw_dir * (radius * chase.pitch.cos())
-            + Vec3::Y * (radius * chase.pitch.sin());
-        let cam_t = *app.world().get::<Transform>(cam).unwrap();
-        assert!(
-            (cam_t.translation - expected_eye).length() < 1e-4,
-            "eye {:?} snapped to {expected_eye:?} behind the player, no lerp from the old zone",
-            cam_t.translation
-        );
-        let look = *cam_t.forward();
-        let want = (anchor - expected_eye).normalize();
-        assert!(
-            (look - want).length() < 1e-4,
-            "camera faces along the player's heading: {look:?} != {want:?}"
-        );
-    }
+    // snap_to_anchor_places_eye_behind_player_without_smoothing migrated to
+    // kuluu::view_native::camera_collision after the WIP camera work retired this
+    // crate's chase authority (resolve_camera is now the single eye owner).
 
     #[test]
     fn operator_camera_renders_world_and_gizmo_layers() {

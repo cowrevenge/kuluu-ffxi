@@ -47,6 +47,8 @@ fn resolve(ty: u8, _lang: u8, cat: u8, idx: u8) -> String {
 
 const TABLE_TSV: &str = include_str!("../data/autotranslate.tsv");
 
+const LANGUAGE_AGNOSTIC_KEY_MASK: u32 = 0xFFFF_00FF;
+
 fn table() -> &'static HashMap<u32, &'static str> {
     static TABLE: OnceLock<HashMap<u32, &'static str>> = OnceLock::new();
     TABLE.get_or_init(|| {
@@ -61,7 +63,7 @@ fn table() -> &'static HashMap<u32, &'static str> {
                 continue;
             };
 
-            let stripped = key & 0xFFFF_00FF;
+            let stripped = key & LANGUAGE_AGNOSTIC_KEY_MASK;
             map.insert(stripped, text);
         }
         map

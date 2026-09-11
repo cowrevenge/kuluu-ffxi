@@ -2,7 +2,7 @@
 
 include!(concat!(env!("OUT_DIR"), "/weapon_skill_table.rs"));
 
-/// SKILLTYPE, vendor/server/src/map/entities/battleentity.h:144. Rods *and*
+/// SKILLTYPE, vendor/server/src/map/entities/battleentity.h SKILLTYPE SKILL_FISHING. Rods *and*
 /// bait carry it — LSB's fishing gate tests `getSkillType() != SKILL_FISHING`
 /// on both the ranged and ammo slots
 /// (vendor/server/src/map/utils/fishingutils.cpp StartFishing).

@@ -29,7 +29,7 @@ impl From<MzbError> for DatError {
     }
 }
 
-/// research/XIClient/src/XIClient/include/Resource/Derived/ZoneBlockFormat.h:20-67
+/// research/XIClient/src/XIClient/include/Resource/Derived/ZoneBlockFormat.h ZoneBlockHeader
 /// — `ZoneBlockHeader`, a packed 0x20-byte struct.
 const HDR_SIZE_AND_VERSION: usize = 0x00;
 const HDR_CHUNK_COUNT_AND_DECRYPT_INDEX: usize = 0x04;
@@ -46,20 +46,21 @@ const HDR_COLLISION_FLAGS: usize = 0x1D;
 pub const MZB_HEADER_LEN: usize = 0x20;
 
 /// Low 24 bits of the two packed header dwords; the top byte is the format
-/// version / decrypt-table index respectively (ZoneBlockFormat.h:48-66).
+/// version / decrypt-table index respectively (ZoneBlockFormat.h ZoneBlockHeader).
 const HDR_COUNT_MASK: u32 = 0x00FF_FFFF;
 
-/// research/XIClient/src/XIClient/source/Resource/Derived/ZoneBlockResource.cpp:12
+/// research/XIClient/src/XIClient/source/Resource/Derived/ZoneBlockResource.cpp ZoneBlockResource::Decrypt
 /// — `if (GetFormatVersion() < 27) return;`, i.e. only version 27 files carry
 /// the pass-1 XOR at all.
 const ENCRYPTED_MIN_VERSION: u8 = 27;
 
-/// ZoneBlockResource.cpp:25 — "the first 8 bytes are never encrypted", so the
+/// ZoneBlockResource.cpp ZoneBlockResource::Decrypt — "the first 8 bytes are never encrypted", so the
 /// pass-1 region is `[8, 8 + encryptedByteCount)`.
 const ENCRYPTED_REGION_START: usize = 8;
+const DECRYPT_INDEX_XOR: u8 = 0xFF;
 
 /// Pass 2 XORs the name of every placement record.
-/// research/cexi-docs/zone/format.md:101-103 — 0x64-byte records start at 0x20.
+/// research/cexi-docs/zone/format.md "ZoneDef placement (`0x1C`)" — 0x64-byte records start at 0x20.
 pub const PLACEMENT_RECORD_LEN: usize = 0x64;
 const PLACEMENT_NAME_LEN: usize = 16;
 const PLACEMENT_NAME_XOR: u8 = 0x55;
@@ -89,9 +90,9 @@ pub fn decrypt_in_place(data: &mut [u8]) -> Result<()> {
     let decrypt_index = data[HDR_CHUNK_COUNT_AND_DECRYPT_INDEX + 3];
 
     if version >= ENCRYPTED_MIN_VERSION {
-        let mut key: i32 = KEY_TABLE[(decrypt_index ^ 0xFF) as usize] as i32;
+        let mut key: i32 = KEY_TABLE[(decrypt_index ^ DECRYPT_INDEX_XOR) as usize] as i32;
         let mut key_count: i32 = 0;
-        // ZoneBlockResource.cpp:25-40 — `position` counts from 0 while the run
+        // ZoneBlockResource.cpp ZoneBlockResource::Decrypt — `position` counts from 0 while the run
         // it inverts starts at byte 8, so the encrypted region is
         // [8, 8 + encryptedByteCount) and both loop bound and skip test compare
         // against the count, not against the region's end offset.
@@ -140,18 +141,18 @@ pub fn decrypt(data: &[u8]) -> Result<Vec<u8>> {
 /// ship 40-unit blocks (10 sub-blocks); Port Jeuno ships 80 (20).
 pub const MZB_SUB_BLOCK_SIZE: u32 = 4;
 
-/// ZoneRenderer.cpp:553-563 — below this the 0x10 dword is `GroupListCount` and
+/// ZoneRenderer.cpp ZoneRenderer::OpenMzb — below this the 0x10 dword is `GroupListCount` and
 /// there is no quadtree; from 21 on it is `QuadTreeOffset`. Corroborated by the
 /// shipped data: every version 17/18/20 MZB has 0 there, every version 23+ one a
 /// live offset.
 const QUADTREE_MIN_VERSION: u8 = 21;
 
-/// ZoneRenderer.cpp:383 and :518-523 — the header's lighting section and the
+/// ZoneRenderer.cpp ZoneRenderer::OpenMzb — the header's lighting section and the
 /// per-placement `LightReferences` only exist from version 18 on; older files
 /// get zeroed references.
 const LIGHT_BINDING_MIN_VERSION: u8 = 18;
 
-/// CollisionManager.cpp:231-234 sets the collision-object record stride to 128
+/// CollisionManager.cpp CollisionManager::PrepareData sets the collision-object record stride to 128
 /// at version <= 0x19 and 192 above it. 192 is `sizeof(CollisionObjectData)`
 /// and 128 is its two leading `Matrix4`s, so everything past them — including
 /// the water-height word in `flags` — exists only above the split.
@@ -171,7 +172,7 @@ pub struct MzbHeader {
 
     /// Header 0x08. Zero is legal and means the zone ships no collision section
     /// at all — retail guards the whole collision path on it
-    /// (ZoneRenderer.cpp:574). The 15 moving-vehicle zones are all zero.
+    /// (ZoneRenderer.cpp ZoneRenderer::OpenMzb). The 15 moving-vehicle zones are all zero.
     pub collision_data_offset: u32,
 
     /// Header 0x10, a version-dependent union: see [`Self::quadtree_offset`] and
@@ -181,7 +182,7 @@ pub struct MzbHeader {
     pub group_list_offset: u32,
     pub lighting_offset: u32,
 
-    /// Header 0x1C. `ZoneType = SubstructureType + 1` (ZoneRenderer.cpp:373).
+    /// Header 0x1C. `ZoneType = SubstructureType + 1` (ZoneRenderer.cpp ZoneRenderer::OpenMzb).
     pub substructure_type: u8,
     pub collision_flags: u8,
 }
@@ -331,11 +332,14 @@ impl MzbTriangleInfo {
 /// `DoubleSidedSkipPolicy::SkipTriangle`.
 const TRI_CAMERA_TRANSPARENT: u16 = 0x4000;
 
-/// Second index word, same bit position. research/cexi-docs/zone/collision.md:204
+/// Second index word, same bit position. research/cexi-docs/zone/collision.md "Technical notes"
 /// claims player movement keys off it, but it measures 0 across Lower Jeuno,
 /// Port Jeuno, Southern San d'Oria and West Ronfaure — if it gated blocking,
 /// nothing in those zones would block. Parsed, unused, semantics unresolved.
 const TRI_SECOND_WORD_FLAG: u16 = 0x4000;
+
+const TRI_INDEX_MASK: u16 = 0x7FFF;
+const TRI_FLAGGED_INDEX_MASK: u16 = 0x3FFF;
 
 /// research/XIClient/src/XIClient/include/World/Zone/Terrain/CollisionQuery.hpp
 /// `DoubleSidedSkipPolicy::SkipTriangle`:
@@ -350,7 +354,7 @@ const TRI_SECOND_WORD_FLAG: u16 = 0x4000;
 ///
 /// Movement uses `BacksideCullingPolicy`, whose `SkipTriangle` is
 /// unconditionally false — grounding must never consult this.
-/// Corroborated: research/cexi-docs/zone/collision.md:201-209.
+/// Corroborated: research/cexi-docs/zone/collision.md "Technical notes".
 pub fn double_sided_skip(mesh_flags: u16, camera_transparent: bool) -> bool {
     mesh_flags != 0 && camera_transparent
 }
@@ -369,7 +373,7 @@ pub struct MzbMesh {
     pub flags: u16,
 }
 
-/// research/XIClient/src/XIClient/include/Resource/Derived/ZoneBlockFormat.h:145-153
+/// research/XIClient/src/XIClient/include/Resource/Derived/ZoneBlockFormat.h CollisionDataHeader
 /// — `CollisionDataHeader`, the seven dwords the header's 0x08 offset points at.
 const COLL_MESH_COUNT: usize = 0x00;
 const COLL_MESH_DATA_OFFSET: usize = 0x04;
@@ -382,7 +386,7 @@ const COLL_OBJECT_ARRAY_COUNT: usize = 0x18;
 /// Everything this parser reads from `CollisionDataHeader`, i.e. the whole struct.
 const COLL_HEADER_READ_LEN: usize = COLL_OBJECT_ARRAY_COUNT + 4;
 
-/// ZoneBlockFormat.h:166-176 — `CollisionMeshHeader`, one per collision mesh.
+/// ZoneBlockFormat.h — `CollisionMeshHeader`, one per collision mesh.
 const MESH_VERTEX_ARRAY: usize = 0x00;
 const MESH_NORMAL_ARRAY: usize = 0x04;
 const MESH_INDEX_ARRAY: usize = 0x08;
@@ -391,12 +395,12 @@ const MESH_FLAGS: usize = 0x0E;
 /// Through `Flags`; the struct also carries two reserved dwords this parser
 /// never reads.
 const MESH_RECORD_LEN: usize = MESH_FLAGS + 2;
-/// ZoneBlockFormat.h:155-164 — `CollisionMeshTriangle`, four `unsigned short`.
+/// ZoneBlockFormat.h — `CollisionMeshTriangle`, four `unsigned short`.
 const MESH_TRIANGLE_LEN: usize = 8;
 /// `Common::Math::Vector3`, three `f32`.
 const VEC3_LEN: usize = 12;
 
-/// ZoneBlockFormat.h:178-192 — `CollisionObjectData` opens with the object's
+/// ZoneBlockFormat.h — `CollisionObjectData` opens with the object's
 /// world matrix (`Common::Math::Matrix4 one`), followed by a second `Matrix4`
 /// and a `Matrix3`.
 const COLL_OBJECT_MATRIX_LEN: usize = 4 * 4 * 4;
@@ -412,7 +416,7 @@ const COLL_OBJECT_SUB_AREA_LINK: usize = COLL_OBJECT_FLAGS + 0x18;
 const COLL_OBJECT_RECORD_LEN: usize = COLL_OBJECT_SUB_AREA_LINK + 4;
 
 /// Resolve the collision-data header, or `None` when the zone ships no collision
-/// section (ZoneRenderer.cpp:574 guards the whole path on a non-zero offset).
+/// section (ZoneRenderer.cpp ZoneRenderer::OpenMzb guards the whole path on a non-zero offset).
 fn collision_header(body: &[u8], header: &MzbHeader) -> Result<Option<usize>> {
     if !header.has_collision_data() {
         return Ok(None);
@@ -572,10 +576,10 @@ fn parse_one_mesh(body: &[u8], pos: usize) -> Result<MzbMesh> {
         let v1_raw = u16::from_le_bytes([body[o + 2], body[o + 3]]);
         let v2_raw = u16::from_le_bytes([body[o + 4], body[o + 5]]);
         let n0_raw = u16::from_le_bytes([body[o + 6], body[o + 7]]);
-        let v0 = (v0_raw & 0x7FFF) as u32;
-        let v1 = (v1_raw & 0x3FFF) as u32;
-        let v2 = (v2_raw & 0x3FFF) as u32;
-        let n0 = (n0_raw & 0x7FFF) as u32;
+        let v0 = (v0_raw & TRI_INDEX_MASK) as u32;
+        let v1 = (v1_raw & TRI_FLAGGED_INDEX_MASK) as u32;
+        let v2 = (v2_raw & TRI_FLAGGED_INDEX_MASK) as u32;
+        let n0 = (n0_raw & TRI_INDEX_MASK) as u32;
         let m0 = ((v0_raw >> 15) & 1) as u8;
         let m1 = ((v1_raw >> 15) & 1) as u8;
         let m2 = ((v2_raw >> 15) & 1) as u8;
@@ -855,9 +859,9 @@ pub fn apply_placement(m: &[f32; 16], v: [f32; 3]) -> [f32; 3] {
     ]
 }
 
-/// research/XIClient/src/XIClient/include/Resource/Derived/ZoneBlockFormat.h:76-104
+/// research/XIClient/src/XIClient/include/Resource/Derived/ZoneBlockFormat.h ZoneBlockHeader
 /// — `PositionedMeshBlockData`, one 0x64-byte record per placed MMB.
-/// Corroborated field-by-field by research/cexi-docs/zone/format.md:103-121.
+/// Corroborated field-by-field by research/cexi-docs/zone/format.md "ZoneDef placement (`0x1C`)".
 const PL_MESH_BLOCK_NAME: usize = 0x00;
 const PL_TRANSLATION: usize = 0x10;
 const PL_ROTATION: usize = 0x1C;
@@ -870,20 +874,20 @@ const PL_SPECIAL_EFFECTS: usize = 0x46;
 const PL_AREA_RESOURCE_ID: usize = 0x4C;
 const PL_SUB_AREA_LINK: usize = 0x50;
 const PL_LIGHT_REFERENCES: usize = 0x54;
-/// ZoneBlockFormat.h:11 — `LIGHT_REFERENCE_COUNT`. Retail binds these four into
-/// D3D light slots 2-5 (ZoneRenderer.cpp:339-353 `SetLightIndices`).
+/// ZoneBlockFormat.h — `LIGHT_REFERENCE_COUNT`. Retail binds these four into
+/// D3D light slots 2-5 (ZoneRenderer.cpp ZoneRenderer::SetLightIndices `SetLightIndices`).
 pub const LIGHT_REFERENCE_COUNT: usize = 4;
 
 /// FourCC naming an `XiArea`, stored little-endian at placement offset 0x4C
-/// (ZoneBlockFormat.h:99) and resolved by `XiArea::FindAreaByFourCC`
-/// (XiArea.cpp:880-893). `0` means "no area": retail's `FindAreaByFourCCAndGet*`
-/// accessors short-circuit to the zone-wide environment (XiArea.cpp:377,
+/// (ZoneBlockFormat.h PositionedMeshBlockData) and resolved by `XiArea::FindAreaByFourCC`
+/// (XiArea.cpp XiArea::FindAreaByFourCC). `0` means "no area": retail's `FindAreaByFourCCAndGet*`
+/// accessors short-circuit to the zone-wide environment (XiArea.cpp XiArea::FindAreaByFourCCAndGetAmbient,
 /// :434, :284).
 pub type AreaResourceId = u32;
 
 /// The [`AreaResourceId`] a 4-byte DAT directory name denotes. Retail reaches an
 /// area's own environment container by searching the zone container for this
-/// FourCC (`SearchCurrentContainer(Rmp, fourCC)`, XiArea.cpp:32-38), so the
+/// FourCC (`SearchCurrentContainer(Rmp, fourCC)`, XiArea.cpp XiArea::XiArea), so the
 /// placement field and the directory name are the same bytes.
 pub fn area_resource_id_from_dir_name(name: &[u8; 4]) -> AreaResourceId {
     u32::from_le_bytes(*name)
@@ -899,7 +903,7 @@ pub struct MmbPlacement {
 
     /// FourCC. A non-zero `BlockID` makes retail classify the chunk
     /// [`MmbRenderType::Keyed`], which the normal pass never draws
-    /// (ZoneRenderer.cpp:619-641); see [`drawn_placements`] for the second pass
+    /// (ZoneRenderer.cpp ZoneRenderer::SetRenderTypes); see [`drawn_placements`] for the second pass
     /// that puts the `_`/`@` families back on screen.
     pub block_id: u32,
 
@@ -909,36 +913,36 @@ pub struct MmbPlacement {
     pub lod_mid: f32,
     pub lod_far: f32,
 
-    /// ZoneBlockFormat.h:94 — `SpecialEffects`, the third of the four flag
+    /// ZoneBlockFormat.h PositionedMeshBlockData — `SpecialEffects`, the third of the four flag
     /// bytes packed after the LOD triple (:92-95). Bit 0 is
     /// [`MmbPlacement::uses_lod_rendering`].
     pub special_effects: u8,
 
     /// FourCC of the area this chunk belongs to; drives per-area fog and the
-    /// weather diffuse lights (ZoneRenderer.cpp:514, :1133-1152). Read it through
+    /// weather diffuse lights (ZoneRenderer.cpp ZoneRenderer::OpenMzb, :1133-1152). Read it through
     /// [`MmbPlacement::effective_area_resource_id`] — retail clears it for
     /// blocks outside the `_`/unkeyed families.
     pub area_resource_id: AreaResourceId,
 
     /// The sub-area (building interior) whose geometry replaces this placeholder,
     /// 0 when there is none. Retail hides the chunk while that sub-area is the
-    /// active collision map — RenderType 1 (ZoneRenderer.cpp:635-636,
-    /// research/cexi-docs/zone/subareas.md:76-84).
+    /// active collision map — RenderType 1 (ZoneRenderer.cpp ZoneRenderer::SetRenderTypes,
+    /// research/cexi-docs/zone/subareas.md "2. The placeholder link (`0x1C` object `0x50`)").
     pub sub_area_link: u32,
 
     /// 1-based indices into the header's light-binding table; 0 = unused. Zeroed
     /// below [`LIGHT_BINDING_MIN_VERSION`], as retail does
-    /// (ZoneRenderer.cpp:518-523).
+    /// (ZoneRenderer.cpp ZoneRenderer::OpenMzb).
     pub light_references: [u32; LIGHT_REFERENCE_COUNT],
 }
 
-/// ZoneLayoutData.cpp:56-59, :85-86 — retail tests `(unsigned char)BlockID`, i.e.
+/// ZoneLayoutData.cpp ZoneLayoutData::InitUnderscoreAtStructs, :85-86 — retail tests `(unsigned char)BlockID`, i.e.
 /// the first character of the little-endian FourCC.
 const BLOCK_ID_UNDERSCORE_GROUP: u8 = b'_';
 const BLOCK_ID_AT_GROUP: u8 = b'@';
 
 /// `UnderscoreAtStruct::Subchunks` is a fixed array of four
-/// (research/XIClient/.../World/Zone/Terrain/UnderscoreAtStruct.h); members past
+/// (research/XIClient/src/XIClient/include/World/Zone/Terrain/UnderscoreAtStruct.h); members past
 /// the fourth are counted by `ZoneLayoutData::InitUnderscoreAtStructs` and then
 /// dropped, and `SubchunkCount` is clamped to the array, so nothing can draw or
 /// address them.
@@ -956,13 +960,13 @@ impl MmbPlacement {
 
     /// True when this placement joins an `UnderscoreAtStruct` group, which retail
     /// draws in its own pass at the tail of `RenderSubStruct`
-    /// (ZoneRenderer.cpp:2703, :2240-2269) regardless of `RenderType`.
+    /// (ZoneRenderer.cpp ZoneRenderer::RenderSubStruct, :2240-2269) regardless of `RenderType`.
     pub fn in_underscore_at_group(&self) -> bool {
         let first = self.block_id.to_le_bytes()[0];
         self.block_id != 0 && (first == BLOCK_ID_UNDERSCORE_GROUP || first == BLOCK_ID_AT_GROUP)
     }
 
-    /// ZoneBlockFormat.h:109-111 — `PositionedMeshBlockData::UsesLodRendering`.
+    /// ZoneBlockFormat.h — `PositionedMeshBlockData::UsesLodRendering`.
     pub fn uses_lod_rendering(&self) -> bool {
         self.special_effects & SPECIAL_EFFECTS_LOD_RENDERING != 0
     }
@@ -973,7 +977,7 @@ impl MmbPlacement {
 
     /// The [`AreaResourceId`] this placement is actually bound to.
     ///
-    /// ZoneLayoutData.cpp:135-159 (`BuildAreaResourceIDList`) — retail *zeroes*
+    /// ZoneLayoutData.cpp ZoneLayoutData::BuildAreaResourceIDList (`BuildAreaResourceIDList`) — retail *zeroes*
     /// `AreaResourceID` in place on any block whose `BlockID` is both non-zero
     /// and not in the `_` family, so those blocks fall back to the zone-wide
     /// environment even though the record carries an id.
@@ -991,8 +995,8 @@ impl MmbPlacement {
 }
 
 /// Distinct [`AreaResourceId`]s a zone's placements bind to, in first-seen order
-/// — retail's `ZoneLayoutData::AreaResourceIDList` (ZoneLayoutData.cpp:116-168),
-/// one `XiArea` per entry (ZoneRenderer.cpp:702-704).
+/// — retail's `ZoneLayoutData::AreaResourceIDList` (ZoneLayoutData.cpp ZoneLayoutData::BuildAreaResourceIDList),
+/// one `XiArea` per entry (ZoneRenderer.cpp ZoneRenderer::AllocateAndLinkAreas).
 pub fn area_resource_ids(placements: &[MmbPlacement]) -> Vec<AreaResourceId> {
     let mut out: Vec<AreaResourceId> = Vec::new();
     for p in placements {
@@ -1004,10 +1008,10 @@ pub fn area_resource_ids(placements: &[MmbPlacement]) -> Vec<AreaResourceId> {
     out
 }
 
-/// ZoneBlockFormat.h:110 — `SpecialEffects & 0x01`.
+/// ZoneBlockFormat.h UsesLodRendering — `SpecialEffects & 0x01`.
 const SPECIAL_EFFECTS_LOD_RENDERING: u8 = 0x01;
 
-/// ZoneRenderer.cpp:1085-1094 — which of the three mesh variants
+/// ZoneRenderer.cpp ZoneRenderer::RenderChunk2 — which of the three mesh variants
 /// `RenderChunk2` hands to the device for one frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -1023,7 +1027,7 @@ impl MmbLodLevel {
     }
 }
 
-/// ZoneRenderer.cpp:492-504 — retail squares the three `Lod*Distance` floats once
+/// ZoneRenderer.cpp ZoneRenderer::OpenMzb nearDist — retail squares the three `Lod*Distance` floats once
 /// while building the `PositionedMeshBlock` and compares them against the squared
 /// camera distance, so no square root is taken per chunk per frame. Comparing our
 /// linear distance against the raw floats would put every switch at the wrong
@@ -1040,7 +1044,7 @@ impl MmbLodThresholds {
         let near_sq = p.lod_near * p.lod_near;
         Self {
             near_sq,
-            // ZoneRenderer.cpp:499-502 — an authored mid *below* near collapses onto
+            // ZoneRenderer.cpp ZoneRenderer::OpenMzb — an authored mid *below* near collapses onto
             // near, emptying the medium band rather than inverting the comparison.
             mid_sq: if p.lod_near > p.lod_mid {
                 near_sq
@@ -1051,8 +1055,8 @@ impl MmbLodThresholds {
         }
     }
 
-    /// ZoneRenderer.cpp:1085-1094. `camera_dist_sq` is measured from the camera eye
-    /// to the placement translation (ZoneRenderer.cpp:1073-1075), not from the player.
+    /// ZoneRenderer.cpp ZoneRenderer::RenderChunk2. `camera_dist_sq` is measured from the camera eye
+    /// to the placement translation (ZoneRenderer.cpp ZoneRenderer::RenderChunk2 val), not from the player.
     pub fn select(&self, camera_dist_sq: f32) -> MmbLodLevel {
         if camera_dist_sq <= self.mid_sq {
             if camera_dist_sq <= self.near_sq {
@@ -1066,12 +1070,12 @@ impl MmbLodThresholds {
     }
 }
 
-/// XiArea.cpp:803-812 — `GetAnotherSomething(false)`, the per-zone scale retail
+/// XiArea.cpp XiArea::GetAnotherSomething — `GetAnotherSomething(false)`, the per-zone scale retail
 /// multiplies `FarThresholdSquared` by, is 1.0 before the registry graphics-config
 /// draw-distance multipliers this client does not model.
 pub const ZONE_LOD_FAR_SCALE: f32 = 1.0;
 
-/// ZoneRenderer.cpp:1030-1036, :1057-1064, :1071-1079 — the authored Lod far
+/// ZoneRenderer.cpp ZoneRenderer::RenderChunk, :1057-1064, :1071-1079 — the authored Lod far
 /// distance doubles as the draw-distance cull, but only for chunks flagged
 /// [`MmbPlacement::uses_lod_rendering`]; every other chunk is culled by the global
 /// draw distance instead, which is why the placements authored with `lod_far == 0`
@@ -1080,7 +1084,7 @@ pub fn beyond_lod_far_cull(camera_dist_sq: f32, thresholds: MmbLodThresholds) ->
     camera_dist_sq > ZONE_LOD_FAR_SCALE * thresholds.far_sq
 }
 
-/// ZoneRenderer.cpp:81-144 `InitializeMeshLOD` — a placement whose mesh name ends in
+/// ZoneRenderer.cpp `InitializeMeshLOD` — a placement whose mesh name ends in
 /// one of these swaps that last character to reach its siblings.
 const MMB_LOD_SUFFIX_HIGH: u8 = b'h';
 const MMB_LOD_SUFFIX_MEDIUM: u8 = b'm';
@@ -1088,7 +1092,7 @@ const MMB_LOD_SUFFIX_LOW: u8 = b'l';
 
 /// The three mesh-block indices one placement can draw, as
 /// `InitializeMeshLOD` leaves them. `None` means retail would have a null pointer
-/// there and skip the draw entirely (ZoneRenderer.cpp:1096-1097).
+/// there and skip the draw entirely (ZoneRenderer.cpp ZoneRenderer::RenderChunk2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct MmbLodSet {
     pub high: Option<usize>,
@@ -1127,7 +1131,7 @@ impl MmbLodSet {
     }
 }
 
-/// ZoneRenderer.cpp:81-144 `InitializeMeshLOD`, re-expressed over a caller-supplied
+/// ZoneRenderer.cpp `InitializeMeshLOD`, re-expressed over a caller-supplied
 /// name lookup so a consumer that resolves duplicate mesh names its own way keeps
 /// doing so. The order matters: a found `m` sibling overwrites all three slots,
 /// while `h` and `l` overwrite only their own slot and backfill the empty ones.
@@ -1143,7 +1147,7 @@ where
         low: base,
     };
 
-    // ZoneRenderer.cpp:93-96 — `nameLength` is the index of the last character
+    // ZoneRenderer.cpp InitializeMeshLOD — `nameLength` is the index of the last character
     // above ' ', so a blank or single-character name returns before any sibling
     // lookup (:105-106).
     if id.len() < 2 {
@@ -1223,33 +1227,33 @@ fn resolve_mmb_index_exact(
         .position(|n| n.trim_end() == prefixed)
 }
 
-/// research/XIClient/src/XIClient/source/Rendering/ZoneRenderer.cpp:619-641
+/// research/XIClient/src/XIClient/source/Rendering/ZoneRenderer.cpp ZoneRenderer::SetRenderTypes
 /// — `ZoneRenderer::SetRenderTypes`. The static zone pass draws a chunk only when
-/// `RenderType > 1` (ZoneRenderer.cpp:990 quadtree leaf, :2662 flat block list).
+/// `RenderType > 1` (ZoneRenderer.cpp ZoneRenderer::DrawHelper quadtree leaf, :2662 flat block list).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum MmbRenderType {
     /// `BlockID != 0` — a FourCC-keyed chunk (doors `_*`, elevators `@*`, and the
     /// other RID/sub-model families). Retail hands these to the trigger/sub-model
-    /// renderer, so the static pass skips them (ZoneRenderer.cpp:632-633,
-    /// ZoneLayoutData.cpp:55-65).
+    /// renderer, so the static pass skips them (ZoneRenderer.cpp ZoneRenderer::SetRenderTypes,
+    /// ZoneLayoutData.cpp ZoneLayoutData::InitUnderscoreAtStructs).
     Keyed = 0,
     /// The chunk is the exterior placeholder for the sub-area that is currently
     /// active, so the interior DAT is standing in for it
-    /// (ZoneRenderer.cpp:635-636).
+    /// (ZoneRenderer.cpp ZoneRenderer::SetRenderTypes).
     SuppressedPlaceholder = 1,
-    /// Ordinary static zone geometry (ZoneRenderer.cpp:629).
+    /// Ordinary static zone geometry (ZoneRenderer.cpp ZoneRenderer::SetRenderTypes).
     Static = 2,
 }
 
-/// ZoneRenderer.cpp:990, :2662 — `RenderType > 1`.
+/// ZoneRenderer.cpp ZoneRenderer::DrawHelper, :2662 — `RenderType > 1`.
 const MMB_RENDER_TYPE_DRAW_MIN: u8 = 2;
 
 /// Whether a `sub_area_link` names the sub-area currently swapped in, i.e. whether
 /// its owner is the placeholder the interior is standing in for. Retail keeps the
 /// active id in `CollisionManager::field_4`, sentinel `-1` for "none"
-/// (ZoneRenderer.cpp:172, :666), so a link of `0` — "not a placeholder"
-/// (research/cexi-docs/zone/subareas.md:76-84) — must never match, the way the
+/// (ZoneRenderer.cpp ZoneRenderer::ZoneRenderer, :666), so a link of `0` — "not a placeholder"
+/// (research/cexi-docs/zone/subareas.md "2. The placeholder link (`0x1C` object `0x50`)") — must never match, the way the
 /// `-1` sentinel cannot.
 ///
 /// The render pass ([`MmbRenderType::classify`]) and the collision pass
@@ -1260,7 +1264,7 @@ pub fn is_suppressed_placeholder(sub_area_link: u32, active_sub_area: Option<u32
 
 /// A [`MzbPlacement::sub_area_link`] / [`MmbPlacement::sub_area_link`] of `0`:
 /// ordinary zone geometry, standing in for no interior
-/// (research/cexi-docs/zone/subareas.md:76-84).
+/// (research/cexi-docs/zone/subareas.md "2. The placeholder link (`0x1C` object `0x50`)").
 pub const NO_SUB_AREA_LINK: u32 = 0;
 
 impl MmbRenderType {
@@ -1283,7 +1287,7 @@ impl MmbRenderType {
 }
 
 /// One `_`/`@` FourCC family of placements — retail's `UnderscoreAtStruct`
-/// (research/XIClient/.../World/Zone/Terrain/UnderscoreAtStruct.h).
+/// (research/XIClient/src/XIClient/include/World/Zone/Terrain/UnderscoreAtStruct.h).
 ///
 /// A door entity's `DoorId` FourCC, the DAT directory holding its `open`/`clos`
 /// Scheduler routines, and this `four_cc` are the same four bytes, so the group is
@@ -1310,7 +1314,7 @@ impl UnderscoreAtGroup {
 
 /// The zone's `_`/`@` FourCC groups, re-expressing
 /// `ZoneLayoutData::InitUnderscoreAtStructs`
-/// (research/XIClient/.../World/Zone/Terrain/ZoneLayoutData.cpp).
+/// (research/XIClient/src/XIClient/source/World/Zone/Terrain/ZoneLayoutData.cpp).
 ///
 /// Retail walks the placement table once to open a group at each FourCC's first
 /// member, then walks it again per group collecting every placement with that
@@ -1342,8 +1346,8 @@ pub fn underscore_at_groups(placements: &[MmbPlacement]) -> Vec<UnderscoreAtGrou
 /// Per-placement visibility for one MZB, parallel to `placements`.
 ///
 /// Retail reaches a placement through one of two passes, so neither alone is the
-/// answer: the static pass keeps `RenderType > 1` (ZoneRenderer.cpp:990, :2662),
-/// and `DrawUnderscoreAtStructs` (ZoneRenderer.cpp:2703) then draws the first
+/// answer: the static pass keeps `RenderType > 1` (ZoneRenderer.cpp ZoneRenderer::DrawHelper, :2662),
+/// and `DrawUnderscoreAtStructs` (ZoneRenderer.cpp ZoneRenderer::RenderSubStruct) then draws the first
 /// [`UNDERSCORE_AT_GROUP_MAX_SUBCHUNKS`] members of every `_`/`@` FourCC group
 /// without consulting `RenderType`. What is left invisible is therefore the
 /// RenderType 0/1 chunks owned by some *other* subsystem — zone-line entrance
@@ -1413,29 +1417,29 @@ pub fn parse_mmb_placements(body: &[u8], header: &MzbHeader) -> Result<Vec<MmbPl
     Ok(out)
 }
 
-/// research/XIClient/src/XIClient/include/Resource/Derived/ZoneBlockFormat.h:139-143
+/// research/XIClient/src/XIClient/include/Resource/Derived/ZoneBlockFormat.h LightBindingEntry
 /// — `LightBindingEntry` is `{ int LightID; ManagedLight* Light; char more[68]; }`.
 /// Only `LightID` is authored; the rest is runtime state retail fills in place
 /// after load, and it measures zero in the shipped files.
 const LIGHT_BINDING_ENTRY_LEN: usize = 0x4C;
 
-/// ZoneRenderer.cpp:257-268 (`SetupLightBindings`) walks the table for
-/// `sizeof(LightPool) / sizeof(LightPool[0])` entries — ZoneRenderer.h:91 sizes
+/// ZoneRenderer.cpp ZoneRenderer::GetOrAllocateLight (`SetupLightBindings`) walks the table for
+/// `sizeof(LightPool) / sizeof(LightPool[0])` entries — ZoneRenderer.h sizes
 /// `LightPool` at 256.
 const LIGHT_BINDING_TABLE_MAX: usize = 256;
 
-/// ZoneRenderer.cpp:305 — `(managedLight->LightID & 0xFF) == 99` drops the
+/// ZoneRenderer.cpp ZoneRenderer::UpdateBlockLightSettings — `(managedLight->LightID & 0xFF) == 99` drops the
 /// binding. 99 is ASCII `c`, the first character of the little-endian FourCC and
 /// the prefix of the character-light Generator names.
 const LIGHT_ID_CHARACTER_PREFIX: u8 = b'c';
 
 /// FourCC of a light-emitting Generator chunk (`LightID` in
-/// Rendering/Light/ManagedLight.h:6), little-endian like every other DAT FourCC.
+/// Rendering/Light/ManagedLight.h ManagedLight LightID), little-endian like every other DAT FourCC.
 pub type LightId = u32;
 
 /// The zone's authored light table: `LightID`s in binding order, so a
 /// placement's 1-based [`MmbPlacement::light_references`] index it directly.
-/// Empty when the file ships no lighting section (ZoneRenderer.cpp:383 gates on
+/// Empty when the file ships no lighting section (ZoneRenderer.cpp ZoneRenderer::OpenMzb gates on
 /// `LightingOffset != 0 && GetFormatVersion() >= 18`).
 ///
 /// Retail reads a fixed [`LIGHT_BINDING_TABLE_MAX`] entries; we stop at the end
@@ -1466,7 +1470,7 @@ pub fn parse_light_bindings(body: &[u8], header: &MzbHeader) -> Vec<LightId> {
 }
 
 /// The lights retail binds into one chunk's four D3D slots
-/// (ZoneRenderer.cpp:284-313 `UpdateBlockLightSettings`): slot `i` takes
+/// (ZoneRenderer.cpp ZoneRenderer::UpdateBlockLightSettings `UpdateBlockLightSettings`): slot `i` takes
 /// `lightBindings[LightReferences[i] - 1]`, and a slot is left dark when
 ///
 /// - the reference is 0 (`LightEnable(.., false)`),
@@ -1584,6 +1588,11 @@ pub fn infer_zone_prefix(mmb_asset_names: &[String]) -> String {
 mod tests {
     use super::*;
 
+    const TRI_TERRAIN_BIT: u16 = 0x8000;
+    const PLAINTEXT_VERSION: u8 = 0x10;
+    const SYNTH_GEOMETRY_OFFSET: u32 = 0x40;
+    const SPECIAL_EFFECTS_UNRELATED_BIT: u8 = 0x04;
+
     fn synth_mzb() -> Vec<u8> {
         let mut buf = vec![0u8; 0x8C];
 
@@ -1621,8 +1630,13 @@ mod tests {
         buf[0x78..0x7C].copy_from_slice(&0.0f32.to_le_bytes());
 
         let tris: [[u16; 4]; 2] = [
-            [0x8000, 1 | 0x4000, 2, 0],
-            [0, 2, 3 | 0x4000 | 0x8000, 0x8000],
+            [TRI_TERRAIN_BIT, 1 | TRI_SECOND_WORD_FLAG, 2, 0],
+            [
+                0,
+                2,
+                3 | TRI_CAMERA_TRANSPARENT | TRI_TERRAIN_BIT,
+                TRI_TERRAIN_BIT,
+            ],
         ];
         for (i, t) in tris.iter().enumerate() {
             let o = 0x7C + i * 8;
@@ -1639,7 +1653,10 @@ mod tests {
         let orig = synth_mzb();
         let mut buf = orig.clone();
         decrypt_in_place(&mut buf).unwrap();
-        assert_eq!(buf, orig, "version < 0x1B should bypass pass 1 entirely");
+        assert_eq!(
+            buf, orig,
+            "version below ENCRYPTED_MIN_VERSION bypasses pass 1 entirely"
+        );
     }
 
     #[test]
@@ -1675,7 +1692,7 @@ mod tests {
 
     // The 15 moving-vehicle zones ship `CollisionDataOffset == 0`. Retail wraps
     // the whole collision path in `if (CollisionDataOffset != 0)`
-    // (ZoneRenderer.cpp:574), so zero is a legal state, not a parse failure — and
+    // (ZoneRenderer.cpp ZoneRenderer::OpenMzb), so zero is a legal state, not a parse failure — and
     // the terrain bytes at 0x0C..0x10 must never be re-read as the offset. The
     // 0x50505050 below is exactly the garbage the old probe loop produced for
     // zone 46's 80x80-block terrain.
@@ -1712,7 +1729,7 @@ mod tests {
         assert!(parse_placements(&body, &h).is_err());
     }
 
-    // ZoneRenderer.cpp:553-563 (quadtree) and :383/:518-523 (light bindings).
+    // ZoneRenderer.cpp ZoneRenderer::OpenMzb (quadtree) and :383/:518-523 (light bindings).
     #[test]
     fn header_unions_follow_the_format_version() {
         let mut body = synth_mzb();
@@ -1793,19 +1810,22 @@ mod tests {
 
     #[test]
     fn pass2_node_xor_runs() {
+        const FILL: u8 = 0xAA;
         let mut buf = vec![0u8; 0x20 + 0x64];
-        buf[0..4].copy_from_slice(&((0x10u32 << 24) | 0x20).to_le_bytes());
+        buf[0..4].copy_from_slice(
+            &((u32::from(PLAINTEXT_VERSION) << 24) | MZB_HEADER_LEN as u32).to_le_bytes(),
+        );
         buf[4..8].copy_from_slice(&1u32.to_le_bytes());
 
         buf[8..12].copy_from_slice(&0x20u32.to_le_bytes());
         for b in &mut buf[0x20..0x30] {
-            *b = 0xAA;
+            *b = FILL;
         }
         decrypt_in_place(&mut buf).unwrap();
         for b in &buf[0x20..0x30] {
             assert_eq!(
                 *b,
-                0xAA ^ 0x55,
+                FILL ^ PLACEMENT_NAME_XOR,
                 "pass 2 should XOR first 16 bytes of each node with 0x55"
             );
         }
@@ -1865,7 +1885,7 @@ mod tests {
 
         buf[0x210..0x214].copy_from_slice(&0xDEADu32.to_le_bytes());
         buf[0x214..0x218].copy_from_slice(&0x220u32.to_le_bytes());
-        buf[0x218..0x21C].copy_from_slice(&0x40u32.to_le_bytes());
+        buf[0x218..0x21C].copy_from_slice(&SYNTH_GEOMETRY_OFFSET.to_le_bytes());
         buf[0x21C..0x220].copy_from_slice(&0u32.to_le_bytes());
 
         let mut m = [0.0f32; 16];
@@ -1899,7 +1919,7 @@ mod tests {
             "exactly one (mat,geo) pair in cell (0,0)"
         );
         let p = placements[0];
-        assert_eq!(p.geometry_offset, 0x40);
+        assert_eq!(p.geometry_offset, SYNTH_GEOMETRY_OFFSET);
         assert_eq!(p.grid_x, 0);
         assert_eq!(p.grid_y, 0);
         assert!(
@@ -1951,9 +1971,9 @@ mod tests {
 
         let placements = parse_placements(&body, &h).unwrap();
         assert!(
-            placements
-                .iter()
-                .any(|p| p.grid_x == 0 && p.grid_y == 1 && p.geometry_offset == 0x40),
+            placements.iter().any(|p| p.grid_x == 0
+                && p.grid_y == 1
+                && p.geometry_offset == SYNTH_GEOMETRY_OFFSET),
             "row-1 cell must be reached at stride 20, got {:?}",
             placements
                 .iter()
@@ -1985,7 +2005,7 @@ mod tests {
 
     // `CollisionObjectData::flags` — where the section water height is packed —
     // sits 164 bytes into a record that only exists at full length above the
-    // version split (CollisionManager.cpp:231-234).
+    // version split (CollisionManager.cpp CollisionManager::PrepareData).
     #[test]
     fn water_height_is_gated_on_the_collision_object_version() {
         let mut body = synth_mzb_with_placement();
@@ -2107,7 +2127,8 @@ mod tests {
         put_f32(&mut body, PL_LOD_NEAR, 10.0);
         put_f32(&mut body, PL_LOD_MID, 20.0);
         put_f32(&mut body, PL_LOD_FAR, 30.0);
-        body[rec + PL_SPECIAL_EFFECTS] = SPECIAL_EFFECTS_LOD_RENDERING | 0x04;
+        body[rec + PL_SPECIAL_EFFECTS] =
+            SPECIAL_EFFECTS_LOD_RENDERING | SPECIAL_EFFECTS_UNRELATED_BIT;
         put_u32(&mut body, PL_AREA_RESOURCE_ID, 0x1234_5678);
         put_u32(&mut body, PL_SUB_AREA_LINK, 0x1CE);
         for k in 0..LIGHT_REFERENCE_COUNT {
@@ -2129,14 +2150,17 @@ mod tests {
         assert_eq!(p.scale[0], 5.0);
         assert_eq!(p.block_id, 0xAABB_CCDD);
         assert_eq!((p.lod_near, p.lod_mid, p.lod_far), (10.0, 20.0, 30.0));
-        assert_eq!(p.special_effects, SPECIAL_EFFECTS_LOD_RENDERING | 0x04);
+        assert_eq!(
+            p.special_effects,
+            SPECIAL_EFFECTS_LOD_RENDERING | SPECIAL_EFFECTS_UNRELATED_BIT
+        );
         assert!(p.uses_lod_rendering());
         assert_eq!(p.area_resource_id, 0x1234_5678);
         assert_eq!(p.sub_area_link, 0x1CE);
         assert_eq!(p.light_references, [1, 2, 3, 4]);
     }
 
-    // ZoneRenderer.cpp:518-523 zeroes LightReferences below version 18 rather
+    // ZoneRenderer.cpp ZoneRenderer::OpenMzb zeroes LightReferences below version 18 rather
     // than reading whatever those bytes hold.
     #[test]
     fn mmb_placement_light_references_need_version_18() {
@@ -2197,7 +2221,7 @@ mod tests {
         assert!(parse_light_bindings(&body, &no_section).is_empty());
     }
 
-    // ZoneRenderer.cpp:257-268 walks exactly LightPool-many entries; a file long
+    // ZoneRenderer.cpp ZoneRenderer::GetOrAllocateLight walks exactly LightPool-many entries; a file long
     // enough to hold more must not grow the table past the pool.
     #[test]
     fn light_binding_table_stops_at_the_light_pool_size() {
@@ -2245,11 +2269,11 @@ mod tests {
         assert_eq!(
             resolve_chunk_lights(&[1, 2, 0, 0], &bindings),
             [None, Some(bindings[1]), None, None],
-            "LightID 0 is an unallocated pool slot (ZoneRenderer.cpp:260)"
+            "LightID 0 is an unallocated pool slot (ZoneRenderer.cpp ZoneRenderer::GetOrAllocateLight)"
         );
     }
 
-    // ZoneRenderer.cpp:305 — `(LightID & 0xFF) == 99`, i.e. the `c` prefix the
+    // ZoneRenderer.cpp ZoneRenderer::UpdateBlockLightSettings — `(LightID & 0xFF) == 99`, i.e. the `c` prefix the
     // character lights carry (DAT 101 ships `c001` next to its `lt0*` lamps).
     #[test]
     fn character_light_ids_are_never_bound_to_a_chunk() {
@@ -2404,7 +2428,7 @@ mod tests {
         p
     }
 
-    // ZoneLayoutData.cpp:139 — `BlockID == 0 || (char)BlockID == '_'`.
+    // ZoneLayoutData.cpp ZoneLayoutData::BuildAreaResourceIDList — `BlockID == 0 || (char)BlockID == '_'`.
     #[test]
     fn area_binding_survives_only_unkeyed_and_underscore_blocks() {
         assert_eq!(
@@ -2415,7 +2439,7 @@ mod tests {
             area_placement(fourcc(b"_6e1"), b"ev01").effective_area_resource_id(),
             fourcc(b"ev01")
         );
-        // ZoneLayoutData.cpp:158 — retail zeroes the field on any other keyed
+        // ZoneLayoutData.cpp ZoneLayoutData::BuildAreaResourceIDList — retail zeroes the field on any other keyed
         // block, so it draws with the zone-wide environment.
         assert_eq!(
             area_placement(fourcc(b"@abc"), b"ev01").effective_area_resource_id(),
@@ -2428,7 +2452,7 @@ mod tests {
         assert_eq!(placement(0, 0).effective_area_resource_id(), 0);
     }
 
-    // ZoneLayoutData.cpp:141-153 — one entry per distinct surviving FourCC, in
+    // ZoneLayoutData.cpp ZoneLayoutData::BuildAreaResourceIDList isDuplicate — one entry per distinct surviving FourCC, in
     // placement order; retail allocates one XiArea per entry.
     #[test]
     fn area_resource_id_list_is_deduped_in_placement_order() {
@@ -2461,7 +2485,7 @@ mod tests {
         p
     }
 
-    // ZoneRenderer.cpp:492-504 — the comparison space is squared distance, so the
+    // ZoneRenderer.cpp ZoneRenderer::OpenMzb nearDist — the comparison space is squared distance, so the
     // authored (10, 100, 1000) triple that dominates retail's zones switches at
     // 100 / 10 000 / 1 000 000, not at 10 / 100 / 1000.
     #[test]
@@ -2477,7 +2501,7 @@ mod tests {
         );
     }
 
-    // ZoneRenderer.cpp:499-502. Retail zones ship this inversion in bulk (e.g. the
+    // ZoneRenderer.cpp ZoneRenderer::OpenMzb. Retail zones ship this inversion in bulk (e.g. the
     // (25, 0, 60) triple), and the clamp is what keeps it from selecting Medium for
     // everything closer than near.
     #[test]
@@ -2491,7 +2515,7 @@ mod tests {
         assert_eq!(t.select(626.0), MmbLodLevel::Low);
     }
 
-    // ZoneRenderer.cpp:1085-1094 — both comparisons are `<=`, so a chunk sitting
+    // ZoneRenderer.cpp ZoneRenderer::RenderChunk2 — both comparisons are `<=`, so a chunk sitting
     // exactly on a threshold takes the *more* detailed variant.
     #[test]
     fn lod_band_edges_are_inclusive() {
@@ -2503,7 +2527,7 @@ mod tests {
         assert_eq!(t.select(10_000.1), MmbLodLevel::Low);
     }
 
-    // ZoneRenderer.cpp:1057-1064 — `FarThresholdSquared` is the draw-distance cull
+    // ZoneRenderer.cpp ZoneRenderer::RenderChunk2 — `FarThresholdSquared` is the draw-distance cull
     // only for chunks flagged UsesLodRendering; the ~10k retail placements authored
     // with far == 0 clear the flag and fall through to the global draw distance,
     // so reading far as an unconditional cull would erase them.
@@ -2527,7 +2551,7 @@ mod tests {
         list.iter().map(|s| s.to_string()).collect()
     }
 
-    // ZoneRenderer.cpp:108-143 — the sibling names are the placement name with its
+    // ZoneRenderer.cpp InitializeMeshLOD — the sibling names are the placement name with its
     // last character swapped for h / m / l.
     #[test]
     fn lod_set_binds_the_h_m_l_siblings() {
@@ -2542,7 +2566,7 @@ mod tests {
         );
     }
 
-    // ZoneRenderer.cpp:117-121 — a found `m` sibling overwrites all three slots,
+    // ZoneRenderer.cpp InitializeMeshLOD — a found `m` sibling overwrites all three slots,
     // unlike `h`/`l` which only backfill the empty ones.
     #[test]
     fn medium_sibling_overwrites_every_slot() {
@@ -2557,7 +2581,7 @@ mod tests {
         );
     }
 
-    // ZoneRenderer.cpp:125-143 — with no `m` sibling the medium slot keeps whatever
+    // ZoneRenderer.cpp InitializeMeshLOD — with no `m` sibling the medium slot keeps whatever
     // the base name resolved to, so a two-variant family draws the low mesh in the
     // medium band.
     #[test]
@@ -2573,7 +2597,7 @@ mod tests {
         );
     }
 
-    // ZoneRenderer.cpp:100-106 — a name that does not end in h/m/l, and a name too
+    // ZoneRenderer.cpp InitializeMeshLOD — a name that does not end in h/m/l, and a name too
     // short to have a swappable last character, never take the sibling path.
     #[test]
     fn lod_suffix_rule_is_a_blind_last_character_swap() {
@@ -2728,7 +2752,7 @@ mod tests {
         );
         assert!(!MmbRenderType::classify(&placeholder, Some(SUB_AREA)).is_drawn());
 
-        // ZoneRenderer.cpp:631-638 tests BlockID first and the sub-area second, so
+        // ZoneRenderer.cpp ZoneRenderer::SetRenderTypes tests BlockID first and the sub-area second, so
         // the sub-area verdict wins when both hold.
         let both = placement(fourcc(b"en00"), SUB_AREA);
         assert_eq!(

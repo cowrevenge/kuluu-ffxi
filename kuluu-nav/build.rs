@@ -1,8 +1,19 @@
 use std::{fs, path::PathBuf};
 
 use anyhow::{bail, Context, Result};
+use lsb_scrape::check_scrape_count;
 
 const ZONELINES_SQL: &str = "../vendor/server/sql/zonelines.sql";
+
+/// Smallest row count each scrape can return and still plausibly have parsed
+/// zonelines.sql; the argument is the count the pinned vendor tree yields today
+/// (kuluu-m4yk).
+mod floor {
+    use lsb_scrape::scrape_floor;
+
+    pub const ZONE_LINE: usize = scrape_floor(844);
+    pub const FROM_ZONE: usize = scrape_floor(198);
+}
 
 fn main() -> Result<()> {
     println!("cargo:rerun-if-changed=build.rs");
@@ -55,11 +66,13 @@ fn main() -> Result<()> {
     out.push_str("];\n");
 
     fs::write(out_dir.join("zonelines_table.rs"), &out)?;
-    println!(
-        "kuluu-nav: scraped {} zone-lines across {} from_zones",
-        entries.len(),
-        index.len()
-    );
+    check_scrape_count("zone-lines", ZONELINES_SQL, entries.len(), floor::ZONE_LINE)?;
+    check_scrape_count(
+        "zone-line from_zones",
+        ZONELINES_SQL,
+        index.len(),
+        floor::FROM_ZONE,
+    )?;
 
     Ok(())
 }
@@ -131,9 +144,6 @@ fn parse_zonelines(src: &str) -> Result<Vec<ParsedLine>> {
             scale_z,
             rotation,
         });
-    }
-    if out.is_empty() {
-        bail!("parsed zero zonelines — schema may have changed");
     }
     Ok(out)
 }

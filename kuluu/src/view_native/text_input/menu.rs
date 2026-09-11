@@ -14,15 +14,33 @@ enum MenuDispatch {
 }
 
 fn apply_graphics_cycle(cursor: usize, delta: i32, graphics: &mut kuluu_render::GraphicsSettings) {
-    use kuluu_render::graphics_settings::GRAPHICS_FIELDS;
-    if let Some(&field) = GRAPHICS_FIELDS.get(cursor) {
+    // The page carries two non-field action rows ("DLSS Config" under the DLSS
+    // on/off row, "Reset to High" at the bottom), so the cursor slot does not
+    // index GRAPHICS_FIELDS directly — resolve through the shared mapping.
+    if let Some(field) = kuluu_render::hud::menu::graphics_field_at(cursor, graphics.dlss_supported)
+    {
+        graphics.cycle(field, delta);
+    }
+}
+
+/// Same shape for the DLSS Config submenu: slot -> DLSS_CONFIG_FIELDS. The
+/// reset row sits one past the fields and is handled by the caller, so a
+/// cursor there is a no-op here (get returns None), matching apply_graphics_cycle.
+fn apply_graphics_dlss_cycle(
+    cursor: usize,
+    delta: i32,
+    graphics: &mut kuluu_render::GraphicsSettings,
+) {
+    use kuluu_render::graphics_settings::DLSS_CONFIG_FIELDS;
+    if let Some(&field) = DLSS_CONFIG_FIELDS.get(cursor) {
         graphics.cycle(field, delta);
     }
 }
 
 fn resolve_menu_entry(kind: MenuKind, label: &str) -> MenuDispatch {
-    use kuluu_render::hud::menu::{COMM_EMOTE_LIST, ROOT_LOG_OUT, ROOT_SHUT_DOWN};
+    use kuluu_render::hud::menu::{COMM_EMOTE_LIST, CONFIG_CONTROLS, ROOT_LOG_OUT, ROOT_SHUT_DOWN};
     match (kind, label) {
+        (MenuKind::Config, CONFIG_CONTROLS) => MenuDispatch::OpenSubmenu(MenuKind::Controls),
         (MenuKind::Communication, l) if l == COMM_EMOTE_LIST => {
             MenuDispatch::OpenSubmenu(MenuKind::EmoteList)
         }
@@ -68,19 +86,19 @@ fn resolve_menu_entry(kind: MenuKind, label: &str) -> MenuDispatch {
             "Equipment — pending Stage 1 (s2c 0x050 equip_list)".into(),
         ),
 
-        (MenuKind::Config, "Standard") => {
+        (MenuKind::Controls, "Standard") => {
             MenuDispatch::KeybindUpdate(KeybindUpdate::Preset(Preset::Standard))
         }
-        (MenuKind::Config, "Compact 1") => {
+        (MenuKind::Controls, "Compact 1") => {
             MenuDispatch::KeybindUpdate(KeybindUpdate::Preset(Preset::Compact1))
         }
-        (MenuKind::Config, "Compact 2") => {
+        (MenuKind::Controls, "Compact 2") => {
             MenuDispatch::KeybindUpdate(KeybindUpdate::Preset(Preset::Compact2))
         }
-        (MenuKind::Config, "Reset to defaults") => {
+        (MenuKind::Controls, "Reset to defaults") => {
             MenuDispatch::KeybindUpdate(KeybindUpdate::Reset)
         }
-        (MenuKind::Config, "Show current bindings") => {
+        (MenuKind::Controls, "Show current bindings") => {
             MenuDispatch::KeybindUpdate(KeybindUpdate::List)
         }
         (_, other) => MenuDispatch::NotImplemented(other.to_string()),
@@ -117,6 +135,11 @@ pub(super) fn confirm_menu_at_cursor(
         // Pressing the confirm key on it should do nothing rather than fall
         // through to toggle_debug_panel's unknown-entry branch.
         if label == kuluu_render::hud::menu::DEBUG_VOLUME {
+            return None;
+        }
+        // Retail+ section rows live in GraphicsSettings (persisted), not
+        // HudPanels — handle them before the panel toggles.
+        if handle_retail_plus_row(label, graphics, scene_state) {
             return None;
         }
         toggle_debug_panel(
@@ -176,12 +199,32 @@ pub(super) fn confirm_menu_at_cursor(
         }
         return None;
     }
+    if kind == MenuKind::Config {
+        if let Some(&field) = kuluu_render::CONFIG_FIELDS.get(cursor) {
+            graphics.cycle(field, 1);
+            return None;
+        }
+    }
+
     if matches!(kind, MenuKind::Graphics) {
-        if cursor == kuluu_render::hud::menu::GRAPHICS_RESET_SLOT {
+        let dlss_supported = graphics.dlss_supported;
+        if cursor == kuluu_render::hud::menu::graphics_reset_slot(dlss_supported) {
             graphics.reset_to_default();
             push_system_chat_line(scene_state, "[menu] Graphics reset to High".into());
+        } else if dlss_supported && cursor == kuluu_render::hud::menu::GRAPHICS_DLSS_CONFIG_SLOT {
+            stack.push(MenuKind::GraphicsDlss);
         } else {
             apply_graphics_cycle(cursor, 1, graphics);
+        }
+        return None;
+    }
+
+    if matches!(kind, MenuKind::GraphicsDlss) {
+        if cursor == kuluu_render::hud::menu::GRAPHICS_DLSS_RESET_SLOT {
+            graphics.reset_dlss_config();
+            push_system_chat_line(scene_state, "[menu] DLSS config reset to defaults".into());
+        } else {
+            apply_graphics_dlss_cycle(cursor, 1, graphics);
         }
         return None;
     }
@@ -307,6 +350,78 @@ fn activate_current_time(
     }
 }
 
+/// Retail+ section rows (dev-only Debug menu). Returns true when the label is
+/// one of them and it was handled here — the caller must not fall through to
+/// `toggle_debug_panel`. The live toggles flip GraphicsSettings fields, so
+/// `persist_graphics_on_change` writes graphics.json automatically. Mob HP
+/// Under / Job Display only exist in enhanced builds (their rows are absent
+/// from DEBUG_ENTRIES without their feature).
+fn handle_retail_plus_row(
+    label: &str,
+    graphics: &mut kuluu_render::GraphicsSettings,
+    scene_state: &mut SceneState,
+) -> bool {
+    #[cfg(feature = "enhanced-job-display")]
+    use kuluu_render::hud::menu::RETAIL_JOB_DISPLAY;
+    #[cfg(feature = "enhanced-mob-hp-under")]
+    use kuluu_render::hud::menu::RETAIL_MOB_HP_UNDER;
+    use kuluu_render::hud::menu::{DEBUG_RETAIL_LABEL, DEBUG_RETAIL_SEPARATOR, RETAIL_DLSS_MENU};
+    match label {
+        // Section chrome: no state, no banner.
+        DEBUG_RETAIL_SEPARATOR | DEBUG_RETAIL_LABEL => true,
+        RETAIL_DLSS_MENU => {
+            // This build can't run DLSS at all (no dlss feature, or no RTX/Vulkan/DLLs):
+            // the row reads N/A and the toggle is inert - don't flip a persisted gate.
+            if !graphics.dlss_supported {
+                push_system_chat_line(
+                    scene_state,
+                    format!("[menu] {label}: N/A (this build can't run DLSS)"),
+                );
+                true
+            } else {
+                graphics.dlss_menu_enabled = !graphics.dlss_menu_enabled;
+                push_system_chat_line(
+                    scene_state,
+                    format!(
+                        "[menu] {label}: {}",
+                        if graphics.dlss_menu_enabled {
+                            "on"
+                        } else {
+                            "off"
+                        }
+                    ),
+                );
+                true
+            }
+        }
+        #[cfg(feature = "enhanced-mob-hp-under")]
+        RETAIL_MOB_HP_UNDER => {
+            graphics.mob_hp_under = !graphics.mob_hp_under;
+            push_system_chat_line(
+                scene_state,
+                format!(
+                    "[menu] {label}: {}",
+                    if graphics.mob_hp_under { "on" } else { "off" }
+                ),
+            );
+            true
+        }
+        #[cfg(feature = "enhanced-job-display")]
+        RETAIL_JOB_DISPLAY => {
+            graphics.job_display = !graphics.job_display;
+            push_system_chat_line(
+                scene_state,
+                format!(
+                    "[menu] {label}: {}",
+                    if graphics.job_display { "on" } else { "off" }
+                ),
+            );
+            true
+        }
+        _ => false,
+    }
+}
+
 fn toggle_debug_panel(
     label: &str,
     hud_panels: &mut kuluu_render::hud::HudPanels,
@@ -316,8 +431,10 @@ fn toggle_debug_panel(
     scene_state: &mut SceneState,
 ) {
     use kuluu_render::hud::menu::{
-        DEBUG_MESH, DEBUG_NET_STATUS, DEBUG_NOCLIP, DEBUG_PERF, DEBUG_PRINT_POS, DEBUG_SOUND,
-        DEBUG_TARGET_CYCLE,
+        DEBUG_ENTITY_LIST, DEBUG_FOG, DEBUG_GRAPHICS_DEBUG, DEBUG_MESH, DEBUG_NAMEPLATES,
+        DEBUG_NET_STATUS, DEBUG_NOCLIP, DEBUG_PERF, DEBUG_POSITION_LOG, DEBUG_PRINT_POS,
+        DEBUG_SOUND, DEBUG_STAIR_DRAW, DEBUG_STAIR_STATUS, DEBUG_TARGET_CYCLE, DEBUG_UI_SETTINGS,
+        DEBUG_WEATHER,
     };
 
     // Print Pos is a button, not a toggle: fire and return before the
@@ -349,6 +466,44 @@ fn toggle_debug_panel(
         DEBUG_NOCLIP => {
             hud_panels.noclip = !hud_panels.noclip;
             hud_panels.noclip
+        }
+        // The rows report the feature's live state, so they invert the "off"
+        // flags: Weather [on] = weather effects applied.
+        DEBUG_WEATHER => {
+            hud_panels.weather_off = !hud_panels.weather_off;
+            !hud_panels.weather_off
+        }
+        DEBUG_FOG => {
+            hud_panels.fog_off = !hud_panels.fog_off;
+            !hud_panels.fog_off
+        }
+        DEBUG_ENTITY_LIST => {
+            hud_panels.entity_list = !hud_panels.entity_list;
+            hud_panels.entity_list
+        }
+        DEBUG_STAIR_DRAW => {
+            hud_panels.stair_draw = !hud_panels.stair_draw;
+            hud_panels.stair_draw
+        }
+        DEBUG_STAIR_STATUS => {
+            hud_panels.stair_debug = !hud_panels.stair_debug;
+            hud_panels.stair_debug
+        }
+        DEBUG_GRAPHICS_DEBUG => {
+            hud_panels.graphics_debug = !hud_panels.graphics_debug;
+            hud_panels.graphics_debug
+        }
+        DEBUG_POSITION_LOG => {
+            hud_panels.position_log = !hud_panels.position_log;
+            hud_panels.position_log
+        }
+        DEBUG_NAMEPLATES => {
+            hud_panels.nameplate_debug = !hud_panels.nameplate_debug;
+            hud_panels.nameplate_debug
+        }
+        DEBUG_UI_SETTINGS => {
+            hud_panels.ui_settings = !hud_panels.ui_settings;
+            hud_panels.ui_settings
         }
         DEBUG_NET_STATUS => {
             net_status.0 = !net_status.0;
@@ -402,6 +557,7 @@ pub(super) fn handle_menu_key(
     map_markers: Mut<kuluu_render::hud::map_screen::MapMarkers>,
     map_view: &kuluu_render::hud::map_screen::MapView,
     minimap_state: &kuluu_render::minimap::MinimapState,
+    change_map_catalog: &kuluu_render::hud::map_screen::ChangeMapCatalog,
 ) -> Option<InputMode> {
     let top_kind = stack.current()?.kind;
 
@@ -428,13 +584,14 @@ pub(super) fn handle_menu_key(
             map_markers,
             map_view,
             minimap_state,
+            change_map_catalog,
         );
     }
     let (kind, cursor) = {
         let level = stack.current()?;
         (level.kind, level.cursor)
     };
-    let entry_count = kuluu_render::hud::menu::entry_count(kind, dynamic);
+    let entry_count = kuluu_render::hud::menu::entry_count(kind, dynamic, graphics.dlss_supported);
 
     // Menu context (not text input), so reading the raw keycode is correct.
     // "-" flips the Command menu's two pages (retail HorizonXI); single-list
@@ -539,6 +696,19 @@ pub(super) fn handle_menu_key(
         }
     }
 
+    if kind == MenuKind::Config {
+        if let Some(&field) = kuluu_render::CONFIG_FIELDS.get(cursor) {
+            if bindings.matches_logical(Action::NavLeft, key) {
+                graphics.cycle(field, -1);
+                return None;
+            }
+            if bindings.matches_logical(Action::NavRight, key) {
+                graphics.cycle(field, 1);
+                return None;
+            }
+        }
+    }
+
     if matches!(kind, MenuKind::Graphics) {
         if bindings.matches_logical(Action::NavLeft, key) {
             apply_graphics_cycle(cursor, -1, graphics);
@@ -546,6 +716,17 @@ pub(super) fn handle_menu_key(
         }
         if bindings.matches_logical(Action::NavRight, key) {
             apply_graphics_cycle(cursor, 1, graphics);
+            return None;
+        }
+    }
+
+    if matches!(kind, MenuKind::GraphicsDlss) {
+        if bindings.matches_logical(Action::NavLeft, key) {
+            apply_graphics_dlss_cycle(cursor, -1, graphics);
+            return None;
+        }
+        if bindings.matches_logical(Action::NavRight, key) {
+            apply_graphics_dlss_cycle(cursor, 1, graphics);
             return None;
         }
     }
@@ -665,7 +846,9 @@ mod menu_key_tests {
     use super::*;
     use crate::keybinds_store::KeybindsStore;
     use bevy::ecs::world::World;
-    use kuluu_render::hud::map_screen::{MapMarkers, MapScreenState, MapSubMode, MapView};
+    use kuluu_render::hud::map_screen::{
+        ChangeMapCatalog, MapMarkers, MapScreenState, MapSubMode, MapView,
+    };
     use kuluu_render::input_mode::Pane;
     use kuluu_render::minimap::{MinimapAabb, MinimapState};
 
@@ -687,6 +870,7 @@ mod menu_key_tests {
         map_state: MapScreenState,
         map_view: MapView,
         minimap_state: MinimapState,
+        change_map_catalog: ChangeMapCatalog,
         cmd_tx: Sender<AgentCommand>,
         _cmd_rx: tokio::sync::mpsc::Receiver<AgentCommand>,
     }
@@ -717,6 +901,7 @@ mod menu_key_tests {
                 map_state: MapScreenState::default(),
                 map_view: MapView::default(),
                 minimap_state: MinimapState::default(),
+                change_map_catalog: ChangeMapCatalog::default(),
                 cmd_tx,
                 _cmd_rx,
             }
@@ -754,6 +939,7 @@ mod menu_key_tests {
                 map_markers,
                 &self.map_view,
                 &self.minimap_state,
+                &self.change_map_catalog,
             )
         }
     }
@@ -763,6 +949,37 @@ mod menu_key_tests {
         world.insert_resource(MapMarkers::default());
         world.clear_trackers();
         world
+    }
+
+    #[test]
+    fn config_keys_cycle_radar_and_open_controls_without_changing_bindings() {
+        use kuluu_render::{MinimapRadar, CONFIG_FIELDS};
+        let mut harness = Harness::new();
+        let mut world = marker_world();
+        let mut stack = MenuStack::root();
+        stack.push(MenuKind::Config);
+        for (key, code, expected) in [
+            (Key::ArrowRight, KeyCode::ArrowRight, MinimapRadar::Enhanced),
+            (Key::ArrowLeft, KeyCode::ArrowLeft, MinimapRadar::Vanilla),
+            (Key::Enter, KeyCode::Enter, MinimapRadar::Enhanced),
+        ] {
+            harness.key(&key, code, &mut stack, world.resource_mut::<MapMarkers>());
+            assert_eq!(harness.graphics.minimap_radar, expected);
+            assert_eq!(stack.current().unwrap().cursor, 0);
+            assert_eq!(stack.current().unwrap().kind, MenuKind::Config);
+        }
+        stack.current_mut().unwrap().cursor = CONFIG_FIELDS.len();
+        harness.key(
+            &Key::Enter,
+            KeyCode::Enter,
+            &mut stack,
+            world.resource_mut::<MapMarkers>(),
+        );
+        assert_eq!(stack.current().unwrap().kind, MenuKind::Controls);
+        assert_eq!(
+            resolve_menu_entry(MenuKind::Controls, "Compact 1"),
+            MenuDispatch::KeybindUpdate(KeybindUpdate::Preset(Preset::Compact1))
+        );
     }
 
     /// kuluu-ce6z: the cursor is read from `stack.current()`, so writes must go
@@ -835,6 +1052,51 @@ mod menu_key_tests {
         let markers = world.resource::<MapMarkers>();
         assert_eq!(markers.for_zone(ZONE).len(), 1);
         assert_eq!(markers.for_zone(ZONE)[0].label, "Camp");
+    }
+
+    /// kuluu-u8p1: the Change Map list the key handler indexes and the one the
+    /// panel draws must be the same list, and it must only offer floors the
+    /// zone's DLL records describe -- POLUtils lists a third Windurst Waters map
+    /// that the loader cannot resolve. Gated on a retail install (self-skips).
+    #[test]
+    fn change_map_confirm_selects_a_floor_the_dll_describes() {
+        const WINDURST_WATERS: u16 = 238;
+        let Some(root) = ffxi_dat::archive::open_test_install() else {
+            return;
+        };
+        let Ok(dll) = ffxi_dat::main_dll::MainDll::load(root.root()) else {
+            return;
+        };
+
+        let mut harness = Harness::new();
+        harness.change_map_catalog = ChangeMapCatalog::from_dll(&dll);
+        let mut world = marker_world();
+        let mut stack = MenuStack::root();
+        stack.push(MenuKind::Map);
+        stack.take_absorb_open_minus();
+
+        harness.scene_state.snapshot.zone_id = Some(WINDURST_WATERS);
+        harness.map_state.mode = MapSubMode::ChangeMap;
+
+        for _ in 0..2 {
+            let markers = world.resource_mut::<MapMarkers>();
+            harness.key(&Key::ArrowDown, KeyCode::ArrowDown, &mut stack, markers);
+        }
+        let markers = world.resource_mut::<MapMarkers>();
+        harness.key(&Key::Enter, KeyCode::Enter, &mut stack, markers);
+
+        // POLUtils counts three Windurst Waters maps and the DLL two, so under
+        // the old roster the third row was this zone's phantom third floor.
+        let viewed = harness.map_state.viewed.expect("a row was confirmed");
+        assert_ne!(viewed, (WINDURST_WATERS, 2));
+        assert_eq!(
+            viewed.1, 0,
+            "past the zone's floors the list moves on to other zones at map 0"
+        );
+        assert!(
+            !dll.zone_maps(viewed.0).is_empty(),
+            "and that zone has a DLL record to preview"
+        );
     }
 
     /// kuluu-kzxp: Period/Comma zoom the full-screen map on default binds. The

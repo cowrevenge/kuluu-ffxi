@@ -1,4 +1,7 @@
+use crate::particle_gen::{LINKED_DATA_SOUND, OPCODE_END, OPCODE_STANDARD_SETUP, SIZE_WORDS_MASK};
 use crate::{DatError, Result};
+
+const SETUP_SIZE_NIBBLE_MASK: u8 = 0x0F;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Generator {
@@ -11,7 +14,7 @@ pub struct Generator {
 
 impl Generator {
     pub fn is_sound(&self) -> bool {
-        self.effect_type == 0x3D
+        self.effect_type == LINKED_DATA_SOUND
     }
 
     pub fn parse(name: [u8; 4], body: &[u8]) -> Result<Option<Self>> {
@@ -39,12 +42,13 @@ impl Generator {
         let mut cursor = creation_start;
         while cursor + 4 <= creation_end {
             let data_type = body[cursor];
-            let data_size_nibble = (body[cursor + 1] & 0x0F) as usize;
+            let data_size_nibble = (body[cursor + 1] & SETUP_SIZE_NIBBLE_MASK) as usize;
             let advance = data_size_nibble.saturating_mul(4);
-            if data_type == 0x00 {
+            if data_type == OPCODE_END {
                 break;
             }
-            if data_type == 0x01 && advance >= 32 && cursor + 4 + 32 <= body.len() {
+            if data_type == OPCODE_STANDARD_SETUP && advance >= 32 && cursor + 4 + 32 <= body.len()
+            {
                 let payload = cursor + 4;
                 let id = [
                     body[payload + 8],
@@ -77,10 +81,10 @@ pub struct PointLightDef {
     pub base_position: [f32; 3],
 }
 
-// research/xim ParticleGeneratorAttachment.kt:46-62 — the StandardParticleSetup
+// research/xim ParticleGeneratorAttachment.kt updateAssociatedPosition — the StandardParticleSetup
 // attachment nibble (body[0] & 0x0F) selects how the generator's particles are
 // placed: 0xE = Sun (getSunPosition + camera), 0xF = Moon, 0x0 = None (clouds,
-// camera-follow when cfg bit 0x0004 is set; Particle.kt:232-258). The linked DAT
+// camera-follow when cfg bit 0x0004 is set; Particle.kt updateAssociatedPosition). The linked DAT
 // id at setup+8 is the model the generator instances; linked_type at setup+29 is
 // the linked-data class (0x0B StaticMesh-particle, etc.).
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -101,19 +105,19 @@ pub struct CloudGeneratorDef {
     // texture for wind. [0,0] = static (e.g. fine weather ships no scroll).
     pub uv_scroll: [f32; 2],
 
-    // research/xim ParticleGeneratorParser.kt:271-274 the setup-section "ToD Color"
+    // research/xim ParticleGeneratorParser.kt sec2Handler the setup-section "ToD Color"
     // KeyFrameValueSetup opcodes 0x60/0x61/0x62/0x63 (R/G/B/A; the 0x3C-0x3F
     // ClockValueUpdaters at runtime) and 0x6D-0x70 "ToD Specular Color" (the
     // 0x4A-0x4D sun-specular updaters). KeyFrameValueSetup.read (ParticleInitializers.kt
     // :481-489) is expect32(0) then nextDatId — so the 0x19 keyframe DAT-id sits at
     // payload+4. kcr1/kcg1/kcb1 drive cloud/sky RGB, ksr1/ksg1/ksb1 the sun; sampled
-    // at the full-day fraction (ParticleUpdaters.kt:172-183 ClockValueUpdater).
+    // at the full-day fraction (ParticleUpdaters.kt ClockValueUpdater).
     pub color_r_track: Option<[u8; 4]>,
     pub color_g_track: Option<[u8; 4]>,
     pub color_b_track: Option<[u8; 4]>,
     pub alpha_mult_track: Option<[u8; 4]>,
 
-    // research/XIClient CMoElem.cpp:542-543 — the element flags word gates fog per
+    // research/XIClient CMoElem.cpp CMoElem::PrepDX — the element flags word gates fog per
     // generator, not per layer class: bit set -> D3DRS_FOGENABLE false, else linear fog
     // from the area record. Measured over ROM/0/115.DAT + ROM/0/125.DAT: cld1 and the
     // sun/star/moon meshes clear fog, while the overcast cld2 haze sheet (clod/mist/thdr)
@@ -122,15 +126,16 @@ pub struct CloudGeneratorDef {
 }
 
 impl Generator {
+    const ATTACH_NIBBLE_MASK: u8 = 0x0F;
     const ATTACH_NONE: u8 = 0x0;
     const ATTACH_SUN: u8 = 0xE;
-    // research/XIClient CYyGenerator.cpp:244 `elem->field_10C = pos[1]` — the CMoElem
+    // research/XIClient CYyGenerator.cpp HandleOne `elem->field_10C = pos[1]` — the CMoElem
     // render-state word is the u32 at 0x01-setup payload+0, whose low half is the config
     // bits this parser already read as a u16.
     const ELEM_FLAG_FOLLOW_CAMERA: u32 = 0x0000_0004;
     const ELEM_FLAG_NO_FOG: u32 = 0x0200_0000;
 
-    // research/xim EnvironmentManager.kt:453-515 weat/<type>/ cld1/cld2/sun1 0x05
+    // research/xim EnvironmentManager.kt updateWeatherEffects weat/<type>/ cld1/cld2/sun1 0x05
     // generators. Mirrors dat-cloud-probe parse_setup: the StandardParticleSetup
     // (sec1 op 0x01) carries the config word (camFollow bit), the linked model id
     // and the base position; the chunk-body attachment nibble is body[0] & 0x0F.
@@ -143,7 +148,7 @@ impl Generator {
                 available: body.len(),
             });
         }
-        let attach = body[0] & 0x0F;
+        let attach = body[0] & Self::ATTACH_NIBBLE_MASK;
         let creation_offset = u32_le(body, 0x74) as usize;
         if creation_offset < 16 || creation_offset - 16 >= body.len() {
             return Ok(None);
@@ -157,10 +162,10 @@ impl Generator {
         let mut scale = [1.0f32; 3];
         while cursor + 4 <= body.len() {
             let opcode = body[cursor];
-            if opcode == 0x00 {
+            if opcode == OPCODE_END {
                 break;
             }
-            let size_words = (body[cursor + 1] & 0x1F) as usize;
+            let size_words = (body[cursor + 1] & SIZE_WORDS_MASK) as usize;
             if size_words == 0 {
                 break;
             }
@@ -232,10 +237,10 @@ impl Generator {
             let mut cursor = sec3 - 16;
             while cursor + 4 <= body.len() {
                 let opcode = body[cursor];
-                if opcode == 0x00 {
+                if opcode == OPCODE_END {
                     break;
                 }
-                let size_words = (body[cursor + 1] & 0x1F) as usize;
+                let size_words = (body[cursor + 1] & SIZE_WORDS_MASK) as usize;
                 if size_words == 0 {
                     break;
                 }
@@ -321,10 +326,10 @@ impl Generator {
 
         while cursor + 4 <= body.len() {
             let opcode = body[cursor];
-            if opcode == 0x00 {
+            if opcode == OPCODE_END {
                 break;
             }
-            let size_words = (body[cursor + 1] & 0x1F) as usize;
+            let size_words = (body[cursor + 1] & SIZE_WORDS_MASK) as usize;
             if size_words == 0 {
                 break;
             }
@@ -398,7 +403,7 @@ impl Generator {
 pub struct ModelSpawnDef {
     pub model_name: [u8; 8],
     pub base_position: [f32; 3],
-    // research/xim ParticleGeneratorParser.kt:170,176 — section-1 0x09
+    // research/xim ParticleGeneratorParser.kt sec2Handler,176 — section-1 0x09
     // RotationInitializer / 0x0F ScaleInitializer, each a Vector3f. The broad
     // sea sheets are tiny tiles (lowsea AABB ±1.4) blown up by the generator
     // scale (e.g. 500³), so dropping these renders the sea as a speck.
@@ -420,7 +425,7 @@ impl ModelSpawnDef {
 }
 
 // FFXI effect colors are 0x80-identity, not 0xFF: research/xim
-// MeshBuffers.kt:41 `ByteColor.half = (0x80,0x80,0x80,0x80)` is "opaque
+// MeshBuffers.kt `ByteColor.half = (0x80,0x80,0x80,0x80)` is "opaque
 // neutral" (alpha25/50/75 = 0x20/0x40/0x60), matching the /128 vertex-colour
 // convention. Every static generator ships 0x80 tints (sun/moon/stars), so a
 // /255 scale rendered all model-spawn sheets at half brightness and opacity.
@@ -456,10 +461,10 @@ impl Generator {
 
         while cursor + 4 <= body.len() {
             let opcode = body[cursor];
-            if opcode == 0x00 {
+            if opcode == OPCODE_END {
                 break;
             }
-            let size_words = (body[cursor + 1] & 0x1F) as usize;
+            let size_words = (body[cursor + 1] & SIZE_WORDS_MASK) as usize;
             if size_words == 0 {
                 break;
             }
@@ -517,10 +522,10 @@ impl Generator {
             let mut cursor = sec3 - 16;
             while cursor + 4 <= body.len() {
                 let opcode = body[cursor];
-                if opcode == 0x00 {
+                if opcode == OPCODE_END {
                     break;
                 }
-                let size_words = (body[cursor + 1] & 0x1F) as usize;
+                let size_words = (body[cursor + 1] & SIZE_WORDS_MASK) as usize;
                 if size_words == 0 {
                     break;
                 }
@@ -575,10 +580,10 @@ impl Generator {
 
         while cursor + 4 <= body.len() {
             let opcode = body[cursor];
-            if opcode == 0x00 {
+            if opcode == OPCODE_END {
                 break;
             }
-            let size_words = (body[cursor + 1] & 0x1F) as usize;
+            let size_words = (body[cursor + 1] & SIZE_WORDS_MASK) as usize;
             if size_words == 0 {
                 break;
             }
@@ -1016,7 +1021,7 @@ mod tests {
     }
 
     // The follow-camera bit and the no-fog bit are two halves of ONE u32 (research/XIClient
-    // CYyGenerator.cpp:244), so reading only the low u16 silently drops fog control. Words
+    // CYyGenerator.cpp HandleOne), so reading only the low u16 silently drops fog control. Words
     // measured off ROM/0/115.DAT weat/clod: cld1 0x02440004, cld2 0x00440004.
     #[test]
     fn cloud_generator_reads_fog_and_camera_bits_from_one_word() {

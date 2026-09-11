@@ -40,18 +40,17 @@ an event stream.
 
 Two constraints shape everything:
 
-- **The reactor is not wired in `play --headless`** (main.rs spawns the bare
-  session). Anything reactor-driven — zoneline auto-trigger, follow, engage,
-  pathing — only runs under `kuluu-mcp` standalone (which spawns
-  supervisor→reactor→session) or in the GUI. Raw stdio can still send explicit
-  `AgentCommand`s like `request_zone_change`.
+- **`play --headless` uses the agent reactor profile.** Reactor-driven follow,
+  engage, pathing, fishing automation, and explicit commands such as
+  `request_zone_change` are available over raw stdio. Unlike `kuluu-mcp`, this
+  path still has no supervisor/reconnect or event-driven MCP waits.
 - **Verification runs on the human's desktop while they're using it, so drive
   focus-free.** Session commands, real-input movement (`debug_drive`), grounding
   readback (`debug_heights`), and screen capture (`scripts/capture.sh`) all work
-  over the agent socket with the window unfocused — the client only has to stay
-  un-occluded, because macOS stops rendering a fully hidden window. Only menu
-  navigation and typing need real keystrokes, and those steal focus; batch them
-  and warn the user first. Movement *feel* and camera feel still need their eyes
+  over the agent socket with the window unfocused. Keep it visible and verify
+  image freshness; use the GUI reference's native-video fallback when stills
+  fail. Warn the user before foreground capture or real keystrokes, and restore
+  focus afterward. Movement *feel* and camera feel still need their eyes
   — say exactly which observations you're handing over.
 
 ## Delegating the drive loop (cheap models)
@@ -59,10 +58,10 @@ Two constraints shape everything:
 Driving is mostly mechanical: long runs of small tool calls (MCP waits, stdio
 commands, capture/read cycles) with little reasoning per step. Don't spend the
 orchestrating model's time and context on that — spawn a subagent with the
-Agent tool using `model: haiku` to run the loop, and keep the judgment work
+available delegation tool and a suitable available model. Keep judgment
 (picking the surface, interpreting evidence, writing the report) here.
 
-The driver's brief must be self-contained — it inherits none of your context:
+Make the driver's brief self-contained; do not rely on inherited context:
 
 - exact commands, not intent: paste the launch/attach/drive invocations from
   the reference file rather than making a small model re-derive them;
@@ -155,8 +154,8 @@ fastest at the env-gotcha layer.
 
 Verification runs (headless captures, GUI drives, retail comparisons) should run in subagents to keep the main context clean:
 
-- `model: "haiku"` (haiku-4-5): mechanical evidence collection — run the documented commands, capture, read, report deltas.
-- `model: "sonnet"` (sonnet-5): judgment passes — driving the client through menus, comparing local output against retail references, deciding pass/fail per criterion.
+- Use a lower-cost available model for mechanical collection and a capable available model for judgment. If the harness does not offer an appropriate override, inherit the current model; do not request unavailable model names.
+- Separate session readiness from visual evidence: use socket snapshots for zone-in, and inspect changing frames for rendering. See the native window-video fallback in `references/drive-gui.md` when screenshots are black or stale.
 - Main agent receives only verdicts + evidence paths (artifacts/verify/...), not raw screenshot streams.
 - Give subagents the exact scripts (`scripts/`, `references/drive-headless.md`, `references/drive-gui.md`) and the specific criteria to check; they should not improvise scope.
 

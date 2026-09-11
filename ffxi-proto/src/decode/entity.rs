@@ -17,6 +17,11 @@ pub struct PosHead {
 
     pub y: f32,
 
+    /// POS block word 0x18. Bits 17..31 carry the head-look target (see `facetarget`); the low
+    /// 13 bits are LSB's moving step counter: entity_update.cpp CEntityUpdatePacket::updateWith
+    /// writes `ref<uint16>(0x18) = PEntity->loc.p.moving`, and pathfind.cpp CPathFind::StepTo
+    /// advances it by 0x35 per step (0x28 on a speed change), mod 0x2000. Retail phases walk/run
+    /// cycles off the delta between two POS updates.
     pub flags0: u32,
 
     pub speed: u8,
@@ -35,6 +40,11 @@ pub struct PosHead {
 
 impl PosHead {
     pub(crate) const SIZE: usize = 40;
+
+    /// `HpMax` in GP_SERV_POS_HEAD
+    /// (vendor/server/src/map/packets/s2c/0x00a_login.h GP_SERV_POS_HEAD HpMax). The name is a
+    /// misnomer: every carrier fills it from `PChar->GetHPP()`, a percentage.
+    pub const HPP_OFFSET: usize = 26;
 
     pub(crate) const SIZE_WITH_BT_TARGET: usize = 44;
 
@@ -58,7 +68,7 @@ impl PosHead {
             flags0: u32::from_le_bytes(body[20..24].try_into().unwrap()),
             speed: body[24],
             speed_base: body[25],
-            hpp: body[26],
+            hpp: body[Self::HPP_OFFSET],
             server_status: body[27],
             flags1: u32::from_le_bytes(body[28..32].try_into().unwrap()),
             flags2: u32::from_le_bytes(body[32..36].try_into().unwrap()),
@@ -97,6 +107,54 @@ impl PosHead {
         Some(((flags6 >> Self::MOUNT_INDEX_SHIFT) & Self::MOUNT_INDEX_MASK) as u8)
     }
 
+    // `GP_SERV_CHAR_PC.MonstrosityFlags` — the int16 at body offset 0x3A, past
+    // `PosHead`, inside the Model block. research/XIClient/src/XIClient/include/Game/Net/Packets/s2c/0x00D.h pins it:
+    // `static_assert(offsetof(GP_SERV_CHAR_PC, field_3E) == 0x3A)` with PosHead at
+    // 0x00 (our body start), so this is a direct body offset like FLAGS6_OFFSET.
+    const MONSTROSITY_FLAGS_OFFSET: usize = 0x3A;
+
+    /// Whether a 0x0D `CHAR_PC` is a monstrosity, from the Model block's
+    /// `MonstrosityFlags`. LSB writes it only under `SendFlg.Model`
+    /// (vendor/server/src/map/packets/char_update.cpp `CCharUpdatePacket::updateWith`):
+    /// `0x8000 | Species` when the character is a monstrosity, else 0. Retail's
+    /// nameplate reads it as `AUDIT_210 != 0` → the Monstrosity marker
+    /// (research/XIClient/src/XIClient/source/World/Actor/ActorTelemetry.cpp `GetPrimaryActorNameMarker`).
+    ///
+    /// Returns `None` when the packet stops short of the field; `Some(false)` is a
+    /// Model-block update that says "not a monstrosity" and clears any prior state.
+    pub fn monstrosity(body: &[u8]) -> Option<bool> {
+        let b = body.get(Self::MONSTROSITY_FLAGS_OFFSET..Self::MONSTROSITY_FLAGS_OFFSET + 2)?;
+        Some(u16::from_le_bytes([b[0], b[1]]) != 0)
+    }
+
+    // `GP_SERV_CHAR_PC.Flags4` — the u8 at body offset 0x2F, past `PosHead`. Unlike
+    // Flags1..3 it is written by LSB outside every SendFlg block: "Fields that are
+    // always checked if this isnt a despawn packet"
+    // (vendor/server/src/map/packets/char_update.cpp `CCharUpdatePacket::updateWith`),
+    // and the minimum non-despawn size already covers it. Retail reads it
+    // unconditionally too — research/XIClient/src/XIClient/include/Game/Net/Packets/s2c/0x00D.h pins the byte:
+    // `static_assert(offsetof(GP_SERV_CHAR_PC, Field33Flags) == 0x2F)` with PosHead at
+    // 0x00 (our body start). PC-only: in a 0x0E CHAR_NPC that offset is inside the
+    // SubKind/Status word (vendor/server/src/map/packets/entity_update.cpp
+    // `GP_SERV_CHAR_NPC`), so callers must gate on the opcode.
+    const FLAGS4_OFFSET: usize = 0x2F;
+
+    /// The job-master display bit of a 0x0D `CHAR_PC`'s `Flags4.JobMasterFlag`
+    /// (bit 6). LSB sets it from `getMod(Mod::SUPERIOR_LEVEL) == 5 &&
+    /// m_jobMasterDisplay` — the /mastery-display toggle, persisted per character
+    /// (vendor/server/src/map/packets/c2s/0x11b_mastery_display.cpp).
+    ///
+    /// Retail's nameplate star is keyed off `Flags3.LfgMasterFlag`
+    /// (`AUDIT_140.BIT_3`, research/XIClient/src/XIClient/source/World/Actor/ActorTelemetry.cpp
+    /// `GetPrimaryActorNameMarker`), which LSB hardcodes to 0 in char_update — so on
+    /// this server the star only ever comes from this bit. The same byte's bits 2-5
+    /// are the campaign special-marker index (retail `AUDIT_13C.BIT_2..5`,
+    /// `GetSpecialActorNameMarker`), which LSB never sets and whose glyphs (0xC8-0xCB)
+    /// do not exist in the NA `fontshp` group, so they are not decoded.
+    pub fn flags4_job_master(body: &[u8]) -> Option<bool> {
+        Some(body.get(Self::FLAGS4_OFFSET)? & (1 << flags4::JOB_MASTER as u8) != 0)
+    }
+
     pub fn decode_char_npc(body: &[u8]) -> Result<(Self, u32), DecodeError> {
         let head = Self::decode(body)?;
         Ok((head, head.bt_target_id))
@@ -113,14 +171,14 @@ impl PosHead {
                 .is_some_and(|mask| mask & Self::UPDATE_DESPAWN != 0)
     }
 
-    /// `PacketNameLength` (vendor/server/src/common/utils.h:71) — 15 chars plus
+    /// `PacketNameLength` (vendor/server/src/common/utils.h) — 15 chars plus
     /// the terminator, the cap on every name LSB copies into 0x0D/0x0E.
     const NAME_LEN: usize = 16;
 
     /// `sendflags_t.Name` — `UPDATE_NAME`, the ordinary "a name follows" bit
-    /// (vendor/server/src/map/entities/baseentity.h:173).
+    /// (vendor/server/src/map/entities/baseentity.h UPDATETYPE UPDATE_NAME).
     const SEND_NAME: u8 = 0x08;
-    /// `sendflags_t.Name2` (entity_update.cpp:52). Set on every equipped-model
+    /// `sendflags_t.Name2` (entity_update.cpp). Set on every equipped-model
     /// spawn, which is why it alone does not imply a name is present.
     const SEND_NAME2: u8 = 0x40;
 
@@ -140,7 +198,7 @@ impl PosHead {
         }
 
         // Two layouts, and they are flagged by different bits
-        // (vendor/server/src/map/packets/entity_update.cpp:539-587).
+        // (vendor/server/src/map/packets/entity_update.cpp CEntityUpdatePacket::updateWith).
         //
         // A renamed dynamic entity (targid >= 0x700) spawning with an equipment
         // model grows the packet, memcpy's `look_t` over 0x30 and puts the name
@@ -148,7 +206,7 @@ impl PosHead {
         // UPDATE_NAME *clear* — so gating on UPDATE_NAME alone drops it. Name2
         // rides every equipped spawn though, so the real discriminator is the
         // `ref<uint8>(0x18) = 0x01` marker plus the growth: a plain equipped
-        // spawn is `setSize(0x48)` (entity_update.cpp:463) and stops short of
+        // spawn is `setSize(0x48)` (entity_update.cpp CEntityUpdatePacket::updateWith) and stops short of
         // the name field.
         //
         // Every other rename writes 0x34, shifted to 0x35 for targid < 1024, and
@@ -194,9 +252,10 @@ impl PosHead {
 /// (0x04) is set — the server refreshes the words in that block alone.
 ///
 /// Drives the retail nameplate: colour selection
-/// (research/XIClient/.../ActorTelemetry.cpp `NameColorSet`) and the icon
+/// (research/XIClient/src/XIClient/source/World/Actor/ActorTelemetry.cpp `NameColorSet`) and the icon
 /// markers prefixed to the name
-/// (research/XIClient/.../ActorTelemetry.cpp `GetPrimaryActorNameMarker`).
+/// (research/XIClient/src/XIClient/source/World/Actor/ActorTelemetry.cpp `GetPrimaryActorNameMarker`).
+/// `untargetable` is the targetability authority, not a nameplate concern.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct CharFlags {
     pub monster: bool,
@@ -231,10 +290,36 @@ pub struct CharFlags {
 
     pub new_character: bool,
     pub mentor: bool,
+
+    /// `Flags4.JobMasterFlag` (bit 6 of the u8 at body offset 0x2F): LSB's
+    /// job-master display toggle — `SUPERIOR_LEVEL == 5 && m_jobMasterDisplay`
+    /// (vendor/server/src/map/packets/char_update.cpp CCharUpdatePacket::updateWith). Written on every
+    /// non-despawn 0x0D, outside all SendFlg blocks. Drives the same nameplate
+    /// star as `lfg_master` (retail keys it off `Flags3.LfgMasterFlag`, which LSB
+    /// hardcodes to 0 — see [`PosHead::flags4_job_master`]).
+    pub job_master_display: bool,
+
+    /// `Flags1.InvisFlag` (bit 29): the server's player-invisibility bit — set
+    /// for PCs only, when a GM hides themselves or an EFFECTFLAG_INVISIBLE
+    /// status effect is active. Retail keeps such players targetable but draws
+    /// nothing: no model, no nameplate.
+    pub invis: bool,
+
+    /// `Flags1.TargetOffFlag` (bit 19): the server's untargetable bit. For
+    /// NPC/MOB/PET/TRUST that word carries `m_flags` — LSB writes it at
+    /// `ref<uint32>(0x21)` under UPDATE_HP, so ENTITYFLAGS
+    /// `FLAG_UNTARGETABLE = 0x800` (vendor/server/src/map/entities/baseentity.h)
+    /// lands exactly on this bit; for CHAR_PC it is char_update's explicit
+    /// "Untargetable player" field. vendor/server/src/map/packets/
+    /// entity_update.cpp `flags1_t`, char_update.cpp CCharUpdatePacket::updateWith.
+    pub untargetable: bool,
 }
 
 impl CharFlags {
-    pub fn from_pos_head(head: &PosHead) -> Self {
+    /// `flags4` is the decoded `Flags4.JobMasterFlag` bit — `None` when the packet
+    /// stops short of body offset 0x2F or the caller is not on a CHAR_PC (the byte
+    /// means something else in a 0x0E), which reads as "not set".
+    pub fn from_pos_head(head: &PosHead, flags4_job_master: Option<bool>) -> Self {
         let (f1, f2, f3) = (head.flags1, head.flags2, head.flags3);
         Self {
             monster: bit(f1, flags1::MONSTER),
@@ -261,6 +346,9 @@ impl CharFlags {
             allegiance: field(f3, flags3::BALLISTA_TEAM, flags3::BALLISTA_TEAM_BITS) as u8,
             new_character: bit(f3, flags3::NEW_CHARACTER),
             mentor: bit(f3, flags3::MENTOR),
+            job_master_display: flags4_job_master.unwrap_or(false),
+            invis: bit(f1, flags1::INVIS),
+            untargetable: bit(f1, flags1::TARGET_OFF),
         }
     }
 }
@@ -286,6 +374,16 @@ mod flags1 {
     pub const GM_LEVEL: u32 = 24;
     pub const GM_LEVEL_BITS: u32 = 3;
     pub const BAZAAR: u32 = 31;
+    /// `TargetOffFlag` — bit 19 in both char_update.cpp and entity_update.cpp
+    /// `flags1_t`. For NPC/MOB this is where `m_flags & FLAG_UNTARGETABLE`
+    /// (0x800) lands: LSB writes the u16 at upstream offset 0x21, i.e. bytes
+    /// 1-2 of this word.
+    pub const TARGET_OFF: u32 = 19;
+    /// `InvisFlag` — bit 29 in char_update.cpp's `flags1_t`. LSB sets it for
+    /// PCs only: `m_isGMHidden || HasStatusEffectByFlag(EFFECTFLAG_INVISIBLE)`
+    /// (vendor/server/src/map/packets/char_update.cpp CCharUpdatePacket::updateWith, char_status.cpp CCharStatusPacket::CCharStatusPacket).
+    /// entity_update declares the same bit but never writes it.
+    pub const INVIS: u32 = 29;
 }
 
 // vendor/server/src/map/packets/char_update.cpp `flags2_t`
@@ -310,9 +408,16 @@ mod flags3 {
     pub const MENTOR: u32 = 24;
 }
 
+// vendor/server/src/map/packets/char_update.cpp `flags4_t` — the byte at body
+// offset 0x2F. Only JobMasterFlag (bit 6) is decoded; see
+// [`PosHead::flags4_job_master`] for why the rest stays out.
+mod flags4 {
+    pub const JOB_MASTER: u32 = 6;
+}
+
 /// The FourCC a `MODEL_DOOR` entity carries in `CHAR_NPC` (0x0E) —
 /// `GP_SERV_CHAR_NPC` `packet_data_2.DoorId`
-/// (research/XIClient/.../Game/Net/Packets/s2c/0x00E.h `CharNpcTypeFields`).
+/// (research/XIClient/src/XIClient/include/Game/Net/Packets/s2c/0x00E.h `CharNpcTypeFields`).
 /// LSB fills it with the entity's `npc_list.name`
 /// (vendor/server/src/map/packets/entity_update.cpp
 /// `CEntityUpdatePacket::updateWith`, `case MODEL_DOOR`).
@@ -342,7 +447,7 @@ impl DoorId {
 
     /// The MZB `BlockID` form. Retail reads the FourCC as a little-endian
     /// `int32` and tests `(unsigned char)BlockID` for the group prefix
-    /// (research/XIClient/.../World/Zone/Terrain/ZoneLayoutData.cpp
+    /// (research/XIClient/src/XIClient/source/World/Zone/Terrain/ZoneLayoutData.cpp
     /// `InitUnderscoreAtStructs`), so this compares directly against
     /// `MmbPlacement::block_id`.
     pub const fn block_id(self) -> u32 {
@@ -389,6 +494,10 @@ pub enum LookData {
 
     Transport {
         size: u16,
+        #[serde(default)]
+        model_id: Option<u32>,
+        #[serde(default)]
+        animation_start: Option<u32>,
     },
 }
 
@@ -398,7 +507,7 @@ impl LookData {
     /// `CharNpcTypeFields::field_30`, whose retail struct offsets are relative
     /// to `GP_SERV_POS_HEAD` — exactly this `body` — so
     /// `offsetof(GP_SERV_CHAR_NPC, Data) + offsetof(CharNpcGenericData, Extra)
-    /// == 0x30` (research/XIClient/.../s2c/0x00E.h) is this constant verbatim.
+    /// == 0x30` (research/XIClient/src/XIClient/include/Game/Net/Packets/s2c/0x00E.h) is this constant verbatim.
     /// LSB writes the same bytes at packet 0x34, four past the `look.size` it
     /// puts at packet 0x30.
     pub(crate) const DOOR_ID_BODY_OFFSET: usize = 0x30;
@@ -442,7 +551,20 @@ impl LookData {
                 size,
                 door_id: Self::door_id(body),
             }),
-            3 | 4 => Some(LookData::Transport { size }),
+            ffxi_vocab::transport::MODEL_ELEVATOR | ffxi_vocab::transport::MODEL_SHIP => {
+                // vendor/server/src/map/packets/entity_update.cpp getTransportNPCName
+                const MODEL_OFFSET: usize = 0x30;
+                const TIME_OFFSET: usize = 0x34;
+                let word = |offset| {
+                    body.get(offset..offset + 4)
+                        .map(|b| u32::from_le_bytes(b.try_into().unwrap()))
+                };
+                Some(LookData::Transport {
+                    size,
+                    model_id: word(MODEL_OFFSET),
+                    animation_start: word(TIME_OFFSET),
+                })
+            }
             _ => None,
         }
     }
@@ -458,10 +580,14 @@ impl LookData {
     pub const GRAP_ID_TBL_LEN: usize = Self::GRAP_ID_TBL_SLOTS * 2;
 
     /// Slot tag stripped from `GrapIDTbl[i]`: LSB writes `look.<slot> + 0x{i}000`
-    /// (vendor/server/src/map/packets/s2c/0x051_grap_list.cpp:32-39 and
+    /// (vendor/server/src/map/packets/s2c/0x051_grap_list.cpp GP_SERV_COMMAND_GRAP_LIST::GP_SERV_COMMAND_GRAP_LIST and
     /// vendor/server/src/map/packets/char_update.cpp), the same encoding in all
     /// three carriers of the table (0x00D CHAR_PC, 0x00A LOGIN, 0x051 GRAP_LIST).
     const GRAP_ID_MODEL_MASK: u16 = 0x0FFF;
+    /// `GrapIDTbl[0] = face | race << 8`
+    /// (vendor/server/src/map/packets/s2c/0x051_grap_list.cpp GP_SERV_COMMAND_GRAP_LIST::GP_SERV_COMMAND_GRAP_LIST).
+    const GRAP_ID_FACE_RACE_MASK: u16 = 0x00FF;
+    const GRAP_ID_RACE_SHIFT: u32 = 8;
 
     pub fn decode_char_pc(body: &[u8]) -> Option<Self> {
         Self::decode_grap_id_tbl(body, Self::CHAR_PC_GRAP_OFFSET)
@@ -479,8 +605,8 @@ impl LookData {
         if slot0 == 0 {
             return None;
         }
-        let face = (slot0 & 0x00FF) as u8;
-        let race = ((slot0 >> 8) & 0x00FF) as u8;
+        let face = (slot0 & Self::GRAP_ID_FACE_RACE_MASK) as u8;
+        let race = ((slot0 >> Self::GRAP_ID_RACE_SHIFT) & Self::GRAP_ID_FACE_RACE_MASK) as u8;
 
         let read_slot = |i: usize| -> u16 {
             let p = off + 2 * i;
@@ -644,7 +770,7 @@ pub struct CharSync {
     pub targid: u16,
     pub id: u32,
     /// MogExpansionFlag: MH second floor unlocked (`mhflag & 0x20`), byte 0x27 of the
-    /// full packet = body 0x23. vendor/server/src/map/packets/char_sync.cpp:61.
+    /// full packet = body 0x23. vendor/server/src/map/packets/char_sync.cpp CCharSyncPacket::CCharSyncPacket.
     /// `None` when the packet is too short to carry it.
     pub mh_2f_unlocked: Option<bool>,
 }
@@ -757,7 +883,7 @@ mod char_flags_tests {
 
     #[test]
     fn all_flags_clear_by_default() {
-        let flags = CharFlags::from_pos_head(&head_with(0, 0, 0));
+        let flags = CharFlags::from_pos_head(&head_with(0, 0, 0), None);
         assert_eq!(flags, CharFlags::default());
     }
 
@@ -769,7 +895,7 @@ mod char_flags_tests {
     /// one field only. Catches a shift that silently aliases a neighbour.
     #[test]
     fn each_flag1_bit_is_isolated() {
-        let probes: [FlagProbe; 9] = [
+        let probes: [FlagProbe; 11] = [
             (flags1::MONSTER, |f| f.monster),
             (flags1::LFG, |f| f.lfg),
             (flags1::ANONYMOUS, |f| f.anonymous),
@@ -778,10 +904,12 @@ mod char_flags_tests {
             (flags1::PLAY_ONLINE, |f| f.play_online),
             (flags1::LINKSHELL, |f| f.linkshell),
             (flags1::LINKDEAD, |f| f.linkdead),
+            (flags1::TARGET_OFF, |f| f.untargetable),
+            (flags1::INVIS, |f| f.invis),
             (flags1::BAZAAR, |f| f.bazaar),
         ];
         for (shift, get) in probes {
-            let flags = CharFlags::from_pos_head(&head_with(1 << shift, 0, 0));
+            let flags = CharFlags::from_pos_head(&head_with(1 << shift, 0, 0), None);
             assert!(get(&flags), "flags1 bit {shift} did not set its field");
             let others = probes
                 .iter()
@@ -793,11 +921,43 @@ mod char_flags_tests {
         }
     }
 
+    /// Pins the byte mapping against LSB's write site: for NPC/MOB the
+    /// `m_flags` u16 is written at upstream offset 0x21 — four bytes before our
+    /// body base, i.e. our 0x1D — so ENTITYFLAGS bit N lands on flags1 word bit
+    /// N+8. FLAG_UNTARGETABLE (0x800) must therefore light `untargetable` and
+    /// nothing else.
+    #[test]
+    fn mob_m_flags_untargetable_lands_on_target_off() {
+        let mut body = vec![0u8; PosHead::SIZE];
+        // vendor/server/src/map/packets/entity_update.cpp CEntityUpdatePacket::updateWith/:387
+        // `ref<uint32>(0x21) = m_flags` under UPDATE_HP.
+        const M_FLAGS_OFFSET: usize = 0x1D;
+        body[M_FLAGS_OFFSET..M_FLAGS_OFFSET + 4].copy_from_slice(&0x800u32.to_le_bytes());
+        let flags = CharFlags::from_pos_head(&PosHead::decode(&body).unwrap(), None);
+        assert!(
+            flags.untargetable,
+            "FLAG_UNTARGETABLE did not light TargetOffFlag"
+        );
+        // The neighbouring ENTITYFLAGS bits (HIDE_NAME 0x8, CALL_FOR_HELP 0x20,
+        // HIDE_MODEL 0x80, HIDE_HP 0x100) must not bleed into any decoded field.
+        for m_flags in [0x008u32, 0x020, 0x080, 0x100] {
+            let mut body = vec![0u8; PosHead::SIZE];
+            body[M_FLAGS_OFFSET..M_FLAGS_OFFSET + 4].copy_from_slice(&m_flags.to_le_bytes());
+            let flags = CharFlags::from_pos_head(&PosHead::decode(&body).unwrap(), None);
+            assert!(
+                !flags.untargetable,
+                "m_flags {m_flags:#x} bled into untargetable"
+            );
+        }
+    }
+
     #[test]
     fn gm_level_is_a_three_bit_field_above_the_singles() {
         for level in 0..=7u8 {
-            let flags =
-                CharFlags::from_pos_head(&head_with(u32::from(level) << flags1::GM_LEVEL, 0, 0));
+            let flags = CharFlags::from_pos_head(
+                &head_with(u32::from(level) << flags1::GM_LEVEL, 0, 0),
+                None,
+            );
             assert_eq!(flags.gm_level, level);
             assert!(!flags.bazaar, "GmLevel {level} bled into BazaarFlag");
         }
@@ -808,7 +968,7 @@ mod char_flags_tests {
     #[test]
     fn linkshell_color_reads_the_low_three_bytes_of_flags2() {
         let flags2 = 0x11u32 | (0x22 << 8) | (0x33 << 16);
-        let flags = CharFlags::from_pos_head(&head_with(0, flags2, 0));
+        let flags = CharFlags::from_pos_head(&head_with(0, flags2, 0), None);
         assert_eq!(flags.linkshell_color, [0x11, 0x22, 0x33]);
         assert!(!flags.charm);
         assert!(!flags.auto_party);
@@ -824,7 +984,7 @@ mod char_flags_tests {
             (flags2::GM_ICON, |f: &CharFlags| f.gm_icon),
             (flags2::AUTO_PARTY, |f: &CharFlags| f.auto_party),
         ] {
-            let flags = CharFlags::from_pos_head(&head_with(0, 1 << shift, 0));
+            let flags = CharFlags::from_pos_head(&head_with(0, 1 << shift, 0), None);
             assert!(get(&flags), "flags2 bit {shift} did not set its field");
             assert_eq!(
                 flags.linkshell_color,
@@ -838,11 +998,10 @@ mod char_flags_tests {
     fn allegiance_is_the_ballista_team_byte() {
         // ALLEGIANCE_TYPE::WINDURST (vendor/server/src/map/entities/baseentity.h)
         const WINDURST: u8 = 4;
-        let flags = CharFlags::from_pos_head(&head_with(
-            0,
-            0,
-            u32::from(WINDURST) << flags3::BALLISTA_TEAM,
-        ));
+        let flags = CharFlags::from_pos_head(
+            &head_with(0, 0, u32::from(WINDURST) << flags3::BALLISTA_TEAM),
+            None,
+        );
         assert_eq!(flags.allegiance, WINDURST);
         assert!(!flags.trust);
         assert!(!flags.new_character);
@@ -859,7 +1018,7 @@ mod char_flags_tests {
             (flags3::MENTOR, |f| f.mentor),
         ];
         for (shift, get) in probes {
-            let flags = CharFlags::from_pos_head(&head_with(0, 0, 1 << shift));
+            let flags = CharFlags::from_pos_head(&head_with(0, 0, 1 << shift), None);
             assert!(get(&flags), "flags3 bit {shift} did not set its field");
             assert_eq!(
                 flags.allegiance, 0,
@@ -872,6 +1031,38 @@ mod char_flags_tests {
                 .count();
             assert_eq!(others, 0, "flags3 bit {shift} bled into another field");
         }
+    }
+
+    /// `Flags4.JobMasterFlag` — bit 6 of the u8 at body offset 0x2F, past
+    /// `PosHead`. Unlike the flags1..3 words it is not part of any decoded word,
+    /// so a lone set bit must light exactly one field.
+    #[test]
+    fn flags4_job_master_bit_lights_the_field() {
+        let mut body = vec![0u8; 0x30]; // ≥ 0x30 so byte 0x2F is present
+        body[0x2F] |= 1 << flags4::JOB_MASTER;
+        let head = PosHead::decode(&body).unwrap();
+        assert_eq!(PosHead::flags4_job_master(&body), Some(true));
+        let flags = CharFlags::from_pos_head(&head, PosHead::flags4_job_master(&body));
+        assert!(flags.job_master_display);
+
+        // The neighbouring bits of the same byte (unknown_0_0, TrialFlag,
+        // unknown_0_2/0_4, unknown_0_7) must not bleed in.
+        for bit in [0u32, 1, 2, 3, 4, 5, 7] {
+            let mut body = vec![0u8; 0x30];
+            body[0x2F] |= 1 << bit;
+            assert_eq!(PosHead::flags4_job_master(&body), Some(false));
+        }
+    }
+
+    /// A body that stops short of byte 0x2F decodes to "not set" rather than
+    /// erroring — `from_pos_head` treats it as false.
+    #[test]
+    fn flags4_job_master_is_none_when_the_body_stops_short() {
+        let body = vec![0u8; PosHead::SIZE]; // 40 bytes: no byte at 0x2F
+        assert_eq!(PosHead::flags4_job_master(&body), None);
+        let head = PosHead::decode(&body).unwrap();
+        let flags = CharFlags::from_pos_head(&head, PosHead::flags4_job_master(&body));
+        assert!(!flags.job_master_display);
     }
 }
 
@@ -1240,8 +1431,9 @@ mod pos_head_tests {
     fn char_pc_mount_index_reads_flags6_and_needs_the_general_block() {
         // Flags6.MountIndex is bits 4..11; GateId occupies the low nibble and must
         // not bleed in (flags6_t, vendor/server/src/map/packets/char_update.cpp).
+        const GATE_ID_MASK: u32 = (1 << PosHead::MOUNT_INDEX_SHIFT) - 1;
         let mut buf = vec![0u8; PosHead::FLAGS6_OFFSET + 4];
-        let flags6 = (u32::from(34u8) << PosHead::MOUNT_INDEX_SHIFT) | 0x0F;
+        let flags6 = (u32::from(34u8) << PosHead::MOUNT_INDEX_SHIFT) | GATE_ID_MASK;
         buf[PosHead::FLAGS6_OFFSET..PosHead::FLAGS6_OFFSET + 4]
             .copy_from_slice(&flags6.to_le_bytes());
         assert_eq!(PosHead::mount_index(&buf), Some(34));
@@ -1249,6 +1441,23 @@ mod pos_head_tests {
         // A position-only update stops before Flags6.
         let short = vec![0u8; PosHead::SIZE_WITH_BT_TARGET];
         assert_eq!(PosHead::mount_index(&short), None);
+    }
+
+    #[test]
+    fn char_pc_monstrosity_reads_the_model_block_flags() {
+        // MonstrosityFlags is the int16 at body 0x3A; LSB writes `0x8000 | Species`
+        // when monstrosity, else leaves it 0 (char_update.cpp Model block). Any
+        // non-zero value means "is a monstrosity" to retail's nameplate.
+        let mut buf = vec![0u8; PosHead::MONSTROSITY_FLAGS_OFFSET + 2];
+        assert_eq!(PosHead::monstrosity(&buf), Some(false));
+
+        // The 0x8000 high bit LSB always sets, with the species in the low bits.
+        buf[PosHead::MONSTROSITY_FLAGS_OFFSET..].copy_from_slice(&0x8005u16.to_le_bytes());
+        assert_eq!(PosHead::monstrosity(&buf), Some(true));
+
+        // A General-only update stops before the Model block's field.
+        let short = vec![0u8; PosHead::SIZE_WITH_BT_TARGET];
+        assert_eq!(PosHead::monstrosity(&short), None);
     }
 
     #[test]
@@ -1274,8 +1483,9 @@ mod pos_head_tests {
     fn pos_head_extracts_facetarget_from_flags0() {
         // facetarget occupies Flags0 bits 17..31; targid 0x1A2 must round-trip
         // and not bleed into the low MovTime/RunMode/GroundFlag/KingFlag bits.
+        const BELOW_FACETARGET_MASK: u32 = (1 << PosHead::FACETARGET_SHIFT) - 1;
         let mut buf = vec![0u8; PosHead::SIZE_WITH_BT_TARGET];
-        let flags0 = (0x01A2u32 << 17) | 0x0001_FFFF;
+        let flags0 = (0x01A2u32 << PosHead::FACETARGET_SHIFT) | BELOW_FACETARGET_MASK;
         buf[20..24].copy_from_slice(&flags0.to_le_bytes());
         let h = PosHead::decode(&buf).unwrap();
         assert_eq!(h.facetarget(), 0x01A2);
@@ -1367,7 +1577,7 @@ mod pos_head_tests {
         assert!(PosHead::try_extract_name(s2c::CHAR_PC, &buf).is_none());
     }
 
-    /// entity_update.cpp:539-560 — a renamed dynamic entity (targid >= 0x700)
+    /// entity_update.cpp CEntityUpdatePacket::updateWith — a renamed dynamic entity (targid >= 0x700)
     /// spawning with an equipment model grows to `setSize(0x56)`, gets `look_t`
     /// memcpy'd over packet 0x30 and its name pushed to packet 0x44, flagged by
     /// `ref<uint8>(0x18) = 0x01`. Its mask is the literal 0x57, which carries
@@ -1410,7 +1620,7 @@ mod pos_head_tests {
         use crate::map::s2c;
 
         let mut buf = vec![0u8; 0x54];
-        buf[6] = 0x08 | 0x40;
+        buf[6] = PosHead::SEND_NAME | PosHead::SEND_NAME2;
         buf[0x18 - 4] = 0x01;
         buf[0x30..0x30 + 9].copy_from_slice(b"Sigli-Sea");
         assert_eq!(
@@ -1439,7 +1649,7 @@ mod char_sync_tests {
     use super::*;
 
     /// Pins the 2F-unlock byte to LSB's full-packet offset 0x27 minus the 4-byte
-    /// sub-packet header (vendor/server/src/map/packets/char_sync.cpp:61).
+    /// sub-packet header (vendor/server/src/map/packets/char_sync.cpp CCharSyncPacket::CCharSyncPacket).
     #[test]
     fn char_sync_2f_flag_sits_at_lsb_packet_byte_0x27() {
         assert_eq!(CharSync::MH_2F_UNLOCKED_OFFSET, 0x27 - 4);
@@ -1570,5 +1780,49 @@ mod pet_sync_tests {
             PetSync::decode(&buf),
             Err(DecodeError::Truncated(_, _))
         ));
+    }
+}
+
+#[cfg(test)]
+mod transport_tests {
+    use super::LookData;
+
+    #[test]
+    fn transport_binary_words_preserve_zero_and_partial_presence() {
+        const MODEL: usize = 44;
+        const SELECTOR: usize = 48;
+        const START: usize = 52;
+        const FULL: usize = 56;
+        const STAMP: u32 = 0x1200_3400;
+        for size in [3u16, 4] {
+            let mut body = [0u8; FULL];
+            body[MODEL..MODEL + 2].copy_from_slice(&size.to_le_bytes());
+            body[SELECTOR] = 14;
+            body[START..].copy_from_slice(&STAMP.to_le_bytes());
+            for length in 0..=FULL {
+                let decoded = LookData::decode_char_npc(&body[..length]);
+                if length < SELECTOR {
+                    assert_eq!(decoded, None);
+                } else {
+                    assert_eq!(
+                        decoded,
+                        Some(LookData::Transport {
+                            size,
+                            model_id: (length >= START).then_some(14),
+                            animation_start: (length == FULL).then_some(STAMP),
+                        })
+                    );
+                }
+            }
+            body[SELECTOR..].fill(0);
+            assert_eq!(
+                LookData::decode_char_npc(&body),
+                Some(LookData::Transport {
+                    size,
+                    model_id: Some(0),
+                    animation_start: Some(0),
+                })
+            );
+        }
     }
 }

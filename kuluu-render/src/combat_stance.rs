@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::fs;
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -236,23 +236,28 @@ impl WalkMode {
     }
 }
 
-/// Whether the self character's movement keys are held this tick, written by
-/// the client's movement dispatch. While keys are what move the player, the
-/// self pose reads this instead of inferring motion from transform deltas:
-/// prediction reconcile keeps nudging the rendered transform, so inferred speed
-/// can hover above `MOVE_EXIT` and hold the run cycle after the keys are
-/// released. Not authoritative while a reactor goal (follow/goto/engage) moves
-/// the player with no keys held — the pose falls back to inference there.
-///
-/// `forward`/`strafe` are character-frame intent components feeding directional
-/// gait selection (mvb/mvl/mvr). They are only ever non-(1,0) while locked on —
-/// matching retail, where unlocked movement steers the character into the run
-/// direction (run/wlk gait only) and directional gait exists only under lock-on.
+pub const WALK_RUN_BOUNDARY: f32 = 3.0;
+
+#[inline]
+pub fn infers_walk_gait(speed: f32) -> bool {
+    speed > EntityMotion::MOVE_EXIT && speed < WALK_RUN_BOUNDARY
+}
+
+/// Explicit intent prevents reconciliation jitter from sustaining the self locomotion clip.
 #[derive(Resource, Default, Debug, Clone, Copy, PartialEq)]
 pub struct SelfMoveIntent {
     pub moving: bool,
     pub forward: f32,
     pub strafe: f32,
+    pub scripted_speed: Option<f32>,
+}
+
+impl SelfMoveIntent {
+    pub fn walking(&self, manual_walk: bool) -> bool {
+        self.scripted_speed
+            .map(infers_walk_gait)
+            .unwrap_or(manual_walk)
+    }
 }
 
 pub fn directional_anim_for_skel(skel_file_id: u32, prefix: &[u8; 3]) -> Option<Arc<Mo2Animation>> {
@@ -374,6 +379,238 @@ pub struct EntityMotion {
     pub by_id: HashMap<u32, MotionSample>,
 }
 
+/// KULUU_MOTION_LOG=1 gated probe for the remote locomotion model.
+///
+/// Measures, per entity: server-update spacing (seconds between 0x0E position
+/// updates), jump distance and which snap band `advance_prediction` took,
+/// remaining chase distance when a packet lands, idle frames between packets,
+/// moving-toggle rate on the transform-delta fallback path (the chase model's
+/// entities toggle without hysteresis: reached target or not), and
+/// heading-vs-travel-direction mismatch events. Emits one tracing::debug! line
+/// per event on target "motion" plus a rolling summary every few seconds.
+/// Observation only - no constant changes.
+#[derive(Resource)]
+pub struct MotionProbe {
+    enabled: bool,
+    per_id: HashMap<u32, ProbeEntity>,
+    /// Every server-update spacing seen, for the global median/p90 in summaries.
+    all_intervals: VecDeque<f32>,
+    last_summary_at: f32,
+}
+
+#[derive(Default)]
+struct ProbeEntity {
+    kind_name: &'static str,
+    updates: u64,
+    normals: u64,
+    stretches: u64,
+    pops: u64,
+    toggles: u64,
+    mismatch_events: u64,
+    in_mismatch: bool,
+}
+
+fn entity_kind_name(kind: EntityKind) -> &'static str {
+    match kind {
+        EntityKind::Mob => "Mob",
+        EntityKind::Pc => "Pc",
+        EntityKind::Pet => "Pet",
+        EntityKind::Npc => "Npc",
+        _ => "Other",
+    }
+}
+
+impl MotionProbe {
+    pub const SUMMARY_EVERY_SECS: f32 = 5.0;
+
+    /// Travel direction this far from the heading counts as playing sideways.
+    pub const MISMATCH_THRESHOLD_RAD: f32 = std::f32::consts::FRAC_PI_4;
+
+    /// Below this dead-reckoned speed the travel direction is noise, not intent.
+    const MIN_MEANINGFUL_SPEED_SQ: f32 = 0.01; // (0.1 yps)^2
+
+    /// OnExit(InGame) teardown, mirroring drain_entity_prediction / the entity_motion clear in
+    /// despawn_ingame_entities: a long session's counters and interval history must not carry
+    /// across the game boundary.
+    pub fn drain(&mut self) {
+        self.per_id.clear();
+        self.all_intervals.clear();
+    }
+
+    /// Test-only: an always-enabled probe (init() reads KULUU_MOTION_LOG).
+    #[cfg(test)]
+    pub fn enabled_for_test() -> Self {
+        let mut p = Self::init();
+        p.enabled = true;
+        p
+    }
+
+    pub fn init() -> Self {
+        static ONCE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        let enabled = crate::env_flags::env_flag(&ONCE, "KULUU_MOTION_LOG");
+        Self {
+            enabled,
+            per_id: HashMap::new(),
+            all_intervals: VecDeque::new(),
+            last_summary_at: 0.0,
+        }
+    }
+
+    fn entry(&mut self, id: u32, kind: EntityKind) -> &mut ProbeEntity {
+        self.per_id.entry(id).or_insert_with(|| ProbeEntity {
+            kind_name: entity_kind_name(kind),
+            ..Default::default()
+        })
+    }
+
+    /// One server update was consumed by `advance_prediction` this frame.
+    pub fn record_update(&mut self, id: u32, kind: EntityKind, u: UpdateOutcome) {
+        if !self.enabled {
+            return;
+        }
+        self.all_intervals.push_back(u.dt_server);
+        if self.all_intervals.len() > 65_536 {
+            self.all_intervals.pop_front();
+        }
+        let e = self.entry(id, kind);
+        e.updates += 1;
+        match u.band {
+            SnapBand::Normal => e.normals += 1,
+            SnapBand::Stretch => e.stretches += 1,
+            SnapBand::Pop => e.pops += 1,
+        }
+        let jump = u.jump_sq.sqrt();
+        // ratio is jump/step (the band's defining quantity); guard the zero-step case (a
+        // stationary speed byte) so a real move still prints as an unbounded ratio, not NaN.
+        let ratio = if u.step_yalms > 0.0 {
+            jump / u.step_yalms
+        } else {
+            f32::INFINITY
+        };
+        tracing::debug!(
+            target: "motion",
+            "MOTION_UPD id={id:#x} kind={} band={} dt_srv={:.3}s jump={:.2}y step={:.2} ratio={:.2} speed_pkt={} speed_base={} idle_fr={} rem={:.2} seg={:.3}s ring_max={:.3}s",
+            e.kind_name,
+            match u.band {
+                SnapBand::Normal => "Normal",
+                SnapBand::Stretch => "Stretch",
+                SnapBand::Pop => "Pop",
+            },
+            u.dt_server,
+            jump,
+            u.step_yalms,
+            ratio,
+            u.speed,
+            u.speed_base,
+            u.idle_frames,
+            u.rem_dist,
+            u.segment_duration,
+            u.ring_max
+        );
+    }
+
+    /// The MOVE_ENTER/MOVE_EXIT hysteresis flipped for this entity.
+    pub fn record_toggle(&mut self, id: u32, kind: EntityKind, now_moving: bool, speed: f32) {
+        if !self.enabled {
+            return;
+        }
+        let e = self.entry(id, kind);
+        e.toggles += 1;
+        tracing::debug!(
+            target: "motion",
+            "MOTION_TGL id={id:#x} kind={} moving={} speed={:.2}",
+            e.kind_name, now_moving, speed
+        );
+    }
+
+    /// Rising-edge detector: one event per sideways episode, not per frame.
+    pub fn record_heading_mismatch(
+        &mut self,
+        id: u32,
+        kind: EntityKind,
+        heading_rad: f32,
+        vel: Vec3,
+    ) {
+        if !self.enabled || vel.length_squared() < Self::MIN_MEANINGFUL_SPEED_SQ {
+            return;
+        }
+        // worldAngle basis (see heading_forward): forward = (cos h, sin h) in Bevy space, so a
+        // travel vector (vx, vz) corresponds to the angle atan2(vz, vx).
+        let travel = vel.z.atan2(vel.x);
+        let mut diff = (heading_rad - travel).rem_euclid(std::f32::consts::TAU);
+        if diff > std::f32::consts::PI {
+            diff -= std::f32::consts::TAU;
+        }
+        let sideways = diff.abs() >= Self::MISMATCH_THRESHOLD_RAD;
+        let e = self.entry(id, kind);
+        if sideways && !e.in_mismatch {
+            e.mismatch_events += 1;
+            tracing::debug!(
+                target: "motion",
+                "MOTION_MIS id={id:#x} heading={:.0}deg travel={:.0}deg diff={:.0}deg speed={:.2}",
+                heading_rad.to_degrees(),
+                travel.to_degrees(),
+                diff.abs().to_degrees(),
+                vel.length()
+            );
+        }
+        e.in_mismatch = sideways;
+    }
+
+    /// Rolling summary; called once per frame from predict_entities_system.
+    pub fn maybe_summary(&mut self, now_secs: f32) {
+        if !self.enabled || now_secs - self.last_summary_at < Self::SUMMARY_EVERY_SECS {
+            return;
+        }
+        self.last_summary_at = now_secs;
+        let (mut upd, mut norm, mut stretch, mut pop, mut tgl, mut mis) =
+            (0u64, 0u64, 0u64, 0u64, 0u64, 0u64);
+        for e in self.per_id.values() {
+            upd += e.updates;
+            norm += e.normals;
+            stretch += e.stretches;
+            pop += e.pops;
+            tgl += e.toggles;
+            mis += e.mismatch_events;
+        }
+        let (median, p90) = quantiles(&self.all_intervals);
+        tracing::debug!(
+            target: "motion",
+            "MOTION_SUM t={:.1}s ents={} upd={} normal={} stretch={} pop={} tgl={} mis={} med_dt_srv={} p90_dt_srv={}",
+            now_secs,
+            self.per_id.len(),
+            upd,
+            norm,
+            stretch,
+            pop,
+            tgl,
+            mis,
+            fmt_opt(median),
+            fmt_opt(p90)
+        );
+    }
+}
+
+fn quantiles(samples: &VecDeque<f32>) -> (Option<f32>, Option<f32>) {
+    if samples.is_empty() {
+        return (None, None);
+    }
+    let mut v: Vec<f32> = samples.iter().copied().collect();
+    v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let pick = |q: f32| {
+        let idx = (q * (v.len() - 1) as f32).round() as usize;
+        Some(v[idx.min(v.len() - 1)])
+    };
+    (pick(0.5), pick(0.9))
+}
+
+fn fmt_opt(x: Option<f32>) -> String {
+    match x {
+        Some(v) => format!("{v:.3}s"),
+        None => "-".to_string(),
+    }
+}
+
 impl EntityMotion {
     pub fn is_moving(&self, id: u32) -> bool {
         self.by_id.get(&id).is_some_and(|s| s.moving)
@@ -405,7 +642,9 @@ impl EntityMotion {
 pub fn track_entity_motion_system(
     time: Res<Time>,
     state: Res<SceneState>,
+    prediction: Res<EntityPrediction>,
     mut motion: ResMut<EntityMotion>,
+    mut probe: ResMut<MotionProbe>,
     q: Query<(&WorldEntity, &Transform)>,
     mut heading_by_id: Local<std::collections::HashMap<u32, u8>>,
 ) {
@@ -420,14 +659,68 @@ pub fn track_entity_motion_system(
     for (world, transform) in &q {
         let pos = transform.translation;
 
+        // Entities the chase model owns get their motion sample from the chase state itself:
+        // moving is "inside its arrival segment" (is_chasing), speed is the tween's constant
+        // close-in rate (gap over remaining segment budget; 0 while holding on target), and the
+        // direction components are where the target still is relative to the rendered heading.
+        // No velocity smoothing or enter/exit hysteresis on this path (research/XiPackets
+        // world/server/0x000E: walk toward the target, stop on arrival).
+        if let Some(chase) = prediction.by_id.get(&world.id) {
+            let to_target = Vec3::new(chase.server_pos.x - pos.x, 0.0, chase.server_pos.z - pos.z);
+            let chasing = chase.is_chasing();
+            let heading_rad = chase.rendered_heading_rad;
+            // worldAngle basis (see forward_from_rad): forward = (cos h, sin h) in Bevy space,
+            // and the entity's right is its forward rotated +90 deg of heading (the self walker
+            // strafes with heading.wrapping_add(64)).
+            let fwd = forward_from_rad(heading_rad);
+            let right = Vec3::new(-fwd.z, 0.0, fwd.x);
+            let prev = motion
+                .by_id
+                .get(&world.id)
+                .copied()
+                .unwrap_or(MotionSample {
+                    last_pos: pos,
+                    last_heading_rad: heading_rad,
+                    ..Default::default()
+                });
+            let mut dh = heading_rad - prev.last_heading_rad;
+            if dh > std::f32::consts::PI {
+                dh -= std::f32::consts::TAU;
+            } else if dh < -std::f32::consts::PI {
+                dh += std::f32::consts::TAU;
+            }
+            let heading_rate = dh / dt;
+            motion.by_id.insert(
+                world.id,
+                MotionSample {
+                    last_pos: pos,
+                    speed: if chasing {
+                        let remaining = (chase.segment_duration - chase.segment_elapsed).max(1e-4);
+                        to_target.length() / remaining
+                    } else {
+                        0.0
+                    },
+                    forward_component: to_target.dot(fwd),
+                    strafe_component: to_target.dot(right),
+                    last_heading_rad: heading_rad,
+                    heading_rate,
+                    smooth_vx: 0.0,
+                    smooth_vz: 0.0,
+                    moving: chasing,
+                },
+            );
+            continue;
+        }
+
         let heading_u8 = heading_by_id.get(&world.id).copied().unwrap_or(0);
         let heading_rad = heading_to_rad(heading_u8);
 
         let fwd = heading_forward(heading_u8);
         let (fwd_x, fwd_z) = (fwd.x, fwd.z);
 
-        let right_x = fwd_z;
-        let right_z = -fwd_x;
+        // Entity right: forward rotated +90 deg of heading (see the chase path above).
+        let right_x = -fwd_z;
+        let right_z = fwd_x;
 
         let prev = motion
             .by_id
@@ -457,6 +750,10 @@ pub fn track_entity_motion_system(
         }
         let heading_rate = dh / dt;
 
+        let moving = EntityMotion::apply_move_hysteresis(prev.moving, speed);
+        if probe.enabled && moving != prev.moving {
+            probe.record_toggle(world.id, world.kind, moving, speed);
+        }
         motion.by_id.insert(
             world.id,
             MotionSample {
@@ -468,10 +765,68 @@ pub fn track_entity_motion_system(
                 heading_rate,
                 smooth_vx,
                 smooth_vz,
-                moving: EntityMotion::apply_move_hysteresis(prev.moving, speed),
+                moving,
             },
         );
     }
+}
+
+/// Which snap band a POS update fell into (see `EntityPrediction::SNAP_*_RATIO`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SnapBand {
+    /// jump <= 1.0 * step (+ the float-boundary epsilon): an ordinary tick; chase.
+    Normal,
+
+    /// 1.0*step < jump <= 2.0*step: plausible (path re-eval or a late tick); chase, no snap.
+    Stretch,
+
+    /// jump > 2.0 * step: pop rendered XZ onto the server. Distance-only: staleness is a timing
+    /// event that resets the cadence ring in observe() instead of snapping; the position tweens.
+    Pop,
+}
+
+/// What `advance_prediction` learned when it consumed a server update this
+/// frame; read by the KULUU_MOTION_LOG probe in predict_entities_system.
+#[derive(Clone, Copy, Debug)]
+pub struct UpdateOutcome {
+    /// Seconds since the previous server update for this entity (the LSB
+    /// position-update cadence).
+    pub dt_server: f32,
+
+    /// Squared distance from the rendered position to the new server position.
+    pub jump_sq: f32,
+
+    /// The snap band this update fell into; Pop is the only band that snaps XZ onto the server.
+    pub band: SnapBand,
+
+    /// expected_step_yalms for this update's wire bytes: the LSB per-tick step distance the bands
+    /// are measured against (the ratio jump/step is what the probe prints).
+    pub step_yalms: f32,
+
+    /// The arrival-segment budget in effect when this update was consumed: max of the 8-sample
+    /// interval ring times INTERVAL_HEADROOM. The tween reaches the target exactly when this
+    /// budget lapses.
+    pub segment_duration: f32,
+
+    /// Widest inter-update interval currently in the ring (before headroom): what set the budget.
+    /// A late tick shows up here immediately and ages out as newer intervals replace it.
+    pub ring_max: f32,
+
+    /// The 0x0E speed byte this update carried (retail decodes it as yalms/sec * 10).
+    pub speed: u8,
+
+    /// The 0x0E animationSpeed byte (LSB `animationSpeed`, never multiplied by the run factor;
+    /// vendor/server/src/map/entities/battleentity.cpp CBattleEntity::UpdateSpeed writes the
+    /// movement speed only). Feeds the gait rule and the clip playback-rate scale.
+    pub speed_base: u8,
+
+    /// Rendered frames that elapsed between this update and the previous one:
+    /// how long the client chased on its own before the wire caught up.
+    pub idle_frames: u32,
+
+    /// Distance from the rendered position to the new server target after this
+    /// frame's advance: what is left of the chase when the packet lands.
+    pub rem_dist: f32,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -480,34 +835,111 @@ pub struct PredictSample {
 
     pub server_pos: Vec3,
 
-    pub last_server_pos: Vec3,
-
-    pub dr_velocity: Vec3,
-
     pub target_heading: u8,
+
+    /// Last 0x0E speed byte observed for this entity (retail decodes it as yalms/sec * 10).
+    pub packet_speed: u8,
+
+    /// Last 0x0E animationSpeed byte observed for this entity (LSB `animationSpeed`; the gait
+    /// rule compares it against `packet_speed`).
+    pub packet_speed_base: u8,
+
+    /// Rendered frames since the last consumed POS update. Reset on an update, incremented every
+    /// frame without one: how long the client chased unaided before the wire caught up.
+    pub idle_frames: u32,
 
     pub rendered_heading_rad: f32,
 
-    pub secs_since_update: f32,
+    /// Seconds since the last real position change; observe() resets it when a moved update lands.
+    /// At the next moved observe() this is the measured inter-update interval. advance_prediction
+    /// adds dt to it every frame.
+    pub sample_age: f32,
+
+    /// 8-sample ring of recent measured inter-update intervals (clamped to [MIN_INTERVAL,
+    /// MAX_INTERVAL]), newest last. Seeded with one AI tick so the first segment budget is sane
+    /// before any interval has been measured.
+    sample_intervals: [f32; EntityPrediction::JITTER_HISTORY_SAMPLES],
+
+    /// Seconds elapsed in the current arrival segment since its update was consumed. The tween
+    /// reaches `server_pos` exactly when this hits `segment_duration`; the segment is also what
+    /// holds the moving flag up on target across a late packet.
+    pub segment_elapsed: f32,
+
+    /// Budget of the current arrival segment in seconds: max(ring) * INTERVAL_HEADROOM. One long
+    /// gap widens it immediately; a burst of fast arrivals cannot shrink it until that sample ages
+    /// out of the ring (max-of-ring is asymmetric on purpose).
+    pub segment_duration: f32,
+
+    /// Measured inter-update interval (seconds) of the last consumed update, for the band's
+    /// staleness check and the probe. 0.0 before the first real move after seeding.
+    pub last_interval: f32,
+
+    /// Squared XZ distance between this update's confirmed position and the previous one: what
+    /// LSB actually moved on this tick. observe() stores it before overwriting server_pos; the
+    /// band compares it to one step, never to where we are rendering (render lag is not a
+    /// teleport).
+    wire_jump_sq: f32,
+
+    /// True once a moved update has started an arrival segment. Gates the on-target hold in
+    /// is_chasing so a fresh sample that has never moved reports idle instead of holding its
+    /// seeded budget up for 0.5 s after spawn.
+    pub segment_started: bool,
 
     pub sample_dirty: bool,
 
     pub initialized: bool,
+
+    /// Set by the most recent `advance_prediction(record_outcome = true)` call that consumed a
+    /// server update; cleared on frames without one. Written only while the MotionProbe is
+    /// enabled (its sole production reader); tests pass record_outcome = true.
+    pub last_update: Option<UpdateOutcome>,
 }
 
 impl PredictSample {
-    fn seed(server_pos: Vec3, heading: u8) -> Self {
+    fn seed(server_pos: Vec3, heading: u8, speed: u8, speed_base: u8) -> Self {
         PredictSample {
             rendered_pos: server_pos,
             server_pos,
-            last_server_pos: server_pos,
-            dr_velocity: Vec3::ZERO,
             target_heading: heading,
+            packet_speed: speed,
+            packet_speed_base: speed_base,
+            idle_frames: 0,
             rendered_heading_rad: heading_to_rad(heading),
-            secs_since_update: 0.0,
+            sample_age: 0.0,
+            // One AI tick per slot (vendor/server/src/map/map_constants.h kLogicUpdateRate):
+            // the first segment budget is
+            // a tick plus headroom before any real interval has been measured.
+            sample_intervals: [EntityPrediction::TICK_SECS;
+                EntityPrediction::JITTER_HISTORY_SAMPLES],
+            segment_elapsed: 0.0,
+            segment_duration: EntityPrediction::TICK_SECS * EntityPrediction::INTERVAL_HEADROOM,
+            last_interval: 0.0,
+            wire_jump_sq: 0.0,
+            segment_started: false,
             sample_dirty: false,
             initialized: true,
+            last_update: None,
         }
+    }
+
+    /// Whether the entity still counts as moving. This is the chase model's moving flag (retail
+    /// stops on arrival, research/XiPackets world/server/0x000E): no speed hysteresis, no velocity
+    /// smoothing. XZ only: Y is fully server-resolved (LSB StepTo grounds it and we assign it
+    /// directly on each update), so it never holds "moving" up after the XZ chase has arrived.
+    ///
+    /// Once the rendered position reaches the wire target, the flag stays up for the rest of this
+    /// update's arrival segment: `segment_elapsed < segment_duration`. The tween lands exactly at
+    /// budget end by construction, so a late packet finds the entity holding on target inside its
+    /// segment instead of dropping to idle between updates and restarting the walk clip from frame 0.
+    /// A sample that has never consumed a moved update (segment_started false) is not chasing:
+    /// it sits at its spawn position with nothing to close in on.
+    pub fn is_chasing(&self) -> bool {
+        let dx = self.server_pos.x - self.rendered_pos.x;
+        let dz = self.server_pos.z - self.rendered_pos.z;
+        if dx * dx + dz * dz > EntityPrediction::ARRIVAL_EPS_SQ {
+            return true;
+        }
+        self.segment_started && self.segment_elapsed < self.segment_duration
     }
 }
 
@@ -517,106 +949,291 @@ pub struct EntityPrediction {
 }
 
 impl EntityPrediction {
-    pub const SNAP_DIST_SQ: f32 = 4.0;
+    /// AI logic tick rate in Hz. vendor/server/src/map/map_constants.h kLogicUpdateRate = 2.5f,
+    /// with kLogicUpdateInterval = 1000 / kLogicUpdateRate ms (one 400 ms tick). A moving mob's
+    /// path step runs on that tick and ends in updatemask |= UPDATE_POS exactly once per step
+    /// (vendor/server/src/map/ai/helpers/pathfind.cpp CPathFind::StepTo), so one POS update lands
+    /// per tick: the cadence engine below seeds and bounds from this period.
+    const LSB_LOGIC_UPDATE_RATE_HZ: f32 = 2.5;
 
-    pub const VEL_BLEND_TAU: f32 = 0.20;
+    /// One AI tick in seconds (1 / kLogicUpdateRate). Seeds the interval ring and is the base of
+    /// MIN_INTERVAL / MAX_INTERVAL below.
+    const TICK_SECS: f32 = 1.0 / Self::LSB_LOGIC_UPDATE_RATE_HZ;
 
-    pub const CORRECT_TAU: f32 = 0.12;
+    // Engineering bounds around the cited tick, not LSB-derived: a measured inter-update interval
+    // shorter than half a tick is clamped up (arrival bursts must not shrink the budget), and one
+    // longer than two and a half ticks is treated as idle/resume rather than movement cadence.
+    const MIN_INTERVAL_TICKS: f32 = 0.5;
 
-    pub const Y_TAU: f32 = 0.15;
+    const MAX_INTERVAL_TICKS: f32 = 2.5;
+
+    /// Shortest interval the ring records (half an AI tick).
+    const MIN_INTERVAL: f32 = Self::MIN_INTERVAL_TICKS * Self::TICK_SECS;
+
+    /// Longest interval the ring records (two and a half AI ticks). Gaps beyond
+    /// STALE_INTERVAL (= 2x this) are stale: observe() resets the ring to its seed instead of
+    /// recording them; the band itself is distance-only.
+    const MAX_INTERVAL: f32 = Self::MAX_INTERVAL_TICKS * Self::TICK_SECS;
+
+    // Engineering bound, not LSB-derived: intervals up to this many times MAX_INTERVAL are still
+    // recorded (clamped) so a long idle does not instantly erase the measured cadence; beyond it
+    // the entity was stationary and the ring keeps its last budget.
+    const IDLE_INTERVAL_MULTIPLIER: f32 = 2.0;
+
+    /// Staleness horizon, in seconds: the ring's own recording horizon (five AI ticks). Gaps up
+    /// to here are late ticks: they widen the budget and still chase. Beyond it the measured
+    /// cadence is untrustworthy and observe() resets the ring to its kLogicUpdateRate seed; the
+    /// band itself is distance-only, so a stale sample with a small jump still tweens.
+    const STALE_INTERVAL: f32 = Self::MAX_INTERVAL * Self::IDLE_INTERVAL_MULTIPLIER;
+
+    // Engineering bound, not LSB-derived: a small buffer on top of the widest recent interval so
+    // packet-arrival jitter does not end each run segment early.
+    const INTERVAL_HEADROOM: f32 = 1.25;
+
+    /// Ring depth for the inter-update cadence estimate. Short arrival bursts must not immediately
+    /// erase a recent long gap from the budget, so the widest of these samples sets it.
+    const JITTER_HISTORY_SAMPLES: usize = 8;
+
+    /// Per-AI-tick step distance a moving mob advances, in yalms, from the wire speed byte.
+    /// vendor/server/src/map/ai/helpers/pathfind.cpp CPathFind::StepTo (pinned vendor/server):
+    /// `float stepDistance = speed / (run ? 50 : 40);` on every logic tick. The run flag is
+    /// `m_pathFlags & PATHFLAG_RUN` at the StepTo call site, which
+    /// vendor/server/src/map/ai/controllers/mob_controller.cpp passes for chase/follow/return-home
+    /// and leaves clear while roaming: roam = walk (/40), engaged = run (/50).
+    /// vendor/server/src/map/entities/battleentity.cpp CBattleEntity::UpdateSpeed multiplies only the movement speed by
+    /// the run factor, never animationSpeed, so the client's gait signal is already `run = speed >
+    /// speed_base` (wire bytes) and the divisor is chosen from that same comparison. These two
+    /// divisors are LSB constants; they are the only literals this step model may use.
+    pub const LSB_RUN_STEP_DIVISOR: f32 = 50.0;
+
+    pub const LSB_WALK_STEP_DIVISOR: f32 = 40.0;
+
+    /// The speed StepTo substitutes for a burrowing mob whose GetSpeed() == 0:
+    /// `if (PMobEntity->GetSpeed() == 0 && (m_roamFlags & ROAMFLAG_WORM)) { speed = 20; }`
+    /// (vendor/server/src/map/ai/helpers/pathfind.cpp CPathFind::StepTo; ROAMFLAG_WORM in
+    /// vendor/server/src/map/entities/mobentity.h). The
+    /// substitute is a local that is never written back to the entity, so the wire speed byte stays
+    /// 0 while the worm still advances 20 / divisor per tick. expected_step_yalms mirrors it: a 0
+    /// byte on an update that actually moved means the server used this value.
+    const LSB_WORM_SUBSTITUTE_SPEED: f32 = 20.0;
+
+    /// Snap-band multipliers, as a RATIO TO THE EXPECTED STEP (not distances). A jump within one
+    /// step is an ordinary tick; up to two steps is plausible (a path re-eval or a late tick) and
+    /// still chases without snapping; beyond that the sample is stale/teleported and we pop.
+    pub const SNAP_NORMAL_RATIO: f32 = 1.0;
+
+    pub const SNAP_STRETCH_RATIO: f32 = 2.0;
+
+    /// Float-boundary tolerance on the Normal/Stretch edge, in ratio space (jump/step): a
+    /// one-step tick measured through wire + sqrt noise lands at 1.0 +/- ~1e-7, and without this
+    /// healthy updates split across the boundary. Engineering bound for float noise, not
+    /// LSB-derived; it moves the edge by a fraction of a milliyalm at most.
+    pub const SNAP_NORMAL_EPS_RATIO: f32 = 1e-3;
 
     pub const HEADING_TAU: f32 = 0.10;
 
-    pub const DECEL_TAU: f32 = 0.25;
-
-    pub const STALE_VEL_SECS: f32 = 0.6;
-
-    pub const MAX_DR_SPEED: f32 = 7.0;
-
-    pub const DT_SERVER_CEIL: f32 = 1.0;
+    /// Squared XZ distance at which the chase counts as arrived on target. The clamp below lands
+    /// exactly on `server_pos`, so this only has to clear float noise, not a real gap.
+    pub const ARRIVAL_EPS_SQ: f32 = 1e-6; // (0.001 yalms)^2
 
     const SAMPLE_EPSILON_SQ: f32 = 1e-4;
 
-    pub fn observe(&mut self, id: u32, server_pos: Vec3, heading: u8) {
+    pub fn observe(&mut self, id: u32, server_pos: Vec3, heading: u8, speed: u8, speed_base: u8) {
         match self.by_id.get_mut(&id) {
             None => {
-                self.by_id
-                    .insert(id, PredictSample::seed(server_pos, heading));
+                self.by_id.insert(
+                    id,
+                    PredictSample::seed(server_pos, heading, speed, speed_base),
+                );
             }
             Some(e) => {
-                if e.server_pos.distance_squared(server_pos) > Self::SAMPLE_EPSILON_SQ {
+                // Any component moved (including Y, which StepTo resolves along the slope): ingest
+                // it. The band's jump below is XZ-only: Y is assigned directly and a floor-height
+                // change must not inflate into a Pop.
+                let moved_sq = e.server_pos.distance_squared(server_pos);
+                if moved_sq > Self::SAMPLE_EPSILON_SQ {
+                    // A real position change: sample_age now holds the measured interval since the
+                    // previous one. Record it in the ring (clamped to [MIN_INTERVAL, MAX_INTERVAL])
+                    // and re-derive the segment budget from the widest recent interval. Max-of-ring
+                    // is asymmetric on purpose: one long gap widens the budget immediately, while a
+                    // burst of fast arrivals cannot shrink it back until that sample ages out.
+                    if e.sample_age > 0.0 && e.sample_age <= Self::STALE_INTERVAL {
+                        let interval = e.sample_age.clamp(Self::MIN_INTERVAL, Self::MAX_INTERVAL);
+                        e.sample_intervals.rotate_left(1);
+                        e.sample_intervals[Self::JITTER_HISTORY_SAMPLES - 1] = interval;
+                        e.segment_duration = e.sample_intervals.iter().copied().fold(0.0, f32::max)
+                            * Self::INTERVAL_HEADROOM;
+                    } else if e.sample_age > Self::STALE_INTERVAL {
+                        // A stale gap (idle/resume): the measured cadence does not describe the
+                        // next segment, so reset the ring to its kLogicUpdateRate seed and let the
+                        // next segment budget be one tick plus headroom. The position still tweens:
+                        // staleness is a timing event, not a distance event (the band is
+                        // distance-only).
+                        e.sample_intervals = [Self::TICK_SECS; Self::JITTER_HISTORY_SAMPLES];
+                        e.segment_duration = Self::TICK_SECS * Self::INTERVAL_HEADROOM;
+                    }
+                    // What LSB actually moved on this tick in XZ: the distance between consecutive
+                    // confirmed positions. Render lag is not a teleport, so the band measures this
+                    // pair, never where we are rendering; its threshold is one StepTo step, not a
+                    // fixed distance.
+                    let dxw = server_pos.x - e.server_pos.x;
+                    let dzw = server_pos.z - e.server_pos.z;
+                    e.last_interval = e.sample_age;
+                    e.sample_age = 0.0;
+                    e.segment_elapsed = 0.0;
+                    e.segment_started = true;
+                    e.wire_jump_sq = dxw * dxw + dzw * dzw;
                     e.server_pos = server_pos;
                     e.sample_dirty = true;
                 }
                 e.target_heading = heading;
+                e.packet_speed = speed;
+                e.packet_speed_base = speed_base;
             }
         }
     }
 }
 
+/// Heading byte to radians in the worldAngle basis.
+///
+/// vendor/server/src/common/utils.cpp worldAngle (pinned vendor/server): LSB position_t.z is a
+/// horizontal axis, not vertical; see [`heading_forward`] for the full wire/Bevy mapping.
 #[inline]
 fn heading_to_rad(heading: u8) -> f32 {
     (heading as f32) * std::f32::consts::TAU / 256.0
 }
 
-/// World-space direction an entity with this heading faces. The one place the
-/// `(sin, -cos)` pairing lives — the motion basis below and the fishing water
-/// probe both come through here rather than re-deriving it.
+/// World-space direction an entity with this heading faces, in Bevy space.
+///
+/// vendor/server/src/common/utils.cpp worldAngle (pinned vendor/server) writes the rotation byte
+/// as `atan2f(B.z - A.z, B.x - A.x) * -(128 / PI), mod 256`. LSB position_t.z is a horizontal axis
+/// (kuluu's WireVec3 names it `y`; WireVec3.z is vertical). worldAngle measures from wire +X,
+/// negated: theta = heading * TAU / 256 gives a wire horizontal forward of (x = cos theta,
+/// z_lsb = -sin theta). ffxi_to_bevy maps wire x -> Bevy x and the horizontal wire axis -> Bevy
+/// -z, so the Bevy forward is (cos theta, 0, sin theta). Heading 0 faces +X, not north.
 #[inline]
 pub fn heading_forward(heading: u8) -> Vec3 {
-    let rad = heading_to_rad(heading);
-    Vec3::new(rad.sin(), 0.0, -rad.cos())
+    forward_from_rad(heading_to_rad(heading))
 }
 
+/// The [`heading_forward`] basis for an already-unpacked radian value; the chase path carries
+/// only `rendered_heading_rad`.
 #[inline]
-fn exp_approach(from: f32, to: f32, tau: f32, dt: f32) -> f32 {
-    let alpha = 1.0 - (-dt / tau.max(1e-4)).exp();
-    from + alpha * (to - from)
+pub fn forward_from_rad(rad: f32) -> Vec3 {
+    Vec3::new(rad.cos(), 0.0, rad.sin())
 }
 
-fn advance_prediction(s: &mut PredictSample, dt: f32) -> (Vec3, f32) {
+/// Per-AI-tick step distance in yalms for the incoming wire speed bytes.
+///
+/// vendor/server/src/map/ai/helpers/pathfind.cpp CPathFind::StepTo (pinned vendor/server) advances
+/// a moving mob by `speed / (run ? 50 : 40)` each tick;
+/// vendor/server/src/map/entities/battleentity.cpp CBattleEntity::UpdateSpeed
+/// multiplies only the movement speed by the run factor, never animationSpeed, so the run/walk
+/// split is read straight off the wire as `speed > speed_base` (the same comparison the gait rule
+/// uses). No mount or retail-yps factor: this is the server's own per-tick budget.
+///
+/// StepTo also substitutes a local `speed = 20` for ROAMFLAG_WORM mobs whose GetSpeed() == 0, and
+/// never writes it back, so the wire byte stays 0 while the worm still moves. This function is only
+/// ever called on an update that actually moved (observe gates on SAMPLE_EPSILON_SQ), so a 0 speed
+/// byte here means the server used that substitute.
+pub fn expected_step_yalms(speed: u8, speed_base: u8) -> f32 {
+    let divisor = if speed > speed_base {
+        EntityPrediction::LSB_RUN_STEP_DIVISOR
+    } else {
+        EntityPrediction::LSB_WALK_STEP_DIVISOR
+    };
+    let effective_speed = if speed == 0 {
+        EntityPrediction::LSB_WORM_SUBSTITUTE_SPEED
+    } else {
+        speed as f32
+    };
+    effective_speed / divisor
+}
+
+/// `record_outcome` gates the write of [`PredictSample::last_update`]: it exists for the
+/// MotionProbe, so a disabled probe pays nothing per entity per frame.
+fn advance_prediction(s: &mut PredictSample, dt: f32, record_outcome: bool) -> (Vec3, f32) {
     use std::f32::consts::{PI, TAU};
 
+    // sample_age accumulates from the previous update's observe() reset; at the next moved
+    // observe() it is the measured inter-update interval.
+    s.sample_age += dt;
+
+    let mut outcome: Option<UpdateOutcome> = None;
     if s.sample_dirty {
         s.sample_dirty = false;
-        let dt_server = s.secs_since_update;
-        let discontinuity = dt_server > EntityPrediction::DT_SERVER_CEIL
-            || s.server_pos.distance_squared(s.rendered_pos) >= EntityPrediction::SNAP_DIST_SQ;
-        if discontinuity {
-            s.rendered_pos = s.server_pos;
-            s.dr_velocity = Vec3::ZERO;
+        let dt_server = s.last_interval;
+        let step = expected_step_yalms(s.packet_speed, s.packet_speed_base);
+
+        // Step-relative snap band, decided BEFORE the tween runs. jump is what LSB actually moved
+        // on this tick: the XZ distance between consecutive confirmed server positions (observe()
+        // stores it), never where we are rendering -- render lag is not a teleport. step is what
+        // StepTo advanced this tick (vendor/server/src/map/ai/helpers/pathfind.cpp CPathFind::StepTo).
+        // The bands are a ratio to that step, never a flat distance, so a fast mob's legitimate
+        // per-tick move stays in Normal. XZ only: Y is assigned directly below and
+        // must not inflate the jump with a floor-height change. Distance-only: a stale sample
+        // (idle past STALE_INTERVAL) resets the cadence ring in observe() instead of snapping --
+        // staleness is a timing event, and the position still tweens. The Normal edge carries a
+        // float-boundary epsilon so one-step ticks do not split across it.
+        let jump = s.wire_jump_sq.sqrt();
+        let band = if jump > EntityPrediction::SNAP_STRETCH_RATIO * step {
+            SnapBand::Pop
+        } else if jump
+            > (EntityPrediction::SNAP_NORMAL_RATIO + EntityPrediction::SNAP_NORMAL_EPS_RATIO) * step
+        {
+            SnapBand::Stretch
         } else {
-            let dt_eff = dt_server.max(1e-3);
-            let mut v_meas = (s.server_pos - s.last_server_pos) / dt_eff;
-            v_meas.y = 0.0;
-            let alpha = 1.0 - (-dt_eff / EntityPrediction::VEL_BLEND_TAU).exp();
-            s.dr_velocity += (v_meas - s.dr_velocity) * alpha;
-            s.dr_velocity.y = 0.0;
-            let speed = s.dr_velocity.length();
-            if speed > EntityPrediction::MAX_DR_SPEED {
-                s.dr_velocity *= EntityPrediction::MAX_DR_SPEED / speed;
-            }
+            SnapBand::Normal
+        };
+
+        if band == SnapBand::Pop {
+            // Teleport or zone-in: snap XZ onto the server position. The tween below then has
+            // nothing left to cover for this update.
+            s.rendered_pos.x = s.server_pos.x;
+            s.rendered_pos.z = s.server_pos.z;
         }
-        s.last_server_pos = s.server_pos;
-        s.secs_since_update = 0.0;
+        // Y is fully server-resolved (LSB StepTo walks it along the slope and snaps it onto
+        // target.y on arrival), so assign it directly on every update. No smoothing, no ground
+        // probe, no gravity.
+        s.rendered_pos.y = s.server_pos.y;
+
+        outcome = Some(UpdateOutcome {
+            dt_server,
+            jump_sq: s.wire_jump_sq,
+            band,
+            step_yalms: step,
+            segment_duration: s.segment_duration,
+            ring_max: s.sample_intervals.iter().copied().fold(0.0, f32::max),
+            speed: s.packet_speed,
+            speed_base: s.packet_speed_base,
+            idle_frames: s.idle_frames,
+            rem_dist: 0.0, // filled below, once this frame's advance has run
+        });
+        s.idle_frames = 0;
     }
 
-    let mut pos = s.rendered_pos + s.dr_velocity * dt;
-    let server_track = s.server_pos + s.dr_velocity * s.secs_since_update;
+    // Arrival-segment tween (upstream main): the rendered position closes on server_pos by a
+    // fraction of the remaining gap per frame, dt / remaining, so it reaches the target exactly at
+    // budget end by construction: no early arrival, no overshoot. Retail stops on arrival
+    // (research/XiPackets world/server/0x000E) and there is no velocity state, so a stop can never
+    // slide back.
+    let remaining = s.segment_duration - s.segment_elapsed;
+    if remaining > dt {
+        s.rendered_pos += (s.server_pos - s.rendered_pos) * (dt / remaining);
+    } else {
+        s.rendered_pos = s.server_pos;
+    }
+    s.segment_elapsed = (s.segment_elapsed + dt).min(s.segment_duration);
 
-    pos.x = exp_approach(pos.x, server_track.x, EntityPrediction::CORRECT_TAU, dt);
-    pos.z = exp_approach(pos.z, server_track.z, EntityPrediction::CORRECT_TAU, dt);
-    pos.y = exp_approach(
-        s.rendered_pos.y,
-        s.server_pos.y,
-        EntityPrediction::Y_TAU,
-        dt,
-    );
-    s.rendered_pos = pos;
+    if let Some(u) = &mut outcome {
+        let rx = s.server_pos.x - s.rendered_pos.x;
+        let rz = s.server_pos.z - s.rendered_pos.z;
+        u.rem_dist = (rx * rx + rz * rz).sqrt();
+    }
 
-    s.secs_since_update += dt;
-    if s.secs_since_update > EntityPrediction::STALE_VEL_SECS {
-        s.dr_velocity *= (-dt / EntityPrediction::DECEL_TAU).exp();
+    // Frames without a consumed update: the client is chasing on its own.
+    if outcome.is_none() {
+        s.idle_frames = s.idle_frames.saturating_add(1);
     }
 
     let target = heading_to_rad(s.target_heading);
@@ -628,12 +1245,15 @@ fn advance_prediction(s: &mut PredictSample, dt: f32) -> (Vec3, f32) {
     let alpha_h = 1.0 - (-dt / EntityPrediction::HEADING_TAU).exp();
     s.rendered_heading_rad += dh * alpha_h;
 
+    s.last_update = if record_outcome { outcome } else { None };
+
     (s.rendered_pos, s.rendered_heading_rad)
 }
 
 pub fn predict_entities_system(
     time: Res<Time>,
     mut prediction: ResMut<EntityPrediction>,
+    mut probe: ResMut<MotionProbe>,
     mut q: Query<(&WorldEntity, &mut Transform), Without<IsSelf>>,
 ) {
     let dt = time.delta_secs().max(1e-4);
@@ -650,9 +1270,114 @@ pub fn predict_entities_system(
         if !sample.initialized {
             continue;
         }
-        let (pos, heading_rad) = advance_prediction(sample, dt);
+        let (pos, heading_rad) = advance_prediction(sample, dt, probe.enabled);
+        if probe.enabled {
+            if let Some(u) = sample.last_update {
+                probe.record_update(world.id, world.kind, u);
+            }
+            // The chase model's travel direction: toward the target at the tween's close-in rate
+            // (gap over remaining segment budget) while chasing, still otherwise.
+            let to_target = Vec3::new(
+                sample.server_pos.x - pos.x,
+                0.0,
+                sample.server_pos.z - pos.z,
+            );
+            let vel = if sample.is_chasing() {
+                let remaining = (sample.segment_duration - sample.segment_elapsed).max(1e-4);
+                to_target * (1.0 / remaining)
+            } else {
+                Vec3::ZERO
+            };
+            probe.record_heading_mismatch(world.id, world.kind, heading_rad, vel);
+        }
         transform.translation = pos;
         transform.rotation = Quat::from_rotation_y(-heading_rad);
+    }
+    probe.maybe_summary(time.elapsed_secs());
+}
+
+// Once-per-entity dedupe for the off-mesh debug line (same pattern as CLIP_WARN_SEEN in
+// ffxi_actor_render): an entity that stays off-mesh would otherwise log every frame.
+static GROUND_OFF_MESH_SEEN: OnceLock<Mutex<std::collections::HashSet<u32>>> = OnceLock::new();
+
+/// Per-frame remote grounding, run after the prediction tween.
+///
+/// LSB grounds mobs to the Detour navmesh, not the render mesh: waypoints come from Detour
+/// (vendor/server/src/map/navmesh.cpp CNavMesh::findPath / findRandomPosition over
+/// DetourNavMeshQuery) and vendor/server/src/map/ai/helpers/pathfind.cpp CPathFind::StepTo walks Y
+/// to that waypoint. Detour poly heights differ from the MZB collision surface by up to a navmesh
+/// cell height, so the POS packet Y is approximate: it picks the level, and this system places
+/// remote ground movers on their own collision mesh. Kuluu inference from the LSB navmesh model,
+/// not an observed retail client behavior.
+///
+/// Runs every frame on the RENDERED (x,z) so the model rides the slope during interpolation; no
+/// history, no distance test, no snap constant: the SnapBand bands own the jump decision already.
+/// Self is unchanged. The 0x45 Info movement byte from the loaded model gates it: Flying keeps
+/// server Y while alive (no ground to stand on); Walking/Large/Sliding/Unset ground. A dead
+/// entity grounds regardless of movement type (see the block in the body for why). A None answer
+/// (off-mesh, unloaded interior) keeps server Y and logs once per entity at debug.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn ground_remote_movers_system(
+    collision: Res<crate::dat_mzb::MzbCollisionGeometry>,
+    prediction: Res<EntityPrediction>,
+    mut q: Query<(Entity, &WorldEntity, &mut Transform), Without<IsSelf>>,
+    q_children: Query<&Children>,
+    q_render: Query<&crate::ffxi_actor_render::FfxiRenderActor>,
+    q_dead: Query<(), With<crate::scheduler_runtime::DeadFromAction>>,
+) {
+    for (entity, world, mut transform) in &mut q {
+        if !matches!(
+            world.kind,
+            EntityKind::Mob | EntityKind::Pc | EntityKind::Pet | EntityKind::Npc
+        ) {
+            continue;
+        }
+        // Only entities routed through the prediction model: mount actors and Other kinds carry no
+        // sample (mounts are pinned to their rider by pin_mount_actors_system).
+        let Some(sample) = prediction.by_id.get(&world.id) else {
+            continue;
+        };
+        // 0x45 Info movement byte from the loaded model (Unset when the DAT carries no CIB, or no
+        // render actor exists yet): Flying keeps server Y while alive. Death overrides the
+        // exemption: LSB never writes Y on the KO transition (vendor/server entity_update.cpp sets
+        // Y only under UPDATE_POS; the death path raises UPDATE_HP with Hpp = GetHPP() == 0 and
+        // leaves loc.p untouched), so a dead flyer's last POS Y is wherever it was hovering and it
+        // would sit in the air forever. Movement type describes locomotion, not corpses; a corpse
+        // grounds like everything else. DeadFromAction is latched on the render child (cleared on
+        // raise), so a raised flyer lifts back to server Y on its own.
+        let mut flying = false;
+        let mut dead = false;
+        if let Ok(children) = q_children.get(entity) {
+            for child in children.iter() {
+                if let Ok(actor) = q_render.get(child) {
+                    flying |= actor.movement_type() == ffxi_dat::cib::MovementType::Flying;
+                }
+                dead |= q_dead.get(child).is_ok();
+            }
+        }
+        if flying && !dead {
+            continue;
+        }
+        let xz = Vec2::new(transform.translation.x, transform.translation.z);
+        match collision.ground_nearest(xz, sample.server_pos.y) {
+            Some(ground_y) => transform.translation.y = ground_y,
+            None => {
+                if GROUND_OFF_MESH_SEEN
+                    .get_or_init(Default::default)
+                    .lock()
+                    .ok()
+                    .is_some_and(|mut seen| seen.insert(world.id))
+                {
+                    tracing::debug!(
+                        target: "motion",
+                        id = world.id,
+                        ?xz,
+                        ref_y = sample.server_pos.y,
+                        "remote grounding off-mesh; keeping server Y"
+                    );
+                }
+            }
+        }
     }
 }
 
@@ -859,7 +1584,6 @@ mod tests {
     #[test]
     #[allow(clippy::assertions_on_constants)]
     fn walk_run_boundary_is_sane() {
-        use crate::ffxi_actor_render::{infers_walk_gait, WALK_RUN_BOUNDARY};
         assert!(EntityMotion::MOVE_EXIT < WALK_RUN_BOUNDARY);
         assert!(
             WALK_RUN_BOUNDARY < 5.0,
@@ -870,110 +1594,1083 @@ mod tests {
         assert!(!infers_walk_gait(6.0), "runner runs, not walks");
     }
 
-    fn dirty_sample(server: Vec3, prev: Vec3, age: f32) -> PredictSample {
-        PredictSample {
-            rendered_pos: prev,
-            server_pos: server,
-            last_server_pos: prev,
-            dr_velocity: Vec3::ZERO,
-            target_heading: 0,
-            rendered_heading_rad: 0.0,
-            secs_since_update: age,
-            sample_dirty: true,
-            initialized: true,
-        }
+    /// A dirty chase sample: rendered at `rendered`, wire target at `server`, the measured
+    /// inter-update interval `age` seconds, and a speed byte (speed_base set equal so the walk
+    /// divisor applies). Mirrors what observe() leaves behind after consuming a moved update:
+    /// last_interval holds the measured gap, sample_age is back to zero.
+    fn chase_sample(server: Vec3, rendered: Vec3, age: f32, speed_byte: u8) -> PredictSample {
+        let mut s = PredictSample::seed(rendered, 0, speed_byte, speed_byte);
+        // The post-move state observe() leaves behind after a real position change: the arrival
+        // segment is running (clock already zeroed by seed), so is_chasing can hold on target.
+        s.segment_started = true;
+        // Previous confirmed position was the seeded one; store what this update moved in XZ, as
+        // observe() would have (Y excluded: it must not inflate the band's jump).
+        let dxw = server.x - rendered.x;
+        let dzw = server.z - rendered.z;
+        s.wire_jump_sq = dxw * dxw + dzw * dzw;
+        s.server_pos = server;
+        s.last_interval = age;
+        s.sample_dirty = true;
+        s
+    }
+
+    /// A dirty sample with distinct speed/speed_base bytes so the run/walk divisor is chosen by
+    /// `speed > speed_base` (the gait rule), not by a fixed walk assumption.
+    fn chase_sample_gait(
+        server: Vec3,
+        rendered: Vec3,
+        age: f32,
+        speed_byte: u8,
+        base_byte: u8,
+    ) -> PredictSample {
+        let mut s = PredictSample::seed(rendered, 0, speed_byte, base_byte);
+        // Same post-move state as chase_sample (see there).
+        s.segment_started = true;
+        let dxw = server.x - rendered.x;
+        let dzw = server.z - rendered.z;
+        s.wire_jump_sq = dxw * dxw + dzw * dzw;
+        s.server_pos = server;
+        s.last_interval = age;
+        s.sample_dirty = true;
+        s
     }
 
     #[test]
-    fn prediction_ingest_seeds_velocity_from_displacement() {
-        let mut s = dirty_sample(Vec3::new(1.0, 0.0, 0.0), Vec3::ZERO, 0.2);
-        advance_prediction(&mut s, 1.0 / 30.0);
+    fn expected_step_uses_the_lsb_divisors() {
+        // walk (speed <= speed_base): /40; run (speed > speed_base): /50, per CPathFind::StepTo.
         assert!(
-            s.dr_velocity.x > 0.5,
-            "x velocity seeded: {}",
-            s.dr_velocity.x
+            (expected_step_yalms(40, 40) - 1.0).abs() < 1e-6,
+            "walk step = 40/40"
         );
-        assert!(s.dr_velocity.y.abs() < 1e-6 && s.dr_velocity.z.abs() < 1e-6);
-        assert!(!s.sample_dirty, "sample consumed by ingest");
-    }
-
-    #[test]
-    fn prediction_clamps_velocity_to_max() {
-        let mut s = dirty_sample(Vec3::new(100.0, 0.0, 0.0), Vec3::ZERO, 0.1);
-        let (pos, _) = advance_prediction(&mut s, 1.0 / 30.0);
-        assert!(s.dr_velocity.length() < 1e-6, "snap zeroes velocity");
         assert!(
-            (pos.x - 100.0).abs() < 0.5,
-            "snapped onto server: {}",
-            pos.x
+            (expected_step_yalms(40, 39) - 0.8).abs() < 1e-6,
+            "run step = 40/50"
+        );
+        assert!(
+            expected_step_yalms(120, 120) > expected_step_yalms(120, 119),
+            "a faster byte steps further per tick"
         );
     }
 
     #[test]
-    fn prediction_extrapolates_between_updates() {
-        let mut s = PredictSample::seed(Vec3::ZERO, 0);
-        s.dr_velocity = Vec3::new(5.0, 0.0, 0.0);
-        let start = s.rendered_pos.x;
-        for _ in 0..10 {
-            advance_prediction(&mut s, 1.0 / 30.0);
-        }
+    fn prediction_band_normal_within_one_step() {
+        // jump (1.0) == step (40/40): within one step -> Normal, no snap; the chase runs on.
+        let mut s = chase_sample(Vec3::new(1.0, 0.0, 0.0), Vec3::ZERO, 0.4, 40);
+        advance_prediction(&mut s, 1.0 / 60.0, true);
+        assert_eq!(s.last_update.unwrap().band, SnapBand::Normal);
+        // Not snapped: the rendered position is still short of the server target.
         assert!(
-            s.rendered_pos.x > start + 0.5,
-            "dead-reckons forward between updates: {} -> {}",
-            start,
+            (s.rendered_pos.x - 1.0).abs() > 1e-3,
+            "a Normal band chases rather than snapping: {}",
             s.rendered_pos.x
         );
     }
 
     #[test]
-    fn prediction_velocity_decays_when_stale() {
-        let mut s = PredictSample::seed(Vec3::ZERO, 0);
-        s.dr_velocity = Vec3::new(5.0, 0.0, 0.0);
-        for _ in 0..120 {
-            advance_prediction(&mut s, 1.0 / 30.0);
+    fn prediction_band_stretch_between_one_and_two_steps() {
+        // jump (1.5) is between one step (1.0) and two steps (2.0): Stretch, still no snap.
+        let mut s = chase_sample(Vec3::new(1.5, 0.0, 0.0), Vec3::ZERO, 0.4, 40);
+        advance_prediction(&mut s, 1.0 / 60.0, true);
+        assert_eq!(s.last_update.unwrap().band, SnapBand::Stretch);
+        assert!(
+            (s.rendered_pos.x - 1.5).abs() > 1e-3,
+            "a Stretch band chases rather than snapping: {}",
+            s.rendered_pos.x
+        );
+    }
+
+    #[test]
+    fn prediction_band_pop_beyond_two_steps_snaps_xz() {
+        // jump (3.0) exceeds two steps (2.0): Pop, XZ snaps onto the server position.
+        let mut s = chase_sample(Vec3::new(3.0, 0.0, 0.0), Vec3::ZERO, 0.4, 40);
+        let (pos, _) = advance_prediction(&mut s, 1.0 / 60.0, true);
+        assert_eq!(s.last_update.unwrap().band, SnapBand::Pop);
+        assert_eq!(pos.x, 3.0, "a Pop band snaps XZ onto the server position");
+    }
+
+    #[test]
+    fn prediction_stale_gap_resets_the_ring_and_tweens() {
+        // Idle 10s then a one-step move: staleness is a timing event, not a distance event. The
+        // band stays Normal (distance-only), the position tweens instead of snapping, and the
+        // cadence ring resets to its kLogicUpdateRate seed so the next budget is one tick plus
+        // headroom rather than the stale gap.
+        let mut s = chase_sample(Vec3::new(0.5, 0.0, 0.0), Vec3::ZERO, 10.0, 40);
+        advance_prediction(&mut s, 1.0 / 60.0, true);
+        assert_eq!(
+            s.last_update.unwrap().band,
+            SnapBand::Normal,
+            "a one-step move after a long idle is Normal"
+        );
+        // Not snapped: the rendered position is still short of the server target and closes in
+        // over the reset budget.
+        assert!(
+            s.rendered_pos.x > 1e-3,
+            "a stale one-step move chases rather than snapping: {}",
+            s.rendered_pos.x
+        );
+        let ring_max = s.sample_intervals.iter().copied().fold(0.0f32, f32::max);
+        assert!(
+            (ring_max - EntityPrediction::TICK_SECS).abs() < 1e-6,
+            "the stale gap reset the ring to its seed: {ring_max}"
+        );
+        assert!(
+            (s.segment_duration
+                - EntityPrediction::TICK_SECS * EntityPrediction::INTERVAL_HEADROOM)
+                .abs()
+                < 1e-6,
+            "the budget is one tick plus headroom again: {}",
+            s.segment_duration
+        );
+    }
+
+    #[test]
+    fn prediction_normal_band_tolerates_the_float_boundary() {
+        // A one-step tick measured through wire + sqrt noise can land marginally above the exact
+        // step (ratio 1.0 + ~1e-7): without SNAP_NORMAL_EPS_RATIO healthy updates split across
+        // the Normal/Stretch edge. Marginally over the epsilon is still Stretch.
+        let mut s = chase_sample(Vec3::new(1.0004, 0.0, 0.0), Vec3::ZERO, 0.4, 40);
+        advance_prediction(&mut s, 1.0 / 60.0, true);
+        assert_eq!(
+            s.last_update.unwrap().band,
+            SnapBand::Normal,
+            "ratio 1.0004 is inside the float-boundary epsilon"
+        );
+
+        let mut s = chase_sample(Vec3::new(1.002, 0.0, 0.0), Vec3::ZERO, 0.4, 40);
+        advance_prediction(&mut s, 1.0 / 60.0, true);
+        assert_eq!(
+            s.last_update.unwrap().band,
+            SnapBand::Stretch,
+            "ratio 1.002 is past the epsilon"
+        );
+    }
+
+    #[test]
+    fn prediction_y_assigns_server_directly() {
+        // Y is fully server-resolved (vendor/server/src/map/ai/helpers/pathfind.cpp
+        // CPathFind::StepTo walks it along the slope and
+        // snaps it onto target.y on arrival): it lands on server.y in one update with no exp
+        // smoothing. A floor-height change must not inflate the XZ jump into a Pop either.
+        let mut s = chase_sample(Vec3::new(1.0, 5.0, 0.0), Vec3::new(0.0, 0.0, 0.0), 0.4, 40);
+        advance_prediction(&mut s, 1.0 / 60.0, true);
+        assert_eq!(
+            s.rendered_pos.y, 5.0,
+            "Y is assigned directly from the server"
+        );
+        // The XZ jump (1.0) is within one step, so the floor-height change did not force a Pop.
+        assert_eq!(s.last_update.unwrap().band, SnapBand::Normal);
+    }
+
+    // --- Per-frame remote grounding on the MZB collision mesh -------------------------------
+
+    /// A minimal app running the prediction tween and the per-frame remote grounding against a
+    /// single slab floor at `floor_y` (x/z in -4..4).
+    fn grounding_app(floor_y: f32) -> App {
+        let mut app = App::new();
+        app.init_resource::<Time>()
+            .init_resource::<EntityPrediction>()
+            .insert_resource(MotionProbe::init())
+            .insert_resource(crate::dat_mzb::MzbCollisionGeometry::from_block(
+                crate::dat_mzb::ground_tests::slab_block(&[(floor_y, Vec3::Y)]),
+            ))
+            .add_systems(
+                Update,
+                (predict_entities_system, ground_remote_movers_system).chain(),
+            );
+        app
+    }
+
+    fn spawn_remote_mob(app: &mut App, id: u32) -> Entity {
+        app.world_mut()
+            .spawn((
+                WorldEntity {
+                    id,
+                    act_index: 1,
+                    kind: EntityKind::Mob,
+                },
+                Transform::default(),
+            ))
+            .id()
+    }
+
+    fn tick_frames(app: &mut App, frames: usize) {
+        for _ in 0..frames {
+            app.world_mut()
+                .resource_mut::<Time>()
+                .advance_by(std::time::Duration::from_secs_f32(1.0 / 60.0));
+            app.update();
+        }
+    }
+
+    #[test]
+    fn grounded_remote_mover_rides_the_collision_mesh() {
+        // The POS packet Y is a Detour waypoint height (1.5 here), not the render surface: the
+        // floor sits at 2.0 and grounding must place the mover on it, every frame.
+        let mut app = grounding_app(2.0);
+        let mob = spawn_remote_mob(&mut app, 900);
+        app.world_mut().resource_mut::<EntityPrediction>().observe(
+            900,
+            Vec3::new(0.5, 1.5, 0.0),
+            0,
+            40,
+            40,
+        );
+        tick_frames(&mut app, 5);
+        let t = app.world().get::<Transform>(mob).unwrap();
+        assert!(
+            (t.translation.y - 2.0).abs() < 1e-4,
+            "mesh Y, not the wire Y"
+        );
+        assert_ne!(t.translation.y, 1.5);
+        assert!((t.translation.x - 0.5).abs() < 1e-4);
+    }
+
+    #[test]
+    fn grounding_runs_on_the_tweened_intermediate_position() {
+        // A one-update move from x=0 to x=1.5 (a Stretch-band jump for the walk step of 1.0)
+        // tweens over the segment budget; on every mid-tween frame the rendered XZ is between
+        // the confirmed endpoints, and grounding must already hold the mesh Y there, not only at
+        // update time.
+        let mut app = grounding_app(2.0);
+        let mob = spawn_remote_mob(&mut app, 901);
+        app.world_mut().resource_mut::<EntityPrediction>().observe(
+            901,
+            Vec3::new(0.0, 1.5, 0.0),
+            0,
+            40,
+            40,
+        );
+        tick_frames(&mut app, 30); // one AI tick of sample_age before the move
+        app.world_mut().resource_mut::<EntityPrediction>().observe(
+            901,
+            Vec3::new(1.5, 1.5, 0.0),
+            0,
+            40,
+            40,
+        );
+        let mut next = 0;
+        for offset in [2usize, 8, 16] {
+            tick_frames(&mut app, offset - next);
+            next = offset;
+            let t = app.world().get::<Transform>(mob).unwrap();
+            assert!(
+                (0.0..1.5).contains(&t.translation.x),
+                "frame +{offset}: mid-tween, x={}",
+                t.translation.x
+            );
+            assert!(
+                (t.translation.y - 2.0).abs() < 1e-4,
+                "frame +{offset}: grounded on the interpolated XZ"
+            );
+        }
+        tick_frames(&mut app, 60); // run out the segment budget
+        let t = app.world().get::<Transform>(mob).unwrap();
+        assert!(
+            (t.translation.x - 1.5).abs() < 1e-4,
+            "arrived at the confirmed endpoint"
+        );
+        assert!((t.translation.y - 2.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn off_mesh_remote_mover_keeps_server_y() {
+        // No floor in this column (x=100 is far outside the slab footprint): grounding has no
+        // answer, so the wire Y stands and nothing snaps.
+        let mut app = grounding_app(2.0);
+        let mob = spawn_remote_mob(&mut app, 902);
+        app.world_mut().resource_mut::<EntityPrediction>().observe(
+            902,
+            Vec3::new(100.0, 1.5, 0.0),
+            0,
+            40,
+            40,
+        );
+        tick_frames(&mut app, 5);
+        let t = app.world().get::<Transform>(mob).unwrap();
+        assert!(
+            (t.translation.y - 1.5).abs() < 1e-6,
+            "server Y kept off-mesh"
+        );
+        assert!((t.translation.x - 100.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn flying_remote_mover_keeps_server_y() {
+        // The 0x45 Info movement byte gates grounding: a Flying model has no ground to stand on,
+        // so it keeps the wire Y even inside the slab footprint.
+        let mut app = grounding_app(2.0);
+        let mob = spawn_remote_mob(&mut app, 903);
+        let skeleton = ffxi_dat::skel::Skeleton {
+            id: ffxi_dat::datid::DatId::from_name(b"skel"),
+            joints: Vec::new(),
+            references: Vec::new(),
+            bounding_boxes: Vec::new(),
+        };
+        let child = app
+            .world_mut()
+            .spawn(
+                crate::ffxi_actor_render::render_actor_with_movement_for_test(
+                    skeleton,
+                    Vec::new(),
+                    ffxi_dat::cib::MovementType::Flying,
+                ),
+            )
+            .id();
+        // Bevy 0.19's EntityRef is read-only; entity_mut's add_child keeps both sides of the
+        // link (the parent's Children and child's ChildOf).
+        app.world_mut().entity_mut(mob).add_child(child);
+        app.world_mut().resource_mut::<EntityPrediction>().observe(
+            903,
+            Vec3::new(0.5, 1.5, 0.0),
+            0,
+            40,
+            40,
+        );
+        tick_frames(&mut app, 5);
+        let t = app.world().get::<Transform>(mob).unwrap();
+        assert!(
+            (t.translation.y - 1.5).abs() < 1e-6,
+            "Flying keeps the wire Y: {}",
+            t.translation.y
+        );
+        assert!((t.translation.x - 0.5).abs() < 1e-4);
+    }
+
+    #[test]
+    fn dead_flying_remote_mover_grounds() {
+        // Death overrides the Flying exemption: LSB never writes Y on the KO transition, so a
+        // dead flyer's last POS Y is its hover height; the corpse grounds like everything else.
+        let mut app = grounding_app(2.0);
+        let mob = spawn_remote_mob(&mut app, 904);
+        let skeleton = ffxi_dat::skel::Skeleton {
+            id: ffxi_dat::datid::DatId::from_name(b"skel"),
+            joints: Vec::new(),
+            references: Vec::new(),
+            bounding_boxes: Vec::new(),
+        };
+        let child = app
+            .world_mut()
+            .spawn(
+                crate::ffxi_actor_render::render_actor_with_movement_for_test(
+                    skeleton,
+                    Vec::new(),
+                    ffxi_dat::cib::MovementType::Flying,
+                ),
+            )
+            .id();
+        app.world_mut().entity_mut(mob).add_child(child);
+        app.world_mut()
+            .entity_mut(child)
+            .insert(crate::scheduler_runtime::DeadFromAction);
+        app.world_mut().resource_mut::<EntityPrediction>().observe(
+            904,
+            Vec3::new(0.5, 1.5, 0.0),
+            0,
+            40,
+            40,
+        );
+        tick_frames(&mut app, 1);
+        let t = app.world().get::<Transform>(mob).unwrap();
+        assert!(
+            (t.translation.y - 2.0).abs() < 1e-6,
+            "a dead flyer grounds on the slab, not its hover Y: {}",
+            t.translation.y
+        );
+    }
+
+    #[test]
+    fn raised_flying_remote_mover_returns_to_server_y() {
+        // Raise clears the latch (C4): a Flying model keeps server Y again and lifts off the mesh.
+        let mut app = grounding_app(2.0);
+        let mob = spawn_remote_mob(&mut app, 905);
+        let skeleton = ffxi_dat::skel::Skeleton {
+            id: ffxi_dat::datid::DatId::from_name(b"skel"),
+            joints: Vec::new(),
+            references: Vec::new(),
+            bounding_boxes: Vec::new(),
+        };
+        let child = app
+            .world_mut()
+            .spawn(
+                crate::ffxi_actor_render::render_actor_with_movement_for_test(
+                    skeleton,
+                    Vec::new(),
+                    ffxi_dat::cib::MovementType::Flying,
+                ),
+            )
+            .id();
+        app.world_mut().entity_mut(mob).add_child(child);
+        app.world_mut()
+            .entity_mut(child)
+            .insert(crate::scheduler_runtime::DeadFromAction);
+        app.world_mut().resource_mut::<EntityPrediction>().observe(
+            905,
+            Vec3::new(0.5, 1.5, 0.0),
+            0,
+            40,
+            40,
+        );
+        // Dead: grounded on the slab; long enough that the arrival segment budget runs out and
+        // the prediction holds exactly at server_pos from then on.
+        tick_frames(&mut app, 60);
+        let t = app.world().get::<Transform>(mob).unwrap();
+        assert!(
+            (t.translation.y - 2.0).abs() < 1e-6,
+            "dead flyer stays grounded: {}",
+            t.translation.y
+        );
+        // Raise: the latch is gone, the Flying exemption applies again, and one frame later the
+        // prediction owns Y at its server value.
+        app.world_mut()
+            .entity_mut(child)
+            .remove::<crate::scheduler_runtime::DeadFromAction>();
+        tick_frames(&mut app, 1);
+        let t = app.world().get::<Transform>(mob).unwrap();
+        assert!(
+            (t.translation.y - 1.5).abs() < 1e-6,
+            "a raised flyer lifts back to server Y: {}",
+            t.translation.y
+        );
+    }
+
+    #[test]
+    fn prediction_chase_paces_to_packet_cadence() {
+        // The chase paces off the measured arrival cadence: a 0.4 s inter-update interval lands in
+        // the ring, the segment budget is max(ring) * INTERVAL_HEADROOM, and the tween closes the
+        // gap at jump/budget per frame -- paced to the tick, not a flat yps constant.
+        let mut p = EntityPrediction::default();
+        p.observe(1, Vec3::ZERO, 0, 40, 40);
+        for _ in 0..24 {
+            // 24 frames at 60 fps: one AI tick of sample_age
+            advance_prediction(p.by_id.get_mut(&1).unwrap(), 1.0 / 60.0, true);
+        }
+        p.observe(1, Vec3::new(1.5, 0.0, 0.0), 0, 40, 40);
+        let s = p.by_id.get_mut(&1).unwrap();
+        assert!(s.sample_dirty, "the moved update is pending consumption");
+        // The measured interval is in the ring and sets the budget with headroom on top.
+        let ring_max = s.sample_intervals.iter().copied().fold(0.0f32, f32::max);
+        assert!(
+            (ring_max - 0.4).abs() < 1e-3,
+            "the measured interval is in the ring: {ring_max}"
+        );
+        assert!(
+            (s.segment_duration - ring_max * EntityPrediction::INTERVAL_HEADROOM).abs() < 1e-6,
+            "budget = widest recent interval plus headroom: {}",
+            s.segment_duration
+        );
+        // One frame of the linear close-in shrinks the gap by jump/budget.
+        let dt = 1.0 / 60.0;
+        advance_prediction(s, dt, true);
+        assert_eq!(
+            s.last_update.unwrap().band,
+            SnapBand::Stretch,
+            "a 1.5 yalms jump is between one and two walk steps"
+        );
+        let gap_after = (s.server_pos.x - s.rendered_pos.x).abs();
+        let expected_gap = 1.5 * (1.0 - dt / s.segment_duration);
+        assert!(
+            (gap_after - expected_gap).abs() < 1e-4,
+            "closes at jump/budget per frame: {} vs {expected_gap}",
+            gap_after
+        );
+    }
+
+    #[test]
+    fn prediction_run_gait_bands_off_the_run_step() {
+        // Gait: a running entity (speed > speed_base) steps off the /50 run step, not the walk
+        // step. The pace is set by the arrival segment; the divisor choice shows up in the band:
+        // the same 1.7 yalms jump stretches the walk step but exceeds two run steps.
+        let mut walker = chase_sample(Vec3::new(1.7, 0.0, 0.0), Vec3::ZERO, 0.4, 40);
+        advance_prediction(&mut walker, 1.0 / 60.0, true);
+        assert_eq!(
+            walker.last_update.unwrap().band,
+            SnapBand::Stretch,
+            "a 1.7 yalms jump is between one and two walk steps"
+        );
+
+        let mut runner = chase_sample_gait(Vec3::new(1.7, 0.0, 0.0), Vec3::ZERO, 0.4, 40, 39);
+        advance_prediction(&mut runner, 1.0 / 60.0, true);
+        let run_step = expected_step_yalms(40, 39); // 40/50 = 0.8
+        assert!((run_step - 0.8).abs() < 1e-6);
+        assert_eq!(
+            runner.last_update.unwrap().band,
+            SnapBand::Pop,
+            "the same jump is beyond two /50 run steps"
+        );
+    }
+
+    #[test]
+    fn prediction_chase_never_overshoots_the_target() {
+        // Target 1.5 yalms ahead (a Stretch band, so it chases rather than pops): the clamp must
+        // hold on every single frame and land exactly on target.
+        let mut s = chase_sample(Vec3::new(1.5, 0.0, 0.0), Vec3::ZERO, 0.4, 40);
+        for _ in 0..600 {
+            advance_prediction(&mut s, 1.0 / 60.0, true);
+            assert!(
+                s.rendered_pos.x <= 1.5 + 1e-6,
+                "chase must not run past the target: {}",
+                s.rendered_pos.x
+            );
+        }
+    }
+
+    #[test]
+    fn prediction_chase_arrives_exactly_and_reports_idle() {
+        let mut s = chase_sample(Vec3::new(1.5, 0.0, 0.0), Vec3::ZERO, 0.4, 40);
+        let dt = 1.0 / 60.0;
+        for _ in 0..600 {
+            if !s.is_chasing() {
+                break;
+            }
+            advance_prediction(&mut s, dt, true);
         }
         assert!(
-            s.dr_velocity.length() < 0.5,
-            "stale velocity coasts to a stop: {}",
-            s.dr_velocity.length()
+            !s.is_chasing(),
+            "the chase reports idle once it reaches the target"
+        );
+        let arrived = s.rendered_pos.x;
+        assert!(
+            (arrived - 1.5).abs() < 1e-3,
+            "idle means on target: {arrived}"
+        );
+        // Idle holds: no slide back or forward for a second of frames.
+        for _ in 0..60 {
+            advance_prediction(&mut s, dt, true);
+        }
+        assert!(!s.is_chasing());
+        assert!(
+            (s.rendered_pos.x - arrived).abs() < 1e-3,
+            "stays put: {arrived} -> {}",
+            s.rendered_pos.x
+        );
+    }
+
+    #[test]
+    fn prediction_keeps_chasing_between_updates() {
+        // No new POS update lands for the whole window; the rendered position must keep closing on
+        // the last target at the segment's constant rate (jump/budget) instead of coasting on a
+        // velocity, landing exactly when the budget lapses and holding there.
+        let mut s = chase_sample(Vec3::new(1.5, 0.0, 0.0), Vec3::ZERO, 0.4, 40);
+        advance_prediction(&mut s, 1.0 / 60.0, true); // consumes the dirty update
+        let dt = 1.0 / 60.0;
+        for _ in 0..14 {
+            advance_prediction(&mut s, dt, true);
+        }
+        assert_eq!(s.idle_frames, 14, "frames without an update count");
+        // Fifteen advances (the consuming one plus these fourteen) is half the seeded budget
+        // (one tick plus headroom): the linear close-in is halfway to the target.
+        let expected_x = 1.5 * (0.25 / s.segment_duration);
+        assert!(
+            (s.rendered_pos.x - expected_x).abs() < 1e-3,
+            "closes at jump/budget between updates: {} vs {expected_x}",
+            s.rendered_pos.x
+        );
+        for _ in 0..45 {
+            advance_prediction(&mut s, dt, true);
+        }
+        assert_eq!(s.idle_frames, 59);
+        assert!(
+            (s.rendered_pos.x - 1.5).abs() < 1e-4,
+            "arrived on target: {}",
+            s.rendered_pos.x
+        );
+    }
+
+    #[test]
+    fn is_chasing_holds_across_the_arrival_segment() {
+        // Once the rendered position reaches the wire target, the moving flag must stay up for the
+        // rest of this update's arrival segment so a late packet does not drop the gait to idle and
+        // restart the walk clip from frame 0. A small hop (Normal band) closes in well under one
+        // budget, so the entity sits on target inside its own segment.
+        let mut s = chase_sample(Vec3::new(0.02, 0.0, 0.0), Vec3::ZERO, 0.4, 40);
+        let dt = 1.0 / 60.0;
+        advance_prediction(&mut s, dt, true); // consumes the update; the segment starts here
+        assert!(
+            s.segment_elapsed < s.segment_duration,
+            "the segment extends past this frame"
+        );
+        // Chase forward and stop on the first frame where it is both on target AND still inside the
+        // segment: that is exactly when a late packet would otherwise have dropped the gait.
+        let mut held = false;
+        for _ in 0..240 {
+            advance_prediction(&mut s, dt, true);
+            let on_target = (s.rendered_pos.x - 0.02).abs() < 1e-3;
+            if on_target && s.segment_elapsed < s.segment_duration {
+                held = true;
+                break;
+            }
+        }
+        assert!(held, "the entity sat on target inside its arrival segment");
+        // On target but inside the segment: is_chasing must still be true (no idle drop).
+        assert!(s.is_chasing(), "the moving flag holds across a late packet");
+        // Past the budget with no new update, it finally reports idle.
+        for _ in 0..240 {
+            advance_prediction(&mut s, dt, true);
+            if !s.is_chasing() {
+                break;
+            }
+        }
+        assert!(!s.is_chasing(), "idle once the segment lapses");
+    }
+
+    #[test]
+    fn prediction_heading_eases_toward_the_target() {
+        // A heading change on an update must ease in over frames (HEADING_TAU), not snap: the
+        // first frame moves partway toward the target and the rest converges on it.
+        let mut s = PredictSample::seed(Vec3::ZERO, 0, 40, 40);
+        let start = s.rendered_heading_rad;
+        s.target_heading = 16; // a quarter turn from the seeded heading
+        let target = heading_to_rad(16);
+        assert!(
+            (start - target).abs() > f32::EPSILON,
+            "the test needs a real heading change"
+        );
+        let dist = |h: f32| {
+            let mut d = (target - h).rem_euclid(std::f32::consts::TAU);
+            if d > std::f32::consts::PI {
+                d -= std::f32::consts::TAU;
+            }
+            d.abs()
+        };
+        advance_prediction(&mut s, 1.0 / 60.0, true);
+        assert_ne!(
+            s.rendered_heading_rad, target,
+            "the first frame must not snap the heading"
+        );
+        assert!(
+            dist(s.rendered_heading_rad) < dist(start),
+            "heading moves toward the target"
+        );
+        for _ in 0..600 {
+            advance_prediction(&mut s, 1.0 / 60.0, true);
+        }
+        assert!(
+            dist(s.rendered_heading_rad) < 1e-3,
+            "converges on the target heading"
+        );
+    }
+
+    /// Port of vendor/server/src/common/utils.cpp worldAngle (pinned vendor/server), byte for
+    /// byte: f32 math, truncating i16 cast, double-mod into [0, 256). The 0.1 yalms gate is the
+    /// XZ form of utils.h isWithinDistance(A, B, 0.1f, true); A.rotation is assumed 0 here.
+    /// Inputs are Bevy-space positions: ffxi_to_bevy maps (lsb.x, lsb.z) to (x, -z), so the LSB
+    /// horizontal delta this formula needs is (dx, -dz). Feeding a raw Bevy delta would compute
+    /// the mirrored byte.
+    fn world_angle_byte(a: Vec3, b: Vec3) -> u8 {
+        let dx = b.x - a.x;
+        let dz_lsb = -(b.z - a.z);
+        if dx * dx + dz_lsb * dz_lsb <= 0.1 * 0.1 {
+            return 0;
+        }
+        let radians = dz_lsb.atan2(dx);
+        let raw = (radians * -(128.0 / std::f32::consts::PI)) as i16;
+        ((raw % 256 + 256) % 256) as u8
+    }
+
+    /// Bevy forward to wire ground plane: ffxi_to_bevy maps (wx, wy) to (x, -z), so the inverse
+    /// of a Bevy direction (f.x, f.z) is the wire direction (f.x, -f.z).
+    fn bevy_forward_to_wire(f: Vec3) -> Vec2 {
+        Vec2::new(f.x, -f.z)
+    }
+
+    #[test]
+    fn heading_forward_points_along_the_world_angle_direction() {
+        // For a grid of Bevy-space displacements, the byte LSB would write for a -> b must make
+        // kuluu's forward point from a toward b in wire space. One quantization step is 1.4 deg,
+        // so even an off-by-one byte passes dot > 0.99; a convention error (a quarter turn) fails
+        // by ~90. The want vector is the true wire delta: ffxi_to_bevy maps (lsb.x, lsb.z) to
+        // (x, -z), so a Bevy step (dx, dz) is the wire step (dx, -dz).
+        let origin = Vec3::ZERO;
+        for dx in [-4.0f32, -1.5, 0.7, 2.0, 4.0] {
+            for dz in [-4.0f32, -2.0, -0.5, 1.5, 3.0] {
+                if dx.abs() < 1e-6 && dz.abs() < 1e-6 {
+                    continue;
+                }
+                let byte = world_angle_byte(origin, Vec3::new(dx, 0.0, dz));
+                let wire_fwd = bevy_forward_to_wire(heading_forward(byte));
+                let want = Vec2::new(dx, -dz).normalize();
+                assert!(
+                    wire_fwd.dot(want) > 0.99,
+                    "a->b ({dx}, {dz}): byte {byte} points the wrong way"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn heading_byte_round_trips_within_one_step() {
+        // Encoding kuluu's forward for byte b through the ported worldAngle must land on b or a
+        // neighbor: LSB's own truncating i16 cast quantizes to 256 steps, so exact identity is
+        // not what the pinned formula gives; a convention error would show up as a constant
+        // offset (a quarter turn is 64 bytes). heading_forward(b) is Bevy space, which is what
+        // world_angle_byte expects.
+        for b in 0u8..=255 {
+            let got = world_angle_byte(Vec3::ZERO, heading_forward(b));
+            let diff = ((got as i32 - b as i32 + 128) % 256 + 256) % 256 - 128;
+            assert!(diff.abs() <= 1, "byte {b} encodes back to {got}");
+        }
+    }
+
+    #[test]
+    fn heading_forward_matches_step_to_travel_direction() {
+        // CPathFind::StepTo (pinned vendor/server) moves a mob by (cosf(radians), sinf(radians))
+        // with radians = (1 - rotation / 256) * 2 * PI: kuluu's wire-space forward for the same
+        // byte must be that exact direction. This is LSB's own decode of its own byte, so it
+        // proves the basis without going through worldAngle's quantization.
+        for b in 0u8..=255 {
+            let radians = (1.0 - b as f32 / 256.0) * std::f32::consts::TAU;
+            let step_dir = Vec2::new(radians.cos(), radians.sin()).normalize();
+            let wire_fwd = bevy_forward_to_wire(heading_forward(b));
+            assert!(
+                wire_fwd.dot(step_dir) > 1.0 - 1e-6,
+                "byte {b}: kuluu forward is not StepTo's travel direction"
+            );
+        }
+    }
+
+    #[test]
+    fn pos_heading_applies_on_the_same_snapshot_as_position() {
+        // LSB writes the rotation byte and the position in one POS block: CPathFind::LookAt sets
+        // loc.p.rotation, then updatemask |= UPDATE_POS. A remote actor receiving a POS update
+        // with the byte for its travel direction must start facing that direction on the same
+        // frame: observe() stores target_heading together with the position and
+        // advance_prediction eases toward it immediately (no one-snapshot lag). The assertions
+        // read the actor's actual Transform, not just the prediction resource.
+        let mut app = grounding_app(0.0);
+        let mob = spawn_remote_mob(&mut app, 950);
+        // Settle at a heading far from the next step's travel direction.
+        app.world_mut()
+            .resource_mut::<EntityPrediction>()
+            .observe(950, Vec3::ZERO, 128, 40, 40);
+        tick_frames(&mut app, 60);
+
+        let a = Vec3::new(1.0, 0.0, 2.0);
+        let b = Vec3::new(5.0, 0.0, 9.0);
+        let byte = world_angle_byte(a, b);
+        let target = heading_to_rad(byte);
+        let dist = |h: f32| {
+            let mut d = (target - h).rem_euclid(std::f32::consts::TAU);
+            if d > std::f32::consts::PI {
+                d -= std::f32::consts::TAU;
+            }
+            d.abs()
+        };
+
+        let before_h = app.world().resource::<EntityPrediction>().by_id[&950].rendered_heading_rad;
+        let t_before = *app.world().get::<Transform>(mob).unwrap();
+
+        app.world_mut()
+            .resource_mut::<EntityPrediction>()
+            .observe(950, a, byte, 40, 40);
+        tick_frames(&mut app, 1);
+
+        let t_after = *app.world().get::<Transform>(mob).unwrap();
+        // Same snapshot: the position tween starts on this frame and closes the gap.
+        assert!(
+            t_after.translation.distance(t_before.translation) > 1e-6,
+            "the position update must move the actor on the same frame"
+        );
+        assert!(
+            t_after.translation.distance(a) < t_before.translation.distance(a),
+            "the tween closes the gap toward the new server position on the first frame"
+        );
+        // Same snapshot: the heading turn starts on this frame (exponential approach, no lag).
+        let after_h = app.world().resource::<EntityPrediction>().by_id[&950].rendered_heading_rad;
+        assert!(
+            dist(after_h) < dist(before_h),
+            "the first frame after the POS update already turns toward the travel direction"
+        );
+
+        // And it converges on the travel direction: run out the HEADING_TAU easing.
+        tick_frames(&mut app, 240);
+        let settled = *app.world().get::<Transform>(mob).unwrap();
+        // The rotation is set every frame via from_rotation_y(-heading), so it is a pure Y
+        // rotation and the angle comes straight off the quaternion components.
+        let yaw = 2.0 * settled.rotation.y.atan2(settled.rotation.w);
+        assert!(
+            dist(-yaw) < 1e-3,
+            "the actor ends facing its travel direction (rotation is from_rotation_y(-heading))"
         );
     }
 
     #[test]
     fn prediction_static_actor_does_not_drift() {
         let anchor = Vec3::new(3.0, 1.0, 2.0);
-        let mut s = PredictSample::seed(anchor, 64);
+        let mut s = PredictSample::seed(anchor, 64, 0, 0);
         for _ in 0..60 {
-            advance_prediction(&mut s, 1.0 / 30.0);
+            advance_prediction(&mut s, 1.0 / 30.0, true);
         }
         assert!(
             (s.rendered_pos - anchor).length() < 0.05,
             "stays put: {:?}",
             s.rendered_pos
         );
-        assert!(s.dr_velocity.length() < 1e-3);
     }
 
     #[test]
     fn observe_seeds_then_flags_only_on_real_move() {
         let mut p = EntityPrediction::default();
-        p.observe(7, Vec3::new(1.0, 0.0, 0.0), 10);
+        p.observe(7, Vec3::new(1.0, 0.0, 0.0), 10, 25, 40);
         let s = p.by_id[&7];
         assert!(
             s.initialized && !s.sample_dirty,
             "first sight seeds, not dirty"
         );
         assert_eq!(s.rendered_pos, Vec3::new(1.0, 0.0, 0.0));
+        assert_eq!(s.packet_speed, 25);
+        assert_eq!(s.packet_speed_base, 40);
+        assert!(!s.is_chasing(), "a fresh sample is already on target");
 
-        p.observe(7, Vec3::new(1.0, 0.0, 0.0), 10);
+        p.observe(7, Vec3::new(1.0, 0.0, 0.0), 10, 25, 40);
         assert!(
             !p.by_id[&7].sample_dirty,
             "unchanged position must not re-ingest"
         );
 
-        p.observe(7, Vec3::new(2.0, 0.0, 0.0), 20);
+        p.observe(7, Vec3::new(2.0, 0.0, 0.0), 20, 40, 50);
         assert!(p.by_id[&7].sample_dirty, "moved position raises dirty");
         assert_eq!(p.by_id[&7].target_heading, 20);
+        assert_eq!(p.by_id[&7].packet_speed, 40, "speed byte tracks the update");
+        assert_eq!(
+            p.by_id[&7].packet_speed_base, 50,
+            "animationSpeed byte tracks the update"
+        );
+
+        // Mount state feeds nothing: the step model derives pace from the wire speed byte and the
+        // measured inter-update cadence, so observe() leaves the segment budget at its seeded value
+        // regardless of mount.
+        let seeded_budget = EntityPrediction::TICK_SECS * EntityPrediction::INTERVAL_HEADROOM;
+        p.observe(7, Vec3::new(2.0, 0.0, 0.0), 20, 40, 50);
+        assert!(
+            (p.by_id[&7].segment_duration - seeded_budget).abs() < 1e-6,
+            "observe does not re-budget the segment: {} vs seeded {}",
+            p.by_id[&7].segment_duration,
+            seeded_budget
+        );
+    }
+
+    #[test]
+    fn remote_running_keeps_gait_across_captured_lsb_arrival_jitter() {
+        const FRAME_SECS: f32 = 1.0 / 60.0;
+        const PACKET_STEP: f32 = 2.4;
+        const RUN_SPEED: f32 = 4.8;
+        const MAX_SPEED_MULTIPLIER: f32 = 2.0;
+        const WARMUP_FRAMES: usize = 180;
+        const STOP_FRAMES: usize = 180;
+        // Arrival jitter changes timing without changing the sender's half-second position steps.
+        const ARRIVAL_FRAMES: [usize; 10] = [24, 48, 66, 114, 138, 162, 192, 234, 264, 288];
+        // Wire bytes for this trace: a run gait (speed > speed_base) whose /50 step is exactly the
+        // trace's per-update jump, so every update lands in the Normal band.
+        const SPEED_BYTE: u8 = 120;
+        const BASE_BYTE: u8 = 48;
+        let mut app = App::new();
+        app.init_resource::<Time>()
+            .init_resource::<SceneState>()
+            .init_resource::<EntityPrediction>()
+            .init_resource::<EntityMotion>();
+        app.world_mut().insert_resource(MotionProbe::init());
+        app.add_systems(
+            Update,
+            (predict_entities_system, track_entity_motion_system).chain(),
+        );
+        let actor = app
+            .world_mut()
+            .spawn((
+                WorldEntity {
+                    id: 7,
+                    act_index: 1,
+                    kind: EntityKind::Pc,
+                },
+                Transform::default(),
+            ))
+            .id();
+        app.world_mut().resource_mut::<EntityPrediction>().observe(
+            7,
+            Vec3::ZERO,
+            0,
+            SPEED_BYTE,
+            BASE_BYTE,
+        );
+        let mut packet = 0;
+        let mut confirmed = 0.0;
+        let mut previous = 0.0;
+        let last_arrival = *ARRIVAL_FRAMES.last().unwrap();
+        for frame in 0..last_arrival + STOP_FRAMES {
+            if ARRIVAL_FRAMES.get(packet) == Some(&frame) {
+                packet += 1;
+                confirmed = packet as f32 * PACKET_STEP;
+                app.world_mut().resource_mut::<EntityPrediction>().observe(
+                    7,
+                    Vec3::X * confirmed,
+                    0,
+                    SPEED_BYTE,
+                    BASE_BYTE,
+                );
+            }
+            app.world_mut()
+                .resource_mut::<Time>()
+                .advance_by(std::time::Duration::from_secs_f32(FRAME_SECS));
+            app.update();
+            let x = app.world().get::<Transform>(actor).unwrap().translation.x;
+            assert!(x >= previous && x <= confirmed);
+            assert!(x - previous <= RUN_SPEED * FRAME_SECS * MAX_SPEED_MULTIPLIER);
+            previous = x;
+            if (WARMUP_FRAMES..last_arrival).contains(&frame) {
+                let sample = app.world().resource::<EntityMotion>().sample(7).unwrap();
+                assert!(sample.moving);
+                assert!(
+                    !infers_walk_gait(sample.speed),
+                    "run restarted at frame {frame}"
+                );
+            }
+        }
+        assert_eq!(previous, confirmed);
+        assert!(!app.world().resource::<EntityMotion>().is_moving(7));
+    }
+
+    #[test]
+    fn remote_motion_jitter_and_missing_updates_stay_between_confirmed_endpoints() {
+        const FRAME_SECS: f32 = 1.0 / 60.0;
+        const RUN_SPEED: f32 = 4.8;
+        // Walk bytes whose /40 step (2.0 yalms) covers the trace's per-update jump (0.72), so no
+        // update reads as a teleport.
+        let mut prediction = EntityPrediction::default();
+        prediction.observe(7, Vec3::ZERO, 0, 80, 80);
+        let mut elapsed = 0.0;
+        for frames in [12, 9, 15, 24, 6, 18] {
+            let target = Vec3::X * elapsed * RUN_SPEED;
+            prediction.observe(7, target, 0, 80, 80);
+            let sample = prediction.by_id.get_mut(&7).unwrap();
+            let mut previous = sample.rendered_pos.x;
+            for _ in 0..frames {
+                let (position, _) = advance_prediction(sample, FRAME_SECS, true);
+                assert!(position.x >= previous && position.x <= target.x);
+                previous = position.x;
+            }
+            elapsed += frames as f32 * FRAME_SECS;
+        }
+    }
+
+    #[test]
+    fn worm_speed_zero_mirrors_the_server_substitute_step() {
+        // vendor/server/src/map/ai/helpers/pathfind.cpp CPathFind::StepTo substitutes speed = 20
+        // for a ROAMFLAG_WORM mob whose
+        // GetSpeed() == 0 and never writes it back, so the wire byte stays 0 while the server still
+        // advances 20 / divisor per tick. A 0 byte on an update that actually moved must band off
+        // that substitute step: successive 0.5 yalms hops are exactly one walk step each -> Normal,
+        // chase, never Pop.
+        assert!(
+            (expected_step_yalms(0, 0) - 0.5).abs() < 1e-6,
+            "the worm substitute step is 20/40"
+        );
+        let mut p = EntityPrediction::default();
+        p.observe(9, Vec3::ZERO, 0, 0, 0);
+        for hop in 1..=6 {
+            // One AI tick of sample_age between updates: the measured interval lands in the ring.
+            for _ in 0..24 {
+                advance_prediction(p.by_id.get_mut(&9).unwrap(), 1.0 / 60.0, true);
+            }
+            p.observe(9, Vec3::new(hop as f32 * 0.5, 0.0, 0.0), 0, 0, 0);
+            let s = p.by_id.get_mut(&9).unwrap();
+            advance_prediction(s, 1.0 / 60.0, true); // consumes the update
+            let u = s.last_update.unwrap();
+            assert_eq!(
+                u.band,
+                SnapBand::Normal,
+                "hop {hop}: a worm tick is one substitute step"
+            );
+            assert!(
+                (s.rendered_pos.x - hop as f32 * 0.5).abs() > 1e-4,
+                "hop {hop}: Normal chases rather than snapping: {}",
+                s.rendered_pos.x
+            );
+        }
+        // Let the last segment run out: the tween clamps exactly onto the server position at
+        // budget end, so a worm that keeps ticking arrives for good by segment end. The budget is
+        // max(ring) * INTERVAL_HEADROOM and the ring's widest sample here is 25 frames (the
+        // consume-advance between observes), i.e. ~31.25 frames; 40 covers it with margin.
+        let s = p.by_id.get_mut(&9).unwrap();
+        for _ in 0..39 {
+            advance_prediction(s, 1.0 / 60.0, true);
+        }
+        assert_eq!(
+            s.rendered_pos.x, 3.0,
+            "arrives exactly at segment end: {}",
+            s.rendered_pos.x
+        );
+    }
+
+    #[test]
+    fn worm_speed_zero_idle_produces_no_chase_and_no_band_churn() {
+        // A burrowed worm that does not move sends no POS updates at all: a 0 speed byte with no
+        // position change must not start a segment, band anything, or drift the rendered pose.
+        let anchor = Vec3::new(12.0, -4.0, 7.5);
+        let mut p = EntityPrediction::default();
+        p.observe(9, anchor, 0, 0, 0);
+        for _ in 0..600 {
+            advance_prediction(p.by_id.get_mut(&9).unwrap(), 1.0 / 60.0, true);
+        }
+        // Re-sent identical positions (a server re-broadcasting an unchanged pose) must not
+        // churn either: observe() gates on a real move.
+        for _ in 0..5 {
+            p.observe(9, anchor, 0, 0, 0);
+            advance_prediction(p.by_id.get_mut(&9).unwrap(), 1.0 / 60.0, true);
+        }
+        let s = &p.by_id[&9];
+        assert!(!s.is_chasing(), "an idle worm has no segment to hold");
+        assert!(
+            s.last_update.is_none(),
+            "no update was ever consumed: no band churn"
+        );
+        assert_eq!(s.rendered_pos, anchor, "the rendered pose does not drift");
+    }
+
+    #[test]
+    fn late_tick_widens_the_ring_budget_without_popping() {
+        // A captured-trace run with one interval at three times the AI tick: the ring must widen
+        // the segment budget on that update (max-of-ring is asymmetric), the mob must not arrive
+        // early over the next two normal updates, and the band stays Normal throughout -- a late
+        // tick is a timing event, not a distance event.
+        const FRAME_SECS: f32 = 1.0 / 60.0;
+        const PACKET_STEP: f32 = 2.4;
+        const SPEED_BYTE: u8 = 120;
+        const BASE_BYTE: u8 = 48; // run gait, /50 step = 2.4 = the trace's per-update jump
+        let mut p = EntityPrediction::default();
+        p.observe(7, Vec3::ZERO, 0, SPEED_BYTE, BASE_BYTE);
+        // One gap is 72 frames = three ticks; the rest are one tick apart.
+        let arrivals: [usize; 6] = [24, 48, 120, 144, 168, 192];
+        let mut arrived = 0;
+        let mut confirmed = 0.0;
+        let mut previous = 0.0;
+        let mut last_update: Option<UpdateOutcome> = None;
+        for frame in 0..240 {
+            if arrived < arrivals.len() && arrivals[arrived] == frame {
+                arrived += 1;
+                confirmed += PACKET_STEP;
+                p.observe(7, Vec3::X * confirmed, 0, SPEED_BYTE, BASE_BYTE);
+            }
+            let s = p.by_id.get_mut(&7).unwrap();
+            advance_prediction(s, FRAME_SECS, true);
+            if let Some(u) = s.last_update {
+                last_update = Some(u);
+                assert_eq!(
+                    u.band,
+                    SnapBand::Normal,
+                    "frame {frame}: a late tick is not a Pop"
+                );
+            }
+            let x = s.rendered_pos.x;
+            assert!(x >= previous && x <= confirmed + 1e-6, "frame {frame}");
+            previous = x;
+        }
+        // The outcome of the last update (two normal updates after the late tick) still carries
+        // the widened budget: max-of-ring kept the 3-tick interval in play.
+        let widened = last_update.expect("updates were consumed").segment_duration;
+        assert!(
+            (widened - EntityPrediction::MAX_INTERVAL * EntityPrediction::INTERVAL_HEADROOM).abs()
+                < 1e-6,
+            "the ring kept the widest interval in the budget: {widened}"
+        );
     }
 
     #[test]
@@ -1075,6 +2772,80 @@ mod tests {
         s.kind = RestKind::Heal;
         s.observe_exit_clip(false);
         assert!(!s.exit_blocks_movement(1.0 / 30.0));
+    }
+
+    // KULUU_MOTION_LOG probe: snap-band counting, toggle counting, and rising-edge mismatch
+    // detection.
+    #[test]
+    fn motion_probe_counts_snap_bands() {
+        let mut p = MotionProbe::enabled_for_test();
+        for band in [SnapBand::Normal, SnapBand::Stretch, SnapBand::Pop] {
+            p.record_update(
+                1,
+                EntityKind::Mob,
+                UpdateOutcome {
+                    dt_server: 0.4,
+                    jump_sq: 1.0,
+                    band,
+                    step_yalms: 1.0,
+                    segment_duration: 0.5,
+                    ring_max: 0.4,
+                    speed: 40,
+                    speed_base: 40,
+                    idle_frames: 12,
+                    rem_dist: 0.0,
+                },
+            );
+        }
+        let e = &p.per_id[&1];
+        assert_eq!((e.updates, e.normals, e.stretches, e.pops), (3, 1, 1, 1));
+        assert_eq!(p.all_intervals.len(), 3);
+    }
+
+    #[test]
+    fn motion_probe_counts_moving_toggles() {
+        let mut p = MotionProbe::enabled_for_test();
+        p.record_toggle(9, EntityKind::Mob, true, 0.9);
+        p.record_toggle(9, EntityKind::Mob, false, 0.3);
+        assert_eq!(p.per_id[&9].toggles, 2);
+    }
+
+    #[test]
+    fn motion_probe_mismatch_is_rising_edge() {
+        let mut p = MotionProbe::enabled_for_test();
+        // worldAngle basis: heading 0 faces +X (see heading_forward), so travelling +z is a full
+        // quarter turn sideways.
+        p.record_heading_mismatch(3, EntityKind::Mob, 0.0, Vec3::new(0.0, 0.0, 5.0));
+        assert_eq!(p.per_id[&3].mismatch_events, 1);
+        // still sideways: no second event for the same episode
+        p.record_heading_mismatch(3, EntityKind::Mob, 0.05, Vec3::new(0.6, 0.0, 4.9));
+        assert_eq!(p.per_id[&3].mismatch_events, 1);
+        // aligned: the episode ends without an event
+        p.record_heading_mismatch(3, EntityKind::Mob, 0.0, Vec3::new(5.0, 0.0, 0.0));
+        assert_eq!(p.per_id[&3].mismatch_events, 1);
+        // a new sideways episode counts again
+        p.record_heading_mismatch(3, EntityKind::Mob, 0.0, Vec3::new(0.0, 0.0, 5.0));
+        assert_eq!(p.per_id[&3].mismatch_events, 2);
+    }
+
+    #[test]
+    fn motion_probe_ignores_crawl_speed_for_mismatches() {
+        let mut p = MotionProbe::enabled_for_test();
+        // below MIN_MEANINGFUL_SPEED_SQ the direction is noise: no event and
+        // not even an entry (the early return precedes first-sight bookkeeping)
+        p.record_heading_mismatch(4, EntityKind::Mob, 0.0, Vec3::new(0.05, 0.0, 0.0));
+        assert!(!p.per_id.contains_key(&4), "crawl speed records nothing");
+    }
+
+    #[test]
+    fn motion_probe_quantiles() {
+        let mut samples = std::collections::VecDeque::new();
+        for v in [1.0f32, 0.5, 0.75, 0.25, 2.0] {
+            samples.push_back(v);
+        }
+        let (med, p90) = quantiles(&samples);
+        assert_eq!(med, Some(0.75));
+        assert_eq!(p90, Some(2.0), "five samples: p90 rounds to the top");
     }
 
     #[test]

@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::OnceLock;
 use std::time::Instant;
 
@@ -134,45 +134,13 @@ pub fn model_radius(kind: EntityKind) -> f32 {
     }
 }
 
-/// Retail's own decode of the wire speed byte
-/// (research/XIClient .../Game/Net/Packets/s2c, RecvCharPc and RecvServerStatus).
-pub const SPEED_TO_YPS: f32 = 0.1;
-
-// The server does not send a faster speed to a mounted player — LSB caps its
-// mount speed at map.MOUNT_SPEED/2 = 40, *below* the 50 it sends on foot
-// (vendor/server/src/map/entities/battleentity.cpp, CBattleEntity::UpdateSpeed).
-// Retail makes up the difference in the client, doubling the decoded speed while
-// mounted and then clamping
-// (research/XIClient .../World/Actor/ControllableActor.cpp,
-// ControllableActor::StepControl). Taking the packet at face value therefore
-// makes mounting *slower*.
-pub const MOUNTED_SPEED_MULTIPLIER: f32 = 2.0;
-pub const MAX_MOVE_SPEED_YPS: f32 = 30.0;
-
-/// The speed LSB sends an unmounted PC, which every "step per tick" budget in
-/// the reactor is calibrated against
-/// (vendor/server/src/map/entities/battleentity.cpp, CBattleEntity::UpdateSpeed).
-pub const BASE_PACKET_SPEED: u8 = 50;
-
-/// Yalms per second for a decoded packet speed. `speed_base` is a separate value
-/// retail keeps but never spends on the movement rate — `StepControl` reads only
-/// the doubled-and-clamped `speed`, so scaling by `speed / speed_base` would
-/// under-drive a mounted PC rather than over-drive it.
-pub fn move_speed_yps(packet_speed: u8, mounted: bool) -> f32 {
-    let speed = f32::from(packet_speed) * SPEED_TO_YPS;
-    let speed = if mounted {
-        speed * MOUNTED_SPEED_MULTIPLIER
-    } else {
-        speed
-    };
-    speed.min(MAX_MOVE_SPEED_YPS)
-}
-
-/// Movement rate as a multiple of the unmounted run the callers' per-tick step
-/// budgets are sized for.
-pub fn move_speed_ratio(packet_speed: u8, mounted: bool) -> f32 {
-    move_speed_yps(packet_speed, mounted) / move_speed_yps(BASE_PACKET_SPEED, false)
-}
+// The wire speed decode lives in kuluu-snapshot so the render layer (which cannot depend on
+// kuluu-session at runtime) and the session reactor share one source of truth; re-exported here
+// for the existing `kuluu_session::state::{...}` call sites.
+pub use kuluu_snapshot::speed::{
+    move_speed_ratio, move_speed_yps, AUTHORED_ANIM_RATE, BASE_PACKET_SPEED, MAX_MOVE_SPEED_YPS,
+    MOUNTED_SPEED_MULTIPLIER, SPEED_TO_YPS,
+};
 
 fn merge_kind(existing: EntityKind, incoming: EntityKind) -> EntityKind {
     use EntityKind::*;
@@ -202,6 +170,15 @@ pub struct Entity {
     /// Position block, so preserved across non-position updates (like `pos`).
     #[serde(default)]
     pub face_target: u16,
+
+    /// entity_update namevis byte (PosHead flags3 top byte), written under
+    /// UPDATE_HP — vendor/server/src/map/packets/entity_update.cpp CEntityUpdatePacket::updateWith/:408 put
+    /// `ref<uint8>(0x2B) = PEntity->namevis` inside `if (updatemask & UPDATE_HP)`.
+    /// The packet buffer is zero-filled, so a POS-only update carries no namevis:
+    /// `None` until the first General-block update does, preserved across
+    /// pos-only updates like `char_flags`.
+    #[serde(default)]
+    pub name_vis: Option<u8>,
 
     #[serde(default)]
     pub claim_id: u32,
@@ -238,6 +215,22 @@ pub struct Entity {
     /// Preserved across pos-only updates like `look`, for the same reason.
     #[serde(skip)]
     pub mount_id: Option<u8>,
+
+    /// `GP_SERV_CHAR_PC.MonstrosityFlags` (body 0x3A) of the last Model-block
+    /// update. Written only under `SendFlg.Model` — vendor/server/src/map/packets/
+    /// char_update.cpp `CCharUpdatePacket::updateWith` — so a General-block update
+    /// does not refresh it; preserved across non-Model updates like `mount_id`.
+    /// Drives the retail Monstrosity nameplate marker (0xAB).
+    #[serde(skip)]
+    pub monstrosity: Option<bool>,
+
+    /// `Flags4.JobMasterFlag` of the last non-despawn 0x0D. Unlike the General
+    /// words in `char_flags`, LSB writes it on every update, outside all SendFlg
+    /// blocks (vendor/server/src/map/packets/char_update.cpp "Fields that are
+    /// always checked if this isnt a despawn packet"), so it refreshes even on
+    /// pos-only updates. PC-only; folded into `char_flags` at upsert time.
+    #[serde(skip)]
+    pub job_master_display: Option<bool>,
 }
 
 /// Which retail colour a run of a chat line takes. Retail renders some
@@ -346,7 +339,7 @@ pub enum ChatChannel {
 
     /// Chat kind 8 MESSAGE_EMOTION: canned-emote lines the client composes
     /// from its DAT, plus free-form /em text
-    /// (vendor/server/src/map/enums/chat_message_type.h:35).
+    /// (vendor/server/src/map/enums/chat_message_type.h CHAT_MESSAGE_TYPE MESSAGE_EMOTION).
     Emote,
 }
 
@@ -407,7 +400,7 @@ pub struct CharStatsRaw {
 
 /// s2c 0x00A myroom cluster; present only while inside a Mog House. `model`
 /// is an interior model id, not a zone id
-/// (vendor/server/src/map/packets/s2c/0x00a_login.cpp:32-34).
+/// (vendor/server/src/map/packets/s2c/0x00a_login.cpp GetMogHouseModelID).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MyRoomInfo {
     pub model: u16,
@@ -447,7 +440,38 @@ pub struct SessionState {
     pub character: Option<String>,
     pub zone_id: Option<u16>,
     pub entities: Vec<Entity>,
+
+    /// Wire-id → index into [`Self::entities`]. Maintained in lockstep by every
+    /// `apply_event` arm that mutates the Vec, so self/lookup paths are O(1)
+    /// instead of O(N) scans. Transient: not serialized (nothing deserializes
+    /// `SessionState` today); rebuilt from scratch on zone change.
+    #[serde(skip)]
+    pub entity_index: HashMap<u32, usize>,
+
+    /// Entity ids whose records changed since the last drain of this set.
+    /// Stamped by the same `apply_event` arms that mutate [`Self::entities`] —
+    /// only when something actually changed — and drained by the translator to
+    /// build O(changed) scene deltas instead of full snapshots. A zone change
+    /// clears it (the repopulating upserts stamp back in). Transient: not
+    /// serialized.
+    #[serde(skip)]
+    pub pending_entity_upserts: HashSet<u32>,
+
+    /// Entity ids removed since the last drain, plus every live id at a zone
+    /// change (see `pending_entity_upserts`). An id present in both sets was
+    /// upserted then removed within one batch: removal wins — the translator
+    /// must not emit it. Transient: not serialized.
+    #[serde(skip)]
+    pub pending_entity_removals: HashSet<u32>,
+
     pub party: Vec<PartyMember>,
+
+    /// Monotonically increasing counter, bumped on every `ZoneChanged`. The
+    /// renderer's party-frame content key includes this so a zone transition
+    /// always forces a UI rebuild, even when the party data looks identical.
+    #[serde(default)]
+    pub zone_generation: u64,
+
     pub chat: Vec<ChatLine>,
 
     /// Lines already evicted from `chat` by [`CHAT_HISTORY_CAP`], so
@@ -503,6 +527,11 @@ pub struct SessionState {
 
     #[serde(default)]
     pub death_homepoint_secs: Option<u32>,
+
+    /// Server-offered alternative to returning home while dead (s2c 0x0F9).
+    /// `None` is the ordinary home-point-only menu.
+    #[serde(default)]
+    pub death_menu_offer: Option<ffxi_proto::decode::DeathMenuOffer>,
 
     #[serde(default)]
     pub current_weather: Option<u16>,
@@ -566,6 +595,8 @@ pub struct SessionState {
     /// describes the zone currently loaded.
     #[serde(default)]
     pub sub_area: Option<u16>,
+    #[serde(default)]
+    pub voyage: Option<kuluu_snapshot::Voyage>,
 
     #[serde(default)]
     pub mog_zone_flag: bool,
@@ -574,7 +605,7 @@ pub struct SessionState {
     pub job_info: Option<JobInfoState>,
 
     /// 2F-unlock bit from the self 0x067 CharSync
-    /// (vendor/server/src/map/packets/char_sync.cpp:61); `None` until one lands.
+    /// (vendor/server/src/map/packets/char_sync.cpp CCharSyncPacket::CCharSyncPacket); `None` until one lands.
     #[serde(default)]
     pub mh_2f_unlocked: Option<bool>,
 
@@ -621,7 +652,7 @@ pub struct CheckMessage {
 
 /// A bazaar being browsed. Rows are keyed by the seller's LOC_INVENTORY slot
 /// because the server refreshes single rows in place after each purchase
-/// (vendor/server/src/map/packets/c2s/0x106_bazaar_buy.cpp:198).
+/// (vendor/server/src/map/packets/c2s/0x106_bazaar_buy.cpp GP_CLI_COMMAND_BAZAAR_BUY::process).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BazaarView {
     pub seller_id: u32,
@@ -780,7 +811,7 @@ pub struct AhFeeQuote {
 }
 
 /// Faithful wide-scan model: the server owns membership, order, and gating
-/// (job/range/floor — vendor/server/src/map/zone_entities.cpp:1578 WideScan).
+/// (job/range/floor — vendor/server/src/map/zone_entities.cpp CZoneEntities::WideScan WideScan).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct WidescanList {
     pub entries: Vec<WidescanEntry>,
@@ -842,7 +873,7 @@ impl From<ffxi_proto::decode::WidescanPos> for WidescanPos {
 
 /// Accumulated s2c 0x0C9 EQUIP_INSPECT answer for the latest /check on a PC:
 /// EQUIPMENT batches and the GENERAL packet merge here keyed on `target_id`
-/// (vendor/server/src/map/packets/c2s/0x0dd_equip_inspect.cpp:135-136).
+/// (vendor/server/src/map/packets/c2s/0x0dd_equip_inspect.cpp GP_CLI_COMMAND_EQUIP_INSPECT::process).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CheckResult {
     pub target_id: u32,
@@ -1070,7 +1101,7 @@ pub enum InventoryUpdate {
     },
 }
 
-/// GP_CLI_COMMAND_PBX_BOXNO (vendor/server/src/map/packets/c2s/0x04d_pbx.h:45).
+/// GP_CLI_COMMAND_PBX_BOXNO (vendor/server/src/map/packets/c2s/0x04d_pbx.h).
 /// Incoming = the inbox ("Delivery Box"), Outgoing = the send box ("Deliveries").
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1304,7 +1335,7 @@ pub struct PartyMember {
     pub is_alliance_leader: bool,
 
     /// Which party of the alliance this member sits in (0..2, or 3 for
-    /// "no party"). vendor/server/src/map/packets/s2c/0x0dd_group_list.cpp:40.
+    /// "no party"). vendor/server/src/map/packets/s2c/0x0dd_group_list.cpp GP_SERV_COMMAND_GROUP_LIST::GP_SERV_COMMAND_GROUP_LIST.
     #[serde(default)]
     pub party_no: u8,
 
@@ -1366,6 +1397,31 @@ impl SessionState {
         }
         self.check_result.as_mut().expect("just ensured Some")
     }
+}
+
+/// One drained batch of [`SessionState::pending_entity_upserts`] /
+/// [`SessionState::pending_entity_removals`]. The event folder drains it after
+/// each fold and forwards it to the translator, which merges batches into
+/// O(changed) scene deltas. `other_changed` marks a batch whose triggering
+/// event also mutated non-entity state (chat, party, stage, …); the translator
+/// answers those with a full snapshot instead of an entity-only delta.
+#[derive(Debug, Clone, Default)]
+pub struct EntityChanges {
+    pub upserts: HashSet<u32>,
+    pub removals: HashSet<u32>,
+    pub other_changed: bool,
+}
+
+impl SessionState {
+    /// Takes both pending entity sets (leaving them empty). The event folder
+    /// drains this after each fold; ids present in `removals` win over
+    /// `upserts` — an upsert-then-remove within one batch nets to a removal.
+    pub fn take_pending_entities(&mut self) -> (HashSet<u32>, HashSet<u32>) {
+        (
+            std::mem::take(&mut self.pending_entity_upserts),
+            std::mem::take(&mut self.pending_entity_removals),
+        )
+    }
 
     /// Folds `event` into the state, returning `true` only when the state
     /// actually mutated. Paired with `watch::Sender::send_if_modified` in the
@@ -1402,12 +1458,22 @@ impl SessionState {
                 self.myroom = *myroom;
                 self.mog_zone_flag = *mog_zone_flag;
                 self.sub_area = None;
+                self.voyage = None;
 
                 self.logout_countdown = None;
                 self.death_homepoint_secs = None;
+                self.death_menu_offer = None;
 
+                // Every live id is gone: stamp them all as removals so a delta
+                // drained before the repopulating upserts still sees the wipe,
+                // and drop pending upserts (they belong to the old zone). The
+                // index dies with the Vec.
+                self.pending_entity_removals = self.entities.iter().map(|e| e.id).collect();
+                self.pending_entity_upserts.clear();
+                self.entity_index.clear();
                 self.entities.clear();
                 self.party.clear();
+                self.zone_generation = self.zone_generation.wrapping_add(1);
 
                 self.current_weather = None;
                 self.check_result = None;
@@ -1415,7 +1481,7 @@ impl SessionState {
                 // The seller is a zone-local entity, so a bazaar cannot survive
                 // the warp: LSB resolves the browsed bazaar through
                 // `GetEntity(BazaarID.targid)` and drops any request once that
-                // lookup fails (0x106_bazaar_buy.cpp:46-56).
+                // lookup fails (0x106_bazaar_buy.cpp GP_CLI_COMMAND_BAZAAR_BUY::process).
                 self.bazaar = None;
                 // The AH counter is likewise zone-local (sendMenu from the NPC;
                 // GP_CLI_COMMAND_AUC::validate gates on the zone's MISC_AH).
@@ -1434,6 +1500,10 @@ impl SessionState {
                 self.treasure_pool.clear();
                 true
             }
+            AgentEvent::VoyageSynced { voyage } => {
+                self.voyage = Some(*voyage);
+                true
+            }
             AgentEvent::SubAreaSynced { sub_area } => {
                 let changed = self.sub_area != *sub_area;
                 self.sub_area = *sub_area;
@@ -1442,15 +1512,19 @@ impl SessionState {
             AgentEvent::PositionChanged { pos } => {
                 let mut changed = false;
                 if let Some(char_id) = self.char_id {
-                    if let Some(ent) = self.entities.iter_mut().find(|e| e.id == char_id) {
+                    if let Some(idx) = self.entity_index.get(&char_id).copied() {
+                        let ent = &mut self.entities[idx];
                         changed = ent.pos != pos.pos
                             || ent.heading != pos.heading
                             || ent.speed != pos.speed
                             || ent.speed_base != pos.speed_base;
-                        ent.pos = pos.pos;
-                        ent.heading = pos.heading;
-                        ent.speed = pos.speed;
-                        ent.speed_base = pos.speed_base;
+                        if changed {
+                            ent.pos = pos.pos;
+                            ent.heading = pos.heading;
+                            ent.speed = pos.speed;
+                            ent.speed_base = pos.speed_base;
+                            self.pending_entity_upserts.insert(char_id);
+                        }
                     }
                 }
                 changed
@@ -1467,7 +1541,8 @@ impl SessionState {
                 let latched_self_look = (self.char_id == Some(entity.id))
                     .then_some(self.self_look)
                     .flatten();
-                if let Some(existing) = self.entities.iter_mut().find(|e| e.id == entity.id) {
+                if let Some(idx) = self.entity_index.get(&entity.id).copied() {
+                    let existing = &mut self.entities[idx];
                     let preserved_name = entity.name.clone().or_else(|| existing.name.clone());
                     let merged_kind = merge_kind(existing.kind, entity.kind);
 
@@ -1475,8 +1550,32 @@ impl SessionState {
 
                     let preserved_look = entity.look.or(existing.look).or(latched_self_look);
                     let preserved_npc_state = entity.npc_state.or(existing.npc_state);
-                    let preserved_char_flags = entity.char_flags.or(existing.char_flags);
+                    // Flags4.JobMasterFlag refreshes on every non-despawn 0x0D
+                    // (char_update.cpp), unlike the General words — fold the
+                    // freshest value into the preserved flags so a pos-only tick
+                    // still carries it.
+                    let base_char_flags = entity.char_flags.or(existing.char_flags);
+                    let preserved_char_flags = match (base_char_flags, entity.job_master_display) {
+                        (Some(mut flags), Some(job_master)) => {
+                            flags.job_master_display = job_master;
+                            Some(flags)
+                        }
+                        // No General update has arrived yet (a spawn always
+                        // carries one, so this is defensive): materialize the
+                        // flags with just the star.
+                        (None, Some(true)) => Some(ffxi_proto::decode::CharFlags {
+                            job_master_display: true,
+                            ..Default::default()
+                        }),
+                        _ => base_char_flags,
+                    };
                     let preserved_mount_id = entity.mount_id.or(existing.mount_id);
+                    // Model-block-gated at the source (char_update.cpp), so merge
+                    // like mount_id — never off pos_present.
+                    let preserved_monstrosity = entity.monstrosity.or(existing.monstrosity);
+                    // UPDATE_HP-gated at the source (entity_update.cpp CEntityUpdatePacket::updateWith/:408), so
+                    // merge like char_flags — never off pos_present.
+                    let preserved_name_vis = entity.name_vis.or(existing.name_vis);
 
                     let (
                         preserved_pos,
@@ -1509,29 +1608,48 @@ impl SessionState {
                         npc_state: preserved_npc_state,
                         char_flags: preserved_char_flags,
                         mount_id: preserved_mount_id,
+                        monstrosity: preserved_monstrosity,
                         pos: preserved_pos,
                         heading: preserved_heading,
                         speed: preserved_speed,
                         speed_base: preserved_speed_base,
                         face_target: preserved_face_target,
+                        name_vis: preserved_name_vis,
                         ..entity.clone()
                     };
                     if *existing == merged {
                         false
                     } else {
                         *existing = merged;
+                        self.pending_entity_upserts.insert(entity.id);
                         true
                     }
                 } else {
                     let mut inserted = entity.clone();
                     inserted.look = inserted.look.or(latched_self_look);
+                    self.entity_index.insert(entity.id, self.entities.len());
                     self.entities.push(inserted);
+                    self.pending_entity_upserts.insert(entity.id);
+                    self.pending_entity_removals.remove(&entity.id);
                     true
                 }
             }
             AgentEvent::EntityRemoved { id } => {
                 let before = self.entities.len();
                 self.entities.retain(|e| e.id != *id);
+                if self.entities.len() != before {
+                    // retain shifted every index after the removed slot, so
+                    // rebuild rather than patch; an upsert pending for this id
+                    // in the same batch is voided — removal wins.
+                    self.entity_index = self
+                        .entities
+                        .iter()
+                        .enumerate()
+                        .map(|(i, e)| (e.id, i))
+                        .collect();
+                    self.pending_entity_upserts.remove(id);
+                    self.pending_entity_removals.insert(*id);
+                }
                 self.entities.len() != before
             }
             AgentEvent::NameExtractionMiss { miss } => {
@@ -1547,11 +1665,16 @@ impl SessionState {
                 name,
                 kind,
                 hp_pct,
+                allegiance,
             } => {
-                let existing = self.entities.iter_mut().find(|e| {
-                    id.is_some_and(|target| e.id == target)
-                        || act_index.is_some_and(|target| e.act_index == target)
-                });
+                // Index first (the common case: the patcher knows the wire id);
+                // fall back to a scan when only an act_index was given.
+                let idx = match (id, act_index) {
+                    (Some(wire_id), _) => self.entity_index.get(wire_id).copied(),
+                    (None, Some(act)) => self.entities.iter().position(|e| e.act_index == *act),
+                    _ => None,
+                };
+                let existing = idx.and_then(|i| self.entities.get_mut(i));
                 let mut changed = false;
                 if let Some(existing) = existing {
                     if let Some(n) = name {
@@ -1573,6 +1696,18 @@ impl SessionState {
                             changed = true;
                         }
                     }
+                    if let Some(a) = allegiance {
+                        // Self's entity may still carry no flags at all (it never
+                        // receives its own 0x0D), so materialize rather than skip.
+                        if existing.char_flags.as_ref().map(|f| f.allegiance) != Some(*a) {
+                            let flags = existing.char_flags.get_or_insert_with(Default::default);
+                            flags.allegiance = *a;
+                            changed = true;
+                        }
+                    }
+                    if changed {
+                        self.pending_entity_upserts.insert(existing.id);
+                    }
                 }
                 changed
             }
@@ -1590,6 +1725,11 @@ impl SessionState {
                 };
                 let changed = self.logout_countdown != Some(next);
                 self.logout_countdown = Some(next);
+                changed
+            }
+            AgentEvent::LogoutCountdownCancelled => {
+                let changed = self.logout_countdown.is_some();
+                self.logout_countdown = None;
                 changed
             }
             AgentEvent::Diagnostics { diagnostics } => {
@@ -1611,11 +1751,13 @@ impl SessionState {
                 let changed = self.stage != Stage::Disconnected
                     || self.diagnostics.stage != Some(Stage::Disconnected)
                     || self.logout_countdown.is_some()
+                    || self.voyage.is_some()
                     || self.widescan != WidescanList::default();
                 self.stage = Stage::Disconnected;
                 self.diagnostics.stage = Some(Stage::Disconnected);
 
                 self.logout_countdown = None;
+                self.voyage = None;
                 self.widescan = WidescanList::default();
                 changed
             }
@@ -1629,6 +1771,54 @@ impl SessionState {
                     server_ts: 0,
                 });
                 true
+            }
+            AgentEvent::PartyTableReset { members } => {
+                // GROUP_TBL arrived. Two shapes matter:
+                //  - solo: LSB answers 0x076 with GROUP_TBL(nullptr) — Kind 0,
+                //    no entries. Self is NOT in the table, and self's only
+                //    source of stats is GROUP_ATTR (0x061 reply / UPDATE_HP),
+                //    so wiping here would leave the frame on 0/0 until the
+                //    next HP change. Self is always retained.
+                //  - party: the table is the authoritative roster. Members it
+                //    no longer lists are dropped; members it still lists keep
+                //    their stats (the 0x0DD burst that follows refreshes them);
+                //    new ids get a skeleton row.
+                let self_id = self.char_id;
+                let before = self.party.clone();
+                self.party.retain(|m| {
+                    Some(m.id) == self_id || members.iter().any(|e| e.unique_no == m.id)
+                });
+                for entry in members {
+                    if let Some(existing) = self.party.iter_mut().find(|m| m.id == entry.unique_no)
+                    {
+                        existing.act_index = entry.act_index;
+                        existing.zone_no = entry.zone_no;
+                        existing.is_party_leader = entry.is_party_leader;
+                        existing.is_alliance_leader = entry.is_alliance_leader;
+                        existing.party_no = entry.party_no;
+                    } else {
+                        self.party.push(PartyMember {
+                            id: entry.unique_no,
+                            act_index: entry.act_index,
+                            name: None,
+                            hp: 0,
+                            mp: 0,
+                            tp: 0,
+                            hp_pct: 0,
+                            mp_pct: 0,
+                            zone_no: entry.zone_no,
+                            main_job: 0,
+                            main_job_lv: 0,
+                            sub_job: 0,
+                            sub_job_lv: 0,
+                            is_party_leader: entry.is_party_leader,
+                            is_alliance_leader: entry.is_alliance_leader,
+                            party_no: entry.party_no,
+                            in_mog_house: false,
+                        });
+                    }
+                }
+                before != self.party
             }
             AgentEvent::PartyMemberUpdated { member } => {
                 if let Some(existing) = self.party.iter_mut().find(|m| m.id == member.id) {
@@ -1695,10 +1885,14 @@ impl SessionState {
             AgentEvent::ForcedMove { target, .. } => {
                 let mut changed = false;
                 if let Some(char_id) = self.char_id {
-                    if let Some(ent) = self.entities.iter_mut().find(|e| e.id == char_id) {
+                    if let Some(idx) = self.entity_index.get(&char_id).copied() {
+                        let ent = &mut self.entities[idx];
                         changed = ent.pos != target.pos || ent.heading != target.heading;
-                        ent.pos = target.pos;
-                        ent.heading = target.heading;
+                        if changed {
+                            ent.pos = target.pos;
+                            ent.heading = target.heading;
+                            self.pending_entity_upserts.insert(char_id);
+                        }
                     }
                 }
                 changed
@@ -1706,6 +1900,7 @@ impl SessionState {
             AgentEvent::LowHp { .. }
             | AgentEvent::PartyMemberLowHp { .. }
             | AgentEvent::EngagedBy { .. }
+            | AgentEvent::TargetChanged { .. }
             | AgentEvent::TellReceived { .. }
             | AgentEvent::SceneSummary { .. }
             | AgentEvent::ActionStarted { .. }
@@ -1724,7 +1919,7 @@ impl SessionState {
                         // Zeros apply too: 0 is LSB's "container disabled"
                         // sentinel (e.g. an expired Mog Locker lease across a
                         // zone change) — sticky grants would keep offering a
-                        // bag the server rejects (s2c/0x01c_item_max.cpp:52).
+                        // bag the server rejects (s2c/0x01c_item_max.cpp GP_SERV_COMMAND_ITEM_MAX::GP_SERV_COMMAND_ITEM_MAX).
                         for (id, cap) in capacities.iter().enumerate() {
                             self.inventory
                                 .containers
@@ -1813,7 +2008,7 @@ impl SessionState {
                 let mut changed = false;
                 if let Some(cell) = self.equipment.get_mut(*slot as usize) {
                     // The server reports an empty/unequipped slot as inventory
-                    // index 0 (charutils.cpp:2268 queueEquipChange(LOC_INVENTORY,
+                    // index 0 (charutils.cpp UnequipItem queueEquipChange(LOC_INVENTORY,
                     // 0, ...)). Index 0 is reserved (Gil in LOC_INVENTORY) and is
                     // never a real equipped item, so treat it as cleared — else
                     // resolve_equipment joins it to Gil.
@@ -1835,9 +2030,13 @@ impl SessionState {
                 let mut changed = self.self_look != Some(*look);
                 self.self_look = Some(*look);
                 if let Some(char_id) = self.char_id {
-                    if let Some(ent) = self.entities.iter_mut().find(|e| e.id == char_id) {
+                    if let Some(idx) = self.entity_index.get(&char_id).copied() {
+                        let ent = &mut self.entities[idx];
                         changed |= ent.look != Some(*look);
-                        ent.look = Some(*look);
+                        if changed && ent.look != Some(*look) {
+                            ent.look = Some(*look);
+                            self.pending_entity_upserts.insert(char_id);
+                        }
                     }
                 }
                 changed
@@ -2091,8 +2290,17 @@ impl SessionState {
             AgentEvent::DeathTimerUpdated {
                 seconds_until_homepoint,
             } => {
-                let changed = self.death_homepoint_secs != *seconds_until_homepoint;
+                let changed = self.death_homepoint_secs != *seconds_until_homepoint
+                    || (seconds_until_homepoint.is_none() && self.death_menu_offer.is_some());
                 self.death_homepoint_secs = *seconds_until_homepoint;
+                if seconds_until_homepoint.is_none() {
+                    self.death_menu_offer = None;
+                }
+                changed
+            }
+            AgentEvent::DeathMenuUpdated { offer } => {
+                let changed = self.death_menu_offer != *offer;
+                self.death_menu_offer = *offer;
                 changed
             }
             AgentEvent::WeatherUpdated { weather_number } => {
@@ -2313,6 +2521,9 @@ pub enum AgentEvent {
         #[serde(default)]
         mog_zone_flag: bool,
     },
+    VoyageSynced {
+        voyage: kuluu_snapshot::Voyage,
+    },
     /// `SubMapNumber` out of 0x00A LOGIN, emitted right after the
     /// [`AgentEvent::ZoneChanged`] that clears it.
     SubAreaSynced {
@@ -2349,6 +2560,10 @@ pub enum AgentEvent {
         kind: Option<EntityKind>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         hp_pct: Option<u8>,
+        /// Self allegiance out of 0x037 `Flags2.BallistaFlg` — the only channel
+        /// for self (the server skips its own 0x0D).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        allegiance: Option<u8>,
     },
     ChatLine {
         line: ChatLine,
@@ -2430,6 +2645,11 @@ pub enum AgentEvent {
 
         shutdown: bool,
     },
+    /// Stand-up cancels leavegame server-side (`MakeEntityStandUp` drops the
+    /// HEALING effect, `healing.onEffectLose` removes LEAVEGAME) without any
+    /// 0x053 cancel packet — the client sees it as its own CHAR_PC status
+    /// flipping off HEALING and clears the countdown here.
+    LogoutCountdownCancelled,
     EventEnded,
 
     ActionStarted {
@@ -2439,6 +2659,11 @@ pub enum AgentEvent {
         target_id: Option<u32>,
         result: Option<ffxi_proto::melee::MeleeResult>,
         animation: Option<u16>,
+        /// The first result block as one typed outcome (resolution, info bits, hitDistortion,
+        /// and knockback), read for every category in the 0x028 per-result order (vendor/server/
+        /// src/map/packets/s2c/0x028_battle2.cpp GP_SERV_COMMAND_BATTLE2::pack). None means no
+        /// result block was read: resolution 0 is Hit, so absence must not be spelled as zero.
+        outcome: Option<ffxi_proto::melee::ResultOutcome>,
     },
 
     /// The self player began casting a spell (optimistic, on send). Drives the
@@ -2498,6 +2723,13 @@ pub enum AgentEvent {
         member: PartyMember,
     },
 
+    /// GROUP_TBL (s2c 0x0C8) arrived: the server is sending a fresh party
+    /// definition. Clear the party list and seed it with the skeleton entries
+    /// from the table; the full stats follow in GROUP_LIST (0x0DD) packets.
+    PartyTableReset {
+        members: Vec<ffxi_proto::decode::GroupTblEntry>,
+    },
+
     LowHp {
         pct: u8,
     },
@@ -2509,6 +2741,14 @@ pub enum AgentEvent {
 
     EngagedBy {
         entity_id: u32,
+    },
+
+    /// s2c 0x058 ASSIST: the server retargeted us. `target_id` is the wire
+    /// `AssistNo`; `None` is LSB's zeroed `AssistNo`
+    /// (vendor/server/src/map/packets/s2c/0x058_assist.cpp GP_SERV_COMMAND_ASSIST::GP_SERV_COMMAND_ASSIST), i.e. the
+    /// target went away rather than moved.
+    TargetChanged {
+        target_id: Option<u32>,
     },
 
     ForcedMove {
@@ -2597,6 +2837,12 @@ pub enum AgentEvent {
 
     DeathTimerUpdated {
         seconds_until_homepoint: Option<u32>,
+    },
+
+    /// s2c 0x0F9 `GP_SERV_COMMAND_RES`: `None` restores the default
+    /// home-point-only menu; `Some` offers Raise/Reraise or Tractor.
+    DeathMenuUpdated {
+        offer: Option<ffxi_proto::decode::DeathMenuOffer>,
     },
 
     MusicVolumeChanged {
@@ -2822,6 +3068,32 @@ pub enum AgentEvent {
     },
 }
 
+pub const GROUND_CORRECTION_XY_EPSILON_YALMS: f32 = 0.05;
+
+pub fn ground_correction_matches(
+    expected_x: f32,
+    expected_y: f32,
+    actual_x: f32,
+    actual_y: f32,
+) -> bool {
+    let dx = expected_x - actual_x;
+    let dy = expected_y - actual_y;
+    dx * dx + dy * dy <= GROUND_CORRECTION_XY_EPSILON_YALMS * GROUND_CORRECTION_XY_EPSILON_YALMS
+}
+
+pub fn apply_ground_height_correction(
+    position: &mut Position,
+    expected_x: f32,
+    expected_y: f32,
+    corrected_z: f32,
+) -> bool {
+    if !ground_correction_matches(expected_x, expected_y, position.pos.x, position.pos.y) {
+        return false;
+    }
+    position.pos.z = corrected_z;
+    true
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "cmd", rename_all = "snake_case")]
 pub enum AgentCommand {
@@ -2835,10 +3107,14 @@ pub enum AgentCommand {
     StopMove,
 
     /// Client-side height repair for the under-every-floor wedge (kuluu-mo4q).
-    /// Distinct from [`AgentCommand::Move`] because it is not player movement:
-    /// the reactor must neither cancel the player's goal for it nor drop it
-    /// while a forced-move override is running.
+    /// The identity and horizontal coordinates identify the position whose
+    /// height was diagnosed; the session applies `z` only while they still
+    /// match.
     GroundCorrection {
+        #[serde(default)]
+        zone_id: u16,
+        #[serde(default)]
+        self_id: u32,
         x: f32,
         y: f32,
         z: f32,

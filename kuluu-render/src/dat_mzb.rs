@@ -15,6 +15,7 @@ use ffxi_dat::zone_interaction::ZoneInteraction;
 use ffxi_dat::{mmb, mzb, sub_area, walk, ChunkKind, DatRoot};
 
 use crate::components::{IsSelf, WorldEntity};
+use crate::entity_table::EntityTable;
 use crate::snapshot::SceneState;
 use kuluu_snapshot::EntityKind;
 
@@ -23,6 +24,7 @@ pub const DEFAULT_MOB_DRAW_DISTANCE: f32 = 50.0;
 
 pub const MMB_LOAD_DISTANCE_MARGIN: f32 = 1.25;
 
+const MZB_TERRAIN_PALETTE_INDEX_MASK: u8 = 0x0F;
 const MZB_TERRAIN_PALETTE: [[f32; 3]; 16] = [
     [0.85, 0.55, 0.40],
     [0.75, 0.65, 0.45],
@@ -134,7 +136,7 @@ impl Default for DrawDistance {
 #[derive(Component)]
 pub struct MzbCollisionMesh;
 
-/// research/XIClient/src/XIClient/include/Rendering/ZoneRenderer.h:45
+/// research/XIClient/src/XIClient/include/Rendering/ZoneRenderer.h ZoneRenderer MAX_ZONE_LOAD_COUNT
 /// `MAX_ZONE_LOAD_COUNT = 2` — retail keeps the main zone block and the one
 /// sub-area interior the player stands in loaded at the same time.
 pub const ZONE_BLOCK_SLOTS: usize = 2;
@@ -215,29 +217,33 @@ pub struct MzbCollisionBlock {
 pub struct MzbCollisionGeometry {
     slots: [MzbCollisionBlock; ZONE_BLOCK_SLOTS],
     suppressed: Option<u32>,
-    /// Retail's step lift (research/XIClient .../Actor/CollidableActor.cpp OnMove,
-    /// `field_F4`): accumulated endpoint height that grows by the blocked tick's
-    /// movement amount while a face holds us and caps at [`MAX_GROUND_STEP_UP`].
-    /// It persists across consecutive steps, so a flight climbs at walk speed once
-    /// primed (Bastok Mines 2026-08-23: the one-tick warp-up was the missing ramp).
-    /// `Mutex` (parking_lot) for interior mutability under the `&self`
-    /// [`MzbCollisionGeometry::wall_clip_wire`] that Bevy's Send+Sync Resource
-    /// bound rules out a plain field from.
-    pub step_lift: parking_lot::Mutex<f32>,
-    /// Step grace after landing ahead of the floor we stepped onto (retail
-    /// advances at walk speed and lets the body rise THROUGH the face — Bastok
-    /// Mines 2026-08-23): `(floor, ticks_left)`. While set, our height is held at
-    /// `floor` instead of whatever lower surface `ground_step` finds in this column
-    /// (a stair with ground under it keeps offering that low slab until we're over
-    /// the tread). Consumed one tick at a time by input.rs; each new validated
-    /// step-up refreshes it. The cap bounds airtime if the floor never comes.
-    pub pending_floor: parking_lot::Mutex<Option<(f32, u8)>>,
 }
 
-/// Max ticks of [`MzbCollisionGeometry::pending_floor`] grace — ~one yalm of
-/// walking at 60 fps, well past any slab edge a validated landing promised within
-/// its (≤ one body-radius + move) reach.
-pub const STEP_GRACE_TICKS: u8 = 16;
+impl MzbCollisionGeometry {
+    /// Merged triangle soup of every loaded block (suppressed slot skipped),
+    /// already in Bevy space, for mirroring the zone into an external physics
+    /// trimesh (avian3d bridge).
+    pub fn trimesh_data(&self) -> (Vec<Vec3>, Vec<[u32; 3]>) {
+        let mut positions: Vec<Vec3> = Vec::new();
+        let mut tris: Vec<[u32; 3]> = Vec::new();
+        for block in self.slots.iter() {
+            if block.indices.is_empty() {
+                continue;
+            }
+            let base = positions.len() as u32;
+            positions.extend_from_slice(&block.positions);
+            for (i, t) in block.indices.chunks_exact(3).enumerate() {
+                // Suppressed shell triangles are walk-through in every MZB query;
+                // the physics mesh must mirror that or interiors get invisible walls.
+                if block.is_suppressed(i) {
+                    continue;
+                }
+                tris.push([base + t[0], base + t[1], base + t[2]]);
+            }
+        }
+        (positions, tris)
+    }
+}
 
 #[derive(Clone)]
 pub struct LoadedZoneGeom {
@@ -274,18 +280,12 @@ impl LoadMzbInFlight {
     }
 }
 
-/// LRU of parsed zone blocks.
-///
-/// Keyed on `(file_id, active_sub_area)`, not `file_id` alone: the cached
-/// [`LoadedZoneGeom::mmb_spawns`] is already latched to the sub-area that was
-/// active when it was built, so a one-key cache serves a shell-visible build to
-/// a shell-suppressed request.
 #[derive(Resource, Default)]
 pub struct ZoneGeomCache {
     pub entries: VecDeque<(ZoneGeomKey, LoadedZoneGeom)>,
 }
 
-pub type ZoneGeomKey = (u32, Option<u32>);
+pub type ZoneGeomKey = (u32, Option<usize>, Option<u32>);
 
 pub const ZONE_GEOM_CACHE_CAP: usize = 4;
 
@@ -311,7 +311,11 @@ impl ZoneGeomCache {
 
 pub const MZB_GRID_CELL: f32 = 8.0;
 
-pub const FLOOR_NORMAL_MIN: f32 = 0.5;
+/// research/XIClient/src/XIClient/source/World/Zone/Terrain/CollisionManager.cpp
+/// CollisionManager::InterpolatePosition splits collision candidates at
+/// `|ObjectNormal.y| <= 0.708`: a steeper face pushes the movement sphere
+/// out sideways, a flatter one carries the height. cos(45 deg).
+pub const FLOOR_NORMAL_MIN: f32 = 0.708;
 
 /// Below this the placement matrix is singular and its inverse-transpose is all
 /// NaN, which would silently make every triangle in the placement non-grounding.
@@ -545,7 +549,11 @@ impl MzbCollisionGeometry {
     pub fn ground_step(&self, xz: Vec2, feet_y: f32, max_rise: f32) -> Option<f32> {
         let mut best: Option<(u8, f32)> = None;
         self.for_each_hit_in_column(xz, |slot, _, hit_y, normal| {
-            if normal.y < FLOOR_NORMAL_MIN || hit_y > feet_y + max_rise {
+            // STEP_UP_REACH_EPSILON: the column ray's fixed high origin leaves
+            // ~1e-4-yalm f32 noise in reported hit heights, so a riser sitting
+            // EXACTLY at the bound (a real stair step right at MAX_GROUND_STEP_UP)
+            // must not be coin-flipped out of reach.
+            if normal.y < FLOOR_NORMAL_MIN || hit_y > feet_y + max_rise + STEP_UP_REACH_EPSILON {
                 return;
             }
             let cand = (slot, hit_y);
@@ -934,7 +942,7 @@ pub struct LoadMzbRequest {
 
 impl LoadMzbRequest {
     pub fn cache_key(&self) -> ZoneGeomKey {
-        (self.file_id, self.active_sub_area)
+        (self.file_id, self.chunk_idx, self.active_sub_area)
     }
 }
 
@@ -977,8 +985,7 @@ pub fn load_mzb_placed(
     let (header, plain, _chunks) = load_decrypted(file_id, chunk_idx)?;
 
     // A zero CollisionDataOffset is a legal state, not a degraded parse: the
-    // moving-vehicle zones ship no static collision at all and retail skips the
-    // whole path (ffxi-dat mzb::MzbHeader::has_collision_data).
+    // voyage scenery has none; the passenger hull occupies a separate MZB.
     if !header.has_collision_data() {
         info!(
             "MZB {file_id}: no collision section (substructure type {}); zone has no static collision",
@@ -1140,10 +1147,8 @@ fn load_decrypted(
                 .get(i)
                 .ok_or_else(|| format!("chunk_idx {i} out of range ({} chunks)", chunks.len()))?,
         ),
-        None => chunks
-            .iter()
-            .enumerate()
-            .find(|(_, c)| c.kind == ChunkKind::Mzb as u8)
+        None => ffxi_dat::vehicle::collision_mzb_index(&bytes)
+            .and_then(|i| chunks.get(i).map(|c| (i, c)))
             .ok_or_else(|| {
                 format!(
                     "no MZB (kind 0x1C) chunk in file_id {file_id} ({} chunks)",
@@ -1166,6 +1171,7 @@ fn load_decrypted(
 
 #[derive(Debug, Clone, Copy)]
 pub struct ZoneMmbSpawn {
+    pub voyage_backdrop: bool,
     pub chunk_idx: usize,
     pub bevy_transform: Mat4,
     // Set for generator-driven water sheets (sea1/sea2): translucent tint +
@@ -1237,7 +1243,7 @@ const AREA_FOOT_SLACK: f32 = MAX_GROUND_STEP_UP;
 /// One chunk's authored light binding with the footprint it lights.
 ///
 /// Retail resolves `LightReferences[4]` once at load and holds the four D3D
-/// slots for the whole chunk (ZoneRenderer.cpp:284-313), so the set is a
+/// slots for the whole chunk (ZoneRenderer.cpp ZoneRenderer::UpdateBlockLightSettings), so the set is a
 /// property of the geometry, never of the camera.
 #[derive(Debug, Clone, Copy)]
 pub struct ZoneChunkLightBox {
@@ -1248,6 +1254,7 @@ pub struct ZoneChunkLightBox {
 
 #[derive(Clone)]
 pub struct ZoneMmbBuild {
+    pub voyage_routes: Vec<([u8; 4], ffxi_dat::vehicle::VoyageRoute)>,
     pub spawns: Vec<ZoneMmbSpawn>,
     pub area_boxes: Vec<ZoneAreaBox>,
     pub light_boxes: Vec<ZoneChunkLightBox>,
@@ -1271,9 +1278,9 @@ pub struct ZoneMmbBuild {
 ///
 /// Retail asks the collision map for the FourCC of the block under the actor and
 /// draws that actor's fog and ambient from the matching `XiArea`
-/// (CollidableActor.cpp:218-228, SkeletalMeshActor.cpp:2743-2749). Our MZB
+/// (CollidableActor.cpp CollidableActor::UpdateGroundNormal, SkeletalMeshActor.cpp SkeletalMeshActor::AdjustLighting). Our MZB
 /// collision section carries no area id — only the render placements do
-/// (ZoneBlockFormat.h:99) — so the block is found by its own bounds instead.
+/// (ZoneBlockFormat.h PositionedMeshBlockData) — so the block is found by its own bounds instead.
 /// The areas that differ from the zone environment are building interiors and
 /// the blocks that floor them, so [`ZoneAreaBox::holds`] answers the same
 /// question the ground query does.
@@ -1331,7 +1338,7 @@ impl ZoneAreaMap {
 /// Which lights each point of the zone is authored to receive.
 ///
 /// Retail binds a chunk's `LightReferences[4]` into D3D light slots 2-5 once at
-/// load (research/XIClient/src/XIClient/source/Rendering/ZoneRenderer.cpp:284-313,
+/// load (research/XIClient/src/XIClient/source/Rendering/ZoneRenderer.cpp ZoneRenderer::UpdateBlockLightSettings,
 /// :339-353) and every model drawn over that chunk keeps those slots, so the
 /// point lights on an actor are the ones its chunk authors — not the ones that
 /// happen to be nearest. `boxes` is empty for a zone that ships no light-binding
@@ -1388,7 +1395,7 @@ impl ZoneChunkLightMap {
 }
 
 /// The per-frame mesh-variant pick retail makes in `RenderChunk2`
-/// (research/XIClient/src/XIClient/source/Rendering/ZoneRenderer.cpp:1085-1094).
+/// (research/XIClient/src/XIClient/source/Rendering/ZoneRenderer.cpp ZoneRenderer::RenderChunk2).
 /// One placement spawns one entity per *distinct* mesh in its
 /// [`mzb::MmbLodSet`]; `level_mask` says which distance bands that entity serves.
 #[derive(Component, Debug, Clone, Copy)]
@@ -1411,11 +1418,11 @@ impl ZoneMeshLod {
 ///
 /// Retail composes Identity -> scale -> RotateX -> RotateY -> RotateZ ->
 /// translate in D3D row-vector convention (research/XIClient/src/XIClient/
-/// source/Rendering/ZoneRenderer.cpp:430-443, with Matrix4.cpp:200-204
+/// source/Rendering/ZoneRenderer.cpp ZoneRenderer::OpenMzb, with Matrix4.cpp Matrix4::MultiplyRight
 /// `MultiplyRight` = this*r and :508-511 `out = v*M`), which transposes to
 /// column-vector T*Rz*Ry*Rx*S — glam's *extrinsic* XYZ. The intrinsic
 /// `EulerRot::XYZ` is Rx*Ry*Rz, the reverse. Self-proven by the
-/// order-reversed inverse chain at ZoneRenderer.cpp:459-466.
+/// order-reversed inverse chain at ZoneRenderer.cpp ZoneRenderer::OpenMzb.
 ///
 /// `UnderscoreAtStruct::InitMatrix` rebuilds an animated `_`/`@` block's matrix
 /// from its own copy of the same three vectors in the same order, so a door leaf
@@ -1449,12 +1456,50 @@ pub fn build_zone_mmb_spawns(
     let path = location.path_under(&root);
     let bytes = fs::read(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
     let chunks: Vec<_> = walk(&bytes).filter_map(Result::ok).collect();
+    let voyage_layout = ffxi_dat::vehicle::voyage_layout(&bytes);
+    if chunk_idx.is_none() {
+        if let Some(layout) = voyage_layout {
+            let mut ship = build_zone_mmb_spawns(file_id, Some(layout.ship_mzb), active_sub_area)?;
+            let mut scenery =
+                build_zone_mmb_spawns(file_id, Some(layout.scenery_mzb), active_sub_area)?;
+            for spawn in &mut scenery.spawns {
+                spawn.voyage_backdrop = true;
+                spawn.lod = None;
+            }
+            ship.spawns.extend(scenery.spawns);
+            ship.voyage_routes = chunks
+                .iter()
+                .filter(|c| c.kind == ffxi_dat::vehicle::VOYAGE_ROUTE_KIND)
+                .filter_map(|c| {
+                    ffxi_dat::vehicle::VoyageRoute::parse(c.data).map(|route| (c.name, route))
+                })
+                .collect();
+            return Ok(ship);
+        }
+    }
 
+    let mut parents = Vec::with_capacity(chunks.len());
+    let mut directories = Vec::new();
+    for (index, chunk) in chunks.iter().enumerate() {
+        parents.push(directories.last().copied());
+        match ChunkKind::from_u8(chunk.kind) {
+            Some(ChunkKind::Rmp) => directories.push(index),
+            Some(ChunkKind::Terminate) => {
+                directories.pop();
+            }
+            _ => {}
+        }
+    }
+    let selected_parent = chunk_idx
+        .and_then(|index| parents.get(index).copied())
+        .flatten();
+    let in_model_scope =
+        |index: usize| voyage_layout.is_none() || parents[index] == selected_parent;
     let pool = AsyncComputeTaskPool::get();
     let mmb_chunk_refs: Vec<(usize, &[u8])> = chunks
         .iter()
         .enumerate()
-        .filter(|(_, c)| c.kind == ChunkKind::Mmb as u8)
+        .filter(|(index, c)| c.kind == ChunkKind::Mmb as u8 && in_model_scope(*index))
         .map(|(idx, c)| (idx, c.data))
         .collect();
     type ParsedMmb = (usize, String, Option<([f32; 3], [f32; 3])>);
@@ -1493,7 +1538,7 @@ pub fn build_zone_mmb_spawns(
     // so it maps straight to ZoneMmbSpawn.chunk_idx.
     let mut datid_to_chunk_idx: HashMap<String, usize> = HashMap::new();
     for (idx, c) in chunks.iter().enumerate() {
-        if c.kind != ChunkKind::Mmb as u8 {
+        if c.kind != ChunkKind::Mmb as u8 || !in_model_scope(idx) {
             continue;
         }
         let id = String::from_utf8_lossy(&c.name)
@@ -1512,10 +1557,8 @@ pub fn build_zone_mmb_spawns(
                 .get(i)
                 .ok_or_else(|| format!("chunk_idx {i} out of range ({} chunks)", chunks.len()))?,
         ),
-        None => chunks
-            .iter()
-            .enumerate()
-            .find(|(_, c)| c.kind == ChunkKind::Mzb as u8)
+        None => ffxi_dat::vehicle::collision_mzb_index(&bytes)
+            .and_then(|i| chunks.get(i).map(|c| (i, c)))
             .ok_or_else(|| {
                 format!(
                     "no MZB chunk in file_id {file_id} ({} chunks)",
@@ -1573,7 +1616,7 @@ pub fn build_zone_mmb_spawns(
         // placement's own name advances that cursor, so the LOD sibling lookups
         // cannot shuffle which duplicate a later placement gets. Advance it even
         // for gated placements: retail resolves every chunk's mesh LOD before
-        // SetRenderTypes classifies it (ZoneRenderer.cpp:406 ResolveMeshReference ->
+        // SetRenderTypes classifies it (ZoneRenderer.cpp ZoneRenderer::OpenMzb ResolveMeshReference ->
         // InitializeMeshLOD :100-143, then :572).
         let mut base_pick: Option<Option<usize>> = None;
         let lod_set = mzb::resolve_mmb_lod_set_with(id, |name| {
@@ -1598,7 +1641,7 @@ pub fn build_zone_mmb_spawns(
         );
 
         // Built before the render gate: retail binds every positioned block to
-        // its area (ZoneRenderer.cpp:710-718) and the interiors that carry one
+        // its area (ZoneRenderer.cpp ZoneRenderer::AllocateAndLinkAreas) and the interiors that carry one
         // are `_`-keyed blocks the *second* draw pass owns, so a gate-filtered
         // list would drop exactly the areas we need.
         let area_id = p.effective_area_resource_id();
@@ -1679,6 +1722,7 @@ pub fn build_zone_mmb_spawns(
                     level_mask: lod_set.level_mask(local),
                     uses_lod_rendering,
                 }),
+                voyage_backdrop: false,
             });
         }
     }
@@ -1700,10 +1744,13 @@ pub fn build_zone_mmb_spawns(
     // ffxi-dat Generator::parse_model_spawn.
     let zone_prefix = mzb::infer_zone_prefix(&mmb_names);
     for c in &chunks {
+        if voyage_layout.is_some_and(|v| chunk_idx == Some(v.ship_mzb)) {
+            break;
+        }
         if c.kind != ChunkKind::Generator as u8 {
             continue;
         }
-        // research/xim EnvironmentManager.updateWeatherEffects + Particle.kt:232-258:
+        // research/xim EnvironmentManager.updateWeatherEffects + Particle.kt updateAssociatedPosition:
         // the weat/<type>/ sky generators (cloud canopies cld1/cld2 and per-weather
         // variants like ~4cl) set the follow_camera config bit (0x0004) — they are
         // camera-relative sky registered through EffectManager, NOT world geometry.
@@ -1791,6 +1838,7 @@ pub fn build_zone_mmb_spawns(
             lod: None,
             door: None,
             sub_area_link: 0,
+            voyage_backdrop: false,
         });
     }
 
@@ -1968,6 +2016,7 @@ pub fn build_zone_mmb_spawns(
     loadable_sub_areas.dedup();
 
     Ok(ZoneMmbBuild {
+        voyage_routes: Vec::new(),
         spawns: out,
         area_boxes,
         light_boxes,
@@ -2130,10 +2179,8 @@ pub fn load_mzb(file_id: u32, chunk_idx: Option<usize>) -> Result<Vec<MzbSubMesh
                 .get(i)
                 .ok_or_else(|| format!("chunk_idx {i} out of range ({} chunks)", chunks.len()))?,
         ),
-        None => chunks
-            .iter()
-            .enumerate()
-            .find(|(_, c)| c.kind == ChunkKind::Mzb as u8)
+        None => ffxi_dat::vehicle::collision_mzb_index(&bytes)
+            .and_then(|i| chunks.get(i).map(|c| (i, c)))
             .ok_or_else(|| {
                 format!(
                     "no MZB (kind 0x1C) chunk in file_id {file_id} ({} chunks)",
@@ -2257,15 +2304,23 @@ pub fn poll_load_mzb_tasks(
     let init_vis = compute_init_visibility(draw.zone_geom_mode);
 
     let mut completed: Vec<(ZoneGeomKey, Vec<LoadMzbRequest>, LoadedZoneGeom)> = Vec::new();
-    in_flight.tasks.retain(
-        |key, (reqs, task)| match future::block_on(future::poll_once(task)) {
-            Some(geom) => {
-                completed.push((*key, std::mem::take(reqs), geom));
-                false
-            }
-            None => true,
-        },
-    );
+    // ZoneFloorGate::changed() reads this resource's change tick as "a floor
+    // landed", so an idle poll must not tick it.
+    in_flight
+        .bypass_change_detection()
+        .tasks
+        .retain(
+            |key, (reqs, task)| match future::block_on(future::poll_once(task)) {
+                Some(geom) => {
+                    completed.push((*key, std::mem::take(reqs), geom));
+                    false
+                }
+                None => true,
+            },
+        );
+    if !completed.is_empty() {
+        in_flight.set_changed();
+    }
     for (key, reqs, geom) in completed {
         let cache_eligible = !geom.submeshes.is_empty() && !geom.instances.is_empty();
         if cache_eligible {
@@ -2334,7 +2389,7 @@ fn simple_water_material(texture: Handle<Image>) -> crate::ffxi_zone_material::F
             // the shoreline; the decal polygon-offset pulls the surface toward
             // the camera so it wins the depth test there (replaces the old
             // constant `depth_bias: 1000.0`).
-            z_bias_level: 1,
+            z_bias_level: ffxi_dat::mmb::TRANSPARENT_Z_BIAS_LEVEL,
             depth_write: false,
             // A reconstructed plane over the MZB water height, not a generator mesh.
             generator_stage_chain: false,
@@ -2348,6 +2403,7 @@ pub fn scroll_water_uv(
     time: Res<Time>,
     water_mat: Res<ZoneWaterMaterial>,
     mut materials: ResMut<Assets<crate::ffxi_zone_material::FfxiZoneMaterial>>,
+    mut touched: ResMut<crate::ffxi_zone_material::ZoneMaterialTouched>,
 ) {
     let Some(handle) = water_mat.0.as_ref() else {
         return;
@@ -2365,6 +2421,7 @@ pub fn scroll_water_uv(
             (t * WATER_SCROLL_WORLD.y / WATER_TEX_TILE).fract(),
         );
         material.uv_offset = Vec4::new(uv.x, uv.y, 0.0, 0.0);
+        touched.mark(handle.id());
     }
 }
 
@@ -2521,6 +2578,7 @@ pub fn spawn_zone_water(
             MeshMaterial3d(simple_mat.clone()),
             Transform::IDENTITY,
             water_vis,
+            bevy::light::NotShadowCaster,
             bevy::light::NotShadowReceiver,
             ChildOf(spec.parent),
         ));
@@ -2557,6 +2615,10 @@ fn spawn_mzb_overlay(
         // Only the main block declares interiors: a sub-area DAT is a block
         // within a zone, not a zone that can hold blocks of its own.
         if req.slot == ZONE_SLOT_MAIN {
+            commands.insert_resource(crate::transport::VoyageState::new(
+                req.file_id,
+                build.voyage_routes.clone(),
+            ));
             activation.install_zone(
                 req.file_id,
                 &build.sub_area_triggers,
@@ -2715,7 +2777,7 @@ fn spawn_mzb_overlay(
                 .zip(vert_mat.iter())
                 .map(|(n, &m)| {
                     let shade = 0.4 + 0.6 * (n[1] * 0.5 + 0.5);
-                    let pal = MZB_TERRAIN_PALETTE[(m & 0x0F) as usize];
+                    let pal = MZB_TERRAIN_PALETTE[(m & MZB_TERRAIN_PALETTE_INDEX_MASK) as usize];
                     [pal[0] * shade, pal[1] * shade, pal[2] * shade, 1.0]
                 })
                 .collect();
@@ -2885,6 +2947,7 @@ fn spawn_mzb_overlay(
                     door: s.door.map(|d| d.with_world_offset(req.world_pos)),
                     slot: req.slot,
                     sub_area_link: s.sub_area_link,
+                    voyage_backdrop: s.voyage_backdrop,
                 });
             }
             push_system_msg(
@@ -2927,7 +2990,7 @@ impl ZoneBlockRetire<'_, '_> {
         for (e, s) in self.slots.iter() {
             if s.0 == slot {
                 if let Ok(mut ec) = self.commands.get_entity(e) {
-                    ec.despawn();
+                    ec.try_despawn();
                 }
             }
         }
@@ -2944,7 +3007,7 @@ impl ZoneBlockRetire<'_, '_> {
 
 /// Retail's `SetRenderTypes` demotes the placements standing in for the active
 /// interior to a type the draw passes skip
-/// (research/XIClient/src/XIClient/source/Rendering/ZoneRenderer.cpp:619-641).
+/// (research/XIClient/src/XIClient/source/Rendering/ZoneRenderer.cpp ZoneRenderer::SetRenderTypes).
 /// Doing it as visibility rather than as a build-time gate is what lets the
 /// shell come back when the player walks out, without reloading the zone.
 /// Placements that also carry [`ZoneMeshLod`] are left to
@@ -3002,7 +3065,7 @@ pub fn auto_load_zone_geometry_system(
 
     for e in auto_q.iter() {
         if let Ok(mut ec) = commands.get_entity(e) {
-            ec.despawn();
+            ec.try_despawn();
         }
     }
 
@@ -3071,7 +3134,27 @@ pub fn auto_load_zone_geometry_system(
     }
 }
 
-/// research/XIClient/src/XIClient/source/Rendering/ZoneRenderer.cpp:1071-1094 —
+/// Hard load-order gate for zone entry: true once the main-zone MZB load has
+/// COMPLETED — success, empty DAT, or parse failure all count, because a
+/// completion is what leaves [`LoadMzbInFlight`], and a zone whose floor never
+/// materializes must not hold its characters hostage behind the loading screen
+/// either. The loading overlay's `ready` reads this same pair of signals, so
+/// the gate opens exactly when that screen lifts. Zones without a DAT mapping
+/// have no floor to wait for and are ready by definition.
+pub fn main_zone_floor_ready(
+    snapshot: &kuluu_snapshot::SceneSnapshot,
+    last: &LastAutoLoadedZone,
+    in_flight: &LoadMzbInFlight,
+) -> bool {
+    match crate::snapshot::effective_zone_file_id(snapshot) {
+        None => true,
+        Some(file_id) => {
+            last.file_id == Some(file_id) && !in_flight.pending_in_slot(ZONE_SLOT_MAIN)
+        }
+    }
+}
+
+/// research/XIClient/src/XIClient/source/Rendering/ZoneRenderer.cpp ZoneRenderer::RenderChunk2 —
 /// `RenderChunk2` measures from the camera eye to the placement translation, culls
 /// on the squared Lod far distance when the chunk is flagged `UsesLodRendering`,
 /// and then hands the device whichever of the h/m/l variants the squared distance
@@ -3136,6 +3219,7 @@ pub fn cull_mzb_by_distance(
 
 pub fn cull_entities_by_distance(
     draw: Res<DrawDistance>,
+    table: Res<EntityTable>,
     self_q: Query<&GlobalTransform, With<IsSelf>>,
     mut ent_q: Query<(&WorldEntity, &GlobalTransform, &mut Visibility), Without<IsSelf>>,
 ) {
@@ -3146,6 +3230,11 @@ pub fn cull_entities_by_distance(
     let cull_sq = draw.mob * draw.mob;
 
     for (ent, ent_t, mut vis) in ent_q.iter_mut() {
+        // Server-invisible models are owned by sync_entities_system; resetting them to
+        // Inherited would re-show the model every frame. Kind-agnostic on purpose.
+        if table.get(ent.id).is_some_and(|r| r.is_invisible()) {
+            continue;
+        }
         if matches!(ent.kind, EntityKind::Pc) {
             if *vis != Visibility::Inherited {
                 *vis = Visibility::Inherited;
@@ -3773,7 +3862,7 @@ mod lod_tests {
         }
     }
 
-    // ZoneRenderer.cpp:1057-1064 — the far cull only applies to chunks that opted
+    // ZoneRenderer.cpp ZoneRenderer::RenderChunk2 — the far cull only applies to chunks that opted
     // into LOD rendering, and it outranks the band pick.
     #[test]
     fn the_far_cull_applies_only_to_lod_flagged_chunks() {
@@ -4028,6 +4117,9 @@ mod zone_block_slot_tests {
         let open = request(ZONE_FILE_ID, ZONE_SLOT_MAIN, None);
         let inside = request(ZONE_FILE_ID, ZONE_SLOT_MAIN, Some(SUB_AREA));
         assert_ne!(open.cache_key(), inside.cache_key());
+        let mut ship = request(ZONE_FILE_ID, ZONE_SLOT_MAIN, None);
+        ship.chunk_idx = Some(220);
+        assert_ne!(open.cache_key(), ship.cache_key());
 
         let mut cache = ZoneGeomCache::default();
         cache.insert(open.cache_key(), geom(SHELL_VISIBLE));
@@ -4166,104 +4258,21 @@ mod real_dat_sub_area_tests {
     }
 }
 
-// ===================== kuluu-q5sn: client-side wall collision (v5, capsule) =====================
+// ===================== MZB-native wall contact helpers (walker sweep source) =====================
 //
-// A UE5-style capsule controller replaces the earlier ray-fan / swept-orb /
-// climb-through stack (v1..v4). One upright body of two spheres is swept along
-// the intended move; a blocking wall triggers a step-up ATTEMPT that is
-// validated and reverted on failure, and an unresolved wall slides. There are
-// no probe heights, no whisker fan, no climb-through gate, and no lookahead
-// lead — the four constants that had to be re-tuned per report are gone. Wall
-// vs stair is decided by the OUTCOME of an attempted step, not by geometry
-// sampled at chosen heights, which is why ascent, descent, fences, parapets,
-// ramps and cliffs all fall out of one mechanism.
-//
-// Frames: wire (x, y, z) with feet_y = -z; queries run in bevy (x, feet, z)
-// where bevy.z = -wire.y. ground_step (the FindFloor analogue, unbounded down)
-// is reused unchanged and does the actual vertical snap in input.rs next tick.
-// Retail cross-ref: research/XIClient .../Terrain/CollisionManager.cpp
-// (KO_CharaCollision sphere, 0.708 walkable normal); UE cross-ref:
-// UCharacterMovementComponent::StepUp / SlideAlongSurface / FindFloor.
-
-/// Body radius. Retail derives per-actor radius from the skeleton
-/// (0.8 x element 44 XZ magnitude, kuluu-b091); until that lands this is sized
-/// for the ~2-yalm player so the shoulders, not the centerline, stop at a face.
-pub const PLAYER_WALL_RADIUS: f32 = 0.4;
-
-/// Skin between the feet and the lower sphere's bottom. Keeps the lower sphere
-/// from dipping below the feet and catching the riser tops of the flight below
-/// — the mechanism that made every earlier version block descent.
-pub const CAPSULE_SKIN: f32 = 0.05;
-
-/// Upper sphere center height (chest) on the ~2-yalm player.
-pub const CAPSULE_UPPER_CENTER: f32 = 1.3;
-
-/// A face is a wall (not a walkable floor/ramp) below this normal.y. 0.708 is
-/// retail's KO_CharaCollision threshold and UE's default walkable angle
-/// (~44.77deg) to within rounding — ramps up to that climb free, steeper faces
-/// block. Distinct from FLOOR_NORMAL_MIN (0.5), which stays ground_step's floor
-/// gate so grounding behavior is unchanged.
-pub const WALKABLE_NORMAL_Y: f32 = 0.708;
-
-/// A validated step landing's floor must sit no lower than this below the
-/// blocking face's top edge: a riser ends AT its tread, a parapet lip tops out
-/// above the platform behind it. This is what keeps a lip fronting a walkable
-/// platform a wall while a true riser climbs.
-pub const STEP_TOP_TOLERANCE: f32 = 0.05;
-
-/// Slide re-projection passes per tick (wall, then crease).
-pub const SLIDE_ITERATIONS: usize = 3;
-
-/// Depenetration passes for a move that STARTS embedded (bad server seed, mid
-/// zone-swap). Resting at sweep standoff (~R) must not fight the approach, so
-/// only penetration past DEPEN_SLOP pushes out.
-pub const DEPEN_ITERATIONS: usize = 3;
-pub const DEPEN_SLOP: f32 = 0.02;
-
-/// Cap on [`MzbCollisionGeometry::depenetrate`]'s total kick per tick — ~two
-/// in-game ticks of walking (see the depenetration doc for why uncapped was a
-/// stair pop).
-pub const DEPEN_MAX_PUSH: f32 = 0.15;
-
-/// A contact between the capsule and a wall triangle.
-#[derive(Clone, Copy)]
-struct WallContact {
-    dist_sq: f32,
-    normal: Vec3,
-    face_top: f32,
-}
-
-/// One tick's [`MzbCollisionGeometry::wall_clip_wire`] outcome.
-#[derive(Clone, Copy)]
-pub struct WallClipResult {
-    /// Allowed horizontal displacement (wire units, same frame as the request).
-    pub dx: f32,
-    pub dy: f32,
-    /// The floor a validated step-up landed on this tick (bevy up = −wire z), or
-    /// `None` when the move was horizontal-only. When `Some`, the caller MUST put its
-    /// feet there: re-running `ground_step` from the OLD height picks the surface nearest
-    /// the old feet in the NEW column, which for a stair with ground under it is the low
-    /// slab behind the riser just crossed — undoing every step (Bastok Mines 2026-08-23).
-    pub landed_floor: Option<f32>,
-}
-
-impl WallClipResult {
-    pub fn none(dx: f32, dy: f32) -> Self {
-        Self {
-            dx,
-            dy,
-            landed_floor: None,
-        }
-    }
-}
+// Geometry-side half of the player walker: `nearest_wall_contact` finds the
+// nearest wall-class triangle to a point; `point_tri_dist_sq` is its distance
+// primitive. The sweep that consumes them lives in kuluu::view_native::walker.
 
 impl MzbCollisionBlock {
-    /// Nearest wall-class triangle (authored normal.y < WALKABLE_NORMAL_Y)
-    /// within `r` of `center`, by full point-to-triangle distance. Suppressed
-    /// shell triangles are walked past, same as every collision query.
-    fn nearest_wall_contact(&self, center: Vec3, r: f32) -> Option<WallContact> {
+    /// Nearest wall-class triangle (authored normal.y < FLOOR_NORMAL_MIN —
+    /// retail's 45 degree floor/wall rule) within `r` of `center`, by full
+    /// point-to-triangle distance. Suppressed shell triangles are walked past,
+    /// same as every collision query. Returns `(dist_sq, normal)` for the
+    /// walker sweep's slide re-projection.
+    pub fn nearest_wall_contact(&self, center: Vec3, r: f32) -> Option<(f32, Vec3)> {
         let r2 = r * r;
-        let mut best: Option<WallContact> = None;
+        let mut best: Option<(f32, Vec3)> = None;
         let mut test = |tri_id: usize| {
             if self.is_suppressed(tri_id) {
                 return;
@@ -4278,7 +4287,7 @@ impl MzbCollisionBlock {
                     (v1 - v0).cross(v2 - v0).normalize_or_zero()
                 }
             };
-            if normal.y >= WALKABLE_NORMAL_Y {
+            if normal.y >= FLOOR_NORMAL_MIN {
                 return;
             }
             let base = tri_id * 3;
@@ -4289,13 +4298,8 @@ impl MzbCollisionBlock {
             if d2 >= r2 {
                 return;
             }
-            let face_top = v0.y.max(v1.y).max(v2.y);
-            if best.is_none_or(|c| d2 < c.dist_sq) {
-                best = Some(WallContact {
-                    dist_sq: d2,
-                    normal,
-                    face_top,
-                });
+            if best.is_none_or(|(bd, _)| d2 < bd) {
+                best = Some((d2, normal));
             }
         };
         if self.cell_index.is_empty() {
@@ -4322,459 +4326,10 @@ impl MzbCollisionBlock {
         best
     }
 }
-
-impl MzbCollisionGeometry {
-    /// Nearest wall contact for the two-sphere capsule standing at `xz` with
-    /// feet at `feet`, across every loaded block (parent + active interior).
-    fn capsule_contact(&self, xz: Vec2, feet: f32, r: f32) -> Option<WallContact> {
-        let lower = Vec3::new(xz.x, feet + PLAYER_WALL_RADIUS + CAPSULE_SKIN, xz.y);
-        let upper = Vec3::new(xz.x, feet + CAPSULE_UPPER_CENTER, xz.y);
-        let mut best: Option<WallContact> = None;
-        for block in &self.slots {
-            for center in [lower, upper] {
-                if let Some(c) = block.nearest_wall_contact(center, r) {
-                    if best.is_none_or(|b| c.dist_sq < b.dist_sq) {
-                        best = Some(c);
-                    }
-                }
-            }
-        }
-        best
-    }
-
-    /// Sweep the capsule from `xz` along horizontal `d` (bevy xz). Returns the
-    /// clear fraction of `d` and the blocking contact at the stop (None when
-    /// the whole sweep is clear). Coarse march by half-radius then bisect.
-    fn capsule_sweep(&self, xz: Vec2, feet: f32, d: Vec2) -> (f32, Option<WallContact>) {
-        let len = d.length();
-        if len < 1e-6 {
-            return (1.0, None);
-        }
-        let r_eff = PLAYER_WALL_RADIUS - 1e-4;
-        let d_hat = d / len;
-        let blocked = |t: f32| -> Option<WallContact> {
-            let c = self.capsule_contact(xz + d * t, feet, r_eff)?;
-            // A face we are NOT moving into cannot block. The walker rests at
-            // standoff ~R beside a wall; sliding parallel used to re-detect the
-            // same wall at t≈0 every iteration (triangle-seam distance dips),
-            // which is the stuck-on-walls / walking-in-place bug: the slide
-            // computed a correct tangent but this sweep refused to advance
-            // along it. Only an opposing face stops the sweep now — grazes and
-            // partings pass through.
-            let n2 = Vec2::new(c.normal.x, c.normal.z);
-            let n2l = n2.length();
-            if n2l > 1e-4 && d_hat.dot(n2 / n2l) >= -1e-3 {
-                return None;
-            }
-            Some(c)
-        };
-        // March no more than ~1/8 radius per probe. The old half-radius cap meant a
-        // normal in-game tick (0.07 yalms) got ONE check at the segment END — by the
-        // time "blocked" registered the capsule was already embedded, and step-up had
-        // to warp ~a tread forward just to clear back out (Bastok Mines 2026-08-23).
-        let step = ((PLAYER_WALL_RADIUS * 0.125) / len).min(1.0);
-        let mut t_clear = 0.0f32;
-        let mut t_hit: Option<f32> = None;
-        let mut t = 0.0f32;
-        loop {
-            t = (t + step).min(1.0);
-            if blocked(t).is_some() {
-                t_hit = Some(t);
-                break;
-            }
-            t_clear = t;
-            if t >= 1.0 {
-                break;
-            }
-        }
-        let Some(mut hi) = t_hit else {
-            return (1.0, None);
-        };
-        let mut lo = t_clear;
-        for _ in 0..8 {
-            let mid = (lo + hi) / 2.0;
-            if blocked(mid).is_some() {
-                hi = mid;
-            } else {
-                lo = mid;
-            }
-        }
-        (lo, blocked(hi))
-    }
-
-    /// Push the capsule out of any wall it starts embedded in (past DEPEN_SLOP).
-    ///
-    /// The total kick is capped at [`DEPEN_MAX_PUSH`]: this path exists for bad
-    /// server seeds and mid zone-swap embeds, not for normal walking. A stair
-    /// riser whose face plane passes THROUGH the body (Bastok Mines 2026-08-23:
-    /// dropping onto a tread puts the lower sphere ~0.18 into the riser above,
-    /// because the slab's front edge runs along the walk line and the face
-    /// stands on it) is resolved by ONE step of walking — an uncapped push of
-    /// up to 3×(R+0.01) teleports ~half a yalm along the face per riser, which
-    /// reads as the "pop" and sideways drift on descent.
-    fn depenetrate(&self, mut xz: Vec2, feet: f32) -> Vec2 {
-        let mut pushed = 0.0f32;
-        for _ in 0..DEPEN_ITERATIONS {
-            if pushed >= DEPEN_MAX_PUSH - 1e-6 {
-                break;
-            }
-            let Some(c) = self.capsule_contact(xz, feet, PLAYER_WALL_RADIUS - DEPEN_SLOP) else {
-                return xz;
-            };
-            let n2 = Vec2::new(c.normal.x, c.normal.z);
-            let n2l = n2.length();
-            if n2l < 1e-4 {
-                return xz;
-            }
-            let push =
-                ((PLAYER_WALL_RADIUS - c.dist_sq.sqrt()) + 0.01).min(DEPEN_MAX_PUSH - pushed);
-            xz += (n2 / n2l) * push;
-            pushed += push;
-        }
-        xz
-    }
-
-    /// kuluu-q5sn (v5/v6): clamp one tick's horizontal displacement against MZB
-    /// wall triangles so the player slides along walls, steps up stairs, and
-    /// walks off ledges. Wire in/out (bevy.x = ffxi.x, bevy.z = -ffxi.y,
-    /// bevy.y = -ffxi.z): (x, y, z) is the pre-move position, (dx, dy) the
-    /// intended horizontal displacement; returns the allowed displacement plus
-    /// [`WallClipResult::landed_floor`], which owns this tick's vertical snap.
-    ///
-    /// Sweep the capsule forward. A blocking wall triggers a step-up ATTEMPT:
-    /// grow the persistent retail `step_lift` (CollidableActor.cpp OnMove,
-    /// `field_F4`) by this tick's move, sweep at the lifted height to bound
-    /// reach, then find the NEAREST point where a landing is VALID — its
-    /// column's highest reachable floor (`ground_raycast`, FindFloor semantics) is
-    /// above us, tops out AT the blocking face (a riser ends at its tread),
-    /// and the capsule clears there except a graze of the next riser. Validated:
-    /// advance ONE normal-tick move toward it (the body rises through the face —
-    /// retail's walk-speed pass, no warp); if that floor doesn't yet cover the
-    /// endpoint, carry it in `pending_floor` for up to [`STEP_GRACE_TICKS`] more
-    /// ticks. Any gate fails -> SLIDE the remaining move along the wall plane.
-    /// Descent needs no case: ground_step snaps down unbounded, and a riser face
-    /// behind the walker can't block forward sweeps (the lower sphere's bottom
-    /// sits above its top edge); when descent still embeds the body in such a
-    /// face, [`Self::depenetrate`]'s capped kick resolves it without teleporting.
-    pub fn wall_clip_wire(&self, x: f32, y: f32, z: f32, dx: f32, dy: f32) -> WallClipResult {
-        let feet0 = -z;
-        let start_xz = Vec2::new(x, -y);
-        let mut p = self.depenetrate(start_xz, feet0);
-        // `feet` never changes inside the loop anymore (a validated landing exits via
-        // `landed_floor`), but depenetrate + sweeps still need the pre-move height.
-        let feet = feet0;
-        let mut landed: Option<f32> = None;
-        let mut d = Vec2::new(dx, -dy);
-        let want_len = d.length();
-        // A validated landing's floor is accepted for the endpoint column if it
-        // sits within this slack of the tread — shared by the primary step-up
-        // and the fan rescue.
-        const SLAB_EDGE_SLACK: f32 = 0.1;
-
-        // Clip planes accumulated across slide iterations (Quake III
-        // `PM_SlideMove` / `PM_ClipVelocity`). Each wall we touch adds its
-        // normal; the remaining velocity is clipped so it never points into any
-        // plane we've hit. On a single flat wall this is a plain slide; at an
-        // inside corner it rides the crease; only a true reversal (the clipped
-        // velocity would point back the way we came) stops us.
-        let mut normals: [Vec2; 4] = [Vec2::ZERO; 4];
-        let mut n_count: usize = 0;
-        // The original desired direction. A slide that ends up pointing more
-        // than 90° away from this means we're boxed in — stop rather than
-        // crab backwards.
-        let want_dir = if want_len > 1e-6 {
-            d / want_len
-        } else {
-            Vec2::ZERO
-        };
-
-        for _ in 0..SLIDE_ITERATIONS {
-            if d.length() < 1e-6 {
-                break;
-            }
-            let (t, hit) = self.capsule_sweep(p, feet, d);
-            p += d * t;
-            let Some(hit) = hit else {
-                break;
-            };
-            let rem = d * (1.0 - t);
-            let rem_len = rem.length();
-            // Step-up, retail field_F4 port (research/XIClient .../CollidableActor.cpp
-            // OnMove; Bastok Mines 2026-08-23 "warps up the stairs" while blocked:
-            // grow a persistent endpoint lift by this tick's move amount (capped at
-            // MAX_GROUND_STEP_UP). Once it clears the riser, pass through — but land
-            // as close to the face as valid geometry allows, and only where terrain
-            // actually continues ahead, so each riser costs a few walk-speed ticks.
-            let lifted;
-            {
-                let mut l = self.step_lift.lock();
-                *l = (*l + want_len).min(MAX_GROUND_STEP_UP);
-                lifted = feet + *l;
-            }
-            let dir = rem / rem_len;
-            // Raised-height sweep bounds the reach: anything within this prefix is
-            // provably clear of tall geometry between here and the landing.
-            let step_len = rem_len + PLAYER_WALL_RADIUS;
-            let (t2, _) = self.capsule_sweep(p, lifted, dir * step_len);
-            if t2 > 0.05 {
-                let max_reach = step_len * t2;
-                // A landing candidate is valid when its column's highest reachable
-                // floor is above us, tops out at the blocking face (a riser ends AT
-                // its tread), and the capsule clears there except a graze of the
-                // next riser. FindFloor semantics: HIGHEST floor within reach —
-                // ground_step's nearest-to-old-feet rule picks the low slab under a
-                // stair instead of the tread just crossed.
-                let valid_at = |s: f32| -> Option<f32> {
-                    // The face must actually RISE above our current feet — otherwise
-                    // a validated "landing" is really walk-off-the-edge: Bastok's
-                    // descent drops onto the lower tread right on the shared slab edge,
-                    // leaving the body touching the riser above one tick later, and a
-                    // land there would teleport back to the floor just left. (With
-                    // today's sphere constants any sweep-blocking face already tops out
-                    // > feet + 0.05, so this is defense for constant changes — keep it
-                    // if you touch PLAYER_WALL_RADIUS / CAPSULE_SKIN.)
-                    if hit.face_top <= feet + STEP_UP_REACH_EPSILON {
-                        return None;
-                    }
-                    let pos = p + dir * s;
-                    let f0 = self.ground_raycast(pos, feet + MAX_GROUND_STEP_UP)?;
-                    if f0 <= feet + STEP_UP_REACH_EPSILON {
-                        return None;
-                    }
-                    if hit.face_top > f0 + STEP_TOP_TOLERANCE {
-                        return None;
-                    }
-                    // Landing may graze the NEXT riser (shallow treads); only
-                    // geometry topping above floor + a step rejects it.
-                    let c = self.capsule_contact(pos, f0, PLAYER_WALL_RADIUS - 1e-4);
-                    if c.is_some_and(|cc| {
-                        cc.face_top > f0 + MAX_GROUND_STEP_UP + STEP_TOP_TOLERANCE
-                    }) {
-                        return None;
-                    }
-                    Some(f0)
-                };
-                // Nearest valid point: s=0 when already clear (the sweep stopped well
-                // short of the face — step up on the spot), else bisect between an
-                // invalid lo and a valid hi.
-                let mut landing: Option<(f32, f32)> = None; // (s, floor)
-                match valid_at(0.0) {
-                    Some(f) => landing = Some((0.0, f)),
-                    None if valid_at(max_reach).is_some() => {
-                        let (mut lo, mut hi) = (0.0f32, max_reach);
-                        for _ in 0..14 {
-                            let mid = (lo + hi) / 2.0;
-                            if valid_at(mid).is_some() {
-                                hi = mid;
-                            } else {
-                                lo = mid;
-                            }
-                        }
-                        landing = valid_at(hi).map(|f| (hi, f));
-                    }
-                    None => {}
-                }
-                // A validated landing exists within reach. Advance ONE normal step
-                // (retail's walk-speed pass — the body rises through the face; no
-                // warp), and if that floor doesn't yet cover our endpoint, carry it
-                // in `pending_floor` for the tick(s) until we're over it: repeated
-                // blocks keep advancing one step at a time until grounded.
-                if let Some((_s, f)) = landing {
-                    let endpoint_floor =
-                        self.ground_floor_at(p + dir * rem_len, f, SLAB_EDGE_SLACK);
-                    p += dir * rem_len;
-                    landed = Some(f);
-                    if !endpoint_floor.is_some_and(|v| v >= f - SLAB_EDGE_SLACK) {
-                        *self.pending_floor.lock() = Some((f, STEP_GRACE_TICKS));
-                    }
-                    break; // caller owns the vertical snap via `landed_floor`
-                }
-            }
-
-            // Oblique-approach rescue (fan probe). Runs BEFORE the slide and
-            // OUTSIDE the `t2 > 0.05` gate above: at a steep approach the
-            // raised-height sweep along `dir` immediately hits the wall beside
-            // the stair, so `t2 ≈ 0` and the primary step-up never even tries.
-            // The fan does its own raycasts from probe columns fanned around
-            // `dir`, so it doesn't depend on that sweep — it fires at any
-            // approach angle. If a quorum see a legal tread, step toward the
-            // lowest (nearest) one; otherwise fall through to the slide.
-            //
-            // Tuning: FAN_ANGLES.len() probes + quorum. Wider fan / lower quorum
-            // = grabbier (climbs at sharper angles, risks phantom steps on
-            // rims); narrower / higher = pickier. FAN_RADII (below) sets how far
-            // out each probe marches.
-            {
-                const FAN_QUORUM: usize = 1;
-                // 9 probes: center (0°) + 4 each side spanning ±75°
-                // (±18.75, ±37.5, ±56.25, ±75). Quorum 1 = any single probe
-                // seeing a legal tread commits the step.
-                const FAN_ANGLES: [f32; 9] = [
-                    -75.0_f32 * std::f32::consts::PI / 180.0,
-                    -56.25_f32 * std::f32::consts::PI / 180.0,
-                    -37.5_f32 * std::f32::consts::PI / 180.0,
-                    -18.75_f32 * std::f32::consts::PI / 180.0,
-                    0.0,
-                    18.75_f32 * std::f32::consts::PI / 180.0,
-                    37.5_f32 * std::f32::consts::PI / 180.0,
-                    56.25_f32 * std::f32::consts::PI / 180.0,
-                    75.0_f32 * std::f32::consts::PI / 180.0,
-                ];
-                // `dir` is only defined inside the t2 block above; recompute the
-                // movement direction here from the remaining velocity.
-                let fan_dir = if rem_len > 1e-6 {
-                    rem / rem_len
-                } else {
-                    Vec2::ZERO
-                };
-                if fan_dir != Vec2::ZERO {
-                    // Each angle marches OUTWARD through several radii. The body
-                    // rests at standoff R from the blocking face, so a probe at
-                    // 0.75·R lands SHORT of the face on our own floor and always
-                    // rejects — the old single-radius fan never fired at all.
-                    // R+0.1 and R+0.3 land past the face on the candidate tread;
-                    // the cap at R+0.3 keeps probes from seeing through thick
-                    // walls, and level-ground / tall-geometry rejection below
-                    // handles thin fences and parapet lips.
-                    const FAN_RADII: [f32; 3] = [
-                        PLAYER_WALL_RADIUS * 0.75,
-                        PLAYER_WALL_RADIUS + 0.1,
-                        PLAYER_WALL_RADIUS + 0.3,
-                    ];
-                    let fan_probe = |angle_rad: f32| -> Option<f32> {
-                        let (sn, cs) = angle_rad.sin_cos();
-                        let probe_dir =
-                            Vec2::new(fan_dir.x * cs - fan_dir.y * sn, fan_dir.x * sn + fan_dir.y * cs);
-                        for r in FAN_RADII {
-                            let probe_pos = p + probe_dir * r;
-                            // A legal tread: a floor above our feet but within one
-                            // step, that the capsule fits on (grazing the next riser
-                            // is allowed; only tall geometry rejects).
-                            let Some(f0) = self.ground_raycast(probe_pos, feet + MAX_GROUND_STEP_UP)
-                            else {
-                                continue;
-                            };
-                            if f0 <= feet + STEP_UP_REACH_EPSILON {
-                                continue;
-                            }
-                            if f0 > feet + MAX_GROUND_STEP_UP {
-                                continue;
-                            }
-                            let clear = self
-                                .capsule_contact(probe_pos, f0, PLAYER_WALL_RADIUS - 1e-4)
-                                .is_none_or(|cc| {
-                                    cc.face_top <= f0 + MAX_GROUND_STEP_UP + STEP_TOP_TOLERANCE
-                                });
-                            if !clear {
-                                continue;
-                            }
-                            return Some(f0);
-                        }
-                        None
-                    };
-                    let mut best_floor: Option<f32> = None;
-                    let mut hits = 0usize;
-                    for a in FAN_ANGLES {
-                        if let Some(f) = fan_probe(a) {
-                            hits += 1;
-                            best_floor = Some(match best_floor {
-                                Some(cur) => cur.min(f),
-                                None => f,
-                            });
-                        }
-                    }
-                    if hits >= FAN_QUORUM {
-                        if let Some(f) = best_floor {
-                            let endpoint_floor =
-                                self.ground_floor_at(p + fan_dir * rem_len, f, SLAB_EDGE_SLACK);
-                            p += fan_dir * rem_len;
-                            landed = Some(f);
-                            if !endpoint_floor.is_some_and(|v| v >= f - SLAB_EDGE_SLACK) {
-                                *self.pending_floor.lock() = Some((f, STEP_GRACE_TICKS));
-                            }
-                            break;
-                        }
-                    }
-                }
-            }
-            // Slide along the wall plane(s). Add this hit's normal to the clip
-            // set, then rebuild the slide from the ORIGINAL remaining velocity
-            // clipped against every plane touched so far.
-            let n2 = Vec2::new(hit.normal.x, hit.normal.z);
-            let n2l = n2.length();
-            if n2l < 1e-4 {
-                break;
-            }
-            let n2 = n2 / n2l;
-
-            // Skip a plane we already have (same wall grazed again). A tiny
-            // angular tolerance keeps numerical twins on a flat wall from
-            // filling the clip set and confusing the crease logic below.
-            let is_duplicate = normals[..n_count].iter().any(|prev| prev.dot(n2) > 0.98);
-            if !is_duplicate && n_count < normals.len() {
-                normals[n_count] = n2;
-                n_count += 1;
-            }
-
-            // Clip `rem` against each plane. `PM_ClipVelocity`: remove the
-            // component pointing into the plane. Do it for every accumulated
-            // plane; if clipping against a later plane re-introduces motion into
-            // an earlier one, clip to the CREASE (slide along the shared edge).
-            let rem_len2 = rem.length();
-            let mut vel = rem;
-            'planes: for i in 0..n_count {
-                // Only clip if we're actually heading into this plane.
-                if vel.dot(normals[i]) >= 0.0 {
-                    continue;
-                }
-                // Slide along this plane.
-                let mut v = vel - normals[i] * vel.dot(normals[i]);
-                // Does the new velocity dig into any OTHER plane?
-                for j in 0..n_count {
-                    if j == i {
-                        continue;
-                    }
-                    if v.dot(normals[j]) < 0.0 {
-                        // Two planes at once — slide along their crease (the
-                        // direction perpendicular to both). In 2D that's the
-                        // perpendicular of one normal, oriented downstream.
-                        let crease = Vec2::new(-normals[i].y, normals[i].x);
-                        let crease = if crease.dot(rem) < 0.0 { -crease } else { crease };
-                        // If the crease still points into plane j, it's a real
-                        // dead-end pocket. Otherwise ride it.
-                        if crease.dot(normals[j]) < -1e-3 {
-                            vel = Vec2::ZERO;
-                            break 'planes;
-                        }
-                        v = crease * rem_len2;
-                    }
-                }
-                vel = v;
-            }
-
-            // Stop only on a genuine reversal: the slide points back more than
-            // 90° from where we wanted to go. A flat wall hit at any oblique
-            // angle stays forward and keeps sliding; a true box-in reverses.
-            if want_dir != Vec2::ZERO && vel.length() > 1e-6 {
-                let vd = vel / vel.length();
-                if vd.dot(want_dir) < -0.01 {
-                    break;
-                }
-            }
-            d = vel;
-        }
-        WallClipResult {
-            dx: p.x - start_xz.x,
-            dy: -(p.y - start_xz.y),
-            landed_floor: landed,
-        }
-    }
-}
-
 /// Squared distance from `p` to triangle (a, b, c) — Ericson,
 /// "Real-Time Collision Detection" §1.3.6: vertex regions, edge projections,
 /// then the plane interior.
-fn point_tri_dist_sq(p: Vec3, a: Vec3, b: Vec3, c: Vec3) -> f32 {
+pub fn point_tri_dist_sq(p: Vec3, a: Vec3, b: Vec3, c: Vec3) -> f32 {
     let ab = b - a;
     let ac = c - a;
     let ap = p - a;
@@ -4816,664 +4371,201 @@ fn point_tri_dist_sq(p: Vec3, a: Vec3, b: Vec3, c: Vec3) -> f32 {
     ((a + ab * v + ac * w) - p).length_squared()
 }
 
-#[cfg(test)]
-mod wall_collision_tests {
-    use super::*;
-
-    fn quad(b: &mut MzbCollisionBlock, v: [Vec3; 4], n: Vec3, link: u32) {
-        let i0 = b.positions.len() as u32;
-        b.positions.extend_from_slice(&v);
-        b.indices
-            .extend_from_slice(&[i0, i0 + 1, i0 + 2, i0, i0 + 2, i0 + 3]);
-        b.tri_normals.extend_from_slice(&[n, n]);
-        b.tri_sub_area.extend_from_slice(&[link, link]);
-    }
-
-    fn staircase(steps: usize, d: f32, r: f32, balustrades: bool) -> MzbCollisionGeometry {
-        let mut b = MzbCollisionBlock::default();
-        quad(
-            &mut b,
-            [
-                Vec3::new(-10.0, 0.0, -3.0),
-                Vec3::new(0.0, 0.0, -3.0),
-                Vec3::new(0.0, 0.0, 3.0),
-                Vec3::new(-10.0, 0.0, 3.0),
-            ],
-            Vec3::Y,
-            mzb::NO_SUB_AREA_LINK,
-        );
-        for i in 0..steps {
-            let x0 = i as f32 * d;
-            let y0 = i as f32 * r;
-            let y1 = y0 + r;
-            quad(
-                &mut b,
-                [
-                    Vec3::new(x0, y0, -3.0),
-                    Vec3::new(x0, y0, 3.0),
-                    Vec3::new(x0, y1, 3.0),
-                    Vec3::new(x0, y1, -3.0),
-                ],
-                Vec3::new(-1.0, 0.0, 0.0),
-                mzb::NO_SUB_AREA_LINK,
-            );
-            quad(
-                &mut b,
-                [
-                    Vec3::new(x0, y1, -3.0),
-                    Vec3::new(x0 + d, y1, -3.0),
-                    Vec3::new(x0 + d, y1, 3.0),
-                    Vec3::new(x0, y1, 3.0),
-                ],
-                Vec3::Y,
-                mzb::NO_SUB_AREA_LINK,
-            );
-        }
-        let xt = steps as f32 * d;
-        let yt = steps as f32 * r;
-        quad(
-            &mut b,
-            [
-                Vec3::new(xt, yt, -3.0),
-                Vec3::new(xt + 10.0, yt, -3.0),
-                Vec3::new(xt + 10.0, yt, 3.0),
-                Vec3::new(xt, yt, 3.0),
-            ],
-            Vec3::Y,
-            mzb::NO_SUB_AREA_LINK,
-        );
-        if balustrades {
-            let sl = (d * d + r * r).sqrt();
-            for zed in [3.0f32, -3.0] {
-                let nn = Vec3::new(0.0, 0.0, -zed.signum());
-                quad(
-                    &mut b,
-                    [
-                        Vec3::new(-2.0, 0.0, zed),
-                        Vec3::new(xt + 2.0, yt, zed),
-                        Vec3::new(xt + 2.0, yt + 1.2, zed),
-                        Vec3::new(-2.0, 1.2, zed),
-                    ],
-                    nn,
-                    mzb::NO_SUB_AREA_LINK,
-                );
-                let sn = Vec3::new(-r / sl, d / sl, 0.0);
-                quad(
-                    &mut b,
-                    [
-                        Vec3::new(0.0, 0.0, zed - 0.2 * zed.signum()),
-                        Vec3::new(xt, yt, zed - 0.2 * zed.signum()),
-                        Vec3::new(xt + 0.3, yt, zed - 0.2 * zed.signum()),
-                        Vec3::new(0.3, 0.0, zed - 0.2 * zed.signum()),
-                    ],
-                    sn,
-                    mzb::NO_SUB_AREA_LINK,
-                );
-            }
-        }
-        MzbCollisionGeometry::from_block(b)
-    }
-
-    fn flat_with_wall(wall_x: f32, height: f32, link: u32) -> MzbCollisionGeometry {
-        let mut b = MzbCollisionBlock::default();
-        quad(
-            &mut b,
-            [
-                Vec3::new(-10.0, 0.0, -10.0),
-                Vec3::new(10.0, 0.0, -10.0),
-                Vec3::new(10.0, 0.0, 10.0),
-                Vec3::new(-10.0, 0.0, 10.0),
-            ],
-            Vec3::Y,
-            mzb::NO_SUB_AREA_LINK,
-        );
-        quad(
-            &mut b,
-            [
-                Vec3::new(wall_x, 0.0, -10.0),
-                Vec3::new(wall_x, 0.0, 10.0),
-                Vec3::new(wall_x, height, 10.0),
-                Vec3::new(wall_x, height, -10.0),
-            ],
-            Vec3::new(-1.0, 0.0, 0.0),
-            link,
-        );
-        MzbCollisionGeometry::from_block(b)
-    }
-
-    fn parapet_platform(wall_x: f32, wall_h: f32, plat_y: f32) -> MzbCollisionGeometry {
-        let mut b = MzbCollisionBlock::default();
-        quad(
-            &mut b,
-            [
-                Vec3::new(-10.0, 0.0, -10.0),
-                Vec3::new(wall_x, 0.0, -10.0),
-                Vec3::new(wall_x, 0.0, 10.0),
-                Vec3::new(-10.0, 0.0, 10.0),
-            ],
-            Vec3::Y,
-            mzb::NO_SUB_AREA_LINK,
-        );
-        quad(
-            &mut b,
-            [
-                Vec3::new(wall_x, 0.0, -10.0),
-                Vec3::new(wall_x, 0.0, 10.0),
-                Vec3::new(wall_x, wall_h, 10.0),
-                Vec3::new(wall_x, wall_h, -10.0),
-            ],
-            Vec3::new(-1.0, 0.0, 0.0),
-            mzb::NO_SUB_AREA_LINK,
-        );
-        quad(
-            &mut b,
-            [
-                Vec3::new(wall_x, plat_y, -10.0),
-                Vec3::new(10.0, plat_y, -10.0),
-                Vec3::new(10.0, plat_y, 10.0),
-                Vec3::new(wall_x, plat_y, 10.0),
-            ],
-            Vec3::Y,
-            mzb::NO_SUB_AREA_LINK,
-        );
-        MzbCollisionGeometry::from_block(b)
-    }
-
-    fn ramp(from_x: f32, to_x: f32, top_y: f32) -> MzbCollisionGeometry {
-        let mut b = MzbCollisionBlock::default();
-        quad(
-            &mut b,
-            [
-                Vec3::new(-10.0, 0.0, -6.0),
-                Vec3::new(from_x, 0.0, -6.0),
-                Vec3::new(from_x, 0.0, 6.0),
-                Vec3::new(-10.0, 0.0, 6.0),
-            ],
-            Vec3::Y,
-            mzb::NO_SUB_AREA_LINK,
-        );
-        let run = to_x - from_x;
-        let l = (run * run + top_y * top_y).sqrt();
-        let n = Vec3::new(-top_y / l, run / l, 0.0);
-        quad(
-            &mut b,
-            [
-                Vec3::new(from_x, 0.0, -6.0),
-                Vec3::new(to_x, top_y, -6.0),
-                Vec3::new(to_x, top_y, 6.0),
-                Vec3::new(from_x, 0.0, 6.0),
-            ],
-            n,
-            mzb::NO_SUB_AREA_LINK,
-        );
-        quad(
-            &mut b,
-            [
-                Vec3::new(to_x, top_y, -6.0),
-                Vec3::new(to_x + 10.0, top_y, -6.0),
-                Vec3::new(to_x + 10.0, top_y, 6.0),
-                Vec3::new(to_x, top_y, 6.0),
-            ],
-            Vec3::Y,
-            mzb::NO_SUB_AREA_LINK,
-        );
-        MzbCollisionGeometry::from_block(b)
-    }
-
-    fn corridor(gap: f32) -> MzbCollisionGeometry {
-        let mut b = MzbCollisionBlock::default();
-        quad(
-            &mut b,
-            [
-                Vec3::new(-10.0, 0.0, -10.0),
-                Vec3::new(10.0, 0.0, -10.0),
-                Vec3::new(10.0, 0.0, 10.0),
-                Vec3::new(-10.0, 0.0, 10.0),
-            ],
-            Vec3::Y,
-            mzb::NO_SUB_AREA_LINK,
-        );
-        let h = gap / 2.0;
-        quad(
-            &mut b,
-            [
-                Vec3::new(2.0, 0.0, h),
-                Vec3::new(3.0, 0.0, h),
-                Vec3::new(3.0, 2.5, h),
-                Vec3::new(2.0, 2.5, h),
-            ],
-            Vec3::new(0.0, 0.0, -1.0),
-            mzb::NO_SUB_AREA_LINK,
-        );
-        quad(
-            &mut b,
-            [
-                Vec3::new(2.0, 0.0, -h),
-                Vec3::new(3.0, 0.0, -h),
-                Vec3::new(3.0, 2.5, -h),
-                Vec3::new(2.0, 2.5, -h),
-            ],
-            Vec3::new(0.0, 0.0, 1.0),
-            mzb::NO_SUB_AREA_LINK,
-        );
-        MzbCollisionGeometry::from_block(b)
-    }
-
-    /// Walk from wire (x,y,z) in wire dir for `ticks` — input.rs' exact tick loop:
-    /// wall_clip_wire first, then a validated step-up's landing floor owns the
-    /// vertical snap; otherwise ground_step from the current height.
-    fn walk(
-        g: &MzbCollisionGeometry,
-        start: (f32, f32, f32),
-        dir: (f32, f32),
-        ticks: usize,
-    ) -> (f32, f32, f32) {
-        walk_traced(g, start, dir, ticks, None)
-    }
-
-    /// [`walk`] with an optional per-tick tracer (regression diagnostics).
-    fn walk_traced(
-        g: &MzbCollisionGeometry,
-        start: (f32, f32, f32),
-        dir: (f32, f32),
-        ticks: usize,
-        mut trace: Option<&mut dyn FnMut(usize, f32, f32, f32, &WallClipResult)>,
-    ) -> (f32, f32, f32) {
-        const DT: f32 = 1.0 / 30.0;
-        const RUN: f32 = 6.0;
-        let (mut x, mut y, mut z) = start;
-        for tick in 0..ticks {
-            let clip = g.wall_clip_wire(x, y, z, dir.0 * RUN * DT, dir.1 * RUN * DT);
-            if let Some(t) = trace.as_mut() {
-                t(tick, x, y, z, &clip);
-            }
-            x += clip.dx;
-            y += clip.dy;
-            match clip.landed_floor {
-                Some(f) => z = -f,
-                None => {
-                    let pending_now = g.pending_floor.lock().take();
-                    let stepped_z = g
-                        .ground_step(Vec2::new(x, -y), -z, MAX_GROUND_STEP_UP)
-                        .map(|b| -b);
-                    match pending_now {
-                        Some((f, ticks)) => {
-                            let f_wire = -f;
-                            z = match stepped_z {
-                                // Still walking over to the grace floor: hold it and
-                                // consume one tick. The count must actually EXPIRE at
-                                // zero — writing (f, 0) back is a fixed point that
-                                // holds the phantom height forever once the floor
-                                // never arrives under us.
-                                Some(sz) if sz >= f_wire - 1e-3 => {
-                                    let next = ticks.saturating_sub(1);
-                                    *g.pending_floor.lock() = (next > 0).then_some((f, next));
-                                    f_wire
-                                }
-                                // Grounded higher (on it or past it): let go.
-                                _ => stepped_z.unwrap_or(f_wire),
-                            };
-                        }
-                        None => {
-                            if let Some(b) = stepped_z {
-                                z = b;
-                            }
-                        }
-                    }
+impl MzbCollisionGeometry {
+    /// Nearest wall-class triangle within `r` of `center`, across every loaded
+    /// block (parent + active interior): the best of each block's
+    /// [`MzbCollisionBlock::nearest_wall_contact`]. The walker sweep queries
+    /// its two body spheres through this.
+    pub fn nearest_wall_contact(&self, center: Vec3, r: f32) -> Option<(f32, Vec3)> {
+        let mut best: Option<(f32, Vec3)> = None;
+        for block in &self.slots {
+            if let Some(c) = block.nearest_wall_contact(center, r) {
+                if best.is_none_or(|(bd, _)| c.0 < bd) {
+                    best = Some(c);
                 }
             }
         }
-        (x, y, z)
+        best
     }
 
-    #[test]
-    fn stairs_ascend_full_matrix() {
-        for (r, d) in [
-            (0.2, 0.25),
-            (0.25, 0.3),
-            (0.3, 0.4),
-            (0.35, 0.5),
-            (0.4, 0.4),
-            (0.5, 0.5),
-            (0.5, 1.0),
-            (0.3, 0.9),
-        ] {
-            for bal in [false, true] {
-                let g = staircase(12, d, r, bal);
-                let (x, _y, z) = walk(&g, (-2.0, 0.0, 0.0), (1.0, 0.0), 600);
-                assert!(
-                    (-z - 12.0 * r).abs() < 0.05 && x > 12.0 * d,
-                    "stuck ascending r={r} d={d} bal={bal}: x={x:.2} h={:.2}",
-                    -z
-                );
+    /// True when any triangle (any face class — a ceiling is usually an
+    /// underside) crosses the vertical slab `(lo_y, hi_y]` at `xz`. The walker
+    /// uses this as its ceiling hold: a rise that would push the body top into
+    /// geometry is rejected for the tick.
+    pub fn any_tri_in_column_slab(&self, xz: Vec2, lo_y: f32, hi_y: f32) -> bool {
+        let mut found = false;
+        self.for_each_hit_in_column(xz, |_, _, hit_y, _| {
+            if !found && hit_y > lo_y && hit_y <= hi_y {
+                found = true;
             }
-        }
+        });
+        found
     }
 
-    #[test]
-    fn stairs_descend_full_matrix() {
-        for (r, d) in [(0.2, 0.25), (0.3, 0.4), (0.35, 0.5), (0.5, 0.5), (0.3, 0.9)] {
-            for bal in [false, true] {
-                let g = staircase(12, d, r, bal);
-                let top = (12.0 * d + 3.0, 0.0, -(12.0 * r));
-                let (x, _y, z) = walk(&g, top, (-1.0, 0.0), 600);
-                assert!(
-                    (-z).abs() < 0.05 && x < -1.0,
-                    "stuck descending r={r} d={d} bal={bal}: x={x:.2} h={:.2}",
-                    -z
-                );
+    /// Highest up-facing triangle of any steepness crossing `[lo_y, hi_y]` at
+    /// `xz`. The walker's landing test reaches for this once its floor-class
+    /// search misses: retail's movement sphere collides with every polygon
+    /// (research/XIClient/src/XIClient/source/World/Zone/Terrain/CollisionManager.cpp
+    /// CollisionManager::KO_CharaCollision), so a fall stops on a bank too
+    /// steep to stand on instead of passing through it. Down-facing faces stay
+    /// out: the underside of a roof is not a landing surface (kuluu-0nnl).
+    pub fn highest_up_facing_hit_in_slab(&self, xz: Vec2, lo_y: f32, hi_y: f32) -> Option<f32> {
+        let mut best: Option<f32> = None;
+        self.for_each_hit_in_column(xz, |_, _, hit_y, normal| {
+            if normal.y > 0.0 && hit_y >= lo_y && hit_y <= hi_y && best.is_none_or(|b| hit_y > b) {
+                best = Some(hit_y);
             }
+        });
+        best
+    }
+}
+
+#[cfg(test)]
+mod cull_tests {
+    use super::*;
+    use kuluu_snapshot::{Entity, Vec3 as WireVec3};
+
+    fn wire_entity(id: u32, status: u8) -> Entity {
+        Entity {
+            id,
+            act_index: 0,
+            kind: EntityKind::Mob,
+            name: None,
+            pos: WireVec3 {
+                x: 0.0,
+                y: 0.0,
+                z: 0.0,
+            },
+            heading: 0,
+            hp_pct: Some(100),
+            bt_target_id: 0,
+            face_target: 0,
+            name_vis: None,
+            claim_id: 0,
+            speed: 0,
+            speed_base: 0,
+            look: None,
+            animation: 0,
+            animationsub: 0,
+            mount: None,
+            status,
+            char_flags: Default::default(),
+            monstrosity: false,
         }
     }
 
+    /// A server-invisible entity (status INVISIBLE) is hidden by sync_entities_system;
+    /// distance-culling must not reset its Visibility back to Inherited every frame, or
+    /// the model re-appears. Visible entities keep normal cull behavior.
     #[test]
-    fn tall_wall_blocks_with_standoff() {
-        let g = flat_with_wall(2.0, 3.0, mzb::NO_SUB_AREA_LINK);
-        let (x, _y, _z) = walk(&g, (-2.0, 0.0, 0.0), (1.0, 0.0), 300);
-        assert!(x < 2.0 - 0.35 && x > 2.0 - 0.65, "standoff: x={x:.3}");
+    fn cull_respects_server_invisible_entities() {
+        let mut app = App::new();
+        app.init_resource::<DrawDistance>()
+            .init_resource::<EntityTable>()
+            .add_systems(Update, cull_entities_by_distance);
+
+        // Self at origin; cull needs exactly one IsSelf.
+        app.world_mut().spawn((
+            IsSelf,
+            GlobalTransform::from(Transform::from_xyz(0.0, 0.0, 0.0)),
+        ));
+
+        let invis = app
+            .world_mut()
+            .spawn((
+                WorldEntity {
+                    id: 1,
+                    act_index: 0,
+                    kind: EntityKind::Mob,
+                },
+                GlobalTransform::from(Transform::from_xyz(5.0, 0.0, 0.0)),
+                Visibility::Hidden,
+            ))
+            .id();
+        let vis_in_range = app
+            .world_mut()
+            .spawn((
+                WorldEntity {
+                    id: 2,
+                    act_index: 0,
+                    kind: EntityKind::Mob,
+                },
+                GlobalTransform::from(Transform::from_xyz(5.0, 0.0, 0.0)),
+                Visibility::Hidden,
+            ))
+            .id();
+        let vis_out_of_range = app
+            .world_mut()
+            .spawn((
+                WorldEntity {
+                    id: 3,
+                    act_index: 0,
+                    kind: EntityKind::Mob,
+                },
+                GlobalTransform::from(Transform::from_xyz(100.0, 0.0, 0.0)),
+                Visibility::Inherited,
+            ))
+            .id();
+
+        let mut table = app.world_mut().resource_mut::<EntityTable>();
+        table.upsert(&wire_entity(1, kuluu_snapshot::status_type::INVISIBLE));
+        table.upsert(&wire_entity(2, 0));
+        table.upsert(&wire_entity(3, 0));
+
+        app.update();
+
+        assert_eq!(
+            *app.world().get::<Visibility>(invis).unwrap(),
+            Visibility::Hidden,
+            "server-invisible entity must stay hidden; cull must not reset it to Inherited"
+        );
+        assert_eq!(
+            *app.world().get::<Visibility>(vis_in_range).unwrap(),
+            Visibility::Inherited,
+            "in-range visible entity is un-hidden by distance-culling (control)"
+        );
+        assert_eq!(
+            *app.world().get::<Visibility>(vis_out_of_range).unwrap(),
+            Visibility::Hidden,
+            "out-of-range visible entity is hidden by distance-culling (control)"
+        );
+    }
+}
+
+#[cfg(test)]
+mod poll_change_detection_tests {
+    use super::*;
+
+    #[derive(Resource, Default)]
+    struct InFlightChangedProbe(Vec<bool>);
+
+    fn probe(in_flight: Res<LoadMzbInFlight>, mut out: ResMut<InFlightChangedProbe>) {
+        out.0.push(in_flight.is_changed());
     }
 
     #[test]
-    fn fence_with_level_ground_behind_blocks() {
-        let g = flat_with_wall(2.0, 0.7, mzb::NO_SUB_AREA_LINK);
-        let (x, _y, z) = walk(&g, (-2.0, 0.0, 0.0), (1.0, 0.0), 300);
-        assert!(x < 2.0, "fence held: x={x:.3}");
-        assert!((-z).abs() < 0.01, "no phantom lift: h={:.3}", -z);
-    }
-
-    #[test]
-    fn parapet_lip_fronting_platform_blocks() {
-        let g = parapet_platform(2.0, 1.0, 0.8);
-        let (x, _y, z) = walk(&g, (-2.0, 0.0, 0.0), (1.0, 0.0), 300);
-        assert!(x < 2.0, "lip held: x={x:.3}");
-        assert!((-z).abs() < 0.01, "stayed low: h={:.3}", -z);
-    }
-
-    #[test]
-    fn flush_step_onto_platform_works() {
-        let g = parapet_platform(2.0, 0.8, 0.8);
-        let (x, _y, z) = walk(&g, (-2.0, 0.0, 0.0), (1.0, 0.0), 300);
-        assert!(
-            x > 3.0 && (-z - 0.8).abs() < 0.05,
-            "stepped up: x={x:.2} h={:.2}",
-            -z
-        );
-    }
-
-    #[test]
-    fn ramp_40_degrees_walks_up_free() {
-        let top = 4.0 * (40f32.to_radians().tan());
-        let g = ramp(2.0, 6.0, top);
-        let (x, _y, z) = walk(&g, (-2.0, 0.0, 0.0), (1.0, 0.0), 400);
-        assert!(
-            x > 6.5 && (-z - top).abs() < 0.05,
-            "ramp free: x={x:.2} h={:.2}",
-            -z
-        );
-    }
-
-    #[test]
-    fn steep_50_degree_face_blocks() {
-        let top = 4.0 * (50f32.to_radians().tan());
-        let g = ramp(2.0, 6.0, top);
-        let (x, _y, z) = walk(&g, (-2.0, 0.0, 0.0), (1.0, 0.0), 400);
-        assert!(x < 2.5, "steep held: x={x:.2}");
-        assert!(-z < 0.5, "did not climb: h={:.2}", -z);
-    }
-
-    #[test]
-    fn corner_blocks_the_body() {
-        let mut b = MzbCollisionBlock::default();
-        quad(
-            &mut b,
-            [
-                Vec3::new(-10.0, 0.0, -10.0),
-                Vec3::new(10.0, 0.0, -10.0),
-                Vec3::new(10.0, 0.0, 10.0),
-                Vec3::new(-10.0, 0.0, 10.0),
-            ],
-            Vec3::Y,
-            mzb::NO_SUB_AREA_LINK,
-        );
-        quad(
-            &mut b,
-            [
-                Vec3::new(2.0, 0.0, 0.1),
-                Vec3::new(2.0, 0.0, 10.0),
-                Vec3::new(2.0, 3.0, 10.0),
-                Vec3::new(2.0, 3.0, 0.1),
-            ],
-            Vec3::new(-1.0, 0.0, 0.0),
-            mzb::NO_SUB_AREA_LINK,
-        );
-        let g = MzbCollisionGeometry::from_block(b);
-        let (x, _y, _z) = walk(&g, (-2.0, 0.0, 0.0), (1.0, 0.0), 200);
-        assert!(x < 2.0 - 0.2, "corner caught body: x={x:.2}");
-    }
-
-    /// The Bastok Mines stair as measured 2026-08-23: riser ~0.26, tread run
-    /// ~0.48, and a level-0 terrace slab that continues UNDER the treads (the
-    /// "stuff" the player was clipping through). Pre-fix, the tick loop pinned at
-    /// the flight's foot forever: every step-up validated the next tread but
-    /// ground_step from the old height re-picked the lower slab (nearer to the old
-    /// feet) and undid the lift on the same tick.
-    fn stair_with_ground_under(steps: usize, d: f32, r: f32) -> MzbCollisionGeometry {
-        let mut b = MzbCollisionBlock::default();
-        // Level-0 slab spanning ground AND under every tread.
-        quad(
-            &mut b,
-            [
-                Vec3::new(-10.0, 0.0, -3.0),
-                Vec3::new(steps as f32 * d + 5.0, 0.0, -3.0),
-                Vec3::new(steps as f32 * d + 5.0, 0.0, 3.0),
-                Vec3::new(-10.0, 0.0, 3.0),
-            ],
-            Vec3::Y,
-            mzb::NO_SUB_AREA_LINK,
-        );
-        for i in 0..steps {
-            let x0 = i as f32 * d;
-            let y0 = i as f32 * r;
-            let y1 = y0 + r;
-            quad(
-                &mut b,
-                [
-                    Vec3::new(x0, y0, -3.0),
-                    Vec3::new(x0, y0, 3.0),
-                    Vec3::new(x0, y1, 3.0),
-                    Vec3::new(x0, y1, -3.0),
-                ],
-                Vec3::new(-1.0, 0.0, 0.0),
-                mzb::NO_SUB_AREA_LINK,
-            );
-            quad(
-                &mut b,
-                [
-                    Vec3::new(x0, y1, -3.0),
-                    Vec3::new(x0 + d, y1, -3.0),
-                    Vec3::new(x0 + d, y1, 3.0),
-                    Vec3::new(x0, y1, 3.0),
-                ],
-                Vec3::Y,
-                mzb::NO_SUB_AREA_LINK,
-            );
-        }
-        let xt = steps as f32 * d;
-        let yt = steps as f32 * r;
-        quad(
-            &mut b,
-            [
-                Vec3::new(xt, yt, -3.0),
-                Vec3::new(xt + 10.0, yt, -3.0),
-                Vec3::new(xt + 10.0, yt, 3.0),
-                Vec3::new(xt, yt, 3.0),
-            ],
-            Vec3::Y,
-            mzb::NO_SUB_AREA_LINK,
-        );
-        MzbCollisionGeometry::from_block(b)
-    }
-
-    #[test]
-    fn stair_with_ground_under_climbs() {
-        // Measured Bastok geometry (riser 0.26 / run 0.48) plus a coarser variant.
-        for (r, d) in [(0.26, 0.48), (0.35, 0.5)] {
-            let g = stair_with_ground_under(8, d, r);
-            // Start flush against the first riser — his spawn was ~0.35 yalms off it.
-            let start_x = -PLAYER_WALL_RADIUS + 0.05;
-            let (x, _y, z) = walk(&g, (start_x, 0.0, 0.0), (1.0, 0.0), 600);
-            assert!(
-                (-z - 8.0 * r).abs() < 0.05 && x > 8.0 * d,
-                "pinned at foot of buried stair r={r} d={d}: x={x:.2} h={:.3}",
-                -z
-            );
-        }
-    }
-
-    #[test]
-    fn stair_with_ground_under_descends() {
-        let (r, d) = (0.26f32, 0.48);
-        let g = stair_with_ground_under(8, d, r);
-        let top = (8.0 * d + 3.0, 0.0, -(8.0 * r));
-        let (x, _y, z) = walk(&g, top, (-1.0, 0.0), 600);
-        assert!(
-            (-z).abs() < 0.05 && x < -1.0,
-            "stuck descending buried stair: x={x:.2} h={:.3}",
-            -z
-        );
-    }
-
-    /// Bastok Mines descent embed (measured 2026-08-23): both slab edges — the
-    /// upper terrace's front edge and the lower tread's front edge — run along the
-    /// riser face, so dropping onto the lower tread in place leaves the capsule
-    /// touching the riser one tick later (lower sphere ~0.18 into its top band).
-    /// Pre-fix v6 resolved that embed two ways at once: `depenetrate` kicked up to
-    /// 3×(R+0.01) along the face (~half a yalm pop per riser, with sideways drift),
-    /// and a false step-up "landing" could teleport back onto the floor just left.
-    /// Descent must pass through the face's x-range and stay grounded on the lower
-    /// tread — no pop (x keeps advancing at walk speed) and no re-lift to 3.0.
-    #[test]
-    fn descent_through_face_with_floor_under_walks() {
-        let mut b = MzbCollisionBlock::default();
-        // Upper terrace: y=3.0, front edge at x=0 (walker starts on it, walks -x).
-        quad(
-            &mut b,
-            [
-                Vec3::new(0.0, 3.0, -3.0),
-                Vec3::new(10.0, 3.0, -3.0),
-                Vec3::new(10.0, 3.0, 3.0),
-                Vec3::new(0.0, 3.0, 3.0),
-            ],
-            Vec3::Y,
-            mzb::NO_SUB_AREA_LINK,
-        );
-        // Lower tread: y=2.76 (Bastok's measured riser below 3.0 is 0.236), front
-        // edge on the same line x=0; extends past it like every real flight.
-        quad(
-            &mut b,
-            [
-                Vec3::new(-20.0, 2.76, -3.0),
-                Vec3::new(0.0, 2.76, -3.0),
-                Vec3::new(0.0, 2.76, 3.0),
-                Vec3::new(-20.0, 2.76, 3.0),
-            ],
-            Vec3::Y,
-            mzb::NO_SUB_AREA_LINK,
-        );
-        // Riser face standing on that shared edge: bottom at y=2.76 (x=0), top at
-        // y=3.0 shifted back by tan(17°)×riser ≈ 0.08 (x=-0.08). Authored normal
-        // points to the walker's side (+x), as MZB normals do.
-        quad(
-            &mut b,
-            [
-                Vec3::new(0.0, 2.76, -3.0),
-                Vec3::new(-0.08, 3.0, -3.0),
-                Vec3::new(-0.08, 3.0, 3.0),
-                Vec3::new(0.0, 2.76, 3.0),
-            ],
-            Vec3::new(1.0, 0.0, 0.0),
-            mzb::NO_SUB_AREA_LINK,
-        );
-        let g = MzbCollisionGeometry::from_block(b);
-        // Start on the terrace near its edge (wire z = -bevy y); walk -x over it.
-        let start: (f32, f32, f32) = (1.5, 0.0, -3.0);
-        let (x, _y, z) = walk(&g, start, (-1.0, 0.0), 40);
-        assert!(
-            x < -1.5 && ((-z) - 2.76).abs() < 0.05,
-            "did not pass the descent face cleanly: x={x:.2} h={:.3}",
-            -z
-        );
-    }
-
-    #[test]
-    fn corridor_pass_and_block() {
-        let (x, _, _) = walk(&corridor(1.2), (-2.0, 0.0, 0.0), (1.0, 0.0), 300);
-        assert!(x > 4.0, "1.2 gap passes: x={x:.2}");
-        let (x, _, _) = walk(&corridor(0.7), (-2.0, 0.0, 0.0), (1.0, 0.0), 300);
-        assert!(x < 2.0, "0.7 gap blocks: x={x:.2}");
-    }
-
-    #[test]
-    fn embedded_start_recovers_and_never_tunnels() {
-        let g = flat_with_wall(2.0, 3.0, mzb::NO_SUB_AREA_LINK);
-        let (x, _, _) = walk(&g, (1.75, 0.0, 0.0), (1.0, 0.0), 120);
-        assert!(x < 2.0, "never crossed: x={x:.3}");
-        let (xa, _, _) = walk(&g, (1.75, 0.0, 0.0), (-1.0, 0.0), 60);
-        assert!(xa < 1.0, "walking away works: x={xa:.2}");
-    }
-
-    #[test]
-    fn suppressed_shell_is_walk_through() {
-        let mut g = flat_with_wall(2.0, 3.0, 7);
-        let (x, _, _) = walk(&g, (-2.0, 0.0, 0.0), (1.0, 0.0), 120);
-        assert!(x < 2.0, "blocks while unsuppressed: x={x:.2}");
-        g.set_suppressed(Some(7));
-        let (x2, _, _) = walk(&g, (-2.0, 0.0, 0.0), (1.0, 0.0), 120);
-        assert!(x2 > 4.0, "suppressed shell passes: x={x2:.2}");
-    }
-
-    #[test]
-    fn cliff_descent_is_never_a_wall() {
-        let mut b = MzbCollisionBlock::default();
-        quad(
-            &mut b,
-            [
-                Vec3::new(-10.0, 2.0, -6.0),
-                Vec3::new(2.0, 2.0, -6.0),
-                Vec3::new(2.0, 2.0, 6.0),
-                Vec3::new(-10.0, 2.0, 6.0),
-            ],
-            Vec3::Y,
-            mzb::NO_SUB_AREA_LINK,
-        );
-        quad(
-            &mut b,
-            [
-                Vec3::new(2.0, 0.0, -6.0),
-                Vec3::new(2.0, 0.0, 6.0),
-                Vec3::new(2.0, 2.0, 6.0),
-                Vec3::new(2.0, 2.0, -6.0),
-            ],
-            Vec3::new(1.0, 0.0, 0.0),
-            mzb::NO_SUB_AREA_LINK,
-        );
-        quad(
-            &mut b,
-            [
-                Vec3::new(2.0, 0.0, -6.0),
-                Vec3::new(10.0, 0.0, -6.0),
-                Vec3::new(10.0, 0.0, 6.0),
-                Vec3::new(2.0, 0.0, 6.0),
-            ],
-            Vec3::Y,
-            mzb::NO_SUB_AREA_LINK,
-        );
-        let g = MzbCollisionGeometry::from_block(b);
-        let (x, _y, z) = walk(&g, (0.0, 0.0, -2.0), (1.0, 0.0), 200);
-        assert!(
-            x > 4.0 && (-z).abs() < 0.05,
-            "walked off and landed: x={x:.2} h={:.2}",
-            -z
+    fn idle_poll_does_not_tick_in_flight() {
+        let mut app = App::new();
+        app.init_resource::<Assets<Mesh>>()
+            .init_resource::<Assets<StandardMaterial>>()
+            .add_message::<crate::snapshot::ToastEvent>()
+            .add_message::<crate::dat_mmb::LoadMmbRequest>()
+            .init_resource::<DrawDistance>()
+            .init_resource::<MzbCollisionGeometry>()
+            .init_resource::<ZoneAreaMap>()
+            .init_resource::<ZoneChunkLightMap>()
+            .init_resource::<PendingWaterSpawns>()
+            .init_resource::<LoadMzbInFlight>()
+            .init_resource::<ZoneGeomCache>()
+            .init_resource::<crate::sub_area_activation::SubAreaActivation>()
+            .init_resource::<InFlightChangedProbe>()
+            .add_systems(Update, (poll_load_mzb_tasks, probe).chain());
+        app.update();
+        app.update();
+        assert_eq!(
+            app.world().resource::<InFlightChangedProbe>().0,
+            vec![true, false],
+            "first frame observes the insertion; an idle poll must not re-tick"
         );
     }
 }

@@ -7,6 +7,8 @@ pub mod chat_input;
 pub mod chat_panel;
 pub mod check_view;
 pub mod compass;
+#[cfg(feature = "enhanced-death-countdown")]
+pub mod death_countdown;
 pub mod death_prompt;
 pub mod delivery;
 pub mod diagnostics;
@@ -20,8 +22,10 @@ pub mod item_grid;
 pub mod item_meta;
 pub mod item_screen;
 pub mod item_ui;
+#[cfg(feature = "enhanced-shutdown-counter")]
 pub mod logout_countdown;
 // Depends on `crate::minimap`, which is itself gated off wasm (lib.rs).
+pub mod graphics_debug;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod map_screen;
 pub mod menu;
@@ -31,9 +35,10 @@ pub mod network_status;
 pub mod overlay;
 pub mod panel_column;
 pub mod quick_action;
-pub mod roster;
+pub mod stair_debug;
+// (roster mockup deleted — real party/self HUD is party_frame.rs)
+pub mod party_frame;
 pub mod self_fishing;
-pub mod self_hud;
 pub mod shop;
 pub mod spinner;
 pub mod stage_bar;
@@ -64,6 +69,44 @@ pub struct HudPanels {
     /// in movement. Grounding stays on. Toggled from the Debug menu NoClip row
     /// or /noclip; both flip this same flag.
     pub noclip: bool,
+    /// Stair-climber debug: when true, shows the status panel populated by
+    /// the input crate's stair detection state (orbs, slopes, classification
+    /// counts). Independent from `stair_draw` (whether the in-world gizmos
+    /// render); either can be on without the other.
+    pub stair_debug: bool,
+    /// Draws the in-world stair-climber gizmos (ring orbs, purple march,
+    /// head sphere, ramp line). Off = detection still runs (the character
+    /// still climbs), just no visuals.
+    pub stair_draw: bool,
+    /// Graphics-debug panel (win/img/panel metrics). Runtime-only, no persist.
+    pub graphics_debug: bool,
+    /// Nameplate Debug panel: last-two-tick pass state from the final in-view
+    /// nameplate pass (extract/bind/draw counters + far-plate clip position).
+    /// Runtime-only, no persist.
+    pub nameplate_debug: bool,
+    /// Rolling panel-position capture to panelpositions.txt. Runtime-only,
+    /// default off so the game never spams a log unasked. No persist.
+    pub position_log: bool,
+    /// Party-frame UI Settings panel (Debug menu): layout overrides, bar
+    /// toggles, distance readouts, scale. Runtime-only, no persist.
+    pub ui_settings: bool,
+    /// Debug weather gate (Debug menu Weather row): when true, suppresses the
+    /// active-weather modifier (ambient tint/brightness, sun mul, lightning)
+    /// and precipitation particles so scene-graphic errors can be isolated.
+    /// The zone DAT environment (sky, base ambient, distance fog) is untouched —
+    /// that is what the Fog row controls. Runtime-only, no persist.
+    pub weather_off: bool,
+    /// Debug fog gate (Debug menu Fog row): when true, strips every fog layer
+    /// (DAT DistanceFog, volumetric ground haze + its volume entity) so
+    /// scene-graphic errors can be isolated. Independent of `weather_off`.
+    /// Runtime-only, no persist.
+    pub fog_off: bool,
+    /// Debug Entity List overlay (Debug menu "Entity List" row): when true,
+    /// shows a scrollable dump of every live wire entity from the
+    /// EntityTable — id, name, kind, position, status byte, hp%, invis/name-
+    /// hidden/dead flags. Mouse wheel scrolls; default off.
+    /// Runtime-only, no persist.
+    pub entity_list: bool,
 }
 
 #[derive(Component)]
@@ -116,7 +159,6 @@ pub fn spawn_bottom_left_stack(
                     #[cfg(not(target_arch = "wasm32"))]
                     crate::minimap::spawn_minimap_as_child(col, &mut images);
 
-                    #[cfg(target_arch = "wasm32")]
                     compass::spawn_compass_as_child(col);
 
                     col.spawn(Node {
@@ -181,9 +223,17 @@ impl Plugin for HudPlugin {
         app.init_resource::<chat_panel::ChatUnread>();
         app.init_resource::<chat_panel::ChatActivityTracker>();
         app.init_resource::<mesh_debug::MeshHoverDebug>();
-
+        app.init_resource::<stair_debug::StairDebugSnapshot>();
+        app.init_resource::<graphics_debug::GraphicsDebugState>();
+        // Render-world probe for the surface size (see graphics_debug).
+        if let Some(render_app) = app.get_sub_app_mut(bevy::render::RenderApp) {
+            render_app.add_systems(
+                bevy::render::Render,
+                graphics_debug::record_surface_size
+                    .in_set(bevy::render::RenderSystems::PrepareViews),
+            );
+        }
         app.init_resource::<zone_flash::ZoneFlashState>();
-        app.init_resource::<self_hud::SelfHealTracker>();
 
         app.init_resource::<status_ribbon::StatusIconCache>();
         app.init_resource::<status_ribbon::StatusIconDatRoot>();
@@ -201,11 +251,13 @@ impl Plugin for HudPlugin {
             app.init_resource::<map_screen::MapMarkers>();
             app.init_resource::<map_screen::ViewedMap>();
             app.init_resource::<map_screen::MapView>();
+            app.init_resource::<map_screen::ChangeMapCatalog>();
         }
 
         app.init_resource::<check_view::CheckTarget>();
         app.init_resource::<bazaar_view::BazaarScreenState>();
         app.init_resource::<status_panel::StatusProfileOpen>();
+        app.init_resource::<party_frame::PartyFrameSettings>();
 
         app.init_resource::<trade::TradeState>();
 
@@ -220,8 +272,12 @@ impl Plugin for HudPlugin {
         app.add_message::<target_action_menu::TargetActionActivated>();
         app.add_message::<trade::TradeIntent>();
         app.init_resource::<target_panel::SwingPulse>();
+        #[cfg(feature = "enhanced-shutdown-counter")]
         app.init_resource::<logout_countdown::LogoutCountdownAnchor>();
-        app.init_resource::<logout_countdown::OptimisticLogoutCountdown>();
+        #[cfg(feature = "enhanced-shutdown-counter")]
+        app.init_resource::<logout_countdown::PendingLogoutRequest>();
+        app.init_resource::<death_prompt::DeathPromptSelection>();
+        #[cfg(feature = "enhanced-shutdown-counter")]
         app.add_message::<logout_countdown::LogoutRequested>();
 
         app.add_message::<menu::MenuRowActivated>();
@@ -239,7 +295,6 @@ impl Plugin for HudPlugin {
                 stage_bar::update_stage_bar,
                 chat_panel::update_chat_panel,
                 diagnostics::update_diagnostics,
-                roster::update_roster_panel_system,
                 chat_input::update_chat_input,
                 menu::update_main_menu,
                 quick_action::update_quick_action,
@@ -254,20 +309,20 @@ impl Plugin for HudPlugin {
                 shop::update_shop_panel_system,
                 (
                     compass::update_compass,
+                    compass::update_compass_art,
+                    compass::update_compass_dots,
                     #[cfg(not(target_arch = "wasm32"))]
                     compass::update_compass_track_pointer,
                 ),
                 vana_clock::update_vana_clock,
                 zone_flash::update_zone_flash,
-                (
-                    self_hud::update_self_hud,
-                    self_hud::update_self_status,
-                    self_hud::update_self_party_indicator,
-                ),
+                party_frame::update_party_frame_system,
+                party_frame::update_ui_settings_system,
                 self_fishing::update_fishing_hud,
                 (
                     status_ribbon::update_status_ribbon,
-                    status_ribbon::update_status_timers,
+                    #[cfg(feature = "enhanced-buff-timers")]
+                    status_ribbon::timers::update_status_timers,
                     status_ribbon::update_status_ribbon_selection,
                 ),
                 (
@@ -275,6 +330,15 @@ impl Plugin for HudPlugin {
                     weather_icon::update_weather_icon,
                 ),
             ),
+        );
+
+        // Separate call: the main HUD tuple above is already at Bevy's 20-element
+        // limit. In-place distance readouts — must follow the row rebuild so
+        // freshly spawned distance texts get their value same-frame.
+        app.add_systems(
+            Update,
+            party_frame::update_party_dist_text_system
+                .after(party_frame::update_party_frame_system),
         );
 
         app.add_systems(
@@ -285,7 +349,6 @@ impl Plugin for HudPlugin {
         app.add_systems(
             Update,
             panel_column::layout_panel_column_system
-                .after(roster::update_roster_panel_system)
                 .after(target_panel::update_target_panel_system),
         );
 
@@ -294,6 +357,7 @@ impl Plugin for HudPlugin {
             menu_help_bar::update_menu_help_bar.after(menu::refresh_dynamic_menu_rows),
         );
 
+        #[cfg(feature = "enhanced-shutdown-counter")]
         app.add_systems(Update, logout_countdown::update_logout_countdown);
         app.add_systems(Update, treasure_pool::update_treasure_pool);
 
@@ -323,6 +387,7 @@ impl Plugin for HudPlugin {
             Update,
             (
                 map_screen::reset_map_screen_on_open,
+                map_screen::refresh_change_map_catalog,
                 map_screen::load_viewed_map,
                 map_screen::update_map_view,
                 map_screen::update_map_screen_image,
@@ -345,6 +410,8 @@ impl Plugin for HudPlugin {
         app.add_systems(Update, status_ribbon::tooltip::update_buff_tooltip);
         #[cfg(feature = "enhanced-cast-bar")]
         app.add_systems(Update, cast_bar::update_cast_bar);
+        #[cfg(feature = "enhanced-death-countdown")]
+        app.add_systems(Update, death_countdown::update_death_countdown_system);
 
         app.add_systems(Update, chat_panel::chat_tab_click_system);
         app.add_systems(Update, chat_panel::chat_auto_switch_click_system);
@@ -363,6 +430,8 @@ impl Plugin for HudPlugin {
         app.add_systems(
             Update,
             (
+                party_frame::party_row_click_system,
+                party_frame::ui_settings_click_system,
                 menu::menu_mouse_hover_system,
                 menu::menu_mouse_click_system,
                 item_screen::item_row_mouse_hover_system,
@@ -391,6 +460,10 @@ impl Plugin for HudPlugin {
             (
                 mesh_debug::update_hover_state,
                 mesh_debug::update_mesh_debug_hud,
+                stair_debug::update_stair_debug_hud,
+                graphics_debug::graphics_debug_metrics_system,
+                graphics_debug::update_graphics_debug_hud,
+                graphics_debug::update_nameplate_debug_hud,
             )
                 .chain(),
         );
@@ -410,7 +483,6 @@ pub fn add_hud_spawners<L: bevy::ecs::schedule::ScheduleLabel + Clone>(app: &mut
         (
             spawn_bottom_left_stack,
             diagnostics::spawn_diagnostics,
-            roster::spawn_roster_panel,
             chat_input::spawn_chat_input,
             menu::spawn_main_menu,
             menu_help_bar::spawn_menu_help_bar,
@@ -420,9 +492,10 @@ pub fn add_hud_spawners<L: bevy::ecs::schedule::ScheduleLabel + Clone>(app: &mut
             shop::spawn_shop_panel,
             zone_flash::spawn_zone_flash,
             self_fishing::spawn_fishing_hud,
-            self_hud::spawn_self_hud,
+            party_frame::spawn_party_frames,
             status_ribbon::spawn_status_ribbon,
             death_prompt::spawn_death_prompt,
+            #[cfg(feature = "enhanced-shutdown-counter")]
             logout_countdown::spawn_logout_countdown,
             treasure_pool::spawn_treasure_pool,
             mesh_debug::spawn_mesh_debug_hud,
@@ -430,6 +503,11 @@ pub fn add_hud_spawners<L: bevy::ecs::schedule::ScheduleLabel + Clone>(app: &mut
             network_status::spawn_network_status,
         ),
     );
+    // Separate call: bevy's add_systems tuple bound caps at 20, and we're
+    // already at 20 above.
+    app.add_systems(schedule.clone(), stair_debug::spawn_stair_debug_hud);
+    app.add_systems(schedule.clone(), graphics_debug::spawn_graphics_debug_hud);
+    app.add_systems(schedule.clone(), graphics_debug::spawn_nameplate_debug_hud);
 
     #[cfg(feature = "enhanced-buff-tooltips")]
     app.add_systems(schedule.clone(), status_ribbon::tooltip::spawn_buff_tooltip);
@@ -453,4 +531,27 @@ pub fn add_hud_spawners<L: bevy::ecs::schedule::ScheduleLabel + Clone>(app: &mut
     // Depends on `crate::minimap` (wasm-gated).
     #[cfg(not(target_arch = "wasm32"))]
     app.add_systems(schedule, map_screen::spawn_map_screen);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bevy::ecs::system::RunSystemOnce;
+
+    #[test]
+    fn bottom_left_stack_spawns_one_compass_with_four_cardinals() {
+        let mut world = World::new();
+        #[cfg(not(target_arch = "wasm32"))]
+        world.init_resource::<Assets<bevy::image::Image>>();
+        world.run_system_once(spawn_bottom_left_stack).unwrap();
+
+        assert_eq!(
+            world.query::<&compass::CompassPanel>().iter(&world).count(),
+            1
+        );
+        assert_eq!(
+            world.query::<&compass::CompassLabel>().iter(&world).count(),
+            4
+        );
+    }
 }

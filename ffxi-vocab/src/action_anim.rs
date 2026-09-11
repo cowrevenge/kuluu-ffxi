@@ -8,6 +8,15 @@ const SPELL_FILE_TABLE_OFFSET: u32 = 0xAF0;
 const ABILITY_FILE_TABLE_OFFSET: u32 = 0x113C;
 const TRUST_FILE_ID: u32 = 0xE9B;
 const TRUST_SPELL_ID_MIN: u16 = 896;
+// research/xim resource/table/MobAbilityTable.kt getFileTableOffset - a mob skill's animation id
+// falls in one of four FTABLE bands, each with its own base offset into the file table.
+const MOB_ANIM_BAND_1_MAX: u32 = 0x200;
+const MOB_ANIM_BASE_1: u32 = 0x0F3C;
+const MOB_ANIM_BAND_2_MAX: u32 = 0x600;
+const MOB_ANIM_BASE_2: u32 = 0xC1EF;
+const MOB_ANIM_BAND_3_MAX: u32 = 0x800;
+const MOB_ANIM_BASE_3: u32 = 0xE739;
+const MOB_ANIM_BASE_4: u32 = 0x14B07;
 
 fn lookup(table: &[(u16, u16)], id: u16) -> Option<u16> {
     table
@@ -18,7 +27,7 @@ fn lookup(table: &[(u16, u16)], id: u16) -> Option<u16> {
 
 // Every completion effect is `<table base> + animation index`, and s2c 0x028 carries that index
 // per result — LSB fills it straight from the action's own animation column (magic_state.cpp,
-// charentity.cpp:1602/1923). The scraped `*_ANIMATION` tables hold the same column keyed by
+// charentity.cpp CCharEntity::OnWeaponSkillFinished/1923). The scraped `*_ANIMATION` tables hold the same column keyed by
 // action id, and stand in only when a truncated body carried no result to read it from.
 //
 // The action id is NOT the index. research/xim AbilityTable.kt getAnimationId adds
@@ -36,6 +45,23 @@ pub fn spell_file_id(spell_id: u32, animation: Option<u16>) -> Option<u32> {
 pub fn ability_file_id(ability_id: u32, animation: Option<u16>) -> Option<u32> {
     let index = animation.or_else(|| lookup(ABILITY_ANIMATION, u16::try_from(ability_id).ok()?))?;
     Some(ABILITY_FILE_TABLE_OFFSET + index as u32)
+}
+
+// research/xim resource/table/MobAbilityTable.kt getFileTableOffset - a mob skill's animation id
+// (LSB mob_skills.mob_anim_id, carried per result in s2c 0x028 category 11) is an FTABLE index
+// with a range-dependent base. The DAT at that index holds the skill's `main` routine, whose
+// 0x05 stage names the caster's own `sp??` clip. Pet skills (category 13) share the table.
+pub fn mob_skill_file_id(animation: u16) -> u32 {
+    let a = animation as u32;
+    a + if a < MOB_ANIM_BAND_1_MAX {
+        MOB_ANIM_BASE_1
+    } else if a < MOB_ANIM_BAND_2_MAX {
+        MOB_ANIM_BASE_2
+    } else if a < MOB_ANIM_BAND_3_MAX {
+        MOB_ANIM_BASE_3
+    } else {
+        MOB_ANIM_BASE_4
+    }
 }
 
 #[cfg(test)]
@@ -85,5 +111,18 @@ mod tests {
     fn out_of_range_is_none() {
         assert_eq!(spell_file_id(0xF_FFFF, None), None);
         assert_eq!(ability_file_id(0xF_FFFF, None), None);
+    }
+
+    // whirl_claws is mob skill 259 with animation 3 (foot_kick is 257 / 1): the first
+    // range's base plus the index.
+    #[test]
+    fn mob_skill_file_id_uses_the_range_dependent_base() {
+        assert_eq!(mob_skill_file_id(3), 0x0F3C + 3);
+        assert_eq!(mob_skill_file_id(0x1FF), 0x0F3C + 0x1FF);
+        assert_eq!(mob_skill_file_id(0x200), 0xC1EF + 0x200);
+        assert_eq!(mob_skill_file_id(0x5FF), 0xC1EF + 0x5FF);
+        assert_eq!(mob_skill_file_id(0x600), 0xE739 + 0x600);
+        assert_eq!(mob_skill_file_id(0x7FF), 0xE739 + 0x7FF);
+        assert_eq!(mob_skill_file_id(0x800), 0x14B07 + 0x800);
     }
 }

@@ -2,10 +2,100 @@ use crate::{DatError, Result};
 
 pub const CIB_LEN: usize = 15;
 
+// The Info byte that means "no value": retail writes it where a field is absent (movement and
+// range type) or default (scale).
+const UNSET_BYTE: u8 = 0xFF;
+
+// The movement byte of the 0x45 Info chunk (vekien/xi-model-viewer ui/js/dat/inspect.js
+// MOVEMENT_TYPE). Retail ships only 0/1/2/3/0xFF in this install's ROMs (full scan:
+// 1102/50/178/304/16494 CIBs), so Unknown is unreachable for shipped data; it keeps an odd
+// byte out of Unset instead of collapsing onto it. The wire byte values live in `from_u8`
+// alone: a payload-carrying variant cannot share a u8 repr.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MovementType {
+    Walking,
+    Sliding,
+    Large,
+    Flying,
+    /// The 0xFF byte: the model's Info chunk carries no movement type.
+    Unset,
+    /// A byte outside the viewer's MOVEMENT_TYPE table, kept raw.
+    Unknown(u8),
+}
+
+impl std::fmt::Display for MovementType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Walking => f.write_str("Walking"),
+            Self::Sliding => f.write_str("Sliding"),
+            Self::Large => f.write_str("Large"),
+            Self::Flying => f.write_str("Flying"),
+            Self::Unset => f.write_str("Unset"),
+            Self::Unknown(b) => write!(f, "Unknown(0x{b:02X})"),
+        }
+    }
+}
+
+impl MovementType {
+    pub fn from_u8(b: u8) -> Self {
+        match b {
+            0 => Self::Walking,
+            1 => Self::Sliding,
+            2 => Self::Large,
+            3 => Self::Flying,
+            UNSET_BYTE => Self::Unset,
+            _ => Self::Unknown(b),
+        }
+    }
+}
+
+// The range-type byte of the 0x45 Info chunk (viewer RANGE_TYPE). xim documents the gaps
+// explicitly ("no 0x07 / no 0x08 / no 0x09", research/xim resource/InfoSection.kt) and reads an
+// out-of-table byte as Unset; this install's ROMs carry seven 0x08 CIBs, so that fallback is
+// live data: kuluu keeps the raw byte in Unknown instead of collapsing it onto Unset. The
+// wire byte values live in `from_u8` alone: a payload-carrying variant cannot share a u8 repr.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RangeType {
+    None,
+    Wind,
+    String,
+    Marksmanship,
+    ThrowingWeapon,
+    ThrowingAmmo,
+    Archery,
+    HandbellIndi,
+    HandbellGeo,
+    /// The 0xFF byte: the model's Info chunk carries no range type.
+    Unset,
+    /// A byte outside xim's RANGE_TYPE table (including the documented gaps), kept raw.
+    Unknown(u8),
+}
+
+impl RangeType {
+    pub fn from_u8(b: u8) -> Self {
+        match b {
+            0x00 => Self::None,
+            0x01 => Self::Wind,
+            0x02 => Self::String,
+            0x03 => Self::Marksmanship,
+            0x04 => Self::ThrowingWeapon,
+            0x05 => Self::ThrowingAmmo,
+            0x06 => Self::Archery,
+            0x0a => Self::HandbellIndi,
+            0x0b => Self::HandbellGeo,
+            UNSET_BYTE => Self::Unset,
+            _ => Self::Unknown(b),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Cib {
     pub name: [u8; 4],
-    pub unknown1: u8,
+
+    /// The Info movement byte (viewer parseInspectInfo b[0]). Flying/Sliding mobs have no
+    /// ground stride to match, so their locomotion clips play at the authored rate.
+    pub movement_type: MovementType,
 
     pub footstep_material: u8,
 
@@ -15,7 +105,7 @@ pub struct Cib {
 
     /// `is_shield` — read from the SUB slot's CIB. Selects the upper-body motion
     /// DAT as `base + is_shield + 1` (research/XIClient/src/XIClient/source/
-    /// World/Actor/SkeletalMeshActor.cpp:3175), so a shield swaps in a variant
+    /// World/Actor/SkeletalMeshActor.cpp SkeletalMeshActor::GetUpperBodyDatIndex), so a shield swaps in a variant
     /// with its own joint count.
     pub is_shield: u8,
     pub weapon_constrain: u8,
@@ -23,15 +113,21 @@ pub struct Cib {
     pub weapon_unknown3: u8,
 
     /// `waist_type` — read from the BODY slot's CIB. Selects the waist/skirt
-    /// motion DAT as `base + max(waist_type, 1) + 2` (SkeletalMeshActor.cpp:3165,
+    /// motion DAT as `base + max(waist_type, 1) + 2` (SkeletalMeshActor.cpp SkeletalMeshActor::GetWaistDatIndex,
     /// via `ReadStdMotionRes` at :3014), which is how a robe gets skirt motion
     /// where plate legs get trousers.
     pub body_armour_waist: u8,
+
+    /// Model scale in percent. Retail divides it by 100 with only UNSET_BYTE meaning default
+    /// (research/xim poc/Model.kt NpcModel.getScale). The byte after it is the static-NPC
+    /// variant retail swaps in for non-seated NPCs (poc/Actor.kt getScale); kuluu has no seated
+    /// NPC path, so it stays uninterpreted.
     pub scale: u8,
-    pub unknown6: u8,
     pub unknown7: u8,
     pub unknown8: u8,
-    pub motion_range_index: u8,
+
+    /// The Info range byte at 0x0E (viewer parseInspectInfo b[14]).
+    pub motion_range_index: RangeType,
 }
 
 impl Cib {
@@ -45,7 +141,7 @@ impl Cib {
         }
         Ok(Self {
             name,
-            unknown1: body[0x00],
+            movement_type: MovementType::from_u8(body[0x00]),
             footstep_material: body[0x01],
             footstep_size: body[0x02],
             motion_index: body[0x03],
@@ -56,11 +152,23 @@ impl Cib {
             weapon_unknown3: body[0x08],
             body_armour_waist: body[0x09],
             scale: body[0x0A],
-            unknown6: body[0x0B],
             unknown7: body[0x0C],
             unknown8: body[0x0D],
-            motion_range_index: body[0x0E],
+            motion_range_index: RangeType::from_u8(body[0x0E]),
         })
+    }
+
+    /// The Info `scale` byte as a model multiplier. Retail divides by 100 with only UNSET_BYTE
+    /// meaning "default" (research/xim poc/Model.kt NpcModel.getScale, poc/Actor.kt getScale;
+    /// resource/InfoSection.kt readInfoDefinition reads the scale and staticNpcScale bytes as
+    /// null when they are 0xFF). 100 therefore lands on 1.0 by the division itself, and a
+    /// shipped 0 renders at zero size exactly as retail would.
+    pub fn scale_factor(&self) -> f32 {
+        if self.scale == UNSET_BYTE {
+            1.0
+        } else {
+            self.scale as f32 / 100.0
+        }
     }
 }
 
@@ -79,7 +187,11 @@ mod tests {
         assert_eq!(c.footstep_size, 0x01);
         assert_eq!(c.motion_index, 0x05);
         assert_eq!(c.scale, 0x80);
-        assert_eq!(c.motion_range_index, 0x07);
+        // 0x10 is outside the viewer's MOVEMENT_TYPE table; xim would throw, we keep it raw.
+        assert_eq!(c.movement_type, MovementType::Unknown(0x10));
+        // 0x07 is one of xim's documented range gaps ("no 0x07"); kept raw, not collapsed
+        // onto Unset.
+        assert_eq!(c.motion_range_index, RangeType::Unknown(0x07));
     }
 
     #[test]
@@ -102,5 +214,51 @@ mod tests {
         body.extend_from_slice(&[0xFF; 8]);
         let c = Cib::parse(*b"long", &body).unwrap();
         assert_eq!(c.footstep_material, 0x42);
+    }
+
+    #[test]
+    fn bat_info_chunk() {
+        // The bat's raw Info body as the viewer reads it (ROM/4/106.DAT, file id 1564; its
+        // variants 1556/1561/1563/1565 carry the same bytes). All sixteen on-disk bytes are
+        // fed in: our CIB_LEN is 15 and the uninterpreted sixteenth is ignored by design.
+        let body = [
+            0x03, 0x06, 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x55, 0x64, 0x73, 0x8C,
+            0xFF, 0xFF,
+        ];
+        let c = Cib::parse(*b"cib0", &body).unwrap();
+        assert_eq!(c.movement_type, MovementType::Flying);
+        assert_eq!(c.scale, 85);
+        assert_eq!(c.motion_range_index, RangeType::Unset);
+        assert!((c.scale_factor() - 0.85).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn scale_factor_rules() {
+        let parse = |scale: u8| {
+            let mut body = [0u8; CIB_LEN];
+            body[0x0A] = scale;
+            Cib::parse(*b"cib0", &body).unwrap()
+        };
+        assert!((parse(100).scale_factor() - 1.0).abs() < f32::EPSILON);
+        assert!((parse(0xFF).scale_factor() - 1.0).abs() < f32::EPSILON);
+        assert!((parse(85).scale_factor() - 0.85).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn enums_cover_the_viewer_tables() {
+        assert_eq!(MovementType::from_u8(0), MovementType::Walking);
+        assert_eq!(MovementType::from_u8(1), MovementType::Sliding);
+        assert_eq!(MovementType::from_u8(2), MovementType::Large);
+        assert_eq!(MovementType::from_u8(3), MovementType::Flying);
+        assert_eq!(MovementType::from_u8(0xFF), MovementType::Unset);
+        // Out-of-table bytes keep their raw value instead of collapsing onto Unset.
+        assert_eq!(MovementType::from_u8(4), MovementType::Unknown(4));
+
+        assert_eq!(RangeType::from_u8(0x06), RangeType::Archery);
+        assert_eq!(RangeType::from_u8(0x0a), RangeType::HandbellIndi);
+        assert_eq!(RangeType::from_u8(0x0b), RangeType::HandbellGeo);
+        // The documented gaps keep their raw value, not Unset: this install ships 0x08 CIBs.
+        assert_eq!(RangeType::from_u8(0x07), RangeType::Unknown(0x07));
+        assert_eq!(RangeType::from_u8(0x08), RangeType::Unknown(0x08));
     }
 }

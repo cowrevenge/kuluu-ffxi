@@ -67,20 +67,30 @@ impl ResourceDir {
             .collect()
     }
 
+    /// All scheduler chunks in this dir that parse cleanly.
     pub fn collect_schedulers(&self) -> Vec<Scheduler> {
+        self.collect_schedulers_with_rejections().0
+    }
+
+    /// `collect_schedulers` plus the chunks whose parse was rejected (name + reason), so a
+    /// consumer can report them instead of silently degrading.
+    pub fn collect_schedulers_with_rejections(&self) -> (Vec<Scheduler>, Vec<RejectedRoutine>) {
         let root = self.tree();
         let mut out = Vec::new();
+        let mut rejected = Vec::new();
         collect_in_dir(
             &root,
             crate::scheduler::NO_LOCAL_DIR,
             ChunkKind::Scheduler as u8,
-            &mut |dir, node| {
-                if let Ok(s) = Scheduler::parse_in_dir(dir, node.chunk.name, node.chunk.data) {
-                    out.push(s);
-                }
+            &mut |dir, node| match Scheduler::parse_in_dir(dir, node.chunk.name, node.chunk.data) {
+                Ok(s) => out.push(s),
+                Err(e) => rejected.push(RejectedRoutine {
+                    name: node.chunk.name,
+                    reason: e.to_string(),
+                }),
             },
         );
-        out
+        (out, rejected)
     }
 
     pub fn first_cib(&self) -> Option<Cib> {
@@ -95,6 +105,16 @@ impl ResourceDir {
         });
         found
     }
+}
+
+/// A scheduler chunk seen in a DAT walk whose parse was rejected: its 4-byte name and why
+/// parse failed. Kept out of `collect_schedulers`'s output so CLIP_WARN can tell "the routine
+/// is there but broken" (routine_seq_load_error) apart from "the model ships no such routine
+/// at all" (routine_not_found).
+#[derive(Debug, Clone, PartialEq)]
+pub struct RejectedRoutine {
+    pub name: [u8; 4],
+    pub reason: String,
 }
 
 fn collect<'a>(node: &ChunkNode<'a>, kind: u8, visit: &mut dyn FnMut(&ChunkNode<'a>)) {
@@ -136,7 +156,7 @@ mod tests {
         let padded = total.div_ceil(16) * 16;
         let pad = padded - total;
         let size_units = (padded / 16) as u32;
-        let value = (size_units << 7) | (kind as u32 & 0x7F);
+        let value = (size_units << 7) | (kind as u32 & crate::chunk::CHUNK_KIND_MASK);
         let mut out = Vec::with_capacity(padded);
         out.extend_from_slice(name);
         out.extend_from_slice(&value.to_le_bytes());
@@ -274,7 +294,36 @@ mod tests {
         assert_eq!(cib.motion_option, 1);
     }
 
-    // research/xim EffectRoutineInstance.kt:418-431 — a routine's ids resolve against the chunk
+    // A scheduler chunk whose parse fails must not vanish silently: the clean set keeps only
+    // what parsed, and the rejection carries the chunk name plus why parse failed.
+    #[test]
+    fn collect_schedulers_reports_rejected_chunks() {
+        let mut dat = synth_chunk(b"file", ChunkKind::Rmp as u8, &[]);
+        dat.extend(synth_chunk(
+            b"ati0",
+            ChunkKind::Scheduler as u8,
+            &synth_scheduler_body(b"at0?"),
+        ));
+        // Truncated body: below SCHEDULER_HEADER_LEN, so parse_in_dir rejects it.
+        dat.extend(synth_chunk(b"bad1", ChunkKind::Scheduler as u8, &[0u8; 4]));
+        dat.extend(synth_chunk(b"end\0", ChunkKind::Terminate as u8, &[]));
+
+        let dir = ResourceDir::from_bytes(dat);
+        assert_eq!(dir.collect_schedulers().len(), 1);
+
+        let (scheds, rejected) = dir.collect_schedulers_with_rejections();
+        assert_eq!(scheds.len(), 1);
+        assert_eq!(&scheds[0].name, b"ati0");
+        assert_eq!(rejected.len(), 1);
+        assert_eq!(rejected[0].name, *b"bad1");
+        assert!(
+            rejected[0].reason.contains("truncated chunk"),
+            "the rejection names the parse failure: {}",
+            rejected[0].reason
+        );
+    }
+
+    // research/xim EffectRoutineInstance.kt appendChildSequences — a routine's ids resolve against the chunk
     // directory it lives in first. Retail reuses generator names across directories (ROM/0/0.DAT
     // has several `g010`), so the directory has to travel with the parsed stages.
     #[test]

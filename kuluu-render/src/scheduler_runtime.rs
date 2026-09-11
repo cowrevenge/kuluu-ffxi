@@ -7,6 +7,8 @@ use ffxi_dat::generator::Generator;
 use ffxi_dat::kind::ChunkKind;
 use ffxi_dat::scheduler::{Scheduler, StageKind, TimedStage};
 use ffxi_dat::sep::Sep;
+#[cfg(not(target_arch = "wasm32"))]
+use kuluu_snapshot::CutsceneCue;
 
 // research/xim util/Fps.kt — `internalFps = 60.0` is the clock every effect routine and
 // particle generator is authored against (poc/MainTool.kt internalLoop feeds the raw elapsed frames to
@@ -864,7 +866,10 @@ enum PendingActionDispatch {
         actor_id: u32,
         target_id: Option<u32>,
     },
-    Emote {
+    // A named routine out of a file, on an actor, with a partner. Emotes and cutscene
+    // motions (0x45 non-fade schedulers, 0x5B/0x66 event motion resources) both dispatch
+    // through this; the name describes the operation, not one caller.
+    Routine {
         actor_id: u32,
         target_id: u32,
         routine: [u8; 4],
@@ -958,7 +963,7 @@ fn apply_action_dispatch(
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn apply_emote_dispatch(
+fn apply_routine_dispatch(
     parsed: &ParsedActionDat,
     routine: &[u8; 4],
     actor_entity: Entity,
@@ -970,8 +975,8 @@ fn apply_emote_dispatch(
     let Some(active) = ActiveScheduler::from_main(&parsed.schedulers, routine) else {
         return false;
     };
-    // Same insert-or-push as apply_action_dispatch: an emote mid-cast (or a cast mid-emote)
-    // runs alongside the other instead of replacing it.
+    // Same insert-or-push as apply_action_dispatch: a second routine (an emote or cutscene
+    // motion) mid-cast runs alongside the other instead of replacing it.
     let fresh = queue_active_scheduler(actor_entity, active, q_scheds, pending_inserts);
     if fresh {
         commands
@@ -1058,7 +1063,7 @@ pub fn poll_action_dat_tasks(
                     &mut commands,
                 );
             }
-            PendingActionDispatch::Emote {
+            PendingActionDispatch::Routine {
                 actor_id,
                 target_id,
                 routine,
@@ -1067,7 +1072,7 @@ pub fn poll_action_dat_tasks(
                     continue;
                 };
                 let target_entity = tracked.by_id.get(&target_id).copied();
-                if !apply_emote_dispatch(
+                if !apply_routine_dispatch(
                     &parsed,
                     &routine,
                     actor_entity,
@@ -1457,6 +1462,173 @@ fn actor_render_routines<'a>(
         .iter()
         .find_map(|child| q_render.get(child).ok())
         .map(|actor| actor.routines())
+}
+
+// The server id a cutscene cue's actor operand names: the local player resolves
+// against the entity table's self id (None until it is known), everything else
+// is already a literal.
+#[cfg(not(target_arch = "wasm32"))]
+fn cutscene_actor_server_id(
+    self_id: Option<u32>,
+    actor: kuluu_snapshot::CutsceneActor,
+) -> Option<u32> {
+    match actor {
+        kuluu_snapshot::CutsceneActor::LocalPlayer => self_id,
+        kuluu_snapshot::CutsceneActor::Entity { server_id } => Some(server_id),
+    }
+}
+
+// Cutscene motion cues (research/XiEvents/OpCodes/0x002C.md, 0x0045.md, 0x005B.md):
+// the event script's actor choreography. 0x2C names a routine in the actor's own model DAT,
+// so it plays straight off the render component; 0x45 (non-fade) and 0x5B/0x66 name a
+// routine out of an event motion resource file, which loads through the action cache like
+// an emote. The session already armed the VM's WAIT* holds from the DAT-authored lengths,
+// so this system only plays what it is told; fades stay in cutscene.rs.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn dispatch_cutscene_motion(
+    events: Res<crate::snapshot::EventLog>,
+    tracked: Res<crate::scene::TrackedEntities>,
+    table: Res<crate::entity_table::EntityTable>,
+    q_children: Query<&Children>,
+    q_render: Query<&crate::ffxi_actor_render::FfxiRenderActor>,
+    mut cache: ResMut<ActionDatCache>,
+    mut q_scheds: Query<&mut ActiveSchedulers>,
+    mut pending_inserts: Local<HashMap<Entity, Vec<ActiveScheduler>>>,
+    mut commands: Commands,
+    mut last_seen: Local<u64>,
+) {
+    let new_count =
+        (events.pushed_total.saturating_sub(*last_seen)).min(events.recent.len() as u64) as usize;
+    *last_seen = events.pushed_total;
+    if new_count == 0 {
+        return;
+    }
+    let self_id = table.self_id();
+    for ev in events.recent.iter().rev().take(new_count).rev() {
+        let kuluu_snapshot::ViewerEvent::Cutscene { cue } = *ev else {
+            continue;
+        };
+        let resolve = |a: kuluu_snapshot::CutsceneActor| -> Option<u32> {
+            cutscene_actor_server_id(self_id, a)
+        };
+        match cue {
+            // 0x2C: the routine is in the actor's own model DAT.
+            CutsceneCue::ActorMotion {
+                actor,
+                partner,
+                key,
+            } => {
+                let (Some(actor_id), Some(partner_id)) = (resolve(actor), resolve(partner)) else {
+                    continue;
+                };
+                let Some(&actor_entity) = tracked.by_id.get(&actor_id) else {
+                    continue;
+                };
+                let Some(routines) = actor_render_routines(actor_entity, &q_children, &q_render)
+                else {
+                    continue;
+                };
+                let lookup = RoutineLookup::new().with_actor(routines);
+                let Some(active) = ActiveScheduler::from_routine(&lookup, &key) else {
+                    tracing::debug!(
+                        target: "kuluu_render::scheduler_runtime",
+                        key = %fourcc(key),
+                        "cutscene actor motion has no routine on the actor"
+                    );
+                    continue;
+                };
+                let target_entity = tracked.by_id.get(&partner_id).copied();
+                if queue_active_scheduler(actor_entity, active, &mut q_scheds, &mut pending_inserts)
+                {
+                    commands
+                        .entity(actor_entity)
+                        .insert_if_new(ActionTarget(target_entity));
+                }
+            }
+            // 0x45 with a non-fade DAT: a named routine out of a file, on an actor, with a
+            // partner. Same dispatch shape the emote path uses.
+            CutsceneCue::Scheduler {
+                dat_id,
+                actor,
+                partner,
+                tag,
+                ..
+            } if dat_id != ffxi_event::SCHEDULER_FADE_DAT_ID => {
+                let (Some(actor_id), Some(target_id)) = (resolve(actor), resolve(partner)) else {
+                    continue;
+                };
+                cache.defer(
+                    dat_id,
+                    PendingActionDispatch::Routine {
+                        actor_id,
+                        target_id,
+                        routine: tag,
+                    },
+                );
+            }
+            // 0x5B bank and 0x66 package: same dispatch. Prefer a routine the actor already
+            // owns under that key (research/cexi-docs/cutscene_authoring.md, Dialogue +
+            // gestures: an actor's own routine outranks a same-named bank gesture, and bank
+            // motion binds by joint index, which distorts fixed-model rigs); otherwise load
+            // the file and dispatch the named routine.
+            CutsceneCue::ExtScheduler {
+                motion_dat_id,
+                tpc,
+                actor,
+                partner,
+                key,
+            } => {
+                let (Some(actor_id), Some(target_id)) = (resolve(actor), resolve(partner)) else {
+                    continue;
+                };
+                let Some(&actor_entity) = tracked.by_id.get(&actor_id) else {
+                    continue;
+                };
+                let owned = actor_render_routines(actor_entity, &q_children, &q_render).and_then(
+                    |routines| {
+                        ActiveScheduler::from_routine(
+                            &RoutineLookup::new().with_actor(routines),
+                            &key,
+                        )
+                    },
+                );
+                match owned {
+                    Some(active) => {
+                        let target_entity = tracked.by_id.get(&target_id).copied();
+                        if queue_active_scheduler(
+                            actor_entity,
+                            active,
+                            &mut q_scheds,
+                            &mut pending_inserts,
+                        ) {
+                            commands
+                                .entity(actor_entity)
+                                .insert_if_new(ActionTarget(target_entity));
+                        }
+                    }
+                    None => {
+                        tracing::debug!(
+                            target: "kuluu_render::scheduler_runtime",
+                            motion_dat_id,
+                            tpc,
+                            key = %fourcc(key),
+                            "cutscene motion from event motion resource"
+                        );
+                        cache.defer(
+                            motion_dat_id,
+                            PendingActionDispatch::Routine {
+                                actor_id,
+                                target_id,
+                                routine: key,
+                            },
+                        );
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    flush_active_scheduler_inserts(&mut pending_inserts, &mut q_scheds, &mut commands);
 }
 
 // The routine the caster's cast-start effects were flattened from, so an interrupt can stop the
@@ -2271,7 +2443,7 @@ pub fn dispatch_entity_emoted(
                 let file_id = base as u32 + file_offset;
                 match cache.lru.get_and_promote(file_id) {
                     Some(parsed) => {
-                        if apply_emote_dispatch(
+                        if apply_routine_dispatch(
                             &parsed,
                             &routine,
                             actor_entity,
@@ -2287,7 +2459,7 @@ pub fn dispatch_entity_emoted(
                     None => {
                         cache.defer(
                             file_id,
-                            PendingActionDispatch::Emote {
+                            PendingActionDispatch::Routine {
                                 actor_id,
                                 target_id,
                                 routine,
@@ -2370,6 +2542,7 @@ impl Plugin for SchedulerRuntimePlugin {
                     dispatch_cast_routine_started,
                     dispatch_melee_action_started,
                     dispatch_entity_emoted,
+                    dispatch_cutscene_motion,
                     poll_action_dat_tasks,
                     // Chained between the routine inserters and the stage consumers so a
                     // routine's frame-0 stages fire on the frame it is inserted, and every
@@ -2408,6 +2581,27 @@ impl Plugin for SchedulerRuntimePlugin {
 mod tests {
     use super::*;
     use ffxi_dat::scheduler::{SchedulerStage, StageKind};
+
+    #[test]
+    fn cutscene_actor_server_id_resolves_local_player_and_entities() {
+        assert_eq!(
+            cutscene_actor_server_id(None, kuluu_snapshot::CutsceneActor::LocalPlayer),
+            None
+        );
+        assert_eq!(
+            cutscene_actor_server_id(Some(7), kuluu_snapshot::CutsceneActor::LocalPlayer),
+            Some(7)
+        );
+        assert_eq!(
+            cutscene_actor_server_id(
+                None,
+                kuluu_snapshot::CutsceneActor::Entity {
+                    server_id: 0x010E_6001
+                }
+            ),
+            Some(0x010E_6001)
+        );
+    }
 
     // whirl_claws (mob skill 259) arrives as category 11 with animation 3; the effect DAT's file
     // id is the range-dependent base plus that index (research/xim resource/table/MobAbilityTable.kt

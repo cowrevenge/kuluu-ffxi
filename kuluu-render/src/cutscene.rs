@@ -396,6 +396,8 @@ fn apply_cue(
                 fade.start(&scaled(program, ratio));
             }
         }
+        // Actor motion and non-fade schedulers are dispatched by
+        // scheduler_runtime::dispatch_cutscene_motion.
         _ => {}
     }
 }

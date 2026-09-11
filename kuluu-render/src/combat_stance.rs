@@ -1094,6 +1094,10 @@ impl EntityPrediction {
     }
 }
 
+/// Heading byte to radians in the worldAngle basis.
+///
+/// vendor/server/src/common/utils.cpp worldAngle (pinned vendor/server): LSB position_t.z is a
+/// horizontal axis, not vertical; see [`heading_forward`] for the full wire/Bevy mapping.
 #[inline]
 fn heading_to_rad(heading: u8) -> f32 {
     (heading as f32) * std::f32::consts::TAU / 256.0
@@ -1102,10 +1106,11 @@ fn heading_to_rad(heading: u8) -> f32 {
 /// World-space direction an entity with this heading faces, in Bevy space.
 ///
 /// vendor/server/src/common/utils.cpp worldAngle (pinned vendor/server) writes the rotation byte
-/// as `atan2f(B.z - A.z, B.x - A.x) * -(128 / PI), mod 256`: the angle is measured from the wire
-/// +X axis and negated. Inverting with theta = heading * TAU / 256 gives a wire forward of
-/// `(cos theta, -sin theta)`; through ffxi_to_bevy (x, -z, -y) that lands on Bevy forward
-/// `(cos theta, 0, sin theta)`. Heading 0 faces +X, not north: do not re-add a north assumption.
+/// as `atan2f(B.z - A.z, B.x - A.x) * -(128 / PI), mod 256`. LSB position_t.z is a horizontal axis
+/// (kuluu's WireVec3 names it `y`; WireVec3.z is vertical). worldAngle measures from wire +X,
+/// negated: theta = heading * TAU / 256 gives a wire horizontal forward of (x = cos theta,
+/// z_lsb = -sin theta). ffxi_to_bevy maps wire x -> Bevy x and the horizontal wire axis -> Bevy
+/// -z, so the Bevy forward is (cos theta, 0, sin theta). Heading 0 faces +X, not north.
 #[inline]
 pub fn heading_forward(heading: u8) -> Vec3 {
     forward_from_rad(heading_to_rad(heading))

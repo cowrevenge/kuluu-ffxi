@@ -6455,7 +6455,7 @@ fn face_target_for(target_index: u16, self_act_index: Option<u16>) -> u16 {
 
 /// Also the resolution a cutscene's timed waits are served at, so it bounds how
 /// far a fade can overrun its authored duration.
-const SESSION_TICK_PERIOD: std::time::Duration = std::time::Duration::from_millis(100);
+pub const SESSION_TICK_PERIOD: std::time::Duration = std::time::Duration::from_millis(100);
 
 const MOVE_EMISSION_PERIOD: std::time::Duration = std::time::Duration::from_millis(100);
 

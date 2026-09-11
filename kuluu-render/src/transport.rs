@@ -16,7 +16,8 @@ use std::collections::HashMap;
 
 use ffxi_vocab::transport::MODEL_SHIP;
 
-// FFXiMain.dll (2026-09-09 install) VA 0x10096E90 maps ship animations to seq0..seq7.
+// FFXiMain.dll SHA-256 f4f90fbd080c05448aab3f866b127d7c1675b3cc15c8beaa57bfc584064b7e7c.
+// RVA 0x96E90 maps ship animations to seq0..seq7.
 const FIRST_SHIP_ANIMATION: u8 = 18;
 const SHIP_ANIMATION_COUNT: u8 = 8;
 const PATH_FORWARD: u32 = 8;
@@ -163,7 +164,8 @@ fn transport_pose(
     position.map(|p| (p, yaw))
 }
 
-// FFXiMain.dll (2026-09-09 install) VA 0x1005DCC0, point-list motion task.
+// FFXiMain.dll SHA-256 f4f90fbd080c05448aab3f866b127d7c1675b3cc15c8beaa57bfc584064b7e7c.
+// Point-list motion task RVA 0x5DCC0.
 fn eased_progress(t: f32, mode: u32) -> f32 {
     match mode {
         1 => (t * std::f32::consts::FRAC_PI_2).sin(),
@@ -180,7 +182,8 @@ struct TransportPlayback {
 }
 
 impl TransportPlayback {
-    // FFXiMain.dll (2026-09-09 install) VA 0x10096E90.
+    // FFXiMain.dll SHA-256 f4f90fbd080c05448aab3f866b127d7c1675b3cc15c8beaa57bfc584064b7e7c.
+    // RVA 0x96E90.
     fn elapsed(&mut self, animation: u8, start: Option<u32>, frames: f32) -> f32 {
         const SEEK_THRESHOLD_FRAMES: f32 = 600.0;
         let key = Some((animation, start));

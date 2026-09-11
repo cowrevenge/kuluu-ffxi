@@ -17,6 +17,7 @@ use ffxi_dat::kind::ChunkKind;
 use ffxi_dat::mzb::{self, MmbPlacement};
 use ffxi_dat::scheduler::{Scheduler, StageKind, MODEL_TRANSFORM_SUBCHUNK_SLOTS};
 use ffxi_dat::sep::Sep;
+use ffxi_dat::zone_interaction::{self, ZoneInteraction};
 use ffxi_dat::DatRoot;
 use ffxi_proto::decode::{animation, DoorId};
 use kuluu_snapshot::EntityLook;
@@ -252,10 +253,43 @@ pub struct ZoneDoors {
     source_file_id: Option<u32>,
     dirs: HashMap<u32, DoorDir>,
     leaves: HashMap<DoorLeafKey, LeafMotion>,
-    load: Option<Task<HashMap<u32, DoorDir>>>,
+    collision_rects: Vec<ZoneInteraction>,
+    load: Option<Task<DoorZoneData>>,
+}
+
+#[derive(Default)]
+struct DoorZoneData {
+    dirs: HashMap<u32, DoorDir>,
+    collision_rects: Vec<ZoneInteraction>,
+}
+
+impl DoorZoneData {
+    fn parse(bytes: &[u8]) -> Self {
+        Self {
+            dirs: door_dirs(bytes),
+            collision_rects: zone_interaction::from_dat(bytes)
+                .unwrap_or_default()
+                .into_iter()
+                .filter(ZoneInteraction::is_door)
+                .collect(),
+        }
+    }
 }
 
 impl ZoneDoors {
+    pub fn from_dat(bytes: &[u8]) -> Self {
+        let data = DoorZoneData::parse(bytes);
+        Self {
+            dirs: data.dirs,
+            collision_rects: data.collision_rects,
+            ..Self::default()
+        }
+    }
+
+    pub fn collision_rects(&self) -> &[ZoneInteraction] {
+        &self.collision_rects
+    }
+
     pub fn pose(&self, key: DoorLeafKey) -> DoorPose {
         self.leaves.get(&key).map(|m| m.pose).unwrap_or_default()
     }
@@ -272,6 +306,7 @@ impl ZoneDoors {
     fn clear_zone_state(&mut self) {
         self.dirs.clear();
         self.leaves.clear();
+        self.collision_rects.clear();
         self.load = None;
     }
 }
@@ -327,7 +362,7 @@ pub fn door_dirs(bytes: &[u8]) -> HashMap<u32, DoorDir> {
     out
 }
 
-fn load_door_dirs(file_id: u32) -> HashMap<u32, DoorDir> {
+fn load_door_dirs(file_id: u32) -> DoorZoneData {
     let bytes = DatRoot::from_env_or_default()
         .ok()
         .and_then(|root| {
@@ -335,7 +370,11 @@ fn load_door_dirs(file_id: u32) -> HashMap<u32, DoorDir> {
             std::fs::read(loc.path_under(&root)).ok()
         })
         .unwrap_or_default();
-    door_dirs(&bytes)
+    let parsed = ZoneDoors::from_dat(&bytes);
+    DoorZoneData {
+        dirs: parsed.dirs,
+        collision_rects: parsed.collision_rects,
+    }
 }
 
 pub fn sync_zone_door_dirs(scene_state: Res<SceneState>, mut doors: ResMut<ZoneDoors>) {
@@ -350,15 +389,16 @@ pub fn sync_zone_door_dirs(scene_state: Res<SceneState>, mut doors: ResMut<ZoneD
     }
 
     let Some(task) = &mut doors.load else { return };
-    let Some(dirs) = future::block_on(future::poll_once(task)) else {
+    let Some(data) = future::block_on(future::poll_once(task)) else {
         return;
     };
     info!(
         "zone_doors: DAT {:?} → {} animated door group(s)",
         doors.source_file_id,
-        dirs.len()
+        data.dirs.len()
     );
-    doors.dirs = dirs;
+    doors.dirs = data.dirs;
+    doors.collision_rects = data.collision_rects;
     doors.load = None;
 }
 
@@ -402,6 +442,12 @@ pub fn trigger_zone_doors(
                 true
             }
         };
+
+        debug!(
+            door = door_label(four_cc),
+            animation = wire.animation,
+            "zone_doors: server door state"
+        );
 
         if on_arrival {
             // Retail rebuilds `UnderscoreAtStructs` from the placement table when

@@ -236,23 +236,28 @@ impl WalkMode {
     }
 }
 
-/// Whether the self character's movement keys are held this tick, written by
-/// the client's movement dispatch. While keys are what move the player, the
-/// self pose reads this instead of inferring motion from transform deltas:
-/// prediction reconcile keeps nudging the rendered transform, so inferred speed
-/// can hover above `MOVE_EXIT` and hold the run cycle after the keys are
-/// released. Not authoritative while a reactor goal (follow/goto/engage) moves
-/// the player with no keys held — the pose falls back to inference there.
-///
-/// `forward`/`strafe` are character-frame intent components feeding directional
-/// gait selection (mvb/mvl/mvr). They are only ever non-(1,0) while locked on —
-/// matching retail, where unlocked movement steers the character into the run
-/// direction (run/wlk gait only) and directional gait exists only under lock-on.
+pub const WALK_RUN_BOUNDARY: f32 = 3.0;
+
+#[inline]
+pub fn infers_walk_gait(speed: f32) -> bool {
+    speed > EntityMotion::MOVE_EXIT && speed < WALK_RUN_BOUNDARY
+}
+
+/// Explicit intent prevents reconciliation jitter from sustaining the self locomotion clip.
 #[derive(Resource, Default, Debug, Clone, Copy, PartialEq)]
 pub struct SelfMoveIntent {
     pub moving: bool,
     pub forward: f32,
     pub strafe: f32,
+    pub scripted_speed: Option<f32>,
+}
+
+impl SelfMoveIntent {
+    pub fn walking(&self, manual_walk: bool) -> bool {
+        self.scripted_speed
+            .map(infers_walk_gait)
+            .unwrap_or(manual_walk)
+    }
 }
 
 pub fn directional_anim_for_skel(skel_file_id: u32, prefix: &[u8; 3]) -> Option<Arc<Mo2Animation>> {
@@ -1574,7 +1579,6 @@ mod tests {
     #[test]
     #[allow(clippy::assertions_on_constants)]
     fn walk_run_boundary_is_sane() {
-        use crate::ffxi_actor_render::{infers_walk_gait, WALK_RUN_BOUNDARY};
         assert!(EntityMotion::MOVE_EXIT < WALK_RUN_BOUNDARY);
         assert!(
             WALK_RUN_BOUNDARY < 5.0,
@@ -2510,7 +2514,7 @@ mod tests {
                 let sample = app.world().resource::<EntityMotion>().sample(7).unwrap();
                 assert!(sample.moving);
                 assert!(
-                    !crate::ffxi_actor_render::infers_walk_gait(sample.speed),
+                    !infers_walk_gait(sample.speed),
                     "run restarted at frame {frame}"
                 );
             }

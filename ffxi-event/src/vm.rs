@@ -152,6 +152,7 @@ const OP_REQWAIT: u8 = 0x2A;
 const OP_LOADEXTSCHEDULER: u8 = 0x5B;
 const OP_LOADEXTSCHEDULER2: u8 = 0x66;
 const OP_SCHEDULOR: u8 = 0x2C;
+const OP_MAPSCHEDULOR: u8 = 0x2D;
 const OP_LOADEVENTSCHEDULER2: u8 = 0x45;
 const OP_DEFCAMERA: u8 = 0x46;
 const OP_EVENTHIDE: u8 = 0x4E;
@@ -249,6 +250,7 @@ const WAITSCHEDULOR_ACTOR1_OFS: usize = 1; // 0x0053 / 0x0054
 const WAITSCHEDULOR_KEY_OFS: usize = 9;
 const WAITLOADSCHEDULER_ACTOR1_OFS: usize = 3; // 0x0055
 const WAITLOADSCHEDULER_KEY_OFS: usize = 11;
+const MAPSCHEDULOR_KEY_OFS: usize = 9; // 0x002D, same layout as the WAIT family
 const DEFCAMERA_CASE_OFS: usize = 1; // 0x0046
 const DEFCAMERA_CASE_UNLOCK: u8 = 0;
 const DEFCAMERA_CASE_LOCK: u8 = 1;
@@ -1098,6 +1100,19 @@ impl EventVm {
                     self.parked_on_action_hold = false;
                     self.exec_pointer += OPCODE_META[op as usize].size as usize;
                 }
+                // XiEvent MAPSCHEDULOR (research/XiEvents/OpCodes/0x002D.md): a zone
+                // camera routine out of the zone scene DAT, waited on by 0x54. This VM
+                // has no zone camera model, so it logs the key and advances; the gap is
+                // named in the PR rather than faked with a cue.
+                OP_MAPSCHEDULOR => {
+                    let key = self.fourcc_at(MAPSCHEDULOR_KEY_OFS);
+                    tracing::debug!(
+                        target: "ffxi_event::vm",
+                        key = %fourcc_display(key),
+                        "MAPSCHEDULOR zone camera routine is not modeled; advancing"
+                    );
+                    self.exec_pointer += OPCODE_META[op as usize].size as usize;
+                }
                 OP_SCHEDULOR => {
                     self.cues.push(EventCue::ActorMotion {
                         actor1: ActorLookup(self.eventgetcode2(SCHEDULOR_ACTOR1_OFS)),
@@ -1493,6 +1508,19 @@ impl EventVm {
     }
 }
 
+/// The key bytes as printable ASCII for log lines; non-alphanumerics as dots.
+fn fourcc_display(key: FourCc) -> String {
+    key.iter()
+        .map(|b| {
+            if b.is_ascii_alphanumeric() {
+                *b as char
+            } else {
+                '.'
+            }
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1878,6 +1906,22 @@ mod tests {
             );
             assert_eq!(e.exec_pointer(), size, "op 0x{op:02X} advanced wrong size");
         }
+    }
+
+    #[test]
+    fn mapschedulor_advances_13_without_a_cue() {
+        // 0x2D drives a zone camera routine out of the zone scene DAT; this VM has no
+        // zone camera model, so it logs and advances (research/XiEvents/OpCodes/
+        // 0x002D.md). The key sits at @9 like the WAIT family's.
+        let mut data = vec![OP_MAPSCHEDULOR];
+        data.extend_from_slice(&0u32.to_le_bytes()); // actor1 @1
+        data.extend_from_slice(&0u32.to_le_bytes()); // actor2 @5
+        data.extend_from_slice(b"abcd"); // key @9
+        data.push(OP_END); // offset 13
+        let mut e = vm(data, vec![]);
+        assert_eq!(e.step(), StepResult::Done);
+        assert_eq!(e.exec_pointer(), 14);
+        assert!(e.take_cues().is_empty());
     }
 
     #[test]

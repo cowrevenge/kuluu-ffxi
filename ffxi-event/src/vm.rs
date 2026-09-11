@@ -293,8 +293,9 @@ const CHOICE_CANCELLED_QUERYWAIT2: u32 = 255;
 pub const OPCODE_BUDGET_PER_STEP: u32 = 100_000;
 
 /// `XiEvent` runtime for a single event, simplified to the linear+jump+message
-/// flow (the full 16-entry priority `ReqStack` is a Stage 2 concern). Mirrors the
-/// fields the implemented opcodes touch.
+/// flow plus the per-actor request stacks a scene fans out onto (research/
+/// XiEvents/Event VM Structures.md xievent_t::ReqStack). Mirrors the fields the
+/// implemented opcodes touch.
 pub struct EventVm {
     scene: Option<scene::Scene>,
     scene_cancelled: bool,
@@ -334,17 +335,29 @@ pub struct EventVm {
     /// position-tag counterpart), held until [`Self::ack_server`]. While set,
     /// execution stays parked on the sending opcode's case-1 poll.
     pending_ack: Option<PendingTag>,
+    /// The request this VM queued via REQEW and is still tracking, as (actor,
+    /// tag): retail keeps that wait in `ReqStack[RunPos].ReqFlag` across ticks
+    /// (research/XiEvents/Event VM Structures.md ReqFlag; OpCodes/0x0029.md).
+    /// Set when the opcode queues its tag, cleared when that request leaves the
+    /// target's stack so the re-run of the parked opcode advances instead of
+    /// queueing a second child.
+    req_wait: Option<(u32, u8)>,
     /// Host-armed action holds the WAIT* family parks on; see [`ActionHold`].
     action_holds: Vec<ActionHold>,
-    /// Actions this VM's own 0x45/0x5B opcodes started within the current step
-    /// batch, before the host has drained the cues and armed their holds. They
-    /// bridge an opcode to its WAIT* when both run in one batch; [`Self::take_cues`]
-    /// clears them so an action whose DAT the host cannot read falls through
-    /// instead of holding forever.
+    /// Host-armed move holds a non-player MOVE case 1 parks on; see
+    /// [`MoveHold`].
+    move_holds: Vec<MoveHold>,
+    /// Actions this VM's own 0x45/0x5B opcodes started within the current step,
+    /// before the host has drained the cues and armed their holds. They bridge a
+    /// loader to its WAIT* when both run in one pass; [`Self::take_cues`] and the
+    /// start of each later [`step`](Self::step) clear them, so an action whose DAT
+    /// the host cannot read falls through instead of holding forever.
     pending_action_starts: Vec<(ActorLookup, FourCc)>,
     /// Set while execution is parked on a WAIT* opcode whose hold still has
     /// frames left, so [`Self::is_waiting`] keeps the host ticking it down.
     parked_on_action_hold: bool,
+    /// The same for a non-player MOVE case 1 parked on its move hold.
+    parked_on_move_hold: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -361,6 +374,16 @@ struct Wait {
 struct ActionHold {
     actor: ActorLookup,
     key: FourCc,
+    remaining_units: f32,
+}
+
+/// A running move the host told the VM about, so a non-player MOVE case 1 can
+/// hold the way retail's arrival test does. Armed by the host from its own
+/// distance and speed when it publishes an [`EventCue::ActorMove`]; with none
+/// armed the case falls through.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct MoveHold {
+    actor: ActorLookup,
     remaining_units: f32,
 }
 
@@ -460,9 +483,12 @@ impl EventVm {
             ran_past_end: false,
             wait: None,
             pending_ack: None,
+            req_wait: None,
             action_holds: Vec::new(),
+            move_holds: Vec::new(),
             pending_action_starts: Vec::new(),
             parked_on_action_hold: false,
+            parked_on_move_hold: false,
             oob_reads: std::cell::Cell::new(0),
         }
     }
@@ -475,10 +501,12 @@ impl EventVm {
     }
 
     /// Clear the open-dialog flag after the player dismisses a message, so the
-    /// next [`step`](Self::step) advances past MESWAIT.
+    /// next [`step`](Self::step) advances past MESWAIT. The frame is dropped with
+    /// it: while it stays up, MESWAIT re-emits it instead of acking (retail
+    /// yields every frame until dismissal).
     pub fn dismiss_message(&mut self) {
-        self.dismiss_child_message();
         self.message_open = MESSAGE_OPEN_NONE;
+        self.pending_message = None;
     }
 
     /// Mark the open message invalid so the next MESWAIT force-cancels the
@@ -497,7 +525,6 @@ impl EventVm {
     /// opcodes branch on — so the next [`step`](Self::step) advances past
     /// QUERYWAIT.
     pub fn select_choice(&mut self, index: Option<u32>) {
-        self.select_child_choice(index);
         self.work_zone[0] = index.unwrap_or(CHOICE_CANCELLED);
         self.selection_made = true;
     }
@@ -561,6 +588,27 @@ impl EventVm {
         });
     }
 
+    /// Arm a move hold on `actor` lasting `units` (1/60 s, the same clock as
+    /// [`Self::tick`]). Replaces an existing hold for the same actor. The host
+    /// computes units from its own entity distance and speed when it publishes
+    /// an [`EventCue::ActorMove`]; the VM never measures a move itself.
+    pub fn hold_move(&mut self, actor: ActorLookup, units: f32) {
+        let actor = self.resolve_hold_actor(actor);
+        self.move_holds.retain(|h| h.actor != actor);
+        self.move_holds.push(MoveHold {
+            actor,
+            remaining_units: units,
+        });
+    }
+
+    /// True while a host-armed move hold for `actor` still has frames left.
+    fn move_running(&self, actor: ActorLookup) -> bool {
+        let actor = self.resolve_hold_actor(actor);
+        self.move_holds
+            .iter()
+            .any(|h| h.actor == actor && h.remaining_units > 0.0)
+    }
+
     /// True while a host-armed hold for `(actor, key)` still has frames left.
     fn action_running(&self, actor: ActorLookup, key: FourCc) -> bool {
         let actor = self.resolve_hold_actor(actor);
@@ -604,11 +652,16 @@ impl EventVm {
     /// landing together.
     pub fn tick(&mut self, dt_secs: f32) {
         self.tick_scene(dt_secs);
+        self.tick_stacks(dt_secs);
         let hold_dt = dt_secs * WAIT_UNITS_PER_SEC;
         for hold in &mut self.action_holds {
             hold.remaining_units -= hold_dt;
         }
         self.action_holds.retain(|h| h.remaining_units > 0.0);
+        for hold in &mut self.move_holds {
+            hold.remaining_units -= hold_dt;
+        }
+        self.move_holds.retain(|h| h.remaining_units > 0.0);
         let Some(wait) = self.wait.as_mut() else {
             return;
         };
@@ -620,7 +673,10 @@ impl EventVm {
     }
 
     pub fn is_waiting(&self) -> bool {
-        self.wait.is_some() || self.scene_waiting() || self.parked_on_action_hold
+        self.wait.is_some()
+            || self.scene_waiting()
+            || self.parked_on_action_hold
+            || self.parked_on_move_hold
     }
 
     /// The server acknowledged the pending tag (s2c PENDINGNUM/PENDINGSTR):
@@ -652,13 +708,37 @@ impl EventVm {
         self.pending_ack.as_ref()
     }
 
+    /// The result a finished master reports: while actor request stacks still
+    /// hold work, retail keeps ticking those actors and the event only ends
+    /// when they all drain.
+    fn finish_result(&self) -> StepResult {
+        if self.scene_waiting() {
+            StepResult::Waiting
+        } else {
+            StepResult::Done
+        }
+    }
+
     /// Run opcodes until the VM yields (one `EventIdle` tick).
     pub fn step(&mut self) -> StepResult {
         if self.scene_cancelled {
             return StepResult::Cancelled;
         }
+        // A new EventIdle tick: retail re-queries IsMovingAction from live render
+        // state, so the same-pass bridge (this VM's own loader cues not yet armed
+        // by the host) spans only the pass that emitted them.
+        self.pending_action_starts.clear();
+        // The actor request stacks run on this frame before the master's own
+        // opcodes, the way retail's RunPos ticks every actor each EventIdle.
+        self.step_stacks();
         if self.finished {
-            return StepResult::Done;
+            return self.finish_result();
+        }
+        // A displayed frame holds execution at its MESWAIT until dismissal:
+        // retail yields every tick with the open flag up and runs nothing else,
+        // so re-stepping here must not reach the opcode again.
+        if self.message_open == MESSAGE_OPEN_AWAITING && self.pending_message.is_some() {
+            return StepResult::Waiting;
         }
         if self.wait.is_some() {
             return StepResult::Waiting;
@@ -669,9 +749,6 @@ impl EventVm {
         self.resume_scene();
         let mut budget = OPCODE_BUDGET_PER_STEP;
         loop {
-            if let Some(result) = self.step_child() {
-                return result;
-            }
             let Some(&op) = self.event_data.get(self.exec_pointer) else {
                 // Retail reads 0 (== OP_END) here, so ending is faithful; flag
                 // it because a well-formed event always terminates via
@@ -684,7 +761,7 @@ impl EventVm {
                     bytecode_len = self.event_data.len(),
                     "event VM ran past end of bytecode without END opcode"
                 );
-                return StepResult::Done;
+                return self.finish_result();
             };
             // Retail runs the program each frame until an opcode sets RetFlag,
             // and authored events always reach one. Ours can miss it, because
@@ -711,14 +788,14 @@ impl EventVm {
             match op {
                 OP_END => {
                     self.finished = true;
-                    return StepResult::Done;
+                    return self.finish_result();
                 }
                 // 0x21 sets EventExecEnd, which stops XiEvent::EventIdle from
                 // running the program again — the event is over (XiEvents
                 // OpCodes/0x0021.md).
                 OP_EXECEND => {
                     self.finished = true;
-                    return StepResult::Done;
+                    return self.finish_result();
                 }
                 OP_GOTO => self.exec_pointer = self.eventgetcode(1) as usize,
                 OP_IF => self.op_if(),
@@ -865,7 +942,7 @@ impl EventVm {
                 OP_RETURN => {
                     if self.jump_index == 0 {
                         self.finished = true;
-                        return StepResult::Done;
+                        return self.finish_result();
                     }
                     self.jump_index -= 1;
                     self.exec_pointer = self.jump_table[self.jump_index] as usize;
@@ -874,17 +951,20 @@ impl EventVm {
                     let message_id = self.getworkofs(MESSAGE_ID_OFS, 0) as u32;
                     self.open_message(message_id, Some(self.speaker_index));
                     self.advance(op);
+                    return self.emit_open_message();
                 }
                 OP_MESSAGE_ACTOR => {
                     let speaker = self.actor_index(self.eventgetcode2(ACTOR_LOOKUP_OFS));
                     let message_id = self.getworkofs(ACTOR_MESSAGE_ID_OFS, 0) as u32;
                     self.open_message(message_id, Some(speaker));
                     self.advance(op);
+                    return self.emit_open_message();
                 }
                 OP_MESSAGE_UNNAMED => {
                     let message_id = self.getworkofs(MESSAGE_ID_OFS, 0) as u32;
                     self.open_message(message_id, None);
                     self.advance(op);
+                    return self.emit_open_message();
                 }
                 // 0x49 resolves an actor into MESCASNAMEINDEX/MESTARNAMEINDEX but
                 // prints through the nameless EventMessDecodePut, so the line
@@ -893,6 +973,7 @@ impl EventVm {
                     let message_id = self.getworkofs(ACTOR_MESSAGE_ID_OFS, 0) as u32;
                     self.open_message(message_id, None);
                     self.advance(op);
+                    return self.emit_open_message();
                 }
                 OP_MESSAGE_ACTOR_PAIR => {
                     // Retail returns from the handler without advancing when this
@@ -906,6 +987,7 @@ impl EventVm {
                     let message_id = self.getworkofs(ACTOR_PAIR_MESSAGE_ID_OFS, 0) as u32;
                     self.open_message(message_id, Some(speaker));
                     self.advance(op);
+                    return self.emit_open_message();
                 }
                 OP_MESWAIT => match self.message_open {
                     MESSAGE_OPEN_NONE => self.exec_pointer += 1,
@@ -914,7 +996,11 @@ impl EventVm {
                         return StepResult::Cancelled;
                     }
                     _ => {
-                        return match self.pending_message.take() {
+                        // The frame is up (message_open AWAITING): emit it and
+                        // keep it pending so re-steps park at the top of
+                        // [`Self::step`] until dismissal; [`Self::dismiss_message`]
+                        // clears both.
+                        return match self.pending_message.clone() {
                             Some(msg) => StepResult::AwaitMessage(msg),
                             None => StepResult::AwaitMessageAck,
                         };
@@ -946,9 +1032,10 @@ impl EventVm {
                     self.exec_pointer += 1;
                 }
                 // XiEvent ReqSet/GetReqStatus family (research/XiEvents/OpCodes/
-                // 0x0027.md–0x002A.md): actor-choreography sync points. This
-                // dialog-only VM has no actors to wait on, so they complete
-                // instantly; explicit arms because the fallback refuses sets_ret.
+                // 0x0027.md, 0x0028.md, 0x0029.md, 0x002A.md): actor-choreography
+                // sync points. Without a scene there are no actor stacks to push
+                // onto or wait on, so they complete instantly; explicit arms
+                // because the fallback refuses sets_ret.
                 OP_REQSET | OP_REQSET_CHECKED | OP_REQSET_PRIORITY | OP_REQWAIT => {
                     self.exec_pointer += OPCODE_META[op as usize].size as usize;
                 }
@@ -1152,6 +1239,17 @@ impl EventVm {
     fn advance(&mut self, op: u8) {
         let fixed = OPCODE_META[op as usize].size;
         self.exec_pointer += self.op_width(op, fixed) as usize;
+    }
+
+    /// Yield on the frame [`Self::open_message`] just opened. Retail prints the
+    /// line at the EventMess opcode (CliEventMessOpenFlag goes up there) and only
+    /// parks at MESWAIT, so a yield between the two must not hold the frame back
+    /// (research/XiEvents/OpCodes/0x001D.md, 0x0023.md).
+    fn emit_open_message(&self) -> StepResult {
+        match self.pending_message.clone() {
+            Some(msg) => StepResult::AwaitMessage(msg),
+            None => StepResult::AwaitMessageAck,
+        }
     }
 
     /// Set `CliEventMessOpenFlag` and hold the message for the MESWAIT (0x23)
@@ -1912,8 +2010,10 @@ mod tests {
                 params: vec![],
             })
         );
-        // Still parked on MESWAIT until dismissed.
-        assert_eq!(e.step(), StepResult::AwaitMessageAck);
+        // Still parked on MESWAIT until dismissed: retail yields every tick
+        // with the open flag up, so a re-step reports Waiting rather than an
+        // ack that would dismiss the displayed frame.
+        assert_eq!(e.step(), StepResult::Waiting);
         e.dismiss_message();
         assert_eq!(e.step(), StepResult::Done);
     }
@@ -2453,6 +2553,12 @@ mod tests {
     const MSG_ID: u32 = 900;
     /// Operand selecting References[0] (the [`REFERENCE_FLAG`] marker).
     const REF0: [u8; 2] = [0x00, 0x80];
+    /// Operand selecting References[1].
+    const REF1: [u8; 2] = [0x01, 0x80];
+    /// Operand selecting References[2].
+    const REF2: [u8; 2] = [0x02, 0x80];
+    /// Operand selecting References[3].
+    const REF3: [u8; 2] = [0x03, 0x80];
 
     /// Bytecode for one message opcode followed by MESWAIT + END.
     fn message_program(op: u8, operands: &[u8]) -> Vec<u8> {
@@ -2891,6 +2997,436 @@ mod tests {
         let data = vec![OP_EVENTPOSSET, 0x01, OP_END];
         let mut e = vm(data, vec![]);
         assert_eq!(e.step(), StepResult::Done);
+    }
+
+    // 0x1F MOVE and 0x32 MainSpeed are owned by scene.rs when a scene exists;
+    // these literals keep the fixture bytecode readable without importing them.
+    const OP_MOVE_TEST: u8 = 0x1F;
+    const OP_SPEED_TEST: u8 = 0x32;
+
+    /// A zone DAT with the master block (event 7 at offset 0) and one NPC
+    /// block whose tag index `tag` starts at offset 0 of its own bytecode.
+    fn scene_dat(
+        master: Vec<u8>,
+        npc_data: Vec<u8>,
+        npc_refs: Vec<u32>,
+    ) -> std::sync::Arc<ffxi_dat::event_dat::EventDat> {
+        let mut dat = ffxi_dat::event_dat::EventDat {
+            blocks: vec![block(master, vec![])],
+        };
+        dat.blocks.push(EventBlock {
+            actor: NPC_SERVER_ID,
+            event_ids: vec![7],
+            event_offsets: vec![0],
+            references: npc_refs,
+            event_data: npc_data,
+        });
+        std::sync::Arc::new(dat)
+    }
+
+    fn scene_vm(master: Vec<u8>, npc_data: Vec<u8>) -> EventVm {
+        scene_vm_refs(master, npc_data, vec![])
+    }
+
+    /// [`scene_vm`] with the NPC block's references table set.
+    fn scene_vm_refs(master: Vec<u8>, npc_data: Vec<u8>, npc_refs: Vec<u32>) -> EventVm {
+        let mut e = vm(master.clone(), vec![]);
+        e.attach_scene(
+            scene_dat(master, npc_data, npc_refs),
+            ffxi_dat::event_dat::ZONE_PLAYER_ACTOR,
+            crate::vm::scene::EventPosition::default(),
+        );
+        e
+    }
+
+    /// REQSET operand bytes: priority @1, target actor @2, tag @6.
+    fn reqset_operands(priority: u8, actor: u32, tag: u8) -> Vec<u8> {
+        let mut o = vec![priority];
+        o.extend_from_slice(&actor.to_le_bytes());
+        o.push(tag);
+        o
+    }
+
+    /// REQWAIT operand bytes: priority @1, target actor @2.
+    fn reqwait_operands(priority: u8, actor: u32) -> Vec<u8> {
+        let mut o = vec![priority];
+        o.extend_from_slice(&actor.to_le_bytes());
+        o
+    }
+
+    #[test]
+    fn reqset_spawns_child_on_target_block_at_tag_index() {
+        // Master: REQSET the NPC's tag 0 at priority 0, then END. The NPC block
+        // hides itself and ends.
+        let mut master = vec![OP_REQSET];
+        master.extend_from_slice(&reqset_operands(0, NPC_SERVER_ID, 0));
+        master.push(OP_END);
+        let mut npc = vec![OP_EVENTHIDE, 1];
+        npc.extend_from_slice(&NPC_SERVER_ID.to_le_bytes());
+        npc.push(OP_END);
+
+        let mut e = scene_vm(master, npc);
+        assert_eq!(
+            e.step(),
+            StepResult::Waiting,
+            "the master ends but its request stack still holds work"
+        );
+        // The child's first frame runs on the next step; its cue bubbles up with
+        // the NPC as event entity.
+        assert_eq!(e.step(), StepResult::Done);
+        assert_eq!(
+            e.take_cues(),
+            [EventCue::ActorHide {
+                target: ActorLookup(NPC_SERVER_ID),
+                hide: true,
+            }]
+        );
+    }
+
+    #[test]
+    fn reqwait_holds_until_target_stack_drains_at_or_below_priority() {
+        // Master: REQSET the NPC's tag 0 at priority 3, then REQWAIT priority 3.
+        let mut master = vec![OP_REQSET];
+        master.extend_from_slice(&reqset_operands(3, NPC_SERVER_ID, 0));
+        master.push(OP_REQWAIT);
+        master.extend_from_slice(&reqwait_operands(3, NPC_SERVER_ID));
+        master.push(OP_END);
+        // The NPC parks on a ten-second timed wait.
+        const TEN_SECONDS: u32 = 10 * WAIT_UNITS_PER_SEC as u32;
+        let npc = vec![OP_WAIT, REF0[0], REF0[1]];
+
+        let mut e = scene_vm_refs(master, npc.clone(), vec![TEN_SECONDS]);
+        assert_eq!(
+            e.step(),
+            StepResult::Waiting,
+            "the REQWAIT parks on its own push"
+        );
+        // The child arms its wait on the step after the push; the master stays parked.
+        assert_eq!(e.step(), StepResult::Waiting);
+        e.tick(5.0);
+        assert_eq!(
+            e.step(),
+            StepResult::Waiting,
+            "halfway through the child's wait"
+        );
+        e.tick(5.1); // 10.1 s: past the ten-second wait
+        assert_eq!(
+            e.step(),
+            StepResult::Done,
+            "the drained stack releases the REQWAIT"
+        );
+
+        // A numerically higher priority on the stack does not hold a lower
+        // REQWAIT byte.
+        let mut master = vec![OP_REQSET];
+        master.extend_from_slice(&reqset_operands(110, NPC_SERVER_ID, 0));
+        master.push(OP_REQWAIT);
+        master.extend_from_slice(&reqwait_operands(3, NPC_SERVER_ID));
+        master.push(OP_END);
+        let mut e = scene_vm_refs(master, npc, vec![TEN_SECONDS]);
+        assert_eq!(e.step(), StepResult::Waiting, "the stack still holds work");
+        assert_eq!(e.step(), StepResult::Waiting, "the child arms its wait");
+        e.tick(10.5);
+        assert_eq!(e.step(), StepResult::Done);
+    }
+
+    #[test]
+    fn reqew_pushes_then_waits_for_that_tag() {
+        // Master: REQEW the NPC's tag 0, then END. The NPC parks on a one-second
+        // timed wait.
+        let mut master = vec![OP_REQSET_PRIORITY];
+        master.extend_from_slice(&reqset_operands(5, NPC_SERVER_ID, 0));
+        master.push(OP_END);
+        const ONE_SECOND: u32 = WAIT_UNITS_PER_SEC as u32;
+        let npc = vec![OP_WAIT, REF0[0], REF0[1]];
+
+        let mut e = scene_vm_refs(master, npc, vec![ONE_SECOND]);
+        assert_eq!(
+            e.step(),
+            StepResult::Waiting,
+            "REQEW holds while its tag still sits on the stack"
+        );
+        // The child arms its wait on this step; the master re-evaluates and stays held.
+        assert_eq!(e.step(), StepResult::Waiting);
+        e.tick(1.5); // past the one-second wait
+        assert_eq!(
+            e.step(),
+            StepResult::Done,
+            "the tag leaves the stack when its request ends"
+        );
+    }
+
+    #[test]
+    fn lower_priority_number_preempts_and_the_other_resumes() {
+        // One NPC block, two tags: tag 0 is a one-second wait, tag 1 hides and
+        // ends. The master REQSETs both; the lower number runs first, and the
+        // other starts only when it drains.
+        let mut master = vec![OP_REQSET];
+        master.extend_from_slice(&reqset_operands(9, NPC_SERVER_ID, 0));
+        master.push(OP_REQSET);
+        master.extend_from_slice(&reqset_operands(1, NPC_SERVER_ID, 1));
+        master.push(OP_END);
+        // [0..3) tag 0: one-second wait; [3..10) tag 1: hide + END.
+        let mut npc = vec![OP_WAIT, REF0[0], REF0[1], OP_EVENTHIDE, 1];
+        npc.extend_from_slice(&NPC_SERVER_ID.to_le_bytes());
+        npc.push(OP_END);
+
+        const ONE_SECOND: u32 = WAIT_UNITS_PER_SEC as u32;
+        let mut dat = ffxi_dat::event_dat::EventDat {
+            blocks: vec![block(master.clone(), vec![])],
+        };
+        dat.blocks.push(EventBlock {
+            actor: NPC_SERVER_ID,
+            event_ids: vec![7; 2],
+            event_offsets: vec![0, 3],
+            references: vec![ONE_SECOND],
+            event_data: npc,
+        });
+
+        let mut e = vm(master, vec![]);
+        e.attach_scene(
+            std::sync::Arc::new(dat),
+            ffxi_dat::event_dat::ZONE_PLAYER_ACTOR,
+            crate::vm::scene::EventPosition::default(),
+        );
+        assert_eq!(e.step(), StepResult::Waiting, "both requests are queued");
+        // Neither request has run yet: the lower number goes first on the next
+        // frame.
+        assert_eq!(
+            e.take_cues().len(),
+            0,
+            "the higher-numbered request has not run yet"
+        );
+        assert_eq!(
+            e.step(),
+            StepResult::Waiting,
+            "tag 1 ends; tag 0 still queued"
+        );
+        assert_eq!(
+            e.take_cues(),
+            [EventCue::ActorHide {
+                target: ActorLookup(NPC_SERVER_ID),
+                hide: true,
+            }],
+            "the lower-numbered request ran first, from its saved pointer"
+        );
+        assert_eq!(
+            e.step(),
+            StepResult::Waiting,
+            "tag 0 starts and arms its one-second wait"
+        );
+        e.tick(1.5); // past tag 0's wait
+        assert_eq!(
+            e.step(),
+            StepResult::Done,
+            "the drained stack ends the event"
+        );
+    }
+
+    #[test]
+    fn stack_full_makes_reqset_yield() {
+        // An NPC block with 17 placeholder entries, all starting at offset 0 of a
+        // one-second wait; the master REQSETs tag 0 sixteen times (each push is a
+        // no-op once queued) and then tag 16, which must yield on the full stack.
+        let mut dat = ffxi_dat::event_dat::EventDat {
+            blocks: vec![block(vec![], vec![])],
+        };
+        let npc_block = EventBlock {
+            actor: NPC_SERVER_ID,
+            event_ids: vec![7; 17],
+            event_offsets: vec![0; 17],
+            references: vec![WAIT_UNITS_PER_SEC as u32],
+            event_data: vec![OP_WAIT, REF0[0], REF0[1]],
+        };
+        dat.blocks.push(npc_block);
+
+        let mut master = Vec::new();
+        for tag in 0u8..16 {
+            master.push(OP_REQSET_CHECKED);
+            master.extend_from_slice(&reqset_operands(0, NPC_SERVER_ID, tag));
+        }
+        master.push(OP_REQSET);
+        master.extend_from_slice(&reqset_operands(0, NPC_SERVER_ID, 16));
+        master.push(OP_END);
+
+        let mut e = vm(master, vec![]);
+        e.attach_scene(
+            std::sync::Arc::new(dat),
+            ffxi_dat::event_dat::ZONE_PLAYER_ACTOR,
+            crate::vm::scene::EventPosition::default(),
+        );
+        assert_eq!(
+            e.step(),
+            StepResult::Waiting,
+            "the seventeenth push finds a full stack and yields"
+        );
+    }
+
+    #[test]
+    fn placeholder_tag_entries_are_reqset_entry_points() {
+        // The NPC block's only entry carries the placeholder event id; REQSET by
+        // tag index still reaches it, because ReqSet indexes TagOffset directly.
+        let mut master = vec![OP_REQSET];
+        master.extend_from_slice(&reqset_operands(0, NPC_SERVER_ID, 0));
+        master.push(OP_END);
+        let mut npc_data = vec![OP_EVENTHIDE, 1];
+        npc_data.extend_from_slice(&NPC_SERVER_ID.to_le_bytes());
+        npc_data.push(OP_END);
+        let npc_block = EventBlock {
+            actor: NPC_SERVER_ID,
+            event_ids: vec![ffxi_dat::event_dat::EVENT_ID_PLACEHOLDER],
+            event_offsets: vec![0],
+            references: vec![],
+            event_data: npc_data,
+        };
+        let mut dat = ffxi_dat::event_dat::EventDat {
+            blocks: vec![block(master.clone(), vec![])],
+        };
+        dat.blocks.push(npc_block);
+
+        let mut e = vm(master, vec![]);
+        e.attach_scene(
+            std::sync::Arc::new(dat),
+            ffxi_dat::event_dat::ZONE_PLAYER_ACTOR,
+            crate::vm::scene::EventPosition::default(),
+        );
+        assert_eq!(
+            e.step(),
+            StepResult::Waiting,
+            "the master ends; the child is queued"
+        );
+        assert_eq!(e.step(), StepResult::Done);
+        assert_eq!(
+            e.take_cues(),
+            [EventCue::ActorHide {
+                target: ActorLookup(NPC_SERVER_ID),
+                hide: true,
+            }]
+        );
+    }
+
+    #[test]
+    fn npc_move_emits_actor_move_and_case1_holds_on_host_hold() {
+        // Master: REQSET the NPC's tag 0, then END. The NPC sets its speed, walks
+        // to a goal (case 0), and holds on the arrival test (case 1).
+        // [0..3) speed = refs[0] * 0.1; [3..11) MOVE case 0 goal: x @2,
+        // z @4 and y @6 as work operands, all through the References table
+        // because a plain bytecode value is a work-store index; [11..13)
+        // MOVE case 1; [13] END.
+        let npc = vec![
+            OP_SPEED_TEST,
+            REF0[0],
+            REF0[1],
+            OP_MOVE_TEST,
+            0,
+            REF2[0],
+            REF2[1],
+            REF3[0],
+            REF3[1],
+            REF1[0],
+            REF1[1],
+            OP_MOVE_TEST,
+            1,
+            OP_END,
+        ];
+
+        /// References[0]: the speed operand, * EVENT_SPEED_SCALE = 1.0.
+        const MOVE_SPEED_REF: u32 = 10;
+        /// References[1]: the y goal -5 (a bytecode literal cannot carry it).
+        const NEG_FIVE_REF: u32 = (-5_i32) as u32;
+        /// References[2]: the x goal.
+        const GOAL_X_REF: u32 = 20;
+        /// References[3]: the z goal.
+        const GOAL_Z_REF: u32 = 40;
+
+        let mut master = vec![OP_REQSET];
+        master.extend_from_slice(&reqset_operands(0, NPC_SERVER_ID, 0));
+        master.push(OP_END);
+        let mut dat = ffxi_dat::event_dat::EventDat {
+            blocks: vec![block(master.clone(), vec![])],
+        };
+        dat.blocks.push(EventBlock {
+            actor: NPC_SERVER_ID,
+            event_ids: vec![7],
+            event_offsets: vec![0],
+            references: vec![MOVE_SPEED_REF, NEG_FIVE_REF, GOAL_X_REF, GOAL_Z_REF],
+            event_data: npc.clone(),
+        });
+
+        let mut e = vm(master, vec![]);
+        e.attach_scene(
+            std::sync::Arc::new(dat),
+            ffxi_dat::event_dat::ZONE_PLAYER_ACTOR,
+            crate::vm::scene::EventPosition::default(),
+        );
+        assert_eq!(
+            e.step(),
+            StepResult::Waiting,
+            "the master ends; the child is queued"
+        );
+        // The child's first frame: speed lands, case 0 emits the move cue, and
+        // with no host-armed hold case 1 falls through to END.
+        assert_eq!(e.step(), StepResult::Done);
+        let cues = e.take_cues();
+        assert_eq!(
+            cues,
+            [EventCue::ActorMove {
+                actor: ActorLookup(NPC_SERVER_ID),
+                goal: crate::vm::scene::EventPosition {
+                    x: 20,
+                    y: -5,
+                    z: 40,
+                    heading: 0,
+                },
+                speed: 1.0,
+            }]
+        );
+
+        // With a host-armed move hold (copied into the child before its first
+        // frame), case 1 parks until it expires.
+        let mut master = vec![OP_REQSET];
+        master.extend_from_slice(&reqset_operands(0, NPC_SERVER_ID, 0));
+        master.push(OP_END);
+        let mut dat = ffxi_dat::event_dat::EventDat {
+            blocks: vec![block(master.clone(), vec![])],
+        };
+        dat.blocks.push(EventBlock {
+            actor: NPC_SERVER_ID,
+            event_ids: vec![7],
+            event_offsets: vec![0],
+            references: vec![MOVE_SPEED_REF, NEG_FIVE_REF, GOAL_X_REF, GOAL_Z_REF],
+            event_data: npc,
+        });
+
+        let mut e = vm(master, vec![]);
+        e.attach_scene(
+            std::sync::Arc::new(dat),
+            ffxi_dat::event_dat::ZONE_PLAYER_ACTOR,
+            crate::vm::scene::EventPosition::default(),
+        );
+        assert_eq!(
+            e.step(),
+            StepResult::Waiting,
+            "the master ends; the child is queued"
+        );
+        e.hold_move(ActorLookup(NPC_SERVER_ID), WAIT_UNITS_PER_SEC); // one second
+        assert_eq!(
+            e.step(),
+            StepResult::Waiting,
+            "case 1 parks on the armed hold"
+        );
+        assert_eq!(e.take_cues().len(), 1, "the move cue went out with case 0");
+        assert_eq!(
+            e.step(),
+            StepResult::Waiting,
+            "the hold still has frames left"
+        );
+        e.tick(1.5);
+        assert_eq!(
+            e.step(),
+            StepResult::Done,
+            "an expired move hold falls through"
+        );
     }
 
     /// Trigger-packet parameters ride along on every message opcode.

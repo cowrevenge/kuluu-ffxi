@@ -552,6 +552,46 @@ fn cutscene_cue_to_wire(cue: crate::state::CutsceneCue) -> wire::CutsceneCue {
             partner: cutscene_actor_to_wire(partner),
             key,
         },
+        Cue::ActorMove {
+            actor,
+            x,
+            y,
+            z,
+            heading,
+            speed,
+        } => wire::CutsceneCue::ActorMove {
+            actor: cutscene_actor_to_wire(actor),
+            x,
+            y,
+            z,
+            heading,
+            speed,
+        },
+        Cue::ActorPlace {
+            actor,
+            x,
+            y,
+            z,
+            heading,
+        } => wire::CutsceneCue::ActorPlace {
+            actor: cutscene_actor_to_wire(actor),
+            x,
+            y,
+            z,
+            heading,
+        },
+        Cue::ActorFace { actor, heading } => wire::CutsceneCue::ActorFace {
+            actor: cutscene_actor_to_wire(actor),
+            heading,
+        },
+        Cue::ActorLookAt { actor, target } => wire::CutsceneCue::ActorLookAt {
+            actor: cutscene_actor_to_wire(actor),
+            target: cutscene_actor_to_wire(target),
+        },
+        Cue::ActorStopAction { actor, key } => wire::CutsceneCue::ActorStopAction {
+            actor: cutscene_actor_to_wire(actor),
+            key,
+        },
     }
 }
 

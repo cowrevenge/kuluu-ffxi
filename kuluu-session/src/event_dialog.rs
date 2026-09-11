@@ -145,6 +145,10 @@ pub struct DialogSession {
     /// tag) with misses included so a re-issued routine does not re-read its
     /// file.
     routine_lengths: std::collections::HashMap<(u32, FourCc), Option<f32>>,
+    /// Last known position of every entity the server has placed since the
+    /// zone-in, in event coordinates: the source for MOVE hold lengths while a
+    /// scene walks its actors.
+    entity_positions: std::collections::HashMap<u32, ffxi_event::vm::scene::EventPosition>,
 }
 
 impl DialogSession {
@@ -163,6 +167,7 @@ impl DialogSession {
             cues: Vec::new(),
             fishing: std::collections::HashMap::new(),
             routine_lengths: std::collections::HashMap::new(),
+            entity_positions: std::collections::HashMap::new(),
         }
     }
 
@@ -250,6 +255,7 @@ impl DialogSession {
             self.dat_root.as_deref(),
             &mut self.routine_lengths,
         );
+        arm_move_holds(&mut runner, &raw_cues, &self.entity_positions, unique_no);
         self.cues
             .extend(raw_cues.into_iter().map(|c| resolve_cue(c, unique_no)));
         let active = ActiveEvent {
@@ -383,6 +389,7 @@ impl DialogSession {
             self.dat_root.as_deref(),
             &mut self.routine_lengths,
         );
+        arm_move_holds(runner, &raw_cues, &self.entity_positions, event_entity);
         let cues: Vec<ResolvedCue> = raw_cues
             .into_iter()
             .map(|c| resolve_cue(c, event_entity))
@@ -417,6 +424,16 @@ impl DialogSession {
 
     pub fn set_player_position(&mut self, position: ffxi_event::vm::scene::EventPosition) {
         self.player_position = Some(position);
+    }
+
+    /// Remember where the server placed an entity, in event coordinates:
+    /// feeds [`arm_move_holds`] when a scene walks that actor.
+    pub fn note_entity_position(
+        &mut self,
+        id: u32,
+        position: ffxi_event::vm::scene::EventPosition,
+    ) {
+        self.entity_positions.insert(id, position);
     }
 
     pub fn controls_player_position(&self) -> bool {
@@ -559,8 +576,9 @@ pub fn agent_event_id(unique_no: u32, event_id: u16) -> u32 {
     ((unique_no as u64) << 16 | event_id as u64) as u32
 }
 
-/// A drained [`EventCue`] with its actors resolved.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// A drained [`EventCue`] with its actors resolved. Not `Eq`: the scene arm
+/// carries a [`CutsceneCue`], whose [`CutsceneCue::ActorMove`] speed is a float.
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ResolvedCue {
     /// Crosses the wire boundary as a [`CutsceneCue`].
     Scene(CutsceneCue),
@@ -622,6 +640,46 @@ pub fn resolve_cue(cue: EventCue, event_entity: u32) -> ResolvedCue {
             target: actor(target),
             status_event,
             mount_id,
+        },
+        EventCue::ActorMove {
+            actor: target,
+            goal,
+            speed,
+        } => CutsceneCue::ActorMove {
+            actor: actor(target),
+            x: goal.x,
+            y: goal.y,
+            z: goal.z,
+            heading: goal.heading,
+            speed,
+        },
+        EventCue::ActorPlace {
+            actor: target,
+            position,
+        } => CutsceneCue::ActorPlace {
+            actor: actor(target),
+            x: position.x,
+            y: position.y,
+            z: position.z,
+            heading: position.heading,
+        },
+        EventCue::ActorFace {
+            actor: target,
+            heading,
+        } => CutsceneCue::ActorFace {
+            actor: actor(target),
+            heading,
+        },
+        EventCue::ActorLookAt {
+            actor: from,
+            target: toward,
+        } => CutsceneCue::ActorLookAt {
+            actor: actor(from),
+            target: actor(toward),
+        },
+        EventCue::ActorStopAction { actor: target, key } => CutsceneCue::ActorStopAction {
+            actor: actor(target),
+            key,
         },
         EventCue::MusicVolume {
             volume,
@@ -1169,6 +1227,64 @@ fn load_event_dat(root: Option<&DatRoot>, zone: u16) -> Option<EventDat> {
 // 0x45 duration operand: 0 and this value mean "play the authored timing";
 // kuluu-render/src/cutscene.rs scheduler_speed_ratio treats both as ratio 1.
 const SCHEDULER_DURATION_LOOP: u16 = 1;
+
+/// The VM's wait clock: one hold unit per 1/60 s (ffxi-event vm.rs
+/// WAIT_UNITS_PER_SEC).
+const WAIT_UNITS_PER_SEC: f32 = 60.0;
+
+/// Arm the MOVE case-1 hold for each walk in `raw_cues`: the length comes
+/// from this session's own entity positions and the authored speed, because
+/// the VM never measures a move (research/XiEvents/OpCodes/0x001F.md). An
+/// unknown position or a zero speed arms nothing, so the wait falls through.
+fn arm_move_holds(
+    runner: &mut DialogRunner,
+    raw_cues: &[EventCue],
+    positions: &std::collections::HashMap<u32, ffxi_event::vm::scene::EventPosition>,
+    event_entity: u32,
+) {
+    for cue in raw_cues {
+        let EventCue::ActorMove { actor, goal, speed } = *cue else {
+            continue;
+        };
+        let server_id = if actor.is_event_entity() {
+            event_entity
+        } else if let Some(id) = actor.server_id() {
+            id
+        } else {
+            tracing::debug!(
+                target: "kuluu_session::event_dialog",
+                "move cue names no resolvable actor; the MOVE hold falls through"
+            );
+            continue;
+        };
+        let Some(current) = positions.get(&server_id) else {
+            tracing::debug!(
+                target: "kuluu_session::event_dialog",
+                server_id,
+                "no known position for the moving actor; the MOVE hold falls through"
+            );
+            continue;
+        };
+        if speed <= 0.0 {
+            tracing::debug!(
+                target: "kuluu_session::event_dialog",
+                server_id,
+                speed,
+                "move cue carries no authored speed; the MOVE hold falls through"
+            );
+            continue;
+        }
+        // The scene lerp travels `speed * EVENT_COORD_UNITS` event units per
+        // second in the x/z plane (ffxi-event vm/scene.rs tick_scene); hold
+        // units are 1/60 s on the VM's wait clock.
+        let dx = (goal.x - current.x) as f32;
+        let dz = (goal.z - current.z) as f32;
+        runner.hold_move(
+            actor,
+            dx.hypot(dz) / (speed * ffxi_event::vm::scene::EVENT_COORD_UNITS) * WAIT_UNITS_PER_SEC,
+        );
+    }
+}
 
 /// Arm WAIT* holds for motion cues whose authored length this session can read
 /// from a DAT, before their actors are resolved: the hold keys on the VM's own

@@ -1006,8 +1006,9 @@ pub enum CutsceneActor {
 
 /// One staging effect the running event script asked for — the renderer-facing
 /// half of [`ffxi_event::EventCue`]. `MusicVolume` is absent because 0x5D rides
-/// [`AgentEvent::MusicVolumeChanged`] instead of the cue stream.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// [`AgentEvent::MusicVolumeChanged`] instead of the cue stream. Not `Eq`:
+/// [`CutsceneCue::ActorMove`] carries a float speed.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum CutsceneCue {
     ActorMotion {
         actor: CutsceneActor,
@@ -1039,6 +1040,41 @@ pub enum CutsceneCue {
         actor: CutsceneActor,
         partner: CutsceneActor,
         key: ffxi_event::FourCc,
+    },
+    /// Walk `actor` to `(x, y, z)` at `speed`, facing `heading`; the
+    /// coordinates are the VM's event-coordinate integers.
+    ActorMove {
+        actor: CutsceneActor,
+        x: i32,
+        y: i32,
+        z: i32,
+        heading: i32,
+        speed: f32,
+    },
+    /// Snap `actor` to `(x, y, z)` facing `heading`, in event-coordinate
+    /// integers.
+    ActorPlace {
+        actor: CutsceneActor,
+        x: i32,
+        y: i32,
+        z: i32,
+        heading: i32,
+    },
+    /// Face `actor` toward `heading`, in the VM's 4096-step full-circle units.
+    ActorFace {
+        actor: CutsceneActor,
+        heading: i32,
+    },
+    /// Turn `actor` to face `target`.
+    ActorLookAt {
+        actor: CutsceneActor,
+        target: CutsceneActor,
+    },
+    /// Stop the named routine on `actor`, or every routine when `key` is
+    /// None, and return it to idle.
+    ActorStopAction {
+        actor: CutsceneActor,
+        key: Option<ffxi_event::FourCc>,
     },
 }
 

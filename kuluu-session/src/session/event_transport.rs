@@ -118,6 +118,24 @@ pub(super) fn receive(
                 }
             }
         }
+        // The server's placement of every entity, in event coordinates: the
+        // source for MOVE hold lengths when a scene walks its actors.
+        map::s2c::CHAR_PC | map::s2c::CHAR_NPC => {
+            if let Ok(head) = decode::PosHead::decode(sub.data) {
+                dialog.note_entity_position(
+                    head.unique_no,
+                    event_position(Position {
+                        pos: Vec3 {
+                            x: head.x,
+                            y: head.y,
+                            z: head.z,
+                        },
+                        heading: head.dir,
+                        ..Default::default()
+                    }),
+                );
+            }
+        }
         map::s2c::EVENTUCOFF => match super::eventucoff_mode_of(sub.data) {
             Some(map::event_position_wire::EVENT_RECV_PENDING) => dialog.acknowledge_event(),
             Some(map::eventucoff_mode::CANCEL_EVENT) => dialog.clear(),

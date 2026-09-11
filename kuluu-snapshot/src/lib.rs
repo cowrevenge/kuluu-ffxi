@@ -1500,8 +1500,8 @@ pub enum CutsceneActor {
 /// One staging effect the running event script asked for, in execution order.
 /// Scoped to the event session: every one of these is undone at
 /// [`ViewerEvent::CutsceneEnded`], because the bytecode routinely never undoes
-/// it itself.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// it itself. Not `Eq`: [`CutsceneCue::ActorMove`] carries a float speed.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum CutsceneCue {
     /// Play action `key` on `actor`, with `partner` as the action's partner.
     ActorMotion {
@@ -1541,6 +1541,39 @@ pub enum CutsceneCue {
         actor: CutsceneActor,
         partner: CutsceneActor,
         key: FourCc,
+    },
+    /// Walk `actor` to `(x, y, z)` at `speed`, facing `heading`. The
+    /// coordinates are the VM's event-coordinate integers; the renderer scales
+    /// them with EVENT_COORD_UNITS / EVENT_HEADING_UNITS.
+    ActorMove {
+        actor: CutsceneActor,
+        x: i32,
+        y: i32,
+        z: i32,
+        heading: i32,
+        speed: f32,
+    },
+    /// Snap `actor` to `(x, y, z)` facing `heading`, in event-coordinate
+    /// integers.
+    ActorPlace {
+        actor: CutsceneActor,
+        x: i32,
+        y: i32,
+        z: i32,
+        heading: i32,
+    },
+    /// Face `actor` toward `heading`, in the VM's 4096-step full-circle units.
+    ActorFace { actor: CutsceneActor, heading: i32 },
+    /// Turn `actor` to face `target`.
+    ActorLookAt {
+        actor: CutsceneActor,
+        target: CutsceneActor,
+    },
+    /// Stop the named routine on `actor`, or every routine when `key` is
+    /// None, and return it to idle.
+    ActorStopAction {
+        actor: CutsceneActor,
+        key: Option<FourCc>,
     },
 }
 

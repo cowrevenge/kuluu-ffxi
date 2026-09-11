@@ -10,6 +10,8 @@
 //! Cues are **event-scoped**: each one describes a change retail applies for the
 //! duration of the running event, never a persisted flag.
 
+use crate::vm::scene::EventPosition;
+
 /// A baked `XiEvent::GetActorIndex` operand: the entity an opcode names
 /// (research/XiEvents/Event VM Functions.md). Cues carry it unresolved because
 /// only the host owns the entity table the reserved selectors index; this VM's
@@ -151,7 +153,8 @@ pub fn tpc_motion_dat_id(param: i32) -> u32 {
 pub const NO_ACTION_KEY: FourCc = *b"xxxx";
 
 /// One staging effect the running event asked for. Emitted in execution order.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Not `Eq`: [`EventCue::ActorMove`] carries a float speed.
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum EventCue {
     /// 0x2C SCHEDULOR: play action `key` on `actor1`, with `actor2` as the
     /// action's partner (research/XiEvents/OpCodes/0x002C.md).
@@ -198,6 +201,37 @@ pub enum EventCue {
         target: ActorLookup,
         status_event: u8,
         mount_id: Option<u16>,
+    },
+    /// 0x1F MOVE case 0 on a non-player actor: walk the event entity to `goal`
+    /// at `speed` (research/XiEvents/OpCodes/0x001F.md). The host arms the
+    /// arrival hold from its own distance and speed; the VM never measures it.
+    ActorMove {
+        actor: ActorLookup,
+        goal: EventPosition,
+        speed: f32,
+    },
+    /// 0x37 on a non-player actor: set the event entity's position (teleport,
+    /// no hold; research/XiEvents/OpCodes/0x0037.md).
+    ActorPlace {
+        actor: ActorLookup,
+        position: EventPosition,
+    },
+    /// 0x39 on a non-player actor: set the event entity's facing from its work
+    /// operand (research/XiEvents/OpCodes/0x0039.md).
+    ActorFace { actor: ActorLookup, heading: i32 },
+    /// 0x4A DTURA, 0x79 lookat case 0 and the motion half of 0x1E
+    /// look-and-talk: turn `actor` toward `target`
+    /// (research/XiEvents/OpCodes/0x004A.md, 0x0079.md, 0x001E.md).
+    ActorLookAt {
+        actor: ActorLookup,
+        target: ActorLookup,
+    },
+    /// 0x5E / 0x6B stop action: kill the current action on `actor` and return
+    /// it to idle; `key` names the routine slot to clear when the operand is a
+    /// nonzero tag (research/XiEvents/OpCodes/0x005E.md, 0x006B.md).
+    ActorStopAction {
+        actor: ActorLookup,
+        key: Option<FourCc>,
     },
 }
 
@@ -258,6 +292,27 @@ impl EventCue {
                 target: resolve(target),
                 status_event,
                 mount_id,
+            },
+            Self::ActorMove { actor, goal, speed } => Self::ActorMove {
+                actor: resolve(actor),
+                goal,
+                speed,
+            },
+            Self::ActorPlace { actor, position } => Self::ActorPlace {
+                actor: resolve(actor),
+                position,
+            },
+            Self::ActorFace { actor, heading } => Self::ActorFace {
+                actor: resolve(actor),
+                heading,
+            },
+            Self::ActorLookAt { actor, target } => Self::ActorLookAt {
+                actor: resolve(actor),
+                target: resolve(target),
+            },
+            Self::ActorStopAction { actor, key } => Self::ActorStopAction {
+                actor: resolve(actor),
+                key,
             },
             other => other,
         }

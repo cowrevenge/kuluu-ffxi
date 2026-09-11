@@ -31,7 +31,9 @@ pub const ZONE_PLAYER_ACTOR: u32 = 0x7FFF_FFF0;
 pub const EVENT_ID_WILDCARD: u16 = 0xFFFE;
 
 /// A placeholder occupying an otherwise-real entry offset. It cannot be
-/// requested by id, so an exact match on it must not resolve.
+/// requested by event id, so an exact match on it must not resolve; but the
+/// entry is still a valid REQSET target, because ReqSet indexes TagOffset by
+/// tag byte (research/XiEvents/Event VM Functions.md XiEvent::ReqSet).
 pub const EVENT_ID_PLACEHOLDER: u16 = 0xFFFF;
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]

@@ -149,6 +149,13 @@ impl DialogRunner {
         self.vm.hold_action(actor, key, units);
     }
 
+    /// Arm a host-armed move hold a non-player MOVE case 1 parks on; see
+    /// [`EventVm::hold_move`]. The session calls this from its own entity
+    /// distance and speed when it publishes an [`EventCue::ActorMove`].
+    pub fn hold_move(&mut self, actor: ActorLookup, units: f32) {
+        self.vm.hold_move(actor, units);
+    }
+
     /// Advance a held wait by `dt_secs` of host clock and run on if it expired.
     /// Cheap to call every tick: it is a no-op unless a wait is actually held.
     pub fn tick(&mut self, dt_secs: f32, strings: &StringDat) -> DialogStep {

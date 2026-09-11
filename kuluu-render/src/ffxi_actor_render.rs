@@ -93,7 +93,7 @@ pub const LOCOMOTION_XFADE_OUT: f32 = 7.5;
 // FFXiMain.dll .data @RVA 0x35AF60). Off by default; read once.
 fn special_log_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    crate::particle_sim::env_flag(&ENABLED, "KULUU_SPECIAL_LOG")
+    crate::env_flags::env_flag(&ENABLED, "KULUU_SPECIAL_LOG")
 }
 
 // Tick counter for the gated hold probe below; advanced once per snapshot tick in
@@ -106,7 +106,7 @@ static SPECIAL_LOG_TICK: std::sync::atomic::AtomicU64 = std::sync::atomic::Atomi
 // resolutions, which is chatty enough to stay gated.
 fn clip_log_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    crate::particle_sim::env_flag(&ENABLED, "KULUU_CLIP_LOG")
+    crate::env_flags::env_flag(&ENABLED, "KULUU_CLIP_LOG")
 }
 
 // Once-per-(world_id, clip, reason) dedupe for CLIP_WARN: a miss repeats every frame while the

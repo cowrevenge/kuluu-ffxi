@@ -447,7 +447,7 @@ impl MotionProbe {
 
     pub fn init() -> Self {
         static ONCE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-        let enabled = crate::particle_sim::env_flag(&ONCE, "KULUU_MOTION_LOG");
+        let enabled = crate::env_flags::env_flag(&ONCE, "KULUU_MOTION_LOG");
         Self {
             enabled,
             per_id: HashMap::new(),

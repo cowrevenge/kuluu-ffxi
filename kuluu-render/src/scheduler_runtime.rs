@@ -1683,7 +1683,7 @@ const MELEE_VOICE_ROUTINE: [u8; 4] = *b"atk0";
 // as KULUU_MOTION_LOG).
 fn combat_log_enabled() -> bool {
     static ONCE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    crate::particle_sim::env_flag(&ONCE, "KULUU_COMBAT_LOG")
+    crate::env_flags::env_flag(&ONCE, "KULUU_COMBAT_LOG")
 }
 
 /// Printable form of a FourCC for COMBAT_ log lines.

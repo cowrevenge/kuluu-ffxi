@@ -23,6 +23,7 @@ pub mod dat_mzb;
 pub mod dat_vos2;
 pub mod debug_chat;
 pub mod entity_table;
+pub mod env_flags;
 pub mod equip_slot;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod ffxi_actor_render;

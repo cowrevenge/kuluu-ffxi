@@ -789,7 +789,7 @@ fn first_decode_err(opcode: u16) -> bool {
 }
 
 // Read-once env switch for the gated diagnostics in this module (same pattern as
-// kuluu-render's particle_sim::env_flag): any value enables, unset disables.
+// kuluu-render's env_flags::env_flag): any value enables, unset disables.
 fn env_flag(cell: &'static std::sync::OnceLock<bool>, name: &str) -> bool {
     *cell.get_or_init(|| std::env::var_os(name).is_some())
 }

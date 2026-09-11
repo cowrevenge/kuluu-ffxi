@@ -12,6 +12,7 @@ use ffxi_dat::sprite_sheet::ParticleSpriteSheet;
 use crate::camera::OperatorCamera;
 use crate::components::InGameEntity;
 use crate::dat_d3m::{decoded_sky_texture_to_image, decoded_texture_to_image, D3mBlendMode};
+use crate::env_flags::env_flag;
 use crate::ffxi_actor_render::FfxiRenderActor;
 use crate::ffxi_particle_material::FfxiParticleMaterial;
 use crate::scheduler_runtime::{
@@ -915,12 +916,6 @@ fn emit(g: &mut LiveGenerator, life_frames: f32) {
         rgb: Vec3::from_slice(&g.def.init_color[..3]),
         scale: Vec2::new(g.def.init_scale[0], g.def.init_scale[1]),
     });
-}
-
-// Shared read-once env switch for the gated diagnostics in this crate (the KULUU_* probes and
-// the FFXI_TRACE_* particle traces): any value enables, unset disables.
-pub(crate) fn env_flag(cell: &'static OnceLock<bool>, name: &str) -> bool {
-    *cell.get_or_init(|| std::env::var_os(name).is_some())
 }
 
 fn trace_celestial() -> bool {

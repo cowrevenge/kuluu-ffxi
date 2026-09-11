@@ -3,8 +3,9 @@ pub mod scene;
 use ffxi_dat::event_dat::EventBlock;
 
 use crate::cue::{
-    dat_id_helper, ActorLookup, EventCue, FourCc, MUSIC_VOLUME_MAX, SCHEDULER_DAT_ID_BASE,
-    STATUS_EVENT_CHOCOBO, STATUS_EVENT_IDLE, STATUS_EVENT_MOUNT,
+    dat_id_helper, event_motion_dat_id, tpc_motion_dat_id, ActorLookup, EventCue, FourCc,
+    MUSIC_VOLUME_MAX, NO_ACTION_KEY, SCHEDULER_DAT_ID_BASE, STATUS_EVENT_CHOCOBO,
+    STATUS_EVENT_IDLE, STATUS_EVENT_MOUNT,
 };
 use crate::opcode_meta::{
     OPCODE_META, OP_ENTITYSPEED, OP_EVENTPOSSET, OP_ITEMINFO, OP_LOADROOM, OP_LOOKSET, OP_MENU,
@@ -101,9 +102,9 @@ pub enum StepResult {
     /// rank real refusals without these drowning them (kuluu-cjct).
     Spun(u8),
     /// Blocked on a timed wait; the host runs its clock into [`EventVm::tick`]
-    /// and steps again. Only the pure timers yield here — an actor-gated wait
-    /// would block on state this VM never models, turning a dropped scene into a
-    /// hung client.
+    /// and steps again. Pure timers yield here, as do the WAIT* scheduler holds
+    /// while a host-armed, DAT-bounded action still has frames left; those holds
+    /// are bounded by the routine's authored length, so they cannot hang.
     Waiting,
     /// A mid-event tag was sent to the server (the send-tag or position-tag
     /// opcode) and execution is held on its case-1 poll until the s2c ack
@@ -237,6 +238,17 @@ const LOADEVENTSCHEDULER2_ACTOR1_OFS: usize = 3;
 const LOADEVENTSCHEDULER2_ACTOR2_OFS: usize = 7;
 const LOADEVENTSCHEDULER2_TAG_OFS: usize = 11;
 const LOADEVENTSCHEDULER2_DURATION_OFS: usize = 15;
+const LOADEXTSCHEDULER_FILE_OFS: usize = 1; // 0x005B / 0x0066
+const LOADEXTSCHEDULER_ACTOR1_OFS: usize = 3;
+const LOADEXTSCHEDULER_ACTOR2_OFS: usize = 7;
+const LOADEXTSCHEDULER_KEY_OFS: usize = 11;
+// The WAIT* family's host-armed hold matches on (actor1, key) only; retail's
+// IsMovingAction also takes actor2 (0x53/0x54 @5, 0x55 @7), but the partner does
+// not change which armed hold a wait parks on.
+const WAITSCHEDULOR_ACTOR1_OFS: usize = 1; // 0x0053 / 0x0054
+const WAITSCHEDULOR_KEY_OFS: usize = 9;
+const WAITLOADSCHEDULER_ACTOR1_OFS: usize = 3; // 0x0055
+const WAITLOADSCHEDULER_KEY_OFS: usize = 11;
 const DEFCAMERA_CASE_OFS: usize = 1; // 0x0046
 const DEFCAMERA_CASE_UNLOCK: u8 = 0;
 const DEFCAMERA_CASE_LOCK: u8 = 1;
@@ -322,12 +334,28 @@ pub struct EventVm {
     /// position-tag counterpart), held until [`Self::ack_server`]. While set,
     /// execution stays parked on the sending opcode's case-1 poll.
     pending_ack: Option<PendingTag>,
+    /// Host-armed action holds the WAIT* family parks on; see [`ActionHold`].
+    action_holds: Vec<ActionHold>,
+    /// Set while execution is parked on a WAIT* opcode whose hold still has
+    /// frames left, so [`Self::is_waiting`] keeps the host ticking it down.
+    parked_on_action_hold: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct Wait {
     remaining_units: f32,
     advance: usize,
+}
+
+/// A running action the host told the VM about, so the WAIT* family can hold
+/// the way retail's IsMovingAction does. Armed by the host from the
+/// DAT-authored routine length when it publishes the motion cue; the VM never
+/// invents one, so an un-armed wait falls through.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct ActionHold {
+    actor: ActorLookup,
+    key: FourCc,
+    remaining_units: f32,
 }
 
 /// `WaitTime` decrements by `GetFrameDelay()`, which counts 1/60ths of a
@@ -426,6 +454,8 @@ impl EventVm {
             ran_past_end: false,
             wait: None,
             pending_ack: None,
+            action_holds: Vec::new(),
+            parked_on_action_hold: false,
             oob_reads: std::cell::Cell::new(0),
         }
     }
@@ -505,6 +535,42 @@ impl EventVm {
         self.work_zone.get(index).copied().unwrap_or(0) as i32
     }
 
+    /// Arm a hold for `key` on `actor` lasting `units` (1/60 s, the same clock
+    /// as [`Self::tick`]). Replaces an existing hold for the same pair. The
+    /// event-entity selector resolves against the running scene's actor, the
+    /// way [`EventCue::resolve_event_actor`] does, so the host passes the
+    /// unresolved lookup it got from the cue.
+    pub fn hold_action(&mut self, actor: ActorLookup, key: FourCc, units: f32) {
+        let actor = self.resolve_hold_actor(actor);
+        self.action_holds
+            .retain(|h| !(h.actor == actor && h.key == key));
+        self.action_holds.push(ActionHold {
+            actor,
+            key,
+            remaining_units: units,
+        });
+    }
+
+    /// True while a host-armed hold for `(actor, key)` still has frames left.
+    fn action_running(&self, actor: ActorLookup, key: FourCc) -> bool {
+        let actor = self.resolve_hold_actor(actor);
+        self.action_holds
+            .iter()
+            .any(|h| h.actor == actor && h.key == key && h.remaining_units > 0.0)
+    }
+
+    /// Resolve a hold's actor the way [`Self::take_cues`] resolves cue actors:
+    /// the event-entity selector maps to the running scene's actor, everything
+    /// else is identity.
+    fn resolve_hold_actor(&self, actor: ActorLookup) -> ActorLookup {
+        if actor.is_event_entity() {
+            if let Some(scene) = &self.scene {
+                return ActorLookup(scene.actor);
+            }
+        }
+        actor
+    }
+
     fn arm_wait(&mut self, units: f32, advance: usize) -> StepResult {
         self.wait = Some(Wait {
             remaining_units: units,
@@ -519,6 +585,11 @@ impl EventVm {
     /// landing together.
     pub fn tick(&mut self, dt_secs: f32) {
         self.tick_scene(dt_secs);
+        let hold_dt = dt_secs * WAIT_UNITS_PER_SEC;
+        for hold in &mut self.action_holds {
+            hold.remaining_units -= hold_dt;
+        }
+        self.action_holds.retain(|h| h.remaining_units > 0.0);
         let Some(wait) = self.wait.as_mut() else {
             return;
         };
@@ -530,7 +601,7 @@ impl EventVm {
     }
 
     pub fn is_waiting(&self) -> bool {
-        self.wait.is_some() || self.scene_waiting()
+        self.wait.is_some() || self.scene_waiting() || self.parked_on_action_hold
     }
 
     /// The server acknowledged the pending tag (s2c PENDINGNUM/PENDINGSTR):
@@ -744,7 +815,9 @@ impl EventVm {
                     0 => {
                         // Retail evaluates left-to-right with its own literals
                         // (research/XiEvents/OpCodes/0x0047.md); the fold order
-                        // is load-bearing at the last ulp.
+                        // is load-bearing at the last ulp. 6.283 is retail's
+                        // authored literal, not a stand-in for TAU, so it stays exact.
+                        #[allow(clippy::approx_constant)]
                         let radians = self.getworkofs(8, 0) as f32 * 6.283 * 0.00024414062;
                         self.pending_ack = Some(PendingTag::SendXzy {
                             x: self.getworkofs(2, 0) as f32 * XZY_COORD_SCALE,
@@ -861,20 +934,59 @@ impl EventVm {
                     self.exec_pointer += OPCODE_META[op as usize].size as usize;
                 }
                 // XiEvent LOADEXTSCHEDULER (research/XiEvents/OpCodes/0x005B.md,
-                // 0x0066.md): plays a motion between two actors, but always
-                // takes the "actor not found" early exit since this dialog-only
-                // VM models no actors.
+                // 0x0066.md): load an event motion resource into actor1, then
+                // SetAction(actor1, key, actor2) unless the key is empty. Retail
+                // yields until the resource read completes; that is load latency
+                // the host handles asynchronously, so the cue carries the request
+                // and execution moves on. 0x66 is the Tpc form: a per-actor motion
+                // package at the same base with no banding
+                // (research/cexi-docs/cutscene_authoring.md, Dialogue + gestures).
                 OP_LOADEXTSCHEDULER | OP_LOADEXTSCHEDULER2 => {
+                    let tpc = op == OP_LOADEXTSCHEDULER2;
+                    let operand = self.getworkofs(LOADEXTSCHEDULER_FILE_OFS, 0);
+                    let motion_dat_id = if tpc {
+                        tpc_motion_dat_id(operand)
+                    } else {
+                        event_motion_dat_id(operand)
+                    };
+                    let key = self.fourcc_at(LOADEXTSCHEDULER_KEY_OFS);
+                    if key != [0; 4] && key != NO_ACTION_KEY {
+                        self.cues.push(EventCue::ExtScheduler {
+                            motion_dat_id,
+                            tpc,
+                            actor1: ActorLookup(self.eventgetcode2(LOADEXTSCHEDULER_ACTOR1_OFS)),
+                            actor2: ActorLookup(self.eventgetcode2(LOADEXTSCHEDULER_ACTOR2_OFS)),
+                            key,
+                        });
+                    }
                     self.exec_pointer += OPCODE_META[op as usize].size as usize;
                 }
-                // XiEvent WAITSCHEDULOR/WAITMAPSCHEDULOR/WAITLOADSCHEDULER
-                // (research/XiEvents/OpCodes/0x0053.md–0x0055.md): block until
-                // two named actors' schedulers finish. Same early exit as the
-                // loaders above — both actors have to resolve before retail
-                // waits on anything, and this VM resolves none. Load-bearing:
-                // the chocobo rental cutscene is one 0x53, and refusing it
-                // auto-released the whole scene.
-                OP_WAITSCHEDULOR | OP_WAITMAPSCHEDULOR | OP_WAITLOADSCHEDULER => {
+                // XiEvent WAITSCHEDULOR / WAITMAPSCHEDULOR (research/XiEvents/
+                // OpCodes/0x0053.md, 0x0054.md): hold while IsMovingAction(key,
+                // actor1, actor2) is true. The host arms that state from the
+                // DAT-authored routine length via hold_action; with nothing
+                // armed the wait falls through, which is also retail's path when
+                // either actor fails to resolve.
+                OP_WAITSCHEDULOR | OP_WAITMAPSCHEDULOR => {
+                    let actor = ActorLookup(self.eventgetcode2(WAITSCHEDULOR_ACTOR1_OFS));
+                    let key = self.fourcc_at(WAITSCHEDULOR_KEY_OFS);
+                    if self.action_running(actor, key) {
+                        self.parked_on_action_hold = true;
+                        return StepResult::Waiting;
+                    }
+                    self.parked_on_action_hold = false;
+                    self.exec_pointer += OPCODE_META[op as usize].size as usize;
+                }
+                // XiEvent WAITLOADSCHEDULER (research/XiEvents/OpCodes/0x0055.md):
+                // same hold, keyed on the actor1/key pair a 0x45 or 0x5B started.
+                OP_WAITLOADSCHEDULER => {
+                    let actor = ActorLookup(self.eventgetcode2(WAITLOADSCHEDULER_ACTOR1_OFS));
+                    let key = self.fourcc_at(WAITLOADSCHEDULER_KEY_OFS);
+                    if self.action_running(actor, key) {
+                        self.parked_on_action_hold = true;
+                        return StepResult::Waiting;
+                    }
+                    self.parked_on_action_hold = false;
                     self.exec_pointer += OPCODE_META[op as usize].size as usize;
                 }
                 OP_SCHEDULOR => {
@@ -1532,7 +1644,9 @@ mod tests {
     }
 
     #[test]
-    fn loadextscheduler_family_skips_by_size_and_continues() {
+    fn loadextscheduler_family_advances_by_size_with_an_empty_key() {
+        // An empty key emits no cue but still advances the full width; a real
+        // key's cue is pinned by the dedicated tests below.
         for op in [OP_LOADEXTSCHEDULER, OP_LOADEXTSCHEDULER2] {
             let size = OPCODE_META[op as usize].size as usize;
             assert_eq!(
@@ -1553,6 +1667,59 @@ mod tests {
     }
 
     #[test]
+    fn loadextscheduler_emits_ext_cue_and_advances_15() {
+        const FILE_OPERAND: u32 = 5; // band 0 -> base 32104
+        let mut o = REF0.to_vec(); // file @1 -> References[0]
+        o.extend_from_slice(&LOOKUP_EVENT_ENTITY.to_le_bytes());
+        o.extend_from_slice(&LOOKUP_EVENT_ENTITY.to_le_bytes());
+        o.extend_from_slice(b"abcd");
+        assert_eq!(
+            cues_of(OP_LOADEXTSCHEDULER, &o, vec![FILE_OPERAND]),
+            [EventCue::ExtScheduler {
+                motion_dat_id: 32104 + FILE_OPERAND,
+                tpc: false,
+                actor1: ActorLookup::EVENT_ENTITY,
+                actor2: ActorLookup::EVENT_ENTITY,
+                key: *b"abcd",
+            }]
+        );
+    }
+
+    #[test]
+    fn loadextscheduler2_flags_tpc_and_maps_to_base_plus_operand() {
+        const PACKAGE: u32 = 20; // the Sandy scene's Tpc package
+        let mut o = REF0.to_vec();
+        o.extend_from_slice(&LOOKUP_EVENT_ENTITY.to_le_bytes());
+        o.extend_from_slice(&LOOKUP_EVENT_ENTITY.to_le_bytes());
+        o.extend_from_slice(b"abcd");
+        assert_eq!(
+            cues_of(OP_LOADEXTSCHEDULER2, &o, vec![PACKAGE]),
+            [EventCue::ExtScheduler {
+                motion_dat_id: 32_104 + PACKAGE,
+                tpc: true,
+                actor1: ActorLookup::EVENT_ENTITY,
+                actor2: ActorLookup::EVENT_ENTITY,
+                key: *b"abcd",
+            }]
+        );
+    }
+
+    #[test]
+    fn loadextscheduler_with_xxxx_key_emits_no_cue() {
+        let mut o = REF0.to_vec();
+        o.extend_from_slice(&LOOKUP_EVENT_ENTITY.to_le_bytes());
+        o.extend_from_slice(&LOOKUP_EVENT_ENTITY.to_le_bytes());
+        for key in [b"xxxx", b"\0\0\0\0"] {
+            let mut ops = o.clone();
+            ops.extend_from_slice(key);
+            assert!(
+                cues_of(OP_LOADEXTSCHEDULER, &ops, vec![5]).is_empty(),
+                "key {key:?} must not stage a motion"
+            );
+        }
+    }
+
+    #[test]
     fn a_script_that_loops_forever_stops_instead_of_hanging() {
         // GOTO 0: the tightest loop the bytecode can express. GOTO is
         // implemented, so this must report as a spin, not as work to do.
@@ -1563,9 +1730,10 @@ mod tests {
     }
 
     #[test]
-    fn scheduler_wait_family_skips_by_size_and_continues() {
-        // Sizes are load-bearing: these opcodes carry actor references the VM
-        // steps over blind, so a wrong width lands mid-instruction.
+    fn scheduler_wait_family_falls_through_without_a_hold() {
+        // Sizes are load-bearing: a wrong width lands mid-instruction. With no
+        // host-armed hold the wait advances immediately; the hold path is pinned
+        // by the dedicated tests below.
         for (op, size) in [
             (OP_WAITSCHEDULOR, 13usize),
             (OP_WAITMAPSCHEDULOR, 13),
@@ -1586,6 +1754,70 @@ mod tests {
             );
             assert_eq!(e.exec_pointer(), size, "op 0x{op:02X} advanced wrong size");
         }
+    }
+
+    #[test]
+    fn waitschedulor_holds_while_action_runs_then_falls_through() {
+        const ACTOR: u32 = 0x010E_6032; // literal server id, resolves to itself
+        let key: [u8; 4] = *b"abcd";
+        let mut data = vec![OP_WAITSCHEDULOR];
+        data.extend_from_slice(&ACTOR.to_le_bytes()); // actor1 @1
+        data.extend_from_slice(&0u32.to_le_bytes()); // actor2 @5 (unused by the hold)
+        data.extend_from_slice(&key); // key @9
+        data.push(OP_END); // offset 13
+        let mut e = vm(data, vec![]);
+        e.hold_action(ActorLookup(ACTOR), key, WAIT_UNITS_PER_SEC); // one second of frames
+        assert_eq!(
+            e.step(),
+            StepResult::Waiting,
+            "an armed hold parks the wait"
+        );
+        e.tick(0.5);
+        assert_eq!(
+            e.step(),
+            StepResult::Waiting,
+            "half a second in still holds"
+        );
+        e.tick(0.6); // 1.1 s total: the one-second hold has expired
+        assert_eq!(
+            e.step(),
+            StepResult::Done,
+            "an expired hold falls through to END"
+        );
+    }
+
+    #[test]
+    fn waitschedulor_with_no_hold_falls_through() {
+        const ACTOR: u32 = 0x010E_6032;
+        let key: [u8; 4] = *b"abcd";
+        let mut data = vec![OP_WAITSCHEDULOR];
+        data.extend_from_slice(&ACTOR.to_le_bytes());
+        data.extend_from_slice(&0u32.to_le_bytes());
+        data.extend_from_slice(&key);
+        data.push(OP_END);
+        let mut e = vm(data, vec![]);
+        // No hold armed: the wait advances immediately instead of parking.
+        assert_eq!(e.step(), StepResult::Done);
+    }
+
+    #[test]
+    fn waitloadscheduler_reads_actor_at_3_and_key_at_11() {
+        const ACTOR: u32 = 0x010E_6032;
+        let key: [u8; 4] = *b"abcd";
+        // 0x55 layout: file @1, actor1 @3, actor2 @7, key @11.
+        let mut data = vec![OP_WAITLOADSCHEDULER];
+        data.extend_from_slice(&0u16.to_le_bytes()); // file @1 (unused by the hold)
+        data.extend_from_slice(&ACTOR.to_le_bytes()); // actor1 @3
+        data.extend_from_slice(&0u32.to_le_bytes()); // actor2 @7
+        data.extend_from_slice(&key); // key @11
+        data.push(OP_END); // offset 15
+        let mut e = vm(data, vec![]);
+        e.hold_action(ActorLookup(ACTOR), key, WAIT_UNITS_PER_SEC);
+        assert_eq!(
+            e.step(),
+            StepResult::Waiting,
+            "0x55 must read actor @3 and key @11"
+        );
     }
 
     #[test]

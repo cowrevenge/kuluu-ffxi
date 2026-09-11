@@ -24,9 +24,10 @@ pub mod runner;
 pub mod vm;
 
 pub use cue::{
-    dat_id_helper, ActorLookup, EventCue, FourCc, MUSIC_VOLUME_MAX, SCHEDULER_DAT_ID_BASE,
-    SCHEDULER_DURATION_FROM_DAT, SCHEDULER_FADE_DAT_ID, SCHEDULER_TAG_FADE_IN,
-    SCHEDULER_TAG_FADE_OUT, STATUS_EVENT_CHOCOBO, STATUS_EVENT_IDLE, STATUS_EVENT_MOUNT,
+    dat_id_helper, event_motion_dat_id, tpc_motion_dat_id, ActorLookup, EventCue, FourCc,
+    MUSIC_VOLUME_MAX, NO_ACTION_KEY, SCHEDULER_DAT_ID_BASE, SCHEDULER_DURATION_FROM_DAT,
+    SCHEDULER_FADE_DAT_ID, SCHEDULER_TAG_FADE_IN, SCHEDULER_TAG_FADE_OUT, STATUS_EVENT_CHOCOBO,
+    STATUS_EVENT_IDLE, STATUS_EVENT_MOUNT,
 };
 pub use runner::{clean_display, DialogFrame, DialogRunner, DialogStep, EVENT_CANCELLED_END_PARA};
 pub use vm::{EventChoice, EventMessage, EventVm, PendingTag, StepResult, OPCODE_BUDGET_PER_STEP};

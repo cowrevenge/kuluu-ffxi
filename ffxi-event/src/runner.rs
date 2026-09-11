@@ -6,7 +6,7 @@ use ffxi_dat::dmsg::{
 };
 use ffxi_dat::event_dat::EventBlock;
 
-use crate::cue::EventCue;
+use crate::cue::{ActorLookup, EventCue, FourCc};
 use crate::vm::{EventVm, PendingTag, StepResult};
 
 /// 0x05B `EndPara` the client returns for a cancelled event in place of
@@ -140,6 +140,13 @@ impl DialogRunner {
     /// one step emits any number of them.
     pub fn take_cues(&mut self) -> Vec<EventCue> {
         self.vm.take_cues()
+    }
+
+    /// Arm a host-armed action hold the WAIT* family parks on; see
+    /// [`EventVm::hold_action`]. The session calls this from the DAT-authored
+    /// routine length when it publishes a motion cue.
+    pub fn hold_action(&mut self, actor: ActorLookup, key: FourCc, units: f32) {
+        self.vm.hold_action(actor, key, units);
     }
 
     /// Advance a held wait by `dt_secs` of host clock and run on if it expired.

@@ -110,6 +110,46 @@ pub fn dat_id_helper(param: i32) -> i32 {
     param
 }
 
+// The 0x5B event motion resource bands (research/XiEvents/OpCodes/0x005B.md,
+// FUNC_XiSkeletonActor_ReadEventMotionRes call sites): the operand selects a
+// base DAT id by which band it falls in.
+const EVENT_MOTION_BAND_1: i32 = 512;
+const EVENT_MOTION_BAND_2: i32 = 1024;
+const EVENT_MOTION_BAND_3: i32 = 2048;
+const EVENT_MOTION_BAND_4: i32 = 3072;
+const EVENT_MOTION_BASE_0: i32 = 32104;
+const EVENT_MOTION_BASE_1: i32 = 49135;
+const EVENT_MOTION_BASE_2: i32 = 56345;
+const EVENT_MOTION_BASE_3: i32 = 59739;
+const EVENT_MOTION_BASE_4: i32 = 66339;
+
+/// DAT id of the event motion resource a 0x5B operand names.
+pub fn event_motion_dat_id(param: i32) -> u32 {
+    let base = if param < EVENT_MOTION_BAND_1 {
+        EVENT_MOTION_BASE_0
+    } else if param < EVENT_MOTION_BAND_2 {
+        EVENT_MOTION_BASE_1
+    } else if param < EVENT_MOTION_BAND_3 {
+        EVENT_MOTION_BASE_2
+    } else if param < EVENT_MOTION_BAND_4 {
+        EVENT_MOTION_BASE_3
+    } else {
+        EVENT_MOTION_BASE_4
+    };
+    param.wrapping_add(base) as u32
+}
+
+/// DAT id of the 0x66 Tpc motion package `param` names: the same base as the
+/// 0x5B low band with no banding (research/cexi-docs/cutscene_authoring.md,
+/// Dialogue + gestures; package 0 is the default humanoid talk set).
+pub fn tpc_motion_dat_id(param: i32) -> u32 {
+    param.wrapping_add(EVENT_MOTION_BASE_0) as u32
+}
+
+/// The 0x5B "no action" key: retail loads the motion resource and skips
+/// SetAction when the key is zero or these bytes.
+pub const NO_ACTION_KEY: FourCc = *b"xxxx";
+
 /// One staging effect the running event asked for. Emitted in execution order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EventCue {
@@ -129,6 +169,17 @@ pub enum EventCue {
         actor2: ActorLookup,
         tag: FourCc,
         duration: u16,
+    },
+    /// 0x5B/0x66 LOADEXTSCHEDULER: load event motion resource `motion_dat_id`
+    /// into `actor1`'s skeleton, then play action `key` on it with `actor2` as
+    /// partner (research/XiEvents/OpCodes/0x005B.md). `tpc` marks the 0x66
+    /// per-actor package form; the id is resolved in both cases.
+    ExtScheduler {
+        motion_dat_id: u32,
+        tpc: bool,
+        actor1: ActorLookup,
+        actor2: ActorLookup,
+        key: FourCc,
     },
     /// 0x4E EVENTHIDE: set/clear the target's event-hide render flag
     /// (research/XiEvents/OpCodes/0x004E.md).
@@ -182,6 +233,19 @@ impl EventCue {
                 tag,
                 duration,
             },
+            Self::ExtScheduler {
+                motion_dat_id,
+                tpc,
+                actor1,
+                actor2,
+                key,
+            } => Self::ExtScheduler {
+                motion_dat_id,
+                tpc,
+                actor1: resolve(actor1),
+                actor2: resolve(actor2),
+                key,
+            },
             Self::ActorHide { target, hide } => Self::ActorHide {
                 target: resolve(target),
                 hide,
@@ -231,6 +295,21 @@ mod tests {
         assert_eq!(dat_id_helper(300), 300 + 25937);
         assert_eq!(dat_id_helper(599), 599 + 25937);
         assert_eq!(dat_id_helper(600), 600 + 39643);
+    }
+
+    #[test]
+    fn event_motion_dat_id_picks_its_base_at_each_band_edge() {
+        // Each band edge lands on the next base exactly once; the value just
+        // below an edge stays in the current band.
+        assert_eq!(event_motion_dat_id(0), 32104);
+        assert_eq!(event_motion_dat_id(511), 32104 + 511);
+        assert_eq!(event_motion_dat_id(512), 49135 + 512);
+        assert_eq!(event_motion_dat_id(1023), 49135 + 1023);
+        assert_eq!(event_motion_dat_id(1024), 56345 + 1024);
+        assert_eq!(event_motion_dat_id(2047), 56345 + 2047);
+        assert_eq!(event_motion_dat_id(2048), 59739 + 2048);
+        assert_eq!(event_motion_dat_id(3071), 59739 + 3071);
+        assert_eq!(event_motion_dat_id(3072), 66339 + 3072);
     }
 
     #[test]

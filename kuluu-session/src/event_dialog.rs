@@ -14,7 +14,9 @@ use ffxi_dat::dmsg::{
 };
 use ffxi_dat::event_dat::{EventBlockSource, EventDat};
 use ffxi_dat::DatRoot;
-use ffxi_event::{ActorLookup, DialogRunner, DialogStep, EventCue};
+use ffxi_event::{
+    ActorLookup, DialogRunner, DialogStep, EventCue, PendingTag, OPCODE_BUDGET_PER_STEP,
+};
 use tokio::sync::broadcast;
 
 use crate::state::{AgentEvent, CutsceneActor, CutsceneCue, DialogState};
@@ -227,6 +229,7 @@ impl DialogSession {
             runner.attach_scene(dat.clone(), block.actor, position);
         }
         let step = runner.advance(None, strings);
+        let step = auto_ack(&mut runner, strings, step);
         self.scene_actions.extend(runner.take_scene_actions());
         self.cues.extend(
             runner
@@ -264,6 +267,9 @@ impl DialogSession {
                 self.active = Some(active);
                 Begin::Waiting
             }
+            // auto_ack only returns a pending tag if it hit its cap, in which
+            // case it converts to Stopped; this arm is the invariant's witness.
+            DialogStep::AwaitServerAck(_) => unreachable!("auto_ack consumes pending tags"),
         }
     }
 
@@ -321,6 +327,7 @@ impl DialogSession {
         };
         let event_entity = active.unique_no;
         let outcome = step(runner, strings);
+        let outcome = auto_ack(runner, strings, outcome);
         let final_position = runner.controlled_position();
         self.scene_actions.extend(runner.take_scene_actions());
         let cues: Vec<ResolvedCue> = runner
@@ -347,6 +354,9 @@ impl DialogSession {
                 }
             }
             DialogStep::Waiting => Advance::Waiting,
+            // auto_ack only returns a pending tag if it hit its cap, in which
+            // case it converts to Stopped; this arm is the invariant's witness.
+            DialogStep::AwaitServerAck(_) => unreachable!("auto_ack consumes pending tags"),
         };
         self.cues.extend(cues);
         if matches!(advance, Advance::Ended { .. }) {
@@ -489,6 +499,32 @@ impl DialogSession {
             .server = server;
         chat
     }
+}
+
+/// Acknowledge pending tags immediately and run on: no c2s send or s2c ack
+/// path exists yet, so every event behaves exactly as it did before the VM
+/// modeled the hold. The cap reuses the VM's per-step opcode budget: an event
+/// whose loop condition only a server-side effect would move re-sends its tag
+/// forever, and capping turns that into the same clean stop the VM's own
+/// budget produces instead of hanging the thread.
+fn auto_ack(runner: &mut DialogRunner, strings: &StringDat, mut step: DialogStep) -> DialogStep {
+    let mut cycles = 0;
+    while let DialogStep::AwaitServerAck(tag) = step {
+        cycles += 1;
+        if cycles > OPCODE_BUDGET_PER_STEP as usize {
+            let op = match &tag {
+                PendingTag::SendTag { .. } => 0x43,
+                PendingTag::SendXzy { .. } => 0x47,
+            };
+            tracing::warn!(
+                op = format!("0x{op:02X}"),
+                "event VM re-sent its pending tag past the auto-ack cap; stopping"
+            );
+            return DialogStep::Stopped(op);
+        }
+        step = runner.ack_server(strings);
+    }
+    step
 }
 
 /// Opaque id for the agent event stream, joining the triggering entity to the

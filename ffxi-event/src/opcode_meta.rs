@@ -1404,8 +1404,8 @@ pub fn sub_size(op: u8, sub: u8) -> Option<u8> {
             _ => None,
         },
         // 0x0047.md: case 0 sends the position tag (10); case 1 polls until the
-        // server acknowledges it (2). We have no pending-tag state, so case 1
-        // takes the acknowledged path.
+        // server acknowledges it (2). The VM models the round-trip as a pending
+        // tag held on the case-1 poll, so these widths are only the fallbacks.
         OP_EVENTPOSSET => match sub {
             0 => Some(10),
             1 => Some(2),

@@ -11,7 +11,7 @@
 //!
 //! `cargo run -p ffxi-event --example zz-jump-check -- <zone> [event id]`
 
-use ffxi_dat::event_dat::{EventDat, EventBlock};
+use ffxi_dat::event_dat::{EventBlock, EventDat};
 use ffxi_dat::DatRoot;
 use ffxi_event::opcode_meta::{sub_size, OPCODE_META};
 

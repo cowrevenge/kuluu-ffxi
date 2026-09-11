@@ -7,7 +7,7 @@ use ffxi_dat::dmsg::{
 use ffxi_dat::event_dat::EventBlock;
 
 use crate::cue::EventCue;
-use crate::vm::{EventVm, StepResult};
+use crate::vm::{EventVm, PendingTag, StepResult};
 
 /// 0x05B `EndPara` the client returns for a cancelled event in place of
 /// `Work_Zone[1]` (research/XiPackets/world/client/0x005B); LSB scripts match
@@ -31,8 +31,9 @@ pub struct DialogFrame {
     pub params: Vec<i32>,
 }
 
-/// Result of advancing the dialog one step.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Result of advancing the dialog one step. Not `Eq`: [`PendingTag::SendXzy`]
+/// carries floats.
+#[derive(Debug, Clone, PartialEq)]
 pub enum DialogStep {
     /// Show this frame and wait for the player; pass their response to the next
     /// [`DialogRunner::advance`].
@@ -49,6 +50,11 @@ pub enum DialogStep {
     /// drives [`DialogRunner::tick`] until it yields something else; there is no
     /// frame to show and nothing for the player to answer.
     Waiting,
+    /// A mid-event tag was sent to the server (the send-tag or position-tag
+    /// opcode) and execution is held on its case-1 poll. The host
+    /// sends the matching c2s packet, then calls [`DialogRunner::ack_server`]
+    /// when the s2c ack (PENDINGNUM/PENDINGSTR) arrives.
+    AwaitServerAck(PendingTag),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -146,6 +152,14 @@ impl DialogRunner {
         self.run(strings)
     }
 
+    /// The server acknowledged the pending tag (s2c PENDINGNUM/PENDINGSTR):
+    /// release the VM's hold and run on to the next frame. No-op advance if
+    /// nothing is pending.
+    pub fn ack_server(&mut self, strings: &StringDat) -> DialogStep {
+        self.vm.ack_server();
+        self.run(strings)
+    }
+
     /// Cancel out of the current frame (the Esc path): a menu reports the
     /// cancel selection, a message invalidates the open dialog; either way the
     /// VM ends the event with [`EVENT_CANCELLED_END_PARA`].
@@ -198,6 +212,9 @@ impl DialogRunner {
                     return DialogStep::Stopped(op)
                 }
                 StepResult::Waiting => return DialogStep::Waiting,
+                StepResult::AwaitServerAck(tag) => {
+                    return DialogStep::AwaitServerAck(tag);
+                }
             }
         }
     }
@@ -372,7 +389,9 @@ mod tests {
     }
 
     /// Advance, running any timed wait to expiry — the tests have no host
-    /// clock, so an authored fade is skipped rather than slept through.
+    /// clock, so an authored fade is skipped rather than slept through. Pending
+    /// tags are answered immediately the way the server would (a unit test has
+    /// no c2s/s2c round-trip).
     fn advance_past_waits(
         runner: &mut DialogRunner,
         choice: Option<u32>,
@@ -380,8 +399,12 @@ mod tests {
     ) -> DialogStep {
         const WAIT_SKIP_SECS: f32 = 3600.0;
         let mut step = runner.advance(choice, strings);
-        while matches!(step, DialogStep::Waiting) {
-            step = runner.tick(WAIT_SKIP_SECS, strings);
+        while matches!(step, DialogStep::Waiting | DialogStep::AwaitServerAck(_)) {
+            step = if matches!(step, DialogStep::Waiting) {
+                runner.tick(WAIT_SKIP_SECS, strings)
+            } else {
+                runner.ack_server(strings)
+            };
         }
         step
     }
@@ -606,7 +629,9 @@ mod tests {
                                 *stopped.entry(op).or_default() += 1;
                                 break;
                             }
-                            DialogStep::Waiting => unreachable!("consumed by advance_past_waits"),
+                            DialogStep::Waiting | DialogStep::AwaitServerAck(_) => {
+                                unreachable!("consumed by advance_past_waits")
+                            }
                         }
                     }
                 }
@@ -660,7 +685,9 @@ mod tests {
                     break;
                 }
                 DialogStep::Stopped(op) => panic!("event 32759 stopped on opcode 0x{op:02X}"),
-                DialogStep::Waiting => unreachable!("consumed by advance_past_waits"),
+                DialogStep::Waiting | DialogStep::AwaitServerAck(_) => {
+                    unreachable!("consumed by advance_past_waits")
+                }
             }
         }
         assert!(ended, "event 32759 did not end cleanly within 16 steps");
@@ -712,7 +739,9 @@ mod tests {
                     break;
                 }
                 DialogStep::Stopped(op) => panic!("event 32759 stopped on opcode 0x{op:02X}"),
-                DialogStep::Waiting => unreachable!("consumed by advance_past_waits"),
+                DialogStep::Waiting | DialogStep::AwaitServerAck(_) => {
+                    unreachable!("consumed by advance_past_waits")
+                }
             }
         }
         assert_eq!(end_para, Some(1), "Signet pick must return EndPara == 1");
@@ -764,7 +793,9 @@ mod tests {
                 DialogStep::Frame(_) => {}
                 DialogStep::Ended { .. } => break,
                 DialogStep::Stopped(op) => panic!("rental stopped on opcode 0x{op:02X}"),
-                DialogStep::Waiting => unreachable!("consumed by advance_past_waits"),
+                DialogStep::Waiting | DialogStep::AwaitServerAck(_) => {
+                    unreachable!("consumed by advance_past_waits")
+                }
             }
         }
 

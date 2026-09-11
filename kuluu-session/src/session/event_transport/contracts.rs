@@ -1,4 +1,5 @@
 use super::*;
+use crate::map_client::MapClient;
 use ffxi_dat::event_dat::{EventBlock, EventDat, ZONE_PLAYER_ACTOR};
 use ffxi_proto::{decode::PosMode, framing, map};
 
@@ -140,10 +141,19 @@ struct Host {
     position: Position,
     events: broadcast::Sender<AgentEvent>,
     receiver: broadcast::Receiver<AgentEvent>,
+    map: MapClient,
 }
 impl Host {
-    fn new(dat: EventDat, gil: i32) -> Self {
+    async fn new(dat: EventDat, gil: i32) -> Self {
         let (events, receiver) = broadcast::channel(64);
+        // Offline fixture socket: an ephemeral UDP bind with no server behind
+        // it; a tag send from Begin::AwaitServerAck just drops.
+        let map = MapClient::connect_with_local_sync(
+            std::net::SocketAddr::from(([127, 0, 0, 1], 9)),
+            [0u8; 20],
+            "0.0.0.0:0",
+        )
+        .unwrap();
         let mut host = Self {
             dialog: crate::event_dialog::tests::contract_session(dat, ZONE, TEXT_ZONE),
             pending: vec![],
@@ -151,22 +161,28 @@ impl Host {
             position: INITIAL,
             events,
             receiver,
+            map,
         };
-        host.begin(gil);
+        host.begin(gil).await;
         host
     }
-    fn begin(&mut self, gil: i32) {
+    async fn begin(&mut self, gil: i32) {
         self.dialog
             .set_player_position(event_position(self.position));
         let mut automatic = vec![];
         super::super::begin_server_event(
+            &mut self.map,
+            &mut self.sequence,
+            0,
+            ZONE,
             &mut self.dialog,
             trigger(gil),
             &self.events,
             &mut crate::event_dialog::CutsceneScope::default(),
             &mut self.pending,
             &mut automatic,
-        );
+        )
+        .await;
         assert!(
             automatic.is_empty(),
             "contract fixture must be driven, not auto-released"
@@ -253,9 +269,9 @@ fn float(body: &[u8], offset: usize) -> f32 {
     f32::from_le_bytes(body[offset..offset + 4].try_into().unwrap())
 }
 
-fn numeric_contract() {
+async fn numeric_contract() {
     for gil in [0, FARE - 1, FARE, 1_300_000, i32::MAX] {
-        let mut host = Host::new(affordability_dat(), gil);
+        let mut host = Host::new(affordability_dat(), gil).await;
         let initial = std::iter::from_fn(|| host.receiver.try_recv().ok())
             .find_map(|event| {
                 if let AgentEvent::EventDialog { dialog } = event {
@@ -289,11 +305,11 @@ fn numeric_contract() {
             .contains(&format!("fare {expected_fare}")));
     }
 }
-fn acknowledgement_contract() {
+async fn acknowledgement_contract() {
     for child in [false, true] {
         for position_first in [false, true] {
             for mode in [PosMode::Event, PosMode::Clear] {
-                let mut host = Host::new(position_dat(child), 1_300_000);
+                let mut host = Host::new(position_dat(child), 1_300_000).await;
                 host.request();
                 host.position_ack(PLAYER + 1, PosMode::Event);
                 host.waiting();
@@ -368,13 +384,13 @@ fn acknowledgement_contract() {
         }
     }
 }
-fn abort_contract() {
-    let mut replaced = Host::new(position_dat(false), FARE);
-    replaced.begin(FARE);
+async fn abort_contract() {
+    let mut replaced = Host::new(position_dat(false), FARE).await;
+    replaced.begin(FARE).await;
     replaced.request();
 
     for queued_ack in [false, true] {
-        let mut host = Host::new(position_dat(true), FARE);
+        let mut host = Host::new(position_dat(true), FARE).await;
         if queued_ack {
             host.request();
             host.position_ack(PLAYER, PosMode::Event);
@@ -388,7 +404,7 @@ fn abort_contract() {
         assert_eq!(host.position, INITIAL);
         assert!(host.dialog.drain_scene_actions(&DrivePermit(())).is_empty());
     }
-    let mut host = Host::new(position_dat(false), FARE);
+    let mut host = Host::new(position_dat(false), FARE).await;
     host.request();
     host.position_ack(PLAYER, PosMode::Event);
     host.packet(
@@ -397,16 +413,22 @@ fn abort_contract() {
     );
     assert!(host.dialog.active_end().is_none());
     assert!(host.dialog.drain_scene_actions(&DrivePermit(())).is_empty());
-    host.begin(FARE);
+    host.begin(FARE).await;
     host.request();
     assert_eq!(host.position, INITIAL);
 }
 
 #[test]
-fn event_state_contract() {
+fn ferry_and_bootstrap_contracts_hold() {
+    // bootstrap_acceptance_contract blocks on its own current-thread runtime,
+    // so it must run outside an active tokio context.
     super::super::tests::ferry_packet_state_contract();
     super::super::tests::bootstrap_acceptance_contract();
-    numeric_contract();
-    acknowledgement_contract();
-    abort_contract();
+}
+
+#[tokio::test]
+async fn event_state_contract() {
+    numeric_contract().await;
+    acknowledgement_contract().await;
+    abort_contract().await;
 }

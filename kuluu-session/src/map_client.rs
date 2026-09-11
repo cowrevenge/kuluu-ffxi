@@ -65,6 +65,23 @@ impl MapClient {
             .await
             .with_context(|| format!("UDP bind {local}"))?;
         tracing::info!(local_addr = %socket.local_addr()?, "UDP socket bound");
+        Self::finish(server, seed, socket)
+    }
+
+    /// Sync variant of [`Self::connect_with_local`] for offline test fixtures:
+    /// binds the same ephemeral UDP socket without a runtime. No datagram is
+    /// sent until one is explicitly requested.
+    pub fn connect_with_local_sync(
+        server: SocketAddr,
+        seed: [u8; 20],
+        local: &str,
+    ) -> Result<Self> {
+        let std_socket = std::net::UdpSocket::bind(local)
+            .with_context(|| format!("UDP bind {local}"))?;
+        Self::finish(server, seed, UdpSocket::from_std(std_socket)?)
+    }
+
+    fn finish(server: SocketAddr, seed: [u8; 20], socket: UdpSocket) -> Result<Self> {
         let blowfish = derive_blowfish(&seed);
         let decompress_table =
             zlib::DecompressTable::new().map_err(|e| anyhow!("decompress table init: {e}"))?;

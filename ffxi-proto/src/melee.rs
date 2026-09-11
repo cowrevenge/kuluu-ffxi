@@ -101,6 +101,10 @@ pub struct ActionInfo(u8);
 
 impl ActionInfo {
     pub const NONE: Self = Self(0);
+    /// Field width on the wire: 0x028_battle2.cpp GP_SERV_COMMAND_BATTLE2::pack writes info(5)
+    /// (vendor/server/src/map/enums/action/info.h result.info is 5 bits), so only the low five
+    /// bits of a byte are part of the field.
+    const FIELD_MASK: u8 = 0x1F;
     /// info.h Defeated - the action defeated the target; retail flips StatusServer on this frame.
     pub const DEFEATED: Self = Self(INFO_DEFEATED);
     /// info.h CriticalHit - set from outcome.isCritical, independent of hitDistortion.
@@ -114,7 +118,7 @@ impl ActionInfo {
     /// Mask to the field width: the bit reader already bounds info to 5 bits, and anything above
     /// is not representable on the wire.
     pub fn from_bits(bits: u8) -> Self {
-        Self(bits & 0x1F)
+        Self(bits & Self::FIELD_MASK)
     }
 
     pub fn is_defeated(self) -> bool {

@@ -1254,6 +1254,7 @@ pub fn predict_entities_system(
     time: Res<Time>,
     mut prediction: ResMut<EntityPrediction>,
     mut probe: ResMut<MotionProbe>,
+    cutscene: Res<crate::scheduler_runtime::CutsceneActorState>,
     mut q: Query<(&WorldEntity, &mut Transform), Without<IsSelf>>,
 ) {
     let dt = time.delta_secs().max(1e-4);
@@ -1262,6 +1263,10 @@ pub fn predict_entities_system(
             world.kind,
             EntityKind::Mob | EntityKind::Pc | EntityKind::Pet | EntityKind::Npc
         ) {
+            continue;
+        }
+        // A running cutscene owns this entity's transform until CutsceneEnded releases it.
+        if cutscene.is_touched(world.id) {
             continue;
         }
         let Some(sample) = prediction.by_id.get_mut(&world.id) else {
@@ -1320,6 +1325,7 @@ static GROUND_OFF_MESH_SEEN: OnceLock<Mutex<std::collections::HashSet<u32>>> = O
 pub fn ground_remote_movers_system(
     collision: Res<crate::dat_mzb::MzbCollisionGeometry>,
     prediction: Res<EntityPrediction>,
+    cutscene: Res<crate::scheduler_runtime::CutsceneActorState>,
     mut q: Query<(Entity, &WorldEntity, &mut Transform), Without<IsSelf>>,
     q_children: Query<&Children>,
     q_render: Query<&crate::ffxi_actor_render::FfxiRenderActor>,
@@ -1330,6 +1336,10 @@ pub fn ground_remote_movers_system(
             world.kind,
             EntityKind::Mob | EntityKind::Pc | EntityKind::Pet | EntityKind::Npc
         ) {
+            continue;
+        }
+        // A running cutscene owns this entity's transform until CutsceneEnded releases it.
+        if cutscene.is_touched(world.id) {
             continue;
         }
         // Only entities routed through the prediction model: mount actors and Other kinds carry no
@@ -1769,6 +1779,7 @@ mod tests {
         let mut app = App::new();
         app.init_resource::<Time>()
             .init_resource::<EntityPrediction>()
+            .init_resource::<crate::scheduler_runtime::CutsceneActorState>()
             .insert_resource(MotionProbe::init())
             .insert_resource(crate::dat_mzb::MzbCollisionGeometry::from_block(
                 crate::dat_mzb::ground_tests::slab_block(&[(floor_y, Vec3::Y)]),
@@ -2467,6 +2478,7 @@ mod tests {
         app.init_resource::<Time>()
             .init_resource::<SceneState>()
             .init_resource::<EntityPrediction>()
+            .init_resource::<crate::scheduler_runtime::CutsceneActorState>()
             .init_resource::<EntityMotion>();
         app.world_mut().insert_resource(MotionProbe::init());
         app.add_systems(

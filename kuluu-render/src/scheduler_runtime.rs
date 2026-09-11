@@ -2,11 +2,15 @@ use std::collections::HashMap;
 #[cfg(not(target_arch = "wasm32"))]
 use std::sync::Arc;
 
+#[cfg(not(target_arch = "wasm32"))]
+use crate::components::WorldEntity;
 use bevy::prelude::*;
 use ffxi_dat::generator::Generator;
 use ffxi_dat::kind::ChunkKind;
 use ffxi_dat::scheduler::{Scheduler, StageKind, TimedStage};
 use ffxi_dat::sep::Sep;
+#[cfg(not(target_arch = "wasm32"))]
+use ffxi_event::vm::scene::{EVENT_COORD_UNITS, EVENT_HEADING_UNITS};
 #[cfg(not(target_arch = "wasm32"))]
 use kuluu_snapshot::CutsceneCue;
 
@@ -276,6 +280,12 @@ impl ActiveSchedulers {
     /// here either.
     pub fn remove_routine_named(&mut self, name: &[u8; 4]) {
         self.routines.retain(|r| r.name != *name);
+    }
+
+    /// 0x5E/0x6B stop action with no tag: clear the whole queue so the actor's pose
+    /// falls back to its idle path (research/XiEvents/OpCodes/0x005E.md).
+    pub fn stop_all(&mut self) {
+        self.routines.clear();
     }
 
     pub fn is_empty(&self) -> bool {
@@ -1631,6 +1641,298 @@ pub fn dispatch_cutscene_motion(
     flush_active_scheduler_inserts(&mut pending_inserts, &mut q_scheds, &mut commands);
 }
 
+/// Client-side actor state owned by a running cutscene: pending walks plus every server id
+/// this session moved. CutsceneEnded releases each touched entity back to its last
+/// server-authored position (the way the fade and camera lock are released), and prediction
+/// and grounding skip touched ids while they stay here so the authored choreography owns the
+/// transform.
+#[derive(Resource, Debug, Default)]
+pub struct CutsceneActorState {
+    /// Server id -> (goal in world units, speed in world units per second).
+    walks: HashMap<u32, (Vec3, f32)>,
+    touched: std::collections::HashSet<u32>,
+}
+
+impl CutsceneActorState {
+    pub fn is_touched(&self, id: u32) -> bool {
+        self.touched.contains(&id)
+    }
+
+    pub fn touch(&mut self, id: u32) {
+        self.touched.insert(id);
+    }
+
+    pub fn begin_walk(&mut self, id: u32, goal: Vec3, speed: f32) {
+        self.touch(id);
+        self.walks.insert(id, (goal, speed));
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.touched.is_empty() && self.walks.is_empty()
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+/// Event-coordinate position to Bevy world units: event x/y are the ground plane and event z
+/// is height (kuluu-session's session_position does the same division).
+fn event_to_world(x: i32, y: i32, z: i32) -> Vec3 {
+    Vec3::new(
+        x as f32 / EVENT_COORD_UNITS,
+        z as f32 / EVENT_COORD_UNITS,
+        y as f32 / EVENT_COORD_UNITS,
+    )
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+/// Event-coordinate heading (4096 steps per full circle) to a Bevy yaw: the inverse of
+/// scene.rs's wire-heading convention (heading_to_quat over the 1/256-step wire byte).
+fn event_heading_to_quat(heading: i32) -> Quat {
+    Quat::from_rotation_y(-std::f32::consts::TAU * heading as f32 / EVENT_HEADING_UNITS)
+}
+
+// The five client-side actor cues (research/XiEvents/OpCodes/0x001F.md, 0x0037.md, 0x0039.md,
+// 0x004A.md, 0x005E.md): the event script's NPC choreography. Every write is client-side
+// transform state scoped to the running cutscene; release_cutscene_actors puts each touched
+// entity back on its last server-authored position at CutsceneEnded.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn apply_cutscene_actor_cues(
+    events: Res<crate::snapshot::EventLog>,
+    tracked: Res<crate::scene::TrackedEntities>,
+    table: Res<crate::entity_table::EntityTable>,
+    mut state: ResMut<CutsceneActorState>,
+    q_xform_ro: Query<&Transform, With<WorldEntity>>,
+    mut q_xform: Query<&mut Transform, With<WorldEntity>>,
+    mut q_scheds: Query<&mut ActiveSchedulers>,
+    mut last_seen: Local<u64>,
+) {
+    let new_count =
+        (events.pushed_total.saturating_sub(*last_seen)).min(events.recent.len() as u64) as usize;
+    *last_seen = events.pushed_total;
+    if new_count == 0 {
+        return;
+    }
+    let self_id = table.self_id();
+    for ev in events.recent.iter().rev().take(new_count).rev() {
+        let kuluu_snapshot::ViewerEvent::Cutscene { cue } = *ev else {
+            continue;
+        };
+        // The local player's movement is the session's own scene lerp, not a cue: driving it
+        // here would fight first-person input and prediction. Look-at targets may still be
+        // the player (an NPC turning to face you).
+        let moved = |a: kuluu_snapshot::CutsceneActor| -> Option<u32> {
+            cutscene_actor_server_id(self_id, a).filter(|id| Some(*id) != self_id)
+        };
+        match cue {
+            // The authored arrival heading is not applied: the walk faces its travel
+            // direction, and the scene's next facing opcode owns what comes after.
+            CutsceneCue::ActorMove {
+                actor,
+                x,
+                y,
+                z,
+                speed,
+                ..
+            } => {
+                let Some(id) = moved(actor) else {
+                    continue;
+                };
+                state.begin_walk(id, event_to_world(x, y, z), speed);
+                tracing::debug!(
+                    target: "kuluu_render::scheduler_runtime",
+                    id,
+                    speed,
+                    "cutscene actor walk"
+                );
+            }
+            CutsceneCue::ActorPlace {
+                actor,
+                x,
+                y,
+                z,
+                heading,
+            } => {
+                let Some(id) = moved(actor) else {
+                    continue;
+                };
+                let Some(&entity) = tracked.by_id.get(&id) else {
+                    continue;
+                };
+                if let Ok(mut t) = q_xform.get_mut(entity) {
+                    t.translation = event_to_world(x, y, z);
+                    t.rotation = event_heading_to_quat(heading);
+                    state.touch(id);
+                    tracing::debug!(
+                        target: "kuluu_render::scheduler_runtime",
+                        id,
+                        heading,
+                        "cutscene actor place"
+                    );
+                }
+            }
+            CutsceneCue::ActorFace { actor, heading } => {
+                let Some(id) = moved(actor) else {
+                    continue;
+                };
+                let Some(&entity) = tracked.by_id.get(&id) else {
+                    continue;
+                };
+                if let Ok(mut t) = q_xform.get_mut(entity) {
+                    t.rotation = event_heading_to_quat(heading);
+                    state.touch(id);
+                    tracing::debug!(
+                        target: "kuluu_render::scheduler_runtime",
+                        id,
+                        heading,
+                        "cutscene actor face"
+                    );
+                }
+            }
+            CutsceneCue::ActorLookAt { actor, target } => {
+                let Some(id) = moved(actor) else {
+                    continue;
+                };
+                let Some(target_id) = cutscene_actor_server_id(self_id, target) else {
+                    continue;
+                };
+                let (Some(&entity), Some(&target_entity)) =
+                    (tracked.by_id.get(&id), tracked.by_id.get(&target_id))
+                else {
+                    continue;
+                };
+                // Read both positions before writing either: the look-at yaw is the event
+                // convention's inverse of scene.rs's travel-heading formula.
+                let (Ok(from), Ok(to)) = (q_xform_ro.get(entity), q_xform_ro.get(target_entity))
+                else {
+                    continue;
+                };
+                let dx = to.translation.x - from.translation.x;
+                let dz = to.translation.z - from.translation.z;
+                if dx.abs() <= f32::EPSILON && dz.abs() <= f32::EPSILON {
+                    continue;
+                }
+                if let Ok(mut t) = q_xform.get_mut(entity) {
+                    t.rotation = Quat::from_rotation_y(dz.atan2(dx));
+                    state.touch(id);
+                    tracing::debug!(
+                        target: "kuluu_render::scheduler_runtime",
+                        id,
+                        target_id,
+                        "cutscene actor look-at"
+                    );
+                }
+            }
+            CutsceneCue::ActorStopAction { actor, key } => {
+                let Some(id) = moved(actor) else {
+                    continue;
+                };
+                let Some(&entity) = tracked.by_id.get(&id) else {
+                    continue;
+                };
+                if let Ok(mut scheds) = q_scheds.get_mut(entity) {
+                    match key {
+                        Some(name) => scheds.remove_routine_named(&name),
+                        None => scheds.stop_all(),
+                    }
+                    tracing::debug!(
+                        target: "kuluu_render::scheduler_runtime",
+                        id,
+                        key = %key.map(fourcc).unwrap_or_default(),
+                        "cutscene actor stop action"
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+// Per-frame progression of the walks apply_cutscene_actor_cues queued: each entity steps
+// toward its goal at the authored speed (world units per second, the same clock the session
+// used to arm the MOVE hold) and faces its travel direction; arrival snaps and drops the walk.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn advance_cutscene_walks(
+    time: Res<Time>,
+    tracked: Res<crate::scene::TrackedEntities>,
+    mut state: ResMut<CutsceneActorState>,
+    mut q_xform: Query<&mut Transform, With<WorldEntity>>,
+) {
+    if state.walks.is_empty() {
+        return;
+    }
+    let dt = time.delta_secs();
+    let mut arrived = Vec::new();
+    for (&id, &(goal, speed)) in state.walks.iter() {
+        let Some(&entity) = tracked.by_id.get(&id) else {
+            arrived.push(id);
+            continue;
+        };
+        let Ok(mut t) = q_xform.get_mut(entity) else {
+            continue;
+        };
+        let dx = goal.x - t.translation.x;
+        let dz = goal.z - t.translation.z;
+        let dist = (dx * dx + dz * dz).sqrt();
+        if dist <= f32::EPSILON {
+            arrived.push(id);
+            continue;
+        }
+        let travel = (speed * dt).min(dist);
+        t.translation.x += dx / dist * travel;
+        t.translation.z += dz / dist * travel;
+        t.translation.y = goal.y;
+        t.rotation = Quat::from_rotation_y(dz.atan2(dx));
+        if travel >= dist {
+            arrived.push(id);
+        }
+    }
+    for id in arrived {
+        state.walks.remove(&id);
+    }
+}
+
+// CutsceneEnded (and the zone/disconnect belt-and-braces, mirroring drain_cutscene_events):
+// release every entity this cutscene moved back to its last server-authored position and
+// drop the pending walks.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn release_cutscene_actors(
+    events: Res<crate::snapshot::EventLog>,
+    scene_state: Res<crate::snapshot::SceneState>,
+    tracked: Res<crate::scene::TrackedEntities>,
+    mut state: ResMut<CutsceneActorState>,
+    mut cursor: Local<u64>,
+    mut q_xform: Query<&mut Transform, With<WorldEntity>>,
+) {
+    let total = events.pushed_total;
+    let first_global = total.saturating_sub(events.recent.len() as u64);
+    let mut ended = false;
+    for g in (*cursor).max(first_global)..total {
+        match &events.recent[(g - first_global) as usize] {
+            kuluu_snapshot::ViewerEvent::CutsceneEnded
+            | kuluu_snapshot::ViewerEvent::ZoneChanged { .. }
+            | kuluu_snapshot::ViewerEvent::Disconnected { .. } => ended = true,
+            _ => {}
+        }
+    }
+    *cursor = total;
+    if !ended || state.is_empty() {
+        return;
+    }
+    for wire in &scene_state.snapshot.entities {
+        if !state.is_touched(wire.id) {
+            continue;
+        }
+        let Some(&entity) = tracked.by_id.get(&wire.id) else {
+            continue;
+        };
+        if let Ok(mut t) = q_xform.get_mut(entity) {
+            t.translation = crate::scene::ffxi_to_bevy(wire.pos);
+            t.rotation = crate::scene::heading_to_quat(wire.heading);
+        }
+    }
+    state.walks.clear();
+    state.touched.clear();
+}
+
 // The routine the caster's cast-start effects were flattened from, so an interrupt can stop the
 // generators it spawned. research/xim Actor.kt startCasting enqueues the whole model
 // routine, not just its Motion stage.
@@ -2511,6 +2813,9 @@ pub struct SchedulerRuntimePlugin;
 impl Plugin for SchedulerRuntimePlugin {
     fn build(&self, app: &mut App) {
         app.add_message::<SchedulerStageEvent>();
+        // Prediction and grounding read this on every target; only the native cutscene systems
+        // write it.
+        app.init_resource::<CutsceneActorState>();
 
         #[cfg(target_arch = "wasm32")]
         app.add_systems(
@@ -2579,6 +2884,20 @@ impl Plugin for SchedulerRuntimePlugin {
                 )
                     .chain(),
             );
+            // The cutscene's NPC choreography owns its entities' transforms for as long as they
+            // are touched, so it runs after prediction and grounding (which skip them) and wins
+            // any same-frame write.
+            app.add_systems(
+                Update,
+                (
+                    apply_cutscene_actor_cues,
+                    advance_cutscene_walks,
+                    release_cutscene_actors,
+                )
+                    .chain()
+                    .after(crate::combat_stance::predict_entities_system)
+                    .after(crate::combat_stance::ground_remote_movers_system),
+            );
             app.add_systems(
                 Update,
                 stop_cast_effects_when_cast_ends
@@ -2594,6 +2913,16 @@ mod tests {
     use ffxi_dat::scheduler::{SchedulerStage, StageKind};
 
     #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn event_coordinates_and_heading_convert_to_bevy_space() {
+        // Event x/y are the ground plane and event z is height (session_position's division).
+        assert_eq!(event_to_world(2000, -500, 400), Vec3::new(2.0, 0.4, -0.5));
+        // A quarter circle of event heading steps is a quarter Bevy yaw, signed the way
+        // scene.rs's wire-heading convention (heading_to_quat) signs it.
+        let q = event_heading_to_quat(1024);
+        assert!(q.angle_between(Quat::from_rotation_y(-std::f32::consts::FRAC_PI_2)) < 1e-5);
+    }
+
     fn cutscene_actor_server_id_resolves_local_player_and_entities() {
         assert_eq!(
             cutscene_actor_server_id(None, kuluu_snapshot::CutsceneActor::LocalPlayer),

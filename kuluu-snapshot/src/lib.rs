@@ -2,6 +2,9 @@
 
 use serde::{Deserialize, Serialize};
 
+// v29: CutsceneCue::ExtScheduler (the 0x5B/0x66 motion-resource cue) and the
+// actor cues ActorMove / ActorPlace / ActorFace / ActorLookAt / ActorStopAction
+// that a REQSET-spawned NPC script emits.
 // v28: ViewerEvent::ActionStarted.outcome - the first result block as one typed
 // Option<ResultOutcome> (resolution + info bits + hitDistortion + knockback, ffxi-proto enums
 // from the pinned vendor/server headers) instead of four parallel u8 fields that spelled "no
@@ -61,7 +64,7 @@ use serde::{Deserialize, Serialize};
 // v5: InventoryItem.charges_remaining + next_use_vana_ts (item recast/charges).
 // v4: SceneSnapshot.delivery_box (dedicated delivery screen) + ViewerCommand::DeliveryBox
 // (postcard frames are not self-describing, so any shape change bumps this).
-pub const PROTOCOL_VERSION: u32 = 28;
+pub const PROTOCOL_VERSION: u32 = 29;
 
 /// Longest countdown `SceneSnapshot::status_icon_expiries` can carry. The
 /// producer rejects anything beyond it as a corrupt 0x063 timestamp, and the HUD
@@ -1529,6 +1532,16 @@ pub enum CutsceneCue {
         status_event: u8,
         mount_id: Option<u16>,
     },
+    /// Load event motion resource `motion_dat_id` into `actor`, then play
+    /// action `key` on it with `partner`. `tpc` marks the 0x66 per-actor
+    /// package form; the id is already resolved either way.
+    ExtScheduler {
+        motion_dat_id: u32,
+        tpc: bool,
+        actor: CutsceneActor,
+        partner: CutsceneActor,
+        key: FourCc,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2162,7 +2175,7 @@ mod tests {
 
     #[test]
     fn ferry_protocol_preserves_transport_and_voyage_fields() {
-        const VERSION: u32 = 28;
+        const VERSION: u32 = 29;
         const STAMP: u32 = 0x1200_3400;
         assert_eq!(PROTOCOL_VERSION, VERSION);
         let mut snapshot = sample_snapshot();

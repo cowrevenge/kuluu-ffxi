@@ -1,14 +1,18 @@
-// Chunk kinds ffxi-dat parses. Retail ships other chunk codes too (Route 0x06, WeightedMesh
-// 0x25, UiMenu 0x30, UiElementGroup 0x31, PointList 0x3E, SpellList 0x49, Path 0x4A,
-// AbilityList 0x53, WeaponTrace 0x54, BumpMap 0x5D, Blur 0x5E; research/xim DatResource.kt
-// SectionType); they have no parser here and stay out of the enum until one lands. `label`
-// still names them from the raw code for diagnostics.
+// Chunk kinds ffxi-dat parses. Retail ships other chunk codes too (WeightedMesh 0x25, UiMenu
+// 0x30, UiElementGroup 0x31, PointList 0x3E, SpellList 0x49, Path 0x4A, AbilityList 0x53,
+// WeaponTrace 0x54, BumpMap 0x5D, Blur 0x5E; research/xim DatResource.kt SectionType); they
+// have no parser here and stay out of the enum until one lands. `label` still names them from
+// the raw code for diagnostics.
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChunkKind {
     Terminate = 0x00,
     Rmp = 0x01,
     Generator = 0x05,
+
+    /// The camera route chunks (research/XIClient include/World/Camera/CameraFormat.h); xim's
+    /// name for the code is Route.
+    Camera = 0x06,
     Scheduler = 0x07,
     Tim = 0x09,
     KeyFrame = 0x19,
@@ -32,6 +36,7 @@ impl ChunkKind {
             0x00 => Self::Terminate,
             0x01 => Self::Rmp,
             0x05 => Self::Generator,
+            0x06 => Self::Camera,
             0x07 => Self::Scheduler,
             0x09 => Self::Tim,
             0x19 => Self::KeyFrame,
@@ -93,11 +98,11 @@ mod tests {
 
     #[test]
     fn kind_roundtrip() {
-        for raw in [0x01u8, 0x07, 0x09, 0x20, 0x2A, 0x2B, 0x45] {
+        for raw in [0x01u8, 0x06, 0x07, 0x09, 0x20, 0x2A, 0x2B, 0x45] {
             assert_eq!(ChunkKind::from_u8(raw).unwrap() as u8, raw);
         }
         // Parser-less retail codes stay out of the enum; label still names them.
-        for raw in [0x06u8, 0x25, 0x3E, 0x49, 0x4A, 0x53, 0x54, 0x5D, 0x5E] {
+        for raw in [0x25u8, 0x3E, 0x49, 0x4A, 0x53, 0x54, 0x5D, 0x5E] {
             assert_eq!(ChunkKind::from_u8(raw), None);
         }
     }

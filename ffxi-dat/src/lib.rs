@@ -2,6 +2,7 @@ pub mod action;
 pub mod anim;
 pub mod archive;
 pub mod bone;
+pub mod camera;
 pub mod chunk;
 pub mod cib;
 pub mod d3m;
@@ -40,6 +41,7 @@ pub mod zone_dat;
 pub mod zone_interaction;
 
 pub use archive::{discover_overlays, DatLocation, DatRoot};
+pub use camera::CameraResource;
 pub use chunk::{walk, walk_tree, Chunk, ChunkNode, ChunkWalker};
 pub use item_dat::ItemStatic;
 pub use kind::ChunkKind;

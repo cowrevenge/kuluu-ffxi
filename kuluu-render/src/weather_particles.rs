@@ -159,7 +159,7 @@ fn sync_weather_particles(
     if defs.is_empty() {
         return;
     }
-    let (_schedulers, assets) = parse_action_tree(weat);
+    let (_schedulers, assets, _cameras) = parse_action_tree(weat);
     let global = global.as_ref().map(|g| &g.assets);
 
     for (name, def) in &defs {
@@ -338,8 +338,8 @@ pub(crate) mod tests {
         assert!(dust.camera_attached_base && !dust.follow_camera);
         assert_eq!(&dust.mesh_id, b"hit3");
 
-        let (_s, scoped) = parse_action_tree(weat);
-        let (_s, whole) = crate::scheduler_runtime::parse_action_bytes(&bytes);
+        let (_s, scoped, _) = parse_action_tree(weat);
+        let (_s, whole, _) = crate::scheduler_runtime::parse_action_bytes(&bytes);
         for zone_tier in [&scoped, &whole] {
             assert!(!zone_tier.sprite_sheets.contains_key(b"hit3"));
             assert!(!zone_tier.mmbs.contains_key(b"hit3"));
@@ -348,7 +348,7 @@ pub(crate) mod tests {
         let Some(global) = zone_dat(crate::scheduler_runtime::GLOBAL_EFFECT_DIR_FILE_ID) else {
             return;
         };
-        let (_s, global) = crate::scheduler_runtime::parse_action_bytes(&global);
+        let (_s, global, _) = crate::scheduler_runtime::parse_action_bytes(&global);
         assert!(
             global.sprite_sheets.contains_key(b"hit3"),
             "the dust sheet resolves only against the global effect dir"
@@ -369,8 +369,8 @@ pub(crate) mod tests {
         };
         let tree = ffxi_dat::chunk::walk_tree(&bytes);
         let weat = find_weat_type(&tree, *b"rain").unwrap();
-        let (_s, scoped) = parse_action_tree(weat);
-        let (_s, whole) = crate::scheduler_runtime::parse_action_bytes(&bytes);
+        let (_s, scoped, _) = parse_action_tree(weat);
+        let (_s, whole, _) = crate::scheduler_runtime::parse_action_bytes(&bytes);
         assert!(scoped.sprite_sheets.contains_key(b"rain"));
         assert!(
             scoped.particle_defs.len() < whole.particle_defs.len(),

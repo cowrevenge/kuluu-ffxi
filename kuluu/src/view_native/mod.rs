@@ -805,6 +805,15 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
             .run_if(in_state(AppPhase::InGame)),
     );
 
+    // The cutscene's camera route owns the operator camera while it runs: after resolve_camera,
+    // so its transform and focal writes win any same-frame collision push.
+    app.add_systems(
+        Update,
+        kuluu_render::cutscene_camera::advance_cutscene_camera_task
+            .after(camera_collision::resolve_camera)
+            .run_if(in_state(AppPhase::InGame)),
+    );
+
     app.add_systems(
         Update,
         camera_collision::draw_camera_collision_debug

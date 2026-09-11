@@ -273,6 +273,11 @@ pub enum StageKind {
     ActorFadeOnCaster,
     ActorFadeOnTarget,
 
+    /// 0x04 - drive the camera along the kind 0x06 route named by `id` for the stage's scaled
+    /// duration (research/XIClient Game/Scheduler/Tags/0x04.cpp HandleTag0x04 looks the
+    /// resource up by the tag's four-char name and calls CameraResource::CreateCameraTask).
+    CameraRoute,
+
     Unknown,
 }
 
@@ -289,6 +294,9 @@ impl StageKind {
             // 0x0B/0x53 play sound on target/caster.
             0x02 => Self::Particle,
             0x03 => Self::SubRoutine,
+            // research/XIClient Game/Scheduler/Tags/0x04.cpp HandleTag0x04 - the camera route
+            // stage; `id` is the kind 0x06 chunk name in the same file.
+            0x04 => Self::CameraRoute,
             0x05 => Self::Motion,
             // research/xim EffectRoutineParser.kt parseSection2.
             0x09 => Self::SubRoutineOnTarget,

@@ -3,7 +3,11 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 #[cfg(not(target_arch = "wasm32"))]
-use crate::components::WorldEntity;
+use crate::components::{IsSelf, WorldEntity};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::cutscene_camera::CutsceneCameraTasks;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::scene::BakedActor;
 use bevy::prelude::*;
 use ffxi_dat::generator::Generator;
 use ffxi_dat::kind::ChunkKind;
@@ -645,7 +649,11 @@ fn walk_with_dirs(
     rec(node, ffxi_dat::scheduler::NO_LOCAL_DIR, visit);
 }
 
-pub fn parse_action_bytes(bytes: &[u8]) -> (Vec<Scheduler>, ActionAssets) {
+/// The kind 0x06 camera routes of one action DAT, keyed by four-char name; a scheduler's
+/// CameraRoute stage names one of these (research/XIClient Game/Scheduler/Tags/0x04.cpp).
+pub type ActionDatCameras = HashMap<[u8; 4], ffxi_dat::camera::CameraResource>;
+
+pub fn parse_action_bytes(bytes: &[u8]) -> (Vec<Scheduler>, ActionAssets, ActionDatCameras) {
     parse_action_tree(&ffxi_dat::chunk::walk_tree(bytes))
 }
 
@@ -653,9 +661,12 @@ pub fn parse_action_bytes(bytes: &[u8]) -> (Vec<Scheduler>, ActionAssets) {
 // (zone 123 carries `clod` and `hm01..hm15` under both weat/rain and weat/squl), so a consumer
 // that owns one subtree must build its assets from that subtree alone or it binds the wrong
 // mesh/texture/keyframe.
-pub fn parse_action_tree(node: &ffxi_dat::chunk::ChunkNode<'_>) -> (Vec<Scheduler>, ActionAssets) {
+pub fn parse_action_tree(
+    node: &ffxi_dat::chunk::ChunkNode<'_>,
+) -> (Vec<Scheduler>, ActionAssets, ActionDatCameras) {
     let mut schedulers = Vec::new();
     let mut assets = ActionAssets::default();
+    let mut cameras = ActionDatCameras::new();
     walk_with_dirs(node, &mut |dir, c| {
         let Some(kind) = ChunkKind::from_u8(c.kind) else {
             return;
@@ -711,6 +722,13 @@ pub fn parse_action_tree(node: &ffxi_dat::chunk::ChunkNode<'_>) -> (Vec<Schedule
                     assets.seps.insert(c.name, s);
                 }
             }
+            // research/XIClient include/World/Camera/CameraFormat.h - the camera route a
+            // scheduler's 0x04 stage drives; keyed by name like every other chunk here.
+            ChunkKind::Camera => {
+                if let Ok(cam) = ffxi_dat::camera::CameraResource::parse(c.name, c.data) {
+                    cameras.insert(c.name, cam);
+                }
+            }
             ChunkKind::AnimMo2 => {
                 let id = ffxi_dat::datid::DatId::from_name(&c.name);
                 assets
@@ -733,7 +751,7 @@ pub fn parse_action_tree(node: &ffxi_dat::chunk::ChunkNode<'_>) -> (Vec<Schedule
             _ => {}
         }
     });
-    (schedulers, assets)
+    (schedulers, assets, cameras)
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -810,8 +828,13 @@ pub(crate) struct GlobalEffectDirTask(bevy::tasks::Task<(Vec<Scheduler>, ActionA
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn load_global_effect_dir(root: Res<ActionDatRoot>, mut commands: Commands) {
     let root = root.0.clone();
-    let task = bevy::tasks::AsyncComputeTaskPool::get()
-        .spawn(async move { parse_action_bytes(&read_dat_bytes(root, GLOBAL_EFFECT_DIR_FILE_ID)) });
+    let task = bevy::tasks::AsyncComputeTaskPool::get().spawn(async move {
+        // The global effect dir is spell effects, not cutscene camera routes; the parse's
+        // third value does not land here.
+        let (schedulers, assets, _cameras) =
+            parse_action_bytes(&read_dat_bytes(root, GLOBAL_EFFECT_DIR_FILE_ID));
+        (schedulers, assets)
+    });
     commands.insert_resource(GlobalEffectDirTask(task));
 }
 
@@ -833,6 +856,10 @@ pub(crate) fn poll_global_effect_dir(
 pub struct ParsedActionDat {
     pub schedulers: Vec<Scheduler>,
     pub assets: ActionAssets,
+
+    /// The kind 0x06 camera routes of the file, keyed by four-char name; a scheduler's
+    /// CameraRoute stage names one of these (research/XIClient Game/Scheduler/Tags/0x04.cpp).
+    pub cameras: ActionDatCameras,
 }
 
 // Populated Jeuno fires several casts/WS per second and each re-visits a handful of files, so a
@@ -883,6 +910,10 @@ enum PendingActionDispatch {
         actor_id: u32,
         target_id: u32,
         routine: [u8; 4],
+        /// The 0x45 duration operand (ffxi_event::SCHEDULER_DURATION_FROM_DAT when the cue
+        /// carries none): it scales a CameraRoute stage's authored length against the
+        /// routine's end frame, the way kuluu-session arms its WAIT* holds.
+        duration: u16,
     },
 }
 
@@ -927,8 +958,12 @@ impl ActionDatCache {
 // pre-existing "no effect" behaviour instead of re-spawning a load per cast.
 #[cfg(not(target_arch = "wasm32"))]
 fn load_action_dat(root: Option<Arc<ffxi_dat::DatRoot>>, file_id: u32) -> ParsedActionDat {
-    let (schedulers, assets) = parse_action_bytes(&read_dat_bytes(root, file_id));
-    ParsedActionDat { schedulers, assets }
+    let (schedulers, assets, cameras) = parse_action_bytes(&read_dat_bytes(root, file_id));
+    ParsedActionDat {
+        schedulers,
+        assets,
+        cameras,
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -985,16 +1020,37 @@ fn apply_routine_dispatch(
     let Some(active) = ActiveScheduler::from_main(&parsed.schedulers, routine) else {
         return false;
     };
-    // Same insert-or-push as apply_action_dispatch: a second routine (an emote or cutscene
-    // motion) mid-cast runs alongside the other instead of replacing it.
+    queue_routine_on_actor(
+        parsed,
+        active,
+        actor_entity,
+        target_entity,
+        q_scheds,
+        pending_inserts,
+        commands,
+    );
+    true
+}
+
+// Same insert-or-push as apply_action_dispatch: a second routine (an emote or cutscene motion)
+// mid-cast runs alongside the other instead of replacing it.
+#[cfg(not(target_arch = "wasm32"))]
+fn queue_routine_on_actor(
+    parsed: &ParsedActionDat,
+    active: ActiveScheduler,
+    actor_entity: Entity,
+    target_entity: Option<Entity>,
+    q_scheds: &mut Query<&mut ActiveSchedulers>,
+    pending_inserts: &mut HashMap<Entity, Vec<ActiveScheduler>>,
+    commands: &mut Commands,
+) {
     let fresh = queue_active_scheduler(actor_entity, active, q_scheds, pending_inserts);
     if fresh {
         commands
             .entity(actor_entity)
             .insert_if_new(parsed.assets.clone())
             .insert_if_new(ActionTarget(target_entity));
-    };
-    true
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -1011,6 +1067,98 @@ fn actor_routines_via_mut<'a>(
         .map(|actor| actor.routines())
 }
 
+// A CameraRoute stage drives the operator camera instead of the skeleton (research/XIClient
+// Game/Scheduler/Tags/0x04.cpp HandleTag0x04): one task per such stage, each scaled by the 0x45
+// duration operand against the routine's authored end frame - the same ratio kuluu-session
+// applies when it arms the WAIT* hold for this cue. The endpoints a route substitutes come from
+// the operator camera's live state (START_AT_CURRENT_POS) and the player's default chase state
+// (END_AT_CURRENT_POS), both captured at start time.
+#[cfg(not(target_arch = "wasm32"))]
+fn start_cutscene_camera_tasks(
+    parsed: &ParsedActionDat,
+    active: &ActiveScheduler,
+    duration_override: u16,
+    q_cam: &Query<(&Transform, &Projection), With<crate::camera::OperatorCamera>>,
+    q_self: &Query<
+        (&Transform, Option<&BakedActor>),
+        (With<IsSelf>, Without<crate::camera::OperatorCamera>),
+    >,
+    mode: &crate::camera::CameraMode,
+    tasks: &mut ResMut<CutsceneCameraTasks>,
+) {
+    let Some(named) = parsed.schedulers.iter().find(|s| s.name == active.name()) else {
+        return;
+    };
+    let ratio = crate::cutscene::scheduler_speed_ratio(duration_override, named.end_frame());
+
+    // No operator camera yet (or an orthographic one) means no substitution source; the stages
+    // are dropped with a log rather than guessed.
+    let Some((cam_t, cam_proj)) = q_cam.single().ok() else {
+        tracing::debug!(
+            target: "kuluu_render::scheduler_runtime",
+            routine = %fourcc(active.name()),
+            "no operator camera to start the cutscene route from; its stages are dropped"
+        );
+        return;
+    };
+    let Some(current) = crate::cutscene_camera::capture_current_camera(cam_t, cam_proj) else {
+        tracing::debug!(
+            target: "kuluu_render::scheduler_runtime",
+            routine = %fourcc(active.name()),
+            "the operator camera is not a perspective projection; the route stages are dropped"
+        );
+        return;
+    };
+    let default_chase = q_self.single().ok().map(|(self_t, baked)| {
+        crate::cutscene_camera::default_chase_endpoint(
+            self_t,
+            baked,
+            matches!(*mode, crate::camera::CameraMode::FirstPerson),
+        )
+    });
+
+    for stage in active
+        .stages
+        .iter()
+        .filter(|t| t.stage.kind == StageKind::CameraRoute)
+    {
+        let Some(cam) = parsed.cameras.get(&stage.stage.id) else {
+            tracing::debug!(
+                target: "kuluu_render::scheduler_runtime",
+                routine = %fourcc(active.name()),
+                camera = %String::from_utf8_lossy(&stage.stage.id),
+                "camera route stage names no kind 0x06 chunk in the file; the stage is dropped"
+            );
+            continue;
+        };
+        let Some(default_chase) = default_chase else {
+            tracing::debug!(
+                target: "kuluu_render::scheduler_runtime",
+                routine = %fourcc(active.name()),
+                camera = %String::from_utf8_lossy(&stage.stage.id),
+                "no player entity for the route's end point; the stage is dropped"
+            );
+            continue;
+        };
+        let total_frames = stage.stage.duration_frames as f32 * ratio;
+        match crate::cutscene_camera::CutsceneCameraTask::start(
+            cam,
+            total_frames,
+            current,
+            default_chase,
+        ) {
+            Some(task) => tasks.start(task),
+            None => tracing::debug!(
+                target: "kuluu_render::scheduler_runtime",
+                routine = %fourcc(active.name()),
+                camera = %String::from_utf8_lossy(&stage.stage.id),
+                attachment_info = cam.attachment_info,
+                "camera route is attached to a bone; retail's MakeAttachMatrix machinery is not ported and the stage is dropped"
+            ),
+        }
+    }
+}
+
 // Applies dispatches whose action-DAT parse has landed. A cache miss therefore delays the
 // completion effect by the load's frames-in-flight instead of stalling the frame it arrived on;
 // the routine's internal timeline (motion + particles + SE) shifts as one unit.
@@ -1021,6 +1169,13 @@ pub fn poll_action_dat_tasks(
     q_children: Query<&Children>,
     mut q_actors: Query<&mut crate::ffxi_actor_render::FfxiRenderActor>,
     global: Option<Res<GlobalEffectDir>>,
+    mut tasks: ResMut<CutsceneCameraTasks>,
+    q_cam: Query<(&Transform, &Projection), With<crate::camera::OperatorCamera>>,
+    q_self: Query<
+        (&Transform, Option<&BakedActor>),
+        (With<IsSelf>, Without<crate::camera::OperatorCamera>),
+    >,
+    mode: Res<crate::camera::CameraMode>,
     mut q_scheds: Query<&mut ActiveSchedulers>,
     mut pending_inserts: Local<HashMap<Entity, Vec<ActiveScheduler>>>,
     mut commands: Commands,
@@ -1077,21 +1232,41 @@ pub fn poll_action_dat_tasks(
                 actor_id,
                 target_id,
                 routine,
+                duration,
             } => {
                 let Some(&actor_entity) = tracked.by_id.get(&actor_id) else {
                     continue;
                 };
                 let target_entity = tracked.by_id.get(&target_id).copied();
-                if !apply_routine_dispatch(
-                    &parsed,
-                    &routine,
-                    actor_entity,
-                    target_entity,
-                    &mut q_scheds,
-                    &mut pending_inserts,
-                    &mut commands,
-                ) {
+                let Some(mut active) = ActiveScheduler::from_main(&parsed.schedulers, &routine)
+                else {
                     play_local_emote_clip(&routine, actor_entity, &q_children, &mut q_actors);
+                    continue;
+                };
+                // A CameraRoute stage plays on the operator camera instead of the skeleton:
+                // start its task here and keep only what still plays on the actor.
+                if active
+                    .stages
+                    .iter()
+                    .any(|t| t.stage.kind == StageKind::CameraRoute)
+                {
+                    start_cutscene_camera_tasks(
+                        &parsed, &active, duration, &q_cam, &q_self, &mode, &mut tasks,
+                    );
+                    active
+                        .stages
+                        .retain(|t| t.stage.kind != StageKind::CameraRoute);
+                }
+                if !active.stages.is_empty() {
+                    queue_routine_on_actor(
+                        &parsed,
+                        active,
+                        actor_entity,
+                        target_entity,
+                        &mut q_scheds,
+                        &mut pending_inserts,
+                        &mut commands,
+                    );
                 }
             }
         }
@@ -1556,13 +1731,14 @@ pub fn dispatch_cutscene_motion(
                 }
             }
             // 0x45 with a non-fade DAT: a named routine out of a file, on an actor, with a
-            // partner. Same dispatch shape the emote path uses.
+            // partner. Same dispatch shape the emote path uses; the duration operand scales any
+            // CameraRoute stage it carries.
             CutsceneCue::Scheduler {
                 dat_id,
                 actor,
                 partner,
                 tag,
-                ..
+                duration,
             } if dat_id != ffxi_event::SCHEDULER_FADE_DAT_ID => {
                 let (Some(actor_id), Some(target_id)) = (resolve(actor), resolve(partner)) else {
                     continue;
@@ -1573,6 +1749,7 @@ pub fn dispatch_cutscene_motion(
                         actor_id,
                         target_id,
                         routine: tag,
+                        duration,
                     },
                 );
             }
@@ -1630,6 +1807,7 @@ pub fn dispatch_cutscene_motion(
                                 actor_id,
                                 target_id,
                                 routine: key,
+                                duration: ffxi_event::SCHEDULER_DURATION_FROM_DAT,
                             },
                         );
                     }
@@ -2765,6 +2943,7 @@ pub fn dispatch_entity_emoted(
                                 actor_id,
                                 target_id,
                                 routine,
+                                duration: ffxi_event::SCHEDULER_DURATION_FROM_DAT,
                             },
                         );
                         continue;
@@ -2827,6 +3006,9 @@ impl Plugin for SchedulerRuntimePlugin {
         {
             app.init_resource::<crate::particle_sim::ParticleSimulator>();
             app.init_resource::<ActionDatCache>();
+            // The running cutscene camera route; the advance system lives in kuluu's view
+            // native module, after resolve_camera.
+            app.init_resource::<CutsceneCameraTasks>();
             app.init_resource::<ActionDatRoot>();
             app.add_systems(Startup, load_global_effect_dir);
             // Ordered ahead of the poll so a root change landing on the same frame as an
@@ -2923,6 +3105,8 @@ mod tests {
         assert!(q.angle_between(Quat::from_rotation_y(-std::f32::consts::FRAC_PI_2)) < 1e-5);
     }
 
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
     fn cutscene_actor_server_id_resolves_local_player_and_entities() {
         assert_eq!(
             cutscene_actor_server_id(None, kuluu_snapshot::CutsceneActor::LocalPlayer),
@@ -3610,7 +3794,7 @@ mod tests {
         let Ok(bytes) = std::fs::read(loc.path_under(&root)) else {
             return;
         };
-        let (schedulers, _) = parse_action_bytes(&bytes);
+        let (schedulers, _, _) = parse_action_bytes(&bytes);
         let tgt0 = schedulers
             .iter()
             .find(|s| &s.name == b"tgt0")
@@ -3732,7 +3916,7 @@ mod tests {
         let (offset, routine) = emote_routine(1, 0).expect("bow is mapped");
         let loc = root.resolve(base + offset).expect("emote file resolves");
         let bytes = std::fs::read(loc.path_under(&root)).expect("emote DAT readable");
-        let (schedulers, assets) = parse_action_bytes(&bytes);
+        let (schedulers, assets, _cameras) = parse_action_bytes(&bytes);
         let active = ActiveScheduler::from_main(&schedulers, &routine).expect("em00 exists");
         let motion = active
             .stages
@@ -3820,7 +4004,7 @@ mod tests {
 
     #[test]
     fn parse_action_bytes_handles_empty_input() {
-        let (scheds, assets) = parse_action_bytes(&[]);
+        let (scheds, assets, _cameras) = parse_action_bytes(&[]);
         assert!(scheds.is_empty());
         assert!(assets.generators.is_empty());
         assert!(assets.seps.is_empty());
@@ -3851,7 +4035,7 @@ mod tests {
         let Ok(bytes) = std::fs::read(loc.path_under(&root)) else {
             return;
         };
-        let (_scheds, assets) = parse_action_bytes(&bytes);
+        let (_scheds, assets, _cameras) = parse_action_bytes(&bytes);
 
         assert!(
             !assets.sprite_sheets.is_empty(),
@@ -3882,7 +4066,7 @@ mod tests {
         let Ok(cure_bytes) = std::fs::read(cure_loc.path_under(&root)) else {
             return;
         };
-        let (_s, cure_assets) = parse_action_bytes(&cure_bytes);
+        let (_s, cure_assets, _) = parse_action_bytes(&cure_bytes);
         assert!(
             cure_assets
                 .particle_defs
@@ -3910,7 +4094,7 @@ mod tests {
         let Ok(bytes) = std::fs::read(loc.path_under(&root)) else {
             return;
         };
-        let (_scheds, assets) = parse_action_bytes(&bytes);
+        let (_scheds, assets, _cameras) = parse_action_bytes(&bytes);
 
         let sheet = assets
             .sprite_sheets
@@ -3952,7 +4136,7 @@ mod tests {
         let Some(bytes) = read_dat(GLOBAL_EFFECT_DIR_FILE_ID) else {
             return;
         };
-        let (schedulers, assets) = parse_action_bytes(&bytes);
+        let (schedulers, assets, _cameras) = parse_action_bytes(&bytes);
 
         let ner1 = schedulers
             .iter()
@@ -4012,8 +4196,8 @@ mod tests {
         ) else {
             return;
         };
-        let (actor_scheds, _) = parse_action_bytes(&actor_bytes);
-        let (global_scheds, _) = parse_action_bytes(&global_bytes);
+        let (actor_scheds, _, _) = parse_action_bytes(&actor_bytes);
+        let (global_scheds, _, _) = parse_action_bytes(&global_bytes);
         let lookup = RoutineLookup::new()
             .with_dat(&actor_scheds)
             .with_dat(&global_scheds);
@@ -4385,7 +4569,8 @@ mod tests {
         let root = ffxi_dat::archive::open_test_install()?;
         let loc = root.resolve(GLOBAL_EFFECT_DIR_FILE_ID).ok()?;
         let bytes = std::fs::read(loc.path_under(&root)).ok()?;
-        Some(parse_action_bytes(&bytes))
+        let (schedulers, assets, _cameras) = parse_action_bytes(&bytes);
+        Some((schedulers, assets))
     }
 
     // Retail-DAT guard (self-skips without an install) for the whole hit-spark chain. `chit`
@@ -4494,7 +4679,7 @@ mod tests {
         let Ok(bytes) = std::fs::read(loc.path_under(&root)) else {
             return;
         };
-        let (schedulers, _) = parse_action_bytes(&bytes);
+        let (schedulers, _, _) = parse_action_bytes(&bytes);
 
         let damg = schedulers
             .iter()
@@ -4621,7 +4806,7 @@ mod tests {
             eprintln!("skipping: no {}", path.display());
             return;
         };
-        let (schedulers, _) = parse_action_bytes(&bytes);
+        let (schedulers, _, _) = parse_action_bytes(&bytes);
 
         for (name, lock_dur, stops) in [(*b"ini1", 112u16, *b"init"), (*b"init", 188, *b"ini1")] {
             let routine = schedulers
@@ -4662,6 +4847,7 @@ mod tests {
         Arc::new(ParsedActionDat {
             schedulers: Vec::new(),
             assets: ActionAssets::default(),
+            cameras: ActionDatCameras::new(),
         })
     }
 

@@ -607,7 +607,8 @@ pub fn load_npc(file_id: u32) -> Result<LoadedActor, String> {
     let mut effect_meshes = Vec::new();
     collect_d3m(&tree, &mut effect_meshes);
 
-    let (_schedulers, action_assets) = crate::scheduler_runtime::parse_action_bytes(&bytes);
+    let (_schedulers, action_assets, _cameras) =
+        crate::scheduler_runtime::parse_action_bytes(&bytes);
     // A D3m referenced by a particle generator is drawn by the particle stream
     // (XIM ParticleMeshResource, Particle.kt shouldSnapAlpha) with its own unlit additive/blend
     // material; rendering it as a static child too would double-draw it through the
@@ -5997,7 +5998,7 @@ mod pose_resolution_tests {
         let Ok(bytes) = std::fs::read(loc.path_under(&root)) else {
             return;
         };
-        let (schedulers, _) = crate::scheduler_runtime::parse_action_bytes(&bytes);
+        let (schedulers, _, _) = crate::scheduler_runtime::parse_action_bytes(&bytes);
         let routines: HashMap<DatId, Scheduler> = schedulers
             .into_iter()
             .map(|s| (DatId::from_name(&s.name), s))

@@ -15,7 +15,7 @@ workspace crates.
 
 ## Contents
 
-- `AltanaViewer/`, `XiEvents/`, `XiPackets/` — submodule pointers to upstream
+- `XiEvents/`, `XiPackets/` — submodule pointers to upstream
   repos cited in source comments. Deinitialized by default; populate on demand
   with `git submodule update --init research/<name>`. See *Which reference for
   what* below before trusting any of them for bit-level format details.
@@ -23,14 +23,21 @@ workspace crates.
   git-only, so they are git-ignored and you clone them here yourself. Every
   `Phoenix/…` citation in this tree assumes such a local clone; absent one,
   the path simply won't exist.
+- `xi-model-viewer/` — [xi-model-viewer](https://github.com/vekien/xi-model-viewer),
+  a Tauri/WebGL2 FFXI asset browser (zones, NPCs, PCs, spell effects,
+  textures, audio) with GPU skinning. GPL-3. Reference for DAT parsing,
+  skeleton posing, and zone/weather rendering. The successor of both
+  `cexi-viewer` and voliathon's AltanaViewer, which are archived upstream.
 - `cexi-viewer/` — [cexi-viewer](https://github.com/CatsAndBoats/cexi-viewer),
-  a Tauri/WebGL2 FFXI asset browser (zones, NPCs, PCs, textures, audio) with
-  GPU skinning. GPL-3. Reference for DAT parsing, skeleton posing, and
-  zone/weather rendering.
+  the pre-move source of `xi-model-viewer`; upstream now redirects there.
+  Kept pinned only while source comments still cite `research/cexi-viewer/`
+  paths; prefer `xi-model-viewer/` for new citations.
 - `cexi-docs/` — [cexi-docs](https://github.com/CatsAndBoats/cexi-docs),
   community docs of FFXI's internal formats (DAT, animation, zone mesh, event
   bytecode, audio, VFX). GPL-3. Format cross-reference for `ffxi-dat` /
-  `ffxi-audio`.
+  `ffxi-audio`. Upstream has moved to
+  [xi-tools](https://github.com/vekien/xi-tools); the pin stays until the
+  `research/cexi-docs/` citations are repointed.
 - `XIClient/` — [XIClient](https://gitlab.com/Aenge/XIClient), a from-scratch
   playable C++ FFXI client (no license — all rights reserved). Reference for
   client architecture and vanilla behavior only.
@@ -65,7 +72,8 @@ the higher tier:
    event bytecode, audio, VFX). Useful cross-reference for `ffxi-dat` /
    `ffxi-audio` work, but AI-assisted: treat claims as hypotheses and
    verify against tier 1–2 before baking values into the crates.
-5. **`cexi-viewer/`** — rendering and asset-pipeline reference: WebGL2 GPU
+5. **`xi-model-viewer/`** (and its pre-move pin `cexi-viewer/`) — rendering
+   and asset-pipeline reference: WebGL2 GPU
    skinning, zone time-of-day/weather, BGW/SPW playback. Most useful for
    `kuluu-render` materials and `ffxi-actor` posing.
 6. **`xim/`** — broad behavioral/architecture reference (actor handling,

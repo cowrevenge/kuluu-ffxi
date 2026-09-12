@@ -73,7 +73,7 @@ Bypass a single push with `git push --no-verify`; `PREPUSH_FAST=1 git push`
 runs fmt only. (`scripts/install-hooks.sh` does the same thing without a build.)
 
 That's everything the compiler needs. Upstream repos that are **not used by
-the build** — only cited in source comments for reference (`AltanaViewer`,
+the build** — only cited in source comments for reference (`xi-model-viewer`,
 `XiEvents`, `XiPackets`, `XIClient`, `cexi-*`) — live under `research/`, not
 `vendor/`. They stay deinitialized; `git submodule update --init
 research/<name>` populates one if you want to read the upstream sources.

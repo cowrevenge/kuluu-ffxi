@@ -5,9 +5,6 @@
 [submodule "vendor/POLUtils"]
 	path = vendor/POLUtils
 	url = https://github.com/Windower/POLUtils.git
-[submodule "research/AltanaViewer"]
-	path = research/AltanaViewer
-	url = https://github.com/voliathon/AltanaViewer.git
 [submodule "vendor/AltanaListener"]
 	path = vendor/AltanaListener
 	url = https://github.com/voliathon/AltanaListener.git
@@ -30,3 +27,6 @@
 	path = vendor/DLSS
 	url = https://github.com/NVIDIA/DLSS.git
 	update = none
+[submodule "research/xi-model-viewer"]
+	path = research/xi-model-viewer
+	url = https://github.com/vekien/xi-model-viewer.git

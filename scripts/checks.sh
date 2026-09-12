@@ -508,18 +508,13 @@ run_wasm() {
 }
 
 # Cargo never garbage-collects target/: artifacts for superseded dep versions,
-# deleted tests and renamed examples accumulate forever. Thirty days of
-# iteration on this workspace reached 206 GB (94 GB of deps across 504k files,
-# 64 GB of stale incremental sessions) and filled the disk.
-#
-# The age pass goes first so genuinely-stale artifacts go before the cap has
-# to make its blunter oldest-first call. The cap is what actually bounds the
-# directory, and it binds on most runs: this workspace's week-old working set
-# alone exceeds it.
+# deleted tests and renamed examples accumulate until the disk fills. The age
+# pass goes first so genuinely-stale artifacts go before the cap has to make
+# its blunter oldest-first call; the cap is what actually bounds the directory.
 #
 # The cap is in cargo-sweep's accounting, which sums file sizes without
-# deduplicating cargo's hardlinks, so it reads roughly 1.4x what `du` reports.
-# 180 here settles the tree around 130 GB on disk.
+# deduplicating cargo's hardlinks, so it reads higher than `du` for the same
+# tree. Tune it against `cargo sweep --dry-run`, not against `du`.
 TARGET_SWEEP_KEEP_DAYS=7
 TARGET_DIR_CAP_GB=180
 

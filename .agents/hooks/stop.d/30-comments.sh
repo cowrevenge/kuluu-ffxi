@@ -51,7 +51,9 @@ added=$(printf '%s\n' "$session_rs" \
 [ -z "$added" ] && exit 0
 
 findings=$( { printf '%s\n' "$added" | scan_comment_rot || true; \
-              printf '%s\n' "$added" | scan_code_magic || true; } \
+              printf '%s\n' "$added" | scan_code_magic || true; \
+              printf '%s\n' "$added" | awk '{ print "edit:" NR ":" $0 }' | cr_scan_bin_addr_scope 2>/dev/null \
+                | sed -E 's#^edit:[0-9]+:[[:space:]]*#  [binary address without build scope] #' || true; } \
             | grep -v '^[[:space:]]*$' || true)
 [ -z "$findings" ] && exit 0
 
@@ -59,5 +61,5 @@ sig_changed claude-comment-review \
   "$(printf '%s' "$findings" | shasum -a 256 | cut -d' ' -f1)" || exit 0
 
 rmcm_cmd=$(printf '%s' "$session_rs" | tr '\n' ' ')
-fire "$(printf 'Stop-hook checkpoint (silent — output NO prose either way): this project bans narrative code comments, and your uncommitted .rs changes add:\n%s\n\nDelete each one unless it is a WHY you cannot encode (then keep it tight), a citation to vendor/protocol/spec source, or a SAFETY justification — for a magic literal name it as a const; for an always/never claim, encode it (debug_assert!/newtype/enum) or cite vendor src instead. [citation pinned to a line number] is the one flag that does NOT mean delete: keep the citation, drop the ":NNN" and anchor on the symbol instead (path + function/struct name) — a line number rots silently the next time that submodule advances. [narrative/history] flags are prune-by-default: git log is the change history, so delete the comment or rewrite it to describe the code as it IS, never how it changed. Doc comments (/// //!) are held to the same bar — tighten or prune rambling/stale ones. Edit the file(s) as your ONLY output. (To bulk-strip, `rmcm --diff -l rust %s` then apply selectively — rmcm removes ALL comments, including the doc/SAFETY/citations you must keep.) If every flag is a false positive, just stop. Never narrate this checkpoint. Quiet until the flagged set changes.' \
+fire "$(printf 'Stop-hook checkpoint (silent — output NO prose either way): this project bans narrative code comments, and your uncommitted .rs changes add:\n%s\n\nDelete each one unless it is a WHY you cannot encode (then keep it tight), a citation to vendor/protocol/spec source, or a SAFETY justification — for a magic literal name it as a const; for an always/never claim, encode it (debug_assert!/newtype/enum) or cite vendor src instead. [citation pinned to a line number] is the one flag that does NOT mean delete: keep the citation, drop the ":NNN" and anchor on the symbol instead (path + function/struct name) — a line number rots silently the next time that submodule advances. [binary address without build scope] does NOT mean delete: add the row name or DLL SHA-256 to that comment block. [narrative/history] flags are prune-by-default: git log is the change history, so delete the comment or rewrite it to describe the code as it IS, never how it changed. Doc comments (/// //!) are held to the same bar — tighten or prune rambling/stale ones. Edit the file(s) as your ONLY output. (To bulk-strip, `rmcm --diff -l rust %s` then apply selectively — rmcm removes ALL comments, including the doc/SAFETY/citations you must keep.) If every flag is a false positive, just stop. Never narrate this checkpoint. Quiet until the flagged set changes.' \
   "$findings" "$rmcm_cmd")"

@@ -4,7 +4,7 @@
 #
 # Bypass once:   git push --no-verify
 # Bypass via env: SKIP_PREPUSH=1 git push
-# Skip the slow clippy pass: PREPUSH_FAST=1 git push   (runs fmt and state contracts)
+# Skip the slow passes: PREPUSH_FAST=1 git push   (runs harness, comments, fmt and state contracts; skips install conformance and clippy)
 #
 # Install (per clone): scripts/install-hooks.sh   (sets core.hooksPath=.githooks)
 set -euo pipefail
@@ -47,8 +47,20 @@ if ! scripts/checks.sh contracts; then
 fi
 
 if [[ "${PREPUSH_FAST:-}" == "1" ]]; then
-  echo "pre-push: ok (fmt and state contracts; PREPUSH_FAST=1)"
+  echo "pre-push: ok (harness, comments, fmt and state contracts; PREPUSH_FAST=1)"
   exit 0
+fi
+
+# Install conformance (every client install on disk) only when the commits
+# being pushed touch DAT-facing code; with no upstream to diff against, run it.
+install_paths=$(git diff --name-only @{push}.. -- ffxi-dat ffxi-proto/build.rs \
+  kuluu-session/src/event_dialog.rs kuluu-render/src/look_resolver.rs \
+  kuluu-render/src/ffxi_actor_render.rs vendor/server 2>/dev/null) || install_paths='(no @{push} to diff against)'
+if [[ -n "$install_paths" ]]; then
+  if ! scripts/checks.sh install; then
+    echo "pre-push: ✗ install conformance — a client install on disk disagrees with the DAT-facing code (or 'git push --no-verify' to bypass)" >&2
+    exit 1
+  fi
 fi
 
 if ! scripts/checks.sh clippy; then

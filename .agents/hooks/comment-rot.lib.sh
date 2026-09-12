@@ -47,7 +47,99 @@ CR_RE_VERSIONED='[0-9]+\.[0-9]+\.[0-9]+'
 # survives upstream edits and is greppable; a line number is a promise the
 # submodule pin does not keep. Matched BEFORE the allow-list strip, since the
 # allow-list is what would otherwise exempt these.
-CR_RE_CITE_LINE='(^|[^A-Za-z0-9_])[A-Za-z0-9_.-]*\.(cpp|h|hpp|c|cc|cs|lua|sql|py|rs|xml|json|kt|js|md)([[:space:]]+[A-Za-z0-9_:.]+){0,3}[[:space:]]*\(?:[0-9]+'
+CR_RE_CITE_LINE='(^|[^A-Za-z0-9_])[A-Za-z0-9_.-]*\.(cpp|h|hpp|c|cc|cs|lua|sql|py|rs|xml|json|kt|js|md)([[:space:]]+[A-Za-z0-9_:./-]+){0,3}[[:space:]]*\(?:[0-9]+'
+
+# Retail-binary addresses. An RVA/VA is a fact about ONE FFXiMain.dll build
+# (the offsets moved between horizonxi-2023 and retail-2026-09), so the
+# comment block carrying one must name that build: a KNOWN_CLIENTS row from
+# ffxi-dat/src/client_profile.rs (read at check time, never copied here) or
+# the DLL SHA-256 (CR_BUILD_SHA_MIN_HEX hex digits or more). An explicit
+# `RVA 0x…`/`VA 0x…` is always judged; a bare 0x10xxxxxx token is the VA
+# shape but also a DAT magic, so it is judged only when the block talks about
+# the binary (CR_RE_BIN_CTX), and CR_BIN_IMAGE_BASE itself (the VA/RVA
+# relation) is exempt. Hex classes are spelled out because BWK awk and mawk
+# have neither \b nor {n}; the patterns reach awk through -v, whose escape
+# processing differs per awk, so they carry no backslash (`[.]`, not `\.`).
+CR_RE_BIN_ADDR='R?VA[[:space:]]*[=:@]?[[:space:]]*0x[0-9A-Fa-f]+'
+CR_RE_BIN_BARE='^0x10[0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f]$'
+CR_BIN_IMAGE_BASE='0x10000000'
+CR_RE_BIN_CTX='FFXiMain|ffximain|[.]text|POL1'
+CR_BUILD_SHA_MIN_HEX=12
+CR_RE_HEX_TOKEN=$(i=0; while [ "$i" -lt "$CR_BUILD_SHA_MIN_HEX" ]; do printf '[0-9A-Fa-f]'; i=$((i + 1)); done)
+CR_CLIENT_PROFILE=${CR_CLIENT_PROFILE:-"$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/ffxi-dat/src/client_profile.rs"}
+
+# cr_known_client_rows: print the KNOWN_CLIENTS row names, one per line.
+# Returns 2 when the registry is unreadable or names no rows, so callers can
+# hard-error instead of silently judging every address as unscoped.
+cr_known_client_rows() {
+  local rows
+  rows=$(grep -oE 'name: "[^"]+"' "$CR_CLIENT_PROFILE" 2>/dev/null | sed -E 's/^name: "//; s/"$//') || true
+  [ -n "$rows" ] || return 2
+  printf '%s\n' "$rows"
+}
+
+# cr_scan_bin_addr_scope: read `file:line:text` records on stdin (grep -nH
+# shape; text may be a whole source line) and print every retail-binary
+# address whose comment block names no build. A block is a run of adjacent
+# comment lines in one file, so the scope may sit on a header line above the
+# address. Optional $1 names a file of `file:line` keys; when given, only
+# blocks containing one of those lines are judged (staged mode judges what a
+# commit adds, but a new address under an existing scoped header passes).
+# Returns 0 clean, 1 with offenders printed, 2 when the registry is unreadable.
+cr_scan_bin_addr_scope() {
+  local keys="${1:-}" rows
+  rows=$(cr_known_client_rows) || return 2
+  awk -v rows="$(printf '%s\n' "$rows" | paste -sd '|' -)" -v keys="$keys" \
+      -v addrre="$CR_RE_BIN_ADDR" -v barere="$CR_RE_BIN_BARE" -v imagebase="$CR_BIN_IMAGE_BASE" \
+      -v ctxre="$CR_RE_BIN_CTX" -v hexre="$CR_RE_HEX_TOKEN" '
+    BEGIN {
+      nrows = split(rows, rowlist, "|")
+      for (k = 1; k <= nrows; k++) rowset[rowlist[k]] = 1
+      havekeys = (keys != "")
+      if (keys != "") { while ((getline key < keys) > 0) { added[key] = 1 }; close(keys) }
+      n = 0; rc = 0
+    }
+    function flush(   j, t, m, nt, tok, scoped, judged, ctx, off) {
+      if (n == 0) return
+      scoped = 0; ctx = 0; judged = !havekeys
+      for (j = 1; j <= n; j++) {
+        t = texts[j]
+        if (t ~ hexre) scoped = 1
+        if (t ~ ctxre) ctx = 1
+        nt = split(t, tok, /[^A-Za-z0-9_-]+/)
+        for (m = 1; m <= nt; m++) if (tok[m] in rowset) scoped = 1
+        if (!judged && ((blkfile ":" lines[j]) in added)) judged = 1
+      }
+      if (judged && !scoped) {
+        for (j = 1; j <= n; j++) {
+          t = texts[j]; off = 0
+          if (t ~ addrre) off = 1
+          else if (ctx) {
+            nt = split(t, tok, /[^A-Za-z0-9_]+/)
+            for (m = 1; m <= nt; m++) if (tok[m] ~ barere && tok[m] != imagebase) off = 1
+          }
+          if (off) { print blkfile ":" lines[j] ": " t; rc = 1 }
+        }
+      }
+      n = 0
+    }
+    {
+      if (!match($0, /^[^:]+:[0-9]+:/)) next
+      hdr = substr($0, 1, RLENGTH - 1)
+      text = substr($0, RLENGTH + 1)
+      c = index(hdr, ":")
+      file = substr(hdr, 1, c - 1); line = substr(hdr, c + 1) + 0
+      gsub(/https?:\/\/[^[:space:]]*/, "", text)
+      c = index(text, "//")
+      if (c == 0) next
+      text = substr(text, c)
+      if (file != blkfile || line != lastline + 1) { flush(); blkfile = file }
+      lastline = line
+      n++; lines[n] = line; texts[n] = text
+    }
+    END { flush(); exit rc }
+  '
+}
 
 # Citations nobody in this tree can open. An elided `.../` path can't be
 # checked for existence, and a `(F37)`-style finding id points at a note that

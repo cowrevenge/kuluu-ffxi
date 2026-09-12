@@ -412,17 +412,10 @@ impl DialogSession {
         self.strings.as_ref()?.text(index)
     }
 
-    /// [`Self::zone_text`] restricted to entries that are actually printable
-    /// lines. An entry carrying a Selection control code is a menu — prompt plus
-    /// options — which retail drives through the event VM and never prints as
-    /// chat, so a chat packet naming one means the server's text ids and this
-    /// install's dialog DAT disagree about where the block starts.
-    ///
-    /// That happens whenever the two were built for different client eras: on
-    /// the LandSandBoat pin under `vendor/`, the fishing block sits 8-10 entries
-    /// above where a May-2023 install has it, so every fishing line would render
-    /// as whatever entry now occupies that index. Returning `None` keeps the
-    /// caller's placeholder — visibly wrong beats plausibly wrong.
+    /// [`Self::zone_text`] restricted to printable lines. An entry carrying a
+    /// Selection control code is a menu — prompt plus options — which retail
+    /// drives through the event VM; a menu entry is never a chat line, and
+    /// returning `None` keeps the caller's placeholder.
     pub fn zone_chat_text(&mut self, zone: u16, index: usize) -> Option<String> {
         self.ensure_strings(zone);
         let dat = self.strings.as_ref()?;
@@ -430,8 +423,7 @@ impl DialogSession {
             tracing::warn!(
                 zone,
                 index,
-                "zone message names a menu entry, not a line — server text ids and the \
-                 installed dialog DAT are from different client eras"
+                "zone message names a menu entry, not a chat line; keeping the placeholder"
             );
             return None;
         }
@@ -442,10 +434,12 @@ impl DialogSession {
     /// client-era skew between the server's text ids and this install's
     /// dialog DAT. The wire id is `server_base + offset`; the DAT entry lives
     /// at `install_base + offset`, and the two bases differ whenever the
-    /// server and the install were built for different client eras (the
-    /// vendor LSB pin sits ~9 entries above a May-2023 install). Without
-    /// reconciliation every fishing line renders as whatever entry the skew
-    /// lands on — another line entirely, or the menu-guard placeholder.
+    /// server and the install were built for different client eras: against
+    /// the vendored LSB pin's fishing base, KNOWN_CLIENTS horizonxi-2023 sits
+    /// 8-10 entries below and retail-2026-09 sits 4 above (LSB origin/base at
+    /// 30260904_1 matches retail-2026-09 exactly). Without reconciliation
+    /// every fishing line renders as whatever entry the skew lands on —
+    /// another line entirely, or the menu-guard placeholder.
     pub fn fishing_chat(&mut self, zone: u16, mes_num: u16, opcode: u16) -> FishingChat {
         let Some(pin_base) = ffxi_proto::fishing_messages::zone_offset(zone) else {
             return FishingChat::NotFishing;
@@ -698,16 +692,18 @@ enum ServerBase {
 }
 
 /// How far apart the same zone's fishing base can sit between the installed
-/// DAT and the server's text ids and still count as the same block. Observed:
-/// 9 between the vendor LSB pin and a May-2023 install, 26 between an older
-/// server fork and that install.
-const MAX_ERA_SKEW: u16 = 96;
+/// DAT and the server's text ids and still count as the same block. Measured
+/// against the vendored LSB pin's fishing base: KNOWN_CLIENTS horizonxi-2023
+/// sits 8-10 entries below it and retail-2026-09 sits 4 above it (LSB
+/// origin/base at 30260904_1 matches retail-2026-09 exactly); an older LSB
+/// fork sat 26 from horizonxi-2023.
+pub const MAX_ERA_SKEW: u16 = 96;
 
 /// Locate the fishing block in an installed dialog DAT by its landmark lines,
 /// returning the block's base — the index LSB calls FISHING_MESSAGE_OFFSET.
 /// One landmark could collide with another block's duplicate line, so the
 /// match requires three lines at their exact relative offsets.
-fn find_fishing_block(dat: &StringDat) -> Option<u16> {
+pub fn find_fishing_block(dat: &StringDat) -> Option<u16> {
     use ffxi_proto::fishing_messages::{kind, offset_text};
     let (norod, nocatch, hooked) = (
         offset_text(kind::NOROD)?,

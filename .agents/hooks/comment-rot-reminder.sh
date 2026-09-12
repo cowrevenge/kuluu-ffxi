@@ -23,7 +23,9 @@ text=$(printf '%s' "$payload" | /usr/bin/python3 -c \
 [ -z "$text" ] && exit 0
 
 findings=$( { printf '%s\n' "$text" | scan_comment_rot || true; \
-              printf '%s\n' "$text" | scan_code_magic || true; } \
+              printf '%s\n' "$text" | scan_code_magic || true; \
+              printf '%s\n' "$text" | awk '{ print "edit:" NR ":" $0 }' | cr_scan_bin_addr_scope 2>/dev/null \
+                | sed -E 's#^edit:[0-9]+:[[:space:]]*#  [binary address without build scope] #' || true; } \
             | grep -v '^[[:space:]]*$' || true)
 [ -z "$findings" ] && exit 0
 
@@ -33,5 +35,5 @@ findings=$( { printf '%s\n' "$text" | scan_comment_rot || true; \
 printf '%s\n%s\n%s\n' >&2 \
   "[comment] This project bans narrative code comments — they rot, restate the code, or paper over names that should be clearer. The text you're about to write adds:" \
   "$findings" \
-  'Default to NO comment: encode the intent in names/types/asserts (block comments are discouraged too). Keep one only if it is a non-obvious WHY you cannot encode, a citation to an external/vendor/protocol source, or a SAFETY justification (a magic literal wants a named const, not a comment). [citation pinned to a line number] is the one flag that does NOT mean delete: keep the citation, drop the ":NNN" and anchor on the symbol instead (the path plus the function/struct name) — a line number goes stale the next time that submodule advances, silently. [narrative/history] flags are prune-by-default: git log is the change history — describe the code as it IS, never how it changed. Doc comments (/// //!) are held to the same bar — tight and accurate, not rambling or stale. Ignore if a flag is a false positive.'
+  'Default to NO comment: encode the intent in names/types/asserts (block comments are discouraged too). Keep one only if it is a non-obvious WHY you cannot encode, a citation to an external/vendor/protocol source, or a SAFETY justification (a magic literal wants a named const, not a comment). [citation pinned to a line number] is the one flag that does NOT mean delete: keep the citation, drop the ":NNN" and anchor on the symbol instead (the path plus the function/struct name) — a line number goes stale the next time that submodule advances, silently. [binary address without build scope] does not mean delete either: an RVA/VA belongs to one FFXiMain.dll build, so name the KNOWN_CLIENTS row (ffxi-dat/src/client_profile.rs) or the DLL SHA-256 in the same comment block, and ignore the flag if that scope already sits on an adjacent line outside this edit. [narrative/history] flags are prune-by-default: git log is the change history — describe the code as it IS, never how it changed. Doc comments (/// //!) are held to the same bar — tight and accurate, not rambling or stale. Ignore if a flag is a false positive.'
 exit 0

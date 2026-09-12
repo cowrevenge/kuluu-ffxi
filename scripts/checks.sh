@@ -7,11 +7,12 @@
 # the *exact* fmt/clippy invocation CI will, and vice versa.
 #
 # Usage: scripts/checks.sh <stage>...
-#   stage ∈ {harness, comments, fmt, clippy, style, contracts, test, enhanced, build, wasm, doc}
+#   stage ∈ {harness, comments, fmt, clippy, style, contracts, install, test, enhanced, build, wasm, doc}
 #   scripts/checks.sh harness comments fmt contracts clippy  # pre-push default
 #   COMMENTS_DIFF=staged scripts/checks.sh comments  # pre-commit (staged hunks)
 #   scripts/checks.sh harness fmt clippy test # the CI gate (ci.yml runs these)
 #   scripts/checks.sh enhanced                # the opt-in feature family (CI)
+#   scripts/checks.sh install                 # DAT conformance per client install on disk (pre-push when DAT code moved; skips without assets)
 #   scripts/checks.sh build                   # local-only: see run_build below
 #
 # Each stage is a separate argument so callers (notably CI) can run them as
@@ -281,7 +282,7 @@ run_comments() {
   local bad=0 lines text
   if [ "${COMMENTS_DIFF:-}" = "staged" ]; then
     lines=$(for f in $(git diff --cached --name-only --diff-filter=AM -- '*.rs'); do
-      git diff --cached -U0 -- "$f" | grep -E '^\+[^+]' | sed -E "s#^\+#$f: #"
+      git diff --cached -U0 -- "$f" | grep -E '^\+[^+]' | sed -E "s#^\+#$f: #" || true
     done)
   else
     lines=$(git ls-files '*.rs' | grep -vE '^(vendor|research|target|ffxi-agent)/' \
@@ -337,6 +338,37 @@ run_comments() {
   if [ -n "$missing" ]; then
     echo "checks: comments - cited path does not exist in this tree (moved upstream, a private note, or the retired docs/ tree); fix or drop the citation:" >&2
     printf '%s' "$missing" >&2
+    bad=1
+  fi
+
+  # Retail-binary addresses are judged per comment block (cr_scan_bin_addr_scope),
+  # so staged mode feeds the whole staged blob plus the added line numbers: a
+  # new address under an existing scoped header passes, a new unscoped one fails.
+  local rows records keys='' rc=0
+  if ! rows=$(cr_known_client_rows); then
+    echo "checks: comments - cannot read the KNOWN_CLIENTS registry at $CR_CLIENT_PROFILE; the build-scope gate needs its row names" >&2
+    return 1
+  fi
+  if [ "${COMMENTS_DIFF:-}" = "staged" ]; then
+    keys=$(mktemp)
+    records=$(for f in $(git diff --cached --name-only --diff-filter=AM -- '*.rs'); do
+      git show ":$f" | grep -nE '//' | sed -E "s#^#$f:#" || true
+      git diff --cached -U0 -- "$f" | awk -v f="$f" '/^@@/ {
+        s = $3; sub(/^\+/, "", s); n = split(s, p, ","); start = p[1] + 0; cnt = (n > 1) ? p[2] + 0 : 1
+        for (i = 0; i < cnt; i++) print f ":" (start + i) }' >> "$keys"
+    done)
+  else
+    records=$lines
+  fi
+  hits=$(printf '%s\n' "$records" | cr_scan_bin_addr_scope ${keys:+"$keys"}) || rc=$?
+  [ -n "$keys" ] && rm -f "$keys"
+  if [ "$rc" -eq 2 ]; then
+    echo "checks: comments - cannot read the KNOWN_CLIENTS registry at $CR_CLIENT_PROFILE; the build-scope gate needs its row names" >&2
+    return 1
+  fi
+  if [ -n "$hits" ]; then
+    echo "checks: comments - retail-binary address without a build scope. An RVA/VA is a fact about ONE FFXiMain.dll build (they moved between horizonxi-2023 and retail-2026-09); the same comment block must name the build: a KNOWN_CLIENTS row ($(printf '%s\n' "$rows" | paste -sd ' ' -)) from ffxi-dat/src/client_profile.rs, or the DLL SHA-256 (>= $CR_BUILD_SHA_MIN_HEX hex). Say RVA or VA, never a date or an installed build:" >&2
+    printf '%s\n' "$hits" | cut -c1-200 | sed 's/^/  /' >&2
     bad=1
   fi
 
@@ -409,6 +441,38 @@ run_test() {
   cargo test --workspace --locked "${FEATURES[@]}"
 }
 
+run_install() {
+  # Retail-DAT conformance against every client install on disk: each checkout
+  # target plus FFXI_DAT_PATH when it names a different one. CI has no game
+  # assets, so an empty root list skips rather than fails. Per root the
+  # overlay/target env is cleared so the suites read exactly that install.
+  # env(1) would bypass the cargo guard function above, hence the subshell.
+  local roots=() root rp seen='|'
+  for root in vendor/game-files/targets/*/SquareEnix/"FINAL FANTASY XI" "${FFXI_DAT_PATH:-}"; do
+    [ -n "$root" ] && [ -f "$root/VTABLE.DAT" ] || continue
+    rp=$(cd "$root" && pwd -P)
+    case "$seen" in *"|$rp|"*) continue ;; esac
+    seen+="$rp|"
+    roots+=("$rp")
+  done
+  if [ ${#roots[@]} -eq 0 ]; then
+    echo "checks: install — no client install under vendor/game-files/targets/ or FFXI_DAT_PATH; skipping"
+    return 0
+  fi
+  install_cargo() { # $1=install root, rest=cargo args
+    ( unset FFXI_DAT_OVERLAYS FFXI_CLIENT_TARGET; export FFXI_DAT_PATH="$1"; shift; cargo "$@" )
+  }
+  for root in ${roots[@]+"${roots[@]}"}; do
+    echo "checks: install — $root"
+    if ! install_cargo "$root" test -p ffxi-dat --locked \
+      || ! install_cargo "$root" test -p kuluu-session --locked --test install_conformance -- --nocapture \
+      || ! install_cargo "$root" test -p kuluu-render --locked --test install_conformance --test fishing_pose_clips; then
+      echo "checks: install — conformance failed against $root" >&2
+      return 1
+    fi
+  done
+}
+
 run_enhanced() {
   # The Enhanced (non-retail) family is opt-in, so FEATURES above — the vanilla
   # gate every other stage runs — never even type-checks it, and code under
@@ -464,7 +528,7 @@ run_doc() {
 }
 
 if [[ $# -eq 0 ]]; then
-  echo "checks: no stage given (expected one or more of: fmt clippy style harness contracts test enhanced build wasm doc)" >&2
+  echo "checks: no stage given (expected one or more of: fmt clippy style harness comments contracts install test enhanced build wasm doc)" >&2
   exit 2
 fi
 
@@ -476,6 +540,7 @@ for stage in "$@"; do
     comments) echo "checks: comments"; run_comments ;;
     harness) echo "checks: harness"; run_harness ;;
     contracts) echo "checks: contracts"; run_contracts ;;
+    install) echo "checks: install"; run_install ;;
     test)   echo "checks: test";   run_test ;;
     enhanced) echo "checks: enhanced"; run_enhanced ;;
     build)  echo "checks: build";  run_build ;;

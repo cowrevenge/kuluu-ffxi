@@ -1,37 +1,63 @@
 use std::collections::BTreeMap;
+use std::ops::Range;
 use std::path::Path;
+use std::sync::Once;
 
 use crate::{DatError, Result};
 
 // research/xim MainDll.kt — table offsets are located by scanning FFXiMain.dll for a known
-// big-endian marker word, starting at 0x30000. The marker bytes ARE the first entries of the
-// table, so the matched position is used directly as the table base; per-race entries are
-// little-endian u16 at base + race_index * 2.
-const SCAN_START: usize = 0x30000;
-const SCAN_WORDS: usize = 0xC000;
+// big-endian marker word. The marker bytes ARE the first entries of the table, so the
+// matched position is used directly as the table base; per-race entries are little-endian
+// u16 at base + race_index * 2.
+//
+// Every table lives in the `.data` section: `.text` ships packed (its raw size is 0 in
+// both KNOWN_CLIENTS horizonxi-2023 and retail-2026-09) and is only unpacked at load,
+// so the file bytes of the code section hold no marker. The scan window is
+// therefore the `.data` raw span from the PE section table; the fixed window below is
+// the fallback for a file whose header does not parse.
+pub const SCAN_START: usize = 0x30000;
+pub const SCAN_WORDS: usize = 0xC000;
+/// Every marker is 4-byte aligned in both builds, so the scan steps by a word.
+const SCAN_STRIDE: usize = 4;
 
-const WEAPON_SKILL_HINT: u32 = 0xCB81_CB81;
-const DANCE_SKILL_HINT: u32 = 0xB9E2_B9E2;
+const PE_E_LFANEW_OFFSET: usize = 0x3C;
+const PE_SIGNATURE: &[u8; 4] = b"PE\0\0";
+/// COFF header fields, offset from the `PE\0\0` signature; the section table
+/// follows the signature, the COFF header and the optional header.
+const PE_NUMBER_OF_SECTIONS_OFFSET: usize = 6;
+const PE_SIZE_OF_OPTIONAL_HEADER_OFFSET: usize = 20;
+const PE_SECTION_TABLE_OFFSET: usize = 24;
+const SECTION_HEADER_SIZE: usize = 40;
+const SECTION_NAME_LEN: usize = 8;
+const SECTION_SIZE_OF_RAW_DATA_OFFSET: usize = 16;
+const SECTION_POINTER_TO_RAW_DATA_OFFSET: usize = 20;
+const DATA_SECTION_NAME: &[u8; SECTION_NAME_LEN] = b".data\0\0\0";
+
+pub const WEAPON_SKILL_HINT: u32 = 0xCB81_CB81;
+pub const DANCE_SKILL_HINT: u32 = 0xB9E2_B9E2;
 // research/xim MainDll.kt emoteAnimationOffsetHint.
-const EMOTE_HINT: u32 = 0x4827_4827;
+pub const EMOTE_HINT: u32 = 0x4827_4827;
 // research/xim MainDll.kt raceConfigLookupTableOffsetHint / actionAnimationFileTableOffsetHint.
-const RACE_CONFIG_HINT: u32 = 0xA01B_A01B;
-const ACTION_ANIM_HINT: u32 = 0xCB96_CB96;
+pub const RACE_CONFIG_HINT: u32 = 0xA01B_A01B;
+pub const ACTION_ANIM_HINT: u32 = 0xCB96_CB96;
+// research/xim MainDll.kt battleAnimationFileTableOffsetHint.
+pub const BATTLE_ANIM_HINT: u32 = 0xC825_C825;
 // research/xim MainDll.kt equipmentLookupTableOffsetHint. Unlike the per-race u16
 // tables the marker is the table's own first `(file_id, count)` pair rather than a
 // repeated word: 0x1BA8 = 7080 is HumeM's face base, and the count's high half is 0.
-const EQUIPMENT_HINT: u32 = 0xA81B_0000;
+pub const EQUIPMENT_HINT: u32 = 0xA81B_0000;
 
 /// Per-race stride of the equipment lookup table, and the per-slot stride within
 /// one race's block. research/xim resource/table/EquipmentModelTable.kt,
 /// parseRaceGenderTable.
-const EQUIPMENT_RACE_STRIDE: usize = 0x1B0;
-const EQUIPMENT_SLOT_STRIDE: usize = 0x30;
+pub const EQUIPMENT_RACE_STRIDE: usize = 0x1B0;
+pub const EQUIPMENT_SLOT_STRIDE: usize = 0x30;
 /// Each slot row is six `(first_file_id, entry_count)` pairs; a zero file id ends it.
-const EQUIPMENT_SLOT_BANDS: usize = 6;
+pub const EQUIPMENT_SLOT_BANDS: usize = 6;
 
 /// The mount pose/movement clips a rider needs (`chi?`, `{n}un?`, …) live this far
-/// past the race's action-animation base.
+/// past the race's action-animation base; the same distance in KNOWN_CLIENTS
+/// horizonxi-2023 and retail-2026-09.
 /// research/xim poc/Model.kt, PcModel.getMountAnimationResource.
 pub const ACTION_ANIM_MOUNT_OFFSET: u16 = 0x05;
 
@@ -39,9 +65,9 @@ pub const ACTION_ANIM_MOUNT_OFFSET: u16 = 0x05;
 /// (each naming the `fh0?`..`fhd?` motion clips that live alongside them) plus
 /// the `hits`/`hitl` sweat routines s2c 0x038 SCHEDULOR triggers.
 ///
-/// Measured on the retail install: race 1's action base is 38603, and 38604 is
-/// the only DAT in `base..base+8` carrying `fsh*`. Pinned by
-/// `kuluu-render/tests/fishing_pose_clips.rs`.
+/// Measured identical on KNOWN_CLIENTS horizonxi-2023 and retail-2026-09 (race 1
+/// action base 38603, fishing DAT 38604): 38604 is the only DAT in `base..base+8`
+/// carrying `fsh*`. Pinned by `kuluu-render/tests/fishing_pose_clips.rs`.
 pub const ACTION_ANIM_FISHING_OFFSET: u16 = 0x01;
 
 // research/xim ZoneMapTable.kt
@@ -51,8 +77,15 @@ const ZONE_MAP_NEXT_DIVISOR: usize = 0x13;
 const ZONE_MAP_SIZE_NUMERATOR: u16 = 2560;
 
 /// The record's low nibble at byte 4 picks which file-table base its
-/// `file_table_offset` counts from. research/xim `ZoneMapTable.getFileTableOffset`.
+/// `file_table_offset` counts from. Values from research/xim
+/// ZoneMapTable.kt getFileTableOffset. Indices 0 and 1 are content-verified
+/// on KNOWN_CLIENTS horizonxi-2023 and retail-2026-09: they are the only
+/// nibbles a zone-keyed row picks, and every such row resolves through the
+/// install's VTABLE. Index 2 occurs only on the client-only negative-key rows
+/// (148 rows, 84 of which resolve on both builds). Index 3 is unexercised by
+/// every row of both builds, so it is carried on xim's word alone.
 const ZONE_MAP_FILE_TABLE_BASES: [u32; 4] = [0x14C0, 0xD02F, 0xD147, 0x1592];
+const ZONE_MAP_EXERCISED_FILE_TABLE_BASES: usize = 3;
 const ZONE_MAP_FILE_TABLE_BASE_MASK: u8 = 0x0F;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -61,7 +94,7 @@ pub struct ZoneMapRecord {
     pub sub_zone_id: u8,
     /// The map image's own DAT file id. Carrying it here is what lets a caller
     /// take the image and the calibration below from one row, instead of
-    /// cross-referencing a table keyed on a different index (kuluu-bqm5).
+    /// cross-referencing a table keyed on a different index.
     pub file_id: u32,
     pub size: u16,
     pub x_offset: i16,
@@ -76,6 +109,7 @@ pub struct MainDll {
     zone_map_base: Option<usize>,
     race_config_base: Option<usize>,
     action_anim_base: Option<usize>,
+    battle_anim_base: Option<usize>,
     equipment_base: Option<usize>,
 }
 
@@ -86,19 +120,21 @@ impl MainDll {
             path: path.clone(),
             source,
         })?;
+        let window = scan_window(&bytes);
         let weapon_skill_base =
-            find_offset(&bytes, WEAPON_SKILL_HINT).ok_or(DatError::DllMarkerNotFound {
+            find_offset(&bytes, &window, WEAPON_SKILL_HINT).ok_or(DatError::DllMarkerNotFound {
                 hint: WEAPON_SKILL_HINT,
             })?;
         let dance_skill_base =
-            find_offset(&bytes, DANCE_SKILL_HINT).ok_or(DatError::DllMarkerNotFound {
+            find_offset(&bytes, &window, DANCE_SKILL_HINT).ok_or(DatError::DllMarkerNotFound {
                 hint: DANCE_SKILL_HINT,
             })?;
-        let emote_base = find_offset(&bytes, EMOTE_HINT);
-        let zone_map_base = find_offset_u64(&bytes, ZONE_MAP_HINT);
-        let race_config_base = find_offset(&bytes, RACE_CONFIG_HINT);
-        let action_anim_base = find_offset(&bytes, ACTION_ANIM_HINT);
-        let equipment_base = find_offset(&bytes, EQUIPMENT_HINT);
+        let emote_base = find_offset(&bytes, &window, EMOTE_HINT);
+        let zone_map_base = find_offset_u64(&bytes, &window, ZONE_MAP_HINT);
+        let race_config_base = find_offset(&bytes, &window, RACE_CONFIG_HINT);
+        let action_anim_base = find_offset(&bytes, &window, ACTION_ANIM_HINT);
+        let battle_anim_base = find_offset(&bytes, &window, BATTLE_ANIM_HINT);
+        let equipment_base = find_offset(&bytes, &window, EQUIPMENT_HINT);
         Ok(Self {
             bytes,
             weapon_skill_base,
@@ -107,6 +143,7 @@ impl MainDll {
             zone_map_base,
             race_config_base,
             action_anim_base,
+            battle_anim_base,
             equipment_base,
         })
     }
@@ -119,7 +156,7 @@ impl MainDll {
 
     /// Every map the zone ships, in table order. A quarter of the zones number
     /// their maps from 1, so callers must enumerate rather than assume a
-    /// sub-zone 0 exists (kuluu-bqm5).
+    /// sub-zone 0 exists.
     pub fn zone_maps(&self, zone_id: u16) -> Vec<ZoneMapRecord> {
         let mut out = Vec::new();
         self.for_each_zone_map(|rec| {
@@ -132,13 +169,14 @@ impl MainDll {
 
     /// How many maps each zone ships, ascending by zone id. One walk, so a
     /// caller that needs every zone's count (the Change Map list) does not
-    /// re-walk the table per zone (kuluu-u8p1).
+    /// re-walk the table per zone.
     ///
     /// Rows whose key is negative are skipped: the field is signed (research/xim
     /// ZoneMapTable.kt reads it with `next16Signed`) and xim only reaches those
     /// rows through a zone's `customDefinition.zoneMapId`, never through a zone
-    /// id the server sends. On the retail install they are the 0xFF07..0xFFFF
-    /// band -- 153 keys, none of them a zone.
+    /// id the server sends. Identical on KNOWN_CLIENTS horizonxi-2023 and
+    /// retail-2026-09: they are the 0xFF07..0xFFFF band, 153 keys, none of
+    /// them a zone.
     pub fn zone_map_counts(&self) -> BTreeMap<u16, usize> {
         let mut counts: BTreeMap<u16, usize> = BTreeMap::new();
         self.for_each_zone_map(|rec| {
@@ -200,6 +238,13 @@ impl MainDll {
         self.read16(self.action_anim_base? + race_index as usize * 2)
     }
 
+    /// First file of the race's battle-animation block (the per-weapon-type
+    /// engaged stances and attack motions). research/xim MainDll.kt,
+    /// getBaseBattleAnimationIndex.
+    pub fn base_battle_animation_index(&self, race_index: u8) -> Option<u16> {
+        self.read16(self.battle_anim_base? + race_index as usize * 2)
+    }
+
     /// Model DAT for one equipment slot of one race. `table_index` is the race's
     /// *equipment* table row, which is not the race index for the non-playable
     /// configs (the chocobo's race 32 uses row 12; research/xim poc/Model.kt,
@@ -242,16 +287,56 @@ impl MainDll {
     }
 }
 
-fn find_offset(bytes: &[u8], hint: u32) -> Option<usize> {
-    let mut pos = SCAN_START;
-    for _ in 0..SCAN_WORDS {
-        let b = bytes.get(pos..pos + 4)?;
-        if u32::from_be_bytes([b[0], b[1], b[2], b[3]]) == hint {
-            return Some(pos);
-        }
-        pos += 4;
+fn read_u16_le(bytes: &[u8], off: usize) -> Option<u16> {
+    let b = bytes.get(off..off + 2)?;
+    Some(u16::from_le_bytes([b[0], b[1]]))
+}
+
+fn read_u32_le(bytes: &[u8], off: usize) -> Option<u32> {
+    let b = bytes.get(off..off + 4)?;
+    Some(u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+}
+
+/// The `.data` section's raw file span, clipped to the file, from the PE
+/// section table; `None` when the image has no parseable section table or
+/// no `.data` section.
+fn data_section_span(bytes: &[u8]) -> Option<Range<usize>> {
+    let pe = read_u32_le(bytes, PE_E_LFANEW_OFFSET)? as usize;
+    if bytes.get(pe..pe + PE_SIGNATURE.len())? != PE_SIGNATURE {
+        return None;
     }
-    None
+    let sections = read_u16_le(bytes, pe + PE_NUMBER_OF_SECTIONS_OFFSET)? as usize;
+    let optional = read_u16_le(bytes, pe + PE_SIZE_OF_OPTIONAL_HEADER_OFFSET)? as usize;
+    let table = pe + PE_SECTION_TABLE_OFFSET + optional;
+    (0..sections)
+        .map(|i| table + i * SECTION_HEADER_SIZE)
+        .find(|&at| bytes.get(at..at + SECTION_NAME_LEN) == Some(DATA_SECTION_NAME))
+        .and_then(|at| {
+            let raw = read_u32_le(bytes, at + SECTION_SIZE_OF_RAW_DATA_OFFSET)? as usize;
+            let ptr = read_u32_le(bytes, at + SECTION_POINTER_TO_RAW_DATA_OFFSET)? as usize;
+            let end = ptr.checked_add(raw)?.min(bytes.len());
+            (ptr < end).then_some(ptr..end)
+        })
+}
+
+fn scan_window(bytes: &[u8]) -> Range<usize> {
+    data_section_span(bytes).unwrap_or(SCAN_START..SCAN_START + SCAN_WORDS * SCAN_STRIDE)
+}
+
+fn find_offset(bytes: &[u8], window: &Range<usize>, hint: u32) -> Option<usize> {
+    window.clone().step_by(SCAN_STRIDE).find(|&pos| {
+        bytes
+            .get(pos..pos + 4)
+            .is_some_and(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]) == hint)
+    })
+}
+
+fn find_offset_u64(bytes: &[u8], window: &Range<usize>, hint: u64) -> Option<usize> {
+    window.clone().step_by(SCAN_STRIDE).find(|&pos| {
+        bytes.get(pos..pos + 8).is_some_and(|b| {
+            u64::from_be_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]) == hint
+        })
+    })
 }
 
 /// One `ZONE_MAP_STRIDE`-byte row. `None` when the divisor is 0, which is how
@@ -261,8 +346,16 @@ fn parse_zone_map(rec: &[u8]) -> Option<ZoneMapRecord> {
     if divisor == 0 {
         return None;
     }
-    let base =
-        *ZONE_MAP_FILE_TABLE_BASES.get(usize::from(rec[4] & ZONE_MAP_FILE_TABLE_BASE_MASK))?;
+    let table_index = usize::from(rec[4] & ZONE_MAP_FILE_TABLE_BASE_MASK);
+    let base = *ZONE_MAP_FILE_TABLE_BASES.get(table_index)?;
+    if table_index >= ZONE_MAP_EXERCISED_FILE_TABLE_BASES {
+        static UNEXERCISED_BASE: Once = Once::new();
+        UNEXERCISED_BASE.call_once(|| {
+            eprintln!(
+                "FFXiMain.dll zone-map table: file-table base index {table_index} ({base:#x}) is exercised by no row of any known client; trusting research/xim"
+            );
+        });
+    }
     let file_table_offset = i16::from_le_bytes([rec[8], rec[9]]);
     Some(ZoneMapRecord {
         zone_id: u16::from_le_bytes([rec[0], rec[1]]),
@@ -274,35 +367,101 @@ fn parse_zone_map(rec: &[u8]) -> Option<ZoneMapRecord> {
     })
 }
 
-fn find_offset_u64(bytes: &[u8], hint: u64) -> Option<usize> {
-    let mut pos = SCAN_START;
-    for _ in 0..SCAN_WORDS {
-        let b = bytes.get(pos..pos + 8)?;
-        let word = u64::from_be_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]);
-        if word == hint {
-            return Some(pos);
-        }
-        pos += 4;
-    }
-    None
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const FALLBACK_WINDOW: Range<usize> = SCAN_START..SCAN_START + SCAN_WORDS * SCAN_STRIDE;
 
     #[test]
     fn find_offset_matches_big_endian_marker_word_aligned() {
         let mut bytes = vec![0u8; SCAN_START + 0x40];
         let at = SCAN_START + 0x20;
         bytes[at..at + 4].copy_from_slice(&0xCB81_CB81u32.to_be_bytes());
-        assert_eq!(find_offset(&bytes, WEAPON_SKILL_HINT), Some(at));
+        assert_eq!(
+            find_offset(&bytes, &FALLBACK_WINDOW, WEAPON_SKILL_HINT),
+            Some(at)
+        );
     }
 
     #[test]
     fn find_offset_none_when_absent() {
         let bytes = vec![0u8; SCAN_START + 0x40];
-        assert_eq!(find_offset(&bytes, WEAPON_SKILL_HINT), None);
+        assert_eq!(
+            find_offset(&bytes, &FALLBACK_WINDOW, WEAPON_SKILL_HINT),
+            None
+        );
+    }
+
+    #[test]
+    fn scan_window_falls_back_when_there_is_no_pe_header() {
+        assert_eq!(scan_window(&[0u8; 0x100]), FALLBACK_WINDOW);
+        assert_eq!(scan_window(&[]), FALLBACK_WINDOW);
+        let mut bytes = vec![0u8; 0x200];
+        bytes[PE_E_LFANEW_OFFSET..PE_E_LFANEW_OFFSET + 4].copy_from_slice(&0x80u32.to_le_bytes());
+        bytes[0x80..0x84].copy_from_slice(b"NE\0\0");
+        assert_eq!(scan_window(&bytes), FALLBACK_WINDOW);
+    }
+
+    /// A minimal image: DOS stub pointer, `PE\0\0`, a COFF header naming two
+    /// sections with an empty optional header, then `.text` and `.data` rows.
+    fn synthetic_pe(data_ptr: u32, data_raw: u32, total: usize) -> Vec<u8> {
+        let pe = 0x80usize;
+        let mut bytes = vec![0u8; total];
+        bytes[PE_E_LFANEW_OFFSET..PE_E_LFANEW_OFFSET + 4]
+            .copy_from_slice(&(pe as u32).to_le_bytes());
+        bytes[pe..pe + 4].copy_from_slice(PE_SIGNATURE);
+        bytes[pe + PE_NUMBER_OF_SECTIONS_OFFSET..pe + PE_NUMBER_OF_SECTIONS_OFFSET + 2]
+            .copy_from_slice(&2u16.to_le_bytes());
+        let table = pe + PE_SECTION_TABLE_OFFSET;
+        bytes[table..table + SECTION_NAME_LEN].copy_from_slice(b".text\0\0\0");
+        bytes[table + SECTION_POINTER_TO_RAW_DATA_OFFSET
+            ..table + SECTION_POINTER_TO_RAW_DATA_OFFSET + 4]
+            .copy_from_slice(&0x400u32.to_le_bytes());
+        let data = table + SECTION_HEADER_SIZE;
+        bytes[data..data + SECTION_NAME_LEN].copy_from_slice(DATA_SECTION_NAME);
+        bytes[data + SECTION_SIZE_OF_RAW_DATA_OFFSET..data + SECTION_SIZE_OF_RAW_DATA_OFFSET + 4]
+            .copy_from_slice(&data_raw.to_le_bytes());
+        bytes[data + SECTION_POINTER_TO_RAW_DATA_OFFSET
+            ..data + SECTION_POINTER_TO_RAW_DATA_OFFSET + 4]
+            .copy_from_slice(&data_ptr.to_le_bytes());
+        bytes
+    }
+
+    #[test]
+    fn scan_window_is_the_data_section_from_the_section_table() {
+        let bytes = synthetic_pe(0x1000, 0x800, 0x2000);
+        assert_eq!(scan_window(&bytes), 0x1000..0x1800);
+    }
+
+    #[test]
+    fn scan_window_clips_a_data_section_that_overruns_the_file() {
+        let bytes = synthetic_pe(0x1000, 0x8000, 0x1400);
+        assert_eq!(scan_window(&bytes), 0x1000..0x1400);
+        let bytes = synthetic_pe(0x4000, 0x100, 0x1400);
+        assert_eq!(
+            scan_window(&bytes),
+            FALLBACK_WINDOW,
+            "a section past EOF is no window"
+        );
+    }
+
+    #[test]
+    fn find_offset_ignores_a_marker_outside_the_data_section() {
+        let mut bytes = synthetic_pe(0x1000, 0x800, 0x2000);
+        let outside = 0x800;
+        let inside = 0x1400;
+        bytes[outside..outside + 4].copy_from_slice(&WEAPON_SKILL_HINT.to_be_bytes());
+        bytes[inside..inside + 4].copy_from_slice(&WEAPON_SKILL_HINT.to_be_bytes());
+        let window = scan_window(&bytes);
+        assert_eq!(
+            find_offset(&bytes, &window, WEAPON_SKILL_HINT),
+            Some(inside)
+        );
+        let past = 0x1900;
+        bytes[inside..inside + 4].fill(0);
+        bytes[past..past + 4].copy_from_slice(&WEAPON_SKILL_HINT.to_be_bytes());
+        assert_eq!(find_offset(&bytes, &window, WEAPON_SKILL_HINT), None);
     }
 
     #[test]
@@ -319,12 +478,14 @@ mod tests {
             emote_base: Some(base),
             race_config_base: Some(base),
             action_anim_base: Some(base),
+            battle_anim_base: Some(base),
             ..blank(bytes)
         };
         assert_eq!(dll.base_weapon_skill_index(1), Some(0x1234));
         assert_eq!(dll.base_emote_index(1), Some(0x1234));
         assert_eq!(dll.base_race_config_index(1), Some(0x1234));
         assert_eq!(dll.base_action_animation_index(1), Some(0x1234));
+        assert_eq!(dll.base_battle_animation_index(1), Some(0x1234));
     }
 
     #[test]
@@ -333,6 +494,7 @@ mod tests {
         assert_eq!(dll.base_emote_index(1), None);
         assert_eq!(dll.base_race_config_index(1), None);
         assert_eq!(dll.base_action_animation_index(1), None);
+        assert_eq!(dll.base_battle_animation_index(1), None);
         assert_eq!(dll.equipment_model_index(1, 0, 0), None);
     }
 
@@ -380,6 +542,7 @@ mod tests {
             zone_map_base: None,
             race_config_base: None,
             action_anim_base: None,
+            battle_anim_base: None,
             equipment_base: None,
         }
     }
@@ -407,6 +570,25 @@ mod tests {
         assert_eq!((rec.x_offset, rec.y_offset), (10, -20));
         assert_eq!(dll.zone_map(230, 0).map(|r| r.size), Some(320));
         assert_eq!(dll.zone_map(999, 0), None);
+    }
+
+    #[test]
+    fn zone_map_file_table_base_follows_the_low_nibble() {
+        for (nibble, base) in ZONE_MAP_FILE_TABLE_BASES.iter().enumerate() {
+            let mut rec = [0u8; ZONE_MAP_STRIDE];
+            rec[4] = 0xF0 | nibble as u8;
+            rec[5] = 4;
+            rec[8..10].copy_from_slice(&7i16.to_le_bytes());
+            assert_eq!(parse_zone_map(&rec).map(|r| r.file_id), Some(base + 7));
+        }
+        let mut rec = [0u8; ZONE_MAP_STRIDE];
+        rec[4] = ZONE_MAP_FILE_TABLE_BASES.len() as u8;
+        rec[5] = 4;
+        assert_eq!(
+            parse_zone_map(&rec),
+            None,
+            "a nibble past the table is no record"
+        );
     }
 
     #[test]
@@ -438,15 +620,23 @@ mod tests {
         assert_eq!(dll.zone_map_counts().get(&999), None);
     }
 
-    /// Gated on a retail install (self-skips). The Change Map list is built from
+    /// The install under test plus its DLL; `None` (after saying so) when no
+    /// install is reachable.
+    fn open_test_dll() -> Option<(crate::archive::DatRoot, MainDll)> {
+        let Some(root) = crate::archive::open_test_install() else {
+            eprintln!("skipping: no FFXI install");
+            return None;
+        };
+        let dll = MainDll::load(root.root()).expect("FFXiMain.dll beside the install's VTABLE");
+        Some((root, dll))
+    }
+
+    /// Gated on an install (self-skips). The Change Map list is built from
     /// `zone_map_counts`, so a count that disagrees with the per-zone walk the
-    /// loader indexes would put a row on screen that previews blank (kuluu-u8p1).
+    /// loader indexes would put a row on screen that previews blank.
     #[test]
     fn real_dll_zone_map_counts_agree_with_the_per_zone_walk() {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("..")
-            .join(crate::archive::DEFAULT_INSTALL_DIR);
-        let Ok(dll) = MainDll::load(&root) else {
+        let Some((_, dll)) = open_test_dll() else {
             return;
         };
 
@@ -500,15 +690,12 @@ mod tests {
         );
     }
 
-    /// Gated on a retail install (self-skips). The defect this guards is a
+    /// Gated on an install (self-skips). The defect this guards is a
     /// zone whose maps are numbered from 1 being looked up at sub-zone 0 and
-    /// silently coming back empty (kuluu-bqm5).
+    /// silently coming back empty.
     #[test]
     fn real_dll_zone_maps_cover_every_zone_that_ships_one() {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("..")
-            .join(crate::archive::DEFAULT_INSTALL_DIR);
-        let Ok(dll) = MainDll::load(&root) else {
+        let Some((_, dll)) = open_test_dll() else {
             return;
         };
 
@@ -542,5 +729,260 @@ mod tests {
             enumerated > from_zero,
             "enumerating reaches more zones than a sub-zone-0 lookup ({enumerated} vs {from_zero})"
         );
+    }
+
+    /// Per-race table contents, identical on KNOWN_CLIENTS horizonxi-2023 and
+    /// retail-2026-09. Each vector is races 1..=8 (HumeM..GalkaM); race 6 is
+    /// the Tarutaru female slot that repeats the male's tables.
+    const RACE_RANGE: std::ops::RangeInclusive<u8> = 1..=8;
+    const WEAPON_SKILL_BY_RACE: [u16; 8] = [33227, 33995, 34763, 35531, 36299, 36299, 37067, 37835];
+    const DANCE_SKILL_BY_RACE: [u16; 8] = [58041, 58425, 58809, 59193, 59577, 59577, 59961, 60345];
+    const EMOTE_BY_RACE: [u16; 8] = [10056, 13232, 16408, 19584, 22760, 22984, 26160, 29336];
+    const RACE_CONFIG_BY_RACE: [u16; 8] = [7072, 10248, 13424, 16600, 19776, 19776, 23176, 26352];
+    const ACTION_ANIM_BY_RACE: [u16; 8] = [38603, 38699, 38795, 38891, 38987, 38987, 39083, 39179];
+    const BATTLE_ANIM_BY_RACE: [u16; 8] = [9672, 12848, 16024, 19200, 22376, 22376, 25776, 28952];
+    /// The ridden-chocobo configs, one per colour, at race indices 32..=36.
+    const CHOCOBO_RACE_RANGE: std::ops::RangeInclusive<u8> = 32..=36;
+    const RACE_CONFIG_BY_CHOCOBO: [u16; 5] = [55295, 55329, 55363, 55397, 55431];
+
+    fn per_race(f: impl Fn(u8) -> Option<u16>, races: std::ops::RangeInclusive<u8>) -> Vec<u16> {
+        races.map(|r| f(r).expect("race in table")).collect()
+    }
+
+    /// Gated on an install (self-skips).
+    #[test]
+    fn real_dll_per_race_tables_match_both_known_clients() {
+        let Some((_, dll)) = open_test_dll() else {
+            return;
+        };
+        assert_eq!(
+            per_race(|r| dll.base_weapon_skill_index(r), RACE_RANGE),
+            WEAPON_SKILL_BY_RACE
+        );
+        assert_eq!(
+            per_race(|r| dll.base_dance_skill_index(r), RACE_RANGE),
+            DANCE_SKILL_BY_RACE
+        );
+        assert_eq!(
+            per_race(|r| dll.base_emote_index(r), RACE_RANGE),
+            EMOTE_BY_RACE
+        );
+        assert_eq!(
+            per_race(|r| dll.base_race_config_index(r), RACE_RANGE),
+            RACE_CONFIG_BY_RACE
+        );
+        assert_eq!(
+            per_race(|r| dll.base_race_config_index(r), CHOCOBO_RACE_RANGE),
+            RACE_CONFIG_BY_CHOCOBO
+        );
+        assert_eq!(
+            per_race(|r| dll.base_action_animation_index(r), RACE_RANGE),
+            ACTION_ANIM_BY_RACE
+        );
+        assert_eq!(
+            per_race(|r| dll.base_battle_animation_index(r), RACE_RANGE),
+            BATTLE_ANIM_BY_RACE
+        );
+        assert_eq!(
+            dll.base_action_animation_index(1)
+                .map(|b| b + ACTION_ANIM_FISHING_OFFSET),
+            Some(38604),
+            "the fishing DAT the pose-clip test opens"
+        );
+    }
+
+    /// Gated on an install (self-skips). `(table_index, slot, model_id)` cells
+    /// of the equipment table, identical on both known clients.
+    #[test]
+    fn real_dll_equipment_cells_match_both_known_clients() {
+        let Some((_, dll)) = open_test_dll() else {
+            return;
+        };
+        for (table_index, slot, model_id, expected) in [
+            (1u8, 0u8, 0u16, Some(7080u32)),
+            (1, 1, 304, Some(63371)),
+            (1, 6, 928, Some(107333)),
+            (1, 6, 1196, None),
+            (12, 2, 0, Some(55297)),
+            (6, 0, 0, Some(22952)),
+        ] {
+            assert_eq!(
+                dll.equipment_model_index(table_index, slot, model_id),
+                expected,
+                "row {table_index} slot {slot} model {model_id}"
+            );
+        }
+    }
+
+    /// Gated on an install (self-skips). Row and key totals of the zone-map
+    /// table, identical on both known clients.
+    #[test]
+    fn real_dll_zone_map_totals_match_both_known_clients() {
+        let Some((_, dll)) = open_test_dll() else {
+            return;
+        };
+        let mut rows = 0usize;
+        let mut negative = std::collections::BTreeSet::new();
+        let mut nibbles = std::collections::BTreeSet::new();
+        dll.for_each_zone_map(|rec| {
+            rows += 1;
+            if (rec.zone_id as i16) < 0 {
+                negative.insert(rec.zone_id);
+            }
+        });
+        for rec in zone_map_raw_rows(&dll) {
+            if rec[5] != 0 && (u16::from_le_bytes([rec[0], rec[1]]) as i16) >= 0 {
+                nibbles.insert(rec[4] & ZONE_MAP_FILE_TABLE_BASE_MASK);
+            }
+        }
+        assert_eq!(rows, 829, "rows with a drawable map");
+        assert_eq!(negative.len(), 153, "distinct client-only keys");
+        let counts = dll.zone_map_counts();
+        assert_eq!(counts.len(), 231, "zones with at least one map");
+        assert_eq!(counts.get(&238).copied(), Some(2));
+        assert_eq!(counts.get(&157).copied(), Some(6));
+        assert_eq!(
+            nibbles,
+            std::collections::BTreeSet::from([0u8, 1]),
+            "zone-keyed rows only ever pick the first two file-table bases"
+        );
+    }
+
+    /// Raw rows of the zone-map table, walked with the same terminator as
+    /// `for_each_zone_map`, for tests that need the file-table nibble the
+    /// parsed record does not carry.
+    fn zone_map_raw_rows(dll: &MainDll) -> Vec<&[u8]> {
+        let mut rows = Vec::new();
+        let Some(mut base) = dll.zone_map_base else {
+            return rows;
+        };
+        while let Some(rec) = dll.bytes.get(base..base + ZONE_MAP_STRIDE) {
+            rows.push(rec);
+            match dll.bytes.get(base + ZONE_MAP_NEXT_DIVISOR) {
+                Some(0) | None => break,
+                Some(_) => base += ZONE_MAP_STRIDE,
+            }
+        }
+        rows
+    }
+
+    /// Gated on an install (self-skips). Every zone-keyed record's file id is a
+    /// DAT the install's VTABLE knows, which is what makes the first two
+    /// file-table bases content-verified. The client-only negative keys are
+    /// the only rows that reach base index 2, and only part of them resolve,
+    /// so that base is pinned as partially verified rather than trusted.
+    #[test]
+    fn real_dll_every_zone_keyed_map_resolves_through_the_install() {
+        let Some((root, dll)) = open_test_dll() else {
+            return;
+        };
+        let mut tally: BTreeMap<(bool, u8), (usize, usize)> = BTreeMap::new();
+        let mut unresolved_zone_keyed = Vec::new();
+        let mut unresolved_client_only = std::collections::BTreeSet::new();
+        for raw in zone_map_raw_rows(&dll) {
+            let Some(rec) = parse_zone_map(raw) else {
+                continue;
+            };
+            let zone_keyed = rec.zone_id as i16 >= 0;
+            let nibble = raw[4] & ZONE_MAP_FILE_TABLE_BASE_MASK;
+            let entry = tally.entry((zone_keyed, nibble)).or_default();
+            entry.0 += 1;
+            if root.resolve(rec.file_id).is_ok() {
+                entry.1 += 1;
+            } else if zone_keyed {
+                unresolved_zone_keyed.push(rec);
+            } else {
+                unresolved_client_only.insert(rec.file_id);
+            }
+        }
+        assert!(
+            unresolved_zone_keyed.is_empty(),
+            "unresolved zone-keyed map DATs: {unresolved_zone_keyed:?}"
+        );
+        assert_eq!(
+            tally,
+            BTreeMap::from([
+                ((true, 0u8), (284usize, 284usize)),
+                ((true, 1), (377, 377)),
+                ((false, 0), (20, 20)),
+                ((false, 2), (148, 84)),
+            ]),
+            "(zone-keyed, base nibble) -> (rows, resolved)"
+        );
+        assert_eq!(
+            unresolved_client_only,
+            (53659u32..=53724)
+                .filter(|id| !matches!(id, 53690 | 53691))
+                .collect(),
+            "the client-only file ids base index 2 leaves unresolved, identical on both known clients"
+        );
+    }
+
+    fn first_occurrence(bytes: &[u8], needle: &[u8]) -> Option<usize> {
+        bytes.windows(needle.len()).position(|w| w == needle)
+    }
+
+    /// Gated on an install (self-skips). Each marker's table base is the
+    /// file's first occurrence of its hint at any alignment, inside `.data`.
+    #[test]
+    fn real_dll_every_marker_is_first_hit_inside_the_data_section() {
+        let Some((_, dll)) = open_test_dll() else {
+            return;
+        };
+        let data = data_section_span(&dll.bytes).expect("a PE section table naming .data");
+        let markers: [(&str, Option<usize>, Vec<u8>); 8] = [
+            (
+                "weapon",
+                Some(dll.weapon_skill_base),
+                WEAPON_SKILL_HINT.to_be_bytes().to_vec(),
+            ),
+            (
+                "dance",
+                Some(dll.dance_skill_base),
+                DANCE_SKILL_HINT.to_be_bytes().to_vec(),
+            ),
+            ("emote", dll.emote_base, EMOTE_HINT.to_be_bytes().to_vec()),
+            (
+                "race_config",
+                dll.race_config_base,
+                RACE_CONFIG_HINT.to_be_bytes().to_vec(),
+            ),
+            (
+                "action_anim",
+                dll.action_anim_base,
+                ACTION_ANIM_HINT.to_be_bytes().to_vec(),
+            ),
+            (
+                "battle_anim",
+                dll.battle_anim_base,
+                BATTLE_ANIM_HINT.to_be_bytes().to_vec(),
+            ),
+            (
+                "equipment",
+                dll.equipment_base,
+                EQUIPMENT_HINT.to_be_bytes().to_vec(),
+            ),
+            (
+                "zone_map",
+                dll.zone_map_base,
+                ZONE_MAP_HINT.to_be_bytes().to_vec(),
+            ),
+        ];
+        for (name, base, needle) in markers {
+            let base = base.unwrap_or_else(|| panic!("{name} marker found"));
+            assert!(
+                data.contains(&base),
+                "{name} base {base:#x} inside .data {data:#x?}"
+            );
+            assert!(
+                base.is_multiple_of(SCAN_STRIDE),
+                "{name} base is word-aligned"
+            );
+            assert_eq!(
+                first_occurrence(&dll.bytes, &needle),
+                Some(base),
+                "{name} base is the file's first occurrence of its hint"
+            );
+        }
     }
 }

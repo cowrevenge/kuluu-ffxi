@@ -1,12 +1,18 @@
 use std::env;
+use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::RwLock;
 
 use crate::client_profile::ClientProfile;
-use crate::ftable::{FTable, SubPath};
+use crate::ftable::{FTable, SubPath, FTABLE_BYTES_PER_FILE_ID};
 use crate::vtable::VTable;
 use crate::{DatError, Result};
 
+/// XIClient's LoadFileTables stops at INDEX_ROM_MAX, which is 13
+/// (research/XIClient/src/XIClient/include/Constants/Values.h); POLUtils
+/// DoFullFileScan (vendor/POLUtils/MassExtractor/Program.cs) probes up to
+/// ROM19, and so does this crate so a newer install than that client still
+/// resolves.
 const MAX_ROM_INDEX: u8 = 19;
 
 pub const DAT_PATH_ENV: &str = "FFXI_DAT_PATH";
@@ -110,8 +116,8 @@ fn game_dir(install_root: &Path) -> Option<PathBuf> {
 /// Pivot indexes them `0=`, `1=`, … and we search in that order, first match
 /// wins. That precedence is NOT confirmed against Pivot's source (none is
 /// vendored) and the shipped `pivotSettingsHolder.ini` comment contradicts its
-/// own entries; it is unobservable on the install measured for kuluu-gp3s, where
-/// no two overlays claim the same path.
+/// own entries; it is unobservable on the horizonxi-2023 target
+/// (vendor/game-files/targets/hxi), where no two overlays claim the same path.
 fn parse_pivot_ini(ini: &str) -> (Option<PathBuf>, Vec<String>) {
     let mut root_path = None;
     let mut entries: Vec<(u32, String)> = Vec::new();
@@ -201,7 +207,7 @@ impl DatLocation {
     /// Windows, whose fopen is case-insensitive, so an install (or a
     /// hand-assembled overlay) can mix `.DAT` with `.dat` and the real client
     /// never notices; only a case-sensitive filesystem — a Linux user's
-    /// wine/launcher-managed install (kuluu-39fi) — can tell them apart.
+    /// wine/launcher-managed install — can tell them apart.
     fn find_under(&self, dir: &Path) -> Option<PathBuf> {
         ["DAT", "dat"]
             .into_iter()
@@ -218,11 +224,71 @@ struct AppTables {
     ftable: FTable,
 }
 
+/// A ROM left out of the merge because a table is not the size the base
+/// tables dictate. LoadFileTables
+/// (research/XIClient/src/XIClient/source/System/FileIO/FileIOVirtualFileSystem.cpp)
+/// aborts the whole load on this; a user-assembled install is better served by
+/// the ROMs that do fit, with the rejected one reported through
+/// [`DatRoot::skipped_tables`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TableSizeMismatch {
+    pub rom_dir: String,
+    pub path: PathBuf,
+    pub len: u64,
+    pub expected: u64,
+}
+
+impl fmt::Display for TableSizeMismatch {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{} skipped: {} is {} bytes, the base tables dictate {}",
+            self.rom_dir,
+            self.path.display(),
+            self.len,
+            self.expected
+        )
+    }
+}
+
+fn check_table_sizes(
+    rom_dir: &str,
+    vtable: &VTable,
+    ftable: &FTable,
+    file_id_count: u32,
+) -> std::result::Result<(), TableSizeMismatch> {
+    let mismatch = |path: &Path, len: u64, expected: u64| TableSizeMismatch {
+        rom_dir: rom_dir.to_string(),
+        path: path.to_path_buf(),
+        len,
+        expected,
+    };
+    if vtable.len() != file_id_count {
+        return Err(mismatch(
+            vtable.source(),
+            u64::from(vtable.len()),
+            u64::from(file_id_count),
+        ));
+    }
+    let ftable_bytes = u64::from(ftable.len()) * FTABLE_BYTES_PER_FILE_ID as u64;
+    let expected_ftable_bytes = u64::from(vtable.len()) * FTABLE_BYTES_PER_FILE_ID as u64;
+    if ftable_bytes != expected_ftable_bytes {
+        return Err(mismatch(
+            ftable.source(),
+            ftable_bytes,
+            expected_ftable_bytes,
+        ));
+    }
+    Ok(())
+}
+
 #[derive(Debug)]
 pub struct DatRoot {
     root: PathBuf,
     profile: ClientProfile,
+    /// Ascending `rom_index`; [`DatRoot::resolve`] walks it backwards.
     apps: Vec<AppTables>,
+    skipped: Vec<TableSizeMismatch>,
     /// Behind a lock because the renderer shares one `Arc<DatRoot>`: swapping
     /// overlays must be visible through that handle without rebuilding the root
     /// (which would re-read every VTABLE/FTABLE) or replacing the `Arc` at every
@@ -233,7 +299,8 @@ pub struct DatRoot {
 impl DatRoot {
     pub fn open(root: impl Into<PathBuf>) -> Result<Self> {
         let root = root.into();
-        let mut apps = Vec::new();
+        let mut apps: Vec<AppTables> = Vec::new();
+        let mut skipped = Vec::new();
 
         for i in 1..=MAX_ROM_INDEX {
             let (rom_dir, vt_path, ft_path) = appid_paths(&root, i);
@@ -242,6 +309,11 @@ impl DatRoot {
             }
             let vtable = VTable::load(&vt_path)?;
             let ftable = FTable::load(&ft_path)?;
+            let file_id_count = apps.first().map_or(vtable.len(), |base| base.vtable.len());
+            if let Err(mismatch) = check_table_sizes(&rom_dir, &vtable, &ftable, file_id_count) {
+                skipped.push(mismatch);
+                continue;
+            }
             apps.push(AppTables {
                 rom_index: i,
                 rom_dir,
@@ -266,6 +338,7 @@ impl DatRoot {
             root,
             profile,
             apps,
+            skipped,
             overlays,
         })
     }
@@ -348,8 +421,23 @@ impl DatRoot {
             .collect()
     }
 
+    /// ROMs whose tables were rejected at open; empty on a well-formed install.
+    pub fn skipped_tables(&self) -> &[TableSizeMismatch] {
+        &self.skipped
+    }
+
+    /// Size of the file-id space: the base VTABLE's length, which every
+    /// accepted expansion table matches.
+    pub fn file_id_count(&self) -> u32 {
+        self.apps.first().map_or(0, |base| base.vtable.len())
+    }
+
+    /// The highest ROM claiming `file_id` owns it. LoadFileTables
+    /// (research/XIClient/src/XIClient/source/System/FileIO/FileIOVirtualFileSystem.cpp)
+    /// merges ROM2..INDEX_ROM_MAX ascending into the base tables and overwrites
+    /// the owner on every claim, so a later ROM's copy shadows an earlier one.
     pub fn resolve(&self, file_id: u32) -> Result<DatLocation> {
-        for app in &self.apps {
+        for app in self.apps.iter().rev() {
             if app.vtable.contains(file_id, app.rom_index) {
                 let sub_path = app.ftable.sub_path(file_id)?;
                 return Ok(DatLocation {
@@ -363,8 +451,9 @@ impl DatRoot {
 }
 
 /// Test-support entry point, `pub` only so real-DAT guards in sibling crates can
-/// share it. Opens `FFXI_DAT_PATH` if set and usable, else the default install
-/// resolved relative to the crate (works regardless of the test CWD, unlike
+/// share it. Opens `FFXI_DAT_PATH` if set and usable, else the checkout target
+/// named by `FFXI_CLIENT_TARGET`, else the default install resolved relative to
+/// the crate (works regardless of the test CWD, unlike
 /// [`DatRoot::from_env_or_default`]'s relative path). `None` — with a printed
 /// reason, so a vacuous pass is never mistaken for a real one — when no install
 /// is present.
@@ -376,15 +465,27 @@ pub fn open_test_install() -> Option<DatRoot> {
         // A stale FFXI_DAT_PATH in a shell must not turn every real-DAT test into a silent
         // skip, so say so and still try the vendored install.
         Err(e) => eprintln!(
-            "real-DAT guard: FFXI_DAT_PATH unusable ({e}); trying the vendored install instead"
+            "real-DAT guard: {DAT_PATH_ENV} unusable ({e}); trying the vendored install instead"
         ),
+    }
+    if let Some(name) = env::var_os(CLIENT_TARGET_ENV) {
+        let name = name.to_string_lossy();
+        match workspace_target(&name).map(DatRoot::open) {
+            Some(Ok(root)) => return Some(root),
+            Some(Err(e)) => eprintln!(
+                "real-DAT guard: {CLIENT_TARGET_ENV}={name} unusable ({e}); trying the vendored install instead"
+            ),
+            None => eprintln!(
+                "real-DAT guard: {CLIENT_TARGET_ENV}={name} names no install under {TARGETS_DIR}; trying the vendored install instead"
+            ),
+        }
     }
     let default = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("..")
         .join(DEFAULT_INSTALL_DIR);
     if !default.join("VTABLE.DAT").exists() {
         eprintln!(
-            "SKIP (real-DAT guard): no retail install — FFXI_DAT_PATH unset and {} has no VTABLE.DAT",
+            "SKIP (real-DAT guard): no retail install — {DAT_PATH_ENV} unset and {} has no VTABLE.DAT",
             default.display()
         );
         return None;
@@ -447,8 +548,11 @@ mod tests {
         (dir, root)
     }
 
+    // Ids 1 and 2 are claimed by the base ROM; ROM2 re-claims id 1 and ROM3
+    // re-claims both, each with its own FTABLE entry. The merge order in
+    // LoadFileTables makes the highest claimant the owner.
     #[test]
-    fn resolve_picks_first_appid_that_claims_file_id() {
+    fn resolve_picks_highest_appid_that_claims_file_id() {
         let (_tmp, root) = synth_root(&[
             SynthApp {
                 rom_index: 1,
@@ -457,19 +561,23 @@ mod tests {
             },
             SynthApp {
                 rom_index: 2,
-                vtable: vec![0, 0, 0, 2, 0],
-                ftable_words: vec![0x0000, 0x0000, 0x0000, 0x0001, 0x0000],
+                vtable: vec![0, 2, 0, 2, 0],
+                ftable_words: vec![0x0000, 0x0100, 0x0000, 0x0001, 0x0000],
             },
             SynthApp {
                 rom_index: 3,
-                vtable: vec![0, 0, 0, 0, 3],
-                ftable_words: vec![0x0000, 0x0000, 0x0000, 0x0000, 0xFFFF],
+                vtable: vec![0, 3, 3, 0, 3],
+                ftable_words: vec![0x0000, 0x0180, 0x0181, 0x0000, 0xFFFF],
             },
         ]);
 
         let loc1 = root.resolve(1).unwrap();
-        assert_eq!(loc1.rom_dir, "ROM");
-        assert_eq!(loc1.sub_path, SubPath { dir: 1, file: 0 });
+        assert_eq!(loc1.rom_dir, "ROM3");
+        assert_eq!(loc1.sub_path, SubPath { dir: 3, file: 0 });
+
+        let loc2 = root.resolve(2).unwrap();
+        assert_eq!(loc2.rom_dir, "ROM3");
+        assert_eq!(loc2.sub_path, SubPath { dir: 3, file: 1 });
 
         let loc3 = root.resolve(3).unwrap();
         assert_eq!(loc3.rom_dir, "ROM2");
@@ -483,6 +591,117 @@ mod tests {
                 dir: 511,
                 file: 127
             }
+        );
+        assert!(root.skipped_tables().is_empty());
+        assert_eq!(root.file_id_count(), 5);
+    }
+
+    #[test]
+    fn expansion_vtable_of_another_length_is_skipped() {
+        let (_tmp, root) = synth_root(&[
+            SynthApp {
+                rom_index: 1,
+                vtable: vec![0, 1, 1],
+                ftable_words: vec![0x0000, 0x0080, 0x00FF],
+            },
+            SynthApp {
+                rom_index: 2,
+                vtable: vec![0, 2, 2, 2],
+                ftable_words: vec![0x0000, 0x0100, 0x0101, 0x0102],
+            },
+            SynthApp {
+                rom_index: 3,
+                vtable: vec![0, 0, 3],
+                ftable_words: vec![0x0000, 0x0000, 0x0180],
+            },
+        ]);
+
+        let [skipped] = root.skipped_tables() else {
+            panic!("exactly ROM2 must be skipped: {:?}", root.skipped_tables());
+        };
+        assert_eq!(skipped.rom_dir, "ROM2");
+        assert_eq!(skipped.path, root.root().join("ROM2").join("VTABLE2.DAT"));
+        assert_eq!((skipped.len, skipped.expected), (4, 3));
+        assert_eq!(root.file_id_count(), 3);
+
+        assert_eq!(root.resolve(1).unwrap().rom_dir, "ROM");
+        assert_eq!(root.resolve(2).unwrap().rom_dir, "ROM3");
+        assert!(matches!(
+            root.resolve(3),
+            Err(DatError::FileNotPresent { file_id: 3 })
+        ));
+    }
+
+    #[test]
+    fn ftable_not_twice_its_vtable_is_skipped() {
+        let (_tmp, root) = synth_root(&[
+            SynthApp {
+                rom_index: 1,
+                vtable: vec![0, 1, 1],
+                ftable_words: vec![0x0000, 0x0080, 0x00FF],
+            },
+            SynthApp {
+                rom_index: 2,
+                vtable: vec![0, 2, 2],
+                ftable_words: vec![0x0000, 0x0100],
+            },
+        ]);
+
+        let [skipped] = root.skipped_tables() else {
+            panic!("exactly ROM2 must be skipped: {:?}", root.skipped_tables());
+        };
+        assert_eq!(skipped.path, root.root().join("ROM2").join("FTABLE2.DAT"));
+        assert_eq!((skipped.len, skipped.expected), (4, 6));
+        assert_eq!(root.resolve(1).unwrap().rom_dir, "ROM");
+        assert_eq!(root.app_summary().len(), 1);
+    }
+
+    // Real-install guard: every ROM's tables fit the base id space (no ROM
+    // skipped), and wherever more than one ROM claims an id the highest wins.
+    // The horizonxi-2023 target ships a ROM10 that re-claims base-ROM ids;
+    // retail-2026-09 has no multi-claims, where this passes vacuously.
+    #[test]
+    fn installed_tables_all_fit_and_highest_claim_wins() {
+        let Some(root) = open_test_install() else {
+            return;
+        };
+        assert!(
+            root.skipped_tables().is_empty(),
+            "{:?}",
+            root.skipped_tables()
+        );
+        let summary = root.app_summary();
+        let id_count = root.file_id_count();
+        assert!(id_count > 0);
+        for (rom_dir, vtable_len, ftable_len) in &summary {
+            assert_eq!(*vtable_len, id_count, "{rom_dir} VTABLE");
+            assert_eq!(*ftable_len, id_count, "{rom_dir} FTABLE");
+        }
+
+        let mut multi_claims = 0u32;
+        for file_id in 0..id_count {
+            let claimants: Vec<&str> = root
+                .apps
+                .iter()
+                .filter(|app| app.vtable.contains(file_id, app.rom_index))
+                .map(|app| app.rom_dir.as_str())
+                .collect();
+            let Some(highest) = claimants.last() else {
+                continue;
+            };
+            if claimants.len() > 1 {
+                multi_claims += 1;
+            }
+            assert_eq!(
+                root.resolve(file_id).unwrap().rom_dir,
+                *highest,
+                "file id {file_id} claimed by {claimants:?}"
+            );
+        }
+        eprintln!(
+            "{}: {} ROMs, {id_count} ids, {multi_claims} claimed by more than one ROM",
+            root.root().display(),
+            summary.len()
         );
     }
 
@@ -567,9 +786,8 @@ mod tests {
         );
     }
 
-    // Overlays are hand-assembled and mix `.DAT` with `.dat` (HorizonXI ships
-    // both spellings side by side), which only matters where the filesystem is
-    // case-sensitive.
+    // HorizonXI's XI-Pivot overlays (horizonoverrides, xiview) mix both
+    // spellings, which only matters where the filesystem is case-sensitive.
     #[test]
     fn overlay_matches_a_lowercase_extension() {
         let (_tmp, root) = overlay_root();
@@ -583,8 +801,8 @@ mod tests {
     // The base install mixes spellings too: retail's Windows fopen is
     // case-insensitive, so an install assembled by wine or a third-party
     // launcher can carry `127.dat` and the real client never notices. A
-    // case-sensitive filesystem (the Linux field report in kuluu-39fi) must
-    // not turn that file into a missing body part.
+    // case-sensitive filesystem (a Linux user's install) must not turn that
+    // file into a missing body part.
     #[test]
     fn base_install_matches_a_lowercase_extension() {
         let (tmp, root) = overlay_root();
@@ -592,9 +810,9 @@ mod tests {
         assert_eq!(served_bytes(&root), b"base-lower");
     }
 
-    /// The shape XI-Pivot actually ships, from the HorizonXI install measured
-    /// for kuluu-gp3s — including the Windows `root_path` that cannot resolve
-    /// off Windows.
+    /// The shape XI-Pivot actually ships, from the horizonxi-2023 target
+    /// (vendor/game-files/targets/hxi) — including the Windows `root_path` that
+    /// cannot resolve off Windows.
     const REAL_PIVOT_INI: &str = "\
 [settings]
 root_path=C:\\Program Files (x86)\\HorizonXI\\HorizonXI\\Game\\polplugins\\DATs

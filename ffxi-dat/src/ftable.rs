@@ -5,6 +5,10 @@ use crate::{DatError, Result};
 
 const SUB_PATH_FILE_MASK: u16 = 0x7F;
 
+/// One little-endian dir/file word per file id; the VTABLE has one byte per
+/// id, so an FTABLE is twice its VTABLE's length.
+pub const FTABLE_BYTES_PER_FILE_ID: usize = 2;
+
 #[derive(Debug, Clone)]
 pub struct FTable {
     bytes: Box<[u8]>,
@@ -24,11 +28,11 @@ impl FTable {
             path: path.to_path_buf(),
             source,
         })?;
-        if bytes.len() % 2 != 0 {
+        if !bytes.len().is_multiple_of(FTABLE_BYTES_PER_FILE_ID) {
             return Err(DatError::InvalidTableSize {
                 path: path.to_path_buf(),
                 len: bytes.len() as u64,
-                stride: 2,
+                stride: FTABLE_BYTES_PER_FILE_ID as u64,
             });
         }
         Ok(Self {
@@ -38,7 +42,7 @@ impl FTable {
     }
 
     pub fn len(&self) -> u32 {
-        (self.bytes.len() / 2) as u32
+        (self.bytes.len() / FTABLE_BYTES_PER_FILE_ID) as u32
     }
 
     pub fn is_empty(&self) -> bool {
@@ -51,10 +55,10 @@ impl FTable {
 
     pub fn sub_path(&self, file_id: u32) -> Result<SubPath> {
         let table_len = self.len();
-        let off = (file_id as usize) * 2;
+        let off = (file_id as usize) * FTABLE_BYTES_PER_FILE_ID;
         let raw = self
             .bytes
-            .get(off..off + 2)
+            .get(off..off + FTABLE_BYTES_PER_FILE_ID)
             .ok_or(DatError::FileIdOutOfRange { file_id, table_len })?;
         let file_dir = u16::from_le_bytes([raw[0], raw[1]]);
         Ok(SubPath {
@@ -69,7 +73,7 @@ mod tests {
     use super::*;
 
     fn synth_ftable(words: &[u16]) -> FTable {
-        let mut bytes = Vec::with_capacity(words.len() * 2);
+        let mut bytes = Vec::with_capacity(words.len() * FTABLE_BYTES_PER_FILE_ID);
         for w in words {
             bytes.extend_from_slice(&w.to_le_bytes());
         }

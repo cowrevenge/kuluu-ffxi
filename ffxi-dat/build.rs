@@ -6,6 +6,12 @@ use std::{
 use anyhow::{bail, Context, Result};
 use lsb_scrape::check_scrape_count;
 
+// Zone id -> zone MZB DAT file id. Client-lineage-wide, not build-specific:
+// research/xi-tools/docs/reference/ps2_decomp_crosscheck.md "Per-zone DAT ids"
+// (XiZone::OpenIndoor, map_num + 100) and
+// research/xim/src/jsMain/kotlin/xim/resource/table/ZoneTables.kt
+// getMainAreaResourcePath (0x64 + zoneId below 0x100, 0x147B3 + (zoneId - 0x100)
+// above, i.e. zoneId + 83635).
 const ZONE_DAT_FORMULA: Formula = Formula {
     threshold: 256,
     lo_offset: 100,
@@ -105,6 +111,18 @@ fn main() -> Result<()> {
         zones.len()
     ));
     s.push_str("//\n");
+    s.push_str(&format!(
+        "pub const ZONE_DAT_THRESHOLD: u16 = {};\n",
+        formula.threshold
+    ));
+    s.push_str(&format!(
+        "pub const ZONE_DAT_LO_OFFSET: u32 = {};\n",
+        formula.lo_offset
+    ));
+    s.push_str(&format!(
+        "pub const ZONE_DAT_HI_OFFSET: u32 = {};\n",
+        formula.hi_offset
+    ));
     s.push_str("/// `(zone_id, file_id)` pairs, sorted by `zone_id` for binary search.\n");
     s.push_str("pub const ZONE_DAT_TABLE: &[(u16, u32)] = &[\n");
     for (zid, fid) in &rows {
@@ -123,7 +141,7 @@ fn main() -> Result<()> {
 
 #[derive(Debug, Clone, Copy)]
 struct Formula {
-    threshold: u32,
+    threshold: u16,
     lo_offset: u32,
     hi_offset: u32,
 }
@@ -131,7 +149,7 @@ struct Formula {
 impl Formula {
     fn apply(&self, zone_id: u16) -> u32 {
         let z = zone_id as u32;
-        if z < self.threshold {
+        if z < u32::from(self.threshold) {
             z + self.lo_offset
         } else {
             z + self.hi_offset

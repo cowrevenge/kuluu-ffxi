@@ -561,10 +561,12 @@ mod tests {
             .expect("zone 230 has the zmr1 arrival marker");
         assert!(marker.is_zone_entrance());
 
-        let high_file_id = crate::zone_dat::zone_id_to_mzb_file_id(256).unwrap();
+        let high_file_id =
+            crate::zone_dat::zone_id_to_mzb_file_id(crate::zone_dat::ZONE_DAT_THRESHOLD).unwrap();
         assert!(
-            high_file_id > 83635,
-            "zone 256 uses the high-file-id branch"
+            high_file_id > crate::zone_dat::ZONE_DAT_HI_OFFSET,
+            "zone {} uses the high-file-id branch",
+            crate::zone_dat::ZONE_DAT_THRESHOLD
         );
         let loc = root.resolve(high_file_id).unwrap();
         let bytes = std::fs::read(loc.path_under(&root)).unwrap();

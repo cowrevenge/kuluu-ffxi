@@ -514,14 +514,15 @@ fn panel_rows(
 ///
 /// Both the roster and the counts come from the DLL rather than from POLUtils'
 /// map table, because [`load_viewed_map`] resolves a row by indexing
-/// `MainDll::zone_maps` and the two tables disagree in both directions. On the
-/// retail install POLUtils names 197 zones and the DLL 231 (its remaining 153
-/// keys are the client-only band `zone_map_counts` drops): POLUtils lists
-/// pre-CoP maps the DLL dropped (zone 238: 3 vs 2), misses maps the DLL has
-/// (zone 50: 1 vs 2), omits 36 zones whose maps do ship (Middle Delkfutt's
-/// Tower, the WotG [S] zones, the Horutoto Ruins...), and names two zones the DLL
-/// has no record for (14, 77). A POLUtils-built list therefore both hides
-/// resolvable maps and offers rows that preview blank (kuluu-u8p1).
+/// `MainDll::zone_maps` and the two tables disagree in both directions.
+/// Identical on KNOWN_CLIENTS horizonxi-2023 and retail-2026-09: POLUtils names
+/// 197 zones and the DLL 231 (its remaining 153 keys are the client-only band
+/// `zone_map_counts` drops). POLUtils lists pre-CoP maps the DLL dropped (zone
+/// 238: 3 vs 2), misses maps the DLL has (zone 50: 1 vs 2), omits 36 zones
+/// whose maps do ship (Middle Delkfutt's Tower, the WotG [S] zones, the
+/// Horutoto Ruins...), and names two zones the DLL has no record for (14, 77).
+/// A POLUtils-built list therefore both hides resolvable maps and offers rows
+/// that preview blank.
 #[derive(Resource, Default)]
 pub struct ChangeMapCatalog {
     zones: BTreeMap<u16, u8>,

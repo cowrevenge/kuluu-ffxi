@@ -93,10 +93,10 @@ mod tests {
     fn high_zone_branch_is_reachable() {
         let any_high = ZONE_DAT_TABLE
             .iter()
-            .any(|(z, f)| *z >= 256 && *f == *z as u32 + 83635);
+            .any(|(z, f)| *z >= ZONE_DAT_THRESHOLD && *f == *z as u32 + ZONE_DAT_HI_OFFSET);
         assert!(
             any_high,
-            "no zone_id >= 256 found applying the high-branch formula"
+            "no zone_id >= {ZONE_DAT_THRESHOLD} found applying the high-branch formula"
         );
     }
 

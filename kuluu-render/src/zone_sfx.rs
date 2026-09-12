@@ -12,12 +12,14 @@ use ffxi_dat::DatRoot;
 use kuluu_snapshot::Vec3 as WireVec3;
 
 use crate::audio::{
-    sfx_attenuation_calc3d, AudioMuteState, BgmSlots, PcmAudio, SfxCache,
+    sfx_attenuation_calc3d, AudioMuteState, BgmSlots, PcmAudio, SfxCache, ATTACHED_VERTICAL_WEIGHT,
     UNATTACHED_VERTICAL_WEIGHT,
 };
 use crate::camera::OperatorCamera;
 use crate::components::InGameEntity;
+use crate::particle_sim::ActorAutoRunEffects;
 use crate::scene::mzb_to_bevy;
+use crate::scheduler_runtime::ActionAssets;
 use crate::scheduler_runtime::RETAIL_FPS;
 use crate::snapshot::{effective_zone_file_id, SceneState};
 use crate::weather_particles::WEAT_DIR;
@@ -40,6 +42,9 @@ pub struct ZonePlacedSfx {
     near: f32,
     far: f32,
     origin: Vec3,
+    // An actor-attached emitter (CYyGenerator attach type SourceActor) mixes from its own
+    // GlobalTransform, a child of the actor root; a zone placement mixes from `origin`.
+    attached: bool,
     frames_per_emission: f32,
     emission_variance: f32,
     countdown_frames: f32,
@@ -134,6 +139,35 @@ fn collect_placed_sounds(
     }
 }
 
+fn emitter(
+    def: &SoundGeneratorDef,
+    sep: &Sep,
+    origin: Vec3,
+    attached: bool,
+    index: usize,
+) -> ZonePlacedSfx {
+    // Seeded per emitter so a row of identical bird calls does not fire in lockstep.
+    let mut rng = SFX_RNG_SEED ^ (index as u64).wrapping_mul(SFX_RNG_STRIDE);
+    // Drawn from the same window as the re-emission period rather than started at zero,
+    // or every in-range emitter in the zone fires together on the first tick after
+    // zone-in (West Ronfaure ships 30+ bird calls) and only de-syncs afterwards.
+    let countdown_frames = next_unit(&mut rng) * (def.frames_per_emission + def.emission_variance);
+    ZonePlacedSfx {
+        se_id: sep.se_id,
+        loops: sep.loops(),
+        singleton: def.is_singleton(),
+        near: def.near,
+        far: def.far,
+        origin,
+        attached,
+        frames_per_emission: def.frames_per_emission,
+        emission_variance: def.emission_variance,
+        countdown_frames,
+        rng,
+        audio: None,
+    }
+}
+
 fn spawn_emitters(
     defs: &[(SoundGeneratorDef, Sep)],
     commands: &mut Commands,
@@ -146,33 +180,51 @@ fn spawn_emitters(
             y: bp[1],
             z: bp[2],
         });
-        // Seeded per emitter so a row of identical bird calls does not fire in lockstep.
-        let mut rng = SFX_RNG_SEED ^ (index as u64).wrapping_mul(SFX_RNG_STRIDE);
-        // Drawn from the same window as the re-emission period rather than started at zero,
-        // or every in-range emitter in the zone fires together on the first tick after
-        // zone-in (West Ronfaure ships 30+ bird calls) and only de-syncs afterwards.
-        let countdown_frames =
-            next_unit(&mut rng) * (def.frames_per_emission + def.emission_variance);
         out.push(
             commands
-                .spawn((
-                    InGameEntity,
-                    ZonePlacedSfx {
-                        se_id: sep.se_id,
-                        loops: sep.loops(),
-                        singleton: def.is_singleton(),
-                        near: def.near,
-                        far: def.far,
-                        origin,
-                        frames_per_emission: def.frames_per_emission,
-                        emission_variance: def.emission_variance,
-                        countdown_frames,
-                        rng,
-                        audio: None,
-                    },
-                ))
+                .spawn((InGameEntity, emitter(def, sep, origin, false, index)))
                 .id(),
         );
+    }
+}
+
+// research/xim Actor.kt startAutoRunParticles starts every auto-run generator of a model at
+// model-ready, the Sep-linked ones included: the Home Point's `snd0` (Sep 9013, a loop) is
+// what hums at the crystal. Actor-attached, so it rides the actor root rather than a zone
+// placement; a placed or unattached one belongs to the zone pass instead.
+pub fn actor_auto_run_sounds(assets: &ActionAssets) -> Vec<(SoundGeneratorDef, Sep)> {
+    let mut out: Vec<(SoundGeneratorDef, Sep)> = assets
+        .sound_defs
+        .iter()
+        .filter(|(_, def)| def.auto_run && def.attach_type == AttachType::SourceActor)
+        .filter_map(|(name, def)| {
+            assets
+                .seps
+                .get(&def.sep_id)
+                .map(|sep| (*name, (*def, *sep)))
+        })
+        .map(|(_, pair)| pair)
+        .collect();
+    out.sort_by_key(|(def, sep)| (sep.se_id, def.sep_id));
+    out
+}
+
+fn spawn_actor_auto_run_sounds(
+    q_added: Query<(Entity, &ActorAutoRunEffects), Added<ActorAutoRunEffects>>,
+    mut commands: Commands,
+) {
+    for (actor_root, fx) in &q_added {
+        for (index, (def, sep)) in actor_auto_run_sounds(&fx.assets).iter().enumerate() {
+            // The base position is in the actor's DAT-local frame; the root's transform
+            // carries the FFXI->Bevy basis, as it does for the actor's particle meshes.
+            let local = Vec3::from_array(def.base_position);
+            commands.spawn((
+                InGameEntity,
+                ChildOf(actor_root),
+                Transform::from_translation(local),
+                emitter(def, sep, local, true, index),
+            ));
+        }
     }
 }
 
@@ -263,7 +315,7 @@ fn update_zone_sfx(
     listener: Query<&GlobalTransform, With<OperatorCamera>>,
     mut cache: ResMut<SfxCache>,
     mut pcm_assets: ResMut<Assets<PcmAudio>>,
-    mut emitters: Query<(Entity, &mut ZonePlacedSfx)>,
+    mut emitters: Query<(Entity, &mut ZonePlacedSfx, Option<&GlobalTransform>)>,
     mut sinks: Query<&mut bevy::audio::AudioSink>,
     playing: Query<(), With<AudioPlayer<PcmAudio>>>,
     mut commands: Commands,
@@ -284,11 +336,19 @@ fn update_zone_sfx(
 
     // The playing cue is a CHILD of its emitter: despawn is recursive, so a zone warp or an
     // OnExit(InGame) that reaps the emitter cannot leave a waterfall looping in the void.
-    for (emitter, mut em) in emitters.iter_mut() {
+    for (emitter, mut em, xf) in emitters.iter_mut() {
+        let (origin, vertical_weight) = if em.attached {
+            (
+                xf.map(|t| t.translation()).unwrap_or(em.origin),
+                ATTACHED_VERTICAL_WEIGHT,
+            )
+        } else {
+            (em.origin, UNATTACHED_VERTICAL_WEIGHT)
+        };
         let gain = if mute.sfx {
             0.0
         } else {
-            sfx_attenuation_calc3d(eye, em.origin, em.near, em.far, UNATTACHED_VERTICAL_WEIGHT)
+            sfx_attenuation_calc3d(eye, origin, em.near, em.far, vertical_weight)
         };
 
         if em.loops {
@@ -360,7 +420,7 @@ impl Plugin for ZoneSfxPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<ZoneSfx>().add_systems(
             Update,
-            (sync_zone_sfx, update_zone_sfx)
+            (sync_zone_sfx, spawn_actor_auto_run_sounds, update_zone_sfx)
                 .chain()
                 // The weather key comes from the set sample_zone_weather selects; unordered,
                 // zone-in reads the whole DAT once against the `suny` fallback and again the
@@ -394,6 +454,87 @@ mod tests {
         let mut out = Vec::new();
         collect_placed_sounds(&tree, &flat, skip_weat, &mut out);
         out
+    }
+
+    const HOME_POINT_MODEL_DAT: u32 = 1351;
+    const HOME_POINT_AMBIENT_SE: u32 = 9013;
+
+    fn sep_body(se_id: u32, flags: u32) -> Vec<u8> {
+        let mut body = vec![0u8; 16];
+        body[8..12].copy_from_slice(&se_id.to_le_bytes());
+        body[12..16].copy_from_slice(&flags.to_le_bytes());
+        body
+    }
+
+    fn actor_assets(
+        defs: &[([u8; 4], SoundGeneratorDef)],
+        seps: &[([u8; 4], u32)],
+    ) -> ActionAssets {
+        let mut assets = ActionAssets::default();
+        for (name, def) in defs {
+            assets.sound_defs.insert(*name, *def);
+        }
+        for (name, se_id) in seps {
+            assets
+                .seps
+                .insert(*name, Sep::parse(*name, &sep_body(*se_id, 0)).unwrap());
+        }
+        assets
+    }
+
+    // Only an auto-run, source-attached Sep generator rides the actor; a zone placement or a
+    // routine-driven cue is someone else's.
+    #[test]
+    fn actor_auto_run_sounds_take_the_attached_auto_run_generators() {
+        let attached = SoundGeneratorDef {
+            sep_id: *b"9013",
+            auto_run: true,
+            attach_type: AttachType::SourceActor,
+            far: 20.0,
+            ..Default::default()
+        };
+        let routine_driven = SoundGeneratorDef {
+            auto_run: false,
+            ..attached
+        };
+        let placed = SoundGeneratorDef {
+            attach_type: AttachType::None,
+            base_position: [1.0, 2.0, 3.0],
+            ..attached
+        };
+        let unresolved = SoundGeneratorDef {
+            sep_id: *b"none",
+            ..attached
+        };
+        let assets = actor_assets(
+            &[
+                (*b"snd0", attached),
+                (*b"snd1", routine_driven),
+                (*b"snd2", placed),
+                (*b"snd3", unresolved),
+            ],
+            &[(*b"9013", HOME_POINT_AMBIENT_SE)],
+        );
+        let out = actor_auto_run_sounds(&assets);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].0, attached);
+        assert_eq!(out[0].1.se_id, HOME_POINT_AMBIENT_SE);
+    }
+
+    // ROM/3/25.DAT: `snd0` links Sep `9013` (loop flag set), auto-run, attached to the actor.
+    #[test]
+    fn home_point_model_carries_its_ambient_loop() {
+        let Some(bytes) = zone_dat(HOME_POINT_MODEL_DAT) else {
+            return;
+        };
+        let (_, assets) = crate::scheduler_runtime::parse_action_bytes(&bytes);
+        let out = actor_auto_run_sounds(&assets);
+        assert_eq!(out.len(), 1, "{:?}", out);
+        let (def, sep) = out[0];
+        assert_eq!(sep.se_id, HOME_POINT_AMBIENT_SE);
+        assert!(sep.loops());
+        assert!(def.is_singleton());
+        assert_eq!(def.far, 20.0);
     }
 
     // The waterfall spray is a looping cue and the bird calls are one-shots; the Sep loop

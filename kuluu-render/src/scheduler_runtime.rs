@@ -422,6 +422,9 @@ pub struct ActionAssets {
     pub images_by_qualified_name: HashMap<(String, String), ffxi_dat::texture::DecodedTexture>,
     pub emitters: HashMap<[u8; 4], ffxi_dat::generator::ParticleEmitter>,
     pub particle_defs: HashMap<[u8; 4], ffxi_dat::particle_gen::ParticleGeneratorDef>,
+    // Generators whose setup links a Sep instead of a mesh (the Home Point's `snd0` ambient
+    // loop).
+    pub sound_defs: HashMap<[u8; 4], ffxi_dat::particle_gen::SoundGeneratorDef>,
     // The same defs keyed by (containing directory, name). ROM/0/0.DAT defines four different
     // generators called `g010`, one per effect directory; the flat map keeps only the last.
     pub particle_defs_by_dir:
@@ -662,6 +665,9 @@ pub fn parse_action_tree(node: &ffxi_dat::chunk::ChunkNode<'_>) -> (Vec<Schedule
                     assets.particle_defs.insert(c.name, d);
                     assets.particle_def_dirs.insert(c.name, dir);
                     assets.particle_defs_by_dir.insert((dir, c.name), d);
+                }
+                if let Ok(Some(d)) = ffxi_dat::particle_gen::SoundGeneratorDef::parse(c.data) {
+                    assets.sound_defs.insert(c.name, d);
                 }
             }
             ChunkKind::KeyFrame => {
@@ -1392,6 +1398,69 @@ pub fn dispatch_action_started(
             ),
         }
     }
+}
+
+// research/XiEvents/OpCodes/0x002C.md SCHEDULOR — the event script plays action `key` out of
+// the target's own model. The Home Point's set-home-point branch runs `bind` (the activation
+// flash and its se016023 cue) on the crystal this way, so the routine comes from the actor's
+// DAT rather than an action DAT, and the partner becomes the routine's target.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn dispatch_cutscene_actor_motion(
+    events: Res<crate::snapshot::EventLog>,
+    scene: Res<crate::snapshot::SceneState>,
+    tracked: Res<crate::scene::TrackedEntities>,
+    q_children: Query<&Children>,
+    q_render: Query<&crate::ffxi_actor_render::FfxiRenderActor>,
+    mut commands: Commands,
+    mut last_seen: Local<u64>,
+) {
+    let new_count =
+        (events.pushed_total.saturating_sub(*last_seen)).min(events.recent.len() as u64) as usize;
+    *last_seen = events.pushed_total;
+    if new_count == 0 {
+        return;
+    }
+    for ev in events.recent.iter().rev().take(new_count).rev() {
+        let kuluu_snapshot::ViewerEvent::Cutscene {
+            cue:
+                kuluu_snapshot::CutsceneCue::ActorMotion {
+                    actor,
+                    partner,
+                    key,
+                },
+        } = ev
+        else {
+            continue;
+        };
+        let self_id = scene.snapshot.self_char_id;
+        let Some(actor_entity) = cutscene_actor_entity(actor, self_id, &tracked) else {
+            continue;
+        };
+        let Some(routines) = actor_render_routines(actor_entity, &q_children, &q_render) else {
+            continue;
+        };
+        let lookup = RoutineLookup::new().with_actor(routines);
+        let Some(active) = ActiveScheduler::from_routine(&lookup, key) else {
+            continue;
+        };
+        let target = cutscene_actor_entity(partner, self_id, &tracked);
+        enqueue_routine(&mut commands, actor_entity, active);
+        commands
+            .entity(actor_entity)
+            .try_insert_if_new(ActionTarget(target));
+    }
+}
+
+fn cutscene_actor_entity(
+    actor: &kuluu_snapshot::CutsceneActor,
+    self_id: Option<u32>,
+    tracked: &crate::scene::TrackedEntities,
+) -> Option<Entity> {
+    let id = match actor {
+        kuluu_snapshot::CutsceneActor::LocalPlayer => self_id?,
+        kuluu_snapshot::CutsceneActor::Entity { server_id } => *server_id,
+    };
+    tracked.by_id.get(&id).copied()
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -2260,7 +2329,7 @@ impl Plugin for SchedulerRuntimePlugin {
                     dispatch_action_started,
                     dispatch_cast_routine_started,
                     dispatch_melee_action_started,
-                    dispatch_entity_emoted,
+                    (dispatch_entity_emoted, dispatch_cutscene_actor_motion).chain(),
                     poll_action_dat_tasks,
                     // Chained between the routine inserters and the stage consumers so a
                     // routine's frame-0 stages fire on the frame it is inserted, and every
@@ -3271,6 +3340,62 @@ mod tests {
         let root = ffxi_dat::archive::open_test_install()?;
         let loc = root.resolve(file_id).ok()?;
         std::fs::read(loc.path_under(&root)).ok()
+    }
+
+    // Retail-DAT guard (skips without an install): the Home Point model (DAT 1351, ROM/3/25)
+    // ships its activation as routine `bind` — the four non-auto-run generators plus the Sep
+    // section named `6023`, whose embedded id is 16023 — which the 0x2C actor-motion cue starts
+    // through the actor tier, so both halves have to resolve from the model's own assets.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn real_dat_home_point_bind_routine_resolves_from_the_model() {
+        const HOME_POINT_MODEL_DAT: u32 = 1351;
+        const ACTIVATION_SE: u32 = 16023;
+        const ACTIVATION_GENERATORS: [&[u8; 4]; 4] = [b"pou1", b"tub0", b"pou0", b"sil2"];
+
+        let Some(bytes) = read_dat(HOME_POINT_MODEL_DAT) else {
+            return;
+        };
+        let (schedulers, assets) = parse_action_bytes(&bytes);
+        let active = ActiveScheduler::from_main(&schedulers, b"bind").expect("bind routine");
+
+        let particles: Vec<[u8; 4]> = active
+            .stages
+            .iter()
+            .filter(|t| t.stage.kind == StageKind::Particle)
+            .map(|t| t.stage.id)
+            .collect();
+        for name in ACTIVATION_GENERATORS {
+            assert!(
+                particles.contains(name),
+                "{:?} missing {:?}",
+                particles,
+                name
+            );
+            assert!(
+                !assets.particle_defs[name].auto_run,
+                "activation generators do not auto-run"
+            );
+        }
+
+        let sounds: Vec<u32> = active
+            .stages
+            .iter()
+            .filter_map(|t| {
+                ffxi_dat::action::resolve_stage_to_se(
+                    &t.stage.id,
+                    t.stage.kind,
+                    &assets.generators,
+                    &assets.seps,
+                )
+            })
+            .map(|(se, _)| se)
+            .collect();
+        assert_eq!(sounds, vec![ACTIVATION_SE]);
+        assert!(
+            ActiveScheduler::from_main(&schedulers, b"aper").is_some(),
+            "the idle routine is the other scheduler in the file"
+        );
     }
 
     // Retail-DAT guard (skips without an install): the cast aura `ner1` and its `stbk` shutdown

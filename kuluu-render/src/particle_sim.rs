@@ -329,6 +329,9 @@ struct Particle {
     life_frames: f32,
     rgb: Vec3,
     scale: Vec2,
+    // Euler radians, seeded from the generator's 0x09 rotation and turned by its spin
+    // (CYyGenerator.cpp CYyGenerator::ElemIdle case 0x05 integrates the 0x0B rate per frame).
+    rotation: Vec3,
 }
 
 // research/xim ParticleGeneratorAttachment.kt resolveExtendedJoints — a source joint naming
@@ -766,6 +769,12 @@ fn particle_orientation(def: &ParticleGeneratorDef) -> Option<Quat> {
     Some(Quat::from_euler(EulerRot::XYZ, r[0], r[1], r[2]))
 }
 
+// The live orientation of a fixed-orientation particle: its 0x09 seed plus whatever the spin
+// has added, in the same Euler order `particle_orientation` seeds with.
+fn particle_rotation(p: &Particle) -> Quat {
+    Quat::from_euler(EulerRot::XYZ, p.rotation.x, p.rotation.y, p.rotation.z)
+}
+
 // Distinct per generator so two emitters sharing a def do not spawn identical particle clouds;
 // deterministic so a rebuilt zone/weather set replays the same spread.
 fn emit_seed(entity: Entity) -> u64 {
@@ -798,7 +807,7 @@ fn advance_generator(g: &mut LiveGenerator, frames: f32) {
     // research/xim ParticleGenerator.kt emit — completed particles are swept
     // before emission, so a continuous singleton re-emits the same tick its
     // predecessor expires.
-    g.particles.retain(|p| p.age_frames < p.life_frames);
+    reap_expired(g);
 
     // Particles emitted below were born during this tick, so the ageing pass must not charge them
     // the whole frame: at 30 fps retail that error is invisible, but one long frame (the blocking
@@ -859,14 +868,18 @@ fn advance_generator(g: &mut LiveGenerator, frames: f32) {
         .def
         .accel
         .map(|a| Vec3::from_array(a) * g.vel_basis * frames);
+    let spin = g.def.spin().map(|r| Vec3::from_array(r) * frames);
     for p in g.particles.iter_mut().take(pre_emit_len) {
         p.age_frames += frames;
         if let Some(a) = accel {
             p.vel += a;
         }
         p.pos += p.vel * frames;
+        if let Some(r) = spin {
+            p.rotation += r;
+        }
     }
-    g.particles.retain(|p| p.age_frames < p.life_frames);
+    reap_expired(g);
 
     // A continuous generator re-emits "the moment its particle expires"
     // (research/xim ParticleGenerator.kt emit). The aging above can push the lone
@@ -914,7 +927,23 @@ fn emit(g: &mut LiveGenerator, life_frames: f32) {
         life_frames: life_frames.max(1.0),
         rgb: Vec3::from_slice(&g.def.init_color[..3]),
         scale: Vec2::new(g.def.init_scale[0], g.def.init_scale[1]),
+        rotation: Vec3::from_array(g.def.init_rotation),
     });
+}
+
+// CYyGenerator.cpp CYyGenerator::ElemDie case 5 — a relife generator resets an expiring element's
+// life and keeps it (its rotation, position and UV state carry on); any other generator's
+// expired particles are swept.
+fn reap_expired(g: &mut LiveGenerator) {
+    if g.def.relife_on_expiry {
+        for p in &mut g.particles {
+            if p.age_frames >= p.life_frames {
+                p.age_frames = p.age_frames.rem_euclid(p.life_frames);
+            }
+        }
+    } else {
+        g.particles.retain(|p| p.age_frames < p.life_frames);
+    }
 }
 
 fn env_flag(cell: &'static OnceLock<bool>, name: &str) -> bool {
@@ -1240,6 +1269,7 @@ struct ParticleKey {
     factor_rgb: [i32; 3],
     factor_alpha: i32,
     life_alpha: i32,
+    rotation: [i32; 3],
 }
 
 fn quantized(v: f32, quantum: f32) -> i32 {
@@ -1268,6 +1298,7 @@ fn mesh_key(g: &LiveGenerator, cam: CameraView, clock: &CelestialClock) -> MeshK
                     factor_rgb: draw.factor_rgb.to_array().map(color),
                     factor_alpha: color(draw.factor_alpha),
                     life_alpha: color(draw.life_alpha),
+                    rotation: p.rotation.to_array().map(spatial),
                 }
             })
             .collect(),
@@ -1339,6 +1370,8 @@ fn rebuild_mesh(g: &LiveGenerator, cam: CameraView, clock: &CelestialClock, mesh
 
         let rot = if axial {
             axial_camera_rotation(draw.world, cam.pos, g.vel_basis)
+        } else if g.orientation.is_some() {
+            particle_rotation(p)
         } else {
             cam.rot
         };
@@ -1648,6 +1681,11 @@ mod tests {
             uv_scroll: [0.0, 0.0],
             accel: None,
             emit_cull: None,
+            rotation_velocity: None,
+            rotation_updater: false,
+            relife_on_expiry: false,
+            specular_element: false,
+            specular: None,
         }
     }
 
@@ -2128,6 +2166,7 @@ mod tests {
                 life_frames: 100.0,
                 rgb: Vec3::ONE,
                 scale: Vec2::ONE,
+                rotation: Vec3::ZERO,
             });
             g
         }
@@ -2215,6 +2254,101 @@ mod tests {
         }
     }
 
+    // The Home Point crystal `bnd0`: 0x0B (0, -0.0157, 0) with the sec3 0x05 updater turns the
+    // particle by that much every 60 Hz frame; the rate alone must not.
+    #[test]
+    fn spin_integrates_only_with_the_rotation_updater() {
+        const YAW_PER_FRAME: f32 = -0.0157;
+        let mut d = def(120.0, 1.0, 1);
+        d.camera_billboard = false;
+        d.continuous = true;
+        d.init_rotation = [0.0, 0.5, 0.0];
+        d.rotation_velocity = Some([0.0, YAW_PER_FRAME, 0.0]);
+        d.rotation_updater = true;
+        let mut g = live(d, 1000.0);
+        g.orientation = particle_orientation(&g.def);
+        advance(&mut g, 1.0);
+        assert_eq!(g.particles.len(), 1);
+        assert_eq!(
+            g.particles[0].rotation,
+            Vec3::new(0.0, 0.5, 0.0),
+            "born at the 0x09 seed"
+        );
+        advance(&mut g, 10.0);
+        let yaw = g.particles[0].rotation.y;
+        assert!((yaw - (0.5 + 10.0 * YAW_PER_FRAME)).abs() < 1e-5, "{yaw}");
+
+        let mut still = g.def;
+        still.rotation_updater = false;
+        let mut g = live(still, 1000.0);
+        advance(&mut g, 1.0);
+        advance(&mut g, 10.0);
+        assert_eq!(g.particles[0].rotation, Vec3::new(0.0, 0.5, 0.0));
+    }
+
+    // CYyGenerator.cpp CYyGenerator::ElemDie case 5 — a relife generator keeps its element past
+    // its life, so the spin accumulated over the first cycle survives into the next instead of
+    // snapping back to the seed with a fresh particle.
+    #[test]
+    fn relife_keeps_the_particle_and_its_accumulated_rotation() {
+        let mut d = def(120.0, 1.0, 1);
+        d.camera_billboard = false;
+        d.continuous = true;
+        d.rotation_velocity = Some([0.0, 0.01, 0.0]);
+        d.rotation_updater = true;
+        d.relife_on_expiry = true;
+        let mut g = live(d, 1000.0);
+        g.auto_run = true;
+        advance(&mut g, 1.0);
+        for _ in 0..30 {
+            advance(&mut g, 5.0);
+        }
+        assert_eq!(g.particles.len(), 1, "one element, never re-emitted");
+        let p = &g.particles[0];
+        assert!(p.age_frames < p.life_frames, "life was reset, not run out");
+        assert!(
+            (p.rotation.y - 1.5).abs() < 1e-4,
+            "150 frames of spin: {}",
+            p.rotation.y
+        );
+
+        let mut mortal = g.def;
+        mortal.relife_on_expiry = false;
+        let mut g = live(mortal, 1000.0);
+        g.auto_run = true;
+        advance(&mut g, 1.0);
+        for _ in 0..30 {
+            advance(&mut g, 5.0);
+        }
+        assert_eq!(g.particles.len(), 1);
+        assert!(
+            g.particles[0].rotation.y < 1.0,
+            "the re-emitted particle restarted its spin"
+        );
+    }
+
+    // A turning particle changes the built mesh, so the rebuild key has to follow its rotation.
+    #[test]
+    fn rotation_changes_the_mesh_key() {
+        let mut d = def(120.0, 1.0, 1);
+        d.camera_billboard = false;
+        d.continuous = true;
+        d.rotation_velocity = Some([0.0, 0.1, 0.0]);
+        d.rotation_updater = true;
+        let mut g = live(d, 1000.0);
+        g.orientation = particle_orientation(&g.def);
+        advance(&mut g, 1.0);
+        let cam = CameraView {
+            rot: Quat::IDENTITY,
+            pos: Vec3::ZERO,
+        };
+        let clock = CelestialClock::default();
+        let before = mesh_key(&g, cam, &clock);
+        advance(&mut g, 1.0);
+        let after = mesh_key(&g, cam, &clock);
+        assert!(needs_rebuild(&before, &after));
+    }
+
     #[test]
     fn mesh_is_never_zero_length() {
         // Bevy's MeshAllocator errors on a zero-length vertex buffer, so an
@@ -2254,6 +2388,7 @@ mod tests {
                 life_frames: 100.0,
                 rgb: Vec3::ONE,
                 scale: Vec2::ONE,
+                rotation: Vec3::ZERO,
             });
             g
         }
@@ -2607,6 +2742,7 @@ mod tests {
             life_frames: 1.0,
             rgb: Vec3::from_slice(&g.def.init_color[..3]),
             scale: Vec2::ONE,
+            rotation: Vec3::ZERO,
         });
         g
     }
@@ -3282,6 +3418,7 @@ mod tests {
             life_frames: 4.0,
             rgb: Vec3::ONE,
             scale: Vec2::splat(0.1),
+            rotation: Vec3::ZERO,
         };
         cont.particles = vec![particle(3.0)];
         spray.particles = vec![particle(3.0)];

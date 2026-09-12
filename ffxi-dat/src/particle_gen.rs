@@ -95,6 +95,10 @@ const ATTACH_SOURCE_ORIENTED: u16 = 0x0001;
 const RENDER_STATE_IGNORE_TEXTURE_ALPHA: u16 = 0x1000;
 // research/xim ParticleInitializers.kt read `cameraAttachedBasePosition`.
 const RENDER_STATE_CAMERA_ATTACHED_BASE: u16 = 0x0400;
+// research/XIClient/src/XIClient/source/World/Generator/CYyGenerator.cpp CYyGenerator::HandleOne — the
+// StandardSetup dword's 0x01000000 (0x00200000 CMoD3mSpecialElem and 0x00100000 CMoDistModelElem
+// are tested first) hands the element to CMoD3mSpecularElem; it is the high u16's 0x0100 here.
+const RENDER_STATE_SPECULAR_ELEMENT: u16 = 0x0100;
 
 // research/xim ParticleInitializers.kt read `followCamera` — orthogonal to the billboard-type bits
 // in the same word. The weat/ precipitation curtains ride it (La Theine's `~1ra` is cfg 0x0004:
@@ -320,6 +324,39 @@ pub struct ParticleGeneratorDef {
     // Section 1 (body[0x70]) generator-level updater 0x0A, research/xim
     // ParticleGeneratorParser.kt sec1Handler GeneratorCullUpdater.
     pub emit_cull: Option<EmitCull>,
+
+    // sec2 0x0B RotationVelocitySetup: radians per 60 Hz frame, stored on the element
+    // (CYyGenerator.cpp CYyGenerator::ElemGenerate case 0x0B). It only turns the particle when the
+    // sec3 0x05 RotationUpdater integrates it (CYyGenerator.cpp CYyGenerator::ElemIdle case 0x05;
+    // research/xim ParticleGeneratorParser.kt sec3Handler RotationUpdater), so read [`Self::spin`].
+    pub rotation_velocity: Option<[f32; 3]>,
+    pub rotation_updater: bool,
+
+    // Section 4 (body[0x7C]) opcode 0x05, CYyGenerator.cpp CYyGenerator::ElemDie case 5 — an expiring
+    // element gets its life reset instead of dying, keeping its position, rotation and UV state.
+    // Every idle Home Point layer authors it; without it the crystal would snap back to its
+    // spawn rotation every 120 frames.
+    pub relife_on_expiry: bool,
+
+    // CYyGenerator.cpp CYyGenerator::HandleOne 0x01000000 — the element renders through
+    // CMoD3mSpecularElem, whose draw the XIClient decompile leaves as missing code; the sec2 0x55
+    // record is kept alongside so the reconstruction has its inputs.
+    pub specular_element: bool,
+    pub specular: Option<SpecularParams>,
+}
+
+// sec2 0x55 SpecularParams (research/xim ParticleInitializers.kt SpecularParamsInitializer): a
+// non-unit vector, the DatId of a 0x20 the element does not otherwise draw with (the Home Point
+// crystal names `nami`), a zeroed in-memory pointer, two floats xim found no visible effect for
+// (10.0 and 30.0 corpus-wide), a BGRA colour and a flags word. Only the texture link is understood.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SpecularParams {
+    pub vector: [f32; 3],
+    pub texture: Option<[u8; 4]>,
+    pub unknown_a: f32,
+    pub unknown_b: f32,
+    pub color_bgra: [u8; 4],
+    pub flags: u32,
 }
 
 // research/XIClient/src/XIClient/source/World/Generator/CYyGenerator.cpp CYyGenerator::Idle case 0x0A —
@@ -346,6 +383,9 @@ impl EmitCull {
 }
 
 const SEC1_OPCODE_EMIT_CULL: u8 = 0x0A;
+const SEC3_OPCODE_ROTATION_UPDATER: u8 = 0x05;
+const SEC4_OFFSET: usize = 0x7C;
+const SEC4_OPCODE_RELIFE: u8 = 0x05;
 
 impl ParticleGeneratorDef {
     pub fn parse(body: &[u8]) -> Result<Option<Self>> {
@@ -404,6 +444,9 @@ impl ParticleGeneratorDef {
         let mut ignore_texture_alpha = false;
         let mut tod_color_tracks: [Option<[u8; 4]>; TOD_COLOR_CHANNELS] =
             [None; TOD_COLOR_CHANNELS];
+        let mut rotation_velocity = None;
+        let mut specular = None;
+        let mut specular_element = false;
 
         while cursor + 4 <= body.len() {
             let cfg = u32_le(body, cursor);
@@ -427,6 +470,7 @@ impl ParticleGeneratorDef {
                     ignore_texture_alpha = render_state & RENDER_STATE_IGNORE_TEXTURE_ALPHA != 0;
                     follow_camera = bb & BILLBOARD_FOLLOW_CAMERA != 0;
                     camera_attached_base = render_state & RENDER_STATE_CAMERA_ATTACHED_BASE != 0;
+                    specular_element = render_state & RENDER_STATE_SPECULAR_ELEMENT != 0;
                     mesh_id = [
                         body[payload + 8],
                         body[payload + 9],
@@ -477,12 +521,38 @@ impl ParticleGeneratorDef {
                         f32_le(body, payload + 8),
                     ];
                 }
+                0x0B if payload + 12 <= body.len() => {
+                    rotation_velocity = Some([
+                        f32_le(body, payload),
+                        f32_le(body, payload + 4),
+                        f32_le(body, payload + 8),
+                    ]);
+                }
                 0x0F if payload + 12 <= body.len() => {
                     init_scale = [
                         f32_le(body, payload),
                         f32_le(body, payload + 4),
                         f32_le(body, payload + 8),
                     ];
+                }
+                0x55 if payload + 36 <= body.len() => {
+                    specular = Some(SpecularParams {
+                        vector: [
+                            f32_le(body, payload),
+                            f32_le(body, payload + 4),
+                            f32_le(body, payload + 8),
+                        ],
+                        texture: track_id(body, payload + 12),
+                        unknown_a: f32_le(body, payload + 20),
+                        unknown_b: f32_le(body, payload + 24),
+                        color_bgra: [
+                            body[payload + 28],
+                            body[payload + 29],
+                            body[payload + 30],
+                            body[payload + 31],
+                        ],
+                        flags: u32_le(body, payload + 32),
+                    });
                 }
                 0x16 if payload + 4 <= body.len() => {
                     init_color = [
@@ -534,6 +604,7 @@ impl ParticleGeneratorDef {
         let mut day_of_week_color = None;
         let mut moon_phase_color = None;
         let mut moon_phase_sprite = false;
+        let mut rotation_updater = false;
         let mut tod_color_driven = [false; TOD_COLOR_CHANNELS];
         let sec3_raw = u32_le(body, 0x78) as usize;
         if sec3_raw >= CHUNK_HEADER_LEN && sec3_raw - CHUNK_HEADER_LEN < body.len() {
@@ -551,6 +622,7 @@ impl ParticleGeneratorDef {
                     break;
                 }
                 match opcode {
+                    SEC3_OPCODE_ROTATION_UPDATER => rotation_updater = true,
                     0x27 if payload + 4 <= body.len() => uv_scroll[0] = f32_le(body, payload),
                     0x28 if payload + 4 <= body.len() => uv_scroll[1] = f32_le(body, payload),
                     0x03 if payload + 12 <= body.len() => {
@@ -611,6 +683,25 @@ impl ParticleGeneratorDef {
             }
         }
 
+        // Section 4 (body[0x7C]) — the element-die script, the same block framing.
+        let mut relife_on_expiry = false;
+        let sec4_raw = u32_le(body, SEC4_OFFSET) as usize;
+        if sec4_raw >= CHUNK_HEADER_LEN && sec4_raw - CHUNK_HEADER_LEN < body.len() {
+            let mut cursor = sec4_raw - CHUNK_HEADER_LEN;
+            while cursor + 4 <= body.len() {
+                let cfg = u32_le(body, cursor);
+                let opcode = (cfg & OPCODE_MASK) as u8;
+                let size_words = ((cfg >> 8) & u32::from(SIZE_WORDS_MASK)) as usize;
+                if opcode == OPCODE_END || size_words == 0 {
+                    break;
+                }
+                if opcode == SEC4_OPCODE_RELIFE {
+                    relife_on_expiry = true;
+                }
+                cursor += size_words * 4;
+            }
+        }
+
         Ok(Some(Self {
             frames_per_emission,
             particles_per_emission,
@@ -650,7 +741,18 @@ impl ParticleGeneratorDef {
             uv_scroll,
             accel,
             emit_cull,
+            rotation_velocity,
+            rotation_updater,
+            relife_on_expiry,
+            specular_element,
+            specular,
         }))
+    }
+
+    // The per-frame rotation the element actually turns by: a 0x0B rate with no sec3 0x05
+    // updater never turns (research/xi-tools/docs/fx/effects.md "What MOVES an effect").
+    pub fn spin(&self) -> Option<[f32; 3]> {
+        self.rotation_velocity.filter(|_| self.rotation_updater)
     }
 
     pub fn is_singleton(&self) -> bool {
@@ -1254,6 +1356,114 @@ mod tests {
         assert!(!element(0x0FFF), "only bit 0x1000 selects the element");
         assert!(element(0x1000));
         assert!(element(0x1200), "other render-state bits do not mask it");
+    }
+
+    fn mesh_setup() -> Vec<u8> {
+        let mut setup = op(0x01, 12, &[]);
+        setup[4 + 29] = LINKED_DATA_STATIC_MESH;
+        setup
+    }
+
+    fn vec3_payload(v: [f32; 3]) -> Vec<u8> {
+        v.iter().flat_map(|f| f.to_le_bytes()).collect()
+    }
+
+    // Appends a section stream after the body and points the section word at it.
+    fn with_section(mut body: Vec<u8>, offset_word: usize, stream: &[u8]) -> Vec<u8> {
+        body.extend_from_slice(&[0u8; 4]);
+        let at = body.len();
+        body[offset_word..offset_word + 4].copy_from_slice(&((at + 0x10) as u32).to_le_bytes());
+        body.extend_from_slice(stream);
+        body
+    }
+
+    // The Home Point crystal `bnd0`: sec2 0x0B (0, -0.0157, 0) with a sec3 0x05 updater turns;
+    // the same rate with no updater does not (effects.md "What MOVES an effect").
+    #[test]
+    fn rotation_velocity_spins_only_with_the_sec3_updater() {
+        const BND0_YAW_PER_FRAME: f32 = -0.015_707_5;
+        let mut sec2 = mesh_setup();
+        sec2.extend(op(0x0B, 4, &vec3_payload([0.0, BND0_YAW_PER_FRAME, 0.0])));
+        let rate_only = ParticleGeneratorDef::parse(&build(&sec2, 120, 0x1400))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            rate_only.rotation_velocity,
+            Some([0.0, BND0_YAW_PER_FRAME, 0.0])
+        );
+        assert!(!rate_only.rotation_updater);
+        assert_eq!(rate_only.spin(), None);
+
+        let body = with_section(build(&sec2, 120, 0x1400), 0x78, &op(0x05, 1, &[]));
+        let spinning = ParticleGeneratorDef::parse(&body).unwrap().unwrap();
+        assert!(spinning.rotation_updater);
+        assert_eq!(spinning.spin(), Some([0.0, BND0_YAW_PER_FRAME, 0.0]));
+
+        let updater_only = ParticleGeneratorDef::parse(&with_section(
+            build(&mesh_setup(), 120, 0x1400),
+            0x78,
+            &op(0x05, 1, &[]),
+        ))
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            updater_only.spin(),
+            None,
+            "an updater with no rate has nothing to add"
+        );
+    }
+
+    // CYyGenerator.cpp CYyGenerator::ElemDie case 5 — the section-4 relife opcode every idle Home
+    // Point layer carries.
+    #[test]
+    fn section_4_relife_opcode_is_read() {
+        let plain = ParticleGeneratorDef::parse(&build(&mesh_setup(), 120, 0x1400))
+            .unwrap()
+            .unwrap();
+        assert!(!plain.relife_on_expiry);
+
+        let body = with_section(build(&mesh_setup(), 120, 0x1400), 0x7C, &op(0x05, 1, &[]));
+        let relife = ParticleGeneratorDef::parse(&body).unwrap().unwrap();
+        assert!(relife.relife_on_expiry);
+
+        let other = with_section(build(&mesh_setup(), 120, 0x1400), 0x7C, &op(0x04, 1, &[]));
+        assert!(
+            !ParticleGeneratorDef::parse(&other)
+                .unwrap()
+                .unwrap()
+                .relife_on_expiry
+        );
+    }
+
+    // `bnd0`'s StandardSetup dword is 0x01010000: the high u16 carries the specular selector.
+    #[test]
+    fn specular_selector_and_params_are_read() {
+        let mut setup = mesh_setup();
+        setup[4 + 2..4 + 4].copy_from_slice(&0x0101u16.to_le_bytes());
+        let mut payload = vec3_payload([0.0349, -0.5410, 0.6108]);
+        payload.extend_from_slice(b"nami");
+        payload.extend_from_slice(&0u32.to_le_bytes());
+        payload.extend_from_slice(&10.0f32.to_le_bytes());
+        payload.extend_from_slice(&30.0f32.to_le_bytes());
+        payload.extend_from_slice(&[0xAA, 0xAA, 0x8C, 0x80]);
+        payload.extend_from_slice(&3u32.to_le_bytes());
+        setup.extend(op(0x55, 10, &payload));
+        let def = ParticleGeneratorDef::parse(&build(&setup, 120, 0x1400))
+            .unwrap()
+            .unwrap();
+        assert!(def.specular_element);
+        let spec = def.specular.expect("0x55 record");
+        assert_eq!(spec.texture, Some(*b"nami"));
+        assert_eq!(spec.vector, [0.0349, -0.5410, 0.6108]);
+        assert_eq!((spec.unknown_a, spec.unknown_b), (10.0, 30.0));
+        assert_eq!(spec.color_bgra, [0xAA, 0xAA, 0x8C, 0x80]);
+        assert_eq!(spec.flags, 3);
+
+        let common = ParticleGeneratorDef::parse(&build(&mesh_setup(), 120, 0x1400))
+            .unwrap()
+            .unwrap();
+        assert!(!common.specular_element);
+        assert_eq!(common.specular, None);
     }
 
     // CMoD3m.cpp CMoD3m::Draw keys the TEXTUREFACTOR-alpha promotion on the exact blend byte, which

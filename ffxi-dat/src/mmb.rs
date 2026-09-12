@@ -1121,6 +1121,7 @@ mod tests {
         let vertex = plain_vertex([0.0, 0.0, 0.0], AUTHORED_ARGB, [0.0, 0.0]);
         let mut d3m_body = vec![0u8; crate::d3m::D3M_VERTEX_OFFSET];
         d3m_body[0..4].copy_from_slice(&crate::d3m::D3M_MAGIC.to_le_bytes());
+        d3m_body[0x04] = 1;
         d3m_body[0x06..0x08].copy_from_slice(&1u16.to_le_bytes());
         for _ in 0..D3M_VERTS_PER_TRI {
             d3m_body.extend_from_slice(&vertex);

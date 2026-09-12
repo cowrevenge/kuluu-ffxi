@@ -1535,11 +1535,9 @@ pub fn spawn_loaded_actor(
 
 // research/xim Actor.kt createFrom — auto-run generators start at model-ready.
 fn insert_auto_run_effects(commands: &mut Commands, actor_root: Entity, loaded: &LoadedActor) {
-    if loaded
-        .action_assets
-        .particle_defs
-        .values()
-        .any(|d| d.auto_run)
+    let assets = &loaded.action_assets;
+    if assets.particle_defs.values().any(|d| d.auto_run)
+        || assets.sound_defs.values().any(|d| d.auto_run)
     {
         commands
             .entity(actor_root)

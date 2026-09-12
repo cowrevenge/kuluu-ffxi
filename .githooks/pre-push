@@ -4,7 +4,7 @@
 #
 # Bypass once:   git push --no-verify
 # Bypass via env: SKIP_PREPUSH=1 git push
-# Skip the slow passes: PREPUSH_FAST=1 git push   (runs harness, comments, fmt and state contracts; skips install conformance and clippy)
+# Skip the slow passes: PREPUSH_FAST=1 git push   (runs harness, comments, fmt, state contracts and the target/ sweep; skips install conformance and clippy)
 #
 # Install (per clone): scripts/install-hooks.sh   (sets core.hooksPath=.githooks)
 set -euo pipefail
@@ -45,6 +45,11 @@ if ! scripts/checks.sh contracts; then
   echo "pre-push: state contracts failed" >&2
   exit 1
 fi
+
+# target/ hygiene, never a gate: evicting stale build artifacts can't make a
+# push wrong, and a sweep failure must not block one. Runs before the slow
+# passes so their fresh artifacts aren't candidates for eviction.
+scripts/checks.sh sweep || echo "pre-push: sweep failed (ignored)" >&2
 
 if [[ "${PREPUSH_FAST:-}" == "1" ]]; then
   echo "pre-push: ok (harness, comments, fmt and state contracts; PREPUSH_FAST=1)"

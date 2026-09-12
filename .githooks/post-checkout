@@ -4,5 +4,26 @@ set -euo pipefail
 export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
 cd "$(git rev-parse --show-toplevel)"
 
+# A git worktree is a second checkout, so cargo gives it its own target/ —
+# tens of GB per agent worktree, never reclaimed because the worktree outlives
+# the task that made it. Symlinking it at the main checkout's target/ shares
+# one artifact pool instead. The cost is that concurrent builds serialize on
+# cargo's build lock, which is much cheaper than the duplication.
+share_worktree_target() {
+  local root main_dir
+  root="$(pwd)"
+  main_dir="$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")"
+  if [ "$main_dir" = "$root" ]; then
+    return 0
+  fi
+  if [ -e "$root/target" ] || [ -L "$root/target" ]; then
+    return 0
+  fi
+  mkdir -p "$main_dir/target"
+  ln -s "$main_dir/target" "$root/target"
+}
+
+share_worktree_target || echo "post-checkout: shared target/ link skipped" >&2
+
 command -v bd >/dev/null 2>&1 || exit 0
 exec bd hooks run post-checkout "$@"

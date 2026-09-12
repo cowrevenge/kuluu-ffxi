@@ -1,4 +1,9 @@
-# Rust workspace artifacts (defense-in-depth; component .gitignores cover this too)
+# Rust workspace artifacts (defense-in-depth; component .gitignores cover this too).
+# No trailing slash: in a worktree, .githooks/post-checkout makes target/ a
+# symlink to the main checkout's, and a trailing-slash pattern matches only
+# real directories — leaving the symlink untracked, which makes
+# `git worktree remove` refuse.
+**/target
 **/target/
 **/*.rs.bk
 

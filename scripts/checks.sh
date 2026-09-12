@@ -7,13 +7,14 @@
 # the *exact* fmt/clippy invocation CI will, and vice versa.
 #
 # Usage: scripts/checks.sh <stage>...
-#   stage ∈ {harness, comments, fmt, clippy, style, contracts, install, test, enhanced, build, wasm, doc}
+#   stage ∈ {harness, comments, fmt, clippy, style, contracts, install, test, enhanced, build, wasm, doc, sweep}
 #   scripts/checks.sh harness comments fmt contracts clippy  # pre-push default
 #   COMMENTS_DIFF=staged scripts/checks.sh comments  # pre-commit (staged hunks)
 #   scripts/checks.sh harness fmt clippy test # the CI gate (ci.yml runs these)
 #   scripts/checks.sh enhanced                # the opt-in feature family (CI)
 #   scripts/checks.sh install                 # DAT conformance per client install on disk (pre-push when DAT code moved; skips without assets)
 #   scripts/checks.sh build                   # local-only: see run_build below
+#   scripts/checks.sh sweep                   # local-only: cap target/ size (pre-push, advisory)
 #
 # Each stage is a separate argument so callers (notably CI) can run them as
 # distinct steps for per-stage pass/fail reporting while still sharing flags.
@@ -506,6 +507,31 @@ run_wasm() {
   cargo check -p kuluu-viewer-wasm --locked --target wasm32-unknown-unknown
 }
 
+# Cargo never garbage-collects target/: artifacts for superseded dep versions,
+# deleted tests and renamed examples accumulate forever. Thirty days of
+# iteration on this workspace reached 206 GB (94 GB of deps across 504k files,
+# 64 GB of stale incremental sessions) and filled the disk.
+#
+# The age pass goes first so genuinely-stale artifacts go before the cap has
+# to make its blunter oldest-first call. The cap is what actually bounds the
+# directory, and it binds on most runs: this workspace's week-old working set
+# alone exceeds it.
+#
+# The cap is in cargo-sweep's accounting, which sums file sizes without
+# deduplicating cargo's hardlinks, so it reads roughly 1.4x what `du` reports.
+# 180 here settles the tree around 130 GB on disk.
+TARGET_SWEEP_KEEP_DAYS=7
+TARGET_DIR_CAP_GB=180
+
+run_sweep() {
+  if ! command -v cargo-sweep >/dev/null 2>&1; then
+    echo "checks: sweep skipped — cargo-sweep not installed (scripts/install-tools.sh)"
+    return 0
+  fi
+  cargo sweep --time "$TARGET_SWEEP_KEEP_DAYS" .
+  cargo sweep --maxsize "${TARGET_DIR_CAP_GB}GB" .
+}
+
 run_doc() {
   # Comment/doc-rot discipline. Advisory at the call site (CI marks the step
   # continue-on-error) until the tree reports zero.
@@ -528,7 +554,7 @@ run_doc() {
 }
 
 if [[ $# -eq 0 ]]; then
-  echo "checks: no stage given (expected one or more of: fmt clippy style harness comments contracts install test enhanced build wasm doc)" >&2
+  echo "checks: no stage given (expected one or more of: fmt clippy style harness comments contracts install test enhanced build wasm doc sweep)" >&2
   exit 2
 fi
 
@@ -546,6 +572,7 @@ for stage in "$@"; do
     build)  echo "checks: build";  run_build ;;
     wasm)   echo "checks: wasm";   run_wasm ;;
     doc)    echo "checks: doc";    run_doc ;;
+    sweep)  echo "checks: sweep";  run_sweep ;;
     *) echo "checks: unknown stage '$stage'" >&2; exit 2 ;;
   esac
 done

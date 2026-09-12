@@ -17,20 +17,31 @@ const PATCH_CFG: &str = "patch.cfg";
 
 /// Per-byte obfuscation shared by every item DAT. POLUtils
 /// Wiki/FFXIDATFileEncryption.wiki: a fixed rotate for item data.
-pub(crate) const ITEM_BYTE_SHIFT: u32 = 5;
+pub const ITEM_BYTE_SHIFT: u32 = 5;
 
 /// Retail item DAT block layouts, in release order. Each variant is a whole
 /// on-disk format, so parsers dispatch on it rather than on a build date.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ItemBlockLayout {
-    /// 0xC00-byte blocks: every retail build up to the September 2026 update,
-    /// and therefore every HorizonXI client. POLUtils Item.cs.
+    /// 0xC00-byte blocks: [`KNOWN_CLIENTS`] horizonxi-2023 and
+    /// retail-2019-base. POLUtils Item.cs.
     Legacy,
-    /// 0x1400-byte blocks with two extra bytes after `flags` and, for
-    /// equipment, two after `races`. Windower/ResourceExtractor commit 51bef17
-    /// ResourceParser.cs ParseItems (2026-09-10).
+    /// 0x1400-byte blocks. Relative to `Legacy`: a reserved u16 follows
+    /// `flags`, so stack/type/resource/targets and every tail shift by 2; an
+    /// equipment block inserts a second reserved u16 after `races`, so `jobs`
+    /// and the rest of the equipment tail shift by 4; a general or currency
+    /// block gains a trailing reserved u16 before its string table; a usable
+    /// block's last tail field narrows from u32 to u16. The icon offset is
+    /// unchanged and the extra 0x800 bytes are trailing pad. Measured on every
+    /// block of every item DAT of [`KNOWN_CLIENTS`] horizonxi-2023 (0xC00) and
+    /// retail-2026-09 (0x1400); Windower/ResourceExtractor ResourceParser.cs
+    /// `ParseItems` is the secondary hypothesis source.
     Retail2026,
 }
+
+/// Decoded value of the last byte of every real block on both measured
+/// layouts; a stride that lands elsewhere reads a 0x00 pad or icon byte.
+pub const ITEM_BLOCK_TRAILER: u8 = 0xFF;
 
 impl ItemBlockLayout {
     pub const ALL: [ItemBlockLayout; 2] = [ItemBlockLayout::Legacy, ItemBlockLayout::Retail2026];
@@ -42,6 +53,22 @@ impl ItemBlockLayout {
         }
     }
 
+    /// Bytes inserted after `flags`, before the rest of the common header.
+    pub const fn header_shift(self) -> usize {
+        match self {
+            ItemBlockLayout::Legacy => 0,
+            ItemBlockLayout::Retail2026 => 2,
+        }
+    }
+
+    /// Bytes inserted after `races` in an equipment block, before `jobs`.
+    pub const fn races_gap(self) -> usize {
+        match self {
+            ItemBlockLayout::Legacy => 0,
+            ItemBlockLayout::Retail2026 => 2,
+        }
+    }
+
     pub const fn name(self) -> &'static str {
         match self {
             ItemBlockLayout::Legacy => "legacy-0xC00",
@@ -49,8 +76,10 @@ impl ItemBlockLayout {
         }
     }
 
-    /// Which stride makes the first two blocks carry consecutive ids. Works on
-    /// a file prefix, so callers only need the first `0x1400 + 4` bytes.
+    /// Which stride ends the first block on [`ITEM_BLOCK_TRAILER`] and starts
+    /// the second on the consecutive id, or on an all-zero id when the file
+    /// holds a single real block (the currency DAT). Works on a file prefix,
+    /// so callers only need the first `0x1400 + 4` bytes.
     pub fn detect(head: &[u8]) -> Option<ItemBlockLayout> {
         let id_at = |off: usize| -> Option<u32> {
             let b = head.get(off..off + 4)?;
@@ -62,9 +91,15 @@ impl ItemBlockLayout {
             ]))
         };
         let base = id_at(0)?;
-        Self::ALL
-            .into_iter()
-            .find(|layout| id_at(layout.stride()) == Some(base + 1))
+        Self::ALL.into_iter().find(|layout| {
+            let stride = layout.stride();
+            let trailer = head
+                .get(stride - 1)
+                .map(|b| b.rotate_right(ITEM_BYTE_SHIFT));
+            let second = id_at(stride);
+            trailer == Some(ITEM_BLOCK_TRAILER)
+                && (second == Some(base.wrapping_add(1)) || second == Some(0))
+        })
     }
 
     pub fn probe_file(path: &Path) -> Option<ItemBlockLayout> {
@@ -238,6 +273,7 @@ mod tests {
             for (i, b) in id.to_le_bytes().iter().enumerate() {
                 bytes[off + i] = b.rotate_left(ITEM_BYTE_SHIFT);
             }
+            bytes[off + stride - 1] = ITEM_BLOCK_TRAILER.rotate_left(ITEM_BYTE_SHIFT);
         }
         bytes
     }
@@ -311,15 +347,38 @@ mod tests {
             return;
         };
         let profile = ClientProfile::probe(root.root());
-        assert_eq!(profile.item_layout, Some(ItemBlockLayout::Legacy));
+        assert!(
+            profile.is_known(),
+            "vendored install is not in KNOWN_CLIENTS: {profile}"
+        );
+        assert_eq!(
+            profile.item_layout,
+            profile.known.map(|k| k.item_layout),
+            "{profile}"
+        );
         assert_eq!(
             profile.patch_version.as_deref(),
             profile.known.and_then(|k| k.patch_version),
             "{profile}"
         );
-        assert!(
-            profile.is_known(),
-            "vendored install is not in KNOWN_CLIENTS: {profile}"
-        );
+    }
+
+    #[test]
+    fn every_item_dat_probes_to_the_profile_layout() {
+        let Some(root) = crate::archive::open_test_install() else {
+            return;
+        };
+        let profile = ClientProfile::probe(root.root());
+        for rel in crate::item_dat::ITEM_DAT_ROM_PATHS {
+            let path = root.root().join(rel);
+            if !path.is_file() {
+                continue;
+            }
+            assert_eq!(
+                ItemBlockLayout::probe_file(&path),
+                profile.item_layout,
+                "{rel}: {profile}"
+            );
+        }
     }
 }

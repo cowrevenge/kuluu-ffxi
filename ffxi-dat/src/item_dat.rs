@@ -19,13 +19,50 @@ pub const ITEM_DAT_ROM_PATHS: &[&str] = &[
     "ROM/301/115.DAT", // items (expansions)
 ];
 
-/// Stride of the only layout this module decodes; `Retail2026` files are
-/// recognised but fail closed (kuluu-47cq).
-pub const ITEM_BLOCK_STRIDE: usize = ItemBlockLayout::Legacy.stride();
-
+/// Same on both layouts: the extra 0x800 bytes of a `Retail2026` block are
+/// trailing pad after the icon.
 pub const ITEM_ICON_OFFSET: usize = 0x280;
 
 const ITEM_BLOCK_SHIFT: u32 = crate::client_profile::ITEM_BYTE_SHIFT;
+
+const ITEM_FLAGS_OFFSET: usize = 0x04;
+
+/// `Legacy` offset of the header run stack/type/resource/targets; every
+/// layout places it at this plus `ItemBlockLayout::header_shift`.
+const ITEM_STACK_OFFSET: usize = 0x06;
+
+const ITEM_TYPE_OFFSET: usize = ITEM_STACK_OFFSET + 2;
+
+/// `Legacy` offset of the equipment tail (level/slots/races/jobs...); every
+/// layout places it at this plus `ItemBlockLayout::header_shift`.
+const ITEM_EQUIPMENT_TAIL_OFFSET: usize = 0x0E;
+
+/// Where the string-table probe starts: the first offset past the common
+/// header on either layout.
+const STRING_TABLE_PROBE_START: usize = 0x10;
+
+const STRING_TABLE_MAX_ENTRIES: u32 = 9;
+
+const STRING_TABLE_META_LEN: usize = 8;
+
+const STRING_TABLE_COUNT_LEN: usize = 4;
+
+#[derive(Debug, thiserror::Error)]
+pub enum ItemDatError {
+    #[error("{path}: block layout not detected (no known stride ends the first block on the trailer byte)")]
+    LayoutUndetected { path: PathBuf },
+
+    #[error("{path}: {len} bytes is not a multiple of the {layout} stride {stride:#x}")]
+    UnalignedLength {
+        path: PathBuf,
+        len: usize,
+        layout: &'static str,
+        stride: usize,
+    },
+
+    #[error("{path}: first block id unreadable")]
+    HeaderUnreadable { path: PathBuf },
+}
 
 pub const ITEM_FLAG_RARE: u16 = 0x8000;
 
@@ -77,25 +114,29 @@ fn is_equipment(item_id: u32) -> bool {
     matches!(item_id, 0x2800..=0x6FFF)
 }
 
+/// `dat_bytes` is a whole item DAT: the layout comes from its first two
+/// blocks and the base id from its first block.
 pub fn lookup(dat_bytes: &[u8], item_id: u16) -> Option<ItemStatic> {
-    let block = decoded_block(dat_bytes, item_id)?;
-    decode_item_static(&block)
+    let (layout, block) = decoded_block(dat_bytes, item_id)?;
+    decode_item_static(&block, layout)
 }
 
-fn decode_item_static(block: &[u8]) -> Option<ItemStatic> {
+fn decode_item_static(block: &[u8], layout: ItemBlockLayout) -> Option<ItemStatic> {
     let stored_id = read_u32_le(block.get(0x00..0x04)?);
-    let flags = read_u16_le(block.get(0x04..0x06)?);
-    let item_type = read_u16_le(block.get(0x08..0x0A)?);
+    let flags = read_u16_le(block.get(ITEM_FLAGS_OFFSET..ITEM_FLAGS_OFFSET + 2)?);
+    let type_off = ITEM_TYPE_OFFSET + layout.header_shift();
+    let item_type = read_u16_le(block.get(type_off..type_off + 2)?);
 
     let (slot_mask, races_mask, jobs_mask, level, max_charges, recast_base) =
         if is_equipment(stored_id) {
-            let mut off = 0x0E;
+            let mut off = ITEM_EQUIPMENT_TAIL_OFFSET + layout.header_shift();
             let level = read_u16_le(block.get(off..off + 2)?);
             off += 2;
             let slots = read_u16_le(block.get(off..off + 2)?);
             off += 2;
             let races = read_u16_le(block.get(off..off + 2)?);
             off += 2;
+            off += layout.races_gap();
             let jobs = read_u32_le(block.get(off..off + 4)?);
             off += 4;
 
@@ -142,7 +183,7 @@ fn decode_item_static(block: &[u8]) -> Option<ItemStatic> {
 }
 
 pub fn icon_at(dat_bytes: &[u8], item_id: u16) -> Option<GraphicImage> {
-    let block = decoded_block(dat_bytes, item_id)?;
+    let (_, block) = decoded_block(dat_bytes, item_id)?;
     decode_icon(&block)
 }
 
@@ -160,14 +201,17 @@ struct ItemDatFile {
 /// rotate-right-5 obfuscation), so the table itself stays tiny.
 pub struct ItemTable {
     files: Vec<ItemDatFile>,
+    skipped: Vec<ItemDatError>,
 }
 
 impl ItemTable {
     /// Open every available item DAT under `root_dir` (the retail install root).
-    /// Missing or malformed files are skipped, so a partial install still yields
-    /// whatever ranges it has.
+    /// A missing file is silently absent; a present but unusable one is skipped
+    /// and reported by [`ItemTable::skipped`], so a partial install still
+    /// yields whatever ranges it has.
     pub fn open(root_dir: &Path) -> ItemTable {
         let mut files = Vec::new();
+        let mut skipped = Vec::new();
         for rel in ITEM_DAT_ROM_PATHS {
             let path = root_dir.join(rel);
             let Ok(meta) = std::fs::metadata(&path) else {
@@ -175,26 +219,46 @@ impl ItemTable {
             };
             let len = meta.len() as usize;
             let Some(layout) = ItemBlockLayout::probe_file(&path) else {
+                skipped.push(ItemDatError::LayoutUndetected { path });
                 continue;
             };
-            if len == 0 || !len.is_multiple_of(layout.stride()) {
+            let stride = layout.stride();
+            if len == 0 || !len.is_multiple_of(stride) {
+                skipped.push(ItemDatError::UnalignedLength {
+                    path,
+                    len,
+                    layout: layout.name(),
+                    stride,
+                });
                 continue;
             }
-            let Some(base) = first_block_id(&path) else {
+            let Some(base) = block_id_at(&path, 0) else {
+                skipped.push(ItemDatError::HeaderUnreadable { path });
                 continue;
+            };
+            let blocks = if block_id_at(&path, stride) == Some(0) {
+                1
+            } else {
+                len / stride
             };
             files.push(ItemDatFile {
                 path,
-                base,
-                blocks: len / layout.stride(),
+                base: base as u16,
+                blocks,
                 layout,
             });
         }
-        ItemTable { files }
+        ItemTable { files, skipped }
     }
 
     pub fn is_empty(&self) -> bool {
         self.files.is_empty()
+    }
+
+    /// Present item DATs that could not be opened, in [`ITEM_DAT_ROM_PATHS`]
+    /// order.
+    pub fn skipped(&self) -> &[ItemDatError] {
+        &self.skipped
     }
 
     /// Layouts present across the opened files, deduplicated in file order. A
@@ -209,36 +273,25 @@ impl ItemTable {
         out
     }
 
-    /// Whether every opened file is in a layout this module decodes.
-    pub fn is_decodable(&self) -> bool {
-        self.files
-            .iter()
-            .all(|f| f.layout == ItemBlockLayout::Legacy)
-    }
-
-    fn block(&self, item_id: u16) -> Option<Vec<u8>> {
+    fn block(&self, item_id: u16) -> Option<(ItemBlockLayout, Vec<u8>)> {
         let file = self
             .files
             .iter()
             .find(|f| item_id >= f.base && ((item_id - f.base) as usize) < f.blocks)?;
-        if file.layout != ItemBlockLayout::Legacy {
-            return None;
-        }
         let stride = file.layout.stride();
         let offset = (item_id - file.base) as usize * stride;
         let mut block = read_at(&file.path, offset, stride)?;
-        for b in block.iter_mut() {
-            *b = rotate_byte_right(*b, ITEM_BLOCK_SHIFT);
-        }
-        (read_u32_le(block.get(0x00..0x04)?) as u16 == item_id).then_some(block)
+        decode_bytes(&mut block);
+        (read_u32_le(block.get(0x00..0x04)?) as u16 == item_id).then_some((file.layout, block))
     }
 
     pub fn lookup(&self, item_id: u16) -> Option<ItemStatic> {
-        decode_item_static(&self.block(item_id)?)
+        let (layout, block) = self.block(item_id)?;
+        decode_item_static(&block, layout)
     }
 
     pub fn icon(&self, item_id: u16) -> Option<GraphicImage> {
-        decode_icon(&self.block(item_id)?)
+        decode_icon(&self.block(item_id)?.1)
     }
 }
 
@@ -250,27 +303,34 @@ fn read_at(path: &Path, offset: usize, len: usize) -> Option<Vec<u8>> {
     Some(buf)
 }
 
-fn first_block_id(path: &Path) -> Option<u16> {
-    let mut head = read_at(path, 0, 4)?;
-    for b in head.iter_mut() {
+fn block_id_at(path: &Path, offset: usize) -> Option<u32> {
+    let mut head = read_at(path, offset, 4)?;
+    decode_bytes(&mut head);
+    Some(read_u32_le(&head))
+}
+
+fn decode_bytes(bytes: &mut [u8]) {
+    for b in bytes.iter_mut() {
         *b = rotate_byte_right(*b, ITEM_BLOCK_SHIFT);
     }
-    Some(read_u32_le(&head) as u16)
 }
 
 fn is_weapon(item_id: u32) -> bool {
     matches!(item_id, 0x4000..=0x59FF)
 }
 
-fn decoded_block(dat_bytes: &[u8], item_id: u16) -> Option<Vec<u8>> {
-    let id = item_id as usize;
-    let start = id.checked_mul(ITEM_BLOCK_STRIDE)?;
-    let end = start.checked_add(ITEM_BLOCK_STRIDE)?;
+fn decoded_block(dat_bytes: &[u8], item_id: u16) -> Option<(ItemBlockLayout, Vec<u8>)> {
+    let layout = ItemBlockLayout::detect(dat_bytes)?;
+    let stride = layout.stride();
+    let mut head = dat_bytes.get(0..4)?.to_vec();
+    decode_bytes(&mut head);
+    let base = read_u32_le(&head);
+    let index = (item_id as u32).checked_sub(base)? as usize;
+    let start = index.checked_mul(stride)?;
+    let end = start.checked_add(stride)?;
     let mut block = dat_bytes.get(start..end)?.to_vec();
-    for b in block.iter_mut() {
-        *b = rotate_byte_right(*b, ITEM_BLOCK_SHIFT);
-    }
-    Some(block)
+    decode_bytes(&mut block);
+    (read_u32_le(block.get(0x00..0x04)?) == item_id as u32).then_some((layout, block))
 }
 
 fn decode_icon(block: &[u8]) -> Option<GraphicImage> {
@@ -303,22 +363,30 @@ const STRING_TABLE_LOG_NAME: usize = 2;
 const STRING_TABLE_LOG_NAME_PLURAL: usize = 3;
 const STRING_TABLE_DESCRIPTION: usize = 4;
 
+/// The table's first descriptor points just past the descriptors, so a
+/// candidate count word is accepted only when the word after it agrees.
+fn string_table_body_offset(count: usize) -> usize {
+    STRING_TABLE_COUNT_LEN + count * STRING_TABLE_META_LEN
+}
+
 fn read_item_strings(block: &[u8]) -> Option<ItemStrings> {
     let table_region_end = ITEM_ICON_OFFSET;
 
-    let mut probe = 0x10;
-    while probe + 4 <= table_region_end {
+    let mut probe = STRING_TABLE_PROBE_START;
+    while probe + STRING_TABLE_COUNT_LEN <= table_region_end {
         let count = read_u32_le(block.get(probe..probe + 4)?);
-        if (1..=9).contains(&count) {
-            let metas_start = probe + 4;
-            let body_start = metas_start + (count as usize) * 8;
-            if body_start <= table_region_end {
-                if let Some(parsed) = parse_string_table(block, probe, count as usize) {
+        if (1..=STRING_TABLE_MAX_ENTRIES).contains(&count) {
+            let count = count as usize;
+            let first_meta = probe + STRING_TABLE_COUNT_LEN;
+            let first_rel = read_u32_le(block.get(first_meta..first_meta + 4)?) as usize;
+            let body_start = probe + string_table_body_offset(count);
+            if first_rel == string_table_body_offset(count) && body_start <= table_region_end {
+                if let Some(parsed) = parse_string_table(block, probe, count) {
                     return Some(parsed);
                 }
             }
         }
-        probe += 4;
+        probe += STRING_TABLE_COUNT_LEN;
     }
     None
 }
@@ -326,7 +394,7 @@ fn read_item_strings(block: &[u8]) -> Option<ItemStrings> {
 fn parse_string_table(block: &[u8], table_off: usize, count: usize) -> Option<ItemStrings> {
     let mut metas = Vec::with_capacity(count);
     for i in 0..count {
-        let m = table_off + 4 + i * 8;
+        let m = table_off + STRING_TABLE_COUNT_LEN + i * STRING_TABLE_META_LEN;
         let rel_off = read_u32_le(block.get(m..m + 4)?) as usize;
         let kind = read_u32_le(block.get(m + 4..m + 8)?);
         metas.push((rel_off, kind));

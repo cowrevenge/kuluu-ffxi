@@ -271,6 +271,21 @@ cargo run -p ffxi-dat --example dat-client-profile -- "/path/to/FINAL FANTASY XI
 When you measure a new build, add its row to `KNOWN_CLIENTS` and cite that
 row's name (not a date) next to any offset or constant verified on it.
 
+The build-time vendor pins have generations too, and they are not the
+client's. `vendor/server` (LandSandBoat, pinned 2026-04-26) declares
+`CLIENT_VER = '30260203_0'` in `settings/default/login.lua` with
+`VER_LOCK = 2`, so a stock server at that pin admits `retail-2026-09`
+(`30260904_1`) and refuses `horizonxi-2023` (`30230905_0`) unless the lock is
+off; upstream has since moved to `30260904_1`, and a pin bump moves it again.
+`vendor/POLUtils`' `ROMFileMappings.xml` (pinned 2020-07-19; last edited
+2018-08-18 for the Unity dialog tables, before that the 2015-11 Reisenjima
+update) keys on absolute file ids up to 86528; every one still resolves on
+both installs and retail's table now runs to 109480, so Square Enix appends
+and the 2018 mapping stays valid. `vendor/AltanaListener`'s `track_names.json`
+(v1.0.4, 2026-03-11) is a hand-curated 223-track name list, not a
+client-derived table, so it has no build to match; the repository is archived
+and the pin stays frozen.
+
 ### Steam Deck
 
 The Deck runs the plain x86_64 Linux binary. Launch it from Game Mode, not

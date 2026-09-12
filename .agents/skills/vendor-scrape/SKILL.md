@@ -146,6 +146,7 @@ mod tests {
 | C++ enum class | `vendor/server/src/map/enums/*.h` | Strip braces, match `Name = N,` lines |
 | SQL `INSERT INTO` | `vendor/server/sql/*.sql` | Match `INSERT INTO \`table\` VALUES (...)` per line, split on `,` |
 | Lua action table | `vendor/server/scripts/...` | Heavier — only worth it for high-value, stable tables |
+| Lua scalar setting | `vendor/server/settings/default/*.lua` | Match `KEY = value,`, strip quotes; see `ffxi-proto/build.rs` `login.CLIENT_VER` |
 | `#define` constants | scattered in C++ headers | Match `#define NAME VALUE` lines |
 | Phoenix-style `enum class X : uint8_t` | `research/Phoenix/src/.../*.h` (local clone only) | Same as LSB enums; useful when LSB hasn't migrated |
 
@@ -167,3 +168,38 @@ narrow so unrelated edits don't trigger rebuilds.
 - `lsb-mirror-check` skill — for verifying that the scraped values
   actually match LSB's runtime usage (scraping the data is
   necessary but not sufficient)
+
+## Bumping the vendor/server pin
+
+1. Record OLD and NEW commit SHAs. Shallow-fetch the new commit; deepen the
+   clone (`git fetch --deepen`) if the target isn't reachable at the current
+   depth.
+2. Snapshot every scraper's `OUT_DIR` before and after the bump:
+   `cargo build -p <crate> --message-format=json | jq -r 'select(.reason=="build-script-executed") | .out_dir'`,
+   then diff the two snapshots. Every hunk is a constant Kuluu now compiles
+   differently. A scraper that bails is upstream telling you a format moved:
+   fix the walker, never relax the floor.
+3. Intersect `git -C vendor/server diff --name-only OLD NEW` with the
+   `vendor/server` paths Kuluu actually cites
+   (`grep -rhoE 'vendor/server/[A-Za-z0-9_./-]+' --include='*.rs'` over the
+   crates), and hand that intersection plus the diffs to the
+   `protocol-conformance-reviewer` agent.
+4. Run `scripts/checks.sh contracts` then `scripts/checks.sh fmt clippy test
+   install`.
+5. Tests that hard-pin scraped values — `ffxi-proto` `login.rs`
+   `scraped_login_settings_match_the_pinned_lsb_tree` (CLIENT_VER/VER_LOCK) and
+   `kuluu-session` `auth_client.rs` `default_version_matches_lsb_supported_xiloader`
+   — are updated in the same commit, never loosened.
+6. When `CLIENT_VER` moves, say in the commit message which `KNOWN_CLIENTS`
+   rows are now older than the server era, and that `kuluu` warns for them at
+   startup. A running dev stack keeps its image's `CLIENT_VER` until
+   recreated (dump the DB first).
+
+### Known blocker for the next bump
+
+At LSB `origin/base`, six scrape inputs no longer exist:
+`scripts/enum/effect.lua`, `scripts/enum/zone.lua`, `sql/status_effects.sql`,
+`sql/transport.sql`, `sql/zonelines.sql`, `src/map/transport.cpp`. Upstream
+replaced them with `data/enums/*.yaml`, `data/status_effects.yaml` and
+`data/zones/<zone>/zone.yaml`. Those walkers must be re-sourced against the
+new shapes before the pin can move; tracked as a bead.

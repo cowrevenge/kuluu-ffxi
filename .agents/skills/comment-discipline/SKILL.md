@@ -32,8 +32,12 @@ sentence beats a paragraph that will rot.
   elided path (`research/XIClient/.../Foo.cpp`). If the evidence lives
   outside the repo, first land it as a dated record under
   `.agents/skills/retail-observe/references/` and cite that.
-- A retail-binary citation looks like `FFXiMain.dll .data @RVA 0x35AF60`
-  plus the client version observed.
+- A retail-binary citation is scoped to a build in the same comment block,
+  and says RVA or VA: bad `FFXiMain.dll (2026-09-09 install) VA 0x100FA0F7`;
+  good `FFXiMain.dll horizonxi-2023 RVA 0xFA0F7 / retail-2026-09 RVA
+  0xFB3A7` or `FFXiMain.dll SHA-256 f4f90fbd080c RVA 0x96E90`. Row names
+  live in `ffxi-dat/src/client_profile.rs` `KNOWN_CLIENTS`; a build not
+  there gets its SHA-256 (>= 12 hex).
 
 ## Literals
 
@@ -67,7 +71,8 @@ COMMENTS_DIFF=staged scripts/checks.sh comments  # only what you are about to co
 ```
 
 Hard failures: a line-pinned citation, a cited path that does not exist, an
-elided path, a finding id. Everything else prints as advisory; read it and
+elided path, a finding id, a retail-binary address whose comment block names
+no build. Everything else prints as advisory; read it and
 decide, then commit. `.githooks/pre-commit` runs the staged form on every
 commit once hooks are installed (`cargo xtask install-hooks`); pre-push and
 CI run the tree form.

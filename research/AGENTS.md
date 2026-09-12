@@ -15,8 +15,11 @@ workspace crates.
 
 ## Contents
 
-- `XiEvents/`, `XiPackets/` — submodule pointers to upstream
-  repos cited in source comments. Deinitialized by default; populate on demand
+- `XiEvents/`, `XiPackets/` — atom0s's submodule pointers cited in source
+  comments. XiEvents self-dates to the Feb. 28, 2022 retail client (older than
+  every `KNOWN_CLIENTS` row); XiPackets tracks retail with a lag and is current
+  through the early-2026 Alter Ego points packets (`0x00C1`/`0x008E`), with no
+  DLL hash to anchor it. Deinitialized by default; populate on demand
   with `git submodule update --init research/<name>`. See *Which reference for
   what* below before trusting any of them for bit-level format details.
 - `Phoenix/`, `xim/` — **not** submodules. Both upstreams are private or
@@ -47,6 +50,10 @@ the higher tier:
 1. **Retail itself** — the disassembled FFXiMain/POL `.text` and live
    observation (the `retail-observe` skill) are the oracle. Bit-level
    questions (field widths, masks, flags) are settled here, nowhere else.
+   Build: the `KNOWN_CLIENTS` rows in `ffxi-dat/src/client_profile.rs` -
+   `retail-2026-09` (patch `30260904_1`, the oracle) and `horizonxi-2023`
+   (`30230905_0`, the HorizonXI pin); name the row, not a date, beside
+   anything verified on it.
 2. **`XIClient/`** — disassembly-grounded; the best community reference for
    **bit-level format accuracy** (field widths, in-memory-only bits). No
    license: read-only. Its reconstructions remain community evidence; cite them
@@ -59,17 +66,30 @@ the higher tier:
    policy (`BacksideCullingPolicy` for movement, `DoubleSidedSkipPolicy` for
    the chase camera), which settles floor-vs-ceiling and camera-skip questions
    that XIM only approximates.
+   Build: none pinned - it takes its version from the install's `patch.ver`
+   and tracks live retail as a moving target (`GC_ZONE` and the DMsg v16
+   loader were refreshed through 2026-05); the pin here (2026-07-28) falls
+   between `horizonxi-2023` and `retail-2026-09`, so confirm a layout against
+   the row you are on.
 3. **`Phoenix/`** — server-side divergence signal for wire-protocol
    questions (LSB under `vendor/` stays authoritative for runtime). Not
    vendored; needs a local clone, so treat a missing path as "unavailable",
    not "no divergence".
+   Build: unpinned - whatever commit your local clone is at; record it in the
+   bead that cites it.
 4. **`xi-tools/docs/`** — community format docs (DAT, animation, zone mesh,
    event bytecode, audio, VFX). Useful cross-reference for `ffxi-dat` /
    `ffxi-audio` work, but AI-assisted: treat claims as hypotheses and
    verify against tier 1–2 before baking values into the crates.
+   Build: CatsEyeXI's client (`docs/HANDOVER.md`), a retail-lineage
+   `FFXiMain.dll` newer than `horizonxi-2023` and older than `retail-2026-09`
+   (`.text` `0x32716E` against `0x3230BE` / `0x3275EE`), so its VAs match
+   neither `KNOWN_CLIENTS` row.
 5. **`xi-model-viewer/`** — rendering and asset-pipeline reference: WebGL2 GPU
    skinning, zone time-of-day/weather, BGW/SPW playback. Most useful for
    `kuluu-render` materials and `ffxi-actor` posing.
+   Build: v1.6.0; it ships no client and reads whatever install it is pointed
+   at (the author's is CatsEyeXI, with lists baked by xi-tools).
 6. **`xim/`** — broad behavioral/architecture reference (actor handling,
    packet flow, DAT pipeline), but the author rarely consulted the
    disassembly and states XIM is unaware of in-memory-only bits/fields.
@@ -89,6 +109,9 @@ the higher tier:
    triangle's third vertex index (`Flags != 0 && VertexIndex3 & 0x4000`).
    XIM was right about the shape and wrong about the predicate — the usual
    failure mode. Use XIM to find *where* to look, then read XIClient.
+   Build: the unversioned `source.zip` from xim.pages.dev (`1.0-SNAPSHOT`);
+   the copy fetched here carries content dated 2026-03-09 and LSB tables from
+   2024-06-30.
 
 ## XIM
 

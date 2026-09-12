@@ -48,7 +48,33 @@ offsets or lengths.
 Record the input path, SHA-256, image base and relevant section RVA; include the
 function addresses and how they were identified. For a DAT measurement, record
 the file ID, resolved path, resource/locator index, raw value and coordinate
-conversion. Scope addresses and measurements to that build.
+conversion. Scope addresses and measurements to that build: name the
+`KNOWN_CLIENTS` row (`ffxi-dat/src/client_profile.rs`) when the build is one of
+those, or the DLL SHA-256 (twelve hex digits or more) when it is not, and say
+whether each address is an RVA or a VA. `scripts/checks.sh comments` enforces
+this scoping on any comment carrying an FFXiMain.dll address.
+
+The unpack recipe is proven on both `KNOWN_CLIENTS` rows: `research/xi-tools`
+`uv run xi dll ffximain unpack` (or an independent LZSS decoder bounded to
+`.text` `VirtualSize`) produces the raw `.text` dump, whose first byte is VA
+`0x10001000` (RVA `0x1000`). Disassemble it ephemerally with capstone; nothing
+is tracked in the tree, so write the one-liner on the spot:
+
+```bash
+uv run --with capstone python3 -c '
+import sys, capstone
+dump, va, n = sys.argv[1], int(sys.argv[2], 0), int(sys.argv[3], 0)
+data = open(dump, "rb").read()[va - 0x10001000:][:n]
+for i in capstone.Cs(capstone.CS_ARCH_X86, capstone.CS_MODE_32).disasm(data, va):
+    print(f"{i.address:08X}  {i.bytes.hex():<20}  {i.mnemonic} {i.op_str}")
+' <dump> <VA> <nbytes>
+```
+
+Install nothing project-permanent for a one-off read. The unpacked `.text`
+SHA-256 per row: `horizonxi-2023`
+`f6b48296b3f9e82a5ed73004e513cc69ded72bb407fb42872e5c9ff63725a527`;
+`retail-2026-09`
+`b55f8b4c730c00229e2febd1ea6a5efba29920e094fa565a3816b763c3d9cdc9`.
 
 Follow the call chain far enough to establish the actual inputs and exceptions.
 For example, the nameplate investigation on `kuluu-81r8` found that the name

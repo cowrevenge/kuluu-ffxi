@@ -244,6 +244,7 @@ fn resolve_dat_root(require_dat: bool) -> Result<Option<std::sync::Arc<ffxi_dat:
                      DAT layouts are probed, not verified"
                 );
             }
+            warn_on_client_ver_era_mismatch(root.profile());
             Ok(Some(std::sync::Arc::new(root)))
         }
         Err(err) if require_dat => Err(anyhow::anyhow!(
@@ -259,6 +260,33 @@ fn resolve_dat_root(require_dat: bool) -> Result<Option<std::sync::Arc<ffxi_dat:
             Ok(None)
         }
     }
+}
+
+/// Kuluu never sends the lobby's client-version packet
+/// (vendor/server/src/login/view_session.cpp view_session::read_func case 0x26),
+/// so LSB never runs this check itself; the warning is the only place a patch
+/// era drifting from login.CLIENT_VER becomes visible.
+fn warn_on_client_ver_era_mismatch(profile: &ffxi_dat::client_profile::ClientProfile) {
+    use ffxi_proto::login::{
+        compare_client_ver_era, lobby_accepts_client_ver, VerLock, LSB_CLIENT_VER,
+        LSB_DEFAULT_VER_LOCK,
+    };
+    let Some(stamp) = profile.patch_version.as_deref() else {
+        return;
+    };
+    if compare_client_ver_era(stamp, LSB_CLIENT_VER) == std::cmp::Ordering::Equal {
+        return;
+    }
+    tracing::warn!(
+        client_patch = stamp,
+        lsb_client_ver = LSB_CLIENT_VER,
+        accepted_at_default_ver_lock = lobby_accepts_client_ver(
+            stamp,
+            LSB_CLIENT_VER,
+            VerLock::from_setting(LSB_DEFAULT_VER_LOCK)
+        ),
+        "FFXI client patch era differs from the pinned LSB login.CLIENT_VER"
+    );
 }
 
 async fn run_command_async(args: Args, auth: auth_client::AuthClient) -> Result<()> {

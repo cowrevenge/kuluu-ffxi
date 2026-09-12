@@ -193,6 +193,190 @@ pub fn parse_lua_indexed_pair_table(
     Ok(out)
 }
 
+/// The value of the first `KEY = value,` line in a lua settings table, quotes
+/// stripped and any trailing `--` comment dropped.
+pub fn parse_lua_scalar_field(src: &str, key: &str) -> Result<String> {
+    let line = src
+        .lines()
+        .map(str::trim)
+        .find(|line| {
+            line.strip_prefix(key)
+                .is_some_and(|rest| rest.trim_start().starts_with('='))
+        })
+        .with_context(|| format!("could not locate `{key} =` in source"))?;
+    let rhs = line[key.len()..].trim_start()[1..].trim();
+    let value = rhs.split(',').next().unwrap_or("");
+    let value = value.split("--").next().unwrap_or("").trim();
+    let value = value
+        .strip_prefix('\'')
+        .and_then(|v| v.strip_suffix('\''))
+        .or_else(|| value.strip_prefix('"').and_then(|v| v.strip_suffix('"')))
+        .unwrap_or(value);
+    if value.is_empty() {
+        bail!("`{key}` has an empty value — settings format may have changed");
+    }
+    Ok(value.to_string())
+}
+
+/// Every `{ <int>, "<c-string>" }` pair inside the brace-initialised map whose
+/// declaration line starts with `needle`, C escapes decoded, in source order.
+/// std::map's initializer_list constructor keeps the first of two equal keys,
+/// so a repeated key is dropped rather than overwritten.
+pub fn parse_cpp_u32_str_map(src: &str, needle: &str) -> Result<Vec<(u32, String)>> {
+    let header = line_starting_with(src, needle)
+        .with_context(|| format!("could not locate a line starting with `{needle}` in source"))?;
+    let body_start = src[header..]
+        .find('{')
+        .with_context(|| format!("no opening `{{` after `{needle}`"))?
+        + header
+        + 1;
+    let mut cursor = CppCursor {
+        chars: src[body_start..].chars().peekable(),
+    };
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    loop {
+        cursor.skip_whitespace_and_commas();
+        match cursor.chars.next() {
+            Some('}') => break,
+            Some('{') => {
+                cursor.skip_whitespace();
+                let key = cursor.read_int_lit()?;
+                cursor.skip_whitespace();
+                cursor.expect(',')?;
+                cursor.skip_whitespace();
+                cursor.expect('"')?;
+                let value = cursor.read_c_string_body()?;
+                cursor.skip_whitespace();
+                cursor.expect('}')?;
+                if seen.insert(key) {
+                    out.push((key, value));
+                }
+            }
+            Some(other) => bail!("unexpected `{other}` in `{needle}` body; expected `{{` or `}}`"),
+            None => bail!("`{needle}` body has no closing `}}`"),
+        }
+    }
+    if out.is_empty() {
+        bail!("parsed zero entries for `{needle}` — source format may have changed");
+    }
+    Ok(out)
+}
+
+/// Byte offset of the first line whose leading whitespace is followed by
+/// `needle`; a quoted copy of the declaration inside a comment does not match.
+fn line_starting_with(src: &str, needle: &str) -> Option<usize> {
+    let mut offset = 0;
+    for line in src.split_inclusive('\n') {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with(needle) {
+            return Some(offset + (line.len() - trimmed.len()));
+        }
+        offset += line.len();
+    }
+    None
+}
+
+struct CppCursor<'a> {
+    chars: std::iter::Peekable<std::str::Chars<'a>>,
+}
+
+impl CppCursor<'_> {
+    fn skip_whitespace(&mut self) {
+        while self.chars.peek().is_some_and(|c| c.is_whitespace()) {
+            self.chars.next();
+        }
+    }
+
+    fn skip_whitespace_and_commas(&mut self) {
+        while self
+            .chars
+            .peek()
+            .is_some_and(|c| c.is_whitespace() || *c == ',')
+        {
+            self.chars.next();
+        }
+    }
+
+    fn expect(&mut self, want: char) -> Result<()> {
+        match self.chars.next() {
+            Some(c) if c == want => Ok(()),
+            Some(c) => bail!("expected `{want}`, found `{c}`"),
+            None => bail!("expected `{want}`, found end of source"),
+        }
+    }
+
+    fn read_int_lit(&mut self) -> Result<u32> {
+        let mut lit = String::new();
+        while self.chars.peek().is_some_and(|c| c.is_ascii_alphanumeric()) {
+            lit.push(self.chars.next().unwrap());
+        }
+        let parsed = match lit.strip_prefix("0x").or_else(|| lit.strip_prefix("0X")) {
+            Some(hex) => u32::from_str_radix(hex, 16),
+            None => lit.parse::<u32>(),
+        };
+        parsed.with_context(|| format!("`{lit}` is not a u32 literal"))
+    }
+
+    /// The body of a C string literal after its opening quote, consuming the
+    /// closing quote.
+    fn read_c_string_body(&mut self) -> Result<String> {
+        let mut out = String::new();
+        loop {
+            match self.chars.next() {
+                None => bail!("unterminated string literal"),
+                Some('"') => return Ok(out),
+                Some('\\') => out.push(self.read_c_escape()?),
+                Some(c) => out.push(c),
+            }
+        }
+    }
+
+    fn read_c_escape(&mut self) -> Result<char> {
+        let Some(c) = self.chars.next() else {
+            bail!("dangling `\\` at end of source");
+        };
+        Ok(match c {
+            '"' => '"',
+            '\'' => '\'',
+            '\\' => '\\',
+            '?' => '?',
+            'n' => '\n',
+            't' => '\t',
+            'r' => '\r',
+            '0'..='7' => {
+                let mut code = c.to_digit(8).unwrap();
+                for _ in 0..2 {
+                    match self.chars.peek().and_then(|d| d.to_digit(8)) {
+                        Some(d) => {
+                            code = code * 8 + d;
+                            self.chars.next();
+                        }
+                        None => break,
+                    }
+                }
+                char::from_u32(code)
+                    .with_context(|| format!("octal escape {code:#o} out of range"))?
+            }
+            'x' => {
+                let mut code = 0u32;
+                let mut digits = 0;
+                while let Some(d) = self.chars.peek().and_then(|d| d.to_digit(16)) {
+                    code = code * 16 + d;
+                    digits += 1;
+                    self.chars.next();
+                }
+                if digits == 0 {
+                    bail!("`\\x` escape with no hex digits");
+                }
+                char::from_u32(code)
+                    .with_context(|| format!("hex escape {code:#x} out of range"))?
+            }
+            other => bail!("unsupported C escape `\\{other}`"),
+        })
+    }
+}
+
 pub fn parse_sql_insert_rows(
     src: &str,
     table: &str,
@@ -608,6 +792,47 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("floor"), "{err}");
+    }
+
+    #[test]
+    fn lua_scalar_field_takes_the_first_definition_and_strips_quotes() {
+        let src = "xi.settings.login =\n{\n    -- only exact CLIENT_VER allowed\n    CLIENT_VER = '30260203_0',\n    VER_LOCK = 2, -- default\n    CLIENT_VER = 'shadowed',\n    NAME = \"dq\"\n}\n";
+        assert_eq!(
+            parse_lua_scalar_field(src, "CLIENT_VER").unwrap(),
+            "30260203_0"
+        );
+        assert_eq!(parse_lua_scalar_field(src, "VER_LOCK").unwrap(), "2");
+        assert_eq!(parse_lua_scalar_field(src, "NAME").unwrap(), "dq");
+        assert!(parse_lua_scalar_field(src, "VER").is_err());
+        assert!(parse_lua_scalar_field(src, "MAINT_MODE").is_err());
+        assert!(parse_lua_scalar_field("EMPTY = '',\n", "EMPTY").is_err());
+        assert!(parse_lua_scalar_field("EMPTY = ,\n", "EMPTY").is_err());
+    }
+
+    #[test]
+    fn cpp_u32_str_map_decodes_c_escapes_and_keeps_the_first_duplicate() {
+        let src = "// f.write(\"const std::map<unsigned int, const char*> values =\\n{\\n\")\nconst std::map<unsigned int, const char*> values =\n{\n    { 66050, \"Greetings\" },\n    { 0x01010202, \"Nice to meet you.\" },\n    { 3489989127, \"\\\" A \\\" Egg\" },\n    { 7, \"tab\\there\\\\\\x41\\101\" },\n    { 66050, \"shadowed\" },\n};\n";
+        let rows = parse_cpp_u32_str_map(src, "const std::map<unsigned int, const char*> values =")
+            .unwrap();
+        assert_eq!(
+            rows,
+            vec![
+                (66050, "Greetings".to_string()),
+                (0x0101_0202, "Nice to meet you.".to_string()),
+                (3_489_989_127, "\" A \" Egg".to_string()),
+                (7, "tab\there\\AA".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn cpp_u32_str_map_bails_on_malformed_rows() {
+        assert!(parse_cpp_u32_str_map("values = { { 1 \"x\" } };", "values =").is_err());
+        assert!(parse_cpp_u32_str_map("values = { { 1, x } };", "values =").is_err());
+        assert!(parse_cpp_u32_str_map("values = { { 1, \"x\" }", "values =").is_err());
+        assert!(parse_cpp_u32_str_map("values = { { 1, \"\\q\" } };", "values =").is_err());
+        assert!(parse_cpp_u32_str_map("values = { };", "values =").is_err());
+        assert!(parse_cpp_u32_str_map("values = { { 1, \"x\" } };", "other =").is_err());
     }
 
     #[test]

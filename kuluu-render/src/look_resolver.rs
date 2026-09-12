@@ -23,8 +23,8 @@ const EQUIP_SLOT_ID_SHIFT: u32 = 12;
 const EQUIP_SLOT_ID_SLOT_MASK: u16 = 0xF;
 const EQUIP_SLOT_ID_MODEL_MASK: u16 = 0x0FFF;
 
-// FFXiMain `.text` VA 0x100C513D (retail client disassembly; the full quote
-// lives in out-of-tree cexi research notes, not in this repo): four ranges
+// FFXiMain `.text` VA 0x100C513D (retail client disassembly, quoted in
+// research/xi-tools/docs/ffximain/ffximain.md "Monster Model ID → File ID Formula"): four ranges
 // split at 1500 / 3000 / 3500, the top one computed as `(m - 3500) + 101739`.
 //
 // The 3000-range is only *registered* for 3000..=3193 — every fid for 3194..3499

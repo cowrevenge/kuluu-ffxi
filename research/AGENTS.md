@@ -27,17 +27,12 @@ workspace crates.
   a Tauri/WebGL2 FFXI asset browser (zones, NPCs, PCs, spell effects,
   textures, audio) with GPU skinning. GPL-3. Reference for DAT parsing,
   skeleton posing, and zone/weather rendering. The successor of both
-  `cexi-viewer` and voliathon's AltanaViewer, which are archived upstream.
-- `cexi-viewer/` — [cexi-viewer](https://github.com/CatsAndBoats/cexi-viewer),
-  the pre-move source of `xi-model-viewer`; upstream now redirects there.
-  Kept pinned only while source comments still cite `research/cexi-viewer/`
-  paths; prefer `xi-model-viewer/` for new citations.
-- `cexi-docs/` — [cexi-docs](https://github.com/CatsAndBoats/cexi-docs),
-  community docs of FFXI's internal formats (DAT, animation, zone mesh, event
-  bytecode, audio, VFX). GPL-3. Format cross-reference for `ffxi-dat` /
-  `ffxi-audio`. Upstream has moved to
-  [xi-tools](https://github.com/vekien/xi-tools); the pin stays until the
-  `research/cexi-docs/` citations are repointed.
+  cexi-viewer and voliathon's AltanaViewer, which are archived upstream.
+- `xi-tools/` — [xi-tools](https://github.com/vekien/xi-tools), the DAT
+  editing CLI and the community docs of FFXI's internal formats under
+  `docs/` (DAT, animation, zone mesh, event bytecode, audio, VFX,
+  FFXiMain unpacking). Successor of cexi-docs. Format cross-reference for
+  `ffxi-dat` / `ffxi-audio`.
 - `XIClient/` — [XIClient](https://gitlab.com/Aenge/XIClient), a from-scratch
   playable C++ FFXI client (no license — all rights reserved). Reference for
   client architecture and vanilla behavior only.
@@ -68,12 +63,11 @@ the higher tier:
    questions (LSB under `vendor/` stays authoritative for runtime). Not
    vendored; needs a local clone, so treat a missing path as "unavailable",
    not "no divergence".
-4. **`cexi-docs/`** — community format docs (DAT, animation, zone mesh,
+4. **`xi-tools/docs/`** — community format docs (DAT, animation, zone mesh,
    event bytecode, audio, VFX). Useful cross-reference for `ffxi-dat` /
    `ffxi-audio` work, but AI-assisted: treat claims as hypotheses and
    verify against tier 1–2 before baking values into the crates.
-5. **`xi-model-viewer/`** (and its pre-move pin `cexi-viewer/`) — rendering
-   and asset-pipeline reference: WebGL2 GPU
+5. **`xi-model-viewer/`** — rendering and asset-pipeline reference: WebGL2 GPU
    skinning, zone time-of-day/weather, BGW/SPW playback. Most useful for
    `kuluu-render` materials and `ffxi-actor` posing.
 6. **`xim/`** — broad behavioral/architecture reference (actor handling,

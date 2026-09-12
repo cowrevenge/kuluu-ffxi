@@ -51,7 +51,7 @@ impl ParticleSimulator {
         self.clock = clock;
     }
 
-    // research/cexi-viewer ui/js/particle/runtime.js updateAssociatedPosition:
+    // research/xi-model-viewer/ui/js/particle/runtime.js updateAssociatedPosition:
     // cameraAttachedBasePosition adds the base in fixed world axes, while followCamera anchors at
     // the camera itself. Both refresh every frame, but a cameraAttachedBasePosition particle reads
     // the result once — see `Particle::spawn_origin`.
@@ -69,7 +69,7 @@ impl ParticleSimulator {
         }
     }
 
-    // research/xim ParticleGeneratorAttachment / cexi-viewer particle/runtime.js updateAssociatedPosition —
+    // research/xim ParticleGeneratorAttachment / research/xi-model-viewer/ui/js/particle/runtime.js updateAssociatedPosition —
     // a Sun/Moon-attached generator's associated position is the celestial body's position
     // offset by the camera, refreshed every frame so the sky rides with the viewer.
     pub fn set_celestial_origins(&mut self, sun: Vec3, moon: Vec3) {
@@ -1874,7 +1874,7 @@ mod tests {
     }
 
     // La Theine's `~1ra` curtain is followCamera with a pure-Y base. The `rai2`/`~1du` sheets are
-    // cameraAttachedBasePosition, whose base stays in fixed world axes (research/cexi-viewer
+    // cameraAttachedBasePosition, whose base stays in fixed world axes (research/xi-model-viewer
     // ui/js/particle/runtime.js updateAssociatedPosition).
     #[test]
     fn camera_relative_origins_stay_in_world_axes() {

@@ -129,7 +129,7 @@ impl ZoneInteraction {
     }
 
     /// The interior a sub-area trigger declares, `None` for the leave rects and for
-    /// every non-trigger. research/cexi-docs/zone/subareas.md "1. Discovery — the `0x36` ZoneInteraction section" names `param` as
+    /// every non-trigger. research/xi-tools/docs/zone/subareas.md "1. Discovery — the `0x36` ZoneInteraction section" names `param` as
     /// the id, which the retail install confirms — see [`crate::sub_area`].
     pub fn sub_area_id(&self) -> Option<u32> {
         self.sub_area_param().filter(|p| *p != 0)

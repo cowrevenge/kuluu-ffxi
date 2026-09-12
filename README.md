@@ -74,7 +74,7 @@ runs fmt only. (`scripts/install-hooks.sh` does the same thing without a build.)
 
 That's everything the compiler needs. Upstream repos that are **not used by
 the build** — only cited in source comments for reference (`xi-model-viewer`,
-`XiEvents`, `XiPackets`, `XIClient`, `cexi-*`) — live under `research/`, not
+`XiEvents`, `XiPackets`, `XIClient`, `xi-tools`) — live under `research/`, not
 `vendor/`. They stay deinitialized; `git submodule update --init
 research/<name>` populates one if you want to read the upstream sources.
 Phoenix is **not** a submodule: it is private, so clone it yourself into

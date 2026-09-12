@@ -14,7 +14,7 @@ than guessing ROM paths. `rg` normally ignores this install, so use an explicit
 path with `--no-ignore` when searching it.
 
 Search the relevant policy in `research/XIClient/src/XIClient/source/` to find
-candidate callers and data structures. XIM and cexi references can supply search
+candidate callers and data structures. XIM and xi-tools references can supply search
 terms. Preserve the distinction between a community hypothesis and a rule
 independently confirmed in the installed binary.
 
@@ -22,9 +22,9 @@ independently confirmed in the installed binary.
 
 Some builds store compressed code in a `POL1` PE section while `.text` has no
 raw bytes. Inspect the actual PE section table before disassembly. The local
-`research/cexi-docs/reference/ffximain.md` and
-`research/cexi-docs/dats/research/pol_decompress.py` describe an LZSS decoder;
-read them as hypotheses/tools, not universal offsets or lengths.
+`research/xi-tools/docs/ffximain/ffximain.md` describes the LZSS decoder and
+the `xi dll ffximain unpack` tool; read it as hypotheses/tools, not universal
+offsets or lengths.
 
 - Inspect the installed unpacker stub and section sizes rather than assuming
   the example build matches. Bound decoding to the actual destination size and

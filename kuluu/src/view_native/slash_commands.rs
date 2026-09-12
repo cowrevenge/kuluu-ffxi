@@ -3117,7 +3117,7 @@ fn parse_sub_area(rest: &str, self_pos: WireVec3) -> SlashOutcome {
 }
 
 /// Sub-area ids are quoted in hex by every upstream reference
-/// (research/cexi-docs/zone/subareas.md), so `/subarea 0x1CE` has to work as well
+/// (research/xi-tools/docs/zone/subareas.md), so `/subarea 0x1CE` has to work as well
 /// as `/subarea 462`.
 fn parse_u32_auto_radix(s: &str) -> Option<u32> {
     match s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
@@ -4071,7 +4071,7 @@ mod tests {
         }
 
         // 0x1CE is the Lower Jeuno food-shop interior in
-        // research/cexi-docs/zone/subareas.md "Worked example — Lower Jeuno (`ROM/1/41`, zone 245)".
+        // research/xi-tools/docs/zone/subareas.md "Worked example — Lower Jeuno (`ROM/1/41`, zone 245)".
         for s in ["/subarea 462", "/subarea 0x1CE", "/subareas 0x1ce"] {
             match parse_slash_t(s, &empty_entities(), pos, None, None) {
                 SlashOutcome::SubArea {

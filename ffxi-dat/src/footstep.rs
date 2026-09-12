@@ -5,7 +5,7 @@
 //! table of 0x3D sound pointers held in the zone DAT.
 //!
 //! The composition below is **measured from the retail install**, not taken from
-//! a reference. research/cexi-docs/sounds/footsteps.md describes the shape and is
+//! a reference. research/xi-tools/docs/sounds/footsteps.md describes the shape and is
 //! tier 4; it reads the terrain digit as a decimal int and flags what happens
 //! past terrain 9 as an open question. The shipped bytes answer it: the digit is
 //! a hex nibble. Measured over the first 60 zones in `ZONE_DAT_TABLE` — 22,596
@@ -131,7 +131,7 @@ mod tests {
     fn composes_the_measured_id_shape() {
         assert_eq!(footstep_dat_id(1, 1, 0), Some(*b"0111"));
         // Terrain is a hex nibble, not a decimal int: terrain 10 is 'a', which is
-        // the question research/cexi-docs/sounds/footsteps.md leaves open.
+        // the question research/xi-tools/docs/sounds/footsteps.md leaves open.
         assert_eq!(footstep_dat_id(10, 1, 0), Some(*b"0a11"));
         // Material runs past 9 into the same base-36 alphabet.
         assert_eq!(footstep_dat_id(1, 10, 0), Some(*b"01a1"));

@@ -11,7 +11,7 @@ comment only when it is one of three things:
 1. A WHY the code cannot encode (a tuning the data cannot supply, a
    non-obvious ordering constraint).
 2. A citation to a source someone can open from this tree: `vendor/...`
-   (LSB, POLUtils), `research/...` (XIClient, xim, XiPackets, cexi-docs), a
+   (LSB, POLUtils), `research/...` (XIClient, xim, XiPackets, xi-tools), a
    retail binary symbol/RVA, or an observation record under
    `.agents/skills/retail-observe/references/`.
 3. A `// SAFETY:` justification on an `unsafe` block.

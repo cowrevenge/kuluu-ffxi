@@ -466,11 +466,20 @@ pub fn spawn_particle_generators(
             continue;
         };
         // A cast routine's generators ship in the global effect dir, never in the caster's own
-        // ActionAssets, so the def resolves against whichever tier actually holds it.
+        // ActionAssets, and an actor-routine's (a model's `bind`) in the model DAT, so the def
+        // resolves against whichever tier actually holds it.
+        let actor_assets = q_children
+            .get(ev.actor)
+            .ok()
+            .and_then(|c| c.iter().find_map(|child| q_render.get(child).ok()))
+            .map(|a| a.action_assets());
         let local_dir = ev.stage.stage.local_dir;
-        let Some(assets) = assets_holding(local_assets, global.as_ref().map(|g| &g.assets), |a| {
-            a.particle_def(local_dir, &ev.stage.stage.id).is_some()
-        }) else {
+        let Some(assets) = assets_holding(
+            local_assets,
+            actor_assets,
+            global.as_ref().map(|g| &g.assets),
+            |a| a.particle_def(local_dir, &ev.stage.stage.id).is_some(),
+        ) else {
             continue;
         };
         let Some((def_dir, def)) = assets

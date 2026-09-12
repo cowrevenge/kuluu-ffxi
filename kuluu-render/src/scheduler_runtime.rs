@@ -597,16 +597,21 @@ fn flatten_routine(
 }
 
 // A generator and the mesh/sheet/texture it references always ship in the same DAT, so a stage
-// resolves against whichever single ActionAssets actually holds it — the routine's own (on the
-// tracked entity) or the global effect dir's.
+// resolves against whichever single ActionAssets actually holds it, in retail's search order
+// (research/xim EffectRoutineInstance.kt appendChildSequences): the routine DAT's own assets on
+// the tracked entity, then the actor model's, then the global effect dir's. The Home Point's
+// `bind` routine is an actor-tier case: its `tub0` is also a global-dir name, so skipping the
+// actor tier drew ROM/0/0's hit spark in place of the crystal's `tubu` card.
 pub fn assets_holding<'a>(
     local: Option<&'a ActionAssets>,
+    actor: Option<&'a ActionAssets>,
     global: Option<&'a ActionAssets>,
     has: impl Fn(&ActionAssets) -> bool,
 ) -> Option<&'a ActionAssets> {
-    local
-        .filter(|a| has(a))
-        .or_else(|| global.filter(|a| has(a)))
+    [local, actor, global]
+        .into_iter()
+        .flatten()
+        .find(|a| has(a))
 }
 
 // A routine and the generators it names share a chunk directory, and those names are only unique
@@ -1146,6 +1151,7 @@ pub fn dispatch_motion_stages(
         let clip = ffxi_dat::datid::DatId::from_name(&stage.id);
         let local_clips: &[ffxi_dat::skel_anim::SkeletonAnimation] = assets_holding(
             q_assets.get(ev.actor).ok(),
+            None,
             global.as_ref().map(|g| &g.assets),
             |a| {
                 a.animations
@@ -3404,6 +3410,50 @@ mod tests {
         let root = ffxi_dat::archive::open_test_install()?;
         let loc = root.resolve(file_id).ok()?;
         std::fs::read(loc.path_under(&root)).ok()
+    }
+
+    // The Home Point's `bind` names `tub0`, which ROM/0/0 also defines: the actor tier has to
+    // win over the global dir, and the routine's own assets over both.
+    #[test]
+    fn assets_holding_searches_routine_then_actor_then_global() {
+        let mut local = ActionAssets::default();
+        let mut actor = ActionAssets::default();
+        let mut global = ActionAssets::default();
+        local
+            .seps
+            .insert(*b"l   ", Sep::parse(*b"l   ", &[0u8; 12]).unwrap());
+        actor
+            .seps
+            .insert(*b"a   ", Sep::parse(*b"a   ", &[0u8; 12]).unwrap());
+        actor
+            .seps
+            .insert(*b"both", Sep::parse(*b"both", &[0u8; 12]).unwrap());
+        global
+            .seps
+            .insert(*b"g   ", Sep::parse(*b"g   ", &[0u8; 12]).unwrap());
+        global
+            .seps
+            .insert(*b"both", Sep::parse(*b"both", &[0u8; 12]).unwrap());
+        let find = |name: &[u8; 4]| {
+            assets_holding(Some(&local), Some(&actor), Some(&global), |a| {
+                a.seps.contains_key(name)
+            })
+            .map(|a| a as *const ActionAssets)
+        };
+        assert_eq!(find(b"l   "), Some(&local as *const _));
+        assert_eq!(find(b"a   "), Some(&actor as *const _));
+        assert_eq!(find(b"g   "), Some(&global as *const _));
+        assert_eq!(
+            find(b"both"),
+            Some(&actor as *const _),
+            "actor tier beats global"
+        );
+        assert_eq!(find(b"none"), None);
+        assert_eq!(
+            assets_holding(None, None, Some(&global), |a| a.seps.contains_key(b"g   "))
+                .map(|a| a as *const ActionAssets),
+            Some(&global as *const _)
+        );
     }
 
     // Retail-DAT guard (skips without an install): the Home Point model (DAT 1351, ROM/3/25)

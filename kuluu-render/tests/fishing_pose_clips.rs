@@ -7,16 +7,18 @@
 //! routine id up among animations, where it can never match — so no fishing pose
 //! ever played, for the local player or anyone in view.
 
-use ffxi_dat::main_dll::{MainDll, ACTION_ANIM_FISHING_OFFSET};
+use ffxi_dat::main_dll::{MainDll, ACTION_ANIM_FISHING_OFFSET, ACTION_ANIM_MOUNT_OFFSET};
 use ffxi_dat::resource_dir::ResourceDir;
 use ffxi_dat::DatRoot;
+use kuluu_render::look_resolver::PC_LOOK_RACES;
 
 /// The macro-state phases `ffxi_actor::fishing_clip` maps: cast/wait, fighting,
 /// then the five resolutions.
 const PHASES: [u8; 7] = [0, 1, 2, 3, 4, 5, 6];
 
-/// Every playable race index `skeleton_file_id_for_race` accepts.
-const RACES: [u8; 8] = [1, 2, 3, 4, 5, 6, 7, 8];
+/// The offsets past the action-animation base the fishing and mount DATs are
+/// searched among; both lie well inside it.
+const ACTION_ANIM_PROBE_OFFSETS: std::ops::Range<u16> = 0..8;
 
 fn install() -> Option<DatRoot> {
     DatRoot::from_env_or_default().ok()
@@ -42,7 +44,7 @@ fn every_race_resolves_every_fishing_phase_to_a_real_clip() {
         return;
     };
 
-    for race in RACES {
+    for race in PC_LOOK_RACES {
         let Some(dir) = fishing_dir(&root, race) else {
             panic!("race {race}: no fishing DAT at action base + {ACTION_ANIM_FISHING_OFFSET}");
         };
@@ -132,7 +134,7 @@ fn the_fishing_offset_is_the_only_one_that_carries_fsh_routines() {
     };
 
     assert!(carries_fsh(ACTION_ANIM_FISHING_OFFSET));
-    let others: Vec<u16> = (0..8u16)
+    let others: Vec<u16> = ACTION_ANIM_PROBE_OFFSETS
         .filter(|o| *o != ACTION_ANIM_FISHING_OFFSET && carries_fsh(*o))
         .collect();
     // +2 is the rod model's own copy of fsh0..fsh6; it poses the rod, not the
@@ -142,4 +144,59 @@ fn the_fishing_offset_is_the_only_one_that_carries_fsh_routines() {
         vec![ACTION_ANIM_FISHING_OFFSET + 1],
         "unexpected DATs carrying fsh* near the action base"
     );
+}
+
+/// The AnimMo2 clip ids of one DAT off the race's action-animation base.
+fn action_anim_clips(root: &DatRoot, dll: &MainDll, race: u8, offset: u16) -> Vec<String> {
+    let Some(base) = dll.base_action_animation_index(race) else {
+        return Vec::new();
+    };
+    let Ok(loc) = root.resolve(u32::from(base + offset)) else {
+        return Vec::new();
+    };
+    let Ok(bytes) = std::fs::read(loc.path_under(root)) else {
+        return Vec::new();
+    };
+    ResourceDir::from_bytes(bytes)
+        .collect_animations()
+        .iter()
+        .map(|a| a.id.as_str().to_string())
+        .collect()
+}
+
+/// The mount DAT is the one at `ACTION_ANIM_MOUNT_OFFSET` for every race: it
+/// carries the chocobo seat (`chi?`) and the other mounts' seat (`1un?`), and
+/// no other DAT near the base carries `1un?` -- so a wrong offset would leave
+/// a rider standing on the saddle rather than fail.
+#[test]
+fn the_mount_offset_carries_both_seat_families_and_is_the_only_one_with_1un() {
+    let Some(root) = install() else { return };
+    let Ok(dll) = MainDll::load(root.root()) else {
+        return;
+    };
+    const CHOCOBO_SEAT: &str = "chi";
+    const OTHER_MOUNT_SEAT: &str = "1un";
+    let has = |clips: &[String], stem: &str| clips.iter().any(|c| c.starts_with(stem));
+
+    for race in PC_LOOK_RACES {
+        let mount = action_anim_clips(&root, &dll, race, ACTION_ANIM_MOUNT_OFFSET);
+        assert!(
+            has(&mount, CHOCOBO_SEAT),
+            "race {race}: no `{CHOCOBO_SEAT}?` clip at action base + {ACTION_ANIM_MOUNT_OFFSET}; have {mount:?}"
+        );
+        assert!(
+            has(&mount, OTHER_MOUNT_SEAT),
+            "race {race}: no `{OTHER_MOUNT_SEAT}?` clip at action base + {ACTION_ANIM_MOUNT_OFFSET}; have {mount:?}"
+        );
+        let others: Vec<u16> = ACTION_ANIM_PROBE_OFFSETS
+            .filter(|o| {
+                *o != ACTION_ANIM_MOUNT_OFFSET
+                    && has(&action_anim_clips(&root, &dll, race, *o), OTHER_MOUNT_SEAT)
+            })
+            .collect();
+        assert!(
+            others.is_empty(),
+            "race {race}: `{OTHER_MOUNT_SEAT}?` also at offsets {others:?}"
+        );
+    }
 }

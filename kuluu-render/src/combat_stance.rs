@@ -10,7 +10,35 @@ use crate::components::{IsSelf, WorldEntity};
 use crate::snapshot::SceneState;
 use kuluu_snapshot::EntityKind;
 
+/// The race's battle-motion DAT (engaged idle, run, the per-weapon-type stance
+/// files that follow it): the FFXiMain.dll battle-animation table
+/// (`MainDll::base_battle_animation_index`), else the shipped fallback when the
+/// dll is unreadable.
+pub fn motion_dat_for_race(dll: Option<&ffxi_dat::main_dll::MainDll>, race: u8) -> Option<u32> {
+    dll.and_then(|dll| dll.base_battle_animation_index(race))
+        .map(u32::from)
+        .or_else(|| motion_dat_fallback(crate::dat_vos2::skeleton_file_id_fallback(race)?))
+}
+
+/// [`motion_dat_for_race`] keyed on the race's skeleton file id, which is what
+/// the animation caches below and the legacy VOS2 path carry instead of a race.
+/// The dll's race-config table inverts the id to its race; a non-PC id (an NPC
+/// model DAT) matches no row and, as before, has no battle DAT here.
 pub fn motion_dat_for_skel(skel_file_id: u32) -> Option<u32> {
+    if let Some(dll) = crate::scheduler_runtime::main_dll_from_env() {
+        let race = crate::look_resolver::PC_LOOK_RACES
+            .into_iter()
+            .find(|&race| dll.base_race_config_index(race).map(u32::from) == Some(skel_file_id))?;
+        return motion_dat_for_race(Some(&dll), race);
+    }
+    motion_dat_fallback(skel_file_id)
+}
+
+/// Skeleton -> battle-motion DAT as measured on KNOWN_CLIENTS horizonxi-2023 and
+/// retail-2026-09 (identical); the fallback for an install whose FFXiMain.dll
+/// cannot be read, pinned against the dll by
+/// `kuluu-render/tests/install_conformance.rs`.
+pub fn motion_dat_fallback(skel_file_id: u32) -> Option<u32> {
     match skel_file_id {
         7072 => Some(9672),
         10248 => Some(12848),
@@ -711,7 +739,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn motion_dat_resolves_for_each_pc_race() {
+    fn motion_dat_fallback_resolves_for_each_pc_race() {
         let pairs = [
             (7072, 9672),
             (10248, 12848),
@@ -723,28 +751,62 @@ mod tests {
         ];
         for (skel, motion) in pairs {
             assert_eq!(
-                motion_dat_for_skel(skel),
+                motion_dat_fallback(skel),
                 Some(motion),
                 "skel {skel} should map to motion {motion}"
             );
+            assert_eq!(motion_dat_for_skel(skel), Some(motion));
         }
     }
 
     #[test]
     fn motion_dat_returns_none_for_non_pc_skel() {
-        assert_eq!(motion_dat_for_skel(0), None);
-        assert_eq!(motion_dat_for_skel(7000), None);
-        assert_eq!(motion_dat_for_skel(50000), None);
+        for skel in [0u32, 7000, 50000] {
+            assert_eq!(motion_dat_fallback(skel), None);
+            assert_eq!(motion_dat_for_skel(skel), None);
+        }
     }
 
     #[test]
-    fn motion_dat_offset_is_consistent() {
+    fn motion_dat_fallback_offset_is_consistent() {
         for skel in [7072u32, 10248, 13424, 16600, 19776, 23176, 26352] {
-            let motion = motion_dat_for_skel(skel).expect("PC race");
+            let motion = motion_dat_fallback(skel).expect("PC race");
             assert_eq!(
                 motion - skel,
                 2600,
-                "skel {skel} → motion {motion}: offset must be +2600"
+                "skel {skel} -> motion {motion}: offset must be +2600"
+            );
+        }
+    }
+
+    #[test]
+    fn motion_dat_for_race_without_a_dll_is_the_fallback() {
+        for race in 1u8..=8 {
+            let skel = crate::dat_vos2::skeleton_file_id_fallback(race).expect("PC race");
+            assert_eq!(motion_dat_for_race(None, race), motion_dat_fallback(skel));
+        }
+        assert_eq!(motion_dat_for_race(None, 0), None);
+        assert_eq!(motion_dat_for_race(None, 9), None);
+    }
+
+    #[test]
+    fn motion_dat_for_race_reads_the_installed_dll_battle_table() {
+        let Some(root) = ffxi_dat::archive::open_test_install() else {
+            return;
+        };
+        let dll = ffxi_dat::main_dll::MainDll::load(root.root()).expect("FFXiMain.dll loads");
+        for race in 1u8..=8 {
+            let from_dll = dll.base_battle_animation_index(race).map(u32::from);
+            assert!(
+                from_dll.is_some(),
+                "race {race} has a battle-animation base"
+            );
+            assert_eq!(motion_dat_for_race(Some(&dll), race), from_dll);
+            let skel = u32::from(dll.base_race_config_index(race).expect("race config"));
+            assert_eq!(
+                motion_dat_for_skel(skel),
+                from_dll,
+                "race {race} via its skeleton id"
             );
         }
     }

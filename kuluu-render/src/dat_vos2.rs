@@ -167,9 +167,25 @@ pub fn load_vos2(file_id: u32, chunk_idx: usize) -> Result<LoadedVos2, String> {
     Ok(LoadedVos2 { mesh, textures })
 }
 
+/// Race-config DAT per playable look race (HumeM=1..Galka=8) as measured on
+/// KNOWN_CLIENTS horizonxi-2023 and retail-2026-09 (identical). The fallback for
+/// an install whose FFXiMain.dll cannot be read, and the fixture hermetic tests
+/// key on; pinned against the dll's race-config table by
+/// `kuluu-render/tests/install_conformance.rs`.
 const PC_SKELETON_FILE_IDS: [u32; 8] = [7072, 10248, 13424, 16600, 19776, 19776, 23176, 26352];
 
-pub fn skeleton_file_id_for_race(race: u8) -> Option<u32> {
+/// The race's skeleton DAT: the FFXiMain.dll race-config table
+/// (`MainDll::base_race_config_index`), else [`skeleton_file_id_fallback`].
+pub fn skeleton_file_id_for_race(
+    dll: Option<&ffxi_dat::main_dll::MainDll>,
+    race: u8,
+) -> Option<u32> {
+    dll.and_then(|dll| dll.base_race_config_index(race))
+        .map(u32::from)
+        .or_else(|| skeleton_file_id_fallback(race))
+}
+
+pub fn skeleton_file_id_fallback(race: u8) -> Option<u32> {
     let idx = race.checked_sub(1)? as usize;
     PC_SKELETON_FILE_IDS.get(idx).copied()
 }
@@ -298,7 +314,8 @@ fn idle_anim_for_file(file_id: u32) -> Option<std::sync::Arc<ffxi_dat::anim::Mo2
 }
 
 fn baked_skeleton(race: u8) -> Option<BakedSkeleton> {
-    let file_id = skeleton_file_id_for_race(race)?;
+    let dll = crate::scheduler_runtime::main_dll_from_env();
+    let file_id = skeleton_file_id_for_race(dll.as_deref(), race)?;
     baked_skeleton_for_file(file_id)
 }
 
@@ -2220,11 +2237,12 @@ pub fn prepare_equipped(
     sub: u16,
     ranged: u16,
 ) -> PreparedEquipped {
-    use crate::look_resolver::{resolve_equipment_slot, resolve_face};
+    use crate::look_resolver::{equipment_slot_dat_id, face_dat_id};
     let slot_names = [
         "head", "body", "hands", "legs", "feet", "main", "sub", "ranged",
     ];
     let slots = [head, body, hands, legs, feet, main, sub, ranged];
+    let dll = crate::scheduler_runtime::main_dll_from_env();
 
     let baked_skel = baked_skeleton(race);
     let mut loaded_slots: Vec<LoadedSlot> = Vec::new();
@@ -2261,7 +2279,7 @@ pub fn prepare_equipped(
         }
     };
 
-    if let Some(file_id) = resolve_face(face, race) {
+    if let Some(file_id) = dll.as_deref().and_then(|dll| face_dat_id(dll, face, race)) {
         let chunks = enumerate_vos2_chunks(file_id);
         if chunks.is_empty() {
             info!(
@@ -2273,7 +2291,10 @@ pub fn prepare_equipped(
         }
     }
     for (slot_id, slot_name) in slots.iter().zip(slot_names.iter()) {
-        let Some(file_id) = resolve_equipment_slot(*slot_id, race) else {
+        let Some(file_id) = dll
+            .as_deref()
+            .and_then(|dll| equipment_slot_dat_id(dll, *slot_id, race))
+        else {
             if *slot_id != 0 {
                 info!(
                     "spawn_equipped: slot {}={:#06X} unresolved (race={})",

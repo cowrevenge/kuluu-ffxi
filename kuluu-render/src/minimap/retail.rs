@@ -8,17 +8,20 @@ use crate::snapshot::SceneState;
 
 use super::{MinimapAabb, MinimapState, RetailStatus};
 
+/// The zone-map table of the install currently wired as [`MinimapDatRoot`],
+/// keyed on the root so a launcher install switch re-reads it (as
+/// `scheduler_runtime::adopt_action_dat_root` does for the action tables).
 #[derive(Resource, Default)]
 pub struct MapCalibration {
+    root: Option<std::path::PathBuf>,
     dll: Option<std::sync::Arc<MainDll>>,
-    tried: bool,
 }
 
 impl MapCalibration {
     pub(crate) fn ensure_dll(&mut self, root: &std::path::Path) -> Option<std::sync::Arc<MainDll>> {
-        if !self.tried {
-            self.tried = true;
-            self.dll = MainDll::load(root).ok().map(std::sync::Arc::new);
+        if self.root.as_deref() != Some(root) {
+            self.root = Some(root.to_path_buf());
+            self.dll = crate::scheduler_runtime::main_dll_for_root(root);
         }
         self.dll.clone()
     }
@@ -320,5 +323,60 @@ fn describe_map_load_failure(dat_root: &ffxi_dat::DatRoot, file_id: u32) -> Stri
             "no decodable Graphic chunk; flags present: [{}]",
             flags.join(", ")
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_root(tag: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "kuluu-render-map-calibration-{tag}-{}",
+            std::process::id()
+        ))
+    }
+
+    #[test]
+    fn ensure_dll_retries_when_the_root_changes() {
+        let mut calib = MapCalibration::default();
+        let missing_a = temp_root("missing-a");
+        let missing_b = temp_root("missing-b");
+        assert!(calib.ensure_dll(&missing_a).is_none());
+        assert_eq!(calib.root.as_deref(), Some(missing_a.as_path()));
+        assert!(calib.ensure_dll(&missing_b).is_none());
+        assert_eq!(
+            calib.root.as_deref(),
+            Some(missing_b.as_path()),
+            "a new root is tried even after the previous one failed"
+        );
+    }
+
+    #[test]
+    fn swapping_the_root_yields_a_different_dll() {
+        let Some(root) = ffxi_dat::archive::open_test_install() else {
+            return;
+        };
+        let copy = temp_root("copy");
+        std::fs::create_dir_all(&copy).expect("temp root");
+        std::fs::copy(root.root().join("FFXiMain.dll"), copy.join("FFXiMain.dll"))
+            .expect("copy FFXiMain.dll");
+
+        let mut calib = MapCalibration::default();
+        let first = calib.ensure_dll(root.root()).expect("FFXiMain.dll loads");
+        let same = calib.ensure_dll(root.root()).expect("FFXiMain.dll loads");
+        assert!(std::sync::Arc::ptr_eq(&first, &same), "same root, same dll");
+
+        let swapped = calib.ensure_dll(&copy).expect("the copied dll loads");
+        assert!(
+            !std::sync::Arc::ptr_eq(&first, &swapped),
+            "a root swap must re-read the table from the new install"
+        );
+        assert_eq!(
+            swapped.zone_map_counts(),
+            first.zone_map_counts(),
+            "an identical dll under another root carries the same table"
+        );
+        let _ = std::fs::remove_dir_all(&copy);
     }
 }

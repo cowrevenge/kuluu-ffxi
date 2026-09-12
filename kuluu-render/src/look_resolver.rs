@@ -1,10 +1,13 @@
+use bevy::log::warn_once;
 use bevy::prelude::*;
+use ffxi_dat::main_dll::MainDll;
 use kuluu_snapshot::EntityLook;
 
 use crate::components::{EntityModel, LookComp, WorldEntity};
 use crate::dat_mmb::LoadMmbRequest;
 use crate::graphics_settings::GraphicsSettings;
 use crate::scene::TrackedEntities;
+use crate::scheduler_runtime::{main_dll_from_env, ActionMainDll};
 use crate::snapshot::SceneState;
 
 const EQUIP_SLOT_ORDER_LEN: usize = 8;
@@ -12,27 +15,27 @@ const EQUIP_SLOT_ORDER_LEN: usize = 8;
 // Slot numbering retail switches on when collecting per-slot CIB bytes
 // (research/XIClient/src/XIClient/source/World/Actor/SkeletalMeshActor.cpp SkeletalMeshActor::SetEquipModel:
 // 2 = body, 5 = feet, 6 = main, 7 = sub, 8 = ranged), matching the order of
-// `slot_models` below.
+// `slot_models` below. Slot 0 is the face row of the same table.
+const EQUIP_SLOT_FACE: u8 = 0;
 const EQUIP_SLOT_BODY: u8 = 2;
 const EQUIP_SLOT_MAIN: u8 = 6;
 const EQUIP_SLOT_SUB: u8 = 7;
 const EQUIP_SLOT_RANGED: u8 = 8;
 const WEAPON_SLOTS: [u8; 3] = [EQUIP_SLOT_MAIN, EQUIP_SLOT_SUB, EQUIP_SLOT_RANGED];
 
+/// The playable look races, HumeM=1..Galka=8: the equipment table rows the look
+/// race byte indexes directly (the non-playable configs map to other rows, see
+/// `MainDll::equipment_model_index`).
+pub const PC_LOOK_RACES: std::ops::RangeInclusive<u8> = 1..=8;
+
 const EQUIP_SLOT_ID_SHIFT: u32 = 12;
 const EQUIP_SLOT_ID_SLOT_MASK: u16 = 0xF;
 const EQUIP_SLOT_ID_MODEL_MASK: u16 = 0x0FFF;
 
-// FFXiMain `.text` VA 0x100C513D (retail client disassembly, quoted in
-// research/xi-tools/docs/ffximain/ffximain.md "Monster Model ID → File ID Formula"): four ranges
-// split at 1500 / 3000 / 3500, the top one computed as `(m - 3500) + 101739`.
-//
-// The 3000-range is only *registered* for 3000..=3193 — every fid for 3194..3499
-// is VTABLE=0 and no retail mob_pools row uses one — so range 3's extent looks
-// like a boundary from the data alone. Folding that hole into the split makes
-// modelid 3193 land on 101739, the same fid retail reaches at 3500, which is why
-// this read the part right and the whole wrong; every modelid above it was off by
-// the 307-slot gap. Do not re-derive these from registration extent.
+// FFXiMain.dll horizonxi-2023 RVA 0xC417D / retail-2026-09 RVA 0xC520D (identical
+// bytes; pointed at by research/xi-tools/docs/ffximain/ffximain.md "Monster
+// Model ID → File ID Formula"): four ranges split at 1500 / 3000 / 3500, the top
+// one computed as `(m - 3500) + 101739`.
 const NPC_DAT_ID_BASES: [(u32, u32); 4] = [
     (1500, 1300),
     (3000, 50295),
@@ -49,544 +52,75 @@ pub fn npc_dat_id(modelid: u16) -> u32 {
     m + base
 }
 
-pub fn resolve_equipment_slot(slot_id: u16, race: u8) -> Option<u32> {
-    let slot = u32::from((slot_id >> EQUIP_SLOT_ID_SHIFT) & EQUIP_SLOT_ID_SLOT_MASK);
-    let id = u32::from(slot_id & EQUIP_SLOT_ID_MODEL_MASK);
-
-    if slot == 0 || slot > 8 || race == 0 || race > 8 {
+/// Model DAT for one retail equipment slot (1 head .. 8 ranged) of a playable
+/// race, from the FFXiMain.dll equipment lookup table
+/// (`MainDll::equipment_model_index`; the look race byte is the table row for
+/// the playable races). A model id past the slot's bands renders the slot's
+/// model 0 instead of dropping the part: retail's "wrong GRP number" clamp
+/// (research/XIClient/src/XIClient/source/World/Actor/SkeletalMeshActor.cpp
+/// SkeletalMeshActor::SetEquipModel). A race outside [`PC_LOOK_RACES`] is `None`.
+pub fn equipment_dat_id(dll: &MainDll, slot_index: u8, model_id: u16, race: u8) -> Option<u32> {
+    if slot_index == EQUIP_SLOT_FACE
+        || slot_index > EQUIP_SLOT_RANGED
+        || !PC_LOOK_RACES.contains(&race)
+    {
         return None;
     }
-    let bps = PC_MODEL_IDS.get((race - 1) as usize)?.get(slot as usize)?;
-
-    let mut chosen: Option<(u16, u32)> = None;
-    for &(thr, base) in *bps {
-        if u32::from(thr) <= id {
-            chosen = Some((thr, base));
-        } else {
-            break;
-        }
-    }
-    let (thr, base) = chosen?;
-    if base == 0 {
-        // Retail clamps a model id past the slot's table to model 0 instead of
-        // dropping the part ("wrong GRP number",
-        // research/XIClient/src/XIClient/source/World/Actor/SkeletalMeshActor.cpp constexpr),
-        // so an out-of-band id renders the slot's base model, never a missing
-        // body part.
-        let (_, first_base) = bps.first()?;
-        if *first_base == 0 {
-            return None;
-        }
-        return Some(*first_base);
-    }
-    Some(base + id - u32::from(thr))
+    let model_id = model_id & EQUIP_SLOT_ID_MODEL_MASK;
+    dll.equipment_model_index(race, slot_index, model_id)
+        .or_else(|| dll.equipment_model_index(race, slot_index, 0))
 }
 
-pub fn resolve_equipment_model(slot_index: u8, model_id: u16, race: u8) -> Option<u32> {
-    if slot_index == 0 || slot_index > 8 {
+/// [`equipment_dat_id`] for a wire slot id: the slot number in the high nibble
+/// over a 12-bit model id (the shape s2c 0x00D / 0x051 carry per slot). A bare
+/// model id with no slot nibble is slot 0 and resolves to nothing, which is how
+/// an empty slot reads.
+pub fn equipment_slot_dat_id(dll: &MainDll, slot_id: u16, race: u8) -> Option<u32> {
+    let slot = ((slot_id >> EQUIP_SLOT_ID_SHIFT) & EQUIP_SLOT_ID_SLOT_MASK) as u8;
+    equipment_dat_id(dll, slot, slot_id & EQUIP_SLOT_ID_MODEL_MASK, race)
+}
+
+/// The face byte is the 0-based index into the race's Face row (slot 0 of the
+/// FFXiMain.dll equipment lookup): file = base + face, no -1. LSB caps creation
+/// faces at 15 ("Face 8B", vendor/server/src/login/login_helpers.cpp), the
+/// stylist spans the full row; xim EquipmentModelTable.getItemModelPath indexes
+/// the Face slot directly the same way.
+pub fn face_dat_id(dll: &MainDll, face: u8, race: u8) -> Option<u32> {
+    if !PC_LOOK_RACES.contains(&race) {
         return None;
     }
-    let slot_id =
-        (u16::from(slot_index) << EQUIP_SLOT_ID_SHIFT) | (model_id & EQUIP_SLOT_ID_MODEL_MASK);
-    resolve_equipment_slot(slot_id, race)
+    let face_zero = dll.equipment_model_index(race, EQUIP_SLOT_FACE, 0)?;
+    match dll.equipment_model_index(race, EQUIP_SLOT_FACE, u16::from(face)) {
+        Some(file_id) => Some(file_id),
+        None => {
+            // Retail clamp: an id past the slot's table renders model 0, never a
+            // missing part ("wrong GRP number", research/XIClient/src/XIClient/
+            // source/World/Actor/SkeletalMeshActor.cpp SkeletalMeshActor::SetEquipModel),
+            // so an out-of-band face byte draws face 0 rather than a decapitated
+            // PC. Loud because the server named a face this install's table does
+            // not know, and the wrong-face render needs explaining.
+            warn!("face {face} out of band for race {race}: clamping to face 0 (retail behavior)");
+            Some(face_zero)
+        }
+    }
 }
 
-type Breakpoints = &'static [(u16, u32)];
-const PC_MODEL_IDS: [[Breakpoints; 9]; 8] = [
-    [
-        &[(0, 7080), (32, 0)],
-        &[
-            (0, 7112),
-            (256, 63323),
-            (320, 71247),
-            (576, 98787),
-            (608, 102961),
-            (672, 0),
-        ],
-        &[
-            (0, 7368),
-            (256, 63387),
-            (320, 71503),
-            (576, 98819),
-            (608, 103025),
-            (672, 0),
-        ],
-        &[
-            (0, 7624),
-            (256, 63451),
-            (320, 71759),
-            (576, 98851),
-            (608, 103089),
-            (672, 0),
-        ],
-        &[
-            (0, 7880),
-            (256, 63515),
-            (320, 72015),
-            (576, 98883),
-            (608, 103153),
-            (672, 0),
-        ],
-        &[
-            (0, 8136),
-            (256, 63579),
-            (320, 72271),
-            (576, 98915),
-            (608, 103217),
-            (672, 0),
-        ],
-        &[
-            (0, 8392),
-            (512, 63643),
-            (640, 72527),
-            (896, 107301),
-            (928, 0),
-        ],
-        &[
-            (0, 41199),
-            (512, 66459),
-            (640, 81999),
-            (896, 105201),
-            (928, 0),
-        ],
-        &[(0, 9416), (256, 0)],
-    ],
-    [
-        &[(0, 10256), (32, 0)],
-        &[
-            (0, 10288),
-            (256, 63771),
-            (320, 72783),
-            (576, 98947),
-            (608, 103281),
-            (672, 0),
-        ],
-        &[
-            (0, 10544),
-            (256, 63835),
-            (320, 73039),
-            (576, 98979),
-            (608, 103345),
-            (672, 0),
-        ],
-        &[
-            (0, 10800),
-            (256, 63899),
-            (320, 73295),
-            (576, 99011),
-            (608, 103409),
-            (672, 0),
-        ],
-        &[
-            (0, 11056),
-            (256, 63963),
-            (320, 73551),
-            (576, 99043),
-            (608, 103473),
-            (672, 0),
-        ],
-        &[
-            (0, 11312),
-            (256, 64027),
-            (320, 73807),
-            (576, 99075),
-            (608, 103537),
-            (672, 0),
-        ],
-        &[
-            (0, 11568),
-            (512, 64091),
-            (640, 74063),
-            (896, 107601),
-            (928, 0),
-        ],
-        &[
-            (0, 42479),
-            (512, 66587),
-            (640, 82255),
-            (896, 105501),
-            (928, 0),
-        ],
-        &[(0, 12592), (256, 0)],
-    ],
-    [
-        &[(0, 13432), (32, 0)],
-        &[
-            (0, 13464),
-            (256, 64219),
-            (320, 74319),
-            (576, 99107),
-            (608, 103601),
-            (672, 0),
-        ],
-        &[
-            (0, 13720),
-            (256, 64283),
-            (320, 74575),
-            (576, 99139),
-            (608, 103665),
-            (672, 0),
-        ],
-        &[
-            (0, 13976),
-            (256, 64347),
-            (320, 74831),
-            (576, 99171),
-            (608, 103729),
-            (672, 0),
-        ],
-        &[
-            (0, 14232),
-            (256, 64411),
-            (320, 75087),
-            (576, 99203),
-            (608, 103793),
-            (672, 0),
-        ],
-        &[
-            (0, 14488),
-            (256, 64475),
-            (320, 75343),
-            (576, 99235),
-            (608, 103857),
-            (672, 0),
-        ],
-        &[
-            (0, 14744),
-            (512, 64539),
-            (640, 75599),
-            (896, 107901),
-            (928, 0),
-        ],
-        &[
-            (0, 43759),
-            (512, 66715),
-            (640, 82511),
-            (896, 105801),
-            (928, 0),
-        ],
-        &[(0, 15768), (256, 0)],
-    ],
-    [
-        &[(0, 16608), (32, 0)],
-        &[
-            (0, 16640),
-            (256, 64667),
-            (320, 75855),
-            (576, 99267),
-            (608, 103921),
-            (672, 0),
-        ],
-        &[
-            (0, 16896),
-            (256, 64731),
-            (320, 76111),
-            (576, 99299),
-            (608, 103985),
-            (672, 0),
-        ],
-        &[
-            (0, 17152),
-            (256, 64795),
-            (320, 76367),
-            (576, 99331),
-            (608, 104049),
-            (672, 0),
-        ],
-        &[
-            (0, 17408),
-            (256, 64859),
-            (320, 76623),
-            (576, 99363),
-            (608, 104113),
-            (672, 0),
-        ],
-        &[
-            (0, 17664),
-            (256, 64923),
-            (320, 76879),
-            (576, 99395),
-            (608, 104177),
-            (672, 0),
-        ],
-        &[
-            (0, 17920),
-            (512, 64987),
-            (640, 77135),
-            (896, 108201),
-            (928, 0),
-        ],
-        &[
-            (0, 45039),
-            (512, 66843),
-            (640, 82767),
-            (896, 106101),
-            (928, 0),
-        ],
-        &[(0, 18944), (256, 0)],
-    ],
-    [
-        &[(0, 19784), (32, 0)],
-        &[
-            (0, 19816),
-            (256, 65115),
-            (320, 77391),
-            (576, 99427),
-            (608, 104241),
-            (672, 0),
-        ],
-        &[
-            (0, 20072),
-            (256, 65179),
-            (320, 77647),
-            (576, 99459),
-            (608, 104305),
-            (672, 0),
-        ],
-        &[
-            (0, 20328),
-            (256, 65243),
-            (320, 77903),
-            (576, 99491),
-            (608, 104369),
-            (672, 0),
-        ],
-        &[
-            (0, 20584),
-            (256, 65307),
-            (320, 78159),
-            (576, 99523),
-            (608, 104433),
-            (672, 0),
-        ],
-        &[
-            (0, 20840),
-            (256, 65371),
-            (320, 78415),
-            (576, 99555),
-            (608, 104497),
-            (672, 0),
-        ],
-        &[
-            (0, 21096),
-            (512, 65435),
-            (640, 78671),
-            (896, 108501),
-            (928, 0),
-        ],
-        &[
-            (0, 46319),
-            (512, 66971),
-            (640, 83023),
-            (896, 106401),
-            (928, 0),
-        ],
-        &[(0, 22120), (256, 0)],
-    ],
-    [
-        &[(0, 22960), (32, 0)],
-        &[
-            (0, 19816),
-            (256, 65115),
-            (320, 77391),
-            (576, 99427),
-            (608, 104241),
-            (672, 0),
-        ],
-        &[
-            (0, 20072),
-            (256, 65179),
-            (320, 77647),
-            (576, 99459),
-            (608, 104305),
-            (672, 0),
-        ],
-        &[
-            (0, 20328),
-            (256, 65243),
-            (320, 77903),
-            (576, 99491),
-            (608, 104369),
-            (672, 0),
-        ],
-        &[
-            (0, 20584),
-            (256, 65307),
-            (320, 78159),
-            (576, 99523),
-            (608, 104433),
-            (672, 0),
-        ],
-        &[
-            (0, 20840),
-            (256, 65371),
-            (320, 78415),
-            (576, 99555),
-            (608, 104497),
-            (672, 0),
-        ],
-        &[
-            (0, 21096),
-            (512, 65435),
-            (640, 78671),
-            (896, 108501),
-            (928, 0),
-        ],
-        &[
-            (0, 46319),
-            (512, 66971),
-            (640, 83023),
-            (896, 106401),
-            (928, 0),
-        ],
-        &[(0, 22120), (256, 0)],
-    ],
-    [
-        &[(0, 23184), (32, 0)],
-        &[
-            (0, 23216),
-            (256, 65563),
-            (320, 78927),
-            (576, 99587),
-            (608, 104561),
-            (672, 0),
-        ],
-        &[
-            (0, 23472),
-            (256, 65627),
-            (320, 79183),
-            (576, 99619),
-            (608, 104625),
-            (672, 0),
-        ],
-        &[
-            (0, 23728),
-            (256, 65691),
-            (320, 79439),
-            (576, 99651),
-            (608, 104689),
-            (672, 0),
-        ],
-        &[
-            (0, 23984),
-            (256, 65755),
-            (320, 79695),
-            (576, 99683),
-            (608, 104753),
-            (672, 0),
-        ],
-        &[
-            (0, 24240),
-            (256, 65819),
-            (320, 79951),
-            (576, 99715),
-            (608, 104817),
-            (672, 0),
-        ],
-        &[
-            (0, 24496),
-            (512, 65883),
-            (640, 80207),
-            (896, 108801),
-            (928, 0),
-        ],
-        &[
-            (0, 47599),
-            (512, 67099),
-            (640, 83279),
-            (896, 106701),
-            (928, 0),
-        ],
-        &[(0, 25520), (256, 0)],
-    ],
-    [
-        &[(0, 26360), (32, 0)],
-        &[
-            (0, 26392),
-            (256, 66011),
-            (320, 80463),
-            (576, 99747),
-            (608, 104881),
-            (672, 0),
-        ],
-        &[
-            (0, 26648),
-            (256, 66075),
-            (320, 80719),
-            (576, 99779),
-            (608, 104945),
-            (672, 0),
-        ],
-        &[
-            (0, 26904),
-            (256, 66139),
-            (320, 80975),
-            (576, 99811),
-            (608, 105009),
-            (672, 0),
-        ],
-        &[
-            (0, 27160),
-            (256, 66203),
-            (320, 81231),
-            (576, 99843),
-            (608, 105073),
-            (672, 0),
-        ],
-        &[
-            (0, 27416),
-            (256, 66267),
-            (320, 81487),
-            (576, 99875),
-            (608, 105137),
-            (672, 0),
-        ],
-        &[
-            (0, 27672),
-            (512, 66331),
-            (640, 81743),
-            (896, 109101),
-            (928, 0),
-        ],
-        &[
-            (0, 48879),
-            (512, 67227),
-            (640, 83535),
-            (896, 107001),
-            (928, 0),
-        ],
-        &[(0, 28696), (256, 0)],
-    ],
-];
-
+/// [`face_dat_id`] against the install the environment names
+/// (`scheduler_runtime::main_dll_from_env`), for callers that open their
+/// `DatRoot` from the environment the same way (the launcher's character
+/// preview, `/actordiag`). In-world dispatch reads the wired [`ActionMainDll`].
 pub fn resolve_face(face: u8, race: u8) -> Option<u32> {
-    // The face byte is the 0-based index into the per-race Face sub-table (slot 0
-    // of the FFXiMain.dll equipment lookup): file = base + face, no -1. LSB caps
-    // creation faces at 15 ("Face 8B", vendor/server/src/login/login_helpers.cpp),
-    // the stylist spans the full slot; xim EquipmentModelTable.getItemModelPath
-    // indexes the Face slot directly the same way. PC_MODEL_IDS slot 0 is the
-    // single source for base/count — `[(0, base), (count, 0)]` — so don't
-    // hand-duplicate the bases.
-    if race == 0 || race > 8 {
-        return None;
-    }
-    let face_band = PC_MODEL_IDS[(race - 1) as usize][0];
-    let base = face_band.first()?.1;
-    let count = face_band.get(1).map_or(u16::MAX, |&(thr, _)| thr);
-    if base == 0 {
-        return None;
-    }
-    if u16::from(face) >= count {
-        // Retail clamp: an id past the slot's table renders model 0, never a
-        // missing part ("wrong GRP number", research/XIClient/src/XIClient/
-        // source/World/Actor/SkeletalMeshActor.cpp constexpr). For the face slot
-        // that means an out-of-band face byte renders face 0 instead of a
-        // decapitated PC. Loud because it means the server sent a face this
-        // client's tables don't know -- the wrong-face render needs explaining.
-        warn!("face {face} out of band for race {race}: clamping to face 0 (retail behavior)");
-        return Some(base);
-    }
-    Some(base + u32::from(face))
+    face_dat_id(&*main_dll_from_env()?, face, race)
+}
+
+/// [`equipment_slot_dat_id`] against the environment's install; see [`resolve_face`].
+pub fn resolve_equipment_slot(slot_id: u16, race: u8) -> Option<u32> {
+    equipment_slot_dat_id(&*main_dll_from_env()?, slot_id, race)
+}
+
+/// [`equipment_dat_id`] against the environment's install; see [`resolve_face`].
+pub fn resolve_equipment_model(slot_index: u8, model_id: u16, race: u8) -> Option<u32> {
+    equipment_dat_id(&*main_dll_from_env()?, slot_index, model_id, race)
 }
 
 /// Loads the model for each ridden mount. Kept apart from
@@ -661,6 +195,7 @@ pub fn dispatch_look_driven_models(
     mut load_actor_tx: MessageWriter<crate::ffxi_actor_render::LoadActorRequest>,
     mut commands: Commands,
     settings: Res<GraphicsSettings>,
+    dll: Option<Res<ActionMainDll>>,
 ) {
     let Some(zone_id) = state.snapshot.zone_id else {
         return;
@@ -673,6 +208,7 @@ pub fn dispatch_look_driven_models(
     }
 
     let _ = &settings;
+    let dll: Option<&MainDll> = dll.as_ref().and_then(|dll| dll.0.as_deref());
     let mounted_riders: std::collections::HashSet<u32> = state
         .snapshot
         .entities
@@ -703,8 +239,19 @@ pub fn dispatch_look_driven_models(
             ranged,
         } = look.0
         {
+            // Every PC part is named by the wired install's equipment table, so
+            // until `ActionMainDll` lands (it loads off-thread after the root is
+            // wired) the look is left unsigned and comes back on the next dirty
+            // frame; NPCs below need no table and are not held up.
+            let Some(dll) = dll else {
+                warn_once!(
+                    "pc dispatch deferred: the wired install's FFXiMain.dll has not loaded (entity {})",
+                    we.id
+                );
+                continue;
+            };
             let mut equipment: Vec<u32> = Vec::new();
-            if let Some(file_id) = resolve_face(face, race) {
+            if let Some(file_id) = face_dat_id(dll, face, race) {
                 equipment.push(file_id);
             } else {
                 // Only reachable for a race outside 1..=8; the face DAT carries
@@ -726,7 +273,7 @@ pub fn dispatch_look_driven_models(
                 // (research/xim poc/ActorModel.kt,
                 // ActorModel.getHiddenSlotIds).
                 let file_id = (!(mounted && WEAPON_SLOTS.contains(&slot_index)))
-                    .then(|| resolve_equipment_model(slot_index, model_id, race))
+                    .then(|| equipment_dat_id(dll, slot_index, model_id, race))
                     .flatten();
                 slot_trace[i] = (slot_index, model_id, file_id);
                 if let Some(file_id) = file_id {
@@ -750,13 +297,13 @@ pub fn dispatch_look_driven_models(
                     // Slot 2 is the body (SkeletalMeshActor.cpp SkeletalMeshActor::SetEquipModel takes
                     // waist_type from that slot's CIB); `equipment` above drops
                     // slot identity, so pass it separately.
-                    body: resolve_equipment_model(EQUIP_SLOT_BODY, body, race),
+                    body: equipment_dat_id(dll, EQUIP_SLOT_BODY, body, race),
 
                     // Still resolved while mounted even though the model is
                     // suppressed: load_pc reads their CIBs for the waist/shield
                     // motion selectors, which the seat pose still needs.
-                    main_weapon: resolve_equipment_model(EQUIP_SLOT_MAIN, main, race),
-                    sub_weapon: resolve_equipment_model(EQUIP_SLOT_SUB, sub, race),
+                    main_weapon: equipment_dat_id(dll, EQUIP_SLOT_MAIN, main, race),
+                    sub_weapon: equipment_dat_id(dll, EQUIP_SLOT_SUB, sub, race),
                 },
             });
             info!(
@@ -818,6 +365,101 @@ pub fn dispatch_look_driven_models(
 mod tests {
     use super::*;
 
+    // A FFXiMain.dll carrying only the tables the resolver reads, laid out the
+    // way ffxi-dat's reader locates them (ffxi-dat/src/main_dll.rs): each table
+    // is found by its big-endian marker word inside the fallback scan window (no
+    // PE header here), the two required per-race tables are present so
+    // `MainDll::load` accepts the file, and the equipment table's marker is its
+    // own first `(file_id, count)` pair -- HumeM's face row -- so that row is
+    // fixed at the real base. Layout constants are the reader's own.
+    use ffxi_dat::main_dll::{
+        DANCE_SKILL_HINT as DLL_DANCE_SKILL_MARKER, EQUIPMENT_HINT as DLL_EQUIPMENT_MARKER,
+        EQUIPMENT_RACE_STRIDE as DLL_EQUIPMENT_RACE_STRIDE,
+        EQUIPMENT_SLOT_STRIDE as DLL_EQUIPMENT_SLOT_STRIDE, SCAN_START as DLL_SCAN_START,
+        WEAPON_SKILL_HINT as DLL_WEAPON_SKILL_MARKER,
+    };
+    const DLL_EQUIPMENT_TABLE_AT: usize = DLL_SCAN_START + 0x1000;
+    const HUME_M_FACE_BASE: u32 = DLL_EQUIPMENT_MARKER.swap_bytes();
+
+    /// `rows`: `(race, slot, bands)` with bands as the `(first_file_id, count)`
+    /// pairs the table stores.
+    struct SyntheticDll {
+        dir: std::path::PathBuf,
+        dll: MainDll,
+    }
+
+    impl SyntheticDll {
+        fn new(tag: &str, rows: &[(u8, u8, &[(u32, u32)])]) -> Self {
+            let mut bytes = vec![
+                0u8;
+                DLL_EQUIPMENT_TABLE_AT
+                    + DLL_EQUIPMENT_RACE_STRIDE * PC_LOOK_RACES.count()
+            ];
+            bytes[DLL_SCAN_START..DLL_SCAN_START + 4]
+                .copy_from_slice(&DLL_WEAPON_SKILL_MARKER.to_be_bytes());
+            bytes[DLL_SCAN_START + 0x10..DLL_SCAN_START + 0x14]
+                .copy_from_slice(&DLL_DANCE_SKILL_MARKER.to_be_bytes());
+            for &(race, slot, bands) in rows {
+                let row = DLL_EQUIPMENT_TABLE_AT
+                    + DLL_EQUIPMENT_RACE_STRIDE * usize::from(race - 1)
+                    + DLL_EQUIPMENT_SLOT_STRIDE * usize::from(slot);
+                for (i, &(first, count)) in bands.iter().enumerate() {
+                    let at = row + i * 8;
+                    bytes[at..at + 4].copy_from_slice(&first.to_le_bytes());
+                    bytes[at + 4..at + 8].copy_from_slice(&count.to_le_bytes());
+                }
+            }
+            assert_eq!(
+                &bytes[DLL_EQUIPMENT_TABLE_AT..DLL_EQUIPMENT_TABLE_AT + 4],
+                &DLL_EQUIPMENT_MARKER.to_be_bytes(),
+                "race 1 face row must start at HumeM's base for the reader to find the table"
+            );
+            let dir = std::env::temp_dir().join(format!(
+                "kuluu-render-look-resolver-{tag}-{}",
+                std::process::id()
+            ));
+            std::fs::create_dir_all(&dir).expect("temp dir");
+            std::fs::write(dir.join("FFXiMain.dll"), &bytes).expect("write synthetic dll");
+            let dll = MainDll::load(&dir).expect("synthetic dll loads");
+            Self { dir, dll }
+        }
+    }
+
+    impl Drop for SyntheticDll {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    /// HumeM face and head, Tarutaru F face, Elvaan M body: the retail bands the
+    /// unit assertions below step along.
+    fn fixture(tag: &str) -> SyntheticDll {
+        SyntheticDll::new(
+            tag,
+            &[
+                (1, 0, &[(HUME_M_FACE_BASE, 32)]),
+                (
+                    1,
+                    1,
+                    &[
+                        (7112, 256),
+                        (63323, 64),
+                        (71247, 256),
+                        (98787, 32),
+                        (102961, 64),
+                    ],
+                ),
+                (
+                    1,
+                    6,
+                    &[(8392, 512), (63643, 128), (72527, 256), (107301, 32)],
+                ),
+                (3, 2, &[(13720, 256)]),
+                (6, 0, &[(22952, 32)]),
+            ],
+        )
+    }
+
     #[test]
     fn mount_dat_id_maps_the_block_and_rejects_the_chocobo_ids() {
         // Verified against the retail DAT 2026-08-04 by dumping each file's
@@ -861,11 +503,10 @@ mod tests {
         assert_eq!(npc_dat_id(3500), 3500 + 98239);
     }
 
-    // 3194..=3499 is a registration hole, not a range boundary: retail keeps
-    // applying the 3000-range base across it. Reading the hole as the split is
-    // what made every modelid at or above it resolve 307 slots high.
+    // The 3000-range base applies all the way to 3499: the split is at 3500,
+    // not wherever the install's registered files happen to thin out.
     #[test]
-    fn npc_dat_id_spans_the_unregistered_hole_with_the_3000_range_base() {
+    fn npc_dat_id_keeps_the_3000_range_base_through_3499() {
         for m in [3193u16, 3194, 3300, 3499] {
             assert_eq!(npc_dat_id(m), u32::from(m) + 96907, "modelid {m}");
         }
@@ -874,84 +515,95 @@ mod tests {
 
     #[test]
     fn equipment_slot_extraction() {
-        assert_eq!(resolve_equipment_slot(0x1000, 3), Some(13464));
-
-        assert_eq!(resolve_equipment_slot(0x2004, 3), Some(13724));
+        let f = fixture("slot-extraction");
+        assert_eq!(equipment_slot_dat_id(&f.dll, 0x1000, 1), Some(7112));
+        assert_eq!(equipment_slot_dat_id(&f.dll, 0x2004, 3), Some(13724));
     }
 
     #[test]
     fn equipment_model_retags_bare_wire_ids() {
-        assert_eq!(resolve_equipment_model(2, 4, 3), Some(13724));
+        let f = fixture("retag");
+        assert_eq!(equipment_dat_id(&f.dll, 2, 4, 3), Some(13724));
 
-        assert_eq!(resolve_equipment_slot(4, 3), None);
+        // A bare model id is slot 0: an empty slot, never a face.
+        assert_eq!(equipment_slot_dat_id(&f.dll, 4, 3), None);
 
-        assert_eq!(resolve_equipment_model(2, 0x2004, 3), Some(13724));
+        assert_eq!(equipment_dat_id(&f.dll, 2, 0x2004, 3), Some(13724));
 
-        assert_eq!(resolve_equipment_model(0, 4, 3), None);
-        assert_eq!(resolve_equipment_model(9, 4, 3), None);
+        assert_eq!(equipment_dat_id(&f.dll, 0, 4, 3), None);
+        assert_eq!(equipment_dat_id(&f.dll, 9, 4, 3), None);
     }
 
     #[test]
     fn equipment_sentinels_return_none() {
-        assert_eq!(resolve_equipment_slot(0x0000, 3), None);
-        assert_eq!(resolve_equipment_slot(0x2004, 0), None);
-        assert_eq!(resolve_equipment_slot(0x2000, 3), Some(13720));
+        let f = fixture("sentinels");
+        assert_eq!(equipment_slot_dat_id(&f.dll, 0x0000, 3), None);
+        assert_eq!(equipment_slot_dat_id(&f.dll, 0x2004, 0), None);
+        assert_eq!(equipment_slot_dat_id(&f.dll, 0x2004, 9), None);
+        assert_eq!(equipment_slot_dat_id(&f.dll, 0x2000, 3), Some(13720));
+        // A slot the race's row leaves empty resolves to nothing, not to a clamp.
+        assert_eq!(equipment_dat_id(&f.dll, EQUIP_SLOT_RANGED, 0, 1), None);
     }
 
     #[test]
-    fn equipment_table_band_samples_race1_head() {
-        assert_eq!(resolve_equipment_slot(0x1001, 1), Some(7113));
-
-        assert_eq!(resolve_equipment_slot(0x1100, 1), Some(63323));
-
-        assert_eq!(resolve_equipment_slot(0x1140, 1), Some(71247));
-
-        assert_eq!(resolve_equipment_slot(0x1240, 1), Some(98787));
-
-        assert_eq!(resolve_equipment_slot(0x1260, 1), Some(102961));
+    fn equipment_bands_partition_the_model_id_space_in_order() {
+        let f = fixture("bands");
+        let head = |id: u16| equipment_slot_dat_id(&f.dll, 0x1000 | id, 1);
+        assert_eq!(head(0), Some(7112));
+        assert_eq!(head(1), Some(7113));
+        assert_eq!(head(255), Some(7367));
+        assert_eq!(head(256), Some(63323));
+        assert_eq!(head(319), Some(63386));
+        assert_eq!(head(320), Some(71247));
+        assert_eq!(head(575), Some(71502));
+        assert_eq!(head(576), Some(98787));
+        assert_eq!(head(607), Some(98818));
+        assert_eq!(head(608), Some(102961));
+        assert_eq!(head(671), Some(103024));
 
         // Past the last band: retail clamps to model 0 of the slot ("wrong GRP
-        // number", SkeletalMeshActor.cpp constexpr), so the head slot's base file
-        // comes back instead of a dropped body part.
-        assert_eq!(resolve_equipment_slot(0x12A0, 1), Some(7112));
+        // number", SkeletalMeshActor.cpp SkeletalMeshActor::SetEquipModel), so
+        // the head slot's base file comes back instead of a dropped body part.
+        assert_eq!(head(672), Some(7112));
+        assert_eq!(head(0xFFF), Some(7112));
     }
 
     #[test]
-    fn equipment_per_race_correctness() {
-        assert_eq!(resolve_equipment_slot(0x2008, 8), Some(26656));
-
-        assert_eq!(resolve_equipment_slot(0x4004, 7), Some(23988));
-    }
-
-    #[test]
-    fn equipment_rejects_high_race_codes() {
-        assert_eq!(resolve_equipment_slot(0x2004, 29), None);
+    fn main_hand_ids_past_the_old_hand_table_still_resolve() {
+        let f = fixture("main-hand");
+        let main = |id: u16| equipment_dat_id(&f.dll, EQUIP_SLOT_MAIN, id, 1);
+        assert_eq!(main(0), Some(8392));
+        assert_eq!(main(896), Some(107301));
+        assert_eq!(main(927), Some(107332));
+        assert_eq!(main(928), Some(8392), "past every band: the clamp");
     }
 
     #[test]
     fn face_is_zero_based_direct_index() {
-        // xim EquipmentModelTable indexes the Face slot directly: file = base + face.
-        // HumeM face base is 7080 (PC_MODEL_IDS[0][0]).
-        assert_eq!(resolve_face(0, 1), Some(7080));
-        assert_eq!(resolve_face(1, 1), Some(7081));
-        assert_eq!(resolve_face(17, 1), Some(7097));
-        // Mithra (race 7) face base is 23184.
-        assert_eq!(resolve_face(0, 7), Some(23184));
+        let f = fixture("face-index");
+        assert_eq!(face_dat_id(&f.dll, 0, 1), Some(7080));
+        assert_eq!(face_dat_id(&f.dll, 1, 1), Some(7081));
+        assert_eq!(face_dat_id(&f.dll, 17, 1), Some(7097));
         // Face 8B == 15 is LSB's creation maximum.
-        assert_eq!(resolve_face(15, 7), Some(23199));
+        assert_eq!(face_dat_id(&f.dll, 15, 1), Some(7095));
+        // Tarutaru F: the row the dll places at 22952.
+        assert_eq!(face_dat_id(&f.dll, 0, 6), Some(22952));
+        assert_eq!(face_dat_id(&f.dll, 31, 6), Some(22983));
     }
 
     #[test]
     fn face_band_boundaries() {
+        let f = fixture("face-bounds");
         // 32 face entries (0..31); index 31 is the last face file. An
         // out-of-band face clamps to face 0 the way retail does ("wrong GRP
-        // number", SkeletalMeshActor.cpp constexpr) -- never a decapitated PC.
-        assert_eq!(resolve_face(31, 1), Some(7111));
-        assert_eq!(resolve_face(32, 1), Some(7080));
-        assert_eq!(resolve_face(255, 5), Some(19784));
-        assert_eq!(resolve_equipment_slot(0x1000, 1), Some(7112));
-        // Invalid races reject.
-        assert_eq!(resolve_face(0, 0), None);
-        assert_eq!(resolve_face(0, 9), None);
+        // number", SkeletalMeshActor.cpp SkeletalMeshActor::SetEquipModel) --
+        // never a decapitated PC.
+        assert_eq!(face_dat_id(&f.dll, 31, 1), Some(7111));
+        assert_eq!(face_dat_id(&f.dll, 32, 1), Some(7080));
+        assert_eq!(face_dat_id(&f.dll, 255, 6), Some(22952));
+        // Invalid races reject; a race with no face row is nothing, not a clamp.
+        assert_eq!(face_dat_id(&f.dll, 0, 0), None);
+        assert_eq!(face_dat_id(&f.dll, 0, 9), None);
+        assert_eq!(face_dat_id(&f.dll, 0, 3), None);
     }
 }

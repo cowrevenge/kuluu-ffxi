@@ -10,7 +10,7 @@ use kuluu_render::dat_vos2::{
     enumerate_vos2_chunks, process_load_vos2_requests, tick_skinned_actors, LoadVos2Request,
     SkinnedActor,
 };
-use kuluu_render::look_resolver::{npc_dat_id, resolve_equipment_slot, resolve_face};
+use kuluu_render::look_resolver::{equipment_slot_dat_id, face_dat_id, npc_dat_id};
 use kuluu_render::scene::{BakedActor, TrackedEntities};
 use kuluu_render::snapshot::SceneState;
 use kuluu_snapshot::EntityKind;
@@ -51,6 +51,12 @@ fn parse_id_lenient(s: &str) -> Option<u16> {
 }
 
 const PREVIEW_ENTITY_ID: u32 = 1;
+
+/// The install's FFXiMain.dll, which names every PC part and the race skeleton;
+/// `None` when no install is reachable or its dll is unreadable, in which case
+/// PC mode falls back to the shipped skeleton table and draws no parts.
+#[derive(Resource, Default)]
+struct ViewerMainDll(Option<std::sync::Arc<ffxi_dat::main_dll::MainDll>>);
 
 const PREVIEW_PARENT_POS: Vec3 = Vec3::ZERO;
 const PREVIEW_CAMERA_OFFSET: Vec3 = Vec3::new(0.0, 1.3, 3.5);
@@ -240,6 +246,9 @@ pub fn run(args: ModelViewerArgs) -> Result<()> {
              Set FFXI_DAT_PATH or run `kuluu --require-dat model-viewer` to fail fast."
         );
     }
+    app.insert_resource(ViewerMainDll(dat_root.as_deref().and_then(|root| {
+        kuluu_render::scheduler_runtime::main_dll_for_root(root.root())
+    })));
 
     app.add_message::<LoadVos2Request>();
 
@@ -335,6 +344,7 @@ fn do_rebake(
     npc: NpcForm,
     clip_list: &mut ClipList,
     existing_parent: Option<Entity>,
+    dll: Option<&ffxi_dat::main_dll::MainDll>,
 ) -> Option<Entity> {
     if let Some(prev) = existing_parent {
         commands.entity(prev).try_despawn();
@@ -371,38 +381,14 @@ fn do_rebake(
     let _ = (meshes, materials, images);
     let skel_file_id = match mode {
         ViewerMode::Pc => {
-            let skel = pc_race_to_skel(pc.race)?;
-            let mut dispatch_dat = |file_id: u32| {
-                let chunks = enumerate_vos2_chunks(file_id);
-                if chunks.is_empty() {
-                    return;
-                }
-                for chunk_idx in chunks {
-                    npc_loads.write(LoadVos2Request {
-                        file_id,
-                        chunk_idx,
-                        entity_id: PREVIEW_ENTITY_ID,
-                        race: pc.race,
-                        skeleton_file_id: Some(skel),
-                    });
-                }
-            };
-            if let Some(face_file) = resolve_face(pc.face, pc.race) {
-                dispatch_dat(face_file);
+            let skel = pc_race_to_skel(dll, pc.race)?;
+            if let Some(dll) = dll {
+                dispatch_pc_parts(dll, pc, skel, npc_loads);
             } else {
                 warn!(
                     race = pc.race,
-                    face = pc.face,
-                    "model viewer: resolve_face returned None"
+                    "model viewer: no FFXiMain.dll, so no PC part can be named"
                 );
-            }
-            for slot_id in [
-                pc.head, pc.body, pc.hands, pc.legs, pc.feet, pc.main, pc.sub, pc.ranged,
-            ] {
-                let Some(file_id) = resolve_equipment_slot(slot_id, pc.race) else {
-                    continue;
-                };
-                dispatch_dat(file_id);
             }
             Some(skel)
         }
@@ -433,17 +419,52 @@ fn do_rebake(
     Some(parent)
 }
 
-fn pc_race_to_skel(race: u8) -> Option<u32> {
-    match race {
-        1 => Some(7072),
-        2 => Some(10248),
-        3 => Some(13424),
-        4 => Some(16600),
-        5 | 6 => Some(19776),
-        7 => Some(23176),
-        8 => Some(26352),
-        _ => None,
+/// Every PC part the form names, each dispatched as VOS2 chunk loads against
+/// the preview entity.
+fn dispatch_pc_parts(
+    dll: &ffxi_dat::main_dll::MainDll,
+    pc: &PcForm,
+    skel: u32,
+    npc_loads: &mut MessageWriter<LoadVos2Request>,
+) {
+    let mut dispatch_dat = |file_id: u32| {
+        let chunks = enumerate_vos2_chunks(file_id);
+        if chunks.is_empty() {
+            return;
+        }
+        for chunk_idx in chunks {
+            npc_loads.write(LoadVos2Request {
+                file_id,
+                chunk_idx,
+                entity_id: PREVIEW_ENTITY_ID,
+                race: pc.race,
+                skeleton_file_id: Some(skel),
+            });
+        }
+    };
+    if let Some(face_file) = face_dat_id(dll, pc.face, pc.race) {
+        dispatch_dat(face_file);
+    } else {
+        warn!(
+            race = pc.race,
+            face = pc.face,
+            "model viewer: face_dat_id returned None"
+        );
     }
+    for slot_id in [
+        pc.head, pc.body, pc.hands, pc.legs, pc.feet, pc.main, pc.sub, pc.ranged,
+    ] {
+        let Some(file_id) = equipment_slot_dat_id(dll, slot_id, pc.race) else {
+            continue;
+        };
+        dispatch_dat(file_id);
+    }
+}
+
+/// The race's skeleton DAT from the dll's race-config table, else the render
+/// crate's shipped fallback (`dat_vos2::skeleton_file_id_for_race`).
+fn pc_race_to_skel(dll: Option<&ffxi_dat::main_dll::MainDll>, race: u8) -> Option<u32> {
+    kuluu_render::dat_vos2::skeleton_file_id_for_race(dll, race)
 }
 
 fn refresh_clip_list(list: &mut ClipList, skel_file_id: Option<u32>) {
@@ -489,6 +510,7 @@ fn debounced_rebake(
     pc: Res<PcForm>,
     npc: Res<NpcForm>,
     q_existing: Query<Entity, With<PreviewParent>>,
+    dll: Res<ViewerMainDll>,
 ) {
     let should_bake = if state.initial_bake_pending {
         true
@@ -516,6 +538,7 @@ fn debounced_rebake(
         *npc,
         &mut clip_list,
         existing,
+        dll.0.as_deref(),
     );
 }
 

@@ -34,6 +34,7 @@ use crate::combat_stance;
 pub use crate::combat_stance::{infers_walk_gait, WALK_RUN_BOUNDARY};
 use crate::dat_vos2::skeleton_file_id_for_race;
 use crate::scene::BakedActor;
+use crate::scheduler_runtime::main_dll_for_root;
 use crate::skinned_ffxi_material::{
     FfxiInstance, FfxiInstanceSlot, FfxiJointMatrices, FfxiLightingUniform, FfxiSkinRegistry,
     FfxiSkinSlot, FfxiSkinnedMaterial, FfxiSkinnedMaterialCache, ATTR_COLOR, ATTR_JOINT0,
@@ -642,8 +643,8 @@ fn mount_equipment_table_index(race: u8) -> Option<u8> {
 pub fn load_mount_race(race: u8) -> Result<LoadedActor, String> {
     crate::perf_probe::note_model_load();
     let root = DatRoot::from_env_or_default().map_err(|e| format!("DatRoot: {e}"))?;
-    let dll =
-        ffxi_dat::main_dll::MainDll::load(root.root()).map_err(|e| format!("FFXiMain.dll: {e}"))?;
+    let dll = main_dll_for_root(root.root())
+        .ok_or_else(|| format!("FFXiMain.dll unreadable under {}", root.root().display()))?;
     let table_index = mount_equipment_table_index(race)
         .ok_or_else(|| format!("race {race} is not a mount race config"))?;
     let skel_file_id = u32::from(
@@ -706,39 +707,44 @@ pub fn load_mount_race(race: u8) -> Result<LoadedActor, String> {
     })
 }
 
-fn default_pc_equipment(race: u8) -> Vec<u32> {
-    use crate::look_resolver::{resolve_equipment_slot, resolve_face};
+/// The naked default body: face 0 and model 0 of each clothing slot (1 head
+/// .. 5 feet); the weapon slots stay empty.
+fn default_pc_equipment(dll: &ffxi_dat::main_dll::MainDll, race: u8) -> Vec<u32> {
+    use crate::look_resolver::{equipment_dat_id, face_dat_id};
     let mut out = Vec::new();
-    if let Some(f) = resolve_face(0, race) {
+    if let Some(f) = face_dat_id(dll, 0, race) {
         out.push(f);
     }
 
-    for slot in 1u16..=5 {
-        if let Some(f) = resolve_equipment_slot(slot << 12, race) {
+    for slot in 1u8..=5 {
+        if let Some(f) = equipment_dat_id(dll, slot, 0, race) {
             out.push(f);
         }
     }
     out
 }
 
-// research/XIClient/src/XIClient/source/World/Actor/SkeletalMeshActor.cpp SkeletalMeshActor::GetUpperBodyDatIndex
-// and :3165 — the two companion motion DATs sit at fixed offsets from the race
-// skeleton base, indexed by a CIB byte.
+// research/XIClient/src/XIClient/source/World/Actor/SkeletalMeshActor.cpp
+// SkeletalMeshActor::GetUpperBodyDatIndex and SkeletalMeshActor::GetWaistDatIndex
+// — the two companion motion DATs sit at fixed offsets from the race skeleton
+// base, indexed by a CIB byte.
 const CIB_MOTION_INDEX_NONE: u8 = 0xFF;
 const UPPER_BODY_MOTION_OFFSET: u32 = 1;
 const WAIST_MOTION_OFFSET: u32 = 2;
-// `GetWaistDatIndex` floors waist_type at 1 before using it (:3134-3136), so an
-// unequipped or CIB-less body still resolves to the trousers waist rather than
-// colliding with the upper-body DAT.
+// `SkeletalMeshActor::GetWaistDatIndex` floors waist_type at 1 before using it,
+// so an unequipped or CIB-less body still resolves to the trousers waist rather
+// than colliding with the upper-body DAT.
 const WAIST_TYPE_MIN: u8 = 1;
 
 /// One DAT off the race's action-animation base.
 /// research/xim poc/Model.kt, PcModel.getMountAnimationResource.
-fn action_anim_dat(root: &DatRoot, race: u8, offset: u16) -> Option<Vec<u8>> {
-    let dll = ffxi_dat::main_dll::MainDll::load(root.root())
-        .inspect_err(|e| warn!("FFXiMain.dll unreadable, action poses unavailable: {e}"))
-        .ok()?;
-    let base = dll.base_action_animation_index(race)?;
+fn action_anim_dat(
+    root: &DatRoot,
+    dll: Option<&ffxi_dat::main_dll::MainDll>,
+    race: u8,
+    offset: u16,
+) -> Option<Vec<u8>> {
+    let base = dll?.base_action_animation_index(race)?;
     read_dat(root, u32::from(base + offset))
 }
 
@@ -753,8 +759,15 @@ pub fn load_pc(
 ) -> Result<LoadedActor, String> {
     crate::perf_probe::note_model_load();
     let root = DatRoot::from_env_or_default().map_err(|e| format!("DatRoot: {e}"))?;
-    let skel_file_id =
-        skeleton_file_id_for_race(race).ok_or_else(|| format!("unsupported race {race}"))?;
+    // One parsed FFXiMain.dll per install root, shared with every other consumer;
+    // `None` (unreadable) degrades to the shipped fallback tables for the
+    // skeleton and battle DATs and to no action poses or default body.
+    let dll = main_dll_for_root(root.root());
+    if dll.is_none() {
+        warn!("load_pc race={race}: FFXiMain.dll unreadable; action poses and default gear unavailable");
+    }
+    let skel_file_id = skeleton_file_id_for_race(dll.as_deref(), race)
+        .ok_or_else(|| format!("unsupported race {race}"))?;
 
     let skel_bytes =
         read_dat(&root, skel_file_id).ok_or_else(|| format!("read skel dat {skel_file_id}"))?;
@@ -777,18 +790,21 @@ pub fn load_pc(
     }
 
     // Retail loads three motion DATs around the race base, not one. Upper body is
-    // `base + is_shield + 1` (SkeletalMeshActor.cpp SkeletalMeshActor::GetUpperBodyDatIndex) — a shield swaps in a
-    // variant with its own joint count. Waist/skirt is
-    // `base + max(waist_type, 1) + 2` (:3165, reached from ReadStdMotionRes at
-    // :3014), which drives the hip-hung cloth joints; without it they hold bind
-    // pose through every idle, walk, run, strafe and death.
+    // `base + is_shield + 1` (SkeletalMeshActor.cpp
+    // SkeletalMeshActor::GetUpperBodyDatIndex) — a shield swaps in a variant with
+    // its own joint count. Waist/skirt is `base + max(waist_type, 1) + 2`
+    // (SkeletalMeshActor::GetWaistDatIndex, reached from
+    // SkeletalMeshActor::ReadStdMotionRes), which drives the hip-hung cloth
+    // joints; without it they hold bind pose through every idle, walk, run,
+    // strafe and death.
     //
     // Both selectors come from equipment CIBs and neither is a fixed offset: the
     // sub slot supplies is_shield and the body slot waist_type
-    // (SkeletalMeshActor.cpp SkeletalMeshActor::SetEquipModel,1682 collect them per slot). Loading a fixed
-    // `+3` instead would give every robed mage trouser motion, and because
-    // `dedup_clips` is first-writer-wins, loading both candidates would silently
-    // keep whichever came first rather than the authored one.
+    // (SkeletalMeshActor.cpp SkeletalMeshActor::SetEquipModel collects them per
+    // slot). Loading a fixed `+3` instead would give every robed mage trouser
+    // motion, and because `dedup_clips` is first-writer-wins, loading both
+    // candidates would silently keep whichever came first rather than the
+    // authored one.
     let cib_byte = |file_id: Option<u32>, pick: fn(&ffxi_dat::cib::Cib) -> u8| {
         file_id
             .and_then(|f| read_dat(&root, f))
@@ -813,7 +829,12 @@ pub fn load_pc(
     // their own run/walk variants ship in one DAT off the race's action-animation
     // base, and only while riding does retail put it in the animation set.
     if mounted {
-        match action_anim_dat(&root, race, ffxi_dat::main_dll::ACTION_ANIM_MOUNT_OFFSET) {
+        match action_anim_dat(
+            &root,
+            dll.as_deref(),
+            race,
+            ffxi_dat::main_dll::ACTION_ANIM_MOUNT_OFFSET,
+        ) {
             Some(bytes) => anim_dirs.insert(0, ResourceDir::from_bytes(bytes)),
             None => warn!("load_pc race={race}: no mount-pose DAT — rider will not sit"),
         }
@@ -823,14 +844,22 @@ pub fn load_pc(
     // can start a cast at any time, and an actor is built once — so the fishing
     // DAT rides along for every PC. It is a quarter the size of the race base
     // and carries the `fsh*` routines the pose selector resolves through.
-    match action_anim_dat(&root, race, ffxi_dat::main_dll::ACTION_ANIM_FISHING_OFFSET) {
+    match action_anim_dat(
+        &root,
+        dll.as_deref(),
+        race,
+        ffxi_dat::main_dll::ACTION_ANIM_FISHING_OFFSET,
+    ) {
         Some(bytes) => anim_dirs.push(ResourceDir::from_bytes(bytes)),
         None => warn!("load_pc race={race}: no fishing DAT — fishing poses unavailable"),
     }
 
     let resolved_default;
     let equipment = if equipment.is_empty() {
-        resolved_default = default_pc_equipment(race);
+        resolved_default = dll
+            .as_deref()
+            .map(|dll| default_pc_equipment(dll, race))
+            .unwrap_or_default();
         resolved_default.as_slice()
     } else {
         equipment
@@ -873,7 +902,7 @@ pub fn load_pc(
         .map(|c| c.motion_index)
         .unwrap_or(0);
     let mut battle_dirs = Vec::new();
-    if let Some(base) = combat_stance::motion_dat_for_skel(skel_file_id) {
+    if let Some(base) = combat_stance::motion_dat_for_race(dll.as_deref(), race) {
         if weapon_anim_type != 0 && weapon_anim_type != CIB_MOTION_INDEX_NONE {
             if let Some(dir) = read_dat(&root, base + weapon_anim_type as u32)
                 .map(ResourceDir::from_bytes)
@@ -3756,7 +3785,7 @@ impl SpellSuffixCache {
         if !self.loaded {
             self.loaded = true;
             if let Ok(root) = DatRoot::from_env_or_default() {
-                self.table = Some(ffxi_dat::spell_info::SpellTable::open(root.root()));
+                self.table = Some(ffxi_dat::spell_info::SpellTable::open_from_root(&root));
             }
         }
         self.table
@@ -4487,7 +4516,8 @@ mod pose_resolution_tests {
         if DatRoot::from_env_or_default().is_err() {
             return;
         }
-        // Installed DATs measured alongside FFXiMain.dll 0x1002b9a0 (kuluu-81r8).
+        // Reference 2 (standard_position::ABOVE_HEAD) offsets read from the
+        // installed DATs (identical on horizonxi-2023 and retail-2026-09).
         let models = [
             (
                 "Tarutaru",
@@ -5294,26 +5324,20 @@ mod pose_resolution_tests {
     // take the whole spark chain with it.
     #[test]
     fn equipped_weapon_routines_reach_the_actor_lookup() {
-        // look_resolver::PC_MODEL_IDS[HumeM][main-hand] base — main-hand weapon model 0.
-        const HUME_M_MAIN_WEAPON_FILE: u32 = 8392;
+        use crate::look_resolver::equipment_dat_id;
+        const HUME_M: u8 = 1;
+        const MAIN_HAND_SLOT: u8 = 6;
 
-        if DatRoot::from_env_or_default().is_err() {
+        let Ok(root) = DatRoot::from_env_or_default() else {
             return;
-        }
-        let mut equipment = vec![HUME_M_MAIN_WEAPON_FILE];
-        equipment.extend(
-            (1u16..=5)
-                .filter_map(|slot| crate::look_resolver::resolve_equipment_slot(slot << 12, 1)),
-        );
-        let actor = load_pc(
-            1,
-            false,
-            &equipment,
-            None,
-            Some(HUME_M_MAIN_WEAPON_FILE),
-            None,
-        )
-        .expect("load Hume M with a main-hand weapon");
+        };
+        let dll = main_dll_for_root(root.root()).expect("FFXiMain.dll loads");
+        let main_weapon =
+            equipment_dat_id(&dll, MAIN_HAND_SLOT, 0, HUME_M).expect("HumeM main-hand model 0");
+        let mut equipment = vec![main_weapon];
+        equipment.extend((1u8..=5).filter_map(|slot| equipment_dat_id(&dll, slot, 0, HUME_M)));
+        let actor = load_pc(HUME_M, false, &equipment, None, Some(main_weapon), None)
+            .expect("load Hume M with a main-hand weapon");
         for id in ["ef h", "se h", "skaz", "chit"] {
             assert!(
                 actor.routines.contains_key(&DatId::from_str(id)),
@@ -5766,7 +5790,8 @@ mod motion_dat_tests {
         let Ok(root) = DatRoot::from_env_or_default() else {
             return;
         };
-        let Some(base) = skeleton_file_id_for_race(1) else {
+        let dll = main_dll_for_root(root.root());
+        let Some(base) = skeleton_file_id_for_race(dll.as_deref(), 1) else {
             return;
         };
         let Some(upper) = clip_joints(&root, base + UPPER_BODY_MOTION_OFFSET, "wlk") else {
@@ -5793,8 +5818,9 @@ mod motion_dat_tests {
         let Ok(root) = DatRoot::from_env_or_default() else {
             return;
         };
+        let dll = main_dll_for_root(root.root());
         let differs = (1u8..=8).any(|race| {
-            let Some(base) = skeleton_file_id_for_race(race) else {
+            let Some(base) = skeleton_file_id_for_race(dll.as_deref(), race) else {
                 return false;
             };
             let count = |off: u32| {

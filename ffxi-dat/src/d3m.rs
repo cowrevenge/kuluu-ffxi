@@ -27,7 +27,11 @@ pub const D3M_VERTEX_OFFSET: usize = 0x1E;
 // past that.
 pub fn material_table_offset(mat_count: usize, extra_count: usize) -> usize {
     let n = mat_count + extra_count;
-    let shorts = if n % 4 == 0 { n } else { n - n % 4 + 3 };
+    let shorts = if n.is_multiple_of(4) {
+        n
+    } else {
+        n - n % 4 + 3
+    };
     D3M_COUNT_TABLE_OFFSET + 2 * shorts
 }
 

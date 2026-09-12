@@ -1287,13 +1287,78 @@ pub struct ActionMainDll(pub Option<Arc<ffxi_dat::main_dll::MainDll>>);
 
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Resource)]
-pub(crate) struct ActionMainDllTask(bevy::tasks::Task<Option<ffxi_dat::main_dll::MainDll>>);
+pub(crate) struct ActionMainDllTask(bevy::tasks::Task<Option<Arc<ffxi_dat::main_dll::MainDll>>>);
+
+#[cfg(not(target_arch = "wasm32"))]
+type MainDllCache =
+    std::sync::Mutex<HashMap<std::path::PathBuf, Option<Arc<ffxi_dat::main_dll::MainDll>>>>;
+
+#[cfg(not(target_arch = "wasm32"))]
+static MAIN_DLLS: std::sync::OnceLock<MainDllCache> = std::sync::OnceLock::new();
+
+/// The parsed FFXiMain.dll of one install root, shared by every consumer (action
+/// dispatch, the actor loader, the look resolver, the minimap calibration). One
+/// load per root; a root whose dll is unreadable is remembered as `None` so a
+/// broken install is not re-read per actor. A different root is a different
+/// entry, which is how a launcher install switch reaches every holder.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn main_dll_for_root(root: &std::path::Path) -> Option<Arc<ffxi_dat::main_dll::MainDll>> {
+    let cache = MAIN_DLLS.get_or_init(Default::default);
+    let mut guard = cache.lock().ok()?;
+    if let Some(entry) = guard.get(root) {
+        return entry.clone();
+    }
+    let loaded = ffxi_dat::main_dll::MainDll::load(root)
+        .inspect_err(|e| warn!("FFXiMain.dll unreadable under {}: {e}", root.display()))
+        .ok()
+        .map(Arc::new);
+    guard.insert(root.to_path_buf(), loaded.clone());
+    loaded
+}
+
+/// Drop the cached parse of `root` and read it again: a launcher setup or patch
+/// rewrites FFXiMain.dll in place under the same path.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn reload_main_dll_for_root(
+    root: &std::path::Path,
+) -> Option<Arc<ffxi_dat::main_dll::MainDll>> {
+    if let Some(mut guard) = MAIN_DLLS.get().and_then(|cache| cache.lock().ok()) {
+        guard.remove(root);
+    }
+    main_dll_for_root(root)
+}
+
+/// The install `DatRoot::from_env_or_default` would open (same precedence:
+/// `FFXI_DAT_PATH`, then the `FFXI_CLIENT_TARGET` checkout target, then the
+/// checkout default), without opening it: callers that only need the dll must
+/// not pay the VTABLE/FTABLE parse a `DatRoot` costs. kuluu settles the
+/// launcher's choice into `FFXI_DAT_PATH` before any of this runs
+/// (kuluu/src/ffxi_client.rs), so this agrees with the wired `ActionDatRoot`.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn install_root_from_env() -> Option<std::path::PathBuf> {
+    use ffxi_dat::archive::{workspace_default, workspace_target, CLIENT_TARGET_ENV, DAT_PATH_ENV};
+    if let Some(path) = std::env::var_os(DAT_PATH_ENV) {
+        return Some(std::path::PathBuf::from(path));
+    }
+    if let Some(name) = std::env::var_os(CLIENT_TARGET_ENV) {
+        return workspace_target(&name.to_string_lossy());
+    }
+    workspace_default()
+}
+
+/// [`main_dll_for_root`] for [`install_root_from_env`]; the entry point for
+/// code paths that open their `DatRoot` from the environment.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn main_dll_from_env() -> Option<Arc<ffxi_dat::main_dll::MainDll>> {
+    main_dll_for_root(&install_root_from_env()?)
+}
 
 // Both halves of a DAT-root change: the parsed-DAT cache re-keys onto the new install and the
-// dll re-loads from it. The dll is dropped along with the cache rather than kept warm, because
-// it is what turns an action into a *file id* -- serving the previous install's base tables
-// while resolving them through the new root mixes the two installs. Until the new one lands the
-// dispatchers take their existing no-dll paths.
+// dll is re-read from it (its per-root cache entry is evicted first, since a launcher setup or
+// patch rewrites FFXiMain.dll in place under the same path). The dll is what turns an action
+// into a *file id* -- serving the previous install's base tables while resolving them through
+// the new root mixes the two installs -- so until the new one lands the dispatchers take their
+// existing no-dll paths.
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn adopt_action_dat_root(
     root: Res<ActionDatRoot>,
@@ -1302,9 +1367,8 @@ pub(crate) fn adopt_action_dat_root(
 ) {
     cache.adopt_root(root.0.clone());
     let root = root.0.clone();
-    let task = bevy::tasks::AsyncComputeTaskPool::get().spawn(async move {
-        root.and_then(|root| ffxi_dat::main_dll::MainDll::load(root.root()).ok())
-    });
+    let task = bevy::tasks::AsyncComputeTaskPool::get()
+        .spawn(async move { root.and_then(|root| reload_main_dll_for_root(root.root())) });
     commands.remove_resource::<ActionMainDll>();
     commands.insert_resource(ActionMainDllTask(task));
 }
@@ -1320,7 +1384,7 @@ pub(crate) fn poll_action_main_dll(
         return;
     };
     commands.remove_resource::<ActionMainDllTask>();
-    commands.insert_resource(ActionMainDll(dll.map(Arc::new)));
+    commands.insert_resource(ActionMainDll(dll));
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -3821,7 +3885,9 @@ mod tests {
     // ROM/27/82.DAT `hm_s` — the HumeM skeleton, which carries the reaction routines
     // (`damg`/`chit`/`sway`/`gurd`/`pary`).
     const HUME_M_SKELETON_FILE: u32 = 7072;
-    // look_resolver::PC_MODEL_IDS[HumeM][main-hand] base — main-hand weapon model 0.
+    // HumeM main-hand weapon model 0: the FFXiMain.dll equipment lookup row for
+    // race 1 slot 6 (`MainDll::equipment_model_index`), identical on KNOWN_CLIENTS
+    // horizonxi-2023 and retail-2026-09.
     const HUME_M_MAIN_WEAPON_FILE: u32 = 8392;
 
     fn routines_in_file(file_id: u32) -> Option<Vec<Scheduler>> {
@@ -4260,6 +4326,58 @@ mod tests {
     const HUME_MALE_LOOK_RACE: u8 = 1;
     #[cfg(not(target_arch = "wasm32"))]
     const MAIN_DLL_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(10);
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn main_dll_cache_is_one_arc_per_root_and_remembers_an_unreadable_root() {
+        let missing = std::env::temp_dir().join(format!(
+            "kuluu-render-main-dll-missing-{}",
+            std::process::id()
+        ));
+        assert!(main_dll_for_root(&missing).is_none());
+        assert!(main_dll_for_root(&missing).is_none());
+
+        let Some(root) = ffxi_dat::archive::open_test_install() else {
+            return;
+        };
+        let first = main_dll_for_root(root.root()).expect("FFXiMain.dll loads");
+        let again = main_dll_for_root(root.root()).expect("FFXiMain.dll loads");
+        assert!(Arc::ptr_eq(&first, &again), "one load per root");
+
+        let copy =
+            std::env::temp_dir().join(format!("kuluu-render-main-dll-copy-{}", std::process::id()));
+        std::fs::create_dir_all(&copy).expect("temp root");
+        std::fs::copy(root.root().join("FFXiMain.dll"), copy.join("FFXiMain.dll"))
+            .expect("copy FFXiMain.dll");
+        let other = main_dll_for_root(&copy).expect("the copy loads");
+        assert!(
+            !Arc::ptr_eq(&first, &other),
+            "a different root must be a different dll"
+        );
+        assert_eq!(
+            other.base_race_config_index(HUME_MALE_LOOK_RACE),
+            first.base_race_config_index(HUME_MALE_LOOK_RACE)
+        );
+        let _ = std::fs::remove_dir_all(&copy);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn env_install_root_follows_the_dat_path_precedence() {
+        let Some(root) = ffxi_dat::archive::open_test_install() else {
+            return;
+        };
+        let opened = ffxi_dat::DatRoot::from_env_or_default().ok();
+        let Some(opened) = opened else {
+            return;
+        };
+        assert_eq!(
+            install_root_from_env().as_deref(),
+            Some(opened.root()),
+            "the env-resolved root must be the one DatRoot::from_env_or_default opens"
+        );
+        let _ = root;
+    }
 
     // The tables `dispatch_action_started` (weaponskill file ids) and `dispatch_entity_emoted`
     // (emote file ids) read must survive the move off the render thread: what lands in

@@ -41,9 +41,10 @@ pub(crate) const PRINTABLE: std::ops::RangeInclusive<u8> = 0x20..=0x7e;
 // Inline substitution tag: `01 <len> <kind> <data…>` where `len` is the whole
 // tag's byte count and `data` holds `82 <0x80|param>` message-parameter
 // references — the newer FFXiMain tag family POLUtils predates and decodes as
-// garbage. Grammar verified byte-for-byte against the NA install's zone-230
-// DialogTable (ROM/25/39 entries 6428/6434/6437/6440/6446/6447) cross-checked
-// with the LSB messageSpecial call signatures that fill their parameters
+// garbage. Grammar verified byte-for-byte against the zone-230 DialogTable
+// (horizonxi-2023 ROM/25/39 entries 6428/6434/6437/6440/6446/6447;
+// retail-2026-09 carries them 3-5 entries higher) cross-checked with the LSB
+// messageSpecial call signatures that fill their parameters
 // (vendor/server/scripts/globals/npc_util.lua giveKeyItem,
 // vendor/server/scripts/globals/sparkshop.lua YOU_OBTAIN_ITEM(item, count)).
 pub(crate) const CC_INLINE_TAG: u8 = 0x01;
@@ -60,7 +61,7 @@ pub(crate) const INLINE_KIND_NUM2: u8 = 0x04;
 /// Item-name substitutions. The kinds differ only in the grammatical form the
 /// client selects — the surrounding article ("a", "the") and any count come
 /// from separate slots in the entry, so every one of them renders as the plain
-/// item name. Kinds observed across the NA install's zone DialogTables and the
+/// item name. Kinds observed across the horizonxi-2023 zone DialogTables and the
 /// system-message table (ROM/27/76.DAT): 0x23 bare, 0x25 plural, 0x26 after
 /// "the", 0x27 after the a/an article slot, 0x28 after "any", 0x29 counted,
 /// 0x2A counted plural.
@@ -111,8 +112,9 @@ pub fn plain_marker(name: &str) -> String {
     format!("{{{name}}}")
 }
 
-// Emote chat-text control sequences, observed in the NA install's emote
-// DialogTable (ROM/27/70.DAT; see [`EmoteTextDat`]). Each line wraps its slots
+// Emote chat-text control sequences, observed in the emote DialogTable
+// (ROM/27/70.DAT, byte-identical on horizonxi-2023 and retail-2026-09; see
+// [`EmoteTextDat`]). Each line wraps its slots
 // in CC_AUTO (0x7f) sequences the generic decoder only knows as `{Auto:N}`:
 //   7f fc <caster-name slot> 7f fb   — leading caster block
 //   7f 88 01 "[the /]" <target-name slot> — article alternative + target
@@ -238,15 +240,15 @@ pub(crate) fn split_alternative(bytes: &[u8]) -> Option<(&str, &str, usize)> {
 }
 
 /// Entry index for a MesNum: lines come in (targeted, untargeted) pairs —
-/// entry = 2*MesNum + 0 for targeted, +1 for untargeted (verified against the
-/// NA install: 0/1 point, 2/3 bow, 4/5 salute, …).
+/// entry = 2*MesNum + 0 for targeted, +1 for untargeted (verified on
+/// horizonxi-2023 and retail-2026-09: 0/1 point, 2/3 bow, 4/5 salute, …).
 pub fn emote_line_index(mes_num: u16, targeted: bool) -> usize {
     mes_num as usize * 2 + usize::from(!targeted)
 }
 
 /// MesNum 0..=96 (LSB Emote::Point..=Emote::Aim) each carry a
 /// (targeted, untargeted) line pair, so a plausible emote table holds at least
-/// 2*97 entries (the NA install's ROM/27/70.DAT has 198).
+/// 2*97 entries (ROM/27/70.DAT has 198 on horizonxi-2023 and retail-2026-09).
 pub const EMOTE_TABLE_MIN_ENTRIES: usize = 2 * 97;
 
 /// The canned-emote chat-text DialogTable. Located at ROM/27/70.DAT in the NA
@@ -367,6 +369,11 @@ impl StringDat {
     /// XOR-decoded raw bytes of entry `index` (no text interpretation).
     pub fn raw(&self, index: usize) -> Option<&[u8]> {
         self.entries.get(index).map(Vec::as_slice)
+    }
+
+    /// Index of the first entry whose decoded text starts with `prefix`.
+    pub fn first_entry_starting_with(&self, prefix: &str) -> Option<usize> {
+        (0..self.len()).find(|&i| self.text(i).is_some_and(|t| t.starts_with(prefix)))
     }
 
     /// Decode entry `index` to display text: ASCII passthrough, control-code
@@ -749,7 +756,8 @@ mod tests {
 
     #[test]
     fn decodes_inline_substitution_tags() {
-        // Byte-for-byte the NA install's zone-230 DialogTable layouts:
+        // Byte-for-byte the zone-230 DialogTable layouts (horizonxi-2023
+        // ROM/25/39 entries; retail-2026-09 carries them 3-5 entries higher):
         // entry 6437 "Obtained key item: <keyitem>." wraps its tag in a
         // three-byte `7f 80 01` code, entry 6440 "You obtain <n> <item>!"
         // carries a number tag (param 1) and a counted item tag (id param 0).
@@ -833,22 +841,50 @@ mod tests {
         assert_eq!(dat.text(0).as_deref(), Some("#hi"), "kind byte re-renders");
     }
 
-    /// Southern San d'Oria (zone 230) KEYITEM_OBTAINED in the client era this
-    /// repo's default install carries: LSB pinned it at 6437 when its text-id
-    /// sync matched this DAT (LandSandBoat b3af49c62ae2, 2023-05-25,
-    /// scripts/zones/Southern_San_dOria/IDs.lua — every anchor id in that sync
-    /// equals this DAT's physical entry index, confirming ids are identity
-    /// DAT indexes). Newer LSB pins say 6438 because SE later inserted
-    /// entries; that is client-version skew, not an index-base convention.
-    const ZONE230_KEYITEM_OBTAINED_MAY2023: usize = 6437;
     const ZONE230_ID: u16 = 230;
+    const KEYITEM_OBTAINED_PREFIX: &str = "Obtained key item:";
+    /// Southern San d'Oria (zone 230) KEYITEM_OBTAINED per KNOWN_CLIENTS row.
+    /// LSB text ids are identity DAT entry indexes for the client era LSB was
+    /// synced to: the vendored vendor/server/scripts/zones/Southern_San_dOria/IDs.lua
+    /// (CLIENT_VER 30260203_0) pins 6438; horizonxi-2023 sits 1 below it and
+    /// retail-2026-09 4 above (LSB's 30260904_1 sync matches retail-2026-09
+    /// exactly). The index moves between rows because SE inserts dialog
+    /// entries over time — client-build skew, not an index-base convention.
+    const HORIZONXI_2023_KEYITEM_OBTAINED: usize = 6437;
+    const RETAIL_2026_09_KEYITEM_OBTAINED: usize = 6442;
+
+    const MEASURED_KEYITEM_OBTAINED_ROWS: &[(&str, usize)] = &[
+        ("horizonxi-2023", HORIZONXI_2023_KEYITEM_OBTAINED),
+        ("retail-2026-09", RETAIL_2026_09_KEYITEM_OBTAINED),
+    ];
+
+    fn keyitem_obtained_index_for(profile: &str) -> Option<usize> {
+        MEASURED_KEYITEM_OBTAINED_ROWS
+            .iter()
+            .find(|(name, _)| *name == profile)
+            .map(|(_, index)| *index)
+    }
+
+    /// A renamed KNOWN_CLIENTS row would otherwise turn the index pin into a
+    /// silent skip.
+    #[test]
+    fn measured_keyitem_rows_are_known_clients() {
+        for (name, _) in MEASURED_KEYITEM_OBTAINED_ROWS {
+            assert!(
+                crate::client_profile::KNOWN_CLIENTS
+                    .iter()
+                    .any(|k| k.name == *name),
+                "{name} is not a KNOWN_CLIENTS row"
+            );
+        }
+    }
 
     /// Decodes the real zone-230 KEYITEM_OBTAINED entry to the `{KeyItem:0}`
-    /// marker (pre-fix the inline tag leaked as `{Auto:128}3\u{FFFD}`);
-    /// self-skips without game files. The entry's physical index drifts with
-    /// client patch level (SE inserts dialog entries over time), so locate it
-    /// by content in a window around the May-2023 pin instead of asserting
-    /// the exact index.
+    /// marker (pre-fix the inline tag leaked as `{Auto:128}3\u{FFFD}`) and
+    /// pins its physical index for the measured KNOWN_CLIENTS rows. The entry
+    /// is located by content, which is unambiguous: the next entry starting
+    /// with the prefix sits thousands of entries later in every zone table.
+    /// Self-skips without game files.
     #[test]
     fn real_zone230_keyitem_obtained_decodes_marker() {
         let Some(root) = crate::archive::open_test_install() else {
@@ -860,24 +896,32 @@ mod tests {
         let loc = root.resolve(file_id).expect("string DAT resolves");
         let bytes = std::fs::read(loc.path_under(&root)).expect("string DAT readable");
         let dat = StringDat::parse(&bytes).expect("zone 230 dialog table parses");
-        let pin = ZONE230_KEYITEM_OBTAINED_MAY2023;
-        let lo = pin.saturating_sub(256);
-        let hi = pin + 512;
-        let text = (lo..hi.min(dat.len()))
-            .filter_map(|i| dat.text(i))
-            .find(|t| t.contains("Obtained key item:"));
-        let Some(text) = text else {
-            panic!(
-                "no 'Obtained key item:' entry in {lo}..{hi} of a {}-entry table; \
-                 install patch skew beyond the window (pin {pin} holds {:?})",
-                dat.len(),
-                dat.text(pin)
-            );
-        };
+        let index = dat
+            .first_entry_starting_with(KEYITEM_OBTAINED_PREFIX)
+            .unwrap_or_else(|| {
+                panic!(
+                    "no {KEYITEM_OBTAINED_PREFIX:?} entry in a {}-entry table",
+                    dat.len()
+                )
+            });
+        let text = dat.text(index).expect("located entry decodes");
         assert!(
             text.contains(&format!("{{{MARKER_KEY_ITEM}:0}}")),
             "expected a {{KeyItem:0}} marker, got {text:?}"
         );
+        let profile = root.profile().name();
+        match keyitem_obtained_index_for(profile) {
+            Some(expected) => assert_eq!(
+                index,
+                expected,
+                "{profile} zone-230 KEYITEM_OBTAINED index (table has {} entries)",
+                dat.len()
+            ),
+            None => eprintln!(
+                "skipping index pin: client profile {profile} has no measured \
+                 zone-230 KEYITEM_OBTAINED index (located at {index})"
+            ),
+        }
     }
 
     /// Loads a real DialogTable from the retail install when present; self-skips

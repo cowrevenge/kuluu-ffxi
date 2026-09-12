@@ -70,7 +70,8 @@ pub fn carried_by(opcode: u16, offset: u8) -> bool {
 }
 
 /// The zone's fishing-message base, or `None` for a zone LSB declares no
-/// fishing messages for.
+/// fishing messages for. Carries the vendored LSB pin's era: the hypothesis the
+/// landmark reconciliation verifies against the installed DAT, not the authority.
 pub fn zone_offset(zone_id: u16) -> Option<u16> {
     FISHING_ZONE_OFFSET
         .binary_search_by_key(&zone_id, |&(k, _)| k)
@@ -80,6 +81,7 @@ pub fn zone_offset(zone_id: u16) -> Option<u16> {
 
 /// Which fishing message `mes_num` is in `zone_id`, or `None` when it is not a
 /// fishing message at all (any other zone-dialog line, or an unmapped zone).
+/// Same era caveat as [`zone_offset`]: an LSB-pin hypothesis, not the authority.
 pub fn classify(zone_id: u16, mes_num: u16) -> Option<u8> {
     let base = zone_offset(zone_id)?;
     let delta = mes_num.checked_sub(base)?;

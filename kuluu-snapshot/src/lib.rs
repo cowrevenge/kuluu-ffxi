@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 // Tractor offer shown while dead. (Upstream's "v20"; renumbered on merge because our
 // side had already spent 20-22 on zone_generation / untargetable / name_vis.)
 // v22: Entity.name_vis is now Option<u8> — None until a General-block update carries
-// it. The byte rides UPDATE_HP (entity_update.cpp CEntityUpdatePacket::updateWith/:408), not the Position block,
+// it. The byte rides UPDATE_HP (entity_update.cpp CEntityUpdatePacket::updateWith), not the Position block,
 // so a POS-only 0x00E must not clobber the last known value with its zero-filled byte.
 // v21: Entity.char_flags.untargetable — flags1 TargetOffFlag, the server's
 // targetability authority (LSB m_flags FLAG_UNTARGETABLE for NPC/MOB, the explicit
@@ -413,7 +413,7 @@ pub struct Entity {
     pub monstrosity: bool,
 
     /// entity_update byte 0x2B (LSB `namevis`; PosHead `flags3 >> 24`), written
-    /// under UPDATE_HP — vendor/server/src/map/packets/entity_update.cpp CEntityUpdatePacket::updateWith/:408.
+    /// under UPDATE_HP — vendor/server/src/map/packets/entity_update.cpp CEntityUpdatePacket::updateWith.
     /// `None` until the first General-block update carries it; treated as visible,
     /// matching the server's VIS_NONE default (baseentity.cpp CBaseEntity::CBaseEntity). LSB NAMEVIS
     /// (vendor/server/src/map/entities/baseentity.h): 0x01 icon, 0x08 hide-name,

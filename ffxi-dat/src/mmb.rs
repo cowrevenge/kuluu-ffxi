@@ -464,8 +464,8 @@ pub struct MmbModel {
 const VERTEX_STRIDE_PLAIN: usize = 36;
 const VERTEX_STRIDE_VERTEX_BLEND: usize = 48;
 // research/XIClient/src/XIClient/source/World/Zone/Terrain/MeshBlockManager.cpp MeshBlockManager::AddFromData;
-// FFXiMain.dll SHA-256 f4f90fbd080c05448aab3f866b127d7c1675b3cc15c8beaa57bfc584064b7e7c.
-// RVA 0x16D14B reads the type independently of the signature.
+// FFXiMain.dll horizonxi-2023 RVA 0x16D14B / retail-2026-09 RVA 0x16FD9B (`mov eax,[esi+4];
+// and eax,0xff` reads the type byte at section offset 4 without comparing the signature first).
 const MESH_TYPE_OFFSET: usize = 4;
 const MESH_TYPE_STATIC_STRIP: u8 = 1;
 const CONFIG_VERTEX_BLEND: u8 = 2;

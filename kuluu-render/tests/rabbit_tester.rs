@@ -73,7 +73,8 @@ const NOLDA_W: u32 = 9_000_005;
 const BAT_W: u32 = 9_000_006;
 const WALKER_W: u32 = 9_000_007;
 
-// HumeM main-hand weapon model 0 (look_resolver::PC_MODEL_IDS[HumeM][main-hand] base).
+// HumeM main-hand weapon model 0: the first band of the FFXiMain.dll equipment table row 1,
+// main-hand slot (`MainDll::equipment_model_index`), identical on horizonxi-2023 and retail-2026-09.
 const HUME_M_MAIN_WEAPON_FILE: u32 = 8392;
 
 fn install() -> Option<ffxi_dat::DatRoot> {

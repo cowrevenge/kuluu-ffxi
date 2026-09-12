@@ -18,7 +18,9 @@ pub(crate) const CELL_GAP_PX: f32 = 4.0;
 ///
 /// The label is absolutely positioned so an equipped item's icon draws *over*
 /// it rather than beside it — retail keeps the slot name legible under the
-/// icon (retail capture 2026-08-04, HorizonXI /check window).
+/// icon; observed on the horizonxi-2023 client
+/// (.agents/skills/retail-observe/references/vanilla-menu-spec.md,
+/// "`/check` on a player → wares + gear").
 pub(crate) fn spawn_item_cell(
     p: &mut ChildSpawnerCommands,
     frame_marker: impl Bundle,

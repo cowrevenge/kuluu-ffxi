@@ -173,7 +173,7 @@ pub struct Entity {
     pub face_target: u16,
 
     /// entity_update namevis byte (PosHead flags3 top byte), written under
-    /// UPDATE_HP — vendor/server/src/map/packets/entity_update.cpp CEntityUpdatePacket::updateWith/:408 put
+    /// UPDATE_HP — vendor/server/src/map/packets/entity_update.cpp CEntityUpdatePacket::updateWith put
     /// `ref<uint8>(0x2B) = PEntity->namevis` inside `if (updatemask & UPDATE_HP)`.
     /// The packet buffer is zero-filled, so a POS-only update carries no namevis:
     /// `None` until the first General-block update does, preserved across
@@ -1567,7 +1567,7 @@ impl SessionState {
                     // Model-block-gated at the source (char_update.cpp), so merge
                     // like mount_id — never off pos_present.
                     let preserved_monstrosity = entity.monstrosity.or(existing.monstrosity);
-                    // UPDATE_HP-gated at the source (entity_update.cpp CEntityUpdatePacket::updateWith/:408), so
+                    // UPDATE_HP-gated at the source (entity_update.cpp CEntityUpdatePacket::updateWith), so
                     // merge like char_flags — never off pos_present.
                     let preserved_name_vis = entity.name_vis.or(existing.name_vis);
 

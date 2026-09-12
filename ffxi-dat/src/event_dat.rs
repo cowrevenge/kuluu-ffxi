@@ -390,11 +390,20 @@ mod tests {
         assert_eq!(src, EventBlockSource::SoleOwnerElsewhere);
     }
 
-    // Private servers renumber entities relative to the retail DAT, so the
-    // triggering entity can have no block of its own at all. Zone 109 on
-    // HorizonXI dispatches the outpost vendor's 32756 on 0x0106D291, which the
-    // DAT does not script; 0x0106D290 (Tahmasp) is the sole owner. A caller that
-    // gates on block_for_actor before this ladder loses the whole interaction.
+    // Zone 109's event DAT (ROM/20/46.DAT) scripts the outpost vendor event
+    // only on Tahmasp (vendor/server/sql/npc_list.sql row 17224336; the LSB
+    // vendor lua vendor/server/scripts/zones/Pashhow_Marshlands/npcs/Tahmasp.lua
+    // vendorEvent) on both the horizonxi-2023 and retail-2026-09 KNOWN_CLIENTS
+    // rows -- there is no block for PASHHOW_CONQUEST_BANNER, LSB's unique_no
+    // for that entity. A HorizonXI
+    // server (an LSB fork with a renumbered npc_list) was observed sending
+    // OUTPOST_VENDOR_EVENT with unique_no PASHHOW_CONQUEST_BANNER instead, which
+    // the DAT does not script. A caller that gates on block_for_actor before
+    // this ladder loses the whole interaction.
+    const PASHHOW_TAHMASP: u32 = 0x0106_D290;
+    const PASHHOW_CONQUEST_BANNER: u32 = 0x0106_D291;
+    const OUTPOST_VENDOR_EVENT: u16 = 32756;
+
     #[test]
     fn an_actor_with_no_block_of_its_own_still_resolves() {
         let dat = EventDat::parse(&dat_bytes(&[
@@ -404,16 +413,24 @@ mod tests {
                 &[],
                 &[0],
             ),
-            block_bytes(0x0106_D290, &[(32756, 0)], &[], &[0]),
+            block_bytes(PASHHOW_TAHMASP, &[(OUTPOST_VENDOR_EVENT, 0)], &[], &[0]),
         ]))
         .expect("parse");
-        assert_eq!(dat.block_for_actor(0x0106_D291), None, "premise");
+        assert_eq!(
+            dat.block_for_actor(PASHHOW_CONQUEST_BANNER),
+            None,
+            "premise"
+        );
 
-        let (b, src) = dat.block_for_event(0x0106_D291, 32756).expect("sole owner");
-        assert_eq!(b.actor, 0x0106_D290);
+        let (b, src) = dat
+            .block_for_event(PASHHOW_CONQUEST_BANNER, OUTPOST_VENDOR_EVENT)
+            .expect("sole owner");
+        assert_eq!(b.actor, PASHHOW_TAHMASP);
         assert_eq!(src, EventBlockSource::SoleOwnerElsewhere);
 
-        let (b, src) = dat.block_for_event(0x0106_D291, 26).expect("master");
+        let (b, src) = dat
+            .block_for_event(PASHHOW_CONQUEST_BANNER, 26)
+            .expect("master");
         assert_eq!(b.actor, ZONE_PLAYER_ACTOR);
         assert_eq!(src, EventBlockSource::ZoneMasterBlock);
     }

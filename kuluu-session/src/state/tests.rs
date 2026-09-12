@@ -947,7 +947,7 @@ fn entity_upserted_preserves_hp_pct_across_position_only_update() {
 
 #[test]
 fn entity_upserted_name_vis_survives_pos_only_tick() {
-    // #512-4: namevis is written under UPDATE_HP (entity_update.cpp CEntityUpdatePacket::updateWith/:408), and a
+    // #512-4: namevis is written under UPDATE_HP (entity_update.cpp CEntityUpdatePacket::updateWith), and a
     // POS-only 0x00E carries the byte zero-filled. Merging off pos_present would
     // un-hide a hidden entity the moment it moved.
     let mut s = SessionState::default();

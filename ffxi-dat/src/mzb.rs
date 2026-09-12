@@ -1729,7 +1729,7 @@ mod tests {
         assert!(parse_placements(&body, &h).is_err());
     }
 
-    // ZoneRenderer.cpp ZoneRenderer::OpenMzb (quadtree) and :383/:518-523 (light bindings).
+    // ZoneRenderer.cpp ZoneRenderer::OpenMzb (quadtree and light bindings).
     #[test]
     fn header_unions_follow_the_format_version() {
         let mut body = synth_mzb();

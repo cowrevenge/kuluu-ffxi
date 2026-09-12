@@ -3,8 +3,8 @@
 //! Retail draws a fixed-height list of `<icon> <name> ....... <price> G` rows
 //! over a Current Gil box and the focused item's description panel; the gil box
 //! is replaced by the `All ◄ n/max ►` quantity picker while a purchase is being
-//! sized, and the purchase itself is confirmed from a chat prompt
-//! (retail capture 2026-08-04, HorizonXI).
+//! sized, and the purchase itself is confirmed from a chat prompt; observed on
+//! the horizonxi-2023 client.
 //!
 //! Rows come straight from the server's s2c 0x105 packets, one per priced
 //! seller slot; the seller's own bazaar is the authority, so this window only

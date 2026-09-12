@@ -256,6 +256,26 @@ mod tests {
     use super::*;
     use crate::texture::TexFormat;
 
+    const FRAMES_JP: &str = "menu    frames  ";
+    const FRAMES_US: &str = "menu    framesus";
+    const ICON_SHEET_DAT: &str = "ROM/119/51.DAT";
+
+    // Read the bare install file rather than resolving through overlays: the
+    // xiview Pivot overlay ships an hxi-era 51.DAT, which would mask the
+    // install's own sheet.
+    fn read_icon_sheet_unoverlaid(root: &crate::archive::DatRoot) -> Option<Vec<u8>> {
+        match std::fs::read(root.root().join(ICON_SHEET_DAT)) {
+            Ok(bytes) => Some(bytes),
+            Err(e) => {
+                eprintln!(
+                    "SKIP (real-DAT guard): {} has no {ICON_SHEET_DAT}: {e}",
+                    root.root().display()
+                );
+                None
+            }
+        }
+    }
+
     fn name16(s: &str) -> [u8; 16] {
         let mut out = [b' '; 16];
         for (i, b) in s.bytes().take(16).enumerate() {
@@ -460,23 +480,25 @@ mod tests {
 
     // Gated on a retail install (self-skips without one). Pins the parser +
     // texture decode + crop against the real day-of-week orbs, which live in
-    // ROM/119/51.DAT group "menu    framesus" at index 106 + element (the JP
-    // "menu    frames  " is the same group; HorizonXI/US ships only framesus).
+    // ROM/119/51.DAT at index 106 + element. The US sheet names the group
+    // "menu    framesus" (measured on KNOWN_CLIENTS horizonxi-2023 and
+    // retail-2026-09); research/xim UiResourceManager.kt register aliases the
+    // JP "menu    frames  ".
     #[test]
     fn real_dat_day_orbs_extract_14x14() {
         let Some(root) = crate::archive::open_test_install() else {
             return;
         };
-        let Ok(bytes) = std::fs::read(root.root().join("ROM/119/51.DAT")) else {
+        let Some(bytes) = read_icon_sheet_unoverlaid(&root) else {
             return;
         };
-        let Some(group) = find_ui_element_group(&bytes, "menu    framesus") else {
+        let Some(group) = find_ui_element_group(&bytes, FRAMES_US) else {
             return;
         };
         assert!(group.elements.len() > 113, "framesus has the 8 day orbs");
 
         for idx in 106..=113usize {
-            let sprite = ui_sprite(&bytes, "menu    framesus", idx)
+            let sprite = ui_sprite(&bytes, FRAMES_US, idx)
                 .unwrap_or_else(|| panic!("no sprite for framesus[{idx}]"));
             assert_eq!(
                 (sprite.width, sprite.height),
@@ -487,36 +509,74 @@ mod tests {
         }
     }
 
+    // Gated on a retail install (self-skips without one). The US sheet names
+    // the frames group "menu    framesus" and has no JP "menu    frames  "
+    // (measured on KNOWN_CLIENTS horizonxi-2023 and retail-2026-09).
+    #[test]
+    fn real_dat_51_names_the_frames_group_framesus() {
+        let Some(root) = crate::archive::open_test_install() else {
+            return;
+        };
+        let Some(bytes) = read_icon_sheet_unoverlaid(&root) else {
+            return;
+        };
+        assert!(
+            find_ui_element_group(&bytes, FRAMES_US).is_some(),
+            "{}: 51.DAT has no {FRAMES_US:?} group",
+            root.profile()
+        );
+        assert!(
+            find_ui_element_group(&bytes, FRAMES_JP).is_none(),
+            "{}: 51.DAT unexpectedly has a JP {FRAMES_JP:?} group",
+            root.profile()
+        );
+    }
+
     // Gated on a retail install (self-skips without one). Pins the +42 byte as
     // MenuShapeFormat.h's SourceBlendFactor: every quad in the icon sheet decodes
-    // to a valid 0..2 factor, and the counts are the ones measured for kuluu-hjr6.
+    // to a valid 0..2 factor, and the counts are the ones measured per
+    // KNOWN_CLIENTS row.
     #[test]
     fn real_dat_framesus_blend_factor_counts() {
-        const FRAMESUS_QUADS: usize = 2433;
+        const FRAMESUS_QUADS_BY_CLIENT: &[(&str, usize)] =
+            &[("horizonxi-2023", 2433), ("retail-2026-09", 2464)];
         const FRAMESUS_ZERO_SOURCE_QUADS: usize = 163;
 
         let Some(root) = crate::archive::open_test_install() else {
             return;
         };
-        let Ok(bytes) = std::fs::read(root.root().join("ROM/119/51.DAT")) else {
+        assert!(
+            root.profile().is_known(),
+            "install is not in KNOWN_CLIENTS: {}",
+            root.profile()
+        );
+        let client = root.profile().name();
+        let Some(&(_, expected_quads)) = FRAMESUS_QUADS_BY_CLIENT
+            .iter()
+            .find(|(name, _)| *name == client)
+        else {
+            eprintln!("SKIP (real-DAT guard): no framesus quad count measured for {client}");
             return;
         };
-        let Some(group) = find_ui_element_group(&bytes, "menu    framesus") else {
+        let Some(bytes) = read_icon_sheet_unoverlaid(&root) else {
             return;
         };
+        let group = find_ui_element_group(&bytes, FRAMES_US)
+            .unwrap_or_else(|| panic!("{client}: 51.DAT has no {FRAMES_US:?} group"));
 
         let quads: Vec<&UiElementComponent> = group
             .elements
             .iter()
             .flat_map(|e| e.components.iter())
             .collect();
-        assert_eq!(quads.len(), FRAMESUS_QUADS);
+        assert_eq!(quads.len(), expected_quads, "{client}");
         assert_eq!(
             quads
                 .iter()
                 .filter(|c| c.source_blend_factor == BlendFactor::Zero)
                 .count(),
-            FRAMESUS_ZERO_SOURCE_QUADS
+            FRAMESUS_ZERO_SOURCE_QUADS,
+            "{client}"
         );
     }
 }

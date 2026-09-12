@@ -7,8 +7,10 @@ pub const SLOT_NAMES: [&str; 16] = [
     "L.Ear", "R.Ear", "L.Ring", "R.Ring", "Back",
 ];
 
-// The labels retail prints in each equipment cell, under the icon
-// (retail capture 2026-08-04, HorizonXI /check window).
+// The labels retail prints in each equipment cell, under the icon; observed
+// on the horizonxi-2023 client
+// (.agents/skills/retail-observe/references/vanilla-menu-spec.md,
+// "`/check` on a player → wares + gear").
 const SLOT_ABBR: [&str; 16] = [
     "Main", "Sub", "Range", "Ammo", "Head", "Body", "Hands", "Legs", "Feet", "Neck", "Waist",
     "Ear1", "Ear2", "Ring1", "Ring2", "Back",

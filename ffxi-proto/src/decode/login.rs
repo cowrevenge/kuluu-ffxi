@@ -184,7 +184,9 @@ pub struct ZoneInVoyage {
 
 impl ZoneInVoyage {
     // vendor/server/src/map/packets/s2c/0x00a_login.h GP_SERV_COMMAND_LOGIN ShipStart/ShipEnd
-    // FFXiMain.dll (2026-09-09 install) VA 0x100FA0F7 reconstructs end = start + duration.
+    // FFXiMain.dll horizonxi-2023 RVA 0xFA0F7 / retail-2026-09 RVA 0xFB3A7 reconstructs
+    // end = start + duration. LSB leaves ShipStart/ShipEnd zero (vendor/server/src/map/packets/
+    // s2c/0x00a_login.cpp sets neither), so the field is retail-populated only.
     pub fn decode(body: &[u8]) -> Option<Self> {
         const START: usize = 0x74;
         const DURATION: usize = 0x78;

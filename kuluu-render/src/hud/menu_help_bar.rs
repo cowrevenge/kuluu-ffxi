@@ -1,8 +1,8 @@
 //! Retail top menu bar (kuluu-5ndh): whenever a menu is open, a bar spans the
 //! top of the game window — menu title, an inventory used/capacity counter for
 //! item lists, a one-line help string for the highlighted entry, and a "Help"
-//! label at the far right (retail capture 2026-07-19, HorizonXI). The counter is
-//! bag fill, NOT cursor position.
+//! label at the far right; observed on the horizonxi-2023 client. The counter
+//! is bag fill, NOT cursor position.
 
 use bevy::prelude::*;
 
@@ -31,8 +31,8 @@ pub struct MenuHelpPaneSwitch;
 
 const PANE_SWITCH_HINT: &str = "- : page";
 
-// Retail's bazaar window titles the bar itself, not the window
-// (retail capture 2026-08-04, HorizonXI).
+// Retail's bazaar window titles the bar itself, not the window;
+// observed on the horizonxi-2023 client.
 const BAZAAR_TITLE: &str = "Bazaar";
 const BAZAAR_HINT: &str = "Purchase merchandise.";
 
@@ -326,8 +326,8 @@ pub fn update_menu_help_bar(
         InputMode::PassiveCursor(s) if s.focus == PassiveCursorFocus::StatusIcons => {
             (buff_bar_content(&scene.snapshot, s.status_cursor), false)
         }
-        // Retail titles the /check window with the target's name and their jobs
-        // (retail capture 2026-08-04, HorizonXI).
+        // Retail titles the /check window with the target's name and their jobs;
+        // observed on the horizonxi-2023 client.
         InputMode::Check => (
             check.target_id.map(|id| BarContent {
                 title: crate::hud::check_view::target_name(&scene.snapshot, id),

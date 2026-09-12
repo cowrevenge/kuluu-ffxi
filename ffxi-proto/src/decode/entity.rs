@@ -942,7 +942,7 @@ mod char_flags_tests {
     #[test]
     fn mob_m_flags_untargetable_lands_on_target_off() {
         let mut body = vec![0u8; PosHead::SIZE];
-        // vendor/server/src/map/packets/entity_update.cpp CEntityUpdatePacket::updateWith/:387
+        // vendor/server/src/map/packets/entity_update.cpp CEntityUpdatePacket::updateWith
         // `ref<uint32>(0x21) = m_flags` under UPDATE_HP.
         const M_FLAGS_OFFSET: usize = 0x1D;
         body[M_FLAGS_OFFSET..M_FLAGS_OFFSET + 4].copy_from_slice(&0x800u32.to_le_bytes());

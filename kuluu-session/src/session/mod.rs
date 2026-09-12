@@ -256,7 +256,7 @@ pub async fn run(
     let spell_table: Option<std::sync::Arc<ffxi_dat::spell_info::SpellTable>> =
         match cfg.dat_root.clone() {
             Some(root) => tokio::task::spawn_blocking(move || {
-                ffxi_dat::spell_info::SpellTable::open(root.root())
+                ffxi_dat::spell_info::SpellTable::open_from_root(&root)
             })
             .await
             .ok()
@@ -1260,7 +1260,7 @@ fn handle_sub_packet(
                         hp_pct,
                         bt_target_id,
                         face_target: head.facetarget(),
-                        // UPDATE_HP-gated like its neighbours: entity_update.cpp CEntityUpdatePacket::updateWith/:408
+                        // UPDATE_HP-gated like its neighbours: entity_update.cpp CEntityUpdatePacket::updateWith
                         // write byte 0x2B only inside `if (updatemask & UPDATE_HP)`, and the
                         // packet buffer is zero-filled, so a POS-only update carries no namevis.
                         name_vis: (send_flag & UPDATE_HP != 0).then_some((head.flags3 >> 24) as u8),
@@ -4767,6 +4767,8 @@ fn emit_zone_message_chat(
 /// pushes this TALKNUM immediately before 0x115, so the mini-game bar is
 /// labelled by the time it appears
 /// (vendor/server/src/map/utils/fishingutils.cpp `SendHookResponse`).
+/// Carries the vendored LSB pin's message-id era; only a degrade path for when
+/// the installed dialog DAT cannot be reconciled against that era.
 fn hooked_fish_size(zone_id: u16, mes_num: u16) -> Option<crate::state::FishSize> {
     ffxi_proto::fishing_messages::classify(zone_id, mes_num).and_then(fish_size_of_offset)
 }
@@ -6102,7 +6104,7 @@ fn is_no_speaker_chat_kind(kind: u8) -> bool {
 // (vendor/server/src/map/lua/lua_baseentity.cpp CLuaBaseEntity::customMenu customMenu +
 // luautils.cpp SetCustomMenuContext). The reply round-trips as a
 // `_CUSTOM_MENU` tell the server routes to HandleCustomMenu
-// (0x0b6_chat_name.cpp GP_CLI_COMMAND_CHAT_NAME::process-:82).
+// (0x0b6_chat_name.cpp GP_CLI_COMMAND_CHAT_NAME::process).
 const CUSTOM_MENU_SENDER: &str = "_CUSTOM_MENU";
 const MESSAGE_GMPROMPT: u8 = 12; // vendor/server/src/map/enums/chat_message_type.h
                                  // HandleCustomMenu (luautils.cpp) extracts the result after this marker and

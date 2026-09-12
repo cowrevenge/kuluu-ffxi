@@ -1,5 +1,6 @@
 use crate::datid::DatId;
 
+// research/xim resource/SkeletonSection.kt StandardPosition
 pub mod standard_position {
     pub const ABOVE_HEAD: usize = 2;
     pub const RIGHT_FOOT: usize = 8;

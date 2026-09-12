@@ -1249,17 +1249,12 @@ fn talknumwork_resolves_key_item_marker_from_zone_text() {
     assert_eq!(line.sender, "");
 }
 
-/// Zone-230 KEYITEM_OBTAINED for the client era LSB's text-id sync matched —
-/// LSB text ids are identity DAT entry indexes (LandSandBoat b3af49c62ae2
-/// IDs.lua pinned 6437; newer pins say 6438 only because SE inserted entries
-/// in later clients — see ffxi-dat
-/// dmsg::tests::real_zone230_keyitem_obtained_decodes_marker). The physical
-/// index drifts per install (retail and HorizonXI sit at different patch
-/// levels), so it anchors a search window rather than being asserted.
-const ZONE230_KEYITEM_OBTAINED_MAY2023: u16 = 6437;
-const ZONE230_KEYITEM_SEARCH_BELOW: u16 = 256;
-const ZONE230_KEYITEM_SEARCH_ABOVE: u16 = 512;
+/// Zone-230 KEYITEM_OBTAINED is located by content: LSB text ids are identity
+/// DAT entry indexes, but the physical index moves with the client build
+/// (horizonxi-2023 6437, retail-2026-09 6442 — pinned per KNOWN_CLIENTS row in
+/// ffxi-dat dmsg::tests::real_zone230_keyitem_obtained_decodes_marker).
 const ZONE230_KEYITEM_OBTAINED_PREFIX: &str = "Obtained key item:";
+const ZONE230: u16 = 230;
 
 fn test_dat_root() -> Option<ffxi_dat::DatRoot> {
     if let Ok(root) = ffxi_dat::DatRoot::from_env() {
@@ -1282,27 +1277,26 @@ fn talknumwork_composes_real_keyitem_line_from_zone_dat() {
         eprintln!("skipping: no FFXI install");
         return;
     };
+    let file_id = ffxi_dat::zone_dat::zone_id_to_string_file_id(ZONE230)
+        .expect("zone 230 has a string DAT mapping");
+    let loc = root.resolve(file_id).expect("string DAT resolves");
+    let bytes = std::fs::read(loc.path_under(&root)).expect("string DAT readable");
+    let dat = ffxi_dat::dmsg::StringDat::parse(&bytes).expect("zone 230 dialog table parses");
+    let index = dat
+        .first_entry_starting_with(ZONE230_KEYITEM_OBTAINED_PREFIX)
+        .unwrap_or_else(|| {
+            panic!(
+                "no {ZONE230_KEYITEM_OBTAINED_PREFIX:?} entry in a {}-entry table",
+                dat.len()
+            )
+        });
+    let index = u16::try_from(index).expect("dialog index fits a MesNum");
     let mut ds =
         crate::event_dialog::DialogSession::new(Some(std::sync::Arc::new(root)), "Tester".into());
-    assert!(
-        ds.zone_text(230, ZONE230_KEYITEM_OBTAINED_MAY2023 as usize)
-            .is_some(),
-        "zone 230 string DAT must load"
-    );
-    let lo = ZONE230_KEYITEM_OBTAINED_MAY2023.saturating_sub(ZONE230_KEYITEM_SEARCH_BELOW);
-    let hi = ZONE230_KEYITEM_OBTAINED_MAY2023 + ZONE230_KEYITEM_SEARCH_ABOVE;
-    let found = (lo..hi).find_map(|i| {
-        let text = ds.zone_text(230, i as usize)?;
-        text.starts_with(ZONE230_KEYITEM_OBTAINED_PREFIX)
-            .then_some((i, text))
-    });
-    let Some((index, zone_text)) = found else {
-        panic!(
-            "no {ZONE230_KEYITEM_OBTAINED_PREFIX:?} entry in {lo}..{hi}; \
-             install patch skew beyond the window ({ZONE230_KEYITEM_OBTAINED_MAY2023} holds {:?})",
-            ds.zone_text(230, ZONE230_KEYITEM_OBTAINED_MAY2023 as usize)
-        );
-    };
+    let zone_text = ds
+        .zone_text(ZONE230, usize::from(index))
+        .expect("zone 230 string DAT must load");
+    assert!(zone_text.starts_with(ZONE230_KEYITEM_OBTAINED_PREFIX));
     let line = zone_message_chat_line(
         &tnw(index | decode::MESNUM_HIDE_NAME_FLAG, [1, 0, 0, 0], ""),
         Some(zone_text),
@@ -1550,6 +1544,9 @@ fn talknumwork2_substitutes_the_caught_item() {
 fn ferry_fishing_chat_replays_reported_catches_with_installed_dat() {
     const FERRY_ZONE: u16 = 220;
     const REPORTED_CATCH: u16 = 7288;
+    // The capture's server sat at an era no LSB pin matches: zone 220's
+    // fishing base is 7241 on horizonxi-2023, 7254 on retail-2026-09 and
+    // 7250 in the pinned LSB, so the base has to be learned from the wire.
     const SERVER_BASE: u16 = 7249;
     const NUM1_START: usize = 12;
     const STRING1_START: usize = 28;
@@ -1858,10 +1855,23 @@ fn event_0x034_extracts_nums_and_param_block() {
     assert_eq!(d.nums[1], 1234);
 }
 
-// The conquest outpost vendor: LSB's conquest.lua canPurchaseItem calls
-// startEvent(32756, nation, fee, 0, fee, getCP(), 0, 0, 0), packed into
-// num[0..7] by 0x034_eventnum.cpp GP_SERV_COMMAND_EVENTNUM::GP_SERV_COMMAND_EVENTNUM. Dropping those on the floor leaves
-// every {Num:N} marker in the vendor dialog unresolved (kuluu-fldn).
+/// A HorizonXI server's renumbered id for the Pashhow Marshlands outpost
+/// vendor; LSB's vendor/server/sql/npc_list.sql has Tahmasp at 0x0106D290.
+const PASHHOW_CONQUEST_BANNER: u32 = 0x0106_D291;
+const PASHHOW_CONQUEST_BANNER_ACT_INDEX: u16 = 657;
+const PASHHOW_ZONE: u16 = 109;
+/// Tahmasp's vendorEvent in
+/// vendor/server/scripts/zones/Pashhow_Marshlands/npcs/Tahmasp.lua, dispatched
+/// by vendor/server/scripts/globals/conquest.lua xi.conquest.vendorOnTrigger.
+const OUTPOST_VENDOR_EVENT: u16 = 32756;
+/// The vendor dialog reads its strings from Southern San d'Oria's table.
+const OUTPOST_VENDOR_TEXT_ZONE: u16 = 230;
+
+// The conquest outpost vendor: LSB's conquest.lua xi.conquest.vendorOnTrigger
+// calls startEvent(OUTPOST_VENDOR_EVENT, nation, fee, 0, fee, getCP(), 0, 0, 0),
+// packed into num[0..7] by 0x034_eventnum.cpp
+// GP_SERV_COMMAND_EVENTNUM::GP_SERV_COMMAND_EVENTNUM. Dropping those on the
+// floor leaves every {Num:N} marker in the vendor dialog unresolved.
 #[test]
 fn event_trigger_0x034_carries_params_and_the_redirected_text_table() {
     const NATION: i32 = 1;
@@ -1869,14 +1879,14 @@ fn event_trigger_0x034_carries_params_and_the_redirected_text_table() {
     const CP: i32 = 4200;
 
     let mut data = vec![0u8; 48];
-    data[0..4].copy_from_slice(&0x0106_D291u32.to_le_bytes());
+    data[0..4].copy_from_slice(&PASHHOW_CONQUEST_BANNER.to_le_bytes());
     data[4..8].copy_from_slice(&NATION.to_le_bytes());
     data[8..12].copy_from_slice(&FEE.to_le_bytes());
     data[20..24].copy_from_slice(&CP.to_le_bytes());
-    data[36..38].copy_from_slice(&657u16.to_le_bytes());
-    data[38..40].copy_from_slice(&109u16.to_le_bytes());
-    data[40..42].copy_from_slice(&32756u16.to_le_bytes());
-    data[44..46].copy_from_slice(&230u16.to_le_bytes());
+    data[36..38].copy_from_slice(&PASHHOW_CONQUEST_BANNER_ACT_INDEX.to_le_bytes());
+    data[38..40].copy_from_slice(&PASHHOW_ZONE.to_le_bytes());
+    data[40..42].copy_from_slice(&OUTPOST_VENDOR_EVENT.to_le_bytes());
+    data[44..46].copy_from_slice(&OUTPOST_VENDOR_TEXT_ZONE.to_le_bytes());
 
     let sub = framing::SubPacket {
         opcode: ffxi_proto::map::s2c::EVENTNUM,
@@ -1884,14 +1894,17 @@ fn event_trigger_0x034_carries_params_and_the_redirected_text_table() {
         data: &data,
     };
     let t = event_trigger(&sub).expect("trigger");
-    assert_eq!(t.unique_no, 0x0106_D291);
-    assert_eq!(t.act_index, 657);
+    assert_eq!(t.unique_no, PASHHOW_CONQUEST_BANNER);
+    assert_eq!(t.act_index, PASHHOW_CONQUEST_BANNER_ACT_INDEX);
     assert_eq!(
-        t.event_id, 32756,
+        t.event_id, OUTPOST_VENDOR_EVENT,
         "EventPara is the script id, not EventNum"
     );
-    assert_eq!(t.event_zone, 109);
-    assert_eq!(t.text_zone, 230, "EventNum2 redirects the string table");
+    assert_eq!(t.event_zone, PASHHOW_ZONE);
+    assert_eq!(
+        t.text_zone, OUTPOST_VENDOR_TEXT_ZONE,
+        "EventNum2 redirects the string table"
+    );
     assert_eq!(t.params[0], NATION);
     assert_eq!(t.params[1], FEE);
     assert_eq!(t.params[4], CP);
@@ -3080,7 +3093,7 @@ fn abil_recast_decodes_running_timers() {
     assert_eq!(recasts.len(), 1);
     assert_eq!(recasts[0].0, 5);
     // Expiry must be stamped with recast_now_unix() — the clock every consumer
-    // (gate + display) reads (kuluu-t815).
+    // (gate + display) reads.
     assert!(recasts[0].1 >= before + TIMER_SECS as u32);
     assert!(recasts[0].1 <= after + TIMER_SECS as u32);
 }

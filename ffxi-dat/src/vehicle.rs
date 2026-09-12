@@ -45,8 +45,8 @@ pub fn collision_mzb_index(bytes: &[u8]) -> Option<usize> {
         })
 }
 
-// FFXiMain.dll SHA-256 f4f90fbd080c05448aab3f866b127d7c1675b3cc15c8beaa57bfc584064b7e7c.
-// Transport resource loader RVA 0xC3330.
+// FFXiMain.dll horizonxi-2023 RVA 0xC3330 / retail-2026-09 RVA 0xC43C0: transport resource
+// loader adds TRANSPORT_FILE_BASE to the selector before the resource lookup.
 const TRANSPORT_FILE_BASE: u32 = 0x791C;
 pub fn transport_file_id(selector: u32) -> Option<u32> {
     TRANSPORT_FILE_BASE.checked_add(selector)
@@ -175,8 +175,8 @@ pub struct VoyageRoute {
 }
 
 impl VoyageRoute {
-    // FFXiMain.dll SHA-256 f4f90fbd080c05448aab3f866b127d7c1675b3cc15c8beaa57bfc584064b7e7c.
-    // RVA 0x54BB0 builds position and facing splines.
+    // FFXiMain.dll horizonxi-2023 RVA 0x54BB0 / retail-2026-09 RVA 0x55780 builds position
+    // and facing splines.
     pub fn parse(body: &[u8]) -> Option<Self> {
         const HEADER_LEN: usize = 32;
         const COUNT_OFFSET: usize = 16;

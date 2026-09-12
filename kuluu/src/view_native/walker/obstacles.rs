@@ -10,9 +10,10 @@ use kuluu_render::{
 };
 use kuluu_snapshot::{Entity as WireEntity, EntityLook};
 
-// FFXiMain.dll SHA-256 f4f90fbd080c05448aab3f866b127d7c1675b3cc15c8beaa57bfc584064b7e7c.
-// DoorOpen RVA 0xAC5E0 / DoorClose RVA 0xAC670 toggle RID collision through RVA 0x177F20
-// independently of visual schedulers.
+// FFXiMain.dll DoorOpen horizonxi-2023 RVA 0xAC5E0 / retail-2026-09 RVA 0xAD1E0 and DoorClose
+// horizonxi-2023 RVA 0xAC670 / retail-2026-09 RVA 0xAD270 toggle RID collision through the RID
+// flag setter horizonxi-2023 RVA 0x177F20 / retail-2026-09 RVA 0x17AC40 independently of visual
+// schedulers.
 fn rid_door_closed(rect: &ZoneInteraction, entities: &[WireEntity]) -> bool {
     !entities.iter().any(|entity| {
         matches!(entity.look, Some(EntityLook::Door { door_id: Some(id), .. })

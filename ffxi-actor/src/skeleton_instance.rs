@@ -294,9 +294,9 @@ fn update_with_parent_override(
     }
 }
 
-// FFXiMain.dll 0x1002b9a0 (SHA256 f4f90fbd080c05448aab3f866b127d7c1675b3cc15c8beaa57bfc584064b7e7c),
-// corroborated by research/XIClient/src/XIClient/source/World/Model/ModelInstance.cpp:
-// locator 2 bypasses animated bones and facing. Scale is in DAT axes (retail Model.Scale.x,z,y).
+// FFXiMain.dll horizonxi-2023 RVA 0x2B9A0 / retail-2026-09 RVA 0x2C400: locator 2 bypasses
+// animated bones and facing; scale is in DAT axes (Model.Scale.x,z,y). Corroborated by
+// research/XIClient/src/XIClient/source/World/Model/ModelInstance.cpp GetLocatorWorldPosition.
 pub fn nameplate_locator_offset(skeleton: &Skeleton, dat_axis_scale: Vec3) -> Option<Vec3> {
     let reference = skeleton.reference_at(ffxi_dat::skel::standard_position::ABOVE_HEAD)?;
     let offset = arr3(reference.position_offset) * dat_axis_scale;
@@ -874,8 +874,8 @@ mod tests {
         assert!(standard_joint_world_position(&world, &s, 5).is_none());
     }
 
-    // Ring geometry transcribed from the retail HumeM skeleton (ROM/27/82.DAT `hm_s`, dumped
-    // 2026-09-09), as posed positions rather than raw offsets so the fixture root can stay
+    // Ring geometry transcribed from the retail HumeM skeleton (ROM/27/82.DAT directory `hm_s`,
+    // skeleton `hum_`), as posed positions rather than raw offsets so the fixture root can stay
     // unrotated: references 13..20 are filed on joint 0 around a torso-sized, front/back-
     // asymmetric ellipse 1.1 above the root (pose space is -Y up), and 49..53 carry a zero
     // offset there. `real_dat_retail_skeleton_resolves_the_nearest_joint_selector_onto_its_ring`
@@ -1012,7 +1012,8 @@ mod tests {
     // skeleton, posed, must put a j1=49 attach (the ROM/0/0.DAT hit sparks g010/g011/g013) on the
     // ring point nearest the attacker -- never at the actor root, which is what reference 49's own
     // table entry resolves to.
-    // ROM/27/82.DAT `hm_s`, the same skeleton kuluu-render's melee-hit-chain test walks.
+    // ROM/27/82.DAT directory `hm_s`, skeleton `hum_`, the same skeleton kuluu-render's
+    // melee-hit-chain test walks.
     const HUME_M_SKELETON_FILE: u32 = 7072;
 
     #[test]

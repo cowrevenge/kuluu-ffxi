@@ -1,7 +1,9 @@
 //! The /check window for a PC target. Retail draws a compact window — a 4x4
 //! equipment grid over a View Wares entry — with the target's name and jobs in
-//! the top menu bar and the focused slot's item card in a panel underneath
-//! (retail capture 2026-08-04, HorizonXI).
+//! the top menu bar and the focused slot's item card in a panel underneath;
+//! observed on the horizonxi-2023 client
+//! (.agents/skills/retail-observe/references/vanilla-menu-spec.md,
+//! "`/check` on a player → wares + gear").
 //!
 //! The grid layout is [`equipment_screen::EQUIP_GRID`] — the same one our own
 //! Equipment window uses, since both windows show the same 16 SAVE_EQUIP_KIND
@@ -464,8 +466,10 @@ fn role_value(
     }
 }
 
-/// `Lv.75 Black Mage / Lv.37 White Mage` — retail levels both jobs and spaces
-/// the separator (retail capture 2026-08-04, HorizonXI).
+/// `Lv.75 Black Mage / Lv.37 White Mage` — the `Lv.N Job` form is recorded in
+/// .agents/skills/retail-observe/references/vanilla-menu-spec.md
+/// ("`/check` on a player → wares + gear"); the ` / Lv.M Sub` half and its
+/// spacing were observed on the horizonxi-2023 client.
 pub fn job_ribbon(check: Option<&kuluu_snapshot::CheckResult>) -> String {
     let job_name = |id: u8| ffxi_vocab::job_names::lookup(u16::from(id)).unwrap_or("Adventurer");
     match check {

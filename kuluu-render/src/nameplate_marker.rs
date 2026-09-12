@@ -142,7 +142,7 @@ pub fn nameplate_markers(entity: &Entity) -> Vec<u8> {
 ///   (`AUDIT_130.BIT_22`) ride only s2c 0x067 RecvActorSupplement, which LSB does
 ///   not implement — dead on this wire.
 /// - The 0xA2/0xB1 bazaar check reads `AUDIT_130.BIT_20`, which the client sets
-///   only in the 0x00E NPC path (research/XIClient/src/XIClient/source/Game/Net/Packets/s2c/0x00E.cpp ActorTelemetry::IsOnChair/:305);
+///   only in the 0x00E NPC path (research/XIClient/src/XIClient/source/Game/Net/Packets/s2c/0x00E.cpp ActorTelemetry::IsOnChair);
 ///   the PC bazaar is `AUDIT_128.BIT_9` → glyph 0x9C, which we do draw.
 /// - The campaign special markers (glyphs 0xC8-0xCB/0xCD via
 ///   `GetSpecialActorNameMarker`, keyed off Flags4 bits 2-5) are not decodable:

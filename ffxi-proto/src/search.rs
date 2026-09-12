@@ -535,10 +535,12 @@ mod tests {
         assert_eq!(rd_u32(&more, AH_LIST_PARAMS_OFFSET), SORT_NAME);
     }
 
-    /// Reusing one client key across a connection's requests keeps both sides'
-    /// key state identical, so later pages still decrypt — changing it
-    /// mid-connection made HorizonXI's next response fail the integrity check
-    /// (observed 2026-08-05).
+    /// LSB evolves `SearchHandler::key` in place across a connection
+    /// (`vendor/server/src/search/search_handler.cpp` `SearchHandler::decrypt`);
+    /// splicing a fresh key into a follow-up page made the next response fail
+    /// the client-side integrity hash check (`SearchError::BadHash` here;
+    /// `.agents/skills/retail-observe/references/auction-house.md`,
+    /// "One client key per connection").
     #[test]
     fn repeated_requests_under_one_client_key_hold_key_state_steady() {
         let mut client = SearchCrypto::new();

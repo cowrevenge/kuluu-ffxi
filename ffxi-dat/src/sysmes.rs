@@ -3,17 +3,17 @@
 //!
 //! Same container format as [`crate::dmsg::StringDat`]; what differs is the
 //! control-code grammar, which carries substitution slots the zone dialog
-//! tables do not use. Located at `ROM/27/76.DAT` in the NA install (empirical —
-//! found by scanning for the pool wording, like the emote table next to it at
-//! `ROM/27/70.DAT`), so [`SysMesDat::open`] validates the shape rather than
-//! trusting the path: entry 262 of a real table is the untranslated placeholder
-//! `sysmes262`.
+//! tables do not use. Located at `ROM/27/76.DAT` on both the horizonxi-2023
+//! and retail-2026-09 KNOWN_CLIENTS rows (empirical — found by scanning for the
+//! pool wording, like the emote table next to it at `ROM/27/70.DAT`), so
+//! [`SysMesDat::open`] validates the shape rather than trusting the path: entry
+//! 262 of a real table is the untranslated placeholder `sysmes262`.
 //!
 //! Composition returns spans, not a flat string, because retail colours the
 //! item-name substitution differently from the text around it — "You find a
 //! [pair of bounding boots] on Leaping Lizzy." renders the bracketed item green
-//! against white (retail screenshots, 2026-08-03; see
-//! `.agents/skills/retail-observe/references/`).
+//! against white (`.agents/skills/retail-observe/references/treasure-pool-chat.md`,
+//! "What the screenshots show").
 
 use crate::dmsg::{
     self, parse_inline_tag, split_alternative, StringDat, ALT_OPEN, CC_AUTO, CC_INLINE_TAG,
@@ -152,7 +152,9 @@ impl SysMesDat {
     }
 }
 
-/// Indices of the treasure-pool messages, read out of the NA install's table.
+/// Indices of the treasure-pool messages, read out of `ROM/27/76.DAT`; the
+/// horizonxi-2023 and retail-2026-09 tables both hold 326 entries and differ
+/// only at entry 317, so the indexes hold on either row.
 /// The client picks between the pairs by packet flags: `IsContainer` selects
 /// [`FIND_IN`] over [`FIND_ON`], and a zero `LootUniqueNo`/`EntryUniqueNo`
 /// selects the first-person wording (research/XiPackets/world/server/0x00D3).

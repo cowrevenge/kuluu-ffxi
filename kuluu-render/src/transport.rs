@@ -16,8 +16,9 @@ use std::collections::HashMap;
 
 use ffxi_vocab::transport::MODEL_SHIP;
 
-// FFXiMain.dll SHA-256 f4f90fbd080c05448aab3f866b127d7c1675b3cc15c8beaa57bfc584064b7e7c.
-// RVA 0x96E90 maps ship animations to seq0..seq7.
+// FFXiMain.dll horizonxi-2023 RVA 0x96E90 / retail-2026-09 RVA 0x97A80 indexes the actor's
+// animation number into an .rdata 4CC table (horizonxi-2023 RVA 0x3292B4 / retail-2026-09
+// RVA 0x32D42C) whose entries 18..25 read seq0..seq7.
 const FIRST_SHIP_ANIMATION: u8 = 18;
 const SHIP_ANIMATION_COUNT: u8 = 8;
 const PATH_FORWARD: u32 = 8;
@@ -164,8 +165,9 @@ fn transport_pose(
     position.map(|p| (p, yaw))
 }
 
-// FFXiMain.dll SHA-256 f4f90fbd080c05448aab3f866b127d7c1675b3cc15c8beaa57bfc584064b7e7c.
-// Point-list motion task RVA 0x5DCC0.
+// FFXiMain.dll horizonxi-2023 RVA 0x5DCC0 / retail-2026-09 RVA 0x5E890: point-list motion
+// task ctor. Its easing switch (sin, 1-cos, half-sin, cos-blend) is horizonxi-2023 RVA 0x54F00
+// / retail-2026-09 RVA 0x55AD0.
 fn eased_progress(t: f32, mode: u32) -> f32 {
     match mode {
         1 => (t * std::f32::consts::FRAC_PI_2).sin(),
@@ -182,8 +184,9 @@ struct TransportPlayback {
 }
 
 impl TransportPlayback {
-    // FFXiMain.dll SHA-256 f4f90fbd080c05448aab3f866b127d7c1675b3cc15c8beaa57bfc584064b7e7c.
-    // RVA 0x96E90.
+    // FFXiMain.dll horizonxi-2023 RVA 0x96E90 / retail-2026-09 RVA 0x97A80 hands (start, now)
+    // frames to the seek routine at horizonxi-2023 RVA 0xC36A0 / retail-2026-09 RVA 0xC4730
+    // whose `cmp eax, 0x258` is SEEK_THRESHOLD_FRAMES.
     fn elapsed(&mut self, animation: u8, start: Option<u32>, frames: f32) -> f32 {
         const SEEK_THRESHOLD_FRAMES: f32 = 600.0;
         let key = Some((animation, start));

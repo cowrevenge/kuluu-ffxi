@@ -161,8 +161,9 @@ fn modulate_dxt3_ui_alpha(sprite: &mut UiSprite, vertex_alpha: f32) {
     }
 }
 
-// HorizonXI/US ships "menu    framesus" where the JP client uses
-// "menu    frames  "; XIM aliases the two (UiResourceManager.kt register).
+// The US sheet names the group "menu    framesus" (measured on KNOWN_CLIENTS
+// horizonxi-2023 and retail-2026-09); research/xim UiResourceManager.kt
+// register aliases the JP "menu    frames  ".
 fn resolve_sprite(bytes: &[u8], group: &str, index: usize) -> Option<UiSprite> {
     ui_sprite(bytes, group, index).or_else(|| {
         if group == FRAMES_JP {

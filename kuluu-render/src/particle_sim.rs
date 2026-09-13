@@ -283,6 +283,9 @@ struct LiveGenerator {
     // Key of the last BUILT mesh (spawn writes `empty_mesh`, hence `MeshKey::Empty`), so
     // quantization error is bounded by one quantum and never accumulates across skipped frames.
     built_key: MeshKey,
+    // `template_bound_radius`, resolved once at spawn: the unscaled radius of the widest
+    // template/flipbook frame, which `generator_bounds` scales per particle.
+    bound_radius: f32,
 }
 
 // The count scale for a generator outside retail's `taew` container: its authored count, as is.
@@ -535,7 +538,7 @@ pub fn spawn_particle_generators(
                 Visibility::default(),
                 // The mesh is rebuilt in place every frame; Bevy computes a frustum-culling Aabb
                 // once from the initially-empty mesh and never recomputes it, so the entity would
-                // be culled forever. Opt out of culling instead.
+                // be culled forever. Opt out, and let `sync_particle_meshes` own the draw gate.
                 bevy::camera::visibility::NoFrustumCulling,
                 bevy::light::NotShadowCaster,
                 bevy::light::NotShadowReceiver,
@@ -560,6 +563,7 @@ pub fn spawn_particle_generators(
             alpha: resolve(def.alpha_track),
             tod_color: resolve_tod_tracks(&def, assets),
             solid_mesh: is_solid_mesh(&template),
+            bound_radius: template_bound_radius(&template, &sprite_frames),
             template,
             draw_path: D3mDrawPath::D3m,
             sprite_frames,
@@ -658,6 +662,7 @@ pub fn spawn_actor_auto_run_particles(
                 alpha: resolve(def.alpha_track),
                 tod_color: resolve_tod_tracks(&def, &fx.assets),
                 solid_mesh: is_solid_mesh(&template),
+                bound_radius: template_bound_radius(&template, &sprite_frames),
                 template,
                 draw_path: D3mDrawPath::D3m,
                 sprite_frames,
@@ -734,6 +739,7 @@ pub fn spawn_zone_particle_generator(
         alpha: resolve(def.alpha_track),
         tod_color: def.tod_color_tracks.map(|id| keyframe(assets, global, id)),
         solid_mesh: is_solid_mesh(&template),
+        bound_radius: template_bound_radius(&template, &sprite_frames),
         template,
         draw_path,
         sprite_frames,
@@ -976,11 +982,16 @@ fn trace_particle_rebuilds() -> bool {
 pub struct RebuildTrace {
     since_secs: f32,
     per_generator: std::collections::HashMap<String, (u32, usize)>,
+    gated: u32,
 }
 
 pub fn sync_particle_meshes(
-    cam: Query<&GlobalTransform, With<OperatorCamera>>,
+    cam: Query<
+        (&GlobalTransform, Option<&bevy::camera::primitives::Frustum>),
+        With<OperatorCamera>,
+    >,
     q_mesh_xf: Query<&GlobalTransform, With<Mesh3d>>,
+    mut q_vis: Query<&mut Visibility, With<Mesh3d>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut sim: ResMut<ParticleSimulator>,
     mut commands: Commands,
@@ -988,7 +999,9 @@ pub fn sync_particle_meshes(
     draw: Option<Res<crate::dat_mzb::DrawDistance>>,
     mut trace: Local<RebuildTrace>,
 ) {
-    let cam_xf = cam.iter().next().copied().unwrap_or_default();
+    let cam_xf = cam.iter().next().map(|(xf, _)| *xf).unwrap_or_default();
+    let frusta: Vec<&bevy::camera::primitives::Frustum> =
+        cam.iter().filter_map(|(_, f)| f).collect();
     let (cam_rot, cam_pos) = (cam_xf.rotation(), cam_xf.translation());
     // XiZone::GetDrawDistance, the band a 0x0A block with no authored maximum falls back to.
     let zone_draw = draw
@@ -1050,21 +1063,55 @@ pub fn sync_particle_meshes(
                 g.def.attach_type,
             );
         }
+        // Simulation is deliberately NOT gated: `advance_generator` keeps running for every
+        // generator, so a fountain is in the state it would have had when the camera comes back.
+        // Only the mesh write and the draw submission are skipped.
+        //
+        // The bounds drive `Visibility` rather than a published `Aabb` for stock culling, for two
+        // reasons an Aabb cannot meet: the mesh is written here in Update while stock
+        // check_visibility runs in PostUpdate, so an Aabb-culled generator re-entering the frustum
+        // would be drawn one frame with last-visible geometry; and an auto-run generator entity is
+        // a child of the actor root, where kuluu/src/view_native/walker/obstacles.rs
+        // snapshot_mob_block_radius consumes the first descendant Aabb as the mob block radius.
+        // No operator camera at all gates nothing: the launcher backdrop camera is marked
+        // `BackdropCamera`, so behind the character-select screen `frusta` is empty.
+        let drawable = g.camera_relative
+            || frusta.is_empty()
+            || generator_bounds(g, &clock).is_some_and(|b| {
+                // bevy_camera visibility check_visibility_cpu_culling's own call shape: the near
+                // plane culls, the far plane does not (reverse-z infinite perspective).
+                frusta
+                    .iter()
+                    .any(|f| f.intersects_obb(&b, &entity_xf.affine(), true, false))
+            });
+        if let Ok(mut v) = q_vis.get_mut(g.entity) {
+            v.set_if_neq(if drawable {
+                Visibility::Inherited
+            } else {
+                Visibility::Hidden
+            });
+        }
         let view = CameraView { rot, pos: cam_pos };
-        let key = mesh_key(g, view, &clock);
-        if needs_rebuild(&g.built_key, &key) {
-            if let Some(mut mesh) = meshes.get_mut(&g.mesh) {
-                rebuild_mesh(g, view, &clock, &mut mesh);
-                g.built_key = key;
-                if trace_rebuilds {
-                    let row = trace
-                        .per_generator
-                        .entry(String::from_utf8_lossy(&g.def.mesh_id).into_owned())
-                        .or_default();
-                    row.0 += 1;
-                    row.1 = g.particles.len() * g.template.positions.len();
+        if drawable {
+            // `built_key` is left alone when hidden: it stays the key of what is actually in the
+            // mesh asset, so the first drawable frame rebuilds to whatever the sim has reached.
+            let key = mesh_key(g, view, &clock);
+            if needs_rebuild(&g.built_key, &key) {
+                if let Some(mut mesh) = meshes.get_mut(&g.mesh) {
+                    rebuild_mesh(g, view, &clock, &mut mesh);
+                    g.built_key = key;
+                    if trace_rebuilds {
+                        let row = trace
+                            .per_generator
+                            .entry(String::from_utf8_lossy(&g.def.mesh_id).into_owned())
+                            .or_default();
+                        row.0 += 1;
+                        row.1 = g.particles.len() * g.template.positions.len();
+                    }
                 }
             }
+        } else if trace_rebuilds {
+            trace.gated += 1;
         }
         let window_over =
             g.stopped || (!g.auto_run && g.age_frames > g.emit_window_frames.max(1.0));
@@ -1091,9 +1138,11 @@ pub fn sync_particle_meshes(
         info!(
             target: "perf",
             generators = sim.generators.len(),
+            gated = trace.gated,
             "particle mesh rebuilds/s: {}",
             summary.join(" ")
         );
+        trace.gated = 0;
         trace.since_secs = time.elapsed_secs();
     }
 }
@@ -1330,6 +1379,49 @@ fn is_axial_camera_billboard(g: &LiveGenerator) -> bool {
         && g.solid_mesh
 }
 
+// The distance from the particle centre to the farthest vertex any frame of this generator can
+// place there, before per-particle scale. Taken as a norm rather than per-axis extents so it is
+// rotation-invariant: the screen billboard, `particle_rotation` spin, `axial_camera_rotation` and
+// the `vel_basis` sign flips all preserve it, and none of them can push a vertex outside it.
+fn template_bound_radius(template: &SpriteTemplate, sprite_frames: &[SpriteTemplate]) -> f32 {
+    std::iter::once(template)
+        .chain(sprite_frames)
+        .flat_map(|t| t.positions.iter())
+        .fold(0.0f32, |acc, p| acc.max(p.length()))
+}
+
+// The live particle set's bounds in the frame `rebuild_mesh` writes positions in (entity-local for
+// an actor-local generator, Bevy world space otherwise), so the caller supplies the entity
+// transform. `None` when nothing is alive to draw.
+//
+// This over-approximates on purpose: a partially visible generator has to stay in, and the
+// per-particle radius folds in a scale the individual vertex may not use.
+fn generator_bounds(
+    g: &LiveGenerator,
+    clock: &CelestialClock,
+) -> Option<bevy::camera::primitives::Aabb> {
+    if g.particles.is_empty() {
+        return None;
+    }
+    let axial = is_axial_camera_billboard(g);
+    // The same z-scale `rebuild_mesh` picks: a flat screen billboard leaves its unused depth
+    // axis at 1.0, everything else scales by the untracked init z.
+    let sz = if g.orientation.is_some() || axial {
+        g.def.init_scale[2]
+    } else {
+        1.0
+    };
+    let mut lo = Vec3::splat(f32::INFINITY);
+    let mut hi = Vec3::splat(f32::NEG_INFINITY);
+    for p in &g.particles {
+        let draw = particle_draw(g, p, clock);
+        let r = g.bound_radius * draw.scale.x.abs().max(draw.scale.y.abs()).max(sz.abs());
+        lo = lo.min(draw.world - r);
+        hi = hi.max(draw.world + r);
+    }
+    Some(bevy::camera::primitives::Aabb::from_min_max(lo, hi))
+}
+
 // A template with no extent on some axis is a flat authored sprite quad — every D3M billboard
 // and SpriteSheet frame is an XY rectangle whose vertices carry z exactly 0, so its only face
 // normal is the axis it is missing. Aiming such a quad's local +X at the eye lays its plane
@@ -1434,6 +1526,8 @@ fn rebuild_mesh(g: &LiveGenerator, cam: CameraView, clock: &CelestialClock, mesh
     mesh.insert_indices(Indices::U32(indices));
 }
 
+const HIDDEN_PRIMITIVE_VERTS: usize = 3;
+
 // A generator with zero live particles (on spawn, and in the gaps between emit
 // windows) would otherwise rebuild an empty mesh. Bevy's MeshAllocator skips the
 // slab allocation for a zero-length vertex buffer but still runs the upload copy,
@@ -1447,7 +1541,7 @@ fn push_hidden_primitive(
     indices: &mut Vec<u32>,
 ) {
     let base = positions.len() as u32;
-    for _ in 0..3 {
+    for _ in 0..HIDDEN_PRIMITIVE_VERTS {
         positions.push([0.0, 0.0, 0.0]);
         uvs.push([0.0, 0.0]);
         colors.push([0.0, 0.0, 0.0, 0.0]);
@@ -1733,6 +1827,7 @@ mod tests {
             emit_scale: UNSCALED_EMISSION,
             emit_rng: emit_seed(Entity::PLACEHOLDER),
             built_key: MeshKey::Empty,
+            bound_radius: 0.0,
         }
     }
 
@@ -1841,6 +1936,164 @@ mod tests {
         assert!(
             !world.resource::<ParticleSimulator>().generators[0].emit_culled,
             "30 units: back in band"
+        );
+    }
+
+    // The default `PerspectiveProjection` looks down -Z with a 1:1 aspect, so a generator at +Z
+    // is behind the camera and one far enough out on +X is past a side plane.
+    fn frustum_camera(world: &mut World, xf: GlobalTransform) -> Entity {
+        use bevy::camera::{CameraProjection, PerspectiveProjection};
+        let frustum = PerspectiveProjection::default().compute_frustum(&xf);
+        world.spawn((OperatorCamera, xf, frustum)).id()
+    }
+
+    fn aim_camera(world: &mut World, cam: Entity, at: Vec3) {
+        use bevy::camera::{CameraProjection, PerspectiveProjection};
+        let xf =
+            GlobalTransform::from(Transform::from_translation(Vec3::ZERO).looking_at(at, Vec3::Y));
+        *world.get_mut::<GlobalTransform>(cam).unwrap() = xf;
+        *world
+            .get_mut::<bevy::camera::primitives::Frustum>(cam)
+            .unwrap() = PerspectiveProjection::default().compute_frustum(&xf);
+    }
+
+    fn built_verts(world: &World, mesh: &Handle<Mesh>) -> usize {
+        world
+            .resource::<Assets<Mesh>>()
+            .get(mesh)
+            .and_then(|m| m.attribute(Mesh::ATTRIBUTE_POSITION))
+            .map(|a| a.len())
+            .expect("mesh positions")
+    }
+
+    // A generator wired to a live mesh asset and mesh entity, with `frames` of emission already
+    // simulated so it has particles to bound.
+    fn gated_world(origin: Vec3, bound_radius: f32, frames: f32) -> (World, Handle<Mesh>, Entity) {
+        let mut world = World::new();
+        world.insert_resource(Time::<()>::default());
+        world.insert_resource(Assets::<Mesh>::default());
+        let mesh = world.resource_mut::<Assets<Mesh>>().add(empty_mesh());
+        let entity = world
+            .spawn((
+                Mesh3d(mesh.clone()),
+                GlobalTransform::IDENTITY,
+                Visibility::default(),
+            ))
+            .id();
+        let mut g = live(def(600.0, 1.0, 4), 0.0);
+        g.auto_run = true;
+        g.entity = entity;
+        g.mesh = mesh.clone();
+        g.bound_radius = bound_radius;
+        g.origin = origin;
+        advance(&mut g, frames);
+        assert!(!g.particles.is_empty(), "test needs live particles");
+        let mut sim = ParticleSimulator::default();
+        sim.generators.push(g);
+        world.insert_resource(sim);
+        (world, mesh, entity)
+    }
+
+    #[test]
+    fn offscreen_generator_keeps_simulating_but_stops_rebuilding() {
+        use bevy::ecs::system::RunSystemOnce;
+
+        let behind = Vec3::new(0.0, 0.0, 50.0);
+        let (mut world, mesh, entity) = gated_world(behind, 1.0, 10.0);
+        let cam = frustum_camera(&mut world, GlobalTransform::IDENTITY);
+
+        world.run_system_once(sync_particle_meshes).unwrap();
+        assert_eq!(
+            *world.get::<Visibility>(entity).unwrap(),
+            Visibility::Hidden,
+            "behind the camera"
+        );
+        assert_eq!(
+            built_verts(&world, &mesh),
+            HIDDEN_PRIMITIVE_VERTS,
+            "no mesh write while hidden"
+        );
+
+        let (want_verts, moved) = {
+            let mut sim = world.resource_mut::<ParticleSimulator>();
+            let g = &mut sim.generators[0];
+            let (age, pos) = (g.age_frames, g.particles[0].pos);
+            advance_generator(g, 10.0);
+            assert!(g.age_frames > age, "hidden generators keep ageing");
+            (
+                g.particles.len() * g.template.positions.len(),
+                g.particles[0].pos != pos,
+            )
+        };
+        assert!(moved, "hidden particles keep integrating velocity");
+
+        aim_camera(&mut world, cam, behind);
+        world.run_system_once(sync_particle_meshes).unwrap();
+        assert_eq!(
+            *world.get::<Visibility>(entity).unwrap(),
+            Visibility::Inherited,
+            "back in frame"
+        );
+        assert_eq!(
+            built_verts(&world, &mesh),
+            want_verts,
+            "rebuilt to the state the sim reached while hidden"
+        );
+    }
+
+    #[test]
+    fn partially_visible_generator_is_not_culled() {
+        use bevy::ecs::system::RunSystemOnce;
+
+        // Past the +X side plane at 10 units of depth (half-width ~4.1 at the default 45-degree
+        // vertical fov and 1:1 aspect), so only the template radius can pull it back in.
+        let edge = Vec3::new(6.0, 0.0, -10.0);
+        for (bound_radius, want) in [(0.1, Visibility::Hidden), (4.0, Visibility::Inherited)] {
+            let (mut world, _mesh, entity) = gated_world(edge, bound_radius, 1.0);
+            frustum_camera(&mut world, GlobalTransform::IDENTITY);
+            world.run_system_once(sync_particle_meshes).unwrap();
+            assert_eq!(
+                *world.get::<Visibility>(entity).unwrap(),
+                want,
+                "radius {bound_radius}"
+            );
+        }
+    }
+
+    #[test]
+    fn camera_relative_generator_is_never_gated() {
+        use bevy::ecs::system::RunSystemOnce;
+
+        let (mut world, mesh, entity) = gated_world(Vec3::new(0.0, 0.0, 50.0), 1.0, 10.0);
+        world.resource_mut::<ParticleSimulator>().generators[0].camera_relative = true;
+        frustum_camera(&mut world, GlobalTransform::IDENTITY);
+
+        world.run_system_once(sync_particle_meshes).unwrap();
+        assert_eq!(
+            *world.get::<Visibility>(entity).unwrap(),
+            Visibility::Inherited
+        );
+        assert!(
+            built_verts(&world, &mesh) > HIDDEN_PRIMITIVE_VERTS,
+            "camera-pinned curtains rebuild wherever their origin reads"
+        );
+    }
+
+    #[test]
+    fn without_a_camera_frustum_nothing_is_gated() {
+        use bevy::ecs::system::RunSystemOnce;
+
+        let (mut world, mesh, entity) = gated_world(Vec3::new(0.0, 0.0, 50.0), 1.0, 10.0);
+        world.spawn((OperatorCamera, GlobalTransform::IDENTITY));
+
+        world.run_system_once(sync_particle_meshes).unwrap();
+        assert_eq!(
+            *world.get::<Visibility>(entity).unwrap(),
+            Visibility::Inherited
+        );
+        assert!(
+            built_verts(&world, &mesh) > HIDDEN_PRIMITIVE_VERTS,
+            "an operator camera with no frustum gates nothing"
         );
     }
 
@@ -4113,6 +4366,7 @@ mod tests {
         ffxi_dat::scheduler::TimedStage {
             frame: 0,
             stage: ffxi_dat::scheduler::SchedulerStage {
+                stage_words: ffxi_dat::scheduler::SYNTHESIZED_STAGE_WORDS,
                 kind: ffxi_dat::scheduler::StageKind::Particle,
                 raw_type: 0,
                 delay_frames: 0,

@@ -34,6 +34,32 @@ const PARAM_OFFSET: usize = 32;
 pub const DEFAULT_FOCAL_LENGTH_FIRST_PERSON: f32 = 280.0;
 pub const DEFAULT_FOCAL_LENGTH_THIRD_PERSON: f32 = 350.0;
 
+// research/XIClient source/World/Actor/Attachment.cpp GetAttachMode - the mode field of
+// AttachmentInfo: the low nibble, bit 16 extending the high group.
+pub const ATTACH_MODE_MASK: u32 = 0xF;
+pub const ATTACH_MODE_EXT_SHIFT: u32 = 16;
+// research/XIClient source/World/Actor/Attachment.cpp MakeAttachMatrix - the attach modes
+// this tree resolves: mode 1 rides the caster's EID locator, mode 3 (the source-to-target
+// basis, research/xim ParticleGeneratorAttachment.kt SourceToTargetBasis) resolves against
+// the caster the same way, and every other mode plays the route in world space (mode 0's
+// identity default arm; the rest the decompilation leaves identity).
+pub const ATTACH_MODE_WORLD: u32 = 0;
+pub const ATTACH_MODE_CASTER: u32 = 1;
+pub const ATTACH_MODE_SOURCE_TO_TARGET: u32 = 3;
+// research/XIClient source/World/Actor/Attachment.cpp MakeAttachMatrix mode1 - the locator
+// field of AttachmentInfo: bits 4..9, bit 18 extending the high group.
+pub const ATTACH_LOCATOR_SHIFT: u32 = 4;
+pub const ATTACH_LOCATOR_MASK: u32 = 0x3F;
+pub const ATTACH_LOCATOR_BITS: u32 = 6;
+pub const ATTACH_LOCATOR_EXT_SHIFT: u32 = 18;
+// research/XIClient include/World/Actor/EID_INDEX.h EID_NORMAL_MAX - the first special
+// locator (EID_GROUND and on); the index below it reads the skeleton's reference table.
+pub const EID_NORMAL_MAX: u32 = 48;
+// research/XIClient source/World/Camera/CameraTask.cpp OnMove - the InterpFactor byte is a
+// fraction of this: each frame the smoothed attach matrix steps toward the live one by
+// InterpFactor / INTERP_FACTOR_SCALE.
+pub const INTERP_FACTOR_SCALE: f32 = 255.0;
+
 /// The SmoothingType field of a camera header (research/XIClient include/World/Camera/
 /// CameraFormat.h CameraSmoothType). Values above the five curves are keyframe resource
 /// FourCCs retail resolves at load time (CameraTask.cpp EvaluateProgressionCurve default arm);
@@ -230,6 +256,22 @@ impl CameraResource {
             _ => CameraPathMode::Spline,
         }
     }
+
+    /// research/XIClient source/World/Actor/Attachment.cpp GetAttachMode: the low nibble of
+    /// AttachmentInfo plus bit 16 select one of the attach modes; zero and the unhandled
+    /// modes leave the attach matrix identity (world space).
+    pub fn attach_mode(&self) -> u32 {
+        (self.attachment_info & ATTACH_MODE_MASK)
+            + 16 * ((self.attachment_info >> ATTACH_MODE_EXT_SHIFT) & 1)
+    }
+
+    /// research/XIClient source/World/Actor/Attachment.cpp MakeAttachMatrix mode1: the
+    /// EID_INDEX locator read off the caster's skeleton - bits 4..9, bit 18 extending the
+    /// high group (EID_AF_START0 and on).
+    pub fn attach_locator_index(&self) -> u32 {
+        ((self.attachment_info >> ATTACH_LOCATOR_SHIFT) & ATTACH_LOCATOR_MASK)
+            + (((self.attachment_info >> ATTACH_LOCATOR_EXT_SHIFT) & 1) << ATTACH_LOCATOR_BITS)
+    }
 }
 
 #[cfg(test)]
@@ -377,6 +419,31 @@ mod tests {
         .unwrap();
         assert_eq!(both.control_point_count(), 3);
         assert_eq!(both.path_mode(), CameraPathMode::Spline);
+    }
+
+    #[test]
+    fn attach_mode_and_locator_decode_the_shipped_forms() {
+        // The forms the install ships (corpus scan of every kind 0x06 chunk): the asserts pin
+        // each raw value against the Attachment.cpp decode - the dominant form orbits the
+        // caster's BODY_CENTER, the source-to-target pair rides the NAME locator, and the
+        // mode-zero values carry locator bits the default arm ignores.
+        let decode = |raw: u32| -> (u32, u32) {
+            let cam = CameraResource::parse(*b"at01", &chunk_body(raw, 0, 0, 0, &[])).unwrap();
+            (cam.attach_mode(), cam.attach_locator_index())
+        };
+        assert_eq!(decode(0x0), (ATTACH_MODE_WORLD, 0));
+        assert_eq!(decode(0x1), (ATTACH_MODE_CASTER, 0));
+        assert_eq!(decode(0x71), (ATTACH_MODE_CASTER, 7));
+        assert_eq!(decode(0x151), (ATTACH_MODE_CASTER, 21));
+        assert_eq!(decode(0x191), (ATTACH_MODE_CASTER, 25));
+        assert_eq!(decode(0x821), (ATTACH_MODE_CASTER, 2));
+        assert_eq!(decode(0x823), (ATTACH_MODE_SOURCE_TO_TARGET, 2));
+        for raw in [0x10, 0x20, 0x50, 0x170] {
+            assert_eq!(decode(raw).0, ATTACH_MODE_WORLD, "mode 0 ignores the locator bits: {raw:#x}");
+        }
+        // The extension bits: bit 16 lifts the mode into the high group, bit 18 the locator.
+        assert_eq!(decode(0x10151), (17, 21));
+        assert_eq!(decode(0x40151), (ATTACH_MODE_CASTER, 64 + 21));
     }
 
     #[test]

@@ -257,6 +257,38 @@ impl From<CurrentCameraState> for CameraFrame {
     }
 }
 
+/// The attach context a route's start needs (research/XIClient source/World/Camera/
+/// CameraTask.cpp constructor: the smoothed attach matrix seeds from the caster/target's
+/// state at task creation, and OnMove chases the live matrix at InterpFactor/255 per frame).
+#[derive(Debug, Clone, Copy)]
+pub struct AttachStart {
+    /// The attach actor's wire entity (the cue's caster; mode 2 and the unported modes play
+    /// in world space instead).
+    pub actor: Entity,
+
+    /// The EID locator index the attach resolves against the actor's skeleton.
+    pub locator: u32,
+
+    /// The resource's InterpFactor scaled to 0..=1: how fast the smoothed matrix chases the
+    /// live one (0 freezes the start-time matrix).
+    pub interp: f32,
+
+    /// The attach matrix at task start, Bevy space, column-vector convention.
+    pub initial_matrix: Mat4,
+}
+
+/// The running attach: the actor to re-resolve each frame and the smoothed matrix the
+/// evaluated frame transforms out through.
+struct AttachTask {
+    actor: Entity,
+
+    locator: u32,
+
+    interp: f32,
+
+    smoothed: Mat4,
+}
+
 /// One running camera route on the renderer's clock (research/XIClient source/World/Camera/
 /// CameraTask.cpp OnMove): a scaled frame duration, the path, and per-frame output of eye,
 /// look-at, roll and focal length.
@@ -275,33 +307,38 @@ pub struct CutsceneCameraTask {
     start_point: Endpoint,
 
     end_point: Endpoint,
+
+    /// None is world space; the points are otherwise local to the attach actor.
+    attach: Option<AttachTask>,
 }
 
 impl CutsceneCameraTask {
     /// research/XIClient source/World/Camera/CameraResource.cpp CreateCameraTask - a new task
     /// replaces the running one; a locked route with zero duration is a hard cut that applies
     /// its first point and runs out on the next frame. `total_frames` is already scaled by the
-    /// 0x45 duration operand (scheduler_speed_ratio). Attached routes (AttachmentInfo nonzero)
-    /// need retail's bone attach matrix (research/XIClient source/World/Actor/Attachment.cpp
-    /// MakeAttachMatrix / MakeEIDPoint), which this tree does not port; they are dropped here
-    /// rather than played in world space.
+    /// 0x45 duration operand (scheduler_speed_ratio). An attached route carries its attach
+    /// context: the points are local to the attach actor and each frame's eye/at transform
+    /// out through the smoothed attach matrix (CameraTask.cpp constructor and OnMove).
     pub fn start(
         resource: &CameraResource,
         total_frames: f32,
         current: CurrentCameraState,
         default_chase: Endpoint,
-    ) -> Option<Self> {
-        if resource.attachment_info != 0 {
-            return None;
-        }
+        attach: Option<AttachStart>,
+    ) -> Self {
+        // The START/END_AT_CURRENT_POS endpoints are expressed in the route's local space:
+        // the inverse of the initial attach matrix maps the camera's world state into it
+        // (CameraTask.cpp constructor).
+        let to_local = attach.as_ref().map(|a| a.initial_matrix.inverse());
+        let into_local = |p: Vec3| to_local.map(|m| m.transform_point3(p)).unwrap_or(p);
 
         // The flags add virtual endpoints from the camera's current state (start) and the
         // default chase position (end), the way CameraTask.cpp's constructor does.
         let mut points: Vec<Endpoint> = Vec::with_capacity(resource.points.len() + 2);
         if resource.flags.starts_at_current_pos() {
             points.push(Endpoint {
-                eye: current.eye,
-                target: current.target,
+                eye: into_local(current.eye),
+                target: into_local(current.target),
                 roll: current.roll,
                 focal_length: current.focal_length,
             });
@@ -310,7 +347,12 @@ impl CutsceneCameraTask {
             points.push(p.into());
         }
         if resource.flags.ends_at_current_pos() {
-            points.push(default_chase);
+            points.push(Endpoint {
+                eye: into_local(default_chase.eye),
+                target: into_local(default_chase.target),
+                roll: default_chase.roll,
+                focal_length: default_chase.focal_length,
+            });
         }
 
         // A route with no authored points and no flags applies the default chase state directly
@@ -326,7 +368,7 @@ impl CutsceneCameraTask {
         let start_point = points[0];
         let end_point = *points.last().unwrap();
 
-        Some(Self {
+        Self {
             resource: resource.clone(),
             total_frames,
             elapsed_frames: 0.0,
@@ -337,7 +379,13 @@ impl CutsceneCameraTask {
             },
             start_point,
             end_point,
-        })
+            attach: attach.map(|a| AttachTask {
+                actor: a.actor,
+                locator: a.locator,
+                interp: a.interp,
+                smoothed: a.initial_matrix,
+            }),
+        }
     }
 
     fn spline_tracks(points: &[Endpoint]) -> Option<(SplineTrack, SplineTrack, SplineTrack)> {
@@ -371,8 +419,10 @@ impl CutsceneCameraTask {
 
     /// Advance the task by `dt_secs` and output this frame's camera state; None once the scaled
     /// duration has run out. The last frame is still emitted: retail's OnMove applies the path
-    /// before it checks RemainingDuration.
-    pub fn advance(&mut self, dt_secs: f32) -> Option<CameraFrame> {
+    /// before it checks RemainingDuration. `live_attach` is the attach matrix recomputed from
+    /// the actor's current state; a world-space route ignores it, and a zero interp factor
+    /// keeps the smoothed matrix at its start value (CameraTask.cpp OnMove).
+    pub fn advance(&mut self, dt_secs: f32, live_attach: Option<Mat4>) -> Option<CameraFrame> {
         if self.done {
             return None;
         }
@@ -413,11 +463,102 @@ impl CutsceneCameraTask {
             }
         };
 
+        let frame = if let Some(attach) = self.attach.as_mut() {
+            if attach.interp > 0.0 {
+                if let Some(live) = live_attach {
+                    attach.smoothed = lerp_matrix(attach.smoothed, live, attach.interp);
+                }
+            }
+            // The path points are local to the attach actor; the smoothed matrix carries the
+            // evaluated eye/at out to world (CameraTask.cpp OnMove's VirtProcessor15 pair).
+            CameraFrame {
+                eye: attach.smoothed.transform_point3(frame.eye),
+                target: attach.smoothed.transform_point3(frame.target),
+                roll: frame.roll,
+                focal_length: frame.focal_length,
+            }
+        } else {
+            frame
+        };
+
         if self.elapsed_frames >= self.total_frames {
             self.done = true;
         }
         Some(frame)
     }
+}
+
+/// CameraTask.cpp OnMove: each element of the smoothed matrix steps toward the live matrix by
+/// the interp factor.
+fn lerp_matrix(smoothed: Mat4, live: Mat4, t: f32) -> Mat4 {
+    Mat4::from_cols(
+        smoothed.col(0).lerp(live.col(0), t),
+        smoothed.col(1).lerp(live.col(1), t),
+        smoothed.col(2).lerp(live.col(2), t),
+        smoothed.col(3).lerp(live.col(3), t),
+    )
+}
+
+/// research/XIClient source/World/Actor/Attachment.cpp MakeAttachMatrix mode1 - the attach
+/// matrix retail seeds the smoothed matrix with: origin at the caster's EID point, rotation
+/// the caster's yaw. The EID point is authored in the model's DAT frame, so it converts to
+/// Bevy with mzb_to_bevy and then rides the wire entity's transform (position + yaw, scale 1).
+pub fn attach_matrix(actor: &Transform, model_point: Vec3) -> Mat4 {
+    let eid = actor.to_matrix().transform_point3(crate::scene::mzb_to_bevy(kuluu_snapshot::Vec3 {
+        x: model_point.x,
+        y: model_point.y,
+        z: model_point.z,
+    }));
+    Mat4::from_translation(eid) * Mat4::from_quat(actor.rotation)
+}
+
+/// research/XIClient include/World/Actor/EID_INDEX.h - the locator's point in the actor's
+/// model frame: the skeleton's EID reference table when the actor has a loaded model, else a
+/// fraction of the actor's height on the model's up axis. The special locators (EID_GROUND
+/// and up) need collision or a nearest-actor search and stay unresolvable.
+pub fn eid_model_point(
+    locator: u32,
+    baked: Option<&BakedActor>,
+    render: Option<&crate::ffxi_actor_render::FfxiRenderActor>,
+) -> Option<Vec3> {
+    if locator >= ffxi_dat::camera::EID_NORMAL_MAX {
+        return None;
+    }
+    if let Some(render) = render {
+        let point = ffxi_actor::skeleton_instance::standard_joint_world_position(
+            render.world_pose(),
+            &render.skeleton,
+            locator as usize,
+        );
+        if point.is_some_and(Vec3::is_finite) {
+            return point;
+        }
+    }
+    let height = baked.map_or(crate::camera::FALLBACK_ACTOR_HEIGHT, |b| b.actor_height);
+    locator_height_fraction(locator).map(|frac| Vec3::new(0.0, height * frac, 0.0))
+}
+
+/// research/XIClient include/World/Actor/EID_INDEX.h - the named body points as fractions of
+/// the actor's height, standing in for the skeleton reference table when the model did not
+/// load.
+fn locator_height_fraction(locator: u32) -> Option<f32> {
+    Some(match locator {
+        0 => 0.0, // EID_CURRENT
+        1 => 0.45, // EID_WAIST
+        2 => 1.05, // EID_NAME
+        3 => 0.85, // EID_NECK
+        4 => 0.75, // EID_LOOK_AT
+        5 => 1.0, // EID_HEAD_TOP
+        6 => 0.9, // EID_EYE_CENTER
+        7 => 0.6, // EID_CHEST
+        8 | 9 => 0.05, // EID_R_FOOT | EID_L_FOOT
+        10 | 11 => 0.65, // EID_R_HAND | EID_L_HAND
+        12..=21 => 0.5, // EID_HEIGHT..EID_BODY_CENTER
+        22 => 0.95, // EID_HEAD_CENTER
+        23..=32 => 0.7, // EID_MAGIC0..EID_REACH_H
+        33..=42 => 0.5, // EID_R_EYE0..EID_CAMERA3
+        _ => return None,
+    })
 }
 
 /// The running camera route, singular: retail's CameraManager::CurrentCameraTask is one task,
@@ -452,9 +593,37 @@ impl CutsceneCameraTasks {
         self.held = Some(frame);
     }
 
+    /// The running route's live attach matrix (CameraTask.cpp OnMove recomputes it from the
+    /// actor's current state before each lerp); None for a world-space route or when the
+    /// attach does not resolve.
+    fn live_attach_matrix(
+        &self,
+        q_attach: &Query<
+            (&Transform, Option<&BakedActor>),
+            (
+                With<crate::components::WorldEntity>,
+                Without<crate::camera::OperatorCamera>,
+            ),
+        >,
+        q_children: &Query<&Children>,
+        q_render: &Query<&crate::ffxi_actor_render::FfxiRenderActor>,
+    ) -> Option<Mat4> {
+        let attach = self.current.as_ref()?.attach.as_ref()?;
+        let (xform, baked) = q_attach.get(attach.actor).ok()?;
+        let render = q_children.get(attach.actor).ok().and_then(|children| {
+            children
+                .iter()
+                .find_map(|c| q_render.get(c).ok())
+        });
+        let point = eid_model_point(attach.locator, baked, render)?;
+        Some(attach_matrix(xform, point))
+    }
+
     /// Advance the running route by `dt_secs`; None when there is no route or it has run out.
-    pub fn advance(&mut self, dt_secs: f32) -> Option<CameraFrame> {
-        let frame = self.current.as_mut()?.advance(dt_secs);
+    /// `live_attach` feeds the attached route's smoothed matrix (see
+    /// [`CutsceneCameraTask::advance`]).
+    pub fn advance(&mut self, dt_secs: f32, live_attach: Option<Mat4>) -> Option<CameraFrame> {
+        let frame = self.current.as_mut()?.advance(dt_secs, live_attach);
         if self.current.as_ref().is_some_and(|t| t.done) {
             self.current = None;
         }
@@ -523,6 +692,15 @@ pub fn advance_cutscene_camera_task(
     mut cursor: Local<u64>,
     mut logged_start: Local<bool>,
     mut q_cam: Query<(&mut Transform, &mut Projection), With<crate::camera::OperatorCamera>>,
+    q_attach: Query<
+        (&Transform, Option<&BakedActor>),
+        (
+            With<crate::components::WorldEntity>,
+            Without<crate::camera::OperatorCamera>,
+        ),
+    >,
+    q_children: Query<&Children>,
+    q_render: Query<&crate::ffxi_actor_render::FfxiRenderActor>,
 ) {
     let total = events.pushed_total;
     let first_global = total.saturating_sub(events.recent.len() as u64);
@@ -551,7 +729,8 @@ pub fn advance_cutscene_camera_task(
         return;
     }
 
-    let Some(frame) = tasks.advance(time.delta_secs()) else {
+    let live = tasks.live_attach_matrix(&q_attach, &q_children, &q_render);
+    let Some(frame) = tasks.advance(time.delta_secs(), live) else {
         // No route running: hold the last applied frame over resolve_camera's chase writes. A
         // lock that outlives every task (event 503 holds its camera from +037F7 to +04683 across
         // all its MESWAITs) parks on the finished route's final frame, retail-style; a lock with
@@ -722,13 +901,13 @@ mod tests {
             100.0,
             current_state(),
             default_chase(),
-        )
-        .expect("two authored points is a straight path");
+            None,
+        );
 
         // Half the duration at linear smoothing: halfway along every channel (the authored
         // points are retail Y-up; their Bevy images negate y and z).
         let frame = task
-            .advance(50.0 / crate::scheduler_runtime::ROUTINE_FPS)
+            .advance(50.0 / crate::scheduler_runtime::ROUTINE_FPS, None)
             .unwrap();
         assert!((frame.eye - Vec3::new(2.0, 0.0, 0.0)).length() < 1e-4);
         assert!((frame.target - Vec3::new(2.0, -1.0, 0.0)).length() < 1e-4);
@@ -737,11 +916,11 @@ mod tests {
 
         // The last frame lands on the end point and the next advance reports done.
         let last = task
-            .advance(50.0 / crate::scheduler_runtime::ROUTINE_FPS)
+            .advance(50.0 / crate::scheduler_runtime::ROUTINE_FPS, None)
             .unwrap();
         assert!((last.eye - Vec3::new(4.0, 0.0, 0.0)).length() < 1e-4);
         assert!(task
-            .advance(1.0 / crate::scheduler_runtime::ROUTINE_FPS)
+            .advance(1.0 / crate::scheduler_runtime::ROUTINE_FPS, None)
             .is_none());
     }
 
@@ -756,12 +935,12 @@ mod tests {
             60.0,
             current_state(),
             default_chase(),
-        )
-        .expect("one authored point plus the start flag is a straight path");
+            None,
+        );
 
         // Frame zero starts on the camera's own state, not on the authored point.
         let frame = task
-            .advance(1.0 / crate::scheduler_runtime::ROUTINE_FPS)
+            .advance(1.0 / crate::scheduler_runtime::ROUTINE_FPS, None)
             .unwrap();
         assert!((frame.eye - Vec3::new(1.0, 2.0, 3.0)).length() < 0.5);
     }
@@ -777,16 +956,16 @@ mod tests {
             60.0,
             current_state(),
             default_chase(),
-        )
-        .expect("one authored point plus the end flag is a straight path");
+            None,
+        );
 
         // The last frame lands on the default chase eye, not the camera's start state.
         let dt = 1.0 / crate::scheduler_runtime::ROUTINE_FPS;
         let mut last: Option<CameraFrame> = None;
         for _ in 0..60 {
-            last = Some(task.advance(dt).expect("route runs its full duration"));
+            last = Some(task.advance(dt, None).expect("route runs its full duration"));
         }
-        assert!(task.advance(dt).is_none());
+        assert!(task.advance(dt, None).is_none());
         let last = last.expect("the final frame was emitted");
         assert!(
             (last.eye - default_chase().eye).length() < 1e-3,
@@ -794,15 +973,192 @@ mod tests {
         );
     }
 
+    fn attach_start(actor: Entity, locator: u32, interp: f32, initial_matrix: Mat4) -> AttachStart {
+        AttachStart {
+            actor,
+            locator,
+            interp,
+            initial_matrix,
+        }
+    }
+
     #[test]
-    fn attached_routes_are_dropped_not_played_in_world_space() {
-        let mut res = resource(
-            CameraSmoothType::Linear,
-            0,
-            vec![point([0.0; 3], 280.0, [0.0; 3], 0.0)],
+    fn an_attached_route_transforms_through_the_attach_matrix() {
+        let mut task = CutsceneCameraTask::start(
+            &resource(
+                CameraSmoothType::Linear,
+                0,
+                vec![point([0.0; 3], 280.0, [0.0; 3], 0.0)],
+            ),
+            60.0,
+            current_state(),
+            default_chase(),
+            Some(attach_start(
+                Entity::PLACEHOLDER,
+                21,
+                0.0,
+                Mat4::from_translation(Vec3::new(10.0, 0.0, 0.0)),
+            )),
         );
-        res.attachment_info = 337;
-        assert!(CutsceneCameraTask::start(&res, 60.0, current_state(), default_chase()).is_none());
+
+        // The locked point is local to the attach actor; the frame transforms out through the
+        // attach matrix.
+        let frame = task
+            .advance(1.0 / crate::scheduler_runtime::ROUTINE_FPS, None)
+            .unwrap();
+        assert!((frame.eye - Vec3::new(10.0, 0.0, 0.0)).length() < 1e-5);
+    }
+
+    #[test]
+    fn the_attach_matrix_carries_the_actor_origin_and_yaw() {
+        // The model's +X is the actor's facing; a 90-degree yaw turns it toward -Z in Bevy's
+        // right-handed Y-up space.
+        let actor = Transform::from_xyz(5.0, 0.0, 0.0)
+            * Transform::from_rotation(Quat::from_rotation_y(std::f32::consts::FRAC_PI_2));
+        let m = attach_matrix(&actor, Vec3::new(1.0, 0.0, 0.0));
+        // The EID point lands at the origin plus the yaw-rotated facing offset.
+        assert!(
+            (m.transform_point3(Vec3::ZERO) - Vec3::new(5.0, 0.0, -1.0)).length() < 1e-5
+        );
+        // A local +X step keeps riding the facing.
+        assert!((m.transform_point3(Vec3::X) - Vec3::new(5.0, 0.0, -2.0)).length() < 1e-5);
+    }
+
+    #[test]
+    fn a_zero_interp_freezes_the_start_matrix() {
+        let mut task = CutsceneCameraTask::start(
+            &resource(
+                CameraSmoothType::Linear,
+                0,
+                vec![point([0.0; 3], 280.0, [0.0; 3], 0.0)],
+            ),
+            60.0,
+            current_state(),
+            default_chase(),
+            Some(attach_start(
+                Entity::PLACEHOLDER,
+                21,
+                0.0,
+                Mat4::from_translation(Vec3::new(10.0, 0.0, 0.0)),
+            )),
+        );
+
+        // The live matrix moves away; the frozen start matrix wins every frame.
+        let live = Mat4::from_translation(Vec3::new(99.0, 0.0, 0.0));
+        for _ in 0..3 {
+            let frame = task
+                .advance(1.0 / crate::scheduler_runtime::ROUTINE_FPS, Some(live))
+                .unwrap();
+            assert!((frame.eye - Vec3::new(10.0, 0.0, 0.0)).length() < 1e-5);
+        }
+    }
+
+    #[test]
+    fn the_interp_factor_steps_the_smoothed_matrix_toward_the_live_one() {
+        let start = Mat4::IDENTITY;
+        let live = Mat4::from_translation(Vec3::new(10.0, 0.0, 0.0));
+        let dt = 1.0 / crate::scheduler_runtime::ROUTINE_FPS;
+
+        // A full interp jumps to the live matrix in one frame.
+        let mut task = CutsceneCameraTask::start(
+            &resource(
+                CameraSmoothType::Linear,
+                0,
+                vec![point([0.0; 3], 280.0, [0.0; 3], 0.0)],
+            ),
+            60.0,
+            current_state(),
+            default_chase(),
+            Some(attach_start(Entity::PLACEHOLDER, 21, 1.0, start)),
+        );
+        let frame = task.advance(dt, Some(live)).unwrap();
+        assert!((frame.eye - Vec3::new(10.0, 0.0, 0.0)).length() < 1e-5);
+
+        // A half interp lands halfway on the first step.
+        let mut task = CutsceneCameraTask::start(
+            &resource(
+                CameraSmoothType::Linear,
+                0,
+                vec![point([0.0; 3], 280.0, [0.0; 3], 0.0)],
+            ),
+            60.0,
+            current_state(),
+            default_chase(),
+            Some(attach_start(Entity::PLACEHOLDER, 21, 0.5, start)),
+        );
+        let frame = task.advance(dt, Some(live)).unwrap();
+        assert!((frame.eye - Vec3::new(5.0, 0.0, 0.0)).length() < 1e-5);
+    }
+
+    #[test]
+    fn a_start_at_current_pos_maps_the_camera_state_into_the_local_space() {
+        let initial = Mat4::from_translation(Vec3::new(10.0, 0.0, 0.0));
+        let mut task = CutsceneCameraTask::start(
+            &resource(
+                CameraSmoothType::Linear,
+                ffxi_dat::camera::CameraFlags::START_AT_CURRENT_POS as u16,
+                vec![point([0.0; 3], 280.0, [0.0; 3], 0.0)],
+            ),
+            60.0,
+            current_state(),
+            default_chase(),
+            Some(attach_start(Entity::PLACEHOLDER, 21, 0.0, initial)),
+        );
+
+        // The camera state is mapped into the local space by the inverse initial matrix and the
+        // first frame maps it back out: the eye round-trips to the camera's own state.
+        let frame = task
+            .advance(1.0 / crate::scheduler_runtime::ROUTINE_FPS, None)
+            .unwrap();
+        assert!((frame.eye - current_state().eye).length() < 0.5);
+    }
+
+    #[test]
+    fn the_eid_fallback_reads_the_named_points_off_the_actor_height() {
+        let baked = BakedActor {
+            min_mesh_y: 0.0,
+            actor_height: 2.0,
+        };
+        // EID_NAME stands above the head, EID_BODY_CENTER at half height, EID_CURRENT on the
+        // ground.
+        assert!((eid_model_point(2, Some(&baked), None).unwrap() - Vec3::new(0.0, 2.1, 0.0)).length() < 1e-5);
+        assert!((eid_model_point(21, Some(&baked), None).unwrap() - Vec3::new(0.0, 1.0, 0.0)).length() < 1e-5);
+        assert_eq!(eid_model_point(0, Some(&baked), None), Some(Vec3::ZERO));
+        // The special locators and the untabled empties stay unresolvable.
+        assert!(eid_model_point(48, Some(&baked), None).is_none());
+        assert!(eid_model_point(44, Some(&baked), None).is_none());
+        // No baked actor: the fallback height stands in.
+        assert!((eid_model_point(2, None, None).unwrap() - Vec3::new(0.0, 1.05 * crate::camera::FALLBACK_ACTOR_HEIGHT, 0.0)).length() < 1e-5);
+    }
+
+    #[test]
+    fn the_eid_point_reads_the_skeleton_reference_table() {
+        let skeleton = ffxi_dat::skel::Skeleton {
+            id: ffxi_dat::datid::DatId::from_str("0000"),
+            joints: vec![ffxi_dat::skel::Joint {
+                rotation: [0.0, 0.0, 0.0, 1.0],
+                translation: [0.0; 3],
+                parent: None,
+            }],
+            references: (0..ffxi_dat::camera::EID_NORMAL_MAX)
+                .map(|i| ffxi_dat::skel::JointReference {
+                    index: 0,
+                    unk_v0: [0.0; 3],
+                    position_offset: [0.0, i as f32, 0.0],
+                })
+                .collect(),
+            bounding_boxes: Vec::new(),
+        };
+        let pose = ffxi_actor::skeleton_instance::pose_world(
+            &skeleton,
+            |_| None,
+            ffxi_actor::skeleton_instance::RootTransform::identity(),
+            &[],
+        );
+        let render = crate::ffxi_actor_render::render_actor_for_test(skeleton, pose);
+        // The reference table wins over the height fallback: EID 7 sits at the joint plus its
+        // offset.
+        assert!((eid_model_point(7, None, Some(&render)).unwrap() - Vec3::new(0.0, 7.0, 0.0)).length() < 1e-4);
     }
 
     #[test]
@@ -816,12 +1172,12 @@ mod tests {
             60.0,
             current_state(),
             default_chase(),
-        )
-        .expect("one authored point with no flags is locked");
+            None,
+        );
 
         for _ in 0..3 {
             let frame = task
-                .advance(1.0 / crate::scheduler_runtime::ROUTINE_FPS)
+                .advance(1.0 / crate::scheduler_runtime::ROUTINE_FPS, None)
                 .unwrap();
             assert!((frame.eye - Vec3::new(7.0, -8.0, -9.0)).length() < 1e-5);
             assert!((frame.focal_length - 500.0).abs() < 1e-4);
@@ -839,17 +1195,17 @@ mod tests {
             0.0,
             current_state(),
             default_chase(),
-        )
-        .expect("locked with zero duration");
+            None,
+        );
 
         // The first advance applies the point and finishes in one frame (CreateCameraTask's
         // hard-cut branch).
         let frame = task
-            .advance(1.0 / crate::scheduler_runtime::ROUTINE_FPS)
+            .advance(1.0 / crate::scheduler_runtime::ROUTINE_FPS, None)
             .unwrap();
         assert!((frame.eye - Vec3::new(7.0, -7.0, -7.0)).length() < 1e-5);
         assert!(task
-            .advance(1.0 / crate::scheduler_runtime::ROUTINE_FPS)
+            .advance(1.0 / crate::scheduler_runtime::ROUTINE_FPS, None)
             .is_none());
     }
 
@@ -871,14 +1227,14 @@ mod tests {
             300.0,
             current_state(),
             default_chase(),
-        )
-        .expect("three authored points is a spline");
+            None,
+        );
 
         let dt = 1.0 / crate::scheduler_runtime::ROUTINE_FPS;
         // Frame one of a linear 300-frame route has moved one frame along the tangent from
         // the first control point (sqrt(14)/150 units here); anything larger means the start
         // is not on it.
-        let first = task.advance(dt).unwrap();
+        let first = task.advance(dt, None).unwrap();
         assert!(
             (first.eye - Vec3::ZERO).length() < 0.03,
             "t~0 on the first point: {first:?}"
@@ -887,9 +1243,9 @@ mod tests {
         // Advance #150 (elapsed 150 of 300 frames, t exactly 0.5) sits on the middle control
         // point.
         for _ in 0..148 {
-            let _ = task.advance(dt);
+            let _ = task.advance(dt, None);
         }
-        let mid = task.advance(dt).unwrap();
+        let mid = task.advance(dt, None).unwrap();
         assert!(
             (mid.eye - Vec3::new(1.0, -2.0, -3.0)).length() < 1e-3,
             "t=0.5 on the middle point: {mid:?}"
@@ -897,14 +1253,14 @@ mod tests {
 
         // Frame 300 lands on the last control point and the next advance reports done.
         for _ in 0..149 {
-            let _ = task.advance(dt);
+            let _ = task.advance(dt, None);
         }
-        let last = task.advance(dt).unwrap();
+        let last = task.advance(dt, None).unwrap();
         assert!(
             (last.eye - Vec3::new(2.0, -4.0, -6.0)).length() < 1e-3,
             "t=1 on the last point: {last:?}"
         );
-        assert!(task.advance(dt).is_none());
+        assert!(task.advance(dt, None).is_none());
     }
 
     #[test]
@@ -919,11 +1275,10 @@ mod tests {
         assert_eq!(res.path_mode(), CameraPathMode::Spline);
 
         // The task builds for it and runs to completion without panicking.
-        let mut task = CutsceneCameraTask::start(&res, 60.0, current_state(), default_chase())
-            .expect("flagged single point is a spline");
+        let mut task = CutsceneCameraTask::start(&res, 60.0, current_state(), default_chase(), None);
         for _ in 0..70 {
             if task
-                .advance(1.0 / crate::scheduler_runtime::ROUTINE_FPS)
+                .advance(1.0 / crate::scheduler_runtime::ROUTINE_FPS, None)
                 .is_none()
             {
                 break;
@@ -1025,8 +1380,8 @@ mod tests {
             60.0,
             current_state(),
             default_chase(),
-        )
-        .expect("two authored points is a straight path");
+            None,
+        );
         app.world_mut()
             .resource_mut::<CutsceneCameraTasks>()
             .start(task);
@@ -1081,6 +1436,75 @@ mod tests {
         assert!(
             (frozen_eye - first_eye).length() < 1e-4,
             "drifted while locked with no route: {frozen_eye:?}"
+        );
+    }
+
+    // ===== System-level attach test: the route rides the attach actor =====
+
+    #[test]
+    fn an_attached_route_tracks_the_actor_as_it_moves() {
+        // An attached route re-resolves the attach matrix from the actor's wire transform each
+        // frame; a full interp follows every move.
+        let mut app = hold_app();
+        let actor = app
+            .world_mut()
+            .spawn((
+                crate::components::WorldEntity {
+                    id: 7,
+                    act_index: 0,
+                    kind: kuluu_snapshot::EntityKind::Mob,
+                },
+                Transform::from_xyz(10.0, 0.0, 0.0),
+                BakedActor {
+                    min_mesh_y: 0.0,
+                    actor_height: 2.0,
+                },
+            ))
+            .with_children(|parent| {
+                // A child stands in for the render actor's slot so the attach can resolve.
+                parent.spawn(crate::components::InGameEntity);
+            })
+            .id();
+        let task = CutsceneCameraTask::start(
+            &resource(
+                CameraSmoothType::Linear,
+                0,
+                vec![point([0.0; 3], 280.0, [0.0; 3], 0.0)],
+            ),
+            300.0,
+            current_state(),
+            default_chase(),
+            Some(attach_start(
+                actor,
+                21,
+                1.0,
+                attach_matrix(&Transform::from_xyz(10.0, 0.0, 0.0), Vec3::new(0.0, 1.0, 0.0)),
+            )),
+        );
+        app.world_mut()
+            .resource_mut::<CutsceneCameraTasks>()
+            .start(task);
+
+        hold_step(&mut app, 2);
+        let (eye, _) = hold_cam(&mut app);
+        // EID_BODY_CENTER is half the actor's height in the model frame; mzb_to_bevy maps the
+        // model's up to Bevy -Y, so the eye parks one unit below the actor's origin.
+        assert!(
+            (eye - Vec3::new(10.0, -1.0, 0.0)).length() < 1e-3,
+            "parked: {eye:?}"
+        );
+
+        // The actor moves; the live matrix re-resolves and the full interp follows.
+        {
+            let mut entity = app.world_mut().entity_mut(actor);
+            let mut actor_t = entity.get_mut::<Transform>().unwrap();
+            actor_t.translation = Vec3::new(30.0, 0.0, 0.0);
+        }
+        hold_step(&mut app, 2);
+        let (eye, _) = hold_cam(&mut app);
+        assert!(
+            (eye - Vec3::new(30.0, -1.0, 0.0)).length() < 1e-3,
+            "tracked: {eye:?}"
         );
     }
 }

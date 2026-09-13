@@ -1160,6 +1160,16 @@ fn start_cutscene_camera_tasks(
     >,
     mode: &crate::camera::CameraMode,
     tasks: &mut ResMut<CutsceneCameraTasks>,
+    actor_entity: Entity,
+    q_attach: &Query<
+        (&Transform, Option<&BakedActor>),
+        (
+            With<crate::components::WorldEntity>,
+            Without<crate::camera::OperatorCamera>,
+        ),
+    >,
+    q_children: &Query<&Children>,
+    q_render: &Query<&mut crate::ffxi_actor_render::FfxiRenderActor>,
 ) {
     let Some(named) = parsed.schedulers.iter().find(|s| s.name == active.name()) else {
         return;
@@ -1216,30 +1226,93 @@ fn start_cutscene_camera_tasks(
             continue;
         };
         let total_frames = stage.stage.duration_frames as f32 * ratio;
-        match crate::cutscene_camera::CutsceneCameraTask::start(
-            cam,
-            total_frames,
-            current,
-            default_chase,
-        ) {
-            Some(task) => {
-                tracing::debug!(
-                    target: "kuluu_render::scheduler_runtime",
-                    routine = %fourcc(active.name()),
-                    camera = %String::from_utf8_lossy(&stage.stage.id),
-                    total_frames,
-                    "cutscene camera route started"
-                );
-                tasks.start(task);
-            }
-            None => tracing::debug!(
+        // Modes 1 and 3 ride the cue's caster: Attachment.cpp MakeAttachMatrix places the
+        // origin on the caster's EID locator, and xim's SourceToTargetBasis (mode 3) puts the
+        // source-to-target origin on the source's joint 0, the same point. Mode 0 and the
+        // unported modes play in world space, the decompilation's identity default arm.
+        let attach_actor = match cam.attach_mode() {
+            ffxi_dat::camera::ATTACH_MODE_CASTER
+            | ffxi_dat::camera::ATTACH_MODE_SOURCE_TO_TARGET => Some(actor_entity),
+            _ => None,
+        };
+        if cam.attachment_info != 0 && attach_actor.is_none() {
+            tracing::debug!(
                 target: "kuluu_render::scheduler_runtime",
                 routine = %fourcc(active.name()),
                 camera = %String::from_utf8_lossy(&stage.stage.id),
                 attachment_info = cam.attachment_info,
-                "camera route is attached to a bone; retail's MakeAttachMatrix machinery is not ported and the stage is dropped"
-            ),
+                "camera route attach mode is not ported; the route plays in world space"
+            );
         }
+        let mut attach = None;
+        if let Some(actor) = attach_actor {
+            match q_attach.get(actor) {
+                Ok((xform, baked)) => {
+                    let render = q_children
+                        .get(actor)
+                        .ok()
+                        .and_then(|children| {
+                            children
+                                .iter()
+                                .find_map(|child| q_render.get(child).ok())
+                        });
+                    let locator = cam.attach_locator_index();
+                    match crate::cutscene_camera::eid_model_point(
+                        locator,
+                        baked,
+                        render,
+                    ) {
+                        Some(point) => {
+                            attach = Some(crate::cutscene_camera::AttachStart {
+                                actor,
+                                locator,
+                                interp: cam.interp_factor as f32
+                                    / ffxi_dat::camera::INTERP_FACTOR_SCALE,
+                                initial_matrix: crate::cutscene_camera::attach_matrix(xform, point),
+                            });
+                        }
+                        // The special EID locators need a collision or nearest-actor query
+                        // this tree does not run; the stage is dropped rather than misread in
+                        // world space.
+                        None => {
+                            tracing::debug!(
+                                target: "kuluu_render::scheduler_runtime",
+                                routine = %fourcc(active.name()),
+                                camera = %String::from_utf8_lossy(&stage.stage.id),
+                                attachment_info = cam.attachment_info,
+                                "camera route attach locator does not resolve; the stage is dropped"
+                            );
+                            continue;
+                        }
+                    }
+                }
+                // The caster is gone: retail's mode 1 with a null caster takes the identity
+                // matrix, so the route plays in world space.
+                Err(_) => tracing::debug!(
+                    target: "kuluu_render::scheduler_runtime",
+                    routine = %fourcc(active.name()),
+                    camera = %String::from_utf8_lossy(&stage.stage.id),
+                    attachment_info = cam.attachment_info,
+                    "camera route attach actor is gone; the route plays in world space"
+                ),
+            }
+        }
+        let task = crate::cutscene_camera::CutsceneCameraTask::start(
+            cam,
+            total_frames,
+            current,
+            default_chase,
+            attach,
+        );
+        tracing::debug!(
+            target: "kuluu_render::scheduler_runtime",
+            routine = %fourcc(active.name()),
+            camera = %String::from_utf8_lossy(&stage.stage.id),
+            total_frames,
+            attached = attach.is_some(),
+            "cutscene camera route started"
+        );
+        tasks.start(task);
     }
 }
 
@@ -1258,6 +1331,13 @@ pub fn poll_action_dat_tasks(
     q_self: Query<
         (&Transform, Option<&BakedActor>),
         (With<IsSelf>, Without<crate::camera::OperatorCamera>),
+    >,
+    q_attach: Query<
+        (&Transform, Option<&BakedActor>),
+        (
+            With<crate::components::WorldEntity>,
+            Without<crate::camera::OperatorCamera>,
+        ),
     >,
     mode: Res<crate::camera::CameraMode>,
     mut q_scheds: Query<&mut ActiveSchedulers>,
@@ -1349,7 +1429,17 @@ pub fn poll_action_dat_tasks(
                     .any(|t| t.stage.kind == StageKind::CameraRoute)
                 {
                     start_cutscene_camera_tasks(
-                        &parsed, &active, duration, &q_cam, &q_self, &mode, &mut tasks,
+                        &parsed,
+                        &active,
+                        duration,
+                        &q_cam,
+                        &q_self,
+                        &mode,
+                        &mut tasks,
+                        actor_entity,
+                        &q_attach,
+                        &q_children,
+                        &q_actors,
                     );
                     active
                         .stages
@@ -1413,7 +1503,17 @@ pub fn poll_action_dat_tasks(
                     .any(|t| t.stage.kind == StageKind::CameraRoute)
                 {
                     start_cutscene_camera_tasks(
-                        &parsed, &active, duration, &q_cam, &q_self, &mode, &mut tasks,
+                        &parsed,
+                        &active,
+                        duration,
+                        &q_cam,
+                        &q_self,
+                        &mode,
+                        &mut tasks,
+                        actor_entity,
+                        &q_attach,
+                        &q_children,
+                        &q_actors,
                     );
                     active
                         .stages

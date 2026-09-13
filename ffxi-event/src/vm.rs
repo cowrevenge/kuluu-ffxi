@@ -1015,7 +1015,7 @@ impl EventVm {
                 }
                 // Retail yields here only while the event entity is mid-turn,
                 // which is render state we do not model, so only its other path
-                // is reachable (research/XiEvents OpCodes/0x0070.md).
+                // is reachable (research/XiEvents/OpCodes/0x0070.md).
                 OP_TURNWAIT => self.exec_pointer += 1,
                 OP_SLEEP => return self.arm_wait(SLEEP_WAIT_UNITS, 1),
                 OP_WAIT => {

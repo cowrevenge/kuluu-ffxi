@@ -138,6 +138,16 @@ pub struct ActiveScheduler {
     pub cursor: usize,
 
     pub name: [u8; 4],
+
+    // The 0x2C SCHEDULOR actor this routine was started for, as the wire value
+    // the cue named (the session matches the report against the same value it
+    // resolved the cue with). `None` for routines no 0x53 waits on, so they
+    // never report.
+    pub cutscene_motion_actor: Option<kuluu_snapshot::CutsceneActor>,
+
+    // Set once the finish report went out: the routine lingers past its last
+    // stage for the post-finish TTL, so the report must fire exactly once.
+    pub done_reported: bool,
 }
 
 impl ActiveScheduler {
@@ -149,6 +159,8 @@ impl ActiveScheduler {
             elapsed: 0.0,
             cursor: 0,
             name: s.name,
+            cutscene_motion_actor: None,
+            done_reported: false,
         }
     }
 
@@ -191,6 +203,8 @@ impl ActiveScheduler {
             elapsed: 0.0,
             cursor: 0,
             name: first,
+            cutscene_motion_actor: None,
+            done_reported: false,
         })
     }
 
@@ -205,6 +219,8 @@ impl ActiveScheduler {
             elapsed: 0.0,
             cursor: 0,
             name: *name,
+            cutscene_motion_actor: None,
+            done_reported: false,
         })
     }
 
@@ -327,10 +343,22 @@ pub struct SchedulerStageEvent {
     pub scheduler: [u8; 4],
 }
 
+/// A 0x2C SCHEDULOR routine the cue `(actor, key)` named has finished - or
+/// could not be started at all: the host releases the event VM's pending hold
+/// on the pair so the 0x53 past it advances. The actor is the wire value the
+/// cue named, the same one the session resolved it against.
+#[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CutsceneMotionDone {
+    pub actor: kuluu_snapshot::CutsceneActor,
+
+    pub key: [u8; 4],
+}
+
 pub fn tick_active_schedulers(
     time: Res<Time>,
     mut q: Query<(Entity, &mut ActiveSchedulers)>,
     mut writer: MessageWriter<SchedulerStageEvent>,
+    mut motion_done: MessageWriter<CutsceneMotionDone>,
     mut commands: Commands,
 ) {
     let dt = time.delta_secs();
@@ -353,6 +381,17 @@ pub fn tick_active_schedulers(
                     scheduler: scheduler_name,
                 });
                 sched.cursor += 1;
+            }
+            // A 0x2C routine reports its finish the frame its last stage fires;
+            // unmarked routines (emotes, hit reactions, ...) never do.
+            if !sched.done_reported && sched.finished() {
+                if let Some(actor) = sched.cutscene_motion_actor {
+                    motion_done.write(CutsceneMotionDone {
+                        actor,
+                        key: scheduler_name,
+                    });
+                    sched.done_reported = true;
+                }
             }
         }
 
@@ -1820,6 +1859,7 @@ pub fn dispatch_cutscene_motion(
     mut q_scheds: Query<&mut ActiveSchedulers>,
     mut pending_inserts: Local<HashMap<Entity, Vec<ActiveScheduler>>>,
     mut commands: Commands,
+    mut motion_done: MessageWriter<CutsceneMotionDone>,
     mut last_seen: Local<u64>,
 ) {
     let new_count =
@@ -1837,31 +1877,38 @@ pub fn dispatch_cutscene_motion(
             cutscene_actor_server_id(self_id, a)
         };
         match cue {
-            // 0x2C: the routine is in the actor's own model DAT.
+            // 0x2C: the routine is in the actor's own model DAT. Every path that
+            // cannot start it reports done immediately: the session's pending
+            // hold must not wait for a finish that never comes.
             CutsceneCue::ActorMotion {
                 actor,
                 partner,
                 key,
             } => {
                 let (Some(actor_id), Some(partner_id)) = (resolve(actor), resolve(partner)) else {
+                    motion_done.write(CutsceneMotionDone { actor, key });
                     continue;
                 };
                 let Some(&actor_entity) = tracked.by_id.get(&actor_id) else {
+                    motion_done.write(CutsceneMotionDone { actor, key });
                     continue;
                 };
                 let Some(routines) = actor_render_routines(actor_entity, &q_children, &q_render)
                 else {
+                    motion_done.write(CutsceneMotionDone { actor, key });
                     continue;
                 };
                 let lookup = RoutineLookup::new().with_actor(routines);
-                let Some(active) = ActiveScheduler::from_routine(&lookup, &key) else {
+                let Some(mut active) = ActiveScheduler::from_routine(&lookup, &key) else {
                     tracing::debug!(
                         target: "kuluu_render::scheduler_runtime",
                         key = %fourcc(key),
                         "cutscene actor motion has no routine on the actor"
                     );
+                    motion_done.write(CutsceneMotionDone { actor, key });
                     continue;
                 };
+                active.cutscene_motion_actor = Some(actor);
                 let target_entity = tracked.by_id.get(&partner_id).copied();
                 if queue_active_scheduler(actor_entity, active, &mut q_scheds, &mut pending_inserts)
                 {
@@ -3239,6 +3286,7 @@ pub struct SchedulerRuntimePlugin;
 impl Plugin for SchedulerRuntimePlugin {
     fn build(&self, app: &mut App) {
         app.add_message::<SchedulerStageEvent>();
+        app.add_message::<CutsceneMotionDone>();
         // Prediction and grounding read this on every target; only the native cutscene systems
         // write it.
         app.init_resource::<CutsceneActorState>();
@@ -3632,6 +3680,7 @@ mod tests {
     fn tick_active_schedulers_strips_action_components_after_ttl() {
         let mut app = App::new();
         app.add_message::<SchedulerStageEvent>()
+            .add_message::<CutsceneMotionDone>()
             .init_resource::<Time>()
             .add_systems(Update, tick_active_schedulers);
 
@@ -3683,6 +3732,7 @@ mod tests {
     fn concurrent_routines_keep_separate_cursors_and_strip_together() {
         let mut app = App::new();
         app.add_message::<SchedulerStageEvent>()
+            .add_message::<CutsceneMotionDone>()
             .init_resource::<Time>()
             .init_resource::<CapturedStages>()
             .add_systems(Update, (tick_active_schedulers, capture_stages).chain());
@@ -3748,12 +3798,117 @@ mod tests {
         assert!(!app.world().entity(actor).contains::<ActiveSchedulers>());
     }
 
+    #[derive(Resource, Default)]
+    struct CapturedMotionDone(Vec<CutsceneMotionDone>);
+
+    fn capture_motion_done(
+        mut reader: MessageReader<CutsceneMotionDone>,
+        mut out: ResMut<CapturedMotionDone>,
+    ) {
+        out.0.extend(reader.read().copied());
+    }
+
+    // The 0x53 past a 0x2C parks on this report: it must fire the frame the
+    // routine's last stage lands, exactly once, carrying the wire actor and
+    // key the cue named.
+    #[test]
+    fn a_marked_routine_reports_done_exactly_once_on_finish() {
+        let mut app = App::new();
+        app.add_message::<SchedulerStageEvent>()
+            .add_message::<CutsceneMotionDone>()
+            .init_resource::<Time>()
+            .init_resource::<CapturedMotionDone>()
+            .add_systems(
+                Update,
+                (tick_active_schedulers, capture_motion_done).chain(),
+            );
+
+        let actor = kuluu_snapshot::CutsceneActor::Entity { server_id: 0x010E_6032 };
+        let mut sched = ActiveScheduler::from_scheduler(&make_scheduler(
+            *b"kue0",
+            vec![stage(30, StageKind::SoundOnCaster, 0x53, *b"snd1")],
+        ));
+        sched.cutscene_motion_actor = Some(actor);
+        let entity = app.world_mut().spawn(ActiveSchedulers::one(sched)).id();
+
+        // t=0.1 s (frame 6): the frame-30 stage has not fired yet.
+        app.world_mut()
+            .resource_mut::<Time>()
+            .advance_by(std::time::Duration::from_secs_f32(0.1));
+        app.update();
+        assert!(
+            app.world().resource::<CapturedMotionDone>().0.is_empty(),
+            "an unfinished routine does not report"
+        );
+
+        // t=0.6 s (frame 36): the routine finished on this frame.
+        app.world_mut()
+            .resource_mut::<Time>()
+            .advance_by(std::time::Duration::from_secs_f32(0.5));
+        app.update();
+        let done = std::mem::take(&mut app.world_mut().resource_mut::<CapturedMotionDone>().0);
+        assert_eq!(
+            done,
+            vec![CutsceneMotionDone {
+                actor,
+                key: *b"kue0"
+            }]
+        );
+
+        // The entry lingers past its last stage for the post-finish TTL: the
+        // report must not fire again while it does.
+        app.world_mut()
+            .resource_mut::<Time>()
+            .advance_by(std::time::Duration::from_secs_f32(0.5));
+        app.update();
+        assert!(app.world().entity(entity).contains::<ActiveSchedulers>());
+        assert!(
+            app.world().resource::<CapturedMotionDone>().0.is_empty(),
+            "the report fires exactly once"
+        );
+    }
+
+    #[test]
+    fn unmarked_routines_never_report_done() {
+        let mut app = App::new();
+        app.add_message::<SchedulerStageEvent>()
+            .add_message::<CutsceneMotionDone>()
+            .init_resource::<Time>()
+            .init_resource::<CapturedMotionDone>()
+            .add_systems(
+                Update,
+                (tick_active_schedulers, capture_motion_done).chain(),
+            );
+
+        // An emote-style routine: finished long ago, no 0x53 waiting on it.
+        let actor = app
+            .world_mut()
+            .spawn(ActiveSchedulers::one(ActiveScheduler::from_scheduler(&make_scheduler(
+                *b"em01",
+                vec![stage(5, StageKind::SoundOnCaster, 0x53, *b"snd1")],
+            ))))
+            .id();
+        app.world_mut()
+            .resource_mut::<Time>()
+            .advance_by(std::time::Duration::from_secs_f32(0.5));
+        app.update();
+        assert!(
+            app.world().entity(actor).contains::<ActiveSchedulers>(),
+            "the routine is finished but still within its TTL"
+        );
+        assert!(
+            app.world().resource::<CapturedMotionDone>().0.is_empty(),
+            "only a 0x2C-marked routine reports"
+        );
+    }
+
     // 0x5F StopRoutine drops the named entry and only that one (xim EffectRoutineInstance.kt:
     // 910-915 stops each matching sequence on the same actor).
     #[test]
     fn stop_routine_stage_removes_only_the_named_entry() {
         let mut app = App::new();
         app.add_message::<SchedulerStageEvent>()
+            .add_message::<CutsceneMotionDone>()
             .init_resource::<Time>()
             .add_systems(
                 Update,
@@ -4116,6 +4271,7 @@ mod tests {
         // lock are visible to is_locked_now.
         let mut app = App::new();
         app.add_message::<SchedulerStageEvent>()
+            .add_message::<CutsceneMotionDone>()
             .init_resource::<Time>()
             .add_systems(Update, tick_active_schedulers);
         let actor = app

@@ -149,6 +149,20 @@ impl DialogRunner {
         self.vm.hold_action(actor, key, units);
     }
 
+    /// Arm the 0x2C SCHEDULOR hold the WAIT* family parks on until the
+    /// renderer reports the routine finished; see
+    /// [`EventVm::hold_action_pending`]. The session calls this when it
+    /// publishes a 0x2C motion cue, whose routine this host never reads.
+    pub fn hold_action_pending(&mut self, actor: ActorLookup, key: FourCc) {
+        self.vm.hold_action_pending(actor, key);
+    }
+
+    /// Release the 0x2C SCHEDULOR hold the renderer's finish report names;
+    /// see [`EventVm::release_action_hold`].
+    pub fn release_action_hold(&mut self, actor: ActorLookup, key: FourCc) {
+        self.vm.release_action_hold(actor, key);
+    }
+
     /// Arm a host-armed move hold a non-player MOVE case 1 parks on; see
     /// [`EventVm::hold_move`]. The session calls this from its own entity
     /// distance and speed when it publishes an [`EventCue::ActorMove`].

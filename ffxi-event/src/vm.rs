@@ -385,6 +385,11 @@ pub struct EventVm {
     /// start of each later [`step`](Self::step) clear them, so an action whose DAT
     /// the host cannot read falls through instead of holding forever.
     pending_action_starts: Vec<(ActorLookup, FourCc)>,
+    /// 0x2C SCHEDULOR holds armed without a length: the routine lives in the
+    /// actor's model DAT, which the host never opens, so the hold is released
+    /// by the renderer's finish report instead of a timer. See
+    /// [`Self::hold_action_pending`].
+    pending_action_holds: Vec<(ActorLookup, FourCc)>,
     /// Set while execution is parked on a WAIT* opcode whose hold still has
     /// frames left, so [`Self::is_waiting`] keeps the host ticking it down.
     parked_on_action_hold: bool,
@@ -520,6 +525,7 @@ impl EventVm {
             action_holds: Vec::new(),
             move_holds: Vec::new(),
             pending_action_starts: Vec::new(),
+            pending_action_holds: Vec::new(),
             parked_on_action_hold: false,
             parked_on_move_hold: false,
             oob_reads: std::cell::Cell::new(0),
@@ -627,11 +633,38 @@ impl EventVm {
         let actor = self.resolve_hold_actor(actor);
         self.action_holds
             .retain(|h| !(h.actor == actor && h.key == key));
+        // Last-arm-wins both ways: a timed hold supersedes the pending 0x2C
+        // hold for the same pair.
+        self.pending_action_holds
+            .retain(|(a, k)| !(a == &actor && k == &key));
         self.action_holds.push(ActionHold {
             actor,
             key,
             remaining_units: units,
         });
+    }
+
+    /// Arm a 0x2C SCHEDULOR hold with no length: the routine lives in the
+    /// actor's model DAT, which the host never opens, so it is released by
+    /// [`Self::release_action_hold`] when the renderer reports the routine
+    /// finished instead of by a timer. Replaces any timed or pending hold for
+    /// the same pair, the way [`Self::hold_action`] does.
+    pub fn hold_action_pending(&mut self, actor: ActorLookup, key: FourCc) {
+        let actor = self.resolve_hold_actor(actor);
+        self.action_holds
+            .retain(|h| !(h.actor == actor && h.key == key));
+        self.pending_action_holds
+            .retain(|(a, k)| !(a == &actor && k == &key));
+        self.pending_action_holds.push((actor, key));
+    }
+
+    /// Release the 0x2C SCHEDULOR hold the renderer's finish report names.
+    /// No-op when nothing is pending for the pair, so a report for a routine
+    /// the VM no longer waits on (stopped, superseded, event ended) is safe.
+    pub fn release_action_hold(&mut self, actor: ActorLookup, key: FourCc) {
+        let actor = self.resolve_hold_actor(actor);
+        self.pending_action_holds
+            .retain(|(a, k)| !(a == &actor && k == &key));
     }
 
     /// Arm a move hold on `actor` lasting `units` (1/60 s, the same clock as
@@ -655,13 +688,21 @@ impl EventVm {
             .any(|h| h.actor == actor && h.remaining_units > 0.0)
     }
 
-    /// True while a host-armed hold for `(actor, key)` still has frames left.
+    /// True while a host-armed hold for `(actor, key)` still has frames left,
+    /// or a 0x2C SCHEDULOR hold is still pending its renderer finish report.
     fn action_running(&self, actor: ActorLookup, key: FourCc) -> bool {
         let actor = self.resolve_hold_actor(actor);
         if self
             .action_holds
             .iter()
             .any(|h| h.actor == actor && h.key == key && h.remaining_units > 0.0)
+        {
+            return true;
+        }
+        if self
+            .pending_action_holds
+            .iter()
+            .any(|(a, k)| *a == actor && *k == key)
         {
             return true;
         }
@@ -1202,10 +1243,19 @@ impl EventVm {
                     self.exec_pointer += OPCODE_META[op as usize].size as usize;
                 }
                 OP_SCHEDULOR => {
+                    let actor1 = ActorLookup(self.eventgetcode2(SCHEDULOR_ACTOR1_OFS));
+                    let key = self.fourcc_at(SCHEDULOR_KEY_OFS);
+                    // The same-pass bridge the other loaders use: a 0x53 that
+                    // follows the 0x2C in one pass must see the routine as
+                    // running, the way retail's IsMovingAction does (research/
+                    // XiEvents/OpCodes/0x0053.md). The host's pending hold from
+                    // the drained cue takes over from the bridge.
+                    self.pending_action_starts
+                        .push((self.resolve_hold_actor(actor1), key));
                     self.cues.push(EventCue::ActorMotion {
-                        actor1: ActorLookup(self.eventgetcode2(SCHEDULOR_ACTOR1_OFS)),
+                        actor1,
                         actor2: ActorLookup(self.eventgetcode2(SCHEDULOR_ACTOR2_OFS)),
-                        key: self.fourcc_at(SCHEDULOR_KEY_OFS),
+                        key,
                     });
                     self.advance(op);
                 }
@@ -2205,6 +2255,90 @@ mod tests {
         data.push(OP_END);
         let mut e = vm(data, vec![]);
         // No hold armed: the wait advances immediately instead of parking.
+        assert_eq!(e.step(), StepResult::Done);
+    }
+
+    fn waitschedulor_program(actor: u32, key: [u8; 4]) -> Vec<u8> {
+        let mut data = vec![OP_WAITSCHEDULOR];
+        data.extend_from_slice(&actor.to_le_bytes()); // actor1 @1
+        data.extend_from_slice(&0u32.to_le_bytes()); // actor2 @5 (unused by the hold)
+        data.extend_from_slice(&key); // key @9
+        data.push(OP_END); // offset 13
+        data
+    }
+
+    #[test]
+    fn waitschedulor_parks_on_a_pending_hold_until_the_renderer_reports() {
+        const ACTOR: u32 = 0x010E_6032; // literal server id, resolves to itself
+        let key: [u8; 4] = *b"kue0";
+        let mut e = vm(waitschedulor_program(ACTOR, key), vec![]);
+        e.hold_action_pending(ActorLookup(ACTOR), key);
+        assert_eq!(
+            e.step(),
+            StepResult::Waiting,
+            "a pending 0x2C hold parks the wait"
+        );
+        // The pending hold has no length: no amount of host clock releases it.
+        e.tick(3600.0);
+        assert_eq!(
+            e.step(),
+            StepResult::Waiting,
+            "the pending hold does not decay on the VM's clock"
+        );
+        e.release_action_hold(ActorLookup(ACTOR), key);
+        assert_eq!(
+            e.step(),
+            StepResult::Done,
+            "the renderer's finish report releases the hold"
+        );
+    }
+
+    #[test]
+    fn release_action_hold_is_a_noop_when_nothing_is_pending() {
+        const ACTOR: u32 = 0x010E_6032;
+        let key: [u8; 4] = *b"abcd";
+        let mut e = vm(waitschedulor_program(ACTOR, key), vec![]);
+        // A stray report (the routine was stopped or the event ended) must not
+        // panic or touch a timed hold for the same pair.
+        e.release_action_hold(ActorLookup(ACTOR), key);
+        e.hold_action(ActorLookup(ACTOR), key, WAIT_UNITS_PER_SEC);
+        e.release_action_hold(ActorLookup(ACTOR), key);
+        assert_eq!(
+            e.step(),
+            StepResult::Waiting,
+            "the timed hold survives a stray release"
+        );
+    }
+
+    #[test]
+    fn a_timed_hold_supersedes_a_pending_hold_for_the_same_pair() {
+        const ACTOR: u32 = 0x010E_6032;
+        let key: [u8; 4] = *b"abcd";
+        let mut e = vm(waitschedulor_program(ACTOR, key), vec![]);
+        e.hold_action_pending(ActorLookup(ACTOR), key);
+        e.hold_action(ActorLookup(ACTOR), key, WAIT_UNITS_PER_SEC);
+        e.tick(1.1); // past the one-second timed hold, no release ever arrives
+        assert_eq!(
+            e.step(),
+            StepResult::Done,
+            "last-arm-wins: the timed hold expired and nothing pending remains"
+        );
+    }
+
+    #[test]
+    fn a_pending_hold_supersedes_a_timed_hold_for_the_same_pair() {
+        const ACTOR: u32 = 0x010E_6032;
+        let key: [u8; 4] = *b"abcd";
+        let mut e = vm(waitschedulor_program(ACTOR, key), vec![]);
+        e.hold_action(ActorLookup(ACTOR), key, WAIT_UNITS_PER_SEC);
+        e.hold_action_pending(ActorLookup(ACTOR), key);
+        e.tick(1.1); // past the one-second timed hold, which the pending replaced
+        assert_eq!(
+            e.step(),
+            StepResult::Waiting,
+            "last-arm-wins: only the pending hold remains"
+        );
+        e.release_action_hold(ActorLookup(ACTOR), key);
         assert_eq!(e.step(), StepResult::Done);
     }
 

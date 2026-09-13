@@ -1513,7 +1513,7 @@ pub type FourCc = [u8; 4];
 /// Which entity a [`CutsceneCue`] names. The event VM's own operand is an
 /// unresolved `ActorLookup`; the producer resolves it against the running
 /// event's entity before it crosses this boundary.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CutsceneActor {
     LocalPlayer,

@@ -1015,7 +1015,7 @@ pub struct DialogGridCell {
 /// Which entity a [`CutsceneCue`] names, resolved from the event VM's
 /// [`ffxi_event::ActorLookup`] against the running event's own entity (the VM
 /// deliberately leaves that to its host).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CutsceneActor {
     LocalPlayer,
@@ -3300,6 +3300,15 @@ pub enum AgentCommand {
     /// matching retail's clamp of a negative boundary.
     ReportSubArea {
         sub_area: u16,
+    },
+
+    /// The renderer finished (or could not start) the 0x2C SCHEDULOR routine
+    /// this `(actor, key)` named: releases the event VM's pending hold on it.
+    /// Carries the wire actor the cue named, so the session matches the same
+    /// value it resolved the cue with.
+    CutsceneMotionDone {
+        actor: CutsceneActor,
+        key: ffxi_event::FourCc,
     },
 
     EndEvent,

@@ -149,6 +149,15 @@ pub struct DialogSession {
     /// zone-in, in event coordinates: the source for MOVE hold lengths while a
     /// scene walks its actors.
     entity_positions: std::collections::HashMap<u32, ffxi_event::vm::scene::EventPosition>,
+    /// 0x2C SCHEDULOR holds awaiting the renderer's finish report, keyed by the
+    /// wire actor the cue named plus its key: the value is the VM's own
+    /// unresolved lookup (for the release), the count of outstanding 0x2C
+    /// issues for the pair (a repeat issue re-arms before the first finishes),
+    /// and the arm time the deadline sweep measures from.
+    pending_motion_holds: std::collections::HashMap<
+        (CutsceneActor, FourCc),
+        (ActorLookup, u32, std::time::Instant),
+    >,
     /// Whether a frame was displayed before the last step, so
     /// [`take_message_closed`](Self::take_message_closed) fires exactly once per
     /// up→down transition instead of on every tick parked after it.
@@ -172,6 +181,7 @@ impl DialogSession {
             fishing: std::collections::HashMap::new(),
             routine_lengths: std::collections::HashMap::new(),
             entity_positions: std::collections::HashMap::new(),
+            pending_motion_holds: std::collections::HashMap::new(),
             message_was_up: false,
         }
     }
@@ -259,6 +269,8 @@ impl DialogSession {
             &raw_cues,
             self.dat_root.as_deref(),
             &mut self.routine_lengths,
+            unique_no,
+            &mut self.pending_motion_holds,
         );
         arm_move_holds(&mut runner, &raw_cues, &self.entity_positions, unique_no);
         self.cues
@@ -339,6 +351,7 @@ impl DialogSession {
     ///
     /// [`active_end`]: Self::active_end
     fn tick(&mut self, dt_secs: f32) -> Advance {
+        self.sweep_pending_motion_holds();
         self.drive(|runner, strings| runner.tick(dt_secs, strings))
     }
 
@@ -407,6 +420,8 @@ impl DialogSession {
             &raw_cues,
             self.dat_root.as_deref(),
             &mut self.routine_lengths,
+            event_entity,
+            &mut self.pending_motion_holds,
         );
         arm_move_holds(runner, &raw_cues, &self.entity_positions, event_entity);
         let cues: Vec<ResolvedCue> = raw_cues
@@ -502,6 +517,56 @@ impl DialogSession {
         self.runner = None;
         self.active = None;
         self.message_was_up = false;
+        self.pending_motion_holds.clear();
+    }
+
+    /// The renderer finished (or could not start) the 0x2C SCHEDULOR routine
+    /// this wire `(actor, key)` named: decrement the pending hold's issue
+    /// count and release the VM's hold when the last one lands. No-op when
+    /// nothing is pending for the pair (stray report, event already ended).
+    pub fn motion_done(&mut self, actor: CutsceneActor, key: FourCc) {
+        let Some(entry) = self.pending_motion_holds.get_mut(&(actor, key)) else {
+            return;
+        };
+        entry.1 = entry.1.saturating_sub(1);
+        if entry.1 > 0 {
+            return;
+        }
+        let (lookup, _, _) = self
+            .pending_motion_holds
+            .remove(&(actor, key))
+            .expect("entry held above");
+        if let Some(runner) = self.runner.as_mut() {
+            runner.release_action_hold(lookup, key);
+        }
+    }
+
+    /// Last-resort release for 0x2C SCHEDULOR holds the renderer never
+    /// reported: a stopped routine, a despawned entity, or a headless session
+    /// with no renderer at all. [`PENDING_MOTION_HOLD_MAX`] is well above any
+    /// model-DAT routine length, so a live finish report always wins; the
+    /// sweep is the degradation path, not the clock.
+    fn sweep_pending_motion_holds(&mut self) {
+        let now = std::time::Instant::now();
+        let stale: Vec<(CutsceneActor, FourCc)> = self
+            .pending_motion_holds
+            .iter()
+            .filter(|(_, (_, _, armed))| now.duration_since(*armed) > PENDING_MOTION_HOLD_MAX)
+            .map(|(key, _)| *key)
+            .collect();
+        for key in stale {
+            let Some((lookup, _, armed)) = self.pending_motion_holds.remove(&key) else {
+                continue;
+            };
+            tracing::warn!(
+                target: "kuluu_session::event_dialog",
+                age_secs = now.duration_since(armed).as_secs_f32(),
+                "0x2C SCHEDULOR hold released on its deadline without a renderer finish report"
+            );
+            if let Some(runner) = self.runner.as_mut() {
+                runner.release_action_hold(lookup, key.1);
+            }
+        }
     }
 
     /// Entry `index` of `zone`'s dialog DAT, loading it if needed. `None` when
@@ -1357,6 +1422,11 @@ const SCHEDULER_DURATION_LOOP: u16 = 1;
 /// WAIT_UNITS_PER_SEC).
 const WAIT_UNITS_PER_SEC: f32 = 60.0;
 
+/// Last-resort release for a 0x2C SCHEDULOR hold the renderer never reported
+/// (stopped routine, despawned entity, headless session): well above any
+/// model-DAT routine length, so a live finish report always wins.
+const PENDING_MOTION_HOLD_MAX: std::time::Duration = std::time::Duration::from_secs(15);
+
 /// Arm the MOVE case-1 hold for each walk in `raw_cues`: the length comes
 /// from this session's own entity positions and the authored speed, because
 /// the VM never measures a move (research/XiEvents/OpCodes/0x001F.md). An
@@ -1417,19 +1487,41 @@ fn arm_move_holds(
     }
 }
 
-/// Arm WAIT* holds for motion cues whose authored length this session can read
-/// from a DAT, before their actors are resolved: the hold keys on the VM's own
-/// unresolved ActorLookup. 0x2C arms nothing - its routine lives in the actor's
-/// model DAT, which this session never opens; the renderer plays it and the VM
-/// does not hold on it.
+/// Arm WAIT* holds for motion cues, before their actors are resolved: the hold
+/// keys on the VM's own unresolved ActorLookup. 0x45/0x5B/0x66/0x2D arm a
+/// timed hold from the DAT-authored routine length; 0x2C arms a pending hold
+/// instead - its routine lives in the actor's model DAT, which this session
+/// never opens, so the renderer's finish report releases it (the deadline
+/// sweep in [`DialogSession::tick`] is the last resort).
 fn arm_motion_holds(
     runner: &mut DialogRunner,
     raw_cues: &[EventCue],
     root: Option<&DatRoot>,
     cache: &mut std::collections::HashMap<(u32, FourCc), Option<f32>>,
+    event_entity: u32,
+    pending: &mut std::collections::HashMap<
+        (CutsceneActor, FourCc),
+        (ActorLookup, u32, std::time::Instant),
+    >,
 ) {
     for cue in raw_cues {
         match *cue {
+            // 0x2C: the routine is in the actor's own model DAT. The renderer
+            // plays it and reports its finish; until then the WAIT* parks on
+            // the pending hold. The map keys on the wire actor the cue resolved
+            // to - the same value the renderer's report carries back.
+            EventCue::ActorMotion {
+                actor1,
+                key,
+                ..
+            } => {
+                runner.hold_action_pending(actor1, key);
+                let entry = pending
+                    .entry((resolve_actor(actor1, event_entity), key))
+                    .or_insert((actor1, 0, std::time::Instant::now()));
+                entry.1 += 1;
+                entry.2 = std::time::Instant::now();
+            }
             EventCue::Scheduler {
                 dat_id,
                 actor1,
@@ -2269,6 +2361,136 @@ pub(crate) mod tests {
         // The hold is 60 frames = one second on the VM's clock.
         assert!(matches!(session.tick(0.5), Advance::Waiting));
         assert!(matches!(session.tick(0.6), Advance::Ended { .. }));
+    }
+
+    fn schedulor_session(program: Vec<u8>) -> DialogSession {
+        const NPC: u32 = 0x010E_6032;
+        const EVENT: u16 = 503;
+        const ZONE: u16 = 248;
+        let block = ffxi_dat::event_dat::EventBlock {
+            actor: NPC,
+            event_ids: vec![EVENT],
+            event_offsets: vec![0],
+            references: vec![],
+            event_data: program,
+        };
+        let mut session = DialogSession::new(None, "Test".into());
+        session.loaded_event_zone = Some(ZONE);
+        session.loaded_string_zone = Some(ZONE);
+        session.event_dat = Some(Arc::new(EventDat {
+            blocks: vec![block],
+        }));
+        session.strings = Some(StringDat::parse(&synth_dat(&[b"test"])).unwrap());
+        session
+    }
+
+    fn schedulor_trigger() -> EventTrigger {
+        const NPC: u32 = 0x010E_6032;
+        const EVENT: u16 = 503;
+        const ZONE: u16 = 248;
+        EventTrigger {
+            event_zone: ZONE,
+            text_zone: ZONE,
+            unique_no: NPC,
+            act_index: 0,
+            event_id: EVENT,
+            params: vec![],
+            npc_name: None,
+        }
+    }
+
+    /// 0x2C names a routine in the actor's model DAT, which the session never
+    /// opens: its 0x53 parks on the pending hold until the renderer's finish
+    /// report, no matter how much host clock elapses.
+    #[test]
+    fn schedulor_hold_parks_until_the_renderer_reports_done() {
+        const NPC: u32 = 0x010E_6032;
+        const KEY: [u8; 4] = *b"kue0";
+        let mut program = vec![0x2C];
+        program.extend(NPC.to_le_bytes()); // actor1 @1
+        program.extend(0u32.to_le_bytes()); // actor2 @5
+        program.extend(KEY); // key @9
+        program.push(0x53); // WAITSCHEDULOR @13
+        program.extend(NPC.to_le_bytes()); // actor1 @14
+        program.extend(0u32.to_le_bytes()); // actor2 @18
+        program.extend(KEY); // key @22
+        program.push(0x21); // END @26
+        let mut session = schedulor_session(program);
+        assert!(matches!(session.begin(schedulor_trigger()), Begin::Waiting));
+        let cues = session.take_cues();
+        let [ResolvedCue::Scene(CutsceneCue::ActorMotion { actor, key, .. })] =
+            cues.as_slice()
+        else {
+            panic!("expected the ActorMotion cue: {cues:?}");
+        };
+        assert_eq!(*actor, CutsceneActor::Entity { server_id: NPC });
+        assert_eq!(*key, KEY);
+        // The pending hold has no length: no ticking releases it.
+        assert!(matches!(session.tick(3600.0), Advance::Waiting));
+        // The renderer's finish report releases it; the 0x53 advances next tick.
+        session.motion_done(CutsceneActor::Entity { server_id: NPC }, KEY);
+        assert!(matches!(session.tick(0.1), Advance::Ended { .. }));
+    }
+
+    #[test]
+    fn a_repeated_schedulor_issue_needs_one_report_per_issue() {
+        const NPC: u32 = 0x010E_6032;
+        const KEY: [u8; 4] = *b"kue0";
+        // Two 0x2C issues of the same key, then the 0x53: each 13-byte opcode
+        // carries its own actor1 @1 / actor2 @5 / key @9.
+        let mut program = Vec::new();
+        for op in [0x2C, 0x2C, 0x53] {
+            program.push(op);
+            program.extend(NPC.to_le_bytes()); // actor1 @1
+            program.extend(0u32.to_le_bytes()); // actor2 @5
+            program.extend(KEY); // key @9
+        }
+        program.push(0x21); // END @39
+        let mut session = schedulor_session(program);
+        assert!(matches!(session.begin(schedulor_trigger()), Begin::Waiting));
+        let cues = session.take_cues();
+        assert_eq!(cues.len(), 2, "both 0x2C cues drain in one pass");
+        let actor = CutsceneActor::Entity { server_id: NPC };
+        // The first report leaves the second issue still outstanding.
+        session.motion_done(actor, KEY);
+        assert!(matches!(session.tick(0.1), Advance::Waiting));
+        // The second releases the hold.
+        session.motion_done(actor, KEY);
+        assert!(matches!(session.tick(0.1), Advance::Ended { .. }));
+    }
+
+    #[test]
+    fn motion_done_is_a_noop_for_an_unknown_pair() {
+        let mut session = DialogSession::new(None, "Test".into());
+        // Stray reports (event ended, routine stopped) must not panic.
+        session.motion_done(CutsceneActor::Entity { server_id: 1 }, *b"kue0");
+        session.motion_done(CutsceneActor::LocalPlayer, *b"kue0");
+    }
+
+    /// A stopped routine or a headless session never gets the renderer's
+    /// report: the deadline sweep in the tick releases the hold instead.
+    #[test]
+    fn schedulor_hold_releases_on_its_deadline_without_a_report() {
+        const NPC: u32 = 0x010E_6032;
+        const KEY: [u8; 4] = *b"kue0";
+        let mut program = vec![0x2C];
+        program.extend(NPC.to_le_bytes()); // actor1 @1
+        program.extend(0u32.to_le_bytes()); // actor2 @5
+        program.extend(KEY); // key @9
+        program.push(0x53); // WAITSCHEDULOR @13
+        program.extend(NPC.to_le_bytes()); // actor1 @14
+        program.extend(0u32.to_le_bytes()); // actor2 @18
+        program.extend(KEY); // key @22
+        program.push(0x21); // END @26
+        let mut session = schedulor_session(program);
+        assert!(matches!(session.begin(schedulor_trigger()), Begin::Waiting));
+        let _ = session.take_cues();
+        // Age the entry past its deadline: the renderer never reported.
+        let entry = session.pending_motion_holds.values_mut().next().unwrap();
+        entry.2 = std::time::Instant::now()
+            - (PENDING_MOTION_HOLD_MAX + std::time::Duration::from_secs(1));
+        assert!(matches!(session.tick(0.1), Advance::Ended { .. }));
+        assert!(session.pending_motion_holds.is_empty());
     }
 
     #[test]

@@ -754,6 +754,7 @@ mod tests {
             .init_resource::<TrackedEntities>()
             .init_resource::<ZoneDoors>()
             .add_message::<SchedulerStageEvent>()
+            .add_message::<crate::scheduler_runtime::CutsceneMotionDone>()
             .add_systems(
                 Update,
                 (

@@ -2125,6 +2125,7 @@ fn _agentcommand_is_additive_only(x: &AgentCommand) {
         AgentCommand::MarkKeyItemsSeen { .. } => (),
         AgentCommand::CancelBuff { .. } => (),
         AgentCommand::ReportSubArea { .. } => (),
+        AgentCommand::CutsceneMotionDone { .. } => (),
         AgentCommand::EndEvent { .. } => (),
         AgentCommand::EndEventChoice { .. } => (),
         AgentCommand::CustomMenuRespond { .. } => (),

@@ -3681,6 +3681,12 @@ async fn keepalive_loop(
                             tracing::warn!(error = %e, "submapchange send failed");
                         }
                     }
+                    // The renderer's finish report for a 0x2C SCHEDULOR routine:
+                    // releases the event VM's pending hold on it so the 0x53
+                    // past it advances on the next tick. No server traffic.
+                    Some(AgentCommand::CutsceneMotionDone { actor, key }) => {
+                        dialog_session.motion_done(actor, key);
+                    }
                     Some(AgentCommand::TreasureLot { slot }) => {
                         let payload = build_subpacket_trophy_lot(sub_seq, slot);
                         sub_seq = sub_seq.wrapping_add(1);

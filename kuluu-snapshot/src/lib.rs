@@ -2,6 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 
+// v30: CutsceneCue::ZoneScheduler - the 0x2D/0x54 zone scene routine out of the global
+// scene DAT (ROM/0/23.DAT), whose camera routes drive the operator camera.
 // v29: CutsceneCue::ExtScheduler (the 0x5B/0x66 motion-resource cue) and the
 // actor cues ActorMove / ActorPlace / ActorFace / ActorLookAt / ActorStopAction
 // that a REQSET-spawned NPC script emits.
@@ -64,7 +66,7 @@ use serde::{Deserialize, Serialize};
 // v5: InventoryItem.charges_remaining + next_use_vana_ts (item recast/charges).
 // v4: SceneSnapshot.delivery_box (dedicated delivery screen) + ViewerCommand::DeliveryBox
 // (postcard frames are not self-describing, so any shape change bumps this).
-pub const PROTOCOL_VERSION: u32 = 29;
+pub const PROTOCOL_VERSION: u32 = 30;
 
 /// Longest countdown `SceneSnapshot::status_icon_expiries` can carry. The
 /// producer rejects anything beyond it as a corrupt 0x063 timestamp, and the HUD
@@ -1354,6 +1356,24 @@ pub struct DialogState {
     /// with `AgentCommand::CustomMenuRespond` instead of an `EndEventChoice`.
     #[serde(default)]
     pub custom_menu: bool,
+    /// Whether ESC may cancel this event (retail's CliEventCancelFlag; the VM's
+    /// 0x42 disarms it in cutscenes that lock you in, 0x2E re-arms). Defaults to
+    /// true so frames from an unknown producer stay cancellable.
+    #[serde(default = "cancel_armed_default")]
+    pub cancel_armed: bool,
+    /// The speaking entity's target index for this frame; `None` is a line the
+    /// bytecode prints with no speaker (retail renders those headerless).
+    #[serde(default)]
+    pub speaker_index: Option<u16>,
+    /// The line carried an item / key-item marker (`{Item:N}` / `{KeyItem:N}`)
+    /// before substitution: enternity-style auto-advance leaves such lines
+    /// manual (the addon's "sentences that contain items will not be skipped").
+    #[serde(default)]
+    pub contains_item: bool,
+}
+
+fn cancel_armed_default() -> bool {
+    true
 }
 
 /// Row-major grid overlay for a choice frame (`cells.len() == rows * cols`).
@@ -1524,6 +1544,13 @@ pub enum CutsceneCue {
     ActorHide { target: CutsceneActor, hide: bool },
     /// Take camera control away from the player, or give it back.
     CameraLock { lock: bool },
+    /// 0x67/0x68 HIDE_HUD/SHOW_HUD: hide or show the entire HUD UI for the
+    /// rest of the cutscene (research/XiEvents/OpCodes/0x0067.md, 0x0068.md).
+    HudHide { hide: bool },
+    /// 0x77/0x78 STOP_CLOCK/RESTORE_CLOCK: hold the game clock at Vana'diel
+    /// hour `hour`, or release it back to server time
+    /// (research/XiEvents/OpCodes/0x0077.md, 0x0078.md).
+    ClockHold { stop: bool, hour: Option<u32> },
     /// Put the target on or off a mount. `status_event` is the `GameStatus`
     /// value the script writes; `mount_id` is carried only by the non-chocobo
     /// mount cases.
@@ -1541,6 +1568,14 @@ pub enum CutsceneCue {
         actor: CutsceneActor,
         partner: CutsceneActor,
         key: FourCc,
+    },
+    /// Start zone-level scheduler routine `key` out of the global scene DAT
+    /// over the two actors (the 0x2D/0x54 pair, research/XiEvents/OpCodes/
+    /// 0x002D.md); its camera routes drive the operator camera.
+    ZoneScheduler {
+        key: FourCc,
+        actor: CutsceneActor,
+        partner: CutsceneActor,
     },
     /// Walk `actor` to `(x, y, z)` at `speed`, facing `heading`. The
     /// coordinates are the VM's event-coordinate integers; the renderer scales
@@ -1620,6 +1655,24 @@ pub enum ViewerEvent {
         slot: u8,
         volume: u8,
     },
+
+    /// Event script 0xC8 MAP_TUTORIAL: open the Map screen on zone `map_id`.
+    MapOpen {
+        map_id: u16,
+        tutorial: bool,
+    },
+
+    /// Event script 0x8B MAP_MARKER: place a named marker at milli-unit
+    /// coordinates on zone `map_id`'s map.
+    MapMarkerPlaced {
+        map_id: u16,
+        x_milli: i32,
+        y_milli: i32,
+        label: String,
+    },
+
+    /// Event script 0x8A CLOSE_MAP: close the Map screen.
+    MapClosed,
 
     LevelUp {
         player_id: u32,
@@ -2208,7 +2261,7 @@ mod tests {
 
     #[test]
     fn ferry_protocol_preserves_transport_and_voyage_fields() {
-        const VERSION: u32 = 29;
+        const VERSION: u32 = 30;
         const STAMP: u32 = 0x1200_3400;
         assert_eq!(PROTOCOL_VERSION, VERSION);
         let mut snapshot = sample_snapshot();

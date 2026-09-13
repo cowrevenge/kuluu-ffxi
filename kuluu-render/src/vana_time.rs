@@ -134,6 +134,8 @@ pub struct VanaClock {
     anchor_earth_unix: Option<u64>,
 
     anchor_instant: Option<Instant>,
+    /// Fixed instant every reader sees while a cutscene holds the game clock; cleared by [`Self::thaw`].
+    frozen_at_earth_unix: Option<f64>,
 }
 
 impl VanaClock {
@@ -141,7 +143,35 @@ impl VanaClock {
         self.anchor_earth_unix.is_some()
     }
 
+    pub fn is_frozen(&self) -> bool {
+        self.frozen_at_earth_unix.is_some()
+    }
+
+    /// Hold every reader at the current instant until [`Self::thaw`].
+    pub fn freeze(&mut self) {
+        self.frozen_at_earth_unix = Some(self.earth_unix_now());
+    }
+
+    /// Hold every reader at Vana'diel hour `hour`, minute zeroed, on the day they are in now (research/XiEvents/OpCodes/0x0077.md SetHour/SetMinute).
+    pub fn freeze_at_hour(&mut self, hour: u32) {
+        let since_epoch = (self.earth_unix_now() - EARTH_EPOCH_UNIX as f64).max(0.0);
+        let day_index = (since_epoch / EARTH_SECS_PER_VANA_DAY as f64).floor();
+        self.frozen_at_earth_unix = Some(
+            EARTH_EPOCH_UNIX as f64
+                + day_index * EARTH_SECS_PER_VANA_DAY as f64
+                + hour.rem_euclid(24) as f64 * EARTH_SECS_PER_VANA_HOUR as f64,
+        );
+    }
+
+    /// Release the hold so readers resume from the live clock (research/XiEvents/OpCodes/0x0078.md EnableGameTimer).
+    pub fn thaw(&mut self) {
+        self.frozen_at_earth_unix = None;
+    }
+
     pub fn earth_unix_now(&self) -> f64 {
+        if let Some(frozen) = self.frozen_at_earth_unix {
+            return frozen;
+        }
         if let (Some(anchor), Some(instant)) = (self.anchor_earth_unix, self.anchor_instant) {
             anchor as f64 + instant.elapsed().as_secs_f64()
         } else {

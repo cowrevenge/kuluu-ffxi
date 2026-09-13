@@ -5,6 +5,7 @@ use crate::hud::item_dat_root::{ItemDatRoot, ItemIconCache};
 use crate::hud::item_grid::{spawn_item_cell, CELL_GAP_PX, CELL_PX};
 use crate::hud::item_ui::transparent_placeholder;
 use crate::hud::style::{self, theme};
+use crate::hud_hide::HudHideExempt;
 use crate::input_mode::InputMode;
 use crate::snapshot::SceneState;
 
@@ -71,6 +72,12 @@ pub fn spawn_dialog_panel(mut commands: Commands, mut images: ResMut<Assets<Imag
     commands
         .spawn((
             crate::components::InGameEntity,
+            // Retail's HIDE_HUD (0x67) presets the event-message box to its own
+            // mode instead of hiding it with the HUD: CTkMsgBase.cpp DisableDraw
+            // only disables primitive drawing when field_48 == 0, so the cutscene
+            // text box stays visible through HIDE_HUD (research/XiEvents/OpCodes/
+            // 0x0067.md). The panel must survive apply_hud_hidden with it.
+            HudHideExempt,
             DialogPanel,
             Node {
                 position_type: PositionType::Absolute,
@@ -487,6 +494,9 @@ mod tests {
             text_entry: false,
             grid: None,
             custom_menu: false,
+            cancel_armed: true,
+            speaker_index: None,
+            contains_item: false,
         }
     }
 
@@ -559,5 +569,316 @@ mod tests {
         let body = format_body(&x, None, None);
         assert!(body.starts_with("Enter a name."), "got: {body}");
         assert!(body.contains("\n\n_\n"), "got: {body}");
+    }
+
+    // Headless draw-level proof for event 503 (Southern San d'Oria new-character
+    // CS): feed the render systems the session's REAL recorded frames and assert
+    // the panel nodes actually flip visible with the right text — a drawn box,
+    // not just an emitted event. Frames are the post-PT-fix decodes of
+    // ROM/25/39.DAT entries 7668+, recorded against local LSB.
+    mod event503_draw {
+        use super::*;
+        use crate::input_mode::{DialogCursor, InputMode};
+        use bevy::ecs::system::RunSystemOnce;
+
+        /// Event 503's first narration frame (ROM/25/39.DAT entry 7668), as the
+        /// session emits it: speakerless line carries a blank header, no choices.
+        fn narration_frame() -> DialogState {
+            let mut x = d();
+            x.event_id = 0x0006_01F7; // (unique_no 6 << 16) | 503
+            x.npc_id = 6;
+            x.npc_name = Some(String::new());
+            x.act_index = 1024;
+            x.event_para = 503;
+            x.prompt = Some(
+                "The fortress city of San d'Oria lies to the\nnorth on the great continent of Quon. The\nbeating heart of an ancient kingdom, it is\nhome to a thousand legends past."
+                    .to_string(),
+            );
+            x
+        }
+
+        /// Event 503's second choice menu (G4a), exact recorded strings.
+        fn g4a_menu_frame() -> DialogState {
+            let mut x = narration_frame();
+            x.prompt = Some("What would you like to hear about?".into());
+            x.choices = vec![
+                "Helping people.".into(),
+                "Hunting monsters.".into(),
+                "Making easy money.".into(),
+                "Working for my country.".into(),
+            ];
+            x
+        }
+
+        /// Bare world with the panel spawned hidden, as `add_hud_spawners` leaves it.
+        fn app_with_panel() -> App {
+            let mut app = App::new();
+            app.init_resource::<Assets<Image>>()
+                .init_resource::<SceneState>()
+                .insert_resource(InputMode::default());
+            app.world_mut().run_system_once(spawn_dialog_panel).unwrap();
+            app
+        }
+
+        fn run_draw(app: &mut App) {
+            // The two systems that own the panel's visible state; in the live app
+            // they run after `dialog_mode_sync_system` has already flipped World→Dialog.
+            app.world_mut()
+                .run_system_once(update_dialog_panel_system)
+                .unwrap();
+            app.world_mut()
+                .run_system_once(update_dialog_options_system)
+                .unwrap();
+        }
+
+        fn panel_display(world: &mut World) -> Display {
+            world
+                .query_filtered::<&Node, With<DialogPanel>>()
+                .iter(world)
+                .next()
+                .expect("panel root spawned")
+                .display
+        }
+
+        fn header_text(world: &mut World) -> String {
+            world
+                .query_filtered::<&Text, (With<DialogHeader>, Without<DialogBody>)>()
+                .iter(world)
+                .next()
+                .expect("header spawned")
+                .0
+                .clone()
+        }
+
+        fn body_text(world: &mut World) -> String {
+            world
+                .query_filtered::<&Text, (With<DialogBody>, Without<DialogHeader>)>()
+                .iter(world)
+                .next()
+                .expect("body spawned")
+                .0
+                .clone()
+        }
+
+        fn row_displays(world: &mut World) -> Vec<Display> {
+            let mut rows: Vec<(u32, Display)> = world
+                .query::<(&DialogChoiceButton, &Node)>()
+                .iter(world)
+                .map(|(b, n)| (b.choice, n.display))
+                .collect();
+            rows.sort_by_key(|(choice, _)| *choice);
+            rows.into_iter().map(|(_, d)| d).collect()
+        }
+
+        fn row_labels(world: &mut World) -> Vec<String> {
+            let mut labels: Vec<(u32, String)> = world
+                .query::<(&DialogOptionText, &Text)>()
+                .iter(world)
+                .map(|(l, t)| (l.choice, t.0.clone()))
+                .collect();
+            labels.sort_by_key(|(choice, _)| *choice);
+            labels.into_iter().map(|(_, s)| s).collect()
+        }
+
+        fn row_colors(world: &mut World) -> Vec<Color> {
+            let mut colors: Vec<(u32, Color)> = world
+                .query::<(&DialogOptionText, &TextColor)>()
+                .iter(world)
+                .map(|(l, c)| (l.choice, c.0))
+                .collect();
+            colors.sort_by_key(|(choice, _)| *choice);
+            colors.into_iter().map(|(_, c)| c).collect()
+        }
+
+        #[test]
+        fn panel_spawns_hidden_and_stays_there_without_a_frame() {
+            let mut app = app_with_panel();
+            run_draw(&mut app);
+            assert_eq!(panel_display(app.world_mut()), Display::None);
+            assert!(row_displays(app.world_mut())
+                .iter()
+                .all(|d| *d == Display::None));
+        }
+
+        #[test]
+        fn event503_narration_frame_draws_the_panel() {
+            let mut app = app_with_panel();
+            {
+                let mut state = app.world_mut().resource_mut::<SceneState>();
+                state.snapshot.dialog = Some(narration_frame());
+            }
+            // Same-frame reality: dialog_mode_sync_system has already flipped the
+            // mode, so the panel draws with a live cursor.
+            app.world_mut()
+                .insert_resource(InputMode::Dialog(DialogCursor {
+                    cursor: 0,
+                    entry: None,
+                }));
+            run_draw(&mut app);
+
+            assert_eq!(
+                panel_display(app.world_mut()),
+                Display::Flex,
+                "panel root must flip visible"
+            );
+            // Speakerless narration carries a blank header — never the player's name.
+            assert_eq!(
+                header_text(app.world_mut()),
+                "",
+                "narration header must be blank"
+            );
+            let want_body = format!(
+                "The fortress city of San d'Oria lies to the\nnorth on the great continent of Quon. The\nbeating heart of an ancient kingdom, it is\nhome to a thousand legends past.\n\n{CONTINUE_MARKER} Enter to continue"
+            );
+            assert_eq!(body_text(app.world_mut()), want_body);
+            // No choices: every pooled row stays hidden with empty labels.
+            let displays = row_displays(app.world_mut());
+            assert_eq!(displays.len(), MAX_OPTION_ROWS as usize);
+            assert!(displays.iter().all(|d| *d == Display::None));
+            assert!(row_labels(app.world_mut()).iter().all(|s| s.is_empty()));
+        }
+
+        #[test]
+        fn event503_g4a_menu_draws_four_rows_with_cursor_on_first() {
+            let mut app = app_with_panel();
+            {
+                let mut state = app.world_mut().resource_mut::<SceneState>();
+                state.snapshot.dialog = Some(g4a_menu_frame());
+            }
+            app.world_mut()
+                .insert_resource(InputMode::Dialog(DialogCursor {
+                    cursor: 0,
+                    entry: None,
+                }));
+            run_draw(&mut app);
+
+            assert_eq!(panel_display(app.world_mut()), Display::Flex);
+            // A menu's body is the prompt alone — options render as rows.
+            assert_eq!(
+                body_text(app.world_mut()),
+                "What would you like to hear about?"
+            );
+
+            let displays = row_displays(app.world_mut());
+            for (i, d) in displays.iter().enumerate() {
+                let want = if i < 4 { Display::Flex } else { Display::None };
+                assert_eq!(*d, want, "row {i} display");
+            }
+            let mut want_labels = vec![
+                format!("{CURSOR_MARKER} Helping people."),
+                "  Hunting monsters.".into(),
+                "  Making easy money.".into(),
+                "  Working for my country.".into(),
+            ];
+            want_labels.extend(std::iter::repeat(String::new()).take(12));
+            assert_eq!(row_labels(app.world_mut()), want_labels);
+            let colors = row_colors(app.world_mut());
+            assert_eq!(colors[0], theme::CURSOR, "cursor row gets the cursor color");
+            for c in &colors[1..4] {
+                assert_eq!(*c, theme::TEXT);
+            }
+        }
+
+        #[test]
+        fn event503_menu_cursor_move_relabels_rows() {
+            let mut app = app_with_panel();
+            {
+                let mut state = app.world_mut().resource_mut::<SceneState>();
+                state.snapshot.dialog = Some(g4a_menu_frame());
+            }
+            app.world_mut()
+                .insert_resource(InputMode::Dialog(DialogCursor {
+                    cursor: 0,
+                    entry: None,
+                }));
+            run_draw(&mut app);
+
+            // Player moves the cursor to row 2 ("Making easy money.").
+            let mut mode = app.world_mut().resource_mut::<InputMode>();
+            if let InputMode::Dialog(c) = &mut *mode {
+                c.cursor = 2;
+            } else {
+                panic!("expected Dialog mode");
+            }
+            run_draw(&mut app);
+
+            let labels = row_labels(app.world_mut());
+            assert_eq!(labels[0], "  Helping people.");
+            assert_eq!(labels[2], format!("{CURSOR_MARKER} Making easy money."));
+        }
+
+        /// Event 503's A6 HIDE_HUD is live through every narration beat (B1–B8)
+        /// and the gate approach; retail keeps the event-message box drawable
+        /// through it, so the panel root must survive `apply_hud_hidden` while a
+        /// plain HUD root hides.
+        #[test]
+        fn cutscene_hud_hide_keeps_the_dialog_panel_visible() {
+            use crate::hud_hide::{apply_hud_hidden, HudHidden, HudHideStash};
+            let mut app = app_with_panel();
+            app.init_resource::<HudHidden>()
+                .init_resource::<HudHideStash>();
+
+            // Node requires Visibility (bevy_ui ui_node.rs #[require]), so the
+            // panel root carries a default Inherited in any world — same as live.
+            let panel = app
+                .world_mut()
+                .query_filtered::<Entity, With<DialogPanel>>()
+                .iter(app.world())
+                .next()
+                .expect("panel root");
+            assert!(app.world().get::<Visibility>(panel).is_some());
+            let plain_root = app
+                .world_mut()
+                .spawn((Node::default(), Visibility::Inherited))
+                .id();
+
+            app.world_mut().resource_mut::<HudHidden>().cutscene = true;
+            app.world_mut().run_system_once(apply_hud_hidden).unwrap();
+
+            let panel_vis = *app
+                .world()
+                .get::<Visibility>(panel)
+                .expect("panel root visibility");
+            assert_eq!(
+                panel_vis,
+                Visibility::Inherited,
+                "retail keeps the event-message box visible through HIDE_HUD"
+            );
+            let plain_vis = *app
+                .world()
+                .get::<Visibility>(plain_root)
+                .expect("plain root visibility");
+            assert_eq!(plain_vis, Visibility::Hidden, "plain HUD roots still hide");
+        }
+
+        #[test]
+        fn closing_the_dialog_hides_the_panel_again() {
+            let mut app = app_with_panel();
+            {
+                let mut state = app.world_mut().resource_mut::<SceneState>();
+                state.snapshot.dialog = Some(g4a_menu_frame());
+            }
+            app.world_mut()
+                .insert_resource(InputMode::Dialog(DialogCursor {
+                    cursor: 0,
+                    entry: None,
+                }));
+            run_draw(&mut app);
+            assert_eq!(panel_display(app.world_mut()), Display::Flex);
+
+            // EventEnded clears the dialog (state.rs AgentEvent::EventEnded arm).
+            let mut state = app.world_mut().resource_mut::<SceneState>();
+            state.snapshot.dialog = None;
+            run_draw(&mut app);
+
+            assert_eq!(
+                panel_display(app.world_mut()),
+                Display::None,
+                "panel must hide on close"
+            );
+            assert!(row_displays(app.world_mut())
+                .iter()
+                .all(|d| *d == Display::None));
+        }
     }
 }

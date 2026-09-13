@@ -1959,6 +1959,39 @@ fn apply_event_reports_real_mutations_only() {
     }));
 }
 
+/// The dismissal edge clears the displayed frame so its advance hint cannot linger over
+/// camera moves and holds; a second dismissal with nothing up is a no-op, and the next
+/// message opcode reopens it.
+#[test]
+fn apply_event_dialog_dismissed_clears_the_frame() {
+    let mut s = SessionState::default();
+    assert!(
+        !s.apply_event(&AgentEvent::DialogDismissed),
+        "nothing up yet"
+    );
+
+    let dialog = DialogState {
+        event_id: 503,
+        prompt: Some("The coupon line".into()),
+        ..Default::default()
+    };
+    assert!(s.apply_event(&AgentEvent::EventDialog {
+        dialog: dialog.clone()
+    }));
+    assert!(s.dialog.is_some());
+
+    // The dismissal clears the frame — and reports a mutation only because it did.
+    assert!(s.apply_event(&AgentEvent::DialogDismissed));
+    assert!(s.dialog.is_none());
+    assert!(
+        !s.apply_event(&AgentEvent::DialogDismissed),
+        "already clear"
+    );
+
+    // Reopening after dismissal still mutates (the next message opcode).
+    assert!(s.apply_event(&AgentEvent::EventDialog { dialog }));
+}
+
 #[test]
 fn apply_event_dedupes_identical_entity_upserts() {
     let mut s = SessionState::default();
@@ -2236,6 +2269,7 @@ fn _agentevent_is_additive_only(x: &AgentEvent) {
         AgentEvent::ChatLine { .. } => (),
         AgentEvent::EventStart { .. } => (),
         AgentEvent::EventDialog { .. } => (),
+        AgentEvent::DialogDismissed { .. } => (),
         AgentEvent::CutsceneStarted { .. } => (),
         AgentEvent::CutsceneCue { .. } => (),
         AgentEvent::CutsceneEnded { .. } => (),
@@ -2324,6 +2358,9 @@ fn _agentevent_is_additive_only(x: &AgentEvent) {
         AgentEvent::AuctionSalesStatusReset { .. } => (),
         AgentEvent::AuctionSalesSlot { .. } => (),
         AgentEvent::AuctionCancelResult { .. } => (),
+        AgentEvent::MapOpen { .. } => (),
+        AgentEvent::MapMarkerPlaced { .. } => (),
+        AgentEvent::MapClosed => (),
     }
 }
 

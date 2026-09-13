@@ -1147,7 +1147,16 @@ fn start_cutscene_camera_tasks(
             current,
             default_chase,
         ) {
-            Some(task) => tasks.start(task),
+            Some(task) => {
+                tracing::debug!(
+                    target: "kuluu_render::scheduler_runtime",
+                    routine = %fourcc(active.name()),
+                    camera = %String::from_utf8_lossy(&stage.stage.id),
+                    total_frames,
+                    "cutscene camera route started"
+                );
+                tasks.start(task);
+            }
             None => tracing::debug!(
                 target: "kuluu_render::scheduler_runtime",
                 routine = %fourcc(active.name()),
@@ -1813,6 +1822,26 @@ pub fn dispatch_cutscene_motion(
                     }
                 }
             }
+            // 0x2D: the zone-level routine out of the global scene DAT; its camera stages
+            // drive the operator camera like any other routine's.
+            CutsceneCue::ZoneScheduler {
+                key,
+                actor,
+                partner,
+            } => {
+                let (Some(actor_id), Some(target_id)) = (resolve(actor), resolve(partner)) else {
+                    continue;
+                };
+                cache.defer(
+                    ffxi_dat::scheduler::ZONE_SCENE_DAT_ID,
+                    PendingActionDispatch::Routine {
+                        actor_id,
+                        target_id,
+                        routine: key,
+                        duration: ffxi_event::SCHEDULER_DURATION_FROM_DAT,
+                    },
+                );
+            }
             _ => {}
         }
     }
@@ -1829,7 +1858,15 @@ pub struct CutsceneActorState {
     /// Server id -> (goal in world units, speed in world units per second).
     walks: HashMap<u32, (Vec3, f32)>,
     touched: std::collections::HashSet<u32>,
+    /// Server ids hidden by a running cutscene's EVENT_HIDE cue; cleared at CutsceneEnded.
+    hidden: std::collections::HashSet<u32>,
 }
+
+/// A model root hidden by a running cutscene's EVENT_HIDE (0x4E) cue. Distance-culling and the
+/// entity sync respect it the way they already respect server-invisible entities, so an in-range
+/// hide is not re-shown on the next cull pass; release_cutscene_actors removes it at CutsceneEnded.
+#[derive(Component, Debug, Default)]
+pub struct CutsceneHidden;
 
 impl CutsceneActorState {
     pub fn is_touched(&self, id: u32) -> bool {
@@ -1845,19 +1882,28 @@ impl CutsceneActorState {
         self.walks.insert(id, (goal, speed));
     }
 
+    pub fn hide(&mut self, id: u32) {
+        self.hidden.insert(id);
+    }
+
+    pub fn unhide(&mut self, id: u32) {
+        self.hidden.remove(&id);
+    }
+
     pub fn is_empty(&self) -> bool {
-        self.touched.is_empty() && self.walks.is_empty()
+        self.touched.is_empty() && self.walks.is_empty() && self.hidden.is_empty()
     }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-/// Event-coordinate position to Bevy world units: event x/y are the ground plane and event z
-/// is height (kuluu-session's session_position does the same division).
+/// Event-coordinate position to Bevy world units: event y is height and x/z are the ground
+/// plane (research/XiEvents/OpCodes/0x001F.md MOVE integrates [0]/[2] and snaps [1]), so the
+/// vertical lands on Bevy's up axis, negated like every other placed asset.
 fn event_to_world(x: i32, y: i32, z: i32) -> Vec3 {
     Vec3::new(
         x as f32 / EVENT_COORD_UNITS,
-        z as f32 / EVENT_COORD_UNITS,
-        y as f32 / EVENT_COORD_UNITS,
+        -(y as f32 / EVENT_COORD_UNITS),
+        -(z as f32 / EVENT_COORD_UNITS),
     )
 }
 
@@ -1878,9 +1924,10 @@ pub fn apply_cutscene_actor_cues(
     tracked: Res<crate::scene::TrackedEntities>,
     table: Res<crate::entity_table::EntityTable>,
     mut state: ResMut<CutsceneActorState>,
-    q_xform_ro: Query<&Transform, With<WorldEntity>>,
     mut q_xform: Query<&mut Transform, With<WorldEntity>>,
+    mut q_vis: Query<&mut Visibility, With<WorldEntity>>,
     mut q_scheds: Query<&mut ActiveSchedulers>,
+    mut commands: Commands,
     mut last_seen: Local<u64>,
 ) {
     let new_count =
@@ -1977,10 +2024,10 @@ pub fn apply_cutscene_actor_cues(
                 else {
                     continue;
                 };
-                // Read both positions before writing either: the look-at yaw is the event
-                // convention's inverse of scene.rs's travel-heading formula.
-                let (Ok(from), Ok(to)) = (q_xform_ro.get(entity), q_xform_ro.get(target_entity))
-                else {
+                // The look-at yaw inverts scene.rs's travel-heading formula, and this system keeps
+                // one exclusive Transform query (a second shared one trips B0001), so both
+                // positions are read via .get() before the write.
+                let (Ok(from), Ok(to)) = (q_xform.get(entity), q_xform.get(target_entity)) else {
                     continue;
                 };
                 let dx = to.translation.x - from.translation.x;
@@ -2016,6 +2063,38 @@ pub fn apply_cutscene_actor_cues(
                         id,
                         key = %key.map(fourcc).unwrap_or_default(),
                         "cutscene actor stop action"
+                    );
+                }
+            }
+            CutsceneCue::ActorHide { target, hide } => {
+                // Hiding the local player model is a valid ask (EVENT_HIDE_SELF routes here too),
+                // so resolve without excluding self.
+                let Some(id) = cutscene_actor_server_id(self_id, target) else {
+                    continue;
+                };
+                let Some(&entity) = tracked.by_id.get(&id) else {
+                    continue;
+                };
+                if hide {
+                    commands.entity(entity).insert(CutsceneHidden);
+                    state.hide(id);
+                    if let Ok(mut v) = q_vis.get_mut(entity) {
+                        *v = Visibility::Hidden;
+                    }
+                    tracing::debug!(
+                        target: "kuluu_render::scheduler_runtime",
+                        id,
+                        "cutscene actor hide"
+                    );
+                } else {
+                    commands.entity(entity).remove::<CutsceneHidden>();
+                    state.unhide(id);
+                    // Leave Visibility to culling/sync: next frame it is Inherited when in range
+                    // and not server-invisible, so we never force-show an out-of-range or buried actor.
+                    tracing::debug!(
+                        target: "kuluu_render::scheduler_runtime",
+                        id,
+                        "cutscene actor show"
                     );
                 }
             }
@@ -2079,6 +2158,8 @@ pub fn release_cutscene_actors(
     mut state: ResMut<CutsceneActorState>,
     mut cursor: Local<u64>,
     mut q_xform: Query<&mut Transform, With<WorldEntity>>,
+    q_hidden: Query<Entity, With<CutsceneHidden>>,
+    mut commands: Commands,
 ) {
     let total = events.pushed_total;
     let first_global = total.saturating_sub(events.recent.len() as u64);
@@ -2107,8 +2188,14 @@ pub fn release_cutscene_actors(
             t.rotation = crate::scene::heading_to_quat(wire.heading);
         }
     }
+    // Release every cutscene-hidden model so it reappears on its last server-authored visibility
+    // (culling/sync own Visibility from the next frame once the marker is gone).
+    for e in q_hidden.iter() {
+        commands.entity(e).remove::<CutsceneHidden>();
+    }
     state.walks.clear();
     state.touched.clear();
+    state.hidden.clear();
 }
 
 // The routine the caster's cast-start effects were flattened from, so an interrupt can stop the
@@ -3097,12 +3184,16 @@ mod tests {
     #[test]
     #[cfg(not(target_arch = "wasm32"))]
     fn event_coordinates_and_heading_convert_to_bevy_space() {
-        // Event x/y are the ground plane and event z is height (session_position's division).
-        assert_eq!(event_to_world(2000, -500, 400), Vec3::new(2.0, 0.4, -0.5));
+        // Event y is height; Bevy's up axis is -native-y like every other placed asset.
+        assert_eq!(event_to_world(2000, -500, 400), Vec3::new(2.0, 0.5, -0.4));
         // A quarter circle of event heading steps is a quarter Bevy yaw, signed the way
         // scene.rs's wire-heading convention (heading_to_quat) signs it.
         let q = event_heading_to_quat(1024);
-        assert!(q.angle_between(Quat::from_rotation_y(-std::f32::consts::FRAC_PI_2)) < 1e-5);
+        // -TAU * 1024 / 4096 rounds to exactly -FRAC_PI_2 in f32, so the yaw is a
+        // quarter turn; compare against that exact quaternion rather than through
+        // angle_between, whose dot product of two identical quaternions rounds just
+        // under 1.0 and reports about 7e-4 radians for zero rotation.
+        assert_eq!(q, Quat::from_rotation_y(-std::f32::consts::FRAC_PI_2));
     }
 
     #[test]
@@ -5143,5 +5234,136 @@ mod tests {
             Some("fireefc"),
             "an unscoped caller still falls back to the flat map"
         );
+    }
+
+    // --- ActorHide cue (EVENT_HIDE 0x4E, EVENT_HIDE_SELF): event 503's B4/C6/E1 reveals ---
+
+    fn actor_cue_app() -> App {
+        let mut app = App::new();
+        app.init_resource::<crate::snapshot::EventLog>()
+            .init_resource::<crate::scene::TrackedEntities>()
+            .init_resource::<crate::entity_table::EntityTable>()
+            .init_resource::<CutsceneActorState>()
+            .add_systems(Update, apply_cutscene_actor_cues);
+        app
+    }
+
+    fn spawn_tracked_actor(app: &mut App, id: u32) -> Entity {
+        let e = app
+            .world_mut()
+            .spawn((
+                WorldEntity {
+                    id,
+                    act_index: 0,
+                    kind: kuluu_snapshot::EntityKind::Pc,
+                },
+                Transform::from_xyz(1.0, 0.0, 2.0),
+                Visibility::Inherited,
+            ))
+            .id();
+        app.world_mut()
+            .resource_mut::<crate::scene::TrackedEntities>()
+            .by_id
+            .insert(id, e);
+        e
+    }
+
+    fn push_hide(app: &mut App, target: kuluu_snapshot::CutsceneActor, hide: bool) {
+        app.world_mut()
+            .resource_mut::<crate::snapshot::EventLog>()
+            .push(kuluu_snapshot::ViewerEvent::Cutscene {
+                cue: CutsceneCue::ActorHide { target, hide },
+            });
+    }
+
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn actor_hide_cue_hides_the_entity_and_unhide_releases_it() {
+        const NPC: u32 = 0x010E_60D5; // Curilla, event 503's party lead
+        let mut app = actor_cue_app();
+        let npc = spawn_tracked_actor(&mut app, NPC);
+
+        push_hide(
+            &mut app,
+            kuluu_snapshot::CutsceneActor::Entity { server_id: NPC },
+            true,
+        );
+        app.update();
+        assert!(
+            app.world().get::<CutsceneHidden>(npc).is_some(),
+            "hide must insert the marker so culling keeps it hidden in range"
+        );
+        assert_eq!(
+            *app.world().get::<Visibility>(npc).unwrap(),
+            Visibility::Hidden
+        );
+        let state = app.world().resource::<CutsceneActorState>();
+        assert!(
+            state.hidden.contains(&NPC),
+            "hide must record the id for release"
+        );
+
+        push_hide(
+            &mut app,
+            kuluu_snapshot::CutsceneActor::Entity { server_id: NPC },
+            false,
+        );
+        app.update();
+        assert!(
+            app.world().get::<CutsceneHidden>(npc).is_none(),
+            "unhide must remove the marker; culling/sync own Visibility from here"
+        );
+        let state = app.world().resource::<CutsceneActorState>();
+        assert!(state.hidden.is_empty());
+    }
+
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn actor_hide_cue_resolves_the_local_player() {
+        // EVENT_HIDE_SELF routes here: the motion cues' `moved` closure excludes self, but a
+        // hide must not — event 503's A1 hides the player model for the whole opening.
+        const SELF: u32 = 7;
+        let mut app = actor_cue_app();
+        let player = spawn_tracked_actor(&mut app, SELF);
+        app.world_mut()
+            .resource_mut::<crate::entity_table::EntityTable>()
+            .set_self_id(Some(SELF));
+
+        push_hide(&mut app, kuluu_snapshot::CutsceneActor::LocalPlayer, true);
+        app.update();
+        assert!(app.world().get::<CutsceneHidden>(player).is_some());
+        assert_eq!(
+            *app.world().get::<Visibility>(player).unwrap(),
+            Visibility::Hidden
+        );
+    }
+
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn cutscene_ended_releases_cutscene_hidden_models() {
+        const NPC: u32 = 0x010E_60D5;
+        let mut app = actor_cue_app();
+        app.init_resource::<crate::snapshot::SceneState>()
+            .add_systems(Update, release_cutscene_actors);
+        let npc = spawn_tracked_actor(&mut app, NPC);
+
+        push_hide(
+            &mut app,
+            kuluu_snapshot::CutsceneActor::Entity { server_id: NPC },
+            true,
+        );
+        app.update();
+        assert!(app.world().get::<CutsceneHidden>(npc).is_some());
+
+        app.world_mut()
+            .resource_mut::<crate::snapshot::EventLog>()
+            .push(kuluu_snapshot::ViewerEvent::CutsceneEnded);
+        app.update();
+        assert!(
+            app.world().get::<CutsceneHidden>(npc).is_none(),
+            "ended must release the marker so the model reappears on its server visibility"
+        );
+        let state = app.world().resource::<CutsceneActorState>();
+        assert!(state.is_empty());
     }
 }

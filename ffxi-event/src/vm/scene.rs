@@ -6,8 +6,8 @@ use crate::cue::EventCue;
 
 use super::{ActorLookup, EventVm, StepResult};
 
-// research/XiEvents/OpCodes/0x001F.md CodeMOVE; 0x0032.md MainSpeed;
-// 0x0047.md FUNC_XiEvent_OpCode_0x0047.
+// research/XiEvents/OpCodes/0x001F.md CodeMOVE; 0x005A.md CodeMOVE2;
+// 0x0032.md MainSpeed; 0x0047.md FUNC_XiEvent_OpCode_0x0047.
 pub const EVENT_COORD_UNITS: f32 = 1000.0;
 pub const EVENT_HEADING_UNITS: f32 = 4096.0;
 const EVENT_SPEED_SCALE: f32 = 0.1;
@@ -22,6 +22,7 @@ const OP_REQSET_CHECKED: u8 = 0x28;
 const OP_REQUEST_WAIT: u8 = 0x29;
 const OP_REQWAIT: u8 = 0x2A;
 const OP_MOVE: u8 = 0x1F;
+const OP_CODE_MOVE2: u8 = 0x5A;
 const OP_POSITION_UPDATE: u8 = 0x47;
 const OP_SET_EVENT_POS: u8 = 0x37;
 const OP_SET_FACING: u8 = 0x39;
@@ -97,6 +98,12 @@ pub(super) struct Scene {
     controls_position: bool,
     held: bool,
     stacks: Vec<ActorStack>,
+    /// The (actor, request index) of the child holding the open dialog frame:
+    /// retail's CliEventMessOpenFlag is one global flag shared by every
+    /// entity's VM (research/XiEvents/OpCodes/0x001D.md, 0x0023.md), so a
+    /// child's PRINT_MSG parks the whole event and the player's response must
+    /// reach that child.
+    dialog_child: Option<(u32, usize)>,
 }
 
 impl EventVm {
@@ -112,6 +119,7 @@ impl EventVm {
             controls_position: false,
             held: false,
             stacks: Vec::new(),
+            dialog_child: None,
         });
     }
 
@@ -186,10 +194,12 @@ impl EventVm {
     /// with the child's actor as the event entity for cue resolution, and the
     /// shared Work_Zone is copied in before and out after (retail keeps one
     /// global zone work array across every actor's VM; work_local stays per
-    /// child). A request that parks on a dialog or server round-trip this scene
-    /// does not author is dropped rather than stalling the master, as are
-    /// requests that stop on an unrunnable opcode.
-    pub(super) fn step_stacks(&mut self) {
+    /// child). A child that parks on a dialog frame surfaces it to the host via
+    /// [`Scene::dialog_child`] instead of being dropped, because retail's single
+    /// global CliEventMessOpenFlag (research/XiEvents/OpCodes/0x001D.md) keeps
+    /// the whole event parked until the player answers that child; requests that
+    /// stop on an unrunnable opcode are still dropped.
+    pub(super) fn step_stacks(&mut self) -> Option<StepResult> {
         // Collect the active (actor, request index) pairs under one immutable
         // borrow; each step below needs &mut self.
         let active = match &self.scene {
@@ -205,23 +215,44 @@ impl EventVm {
                         .map(|(i, _)| (stack.actor, i))
                 })
                 .collect::<Vec<_>>(),
-            None => return,
+            None => return None,
         };
+        let mut surfaced: Option<StepResult> = None;
         for (actor, index) in active {
             self.copy_zone_into_child(actor, index);
             let result = self.child_step(actor, index);
             match result {
                 StepResult::Done => self.remove_request(actor, index),
-                StepResult::AwaitMessage(_)
-                | StepResult::AwaitMessageAck
-                | StepResult::AwaitChoice(_)
-                | StepResult::AwaitServerAck(_) => {
+                StepResult::AwaitMessage(_) | StepResult::AwaitChoice(_) => {
+                    // A frame is already open: the master's own, or one another
+                    // child surfaced this pass. Retail's single global flag holds
+                    // one frame at a time and authored events sequence around it
+                    // with REQWAIT/MESWAIT, so a second parker is dropped rather
+                    // than stalling the stack behind it.
+                    if self.pending_message.is_some()
+                        || self.pending_choice.is_some()
+                        || surfaced.is_some()
+                    {
+                        tracing::warn!(
+                            target: "ffxi_event::vm",
+                            actor,
+                            ?result,
+                            "dropping a child request that parked on a dialog \
+                             while another frame is open"
+                        );
+                        self.remove_request(actor, index);
+                    } else {
+                        self.scene.as_mut().unwrap().dialog_child = Some((actor, index));
+                        surfaced = Some(result);
+                    }
+                }
+                StepResult::AwaitMessageAck | StepResult::AwaitServerAck(_) => {
                     tracing::debug!(
                         target: "ffxi_event::vm",
                         actor,
                         ?result,
-                        "dropping a child request that parked on a dialog or \
-                         server round-trip this scene does not author"
+                        "a child request parked on a server round-trip this \
+                         scene does not author"
                     );
                 }
                 StepResult::Unimplemented(op) | StepResult::Spun(op) => {
@@ -232,10 +263,14 @@ impl EventVm {
                         "dropping a child request that stopped on an opcode \
                          this VM does not run"
                     );
+                    // The drop must be real: a zombie left on the stack keeps
+                    // REQWAIT/REQEW parked on it forever.
+                    self.remove_request(actor, index);
                 }
                 StepResult::Waiting | StepResult::Cancelled => {}
             }
         }
+        surfaced
     }
 
     /// Tick every actor request stack with the host clock.
@@ -322,7 +357,7 @@ impl EventVm {
         self.child_mut(actor, index).work_zone = zone;
     }
 
-    fn child_mut(&mut self, actor: u32, index: usize) -> &mut EventVm {
+    pub(super) fn child_mut(&mut self, actor: u32, index: usize) -> &mut EventVm {
         &mut self
             .scene
             .as_mut()
@@ -333,6 +368,12 @@ impl EventVm {
             .unwrap()
             .requests[index]
             .vm
+    }
+
+    /// The (actor, request index) of the child holding the open dialog frame,
+    /// if one is parked on it; see [`Scene::dialog_child`].
+    pub(super) fn open_frame_holder(&self) -> Option<(u32, usize)> {
+        self.scene.as_ref().and_then(|s| s.dialog_child)
     }
 
     /// The target actor a REQSET-family opcode names: the local player maps to
@@ -465,9 +506,13 @@ impl EventVm {
     }
 
     /// Remove a finished request from its stack; an actor whose last request
-    /// leaves is pruned so `scene_waiting` sees no remaining work.
+    /// leaves is pruned so `scene_waiting` sees no remaining work. A child that
+    /// held the open dialog frame releases it with its slot.
     fn remove_request(&mut self, actor: u32, index: usize) {
         let scene = self.scene.as_mut().unwrap();
+        if scene.dialog_child == Some((actor, index)) {
+            scene.dialog_child = None;
+        }
         if let Some(stack) = scene.stacks.iter_mut().find(|s| s.actor == actor) {
             stack.requests.remove(index);
         }
@@ -550,7 +595,7 @@ impl EventVm {
                 }
                 self.advance(op);
             }
-            OP_MOVE if self.scene.as_ref().unwrap().actor == ZONE_PLAYER_ACTOR => {
+            OP_MOVE | OP_CODE_MOVE2 if self.scene.as_ref().unwrap().actor == ZONE_PLAYER_ACTOR => {
                 if self.byte_at(1) == 0 {
                     let goal = self.position_operands(MOVE_GOAL_OFS, false);
                     self.scene.as_mut().unwrap().motion = Some(goal);
@@ -567,10 +612,12 @@ impl EventVm {
                     return Some(StepResult::Unimplemented(op));
                 }
             }
-            // 0x1F MOVE on a non-player actor: case 0 walks the event entity to
-            // its goal (the host arms the arrival hold from distance/speed),
-            // case 1 holds while that move still has frames left.
-            OP_MOVE => {
+            // 0x1F MOVE / 0x5A CodeMOVE2 on a non-player actor: case 0 walks
+            // the event entity to its goal (the host arms the arrival hold from
+            // distance/speed), case 1 holds while that move still has frames
+            // left. 0x5A is retail's uncalibrated twin of 0x1F
+            // (research/XiEvents/OpCodes/0x005A.md).
+            OP_MOVE | OP_CODE_MOVE2 => {
                 if self.byte_at(1) == 0 {
                     let goal = self.position_operands(MOVE_GOAL_OFS, false);
                     let speed = self.scene.as_ref().unwrap().speed;
@@ -709,6 +756,7 @@ impl EventVm {
                     | OP_SPEED
                     | OP_GET_POSITION
                     | OP_MOVE
+                    | OP_CODE_MOVE2
                     | OP_SET_EVENT_POS
                     | OP_SET_FACING
                     | OP_DTURA

@@ -229,6 +229,34 @@ impl EphemeralChar {
 
         Ok(())
     }
+
+    /// Insert or update one char_vars row for this fixture char — quest vars
+    /// like the hidden-quest notSeen flag that gate zone-in events.
+    pub async fn set_char_var(&self, varname: &str, value: i32) -> Result<()> {
+        let mut conn = self.pool.get_conn().await.context("DB conn for char var")?;
+
+        "INSERT INTO char_vars(charid, varname, value) VALUES (?, ?, ?) \
+         ON DUPLICATE KEY UPDATE value = VALUES(value)"
+            .with((self.charid, varname, value))
+            .ignore(&mut conn)
+            .await
+            .context("upserting char_vars row")?;
+
+        let stored: i32 = "SELECT value FROM char_vars WHERE charid = ? AND varname = ?"
+            .with((self.charid, varname))
+            .first(&mut conn)
+            .await
+            .context("reading back the char_vars row")?
+            .ok_or_else(|| anyhow!("char_vars {varname:?} missing after upsert"))?;
+
+        if stored != value {
+            return Err(anyhow!(
+                "char_vars {varname:?} read back as {stored}, expected {value}"
+            ));
+        }
+
+        Ok(())
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

@@ -20,6 +20,7 @@ fn sub_packet_events(opcode: u16, body: &[u8]) -> Vec<AgentEvent> {
         &mut std::collections::HashMap::new(),
         &mut std::collections::HashMap::new(),
         &mut std::collections::HashMap::new(),
+        &mut std::collections::HashMap::new(),
         &mut 0,
         &mut Position::default(),
         &mut false,
@@ -4268,4 +4269,39 @@ async fn bootstrap_scenario(scenario: BootstrapReply) {
             "{scenario:?}: no post-bootstrap packet may precede self LOGIN"
         );
     }
+}
+
+#[test]
+fn speaker_attribution_resolves_the_frame_speaker_not_the_trigger() {
+    let mut target_cache: std::collections::HashMap<u16, u32> = std::collections::HashMap::new();
+    target_cache.insert(7u16, 0x010E_60D5u32);
+    let mut name_cache: std::collections::HashMap<u32, String> = std::collections::HashMap::new();
+    name_cache.insert(0x010E_60D5u32, "Curilla".to_string());
+
+    // A frame with a speaker resolves to that entity's name.
+    let mut d = crate::state::DialogState {
+        npc_name: None,
+        speaker_index: Some(7),
+        ..Default::default()
+    };
+    super::attribute_event_speaker(&mut d, &target_cache, &name_cache);
+    assert_eq!(d.npc_name.as_deref(), Some("Curilla"));
+
+    // A speakerless frame gets a blank header (retail's no-speaker lines).
+    let mut d = crate::state::DialogState {
+        npc_name: None,
+        speaker_index: None,
+        ..Default::default()
+    };
+    super::attribute_event_speaker(&mut d, &target_cache, &name_cache);
+    assert_eq!(d.npc_name.as_deref(), Some(""));
+
+    // An unresolvable index blanks rather than guessing the trigger NPC.
+    let mut d = crate::state::DialogState {
+        npc_name: None,
+        speaker_index: Some(99),
+        ..Default::default()
+    };
+    super::attribute_event_speaker(&mut d, &target_cache, &name_cache);
+    assert_eq!(d.npc_name.as_deref(), Some(""));
 }

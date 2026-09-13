@@ -21,6 +21,7 @@ use kuluu_snapshot::{CutsceneCue, ViewerEvent};
 use crate::hud_hide::{HudHidden, HudHideExempt};
 use crate::scheduler_runtime::ROUTINE_FPS;
 use crate::snapshot::EventLog;
+use crate::vana_time::VanaClock;
 
 /// The screen colour that leaves the scene alone, in
 /// [`ffxi_dat::scheduler::ScreenColor::tint`] units.
@@ -243,11 +244,23 @@ impl ScreenFade {
 pub struct CutsceneMode {
     pub active: bool,
     pub camera_locked: bool,
+    /// The last 0x67/0x68 the running event staged; `None` until one arrives.
+    pub(crate) hud_event: Option<bool>,
 }
 
 impl CutsceneMode {
     fn end(&mut self) {
         *self = Self::default();
+    }
+
+    /// An active session holding the camera, no 0x67/0x68 staged yet — what tests construct
+    /// when they need a locked cutscene without driving the cue stream.
+    pub fn active_locked() -> Self {
+        Self {
+            active: true,
+            camera_locked: true,
+            hud_event: None,
+        }
     }
 }
 
@@ -338,8 +351,14 @@ pub fn apply_screen_fade(
 }
 
 pub fn apply_cutscene_hud_hide(mode: Res<CutsceneMode>, mut hidden: ResMut<HudHidden>) {
-    if hidden.cutscene != mode.camera_locked {
-        hidden.cutscene = mode.camera_locked;
+    // 0x67/0x68 drive the whole-HUD flag independently of the camera (research/XiEvents/OpCodes/
+    // 0x0068.md), so an explicit show wins over the lock default.
+    let cutscene = match mode.hud_event {
+        Some(hide) => hide,
+        None => mode.camera_locked,
+    };
+    if hidden.cutscene != cutscene {
+        hidden.cutscene = cutscene;
     }
 }
 
@@ -380,6 +399,7 @@ fn apply_cue(
 ) {
     match *cue {
         CutsceneCue::CameraLock { lock } => mode.camera_locked = lock,
+        CutsceneCue::HudHide { hide } => mode.hud_event = Some(hide),
         CutsceneCue::Scheduler {
             dat_id,
             tag,
@@ -400,6 +420,41 @@ fn apply_cue(
         // scheduler_runtime::dispatch_cutscene_motion.
         _ => {}
     }
+}
+
+/// The 0x77/0x78 game-clock hold, drained on its own cursor because [`VanaClock`] outlives this
+/// module's other systems; a session exit releases whatever it left held.
+pub fn drain_cutscene_clock(
+    events: Res<EventLog>,
+    mut cursor: Local<u64>,
+    clock: Option<ResMut<VanaClock>>,
+) {
+    let Some(mut clock) = clock else {
+        return;
+    };
+    let total = events.pushed_total;
+    let first_global = total.saturating_sub(events.recent.len() as u64);
+    for g in (*cursor).max(first_global)..total {
+        match &events.recent[(g - first_global) as usize] {
+            ViewerEvent::Cutscene { cue } => match cue {
+                CutsceneCue::ClockHold { stop: true, hour } => match *hour {
+                    Some(hour) => clock.freeze_at_hour(hour),
+                    None => clock.freeze(),
+                },
+                CutsceneCue::ClockHold { stop: false, .. } => clock.thaw(),
+                _ => {}
+            },
+            ViewerEvent::CutsceneEnded
+            | ViewerEvent::ZoneChanged { .. }
+            | ViewerEvent::Disconnected { .. } => {
+                if clock.is_frozen() {
+                    clock.thaw();
+                }
+            }
+            _ => {}
+        }
+    }
+    *cursor = total;
 }
 
 fn fade_total_frames(program: &FadeProgram) -> u32 {
@@ -477,6 +532,7 @@ impl Plugin for CutscenePlugin {
                     apply_cutscene_hud_hide,
                     tick_screen_fade,
                     apply_screen_fade,
+                    drain_cutscene_clock,
                 )
                     .chain(),
             );
@@ -660,6 +716,137 @@ mod tests {
         step(&mut app, 1.0);
         assert!(!app.world().resource::<HudHidden>().cutscene);
         assert!(!app.world().resource::<CutsceneMode>().camera_locked);
+    }
+
+    /// Event 503's D1 shows the HUD while the camera stays locked until H7: an explicit
+    /// 0x68 must win over the lock default, and both clear at session end.
+    #[test]
+    fn an_explicit_show_hud_wins_over_the_camera_lock_and_clears_at_session_end() {
+        let mut app = test_app();
+        push(&mut app, ViewerEvent::CutsceneStarted { event_id: 503 });
+        push(
+            &mut app,
+            ViewerEvent::Cutscene {
+                cue: CutsceneCue::CameraLock { lock: true },
+            },
+        );
+        step(&mut app, 1.0);
+        assert!(
+            app.world().resource::<HudHidden>().cutscene,
+            "camera lock hides the HUD by default"
+        );
+
+        push(
+            &mut app,
+            ViewerEvent::Cutscene {
+                cue: CutsceneCue::HudHide { hide: false },
+            },
+        );
+        step(&mut app, 1.0);
+        assert!(
+            !app.world().resource::<HudHidden>().cutscene,
+            "explicit show wins over the lock"
+        );
+
+        push(
+            &mut app,
+            ViewerEvent::Cutscene {
+                cue: CutsceneCue::HudHide { hide: true },
+            },
+        );
+        step(&mut app, 1.0);
+        assert!(
+            app.world().resource::<HudHidden>().cutscene,
+            "explicit hide re-hides"
+        );
+
+        push(&mut app, ViewerEvent::CutsceneEnded);
+        step(&mut app, 1.0);
+        assert!(
+            !app.world().resource::<HudHidden>().cutscene,
+            "cleared at session end"
+        );
+    }
+
+    fn clock_app() -> App {
+        let mut app = App::new();
+        app.init_resource::<Time>()
+            .init_resource::<EventLog>()
+            .insert_resource(VanaClock::anchored_at_hour(12.0))
+            .add_systems(Update, drain_cutscene_clock);
+        app
+    }
+
+    fn clock_hold(stop: bool, hour: Option<u32>) -> ViewerEvent {
+        ViewerEvent::Cutscene {
+            cue: CutsceneCue::ClockHold { stop, hour },
+        }
+    }
+
+    #[test]
+    fn a_stop_clock_cue_freezes_the_vana_clock_at_the_authored_hour() {
+        let mut app = clock_app();
+        step(&mut app, 1.0);
+        assert!(
+            app.world().resource::<VanaClock>().earth_unix_now()
+                >= crate::vana_time::EARTH_EPOCH_UNIX as f64
+                    + 12.0 * crate::vana_time::EARTH_SECS_PER_VANA_HOUR as f64,
+            "anchored at noon"
+        );
+
+        push(&mut app, clock_hold(true, Some(8)));
+        step(&mut app, 60.0);
+        let frozen = app.world().resource::<VanaClock>().earth_unix_now();
+        assert_eq!(
+            frozen,
+            crate::vana_time::EARTH_EPOCH_UNIX as f64
+                + 8.0 * crate::vana_time::EARTH_SECS_PER_VANA_HOUR as f64,
+            "held at 8:00 on the anchored day"
+        );
+
+        step(&mut app, 600.0);
+        assert_eq!(
+            app.world().resource::<VanaClock>().earth_unix_now(),
+            frozen,
+            "still held across frames"
+        );
+
+        push(&mut app, clock_hold(false, None));
+        step(&mut app, 1.0);
+        let live = app.world().resource::<VanaClock>().earth_unix_now();
+        assert!(
+            live > frozen,
+            "thawed back to the running anchor: {live} vs {frozen}"
+        );
+    }
+
+    #[test]
+    fn a_session_exit_releases_a_still_held_clock() {
+        let mut app = clock_app();
+        push(&mut app, clock_hold(true, Some(8)));
+        step(&mut app, 1.0);
+        assert!(app.world().resource::<VanaClock>().is_frozen());
+
+        push(&mut app, ViewerEvent::CutsceneEnded);
+        step(&mut app, 1.0);
+        let clock = app.world().resource::<VanaClock>();
+        assert!(!clock.is_frozen(), "released at session end");
+        assert!(
+            clock.earth_unix_now()
+                >= crate::vana_time::EARTH_EPOCH_UNIX as f64
+                    + 12.0 * crate::vana_time::EARTH_SECS_PER_VANA_HOUR as f64,
+            "back on the running anchor"
+        )
+    }
+
+    #[test]
+    fn freeze_at_hour_lands_on_the_zero_minute_of_that_day() {
+        let mut clock = VanaClock::default();
+        clock.freeze_at_hour(8);
+        assert_eq!(
+            crate::vana_time::format_vana_time(clock.earth_unix_secs_now()),
+            "8:00"
+        );
     }
 
     #[test]

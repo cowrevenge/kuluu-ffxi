@@ -337,6 +337,9 @@ pub fn dialog_to_wire(d: &DialogState) -> wire::DialogState {
         text_entry: d.text_entry,
         grid: d.grid.as_ref().map(grid_to_wire),
         custom_menu: d.custom_menu,
+        cancel_armed: d.cancel_armed,
+        speaker_index: d.speaker_index,
+        contains_item: d.contains_item,
     }
 }
 
@@ -486,6 +489,21 @@ pub fn event_to_viewer_event(ev: AgentEvent) -> Option<wire::ViewerEvent> {
             cue: cutscene_cue_to_wire(cue),
         }),
         AgentEvent::CutsceneEnded => Some(wire::ViewerEvent::CutsceneEnded),
+        AgentEvent::MapOpen { map_id, tutorial } => {
+            Some(wire::ViewerEvent::MapOpen { map_id, tutorial })
+        }
+        AgentEvent::MapMarkerPlaced {
+            map_id,
+            x_milli,
+            y_milli,
+            label,
+        } => Some(wire::ViewerEvent::MapMarkerPlaced {
+            map_id,
+            x_milli,
+            y_milli,
+            label,
+        }),
+        AgentEvent::MapClosed => Some(wire::ViewerEvent::MapClosed),
 
         _ => None,
     }
@@ -530,6 +548,8 @@ fn cutscene_cue_to_wire(cue: crate::state::CutsceneCue) -> wire::CutsceneCue {
             hide,
         },
         Cue::CameraLock { lock } => wire::CutsceneCue::CameraLock { lock },
+        Cue::HudHide { hide } => wire::CutsceneCue::HudHide { hide },
+        Cue::ClockHold { stop, hour } => wire::CutsceneCue::ClockHold { stop, hour },
         Cue::Mount {
             target,
             status_event,
@@ -551,6 +571,15 @@ fn cutscene_cue_to_wire(cue: crate::state::CutsceneCue) -> wire::CutsceneCue {
             actor: cutscene_actor_to_wire(actor),
             partner: cutscene_actor_to_wire(partner),
             key,
+        },
+        Cue::ZoneScheduler {
+            key,
+            actor,
+            partner,
+        } => wire::CutsceneCue::ZoneScheduler {
+            key,
+            actor: cutscene_actor_to_wire(actor),
+            partner: cutscene_actor_to_wire(partner),
         },
         Cue::ActorMove {
             actor,

@@ -185,6 +185,20 @@ impl DialogRunner {
         self.vm.pending_tag()
     }
 
+    /// Whether ESC may cancel this event right now (retail's `CliEventCancelFlag`;
+    /// armed at start, flipped by the 0x2E/0x42 opcodes).
+    pub fn cancel_armed(&self) -> bool {
+        self.vm.cancel_armed()
+    }
+
+    /// True while a dialog frame (message or choice menu) is displayed and parked
+    /// on its wait — retail's CliEventMessOpenFlag up. The host shows the box for
+    /// exactly this span; dismissal clears it, so the box hides until the next
+    /// message opcode reopens it.
+    pub fn message_awaiting(&self) -> bool {
+        self.vm.message_awaiting()
+    }
+
     /// Cancel out of the current frame (the Esc path): a menu reports the
     /// cancel selection, a message invalidates the open dialog; either way the
     /// VM ends the event with [`EVENT_CANCELLED_END_PARA`].

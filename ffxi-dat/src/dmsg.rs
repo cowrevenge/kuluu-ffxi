@@ -21,6 +21,14 @@ const OFFSET_XOR: u32 = 0x8080_8080;
 const MAGIC_BASE: u32 = 0x1000_0000;
 
 // DialogTable control codes (POLUtils Things/DialogTableEntry.cs).
+/// Text X position for the message-box renderer: two position bytes
+/// (`p1 << 8 | p0`), no visible text. The zone-230 event-503 narration lines
+/// open with `set_x(80)` so their subtitles anchor off the dialog frame —
+/// consuming the pair keeps its parameter bytes from leaking as "PT".
+/// (research/cexi-docs/dialog/format.md, set_x row.)
+const CC_SET_X: u8 = 0x02;
+/// Text Y position — see [`CC_SET_X`]; the narration lines' `set_y(340)`.
+const CC_SET_Y: u8 = 0x03;
 pub(crate) const CC_NEWLINE: u8 = 0x07;
 const CC_PLAYER_NAME: u8 = 0x08;
 const CC_SPEAKER_NAME: u8 = 0x09;
@@ -408,6 +416,8 @@ fn decode_dialog_text(bytes: &[u8]) -> String {
     while i < bytes.len() {
         let b = bytes[i];
         match b {
+            // Layout directives: consume both position bytes, emit nothing.
+            CC_SET_X | CC_SET_Y => i += 2,
             CC_NEWLINE => out.push('\n'),
             CC_PLAYER_NAME => push_plain(&mut out, MARKER_PLAYER_NAME),
             CC_SPEAKER_NAME => push_plain(&mut out, MARKER_SPEAKER_NAME),
@@ -552,6 +562,58 @@ mod tests {
         let entry = [b'H', b'i', b' ', 0x08, b',', b' ', 0x0a, 5];
         let dat = StringDat::parse(&synth(&[&entry])).expect("parse");
         assert_eq!(dat.text(0).as_deref(), Some("Hi {PlayerName}, {Num:5}"));
+    }
+
+    /// The event-503 narration lines open with `set_x(80)` + NUL + `set_y(340)`:
+    /// the position bytes must not leak as "PT" before the text, and the NUL
+    /// between them does not stop decoding (the text lives in the second
+    /// NUL-separated sub-string).
+    #[test]
+    fn narration_position_prefix_decodes_clean() {
+        let entry = [
+            CC_SET_X, 0x50, 0x00, CC_SET_Y, 0x54, 0x01, b'T', b'h', b'e', CC_NEWLINE, b'n', b'o',
+            b'r', b't', b'h', CC_AUTO, 0x34, 9, CC_AUTO, 0x31, 0x00, CC_NEWLINE,
+        ];
+        let dat = StringDat::parse(&synth(&[&entry])).expect("parse");
+        assert_eq!(
+            dat.text(0).as_deref(),
+            Some("The\nnorth{Auto:52}{Auto:49}\n")
+        );
+    }
+
+    /// Decodes the real zone-230 event-503 narration line to clean text — no
+    /// "PT" position-byte leak. Self-skips without game files; located by
+    /// content in a window around the observed index, which drifts with client
+    /// patch level.
+    #[test]
+    fn real_zone230_event503_narration_line_decodes_clean() {
+        let Some(root) = crate::archive::open_test_install() else {
+            eprintln!("skipping: no FFXI install");
+            return;
+        };
+        const NARRATION_LINE_PIN: usize = 7668;
+        let file_id = crate::zone_dat::zone_id_to_string_file_id(ZONE230_ID)
+            .expect("zone 230 has a string DAT mapping");
+        let loc = root.resolve(file_id).expect("string DAT resolves");
+        let bytes = std::fs::read(loc.path_under(&root)).expect("string DAT readable");
+        let dat = StringDat::parse(&bytes).expect("zone 230 dialog table parses");
+        let pin = NARRATION_LINE_PIN;
+        let lo = pin.saturating_sub(256);
+        let hi = pin + 512;
+        let text = (lo..hi.min(dat.len()))
+            .filter_map(|i| dat.text(i))
+            .find(|t| t.contains("fortress city of San d'Oria"));
+        let Some(text) = text else {
+            panic!(
+                "no 'fortress city of San d'Oria' entry in {lo}..{hi} of a {}-entry table; \n                 install patch skew beyond the window (pin {pin} holds {:?})",
+                dat.len(),
+                dat.text(pin)
+            );
+        };
+        assert!(
+            text.starts_with("The fortress city"),
+            "position bytes leaked into the narration line: {text:?}"
+        );
     }
 
     #[test]
@@ -841,6 +903,10 @@ mod tests {
     /// DAT indexes). Newer LSB pins say 6438 because SE later inserted
     /// entries; that is client-version skew, not an index-base convention.
     const ZONE230_KEYITEM_OBTAINED_MAY2023: usize = 6437;
+    /// Message index Southern San d'Oria event 503's epilogue SAY references —
+    /// the "give coupon" line that inlines the Adventurer's Coupon name
+    /// (vendor/server/sql/item_basic.sql item 536) through an item inline tag.
+    const ZONE230_EVENT503_COUPON_LINE: usize = 7747;
     const ZONE230_ID: u16 = 230;
 
     /// Decodes the real zone-230 KEYITEM_OBTAINED entry to the `{KeyItem:0}`
@@ -877,6 +943,45 @@ mod tests {
         assert!(
             text.contains(&format!("{{{MARKER_KEY_ITEM}:0}}")),
             "expected a {{KeyItem:0}} marker, got {text:?}"
+        );
+    }
+
+    /// Decodes the real zone-230 event-503 coupon line to an `{Item:0}` marker
+    /// (the tag's `82 80` word is a message-parameter reference to slot 0; the
+    /// byte after the tag drops as an unknown control code). Self-skips without
+    /// game files; located by content in a window around the observed index,
+    /// which drifts with client patch level.
+    #[test]
+    fn real_zone230_event503_coupon_line_decodes_item_marker() {
+        let Some(root) = crate::archive::open_test_install() else {
+            eprintln!("skipping: no FFXI install");
+            return;
+        };
+        let file_id = crate::zone_dat::zone_id_to_string_file_id(ZONE230_ID)
+            .expect("zone 230 has a string DAT mapping");
+        let loc = root.resolve(file_id).expect("string DAT resolves");
+        let bytes = std::fs::read(loc.path_under(&root)).expect("string DAT readable");
+        let dat = StringDat::parse(&bytes).expect("zone 230 dialog table parses");
+        let pin = ZONE230_EVENT503_COUPON_LINE;
+        let lo = pin.saturating_sub(256);
+        let hi = pin + 512;
+        let text = (lo..hi.min(dat.len()))
+            .filter_map(|i| dat.text(i))
+            .find(|t| t.contains("Give it to Ailevia"));
+        let Some(text) = text else {
+            panic!(
+                "no 'Give it to Ailevia' entry in {lo}..{hi} of a {}-entry table; \n                 install patch skew beyond the window (pin {pin} holds {:?})",
+                dat.len(),
+                dat.text(pin)
+            );
+        };
+        assert!(
+            text.contains(&format!("{{{MARKER_ITEM}:0}}")),
+            "expected an {{Item:0}} marker, got {text:?}"
+        );
+        assert!(
+            !text.contains(char::REPLACEMENT_CHARACTER),
+            "tag bytes leaked as unmapped text: {text:?}"
         );
     }
 

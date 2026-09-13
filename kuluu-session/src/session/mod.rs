@@ -377,6 +377,8 @@ async fn run_map_session(
     let mut self_act_index: Option<u16> = None;
     let mut name_cache: std::collections::HashMap<u32, String> = Default::default();
 
+    let mut target_cache: std::collections::HashMap<u16, u32> = Default::default();
+
     let mut kind_cache: std::collections::HashMap<u32, crate::state::EntityKind> =
         Default::default();
 
@@ -422,6 +424,7 @@ async fn run_map_session(
         bootstrap.char_name,
         &mut self_act_index,
         &mut name_cache,
+        &mut target_cache,
         &mut kind_cache,
         &mut claim_cache,
         &mut name_miss_dedup,
@@ -475,6 +478,7 @@ async fn run_map_session(
                 bootstrap.char_name,
                 &mut self_act_index,
                 &mut name_cache,
+                &mut target_cache,
                 &mut kind_cache,
                 &mut claim_cache,
                 &mut name_miss_dedup,
@@ -586,6 +590,7 @@ async fn run_map_session(
         event_tx.clone(),
         cfg.user_driven_events,
         name_cache,
+        target_cache,
         kind_cache,
         claim_cache,
         name_miss_dedup,
@@ -646,6 +651,7 @@ async fn drain_zone_flood(
     self_char_name: &str,
     self_act_index: &mut Option<u16>,
     name_cache: &mut std::collections::HashMap<u32, String>,
+    target_cache: &mut std::collections::HashMap<u16, u32>,
     kind_cache: &mut std::collections::HashMap<u32, crate::state::EntityKind>,
     claim_cache: &mut std::collections::HashMap<u32, u32>,
     name_miss_dedup: &mut std::collections::HashMap<
@@ -704,6 +710,7 @@ async fn drain_zone_flood(
                         self_char_name,
                         self_act_index,
                         name_cache,
+                        target_cache,
                         kind_cache,
                         claim_cache,
                         name_miss_dedup,
@@ -828,6 +835,8 @@ fn handle_sub_packet(
     self_char_name: &str,
     self_act_index: &mut Option<u16>,
     name_cache: &mut std::collections::HashMap<u32, String>,
+
+    target_cache: &mut std::collections::HashMap<u16, u32>,
 
     kind_cache: &mut std::collections::HashMap<u32, crate::state::EntityKind>,
 
@@ -1163,6 +1172,8 @@ fn handle_sub_packet(
                 } else {
                     wire_name
                 };
+
+                target_cache.insert(head.act_index, head.unique_no);
 
                 let name = name.map(|n| n.replace('_', " "));
                 if let Some(n) = name.as_ref() {
@@ -1790,6 +1801,7 @@ fn handle_sub_packet(
                     prompt: Some(title),
                     choices: options,
                     custom_menu: true,
+                    cancel_armed: true, // ESC answers "Canceled." via the customMenu branch
                     ..Default::default()
                 };
                 let _ = event_tx.send(AgentEvent::EventDialog { dialog });
@@ -2246,6 +2258,8 @@ async fn begin_server_event(
     cutscene: &mut crate::event_dialog::CutsceneScope,
     pending_event_end: &mut Vec<(u32, u16, u16)>,
     auto_event_end: &mut Vec<(u32, u16, u16, u32)>,
+    name_cache: &std::collections::HashMap<u32, String>,
+    target_cache: &std::collections::HashMap<u16, u32>,
 ) {
     let (zone_id, unique_no, act_index, event_id) = (
         trigger.event_zone,
@@ -2255,6 +2269,10 @@ async fn begin_server_event(
     );
     let outcome = dialog_session.begin(trigger);
     let cues = dialog_session.take_cues();
+    // Syncs the up→down edge detector for this event's first frame.
+    if dialog_session.take_message_closed() {
+        let _ = event_tx.send(AgentEvent::DialogDismissed);
+    }
     // A choreography-only script runs to completion inside `begin`, so its
     // cues have to open and close a session of their own or nothing downstream
     // would ever see them.
@@ -2268,11 +2286,12 @@ async fn begin_server_event(
         }
     }
     match outcome {
-        crate::event_dialog::Begin::Frame(dialog) => {
+        crate::event_dialog::Begin::Frame(mut dialog) => {
             cutscene.start(dialog.event_id, event_tx);
             let _ = event_tx.send(AgentEvent::EventStart {
                 event_id: dialog.event_id,
             });
+            attribute_event_speaker(&mut dialog, target_cache, name_cache);
             emit_event_speech_to_chat(event_tx, &dialog);
             let _ = event_tx.send(AgentEvent::EventDialog { dialog });
             pending_event_end.push((unique_no, act_index, event_id));
@@ -2444,6 +2463,9 @@ async fn keepalive_loop(
     event_tx: broadcast::Sender<AgentEvent>,
     user_driven_events: bool,
     mut name_cache: std::collections::HashMap<u32, String>,
+    // Target index -> unique_no for live entities; resolves a VM frame's
+    // speaker_index to the entity that speaks it.
+    mut target_cache: std::collections::HashMap<u16, u32>,
     mut kind_cache: std::collections::HashMap<u32, crate::state::EntityKind>,
     mut claim_cache: std::collections::HashMap<u32, u32>,
     mut name_miss_dedup: std::collections::HashMap<
@@ -2645,8 +2667,12 @@ async fn keepalive_loop(
                             for cue in cues {
                                 cutscene.push(cue, &event_tx);
                             }
+                            if dialog_session.take_message_closed() {
+                                let _ = event_tx.send(AgentEvent::DialogDismissed);
+                            }
                             match advance {
-                                crate::event_dialog::Advance::Frame(dialog) => {
+                                crate::event_dialog::Advance::Frame(mut dialog) => {
+                                    attribute_event_speaker(&mut dialog, &target_cache, &name_cache);
                                     emit_event_speech_to_chat(&event_tx, &dialog);
                                     let _ = event_tx.send(AgentEvent::EventDialog { dialog });
                                 }
@@ -2827,8 +2853,12 @@ async fn keepalive_loop(
                             for cue in cues {
                                 cutscene.push(cue, &event_tx);
                             }
+                            if dialog_session.take_message_closed() {
+                                let _ = event_tx.send(AgentEvent::DialogDismissed);
+                            }
                             match advance {
-                                crate::event_dialog::Advance::Frame(dialog) => {
+                                crate::event_dialog::Advance::Frame(mut dialog) => {
+                                    attribute_event_speaker(&mut dialog, &target_cache, &name_cache);
                                     emit_event_speech_to_chat(&event_tx, &dialog);
                                     let _ = event_tx.send(AgentEvent::EventDialog { dialog });
                                 }
@@ -3979,8 +4009,12 @@ async fn keepalive_loop(
                     for cue in cues {
                         cutscene.push(cue, &event_tx);
                     }
+                    if dialog_session.take_message_closed() {
+                        let _ = event_tx.send(AgentEvent::DialogDismissed);
+                    }
                     match advance {
-                        crate::event_dialog::Advance::Frame(dialog) => {
+                        crate::event_dialog::Advance::Frame(mut dialog) => {
+                            attribute_event_speaker(&mut dialog, &target_cache, &name_cache);
                             emit_event_speech_to_chat(&event_tx, &dialog);
                             let _ = event_tx.send(AgentEvent::EventDialog { dialog });
                         }
@@ -4131,6 +4165,8 @@ async fn keepalive_loop(
                             &mut cutscene,
                             &mut pending_event_end,
                             &mut auto_event_end,
+                            &name_cache,
+                            &target_cache,
                         )
                         .await;
                     }
@@ -4533,6 +4569,8 @@ async fn keepalive_loop(
                                         &mut cutscene,
                                         &mut pending_event_end,
                                         &mut auto_event_end,
+                                        &name_cache,
+                                        &target_cache,
                                     )
                                     .await;
                                     continue;
@@ -4580,8 +4618,12 @@ async fn keepalive_loop(
                                 for cue in dialog_session.take_cues() {
                                     cutscene.push(cue, &event_tx);
                                 }
+                                if dialog_session.take_message_closed() {
+                                    let _ = event_tx.send(AgentEvent::DialogDismissed);
+                                }
                                 match advance {
-                                    crate::event_dialog::Advance::Frame(dialog) => {
+                                    crate::event_dialog::Advance::Frame(mut dialog) => {
+                                        attribute_event_speaker(&mut dialog, &target_cache, &name_cache);
                                         emit_event_speech_to_chat(&event_tx, &dialog);
                                         let _ = event_tx.send(AgentEvent::EventDialog { dialog });
                                     }
@@ -4656,6 +4698,7 @@ async fn keepalive_loop(
                                 &character_name,
                                 &mut self_act_index,
                                 &mut name_cache,
+                                &mut target_cache,
                                 &mut kind_cache,
                                 &mut claim_cache,
                                 &mut name_miss_dedup,
@@ -6007,6 +6050,9 @@ fn decode_event_0x032(data: &[u8]) -> Option<crate::state::DialogState> {
         text_entry: false,
         grid: None,
         custom_menu: false,
+        cancel_armed: true,
+        speaker_index: None,
+        contains_item: false,
     })
 }
 
@@ -6055,6 +6101,9 @@ fn decode_event_0x033(data: &[u8]) -> Option<crate::state::DialogState> {
         text_entry: false,
         grid: None,
         custom_menu: false,
+        cancel_armed: true,
+        speaker_index: None,
+        contains_item: false,
     })
 }
 
@@ -6092,6 +6141,9 @@ fn decode_event_0x034(data: &[u8]) -> Option<crate::state::DialogState> {
         text_entry: false,
         grid: None,
         custom_menu: false,
+        cancel_armed: true,
+        speaker_index: None,
+        contains_item: false,
     })
 }
 
@@ -6266,6 +6318,24 @@ fn decode_abil_recast(data: &[u8]) -> Vec<(u16, u32)> {
         out.push((timer_id, now_unix.saturating_add(timer as u32)));
     }
     out
+}
+
+/// Attribute a VM frame to its speaker: resolve the frame's target index to an
+/// entity name for the dialog header and chat attribution. A speakerless frame
+/// (retail's no-speaker lines) or one whose index cannot be resolved gets a
+/// blank header rather than a guessed one.
+fn attribute_event_speaker(
+    dialog: &mut crate::state::DialogState,
+    target_cache: &std::collections::HashMap<u16, u32>,
+    name_cache: &std::collections::HashMap<u32, String>,
+) {
+    let resolved = dialog
+        .speaker_index
+        .and_then(|idx| target_cache.get(&idx).and_then(|id| name_cache.get(id)));
+    dialog.npc_name = match resolved {
+        Some(name) => Some(name.clone()),
+        None => Some(String::new()),
+    };
 }
 
 /// Copy an NPC's event *speech* (a VM message frame — `prompt` set, no `choices`)

@@ -76,8 +76,8 @@ impl MapClient {
         seed: [u8; 20],
         local: &str,
     ) -> Result<Self> {
-        let std_socket = std::net::UdpSocket::bind(local)
-            .with_context(|| format!("UDP bind {local}"))?;
+        let std_socket =
+            std::net::UdpSocket::bind(local).with_context(|| format!("UDP bind {local}"))?;
         Self::finish(server, seed, UdpSocket::from_std(std_socket)?)
     }
 

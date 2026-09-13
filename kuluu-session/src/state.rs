@@ -970,6 +970,24 @@ pub struct DialogState {
     /// (`AgentCommand::CustomMenuRespond`), not an `EndEventChoice`.
     #[serde(default)]
     pub custom_menu: bool,
+    /// Whether ESC may cancel this event (retail's CliEventCancelFlag; the VM's
+    /// 0x42 disarms it in cutscenes that lock you in, 0x2E re-arms). Defaults to
+    /// true so frames from an unknown producer stay cancellable.
+    #[serde(default = "cancel_armed_default")]
+    pub cancel_armed: bool,
+    /// The speaking entity's target index for this frame; `None` is a line the
+    /// bytecode prints with no speaker (retail renders those headerless).
+    #[serde(default)]
+    pub speaker_index: Option<u16>,
+    /// The line carried an item / key-item marker (`{Item:N}` / `{KeyItem:N}`)
+    /// before substitution: enternity-style auto-advance leaves such lines
+    /// manual (the addon's "sentences that contain items will not be skipped").
+    #[serde(default)]
+    pub contains_item: bool,
+}
+
+fn cancel_armed_default() -> bool {
+    true
 }
 
 /// Row-major grid overlay for a choice frame (`cells.len() == rows * cols`).
@@ -1029,6 +1047,18 @@ pub enum CutsceneCue {
     CameraLock {
         lock: bool,
     },
+    /// 0x67/0x68 HIDE_HUD/SHOW_HUD: hide or show the entire HUD UI for the
+    /// rest of the cutscene (research/XiEvents/OpCodes/0x0067.md, 0x0068.md).
+    HudHide {
+        hide: bool,
+    },
+    /// 0x77/0x78 STOP_CLOCK/RESTORE_CLOCK: hold the game clock at Vana'diel
+    /// hour `hour`, or release it back to server time
+    /// (research/XiEvents/OpCodes/0x0077.md, 0x0078.md).
+    ClockHold {
+        stop: bool,
+        hour: Option<u32>,
+    },
     Mount {
         target: CutsceneActor,
         status_event: u8,
@@ -1040,6 +1070,14 @@ pub enum CutsceneCue {
         actor: CutsceneActor,
         partner: CutsceneActor,
         key: ffxi_event::FourCc,
+    },
+    /// Start zone-level scheduler routine `key` out of the global scene DAT
+    /// over the two actors (the 0x2D/0x54 pair, research/XiEvents/OpCodes/
+    /// 0x002D.md).
+    ZoneScheduler {
+        key: ffxi_event::FourCc,
+        actor: CutsceneActor,
+        partner: CutsceneActor,
     },
     /// Walk `actor` to `(x, y, z)` at `speed`, facing `heading`; the
     /// coordinates are the VM's event-coordinate integers.
@@ -2263,10 +2301,18 @@ impl SessionState {
             | AgentEvent::KeyRotated { .. }
             | AgentEvent::CutsceneStarted { .. }
             | AgentEvent::CutsceneCue { .. }
-            | AgentEvent::CutsceneEnded => false,
+            | AgentEvent::CutsceneEnded
+            | AgentEvent::MapOpen { .. }
+            | AgentEvent::MapMarkerPlaced { .. }
+            | AgentEvent::MapClosed => false,
             AgentEvent::EventDialog { dialog } => {
                 let changed = self.dialog.as_ref() != Some(dialog);
                 self.dialog = Some(dialog.clone());
+                changed
+            }
+            AgentEvent::DialogDismissed => {
+                let changed = self.dialog.is_some();
+                self.dialog = None;
                 changed
             }
             AgentEvent::ShopUpdated { shop } => {
@@ -2619,6 +2665,14 @@ pub enum AgentEvent {
         dialog: DialogState,
     },
 
+    /// The running event's displayed frame is down again without the session
+    /// ending: dismissal parked on a timed hold, or a pending tag awaits its
+    /// ack. Retail clears CliEventMessOpenFlag when the player answers, so the
+    /// box hides until the next [`AgentEvent::EventDialog`] reopens it —
+    /// otherwise the dismissed line (and its advance hint) lingers over camera
+    /// moves and holds.
+    DialogDismissed,
+
     /// An event session opened. Distinct from [`AgentEvent::EventStart`],
     /// which also fires for client-local menus that run no script.
     CutsceneStarted {
@@ -2892,6 +2946,24 @@ pub enum AgentEvent {
         slot: u8,
         volume: u8,
     },
+
+    /// Event script 0xC8 MAP_TUTORIAL: open the Map screen on zone `map_id`.
+    MapOpen {
+        map_id: u16,
+        tutorial: bool,
+    },
+
+    /// Event script 0x8B MAP_MARKER: place a named marker at milli-unit
+    /// coordinates on zone `map_id`'s map.
+    MapMarkerPlaced {
+        map_id: u16,
+        x_milli: i32,
+        y_milli: i32,
+        label: String,
+    },
+
+    /// Event script 0x8A CLOSE_MAP: close the Map screen.
+    MapClosed,
 
     LevelUp {
         player_id: u32,

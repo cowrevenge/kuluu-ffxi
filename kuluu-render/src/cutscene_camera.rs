@@ -208,9 +208,19 @@ pub struct Endpoint {
 
 impl From<&CameraControlPoint> for Endpoint {
     fn from(p: &CameraControlPoint) -> Self {
+        // The kind 0x06 points are retail world coordinates (Y up); the operator camera lives
+        // in Bevy space, whose up axis is -native-y like every other placed asset.
         Self {
-            eye: Vec3::from(p.position),
-            target: Vec3::from(p.target),
+            eye: crate::scene::mzb_to_bevy(kuluu_snapshot::Vec3 {
+                x: p.position[0],
+                y: p.position[1],
+                z: p.position[2],
+            }),
+            target: crate::scene::mzb_to_bevy(kuluu_snapshot::Vec3 {
+                x: p.target[0],
+                y: p.target[1],
+                z: p.target[2],
+            }),
             roll: p.roll,
             focal_length: p.focal_length,
         }
@@ -234,6 +244,17 @@ pub struct CameraFrame {
     pub target: Vec3,
     pub roll: f32,
     pub focal_length: f32,
+}
+
+impl From<CurrentCameraState> for CameraFrame {
+    fn from(state: CurrentCameraState) -> Self {
+        Self {
+            eye: state.eye,
+            target: state.target,
+            roll: state.roll,
+            focal_length: state.focal_length,
+        }
+    }
 }
 
 /// One running camera route on the renderer's clock (research/XIClient source/World/Camera/
@@ -404,6 +425,12 @@ impl CutsceneCameraTask {
 #[derive(Resource, Default)]
 pub struct CutsceneCameraTasks {
     current: Option<CutsceneCameraTask>,
+    /// The last frame applied while the scene held the camera. While locked with no active
+    /// task, retail's user-control-disabled operator camera stays where the finished route
+    /// left it (research/XiEvents/OpCodes/0x0046.md: case 1 disables control; only case 0
+    /// kills all tasks and re-seats the chase at the player), so this frame is re-applied over
+    /// resolve_camera's chase writes until the lock releases.
+    held: Option<CameraFrame>,
 }
 
 impl CutsceneCameraTasks {
@@ -415,6 +442,16 @@ impl CutsceneCameraTasks {
         self.current.is_some()
     }
 
+    /// The frame held while the lock outlives its route, if any.
+    pub fn held(&self) -> Option<CameraFrame> {
+        self.held
+    }
+
+    /// Remember a route's applied frame so the hold can keep it after the route drains.
+    pub fn set_held(&mut self, frame: CameraFrame) {
+        self.held = Some(frame);
+    }
+
     /// Advance the running route by `dt_secs`; None when there is no route or it has run out.
     pub fn advance(&mut self, dt_secs: f32) -> Option<CameraFrame> {
         let frame = self.current.as_mut()?.advance(dt_secs);
@@ -424,9 +461,10 @@ impl CutsceneCameraTasks {
         frame
     }
 
-    /// The session ended: drop the route so the chase camera resumes on the next frame.
+    /// The session ended or the lock released: drop route and hold so the chase camera resumes on the next frame.
     pub fn clear(&mut self) {
         self.current = None;
+        self.held = None;
     }
 }
 
@@ -472,8 +510,9 @@ pub fn capture_current_camera(cam_t: &Transform, proj: &Projection) -> Option<Cu
 
 /// The camera route a cutscene scheduler routine started (research/XiEvents/OpCodes/0x0045.md):
 /// advance it while the scene holds the camera and write its output onto the operator camera's
-/// transform and projection. Released at CutsceneEnded like the fade; the chase camera resumes
-/// on the frame after.
+/// transform and projection. While the lock outlives the route, the last applied frame is held
+/// over resolve_camera's chase writes (this system runs after it); released at CutsceneEnded or
+/// DEFCAMERA case 0 like the fade, when the chase camera resumes on the frame after.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn advance_cutscene_camera_task(
     time: Res<Time>,
@@ -482,6 +521,7 @@ pub fn advance_cutscene_camera_task(
     events: Res<EventLog>,
     mut tasks: ResMut<CutsceneCameraTasks>,
     mut cursor: Local<u64>,
+    mut logged_start: Local<bool>,
     mut q_cam: Query<(&mut Transform, &mut Projection), With<crate::camera::OperatorCamera>>,
 ) {
     let total = events.pushed_total;
@@ -492,6 +532,7 @@ pub fn advance_cutscene_camera_task(
             | kuluu_snapshot::ViewerEvent::ZoneChanged { .. }
             | kuluu_snapshot::ViewerEvent::Disconnected { .. } => {
                 tasks.clear();
+                *logged_start = false;
                 restore_projection(&settings, &mut q_cam);
             }
             _ => {}
@@ -499,13 +540,63 @@ pub fn advance_cutscene_camera_task(
     }
     *cursor = total;
 
-    if !mode.camera_locked || !tasks.is_active() {
+    if !mode.camera_locked {
+        // DEFCAMERA case 0: retail kills every camera task and re-seats the chase at the player
+        // (research/XiEvents/OpCodes/0x0046.md); drop route and hold, hand the focal back to the
+        // settings default.
+        if tasks.is_active() || tasks.held().is_some() {
+            tasks.clear();
+            restore_projection(&settings, &mut q_cam);
+        }
         return;
     }
+
     let Some(frame) = tasks.advance(time.delta_secs()) else {
-        restore_projection(&settings, &mut q_cam);
+        // No route running: hold the last applied frame over resolve_camera's chase writes. A
+        // lock that outlives every task (event 503 holds its camera from +037F7 to +04683 across
+        // all its MESWAITs) parks on the finished route's final frame, retail-style; a lock with
+        // no route yet captures the operator state once and freezes it.
+        let held = match tasks.held() {
+            Some(held) => Some(held),
+            None => q_cam
+                .iter()
+                .next()
+                .and_then(|(cam_t, proj)| capture_current_camera(cam_t, proj))
+                .map(CameraFrame::from),
+        };
+        if let Some(held) = held {
+            tasks.set_held(held);
+            apply_frame(&held, &mut q_cam);
+        } else if *logged_start {
+            tracing::debug!(
+                target: "kuluu_render::cutscene_camera",
+                "cutscene camera route finished"
+            );
+            *logged_start = false;
+        }
         return;
     };
+    if !*logged_start {
+        tracing::debug!(
+            target: "kuluu_render::cutscene_camera",
+            eye = ?frame.eye,
+            target = ?frame.target,
+            focal_length = frame.focal_length,
+            roll = frame.roll,
+            "cutscene camera route first frame"
+        );
+        *logged_start = true;
+    }
+    tasks.set_held(frame);
+    apply_frame(&frame, &mut q_cam);
+}
+
+/// One route frame onto the operator camera: eye and look-at with roll as an up-axis twist,
+/// focal length inverted into the projection with retail's fixed half-height.
+fn apply_frame(
+    frame: &CameraFrame,
+    q_cam: &mut Query<(&mut Transform, &mut Projection), With<crate::camera::OperatorCamera>>,
+) {
     for (mut cam_t, mut proj) in q_cam.iter_mut() {
         // The roll rotates the up vector about the view direction: Bevy's look_at takes an up
         // axis rather than a roll angle.
@@ -634,12 +725,13 @@ mod tests {
         )
         .expect("two authored points is a straight path");
 
-        // Half the duration at linear smoothing: halfway along every channel.
+        // Half the duration at linear smoothing: halfway along every channel (the authored
+        // points are retail Y-up; their Bevy images negate y and z).
         let frame = task
             .advance(50.0 / crate::scheduler_runtime::ROUTINE_FPS)
             .unwrap();
         assert!((frame.eye - Vec3::new(2.0, 0.0, 0.0)).length() < 1e-4);
-        assert!((frame.target - Vec3::new(2.0, 1.0, 0.0)).length() < 1e-4);
+        assert!((frame.target - Vec3::new(2.0, -1.0, 0.0)).length() < 1e-4);
         assert!((frame.focal_length - 481.0).abs() < 1e-2);
         assert!((frame.roll - 0.25).abs() < 1e-5);
 
@@ -731,7 +823,7 @@ mod tests {
             let frame = task
                 .advance(1.0 / crate::scheduler_runtime::ROUTINE_FPS)
                 .unwrap();
-            assert!((frame.eye - Vec3::new(7.0, 8.0, 9.0)).length() < 1e-5);
+            assert!((frame.eye - Vec3::new(7.0, -8.0, -9.0)).length() < 1e-5);
             assert!((frame.focal_length - 500.0).abs() < 1e-4);
         }
     }
@@ -755,7 +847,7 @@ mod tests {
         let frame = task
             .advance(1.0 / crate::scheduler_runtime::ROUTINE_FPS)
             .unwrap();
-        assert!((frame.eye - Vec3::new(7.0, 7.0, 7.0)).length() < 1e-5);
+        assert!((frame.eye - Vec3::new(7.0, -7.0, -7.0)).length() < 1e-5);
         assert!(task
             .advance(1.0 / crate::scheduler_runtime::ROUTINE_FPS)
             .is_none());
@@ -799,7 +891,7 @@ mod tests {
         }
         let mid = task.advance(dt).unwrap();
         assert!(
-            (mid.eye - Vec3::new(1.0, 2.0, 3.0)).length() < 1e-3,
+            (mid.eye - Vec3::new(1.0, -2.0, -3.0)).length() < 1e-3,
             "t=0.5 on the middle point: {mid:?}"
         );
 
@@ -809,7 +901,7 @@ mod tests {
         }
         let last = task.advance(dt).unwrap();
         assert!(
-            (last.eye - Vec3::new(2.0, 4.0, 6.0)).length() < 1e-3,
+            (last.eye - Vec3::new(2.0, -4.0, -6.0)).length() < 1e-3,
             "t=1 on the last point: {last:?}"
         );
         assert!(task.advance(dt).is_none());
@@ -840,12 +932,155 @@ mod tests {
     }
 
     #[test]
+    fn dat_points_convert_to_bevy_space() {
+        // The kind 0x06 points are retail world coordinates (Y up); Bevy's up axis is
+        // -native-y, so the vertical and horizontal-z components both negate.
+        let p = point([1.0, 2.0, 3.0], 500.0, [4.0, 5.0, 6.0], 0.0);
+        let e = Endpoint::from(&p);
+        assert_eq!(e.eye, Vec3::new(1.0, -2.0, -3.0));
+        assert_eq!(e.target, Vec3::new(4.0, -5.0, -6.0));
+    }
+
+    #[test]
     fn the_focal_to_fov_conversion_matches_retail() {
         // GameManager.cpp UpdateProjectionMatrix: fovy = 2 * atan(192 / focal), and the
         // settings default is exactly that at retail's 350 default focal.
         let fov = 2.0 * (RETAIL_PROJECTION_HALF_HEIGHT / 350.0).atan();
         assert!(
             (fov.to_degrees() - crate::graphics_settings::retail_default_fov_deg()).abs() < 1e-4
+        );
+    }
+
+    // ===== System-level hold tests: the lock outliving its route =====
+
+    /// Simulates resolve_camera, which rewrites the operator eye every frame in Chase mode:
+    /// whatever the hold does not overwrite this frame is lost.
+    fn chase_steal(mut q_cam: Query<&mut Transform, With<crate::camera::OperatorCamera>>) {
+        for mut cam_t in q_cam.iter_mut() {
+            cam_t.translation = Vec3::new(99.0, 50.0, -99.0);
+            cam_t.look_at(Vec3::ZERO, Vec3::Y);
+        }
+    }
+
+    fn hold_app() -> App {
+        let mut app = App::new();
+        app.init_resource::<Time>()
+            .init_resource::<EventLog>()
+            .insert_resource(CutsceneMode {
+                camera_locked: true,
+                ..Default::default()
+            })
+            .insert_resource(GraphicsSettings::default())
+            .init_resource::<CutsceneCameraTasks>();
+        app.world_mut().spawn((
+            crate::camera::OperatorCamera,
+            Transform::from_xyz(0.0, 1.0, -3.0).looking_at(Vec3::new(0.0, 1.0, 0.0), Vec3::Y),
+            Projection::Perspective(crate::PerspectiveProjection {
+                fov: crate::graphics_settings::retail_default_fov_deg().to_radians(),
+                ..Default::default()
+            }),
+        ));
+        // chase_steal first, exactly like resolve_camera runs before the cutscene system.
+        app.add_systems(Update, (chase_steal, advance_cutscene_camera_task).chain());
+        app
+    }
+
+    fn hold_step(app: &mut App, frames: u32) {
+        for _ in 0..frames {
+            app.world_mut()
+                .resource_mut::<Time>()
+                .advance_by(std::time::Duration::from_secs_f32(
+                    1.0 / crate::scheduler_runtime::ROUTINE_FPS,
+                ));
+            app.update();
+        }
+    }
+
+    fn hold_cam(app: &mut App) -> (Vec3, f32) {
+        let mut q = app
+            .world_mut()
+            .query_filtered::<(&Transform, &Projection), With<crate::camera::OperatorCamera>>();
+        let (t, p) = q.single(app.world()).expect("one operator camera");
+        let Projection::Perspective(p) = p else {
+            panic!("perspective projection")
+        };
+        (t.translation, p.fov)
+    }
+
+    #[test]
+    fn a_finished_route_holds_its_last_frame_while_the_lock_outlives_it() {
+        // Event 503's shape: DEFCAMERA case 1 at +037F7, camera routes throughout, MESWAITs
+        // between them, case 0 only at +04683. A route that drains mid-MESWAIT must park on
+        // its final frame instead of handing the eye back to the chase.
+        let mut app = hold_app();
+        let task = CutsceneCameraTask::start(
+            &resource(
+                CameraSmoothType::Linear,
+                0,
+                vec![
+                    point([0.0; 3], 280.0, [0.0, 1.0, 0.0], 0.0),
+                    point([4.0, 0.0, 0.0], 682.0, [4.0, 1.0, 0.0], 0.5),
+                ],
+            ),
+            60.0,
+            current_state(),
+            default_chase(),
+        )
+        .expect("two authored points is a straight path");
+        app.world_mut()
+            .resource_mut::<CutsceneCameraTasks>()
+            .start(task);
+
+        hold_step(&mut app, 60); // the route runs to completion while locked
+        let (last_eye, last_fov) = hold_cam(&mut app);
+        assert!(
+            (last_eye - Vec3::new(4.0, 0.0, 0.0)).length() < 1e-3,
+            "route end: {last_eye:?}"
+        );
+
+        // The lock outlives the route: chase_steal rewrites the eye every frame and the hold
+        // must win all of them, keeping both position and focal parked.
+        hold_step(&mut app, 120);
+        let (held_eye, held_fov) = hold_cam(&mut app);
+        assert!(
+            (held_eye - last_eye).length() < 1e-4,
+            "hold lost to the chase: {held_eye:?}"
+        );
+        assert!(
+            (held_fov - last_fov).abs() < 1e-5,
+            "focal drifted while holding"
+        );
+
+        // DEFCAMERA case 0: retail kills all tasks and re-seats the chase; the hold drops and
+        // the focal returns to the settings default.
+        app.world_mut().resource_mut::<CutsceneMode>().camera_locked = false;
+        hold_step(&mut app, 2);
+        let tasks = app.world().resource::<CutsceneCameraTasks>();
+        assert!(
+            !tasks.is_active() && tasks.held().is_none(),
+            "hold survived the release"
+        );
+        let (_, fov) = hold_cam(&mut app);
+        let default_fov = crate::graphics_settings::retail_default_fov_deg().to_radians();
+        assert!(
+            (fov - default_fov).abs() < 1e-5,
+            "focal not restored: {fov}"
+        );
+    }
+
+    #[test]
+    fn a_lock_before_any_route_freezes_the_operator_state() {
+        // A lock with no route yet (event 503's first MESWAIT at +03846 precedes its camera
+        // routines): retail's user-control-disabled camera stays put, so the operator state is
+        // captured once and held over every chase write.
+        let mut app = hold_app();
+        hold_step(&mut app, 3);
+        let (first_eye, _) = hold_cam(&mut app);
+        hold_step(&mut app, 60);
+        let (frozen_eye, _) = hold_cam(&mut app);
+        assert!(
+            (frozen_eye - first_eye).length() < 1e-4,
+            "drifted while locked with no route: {frozen_eye:?}"
         );
     }
 }

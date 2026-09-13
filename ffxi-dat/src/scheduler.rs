@@ -623,6 +623,32 @@ pub struct SoundEvent {
     pub on_caster: bool,
 }
 
+/// The global zone scene DAT (ROM/0/23.DAT): the one file carrying every movN/exNN
+/// zone routine and all the camera routes those routines reference, which 0x2D
+/// MAPSCHEDULOR starts (research/XiEvents/OpCodes/0x002D.md,
+/// research/cexi-docs/dats/ROM_0_23.md).
+pub const ZONE_SCENE_DAT_ID: u32 = 23;
+
+// The camera route names in that file run two lowercase hex digits plus a two-digit decimal
+// index (research/cexi-docs/dats/ROM_0_23.md node naming conventions).
+const ROUTE_NAME_HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
+/// Two hex digits of the zone id fit this bound.
+const ROUTE_NAME_ZONE_MAX: u16 = 0xFF;
+/// A two-digit decimal index fits this bound.
+const ROUTE_NAME_INDEX_MAX: u8 = 99;
+
+/// The zone-coded camera route name in the global scene DAT: `zone_id` as two lowercase hex
+/// digits followed by a two-digit decimal `index` (research/cexi-docs/dats/ROM_0_23.md).
+pub fn zone_camera_route_name(zone_id: u16, index: u8) -> [u8; 4] {
+    debug_assert!(zone_id <= ROUTE_NAME_ZONE_MAX && index <= ROUTE_NAME_INDEX_MAX);
+    let mut name = [0u8; 4];
+    name[0] = ROUTE_NAME_HEX_DIGITS[(zone_id >> 4 & 0xF) as usize];
+    name[1] = ROUTE_NAME_HEX_DIGITS[(zone_id & 0xF) as usize];
+    name[2] = b'0' + index / 10;
+    name[3] = b'0' + index % 10;
+    name
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1804,5 +1830,17 @@ mod vehicle_contract_tests {
         assert_eq!(scheduler.stages.len(), 1);
         assert_eq!(scheduler.stages[0].stage.kind, StageKind::Unknown);
         assert_eq!(scheduler.stages[0].stage.follow_points, None);
+    }
+
+    #[test]
+    fn zone_camera_route_name_spells_the_hex_zone_prefix_and_decimal_index() {
+        // Anchors from the global scene file's census: ex1a plays 1c* routes
+        // (zone 28 = 0x1C), ex1b plays 2c* (44 = 0x2C), mov2 plays c1* to c4*
+        // (zones 193 to 196).
+        assert_eq!(zone_camera_route_name(0x1C, 1), *b"1c01");
+        assert_eq!(zone_camera_route_name(0x2C, 14), *b"2c14");
+        assert_eq!(zone_camera_route_name(0xC1, 7), *b"c107");
+        assert_eq!(zone_camera_route_name(0xC4, 99), *b"c499");
+        assert_eq!(zone_camera_route_name(0, 0), *b"0000");
     }
 }

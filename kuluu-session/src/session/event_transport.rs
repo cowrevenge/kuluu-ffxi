@@ -71,7 +71,12 @@ pub(super) fn prepare(
         if super::take_pending_event_end(pending, actor, event) {
             // vendor/server/src/map/map_networking.cpp MapNetworking::parse dispatches in payload order.
             payload.extend(super::build_subpacket_event_end(
-                *sequence, actor, index, zone, event, *end_para,
+                *sequence,
+                actor,
+                index,
+                zone,
+                event,
+                *end_para,
                 ffxi_proto::map::c2s::event_end_mode::END,
             ));
             *sequence = sequence.wrapping_add(1);

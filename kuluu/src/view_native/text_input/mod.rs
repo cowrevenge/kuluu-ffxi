@@ -25,6 +25,12 @@ mod delivery;
 pub use delivery::delivery_mode_sync_system;
 use delivery::handle_delivery_key;
 
+mod event_map;
+pub use event_map::event_map_sync_system;
+
+mod auto_enter;
+pub use auto_enter::auto_enter_cs_system;
+
 mod map_screen;
 
 mod menu;
@@ -194,6 +200,8 @@ pub(crate) fn text_input_system(
     mut chat_scroll: ResMut<ChatScroll>,
 
     dynamic_menu: Res<kuluu_render::hud::menu::DynamicMenu>,
+
+    cutscene_mode: Res<kuluu_render::cutscene::CutsceneMode>,
 ) {
     let entities = scene_state.snapshot.entities.clone();
     let self_pos = scene_state.snapshot.self_pos.pos;
@@ -208,6 +216,37 @@ pub(crate) fn text_input_system(
     let pad_synth: Vec<KeyboardInput> = events.pad.read().map(|e| e.0.clone()).collect();
     for ev in events.keyboard.read().chain(pad_synth.iter()) {
         if ev.state != ButtonState::Pressed {
+            continue;
+        }
+        // CS input lock: while a VM-driven event frame is up, retail's DEFCAMERA has taken the
+        // camera and disabled menu drawing (research/XiEvents/OpCodes/0x0046.md), so every key
+        // routes through the dialog handler — Enter advances the event even with the map open in
+        // Menu(Map) mode, and ESC respects cancel_armed instead of closing whatever window is up.
+        if cutscene_mode.active && scene_state.snapshot.dialog.is_some() {
+            let next = match &mut *mode {
+                InputMode::Dialog(cursor) => handle_dialog_key(
+                    &ev.logical_key,
+                    &bindings,
+                    cursor,
+                    &mut scene_state,
+                    &cmd_tx.0,
+                    &mut slash_writers.item_screen_container,
+                ),
+                _ => {
+                    let mut cursor = DialogCursor::default();
+                    handle_dialog_key(
+                        &ev.logical_key,
+                        &bindings,
+                        &mut cursor,
+                        &mut scene_state,
+                        &cmd_tx.0,
+                        &mut slash_writers.item_screen_container,
+                    )
+                }
+            };
+            if let Some(next) = next {
+                *mode = next;
+            }
             continue;
         }
         match &mut *mode {
@@ -1435,6 +1474,10 @@ fn confirm_dialog_choice(
 ) -> Option<u8> {
     let mut open_storage = None;
     if let Some(d) = scene_state.snapshot.dialog.as_ref() {
+        // The player answered the frame manually: the auto-enter clock holds
+        // its fire while this timestamp is inside its guard window, so the
+        // session's round-trip can't double-advance (auto_enter.rs).
+        scene_state.last_manual_dialog_advance = Some(std::time::Instant::now());
         // A server customMenu answers with a `_CUSTOM_MENU` tell, not an
         // EndEventChoice — the server owns the context, not an event.
         if d.custom_menu {
@@ -1769,6 +1812,17 @@ fn handle_dialog_key(
                 title: d.prompt.clone().unwrap_or_default(),
                 option: None,
             });
+            return None;
+        }
+        // Retail's 0x42 disarms ESC-cancel in the prologue of cutscenes that lock
+        // you in (event 503 runs it as its second opcode); while disarmed, ESC is
+        // a no-op — no EVENT_END goes out and the event keeps running.
+        if scene_state
+            .snapshot
+            .dialog
+            .as_ref()
+            .is_some_and(|d| !d.cancel_armed)
+        {
             return None;
         }
         // Reconcile via the session snapshot; clearing here flickers multi-frame events.
@@ -2282,5 +2336,385 @@ mod chat_history_tests {
 
         handle_chat_key(&Key::ArrowUp, &bindings, &mut buffer, &history);
         assert_eq!(buffer.text, "/heal");
+    }
+}
+
+#[cfg(test)]
+mod dialog_esc_gate_tests {
+    use super::*;
+    use kuluu_snapshot::DialogState;
+
+    /// Drains a tokio mpsc receiver without a runtime (try_recv only).
+    pub(super) fn drain(
+        cmd_rx: &mut tokio::sync::mpsc::Receiver<AgentCommand>,
+    ) -> Vec<AgentCommand> {
+        let mut sent = Vec::new();
+        while let Ok(msg) = cmd_rx.try_recv() {
+            sent.push(msg);
+        }
+        sent
+    }
+
+    /// Event 503's master block runs 0x42 as its second opcode: while the VM
+    /// reports cancel_armed=false, ESC must not send any command (retail locks
+    /// you in; no EVENT_END goes out at all).
+    #[test]
+    fn esc_is_a_noop_while_the_vm_has_disarmed_cancel() {
+        let bindings = Bindings::default();
+        let mut cursor = DialogCursor::default();
+        let mut scene_state = SceneState::default();
+        let mut dialog = DialogState::default();
+        dialog.cancel_armed = false;
+        scene_state.snapshot.dialog = Some(dialog);
+
+        let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel::<AgentCommand>(4);
+        let mut item_bag = kuluu_render::hud::item_screen::ItemScreenContainer::default();
+
+        assert!(handle_dialog_key(
+            &Key::Escape,
+            &bindings,
+            &mut cursor,
+            &mut scene_state,
+            &cmd_tx,
+            &mut item_bag
+        )
+        .is_none());
+
+        let sent = drain(&mut cmd_rx);
+        assert!(
+            sent.is_empty(),
+            "ESC must not send any command while cancel is disarmed, got {sent:?}"
+        );
+    }
+
+    /// A plain conversation (cancel_armed=true) still cancels with EndEvent.
+    #[test]
+    fn esc_sends_end_event_while_cancel_is_armed() {
+        let bindings = Bindings::default();
+        let mut cursor = DialogCursor::default();
+        let mut scene_state = SceneState::default();
+        let mut dialog = DialogState::default();
+        dialog.cancel_armed = true;
+        scene_state.snapshot.dialog = Some(dialog);
+
+        let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel::<AgentCommand>(4);
+        let mut item_bag = kuluu_render::hud::item_screen::ItemScreenContainer::default();
+
+        assert!(handle_dialog_key(
+            &Key::Escape,
+            &bindings,
+            &mut cursor,
+            &mut scene_state,
+            &cmd_tx,
+            &mut item_bag
+        )
+        .is_none());
+
+        let sent = drain(&mut cmd_rx);
+        assert_eq!(sent, vec![AgentCommand::EndEvent]);
+    }
+}
+
+/// The CS input lock at the system level: while a VM-driven event frame is up, keys route
+/// through the dialog handler even when InputMode says otherwise — Enter advances the event
+/// with the map open in Menu(Map) mode (event 503's beat), and ESC respects cancel_armed
+/// instead of closing whatever window is up.
+#[cfg(test)]
+mod cs_input_lock_tests {
+    use super::*;
+    use bevy::input::keyboard::KeyCode;
+    use kuluu_snapshot::DialogState;
+
+    /// The full resource set text_input_system's parameters fetch, so the gate can be driven
+    /// on a bare app exactly like cutscene.rs's tests do.
+    fn gate_app(cmd_tx: tokio::sync::mpsc::Sender<AgentCommand>) -> App {
+        let mut app = App::new();
+        // Message storage for every reader/writer the system carries.
+        app.add_message::<KeyboardInput>()
+            .add_message::<crate::view_native::gamepad_input::PadKeyEvent>()
+            .add_message::<AppExit>()
+            .add_message::<LoadMmbRequest>()
+            .add_message::<LoadMzbRequest>()
+            .add_message::<kuluu_render::sub_area_activation::SetSubArea>()
+            .add_message::<DebugHeightsRequest>()
+            .add_message::<kuluu_render::audio::SfxEvent>()
+            .add_message::<crate::view_native::screenshot::ScreenshotRequest>()
+            .add_message::<kuluu_render::hud::trade::TradeIntent>();
+        // The rest of the parameters.
+        app.insert_resource(CommandTx(cmd_tx));
+        app.insert_resource(Bindings::default());
+        app.insert_resource(KeybindsStateRes {
+            store: crate::keybinds_store::KeybindsStore::new(
+                std::env::temp_dir().join("kuluu-cs-gate-tests-unused.json"),
+            ),
+            persisted: Default::default(),
+        });
+        let mut stack = MenuStack::root();
+        stack.push(MenuKind::Map);
+        app.insert_resource(InputMode::Menu(stack));
+        app.insert_resource(Target::default());
+        app.insert_resource(SceneState::default());
+        // The plugin initializes this in production; the gate reads it unconditionally.
+        app.insert_resource(kuluu_render::cutscene::CutsceneMode::default());
+        app.insert_resource(crate::view_native::navmesh_overlay::NavmeshOverlayVisible::default());
+        app.insert_resource(crate::view_native::navmesh_overlay::NavmeshState::default());
+        app.insert_resource(bevy_framepace::FramepaceSettings::default());
+        app.insert_resource(CaptureMode::default());
+        app.insert_resource(kuluu_render::EventLog::default());
+        app.insert_resource(kuluu_render::GraphicsSettings::default());
+        app.insert_resource(kuluu_render::hud::HudVerbosity::default());
+        app.insert_resource(kuluu_render::hud::HudPanels::default());
+        app.insert_resource(kuluu_render::hud::network_status::NetStatusVisible::default());
+        app.insert_resource(kuluu_render::vana_time::VanaClock::default());
+        app.insert_resource(kuluu_render::hud::vana_clock::VanaClockVisible::default());
+        app.insert_resource(kuluu_render::minimap::MinimapMode::default());
+        app.insert_resource(kuluu_render::minimap::MinimapVisible::default());
+        app.insert_resource(kuluu_render::minimap::topdown::TopdownCullPolicy::default());
+        app.insert_resource(kuluu_render::audio::AudioMuteState::default());
+        app.insert_resource(kuluu_render::minimap::MinimapZoom::default());
+        app.insert_resource(kuluu_render::minimap::MinimapView::default());
+        app.insert_resource(kuluu_render::minimap::MinimapState::default());
+        app.insert_resource(kuluu_render::combat_stance::RestStance::default());
+        app.insert_resource(kuluu_render::hud::status_panel::StatusProfileOpen::default());
+        app.insert_resource(kuluu_render::hud::item_detail::SortOptions::default());
+        app.insert_resource(kuluu_render::hud::item_detail::ItemMenuFocus::default());
+        app.insert_resource(kuluu_render::hud::item_screen::ItemScreenContainer::default());
+        app.insert_resource(kuluu_render::hud::check_view::CheckTarget::default());
+        app.insert_resource(kuluu_render::hud::bazaar_view::BazaarScreenState::default());
+        app.insert_resource(kuluu_render::hud::trade::TradeState::default());
+        app.insert_resource(kuluu_render::hud::delivery::DeliveryScreenState::default());
+        app.insert_resource(kuluu_render::hud::delivery::DeliveryInventory::default());
+        app.insert_resource(kuluu_render::hud::auction::AuctionScreenState::default());
+        app.insert_resource(kuluu_render::hud::auction::AuctionSellInventory::default());
+        app.insert_resource(crate::view_native::input::SelectTargetMode::default());
+        app.insert_resource(kuluu_render::fishing_spot::FishingSpot::default());
+        app.insert_resource(ActiveChatTab::default());
+        app.insert_resource(ChatHistory::default());
+        app.insert_resource(kuluu_render::hud::map_screen::MapScreenState::default());
+        app.insert_resource(kuluu_render::hud::map_screen::MapMarkers::default());
+        app.insert_resource(kuluu_render::hud::map_screen::MapView::default());
+        app.insert_resource(kuluu_render::hud::map_screen::ChangeMapCatalog::default());
+        app.insert_resource(kuluu_render::hud::death_prompt::DeathPromptSelection::default());
+        app.insert_resource(crate::view_native::DatRootRes(None));
+        app.insert_resource(kuluu_render::dat_mzb::DrawDistance::default());
+        app.insert_resource(ChatScroll::default());
+        app.insert_resource(kuluu_render::hud::menu::DynamicMenu::default());
+        app.add_systems(Update, text_input_system);
+        app
+    }
+
+    fn press(app: &mut App, key: Key) {
+        app.world_mut()
+            .resource_mut::<Messages<KeyboardInput>>()
+            .write(KeyboardInput {
+                key_code: KeyCode::Enter,
+                logical_key: key,
+                state: ButtonState::Pressed,
+                text: None,
+                repeat: false,
+                window: Entity::PLACEHOLDER,
+            });
+    }
+
+    /// Event 503's map beat: the coupon line is up with the map open in Menu(Map) mode and the
+    /// VM disarmed ESC-cancel. Enter must advance the event (EndEventChoice), not fall through
+    /// to the menu handler — without the gate a human playthrough hangs here.
+    #[test]
+    fn enter_advances_the_event_with_the_map_open() {
+        let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel::<AgentCommand>(4);
+        let mut app = gate_app(cmd_tx);
+        let mut dialog = DialogState::default();
+        dialog.cancel_armed = false;
+        app.world_mut().resource_mut::<SceneState>().snapshot.dialog = Some(dialog);
+        app.insert_resource(kuluu_render::cutscene::CutsceneMode::active_locked());
+
+        press(&mut app, Key::Enter);
+        app.update();
+
+        let sent = dialog_esc_gate_tests::drain(&mut cmd_rx);
+        assert_eq!(
+            sent,
+            vec![AgentCommand::EndEventChoice {
+                event_id: 0,
+                act_index: 0,
+                event_num: 0,
+                choice: 0
+            }],
+            "Enter must advance the event, got {sent:?}"
+        );
+    }
+
+    /// Same state, ESC instead: with cancel disarmed (event 503's second opcode) no command may
+    /// go out at all — the map cannot be closed by hand while the frame is up.
+    #[test]
+    fn esc_cannot_close_the_map_while_disarmed() {
+        let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel::<AgentCommand>(4);
+        let mut app = gate_app(cmd_tx);
+        let mut dialog = DialogState::default();
+        dialog.cancel_armed = false;
+        app.world_mut().resource_mut::<SceneState>().snapshot.dialog = Some(dialog);
+        app.insert_resource(kuluu_render::cutscene::CutsceneMode::active_locked());
+
+        press(&mut app, Key::Escape);
+        app.update();
+
+        let sent = dialog_esc_gate_tests::drain(&mut cmd_rx);
+        assert!(
+            sent.is_empty(),
+            "ESC must be a no-op while disarmed, got {sent:?}"
+        );
+    }
+
+    /// The gate must not overreach: with no cutscene session active the same Menu(Map) + frame
+    /// state routes to the menu handler as before — its map-beat branch cancels the event
+    /// unconditionally (no cancel_armed check), which is exactly what the gated path refuses.
+    #[test]
+    fn without_a_cutscene_session_the_menu_handler_keeps_the_keys() {
+        let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel::<AgentCommand>(4);
+        let mut app = gate_app(cmd_tx);
+        let mut dialog = DialogState::default();
+        dialog.cancel_armed = false;
+        app.world_mut().resource_mut::<SceneState>().snapshot.dialog = Some(dialog);
+        // CutsceneMode defaults to inactive — no session brackets this frame.
+
+        press(&mut app, Key::Escape);
+        app.update();
+
+        let sent = dialog_esc_gate_tests::drain(&mut cmd_rx);
+        assert_eq!(
+            sent,
+            vec![AgentCommand::EndEvent],
+            "the map handler's own cancel must run when no CS session is active, got {sent:?}"
+        );
+    }
+}
+
+/// Auto-Enter CS at the system level: with the Debug row on, eligible
+/// message frames advance themselves after their read time (the same
+/// `EndEventChoice` Enter would send), and the frames the player must answer
+/// stay manual.
+#[cfg(test)]
+mod auto_enter_tests {
+    use super::*;
+    use kuluu_snapshot::DialogState;
+
+    /// A headless app carrying only auto_enter_cs_system's parameters;
+    /// MinimalPlugins supplies the Time resource and its per-update advance.
+    fn auto_enter_app(cmd_tx: tokio::sync::mpsc::Sender<AgentCommand>) -> App {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.insert_resource(CommandTx(cmd_tx));
+        app.insert_resource(kuluu_render::hud::HudPanels::default());
+        app.insert_resource(SceneState::default());
+        app.add_systems(Update, auto_enter_cs_system);
+        app
+    }
+
+    fn eligible_frame() -> DialogState {
+        let mut d = DialogState::default();
+        d.npc_id = 0x010E6001;
+        d.act_index = 7;
+        d.event_para = 230;
+        d.prompt = Some("A line of narration.".into());
+        d
+    }
+
+    #[test]
+    fn off_sends_nothing() {
+        let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel::<AgentCommand>(4);
+        let mut app = auto_enter_app(cmd_tx);
+        app.world_mut().resource_mut::<SceneState>().snapshot.dialog = Some(eligible_frame());
+        for _ in 0..3 {
+            app.update();
+        }
+        assert!(dialog_esc_gate_tests::drain(&mut cmd_rx).is_empty());
+    }
+
+    #[test]
+    fn choice_frames_are_never_advanced() {
+        let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel::<AgentCommand>(4);
+        let mut app = auto_enter_app(cmd_tx);
+        let mut d = eligible_frame();
+        d.choices.push("Yes".into());
+        app.world_mut().resource_mut::<SceneState>().snapshot.dialog = Some(d);
+        app.world_mut()
+            .resource_mut::<kuluu_render::hud::HudPanels>()
+            .auto_enter_cs = true;
+        for _ in 0..3 {
+            app.update();
+        }
+        assert!(dialog_esc_gate_tests::drain(&mut cmd_rx).is_empty());
+    }
+
+    #[test]
+    fn blacklisted_speakers_are_never_advanced() {
+        let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel::<AgentCommand>(4);
+        let mut app = auto_enter_app(cmd_tx);
+        let mut d = eligible_frame();
+        d.npc_name = Some("Paintbrush of Souls".into());
+        app.world_mut().resource_mut::<SceneState>().snapshot.dialog = Some(d);
+        app.world_mut()
+            .resource_mut::<kuluu_render::hud::HudPanels>()
+            .auto_enter_cs = true;
+        for _ in 0..3 {
+            app.update();
+        }
+        assert!(dialog_esc_gate_tests::drain(&mut cmd_rx).is_empty());
+    }
+
+    /// The read-time floor is 1.5 s of wall clock, so this test runs real
+    /// time; the deadline bounds a wedged clock.
+    #[test]
+    fn eligible_frame_advances_exactly_once_after_its_read_time() {
+        let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel::<AgentCommand>(4);
+        let mut app = auto_enter_app(cmd_tx);
+        app.world_mut().resource_mut::<SceneState>().snapshot.dialog = Some(eligible_frame());
+        app.world_mut()
+            .resource_mut::<kuluu_render::hud::HudPanels>()
+            .auto_enter_cs = true;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(6);
+        let mut sent = Vec::new();
+        while sent.is_empty() && std::time::Instant::now() < deadline {
+            app.update();
+            sent = dialog_esc_gate_tests::drain(&mut cmd_rx);
+        }
+        assert_eq!(
+            sent,
+            vec![AgentCommand::EndEventChoice {
+                event_id: 0x010E6001,
+                act_index: 7,
+                event_num: 230,
+                choice: 0
+            }],
+            "the eligible frame must advance exactly once, got {sent:?}"
+        );
+    }
+
+    /// A manual Enter landing just before the clock's fire must hold it: the
+    /// snapshot is still on the pre-advance frame, and sending would make the
+    /// session dismiss the frame the manual advance just opened. Runs real
+    /// time up to the 1.5 s read-time floor plus guard margin.
+    #[test]
+    fn a_recent_manual_advance_holds_the_fire() {
+        let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel::<AgentCommand>(4);
+        let mut app = auto_enter_app(cmd_tx);
+        app.world_mut().resource_mut::<SceneState>().snapshot.dialog = Some(eligible_frame());
+        app.world_mut()
+            .resource_mut::<kuluu_render::hud::HudPanels>()
+            .auto_enter_cs = true;
+        let start = std::time::Instant::now();
+        while start.elapsed() < std::time::Duration::from_millis(1300) {
+            app.update();
+        }
+        app.world_mut()
+            .resource_mut::<SceneState>()
+            .last_manual_dialog_advance = Some(std::time::Instant::now());
+        while start.elapsed() < std::time::Duration::from_millis(1900) {
+            app.update();
+        }
+        assert!(
+            dialog_esc_gate_tests::drain(&mut cmd_rx).is_empty(),
+            "the manual-advance guard must hold the fire"
+        );
     }
 }

@@ -7,6 +7,7 @@ use crate::components::{InGameEntity, IsSelf, WorldEntity};
 use crate::entity_table::EntityTable;
 use crate::hud::style::{self, theme};
 use crate::hud::zone_flash::ZoneNameResolver;
+use crate::hud_hide::HudHideExempt;
 use crate::input_mode::{InputMode, MenuKind};
 use crate::lock_on::LockOn;
 use crate::minimap::overlay::{self, MarkerContext, MarkerFilters, MarkerNode, MinimapDot};
@@ -634,7 +635,13 @@ pub(crate) fn spawn_map_screen(mut commands: Commands, mut images: ResMut<Assets
     commands
         .spawn((
             InGameEntity,
+            // The map is an event-opened window (MAPSCHEDULOR), not HUD chrome:
+            // 0x67 HIDE_HUD only repositions the event-message boxes and sets
+            // CompassDraw (research/XiEvents/OpCodes/0x0067.md), so a cutscene's
+            // camera lock must not hide it — event 503 shows Ailevia's marker on
+            // the map while the HUD stays hidden.
             MapScreenRoot,
+            HudHideExempt,
             Node {
                 position_type: PositionType::Absolute,
                 top: Val::Px(0.0),
@@ -858,7 +865,10 @@ pub(crate) fn spawn_map_screen(mut commands: Commands, mut images: ResMut<Assets
     commands
         .spawn((
             InGameEntity,
+            // Same exemption as the map surface: the command panel belongs to the
+            // event-opened window, not the HUD that 0x67 hides.
             MapPanelRoot,
+            HudHideExempt,
             n,
             bg,
             bd,
@@ -1755,5 +1765,267 @@ mod tests {
         let rows = panel_rows(&state, &snap, &[], &ChangeMapCatalog::default(), &|_| None);
         assert_eq!(rows.len(), 1);
         assert!(!rows[0].is_cursor);
+    }
+
+    // Headless draw-level proof for event 503 (Southern San d'Oria new-character
+    // CS): the MAPSCHEDULOR beat opens the full-screen Map with Ailevia's marker
+    // while HIDE_HUD is live — assert the map roots actually flip visible and the
+    // placed-marker dot lands at the recorded position: a drawn map, not just an
+    // emitted event (recorded beat: map_open{map_id 230} + marker "Ailevia" @
+    // x_milli -10264 / y_milli -363).
+    mod event503_draw {
+        use super::*;
+        // The outer tests module globs in kuluu_snapshot::{Entity, Vec3}; the
+        // explicit imports below shadow them for Bevy's query types.
+        use crate::input_mode::MenuStack;
+        use crate::minimap::MinimapAabb;
+        use bevy::ecs::entity::Entity;
+        use bevy::ecs::system::RunSystemOnce;
+
+        /// The recorded Ailevia marker in Bevy world meters: wire x_milli -10264 /
+        /// y_milli -363 is (x, z) after the ffxi_to_bevy axis swap.
+        const AILEVIA_X: f32 = -10.264;
+        const AILEVIA_Z: f32 = -0.363;
+
+        /// The test's visible window: a 100×100 m square centred on the origin,
+        /// containing the recorded marker.
+        fn test_aabb() -> MinimapAabb {
+            MinimapAabb {
+                min: Vec2::new(-50.0, -50.0),
+                max: Vec2::new(50.0, 50.0),
+            }
+        }
+
+        fn map_mode() -> InputMode {
+            let mut stack = MenuStack::root();
+            stack.push(MenuKind::Map);
+            InputMode::Menu(stack)
+        }
+
+        /// Bare world with the map tree spawned hidden, as `add_hud_spawners` leaves it.
+        fn app_with_map() -> App {
+            let mut app = App::new();
+            app.init_resource::<Assets<Image>>()
+                .init_resource::<SceneState>()
+                .insert_resource(InputMode::default())
+                .init_resource::<EntityTable>()
+                .init_resource::<Target>()
+                .init_resource::<LockOn>()
+                .init_resource::<MarkerFilters>()
+                .init_resource::<NameColorTable>()
+                .init_resource::<MapScreenState>()
+                .init_resource::<MapView>()
+                .init_resource::<ViewedMap>()
+                .init_resource::<MapScreenDots>()
+                .init_resource::<MapMarkers>()
+                .init_resource::<ChangeMapCatalog>();
+            app.world_mut().run_system_once(spawn_map_screen).unwrap();
+            app
+        }
+
+        /// The systems that own the map's visible state; in the live app they run
+        /// after `event_map_sync_system` has pushed MenuKind::Map.
+        fn run_draw(app: &mut App) {
+            app.world_mut()
+                .run_system_once(update_map_screen_markers)
+                .unwrap();
+            app.world_mut()
+                .run_system_once(update_map_placed_markers)
+                .unwrap();
+            app.world_mut().run_system_once(update_map_panel).unwrap();
+        }
+
+        fn root_display(world: &mut World) -> Display {
+            world
+                .query_filtered::<&Node, With<MapScreenRoot>>()
+                .iter(world)
+                .next()
+                .expect("map root spawned")
+                .display
+        }
+
+        fn panel_display(world: &mut World) -> Display {
+            world
+                .query_filtered::<&Node, (With<MapPanelRoot>, Without<MapPanelRow>)>()
+                .iter(world)
+                .next()
+                .expect("panel root spawned")
+                .display
+        }
+
+        fn placed_dot_node(world: &mut World) -> Node {
+            world
+                .query::<(&MapPlacedMarker, &Node)>()
+                .iter(world)
+                .find(|(m, _)| m.slot == 0)
+                .expect("slot-0 dot spawned")
+                .1
+                .clone()
+        }
+
+        fn placed_label(world: &mut World) -> String {
+            world
+                .query::<(&MapPlacedLabel, &Text)>()
+                .iter(world)
+                .find(|(l, _)| l.slot == 0)
+                .expect("slot-0 label spawned")
+                .1
+                 .0
+                .clone()
+        }
+
+        fn val_percent(v: &Val) -> Option<f32> {
+            match v {
+                Val::Percent(p) => Some(*p),
+                _ => None,
+            }
+        }
+
+        #[test]
+        fn map_spawns_hidden_and_stays_there_without_opening() {
+            let mut app = app_with_map();
+            run_draw(&mut app);
+            assert_eq!(root_display(app.world_mut()), Display::None);
+            assert_eq!(panel_display(app.world_mut()), Display::None);
+        }
+
+        #[test]
+        fn event503_map_beat_draws_the_map_with_ailevia_marker() {
+            let mut app = app_with_map();
+            {
+                let mut state = app.world_mut().resource_mut::<SceneState>();
+                state.snapshot.zone_id = Some(230);
+            }
+            // The recorded beat: the session pushed MenuKind::Map and placed
+            // Ailevia's marker in zone 230.
+            app.world_mut().insert_resource(map_mode());
+            let mut markers = app.world_mut().resource_mut::<MapMarkers>();
+            markers.by_zone.insert(
+                230,
+                vec![MapMarker {
+                    world: Vec3 {
+                        x: AILEVIA_X,
+                        y: 0.0,
+                        z: AILEVIA_Z,
+                    },
+                    label: "Ailevia".into(),
+                }],
+            );
+            app.world_mut().resource_mut::<MapView>().visible_aabb = Some(test_aabb());
+            run_draw(&mut app);
+
+            assert_eq!(
+                root_display(app.world_mut()),
+                Display::Flex,
+                "map root must flip visible"
+            );
+            assert_eq!(
+                panel_display(app.world_mut()),
+                Display::Flex,
+                "command panel must draw"
+            );
+
+            let dot = placed_dot_node(app.world_mut());
+            assert_eq!(dot.display, Display::Flex, "Ailevia's dot must draw");
+            // (-10.264 + 50) / 100 and (-0.363 + 50) / 100 in the test window.
+            let left = val_percent(&dot.left).expect("percent-placed dot");
+            let top = val_percent(&dot.top).expect("percent-placed dot");
+            assert!((left - 39.736).abs() < 1e-3, "dot left {left}");
+            assert!((top - 49.637).abs() < 1e-3, "dot top {top}");
+            assert_eq!(placed_label(app.world_mut()), "Ailevia");
+        }
+
+        /// Event 503's A6 HIDE_HUD is live through the map beat; retail's 0x67 only
+        /// repositions the event-message boxes and sets CompassDraw, so both map
+        /// roots must survive `apply_hud_hidden` while a plain HUD root hides.
+        #[test]
+        fn cutscene_hud_hide_keeps_the_map_roots_visible() {
+            use crate::hud_hide::{apply_hud_hidden, HudHidden, HudHideStash};
+            let mut app = app_with_map();
+            app.init_resource::<HudHidden>()
+                .init_resource::<HudHideStash>();
+
+            // Node requires Visibility (bevy_ui ui_node.rs #[require]), so the map
+            // roots carry a default Inherited in any world — same as live.
+            let root = app
+                .world_mut()
+                .query_filtered::<Entity, With<MapScreenRoot>>()
+                .iter(app.world())
+                .next()
+                .expect("map root");
+            let panel = app
+                .world_mut()
+                .query_filtered::<Entity, (With<MapPanelRoot>, Without<MapPanelRow>)>()
+                .iter(app.world())
+                .next()
+                .expect("panel root");
+            assert!(app.world().get::<Visibility>(root).is_some());
+            let plain_root = app
+                .world_mut()
+                .spawn((Node::default(), Visibility::Inherited))
+                .id();
+
+            app.world_mut().resource_mut::<HudHidden>().cutscene = true;
+            app.world_mut().run_system_once(apply_hud_hidden).unwrap();
+
+            assert_eq!(
+                *app.world()
+                    .get::<Visibility>(root)
+                    .expect("map root visibility"),
+                Visibility::Inherited,
+                "retail's 0x67 does not hide the event-opened map"
+            );
+            assert_eq!(
+                *app.world()
+                    .get::<Visibility>(panel)
+                    .expect("panel root visibility"),
+                Visibility::Inherited,
+                "the command panel belongs to the map window"
+            );
+            let plain_vis = *app
+                .world()
+                .get::<Visibility>(plain_root)
+                .expect("plain root visibility");
+            assert_eq!(plain_vis, Visibility::Hidden, "plain HUD roots still hide");
+        }
+
+        #[test]
+        fn closing_the_map_hides_it_again() {
+            let mut app = app_with_map();
+            {
+                let mut state = app.world_mut().resource_mut::<SceneState>();
+                state.snapshot.zone_id = Some(230);
+            }
+            app.world_mut().insert_resource(map_mode());
+            let mut markers = app.world_mut().resource_mut::<MapMarkers>();
+            markers.by_zone.insert(
+                230,
+                vec![MapMarker {
+                    world: Vec3 {
+                        x: AILEVIA_X,
+                        y: 0.0,
+                        z: AILEVIA_Z,
+                    },
+                    label: "Ailevia".into(),
+                }],
+            );
+            app.world_mut().resource_mut::<MapView>().visible_aabb = Some(test_aabb());
+            run_draw(&mut app);
+            assert_eq!(root_display(app.world_mut()), Display::Flex);
+
+            // map_closed pops MenuKind::Map back to the root menu level.
+            app.world_mut()
+                .insert_resource(InputMode::Menu(MenuStack::root()));
+            run_draw(&mut app);
+
+            assert_eq!(
+                root_display(app.world_mut()),
+                Display::None,
+                "map must hide on close"
+            );
+            assert_eq!(panel_display(app.world_mut()), Display::None);
+            let dot = placed_dot_node(app.world_mut());
+            assert_eq!(dot.display, Display::None, "placed dots hide with the map");
+        }
     }
 }

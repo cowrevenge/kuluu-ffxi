@@ -269,6 +269,12 @@ pub const DEBUG_TARGET_CYCLE: &str = "Target Cycle";
 pub const DEBUG_MESH: &str = "Mesh Debug";
 pub const DEBUG_NET_STATUS: &str = "Net Status";
 pub const DEBUG_NOCLIP: &str = "NoClip";
+/// Debug auto-enter row (enternity-style): [on] = event-dialog message frames
+/// advance themselves after their read time instead of parking on Enter;
+/// choice frames, item lines, text-entry frames, server custom menus, and the
+/// enternity blacklist (Paintbrush of Souls, Geomantic Reservoir) stay manual.
+/// Off by default.
+pub const DEBUG_AUTO_ENTER_CS: &str = "Auto-Enter CS";
 /// Debug weather gate row: [on] = the active-weather modifier (ambient tint,
 /// sun mul, lightning) and precipitation particles are applied; toggling it
 /// off suppresses them for isolating scene-graphic errors. Default on.
@@ -312,6 +318,7 @@ const DEBUG_ENTRIES: &[&str] = &[
     DEBUG_MESH,
     DEBUG_NET_STATUS,
     DEBUG_NOCLIP,
+    DEBUG_AUTO_ENTER_CS,
     DEBUG_WEATHER,
     DEBUG_FOG,
     DEBUG_ENTITY_LIST,
@@ -1567,6 +1574,7 @@ pub fn debug_panel_state(
         DEBUG_TARGET_CYCLE => panels.target_cycle,
         DEBUG_MESH => panels.mesh_debug,
         DEBUG_NOCLIP => panels.noclip,
+        DEBUG_AUTO_ENTER_CS => panels.auto_enter_cs,
         // The rows read as the feature's live state, so they invert the
         // "off" flags: Weather [on] = weather effects applied.
         DEBUG_WEATHER => !panels.weather_off,

@@ -36,6 +36,11 @@ const LOOKUP_TARGET_INDEX_MASK: u32 = 0x3FF;
 impl ActorLookup {
     pub const LOCAL_PLAYER: Self = Self(LOOKUP_LOCAL_PLAYER_B);
     pub const EVENT_ENTITY: Self = Self(LOOKUP_EVENT_ENTITY);
+    /// Hold-table stand-in for a zone-level routine (0x2D/0x54): retail polls the
+    /// zone object, not an actor, so kuluu keys that WAIT* hold on this sentinel
+    /// instead of either cue actor. It sits just past retail's reserved lookup
+    /// range (research/XiEvents/Event VM Functions.md GetActorIndex).
+    pub const ZONE: Self = Self(0x7FFF_FFFA);
 
     pub fn is_local_player(self) -> bool {
         matches!(
@@ -184,6 +189,15 @@ pub enum EventCue {
         actor2: ActorLookup,
         key: FourCc,
     },
+    /// 0x2D MAPSCHEDULOR: start the zone-level routine `key` out of the global
+    /// scene DAT over the two actors, waited on by 0x54
+    /// (research/XiEvents/OpCodes/0x002D.md). The host arms that wait's hold
+    /// from the routine's authored length in the file.
+    ZoneScheduler {
+        key: FourCc,
+        actor1: ActorLookup,
+        actor2: ActorLookup,
+    },
     /// 0x4E EVENTHIDE: set/clear the target's event-hide render flag
     /// (research/XiEvents/OpCodes/0x004E.md).
     ActorHide { target: ActorLookup, hide: bool },
@@ -191,6 +205,13 @@ pub enum EventCue {
     /// player, or give it back (research/XiEvents/OpCodes/0x0046.md). Retail's
     /// restore reads saved global camera state, so the cue carries none.
     CameraLock { lock: bool },
+    /// 0x67/0x68 HIDE_HUD/SHOW_HUD: hide or show the entire HUD UI for the
+    /// rest of the cutscene (research/XiEvents/OpCodes/0x0067.md, 0x0068.md).
+    HudHide { hide: bool },
+    /// 0x77/0x78 STOP_CLOCK/RESTORE_CLOCK: hold the game clock at Vana'diel
+    /// hour `hour`, or release it back to server time
+    /// (research/XiEvents/OpCodes/0x0077.md, 0x0078.md).
+    ClockHold { stop: bool, hour: Option<u32> },
     /// 0x5D MUSICVOLUME: ease the playing track to volume table index `volume`
     /// over `fade_frames` (research/XiEvents/OpCodes/0x005D.md).
     MusicVolume { volume: u8, fade_frames: u16 },
@@ -233,6 +254,21 @@ pub enum EventCue {
         actor: ActorLookup,
         key: Option<FourCc>,
     },
+    /// 0xC8 MAP_TUTORIAL: open the map window on zone `map_id`; `tutorial` is
+    /// the LOBYTE of the third work operand (research/XiEvents/OpCodes/0x00C8.md).
+    MapOpen { map_id: i32, tutorial: bool },
+    /// 0x8B MAP_MARKER: place a named marker on the player's map at
+    /// milli-unit coordinates; `name` is the raw 16-byte field with retail's
+    /// underscore-to-space rewrite already applied
+    /// (research/XiEvents/OpCodes/0x008B.md).
+    MapMarker {
+        map_id: i32,
+        x_milli: i32,
+        y_milli: i32,
+        name: [u8; 16],
+    },
+    /// 0x8A CLOSE_MAP: close the map window (research/XiEvents/OpCodes/0x008A.md).
+    MapClose,
 }
 
 impl EventCue {
@@ -279,6 +315,15 @@ impl EventCue {
                 actor1: resolve(actor1),
                 actor2: resolve(actor2),
                 key,
+            },
+            Self::ZoneScheduler {
+                key,
+                actor1,
+                actor2,
+            } => Self::ZoneScheduler {
+                key,
+                actor1: resolve(actor1),
+                actor2: resolve(actor2),
             },
             Self::ActorHide { target, hide } => Self::ActorHide {
                 target: resolve(target),
@@ -386,5 +431,9 @@ mod tests {
 
         // No high byte and not reserved: the default handler's fallback.
         assert!(ActorLookup(0x0000_0042).is_event_entity());
+
+        // The zone sentinel is neither an actor selector nor a server id.
+        assert!(!ActorLookup::ZONE.is_local_player());
+        assert!(!ActorLookup::ZONE.is_event_entity());
     }
 }

@@ -1444,6 +1444,14 @@ pub fn sub_size(op: u8, sub: u8) -> Option<u8> {
             1 => Some(2),
             _ => None,
         },
+        // 0x005A.md CodeMOVE2: the uncalibrated twin of 0x1F — case 0 stores
+        // the goal in ReqStack (8); case 1 re-runs each frame while the entity
+        // walks and advances 2 on arrival.
+        OP_CODE_MOVE2 => match sub {
+            0 => Some(8),
+            1 => Some(2),
+            _ => None,
+        },
         // 0x00B4.md: the event window family. Cases 0x00/0x13 carry a 16-byte
         // string, 0x14 five work operands, 0x05/0x06 a trailing key byte.
         OP_WINDOW => match sub {
@@ -1564,6 +1572,7 @@ pub(crate) const OP_LOADROOM: u8 = 0x75;
 pub(crate) const OP_ITEMINFO: u8 = 0xCC;
 pub(crate) const OP_ENTITYSPEED: u8 = 0x59;
 pub(crate) const OP_MOVE: u8 = 0x1F;
+pub(crate) const OP_CODE_MOVE2: u8 = 0x5A;
 pub(crate) const OP_WINDOW: u8 = 0xB4;
 pub(crate) const OP_MENU: u8 = 0x71;
 pub(crate) const OP_RENDERFLAG: u8 = 0xAB;
@@ -1648,6 +1657,10 @@ mod tests {
         assert_eq!(sub_size(0x1F, 0), Some(8));
         assert_eq!(sub_size(0x1F, 1), Some(2));
         assert_eq!(sub_size(0x1F, 2), None);
+        // 0x005A.md — CodeMOVE2 carries the same widths as its calibrated twin.
+        assert_eq!(sub_size(0x5A, 0), Some(8));
+        assert_eq!(sub_size(0x5A, 1), Some(2));
+        assert_eq!(sub_size(0x5A, 2), None);
         // 0x00B4.md
         assert_eq!(sub_size(0xB4, 0x00), Some(20));
         assert_eq!(sub_size(0xB4, 0x05), Some(3));

@@ -149,6 +149,10 @@ pub struct DialogSession {
     /// zone-in, in event coordinates: the source for MOVE hold lengths while a
     /// scene walks its actors.
     entity_positions: std::collections::HashMap<u32, ffxi_event::vm::scene::EventPosition>,
+    /// Whether a frame was displayed before the last step, so
+    /// [`take_message_closed`](Self::take_message_closed) fires exactly once per
+    /// up→down transition instead of on every tick parked after it.
+    message_was_up: bool,
 }
 
 impl DialogSession {
@@ -168,6 +172,7 @@ impl DialogSession {
             fishing: std::collections::HashMap::new(),
             routine_lengths: std::collections::HashMap::new(),
             entity_positions: std::collections::HashMap::new(),
+            message_was_up: false,
         }
     }
 
@@ -267,7 +272,8 @@ impl DialogSession {
         };
         match step {
             DialogStep::Frame(frame) => {
-                let dialog = frame_to_dialog(&active, frame, &self.player_name);
+                let dialog =
+                    frame_to_dialog(&active, frame, &self.player_name, runner.cancel_armed());
                 self.runner = Some(runner);
                 self.active = Some(active);
                 Begin::Frame(dialog)
@@ -366,6 +372,19 @@ impl DialogSession {
             .is_some_and(|r| r.pending_tag().is_some())
     }
 
+    /// True exactly once per up→down transition of the displayed frame: call it
+    /// after every step and emit [`AgentEvent::DialogDismissed`](crate::state::AgentEvent)
+    /// when it fires. Retail clears CliEventMessOpenFlag on dismissal, so the
+    /// box hides until the next message opcode reopens it; a plain
+    /// `Advance::Waiting` cannot signal this because ticks parked while a frame
+    /// is up report Waiting too.
+    pub fn take_message_closed(&mut self) -> bool {
+        let up = self.runner.as_ref().is_some_and(|r| r.message_awaiting());
+        let closed = self.message_was_up && !up;
+        self.message_was_up = up;
+        closed
+    }
+
     fn drive(&mut self, step: impl FnOnce(&mut DialogRunner, &StringDat) -> DialogStep) -> Advance {
         let (Some(strings), Some(runner), Some(active)) = (
             self.strings.as_ref(),
@@ -395,9 +414,12 @@ impl DialogSession {
             .map(|c| resolve_cue(c, event_entity))
             .collect();
         let advance = match outcome {
-            DialogStep::Frame(frame) => {
-                Advance::Frame(frame_to_dialog(active, frame, &self.player_name))
-            }
+            DialogStep::Frame(frame) => Advance::Frame(frame_to_dialog(
+                active,
+                frame,
+                &self.player_name,
+                runner.cancel_armed(),
+            )),
             DialogStep::Ended { end_para } => Advance::Ended {
                 end_para,
                 final_position,
@@ -479,6 +501,7 @@ impl DialogSession {
     fn finish(&mut self) {
         self.runner = None;
         self.active = None;
+        self.message_was_up = false;
     }
 
     /// Entry `index` of `zone`'s dialog DAT, loading it if needed. `None` when
@@ -578,13 +601,33 @@ pub fn agent_event_id(unique_no: u32, event_id: u16) -> u32 {
 
 /// A drained [`EventCue`] with its actors resolved. Not `Eq`: the scene arm
 /// carries a [`CutsceneCue`], whose [`CutsceneCue::ActorMove`] speed is a float.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum ResolvedCue {
     /// Crosses the wire boundary as a [`CutsceneCue`].
     Scene(CutsceneCue),
     /// 0x5D rides the existing [`AgentEvent::MusicVolumeChanged`] instead of
     /// the cue stream.
     MusicVolume { volume: u8, fade_frames: u16 },
+    /// 0xC8/0x8B/0x8A ride their own map AgentEvents: the Map screen is client
+    /// UI state, not scene state.
+    Map(MapOp),
+}
+
+/// One event-script ask on the player's Map screen (research/XiEvents/OpCodes/
+/// 0x00C8.md, 0x008B.md, 0x008A.md).
+#[derive(Debug, Clone, PartialEq)]
+pub enum MapOp {
+    /// Open the Map on zone `map_id`; `tutorial` is retail's help-flag operand.
+    Open { map_id: u16, tutorial: bool },
+    /// Place a named marker at milli-unit coordinates on zone `map_id`'s map.
+    Marker {
+        map_id: u16,
+        x_milli: i32,
+        y_milli: i32,
+        label: String,
+    },
+    /// Close the Map screen.
+    Close,
 }
 
 /// Resolve one VM cue against `event_entity`, the server id of the entity the
@@ -627,11 +670,22 @@ pub fn resolve_cue(cue: EventCue, event_entity: u32) -> ResolvedCue {
             partner: actor(actor2),
             key,
         },
+        EventCue::ZoneScheduler {
+            key,
+            actor1,
+            actor2,
+        } => CutsceneCue::ZoneScheduler {
+            key,
+            actor: actor(actor1),
+            partner: actor(actor2),
+        },
         EventCue::ActorHide { target, hide } => CutsceneCue::ActorHide {
             target: actor(target),
             hide,
         },
         EventCue::CameraLock { lock } => CutsceneCue::CameraLock { lock },
+        EventCue::HudHide { hide } => CutsceneCue::HudHide { hide },
+        EventCue::ClockHold { stop, hour } => CutsceneCue::ClockHold { stop, hour },
         EventCue::Mount {
             target,
             status_event,
@@ -690,6 +744,32 @@ pub fn resolve_cue(cue: EventCue, event_entity: u32) -> ResolvedCue {
                 fade_frames,
             }
         }
+        EventCue::MapOpen { map_id, tutorial } => {
+            return ResolvedCue::Map(MapOp::Open {
+                map_id: map_id as u16,
+                tutorial,
+            })
+        }
+        EventCue::MapMarker {
+            map_id,
+            x_milli,
+            y_milli,
+            name,
+        } => {
+            // The 16-byte field is NUL-padded; retail's underscore rewrite
+            // already happened in the VM.
+            let label = String::from_utf8_lossy(&name)
+                .trim_end_matches('\0')
+                .trim()
+                .to_string();
+            return ResolvedCue::Map(MapOp::Marker {
+                map_id: map_id as u16,
+                x_milli,
+                y_milli,
+                label,
+            });
+        }
+        EventCue::MapClose => return ResolvedCue::Map(MapOp::Close),
     })
 }
 
@@ -760,6 +840,24 @@ impl CutsceneScope {
                 for slot in 0..crate::state::MUSIC_SLOT_COUNT {
                     let _ = event_tx.send(AgentEvent::MusicVolumeChanged { slot, volume });
                 }
+            }
+            ResolvedCue::Map(op) => {
+                let ev = match op {
+                    MapOp::Open { map_id, tutorial } => AgentEvent::MapOpen { map_id, tutorial },
+                    MapOp::Marker {
+                        map_id,
+                        x_milli,
+                        y_milli,
+                        label,
+                    } => AgentEvent::MapMarkerPlaced {
+                        map_id,
+                        x_milli,
+                        y_milli,
+                        label,
+                    },
+                    MapOp::Close => AgentEvent::MapClosed,
+                };
+                let _ = event_tx.send(ev);
             }
         }
     }
@@ -995,8 +1093,10 @@ fn frame_to_dialog(
     active: &ActiveEvent,
     frame: ffxi_event::DialogFrame,
     player_name: &str,
+    cancel_armed: bool,
 ) -> DialogState {
     let ffxi_event::DialogFrame {
+        speaker_index,
         text,
         choices,
         params,
@@ -1011,6 +1111,13 @@ fn frame_to_dialog(
             &params,
         )
     };
+    let item_marker = format!("{{{MARKER_ITEM}:");
+    let key_item_marker = format!("{{{MARKER_KEY_ITEM}:");
+    let contains_item = text.contains(&item_marker)
+        || text.contains(&key_item_marker)
+        || choices
+            .iter()
+            .any(|c| c.contains(&item_marker) || c.contains(&key_item_marker));
     DialogState {
         event_id: active.agent_event_id,
         npc_id: active.unique_no,
@@ -1028,6 +1135,9 @@ fn frame_to_dialog(
         text_entry: false,
         grid: None,
         custom_menu: false,
+        cancel_armed,
+        speaker_index,
+        contains_item,
     }
 }
 
@@ -1279,10 +1389,16 @@ fn arm_move_holds(
         // units are 1/60 s on the VM's wait clock.
         let dx = (goal.x - current.x) as f32;
         let dz = (goal.z - current.z) as f32;
-        runner.hold_move(
-            actor,
-            dx.hypot(dz) / (speed * ffxi_event::vm::scene::EVENT_COORD_UNITS) * WAIT_UNITS_PER_SEC,
+        let units =
+            dx.hypot(dz) / (speed * ffxi_event::vm::scene::EVENT_COORD_UNITS) * WAIT_UNITS_PER_SEC;
+        tracing::debug!(
+            target: "kuluu_session::event_dialog",
+            server_id,
+            speed,
+            hold_secs = units / WAIT_UNITS_PER_SEC,
+            "armed the MOVE hold from the session's own entity positions"
         );
+        runner.hold_move(actor, units);
     }
 }
 
@@ -1326,6 +1442,19 @@ fn arm_motion_holds(
                     runner.hold_action(actor1, key, units);
                 }
             }
+            // 0x2D: the routine lives in the global scene DAT; retail waits on it via the
+            // zone object, so the hold keys on the VM's zone sentinel rather than an actor.
+            EventCue::ZoneScheduler { key, .. } => {
+                if let Some(units) = routine_units(
+                    root,
+                    cache,
+                    ffxi_dat::scheduler::ZONE_SCENE_DAT_ID,
+                    key,
+                    ffxi_event::SCHEDULER_DURATION_FROM_DAT,
+                ) {
+                    runner.hold_action(ffxi_event::ActorLookup::ZONE, key, units);
+                }
+            }
             _ => {}
         }
     }
@@ -1344,11 +1473,22 @@ fn routine_units(
     tag: FourCc,
     duration_override: u16,
 ) -> Option<f32> {
-    if let Some(units) = cache.get(&(dat_id, tag)) {
-        return *units;
+    let units = if let Some(units) = cache.get(&(dat_id, tag)) {
+        *units
+    } else {
+        let units = routine_units_uncached(root, dat_id, tag, duration_override);
+        cache.insert((dat_id, tag), units);
+        units
+    };
+    if let Some(units) = &units {
+        tracing::debug!(
+            target: "kuluu_session::event_dialog",
+            dat_id,
+            tag = %String::from_utf8_lossy(&tag),
+            hold_secs = units / WAIT_UNITS_PER_SEC,
+            "armed the WAIT* hold from the DAT-authored routine length"
+        );
     }
-    let units = routine_units_uncached(root, dat_id, tag, duration_override);
-    cache.insert((dat_id, tag), units);
     units
 }
 
@@ -1801,6 +1941,138 @@ pub(crate) mod tests {
         (session, trigger)
     }
 
+    /// Event 503's master block runs 0x42 as its second opcode (the VM's cancel
+    /// disarm). The first dialog frame must carry cancel_armed=false so the
+    /// client's ESC gate holds; a program without it stays cancellable.
+    #[test]
+    fn cancel_disarm_opcodes_flow_into_the_first_frame() {
+        const NPC: u32 = 0x010E_6032;
+        const EVENT: u16 = 503;
+        const ZONE: u16 = 248;
+
+        fn begin_with(program: Vec<u8>) -> Begin {
+            let block = ffxi_dat::event_dat::EventBlock {
+                actor: NPC,
+                event_ids: vec![EVENT],
+                event_offsets: vec![0],
+                references: vec![900],
+                event_data: program,
+            };
+            let mut session = DialogSession::new(None, "Test".into());
+            session.loaded_event_zone = Some(ZONE);
+            session.loaded_string_zone = Some(ZONE);
+            session.event_dat = Some(Arc::new(EventDat {
+                blocks: vec![block],
+            }));
+            session.strings = Some(StringDat::parse(&synth_dat(&[b"test"])).unwrap());
+            let trigger = EventTrigger {
+                event_zone: ZONE,
+                text_zone: ZONE,
+                unique_no: NPC,
+                act_index: 54,
+                event_id: EVENT,
+                params: vec![],
+                npc_name: None,
+            };
+            session.begin(trigger)
+        }
+
+        // 0x42 disarm, then a chat line (0x1D, ref[0]) + MESWAIT.
+        let Begin::Frame(dialog) = begin_with(vec![0x42, 0x1D, 0x00, 0x80, 0x23, 0x21]) else {
+            panic!("the disarmed program produced no frame");
+        };
+        assert!(!dialog.cancel_armed);
+        // The trigger's target index rides the frame as its speaker.
+        assert_eq!(dialog.speaker_index, Some(54));
+
+        // Same line without the disarm opcode stays cancellable.
+        let Begin::Frame(dialog) = begin_with(vec![0x1D, 0x00, 0x80, 0x23, 0x21]) else {
+            panic!("the armed program produced no frame");
+        };
+        assert!(dialog.cancel_armed);
+    }
+
+    /// Event 503's map beat (master +045D9..+04606): the coupon line parks on its MESWAIT
+    /// with the map open, and CLOSE_MAP only runs after dismissal. The up→down edge detector
+    /// must fire exactly once — on the step that dismisses the parked frame into a timed hold —
+    /// and never again while the scene stays parked: ticks parked with the frame still up also
+    /// report Waiting, so a plain Advance::Waiting cannot carry this signal.
+    #[test]
+    fn message_closed_fires_exactly_once_per_up_down_transition() {
+        const NPC: u32 = 0x010E_6032;
+        const EVENT: u16 = 503;
+        const ZONE: u16 = 248;
+
+        let block = ffxi_dat::event_dat::EventBlock {
+            actor: NPC,
+            event_ids: vec![EVENT],
+            event_offsets: vec![0],
+            // refs[0] is the string index; refs[1] a long WAIT in 1/60s units so the
+            // post-dismissal hold outlives every tick this test runs.
+            references: vec![900, 60 * 100],
+            event_data: vec![
+                0x1D, 0x00, 0x80, // MESSAGE refs[0]
+                0x23, // MESWAIT
+                0x1C, 0x01, 0x80, // WAIT refs[1] (timed hold after dismissal)
+                0x21, // END
+            ],
+        };
+        let mut session = DialogSession::new(None, "Test".into());
+        session.loaded_event_zone = Some(ZONE);
+        session.loaded_string_zone = Some(ZONE);
+        session.event_dat = Some(Arc::new(EventDat {
+            blocks: vec![block],
+        }));
+        session.strings = Some(StringDat::parse(&synth_dat(&[b"test"])).unwrap());
+        let trigger = EventTrigger {
+            event_zone: ZONE,
+            text_zone: ZONE,
+            unique_no: NPC,
+            act_index: 54,
+            event_id: EVENT,
+            params: vec![],
+            npc_name: None,
+        };
+
+        // First frame up: the detector syncs on this call, nothing has closed yet.
+        let Begin::Frame(_dialog) = session.begin(trigger) else {
+            panic!("the program produced no first frame");
+        };
+        assert!(
+            !session.take_message_closed(),
+            "no close before any dismissal"
+        );
+
+        // Parked on the MESWAIT with the frame still displayed: ticks report Waiting and
+        // must not fire the detector.
+        for _ in 0..3 {
+            let Advance::Waiting = session.tick(1.0 / 60.0) else {
+                panic!("parked tick should wait");
+            };
+            assert!(
+                !session.take_message_closed(),
+                "frame still up, nothing closed"
+            );
+        }
+
+        // Dismissal: the box hides and the scene parks on its timed WAIT — exactly one fire.
+        let Advance::Waiting = session.advance(None) else {
+            panic!("dismissal should park on the hold");
+        };
+        assert!(
+            session.take_message_closed(),
+            "the dismissal must fire once"
+        );
+
+        // Further ticks parked after it: no re-fire.
+        for _ in 0..3 {
+            let Advance::Waiting = session.tick(1.0 / 60.0) else {
+                panic!("parked tick should wait");
+            };
+            assert!(!session.take_message_closed(), "no re-fire while parked");
+        }
+    }
+
     /// A minimal DAT root that resolves `dat_id` to ROM/21/39.DAT, which holds
     /// one scheduler chunk named `tag`: a single zero-delay stage of duration
     /// `frames`, so the authored end frame is exactly `frames`.
@@ -1825,11 +2097,17 @@ pub(crate) mod tests {
         // stage, that stage (0x59 AnimationLock, delay 0, duration `frames`),
         // then the end-of-section opcode.
         let mut body = vec![0u8; 64];
-        body[0x14..0x18].copy_from_slice(&74u32.to_le_bytes()); // effect list at body offset 64, measured from the chunk header
+        // The section table measures offsets from the chunk header
+        // (ffxi-dat/src/scheduler.rs effect_section_start), so the stage at body
+        // offset 64 sits at raw 80.
+        body[0x14..0x18].copy_from_slice(&80u32.to_le_bytes());
         body.extend([0x59, 0x02, 0x00, 0x00]); // stage opcode + length (8 bytes)
         body.extend(0u16.to_le_bytes()); // delay
         body.extend(frames.to_le_bytes()); // duration
-                                           // Retail chunks are a 16-byte header plus a body on the same stride.
+                                           // Retail chunks are a 16-byte header plus a body on the same stride; the
+                                           // walker (ffxi-dat/src/chunk.rs walk) reads the name and size word out of the first
+                                           // eight bytes and starts the body at offset 16, so the header's remaining
+                                           // eight bytes must be written even though they are zero.
         const CHUNK_STRIDE: usize = 16;
         let total = CHUNK_STRIDE + body.len();
         let padded = total.div_ceil(CHUNK_STRIDE) * CHUNK_STRIDE;
@@ -1839,6 +2117,7 @@ pub(crate) mod tests {
             &(((padded / CHUNK_STRIDE) as u32) << 7 | ffxi_dat::ChunkKind::Scheduler as u32)
                 .to_le_bytes(),
         );
+        chunk.resize(CHUNK_STRIDE, 0);
         chunk.extend(body);
         chunk.resize(padded, 0);
         let rom = dir.path().join("ROM").join("21");
@@ -1906,6 +2185,61 @@ pub(crate) mod tests {
         assert!(!*tpc);
         assert_eq!(*actor, CutsceneActor::Entity { server_id: NPC });
         assert_eq!(*key, KEY);
+        // The hold is 60 frames = one second on the VM's clock.
+        assert!(matches!(session.tick(0.5), Advance::Waiting));
+        assert!(matches!(session.tick(0.6), Advance::Ended { .. }));
+    }
+
+    #[test]
+    fn zone_scheduler_hold_arms_from_the_scene_dat_routine_length() {
+        const NPC: u32 = 0x010E_6032;
+        const EVENT: u16 = 503;
+        const ZONE: u16 = 248;
+        const KEY: [u8; 4] = *b"mov1";
+        // The synthetic root resolves file id 23 (the global scene DAT) to the
+        // one-chunk routine of `frames` length.
+        let frames = 60u16;
+        let (_dir, root) = motion_dat_root(ffxi_dat::scheduler::ZONE_SCENE_DAT_ID, KEY, frames);
+        let mut program = vec![0x2D];
+        program.extend(NPC.to_le_bytes()); // actor1 @1
+        program.extend(0u32.to_le_bytes()); // actor2 @5
+        program.extend(KEY); // key @9
+        program.push(0x54); // WAITMAPSCHEDULOR @13
+        program.extend(0u32.to_le_bytes()); // actor1 @14 (retail's guard only)
+        program.extend(0u32.to_le_bytes()); // actor2 @18
+        program.extend(KEY); // key @22
+        program.push(0x21); // END @26
+        let block = ffxi_dat::event_dat::EventBlock {
+            actor: NPC,
+            event_ids: vec![EVENT],
+            event_offsets: vec![0],
+            references: vec![],
+            event_data: program,
+        };
+        let mut session = DialogSession::new(Some(Arc::new(root)), "Test".into());
+        session.loaded_event_zone = Some(ZONE);
+        session.loaded_string_zone = Some(ZONE);
+        session.event_dat = Some(Arc::new(EventDat {
+            blocks: vec![block],
+        }));
+        session.strings = Some(StringDat::parse(&synth_dat(&[b"test"])).unwrap());
+        let trigger = EventTrigger {
+            event_zone: ZONE,
+            text_zone: ZONE,
+            unique_no: NPC,
+            act_index: 0,
+            event_id: EVENT,
+            params: vec![],
+            npc_name: None,
+        };
+        assert!(matches!(session.begin(trigger), Begin::Waiting));
+        let cues = session.take_cues();
+        let [ResolvedCue::Scene(CutsceneCue::ZoneScheduler { key, actor, .. })] = cues.as_slice()
+        else {
+            panic!("expected the ZoneScheduler cue: {cues:?}");
+        };
+        assert_eq!(*key, KEY);
+        assert_eq!(*actor, CutsceneActor::Entity { server_id: NPC });
         // The hold is 60 frames = one second on the VM's clock.
         assert!(matches!(session.tick(0.5), Advance::Waiting));
         assert!(matches!(session.tick(0.6), Advance::Ended { .. }));
@@ -2064,10 +2398,11 @@ pub(crate) mod tests {
             choices: vec!["Pay {Num:1}.".to_string(), "Decline.".to_string()],
             params: vec![0, 250],
         };
-        let dialog = frame_to_dialog(&active, frame, "Zeid");
+        let dialog = frame_to_dialog(&active, frame, "Zeid", true);
         assert_eq!(dialog.nums, vec![0, 250]);
         assert_eq!(dialog.prompt.as_deref(), Some("Trion: 250 gil, Zeid."));
         assert_eq!(dialog.choices, vec!["Pay 250.", "Decline."]);
+        assert!(dialog.cancel_armed, "the VM's cancel flag rides the frame");
     }
 
     fn drain(rx: &mut broadcast::Receiver<AgentEvent>) -> Vec<AgentEvent> {

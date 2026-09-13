@@ -653,6 +653,9 @@ fn frame(menu: &Menu) -> DialogState {
         text_entry: false,
         grid: None,
         custom_menu: false,
+        cancel_armed: true,
+        speaker_index: None,
+        contains_item: false,
     }
 }
 
@@ -820,6 +823,9 @@ fn recipient_entry_frame() -> DialogState {
         text_entry: true,
         grid: None,
         custom_menu: false,
+        cancel_armed: true,
+        speaker_index: None,
+        contains_item: false,
     }
 }
 

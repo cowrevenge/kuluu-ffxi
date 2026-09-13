@@ -431,10 +431,10 @@ fn toggle_debug_panel(
     scene_state: &mut SceneState,
 ) {
     use kuluu_render::hud::menu::{
-        DEBUG_ENTITY_LIST, DEBUG_FOG, DEBUG_GRAPHICS_DEBUG, DEBUG_MESH, DEBUG_NAMEPLATES,
-        DEBUG_NET_STATUS, DEBUG_NOCLIP, DEBUG_PERF, DEBUG_POSITION_LOG, DEBUG_PRINT_POS,
-        DEBUG_SOUND, DEBUG_STAIR_DRAW, DEBUG_STAIR_STATUS, DEBUG_TARGET_CYCLE, DEBUG_UI_SETTINGS,
-        DEBUG_WEATHER,
+        DEBUG_AUTO_ENTER_CS, DEBUG_ENTITY_LIST, DEBUG_FOG, DEBUG_GRAPHICS_DEBUG, DEBUG_MESH,
+        DEBUG_NAMEPLATES, DEBUG_NET_STATUS, DEBUG_NOCLIP, DEBUG_PERF, DEBUG_POSITION_LOG,
+        DEBUG_PRINT_POS, DEBUG_SOUND, DEBUG_STAIR_DRAW, DEBUG_STAIR_STATUS, DEBUG_TARGET_CYCLE,
+        DEBUG_UI_SETTINGS, DEBUG_WEATHER,
     };
 
     // Print Pos is a button, not a toggle: fire and return before the
@@ -466,6 +466,10 @@ fn toggle_debug_panel(
         DEBUG_NOCLIP => {
             hud_panels.noclip = !hud_panels.noclip;
             hud_panels.noclip
+        }
+        DEBUG_AUTO_ENTER_CS => {
+            hud_panels.auto_enter_cs = !hud_panels.auto_enter_cs;
+            hud_panels.auto_enter_cs
         }
         // The rows report the feature's live state, so they invert the "off"
         // flags: Weather [on] = weather effects applied.

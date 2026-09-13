@@ -181,6 +181,8 @@ impl Host {
             &mut crate::event_dialog::CutsceneScope::default(),
             &mut self.pending,
             &mut automatic,
+            &std::collections::HashMap::new(),
+            &std::collections::HashMap::new(),
         )
         .await;
         assert!(

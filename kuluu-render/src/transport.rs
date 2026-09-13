@@ -369,6 +369,7 @@ mod tests {
         TimedStage {
             frame,
             stage: SchedulerStage {
+                stage_words: ffxi_dat::scheduler::SYNTHESIZED_STAGE_WORDS,
                 kind: StageKind::FollowPoints,
                 raw_type: 0x27,
                 actor_fade: None,

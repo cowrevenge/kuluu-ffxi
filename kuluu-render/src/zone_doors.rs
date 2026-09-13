@@ -627,6 +627,7 @@ mod tests {
         TimedStage {
             frame: 0,
             stage: SchedulerStage {
+                stage_words: ffxi_dat::scheduler::SYNTHESIZED_STAGE_WORDS,
                 kind: StageKind::ModelRotation,
                 raw_type: 0x0D,
                 delay_frames: delay,

@@ -639,7 +639,44 @@ fn walk_with_dirs(
 }
 
 pub fn parse_action_bytes(bytes: &[u8]) -> (Vec<Scheduler>, ActionAssets) {
-    parse_action_tree(&ffxi_dat::chunk::walk_tree(bytes))
+    let (schedulers, assets, _) = parse_action_bytes_reporting(bytes);
+    (schedulers, assets)
+}
+
+pub fn parse_action_bytes_reporting(
+    bytes: &[u8],
+) -> (Vec<Scheduler>, ActionAssets, EffectCoverageReport) {
+    parse_action_tree_reporting(&ffxi_dat::chunk::walk_tree(bytes))
+}
+
+/// What one effect-DAT parse understood nothing of: scheduler stages whose opcode reaches no
+/// `StageKind` arm, and generator blocks no section arm decoded. Both are silent degradations —
+/// the routine still runs, missing whatever the instruction said — so they are counted rather
+/// than dropped.
+#[derive(Default, Debug, Clone)]
+pub struct EffectCoverageReport {
+    /// (routine name, raw opcode, stage length in dwords)
+    pub unknown_stages: Vec<([u8; 4], u8, u8)>,
+    /// (generator chunk name, section, opcode, outcome) for every generator block walked.
+    pub generator_opcodes: Vec<(
+        [u8; 4],
+        ffxi_dat::particle_gen::GeneratorSection,
+        u8,
+        ffxi_dat::particle_gen::GeneratorOpcodeOutcome,
+    )>,
+}
+
+impl EffectCoverageReport {
+    pub fn dropped_generator_opcodes(
+        &self,
+    ) -> impl Iterator<Item = ([u8; 4], ffxi_dat::particle_gen::GeneratorSection, u8)> + '_ {
+        self.generator_opcodes
+            .iter()
+            .filter(|(.., outcome)| {
+                *outcome == ffxi_dat::particle_gen::GeneratorOpcodeOutcome::Dropped
+            })
+            .map(|&(name, section, opcode, _)| (name, section, opcode))
+    }
 }
 
 // Chunk ids are only unique within a directory, and a zone DAT repeats them across weat/ subtrees
@@ -647,8 +684,16 @@ pub fn parse_action_bytes(bytes: &[u8]) -> (Vec<Scheduler>, ActionAssets) {
 // that owns one subtree must build its assets from that subtree alone or it binds the wrong
 // mesh/texture/keyframe.
 pub fn parse_action_tree(node: &ffxi_dat::chunk::ChunkNode<'_>) -> (Vec<Scheduler>, ActionAssets) {
+    let (schedulers, assets, _) = parse_action_tree_reporting(node);
+    (schedulers, assets)
+}
+
+pub fn parse_action_tree_reporting(
+    node: &ffxi_dat::chunk::ChunkNode<'_>,
+) -> (Vec<Scheduler>, ActionAssets, EffectCoverageReport) {
     let mut schedulers = Vec::new();
     let mut assets = ActionAssets::default();
+    let mut report = EffectCoverageReport::default();
     walk_with_dirs(node, &mut |dir, c| {
         let Some(kind) = ChunkKind::from_u8(c.kind) else {
             return;
@@ -656,22 +701,41 @@ pub fn parse_action_tree(node: &ffxi_dat::chunk::ChunkNode<'_>) -> (Vec<Schedule
         match kind {
             ChunkKind::Scheduler => {
                 if let Ok(s) = Scheduler::parse_in_dir(dir, c.name, c.data) {
+                    report.unknown_stages.extend(
+                        s.stages
+                            .iter()
+                            .map(|t| t.stage)
+                            .filter(|st| {
+                                st.kind == StageKind::Unknown
+                                    && !ffxi_dat::scheduler::is_structural_opcode(st.raw_type)
+                            })
+                            .map(|st| (s.name, st.raw_type, st.stage_words)),
+                    );
                     schedulers.push(s);
                 }
             }
             ChunkKind::Generator => {
+                let mut sink = |section, opcode, outcome| {
+                    report
+                        .generator_opcodes
+                        .push((c.name, section, opcode, outcome));
+                };
                 if let Ok(Some(g)) = Generator::parse(c.name, c.data) {
                     assets.generators.insert(c.name, g);
                 }
                 if let Ok(Some(e)) = Generator::parse_particle_emitter(c.data) {
                     assets.emitters.insert(c.name, e);
                 }
-                if let Ok(Some(d)) = ffxi_dat::particle_gen::ParticleGeneratorDef::parse(c.data) {
+                if let Ok(Some(d)) =
+                    ffxi_dat::particle_gen::ParticleGeneratorDef::parse_reporting(c.data, &mut sink)
+                {
                     assets.particle_defs.insert(c.name, d);
                     assets.particle_def_dirs.insert(c.name, dir);
                     assets.particle_defs_by_dir.insert((dir, c.name), d);
                 }
-                if let Ok(Some(d)) = ffxi_dat::particle_gen::SoundGeneratorDef::parse(c.data) {
+                if let Ok(Some(d)) =
+                    ffxi_dat::particle_gen::SoundGeneratorDef::parse_reporting(c.data, &mut sink)
+                {
                     assets.sound_defs.insert(c.name, d);
                 }
             }
@@ -729,7 +793,7 @@ pub fn parse_action_tree(node: &ffxi_dat::chunk::ChunkNode<'_>) -> (Vec<Schedule
             _ => {}
         }
     });
-    (schedulers, assets)
+    (schedulers, assets, report)
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -806,8 +870,12 @@ pub(crate) struct GlobalEffectDirTask(bevy::tasks::Task<(Vec<Scheduler>, ActionA
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn load_global_effect_dir(root: Res<ActionDatRoot>, mut commands: Commands) {
     let root = root.0.clone();
-    let task = bevy::tasks::AsyncComputeTaskPool::get()
-        .spawn(async move { parse_action_bytes(&read_dat_bytes(root, GLOBAL_EFFECT_DIR_FILE_ID)) });
+    let task = bevy::tasks::AsyncComputeTaskPool::get().spawn(async move {
+        let (schedulers, assets, report) =
+            parse_action_bytes_reporting(&read_dat_bytes(root, GLOBAL_EFFECT_DIR_FILE_ID));
+        report_effect_coverage(GLOBAL_EFFECT_DIR_FILE_ID, &report);
+        (schedulers, assets)
+    });
     commands.insert_resource(GlobalEffectDirTask(task));
 }
 
@@ -920,8 +988,45 @@ impl ActionDatCache {
 // pre-existing "no effect" behaviour instead of re-spawning a load per cast.
 #[cfg(not(target_arch = "wasm32"))]
 fn load_action_dat(root: Option<Arc<ffxi_dat::DatRoot>>, file_id: u32) -> ParsedActionDat {
-    let (schedulers, assets) = parse_action_bytes(&read_dat_bytes(root, file_id));
+    let (schedulers, assets, report) = parse_action_bytes_reporting(&read_dat_bytes(root, file_id));
+    report_effect_coverage(file_id, &report);
     ParsedActionDat { schedulers, assets }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+type CoverageKey = (Option<ffxi_dat::particle_gen::GeneratorSection>, u8);
+
+#[cfg(not(target_arch = "wasm32"))]
+static REPORTED_COVERAGE: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashSet<CoverageKey>>,
+> = std::sync::OnceLock::new();
+
+/// One warn per (stream, opcode) for the whole process, naming the first effect DAT it was seen
+/// in. The rate limit is the set, not a clock — a reload after a cache eviction or a DAT-root
+/// switch stays quiet. Keying on the file as well would be a line per opcode per DAT, and the
+/// corpus census (kuluu-render/tests/effect_instruction_census.rs) measures ~200 distinct codes
+/// spread across nearly every file, so that key would flood a session's log rather than report.
+#[cfg(not(target_arch = "wasm32"))]
+fn report_effect_coverage(file_id: u32, report: &EffectCoverageReport) {
+    let Ok(mut seen) = REPORTED_COVERAGE.get_or_init(Default::default).lock() else {
+        return;
+    };
+    for &(routine, opcode, words) in &report.unknown_stages {
+        if seen.insert((None, opcode)) {
+            warn!(
+                "effect DAT {file_id}: routine {} stage opcode {opcode:#04x} ({words} dwords) has no handler; the instruction is skipped",
+                String::from_utf8_lossy(&routine)
+            );
+        }
+    }
+    for (chunk, section, opcode) in report.dropped_generator_opcodes() {
+        if seen.insert((Some(section), opcode)) {
+            warn!(
+                "effect DAT {file_id}: generator {} {section:?} opcode {opcode:#04x} is dropped",
+                String::from_utf8_lossy(&chunk)
+            );
+        }
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -2661,6 +2766,7 @@ mod tests {
         TimedStage {
             frame,
             stage: SchedulerStage {
+                stage_words: ffxi_dat::scheduler::SYNTHESIZED_STAGE_WORDS,
                 kind,
                 raw_type,
                 delay_frames: 0,

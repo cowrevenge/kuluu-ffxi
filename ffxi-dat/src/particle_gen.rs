@@ -15,6 +15,50 @@ use crate::{DatError, Result};
 // Each section is a stream of opcodeConfig u32s: opcode = cfg & 0xFF, size_words = (cfg>>8)&0x1F,
 // allocationOffset = cfg>>0xD; the block is size_words*4 bytes; a 0 opcode/size terminates.
 // Only section 2 (particle initializers) is needed for the visible stream.
+/// The generator opcode streams a caller can be told about when a block is decoded by no arm.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash, PartialOrd, Ord)]
+pub enum GeneratorSection {
+    /// Section 1 (body[0x70]) — generator-level per-frame updaters.
+    Setup,
+    /// Section 2 (body[0x74]) — particle initializers.
+    Initializers,
+    /// Section 3 (body[0x78]) — per-frame particle updaters.
+    Updaters,
+    /// Section 4 (body[0x7C]) — the element-die script.
+    ElementDie,
+    /// `SoundGeneratorDef`'s section 2.
+    SoundSetup,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash, PartialOrd, Ord)]
+pub enum GeneratorOpcodeOutcome {
+    /// A section arm read the block's payload.
+    Decoded,
+    /// No arm matched, or the arm's length guard failed: the block's payload is discarded.
+    Dropped,
+}
+
+/// Notified once per generator block, so a caller can measure what the parser understands and
+/// what it discards instead of inferring either from a missing visual.
+pub type GeneratorOpcodeSink<'a> = &'a mut dyn FnMut(GeneratorSection, u8, GeneratorOpcodeOutcome);
+
+// A generator chunk is offered to every def parser in turn and only one claims it, so a block is
+// only honestly this parse's business once the parse that saw it returns a def. Blocks are
+// buffered until then; a sound generator must not report its whole stream as particle initializers.
+pub(crate) fn flush_blocks(sink: GeneratorOpcodeSink<'_>, blocks: &[(GeneratorSection, u8, bool)]) {
+    for &(section, opcode, decoded) in blocks {
+        sink(
+            section,
+            opcode,
+            if decoded {
+                GeneratorOpcodeOutcome::Decoded
+            } else {
+                GeneratorOpcodeOutcome::Dropped
+            },
+        );
+    }
+}
+
 const HEADER_LEN: usize = 0x80;
 const CHUNK_HEADER_LEN: usize = 0x10;
 const OPCODE_MASK: u32 = 0xFF;
@@ -389,6 +433,11 @@ const SEC4_OPCODE_RELIFE: u8 = 0x05;
 
 impl ParticleGeneratorDef {
     pub fn parse(body: &[u8]) -> Result<Option<Self>> {
+        Self::parse_reporting(body, &mut |_, _, _| {})
+    }
+
+    pub fn parse_reporting(body: &[u8], sink: GeneratorOpcodeSink<'_>) -> Result<Option<Self>> {
+        let mut blocks: Vec<(GeneratorSection, u8, bool)> = Vec::new();
         if body.len() < HEADER_LEN {
             return Err(DatError::TruncatedChunk {
                 offset: 0,
@@ -460,6 +509,7 @@ impl ParticleGeneratorDef {
             if cursor + block_len > body.len() {
                 break;
             }
+            let mut decoded = true;
             match opcode {
                 0x01 if payload + 32 <= body.len() => {
                     let bb = u16_le(body, payload);
@@ -587,8 +637,9 @@ impl ParticleGeneratorDef {
                         }
                     };
                 }
-                _ => {}
+                _ => decoded = false,
             }
+            blocks.push((GeneratorSection::Initializers, opcode, decoded));
             cursor += block_len;
         }
 
@@ -621,6 +672,7 @@ impl ParticleGeneratorDef {
                 if cursor + block_len > body.len() {
                     break;
                 }
+                let mut decoded = true;
                 match opcode {
                     SEC3_OPCODE_ROTATION_UPDATER => rotation_updater = true,
                     0x27 if payload + 4 <= body.len() => uv_scroll[0] = f32_le(body, payload),
@@ -649,8 +701,9 @@ impl ParticleGeneratorDef {
                         moon_phase_color =
                             Some(std::array::from_fn(|i| rgba_u8(body, payload + 4 + i * 4)));
                     }
-                    _ => {}
+                    _ => decoded = false,
                 }
+                blocks.push((GeneratorSection::Updaters, opcode, decoded));
                 cursor += block_len;
             }
         }
@@ -672,13 +725,18 @@ impl ParticleGeneratorDef {
                 if cursor + block_len > body.len() {
                     break;
                 }
-                if opcode == SEC1_OPCODE_EMIT_CULL && payload + 12 <= body.len() {
-                    emit_cull = Some(EmitCull {
-                        max_distance: f32_le(body, payload),
-                        min_distance: f32_le(body, payload + 4),
-                        unlink_out_of_range: u32_le(body, payload + 8) & 1 != 0,
-                    });
+                let mut decoded = true;
+                match opcode {
+                    SEC1_OPCODE_EMIT_CULL if payload + 12 <= body.len() => {
+                        emit_cull = Some(EmitCull {
+                            max_distance: f32_le(body, payload),
+                            min_distance: f32_le(body, payload + 4),
+                            unlink_out_of_range: u32_le(body, payload + 8) & 1 != 0,
+                        });
+                    }
+                    _ => decoded = false,
                 }
+                blocks.push((GeneratorSection::Setup, opcode, decoded));
                 cursor += block_len;
             }
         }
@@ -695,13 +753,17 @@ impl ParticleGeneratorDef {
                 if opcode == OPCODE_END || size_words == 0 {
                     break;
                 }
-                if opcode == SEC4_OPCODE_RELIFE {
-                    relife_on_expiry = true;
-                }
+                relife_on_expiry |= opcode == SEC4_OPCODE_RELIFE;
+                blocks.push((
+                    GeneratorSection::ElementDie,
+                    opcode,
+                    opcode == SEC4_OPCODE_RELIFE,
+                ));
                 cursor += size_words * 4;
             }
         }
 
+        flush_blocks(sink, &blocks);
         Ok(Some(Self {
             frames_per_emission,
             particles_per_emission,
@@ -802,6 +864,11 @@ pub struct SoundGeneratorDef {
 
 impl SoundGeneratorDef {
     pub fn parse(body: &[u8]) -> Result<Option<Self>> {
+        Self::parse_reporting(body, &mut |_, _, _| {})
+    }
+
+    pub fn parse_reporting(body: &[u8], sink: GeneratorOpcodeSink<'_>) -> Result<Option<Self>> {
+        let mut blocks: Vec<(GeneratorSection, u8, bool)> = Vec::new();
         if body.len() < HEADER_LEN {
             return Err(DatError::TruncatedChunk {
                 offset: 0,
@@ -838,6 +905,7 @@ impl SoundGeneratorDef {
             if cursor + block_len > body.len() {
                 break;
             }
+            let mut decoded = true;
             match opcode {
                 0x01 if payload + 32 <= body.len() => {
                     sep_id = [
@@ -858,8 +926,9 @@ impl SoundGeneratorDef {
                     far = f32_le(body, payload);
                     near = f32_le(body, payload + 4);
                 }
-                _ => {}
+                _ => decoded = false,
             }
+            blocks.push((GeneratorSection::SoundSetup, opcode, decoded));
             cursor += block_len;
         }
 
@@ -867,6 +936,7 @@ impl SoundGeneratorDef {
             return Ok(None);
         }
 
+        flush_blocks(sink, &blocks);
         Ok(Some(Self {
             sep_id,
             base_position,

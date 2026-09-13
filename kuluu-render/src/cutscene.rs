@@ -514,6 +514,7 @@ mod tests {
             stages: vec![TimedStage {
                 frame: 0,
                 stage: SchedulerStage {
+                    stage_words: ffxi_dat::scheduler::SYNTHESIZED_STAGE_WORDS,
                     kind: StageKind::ScreenColorDrive,
                     raw_type: 0x0F,
                     delay_frames: FADE_FRAMES,

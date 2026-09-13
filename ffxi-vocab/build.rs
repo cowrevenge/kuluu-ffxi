@@ -58,6 +58,8 @@ mod floor {
     pub const EQUIP_INFO: usize = scrape_floor(15378);
     pub const ITEM_USABLE: usize = scrape_floor(3075);
     pub const WEAPON_SKILL: usize = scrape_floor(4681);
+    pub const WEAPON_SKILL_ANIMATION: usize = scrape_floor(226);
+    pub const MOB_SKILL_ANIMATION: usize = scrape_floor(4344);
     pub const EMOTE: usize = scrape_floor(51);
     pub const TRANSPORT: usize = scrape_floor(29);
 }
@@ -352,11 +354,43 @@ fn main() -> Result<()> {
     let ws_src = fs::read_to_string(LSB_WEAPON_SKILLS_SQL)
         .with_context(|| format!("reading {LSB_WEAPON_SKILLS_SQL}"))?;
 
+    // vendor/server/sql/weapon_skills.sql field 6 `animation`, the per-skill index the WS
+    // completion effect's file id is the race base plus.
+    let ws_anim_entries = parse_u16_pair_rows(&ws_src, "weapon_skills", 6)?;
+    write_u16_u16_table(
+        &out_dir.join("weapon_skill_animation_table.rs"),
+        "WEAPON_SKILL_ANIMATION",
+        LSB_WEAPON_SKILLS_SQL,
+        &ws_anim_entries,
+    )?;
+    check_scrape_count(
+        "weapon-skill animation entries",
+        LSB_WEAPON_SKILLS_SQL,
+        ws_anim_entries.len(),
+        floor::WEAPON_SKILL_ANIMATION,
+    )?;
+
     // One id space, two LSB tables: ids < 256 are weapon skills PCs and mobs share
     // (weapon_skills.name), ids >= 256 are monster-only TP moves (mob_skills.mob_skill_name).
     // mob_skills mirrors the low ids verbatim but omits some, so both are merged.
     let mob_skill_src = fs::read_to_string(LSB_MOB_SKILLS_SQL)
         .with_context(|| format!("reading {LSB_MOB_SKILLS_SQL}"))?;
+    // vendor/server/sql/mob_skills.sql field 1 `mob_anim_id`, the FTABLE index
+    // `ffxi_vocab::action_anim::mob_skill_file_id` bases.
+    let mob_anim_entries = parse_u16_pair_rows(&mob_skill_src, "mob_skills", 1)?;
+    write_u16_u16_table(
+        &out_dir.join("mob_skill_animation_table.rs"),
+        "MOB_SKILL_ANIMATION",
+        LSB_MOB_SKILLS_SQL,
+        &mob_anim_entries,
+    )?;
+    check_scrape_count(
+        "mob-skill animation entries",
+        LSB_MOB_SKILLS_SQL,
+        mob_anim_entries.len(),
+        floor::MOB_SKILL_ANIMATION,
+    )?;
+
     let mut tp_move_entries = parse_sql_insert_rows(&mob_skill_src, "mob_skills", 0, 2)?;
     tp_move_entries.extend(parse_sql_insert_rows(&ws_src, "weapon_skills", 0, 1)?);
     write_u16_table(

@@ -1,5 +1,7 @@
 include!(concat!(env!("OUT_DIR"), "/spell_animation_table.rs"));
 include!(concat!(env!("OUT_DIR"), "/ability_animation_table.rs"));
+include!(concat!(env!("OUT_DIR"), "/weapon_skill_animation_table.rs"));
+include!(concat!(env!("OUT_DIR"), "/mob_skill_animation_table.rs"));
 
 // research/xim SpellTables.kt / AbilityTable.kt: a skill's completion animation
 // is a global file-table entry at base_offset + per-skill animation index, where

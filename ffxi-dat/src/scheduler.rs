@@ -156,6 +156,11 @@ pub struct SchedulerStage {
 
     pub raw_type: u8,
 
+    // `unkCombo & STAGE_LENGTH_MASK`, the dword count the stage spans. `StageKind::from_stage` is
+    // length-conditional for several opcodes, so a consumer that wants to re-classify a stage
+    // needs the same length the parser used.
+    pub stage_words: u8,
+
     pub delay_frames: u16,
 
     pub duration_frames: u16,
@@ -288,8 +293,36 @@ pub enum StageKind {
 // while any other length is a LinkedEffectRoutine sub-routine. Disambiguate by length.
 const SOUND_EMITTER_LENGTH_WORDS: usize = 8;
 
+// The opcodes `Scheduler::parse` acts on structurally — it opens/closes a random block, ends the
+// section, or marks a control-flow branch the caller evaluates — rather than turning into a
+// StageKind. Their `Unknown` kind is the parser's design, not an unhandled instruction, so a
+// coverage census must not count them as a gap.
+pub const fn is_structural_opcode(raw_type: u8) -> bool {
+    is_control_flow_opcode(raw_type)
+        || matches!(
+            raw_type,
+            END_ROUTINE_OPCODE | RANDOM_BLOCK_OPEN | RANDOM_BLOCK_CLOSE
+        )
+}
+
+pub const fn is_control_flow_opcode(raw_type: u8) -> bool {
+    matches!(
+        raw_type,
+        CONTROL_FLOW_BRANCH_TRUE
+            | CONTROL_FLOW_BRANCH_FALSE
+            | CONTROL_FLOW_BLOCK_OPEN
+            | CONTROL_FLOW_BLOCK_CLOSE
+            | CONTROL_FLOW_CONDITION
+    )
+}
+
+// The shortest stage `from_stage` can be asked about, and the longest the length field can
+// express: sweeping this range is how a consumer discovers the handled opcode set without
+// restating the match arms.
+pub const STAGE_WORDS_RANGE: std::ops::RangeInclusive<usize> = 1..=STAGE_LENGTH_MASK as usize;
+
 impl StageKind {
-    fn from_stage(b: u8, length_words: usize) -> Self {
+    pub fn from_stage(b: u8, length_words: usize) -> Self {
         match b {
             // Opcodes empirically confirmed against retail spell DATs (e.g. Cure = file 0xAF1):
             // 0x02 spawns a particle generator, 0x03 calls a sub-routine, 0x05 plays motion,
@@ -378,6 +411,10 @@ pub struct TimedStage {
 }
 
 pub const NO_LOCAL_DIR: [u8; 4] = [0; 4];
+
+// A stage built in code rather than decoded from a DAT spans no dwords at all, and a length the
+// encoding cannot produce (`STAGE_LENGTH_MASK` counts the opcode's own dword) says so.
+pub const SYNTHESIZED_STAGE_WORDS: u8 = 0;
 
 impl Scheduler {
     pub fn parse(name: [u8; 4], body: &[u8]) -> Result<Self> {
@@ -519,6 +556,7 @@ impl Scheduler {
                     stage: SchedulerStage {
                         kind,
                         raw_type,
+                        stage_words: length_words as u8,
                         delay_frames: delay,
                         duration_frames: duration,
                         id,
@@ -564,16 +602,9 @@ impl Scheduler {
     // additional effect), so inlining it whole would run every branch at once. We do not
     // evaluate the conditions; callers pick the branch.
     pub fn has_control_flow(&self) -> bool {
-        self.stages.iter().any(|t| {
-            matches!(
-                t.stage.raw_type,
-                CONTROL_FLOW_BRANCH_TRUE
-                    | CONTROL_FLOW_BRANCH_FALSE
-                    | CONTROL_FLOW_BLOCK_OPEN
-                    | CONTROL_FLOW_BLOCK_CLOSE
-                    | CONTROL_FLOW_CONDITION
-            )
-        })
+        self.stages
+            .iter()
+            .any(|t| is_control_flow_opcode(t.stage.raw_type))
     }
 
     pub fn sound_events(&self) -> impl Iterator<Item = SoundEvent> + '_ {

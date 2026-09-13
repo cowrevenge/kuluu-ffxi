@@ -4963,6 +4963,7 @@ mod pose_resolution_tests {
                     stages: vec![TimedStage {
                         frame: 0,
                         stage: SchedulerStage {
+                            stage_words: ffxi_dat::scheduler::SYNTHESIZED_STAGE_WORDS,
                             kind: StageKind::Motion,
                             raw_type: 0x05,
                             delay_frames: 0,
@@ -5010,6 +5011,7 @@ mod pose_resolution_tests {
                     .map(|&(clip, duration_frames, frame)| TimedStage {
                         frame,
                         stage: SchedulerStage {
+                            stage_words: ffxi_dat::scheduler::SYNTHESIZED_STAGE_WORDS,
                             kind: StageKind::Motion,
                             raw_type: 0x05,
                             delay_frames: 0,

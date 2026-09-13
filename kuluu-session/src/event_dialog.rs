@@ -630,6 +630,23 @@ pub enum MapOp {
     Close,
 }
 
+/// The cue's motion resource across the wire boundary: the VM's type is
+/// isomorphic to the wire's, so this is a field-for-field copy.
+fn snapshot_motion(
+    motion: ffxi_event::ExtSchedulerMotion,
+) -> kuluu_snapshot::ExtSchedulerMotion {
+    match motion {
+        ffxi_event::ExtSchedulerMotion::Event(id) => {
+            kuluu_snapshot::ExtSchedulerMotion::Event(id)
+        }
+        ffxi_event::ExtSchedulerMotion::Tpc(pkgs) => kuluu_snapshot::ExtSchedulerMotion::Tpc {
+            a: pkgs.a,
+            b_set: pkgs.b_set,
+            b_clear: pkgs.b_clear,
+        },
+    }
+}
+
 /// Resolve one VM cue against `event_entity`, the server id of the entity the
 /// running event belongs to.
 pub fn resolve_cue(cue: EventCue, event_entity: u32) -> ResolvedCue {
@@ -658,14 +675,12 @@ pub fn resolve_cue(cue: EventCue, event_entity: u32) -> ResolvedCue {
             duration,
         },
         EventCue::ExtScheduler {
-            motion_dat_id,
-            tpc,
+            motion,
             actor1,
             actor2,
             key,
         } => CutsceneCue::ExtScheduler {
-            motion_dat_id,
-            tpc,
+            motion: motion.map(snapshot_motion),
             actor: actor(actor1),
             partner: actor(actor2),
             key,
@@ -1427,15 +1442,25 @@ fn arm_motion_holds(
                 }
             }
             EventCue::ExtScheduler {
-                motion_dat_id,
+                motion,
                 actor1,
                 key,
                 ..
             } => {
+                // The routine's schedulers live in container A (tag 1), which
+                // both the 0x5B single file and the 0x66 package name.
+                let file_id = match motion {
+                    Some(ffxi_event::ExtSchedulerMotion::Event(id)) => Some(id),
+                    Some(ffxi_event::ExtSchedulerMotion::Tpc(pkgs)) => Some(pkgs.a),
+                    None => None,
+                };
+                let Some(file_id) = file_id else {
+                    continue;
+                };
                 if let Some(units) = routine_units(
                     root,
                     cache,
-                    motion_dat_id,
+                    file_id,
                     key,
                     ffxi_event::SCHEDULER_DURATION_FROM_DAT,
                 ) {
@@ -2172,8 +2197,7 @@ pub(crate) mod tests {
         assert!(matches!(session.begin(trigger), Begin::Waiting));
         let cues = session.take_cues();
         let [ResolvedCue::Scene(CutsceneCue::ExtScheduler {
-            motion_dat_id,
-            tpc,
+            motion,
             actor,
             key,
             ..
@@ -2181,8 +2205,10 @@ pub(crate) mod tests {
         else {
             panic!("expected the ExtScheduler cue");
         };
-        assert_eq!(*motion_dat_id, dat_id);
-        assert!(!*tpc);
+        assert_eq!(
+            *motion,
+            Some(kuluu_snapshot::ExtSchedulerMotion::Event(dat_id))
+        );
         assert_eq!(*actor, CutsceneActor::Entity { server_id: NPC });
         assert_eq!(*key, KEY);
         // The hold is 60 frames = one second on the VM's clock.

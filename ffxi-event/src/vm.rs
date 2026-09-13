@@ -3,9 +3,9 @@ pub mod scene;
 use ffxi_dat::event_dat::EventBlock;
 
 use crate::cue::{
-    dat_id_helper, event_motion_dat_id, tpc_motion_dat_id, ActorLookup, EventCue, FourCc,
-    MUSIC_VOLUME_MAX, NO_ACTION_KEY, SCHEDULER_DAT_ID_BASE, STATUS_EVENT_CHOCOBO,
-    STATUS_EVENT_IDLE, STATUS_EVENT_MOUNT,
+    dat_id_helper, event_motion_dat_id, tpc_motion_packages, ActorLookup, EventCue,
+    ExtSchedulerMotion, FourCc, MUSIC_VOLUME_MAX, NO_ACTION_KEY, SCHEDULER_DAT_ID_BASE,
+    STATUS_EVENT_CHOCOBO, STATUS_EVENT_IDLE, STATUS_EVENT_MOUNT,
 };
 use crate::opcode_meta::{
     OPCODE_META, OP_ENTITYSPEED, OP_EVENTPOSSET, OP_ITEMINFO, OP_LOADROOM, OP_LOOKSET, OP_MENU,
@@ -1121,16 +1121,16 @@ impl EventVm {
                 // SetAction(actor1, key, actor2) unless the key is empty. Retail
                 // yields until the resource read completes; that is load latency
                 // the host handles asynchronously, so the cue carries the request
-                // and execution moves on. 0x66 is the Tpc form: a per-actor motion
-                // package at the same base with no banding
-                // (research/cexi-docs/cutscene_authoring.md, Dialogue + gestures).
+                // and execution moves on. 0x66 is the Tpc form: the package number
+                // names two containers (A + a CIB-waist-selected B) instead of one
+                // banded file id, and an out-of-range package loads nothing.
                 OP_LOADEXTSCHEDULER | OP_LOADEXTSCHEDULER2 => {
                     let tpc = op == OP_LOADEXTSCHEDULER2;
                     let operand = self.getworkofs(LOADEXTSCHEDULER_FILE_OFS, 0);
-                    let motion_dat_id = if tpc {
-                        tpc_motion_dat_id(operand)
+                    let motion = if tpc {
+                        tpc_motion_packages(operand).map(ExtSchedulerMotion::Tpc)
                     } else {
-                        event_motion_dat_id(operand)
+                        Some(ExtSchedulerMotion::Event(event_motion_dat_id(operand)))
                     };
                     let key = self.fourcc_at(LOADEXTSCHEDULER_KEY_OFS);
                     if key != [0; 4] && key != NO_ACTION_KEY {
@@ -1138,8 +1138,7 @@ impl EventVm {
                         self.pending_action_starts
                             .push((self.resolve_hold_actor(actor1), key));
                         self.cues.push(EventCue::ExtScheduler {
-                            motion_dat_id,
-                            tpc,
+                            motion,
                             actor1,
                             actor2: ActorLookup(self.eventgetcode2(LOADEXTSCHEDULER_ACTOR2_OFS)),
                             key,
@@ -1980,8 +1979,7 @@ mod tests {
         assert_eq!(
             cues_of(OP_LOADEXTSCHEDULER, &o, vec![FILE_OPERAND]),
             [EventCue::ExtScheduler {
-                motion_dat_id: 32104 + FILE_OPERAND,
-                tpc: false,
+                motion: Some(ExtSchedulerMotion::Event(32104 + FILE_OPERAND)),
                 actor1: ActorLookup::EVENT_ENTITY,
                 actor2: ActorLookup::EVENT_ENTITY,
                 key: *b"abcd",
@@ -1990,7 +1988,7 @@ mod tests {
     }
 
     #[test]
-    fn loadextscheduler2_flags_tpc_and_maps_to_base_plus_operand() {
+    fn loadextscheduler2_maps_the_tpc_package_to_its_band_ids() {
         const PACKAGE: u32 = 20; // the Sandy scene's Tpc package
         let mut o = REF0.to_vec();
         o.extend_from_slice(&LOOKUP_EVENT_ENTITY.to_le_bytes());
@@ -1999,8 +1997,29 @@ mod tests {
         assert_eq!(
             cues_of(OP_LOADEXTSCHEDULER2, &o, vec![PACKAGE]),
             [EventCue::ExtScheduler {
-                motion_dat_id: 32_104 + PACKAGE,
-                tpc: true,
+                motion: Some(ExtSchedulerMotion::Tpc(TpcMotionPackages {
+                    a: 32_732,
+                    b_set: 32_802,
+                    b_clear: 32_872,
+                })),
+                actor1: ActorLookup::EVENT_ENTITY,
+                actor2: ActorLookup::EVENT_ENTITY,
+                key: *b"abcd",
+            }]
+        );
+    }
+
+    #[test]
+    fn loadextscheduler2_out_of_range_package_carries_no_motion() {
+        const PACKAGE: u32 = TPC_PACKAGE_OUT_OF_RANGE; // at the limit: loads nothing
+        let mut o = REF0.to_vec();
+        o.extend_from_slice(&LOOKUP_EVENT_ENTITY.to_le_bytes());
+        o.extend_from_slice(&LOOKUP_EVENT_ENTITY.to_le_bytes());
+        o.extend_from_slice(b"abcd");
+        assert_eq!(
+            cues_of(OP_LOADEXTSCHEDULER2, &o, vec![PACKAGE]),
+            [EventCue::ExtScheduler {
+                motion: None,
                 actor1: ActorLookup::EVENT_ENTITY,
                 actor2: ActorLookup::EVENT_ENTITY,
                 key: *b"abcd",
@@ -2943,8 +2962,9 @@ mod tests {
     }
 
     use crate::cue::{
-        FourCc, SCHEDULER_DURATION_FROM_DAT, SCHEDULER_FADE_DAT_ID, SCHEDULER_TAG_FADE_IN,
-        SCHEDULER_TAG_FADE_OUT,
+        ExtSchedulerMotion, FourCc, SCHEDULER_DURATION_FROM_DAT, SCHEDULER_FADE_DAT_ID,
+        SCHEDULER_TAG_FADE_IN, SCHEDULER_TAG_FADE_OUT, TPC_PACKAGE_OUT_OF_RANGE,
+        TpcMotionPackages,
     };
 
     /// Run one choreography opcode (padded to its documented width) to END and

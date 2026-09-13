@@ -146,11 +146,98 @@ pub fn event_motion_dat_id(param: i32) -> u32 {
     param.wrapping_add(base) as u32
 }
 
-/// DAT id of the 0x66 Tpc motion package `param` names: the same base as the
-/// 0x5B low band with no banding (research/cexi-docs/cutscene_authoring.md,
-/// Dialogue + gestures; package 0 is the default humanoid talk set).
-pub fn tpc_motion_dat_id(param: i32) -> u32 {
-    param.wrapping_add(EVENT_MOTION_BASE_0) as u32
+// The 0x66 Tpc motion package bands (FFXiMain.dll ReadTpcEventMotionRes @rva 0xD2230):
+// the package number picks a base by which band it falls in, and each band
+// yields three ids - A (resource tag 1) and the two B candidates (resource
+// tag 2), one per CIB waist-byte state.
+pub const TPC_PACKAGE_OUT_OF_RANGE: u32 = 0x118;
+const TPC_PACKAGE_BAND_2: u32 = 0x46;
+const TPC_PACKAGE_BAND_3: u32 = 0x8C;
+const TPC_PACKAGE_BAND_4: u32 = 0xD2;
+const TPC_PACKAGE_A_BASE_1: u32 = 0x7FC8;
+const TPC_PACKAGE_B_SET_BASE_1: u32 = 0x800E;
+const TPC_PACKAGE_B_CLEAR_BASE_1: u32 = 0x8054;
+const TPC_PACKAGE_A_BASE_2: u32 = 0xEF39;
+const TPC_PACKAGE_B_SET_BASE_2: u32 = 0xEF7F;
+const TPC_PACKAGE_B_CLEAR_BASE_2: u32 = 0xEFC5;
+const TPC_PACKAGE_A_BASE_3: u32 = 0x15711;
+const TPC_PACKAGE_B_SET_BASE_3: u32 = 0x15757;
+const TPC_PACKAGE_B_CLEAR_BASE_3: u32 = 0x1579D;
+const TPC_PACKAGE_A_BASE_4: u32 = 0x18F5F;
+const TPC_PACKAGE_B_SET_BASE_4: u32 = 0x18FA5;
+const TPC_PACKAGE_B_CLEAR_BASE_4: u32 = 0x18FEB;
+
+/// The container file ids a 0x66 Tpc motion package names: A is attached
+/// with resource tag 1, B with tag 2.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TpcMotionPackages {
+    pub a: u32,
+    pub b_set: u32,
+    pub b_clear: u32,
+}
+
+/// The tag-2 container a CIB waist byte selects out of a Tpc package's two
+/// candidates: 1 takes `b_set`, 2..=0x7F takes `b_clear`, 0 or >= 0x80
+/// (including no CIB) loads A only - the re-read after container A lands skips
+/// B when the signed byte is <= 0 (FFXiMain.dll ReadTpcEventMotionRes @rva
+/// 0xD2230).
+pub fn tpc_b_for_waist(b_set: u32, b_clear: u32, waist: u8) -> Option<u32> {
+    match waist {
+        1 => Some(b_set),
+        2..=0x7F => Some(b_clear),
+        _ => None,
+    }
+}
+
+/// The container file ids a 0x66 Tpc motion package `param` names, or `None`
+/// at or past the package limit, where retail logs and loads nothing
+/// (FFXiMain.dll ReadTpcEventMotionRes @rva 0xD2230).
+pub fn tpc_motion_packages(param: i32) -> Option<TpcMotionPackages> {
+    let val = param as u32;
+    if val >= TPC_PACKAGE_OUT_OF_RANGE {
+        return None;
+    }
+    let (v, a_base, b_set_base, b_clear_base) = if val < TPC_PACKAGE_BAND_2 {
+        (val, TPC_PACKAGE_A_BASE_1, TPC_PACKAGE_B_SET_BASE_1, TPC_PACKAGE_B_CLEAR_BASE_1)
+    } else if val < TPC_PACKAGE_BAND_3 {
+        (
+            val - TPC_PACKAGE_BAND_2,
+            TPC_PACKAGE_A_BASE_2,
+            TPC_PACKAGE_B_SET_BASE_2,
+            TPC_PACKAGE_B_CLEAR_BASE_2,
+        )
+    } else if val < TPC_PACKAGE_BAND_4 {
+        (
+            val - TPC_PACKAGE_BAND_3,
+            TPC_PACKAGE_A_BASE_3,
+            TPC_PACKAGE_B_SET_BASE_3,
+            TPC_PACKAGE_B_CLEAR_BASE_3,
+        )
+    } else {
+        (
+            val - TPC_PACKAGE_BAND_4,
+            TPC_PACKAGE_A_BASE_4,
+            TPC_PACKAGE_B_SET_BASE_4,
+            TPC_PACKAGE_B_CLEAR_BASE_4,
+        )
+    };
+    Some(TpcMotionPackages {
+        a: v + a_base,
+        b_set: v + b_set_base,
+        b_clear: v + b_clear_base,
+    })
+}
+
+/// The motion resource a LOADEXTSCHEDULER cue loads before playing its key
+/// (research/XiEvents/OpCodes/0x005B.md, 0x0066.md).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExtSchedulerMotion {
+    /// 0x5B: the event motion resource a single DAT file id names.
+    Event(u32),
+    /// 0x66 in range: container A (resource tag 1) and the two B candidates
+    /// (resource tag 2); the host picks between them from the actor's CIB
+    /// waist byte, which this VM does not carry.
+    Tpc(TpcMotionPackages),
 }
 
 /// The 0x5B "no action" key: retail loads the motion resource and skips
@@ -178,13 +265,13 @@ pub enum EventCue {
         tag: FourCc,
         duration: u16,
     },
-    /// 0x5B/0x66 LOADEXTSCHEDULER: load event motion resource `motion_dat_id`
-    /// into `actor1`'s skeleton, then play action `key` on it with `actor2` as
-    /// partner (research/XiEvents/OpCodes/0x005B.md). `tpc` marks the 0x66
-    /// per-actor package form; the id is resolved in both cases.
+    /// 0x5B/0x66 LOADEXTSCHEDULER: load the motion resource into `actor1`'s
+    /// skeleton, then play action `key` on it with `actor2` as partner
+    /// (research/XiEvents/OpCodes/0x005B.md, 0x0066.md). `motion` is `None`
+    /// for the 0x66 out-of-range package, where retail logs and loads nothing
+    /// and the host plays `key` on the actor's own resources.
     ExtScheduler {
-        motion_dat_id: u32,
-        tpc: bool,
+        motion: Option<ExtSchedulerMotion>,
         actor1: ActorLookup,
         actor2: ActorLookup,
         key: FourCc,
@@ -304,14 +391,12 @@ impl EventCue {
                 duration,
             },
             Self::ExtScheduler {
-                motion_dat_id,
-                tpc,
+                motion,
                 actor1,
                 actor2,
                 key,
             } => Self::ExtScheduler {
-                motion_dat_id,
-                tpc,
+                motion,
                 actor1: resolve(actor1),
                 actor2: resolve(actor2),
                 key,
@@ -410,6 +495,116 @@ mod tests {
         assert_eq!(event_motion_dat_id(2048), 59739 + 2048);
         assert_eq!(event_motion_dat_id(3071), 59739 + 3071);
         assert_eq!(event_motion_dat_id(3072), 66339 + 3072);
+    }
+
+    #[test]
+    fn tpc_motion_packages_picks_its_base_at_each_band_edge() {
+        // Each band edge lands on the next base exactly once; the value just
+        // below an edge stays in the current band.
+        assert_eq!(
+            tpc_motion_packages(0),
+            Some(TpcMotionPackages {
+                a: 32712,
+                b_set: 32782,
+                b_clear: 32852,
+            })
+        );
+        assert_eq!(
+            tpc_motion_packages(0x45),
+            Some(TpcMotionPackages {
+                a: 32712 + 0x45,
+                b_set: 32782 + 0x45,
+                b_clear: 32852 + 0x45,
+            })
+        );
+        assert_eq!(
+            tpc_motion_packages(0x46),
+            Some(TpcMotionPackages {
+                a: 61241,
+                b_set: 61311,
+                b_clear: 61381,
+            })
+        );
+        assert_eq!(
+            tpc_motion_packages(0x8B),
+            Some(TpcMotionPackages {
+                a: 61241 + 0x45,
+                b_set: 61311 + 0x45,
+                b_clear: 61381 + 0x45,
+            })
+        );
+        assert_eq!(
+            tpc_motion_packages(0x8C),
+            Some(TpcMotionPackages {
+                a: 87825,
+                b_set: 87895,
+                b_clear: 87965,
+            })
+        );
+        assert_eq!(
+            tpc_motion_packages(0xD1),
+            Some(TpcMotionPackages {
+                a: 87825 + 0x45,
+                b_set: 87895 + 0x45,
+                b_clear: 87965 + 0x45,
+            })
+        );
+        assert_eq!(
+            tpc_motion_packages(0xD2),
+            Some(TpcMotionPackages {
+                a: 102239,
+                b_set: 102309,
+                b_clear: 102379,
+            })
+        );
+        assert_eq!(
+            tpc_motion_packages(0x117),
+            Some(TpcMotionPackages {
+                a: 102239 + 0x45,
+                b_set: 102309 + 0x45,
+                b_clear: 102379 + 0x45,
+            })
+        );
+        assert_eq!(tpc_motion_packages(0x118), None);
+        assert_eq!(tpc_motion_packages(0x118 + 1), None);
+        // Negative operands are huge unsigned packages: out of range.
+        assert_eq!(tpc_motion_packages(-1), None);
+    }
+
+    #[test]
+    fn tpc_motion_packages_hits_the_retail_anchors() {
+        // Package 20 (the Sandy opening scene) and 12, cross-checked against
+        // the install's DATs: 32732 holds tlk0 + thk1, 32724 holds kka0.
+        assert_eq!(
+            tpc_motion_packages(20),
+            Some(TpcMotionPackages {
+                a: 32732,
+                b_set: 32802,
+                b_clear: 32872,
+            })
+        );
+        assert_eq!(
+            tpc_motion_packages(12),
+            Some(TpcMotionPackages {
+                a: 32724,
+                b_set: 32794,
+                b_clear: 32864,
+            })
+        );
+    }
+
+    #[test]
+    fn tpc_b_for_waist_follows_the_retail_flag_rule() {
+        let pkgs = tpc_motion_packages(20).unwrap();
+        assert_eq!(tpc_b_for_waist(pkgs.b_set, pkgs.b_clear, 1), Some(pkgs.b_set));
+        assert_eq!(tpc_b_for_waist(pkgs.b_set, pkgs.b_clear, 2), Some(pkgs.b_clear));
+        assert_eq!(
+            tpc_b_for_waist(pkgs.b_set, pkgs.b_clear, 0x7F),
+            Some(pkgs.b_clear)
+        );
+        assert_eq!(tpc_b_for_waist(pkgs.b_set, pkgs.b_clear, 0), None);
+        assert_eq!(tpc_b_for_waist(pkgs.b_set, pkgs.b_clear, 0x80), None);
+        assert_eq!(tpc_b_for_waist(pkgs.b_set, pkgs.b_clear, 0xFF), None);
     }
 
     #[test]

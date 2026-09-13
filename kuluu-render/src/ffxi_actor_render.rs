@@ -1260,6 +1260,10 @@ pub struct FfxiRenderActor {
     /// the wire AnimationSpeed stride scale applies to locomotion clip playback.
     movement_type: MovementType,
 
+    /// The model's 0x45 Info waist byte (0 when the DAT carries no CIB): which of a 0x66 Tpc
+    /// package's two tag-2 containers the renderer loads.
+    body_armour_waist: u8,
+
     current_clip: Option<(DatId, bool)>,
 
     rest_phase: RestPlayback,
@@ -1303,6 +1307,12 @@ impl FfxiRenderActor {
     /// CIB); gates the wire stride scale on locomotion clip playback.
     pub fn movement_type(&self) -> MovementType {
         self.movement_type
+    }
+
+    /// The 0x45 Info waist byte this model was loaded with (0 when the DAT carries no CIB):
+    /// which of a 0x66 Tpc package's two tag-2 containers the renderer loads.
+    pub fn body_armour_waist(&self) -> u8 {
+        self.body_armour_waist
     }
 
     /// The completion motion's clip while `action` is held - what a routine's Motion stage (or
@@ -1832,6 +1842,7 @@ pub fn make_render_actor(
             .cib
             .map(|c| c.movement_type)
             .unwrap_or(MovementType::Unset),
+        body_armour_waist: loaded.cib.map(|c| c.body_armour_waist).unwrap_or(0),
         current_clip: None,
         rest_phase: RestPlayback::Inactive,
         death_phase: actor_state::DeathPhase::Unobserved,

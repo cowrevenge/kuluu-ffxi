@@ -216,9 +216,16 @@ fn handle_event(tally: &mut Tally, ev: &AgentEvent, now: Instant) {
                 tally.scheduler_cues.push((*dat_id, fourcc_to_string(*tag)));
             }
             kuluu_session::state::CutsceneCue::ExtScheduler {
-                motion_dat_id, key, ..
+                motion, key, ..
             } => {
-                if *motion_dat_id == 32124 {
+                // The 0x66 package 20 gesture cues: container A is 32732.
+                if matches!(
+                    motion,
+                    Some(kuluu_snapshot::ExtSchedulerMotion::Tpc {
+                        a: 32_732,
+                        ..
+                    })
+                ) {
                     tally.gesture_keys.push(fourcc_to_string(*key));
                 }
             }
@@ -515,7 +522,7 @@ async fn event_503_full_playback_against_live_lsb() {
     assert!(
         tally.gesture_keys.iter().any(|k| k == "tlk0")
             && tally.gesture_keys.iter().any(|k| k == "thk1"),
-        "D-beat gestures tlk0/thk1 (DAT 32124) missing; keys: {:?}",
+        "D-beat gestures tlk0/thk1 (Tpc container A 32732) missing; keys: {:?}",
         tally.gesture_keys
     );
     assert!(
@@ -588,7 +595,7 @@ fn write_summary(out_dir: &Path, tally: &Tally, stop_reason: &str) {
     push_line(
         &mut s,
         &format!(
-            "gestures(32124): {:?}; actor moves: {}",
+            "gestures(32732): {:?}; actor moves: {}",
             tally.gesture_keys, tally.actor_moves
         ),
     );

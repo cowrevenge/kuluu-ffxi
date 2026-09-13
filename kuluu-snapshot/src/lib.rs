@@ -2,6 +2,9 @@
 
 use serde::{Deserialize, Serialize};
 
+// v31: CutsceneCue::ExtScheduler.motion - the 0x66 Tpc package now carries its two
+// container file ids (A + the CIB-waist-selected B) instead of one flat id; None is the
+// out-of-range package, which loads nothing.
 // v30: CutsceneCue::ZoneScheduler - the 0x2D/0x54 zone scene routine out of the global
 // scene DAT (ROM/0/23.DAT), whose camera routes drive the operator camera.
 // v29: CutsceneCue::ExtScheduler (the 0x5B/0x66 motion-resource cue) and the
@@ -66,7 +69,7 @@ use serde::{Deserialize, Serialize};
 // v5: InventoryItem.charges_remaining + next_use_vana_ts (item recast/charges).
 // v4: SceneSnapshot.delivery_box (dedicated delivery screen) + ViewerCommand::DeliveryBox
 // (postcard frames are not self-describing, so any shape change bumps this).
-pub const PROTOCOL_VERSION: u32 = 30;
+pub const PROTOCOL_VERSION: u32 = 31;
 
 /// Longest countdown `SceneSnapshot::status_icon_expiries` can carry. The
 /// producer rejects anything beyond it as a corrupt 0x063 timestamp, and the HUD
@@ -1517,6 +1520,18 @@ pub enum CutsceneActor {
     Entity { server_id: u32 },
 }
 
+/// The motion resource a LOADEXTSCHEDULER cue loads before playing its key
+/// (research/XiEvents/OpCodes/0x005B.md, 0x0066.md).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ExtSchedulerMotion {
+    /// 0x5B: the event motion resource a single DAT file id names.
+    Event(u32),
+    /// 0x66 in range: container A (resource tag 1) and the two B candidates
+    /// (resource tag 2); the renderer picks between them from the actor's CIB
+    /// waist byte.
+    Tpc { a: u32, b_set: u32, b_clear: u32 },
+}
+
 /// One staging effect the running event script asked for, in execution order.
 /// Scoped to the event session: every one of these is undone at
 /// [`ViewerEvent::CutsceneEnded`], because the bytecode routinely never undoes
@@ -1559,12 +1574,12 @@ pub enum CutsceneCue {
         status_event: u8,
         mount_id: Option<u16>,
     },
-    /// Load event motion resource `motion_dat_id` into `actor`, then play
-    /// action `key` on it with `partner`. `tpc` marks the 0x66 per-actor
-    /// package form; the id is already resolved either way.
+    /// Load the motion resource into `actor`, then play action `key` on it
+    /// with `partner`. `motion` is `None` for the 0x66 out-of-range package,
+    /// where retail logs and loads nothing and the renderer plays `key` on the
+    /// actor's own resources.
     ExtScheduler {
-        motion_dat_id: u32,
-        tpc: bool,
+        motion: Option<ExtSchedulerMotion>,
         actor: CutsceneActor,
         partner: CutsceneActor,
         key: FourCc,
@@ -2261,7 +2276,7 @@ mod tests {
 
     #[test]
     fn ferry_protocol_preserves_transport_and_voyage_fields() {
-        const VERSION: u32 = 30;
+        const VERSION: u32 = 31;
         const STAMP: u32 = 0x1200_3400;
         assert_eq!(PROTOCOL_VERSION, VERSION);
         let mut snapshot = sample_snapshot();

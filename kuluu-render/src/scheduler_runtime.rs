@@ -16,7 +16,7 @@ use ffxi_dat::sep::Sep;
 #[cfg(not(target_arch = "wasm32"))]
 use ffxi_event::vm::scene::{EVENT_COORD_UNITS, EVENT_HEADING_UNITS};
 #[cfg(not(target_arch = "wasm32"))]
-use kuluu_snapshot::CutsceneCue;
+use kuluu_snapshot::{CutsceneCue, ExtSchedulerMotion};
 
 // research/xim util/Fps.kt — `internalFps = 60.0` is the clock every effect routine and
 // particle generator is authored against (poc/MainTool.kt internalLoop feeds the raw elapsed frames to
@@ -915,6 +915,16 @@ enum PendingActionDispatch {
         /// routine's end frame, the way kuluu-session arms its WAIT* holds.
         duration: u16,
     },
+    // A 0x66 Tpc routine: the routine's schedulers live in container A (the pending vec's
+    // file id); container B's clips join A's assets so the routine's Motion stages can
+    // resolve the waist clip. `b` is None when the actor's CIB waist byte loads A only.
+    TpcRoutine {
+        actor_id: u32,
+        target_id: u32,
+        b: Option<u32>,
+        routine: [u8; 4],
+        duration: u16,
+    },
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -950,6 +960,9 @@ impl ActionDatCache {
 
     fn defer(&mut self, file_id: u32, dispatch: PendingActionDispatch) {
         self.request(file_id);
+        if let PendingActionDispatch::TpcRoutine { b: Some(b), .. } = &dispatch {
+            self.request(*b);
+        }
         self.pending.push((file_id, dispatch));
     }
 }
@@ -1044,11 +1057,34 @@ fn queue_routine_on_actor(
     pending_inserts: &mut HashMap<Entity, Vec<ActiveScheduler>>,
     commands: &mut Commands,
 ) {
+    queue_routine_on_actor_assets(
+        &parsed.assets,
+        active,
+        actor_entity,
+        target_entity,
+        q_scheds,
+        pending_inserts,
+        commands,
+    );
+}
+
+// The 0x66 Tpc form of the above: the assets are the two containers' merged set, not one
+// file's.
+#[cfg(not(target_arch = "wasm32"))]
+fn queue_routine_on_actor_assets(
+    assets: &ActionAssets,
+    active: ActiveScheduler,
+    actor_entity: Entity,
+    target_entity: Option<Entity>,
+    q_scheds: &mut Query<&mut ActiveSchedulers>,
+    pending_inserts: &mut HashMap<Entity, Vec<ActiveScheduler>>,
+    commands: &mut Commands,
+) {
     let fresh = queue_active_scheduler(actor_entity, active, q_scheds, pending_inserts);
     if fresh {
         commands
             .entity(actor_entity)
-            .insert_if_new(parsed.assets.clone())
+            .insert_if_new(assets.clone())
             .insert_if_new(ActionTarget(target_entity));
     }
 }
@@ -1211,11 +1247,25 @@ pub fn poll_action_dat_tasks(
     }
     let pending = std::mem::take(&mut cache.pending);
     for (file_id, dispatch) in pending {
+        // A Tpc dispatch names two files: container A (its routine's schedulers) and, when
+        // the CIB waist byte selects one, container B (the waist clips that merge into A's
+        // assets). Both must be in the LRU before it can run.
+        let b_file = match &dispatch {
+            PendingActionDispatch::TpcRoutine { b: Some(b), .. } => Some(*b),
+            _ => None,
+        };
         let Some(parsed) = cache.lru.get_and_promote(file_id) else {
             // Still in flight — or evicted before this entry drained, in which case re-request.
             cache.defer(file_id, dispatch);
             continue;
         };
+        let parsed_b = b_file.and_then(|b| cache.lru.get_and_promote(b));
+        if b_file.is_some() && parsed_b.is_none() {
+            // B is still in flight (A landed first): re-request both and drain on a later
+            // frame.
+            cache.defer(file_id, dispatch);
+            continue;
+        }
         match dispatch {
             PendingActionDispatch::Action {
                 actor_id,
@@ -1269,6 +1319,70 @@ pub fn poll_action_dat_tasks(
                 if !active.stages.is_empty() {
                     queue_routine_on_actor(
                         &parsed,
+                        active,
+                        actor_entity,
+                        target_entity,
+                        &mut q_scheds,
+                        &mut pending_inserts,
+                        &mut commands,
+                    );
+                }
+            }
+            PendingActionDispatch::TpcRoutine {
+                actor_id,
+                target_id,
+                routine,
+                duration,
+                ..
+            } => {
+                let Some(&actor_entity) = tracked.by_id.get(&actor_id) else {
+                    continue;
+                };
+                let target_entity = tracked.by_id.get(&target_id).copied();
+                let Some(mut active) = ActiveScheduler::from_main(&parsed.schedulers, &routine)
+                else {
+                    play_local_emote_clip(&routine, actor_entity, &q_children, &mut q_actors);
+                    continue;
+                };
+                // B's clips join A's assets before the routine queues: the entity's
+                // ActionAssets is first-writer-wins, so a second DAT can never attach
+                // separately - A's clips keep any name B also ships.
+                let assets = if let Some(parsed_b) = &parsed_b {
+                    let mut merged = parsed.assets.clone();
+                    let mut a_ids: std::collections::HashSet<ffxi_dat::datid::DatId> = merged
+                        .animations
+                        .iter()
+                        .map(|an| an.id)
+                        .collect();
+                    merged.animations.extend(
+                        parsed_b
+                            .assets
+                            .animations
+                            .iter()
+                            .filter(|an| a_ids.insert(an.id))
+                            .cloned(),
+                    );
+                    merged
+                } else {
+                    parsed.assets.clone()
+                };
+                // A CameraRoute stage plays on the operator camera instead of the skeleton:
+                // start its task here and keep only what still plays on the actor.
+                if active
+                    .stages
+                    .iter()
+                    .any(|t| t.stage.kind == StageKind::CameraRoute)
+                {
+                    start_cutscene_camera_tasks(
+                        &parsed, &active, duration, &q_cam, &q_self, &mode, &mut tasks,
+                    );
+                    active
+                        .stages
+                        .retain(|t| t.stage.kind != StageKind::CameraRoute);
+                }
+                if !active.stages.is_empty() {
+                    queue_routine_on_actor_assets(
+                        &assets,
                         active,
                         actor_entity,
                         target_entity,
@@ -1672,6 +1786,23 @@ fn cutscene_actor_server_id(
     }
 }
 
+// The CIB waist byte of the actor's render component (0 when the actor has no
+// render child or no CIB): which of a 0x66 Tpc package's two tag-2 containers
+// the renderer loads.
+#[cfg(not(target_arch = "wasm32"))]
+fn actor_waist_byte(
+    entity: Entity,
+    q_children: &Query<&Children>,
+    q_render: &Query<&crate::ffxi_actor_render::FfxiRenderActor>,
+) -> u8 {
+    q_children
+        .get(entity)
+        .ok()
+        .and_then(|children| children.iter().find_map(|child| q_render.get(child).ok()))
+        .map(|actor| actor.body_armour_waist())
+        .unwrap_or(0)
+}
+
 // Cutscene motion cues (research/XiEvents/OpCodes/0x002C.md, 0x0045.md, 0x005B.md):
 // the event script's actor choreography. 0x2C names a routine in the actor's own model DAT,
 // so it plays straight off the render component; 0x45 (non-fade) and 0x5B/0x66 name a
@@ -1768,8 +1899,7 @@ pub fn dispatch_cutscene_motion(
             // motion binds by joint index, which distorts fixed-model rigs); otherwise load
             // the file and dispatch the named routine.
             CutsceneCue::ExtScheduler {
-                motion_dat_id,
-                tpc,
+                motion,
                 actor,
                 partner,
                 key,
@@ -1788,8 +1918,8 @@ pub fn dispatch_cutscene_motion(
                         )
                     },
                 );
-                match owned {
-                    Some(active) => {
+                match (owned, motion) {
+                    (Some(active), _) => {
                         let target_entity = tracked.by_id.get(&target_id).copied();
                         if queue_active_scheduler(
                             actor_entity,
@@ -1802,19 +1932,49 @@ pub fn dispatch_cutscene_motion(
                                 .insert_if_new(ActionTarget(target_entity));
                         }
                     }
-                    None => {
+                    (None, None) => {
                         tracing::debug!(
                             target: "kuluu_render::scheduler_runtime",
-                            motion_dat_id,
-                            tpc,
+                            key = %fourcc(key),
+                            "0x66 out-of-range package: no container and no owned routine; nothing to play"
+                        );
+                    }
+                    (None, Some(ExtSchedulerMotion::Event(file_id))) => {
+                        tracing::debug!(
+                            target: "kuluu_render::scheduler_runtime",
+                            file_id,
                             key = %fourcc(key),
                             "cutscene motion from event motion resource"
                         );
                         cache.defer(
-                            motion_dat_id,
+                            file_id,
                             PendingActionDispatch::Routine {
                                 actor_id,
                                 target_id,
+                                routine: key,
+                                duration: ffxi_event::SCHEDULER_DURATION_FROM_DAT,
+                            },
+                        );
+                    }
+                    (None, Some(ExtSchedulerMotion::Tpc { a, b_set, b_clear })) => {
+                        let b = ffxi_event::tpc_b_for_waist(
+                            b_set,
+                            b_clear,
+                            actor_waist_byte(actor_entity, &q_children, &q_render),
+                        );
+                        tracing::debug!(
+                            target: "kuluu_render::scheduler_runtime",
+                            a,
+                            b,
+                            key = %fourcc(key),
+                            "cutscene motion from Tpc package"
+                        );
+                        cache.defer(
+                            a,
+                            PendingActionDispatch::TpcRoutine {
+                                actor_id,
+                                target_id,
+                                b,
                                 routine: key,
                                 duration: ffxi_event::SCHEDULER_DURATION_FROM_DAT,
                             },

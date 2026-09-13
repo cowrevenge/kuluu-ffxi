@@ -1065,8 +1065,7 @@ pub enum CutsceneCue {
         mount_id: Option<u16>,
     },
     ExtScheduler {
-        motion_dat_id: u32,
-        tpc: bool,
+        motion: Option<kuluu_snapshot::ExtSchedulerMotion>,
         actor: CutsceneActor,
         partner: CutsceneActor,
         key: ffxi_event::FourCc,

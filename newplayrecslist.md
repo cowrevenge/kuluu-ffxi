@@ -5,7 +5,7 @@ Every line below is one or more instructions in execution order; offsets are abs
 master block's data region (traceable in scratchpad `evt503_master_disasm.txt`).
 
 **Related docs:** how the retail event VM works end-to-end and how kuluu interprets it —
-`Cow_doc/ffxi-cutscenes-how-they-work.md`; the authoritative retail binary dispatch table —
+`Cow_doc/cs_docs/cutscenes.md`; the authoritative retail binary dispatch table —
 `Cow_doc/disassmembly_docs/event_opcode_table.md` (219-entry `ExecProg` jump table from FFXiMain.dll);
 per-opcode semantics — `research/XiEvents/OpCodes/0xNNNN.md`. This file is the per-ask breakdown +
 phase history for event 503 specifically.

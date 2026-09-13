@@ -1,7 +1,7 @@
 # LSB Docker Stack — Kuluu Test Bed
 
 > **Consolidated from `Cow_doc/LSB_DOCKER.md` during the 2026-09-13 doc reorg into
-> `Cow_doc2/`.** Content carried over verbatim (it described the 2026-08-29
+> `Cow_doc/`.** Content carried over verbatim (it described the 2026-08-29
 > deterministic-networking rebuild and was verified current on 2026-09-13).
 
 Docker hosts our **LandSandBoat (LSB)** server stack. It is the live test bed / protocol

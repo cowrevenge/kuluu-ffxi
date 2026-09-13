@@ -1,10 +1,10 @@
 # Tools — list and short descriptions of all cow_tools (and where the rest lives)
 
 > **Consolidated from `Cow_doc/TOOLS.md` during the 2026-09-13 doc reorg into
-> `Cow_doc2/`, refreshed against the live `cow_tools/` tree (2026-09-13):** the
+> `Cow_doc/`, refreshed against the live `cow_tools/` tree (2026-09-13):** the
 > `ffxi_disasm/` scanner suite and `ffxi_dat_find.py` were added to the tree after the
 > original inventory and are documented here for the first time. Cross-references now
-> point at `Cow_doc2/` files.
+> point at `Cow_doc/` files.
 
 Where everything lives now and what it does. The old CowEngine `tools/` dir
 (`C:\CowEngine`) is gone as such — its Python workhorses moved to **`cow_tools/`**, and most
@@ -44,7 +44,7 @@ Layout at a glance:
 
 Alpha convention reminder (matters for anything consuming these PNGs): FFXI stores alpha at
 half scale (opaque = 0x80); wall/floor "opacity" is a 50/50 dither straddling 0.5 — don't
-threshold at exactly 0.5. See `Cow_doc2/Texture_Mesh.md` §3.
+threshold at exactly 0.5. See `Cow_doc/Texture_Mesh.md` §3.
 
 ## 3. Offline loader probes
 
@@ -77,9 +77,9 @@ key-schedule trace vs Python), `decode_probe.cpp` (frame-decode debug), `rom_sca
 Python + capstone scanners over the retail `FFXiMain.dll` (PE32 i386, ImageBase
 0x10000000). Read-only analysis of a locally installed binary; nothing here patches or
 redistributes anything. Full how-to (setup, run order, gotchas, result-recording
-conventions) lives in `Cow_doc2/Dissembly.md`; the findings they back live in
-`Cow_doc2/Part1–Part4.md` (mob pass F1–F58) and `Cow_doc2/Cutscene.md` (event pass
-E1–E20). Every script prints markdown meant to be pasted into the findings docs.
+conventions) lives in `Cow_doc/disassmembly_docs/README.md`; the findings they back live in
+`Cow_doc/disassmembly_docs/mob_animation.md` (mob pass F1-F58) and `Cow_doc/disassmembly_docs/event_vm.md` (event pass
+E1-E20). Every script prints markdown meant to be pasted into the findings docs.
 
 | Tool | What it does |
 |---|---|
@@ -88,26 +88,26 @@ E1–E20). Every script prints markdown meant to be pasted into the findings doc
 | `p1_anchors.py` | Phase 1 anchors: maps the known RVAs to sections, dumps vtable slot lists, finds the constructors (instructions that install each vtable VA), the `ini`/`init`/… literals in code and data, class-name and `ROM/` strings, and every `mov [reg+0x11E], 0x708` (ActionTimer2 = 1800) site. |
 | `p2_handler.py` | Phase 2: scores every heuristic function by ten signals (status/animsub/animation byte loads, `cmp 3`, ActorPointer=0, RenderFlags0 0x200 masks, ActionTimer2 reset, actor ctor, `ini` literal, spawn-flag 0x04 masking); prints top candidates with hit sites, callers, and full disassembly of the top three. |
 | `p7_event_vm.py` | Event-VM pass: pattern-searches every XiEvents byte pattern (wildcards `??`) against the cached `.text` sweep; table of name → hit RVA → heuristic func start → matched bytes. All 20 patterns hit on the current build; a miss is the fallback to immediate anchors. |
-| `p8_jumptable.py` | Dumps the `ExecProg` switch jump table (rva 0xBC970, 219 entries, opcodes 0x00–0xDA) as opcode → entry VA → thunk RVA → handler RVA. **Source of `Cow_doc2/Event_Opcode_Table.md`**; if the ExecProg pattern misses on a future build, find it by immediate search for the 0x5B band constants (0x7D68/0xBFEF/0xDC19/0xE95B/0x10323) and walk `--to` back to the table. |
+| `p8_jumptable.py` | Dumps the `ExecProg` switch jump table (rva 0xBC970, 219 entries, opcodes 0x00–0xDA) as opcode → entry VA → thunk RVA → handler RVA. **Source of `Cow_doc/disassmembly_docs/event_opcode_table.md`**; if the ExecProg pattern misses on a future build, find it by immediate search for the 0x5B band constants (0x7D68/0xBFEF/0xDC19/0xE95B/0x10323) and walk `--to` back to the table. |
 | `p9_zone_scene.py` | Lists every DAT whose parsed scheduler routines reference movN / exNN stage names (the zone scene file shape, E14). File ids resolved through VTABLE/FTABLE; corrected the five arithmetic pseudo-ids of the original one-off scan (E16). |
-| `probe_tpc_files.py` | Re-runs the E6 Tpc cross-check: resolves the four-band A/B file ids for packages 12 and 20 through VTABLE/FTABLE and lists which of tlk0 / thk1 / kka0 each mapped DAT carries. Read-only against the install (install path is a constant in the script). **Backs `Cow_doc2/Tpc_Package_Table.md`.** |
+| `probe_tpc_files.py` | Re-runs the E6 Tpc cross-check: resolves the four-band A/B file ids for packages 12 and 20 through VTABLE/FTABLE and lists which of tlk0 / thk1 / kka0 each mapped DAT carries. Read-only against the install (install path is a constant in the script). **Backs `Cow_doc/disassmembly_docs/tpc_package_table.md`.** |
 | `scene_dat_parse.py` | Parses zone scene DATs (scheduler routines, stage names) for the p9/probe workflows. |
 | `dat_routines.py` | Shared DAT/scheduler-routine parsing used by the event-VM tools. |
-| `assemble_event_evidence.py` | Rebuilds the raw evidence appendix (`Cow_doc2/Cutscene_Appendix_event_evidence.md`) from the raw dumps in `out3/` (verified byte-identical on 2026-09-11, including the E16 correction block in section I.2). Extend its section lists when adding new dumps. |
+| `assemble_event_evidence.py` | Rebuilds the raw evidence appendix (`Cow_doc/disassmembly_docs/event_evidence.md`) from the raw dumps in `out3/` (verified byte-identical on 2026-09-11, including the E16 correction block in section I.2). Extend its section lists when adding new dumps. |
 | `xref.py` | Cross-reference: `--to 0xRVA` (callers), `--from 0xRVA` (callees), `--imm 0x…` (who uses an immediate / on-disk VA / fourcc), `--disp 0x11E --size 2` (who touches a displacement), `--tree 0xRVA --depth N` (caller tree). |
 | `disasm.py` | Disassembly: `--func 0xRVA` (whole heuristic function, annotated), `--rva/--len`, `--va 0x04DF0F40` (convert a wormwatch runtime VA, base 0x04AC0000), `--bytes 0x32BB38 --len 0x100` (hex/dword dump of vtables/tables). Annotations: `; VA of <known vtable>`, `; 'ini1'` for fourcc immediates, `; ent.ActionTimer2?` / `; pkt body status?` for plan offsets. |
 | `requirements.txt` | `pip install -r requirements.txt` (pefile, capstone). |
 
 ## 5. Live-stack verification (`dev-live/`)
 
-The LSB Docker stack is the test bed — see `Cow_doc2/LSB_Docker.md` for the full
+The LSB Docker stack is the test bed — see `Cow_doc/LSB_Docker.md` for the full
 bring-up/runbook.
 
 | Tool | What it does | Usage |
 |---|---|---|
 | `udp-probe.ps1` | Host-side UDP health check: round-trip echo against `cow-udp-probe` (19475/udp) proves Docker Desktop's published-UDP return path; send-only ping to `cow-map` (54230/udp), delivery confirmed server-side. Run this before blaming kuluu for silent map traffic. | `powershell -NoProfile -File dev-live/udp-probe.ps1` |
 | `udp-diag-elevated.ps1` | Elevated diagnostics variant (route/firewall/netstat inspection) when the basic probe fails. | run as admin |
-| DB one-liners | Char ground truth, `zone_settings` loopback sanity — in `Cow_doc2/LSB_Docker.md` §bring-up. | `docker exec cow-db mariadb …` |
+| DB one-liners | Char ground truth, `zone_settings` loopback sanity — in `Cow_doc/LSB_Docker.md` §bring-up. | `docker exec cow-db mariadb …` |
 
 ## 6. Agent / MCP tooling
 

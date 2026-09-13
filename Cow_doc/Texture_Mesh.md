@@ -1,7 +1,7 @@
 # Textures & Meshes — how kuluu gets pixels and polygons out of the retail ROMs
 
 > **Consolidated from `Cow_doc/TEXTURES_MESH.md` during the 2026-09-13 doc reorg into
-> `Cow_doc2/`.** Content carried over verbatim; all in-tree citations verified to still
+> `Cow_doc/`.** Content carried over verbatim; all in-tree citations verified to still
 > resolve on 2026-09-13.
 
 One-stop reference: **where the game data lives, how a `.DAT` file is structured, and how

@@ -1,7 +1,7 @@
 # Headless testing — how to drive the headless test system
 
-> **New 2026-09-13.** Companion docs: `Cow_doc2/LSB_Docker.md` (the stack itself),
-> `Cow_doc2/cs_docs/cutscenes.md` (what the event 503 live test proves). The canonical
+> **New 2026-09-13.** Companion docs: `Cow_doc/LSB_Docker.md` (the stack itself),
+> `Cow_doc/cs_docs/cutscenes.md` (what the event 503 live test proves). The canonical
 > recipes for verifying a change and recording evidence live in
 > `.agents/skills/verify/SKILL.md` and its `references/` — this doc explains the headless
 > system and how to drive it.
@@ -31,7 +31,7 @@ Five containers under colima/docker (`dev-live/docker-compose.yml`): `cow-connec
 (auth 54231/tcp, data 54230/tcp, view 54001/tcp), `cow-map` (54230/udp), `cow-db` (MariaDB
 `xidb`), `cow-search`, `cow-world`, plus the `cow-dnat` sidecar that keeps the s2c UDP
 return path alive. Bring-up, the static-IP layout, and failure modes:
-`Cow_doc2/LSB_Docker.md`. Readiness: `docker logs cow-map -f` until
+`Cow_doc/LSB_Docker.md`. Readiness: `docker logs cow-map -f` until
 "The map-server is ready to work", then `nc -z 127.0.0.1 54231`.
 
 ## 1. kuluu-mcp standalone (preferred)
@@ -146,7 +146,7 @@ and the test dies at the 0x02 ack step.
 - **colima dead / one-way UDP / login stuck at "Authenticating"** — the VM slept and
   virtiofs went stale: `colima restart`, then `docker start` the server containers.
 - **Map UDP return path** — s2c UDP replies are kept alive by the `cow-dnat` sidecar
-  (`Cow_doc2/LSB_Docker.md`); if login succeeds and then map traffic goes silent, check
+  (`Cow_doc/LSB_Docker.md`); if login succeeds and then map traffic goes silent, check
   that before theorizing about the client.
 - **Raw stdio credentials are positional** — env vars only feed the interactive launcher
   (which blocks on a `Username:` prompt).

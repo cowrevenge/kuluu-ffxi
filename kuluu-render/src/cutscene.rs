@@ -16,7 +16,7 @@ use bevy::prelude::*;
 
 use ffxi_dat::scheduler::Scheduler;
 use ffxi_event::{FourCc, SCHEDULER_FADE_DAT_ID, SCHEDULER_TAG_FADE_IN, SCHEDULER_TAG_FADE_OUT};
-use kuluu_snapshot::{CutsceneCue, ViewerEvent};
+use kuluu_snapshot::{CutsceneActor, CutsceneCue, ViewerEvent};
 
 use crate::hud_hide::{HudHidden, HudHideExempt};
 use crate::scheduler_runtime::ROUTINE_FPS;
@@ -368,27 +368,79 @@ pub fn drain_cutscene_events(
     mut cursor: Local<u64>,
     mut mode: ResMut<CutsceneMode>,
     mut fade: ResMut<ScreenFade>,
+    table: Res<crate::entity_table::EntityTable>,
+    mut names: ResMut<EventNameOverrides>,
 ) {
     let total = events.pushed_total;
     let first_global = total.saturating_sub(events.recent.len() as u64);
     for g in (*cursor).max(first_global)..total {
         match &events.recent[(g - first_global) as usize] {
             ViewerEvent::CutsceneStarted { .. } => mode.active = true,
-            ViewerEvent::Cutscene { cue } => apply_cue(cue, &programs, &mut mode, &mut fade),
+            ViewerEvent::Cutscene { cue } => {
+                apply_cue(cue, &programs, &mut mode, &mut fade);
+                if let CutsceneCue::EntityName { actor, name } = cue {
+                    if let Some(id) = cutscene_actor_server_id(table.self_id(), *actor) {
+                        names.set(id, event_name_string(name));
+                    }
+                }
+            }
             ViewerEvent::CutsceneEnded => {
                 mode.end();
                 fade.release(programs.fade_in());
+                names.clear();
             }
             // Belt and braces: the producer guarantees a CutsceneEnded on both of these, so
             // reaching them with the screen still held means that guarantee broke.
             ViewerEvent::ZoneChanged { .. } | ViewerEvent::Disconnected { .. } => {
                 mode.end();
                 fade.clear();
+                names.clear();
             }
             _ => {}
         }
     }
     *cursor = total;
+}
+
+/// A `CutsceneCue::EntityName` target as a server id: the local player's own
+/// id from the table, the literal id otherwise.
+fn cutscene_actor_server_id(self_id: Option<u32>, actor: CutsceneActor) -> Option<u32> {
+    match actor {
+        CutsceneActor::LocalPlayer => self_id,
+        CutsceneActor::Entity { server_id } => Some(server_id),
+    }
+}
+
+/// The NUL-terminated string inside a 16-byte event name slot: retail's
+/// names are C strings, so the padding after the terminator is not part of
+/// the display name.
+fn event_name_string(name: &[u8; 16]) -> String {
+    let end = name.iter().position(|&b| b == 0).unwrap_or(name.len());
+    String::from_utf8_lossy(&name[..end]).into_owned()
+}
+
+/// Display names a running event overrode (0xB5 case 0, fed by an inline
+/// literal or the s2c 0x005D PENDINGSTR table), keyed by entity server id.
+/// Event-scoped like every other cue: cleared at [`ViewerEvent::CutsceneEnded`]
+/// so the server-authored name returns. The nameplate pass reads these ahead
+/// of the entity-table record.
+#[derive(Resource, Debug, Default)]
+pub struct EventNameOverrides {
+    names: HashMap<u32, String>,
+}
+
+impl EventNameOverrides {
+    pub fn set(&mut self, id: u32, name: String) {
+        self.names.insert(id, name);
+    }
+
+    pub fn get(&self, id: u32) -> Option<&str> {
+        self.names.get(&id).map(String::as_str)
+    }
+
+    pub fn clear(&mut self) {
+        self.names.clear();
+    }
 }
 
 fn apply_cue(
@@ -523,6 +575,7 @@ impl Plugin for CutscenePlugin {
             .init_resource::<ScreenFade>()
             .init_resource::<FadePrograms>()
             .init_resource::<CutsceneFadeDatRoot>()
+            .init_resource::<EventNameOverrides>()
             .init_resource::<HudHidden>()
             .add_systems(Startup, spawn_screen_fade_overlay)
             .add_systems(
@@ -614,6 +667,8 @@ mod tests {
             .init_resource::<HudHidden>()
             .init_resource::<CutsceneMode>()
             .init_resource::<ScreenFade>()
+            .init_resource::<crate::entity_table::EntityTable>()
+            .init_resource::<EventNameOverrides>()
             .insert_resource(synthetic_programs())
             .add_systems(Startup, spawn_screen_fade_overlay)
             .add_systems(
@@ -903,6 +958,59 @@ mod tests {
             assert_eq!(overlay_alpha(&mut app), 0.0, "cleared on the same frame");
             assert!(!app.world().resource::<HudHidden>().cutscene);
         }
+    }
+
+    /// A 0xB5 rename resolves its actor to a server id (the local player
+    /// through the table's self id) and holds the name until the session ends.
+    #[test]
+    fn an_entity_name_cue_overrides_the_plate_name_until_session_end() {
+        const SELF: u32 = 0x010E_6001;
+        const NPC: u32 = 0x010E_6032;
+        let mut app = test_app();
+        app.world_mut()
+            .resource_mut::<crate::entity_table::EntityTable>()
+            .set_self_id(Some(SELF));
+
+        let name_cue = |actor: kuluu_snapshot::CutsceneActor| {
+            ViewerEvent::Cutscene {
+                cue: CutsceneCue::EntityName {
+                    actor,
+                    name: *b"Sajj'aka\0\0\0\0\0\0\0\0",
+                },
+            }
+        };
+
+        push(&mut app, ViewerEvent::CutsceneStarted { event_id: 503 });
+        push(&mut app, name_cue(kuluu_snapshot::CutsceneActor::LocalPlayer));
+        push(
+            &mut app,
+            name_cue(kuluu_snapshot::CutsceneActor::Entity {
+                server_id: NPC,
+            }),
+        );
+        step(&mut app, 1.0);
+        let names = app.world().resource::<EventNameOverrides>();
+        assert_eq!(names.get(SELF), Some("Sajj'aka"));
+        assert_eq!(names.get(NPC), Some("Sajj'aka"));
+
+        push(&mut app, ViewerEvent::CutsceneEnded);
+        step(&mut app, 1.0);
+        let names = app.world().resource::<EventNameOverrides>();
+        assert_eq!(names.get(SELF), None, "cleared at session end");
+        assert_eq!(names.get(NPC), None, "cleared at session end");
+    }
+
+    /// The 16-byte slot is a C string: truncate at the first NUL, and a
+    /// full-width name without one keeps all sixteen bytes.
+    #[test]
+    fn the_name_slot_truncates_at_the_first_nul() {
+        assert_eq!(
+            event_name_string(&*b"Sajj'aka\0\0\0\0\0\0\0\0"),
+            "Sajj'aka"
+        );
+        assert_eq!(event_name_string(&[0u8; 16]), "");
+        let full: [u8; 16] = *b"SixteenBytes!!!!";
+        assert_eq!(event_name_string(&full), "SixteenBytes!!!!");
     }
 
     #[test]

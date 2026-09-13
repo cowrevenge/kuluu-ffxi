@@ -4596,12 +4596,15 @@ async fn keepalive_loop(
                             }
 
                             // s2c PENDINGSTR copies four 16-byte strings into
-                            // PTR_EventStrings; the only opcode that reads them
-                            // (0xB4 case 1) is skipped by width in our VM, so there
-                            // is nothing to store: a named no-op, not an unknown-
-                            // opcode fallthrough (research/XiPackets/world/server/
-                            // 0x005D).
+                            // PTR_EventStrings, the table the event VM's 0xB4
+                            // case 1 reads; it must land before the next step even
+                            // while a tag is held, like PENDINGNUM above
+                            // (research/XiPackets/world/server/0x005D).
                             if sub.opcode == ffxi_proto::map::s2c::PENDINGSTR {
+                                match decode::PendingStr::decode(sub.data) {
+                                    Ok(p) => dialog_session.apply_pending_str(&p.strings),
+                                    Err(e) => warn_decode_err(sub.opcode, e),
+                                }
                                 continue;
                             }
 

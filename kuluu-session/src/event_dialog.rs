@@ -375,6 +375,16 @@ impl DialogSession {
         }
     }
 
+    /// s2c PENDINGSTR's four strings into the VM's event string table, where
+    /// 0xB4 case 1 reads them; lands before the next step even while a tag is
+    /// held (research/XiPackets/world/server/0x005D). No-op when no VM event
+    /// runs.
+    pub fn apply_pending_str(&mut self, strings: &[[u8; 16]; 4]) {
+        if let Some(runner) = self.runner.as_mut() {
+            runner.apply_pending_str(strings);
+        }
+    }
+
     /// True while the VM holds a pending tag awaiting its s2c ack. While true
     /// the owning event must not be drained by a Mode-0 EVENT_END: that would
     /// kill the server-side event mid-transaction and OnEventUpdate would find
@@ -850,6 +860,13 @@ pub fn resolve_cue(cue: EventCue, event_entity: u32) -> ResolvedCue {
             });
         }
         EventCue::MapClose => return ResolvedCue::Map(MapOp::Close),
+        EventCue::EntityName {
+            actor: target,
+            name,
+        } => CutsceneCue::EntityName {
+            actor: actor(target),
+            name,
+        },
     })
 }
 
@@ -2817,5 +2834,44 @@ pub(crate) mod tests {
                 server_id: POSED_NPC
             }
         );
+    }
+
+    /// 0xB5 names the event entity by default: the rename cue rides the
+    /// running event's own server id.
+    #[test]
+    fn entity_name_cue_resolves_to_the_running_events_entity() {
+        const EVENT_ENTITY: u32 = 0x010E_602F;
+        let name: [u8; 16] = *b"Sajj'aka\0\0\0\0\0\0\0\0";
+        let cue = resolve_cue(
+            EventCue::EntityName {
+                actor: ActorLookup::EVENT_ENTITY,
+                name,
+            },
+            EVENT_ENTITY,
+        );
+        match cue {
+            ResolvedCue::Scene(CutsceneCue::EntityName {
+                actor,
+                name: got,
+            }) => {
+                assert_eq!(
+                    actor,
+                    CutsceneActor::Entity {
+                        server_id: EVENT_ENTITY
+                    }
+                );
+                assert_eq!(got, name);
+            }
+            other => panic!("not a name cue: {other:?}"),
+        }
+    }
+
+    /// PENDINGSTR can land before the event's VM exists: it is accepted and
+    /// dropped, not an error.
+    #[test]
+    fn apply_pending_str_without_a_runner_is_a_noop() {
+        let mut session = DialogSession::new(None, "tester".into());
+        session.apply_pending_str(&[[0u8; 16]; 4]);
+        assert!(session.runner.is_none());
     }
 }

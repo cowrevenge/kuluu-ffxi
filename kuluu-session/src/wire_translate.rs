@@ -619,6 +619,10 @@ fn cutscene_cue_to_wire(cue: crate::state::CutsceneCue) -> wire::CutsceneCue {
             actor: cutscene_actor_to_wire(actor),
             key,
         },
+        Cue::EntityName { actor, name } => wire::CutsceneCue::EntityName {
+            actor: cutscene_actor_to_wire(actor),
+            name,
+        },
     }
 }
 

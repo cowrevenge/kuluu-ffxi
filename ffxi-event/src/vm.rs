@@ -300,6 +300,10 @@ const CHOCOBO_MOUNT_ID_BIAS: u16 = 1;
 const CHOCOBO_UNMOUNT_ID: u16 = 0;
 
 const WORK_LOCAL_LEN: usize = 80;
+// `XiEvent::setworkstrofs` refuses string writes at slot 64 and up: a 16-byte
+// store must stay inside the WorkLocal table (research/XiEvents/Event VM
+// Functions.md; the int view bounds the same table at 80 slots).
+const WORK_STR_WRITE_LEN: usize = 64;
 const WORK_ZONE_LEN: usize = 96;
 const WORK_ZONE_BASE: u32 = 4096;
 // Selbina's Lucia event 221 reads num[0] as Work_Zone[2]; Southern San d'Oria
@@ -331,6 +335,13 @@ pub struct EventVm {
     event_data: Vec<u8>,
     references: Vec<u32>,
     work_local: [u32; WORK_LOCAL_LEN],
+    /// The string view of the same WorkLocal table `work_local` reads as ints
+    /// (retail stores both in one 16-byte-per-slot array; only the opcodes
+    /// implemented here touch it, so the two views need not alias).
+    work_local_str: [[u8; 16]; WORK_LOCAL_LEN],
+    /// The s2c 0x005D PENDINGSTR table (PTR_EventStrings): four 16-byte strings
+    /// the server pushes before the event, read by 0xB4 case 1.
+    pending_strings: [[u8; 16]; 4],
     work_zone: [u32; WORK_ZONE_LEN],
     exec_pointer: usize,
     jump_table: [u16; JUMP_STACK_LEN],
@@ -505,6 +516,8 @@ impl EventVm {
             event_data: block.event_data.clone(),
             references: block.references.clone(),
             work_local: [0; WORK_LOCAL_LEN],
+            work_local_str: [[0u8; 16]; WORK_LOCAL_LEN],
+            pending_strings: [[0u8; 16]; 4],
             work_zone,
             exec_pointer,
             jump_table: [0; JUMP_STACK_LEN],
@@ -803,6 +816,15 @@ impl EventVm {
                 *cell = *value as u32;
             }
         }
+    }
+
+    /// s2c 0x005D PENDINGSTR's four 16-byte strings copied into the event
+    /// string table (PTR_EventStrings); 0xB4 case 1 reads them by the work
+    /// operand each instruction carries (research/XiPackets/world/server/
+    /// 0x005D, research/XiEvents/OpCodes/0x00B4.md). Lands before the next
+    /// step even while a tag is held, like [`Self::apply_pending_num`].
+    pub fn apply_pending_str(&mut self, strings: &[[u8; 16]; 4]) {
+        self.pending_strings = *strings;
     }
 
     /// The tag held on its case-1 poll, if any.
@@ -1429,6 +1451,36 @@ impl EventVm {
                     let Some(width) = crate::opcode_meta::sub_size(op, sub) else {
                         return StepResult::Unimplemented(op);
                     };
+                    match (op, sub) {
+                        // 0xB4 case 0: the inline 16-byte string at +4 becomes
+                        // the work string the +2 operand selects (research/
+                        // XiEvents/OpCodes/0x00B4.md).
+                        (OP_WINDOW, 0x00) => {
+                            let mut name = [0u8; 16];
+                            let start = self.exec_pointer + 4;
+                            let end = (start + 16).min(self.event_data.len());
+                            name[..end - start].copy_from_slice(&self.event_data[start..end]);
+                            self.setworkstr(2, name);
+                        }
+                        // 0xB4 case 1: the PENDINGSTR table entry the +4 work
+                        // operand selects becomes that work string; an out-of-
+                        // range index reads slot 0, retail's clamp.
+                        (OP_WINDOW, 0x01) => {
+                            let idx = self.getworkofs(4, 0);
+                            let idx = (0..4).contains(&idx).then_some(idx as usize).unwrap_or(0);
+                            self.setworkstr(2, self.pending_strings[idx]);
+                        }
+                        // 0xB5 case 0: the event entity's display name becomes
+                        // the work string the +2 operand selects (research/
+                        // XiEvents/OpCodes/0x00B5.md).
+                        (OP_NAMESET, 0x00) => {
+                            self.cues.push(EventCue::EntityName {
+                                actor: ActorLookup::EVENT_ENTITY,
+                                name: self.getworkstr(2),
+                            });
+                        }
+                        _ => {}
+                    }
                     self.exec_pointer += width as usize;
                 }
                 // The retail two-flag gate (CliEventCancelSetFlag) is empirically
@@ -1636,6 +1688,32 @@ impl EventVm {
             if (EVENT_PARAM_WORK_BASE..EVENT_PARAM_WORK_BASE + EVENT_PARAM_COUNT).contains(&index) {
                 self.param_len = self.param_len.max(index - EVENT_PARAM_WORK_BASE + 1);
             }
+        }
+    }
+
+    /// `XiEvent::getworkstrofs`: the WorkLocal string slot the bytecode operand
+    /// at `index` selects (research/XiEvents/Event VM Functions.md). A
+    /// References-flagged or out-of-range operand reads the global zero array
+    /// retail returns — an empty string here.
+    fn getworkstr(&self, index: usize) -> [u8; 16] {
+        let val = self.eventgetcode(index) as u32;
+        if val & REFERENCE_FLAG == 0 && (val as usize) < WORK_LOCAL_LEN {
+            self.work_local_str[val as usize]
+        } else {
+            [0u8; 16]
+        }
+    }
+
+    /// `XiEvent::setworkstrofs`: write `src` into the slot the operand at
+    /// `index` selects; References are read-only and the write bound is
+    /// [`WORK_STR_WRITE_LEN`], past which retail refuses the store.
+    fn setworkstr(&mut self, index: usize, src: [u8; 16]) {
+        let val = self.eventgetcode(index) as u32;
+        if val & REFERENCE_FLAG != 0 {
+            return;
+        }
+        if (val as usize) < WORK_STR_WRITE_LEN {
+            self.work_local_str[val as usize] = src;
         }
     }
 
@@ -4301,6 +4379,103 @@ mod tests {
                 panic!("op 0x{op:02X} produced no message");
             };
             assert_eq!(m.params, params, "op 0x{op:02X} dropped event params");
+        }
+    }
+
+    /// 0xB4 case 0: the inline 16-byte literal at +4 fills the work string the
+    /// +2 operand selects (research/XiEvents/OpCodes/0x00B4.md).
+    #[test]
+    fn window_case_zero_copies_the_inline_literal_into_the_work_string() {
+        let literal: [u8; 16] = *b"Sajj'aka\0\0\0\0\0\0\0\0";
+        let mut data = vec![OP_WINDOW, 0x00];
+        data.extend_from_slice(&3u16.to_le_bytes()); // dest slot @2
+        data.extend_from_slice(&literal); // literal @4
+        data.push(OP_END); // offset 20
+        let mut e = vm(data, vec![]);
+        assert_eq!(e.step(), StepResult::Done);
+        assert_eq!(e.exec_pointer(), 20);
+        assert_eq!(e.work_local_str[3], literal);
+    }
+
+    /// 0xB4 case 1: the +4 work operand is the PENDINGSTR index, routed through
+    /// the same getworkofs as every other operand — here a References-flagged
+    /// value naming refs[7] (research/XiEvents/OpCodes/0x00B4.md).
+    #[test]
+    fn window_case_one_reads_the_pending_str_entry_the_work_operand_selects() {
+        let mut data = vec![OP_WINDOW, 0x01];
+        data.extend_from_slice(&3u16.to_le_bytes()); // dest slot @2
+        data.extend_from_slice(&0x8007u16.to_le_bytes()); // refs[7] @4
+        data.push(OP_END); // offset 6
+        let mut pending = [[0u8; 16]; 4];
+        pending[2] = *b"pending-two\0\0\0\0\0";
+        let mut e = vm(data, vec![0, 0, 0, 0, 0, 0, 0, 2]);
+        e.apply_pending_str(&pending);
+        assert_eq!(e.step(), StepResult::Done);
+        assert_eq!(e.work_local_str[3], pending[2]);
+    }
+
+    /// 0xB4 case 1 with a literal index past the four-entry table: retail
+    /// lands on entry 0, not the clamped last entry.
+    #[test]
+    fn window_case_one_out_of_range_index_reads_slot_zero() {
+        let mut data = vec![OP_WINDOW, 0x01];
+        data.extend_from_slice(&3u16.to_le_bytes()); // dest slot @2
+        data.extend_from_slice(&9u16.to_le_bytes()); // literal index 9 @4
+        data.push(OP_END); // offset 6
+        let mut pending = [[0u8; 16]; 4];
+        pending[0] = *b"zero\0\0\0\0\0\0\0\0\0\0\0\0";
+        pending[3] = *b"three\0\0\0\0\0\0\0\0\0\0\0";
+        let mut e = vm(data, vec![]);
+        e.apply_pending_str(&pending);
+        assert_eq!(e.step(), StepResult::Done);
+        assert_eq!(
+            e.work_local_str[3], pending[0],
+            "out of range lands on entry 0"
+        );
+    }
+
+    /// 0xB5 case 0: the event entity's display name becomes the work string the
+    /// +2 operand selects; the canonical rename is a 0xB4 case 0 right before
+    /// it (research/XiEvents/OpCodes/0x00B5.md).
+    #[test]
+    fn nameset_case_zero_emits_the_event_entity_name_cue() {
+        let literal: [u8; 16] = *b"Sajj'aka\0\0\0\0\0\0\0\0";
+        let mut data = vec![OP_WINDOW, 0x00];
+        data.extend_from_slice(&5u16.to_le_bytes()); // dest slot @2
+        data.extend_from_slice(&literal); // literal @4
+        data.extend_from_slice(&[OP_NAMESET, 0x00]); // offset 20
+        data.extend_from_slice(&5u16.to_le_bytes()); // source slot @22
+        data.push(OP_END); // offset 24
+        let mut e = vm(data, vec![]);
+        assert_eq!(e.step(), StepResult::Done);
+        assert_eq!(e.exec_pointer(), 24);
+        assert_eq!(
+            e.take_cues(),
+            vec![EventCue::EntityName {
+                actor: ActorLookup::EVENT_ENTITY,
+                name: literal,
+            }]
+        );
+    }
+
+    /// setworkstrofs refuses both stores: a References-flagged operand is
+    /// read-only, and the write bound is slot 64 even though the int view runs
+    /// to 80 (research/XiEvents/Event VM Functions.md).
+    #[test]
+    fn window_case_zero_refuses_ref_flagged_and_over_bound_destinations() {
+        let literal: [u8; 16] = *b"Sajj'aka\0\0\0\0\0\0\0\0";
+        for dest in [0x8003u16, 64] {
+            let mut data = vec![OP_WINDOW, 0x00];
+            data.extend_from_slice(&dest.to_le_bytes()); // dest slot @2
+            data.extend_from_slice(&literal); // literal @4
+            data.push(OP_END); // offset 20
+            let mut e = vm(data, vec![0, 0, 0, 0]);
+            assert_eq!(e.step(), StepResult::Done);
+            assert_eq!(
+                e.work_local_str,
+                [[0u8; 16]; WORK_LOCAL_LEN],
+                "dest 0x{dest:04X} must not store"
+            );
         }
     }
 }

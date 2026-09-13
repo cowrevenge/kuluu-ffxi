@@ -69,7 +69,9 @@ use serde::{Deserialize, Serialize};
 // v5: InventoryItem.charges_remaining + next_use_vana_ts (item recast/charges).
 // v4: SceneSnapshot.delivery_box (dedicated delivery screen) + ViewerCommand::DeliveryBox
 // (postcard frames are not self-describing, so any shape change bumps this).
-pub const PROTOCOL_VERSION: u32 = 31;
+// v32: CutsceneCue::EntityName (0xB5 case 0 display-name change, fed by the
+// s2c 0x005D PENDINGSTR table via 0xB4 case 1).
+pub const PROTOCOL_VERSION: u32 = 32;
 
 /// Longest countdown `SceneSnapshot::status_icon_expiries` can carry. The
 /// producer rejects anything beyond it as a corrupt 0x063 timestamp, and the HUD
@@ -1625,6 +1627,13 @@ pub enum CutsceneCue {
         actor: CutsceneActor,
         key: Option<FourCc>,
     },
+    /// 0xB5 case 0: set `actor`'s display name to `name` (the event's work
+    /// string, filled from an inline literal or the s2c 0x005D PENDINGSTR
+    /// table); released like every other cue at [`ViewerEvent::CutsceneEnded`].
+    EntityName {
+        actor: CutsceneActor,
+        name: [u8; 16],
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2276,7 +2285,7 @@ mod tests {
 
     #[test]
     fn ferry_protocol_preserves_transport_and_voyage_fields() {
-        const VERSION: u32 = 31;
+        const VERSION: u32 = 32;
         const STAMP: u32 = 0x1200_3400;
         assert_eq!(PROTOCOL_VERSION, VERSION);
         let mut snapshot = sample_snapshot();
@@ -2535,6 +2544,12 @@ mod tests {
                 actor: CutsceneActor::Entity { server_id: 1 },
                 partner: CutsceneActor::LocalPlayer,
                 key: *b"kue0",
+            },
+            CutsceneCue::EntityName {
+                actor: CutsceneActor::Entity {
+                    server_id: 0x010E_602F,
+                },
+                name: *b"Sajj'aka\0\0\0\0\0\0\0\0",
             },
         ];
         for cue in cues {

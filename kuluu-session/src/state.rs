@@ -1113,6 +1113,13 @@ pub enum CutsceneCue {
         actor: CutsceneActor,
         key: Option<ffxi_event::FourCc>,
     },
+    /// 0xB5 case 0: set `actor`'s display name to `name` (the event's work
+    /// string, filled from an inline literal or the s2c 0x005D PENDINGSTR
+    /// table). The nameplate re-rasters from it until the event ends.
+    EntityName {
+        actor: CutsceneActor,
+        name: [u8; 16],
+    },
 }
 
 /// Number of music slots [`AgentEvent::MusicVolumeChanged::slot`] can name

@@ -194,6 +194,13 @@ impl DialogRunner {
         self.vm.apply_pending_num(num);
     }
 
+    /// s2c PENDINGSTR's four strings into the VM's event string table; lands
+    /// before the next step even while a tag is held, like
+    /// [`Self::apply_pending_num`].
+    pub fn apply_pending_str(&mut self, strings: &[[u8; 16]; 4]) {
+        self.vm.apply_pending_str(strings);
+    }
+
     /// The pending tag the VM holds on its case-1 poll, if any.
     pub fn pending_tag(&self) -> Option<&PendingTag> {
         self.vm.pending_tag()

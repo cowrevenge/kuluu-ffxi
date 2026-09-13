@@ -248,6 +248,8 @@ pub struct RasterInputs<'w> {
     pub font: Res<'w, BillboardFont>,
     pub name_colors: Res<'w, crate::nameplate_color::NameColorTable>,
     pub icons: Res<'w, crate::nameplate_icons::NameplateIcons>,
+    /// A running event's 0xB5 renames; win over the record's name while set.
+    pub name_overrides: Res<'w, crate::cutscene::EventNameOverrides>,
 }
 
 pub fn is_self_billboard(entity_id: u32, self_char_id: Option<u32>) -> bool {
@@ -339,7 +341,21 @@ pub fn update_nameplate_billboards_system(
             if have.contains(&id) || !pos_by_id.get(&id).is_some_and(Option::is_some) {
                 continue;
             }
-            let Some(name) = rec.entity.name.as_deref().filter(|s| !s.is_empty()) else {
+            // A running event's 0xB5 rename (EventNameOverrides) wins over the
+            // record's name; with neither there is no plate yet — this pass
+            // re-runs every frame, so a name that arrives later still gets one.
+            let name = raster
+                .name_overrides
+                .get(id)
+                .map(|n| n.to_string())
+                .or_else(|| {
+                    rec.entity
+                        .name
+                        .as_deref()
+                        .filter(|s| !s.is_empty())
+                        .map(String::from)
+                });
+            let Some(name) = name else {
                 continue;
             };
             // The record's kind/status are known right now, so the first bake
@@ -360,7 +376,7 @@ pub fn update_nameplate_billboards_system(
                 &raster.font.0,
                 id,
                 rec.entity.kind,
-                name,
+                &name,
                 color,
             );
             have.insert(id);
@@ -510,6 +526,25 @@ pub fn update_nameplate_billboards_system(
             party: &state.snapshot.party,
         };
         let key = raster_key_for(&rec.entity, ctx, &raster.name_colors, settings.mob_hp_under);
+        // A 0xB5 rename overrides the record's name for the event's duration;
+        // when the override clears at session end the record's name returns,
+        // and with neither present the plate keeps the name it spawned with
+        // (the "name lives on the component" contract below). A move of
+        // `base_name` breaks `matches` and re-rasters on this frame.
+        let effective_name = raster
+            .name_overrides
+            .get(np.entity_id)
+            .map(|n| n.to_string())
+            .or_else(|| {
+                rec.entity
+                    .name
+                    .as_deref()
+                    .filter(|s| !s.is_empty())
+                    .map(String::from)
+            });
+        if let Some(name) = effective_name {
+            np.base_name = name;
+        }
         if np
             .rastered
             .as_ref()
@@ -1485,6 +1520,7 @@ mod tests {
             .init_resource::<crate::nameplate_icons::NameplateIcons>()
             .init_resource::<NameplateBillboardDebug>()
             .init_resource::<crate::entity_table::EntityTable>()
+            .init_resource::<crate::cutscene::EventNameOverrides>()
             .add_systems(Update, update_nameplate_billboards_system);
         app.world_mut().spawn((
             OperatorCamera,

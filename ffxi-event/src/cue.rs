@@ -341,6 +341,14 @@ pub enum EventCue {
         actor: ActorLookup,
         key: Option<FourCc>,
     },
+    /// 0xB5 case 0: set the event entity's display name to `name`, the work
+    /// string its operand selects (research/XiEvents/OpCodes/0x00B5.md). That
+    /// string is filled by 0xB4 case 0 (an inline literal) or case 1 (the
+    /// s2c 0x005D PENDINGSTR table entry its work operand selects).
+    EntityName {
+        actor: ActorLookup,
+        name: [u8; 16],
+    },
     /// 0xC8 MAP_TUTORIAL: open the map window on zone `map_id`; `tutorial` is
     /// the LOBYTE of the third work operand (research/XiEvents/OpCodes/0x00C8.md).
     MapOpen { map_id: i32, tutorial: bool },
@@ -443,6 +451,10 @@ impl EventCue {
             Self::ActorStopAction { actor, key } => Self::ActorStopAction {
                 actor: resolve(actor),
                 key,
+            },
+            Self::EntityName { actor, name } => Self::EntityName {
+                actor: resolve(actor),
+                name,
             },
             other => other,
         }

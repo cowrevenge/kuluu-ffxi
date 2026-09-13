@@ -6329,10 +6329,10 @@ fn decode_abil_recast(data: &[u8]) -> Vec<(u16, u32)> {
     out
 }
 
-/// Attribute a VM frame to its speaker: resolve the frame's target index to an
-/// entity name for the dialog header and chat attribution. A speakerless frame
-/// (retail's no-speaker lines) or one whose index cannot be resolved gets a
-/// blank header rather than a guessed one.
+/// Attribute a VM frame to its speaker for the dialog header and chat:
+/// resolve the frame's target index to an entity name. A speakerless frame
+/// (retail's no-speaker lines) stays blank; an unresolvable index prints
+/// "???", retail's missing-entity speaker (research/XiEvents/OpCodes/0x001D.md).
 fn attribute_event_speaker(
     dialog: &mut crate::state::DialogState,
     target_cache: &std::collections::HashMap<u16, u32>,
@@ -6343,7 +6343,10 @@ fn attribute_event_speaker(
         .and_then(|idx| target_cache.get(&idx).and_then(|id| name_cache.get(id)));
     dialog.npc_name = match resolved {
         Some(name) => Some(name.clone()),
-        None => Some(String::new()),
+        None => Some(match dialog.speaker_index {
+            Some(_) => "???".to_string(),
+            None => String::new(),
+        }),
     };
 }
 

@@ -4296,12 +4296,13 @@ fn speaker_attribution_resolves_the_frame_speaker_not_the_trigger() {
     super::attribute_event_speaker(&mut d, &target_cache, &name_cache);
     assert_eq!(d.npc_name.as_deref(), Some(""));
 
-    // An unresolvable index blanks rather than guessing the trigger NPC.
+    // An unresolvable index prints retail's missing-entity marker rather than
+    // guessing the trigger NPC.
     let mut d = crate::state::DialogState {
         npc_name: None,
         speaker_index: Some(99),
         ..Default::default()
     };
     super::attribute_event_speaker(&mut d, &target_cache, &name_cache);
-    assert_eq!(d.npc_name.as_deref(), Some(""));
+    assert_eq!(d.npc_name.as_deref(), Some("???"));
 }

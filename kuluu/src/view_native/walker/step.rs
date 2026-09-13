@@ -1,4 +1,4 @@
-//! One fixed tick of the walker (plan §2.3/§3): horizontal slide plus vertical
+//! One fixed tick of the walker: horizontal slide plus vertical
 //! authority in one place, replacing the stub's free move + column snap.
 //!
 //! Wire coordinates at the boundary: x/y horizontal, z grows DOWN; bevy space
@@ -21,8 +21,8 @@ use super::sweep::{self, WallSource};
 use super::{ActorContact, StepResult, VerticalDecision, WalkMode, Walker};
 
 /// Floor source for the walker's column queries: MZB zone collision plus
-/// closed-door triangles (a closed drawbridge is a floor, plan §2.1). The
-/// support probe and the ramp field both sample through this.
+/// closed-door triangles (a closed drawbridge is a floor). The support probe
+/// and the ramp field both sample through this.
 struct FloorSampler<'a> {
     geom: &'a MzbCollisionGeometry,
     doors: &'a [DoorObstacle],
@@ -47,8 +47,8 @@ impl Sampler for FloorSampler<'_> {
 }
 
 /// Wall source for the body sweep: MZB zone geometry plus closed-door
-/// triangles (plan §2.5 — doors are walls for the sweep AND floors for the
-/// column probe). Door normals are winding-derived and oriented toward the
+/// triangles: a door is a wall for the sweep AND a floor for the column
+/// probe. Door normals are winding-derived and oriented toward the
 /// query point at contact time, so either mesh authoring side blocks.
 struct Walls<'a> {
     geom: &'a MzbCollisionGeometry,
@@ -113,8 +113,9 @@ fn door_floor_at(d: &DoorObstacle, xz: Vec2, ceiling_y: f32) -> Option<f32> {
 }
 
 /// True when any closed-door triangle crosses the vertical slab `(lo_y, hi_y]`
-/// at `xz` — the door half of the ceiling hold (plan §2.4: "any triangle, any
-/// face class"). A descent never trips it; callers gate on a rise first.
+/// at `xz` — the door half of the ceiling hold: any triangle crossing the slab
+/// blocks the rise, whatever its face class. A descent never trips it; callers
+/// gate on a rise first.
 fn doors_in_column_slab(doors: &[DoorObstacle], xz: Vec2, lo_y: f32, hi_y: f32) -> bool {
     for d in doors {
         if !column_in_box(d.min.x, d.max.x, d.min.z, d.max.z, xz) {
@@ -205,7 +206,7 @@ fn closest_point_on_tri(p: Vec3, a: Vec3, b: Vec3, c: Vec3) -> Vec3 {
     a + ab * v + ac * w
 }
 
-/// Landing test for an airborne tick (plan §2.3): a floor within the swept
+/// Landing test for an airborne tick: a floor within the swept
 /// band `[y_lo, y_hi]` under the footprint — any of the five support columns,
 /// highest accepted wins. Unlike [`field::support_probe`] this is UNBOUNDED in
 /// how far below the feet the floor may sit: that IS the fall.
@@ -289,7 +290,7 @@ pub fn step(
     };
 
     // ---- 1. Horizontal -----------------------------------------------------
-    // The wall sweep runs at the PRE-move height (plan §2.4): nothing below
+    // The wall sweep runs at the PRE-move height: nothing below
     // feet + STEP_MAX is a horizontal obstacle, and vertical authority lands
     // after it. Noclip bypasses walls AND mobs — free-fly for debugging;
     // grounding stays on either way.
@@ -331,7 +332,6 @@ pub fn step(
             };
             VerticalDecision::NoGeometry
         } else {
-            // Gravity (plan §2.3): vy -= g*dt clamped to -v_max, then integrate.
             let prev_vy = match state.mode {
                 WalkMode::Airborne { vy } => vy,
                 _ => 0.0,
@@ -380,7 +380,7 @@ pub fn step(
         }
     } else {
         // Grounded: merge toward the target at speed_yps * dt per tick — that's
-        // the whole blend model (plan §2.3). The field is only sampled when it
+        // the whole blend model. The field is only sampled when it
         // can matter: a moving walker on a staircase window rides the envelope;
         // everything else targets h0 direct.
         let v = speed_yps * dt;
@@ -398,7 +398,7 @@ pub fn step(
         let (target, mut decision) = match &field_opt {
             Some(f) if f.poof => (h0, VerticalDecision::Poof { delta: h0 - feet_y }),
             Some(f) if f.target.is_some() => {
-                // Slew the gradient toward this tick's fit (plan §2.2): a
+                // Slew the gradient toward this tick's fit: a
                 // wobbly estimate or a fast 180 can't spike g.
                 let g_new = f.g;
                 state.grad.x += (g_new.x - state.grad.x).clamp(-GRAD_SLEW, GRAD_SLEW);
@@ -460,7 +460,7 @@ pub fn step(
         y_new = feet_y + delta;
 
         // Sanity cap outside Airborne: |dy| <= STEP_MAX per tick — if the field
-        // ever asks for more it's lying; hold and log (plan §2.3).
+        // ever asks for more it's lying; hold and log.
         if y_new - feet_y > STEP_MAX + 1e-6 || feet_y - y_new > STEP_MAX + 1e-6 {
             eprintln!(
                 "walker: vertical delta {} exceeds STEP_MAX, holding",
@@ -469,7 +469,7 @@ pub fn step(
             y_new = feet_y;
         }
 
-        // Ceiling hold (plan §2.4): a rise is rejected for the tick when any
+        // Ceiling hold: a rise is rejected for the tick when any
         // triangle sits in (feet + BODY_HEIGHT, y_new + BODY_HEIGHT] at the new
         // column — MZB or a closed door above us.
         if y_new > feet_y + 1e-6 {
@@ -533,19 +533,32 @@ mod tests {
         (-dist, vy)
     }
 
+    fn fall_time(g: f32, v_max: f32, dist: f32) -> f32 {
+        // Inverse of fall_closed_form: time to fall `dist` from rest.
+        let t_term = v_max / g;
+        let d_term = 0.5 * g * t_term * t_term;
+        if dist <= d_term {
+            (2.0 * dist / g).sqrt()
+        } else {
+            t_term + (dist - d_term) / v_max
+        }
+    }
+
     #[test]
     fn fall_model_matches_closed_form() {
-        // Feel numbers at g=40 v_max=30 (terminal speed reached at 0.75 s):
-        // a 1 yalm drop takes ~0.22 s, 3 yalms ~0.39 s, 10 ~0.71 s — all
-        // pre-terminal, so the closed-form time is sqrt(2d/g).
+        // The retail derivation in walker::consts, pinned so a change to either
+        // factor has to be deliberate: a per-frame step growing 0.040833335 per
+        // tick over 60 ticks and 30 frames a second is 73.5 yalms/s^2, and the
+        // 1 yalm step ceiling at 30 frames a second is 30 yalms/s. Terminal
+        // speed arrives after 6.12 yalms of drop.
         let fall = FallModel::default();
-        assert!((fall.g - 40.0).abs() < 1e-6);
+        assert!((fall.g - 73.5).abs() < 1e-4);
         assert!((fall.v_max - 30.0).abs() < 1e-6);
 
-        // The closed form itself: past the terminal time it runs at v_max
-        // (at t=1.0: 11.25 yalms of parabola + 30 * 0.25 = 18.75, vy -30).
+        // The closed form itself: past the terminal time (0.408 s) it runs at
+        // v_max (at t=1.0: 6.1224 yalms of parabola + 30 * 0.5918, vy -30).
         let (d, v) = fall_closed_form(fall.g, fall.v_max, 1.0);
-        assert!((d - (-18.75)).abs() < 1e-4 && (v - -30.0).abs() < 1e-6);
+        assert!((d - (-23.8776)).abs() < 1e-3 && (v - -30.0).abs() < 1e-6);
 
         // Euler integration of the same model must land within one tick of the
         // closed-form time at production dt.
@@ -559,7 +572,7 @@ mod tests {
                 y += vy * dt;
                 t += dt;
             }
-            let t_ref = (2.0 * dist / fall.g).sqrt();
+            let t_ref = fall_time(fall.g, fall.v_max, dist);
             assert!(
                 (t - t_ref).abs() <= dt + 1e-6,
                 "d={dist}: landed at {t}, closed form {t_ref}"

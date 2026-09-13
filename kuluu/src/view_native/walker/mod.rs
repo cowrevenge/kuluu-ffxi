@@ -6,10 +6,10 @@
 //! the triangle contact helpers. No ECS inside [`step`] — pure over its
 //! inputs so the test matrices can drive it headless.
 //!
-//! Layout: `consts` (one place, plan §2.7), `field` (the ramp field + support
-//! probe), `sweep` (horizontal slide against walls), `obstacles` (doors +
-//! mobs, rebuilt every fixed tick), `step` (the tick itself), `debug`
-//! (FieldDebug resource + panel/gizmo plumbing).
+//! Layout: `consts` (every walker constant in one place), `field` (the ramp
+//! field + support probe), `sweep` (horizontal slide against walls),
+//! `obstacles` (doors + mobs, rebuilt every fixed tick), `step` (the tick
+//! itself), `debug` (FieldDebug resource + panel/gizmo plumbing).
 
 pub mod consts;
 pub mod debug;
@@ -74,7 +74,7 @@ impl ActorContact {
     }
 }
 
-/// The walker's vertical mode (plan §2.3). Driven by input: `want_len == 0` is
+/// The walker's vertical mode. Driven by input: `want_len == 0` is
 /// Stopped this tick; Airborne persists until a landing, which picks the next
 /// mode from that tick's input.
 #[derive(Clone, Copy, Debug, Default)]
@@ -94,10 +94,8 @@ pub struct Walker {
     pub mode: WalkMode,
     /// Retail's contact block against the actor currently being walked into.
     pub contact: ActorContact,
-    /// Fall feel (plan §0 Q3): fast and smooth, tuned by walking off ledges —
-    /// swap for the real constant if the XiClient source ever turns up one.
     pub fall: consts::FallModel,
-    /// Slew-limited envelope gradient carried across ticks (plan §2.2): a
+    /// Slew-limited envelope gradient carried across ticks: a
     /// wobbly estimate or a fast 180 can't spike g.
     pub grad: bevy::math::Vec2,
 }
@@ -112,12 +110,12 @@ pub struct StepResult {
     pub feet_z: f32,
     /// The mode after this tick's vertical pass.
     pub mode: WalkMode,
-    /// What the vertical pass did (plan §3).
+    /// What the vertical pass did.
     pub decision: VerticalDecision,
 }
 
-/// What this tick's vertical pass did (plan §3). One per tick; the panel shows
-/// the last two and step 4's live tests assert on it.
+/// What this tick's vertical pass did. One per tick; the panel shows the last
+/// two and the live matrices in `live_tests` assert on it.
 #[derive(Clone, Copy, Debug)]
 pub enum VerticalDecision {
     /// Idle tick: settled toward h0 at speed (or held when already there).
@@ -192,7 +190,7 @@ impl Plugin for WalkerPlugin {
         app.init_resource::<obstacles::ObstacleSet>();
         app.init_resource::<debug::FieldDebug>();
         app.init_resource::<debug::StairDebugZoneCache>();
-        // Dynamic obstacles before the walker reads them (plan §2.5).
+        // Dynamic obstacles before the walker reads them.
         app.add_systems(
             FixedUpdate,
             (

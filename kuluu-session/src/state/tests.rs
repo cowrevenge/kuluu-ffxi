@@ -2338,9 +2338,9 @@ fn _agentevent_is_additive_only(x: &AgentEvent) {
     }
 }
 
-// Piece 0 (entity-table): the wire-id index must stay in lockstep with the
-// entities Vec across every mutation path, and the pending sets must carry
-// exactly the ids that changed since the last drain.
+// The wire-id index must stay in lockstep with the entities Vec across every
+// mutation path, and the pending sets must carry exactly the ids that changed
+// since the last drain.
 
 #[test]
 fn entity_index_stays_in_lockstep_with_the_vec() {

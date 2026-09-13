@@ -490,8 +490,8 @@ pub fn click_to_target_system(
                 scene.snapshot.current_goal,
                 Some(kuluu_snapshot::ReactorGoal::Engaged { .. })
             );
-            // Piece 3: self identity for the context comes from the table's
-            // self slot, not a snapshot field read.
+            // Self identity comes from the table's self slot, not a
+            // per-entity comparison against a snapshot field.
             let ctx = action_model::context_for_target(
                 target.id,
                 &scene.snapshot.entities,
@@ -588,8 +588,8 @@ mod tests {
         let mut scene = crate::snapshot::SceneState::default();
         scene.snapshot.self_char_id = Some(7);
         world.insert_resource(scene);
-        // Piece 3: click_to_target_system reads self from the table; stamp it
-        // to match the snapshot field above.
+        // click_to_target_system reads self from the table; stamp it to match
+        // the snapshot field above.
         let mut table = crate::entity_table::EntityTable::default();
         table.set_self_id(Some(7));
         world.insert_resource(table);

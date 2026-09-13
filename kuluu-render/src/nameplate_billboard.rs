@@ -262,11 +262,6 @@ pub fn self_plate_hidden(is_self: bool, mode: CameraMode) -> bool {
     is_self && matches!(mode, CameraMode::FirstPerson)
 }
 
-// Piece 7 removed the snapshot-rebuilt `SuppressedNameplates` cull set and
-// its `BillboardDebugCull` SystemParam bundle: the server-hidden gate now
-// reads the live entity-table record inline (below), so it moves with the
-// packet that changed it instead of waiting for a rebuild frame.
-
 pub fn update_nameplate_billboards_system(
     state: Res<SceneState>,
     settings: Res<crate::graphics::settings::GraphicsSettings>,
@@ -367,14 +362,11 @@ pub fn update_nameplate_billboards_system(
         }
     }
 
-    // Piece 7: no dirty gate. The re-raster inputs (colour, hp, markers,
-    // tint) are recomputed from LIVE entity-table records per billboard
-    // below, so a plate can never hold a stale key past the frame its facts
-    // changed — the old Local map only rebuilt on `state.dirty` frames, and
-    // a spawn that raced the billboard pass kept its fallback-white bake
-    // until some unrelated later snapshot. The stored-key comparison keeps
-    // the raster itself off the hot path: only plates whose key actually
-    // moved re-run it.
+    // No dirty gate: the re-raster inputs (colour, hp, markers, tint) are
+    // recomputed from LIVE entity-table records per billboard below, so a
+    // plate can never hold a stale key past the frame its facts changed. The
+    // stored-key comparison keeps the raster itself off the hot path: only
+    // plates whose key actually moved re-run it.
 
     // Debug breakdown mirrors each gate below; see NameplateBillboardDebug.
     let mut total = 0u32;
@@ -399,9 +391,9 @@ pub fn update_nameplate_billboards_system(
         // EFFECTFLAG_INVISIBLE). Retail shows nothing for any of them: the model
         // is hidden by sync_entities_system / apply_invis_flag_system on the same
         // signals, and retail's CanBuildActorName returns false while InvisFlag is
-        // set. Piece 7 reads the live record instead of a snapshot-rebuilt set:
-        // the cull moves with the packet that changed it, no rebuild frame
-        // required. Self is exempt from the STATUS/namevis pair — the server never
+        // set. The cull reads the live `EntityTable` record rather than a
+        // snapshot-rebuilt id set, so it moves with the packet that changed it
+        // and needs no rebuild frame. Self is exempt from the STATUS/namevis pair — the server never
         // hides players on those bytes, and a stray byte must not delete our own
         // plate (same exemption as the model). InvisFlag is NOT exempt: the server
         // sets it for self too (m_isGMHidden), and retail hides the local player's
@@ -486,9 +478,9 @@ pub fn update_nameplate_billboards_system(
             }
         }
 
-        // Piece 7: the key is recomputed from LIVE table facts every frame —
-        // an hp tick, a claim flip or the colour-table load all re-raster on
-        // the next frame without waiting for a dirty rebuild. The name lives
+        // The key is recomputed from LIVE table facts every frame — an hp
+        // tick, a claim flip or the colour-table load all re-raster on the
+        // next frame without waiting for a dirty rebuild. The name lives
         // on the component, not the record: a later update can drop it and
         // the plate must keep the name it spawned with.
         // Plates are spawned from this same table (the ensure pass above), so

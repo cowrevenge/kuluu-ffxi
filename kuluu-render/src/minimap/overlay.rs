@@ -307,8 +307,6 @@ impl<'a> MarkerContext<'a> {
     ) -> Self {
         let snapshot = &scene_state.snapshot;
         Self {
-            // Piece 3: self identity from the table's self slot (stamped by
-            // ingest from the same snapshot field).
             self_char_id: table.self_id().unwrap_or(0),
             target,
             lock_on,

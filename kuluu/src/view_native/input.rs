@@ -21,7 +21,7 @@ pub struct MoveEnvParams<'w> {
     // /pathto and minimap culling (kuluu-oe8y; see AGENTS.md).
     pub collision: Res<'w, kuluu_render::dat_mzb::MzbCollisionGeometry>,
     pub floor_gate: kuluu_render::scene::ZoneFloorGate<'w>,
-    /// Dynamic obstacles rebuilt every fixed tick before dispatch (plan §2.5):
+    /// Dynamic obstacles rebuilt every fixed tick before dispatch:
     /// closed door leaves (walls + floors) and mob circles. Bundled here — this
     /// fn sits at bevy's 16-param SystemParam ceiling.
     pub obstacles: Res<'w, super::walker::obstacles::ObstacleSet>,
@@ -823,7 +823,7 @@ pub fn dispatch_movement_system(
     mut prediction: ResMut<LocalPlayerPrediction>,
     env: MoveEnvParams,
     mut stance: StanceParams,
-    // Ramp-field debug record (plan §4 step 2): the gizmo and snapshot systems
+    // Ramp-field debug record: the gizmo and snapshot systems
     // read what this tick's walker::step saw. At bevy's 16-param ceiling; a new
     // param here must bundle into an existing SystemParam struct.
     mut field_dbg: ResMut<super::walker::debug::FieldDebug>,
@@ -1399,8 +1399,8 @@ pub fn dispatch_movement_system(
         y += right_y * step * strafe as f32;
     }
 
-    // The walker owns this tick's horizontal clamp and vertical authority
-    // (plan §2.3/§2.4): wall sweep + slide, then the mode-driven vertical step
+    // The walker owns this tick's horizontal clamp and vertical authority:
+    // wall sweep + slide, then the mode-driven vertical step
     // (MZB collision is in Bevy space, bevy.x = ffxi.x, bevy.z = -ffxi.y,
     // bevy.y = -ffxi.z). No floor within one step of reach means airborne;
     // a PERSISTENT wedge (a column with floors but none within

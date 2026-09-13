@@ -38,9 +38,9 @@ pub struct SessionHandle {
     pub state_rx: watch::Receiver<state::SessionState>,
     pub cmd_tx: mpsc::Sender<state::AgentCommand>,
     pub event_tx: broadcast::Sender<state::AgentEvent>,
-    /// Drained entity-change batches for the translator's delta path (piece 1
-    /// of the entity-table refactor): one batch per state-mutating event, in
-    /// fold order. The native viewer hands this to NativeSource; unused here.
+    /// Drained entity-change batches for the translator's delta path: one
+    /// batch per state-mutating event, in fold order. The native viewer hands
+    /// this to NativeSource; unused here.
     pub entity_changes_rx: mpsc::UnboundedReceiver<state::EntityChanges>,
     pub session_task: JoinHandle<anyhow::Result<()>>,
     pub folder_task: JoinHandle<()>,

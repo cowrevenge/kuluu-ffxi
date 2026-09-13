@@ -1,4 +1,4 @@
-//! Ramp field: the walking target under and ahead of the feet (plan §2.1-2.2).
+//! Ramp field: the walking target under and ahead of the feet.
 //!
 //! Everything here is in y-up space (bevy xz, y up) — the frame
 //! `MzbCollisionGeometry`'s column queries answer in. The walker boundary
@@ -91,7 +91,7 @@ pub struct Field {
     pub target: Option<f32>,
 }
 
-/// Support probe result (plan §2.1): five column queries, feet xz plus four at
+/// Support probe result: five column queries, feet xz plus four at
 /// radius FOOT_RADIUS. Grounded if any accepts; h0 = center hit, fallback max
 /// of accepted ring hits.
 #[derive(Clone, Copy, Debug)]
@@ -824,7 +824,7 @@ mod tests {
         }
     }
 
-    /// Property (plan §4): on random staircases the envelope never dips below h0.
+    /// Property: on random staircases the envelope never dips below h0.
     #[test]
     fn envelope_never_below_h0_on_random_staircases() {
         // Deterministic LCG so a failure is reproducible.
@@ -850,7 +850,7 @@ mod tests {
         }
     }
 
-    /// Ascend/descend (r, d) matrix (plan §4): the fitted gradient is within
+    /// Ascend/descend (r, d) matrix: the fitted gradient is within
     /// 10% of r/d averaged over tread phase; reversing flips its sign.
     #[test]
     fn gradient_matches_riser_over_tread() {
@@ -908,7 +908,7 @@ mod tests {
         assert!((target.unwrap() - 12.0).abs() < 1e-5);
     }
 
-    /// Riser-count regimes by tread width (plan §4): narrow treads read as a
+    /// Riser-count regimes by tread width: narrow treads read as a
     /// staircase, wide ones as single steps.
     #[test]
     fn riser_count_by_tread_width() {
@@ -938,7 +938,7 @@ mod tests {
     }
 
     /// A 0.05 nosing on every tread edge: the lip filter removes it and the
-    /// gradient equals the no-nosing case (plan §4).
+    /// gradient equals the no-nosing case.
     #[test]
     fn nosings_do_not_tilt_the_gradient() {
         let clean = flight(0.3, 0.45, 0.3, 12);
@@ -971,7 +971,7 @@ mod tests {
         );
     }
 
-    /// A hole 0.8 wide at +0.45 (plan §4): the arm truncates, no envelope tilt,
+    /// A hole 0.8 wide at +0.45: the arm truncates, no envelope tilt,
     /// and support under the feet is still grounded.
     #[test]
     fn hole_ahead_truncates_without_losing_support() {
@@ -995,7 +995,7 @@ mod tests {
         assert!(p.grounded, "feet are on solid floor");
     }
 
-    /// A wall face 1.5 up ahead (plan §4): WallAhead truncates and the target
+    /// A wall face 1.5 up ahead: WallAhead truncates and the target
     /// holds at h0.
     #[test]
     fn tall_wall_ahead_holds_target_at_h0() {
@@ -1015,7 +1015,7 @@ mod tests {
         assert_eq!(field_target(&f), Some(0.0));
     }
 
-    /// A riser of 0.5 ahead (plan §4): the chain ceiling caps at STEP_MAX, so it
+    /// A riser of 0.5 ahead: the chain ceiling caps at STEP_MAX, so it
     /// reads as WallAhead — not a climbable step.
     #[test]
     fn half_yalm_riser_ahead_is_wall_ahead() {
@@ -1034,7 +1034,7 @@ mod tests {
         assert_eq!(field_target(&f), Some(0.0));
     }
 
-    /// Diagonal 30/45/60 to the flight (plan §4): the plane fit stays finite and
+    /// Diagonal 30/45/60 to the flight: the plane fit stays finite and
     /// the envelope never dips below h0.
     #[test]
     fn diagonal_to_flight_stays_sane() {
@@ -1053,7 +1053,7 @@ mod tests {
     }
 
     /// A continuous ramp reads as a SLOPE (0 risers); a steep face of the
-    /// same height is a single step (plan §4). The slope/step boundary is set
+    /// same height is a single step. The slope/step boundary is set
     /// by the FLOOR_COS angle cutoff: a jump pair counts as a riser only when
     /// its subdivided samples rise faster than that cutoff, so any continuous
     /// ramp below retail's 45 degrees reads 0 risers regardless of LIP_MAX.

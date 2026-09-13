@@ -1,11 +1,11 @@
-//! Single-authority entity table (piece 2 of the entity-table refactor).
+//! Single-authority entity table.
 //!
-//! The ingest system mirrors every snapshot/delta into this resource so later
-//! pieces can read one fact store instead of re-scanning
-//! `SceneSnapshot.entities`: piece 4's sync pass iterates
-//! [`EntityTable::changed_ids`] only, and piece 7's nameplate pass reads live
-//! records per frame. Additive for now: nothing outside ingest reads the table
-//! yet — `SceneSnapshot.entities` keeps being populated until piece 8.
+//! The ingest system mirrors every snapshot/delta into this resource so
+//! consumers read one fact store instead of re-scanning
+//! `SceneSnapshot.entities`: `sync_entities_system` iterates
+//! [`EntityTable::changed_ids`] only, and `nameplate_billboard` reads live
+//! records per frame. `SceneSnapshot.entities` is still populated in parallel
+//! until every consumer has moved over.
 
 use std::collections::{HashMap, HashSet};
 
@@ -21,8 +21,8 @@ pub struct EntityRecord {
 }
 
 impl EntityRecord {
-    /// Pass-throughs so consumers read facts through one type: piece 4 stamps
-    /// Visibility from `is_invisible`/`name_hidden`, piece 5's self-dead check
+    /// Pass-throughs so consumers read facts through one type: the entity sync
+    /// stamps Visibility from `is_invisible`/`name_hidden`, the self-dead check
     /// uses `is_dead`.
     pub fn is_invisible(&self) -> bool {
         self.entity.is_invisible()
@@ -164,7 +164,7 @@ impl EntityTable {
         }
     }
 
-    /// Piece 3 stamps this at zone entry; until then `is_self` is false.
+    /// Stamped at zone entry; until then `is_self` is false.
     pub fn set_self_id(&mut self, id: Option<u32>) {
         self.self_id = id;
     }
@@ -173,7 +173,6 @@ impl EntityTable {
         self.self_id
     }
 
-    /// Piece 3 replaces the scattered `self_char_id == wire.id` checks with this.
     pub fn is_self(&self, id: u32) -> bool {
         self.self_id.is_some_and(|s| s == id)
     }

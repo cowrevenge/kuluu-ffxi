@@ -1,4 +1,4 @@
-//! Body sweep: horizontal slide against MZB wall triangles (plan §2.4).
+//! Body sweep: horizontal slide against MZB wall triangles.
 //!
 //! Ported from the legacy `dat_mzb::wall_clip_wire` core, minus its step lift,
 //! face_top validation, pending_floor and 45 degree wall test — vertical
@@ -11,7 +11,7 @@ use kuluu_render::dat_mzb::MzbCollisionGeometry;
 
 use super::consts::*;
 
-/// A source of wall-class contacts for the body sweep (plan §2.4/§2.5). MZB
+/// A source of wall-class contacts for the body sweep. MZB
 /// zone geometry is one; closed door leaves add their triangles on top.
 pub trait WallSource {
     /// Nearest wall-class triangle within `r` of `center`: `(dist_sq, normal)`
@@ -240,7 +240,7 @@ pub fn sweep(src: &impl WallSource, xz: Vec2, feet_y: f32, d_in: Vec2) -> Vec2 {
     p - xz
 }
 
-/// Ceiling hold (plan §2.4): before applying a rise from `feet_old` to
+/// Ceiling hold: before applying a rise from `feet_old` to
 /// `feet_new`, reject it when any triangle (any face class) sits in the slab
 /// `(feet_old + BODY_HEIGHT, feet_new + BODY_HEIGHT]` at the feet column —
 /// the body top would push into geometry. A descent never trips this.

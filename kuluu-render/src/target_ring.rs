@@ -101,8 +101,6 @@ pub fn arrow_bob_offset(seconds: f32) -> f32 {
     (seconds * ARROW_BOB_FREQUENCY).sin() * ARROW_BOB_AMPLITUDE
 }
 
-// Piece 3: the self slot + its record come from the entity table, so this
-// file no longer scans snapshot.entities for "who am I".
 fn engaged_on(table: &EntityTable, target_id: u32) -> bool {
     table.self_id().is_some_and(|sid| {
         table
@@ -185,7 +183,6 @@ pub fn draw_sub_target_cursor_system(
     };
     let cam_pos = cam_t.translation;
 
-    // Piece 3: self identity via the table's self slot.
     let self_pos = world_q
         .iter()
         .find(|(_, w, _, _)| table.is_self(w.id))

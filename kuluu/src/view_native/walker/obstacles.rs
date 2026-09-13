@@ -71,7 +71,7 @@ fn rid_obstacle(rect: &ZoneInteraction) -> DoorObstacle {
 pub struct ObstacleSet {
     /// Enabled RID boxes and fallback leaves, in Bevy space.
     pub doors: Vec<DoorObstacle>,
-    /// Mobs that body-block this tick: circle-vs-circle in xz (plan §2.5).
+    /// Mobs that body-block this tick: circle-vs-circle in xz.
     pub mobs: Vec<MobObstacle>,
 }
 
@@ -86,7 +86,7 @@ pub struct DoorObstacle {
 }
 
 /// A mob's horizontal block circle. Vertical extent is ignored by design: the
-/// walker tests circles in xz only (plan §2.5).
+/// walker tests circles in xz only.
 #[derive(Clone, Copy, Debug)]
 pub struct MobObstacle {
     /// The wire entity id — stable identity for the contact budget.

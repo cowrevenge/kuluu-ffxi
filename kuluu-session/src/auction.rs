@@ -54,8 +54,8 @@ pub struct AucOutcome {
 }
 
 impl AuctionFlow {
-    /// Phase 1: record the sell intent whose AskCommit is about to go out. Any
-    /// prior un-confirmed quote is superseded.
+    /// Record the sell intent whose AskCommit is about to go out. Any prior
+    /// un-confirmed quote is superseded.
     pub fn request_sell(
         &mut self,
         inventory_slot: u8,
@@ -74,8 +74,8 @@ impl AuctionFlow {
         sell
     }
 
-    /// Phase 2: the LotIn parameters — the recorded sell plus the target sale
-    /// slot — once the AskCommit quote has landed; `None` before that.
+    /// The LotIn parameters — the recorded sell plus the target sale slot —
+    /// once the AskCommit quote has landed; `None` before that.
     pub fn confirm_sell(&mut self) -> Option<(PendingSell, i8)> {
         if !self.quoted {
             return None;

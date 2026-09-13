@@ -309,6 +309,13 @@ run_comments() {
     bad=1
   fi
 
+  hits=$(printf '%s\n' "$comments" | grep -E "//.*$CR_RE_PRIVATE_PLAN|$CR_RE_STEP_LABEL" || true)
+  if [ -n "$hits" ]; then
+    echo "checks: comments - citation to a session artifact nobody can open: a private plan section or a bare ordinal step label. Restate the WHY inline, cite an in-tree symbol, or delete the comment:" >&2
+    printf '%s\n' "$hits" | cut -c1-200 | sed 's/^/  /' >&2
+    bad=1
+  fi
+
   # Every cited in-tree path must exist. vendor/ and research/ roots are only
   # checked when that submodule (or local clone) is populated; docs/ never
   # exists (the tree was retired), so any docs/ citation is dangling.

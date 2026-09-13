@@ -1,4 +1,4 @@
-//! Live matrices (plan §4 step 4): drive [`step`] headless against real
+//! Live matrices: drive [`step`] headless against real
 //! `MzbCollisionGeometry` built from synthetic blocks — no App, no physics
 //! world. The builders are the ones that lived in dat_mzb's
 //! `wall_collision_tests`; the assertions are re-pinned for the single-
@@ -329,7 +329,7 @@ fn stair_with_ground_under(steps: usize, d: f32, r: f32) -> MzbCollisionGeometry
 }
 
 // ---------------------------------------------------------------------------
-// New builders (plan §4): hole / ledge / nosing
+// New builders: hole / ledge / nosing
 // ---------------------------------------------------------------------------
 
 /// Flat floor at y=0 with a vertical drop of `drop` at x = edge_x.
@@ -486,7 +486,7 @@ fn nosing_flight(steps: usize, d: f32, r: f32) -> MzbCollisionGeometry {
 }
 
 // ---------------------------------------------------------------------------
-// Obstacle builders (plan §4): door_leaf / mob_circle
+// Obstacle builders: door_leaf / mob_circle
 // ---------------------------------------------------------------------------
 
 fn door_tri(v: [Vec3; 4]) -> ([Vec3; 3], Vec3) {
@@ -673,7 +673,7 @@ const RUN: f32 =
     kuluu_session::state::move_speed_yps(kuluu_session::state::BASE_PACKET_SPEED, false); // 5.0 y/s — the production run speed
 
 // ---------------------------------------------------------------------------
-// Staircase matrices (plan §4 live)
+// Staircase matrices
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -834,7 +834,7 @@ fn nosing_flight_climbs_like_a_clean_one() {
 }
 
 // ---------------------------------------------------------------------------
-// Walls / corners / corridors (plan §4 live)
+// Walls / corners / corridors
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -1074,7 +1074,7 @@ fn suppressed_shell_is_walk_through() {
 }
 
 // ---------------------------------------------------------------------------
-// Ramps / slopes (plan §4 live)
+// Ramps / slopes
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -1230,7 +1230,7 @@ fn oblique_wall_slide_keeps_full_speed() {
 }
 
 // ---------------------------------------------------------------------------
-// Falls / ledges / holes (plan §4 live)
+// Falls / ledges / holes
 // ---------------------------------------------------------------------------
 
 /// Walk off a ledge: Airborne under FallModel, lands on the lower floor within
@@ -1405,7 +1405,7 @@ fn cliff_descent_is_never_a_wall() {
 }
 
 // ---------------------------------------------------------------------------
-// Stop / resume / settle (plan §4 live)
+// Stop / resume / settle
 // ---------------------------------------------------------------------------
 
 /// Stop mid-flight: the walker settles onto the tread at speed, then resumes
@@ -1496,7 +1496,7 @@ fn landing_at_top_never_overshoots() {
 }
 
 // ---------------------------------------------------------------------------
-// Doors / mobs (plan §4 live)
+// Doors / mobs
 // ---------------------------------------------------------------------------
 
 /// A closed door leaf blocks the sweep like a wall...
@@ -1595,7 +1595,7 @@ fn mob_circle_does_not_shove_an_idle_player() {
 }
 
 // ---------------------------------------------------------------------------
-// Diagonals / strafes (plan §4 live)
+// Diagonals / strafes
 // ---------------------------------------------------------------------------
 
 /// Diagonal ascent at 30/45/60 degrees to the flight: the plane fit carries it.

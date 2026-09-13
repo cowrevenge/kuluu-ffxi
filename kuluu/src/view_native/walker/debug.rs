@@ -1,4 +1,4 @@
-//! FieldDebug resource + 120-tick ring buffer (plan §4 step 2).
+//! FieldDebug resource + 120-tick ring buffer.
 //!
 //! Dispatch records one tick of ramp-field data at each `walker::step` site;
 //! the gizmo system draws it in-world (`stair_draw`) and the snapshot system
@@ -83,7 +83,7 @@ impl FieldDebug {
     }
 
     /// Sign flips of consecutive nonzero dy over the ring (the "zig" counter;
-    /// step 4's live tests assert on this same number).
+    /// the live matrices in `live_tests` assert on this same number).
     pub fn reversals(&self) -> u32 {
         let ys: Vec<f32> = self.history().map(|(_, _, y)| y).collect();
         let mut flips = 0u32;

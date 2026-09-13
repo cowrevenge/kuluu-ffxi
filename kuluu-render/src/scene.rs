@@ -418,8 +418,8 @@ pub fn sync_entities_system(
         std::collections::HashSet::with_capacity(snap.entities.len() + 1);
     let mut hp_by_id: HashMap<u32, Option<u8>> = HashMap::new();
 
-    // Piece 3: identity comes from the table's self slot (stamped by ingest
-    // from the same snapshot field), not a per-entity comparison.
+    // Identity comes from the table's self slot (stamped by ingest from the
+    // same snapshot field), not a per-entity comparison.
     let self_char_id = table.self_id().unwrap_or(0);
     for wire in &snap.entities {
         seen.insert(wire.id);
@@ -731,7 +731,6 @@ pub fn sync_aggro_system(
     let self_id = snap.diagnostics.sync_in;
     let Some(self_uid) = self_id else { return };
 
-    // Piece 3: claim comparison reads the table's self slot.
     let self_char_id = table.self_id().unwrap_or(0);
 
     // Aggro state derives from the snapshot, so the map rebuild + material

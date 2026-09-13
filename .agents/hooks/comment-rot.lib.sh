@@ -148,6 +148,18 @@ cr_scan_bin_addr_scope() {
 CR_RE_ELIDED_PATH='(vendor|research)/[A-Za-z0-9._-]+[[:space:]]*/?\.\.\./'
 CR_RE_FINDING_ID='(finding(s)?[[:space:]]+F[0-9]{1,3}|\(F[0-9]{1,3}([,;/][[:space:]]?F[0-9]{1,3})*\)|\bF[0-9]{1,3}[-/]F[0-9]{1,3}\b|FFXiMain\.dll[,;)]?[[:space:]]+F[0-9]{1,3}\b)'
 
+# A section reference into a session artifact ("plan §2.3", "the handoff
+# section 4"). Keyed on the ANTECEDENT word, never on the section sign alone,
+# so a published citation (Ericson §5.1.3, "Real-Time Collision Detection"
+# §1.3.6) keeps passing while the unopenable one fails.
+CR_RE_PRIVATE_PLAN='(^|[^A-Za-z0-9_])([Tt]he[[:space:]]+)?([Pp]lan|[Ww]riteup|[Ww]rite-up|[Hh]andoff|[Pp]roposal)[[:space:]]*(§|[Ss]ection[[:space:]]|[Ss]ec\.)'
+
+# A bare ordinal label opening a comment ("Piece 3:", "Phase 2:"). It numbers
+# the step of a session's work plan, which no reader of the merged tree can
+# order or open. Anchored at the comment opener so an ordinal used inside a
+# sentence (a zone's "step 42") still passes.
+CR_RE_STEP_LABEL='//[/!]?[[:space:]]*(-[[:space:]]+)?([Pp]iece|[Pp]hase|[Ss]tep|[Ss]tage|[Pp]art)[[:space:]]+[0-9]+[[:space:]]*[:.)]'
+
 # Narrative / session-history / temporal — describes how the code got
 # here or a passing moment, not what is true now.
 CR_RE_NARRATIVE='(why we |we (abandoned|switched|re-?wrote|removed|replaced|migrated)|no longer|used to |previously|originally|prior to |\bregression\b|stage [0-9]|phase [0-9]|\bfor now\b|for the moment|this replaces|the (old|previous) )'
@@ -203,9 +215,9 @@ scan_comment_rot() {
   fi
 
   local dangling
-  dangling=$(printf '%s\n' "$comments" | grep -E "$CR_RE_ELIDED_PATH|$CR_RE_FINDING_ID" | head -4 || true)
+  dangling=$(printf '%s\n' "$comments" | grep -E "$CR_RE_ELIDED_PATH|$CR_RE_FINDING_ID|$CR_RE_PRIVATE_PLAN|$CR_RE_STEP_LABEL" | head -4 || true)
   if [ -n "$dangling" ]; then
-    printf '%s\n' "$dangling" | sed -E 's#^[[:space:]]*#  [citation nobody can open: elided path / out-of-tree finding id] #'
+    printf '%s\n' "$dangling" | sed -E 's#^[[:space:]]*#  [citation nobody can open: elided path / finding id / private plan section / ordinal step label] #'
     found=0
   fi
 

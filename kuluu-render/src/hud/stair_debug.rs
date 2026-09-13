@@ -70,7 +70,7 @@ pub fn update_stair_debug_hud(
     }
 }
 
-/// Build the multi-line status string (plan §4 step 2 panel spec). ASCII only:
+/// Build the multi-line status string. ASCII only:
 /// this text renders with Bevy's bundled default font, which covers U+0020-7E.
 fn build_status_text(snap: &StairDebugSnapshot) -> String {
     let mut out = String::with_capacity(1024);
@@ -166,7 +166,7 @@ fn build_status_text(snap: &StairDebugSnapshot) -> String {
     out.push_str(&format!("h0     : {}\n", strip_line(&h0s)));
     out.push_str(&format!("target : {}\n", strip_line(&ts)));
 
-    // Counters: the two numbers step 4's live tests assert on.
+    // Counters: the two numbers the walker's `live_tests` matrices assert on.
     out.push_str(&format!(
         "reversals(120)={}  max|d2y|(120)={:.4}\n",
         f.reversals_120, f.max_d2y_120
@@ -218,7 +218,7 @@ fn strip_line(values: &[Option<f32>]) -> String {
     out
 }
 
-/// One ramp-field sample row for the panel's table (plan §4 step 2).
+/// One ramp-field sample row for the panel's table.
 #[derive(Debug, Clone)]
 pub struct SampleRow {
     /// Signed distance along the move direction; 0 is under the feet.
@@ -234,7 +234,7 @@ pub struct SampleRow {
     pub status: String,
 }
 
-/// The last tick's ramp field for the panel (plan §4 step 2). All heights are
+/// The last tick's ramp field for the panel. All heights are
 /// y-up (bevy); wire z grows down.
 #[derive(Debug, Clone)]
 pub struct FieldSnapshot {
@@ -268,7 +268,7 @@ pub struct FieldSnapshot {
     pub samples: Vec<SampleRow>,
     /// Ring oldest-first as (h0, target, y), all y-up; up to 120 ticks.
     pub history: Vec<(Option<f32>, Option<f32>, f32)>,
-    /// dy sign reversals over the ring (step 4's live tests assert on this).
+    /// dy sign reversals over the ring (the walker's `live_tests` assert on this).
     pub reversals_120: u32,
     /// Max |second difference| of y over the ring.
     pub max_d2y_120: f32,

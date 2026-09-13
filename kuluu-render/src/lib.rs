@@ -251,8 +251,6 @@ impl<S: SceneSource + Resource + Component<Mutability = bevy::ecs::component::Mu
             .init_resource::<sun_moon::DatCelestials>()
             .init_resource::<EventLog>()
             .init_resource::<TrackedEntities>()
-            // Piece 2 of the entity-table refactor: ingest mirrors every
-            // snapshot/delta here; nothing reads it until piece 4.
             .init_resource::<EntityTable>()
             .init_resource::<Target>()
             .init_resource::<InputMode>()

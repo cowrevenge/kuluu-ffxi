@@ -574,10 +574,12 @@ fn cutscene_cue_to_wire(cue: crate::state::CutsceneCue) -> wire::CutsceneCue {
             key,
             actor,
             partner,
+            zone_id,
         } => wire::CutsceneCue::ZoneScheduler {
             key,
             actor: cutscene_actor_to_wire(actor),
             partner: cutscene_actor_to_wire(partner),
+            zone_id,
         },
         Cue::ActorMove {
             actor,
@@ -1628,7 +1630,7 @@ mod tests {
         let mut scope = CutsceneScope::default();
         scope.start(crate::event_dialog::agent_event_id(NPC_ID, EVENT_ID), &tx);
         for cue in runner.take_cues() {
-            scope.push(resolve_cue(cue, NPC_ID), &tx);
+            scope.push(resolve_cue(cue, NPC_ID, 0), &tx);
         }
         scope.end(EventSessionExit::ScriptEnded, &tx);
 

@@ -1252,11 +1252,13 @@ impl EventVm {
                 }
                 // XiEvent MAPSCHEDULOR (research/XiEvents/OpCodes/0x002D.md): start the
                 // zone-level routine `key`, waited on by 0x54. Kuluu resolves `key` out
-                // of ZONE_SCENE_DAT_ID (ffxi-dat, the title-screen scene DAT); retail
-                // runs it out of the zone's own model DAT. The host parks that wait on
-                // a pending hold the renderer's finish report releases (the routine's
-                // authored length in the file is its deadline); the same-batch bridge
-                // covers a 0x54 that runs before this cue drains.
+                // of the current zone's own model DAT (ffxi-dat
+                // scheduler::zone_scene_file_id, with the entrance/instance partner and
+                // non-model carriers as fallbacks); retail runs it out of the same file
+                // via the zone object. The host parks that wait on a pending hold the
+                // renderer's finish report releases (the routine's authored length in the
+                // file is its deadline); the same-batch bridge covers a 0x54 that runs
+                // before this cue drains.
                 OP_MAPSCHEDULOR => {
                     let key = self.fourcc_at(MAPSCHEDULOR_KEY_OFS);
                     self.pending_action_starts.push((ActorLookup::ZONE, key));
@@ -2212,9 +2214,9 @@ mod tests {
 
     #[test]
     fn mapschedulor_emits_the_zone_routine_cue() {
-        // 0x2D starts the zone-level routine (kuluu resolves the key out of
-        // ZONE_SCENE_DAT_ID); the key sits at @9 like the WAIT family's, and both
-        // actors ride along for the host (research/XiEvents/OpCodes/0x002D.md).
+        // 0x2D starts the zone-level routine (kuluu resolves the key out of the
+        // current zone's own model DAT); the key sits at @9 like the WAIT family's,
+        // and both actors ride along for the host (research/XiEvents/OpCodes/0x002D.md).
         const ACTOR1: u32 = 0x010E_6032; // literal server id, resolves to itself
         let key: [u8; 4] = *b"abcd";
         let mut data = vec![OP_MAPSCHEDULOR];

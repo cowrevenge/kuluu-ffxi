@@ -69,9 +69,13 @@ use serde::{Deserialize, Serialize};
 // v5: InventoryItem.charges_remaining + next_use_vana_ts (item recast/charges).
 // v4: SceneSnapshot.delivery_box (dedicated delivery screen) + ViewerCommand::DeliveryBox
 // (postcard frames are not self-describing, so any shape change bumps this).
+// v33: CutsceneCue::ZoneScheduler.zone_id - the 0x2D zone scene now carries the
+// current zone so the host resolves its key out of the zone's own model DAT (with
+// the entrance/instance partner and non-model carriers as fallbacks) instead of the
+// global title-screen scene DAT.
 // v32: CutsceneCue::EntityName (0xB5 case 0 display-name change, fed by the
 // s2c 0x005D PENDINGSTR table via 0xB4 case 1).
-pub const PROTOCOL_VERSION: u32 = 32;
+pub const PROTOCOL_VERSION: u32 = 33;
 
 /// Longest countdown `SceneSnapshot::status_icon_expiries` can carry. The
 /// producer rejects anything beyond it as a corrupt 0x063 timestamp, and the HUD
@@ -1588,12 +1592,14 @@ pub enum CutsceneCue {
     },
     /// Start zone-level scheduler routine `key` over the two actors (the
     /// 0x2D/0x54 pair, research/XiEvents/OpCodes/0x002D.md); the host resolves
-    /// `key` out of ZONE_SCENE_DAT_ID and its camera routes drive the operator
-    /// camera.
+    /// `key` out of the current zone's own model DAT (`zone_id`, with the
+    /// entrance/instance partner and non-model carriers as fallbacks) and its
+    /// camera routes drive the operator camera.
     ZoneScheduler {
         key: FourCc,
         actor: CutsceneActor,
         partner: CutsceneActor,
+        zone_id: u16,
     },
     /// Walk `actor` to `(x, y, z)` at `speed`, facing `heading`. The
     /// coordinates are the VM's event-coordinate integers; the renderer scales
@@ -2286,7 +2292,7 @@ mod tests {
 
     #[test]
     fn ferry_protocol_preserves_transport_and_voyage_fields() {
-        const VERSION: u32 = 32;
+        const VERSION: u32 = 33;
         const STAMP: u32 = 0x1200_3400;
         assert_eq!(PROTOCOL_VERSION, VERSION);
         let mut snapshot = sample_snapshot();

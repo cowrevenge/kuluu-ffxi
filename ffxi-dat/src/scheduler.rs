@@ -1,4 +1,4 @@
-use crate::{DatError, Result};
+use crate::{DatError, DatRoot, Result};
 
 // The effect list of a routine whose control-flow section (section 1) is empty. Kept as the
 // fallback for chunks whose section table reads implausibly — see `effect_section_start`.
@@ -623,23 +623,86 @@ pub struct SoundEvent {
     pub on_caster: bool,
 }
 
-/// ROM/0/23.DAT (magic `titl`), the title-screen scene DAT: the file kuluu resolves
-/// 0x2D MAPSCHEDULOR keys against (research/cexi-docs/dats/ROM_0_23.md).
-/// Retail runs 0x2D keys out of the live zone's own model DAT
-/// (research/cexi-docs/zone/zones.md Model column), and a full-corpus scan of the
-/// retail event DATs puts only `main`/`loop` of 217 observed keys in file 23, so
-/// the ZoneScheduler cue is a no-op for real zone scenes.
-pub const ZONE_SCENE_DAT_ID: u32 = 23;
+/// The entrance/instance zone pairs whose 0x2D MAPSCHEDULOR keys resolve in the
+/// partner zone's model DAT rather than their own (fixToDo/Fix9.md corpus scan:
+/// 27 "another zone's model DAT" pairs, the clean instance/entrance pairs below).
+const ZONE_SCENE_PARTNERS: [(u16, u16); 5] = [
+    (242, 170), // Heavens' Tower -> Full Moon Fountain
+    (194, 192), // Outer Horutoto Ruins -> Inner Horutoto Ruins
+    (31, 34),   // Monarch's Linn -> Grand Palace of Hu'Xzoi
+    (32, 11),   // Sealion's Den -> Oldton Movalpolos
+    (32, 8),    // Sealion's Den -> Boneyard Gully
+];
 
-// The camera route names in that file run two lowercase hex digits plus a two-digit decimal
-// index (research/cexi-docs/dats/ROM_0_23.md node naming conventions).
+/// The handful of non-model files that carry 0x2D scene keys no per-zone slot owns
+/// (fixToDo/Fix9.md: the Spire of Holla/Dem/Mea, Sealion's Den and Al'Taieu scene
+/// families, `sc11..sc41` / `kc51..kc54` / `kci1..kci4`).
+const NON_MODEL_SCENE_CARRIERS: [u32; 5] = [
+    641,   // ROM/3/48.DAT
+    30705, // ROM/123/85.DAT
+    57075, // ROM/213/92.DAT
+    57082, // ROM/216/12.DAT
+    57204, // ROM/241/3.DAT
+];
+
+/// Resolve the 0x2D MAPSCHEDULOR key to the DAT file that carries its routine,
+/// following retail's per-zone rule: the routine lives in the CURRENT zone's own
+/// model DAT (already loaded for rendering via
+/// [`zone_dat::zone_id_to_mzb_file_id`]); on a miss, the entrance/instance partner
+/// zone's model DAT; on a further miss, the non-model scene carriers. Returns the
+/// file id, or `None` when no candidate file carries the key. The host arms the
+/// 0x54 WAITMAPSCHEDULOR hold from the file the key resolved in; the renderer plays
+/// it from the same file.
+pub fn zone_scene_file_id(root: &DatRoot, zone: u16, key: [u8; 4]) -> Option<u32> {
+    if let Some(file) = crate::zone_dat::zone_id_to_mzb_file_id(zone) {
+        if scheduler_key_in_file(root, file, key) {
+            return Some(file);
+        }
+    }
+    for &(scene_zone, partner) in &ZONE_SCENE_PARTNERS {
+        if scene_zone != zone {
+            continue;
+        }
+        if let Some(file) = crate::zone_dat::zone_id_to_mzb_file_id(partner) {
+            if scheduler_key_in_file(root, file, key) {
+                return Some(file);
+            }
+        }
+    }
+    NON_MODEL_SCENE_CARRIERS
+        .iter()
+        .copied()
+        .find(|&file| scheduler_key_in_file(root, file, key))
+}
+
+/// True when `key` names a cleanly-parsed scheduler chunk in DAT file `file_id` —
+/// the same set the renderer's action cache can play (a broken chunk resolves to
+/// nothing, so a miss here is a miss there too).
+fn scheduler_key_in_file(root: &DatRoot, file_id: u32, key: [u8; 4]) -> bool {
+    let loc = match root.resolve(file_id) {
+        Ok(loc) => loc,
+        Err(_) => return false,
+    };
+    let bytes = match std::fs::read(loc.path_under(root)) {
+        Ok(bytes) => bytes,
+        Err(_) => return false,
+    };
+    crate::resource_dir::ResourceDir::from_bytes(bytes)
+        .collect_schedulers()
+        .iter()
+        .any(|s| s.name == key)
+}
+
+// The camera route names in the title-screen scene DAT (ROM/0/23.DAT, magic `titl`)
+// run two lowercase hex digits plus a two-digit decimal index
+// (research/cexi-docs/dats/ROM_0_23.md node naming conventions).
 const ROUTE_NAME_HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
 /// Two hex digits of the zone id fit this bound.
 const ROUTE_NAME_ZONE_MAX: u16 = 0xFF;
 /// A two-digit decimal index fits this bound.
 const ROUTE_NAME_INDEX_MAX: u8 = 99;
 
-/// The zone-coded camera route name in the title-screen scene DAT (ZONE_SCENE_DAT_ID):
+/// The zone-coded camera route name in the title-screen scene DAT (ROM/0/23.DAT):
 /// `zone_id` as two lowercase hex digits followed by a two-digit decimal `index`
 /// (research/cexi-docs/dats/ROM_0_23.md).
 pub fn zone_camera_route_name(zone_id: u16, index: u8) -> [u8; 4] {
@@ -1845,5 +1908,52 @@ mod vehicle_contract_tests {
         assert_eq!(zone_camera_route_name(0xC1, 7), *b"c107");
         assert_eq!(zone_camera_route_name(0xC4, 99), *b"c499");
         assert_eq!(zone_camera_route_name(0, 0), *b"0000");
+    }
+
+    // Retail-byte guard (skips without an install). The 0x2D keys of the Chamber of
+    // Oracles (168) live in zone 168's own model DAT (ROM/2/11.DAT): the corpus
+    // scan's dominant rule (fixToDo/Fix9.md).
+    #[test]
+    fn zone_scene_resolves_in_the_zones_own_model_dat() {
+        let Some(root) = DatRoot::from_env_or_default().ok() else {
+            return;
+        };
+        let file = crate::zone_dat::zone_id_to_mzb_file_id(168).expect("zone 168 maps to a model DAT");
+        for key in [b"215s", b"220a"] {
+            assert_eq!(
+                zone_scene_file_id(&root, 168, *key),
+                Some(file),
+                "{key:?} resolves in zone 168's own model DAT"
+            );
+        }
+    }
+
+    // Retail-byte guard (skips without an install). Sealion's Den (32) event 100
+    // runs `lwon` out of zone 32's own model DAT (ROM/3/98.DAT).
+    #[test]
+    fn zone_scene_resolves_sealions_den_lwon_in_its_own_model_dat() {
+        let Some(root) = DatRoot::from_env_or_default().ok() else {
+            return;
+        };
+        let file = crate::zone_dat::zone_id_to_mzb_file_id(32).expect("zone 32 maps to a model DAT");
+        assert_eq!(zone_scene_file_id(&root, 32, *b"lwon"), Some(file));
+    }
+
+    // Retail-byte guard (skips without an install). Heavens' Tower (242) carries no
+    // `hshi` in its own model DAT; the key resolves in the partner zone Full Moon
+    // Fountain (170)'s model DAT (fixToDo/Fix9.md instance/entrance pair).
+    #[test]
+    fn zone_scene_falls_back_to_the_partner_zone_model_dat() {
+        let Some(root) = DatRoot::from_env_or_default().ok() else {
+            return;
+        };
+        let own = crate::zone_dat::zone_id_to_mzb_file_id(242).expect("zone 242 maps to a model DAT");
+        let partner = crate::zone_dat::zone_id_to_mzb_file_id(170).expect("zone 170 maps to a model DAT");
+        assert_ne!(own, partner, "242 and 170 are distinct zones");
+        assert_eq!(
+            zone_scene_file_id(&root, 242, *b"hshi"),
+            Some(partner),
+            "242's hshi resolves in partner zone 170's model DAT"
+        );
     }
 }

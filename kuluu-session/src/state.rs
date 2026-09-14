@@ -1072,11 +1072,12 @@ pub enum CutsceneCue {
     },
     /// Start zone-level scheduler routine `key` over the two actors (the
     /// 0x2D/0x54 pair, research/XiEvents/OpCodes/0x002D.md); the host resolves
-    /// `key` out of ZONE_SCENE_DAT_ID.
+    /// `key` out of the current zone's own model DAT (`zone_id`).
     ZoneScheduler {
         key: ffxi_event::FourCc,
         actor: CutsceneActor,
         partner: CutsceneActor,
+        zone_id: u16,
     },
     /// Walk `actor` to `(x, y, z)` at `speed`, facing `heading`; the
     /// coordinates are the VM's event-coordinate integers.

@@ -272,11 +272,15 @@ impl DialogSession {
             self.dat_root.as_deref(),
             &mut self.routine_lengths,
             unique_no,
+            event_zone,
             &mut self.pending_motion_holds,
         );
         arm_move_holds(&mut runner, &raw_cues, &self.entity_positions, unique_no);
-        self.cues
-            .extend(raw_cues.into_iter().map(|c| resolve_cue(c, unique_no)));
+        self.cues.extend(
+            raw_cues
+                .into_iter()
+                .map(|c| resolve_cue(c, unique_no, event_zone)),
+        );
         let active = ActiveEvent {
             unique_no,
             act_index,
@@ -427,18 +431,20 @@ impl DialogSession {
         let final_position = runner.controlled_position();
         self.scene_actions.extend(runner.take_scene_actions());
         let raw_cues = runner.take_cues();
+        let zone = self.loaded_event_zone.unwrap_or(0);
         arm_motion_holds(
             runner,
             &raw_cues,
             self.dat_root.as_deref(),
             &mut self.routine_lengths,
             event_entity,
+            zone,
             &mut self.pending_motion_holds,
         );
         arm_move_holds(runner, &raw_cues, &self.entity_positions, event_entity);
         let cues: Vec<ResolvedCue> = raw_cues
             .into_iter()
-            .map(|c| resolve_cue(c, event_entity))
+            .map(|c| resolve_cue(c, event_entity, zone))
             .collect();
         let advance = match outcome {
             DialogStep::Frame(frame) => Advance::Frame(frame_to_dialog(
@@ -725,8 +731,10 @@ fn snapshot_motion(
 }
 
 /// Resolve one VM cue against `event_entity`, the server id of the entity the
-/// running event belongs to.
-pub fn resolve_cue(cue: EventCue, event_entity: u32) -> ResolvedCue {
+/// running event belongs to. `zone` is the event's zone, carried on the 0x2D
+/// ZoneScheduler cue so the host resolves its key out of the zone's own model
+/// DAT (the VM does not know it).
+pub fn resolve_cue(cue: EventCue, event_entity: u32, zone: u16) -> ResolvedCue {
     let actor = |lookup| resolve_actor(lookup, event_entity);
     ResolvedCue::Scene(match cue {
         EventCue::ActorMotion {
@@ -770,6 +778,7 @@ pub fn resolve_cue(cue: EventCue, event_entity: u32) -> ResolvedCue {
             key,
             actor: actor(actor1),
             partner: actor(actor2),
+            zone_id: zone,
         },
         EventCue::ActorHide { target, hide } => CutsceneCue::ActorHide {
             target: actor(target),
@@ -1521,6 +1530,7 @@ fn arm_motion_holds(
     root: Option<&DatRoot>,
     cache: &mut std::collections::HashMap<(u32, FourCc), Option<f32>>,
     event_entity: u32,
+    zone: u16,
     pending: &mut std::collections::HashMap<
         (CutsceneActor, FourCc),
         (ActorLookup, u32, std::time::Instant, std::time::Duration),
@@ -1602,28 +1612,35 @@ fn arm_motion_holds(
                     ),
                 );
             }
-            // 0x2D: kuluu resolves the routine out of ZONE_SCENE_DAT_ID (retail runs it
-            // out of the zone's own model DAT); retail waits on it via the zone object,
-            // so the VM's hold keys on the zone sentinel while the renderer's report
-            // keys on the cue's actor1.
+            // 0x2D: retail runs the routine out of the CURRENT zone's own model DAT
+            // (the cue carries the zone id); on a miss, the entrance/instance partner
+            // zone's model DAT, then the non-model scene carriers. The hold arms from
+            // the file the key resolved in; retail waits on it via the zone object, so
+            // the VM's hold keys on the zone sentinel while the renderer's report keys
+            // on the cue's actor1.
             EventCue::ZoneScheduler {
                 key,
                 actor1,
                 ..
             } => {
+                let units = root
+                    .and_then(|root| ffxi_dat::scheduler::zone_scene_file_id(root, zone, key))
+                    .and_then(|file_id| {
+                        routine_units(
+                            root,
+                            cache,
+                            file_id,
+                            key,
+                            ffxi_event::SCHEDULER_DURATION_FROM_DAT,
+                        )
+                    });
                 arm_pending_motion_hold(
                     runner,
                     pending,
                     ffxi_event::ActorLookup::ZONE,
                     resolve_actor(actor1, event_entity),
                     key,
-                    routine_units(
-                        root,
-                        cache,
-                        ffxi_dat::scheduler::ZONE_SCENE_DAT_ID,
-                        key,
-                        ffxi_event::SCHEDULER_DURATION_FROM_DAT,
-                    ),
+                    units,
                 );
             }
             _ => {}
@@ -2401,10 +2418,11 @@ pub(crate) mod tests {
         const EVENT: u16 = 503;
         const ZONE: u16 = 248;
         const KEY: [u8; 4] = *b"mov1";
-        // The synthetic root resolves ZONE_SCENE_DAT_ID (file 23) to the
-        // one-chunk routine of `frames` length.
+        // The synthetic root resolves the zone's own model DAT (zone 248's
+        // mzb file id) to the one-chunk routine of `frames` length.
         let frames = 60u16;
-        let (_dir, root) = motion_dat_root(ffxi_dat::scheduler::ZONE_SCENE_DAT_ID, KEY, frames);
+        let (_dir, root) =
+            motion_dat_root(ffxi_dat::zone_dat::zone_id_to_mzb_file_id(ZONE).expect("zone 248"), KEY, frames);
         let mut program = vec![0x2D];
         program.extend(NPC.to_le_bytes()); // actor1 @1
         program.extend(0u32.to_le_bytes()); // actor2 @5
@@ -2885,6 +2903,7 @@ pub(crate) mod tests {
                     hide: true,
                 },
                 EVENT_ENTITY,
+                0,
             )
         };
         let target = |cue| match cue {
@@ -2922,6 +2941,7 @@ pub(crate) mod tests {
                 name,
             },
             EVENT_ENTITY,
+            0,
         );
         match cue {
             ResolvedCue::Scene(CutsceneCue::EntityName {

@@ -276,10 +276,10 @@ pub enum EventCue {
         actor2: ActorLookup,
         key: FourCc,
     },
-    /// 0x2D MAPSCHEDULOR: start the zone-level routine `key` out of the global
-    /// scene DAT over the two actors, waited on by 0x54
+    /// 0x2D MAPSCHEDULOR: start the zone-level routine `key` out of the current
+    /// zone's own model DAT over the two actors, waited on by 0x54
     /// (research/XiEvents/OpCodes/0x002D.md). The host arms that wait's hold
-    /// from the routine's authored length in the file.
+    /// from the routine's authored length in the file the key resolved in.
     ZoneScheduler {
         key: FourCc,
         actor1: ActorLookup,

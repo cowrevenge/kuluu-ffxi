@@ -2182,19 +2182,32 @@ pub fn dispatch_cutscene_motion(
                     }
                 }
             }
-            // 0x2D: the zone-level routine out of ZONE_SCENE_DAT_ID (the title-screen
-            // scene DAT); its camera stages drive the operator camera like any other
-            // routine's.
+            // 0x2D: the zone-level routine out of the CURRENT zone's own model DAT
+            // (the cue carries the zone id); on a miss, the entrance/instance partner
+            // zone's model DAT, then the non-model scene carriers. Defer the file the
+            // key resolved in; its camera stages drive the operator camera like any
+            // other routine's.
             CutsceneCue::ZoneScheduler {
                 key,
                 actor,
                 partner,
+                zone_id,
             } => {
                 let (Some(actor_id), Some(target_id)) = (resolve(actor), resolve(partner)) else {
                     continue;
                 };
+                let Some(file_id) = cache
+                    .root
+                    .as_ref()
+                    .and_then(|root| ffxi_dat::scheduler::zone_scene_file_id(root, zone_id, key))
+                else {
+                    // No install, or the key is in no candidate file: report done so the
+                    // session's pending hold releases instead of sitting out its deadline.
+                    motion_done.write(CutsceneMotionDone { actor, key });
+                    continue;
+                };
                 cache.defer(
-                    ffxi_dat::scheduler::ZONE_SCENE_DAT_ID,
+                    file_id,
                     PendingActionDispatch::Routine {
                         actor_id,
                         target_id,

@@ -497,6 +497,26 @@ impl EventVm {
         )
     }
 
+    /// Every block that holds a non-END exact entry for `event_id`: the owner
+    /// blocks of a multi-entity event. Retail's InitEvent2 prepares each valid
+    /// entity and XiEventInit starts its own block on its own ReqStack
+    /// (research/XiEvents/Event VM Functions.md), so all of these run in
+    /// parallel when the event starts; [`EventVm::spawn_owner`] is the
+    /// event-start half of that. `event_entry_exact` is positional, so the
+    /// entry is the block's own, not the master's.
+    pub fn owner_blocks(
+        dat: &ffxi_dat::event_dat::EventDat,
+        event_id: u16,
+    ) -> Vec<(&EventBlock, usize)> {
+        dat.blocks
+            .iter()
+            .filter_map(|block| {
+                let entry = block.event_entry_exact(event_id)?;
+                (block.event_data.get(entry) != Some(&OP_END)).then_some((block, entry))
+            })
+            .collect()
+    }
+
     fn start_at(
         block: &EventBlock,
         exec_pointer: usize,
@@ -1843,6 +1863,98 @@ mod tests {
         assert_eq!(EventVm::driving_block(&dat, 1, 7).unwrap().0.actor, 1);
         dat.blocks.last_mut().unwrap().event_data.clear();
         assert_eq!(EventVm::driving_block(&dat, 1, 7).unwrap().0.actor, 1);
+    }
+
+    #[test]
+    fn owner_blocks_lists_every_non_end_exact_owner() {
+        // Event 531's shape: the zone block's exact entry is END and the
+        // owners carry the programs. A wildcard-only block and a block whose
+        // exact entry is END are not owners.
+        let master = block(vec![OP_END], vec![]);
+        let mut owner_a = block(vec![OP_EVENTHIDE, 1, 0, 0, 0, 0, OP_END], vec![]);
+        owner_a.actor = NPC_SERVER_ID;
+        // Owner B's entry sits mid-bytecode, so the entry must be the block's
+        // own offset, not the master's.
+        let mut owner_b = block(
+            vec![OP_END, OP_EVENTHIDE, 1, 0, 0, 0, 0, OP_END],
+            vec![],
+        );
+        owner_b.actor = NPC_SERVER_ID + 1;
+        owner_b.event_ids = vec![5, 7];
+        owner_b.event_offsets = vec![0, 1];
+        let mut wildcard_only = block(vec![OP_END], vec![]);
+        wildcard_only.actor = NPC_SERVER_ID + 2;
+        wildcard_only.event_ids = vec![ffxi_dat::event_dat::EVENT_ID_WILDCARD];
+        let mut end_exact = block(vec![OP_END], vec![]);
+        end_exact.actor = NPC_SERVER_ID + 3;
+        let dat = ffxi_dat::event_dat::EventDat {
+            blocks: vec![master, owner_a, owner_b, wildcard_only, end_exact],
+        };
+
+        let owners = EventVm::owner_blocks(&dat, 7);
+        assert_eq!(
+            owners.iter().map(|(b, _)| b.actor).collect::<Vec<_>>(),
+            [NPC_SERVER_ID, NPC_SERVER_ID + 1]
+        );
+        assert_eq!(
+            owners.iter().map(|(_, entry)| *entry).collect::<Vec<_>>(),
+            [0, 1],
+            "entries are positional within each owner's own bytecode"
+        );
+    }
+
+    #[test]
+    fn spawn_owner_runs_owner_blocks_in_parallel_from_event_start() {
+        // The master's program is just END, like 531's zone block: the owners'
+        // programs are what the event plays. Owner A hides and ends; owner B
+        // parks on a one-second wait, so the master's END must stay Waiting
+        // until B drains (research/XiEvents/Event VM Functions.md
+        // InitEvent2/XiEventInit).
+        const ONE_SECOND: u32 = WAIT_UNITS_PER_SEC as u32;
+        let mut hide = vec![OP_EVENTHIDE, 1];
+        hide.extend_from_slice(&NPC_SERVER_ID.to_le_bytes());
+        hide.push(OP_END);
+        let mut owner_a = block(hide, vec![]);
+        owner_a.actor = NPC_SERVER_ID;
+        let mut owner_b = block(vec![OP_WAIT, REF0[0], REF0[1], OP_END], vec![ONE_SECOND]);
+        owner_b.actor = NPC_SERVER_ID + 1;
+        let dat = std::sync::Arc::new(ffxi_dat::event_dat::EventDat {
+            blocks: vec![block(vec![OP_END], vec![]), owner_a, owner_b],
+        });
+
+        let mut e = vm(vec![OP_END], vec![]);
+        e.attach_scene(
+            dat.clone(),
+            ffxi_dat::event_dat::ZONE_PLAYER_ACTOR,
+            crate::vm::scene::EventPosition::default(),
+        );
+        for (owner, entry) in EventVm::owner_blocks(&dat, 7) {
+            if owner.actor != ffxi_dat::event_dat::ZONE_PLAYER_ACTOR {
+                e.spawn_owner(owner, entry);
+            }
+        }
+
+        assert_eq!(
+            e.step(),
+            StepResult::Waiting,
+            "the master's END must not end the event while an owner is running"
+        );
+        e.tick(0.5);
+        assert_eq!(e.step(), StepResult::Waiting, "halfway through owner B's wait");
+        e.tick(0.6);
+        assert_eq!(
+            e.step(),
+            StepResult::Done,
+            "the event ends only when every owner block has drained"
+        );
+        assert_eq!(
+            e.take_cues(),
+            [EventCue::ActorHide {
+                target: ActorLookup(NPC_SERVER_ID),
+                hide: true,
+            }],
+            "owner A's cue bubbles up with owner A as the event entity"
+        );
     }
 
     #[test]

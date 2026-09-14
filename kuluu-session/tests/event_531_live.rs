@@ -3,25 +3,16 @@
 //
 // Self-skips when the auth port or xidb is unreachable, or when no FFXI
 // install can be opened. 531 is a multi-entity event: ROM/21/47.DAT holds
-// five exact owners (the 163-step main program, a [HIDE_SELF, END] block, and
-// three more NPC blocks). Kuluu's single event VM resolves the zone-in
-// trigger through EventVm::driving_block, whose sole-participant scan
-// fall-throughs to the master block's trivial [END] program whenever two or
-// more blocks hold a non-END exact entry — so kuluu auto-releases 531 with an
-// immediate c2s 0x05B instead of playing the main program (ffxi-event/src/
-// vm.rs driving_block). The server's onEventFinish[531] then runs:
-// messageText, item 536, and setPos to the CS exit (vendor/server/scripts/
-// quests/hiddenQuests/New_Character_Cutscenes.lua WINDURST_WATERS).
+// five exact owners (the 163-step main program, a [HIDE_SELF, END] block,
+// and three more NPC blocks). The master (zone) block carries only a
+// wildcard END, so retail runs every owner block in parallel from event
+// start (per-entity event instances, research/XiEvents/Event VM Functions.md
+// InitEvent2/XiEventInit). Kuluu mirrors that: the session spawns an
+// owner-block child per non-master owner (ffxi-event EventVm::spawn_owner,
+// kuluu-session event_dialog begin) and the event ends when they all drain.
 //
-// This test asserts the observed behavior: the event releases promptly on
-// zone-in and the onEventFinish rewards land. A fresh fixture char spawns at
-// the schema default (0, 0, 0), so the exit position arrives via the
-// post-event WPOS (ForcedMove), not the zone-in stream.
-//
-// The 0x47/0x05C onEventUpdate round trip itself is live-verified by
-// event_568_live.rs; 531's onEventUpdate/0x47 position-tag programs live only
-// in master-block 0xFFFF REQSET children spawned by the 906/907 family, so a
-// retail new-Hume 531 never fires that round trip either.
+// This test asserts the full playback: CutsceneStarted, at least one staging
+// frame (CutsceneCue), and EventEnded.
 
 mod common;
 
@@ -35,7 +26,7 @@ use std::{
 
 use kuluu_session::{
     session::{self, CharSelection, Config},
-    state::{AgentCommand, AgentEvent, InventoryUpdate, Position, Stage, Vec3},
+    state::{AgentCommand, AgentEvent, Stage},
 };
 use tokio::{
     net::TcpStream,
@@ -49,28 +40,18 @@ use common::EphemeralChar;
 // cutscene trigger (vendor/server/scripts/quests/hiddenQuests/
 // New_Character_Cutscenes.lua WINDURST_WATERS onZoneIn).
 const WINDURST_WATERS_ZONE: u32 = 238;
-// xi.item.ADVENTURER_COUPON, granted by onEventFinish[531].
-const COUPON_ITEM_NO: u16 = 536;
+// The 531 event id, low 16 bits of the agent event id.
+const EVENT_531: u16 = 531;
 // The char_vars row that arms the trigger (quest var 'notSeen' of hidden quest
 // newCharacterCS).
 const NOT_SEEN_VAR: &str = "HQuest[newCharacterCS]notSeen";
 
-// onEventFinish[531] ends with setPos(-40.611, -5, 102.5, 57): native
-// (x=-40.611, y=-5, z=102.5) arrives as wire Position pos = (-40.611, 102.5,
-// -5); the wire .y is horizontal Z and .z is vertical. The earlier
-// setPos(-40, -5, 100) of the same handler precedes it on the wire, so the
-// assertion takes the last position.
-const EXIT_WIRE_X: f32 = -40.611;
-const EXIT_WIRE_Y: f32 = 102.5;
-const EXIT_WIRE_Z: f32 = -5.0;
-const EXIT_HEADING: u8 = 57;
-const EXIT_TOLERANCE: f32 = 0.5;
-
 const LOGIN_DEADLINE: Duration = Duration::from_secs(90);
-// The auto-release 0x05B goes out on the same keepalive tick as the zone-in
-// event consumption; the onEventFinish rewards follow within a second. A
-// minute from InZone is generous.
-const REWARD_GRACE: Duration = Duration::from_secs(60);
+// The 531 cutscene plays for a while; two minutes from CutsceneStarted is
+// generous.
+const PLAYBACK_DEADLINE: Duration = Duration::from_secs(120);
+// Grace for the event to start after zone-in.
+const NO_EVENT_GRACE: Duration = Duration::from_secs(60);
 
 // FFXI_DAT_PATH wins when set; otherwise fall back to the retail install on
 // this machine so a plain `cargo test` still mounts real DATs.
@@ -113,13 +94,10 @@ fn artifact_dir() -> PathBuf {
 struct Tally {
     stages_seen: Vec<Stage>,
     inzone_at: Option<Instant>,
-    item_536_slot: Option<u8>,
-    // The last position the session reported, from either ForcedMove (the
-    // post-event WPOS) or PositionChanged (the zone-in seed). The exit
-    // setPos is the last of the two, so the last reported position is the
-    // assertion target.
-    last_position: Option<Position>,
-    forced_moves: Vec<Position>,
+    cutscene_started_at: Option<Instant>,
+    event_ended_at: Option<Instant>,
+    // Staging frames the running 531 script emitted (CutsceneCue).
+    cues_total: u32,
     auto_skipped_line: Option<String>,
     disconnected_reason: Option<String>,
 }
@@ -135,38 +113,36 @@ fn handle_event(tally: &mut Tally, ev: &AgentEvent, now: Instant) {
                 eprintln!("[live] InZone at t+{:.1}s", now.elapsed().as_secs_f32());
             }
         }
+        AgentEvent::CutsceneStarted { event_id } => {
+            if *event_id & 0xFFFF == u32::from(EVENT_531) && tally.cutscene_started_at.is_none() {
+                tally.cutscene_started_at = Some(now);
+                eprintln!(
+                    "[live] CutsceneStarted (agent id 0x{event_id:08X}) at t+{:.1}s",
+                    now.elapsed().as_secs_f32()
+                );
+            }
+        }
+        AgentEvent::CutsceneCue { .. } => {
+            // Count staging frames only after the 531 cutscene has started, so
+            // unrelated cues around zone-in do not inflate the tally.
+            if tally.cutscene_started_at.is_some() {
+                tally.cues_total += 1;
+            }
+        }
+        AgentEvent::EventEnded => {
+            // EventEnded is a unit variant carrying no event id, so gate on the
+            // 531 cutscene having started to ignore any unrelated event that
+            // ends around zone-in. First end after start is the one we tally.
+            if tally.event_ended_at.is_none() && tally.cutscene_started_at.is_some() {
+                tally.event_ended_at = Some(now);
+                eprintln!("[live] EventEnded at t+{:.1}s", now.elapsed().as_secs_f32());
+            }
+        }
         AgentEvent::ChatLine { line, .. } => {
             if line.text.contains("auto-skipped") && tally.auto_skipped_line.is_none() {
                 tally.auto_skipped_line = Some(line.text.clone());
                 eprintln!("[live] AUTO-SKIP CHAT LINE: {}", line.text);
             }
-        }
-        AgentEvent::InventoryUpdated { update, .. } => {
-            if let InventoryUpdate::SlotChanged { slot } = update {
-                if slot.item_no == COUPON_ITEM_NO && tally.item_536_slot.is_none() {
-                    tally.item_536_slot = Some(slot.index);
-                    eprintln!(
-                        "[live] item {COUPON_ITEM_NO} granted to inventory slot {} at t+{:.1}s",
-                        slot.index,
-                        now.elapsed().as_secs_f32()
-                    );
-                }
-            }
-        }
-        AgentEvent::ForcedMove { target, .. } => {
-            tally.forced_moves.push(*target);
-            tally.last_position = Some(*target);
-            eprintln!(
-                "[live] ForcedMove to ({:.1}, {:.1}, {:.1}) heading {} at t+{:.1}s",
-                target.pos.x,
-                target.pos.y,
-                target.pos.z,
-                target.heading,
-                now.elapsed().as_secs_f32()
-            );
-        }
-        AgentEvent::PositionChanged { pos } => {
-            tally.last_position = Some(*pos);
         }
         AgentEvent::Disconnected { reason } => {
             tally.disconnected_reason = Some(reason.clone());
@@ -175,14 +151,8 @@ fn handle_event(tally: &mut Tally, ev: &AgentEvent, now: Instant) {
     }
 }
 
-fn is_exit(pos: &Vec3) -> bool {
-    (pos.x - EXIT_WIRE_X).abs() <= EXIT_TOLERANCE
-        && (pos.y - EXIT_WIRE_Y).abs() <= EXIT_TOLERANCE
-        && (pos.z - EXIT_WIRE_Z).abs() <= EXIT_TOLERANCE
-}
-
 #[tokio::test]
-async fn event_531_auto_release_and_on_event_finish_against_live_lsb() {
+async fn event_531_full_playback_against_live_lsb() {
     let server_host = std::env::var("SERVER_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
     let auth_port = std::env::var("AUTH_PORT")
         .ok()
@@ -200,8 +170,8 @@ async fn event_531_auto_release_and_on_event_finish_against_live_lsb() {
     let Some(dat_root) = open_dat_root() else {
         eprintln!(
             "skipping: no FFXI install found (set FFXI_DAT_PATH or install at \
-             {DEFAULT_RETAIL_INSTALL}); without DATs the VM cannot resolve the \
-             531 block and this test cannot observe the auto-release"
+             {DEFAULT_RETAIL_INSTALL}); without DATs the VM cannot spawn the \
+             531 owner blocks and this test cannot observe the playback"
         );
         return;
     };
@@ -258,7 +228,7 @@ async fn event_531_auto_release_and_on_event_finish_against_live_lsb() {
     let mut events_log = fs::File::create(&events_path).expect("opening event_531_events.jsonl");
 
     let t0 = Instant::now();
-    let hard_deadline = t0 + LOGIN_DEADLINE + REWARD_GRACE;
+    let hard_deadline = t0 + LOGIN_DEADLINE + PLAYBACK_DEADLINE;
     let mut tally = Tally::default();
 
     let stop_reason: Option<String> = loop {
@@ -281,19 +251,19 @@ async fn event_531_auto_release_and_on_event_finish_against_live_lsb() {
                     break Some("session disconnected".into());
                 }
 
-                // Success: the onEventFinish rewards have both landed — the item
-                // and the exit setPos (the last position the session reported).
-                if tally.item_536_slot.is_some()
-                    && tally
-                        .last_position
-                        .is_some_and(|p| is_exit(&p.pos) && p.heading == EXIT_HEADING)
-                {
-                    break Some("onEventFinish rewards observed (item 536 + exit setPos)".into());
+                // Success: the 531 cutscene played end to end — it started,
+                // emitted at least one staging frame, and ended.
+                if tally.event_ended_at.is_some() && tally.cues_total >= 1 {
+                    break Some("event 531 played (CutsceneStarted, frame, EventEnded)".into());
                 }
 
-                if let Some(inzone_at) = tally.inzone_at {
-                    if now - inzone_at > REWARD_GRACE {
-                        break Some("onEventFinish rewards never landed after zone-in".into());
+                if let Some(started_at) = tally.cutscene_started_at {
+                    if now - started_at > PLAYBACK_DEADLINE {
+                        break Some("playback deadline exceeded".into());
+                    }
+                } else if let Some(inzone_at) = tally.inzone_at {
+                    if now - inzone_at > NO_EVENT_GRACE {
+                        break Some("event 531 never started after zone-in".into());
                     }
                 }
             }
@@ -339,29 +309,22 @@ async fn event_531_auto_release_and_on_event_finish_against_live_lsb() {
     assert!(
         tally.auto_skipped_line.is_none(),
         "event 531 auto-skipped with an unimplemented-opcode line instead of \
-         auto-releasing cleanly: {:?}",
+         playing: {:?}",
         tally.auto_skipped_line
     );
     assert!(
-        tally.item_536_slot.is_some(),
-        "onEventFinish never granted item {COUPON_ITEM_NO} (stop: {stop_reason})"
+        tally.cutscene_started_at.is_some(),
+        "CutsceneStarted for event 531 never observed (stop: {stop_reason})"
     );
-    let last = tally.last_position.expect(&format!(
-        "no position observed after event end (stop: {stop_reason})"
-    ));
     assert!(
-        is_exit(&last.pos),
-        "last position ({:.3}, {:.3}, {:.3}) is not the CS-exit setPos \
-         (-40.611, 102.5, -5 wire); all forced moves: {:?}",
-        last.pos.x,
-        last.pos.y,
-        last.pos.z,
-        tally.forced_moves
+        tally.cues_total >= 1,
+        "no staging frame observed — the 531 owner blocks never ran (stop: \
+         {stop_reason})"
     );
-    assert_eq!(
-        last.heading, EXIT_HEADING,
-        "last position heading {} != 57 from setPos(-40.611, -5, 102.5, 57)",
-        last.heading
+    assert!(
+        tally.event_ended_at.is_some(),
+        "event 531 never ended (stop: {stop_reason}, frames: {})",
+        tally.cues_total
     );
     assert!(
         tally.disconnected_reason.is_none(),
@@ -370,47 +333,34 @@ async fn event_531_auto_release_and_on_event_finish_against_live_lsb() {
     );
 
     eprintln!(
-        "[live] PASS: event 531 auto-released on zone-in and onEventFinish rewards \
-         landed — item 536 -> slot {:?}, exit position ({:.3}, {:.3}, {:.3}) heading {}",
-        tally.item_536_slot,
-        last.pos.x,
-        last.pos.y,
-        last.pos.z,
-        last.heading
+        "[live] PASS: event 531 played end to end — InZone at {:?}, \
+         CutsceneStarted at {:?}, {} frame(s), EventEnded at {:?} — the multi-\
+         entity owner blocks ran in parallel",
+        secs_opt(tally.inzone_at),
+        secs_opt(tally.cutscene_started_at),
+        tally.cues_total,
+        secs_opt(tally.event_ended_at),
     );
+}
+
+fn secs_opt(i: Option<Instant>) -> String {
+    match i {
+        Some(t) => format!("{:.1}s", t.elapsed().as_secs_f32()),
+        None => "n/a".into(),
+    }
 }
 
 fn write_summary(out_dir: &Path, tally: &Tally, stop_reason: &str) {
     let summary_path = out_dir.join("event_531_summary.txt");
     let mut s = String::new();
-    let secs = |i: Option<Instant>| match i {
-        Some(t) => format!("{:.1}s", t.elapsed().as_secs_f32()),
-        None => "n/a".into(),
-    };
     push_line(&mut s, &format!("stop reason: {stop_reason}"));
     push_line(&mut s, &format!("stages: {:?}", tally.stages_seen));
-    push_line(
-        &mut s,
-        &format!("InZone at {}", secs(tally.inzone_at)),
-    );
+    push_line(&mut s, &format!("InZone at {}", secs_opt(tally.inzone_at)));
+    push_line(&mut s, &format!("CutsceneStarted at {}", secs_opt(tally.cutscene_started_at)));
+    push_line(&mut s, &format!("EventEnded at {}", secs_opt(tally.event_ended_at)));
+    push_line(&mut s, &format!("cues_total: {}", tally.cues_total));
     if let Some(a) = &tally.auto_skipped_line {
         push_line(&mut s, &format!("AUTO-SKIP LINE: {a}"));
-    }
-    push_line(
-        &mut s,
-        &format!(
-            "item 536 slot: {:?}; last position: {:?}",
-            tally.item_536_slot, tally.last_position
-        ),
-    );
-    for (i, p) in tally.forced_moves.iter().enumerate() {
-        push_line(
-            &mut s,
-            &format!(
-                "forced move {i}: ({:.3}, {:.3}, {:.3}) heading {}",
-                p.pos.x, p.pos.y, p.pos.z, p.heading
-            ),
-        );
     }
     if let Some(r) = &tally.disconnected_reason {
         push_line(&mut s, &format!("disconnected: {r}"));

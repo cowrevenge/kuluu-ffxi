@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use ffxi_dat::event_dat::{EventDat, ZONE_PLAYER_ACTOR};
+use ffxi_dat::event_dat::{EventBlock, EventDat, ZONE_PLAYER_ACTOR};
 
 use crate::cue::EventCue;
 
@@ -67,6 +67,11 @@ pub enum SceneAction {
         end_para: u32,
     },
 }
+
+/// The priority retail's XiEventInit gives the initial run of an entity's own
+/// block (research/XiEvents/Event VM Functions.md); the owner-block children
+/// spawned at event start use it.
+const OWNER_REQUEST_PRIORITY: u8 = 16;
 
 /// One queued request on an actor's ReqStack: the child VM that runs it and
 /// the priority its requester gave it. Lower is more important; a fresh lower
@@ -479,6 +484,46 @@ impl EventVm {
             }),
         }
         true
+    }
+
+    /// Spawn a child VM for `block`'s program at `entry` (the owner block's
+    /// own exact event entry) onto the scene's request stacks, so a
+    /// multi-owner event runs every owner's program in parallel from event
+    /// start. Retail's InitEvent2 prepares each valid entity and XiEventInit
+    /// starts its own block on its own ReqStack (research/XiEvents/Event VM
+    /// Functions.md); this is that, at event start, where [`push_request`]
+    /// does it mid-program from a REQSET. The child's cues bubble up with the
+    /// block's actor as the event entity; the master stays alive (its
+    /// [`EventVm::finish_result`] waits on the scene's stacks) until every
+    /// owner drains. No-op without an attached scene.
+    pub fn spawn_owner(&mut self, block: &EventBlock, entry: usize) {
+        let Some(scene) = &self.scene else { return };
+        let actor = block.actor;
+        let dat = scene.dat.clone();
+        let player = if actor == ZONE_PLAYER_ACTOR {
+            scene.player
+        } else {
+            EventPosition::default()
+        };
+        let mut child = EventVm::start_at(block, entry, self.speaker_index, self.params());
+        child.work_zone = self.work_zone;
+        child.attach_scene(dat, actor, player);
+        let stacks = &mut self.scene.as_mut().unwrap().stacks;
+        match stacks.iter_mut().find(|s| s.actor == actor) {
+            Some(stack) => stack.requests.push(ActorRequest {
+                priority: OWNER_REQUEST_PRIORITY,
+                tag: 0,
+                vm: Box::new(child),
+            }),
+            None => stacks.push(ActorStack {
+                actor,
+                requests: vec![ActorRequest {
+                    priority: OWNER_REQUEST_PRIORITY,
+                    tag: 0,
+                    vm: Box::new(child),
+                }],
+            }),
+        }
     }
 
     /// The entity/player position accessor a `getworkofs` value selects, when a

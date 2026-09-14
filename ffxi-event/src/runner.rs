@@ -98,6 +98,14 @@ impl DialogRunner {
         self.vm.attach_scene(dat, actor, player);
     }
 
+    /// Spawn an owner-block child onto the scene's request stacks so a
+    /// multi-owner event runs every owner's program in parallel from event
+    /// start (retail's per-entity event instances, research/XiEvents/Event VM
+    /// Functions.md InitEvent2/XiEventInit); see [`EventVm::spawn_owner`].
+    pub fn spawn_owner(&mut self, block: &ffxi_dat::event_dat::EventBlock, entry: usize) {
+        self.vm.spawn_owner(block, entry);
+    }
+
     pub fn controls_player_position(&self) -> bool {
         self.vm.controls_player_position()
     }

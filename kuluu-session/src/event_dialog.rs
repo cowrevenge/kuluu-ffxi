@@ -262,6 +262,16 @@ impl DialogSession {
         };
         if let Some(position) = self.player_position {
             runner.attach_scene(dat.clone(), block.actor, position);
+            // Multi-entity events run every owner block in parallel from event
+            // start (retail's per-entity event instances, research/XiEvents/
+            // Event VM Functions.md InitEvent2/XiEventInit): spawn a child for
+            // each owner block the master does not already drive. The children
+            // keep the event alive until they all drain; their cues bubble up.
+            for (owner, entry) in ffxi_event::EventVm::owner_blocks(dat, event_id) {
+                if owner.actor != block.actor {
+                    runner.spawn_owner(owner, entry);
+                }
+            }
         }
         let step = runner.advance(None, strings);
         self.scene_actions.extend(runner.take_scene_actions());

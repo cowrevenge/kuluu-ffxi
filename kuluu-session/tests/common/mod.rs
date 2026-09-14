@@ -18,6 +18,10 @@ const XIDB_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
 const FIXTURE_PASSWORD: &str = "TestPass!1234";
 
+// Southern San d'Oria: the fixture's default home zone; the 503 live test
+// logs in here.
+const DEFAULT_POS_ZONE: u32 = 230;
+
 // vendor/server/sql/triggers.sql `char_insert` (BEFORE INSERT ON chars).
 // A leftover row in any of these makes the next COALESCE(MAX(charid),…)+1
 // insert fail 1062 from inside the trigger, reported against `chars`.
@@ -67,6 +71,13 @@ const LSB_MAX_TIME_LASTUPDATE_SECS: u32 = 60;
 const FIXTURE_SESSION_BUDGET_SECS: u32 = 300;
 const TOMBSTONE_TTL_SECS: u32 = LSB_MAX_TIME_LASTUPDATE_SECS + FIXTURE_SESSION_BUDGET_SECS;
 
+// Local UDP port range the live tests pin `FFXI_MAP_LOCAL_PORT` into: high
+// enough to stay clear of the server's ports (map 53230 / view 54001 /
+// data 54230 / auth 54231) and the OS's low ephemeral allocations, wide
+// enough that two runs don't land on the same port.
+const LOCAL_PORT_BASE: u16 = 49_000;
+const LOCAL_PORT_SPAN: u32 = 10_000;
+
 fn fixture_name_suffix(nanos: u128) -> String {
     let mask = (1u128 << (4 * FIXTURE_SUFFIX_HEX_DIGITS)) - 1;
     format!(
@@ -78,6 +89,26 @@ fn fixture_name_suffix(nanos: u128) -> String {
 
 fn fixture_login_pattern() -> String {
     format!("^{FIXTURE_ACCOUNT_PREFIX}[0-9a-f]{{{FIXTURE_SUFFIX_HEX_DIGITS}}}$")
+}
+
+/// Pin a unique local UDP port for this live-test run so the map client's
+/// socket avoids reusing a port that is still resident on the map server. The
+/// server matches sessions by source IP:port and keeps a session for 60 s
+/// after the client's last packet (vendor/server/settings/default/map.lua
+/// MAX_TIME_LASTUPDATE, vendor/server/src/map/map_session_container.cpp
+/// MapSessionContainer::cleanupSessions); an ephemeral bind reuses the
+/// just-freed port, so a back-to-back live test gets matched to the previous
+/// run's session and its 0x00A is rejected with "Player ID mismatch"
+/// (vendor/server/src/map/packets/c2s/0x00a_login.cpp). A random high port
+/// avoids that. Sets FFXI_MAP_LOCAL_PORT, which MapClient::connect reads.
+pub fn pin_unique_local_port() {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos())
+        .unwrap_or(0);
+    let port = LOCAL_PORT_BASE + (nanos % LOCAL_PORT_SPAN) as u16;
+    std::env::set_var("FFXI_MAP_LOCAL_PORT", port.to_string());
+    eprintln!("[live] pinned local UDP port {port}");
 }
 
 pub struct EphemeralChar {
@@ -148,6 +179,14 @@ async fn xidb_conn(db_url: &str, connect_timeout: Duration) -> Result<Option<(Po
 
 impl EphemeralChar {
     pub async fn create(server_host: &str, auth_port: u16) -> Result<Option<Self>> {
+        Self::create_in_zone(server_host, auth_port, DEFAULT_POS_ZONE).await
+    }
+
+    pub async fn create_in_zone(
+        server_host: &str,
+        auth_port: u16,
+        pos_zone: u32,
+    ) -> Result<Option<Self>> {
         let db_url = std::env::var("TEST_DB_URL").unwrap_or_else(|_| DEFAULT_DB_URL.to_string());
 
         let suffix = fixture_name_suffix(
@@ -178,7 +217,6 @@ impl EphemeralChar {
             .context("looking up accid for new ephemeral account")?
             .ok_or_else(|| anyhow!("ensure_account succeeded but accid {username:?} not found"))?;
 
-        const POS_ZONE: u32 = 230;
         const NATION: u8 = 0;
         const GMLEVEL: u8 = 5;
 
@@ -196,7 +234,7 @@ impl EphemeralChar {
             .context("sweeping orphaned char_* rows before provisioning")?;
 
         let charid = run_inserts(
-            &mut conn, accid, &charname, POS_ZONE, NATION, GMLEVEL, FACE, RACE, SIZE, MJOB,
+            &mut conn, accid, &charname, pos_zone, NATION, GMLEVEL, FACE, RACE, SIZE, MJOB,
         )
         .await
         .context("running LSB char-creation INSERT chain")?;

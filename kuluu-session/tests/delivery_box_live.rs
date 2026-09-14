@@ -77,6 +77,8 @@ async fn delivery_box_against_live_lsb() {
         .with_test_writer()
         .try_init();
 
+    common::pin_unique_local_port();
+
     let Some(fixture) = EphemeralChar::create(&server_host, auth_port)
         .await
         .expect("provisioning ephemeral LSB account+char")

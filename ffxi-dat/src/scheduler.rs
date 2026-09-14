@@ -653,7 +653,73 @@ const NON_MODEL_SCENE_CARRIERS: [u32; 5] = [
 /// file id, or `None` when no candidate file carries the key. The host arms the
 /// 0x54 WAITMAPSCHEDULOR hold from the file the key resolved in; the renderer plays
 /// it from the same file.
+///
+/// Memoized per process: the result is a pure function of the install's DATs,
+/// while deriving it costs up to eight full DAT reads plus parses per call (the
+/// zone's model DAT is a large MZB file) on every 0x2D cue. One install per
+/// process (the renderer and the session are separate processes, each with its
+/// own memo), so the memo keys on (zone, key) alone. An overlay swap changes
+/// which file a resolve reads, so [`DatRoot::set_overlays`] clears it.
 pub fn zone_scene_file_id(root: &DatRoot, zone: u16, key: [u8; 4]) -> Option<u32> {
+    let cache = ZONE_SCENE_CACHE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(&hit) = cache.get(&(zone, key)) {
+        return hit;
+    }
+    drop(cache);
+    let resolved = zone_scene_file_id_uncached(root, zone, key);
+    #[cfg(test)]
+    {
+        *ZONE_SCENE_RESOLVE_COUNTS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entry((zone, key))
+            .or_insert(0) += 1;
+    }
+    ZONE_SCENE_CACHE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert((zone, key), resolved);
+    resolved
+}
+
+/// Process-local memo for [`zone_scene_file_id`]; see its doc for the keying
+/// and invalidation rules.
+type ZoneSceneMemo = std::collections::HashMap<(u16, [u8; 4]), Option<u32>>;
+static ZONE_SCENE_CACHE: std::sync::LazyLock<std::sync::Mutex<ZoneSceneMemo>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(ZoneSceneMemo::new()));
+
+/// Drop the [`zone_scene_file_id`] memo: called from `DatRoot::set_overlays`,
+/// because the swap changes which file a later resolve reads. A lookup racing
+/// the swap may re-memoize a pre-swap result until the next swap; the memo
+/// holds only 0x2D answers, so the exposure is one stale zone-scene file id.
+pub(crate) fn clear_zone_scene_cache() {
+    ZONE_SCENE_CACHE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clear();
+}
+
+/// Per-(zone, key) count of full resolves, test-only: a monotonic observation
+/// point the memoization test reads, immune to parallel memo clears.
+#[cfg(test)]
+type ZoneSceneResolveCounts = std::collections::HashMap<(u16, [u8; 4]), u64>;
+#[cfg(test)]
+static ZONE_SCENE_RESOLVE_COUNTS: std::sync::LazyLock<std::sync::Mutex<ZoneSceneResolveCounts>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(ZoneSceneResolveCounts::new()));
+
+#[cfg(test)]
+fn zone_scene_resolve_count(zone: u16, key: [u8; 4]) -> u64 {
+    ZONE_SCENE_RESOLVE_COUNTS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(&(zone, key))
+        .copied()
+        .unwrap_or(0)
+}
+
+fn zone_scene_file_id_uncached(root: &DatRoot, zone: u16, key: [u8; 4]) -> Option<u32> {
     if let Some(file) = crate::zone_dat::zone_id_to_mzb_file_id(zone) {
         if scheduler_key_in_file(root, file, key) {
             return Some(file);
@@ -1939,6 +2005,39 @@ mod vehicle_contract_tests {
         let file =
             crate::zone_dat::zone_id_to_mzb_file_id(32).expect("zone 32 maps to a model DAT");
         assert_eq!(zone_scene_file_id(&root, 32, *b"lwon"), Some(file));
+    }
+
+    // Retail-byte guard (skips without an install). A repeated 0x2D lookup for the
+    // same (zone, key) is served from the memo instead of re-reading the zone's
+    // model DAT; an overlay-swap clear forces one re-resolve. The probe key is
+    // unique to this test so parallel tests resolving real keys cannot move the
+    // per-key counter.
+    #[test]
+    fn zone_scene_lookups_are_memoized_and_cleared() {
+        let Some(root) = DatRoot::from_env_or_default().ok() else {
+            return;
+        };
+        let key = *b"zz99";
+        let before = zone_scene_resolve_count(168, key);
+        assert_eq!(zone_scene_file_id(&root, 168, key), None);
+        assert_eq!(
+            zone_scene_resolve_count(168, key),
+            before + 1,
+            "the first lookup resolves"
+        );
+        assert_eq!(zone_scene_file_id(&root, 168, key), None);
+        assert_eq!(
+            zone_scene_resolve_count(168, key),
+            before + 1,
+            "the repeat lookup is served from the memo"
+        );
+        clear_zone_scene_cache();
+        assert_eq!(zone_scene_file_id(&root, 168, key), None);
+        assert_eq!(
+            zone_scene_resolve_count(168, key),
+            before + 2,
+            "the clear forces a re-resolve"
+        );
     }
 
     // Retail-byte guard (skips without an install). Heavens' Tower (242) carries no

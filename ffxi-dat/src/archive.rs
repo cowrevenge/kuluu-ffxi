@@ -207,12 +207,16 @@ impl DatRoot {
 
     /// Swap the overlay search path on a live root, so a settings change takes
     /// effect without a restart. Callers holding DAT-derived caches must drop
-    /// them — this only changes which file a later resolve reads.
+    /// them — this only changes which file a later resolve reads. The
+    /// scheduler's zone-scene memo ([`crate::scheduler::clear_zone_scene_cache`])
+    /// is cleared here automatically; every other DAT-derived cache is the
+    /// holder's to drop.
     pub fn set_overlays(&self, overlays: Vec<PathBuf>) {
         *self
             .overlays
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = overlays;
+        crate::scheduler::clear_zone_scene_cache();
     }
 
     pub fn overlays(&self) -> Vec<PathBuf> {

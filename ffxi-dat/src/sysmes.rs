@@ -3,11 +3,10 @@
 //!
 //! Same container format as [`crate::dmsg::StringDat`]; what differs is the
 //! control-code grammar, which carries substitution slots the zone dialog
-//! tables do not use. Located at `ROM/27/76.DAT` on both the horizonxi-2023
-//! and retail-2026-09 KNOWN_CLIENTS rows (empirical — found by scanning for the
-//! pool wording, like the emote table next to it at `ROM/27/70.DAT`), so
-//! [`SysMesDat::open`] validates the shape rather than trusting the path: entry
-//! 262 of a real table is the untranslated placeholder `sysmes262`.
+//! tables do not use. [`SYS_MES_FILE_ID`] is empirical — found by scanning for
+//! the pool wording, like the emote table next to it — so [`SysMesDat::open`]
+//! validates the shape rather than trusting the id: entry 262 of a real table
+//! is the untranslated placeholder `sysmes262`.
 //!
 //! Composition returns spans, not a flat string, because retail colours the
 //! item-name substitution differently from the text around it — "You find a
@@ -20,8 +19,9 @@ use crate::dmsg::{
     CC_NEWLINE, CC_NUM, MARKER_ITEM, MARKER_KEY_ITEM, PRINTABLE,
 };
 
-/// `<install root>/ROM/27/76.DAT` (FTABLE sub_path dir 27, file 76).
-pub const SYS_MES_SUB_PATH: (u16, u8) = (27, 76);
+/// The system-message table's file id; `ROM/27/76.DAT` on the horizonxi-2023
+/// and retail-2026-09 [`crate::client_profile::KNOWN_CLIENTS`] rows.
+pub const SYS_MES_FILE_ID: u32 = 7031;
 
 /// Entry whose NA text is the untranslated placeholder `sysmes262`, used to
 /// tell a real system-message table from any other DialogTable that happens to
@@ -126,12 +126,7 @@ pub struct SysMesDat {
 
 impl SysMesDat {
     pub fn open(root: &crate::DatRoot) -> Option<Self> {
-        let (dir, file) = SYS_MES_SUB_PATH;
-        let path = root
-            .root()
-            .join("ROM")
-            .join(dir.to_string())
-            .join(format!("{file}.DAT"));
+        let path = root.resolve(SYS_MES_FILE_ID).ok()?.path_under(root);
         let bytes = std::fs::read(path).ok()?;
         let dat = StringDat::parse(&bytes).ok()?;
         dat.text(SHAPE_PROBE_INDEX)?

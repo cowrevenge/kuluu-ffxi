@@ -7,7 +7,7 @@ use sha2::{Digest, Sha256};
 pub const FFXIMAIN_DLL: &str = "FFXiMain.dll";
 
 /// The item DAT whose block ids tell the two known layouts apart.
-const ITEM_LAYOUT_PROBE_DAT: &str = "ROM/118/106.DAT";
+const ITEM_LAYOUT_PROBE_FILE_ID: u32 = crate::item_dat::ITEM_DAT_GENERAL;
 
 /// PlayOnline's per-file patch history. Every applied version update appears
 /// as a `YYYYMMDD_n`-style stamp (`3` prefixed; e.g. `30230905_0` is the
@@ -189,7 +189,7 @@ pub const KNOWN_CLIENTS: &[KnownClient] = &[
 /// What an install actually is, measured from its files. `known` is `Some`
 /// only when the DLL hash matches a [`KNOWN_CLIENTS`] row; everything else is
 /// probed so an unmeasured build still gets the right parsers.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ClientProfile {
     pub known: Option<&'static KnownClient>,
     pub ffximain_sha256: Option<String>,
@@ -218,7 +218,28 @@ fn is_patch_stamp(tok: &str) -> bool {
 }
 
 impl ClientProfile {
+    /// For a caller holding only an install path — the installer and launcher
+    /// run before any VTABLE/FTABLE is loaded, and on a tree that may still be
+    /// unpacking — so the layout probe reads the era ROM path of the
+    /// general-item DAT rather than resolving its file id.
     pub fn probe(root: &Path) -> ClientProfile {
+        Self::probe_with(
+            root,
+            &root.join(crate::item_dat::ITEM_DAT_GENERAL_ERA_ROM_PATH),
+        )
+    }
+
+    /// Overlay-aware: [`crate::DatRoot::open`] calls this once its tables are
+    /// loaded, so the layout is read from whichever file the install places the
+    /// general-item DAT at — the same file [`crate::item_dat`] parses.
+    pub fn probe_in(root: &crate::DatRoot) -> ClientProfile {
+        match root.resolve(ITEM_LAYOUT_PROBE_FILE_ID) {
+            Ok(loc) => Self::probe_with(root.root(), &loc.path_under(root)),
+            Err(_) => Self::probe(root.root()),
+        }
+    }
+
+    fn probe_with(root: &Path, item_layout_dat: &Path) -> ClientProfile {
         let dll = root.join(FFXIMAIN_DLL);
         let (ffximain_sha256, ffximain_len) = match hash_file(&dll) {
             Some((hash, len)) => (Some(hash), Some(len)),
@@ -227,8 +248,8 @@ impl ClientProfile {
         let known = ffximain_sha256
             .as_deref()
             .and_then(|hash| KNOWN_CLIENTS.iter().find(|k| k.ffximain_sha256 == hash));
-        let item_layout = ItemBlockLayout::probe_file(&root.join(ITEM_LAYOUT_PROBE_DAT))
-            .or(known.map(|k| k.item_layout));
+        let item_layout =
+            ItemBlockLayout::probe_file(item_layout_dat).or(known.map(|k| k.item_layout));
         let patch_version = std::fs::read_to_string(root.join(PATCH_CFG))
             .ok()
             .and_then(|cfg| latest_patch_version(&cfg));
@@ -401,16 +422,19 @@ mod tests {
         let Some(root) = crate::archive::open_test_install() else {
             return;
         };
-        let profile = ClientProfile::probe(root.root());
-        for rel in crate::item_dat::ITEM_DAT_ROM_PATHS {
-            let path = root.root().join(rel);
+        let profile = ClientProfile::probe_in(&root);
+        for file_id in crate::item_dat::ITEM_DAT_FILE_IDS {
+            let Ok(loc) = root.resolve(file_id) else {
+                continue;
+            };
+            let path = loc.path_under(&root);
             if !path.is_file() {
                 continue;
             }
             assert_eq!(
                 ItemBlockLayout::probe_file(&path),
                 profile.item_layout,
-                "{rel}: {profile}"
+                "file id {file_id}: {profile}"
             );
         }
     }

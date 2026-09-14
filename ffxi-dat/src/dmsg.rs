@@ -251,24 +251,20 @@ pub fn emote_line_index(mes_num: u16, targeted: bool) -> usize {
 /// 2*97 entries (ROM/27/70.DAT has 198 on horizonxi-2023 and retail-2026-09).
 pub const EMOTE_TABLE_MIN_ENTRIES: usize = 2 * 97;
 
-/// The canned-emote chat-text DialogTable. Located at ROM/27/70.DAT in the NA
-/// install (empirical — found by scan, not by a documented file id; other
-/// regions may relocate it, hence the parse-shape validation on open).
+/// The canned-emote chat-text DialogTable of the NA install (empirical — found
+/// by scan, not by a documented file id; another region may hold a different
+/// table at this id, hence the parse-shape validation on open).
 pub struct EmoteTextDat {
     dat: StringDat,
 }
 
-/// `<install root>/ROM/27/70.DAT` (FTABLE sub_path dir 27, file 70).
-pub const EMOTE_TEXT_SUB_PATH: (u16, u8) = (27, 70);
+/// The emote table's file id; `ROM/27/70.DAT` on the horizonxi-2023 and
+/// retail-2026-09 [`crate::client_profile::KNOWN_CLIENTS`] rows.
+pub const EMOTE_TEXT_FILE_ID: u32 = 7025;
 
 impl EmoteTextDat {
     pub fn open(root: &crate::DatRoot) -> Option<Self> {
-        let (dir, file) = EMOTE_TEXT_SUB_PATH;
-        let path = root
-            .root()
-            .join("ROM")
-            .join(dir.to_string())
-            .join(format!("{file}.DAT"));
+        let path = root.resolve(EMOTE_TEXT_FILE_ID).ok()?.path_under(root);
         let bytes = std::fs::read(path).ok()?;
         let dat = StringDat::parse(&bytes).ok()?;
         (dat.len() >= EMOTE_TABLE_MIN_ENTRIES).then_some(Self { dat })

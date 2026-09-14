@@ -3,21 +3,20 @@
 //! reason when no install is present and hard-fails on a violation; a value
 //! pinned per KNOWN_CLIENTS row prints instead of failing on an unmeasured row.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use ffxi_dat::archive::{open_test_install, workspace_target, CLIENT_TARGET_ENV, DAT_PATH_ENV};
 use ffxi_dat::client_profile::{ItemBlockLayout, KNOWN_CLIENTS};
-use ffxi_dat::dmsg::{EmoteTextDat, StringDat, EMOTE_TEXT_SUB_PATH, MARKER_KEY_ITEM};
+use ffxi_dat::dmsg::{EmoteTextDat, StringDat, MARKER_KEY_ITEM};
 use ffxi_dat::event_dat::EventDat;
 use ffxi_dat::event_locate::{event_dat_file_id, event_dat_zones};
 use ffxi_dat::ftable::FTABLE_BYTES_PER_FILE_ID;
-use ffxi_dat::item_dat::{ItemTable, ITEM_DAT_ROM_PATHS};
+use ffxi_dat::item_dat::{ItemTable, ITEM_DAT_FILE_IDS};
 use ffxi_dat::main_dll::MainDll;
-use ffxi_dat::spell_info::{SPELL_DAT_ROM_PATH, SPELL_LIST_FILE_ID};
-use ffxi_dat::sysmes::{SysMesDat, SYS_MES_SUB_PATH};
-use ffxi_dat::ui_element::find_ui_element_group;
+use ffxi_dat::sysmes::SysMesDat;
+use ffxi_dat::ui_element::{find_ui_element_group, UI_SHEET_FILE_ID};
 use ffxi_dat::vtable::VTable;
 use ffxi_dat::zone_dat::{
     moghouse_model_to_mzb_file_id, zone_id_to_string_file_id, STRING_DAT_TABLE, ZONE_DAT_TABLE,
@@ -138,15 +137,18 @@ fn profile_is_a_measured_known_client_row() {
         "{}: patch stamp differs from the row",
         row.name
     );
-    for rel in ITEM_DAT_ROM_PATHS {
-        let path = root.root().join(rel);
+    for file_id in ITEM_DAT_FILE_IDS {
+        let Ok(loc) = root.resolve(file_id) else {
+            continue;
+        };
+        let path = loc.path_under(&root);
         if !path.is_file() {
             continue;
         }
         assert_eq!(
             ItemBlockLayout::probe_file(&path),
             Some(row.item_layout),
-            "{}: {rel} probes to a different layout than the row",
+            "{}: file id {file_id} probes to a different layout than the row",
             row.name
         );
     }
@@ -192,7 +194,7 @@ fn items_decode_on_the_row_layout() {
         eprintln!("SKIP items: unknown client profile");
         return;
     };
-    let table = ItemTable::open(root.root());
+    let table = ItemTable::open_from_root(&root);
     assert!(
         table.skipped().is_empty(),
         "item DATs skipped: {:?}",
@@ -366,29 +368,9 @@ const ZONES_BELOW_THRESHOLD: usize = 255;
 const ZONES_AT_OR_ABOVE_THRESHOLD: usize = 44;
 /// Mog House interior models with a verified MZB file id.
 const MOGHOUSE_MODELS: usize = 16;
-/// The UI-element sheet the day orbs and weather icons live in (ROM/119/51;
-/// research/xim/src/jsMain/kotlin/xim/poc/UiResourceManager.kt uiDats).
-const UI_SHEET_SUB_PATH: (u16, u8) = (119, 51);
-const UI_SHEET_FILE_ID: u32 = 39542;
-/// File ids the item DATs map back to, in `ITEM_DAT_ROM_PATHS` order.
-const ITEM_DAT_FILE_IDS: [u32; 7] = [73, 74, 75, 76, 91, 55668, 55671];
-const EMOTE_TEXT_FILE_ID: u32 = 7025;
-/// Located once by walking the FTABLE for `SYS_MES_SUB_PATH` on both rows.
-const SYS_MES_FILE_ID: u32 = 7031;
-
-fn sub_path_of(rel: &str) -> (u16, u8) {
-    let mut parts = rel
-        .strip_prefix("ROM/")
-        .and_then(|p| p.strip_suffix(".DAT"))
-        .unwrap_or_else(|| panic!("{rel} is not ROM/<dir>/<file>.DAT"))
-        .split('/');
-    let dir = parts.next().and_then(|d| d.parse().ok()).expect("dir");
-    let file = parts.next().and_then(|f| f.parse().ok()).expect("file");
-    (dir, file)
-}
 
 #[test]
-fn zone_dats_resolve_with_an_mzb_and_fixed_paths_round_trip() {
+fn zone_dats_resolve_with_an_mzb() {
     let Some(root) = install() else {
         return;
     };
@@ -433,34 +415,6 @@ fn zone_dats_resolve_with_an_mzb_and_fixed_paths_round_trip() {
         assert!(
             has_chunk(&bytes, ChunkKind::Mzb),
             "Mog House file id {file_id}: no MZB chunk"
-        );
-    }
-
-    let mut by_path: HashMap<(u16, u8), Vec<u32>> = HashMap::new();
-    for file_id in 0..root.file_id_count() {
-        if let Ok(loc) = root.resolve(file_id) {
-            if loc.rom_dir == "ROM" {
-                by_path
-                    .entry((loc.sub_path.dir, loc.sub_path.file))
-                    .or_default()
-                    .push(file_id);
-            }
-        }
-    }
-    let mut fixed: Vec<((u16, u8), u32)> = ITEM_DAT_ROM_PATHS
-        .iter()
-        .map(|rel| sub_path_of(rel))
-        .zip(ITEM_DAT_FILE_IDS)
-        .collect();
-    fixed.push((sub_path_of(SPELL_DAT_ROM_PATH), SPELL_LIST_FILE_ID));
-    fixed.push((UI_SHEET_SUB_PATH, UI_SHEET_FILE_ID));
-    fixed.push((EMOTE_TEXT_SUB_PATH, EMOTE_TEXT_FILE_ID));
-    fixed.push((SYS_MES_SUB_PATH, SYS_MES_FILE_ID));
-    for ((dir, file), file_id) in fixed {
-        assert_eq!(
-            by_path.get(&(dir, file)).cloned().unwrap_or_default(),
-            vec![file_id],
-            "ROM/{dir}/{file}.DAT reverse FTABLE lookup"
         );
     }
 }

@@ -5,19 +5,60 @@ use crate::client_profile::ItemBlockLayout;
 use crate::map_image::{self, GraphicImage};
 
 // Retail packs item data into per-type DATs, each a gap-free ascending array of
-// fixed-size blocks keyed by item id (`ItemBlockLayout::stride`). Paths and split match XIM's InventoryItems
+// fixed-size blocks keyed by item id (`ItemBlockLayout::stride`). The split matches XIM's InventoryItems
 // (research/xim/src/jsMain/kotlin/xim/resource/InventoryItemParser.kt InventoryItems itemListDats), itself a port of Windower
 // POLUtils Item.cs. Block index within a file is `item_id - base_id`, where
-// base_id is the id stored in the file's first block.
-pub const ITEM_DAT_ROM_PATHS: &[&str] = &[
-    "ROM/118/106.DAT", // general items     0x0000..
-    "ROM/118/107.DAT", // usable items      0x1000..
-    "ROM/118/108.DAT", // weapons           0x4000..
-    "ROM/118/109.DAT", // armor             0x2800..
-    "ROM/174/48.DAT",  // currency
-    "ROM/286/73.DAT",  // armor (expansions)
-    "ROM/301/115.DAT", // items (expansions)
+// base_id is the id stored in the file's first block. Each DAT is named by its
+// VTABLE/FTABLE file id, with the ROM path it was measured at in `era_rom_path`.
+
+/// General items, ids from 0x0000.
+pub const ITEM_DAT_GENERAL: u32 = 73;
+/// Usable items, ids from 0x1000.
+pub const ITEM_DAT_USABLE: u32 = 74;
+/// Weapons, ids from 0x4000.
+pub const ITEM_DAT_WEAPON: u32 = 75;
+/// Armor, ids from 0x2800.
+pub const ITEM_DAT_ARMOR: u32 = 76;
+/// Currency.
+pub const ITEM_DAT_CURRENCY: u32 = 91;
+/// Expansion armor.
+pub const ITEM_DAT_ARMOR_EXPANSION: u32 = 55668;
+/// Expansion items.
+pub const ITEM_DAT_ITEMS_EXPANSION: u32 = 55671;
+
+/// Every per-type item DAT, in the order XIM lists them.
+pub const ITEM_DAT_FILE_IDS: [u32; 7] = [
+    ITEM_DAT_GENERAL,
+    ITEM_DAT_USABLE,
+    ITEM_DAT_WEAPON,
+    ITEM_DAT_ARMOR,
+    ITEM_DAT_CURRENCY,
+    ITEM_DAT_ARMOR_EXPANSION,
+    ITEM_DAT_ITEMS_EXPANSION,
 ];
+
+/// [`ITEM_DAT_GENERAL`]'s era ROM path, named apart from the rest because
+/// [`crate::client_profile::ClientProfile::probe`] reads the item block layout
+/// from this file before any table is loaded.
+pub(crate) const ITEM_DAT_GENERAL_ERA_ROM_PATH: &str = "ROM/118/106.DAT";
+
+/// Where each item DAT id resolved on the horizonxi-2023 and retail-2026-09
+/// [`crate::client_profile::KNOWN_CLIENTS`] rows. Reads go by file id through
+/// the install's own VTABLE/FTABLE; this is the fallback for a root whose
+/// tables cannot be loaded, and `ffxi-dat/tests/fixed_dat_ids.rs` fails when an
+/// install moves one.
+pub(crate) fn era_rom_path(file_id: u32) -> Option<&'static str> {
+    Some(match file_id {
+        ITEM_DAT_GENERAL => ITEM_DAT_GENERAL_ERA_ROM_PATH,
+        ITEM_DAT_USABLE => "ROM/118/107.DAT",
+        ITEM_DAT_WEAPON => "ROM/118/108.DAT",
+        ITEM_DAT_ARMOR => "ROM/118/109.DAT",
+        ITEM_DAT_CURRENCY => "ROM/174/48.DAT",
+        ITEM_DAT_ARMOR_EXPANSION => "ROM/286/73.DAT",
+        ITEM_DAT_ITEMS_EXPANSION => "ROM/301/115.DAT",
+        _ => return None,
+    })
+}
 
 /// Same on both layouts: the extra 0x800 bytes of a `Retail2026` block are
 /// trailing pad after the icon.
@@ -206,14 +247,41 @@ pub struct ItemTable {
 
 impl ItemTable {
     /// Open every available item DAT under `root_dir` (the retail install root).
+    /// The tables there place each [`ITEM_DAT_FILE_IDS`] entry, so a caller
+    /// holding only a path still reads through the FTABLE and any Pivot
+    /// overlay; a directory carrying no tables (a synthetic fixture) falls back
+    /// to the ROM paths the ids were measured at. Costs a second table load,
+    /// which [`ItemTable::open_from_root`] avoids.
+    pub fn open(root_dir: &Path) -> ItemTable {
+        match crate::DatRoot::open(root_dir) {
+            Ok(root) => Self::open_from_root(&root),
+            Err(_) => Self::open_paths(
+                ITEM_DAT_FILE_IDS
+                    .iter()
+                    .filter_map(|&id| era_rom_path(id))
+                    .map(|rel| root_dir.join(rel)),
+            ),
+        }
+    }
+
+    /// Overlay-aware: resolves every [`ITEM_DAT_FILE_IDS`] entry through the
+    /// install's VTABLE/FTABLE, skipping the ids it cannot place.
+    pub fn open_from_root(root: &crate::DatRoot) -> ItemTable {
+        Self::open_paths(
+            ITEM_DAT_FILE_IDS
+                .iter()
+                .filter_map(|&id| root.resolve(id).ok())
+                .map(|loc| loc.path_under(root)),
+        )
+    }
+
     /// A missing file is silently absent; a present but unusable one is skipped
     /// and reported by [`ItemTable::skipped`], so a partial install still
     /// yields whatever ranges it has.
-    pub fn open(root_dir: &Path) -> ItemTable {
+    fn open_paths(paths: impl Iterator<Item = PathBuf>) -> ItemTable {
         let mut files = Vec::new();
         let mut skipped = Vec::new();
-        for rel in ITEM_DAT_ROM_PATHS {
-            let path = root_dir.join(rel);
+        for path in paths {
             let Ok(meta) = std::fs::metadata(&path) else {
                 continue;
             };
@@ -255,7 +323,7 @@ impl ItemTable {
         self.files.is_empty()
     }
 
-    /// Present item DATs that could not be opened, in [`ITEM_DAT_ROM_PATHS`]
+    /// Present item DATs that could not be opened, in [`ITEM_DAT_FILE_IDS`]
     /// order.
     pub fn skipped(&self) -> &[ItemDatError] {
         &self.skipped

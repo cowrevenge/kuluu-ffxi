@@ -21,4 +21,5 @@ anyhow.workspace = true
 lsb-scrape = { path = "../lsb-scrape" }
 
 [dev-dependencies]
+lsb-scrape = { path = "../lsb-scrape" }
 tempfile = "3"

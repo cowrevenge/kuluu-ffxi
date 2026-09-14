@@ -2563,7 +2563,7 @@ fn parse_weather(rest: &str) -> SlashOutcome {
         return SlashOutcome::SystemMessage(
             "/weather: usage `/weather <id|name>` — 0..=19, or names like \
              none, sunshine, clouds, fog, rain, snow, thunderstorms, sand_storm, \
-             auroras, gloom, darkness (see vendor/server/scripts/enum/weather.lua)"
+             auroras, gloom, darkness (see vendor/server/data/enums/weather.yaml)"
                 .into(),
         );
     }

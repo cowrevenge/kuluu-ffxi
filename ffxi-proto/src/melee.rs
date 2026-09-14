@@ -78,7 +78,7 @@ impl ActionResolution {
 }
 
 // vendor/server/src/map/attack.h AttackAnimation. Set from `attack.GetAnimationID()` into
-// `actionResult.animation` (vendor/server/src/map/entities/battleentity.cpp CBattleEntity::OnAttack) — for a basic
+// `actionResult.animation` (vendor/server/src/map/entities/battle_entity.cpp CBattleEntity::OnAttack) — for a basic
 // attack this is the swing slot, not a skill id.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum AttackAnimation {

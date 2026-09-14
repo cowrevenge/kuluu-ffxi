@@ -1,13 +1,19 @@
+/// One crossing of a scheduled ship, in the seconds-since-Vana'diel-epoch
+/// cycle vendor/server/src/map/transports/voyage.h keeps: the cycle repeats
+/// every `every` seconds shifted by `offset`; boarding closes `boarding_ends`
+/// seconds into it, the ship leaves the berth at `departs` (the departing
+/// phase start plus the seconds until it is hidden) and riders are put ashore
+/// at `disembark`, which wraps past the cycle end for every airship.
 #[derive(Debug, Clone, Copy)]
 pub struct Schedule {
     pub voyage_zone: u16,
-    pub npc_id: u32,
+    pub ship: u32,
     pub boundary: u16,
-    pub offset: u16,
-    pub interval: u16,
-    pub arrival: u16,
-    pub waiting: u16,
-    pub departure: u16,
+    pub offset: u32,
+    pub every: u32,
+    pub boarding_ends: u32,
+    pub departs: u32,
+    pub disembark: u32,
 }
 
 include!(concat!(env!("OUT_DIR"), "/transport_table.rs"));

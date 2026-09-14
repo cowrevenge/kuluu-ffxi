@@ -53,7 +53,7 @@ echo '{"cmd":"request_zone_change","line_id":812805498}' > $D/in    # zmr0, S. S
 - Coordinate space in commands/events: `x` = native x, `y` = ground (native z),
   `z` = vertical (native y).
 - Zoneline ids are the fourcc as LE u32 — look them up in
-  `vendor/server/sql/zonelines.sql` (comments name each line).
+  `vendor/server/data/zones/<zone>/zone.yaml` zonelines (the fourcc key names each line).
 
 ## 3. Live integration tests (canonical layer proofs)
 

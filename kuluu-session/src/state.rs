@@ -1037,7 +1037,7 @@ pub enum CutsceneCue {
 }
 
 /// Number of music slots [`AgentEvent::MusicVolumeChanged::slot`] can name
-/// (vendor/server/src/map/enums/music_slot.h `MusicSlot`, ZoneDay..Fishing).
+/// (vendor/server/data/enums/music_slot.yaml `MusicSlot`, ZoneDay..Fishing).
 /// The 0x5D event opcode sets retail's single master music volume, so it is
 /// carried as the same volume on every slot.
 pub const MUSIC_SLOT_COUNT: u8 = 8;
@@ -2876,7 +2876,7 @@ pub enum AgentEvent {
     },
 
     /// The whole 0x037 animation byte for self (`ANIMATION_*` in
-    /// vendor/server/src/map/entities/baseentity.h). The server owns this — it
+    /// vendor/server/data/enums/animation.yaml). The server owns this — it
     /// starts and ends resting on its own (damage, status effects) — so the
     /// renderer reconciles its optimistic local stance against it.
     SelfServerStatus {
@@ -3851,6 +3851,37 @@ impl ActionKind {
             ActionKind::Blockaid { .. } => 0x18,
             ActionKind::MonsterSkill { .. } => 0x19,
             ActionKind::Mount { .. } => 0x1A,
+        }
+    }
+
+    /// The action ids vendor/server/src/map/packets/c2s/0x01a_action.cpp
+    /// GP_CLI_COMMAND_ACTION::validate refuses with BlockedState::InEvent.
+    /// Exhaustive on purpose: a new action must state its answer.
+    pub fn blocked_in_event(&self) -> bool {
+        match self {
+            ActionKind::Attack
+            | ActionKind::CastMagic { .. }
+            | ActionKind::JobAbility { .. }
+            | ActionKind::Shoot
+            | ActionKind::Weaponskill { .. }
+            | ActionKind::MonsterSkill { .. }
+            | ActionKind::Fish
+            | ActionKind::Mount { .. } => true,
+            ActionKind::Talk
+            | ActionKind::AttackOff
+            | ActionKind::Help
+            | ActionKind::HomepointMenu { .. }
+            | ActionKind::Assist
+            | ActionKind::RaiseMenu { .. }
+            | ActionKind::ChangeTarget
+            | ActionKind::ChocoboDig
+            | ActionKind::Dismount
+            | ActionKind::TractorMenu { .. }
+            | ActionKind::SendResRdy
+            | ActionKind::Quarry
+            | ActionKind::Sprint
+            | ActionKind::Scout
+            | ActionKind::Blockaid { .. } => false,
         }
     }
 

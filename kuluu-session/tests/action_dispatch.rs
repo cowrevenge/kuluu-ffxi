@@ -9,7 +9,7 @@ fn cast_magic_action_layout_matches_phoenix_struct() {
         pos_y: 0.0,
         pos_z: -2.5,
     };
-    let buf = build_subpacket_action(0xCAFE, 0x1234_5678, 0x00FF, &kind);
+    let buf = build_subpacket_action(0xCAFE, 0x1234_5678, 0x00FF, &kind, false).unwrap();
     assert_eq!(buf.len(), 28, "header(4) + body(24)");
 
     let id_and_size = u16::from_le_bytes([buf[0], buf[1]]);
@@ -62,7 +62,9 @@ fn weaponskill_action_writes_skill_id_only() {
         0xDEAD_BEEF,
         0x10,
         &ActionKind::Weaponskill { skill_id: 0xCAFE },
-    );
+        false,
+    )
+    .unwrap();
     assert_eq!(buf.len(), 28);
     assert_eq!(
         u16::from_le_bytes(buf[10..12].try_into().unwrap()),
@@ -82,7 +84,8 @@ fn weaponskill_action_writes_skill_id_only() {
 
 #[test]
 fn job_ability_action_writes_ability_id_only() {
-    let buf = build_subpacket_action(0, 0, 0, &ActionKind::JobAbility { ability_id: 42 });
+    let buf =
+        build_subpacket_action(0, 0, 0, &ActionKind::JobAbility { ability_id: 42 }, false).unwrap();
     assert_eq!(
         u16::from_le_bytes(buf[10..12].try_into().unwrap()),
         0x09,

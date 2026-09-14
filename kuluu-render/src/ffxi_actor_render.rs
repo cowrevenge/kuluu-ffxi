@@ -3234,7 +3234,7 @@ pub fn despawn_morph_column(
 // Map an observed entity's broadcast animation byte (server_status / ANIMATIONTYPE)
 // to its persistent rest pose. `/heal` and `/sit` ride the same animation channel
 // the server uses for engage and fishing; SITCHAIR is left unmapped (needs a
-// chair-anchored clip). vendor/server/src/map/entities/baseentity.h.
+// chair-anchored clip). vendor/server/data/enums/animation.yaml.
 fn observed_rest_kind(animation: u8) -> ffxi_actor::actor_state::RestKind {
     use ffxi_actor::actor_state::RestKind;
     use ffxi_proto::decode::animation;
@@ -3324,7 +3324,7 @@ pub struct SnapshotActorState {
     face_target: u16,
     // Engaged combat stance is the server's animation byte (ANIMATION_ATTACK),
     // set on every entity at engage and broadcast in the General block — see LSB
-    // CBattleEntity::OnEngage, vendor/server/src/map/entities/baseentity.h. The
+    // CBattleEntity::OnEngage, vendor/server/src/map/entities/battle_entity.h. The
     // reactor goal only *predicts* self-engage for snappy feedback before the
     // server echoes, and only some UIs set it, so it can't be the source of truth.
     engaged: bool,
@@ -4630,7 +4630,9 @@ mod pose_resolution_tests {
         }
         bevy::tasks::ComputeTaskPool::get_or_init(Default::default);
         let mut results = Vec::new();
-        // vendor/server/sql/mob_pools.sql: Damselfly sub=8, sheep sub=16, hare sub=0.
+        // vendor/server/data/zones/valkurm_dunes/mobs.yaml Damselfly
+        // render.animation_sub 8, east_ronfaure/mobs.yaml Wild_Sheep 16,
+        // Forest_Hare carries no animation_sub key (0).
         for (name, file_id, animationsub) in [
             ("Damselfly", 1748, 8),
             ("Sheep", 1640, 16),

@@ -489,8 +489,8 @@ const KEYITEM_OBTAINED_PREFIX: &str = "Obtained key item:";
 /// Southern San d'Oria's KEYITEM_OBTAINED entry per row. LSB text ids are
 /// identity DAT indexes for the client era LSB was synced to: the vendored
 /// vendor/server/scripts/zones/Southern_San_dOria/IDs.lua (CLIENT_VER
-/// 30260203_0) pins 6438; horizonxi-2023 sits 1 below it and retail-2026-09
-/// 4 above (LSB's 30260904_1 sync matches retail-2026-09 exactly).
+/// 30260904_1) pins 6442, which retail-2026-09 matches exactly;
+/// horizonxi-2023 sits 5 below it.
 const KEYITEM_OBTAINED_PINS: &[(&str, usize)] =
     &[("horizonxi-2023", 6437), ("retail-2026-09", 6442)];
 /// The US sheet's frame group; the JP sheet's is `menu    frames  `. Measured

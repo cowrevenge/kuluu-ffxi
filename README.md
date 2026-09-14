@@ -272,11 +272,14 @@ When you measure a new build, add its row to `KNOWN_CLIENTS` and cite that
 row's name (not a date) next to any offset or constant verified on it.
 
 The build-time vendor pins have generations too, and they are not the
-client's. `vendor/server` (LandSandBoat, pinned 2026-04-26) declares
-`CLIENT_VER = '30260203_0'` in `settings/default/login.lua` with
+client's. `vendor/server` (LandSandBoat, pinned 2026-09-11) declares
+`CLIENT_VER = '30260904_1'` in `settings/default/login.lua` with
 `VER_LOCK = 2`, so a stock server at that pin admits `retail-2026-09`
-(`30260904_1`) and refuses `horizonxi-2023` (`30230905_0`) unless the lock is
-off; upstream has since moved to `30260904_1`, and a pin bump moves it again.
+(`30260904_1`) exactly and refuses `horizonxi-2023` (`30230905_0`) unless the
+lock is off; a pin bump moves it again. The same pin's zone text ids
+(`scripts/zones/*/IDs.lua`) are synced to that client, so `retail-2026-09`
+reads them as identity DAT indexes and `horizonxi-2023` through the landmark
+reconciliation in `kuluu-session`.
 `vendor/POLUtils`' `ROMFileMappings.xml` (pinned 2020-07-19; last edited
 2018-08-18 for the Unity dialog tables, before that the 2015-11 Reisenjima
 update) keys on absolute file ids up to 86528; every one still resolves on

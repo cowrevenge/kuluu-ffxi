@@ -87,7 +87,7 @@ impl PosHead {
     // `ref<uint16>(0x18) = PEntity->loc.p.moving` (vendor/server/src/map/packets/
     // entity_update.cpp CEntityUpdatePacket::updateWith), and the pathfinder advances that
     // counter by a fixed amount per step (a different one on a speed change), wrapping at
-    // the 13-bit width (vendor/server/src/map/ai/helpers/pathfind.cpp StepTo). So the delta
+    // the 13-bit width (vendor/server/src/map/ai/helpers/pathfind/pathfind.cpp StepTo). So the delta
     // between two POS updates counts server steps since the last one. XiPackets
     // world/server/0x000E UpdateMoveTime reads the same 13 bits; retail
     // phases walk/run cycles off it so foot timing matches, instead of re-deriving a phase
@@ -186,7 +186,7 @@ impl PosHead {
     const NAME_LEN: usize = 16;
 
     /// `sendflags_t.Name` — `UPDATE_NAME`, the ordinary "a name follows" bit
-    /// (vendor/server/src/map/entities/baseentity.h UPDATETYPE UPDATE_NAME).
+    /// (vendor/server/src/map/entities/base_entity.h UPDATETYPE UPDATE_NAME).
     const SEND_NAME: u8 = 0x08;
     /// `sendflags_t.Name2` (entity_update.cpp). Set on every equipped-model
     /// spawn, which is why it alone does not imply a name is present.
@@ -330,7 +330,7 @@ pub struct CharFlags {
     /// `Flags1.TargetOffFlag` (bit 19): the server's untargetable bit. For
     /// NPC/MOB/PET/TRUST that word carries `m_flags` — LSB writes it at
     /// `ref<uint32>(0x21)` under UPDATE_HP, so ENTITYFLAGS
-    /// `FLAG_UNTARGETABLE = 0x800` (vendor/server/src/map/entities/baseentity.h)
+    /// `FLAG_UNTARGETABLE = 0x800` (vendor/server/data/enums/entity_flags.yaml)
     /// lands exactly on this bit; for CHAR_PC it is char_update's explicit
     /// "Untargetable player" field. vendor/server/src/map/packets/
     /// entity_update.cpp `flags1_t`, char_update.cpp CCharUpdatePacket::updateWith.
@@ -415,6 +415,10 @@ mod flags1 {
 mod flags2 {
     pub const LS_R: u32 = 0;
     pub const LS_G: u32 = 8;
+    /// On 0x0E CHAR_NPC General updates LSB overwrites this channel's high
+    /// nibble with the confrontation gate id
+    /// (vendor/server/src/map/packets/entity_update.cpp CEntityUpdatePacket::updateWith
+    /// `Fenced content ID`); only 0x0D CHAR_PC carries a full linkshell colour.
     pub const LS_B: u32 = 16;
     pub const CHANNEL_BITS: u32 = 8;
     pub const CHARM: u32 = 27;
@@ -1045,7 +1049,7 @@ mod char_flags_tests {
 
     #[test]
     fn allegiance_is_the_ballista_team_byte() {
-        // ALLEGIANCE_TYPE::WINDURST (vendor/server/src/map/entities/baseentity.h)
+        // ALLEGIANCE_TYPE::WINDURST (vendor/server/data/enums/allegiance.yaml)
         const WINDURST: u8 = 4;
         let flags = CharFlags::from_pos_head(
             &head_with(0, 0, u32::from(WINDURST) << flags3::BALLISTA_TEAM),
@@ -1553,7 +1557,7 @@ mod pos_head_tests {
         // a value at the top of the counter's range must decode without bleeding into
         // facetarget.
         const FACETARGET_SAMPLE: u32 = 0x01A2;
-        // vendor/server/src/map/ai/helpers/pathfind.cpp StepTo: the per-step MovTime increment.
+        // vendor/server/src/map/ai/helpers/pathfind/pathfind.cpp StepTo: the per-step MovTime increment.
         const PATHFIND_STEP_MOV_TIME: u32 = 0x35;
         let mut buf = vec![0u8; PosHead::SIZE];
         let flags0 = (FACETARGET_SAMPLE << PosHead::FACETARGET_SHIFT) | PosHead::MOV_TIME_MASK;

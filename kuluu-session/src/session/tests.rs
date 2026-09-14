@@ -1868,7 +1868,7 @@ const OUTPOST_VENDOR_EVENT: u16 = 32756;
 const OUTPOST_VENDOR_TEXT_ZONE: u16 = 230;
 
 // The conquest outpost vendor: LSB's conquest.lua xi.conquest.vendorOnTrigger
-// calls startEvent(OUTPOST_VENDOR_EVENT, nation, fee, 0, fee, getCP(), 0, 0, 0),
+// calls startEvent(OUTPOST_VENDOR_EVENT, nation, fee, 0, fee / 10, getCP(), 0, 0, 0),
 // packed into num[0..7] by 0x034_eventnum.cpp
 // GP_SERV_COMMAND_EVENTNUM::GP_SERV_COMMAND_EVENTNUM. Dropping those on the
 // floor leaves every {Num:N} marker in the vendor dialog unresolved.
@@ -2447,7 +2447,7 @@ fn battle2_header_reports_primary_target() {
 
 // vendor/server/src/map/packets/s2c/0x028_battle2.cpp GP_SERV_COMMAND_BATTLE2::pack — resolution(3), kind(2),
 // animation(12) open every result block. A basic attack never sets `action.actionid`
-// (vendor/server/src/map/entities/battleentity.cpp CBattleEntity::OnAttack), so these bits are the ONLY
+// (vendor/server/src/map/entities/battle_entity.cpp CBattleEntity::OnAttack), so these bits are the ONLY
 // per-swing data: an off-by-one here picks the wrong swing routine and the wrong hit
 // reaction, i.e. the wrong sound or none.
 const BATTLE2_PARRIED_LEFT_ATTACK: ffxi_proto::melee::MeleeResult =
@@ -3442,7 +3442,7 @@ fn equip_set_packet_layout_matches_server_struct() {
 fn item_stack_packet_layout_matches_server_struct() {
     // GP_CLI_COMMAND_ITEM_STACK (vendor/server/src/map/packets/c2s/0x03a_item_stack.h):
     // a single u32 Category (container id) after the 4-byte subpacket header.
-    let buf = build_subpacket_item_stack(0xCAFE, 0);
+    let buf = build_subpacket_item_stack(0xCAFE, 0, false).unwrap();
     assert_eq!(buf.len(), 8, "header (4) + Category u32 (4)");
     let hdr_word = u16::from_le_bytes([buf[0], buf[1]]);
     assert_eq!(
@@ -3462,7 +3462,7 @@ fn item_stack_packet_layout_matches_server_struct() {
         "Category = container (LOC_INVENTORY = 0)"
     );
 
-    let buf = build_subpacket_item_stack(0, 1);
+    let buf = build_subpacket_item_stack(0, 1, false).unwrap();
     assert_eq!(u32::from_le_bytes(buf[4..8].try_into().unwrap()), 1);
 }
 

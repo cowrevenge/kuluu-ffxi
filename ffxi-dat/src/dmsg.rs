@@ -842,9 +842,8 @@ mod tests {
     /// Southern San d'Oria (zone 230) KEYITEM_OBTAINED per KNOWN_CLIENTS row.
     /// LSB text ids are identity DAT entry indexes for the client era LSB was
     /// synced to: the vendored vendor/server/scripts/zones/Southern_San_dOria/IDs.lua
-    /// (CLIENT_VER 30260203_0) pins 6438; horizonxi-2023 sits 1 below it and
-    /// retail-2026-09 4 above (LSB's 30260904_1 sync matches retail-2026-09
-    /// exactly). The index moves between rows because SE inserts dialog
+    /// (CLIENT_VER 30260904_1) pins 6442, which retail-2026-09 matches
+    /// exactly; horizonxi-2023 sits 5 below it. The index moves between rows because SE inserts dialog
     /// entries over time — client-build skew, not an index-base convention.
     const HORIZONXI_2023_KEYITEM_OBTAINED: usize = 6437;
     const RETAIL_2026_09_KEYITEM_OBTAINED: usize = 6442;

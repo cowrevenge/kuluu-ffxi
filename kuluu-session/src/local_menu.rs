@@ -108,7 +108,7 @@ pub const MAIN_JOB_ROW: &str = "Main Job";
 pub const SUPPORT_JOB_ROW: &str = "Support Job";
 
 /// JOBTYPE 1=WAR..22=RUN are player-selectable; 23 (MON) is not.
-/// vendor/server/src/map/entities/battleentity.h JOBTYPE.
+/// vendor/server/data/enums/job.yaml JOBTYPE.
 const SELECTABLE_JOB_MAX: u8 = 22;
 
 /// District rows per MyRoomExitBit; the slot is the MYROOMEXITMODE Option1-4 value

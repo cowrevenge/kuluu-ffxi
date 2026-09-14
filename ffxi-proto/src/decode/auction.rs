@@ -6,7 +6,7 @@ use super::*;
 #[repr(u8)]
 pub enum AuctionCommand {
     /// s2c only: the AH counter menu opens
-    /// (vendor/server/src/map/lua/lua_baseentity.cpp CLuaBaseEntity::sendMenu).
+    /// (vendor/server/src/map/lua/lua_base_entity.cpp CLuaBaseEntity::sendMenu).
     Open = 0x02,
     AskCommit = 0x04,
     Info = 0x05,

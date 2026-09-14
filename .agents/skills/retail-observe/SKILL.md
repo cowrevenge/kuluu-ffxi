@@ -222,7 +222,7 @@ chat) is usually readable straight off the full screenshot.
   tooltips are unreadable — → Enter → Enter ("Log in with <name>?").
 - **City navigation by screenshot is slow and error-prone** (wall-hugging,
   camera collisions). Before wandering: pull exact coords from LSB
-  (`vendor/server/sql/zonelines.sql`, npc_list) or the wiki, and if the user
+  (`vendor/server/data/zones/<zone>/zone.yaml` zonelines, npc_list) or the wiki, and if the user
   is around, a 20-second walk from them beats 15 minutes of capture golf.
 
 ## Delegating the drive loop (cheap models)

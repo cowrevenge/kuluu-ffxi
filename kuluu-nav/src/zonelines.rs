@@ -38,8 +38,9 @@ pub fn to_pos_for_line(line_id: u32) -> Option<[f32; 3]> {
 
 // Mog House residence-entrance tag prefixes; LSB matches the same prefixes on the
 // c2s 0x05E RectID (vendor/server/src/map/packets/c2s/0x05e_maprect.cpp GP_CLI_COMMAND_MAPRECT::process mogEntrancePrefix:
-// "zmr* classic cities; zms* WoTG [S] + Adoulin"). The zonelines.sql primary key IS
-// the trigger's fourcc as a LE u32, so the prefix test works on `line_id` directly.
+// "zmr* classic cities; zms* WoTG [S] + Adoulin"). A zone line's id IS the trigger's
+// fourcc as a LE u32 (vendor/server/src/map/data/datasets/zones/settings/dataset.cpp
+// packZoneLineId), so the prefix test works on `line_id` directly.
 pub const MOG_HOUSE_TAG_PREFIXES: [&[u8; 3]; 2] = [b"zmr", b"zms"];
 
 pub fn is_mog_house_entry(line: &ZoneLine) -> bool {

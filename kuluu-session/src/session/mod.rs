@@ -2063,7 +2063,7 @@ fn handle_sub_packet(
 
 const NAME_MISS_DEDUP_WINDOW: std::time::Duration = std::time::Duration::from_secs(30);
 
-// vendor/server/src/map/entities/baseentity.h UPDATETYPE
+// vendor/server/src/map/entities/base_entity.h UPDATETYPE
 const UPDATE_HP: u8 = 0x04;
 const UPDATE_NAME: u8 = 0x08;
 
@@ -2274,8 +2274,8 @@ struct CastBar {
 
 /// Drives the self cast bar from the server's own BATTLE2 action packets.
 ///
-/// vendor/server/src/map/ai/states/magic_state.cpp CMagicState::CMagicState pushes the MagicStart
-/// action_t from the `CMagicState` constructor, i.e. synchronously inside the
+/// vendor/server/src/map/ai/states/magic_state.cpp CMagicState::init pushes the MagicStart
+/// action_t as CAIContainer::enterState admits the state, i.e. synchronously inside the
 /// 0x1A action handler (player_controller.cpp CPlayerController::Cast → ai_container.cpp CAIContainer::Internal_Cast),
 /// so this packet is the server's cast-start instant and carries the same cast
 /// pose and "starts casting" line. An interrupt reuses the MagicStart category
@@ -2913,9 +2913,22 @@ async fn keepalive_loop(
                                 }
                             }
                         }
+                        let payload = match build_subpacket_action(
+                            sub_seq,
+                            target_id,
+                            target_index,
+                            &kind,
+                            in_event(&dialog_session, &pending_event_end),
+                        ) {
+                            Ok(payload) => payload,
+                            Err(reason) => {
+                                let _ = event_tx.send(AgentEvent::Error {
+                                    message: format!("action not sent: {reason}"),
+                                });
+                                continue;
+                            }
+                        };
                         self_face_target = face_target_for(target_index, self_act_index);
-                        let payload =
-                            build_subpacket_action(sub_seq, target_id, target_index, &kind);
                         sub_seq = sub_seq.wrapping_add(1);
                         if let Err(e) = map
                             .send_encrypted(&payload, datagram_header_id(sub_seq), server_last_seq)
@@ -2979,8 +2992,7 @@ async fn keepalive_loop(
                         // Mirror of the LSB validator (0x05d_motion.cpp
                         // validate + bell note range): a send the server would
                         // drop silently is refused client-side with a reason.
-                        let in_event =
-                            dialog_session.active_end().is_some() || !pending_event_end.is_empty();
+                        let in_event = in_event(&dialog_session, &pending_event_end);
                         if let Some(reason) = emote_send_block_reason(emote_id, mode, param, in_event)
                         {
                             let _ = event_tx.send(AgentEvent::Error {
@@ -3094,8 +3106,21 @@ async fn keepalive_loop(
 
                         let kind = crate::state::ActionKind::HomepointMenu { status_id: 0 };
                         let act_index = self_act_index.unwrap_or(0);
-                        let payload =
-                            build_subpacket_action(sub_seq, self_char_id, act_index, &kind);
+                        let payload = match build_subpacket_action(
+                            sub_seq,
+                            self_char_id,
+                            act_index,
+                            &kind,
+                            in_event(&dialog_session, &pending_event_end),
+                        ) {
+                            Ok(payload) => payload,
+                            Err(reason) => {
+                                let _ = event_tx.send(AgentEvent::Error {
+                                    message: format!("homepoint_return not sent: {reason}"),
+                                });
+                                continue;
+                            }
+                        };
                         sub_seq = sub_seq.wrapping_add(1);
                         if let Err(e) = map
                             .send_encrypted(&payload, datagram_header_id(sub_seq), server_last_seq)
@@ -3485,16 +3510,28 @@ async fn keepalive_loop(
                                 "item_stack throttled (<1.1s) to avoid lightluggage kick"
                             );
                         } else {
-                            let payload = build_subpacket_item_stack(sub_seq, container);
-                            sub_seq = sub_seq.wrapping_add(1);
-                            if let Err(e) = map
-                                .send_encrypted(&payload, datagram_header_id(sub_seq), server_last_seq)
-                                .await
-                            {
-                                tracing::warn!(error = %e, "item_stack send failed");
-                                let _ = event_tx.send(AgentEvent::Error {
-                                    message: format!("item_stack send: {e}"),
-                                });
+                            match build_subpacket_item_stack(
+                                sub_seq,
+                                container,
+                                in_event(&dialog_session, &pending_event_end),
+                            ) {
+                                Err(reason) => {
+                                    let _ = event_tx.send(AgentEvent::Error {
+                                        message: format!("item_stack not sent: {reason}"),
+                                    });
+                                }
+                                Ok(payload) => {
+                                    sub_seq = sub_seq.wrapping_add(1);
+                                    if let Err(e) = map
+                                        .send_encrypted(&payload, datagram_header_id(sub_seq), server_last_seq)
+                                        .await
+                                    {
+                                        tracing::warn!(error = %e, "item_stack send failed");
+                                        let _ = event_tx.send(AgentEvent::Error {
+                                            message: format!("item_stack send: {e}"),
+                                        });
+                                    }
+                                }
                             }
                         }
                     }
@@ -3751,8 +3788,7 @@ async fn keepalive_loop(
                         // wrong self id (0x064_scenarioitem.cpp) — skip rather
                         // than burn a seq slot on a silent drop; the unseen state
                         // stays and a later menu close retries.
-                        let in_event = dialog_session.active_end().is_some()
-                            || !pending_event_end.is_empty();
+                        let in_event = in_event(&dialog_session, &pending_event_end);
                         match mog.key_item_tables.get_mut(table_index as usize) {
                             None => {
                                 tracing::warn!(
@@ -4014,16 +4050,19 @@ async fn keepalive_loop(
                 // that spawns city NPCs early-returns when inMogHouse. Outside the
                 // MH the same action pre-warms NPC/MOB/TRUST spawn lists.
                 if zone_transition_sent && self_pos_seeded && !resrdy_sent {
-                    resrdy_sent = true;
-                    resrdy_in_payload = true;
-                    payload.extend(build_subpacket_action(
+                    if let Ok(action) = build_subpacket_action(
                         sub_seq,
                         self_char_id,
                         self_act_index.unwrap_or(0),
                         &crate::state::ActionKind::SendResRdy,
-                    ));
-                    sub_seq = sub_seq.wrapping_add(1);
-                    tracing::info!("queued 0x01A SendResRdy (post zone-in spawn request)");
+                        in_event(&dialog_session, &pending_event_end),
+                    ) {
+                        resrdy_sent = true;
+                        resrdy_in_payload = true;
+                        payload.extend(action);
+                        sub_seq = sub_seq.wrapping_add(1);
+                        tracing::info!("queued 0x01A SendResRdy (post zone-in spawn request)");
+                    }
                 }
 
                 if let Some(flush) = flush_pending_event_end(
@@ -4124,19 +4163,21 @@ async fn keepalive_loop(
                         Some(t) => should_emit_pos(t.elapsed(), pos_delta, heading_changed),
                     };
                 if include_pos {
-                    payload.extend(build_subpacket_pos(
+                    if let Some(pos) = build_subpacket_pos(
                         sub_seq,
                         self_pos.pos.x,
                         self_pos.pos.y,
                         self_pos.pos.z,
                         self_pos.heading,
                         self_face_target,
-                    ));
-                    sub_seq = sub_seq.wrapping_add(1);
-                    last_keepalive_pos = self_pos.pos;
-                    last_emitted_pos = self_pos.pos;
-                    last_emitted_heading = self_pos.heading;
-                    last_move_emission = Some(std::time::Instant::now());
+                    ) {
+                        payload.extend(pos);
+                        sub_seq = sub_seq.wrapping_add(1);
+                        last_keepalive_pos = self_pos.pos;
+                        last_emitted_pos = self_pos.pos;
+                        last_emitted_heading = self_pos.heading;
+                        last_move_emission = Some(std::time::Instant::now());
+                    }
                 }
 
                 if !payload.is_empty() {
@@ -6027,8 +6068,8 @@ fn eventucoff_mode_of(data: &[u8]) -> Option<u32> {
 /// s2c 0x052 EVENTUCOFF releases the client from an event user-control lock
 /// (vendor/server/src/map/packets/s2c/0x052_eventucoff.h GP_SERV_COMMAND_EVENTUCOFF_MODE). CancelEvent
 /// arrives only after the server already dropped the event (release()/skipEvent
-/// call endCurrentEvent — vendor/server/src/map/lua/lua_baseentity.cpp CLuaBaseEntity::release,
-/// vendor/server/src/map/entities/charentity.cpp CCharEntity::skipEvent), so no 0x05B goes
+/// call endCurrentEvent — vendor/server/src/map/lua/lua_base_entity.cpp CLuaBaseEntity::release,
+/// vendor/server/src/map/entities/char_entity.cpp CCharEntity::skipEvent), so no 0x05B goes
 /// back; the local event state is dropped instead. Fishing release = a rejected
 /// cast (no rod / bait / fishing spot) or the end of fishing. EventRecvPending —
 /// the ack after every processed 0x05B (0x05b_eventend.cpp GP_CLI_COMMAND_EVENTEND::process) — must NOT clear
@@ -6112,7 +6153,7 @@ fn is_no_speaker_chat_kind(kind: u8) -> bool {
 // Server customMenu prompt (home point Set/Yes/No, quest confirmations, …):
 // GP_SERV_COMMAND_CHAT_STD with type MESSAGE_GMPROMPT and sender name
 // `_CUSTOM_MENU`, message = quoted-concat `"Title""Opt1""Opt2"…`
-// (vendor/server/src/map/lua/lua_baseentity.cpp CLuaBaseEntity::customMenu customMenu +
+// (vendor/server/src/map/lua/lua_base_entity.cpp CLuaBaseEntity::customMenu customMenu +
 // luautils.cpp SetCustomMenuContext). The reply round-trips as a
 // `_CUSTOM_MENU` tell the server routes to HandleCustomMenu
 // (0x0b6_chat_name.cpp GP_CLI_COMMAND_CHAT_NAME::process).
@@ -6483,6 +6524,16 @@ fn lerp_toward(cur: Vec3, target: Vec3, max_step: f32) -> (Vec3, bool) {
         },
         false,
     )
+}
+
+/// Client mirror of `PChar->isInEvent()`
+/// (vendor/server/src/map/entities/char_entity.cpp CCharEntity::isInEvent):
+/// an event the VM still drives, or one whose 0x05B EVENT_END has not gone out.
+pub(super) fn in_event(
+    dialog: &crate::event_dialog::DialogSession,
+    pending_event_end: &[(u32, u16, u16)],
+) -> bool {
+    dialog.active_end().is_some() || !pending_event_end.is_empty()
 }
 
 fn should_emit_pos(

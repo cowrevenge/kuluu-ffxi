@@ -1823,7 +1823,7 @@ pub fn hit_reaction_routine(
     use ffxi_proto::melee::ActionResolution;
     let out = match resolution {
         // The crit rides the VICTIM's result block as `info & CriticalHit`
-        // (vendor/server/src/map/entities/battleentity.cpp CBattleEntity::OnAttack). LSB's
+        // (vendor/server/src/map/entities/battle_entity.cpp CBattleEntity::OnAttack). LSB's
         // hitDistortion is the damage share of max HP (action.cpp action_result_t::recordDamage),
         // so it cannot stand in for the flag. None/Light/Medium/Heavy non-crits all play `damg`
         // per retail's dam0 branch table - never sdam, which flinches nothing on its own.
@@ -1850,7 +1850,7 @@ pub fn hit_reaction_routine(
 // Direction-of-movement variants (atf0/atb0/atl0/atr0) are not selected here; that needs the
 // attacker's locomotion state at swing time. No attacker-side crit swing exists on purpose: LSB
 // flags the crit only in the VICTIM's result block (CBattleEntity::OnAttack sets info CriticalHit
-// + hitDistortion Heavy from one bool; vendor/server/src/map/entities/battleentity.cpp) and this
+// + hitDistortion Heavy from one bool; vendor/server/src/map/entities/battle_entity.cpp) and this
 // `animation` field is limb-selected, never
 // crit-selected - do not re-add a crit variant here.
 pub fn swing_routine(animation: ffxi_proto::melee::AttackAnimation) -> Option<[u8; 4]> {

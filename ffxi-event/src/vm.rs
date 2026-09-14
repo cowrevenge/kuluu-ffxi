@@ -396,9 +396,9 @@ pub struct EventVm {
     /// start of each later [`step`](Self::step) clear them, so an action whose DAT
     /// the host cannot read falls through instead of holding forever.
     pending_action_starts: Vec<(ActorLookup, FourCc)>,
-    /// 0x2C SCHEDULOR holds armed without a length: the routine lives in the
-    /// actor's model DAT, which the host never opens, so the hold is released
-    /// by the renderer's finish report instead of a timer. See
+    /// Motion holds the renderer's finish report releases instead of a timer:
+    /// every routine the host plays and reports (0x2C, 0x45 non-fade,
+    /// 0x5B/0x66, 0x2D) parks here while it runs. See
     /// [`Self::hold_action_pending`].
     pending_action_holds: Vec<(ActorLookup, FourCc)>,
     /// Set while execution is parked on a WAIT* opcode whose hold still has
@@ -416,8 +416,9 @@ struct Wait {
 
 /// A running action the host told the VM about, so the WAIT* family can hold
 /// the way retail's IsMovingAction does. Armed by the host from the
-/// DAT-authored routine length when it publishes the motion cue; the VM never
-/// invents one, so an un-armed wait falls through.
+/// DAT-authored routine length when it publishes a motion cue the renderer
+/// plays without a finish report (the 0x45 fades); the VM never invents one,
+/// so an un-armed wait falls through.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct ActionHold {
     actor: ActorLookup,
@@ -646,7 +647,7 @@ impl EventVm {
         let actor = self.resolve_hold_actor(actor);
         self.action_holds
             .retain(|h| !(h.actor == actor && h.key == key));
-        // Last-arm-wins both ways: a timed hold supersedes the pending 0x2C
+        // Last-arm-wins both ways: a timed hold supersedes the pending motion
         // hold for the same pair.
         self.pending_action_holds
             .retain(|(a, k)| !(a == &actor && k == &key));
@@ -657,11 +658,11 @@ impl EventVm {
         });
     }
 
-    /// Arm a 0x2C SCHEDULOR hold with no length: the routine lives in the
-    /// actor's model DAT, which the host never opens, so it is released by
-    /// [`Self::release_action_hold`] when the renderer reports the routine
-    /// finished instead of by a timer. Replaces any timed or pending hold for
-    /// the same pair, the way [`Self::hold_action`] does.
+    /// Arm a motion hold with no length of its own: the host plays the routine
+    /// in the renderer and releases it via [`Self::release_action_hold`] when
+    /// the renderer reports the routine finished, instead of by a timer.
+    /// Replaces any timed or pending hold for the same pair, the way
+    /// [`Self::hold_action`] does.
     pub fn hold_action_pending(&mut self, actor: ActorLookup, key: FourCc) {
         let actor = self.resolve_hold_actor(actor);
         self.action_holds
@@ -671,7 +672,7 @@ impl EventVm {
         self.pending_action_holds.push((actor, key));
     }
 
-    /// Release the 0x2C SCHEDULOR hold the renderer's finish report names.
+    /// Release the motion hold the renderer's finish report names.
     /// No-op when nothing is pending for the pair, so a report for a routine
     /// the VM no longer waits on (stopped, superseded, event ended) is safe.
     pub fn release_action_hold(&mut self, actor: ActorLookup, key: FourCc) {
@@ -702,7 +703,7 @@ impl EventVm {
     }
 
     /// True while a host-armed hold for `(actor, key)` still has frames left,
-    /// or a 0x2C SCHEDULOR hold is still pending its renderer finish report.
+    /// or a motion hold is still pending its renderer finish report.
     fn action_running(&self, actor: ActorLookup, key: FourCc) -> bool {
         let actor = self.resolve_hold_actor(actor);
         if self
@@ -1211,10 +1212,10 @@ impl EventVm {
                 }
                 // XiEvent WAITSCHEDULOR (research/XiEvents/OpCodes/0x0053.md):
                 // hold while IsMovingAction(key, actor1, actor2) is true on
-                // actor1. The host arms that state from the DAT-authored routine
-                // length via hold_action; with nothing armed the wait falls
-                // through, which is also retail's path when either actor fails to
-                // resolve.
+                // actor1. The host arms that state as a pending hold the
+                // renderer's finish report releases; with nothing armed the
+                // wait falls through, which is also retail's path when either
+                // actor fails to resolve.
                 OP_WAITSCHEDULOR => {
                     let actor = ActorLookup(self.eventgetcode2(WAITSCHEDULOR_ACTOR1_OFS));
                     let key = self.fourcc_at(WAITSCHEDULOR_KEY_OFS);
@@ -1252,9 +1253,10 @@ impl EventVm {
                 // XiEvent MAPSCHEDULOR (research/XiEvents/OpCodes/0x002D.md): start the
                 // zone-level routine `key`, waited on by 0x54. Kuluu resolves `key` out
                 // of ZONE_SCENE_DAT_ID (ffxi-dat, the title-screen scene DAT); retail
-                // runs it out of the zone's own model DAT. The host arms that wait's
-                // hold from the routine's authored length in the file; the same-batch
-                // bridge covers a 0x54 that runs before this cue drains.
+                // runs it out of the zone's own model DAT. The host parks that wait on
+                // a pending hold the renderer's finish report releases (the routine's
+                // authored length in the file is its deadline); the same-batch bridge
+                // covers a 0x54 that runs before this cue drains.
                 OP_MAPSCHEDULOR => {
                     let key = self.fourcc_at(MAPSCHEDULOR_KEY_OFS);
                     self.pending_action_starts.push((ActorLookup::ZONE, key));

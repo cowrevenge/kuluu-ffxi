@@ -1,7 +1,7 @@
-//! The renderer's finish report for 0x2C SCHEDULOR routines: the event VM
-//! parks its 0x53 on a pending hold until this report releases it (the
+//! The renderer's finish report for cutscene motion routines: the event VM
+//! parks its WAIT* on a pending hold until this report releases it (the
 //! session's deadline sweep is the last-resort release for stopped routines
-//! and headless sessions that run no renderer at all).
+//! and sessions that run no renderer at all).
 
 use bevy::prelude::*;
 use kuluu_render::scheduler_runtime::CutsceneMotionDone;

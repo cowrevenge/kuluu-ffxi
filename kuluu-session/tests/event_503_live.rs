@@ -49,9 +49,9 @@ const GATE_WIRE_Z: f32 = 1.0;
 const GATE_TOLERANCE: f32 = 0.5;
 
 // A full playback must take at least this long from CutsceneStarted to end:
-// the authored timed holds alone exceed it by a wide margin (an 8 s WAIT plus
-// every camera/fade routine hold). An event ending faster than this means the
-// DAT-armed holds did not run — the skip-to-end failure mode.
+// the authored holds alone exceed it by a wide margin (an 8 s WAIT plus every
+// camera/fade routine hold at its DAT-authored length). An event ending faster
+// than this means the holds did not run — the skip-to-end failure mode.
 const MIN_PLAYBACK_SECS: f32 = 60.0;
 
 // The G1 -> "adventuring" -> G4a path carries ~45 input-gated frames in the

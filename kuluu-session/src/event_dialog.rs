@@ -149,14 +149,16 @@ pub struct DialogSession {
     /// zone-in, in event coordinates: the source for MOVE hold lengths while a
     /// scene walks its actors.
     entity_positions: std::collections::HashMap<u32, ffxi_event::vm::scene::EventPosition>,
-    /// 0x2C SCHEDULOR holds awaiting the renderer's finish report, keyed by the
-    /// wire actor the cue named plus its key: the value is the VM's own
-    /// unresolved lookup (for the release), the count of outstanding 0x2C
-    /// issues for the pair (a repeat issue re-arms before the first finishes),
-    /// and the arm time the deadline sweep measures from.
+    /// Motion holds awaiting the renderer's finish report, keyed by the wire
+    /// actor the cue named plus its key: the value is the VM's own unresolved
+    /// lookup (for the release), the count of outstanding issues for the pair
+    /// (a repeat issue re-arms before the first finishes), the arm time the
+    /// deadline sweep measures from, and the deadline itself: the DAT-authored
+    /// routine length when the session can read it, so a renderer-less session
+    /// times out on the authored length itself, else [`PENDING_MOTION_HOLD_MAX`].
     pending_motion_holds: std::collections::HashMap<
         (CutsceneActor, FourCc),
-        (ActorLookup, u32, std::time::Instant),
+        (ActorLookup, u32, std::time::Instant, std::time::Duration),
     >,
     /// Whether a frame was displayed before the last step, so
     /// [`take_message_closed`](Self::take_message_closed) fires exactly once per
@@ -530,10 +532,10 @@ impl DialogSession {
         self.pending_motion_holds.clear();
     }
 
-    /// The renderer finished (or could not start) the 0x2C SCHEDULOR routine
-    /// this wire `(actor, key)` named: decrement the pending hold's issue
-    /// count and release the VM's hold when the last one lands. No-op when
-    /// nothing is pending for the pair (stray report, event already ended).
+    /// The renderer finished (or could not start) the motion routine this wire
+    /// `(actor, key)` named: decrement the pending hold's issue count and
+    /// release the VM's hold when the last one lands. No-op when nothing is
+    /// pending for the pair (stray report, event already ended).
     pub fn motion_done(&mut self, actor: CutsceneActor, key: FourCc) {
         let Some(entry) = self.pending_motion_holds.get_mut(&(actor, key)) else {
             return;
@@ -542,7 +544,7 @@ impl DialogSession {
         if entry.1 > 0 {
             return;
         }
-        let (lookup, _, _) = self
+        let (lookup, _, _, _) = self
             .pending_motion_holds
             .remove(&(actor, key))
             .expect("entry held above");
@@ -551,27 +553,27 @@ impl DialogSession {
         }
     }
 
-    /// Last-resort release for 0x2C SCHEDULOR holds the renderer never
-    /// reported: a stopped routine, a despawned entity, or a headless session
-    /// with no renderer at all. [`PENDING_MOTION_HOLD_MAX`] is well above any
-    /// model-DAT routine length, so a live finish report always wins; the
-    /// sweep is the degradation path, not the clock.
+    /// Last-resort release for a motion hold that waits out its deadline:
+    /// a stopped routine, a despawned entity, or a session with no renderer at
+    /// all. Each hold ages out on its own deadline (the DAT-authored routine
+    /// length, or [`PENDING_MOTION_HOLD_MAX`] when the session cannot read the
+    /// DAT); the sweep is the degradation path, not the clock.
     fn sweep_pending_motion_holds(&mut self) {
         let now = std::time::Instant::now();
         let stale: Vec<(CutsceneActor, FourCc)> = self
             .pending_motion_holds
             .iter()
-            .filter(|(_, (_, _, armed))| now.duration_since(*armed) > PENDING_MOTION_HOLD_MAX)
+            .filter(|(_, (_, _, armed, deadline))| now.duration_since(*armed) > *deadline)
             .map(|(key, _)| *key)
             .collect();
         for key in stale {
-            let Some((lookup, _, armed)) = self.pending_motion_holds.remove(&key) else {
+            let Some((lookup, _, armed, _)) = self.pending_motion_holds.remove(&key) else {
                 continue;
             };
             tracing::warn!(
                 target: "kuluu_session::event_dialog",
                 age_secs = now.duration_since(armed).as_secs_f32(),
-                "0x2C SCHEDULOR hold released on its deadline without a renderer finish report"
+                "motion hold released on its deadline without a renderer finish report"
             );
             if let Some(runner) = self.runner.as_mut() {
                 runner.release_action_hold(lookup, key.1);
@@ -1439,9 +1441,10 @@ const SCHEDULER_DURATION_LOOP: u16 = 1;
 /// WAIT_UNITS_PER_SEC).
 const WAIT_UNITS_PER_SEC: f32 = 60.0;
 
-/// Last-resort release for a 0x2C SCHEDULOR hold the renderer never reported
-/// (stopped routine, despawned entity, headless session): well above any
-/// model-DAT routine length, so a live finish report always wins.
+/// Deadline for a motion hold the renderer does not report (stopped routine,
+/// despawned entity, renderer-less session) when the session cannot read the
+/// routine's authored length: well above any model-DAT routine length, so a
+/// live finish report releases the hold ahead of the sweep.
 const PENDING_MOTION_HOLD_MAX: std::time::Duration = std::time::Duration::from_secs(15);
 
 /// Arm the MOVE case-1 hold for each walk in `raw_cues`: the length comes
@@ -1505,11 +1508,13 @@ fn arm_move_holds(
 }
 
 /// Arm WAIT* holds for motion cues, before their actors are resolved: the hold
-/// keys on the VM's own unresolved ActorLookup. 0x45/0x5B/0x66/0x2D arm a
-/// timed hold from the DAT-authored routine length; 0x2C arms a pending hold
-/// instead - its routine lives in the actor's model DAT, which this session
-/// never opens, so the renderer's finish report releases it (the deadline
-/// sweep in [`DialogSession::tick`] is the last resort).
+/// keys on the VM's own unresolved ActorLookup. Every routine the renderer
+/// plays and reports (0x2C, 0x45 non-fade, 0x5B/0x66, 0x2D) arms a pending
+/// hold the renderer's finish report releases; the DAT-authored routine length
+/// is its deadline, so a renderer-less session times out on the authored
+/// length itself (the deadline sweep in [`DialogSession::tick`] is the last
+/// resort). Only the 0x45 fades, which cutscene.rs plays without reporting,
+/// keep a timed hold.
 fn arm_motion_holds(
     runner: &mut DialogRunner,
     raw_cues: &[EventCue],
@@ -1518,26 +1523,26 @@ fn arm_motion_holds(
     event_entity: u32,
     pending: &mut std::collections::HashMap<
         (CutsceneActor, FourCc),
-        (ActorLookup, u32, std::time::Instant),
+        (ActorLookup, u32, std::time::Instant, std::time::Duration),
     >,
 ) {
     for cue in raw_cues {
         match *cue {
-            // 0x2C: the routine is in the actor's own model DAT. The renderer
-            // plays it and reports its finish; until then the WAIT* parks on
-            // the pending hold. The map keys on the wire actor the cue resolved
-            // to - the same value the renderer's report carries back.
+            // 0x2C: the routine is in the actor's own model DAT, which this
+            // session does not open: no DAT length, so [`PENDING_MOTION_HOLD_MAX`] stands.
             EventCue::ActorMotion {
                 actor1,
                 key,
                 ..
             } => {
-                runner.hold_action_pending(actor1, key);
-                let entry = pending
-                    .entry((resolve_actor(actor1, event_entity), key))
-                    .or_insert((actor1, 0, std::time::Instant::now()));
-                entry.1 += 1;
-                entry.2 = std::time::Instant::now();
+                arm_pending_motion_hold(
+                    runner,
+                    pending,
+                    actor1,
+                    resolve_actor(actor1, event_entity),
+                    key,
+                    None,
+                );
             }
             EventCue::Scheduler {
                 dat_id,
@@ -1546,8 +1551,22 @@ fn arm_motion_holds(
                 duration,
                 ..
             } => {
-                if let Some(units) = routine_units(root, cache, dat_id, tag, duration) {
-                    runner.hold_action(actor1, tag, units);
+                let units = routine_units(root, cache, dat_id, tag, duration);
+                if dat_id == ffxi_event::SCHEDULER_FADE_DAT_ID {
+                    // The fade plays in cutscene.rs, which reports no finish:
+                    // its hold stays timed from the DAT length.
+                    if let Some(units) = units {
+                        runner.hold_action(actor1, tag, units);
+                    }
+                } else {
+                    arm_pending_motion_hold(
+                        runner,
+                        pending,
+                        actor1,
+                        resolve_actor(actor1, event_entity),
+                        tag,
+                        units,
+                    );
                 }
             }
             EventCue::ExtScheduler {
@@ -1557,7 +1576,9 @@ fn arm_motion_holds(
                 ..
             } => {
                 // The routine's schedulers live in container A (tag 1), which
-                // both the 0x5B single file and the 0x66 package name.
+                // both the 0x5B single file and the 0x66 package name. An
+                // out-of-range 0x66 package names no container: the renderer
+                // plays nothing and reports nothing, so arm nothing.
                 let file_id = match motion {
                     Some(ffxi_event::ExtSchedulerMotion::Event(id)) => Some(id),
                     Some(ffxi_event::ExtSchedulerMotion::Tpc(pkgs)) => Some(pkgs.a),
@@ -1566,33 +1587,77 @@ fn arm_motion_holds(
                 let Some(file_id) = file_id else {
                     continue;
                 };
-                if let Some(units) = routine_units(
-                    root,
-                    cache,
-                    file_id,
+                arm_pending_motion_hold(
+                    runner,
+                    pending,
+                    actor1,
+                    resolve_actor(actor1, event_entity),
                     key,
-                    ffxi_event::SCHEDULER_DURATION_FROM_DAT,
-                ) {
-                    runner.hold_action(actor1, key, units);
-                }
+                    routine_units(
+                        root,
+                        cache,
+                        file_id,
+                        key,
+                        ffxi_event::SCHEDULER_DURATION_FROM_DAT,
+                    ),
+                );
             }
             // 0x2D: kuluu resolves the routine out of ZONE_SCENE_DAT_ID (retail runs it
             // out of the zone's own model DAT); retail waits on it via the zone object,
-            // so the hold keys on the VM's zone sentinel rather than an actor.
-            EventCue::ZoneScheduler { key, .. } => {
-                if let Some(units) = routine_units(
-                    root,
-                    cache,
-                    ffxi_dat::scheduler::ZONE_SCENE_DAT_ID,
+            // so the VM's hold keys on the zone sentinel while the renderer's report
+            // keys on the cue's actor1.
+            EventCue::ZoneScheduler {
+                key,
+                actor1,
+                ..
+            } => {
+                arm_pending_motion_hold(
+                    runner,
+                    pending,
+                    ffxi_event::ActorLookup::ZONE,
+                    resolve_actor(actor1, event_entity),
                     key,
-                    ffxi_event::SCHEDULER_DURATION_FROM_DAT,
-                ) {
-                    runner.hold_action(ffxi_event::ActorLookup::ZONE, key, units);
-                }
+                    routine_units(
+                        root,
+                        cache,
+                        ffxi_dat::scheduler::ZONE_SCENE_DAT_ID,
+                        key,
+                        ffxi_event::SCHEDULER_DURATION_FROM_DAT,
+                    ),
+                );
             }
             _ => {}
         }
     }
+}
+
+/// Arm the pending hold for a motion cue the renderer plays and reports: the
+/// renderer's finish report releases it, and the DAT-authored routine length
+/// (in WAIT* units) is its deadline, so a renderer-less session times out on
+/// the authored length itself. An unreadable DAT falls back to
+/// [`PENDING_MOTION_HOLD_MAX`]. `wire` is the cue's own resolved actor - the
+/// value the renderer's report carries back - which for the 0x2D zone
+/// sentinel is not the VM's hold key.
+fn arm_pending_motion_hold(
+    runner: &mut DialogRunner,
+    pending: &mut std::collections::HashMap<
+        (CutsceneActor, FourCc),
+        (ActorLookup, u32, std::time::Instant, std::time::Duration),
+    >,
+    lookup: ActorLookup,
+    wire: CutsceneActor,
+    key: FourCc,
+    units: Option<f32>,
+) {
+    runner.hold_action_pending(lookup, key);
+    let deadline = units
+        .map(|units| std::time::Duration::from_secs_f32(units / WAIT_UNITS_PER_SEC))
+        .unwrap_or(PENDING_MOTION_HOLD_MAX);
+    let entry = pending
+        .entry((wire, key))
+        .or_insert((lookup, 0, std::time::Instant::now(), deadline));
+    entry.1 += 1;
+    entry.2 = std::time::Instant::now();
 }
 
 /// The authored length of scheduler `tag` in DAT file `dat_id`, in WAIT* hold
@@ -2263,7 +2328,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn extscheduler_hold_arms_from_the_dat_routine_length() {
+    fn extscheduler_hold_parks_until_the_renderer_reports_done() {
         const NPC: u32 = 0x010E_6032;
         const EVENT: u16 = 503;
         const ZONE: u16 = 248;
@@ -2321,13 +2386,17 @@ pub(crate) mod tests {
         );
         assert_eq!(*actor, CutsceneActor::Entity { server_id: NPC });
         assert_eq!(*key, KEY);
-        // The hold is 60 frames = one second on the VM's clock.
+        // The hold parks on the renderer's finish report; its deadline is the
+        // 60-frame = one-second DAT length.
         assert!(matches!(session.tick(0.5), Advance::Waiting));
+        let entry = session.pending_motion_holds.values().next().unwrap();
+        assert_eq!(entry.3, std::time::Duration::from_secs(1));
+        session.motion_done(CutsceneActor::Entity { server_id: NPC }, KEY);
         assert!(matches!(session.tick(0.6), Advance::Ended { .. }));
     }
 
     #[test]
-    fn zone_scheduler_hold_arms_from_the_scene_dat_routine_length() {
+    fn zone_scheduler_hold_parks_until_the_renderer_reports_done() {
         const NPC: u32 = 0x010E_6032;
         const EVENT: u16 = 503;
         const ZONE: u16 = 248;
@@ -2376,8 +2445,12 @@ pub(crate) mod tests {
         };
         assert_eq!(*key, KEY);
         assert_eq!(*actor, CutsceneActor::Entity { server_id: NPC });
-        // The hold is 60 frames = one second on the VM's clock.
+        // The hold parks on the renderer's finish report; its deadline is the
+        // 60-frame = one-second DAT length.
         assert!(matches!(session.tick(0.5), Advance::Waiting));
+        let entry = session.pending_motion_holds.values().next().unwrap();
+        assert_eq!(entry.3, std::time::Duration::from_secs(1));
+        session.motion_done(CutsceneActor::Entity { server_id: NPC }, KEY);
         assert!(matches!(session.tick(0.6), Advance::Ended { .. }));
     }
 

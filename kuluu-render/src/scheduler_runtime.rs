@@ -139,10 +139,11 @@ pub struct ActiveScheduler {
 
     pub name: [u8; 4],
 
-    // The 0x2C SCHEDULOR actor this routine was started for, as the wire value
-    // the cue named (the session matches the report against the same value it
-    // resolved the cue with). `None` for routines no 0x53 waits on, so they
-    // never report.
+    // The cutscene motion actor this routine was started for, as the wire
+    // value the cue named (the session matches the report against the same
+    // value it resolved the cue with): 0x2C SCHEDULOR and the file-routine
+    // motions (0x45 non-fade, 0x5B/0x66, 0x2D). `None` for routines no
+    // WAIT* hold waits on, so they do not report.
     pub cutscene_motion_actor: Option<kuluu_snapshot::CutsceneActor>,
 
     // Set once the finish report went out: the routine lingers past its last
@@ -343,9 +344,9 @@ pub struct SchedulerStageEvent {
     pub scheduler: [u8; 4],
 }
 
-/// A 0x2C SCHEDULOR routine the cue `(actor, key)` named has finished - or
+/// A cutscene motion routine the cue `(actor, key)` named has finished - or
 /// could not be started at all: the host releases the event VM's pending hold
-/// on the pair so the 0x53 past it advances. The actor is the wire value the
+/// on the pair so the WAIT* past it advances. The actor is the wire value the
 /// cue named, the same one the session resolved it against.
 #[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CutsceneMotionDone {
@@ -382,8 +383,8 @@ pub fn tick_active_schedulers(
                 });
                 sched.cursor += 1;
             }
-            // A 0x2C routine reports its finish the frame its last stage fires;
-            // unmarked routines (emotes, hit reactions, ...) never do.
+            // A cutscene motion routine reports its finish the frame its last
+            // stage fires; unmarked routines (emotes, hit reactions, ...) never do.
             if !sched.done_reported && sched.finished() {
                 if let Some(actor) = sched.cutscene_motion_actor {
                     motion_done.write(CutsceneMotionDone {
@@ -943,8 +944,9 @@ enum PendingActionDispatch {
         target_id: Option<u32>,
     },
     // A named routine out of a file, on an actor, with a partner. Emotes and cutscene
-    // motions (0x45 non-fade schedulers, 0x5B/0x66 event motion resources) both dispatch
-    // through this; the name describes the operation, not one caller.
+    // motions (0x45 non-fade schedulers, 0x5B/0x66 event motion resources, 0x2D zone
+    // routines) both dispatch through this; the name describes the operation, not one
+    // caller.
     Routine {
         actor_id: u32,
         target_id: u32,
@@ -953,6 +955,9 @@ enum PendingActionDispatch {
         /// carries none): it scales a CameraRoute stage's authored length against the
         /// routine's end frame, the way kuluu-session arms its WAIT* holds.
         duration: u16,
+        /// The cue's wire actor when this dispatch is a motion the session's pending
+        /// hold waits on; the miss paths report it done. `None` for emotes.
+        cutscene_actor: Option<kuluu_snapshot::CutsceneActor>,
     },
     // A 0x66 Tpc routine: the routine's schedulers live in container A (the pending vec's
     // file id); container B's clips join A's assets so the routine's Motion stages can
@@ -963,6 +968,8 @@ enum PendingActionDispatch {
         b: Option<u32>,
         routine: [u8; 4],
         duration: u16,
+        /// The cue's wire actor; the miss paths report it done.
+        cutscene_actor: Option<kuluu_snapshot::CutsceneActor>,
     },
 }
 
@@ -1343,6 +1350,7 @@ pub fn poll_action_dat_tasks(
     mut q_scheds: Query<&mut ActiveSchedulers>,
     mut pending_inserts: Local<HashMap<Entity, Vec<ActiveScheduler>>>,
     mut commands: Commands,
+    mut motion_done: MessageWriter<CutsceneMotionDone>,
 ) {
     use bevy::tasks::futures_lite::future;
     if cache.tasks.is_empty() && cache.pending.is_empty() {
@@ -1411,14 +1419,33 @@ pub fn poll_action_dat_tasks(
                 target_id,
                 routine,
                 duration,
+                cutscene_actor,
             } => {
                 let Some(&actor_entity) = tracked.by_id.get(&actor_id) else {
+                    // A motion the session's pending hold waits on must report even
+                    // when its actor is not tracked: the hold would otherwise sit out
+                    // its whole DAT-length deadline.
+                    if let Some(actor) = cutscene_actor {
+                        motion_done.write(CutsceneMotionDone {
+                            actor,
+                            key: routine,
+                        });
+                    }
                     continue;
                 };
                 let target_entity = tracked.by_id.get(&target_id).copied();
                 let Some(mut active) = ActiveScheduler::from_main(&parsed.schedulers, &routine)
                 else {
-                    play_local_emote_clip(&routine, actor_entity, &q_children, &mut q_actors);
+                    // A cutscene motion's key is not an emote name: report the miss so
+                    // the session's hold releases, instead of playing a local clip.
+                    if let Some(actor) = cutscene_actor {
+                        motion_done.write(CutsceneMotionDone {
+                            actor,
+                            key: routine,
+                        });
+                    } else {
+                        play_local_emote_clip(&routine, actor_entity, &q_children, &mut q_actors);
+                    }
                     continue;
                 };
                 // A CameraRoute stage plays on the operator camera instead of the skeleton:
@@ -1445,6 +1472,7 @@ pub fn poll_action_dat_tasks(
                         .stages
                         .retain(|t| t.stage.kind != StageKind::CameraRoute);
                 }
+                active.cutscene_motion_actor = cutscene_actor;
                 if !active.stages.is_empty() {
                     queue_routine_on_actor(
                         &parsed,
@@ -1462,15 +1490,34 @@ pub fn poll_action_dat_tasks(
                 target_id,
                 routine,
                 duration,
+                cutscene_actor,
                 ..
             } => {
                 let Some(&actor_entity) = tracked.by_id.get(&actor_id) else {
+                    // A motion the session's pending hold waits on must report even
+                    // when its actor is not tracked: the hold would otherwise sit out
+                    // its whole DAT-length deadline.
+                    if let Some(actor) = cutscene_actor {
+                        motion_done.write(CutsceneMotionDone {
+                            actor,
+                            key: routine,
+                        });
+                    }
                     continue;
                 };
                 let target_entity = tracked.by_id.get(&target_id).copied();
                 let Some(mut active) = ActiveScheduler::from_main(&parsed.schedulers, &routine)
                 else {
-                    play_local_emote_clip(&routine, actor_entity, &q_children, &mut q_actors);
+                    // A cutscene motion's key is not an emote name: report the miss so
+                    // the session's hold releases, instead of playing a local clip.
+                    if let Some(actor) = cutscene_actor {
+                        motion_done.write(CutsceneMotionDone {
+                            actor,
+                            key: routine,
+                        });
+                    } else {
+                        play_local_emote_clip(&routine, actor_entity, &q_children, &mut q_actors);
+                    }
                     continue;
                 };
                 // B's clips join A's assets before the routine queues: the entity's
@@ -1519,6 +1566,7 @@ pub fn poll_action_dat_tasks(
                         .stages
                         .retain(|t| t.stage.kind != StageKind::CameraRoute);
                 }
+                active.cutscene_motion_actor = cutscene_actor;
                 if !active.stages.is_empty() {
                     queue_routine_on_actor_assets(
                         &assets,
@@ -1946,8 +1994,9 @@ fn actor_waist_byte(
 // the event script's actor choreography. 0x2C names a routine in the actor's own model DAT,
 // so it plays straight off the render component; 0x45 (non-fade) and 0x5B/0x66 name a
 // routine out of an event motion resource file, which loads through the action cache like
-// an emote. The session already armed the VM's WAIT* holds from the DAT-authored lengths,
-// so this system only plays what it is told; fades stay in cutscene.rs.
+// an emote. The session parks the VM's WAIT* on a pending hold this system's finish
+// report releases (the DAT-authored length is the hold's deadline), so every path that
+// cannot start a motion reports done; fades stay in cutscene.rs.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn dispatch_cutscene_motion(
     events: Res<crate::snapshot::EventLog>,
@@ -2037,6 +2086,7 @@ pub fn dispatch_cutscene_motion(
                         target_id,
                         routine: tag,
                         duration,
+                        cutscene_actor: Some(actor),
                     },
                 );
             }
@@ -2066,8 +2116,9 @@ pub fn dispatch_cutscene_motion(
                     },
                 );
                 match (owned, motion) {
-                    (Some(active), _) => {
+                    (Some(mut active), _) => {
                         let target_entity = tracked.by_id.get(&target_id).copied();
+                        active.cutscene_motion_actor = Some(actor);
                         if queue_active_scheduler(
                             actor_entity,
                             active,
@@ -2100,6 +2151,7 @@ pub fn dispatch_cutscene_motion(
                                 target_id,
                                 routine: key,
                                 duration: ffxi_event::SCHEDULER_DURATION_FROM_DAT,
+                                cutscene_actor: Some(actor),
                             },
                         );
                     }
@@ -2124,6 +2176,7 @@ pub fn dispatch_cutscene_motion(
                                 b,
                                 routine: key,
                                 duration: ffxi_event::SCHEDULER_DURATION_FROM_DAT,
+                                cutscene_actor: Some(actor),
                             },
                         );
                     }
@@ -2147,6 +2200,7 @@ pub fn dispatch_cutscene_motion(
                         target_id,
                         routine: key,
                         duration: ffxi_event::SCHEDULER_DURATION_FROM_DAT,
+                        cutscene_actor: Some(actor),
                     },
                 );
             }
@@ -3339,6 +3393,7 @@ pub fn dispatch_entity_emoted(
                                 target_id,
                                 routine,
                                 duration: ffxi_event::SCHEDULER_DURATION_FROM_DAT,
+                                cutscene_actor: None,
                             },
                         );
                         continue;

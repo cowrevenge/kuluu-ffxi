@@ -166,9 +166,7 @@ fn main() {
         }
         for (cat, n) in &by_cat {
             let (v, top_n) = top[cat];
-            println!(
-                "  {cat:16} x{n:>6}  (most common value {v:#010x} x{top_n})"
-            );
+            println!("  {cat:16} x{n:>6}  (most common value {v:#010x} x{top_n})");
         }
         println!("  {total:>16} total");
     }

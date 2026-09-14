@@ -356,8 +356,14 @@ fn write_summary(out_dir: &Path, tally: &Tally, stop_reason: &str) {
     push_line(&mut s, &format!("stop reason: {stop_reason}"));
     push_line(&mut s, &format!("stages: {:?}", tally.stages_seen));
     push_line(&mut s, &format!("InZone at {}", secs_opt(tally.inzone_at)));
-    push_line(&mut s, &format!("CutsceneStarted at {}", secs_opt(tally.cutscene_started_at)));
-    push_line(&mut s, &format!("EventEnded at {}", secs_opt(tally.event_ended_at)));
+    push_line(
+        &mut s,
+        &format!("CutsceneStarted at {}", secs_opt(tally.cutscene_started_at)),
+    );
+    push_line(
+        &mut s,
+        &format!("EventEnded at {}", secs_opt(tally.event_ended_at)),
+    );
     push_line(&mut s, &format!("cues_total: {}", tally.cues_total));
     if let Some(a) = &tally.auto_skipped_line {
         push_line(&mut s, &format!("AUTO-SKIP LINE: {a}"));

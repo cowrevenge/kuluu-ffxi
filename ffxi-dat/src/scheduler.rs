@@ -1918,7 +1918,8 @@ mod vehicle_contract_tests {
         let Some(root) = DatRoot::from_env_or_default().ok() else {
             return;
         };
-        let file = crate::zone_dat::zone_id_to_mzb_file_id(168).expect("zone 168 maps to a model DAT");
+        let file =
+            crate::zone_dat::zone_id_to_mzb_file_id(168).expect("zone 168 maps to a model DAT");
         for key in [b"215s", b"220a"] {
             assert_eq!(
                 zone_scene_file_id(&root, 168, *key),
@@ -1935,7 +1936,8 @@ mod vehicle_contract_tests {
         let Some(root) = DatRoot::from_env_or_default().ok() else {
             return;
         };
-        let file = crate::zone_dat::zone_id_to_mzb_file_id(32).expect("zone 32 maps to a model DAT");
+        let file =
+            crate::zone_dat::zone_id_to_mzb_file_id(32).expect("zone 32 maps to a model DAT");
         assert_eq!(zone_scene_file_id(&root, 32, *b"lwon"), Some(file));
     }
 
@@ -1947,8 +1949,10 @@ mod vehicle_contract_tests {
         let Some(root) = DatRoot::from_env_or_default().ok() else {
             return;
         };
-        let own = crate::zone_dat::zone_id_to_mzb_file_id(242).expect("zone 242 maps to a model DAT");
-        let partner = crate::zone_dat::zone_id_to_mzb_file_id(170).expect("zone 170 maps to a model DAT");
+        let own =
+            crate::zone_dat::zone_id_to_mzb_file_id(242).expect("zone 242 maps to a model DAT");
+        let partner =
+            crate::zone_dat::zone_id_to_mzb_file_id(170).expect("zone 170 maps to a model DAT");
         assert_ne!(own, partner, "242 and 170 are distinct zones");
         assert_eq!(
             zone_scene_file_id(&root, 242, *b"hshi"),

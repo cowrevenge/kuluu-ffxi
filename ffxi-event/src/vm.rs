@@ -1928,10 +1928,7 @@ mod tests {
         owner_a.actor = NPC_SERVER_ID;
         // Owner B's entry sits mid-bytecode, so the entry must be the block's
         // own offset, not the master's.
-        let mut owner_b = block(
-            vec![OP_END, OP_EVENTHIDE, 1, 0, 0, 0, 0, OP_END],
-            vec![],
-        );
+        let mut owner_b = block(vec![OP_END, OP_EVENTHIDE, 1, 0, 0, 0, 0, OP_END], vec![]);
         owner_b.actor = NPC_SERVER_ID + 1;
         owner_b.event_ids = vec![5, 7];
         owner_b.event_offsets = vec![0, 1];
@@ -1993,7 +1990,11 @@ mod tests {
             "the master's END must not end the event while an owner is running"
         );
         e.tick(0.5);
-        assert_eq!(e.step(), StepResult::Waiting, "halfway through owner B's wait");
+        assert_eq!(
+            e.step(),
+            StepResult::Waiting,
+            "halfway through owner B's wait"
+        );
         e.tick(0.6);
         assert_eq!(
             e.step(),
@@ -2421,9 +2422,7 @@ mod tests {
             "an accepted 0x66 must arm the same-batch hold"
         );
         // Refused (Type 2, a standard-model NPC): no cue, no hold.
-        assert!(
-            cues_of_with_types(OP_LOADEXTSCHEDULER2, &o, vec![PACKAGE], &types(2)).is_empty()
-        );
+        assert!(cues_of_with_types(OP_LOADEXTSCHEDULER2, &o, vec![PACKAGE], &types(2)).is_empty());
         assert!(
             !wait_after_loader_parks(OP_LOADEXTSCHEDULER2, &o, &types(2)),
             "a refused 0x66 must arm no hold"

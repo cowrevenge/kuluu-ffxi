@@ -100,7 +100,10 @@ fn census_xim20(bytes: &[u8]) -> WalkCensus {
         if body_end > bytes.len() {
             out.fail(
                 cursor,
-                format!("truncated at chunk {cursor}: need {total} bytes, {} left", bytes.len() - cursor),
+                format!(
+                    "truncated at chunk {cursor}: need {total} bytes, {} left",
+                    bytes.len() - cursor
+                ),
             );
             break;
         }
@@ -194,7 +197,10 @@ fn main() {
             retail.cameras - retail.camera_parse_errors,
             retail.camera_parse_errors
         ));
-        push(&format!("  retail attach: [{}]", fmt_attach(&retail.attach)));
+        push(&format!(
+            "  retail attach: [{}]",
+            fmt_attach(&retail.attach)
+        ));
         if let Some((off, err)) = &retail.first_error {
             push(&format!("  retail first error @ {off}: {err}"));
         }
@@ -298,7 +304,10 @@ fn main() {
         "files: {}  files with 0x06: {camera_files}  total 0x06: {total_cameras}  attached (info != 0): {total_attached}  walk errors: {walk_errors}",
         files.len()
     ));
-    push(&format!("attach distribution: [{}]", fmt_attach(&attach_dist)));
+    push(&format!(
+        "attach distribution: [{}]",
+        fmt_attach(&attach_dist)
+    ));
     let mode_str = mode_dist
         .iter()
         .map(|(m, n)| format!("mode {m} x{n}"))

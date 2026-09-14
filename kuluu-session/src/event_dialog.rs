@@ -2453,8 +2453,11 @@ pub(crate) mod tests {
         // The synthetic root resolves the zone's own model DAT (zone 248's
         // mzb file id) to the one-chunk routine of `frames` length.
         let frames = 60u16;
-        let (_dir, root) =
-            motion_dat_root(ffxi_dat::zone_dat::zone_id_to_mzb_file_id(ZONE).expect("zone 248"), KEY, frames);
+        let (_dir, root) = motion_dat_root(
+            ffxi_dat::zone_dat::zone_id_to_mzb_file_id(ZONE).expect("zone 248"),
+            KEY,
+            frames,
+        );
         let mut program = vec![0x2D];
         program.extend(NPC.to_le_bytes()); // actor1 @1
         program.extend(0u32.to_le_bytes()); // actor2 @5

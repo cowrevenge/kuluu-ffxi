@@ -19,7 +19,9 @@ fn main() {
 
     let root = DatRoot::from_env_or_default().expect("DatRoot");
 
-    let loc = ffxi_dat::event_locate::zone_id_to_event_location(zone).expect("event DAT mapping");
+    let loc = root
+        .resolve(ffxi_dat::event_locate::event_dat_file_id(zone))
+        .expect("resolve event DAT");
     let bytes = std::fs::read(loc.path_under(&root)).expect("read event DAT");
     let dat = EventDat::parse(&bytes).expect("parse event DAT");
 

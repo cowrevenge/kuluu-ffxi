@@ -11,7 +11,7 @@ use ffxi_dat::archive::{open_test_install, workspace_target, CLIENT_TARGET_ENV, 
 use ffxi_dat::client_profile::{ItemBlockLayout, KNOWN_CLIENTS};
 use ffxi_dat::dmsg::{EmoteTextDat, StringDat, EMOTE_TEXT_SUB_PATH, MARKER_KEY_ITEM};
 use ffxi_dat::event_dat::EventDat;
-use ffxi_dat::event_locate::{zone_id_to_event_location, EVENT_DAT_LOCATIONS};
+use ffxi_dat::event_locate::{event_dat_file_id, event_dat_zones};
 use ffxi_dat::ftable::FTABLE_BYTES_PER_FILE_ID;
 use ffxi_dat::item_dat::{ItemTable, ITEM_DAT_ROM_PATHS};
 use ffxi_dat::main_dll::MainDll;
@@ -486,8 +486,11 @@ fn event_dats_parse_and_pashhow_scripts_the_vendor_on_tahmasp() {
     let mut parsed = 0usize;
     let mut missing = Vec::new();
     let mut unparsed = Vec::new();
-    for &(zone, _, _, _) in EVENT_DAT_LOCATIONS {
-        let loc = zone_id_to_event_location(zone).expect("table entry locates");
+    let zones = event_dat_zones(&root);
+    for &zone in &zones {
+        let loc = root
+            .resolve(event_dat_file_id(zone))
+            .expect("listed zone locates");
         let path = loc.path_under(&root);
         let Ok(bytes) = std::fs::read(&path) else {
             missing.push((zone, path));
@@ -502,14 +505,13 @@ fn event_dats_parse_and_pashhow_scripts_the_vendor_on_tahmasp() {
     assert!(
         parsed >= MIN_PARSED_EVENT_ZONES,
         "{parsed} of {} event DATs parse, expected at least {MIN_PARSED_EVENT_ZONES}: {unparsed:?}",
-        EVENT_DAT_LOCATIONS.len()
+        zones.len()
     );
-    eprintln!(
-        "event: {parsed}/{} zone event DATs parse",
-        EVENT_DAT_LOCATIONS.len()
-    );
+    eprintln!("event: {parsed}/{} zone event DATs parse", zones.len());
 
-    let loc = zone_id_to_event_location(PASHHOW_MARSHLANDS).expect("Pashhow event DAT");
+    let loc = root
+        .resolve(event_dat_file_id(PASHHOW_MARSHLANDS))
+        .expect("Pashhow event DAT");
     let bytes = std::fs::read(loc.path_under(&root)).expect("Pashhow event DAT readable");
     let dat = EventDat::parse(&bytes).expect("Pashhow event DAT parses");
     let tahmasp = dat

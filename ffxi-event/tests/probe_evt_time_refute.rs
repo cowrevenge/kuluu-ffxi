@@ -40,7 +40,7 @@ fn probe_wait_operand_distribution() {
     let mut zones = 0usize;
 
     for zone in 1u16..=300 {
-        let Some(eloc) = ffxi_dat::event_locate::zone_id_to_event_location(zone) else {
+        let Ok(eloc) = root.resolve(ffxi_dat::event_locate::event_dat_file_id(zone)) else {
             continue;
         };
         let Ok(bytes) = std::fs::read(eloc.path_under(&root)) else {

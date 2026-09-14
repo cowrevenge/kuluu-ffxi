@@ -1055,12 +1055,16 @@ fn substitute_param_marker(
 
 fn load_event_dat(root: Option<&DatRoot>, zone: u16) -> Option<EventDat> {
     let root = root?;
-    let Some(loc) = ffxi_dat::event_locate::zone_id_to_event_location(zone) else {
-        tracing::warn!(
-            zone,
-            "no event DAT mapping for zone; NPC dialog disabled for this zone"
-        );
-        return None;
+    let loc = match root.resolve(ffxi_dat::event_locate::event_dat_file_id(zone)) {
+        Ok(loc) => loc,
+        Err(e) => {
+            tracing::warn!(
+                zone,
+                error = %e,
+                "no event DAT for zone; NPC dialog disabled for this zone"
+            );
+            return None;
+        }
     };
     let path = loc.path_under(root);
     let bytes = match std::fs::read(&path) {

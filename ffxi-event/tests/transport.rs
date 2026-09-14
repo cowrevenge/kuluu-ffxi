@@ -14,7 +14,9 @@ const MAX_STEPS: usize = 1000;
 
 fn dat(zone: u16) -> Option<Arc<EventDat>> {
     let root = DatRoot::from_env_or_default().ok()?;
-    let loc = ffxi_dat::event_locate::zone_id_to_event_location(zone)?;
+    let loc = root
+        .resolve(ffxi_dat::event_locate::event_dat_file_id(zone))
+        .ok()?;
     let bytes = std::fs::read(loc.path_under(&root)).ok()?;
     Some(Arc::new(EventDat::parse(&bytes).unwrap()))
 }

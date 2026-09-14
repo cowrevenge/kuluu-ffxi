@@ -626,6 +626,8 @@ pub struct SoundEvent {
 /// The entrance/instance zone pairs whose 0x2D MAPSCHEDULOR keys resolve in the
 /// partner zone's model DAT rather than their own (fixToDo/Fix9.md corpus scan:
 /// 27 "another zone's model DAT" pairs, the clean instance/entrance pairs below).
+/// Hand-built table from that single corpus scan: retail's loader rule for the
+/// partner fallback is unknown, and these five pairs are the observed clean cases.
 const ZONE_SCENE_PARTNERS: [(u16, u16); 5] = [
     (242, 170), // Heavens' Tower -> Full Moon Fountain
     (194, 192), // Outer Horutoto Ruins -> Inner Horutoto Ruins
@@ -636,7 +638,8 @@ const ZONE_SCENE_PARTNERS: [(u16, u16); 5] = [
 
 /// The handful of non-model files that carry 0x2D scene keys no per-zone slot owns
 /// (fixToDo/Fix9.md: the Spire of Holla/Dem/Mea, Sealion's Den and Al'Taieu scene
-/// families, `sc11..sc41` / `kc51..kc54` / `kci1..kci4`).
+/// families, `sc11..sc41` / `kc51..kc54` / `kci1..kci4`). Hand-built list from the
+/// same corpus scan; retail's loader rule for these is unknown.
 const NON_MODEL_SCENE_CARRIERS: [u32; 5] = [
     641,   // ROM/3/48.DAT
     30705, // ROM/123/85.DAT

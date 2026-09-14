@@ -28,7 +28,7 @@ phase history for event 503 specifically.
 | **30834** | `ROM/62/82.DAT` | camera routines `sNNN` (file operand 130 + base 30704); c043 verified: 2-point linear dolly, 600 frames |
 | **30904** | `ROM/62/110.DAT` | fades `fdi1/fdo1/fdi2/fdo2` + overlay `ovl1` (operand 200) |
 | **30912** | `ROM/94/123.DAT` | camera routes `vNNN` / `s004` (operand 208) |
-| **32124** | — | gesture TPC package: `tlk0/thk1` talk-think gestures (`0x66`, operand 20 + base 32104) |
+| **32732** | `ROM/72/87.DAT` | gesture TPC package A: `tlk0/thk1` talk-think gestures (`0x66`, operand 20 → band-1 A = 20 + 32712; the B container is selected by waist, Fix 1 `9168480`) |
 
 ## Hold legend — what gates each step
 
@@ -73,7 +73,7 @@ Pattern per beat: camera routine + fade in → hold both → NARRATION → `[IN]
 - **C6** SHOW the guard; LOOK_AT guard→player; three staged SET_FACING turns with `[W 60]` between each (he turns to face you).
 - **C7** LOOKAT choreography; REQSET 0xDC tag4 + guard tag11; PLAYER WALKS once more; REQWAIT ×2.
 
-## D. GUARD DIALOGUE (+03DAE–+03DD4) — every line bracketed by his gestures from 32124
+## D. GUARD DIALOGUE (+03DAE–+03DD4) — every line bracketed by his gestures from 32732
 
 - **D1** REQSET guard tag15 → his block loads `tlk0`. SHOW HUD; restore SFX volume. *"I say! Watch where you're going!"* `[IN]`
 - **D2** REQSET guard tag17 → `thk1`. *"Oh, a new recruit, are you? That explains it!"* `[IN]`
@@ -141,7 +141,7 @@ Pattern per beat: camera routine + fade in → hold both → NARRATION → `[IN]
 - ~40 REQSET/REQEW fan-outs + ~15 REQWAITs on scene actor stacks
 - 28× `0x45` scheduler loads: sNNN ×9 (30834), fdi/fdo ×~16 (30904), ovl1, vNNN/s004 ×~17 (30912)
 - ~30× `0x55` WAITLOADSCHEDULER holds — every one host-armed from DAT-authored lengths; duration operand = 0 everywhere
-- `0x66` gesture loads on every guard line (32124 tlk0/thk1)
+- `0x66` gesture loads on every guard line (32732 tlk0/thk1)
 - ~45 MESWAIT/QUERYWAIT input gates, 2 QUERY_MENUs (one nested), 1 MAP_TUTORIAL/MAP_MARKER pair, item handoff id 536
 - 8× MOVE start/wait pairs (player walk-ins + guard/party walks), SET_SPEED before each
 - 1 STOP_CLOCK / 1 RESTORE_CLOCK, 1 HIDE_HUD / 1 SHOW_HUD, DEFCAMERA take/release, EXECEND → EVENT_END(EndPara=choice)
@@ -169,7 +169,7 @@ Evidence is `crate/file.rs:line` unless noted. Offsets are into the master block
 
 ## Skip-to-end root cause → code is GREEN; runtime is ?
 The WAIT* chain is correct and unit-tested, end to end:
-- 0x45/0x66 push `(actor,key)` to `pending_action_starts` + emit cue (`vm.rs:1064,1143`); host arms the real
+- 0x45/0x66 push `(actor,key)` to `pending_action_starts` + emit cue (`vm.rs:1064,1143`); 0x5B/0x66 gate on the actor's entity Type (0x66 → {0,1,6}, 0x5B → {1,2,7,8}; a refusal is a silent no-op, B6 `64d7268`); host arms the real
   hold from the DAT length via `arm_motion_holds`→`routine_units` (`event_dialog.rs:1303`).
 - 0x53/0x54/0x55 park while `action_running` = real armed hold **or** same-batch bridge (`vm.rs:616,1082-1115`);
   the bridge is spent by `take_cues()` and each later `step()` (`vm.rs:547,733`).
@@ -195,7 +195,7 @@ The WAIT* chain is correct and unit-tested, end to end:
 | B1–B8 camera+fade beats | `LOADEVENTSCHEDULER2` sNNN/fdi/fdo + WAITLOADSCHEDULER | **GREEN** (holds) / see fades note | camera task + fade via Scheduler cue; holds arm from DAT length. NOTE: hold order is fade-first then camera-after-[IN] (+03834 waits fdi1, +03858 waits s043) |
 | B4/C6/E1 show-hide NPCs | `EVENT_HIDE` 0x4E (many) | **GREEN** | render arm in `scheduler_runtime.rs apply_cutscene_actor_cues` inserts/releases `CutsceneHidden`, coexisting with distance-cull; test `actor_hide_cue_hides_the_entity_and_unhide_releases_it` |
 | C/D/E/F moves+faces+lookat | MOVE/PLACE/FACE/LOOKAT/STOPACTION | **GREEN** | real handlers `scheduler_runtime.rs:1925-2021` |
-| D guard gestures | `LOADEXTSCHEDULER2` 0x66 tlk0/thk1 (32124) | **GREEN** | ExtScheduler plays gestures on actors (`scheduler_runtime.rs:1761`) |
+| D guard gestures | `LOADEXTSCHEDULER2` 0x66 tlk0/thk1 (32732) | **GREEN** | ExtScheduler plays gestures on actors (`scheduler_runtime.rs:1761`) |
 | G menu + nested menu | QUERY_MENU/QUERYWAIT | **GREEN** | `select_choice`→WZ[0] (`vm.rs:530`); UI chain to EndEventChoice verified. EndPara WZ[1]-vs-WZ[0]: **resolved NOT-A-BUG** — see below |
 | H1 open map+marker | `MAP_TUTORIAL`/`MAP_MARKER` | **GREEN** | emit MapOpen/MapMarker cues; new `kuluu/src/view_native/text_input/event_map.rs` opens the map screen with tutorial + "Ailevia" marker (5 tests) |
 | H2 give item 536 + say | GET_STORE→WZ[2] + PRINT_MSG (\x01\x05 inline name) | **GREEN** (decode) | real-DAT test pins the entry to `{Item:0}` — tag `01 05 23 82 80` = item kind, param-ref → slot 0; trailing byte drops (`ffxi-dat dmsg.rs real_zone230_event503_coupon_line_decodes_item_marker`). Name resolution: `{Item:N}` fills from event-start params (`event_dialog.rs substitute_entity_names`); event 503 starts via s2c 0x32 with no params, so kuluu leaves the marker visible. Retail's 0x2B handler passes no message params either (research/XiEvents/OpCodes/0x002B.md) and GET_STORE wrote WZ[2] while the tag references slot 0 — no locally-grounded mechanism renders "Adventurer's Coupon" here; documented as known deviation. The coupon grant itself is server-side (`vendor/server/scripts/quests/hiddenQuests/New_Character_Cutscenes.lua onEventFinish[503]`) |
@@ -241,7 +241,7 @@ stalls are gone:
   (v017…v016 / v00a–v00c), s004, fdo2/fdi2 — matches sections A–H exactly.
 - **camera lock take=true AND release=true** (`CameraLock{true}` @3109 ms, `{false}` @214076 ms) — H7 DEFCAMERA case 0
   now fires both; the earlier run's `release=false` is resolved.
-- gestures(32124): tlk0/thk1 loaded on every guard line ✓ · actor moves: 49 ✓
+- gestures(32732): tlk0/thk1 loaded on every guard line ✓ · actor moves: 49 ✓
 - map open + marker **"Ailevia"** + close ✓ (H1/H3) · item **536 → slot 6** ✓ (onEventFinish reward)
 - `event_ended` fires @216099 ms.
 
@@ -542,7 +542,7 @@ auto-flows.
 | C2 | v017 (player walk) | +03C83 | — none — | none | auto +03CB0 |
 | C3 | v000 + ovl1 | +03CDE / +03CCD | — none — | none | auto +03CEF / +03CFE |
 | C5 | v001 (player walk) | +03D16 | — none — | none | auto +03D37 |
-| D1–D3 | (guard gestures, 32124 tlk0/thk1) | — | 7677 @ +03DAE, 7678 @ +03DBD, 7679 @ +03DCC | **MW +03DB5 / +03DC4 / +03DD3** | n/a (no camera beat) |
+| D1–D3 | (guard gestures, 32732 tlk0/thk1) | — | 7677 @ +03DAE, 7678 @ +03DBD, 7679 @ +03DCC | **MW +03DB5 / +03DC4 / +03DD3** | n/a (no camera beat) |
 | E1 | — | — | 7680 "Wait, the expedition has returned." @ +03E08 | **MW +03E0F** | n/a |
 | E3 | v003 → v004 | +03E49 / +03E6C | — none — | none | auto +03E5A / +03EA0 (`WAIT 60` + `WAIT 170`) |
 | E4 | — | — | 7681 "Halt! I must inspect your ranks..." @ +03EB9 | **MW +03EC0** | n/a |

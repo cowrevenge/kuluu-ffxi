@@ -466,6 +466,7 @@ impl EventVm {
         };
         let mut child = EventVm::start_at(block, entry as usize, self.speaker_index, self.params());
         child.work_zone = self.work_zone;
+        child.actor_types = self.actor_types.clone();
         child.attach_scene(dat, actor, player);
         let stacks = &mut self.scene.as_mut().unwrap().stacks;
         match stacks.iter_mut().find(|s| s.actor == actor) {
@@ -507,6 +508,7 @@ impl EventVm {
         };
         let mut child = EventVm::start_at(block, entry, self.speaker_index, self.params());
         child.work_zone = self.work_zone;
+        child.actor_types = self.actor_types.clone();
         child.attach_scene(dat, actor, player);
         let stacks = &mut self.scene.as_mut().unwrap().stacks;
         match stacks.iter_mut().find(|s| s.actor == actor) {

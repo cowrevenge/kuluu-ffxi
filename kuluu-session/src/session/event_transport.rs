@@ -139,6 +139,11 @@ pub(super) fn receive(
                         ..Default::default()
                     }),
                 );
+                // The 0x5B/0x66 gate's input: the entity Type byte this 0x0E's
+                // SubKind dispatch writes (decode::LookData::retail_type).
+                if let Some(t) = decode::LookData::retail_type(sub.opcode, sub.data) {
+                    dialog.note_entity_type(head.unique_no, head.act_index, t);
+                }
             }
         }
         map::s2c::EVENTUCOFF => match super::eventucoff_mode_of(sub.data) {

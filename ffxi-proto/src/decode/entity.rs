@@ -569,6 +569,35 @@ impl LookData {
         }
     }
 
+    /// The retail entity Type byte (ent+0xEE) this 0x0E payload's SubKind
+    /// dispatch writes — the input the 0x5B/0x66 motion resource readers' load
+    /// gate reads (Cow_doc/disassmembly_docs/event_vm.md §10: the word at
+    /// [`Self::LOOK_BODY_OFFSET`] & 7 selects the eight-entry jump table; the
+    /// vendored XiClient's RecvCharNpc switch mirrors it,
+    /// research/XiClient/src/XIClient/source/Game/Net/Packets/s2c/0x00E.cpp).
+    /// CHAR_PC sets Type 0.
+    pub fn retail_type(opcode: u16, body: &[u8]) -> Option<u8> {
+        use crate::map::s2c;
+        if opcode == s2c::CHAR_PC {
+            return Some(0);
+        }
+        if opcode != s2c::CHAR_NPC {
+            return None;
+        }
+        let off = Self::LOOK_BODY_OFFSET;
+        let size = u16::from_le_bytes(body.get(off..off + 2)?.try_into().ok()?);
+        Some(match size & 7 {
+            0 => 2,
+            1 => 1,
+            2 => 3,
+            3 => 4,
+            4 => 5,
+            5 => 6,
+            6 => 7,
+            _ => 8,
+        })
+    }
+
     pub const CHAR_PC_GRAP_OFFSET: usize = 0x44;
 
     /// `GP_SERV_COMMAND_GRAP_LIST::PacketData` opens with `GrapIDTbl`

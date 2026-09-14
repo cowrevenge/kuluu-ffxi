@@ -157,6 +157,13 @@ impl DialogRunner {
         self.vm.hold_action(actor, key, units);
     }
 
+    /// Replace the entity Type table the 0x5B/0x66 gate reads; see
+    /// [`EventVm::set_actor_types`]. The session calls this with its current
+    /// map before every drive.
+    pub fn set_actor_types(&mut self, types: &std::collections::HashMap<u32, u8>) {
+        self.vm.set_actor_types(types);
+    }
+
     /// Arm the 0x2C SCHEDULOR hold the WAIT* family parks on until the
     /// renderer reports the routine finished; see
     /// [`EventVm::hold_action_pending`]. The session calls this when it

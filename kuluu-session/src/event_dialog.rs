@@ -149,6 +149,11 @@ pub struct DialogSession {
     /// zone-in, in event coordinates: the source for MOVE hold lengths while a
     /// scene walks its actors.
     entity_positions: std::collections::HashMap<u32, ffxi_event::vm::scene::EventPosition>,
+    /// The retail entity Type byte (ent+0xEE) of every 0x0E'd entity, keyed by
+    /// the entity's server id and target index: the input the VM's 0x5B/0x66
+    /// load gate reads (Cow_doc/disassmembly_docs/event_vm.md §10). Fed from
+    /// [`crate::session::event_transport::receive`]; an absent entry is Type 0.
+    entity_types: std::collections::HashMap<u32, u8>,
     /// Motion holds awaiting the renderer's finish report, keyed by the wire
     /// actor the cue named plus its key: the value is the VM's own unresolved
     /// lookup (for the release), the count of outstanding issues for the pair
@@ -183,6 +188,7 @@ impl DialogSession {
             fishing: std::collections::HashMap::new(),
             routine_lengths: std::collections::HashMap::new(),
             entity_positions: std::collections::HashMap::new(),
+            entity_types: std::collections::HashMap::new(),
             pending_motion_holds: std::collections::HashMap::new(),
             message_was_up: false,
         }
@@ -260,6 +266,7 @@ impl DialogSession {
         let Some(mut runner) = DialogRunner::start(block, event_id, act_index, params) else {
             return undriveable(UndriveableReason::NoEventEntry);
         };
+        runner.set_actor_types(&self.entity_types);
         if let Some(position) = self.player_position {
             runner.attach_scene(dat.clone(), block.actor, position);
             // Multi-entity events run every owner block in parallel from event
@@ -425,6 +432,7 @@ impl DialogSession {
     }
 
     fn drive(&mut self, step: impl FnOnce(&mut DialogRunner, &StringDat) -> DialogStep) -> Advance {
+        let types = self.entity_types.clone();
         let (Some(strings), Some(runner), Some(active)) = (
             self.strings.as_ref(),
             self.runner.as_mut(),
@@ -437,6 +445,7 @@ impl DialogSession {
             };
         };
         let event_entity = active.unique_no;
+        runner.set_actor_types(&types);
         let outcome = step(runner, strings);
         let final_position = runner.controlled_position();
         self.scene_actions.extend(runner.take_scene_actions());
@@ -499,6 +508,15 @@ impl DialogSession {
         position: ffxi_event::vm::scene::EventPosition,
     ) {
         self.entity_positions.insert(id, position);
+    }
+
+    /// Remember the retail entity Type byte a 0x0E assigned to an entity,
+    /// under both its server id and target index: the VM's 0x5B/0x66 gate
+    /// resolves a named actor to one of those keys (retail's GetActorIndex,
+    /// research/XiEvents/Event VM Functions.md).
+    pub fn note_entity_type(&mut self, unique_no: u32, act_index: u16, type_: u8) {
+        self.entity_types.insert(unique_no, type_);
+        self.entity_types.insert(act_index as u32, type_);
     }
 
     pub fn controls_player_position(&self) -> bool {
@@ -2387,6 +2405,10 @@ pub(crate) mod tests {
             blocks: vec![block],
         }));
         session.strings = Some(StringDat::parse(&synth_dat(&[b"test"])).unwrap());
+        // The 0x5B gate loads only for entity Type {1,2,7,8}; feed the NPC's
+        // Type the way a 0x0E CHAR_NPC would, under its target index (the
+        // server id's low 10 bits, retail's GetActorIndex).
+        session.note_entity_type(NPC, (NPC & 0x3FF) as u16, 2);
         let trigger = EventTrigger {
             event_zone: ZONE,
             text_zone: ZONE,

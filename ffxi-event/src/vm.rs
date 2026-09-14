@@ -390,6 +390,12 @@ pub struct EventVm {
     /// Host-armed move holds a non-player MOVE case 1 parks on; see
     /// [`MoveHold`].
     move_holds: Vec<MoveHold>,
+    /// The retail entity Type byte (ent+0xEE) of the actors this VM's
+    /// 0x5B/0x66 opcodes name, keyed by the actor's server id and target
+    /// index: the gate both motion resource readers apply before loading
+    /// (Cow_doc/disassmembly_docs/event_vm.md §4.2–4.3, §10). An absent
+    /// entry is Type 0 — retail's value when the entity has no back-ptr.
+    actor_types: std::collections::HashMap<u32, u8>,
     /// Actions this VM's own 0x45/0x5B opcodes started within the current step,
     /// before the host has drained the cues and armed their holds. They bridge a
     /// loader to its WAIT* when both run in one pass; [`Self::take_cues`] and the
@@ -558,6 +564,7 @@ impl EventVm {
             req_wait: None,
             action_holds: Vec::new(),
             move_holds: Vec::new(),
+            actor_types: std::collections::HashMap::new(),
             pending_action_starts: Vec::new(),
             pending_action_holds: Vec::new(),
             parked_on_action_hold: false,
@@ -699,6 +706,41 @@ impl EventVm {
         let actor = self.resolve_hold_actor(actor);
         self.pending_action_holds
             .retain(|(a, k)| !(a == &actor && k == &key));
+    }
+
+    /// Replace the entity Type table the 0x5B/0x66 gate reads (see
+    /// [`Self::actor_type`]). The session calls this with its current map
+    /// before every drive, so a late 0x0E lands before the next step.
+    pub fn set_actor_types(&mut self, types: &std::collections::HashMap<u32, u8>) {
+        self.actor_types = types.clone();
+    }
+
+    /// The retail entity Type byte (ent+0xEE) the 0x5B/0x66 gate applies to
+    /// `actor` (Cow_doc/disassmembly_docs/event_vm.md §4.2–4.3, §10): 0x5B
+    /// loads only for Type {1,2,7,8}, 0x66 only for {0,1,6}. Resolution stays
+    /// in the hold-actor space: the local player is CHAR_PC (Type 0), the
+    /// event-entity selector and the default-handler fallback resolve to the
+    /// running scene's actor (falling back to the speaker's target index when
+    /// no scene is attached), and a literal server id resolves to its target
+    /// index. Anything else — party/alliance selectors, an entity the host
+    /// never 0x0E'd — is Type 0, retail's value when the entity has no
+    /// back-ptr.
+    fn actor_type(&self, actor: ActorLookup) -> u8 {
+        if actor.is_local_player() {
+            return 0;
+        }
+        if actor.is_event_entity() {
+            return self
+                .scene
+                .as_ref()
+                .and_then(|s| self.actor_types.get(&s.actor).copied())
+                .or_else(|| self.actor_types.get(&(self.speaker_index as u32)).copied())
+                .unwrap_or(0);
+        }
+        actor
+            .target_index()
+            .and_then(|t| self.actor_types.get(&(t as u32)).copied())
+            .unwrap_or(0)
     }
 
     /// Arm a move hold on `actor` lasting `units` (1/60 s, the same clock as
@@ -1208,6 +1250,8 @@ impl EventVm {
                 // and execution moves on. 0x66 is the Tpc form: the package number
                 // names two containers (A + a CIB-waist-selected B) instead of one
                 // banded file id, and an out-of-range package loads nothing.
+                // Each load is additionally gated on actor1's entity Type byte
+                // (0x5B: {1,2,7,8}, 0x66: {0,1,6}); a refused load arms nothing.
                 OP_LOADEXTSCHEDULER | OP_LOADEXTSCHEDULER2 => {
                     let tpc = op == OP_LOADEXTSCHEDULER2;
                     let operand = self.getworkofs(LOADEXTSCHEDULER_FILE_OFS, 0);
@@ -1217,8 +1261,17 @@ impl EventVm {
                         Some(ExtSchedulerMotion::Event(event_motion_dat_id(operand)))
                     };
                     let key = self.fourcc_at(LOADEXTSCHEDULER_KEY_OFS);
-                    if key != [0; 4] && key != NO_ACTION_KEY {
-                        let actor1 = ActorLookup(self.eventgetcode2(LOADEXTSCHEDULER_ACTOR1_OFS));
+                    let actor1 = ActorLookup(self.eventgetcode2(LOADEXTSCHEDULER_ACTOR1_OFS));
+                    // The gate runs before the key check, retail's order
+                    // (Cow_doc/disassmembly_docs/event_vm.md §4.1): a refused
+                    // load leaves no resource entry, so SetAction is a silent
+                    // no-op — no cue, no hold, still the full advance.
+                    let accepted = if tpc {
+                        matches!(self.actor_type(actor1), 0 | 1 | 6)
+                    } else {
+                        matches!(self.actor_type(actor1), 1 | 2 | 7 | 8)
+                    };
+                    if accepted && key != [0; 4] && key != NO_ACTION_KEY {
                         self.pending_action_starts
                             .push((self.resolve_hold_actor(actor1), key));
                         self.cues.push(EventCue::ExtScheduler {
@@ -2221,8 +2274,13 @@ mod tests {
         o.extend_from_slice(&LOOKUP_EVENT_ENTITY.to_le_bytes());
         o.extend_from_slice(&LOOKUP_EVENT_ENTITY.to_le_bytes());
         o.extend_from_slice(b"abcd");
+        // The 0x5B gate loads only for entity Type {1,2,7,8}; the bare test
+        // VM's event entity has no Type data, so install an accepted one under
+        // the vm() helper's speaker index (5).
+        let mut types = std::collections::HashMap::new();
+        types.insert(5u32, 2u8);
         assert_eq!(
-            cues_of(OP_LOADEXTSCHEDULER, &o, vec![FILE_OPERAND]),
+            cues_of_with_types(OP_LOADEXTSCHEDULER, &o, vec![FILE_OPERAND], &types),
             [EventCue::ExtScheduler {
                 motion: Some(ExtSchedulerMotion::Event(32104 + FILE_OPERAND)),
                 actor1: ActorLookup::EVENT_ENTITY,
@@ -2285,6 +2343,91 @@ mod tests {
                 "key {key:?} must not stage a motion"
             );
         }
+    }
+
+    /// The 0x5B gate (Cow_doc/disassmembly_docs/event_vm.md §4.2):
+    /// ReadEventMotionRes loads only for entity Type {1,2,7,8}. One accepted
+    /// and one refused Type, pinned on the cue and on the same-batch hold a
+    /// following 0x53 parks on.
+    #[test]
+    fn loadextscheduler_gates_on_the_entity_type() {
+        const FILE_OPERAND: u32 = 5;
+        let mut o = REF0.to_vec();
+        o.extend_from_slice(&LOOKUP_EVENT_ENTITY.to_le_bytes());
+        o.extend_from_slice(&LOOKUP_EVENT_ENTITY.to_le_bytes());
+        o.extend_from_slice(b"abcd");
+        let types = |t: u8| {
+            let mut m = std::collections::HashMap::new();
+            m.insert(5u32, t); // the vm() helper's speaker index
+            m
+        };
+        // Accepted (Type 2, a standard-model NPC): the cue lands and a 0x53 in
+        // the same pass parks on the same-batch start.
+        assert_eq!(
+            cues_of_with_types(OP_LOADEXTSCHEDULER, &o, vec![FILE_OPERAND], &types(2)),
+            [EventCue::ExtScheduler {
+                motion: Some(ExtSchedulerMotion::Event(32104 + FILE_OPERAND)),
+                actor1: ActorLookup::EVENT_ENTITY,
+                actor2: ActorLookup::EVENT_ENTITY,
+                key: *b"abcd",
+            }]
+        );
+        assert!(
+            wait_after_loader_parks(OP_LOADEXTSCHEDULER, &o, &types(2)),
+            "an accepted 0x5B must arm the same-batch hold"
+        );
+        // Refused (Type 0, the no-back-ptr value): no cue, and a 0x53 in the
+        // same pass falls through to END.
+        assert!(
+            cues_of_with_types(OP_LOADEXTSCHEDULER, &o, vec![FILE_OPERAND], &types(0)).is_empty()
+        );
+        assert!(
+            !wait_after_loader_parks(OP_LOADEXTSCHEDULER, &o, &types(0)),
+            "a refused 0x5B must arm no hold"
+        );
+    }
+
+    /// The 0x66 gate (Cow_doc/disassmembly_docs/event_vm.md §4.3):
+    /// ReadTpcEventMotionRes loads only for entity Type {0,1,6}.
+    #[test]
+    fn loadextscheduler2_gates_on_the_entity_type() {
+        const PACKAGE: u32 = 20;
+        let mut o = REF0.to_vec();
+        o.extend_from_slice(&LOOKUP_EVENT_ENTITY.to_le_bytes());
+        o.extend_from_slice(&LOOKUP_EVENT_ENTITY.to_le_bytes());
+        o.extend_from_slice(b"abcd");
+        let types = |t: u8| {
+            let mut m = std::collections::HashMap::new();
+            m.insert(5u32, t); // the vm() helper's speaker index
+            m
+        };
+        // Accepted (Type 6, a standard-model mob): the cue lands and a 0x53 in
+        // the same pass parks on the same-batch start.
+        assert_eq!(
+            cues_of_with_types(OP_LOADEXTSCHEDULER2, &o, vec![PACKAGE], &types(6)),
+            [EventCue::ExtScheduler {
+                motion: Some(ExtSchedulerMotion::Tpc(TpcMotionPackages {
+                    a: 32_732,
+                    b_set: 32_802,
+                    b_clear: 32_872,
+                })),
+                actor1: ActorLookup::EVENT_ENTITY,
+                actor2: ActorLookup::EVENT_ENTITY,
+                key: *b"abcd",
+            }]
+        );
+        assert!(
+            wait_after_loader_parks(OP_LOADEXTSCHEDULER2, &o, &types(6)),
+            "an accepted 0x66 must arm the same-batch hold"
+        );
+        // Refused (Type 2, a standard-model NPC): no cue, no hold.
+        assert!(
+            cues_of_with_types(OP_LOADEXTSCHEDULER2, &o, vec![PACKAGE], &types(2)).is_empty()
+        );
+        assert!(
+            !wait_after_loader_parks(OP_LOADEXTSCHEDULER2, &o, &types(2)),
+            "a refused 0x66 must arm no hold"
+        );
     }
 
     #[test]
@@ -2551,11 +2694,20 @@ mod tests {
         data
     }
 
+    /// The 0x5B gate's accepted Type for the bridge tests' literal actor,
+    /// installed under the target index retail's GetActorIndex resolves it to.
+    fn bridge_types(actor: u32) -> std::collections::HashMap<u32, u8> {
+        let mut m = std::collections::HashMap::new();
+        m.insert(actor & 0x3FF, 2u8);
+        m
+    }
+
     #[test]
     fn loadextscheduler_and_its_wait_in_one_batch_bridge_until_the_cues_drain() {
         const ACTOR: u32 = 0x010E_6032; // literal server id, resolves to itself
         let key: [u8; 4] = *b"abcd";
         let mut e = vm(loadextscheduler_then_wait_program(ACTOR, key), vec![5]);
+        e.set_actor_types(&bridge_types(ACTOR));
         assert_eq!(
             e.step(),
             StepResult::Waiting,
@@ -2574,6 +2726,7 @@ mod tests {
         const ACTOR: u32 = 0x010E_6032;
         let key: [u8; 4] = *b"abcd";
         let mut e = vm(loadextscheduler_then_wait_program(ACTOR, key), vec![5]);
+        e.set_actor_types(&bridge_types(ACTOR));
         assert_eq!(e.step(), StepResult::Waiting);
         // The host arms the hold from the drained cue; it takes over from the bridge.
         assert_eq!(e.take_cues().len(), 1);
@@ -3299,6 +3452,18 @@ mod tests {
     /// Run one choreography opcode (padded to its documented width) to END and
     /// return the cues it emitted.
     fn cues_of(op: u8, operands: &[u8], references: Vec<u32>) -> Vec<EventCue> {
+        cues_of_with_types(op, operands, references, &std::collections::HashMap::new())
+    }
+
+    /// [`cues_of`] with the entity Type table the 0x5B/0x66 gate reads
+    /// installed before the step: a bare VM has no Type data, and an absent
+    /// entry is Type 0 — retail's no-back-ptr value, which refuses 0x5B.
+    fn cues_of_with_types(
+        op: u8,
+        operands: &[u8],
+        references: Vec<u32>,
+        types: &std::collections::HashMap<u32, u8>,
+    ) -> Vec<EventCue> {
         let mut data = vec![op];
         data.extend_from_slice(operands);
         let width = crate::opcode_meta::sub_size(op, data.get(1).copied().unwrap_or(0))
@@ -3310,9 +3475,31 @@ mod tests {
         );
         data.push(OP_END);
         let mut e = vm(data, references);
+        e.set_actor_types(types);
         assert_eq!(e.step(), StepResult::Done, "op 0x{op:02X} must run to END");
         assert_eq!(e.exec_pointer(), width, "op 0x{op:02X} advanced wrong size");
         e.take_cues()
+    }
+
+    /// True when a 0x53 after `loader` (with `loader_operands`, `loader`'s
+    /// width, and `FILE_OFS`-style padding) parks on the loader's same-batch
+    /// start instead of falling through to END.
+    fn wait_after_loader_parks(
+        loader: u8,
+        loader_operands: &[u8],
+        types: &std::collections::HashMap<u32, u8>,
+    ) -> bool {
+        let mut data = vec![loader];
+        data.extend_from_slice(loader_operands);
+        // 0x53: actor1 (event entity) @+1, key "abcd" @+9.
+        data.push(OP_WAITSCHEDULOR);
+        data.extend_from_slice(&LOOKUP_EVENT_ENTITY.to_le_bytes());
+        data.extend_from_slice(&[0u8; 4]);
+        data.extend_from_slice(b"abcd");
+        data.push(OP_END);
+        let mut e = vm(data, vec![]);
+        e.set_actor_types(types);
+        e.step() == StepResult::Waiting
     }
 
     /// Operand bytes for the 0x45 fade sites the whole retail corpus authors:

@@ -14,7 +14,7 @@
 #   scripts/checks.sh enhanced                # the opt-in feature family (CI)
 #   scripts/checks.sh install                 # DAT conformance per client install on disk (pre-push when DAT code moved; skips without assets)
 #   scripts/checks.sh build                   # local-only: see run_build below
-#   scripts/checks.sh sweep                   # local-only: cap target/ size (pre-push, advisory)
+#   scripts/checks.sh sweep                   # local-only: prune dev-profile caches, never deps/ (pre-push, advisory)
 #
 # Each stage is a separate argument so callers (notably CI) can run them as
 # distinct steps for per-stage pass/fail reporting while still sharing flags.
@@ -514,24 +514,43 @@ run_wasm() {
   cargo check -p kuluu-viewer-wasm --locked --target wasm32-unknown-unknown
 }
 
-# Cargo never garbage-collects target/: artifacts for superseded dep versions,
-# deleted tests and renamed examples accumulate until the disk fills. The age
-# pass goes first so genuinely-stale artifacts go before the cap has to make
-# its blunter oldest-first call; the cap is what actually bounds the directory.
+# Cargo never garbage-collects target/, and its bulk is cache rather than
+# compiled dependencies. Prune only the cheap-to-rebuild caches, and only the
+# dev profile.
 #
-# The cap is in cargo-sweep's accounting, which sums file sizes without
-# deduplicating cargo's hardlinks, so it reads higher than `du` for the same
-# tree. Tune it against `cargo sweep --dry-run`, not against `du`.
-TARGET_SWEEP_KEEP_DAYS=7
-TARGET_DIR_CAP_GB=180
+# deps/ is never swept, by age or oldest-first. An artifact's mtime records
+# when it was last *compiled*, never when it was last used — a no-op rebuild
+# leaves it untouched — so a stable dependency that every build links looks
+# arbitrarily old. Any age-derived eviction applied to deps/ therefore targets
+# the live dependency graph and costs a full recompile of it.
+#
+# Age cannot bound the incremental cache either: cargo rewrites a session dir
+# on every build that touches its crate, so no session ages out while the crate
+# is still worked on. That cache is large by volume, not by staleness — cargo
+# keeps a separate tree per crate per feature/flag combination and never
+# collects across them. So bound it by size and wipe it whole once it grows
+# past the cap, which costs one non-incremental compile per workspace crate and
+# leaves deps/ intact.
+EXAMPLES_KEEP_DAYS=3
+INCREMENTAL_CAP_GB=40
 
 run_sweep() {
-  if ! command -v cargo-sweep >/dev/null 2>&1; then
-    echo "checks: sweep skipped — cargo-sweep not installed (scripts/install-tools.sh)"
-    return 0
+  local examples="target/debug/examples" incremental="target/debug/incremental"
+  local pruned inc_gb
+
+  if [ -d "$examples" ]; then
+    pruned=$(find "$examples" -mindepth 1 -maxdepth 1 -mtime "+$EXAMPLES_KEEP_DAYS" \
+      -print -exec rm -rf {} + | wc -l | tr -d ' ')
+    echo "checks: sweep — pruned $pruned example artifacts older than $EXAMPLES_KEEP_DAYS days"
   fi
-  cargo sweep --time "$TARGET_SWEEP_KEEP_DAYS" .
-  cargo sweep --maxsize "${TARGET_DIR_CAP_GB}GB" .
+
+  if [ -d "$incremental" ]; then
+    inc_gb=$(( $(du -sk "$incremental" | cut -f1) / 1024 / 1024 ))
+    if [ "$inc_gb" -ge "$INCREMENTAL_CAP_GB" ]; then
+      rm -rf "$incremental"
+      echo "checks: sweep — incremental cache reached ${inc_gb} GB (cap ${INCREMENTAL_CAP_GB} GB); wiped"
+    fi
+  fi
 }
 
 run_doc() {

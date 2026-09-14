@@ -1,7 +1,7 @@
 # Ordinary PC model arrival: resource gate and opacity fade
 
-Date: 2026-09-14. Method: original-client binary inspection with XIClient as
-symbol/call-chain guidance. No live visual observation: `hxi.sh status` reports
+Date: 2026-09-14. Initial method: original-client binary inspection with XIClient
+as symbol/call-chain guidance. At that stage there was no live visual observation: `hxi.sh status` reports
 Windows 11 suspended; `hxi.sh capture` returned no window. The VM was left
 suspended and no game inputs were sent.
 
@@ -71,7 +71,7 @@ XIClient pin `aba6c816d25139f0a4fdb60d05bcec8af5f4d928` supplies symbol names:
 - `research/XIClient/src/XIClient/source/Resource/ResourceManager.cpp`:
   `IsResourceReady`.
 
-No high-frame-rate live sequence was captured. Binary verification establishes
+No live sequence was captured during the binary investigation. Binary verification establishes
 the ordinary fade computation and readiness gate, but does not establish visible
 appearance under the user's installed addons, all equipment swaps, unusual
 network timing, or special arrival effects. XIM was not used as the authority.
@@ -121,3 +121,41 @@ GPU cost.
 
 Local evidence: `artifacts/verify/retail-pc-arrival-2026-09-14/composite-binary-evidence.txt`.
 No live VM observation was performed for this follow-up.
+
+
+## User-supplied gameplay recording
+
+Later on 2026-09-14, the user supplied `Screen Recording 2026-09-14 at
+4.47.12 PM.mov`. This adds direct visual evidence to the binary investigation;
+no VM input or new login was needed. The clip shows Oldman in Lower Jeuno,
+with the HorizonXI launcher/connection output and Ashita visible. The clip alone
+does not identify the DLL hash, frame limiter, or complete addon configuration.
+
+The source is 3456 x 2244, approximately 4.383 seconds, with variable capture
+cadence (average about 56.5 frames/second). Local preserved copy:
+`artifacts/retail/pc-arrival-user-2026-09-14/retail-arrival.mov`, SHA-256
+`f56ce276c2212626501e4bbab8e6dd082e88a29d9895a3dad7896d02acb53210`.
+The adjacent `retail-arrival.json` records the original path and ffprobe metadata.
+
+Observed in the first 1.6 seconds, sampled at 100 ms intervals:
+
+- Cylera's nameplate is visible before the character body is visible.
+- Around 0.2-0.3 seconds into the clip, the body becomes faintly visible;
+  opacity increases until it looks solid around 0.7-0.8 seconds.
+- The character keeps normal proportions and position throughout the reveal.
+  The background shows through the fading silhouette. There is no loading
+  column, stretched placeholder, bright outline, or particle burst.
+- A second nearby character appears later, with its nameplate also preceding
+  the visible body. Actor arrivals are staggered in this recording; this does
+  not establish the client's loading scheduler or per-frame work budget.
+
+These approximate visual bounds are consistent with the binary-derived nominal
+533 ms fade; they are not an independent exact timing measurement. The clip
+confirms the intended visible effect, but does not uniquely prove an offscreen
+compositor or quantify Kuluu's per-mesh overlap error. The binary evidence above
+establishes the compositor. Exact parity remains tracked by `kuluu-ph59`.
+
+Inspection artifacts (local only): `contact-sheet.png` covers the full clip at
+5 samples/second; `arrival-detail.png` is a 4 x 4 crop sequence at 10
+samples/second, read left-to-right then top-to-bottom. Its extraction filter is
+`fps=10,crop=520:440:1450:890,tile=4x4`, limited to the first 1.6 seconds.

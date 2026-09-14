@@ -779,6 +779,9 @@ fn s8_info_chunk_scale_and_movement_reach_the_live_actor() {
     app.init_resource::<bevy::asset::Assets<StandardMaterial>>();
     app.insert_resource(kuluu_render::graphics_settings::GraphicsSettings::default());
     app.init_resource::<ActorLoadInFlight>();
+    app.insert_resource(kuluu_render::ffxi_actor_render::ActorDatRoot(
+        install().map(Arc::new),
+    ));
     app.add_message::<LoadActorRequest>();
     app.insert_resource(EntityMesh {
         default: bevy::asset::Handle::default(),

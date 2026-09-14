@@ -73,6 +73,21 @@ pub struct MmbParseCache {
     pub by_asset: std::collections::HashMap<(u32, usize), Option<LoadedMmb>>,
 }
 
+/// Release the decoded texels every cached chunk of `file_id` holds, once that
+/// file's `MmbTexPools` entry owns the uploaded handles. A file's Img chunks are
+/// collected into *every* chunk's `LoadedMmb`, so the cache otherwise keeps one
+/// full copy of the file's texture set per cached chunk index.
+fn drop_pooled_textures(cache: &mut MmbParseCache, file_id: u32) {
+    for ((fid, _), entry) in cache.by_asset.iter_mut() {
+        if *fid != file_id {
+            continue;
+        }
+        if let Some(loaded) = entry {
+            loaded.textures = Vec::new();
+        }
+    }
+}
+
 #[derive(Resource, Default)]
 pub struct MmbLoadInFlight {
     pub tasks: std::collections::HashMap<(u32, usize), Task<Option<LoadedMmb>>>,
@@ -461,7 +476,12 @@ pub fn process_load_mmb_requests(
         },
     );
     let parse_completed = !newly_parsed.is_empty();
-    for (asset, result) in newly_parsed {
+    for (asset, mut result) in newly_parsed {
+        if tex_pools_res.by_file.contains_key(&asset.0) {
+            if let Some(loaded) = result.as_mut() {
+                loaded.textures = Vec::new();
+            }
+        }
         parse_cache.by_asset.entry(asset).or_insert(result);
     }
 
@@ -518,6 +538,7 @@ pub fn process_load_mmb_requests(
     const HEAVY: usize = 8;
     const MMB_MAX_INFLIGHT: usize = 64;
     let mut spawned = 0usize;
+    let mut newly_pooled: Vec<u32> = Vec::new();
     let mut retained: std::collections::VecDeque<LoadMmbRequest> =
         std::collections::VecDeque::with_capacity(queue.pending.len());
 
@@ -588,8 +609,14 @@ pub fn process_load_mmb_requests(
                 });
                 let tex_by_name = &pool.0;
                 let first_texture = pool.1.clone();
+                if !pool_exists {
+                    newly_pooled.push(req.file_id);
+                }
+                let texture_count = texture_count.max(tex_by_name.len());
 
-                if mmb_logged.insert((req.file_id, req.chunk_idx)) {
+                if tracing::enabled!(target: "kuluu_render::dat_mmb", tracing::Level::DEBUG)
+                    && mmb_logged.insert((req.file_id, req.chunk_idx))
+                {
                     let mut img_stats: Vec<(String, u8, u8)> = loaded
                         .textures
                         .iter()
@@ -911,6 +938,9 @@ pub fn process_load_mmb_requests(
         }
     }
     queue.pending = retained;
+    for file_id in newly_pooled {
+        drop_pooled_textures(&mut parse_cache, file_id);
+    }
 
     if diag_file_id.is_some() {
         for (fid, examples) in &diag_zero_submesh {
@@ -1023,12 +1053,14 @@ fn mesh_debug_bundle(
 #[cfg(test)]
 mod tests {
     use super::{
-        mmb_dist_sq_xz, mmb_load_order_key, mmb_repass_needed, submesh_alpha_mode, LoadMmbRequest,
+        drop_pooled_textures, mmb_dist_sq_xz, mmb_load_order_key, mmb_repass_needed,
+        submesh_alpha_mode, LoadMmbRequest, LoadedMmb, MmbParseCache, NamedTexture,
         MMB_REEVAL_MOVE_YALMS,
     };
     use crate::zone_texture::ffxi_alpha_remap;
     use bevy::prelude::{AlphaMode, Mat4, Vec3};
     use ffxi_dat::mzb::NO_SUB_AREA_LINK;
+    use ffxi_dat::texture::{DecodedTexture, TexFormat};
 
     #[test]
     fn repass_triggers_on_events_parses_budget_or_settings() {
@@ -1175,6 +1207,50 @@ mod tests {
                 "raw {raw} should saturate to 255"
             );
         }
+    }
+
+    #[test]
+    fn pooled_file_drops_its_decoded_texture_bytes() {
+        fn chunk() -> Option<LoadedMmb> {
+            Some(LoadedMmb {
+                submeshes: Vec::new(),
+                textures: vec![NamedTexture {
+                    name: "tex".to_string(),
+                    texture: DecodedTexture {
+                        width: 1,
+                        height: 1,
+                        format_tag: TexFormat::Bgra32,
+                        rgba: vec![0xFF; 4],
+                    },
+                }],
+                asset_name: "asset".to_string(),
+                zone_mesh_name: "mesh".to_string(),
+            })
+        }
+
+        let mut cache = MmbParseCache::default();
+        cache.by_asset.insert((10, 0), chunk());
+        cache.by_asset.insert((10, 1), chunk());
+        cache.by_asset.insert((11, 0), chunk());
+
+        drop_pooled_textures(&mut cache, 10);
+
+        for idx in [0usize, 1] {
+            let entry = cache.by_asset[&(10, idx)].as_ref().expect("cached chunk");
+            assert!(
+                entry.textures.is_empty(),
+                "a pooled file's chunks must not keep a duplicate of its decoded texels"
+            );
+        }
+        assert_eq!(
+            cache.by_asset[&(11, 0)]
+                .as_ref()
+                .expect("cached chunk")
+                .textures
+                .len(),
+            1,
+            "an unpooled file must keep its texels: it has no uploaded handles yet"
+        );
     }
 }
 

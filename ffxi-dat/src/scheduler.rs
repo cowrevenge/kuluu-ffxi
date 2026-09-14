@@ -623,10 +623,12 @@ pub struct SoundEvent {
     pub on_caster: bool,
 }
 
-/// The global zone scene DAT (ROM/0/23.DAT): the one file carrying every movN/exNN
-/// zone routine and all the camera routes those routines reference, which 0x2D
-/// MAPSCHEDULOR starts (research/XiEvents/OpCodes/0x002D.md,
-/// research/cexi-docs/dats/ROM_0_23.md).
+/// ROM/0/23.DAT (magic `titl`), the title-screen scene DAT: the file kuluu resolves
+/// 0x2D MAPSCHEDULOR keys against (research/cexi-docs/dats/ROM_0_23.md).
+/// Retail runs 0x2D keys out of the live zone's own model DAT
+/// (research/cexi-docs/zone/zones.md Model column), and a full-corpus scan of the
+/// retail event DATs puts only `main`/`loop` of 217 observed keys in file 23, so
+/// the ZoneScheduler cue is a no-op for real zone scenes.
 pub const ZONE_SCENE_DAT_ID: u32 = 23;
 
 // The camera route names in that file run two lowercase hex digits plus a two-digit decimal
@@ -637,8 +639,9 @@ const ROUTE_NAME_ZONE_MAX: u16 = 0xFF;
 /// A two-digit decimal index fits this bound.
 const ROUTE_NAME_INDEX_MAX: u8 = 99;
 
-/// The zone-coded camera route name in the global scene DAT: `zone_id` as two lowercase hex
-/// digits followed by a two-digit decimal `index` (research/cexi-docs/dats/ROM_0_23.md).
+/// The zone-coded camera route name in the title-screen scene DAT (ZONE_SCENE_DAT_ID):
+/// `zone_id` as two lowercase hex digits followed by a two-digit decimal `index`
+/// (research/cexi-docs/dats/ROM_0_23.md).
 pub fn zone_camera_route_name(zone_id: u16, index: u8) -> [u8; 4] {
     debug_assert!(zone_id <= ROUTE_NAME_ZONE_MAX && index <= ROUTE_NAME_INDEX_MAX);
     let mut name = [0u8; 4];

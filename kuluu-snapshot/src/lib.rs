@@ -1586,9 +1586,10 @@ pub enum CutsceneCue {
         partner: CutsceneActor,
         key: FourCc,
     },
-    /// Start zone-level scheduler routine `key` out of the global scene DAT
-    /// over the two actors (the 0x2D/0x54 pair, research/XiEvents/OpCodes/
-    /// 0x002D.md); its camera routes drive the operator camera.
+    /// Start zone-level scheduler routine `key` over the two actors (the
+    /// 0x2D/0x54 pair, research/XiEvents/OpCodes/0x002D.md); the host resolves
+    /// `key` out of ZONE_SCENE_DAT_ID and its camera routes drive the operator
+    /// camera.
     ZoneScheduler {
         key: FourCc,
         actor: CutsceneActor,

@@ -2129,8 +2129,9 @@ pub fn dispatch_cutscene_motion(
                     }
                 }
             }
-            // 0x2D: the zone-level routine out of the global scene DAT; its camera stages
-            // drive the operator camera like any other routine's.
+            // 0x2D: the zone-level routine out of ZONE_SCENE_DAT_ID (the title-screen
+            // scene DAT); its camera stages drive the operator camera like any other
+            // routine's.
             CutsceneCue::ZoneScheduler {
                 key,
                 actor,

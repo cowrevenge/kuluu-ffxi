@@ -1576,8 +1576,9 @@ fn arm_motion_holds(
                     runner.hold_action(actor1, key, units);
                 }
             }
-            // 0x2D: the routine lives in the global scene DAT; retail waits on it via the
-            // zone object, so the hold keys on the VM's zone sentinel rather than an actor.
+            // 0x2D: kuluu resolves the routine out of ZONE_SCENE_DAT_ID (retail runs it
+            // out of the zone's own model DAT); retail waits on it via the zone object,
+            // so the hold keys on the VM's zone sentinel rather than an actor.
             EventCue::ZoneScheduler { key, .. } => {
                 if let Some(units) = routine_units(
                     root,
@@ -2331,7 +2332,7 @@ pub(crate) mod tests {
         const EVENT: u16 = 503;
         const ZONE: u16 = 248;
         const KEY: [u8; 4] = *b"mov1";
-        // The synthetic root resolves file id 23 (the global scene DAT) to the
+        // The synthetic root resolves ZONE_SCENE_DAT_ID (file 23) to the
         // one-chunk routine of `frames` length.
         let frames = 60u16;
         let (_dir, root) = motion_dat_root(ffxi_dat::scheduler::ZONE_SCENE_DAT_ID, KEY, frames);

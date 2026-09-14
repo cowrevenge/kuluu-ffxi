@@ -21,7 +21,9 @@
 #
 # Env knobs:
 #   CARGO_GUARD_TIMEOUT   hard ceiling in seconds        (default below)
-#   CARGO_GUARD_STALL     zero-CPU seconds before wedge  (default below)
+#   CARGO_GUARD_STALL     seconds without any process in the tree
+#                         gaining CPU time, joining or leaving, before the
+#                         run counts as wedged (default below)
 #   CARGO_GUARD_QUIET     set to 1 to suppress the queue notice
 #
 # Exit codes: cargo's own status, or 124 on timeout, or 125 on a detected wedge
@@ -53,32 +55,34 @@ fi
 
 note() { [ "${CARGO_GUARD_QUIET:-0}" = "1" ] || echo "cargo-guard: $*" >&2; }
 
-# Cumulative CPU time of a process tree, in seconds. Sampling this beats
-# `ps -o %cpu` because %cpu is a decaying average that reads near zero for a
-# process that is merely between bursts; cumulative time only stops advancing
-# when nothing in the tree is actually running.
-tree_cpu_secs() {
+# Cumulative CPU time of every live process in a tree, one `pid seconds`
+# line each. Sampling cumulative time beats `ps -o %cpu` because %cpu is a
+# decaying average that reads near zero for a process that is merely between
+# bursts. The listing is compared whole rather than summed: a summed total
+# drops when a finished rustc takes its seconds with it, and against a
+# high-water mark that drop reads as minutes of "no progress" while cargo is
+# still compiling; the per-process listing only repeats verbatim when nothing
+# in the tree ran and nothing joined or left it.
+tree_cpu_snapshot() {
   local root=$1
   ps -Ao pid,ppid,time= 2>/dev/null | awk -v root="$root" '
     { pid[$1]=$2; t[$1]=$3 }
     END {
       # walk every pid up to root
-      total=0
       for (p in t) {
         q=p; depth=0
         while (q != "" && q != "0" && depth < 64) {
-          if (q == root) { total += hms(t[p]); break }
+          if (q == root) { printf "%s %d\n", p, hms(t[p]); break }
           q = pid[q]; depth++
         }
       }
-      printf "%d", total
     }
     function hms(s,   n, a, v, i) {
       n = split(s, a, ":")
       v = 0
       for (i = 1; i <= n; i++) v = v * 60 + a[i] + 0
       return v
-    }'
+    }' | sort -n
 }
 
 others_running() {
@@ -99,7 +103,7 @@ cargo "$@" &
 cargo_pid=$!
 
 start=$(date +%s)
-last_cpu=$(tree_cpu_secs "$cargo_pid")
+last_cpu=$(tree_cpu_snapshot "$cargo_pid")
 last_progress=$start
 last_sample=$start
 
@@ -111,8 +115,8 @@ while kill -0 "$cargo_pid" 2>/dev/null; do
   [ $((now - last_sample)) -ge "$SAMPLE_SECS" ] || continue
   last_sample=$now
 
-  cpu=$(tree_cpu_secs "$cargo_pid")
-  if [ "${cpu:-0}" -gt "${last_cpu:-0}" ]; then
+  cpu=$(tree_cpu_snapshot "$cargo_pid")
+  if [ "$cpu" != "$last_cpu" ]; then
     last_cpu=$cpu
     last_progress=$now
   fi

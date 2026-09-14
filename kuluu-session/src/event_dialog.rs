@@ -408,8 +408,10 @@ impl DialogSession {
         }
     }
 
-    /// True while the VM holds a pending tag awaiting its s2c ack. While true
-    /// the owning event must not be drained by a Mode-0 EVENT_END: that would
+    /// True while any VM in the event (the master or an owner child) holds a
+    /// pending tag awaiting its s2c ack — the tag is one global per event in
+    /// retail, so a child's held tag gates the drain too. While true the
+    /// owning event must not be drained by a Mode-0 EVENT_END: that would
     /// kill the server-side event mid-transaction and OnEventUpdate would find
     /// no currentEvent (vendor/server/src/map/packets/c2s/0x05b_eventend.cpp).
     pub fn has_pending_tag(&self) -> bool {

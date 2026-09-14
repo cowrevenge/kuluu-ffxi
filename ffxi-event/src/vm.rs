@@ -862,37 +862,55 @@ impl EventVm {
     /// Retail's next tick sees `RecPendingFlag` cleared, advances +2, and
     /// yields; doing that advance here instead of re-running the poll is
     /// behaviorally identical one frame earlier (research/XiEvents/OpCodes/
-    /// 0x0043.md, 0x0047.md). No-op if nothing is pending.
+    /// 0x0043.md, 0x0047.md). No-op if nothing is pending. Retail's
+    /// `RecPendingFlag`/`RecPendingXZYFlag` are single globals shared by every
+    /// entity VM in the event, so the release reaches every parked VM, not
+    /// just the one that sent the tag.
     pub fn ack_server(&mut self) {
         if self.pending_ack.take().is_some() {
             self.exec_pointer += 2;
         }
+        let mut release = |child: &mut EventVm| child.ack_server();
+        self.for_each_child_vm(&mut release);
     }
 
     /// s2c PENDINGNUM's num[8] copied into Work_Zone starting at index 2
     /// (research/XiPackets/world/server/0x005C GP_SERV_PENDINGNUM). The event
     /// system reads these slots as its loop conditions, so the write lands
-    /// before the next step even while a tag is held.
+    /// before the next step even while a tag is held. Work_Zone is one shared
+    /// global array across every entity VM in the event (research/XiEvents/
+    /// Event VM Functions.md getworkofs/setworkofs), so the write lands in
+    /// every VM's copy at once, not just this one's.
     pub fn apply_pending_num(&mut self, num: &[i32; 8]) {
         for (slot, value) in num.iter().enumerate() {
             if let Some(cell) = self.work_zone.get_mut(PENDING_NUM_WORK_ZONE_BASE + slot) {
                 *cell = *value as u32;
             }
         }
+        let mut land = |child: &mut EventVm| child.apply_pending_num(num);
+        self.for_each_child_vm(&mut land);
     }
 
     /// s2c 0x005D PENDINGSTR's four 16-byte strings copied into the event
     /// string table (PTR_EventStrings); 0xB4 case 1 reads them by the work
     /// operand each instruction carries (research/XiPackets/world/server/
     /// 0x005D, research/XiEvents/OpCodes/0x00B4.md). Lands before the next
-    /// step even while a tag is held, like [`Self::apply_pending_num`].
+    /// step even while a tag is held, like [`Self::apply_pending_num`];
+    /// PTR_EventStrings is one global per event, so the table lands in every
+    /// VM's copy at once.
     pub fn apply_pending_str(&mut self, strings: &[[u8; 16]; 4]) {
         self.pending_strings = *strings;
+        let mut land = |child: &mut EventVm| child.apply_pending_str(strings);
+        self.for_each_child_vm(&mut land);
     }
 
-    /// The tag held on its case-1 poll, if any.
+    /// The tag held on its case-1 poll, if any: this VM's own, else the first
+    /// one held by a child (the tag is one global per event in retail, so an
+    /// owner child can be the holder the host must gate on).
     pub fn pending_tag(&self) -> Option<&PendingTag> {
-        self.pending_ack.as_ref()
+        self.pending_ack
+            .as_ref()
+            .or_else(|| self.child_pending_tag())
     }
 
     /// The result a finished master reports: while actor request stacks still
@@ -2008,6 +2026,136 @@ mod tests {
                 hide: true,
             }],
             "owner A's cue bubbles up with owner A as the event entity"
+        );
+    }
+
+    /// The onEventUpdate round trip on an owner child: the child holds the
+    /// pending tag (0x43 SENDTAG), the master's pending_tag sees it — the
+    /// session's EventRecvPending gate keys on it — and the master's
+    /// ack_server releases the child (retail's RecPendingFlag is one global
+    /// shared by every entity VM, research/XiEvents/OpCodes/0x0043.md).
+    #[test]
+    fn owner_childs_pending_tag_is_visible_and_released_through_the_master() {
+        // Owner A: 0x43 case 0 (send the tag, park) -> case 1 poll -> END.
+        let mut owner_a = block(vec![OP_SENDTAG, 0, OP_SENDTAG, 1, OP_END], vec![]);
+        owner_a.actor = NPC_SERVER_ID;
+        let dat = std::sync::Arc::new(ffxi_dat::event_dat::EventDat {
+            blocks: vec![block(vec![OP_END], vec![]), owner_a],
+        });
+
+        let mut e = vm(vec![OP_END], vec![]);
+        e.attach_scene(
+            dat.clone(),
+            ffxi_dat::event_dat::ZONE_PLAYER_ACTOR,
+            crate::vm::scene::EventPosition::default(),
+        );
+        for (owner, entry) in EventVm::owner_blocks(&dat, 7) {
+            if owner.actor != ffxi_dat::event_dat::ZONE_PLAYER_ACTOR {
+                e.spawn_owner(owner, entry);
+            }
+        }
+
+        assert_eq!(
+            e.step(),
+            StepResult::Waiting,
+            "the owner parks on its 0x43 poll"
+        );
+        assert!(
+            e.pending_tag().is_some(),
+            "the master must see the child's held tag"
+        );
+        e.ack_server();
+        assert!(
+            e.pending_tag().is_none(),
+            "the release must reach the child"
+        );
+        assert_eq!(
+            e.step(),
+            StepResult::Done,
+            "the owner runs past the poll to END and the event ends"
+        );
+    }
+
+    /// s2c PENDINGNUM's Work_Zone slots drive the owner child's 0x47: the
+    /// child's onEventUpdate loop reads the slots its sibling state wrote
+    /// (Work_Zone is one shared global array, research/XiEvents/Event VM
+    /// Functions.md getworkofs/setworkofs), and the whole round trip — tag,
+    /// PENDINGNUM, position ack — drains to Done.
+    #[test]
+    fn pending_num_reaches_the_owner_childs_work_zone() {
+        // Owner B: 0x43 case 0 (park) -> case 1 poll -> 0x47 case 0 reading
+        // x/z/y from Work_Zone[2]/[3]/[4] (operands 4098/4099/4100) -> case 1
+        // poll -> END.
+        let mut owner = vec![OP_SENDTAG, 0, OP_SENDTAG, 1];
+        owner.extend_from_slice(&[
+            OP_EVENTPOSSET,
+            0,
+            0x02,
+            0x10,
+            0x03,
+            0x10,
+            0x04,
+            0x10,
+            0x00,
+            0x00,
+            OP_EVENTPOSSET,
+            1,
+        ]);
+        owner.push(OP_END);
+        let mut owner_b = block(owner, vec![]);
+        owner_b.actor = NPC_SERVER_ID;
+        let dat = std::sync::Arc::new(ffxi_dat::event_dat::EventDat {
+            blocks: vec![block(vec![OP_END], vec![]), owner_b],
+        });
+
+        let mut e = vm(vec![OP_END], vec![]);
+        e.attach_scene(
+            dat.clone(),
+            ffxi_dat::event_dat::ZONE_PLAYER_ACTOR,
+            crate::vm::scene::EventPosition::default(),
+        );
+        for (owner, entry) in EventVm::owner_blocks(&dat, 7) {
+            if owner.actor != ffxi_dat::event_dat::ZONE_PLAYER_ACTOR {
+                e.spawn_owner(owner, entry);
+            }
+        }
+
+        assert_eq!(
+            e.step(),
+            StepResult::Waiting,
+            "the owner parks on its 0x43 poll"
+        );
+        e.apply_pending_num(&[11, 22, 33, 44, 55, 66, 77, 88]);
+        e.ack_server();
+        assert_eq!(
+            e.step(),
+            StepResult::Waiting,
+            "the owner's 0x47 case 0 holds on the position round trip"
+        );
+        assert_eq!(
+            e.take_scene_actions(),
+            [crate::vm::scene::SceneAction::PositionUpdate {
+                position: crate::vm::scene::EventPosition {
+                    x: 11,
+                    y: 33,
+                    z: 22,
+                    heading: 0,
+                },
+                end_para: 0,
+            }],
+            "the 0x47 must read the PENDINGNUM slots the child's copy holds"
+        );
+        e.acknowledge_position(crate::vm::scene::EventPosition {
+            x: 11,
+            y: 33,
+            z: 22,
+            heading: 0,
+        });
+        e.acknowledge_event();
+        assert_eq!(
+            e.step(),
+            StepResult::Done,
+            "the position ack releases the 0x47 and the event ends"
         );
     }
 

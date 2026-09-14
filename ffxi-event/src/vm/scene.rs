@@ -4,7 +4,7 @@ use ffxi_dat::event_dat::{EventBlock, EventDat, ZONE_PLAYER_ACTOR};
 
 use crate::cue::EventCue;
 
-use super::{ActorLookup, EventVm, StepResult};
+use super::{ActorLookup, EventVm, PendingTag, StepResult};
 
 // research/XiEvents/OpCodes/0x001F.md CodeMOVE; 0x005A.md CodeMOVE2;
 // 0x0032.md MainSpeed; 0x0047.md FUNC_XiEvent_OpCode_0x0047.
@@ -375,6 +375,34 @@ impl EventVm {
             .vm
     }
 
+    /// Run `f` over the request VMs on this scene's actor stacks (this VM's
+    /// direct children). Recursion into a child's own children is the
+    /// closure's job: the fan-out closures in [`EventVm::ack_server`],
+    /// [`EventVm::apply_pending_num`] and [`EventVm::apply_pending_str`]
+    /// recurse by calling the same fan-out on each child.
+    pub(super) fn for_each_child_vm(&mut self, f: &mut impl FnMut(&mut EventVm)) {
+        let Some(scene) = &mut self.scene else { return };
+        for stack in &mut scene.stacks {
+            for request in &mut stack.requests {
+                f(&mut request.vm);
+            }
+        }
+    }
+
+    /// The pending tag held on any descendant request VM, if any: each
+    /// request's own [`EventVm::pending_tag`] looks into its children, so
+    /// this reaches the whole tree. The tag is one global per event in
+    /// retail, so the holder can be a child.
+    pub(super) fn child_pending_tag(&self) -> Option<&PendingTag> {
+        let scene = self.scene.as_ref()?;
+        scene.stacks.iter().find_map(|stack| {
+            stack
+                .requests
+                .iter()
+                .find_map(|request| request.vm.pending_tag())
+        })
+    }
+
     /// The (actor, request index) of the child holding the open dialog frame,
     /// if one is parked on it; see [`Scene::dialog_child`].
     pub(super) fn open_frame_holder(&self) -> Option<(u32, usize)> {
@@ -496,7 +524,14 @@ impl EventVm {
     /// does it mid-program from a REQSET. The child's cues bubble up with the
     /// block's actor as the event entity; the master stays alive (its
     /// [`EventVm::finish_result`] waits on the scene's stacks) until every
-    /// owner drains. No-op without an attached scene.
+    /// owner drains. No-op without an attached scene. The child's `tag` is 0,
+    /// retail's reserved "no tag": the ReqStack slots start zeroed and
+    /// XiEventInit sets only the event index and priority 16, the 0x0000
+    /// reset writes `TagNum = 0` back on completion, and `XiEvent::ReqSet`
+    /// dedupes on `TagNum` across all 16 slots — so a REQSET of tag 0 at this
+    /// actor is skipped in retail too, while (and after) the owner child runs
+    /// (research/XiEvents/Event VM Functions.md XiEventInit, XiEvent::ReqSet;
+    /// OpCodes/0x0000.md).
     pub fn spawn_owner(&mut self, block: &EventBlock, entry: usize) {
         let Some(scene) = &self.scene else { return };
         let actor = block.actor;

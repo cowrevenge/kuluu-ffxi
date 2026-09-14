@@ -118,6 +118,10 @@ mod tests {
         for raw in [0x01u8, 0x06, 0x09, 0x20, 0x25, 0x2A, 0x2B, 0x3E, 0x45, 0x54] {
             assert_eq!(ChunkKind::from_u8(raw).unwrap() as u8, raw);
         }
+        // Parser-less retail codes stay out of the enum; label still names them.
+        for raw in [0x06u8, 0x25, 0x3E, 0x49, 0x4A, 0x53, 0x54, 0x5D, 0x5E] {
+            assert_eq!(ChunkKind::from_u8(raw), None);
+        }
     }
 
     #[test]

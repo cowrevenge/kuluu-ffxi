@@ -54,7 +54,7 @@ use serde::{Deserialize, Serialize};
 // v5: InventoryItem.charges_remaining + next_use_vana_ts (item recast/charges).
 // v4: SceneSnapshot.delivery_box (dedicated delivery screen) + ViewerCommand::DeliveryBox
 // (postcard frames are not self-describing, so any shape change bumps this).
-pub const PROTOCOL_VERSION: u32 = 26;
+pub const PROTOCOL_VERSION: u32 = 28;
 
 /// Longest countdown `SceneSnapshot::status_icon_expiries` can carry. The
 /// producer rejects anything beyond it as a corrupt 0x063 timestamp, and the HUD
@@ -1610,7 +1610,7 @@ pub enum ViewerEvent {
         /// `animation` (attack.h AttackAnimation) bits; only a `CATEGORY_BASIC_ATTACK` body
         /// carries them, absent otherwise.
         result: Option<(u8, u16)>,
-        /// First result's raw `animation` index, for every category — the file-table key of
+        /// First result's raw `animation` index, for every category: the file-table key of
         /// the caster's effect DAT. Absent on a result-less or truncated body.
         animation: Option<u16>,
         /// First result's `(info, hit_distortion, knockback)` bits
@@ -2195,8 +2195,8 @@ mod tests {
     }
 
     #[test]
-    fn ferry_protocol_26_preserves_transport_and_voyage_fields() {
-        const VERSION: u32 = 26;
+    fn ferry_protocol_preserves_transport_and_voyage_fields() {
+        const VERSION: u32 = 28;
         const STAMP: u32 = 0x1200_3400;
         assert_eq!(PROTOCOL_VERSION, VERSION);
         let mut snapshot = sample_snapshot();

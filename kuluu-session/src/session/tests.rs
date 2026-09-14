@@ -2454,10 +2454,14 @@ const BATTLE2_PARRIED_LEFT_ATTACK: ffxi_proto::melee::MeleeResult =
     ffxi_proto::melee::MeleeResult {
         resolution: ffxi_proto::melee::ActionResolution::Parry,
         animation: ffxi_proto::melee::AttackAnimation::LeftAttack,
+        info: ffxi_proto::melee::ActionInfo::NONE,
+        hit_distortion: ffxi_proto::melee::HitDistortion::None,
+        knockback: ffxi_proto::melee::KnockbackLevel::None,
     };
 
 fn battle2_single_result_body() -> Vec<u8> {
-    let (resolution, animation) = BATTLE2_PARRIED_LEFT_ATTACK.to_wire();
+    let (resolution, animation, _info, _hit_distortion, _knockback) =
+        BATTLE2_PARRIED_LEFT_ATTACK.to_wire();
     let mut w = BattleBitWriter::new(8);
     w.write(0xCAFEu64, 32);
     w.write(1, 6);
@@ -2526,7 +2530,8 @@ fn battle2_result_outcome_bits_roundtrip() {
 // category, not the bit ranges.
 #[test]
 fn battle2_non_basic_category_reports_no_melee_result() {
-    let (resolution, animation) = BATTLE2_PARRIED_LEFT_ATTACK.to_wire();
+    let (resolution, animation, _info, _hit_distortion, _knockback) =
+        BATTLE2_PARRIED_LEFT_ATTACK.to_wire();
     let mut w = BattleBitWriter::new(8);
     w.write(0xCAFEu64, 32);
     w.write(1, 6);
@@ -2546,6 +2551,16 @@ fn battle2_non_basic_category_reports_no_melee_result() {
     assert_eq!(h.action_kind, 4);
     assert_eq!(h.primary_target_id, Some(0xBEEF));
     assert_eq!(h.first_result, None);
+    // The outcome is read for every category even though the swing pair is gated off.
+    assert_eq!(
+        h.first_outcome,
+        Some(ffxi_proto::melee::ResultOutcome {
+            resolution: ffxi_proto::melee::ActionResolution::Parry,
+            info: ffxi_proto::melee::ActionInfo::NONE,
+            hit_distortion: ffxi_proto::melee::HitDistortion::None,
+            knockback: ffxi_proto::melee::KnockbackLevel::None,
+        }),
+    );
 }
 
 // The same 12 bits, uninterpreted, key the caster's effect DAT for every non-attack
@@ -3969,7 +3984,13 @@ async fn bootstrap_scenario(scenario: BootstrapReply) {
                 assert_eq!(sent.opcode, ffxi_proto::map::c2s::LOGIN);
             }
             if count == 1 {
-                peer = Some(MapClient::connect(client, SEED).await.unwrap());
+                // Ephemeral local port: tests must not inherit FFXI_MAP_LOCAL_PORT (the
+                // Docker/WSL2 DNAT pin), or parallel scenarios collide on the pinned port.
+                peer = Some(
+                    MapClient::connect_with_local(client, SEED, "0.0.0.0:0")
+                        .await
+                        .unwrap(),
+                );
                 if let Some(ref payload) = initial {
                     peer.as_ref()
                         .unwrap()
@@ -3998,7 +4019,11 @@ async fn bootstrap_scenario(scenario: BootstrapReply) {
             }
         }
     });
-    let mut map = MapClient::connect(address, SEED).await.unwrap();
+    // Ephemeral local port: tests must not inherit FFXI_MAP_LOCAL_PORT (the Docker/WSL2 DNAT
+    // pin), or parallel scenarios collide on the pinned port.
+    let mut map = MapClient::connect_with_local(address, SEED, "0.0.0.0:0")
+        .await
+        .unwrap();
     let cfg = Config {
         server: "127.0.0.1".into(),
         map_host_override: None,

@@ -630,6 +630,7 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
         (
             despawn_ingame_entities,
             drain_entity_prediction,
+            drain_motion_probe,
             drain_entity_table,
             input::reset_local_movement,
             kuluu_render::camera::reset_camera_follow,
@@ -982,6 +983,10 @@ fn drain_entity_table(mut table: ResMut<kuluu_render::entity_table::EntityTable>
 
 fn drain_entity_prediction(mut prediction: ResMut<kuluu_render::combat_stance::EntityPrediction>) {
     prediction.by_id.clear();
+}
+
+fn drain_motion_probe(mut probe: ResMut<kuluu_render::combat_stance::MotionProbe>) {
+    probe.drain();
 }
 
 fn drain_mzb_load_state(

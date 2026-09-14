@@ -1374,6 +1374,9 @@ fn handle_sub_packet(
         }
         s2c::SHOP_OPEN => {}
         s2c::BATTLE2 => {
+            if combat_log_enabled() {
+                battle2_debug_dump(sub.data);
+            }
             if let Some(h) = decode_battle2_header(sub.data) {
                 tracing::debug!(target: "combat", header = ?h, "BATTLE2");
                 let _ = event_tx.send(AgentEvent::ActionStarted {
@@ -6407,7 +6410,7 @@ fn face_target_for(target_index: u16, self_act_index: Option<u16>) -> u16 {
 
 /// Also the resolution a cutscene's timed waits are served at, so it bounds how
 /// far a fade can overrun its authored duration.
-pub const SESSION_TICK_PERIOD: std::time::Duration = std::time::Duration::from_millis(100);
+const SESSION_TICK_PERIOD: std::time::Duration = std::time::Duration::from_millis(100);
 
 const MOVE_EMISSION_PERIOD: std::time::Duration = std::time::Duration::from_millis(100);
 

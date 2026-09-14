@@ -78,7 +78,13 @@ const WALKER_W: u32 = 9_000_007;
 const HUME_M_MAIN_WEAPON_FILE: u32 = 8392;
 
 fn install() -> Option<ffxi_dat::DatRoot> {
-    ffxi_dat::archive::open_test_install()
+    match ffxi_dat::archive::open_test_install() {
+        Some(root) => Some(root),
+        None => {
+            eprintln!("skipping rabbit_tester: no retail DAT install available");
+            None
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -341,15 +347,20 @@ fn load_humem() -> Option<LoadedActor> {
         (1u16..=5)
             .filter_map(|slot| kuluu_render::look_resolver::resolve_equipment_slot(slot << 12, 1)),
     );
-    load_pc(
+    match load_pc(
         1,
         false,
         &equipment,
         None,
         Some(HUME_M_MAIN_WEAPON_FILE),
         None,
-    )
-    .ok()
+    ) {
+        Ok(loaded) => Some(loaded),
+        Err(e) => {
+            eprintln!("skipping rabbit_tester: HumeM PC failed to load: {e}");
+            None
+        }
+    }
 }
 
 fn step(app: &mut App) {
@@ -445,6 +456,19 @@ fn watch(
         }
     }
     (first, samples)
+}
+
+/// The inlined 0x2B impact effect fires at routine frame ~36 for ati0 (dada @32, +4 delay), so a
+/// victim reaction that lands before this frame is reacting to packet arrival, not the swing.
+const IMPACT_MIN_FRAME: u32 = 30;
+
+fn assert_impact_at(impact_at: Option<u32>, msg: &str) {
+    assert!(
+        impact_at.is_some_and(|f| f >= IMPACT_MIN_FRAME),
+        "{msg} (first hit at frame {:?}, expected {} or later)",
+        impact_at,
+        IMPACT_MIN_FRAME
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -571,11 +595,14 @@ fn s5_swing_impact_runs_damg_and_flinches_the_pc() {
     let (impact_at, _) = watch(&mut app, 45, |_i, w| {
         routines(w, vic_parent).contains(b"damg")
             && active_clip(w, vic_child).is_some_and(|c| c.starts_with("dfm"))
-    });
+        {
+            impact_at = Some(i);
+        }
+    }
     assert!(
         impact_at.is_some_and(|f| f >= IMPACT_FRAME_MIN),
         "victim reaction (damg + dfm? flinch) fired at the inlined-0x2B frame (~36), not on \
-         packet arrival"
+         packet arrival",
     );
 }
 
@@ -746,10 +773,10 @@ fn live_root_probe(
 /// the actor; the walker's scale byte (100) must leave it at exactly 1.0 with Walking.
 #[test]
 fn s8_info_chunk_scale_and_movement_reach_the_live_actor() {
-    let Some(bat) = install().and_then(|_| load_npc(BAT_FILE).ok()) else {
+    let Some(bat) = load_fixture("bat", BAT_FILE) else {
         return;
     };
-    let Some(walker) = install().and_then(|_| load_npc(WALKER_FILE).ok()) else {
+    let Some(walker) = load_fixture("walker", WALKER_FILE) else {
         return;
     };
 
@@ -1048,7 +1075,7 @@ fn s10_left_attack_without_bti0_falls_back_to_ati0() {
 /// bti0 rather than falling back.
 #[test]
 fn s10b_left_attack_with_bti0_plays_the_limb_clip() {
-    let Some(loaded) = install().and_then(|_| load_npc(LIMB_MODEL_FILE).ok()) else {
+    let Some(loaded) = load_fixture("limb model", LIMB_MODEL_FILE) else {
         return;
     };
     // The limb model must actually carry bti0 with a Motion clip, or the scenario is void.

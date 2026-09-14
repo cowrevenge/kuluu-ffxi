@@ -17,14 +17,16 @@ use ffxi_dat::kind::ChunkKind;
 use ffxi_dat::mzb::{self, MmbPlacement};
 use ffxi_dat::scheduler::{Scheduler, StageKind, MODEL_TRANSFORM_SUBCHUNK_SLOTS};
 use ffxi_dat::sep::Sep;
-use ffxi_dat::zone_interaction::{self, ZoneInteraction};
 use ffxi_dat::DatRoot;
 use ffxi_proto::decode::{animation, DoorId};
 use kuluu_snapshot::EntityLook;
 
 use crate::dat_mzb::placement_bevy_transform;
 use crate::scene::TrackedEntities;
-use crate::scheduler_runtime::{ActionAssets, ActiveScheduler, SchedulerStageEvent, ROUTINE_FPS};
+use crate::scheduler_runtime::{
+    flush_active_scheduler_inserts, queue_active_scheduler, ActionAssets, ActiveScheduler,
+    ActiveSchedulers, SchedulerStageEvent, ROUTINE_FPS,
+};
 use crate::snapshot::{effective_zone_file_id, SceneState};
 
 // The two door states LSB broadcasts (`ANIMATION_OPEN_DOOR` = 8 /
@@ -250,43 +252,10 @@ pub struct ZoneDoors {
     source_file_id: Option<u32>,
     dirs: HashMap<u32, DoorDir>,
     leaves: HashMap<DoorLeafKey, LeafMotion>,
-    collision_rects: Vec<ZoneInteraction>,
-    load: Option<Task<DoorZoneData>>,
-}
-
-#[derive(Default)]
-struct DoorZoneData {
-    dirs: HashMap<u32, DoorDir>,
-    collision_rects: Vec<ZoneInteraction>,
-}
-
-impl DoorZoneData {
-    fn parse(bytes: &[u8]) -> Self {
-        Self {
-            dirs: door_dirs(bytes),
-            collision_rects: zone_interaction::from_dat(bytes)
-                .unwrap_or_default()
-                .into_iter()
-                .filter(ZoneInteraction::is_door)
-                .collect(),
-        }
-    }
+    load: Option<Task<HashMap<u32, DoorDir>>>,
 }
 
 impl ZoneDoors {
-    pub fn from_dat(bytes: &[u8]) -> Self {
-        let data = DoorZoneData::parse(bytes);
-        Self {
-            dirs: data.dirs,
-            collision_rects: data.collision_rects,
-            ..Self::default()
-        }
-    }
-
-    pub fn collision_rects(&self) -> &[ZoneInteraction] {
-        &self.collision_rects
-    }
-
     pub fn pose(&self, key: DoorLeafKey) -> DoorPose {
         self.leaves.get(&key).map(|m| m.pose).unwrap_or_default()
     }
@@ -303,7 +272,6 @@ impl ZoneDoors {
     fn clear_zone_state(&mut self) {
         self.dirs.clear();
         self.leaves.clear();
-        self.collision_rects.clear();
         self.load = None;
     }
 }
@@ -359,7 +327,7 @@ pub fn door_dirs(bytes: &[u8]) -> HashMap<u32, DoorDir> {
     out
 }
 
-fn load_door_dirs(file_id: u32) -> DoorZoneData {
+fn load_door_dirs(file_id: u32) -> HashMap<u32, DoorDir> {
     let bytes = DatRoot::from_env_or_default()
         .ok()
         .and_then(|root| {
@@ -367,11 +335,7 @@ fn load_door_dirs(file_id: u32) -> DoorZoneData {
             std::fs::read(loc.path_under(&root)).ok()
         })
         .unwrap_or_default();
-    let parsed = ZoneDoors::from_dat(&bytes);
-    DoorZoneData {
-        dirs: parsed.dirs,
-        collision_rects: parsed.collision_rects,
-    }
+    door_dirs(&bytes)
 }
 
 pub fn sync_zone_door_dirs(scene_state: Res<SceneState>, mut doors: ResMut<ZoneDoors>) {
@@ -386,16 +350,15 @@ pub fn sync_zone_door_dirs(scene_state: Res<SceneState>, mut doors: ResMut<ZoneD
     }
 
     let Some(task) = &mut doors.load else { return };
-    let Some(data) = future::block_on(future::poll_once(task)) else {
+    let Some(dirs) = future::block_on(future::poll_once(task)) else {
         return;
     };
     info!(
         "zone_doors: DAT {:?} → {} animated door group(s)",
         doors.source_file_id,
-        data.dirs.len()
+        dirs.len()
     );
-    doors.dirs = data.dirs;
-    doors.collision_rects = data.collision_rects;
+    doors.dirs = dirs;
     doors.load = None;
 }
 
@@ -407,8 +370,10 @@ pub fn sync_zone_door_dirs(scene_state: Res<SceneState>, mut doors: ResMut<ZoneD
 pub fn trigger_zone_doors(
     scene_state: Res<SceneState>,
     tracked: Res<TrackedEntities>,
+    mut pending_inserts: Local<std::collections::HashMap<Entity, Vec<ActiveScheduler>>>,
     mut doors: ResMut<ZoneDoors>,
     mut q_npc: Query<&mut ZoneDoorNpc>,
+    mut q_scheds: Query<&mut ActiveSchedulers>,
     mut commands: Commands,
 ) {
     if doors.dirs.is_empty() {
@@ -437,12 +402,6 @@ pub fn trigger_zone_doors(
                 true
             }
         };
-
-        debug!(
-            door = door_label(four_cc),
-            animation = wire.animation,
-            "zone_doors: server door state"
-        );
 
         if on_arrival {
             // Retail rebuilds `UnderscoreAtStructs` from the placement table when
@@ -490,6 +449,7 @@ pub fn trigger_zone_doors(
             String::from_utf8_lossy(&routine)
         );
     }
+    flush_active_scheduler_inserts(&mut pending_inserts, &mut q_scheds, &mut commands);
 }
 
 /// The pose a routine ends at, per addressed slot — what an on-arrival door

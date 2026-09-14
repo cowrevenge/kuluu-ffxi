@@ -285,6 +285,43 @@ pub enum StageKind {
     ActorFadeOnTarget,
 
     FollowPoints,
+
+    /// 0x07 / 0x59 - AnimationLock for `duration_frames` frames of the routine clock
+    /// (SE: `BondageActor` /
+    /// `LockCasterMagic`; xim treats both as AnimationLockEffect). Retail's ActionTimer1
+    /// lock; refcounted across overlapping routines, and a routine without a lock stage does
+    /// not lock.
+    AnimationLock,
+
+    /// 0x5F - StopRoutine: stop the running routine named by `id` (research/xim
+    /// EffectRoutineParser.kt parseSection2 StopRoutineEffect). The worm's `ini1` stops `init`
+    /// and `init` stops `ini1` this way.
+    StopRoutine,
+
+    /// 0x21 (caster) / 0x25 (target) - flinch; SE `GetDamageDirId` picks the dfi/dbi/dfm/dbm
+    /// front/back clip by hit direction.
+    FlinchOnCaster,
+    FlinchOnTarget,
+
+    /// 0x5E / 0xBF - knockback (research/xim EffectRoutineParser.kt parseSection2
+    /// KnockBackRoutine).
+    Knockback,
+
+    /// 0x78 - DisplayDeadRoutine (research/xim EffectRoutineParser.kt parseSection2
+    /// DisplayDeadRoutine): the actor is dead from this stage on.
+    DisplayDead,
+
+    /// 0x28 - TransitionToIdle (research/xim EffectRoutineParser.kt parseSection2
+    /// TransitionToIdleEffect); `idle_transition_time` holds the payload's f32 transition time
+    /// when present.
+    TransitionToIdle,
+
+    /// 0x29 (caster) / 0x2A (target) - ActorFade to `actor_fade` over `duration_frames`
+    /// (SE `ActorColorDriveTask`; research/xim EffectRoutineParser.kt parseSection2
+    /// ActorFadeRoutine). 0x80808080 is the neutral tint the worm's `init` uses.
+    ActorFadeOnCaster,
+    ActorFadeOnTarget,
+
     Unknown,
 }
 

@@ -11,7 +11,9 @@ use ffxi_dat::sep::Sep;
 // research/xim util/Fps.kt — `internalFps = 60.0` is the clock every effect routine and
 // particle generator is authored against (poc/MainTool.kt internalLoop feeds the raw elapsed frames to
 // EffectManager). Only the skeleton domain is halved: poc/ActorManager.kt updateAll "In game,
-// skeletal animations are only updated every other frame" — see SKELETON_FRAME_DIVISOR.
+// skeletal animations are only updated every other frame" — see SKELETON_FRAME_DIVISOR. DAT stage
+// durations count whole frames of this clock; DAT transition fields (CompletionMotion's HalfFrames)
+// count half-frames, so a stored V plays as V/2 whole frames at ROUTINE_FPS.
 pub const ROUTINE_FPS: f32 = 60.0;
 
 // research/xim poc/ActorManager.kt updateAll — `elapsedFrames / 2f` into updateAnimation.
@@ -352,6 +354,43 @@ pub fn tick_active_schedulers(
                 .entity(entity)
                 .remove::<(ActiveSchedulers, ActionAssets, ActionTarget)>();
         }
+
+        // Retire entries whose effects ended more than the TTL ago (their last stages may still
+        // be in flight on consumers); strip the component and its assets once none remain.
+        // `end_frame` includes each stage's duration, so a trailing AnimationLock holds until
+        // its own end frame instead of lapsing at fire time + TTL.
+        scheds.routines.retain(|sched| {
+            if !sched.finished() {
+                return true;
+            }
+            let finish_secs = sched.end_frame() as f32 / ROUTINE_FPS;
+            sched.elapsed < finish_secs + POST_FINISH_TTL_SECS
+        });
+        if scheds.routines.is_empty() {
+            commands
+                .entity(entity)
+                .remove::<(ActiveSchedulers, ActionAssets, ActionTarget)>();
+        }
+    }
+}
+
+// 0x5F StopRoutine - the worm's dig (`ini1`) stops `init` and its pop-up stops `ini1` this way.
+// xim stops every sequence named by the stage on the same actor; here that is a plain removal
+// from the vec. The stopped routine's remaining stages simply never fire - including any 0x2D
+// StopParticle, which retail does not run for a stopped sequence either (research/xim
+// EffectRoutineInstance.kt EffectSequence.stop).
+pub fn dispatch_stop_routine_stages(
+    mut events: MessageReader<SchedulerStageEvent>,
+    mut q: Query<&mut ActiveSchedulers>,
+) {
+    for ev in events.read() {
+        if ev.stage.stage.kind != StageKind::StopRoutine {
+            continue;
+        }
+        let Ok(mut scheds) = q.get_mut(ev.actor) else {
+            continue;
+        };
+        scheds.remove_routine_named(&ev.stage.stage.id);
     }
 }
 
@@ -1036,6 +1075,8 @@ fn apply_action_dispatch(
     global: Option<&GlobalEffectDir>,
     actor_entity: Entity,
     target_entity: Option<Entity>,
+    q_scheds: &mut Query<&mut ActiveSchedulers>,
+    pending_inserts: &mut HashMap<Entity, Vec<ActiveScheduler>>,
     commands: &mut Commands,
 ) {
     // A spell DAT's `main` links the caster's own finish routine (0x3C `shbk`), which in turn
@@ -1070,6 +1111,8 @@ fn apply_emote_dispatch(
     routine: &[u8; 4],
     actor_entity: Entity,
     target_entity: Option<Entity>,
+    q_scheds: &mut Query<&mut ActiveSchedulers>,
+    pending_inserts: &mut HashMap<Entity, Vec<ActiveScheduler>>,
     commands: &mut Commands,
 ) -> bool {
     let Some(active) = ActiveScheduler::from_main(&parsed.schedulers, routine) else {
@@ -1109,6 +1152,8 @@ pub fn poll_action_dat_tasks(
     q_children: Query<&Children>,
     mut q_actors: Query<&mut crate::ffxi_actor_render::FfxiRenderActor>,
     global: Option<Res<GlobalEffectDir>>,
+    mut q_scheds: Query<&mut ActiveSchedulers>,
+    mut pending_inserts: Local<HashMap<Entity, Vec<ActiveScheduler>>>,
     mut commands: Commands,
 ) {
     use bevy::tasks::futures_lite::future;
@@ -1154,6 +1199,8 @@ pub fn poll_action_dat_tasks(
                     global.as_deref(),
                     actor_entity,
                     target_entity,
+                    &mut q_scheds,
+                    &mut pending_inserts,
                     &mut commands,
                 );
             }
@@ -1171,6 +1218,8 @@ pub fn poll_action_dat_tasks(
                     &routine,
                     actor_entity,
                     target_entity,
+                    &mut q_scheds,
+                    &mut pending_inserts,
                     &mut commands,
                 ) {
                     play_local_emote_clip(&routine, actor_entity, &q_children, &mut q_actors);
@@ -1178,6 +1227,7 @@ pub fn poll_action_dat_tasks(
             }
         }
     }
+    flush_active_scheduler_inserts(&mut pending_inserts, &mut q_scheds, &mut commands);
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -1277,8 +1327,12 @@ pub fn dispatch_motion_stages(
                         local_clips,
                         duration_frames: stage.duration_frames as f32,
                         max_loops: stage.max_loops,
-                        transition_in: stage.transition_in,
-                        transition_out: stage.transition_out,
+                        transition_in: crate::ffxi_actor_render::HalfFrames::from_dat(
+                            stage.transition_in,
+                        ),
+                        transition_out: crate::ffxi_actor_render::HalfFrames::from_dat(
+                            stage.transition_out,
+                        ),
                     },
                 );
             }
@@ -1366,6 +1420,10 @@ pub fn action_dat_file_id(
     // start categories drive the caster's cast-loop motion instead (see
     // ffxi_actor_render::action_routine). vendor/server enums/action/category.h:
     // 3 = weaponskill finish, 4 = magic finish, 6 = job-ability finish.
+    use ffxi_proto::melee::{
+        CATEGORY_ABILITY_FINISH, CATEGORY_MAGIC_FINISH, CATEGORY_MOB_SKILL_FINISH,
+        CATEGORY_PET_SKILL_FINISH, CATEGORY_SKILL_FINISH,
+    };
     match action_kind {
         3 => weapon_skill_file_id(animation?, race?, main_dll?),
         4 => ffxi_vocab::action_anim::spell_file_id(action_id, animation),
@@ -1516,6 +1574,8 @@ pub fn dispatch_action_started(
     global: Option<Res<GlobalEffectDir>>,
     dll: Option<Res<ActionMainDll>>,
     mut cache: ResMut<ActionDatCache>,
+    mut q_scheds: Query<&mut ActiveSchedulers>,
+    mut pending_inserts: Local<HashMap<Entity, Vec<ActiveScheduler>>>,
     mut commands: Commands,
     mut last_seen: Local<u64>,
 ) {
@@ -1561,6 +1621,8 @@ pub fn dispatch_action_started(
                     global.as_deref(),
                     actor_entity,
                     target_entity,
+                    &mut q_scheds,
+                    &mut pending_inserts,
                     &mut commands,
                 );
             }
@@ -1573,6 +1635,7 @@ pub fn dispatch_action_started(
             ),
         }
     }
+    flush_active_scheduler_inserts(&mut pending_inserts, &mut q_scheds, &mut commands);
 }
 
 // research/XiEvents/OpCodes/0x002C.md SCHEDULOR — the event script plays action `key` out of
@@ -1678,6 +1741,8 @@ pub fn dispatch_cast_routine_started(
     q_cast: Query<&CastRoutine>,
     mut sim: ResMut<crate::particle_sim::ParticleSimulator>,
     mut spell_suffix: ResMut<crate::ffxi_actor_render::SpellSuffixCache>,
+    mut q_scheds: Query<&mut ActiveSchedulers>,
+    mut pending_inserts: Local<HashMap<Entity, Vec<ActiveScheduler>>>,
     mut commands: Commands,
     mut last_seen: Local<u64>,
 ) {
@@ -1751,6 +1816,7 @@ pub fn dispatch_cast_routine_started(
                 target_id.and_then(|id| tracked.by_id.get(&id).copied()),
             ));
     }
+    flush_active_scheduler_inserts(&mut pending_inserts, &mut q_scheds, &mut commands);
 }
 
 // The victim reaction the attacker's routine will hand off at its 0x2B DamageCallback stage.
@@ -1846,7 +1912,7 @@ pub fn hit_reaction_routine(
     routines
 }
 
-// research/xim Actor.kt displayAutoAttack — the swing routine is chosen by which limb struck.
+// research/xim Actor.kt displayAutoAttack: the swing routine is chosen by which limb struck.
 // Direction-of-movement variants (atf0/atb0/atl0/atr0) are not selected here; that needs the
 // attacker's locomotion state at swing time. No attacker-side crit swing exists on purpose: LSB
 // flags the crit only in the VICTIM's result block (CBattleEntity::OnAttack sets info CriticalHit
@@ -2362,6 +2428,8 @@ pub fn dispatch_entity_emoted(
     mut q_actors: Query<&mut crate::ffxi_actor_render::FfxiRenderActor>,
     dll: Option<Res<ActionMainDll>>,
     mut cache: ResMut<ActionDatCache>,
+    mut q_scheds: Query<&mut ActiveSchedulers>,
+    mut pending_inserts: Local<HashMap<Entity, Vec<ActiveScheduler>>>,
     mut commands: Commands,
     mut last_seen: Local<u64>,
 ) {
@@ -2414,6 +2482,8 @@ pub fn dispatch_entity_emoted(
                             &routine,
                             actor_entity,
                             tracked.by_id.get(&target_id).copied(),
+                            &mut q_scheds,
+                            &mut pending_inserts,
                             &mut commands,
                         ) {
                             continue;
@@ -2437,6 +2507,7 @@ pub fn dispatch_entity_emoted(
 
         play_local_emote_clip(&routine, actor_entity, &q_children, &mut q_actors);
     }
+    flush_active_scheduler_inserts(&mut pending_inserts, &mut q_scheds, &mut commands);
 }
 
 // NPC casters (lua sendEmote) and PCs whose emote DAT lacks the routine:
@@ -2461,8 +2532,8 @@ fn play_local_emote_clip(
                     local_clips: &[],
                     duration_frames: 0.0,
                     max_loops: 1,
-                    transition_in: 0,
-                    transition_out: 0,
+                    transition_in: crate::ffxi_actor_render::HalfFrames::ZERO,
+                    transition_out: crate::ffxi_actor_render::HalfFrames::ZERO,
                 },
             );
         }
@@ -3290,7 +3361,62 @@ mod tests {
         let sched = make_scheduler(*b"main", vec![]);
         let a = ActiveScheduler::from_scheduler(&sched);
         assert!(a.finished());
-        assert_eq!(a.last_frame(), 0);
+        assert_eq!(a.end_frame(), 0);
+    }
+
+    // A trailing AnimationLock must hold until its own end frame, not lapse when the entry's
+    // post-finish TTL runs out from the lock stage's fire time. This routine locks [0, 130):
+    // under the old retirement (last stage frame + 2 s TTL) the entry was gone by frame 120,
+    // releasing the lock ten frames early.
+    #[test]
+    fn trailing_lock_holds_until_its_end_frame_not_the_ttl() {
+        let mut lk = stage(0, StageKind::AnimationLock, 0x07, *b"lk01");
+        lk.stage.duration_frames = 130;
+        let sched = make_scheduler(*b"lock", vec![lk]);
+
+        // Exact integer bounds: locked through frame 129, released at 130.
+        let a = ActiveScheduler::from_scheduler(&sched);
+        assert_eq!(a.end_frame(), 130);
+        assert!(a.locks_at(129), "frame 129 is inside [0, 130)");
+        assert!(!a.locks_at(130), "the lock ends at frame 130");
+
+        // And the entry must still be alive when the clock reaches that window: the old code
+        // retired it at elapsed >= 2 s (frame 120), so is_locked_now could no longer see it.
+        let mut app = App::new();
+        app.add_message::<SchedulerStageEvent>()
+            .init_resource::<Time>()
+            .add_systems(Update, tick_active_schedulers);
+        let actor = app
+            .world_mut()
+            .spawn(ActiveSchedulers::one(ActiveScheduler::from_scheduler(
+                &sched,
+            )))
+            .id();
+
+        app.world_mut()
+            .resource_mut::<Time>()
+            .advance_by(std::time::Duration::from_secs_f32(125.0 / ROUTINE_FPS));
+        app.update();
+        let scheds = app
+            .world()
+            .entity(actor)
+            .get::<ActiveSchedulers>()
+            .expect("the entry must survive to tick 125, inside its lock window");
+        assert!(scheds.is_locked_now(), "tick 125 is locked");
+
+        app.world_mut()
+            .resource_mut::<Time>()
+            .advance_by(std::time::Duration::from_secs_f32(15.0 / ROUTINE_FPS));
+        app.update();
+        let scheds = app
+            .world()
+            .entity(actor)
+            .get::<ActiveSchedulers>()
+            .expect("the entry retires only after end_frame + TTL, not at the lock's end");
+        assert!(
+            !scheds.is_locked_now(),
+            "tick 140 is past the [0, 130) window"
+        );
     }
 
     /// End-to-end against the installed retail DATs (skips without them):

@@ -430,7 +430,9 @@ pub fn event_to_viewer_event(ev: AgentEvent) -> Option<wire::ViewerEvent> {
             action_id,
             action_kind,
             target_id,
-            result: result.map(ffxi_proto::melee::MeleeResult::to_wire),
+            // The swing pair stays raw: the snapshot's `result` is basic-attack-only, and the
+            // typed resolution rides in `outcome`.
+            result: result.map(|r| (r.resolution.to_wire(), r.animation.to_wire())),
             animation,
             outcome: outcome.map(ffxi_proto::melee::ResultOutcome::to_wire),
         }),
@@ -976,6 +978,9 @@ mod tests {
         let hit_right = ffxi_proto::melee::MeleeResult {
             resolution: ffxi_proto::melee::ActionResolution::Hit,
             animation: ffxi_proto::melee::AttackAnimation::RightAttack,
+            info: ffxi_proto::melee::ActionInfo::CRITICAL_HIT,
+            hit_distortion: ffxi_proto::melee::HitDistortion::Heavy,
+            knockback: ffxi_proto::melee::KnockbackLevel::Level2,
         };
         let crit = ffxi_proto::melee::ResultOutcome::from_wire(2, 3, 2);
         for result in [None, Some(hit_right)] {

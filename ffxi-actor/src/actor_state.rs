@@ -238,7 +238,7 @@ pub struct FishingClip {
 
 /// Maps a fishing macro-state phase (0..=6) to its `fsh<n>` model clip. Phases:
 /// 0=cast/wait, 1=fighting, 2=caught fish, 3=rod break, 4=line break, 5=caught monster,
-/// 6=stop/cancel. research/xim Actor.kt (`updateFishingState`).
+/// 6=stop/cancel. research/xim poc/Actor.kt updateFishingState.
 pub fn fishing_clip(phase: u8) -> Option<FishingClip> {
     if phase > 6 {
         return None;
@@ -712,6 +712,37 @@ mod tests {
         assert_eq!(idstr(death_routine_id()), "dead");
     }
 
+    #[test]
+    fn rest_phase_ids() {
+        use RestPhase::{In, Loop, Out};
+
+        assert_eq!(
+            idstr(rest_animation_id_phase(RestKind::Sit, In).unwrap()),
+            "si0?"
+        );
+        assert_eq!(
+            idstr(rest_animation_id_phase(RestKind::Sit, Loop).unwrap()),
+            "si1?"
+        );
+        assert_eq!(
+            idstr(rest_animation_id_phase(RestKind::Sit, Out).unwrap()),
+            "si2?"
+        );
+        assert_eq!(
+            idstr(rest_animation_id_phase(RestKind::Kneel, In).unwrap()),
+            "rx0?"
+        );
+        assert_eq!(
+            idstr(rest_animation_id_phase(RestKind::Heal, Loop).unwrap()),
+            "rx1?"
+        );
+        assert_eq!(
+            idstr(rest_animation_id_phase(RestKind::Kneel, Out).unwrap()),
+            "rx2?"
+        );
+        assert!(rest_animation_id_phase(RestKind::None, In).is_none());
+    }
+
     // Routine timings dumped from the retail PC skeleton DATs
     // (`dat-routine-stages 7072 dead`): `ded?` for 116 half-frames = 58 real
     // frames, then `cor?`.
@@ -803,37 +834,6 @@ mod tests {
     fn missing_collapse_clip_falls_straight_to_the_corpse_pose() {
         let phase = next_death_phase(DeathPhase::Alive, true, 0.0, 1.0);
         assert_eq!(phase, DeathPhase::Corpse);
-    }
-
-    #[test]
-    fn rest_phase_ids() {
-        use RestPhase::{In, Loop, Out};
-
-        assert_eq!(
-            idstr(rest_animation_id_phase(RestKind::Sit, In).unwrap()),
-            "si0?"
-        );
-        assert_eq!(
-            idstr(rest_animation_id_phase(RestKind::Sit, Loop).unwrap()),
-            "si1?"
-        );
-        assert_eq!(
-            idstr(rest_animation_id_phase(RestKind::Sit, Out).unwrap()),
-            "si2?"
-        );
-        assert_eq!(
-            idstr(rest_animation_id_phase(RestKind::Kneel, In).unwrap()),
-            "rx0?"
-        );
-        assert_eq!(
-            idstr(rest_animation_id_phase(RestKind::Heal, Loop).unwrap()),
-            "rx1?"
-        );
-        assert_eq!(
-            idstr(rest_animation_id_phase(RestKind::Kneel, Out).unwrap()),
-            "rx2?"
-        );
-        assert!(rest_animation_id_phase(RestKind::None, In).is_none());
     }
 
     #[test]

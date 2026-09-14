@@ -17,6 +17,11 @@ pub struct PosHead {
 
     pub y: f32,
 
+    /// POS block word 0x18. Bits 17..31 carry the head-look target (see `facetarget`); the low
+    /// 13 bits are LSB's moving step counter: entity_update.cpp CEntityUpdatePacket::updateWith
+    /// writes `ref<uint16>(0x18) = PEntity->loc.p.moving`, and pathfind.cpp CPathFind::StepTo
+    /// advances it by 0x35 per step (0x28 on a speed change), mod 0x2000. Retail phases walk/run
+    /// cycles off the delta between two POS updates.
     pub flags0: u32,
 
     pub speed: u8,

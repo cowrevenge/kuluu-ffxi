@@ -408,6 +408,7 @@ impl<S: SceneSource + Resource + Component<Mutability = bevy::ecs::component::Mu
 
         app.init_resource::<combat_stance::EntityMotion>();
         app.init_resource::<combat_stance::EntityPrediction>();
+        app.insert_resource(combat_stance::MotionProbe::init());
         app.init_resource::<combat_stance::RestStance>();
         app.init_resource::<combat_stance::AnimationBlends>();
         app.init_resource::<combat_stance::WalkMode>();
@@ -425,6 +426,16 @@ impl<S: SceneSource + Resource + Component<Mutability = bevy::ecs::component::Mu
         app.add_systems(
             Update,
             combat_stance::predict_entities_system.after(sync_entities_system),
+        );
+        // Per-frame remote grounding on the MZB collision mesh, after the prediction tween has
+        // moved the rendered XZ and before motion tracking reads it: LSB's POS Y is a Detour
+        // waypoint height (pathfind.cpp CPathFind::StepTo), not the render surface.
+        #[cfg(not(target_arch = "wasm32"))]
+        app.add_systems(
+            Update,
+            combat_stance::ground_remote_movers_system
+                .after(combat_stance::predict_entities_system)
+                .before(combat_stance::track_entity_motion_system),
         );
         app.add_systems(
             Update,

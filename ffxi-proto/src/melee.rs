@@ -1,5 +1,25 @@
-// vendor/server/src/map/enums/action/category.h ActionCategory BasicAttack — `action.cmd_no`, 4 bits.
+// vendor/server/src/map/enums/action/category.h ActionCategory - `action.cmd_no`, 4 bits.
 pub const CATEGORY_BASIC_ATTACK: u8 = 1;
+// The finish categories that key a completion effect DAT (scheduler_runtime's
+// action_dat_file_id) and the start categories that carry a cast-loop routine (the "ca??" family).
+pub const CATEGORY_SKILL_FINISH: u8 = 3;
+pub const CATEGORY_MAGIC_FINISH: u8 = 4;
+pub const CATEGORY_ABILITY_FINISH: u8 = 6;
+pub const CATEGORY_SKILL_START: u8 = 7;
+pub const CATEGORY_ITEM_START: u8 = 9;
+pub const CATEGORY_ABILITY_START: u8 = 10;
+pub const CATEGORY_MOB_SKILL_FINISH: u8 = 11;
+pub const CATEGORY_RANGED_START: u8 = 12;
+pub const CATEGORY_PET_SKILL_FINISH: u8 = 13;
+
+// vendor/server/src/map/enums/action/info.h - the per-result `info` bits. Defeated means the
+// action killed the target (retail flips StatusServer on the same frame as the HP packet, F49);
+// CriticalHit marks a critical hit. It is set from outcome.isCritical and is independent of
+// hitDistortion: vendor/server/src/map/action/action.cpp action_result_t::recordDamage derives
+// hitDistortion purely from damage as a percent of target max HP (>=20 Heavy, >=10 Medium, >0
+// Light), so a crit can land on any distortion level and a heavy recoil can be non-crit.
+pub const INFO_DEFEATED: u8 = 1;
+pub const INFO_CRITICAL_HIT: u8 = 2;
 
 // vendor/server/src/map/enums/action/info.h ActionInfo - the per-result `info` bits of a basic
 // attack. Other categories overload the same bits (Dancer step levels, Rune Fencer runes), so
@@ -120,18 +140,46 @@ impl AttackAnimation {
 pub struct MeleeResult {
     pub resolution: ActionResolution,
     pub animation: AttackAnimation,
+    /// vendor/server/src/map/enums/action/info.h - bit 1 `Defeated` (the action killed the
+    /// target), bit 2 `CriticalHit`. Defeated latches the death path on this frame
+    /// (rabbit_tester s9).
+    pub info: ActionInfo,
+    /// vendor/server/src/map/enums/action/hit_distortion.h - recordDamage sets it from damage as a
+    /// percent of the target's max HP, independent of the crit bit in `info`.
+    pub hit_distortion: HitDistortion,
+    /// vendor/server/src/map/enums/action/knockback.h - any non-zero level plays `sway` alongside
+    /// the damage reaction (rabbit_tester s7d).
+    pub knockback: KnockbackLevel,
 }
 
 impl MeleeResult {
-    pub fn from_wire(resolution: u8, animation: u16) -> Option<Self> {
+    pub fn from_wire(
+        resolution: u8,
+        animation: u16,
+        info: u8,
+        hit_distortion: u8,
+        knockback: u8,
+    ) -> Option<Self> {
         Some(Self {
             resolution: ActionResolution::from_wire(resolution)?,
             animation: AttackAnimation::from_wire(animation)?,
+            info: ActionInfo::from_bits(info),
+            hit_distortion: HitDistortion::from_wire(hit_distortion)?,
+            knockback: KnockbackLevel::from_wire(knockback)?,
         })
     }
 
-    pub fn to_wire(self) -> (u8, u16) {
-        (self.resolution.to_wire(), self.animation.to_wire())
+    /// Every wire bit of the result block in 0x028_battle2.cpp pack order (resolution(3),
+    /// animation(12), info(5), hitDistortion(2), knockback(3)). Lossless: from_wire(to_wire(x)) == x
+    /// for every constructible MeleeResult, so no outcome data is dropped on the way to the wire.
+    pub fn to_wire(self) -> (u8, u16, u8, u8, u8) {
+        (
+            self.resolution.to_wire(),
+            self.animation.to_wire(),
+            self.info.bits(),
+            self.hit_distortion.to_wire(),
+            self.knockback.to_wire(),
+        )
     }
 }
 
@@ -143,12 +191,57 @@ mod tests {
     fn wire_roundtrips_through_melee_result() {
         for resolution in 0..=4u8 {
             for animation in 0..=4u16 {
-                let r = MeleeResult::from_wire(resolution, animation).expect("in-range bits");
-                assert_eq!(r.to_wire(), (resolution, animation));
+                let r =
+                    MeleeResult::from_wire(resolution, animation, 0, 0, 0).expect("in-range bits");
+                assert_eq!(r.to_wire(), (resolution, animation, 0, 0, 0));
             }
         }
-        assert_eq!(MeleeResult::from_wire(5, 0), None);
-        assert_eq!(MeleeResult::from_wire(0, 5), None);
+        assert_eq!(MeleeResult::from_wire(5, 0, 0, 0, 0), None);
+        assert_eq!(MeleeResult::from_wire(0, 5, 0, 0, 0), None);
+    }
+
+    // The outcome bits are validated against the pinned enums: hitDistortion is a 2-bit field and
+    // knockback a 3-bit one on the wire, so out-of-range values cannot round-trip.
+    #[test]
+    fn outcome_bits_roundtrip() {
+        let r = MeleeResult::from_wire(0, 1, 2, 3, 2).expect("in-range bits");
+        assert_eq!(r.resolution, ActionResolution::Hit);
+        assert_eq!(r.animation, AttackAnimation::LeftAttack);
+        assert_eq!(r.info, ActionInfo::CRITICAL_HIT, "CriticalHit bit");
+        assert_eq!(r.hit_distortion, HitDistortion::Heavy);
+        assert_eq!(r.knockback, KnockbackLevel::Level2);
+    }
+
+    // from_wire(to_wire(x)) == x for a table of non-zero outcomes: the lossless property the
+    // snapshot contract relies on.
+    #[test]
+    fn melee_result_to_wire_is_lossless() {
+        let cases = [
+            MeleeResult::from_wire(0, 1, 2, 3, 2).expect("in-range bits"),
+            MeleeResult::from_wire(4, 4, 3, 2, 7).expect("in-range bits"),
+            MeleeResult::from_wire(1, 2, 1, 1, 5).expect("in-range bits"),
+        ];
+        for r in cases {
+            let (resolution, animation, info, hit_distortion, knockback) = r.to_wire();
+            assert_eq!(
+                MeleeResult::from_wire(resolution, animation, info, hit_distortion, knockback),
+                Some(r)
+            );
+        }
+    }
+
+    #[test]
+    fn result_outcome_from_wire_validates_the_enums() {
+        let o = ResultOutcome::from_wire(0, 3, 3, 2).expect("in-range bits");
+        assert_eq!(o.resolution, ActionResolution::Hit);
+        assert!(o.info.is_defeated());
+        assert!(o.info.is_critical_hit());
+        assert_eq!(o.hit_distortion, HitDistortion::Heavy);
+        assert_eq!(o.knockback, KnockbackLevel::Level2);
+        // Out-of-range enum bits read as "no outcome", not a zeroed one.
+        assert_eq!(ResultOutcome::from_wire(5, 0, 0, 0), None);
+        assert_eq!(ResultOutcome::from_wire(0, 0, 4, 0), None);
+        assert_eq!(ResultOutcome::from_wire(0, 0, 0, 8), None);
     }
 
     // The outcome bits ride through unvalidated: the bit reader already bounds them to their

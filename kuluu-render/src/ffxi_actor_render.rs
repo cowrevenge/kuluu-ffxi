@@ -97,31 +97,40 @@ fn special_log_enabled() -> bool {
 // `tick_live_ffxi_actors` (serial section), read from the parallel pose pass.
 static SPECIAL_LOG_TICK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+// CLIP_WARN is a tracing::debug! event on target "clip": a selected clip that resolves to nothing
+// in the model DAT is always worth one line (it is how a frozen-mob regression announces itself),
+// visible under RUST_LOG=clip or =debug. KULUU_CLIP_LOG additionally prints CLIP_OK for successful
+// resolutions, which is chatty enough to stay gated.
+fn clip_log_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    crate::env_flags::env_flag(&ENABLED, "KULUU_CLIP_LOG")
+}
+
 // Once-per-(world_id, clip, reason) dedupe for CLIP_WARN: a miss repeats every frame while the
 // pose is held, and the diagnosis only needs the first sighting per entity per requested clip.
 // The reason stays in the key so two distinct diagnostics on one pair (a not_found that also
 // leaves current_clip untouched) both get their line instead of deduping into one.
 static CLIP_WARN_SEEN: std::sync::OnceLock<
-    std::sync::Mutex<std::collections::HashSet<(u32, DatId, &'static str)>>,
+    std::sync::Mutex<std::collections::HashSet<(u32, String, &'static str)>>,
 > = std::sync::OnceLock::new();
 
 // Returns true when this call printed the line (first sighting of the pair), false when the
 // dedupe set already had it. Callers do not branch on it; tests use it to pin the dedupe key.
-fn clip_warn_once(id: u32, model: &str, clip: &DatId, reason: &'static str) -> bool {
+fn clip_warn_once(id: u32, name: &str, model: &str, clip: &DatId, reason: &'static str) -> bool {
     let seen = CLIP_WARN_SEEN.get_or_init(Default::default);
     let Ok(mut guard) = seen.lock() else {
         return false;
     };
-    if !guard.insert((id, *clip, reason)) {
+    if !guard.insert((id, clip.as_str(), reason)) {
         return false;
     }
-    tracing::warn!(
+    tracing::debug!(
         target: "clip",
-        id = format_args!("{id:#x}"),
+        "CLIP_WARN id={id:#x} name={} model={} clip={} reason={}",
+        name,
         model,
-        clip = %clip.as_str(),
-        reason,
-        "CLIP_WARN"
+        clip.as_str(),
+        reason
     );
     true
 }
@@ -130,7 +139,14 @@ fn clip_warn_once(id: u32, model: &str, clip: &DatId, reason: &'static str) -> b
 // when the model's DAT walk saw the chunk but parse rejected it, not_found_override_skipped when
 // an override tier (special/fishing) asked for a clip the model does not ship, and not_found
 // otherwise. The reason stays in the dedupe key so two distinct misses on one pair both print.
-fn clip_miss(id: u32, model: &str, clip: &DatId, rejected_clips: &[DatId], tier: PoseTier) {
+fn clip_miss(
+    id: u32,
+    name: &str,
+    model: &str,
+    clip: &DatId,
+    rejected_clips: &[DatId],
+    tier: PoseTier,
+) {
     let reason = if rejected_clips.iter().any(|r| r.parameterized_match(clip)) {
         "seq_load_error"
     } else if matches!(tier, PoseTier::Special | PoseTier::Fishing) {
@@ -138,18 +154,20 @@ fn clip_miss(id: u32, model: &str, clip: &DatId, rejected_clips: &[DatId], tier:
     } else {
         "not_found"
     };
-    clip_warn_once(id, model, clip, reason);
+    clip_warn_once(id, name, model, clip, reason);
 }
 
 fn clip_ok(id: u32, asked: &DatId, resolved: &SkeletonAnimation, movement_type: MovementType) {
+    if !clip_log_enabled() {
+        return;
+    }
     tracing::debug!(
         target: "clip",
-        id = format_args!("{id:#x}"),
-        clip = %asked.as_str(),
-        resolved = %resolved.id.as_str(),
-        frames = resolved.num_frames,
-        movement = %movement_type,
-        "CLIP_OK"
+        "CLIP_OK id={id:#x} clip={} -> {} frames={} move={}",
+        asked.as_str(),
+        resolved.id.as_str(),
+        resolved.num_frames,
+        movement_type
     );
 }
 
@@ -187,6 +205,12 @@ pub struct LoadedActor {
     /// apart from "the model ships no such clip at all" (not_found).
     rejected_clips: Vec<DatId>,
 
+    /// Named-play routines present in this model's DAT walk whose scheduler parse was rejected;
+    /// CLIP_WARN must tell "the routine chunk is there but broken" (seq_load_error) apart from
+    /// "the model ships no such routine at all" (not_found). The reason itself lives on
+    /// `LoadedActor.rejected_routines`.
+    rejected_routines: Vec<ffxi_dat::resource_dir::RejectedRoutine>,
+
     /// The primary model DAT as `{rom_dir}/{dir}/{file}.DAT` (e.g. ROM/4/109.DAT), for the
     /// CLIP_WARN line's `model=` field.
     model_dat: String,
@@ -208,8 +232,8 @@ fn is_usable_clip(anim: &SkeletonAnimation) -> bool {
 
 // Clip/scheduler parsing is the expensive tail of an actor load; deriving it here
 // keeps it on the loader task instead of the render main thread, and the Arcs let
-// consumers share the parsed sets without deep-cloning keyframe data. The fourth
-// return value lists the motion chunks seen in the DAT walk but rejected by parse,
+// consumers share the parsed sets without deep-cloning keyframe data. The fourth and
+// fifth return values list the chunks seen in the DAT walk but rejected by parse,
 // so CLIP_WARN can name a seq_load_error instead of a not_found.
 fn derive_animation_sets(
     anim_dirs: &[ResourceDir],
@@ -219,6 +243,7 @@ fn derive_animation_sets(
     Arc<Vec<SkeletonAnimation>>,
     Arc<HashMap<DatId, Scheduler>>,
     Vec<DatId>,
+    Vec<ffxi_dat::resource_dir::RejectedRoutine>,
 ) {
     let animations = dedup_clips(anim_dirs.iter());
     let battle_clips = dedup_clips(battle_dirs.iter());
@@ -244,6 +269,7 @@ fn derive_animation_sets(
         Arc::new(battle_clips),
         Arc::new(routines),
         rejected_clips,
+        rejected_routines,
     )
 }
 
@@ -595,7 +621,7 @@ pub fn load_npc(file_id: u32) -> Result<LoadedActor, String> {
     effect_meshes.retain(|d| !particle_meshes.contains(&d.name));
 
     let anim_dirs = vec![ResourceDir::from_bytes(bytes)];
-    let (animations, battle_clips, routines, rejected_clips) =
+    let (animations, battle_clips, routines, rejected_clips, rejected_routines) =
         derive_animation_sets(&anim_dirs, &[]);
     Ok(LoadedActor {
         skeleton: Arc::new(skeleton),
@@ -607,6 +633,7 @@ pub fn load_npc(file_id: u32) -> Result<LoadedActor, String> {
         routines,
         action_assets: Arc::new(action_assets),
         rejected_clips,
+        rejected_routines,
         model_dat: model_dat_label(&root, file_id),
         cib: dir.first_cib(),
     })
@@ -691,7 +718,7 @@ pub fn load_mount_race(race: u8) -> Result<LoadedActor, String> {
         return Err(format!("no body meshes for mount race {race}"));
     }
 
-    let (animations, battle_clips, routines, rejected_clips) =
+    let (animations, battle_clips, routines, rejected_clips, rejected_routines) =
         derive_animation_sets(&anim_dirs, &[]);
     Ok(LoadedActor {
         skeleton: Arc::new(skeleton),
@@ -703,6 +730,7 @@ pub fn load_mount_race(race: u8) -> Result<LoadedActor, String> {
         routines,
         action_assets: Arc::new(collect_sound_assets(&[&anim_dirs])),
         rejected_clips,
+        rejected_routines,
         model_dat: model_dat_label(&root, skel_file_id),
         // The mount's own Info chunk uses the `mount` layout (rotation/poseType at +0x02/+0x0A,
         // research/xim resource/InfoSection.kt readMountDefinition); parsing it with the info
@@ -934,7 +962,7 @@ pub fn load_pc(
         ));
     }
 
-    let (animations, battle_clips, routines, rejected_clips) =
+    let (animations, battle_clips, routines, rejected_clips, rejected_routines) =
         derive_animation_sets(&anim_dirs, &battle_dirs);
     Ok(LoadedActor {
         skeleton: Arc::new(skeleton),
@@ -947,6 +975,7 @@ pub fn load_pc(
         routines,
         action_assets: Arc::new(collect_sound_assets(&[&anim_dirs, &battle_dirs])),
         rejected_clips,
+        rejected_routines,
         model_dat: model_dat_label(&root, skel_file_id),
         cib: race_cib,
     })
@@ -1238,6 +1267,7 @@ pub struct FfxiRenderActor {
     routines: Arc<HashMap<DatId, Scheduler>>,
     action_assets: Arc<crate::scheduler_runtime::ActionAssets>,
     rejected_clips: Vec<DatId>,
+    rejected_routines: Vec<ffxi_dat::resource_dir::RejectedRoutine>,
     model_dat: String,
     coordinator: SkeletonAnimationCoordinator,
     skin_slot: u32,
@@ -1806,6 +1836,7 @@ pub fn make_render_actor(
         routines: loaded.all_routines(),
         action_assets: Arc::clone(&loaded.action_assets),
         rejected_clips: loaded.rejected_clips.clone(),
+        rejected_routines: loaded.rejected_routines.clone(),
         model_dat: loaded.model_dat.clone(),
         coordinator: SkeletonAnimationCoordinator::new(),
         skin_slot,
@@ -1850,6 +1881,7 @@ pub(crate) fn render_actor_for_test(skeleton: Skeleton, world_pose: Vec<Mat4>) -
         routines: Arc::default(),
         action_assets: Arc::default(),
         rejected_clips: Vec::new(),
+        rejected_routines: Vec::new(),
         model_dat: String::new(),
         cib: None,
     };
@@ -1945,7 +1977,7 @@ pub fn advance_actor_pose_standalone(
     elapsed_frames: f32,
     mount: Option<MountAttach>,
 ) {
-    advance_actor_pose(actor, elapsed_frames, None, mount, false);
+    advance_actor_pose(actor, elapsed_frames, None, mount, false, None);
 }
 
 pub fn tick_ffxi_render_actors(
@@ -1955,7 +1987,7 @@ pub fn tick_ffxi_render_actors(
 ) {
     let elapsed_frames = time.delta_secs() * FRAME_RATE;
     q_actors.par_iter_mut().for_each(|mut actor| {
-        advance_actor_pose(&mut actor, elapsed_frames, None, None, false);
+        advance_actor_pose(&mut actor, elapsed_frames, None, None, false, None);
     });
     for actor in &q_actors {
         registry
@@ -2307,7 +2339,7 @@ enum PoseTier {
 
 // `animation_locked` is always false here: the action was just cleared above, so no lock can
 // be in effect on the re-pose.
-fn reset_actor_pose_state(actor: &mut FfxiRenderActor, elapsed_frames: f32) {
+fn reset_actor_pose_state(actor: &mut FfxiRenderActor, elapsed_frames: f32, name: Option<&str>) {
     actor.inputs = ActorAnimInputs::default();
     actor.rest_phase = RestPlayback::Inactive;
 
@@ -2315,7 +2347,7 @@ fn reset_actor_pose_state(actor: &mut FfxiRenderActor, elapsed_frames: f32) {
     actor.engage = EngageMachine::NotEngaged;
     actor.coordinator.clear();
     actor.current_clip = None;
-    advance_actor_pose(actor, elapsed_frames, None, None, false);
+    advance_actor_pose(actor, elapsed_frames, None, None, false, name);
     // Ordered after the re-pose, whose default (alive) inputs would otherwise read
     // as having watched this actor alive: retail only plays `ded?` for a death it
     // saw, so a KO'd zone-in resumes on the held corpse frame.
@@ -2330,6 +2362,7 @@ fn advance_actor_pose(
     look: Option<(Mat4, Vec3)>,
     mount: Option<MountAttach>,
     animation_locked: bool,
+    name: Option<&str>,
 ) {
     let FfxiRenderActor {
         skeleton,
@@ -2354,6 +2387,7 @@ fn advance_actor_pose(
         world_pose,
         pose_work,
         rejected_clips,
+        rejected_routines,
         model_dat,
         ..
     } = actor;
@@ -2446,13 +2480,21 @@ fn advance_actor_pose(
     // asks for that routine's first Motion stage clip; models without the routine (or without a
     // usable chunk for it) fall through to locomotion like any other miss. No per-mob
     // interpretation: what the sub value does on this model is defined by its DAT alone.
-    let special_clip_id = inputs.special.active_routine.and_then(|name| {
-        let routine = DatId::from_name(&name);
-        let clip = routine_motion_clip(routines, routine);
-        if clip.is_none() {
-            clip_warn_once(actor.world_id, model_dat, &routine, "routine_not_found");
+    let special_clip_id = inputs.special.active_routine.and_then(|routine_name| {
+        let routine = DatId::from_name(&routine_name);
+        match routine_motion_lookup(routines, rejected_routines, routine, false) {
+            Ok(clip) => clip,
+            Err(miss) => {
+                routine_motion_miss(
+                    actor.world_id,
+                    name.unwrap_or("-"),
+                    model_dat,
+                    routine,
+                    &miss,
+                );
+                None
+            }
         }
-        clip
     });
 
     // Retail's `dead` routine outranks locomotion and any in-flight action, so the collapse
@@ -2509,7 +2551,14 @@ fn advance_actor_pose(
         if usable(&resolve(id)) {
             Some((id, is_idle, tier))
         } else {
-            clip_miss(actor.world_id, model_dat, &id, rejected_clips, tier);
+            clip_miss(
+                actor.world_id,
+                name.unwrap_or("-"),
+                model_dat,
+                &id,
+                rejected_clips,
+                tier,
+            );
             None
         }
     };
@@ -2543,6 +2592,7 @@ fn advance_actor_pose(
         None => {
             clip_warn_once(
                 actor.world_id,
+                name.unwrap_or("-"),
                 model_dat,
                 &DatId::from_str("idl?"),
                 "not_found",
@@ -2557,6 +2607,7 @@ fn advance_actor_pose(
     if matches.is_empty() {
         clip_warn_once(
             actor.world_id,
+            name.unwrap_or("-"),
             model_dat,
             &selected_id,
             "no_match_kept_previous",
@@ -3419,8 +3470,9 @@ pub fn tick_live_ffxi_actors(
     // Model-root Visibility is written here only for entities with an active special state;
     // every other entity's root stays owned by scene::apply_invis_flag_system (invis-flag PCs).
     // The fourth slot is the Defeated latch: a killing result starts the death path on
-    // this frame instead of waiting for the next 0x0E hp_pct.
+    // this frame instead of waiting for the next 0x0E hp_pct; a raise clears it.
     mut q_actors: Query<(
+        Entity,
         &mut FfxiRenderActor,
         &GlobalTransform,
         &mut Visibility,
@@ -3440,16 +3492,23 @@ pub fn tick_live_ffxi_actors(
     // The entity-level routine vecs: the special-pose routine firing below and the
     // AnimationLock set built before the parallel pass both read through this one query. Sixteen
     // parameters (Bevy's fn-item arity limit); new state goes into FrameScratch, not here.
-    q_scheds: Query<(
-        &crate::components::WorldEntity,
-        &crate::scheduler_runtime::ActiveSchedulers,
-    )>,
+    mut q_scheds: Query<&mut crate::scheduler_runtime::ActiveSchedulers>,
 ) {
     use ffxi_actor::actor_state::RestKind;
 
     frame_scratch.pending_routine_inserts.clear();
     let elapsed_frames = time.delta_secs() * FRAME_RATE;
     let self_id = state.snapshot.self_char_id;
+
+    // Self KO is unreliable via the entity hp_pct (only updated when CHAR_PC
+    // carries UPDATE_HP) and via the party row (absent/stale when solo).
+    // death_homepoint_secs is published from 0x037 CHAR_STATUS and 0x00A LOGIN,
+    // both gated on hpp == 0. Hoisted above the snapshot-change block so a raise
+    // transition can be detected there; the pose pass below reads the same value.
+    let self_dead = state.snapshot.death_homepoint_secs.is_some()
+        || crate::snapshot::resolve_self(&state.snapshot.party, self_id)
+            .map(|m| m.hp_pct == 0)
+            .unwrap_or(false);
 
     // Special-pose effect routines queued by this frame's wire-state transitions, mirroring
     // retail: a sub change on a live actor plays table[sub] on the model
@@ -3596,7 +3655,7 @@ pub fn tick_live_ffxi_actors(
                 if latch.is_none() && dead_now.contains(&actor.world_id) {
                     commands
                         .entity(entity)
-                        .insert(crate::scheduler_runtime::DeadFromAction);
+                        .insert(crate::scheduler_runtime::DeadFromAction::default());
                 }
             }
         }
@@ -3632,7 +3691,8 @@ pub fn tick_live_ffxi_actors(
         };
         // Model not loaded yet: the clip still plays from the pose pass; only the dirt and
         // sound are lost. Acceptable degradation — the load lands within a few frames.
-        let Some((actor, _, _, _)) = q_actors.iter().find(|(a, _, _, _)| a.world_id == world_id)
+        let Some((_, actor, _, _, _)) =
+            q_actors.iter().find(|(_, a, _, _, _)| a.world_id == world_id)
         else {
             continue;
         };
@@ -3676,7 +3736,7 @@ pub fn tick_live_ffxi_actors(
     actor_world_scratch.extend(
         q_actors
             .iter()
-            .map(|(a, gt, _, _)| (a.world_id, gt.translation())),
+            .map(|(_, a, gt, _, _)| (a.world_id, gt.translation())),
     );
     let actor_world_by_id: &HashMap<u32, Vec3> = actor_world_scratch;
 
@@ -3687,7 +3747,7 @@ pub fn tick_live_ffxi_actors(
     // the two actors are posed in the same pass and a frame of lag on a seat is
     // not visible.
     mount_attach_scratch.clear();
-    for (a, _, _, _) in &q_actors {
+    for (_, a, _, _, _) in &q_actors {
         let Some(rider_id) = crate::scene::mount_actor_rider(a.world_id) else {
             continue;
         };
@@ -3718,18 +3778,22 @@ pub fn tick_live_ffxi_actors(
     // the pose pass must not release the routine's Motion clip - a one-shot pins its end frame in
     // the coordinator, so this is what holds buried/emerged poses until the lock lapses. Built
     // serially before the parallel pass; the set is read-only inside it.
-    // dead_fall_pending: world ids whose Defeated latch is up but the `dead` routine's
-    // fall-over Motion has not fired yet: hold idle across that gap instead of flashing cor?.
-    let mut animation_locked = std::collections::HashSet::new();
-    let mut dead_fall_pending = std::collections::HashSet::new();
-    for (world, scheds) in &q_scheds {
-        if scheds.is_locked_now() {
-            animation_locked.insert(world.id);
-        }
-        if scheds.dead_fall_over_pending() {
-            dead_fall_pending.insert(world.id);
-        }
-    }
+    let animation_locked: std::collections::HashSet<u32> = tracked
+        .by_id
+        .iter()
+        .filter(|(_id, e)| q_scheds.get(**e).is_ok_and(|s| s.is_locked_now()))
+        .map(|(id, _)| *id)
+        .collect();
+
+    // World ids whose Defeated latch is up but the `dead` routine's fall-over
+    // Motion has not fired yet: hold idle across that gap instead of flashing cor?. Same
+    // serial-build/read-in-parallel pattern as animation_locked.
+    let dead_fall_pending: std::collections::HashSet<u32> = tracked
+        .by_id
+        .iter()
+        .filter(|(_id, e)| q_scheds.get(**e).is_ok_and(|s| s.dead_fall_over_pending()))
+        .map(|(id, _)| *id)
+        .collect();
 
     let self_engaged_predicted = matches!(
         state.snapshot.current_goal,
@@ -3766,7 +3830,7 @@ pub fn tick_live_ffxi_actors(
     let motion = &*motion;
     q_actors
         .par_iter_mut()
-        .for_each(|(mut actor, actor_global, mut vis, dead_from_action)| {
+        .for_each(|(_entity, mut actor, actor_global, mut vis, dead_from_action)| {
             let world_id = actor.world_id;
             if world_id == 0 {
                 return;
@@ -3938,6 +4002,7 @@ pub fn tick_live_ffxi_actors(
                 look,
                 mount_attach,
                 animation_locked.contains(&world_id),
+                snap.and_then(|s| s.name.as_deref()),
             );
 
             // Special-pose visibility: status INVISIBLE hides the model root outright (retail
@@ -3952,7 +4017,7 @@ pub fn tick_live_ffxi_actors(
         },
     );
 
-    for (actor, _, _, _) in &q_actors {
+    for (_, actor, _, _, _) in &q_actors {
         registry
             .skin_mut(actor.skin_slot)
             .joints
@@ -3960,7 +4025,9 @@ pub fn tick_live_ffxi_actors(
     }
 
     if let Some(self_id) = self_id {
-        if let Some((actor, _, _, _)) = q_actors.iter().find(|(a, _, _, _)| a.world_id == self_id) {
+        if let Some((_, actor, _, _, _)) =
+            q_actors.iter().find(|(_, a, _, _, _)| a.world_id == self_id)
+        {
             rest.observe_exit_clip(matches!(actor.rest_phase, RestPlayback::Stopping { .. }));
         }
     }
@@ -4057,11 +4124,14 @@ pub fn dispatch_action_overlay(
                 // a limb this model does not carry (no bti0/cti0/dti0 Motion
                 // clip in its DAT) falls back to ati0 before the silent skip below.
                 if action_kind == ffxi_proto::melee::CATEGORY_BASIC_ATTACK
-                    && routine_motion_clip(&actor.routines, routine).is_none()
+                    && routine_motion_clip(&actor.routines, &actor.rejected_routines, routine)
+                        .is_none()
                 {
                     (routine, looping) = (DatId::from_str("ati0"), false);
                 }
-                let Some(clip_id) = routine_motion_clip(&actor.routines, routine) else {
+                let Some(clip_id) =
+                    routine_motion_clip(&actor.routines, &actor.rejected_routines, routine)
+                else {
                     continue;
                 };
 
@@ -4434,6 +4504,7 @@ mod mesh_dedup_tests {
             routines: Arc::new(HashMap::new()),
             action_assets: Arc::new(crate::scheduler_runtime::ActionAssets::default()),
             rejected_clips: Vec::new(),
+            rejected_routines: Vec::new(),
             model_dat: "test.DAT".to_string(),
             cib: None,
         };
@@ -6200,6 +6271,7 @@ mod actor_bounds_tests {
             routines: Arc::new(HashMap::new()),
             action_assets: Arc::new(crate::scheduler_runtime::ActionAssets::default()),
             rejected_clips: Vec::new(),
+            rejected_routines: Vec::new(),
             model_dat: "test.DAT".to_string(),
             cib: None,
         };
@@ -6343,17 +6415,23 @@ mod clip_warn_tests {
         let id_b = 0xC0DE_0002;
         let wlk = DatId::from_str("wlk?");
 
-        assert!(clip_warn_once(id_a, "ROM/4/999.DAT", &wlk, "not_found"));
+        assert!(clip_warn_once(
+            id_a,
+            "dedupe-a",
+            "ROM/4/999.DAT",
+            &wlk,
+            "not_found"
+        ));
         assert!(
-            !clip_warn_once(id_a, "ROM/4/999.DAT", &wlk, "not_found"),
+            !clip_warn_once(id_a, "dedupe-a", "ROM/4/999.DAT", &wlk, "not_found"),
             "second sighting of the same pair stays quiet"
         );
         assert!(
-            clip_warn_once(id_a, "ROM/4/999.DAT", &wlk, "seq_load_error"),
+            clip_warn_once(id_a, "dedupe-a", "ROM/4/999.DAT", &wlk, "seq_load_error"),
             "a different reason on the same pair gets its own line"
         );
         assert!(
-            clip_warn_once(id_b, "ROM/4/999.DAT", &wlk, "not_found"),
+            clip_warn_once(id_b, "dedupe-b", "ROM/4/999.DAT", &wlk, "not_found"),
             "a different entity id gets its own line"
         );
     }

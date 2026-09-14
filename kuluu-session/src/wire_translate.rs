@@ -1085,7 +1085,8 @@ mod tests {
                     result: r,
                     outcome: Some((2, 3, 2)),
                     ..
-                }) if r == result.map(ffxi_proto::melee::MeleeResult::to_wire)
+                }) if r
+                    == result.map(|m| (m.resolution.to_wire(), m.animation.to_wire()))
             ));
         }
     }

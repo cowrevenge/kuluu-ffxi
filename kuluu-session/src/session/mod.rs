@@ -5476,8 +5476,14 @@ pub fn decode_battle2_header(data: &[u8]) -> Option<Battle2Header> {
         });
     let first_result = first
         .filter(|_| action_kind == ffxi_proto::melee::CATEGORY_BASIC_ATTACK)
-        .and_then(|(resolution, animation, _)| {
-            ffxi_proto::melee::MeleeResult::from_wire(resolution, animation)
+        .and_then(|(resolution, animation, outcome)| {
+            ffxi_proto::melee::MeleeResult::from_wire(
+                resolution,
+                animation,
+                outcome.info,
+                outcome.hit_distortion,
+                outcome.knockback,
+            )
         });
     Some(Battle2Header {
         actor_id,

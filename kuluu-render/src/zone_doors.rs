@@ -25,8 +25,8 @@ use kuluu_snapshot::EntityLook;
 use crate::dat_mzb::placement_bevy_transform;
 use crate::scene::TrackedEntities;
 use crate::scheduler_runtime::{
-    flush_active_scheduler_inserts, queue_active_scheduler, ActionAssets, ActiveScheduler,
-    ActiveSchedulers, SchedulerStageEvent, ROUTINE_FPS,
+    flush_active_scheduler_inserts, ActionAssets, ActiveScheduler, ActiveSchedulers,
+    SchedulerStageEvent, ROUTINE_FPS,
 };
 use crate::snapshot::{effective_zone_file_id, SceneState};
 

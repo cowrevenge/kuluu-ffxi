@@ -962,10 +962,6 @@ fn reap_expired(g: &mut LiveGenerator) {
     }
 }
 
-fn env_flag(cell: &'static OnceLock<bool>, name: &str) -> bool {
-    *cell.get_or_init(|| std::env::var_os(name).is_some())
-}
-
 fn trace_celestial() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     env_flag(&ON, "FFXI_TRACE_CELESTIAL")

@@ -441,26 +441,6 @@ pub fn dispatch_stop_routine_stages(
     }
 }
 
-// StopRoutine - the worm's dig (`ini1`) stops `init` and its pop-up stops `ini1` this way
-//. xim stops every sequence named by the stage on the same actor; here that is a plain
-// removal from the vec. The stopped routine's remaining stages simply never fire - including any
-// StopParticle, which retail does not run for a stopped sequence either
-// (EffectRoutineInstance.kt stop).
-pub fn dispatch_stop_routine_stages(
-    mut events: MessageReader<SchedulerStageEvent>,
-    mut q: Query<&mut ActiveSchedulers>,
-) {
-    for ev in events.read() {
-        if ev.stage.stage.kind != StageKind::StopRoutine {
-            continue;
-        }
-        let Ok(mut scheds) = q.get_mut(ev.actor) else {
-            continue;
-        };
-        scheds.remove_routine_named(&ev.stage.stage.id);
-    }
-}
-
 // A zone-spray generator (e.g. Bastok "abuk", Port Windurst "rivsea") links an MMB
 // mesh by its 4-byte DatId, not a D3M. Flattened here to sprite geometry so the
 // particle sim can build a SpriteTemplate without re-parsing the MMB.
@@ -728,8 +708,7 @@ fn walk_with_dirs(
 pub type ActionDatCameras = HashMap<[u8; 4], ffxi_dat::camera::CameraResource>;
 
 pub fn parse_action_bytes(bytes: &[u8]) -> (Vec<Scheduler>, ActionAssets, ActionDatCameras) {
-    let (schedulers, assets, _report, cameras) =
-        parse_action_bytes_reporting(&ffxi_dat::chunk::walk_tree(bytes));
+    let (schedulers, assets, _report, cameras) = parse_action_bytes_reporting(bytes);
     (schedulers, assets, cameras)
 }
 
@@ -1876,8 +1855,12 @@ pub fn dispatch_flinch_stages(
                     local_clips: &[],
                     duration_frames: anim_dur,
                     max_loops: 1,
-                    transition_in: anim_dur as u16,
-                    transition_out: anim_dur as u16,
+                    transition_in: crate::ffxi_actor_render::HalfFrames::from_flinch_total(
+                        anim_dur,
+                    ),
+                    transition_out: crate::ffxi_actor_render::HalfFrames::from_flinch_total(
+                        anim_dur,
+                    ),
                 },
             );
         }
@@ -1902,13 +1885,15 @@ pub fn action_dat_file_id(
         CATEGORY_PET_SKILL_FINISH, CATEGORY_SKILL_FINISH,
     };
     match action_kind {
-        3 => weapon_skill_file_id(animation?, race?, main_dll?),
-        4 => ffxi_vocab::action_anim::spell_file_id(action_id, animation),
-        6 => ffxi_vocab::action_anim::ability_file_id(action_id, animation),
+        CATEGORY_SKILL_FINISH => weapon_skill_file_id(animation?, race?, main_dll?),
+        CATEGORY_MAGIC_FINISH => ffxi_vocab::action_anim::spell_file_id(action_id, animation),
+        CATEGORY_ABILITY_FINISH => ffxi_vocab::action_anim::ability_file_id(action_id, animation),
         // research/xim MobAbilityTable.kt getFileTableOffset - mob skills (category 11) and pet
         // skills (category 13) key the effect DAT by the result's animation index with a range-
         // dependent base; that DAT's `main` plays the caster's own sp?? clip.
-        11 | 13 => Some(ffxi_vocab::action_anim::mob_skill_file_id(animation?)),
+        CATEGORY_MOB_SKILL_FINISH | CATEGORY_PET_SKILL_FINISH => {
+            Some(ffxi_vocab::action_anim::mob_skill_file_id(animation?))
+        }
         _ => None,
     }
 }
@@ -3338,6 +3323,7 @@ pub fn enqueue_routine(commands: &mut Commands, entity: Entity, active: ActiveSc
         .entry::<ActiveSchedulers>()
         .or_default()
         .and_modify(move |mut scheds| scheds.push(active));
+}
 
 /// Insert-or-push an ActiveScheduler onto `entity`. Push when the component already exists;
 /// otherwise buffer into `pending_inserts` instead of issuing a deferred insert: two routines
@@ -3370,7 +3356,7 @@ pub fn queue_active_scheduler(
 // queued routine at once so none is lost to a deferred-command overwrite. Commands apply per
 // system, so within one batch only our own buffered inserts can change the answer between the
 // call and this flush.
-fn flush_active_scheduler_inserts(
+pub fn flush_active_scheduler_inserts(
     pending: &mut HashMap<Entity, Vec<ActiveScheduler>>,
     q_active: &mut Query<&mut ActiveSchedulers>,
     commands: &mut Commands,

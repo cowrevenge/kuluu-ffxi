@@ -2654,10 +2654,9 @@ fn battle2_non_basic_category_reports_no_melee_result() {
     assert_eq!(
         h.first_outcome,
         Some(ffxi_proto::melee::ResultOutcome {
-            resolution: ffxi_proto::melee::ActionResolution::Parry,
-            info: ffxi_proto::melee::ActionInfo::NONE,
-            hit_distortion: ffxi_proto::melee::HitDistortion::None,
-            knockback: ffxi_proto::melee::KnockbackLevel::None,
+            info: ffxi_proto::melee::ActionInfo::NONE.bits(),
+            hit_distortion: ffxi_proto::melee::HitDistortion::None.to_wire(),
+            knockback: ffxi_proto::melee::KnockbackLevel::None.to_wire(),
         }),
     );
 }

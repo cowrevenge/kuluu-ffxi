@@ -572,30 +572,17 @@ pub fn span_color(kind: ChatSpanKind, base: Color) -> Color {
 }
 
 pub fn segment_chat_line(line: &str, base: Color) -> Vec<(String, Color)> {
-    let mut out: Vec<(String, Color)> = Vec::new();
-    let mut buf = String::new();
-    let mut chars = line.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c == '{' {
-            if !buf.is_empty() {
-                out.push((std::mem::take(&mut buf), base));
-            }
-
-            let mut at = String::from('{');
-            for ic in chars.by_ref() {
-                at.push(ic);
-                if ic == '}' {
-                    break;
-                }
-            }
-            out.push((at, AUTOTRANSLATE_COLOR));
-        } else {
-            buf.push(c);
-        }
-    }
-    if !buf.is_empty() {
-        out.push((buf, base));
-    }
+    let mut out: Vec<(String, Color)> = ffxi_proto::autotranslate::split_phrases(line)
+        .into_iter()
+        .map(|span| {
+            let color = if span.is_phrase {
+                AUTOTRANSLATE_COLOR
+            } else {
+                base
+            };
+            (span.text, color)
+        })
+        .collect();
     if out.is_empty() {
         out.push((String::new(), base));
     }

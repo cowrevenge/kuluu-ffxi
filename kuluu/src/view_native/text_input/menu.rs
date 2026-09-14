@@ -15,7 +15,7 @@ enum MenuDispatch {
 
 fn apply_graphics_cycle(cursor: usize, delta: i32, graphics: &mut kuluu_render::GraphicsSettings) {
     // The page carries two non-field action rows ("DLSS Config" under the DLSS
-    // on/off row, "Reset to High" at the bottom), so the cursor slot does not
+    // on/off row, "Reset to Minimum" at the bottom), so the cursor slot does not
     // index GRAPHICS_FIELDS directly — resolve through the shared mapping.
     if let Some(field) = kuluu_render::hud::menu::graphics_field_at(cursor, graphics.dlss_supported)
     {
@@ -209,8 +209,8 @@ pub(super) fn confirm_menu_at_cursor(
     if matches!(kind, MenuKind::Graphics) {
         let dlss_supported = graphics.dlss_supported;
         if cursor == kuluu_render::hud::menu::graphics_reset_slot(dlss_supported) {
-            graphics.reset_to_default();
-            push_system_chat_line(scene_state, "[menu] Graphics reset to High".into());
+            graphics.reset_to_minimum();
+            push_system_chat_line(scene_state, "[menu] Graphics reset to Minimum".into());
         } else if dlss_supported && cursor == kuluu_render::hud::menu::GRAPHICS_DLSS_CONFIG_SLOT {
             stack.push(MenuKind::GraphicsDlss);
         } else {

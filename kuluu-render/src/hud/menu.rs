@@ -388,7 +388,7 @@ const GRAPHICS_ENTRIES: &[&str] = &[
     "Model Shadow Receiving",
     "Model Shadow Casting",
     "Zone Shadow Casting",
-    "Reset to High",
+    "Reset to Minimum",
 ];
 
 /// Slot of the "DLSS Config" row: directly under the DLSS on/off row — one
@@ -408,7 +408,7 @@ const fn dlss_config_slot() -> usize {
 
 pub const GRAPHICS_DLSS_CONFIG_SLOT: usize = dlss_config_slot();
 
-/// Slot of "Reset to High": the last row on the page.
+/// Slot of "Reset to Minimum": the last row on the page.
 pub const GRAPHICS_RESET_SLOT: usize = GRAPHICS_FIELDS.len() + 1;
 
 /// The Graphics page rows as they appear in this build: when the build can't
@@ -429,7 +429,7 @@ pub fn graphics_entries(dlss_supported: bool) -> Vec<&'static str> {
         .collect()
 }
 
-/// Slot of "Reset to High" in the current layout: always the last row, one
+/// Slot of "Reset to Minimum" in the current layout: always the last row, one
 /// slot earlier when the DLSS rows are dropped.
 pub fn graphics_reset_slot(dlss_supported: bool) -> usize {
     if dlss_supported {
@@ -440,7 +440,7 @@ pub fn graphics_reset_slot(dlss_supported: bool) -> usize {
 }
 
 /// Maps a Graphics-page cursor slot onto its cyclable field, skipping the two
-/// action rows ("DLSS Config" under the DLSS on/off row, "Reset to High" at
+/// action rows ("DLSS Config" under the DLSS on/off row, "Reset to Minimum" at
 /// the bottom). `None` for those slots. When the build can't run DLSS the page
 /// has no DLSS rows: every slot before the reset row is a field in order.
 pub fn graphics_field_at(slot: usize, dlss_supported: bool) -> Option<GraphicsField> {
@@ -1546,7 +1546,7 @@ fn format_row_body(
                 settings.value_label(field)
             ),
 
-            // The two action rows (DLSS Config, Reset to High).
+            // The two action rows (DLSS Config, Reset to Minimum).
             None => label.to_string(),
         },
         MenuKind::GraphicsDlss => match DLSS_CONFIG_FIELDS.get(slot).copied() {
@@ -2182,7 +2182,7 @@ mod tests {
             "test presumes Graphics outgrows the viewport"
         );
         let dynamic = DynamicMenu::default();
-        // Cursor on the last row (Reset to High) must land inside the window.
+        // Cursor on the last row (Reset to Minimum) must land inside the window.
         let last = total - 1;
         let (t, start) = resolve_viewport(MenuKind::Graphics, last, &dynamic, true);
         let window = visible_window(MenuKind::Graphics, t);
@@ -2352,7 +2352,7 @@ mod tests {
         for (slot, entry) in GRAPHICS_ENTRIES.iter().enumerate() {
             match slot {
                 s if s == GRAPHICS_DLSS_CONFIG_SLOT => assert_eq!(*entry, "DLSS Config"),
-                s if s == GRAPHICS_RESET_SLOT => assert_eq!(*entry, "Reset to High"),
+                s if s == GRAPHICS_RESET_SLOT => assert_eq!(*entry, "Reset to Minimum"),
                 _ => {
                     let field = *GRAPHICS_FIELDS
                         .get(field_i)
@@ -2385,7 +2385,7 @@ mod tests {
         assert!(!bare.iter().any(|e| *e == "DLSS" || *e == "DLSS Config"));
         // One row per field minus the DLSS on/off row, plus the reset row.
         assert_eq!(bare.len(), GRAPHICS_FIELDS.len());
-        assert_eq!(*bare.last().unwrap(), "Reset to High");
+        assert_eq!(*bare.last().unwrap(), "Reset to Minimum");
 
         // Slot mapping: fields keep their order with the DLSS slot removed,
         // and the reset row maps to no field.

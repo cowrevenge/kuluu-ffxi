@@ -19,9 +19,10 @@ use crate::sun_moon::{IsMoon, IsSun};
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum QualityPreset {
+    Minimum,
+    #[default]
     Low,
     Medium,
-    #[default]
     High,
     Ultra,
 
@@ -31,6 +32,7 @@ pub enum QualityPreset {
 impl QualityPreset {
     pub const fn label(self) -> &'static str {
         match self {
+            QualityPreset::Minimum => "Minimum",
             QualityPreset::Low => "Low",
             QualityPreset::Medium => "Medium",
             QualityPreset::High => "High",
@@ -594,7 +596,8 @@ pub const DEFAULT_LIGHT_FLICKER: bool = true;
 // wider spread of lamps light their surroundings before you reach them. Capped
 // by MAX_POINT_LIGHTS (the shader array length).
 pub const DEFAULT_MODEL_LIGHT_COUNT: u32 = 8;
-pub const MODEL_LIGHT_COUNT_SLOTS: &[u32] = &[4, 8, 12, 16];
+pub const MIN_MODEL_LIGHT_COUNT: u32 = 4;
+pub const MODEL_LIGHT_COUNT_SLOTS: &[u32] = &[MIN_MODEL_LIGHT_COUNT, 8, 12, 16];
 
 // Lower f-stop = wider aperture = stronger background blur. f/2.8 is a tasteful
 // cinematic default once the user opts into DoF.
@@ -644,7 +647,7 @@ fn default_render_scale() -> f32 {
 
 impl Default for GraphicsSettings {
     fn default() -> Self {
-        Self::for_preset(QualityPreset::High)
+        Self::for_preset(QualityPreset::Low)
     }
 }
 
@@ -694,6 +697,7 @@ const DLSS_QUALITY_SLOTS: &[DlssQuality] = &[
 ];
 
 const PRESET_CYCLE: &[QualityPreset] = &[
+    QualityPreset::Minimum,
     QualityPreset::Low,
     QualityPreset::Medium,
     QualityPreset::High,
@@ -742,6 +746,51 @@ impl GraphicsSettings {
     pub fn for_preset(preset: QualityPreset) -> Self {
         let aa_default = AaMode::Msaa4;
         match preset {
+            // Every lever at its cheapest: no shadow pass casters, no DAT point
+            // lights, the shortest view distance. The floor a "Reset" returns to.
+            QualityPreset::Minimum => Self {
+                preset,
+                shadow_map_size: 1024,
+                shadow_cascade_count: 2,
+                shadow_max_distance: 100.0,
+                anti_aliasing: AaMode::Off,
+                dlss_quality: DlssQuality::Auto,
+                neural_uplift: false,
+                nr_intensity: default_nr_intensity(),
+                nr_local_tone_strength: default_nr_local_tone(),
+                nr_structure_strength: default_nr_structure(),
+                dlss_supported: false,
+                dlss_menu_enabled: false,
+                job_display: false,
+                mob_hp_under: false,
+                texture_filtering: TextureFiltering::Vanilla,
+                bloom_intensity: 0.0,
+                volumetric_fog: false,
+                fog_step_count: 32,
+                view_distance: 200.0,
+                vsync: true,
+                fps_cap: 0,
+                fov_deg: DEFAULT_FOV_DEG,
+                ui_scale: 1.0,
+                camera_spring: false,
+                menu_scale: true,
+                dynamic_lights: DynamicLights::Off,
+                shadowed_lights: 0,
+                light_flicker: false,
+                model_light_count: MIN_MODEL_LIGHT_COUNT,
+                character_render_path: CharacterRenderPath::FfxiFaithful,
+                realistic_character_lighting: false,
+                faithful_shadow_receive: false,
+                character_shadow_cast: false,
+                zone_shadow_cast: false,
+                depth_of_field: false,
+                dof_aperture_f_stops: DEFAULT_DOF_APERTURE,
+                zone_line_display: ZoneLineDisplay::Off,
+                minimap_radar: MinimapRadar::Vanilla,
+                render_scale: DEFAULT_RENDER_SCALE,
+                fullscreen: false,
+                windowed_fullscreen: false,
+            },
             QualityPreset::Low => Self {
                 preset,
                 shadow_map_size: 1024,
@@ -921,7 +970,7 @@ impl GraphicsSettings {
 
             QualityPreset::Custom => Self {
                 preset,
-                ..Self::for_preset(QualityPreset::High)
+                ..Self::for_preset(QualityPreset::Low)
             },
         }
     }
@@ -1070,11 +1119,14 @@ impl GraphicsSettings {
     pub fn cycle(&mut self, field: GraphicsField, delta: i32) {
         match field {
             GraphicsField::Preset => {
-                let lights = self.dynamic_lights;
+                // The lighting/shadow levers with a per-frame cost (light mode,
+                // zone casting, the realistic shading path) come from the preset,
+                // so "Low" means low: a crowd profile found a Low-looking config
+                // still paying for Enhanced point-light shadows and zone casters
+                // carried over from an earlier pick (kuluu-s9ky). The Enhanced fine
+                // knobs and shadow receipt stay sticky: they are inert or cheap.
                 let (sl, lf) = (self.shadowed_lights, self.light_flicker);
-                let realistic = self.realistic_character_lighting;
                 let receive = self.faithful_shadow_receive;
-                let zone_cast = self.zone_shadow_cast;
                 let zld = self.zone_line_display;
                 let minimap_radar = self.minimap_radar;
                 let (ui_scale, menu_scale) = (self.ui_scale, self.menu_scale);
@@ -1098,14 +1150,11 @@ impl GraphicsSettings {
                     self.nr_structure_strength,
                 );
                 let next =
-                    cycle_slot(self.preset, PRESET_CYCLE, delta).unwrap_or(QualityPreset::High);
+                    cycle_slot(self.preset, PRESET_CYCLE, delta).unwrap_or(QualityPreset::Low);
                 *self = Self::for_preset(next);
-                self.dynamic_lights = lights;
                 self.shadowed_lights = sl;
                 self.light_flicker = lf;
-                self.realistic_character_lighting = realistic;
                 self.faithful_shadow_receive = receive;
-                self.zone_shadow_cast = zone_cast;
                 self.zone_line_display = zld;
                 self.minimap_radar = minimap_radar;
                 self.ui_scale = ui_scale;
@@ -1218,6 +1267,7 @@ impl GraphicsSettings {
                     .unwrap_or(DynamicLights::Vanilla);
                 self.shadowed_lights = DEFAULT_SHADOWED_LIGHTS;
                 self.light_flicker = DEFAULT_LIGHT_FLICKER;
+                self.preset = QualityPreset::Custom;
             }
             GraphicsField::ShadowedLights => {
                 self.shadowed_lights =
@@ -1232,6 +1282,7 @@ impl GraphicsSettings {
             }
             GraphicsField::CharacterLighting => {
                 self.realistic_character_lighting = !self.realistic_character_lighting;
+                self.preset = QualityPreset::Custom;
             }
             GraphicsField::CharacterShadowReceive => {
                 self.faithful_shadow_receive = !self.faithful_shadow_receive;
@@ -1242,6 +1293,7 @@ impl GraphicsSettings {
             }
             GraphicsField::ZoneShadowCast => {
                 self.zone_shadow_cast = !self.zone_shadow_cast;
+                self.preset = QualityPreset::Custom;
             }
             GraphicsField::DepthOfField => {
                 self.depth_of_field = !self.depth_of_field;
@@ -1335,17 +1387,17 @@ impl GraphicsSettings {
         }
     }
 
-    pub fn reset_to_default(&mut self) {
+    pub fn reset_to_minimum(&mut self) {
         // Capability is runtime-detected, not a preference: a menu reset must
         // not un-detect DLSS support (the availability system only writes it
         // once at startup). The Retail+ gates are user choices too — a reset
-        // returns quality knobs to High but keeps the menu/Job/Mob-HP decisions.
+        // returns quality knobs to Minimum but keeps the menu/Job/Mob-HP decisions.
         let dlss_supported = self.dlss_supported;
         let dlss_menu_enabled = self.dlss_menu_enabled;
         let job_display = self.job_display;
         let mob_hp_under = self.mob_hp_under;
         let config = (self.minimap_radar, self.ui_scale, self.menu_scale);
-        *self = Self::for_preset(QualityPreset::High);
+        *self = Self::for_preset(QualityPreset::Minimum);
         (self.minimap_radar, self.ui_scale, self.menu_scale) = config;
         self.dlss_supported = dlss_supported;
         self.dlss_menu_enabled = dlss_menu_enabled;
@@ -2020,12 +2072,45 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_is_high_preset() {
+    fn default_is_low_preset() {
         let s = GraphicsSettings::default();
-        assert_eq!(s.preset, QualityPreset::High);
-        assert_eq!(s.shadow_map_size, 4096);
-        assert_eq!(s.shadow_cascade_count, 4);
-        assert!((s.shadow_max_distance - 700.0).abs() < 1e-6);
+        assert_eq!(s.preset, QualityPreset::Low);
+        assert_eq!(s.shadow_map_size, 1024);
+        assert_eq!(s.shadow_cascade_count, 2);
+        assert!((s.shadow_max_distance - 200.0).abs() < 1e-6);
+        assert_eq!(s.anti_aliasing, AaMode::Off);
+        assert_eq!(s.texture_filtering, TextureFiltering::Vanilla);
+    }
+
+    #[test]
+    fn minimum_is_the_cheapest_preset_on_every_lever() {
+        let m = GraphicsSettings::for_preset(QualityPreset::Minimum);
+        assert_eq!(m.dynamic_lights, DynamicLights::Off);
+        assert_eq!(m.shadowed_lights, 0);
+        assert!(!m.light_flicker);
+        assert_eq!(m.model_light_count, MIN_MODEL_LIGHT_COUNT);
+        assert!(!m.realistic_character_lighting);
+        assert!(!m.faithful_shadow_receive);
+        assert!(!m.character_shadow_cast);
+        assert!(!m.zone_shadow_cast);
+        assert!(!m.depth_of_field);
+        assert!(!m.volumetric_fog);
+        assert_eq!(m.anti_aliasing, AaMode::Off);
+        assert_eq!(m.texture_filtering, TextureFiltering::Vanilla);
+        assert!(m.bloom_intensity <= 1e-3);
+        for &preset in PRESET_CYCLE {
+            let s = GraphicsSettings::for_preset(preset);
+            assert!(m.shadow_map_size <= s.shadow_map_size, "{preset:?}");
+            assert!(
+                m.shadow_cascade_count <= s.shadow_cascade_count,
+                "{preset:?}"
+            );
+            assert!(m.shadow_max_distance <= s.shadow_max_distance, "{preset:?}");
+            assert!(m.view_distance <= s.view_distance, "{preset:?}");
+            assert!(m.fog_step_count <= s.fog_step_count, "{preset:?}");
+            assert!(m.model_light_count <= s.model_light_count, "{preset:?}");
+        }
+        assert_eq!(PRESET_CYCLE[0], QualityPreset::Minimum);
     }
 
     #[test]
@@ -2117,7 +2202,7 @@ mod tests {
     #[test]
     fn cycling_a_lever_marks_preset_custom() {
         let mut s = GraphicsSettings::default();
-        assert_eq!(s.preset, QualityPreset::High);
+        assert_eq!(s.preset, QualityPreset::Low);
         s.cycle(GraphicsField::ShadowMapSize, 1);
         assert_eq!(s.preset, QualityPreset::Custom);
 
@@ -2134,9 +2219,10 @@ mod tests {
         s.shadow_map_size = 1024;
         s.preset = QualityPreset::Custom;
 
+        // Custom sits outside the cycle, so a step lands one past its head.
         s.cycle(GraphicsField::Preset, 1);
-        let medium = GraphicsSettings::for_preset(QualityPreset::Medium);
-        assert_eq!(s, medium);
+        let low = GraphicsSettings::for_preset(QualityPreset::Low);
+        assert_eq!(s, low);
     }
 
     #[test]
@@ -2170,10 +2256,15 @@ mod tests {
             "Vanilla",
             "the shadow count is inert in Vanilla, so the mode label must not read Custom"
         );
-        assert_eq!(s.preset, QualityPreset::High, "light knob ⟂ quality tier");
+        assert_eq!(s.preset, QualityPreset::Low, "light knob ⟂ quality tier");
 
         s.cycle(GraphicsField::DynamicLights, 1);
         assert_eq!(s.dynamic_lights, DynamicLights::Enhanced);
+        assert_eq!(
+            s.preset,
+            QualityPreset::Custom,
+            "the light mode is preset-owned, so leaving it marks Custom"
+        );
         assert!(
             s.lights_fine_is_default(),
             "mode cycle reset the fine knobs"
@@ -2231,7 +2322,11 @@ mod tests {
 
         s.cycle(GraphicsField::DynamicLights, 1);
         assert_eq!(s.dynamic_lights, DynamicLights::Enhanced);
-        assert_eq!(s.preset, QualityPreset::High, "lights must not flip preset");
+        assert_eq!(
+            s.preset,
+            QualityPreset::Custom,
+            "the light mode is a quality lever"
+        );
         assert!(s.dynamic_lights.faithful_enabled());
         assert!(s.dynamic_lights.point_shadows_enabled());
 
@@ -2245,23 +2340,40 @@ mod tests {
     }
 
     #[test]
-    fn preset_cycle_preserves_dynamic_lights() {
+    fn preset_cycle_applies_the_preset_light_mode() {
         let mut s = GraphicsSettings::default();
         s.cycle(GraphicsField::DynamicLights, -1);
         assert_eq!(s.dynamic_lights, DynamicLights::Off);
         s.cycle(GraphicsField::Preset, 1);
-        assert_eq!(s.dynamic_lights, DynamicLights::Off, "preset cycle kept it");
+        assert_eq!(s.preset, QualityPreset::Low);
+        assert_eq!(s.dynamic_lights, DynamicLights::Vanilla, "Low pins Vanilla");
+        s.cycle(GraphicsField::Preset, -1);
+        assert_eq!(s.preset, QualityPreset::Minimum);
+        assert_eq!(s.dynamic_lights, DynamicLights::Off, "Minimum pins Off");
     }
 
     #[test]
-    fn presets_pin_dynamic_lights_vanilla() {
+    fn presets_pin_dynamic_lights_vanilla_and_preset_cycle_drops_enhanced() {
         for &preset in PRESET_CYCLE {
+            if preset == QualityPreset::Minimum {
+                continue;
+            }
             assert_eq!(
                 GraphicsSettings::for_preset(preset).dynamic_lights,
                 DynamicLights::Vanilla,
                 "preset {preset:?} must pin the faithful-only light mode"
             );
         }
+        let mut s = GraphicsSettings::default();
+        s.cycle(GraphicsField::DynamicLights, 1);
+        assert_eq!(s.dynamic_lights, DynamicLights::Enhanced);
+        s.cycle(GraphicsField::Preset, 1);
+        assert_eq!(s.preset, QualityPreset::Low);
+        assert_eq!(
+            s.dynamic_lights,
+            DynamicLights::Vanilla,
+            "picking a preset applies its light mode instead of carrying Enhanced over"
+        );
     }
 
     #[test]
@@ -2324,12 +2436,12 @@ mod tests {
     fn cycle_wraps_in_both_directions() {
         let mut s = GraphicsSettings::default();
 
-        // Default (High) sits on the top slot (4096), so +1 wraps to the bottom
-        // and -1 wraps back to the top.
-        s.cycle(GraphicsField::ShadowMapSize, 1);
-        assert_eq!(s.shadow_map_size, 1024, "wrapped past 4096");
+        // Default (Low) sits on the bottom slot (1024), so -1 wraps to the top
+        // and +1 wraps back to the bottom.
         s.cycle(GraphicsField::ShadowMapSize, -1);
-        assert_eq!(s.shadow_map_size, 4096, "wrapped back");
+        assert_eq!(s.shadow_map_size, 4096, "wrapped past 1024");
+        s.cycle(GraphicsField::ShadowMapSize, 1);
+        assert_eq!(s.shadow_map_size, 1024, "wrapped back");
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -2366,8 +2478,11 @@ mod tests {
     }
 
     #[test]
-    fn model_shadows_default_on_for_all_presets() {
+    fn model_shadows_default_on_for_all_presets_above_minimum() {
         for &preset in PRESET_CYCLE {
+            if preset == QualityPreset::Minimum {
+                continue;
+            }
             assert!(
                 GraphicsSettings::for_preset(preset).faithful_shadow_receive,
                 "preset {preset:?} should default to receiving shadows"
@@ -2385,7 +2500,7 @@ mod tests {
         assert_eq!(s.value_label(GraphicsField::CharacterShadowReceive), "Off");
         assert_eq!(
             s.preset,
-            QualityPreset::High,
+            QualityPreset::Low,
             "shadow receipt ⟂ quality tier"
         );
 
@@ -2395,16 +2510,17 @@ mod tests {
 
     #[test]
     fn model_shadow_casting_follows_preset_tier() {
+        assert!(!GraphicsSettings::for_preset(QualityPreset::Minimum).character_shadow_cast);
         assert!(!GraphicsSettings::for_preset(QualityPreset::Low).character_shadow_cast);
         assert!(!GraphicsSettings::for_preset(QualityPreset::Medium).character_shadow_cast);
         assert!(GraphicsSettings::for_preset(QualityPreset::High).character_shadow_cast);
         assert!(GraphicsSettings::for_preset(QualityPreset::Ultra).character_shadow_cast);
-        assert!(GraphicsSettings::default().character_shadow_cast);
+        assert!(!GraphicsSettings::default().character_shadow_cast);
     }
 
     #[test]
     fn model_shadow_casting_is_quality_lever_tied_to_tier() {
-        let mut s = GraphicsSettings::default(); // High -> casting on
+        let mut s = GraphicsSettings::for_preset(QualityPreset::High); // casting on
         assert_eq!(s.value_label(GraphicsField::CharacterShadowCast), "On");
         s.cycle(GraphicsField::CharacterShadowCast, 1);
         assert!(!s.character_shadow_cast);
@@ -2422,7 +2538,7 @@ mod tests {
     }
 
     #[test]
-    fn zone_shadow_casting_is_off_in_every_preset_and_sticky() {
+    fn zone_shadow_casting_is_off_in_every_preset_and_preset_owned() {
         for preset in PRESET_CYCLE {
             assert!(
                 !GraphicsSettings::for_preset(*preset).zone_shadow_cast,
@@ -2436,11 +2552,14 @@ mod tests {
         assert_eq!(s.value_label(GraphicsField::ZoneShadowCast), "On");
         assert_eq!(
             s.preset,
-            QualityPreset::High,
-            "an enhanced knob is not a quality-tier lever"
+            QualityPreset::Custom,
+            "zone casting is the dominant town render cost, so it is a quality lever"
         );
         s.cycle(GraphicsField::Preset, 1);
-        assert!(s.zone_shadow_cast, "preset cycle kept zone casting on");
+        assert!(
+            !s.zone_shadow_cast,
+            "picking a preset turns zone casting back off"
+        );
     }
 
     #[test]
@@ -2455,7 +2574,7 @@ mod tests {
             settings.ui_scale,
             settings.menu_scale,
         );
-        assert_eq!(settings.preset, QualityPreset::High);
+        assert_eq!(settings.preset, QualityPreset::Low);
         settings.cycle(GraphicsField::Preset, 1);
         assert_eq!(
             (
@@ -2465,8 +2584,8 @@ mod tests {
             ),
             preferences
         );
-        settings.reset_to_default();
-        assert_eq!(settings.preset, QualityPreset::High);
+        settings.reset_to_minimum();
+        assert_eq!(settings.preset, QualityPreset::Minimum);
         assert_eq!(
             (
                 settings.minimap_radar,
@@ -2478,12 +2597,14 @@ mod tests {
     }
 
     #[test]
-    fn reset_returns_to_high() {
-        let mut s = GraphicsSettings::for_preset(QualityPreset::Low);
+    fn reset_returns_to_minimum() {
+        let mut s = GraphicsSettings::for_preset(QualityPreset::High);
         s.bloom_intensity = 0.16;
+        s.zone_shadow_cast = true;
+        s.dynamic_lights = DynamicLights::Enhanced;
         s.preset = QualityPreset::Custom;
-        s.reset_to_default();
-        assert_eq!(s, GraphicsSettings::for_preset(QualityPreset::High));
+        s.reset_to_minimum();
+        assert_eq!(s, GraphicsSettings::for_preset(QualityPreset::Minimum));
     }
 
     #[test]
@@ -2540,8 +2661,8 @@ mod tests {
         let mut s = GraphicsSettings::default();
         s.cycle(GraphicsField::DepthOfField, 1); // on -> Custom
 
-        s.cycle(GraphicsField::Preset, 1); // Custom -> Medium
-        assert_eq!(s.preset, QualityPreset::Medium);
+        s.cycle(GraphicsField::Preset, 1); // Custom -> one past the cycle head
+        assert_eq!(s.preset, QualityPreset::Low);
         assert!(
             !s.depth_of_field,
             "preset cycle reset DoF to the tier default"
@@ -2575,7 +2696,7 @@ mod tests {
 
         s.cycle(GraphicsField::ZoneLineDisplay, 1);
         assert_eq!(s.zone_line_display, ZoneLineDisplay::Pillar);
-        assert_eq!(s.preset, QualityPreset::High, "display ⟂ quality tier");
+        assert_eq!(s.preset, QualityPreset::Low, "display ⟂ quality tier");
 
         s.cycle(GraphicsField::ZoneLineDisplay, 1);
         assert_eq!(s.zone_line_display, ZoneLineDisplay::Gate);
@@ -2645,7 +2766,7 @@ mod tests {
         assert!(!matches!(s.anti_aliasing, AaMode::Dlss));
         s.cycle(GraphicsField::DlssQuality, 1);
         assert_eq!(s.dlss_quality, DlssQuality::Auto);
-        assert_eq!(s.preset, QualityPreset::High);
+        assert_eq!(s.preset, QualityPreset::Low);
 
         // The AA cycler never reaches Dlss without support: a full loop from
         // Off visits only the plain slots.
@@ -2673,7 +2794,7 @@ mod tests {
         assert!(!matches!(s.anti_aliasing, AaMode::Dlss));
         assert_eq!(
             s.preset,
-            QualityPreset::High,
+            QualityPreset::Low,
             "refused cycle must not dirty preset"
         );
 
@@ -2708,7 +2829,7 @@ mod tests {
             s.dlss_menu_enabled && s.job_display && s.mob_hp_under,
             "preset cycle kept the gates"
         );
-        s.reset_to_default();
+        s.reset_to_minimum();
         assert!(
             s.dlss_menu_enabled && s.job_display && s.mob_hp_under,
             "menu reset kept the gates"
@@ -2773,9 +2894,9 @@ mod tests {
         assert_eq!(s.dlss_quality, DlssQuality::Auto);
         assert!(s.dlss_active(), "config reset left on/off alone");
 
-        // Full menu reset returns to High (DLSS off, Msaa4) but must not
+        // Full menu reset returns to Minimum (DLSS off, AA off) but must not
         // un-detect the runtime capability or close the Retail+ gate.
-        s.reset_to_default();
+        s.reset_to_minimum();
         assert!(!matches!(s.anti_aliasing, AaMode::Dlss));
         assert!(s.dlss_supported, "reset preserved capability");
         assert!(s.dlss_menu_enabled, "reset preserved the Retail+ gate");
@@ -2905,6 +3026,7 @@ mod tests {
     #[test]
     fn neural_uplift_is_off_in_every_preset() {
         for preset in [
+            QualityPreset::Minimum,
             QualityPreset::Low,
             QualityPreset::Medium,
             QualityPreset::High,

@@ -326,11 +326,11 @@ pub(super) fn spawn_ui(
                                 ..default()
                             },
                             (),
-                            Spawn((Text::new("Reset to High"), ThemedText)),
+                            Spawn((Text::new("Reset to Minimum"), ThemedText)),
                         ))
                         .observe(
                             |_ev: On<Activate>, mut settings: ResMut<GraphicsSettings>| {
-                                settings.reset_to_default();
+                                settings.reset_to_minimum();
                             },
                         );
 

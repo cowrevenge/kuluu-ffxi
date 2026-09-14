@@ -285,7 +285,9 @@ fn warn_on_client_ver_era_mismatch(profile: &ffxi_dat::client_profile::ClientPro
             LSB_CLIENT_VER,
             VerLock::from_setting(LSB_DEFAULT_VER_LOCK)
         ),
-        "FFXI client patch era differs from the pinned LSB login.CLIENT_VER"
+        "FFXI client patch era differs from the pinned LSB login.CLIENT_VER: zone text ids are \
+         reconciled by landmark, and cast bars timed from the client's spell DAT end when the \
+         server's MAGIC_FINISH arrives"
     );
 }
 

@@ -300,7 +300,9 @@ mod tests {
 
     #[test]
     fn the_shipping_default_reach_is_bounded_by_what_is_drawn() {
-        let high = kuluu_render::graphics_settings::GraphicsSettings::default();
+        let high = kuluu_render::graphics_settings::GraphicsSettings::for_preset(
+            kuluu_render::QualityPreset::High,
+        );
         assert_eq!(
             occlusion_reach(high.view_distance, Some(TEST_FOG_VISIBILITY)),
             TEST_FOG_VISIBILITY,

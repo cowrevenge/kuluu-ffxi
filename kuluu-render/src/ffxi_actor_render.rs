@@ -562,10 +562,34 @@ fn first_skeleton(bytes: &[u8]) -> Option<Skeleton> {
         .next()
 }
 
+// Every PC/NPC/mount load resolves through one shared root: `DatRoot::open` re-runs overlay
+// discovery and the FFXiMain.dll SHA-256 client-profile probe, so opening one per actor spawn is
+// pure repeat work competing with the render task pool. Wired by kuluu's `insert_dat_roots` like
+// every other `*DatRoot` (see `scheduler_runtime::ActionDatRoot`).
+#[derive(Resource, Default, Clone)]
+pub struct ActorDatRoot(pub Option<Arc<DatRoot>>);
+
+/// Shared by every hot per-load path (`kick_load_actor_tasks`,
+/// `dat_mmb::process_load_mmb_requests`): reuse the wired root when the host
+/// has one, and only fall back to opening one from the environment (re-running
+/// overlay discovery and the FFXiMain.dll probe) when it does not.
+pub(crate) fn resolve_actor_root(wired: Option<Arc<DatRoot>>) -> Result<Arc<DatRoot>, String> {
+    match wired {
+        Some(root) => Ok(root),
+        None => Ok(Arc::new(
+            DatRoot::from_env_or_default().map_err(|e| format!("DatRoot: {e}"))?,
+        )),
+    }
+}
+
 pub fn load_npc(file_id: u32) -> Result<LoadedActor, String> {
     crate::perf_probe::note_model_load();
     let root = DatRoot::from_env_or_default().map_err(|e| format!("DatRoot: {e}"))?;
-    let bytes = read_dat(&root, file_id).ok_or_else(|| format!("read npc dat {file_id}"))?;
+    load_npc_with_root(&root, file_id)
+}
+
+pub fn load_npc_with_root(root: &DatRoot, file_id: u32) -> Result<LoadedActor, String> {
+    let bytes = read_dat(root, file_id).ok_or_else(|| format!("read npc dat {file_id}"))?;
 
     let skeleton =
         first_skeleton(&bytes).ok_or_else(|| format!("no skeleton (0x29) in npc dat {file_id}"))?;
@@ -610,7 +634,7 @@ pub fn load_npc(file_id: u32) -> Result<LoadedActor, String> {
         routines,
         action_assets: Arc::new(action_assets),
         rejected_clips,
-        model_dat: model_dat_label(&root, file_id),
+        model_dat: model_dat_label(root, file_id),
         cib: dir.first_cib(),
     })
 }
@@ -650,6 +674,10 @@ fn mount_equipment_table_index(race: u8) -> Option<u8> {
 pub fn load_mount_race(race: u8) -> Result<LoadedActor, String> {
     crate::perf_probe::note_model_load();
     let root = DatRoot::from_env_or_default().map_err(|e| format!("DatRoot: {e}"))?;
+    load_mount_race_with_root(&root, race)
+}
+
+pub fn load_mount_race_with_root(root: &DatRoot, race: u8) -> Result<LoadedActor, String> {
     let dll = main_dll_for_root(root.root())
         .ok_or_else(|| format!("FFXiMain.dll unreadable under {}", root.root().display()))?;
     let table_index = mount_equipment_table_index(race)
@@ -659,7 +687,7 @@ pub fn load_mount_race(race: u8) -> Result<LoadedActor, String> {
             .ok_or_else(|| format!("no race-config table entry for mount race {race}"))?,
     );
 
-    let skel_bytes = read_dat(&root, skel_file_id)
+    let skel_bytes = read_dat(root, skel_file_id)
         .ok_or_else(|| format!("read mount race dat {skel_file_id}"))?;
     let skeleton = first_skeleton(&skel_bytes)
         .ok_or_else(|| format!("no skeleton in mount race dat {skel_file_id}"))?;
@@ -674,7 +702,7 @@ pub fn load_mount_race(race: u8) -> Result<LoadedActor, String> {
         let Some(file_id) = dll.equipment_model_index(table_index, slot, 0) else {
             continue;
         };
-        let Some(bytes) = read_dat(&root, file_id) else {
+        let Some(bytes) = read_dat(root, file_id) else {
             unrendered.push(file_id);
             continue;
         };
@@ -706,7 +734,7 @@ pub fn load_mount_race(race: u8) -> Result<LoadedActor, String> {
         routines,
         action_assets: Arc::new(collect_sound_assets(&[&anim_dirs])),
         rejected_clips,
-        model_dat: model_dat_label(&root, skel_file_id),
+        model_dat: model_dat_label(root, skel_file_id),
         // The mount's own Info chunk uses the `mount` layout (rotation/poseType at +0x02/+0x0A,
         // research/xim resource/InfoSection.kt readMountDefinition); parsing it with the info
         // layout would misread poseType as a scale byte, so mounts carry no CIB.
@@ -766,6 +794,26 @@ pub fn load_pc(
 ) -> Result<LoadedActor, String> {
     crate::perf_probe::note_model_load();
     let root = DatRoot::from_env_or_default().map_err(|e| format!("DatRoot: {e}"))?;
+    load_pc_with_root(
+        &root,
+        race,
+        mounted,
+        equipment,
+        body,
+        main_weapon,
+        sub_weapon,
+    )
+}
+
+pub fn load_pc_with_root(
+    root: &DatRoot,
+    race: u8,
+    mounted: bool,
+    equipment: &[u32],
+    body: Option<u32>,
+    main_weapon: Option<u32>,
+    sub_weapon: Option<u32>,
+) -> Result<LoadedActor, String> {
     // One parsed FFXiMain.dll per install root, shared with every other consumer;
     // `None` (unreadable) degrades to the shipped fallback tables for the
     // skeleton and battle DATs and to no action poses or default body.
@@ -777,7 +825,7 @@ pub fn load_pc(
         .ok_or_else(|| format!("unsupported race {race}"))?;
 
     let skel_bytes =
-        read_dat(&root, skel_file_id).ok_or_else(|| format!("read skel dat {skel_file_id}"))?;
+        read_dat(root, skel_file_id).ok_or_else(|| format!("read skel dat {skel_file_id}"))?;
     let skeleton = first_skeleton(&skel_bytes)
         .ok_or_else(|| format!("no skeleton in race dat {skel_file_id}"))?;
 
@@ -814,7 +862,7 @@ pub fn load_pc(
     // authored one.
     let cib_byte = |file_id: Option<u32>, pick: fn(&ffxi_dat::cib::Cib) -> u8| {
         file_id
-            .and_then(|f| read_dat(&root, f))
+            .and_then(|f| read_dat(root, f))
             .map(ResourceDir::from_bytes)
             .and_then(|d| d.first_cib())
             .map(|c| pick(&c))
@@ -827,7 +875,7 @@ pub fn load_pc(
         u32::from(is_shield) + UPPER_BODY_MOTION_OFFSET,
         u32::from(waist_type) + WAIST_MOTION_OFFSET,
     ] {
-        if let Some(bytes) = read_dat(&root, skel_file_id + offset) {
+        if let Some(bytes) = read_dat(root, skel_file_id + offset) {
             anim_dirs.push(ResourceDir::from_bytes(bytes));
         }
     }
@@ -837,7 +885,7 @@ pub fn load_pc(
     // base, and only while riding does retail put it in the animation set.
     if mounted {
         match action_anim_dat(
-            &root,
+            root,
             dll.as_deref(),
             race,
             ffxi_dat::main_dll::ACTION_ANIM_MOUNT_OFFSET,
@@ -852,7 +900,7 @@ pub fn load_pc(
     // DAT rides along for every PC. It is a quarter the size of the race base
     // and carries the `fsh*` routines the pose selector resolves through.
     match action_anim_dat(
-        &root,
+        root,
         dll.as_deref(),
         race,
         ffxi_dat::main_dll::ACTION_ANIM_FISHING_OFFSET,
@@ -874,7 +922,7 @@ pub fn load_pc(
 
     let mut equip_trace: Vec<(u32, &'static str)> = Vec::new();
     for &file_id in equipment {
-        let Some(bytes) = read_dat(&root, file_id) else {
+        let Some(bytes) = read_dat(root, file_id) else {
             equip_trace.push((file_id, "unreadable"));
             continue;
         };
@@ -903,7 +951,7 @@ pub fn load_pc(
     }
 
     let weapon_anim_type = main_weapon
-        .and_then(|wf| read_dat(&root, wf))
+        .and_then(|wf| read_dat(root, wf))
         .map(ResourceDir::from_bytes)
         .and_then(|d| d.first_cib())
         .map(|c| c.motion_index)
@@ -911,7 +959,7 @@ pub fn load_pc(
     let mut battle_dirs = Vec::new();
     if let Some(base) = combat_stance::motion_dat_for_race(dll.as_deref(), race) {
         if weapon_anim_type != 0 && weapon_anim_type != CIB_MOTION_INDEX_NONE {
-            if let Some(dir) = read_dat(&root, base + weapon_anim_type as u32)
+            if let Some(dir) = read_dat(root, base + weapon_anim_type as u32)
                 .map(ResourceDir::from_bytes)
                 .filter(|d| {
                     d.collect_animations()
@@ -923,7 +971,7 @@ pub fn load_pc(
             }
         }
 
-        if let Some(dir) = read_dat(&root, base).map(ResourceDir::from_bytes) {
+        if let Some(dir) = read_dat(root, base).map(ResourceDir::from_bytes) {
             battle_dirs.push(dir);
         }
     }
@@ -950,7 +998,7 @@ pub fn load_pc(
         routines,
         action_assets: Arc::new(collect_sound_assets(&[&anim_dirs, &battle_dirs])),
         rejected_clips,
-        model_dat: model_dat_label(&root, skel_file_id),
+        model_dat: model_dat_label(root, skel_file_id),
         cib: race_cib,
     })
 }
@@ -2835,6 +2883,7 @@ pub fn kick_load_actor_tasks(
     tracked: Res<crate::scene::TrackedEntities>,
     settings: Res<crate::graphics_settings::GraphicsSettings>,
     mut in_flight: ResMut<ActorLoadInFlight>,
+    actor_root: Res<ActorDatRoot>,
 ) {
     let quality = crate::zone_texture::TextureQuality {
         mipmaps: settings.texture_filtering.mipmaps(),
@@ -2868,10 +2917,13 @@ pub fn kick_load_actor_tasks(
             ActorSubject::Npc { graph_size, .. } => Some(graph_size),
             _ => None,
         };
+        let root_arc = actor_root.0.clone();
         let task = AsyncComputeTaskPool::get().spawn(async move {
+            crate::perf_probe::note_model_load();
+            let root = resolve_actor_root(root_arc)?;
             let loaded = match subject {
-                ActorSubject::Mount { race } => load_mount_race(race),
-                ActorSubject::Npc { file_id, .. } => load_npc(file_id),
+                ActorSubject::Mount { race } => load_mount_race_with_root(&root, race),
+                ActorSubject::Npc { file_id, .. } => load_npc_with_root(&root, file_id),
                 ActorSubject::Pc {
                     race,
                     mounted,
@@ -2879,7 +2931,15 @@ pub fn kick_load_actor_tasks(
                     body,
                     main_weapon,
                     sub_weapon,
-                } => load_pc(race, mounted, &equipment, body, main_weapon, sub_weapon),
+                } => load_pc_with_root(
+                    &root,
+                    race,
+                    mounted,
+                    &equipment,
+                    body,
+                    main_weapon,
+                    sub_weapon,
+                ),
             }?;
             let scale = match (npc_graph_size, loaded.cib) {
                 (Some(graph_size), Some(cib)) => cib.scale_factor(graph_size),
@@ -5925,5 +5985,89 @@ mod skin_slab_tests {
         assert_eq!(world_pose.len(), joints);
         let reg = app.world().resource::<FfxiSkinRegistry>();
         assert_eq!(&reg.skin(slot).joints.matrices[..joints], &world_pose[..]);
+    }
+}
+
+#[cfg(test)]
+mod actor_dat_root_tests {
+    use super::*;
+
+    #[test]
+    fn some_wired_root_is_reused_verbatim() {
+        let Some(root) = ffxi_dat::archive::open_test_install() else {
+            eprintln!("skipping: no retail DAT root");
+            return;
+        };
+        let root = Arc::new(root);
+        let resolved =
+            resolve_actor_root(Some(root.clone())).expect("a wired root always resolves");
+        assert!(
+            Arc::ptr_eq(&root, &resolved),
+            "a wired root must be reused, not reopened into a new DatRoot"
+        );
+    }
+
+    // Bounded so a never-landing task fails the test instead of hanging it; the load is one
+    // race-config DAT read plus a handful of marker scans, so this is orders of magnitude of
+    // slack over a real load.
+    const KICK_LOAD_TASK_POLLS: usize = 600;
+    const KICK_LOAD_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(5);
+
+    // `kick_load_actor_tasks` must resolve through the wired `ActorDatRoot`, not open its own
+    // via `DatRoot::from_env_or_default` -- that per-load reopen is exactly the overlay-discovery
+    // and FFXiMain.dll SHA-256 waste `ActorDatRoot` exists to remove. Proven by identity
+    // (`Arc::ptr_eq`) against the wired root rather than by mutating process-wide env vars, which
+    // would race every other test in this binary that reads `FFXI_DAT_PATH`.
+    #[test]
+    fn kick_load_actor_tasks_reuses_the_wired_root() {
+        let Some(root) = ffxi_dat::archive::open_test_install() else {
+            eprintln!("skipping: no retail DAT root");
+            return;
+        };
+        bevy::tasks::AsyncComputeTaskPool::get_or_init(Default::default);
+        let root = Arc::new(root);
+        let entity_id = 1u32;
+
+        let mut app = App::new();
+        app.add_message::<LoadActorRequest>()
+            .init_resource::<crate::scene::TrackedEntities>()
+            .init_resource::<crate::graphics_settings::GraphicsSettings>()
+            .init_resource::<ActorLoadInFlight>()
+            .insert_resource(ActorDatRoot(Some(root.clone())))
+            .add_systems(Update, kick_load_actor_tasks);
+
+        let wire_entity = app.world_mut().spawn_empty().id();
+        app.world_mut()
+            .resource_mut::<crate::scene::TrackedEntities>()
+            .by_id
+            .insert(entity_id, wire_entity);
+        app.world_mut().write_message(LoadActorRequest {
+            entity_id,
+            subject: ActorSubject::Pc {
+                race: 1,
+                mounted: false,
+                equipment: Vec::new(),
+                body: None,
+                main_weapon: None,
+                sub_weapon: None,
+            },
+        });
+        app.update();
+
+        for _ in 0..KICK_LOAD_TASK_POLLS {
+            let done = {
+                let mut in_flight = app.world_mut().resource_mut::<ActorLoadInFlight>();
+                let Some(task) = in_flight.tasks.get_mut(&entity_id) else {
+                    panic!("kick_load_actor_tasks did not register an in-flight task");
+                };
+                future::block_on(future::poll_once(task))
+            };
+            if let Some(result) = done {
+                result.expect("load through the wired root must succeed");
+                return;
+            }
+            std::thread::sleep(KICK_LOAD_POLL_INTERVAL);
+        }
+        panic!("kick_load_actor_tasks task never completed");
     }
 }

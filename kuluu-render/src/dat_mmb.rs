@@ -243,6 +243,7 @@ impl Plugin for DatOverlayPlugin {
             .init_resource::<crate::dat_mzb::PendingWaterSpawns>()
             .init_resource::<crate::dat_mzb::ZoneWaterMaterial>()
             .init_resource::<crate::ffxi_actor_render::ActorLoadInFlight>()
+            .init_resource::<crate::ffxi_actor_render::ActorDatRoot>()
             .add_systems(
                 Update,
                 (
@@ -306,10 +307,18 @@ pub struct LoadedMmb {
 pub fn load_mmb(file_id: u32, chunk_idx: usize) -> Result<LoadedMmb, String> {
     let root =
         DatRoot::from_env_or_default().map_err(|e| format!("DatRoot::from_env_or_default: {e}"))?;
+    load_mmb_with_root(&root, file_id, chunk_idx)
+}
+
+pub fn load_mmb_with_root(
+    root: &DatRoot,
+    file_id: u32,
+    chunk_idx: usize,
+) -> Result<LoadedMmb, String> {
     let location = root
         .resolve(file_id)
         .map_err(|e| format!("resolve({file_id}): {e}"))?;
-    let path = location.path_under(&root);
+    let path = location.path_under(root);
     let bytes = fs::read(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
 
     let chunks: Vec<_> = walk(&bytes).filter_map(Result::ok).collect();
@@ -439,6 +448,7 @@ pub fn process_load_mmb_requests(
     settings: Res<GraphicsSettings>,
     self_q: Query<&GlobalTransform, With<crate::components::IsSelf>>,
     mut in_flight: ResMut<MmbLoadInFlight>,
+    actor_root: Res<crate::ffxi_actor_render::ActorDatRoot>,
 ) {
     let mut newly_parsed: Vec<((u32, usize), Option<LoadedMmb>)> = Vec::new();
     in_flight.tasks.retain(
@@ -886,9 +896,14 @@ pub fn process_load_mmb_requests(
                 {
                     let pool = AsyncComputeTaskPool::get();
                     let (file_id, chunk_idx) = (req.file_id, req.chunk_idx);
+                    let root_arc = actor_root.0.clone();
                     in_flight.tasks.insert(
                         asset,
-                        pool.spawn(async move { load_mmb(file_id, chunk_idx).ok() }),
+                        pool.spawn(async move {
+                            let root =
+                                crate::ffxi_actor_render::resolve_actor_root(root_arc).ok()?;
+                            load_mmb_with_root(&root, file_id, chunk_idx).ok()
+                        }),
                     );
                 }
                 retained.push_back(req);

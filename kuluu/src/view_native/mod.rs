@@ -254,6 +254,9 @@ pub(crate) fn insert_dat_roots(
     sink.put(kuluu_render::scheduler_runtime::ActionDatRoot(
         dat_root.clone(),
     ));
+    sink.put(kuluu_render::ffxi_actor_render::ActorDatRoot(
+        dat_root.clone(),
+    ));
     // Re-arm the latched spell-DAT load so a settings-screen DAT reload doesn't
     // serve suffixes from the previous install (kuluu-08rh).
     sink.put(kuluu_render::ffxi_actor_render::SpellSuffixCache::default());
@@ -1123,6 +1126,35 @@ mod dat_root_wiring_tests {
         assert!(
             Arc::ptr_eq(&action_root, &shared),
             "every consumer reads one install"
+        );
+    }
+
+    #[test]
+    fn insert_dat_roots_hands_the_actor_loader_the_shared_root() {
+        let mut app = App::new();
+        insert_dat_roots(&mut app, None);
+        assert!(
+            app.world()
+                .get_resource::<kuluu_render::ffxi_actor_render::ActorDatRoot>()
+                .is_some(),
+            "ActorDatRoot must be wired even when there is no install"
+        );
+
+        let Some(root) = ffxi_dat::archive::open_test_install() else {
+            return;
+        };
+        let root = Arc::new(root);
+        insert_dat_roots(&mut app, Some(root.clone()));
+
+        let actor_root = app
+            .world()
+            .resource::<kuluu_render::ffxi_actor_render::ActorDatRoot>()
+            .0
+            .clone()
+            .expect("the wired root reaches the actor loader");
+        assert!(
+            Arc::ptr_eq(&actor_root, &root),
+            "load_pc/load_npc must share the launcher's root, not open their own"
         );
     }
 }

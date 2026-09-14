@@ -54,6 +54,8 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
+use ffxi_install::install_detect::{detect, find_ffxi_root, is_ffxi_root};
+
 /// The install layout the client expects under `vendor/game-files/`.
 const SQUARE_ENIX: &str = "SquareEnix";
 const FFXI: &str = "FINAL FANTASY XI";
@@ -64,9 +66,9 @@ const CLIENT_TARGET_ENV: &str = "FFXI_CLIENT_TARGET";
 /// Where `setup` lands unless `--target` says otherwise.
 const DEFAULT_DOWNLOAD_TARGET: &str = "retail";
 /// File that proves a directory is the FFXI client DAT root.
-const MARKER: &str = "VTABLE.DAT";
+const MARKER: &str = ffxi_install::install_detect::VTABLE_MARKER;
 /// How deep to descend under each detection root looking for the marker.
-const SEARCH_DEPTH: usize = 6;
+const SEARCH_DEPTH: usize = ffxi_install::install_detect::DEFAULT_SEARCH_DEPTH;
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -571,106 +573,6 @@ fn make_executable(dir: &Path) {
 
 #[cfg(not(unix))]
 fn make_executable(_dir: &Path) {}
-
-/// A directory is the FFXI DAT root if it holds VTABLE.DAT and a ROM/ tree.
-fn is_ffxi_root(dir: &Path) -> bool {
-    dir.join(MARKER).is_file() && dir.join("ROM").is_dir()
-}
-
-/// Search `start` (and descendants up to `depth`) for an FFXI DAT root.
-/// Returns the first match, preferring a dir literally named "FINAL FANTASY XI".
-fn find_ffxi_root(start: &Path, depth: usize) -> Option<PathBuf> {
-    if is_ffxi_root(start) {
-        return Some(start.to_path_buf());
-    }
-    // BFS so shallow matches win; cap visited dirs to stay snappy on big trees.
-    let mut queue: Vec<(PathBuf, usize)> = vec![(start.to_path_buf(), 0)];
-    let mut visited = 0usize;
-    while let Some((dir, d)) = queue.pop() {
-        if d > depth || visited > 20_000 {
-            continue;
-        }
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            continue;
-        };
-        for e in entries.flatten() {
-            let p = e.path();
-            if !p.is_dir() || is_symlink(&p) {
-                continue;
-            }
-            visited += 1;
-            if is_ffxi_root(&p) {
-                return Some(p);
-            }
-            queue.push((p, d + 1));
-        }
-    }
-    None
-}
-
-/// Parallels Desktop mounts a guest's drives as `/Volumes/[C] <VM name>`; the
-/// retail PlayOnline tree inside one is the usual way a macOS host reaches a
-/// current retail client.
-fn parallels_shared_drives() -> Vec<PathBuf> {
-    let Ok(rd) = std::fs::read_dir("/Volumes") else {
-        return Vec::new();
-    };
-    rd.flatten()
-        .map(|e| e.path())
-        .filter(|p| {
-            p.file_name()
-                .is_some_and(|n| n.to_string_lossy().starts_with('['))
-        })
-        .flat_map(|p| {
-            [
-                p.join("Program Files (x86)/PlayOnline"),
-                p.join("Program Files (x86)/HorizonXI"),
-                p.join("Program Files (x86)/SquareEnix"),
-            ]
-        })
-        .collect()
-}
-
-/// Platform-specific likely install locations that actually exist on disk.
-fn detect() -> Vec<PathBuf> {
-    let mut roots: Vec<PathBuf> = Vec::new();
-    let home = std::env::var_os("HOME").map(PathBuf::from);
-
-    if cfg!(target_os = "windows") {
-        for drive in ["C:\\", "D:\\"] {
-            roots.push(PathBuf::from(format!(
-                "{drive}Program Files (x86)\\PlayOnline"
-            )));
-            roots.push(PathBuf::from(format!(
-                "{drive}Program Files (x86)\\HorizonXI"
-            )));
-        }
-        if let Some(p) = std::env::var_os("LOCALAPPDATA") {
-            roots.push(PathBuf::from(p).join("HorizonXI"));
-        }
-        if let Some(p) = std::env::var_os("USERPROFILE") {
-            roots.push(PathBuf::from(p).join("Games"));
-        }
-    } else if let Some(home) = home {
-        // macOS CrossOver, Linux Lutris/Wine prefixes.
-        roots.push(home.join("Library/Application Support/CrossOver/Bottles"));
-        roots.push(home.join("Games"));
-        roots.push(home.join(".wine"));
-        roots.push(home.join(".local/share/lutris"));
-        roots.push(home.join("Library/Application Support/HorizonXI"));
-    }
-    roots.extend(parallels_shared_drives());
-
-    let mut hits = Vec::new();
-    for r in roots {
-        if r.is_dir() {
-            if let Some(found) = find_ffxi_root(&r, SEARCH_DEPTH) {
-                hits.push(found);
-            }
-        }
-    }
-    hits
-}
 
 fn print_env_hint(dest: &Path, target: Option<&str>) {
     match target {

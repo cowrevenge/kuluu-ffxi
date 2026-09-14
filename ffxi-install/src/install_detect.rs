@@ -1,9 +1,12 @@
 use std::path::{Path, PathBuf};
 
+/// File that proves a directory is the FFXI client DAT root.
 pub const VTABLE_MARKER: &str = "VTABLE.DAT";
 
+/// How deep to descend under each detection root looking for the marker.
 pub const DEFAULT_SEARCH_DEPTH: usize = 6;
 
+/// A directory is the FFXI DAT root if it holds VTABLE.DAT and a ROM/ tree.
 pub fn is_ffxi_root(dir: &Path) -> bool {
     dir.join(VTABLE_MARKER).is_file() && dir.join("ROM").is_dir()
 }
@@ -14,10 +17,13 @@ fn is_symlink(p: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// Search `start` (and descendants up to `depth`) for an FFXI DAT root.
+/// Returns the first match, preferring a dir literally named "FINAL FANTASY XI".
 pub fn find_ffxi_root(start: &Path, depth: usize) -> Option<PathBuf> {
     if is_ffxi_root(start) {
         return Some(start.to_path_buf());
     }
+    // BFS so shallow matches win; cap visited dirs to stay snappy on big trees.
     let mut queue: Vec<(PathBuf, usize)> = vec![(start.to_path_buf(), 0)];
     let mut visited = 0usize;
     while let Some((dir, d)) = queue.pop() {
@@ -42,7 +48,9 @@ pub fn find_ffxi_root(start: &Path, depth: usize) -> Option<PathBuf> {
     None
 }
 
-/// Parallels Desktop mounts a guest's drives as `/Volumes/[C] <VM name>`.
+/// Parallels Desktop mounts a guest's drives as `/Volumes/[C] <VM name>`; the
+/// retail PlayOnline tree inside one is the usual way a macOS host reaches a
+/// current retail client.
 fn parallels_shared_drives() -> Vec<PathBuf> {
     let Ok(rd) = std::fs::read_dir("/Volumes") else {
         return Vec::new();
@@ -63,6 +71,7 @@ fn parallels_shared_drives() -> Vec<PathBuf> {
         .collect()
 }
 
+/// Platform-specific likely install locations that actually exist on disk.
 pub fn detect() -> Vec<PathBuf> {
     let mut roots: Vec<PathBuf> = Vec::new();
     let home = std::env::var_os("HOME").map(PathBuf::from);
@@ -83,6 +92,7 @@ pub fn detect() -> Vec<PathBuf> {
             roots.push(PathBuf::from(p).join("Games"));
         }
     } else if let Some(home) = home {
+        // macOS CrossOver, Linux Lutris/Wine prefixes.
         roots.push(home.join("Library/Application Support/CrossOver/Bottles"));
         roots.push(home.join("Games"));
         roots.push(home.join(".wine"));

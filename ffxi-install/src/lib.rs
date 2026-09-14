@@ -7,6 +7,7 @@
 //! staged members under `SquareEnix/`. Progress goes to a caller-supplied
 //! sink so a CLI and the launcher UI render the same events.
 
+pub mod install_detect;
 pub mod lz;
 pub mod manifest;
 pub mod patch_client;

@@ -448,11 +448,29 @@ async fn run_map_session(
         self_pos_seeded,
         "zone-in flood drained"
     );
-    // vendor/server/src/map/packets/c2s/0x00a_login.cpp GP_CLI_COMMAND_LOGIN::process.
-    anyhow::ensure!(
-        self_login_received && self_pos_seeded,
-        "map bootstrap failed: required self LOGIN/position missing (login={self_login_received}, position={self_pos_seeded}, received_subpackets={total_subs}, server_sync={server_last_seq})"
-    );
+    // The self-position seed (CHAR_PC) is the only hard bootstrap requirement:
+    // without it we cannot seed outbound POS. The s2c 0x00A LOGIN (vendor/server/
+    // src/map/packets/c2s/0x00a_login.cpp GP_CLI_COMMAND_LOGIN::process) carries
+    // the voyage timing but rides a second datagram behind the zone-in burst, so
+    // it is not a hard gate — if it did not land in the pre-GAMEOK drain it is
+    // still processed opportunistically by the keepalive loop (handle_sub_packet).
+    if !self_pos_seeded {
+        tracing::warn!(
+            iteration,
+            current_zone_id,
+            "zone-in flood ended without a self-position seed (no CHAR_PC for self \
+             before deadline) — outbound POS suppressed until a CHAR_PC for self lands"
+        );
+    }
+    if !self_login_received {
+        tracing::info!(
+            iteration,
+            total_subs,
+            server_sync = server_last_seq,
+            "self 0x00A LOGIN not in the pre-GAMEOK drain (voyage timing deferred \
+             to the keepalive loop)"
+        );
+    }
 
     let mut sub_seq: u16 = map_client::BOOTSTRAP_SUB_SYNC.wrapping_add(1);
 
@@ -563,18 +581,30 @@ async fn run_map_session(
             "sent 0x061 CLISTATUS (zone-in self status request)"
         );
     }
-    emit_stage(event_tx, Stage::InZone);
-    let _ = event_tx.send(AgentEvent::Diagnostics {
-        diagnostics: Diagnostics {
-            stage: Some(Stage::InZone),
-            blowfish_status: Some(BlowfishStatus::Accepted),
-            sync_in: Some(server_last_seq),
-            sync_out: Some(datagram_header_id(sub_seq)),
-            last_server_packet_age_ms: Some(0),
-            cert_sha256,
-            map_server_addr: Some(map.server_addr().to_string()),
-        },
-    });
+    // Claim InZone / blowfish-Accepted only once the self position seed has
+    // landed: without it the session cannot spawn the player, so it must not
+    // present itself as connected. The seed is the sole hard bootstrap
+    // requirement (the s2c 0x00A LOGIN is tracked but not gated), so a server
+    // that never sends a self CHAR_PC leaves the session in Zoning rather than
+    // a false InZone.
+    if self_pos_seeded {
+        emit_stage(event_tx, Stage::InZone);
+        let _ = event_tx.send(AgentEvent::Diagnostics {
+            diagnostics: Diagnostics {
+                stage: Some(Stage::InZone),
+                blowfish_status: Some(BlowfishStatus::Accepted),
+                sync_in: Some(server_last_seq),
+                sync_out: Some(datagram_header_id(sub_seq)),
+                last_server_packet_age_ms: Some(0),
+                cert_sha256,
+                map_server_addr: Some(map.server_addr().to_string()),
+            },
+        });
+    } else {
+        tracing::warn!(
+            "bootstrap completed without a self position seed — staying in Zoning"
+        );
+    }
 
     keepalive_loop(
         map,
@@ -618,17 +648,17 @@ async fn run_map_session(
 /// vendor/server/scripts/zones/Attohwa_Chasm/Zone.lua).
 const FLOOD_ZONE_MESSAGE_MAX: usize = 32;
 
-fn should_break_flood(
-    break_on_idle: bool,
-    self_pos_seeded: bool,
-    self_login_received: bool,
-) -> bool {
-    break_on_idle || (self_pos_seeded && self_login_received)
+fn should_break_flood(break_on_idle: bool, self_pos_seeded: bool) -> bool {
+    break_on_idle || self_pos_seeded
 }
 
 /// Drains and processes zone-in traffic until `deadline`, or earlier once the
 /// socket has been idle for one recv window: unconditionally when
-/// `break_on_idle`, otherwise only after self LOGIN and its position have landed.
+/// `break_on_idle`, otherwise only after the self position seed (CHAR_PC) has
+/// landed. The s2c 0x00A LOGIN is tracked (returned) for voyage timing but is
+/// not a break condition — it rides a second datagram behind the zone-in burst,
+/// so gating the break on it stalls the whole bootstrap when that datagram is
+/// late or lost.
 /// When `ack_at_send` is Some (post-send quiescence), also breaks as soon as a
 /// datagram stamped differently from that ack arrives — the server's id only
 /// advances when it accepts one of our c2s, so any post-acceptance stamp is
@@ -741,7 +771,7 @@ async fn drain_zone_flood(
             Ok(Err(_)) => break,
 
             Err(_) => {
-                if should_break_flood(break_on_idle, *self_pos_seeded, self_login_received) {
+                if should_break_flood(break_on_idle, *self_pos_seeded) {
                     break;
                 }
             }

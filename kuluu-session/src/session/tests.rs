@@ -1058,20 +1058,17 @@ fn should_emit_pos_bypasses_rate_limit_on_heading_change() {
 
 #[test]
 fn flood_drain_waits_for_self_pos_seed() {
-    // Pre-GAMEOK drain (break_on_idle=false): keep reading until the seed lands.
+    // Pre-GAMEOK drain (break_on_idle=false): keep reading until the self
+    // position seed (CHAR_PC) lands. The s2c 0x00A LOGIN is tracked but is not
+    // a break condition — it rides a second datagram behind the zone-in burst
+    // and is processed opportunistically by the keepalive loop.
     assert!(
-        !should_break_flood(false, false, false)
-            && !should_break_flood(false, true, false)
-            && !should_break_flood(false, false, true),
-        "unseeded pre-GAMEOK drain must wait"
-    );
-    assert!(
-        should_break_flood(false, true, true),
-        "seeded pre-GAMEOK drain may break on idle"
+        !should_break_flood(false, false) && should_break_flood(false, true),
+        "unseeded pre-GAMEOK drain must wait; a seeded one may break"
     );
     // Quiescence drains (break_on_idle=true): stop on idle regardless of seed.
     assert!(
-        should_break_flood(true, false, false),
+        should_break_flood(true, false) && should_break_flood(true, true),
         "quiescence drain breaks on idle unconditionally"
     );
 }
@@ -4040,9 +4037,22 @@ async fn bootstrap_scenario(scenario: BootstrapReply) {
         out.extend(body);
         out
     }
-    let accepted = matches!(
+    // The fake server cooperates (sends valid stamped replies) only for the
+    // valid self-LOGIN scenarios. The bootstrap no longer gates on the LOGIN, so
+    // this drives the server's behavior, not the acceptance assertion.
+    let server_cooperates = matches!(
         scenario,
         BootstrapReply::SelfLogin | BootstrapReply::DelayedSelfLogin
+    );
+    // The session claims InZone / blowfish-Accepted only once a self position
+    // seed has landed; the s2c 0x00A LOGIN is tracked but not gated. This is the
+    // new acceptance signal.
+    let position_seeded = matches!(
+        scenario,
+        BootstrapReply::OtherLoginWithSelfPosition
+            | BootstrapReply::SelfPositionOnly
+            | BootstrapReply::SelfLogin
+            | BootstrapReply::DelayedSelfLogin
     );
     let mut self_body = vec![0; LOGIN_BODY_LEN];
     self_body[..4].copy_from_slice(&PLAYER.to_le_bytes());
@@ -4109,7 +4119,7 @@ async fn bootstrap_scenario(scenario: BootstrapReply) {
                         .unwrap();
                 }
             } else if !matches!(scenario, BootstrapReply::Silent) {
-                if accepted {
+                if server_cooperates {
                     peer.as_ref()
                         .unwrap()
                         .send_encrypted(&[], count as u16 + 1, 0)
@@ -4178,7 +4188,11 @@ async fn bootstrap_scenario(scenario: BootstrapReply) {
         fake.await.unwrap_err().is_cancelled(),
         "fake map server panicked"
     );
-    assert_eq!(outcome.is_ok(), accepted, "{scenario:?}: {outcome:?}");
+    // The bootstrap no longer hard-gates on the self LOGIN (it is tracked for
+    // voyage timing but processed opportunistically), so a requested disconnect
+    // always completes cleanly regardless of the scenario. Acceptance is pinned
+    // by saw_in_zone / saw_accepted below, not by the outcome.
+    assert!(outcome.is_ok(), "{scenario:?}: {outcome:?}");
     let mut saw_in_zone = false;
     let mut saw_accepted = false;
     let mut saw_seed = false;
@@ -4204,27 +4218,19 @@ async fn bootstrap_scenario(scenario: BootstrapReply) {
             _ => {}
         }
     }
-    assert_eq!(saw_in_zone, accepted, "{scenario:?}");
-    assert_eq!(saw_accepted, accepted, "{scenario:?}");
-    if matches!(
-        scenario,
-        BootstrapReply::OtherLoginWithSelfPosition | BootstrapReply::SelfPositionOnly
-    ) {
-        assert!(
-            saw_seed,
-            "{scenario:?}: CHAR_PC fixture must seed a position without granting acceptance"
-        );
-    }
-    if accepted {
-        assert!(saw_seed, "{scenario:?}: missing authoritative position");
-        assert!(outgoing.load(Ordering::SeqCst) > EXPECTED_BOOTSTRAPS);
-    } else {
-        assert_eq!(
-            outgoing.load(Ordering::SeqCst),
-            EXPECTED_BOOTSTRAPS,
-            "{scenario:?}: no post-bootstrap packet may precede self LOGIN"
-        );
-    }
+    // The session claims InZone / blowfish-Accepted and seeds a position only
+    // when a self position seed lands; the s2c 0x00A LOGIN is tracked but not
+    // gated, so these track position_seeded, not server_cooperates.
+    assert_eq!(saw_in_zone, position_seeded, "{scenario:?}");
+    assert_eq!(saw_accepted, position_seeded, "{scenario:?}");
+    assert_eq!(saw_seed, position_seeded, "{scenario:?}");
+    // Post-bootstrap packets (GROUP_LIST_REQ, CLISTATUS) are now sent
+    // unconditionally — the bootstrap no longer gates on the self LOGIN — so
+    // every scenario sends more than the two bootstraps.
+    assert!(
+        outgoing.load(Ordering::SeqCst) > EXPECTED_BOOTSTRAPS,
+        "{scenario:?}: post-bootstrap packets must follow the two bootstraps"
+    );
 }
 
 #[test]

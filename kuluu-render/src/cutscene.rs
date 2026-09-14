@@ -16,11 +16,12 @@ use bevy::prelude::*;
 
 use ffxi_dat::scheduler::Scheduler;
 use ffxi_event::{FourCc, SCHEDULER_FADE_DAT_ID, SCHEDULER_TAG_FADE_IN, SCHEDULER_TAG_FADE_OUT};
-use kuluu_snapshot::{CutsceneCue, ViewerEvent};
+use kuluu_snapshot::{CutsceneActor, CutsceneCue, ViewerEvent};
 
 use crate::hud_hide::{HudHidden, HudHideExempt};
 use crate::scheduler_runtime::ROUTINE_FPS;
 use crate::snapshot::EventLog;
+use crate::vana_time::VanaClock;
 
 /// The screen colour that leaves the scene alone, in
 /// [`ffxi_dat::scheduler::ScreenColor::tint`] units.
@@ -243,11 +244,23 @@ impl ScreenFade {
 pub struct CutsceneMode {
     pub active: bool,
     pub camera_locked: bool,
+    /// The last 0x67/0x68 the running event staged; `None` until one arrives.
+    pub(crate) hud_event: Option<bool>,
 }
 
 impl CutsceneMode {
     fn end(&mut self) {
         *self = Self::default();
+    }
+
+    /// An active session holding the camera, no 0x67/0x68 staged yet — what tests construct
+    /// when they need a locked cutscene without driving the cue stream.
+    pub fn active_locked() -> Self {
+        Self {
+            active: true,
+            camera_locked: true,
+            hud_event: None,
+        }
     }
 }
 
@@ -338,8 +351,14 @@ pub fn apply_screen_fade(
 }
 
 pub fn apply_cutscene_hud_hide(mode: Res<CutsceneMode>, mut hidden: ResMut<HudHidden>) {
-    if hidden.cutscene != mode.camera_locked {
-        hidden.cutscene = mode.camera_locked;
+    // 0x67/0x68 drive the whole-HUD flag independently of the camera (research/XiEvents/OpCodes/
+    // 0x0068.md), so an explicit show wins over the lock default.
+    let cutscene = match mode.hud_event {
+        Some(hide) => hide,
+        None => mode.camera_locked,
+    };
+    if hidden.cutscene != cutscene {
+        hidden.cutscene = cutscene;
     }
 }
 
@@ -349,27 +368,79 @@ pub fn drain_cutscene_events(
     mut cursor: Local<u64>,
     mut mode: ResMut<CutsceneMode>,
     mut fade: ResMut<ScreenFade>,
+    table: Res<crate::entity_table::EntityTable>,
+    mut names: ResMut<EventNameOverrides>,
 ) {
     let total = events.pushed_total;
     let first_global = total.saturating_sub(events.recent.len() as u64);
     for g in (*cursor).max(first_global)..total {
         match &events.recent[(g - first_global) as usize] {
             ViewerEvent::CutsceneStarted { .. } => mode.active = true,
-            ViewerEvent::Cutscene { cue } => apply_cue(cue, &programs, &mut mode, &mut fade),
+            ViewerEvent::Cutscene { cue } => {
+                apply_cue(cue, &programs, &mut mode, &mut fade);
+                if let CutsceneCue::EntityName { actor, name } = cue {
+                    if let Some(id) = cutscene_actor_server_id(table.self_id(), *actor) {
+                        names.set(id, event_name_string(name));
+                    }
+                }
+            }
             ViewerEvent::CutsceneEnded => {
                 mode.end();
                 fade.release(programs.fade_in());
+                names.clear();
             }
             // Belt and braces: the producer guarantees a CutsceneEnded on both of these, so
             // reaching them with the screen still held means that guarantee broke.
             ViewerEvent::ZoneChanged { .. } | ViewerEvent::Disconnected { .. } => {
                 mode.end();
                 fade.clear();
+                names.clear();
             }
             _ => {}
         }
     }
     *cursor = total;
+}
+
+/// A `CutsceneCue::EntityName` target as a server id: the local player's own
+/// id from the table, the literal id otherwise.
+fn cutscene_actor_server_id(self_id: Option<u32>, actor: CutsceneActor) -> Option<u32> {
+    match actor {
+        CutsceneActor::LocalPlayer => self_id,
+        CutsceneActor::Entity { server_id } => Some(server_id),
+    }
+}
+
+/// The NUL-terminated string inside a 16-byte event name slot: retail's
+/// names are C strings, so the padding after the terminator is not part of
+/// the display name.
+fn event_name_string(name: &[u8; 16]) -> String {
+    let end = name.iter().position(|&b| b == 0).unwrap_or(name.len());
+    String::from_utf8_lossy(&name[..end]).into_owned()
+}
+
+/// Display names a running event overrode (0xB5 case 0, fed by an inline
+/// literal or the s2c 0x005D PENDINGSTR table), keyed by entity server id.
+/// Event-scoped like every other cue: cleared at [`ViewerEvent::CutsceneEnded`]
+/// so the server-authored name returns. The nameplate pass reads these ahead
+/// of the entity-table record.
+#[derive(Resource, Debug, Default)]
+pub struct EventNameOverrides {
+    names: HashMap<u32, String>,
+}
+
+impl EventNameOverrides {
+    pub fn set(&mut self, id: u32, name: String) {
+        self.names.insert(id, name);
+    }
+
+    pub fn get(&self, id: u32) -> Option<&str> {
+        self.names.get(&id).map(String::as_str)
+    }
+
+    pub fn clear(&mut self) {
+        self.names.clear();
+    }
 }
 
 fn apply_cue(
@@ -380,6 +451,7 @@ fn apply_cue(
 ) {
     match *cue {
         CutsceneCue::CameraLock { lock } => mode.camera_locked = lock,
+        CutsceneCue::HudHide { hide } => mode.hud_event = Some(hide),
         CutsceneCue::Scheduler {
             dat_id,
             tag,
@@ -396,8 +468,45 @@ fn apply_cue(
                 fade.start(&scaled(program, ratio));
             }
         }
+        // Actor motion and non-fade schedulers are dispatched by
+        // scheduler_runtime::dispatch_cutscene_motion.
         _ => {}
     }
+}
+
+/// The 0x77/0x78 game-clock hold, drained on its own cursor because [`VanaClock`] outlives this
+/// module's other systems; a session exit releases whatever it left held.
+pub fn drain_cutscene_clock(
+    events: Res<EventLog>,
+    mut cursor: Local<u64>,
+    clock: Option<ResMut<VanaClock>>,
+) {
+    let Some(mut clock) = clock else {
+        return;
+    };
+    let total = events.pushed_total;
+    let first_global = total.saturating_sub(events.recent.len() as u64);
+    for g in (*cursor).max(first_global)..total {
+        match &events.recent[(g - first_global) as usize] {
+            ViewerEvent::Cutscene { cue } => match cue {
+                CutsceneCue::ClockHold { stop: true, hour } => match *hour {
+                    Some(hour) => clock.freeze_at_hour(hour),
+                    None => clock.freeze(),
+                },
+                CutsceneCue::ClockHold { stop: false, .. } => clock.thaw(),
+                _ => {}
+            },
+            ViewerEvent::CutsceneEnded
+            | ViewerEvent::ZoneChanged { .. }
+            | ViewerEvent::Disconnected { .. } => {
+                if clock.is_frozen() {
+                    clock.thaw();
+                }
+            }
+            _ => {}
+        }
+    }
+    *cursor = total;
 }
 
 fn fade_total_frames(program: &FadeProgram) -> u32 {
@@ -466,6 +575,7 @@ impl Plugin for CutscenePlugin {
             .init_resource::<ScreenFade>()
             .init_resource::<FadePrograms>()
             .init_resource::<CutsceneFadeDatRoot>()
+            .init_resource::<EventNameOverrides>()
             .init_resource::<HudHidden>()
             .add_systems(Startup, spawn_screen_fade_overlay)
             .add_systems(
@@ -475,6 +585,7 @@ impl Plugin for CutscenePlugin {
                     apply_cutscene_hud_hide,
                     tick_screen_fade,
                     apply_screen_fade,
+                    drain_cutscene_clock,
                 )
                     .chain(),
             );
@@ -557,6 +668,8 @@ mod tests {
             .init_resource::<HudHidden>()
             .init_resource::<CutsceneMode>()
             .init_resource::<ScreenFade>()
+            .init_resource::<crate::entity_table::EntityTable>()
+            .init_resource::<EventNameOverrides>()
             .insert_resource(synthetic_programs())
             .add_systems(Startup, spawn_screen_fade_overlay)
             .add_systems(
@@ -661,6 +774,137 @@ mod tests {
         assert!(!app.world().resource::<CutsceneMode>().camera_locked);
     }
 
+    /// Event 503's D1 shows the HUD while the camera stays locked until H7: an explicit
+    /// 0x68 must win over the lock default, and both clear at session end.
+    #[test]
+    fn an_explicit_show_hud_wins_over_the_camera_lock_and_clears_at_session_end() {
+        let mut app = test_app();
+        push(&mut app, ViewerEvent::CutsceneStarted { event_id: 503 });
+        push(
+            &mut app,
+            ViewerEvent::Cutscene {
+                cue: CutsceneCue::CameraLock { lock: true },
+            },
+        );
+        step(&mut app, 1.0);
+        assert!(
+            app.world().resource::<HudHidden>().cutscene,
+            "camera lock hides the HUD by default"
+        );
+
+        push(
+            &mut app,
+            ViewerEvent::Cutscene {
+                cue: CutsceneCue::HudHide { hide: false },
+            },
+        );
+        step(&mut app, 1.0);
+        assert!(
+            !app.world().resource::<HudHidden>().cutscene,
+            "explicit show wins over the lock"
+        );
+
+        push(
+            &mut app,
+            ViewerEvent::Cutscene {
+                cue: CutsceneCue::HudHide { hide: true },
+            },
+        );
+        step(&mut app, 1.0);
+        assert!(
+            app.world().resource::<HudHidden>().cutscene,
+            "explicit hide re-hides"
+        );
+
+        push(&mut app, ViewerEvent::CutsceneEnded);
+        step(&mut app, 1.0);
+        assert!(
+            !app.world().resource::<HudHidden>().cutscene,
+            "cleared at session end"
+        );
+    }
+
+    fn clock_app() -> App {
+        let mut app = App::new();
+        app.init_resource::<Time>()
+            .init_resource::<EventLog>()
+            .insert_resource(VanaClock::anchored_at_hour(12.0))
+            .add_systems(Update, drain_cutscene_clock);
+        app
+    }
+
+    fn clock_hold(stop: bool, hour: Option<u32>) -> ViewerEvent {
+        ViewerEvent::Cutscene {
+            cue: CutsceneCue::ClockHold { stop, hour },
+        }
+    }
+
+    #[test]
+    fn a_stop_clock_cue_freezes_the_vana_clock_at_the_authored_hour() {
+        let mut app = clock_app();
+        step(&mut app, 1.0);
+        assert!(
+            app.world().resource::<VanaClock>().earth_unix_now()
+                >= crate::vana_time::EARTH_EPOCH_UNIX as f64
+                    + 12.0 * crate::vana_time::EARTH_SECS_PER_VANA_HOUR as f64,
+            "anchored at noon"
+        );
+
+        push(&mut app, clock_hold(true, Some(8)));
+        step(&mut app, 60.0);
+        let frozen = app.world().resource::<VanaClock>().earth_unix_now();
+        assert_eq!(
+            frozen,
+            crate::vana_time::EARTH_EPOCH_UNIX as f64
+                + 8.0 * crate::vana_time::EARTH_SECS_PER_VANA_HOUR as f64,
+            "held at 8:00 on the anchored day"
+        );
+
+        step(&mut app, 600.0);
+        assert_eq!(
+            app.world().resource::<VanaClock>().earth_unix_now(),
+            frozen,
+            "still held across frames"
+        );
+
+        push(&mut app, clock_hold(false, None));
+        step(&mut app, 1.0);
+        let live = app.world().resource::<VanaClock>().earth_unix_now();
+        assert!(
+            live > frozen,
+            "thawed back to the running anchor: {live} vs {frozen}"
+        );
+    }
+
+    #[test]
+    fn a_session_exit_releases_a_still_held_clock() {
+        let mut app = clock_app();
+        push(&mut app, clock_hold(true, Some(8)));
+        step(&mut app, 1.0);
+        assert!(app.world().resource::<VanaClock>().is_frozen());
+
+        push(&mut app, ViewerEvent::CutsceneEnded);
+        step(&mut app, 1.0);
+        let clock = app.world().resource::<VanaClock>();
+        assert!(!clock.is_frozen(), "released at session end");
+        assert!(
+            clock.earth_unix_now()
+                >= crate::vana_time::EARTH_EPOCH_UNIX as f64
+                    + 12.0 * crate::vana_time::EARTH_SECS_PER_VANA_HOUR as f64,
+            "back on the running anchor"
+        )
+    }
+
+    #[test]
+    fn freeze_at_hour_lands_on_the_zero_minute_of_that_day() {
+        let mut clock = VanaClock::default();
+        clock.freeze_at_hour(8);
+        assert_eq!(
+            crate::vana_time::format_vana_time(clock.earth_unix_secs_now()),
+            "8:00"
+        );
+    }
+
     #[test]
     fn a_session_that_ends_black_recovers_over_the_authored_fade_in() {
         let mut app = test_app();
@@ -715,6 +959,55 @@ mod tests {
             assert_eq!(overlay_alpha(&mut app), 0.0, "cleared on the same frame");
             assert!(!app.world().resource::<HudHidden>().cutscene);
         }
+    }
+
+    /// A 0xB5 rename resolves its actor to a server id (the local player
+    /// through the table's self id) and holds the name until the session ends.
+    #[test]
+    fn an_entity_name_cue_overrides_the_plate_name_until_session_end() {
+        const SELF: u32 = 0x010E_6001;
+        const NPC: u32 = 0x010E_6032;
+        let mut app = test_app();
+        app.world_mut()
+            .resource_mut::<crate::entity_table::EntityTable>()
+            .set_self_id(Some(SELF));
+
+        let name_cue = |actor: kuluu_snapshot::CutsceneActor| ViewerEvent::Cutscene {
+            cue: CutsceneCue::EntityName {
+                actor,
+                name: *b"Sajj'aka\0\0\0\0\0\0\0\0",
+            },
+        };
+
+        push(&mut app, ViewerEvent::CutsceneStarted { event_id: 503 });
+        push(
+            &mut app,
+            name_cue(kuluu_snapshot::CutsceneActor::LocalPlayer),
+        );
+        push(
+            &mut app,
+            name_cue(kuluu_snapshot::CutsceneActor::Entity { server_id: NPC }),
+        );
+        step(&mut app, 1.0);
+        let names = app.world().resource::<EventNameOverrides>();
+        assert_eq!(names.get(SELF), Some("Sajj'aka"));
+        assert_eq!(names.get(NPC), Some("Sajj'aka"));
+
+        push(&mut app, ViewerEvent::CutsceneEnded);
+        step(&mut app, 1.0);
+        let names = app.world().resource::<EventNameOverrides>();
+        assert_eq!(names.get(SELF), None, "cleared at session end");
+        assert_eq!(names.get(NPC), None, "cleared at session end");
+    }
+
+    /// The 16-byte slot is a C string: truncate at the first NUL, and a
+    /// full-width name without one keeps all sixteen bytes.
+    #[test]
+    fn the_name_slot_truncates_at_the_first_nul() {
+        assert_eq!(event_name_string(&*b"Sajj'aka\0\0\0\0\0\0\0\0"), "Sajj'aka");
+        assert_eq!(event_name_string(&[0u8; 16]), "");
+        let full: [u8; 16] = *b"SixteenBytes!!!!";
+        assert_eq!(event_name_string(&full), "SixteenBytes!!!!");
     }
 
     #[test]

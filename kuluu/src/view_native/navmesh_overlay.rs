@@ -220,6 +220,7 @@ mod tests {
         app.init_resource::<Time>()
             .init_resource::<SceneState>()
             .init_resource::<EntityPrediction>()
+            .init_resource::<kuluu_render::scheduler_runtime::CutsceneActorState>()
             .init_resource::<TrackedEntities>()
             .init_resource::<kuluu_render::sub_area_activation::SubAreaActivation>()
             // predict_entities_system reads the probe; production inserts it in the render plugin.

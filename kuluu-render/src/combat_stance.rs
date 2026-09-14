@@ -262,23 +262,28 @@ impl WalkMode {
     }
 }
 
-/// Whether the self character's movement keys are held this tick, written by
-/// the client's movement dispatch. While keys are what move the player, the
-/// self pose reads this instead of inferring motion from transform deltas:
-/// prediction reconcile keeps nudging the rendered transform, so inferred speed
-/// can hover above `MOVE_EXIT` and hold the run cycle after the keys are
-/// released. Not authoritative while a reactor goal (follow/goto/engage) moves
-/// the player with no keys held — the pose falls back to inference there.
-///
-/// `forward`/`strafe` are character-frame intent components feeding directional
-/// gait selection (mvb/mvl/mvr). They are only ever non-(1,0) while locked on —
-/// matching retail, where unlocked movement steers the character into the run
-/// direction (run/wlk gait only) and directional gait exists only under lock-on.
+pub const WALK_RUN_BOUNDARY: f32 = 3.0;
+
+#[inline]
+pub fn infers_walk_gait(speed: f32) -> bool {
+    speed > EntityMotion::MOVE_EXIT && speed < WALK_RUN_BOUNDARY
+}
+
+/// Explicit intent prevents reconciliation jitter from sustaining the self locomotion clip.
 #[derive(Resource, Default, Debug, Clone, Copy, PartialEq)]
 pub struct SelfMoveIntent {
     pub moving: bool,
     pub forward: f32,
     pub strafe: f32,
+    pub scripted_speed: Option<f32>,
+}
+
+impl SelfMoveIntent {
+    pub fn walking(&self, manual_walk: bool) -> bool {
+        self.scripted_speed
+            .map(infers_walk_gait)
+            .unwrap_or(manual_walk)
+    }
 }
 
 pub fn directional_anim_for_skel(skel_file_id: u32, prefix: &[u8; 3]) -> Option<Arc<Mo2Animation>> {
@@ -400,16 +405,16 @@ pub struct EntityMotion {
     pub by_id: HashMap<u32, MotionSample>,
 }
 
-/// KULUU_MOTION_LOG=1 gated probe for the kuluu-df9t Part B locomotion diagnosis.
+/// KULUU_MOTION_LOG=1 gated probe for the remote locomotion model.
 ///
 /// Measures, per entity: server-update spacing (seconds between 0x0E position
-/// updates), jump distance and which branch `advance_prediction` took (snap vs
-/// blend), remaining chase distance when a packet lands, idle frames between
-/// packets, moving-toggle rate on the transform-delta fallback path (the chase
-/// model's entities toggle without hysteresis: reached target or not), and
-/// heading-vs-travel-direction mismatch events. Prints one line per event plus
-/// a rolling summary every few seconds; redirect stdout to a file when capturing
-/// a roaming-area log. Observation only - no constant changes.
+/// updates), jump distance and which snap band `advance_prediction` took,
+/// remaining chase distance when a packet lands, idle frames between packets,
+/// moving-toggle rate on the transform-delta fallback path (the chase model's
+/// entities toggle without hysteresis: reached target or not), and
+/// heading-vs-travel-direction mismatch events. Emits one tracing::debug! line
+/// per event on target "motion" plus a rolling summary every few seconds.
+/// Observation only - no constant changes.
 #[derive(Resource)]
 pub struct MotionProbe {
     enabled: bool,
@@ -468,7 +473,7 @@ impl MotionProbe {
 
     pub fn init() -> Self {
         static ONCE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-        let enabled = crate::particle_sim::env_flag(&ONCE, "KULUU_MOTION_LOG");
+        let enabled = crate::env_flags::env_flag(&ONCE, "KULUU_MOTION_LOG");
         Self {
             enabled,
             per_id: HashMap::new(),
@@ -555,9 +560,9 @@ impl MotionProbe {
         if !self.enabled || vel.length_squared() < Self::MIN_MEANINGFUL_SPEED_SQ {
             return;
         }
-        // heading_to_rad convention: forward = (sin h, -cos h), so a travel
-        // vector (vx, vz) corresponds to the angle atan2(vx, -vz).
-        let travel = vel.x.atan2(-vel.z);
+        // worldAngle basis (see heading_forward): forward = (cos h, sin h) in Bevy space, so a
+        // travel vector (vx, vz) corresponds to the angle atan2(vz, vx).
+        let travel = vel.z.atan2(vel.x);
         let mut diff = (heading_rad - travel).rem_euclid(std::f32::consts::TAU);
         if diff > std::f32::consts::PI {
             diff -= std::f32::consts::TAU;
@@ -690,9 +695,11 @@ pub fn track_entity_motion_system(
             let to_target = Vec3::new(chase.server_pos.x - pos.x, 0.0, chase.server_pos.z - pos.z);
             let chasing = chase.is_chasing();
             let heading_rad = chase.rendered_heading_rad;
-            // heading_forward convention: forward = (sin h, -cos h).
-            let fwd = Vec3::new(heading_rad.sin(), 0.0, -heading_rad.cos());
-            let right = Vec3::new(fwd.z, 0.0, -fwd.x);
+            // worldAngle basis (see forward_from_rad): forward = (cos h, sin h) in Bevy space,
+            // and the entity's right is its forward rotated +90 deg of heading (the self walker
+            // strafes with heading.wrapping_add(64)).
+            let fwd = forward_from_rad(heading_rad);
+            let right = Vec3::new(-fwd.z, 0.0, fwd.x);
             let prev = motion
                 .by_id
                 .get(&world.id)
@@ -737,8 +744,9 @@ pub fn track_entity_motion_system(
         let fwd = heading_forward(heading_u8);
         let (fwd_x, fwd_z) = (fwd.x, fwd.z);
 
-        let right_x = fwd_z;
-        let right_z = -fwd_x;
+        // Entity right: forward rotated +90 deg of heading (see the chase path above).
+        let right_x = -fwd_z;
+        let right_z = fwd_x;
 
         let prev = motion
             .by_id
@@ -1082,8 +1090,8 @@ impl EntityPrediction {
                         e.segment_duration = e.sample_intervals.iter().copied().fold(0.0, f32::max)
                             * Self::INTERVAL_HEADROOM;
                     } else if e.sample_age > Self::STALE_INTERVAL {
-                        // A stale gap (idle/resume): the measured cadence is no longer
-                        // trustworthy, so reset the ring to its kLogicUpdateRate seed and let the
+                        // A stale gap (idle/resume): the measured cadence does not describe the
+                        // next segment, so reset the ring to its kLogicUpdateRate seed and let the
                         // next segment budget be one tick plus headroom. The position still tweens:
                         // staleness is a timing event, not a distance event (the band is
                         // distance-only).
@@ -1091,9 +1099,9 @@ impl EntityPrediction {
                         e.segment_duration = Self::TICK_SECS * Self::INTERVAL_HEADROOM;
                     }
                     // What LSB actually moved on this tick in XZ: the distance between consecutive
-                    // confirmed positions. Upstream main's snap rule measured this same pair ("render
-                    // lag is not a teleport"); the step-relative bands keep that reference point and
-                    // replace its fixed 20 yalms with one StepTo step.
+                    // confirmed positions. Render lag is not a teleport, so the band measures this
+                    // pair, never where we are rendering; its threshold is one StepTo step, not a
+                    // fixed distance.
                     let dxw = server_pos.x - e.server_pos.x;
                     let dzw = server_pos.z - e.server_pos.z;
                     e.last_interval = e.sample_age;
@@ -1112,18 +1120,33 @@ impl EntityPrediction {
     }
 }
 
+/// Heading byte to radians in the worldAngle basis.
+///
+/// vendor/server/src/common/utils.cpp worldAngle (pinned vendor/server): LSB position_t.z is a
+/// horizontal axis, not vertical; see [`heading_forward`] for the full wire/Bevy mapping.
 #[inline]
 fn heading_to_rad(heading: u8) -> f32 {
     (heading as f32) * std::f32::consts::TAU / 256.0
 }
 
-/// World-space direction an entity with this heading faces. The one place the
-/// `(sin, -cos)` pairing lives — the motion basis below and the fishing water
-/// probe both come through here rather than re-deriving it.
+/// World-space direction an entity with this heading faces, in Bevy space.
+///
+/// vendor/server/src/common/utils.cpp worldAngle (pinned vendor/server) writes the rotation byte
+/// as `atan2f(B.z - A.z, B.x - A.x) * -(128 / PI), mod 256`. LSB position_t.z is a horizontal axis
+/// (kuluu's WireVec3 names it `y`; WireVec3.z is vertical). worldAngle measures from wire +X,
+/// negated: theta = heading * TAU / 256 gives a wire horizontal forward of (x = cos theta,
+/// z_lsb = -sin theta). ffxi_to_bevy maps wire x -> Bevy x and the horizontal wire axis -> Bevy
+/// -z, so the Bevy forward is (cos theta, 0, sin theta). Heading 0 faces +X, not north.
 #[inline]
 pub fn heading_forward(heading: u8) -> Vec3 {
-    let rad = heading_to_rad(heading);
-    Vec3::new(rad.sin(), 0.0, -rad.cos())
+    forward_from_rad(heading_to_rad(heading))
+}
+
+/// The [`heading_forward`] basis for an already-unpacked radian value; the chase path carries
+/// only `rendered_heading_rad`.
+#[inline]
+pub fn forward_from_rad(rad: f32) -> Vec3 {
+    Vec3::new(rad.cos(), 0.0, rad.sin())
 }
 
 /// Per-AI-tick step distance in yalms for the incoming wire speed bytes.
@@ -1173,7 +1196,7 @@ fn advance_prediction(s: &mut PredictSample, dt: f32, record_outcome: bool) -> (
         // stores it), never where we are rendering -- render lag is not a teleport. step is what
         // StepTo advanced this tick (vendor/server/src/map/ai/helpers/pathfind.cpp CPathFind::StepTo).
         // The bands are a ratio to that step, never a flat distance, so a fast mob's legitimate
-        // per-tick move no longer reads as a teleport. XZ only: Y is assigned directly below and
+        // per-tick move stays in Normal. XZ only: Y is assigned directly below and
         // must not inflate the jump with a floor-height change. Distance-only: a stale sample
         // (idle past STALE_INTERVAL) resets the cadence ring in observe() instead of snapping --
         // staleness is a timing event, and the position still tweens. The Normal edge carries a
@@ -1257,6 +1280,7 @@ pub fn predict_entities_system(
     time: Res<Time>,
     mut prediction: ResMut<EntityPrediction>,
     mut probe: ResMut<MotionProbe>,
+    cutscene: Res<crate::scheduler_runtime::CutsceneActorState>,
     mut q: Query<(&WorldEntity, &mut Transform), Without<IsSelf>>,
 ) {
     let dt = time.delta_secs().max(1e-4);
@@ -1265,6 +1289,10 @@ pub fn predict_entities_system(
             world.kind,
             EntityKind::Mob | EntityKind::Pc | EntityKind::Pet | EntityKind::Npc
         ) {
+            continue;
+        }
+        // A running cutscene owns this entity's transform until CutsceneEnded releases it.
+        if cutscene.is_touched(world.id) {
             continue;
         }
         let Some(sample) = prediction.by_id.get_mut(&world.id) else {
@@ -1316,15 +1344,18 @@ static GROUND_OFF_MESH_SEEN: OnceLock<Mutex<std::collections::HashSet<u32>>> = O
 /// Runs every frame on the RENDERED (x,z) so the model rides the slope during interpolation; no
 /// history, no distance test, no snap constant: the SnapBand bands own the jump decision already.
 /// Self is unchanged. The 0x45 Info movement byte from the loaded model gates it: Flying keeps
-/// server Y (no ground to stand on); Walking/Large/Sliding/Unset ground. A None answer (off-mesh,
-/// unloaded interior) keeps server Y and logs once per entity at debug.
+/// server Y while alive (no ground to stand on); Walking/Large/Sliding/Unset ground. A dead
+/// entity grounds regardless of movement type (see the block in the body for why). A None answer
+/// (off-mesh, unloaded interior) keeps server Y and logs once per entity at debug.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn ground_remote_movers_system(
     collision: Res<crate::dat_mzb::MzbCollisionGeometry>,
     prediction: Res<EntityPrediction>,
+    cutscene: Res<crate::scheduler_runtime::CutsceneActorState>,
     mut q: Query<(Entity, &WorldEntity, &mut Transform), Without<IsSelf>>,
     q_children: Query<&Children>,
     q_render: Query<&crate::ffxi_actor_render::FfxiRenderActor>,
+    q_dead: Query<(), With<crate::scheduler_runtime::DeadFromAction>>,
 ) {
     for (entity, world, mut transform) in &mut q {
         if !matches!(
@@ -1333,21 +1364,34 @@ pub fn ground_remote_movers_system(
         ) {
             continue;
         }
+        // A running cutscene owns this entity's transform until CutsceneEnded releases it.
+        if cutscene.is_touched(world.id) {
+            continue;
+        }
         // Only entities routed through the prediction model: mount actors and Other kinds carry no
         // sample (mounts are pinned to their rider by pin_mount_actors_system).
         let Some(sample) = prediction.by_id.get(&world.id) else {
             continue;
         };
         // 0x45 Info movement byte from the loaded model (Unset when the DAT carries no CIB, or no
-        // render actor exists yet): Flying keeps server Y; everything else grounds.
-        let flying = q_children.get(entity).is_ok_and(|children| {
-            children.iter().any(|child| {
-                q_render
-                    .get(child)
-                    .is_ok_and(|actor| actor.movement_type() == ffxi_dat::cib::MovementType::Flying)
-            })
-        });
-        if flying {
+        // render actor exists yet): Flying keeps server Y while alive. Death overrides the
+        // exemption: LSB never writes Y on the KO transition (vendor/server entity_update.cpp sets
+        // Y only under UPDATE_POS; the death path raises UPDATE_HP with Hpp = GetHPP() == 0 and
+        // leaves loc.p untouched), so a dead flyer's last POS Y is wherever it was hovering and it
+        // would sit in the air forever. Movement type describes locomotion, not corpses; a corpse
+        // grounds like everything else. DeadFromAction is latched on the render child (cleared on
+        // raise), so a raised flyer lifts back to server Y on its own.
+        let mut flying = false;
+        let mut dead = false;
+        if let Ok(children) = q_children.get(entity) {
+            for child in children.iter() {
+                if let Ok(actor) = q_render.get(child) {
+                    flying |= actor.movement_type() == ffxi_dat::cib::MovementType::Flying;
+                }
+                dead |= q_dead.get(child).is_ok();
+            }
+        }
+        if flying && !dead {
             continue;
         }
         let xz = Vec2::new(transform.translation.x, transform.translation.z);
@@ -1610,7 +1654,6 @@ mod tests {
     #[test]
     #[allow(clippy::assertions_on_constants)]
     fn walk_run_boundary_is_sane() {
-        use crate::ffxi_actor_render::{infers_walk_gait, WALK_RUN_BOUNDARY};
         assert!(EntityMotion::MOVE_EXIT < WALK_RUN_BOUNDARY);
         assert!(
             WALK_RUN_BOUNDARY < 5.0,
@@ -1664,7 +1707,7 @@ mod tests {
 
     #[test]
     fn expected_step_uses_the_lsb_divisors() {
-        // walk (speed <= speed_base): /40; run (speed > speed_base): /50. StepToInternal.
+        // walk (speed <= speed_base): /40; run (speed > speed_base): /50, per CPathFind::StepTo.
         assert!(
             (expected_step_yalms(40, 40) - 1.0).abs() < 1e-6,
             "walk step = 40/40"
@@ -1796,6 +1839,7 @@ mod tests {
         let mut app = App::new();
         app.init_resource::<Time>()
             .init_resource::<EntityPrediction>()
+            .init_resource::<crate::scheduler_runtime::CutsceneActorState>()
             .insert_resource(MotionProbe::init())
             .insert_resource(crate::dat_mzb::MzbCollisionGeometry::from_block(
                 crate::dat_mzb::ground_tests::slab_block(&[(floor_y, Vec3::Y)]),
@@ -1961,6 +2005,103 @@ mod tests {
             t.translation.y
         );
         assert!((t.translation.x - 0.5).abs() < 1e-4);
+    }
+
+    #[test]
+    fn dead_flying_remote_mover_grounds() {
+        // Death overrides the Flying exemption: LSB never writes Y on the KO transition, so a
+        // dead flyer's last POS Y is its hover height; the corpse grounds like everything else.
+        let mut app = grounding_app(2.0);
+        let mob = spawn_remote_mob(&mut app, 904);
+        let skeleton = ffxi_dat::skel::Skeleton {
+            id: ffxi_dat::datid::DatId::from_name(b"skel"),
+            joints: Vec::new(),
+            references: Vec::new(),
+            bounding_boxes: Vec::new(),
+        };
+        let child = app
+            .world_mut()
+            .spawn(
+                crate::ffxi_actor_render::render_actor_with_movement_for_test(
+                    skeleton,
+                    Vec::new(),
+                    ffxi_dat::cib::MovementType::Flying,
+                ),
+            )
+            .id();
+        app.world_mut().entity_mut(mob).add_child(child);
+        app.world_mut()
+            .entity_mut(child)
+            .insert(crate::scheduler_runtime::DeadFromAction);
+        app.world_mut().resource_mut::<EntityPrediction>().observe(
+            904,
+            Vec3::new(0.5, 1.5, 0.0),
+            0,
+            40,
+            40,
+        );
+        tick_frames(&mut app, 1);
+        let t = app.world().get::<Transform>(mob).unwrap();
+        assert!(
+            (t.translation.y - 2.0).abs() < 1e-6,
+            "a dead flyer grounds on the slab, not its hover Y: {}",
+            t.translation.y
+        );
+    }
+
+    #[test]
+    fn raised_flying_remote_mover_returns_to_server_y() {
+        // Raise clears the latch (C4): a Flying model keeps server Y again and lifts off the mesh.
+        let mut app = grounding_app(2.0);
+        let mob = spawn_remote_mob(&mut app, 905);
+        let skeleton = ffxi_dat::skel::Skeleton {
+            id: ffxi_dat::datid::DatId::from_name(b"skel"),
+            joints: Vec::new(),
+            references: Vec::new(),
+            bounding_boxes: Vec::new(),
+        };
+        let child = app
+            .world_mut()
+            .spawn(
+                crate::ffxi_actor_render::render_actor_with_movement_for_test(
+                    skeleton,
+                    Vec::new(),
+                    ffxi_dat::cib::MovementType::Flying,
+                ),
+            )
+            .id();
+        app.world_mut().entity_mut(mob).add_child(child);
+        app.world_mut()
+            .entity_mut(child)
+            .insert(crate::scheduler_runtime::DeadFromAction);
+        app.world_mut().resource_mut::<EntityPrediction>().observe(
+            905,
+            Vec3::new(0.5, 1.5, 0.0),
+            0,
+            40,
+            40,
+        );
+        // Dead: grounded on the slab; long enough that the arrival segment budget runs out and
+        // the prediction holds exactly at server_pos from then on.
+        tick_frames(&mut app, 60);
+        let t = app.world().get::<Transform>(mob).unwrap();
+        assert!(
+            (t.translation.y - 2.0).abs() < 1e-6,
+            "dead flyer stays grounded: {}",
+            t.translation.y
+        );
+        // Raise: the latch is gone, the Flying exemption applies again, and one frame later the
+        // prediction owns Y at its server value.
+        app.world_mut()
+            .entity_mut(child)
+            .remove::<crate::scheduler_runtime::DeadFromAction>();
+        tick_frames(&mut app, 1);
+        let t = app.world().get::<Transform>(mob).unwrap();
+        assert!(
+            (t.translation.y - 1.5).abs() < 1e-6,
+            "a raised flyer lifts back to server Y: {}",
+            t.translation.y
+        );
     }
 
     #[test]
@@ -2180,6 +2321,149 @@ mod tests {
         );
     }
 
+    /// Port of vendor/server/src/common/utils.cpp worldAngle (pinned vendor/server), byte for
+    /// byte: f32 math, truncating i16 cast, double-mod into [0, 256). The 0.1 yalms gate is the
+    /// XZ form of utils.h isWithinDistance(A, B, 0.1f, true); A.rotation is assumed 0 here.
+    /// Inputs are Bevy-space positions: ffxi_to_bevy maps (lsb.x, lsb.z) to (x, -z), so the LSB
+    /// horizontal delta this formula needs is (dx, -dz). Feeding a raw Bevy delta would compute
+    /// the mirrored byte.
+    fn world_angle_byte(a: Vec3, b: Vec3) -> u8 {
+        let dx = b.x - a.x;
+        let dz_lsb = -(b.z - a.z);
+        if dx * dx + dz_lsb * dz_lsb <= 0.1 * 0.1 {
+            return 0;
+        }
+        let radians = dz_lsb.atan2(dx);
+        let raw = (radians * -(128.0 / std::f32::consts::PI)) as i16;
+        ((raw % 256 + 256) % 256) as u8
+    }
+
+    /// Bevy forward to wire ground plane: ffxi_to_bevy maps (wx, wy) to (x, -z), so the inverse
+    /// of a Bevy direction (f.x, f.z) is the wire direction (f.x, -f.z).
+    fn bevy_forward_to_wire(f: Vec3) -> Vec2 {
+        Vec2::new(f.x, -f.z)
+    }
+
+    #[test]
+    fn heading_forward_points_along_the_world_angle_direction() {
+        // For a grid of Bevy-space displacements, the byte LSB would write for a -> b must make
+        // kuluu's forward point from a toward b in wire space. One quantization step is 1.4 deg,
+        // so even an off-by-one byte passes dot > 0.99; a convention error (a quarter turn) fails
+        // by ~90. The want vector is the true wire delta: ffxi_to_bevy maps (lsb.x, lsb.z) to
+        // (x, -z), so a Bevy step (dx, dz) is the wire step (dx, -dz).
+        let origin = Vec3::ZERO;
+        for dx in [-4.0f32, -1.5, 0.7, 2.0, 4.0] {
+            for dz in [-4.0f32, -2.0, -0.5, 1.5, 3.0] {
+                if dx.abs() < 1e-6 && dz.abs() < 1e-6 {
+                    continue;
+                }
+                let byte = world_angle_byte(origin, Vec3::new(dx, 0.0, dz));
+                let wire_fwd = bevy_forward_to_wire(heading_forward(byte));
+                let want = Vec2::new(dx, -dz).normalize();
+                assert!(
+                    wire_fwd.dot(want) > 0.99,
+                    "a->b ({dx}, {dz}): byte {byte} points the wrong way"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn heading_byte_round_trips_within_one_step() {
+        // Encoding kuluu's forward for byte b through the ported worldAngle must land on b or a
+        // neighbor: LSB's own truncating i16 cast quantizes to 256 steps, so exact identity is
+        // not what the pinned formula gives; a convention error would show up as a constant
+        // offset (a quarter turn is 64 bytes). heading_forward(b) is Bevy space, which is what
+        // world_angle_byte expects.
+        for b in 0u8..=255 {
+            let got = world_angle_byte(Vec3::ZERO, heading_forward(b));
+            let diff = ((got as i32 - b as i32 + 128) % 256 + 256) % 256 - 128;
+            assert!(diff.abs() <= 1, "byte {b} encodes back to {got}");
+        }
+    }
+
+    #[test]
+    fn heading_forward_matches_step_to_travel_direction() {
+        // CPathFind::StepTo (pinned vendor/server) moves a mob by (cosf(radians), sinf(radians))
+        // with radians = (1 - rotation / 256) * 2 * PI: kuluu's wire-space forward for the same
+        // byte must be that exact direction. This is LSB's own decode of its own byte, so it
+        // proves the basis without going through worldAngle's quantization.
+        for b in 0u8..=255 {
+            let radians = (1.0 - b as f32 / 256.0) * std::f32::consts::TAU;
+            let step_dir = Vec2::new(radians.cos(), radians.sin()).normalize();
+            let wire_fwd = bevy_forward_to_wire(heading_forward(b));
+            assert!(
+                wire_fwd.dot(step_dir) > 1.0 - 1e-6,
+                "byte {b}: kuluu forward is not StepTo's travel direction"
+            );
+        }
+    }
+
+    #[test]
+    fn pos_heading_applies_on_the_same_snapshot_as_position() {
+        // LSB writes the rotation byte and the position in one POS block: CPathFind::LookAt sets
+        // loc.p.rotation, then updatemask |= UPDATE_POS. A remote actor receiving a POS update
+        // with the byte for its travel direction must start facing that direction on the same
+        // frame: observe() stores target_heading together with the position and
+        // advance_prediction eases toward it immediately (no one-snapshot lag). The assertions
+        // read the actor's actual Transform, not just the prediction resource.
+        let mut app = grounding_app(0.0);
+        let mob = spawn_remote_mob(&mut app, 950);
+        // Settle at a heading far from the next step's travel direction.
+        app.world_mut()
+            .resource_mut::<EntityPrediction>()
+            .observe(950, Vec3::ZERO, 128, 40, 40);
+        tick_frames(&mut app, 60);
+
+        let a = Vec3::new(1.0, 0.0, 2.0);
+        let b = Vec3::new(5.0, 0.0, 9.0);
+        let byte = world_angle_byte(a, b);
+        let target = heading_to_rad(byte);
+        let dist = |h: f32| {
+            let mut d = (target - h).rem_euclid(std::f32::consts::TAU);
+            if d > std::f32::consts::PI {
+                d -= std::f32::consts::TAU;
+            }
+            d.abs()
+        };
+
+        let before_h = app.world().resource::<EntityPrediction>().by_id[&950].rendered_heading_rad;
+        let t_before = *app.world().get::<Transform>(mob).unwrap();
+
+        app.world_mut()
+            .resource_mut::<EntityPrediction>()
+            .observe(950, a, byte, 40, 40);
+        tick_frames(&mut app, 1);
+
+        let t_after = *app.world().get::<Transform>(mob).unwrap();
+        // Same snapshot: the position tween starts on this frame and closes the gap.
+        assert!(
+            t_after.translation.distance(t_before.translation) > 1e-6,
+            "the position update must move the actor on the same frame"
+        );
+        assert!(
+            t_after.translation.distance(a) < t_before.translation.distance(a),
+            "the tween closes the gap toward the new server position on the first frame"
+        );
+        // Same snapshot: the heading turn starts on this frame (exponential approach, no lag).
+        let after_h = app.world().resource::<EntityPrediction>().by_id[&950].rendered_heading_rad;
+        assert!(
+            dist(after_h) < dist(before_h),
+            "the first frame after the POS update already turns toward the travel direction"
+        );
+
+        // And it converges on the travel direction: run out the HEADING_TAU easing.
+        tick_frames(&mut app, 240);
+        let settled = *app.world().get::<Transform>(mob).unwrap();
+        // The rotation is set every frame via from_rotation_y(-heading), so it is a pure Y
+        // rotation and the angle comes straight off the quaternion components.
+        let yaw = 2.0 * settled.rotation.y.atan2(settled.rotation.w);
+        assert!(
+            dist(-yaw) < 1e-3,
+            "the actor ends facing its travel direction (rotation is from_rotation_y(-heading))"
+        );
+    }
+
     #[test]
     fn prediction_static_actor_does_not_drift() {
         let anchor = Vec3::new(3.0, 1.0, 2.0);
@@ -2254,6 +2538,7 @@ mod tests {
         app.init_resource::<Time>()
             .init_resource::<SceneState>()
             .init_resource::<EntityPrediction>()
+            .init_resource::<crate::scheduler_runtime::CutsceneActorState>()
             .init_resource::<EntityMotion>();
         app.world_mut().insert_resource(MotionProbe::init());
         app.add_systems(
@@ -2306,7 +2591,7 @@ mod tests {
                 let sample = app.world().resource::<EntityMotion>().sample(7).unwrap();
                 assert!(sample.moving);
                 assert!(
-                    !crate::ffxi_actor_render::infers_walk_gait(sample.speed),
+                    !infers_walk_gait(sample.speed),
                     "run restarted at frame {frame}"
                 );
             }
@@ -2600,17 +2885,18 @@ mod tests {
     #[test]
     fn motion_probe_mismatch_is_rising_edge() {
         let mut p = MotionProbe::enabled_for_test();
-        // heading 0 faces -z; travelling +x is a full quarter turn sideways.
-        p.record_heading_mismatch(3, EntityKind::Mob, 0.0, Vec3::new(5.0, 0.0, 0.0));
+        // worldAngle basis: heading 0 faces +X (see heading_forward), so travelling +z is a full
+        // quarter turn sideways.
+        p.record_heading_mismatch(3, EntityKind::Mob, 0.0, Vec3::new(0.0, 0.0, 5.0));
         assert_eq!(p.per_id[&3].mismatch_events, 1);
         // still sideways: no second event for the same episode
-        p.record_heading_mismatch(3, EntityKind::Mob, 0.05, Vec3::new(4.9, 0.0, 0.6));
+        p.record_heading_mismatch(3, EntityKind::Mob, 0.05, Vec3::new(0.6, 0.0, 4.9));
         assert_eq!(p.per_id[&3].mismatch_events, 1);
         // aligned: the episode ends without an event
-        p.record_heading_mismatch(3, EntityKind::Mob, 0.0, Vec3::new(0.0, 0.0, -5.0));
+        p.record_heading_mismatch(3, EntityKind::Mob, 0.0, Vec3::new(5.0, 0.0, 0.0));
         assert_eq!(p.per_id[&3].mismatch_events, 1);
         // a new sideways episode counts again
-        p.record_heading_mismatch(3, EntityKind::Mob, 0.0, Vec3::new(5.0, 0.0, 0.0));
+        p.record_heading_mismatch(3, EntityKind::Mob, 0.0, Vec3::new(0.0, 0.0, 5.0));
         assert_eq!(p.per_id[&3].mismatch_events, 2);
     }
 

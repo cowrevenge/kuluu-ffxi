@@ -179,6 +179,7 @@ fn retail_airship_exit_waits_for_both_acks_then_finishes_through_runner() {
                 runner.advance(Some(0), &strings)
             }
             DialogStep::Waiting => runner.tick(TICK_SECONDS, &strings),
+            DialogStep::AwaitServerAck(_) => runner.ack_server(&strings),
             DialogStep::Ended { .. } => {
                 assert_eq!(requests, 1);
                 for action in runner.take_scene_actions() {

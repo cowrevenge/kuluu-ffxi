@@ -31,6 +31,7 @@ use ffxi_dat::texture::{decode_texture, DecodedTexture};
 use ffxi_dat::{walk_tree, ChunkKind, ChunkNode, DatRoot};
 
 use crate::combat_stance;
+pub use crate::combat_stance::{infers_walk_gait, WALK_RUN_BOUNDARY};
 use crate::dat_vos2::skeleton_file_id_for_race;
 use crate::scene::BakedActor;
 use crate::scheduler_runtime::main_dll_for_root;
@@ -577,7 +578,8 @@ pub fn load_npc(file_id: u32) -> Result<LoadedActor, String> {
     let mut effect_meshes = Vec::new();
     collect_d3m(&tree, &mut effect_meshes);
 
-    let (_schedulers, action_assets) = crate::scheduler_runtime::parse_action_bytes(&bytes);
+    let (_schedulers, action_assets, _cameras) =
+        crate::scheduler_runtime::parse_action_bytes(&bytes);
     // A D3m referenced by a particle generator is drawn by the particle stream
     // (XIM ParticleMeshResource, Particle.kt shouldSnapAlpha) with its own unlit additive/blend
     // material; rendering it as a static child too would double-draw it through the
@@ -1253,6 +1255,10 @@ pub struct FfxiRenderActor {
     /// the wire AnimationSpeed stride scale applies to locomotion clip playback.
     movement_type: MovementType,
 
+    /// The model's 0x45 Info waist byte (0 when the DAT carries no CIB): which of a 0x66 Tpc
+    /// package's two tag-2 containers the renderer loads.
+    body_armour_waist: u8,
+
     current_clip: Option<(DatId, bool)>,
 
     rest_phase: RestPlayback,
@@ -1296,6 +1302,12 @@ impl FfxiRenderActor {
     /// CIB); gates the wire stride scale on locomotion clip playback.
     pub fn movement_type(&self) -> MovementType {
         self.movement_type
+    }
+
+    /// The 0x45 Info waist byte this model was loaded with (0 when the DAT carries no CIB):
+    /// which of a 0x66 Tpc package's two tag-2 containers the renderer loads.
+    pub fn body_armour_waist(&self) -> u8 {
+        self.body_armour_waist
     }
 
     /// The completion motion's clip while `action` is held - what a routine's Motion stage (or
@@ -1806,6 +1818,7 @@ pub fn make_render_actor(
             .cib
             .map(|c| c.movement_type)
             .unwrap_or(MovementType::Unset),
+        body_armour_waist: loaded.cib.map(|c| c.body_armour_waist).unwrap_or(0),
         current_clip: None,
         rest_phase: RestPlayback::Inactive,
         death_phase: actor_state::DeathPhase::Unobserved,
@@ -3458,8 +3471,21 @@ pub fn tick_live_ffxi_actors(
         // World ids whose 0x0E hp_pct just went 0 -> >0 on this snapshot (a Raise): the wire
         // owns death state again, so their Defeated latch is cleared below.
         frame_scratch.raised.clear();
+        // World ids whose 0x0E hp_pct is 0 on this snapshot: a kill that did not arrive as a
+        // BATTLE2 Defeated result still latches the death path below (the wire byte is the only
+        // signal; see the latch block after the loop).
+        let mut dead_now = std::collections::HashSet::<u32>::new();
         for e in &state.snapshot.entities {
-            live_ids.insert(e.id);
+            frame_scratch.live_ids.insert(e.id);
+            // A Raise is a 0 -> >0 transition of this entity's 0x0E hp_pct on this snapshot.
+            let prev_hp = frame_scratch.prev_hp.get(&e.id).copied();
+            frame_scratch.prev_hp.insert(e.id, e.hp_pct);
+            if matches!(prev_hp, Some(Some(0))) && e.hp_pct.is_some_and(|p| p > 0) {
+                frame_scratch.raised.insert(e.id);
+            }
+            if e.hp_pct == Some(0) {
+                dead_now.insert(e.id);
+            }
             let mounted = state.snapshot.mount_of(e).is_some();
             // Advance the special-pose wire state from last frame to this snapshot's
             // status/animationsub. A no-op (stays plain) for entities with no sub and a visible
@@ -3552,7 +3578,47 @@ pub fn tick_live_ffxi_actors(
                 );
             }
         }
-        // Drop states for entities that despawned so the cache stays bounded.
+        // Self's raise arrives through the party row / homepoint timer channel instead of an
+        // entity hp_pct (see self_dead above): a true -> false transition of self-deadness.
+        if let Some(sid) = self_id {
+            if frame_scratch.prev_self_dead == Some(true) && !self_dead {
+                frame_scratch.raised.insert(sid);
+            }
+        }
+        frame_scratch.prev_self_dead = Some(self_dead);
+
+        // Latch the death path on entities whose 0x0E hp_pct is 0 on this snapshot: consumers of
+        // DeadFromAction beyond the pose pass (remote grounding) read the latch, and a kill that
+        // did not arrive as a BATTLE2 Defeated result has no other signal. Mount actors carry
+        // synthetic ids disjoint from server ids, so they never match dead_now.
+        if !dead_now.is_empty() {
+            for (entity, actor, _, _, latch) in q_actors.iter() {
+                if latch.is_none() && dead_now.contains(&actor.world_id) {
+                    commands
+                        .entity(entity)
+                        .insert(crate::scheduler_runtime::DeadFromAction);
+                }
+            }
+        }
+
+        // Clear the Defeated latch on raised entities (see DeadFromAction). Commands apply at
+        // end of system, so this frame's pose pass still sees the latch for one more frame;
+        // from the next frame the wire's hp_pct owns death state again.
+        if !frame_scratch.raised.is_empty() {
+            for (entity, actor, _, _, latch) in q_actors.iter() {
+                if latch.is_some() && frame_scratch.raised.contains(&actor.world_id) {
+                    commands
+                        .entity(entity)
+                        .remove::<crate::scheduler_runtime::DeadFromAction>();
+                }
+            }
+        }
+
+        // Drop states for entities that despawned so the cache stays bounded. Field borrows go
+        // through a materialized &mut (the mount_attach_scratch pattern below): split borrows do
+        // not propagate through Bevy's Local deref when one side is captured by a closure.
+        let frame_scratch = &mut *frame_scratch;
+        let live_ids = &frame_scratch.live_ids;
         special_mem.retain(|id, _| live_ids.contains(id));
     }
 
@@ -3692,7 +3758,7 @@ pub fn tick_live_ffxi_actors(
         .self_casting
         .as_ref()
         .is_some_and(|c| !c.interrupted);
-    let self_walking = walk_mode.walking;
+    let self_walking = self_move.walking(walk_mode.walking);
     let self_target_id = target.id;
     let (self_move_forward, self_move_strafe, self_move_moving) =
         (self_move.forward, self_move.strafe, self_move.moving);
@@ -3726,8 +3792,8 @@ pub fn tick_live_ffxi_actors(
 
             let engaged =
                 snap.map(|s| s.engaged).unwrap_or(false) || (is_self && self_engaged_predicted);
-            // a Defeated result latches the death path on this frame; the 0x0E hp_pct
-            // takes over from there. while the `dead` routine is queued but its
+            // A Defeated result latches the death path on this frame (.agents/skills/retail-observe/references/2026-09-09-wormwatch-runtime.md "First non-burrow routines"); the 0x0E hp_pct
+            // takes over from there. While the `dead` routine is queued but its
             // fall-over has not started, hold idle instead of flashing cor? for the gap frame;
             // once ded? owns the pose via the completion motion, dead may be true again.
             let dead = ((is_self && self_dead)
@@ -5721,7 +5787,7 @@ mod pose_resolution_tests {
         let Ok(bytes) = std::fs::read(loc.path_under(&root)) else {
             return;
         };
-        let (schedulers, _) = crate::scheduler_runtime::parse_action_bytes(&bytes);
+        let (schedulers, _, _) = crate::scheduler_runtime::parse_action_bytes(&bytes);
         let routines: HashMap<DatId, Scheduler> = schedulers
             .into_iter()
             .map(|s| (DatId::from_name(&s.name), s))

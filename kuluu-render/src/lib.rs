@@ -13,6 +13,9 @@ pub mod combat_stance;
 pub mod components;
 pub mod cursor;
 pub mod cutscene;
+// The kind 0x06 camera routes a cutscene scheduler routine drives the operator camera along.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod cutscene_camera;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod dat_d3m;
 #[cfg(not(target_arch = "wasm32"))]
@@ -23,6 +26,7 @@ pub mod dat_mzb;
 pub mod dat_vos2;
 pub mod debug_chat;
 pub mod entity_table;
+pub mod env_flags;
 pub mod equip_slot;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod ffxi_actor_render;
@@ -105,6 +109,8 @@ pub use components::{
 };
 pub use cursor::{system_cursor_icon, CursorPlugin, CursorRequests, CursorStyle};
 pub use cutscene::{CutsceneMode, CutscenePlugin, ScreenFade};
+#[cfg(not(target_arch = "wasm32"))]
+pub use cutscene_camera::{advance_cutscene_camera_task, CutsceneCameraTasks};
 pub use entity_table::{EntityRecord, EntityTable};
 pub use graphics_settings::{
     AaMode, CharacterRenderPath, DlssQuality, DynamicLights, GraphicsField, GraphicsSettings,

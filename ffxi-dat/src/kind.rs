@@ -1,4 +1,4 @@
-// The named-but-unparsed variants (Route, WeightedMesh, PointList, SpellList, Path,
+// The named-but-unparsed variants (WeightedMesh, PointList, SpellList, Path,
 // AbilityList, WeaponTrace, BumpMap, Blur, UiMenu, UiElementGroup) exist so CLIP_WARN and
 // the loader's rejected-chunk lists can name a chunk instead of printing an unknown code.
 // Their names follow vekien/xi-model-viewer ui/js/dat/inspect.js SECTION_TYPE_NAMES;
@@ -9,7 +9,9 @@ pub enum ChunkKind {
     Terminate = 0x00,
     Rmp = 0x01,
     Generator = 0x05,
-    Route = 0x06,
+    /// The camera route chunks (research/XIClient include/World/Camera/CameraFormat.h); xim's
+    /// name for the code is Route.
+    Camera = 0x06,
     Scheduler = 0x07,
     Tim = 0x09,
     KeyFrame = 0x19,
@@ -43,7 +45,7 @@ impl ChunkKind {
             0x00 => Self::Terminate,
             0x01 => Self::Rmp,
             0x05 => Self::Generator,
-            0x06 => Self::Route,
+            0x06 => Self::Camera,
             0x07 => Self::Scheduler,
             0x09 => Self::Tim,
             0x19 => Self::KeyFrame,
@@ -117,10 +119,6 @@ mod tests {
     fn kind_roundtrip() {
         for raw in [0x01u8, 0x06, 0x09, 0x20, 0x25, 0x2A, 0x2B, 0x3E, 0x45, 0x54] {
             assert_eq!(ChunkKind::from_u8(raw).unwrap() as u8, raw);
-        }
-        // Parser-less retail codes stay out of the enum; label still names them.
-        for raw in [0x06u8, 0x25, 0x3E, 0x49, 0x4A, 0x53, 0x54, 0x5D, 0x5E] {
-            assert_eq!(ChunkKind::from_u8(raw), None);
         }
     }
 

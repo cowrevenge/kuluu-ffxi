@@ -1,6 +1,7 @@
 pub mod bridge;
 pub mod camera_collision;
 pub mod collision_bvh;
+pub mod cutscene_motion_done;
 pub mod debug_heights;
 pub mod entity_list_hud;
 pub mod exit_watchdog;
@@ -732,14 +733,17 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
             text_input::delivery_mode_sync_system,
             text_input::bazaar_mode_sync_system,
             text_input::auction_mode_sync_system,
+            text_input::event_map_sync_system,
             input::handle_input_system,
             text_input::text_input_system,
+            text_input::auto_enter_cs_system,
             text_input::mouse_nav_dispatch_system,
             input::dispatch_target_change_system,
             input::sync_target_lock_system,
             input::tab_cycle_invalidate_system,
             key_items::key_items_mark_seen_system,
             sub_area_report::report_sub_area_system,
+            cutscene_motion_done::report_cutscene_motion_done_system,
         )
             .chain()
             .after(kuluu_render::chase_camera_system)
@@ -802,6 +806,15 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
         Update,
         camera_collision::resolve_camera
             .before(kuluu_render::nameplate_billboard::update_nameplate_billboards_system)
+            .run_if(in_state(AppPhase::InGame)),
+    );
+
+    // The cutscene's camera route owns the operator camera while it runs: after resolve_camera,
+    // so its transform and focal writes win any same-frame collision push.
+    app.add_systems(
+        Update,
+        kuluu_render::cutscene_camera::advance_cutscene_camera_task
+            .after(camera_collision::resolve_camera)
             .run_if(in_state(AppPhase::InGame)),
     );
 

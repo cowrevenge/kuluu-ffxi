@@ -1,0 +1,206 @@
+== totals ==
+files: 52926  walked clean: 50644  walk error: 2282  unreadable: 0
+
+== error position (offset of the truncated chunk / file size) ==
+0..25%: 288
+25..50%: 20
+50..75%: 114
+75..100%: 391
+first chunk: 1469
+
+== error chunk kind (header at the error offset) ==
+<no header>: 420
+0x00: 110
+0x01: 21
+0x02: 28
+0x03: 14
+0x04: 41
+0x05: 37
+0x06: 2
+0x07: 9
+0x08: 21
+0x09: 2
+0x0A: 30
+0x0B: 3
+0x0C: 21
+0x0D: 133
+0x0E: 2
+0x0F: 1
+0x10: 22
+0x11: 5
+0x12: 1
+0x13: 3
+0x14: 29
+0x15: 4
+0x16: 3
+0x17: 3
+0x18: 34
+0x19: 2
+0x1A: 2
+0x1B: 3
+0x1C: 23
+0x1D: 1
+0x1E: 2
+0x1F: 4
+0x20: 64
+0x22: 4
+0x23: 5
+0x24: 28
+0x26: 1
+0x27: 3
+0x28: 22
+0x29: 3
+0x2A: 2
+0x2B: 2
+0x2C: 33
+0x2D: 1
+0x2E: 9
+0x2F: 6
+0x30: 19
+0x31: 15
+0x32: 2
+0x34: 14
+0x36: 2
+0x37: 3
+0x38: 30
+0x3A: 7
+0x3B: 2
+0x3C: 20
+0x3D: 1
+0x3E: 1
+0x3F: 1
+0x40: 22
+0x41: 24
+0x42: 1
+0x43: 14
+0x44: 43
+0x45: 6
+0x46: 1
+0x47: 3
+0x48: 33
+0x49: 1
+0x4A: 1
+0x4B: 1
+0x4C: 33
+0x4D: 8
+0x4E: 2
+0x50: 11
+0x51: 1
+0x52: 55
+0x53: 1
+0x54: 21
+0x55: 7
+0x56: 4
+0x57: 1
+0x58: 32
+0x5A: 3
+0x5B: 1
+0x5C: 16
+0x5D: 1
+0x5E: 1
+0x60: 24
+0x61: 14
+0x62: 3
+0x63: 4
+0x64: 38
+0x65: 67
+0x66: 13
+0x67: 10
+0x68: 33
+0x69: 8
+0x6B: 2
+0x6C: 22
+0x6D: 24
+0x6E: 38
+0x6F: 13
+0x70: 36
+0x71: 4
+0x72: 23
+0x73: 18
+0x74: 85
+0x75: 22
+0x76: 9
+0x77: 2
+0x78: 16
+0x79: 2
+0x7B: 3
+0x7C: 28
+0x7D: 1
+0x7E: 3
+0x7F: 33
+
+== truncation depth (needed - available, how far past EOF the body runs) ==
+257..4096: 14
+4097..65536: 119
+<=16: 420
+>65536: 1729
+
+== by top-level directory ==
+FTABLE.DAT: 1
+ROM: 1821
+ROM2: 129
+ROM3: 117
+ROM4: 96
+ROM9: 111
+USER: 6
+VTABLE.DAT: 1
+
+== 0x2D carrier exposure: known carriers among the failing files ==
+carrier 641: ROM3/0/48.DAT — walks clean
+carrier 30705: ROM/123/85.DAT — walks clean
+carrier 57075: ROM/213/92.DAT — walks clean
+carrier 57082: ROM/216/12.DAT — walks clean
+carrier 57204: ROM/241/3.DAT — walks clean
+
+== 0x2D carrier exposure: zone model DATs among the failing files ==
+none: every zone model DAT walks clean
+
+== 0x2D carrier exposure: failing files with scheduler chunks in the clean prefix ==
+2 files:
+  ROM/20/20.DAT (err @ 76496/216188): :
+  ROM3/0/97.DAT (err @ 18528/35080): øá
+
+== attached-route exposure: kind 0x06 with AttachmentInfo != 0 in failing prefixes ==
+routes: 0 in 0 files
+
+== first 40 failing files ==
+FTABLE.DAT (219402 bytes, err @ 24576, 194826 left, kind 0x02, name )
+ROM/0/11.DAT (786432 bytes, err @ 0, 786432 left, kind 0x03, name ....)
+ROM/0/22.DAT (32768 bytes, err @ 0, 32768 left, kind 0x02, name ....)
+ROM/0/8.DAT (1572864 bytes, err @ 262144, 1310720 left, kind 0x04, name )
+ROM/0/9.DAT (49152 bytes, err @ 0, 49152 left, kind 0x00, name ÿÿ..)
+ROM/118/102.DAT (213 bytes, err @ 0, 213 left, kind 0x52, name XIST)
+ROM/118/103.DAT (465 bytes, err @ 0, 465 left, kind 0x52, name XIST)
+ROM/118/104.DAT (568 bytes, err @ 0, 568 left, kind 0x52, name XIST)
+ROM/118/105.DAT (275 bytes, err @ 0, 275 left, kind 0x52, name XIST)
+ROM/118/110.DAT (1572864 bytes, err @ 262144, 1310720 left, kind 0x04, name )
+ROM/119/54.DAT (32768 bytes, err @ 0, 32768 left, kind 0x4E, name ....)
+ROM/119/56.DAT (786432 bytes, err @ 0, 786432 left, kind 0x03, name ....)
+ROM/119/64.DAT (1020 bytes, err @ 0, 1020 left, kind 0x15, name ...)
+ROM/119/65.DAT (24814 bytes, err @ 0, 24814 left, kind 0x47, name USA)
+ROM/159/60.DAT (818 bytes, err @ 0, 818 left, kind 0x52, name XIST)
+ROM/159/61.DAT (1236 bytes, err @ 0, 1236 left, kind 0x52, name XIST)
+ROM/165/113.DAT (1536 bytes, err @ 0, 1536 left, kind 0x7F, name .ÿ.)
+ROM/165/55.DAT (11349 bytes, err @ 0, 11349 left, kind 0x52, name XIST)
+ROM/165/57.DAT (3672 bytes, err @ 0, 3672 left, kind 0x52, name XIST)
+ROM/165/71.DAT (11671 bytes, err @ 0, 11671 left, kind 0x52, name XIST)
+ROM/165/73.DAT (4097 bytes, err @ 0, 4097 left, kind 0x52, name XIST)
+ROM/166/126.DAT (1537972 bytes, err @ 1050768, 487204 left, kind 0x6D, name åóôé)
+ROM/166/127.DAT (1466612 bytes, err @ 1050400, 416212 left, kind 0x62, name õîçó)
+ROM/167/0.DAT (1504244 bytes, err @ 1050592, 453652 left, kind 0x20, name çõîç)
+ROM/167/1.DAT (1510552 bytes, err @ 1050592, 459960 left, kind 0x05, name çåðò)
+ROM/167/10.DAT (1455468 bytes, err @ 1050144, 405324 left, kind 0x41, name ÿ±)
+ROM/167/100.DAT (1959028 bytes, err @ 1052208, 906820 left, kind 0x6E, name åò õ)
+ROM/167/101.DAT (1841948 bytes, err @ 1051200, 790748 left, kind 0x65, name ïîóô)
+ROM/167/102.DAT (1537476 bytes, err @ 1049808, 487668 left, kind 0x73, name õîâå)
+ROM/167/103.DAT (1347444 bytes, err @ 1048864, 298580 left, kind 0x20, name íôåò)
+ROM/167/104.DAT (1218268 bytes, err @ 1056544, 161724 left, kind 0x6D, name óôéí)
+ROM/167/105.DAT (1239620 bytes, err @ 1056576, 183044 left, kind 0x05, name Áõóò)
+ROM/167/106.DAT (1427792 bytes, err @ 1049648, 378144 left, kind 0x74, name Íïîó)
+ROM/167/107.DAT (1422416 bytes, err @ 1049712, 372704 left, kind 0x7F, name ææå®)
+ROM/167/108.DAT (1241968 bytes, err @ 1056704, 185264 left, kind 0x6D, name óôéí)
+ROM/167/109.DAT (1580 bytes, err @ 0, 1580 left, kind 0x00, name (.)
+ROM/167/11.DAT (1524580 bytes, err @ 1050688, 473892 left, kind 0x2F, name º )
+ROM/167/110.DAT (1104 bytes, err @ 0, 1104 left, kind 0x00, name L.)
+ROM/167/111.DAT (7952 bytes, err @ 0, 7952 left, kind 0x18, name .)
+ROM/167/112.DAT (62600 bytes, err @ 0, 62600 left, kind 0x00, name ô.)

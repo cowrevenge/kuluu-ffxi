@@ -10,16 +10,6 @@ const SPELL_FILE_TABLE_OFFSET: u32 = 0xAF0;
 const ABILITY_FILE_TABLE_OFFSET: u32 = 0x113C;
 const TRUST_FILE_ID: u32 = 0xE9B;
 const TRUST_SPELL_ID_MIN: u16 = 896;
-// research/xim resource/table/MobAbilityTable.kt getFileTableOffset - a mob skill's animation id
-// falls in one of four FTABLE bands, each with its own base offset into the file table.
-const MOB_ANIM_BAND_1_MAX: u32 = 0x200;
-const MOB_ANIM_BASE_1: u32 = 0x0F3C;
-const MOB_ANIM_BAND_2_MAX: u32 = 0x600;
-const MOB_ANIM_BASE_2: u32 = 0xC1EF;
-const MOB_ANIM_BAND_3_MAX: u32 = 0x800;
-const MOB_ANIM_BASE_3: u32 = 0xE739;
-const MOB_ANIM_BASE_4: u32 = 0x14B07;
-
 fn lookup(table: &[(u16, u16)], id: u16) -> Option<u16> {
     table
         .binary_search_by_key(&id, |&(k, _)| k)

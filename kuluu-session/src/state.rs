@@ -971,6 +971,24 @@ pub struct DialogState {
     /// (`AgentCommand::CustomMenuRespond`), not an `EndEventChoice`.
     #[serde(default)]
     pub custom_menu: bool,
+    /// Whether ESC may cancel this event (retail's CliEventCancelFlag; the VM's
+    /// 0x42 disarms it in cutscenes that lock you in, 0x2E re-arms). Defaults to
+    /// true so frames from an unknown producer stay cancellable.
+    #[serde(default = "cancel_armed_default")]
+    pub cancel_armed: bool,
+    /// The speaking entity's target index for this frame; `None` is a line the
+    /// bytecode prints with no speaker (retail renders those headerless).
+    #[serde(default)]
+    pub speaker_index: Option<u16>,
+    /// The line carried an item / key-item marker (`{Item:N}` / `{KeyItem:N}`)
+    /// before substitution: enternity-style auto-advance leaves such lines
+    /// manual (the addon's "sentences that contain items will not be skipped").
+    #[serde(default)]
+    pub contains_item: bool,
+}
+
+fn cancel_armed_default() -> bool {
+    true
 }
 
 /// Row-major grid overlay for a choice frame (`cells.len() == rows * cols`).
@@ -998,7 +1016,7 @@ pub struct DialogGridCell {
 /// Which entity a [`CutsceneCue`] names, resolved from the event VM's
 /// [`ffxi_event::ActorLookup`] against the running event's own entity (the VM
 /// deliberately leaves that to its host).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CutsceneActor {
     LocalPlayer,
@@ -1007,8 +1025,9 @@ pub enum CutsceneActor {
 
 /// One staging effect the running event script asked for — the renderer-facing
 /// half of [`ffxi_event::EventCue`]. `MusicVolume` is absent because 0x5D rides
-/// [`AgentEvent::MusicVolumeChanged`] instead of the cue stream.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// [`AgentEvent::MusicVolumeChanged`] instead of the cue stream. Not `Eq`:
+/// [`CutsceneCue::ActorMove`] carries a float speed.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum CutsceneCue {
     ActorMotion {
         actor: CutsceneActor,
@@ -1029,10 +1048,79 @@ pub enum CutsceneCue {
     CameraLock {
         lock: bool,
     },
+    /// 0x67/0x68 HIDE_HUD/SHOW_HUD: hide or show the entire HUD UI for the
+    /// rest of the cutscene (research/XiEvents/OpCodes/0x0067.md, 0x0068.md).
+    HudHide {
+        hide: bool,
+    },
+    /// 0x77/0x78 STOP_CLOCK/RESTORE_CLOCK: hold the game clock at Vana'diel
+    /// hour `hour`, or release it back to server time
+    /// (research/XiEvents/OpCodes/0x0077.md, 0x0078.md).
+    ClockHold {
+        stop: bool,
+        hour: Option<u32>,
+    },
     Mount {
         target: CutsceneActor,
         status_event: u8,
         mount_id: Option<u16>,
+    },
+    ExtScheduler {
+        motion: Option<kuluu_snapshot::ExtSchedulerMotion>,
+        actor: CutsceneActor,
+        partner: CutsceneActor,
+        key: ffxi_event::FourCc,
+    },
+    /// Start zone-level scheduler routine `key` over the two actors (the
+    /// 0x2D/0x54 pair, research/XiEvents/OpCodes/0x002D.md); the host resolves
+    /// `key` out of the current zone's own model DAT (`zone_id`).
+    ZoneScheduler {
+        key: ffxi_event::FourCc,
+        actor: CutsceneActor,
+        partner: CutsceneActor,
+        zone_id: u16,
+    },
+    /// Walk `actor` to `(x, y, z)` at `speed`, facing `heading`; the
+    /// coordinates are the VM's event-coordinate integers.
+    ActorMove {
+        actor: CutsceneActor,
+        x: i32,
+        y: i32,
+        z: i32,
+        heading: i32,
+        speed: f32,
+    },
+    /// Snap `actor` to `(x, y, z)` facing `heading`, in event-coordinate
+    /// integers.
+    ActorPlace {
+        actor: CutsceneActor,
+        x: i32,
+        y: i32,
+        z: i32,
+        heading: i32,
+    },
+    /// Face `actor` toward `heading`, in the VM's 4096-step full-circle units.
+    ActorFace {
+        actor: CutsceneActor,
+        heading: i32,
+    },
+    /// Turn `actor` to face `target`.
+    ActorLookAt {
+        actor: CutsceneActor,
+        target: CutsceneActor,
+    },
+    /// Stop the named routine on `actor`, or every routine when `key` is
+    /// None, and return it to idle.
+    ActorStopAction {
+        actor: CutsceneActor,
+        key: Option<ffxi_event::FourCc>,
+    },
+    /// 0xB5 case 0: set `actor`'s display name to `name` (the event's work
+    /// string, filled from an inline literal or the s2c 0x005D PENDINGSTR
+    /// table). The nameplate re-rasters from it until the event ends.
+    EntityName {
+        actor: CutsceneActor,
+        name: [u8; 16],
     },
 }
 
@@ -2214,10 +2302,18 @@ impl SessionState {
             | AgentEvent::KeyRotated { .. }
             | AgentEvent::CutsceneStarted { .. }
             | AgentEvent::CutsceneCue { .. }
-            | AgentEvent::CutsceneEnded => false,
+            | AgentEvent::CutsceneEnded
+            | AgentEvent::MapOpen { .. }
+            | AgentEvent::MapMarkerPlaced { .. }
+            | AgentEvent::MapClosed => false,
             AgentEvent::EventDialog { dialog } => {
                 let changed = self.dialog.as_ref() != Some(dialog);
                 self.dialog = Some(dialog.clone());
+                changed
+            }
+            AgentEvent::DialogDismissed => {
+                let changed = self.dialog.is_some();
+                self.dialog = None;
                 changed
             }
             AgentEvent::ShopUpdated { shop } => {
@@ -2570,6 +2666,14 @@ pub enum AgentEvent {
         dialog: DialogState,
     },
 
+    /// The running event's displayed frame is down again without the session
+    /// ending: dismissal parked on a timed hold, or a pending tag awaits its
+    /// ack. Retail clears CliEventMessOpenFlag when the player answers, so the
+    /// box hides until the next [`AgentEvent::EventDialog`] reopens it —
+    /// otherwise the dismissed line (and its advance hint) lingers over camera
+    /// moves and holds.
+    DialogDismissed,
+
     /// An event session opened. Distinct from [`AgentEvent::EventStart`],
     /// which also fires for client-local menus that run no script.
     CutsceneStarted {
@@ -2841,6 +2945,24 @@ pub enum AgentEvent {
         slot: u8,
         volume: u8,
     },
+
+    /// Event script 0xC8 MAP_TUTORIAL: open the Map screen on zone `map_id`.
+    MapOpen {
+        map_id: u16,
+        tutorial: bool,
+    },
+
+    /// Event script 0x8B MAP_MARKER: place a named marker at milli-unit
+    /// coordinates on zone `map_id`'s map.
+    MapMarkerPlaced {
+        map_id: u16,
+        x_milli: i32,
+        y_milli: i32,
+        label: String,
+    },
+
+    /// Event script 0x8A CLOSE_MAP: close the Map screen.
+    MapClosed,
 
     LevelUp {
         player_id: u32,
@@ -3178,6 +3300,15 @@ pub enum AgentCommand {
     /// matching retail's clamp of a negative boundary.
     ReportSubArea {
         sub_area: u16,
+    },
+
+    /// The renderer finished (or could not start) the 0x2C SCHEDULOR routine
+    /// this `(actor, key)` named: releases the event VM's pending hold on it.
+    /// Carries the wire actor the cue named, so the session matches the same
+    /// value it resolved the cue with.
+    CutsceneMotionDone {
+        actor: CutsceneActor,
+        key: ffxi_event::FourCc,
     },
 
     EndEvent,

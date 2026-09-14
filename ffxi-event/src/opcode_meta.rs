@@ -1404,8 +1404,8 @@ pub fn sub_size(op: u8, sub: u8) -> Option<u8> {
             _ => None,
         },
         // 0x0047.md: case 0 sends the position tag (10); case 1 polls until the
-        // server acknowledges it (2). We have no pending-tag state, so case 1
-        // takes the acknowledged path.
+        // server acknowledges it (2). The VM models the round-trip as a pending
+        // tag held on the case-1 poll, so these widths are only the fallbacks.
         OP_EVENTPOSSET => match sub {
             0 => Some(10),
             1 => Some(2),
@@ -1440,6 +1440,14 @@ pub fn sub_size(op: u8, sub: u8) -> Option<u8> {
         // frame while the entity walks and advances 2 on arrival. No frame
         // clock here, so case 1 arrives immediately.
         OP_MOVE => match sub {
+            0 => Some(8),
+            1 => Some(2),
+            _ => None,
+        },
+        // 0x005A.md CodeMOVE2: the uncalibrated twin of 0x1F — case 0 stores
+        // the goal in ReqStack (8); case 1 re-runs each frame while the entity
+        // walks and advances 2 on arrival.
+        OP_CODE_MOVE2 => match sub {
             0 => Some(8),
             1 => Some(2),
             _ => None,
@@ -1564,6 +1572,7 @@ pub(crate) const OP_LOADROOM: u8 = 0x75;
 pub(crate) const OP_ITEMINFO: u8 = 0xCC;
 pub(crate) const OP_ENTITYSPEED: u8 = 0x59;
 pub(crate) const OP_MOVE: u8 = 0x1F;
+pub(crate) const OP_CODE_MOVE2: u8 = 0x5A;
 pub(crate) const OP_WINDOW: u8 = 0xB4;
 pub(crate) const OP_MENU: u8 = 0x71;
 pub(crate) const OP_RENDERFLAG: u8 = 0xAB;
@@ -1648,6 +1657,10 @@ mod tests {
         assert_eq!(sub_size(0x1F, 0), Some(8));
         assert_eq!(sub_size(0x1F, 1), Some(2));
         assert_eq!(sub_size(0x1F, 2), None);
+        // 0x005A.md — CodeMOVE2 carries the same widths as its calibrated twin.
+        assert_eq!(sub_size(0x5A, 0), Some(8));
+        assert_eq!(sub_size(0x5A, 1), Some(2));
+        assert_eq!(sub_size(0x5A, 2), None);
         // 0x00B4.md
         assert_eq!(sub_size(0xB4, 0x00), Some(20));
         assert_eq!(sub_size(0xB4, 0x05), Some(3));

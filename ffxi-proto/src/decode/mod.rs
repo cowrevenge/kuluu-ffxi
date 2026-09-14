@@ -44,6 +44,8 @@ mod auction;
 pub use auction::*;
 mod assist;
 pub use assist::*;
+mod pending;
+pub use pending::*;
 
 #[derive(Debug, thiserror::Error)]
 pub enum DecodeError {

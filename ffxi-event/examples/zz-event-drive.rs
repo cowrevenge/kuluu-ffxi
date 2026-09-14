@@ -80,6 +80,10 @@ fn main() {
                     println!("  {step:2}. waiting (clock skipped offline)");
                     next = Some(runner.tick(OFFLINE_WAIT_SKIP_SECS, &strings));
                 }
+                DialogStep::AwaitServerAck(tag) => {
+                    println!("  {step:2}. pending tag (acked offline): {tag:?}");
+                    next = Some(runner.ack_server(&strings));
+                }
             }
         }
     }

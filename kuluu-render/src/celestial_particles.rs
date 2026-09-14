@@ -196,7 +196,7 @@ fn sync_celestial_particles(
         return;
     }
 
-    let (_schedulers, assets) = parse_action_bytes(&bytes);
+    let (_schedulers, assets, _cameras) = parse_action_bytes(&bytes);
     store.entities = spawn_celestial_set(
         &assets,
         &defs,

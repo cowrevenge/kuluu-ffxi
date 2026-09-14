@@ -53,7 +53,7 @@ const THIRD_PERSON_ANCHOR_FRAC: f32 = 0.55;
 
 const FIRST_PERSON_EYE_FRAC: f32 = 0.92;
 
-const FALLBACK_ACTOR_HEIGHT: f32 = 2.3;
+pub const FALLBACK_ACTOR_HEIGHT: f32 = 2.3;
 
 #[inline]
 pub fn third_person_anchor_y(baked: Option<&BakedActor>) -> f32 {

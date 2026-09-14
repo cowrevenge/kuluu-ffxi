@@ -1,4 +1,4 @@
-//! Rabbit (Savanna Rarab) front-to-end animation tester - kuluu-df9t.
+//! Rabbit (Savanna Rarab) front-to-end animation tester.
 //!
 //! Drives a deterministic Bevy app with the real `SchedulerRuntimePlugin` plus the pose path,
 //! feeds hand-packed BATTLE2 bytes through the real session decoder, and asserts what the
@@ -198,6 +198,9 @@ fn build_app() -> App {
     app.init_resource::<bevy::asset::Assets<bevy::prelude::Mesh>>();
     app.init_resource::<bevy::asset::Assets<kuluu_render::ffxi_particle_material::FfxiParticleMaterial>>();
     app.init_resource::<bevy::asset::Assets<bevy::image::Image>>();
+    // The plugin's Update chain includes poll_action_dat_tasks, which takes a bare
+    // Res<CameraMode>; a bare app has no such resource, so the first update panics.
+    app.init_resource::<kuluu_render::camera::CameraMode>();
     app.add_plugins(SchedulerRuntimePlugin);
     // The plugin's chain is .after(dispatch_action_overlay), and
     // stop_cast_effects_when_cast_ends is .after(tick_live_ffxi_actors) - register both, in the
@@ -501,7 +504,7 @@ fn s1_spawn_settles_on_idle() {
 
 fn moving_sample(speed: f32) -> MotionSample {
     // Only `moving` drives the pose pass in this rig (track_entity_motion_system is not
-    // registered); the speed value no longer feeds gait selection.
+    // registered); gait selection reads speed > speed_base, not this value.
     MotionSample {
         speed,
         moving: true,
@@ -609,7 +612,8 @@ fn s5_swing_impact_runs_damg_and_flinches_the_pc() {
 /// S5b: same swing, victim = a second Rarab. Retail's dam0 branch table routes every non-crit
 /// Hit to damg/damh - both carry the 0x21 flinch stage (ROM/0/0.DAT), so the mob victim runs
 /// its own `damg` and flinches with dfi? on a normal hit. This is the "animations not playing"
-/// case: before kuluu-df9t's damg routing, sdam-shipping models like Rarab got sound-only hits.
+/// case: sdam-shipping models like Rarab must get a visible flinch on normal hits (sdam is
+/// sound-only).
 #[test]
 fn s5b_mob_victim_normal_hit_runs_damg_and_flinches() {
     let Some(rarab) = load_rarab() else { return };

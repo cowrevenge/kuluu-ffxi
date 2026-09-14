@@ -21,6 +21,27 @@ pub(super) fn handle_map_key(
         change_map_targets, widescan_rows, MapSubMode, COMMAND_ROWS,
     };
 
+    // While an event's SAY frame is pending over the Map (the beat after
+    // MAP_TUTORIAL), confirm/cancel advance the event instead of navigating;
+    // the Map stays open until CLOSE_MAP arrives.
+    if let Some(d) = scene_state.snapshot.dialog.as_ref() {
+        if bindings.matches_logical(Action::NavConfirm, key) {
+            let _ = super::confirm_dialog_choice(0, scene_state, cmd_tx);
+            return None;
+        }
+        if bindings.matches_logical(Action::NavCancel, key) {
+            if d.custom_menu {
+                let _ = cmd_tx.try_send(AgentCommand::CustomMenuRespond {
+                    title: d.prompt.clone().unwrap_or_default(),
+                    option: None,
+                });
+            } else {
+                let _ = cmd_tx.try_send(AgentCommand::EndEvent);
+            }
+            return None;
+        }
+    }
+
     // Zoom the map with the camera-zoom keys in any submode, except while a
     // marker label is being typed: the default binds are Period/Comma, which
     // the label needs as literal '.'/',' text. Matched on the raw keycode
@@ -322,8 +343,127 @@ fn close_map_screen(
 
 #[cfg(test)]
 mod tests {
-    use super::{page_cursor, wrap_cursor};
-    use kuluu_render::hud::map_screen::PANEL_ROWS;
+    use super::*;
+    use bevy::ecs::world::World;
+    use kuluu_render::hud::map_screen::{
+        ChangeMapCatalog, MapMarkers, MapScreenState, MapView, PANEL_ROWS,
+    };
+    use kuluu_render::minimap::MinimapState;
+
+    fn map_key_harness(
+        dialog: Option<kuluu_snapshot::DialogState>,
+    ) -> (
+        SceneState,
+        MenuStack,
+        tokio::sync::mpsc::Sender<AgentCommand>,
+        tokio::sync::mpsc::Receiver<AgentCommand>,
+        World,
+    ) {
+        let mut world = World::new();
+        world.insert_resource(MapMarkers::default());
+        world.clear_trackers();
+
+        let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel(8);
+        let mut scene_state = SceneState::default();
+        scene_state.snapshot.dialog = dialog;
+
+        let mut stack = MenuStack::root();
+        stack.push(MenuKind::Map);
+        (scene_state, stack, cmd_tx, cmd_rx, world)
+    }
+
+    fn press(
+        key: &Key,
+        key_code: KeyCode,
+        scene_state: &mut SceneState,
+        stack: &mut MenuStack,
+        cmd_tx: &tokio::sync::mpsc::Sender<AgentCommand>,
+        world: &mut World,
+    ) -> Option<InputMode> {
+        handle_map_key(
+            key,
+            key_code,
+            &Bindings::default(),
+            stack,
+            scene_state,
+            cmd_tx,
+            &mut MapScreenState::default(),
+            world.resource_mut::<MapMarkers>(),
+            &MapView::default(),
+            &MinimapState::default(),
+            &ChangeMapCatalog::default(),
+        )
+    }
+
+    #[test]
+    fn confirm_over_a_pending_event_frame_advances_the_event() {
+        let mut dialog = kuluu_snapshot::DialogState::default();
+        dialog.npc_id = 0x010E6001;
+        dialog.act_index = 7;
+        dialog.event_para = 230;
+        let (mut scene_state, mut stack, cmd_tx, mut cmd_rx, mut world) =
+            map_key_harness(Some(dialog));
+
+        let next = press(
+            &Key::Enter,
+            KeyCode::Enter,
+            &mut scene_state,
+            &mut stack,
+            &cmd_tx,
+            &mut world,
+        );
+
+        assert!(next.is_none(), "the map stays open until CLOSE_MAP arrives");
+        let cmd = cmd_rx.try_recv().expect("an event command was sent");
+        assert!(matches!(
+            cmd,
+            AgentCommand::EndEventChoice {
+                event_id: 0x010E6001,
+                act_index: 7,
+                event_num: 230,
+                choice: 0
+            }
+        ));
+    }
+
+    #[test]
+    fn cancel_over_a_pending_event_frame_ends_the_event() {
+        let (mut scene_state, mut stack, cmd_tx, mut cmd_rx, mut world) =
+            map_key_harness(Some(kuluu_snapshot::DialogState::default()));
+
+        let next = press(
+            &Key::Escape,
+            KeyCode::Escape,
+            &mut scene_state,
+            &mut stack,
+            &cmd_tx,
+            &mut world,
+        );
+
+        assert!(next.is_none());
+        assert!(matches!(
+            cmd_rx.try_recv().expect("an event command was sent"),
+            AgentCommand::EndEvent
+        ));
+    }
+
+    #[test]
+    fn cancel_without_a_pending_frame_still_closes_the_map() {
+        let (mut scene_state, mut stack, cmd_tx, _cmd_rx, mut world) = map_key_harness(None);
+
+        let next = press(
+            &Key::Escape,
+            KeyCode::Escape,
+            &mut scene_state,
+            &mut stack,
+            &cmd_tx,
+            &mut world,
+        );
+
+        // A player-opened /map pops to the menu it opened from, not the world.
+        assert!(next.is_none());
+        assert_eq!(stack.current().unwrap().kind, MenuKind::Root);
+    }
 
     #[test]
     fn page_cursor_steps_by_a_panel_and_clamps_at_the_ends() {

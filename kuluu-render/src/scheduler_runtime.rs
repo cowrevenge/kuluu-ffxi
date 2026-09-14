@@ -1235,8 +1235,10 @@ fn start_cutscene_camera_tasks(
         let total_frames = stage.stage.duration_frames as f32 * ratio;
         // Modes 1 and 3 ride the cue's caster: Attachment.cpp MakeAttachMatrix places the
         // origin on the caster's EID locator, and xim's SourceToTargetBasis (mode 3) puts the
-        // source-to-target origin on the source's joint 0, the same point. Mode 0 and the
-        // unported modes play in world space, the decompilation's identity default arm.
+        // source-to-target origin on the source's joint 0, the same actor. Mode 0 plays in
+        // world space (the decompilation's identity default arm); the unported modes (2-13
+        // and 16-27 error out in retail, 14/15 anchor to zone positions) play in world space
+        // here.
         let attach_actor = match cam.attach_mode() {
             ffxi_dat::camera::ATTACH_MODE_CASTER
             | ffxi_dat::camera::ATTACH_MODE_SOURCE_TO_TARGET => Some(actor_entity),

@@ -113,12 +113,29 @@ impl ItemBlockLayout {
     }
 }
 
+/// What a build's code section unpacks to. `FFXiMain.dll` ships `.text` with a
+/// zero raw size and the code LZSS-packed in a `POL1` section, so a disassembly
+/// citation can only be checked against the inflated image ([`crate::pol1`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UnpackedText {
+    /// SHA-256 of the unpacked bytes alone, with no PE wrapper around them.
+    pub sha256: &'static str,
+    /// `.text` VirtualSize, which is exactly how long the unpacked image is.
+    pub virtual_size: u32,
+    /// `AddressOfEntryPoint`: the POL1 unpacker stub, which runs before any
+    /// game code and inflates `.text` in place.
+    pub pol1_stub_rva: u32,
+}
+
 /// A client build this tree has been verified against. Add a row when a new
 /// install is measured; disassembly citations name the row's `name`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct KnownClient {
     pub name: &'static str,
     pub ffximain_sha256: &'static str,
+    /// `None` on a row whose `.text` nobody has unpacked, so no citation into
+    /// its code can be pinned.
+    pub unpacked_text: Option<UnpackedText>,
     /// `None` for an install PlayOnline Viewer has never patched: SE's base
     /// image ships without `patch.cfg`.
     pub patch_version: Option<&'static str>,
@@ -133,6 +150,11 @@ pub const KNOWN_CLIENTS: &[KnownClient] = &[
     KnownClient {
         name: "horizonxi-2023",
         ffximain_sha256: "f4f90fbd080c05448aab3f866b127d7c1675b3cc15c8beaa57bfc584064b7e7c",
+        unpacked_text: Some(UnpackedText {
+            sha256: "f6b48296b3f9e82a5ed73004e513cc69ded72bb407fb42872e5c9ff63725a527",
+            virtual_size: 0x0032_30BE,
+            pol1_stub_rva: 0x00BA_B4B0,
+        }),
         patch_version: Some("30230905_0"),
         item_layout: ItemBlockLayout::Legacy,
         retail: false,
@@ -143,6 +165,7 @@ pub const KNOWN_CLIENTS: &[KnownClient] = &[
     KnownClient {
         name: "retail-2019-base",
         ffximain_sha256: "3da0a1e0dc897294880c0a4bf9ea0e9c580786b2d05698290e588c761a802835",
+        unpacked_text: None,
         patch_version: None,
         item_layout: ItemBlockLayout::Legacy,
         retail: true,
@@ -152,6 +175,11 @@ pub const KNOWN_CLIENTS: &[KnownClient] = &[
     KnownClient {
         name: "retail-2026-09",
         ffximain_sha256: "f2245d1c9d06e02c36624942483913f5120c0d40777fc1bb8703c6f4bda823e4",
+        unpacked_text: Some(UnpackedText {
+            sha256: "b55f8b4c730c00229e2febd1ea6a5efba29920e094fa565a3816b763c3d9cdc9",
+            virtual_size: 0x0032_75EE,
+            pol1_stub_rva: 0x00BE_4A50,
+        }),
         patch_version: Some("30260904_1"),
         item_layout: ItemBlockLayout::Retail2026,
         retail: true,
@@ -295,15 +323,20 @@ mod tests {
 
     #[test]
     fn known_client_hashes_are_lowercase_sha256_hex() {
-        for k in KNOWN_CLIENTS {
-            assert_eq!(k.ffximain_sha256.len(), 64, "{}", k.name);
+        let hex = |hash: &str, name: &str| {
+            assert_eq!(hash.len(), Sha256::output_size() * 2, "{name}");
             assert!(
-                k.ffximain_sha256
-                    .bytes()
-                    .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')),
-                "{}",
-                k.name
+                hash.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')),
+                "{name}"
             );
+        };
+        for k in KNOWN_CLIENTS {
+            hex(k.ffximain_sha256, k.name);
+            if let Some(text) = k.unpacked_text {
+                hex(text.sha256, k.name);
+                assert_ne!(text.virtual_size, 0, "{}", k.name);
+                assert_ne!(text.pol1_stub_rva, 0, "{}", k.name);
+            }
         }
     }
 

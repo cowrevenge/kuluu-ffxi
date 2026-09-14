@@ -3,6 +3,7 @@ use std::ops::Range;
 use std::path::Path;
 use std::sync::Once;
 
+use crate::pol1::{self, SECTION_NAME_LEN};
 use crate::{DatError, Result};
 
 // research/xim MainDll.kt — table offsets are located by scanning FFXiMain.dll for a known
@@ -20,18 +21,7 @@ pub const SCAN_WORDS: usize = 0xC000;
 /// Every marker is 4-byte aligned in both builds, so the scan steps by a word.
 const SCAN_STRIDE: usize = 4;
 
-const PE_E_LFANEW_OFFSET: usize = 0x3C;
-const PE_SIGNATURE: &[u8; 4] = b"PE\0\0";
-/// COFF header fields, offset from the `PE\0\0` signature; the section table
-/// follows the signature, the COFF header and the optional header.
-const PE_NUMBER_OF_SECTIONS_OFFSET: usize = 6;
-const PE_SIZE_OF_OPTIONAL_HEADER_OFFSET: usize = 20;
-const PE_SECTION_TABLE_OFFSET: usize = 24;
-const SECTION_HEADER_SIZE: usize = 40;
-const SECTION_NAME_LEN: usize = 8;
-const SECTION_SIZE_OF_RAW_DATA_OFFSET: usize = 16;
-const SECTION_POINTER_TO_RAW_DATA_OFFSET: usize = 20;
-const DATA_SECTION_NAME: &[u8; SECTION_NAME_LEN] = b".data\0\0\0";
+const DATA_SECTION_NAME: [u8; SECTION_NAME_LEN] = pol1::section_name(b".data");
 
 pub const WEAPON_SKILL_HINT: u32 = 0xCB81_CB81;
 pub const DANCE_SKILL_HINT: u32 = 0xB9E2_B9E2;
@@ -287,36 +277,16 @@ impl MainDll {
     }
 }
 
-fn read_u16_le(bytes: &[u8], off: usize) -> Option<u16> {
-    let b = bytes.get(off..off + 2)?;
-    Some(u16::from_le_bytes([b[0], b[1]]))
-}
-
-fn read_u32_le(bytes: &[u8], off: usize) -> Option<u32> {
-    let b = bytes.get(off..off + 4)?;
-    Some(u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
-}
-
 /// The `.data` section's raw file span, clipped to the file, from the PE
 /// section table; `None` when the image has no parseable section table or
 /// no `.data` section.
 fn data_section_span(bytes: &[u8]) -> Option<Range<usize>> {
-    let pe = read_u32_le(bytes, PE_E_LFANEW_OFFSET)? as usize;
-    if bytes.get(pe..pe + PE_SIGNATURE.len())? != PE_SIGNATURE {
-        return None;
-    }
-    let sections = read_u16_le(bytes, pe + PE_NUMBER_OF_SECTIONS_OFFSET)? as usize;
-    let optional = read_u16_le(bytes, pe + PE_SIZE_OF_OPTIONAL_HEADER_OFFSET)? as usize;
-    let table = pe + PE_SECTION_TABLE_OFFSET + optional;
-    (0..sections)
-        .map(|i| table + i * SECTION_HEADER_SIZE)
-        .find(|&at| bytes.get(at..at + SECTION_NAME_LEN) == Some(DATA_SECTION_NAME))
-        .and_then(|at| {
-            let raw = read_u32_le(bytes, at + SECTION_SIZE_OF_RAW_DATA_OFFSET)? as usize;
-            let ptr = read_u32_le(bytes, at + SECTION_POINTER_TO_RAW_DATA_OFFSET)? as usize;
-            let end = ptr.checked_add(raw)?.min(bytes.len());
-            (ptr < end).then_some(ptr..end)
-        })
+    let data = pol1::find_section(bytes, &DATA_SECTION_NAME)?;
+    let ptr = data.pointer_to_raw_data as usize;
+    let end = ptr
+        .checked_add(data.size_of_raw_data as usize)?
+        .min(bytes.len());
+    (ptr < end).then_some(ptr..end)
 }
 
 fn scan_window(bytes: &[u8]) -> Range<usize> {
@@ -370,6 +340,10 @@ fn parse_zone_map(rec: &[u8]) -> Option<ZoneMapRecord> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pol1::{
+        PE_E_LFANEW_OFFSET, PE_NUMBER_OF_SECTIONS_OFFSET, PE_OPTIONAL_HEADER_OFFSET, PE_SIGNATURE,
+        SECTION_HEADER_SIZE, SECTION_POINTER_TO_RAW_DATA_OFFSET, SECTION_SIZE_OF_RAW_DATA_OFFSET,
+    };
 
     const FALLBACK_WINDOW: Range<usize> = SCAN_START..SCAN_START + SCAN_WORDS * SCAN_STRIDE;
 
@@ -410,16 +384,16 @@ mod tests {
         let mut bytes = vec![0u8; total];
         bytes[PE_E_LFANEW_OFFSET..PE_E_LFANEW_OFFSET + 4]
             .copy_from_slice(&(pe as u32).to_le_bytes());
-        bytes[pe..pe + 4].copy_from_slice(PE_SIGNATURE);
+        bytes[pe..pe + PE_SIGNATURE.len()].copy_from_slice(PE_SIGNATURE);
         bytes[pe + PE_NUMBER_OF_SECTIONS_OFFSET..pe + PE_NUMBER_OF_SECTIONS_OFFSET + 2]
             .copy_from_slice(&2u16.to_le_bytes());
-        let table = pe + PE_SECTION_TABLE_OFFSET;
-        bytes[table..table + SECTION_NAME_LEN].copy_from_slice(b".text\0\0\0");
+        let table = pe + PE_OPTIONAL_HEADER_OFFSET;
+        bytes[table..table + SECTION_NAME_LEN].copy_from_slice(&pol1::section_name(b".text"));
         bytes[table + SECTION_POINTER_TO_RAW_DATA_OFFSET
             ..table + SECTION_POINTER_TO_RAW_DATA_OFFSET + 4]
             .copy_from_slice(&0x400u32.to_le_bytes());
         let data = table + SECTION_HEADER_SIZE;
-        bytes[data..data + SECTION_NAME_LEN].copy_from_slice(DATA_SECTION_NAME);
+        bytes[data..data + SECTION_NAME_LEN].copy_from_slice(&DATA_SECTION_NAME);
         bytes[data + SECTION_SIZE_OF_RAW_DATA_OFFSET..data + SECTION_SIZE_OF_RAW_DATA_OFFSET + 4]
             .copy_from_slice(&data_raw.to_le_bytes());
         bytes[data + SECTION_POINTER_TO_RAW_DATA_OFFSET

@@ -28,6 +28,7 @@ pub mod mmb;
 pub mod mzb;
 pub mod npc_names;
 pub mod particle_gen;
+pub mod pol1;
 pub mod resource_dir;
 pub mod scheduler;
 pub mod sep;

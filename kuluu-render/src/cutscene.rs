@@ -971,22 +971,21 @@ mod tests {
             .resource_mut::<crate::entity_table::EntityTable>()
             .set_self_id(Some(SELF));
 
-        let name_cue = |actor: kuluu_snapshot::CutsceneActor| {
-            ViewerEvent::Cutscene {
-                cue: CutsceneCue::EntityName {
-                    actor,
-                    name: *b"Sajj'aka\0\0\0\0\0\0\0\0",
-                },
-            }
+        let name_cue = |actor: kuluu_snapshot::CutsceneActor| ViewerEvent::Cutscene {
+            cue: CutsceneCue::EntityName {
+                actor,
+                name: *b"Sajj'aka\0\0\0\0\0\0\0\0",
+            },
         };
 
         push(&mut app, ViewerEvent::CutsceneStarted { event_id: 503 });
-        push(&mut app, name_cue(kuluu_snapshot::CutsceneActor::LocalPlayer));
         push(
             &mut app,
-            name_cue(kuluu_snapshot::CutsceneActor::Entity {
-                server_id: NPC,
-            }),
+            name_cue(kuluu_snapshot::CutsceneActor::LocalPlayer),
+        );
+        push(
+            &mut app,
+            name_cue(kuluu_snapshot::CutsceneActor::Entity { server_id: NPC }),
         );
         step(&mut app, 1.0);
         let names = app.world().resource::<EventNameOverrides>();
@@ -1004,10 +1003,7 @@ mod tests {
     /// full-width name without one keeps all sixteen bytes.
     #[test]
     fn the_name_slot_truncates_at_the_first_nul() {
-        assert_eq!(
-            event_name_string(&*b"Sajj'aka\0\0\0\0\0\0\0\0"),
-            "Sajj'aka"
-        );
+        assert_eq!(event_name_string(&*b"Sajj'aka\0\0\0\0\0\0\0\0"), "Sajj'aka");
         assert_eq!(event_name_string(&[0u8; 16]), "");
         let full: [u8; 16] = *b"SixteenBytes!!!!";
         assert_eq!(event_name_string(&full), "SixteenBytes!!!!");

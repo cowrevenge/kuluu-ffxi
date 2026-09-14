@@ -215,16 +215,11 @@ fn handle_event(tally: &mut Tally, ev: &AgentEvent, now: Instant) {
             kuluu_session::state::CutsceneCue::Scheduler { dat_id, tag, .. } => {
                 tally.scheduler_cues.push((*dat_id, fourcc_to_string(*tag)));
             }
-            kuluu_session::state::CutsceneCue::ExtScheduler {
-                motion, key, ..
-            } => {
+            kuluu_session::state::CutsceneCue::ExtScheduler { motion, key, .. } => {
                 // The 0x66 package 20 gesture cues: container A is 32732.
                 if matches!(
                     motion,
-                    Some(kuluu_snapshot::ExtSchedulerMotion::Tpc {
-                        a: 32_732,
-                        ..
-                    })
+                    Some(kuluu_snapshot::ExtSchedulerMotion::Tpc { a: 32_732, .. })
                 ) {
                     tally.gesture_keys.push(fourcc_to_string(*key));
                 }

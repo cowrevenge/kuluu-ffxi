@@ -198,7 +198,12 @@ pub fn tpc_motion_packages(param: i32) -> Option<TpcMotionPackages> {
         return None;
     }
     let (v, a_base, b_set_base, b_clear_base) = if val < TPC_PACKAGE_BAND_2 {
-        (val, TPC_PACKAGE_A_BASE_1, TPC_PACKAGE_B_SET_BASE_1, TPC_PACKAGE_B_CLEAR_BASE_1)
+        (
+            val,
+            TPC_PACKAGE_A_BASE_1,
+            TPC_PACKAGE_B_SET_BASE_1,
+            TPC_PACKAGE_B_CLEAR_BASE_1,
+        )
     } else if val < TPC_PACKAGE_BAND_3 {
         (
             val - TPC_PACKAGE_BAND_2,
@@ -345,10 +350,7 @@ pub enum EventCue {
     /// string its operand selects (research/XiEvents/OpCodes/0x00B5.md). That
     /// string is filled by 0xB4 case 0 (an inline literal) or case 1 (the
     /// s2c 0x005D PENDINGSTR table entry its work operand selects).
-    EntityName {
-        actor: ActorLookup,
-        name: [u8; 16],
-    },
+    EntityName { actor: ActorLookup, name: [u8; 16] },
     /// 0xC8 MAP_TUTORIAL: open the map window on zone `map_id`; `tutorial` is
     /// the LOBYTE of the third work operand (research/XiEvents/OpCodes/0x00C8.md).
     MapOpen { map_id: i32, tutorial: bool },
@@ -608,8 +610,14 @@ mod tests {
     #[test]
     fn tpc_b_for_waist_follows_the_retail_flag_rule() {
         let pkgs = tpc_motion_packages(20).unwrap();
-        assert_eq!(tpc_b_for_waist(pkgs.b_set, pkgs.b_clear, 1), Some(pkgs.b_set));
-        assert_eq!(tpc_b_for_waist(pkgs.b_set, pkgs.b_clear, 2), Some(pkgs.b_clear));
+        assert_eq!(
+            tpc_b_for_waist(pkgs.b_set, pkgs.b_clear, 1),
+            Some(pkgs.b_set)
+        );
+        assert_eq!(
+            tpc_b_for_waist(pkgs.b_set, pkgs.b_clear, 2),
+            Some(pkgs.b_clear)
+        );
         assert_eq!(
             tpc_b_for_waist(pkgs.b_set, pkgs.b_clear, 0x7F),
             Some(pkgs.b_clear)

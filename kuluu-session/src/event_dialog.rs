@@ -743,13 +743,9 @@ pub enum MapOp {
 
 /// The cue's motion resource across the wire boundary: the VM's type is
 /// isomorphic to the wire's, so this is a field-for-field copy.
-fn snapshot_motion(
-    motion: ffxi_event::ExtSchedulerMotion,
-) -> kuluu_snapshot::ExtSchedulerMotion {
+fn snapshot_motion(motion: ffxi_event::ExtSchedulerMotion) -> kuluu_snapshot::ExtSchedulerMotion {
     match motion {
-        ffxi_event::ExtSchedulerMotion::Event(id) => {
-            kuluu_snapshot::ExtSchedulerMotion::Event(id)
-        }
+        ffxi_event::ExtSchedulerMotion::Event(id) => kuluu_snapshot::ExtSchedulerMotion::Event(id),
         ffxi_event::ExtSchedulerMotion::Tpc(pkgs) => kuluu_snapshot::ExtSchedulerMotion::Tpc {
             a: pkgs.a,
             b_set: pkgs.b_set,
@@ -1568,11 +1564,7 @@ fn arm_motion_holds(
         match *cue {
             // 0x2C: the routine is in the actor's own model DAT, which this
             // session does not open: no DAT length, so [`PENDING_MOTION_HOLD_MAX`] stands.
-            EventCue::ActorMotion {
-                actor1,
-                key,
-                ..
-            } => {
+            EventCue::ActorMotion { actor1, key, .. } => {
                 arm_pending_motion_hold(
                     runner,
                     pending,
@@ -1646,11 +1638,7 @@ fn arm_motion_holds(
             // the file the key resolved in; retail waits on it via the zone object, so
             // the VM's hold keys on the zone sentinel while the renderer's report keys
             // on the cue's actor1.
-            EventCue::ZoneScheduler {
-                key,
-                actor1,
-                ..
-            } => {
+            EventCue::ZoneScheduler { key, actor1, .. } => {
                 let units = root
                     .and_then(|root| ffxi_dat::scheduler::zone_scene_file_id(root, zone, key))
                     .and_then(|file_id| {
@@ -1698,9 +1686,10 @@ fn arm_pending_motion_hold(
     let deadline = units
         .map(|units| std::time::Duration::from_secs_f32(units / WAIT_UNITS_PER_SEC))
         .unwrap_or(PENDING_MOTION_HOLD_MAX);
-    let entry = pending
-        .entry((wire, key))
-        .or_insert((lookup, 0, std::time::Instant::now(), deadline));
+    let entry =
+        pending
+            .entry((wire, key))
+            .or_insert((lookup, 0, std::time::Instant::now(), deadline));
     entry.1 += 1;
     entry.2 = std::time::Instant::now();
 }
@@ -2421,10 +2410,7 @@ pub(crate) mod tests {
         assert!(matches!(session.begin(trigger), Begin::Waiting));
         let cues = session.take_cues();
         let [ResolvedCue::Scene(CutsceneCue::ExtScheduler {
-            motion,
-            actor,
-            key,
-            ..
+            motion, actor, key, ..
         })] = cues.as_slice()
         else {
             panic!("expected the ExtScheduler cue");
@@ -2562,8 +2548,7 @@ pub(crate) mod tests {
         let mut session = schedulor_session(program);
         assert!(matches!(session.begin(schedulor_trigger()), Begin::Waiting));
         let cues = session.take_cues();
-        let [ResolvedCue::Scene(CutsceneCue::ActorMotion { actor, key, .. })] =
-            cues.as_slice()
+        let [ResolvedCue::Scene(CutsceneCue::ActorMotion { actor, key, .. })] = cues.as_slice()
         else {
             panic!("expected the ActorMotion cue: {cues:?}");
         };
@@ -2979,10 +2964,7 @@ pub(crate) mod tests {
             0,
         );
         match cue {
-            ResolvedCue::Scene(CutsceneCue::EntityName {
-                actor,
-                name: got,
-            }) => {
+            ResolvedCue::Scene(CutsceneCue::EntityName { actor, name: got }) => {
                 assert_eq!(
                     actor,
                     CutsceneActor::Entity {

@@ -439,7 +439,11 @@ mod tests {
         assert_eq!(decode(0x821), (ATTACH_MODE_CASTER, 2));
         assert_eq!(decode(0x823), (ATTACH_MODE_SOURCE_TO_TARGET, 2));
         for raw in [0x10, 0x20, 0x50, 0x170] {
-            assert_eq!(decode(raw).0, ATTACH_MODE_WORLD, "mode 0 ignores the locator bits: {raw:#x}");
+            assert_eq!(
+                decode(raw).0,
+                ATTACH_MODE_WORLD,
+                "mode 0 ignores the locator bits: {raw:#x}"
+            );
         }
         // The extension bits: bit 16 lifts the mode into the high group, bit 18 the locator.
         assert_eq!(decode(0x10151), (17, 21));

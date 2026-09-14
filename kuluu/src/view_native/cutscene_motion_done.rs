@@ -15,9 +15,7 @@ use kuluu_session::state::{AgentCommand, CutsceneActor};
 fn session_actor(actor: kuluu_snapshot::CutsceneActor) -> CutsceneActor {
     match actor {
         kuluu_snapshot::CutsceneActor::LocalPlayer => CutsceneActor::LocalPlayer,
-        kuluu_snapshot::CutsceneActor::Entity { server_id } => CutsceneActor::Entity {
-            server_id,
-        },
+        kuluu_snapshot::CutsceneActor::Entity { server_id } => CutsceneActor::Entity { server_id },
     }
 }
 

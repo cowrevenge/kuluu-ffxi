@@ -3443,9 +3443,9 @@ mod tests {
     }
 
     use crate::cue::{
-        ExtSchedulerMotion, FourCc, SCHEDULER_DURATION_FROM_DAT, SCHEDULER_FADE_DAT_ID,
-        SCHEDULER_TAG_FADE_IN, SCHEDULER_TAG_FADE_OUT, TPC_PACKAGE_OUT_OF_RANGE,
-        TpcMotionPackages,
+        ExtSchedulerMotion, FourCc, TpcMotionPackages, SCHEDULER_DURATION_FROM_DAT,
+        SCHEDULER_FADE_DAT_ID, SCHEDULER_TAG_FADE_IN, SCHEDULER_TAG_FADE_OUT,
+        TPC_PACKAGE_OUT_OF_RANGE,
     };
 
     /// Run one choreography opcode (padded to its documented width) to END and
@@ -4775,8 +4775,7 @@ mod tests {
             let mut e = vm(data, vec![0, 0, 0, 0]);
             assert_eq!(e.step(), StepResult::Done);
             assert_eq!(
-                e.work_local_str,
-                [[0u8; 16]; WORK_LOCAL_LEN],
+                e.work_local_str, [[0u8; 16]; WORK_LOCAL_LEN],
                 "dest 0x{dest:04X} must not store"
             );
         }

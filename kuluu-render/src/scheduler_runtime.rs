@@ -1257,20 +1257,11 @@ fn start_cutscene_camera_tasks(
         if let Some(actor) = attach_actor {
             match q_attach.get(actor) {
                 Ok((xform, baked)) => {
-                    let render = q_children
-                        .get(actor)
-                        .ok()
-                        .and_then(|children| {
-                            children
-                                .iter()
-                                .find_map(|child| q_render.get(child).ok())
-                        });
+                    let render = q_children.get(actor).ok().and_then(|children| {
+                        children.iter().find_map(|child| q_render.get(child).ok())
+                    });
                     let locator = cam.attach_locator_index();
-                    match crate::cutscene_camera::eid_model_point(
-                        locator,
-                        baked,
-                        render,
-                    ) {
+                    match crate::cutscene_camera::eid_model_point(locator, baked, render) {
                         Some(point) => {
                             attach = Some(crate::cutscene_camera::AttachStart {
                                 actor,
@@ -1527,11 +1518,8 @@ pub fn poll_action_dat_tasks(
                 // separately - A's clips keep any name B also ships.
                 let assets = if let Some(parsed_b) = &parsed_b {
                     let mut merged = parsed.assets.clone();
-                    let mut a_ids: std::collections::HashSet<ffxi_dat::datid::DatId> = merged
-                        .animations
-                        .iter()
-                        .map(|an| an.id)
-                        .collect();
+                    let mut a_ids: std::collections::HashSet<ffxi_dat::datid::DatId> =
+                        merged.animations.iter().map(|an| an.id).collect();
                     merged.animations.extend(
                         parsed_b
                             .assets
@@ -3994,7 +3982,9 @@ mod tests {
                 (tick_active_schedulers, capture_motion_done).chain(),
             );
 
-        let actor = kuluu_snapshot::CutsceneActor::Entity { server_id: 0x010E_6032 };
+        let actor = kuluu_snapshot::CutsceneActor::Entity {
+            server_id: 0x010E_6032,
+        };
         let mut sched = ActiveScheduler::from_scheduler(&make_scheduler(
             *b"kue0",
             vec![stage(30, StageKind::SoundOnCaster, 0x53, *b"snd1")],
@@ -4054,10 +4044,12 @@ mod tests {
         // An emote-style routine: finished long ago, no 0x53 waiting on it.
         let actor = app
             .world_mut()
-            .spawn(ActiveSchedulers::one(ActiveScheduler::from_scheduler(&make_scheduler(
-                *b"em01",
-                vec![stage(5, StageKind::SoundOnCaster, 0x53, *b"snd1")],
-            ))))
+            .spawn(ActiveSchedulers::one(ActiveScheduler::from_scheduler(
+                &make_scheduler(
+                    *b"em01",
+                    vec![stage(5, StageKind::SoundOnCaster, 0x53, *b"snd1")],
+                ),
+            )))
             .id();
         app.world_mut()
             .resource_mut::<Time>()

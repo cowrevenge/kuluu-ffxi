@@ -504,11 +504,13 @@ fn lerp_matrix(smoothed: Mat4, live: Mat4, t: f32) -> Mat4 {
 /// the caster's yaw. The EID point is authored in the model's DAT frame, so it converts to
 /// Bevy with mzb_to_bevy and then rides the wire entity's transform (position + yaw, scale 1).
 pub fn attach_matrix(actor: &Transform, model_point: Vec3) -> Mat4 {
-    let eid = actor.to_matrix().transform_point3(crate::scene::mzb_to_bevy(kuluu_snapshot::Vec3 {
-        x: model_point.x,
-        y: model_point.y,
-        z: model_point.z,
-    }));
+    let eid = actor
+        .to_matrix()
+        .transform_point3(crate::scene::mzb_to_bevy(kuluu_snapshot::Vec3 {
+            x: model_point.x,
+            y: model_point.y,
+            z: model_point.z,
+        }));
     Mat4::from_translation(eid) * Mat4::from_quat(actor.rotation)
 }
 
@@ -543,20 +545,20 @@ pub fn eid_model_point(
 /// load.
 fn locator_height_fraction(locator: u32) -> Option<f32> {
     Some(match locator {
-        0 => 0.0, // EID_CURRENT
-        1 => 0.45, // EID_WAIST
-        2 => 1.05, // EID_NAME
-        3 => 0.85, // EID_NECK
-        4 => 0.75, // EID_LOOK_AT
-        5 => 1.0, // EID_HEAD_TOP
-        6 => 0.9, // EID_EYE_CENTER
-        7 => 0.6, // EID_CHEST
-        8 | 9 => 0.05, // EID_R_FOOT | EID_L_FOOT
+        0 => 0.0,        // EID_CURRENT
+        1 => 0.45,       // EID_WAIST
+        2 => 1.05,       // EID_NAME
+        3 => 0.85,       // EID_NECK
+        4 => 0.75,       // EID_LOOK_AT
+        5 => 1.0,        // EID_HEAD_TOP
+        6 => 0.9,        // EID_EYE_CENTER
+        7 => 0.6,        // EID_CHEST
+        8 | 9 => 0.05,   // EID_R_FOOT | EID_L_FOOT
         10 | 11 => 0.65, // EID_R_HAND | EID_L_HAND
-        12..=21 => 0.5, // EID_HEIGHT..EID_BODY_CENTER
-        22 => 0.95, // EID_HEAD_CENTER
-        23..=32 => 0.7, // EID_MAGIC0..EID_REACH_H
-        33..=42 => 0.5, // EID_R_EYE0..EID_CAMERA3
+        12..=21 => 0.5,  // EID_HEIGHT..EID_BODY_CENTER
+        22 => 0.95,      // EID_HEAD_CENTER
+        23..=32 => 0.7,  // EID_MAGIC0..EID_REACH_H
+        33..=42 => 0.5,  // EID_R_EYE0..EID_CAMERA3
         _ => return None,
     })
 }
@@ -610,11 +612,10 @@ impl CutsceneCameraTasks {
     ) -> Option<Mat4> {
         let attach = self.current.as_ref()?.attach.as_ref()?;
         let (xform, baked) = q_attach.get(attach.actor).ok()?;
-        let render = q_children.get(attach.actor).ok().and_then(|children| {
-            children
-                .iter()
-                .find_map(|c| q_render.get(c).ok())
-        });
+        let render = q_children
+            .get(attach.actor)
+            .ok()
+            .and_then(|children| children.iter().find_map(|c| q_render.get(c).ok()));
         let point = eid_model_point(attach.locator, baked, render)?;
         Some(attach_matrix(xform, point))
     }
@@ -963,7 +964,10 @@ mod tests {
         let dt = 1.0 / crate::scheduler_runtime::ROUTINE_FPS;
         let mut last: Option<CameraFrame> = None;
         for _ in 0..60 {
-            last = Some(task.advance(dt, None).expect("route runs its full duration"));
+            last = Some(
+                task.advance(dt, None)
+                    .expect("route runs its full duration"),
+            );
         }
         assert!(task.advance(dt, None).is_none());
         let last = last.expect("the final frame was emitted");
@@ -1017,9 +1021,7 @@ mod tests {
             * Transform::from_rotation(Quat::from_rotation_y(std::f32::consts::FRAC_PI_2));
         let m = attach_matrix(&actor, Vec3::new(1.0, 0.0, 0.0));
         // The EID point lands at the origin plus the yaw-rotated facing offset.
-        assert!(
-            (m.transform_point3(Vec3::ZERO) - Vec3::new(5.0, 0.0, -1.0)).length() < 1e-5
-        );
+        assert!((m.transform_point3(Vec3::ZERO) - Vec3::new(5.0, 0.0, -1.0)).length() < 1e-5);
         // A local +X step keeps riding the facing.
         assert!((m.transform_point3(Vec3::X) - Vec3::new(5.0, 0.0, -2.0)).length() < 1e-5);
     }
@@ -1121,14 +1123,25 @@ mod tests {
         };
         // EID_NAME stands above the head, EID_BODY_CENTER at half height, EID_CURRENT on the
         // ground.
-        assert!((eid_model_point(2, Some(&baked), None).unwrap() - Vec3::new(0.0, 2.1, 0.0)).length() < 1e-5);
-        assert!((eid_model_point(21, Some(&baked), None).unwrap() - Vec3::new(0.0, 1.0, 0.0)).length() < 1e-5);
+        assert!(
+            (eid_model_point(2, Some(&baked), None).unwrap() - Vec3::new(0.0, 2.1, 0.0)).length()
+                < 1e-5
+        );
+        assert!(
+            (eid_model_point(21, Some(&baked), None).unwrap() - Vec3::new(0.0, 1.0, 0.0)).length()
+                < 1e-5
+        );
         assert_eq!(eid_model_point(0, Some(&baked), None), Some(Vec3::ZERO));
         // The special locators and the untabled empties stay unresolvable.
         assert!(eid_model_point(48, Some(&baked), None).is_none());
         assert!(eid_model_point(44, Some(&baked), None).is_none());
         // No baked actor: the fallback height stands in.
-        assert!((eid_model_point(2, None, None).unwrap() - Vec3::new(0.0, 1.05 * crate::camera::FALLBACK_ACTOR_HEIGHT, 0.0)).length() < 1e-5);
+        assert!(
+            (eid_model_point(2, None, None).unwrap()
+                - Vec3::new(0.0, 1.05 * crate::camera::FALLBACK_ACTOR_HEIGHT, 0.0))
+            .length()
+                < 1e-5
+        );
     }
 
     #[test]
@@ -1158,7 +1171,10 @@ mod tests {
         let render = crate::ffxi_actor_render::render_actor_for_test(skeleton, pose);
         // The reference table wins over the height fallback: EID 7 sits at the joint plus its
         // offset.
-        assert!((eid_model_point(7, None, Some(&render)).unwrap() - Vec3::new(0.0, 7.0, 0.0)).length() < 1e-4);
+        assert!(
+            (eid_model_point(7, None, Some(&render)).unwrap() - Vec3::new(0.0, 7.0, 0.0)).length()
+                < 1e-4
+        );
     }
 
     #[test]
@@ -1275,7 +1291,8 @@ mod tests {
         assert_eq!(res.path_mode(), CameraPathMode::Spline);
 
         // The task builds for it and runs to completion without panicking.
-        let mut task = CutsceneCameraTask::start(&res, 60.0, current_state(), default_chase(), None);
+        let mut task =
+            CutsceneCameraTask::start(&res, 60.0, current_state(), default_chase(), None);
         for _ in 0..70 {
             if task
                 .advance(1.0 / crate::scheduler_runtime::ROUTINE_FPS, None)
@@ -1478,7 +1495,10 @@ mod tests {
                 actor,
                 21,
                 1.0,
-                attach_matrix(&Transform::from_xyz(10.0, 0.0, 0.0), Vec3::new(0.0, 1.0, 0.0)),
+                attach_matrix(
+                    &Transform::from_xyz(10.0, 0.0, 0.0),
+                    Vec3::new(0.0, 1.0, 0.0),
+                ),
             )),
         );
         app.world_mut()

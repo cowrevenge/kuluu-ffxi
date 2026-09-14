@@ -612,10 +612,10 @@ pub fn vec3_to_wire(v: Vec3) -> wire::Vec3 {
     }
 }
 
-// MOUNTTYPE, vendor/server/src/map/entities/baseentity.h. Noble Chocobo
+// MOUNTTYPE, vendor/server/src/map/entities/base_entity.h. Noble Chocobo
 // is a chocobo despite sitting at the far end of the enum — the server routes it
 // through ANIMATION_CHOCOBO like the plain one
-// (charentity.cpp, CCharEntity::tryStartNextEvent).
+// (char_entity.cpp, CCharEntity::tryStartNextEvent).
 const MOUNT_CHOCOBO: u8 = 0;
 const MOUNT_NOBLE_CHOCOBO: u8 = 34;
 

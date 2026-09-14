@@ -914,6 +914,8 @@ pub(crate) fn emote_send_block_reason(
     None
 }
 
+/// vendor/server/src/map/packets/c2s/0x015_pos.cpp GP_CLI_COMMAND_POS::process
+/// discards the update when x, y or z is not finite.
 pub(crate) fn build_subpacket_pos(
     sync: u16,
     x: f32,

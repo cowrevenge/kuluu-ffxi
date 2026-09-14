@@ -111,7 +111,7 @@ pub(crate) const DEAD_COUNTER_PADDING_SECS: u32 = 6 * 60;
 /// both 0x037 (`dead_counter1`) and 0x00A (`DeadCounter`) carry with the same
 /// encoding. Stripping the fixed padding yields the real time left, which hits 0
 /// when the server-side CDeathState completes at death + 60min
-/// (vendor/server/src/map/entities/charentity.cpp::GetTimeUntilDeathHomepoint,
+/// (vendor/server/src/map/entities/char_entity.cpp::GetTimeUntilDeathHomepoint,
 /// vendor/server/src/map/ai/states/death_state.cpp).
 ///
 /// The counter alone cannot tell a corpse from a living character: LSB computes
@@ -213,7 +213,7 @@ pub struct JobInfo {
 }
 
 impl JobInfo {
-    /// MAX_JOBTYPE, vendor/server/src/map/entities/battleentity.h (JOBTYPE 1=WAR..23=MON).
+    /// MAX_JOBTYPE, vendor/server/src/map/entities/battle_entity.h (JOBTYPE 1=WAR..23=MON).
     pub const MAX_JOBTYPE: usize = 24;
 
     pub(crate) const MJOB_NO_OFFSET: usize = 0x04;
@@ -302,7 +302,7 @@ mod job_info_tests {
     /// Pins JobInfo to LSB's GP_MYROOM_DANCER layout
     /// (vendor/server/src/map/packets/s2c/0x01b_job_info.h GP_MYROOM_DANCER; job_lev2, not
     /// the legacy job_lev[16] @0x0C) and MAX_JOBTYPE
-    /// (vendor/server/src/map/entities/battleentity.h MAX_JOBTYPE), since the decode
+    /// (vendor/server/src/map/entities/battle_entity.h MAX_JOBTYPE), since the decode
     /// tests build buffers through these same consts.
     #[test]
     fn job_info_offsets_match_gp_myroom_dancer_layout() {

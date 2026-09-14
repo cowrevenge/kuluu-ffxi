@@ -1105,7 +1105,9 @@ pub const ITEM_ACTION_DROP: &str = "Drop";
 /// items never move, wardrobes only take equipment, and "Take Out" leads when
 /// browsing a storage bag. Drop follows 0x028's refusals
 /// (vendor/server/src/map/packets/c2s/0x028_item_dump.cpp process): never Gil
-/// or a locked slot.
+/// or a busy slot (vendor/server/src/map/items/item.cpp CItem::isBusy:
+/// equipped, bazaar-priced, placed furniture or mid-transaction; the 0x020
+/// LockFlg byte this reads mirrors all but the transient transaction state).
 pub fn item_action_rows(
     snap: &kuluu_snapshot::SceneSnapshot,
     container: u8,
@@ -1933,9 +1935,10 @@ mod tests {
         }
     }
 
-    /// Pins LSB 0x029 isValidMovement's and 0x028's ITEM_LOCKED rejections:
-    /// locked slots (equipped / linkshell / bazaar-reserved) get no move rows
-    /// and no Drop. Use stays listed like retail; the confirm path refuses it.
+    /// Pins LSB 0x029 isValidMovement's and 0x028's CItem::isBusy rejections:
+    /// locked slots (equipped / placed furniture / bazaar-priced, the states
+    /// 0x020 lockFlagFor puts on the wire) get no move rows and no Drop. Use
+    /// stays listed like retail; the confirm path refuses it.
     #[test]
     fn locked_slot_offers_no_moves_or_drop() {
         use ffxi_proto::map::container as c;

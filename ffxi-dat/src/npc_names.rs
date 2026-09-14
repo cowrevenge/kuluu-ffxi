@@ -373,42 +373,33 @@ mod tests {
         );
     }
 
-    const NPC_LIST_INSERT_PREFIX: &str = "INSERT INTO `npc_list` VALUES (";
-
-    fn next_sql_string(chars: &mut std::str::Chars<'_>) -> Option<String> {
-        chars.by_ref().find(|&c| c == '\'')?;
-        let mut out = String::new();
-        loop {
-            match chars.next()? {
-                '\\' => out.push(chars.next()?),
-                '\'' => return Some(out),
-                c => out.push(c),
-            }
-        }
-    }
-
-    fn parse_npc_list_row(line: &str) -> Option<(u32, String)> {
-        let rest = line.strip_prefix(NPC_LIST_INSERT_PREFIX)?;
-        let (id, rest) = rest.split_once(',')?;
-        let id: u32 = id.trim().parse().ok()?;
-        let mut chars = rest.chars();
-        next_sql_string(&mut chars)?;
-        let display_name = next_sql_string(&mut chars)?;
-        Some((id, display_name))
-    }
+    /// LSB's display names for the test zone: data/zones/southern_san_doria/npcs.yaml
+    /// (zone 230's directory is its enum key in vendor/server/data/enums/zone.yaml).
+    const LSB_TEST_ZONE_NPCS_YAML: &str = "vendor/server/data/zones/southern_san_doria/npcs.yaml";
 
     fn lsb_npc_list() -> Option<HashMap<u32, String>> {
         let path = Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()?
-            .join("vendor/server/sql/npc_list.sql");
-        let sql = match fs::read_to_string(&path) {
-            Ok(sql) => sql,
+            .join(LSB_TEST_ZONE_NPCS_YAML);
+        let src = match fs::read_to_string(&path) {
+            Ok(src) => src,
             Err(err) => {
                 eprintln!("skipping: {} unreadable ({err})", path.display());
                 return None;
             }
         };
-        Some(sql.lines().filter_map(parse_npc_list_row).collect())
+        let npcs = lsb_scrape::parse_yaml_npcs(&src)
+            .unwrap_or_else(|e| panic!("{}: {e:#}", path.display()));
+        Some(
+            npcs.into_iter()
+                .filter_map(|(id, npc)| {
+                    let name: Option<String> = npc
+                        .field("display_name")
+                        .unwrap_or_else(|e| panic!("{}: npc {id}: {e:#}", path.display()));
+                    name.map(|name| (id, name))
+                })
+                .collect(),
+        )
     }
 
     #[test]
@@ -425,7 +416,7 @@ mod tests {
         for id in REPORTED_IDS {
             let expected = npc_list
                 .get(&id)
-                .unwrap_or_else(|| panic!("npc_list.sql has no row for {id}"));
+                .unwrap_or_else(|| panic!("{LSB_TEST_ZONE_NPCS_YAML} has no row for {id}"));
             assert_eq!(table.lookup_by_id(id), Some(expected.as_str()), "npc {id}");
         }
     }

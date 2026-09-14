@@ -10,7 +10,7 @@
 use bevy::prelude::*;
 
 /// Snapshot equipment slot ids, LSB `SLOT_RANGED` / `SLOT_AMMO`
-/// (vendor/server/src/map/entities/battleentity.h SLOTTYPE SLOT_RANGED).
+/// (vendor/server/src/map/entities/battle_entity.h SLOTTYPE SLOT_RANGED).
 const SLOT_RANGE: usize = crate::equip_slot::EquipmentIndex::Range as usize;
 const SLOT_AMMO: usize = crate::equip_slot::EquipmentIndex::Ammo as usize;
 

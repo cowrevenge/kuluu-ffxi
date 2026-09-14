@@ -124,8 +124,11 @@ pub fn container_accessible(snap: &kuluu_snapshot::SceneSnapshot, id: u8) -> boo
         id,
         c::LOC_MOGSAFE | c::LOC_MOGSAFE2 | c::LOC_STORAGE | c::LOC_MOGLOCKER
     );
-    // Safe 2F additionally needs profile.mhflag & 0x20 server-side; the server
-    // streams its capacity regardless, so capacity alone over-offers it.
+    // Safe 2F additionally needs profile.mhflag & 0x20 and
+    // main.ENABLE_MOG_HOUSE_2F (vendor/server/settings/default/main.lua)
+    // server-side; the server streams its capacity regardless, so capacity
+    // alone over-offers it, and a server with the setting off refuses what
+    // this predicate still offers.
     let flag_ok = id != c::LOC_MOGSAFE2 || snap.mh_2f_unlocked == Some(true);
     granted && flag_ok && (!mh_only || snap.myroom.is_some())
 }

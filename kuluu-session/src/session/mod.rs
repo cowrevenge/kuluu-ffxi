@@ -2052,7 +2052,7 @@ fn handle_sub_packet(
 
 const NAME_MISS_DEDUP_WINDOW: std::time::Duration = std::time::Duration::from_secs(30);
 
-// vendor/server/src/map/entities/baseentity.h UPDATETYPE
+// vendor/server/src/map/entities/base_entity.h UPDATETYPE
 const UPDATE_HP: u8 = 0x04;
 const UPDATE_NAME: u8 = 0x08;
 
@@ -2263,8 +2263,8 @@ struct CastBar {
 
 /// Drives the self cast bar from the server's own BATTLE2 action packets.
 ///
-/// vendor/server/src/map/ai/states/magic_state.cpp CMagicState::CMagicState pushes the MagicStart
-/// action_t from the `CMagicState` constructor, i.e. synchronously inside the
+/// vendor/server/src/map/ai/states/magic_state.cpp CMagicState::init pushes the MagicStart
+/// action_t as CAIContainer::enterState admits the state, i.e. synchronously inside the
 /// 0x1A action handler (player_controller.cpp CPlayerController::Cast → ai_container.cpp CAIContainer::Internal_Cast),
 /// so this packet is the server's cast-start instant and carries the same cast
 /// pose and "starts casting" line. An interrupt reuses the MagicStart category
@@ -6016,8 +6016,8 @@ fn eventucoff_mode_of(data: &[u8]) -> Option<u32> {
 /// s2c 0x052 EVENTUCOFF releases the client from an event user-control lock
 /// (vendor/server/src/map/packets/s2c/0x052_eventucoff.h GP_SERV_COMMAND_EVENTUCOFF_MODE). CancelEvent
 /// arrives only after the server already dropped the event (release()/skipEvent
-/// call endCurrentEvent — vendor/server/src/map/lua/lua_baseentity.cpp CLuaBaseEntity::release,
-/// vendor/server/src/map/entities/charentity.cpp CCharEntity::skipEvent), so no 0x05B goes
+/// call endCurrentEvent — vendor/server/src/map/lua/lua_base_entity.cpp CLuaBaseEntity::release,
+/// vendor/server/src/map/entities/char_entity.cpp CCharEntity::skipEvent), so no 0x05B goes
 /// back; the local event state is dropped instead. Fishing release = a rejected
 /// cast (no rod / bait / fishing spot) or the end of fishing. EventRecvPending —
 /// the ack after every processed 0x05B (0x05b_eventend.cpp GP_CLI_COMMAND_EVENTEND::process) — must NOT clear
@@ -6101,7 +6101,7 @@ fn is_no_speaker_chat_kind(kind: u8) -> bool {
 // Server customMenu prompt (home point Set/Yes/No, quest confirmations, …):
 // GP_SERV_COMMAND_CHAT_STD with type MESSAGE_GMPROMPT and sender name
 // `_CUSTOM_MENU`, message = quoted-concat `"Title""Opt1""Opt2"…`
-// (vendor/server/src/map/lua/lua_baseentity.cpp CLuaBaseEntity::customMenu customMenu +
+// (vendor/server/src/map/lua/lua_base_entity.cpp CLuaBaseEntity::customMenu customMenu +
 // luautils.cpp SetCustomMenuContext). The reply round-trips as a
 // `_CUSTOM_MENU` tell the server routes to HandleCustomMenu
 // (0x0b6_chat_name.cpp GP_CLI_COMMAND_CHAT_NAME::process).

@@ -1868,7 +1868,7 @@ const OUTPOST_VENDOR_EVENT: u16 = 32756;
 const OUTPOST_VENDOR_TEXT_ZONE: u16 = 230;
 
 // The conquest outpost vendor: LSB's conquest.lua xi.conquest.vendorOnTrigger
-// calls startEvent(OUTPOST_VENDOR_EVENT, nation, fee, 0, fee, getCP(), 0, 0, 0),
+// calls startEvent(OUTPOST_VENDOR_EVENT, nation, fee, 0, fee / 10, getCP(), 0, 0, 0),
 // packed into num[0..7] by 0x034_eventnum.cpp
 // GP_SERV_COMMAND_EVENTNUM::GP_SERV_COMMAND_EVENTNUM. Dropping those on the
 // floor leaves every {Num:N} marker in the vendor dialog unresolved.
@@ -2447,7 +2447,7 @@ fn battle2_header_reports_primary_target() {
 
 // vendor/server/src/map/packets/s2c/0x028_battle2.cpp GP_SERV_COMMAND_BATTLE2::pack — resolution(3), kind(2),
 // animation(12) open every result block. A basic attack never sets `action.actionid`
-// (vendor/server/src/map/entities/battleentity.cpp CBattleEntity::OnAttack), so these bits are the ONLY
+// (vendor/server/src/map/entities/battle_entity.cpp CBattleEntity::OnAttack), so these bits are the ONLY
 // per-swing data: an off-by-one here picks the wrong swing routine and the wrong hit
 // reaction, i.e. the wrong sound or none.
 const BATTLE2_PARRIED_LEFT_ATTACK: ffxi_proto::melee::MeleeResult =

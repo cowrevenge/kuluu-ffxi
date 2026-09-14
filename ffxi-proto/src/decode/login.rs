@@ -255,7 +255,7 @@ impl ServerLogin {
     /// event fields are only written then, and event id 0 is a real cutscene
     /// (Bastok Markets intro), so presence keys off the status byte
     /// (0x00a_login.cpp GP_SERV_COMMAND_LOGIN::GP_SERV_COMMAND_LOGIN, ANIMATION_EVENT in
-    /// vendor/server/src/map/entities/baseentity.h ANIMATIONTYPE ANIMATION_EVENT).
+    /// vendor/server/data/enums/animation.yaml ANIMATION_EVENT).
     pub(crate) const SERVER_STATUS_EVENT: u8 = 4;
 
     pub fn decode(body: &[u8]) -> Result<Self, DecodeError> {

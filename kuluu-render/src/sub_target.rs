@@ -29,7 +29,7 @@ pub struct SubTargetEntity {
 pub const SUB_TARGET_RANGE: f32 = 50.0;
 
 /// Does `flags` permit targeting `e`? Mirrors LSB TARGETTYPE checks
-/// (vendor/server/src/map/entities/battleentity.h semantics).
+/// (vendor/server/src/map/entities/battle_entity.h semantics).
 pub fn entity_valid(flags: TargetFlags, e: &SubTargetEntity) -> bool {
     if e.dist_sq > SUB_TARGET_RANGE * SUB_TARGET_RANGE {
         return false;

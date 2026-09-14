@@ -3,13 +3,14 @@ use std::{fs, path::PathBuf};
 use anyhow::{bail, Context, Result};
 use lsb_scrape::{
     check_scrape_count, parse_cpp_plain_enum, parse_cpp_u32_str_map, parse_int_lit,
-    parse_lua_scalar_field, parse_packet_enum, write_u16_table, write_u16_u16_table,
+    parse_lua_scalar_field, parse_packet_enum, parse_yaml_enum_values, write_u16_table,
+    write_u16_u16_table,
 };
 
 const LSB_BLOWFISH_CPP: &str = "../vendor/server/src/common/blowfish.cpp";
 const LSB_COMPRESS_DAT: &str = "../vendor/server/res/compress.dat";
 const LSB_DECOMPRESS_DAT: &str = "../vendor/server/res/decompress.dat";
-const LSB_ZONE_LUA: &str = "../vendor/server/scripts/enum/zone.lua";
+const LSB_ZONE_YAML: &str = "../vendor/server/data/enums/zone.yaml";
 const LSB_ZONE_SCRIPTS_DIR: &str = "../vendor/server/scripts/zones";
 const LSB_FISHINGUTILS_H: &str = "../vendor/server/src/map/utils/fishingutils.h";
 const LSB_PACKET_S2C_H: &str = "../vendor/server/src/map/enums/packet_s2c.h";
@@ -51,7 +52,7 @@ fn main() -> Result<()> {
     println!("cargo:rerun-if-changed={LSB_BLOWFISH_CPP}");
     println!("cargo:rerun-if-changed={LSB_COMPRESS_DAT}");
     println!("cargo:rerun-if-changed={LSB_DECOMPRESS_DAT}");
-    println!("cargo:rerun-if-changed={LSB_ZONE_LUA}");
+    println!("cargo:rerun-if-changed={LSB_ZONE_YAML}");
     println!("cargo:rerun-if-changed={LSB_ZONE_SCRIPTS_DIR}");
     println!("cargo:rerun-if-changed={LSB_FISHINGUTILS_H}");
     println!("cargo:rerun-if-changed={LSB_PACKET_S2C_H}");
@@ -480,23 +481,17 @@ fn parse_module_u16_consts(src: &str, module: &str) -> Result<Vec<(String, u32)>
 /// needs the base to recover which fishing message a MesNum is.
 fn parse_zone_fishing_message_offsets() -> Result<Vec<(u16, u16)>> {
     let zone_src =
-        fs::read_to_string(LSB_ZONE_LUA).with_context(|| format!("reading {LSB_ZONE_LUA}"))?;
-    let mut zone_ids: std::collections::HashMap<String, u16> = std::collections::HashMap::new();
-    for line in zone_src.lines() {
-        let Some((name, rest)) = line.split_once('=') else {
-            continue;
-        };
-        let name = name.trim();
-        if name.is_empty() || !name.chars().all(|c| c.is_ascii_uppercase() || c == '_') {
-            continue;
-        }
-        if let Ok(id) = rest.trim().trim_end_matches(',').parse::<u16>() {
-            zone_ids.insert(name.to_string(), id);
-        }
-    }
-    if zone_ids.is_empty() {
-        bail!("parsed no zone ids out of {LSB_ZONE_LUA}");
-    }
+        fs::read_to_string(LSB_ZONE_YAML).with_context(|| format!("reading {LSB_ZONE_YAML}"))?;
+    // IDs.lua keys `zones[xi.zone.SELBINA]`; the lua enum is the yaml key upper-cased.
+    let zone_ids: std::collections::HashMap<String, u16> = parse_yaml_enum_values(&zone_src)
+        .with_context(|| format!("parsing {LSB_ZONE_YAML}"))?
+        .into_iter()
+        .map(|(name, id)| {
+            u16::try_from(id)
+                .map(|id| (name.to_ascii_uppercase(), id))
+                .with_context(|| format!("zone `{name}` id {id} overflows u16"))
+        })
+        .collect::<Result<_>>()?;
 
     let mut out = Vec::new();
     let dir = fs::read_dir(LSB_ZONE_SCRIPTS_DIR)

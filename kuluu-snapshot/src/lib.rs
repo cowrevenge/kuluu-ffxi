@@ -62,7 +62,7 @@ pub const PROTOCOL_VERSION: u32 = 26;
 /// cannot drift into a countdown nothing has room to draw.
 pub const MAX_STATUS_TIMER_SECS: u32 = 100 * 3600;
 
-/// vendor/server/src/map/entities/baseentity.h NAMEVIS VIS_HIDE_NAME
+/// vendor/server/data/enums/name_vis.yaml NAMEVIS VIS_HIDE_NAME
 pub const NAMEVIS_HIDE_NAME: u8 = 0x08;
 
 /// The one clock for `ability_recasts` math: local wall-clock Unix seconds.
@@ -128,7 +128,7 @@ pub enum BlowfishStatus {
     PendingZone,
 }
 
-// vendor/server/src/map/enums/weather.h Weather (None=0..Darkness=19)
+// vendor/server/data/enums/weather.yaml Weather (None=0..Darkness=19)
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum Weather {
@@ -158,7 +158,7 @@ pub enum Weather {
 impl Weather {
     pub fn from_lsb(n: u16) -> Self {
         use Weather::*;
-        // vendor/server/src/map/enums/weather.h Weather
+        // vendor/server/data/enums/weather.yaml Weather
         const TABLE: [Weather; 20] = [
             None,
             Sunshine,
@@ -415,15 +415,15 @@ pub struct Entity {
     /// entity_update byte 0x2B (LSB `namevis`; PosHead `flags3 >> 24`), written
     /// under UPDATE_HP — vendor/server/src/map/packets/entity_update.cpp CEntityUpdatePacket::updateWith.
     /// `None` until the first General-block update carries it; treated as visible,
-    /// matching the server's VIS_NONE default (baseentity.cpp CBaseEntity::CBaseEntity). LSB NAMEVIS
-    /// (vendor/server/src/map/entities/baseentity.h): 0x01 icon, 0x08 hide-name,
+    /// matching the server's VIS_NONE default (base_entity.cpp CBaseEntity::CBaseEntity). LSB NAMEVIS
+    /// (vendor/server/data/enums/name_vis.yaml): 0x01 icon, 0x08 hide-name,
     /// 0x80 ghost-phase — the other bits in the data are render-phase flags on real
     /// NPCs (Survival Guides carry 0x20), so only 0x08 suppresses anything.
     #[serde(default)]
     pub name_vis: Option<u8>,
 }
 
-// LSB STATUS_TYPE. vendor/server/src/map/entities/baseentity.h.
+// LSB STATUS_TYPE. vendor/server/data/enums/status.yaml.
 // Public so the renderer can hide models on INVISIBLE without re-declaring
 // the byte (single source of truth).
 pub mod status_type {
@@ -460,7 +460,7 @@ pub mod speed {
     pub const MAX_MOVE_SPEED_YPS: f32 = 30.0;
 
     /// The speed LSB sends an unmounted PC, which every "step per tick" budget in the reactor is
-    /// calibrated against (vendor/server/src/map/entities/battleentity.cpp CBattleEntity::UpdateSpeed).
+    /// calibrated against (vendor/server/src/map/entities/battle_entity.cpp CBattleEntity::UpdateSpeed).
     pub const BASE_PACKET_SPEED: u8 = 50;
 
     /// The movement rate a walk/run clip is authored at: the base packet speed decoded to yalms per
@@ -519,7 +519,7 @@ impl Entity {
     }
 
     /// Retail-hidden helper NPC: VIS_HIDE_NAME set — mannequins, "blank"
-    /// cutscene actors. vendor/server/src/map/entities/baseentity.cpp CBaseEntity::IsNameHidden
+    /// cutscene actors. vendor/server/src/map/entities/base_entity.cpp CBaseEntity::IsNameHidden
     /// `IsNameHidden() = namevis & FLAG_HIDE_NAME` (0x08); the NAMEVIS enum
     /// defines only 0x01/0x08/0x80, so the other bits are render-phase flags,
     /// not name suppression. Suppresses the nameplate only — never targeting.
@@ -578,7 +578,7 @@ impl Entity {
     /// The server-side precondition for a door Talk to fire its onTrigger:
     /// LSB's general trigger path (`GP_CLI_COMMAND_ACTION::process`,
     /// vendor/server/src/map/packets/c2s/0x01a_action.cpp) requires
-    /// `status == STATUS_TYPE::NORMAL` (vendor/server/src/map/entities/baseentity.h).
+    /// `status == STATUS_TYPE::NORMAL` (vendor/server/data/enums/status.yaml).
     /// Otherwise nothing triggers and the handler falls through to the
     /// `GP_SERV_COMMAND_EVENTUCOFF` release it answers every unlocked Talk with.
     /// Doors do ship with other statuses (DISAPPEAR, STATUS_4, CUTSCENE_ONLY in

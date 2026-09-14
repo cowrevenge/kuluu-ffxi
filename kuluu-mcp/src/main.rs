@@ -731,7 +731,7 @@ async fn read_resource(
 }
 
 const SCENE_ENTITIES_CAP: usize = 30;
-// vendor/server/src/map/entities/baseentity.h UPDATETYPE UPDATE_NAME
+// vendor/server/src/map/entities/base_entity.h UPDATETYPE UPDATE_NAME
 const SEND_FLAG_NAME: u8 = 0x08;
 
 fn entities_view(state: &SessionState) -> serde_json::Value {

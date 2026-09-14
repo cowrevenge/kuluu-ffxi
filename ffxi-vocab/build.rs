@@ -3,14 +3,14 @@ use std::{fs, path::PathBuf};
 use anyhow::{bail, Context, Result};
 use lsb_scrape::{
     check_scrape_count, parse_cpp_enum_class, parse_lua_indexed_pair_table, parse_sql_insert_rows,
-    parse_u16_pair_rows, parse_u32_pair_rows, parse_xi_ident_table, rust_string_literal,
-    split_sql_fields, split_sql_tuple, write_u16_table, write_u16_u16_table, write_u16_u32_table,
-    write_u16_u8_table,
+    parse_u16_pair_rows, parse_u32_pair_rows, parse_xi_ident_table, parse_yaml,
+    parse_yaml_enum_values, prettify_snake_case, rust_string_literal, split_sql_fields,
+    split_sql_tuple, write_u16_table, write_u16_u16_table, write_u16_u32_table, write_u16_u8_table,
+    zone_data_files, Yaml,
 };
 
 const LSB_MSG_BASIC_H: &str = "../vendor/server/src/map/enums/msg_basic.h";
 const LSB_MSG_LUA: &str = "../vendor/server/scripts/enum/msg.lua";
-const LSB_EFFECT_LUA: &str = "../vendor/server/scripts/enum/effect.lua";
 const LSB_KEY_ITEM_LUA: &str = "../vendor/server/scripts/enum/key_item.lua";
 const LSB_JOB_NAME_LUA: &str = "../vendor/server/scripts/enum/job_name.lua";
 const LSB_SPELL_LIST_SQL: &str = "../vendor/server/sql/spell_list.sql";
@@ -21,7 +21,10 @@ const LSB_ITEM_BASIC_SQL: &str = "../vendor/server/sql/item_basic.sql";
 const LSB_ITEM_EQUIPMENT_SQL: &str = "../vendor/server/sql/item_equipment.sql";
 const LSB_ITEM_USABLE_SQL: &str = "../vendor/server/sql/item_usable.sql";
 const LSB_ITEM_WEAPON_SQL: &str = "../vendor/server/sql/item_weapon.sql";
-const LSB_STATUS_EFFECTS_SQL: &str = "../vendor/server/sql/status_effects.sql";
+const LSB_STATUS_EFFECTS_YAML: &str = "../vendor/server/data/status_effects.yaml";
+const LSB_STATUS_EFFECT_FLAG_YAML: &str = "../vendor/server/data/enums/status_effect_flag.yaml";
+const LSB_ZONE_ENUM_YAML: &str = "../vendor/server/data/enums/zone.yaml";
+const LSB_ZONES_DATA_DIR: &str = "../vendor/server/data/zones";
 const LSB_EMOTE_H: &str = "../vendor/server/src/map/enums/emote.h";
 
 /// Smallest row count each scrape can return and still plausibly have parsed
@@ -38,7 +41,7 @@ mod floor {
     /// detects a partial drift.
     pub const MSG_ACTION_MODIFIER: usize = 2;
     pub const MSG_SYSTEM: usize = scrape_floor(9);
-    pub const STATUS_EFFECT: usize = scrape_floor(657);
+    pub const STATUS_EFFECT: usize = scrape_floor(668);
     pub const KEY_ITEM: usize = scrape_floor(3206);
     pub const JOB_NAME: usize = scrape_floor(23);
     pub const SPELL: usize = scrape_floor(890);
@@ -54,14 +57,14 @@ mod floor {
     pub const TP_MOVE: usize = scrape_floor(2652);
     pub const ITEM: usize = scrape_floor(23233);
     pub const ITEM_FLAGS: usize = scrape_floor(23187);
-    pub const STATUS_EFFECT_FLAGS: usize = scrape_floor(630);
+    pub const STATUS_EFFECT_FLAGS: usize = scrape_floor(664);
     pub const EQUIP_INFO: usize = scrape_floor(15378);
     pub const ITEM_USABLE: usize = scrape_floor(3075);
     pub const WEAPON_SKILL: usize = scrape_floor(4681);
     pub const WEAPON_SKILL_ANIMATION: usize = scrape_floor(226);
     pub const MOB_SKILL_ANIMATION: usize = scrape_floor(4344);
     pub const EMOTE: usize = scrape_floor(51);
-    pub const TRANSPORT: usize = scrape_floor(29);
+    pub const TRANSPORT: usize = scrape_floor(24);
 }
 
 fn main() -> Result<()> {
@@ -69,7 +72,6 @@ fn main() -> Result<()> {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed={LSB_MSG_BASIC_H}");
     println!("cargo:rerun-if-changed={LSB_MSG_LUA}");
-    println!("cargo:rerun-if-changed={LSB_EFFECT_LUA}");
     println!("cargo:rerun-if-changed={LSB_KEY_ITEM_LUA}");
     println!("cargo:rerun-if-changed={LSB_JOB_NAME_LUA}");
     println!("cargo:rerun-if-changed={LSB_SPELL_LIST_SQL}");
@@ -80,7 +82,8 @@ fn main() -> Result<()> {
     println!("cargo:rerun-if-changed={LSB_ITEM_EQUIPMENT_SQL}");
     println!("cargo:rerun-if-changed={LSB_ITEM_USABLE_SQL}");
     println!("cargo:rerun-if-changed={LSB_ITEM_WEAPON_SQL}");
-    println!("cargo:rerun-if-changed={LSB_STATUS_EFFECTS_SQL}");
+    println!("cargo:rerun-if-changed={LSB_STATUS_EFFECTS_YAML}");
+    println!("cargo:rerun-if-changed={LSB_STATUS_EFFECT_FLAG_YAML}");
     println!("cargo:rerun-if-changed={LSB_EMOTE_H}");
 
     let out_dir = PathBuf::from(std::env::var("OUT_DIR").context("OUT_DIR not set")?);
@@ -145,18 +148,23 @@ fn main() -> Result<()> {
         )?;
     }
 
-    let effect_src =
-        fs::read_to_string(LSB_EFFECT_LUA).with_context(|| format!("reading {LSB_EFFECT_LUA}"))?;
-    let effect_entries = parse_xi_ident_table(&effect_src, "xi.effect")?;
+    let status_effects_src = fs::read_to_string(LSB_STATUS_EFFECTS_YAML)
+        .with_context(|| format!("reading {LSB_STATUS_EFFECTS_YAML}"))?;
+    let status_effects = parse_status_effects(&status_effects_src)
+        .with_context(|| format!("parsing {LSB_STATUS_EFFECTS_YAML}"))?;
+    let effect_entries: Vec<(u32, String)> = status_effects
+        .iter()
+        .map(|effect| (u32::from(effect.id), prettify_snake_case(&effect.key)))
+        .collect();
     write_u16_table(
         &out_dir.join("status_names_table.rs"),
         "STATUS_NAMES",
-        LSB_EFFECT_LUA,
+        LSB_STATUS_EFFECTS_YAML,
         &effect_entries,
     )?;
     check_scrape_count(
         "status_effect entries",
-        LSB_EFFECT_LUA,
+        LSB_STATUS_EFFECTS_YAML,
         effect_entries.len(),
         floor::STATUS_EFFECT,
     )?;
@@ -436,18 +444,32 @@ fn main() -> Result<()> {
         floor::ITEM_FLAGS,
     )?;
 
-    let status_effects_src = fs::read_to_string(LSB_STATUS_EFFECTS_SQL)
-        .with_context(|| format!("reading {LSB_STATUS_EFFECTS_SQL}"))?;
-    let status_flag_entries = parse_sql_status_effect_flags(&status_effects_src)?;
+    let flag_src = fs::read_to_string(LSB_STATUS_EFFECT_FLAG_YAML)
+        .with_context(|| format!("reading {LSB_STATUS_EFFECT_FLAG_YAML}"))?;
+    let flag_bits = parse_yaml_enum_values(&flag_src)
+        .with_context(|| format!("parsing {LSB_STATUS_EFFECT_FLAG_YAML}"))?;
+    let mut flag_consts = String::new();
+    flag_consts.push_str(&format!(
+        "// AUTO-GENERATED by ffxi-vocab/build.rs from {LSB_STATUS_EFFECT_FLAG_YAML}.\n"
+    ));
+    flag_consts.push_str("// Do not edit by hand.\n");
+    for (name, bits) in &flag_bits {
+        flag_consts.push_str(&format!(
+            "pub const FLAG_{}: u32 = {bits:#x};\n",
+            name.to_ascii_uppercase()
+        ));
+    }
+    fs::write(out_dir.join("status_effect_flag_consts.rs"), &flag_consts)?;
+    let status_flag_entries = status_effect_flag_words(&status_effects, &flag_bits)?;
     write_u16_u32_table(
         &out_dir.join("status_effect_flags_table.rs"),
         "STATUS_EFFECT_FLAGS",
-        LSB_STATUS_EFFECTS_SQL,
+        LSB_STATUS_EFFECTS_YAML,
         &status_flag_entries,
     )?;
     check_scrape_count(
         "nonzero status-effect flag entries",
-        LSB_STATUS_EFFECTS_SQL,
+        LSB_STATUS_EFFECTS_YAML,
         status_flag_entries.len(),
         floor::STATUS_EFFECT_FLAGS,
     )?;
@@ -947,72 +969,80 @@ fn parse_sql_item_flags(src: &str) -> Result<Vec<(u16, u32)>> {
 /// The client keys the buff-cancel packet (0x0F1) and its status icons on the
 /// effect id, so this table is consumed by icon id (icon == effect id in LSB's
 /// default assignment). Zero-flag rows are dropped: lookup defaults to 0.
-fn parse_sql_status_effect_flags(src: &str) -> Result<Vec<(u16, u32)>> {
-    let mut vars: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
-    for line in src.lines() {
-        let line = line.trim();
-        let Some(rest) = line.strip_prefix("SET @") else {
-            continue;
+struct StatusEffect {
+    key: String,
+    id: u16,
+    flags: Vec<String>,
+}
+
+/// The `status_effects:` map of data/status_effects.yaml, in file order. The
+/// key is the effect's enum identifier (xi.effect.SLEEP_I is `sleep_i`); the
+/// optional `name:` field is the server's own display name and is not read
+/// here because the client keys names on the identifier.
+fn parse_status_effects(src: &str) -> Result<Vec<StatusEffect>> {
+    let root = parse_yaml(src)?;
+    let entries = root
+        .get("status_effects")
+        .and_then(Yaml::as_map)
+        .context("no `status_effects:` map")?;
+    let mut out = Vec::with_capacity(entries.len());
+    for (key, effect) in entries {
+        let id: u16 = effect
+            .field("id")?
+            .with_context(|| format!("status effect `{key}` has no id"))?;
+        let flags = match effect.get("flags") {
+            None => Vec::new(),
+            Some(node) => node
+                .as_seq()
+                .with_context(|| format!("status effect `{key}`: `flags` is not a list"))?
+                .iter()
+                .map(|flag| {
+                    flag.as_str()
+                        .map(str::to_string)
+                        .with_context(|| format!("status effect `{key}`: non-scalar flag"))
+                })
+                .collect::<Result<Vec<String>>>()?,
         };
-        let Some((name, value)) = rest.split_once('=') else {
-            continue;
-        };
-        let value = value.trim().trim_end_matches(';');
-        let value = value.split("--").next().unwrap_or("").trim();
-        let value = value.trim_end_matches(';').trim();
-        if let Ok(v) = value.parse::<u32>() {
-            vars.insert(name.trim().to_string(), v);
-        }
+        out.push(StatusEffect {
+            key: key.clone(),
+            id,
+            flags,
+        });
     }
+    if out.is_empty() {
+        bail!("parsed zero status effects");
+    }
+    Ok(out)
+}
 
-    let eval = |expr: &str| -> Option<u32> {
-        let mut acc = 0u32;
-        for term in expr.split('|') {
-            let term = term.trim();
-            if term.is_empty() || term == "0" {
-                continue;
-            }
-            let v = if let Some(name) = term.strip_prefix('@') {
-                *vars.get(name)?
-            } else {
-                term.parse::<u32>().ok()?
-            };
-            acc |= v;
-        }
-        Some(acc)
-    };
-
-    let needle = "INSERT INTO `status_effects` VALUES ";
+/// Each effect's flag names OR-ed into the u32 the server keeps
+/// (vendor/server/src/map/data/datasets/status_effects/dataset.cpp); effects
+/// with no bits set are left out so a lookup miss and "no flags" agree.
+fn status_effect_flag_words(
+    effects: &[StatusEffect],
+    flag_bits: &[(String, u32)],
+) -> Result<Vec<(u16, u32)>> {
     let mut out = Vec::new();
-    for line in src.lines() {
-        let line = line.trim();
-        let Some(rest) = line.strip_prefix(needle) else {
-            continue;
-        };
-        let mut cursor = rest;
-        while let Some(open) = cursor.find('(') {
-            cursor = &cursor[open + 1..];
-            let Some((tuple, after)) = split_sql_tuple(cursor) else {
-                break;
-            };
-            cursor = after;
-            let fields = split_sql_fields(tuple);
-            let Some(Ok(id)) = fields.first().map(|s| s.trim().parse::<u16>()) else {
-                continue;
-            };
-            let Some(flags) = fields.get(2).and_then(|s| eval(s.trim())) else {
-                bail!(
-                    "status_effects row {id}: unresolvable flags expression {:?}",
-                    fields.get(2)
-                );
-            };
-            if flags != 0 {
-                out.push((id, flags));
-            }
+    for effect in effects {
+        let mut word = 0u32;
+        for flag in &effect.flags {
+            let (_, bits) = flag_bits
+                .iter()
+                .find(|(name, _)| name == flag)
+                .with_context(|| {
+                    format!(
+                        "status effect `{}`: flag `{flag}` is not in {LSB_STATUS_EFFECT_FLAG_YAML}",
+                        effect.key
+                    )
+                })?;
+            word |= bits;
+        }
+        if word != 0 {
+            out.push((effect.id, word));
         }
     }
     if out.is_empty() {
-        bail!("parsed zero status_effects flag rows — SQL format may have changed");
+        bail!("parsed zero status_effects flag rows");
     }
     Ok(out)
 }
@@ -1059,41 +1089,119 @@ fn parse_sql_weapon_skill_rows(src: &str) -> Result<Vec<(u16, u8)>> {
     Ok(out)
 }
 
+/// One `Schedule` per (run, crossing zone) of every data/zones/<zone>/zone.yaml
+/// `transport.runs` entry that carries riders, mirroring
+/// vendor/server/src/map/transports/ship_handler.cpp ShipHandler::registerVoyage:
+/// a run with no `docked` phase opens no door, so it feeds no crossing. Phase
+/// bounds follow convertPhases in
+/// vendor/server/src/map/data/datasets/zones/settings/dataset.cpp: phases run
+/// back to back from the cycle start and at most one may leave its length out
+/// to take whatever the cycle has left.
 fn scrape_transport() -> Result<()> {
-    const SOURCE: &str = "../vendor/server/sql/transport.sql";
-    println!("cargo:rerun-if-changed={SOURCE}");
-    let source = fs::read_to_string(SOURCE)?;
+    println!("cargo:rerun-if-changed={LSB_ZONES_DATA_DIR}");
+    println!("cargo:rerun-if-changed={LSB_ZONE_ENUM_YAML}");
+    let zone_src = fs::read_to_string(LSB_ZONE_ENUM_YAML)
+        .with_context(|| format!("reading {LSB_ZONE_ENUM_YAML}"))?;
+    let zone_ids = parse_yaml_enum_values(&zone_src)
+        .with_context(|| format!("parsing {LSB_ZONE_ENUM_YAML}"))?;
+    let zone_id = |name: &str| -> Result<u16> {
+        let (_, id) = zone_ids
+            .iter()
+            .find(|(key, _)| key == name)
+            .with_context(|| format!("`{name}` is not in {LSB_ZONE_ENUM_YAML}"))?;
+        u16::try_from(*id).with_context(|| format!("zone `{name}` id {id} overflows u16"))
+    };
+
     let mut output = String::from("pub const SCHEDULES: &[Schedule] = &[\n");
     let mut count = 0;
-    for line in source.lines() {
-        let Some(rest) = line.trim().strip_prefix("INSERT INTO `transport` VALUES (") else {
+    for (zone_key, path) in zone_data_files(LSB_ZONES_DATA_DIR)? {
+        let src =
+            fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+        let root = parse_yaml(&src).with_context(|| format!("parsing {}", path.display()))?;
+        let Some(transport) = root.get("transport") else {
             continue;
         };
-        let (tuple, _) =
-            split_sql_tuple(rest).ok_or_else(|| anyhow::anyhow!("malformed transport row"))?;
-        let fields = split_sql_fields(tuple);
-        anyhow::ensure!(fields.len() == 17, "transport column count changed");
-        let n = |i: usize| fields[i].trim().parse::<u32>();
-        let (zone, npc, boundary, offset, interval, arrival, waiting, departure) =
-            (n(16)?, n(2)?, n(8)?, n(11)?, n(12)?, n(13)?, n(14)?, n(15)?);
-        output.push_str(&format!("Schedule {{ voyage_zone: {zone}, npc_id: {npc}, boundary: {boundary}, offset: {offset}, interval: {interval}, arrival: {arrival}, waiting: {waiting}, departure: {departure} }},\n"));
-        count += 1;
+        let ship: u32 = transport
+            .field("ship")?
+            .with_context(|| format!("{zone_key}: transport without a ship"))?;
+        let Some(runs) = transport.get("runs").and_then(Yaml::as_map) else {
+            continue;
+        };
+        for (name, run) in runs {
+            let crossings: Vec<&str> = match run.get("voyage") {
+                None => Vec::new(),
+                Some(node) => node
+                    .as_seq()
+                    .with_context(|| format!("transport {name}: `voyage` is not a list"))?
+                    .iter()
+                    .map(|zone| {
+                        zone.as_str()
+                            .with_context(|| format!("transport {name}: non-scalar voyage zone"))
+                    })
+                    .collect::<Result<_>>()?,
+            };
+            if crossings.is_empty() {
+                continue;
+            }
+            let phases = run
+                .get("phases")
+                .and_then(Yaml::as_seq)
+                .with_context(|| format!("transport {name}: no phases"))?;
+            let every: u32 = run.field("every")?.unwrap_or(0);
+            let mut stated = 0u32;
+            let mut open = 0usize;
+            for phase in phases {
+                match phase.field::<u32>("seconds")? {
+                    Some(seconds) => stated += seconds,
+                    None => open += 1,
+                }
+            }
+            anyhow::ensure!(
+                open <= 1 && stated <= every,
+                "transport {name}: phases run {stated}s of a {every}s cycle with {open} open-ended"
+            );
+            let mut cursor = 0u32;
+            let mut boarding_ends = None;
+            let mut departs = None;
+            for phase in phases {
+                let length = phase.field::<u32>("seconds")?.unwrap_or(every - stated);
+                let state: String = phase
+                    .field("state")?
+                    .with_context(|| format!("transport {name}: phase without a state"))?;
+                match state.as_str() {
+                    "docked" => boarding_ends = Some(cursor + length),
+                    "departing" => {
+                        departs = Some(cursor + phase.field::<u32>("hide")?.unwrap_or(0))
+                    }
+                    _ => {}
+                }
+                cursor += length;
+            }
+            let Some(boarding_ends) = boarding_ends else {
+                continue;
+            };
+            let departs = departs.with_context(|| {
+                format!("transport {name}: docked run without a departing phase")
+            })?;
+            let disembark: u32 = run.field("disembark")?.with_context(|| {
+                format!("transport {name}: carries riders but states no disembark point")
+            })?;
+            let boundary: u16 = run.field("boundary")?.unwrap_or(0);
+            let offset: u32 = run.field("offset")?.unwrap_or(0);
+            for crossing in crossings {
+                let voyage_zone = zone_id(crossing)?;
+                output.push_str(&format!("Schedule {{ voyage_zone: {voyage_zone}, ship: {ship}, boundary: {boundary}, offset: {offset}, every: {every}, boarding_ends: {boarding_ends}, departs: {departs}, disembark: {disembark} }},\n"));
+                count += 1;
+            }
+        }
     }
-    check_scrape_count("transport schedules", SOURCE, count, floor::TRANSPORT)?;
+    check_scrape_count(
+        "transport voyages",
+        LSB_ZONES_DATA_DIR,
+        count,
+        floor::TRANSPORT,
+    )?;
     output.push_str("];\n");
-    const TIMER_SOURCE: &str = "../vendor/server/src/map/transport.cpp";
-    println!("cargo:rerun-if-changed={TIMER_SOURCE}");
-    let timer = fs::read_to_string(TIMER_SOURCE)?;
-    let lead = timer
-        .split_once("zoneIterator->timeArriveDock - xi::vanadiel_clock::minutes(")
-        .and_then(|(_, tail)| tail.split_once(')'))
-        .context("transport eviction expression changed")?
-        .0
-        .trim()
-        .parse::<u16>()?;
-    output.push_str(&format!(
-        "pub const EVICTION_LEAD_VANA_MINUTES: u16 = {lead};\n"
-    ));
     const MODEL_SOURCE: &str = "../vendor/server/src/map/packets/entity_update.h";
     println!("cargo:rerun-if-changed={MODEL_SOURCE}");
     let model_types =

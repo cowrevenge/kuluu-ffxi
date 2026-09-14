@@ -1037,7 +1037,7 @@ pub enum CutsceneCue {
 }
 
 /// Number of music slots [`AgentEvent::MusicVolumeChanged::slot`] can name
-/// (vendor/server/src/map/enums/music_slot.h `MusicSlot`, ZoneDay..Fishing).
+/// (vendor/server/data/enums/music_slot.yaml `MusicSlot`, ZoneDay..Fishing).
 /// The 0x5D event opcode sets retail's single master music volume, so it is
 /// carried as the same volume on every slot.
 pub const MUSIC_SLOT_COUNT: u8 = 8;
@@ -2876,7 +2876,7 @@ pub enum AgentEvent {
     },
 
     /// The whole 0x037 animation byte for self (`ANIMATION_*` in
-    /// vendor/server/src/map/entities/baseentity.h). The server owns this — it
+    /// vendor/server/data/enums/animation.yaml). The server owns this — it
     /// starts and ends resting on its own (damage, status effects) — so the
     /// renderer reconciles its optimistic local stance against it.
     SelfServerStatus {

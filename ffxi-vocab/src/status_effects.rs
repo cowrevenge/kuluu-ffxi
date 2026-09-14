@@ -1,19 +1,20 @@
-//! Status-effect flags scraped from LSB's `status_effects.sql` `flags` column.
-//!
-//! Bit values mirror `SET @FLAG_*` in vendor/server/sql/status_effects.sql and
-//! `EFFECT` in vendor/server/src/map/status_effect.h. The client keys its buff
-//! icons and the buff-cancel packet (0x0F1) on the effect id, so this table is
-//! consumed by icon id — LSB assigns icon == effect id by default.
+//! Status-effect flags scraped from each effect's `flags` list in
+//! vendor/server/data/status_effects.yaml, OR-ed with the bit values of
+//! vendor/server/data/enums/status_effect_flag.yaml (`FLAG_*` below). The
+//! client keys its buff icons and the buff-cancel packet (0x0F1) on the effect
+//! id, so this table is consumed by icon id — LSB assigns icon == effect id by
+//! default.
 
 include!(concat!(env!("OUT_DIR"), "/status_effect_flags_table.rs"));
+include!(concat!(env!("OUT_DIR"), "/status_effect_flag_consts.rs"));
 
-/// EFFECTFLAG_NO_CANCEL — "CAN NOT CLICK IT OFF IN CLIENT"
-/// (vendor/server/src/map/status_effect.h EFFECTFLAG_NO_CANCEL). Retail's client hides the cancel
+/// `no_cancel` (vendor/server/data/enums/status_effect_flag.yaml). Retail's
+/// client hides the cancel
 /// affordance for these; LSB's 0x0F1 handler does NOT re-check it
 /// (vendor/server/src/map/packets/c2s/0x0f1_buffcancel.cpp `// TODO`), so the
 /// client is the only gate — a cancel we send for a NO_CANCEL buff would be
 /// wrongly honored.
-pub const NO_CANCEL: u32 = 0x0080_0000;
+pub const NO_CANCEL: u32 = FLAG_NO_CANCEL;
 
 /// The `flags` word for effect/icon `id`; effects absent from the sparse table
 /// carry 0 (all bits clear).
@@ -37,7 +38,7 @@ mod tests {
 
     #[test]
     fn no_cancel_debuffs_are_not_cancelable() {
-        // weakness(1), sleep(2), poison(3), paralysis(4) all carry @FLAG_NO_CANCEL.
+        // weakness(1), sleep(2), poison(3), paralysis(4) all carry `no_cancel`.
         for icon in [1u16, 2, 3, 4] {
             assert!(!is_cancelable(icon), "icon {icon} must be non-cancelable");
         }

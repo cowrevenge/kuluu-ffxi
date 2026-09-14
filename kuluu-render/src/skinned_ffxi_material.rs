@@ -56,7 +56,7 @@ pub const ATTR_JOINT1: MeshVertexAttribute =
 pub const ATTR_COLOR: MeshVertexAttribute =
     MeshVertexAttribute::new("Ffxi_Color", ATTR_ID_BASE + 7, VertexFormat::Float32x4);
 
-#[derive(Clone, Debug, ShaderType)]
+#[derive(Clone, Debug, PartialEq, ShaderType)]
 pub struct FfxiLightingUniform {
     pub ambient: Vec4,
     pub dir0_dir: Vec4,
@@ -155,7 +155,7 @@ pub struct FfxiSkin {
 /// indexed per draw via `MeshTag`. `flags.x` = has_texture, `.y` = realistic
 /// lighting, `.z` = receive shadows, `.w` = target-strobe highlight; `tint` =
 /// per-mesh t_factor modulation.
-#[derive(Clone, Debug, ShaderType)]
+#[derive(Clone, Debug, PartialEq, ShaderType)]
 pub struct FfxiInstance {
     pub flags: Vec4,
     pub tint: Vec4,
@@ -179,6 +179,17 @@ pub const INITIAL_SKIN_SLOTS: usize = 128;
 pub const INITIAL_INSTANCE_SLOTS: usize = 1024;
 const SLOT_GROWTH_FACTOR: usize = 2;
 
+const SKIN_STRIDE: u64 = <FfxiSkin as encase::ShaderSize>::SHADER_SIZE.get();
+const SKIN_JOINTS_BYTES: u64 = <FfxiJointMatrices as encase::ShaderSize>::SHADER_SIZE.get();
+const JOINT_MATRIX_STRIDE: u64 = <Mat4 as encase::ShaderSize>::SHADER_SIZE.get();
+const INSTANCE_STRIDE: u64 = <FfxiInstance as encase::ShaderSize>::SHADER_SIZE.get();
+
+// Merging two dirty slab ranges re-copies the clean gap between them twice
+// (encase encode, then wgpu staging) to save one wgpu staging allocation and
+// one copy command. One page is the starting balance point; re-profile to
+// retune. Raising it toward SKIN_STRIDE degenerates to one coalesced write.
+const SLAB_WRITE_MERGE_GAP_BYTES: u64 = 4096;
+
 /// Actor-root marker carrying the actor's slot in the shared skins array.
 /// Freed by observer when the entity despawns.
 #[derive(Component, Debug, Clone, Copy)]
@@ -189,19 +200,39 @@ pub struct FfxiSkinSlot(pub u32);
 #[derive(Component, Debug, Clone, Copy)]
 pub struct FfxiInstanceSlot(pub u32);
 
+/// Per-slot upload bookkeeping. The epochs advance only when a write actually
+/// changed bytes, so a slot whose meta the render world has already uploaded is
+/// byte-identical on the GPU. All-zero is the "never uploaded" sentinel.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct SkinSlotMeta {
+    alloc_gen: u64,
+    joints_epoch: u64,
+    lighting_epoch: u64,
+    joints_len: u32,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct InstanceSlotMeta {
+    epoch: u64,
+}
+
 /// Main-world slab of every live actor's joints/lighting and every submesh's
-/// flags/tint, uploaded to two shared storage buffers with 2 `write_buffer`
-/// calls per frame (replacing ~2 per actor). Slots are recycled lowest-first
-/// so the uploaded high-water region tracks the live count.
+/// flags/tint, uploaded to two shared storage buffers by
+/// [`upload_ffxi_shared_buffers`], which writes only the slots whose bytes
+/// changed. Slots are recycled lowest-first so the uploaded high-water region
+/// tracks the live count.
 #[derive(Resource)]
 pub struct FfxiSkinRegistry {
     skins: Vec<FfxiSkin>,
     instances: Vec<FfxiInstance>,
+    skin_meta: Vec<SkinSlotMeta>,
+    instance_meta: Vec<InstanceSlotMeta>,
     free_skins: BTreeSet<u32>,
     free_instances: BTreeSet<u32>,
     skin_high_water: u32,
     instance_high_water: u32,
     buffer_generation: u64,
+    write_counter: u64,
 }
 
 impl Default for FfxiSkinRegistry {
@@ -209,16 +240,27 @@ impl Default for FfxiSkinRegistry {
         Self {
             skins: vec![FfxiSkin::default(); INITIAL_SKIN_SLOTS],
             instances: vec![FfxiInstance::default(); INITIAL_INSTANCE_SLOTS],
+            skin_meta: vec![SkinSlotMeta::default(); INITIAL_SKIN_SLOTS],
+            instance_meta: vec![InstanceSlotMeta::default(); INITIAL_INSTANCE_SLOTS],
             free_skins: BTreeSet::new(),
             free_instances: BTreeSet::new(),
             skin_high_water: 0,
             instance_high_water: 0,
             buffer_generation: 0,
+            write_counter: 0,
         }
     }
 }
 
 impl FfxiSkinRegistry {
+    // Increment-then-return keeps 0 out of the live epoch space, so the
+    // all-zero sentinel the render world starts from (and resets to on a buffer
+    // realloc) can never match a live slot and skip its first upload.
+    fn next_epoch(&mut self) -> u64 {
+        self.write_counter += 1;
+        self.write_counter
+    }
+
     pub fn alloc_skin(&mut self) -> u32 {
         let slot = match self.free_skins.pop_first() {
             Some(s) => s,
@@ -227,6 +269,7 @@ impl FfxiSkinRegistry {
                 if s as usize >= self.skins.len() {
                     let new_len = self.skins.len() * SLOT_GROWTH_FACTOR;
                     self.skins.resize(new_len, FfxiSkin::default());
+                    self.skin_meta.resize(new_len, SkinSlotMeta::default());
                     self.buffer_generation += 1;
                 }
                 self.skin_high_water += 1;
@@ -234,6 +277,13 @@ impl FfxiSkinRegistry {
             }
         };
         self.skins[slot as usize] = FfxiSkin::default();
+        let epoch = self.next_epoch();
+        self.skin_meta[slot as usize] = SkinSlotMeta {
+            alloc_gen: epoch,
+            joints_epoch: epoch,
+            lighting_epoch: epoch,
+            joints_len: MAX_JOINTS as u32,
+        };
         slot
     }
 
@@ -250,8 +300,56 @@ impl FfxiSkinRegistry {
         &self.skins[slot as usize]
     }
 
+    /// Escape hatch marking the whole slot dirty; the per-frame paths use the
+    /// precise setters instead.
     pub fn skin_mut(&mut self, slot: u32) -> &mut FfxiSkin {
+        let epoch = self.next_epoch();
+        let meta = &mut self.skin_meta[slot as usize];
+        meta.joints_epoch = epoch;
+        meta.lighting_epoch = epoch;
+        meta.joints_len = MAX_JOINTS as u32;
         &mut self.skins[slot as usize]
+    }
+
+    pub fn set_skin_joints(&mut self, slot: u32, pose: &[Mat4]) {
+        let n = pose.len().min(MAX_JOINTS);
+        let matrices = &mut self.skins[slot as usize].joints.matrices;
+        if matrices[..n] != pose[..n] {
+            matrices[..n].copy_from_slice(&pose[..n]);
+            let epoch = self.next_epoch();
+            self.skin_meta[slot as usize].joints_epoch = epoch;
+        }
+        self.skin_meta[slot as usize].joints_len = n as u32;
+    }
+
+    pub fn set_skin_lighting(&mut self, slot: u32, lighting: &FfxiLightingUniform) {
+        if self.skins[slot as usize].lighting == *lighting {
+            return;
+        }
+        self.skins[slot as usize].lighting = lighting.clone();
+        let epoch = self.next_epoch();
+        self.skin_meta[slot as usize].lighting_epoch = epoch;
+    }
+
+    pub fn set_skin_point_lights(
+        &mut self,
+        slot: u32,
+        point_pos: [Vec4; MAX_POINT_LIGHTS],
+        point_color: [Vec4; MAX_POINT_LIGHTS],
+        point_atten: [Vec4; MAX_POINT_LIGHTS],
+    ) {
+        let lighting = &mut self.skins[slot as usize].lighting;
+        if lighting.point_pos == point_pos
+            && lighting.point_color == point_color
+            && lighting.point_atten == point_atten
+        {
+            return;
+        }
+        lighting.point_pos = point_pos;
+        lighting.point_color = point_color;
+        lighting.point_atten = point_atten;
+        let epoch = self.next_epoch();
+        self.skin_meta[slot as usize].lighting_epoch = epoch;
     }
 
     pub fn alloc_instance(&mut self, record: FfxiInstance) -> u32 {
@@ -262,6 +360,8 @@ impl FfxiSkinRegistry {
                 if s as usize >= self.instances.len() {
                     let new_len = self.instances.len() * SLOT_GROWTH_FACTOR;
                     self.instances.resize(new_len, FfxiInstance::default());
+                    self.instance_meta
+                        .resize(new_len, InstanceSlotMeta::default());
                     self.buffer_generation += 1;
                 }
                 self.instance_high_water += 1;
@@ -269,6 +369,8 @@ impl FfxiSkinRegistry {
             }
         };
         self.instances[slot as usize] = record;
+        let epoch = self.next_epoch();
+        self.instance_meta[slot as usize] = InstanceSlotMeta { epoch };
         slot
     }
 
@@ -283,18 +385,37 @@ impl FfxiSkinRegistry {
         }
     }
 
+    /// Escape hatch marking the slot dirty unconditionally; the per-frame path
+    /// uses [`Self::set_instance_lighting_flags`] instead.
     pub fn instance_mut(&mut self, slot: u32) -> &mut FfxiInstance {
+        let epoch = self.next_epoch();
+        self.instance_meta[slot as usize].epoch = epoch;
         &mut self.instances[slot as usize]
+    }
+
+    pub fn set_instance_lighting_flags(&mut self, slot: u32, realistic: f32, receive: f32) {
+        let inst = &mut self.instances[slot as usize];
+        if inst.flags.y == realistic && inst.flags.z == receive {
+            return;
+        }
+        inst.flags.y = realistic;
+        inst.flags.z = receive;
+        let epoch = self.next_epoch();
+        self.instance_meta[slot as usize].epoch = epoch;
     }
 
     pub fn for_each_instance_mut(&mut self, mut f: impl FnMut(&mut FfxiInstance)) {
         let free = &self.free_instances;
+        let meta = &mut self.instance_meta;
+        let counter = &mut self.write_counter;
         for (i, inst) in self.instances[..self.instance_high_water as usize]
             .iter_mut()
             .enumerate()
         {
             if !free.contains(&(i as u32)) {
                 f(inst);
+                *counter += 1;
+                meta[i].epoch = *counter;
             }
         }
     }
@@ -409,8 +530,8 @@ fn prune_ffxi_material_cache(
 }
 
 /// Render-world owner of the two shared storage buffers every
-/// `FfxiSkinnedMaterial` bind group references. Rewritten in full each frame
-/// by [`upload_ffxi_shared_buffers`] (2 `write_buffer` calls total).
+/// `FfxiSkinnedMaterial` bind group references, plus the mirror of what it has
+/// already uploaded per slot. Refreshed by [`upload_ffxi_shared_buffers`].
 #[derive(Resource, Default)]
 pub struct FfxiSharedBuffers {
     skins: Option<Buffer>,
@@ -418,6 +539,126 @@ pub struct FfxiSharedBuffers {
     skin_capacity: usize,
     instance_capacity: usize,
     scratch: Vec<u8>,
+    skin_uploaded: Vec<SkinSlotMeta>,
+    instance_uploaded: Vec<InstanceSlotMeta>,
+    writes: Vec<SlabWrite>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct SlabWrite {
+    offset: u64,
+    len: u64,
+}
+
+fn plan_skin_writes(
+    meta: &[SkinSlotMeta],
+    uploaded: &mut [SkinSlotMeta],
+    high_water: u32,
+    out: &mut Vec<SlabWrite>,
+) {
+    for slot in 0..high_water as usize {
+        let (want, have) = (meta[slot], uploaded[slot]);
+        if want == have {
+            continue;
+        }
+        let base = slot as u64 * SKIN_STRIDE;
+        if want.alloc_gen != have.alloc_gen {
+            out.push(SlabWrite {
+                offset: base,
+                len: SKIN_STRIDE,
+            });
+        } else {
+            if want.joints_epoch != have.joints_epoch && want.joints_len > 0 {
+                out.push(SlabWrite {
+                    offset: base,
+                    len: want.joints_len as u64 * JOINT_MATRIX_STRIDE,
+                });
+            }
+            if want.lighting_epoch != have.lighting_epoch {
+                out.push(SlabWrite {
+                    offset: base + SKIN_JOINTS_BYTES,
+                    len: SKIN_STRIDE - SKIN_JOINTS_BYTES,
+                });
+            }
+        }
+        uploaded[slot] = want;
+    }
+}
+
+fn plan_instance_writes(
+    meta: &[InstanceSlotMeta],
+    uploaded: &mut [InstanceSlotMeta],
+    high_water: u32,
+    out: &mut Vec<SlabWrite>,
+) {
+    for slot in 0..high_water as usize {
+        if meta[slot] == uploaded[slot] {
+            continue;
+        }
+        out.push(SlabWrite {
+            offset: slot as u64 * INSTANCE_STRIDE,
+            len: INSTANCE_STRIDE,
+        });
+        uploaded[slot] = meta[slot];
+    }
+}
+
+fn merge_slab_writes(writes: &mut Vec<SlabWrite>, max_gap: u64) {
+    let mut kept = 0usize;
+    for i in 0..writes.len() {
+        let next = writes[i];
+        if kept > 0 {
+            let prev = &mut writes[kept - 1];
+            let prev_end = prev.offset + prev.len;
+            if next.offset - prev_end <= max_gap {
+                prev.len = next.offset + next.len - prev.offset;
+                continue;
+            }
+        }
+        writes[kept] = next;
+        kept += 1;
+    }
+    writes.truncate(kept);
+}
+
+fn encode_append<T: ?Sized + ShaderType + encase::internal::WriteInto>(
+    out: &mut Vec<u8>,
+    value: &T,
+) {
+    let at = out.len();
+    let mut writer =
+        encase::internal::Writer::new(value, &mut *out, at).expect("grow ffxi slab scratch");
+    value.write_into(&mut writer);
+}
+
+// SKIN_STRIDE is not a multiple of JOINT_MATRIX_STRIDE, so every index is taken
+// relative to the slot base; a global division would misindex odd slots' joints.
+fn encode_skin_range(skins: &[FfxiSkin], write: SlabWrite, out: &mut Vec<u8>) {
+    let end = write.offset + write.len;
+    let mut off = write.offset;
+    while off < end {
+        let slot = (off / SKIN_STRIDE) as usize;
+        let base = slot as u64 * SKIN_STRIDE;
+        let rel = off - base;
+        if rel < SKIN_JOINTS_BYTES {
+            let first = (rel / JOINT_MATRIX_STRIDE) as usize;
+            let last = ((end - base).min(SKIN_JOINTS_BYTES) / JOINT_MATRIX_STRIDE) as usize;
+            debug_assert!(last > first);
+            encode_append(out, &skins[slot].joints.matrices[first..last]);
+            off = base + last as u64 * JOINT_MATRIX_STRIDE;
+        } else {
+            debug_assert_eq!(rel, SKIN_JOINTS_BYTES);
+            encode_append(out, &skins[slot].lighting);
+            off = base + SKIN_STRIDE;
+        }
+    }
+    debug_assert_eq!(off, end);
+}
+
+fn encode_instance_range(instances: &[FfxiInstance], write: SlabWrite, out: &mut Vec<u8>) {
+    let first = (write.offset / INSTANCE_STRIDE) as usize;
+    let last = ((write.offset + write.len) / INSTANCE_STRIDE) as usize;
+    encode_append(out, &instances[first..last]);
 }
 
 impl FfxiSharedBuffers {
@@ -609,42 +850,76 @@ fn upload_ffxi_shared_buffers(
         buffers.skin_capacity = registry.skin_capacity();
         buffers.skins = Some(device.create_buffer(&BufferDescriptor {
             label: Some("ffxi_shared_skins"),
-            size: FfxiSkin::min_size().get() * buffers.skin_capacity as u64,
+            size: SKIN_STRIDE * buffers.skin_capacity as u64,
             usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
             mapped_at_creation: false,
         }));
+        let capacity = buffers.skin_capacity;
+        buffers.skin_uploaded.clear();
+        buffers
+            .skin_uploaded
+            .resize(capacity, SkinSlotMeta::default());
     }
     if buffers.instances.is_none() || buffers.instance_capacity != registry.instance_capacity() {
         buffers.instance_capacity = registry.instance_capacity();
         buffers.instances = Some(device.create_buffer(&BufferDescriptor {
             label: Some("ffxi_shared_instances"),
-            size: FfxiInstance::min_size().get() * buffers.instance_capacity as u64,
+            size: INSTANCE_STRIDE * buffers.instance_capacity as u64,
             usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
             mapped_at_creation: false,
         }));
+        let capacity = buffers.instance_capacity;
+        buffers.instance_uploaded.clear();
+        buffers
+            .instance_uploaded
+            .resize(capacity, InstanceSlotMeta::default());
     }
 
-    let mut scratch = std::mem::take(&mut buffers.scratch);
+    let FfxiSharedBuffers {
+        skins: skin_buffer,
+        instances: instance_buffer,
+        scratch,
+        skin_uploaded,
+        instance_uploaded,
+        writes,
+        ..
+    } = &mut *buffers;
 
-    let skins = registry.skins_used();
-    if !skins.is_empty() {
-        scratch.clear();
-        let mut sb = encase::StorageBuffer::new(scratch);
-        sb.write(skins).expect("encode ffxi shared skins");
-        scratch = sb.into_inner();
-        queue.write_buffer(buffers.skins.as_ref().unwrap(), 0, &scratch);
+    if let Some(buffer) = skin_buffer.as_ref() {
+        writes.clear();
+        plan_skin_writes(
+            &registry.skin_meta,
+            skin_uploaded,
+            registry.skin_high_water,
+            writes,
+        );
+        merge_slab_writes(writes, SLAB_WRITE_MERGE_GAP_BYTES);
+        let skins = registry.skins_used();
+        for write in writes.iter() {
+            scratch.clear();
+            encode_skin_range(skins, *write, scratch);
+            debug_assert_eq!(scratch.len() as u64, write.len);
+            queue.write_buffer(buffer, write.offset, scratch);
+        }
     }
 
-    let instances = registry.instances_used();
-    if !instances.is_empty() {
-        scratch.clear();
-        let mut sb = encase::StorageBuffer::new(scratch);
-        sb.write(instances).expect("encode ffxi shared instances");
-        scratch = sb.into_inner();
-        queue.write_buffer(buffers.instances.as_ref().unwrap(), 0, &scratch);
+    if let Some(buffer) = instance_buffer.as_ref() {
+        writes.clear();
+        plan_instance_writes(
+            &registry.instance_meta,
+            instance_uploaded,
+            registry.instance_high_water,
+            writes,
+        );
+        merge_slab_writes(writes, SLAB_WRITE_MERGE_GAP_BYTES);
+        let instances = registry.instances_used();
+        for write in writes.iter() {
+            scratch.clear();
+            encode_instance_range(instances, *write, scratch);
+            debug_assert_eq!(scratch.len() as u64, write.len);
+            queue.write_buffer(buffer, write.offset, scratch);
+        }
     }
-
-    buffers.scratch = scratch;
 }
 
 pub struct FfxiMaterialPlugin;
@@ -762,6 +1037,307 @@ mod tests {
         );
         assert_eq!(FfxiSkin::min_size().get(), 9056);
         assert_eq!(FfxiInstance::min_size().get(), 48);
+
+        assert_eq!(SKIN_STRIDE, 9056);
+        assert_eq!(SKIN_JOINTS_BYTES, (MAX_JOINTS * 64) as u64);
+        assert_eq!(JOINT_MATRIX_STRIDE, 64);
+        assert_eq!(INSTANCE_STRIDE, 48);
+    }
+
+    fn reference_skin_bytes(reg: &FfxiSkinRegistry) -> Vec<u8> {
+        let mut sb = encase::StorageBuffer::new(Vec::<u8>::new());
+        sb.write(reg.skins_used()).expect("reference encode");
+        sb.into_inner()
+    }
+
+    fn encoded(reg: &FfxiSkinRegistry, write: SlabWrite) -> Vec<u8> {
+        let mut out = Vec::new();
+        encode_skin_range(reg.skins_used(), write, &mut out);
+        out
+    }
+
+    fn distinct_skins(n: u32) -> FfxiSkinRegistry {
+        let mut reg = FfxiSkinRegistry::default();
+        for slot in 0..n {
+            assert_eq!(reg.alloc_skin(), slot);
+            let skin = reg.skin_mut(slot);
+            for j in 0..8 {
+                skin.joints.matrices[j] =
+                    Mat4::from_translation(Vec3::splat(slot as f32 * 10.0 + j as f32));
+            }
+            skin.lighting.ambient = Vec4::splat(slot as f32);
+        }
+        reg
+    }
+
+    fn drain_skin_plan(reg: &FfxiSkinRegistry, uploaded: &mut [SkinSlotMeta]) -> Vec<SlabWrite> {
+        let mut writes = Vec::new();
+        plan_skin_writes(&reg.skin_meta, uploaded, reg.skin_high_water, &mut writes);
+        writes
+    }
+
+    // The partial encoder must reproduce the whole-slab encoder byte for byte,
+    // including for ranges that start mid-slot or straddle a slot boundary:
+    // SKIN_STRIDE is not a multiple of JOINT_MATRIX_STRIDE, so a global rather
+    // than slot-relative index would misalign every odd slot.
+    #[test]
+    fn partial_encode_matches_reference_encoder() {
+        let reg = distinct_skins(3);
+        let want = reference_skin_bytes(&reg);
+        assert_eq!(want.len() as u64, 3 * SKIN_STRIDE);
+
+        let whole = SlabWrite {
+            offset: 0,
+            len: 3 * SKIN_STRIDE,
+        };
+        assert_eq!(encoded(&reg, whole), want);
+
+        let joints_prefix = SlabWrite {
+            offset: SKIN_STRIDE,
+            len: 4 * JOINT_MATRIX_STRIDE,
+        };
+        assert_eq!(
+            encoded(&reg, joints_prefix),
+            want[joints_prefix.offset as usize
+                ..(joints_prefix.offset + joints_prefix.len) as usize]
+        );
+
+        let lighting_only = SlabWrite {
+            offset: SKIN_STRIDE + SKIN_JOINTS_BYTES,
+            len: SKIN_STRIDE - SKIN_JOINTS_BYTES,
+        };
+        assert_eq!(
+            encoded(&reg, lighting_only),
+            want[lighting_only.offset as usize
+                ..(lighting_only.offset + lighting_only.len) as usize]
+        );
+
+        let across_slots = SlabWrite {
+            offset: SKIN_JOINTS_BYTES,
+            len: SKIN_STRIDE,
+        };
+        assert_eq!(
+            encoded(&reg, across_slots),
+            want[across_slots.offset as usize..(across_slots.offset + across_slots.len) as usize]
+        );
+    }
+
+    #[test]
+    fn only_changed_slots_are_rewritten() {
+        let mut reg = distinct_skins(3);
+        let mut uploaded = vec![SkinSlotMeta::default(); reg.skin_capacity()];
+
+        let first = drain_skin_plan(&reg, &mut uploaded);
+        assert_eq!(
+            first,
+            (0..3)
+                .map(|s| SlabWrite {
+                    offset: s * SKIN_STRIDE,
+                    len: SKIN_STRIDE,
+                })
+                .collect::<Vec<_>>()
+        );
+
+        assert!(drain_skin_plan(&reg, &mut uploaded).is_empty());
+
+        let pose = vec![Mat4::from_translation(Vec3::X); 4];
+        reg.set_skin_joints(1, &pose);
+        assert_eq!(
+            drain_skin_plan(&reg, &mut uploaded),
+            vec![SlabWrite {
+                offset: SKIN_STRIDE,
+                len: 4 * JOINT_MATRIX_STRIDE,
+            }]
+        );
+    }
+
+    #[test]
+    fn identical_pose_write_is_not_dirty() {
+        let mut reg = FfxiSkinRegistry::default();
+        let slot = reg.alloc_skin();
+        let mut uploaded = vec![SkinSlotMeta::default(); reg.skin_capacity()];
+
+        let pose = vec![Mat4::from_translation(Vec3::Y); 6];
+        reg.set_skin_joints(slot, &pose);
+        assert!(!drain_skin_plan(&reg, &mut uploaded).is_empty());
+
+        reg.set_skin_joints(slot, &pose);
+        assert!(
+            drain_skin_plan(&reg, &mut uploaded).is_empty(),
+            "an unchanged pose must not dirty the slot"
+        );
+    }
+
+    // A recycled slot must re-upload its whole record, or the joint tail above
+    // the new tenant's joint count would still read as the previous tenant's.
+    #[test]
+    fn reused_slot_uploads_the_full_record() {
+        let mut reg = FfxiSkinRegistry::default();
+        let a = reg.alloc_skin();
+        let mut uploaded = vec![SkinSlotMeta::default(); reg.skin_capacity()];
+        reg.set_skin_joints(a, &[Mat4::from_translation(Vec3::Z); 4]);
+        drain_skin_plan(&reg, &mut uploaded);
+        assert!(drain_skin_plan(&reg, &mut uploaded).is_empty());
+
+        reg.free_skin(a);
+        assert_eq!(reg.alloc_skin(), a);
+        assert_eq!(
+            drain_skin_plan(&reg, &mut uploaded),
+            vec![SlabWrite {
+                offset: a as u64 * SKIN_STRIDE,
+                len: SKIN_STRIDE,
+            }]
+        );
+    }
+
+    #[test]
+    fn buffer_growth_reuploads_every_live_slot() {
+        let mut reg = distinct_skins(5);
+        let mut uploaded = vec![SkinSlotMeta::default(); reg.skin_capacity()];
+        drain_skin_plan(&reg, &mut uploaded);
+        reg.set_skin_joints(2, &[Mat4::IDENTITY; 3]);
+        drain_skin_plan(&reg, &mut uploaded);
+        assert!(drain_skin_plan(&reg, &mut uploaded).is_empty());
+
+        assert_ne!(
+            reg.skin_meta[0],
+            SkinSlotMeta::default(),
+            "the all-zero sentinel must never match a live slot"
+        );
+
+        uploaded.clear();
+        uploaded.resize(reg.skin_capacity(), SkinSlotMeta::default());
+        let mut writes = drain_skin_plan(&reg, &mut uploaded);
+        merge_slab_writes(&mut writes, 0);
+        assert_eq!(
+            writes,
+            vec![SlabWrite {
+                offset: 0,
+                len: 5 * SKIN_STRIDE,
+            }]
+        );
+    }
+
+    // The production path end to end: plan, merge at the shipped gap budget,
+    // encode. A merged range folds in clean bytes, so every write must still
+    // match the whole-slab encoder at its own offset.
+    #[test]
+    fn merged_plan_encodes_the_same_bytes_as_the_whole_slab() {
+        let mut reg = distinct_skins(4);
+        let mut uploaded = vec![SkinSlotMeta::default(); reg.skin_capacity()];
+        drain_skin_plan(&reg, &mut uploaded);
+
+        reg.set_skin_joints(0, &[Mat4::from_translation(Vec3::X); 120]);
+        reg.set_skin_joints(1, &[Mat4::from_translation(Vec3::Y); 120]);
+        reg.set_skin_joints(3, &[Mat4::from_translation(Vec3::Z); 120]);
+        reg.set_skin_lighting(3, &FfxiLightingUniform::default());
+
+        let mut writes = drain_skin_plan(&reg, &mut uploaded);
+        let planned = writes.len();
+        merge_slab_writes(&mut writes, SLAB_WRITE_MERGE_GAP_BYTES);
+        assert_eq!(planned, 4);
+        assert!(writes.len() < planned, "the fixture must exercise merging");
+
+        let want = reference_skin_bytes(&reg);
+        for write in &writes {
+            assert_eq!(
+                encoded(&reg, *write),
+                want[write.offset as usize..(write.offset + write.len) as usize],
+                "merged write {write:?} must match the whole-slab encoding"
+            );
+        }
+    }
+
+    #[test]
+    fn merge_slab_writes_respects_the_gap_budget() {
+        let mut empty: Vec<SlabWrite> = Vec::new();
+        merge_slab_writes(&mut empty, SLAB_WRITE_MERGE_GAP_BYTES);
+        assert!(empty.is_empty());
+
+        let pair = vec![
+            SlabWrite { offset: 0, len: 64 },
+            SlabWrite {
+                offset: 4160,
+                len: 64,
+            },
+        ];
+
+        let mut merged = pair.clone();
+        merge_slab_writes(&mut merged, 4096);
+        assert_eq!(
+            merged,
+            vec![SlabWrite {
+                offset: 0,
+                len: 4224,
+            }]
+        );
+
+        let mut kept = pair;
+        merge_slab_writes(&mut kept, 4095);
+        assert_eq!(kept.len(), 2);
+
+        let mut chain = vec![
+            SlabWrite { offset: 0, len: 64 },
+            SlabWrite {
+                offset: 128,
+                len: 64,
+            },
+            SlabWrite {
+                offset: 256,
+                len: 64,
+            },
+        ];
+        merge_slab_writes(&mut chain, 64);
+        assert_eq!(
+            chain,
+            vec![SlabWrite {
+                offset: 0,
+                len: 320,
+            }]
+        );
+    }
+
+    #[test]
+    fn instance_flag_write_is_dirty_only_on_change() {
+        let mut reg = FfxiSkinRegistry::default();
+        for _ in 0..8 {
+            reg.alloc_instance(FfxiInstance::default());
+        }
+        let mut uploaded = vec![InstanceSlotMeta::default(); reg.instance_capacity()];
+        let mut writes = Vec::new();
+        plan_instance_writes(
+            &reg.instance_meta,
+            &mut uploaded,
+            reg.instance_high_water,
+            &mut writes,
+        );
+        assert_eq!(writes.len(), 8);
+
+        let flags = FfxiInstance::default().flags;
+        writes.clear();
+        reg.set_instance_lighting_flags(5, flags.y, flags.z);
+        plan_instance_writes(
+            &reg.instance_meta,
+            &mut uploaded,
+            reg.instance_high_water,
+            &mut writes,
+        );
+        assert!(writes.is_empty(), "rewriting the same flags is not dirty");
+
+        reg.set_instance_lighting_flags(5, 1.0, 1.0);
+        plan_instance_writes(
+            &reg.instance_meta,
+            &mut uploaded,
+            reg.instance_high_water,
+            &mut writes,
+        );
+        assert_eq!(
+            writes,
+            vec![SlabWrite {
+                offset: 5 * INSTANCE_STRIDE,
+                len: INSTANCE_STRIDE,
+            }]
+        );
     }
 
     #[test]

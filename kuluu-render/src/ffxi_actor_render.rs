@@ -1923,10 +1923,7 @@ pub fn tick_ffxi_render_actors(
         advance_actor_pose(&mut actor, elapsed_frames, None, None, false);
     });
     for actor in &q_actors {
-        registry
-            .skin_mut(actor.skin_slot)
-            .joints
-            .set_from(&actor.world_pose);
+        registry.set_skin_joints(actor.skin_slot, &actor.world_pose);
     }
 }
 
@@ -3766,10 +3763,7 @@ pub fn tick_live_ffxi_actors(
         });
 
     for (actor, _, _, _) in &q_actors {
-        registry
-            .skin_mut(actor.skin_slot)
-            .joints
-            .set_from(&actor.world_pose);
+        registry.set_skin_joints(actor.skin_slot, &actor.world_pose);
     }
 
     if let Some(self_id) = self_id {
@@ -4016,11 +4010,9 @@ pub fn update_ffxi_render_actor_lighting(
     };
 
     for actor in &q_actors {
-        registry.skin_mut(actor.skin_slot).lighting = lighting.clone();
+        registry.set_skin_lighting(actor.skin_slot, &lighting);
         for &slot in &actor.instance_slots {
-            let inst = registry.instance_mut(slot);
-            inst.flags.y = realistic;
-            inst.flags.z = receive;
+            registry.set_instance_lighting_flags(slot, realistic, receive);
         }
     }
 }
@@ -4122,10 +4114,7 @@ pub fn update_ffxi_actor_point_lights(
         let (point_pos, point_color, point_atten) =
             crate::zone_point_lights::point_light_arrays_for(&active.lights, &sel.indices);
 
-        let lighting = &mut registry.skin_mut(actor.skin_slot).lighting;
-        lighting.point_pos = point_pos;
-        lighting.point_color = point_color;
-        lighting.point_atten = point_atten;
+        registry.set_skin_point_lights(actor.skin_slot, point_pos, point_color, point_atten);
     }
 }
 
@@ -5880,5 +5869,61 @@ mod clip_warn_tests {
             clip_warn_once(id_b, "ROM/4/999.DAT", &wlk, "not_found"),
             "a different entity id gets its own line"
         );
+    }
+}
+
+#[cfg(test)]
+mod skin_slab_tests {
+    use super::*;
+
+    fn stub_skeleton(joints: usize) -> Skeleton {
+        Skeleton {
+            id: DatId::from_str("0000"),
+            joints: (0..joints)
+                .map(|i| ffxi_dat::skel::Joint {
+                    rotation: [0.0, 0.0, 0.0, 1.0],
+                    translation: [i as f32, 0.0, 0.0],
+                    parent: i.checked_sub(1),
+                })
+                .collect(),
+            references: Vec::new(),
+            bounding_boxes: Vec::new(),
+        }
+    }
+
+    // The serial pose copy is the only thing that gets a pose onto the GPU; a
+    // wrong setter here freezes every character on its bind pose.
+    #[test]
+    fn live_tick_writes_pose_through_the_dirty_setter() {
+        let joints = 5;
+        let pose: Vec<Mat4> = (0..joints)
+            .map(|i| Mat4::from_translation(Vec3::splat(i as f32 + 1.0)))
+            .collect();
+
+        let mut app = App::new();
+        app.init_resource::<Time>()
+            .init_resource::<FfxiSkinRegistry>()
+            .add_systems(Update, tick_ffxi_render_actors);
+
+        let slot = app
+            .world_mut()
+            .resource_mut::<FfxiSkinRegistry>()
+            .alloc_skin();
+        let mut actor = render_actor_for_test(stub_skeleton(joints), pose);
+        actor.skin_slot = slot;
+        app.world_mut().spawn(actor);
+
+        app.update();
+
+        let world_pose = app
+            .world_mut()
+            .query::<&FfxiRenderActor>()
+            .single(app.world())
+            .expect("one actor")
+            .world_pose
+            .clone();
+        assert_eq!(world_pose.len(), joints);
+        let reg = app.world().resource::<FfxiSkinRegistry>();
+        assert_eq!(&reg.skin(slot).joints.matrices[..joints], &world_pose[..]);
     }
 }

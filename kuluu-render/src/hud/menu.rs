@@ -380,6 +380,7 @@ const GRAPHICS_ENTRIES: &[&str] = &[
     "Depth of Field",
     "DoF Aperture",
     "Zone Lines",
+    "Actor Arrival",
     "Dynamic Lights",
     "  Shadowed Lights",
     "  Flicker",

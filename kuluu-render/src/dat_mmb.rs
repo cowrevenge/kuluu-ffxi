@@ -234,7 +234,8 @@ pub struct DatOverlayPlugin;
 
 impl Plugin for DatOverlayPlugin {
     fn build(&self, app: &mut App) {
-        app.add_observer(crate::ffxi_actor_render::despawn_morph_column);
+        app.add_plugins(crate::gpu_assets::GpuAssetResidencyPlugin);
+        app.add_observer(crate::ffxi_actor_render::finish_actor_reveal);
         app.add_message::<LoadMmbRequest>()
             .add_message::<crate::dat_vos2::LoadVos2Request>()
             .add_message::<crate::ffxi_actor_render::LoadActorRequest>()
@@ -597,7 +598,9 @@ pub fn process_load_mmb_requests(
                         std::collections::HashMap::with_capacity(texture_count);
                     let mut first: Option<Handle<Image>> = None;
                     for nt in &loaded.textures {
-                        let handle = images.add(decoded_texture_to_image(&nt.texture, quality));
+                        let mut image = decoded_texture_to_image(&nt.texture, quality);
+                        image.asset_usage = RenderAssetUsages::RENDER_WORLD;
+                        let handle = images.add(image);
                         if first.is_none() {
                             first = Some(handle.clone());
                         }
@@ -1023,6 +1026,10 @@ pub fn apply_texture_filtering_system(
     }
     let mut patch = |handle: &Handle<Image>| {
         if let Some(mut img) = images.get_mut(handle) {
+            // Re-extract sampler metadata without asking Bevy to take consumed pixel data again.
+            if img.data.is_none() {
+                img.asset_usage = RenderAssetUsages::default();
+            }
             img.sampler = bevy::image::ImageSampler::Descriptor(
                 crate::zone_texture::sampler_descriptor(aniso),
             );

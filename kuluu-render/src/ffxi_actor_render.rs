@@ -457,6 +457,8 @@ fn prep_key(subject: &ActorSubject, q: crate::zone_texture::TextureQuality) -> A
 }
 
 const ACTOR_PREP_CACHE_CAP: usize = 48;
+// Bound idle HD looks without forcing every ordinary look to reload.
+const ACTOR_PREP_CACHE_BYTES: usize = 128 * 1024 * 1024;
 
 struct ActorPrepEntry {
     prepared: Arc<PreparedActor>,
@@ -467,6 +469,7 @@ struct ActorPrepEntry {
     // Uploaded once per look at load completion, so N entities sharing a look
     // cost one GPU texture set and one material rather than N of each.
     image_handles: Vec<Handle<Image>>,
+    image_bytes: usize,
 }
 
 #[derive(Default)]
@@ -492,16 +495,25 @@ impl ActorPrepCache {
         key: ActorPrepKey,
         prepared: Arc<PreparedActor>,
         image_handles: Vec<Handle<Image>>,
+        image_bytes: usize,
     ) {
         let entry = ActorPrepEntry {
             prepared,
             mesh_handles: Vec::new(),
             image_handles,
+            image_bytes,
         };
         if self.map.insert(key.clone(), entry).is_none() {
             self.order.push_back(key);
         }
-        while self.map.len() > ACTOR_PREP_CACHE_CAP {
+        while self.map.len() > ACTOR_PREP_CACHE_CAP
+            || self
+                .map
+                .values()
+                .map(|entry| entry.image_bytes)
+                .sum::<usize>()
+                > ACTOR_PREP_CACHE_BYTES
+        {
             let Some(evict) = self.order.pop_front() else {
                 break;
             };
@@ -1629,6 +1641,7 @@ pub fn spawn_loaded_actor(
         &parts,
         actor_root,
         skin_slot,
+        None,
     );
 
     commands.entity(actor_root).insert(make_render_actor(
@@ -1662,6 +1675,9 @@ fn insert_auto_run_effects(commands: &mut Commands, actor_root: Entity, loaded: 
 pub struct FfxiActorMeshChild;
 
 #[derive(Component)]
+pub struct ActorFadeMaterial(Handle<FfxiSkinnedMaterial>);
+
+#[derive(Component)]
 pub(crate) struct ActorMeshJointBounds {
     skin_slot: u32,
     joint_aabbs: Arc<[JointLocalAabb]>,
@@ -1678,6 +1694,7 @@ fn build_actor_children(
     parts: &PreparedParts,
     actor_root: Entity,
     skin_slot: u32,
+    arrival: Option<bool>,
 ) -> Vec<u32> {
     let mut by_full: std::collections::HashMap<String, Handle<Image>> =
         std::collections::HashMap::with_capacity(image_handles.len());
@@ -1722,11 +1739,19 @@ fn build_actor_children(
         };
         let has_texture = if tex_handle.is_some() { 1.0 } else { 0.0 };
 
-        let mat = material_cache.get_or_create(tex_handle, materials);
+        let opaque = material_cache.get_or_create(tex_handle.clone(), materials);
+        let fading = arrival == Some(false);
+        let mat = if fading {
+            material_cache.get_for_phase(tex_handle, true, materials)
+        } else {
+            opaque.clone()
+        };
         let instance_slot = registry.alloc_instance(FfxiInstance {
             flags: Vec4::new(has_texture, 0.0, 0.0, 0.0),
             tint: built.tint,
             skin_slot,
+            reveal: if arrival == Some(true) { 0.0 } else { 1.0 },
+            opacity: if fading { 0.0 } else { 1.0 },
         });
         instance_slots.push(instance_slot);
 
@@ -1741,6 +1766,9 @@ fn build_actor_children(
                 ChildOf(actor_root),
             ))
             .id();
+        if fading {
+            commands.entity(child).insert(ActorFadeMaterial(opaque));
+        }
         if let Some(aabb) = entity_aabb_from_joints(&parts.bind_joints, &built.joint_aabbs) {
             commands.entity(child).insert((
                 aabb,
@@ -1909,6 +1937,7 @@ pub fn spawn_live_actor(
     wire_entity: Entity,
     world_id: u32,
     scale: f32,
+    enhanced_arrival: bool,
 ) -> Entity {
     commands
         .entity(wire_entity)
@@ -1945,6 +1974,7 @@ pub fn spawn_live_actor(
         &prepared.parts,
         actor_root,
         skin_slot,
+        Some(enhanced_arrival),
     );
 
     commands.entity(actor_root).insert(make_render_actor(
@@ -2778,59 +2808,77 @@ mod shadow_cast_scope_tests {
 }
 
 #[cfg(test)]
-mod morph_column_tests {
+mod actor_reveal_tests {
     use super::*;
 
-    fn morph(orb: Entity, root: Entity) -> crate::components::MorphIn {
-        crate::components::MorphIn {
-            elapsed: 0.0,
-            actor_root: root,
-            orb: Some(orb),
-            orb_mat: None,
-            orb_emissive: LinearRgba::BLACK,
-        }
-    }
-
-    /// The actual regression: an actor reload replaces `MorphIn` rather than
-    /// removing it, and the replacement cannot know the old column's id. Before
-    /// the observer owned that lifetime, the column stayed on the player for the
-    /// rest of the session.
     #[test]
-    fn replacing_the_component_takes_the_old_column_with_it() {
+    fn removing_an_arrival_restores_opacity_and_the_opaque_material() {
         let mut app = App::new();
-        app.add_observer(despawn_morph_column);
-
-        let actor = app.world_mut().spawn_empty().id();
-        let wire = app.world_mut().spawn_empty().id();
-        let first = app.world_mut().spawn(ChildOf(wire)).id();
-        app.world_mut().entity_mut(wire).insert(morph(first, actor));
-
-        let second = app.world_mut().spawn(ChildOf(wire)).id();
-        app.world_mut()
-            .entity_mut(wire)
-            .insert(morph(second, actor));
-        app.update();
-
-        assert!(app.world().get_entity(first).is_err(), "old column leaked");
-        assert!(app.world().get_entity(second).is_ok(), "new column reaped");
-    }
-
-    #[test]
-    fn finishing_the_morph_takes_its_column_with_it() {
-        let mut app = App::new();
-        app.add_observer(despawn_morph_column);
-
-        let actor = app.world_mut().spawn_empty().id();
-        let wire = app.world_mut().spawn_empty().id();
-        let orb = app.world_mut().spawn(ChildOf(wire)).id();
-        app.world_mut().entity_mut(wire).insert(morph(orb, actor));
-
+        app.init_resource::<FfxiSkinRegistry>()
+            .init_resource::<Assets<FfxiSkinnedMaterial>>()
+            .add_observer(finish_actor_reveal);
+        let slot = app
+            .world_mut()
+            .resource_mut::<FfxiSkinRegistry>()
+            .alloc_instance(FfxiInstance {
+                reveal: 0.25,
+                opacity: 0.25,
+                ..default()
+            });
+        let skeleton = Skeleton {
+            id: DatId::from_str("test"),
+            joints: Vec::new(),
+            references: Vec::new(),
+            bounding_boxes: Vec::new(),
+        };
+        let mut actor = render_actor_for_test(skeleton, Vec::new());
+        actor.instance_slots.push(slot);
+        let root = app.world_mut().spawn(actor).id();
+        let opaque = app
+            .world_mut()
+            .resource_mut::<Assets<FfxiSkinnedMaterial>>()
+            .add(FfxiSkinnedMaterial {
+                base_color_texture: None,
+                fading: false,
+            });
+        let fading = app
+            .world_mut()
+            .resource_mut::<Assets<FfxiSkinnedMaterial>>()
+            .add(FfxiSkinnedMaterial {
+                base_color_texture: None,
+                fading: true,
+            });
+        let child = app
+            .world_mut()
+            .spawn((
+                ChildOf(root),
+                MeshMaterial3d(fading),
+                ActorFadeMaterial(opaque.clone()),
+            ))
+            .id();
+        let wire = app
+            .world_mut()
+            .spawn(crate::components::MorphIn {
+                elapsed: 0.1,
+                actor_root: root,
+                enhanced: false,
+            })
+            .id();
         app.world_mut()
             .entity_mut(wire)
             .remove::<crate::components::MorphIn>();
-        app.update();
-
-        assert!(app.world().get_entity(orb).is_err());
+        app.world_mut().flush();
+        let mut registry = app.world_mut().resource_mut::<FfxiSkinRegistry>();
+        assert_eq!(registry.instance_mut(slot).reveal, 1.0);
+        assert_eq!(registry.instance_mut(slot).opacity, 1.0);
+        assert_eq!(
+            app.world()
+                .get::<MeshMaterial3d<FfxiSkinnedMaterial>>(child)
+                .unwrap()
+                .0,
+            opaque
+        );
+        assert!(app.world().get::<ActorFadeMaterial>(child).is_none());
     }
 }
 
@@ -2893,9 +2941,43 @@ mod head_look_tests {
 // Bounds per-frame asset-add + entity-spawn cost when several loads finish at
 // once (zone-in floods); the rest stay queued and drain on subsequent frames.
 const ACTOR_SPAWNS_PER_FRAME: usize = 2;
+// HD images are indivisible; an oversized image gets a frame to itself.
+const ACTOR_UPLOAD_BYTES_PER_FRAME: usize = 8 * 1024 * 1024;
+// Backpressure bounds decoded images waiting behind the upload budget.
+const ACTOR_LOAD_PIPELINE_CAP: usize = 2;
+
+struct ActorUpload {
+    entity_id: u32,
+    key: Option<ActorPrepKey>,
+    prepared: Arc<PreparedActor>,
+    pending: std::collections::VecDeque<Image>,
+    handles: Vec<Handle<Image>>,
+    bytes: usize,
+}
+
+fn upload_actor_images(
+    upload: &mut ActorUpload,
+    images: &mut Assets<Image>,
+    used: &mut usize,
+) -> bool {
+    while let Some(image) = upload.pending.front() {
+        let bytes = crate::gpu_assets::image_bytes(image);
+        if *used > 0 && used.saturating_add(bytes) > ACTOR_UPLOAD_BYTES_PER_FRAME {
+            return false;
+        }
+        let image = upload.pending.pop_front().unwrap();
+        upload.handles.push(images.add(image));
+        *used += bytes;
+        upload.bytes += bytes;
+    }
+    true
+}
 
 #[derive(Resource, Default)]
 pub struct ActorLoadInFlight {
+    queued: std::collections::VecDeque<LoadActorRequest>,
+    owners: HashMap<u32, Entity>,
+    uploads: std::collections::VecDeque<ActorUpload>,
     tasks: HashMap<u32, Task<Result<PreparedLoad, String>>>,
     keys: HashMap<u32, ActorPrepKey>,
     ready: std::collections::VecDeque<(
@@ -2907,29 +2989,91 @@ pub struct ActorLoadInFlight {
     cache: ActorPrepCache,
 }
 
+impl ActorLoadInFlight {
+    fn cancel(&mut self, entity_id: u32) {
+        self.queued.retain(|req| req.entity_id != entity_id);
+        self.tasks.remove(&entity_id);
+        self.keys.remove(&entity_id);
+        self.uploads.retain(|upload| upload.entity_id != entity_id);
+        self.ready.retain(|(id, ..)| *id != entity_id);
+    }
+}
+
 pub fn kick_load_actor_tasks(
+    mut commands: Commands,
     mut events: MessageReader<LoadActorRequest>,
     tracked: Res<crate::scene::TrackedEntities>,
     settings: Res<crate::graphics_settings::GraphicsSettings>,
     mut in_flight: ResMut<ActorLoadInFlight>,
     actor_root: Res<ActorDatRoot>,
+    state: Option<Res<crate::snapshot::SceneState>>,
+    positions: Query<&Transform, With<crate::components::WorldEntity>>,
 ) {
     let quality = crate::zone_texture::TextureQuality {
         mipmaps: settings.texture_filtering.mipmaps(),
         anisotropy: settings.texture_filtering.anisotropy(),
     };
+    let stale: Vec<u32> = in_flight
+        .owners
+        .iter()
+        .filter(|(id, owner)| tracked.by_id.get(id) != Some(owner))
+        .map(|(&id, _)| id)
+        .collect();
+    for id in stale {
+        in_flight.cancel(id);
+        in_flight.owners.remove(&id);
+    }
+    let new_requests = !events.is_empty();
     for req in events.read() {
-        if !tracked.by_id.contains_key(&req.entity_id) {
+        let Some(&owner) = tracked.by_id.get(&req.entity_id) else {
             continue;
-        }
+        };
+        commands.entity(owner).remove::<Mesh3d>();
+        in_flight.cancel(req.entity_id);
+        in_flight.owners.insert(req.entity_id, owner);
+        in_flight.queued.push_back(req.clone());
+    }
+    if new_requests {
+        let self_id = state.as_ref().and_then(|state| state.snapshot.self_char_id);
+        let origin = self_id
+            .and_then(|id| tracked.by_id.get(&id))
+            .and_then(|owner| positions.get(*owner).ok())
+            .map(|tf| tf.translation);
+        let distance = |id: u32| {
+            tracked
+                .by_id
+                .get(&id)
+                .and_then(|owner| positions.get(*owner).ok())
+                .zip(origin)
+                .map_or(f32::MAX, |(tf, origin)| {
+                    tf.translation.distance_squared(origin)
+                })
+        };
+        in_flight.queued.make_contiguous().sort_by(|a, b| {
+            (Some(b.entity_id) == self_id)
+                .cmp(&(Some(a.entity_id) == self_id))
+                .then_with(|| distance(a.entity_id).total_cmp(&distance(b.entity_id)))
+                .then_with(|| a.entity_id.cmp(&b.entity_id))
+        });
+    }
+    let queued_count = in_flight.queued.len();
+    for _ in 0..queued_count {
+        let req = in_flight.queued.pop_front().unwrap();
         let key = prep_key(&req.subject, quality);
         if let Some((prepared, image_handles)) = in_flight.cache.get_and_promote(&key) {
-            in_flight.tasks.remove(&req.entity_id);
-            in_flight.keys.remove(&req.entity_id);
-            in_flight.ready.retain(|(id, ..)| *id != req.entity_id);
             in_flight
                 .ready
                 .push_back((req.entity_id, Some(key), prepared, image_handles));
+            continue;
+        }
+        if in_flight.tasks.len() + in_flight.uploads.len() >= ACTOR_LOAD_PIPELINE_CAP
+            || in_flight.keys.values().any(|active| active == &key)
+            || in_flight
+                .uploads
+                .iter()
+                .any(|upload| upload.key.as_ref() == Some(&key))
+        {
+            in_flight.queued.push_back(req);
             continue;
         }
         let subject = req.subject.clone();
@@ -2999,20 +3143,19 @@ pub fn poll_load_actor_tasks(
     mut materials: ResMut<Assets<FfxiSkinnedMaterial>>,
     mut material_cache: ResMut<FfxiSkinnedMaterialCache>,
     mut registry: ResMut<FfxiSkinRegistry>,
-    mut std_materials: ResMut<Assets<StandardMaterial>>,
     mut images: ResMut<Assets<Image>>,
     tracked: Res<crate::scene::TrackedEntities>,
     entity_mesh: Option<Res<crate::scene::EntityMesh>>,
     mut in_flight: ResMut<ActorLoadInFlight>,
     q_existing: Query<&FfxiRenderRoot>,
-    q_ball: Query<&MeshMaterial3d<StandardMaterial>, With<Mesh3d>>,
-    state: Res<crate::snapshot::SceneState>,
+    gpu_assets: Option<Res<crate::gpu_assets::GpuAssetResidency>>,
+    settings: Res<crate::graphics_settings::GraphicsSettings>,
 ) {
-    if in_flight.tasks.is_empty() && in_flight.ready.is_empty() {
+    if in_flight.tasks.is_empty() && in_flight.ready.is_empty() && in_flight.uploads.is_empty() {
         return;
     }
     // EntityMesh only exists once a scene is loaded; park finished tasks until then.
-    let Some(entity_mesh) = entity_mesh else {
+    let Some(_) = entity_mesh else {
         return;
     };
     let mut completed: Vec<(u32, Result<PreparedLoad, String>)> = Vec::new();
@@ -3032,28 +3175,64 @@ pub fn poll_load_actor_tasks(
                 actor,
                 images: cpu_images,
             }) => {
-                let p = Arc::new(actor);
-                let image_handles: Vec<Handle<Image>> =
-                    cpu_images.into_iter().map(|img| images.add(img)).collect();
-                if let Some(key) = &key {
-                    in_flight
-                        .cache
-                        .insert(key.clone(), Arc::clone(&p), image_handles.clone());
-                }
-                in_flight.ready.retain(|(id, ..)| *id != entity_id);
-                in_flight
-                    .ready
-                    .push_back((entity_id, key, p, image_handles));
+                in_flight.uploads.push_back(ActorUpload {
+                    entity_id,
+                    key,
+                    prepared: Arc::new(actor),
+                    pending: cpu_images.into(),
+                    handles: Vec::new(),
+                    bytes: 0,
+                });
             }
             Err(e) => {
                 warn!("ffxi actor load failed (entity {entity_id}): {e}");
             }
         }
     }
-    for _ in 0..ACTOR_SPAWNS_PER_FRAME {
+    let mut uploaded_bytes = 0;
+    while let Some(upload) = in_flight.uploads.front_mut() {
+        if !upload_actor_images(upload, &mut images, &mut uploaded_bytes) {
+            break;
+        }
+        let upload = in_flight.uploads.pop_front().unwrap();
+        if let Some(key) = &upload.key {
+            in_flight.cache.insert(
+                key.clone(),
+                Arc::clone(&upload.prepared),
+                upload.handles.clone(),
+                upload.bytes,
+            );
+        }
+        in_flight.ready.push_back((
+            upload.entity_id,
+            upload.key,
+            upload.prepared,
+            upload.handles,
+        ));
+    }
+    if uploaded_bytes > 0 {
+        tracing::debug!(target: "actor_upload", bytes = uploaded_bytes, queued = in_flight.queued.len(), uploading = in_flight.uploads.len(), ready = in_flight.ready.len(), "actor textures published");
+    }
+    let ready_count = in_flight.ready.len();
+    let mut spawned = 0;
+    for _ in 0..ready_count {
+        if spawned >= ACTOR_SPAWNS_PER_FRAME {
+            break;
+        }
+
         let Some((entity_id, key, prepared, image_handles)) = in_flight.ready.pop_front() else {
             break;
         };
+        if gpu_assets
+            .as_ref()
+            .is_some_and(|gpu| !gpu.images_ready(&image_handles))
+        {
+            in_flight
+                .ready
+                .push_back((entity_id, key, prepared, image_handles));
+            continue;
+        }
+        spawned += 1;
         // The wire entity may have despawned (or been re-tracked) while the load
         // ran; resolve it fresh and drop the result if it is gone.
         let Some(&wire_entity) = tracked.by_id.get(&entity_id) else {
@@ -3080,64 +3259,20 @@ pub fn poll_load_actor_tasks(
             wire_entity,
             entity_id,
             prepared.scale,
+            settings.enhanced_actor_arrival,
         );
 
-        // A transient child carries the stretch: the wire entity is driven by
-        // sync and the model shares its transform, so neither can be reshaped.
-        // A reload has no resting orb to consume and just regrows the model.
-        //
-        // The placeholder ball is the stand-in for a body that has not loaded
-        // yet, so the model arriving consumes it either way. What retail skips
-        // for self is only the morph-in column it would have stretched into
-        // (retail capture, Upper Jeuno -> Rolanberry Fields, 2026-08-04) —
-        // skipping the whole branch here stranded the ball on the player.
-        let resting_ball = q_ball.get(wire_entity).ok();
-        if resting_ball.is_some() {
-            commands.entity(wire_entity).remove::<Mesh3d>();
-        }
-        let orb = (Some(entity_id) != state.snapshot.self_char_id)
-            .then_some(resting_ball)
-            .flatten()
-            .and_then(|mm| {
-                let lit = std_materials.get(&mm.0).map(|m| {
-                    let mut m = m.clone();
-                    m.alpha_mode = AlphaMode::Blend;
-                    m
-                })?;
-                let emissive = lit.emissive;
-                let handle = std_materials.add(lit);
-                let orb = commands
-                    .spawn((
-                        Mesh3d(entity_mesh.morph_orb.clone()),
-                        MeshMaterial3d(handle.clone()),
-                        Transform::from_xyz(0.0, MORPH_COLUMN_PIVOT_Y, 0.0),
-                        // Inherited (not Visible): an INVISIBLE entity's root is
-                        // Hidden and must not leak the morph column through it —
-                        // Visible would override the parent hide.
-                        Visibility::Inherited,
-                        bevy::light::NotShadowCaster,
-                        ChildOf(wire_entity),
-                    ))
-                    .id();
-                Some((orb, handle, emissive))
-            });
-
-        commands.entity(root).insert(Transform {
-            translation: Vec3::ZERO,
-            rotation: ffxi_to_bevy_basis(),
-            scale: Vec3::splat(MORPH_START_SCALE),
-        });
-
-        commands.entity(wire_entity).try_insert((
-            FfxiRenderRoot(root),
-            crate::components::MorphIn {
+        commands.entity(wire_entity).remove::<Mesh3d>();
+        commands
+            .entity(wire_entity)
+            .try_insert(FfxiRenderRoot(root));
+        commands
+            .entity(wire_entity)
+            .try_insert(crate::components::MorphIn {
                 elapsed: 0.0,
                 actor_root: root,
-                orb: orb.as_ref().map(|(e, _, _)| *e),
-                orb_mat: orb.as_ref().map(|(_, h, _)| h.clone()),
-                orb_emissive: orb.map(|(_, _, e)| e).unwrap_or(LinearRgba::BLACK),
-            },
-        ));
+                enhanced: settings.enhanced_actor_arrival,
+            });
 
         // Animated mob extents need their own camera/picking policy; locator metadata is independent.
         if !matches!(key.as_ref(), Some(ActorPrepKey::Npc { .. })) {
@@ -3151,60 +3286,29 @@ pub fn poll_load_actor_tasks(
     }
 }
 
-const MORPH_START_SCALE: f32 = 0.03;
-const MORPH_DURATION: f32 = 0.5;
-const MORPH_COLUMN_PIVOT_Y: f32 = 1.0;
-const MORPH_COLUMN_STRETCH: f32 = 11.0;
-
-fn ease_out_back(p: f32) -> f32 {
-    const C1: f32 = 1.70158;
-    const C3: f32 = C1 + 1.0;
-    let x = p - 1.0;
-    1.0 + C3 * x * x * x + C1 * x * x
-}
+// .agents/skills/retail-observe/references/2026-09-14-pc-model-arrival.md
+const MORPH_DURATION: f32 = 32.0 / 60.0;
 
 pub fn tick_morph_in(
     time: Res<Time>,
     mut commands: Commands,
-    mut std_materials: ResMut<Assets<StandardMaterial>>,
     mut q_morph: Query<(Entity, &mut crate::components::MorphIn)>,
-    mut q_tf: Query<&mut Transform>,
+    q_actor: Query<&FfxiRenderActor>,
+    mut registry: ResMut<FfxiSkinRegistry>,
 ) {
-    let dt = time.delta_secs();
     for (wire_entity, mut morph) in &mut q_morph {
-        morph.elapsed += dt;
-        let p = (morph.elapsed / MORPH_DURATION).clamp(0.0, 1.0);
-
-        // The figure rises into the column over the back three-quarters.
-        let emerge = ((p - 0.25) / 0.75).clamp(0.0, 1.0);
-        let grow = MORPH_START_SCALE + (1.0 - MORPH_START_SCALE) * ease_out_back(emerge);
-        if let Ok(mut tf) = q_tf.get_mut(morph.actor_root) {
-            tf.scale = Vec3::splat(grow);
-        }
-
-        // Ball -> vertical light-column -> nothing: stretch up, then thin away.
-        let stretch = (p / 0.5).clamp(0.0, 1.0);
-        let collapse = ((p - 0.4) / 0.6).clamp(0.0, 1.0);
-        let sy = 1.0 + (MORPH_COLUMN_STRETCH - 1.0) * stretch;
-        let sxz = 1.0 - collapse;
-        if let Some(orb) = morph.orb {
-            if let Ok(mut tf) = q_tf.get_mut(orb) {
-                tf.scale = Vec3::new(sxz, sy, sxz);
+        morph.elapsed += time.delta_secs();
+        let progress = (morph.elapsed / MORPH_DURATION).clamp(0.0, 1.0);
+        if let Ok(actor) = q_actor.get(morph.actor_root) {
+            for &slot in actor.instance_slots() {
+                if morph.enhanced {
+                    registry.set_instance_reveal(slot, progress);
+                } else {
+                    registry.set_instance_opacity(slot, progress);
+                }
             }
         }
-        if let Some(handle) = &morph.orb_mat {
-            if let Some(mut mat) = std_materials.get_mut(handle) {
-                let fade = sxz;
-                let e = morph.orb_emissive;
-                mat.base_color = mat.base_color.with_alpha(fade);
-                mat.emissive = LinearRgba::new(e.red * fade, e.green * fade, e.blue * fade, 1.0);
-            }
-        }
-
-        if p >= 1.0 {
-            if let Ok(mut tf) = q_tf.get_mut(morph.actor_root) {
-                tf.scale = Vec3::ONE;
-            }
+        if progress >= 1.0 {
             commands
                 .entity(wire_entity)
                 .remove::<crate::components::MorphIn>();
@@ -3212,22 +3316,28 @@ pub fn tick_morph_in(
     }
 }
 
-/// The column is owned by the [`MorphIn`] that spawned it, not by whoever
-/// happens to finish it. Nothing else holds the child's id, so an actor reload
-/// — which *replaces* the component rather than removing it — used to strand
-/// the old column on a living player forever.
-///
-/// [`MorphIn`]: crate::components::MorphIn
-pub fn despawn_morph_column(
+pub fn finish_actor_reveal(
     trigger: On<Discard, crate::components::MorphIn>,
     q: Query<&crate::components::MorphIn>,
+    actors: Query<(&FfxiRenderActor, &Children)>,
+    mut materials: Query<(&ActorFadeMaterial, &mut MeshMaterial3d<FfxiSkinnedMaterial>)>,
+    mut registry: ResMut<FfxiSkinRegistry>,
     mut commands: Commands,
 ) {
     let Ok(morph) = q.get(trigger.event().event_target()) else {
         return;
     };
-    if let Some(orb) = morph.orb {
-        commands.entity(orb).try_despawn();
+    if let Ok((actor, children)) = actors.get(morph.actor_root) {
+        for &slot in actor.instance_slots() {
+            registry.set_instance_reveal(slot, 1.0);
+            registry.set_instance_opacity(slot, 1.0);
+        }
+        for child in children {
+            if let Ok((opaque, mut material)) = materials.get_mut(*child) {
+                material.0 = opaque.0.clone();
+                commands.entity(*child).remove::<ActorFadeMaterial>();
+            }
+        }
     }
 }
 
@@ -4455,7 +4565,7 @@ mod actor_texture_tests {
             mipmaps: false,
             anisotropy: 1,
         };
-        cache.insert(key.clone(), prepared, vec![handle]);
+        cache.insert(key.clone(), prepared, vec![handle], 0);
         assert_eq!(images.len(), 1);
 
         let mut spawned_handles = Vec::new();
@@ -4477,6 +4587,7 @@ mod actor_texture_tests {
                 &hit.parts,
                 root,
                 skin_slot,
+                None,
             );
             state.apply(&mut world);
             spawned_handles.push(image_handles);
@@ -4558,12 +4669,103 @@ mod mesh_dedup_tests {
         }
     }
 
+    fn upload(width: u32, count: usize) -> ActorUpload {
+        use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
+        ActorUpload {
+            entity_id: 1,
+            key: Some(npc_key(1)),
+            prepared: synth_prepared(0),
+            pending: (0..count)
+                .map(|_| {
+                    Image::new_uninit(
+                        Extent3d {
+                            width,
+                            height: width,
+                            depth_or_array_layers: 1,
+                        },
+                        TextureDimension::D2,
+                        TextureFormat::Rgba8UnormSrgb,
+                        RenderAssetUsages::RENDER_WORLD,
+                    )
+                })
+                .collect(),
+            handles: Vec::new(),
+            bytes: 0,
+        }
+    }
+
+    #[test]
+    fn texture_budget_spans_looks_and_oversized_images_make_progress() {
+        let mut images = Assets::default();
+        let mut used = 0;
+        let mut first = upload(1024, 3);
+        assert!(!upload_actor_images(&mut first, &mut images, &mut used));
+        assert_eq!(used, ACTOR_UPLOAD_BYTES_PER_FRAME);
+        assert_eq!(first.handles.len(), 2);
+        used = 0;
+        assert!(upload_actor_images(&mut first, &mut images, &mut used));
+        let mut oversized = upload(2048, 2);
+        assert!(!upload_actor_images(&mut oversized, &mut images, &mut used));
+        assert!(oversized.handles.is_empty());
+        used = 0;
+        assert!(!upload_actor_images(&mut oversized, &mut images, &mut used));
+        assert_eq!(oversized.handles.len(), 1);
+        assert!(used > ACTOR_UPLOAD_BYTES_PER_FRAME);
+        used = 0;
+        assert!(upload_actor_images(&mut oversized, &mut images, &mut used));
+    }
+
+    #[test]
+    fn cache_evicts_by_texture_bytes_and_promotes_recent_looks() {
+        let mut cache = ActorPrepCache::default();
+        let half = ACTOR_PREP_CACHE_BYTES / 2;
+        for id in [1, 2] {
+            cache.insert(npc_key(id), synth_prepared(0), Vec::new(), half);
+        }
+        cache.get_and_promote(&npc_key(1)).unwrap();
+        cache.insert(npc_key(3), synth_prepared(0), Vec::new(), half);
+        assert!(cache.map.contains_key(&npc_key(1)));
+        assert!(!cache.map.contains_key(&npc_key(2)));
+        assert_eq!(cache.map.len(), 2);
+        cache.insert(
+            npc_key(4),
+            synth_prepared(0),
+            Vec::new(),
+            ACTOR_PREP_CACHE_BYTES + 1,
+        );
+        assert!(cache.map.is_empty());
+    }
+
+    #[test]
+    fn cancelling_a_look_drops_every_pending_stage() {
+        let mut in_flight = ActorLoadInFlight::default();
+        in_flight.queued.push_back(LoadActorRequest {
+            entity_id: 1,
+            subject: ActorSubject::Npc {
+                file_id: 1,
+                graph_size: 0,
+            },
+        });
+        in_flight.keys.insert(1, npc_key(1));
+        in_flight.uploads.push_back(upload(1, 1));
+        in_flight
+            .ready
+            .push_back((1, Some(npc_key(1)), synth_prepared(0), Vec::new()));
+        in_flight.cancel(1);
+        assert!(
+            in_flight.queued.is_empty()
+                && in_flight.keys.is_empty()
+                && in_flight.uploads.is_empty()
+                && in_flight.ready.is_empty()
+        );
+    }
+
     #[test]
     fn cached_look_reuses_the_same_mesh_handles() {
         let mut meshes = Assets::<Mesh>::default();
         let mut cache = ActorPrepCache::default();
         let key = npc_key(1);
-        cache.insert(key.clone(), synth_prepared(2), Vec::new());
+        cache.insert(key.clone(), synth_prepared(2), Vec::new(), 0);
 
         let first = cache.mesh_handles(&key, &mut meshes).expect("cached entry");
         let second = cache.mesh_handles(&key, &mut meshes).expect("cached entry");
@@ -6015,6 +6217,7 @@ mod actor_bounds_tests {
             &parts,
             root,
             skin_slot,
+            None,
         );
         state.apply(&mut world);
 

@@ -66,16 +66,11 @@ pub struct EntityModel {
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MountModel(pub kuluu_snapshot::Mount);
 
-/// Model-load transition: grows the actor in while a transient orb stretches
-/// into a light-column and dissolves. The column's lifetime belongs to this
-/// component — see `ffxi_actor_render::despawn_morph_column`.
 #[derive(Component, Debug, Clone)]
 pub struct MorphIn {
+    pub enhanced: bool,
     pub elapsed: f32,
     pub actor_root: Entity,
-    pub orb: Option<Entity>,
-    pub orb_mat: Option<Handle<StandardMaterial>>,
-    pub orb_emissive: LinearRgba,
 }
 
 #[derive(Component, Debug, Clone, Copy)]

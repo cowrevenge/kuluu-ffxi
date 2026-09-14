@@ -788,7 +788,6 @@ fn s8_info_chunk_scale_and_movement_reach_the_live_actor() {
         pc: bevy::asset::Handle::default(),
         mob: bevy::asset::Handle::default(),
         pet: bevy::asset::Handle::default(),
-        morph_orb: bevy::asset::Handle::default(),
     });
     app.add_systems(
         Update,

@@ -31,6 +31,7 @@ pub mod ffxi_particle_material;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod ffxi_zone_material;
 pub mod fishing_spot;
+pub mod gpu_assets;
 pub mod graphics;
 pub use graphics::settings as graphics_settings;
 pub mod hud;

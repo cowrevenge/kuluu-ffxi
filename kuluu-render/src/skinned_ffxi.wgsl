@@ -1,3 +1,5 @@
+#import kuluu_render::actor_reveal::{reveal_threshold, reveal_edge}
+
 // FFXI faithful skinned-character shader — a WGSL port of FFXI's
 // skinned-character shader (cross-referenced against research/xim's
 // poc/gl/XimSkinnedShader.kt).
@@ -84,6 +86,8 @@ struct FfxiInstance {
     flags: vec4<f32>,
     tint: vec4<f32>,
     skin_slot: u32,
+    reveal: f32,
+    opacity: f32,
 };
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(0) var<storage, read> skins: array<FfxiSkin>;
@@ -205,6 +209,12 @@ fn apply_distance_fog(color: vec4<f32>, world_pos: vec3<f32>) -> vec4<f32> {
 fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     let rec = instances[in.inst_idx];
     let si = rec.skin_slot;
+    var arrival_light = vec3<f32>(0.0);
+    if (rec.reveal < 1.0) {
+        let threshold = reveal_threshold(in.uv);
+        if (rec.reveal < threshold) { discard; }
+        arrival_light = reveal_edge(rec.reveal, threshold);
+    }
     // Untextured FFXI meshes (C/CS ops) carry a null TextureLink: treat the
     // texel as white opaque and skip the alpha-test so the vertex color shows.
     let has_texture = rec.flags.x > 0.5;
@@ -255,10 +265,7 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
         let albedo = texel.rgb * in.color.rgb * rec.tint.rgb;
         let irr = scene_irradiance(si, n, in.world_position, 0.3, shadow_scale, receive_shadows, in.clip_position.xy);
         let rgb = albedo * (irr * EXPOSURE + vec3<f32>(AMBIENT_FLOOR));
-        // Opaque output (AlphaMode::Mask already discarded cut-out texels). A
-        // sub-1 alpha here would let the preview camera composite the character
-        // see-through over the launcher backdrop.
-        return apply_distance_fog(vec4<f32>(rgb + highlight, 1.0), in.world_position);
+        return apply_distance_fog(vec4<f32>(rgb + highlight + arrival_light, rec.opacity), in.world_position);
     }
 
     // FFXI-faithful: flat per-vertex light * vertex color through the single
@@ -269,9 +276,5 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     shadow_scale = mix(vec2<f32>(FFXI_SHADOW_FLOOR), vec2<f32>(1.0), shadow_scale);
     let lit = saturate(scene_irradiance(si, n, in.world_position, 0.0, shadow_scale, receive_shadows, in.clip_position.xy) * in.color.rgb);
     let rgb = saturate(D3D_MODULATE_2X * lit * texel.rgb * rec.tint.rgb);
-    // Opaque output (AlphaMode::Mask already discarded cut-out texels). A sub-1
-    // alpha here would let the preview camera composite the character see-
-    // through over the launcher backdrop. The depth-only cast-shadow / prepass
-    // path lives in the separate skinned_ffxi_prepass.wgsl module.
-    return apply_distance_fog(vec4<f32>(rgb + highlight, 1.0), in.world_position);
+    return apply_distance_fog(vec4<f32>(rgb + highlight + arrival_light, rec.opacity), in.world_position);
 }

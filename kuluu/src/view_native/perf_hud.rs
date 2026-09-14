@@ -178,7 +178,11 @@ pub fn track_asset_churn(
         if let AssetEvent::Added { id } | AssetEvent::Modified { id } = ev {
             churn.images += 1;
             if let Some(img) = images.get(*id) {
-                churn.image_bytes += img.data.as_ref().map_or(0, Vec::len) as u64;
+                churn.image_bytes += if matches!(ev, AssetEvent::Added { .. }) {
+                    kuluu_render::gpu_assets::image_bytes(img) as u64
+                } else {
+                    img.data.as_ref().map_or(0, Vec::len) as u64
+                };
             }
         }
     }

@@ -277,6 +277,7 @@ pub enum GraphicsField {
     DofAperture,
 
     ZoneLineDisplay,
+    ActorArrival,
 
     MinimapRadar,
 
@@ -345,6 +346,7 @@ impl GraphicsField {
             GraphicsField::DepthOfField => "Depth of Field",
             GraphicsField::DofAperture => "DoF Aperture",
             GraphicsField::ZoneLineDisplay => "Zone Lines",
+            GraphicsField::ActorArrival => "Actor Arrival",
             GraphicsField::MinimapRadar => "Minimap",
             GraphicsField::RenderScale => "Render Scale",
             GraphicsField::Dlss => "DLSS",
@@ -571,6 +573,9 @@ pub struct GraphicsSettings {
     pub zone_line_display: ZoneLineDisplay,
 
     #[serde(default)]
+    pub enhanced_actor_arrival: bool,
+
+    #[serde(default)]
     pub minimap_radar: MinimapRadar,
 
     #[serde(default = "default_render_scale")]
@@ -786,6 +791,7 @@ impl GraphicsSettings {
                 depth_of_field: false,
                 dof_aperture_f_stops: DEFAULT_DOF_APERTURE,
                 zone_line_display: ZoneLineDisplay::Off,
+                enhanced_actor_arrival: false,
                 minimap_radar: MinimapRadar::Vanilla,
                 render_scale: DEFAULT_RENDER_SCALE,
                 fullscreen: false,
@@ -829,6 +835,7 @@ impl GraphicsSettings {
                 depth_of_field: false,
                 dof_aperture_f_stops: DEFAULT_DOF_APERTURE,
                 zone_line_display: ZoneLineDisplay::Off,
+                enhanced_actor_arrival: false,
                 minimap_radar: MinimapRadar::Vanilla,
                 render_scale: DEFAULT_RENDER_SCALE,
                 fullscreen: false,
@@ -872,6 +879,7 @@ impl GraphicsSettings {
                 depth_of_field: false,
                 dof_aperture_f_stops: DEFAULT_DOF_APERTURE,
                 zone_line_display: ZoneLineDisplay::Off,
+                enhanced_actor_arrival: false,
                 minimap_radar: MinimapRadar::Vanilla,
                 render_scale: DEFAULT_RENDER_SCALE,
                 fullscreen: false,
@@ -915,6 +923,7 @@ impl GraphicsSettings {
                 depth_of_field: false,
                 dof_aperture_f_stops: DEFAULT_DOF_APERTURE,
                 zone_line_display: ZoneLineDisplay::Off,
+                enhanced_actor_arrival: false,
                 minimap_radar: MinimapRadar::Vanilla,
                 render_scale: DEFAULT_RENDER_SCALE,
                 fullscreen: false,
@@ -962,6 +971,7 @@ impl GraphicsSettings {
                 depth_of_field: false,
                 dof_aperture_f_stops: DEFAULT_DOF_APERTURE,
                 zone_line_display: ZoneLineDisplay::Off,
+                enhanced_actor_arrival: false,
                 minimap_radar: MinimapRadar::Vanilla,
                 render_scale: DEFAULT_RENDER_SCALE,
                 fullscreen: false,
@@ -1050,6 +1060,12 @@ impl GraphicsSettings {
             GraphicsField::DepthOfField => bool_label(self.depth_of_field).into(),
             GraphicsField::DofAperture => format!("f/{:.1}", self.dof_aperture_f_stops),
             GraphicsField::ZoneLineDisplay => self.zone_line_display.label().to_string(),
+            GraphicsField::ActorArrival => if self.enhanced_actor_arrival {
+                "Luminous (Enhanced)"
+            } else {
+                "Fade"
+            }
+            .to_string(),
             GraphicsField::MinimapRadar => self.minimap_radar.label().to_string(),
             GraphicsField::RenderScale => {
                 if self.dlss_active() {
@@ -1128,6 +1144,7 @@ impl GraphicsSettings {
                 let (sl, lf) = (self.shadowed_lights, self.light_flicker);
                 let receive = self.faithful_shadow_receive;
                 let zld = self.zone_line_display;
+                let arrival = self.enhanced_actor_arrival;
                 let minimap_radar = self.minimap_radar;
                 let (ui_scale, menu_scale) = (self.ui_scale, self.menu_scale);
                 let vsync = self.vsync;
@@ -1156,6 +1173,7 @@ impl GraphicsSettings {
                 self.light_flicker = lf;
                 self.faithful_shadow_receive = receive;
                 self.zone_line_display = zld;
+                self.enhanced_actor_arrival = arrival;
                 self.minimap_radar = minimap_radar;
                 self.ui_scale = ui_scale;
                 self.menu_scale = menu_scale;
@@ -1303,6 +1321,11 @@ impl GraphicsSettings {
                 self.dof_aperture_f_stops =
                     cycle_slot_f32(self.dof_aperture_f_stops, DOF_APERTURE_SLOTS, delta);
                 self.preset = QualityPreset::Custom;
+            }
+            GraphicsField::ActorArrival => {
+                const ARRIVAL_SLOTS: &[bool] = &[false, true];
+                self.enhanced_actor_arrival =
+                    cycle_slot(self.enhanced_actor_arrival, ARRIVAL_SLOTS, delta).unwrap_or(false);
             }
             GraphicsField::ZoneLineDisplay => {
                 self.zone_line_display =
@@ -1582,6 +1605,7 @@ pub const GRAPHICS_FIELDS: &[GraphicsField] = &[
     GraphicsField::DepthOfField,
     GraphicsField::DofAperture,
     GraphicsField::ZoneLineDisplay,
+    GraphicsField::ActorArrival,
     GraphicsField::DynamicLights,
     GraphicsField::ShadowedLights,
     GraphicsField::LightFlicker,
@@ -2686,6 +2710,34 @@ mod tests {
                 "{f:?}: is_advanced disagrees with its indented label"
             );
         }
+    }
+
+    #[test]
+    fn actor_arrival_is_explicit_persisted_and_independent_of_presets() {
+        let mut settings = GraphicsSettings::default();
+        assert!(!settings.enhanced_actor_arrival);
+        let preset = settings.preset;
+        settings.cycle(GraphicsField::ActorArrival, 1);
+        assert!(settings.enhanced_actor_arrival);
+        assert_eq!(settings.preset, preset);
+        settings.cycle(GraphicsField::Preset, 1);
+        assert!(settings.enhanced_actor_arrival);
+        let json = serde_json::to_string(&settings).unwrap();
+        assert_eq!(
+            serde_json::from_str::<GraphicsSettings>(&json).unwrap(),
+            settings
+        );
+        settings.cycle(GraphicsField::ActorArrival, -1);
+        assert!(!settings.enhanced_actor_arrival);
+        let mut old = serde_json::to_value(&settings).unwrap();
+        old.as_object_mut()
+            .unwrap()
+            .remove("enhanced_actor_arrival");
+        assert!(
+            !serde_json::from_value::<GraphicsSettings>(old)
+                .unwrap()
+                .enhanced_actor_arrival
+        );
     }
 
     #[test]

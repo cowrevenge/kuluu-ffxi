@@ -181,6 +181,9 @@ fn parse_graphics_settings(bytes: &[u8]) -> Result<GraphicsSettings> {
     if let Some(x) = take(&v, "dof_aperture_f_stops") {
         s.dof_aperture_f_stops = x;
     }
+    if let Some(x) = take(&v, "enhanced_actor_arrival") {
+        s.enhanced_actor_arrival = x;
+    }
     if let Some(x) = take::<ZoneLineDisplay>(&v, "zone_line_display") {
         s.zone_line_display = x;
     }
@@ -267,6 +270,21 @@ mod tests {
             std::thread::current().id(),
         ));
         p
+    }
+
+    #[test]
+    fn luminous_arrival_roundtrips_through_lenient_store_parser() {
+        let settings = GraphicsSettings {
+            enhanced_actor_arrival: true,
+            ..default()
+        };
+        let parsed = parse_graphics_settings(&serde_json::to_vec(&settings).unwrap()).unwrap();
+        assert!(parsed.enhanced_actor_arrival);
+        assert!(
+            !parse_graphics_settings(b"{}")
+                .unwrap()
+                .enhanced_actor_arrival
+        );
     }
 
     #[test]

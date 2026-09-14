@@ -160,6 +160,8 @@ pub struct FfxiInstance {
     pub flags: Vec4,
     pub tint: Vec4,
     pub skin_slot: u32,
+    pub reveal: f32,
+    pub opacity: f32,
 }
 
 impl Default for FfxiInstance {
@@ -168,6 +170,8 @@ impl Default for FfxiInstance {
             flags: Vec4::new(1.0, 0.0, 0.0, 0.0),
             tint: Vec4::ONE,
             skin_slot: 0,
+            reveal: 1.0,
+            opacity: 1.0,
         }
     }
 }
@@ -233,6 +237,7 @@ pub struct FfxiSkinRegistry {
     instance_high_water: u32,
     buffer_generation: u64,
     write_counter: u64,
+    extracted_epoch: std::sync::atomic::AtomicU64,
 }
 
 impl Default for FfxiSkinRegistry {
@@ -248,6 +253,7 @@ impl Default for FfxiSkinRegistry {
             instance_high_water: 0,
             buffer_generation: 0,
             write_counter: 0,
+            extracted_epoch: std::sync::atomic::AtomicU64::new(0),
         }
     }
 }
@@ -312,6 +318,15 @@ impl FfxiSkinRegistry {
     }
 
     pub fn set_skin_joints(&mut self, slot: u32, pose: &[Mat4]) {
+        let meta = &mut self.skin_meta[slot as usize];
+        if meta.joints_epoch
+            <= self
+                .extracted_epoch
+                .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            meta.joints_len = 0;
+        }
+
         let n = pose.len().min(MAX_JOINTS);
         let matrices = &mut self.skins[slot as usize].joints.matrices;
         if matrices[..n] != pose[..n] {
@@ -319,7 +334,13 @@ impl FfxiSkinRegistry {
             let epoch = self.next_epoch();
             self.skin_meta[slot as usize].joints_epoch = epoch;
         }
-        self.skin_meta[slot as usize].joints_len = n as u32;
+        self.skin_meta[slot as usize].joints_len =
+            self.skin_meta[slot as usize].joints_len.max(n as u32);
+    }
+
+    fn mark_skin_extract_complete(&self) {
+        self.extracted_epoch
+            .store(self.write_counter, std::sync::atomic::Ordering::Relaxed);
     }
 
     pub fn set_skin_lighting(&mut self, slot: u32, lighting: &FfxiLightingUniform) {
@@ -391,6 +412,20 @@ impl FfxiSkinRegistry {
         let epoch = self.next_epoch();
         self.instance_meta[slot as usize].epoch = epoch;
         &mut self.instances[slot as usize]
+    }
+
+    pub fn set_instance_opacity(&mut self, slot: u32, opacity: f32) {
+        if self.instances[slot as usize].opacity != opacity {
+            self.instances[slot as usize].opacity = opacity;
+            self.instance_meta[slot as usize].epoch = self.next_epoch();
+        }
+    }
+
+    pub fn set_instance_reveal(&mut self, slot: u32, reveal: f32) {
+        if self.instances[slot as usize].reveal != reveal {
+            self.instances[slot as usize].reveal = reveal;
+            self.instance_meta[slot as usize].epoch = self.next_epoch();
+        }
     }
 
     pub fn set_instance_lighting_flags(&mut self, slot: u32, realistic: f32, receive: f32) {
@@ -469,20 +504,15 @@ pub fn free_instance_slot_on_remove(
     }
 }
 
-/// One material asset per distinct texture (see `FfxiSkinnedMaterialCache`);
-/// all per-actor/per-submesh state lives in `FfxiSkinRegistry` and reaches the
-/// shader through the shared storage buffers, so materials never churn.
 #[derive(Asset, TypePath, Clone, Debug)]
 pub struct FfxiSkinnedMaterial {
     pub base_color_texture: Option<Handle<Image>>,
+    pub fading: bool,
 }
 
-/// Dedupes `FfxiSkinnedMaterial` assets by texture so every submesh drawing the
-/// same DAT texture shares one material (one bind group). `None` = the shared
-/// untextured material for blank-texture C/CS meshes.
 #[derive(Resource, Default)]
 pub struct FfxiSkinnedMaterialCache {
-    by_texture: HashMap<Option<AssetId<Image>>, Handle<FfxiSkinnedMaterial>>,
+    by_texture: HashMap<(Option<AssetId<Image>>, bool), Handle<FfxiSkinnedMaterial>>,
 }
 
 impl FfxiSkinnedMaterialCache {
@@ -491,7 +521,16 @@ impl FfxiSkinnedMaterialCache {
         texture: Option<Handle<Image>>,
         materials: &mut Assets<FfxiSkinnedMaterial>,
     ) -> Handle<FfxiSkinnedMaterial> {
-        let key = texture.as_ref().map(Handle::id);
+        self.get_for_phase(texture, false, materials)
+    }
+
+    pub fn get_for_phase(
+        &mut self,
+        texture: Option<Handle<Image>>,
+        fading: bool,
+        materials: &mut Assets<FfxiSkinnedMaterial>,
+    ) -> Handle<FfxiSkinnedMaterial> {
+        let key = (texture.as_ref().map(Handle::id), fading);
         if let Some(h) = self.by_texture.get(&key) {
             if materials.contains(h) {
                 return h.clone();
@@ -499,6 +538,7 @@ impl FfxiSkinnedMaterialCache {
         }
         let h = materials.add(FfxiSkinnedMaterial {
             base_color_texture: texture,
+            fading,
         });
         self.by_texture.insert(key, h.clone());
         h
@@ -519,14 +559,21 @@ fn prune_ffxi_material_cache(
     mut removed: RemovedComponents<MeshMaterial3d<FfxiSkinnedMaterial>>,
     q_live: Query<&MeshMaterial3d<FfxiSkinnedMaterial>>,
     mut cache: ResMut<FfxiSkinnedMaterialCache>,
+    changed: Query<(), Changed<MeshMaterial3d<FfxiSkinnedMaterial>>>,
+    materials: Res<Assets<FfxiSkinnedMaterial>>,
 ) {
-    if removed.is_empty() {
+    if removed.is_empty() && changed.is_empty() {
         return;
     }
     removed.clear();
-    let live: std::collections::HashSet<AssetId<FfxiSkinnedMaterial>> =
-        q_live.iter().map(|m| m.0.id()).collect();
-    cache.by_texture.retain(|_, h| live.contains(&h.id()));
+    let live: std::collections::HashSet<Option<AssetId<Image>>> = q_live
+        .iter()
+        .filter_map(|m| materials.get(&m.0))
+        .map(|m| m.base_color_texture.as_ref().map(Handle::id))
+        .collect();
+    cache
+        .by_texture
+        .retain(|(texture, _), _| live.contains(texture));
 }
 
 /// Render-world owner of the two shared storage buffers every
@@ -767,7 +814,11 @@ impl Material for FfxiSkinnedMaterial {
     }
 
     fn alpha_mode(&self) -> AlphaMode {
-        AlphaMode::Mask(SKINNED_ALPHA_DISCARD)
+        if self.fading {
+            AlphaMode::Blend
+        } else {
+            AlphaMode::Mask(SKINNED_ALPHA_DISCARD)
+        }
     }
 
     fn enable_prepass() -> bool {
@@ -836,7 +887,9 @@ fn remark_materials_on_buffer_growth(
     *last_generation = registry.buffer_generation();
     let ids: Vec<AssetId<FfxiSkinnedMaterial>> = materials.ids().collect();
     for id in ids {
-        let _ = materials.get_mut(id);
+        if let Some(material) = materials.get_mut(id) {
+            let _ = material.into_inner();
+        }
     }
 }
 
@@ -920,6 +973,7 @@ fn upload_ffxi_shared_buffers(
             queue.write_buffer(buffer, write.offset, scratch);
         }
     }
+    registry.mark_skin_extract_complete();
 }
 
 pub struct FfxiMaterialPlugin;
@@ -928,6 +982,7 @@ impl Plugin for FfxiMaterialPlugin {
     fn build(&self, app: &mut App) {
         bevy::shader::load_shader_library!(app, "directional_shadow.wgsl");
         bevy::shader::load_shader_library!(app, "point_shadow.wgsl");
+        bevy::shader::load_shader_library!(app, "actor_reveal.wgsl");
         embedded_asset!(app, "skinned_ffxi.wgsl");
         embedded_asset!(app, "skinned_ffxi_prepass.wgsl");
         app.add_plugins(MaterialPlugin::<FfxiSkinnedMaterial>::default());
@@ -1073,6 +1128,7 @@ mod tests {
     fn drain_skin_plan(reg: &FfxiSkinRegistry, uploaded: &mut [SkinSlotMeta]) -> Vec<SlabWrite> {
         let mut writes = Vec::new();
         plan_skin_writes(&reg.skin_meta, uploaded, reg.skin_high_water, &mut writes);
+        reg.mark_skin_extract_complete();
         writes
     }
 
@@ -1119,6 +1175,36 @@ mod tests {
         assert_eq!(
             encoded(&reg, across_slots),
             want[across_slots.offset as usize..(across_slots.offset + across_slots.len) as usize]
+        );
+    }
+
+    #[test]
+    fn shorter_second_pose_preserves_dirty_joint_tail_until_extract() {
+        let mut reg = distinct_skins(1);
+        let mut uploaded = vec![SkinSlotMeta::default(); reg.skin_capacity()];
+        drain_skin_plan(&reg, &mut uploaded);
+        reg.set_skin_joints(0, &[Mat4::from_translation(Vec3::X); 20]);
+        reg.set_skin_joints(0, &[Mat4::from_translation(Vec3::Y); 10]);
+        let writes = drain_skin_plan(&reg, &mut uploaded);
+        assert_eq!(
+            writes,
+            vec![SlabWrite {
+                offset: 0,
+                len: 20 * JOINT_MATRIX_STRIDE
+            }]
+        );
+        let reference = reference_skin_bytes(&reg);
+        assert_eq!(
+            encoded(&reg, writes[0]),
+            reference[..writes[0].len as usize]
+        );
+        reg.set_skin_joints(0, &[Mat4::from_translation(Vec3::Z); 10]);
+        assert_eq!(
+            drain_skin_plan(&reg, &mut uploaded),
+            vec![SlabWrite {
+                offset: 0,
+                len: 10 * JOINT_MATRIX_STRIDE
+            }]
         );
     }
 
@@ -1396,6 +1482,54 @@ mod tests {
     }
 
     #[test]
+    fn buffer_growth_marks_every_material_variant_for_rebinding() {
+        use bevy::asset::{AssetApp, AssetPlugin};
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, AssetPlugin::default()))
+            .init_asset::<FfxiSkinnedMaterial>()
+            .init_resource::<FfxiSkinRegistry>()
+            .add_systems(Update, remark_materials_on_buffer_growth);
+        let handles: Vec<_> = [false, true]
+            .into_iter()
+            .map(|fading| {
+                app.world_mut()
+                    .resource_mut::<Assets<FfxiSkinnedMaterial>>()
+                    .add(FfxiSkinnedMaterial {
+                        base_color_texture: None,
+                        fading,
+                    })
+            })
+            .collect();
+        app.update();
+        app.world_mut()
+            .resource_mut::<Messages<AssetEvent<FfxiSkinnedMaterial>>>()
+            .clear();
+        {
+            let mut registry = app.world_mut().resource_mut::<FfxiSkinRegistry>();
+            for _ in 0..=INITIAL_INSTANCE_SLOTS {
+                registry.alloc_instance(FfxiInstance::default());
+            }
+        }
+        app.update();
+        let modified: std::collections::HashSet<_> = app
+            .world_mut()
+            .resource_mut::<Messages<AssetEvent<FfxiSkinnedMaterial>>>()
+            .drain()
+            .filter_map(|event| match event {
+                AssetEvent::Modified { id } => Some(id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(modified, handles.iter().map(Handle::id).collect());
+        app.update();
+        assert!(app
+            .world_mut()
+            .resource_mut::<Messages<AssetEvent<FfxiSkinnedMaterial>>>()
+            .drain()
+            .all(|event| !matches!(event, AssetEvent::Modified { .. })));
+    }
+
+    #[test]
     fn material_cache_dedupes_by_texture() {
         let mut materials = Assets::<FfxiSkinnedMaterial>::default();
         let mut images = Assets::<Image>::default();
@@ -1404,7 +1538,7 @@ mod tests {
         let tex_b = images.add(Image::default());
 
         let a1 = cache.get_or_create(Some(tex_a.clone()), &mut materials);
-        let a2 = cache.get_or_create(Some(tex_a), &mut materials);
+        let a2 = cache.get_or_create(Some(tex_a.clone()), &mut materials);
         let b = cache.get_or_create(Some(tex_b), &mut materials);
         let untextured1 = cache.get_or_create(None, &mut materials);
         let untextured2 = cache.get_or_create(None, &mut materials);
@@ -1414,6 +1548,15 @@ mod tests {
         assert_eq!(untextured1, untextured2, "one shared untextured material");
         assert_eq!(cache.len(), 3);
         assert_eq!(materials.len(), 3);
+        let fade = cache.get_for_phase(Some(tex_a.clone()), true, &mut materials);
+        let fade_again = cache.get_for_phase(Some(tex_a), true, &mut materials);
+        assert_ne!(fade, a1);
+        assert_eq!(fade, fade_again);
+        assert_eq!(materials.get(&fade).unwrap().alpha_mode(), AlphaMode::Blend);
+        assert_eq!(
+            materials.get(&a1).unwrap().alpha_mode(),
+            AlphaMode::Mask(SKINNED_ALPHA_DISCARD)
+        );
     }
 
     #[test]

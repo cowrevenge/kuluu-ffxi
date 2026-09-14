@@ -196,22 +196,11 @@ pub fn spawn_nameplate_billboard(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
-    images: &mut Assets<Image>,
-    font: &FontArc,
     entity_id: u32,
     kind: EntityKind,
     name: &str,
-    color: Color,
 ) -> Entity {
-    let rgba = color_to_rgba8(color);
-
-    let raster = rasterize_plate(font, name, NAME_PX, rgba, None, &[], rgba, None);
-    let aspect = (
-        raster.image.width(),
-        raster.image.height(),
-        raster.text_center_y_px,
-    );
-    let image_handle = images.add(raster.image);
+    let image_handle = bevy::image::TRANSPARENT_IMAGE_HANDLE;
 
     let mesh_handle = meshes.add(Rectangle::new(1.0, 1.0));
 
@@ -245,9 +234,9 @@ pub fn spawn_nameplate_billboard(
                 next_key_check_frame: 0,
             },
             BillboardAspect {
-                width: aspect.0,
-                height: aspect.1,
-                text_center_y_px: aspect.2,
+                width: 1,
+                height: 1,
+                text_center_y_px: 0.0,
             },
             Mesh3d(mesh_handle),
             MeshMaterial3d(material_handle),
@@ -358,26 +347,13 @@ pub fn update_nameplate_billboards_system(
             let Some(name) = rec.entity.name.as_deref().filter(|s| !s.is_empty()) else {
                 continue;
             };
-            // The record's kind/status are known right now, so the first bake
-            // already carries its type colour (mob yellow / npc green / pc
-            // white) — no white placeholder waiting on a DAT read. A later
-            // table load or status change re-rasters via the key comparison.
-            let ctx = crate::nameplate_color::SelfContext {
-                self_id: self_char_id,
-                party: &state.snapshot.party,
-            };
-            let color = crate::nameplate_color::name_color_choice(&rec.entity, ctx)
-                .resolve(&raster.name_colors);
             spawn_nameplate_billboard(
                 &mut commands,
                 &mut meshes,
                 &mut materials,
-                &mut images,
-                &raster.font.0,
                 id,
                 rec.entity.kind,
                 name,
-                color,
             );
             have.insert(id);
         }
@@ -509,6 +485,10 @@ pub fn update_nameplate_billboards_system(
             }
         }
 
+        if np.rastered.is_none() && !on_screen {
+            continue;
+        }
+
         // A plate outside the view frustum (but in front of the camera, past
         // the view-depth gate above) only rechecks its raster key once every
         // OFFSCREEN_RASTER_CHECK_INTERVAL_FRAMES: the raster is the hot path
@@ -577,6 +557,13 @@ pub fn update_nameplate_billboards_system(
                 );
             }
         }
+        tracing::debug!(target: "nameplate_raster", id = np.entity_id,
+            first = np.rastered.is_none(),
+            color = np.rastered.as_ref().is_some_and(|done| done.color != want.color),
+            hp = np.rastered.as_ref().is_some_and(|done| done.hp != want.hp),
+            markers = np.rastered.as_ref().is_some_and(|done| done.markers != want.markers),
+            tint = np.rastered.as_ref().is_some_and(|done| done.linkshell_tint != want.linkshell_tint),
+            "nameplate raster inputs changed");
         let Some(mut mat_data) = materials.get_mut(&mat.0) else {
             continue;
         };
@@ -607,7 +594,10 @@ pub fn update_nameplate_billboards_system(
         // PrepareBindGroups, so no stale-plate beat. The displaced texture is
         // unreferenced after this swap and bevy GCs it.
         mat_data.base_color_texture = Some(images.add(new_img.image));
-        np.rastered = Some(want.clone());
+        if np.rastered.is_none() {
+            *vis = Visibility::Hidden;
+        }
+        np.rastered = Some(want);
     }
 
     dbg_out.total = total;
@@ -646,12 +636,18 @@ fn raster_key_for(
         let _ = show_mob_hp;
         None
     };
+    let markers = crate::nameplate_marker::nameplate_markers(ent);
+    let linkshell_tint = if markers.contains(&crate::nameplate_marker::glyph::LINKSHELL) {
+        color_to_rgba8(crate::nameplate_color::linkshell_tint(&ent.char_flags))
+    } else {
+        [0; 4]
+    };
     RasterKey {
         text: String::new(),
         color: color_to_rgba8(color),
         hp,
-        markers: crate::nameplate_marker::nameplate_markers(ent),
-        linkshell_tint: color_to_rgba8(crate::nameplate_color::linkshell_tint(&ent.char_flags)),
+        markers,
+        linkshell_tint,
     }
 }
 
@@ -1485,6 +1481,33 @@ mod tests {
     }
 
     #[test]
+    fn walking_and_unused_pearl_tint_do_not_change_raster_pixels() {
+        let colors = crate::nameplate_color::NameColorTable::default();
+        let key = |entity: &kuluu_snapshot::Entity| {
+            raster_key_for(
+                entity,
+                crate::nameplate_color::SelfContext {
+                    self_id: None,
+                    party: &[],
+                },
+                &colors,
+                false,
+            )
+        };
+        let mut entity = keyed_entity(0, Some(100));
+        entity.kind = EntityKind::Pc;
+        let initial = key(&entity);
+        entity.pos.x += 1.0;
+        entity.heading = 10;
+        entity.char_flags.linkshell_color = [10, 20, 30];
+        assert_eq!(initial, key(&entity));
+        entity.char_flags.linkshell = true;
+        let pearl = key(&entity);
+        entity.char_flags.linkshell_color = [30, 20, 10];
+        assert_ne!(pearl, key(&entity));
+    }
+
+    #[test]
     fn raster_key_ignores_status_flips_but_tracks_death() {
         let colors = crate::nameplate_color::NameColorTable::default();
         let key = |e: &kuluu_snapshot::Entity| {
@@ -1678,6 +1701,36 @@ mod tests {
         (app, plate)
     }
 
+    fn move_test_actor(app: &mut App, position: Vec3) {
+        let world = app.world_mut();
+        let mut actors = world.query_filtered::<&mut Transform, With<WorldEntity>>();
+        actors.single_mut(world).unwrap().translation = position;
+    }
+
+    #[test]
+    fn first_raster_waits_for_visibility_and_uses_latest_facts() {
+        let (mut app, plate) = throttle_test_app(Vec3::new(0.0, 0.0, 10.0), Some(100));
+        app.update();
+        assert!(base_color_texture_of(&app, plate).is_none());
+        app.world_mut()
+            .resource_mut::<crate::entity_table::EntityTable>()
+            .upsert(&keyed_entity(0, Some(0)));
+        move_test_actor(&mut app, Vec3::new(0.0, 0.0, -10.0));
+        advance_one_frame(&mut app);
+        let first = base_color_texture_of(&app, plate);
+        assert!(first.is_some());
+        assert_eq!(
+            app.world().get::<Visibility>(plate),
+            Some(&Visibility::Hidden)
+        );
+        advance_one_frame(&mut app);
+        assert_eq!(base_color_texture_of(&app, plate), first);
+        assert_eq!(
+            app.world().get::<Visibility>(plate),
+            Some(&Visibility::Visible)
+        );
+    }
+
     fn base_color_texture_of(app: &App, plate: Entity) -> Option<Handle<Image>> {
         let mat_handle = app.world().get::<MeshMaterial3d<StandardMaterial>>(plate)?;
         app.world()
@@ -1699,10 +1752,12 @@ mod tests {
     /// until `OFFSCREEN_RASTER_CHECK_INTERVAL_FRAMES` elapses, then catches up.
     #[test]
     fn offscreen_key_check_is_throttled_then_catches_up() {
-        let (mut app, plate) = throttle_test_app(Vec3::new(20.0, 0.0, -10.0), Some(100));
+        let (mut app, plate) = throttle_test_app(Vec3::new(0.0, 0.0, -10.0), Some(100));
+        app.update();
+        move_test_actor(&mut app, Vec3::new(20.0, 0.0, -10.0));
         app.update();
         let baseline = base_color_texture_of(&app, plate);
-        assert!(baseline.is_some(), "the first frame always rasters");
+        assert!(baseline.is_some(), "the plate was rastered while visible");
 
         app.world_mut()
             .resource_mut::<crate::entity_table::EntityTable>()
@@ -1750,7 +1805,9 @@ mod tests {
     /// in-front-but-off-screen case.
     #[test]
     fn hidden_depth_plate_still_checks_every_frame() {
-        let (mut app, plate) = throttle_test_app(Vec3::new(0.0, 0.0, 10.0), Some(100));
+        let (mut app, plate) = throttle_test_app(Vec3::new(0.0, 0.0, -10.0), Some(100));
+        app.update();
+        move_test_actor(&mut app, Vec3::new(0.0, 0.0, 10.0));
         app.update();
         let baseline = base_color_texture_of(&app, plate);
         assert!(baseline.is_some());

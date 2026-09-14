@@ -1,7 +1,6 @@
 use std::collections::BTreeMap;
 use std::ops::Range;
 use std::path::Path;
-use std::sync::Once;
 
 use crate::pol1::{self, SECTION_NAME_LEN};
 use crate::{DatError, Result};
@@ -67,16 +66,30 @@ const ZONE_MAP_NEXT_DIVISOR: usize = 0x13;
 const ZONE_MAP_SIZE_NUMERATOR: u16 = 2560;
 
 /// The record's low nibble at byte 4 picks which file-table base its
-/// `file_table_offset` counts from. Values from research/xim
-/// ZoneMapTable.kt getFileTableOffset. Indices 0 and 1 are content-verified
-/// on KNOWN_CLIENTS horizonxi-2023 and retail-2026-09: they are the only
-/// nibbles a zone-keyed row picks, and every such row resolves through the
-/// install's VTABLE. Index 2 occurs only on the client-only negative-key rows
-/// (148 rows, 84 of which resolve on both builds). Index 3 is unexercised by
-/// every row of both builds, so it is carried on xim's word alone.
-const ZONE_MAP_FILE_TABLE_BASES: [u32; 4] = [0x14C0, 0xD02F, 0xD147, 0x1592];
-const ZONE_MAP_EXERCISED_FILE_TABLE_BASES: usize = 3;
+/// `file_table_offset` counts from, per FFXiMain.dll's switch on
+/// `byte4 & 0x0F` (KNOWN_CLIENTS retail-2026-09 RVA 0x1f85f0, horizonxi-2023
+/// RVA 0x1f4d20): three inline immediates and no arm for any other nibble.
+/// research/xim ZoneMapTable.kt getFileTableOffset reads index 2 as 0xD147;
+/// only 0xD417 resolves all 148 index-2 rows through both installs' VTABLE
+/// (0xD147 resolves 84 and aliases them onto the index-1 `m_2*` maps, while
+/// 0xD417 lands on the disjoint `em_*`/`s?_*` set).
+const ZONE_MAP_FILE_TABLE_BASES: [u32; 3] = [0x14C0, 0xD02F, 0xD417];
+/// What that switch answers for a nibble without an arm: a whole file id,
+/// `file_table_offset` not added. The map loader pre-seeds the same id as its
+/// no-record default (KNOWN_CLIENTS retail-2026-09 RVA 0x1f838a, horizonxi-2023
+/// RVA 0x1f4aba). No row of either build takes this arm; the id resolves to
+/// ROM/18/105.DAT on both installs.
+const ZONE_MAP_FALLBACK_FILE_ID: u32 = 0x1592;
 const ZONE_MAP_FILE_TABLE_BASE_MASK: u8 = 0x0F;
+/// Byte 4's high nibble picks which key-item base signed byte 6 counts from,
+/// naming the map key item the zone's map is gated on (KNOWN_CLIENTS
+/// retail-2026-09 RVA 0x1f7480, horizonxi-2023 RVA 0x1f3bb0). Byte 6 == 0 or a
+/// nibble without an arm answers "no key item"; a negative byte 6 answers
+/// `ZONE_MAP_NEGATIVE_KEY_ITEM` whatever the nibble. Every row naming one lands
+/// on a MAP_OF_* id of vendor/server/scripts/enum/key_item.lua on both builds.
+const ZONE_MAP_KEY_ITEM_BASES: [u16; 3] = [0x180, 0x73F, 0x8FD];
+const ZONE_MAP_KEY_ITEM_BASE_SHIFT: u8 = 4;
+const ZONE_MAP_NEGATIVE_KEY_ITEM: u16 = 0x17F;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ZoneMapRecord {
@@ -86,6 +99,8 @@ pub struct ZoneMapRecord {
     /// take the image and the calibration below from one row, instead of
     /// cross-referencing a table keyed on a different index.
     pub file_id: u32,
+    /// The map key item this map is gated on, when the row names one.
+    pub key_item: Option<u16>,
     pub size: u16,
     pub x_offset: i16,
     pub y_offset: i16,
@@ -317,24 +332,31 @@ fn parse_zone_map(rec: &[u8]) -> Option<ZoneMapRecord> {
         return None;
     }
     let table_index = usize::from(rec[4] & ZONE_MAP_FILE_TABLE_BASE_MASK);
-    let base = *ZONE_MAP_FILE_TABLE_BASES.get(table_index)?;
-    if table_index >= ZONE_MAP_EXERCISED_FILE_TABLE_BASES {
-        static UNEXERCISED_BASE: Once = Once::new();
-        UNEXERCISED_BASE.call_once(|| {
-            eprintln!(
-                "FFXiMain.dll zone-map table: file-table base index {table_index} ({base:#x}) is exercised by no row of any known client; trusting research/xim"
-            );
-        });
-    }
     let file_table_offset = i16::from_le_bytes([rec[8], rec[9]]);
+    let file_id = match ZONE_MAP_FILE_TABLE_BASES.get(table_index) {
+        Some(base) => base.wrapping_add_signed(i32::from(file_table_offset)),
+        None => ZONE_MAP_FALLBACK_FILE_ID,
+    };
     Some(ZoneMapRecord {
         zone_id: u16::from_le_bytes([rec[0], rec[1]]),
         sub_zone_id: rec[2],
-        file_id: base.wrapping_add_signed(i32::from(file_table_offset)),
+        file_id,
+        key_item: zone_map_key_item(rec[4] >> ZONE_MAP_KEY_ITEM_BASE_SHIFT, rec[6] as i8),
         size: ZONE_MAP_SIZE_NUMERATOR / u16::from(divisor),
         x_offset: i16::from_le_bytes([rec[10], rec[11]]),
         y_offset: i16::from_le_bytes([rec[12], rec[13]]),
     })
+}
+
+fn zone_map_key_item(high_nibble: u8, byte6: i8) -> Option<u16> {
+    if byte6 < 0 {
+        return Some(ZONE_MAP_NEGATIVE_KEY_ITEM);
+    }
+    if byte6 == 0 {
+        return None;
+    }
+    let base = ZONE_MAP_KEY_ITEM_BASES.get(usize::from(high_nibble))?;
+    Some(base + u16::from(byte6.unsigned_abs()))
 }
 
 #[cfg(test)]
@@ -550,19 +572,44 @@ mod tests {
     fn zone_map_file_table_base_follows_the_low_nibble() {
         for (nibble, base) in ZONE_MAP_FILE_TABLE_BASES.iter().enumerate() {
             let mut rec = [0u8; ZONE_MAP_STRIDE];
-            rec[4] = 0xF0 | nibble as u8;
+            rec[4] = nibble as u8;
             rec[5] = 4;
             rec[8..10].copy_from_slice(&7i16.to_le_bytes());
             assert_eq!(parse_zone_map(&rec).map(|r| r.file_id), Some(base + 7));
         }
-        let mut rec = [0u8; ZONE_MAP_STRIDE];
-        rec[4] = ZONE_MAP_FILE_TABLE_BASES.len() as u8;
-        rec[5] = 4;
+        for nibble in ZONE_MAP_FILE_TABLE_BASES.len() as u8..=ZONE_MAP_FILE_TABLE_BASE_MASK {
+            let mut rec = [0u8; ZONE_MAP_STRIDE];
+            rec[4] = nibble;
+            rec[5] = 4;
+            rec[8..10].copy_from_slice(&7i16.to_le_bytes());
+            assert_eq!(
+                parse_zone_map(&rec).map(|r| r.file_id),
+                Some(ZONE_MAP_FALLBACK_FILE_ID),
+                "nibble {nibble} takes the fallback whole file id, offset ignored"
+            );
+        }
+    }
+
+    #[test]
+    fn zone_map_key_item_follows_the_high_nibble_and_byte_6() {
+        let key_item = |high: u8, byte6: u8| {
+            let mut rec = [0u8; ZONE_MAP_STRIDE];
+            rec[4] = high << ZONE_MAP_KEY_ITEM_BASE_SHIFT;
+            rec[5] = 4;
+            rec[6] = byte6;
+            parse_zone_map(&rec).unwrap().key_item
+        };
+        for (high, base) in ZONE_MAP_KEY_ITEM_BASES.iter().enumerate() {
+            assert_eq!(key_item(high as u8, 1), Some(base + 1));
+        }
+        assert_eq!(key_item(0, 0), None, "byte 6 == 0 names no key item");
         assert_eq!(
-            parse_zone_map(&rec),
+            key_item(3, 1),
             None,
-            "a nibble past the table is no record"
+            "a nibble without an arm names no key item"
         );
+        assert_eq!(key_item(1, 0xFF), Some(ZONE_MAP_NEGATIVE_KEY_ITEM));
+        assert_eq!(key_item(0, 0xFE), Some(ZONE_MAP_NEGATIVE_KEY_ITEM));
     }
 
     #[test]
@@ -822,6 +869,28 @@ mod tests {
         );
     }
 
+    /// Gated on an install (self-skips). The key items the high nibble and
+    /// byte 6 name are LSB's MAP_OF_THE_SAN_DORIA_AREA, MAP_OF_AL_ZAHBI and
+    /// MAP_OF_RALA_WATERWAYS_U (vendor/server/scripts/enum/key_item.lua), one
+    /// per key-item base; 655 rows name one on both known clients.
+    #[test]
+    fn real_dll_zone_map_key_items_are_the_lsb_map_key_items() {
+        let Some((_, dll)) = open_test_dll() else {
+            return;
+        };
+        for (zone, key_item) in [(100u16, 385u16), (48, 1856), (259, 2302)] {
+            let maps = dll.zone_maps(zone);
+            assert!(!maps.is_empty(), "zone {zone} ships a map");
+            assert!(
+                maps.iter().all(|r| r.key_item == Some(key_item)),
+                "zone {zone}: {maps:?}"
+            );
+        }
+        let mut named = 0usize;
+        dll.for_each_zone_map(|rec| named += usize::from(rec.key_item.is_some()));
+        assert_eq!(named, 655, "rows naming a map key item");
+    }
+
     /// Raw rows of the zone-map table, walked with the same terminator as
     /// `for_each_zone_map`, for tests that need the file-table nibble the
     /// parsed record does not carry.
@@ -840,13 +909,13 @@ mod tests {
         rows
     }
 
-    /// Gated on an install (self-skips). Every zone-keyed record's file id is a
-    /// DAT the install's VTABLE knows, which is what makes the first two
-    /// file-table bases content-verified. The client-only negative keys are
-    /// the only rows that reach base index 2, and only part of them resolve,
-    /// so that base is pinned as partially verified rather than trusted.
+    /// Gated on an install (self-skips). Every record's file id, zone-keyed or
+    /// client-only, is a DAT the install's VTABLE knows and ships, across all
+    /// three file-table bases. The 148 client-only rows on base index 2 are
+    /// what separate 0xD417 from the transposed 0xD147, under which only 84
+    /// of them resolved, onto index-1 maps.
     #[test]
-    fn real_dll_every_zone_keyed_map_resolves_through_the_install() {
+    fn real_dll_every_zone_map_resolves_through_the_install() {
         let Some((root, dll)) = open_test_dll() else {
             return;
         };
@@ -861,7 +930,10 @@ mod tests {
             let nibble = raw[4] & ZONE_MAP_FILE_TABLE_BASE_MASK;
             let entry = tally.entry((zone_keyed, nibble)).or_default();
             entry.0 += 1;
-            if root.resolve(rec.file_id).is_ok() {
+            if root
+                .resolve(rec.file_id)
+                .is_ok_and(|loc| loc.path_under(&root).is_file())
+            {
                 entry.1 += 1;
             } else if zone_keyed {
                 unresolved_zone_keyed.push(rec);
@@ -879,16 +951,13 @@ mod tests {
                 ((true, 0u8), (284usize, 284usize)),
                 ((true, 1), (377, 377)),
                 ((false, 0), (20, 20)),
-                ((false, 2), (148, 84)),
+                ((false, 2), (148, 148)),
             ]),
             "(zone-keyed, base nibble) -> (rows, resolved)"
         );
-        assert_eq!(
-            unresolved_client_only,
-            (53659u32..=53724)
-                .filter(|id| !matches!(id, 53690 | 53691))
-                .collect(),
-            "the client-only file ids base index 2 leaves unresolved, identical on both known clients"
+        assert!(
+            unresolved_client_only.is_empty(),
+            "unresolved client-only map DATs: {unresolved_client_only:?}"
         );
     }
 

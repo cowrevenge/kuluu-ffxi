@@ -3854,6 +3854,37 @@ impl ActionKind {
         }
     }
 
+    /// The action ids vendor/server/src/map/packets/c2s/0x01a_action.cpp
+    /// GP_CLI_COMMAND_ACTION::validate refuses with BlockedState::InEvent.
+    /// Exhaustive on purpose: a new action must state its answer.
+    pub fn blocked_in_event(&self) -> bool {
+        match self {
+            ActionKind::Attack
+            | ActionKind::CastMagic { .. }
+            | ActionKind::JobAbility { .. }
+            | ActionKind::Shoot
+            | ActionKind::Weaponskill { .. }
+            | ActionKind::MonsterSkill { .. }
+            | ActionKind::Fish
+            | ActionKind::Mount { .. } => true,
+            ActionKind::Talk
+            | ActionKind::AttackOff
+            | ActionKind::Help
+            | ActionKind::HomepointMenu { .. }
+            | ActionKind::Assist
+            | ActionKind::RaiseMenu { .. }
+            | ActionKind::ChangeTarget
+            | ActionKind::ChocoboDig
+            | ActionKind::Dismount
+            | ActionKind::TractorMenu { .. }
+            | ActionKind::SendResRdy
+            | ActionKind::Quarry
+            | ActionKind::Sprint
+            | ActionKind::Scout
+            | ActionKind::Blockaid { .. } => false,
+        }
+    }
+
     pub fn fill_action_buf(&self, buf: &mut [u8; 16]) {
         buf.fill(0);
         match self {

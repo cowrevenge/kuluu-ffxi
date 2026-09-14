@@ -2902,9 +2902,22 @@ async fn keepalive_loop(
                                 }
                             }
                         }
+                        let payload = match build_subpacket_action(
+                            sub_seq,
+                            target_id,
+                            target_index,
+                            &kind,
+                            in_event(&dialog_session, &pending_event_end),
+                        ) {
+                            Ok(payload) => payload,
+                            Err(reason) => {
+                                let _ = event_tx.send(AgentEvent::Error {
+                                    message: format!("action not sent: {reason}"),
+                                });
+                                continue;
+                            }
+                        };
                         self_face_target = face_target_for(target_index, self_act_index);
-                        let payload =
-                            build_subpacket_action(sub_seq, target_id, target_index, &kind);
                         sub_seq = sub_seq.wrapping_add(1);
                         if let Err(e) = map
                             .send_encrypted(&payload, datagram_header_id(sub_seq), server_last_seq)
@@ -2968,8 +2981,7 @@ async fn keepalive_loop(
                         // Mirror of the LSB validator (0x05d_motion.cpp
                         // validate + bell note range): a send the server would
                         // drop silently is refused client-side with a reason.
-                        let in_event =
-                            dialog_session.active_end().is_some() || !pending_event_end.is_empty();
+                        let in_event = in_event(&dialog_session, &pending_event_end);
                         if let Some(reason) = emote_send_block_reason(emote_id, mode, param, in_event)
                         {
                             let _ = event_tx.send(AgentEvent::Error {
@@ -3083,8 +3095,21 @@ async fn keepalive_loop(
 
                         let kind = crate::state::ActionKind::HomepointMenu { status_id: 0 };
                         let act_index = self_act_index.unwrap_or(0);
-                        let payload =
-                            build_subpacket_action(sub_seq, self_char_id, act_index, &kind);
+                        let payload = match build_subpacket_action(
+                            sub_seq,
+                            self_char_id,
+                            act_index,
+                            &kind,
+                            in_event(&dialog_session, &pending_event_end),
+                        ) {
+                            Ok(payload) => payload,
+                            Err(reason) => {
+                                let _ = event_tx.send(AgentEvent::Error {
+                                    message: format!("homepoint_return not sent: {reason}"),
+                                });
+                                continue;
+                            }
+                        };
                         sub_seq = sub_seq.wrapping_add(1);
                         if let Err(e) = map
                             .send_encrypted(&payload, datagram_header_id(sub_seq), server_last_seq)
@@ -3474,16 +3499,28 @@ async fn keepalive_loop(
                                 "item_stack throttled (<1.1s) to avoid lightluggage kick"
                             );
                         } else {
-                            let payload = build_subpacket_item_stack(sub_seq, container);
-                            sub_seq = sub_seq.wrapping_add(1);
-                            if let Err(e) = map
-                                .send_encrypted(&payload, datagram_header_id(sub_seq), server_last_seq)
-                                .await
-                            {
-                                tracing::warn!(error = %e, "item_stack send failed");
-                                let _ = event_tx.send(AgentEvent::Error {
-                                    message: format!("item_stack send: {e}"),
-                                });
+                            match build_subpacket_item_stack(
+                                sub_seq,
+                                container,
+                                in_event(&dialog_session, &pending_event_end),
+                            ) {
+                                Err(reason) => {
+                                    let _ = event_tx.send(AgentEvent::Error {
+                                        message: format!("item_stack not sent: {reason}"),
+                                    });
+                                }
+                                Ok(payload) => {
+                                    sub_seq = sub_seq.wrapping_add(1);
+                                    if let Err(e) = map
+                                        .send_encrypted(&payload, datagram_header_id(sub_seq), server_last_seq)
+                                        .await
+                                    {
+                                        tracing::warn!(error = %e, "item_stack send failed");
+                                        let _ = event_tx.send(AgentEvent::Error {
+                                            message: format!("item_stack send: {e}"),
+                                        });
+                                    }
+                                }
                             }
                         }
                     }
@@ -3740,8 +3777,7 @@ async fn keepalive_loop(
                         // wrong self id (0x064_scenarioitem.cpp) — skip rather
                         // than burn a seq slot on a silent drop; the unseen state
                         // stays and a later menu close retries.
-                        let in_event = dialog_session.active_end().is_some()
-                            || !pending_event_end.is_empty();
+                        let in_event = in_event(&dialog_session, &pending_event_end);
                         match mog.key_item_tables.get_mut(table_index as usize) {
                             None => {
                                 tracing::warn!(
@@ -4003,16 +4039,19 @@ async fn keepalive_loop(
                 // that spawns city NPCs early-returns when inMogHouse. Outside the
                 // MH the same action pre-warms NPC/MOB/TRUST spawn lists.
                 if zone_transition_sent && self_pos_seeded && !resrdy_sent {
-                    resrdy_sent = true;
-                    resrdy_in_payload = true;
-                    payload.extend(build_subpacket_action(
+                    if let Ok(action) = build_subpacket_action(
                         sub_seq,
                         self_char_id,
                         self_act_index.unwrap_or(0),
                         &crate::state::ActionKind::SendResRdy,
-                    ));
-                    sub_seq = sub_seq.wrapping_add(1);
-                    tracing::info!("queued 0x01A SendResRdy (post zone-in spawn request)");
+                        in_event(&dialog_session, &pending_event_end),
+                    ) {
+                        resrdy_sent = true;
+                        resrdy_in_payload = true;
+                        payload.extend(action);
+                        sub_seq = sub_seq.wrapping_add(1);
+                        tracing::info!("queued 0x01A SendResRdy (post zone-in spawn request)");
+                    }
                 }
 
                 if let Some(flush) = flush_pending_event_end(
@@ -4113,19 +4152,21 @@ async fn keepalive_loop(
                         Some(t) => should_emit_pos(t.elapsed(), pos_delta, heading_changed),
                     };
                 if include_pos {
-                    payload.extend(build_subpacket_pos(
+                    if let Some(pos) = build_subpacket_pos(
                         sub_seq,
                         self_pos.pos.x,
                         self_pos.pos.y,
                         self_pos.pos.z,
                         self_pos.heading,
                         self_face_target,
-                    ));
-                    sub_seq = sub_seq.wrapping_add(1);
-                    last_keepalive_pos = self_pos.pos;
-                    last_emitted_pos = self_pos.pos;
-                    last_emitted_heading = self_pos.heading;
-                    last_move_emission = Some(std::time::Instant::now());
+                    ) {
+                        payload.extend(pos);
+                        sub_seq = sub_seq.wrapping_add(1);
+                        last_keepalive_pos = self_pos.pos;
+                        last_emitted_pos = self_pos.pos;
+                        last_emitted_heading = self_pos.heading;
+                        last_move_emission = Some(std::time::Instant::now());
+                    }
                 }
 
                 if !payload.is_empty() {
@@ -6472,6 +6513,16 @@ fn lerp_toward(cur: Vec3, target: Vec3, max_step: f32) -> (Vec3, bool) {
         },
         false,
     )
+}
+
+/// Client mirror of `PChar->isInEvent()`
+/// (vendor/server/src/map/entities/char_entity.cpp CCharEntity::isInEvent):
+/// an event the VM still drives, or one whose 0x05B EVENT_END has not gone out.
+pub(super) fn in_event(
+    dialog: &crate::event_dialog::DialogSession,
+    pending_event_end: &[(u32, u16, u16)],
+) -> bool {
+    dialog.active_end().is_some() || !pending_event_end.is_empty()
 }
 
 fn should_emit_pos(

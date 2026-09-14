@@ -396,6 +396,7 @@ async fn run_map_session(
     let mut self_pos = Position::default();
 
     let mut self_pos_seeded = false;
+    let mut enterzone_seen = false;
 
     let mut flood_in_mog_house = false;
 
@@ -410,6 +411,7 @@ async fn run_map_session(
         &mut server_last_seq,
         &mut total_subs,
         &mut self_pos_seeded,
+        &mut enterzone_seen,
         event_tx,
         &mut pending_event_end,
         &mut cutscene,
@@ -462,6 +464,7 @@ async fn run_map_session(
                 &mut server_last_seq,
                 &mut total_subs,
                 &mut self_pos_seeded,
+                &mut enterzone_seen,
                 event_tx,
                 &mut pending_event_end,
                 &mut cutscene,
@@ -585,6 +588,7 @@ async fn run_map_session(
         name_miss_dedup,
         self_pos,
         self_pos_seeded,
+        enterzone_seen,
         npc_name_resolver,
         emote_text_resolver,
         sysmes_resolver,
@@ -631,6 +635,7 @@ async fn drain_zone_flood(
     server_last_seq: &mut u16,
     total_subs: &mut usize,
     self_pos_seeded: &mut bool,
+    enterzone_seen: &mut bool,
     event_tx: &broadcast::Sender<AgentEvent>,
     pending_event_end: &mut Vec<(u32, u16, u16)>,
     cutscene: &mut crate::event_dialog::CutsceneScope,
@@ -679,6 +684,12 @@ async fn drain_zone_flood(
                     if sub.opcode == ffxi_proto::map::s2c::LOGIN {
                         self_login_received |= decode::ServerLogin::decode(sub.data)
                             .is_ok_and(|login| login.unique_no == self_char_id);
+                    }
+                    // 0x008 answers 0x00C GAMEOK (vendor/server/src/map/packets/c2s/
+                    // 0x00c_gameok.cpp GP_CLI_COMMAND_GAMEOK::process), so it lands in
+                    // the post-send drain, before the keepalive loop can watch for it.
+                    if sub.opcode == ffxi_proto::map::s2c::ENTERZONE {
+                        *enterzone_seen = true;
                     }
                     handle_sub_packet(
                         &sub,
@@ -2343,6 +2354,7 @@ async fn keepalive_loop(
     mut self_pos: Position,
 
     mut self_pos_seeded: bool,
+    mut enterzone_seen: bool,
     mut npc_name_resolver: NpcNameResolver,
     mut emote_text_resolver: EmoteTextResolver,
     mut sysmes_resolver: treasure::SysMesResolver,
@@ -2367,7 +2379,6 @@ async fn keepalive_loop(
     let mut last_net_emit = std::time::Instant::now();
     let mut keepalive_send_failing = false;
 
-    let mut enterzone_seen = false;
     let mut zone_transition_sent = false;
 
     let mut resrdy_sent = false;

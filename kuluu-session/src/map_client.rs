@@ -151,7 +151,13 @@ impl MapClient {
         buf.truncate(n);
         self.bytes_recv
             .fetch_add(n as u64, std::sync::atomic::Ordering::Relaxed);
+        self.decode_datagram(buf, src)
+    }
 
+    /// Decrypt, verify and inflate one datagram; both directions share the
+    /// framing, so a fixture holding the same seed can read client datagrams.
+    pub(crate) fn decode_datagram(&self, mut buf: Vec<u8>, src: SocketAddr) -> Result<Vec<u8>> {
+        let n = buf.len();
         if n < framing::MIN_FRAME_SIZE {
             bail!("undersized response datagram: {n} bytes");
         }

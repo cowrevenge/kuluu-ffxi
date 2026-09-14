@@ -3887,6 +3887,67 @@ pub(super) fn bootstrap_acceptance_contract() {
         });
 }
 
+const FIXTURE_PLAYER: u32 = 17_455_719;
+const FIXTURE_SEED: [u8; 20] = [0; 20];
+const FIXTURE_POSITION: [f32; 3] = [2.15, -2.1, 3.25];
+const BOOTSTRAP_DATAGRAMS: usize = 2;
+const FIXTURE_CASE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+
+fn fixture_packet(opcode: u16, body: &[u8]) -> Vec<u8> {
+    let words = framing::subpacket_size_words(body.len() + framing::SUBPACKET_HEADER_SIZE);
+    let mut out = build_subpacket_header(opcode, words, 1).to_vec();
+    out.extend(body);
+    out
+}
+
+/// A self 0x00A / 0x00D body: unique_no, send flags, and the three position
+/// floats in wire order (x, height, north).
+fn login_fixture_body(player: u32, position: [f32; 3]) -> Vec<u8> {
+    const LOGIN_BODY_LEN: usize = 48;
+    const SEND_FLAGS: usize = 6;
+    const POSITION_X: usize = 8;
+    const POSITION_HEIGHT: usize = 12;
+    const POSITION_NORTH: usize = 16;
+    let mut body = vec![0; LOGIN_BODY_LEN];
+    body[..4].copy_from_slice(&player.to_le_bytes());
+    body[SEND_FLAGS] = 1;
+    for (offset, value) in [POSITION_X, POSITION_HEIGHT, POSITION_NORTH]
+        .into_iter()
+        .zip(position)
+    {
+        body[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+    }
+    body
+}
+
+fn fixture_config() -> Config {
+    Config {
+        server: "127.0.0.1".into(),
+        map_host_override: None,
+        auth_port: 0,
+        data_port: 0,
+        view_port: 0,
+        user: "bootstrap-fixture".into(),
+        password: String::new(),
+        char_selection: CharSelection::Id(FIXTURE_PLAYER),
+        initial_state: None,
+        user_driven_events: true,
+        dat_root: None,
+    }
+}
+
+fn fixture_bootstrap() -> BootstrapArgs<'static> {
+    BootstrapArgs {
+        char_id: FIXTURE_PLAYER,
+        char_name: "Bootstrap",
+        account_name: "bootstrap-fixture",
+        ticket: [0; 16],
+        version: 0,
+        platform: *b"WIN\0",
+        cli_lang: 0,
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 enum BootstrapReply {
     Silent,
@@ -3905,37 +3966,19 @@ async fn bootstrap_scenario(scenario: BootstrapReply) {
     };
     use std::time::Duration;
 
-    const PLAYER: u32 = 17_455_719;
-    const SEED: [u8; 20] = [0; 20];
-    const LOGIN_BODY_LEN: usize = 48;
-    const SEND_FLAGS: usize = 6;
-    const POSITION_X: usize = 8;
-    const POSITION_HEIGHT: usize = 12;
-    const POSITION_NORTH: usize = 16;
-    const POSITION: [f32; 3] = [2.15, -2.1, 3.25];
-    const EXPECTED_BOOTSTRAPS: usize = 2;
-    const CASE_TIMEOUT: Duration = Duration::from_secs(20);
+    const PLAYER: u32 = FIXTURE_PLAYER;
+    const SEED: [u8; 20] = FIXTURE_SEED;
+    const POSITION: [f32; 3] = FIXTURE_POSITION;
+    const EXPECTED_BOOTSTRAPS: usize = BOOTSTRAP_DATAGRAMS;
+    const CASE_TIMEOUT: Duration = FIXTURE_CASE_TIMEOUT;
     const DELAYED_LOGIN: Duration = Duration::from_millis(900);
 
-    fn packet(opcode: u16, body: &[u8]) -> Vec<u8> {
-        let words = framing::subpacket_size_words(body.len() + framing::SUBPACKET_HEADER_SIZE);
-        let mut out = build_subpacket_header(opcode, words, 1).to_vec();
-        out.extend(body);
-        out
-    }
+    let packet = fixture_packet;
     let accepted = matches!(
         scenario,
         BootstrapReply::SelfLogin | BootstrapReply::DelayedSelfLogin
     );
-    let mut self_body = vec![0; LOGIN_BODY_LEN];
-    self_body[..4].copy_from_slice(&PLAYER.to_le_bytes());
-    self_body[SEND_FLAGS] = 1;
-    for (offset, value) in [POSITION_X, POSITION_HEIGHT, POSITION_NORTH]
-        .into_iter()
-        .zip(POSITION)
-    {
-        self_body[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
-    }
+    let self_body = login_fixture_body(PLAYER, POSITION);
     let login = packet(s2c::LOGIN, &self_body);
     let self_position = packet(s2c::CHAR_PC, &self_body);
     let initial = match scenario {
@@ -3999,32 +4042,12 @@ async fn bootstrap_scenario(scenario: BootstrapReply) {
         }
     });
     let mut map = MapClient::connect(address, SEED).await.unwrap();
-    let cfg = Config {
-        server: "127.0.0.1".into(),
-        map_host_override: None,
-        auth_port: 0,
-        data_port: 0,
-        view_port: 0,
-        user: "bootstrap-fixture".into(),
-        password: String::new(),
-        char_selection: CharSelection::Id(PLAYER),
-        initial_state: None,
-        user_driven_events: true,
-        dat_root: None,
-    };
+    let cfg = fixture_config();
     let auth = crate::auth_client::AuthSession {
         account_id: 1,
         session_hash: [0; 16],
     };
-    let bootstrap = BootstrapArgs {
-        char_id: PLAYER,
-        char_name: "Bootstrap",
-        account_name: "bootstrap-fixture",
-        ticket: [0; 16],
-        version: 0,
-        platform: *b"WIN\0",
-        cli_lang: 0,
-    };
+    let bootstrap = fixture_bootstrap();
     let (commands, mut command_rx) = mpsc::channel(1);
     commands.send(AgentCommand::Disconnect).await.unwrap();
     let (events, mut event_rx) = broadcast::channel(256);
@@ -4098,6 +4121,137 @@ async fn bootstrap_scenario(scenario: BootstrapReply) {
             "{scenario:?}: no post-bootstrap packet may precede self LOGIN"
         );
     }
+}
+
+#[test]
+pub(super) fn bootstrap_enterzone_contract() {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(enterzone_in_gameok_reply());
+}
+
+/// LSB answers 0x00C GAMEOK with 0x008 ENTERZONE (vendor/server/src/map/packets/
+/// c2s/0x00c_gameok.cpp GP_CLI_COMMAND_GAMEOK::process), which the bootstrap's
+/// post-send drain consumes before the keepalive loop exists. The loop must
+/// still send exactly one 0x011 ZONE_TRANSITION and then 0x01A SendResRdy,
+/// the request LSB spawns the Mog House Moogle on (SpawnConditionalNPCs).
+async fn enterzone_in_gameok_reply() {
+    use ffxi_proto::map::{c2s, s2c};
+    use std::sync::{Arc, Mutex};
+
+    const ACTION_ID: std::ops::Range<usize> = 6..8;
+    let send_res_rdy = crate::state::ActionKind::SendResRdy.action_id();
+
+    let login = fixture_packet(
+        s2c::LOGIN,
+        &login_fixture_body(FIXTURE_PLAYER, FIXTURE_POSITION),
+    );
+    let enterzone = fixture_packet(s2c::ENTERZONE, &[0; 4]);
+    let server = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let address = server.local_addr().unwrap();
+    let sent: Arc<Mutex<Vec<(u16, u16)>>> = Arc::new(Mutex::new(Vec::new()));
+    let observed = sent.clone();
+    let (commands, mut command_rx) = mpsc::channel(1);
+    let release = commands.clone();
+    let fake = tokio::spawn(async move {
+        let mut bytes = vec![0; ffxi_proto::map::MAX_DATAGRAM];
+        let mut peer: Option<MapClient> = None;
+        let mut count = 0usize;
+        let mut released = false;
+        loop {
+            let (size, client) = server.recv_from(&mut bytes).await.unwrap();
+            count += 1;
+            if count == 1 {
+                let connected = MapClient::connect(client, FIXTURE_SEED).await.unwrap();
+                connected.send_encrypted(&login, 1, 0).await.unwrap();
+                peer = Some(connected);
+            }
+            if count <= BOOTSTRAP_DATAGRAMS {
+                continue;
+            }
+            let peer = peer.as_ref().unwrap();
+            let datagram = peer
+                .decode_datagram(bytes[..size].to_vec(), client)
+                .unwrap();
+            for sub in framing::walk_sub_packets(&datagram[framing::FFXI_HEADER_SIZE..]).flatten() {
+                let action = if sub.opcode == c2s::ACTION {
+                    u16::from_le_bytes(sub.data[ACTION_ID].try_into().unwrap())
+                } else {
+                    0
+                };
+                observed.lock().unwrap().push((sub.opcode, action));
+            }
+            let stamp = (count - 1) as u16;
+            let reply: &[u8] = if count == BOOTSTRAP_DATAGRAMS + 1 {
+                &enterzone
+            } else {
+                &[]
+            };
+            peer.send_encrypted(reply, stamp, 0).await.unwrap();
+            let done = observed
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|&(opcode, action)| opcode == c2s::ACTION && action == send_res_rdy);
+            if done && !released {
+                released = true;
+                let _ = release.send(AgentCommand::Disconnect).await;
+            }
+        }
+    });
+    let mut map = MapClient::connect(address, FIXTURE_SEED).await.unwrap();
+    let cfg = fixture_config();
+    let auth = crate::auth_client::AuthSession {
+        account_id: 1,
+        session_hash: [0; 16],
+    };
+    let bootstrap = fixture_bootstrap();
+    let (events, _event_rx) = broadcast::channel(256);
+    let outcome = tokio::time::timeout(
+        FIXTURE_CASE_TIMEOUT,
+        run_map_session(
+            &cfg,
+            &auth,
+            &bootstrap,
+            &mut map,
+            None,
+            1,
+            None,
+            &mut command_rx,
+            &events,
+            None,
+        ),
+    )
+    .await
+    .expect("a bootstrap 0x008 must still lead to 0x011 and SendResRdy");
+    fake.abort();
+    assert!(
+        fake.await.unwrap_err().is_cancelled(),
+        "fake map server panicked"
+    );
+    assert!(outcome.is_ok(), "{outcome:?}");
+    let sent = sent.lock().unwrap().clone();
+    let gameok = sent
+        .iter()
+        .position(|&(opcode, _)| opcode == c2s::GAMEOK)
+        .expect("GAMEOK");
+    let transitions: Vec<usize> = sent
+        .iter()
+        .enumerate()
+        .filter(|(_, &(opcode, _))| opcode == c2s::ZONE_TRANSITION)
+        .map(|(index, _)| index)
+        .collect();
+    assert_eq!(transitions.len(), 1, "one 0x011 per zone-in: {sent:?}");
+    let res_rdy = sent
+        .iter()
+        .position(|&(opcode, action)| opcode == c2s::ACTION && action == send_res_rdy)
+        .expect("SendResRdy");
+    assert!(
+        gameok < transitions[0] && transitions[0] < res_rdy,
+        "GAMEOK, then ZONE_TRANSITION, then SendResRdy: {sent:?}"
+    );
 }
 
 #[test]

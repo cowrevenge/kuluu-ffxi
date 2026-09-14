@@ -406,6 +406,7 @@ fn abort_contract() {
 fn event_state_contract() {
     super::super::tests::ferry_packet_state_contract();
     super::super::tests::bootstrap_acceptance_contract();
+    super::super::tests::bootstrap_enterzone_contract();
     numeric_contract();
     acknowledgement_contract();
     abort_contract();

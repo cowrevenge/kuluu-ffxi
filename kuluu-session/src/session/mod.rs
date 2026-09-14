@@ -2541,6 +2541,12 @@ async fn keepalive_loop(
 
     let mut reconnect_via_zoneline: Option<u32> = None;
     let mut terminal_disconnect = false;
+    // The kind of the last 0x0E7 REQLOGOUT the client sent: retail's /shutdown
+    // must return to the login/server-select screen while /logout returns to the
+    // character list, so the terminal 0x00B LOGOUT reason carries which one was
+    // requested (issue #156). A server-initiated logout (no client request) keeps
+    // the logout flavor.
+    let mut last_reqlogout_shutdown = false;
 
     let mut pending_maprect: Option<(std::time::Instant, u32)> = None;
 
@@ -2937,7 +2943,12 @@ async fn keepalive_loop(
                         break;
                     }
                     Some(AgentCommand::ReqLogout { kind }) => {
-
+                        last_reqlogout_shutdown = matches!(
+                            kind,
+                            crate::state::ReqLogoutKind::ShutdownToggle
+                                | crate::state::ReqLogoutKind::ShutdownOn
+                                | crate::state::ReqLogoutKind::ShutdownOff
+                        );
                         let (mode, kind_wire) = kind.wire_pair();
                         let payload = build_subpacket_reqlogout(sub_seq, mode, kind_wire);
                         tracing::info!(
@@ -4449,11 +4460,13 @@ async fn keepalive_loop(
                                     reconnect_via_zoneline =
                                         pending_maprect.map(|(_, line_id)| line_id);
                                 } else {
+                                    let flavor = if last_reqlogout_shutdown {
+                                        "server shutdown"
+                                    } else {
+                                        "server logout"
+                                    };
                                     let _ = event_tx.send(AgentEvent::Disconnected {
-                                        reason: format!(
-                                            "server logout state={}",
-                                            logout.logout_state
-                                        ),
+                                        reason: format!("{flavor} state={}", logout.logout_state),
                                     });
                                     terminal_disconnect = true;
                                 }

@@ -882,8 +882,15 @@ fn arm_exit_watchdog_on_appexit(mut exits: MessageReader<AppExit>) {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DisconnectKind {
+    /// A clean `/logout`: the account session is retained, so the launcher
+    /// resumes the character list.
     Clean,
 
+    /// A clean `/shutdown`: retail returns to the login/server-select screen
+    /// (the launcher front), not the character list (issue #156).
+    Shutdown,
+
+    /// A forced / unexpected disconnect: the launcher front with an error toast.
     Forced,
 }
 
@@ -895,6 +902,8 @@ pub(crate) struct ResumeCharListAfterLogout;
 fn classify_disconnect_reason(reason: &str) -> DisconnectKind {
     if reason.starts_with("server logout state=") {
         DisconnectKind::Clean
+    } else if reason.starts_with("server shutdown state=") {
+        DisconnectKind::Shutdown
     } else {
         DisconnectKind::Forced
     }
@@ -1158,6 +1167,20 @@ mod disconnect_tests {
         assert_eq!(
             classify_disconnect_reason("server logout state=2"),
             DisconnectKind::Clean
+        );
+    }
+
+    #[test]
+    fn server_shutdown_classified_shutdown() {
+        // Retail's /shutdown returns to the login/server-select screen, not the
+        // character list: it must classify as Shutdown, distinct from Clean.
+        assert_eq!(
+            classify_disconnect_reason("server shutdown state=1"),
+            DisconnectKind::Shutdown
+        );
+        assert_eq!(
+            classify_disconnect_reason("server shutdown state=2"),
+            DisconnectKind::Shutdown
         );
     }
 

@@ -54,6 +54,10 @@ pub struct LookComp(pub EntityLook);
 pub struct EntityModel {
     pub look: EntityLook,
     pub mounted: bool,
+    /// Part of the signature because it selects which of the model's authored
+    /// CIB scales the prepared mesh is built at, so a server-side size change
+    /// has to re-dispatch the load the way a look change does.
+    pub graph_size: u8,
 }
 
 /// The mount whose model is currently loaded onto a mount actor entity. Memoises

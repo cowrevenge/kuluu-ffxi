@@ -279,6 +279,18 @@ pub struct CharFlags {
     pub gm_level: u8,
     pub bazaar: bool,
 
+    /// `Flags1.GraphSize` (bits 9-10): LSB writes `PEntity->modelSize` here for
+    /// NPC/MOB and `PChar->look.size` for PCs
+    /// (vendor/server/src/map/packets/entity_update.cpp
+    /// `CEntityUpdatePacket::updateWith`, char_update.cpp
+    /// `CCharUpdatePacket::updateWith`), clamped to 0..=3 by
+    /// `lua_baseentity.cpp CLuaBaseEntity::setModelSize`. It is not a
+    /// multiplier: retail indexes the model's four authored CIB scales with it
+    /// (research/XIClient/src/XIClient/source/World/Actor/SkeletalMeshActor.cpp
+    /// `SkeletalMeshActor::GetCibScaleIndex`), so the same value means
+    /// different sizes on different models.
+    pub graph_size: u8,
+
     /// `Flags2.r/g/b`: the equipped linkshell's pearl colour, already expanded
     /// from the 4-bit Exdata channel by the server as `(c << 4) + 15`
     /// (`CCharUpdatePacket::updateWith`). Meaningless unless `linkshell` is set.
@@ -341,6 +353,7 @@ impl CharFlags {
             linkshell: bit(f1, flags1::LINKSHELL),
             linkdead: bit(f1, flags1::LINKDEAD),
             gm_level: field(f1, flags1::GM_LEVEL, flags1::GM_LEVEL_BITS) as u8,
+            graph_size: field(f1, flags1::GRAPH_SIZE, flags1::GRAPH_SIZE_BITS) as u8,
             bazaar: bit(f1, flags1::BAZAAR),
             linkshell_color: [
                 field(f2, flags2::LS_R, flags2::CHANNEL_BITS) as u8,
@@ -383,6 +396,8 @@ mod flags1 {
     pub const LINKDEAD: u32 = 18;
     pub const GM_LEVEL: u32 = 24;
     pub const GM_LEVEL_BITS: u32 = 3;
+    pub const GRAPH_SIZE: u32 = 9;
+    pub const GRAPH_SIZE_BITS: u32 = 2;
     pub const BAZAAR: u32 = 31;
     /// `TargetOffFlag` — bit 19 in both char_update.cpp and entity_update.cpp
     /// `flags1_t`. For NPC/MOB this is where `m_flags & FLAG_UNTARGETABLE`
@@ -931,7 +946,28 @@ mod char_flags_tests {
                 .count();
             assert_eq!(others, 0, "flags1 bit {shift} bled into another field");
             assert_eq!(flags.gm_level, 0, "flags1 bit {shift} bled into GmLevel");
+            assert_eq!(
+                flags.graph_size, 0,
+                "flags1 bit {shift} bled into GraphSize"
+            );
         }
+    }
+
+    /// `GraphSize` sits at bits 9-10, immediately under `LfgFlag` and above
+    /// `CliPosInitFlag`, so a maxed size class must not light either neighbour
+    /// (vendor/server/src/map/packets/entity_update.cpp `flags1_t`).
+    #[test]
+    fn graph_size_is_a_two_bit_field_under_lfg() {
+        for size in 0..=3u8 {
+            let flags = CharFlags::from_pos_head(
+                &head_with(u32::from(size) << flags1::GRAPH_SIZE, 0, 0),
+                None,
+            );
+            assert_eq!(flags.graph_size, size);
+            assert!(!flags.lfg, "GraphSize {size} bled into LfgFlag");
+        }
+        let flags = CharFlags::from_pos_head(&head_with(1 << flags1::LFG, 0, 0), None);
+        assert_eq!(flags.graph_size, 0, "LfgFlag bled into GraphSize");
     }
 
     /// Pins the byte mapping against LSB's write site: for NPC/MOB the

@@ -758,7 +758,7 @@ fn s8_info_chunk_scale_and_movement_reach_the_live_actor() {
     let bat_cib = bat.cib().expect("bat DAT carries a 0x45 Info chunk");
     assert_eq!(bat_cib.movement_type, ffxi_dat::cib::MovementType::Flying);
     assert!(
-        (bat_cib.scale_factor() - 0.85).abs() < f32::EPSILON,
+        (bat_cib.scale_factor(0) - 0.85).abs() < f32::EPSILON,
         "scale byte 85 -> 0.85"
     );
     let walker_cib = walker.cib().expect("walker DAT carries a 0x45 Info chunk");
@@ -767,7 +767,7 @@ fn s8_info_chunk_scale_and_movement_reach_the_live_actor() {
         ffxi_dat::cib::MovementType::Walking
     );
     assert!(
-        (walker_cib.scale_factor() - 1.0).abs() < f32::EPSILON,
+        (walker_cib.scale_factor(0) - 1.0).abs() < f32::EPSILON,
         "scale byte 100 -> 1.0"
     );
 
@@ -803,7 +803,10 @@ fn s8_info_chunk_scale_and_movement_reach_the_live_actor() {
             .resource_mut::<bevy::ecs::message::Messages<LoadActorRequest>>()
             .write(LoadActorRequest {
                 entity_id: id,
-                subject: ActorSubject::Npc { file_id: file },
+                subject: ActorSubject::Npc {
+                    file_id: file,
+                    graph_size: 0,
+                },
             });
     }
 

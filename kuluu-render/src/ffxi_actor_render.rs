@@ -60,15 +60,17 @@ pub enum ActorSubject {
 
     Npc {
         file_id: u32,
+        /// The entity's `Flags1.GraphSize`, which picks one of the model's four
+        /// authored CIB scales (research/XIClient/src/XIClient/source/World/
+        /// Actor/SkeletalMeshActor.cpp `SkeletalMeshActor::GetCibScaleIndex`).
+        graph_size: u8,
     },
 
     /// A ridden mount whose model is a PC race config rather than an NPC model.
     /// Only the chocobo is built this way in retail — one race per coat colour,
     /// with the body parts coming from the equipment table like a PC's gear.
     /// research/xim poc/Model.kt, RaceGenderConfig.
-    Mount {
-        race: u8,
-    },
+    Mount { race: u8 },
 }
 
 #[derive(Message, Debug, Clone)]
@@ -385,6 +387,7 @@ fn prepare_actor_parts(
 pub enum ActorPrepKey {
     Npc {
         file_id: u32,
+        graph_size: u8,
         mipmaps: bool,
         anisotropy: u16,
     },
@@ -407,8 +410,12 @@ pub enum ActorPrepKey {
 
 fn prep_key(subject: &ActorSubject, q: crate::zone_texture::TextureQuality) -> ActorPrepKey {
     match subject {
-        ActorSubject::Npc { file_id } => ActorPrepKey::Npc {
+        ActorSubject::Npc {
+            file_id,
+            graph_size,
+        } => ActorPrepKey::Npc {
             file_id: *file_id,
+            graph_size: *graph_size,
             mipmaps: q.mipmaps,
             anisotropy: q.anisotropy,
         },
@@ -2851,17 +2858,23 @@ pub fn kick_load_actor_tasks(
             continue;
         }
         let subject = req.subject.clone();
-        // Retail applies the Cib Info `scale` byte to NPC models only: NpcModel.getScale
-        // divides it by 100 (research/xim poc/Model.kt NpcModel.getScale), PcModel drops the
-        // byte entirely (PcModel.getMovementInfo) and the mount layout has no scale field at all.
-        // The same value
-        // bakes the bind pose/bounds here and rides along to spawn_live_actor's per-frame
-        // RootTransform, so both see one number.
-        let is_npc = matches!(subject, ActorSubject::Npc { .. });
+        // The model's four authored CIB scales are selected by the entity's
+        // GraphSize (research/XIClient/src/XIClient/source/World/Actor/
+        // SkeletalMeshActor.cpp SkeletalMeshActor::GetCibScaleIndex, resolved by
+        // research/XIClient/src/XIClient/source/CYy/Model/KzCibCollect.cpp
+        // KzCibCollect::GetScale). PC and mount models take no scale here: their
+        // CibCollect is merged from equipment CIBs, which this path does not
+        // build. The chosen value bakes the bind pose/bounds here and rides
+        // along to spawn_live_actor's per-frame RootTransform, so both see one
+        // number.
+        let npc_graph_size = match subject {
+            ActorSubject::Npc { graph_size, .. } => Some(graph_size),
+            _ => None,
+        };
         let task = AsyncComputeTaskPool::get().spawn(async move {
             let loaded = match subject {
                 ActorSubject::Mount { race } => load_mount_race(race),
-                ActorSubject::Npc { file_id } => load_npc(file_id),
+                ActorSubject::Npc { file_id, .. } => load_npc(file_id),
                 ActorSubject::Pc {
                     race,
                     mounted,
@@ -2871,10 +2884,9 @@ pub fn kick_load_actor_tasks(
                     sub_weapon,
                 } => load_pc(race, mounted, &equipment, body, main_weapon, sub_weapon),
             }?;
-            let scale = if is_npc {
-                loaded.cib.map_or(1.0, |c| c.scale_factor())
-            } else {
-                1.0
+            let scale = match (npc_graph_size, loaded.cib) {
+                (Some(graph_size), Some(cib)) => cib.scale_factor(graph_size),
+                _ => 1.0,
             };
             let parts = prepare_actor_parts(&loaded, 0.0, scale, quality);
             Ok(PreparedActor {
@@ -4265,6 +4277,7 @@ mod mesh_dedup_tests {
     fn npc_key(file_id: u32) -> ActorPrepKey {
         ActorPrepKey::Npc {
             file_id,
+            graph_size: 0,
             mipmaps: false,
             anisotropy: 1,
         }

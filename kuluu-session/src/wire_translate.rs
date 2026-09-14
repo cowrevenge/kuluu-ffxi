@@ -679,6 +679,7 @@ pub fn char_flags_to_wire(f: ffxi_proto::decode::CharFlags) -> wire::CharFlags {
         linkdead: f.linkdead,
         gm_level: f.gm_level,
         bazaar: f.bazaar,
+        graph_size: f.graph_size,
         linkshell_color: f.linkshell_color,
         charm: f.charm,
         gm_icon: f.gm_icon,

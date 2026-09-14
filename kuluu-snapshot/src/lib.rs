@@ -2,6 +2,9 @@
 
 use serde::{Deserialize, Serialize};
 
+// v27: CharFlags.graph_size - Flags1.GraphSize, the server's per-entity size class.
+// It indexes the model's four authored CIB scales, so without it every entity
+// renders at the model's index-0 size and mob size variation is lost.
 // v26: ViewerEvent::ActionStarted.outcome - the first result's (info, hitDistortion,
 // knockback) bits (GP_SERV_COMMAND_BATTLE2::pack) that drive the victim's reaction routine.
 // v25: ViewerEvent::TargetChanged - the server-pushed retarget (s2c 0x058 ASSIST).
@@ -293,6 +296,7 @@ pub struct CharFlags {
     pub linkdead: bool,
     pub gm_level: u8,
     pub bazaar: bool,
+    pub graph_size: u8,
     pub linkshell_color: [u8; 3],
     pub charm: bool,
     pub gm_icon: bool,
@@ -2279,6 +2283,7 @@ mod tests {
         let mut snapshot = sample_snapshot();
         snapshot.zone_generation = 128;
         snapshot.entities[0].char_flags.untargetable = true;
+        snapshot.entities[0].char_flags.graph_size = 3;
         snapshot.entities[0].name_vis = Some(0x08);
         snapshot.death_menu_offer = Some(DeathMenuOffer::Tractor);
         let bytes = postcard::to_allocvec(&Frame::Snapshot(Box::new(snapshot))).unwrap();
@@ -2287,6 +2292,7 @@ mod tests {
         };
         assert_eq!(decoded.zone_generation, 128);
         assert!(decoded.entities[0].char_flags.untargetable);
+        assert_eq!(decoded.entities[0].char_flags.graph_size, 3);
         assert_eq!(decoded.entities[0].name_vis, Some(0x08));
         assert_eq!(decoded.chat[0].text, "hi");
         assert_eq!(decoded.death_menu_offer, Some(DeathMenuOffer::Tractor));

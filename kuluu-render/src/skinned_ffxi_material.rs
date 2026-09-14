@@ -643,7 +643,7 @@ fn encode_skin_range(skins: &[FfxiSkin], write: SlabWrite, out: &mut Vec<u8>) {
         if rel < SKIN_JOINTS_BYTES {
             let first = (rel / JOINT_MATRIX_STRIDE) as usize;
             let last = ((end - base).min(SKIN_JOINTS_BYTES) / JOINT_MATRIX_STRIDE) as usize;
-            debug_assert!(last > first);
+            assert!(last > first, "skin slab write is not joint-aligned");
             encode_append(out, &skins[slot].joints.matrices[first..last]);
             off = base + last as u64 * JOINT_MATRIX_STRIDE;
         } else {

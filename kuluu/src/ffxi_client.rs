@@ -19,8 +19,7 @@ pub const DEFAULT_REGION: &str = "us";
 const INSTALLER_CACHE_DIR: &str = "ffxi-installer";
 /// Display name of the unnamed checkout install.
 pub const WORKSPACE_DEFAULT_NAME: &str = "default";
-pub const INSTALLER_SIZE_NOTE: &str = "5 volumes, ~7.2 GB";
-pub const PATCH_SIZE_NOTE: &str = "~0.5 GB";
+pub use ffxi_install::{INSTALLER_SIZE_NOTE, PATCH_SIZE_NOTE};
 
 pub fn valid_name(name: &str) -> bool {
     !name.is_empty()
@@ -304,6 +303,7 @@ pub fn use_install(spec: &str) -> Result<PathBuf, String> {
 pub fn download(
     name: &str,
     region: &str,
+    cancel: &ffxi_install::Cancel,
     report: &ffxi_install::Reporter,
 ) -> Result<PathBuf, String> {
     if !valid_name(name) {
@@ -320,7 +320,7 @@ pub fn download(
         installer_dir: &installer_dir,
         target_root: &target_root,
     };
-    ffxi_install::download_and_unpack(&plan, report)?;
+    ffxi_install::download_and_unpack(&plan, cancel, report)?;
     let root = target_root.join(archive::INSTALL_SUBDIR);
     if !install_detect::is_ffxi_root(&root) {
         return Err(format!(
@@ -349,12 +349,14 @@ pub fn refuse_non_retail(root: &Path) -> Result<(), String> {
 pub fn update(
     root: &Path,
     verify: bool,
+    cancel: &ffxi_install::Cancel,
     report: &ffxi_install::Reporter,
 ) -> Result<Option<ffxi_install::update::Outcome>, String> {
     refuse_non_retail(root)?;
     ffxi_install::update::run(
         root,
         ffxi_install::update::Options { force: verify },
+        cancel,
         report,
     )
 }
@@ -378,13 +380,17 @@ pub struct SetupOutcome {
 /// One shot from nothing to a current retail client: reuse a client already
 /// carrying `name` (never re-downloaded over), else download it, then patch
 /// it. Selecting it is the caller's decision.
-pub fn setup(opts: &SetupOptions, report: &ffxi_install::Reporter) -> Result<SetupOutcome, String> {
+pub fn setup(
+    opts: &SetupOptions,
+    cancel: &ffxi_install::Cancel,
+    report: &ffxi_install::Reporter,
+) -> Result<SetupOutcome, String> {
     let (root, reused) = match named(&opts.name) {
         Some(root) => (root, true),
-        None => (download(&opts.name, &opts.region, report)?, false),
+        None => (download(&opts.name, &opts.region, cancel, report)?, false),
     };
     let update = if opts.update {
-        Some(update(&root, false, report)?)
+        Some(update(&root, false, cancel, report)?)
     } else {
         None
     };
@@ -625,7 +631,8 @@ pub mod cli {
             region,
             update: !no_update,
         };
-        let outcome = setup(&opts, &ffxi_install::report::print_progress)?;
+        let cancel = ffxi_install::Cancel::default();
+        let outcome = setup(&opts, &cancel, &ffxi_install::report::print_progress)?;
         println!(
             "\n{}\n  {}",
             outcome.root.display(),
@@ -682,7 +689,13 @@ pub mod cli {
         {
             return Err("aborted".into());
         }
-        match update(&root, verify, &ffxi_install::report::print_progress)? {
+        let cancel = ffxi_install::Cancel::default();
+        match update(
+            &root,
+            verify,
+            &cancel,
+            &ffxi_install::report::print_progress,
+        )? {
             None => {
                 println!("already at the server's version; pass --verify to re-check every file")
             }

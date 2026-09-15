@@ -10,6 +10,10 @@ pub fn print_progress(p: Progress) {
     match p {
         VolumeCached { index } => println!("volume {index}: already downloaded"),
         VolumeDownloading { index, url } => println!("volume {index}: downloading {url}"),
+        DownloadBytes { done, total } => {
+            print!("\r  {} / {} MB", done / 1_000_000, total / 1_000_000);
+            std::io::stdout().flush().ok();
+        }
         VolumeReady {
             index,
             complete_members,

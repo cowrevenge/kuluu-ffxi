@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 use crate::manifest::{self, FileHistory, FileSig, Manifest, MANIFEST_FILE};
 use crate::patch_client::{self, Server, Session, TITLE_FFXI};
-use crate::{Progress, Reporter};
+use crate::{Cancel, Progress, Reporter};
 
 const TEMP_SUFFIX: &str = ".kuluu-update";
 const SCAN_REPORT_EVERY: usize = 1000;
@@ -207,7 +207,12 @@ fn produce(
     Ok(data)
 }
 
-pub fn run(root: &Path, options: Options, report: &Reporter) -> Result<Option<Outcome>, String> {
+pub fn run(
+    root: &Path,
+    options: Options,
+    cancel: &Cancel,
+    report: &Reporter,
+) -> Result<Option<Outcome>, String> {
     let server = Server::for_title(TITLE_FFXI);
     let mut conn = Connection::open(server.clone())?;
     let reply = conn.session.version_check(&[])?;
@@ -238,6 +243,7 @@ pub fn run(root: &Path, options: Options, report: &Reporter) -> Result<Option<Ou
     let count = plan.files.len();
     let mut bytes = 0u64;
     for (index, item) in plan.files.iter().enumerate() {
+        cancel.check()?;
         report(Progress::UpdateFile {
             index,
             count,

@@ -415,7 +415,13 @@ fn update_verb(workspace: &Path, opts: &ClientArgs) -> Result<(), String> {
 /// SE's viewer runs.
 fn update_install(root: &Path, verify: bool) -> Result<(), String> {
     let options = ffxi_install::update::Options { force: verify };
-    match ffxi_install::update::run(root, options, &ffxi_install::report::print_progress)? {
+    let cancel = ffxi_install::Cancel::default();
+    match ffxi_install::update::run(
+        root,
+        options,
+        &cancel,
+        &ffxi_install::report::print_progress,
+    )? {
         None => println!("already at the server's version; pass --verify to re-check every file"),
         Some(outcome) => println!(
             "now at {} ({} file(s) fetched, {} MB)",
@@ -644,7 +650,8 @@ fn setup_verb(workspace: &Path, opts: &ClientArgs) -> Result<(), String> {
     } else {
         println!(
             "This downloads Square Enix's official FINAL FANTASY XI client installer\n\
-             (5 volumes, ~7.2 GB) from {}/{}/ and unpacks it into\n  {}",
+             ({}) from {}/{}/ and unpacks it into\n  {}",
+            ffxi_install::INSTALLER_SIZE_NOTE,
             ffxi_install::CDN_BASE,
             region.sub,
             show(&target_root)
@@ -664,7 +671,8 @@ fn setup_verb(workspace: &Path, opts: &ClientArgs) -> Result<(), String> {
             installer_dir: &installer_dir,
             target_root: &target_root,
         };
-        ffxi_install::download_and_unpack(&plan, &ffxi_install::report::print_progress)?;
+        let cancel = ffxi_install::Cancel::default();
+        ffxi_install::download_and_unpack(&plan, &cancel, &ffxi_install::report::print_progress)?;
         if !is_ffxi_root(&ffxi) {
             return Err(format!(
                 "unpack finished but {} does not validate ({MARKER} missing)",

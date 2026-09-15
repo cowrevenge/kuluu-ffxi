@@ -196,14 +196,15 @@ impl EventVm {
 
     /// Run one frame of every actor request stack: each stack steps its
     /// lowest-priority-number request once, cues and scene actions bubble up
-    /// with the child's actor as the event entity for cue resolution, and the
-    /// shared Work_Zone is copied in before and out after (retail keeps one
-    /// global zone work array across every actor's VM; work_local stays per
-    /// child). A child that parks on a dialog frame surfaces it to the host via
-    /// [`Scene::dialog_child`] instead of being dropped, because retail's single
-    /// global CliEventMessOpenFlag (research/XiEvents/OpCodes/0x001D.md) keeps
-    /// the whole event parked until the player answers that child; requests that
-    /// stop on an unrunnable opcode are still dropped.
+    /// with the child's actor as the event entity for cue resolution. The
+    /// Work_Zone is one shared cell across every VM in the event, so a
+    /// child's write is visible to the master and to siblings without a copy
+    /// (work_local stays per child). A child that parks on a dialog frame
+    /// surfaces it to the host via [`Scene::dialog_child`] instead of being
+    /// dropped, because retail's single global CliEventMessOpenFlag
+    /// (research/XiEvents/OpCodes/0x001D.md) keeps the whole event parked
+    /// until the player answers that child; requests that stop on an
+    /// unrunnable opcode are still dropped.
     pub(super) fn step_stacks(&mut self) -> Option<StepResult> {
         // Collect the active (actor, request index) pairs under one immutable
         // borrow; each step below needs &mut self.
@@ -224,7 +225,6 @@ impl EventVm {
             .collect::<Vec<_>>();
         let mut surfaced: Option<StepResult> = None;
         for (actor, index) in active {
-            self.copy_zone_into_child(actor, index);
             let result = self.child_step(actor, index);
             match result {
                 StepResult::Done => self.remove_request(actor, index),
@@ -338,7 +338,6 @@ impl EventVm {
             self.cues.push(cue.resolve_event_actor(ActorLookup(actor)));
         }
         self.scene_actions.extend(vm.take_scene_actions());
-        self.work_zone = vm.work_zone;
         self.param_len = vm.param_len;
         // The local player's child owns the position this scene reports: mirror
         // its tracked position and control flag up so a finished event still
@@ -355,11 +354,6 @@ impl EventVm {
             scene.controls_position |= controls;
         }
         result
-    }
-
-    fn copy_zone_into_child(&mut self, actor: u32, index: usize) {
-        let zone = self.work_zone;
-        self.child_mut(actor, index).work_zone = zone;
     }
 
     pub(super) fn child_mut(&mut self, actor: u32, index: usize) -> &mut EventVm {
@@ -492,8 +486,13 @@ impl EventVm {
         } else {
             EventPosition::default()
         };
-        let mut child = EventVm::start_at(block, entry as usize, self.speaker_index, self.params());
-        child.work_zone = self.work_zone;
+        let mut child = EventVm::start_at_shared(
+            block,
+            entry as usize,
+            self.speaker_index,
+            self.params(),
+            Arc::clone(&self.work_zone),
+        );
         child.actor_types = self.actor_types.clone();
         child.attach_scene(dat, actor, player);
         let stacks = &mut self.scene.as_mut().unwrap().stacks;
@@ -541,8 +540,13 @@ impl EventVm {
         } else {
             EventPosition::default()
         };
-        let mut child = EventVm::start_at(block, entry, self.speaker_index, self.params());
-        child.work_zone = self.work_zone;
+        let mut child = EventVm::start_at_shared(
+            block,
+            entry,
+            self.speaker_index,
+            self.params(),
+            Arc::clone(&self.work_zone),
+        );
         child.actor_types = self.actor_types.clone();
         child.attach_scene(dat, actor, player);
         let stacks = &mut self.scene.as_mut().unwrap().stacks;

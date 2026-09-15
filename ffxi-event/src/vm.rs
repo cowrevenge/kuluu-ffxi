@@ -1,5 +1,7 @@
 pub mod scene;
 
+use std::sync::{Arc, Mutex};
+
 use ffxi_dat::event_dat::EventBlock;
 
 use crate::cue::{
@@ -324,6 +326,15 @@ const CHOICE_CANCELLED_QUERYWAIT2: u32 = 255;
 /// a loop this VM cannot leave.
 pub const OPCODE_BUDGET_PER_STEP: u32 = 100_000;
 
+/// Work_Zone is one shared global array across every entity VM in the event
+/// (research/XiEvents/Event VM Functions.md getworkofs: "Work_Zone is a shared
+/// global array in FFXiMain.dll for the zone to use for all events"). Every VM
+/// in a scene aliases the same cell, so a setworkofs, choice selection or
+/// PENDINGNUM write in one VM is visible to the master and to siblings with no
+/// copy. Arc<Mutex> rather than Rc<RefCell>: the session holds a VM across an
+/// await in a spawned task, so the VM must stay Send.
+type SharedWorkZone = Arc<Mutex<[u32; WORK_ZONE_LEN]>>;
+
 /// `XiEvent` runtime for a single event, simplified to the linear+jump+message
 /// flow plus the per-actor request stacks a scene fans out onto (research/
 /// XiEvents/Event VM Structures.md xievent_t::ReqStack). Mirrors the fields the
@@ -342,7 +353,7 @@ pub struct EventVm {
     /// The s2c 0x005D PENDINGSTR table (PTR_EventStrings): four 16-byte strings
     /// the server pushes before the event, read by 0xB4 case 1.
     pending_strings: [[u8; 16]; 4],
-    work_zone: [u32; WORK_ZONE_LEN],
+    work_zone: SharedWorkZone,
     exec_pointer: usize,
     jump_table: [u16; JUMP_STACK_LEN],
     jump_index: usize,
@@ -536,6 +547,26 @@ impl EventVm {
         {
             *slot = *value as u32;
         }
+        Self::start_at_shared(
+            block,
+            exec_pointer,
+            speaker_index,
+            params,
+            Arc::new(Mutex::new(work_zone)),
+        )
+    }
+
+    /// [`Self::start_at`] over the event's shared Work_Zone cell: owner and
+    /// REQSET children alias the master's cell instead of snapshotting it
+    /// (retail keeps one Work_Zone per event, not one per VM — see
+    /// [`SharedWorkZone`]).
+    fn start_at_shared(
+        block: &EventBlock,
+        exec_pointer: usize,
+        speaker_index: u16,
+        params: Vec<i32>,
+        work_zone: SharedWorkZone,
+    ) -> Self {
         Self {
             scene: None,
             scene_cancelled: false,
@@ -574,7 +605,11 @@ impl EventVm {
     }
 
     fn params(&self) -> Vec<i32> {
-        self.work_zone[EVENT_PARAM_WORK_BASE..][..self.param_len]
+        self.work_zone
+            .lock()
+            .unwrap()
+            .get(EVENT_PARAM_WORK_BASE..EVENT_PARAM_WORK_BASE + self.param_len)
+            .expect("param_len is bounded by EVENT_PARAM_COUNT")
             .iter()
             .map(|&value| value as i32)
             .collect()
@@ -618,7 +653,7 @@ impl EventVm {
             self.child_mut(actor, i).select_choice(index);
             return;
         }
-        self.work_zone[0] = index.unwrap_or(CHOICE_CANCELLED);
+        self.work_zone.lock().unwrap()[0] = index.unwrap_or(CHOICE_CANCELLED);
         self.selection_made = true;
     }
 
@@ -662,7 +697,12 @@ impl EventVm {
     /// result the client returns in the 0x05B `EndPara`
     /// (research/XiPackets/world/client/0x005B).
     pub fn work_zone(&self, index: usize) -> i32 {
-        self.work_zone.get(index).copied().unwrap_or(0) as i32
+        self.work_zone
+            .lock()
+            .unwrap()
+            .get(index)
+            .copied()
+            .unwrap_or(0) as i32
     }
 
     /// Arm a hold for `key` on `actor` lasting `units` (1/60 s, the same clock
@@ -877,18 +917,20 @@ impl EventVm {
     /// s2c PENDINGNUM's num[8] copied into Work_Zone starting at index 2
     /// (research/XiPackets/world/server/0x005C GP_SERV_PENDINGNUM). The event
     /// system reads these slots as its loop conditions, so the write lands
-    /// before the next step even while a tag is held. Work_Zone is one shared
-    /// global array across every entity VM in the event (research/XiEvents/
-    /// Event VM Functions.md getworkofs/setworkofs), so the write lands in
-    /// every VM's copy at once, not just this one's.
+    /// before the next step even while a tag is held. Work_Zone is the
+    /// event's shared cell ([`SharedWorkZone`]), so the write is visible to
+    /// every VM in the scene at once.
     pub fn apply_pending_num(&mut self, num: &[i32; 8]) {
         for (slot, value) in num.iter().enumerate() {
-            if let Some(cell) = self.work_zone.get_mut(PENDING_NUM_WORK_ZONE_BASE + slot) {
+            if let Some(cell) = self
+                .work_zone
+                .lock()
+                .unwrap()
+                .get_mut(PENDING_NUM_WORK_ZONE_BASE + slot)
+            {
                 *cell = *value as u32;
             }
         }
-        let mut land = |child: &mut EventVm| child.apply_pending_num(num);
-        self.for_each_child_vm(&mut land);
     }
 
     /// s2c 0x005D PENDINGSTR's four 16-byte strings copied into the event
@@ -1246,7 +1288,7 @@ impl EventVm {
                     }
                     self.selection_made = false;
                     self.pending_choice = None;
-                    if self.work_zone[0] == CHOICE_CANCELLED {
+                    if self.work_zone.lock().unwrap()[0] == CHOICE_CANCELLED {
                         self.finished = true;
                         return StepResult::Cancelled;
                     }
@@ -1525,8 +1567,8 @@ impl EventVm {
                     }
                     self.selection_made = false;
                     self.pending_choice = None;
-                    if self.work_zone[0] == CHOICE_CANCELLED {
-                        self.work_zone[0] = CHOICE_CANCELLED_QUERYWAIT2;
+                    if self.work_zone.lock().unwrap()[0] == CHOICE_CANCELLED {
+                        self.work_zone.lock().unwrap()[0] = CHOICE_CANCELLED_QUERYWAIT2;
                     }
                     self.exec_pointer += 1;
                 }
@@ -1762,7 +1804,7 @@ impl EventVm {
             return self.work_local[val as usize] as i32;
         }
         if (WORK_ZONE_BASE..WORK_ZONE_BASE + WORK_ZONE_LEN as u32).contains(&val) {
-            return self.work_zone[(val - WORK_ZONE_BASE) as usize] as i32;
+            return self.work_zone.lock().unwrap()[(val - WORK_ZONE_BASE) as usize] as i32;
         }
         0
     }
@@ -1784,7 +1826,7 @@ impl EventVm {
         }
         if (WORK_ZONE_BASE..WORK_ZONE_BASE + WORK_ZONE_LEN as u32).contains(&val) {
             let index = (val - WORK_ZONE_BASE) as usize;
-            self.work_zone[index] = value as u32;
+            self.work_zone.lock().unwrap()[index] = value as u32;
             if (EVENT_PARAM_WORK_BASE..EVENT_PARAM_WORK_BASE + EVENT_PARAM_COUNT).contains(&index) {
                 self.param_len = self.param_len.max(index - EVENT_PARAM_WORK_BASE + 1);
             }
@@ -2164,6 +2206,85 @@ mod tests {
     }
 
     #[test]
+    fn owner_child_setworkofs_lands_in_master_and_siblings() {
+        // Two owner blocks: A stores 0xDEAD into Work_Zone[3] (0x03 GET_STORE,
+        // work operand 4099), then parks on a one-second wait; B copies
+        // Work_Zone[3] into its own Work_Local[0], then parks the same way.
+        // The master does an END. All three VMs must see 0xDEAD in
+        // Work_Zone[3]: retail's Work_Zone is one shared cell per event, so a
+        // child's write reaches the master and the siblings without a copy.
+        const NPC2: u32 = 0x0100_02C6;
+        const ONE_SECOND: u32 = WAIT_UNITS_PER_SEC as u32;
+        let owner_a = vec![
+            OP_GET_STORE,
+            0x03,
+            0x10, // 4099: Work_Zone[3]
+            0x00,
+            0x80, // references[0]
+            OP_WAIT,
+            0x01,
+            0x80, // wait references[1]
+            OP_END,
+        ];
+        let owner_b = vec![
+            OP_GET_STORE,
+            0x00,
+            0x00, // Work_Local[0]
+            0x03,
+            0x10, // Work_Zone[3]
+            OP_WAIT,
+            0x01,
+            0x80, // wait references[1]
+            OP_END,
+        ];
+        let mut block_a = block(owner_a, vec![0xDEAD, ONE_SECOND]);
+        block_a.actor = NPC_SERVER_ID;
+        let mut block_b = block(owner_b, vec![0, ONE_SECOND]);
+        block_b.actor = NPC2;
+        let dat = std::sync::Arc::new(ffxi_dat::event_dat::EventDat {
+            blocks: vec![block(vec![OP_END], vec![]), block_a, block_b],
+        });
+
+        let mut e = vm(vec![OP_END], vec![]);
+        e.attach_scene(
+            dat.clone(),
+            ffxi_dat::event_dat::ZONE_PLAYER_ACTOR,
+            crate::vm::scene::EventPosition::default(),
+        );
+        for (owner, entry) in EventVm::owner_blocks(&dat, 7) {
+            if owner.actor != ffxi_dat::event_dat::ZONE_PLAYER_ACTOR {
+                e.spawn_owner(owner, entry);
+            }
+        }
+
+        assert_eq!(
+            e.step(),
+            StepResult::Waiting,
+            "both owners park on their waits"
+        );
+        assert_eq!(
+            e.work_zone.lock().unwrap()[3],
+            0xDEAD,
+            "the master sees owner A's write"
+        );
+        assert_eq!(
+            e.child_mut(NPC_SERVER_ID, 0).work_zone.lock().unwrap()[3],
+            0xDEAD,
+            "owner A sees its own write"
+        );
+        assert_eq!(
+            e.child_mut(NPC2, 0).work_zone.lock().unwrap()[3],
+            0xDEAD,
+            "owner B sees owner A's write"
+        );
+        assert_eq!(
+            e.child_mut(NPC2, 0).work_local[0],
+            0xDEAD,
+            "owner B's read went through the shared cell"
+        );
+    }
+
+    #[test]
     fn trigger_params_seed_all_eight_work_slots_without_overwriting_results() {
         let params = vec![1_300_000, 100, -1, i32::MIN, i32::MAX, 17, 29, 41];
         let event = EventVm::start(&block(vec![OP_END], vec![]), 7, 5, params.clone()).unwrap();
@@ -2255,8 +2376,8 @@ mod tests {
     fn endian_swap_exchanges_both_slots() {
         let data = vec![OP_SWAP, DST[0], DST[1], 0x01, 0x10, OP_END];
         let mut e = vm(data, vec![]);
-        e.work_zone[0] = 11;
-        e.work_zone[1] = 22;
+        e.work_zone.lock().unwrap()[0] = 11;
+        e.work_zone.lock().unwrap()[1] = 22;
 
         assert_eq!(e.step(), StepResult::Done);
         assert_eq!((e.work_zone(0), e.work_zone(1)), (22, 11));

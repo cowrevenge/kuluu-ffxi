@@ -770,7 +770,7 @@ mod tests {
                 "  Making easy money.".into(),
                 "  Working for my country.".into(),
             ];
-            want_labels.extend(std::iter::repeat(String::new()).take(12));
+            want_labels.extend(std::iter::repeat_n(String::new(), 12));
             assert_eq!(row_labels(app.world_mut()), want_labels);
             let colors = row_colors(app.world_mut());
             assert_eq!(colors[0], theme::CURSOR, "cursor row gets the cursor color");

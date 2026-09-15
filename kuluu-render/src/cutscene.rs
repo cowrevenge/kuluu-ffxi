@@ -498,10 +498,10 @@ pub fn drain_cutscene_clock(
             },
             ViewerEvent::CutsceneEnded
             | ViewerEvent::ZoneChanged { .. }
-            | ViewerEvent::Disconnected { .. } => {
-                if clock.is_frozen() {
-                    clock.thaw();
-                }
+            | ViewerEvent::Disconnected { .. }
+                if clock.is_frozen() =>
+            {
+                clock.thaw();
             }
             _ => {}
         }
@@ -1004,7 +1004,7 @@ mod tests {
     /// full-width name without one keeps all sixteen bytes.
     #[test]
     fn the_name_slot_truncates_at_the_first_nul() {
-        assert_eq!(event_name_string(&*b"Sajj'aka\0\0\0\0\0\0\0\0"), "Sajj'aka");
+        assert_eq!(event_name_string(b"Sajj'aka\0\0\0\0\0\0\0\0"), "Sajj'aka");
         assert_eq!(event_name_string(&[0u8; 16]), "");
         let full: [u8; 16] = *b"SixteenBytes!!!!";
         assert_eq!(event_name_string(&full), "SixteenBytes!!!!");

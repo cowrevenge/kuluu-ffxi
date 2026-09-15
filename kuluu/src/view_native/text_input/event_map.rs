@@ -53,7 +53,7 @@ fn open_event_map(
     }
     // `viewed` stays None when the authored zone is the live one, so the
     // surface shows the live map rather than a Change-Map override.
-    map_state.viewed = (live_zone != Some(map_id)).then(|| (map_id, 0));
+    map_state.viewed = (live_zone != Some(map_id)).then_some((map_id, 0));
 }
 
 fn upsert_event_marker(
@@ -131,14 +131,14 @@ mod tests {
 
     fn mode_is_map_open(world: &World) -> bool {
         matches!(
-            &*world.resource::<InputMode>(),
+            world.resource::<InputMode>(),
             InputMode::Menu(stack)
                 if stack.current().is_some_and(|l| l.kind == MenuKind::Map)
         )
     }
 
     fn mode_is_world(world: &World) -> bool {
-        matches!(&*world.resource::<InputMode>(), InputMode::World)
+        matches!(world.resource::<InputMode>(), InputMode::World)
     }
 
     fn push(world: &mut World, ev: ViewerEvent) {

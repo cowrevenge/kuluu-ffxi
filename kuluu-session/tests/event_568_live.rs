@@ -157,7 +157,7 @@ fn handle_event(tally: &mut Tally, ev: &AgentEvent, now: Instant) {
             }
         }
         AgentEvent::EventDialog { dialog } => {
-            if dialog.event_para != u16::from(EVENT_568) {
+            if dialog.event_para != EVENT_568 {
                 return;
             }
             tally.frames_total += 1;
@@ -288,7 +288,7 @@ async fn event_568_full_playback_against_live_lsb() {
                 }
 
                 if let AgentEvent::EventDialog { dialog } = &ev {
-                    if dialog.event_para == u16::from(EVENT_568) {
+                    if dialog.event_para == EVENT_568 {
                         // The 568 script carries no 0x24 QUERY frames; choice 0
                         // dismisses the single message frame.
                         eprintln!("[live] frame {}: dismissing", tally.frames_total);

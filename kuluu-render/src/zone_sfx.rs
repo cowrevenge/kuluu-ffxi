@@ -527,7 +527,7 @@ mod tests {
         let Some(bytes) = zone_dat(HOME_POINT_MODEL_DAT) else {
             return;
         };
-        let (_, assets) = crate::scheduler_runtime::parse_action_bytes(&bytes);
+        let (_, assets, _) = crate::scheduler_runtime::parse_action_bytes(&bytes);
         let out = actor_auto_run_sounds(&assets);
         assert_eq!(out.len(), 1, "{:?}", out);
         let (def, sep) = out[0];

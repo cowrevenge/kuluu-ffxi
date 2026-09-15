@@ -1891,6 +1891,38 @@ pub(crate) fn render_actor_for_test(skeleton: Skeleton, world_pose: Vec<Mat4>) -
     }
 }
 
+// A render actor with no model behind it, carrying an explicit 0x45 Info movement byte, for the
+// remote-grounding test that gates on MovementType and needs nothing else.
+#[cfg(test)]
+pub(crate) fn render_actor_with_movement_for_test(
+    skeleton: Skeleton,
+    world_pose: Vec<Mat4>,
+    movement_type: MovementType,
+) -> FfxiRenderActor {
+    let cib = Cib {
+        movement_type,
+        ..Cib::parse(*b"cib0", &[0u8; ffxi_dat::cib::CIB_LEN]).unwrap()
+    };
+    let loaded = LoadedActor {
+        skeleton: Arc::new(skeleton),
+        skel_meshes: Vec::new(),
+        effect_meshes: Vec::new(),
+        textures: Vec::new(),
+        animations: Arc::default(),
+        battle_clips: Arc::default(),
+        routines: Arc::default(),
+        action_assets: Arc::default(),
+        rejected_clips: Vec::new(),
+        rejected_routines: Vec::new(),
+        model_dat: String::new(),
+        cib: Some(cib),
+    };
+    FfxiRenderActor {
+        world_pose,
+        ..make_render_actor(&loaded, 0, Vec::new(), 0, 0.0, 1.0)
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn spawn_live_actor(
     commands: &mut Commands,
@@ -3691,8 +3723,9 @@ pub fn tick_live_ffxi_actors(
         };
         // Model not loaded yet: the clip still plays from the pose pass; only the dirt and
         // sound are lost. Acceptable degradation — the load lands within a few frames.
-        let Some((_, actor, _, _, _)) =
-            q_actors.iter().find(|(_, a, _, _, _)| a.world_id == world_id)
+        let Some((_, actor, _, _, _)) = q_actors
+            .iter()
+            .find(|(_, a, _, _, _)| a.world_id == world_id)
         else {
             continue;
         };
@@ -3828,9 +3861,8 @@ pub fn tick_live_ffxi_actors(
         (self_move.forward, self_move.strafe, self_move.moving);
 
     let motion = &*motion;
-    q_actors
-        .par_iter_mut()
-        .for_each(|(_entity, mut actor, actor_global, mut vis, dead_from_action)| {
+    q_actors.par_iter_mut().for_each(
+        |(_entity, mut actor, actor_global, mut vis, dead_from_action)| {
             let world_id = actor.world_id;
             if world_id == 0 {
                 return;
@@ -4025,8 +4057,9 @@ pub fn tick_live_ffxi_actors(
     }
 
     if let Some(self_id) = self_id {
-        if let Some((_, actor, _, _, _)) =
-            q_actors.iter().find(|(_, a, _, _, _)| a.world_id == self_id)
+        if let Some((_, actor, _, _, _)) = q_actors
+            .iter()
+            .find(|(_, a, _, _, _)| a.world_id == self_id)
         {
             rest.observe_exit_clip(matches!(actor.rest_phase, RestPlayback::Stopping { .. }));
         }
@@ -4755,8 +4788,12 @@ mod pose_resolution_tests {
         let mut actor = make_render_actor(&loaded, 0, Vec::new(), 1, 0.0, 1.0);
         // sub=1 names the ini1 routine; its first Motion stage is the dig clip (the clip
         // comes from the routine record, not a hard-coded mapping).
-        let dig = routine_motion_clip(&actor.routines, DatId::from_name(b"ini1"))
-            .expect("worm ini1 routine carries a motion stage");
+        let dig = routine_motion_clip(
+            &actor.routines,
+            &actor.rejected_routines,
+            DatId::from_name(b"ini1"),
+        )
+        .expect("worm ini1 routine carries a motion stage");
         assert!(
             dig.parameterized_match(&DatId::from_str("sp1?")),
             "worm dig clip is sp1?"
@@ -5645,7 +5682,7 @@ mod pose_resolution_tests {
         });
         app.world_mut()
             .entity_mut(actor_entity)
-            .insert(crate::scheduler_runtime::DeadFromAction);
+            .insert(crate::scheduler_runtime::DeadFromAction::default());
 
         tick(&mut app);
         let actor = app.world().get::<FfxiRenderActor>(actor_entity).unwrap();
@@ -5759,7 +5796,7 @@ mod pose_resolution_tests {
         snapshot.death_homepoint_secs = Some(30);
         app.world_mut()
             .entity_mut(self_entity)
-            .insert(crate::scheduler_runtime::DeadFromAction);
+            .insert(crate::scheduler_runtime::DeadFromAction::default());
 
         tick(&mut app);
         let actor = app.world().get::<FfxiRenderActor>(self_entity).unwrap();

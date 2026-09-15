@@ -1563,7 +1563,11 @@ impl EventVm {
                         // range index reads slot 0, retail's clamp.
                         (OP_WINDOW, 0x01) => {
                             let idx = self.getworkofs(4, 0);
-                            let idx = (0..4).contains(&idx).then_some(idx as usize).unwrap_or(0);
+                            let idx = if (0..4).contains(&idx) {
+                                idx as usize
+                            } else {
+                                0
+                            };
                             self.setworkstr(2, self.pending_strings[idx]);
                         }
                         // 0xB5 case 0: the event entity's display name becomes

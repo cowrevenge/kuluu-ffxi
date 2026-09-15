@@ -185,7 +185,7 @@ fn handle_event(tally: &mut Tally, ev: &AgentEvent, now: Instant) {
             }
         }
         AgentEvent::EventDialog { dialog } => {
-            if dialog.event_para != u16::from(EVENT_503) {
+            if dialog.event_para != EVENT_503 {
                 return;
             }
             tally.frames_total += 1;
@@ -234,16 +234,17 @@ fn handle_event(tally: &mut Tally, ev: &AgentEvent, now: Instant) {
             tally.marker_label = Some(label.clone());
         }
         AgentEvent::MapClosed => tally.map_closed = true,
-        AgentEvent::InventoryUpdated { update, .. } => {
-            if let InventoryUpdate::SlotChanged { slot } = update {
-                if slot.item_no == COUPON_ITEM_NO && tally.item_536_slot.is_none() {
-                    tally.item_536_slot = Some(slot.index);
-                    eprintln!(
-                        "[live] item {COUPON_ITEM_NO} granted to inventory slot {} at t+{:.1}s",
-                        slot.index,
-                        now.elapsed().as_secs_f32()
-                    );
-                }
+        AgentEvent::InventoryUpdated {
+            update: InventoryUpdate::SlotChanged { slot },
+            ..
+        } => {
+            if slot.item_no == COUPON_ITEM_NO && tally.item_536_slot.is_none() {
+                tally.item_536_slot = Some(slot.index);
+                eprintln!(
+                    "[live] item {COUPON_ITEM_NO} granted to inventory slot {} at t+{:.1}s",
+                    slot.index,
+                    now.elapsed().as_secs_f32()
+                );
             }
         }
         AgentEvent::ForcedMove { target, .. } => {
@@ -361,7 +362,7 @@ async fn event_503_full_playback_against_live_lsb() {
                 writeln!(events_log, "{line}").expect("writing events.jsonl");
 
                 if let AgentEvent::EventDialog { dialog } = &ev {
-                    if dialog.event_para == u16::from(EVENT_503) {
+                    if dialog.event_para == EVENT_503 {
                         let choice = pick_choice(dialog);
                         let label = dialog
                             .choices
@@ -449,11 +450,13 @@ async fn event_503_full_playback_against_live_lsb() {
         "event 503 auto-skipped instead of playing: {:?}",
         tally.auto_skipped_line
     );
-    let started_at = tally.cutscene_started_at.expect(&format!(
-        "CutsceneStarted for event 503 never observed (stop: {stop_reason}, \
+    let started_at = tally.cutscene_started_at.unwrap_or_else(|| {
+        panic!(
+            "CutsceneStarted for event 503 never observed (stop: {stop_reason}, \
              frames so far: {:?})",
-        &tally.frame_texts[..tally.frame_texts.len().min(8)]
-    ));
+            &tally.frame_texts[..tally.frame_texts.len().min(8)]
+        )
+    });
     assert!(
         tally.event_ended_at.is_some(),
         "event 503 never ended (stop: {stop_reason}, frames: {})",
@@ -526,9 +529,9 @@ async fn event_503_full_playback_against_live_lsb() {
         tally.item_536_slot.is_some(),
         "onEventFinish never granted item {COUPON_ITEM_NO} (stop: {stop_reason})"
     );
-    let target = tally.forced_move_target.expect(&format!(
-        "no ForcedMove observed after event end (stop: {stop_reason})"
-    ));
+    let target = tally
+        .forced_move_target
+        .unwrap_or_else(|| panic!("no ForcedMove observed after event end (stop: {stop_reason})"));
     assert!(
         (target[0] - GATE_WIRE_X).abs() <= GATE_TOLERANCE
             && (target[1] - GATE_WIRE_Y).abs() <= GATE_TOLERANCE

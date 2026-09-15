@@ -2367,8 +2367,10 @@ mod dialog_esc_gate_tests {
         let bindings = Bindings::default();
         let mut cursor = DialogCursor::default();
         let mut scene_state = SceneState::default();
-        let mut dialog = DialogState::default();
-        dialog.cancel_armed = false;
+        let dialog = DialogState {
+            cancel_armed: false,
+            ..Default::default()
+        };
         scene_state.snapshot.dialog = Some(dialog);
 
         let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel::<AgentCommand>(4);
@@ -2397,8 +2399,10 @@ mod dialog_esc_gate_tests {
         let bindings = Bindings::default();
         let mut cursor = DialogCursor::default();
         let mut scene_state = SceneState::default();
-        let mut dialog = DialogState::default();
-        dialog.cancel_armed = true;
+        let dialog = DialogState {
+            cancel_armed: true,
+            ..Default::default()
+        };
         scene_state.snapshot.dialog = Some(dialog);
 
         let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel::<AgentCommand>(4);
@@ -2527,9 +2531,10 @@ mod cs_input_lock_tests {
     fn enter_advances_the_event_with_the_map_open() {
         let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel::<AgentCommand>(4);
         let mut app = gate_app(cmd_tx);
-        let mut dialog = DialogState::default();
-        dialog.cancel_armed = false;
-        app.world_mut().resource_mut::<SceneState>().snapshot.dialog = Some(dialog);
+        app.world_mut().resource_mut::<SceneState>().snapshot.dialog = Some(DialogState {
+            cancel_armed: false,
+            ..Default::default()
+        });
         app.insert_resource(kuluu_render::cutscene::CutsceneMode::active_locked());
 
         press(&mut app, Key::Enter);
@@ -2554,9 +2559,10 @@ mod cs_input_lock_tests {
     fn esc_cannot_close_the_map_while_disarmed() {
         let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel::<AgentCommand>(4);
         let mut app = gate_app(cmd_tx);
-        let mut dialog = DialogState::default();
-        dialog.cancel_armed = false;
-        app.world_mut().resource_mut::<SceneState>().snapshot.dialog = Some(dialog);
+        app.world_mut().resource_mut::<SceneState>().snapshot.dialog = Some(DialogState {
+            cancel_armed: false,
+            ..Default::default()
+        });
         app.insert_resource(kuluu_render::cutscene::CutsceneMode::active_locked());
 
         press(&mut app, Key::Escape);
@@ -2576,9 +2582,10 @@ mod cs_input_lock_tests {
     fn without_a_cutscene_session_the_menu_handler_keeps_the_keys() {
         let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel::<AgentCommand>(4);
         let mut app = gate_app(cmd_tx);
-        let mut dialog = DialogState::default();
-        dialog.cancel_armed = false;
-        app.world_mut().resource_mut::<SceneState>().snapshot.dialog = Some(dialog);
+        app.world_mut().resource_mut::<SceneState>().snapshot.dialog = Some(DialogState {
+            cancel_armed: false,
+            ..Default::default()
+        });
         // CutsceneMode defaults to inactive — no session brackets this frame.
 
         press(&mut app, Key::Escape);
@@ -2615,12 +2622,13 @@ mod auto_enter_tests {
     }
 
     fn eligible_frame() -> DialogState {
-        let mut d = DialogState::default();
-        d.npc_id = 0x010E6001;
-        d.act_index = 7;
-        d.event_para = 230;
-        d.prompt = Some("A line of narration.".into());
-        d
+        DialogState {
+            npc_id: 0x010E6001,
+            act_index: 7,
+            event_para: 230,
+            prompt: Some("A line of narration.".into()),
+            ..Default::default()
+        }
     }
 
     #[test]

@@ -601,9 +601,7 @@ async fn run_map_session(
             },
         });
     } else {
-        tracing::warn!(
-            "bootstrap completed without a self position seed — staying in Zoning"
-        );
+        tracing::warn!("bootstrap completed without a self position seed — staying in Zoning");
     }
 
     keepalive_loop(

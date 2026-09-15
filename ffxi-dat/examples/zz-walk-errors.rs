@@ -23,7 +23,9 @@ const KIND_SCHEDULER: u8 = 0x07;
 
 #[derive(Default)]
 struct Prefix {
+    #[allow(dead_code)]
     chunks: usize,
+    #[allow(dead_code)]
     kinds: BTreeMap<u8, usize>,
     attached_routes: BTreeMap<u32, usize>,
     scheduler_names: Vec<String>,

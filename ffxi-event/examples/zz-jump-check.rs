@@ -15,7 +15,9 @@ use ffxi_dat::event_dat::{EventBlock, EventDat};
 use ffxi_dat::DatRoot;
 use ffxi_event::opcode_meta::{sub_size, OPCODE_META};
 
-fn decode_block(block: &EventBlock) -> (Vec<usize>, Vec<(usize, u8, usize, usize)>) {
+type DecodedBlock = (Vec<usize>, Vec<(usize, u8, usize, usize)>);
+
+fn decode_block(block: &EventBlock) -> DecodedBlock {
     // Walk every entry offset directly and collect instruction start
     // positions (absolute into event_data), including 0xFFFF placeholder-owned
     // shared code regions that event_entry_exact refuses to hand out. Also
@@ -72,7 +74,7 @@ fn main() {
     let dat = EventDat::parse(&bytes).expect("parse event DAT");
 
     for block in &dat.blocks {
-        if only.is_some_and(|o| !block.event_ids.iter().any(|&e| e == o)) {
+        if only.is_some_and(|o| !block.event_ids.contains(&o)) {
             continue;
         }
         let (boundaries, jumps) = decode_block(block);

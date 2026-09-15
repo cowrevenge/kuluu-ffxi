@@ -170,7 +170,9 @@ fn action_event(bytes: &[u8]) -> ViewerEvent {
         action_id: h.action_id,
         action_kind: h.action_kind,
         target_id: h.primary_target_id,
-        result: h.first_result.map(|r| r.to_wire()),
+        result: h
+            .first_result
+            .map(|r| (r.resolution.to_wire(), r.animation.to_wire())),
         animation: h.animation,
         outcome: h.first_outcome.map(|o| o.to_wire()),
     }
@@ -461,19 +463,6 @@ fn watch(
     (first, samples)
 }
 
-/// The inlined 0x2B impact effect fires at routine frame ~36 for ati0 (dada @32, +4 delay), so a
-/// victim reaction that lands before this frame is reacting to packet arrival, not the swing.
-const IMPACT_MIN_FRAME: u32 = 30;
-
-fn assert_impact_at(impact_at: Option<u32>, msg: &str) {
-    assert!(
-        impact_at.is_some_and(|f| f >= IMPACT_MIN_FRAME),
-        "{msg} (first hit at frame {:?}, expected {} or later)",
-        impact_at,
-        IMPACT_MIN_FRAME
-    );
-}
-
 // ---------------------------------------------------------------------------
 // S1/S2 - spawn + idle baseline
 // ---------------------------------------------------------------------------
@@ -598,10 +587,7 @@ fn s5_swing_impact_runs_damg_and_flinches_the_pc() {
     let (impact_at, _) = watch(&mut app, 45, |_i, w| {
         routines(w, vic_parent).contains(b"damg")
             && active_clip(w, vic_child).is_some_and(|c| c.starts_with("dfm"))
-        {
-            impact_at = Some(i);
-        }
-    }
+    });
     assert!(
         impact_at.is_some_and(|f| f >= IMPACT_FRAME_MIN),
         "victim reaction (damg + dfm? flinch) fired at the inlined-0x2B frame (~36), not on \
@@ -777,10 +763,10 @@ fn live_root_probe(
 /// the actor; the walker's scale byte (100) must leave it at exactly 1.0 with Walking.
 #[test]
 fn s8_info_chunk_scale_and_movement_reach_the_live_actor() {
-    let Some(bat) = load_fixture("bat", BAT_FILE) else {
+    let Some(bat) = load_model(BAT_FILE) else {
         return;
     };
-    let Some(walker) = load_fixture("walker", WALKER_FILE) else {
+    let Some(walker) = load_model(WALKER_FILE) else {
         return;
     };
 
@@ -1079,7 +1065,7 @@ fn s10_left_attack_without_bti0_falls_back_to_ati0() {
 /// bti0 rather than falling back.
 #[test]
 fn s10b_left_attack_with_bti0_plays_the_limb_clip() {
-    let Some(loaded) = load_fixture("limb model", LIMB_MODEL_FILE) else {
+    let Some(loaded) = load_model(LIMB_MODEL_FILE) else {
         return;
     };
     // The limb model must actually carry bti0 with a Motion clip, or the scenario is void.

@@ -714,7 +714,12 @@ pub fn parse_action_bytes(bytes: &[u8]) -> (Vec<Scheduler>, ActionAssets, Action
 
 pub fn parse_action_bytes_reporting(
     bytes: &[u8],
-) -> (Vec<Scheduler>, ActionAssets, EffectCoverageReport, ActionDatCameras) {
+) -> (
+    Vec<Scheduler>,
+    ActionAssets,
+    EffectCoverageReport,
+    ActionDatCameras,
+) {
     parse_action_tree_reporting(&ffxi_dat::chunk::walk_tree(bytes))
 }
 
@@ -761,7 +766,12 @@ pub fn parse_action_tree(
 
 pub fn parse_action_tree_reporting(
     node: &ffxi_dat::chunk::ChunkNode<'_>,
-) -> (Vec<Scheduler>, ActionAssets, EffectCoverageReport, ActionDatCameras) {
+) -> (
+    Vec<Scheduler>,
+    ActionAssets,
+    EffectCoverageReport,
+    ActionDatCameras,
+) {
     let mut schedulers = Vec::new();
     let mut assets = ActionAssets::default();
     let mut report = EffectCoverageReport::default();
@@ -1102,7 +1112,11 @@ fn load_action_dat(root: Option<Arc<ffxi_dat::DatRoot>>, file_id: u32) -> Parsed
     let (schedulers, assets, report, cameras) =
         parse_action_bytes_reporting(&read_dat_bytes(root, file_id));
     report_effect_coverage(file_id, &report);
-    ParsedActionDat { schedulers, assets, cameras }
+    ParsedActionDat {
+        schedulers,
+        assets,
+        cameras,
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -1148,8 +1162,6 @@ fn apply_action_dispatch(
     global: Option<&GlobalEffectDir>,
     actor_entity: Entity,
     target_entity: Option<Entity>,
-    q_scheds: &mut Query<&mut ActiveSchedulers>,
-    pending_inserts: &mut HashMap<Entity, Vec<ActiveScheduler>>,
     commands: &mut Commands,
 ) {
     // A spell DAT's `main` links the caster's own finish routine (0x3C `shbk`), which in turn
@@ -1514,8 +1526,6 @@ pub fn poll_action_dat_tasks(
                     global.as_deref(),
                     actor_entity,
                     target_entity,
-                    &mut q_scheds,
-                    &mut pending_inserts,
                     &mut commands,
                 );
             }
@@ -2083,8 +2093,6 @@ pub fn dispatch_action_started(
                     global.as_deref(),
                     actor_entity,
                     target_entity,
-                    &mut q_scheds,
-                    &mut pending_inserts,
                     &mut commands,
                 );
             }

@@ -2032,7 +2032,7 @@ mod tests {
         app.world_mut().entity_mut(mob).add_child(child);
         app.world_mut()
             .entity_mut(child)
-            .insert(crate::scheduler_runtime::DeadFromAction);
+            .insert(crate::scheduler_runtime::DeadFromAction::default());
         app.world_mut().resource_mut::<EntityPrediction>().observe(
             904,
             Vec3::new(0.5, 1.5, 0.0),
@@ -2073,7 +2073,7 @@ mod tests {
         app.world_mut().entity_mut(mob).add_child(child);
         app.world_mut()
             .entity_mut(child)
-            .insert(crate::scheduler_runtime::DeadFromAction);
+            .insert(crate::scheduler_runtime::DeadFromAction::default());
         app.world_mut().resource_mut::<EntityPrediction>().observe(
             905,
             Vec3::new(0.5, 1.5, 0.0),

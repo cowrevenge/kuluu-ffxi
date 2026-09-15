@@ -207,21 +207,21 @@ impl EventVm {
     pub(super) fn step_stacks(&mut self) -> Option<StepResult> {
         // Collect the active (actor, request index) pairs under one immutable
         // borrow; each step below needs &mut self.
-        let active = match &self.scene {
-            Some(scene) => scene
-                .stacks
-                .iter()
-                .filter_map(|stack| {
-                    stack
-                        .requests
-                        .iter()
-                        .enumerate()
-                        .min_by_key(|(_, r)| r.priority)
-                        .map(|(i, _)| (stack.actor, i))
-                })
-                .collect::<Vec<_>>(),
-            None => return None,
+        let Some(scene) = &self.scene else {
+            return None;
         };
+        let active = scene
+            .stacks
+            .iter()
+            .filter_map(|stack| {
+                stack
+                    .requests
+                    .iter()
+                    .enumerate()
+                    .min_by_key(|(_, r)| r.priority)
+                    .map(|(i, _)| (stack.actor, i))
+            })
+            .collect::<Vec<_>>();
         let mut surfaced: Option<StepResult> = None;
         for (actor, index) in active {
             self.copy_zone_into_child(actor, index);

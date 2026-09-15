@@ -208,7 +208,7 @@ fn effect_dat_instruction_census() {
             per_file.insert(file_id, Resolution::Unreadable);
             continue;
         };
-        let (schedulers, _, report) = parse_action_bytes_reporting(&bytes);
+        let (schedulers, _, report, _) = parse_action_bytes_reporting(&bytes);
         per_file.insert(
             file_id,
             if schedulers.is_empty() {

@@ -930,7 +930,7 @@ mod tests {
         let mut task = CutsceneCameraTask::start(
             &resource(
                 CameraSmoothType::Linear,
-                ffxi_dat::camera::CameraFlags::START_AT_CURRENT_POS as u16,
+                ffxi_dat::camera::CameraFlags::START_AT_CURRENT_POS,
                 vec![point([4.0, 0.0, 0.0], 350.0, [4.0, 1.0, 0.0], 0.0)],
             ),
             60.0,
@@ -951,7 +951,7 @@ mod tests {
         let mut task = CutsceneCameraTask::start(
             &resource(
                 CameraSmoothType::Linear,
-                ffxi_dat::camera::CameraFlags::END_AT_CURRENT_POS as u16,
+                ffxi_dat::camera::CameraFlags::END_AT_CURRENT_POS,
                 vec![point([0.0; 3], 280.0, [0.0, 1.0, 0.0], 0.0)],
             ),
             60.0,
@@ -1098,7 +1098,7 @@ mod tests {
         let mut task = CutsceneCameraTask::start(
             &resource(
                 CameraSmoothType::Linear,
-                ffxi_dat::camera::CameraFlags::START_AT_CURRENT_POS as u16,
+                ffxi_dat::camera::CameraFlags::START_AT_CURRENT_POS,
                 vec![point([0.0; 3], 280.0, [0.0; 3], 0.0)],
             ),
             60.0,
@@ -1284,8 +1284,8 @@ mod tests {
         // One authored point plus both flags is three effective points: a spline.
         let res = resource(
             CameraSmoothType::Linear,
-            (ffxi_dat::camera::CameraFlags::START_AT_CURRENT_POS
-                | ffxi_dat::camera::CameraFlags::END_AT_CURRENT_POS) as u16,
+            ffxi_dat::camera::CameraFlags::START_AT_CURRENT_POS
+                | ffxi_dat::camera::CameraFlags::END_AT_CURRENT_POS,
             vec![point([0.0; 3], 280.0, [0.0; 3], 0.0)],
         );
         assert_eq!(res.path_mode(), CameraPathMode::Spline);

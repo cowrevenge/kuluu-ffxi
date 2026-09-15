@@ -397,10 +397,12 @@ mod tests {
 
     #[test]
     fn confirm_over_a_pending_event_frame_advances_the_event() {
-        let mut dialog = kuluu_snapshot::DialogState::default();
-        dialog.npc_id = 0x010E6001;
-        dialog.act_index = 7;
-        dialog.event_para = 230;
+        let dialog = kuluu_snapshot::DialogState {
+            npc_id: 0x010E6001,
+            act_index: 7,
+            event_para: 230,
+            ..Default::default()
+        };
         let (mut scene_state, mut stack, cmd_tx, mut cmd_rx, mut world) =
             map_key_harness(Some(dialog));
 

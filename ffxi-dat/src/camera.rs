@@ -328,7 +328,7 @@ mod tests {
         let body = chunk_body(
             0,
             17,
-            CameraFlags::START_AT_CURRENT_POS as u16,
+            CameraFlags::START_AT_CURRENT_POS,
             4,
             &[
                 point_bytes(
@@ -370,8 +370,8 @@ mod tests {
     fn path_mode_follows_the_effective_point_count() {
         // One authored point: locked with no flags, straight once a flag adds the virtual
         // endpoint, spline when both do.
-        let one = vec![point_bytes([0.0; 3], 280.0, [0.0; 3], 0.0, [0.0; 3])];
-        let two = vec![
+        let one = [point_bytes([0.0; 3], 280.0, [0.0; 3], 0.0, [0.0; 3])];
+        let two = [
             point_bytes([0.0; 3], 280.0, [0.0; 3], 0.0, [0.0; 3]),
             point_bytes([1.0; 3], 280.0, [1.0; 3], 0.0, [1.0; 3]),
         ];
@@ -397,7 +397,7 @@ mod tests {
             &chunk_body(
                 0,
                 0,
-                CameraFlags::START_AT_CURRENT_POS as u16,
+                CameraFlags::START_AT_CURRENT_POS,
                 0,
                 &[one[0].clone()],
             ),
@@ -411,7 +411,7 @@ mod tests {
             &chunk_body(
                 0,
                 0,
-                (CameraFlags::START_AT_CURRENT_POS | CameraFlags::END_AT_CURRENT_POS) as u16,
+                CameraFlags::START_AT_CURRENT_POS | CameraFlags::END_AT_CURRENT_POS,
                 0,
                 &[one[0].clone()],
             ),

@@ -2,6 +2,7 @@ mod app_icon;
 pub mod bridge;
 pub mod camera_collision;
 pub mod collision_bvh;
+pub mod command_surface;
 pub mod debug_heights;
 pub mod entity_list_hud;
 pub mod exit_watchdog;
@@ -264,6 +265,11 @@ pub(crate) fn insert_dat_roots(
     // Same latch on the map DLL: without this the map calibration and the
     // Change Map catalog keep answering from the previous install (kuluu-u8p1).
     sink.put(kuluu_render::minimap::retail::MapCalibration::default());
+    // Which slash commands exist is the new install's answer, not the previous
+    // one's: a server shipping a patched client renames or drops them.
+    sink.put(command_surface::CommandSurface::from_dat_root(
+        dat_root.as_deref(),
+    ));
     sink.put(DatRootRes(dat_root));
 }
 

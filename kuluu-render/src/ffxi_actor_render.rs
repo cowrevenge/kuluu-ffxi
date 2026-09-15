@@ -4124,7 +4124,10 @@ pub fn update_ffxi_render_actor_lighting(
             Without<crate::sun_moon::IsSun>,
         ),
     >,
-    q_actors: Query<&FfxiRenderActor>,
+    q_actors: Query<(&FfxiRenderActor, &GlobalTransform)>,
+    collision: Res<crate::dat_mzb::MzbCollisionGeometry>,
+    weather: Res<crate::weather::ZoneWeather>,
+    clock: Res<crate::vana_time::VanaClock>,
     mut registry: ResMut<FfxiSkinRegistry>,
 ) {
     const AMBIENT_REF_LUX: f32 = 1000.0;
@@ -4222,7 +4225,22 @@ pub fn update_ffxi_render_actor_lighting(
         time_params: Vec4::ZERO,
     };
 
-    for actor in &q_actors {
+    const MINUTES_PER_HOUR: f32 = 60.0;
+    let minutes = (crate::sun_moon::vana_sky_from_clock(&clock).hour * MINUTES_PER_HOUR) as u32;
+    for (actor, transform) in &q_actors {
+        let mut lighting = lighting.clone();
+        if let Some(record) = collision
+            .lighting_at(transform.translation())
+            .and_then(|ground| weather.sample_for_area(ground.area, minutes))
+        {
+            let (ambient, direction, color) =
+                crate::sun_moon::actor_area_lighting(&record, minutes, zone_lighting.model_dir);
+            lighting.ambient = ambient;
+            lighting.dir0_dir = direction;
+            lighting.dir0_color = color;
+            lighting.dir1_dir = Vec4::ZERO;
+            lighting.dir1_color = Vec4::ZERO;
+        }
         registry.set_skin_lighting(actor.skin_slot, &lighting);
         for &slot in &actor.instance_slots {
             registry.set_instance_lighting_flags(slot, realistic, receive);
@@ -4242,7 +4260,7 @@ const POINT_LIGHT_RESELECT_EPSILON: f32 = 0.25;
 // selected slot (zone reload, /lights emitters) forces a re-pick.
 struct ActorPointLightSelection {
     eval_pos: Vec3,
-    authored: bool,
+    ground: Option<crate::dat_mzb::GroundLighting>,
     count: usize,
     lights_len: usize,
     indices: Vec<u32>,
@@ -4253,11 +4271,11 @@ impl ActorPointLightSelection {
     fn valid_for(
         &self,
         pos: Vec3,
-        authored: bool,
+        ground: Option<crate::dat_mzb::GroundLighting>,
         count: usize,
         lights: &[crate::zone_point_lights::ZonePointLight],
     ) -> bool {
-        self.authored == authored
+        self.ground == ground
             && self.count == count
             && self.lights_len == lights.len()
             && self.eval_pos.distance_squared(pos)
@@ -4273,7 +4291,7 @@ impl ActorPointLightSelection {
 pub fn update_ffxi_actor_point_lights(
     active: Res<crate::zone_point_lights::ActiveSceneLights>,
     settings: Res<crate::graphics_settings::GraphicsSettings>,
-    chunk_lights: Res<crate::dat_mzb::ZoneChunkLightMap>,
+    collision: Res<crate::dat_mzb::MzbCollisionGeometry>,
     mut q_actors: Query<(&mut FfxiRenderActor, &GlobalTransform)>,
     mut registry: ResMut<FfxiSkinRegistry>,
 ) {
@@ -4281,27 +4299,20 @@ pub fn update_ffxi_actor_point_lights(
         return;
     }
     let count = settings.model_light_count as usize;
-    // The zone's own bindings are the point lights retail leaves in D3D slots
-    // 2-5 while it draws a model over that chunk (ZoneRenderer.cpp ZoneRenderer::UpdateBlockLightSettings, :339-353;
-    // ModelPartInstance.cpp ModelPartInstance::Draw only rebinds slots 0-1), so they light the
-    // actor.
-    let authored = chunk_lights.is_authored();
-
     for (mut actor, gt) in &mut q_actors {
         let pos = gt.translation();
+        let ground = collision.lighting_at(pos);
         let cached_valid = actor
             .point_light_selection
             .as_ref()
-            .is_some_and(|sel| sel.valid_for(pos, authored, count, &active.lights))
-            && !chunk_lights.is_changed();
+            .is_some_and(|sel| sel.valid_for(pos, ground, count, &active.lights))
+            && !collision.is_changed();
         if !cached_valid {
-            let indices = match chunk_lights.lights_at(pos).filter(|_| authored) {
-                Some(slots) => {
-                    crate::zone_point_lights::authored_point_light_indices(&active.lights, &slots)
-                }
-                // A chunk that binds no light leaves its slots disabled; only a
-                // zone with no binding table at all falls back to a distance pick.
-                None if authored => Vec::new(),
+            let indices = match ground {
+                Some(ground) => crate::zone_point_lights::authored_point_light_indices(
+                    &active.lights,
+                    &ground.lights,
+                ),
                 None => crate::zone_point_lights::nearest_point_light_indices(
                     pos,
                     &active.lights,
@@ -4314,7 +4325,7 @@ pub fn update_ffxi_actor_point_lights(
                 .collect();
             actor.point_light_selection = Some(ActorPointLightSelection {
                 eval_pos: pos,
-                authored,
+                ground,
                 count,
                 lights_len: active.lights.len(),
                 indices,
@@ -4325,7 +4336,15 @@ pub fn update_ffxi_actor_point_lights(
             continue;
         };
         let (point_pos, point_color, point_atten) =
-            crate::zone_point_lights::point_light_arrays_for(&active.lights, &sel.indices);
+            if settings.dynamic_lights.point_shadows_enabled() {
+                crate::zone_point_lights::point_light_arrays_for(&active.lights, &sel.indices)
+            } else {
+                crate::zone_point_lights::actor_directional_point_light(
+                    pos,
+                    &active.lights,
+                    &sel.indices,
+                )
+            };
 
         registry.set_skin_point_lights(actor.skin_slot, point_pos, point_color, point_atten);
     }

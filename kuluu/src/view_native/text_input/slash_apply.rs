@@ -159,6 +159,7 @@ pub(super) fn apply_slash_outcome(
             let bevy_pos = kuluu_render::ffxi_to_bevy(world_pos);
             slash_writers.load_mmb.write(LoadMmbRequest {
                 light_bindings: Default::default(),
+                area_id: 0,
                 file_id,
                 chunk_idx,
                 world_pos: bevy_pos,

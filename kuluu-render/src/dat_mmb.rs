@@ -33,6 +33,7 @@ pub struct MmbHandleCache {
             usize,
             bool,
             crate::ffxi_zone_material::ZoneLightBindings,
+            u32,
         ),
         bevy::asset::Handle<FfxiZoneMaterial>,
     >,
@@ -134,6 +135,7 @@ pub struct GenWater {
 
 #[derive(Message, Debug, Clone, Copy)]
 pub struct LoadMmbRequest {
+    pub area_id: u32,
     pub light_bindings: crate::ffxi_zone_material::ZoneLightBindings,
     pub voyage_backdrop: bool,
     pub file_id: u32,
@@ -834,6 +836,7 @@ pub fn process_load_mmb_requests(
                                 cache_key.2,
                                 mirrored,
                                 req.light_bindings,
+                                req.area_id,
                             ))
                             .or_insert_with(|| {
                                 materials.add(
@@ -852,7 +855,8 @@ pub fn process_load_mmb_requests(
                                         alpha_mode,
                                         render_key,
                                     )
-                                    .with_light_bindings(req.light_bindings),
+                                    .with_light_bindings(req.light_bindings)
+                                    .with_area(req.area_id),
                                 )
                             })
                             .clone()
@@ -1113,6 +1117,7 @@ mod tests {
 
     fn zone_placement_at(pos: Vec3) -> LoadMmbRequest {
         LoadMmbRequest {
+            area_id: 0,
             light_bindings: Default::default(),
             file_id: 0,
             chunk_idx: 0,
@@ -1130,6 +1135,7 @@ mod tests {
 
     fn entity_spawn_at(pos: Vec3) -> LoadMmbRequest {
         LoadMmbRequest {
+            area_id: 0,
             light_bindings: Default::default(),
             file_id: 0,
             chunk_idx: 0,

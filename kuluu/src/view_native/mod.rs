@@ -906,6 +906,7 @@ fn despawn_ingame_entities(
         ResMut<kuluu_render::zone_point_lights::ActiveSceneLights>,
         ResMut<kuluu_render::zone_doors::ZoneDoors>,
         ResMut<kuluu_render::ffxi_actor_render::ActorLoadInFlight>,
+        ResMut<kuluu_render::ffxi_zone_material::ZoneGlobalLighting>,
     ),
     mut last_zone: ResMut<LastAutoLoadedZone>,
     mut last_atmo: ResMut<LastAtmosphereZone>,
@@ -939,6 +940,7 @@ fn despawn_ingame_entities(
     *zone_geom.5 = kuluu_render::zone_point_lights::ActiveSceneLights::default();
     *zone_geom.6 = kuluu_render::zone_doors::ZoneDoors::default();
     *zone_geom.7 = kuluu_render::ffxi_actor_render::ActorLoadInFlight::default();
+    *zone_geom.8 = kuluu_render::ffxi_zone_material::ZoneGlobalLighting::default();
     last_zone.file_id = None;
     last_atmo.file_id = None;
 
@@ -1237,6 +1239,7 @@ mod zone_teardown_tests {
         world.init_resource::<kuluu_render::zone_point_lights::ActiveSceneLights>();
         world.init_resource::<kuluu_render::zone_doors::ZoneDoors>();
         world.init_resource::<kuluu_render::ffxi_actor_render::ActorLoadInFlight>();
+        world.init_resource::<kuluu_render::ffxi_zone_material::ZoneGlobalLighting>();
         world.init_resource::<super::LastAutoLoadedZone>();
         world.init_resource::<super::LastAtmosphereZone>();
         world.init_resource::<super::BgmSlots>();

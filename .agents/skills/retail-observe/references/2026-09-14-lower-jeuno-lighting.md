@@ -105,3 +105,48 @@ Vanilla configuration (`graphics-alpha-vanilla.json`). At 05:02 and 05:27,
 and tapered shaft, with masonry visible through its lower portion. The
 comparison establishes restored geometry and authored transparency, not exact
 pixel photometry. Broader point-light animation coverage is `kuluu-boxh`.
+
+
+## Ground selection and actor light conversion follow-up
+
+The user reported visible indoor/outdoor transitions, missing outdoor sources,
+unlit actors indoors, and concentrated outdoor light on actors. The following
+binary inspection uses the same **retail-2026-09** build and unpacked text hash
+identified above. Disassembly is retained in
+`artifacts/verify/lower-jeuno-lighting-regressions/` as
+`collision-light-disasm.txt` and `actor-light-adjust-disasm.txt`.
+
+- RVA **0x167E1E** remaps the collision object's four byte light references at
+  offsets **0xAC..0xAF** through a one-based light table. RVA **0x169A47**
+  copies its area at **0xB0** into collision-query output; **0x169A53** copies
+  the four light references.
+- The actor ground-light resolver at RVA **0x181AA0** reads those references.
+  Its masked comparison at **0x181ADE** excludes IDs with the suffix `lgb`.
+  Render-mesh bounding boxes do not supply this actor selection.
+- Actor AdjustLighting at RVA **0xCB4E0** evaluates point-light attenuation at
+  the actor origin. **0xCB698** limits the selected point lights to one;
+  **0xCB845** converts it to a directional light with the sampled intensity.
+  This agrees with `SkeletalMeshActor::AdjustLighting` in XIClient. Computing
+  inverse-square distance separately at each body fragment is not this rule.
+  Temporal smoothing also exists in the binary; this change does not establish
+  or implement its complete state-dependent timing.
+
+The Lower Jeuno floor probe found area `ev01` and actor lights c3/c4/c14 at
+native (15,-1,45), and area zero with pl09/pl13 at (-15,-6,-45).
+The pl09 street light is near (-18.936,-9.5,-48.269), range 6. Its visible
+lt14/RP34 effects are near (-18.95,-11.12,-48.33), separately controlled by
+night alpha tracks. These coordinates are the authored DAT basis.
+
+The Ashenbubs Lower Jeuno DAT has SHA-256
+`be38b8de5c6916a70df2e211b57dc30d4398d7e8e827f82686d25c3debcd15f7`.
+A directory-aware comparison against retail found 1934 chunks in each and
+98 differing chunks, all texture type 0x20. Collision, geometry, generator,
+and keyframe chunks are identical. This rules out different generator
+placements in that pack; it does not prove identical texture appearance.
+
+Kuluu now resolves actor lighting from collision-floor metadata and terrain
+lighting from each positioned block's area. Per-area GPU buffers preserve
+indoor and outdoor terrain lighting simultaneously. Vanilla actor point
+lighting uses the strongest assigned point sampled once at the actor origin.
+Enhanced point shadows retain spatial sampling. Distance fog still uses the
+player's area, and exact retail transition smoothing remains unverified.

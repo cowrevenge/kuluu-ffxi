@@ -195,6 +195,7 @@ pub struct MzbCollisionBlock {
     /// belongs to, `NO_SUB_AREA_LINK` for ordinary zone surface. Empty means
     /// "no shells here", matching the `tri_normals` fallback convention.
     pub tri_sub_area: Vec<u32>,
+    pub tri_lighting: Vec<Option<GroundLighting>>,
 
     /// Which shell [`Self::for_each_hit_in_column`] walks past. Retail suppresses
     /// at query time rather than by rebuilding the block —
@@ -626,6 +627,30 @@ impl MzbCollisionGeometry {
         mzb::TerrainType::from_nibble(*self.block(slot).tri_terrain.get(tri_id)?)
     }
 
+    // research/XIClient/src/XIClient/include/World/Zone/Terrain/CollisionQuery.hpp CollisionQuery.
+    pub fn lighting_at(&self, feet: Vec3) -> Option<GroundLighting> {
+        let mut best: Option<(u8, f32, usize)> = None;
+        self.for_each_hit_in_column(feet.xz(), |slot, tri, height, normal| {
+            if normal.y < FLOOR_NORMAL_MIN
+                || height > feet.y + MAX_GROUND_STEP_UP + STEP_UP_REACH_EPSILON
+            {
+                return;
+            }
+            if best.is_none_or(|(old_slot, old_height, _)| {
+                step_candidate_beats(
+                    (slot, height),
+                    (old_slot, old_height),
+                    feet.y,
+                    MAX_GROUND_STEP_UP,
+                )
+            }) {
+                best = Some((slot, height, tri));
+            }
+        });
+        let (slot, _, tri) = best?;
+        self.block(slot).tri_lighting.get(tri).copied().flatten()
+    }
+
     /// Whether any up-facing floor in this column, from `from_y` down to
     /// `from_y - max_drop`, is water.
     ///
@@ -684,6 +709,7 @@ pub fn build_collision_geometry(
     let mut camera_skip: Vec<bool> = Vec::new();
     let mut tri_terrain: Vec<u8> = Vec::new();
     let mut tri_sub_area: Vec<u32> = Vec::new();
+    let mut tri_lighting = Vec::new();
     let mut missing = 0usize;
 
     for inst in instances {
@@ -718,6 +744,7 @@ pub fn build_collision_geometry(
             ));
             tri_terrain.push(sub.tri_terrain.get(t).copied().unwrap_or_default());
             tri_sub_area.push(inst.sub_area_link);
+            tri_lighting.push(inst.lighting);
         }
     }
 
@@ -739,6 +766,7 @@ pub fn build_collision_geometry(
         camera_skip,
         tri_terrain,
         tri_sub_area,
+        tri_lighting,
         suppressed: None,
         source_file_id: file_id,
     }
@@ -967,11 +995,18 @@ pub struct MzbSubMesh {
     pub flags: u16,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct GroundLighting {
+    pub area: u32,
+    pub lights: [Option<mzb::LightId>; mzb::LIGHT_REFERENCE_COUNT],
+}
+
 pub struct MzbInstance {
     pub submesh_idx: usize,
     pub bevy_transform: Transform,
 
     pub water_height_bevy: Option<f32>,
+    pub lighting: Option<GroundLighting>,
 
     /// `ffxi_dat::mzb::MzbPlacement::sub_area_link` — the interior whose shell
     /// this is, `NO_SUB_AREA_LINK` for ordinary zone surface.
@@ -994,6 +1029,7 @@ pub fn load_mzb_placed(
         return Ok((Vec::new(), Vec::new()));
     }
 
+    let bindings = mzb::parse_light_bindings(&plain, &header);
     let placements =
         mzb::parse_placements(&plain, &header).map_err(|e| format!("MZB parse_placements: {e}"))?;
 
@@ -1029,6 +1065,7 @@ pub fn load_mzb_placed(
                 submesh_idx: idx,
                 bevy_transform: Transform::IDENTITY,
                 water_height_bevy: None,
+                lighting: None,
                 sub_area_link: 0,
             });
         }
@@ -1095,6 +1132,10 @@ pub fn load_mzb_placed(
             submesh_idx: idx,
             bevy_transform: Transform::from_matrix(m_bevy),
             water_height_bevy,
+            lighting: p.lighting.map(|lighting| GroundLighting {
+                area: lighting.area,
+                lights: mzb::resolve_actor_lights(&lighting.light_references, &bindings),
+            }),
             sub_area_link: p.sub_area_link,
         });
     }
@@ -1172,6 +1213,7 @@ fn load_decrypted(
 #[derive(Debug, Clone, Copy)]
 pub struct ZoneMmbSpawn {
     pub light_bindings: [Option<mzb::LightId>; mzb::LIGHT_REFERENCE_COUNT],
+    pub area_id: u32,
     pub voyage_backdrop: bool,
     pub chunk_idx: usize,
     pub bevy_transform: Mat4,
@@ -1277,14 +1319,6 @@ pub struct ZoneMmbBuild {
 
 /// Which [`AreaResourceId`] each point of the zone belongs to.
 ///
-/// Retail asks the collision map for the FourCC of the block under the actor and
-/// draws that actor's fog and ambient from the matching `XiArea`
-/// (CollidableActor.cpp CollidableActor::UpdateGroundNormal, SkeletalMeshActor.cpp SkeletalMeshActor::AdjustLighting). Our MZB
-/// collision section carries no area id — only the render placements do
-/// (ZoneBlockFormat.h PositionedMeshBlockData) — so the block is found by its own bounds instead.
-/// The areas that differ from the zone environment are building interiors and
-/// the blocks that floor them, so [`ZoneAreaBox::holds`] answers the same
-/// question the ground query does.
 #[derive(Resource, Default)]
 pub struct ZoneAreaMap {
     slots: [ZoneAreaSlot; ZONE_BLOCK_SLOTS],
@@ -1759,6 +1793,7 @@ pub fn build_zone_mmb_spawns(
         for local in variants {
             out.push(ZoneMmbSpawn {
                 light_bindings: chunk_lights,
+                area_id,
                 chunk_idx: mmb_indices[local],
                 bevy_transform,
                 water: None,
@@ -1841,6 +1876,7 @@ pub fn build_zone_mmb_spawns(
         let (world_min, world_max) = world_bounds_from_local(bevy_transform, local_min, local_max);
         out.push(ZoneMmbSpawn {
             light_bindings: [None; mzb::LIGHT_REFERENCE_COUNT],
+            area_id: 0,
             chunk_idx,
             bevy_transform,
             water: Some(crate::dat_mmb::GenWater {
@@ -2960,6 +2996,7 @@ fn spawn_mzb_overlay(
                     world_transform: Some(offset * s.bevy_transform),
                     water: s.water,
                     light_bindings: s.light_bindings,
+                    area_id: s.area_id,
                     lod: s.lod,
                     door: s.door.map(|d| d.with_world_offset(req.world_pos)),
                     slot: req.slot,
@@ -3333,10 +3370,37 @@ pub(crate) mod ground_tests {
             camera_skip: Vec::new(),
             tri_terrain: Vec::new(),
             tri_sub_area: Vec::new(),
+            tri_lighting: Vec::new(),
             suppressed: None,
             cell_index: std::collections::HashMap::new(),
             source_file_id: None,
         }
+    }
+
+    #[test]
+    fn floor_lighting_ignores_overhead_surfaces_and_suppressed_shells() {
+        const INDOOR: u32 = u32::from_le_bytes(*b"ev01");
+        const OUTDOOR: u32 = 0;
+        const CEILING_HEIGHT: f32 = 4.0;
+        const LIGHT: u32 = u32::from_le_bytes(*b"c14 ");
+        let indoor = GroundLighting {
+            area: INDOOR,
+            lights: [Some(LIGHT), None, None, None],
+        };
+        let outdoor = GroundLighting {
+            area: OUTDOOR,
+            ..default()
+        };
+        let mut block = slab_block(&[(0.0, Vec3::Y), (CEILING_HEIGHT, Vec3::Y)]);
+        block.tri_lighting = vec![Some(indoor), Some(indoor), Some(outdoor), Some(outdoor)];
+        let mut geom = MzbCollisionGeometry::from_block(block);
+        assert_eq!(geom.lighting_at(Vec3::ZERO), Some(indoor));
+        assert_eq!(geom.lighting_at(Vec3::Y * CEILING_HEIGHT), Some(outdoor));
+        geom.slots[0].tri_sub_area = vec![INDOOR; 4];
+        geom.set_suppressed(Some(INDOOR));
+        assert_eq!(geom.lighting_at(Vec3::ZERO), None);
+        geom.clear_block(ZONE_SLOT_MAIN);
+        assert_eq!(geom.lighting_at(Vec3::ZERO), None);
     }
 
     fn slabs(slabs: &[(f32, Vec3)]) -> MzbCollisionGeometry {
@@ -3436,12 +3500,14 @@ pub(crate) mod ground_tests {
                 submesh_idx: 0,
                 bevy_transform: Transform::IDENTITY,
                 water_height_bevy: None,
+                lighting: None,
                 sub_area_link: SHELL,
             },
             MzbInstance {
                 submesh_idx: 0,
                 bevy_transform: Transform::from_xyz(50.0, 0.0, 0.0),
                 water_height_bevy: None,
+                lighting: None,
                 sub_area_link: 0,
             },
         ];
@@ -3495,18 +3561,21 @@ pub(crate) mod ground_tests {
                 submesh_idx: 0,
                 bevy_transform: Transform::IDENTITY,
                 water_height_bevy: None,
+                lighting: None,
                 sub_area_link: 0,
             },
             MzbInstance {
                 submesh_idx: 0,
                 bevy_transform: Transform::from_xyz(50.0, 0.0, 0.0),
                 water_height_bevy: None,
+                lighting: None,
                 sub_area_link: 0,
             },
             MzbInstance {
                 submesh_idx: 1,
                 bevy_transform: Transform::from_xyz(100.0, 0.0, 0.0),
                 water_height_bevy: None,
+                lighting: None,
                 sub_area_link: 0,
             },
         ];

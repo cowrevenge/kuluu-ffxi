@@ -76,14 +76,34 @@ pub fn build_active_scene_lights(
     settings: Res<crate::graphics_settings::GraphicsSettings>,
     mut active: ResMut<ActiveSceneLights>,
 ) {
-    active.lights.clear();
-    if !settings.dynamic_lights.faithful_enabled() {
-        return;
-    }
     let day = crate::vana_time::full_day_fraction(vana_clock.earth_unix_secs_now());
-    active
-        .lights
-        .extend(faithful.lights.iter().map(|light| light.at_time(day)));
+    let enabled = settings.dynamic_lights.faithful_enabled();
+    let source = if enabled {
+        faithful.lights.as_slice()
+    } else {
+        &[]
+    };
+    let mut changed = active.lights.len() != source.len();
+    {
+        let target = &mut active.bypass_change_detection().lights;
+        target.truncate(source.len());
+        for (index, light) in source.iter().enumerate() {
+            let evaluated = light.at_time(day);
+            if let Some(old) = target.get_mut(index) {
+                changed |= old.light_id != evaluated.light_id
+                    || old.world_pos != evaluated.world_pos
+                    || old.color != evaluated.color
+                    || old.range != evaluated.range
+                    || old.attenuation != evaluated.attenuation;
+                *old = evaluated;
+            } else {
+                target.push(evaluated);
+            }
+        }
+    }
+    if changed {
+        active.set_changed();
+    }
 }
 
 impl ZonePointLight {
@@ -112,9 +132,9 @@ pub type PointLightArrays = (
 
 /// Pack the selected lights into the `(point_pos, point_color, point_atten)`
 /// arrays of `FfxiLightingUniform`. `point_color.w` carries range (the shader
-/// treats slots with range <= 0 as empty); `point_atten` is
+/// treats zero-range slots as empty); `point_atten` is
 /// `(const, linear, quad, _)`. Excess beyond `MAX_POINT_LIGHTS` is dropped.
-fn pack_point_light_arrays<'a>(
+pub(crate) fn pack_point_light_arrays<'a>(
     selected: impl Iterator<Item = &'a ZonePointLight>,
 ) -> PointLightArrays {
     let mut point_pos = [Vec4::ZERO; MAX_POINT_LIGHTS];
@@ -195,6 +215,42 @@ pub fn nearest_point_light_indices(pos: Vec3, lights: &[ZonePointLight], count: 
 
 pub fn point_light_arrays_for(lights: &[ZonePointLight], indices: &[u32]) -> PointLightArrays {
     pack_point_light_arrays(indices.iter().filter_map(|&i| lights.get(i as usize)))
+}
+
+// FFXiMain.dll retail-2026-09 RVA 0xCB698 keeps one point light; RVA 0xCB845 converts it to directional.
+pub fn actor_directional_point_light(
+    pos: Vec3,
+    lights: &[ZonePointLight],
+    indices: &[u32],
+) -> PointLightArrays {
+    const MIN_ATTENUATION_DENOMINATOR: f32 = 0.0001;
+    const DIRECTIONAL_RANGE_MARKER: f32 = -1.0;
+    let mut strongest = None;
+    let mut strength = 0.0;
+    for &index in indices {
+        let Some(light) = lights.get(index as usize) else {
+            continue;
+        };
+        let offset = light.world_pos - pos;
+        let distance_sq = offset.length_squared();
+        if light.range <= 0.0 || distance_sq > light.range * light.range {
+            continue;
+        }
+        let intensity = (distance_sq * light.attenuation)
+            .max(MIN_ATTENUATION_DENOMINATOR)
+            .recip();
+        if intensity > strength {
+            strength = intensity;
+            strongest = Some((light, offset.normalize_or_zero()));
+        }
+    }
+    let mut positions = [Vec4::ZERO; MAX_POINT_LIGHTS];
+    let mut colors = [Vec4::ZERO; MAX_POINT_LIGHTS];
+    if let Some((light, direction)) = strongest {
+        positions[0] = direction.extend(0.0);
+        colors[0] = (light.color * strength).extend(DIRECTIONAL_RANGE_MARKER);
+    }
+    (positions, colors, [Vec4::ZERO; MAX_POINT_LIGHTS])
 }
 
 pub fn nearest_point_light_arrays(
@@ -440,6 +496,33 @@ impl Plugin for ZonePointLightsPlugin {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn actor_samples_the_strongest_point_once_at_its_origin() {
+        const RANGE: f32 = 10.0;
+        const NEAR: f32 = 2.0;
+        const FAR: f32 = 4.0;
+        let make = |height| ZonePointLight {
+            light_id: UNAUTHORED_LIGHT_ID,
+            world_pos: Vec3::Y * height,
+            color: Vec3::ONE,
+            range: RANGE,
+            attenuation: 1.0,
+            theta_track: None,
+            theta_multiplier: 1.0,
+        };
+        let lights = [make(FAR), make(NEAR)];
+        let (positions, colors, attenuation) =
+            actor_directional_point_light(Vec3::ZERO, &lights, &[0, 1]);
+        assert_eq!(positions[0].truncate(), Vec3::Y);
+        assert!(colors[0].w < 0.0);
+        assert_eq!(colors[0].truncate(), Vec3::splat((NEAR * NEAR).recip()));
+        assert!(colors[1..].iter().all(|color| *color == Vec4::ZERO));
+        assert!(attenuation.iter().all(|value| *value == Vec4::ZERO));
+        let (_, absent, _) =
+            actor_directional_point_light(Vec3::X * (RANGE + FAR), &lights, &[0, 1]);
+        assert!(absent.iter().all(|color| *color == Vec4::ZERO));
+    }
 
     #[test]
     fn active_interior_lights_join_main_and_leave_on_deactivation_or_disconnect() {

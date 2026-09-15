@@ -1,4 +1,4 @@
-//! Dynamic obstacles (plan §2.5): RID door boxes, closed door leaves as
+//! Dynamic obstacles: RID door boxes, closed door leaves as
 //! world-baked triangles, mobs as horizontal circles. Rebuilt every fixed tick
 //! into [`ObstacleSet`] before dispatch — the slot the avian collider syncs
 //! used; `step` is pure over it. Bevy space throughout: xz horizontal, y up.
@@ -87,7 +87,7 @@ fn rid_obstacle(rect: &ZoneInteraction) -> DoorObstacle {
 pub struct ObstacleSet {
     /// Enabled RID boxes and fallback leaves, in Bevy space.
     pub doors: Vec<DoorObstacle>,
-    /// Mobs that body-block this tick: circle-vs-circle in xz (plan §2.5).
+    /// Mobs that body-block this tick: circle-vs-circle in xz.
     pub mobs: Vec<MobObstacle>,
 }
 
@@ -102,7 +102,7 @@ pub struct DoorObstacle {
 }
 
 /// A mob's horizontal block circle. Vertical extent is ignored by design: the
-/// walker tests circles in xz only (plan §2.5).
+/// walker tests circles in xz only.
 #[derive(Clone, Copy, Debug)]
 pub struct MobObstacle {
     /// The wire entity id — stable identity for the contact budget.

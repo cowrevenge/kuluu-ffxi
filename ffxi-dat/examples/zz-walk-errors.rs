@@ -6,6 +6,14 @@
 //! 0x2D scene-key carriers (scheduler chunks) or attached camera routes
 //! (kind 0x06, AttachmentInfo nonzero).
 //!
+//! Census result (retail install; the exposure sections below are the close
+//! criteria): 52,926 files, 2,282 walk errors (4.3%), all five known 0x2D
+//! carriers and every zone model DAT walk clean, and no failing prefix carries
+//! a resolvable 0x2D key or a kind-0x06 route with nonzero AttachmentInfo —
+//! the two failing files with a scheduler chunk in the prefix carry garbage
+//! names, not routine carriers. Nothing the client can reach is hidden in a
+//! walk error, so the census closes without code.
+//!
 //! Usage: cargo run -p ffxi-dat --example zz-walk-errors -- <install root>
 //! where the install root is the folder containing ROM/.
 

@@ -4935,8 +4935,8 @@ mod tests {
         };
         dat.blocks.push(EventBlock {
             actor: NPC_SERVER_ID,
-            event_ids: vec![7],
-            event_offsets: vec![0],
+            event_ids: vec![7, 7],
+            event_offsets: vec![0, 0],
             references: vec![SPEED_REF, NEG_FIVE_REF, GOAL_X_REF, GOAL_Z_REF],
             event_data: npc,
         });

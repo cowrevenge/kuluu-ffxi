@@ -6182,21 +6182,25 @@ fn decode_miscdata_status_icons(data: &[u8]) -> Option<(Vec<u16>, Vec<u32>)> {
     Some((icons, expiries))
 }
 
-// vendor/server/src/map/packets/s2c/0x119_abil_recast.h — recasttimer_t[31]:
-// u16 Timer (remaining seconds), u8 Calc1, u8 TimerId (recast group id), u16 Calc2,
-// u16 padding. Returns (recast_id, absolute Unix expiry) for entries still running.
+// vendor/server/src/map/packets/s2c/0x119_abil_recast.h recasttimer_t: Timer
+// (remaining seconds) and TimerId (recast group id) per entry, at the offsets
+// ffxi_proto::decode::AbilRecast pins to the header. Returns (recast_id,
+// absolute Unix expiry) for entries still running.
 fn decode_abil_recast(data: &[u8]) -> Vec<(u16, u32)> {
-    const ENTRY_SIZE: usize = 8;
-    const ENTRY_COUNT: usize = 31;
+    use ffxi_proto::decode::AbilRecast;
     let now_unix = kuluu_snapshot::recast_now_unix();
     let mut out = Vec::new();
-    for i in 0..ENTRY_COUNT {
-        let off = i * ENTRY_SIZE;
-        if data.len() < off + ENTRY_SIZE {
+    for i in 0..AbilRecast::ENTRY_COUNT {
+        let off = i * AbilRecast::ENTRY_STRIDE;
+        if data.len() < off + AbilRecast::ENTRY_STRIDE {
             break;
         }
-        let timer = u16::from_le_bytes(data[off..off + 2].try_into().unwrap());
-        let timer_id = data[off + 3] as u16;
+        let timer = u16::from_le_bytes(
+            data[off + AbilRecast::TIMER_OFFSET..off + AbilRecast::TIMER_OFFSET + 2]
+                .try_into()
+                .unwrap(),
+        );
+        let timer_id = data[off + AbilRecast::TIMER_ID_OFFSET] as u16;
         if timer == 0 {
             continue;
         }

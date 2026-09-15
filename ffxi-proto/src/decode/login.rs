@@ -1,4 +1,5 @@
 use super::*;
+use crate::s2c_layout::login as lsb;
 
 /// s2c 0x00A Mog House cluster. Body offsets follow
 /// vendor/server/src/map/packets/s2c/0x00a_login.h GP_SERV_COMMAND_LOGIN LoginState; `login_state` values are
@@ -190,8 +191,14 @@ impl ZoneInVoyage {
     pub fn decode(body: &[u8]) -> Option<Self> {
         const START: usize = 0x74;
         const DURATION: usize = 0x78;
+        // Retail unpacks direction and route out of bytes inside flag words LSB
+        // declares opaque, so those two pin to the word that contains them.
         const REVERSE: usize = 0x23;
         const ROUTE: usize = 0x26;
+        pin_s2c_offset!(START, lsb::SHIP_START, "GP_SERV_COMMAND_LOGIN.ShipStart");
+        pin_s2c_offset!(DURATION, lsb::SHIP_END, "GP_SERV_COMMAND_LOGIN.ShipEnd");
+        pin_s2c_offset!(REVERSE, lsb::POS_HEAD_FLAGS3 + 3, "GP_SERV_POS_HEAD.flags3");
+        pin_s2c_offset!(ROUTE, lsb::POS_HEAD_FLAGS4 + 2, "GP_SERV_POS_HEAD.flags4");
         const REVERSE_MASK: u8 = 4;
         const ROUTE_SHIFT: u8 = 3;
         const ROUTE_MASK: u8 = 3;
@@ -214,11 +221,7 @@ impl ServerLogin {
 
     pub(crate) const GAME_TIME_OFFSET: usize = 0x38;
 
-    // vendor/server/src/map/packets/s2c/0x00a_login.h GP_SERV_COMMAND_LOGIN EventNo — GrapIDTbl[9] u16
-    // runs to MusicNum[5] u16 at MUSIC_NUM_OFFSET, which lands SubMapNumber
-    // immediately before EVENT_NUM_OFFSET below; pinning the neighbours proves
-    // both offsets (see `grap_id_tbl_offset_abuts_music_num` and
-    // `sub_area_offset_sits_between_music_num_and_event_num`).
+    // vendor/server/src/map/packets/s2c/0x00a_login.h GP_SERV_COMMAND_LOGIN GrapIDTbl
     pub(crate) const GRAP_ID_TBL_OFFSET: usize = 0x40;
 
     pub(crate) const SUB_AREA_OFFSET: usize = 0x5C;
@@ -226,12 +229,7 @@ impl ServerLogin {
     pub(crate) const EVENT_NUM_OFFSET: usize = 0x5E;
     pub(crate) const EVENT_PARA_OFFSET: usize = 0x60;
     pub(crate) const EVENT_MODE_OFFSET: usize = 0x62;
-    // vendor/server/src/map/packets/s2c/0x00a_login.h — WeatherNumber,
-    // WeatherNumber2, WeatherTime, WeatherTime2, WeatherOffsetTime, immediately
-    // after EventMode. The offset chain is pinned at both ends by constants this
-    // decoder already uses: MusicNum[5] at 0x52 runs to SubMapNumber at 0x5C,
-    // and past the weather block sit ShipStart/ShipEnd/IsMonstrosity, landing
-    // exactly on LOGIN_STATE_OFFSET 0x7C.
+    // vendor/server/src/map/packets/s2c/0x00a_login.h GP_SERV_COMMAND_LOGIN WeatherNumber
     pub const WEATHER_NUMBER_OFFSET: usize = 0x64;
     pub const WEATHER_NUMBER2_OFFSET: usize = 0x66;
     pub const WEATHER_TIME_OFFSET: usize = 0x68;
@@ -239,16 +237,13 @@ impl ServerLogin {
     pub const WEATHER_OFFSET_TIME_OFFSET: usize = 0x70;
 
     /// `DeadCounter`, between `PlayTime` and `MyroomSubMapNumber` in
-    /// vendor/server/src/map/packets/s2c/0x00a_login.h GP_SERV_COMMAND_LOGIN LoginState. The chain from
-    /// `LoginState` @0x7C runs `name[16]`, `certificate[2]`, `unknown9C`,
-    /// `ZoneSubNo`, `PlayTime`, `DeadCounter` — landing on
-    /// `ServerLoginMyroom::SUB_MAP_NUMBER_OFFSET`, which the const assert
-    /// below pins. Retail's own struct agrees: `field_A4` (its names run +4
+    /// vendor/server/src/map/packets/s2c/0x00a_login.h GP_SERV_COMMAND_LOGIN
+    /// DeadCounter. Retail's own struct agrees: `field_A4` (its names run +4
     /// ahead of the payload offsets, per
     /// `static_assert(offsetof(GP_SERV_LOGIN, field_A8) == 0xA4)`) is the u32 it
     /// divides by 60 into the death deadline
     /// (research/XIClient/src/XIClient/source/Game/Net/Packets/s2c/0x00A.cpp S2C::RecvLogin,
-    /// .../include/Game/Net/Packets/s2c/0x00A.h).
+    /// research/XIClient/src/XIClient/include/Game/Net/Packets/s2c/0x00A.h).
     pub const DEAD_COUNTER_OFFSET: usize = 0xA0;
 
     /// `PosHead.server_status` while a zone-in event is pending — the packet's
@@ -363,9 +358,100 @@ impl ServerLogin {
     }
 }
 
-const _: () = assert!(
-    ServerLogin::DEAD_COUNTER_OFFSET + 4 == ServerLoginMyroom::SUB_MAP_NUMBER_OFFSET,
-    "DeadCounter abuts MyroomSubMapNumber in GP_SERV_COMMAND_LOGIN"
+pin_s2c_offset!(
+    ServerLogin::GAME_TIME_OFFSET,
+    lsb::GAME_TIME,
+    "GP_SERV_COMMAND_LOGIN.GameTime"
+);
+pin_s2c_offset!(
+    ServerLogin::GRAP_ID_TBL_OFFSET,
+    lsb::GRAP_ID_TBL,
+    "GP_SERV_COMMAND_LOGIN.GrapIDTbl"
+);
+pin_s2c_offset!(
+    ServerLogin::MUSIC_NUM_OFFSET,
+    lsb::MUSIC_NUM,
+    "GP_SERV_COMMAND_LOGIN.MusicNum"
+);
+pin_s2c_offset!(
+    ServerLogin::MUSIC_NUM_SIZE,
+    lsb::MUSIC_NUM_LEN,
+    "GP_SERV_COMMAND_LOGIN.MusicNum length"
+);
+pin_s2c_offset!(
+    ServerLogin::SUB_AREA_OFFSET,
+    lsb::SUB_MAP_NUMBER,
+    "GP_SERV_COMMAND_LOGIN.SubMapNumber"
+);
+pin_s2c_offset!(
+    ServerLogin::EVENT_NUM_OFFSET,
+    lsb::EVENT_NUM,
+    "GP_SERV_COMMAND_LOGIN.EventNum"
+);
+pin_s2c_offset!(
+    ServerLogin::EVENT_PARA_OFFSET,
+    lsb::EVENT_PARA,
+    "GP_SERV_COMMAND_LOGIN.EventPara"
+);
+pin_s2c_offset!(
+    ServerLogin::EVENT_MODE_OFFSET,
+    lsb::EVENT_MODE,
+    "GP_SERV_COMMAND_LOGIN.EventMode"
+);
+pin_s2c_offset!(
+    ServerLogin::WEATHER_NUMBER_OFFSET,
+    lsb::WEATHER_NUMBER,
+    "GP_SERV_COMMAND_LOGIN.WeatherNumber"
+);
+pin_s2c_offset!(
+    ServerLogin::WEATHER_NUMBER2_OFFSET,
+    lsb::WEATHER_NUMBER2,
+    "GP_SERV_COMMAND_LOGIN.WeatherNumber2"
+);
+pin_s2c_offset!(
+    ServerLogin::WEATHER_TIME_OFFSET,
+    lsb::WEATHER_TIME,
+    "GP_SERV_COMMAND_LOGIN.WeatherTime"
+);
+pin_s2c_offset!(
+    ServerLogin::WEATHER_TIME2_OFFSET,
+    lsb::WEATHER_TIME2,
+    "GP_SERV_COMMAND_LOGIN.WeatherTime2"
+);
+pin_s2c_offset!(
+    ServerLogin::WEATHER_OFFSET_TIME_OFFSET,
+    lsb::WEATHER_OFFSET_TIME,
+    "GP_SERV_COMMAND_LOGIN.WeatherOffsetTime"
+);
+pin_s2c_offset!(
+    ServerLogin::DEAD_COUNTER_OFFSET,
+    lsb::DEAD_COUNTER,
+    "GP_SERV_COMMAND_LOGIN.DeadCounter"
+);
+pin_s2c_offset!(
+    ServerLoginMyroom::LOGIN_STATE_OFFSET,
+    lsb::LOGIN_STATE,
+    "GP_SERV_COMMAND_LOGIN.LoginState"
+);
+pin_s2c_offset!(
+    ServerLoginMyroom::SUB_MAP_NUMBER_OFFSET,
+    lsb::MYROOM_SUB_MAP_NUMBER,
+    "GP_SERV_COMMAND_LOGIN.MyroomSubMapNumber"
+);
+pin_s2c_offset!(
+    ServerLoginMyroom::MAP_NUMBER_OFFSET,
+    lsb::MYROOM_MAP_NUMBER,
+    "GP_SERV_COMMAND_LOGIN.MyroomMapNumber"
+);
+pin_s2c_offset!(
+    ServerLoginMyroom::EXIT_BIT_OFFSET,
+    lsb::MY_ROOM_EXIT_BIT,
+    "GP_SERV_COMMAND_LOGIN.MyRoomExitBit"
+);
+pin_s2c_offset!(
+    ServerLoginMyroom::MOG_ZONE_FLAG_OFFSET,
+    lsb::MOG_ZONE_FLAG,
+    "GP_SERV_COMMAND_LOGIN.MogZoneFlag"
 );
 
 #[derive(Debug, Clone, Copy)]
@@ -398,38 +484,6 @@ impl ServerLogout {
 
 #[cfg(test)]
 mod server_login_tests {
-    // The weather block sits between EventMode and ShipStart in
-    // vendor/server/src/map/packets/s2c/0x00a_login.h GP_SERV_COMMAND_LOGIN WeatherNumber. Pin the offsets
-    // against the two constants that bracket it, so a future field insertion
-    // cannot silently slide weather onto the ship or event fields.
-    #[test]
-    fn zone_in_weather_offsets_sit_between_event_mode_and_login_state() {
-        use super::ServerLogin as L;
-        assert_eq!(L::WEATHER_NUMBER_OFFSET, L::EVENT_MODE_OFFSET + 2);
-        assert_eq!(L::WEATHER_NUMBER2_OFFSET, L::WEATHER_NUMBER_OFFSET + 2);
-        assert_eq!(L::WEATHER_TIME_OFFSET, L::WEATHER_NUMBER2_OFFSET + 2);
-        assert_eq!(L::WEATHER_TIME2_OFFSET, L::WEATHER_TIME_OFFSET + 4);
-        assert_eq!(L::WEATHER_OFFSET_TIME_OFFSET, L::WEATHER_TIME2_OFFSET + 4);
-        // ShipStart u32, ShipEnd u16, IsMonstrosity u16, then LoginState.
-        assert_eq!(
-            L::WEATHER_OFFSET_TIME_OFFSET + 4 + 4 + 2 + 2,
-            super::ServerLoginMyroom::LOGIN_STATE_OFFSET
-        );
-    }
-
-    /// Pins SUB_AREA_OFFSET against the two already-pinned neighbours it sits
-    /// between in GP_SERV_COMMAND_LOGIN::PacketData
-    /// (vendor/server/src/map/packets/s2c/0x00a_login.h GP_SERV_COMMAND_LOGIN ntTime): MusicNum[5]
-    /// (MUSIC_NUM_OFFSET, 10 bytes) then SubMapNumber (u16) then EventNum
-    /// (EVENT_NUM_OFFSET). If a field were inserted ahead of SubMapNumber,
-    /// this chain — not just the standalone constant — would break.
-    #[test]
-    fn sub_area_offset_sits_between_music_num_and_event_num() {
-        use super::ServerLogin as L;
-        assert_eq!(L::SUB_AREA_OFFSET, L::MUSIC_NUM_OFFSET + L::MUSIC_NUM_SIZE);
-        assert_eq!(L::EVENT_NUM_OFFSET, L::SUB_AREA_OFFSET + 2);
-    }
-
     use super::*;
 
     #[test]
@@ -468,22 +522,6 @@ mod server_login_tests {
                 event_mode: 32,
             })
         );
-    }
-
-    /// The dead-counter field is only readable if the offset chain from the
-    /// already-pinned LoginState is intact, so pin the chain LSB declares
-    /// (vendor/server/src/map/packets/s2c/0x00a_login.h): LoginState u32,
-    /// name[16], certificate[2] i32, unknown9C u16, ZoneSubNo u16, PlayTime u32,
-    /// DeadCounter u32, MyroomSubMapNumber u8.
-    #[test]
-    fn dead_counter_offset_sits_between_login_state_and_myroom_sub_map() {
-        use super::ServerLogin as L;
-        use super::ServerLoginMyroom as M;
-        assert_eq!(
-            L::DEAD_COUNTER_OFFSET,
-            M::LOGIN_STATE_OFFSET + 4 + 16 + 8 + 2 + 2 + 4
-        );
-        assert_eq!(L::DEAD_COUNTER_OFFSET + 4, M::SUB_MAP_NUMBER_OFFSET);
     }
 
     #[test]
@@ -707,17 +745,13 @@ mod server_login_tests {
         );
     }
 
-    /// Pins the myroom cluster to LSB's GP_SERV_COMMAND_LOGIN PacketData layout
-    /// (vendor/server/src/map/packets/s2c/0x00a_login.h GP_SERV_COMMAND_LOGIN ntTime; body offsets, no
-    /// sub-packet header) so an offset edit can't pass the roundtrip tests, which
-    /// build buffers through these same consts.
+    /// The myroom cluster's sentinels, which are values rather than offsets and
+    /// so have no `offsetof` to pin against
+    /// (vendor/server/src/map/packets/s2c/0x00a_login.cpp
+    /// GP_SERV_COMMAND_LOGIN::GP_SERV_COMMAND_LOGIN, SAVE_LOGIN_STATE in the
+    /// matching header).
     #[test]
-    fn myroom_cluster_offsets_and_sentinels_match_lsb_login_layout() {
-        assert_eq!(ServerLoginMyroom::LOGIN_STATE_OFFSET, 0x7C);
-        assert_eq!(ServerLoginMyroom::SUB_MAP_NUMBER_OFFSET, 0xA4);
-        assert_eq!(ServerLoginMyroom::MAP_NUMBER_OFFSET, 0xA6);
-        assert_eq!(ServerLoginMyroom::EXIT_BIT_OFFSET, 0xAA);
-        assert_eq!(ServerLoginMyroom::MOG_ZONE_FLAG_OFFSET, 0xAB);
+    fn myroom_sentinels_match_lsb_login_values() {
         assert_eq!(ServerLoginMyroom::LOGIN_STATE_MYROOM, 1, "SAVE_LOGIN_STATE");
         assert_eq!(ServerLoginMyroom::LOGIN_STATE_GAME, 2, "SAVE_LOGIN_STATE");
         assert_eq!(ServerLoginMyroom::MYROOM_NONE, 0x01FF);
@@ -744,19 +778,6 @@ mod server_login_tests {
         assert_eq!(l.pos_head.dir, 96);
         assert_eq!(l.pos_head.speed, 40);
         assert_eq!(l.pos_head.speed_base, 40);
-    }
-
-    // vendor/server/src/map/packets/s2c/0x00a_login.h GP_SERV_COMMAND_LOGIN EventNo — GrapIDTbl[9] sits
-    // immediately before MusicNum[5]; pin the abutment so a field insertion
-    // cannot slide the table without failing here.
-    #[test]
-    fn grap_id_tbl_offset_abuts_music_num() {
-        use super::ServerLogin as L;
-        assert_eq!(L::GRAP_ID_TBL_OFFSET, 0x40);
-        assert_eq!(
-            L::GRAP_ID_TBL_OFFSET + LookData::GRAP_ID_TBL_LEN,
-            L::MUSIC_NUM_OFFSET
-        );
     }
 
     #[test]

@@ -1,4 +1,5 @@
 use super::*;
+use crate::s2c_layout::{grap_list, login};
 use std::fmt;
 
 #[derive(Debug, Clone, Copy)]
@@ -43,6 +44,10 @@ impl PosHead {
 
     pub(crate) const SIZE_WITH_BT_TARGET: usize = 44;
 
+    /// Our `flags0..flags3` are the header's `flags1..flags4`: the names are
+    /// off by one, the offsets are not.
+    const FLAGS0_OFFSET: usize = 20;
+
     pub fn decode(body: &[u8]) -> Result<Self, DecodeError> {
         if body.len() < Self::SIZE {
             return Err(DecodeError::Truncated(Self::SIZE, body.len()));
@@ -60,7 +65,11 @@ impl PosHead {
             x: f32::from_le_bytes(body[8..12].try_into().unwrap()),
             z: f32::from_le_bytes(body[12..16].try_into().unwrap()),
             y: f32::from_le_bytes(body[16..20].try_into().unwrap()),
-            flags0: u32::from_le_bytes(body[20..24].try_into().unwrap()),
+            flags0: u32::from_le_bytes(
+                body[Self::FLAGS0_OFFSET..Self::FLAGS0_OFFSET + 4]
+                    .try_into()
+                    .unwrap(),
+            ),
             speed: body[24],
             speed_base: body[25],
             hpp: body[Self::HPP_OFFSET],
@@ -731,6 +740,42 @@ const _: () = {
     assert!(NpcState::ANIMATIONSUB_OFFSET < LookData::LOOK_BODY_OFFSET);
     assert!(LookData::LOOK_BODY_OFFSET < LookData::DOOR_ID_BODY_OFFSET);
 };
+
+pin_s2c_offset!(
+    PosHead::HPP_OFFSET,
+    login::POS_HEAD_HP_MAX,
+    "GP_SERV_POS_HEAD.HpMax"
+);
+pin_s2c_offset!(
+    PosHead::FLAGS0_OFFSET,
+    login::POS_HEAD_FLAGS1,
+    "GP_SERV_POS_HEAD.flags1"
+);
+pin_s2c_offset!(
+    PosHead::SIZE,
+    login::POS_HEAD_BT_TARGET_ID,
+    "GP_SERV_POS_HEAD.BtTargetID"
+);
+pin_s2c_offset!(
+    PosHead::SIZE_WITH_BT_TARGET,
+    login::ZONE_NO,
+    "GP_SERV_POS_HEAD size"
+);
+pin_s2c_offset!(
+    LookData::GRAP_LIST_TBL_OFFSET,
+    grap_list::GRAP_ID_TBL,
+    "GP_SERV_COMMAND_GRAP_LIST.GrapIDTbl"
+);
+pin_s2c_offset!(
+    LookData::GRAP_ID_TBL_SLOTS,
+    grap_list::GRAP_ID_TBL_COUNT,
+    "GP_SERV_COMMAND_GRAP_LIST.GrapIDTbl length"
+);
+pin_s2c_offset!(
+    LookData::GRAP_ID_TBL_LEN,
+    grap_list::GRAP_ID_TBL_LEN,
+    "GP_SERV_COMMAND_GRAP_LIST.GrapIDTbl length"
+);
 
 #[cfg(test)]
 mod despawn_tests {

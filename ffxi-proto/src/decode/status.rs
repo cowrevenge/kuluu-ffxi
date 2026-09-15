@@ -1,4 +1,5 @@
 use super::*;
+use crate::s2c_layout::clistatus as lsb;
 
 /// s2c 0x037 GP_SERV_SERVERSTATUS (char status). Only the fields we consume are
 /// decoded: the subject id, its HP%, the death/homepoint counters, the animation
@@ -141,23 +142,34 @@ pub struct CliStatus {
     pub mjob_lv: u8,
     pub sjob_no: u8,
     pub sjob_lv: u8,
-    pub bp_base: [u16; 7],
-    pub bp_adj: [i16; 7],
+    pub bp_base: [u16; Self::BP_COUNT],
+    pub bp_adj: [i16; Self::BP_COUNT],
     pub attack: u16,
     pub defense: u16,
-    pub def_elem: [i16; 8],
+    pub def_elem: [i16; Self::DEF_ELEM_COUNT],
     pub ilvl: u8,
 }
 
 impl CliStatus {
-    // vendor/server/src/map/packets/s2c/0x061_clistatus.h CLISTATUS — the four job bytes
-    // sit between mpmax (@4) and exp_now (@12).
+    // vendor/server/src/map/packets/s2c/0x061_clistatus.h CLISTATUS
+    const HP_MAX_OFFSET: usize = 0;
+    const MP_MAX_OFFSET: usize = 4;
     const MJOB_NO_OFFSET: usize = 8;
     const MJOB_LV_OFFSET: usize = 9;
     const SJOB_NO_OFFSET: usize = 10;
     const SJOB_LV_OFFSET: usize = 11;
+    const BP_BASE_OFFSET: usize = 16;
+    const BP_ADJ_OFFSET: usize = 30;
+    const ATTACK_OFFSET: usize = 44;
+    const DEFENSE_OFFSET: usize = 46;
+    const DEF_ELEM_OFFSET: usize = 48;
     const ILVL_OFFSET: usize = 81;
     const NEEDED: usize = Self::ILVL_OFFSET + 1;
+
+    /// STR, DEX, VIT, AGI, INT, MND, CHR.
+    pub const BP_COUNT: usize = 7;
+    /// Fire, Ice, Wind, Earth, Lightning, Water, Light, Dark.
+    pub const DEF_ELEM_COUNT: usize = 8;
 
     pub fn decode(body: &[u8]) -> Result<Self, DecodeError> {
         if body.len() < Self::NEEDED {
@@ -166,27 +178,27 @@ impl CliStatus {
         let rd32 = |o: usize| u32::from_le_bytes([body[o], body[o + 1], body[o + 2], body[o + 3]]);
         let rd16 = |o: usize| u16::from_le_bytes([body[o], body[o + 1]]);
         let rdi16 = |o: usize| i16::from_le_bytes([body[o], body[o + 1]]);
-        let mut bp_base = [0u16; 7];
-        let mut bp_adj = [0i16; 7];
-        for i in 0..7 {
-            bp_base[i] = rd16(16 + i * 2);
-            bp_adj[i] = rdi16(30 + i * 2);
+        let mut bp_base = [0u16; Self::BP_COUNT];
+        let mut bp_adj = [0i16; Self::BP_COUNT];
+        for i in 0..Self::BP_COUNT {
+            bp_base[i] = rd16(Self::BP_BASE_OFFSET + i * 2);
+            bp_adj[i] = rdi16(Self::BP_ADJ_OFFSET + i * 2);
         }
-        let mut def_elem = [0i16; 8];
+        let mut def_elem = [0i16; Self::DEF_ELEM_COUNT];
         for (i, e) in def_elem.iter_mut().enumerate() {
-            *e = rdi16(48 + i * 2);
+            *e = rdi16(Self::DEF_ELEM_OFFSET + i * 2);
         }
         Ok(Self {
-            hp_max: rd32(0),
-            mp_max: rd32(4),
+            hp_max: rd32(Self::HP_MAX_OFFSET),
+            mp_max: rd32(Self::MP_MAX_OFFSET),
             mjob_no: body[Self::MJOB_NO_OFFSET],
             mjob_lv: body[Self::MJOB_LV_OFFSET],
             sjob_no: body[Self::SJOB_NO_OFFSET],
             sjob_lv: body[Self::SJOB_LV_OFFSET],
             bp_base,
             bp_adj,
-            attack: rd16(44),
-            defense: rd16(46),
+            attack: rd16(Self::ATTACK_OFFSET),
+            defense: rd16(Self::DEFENSE_OFFSET),
             def_elem,
             ilvl: body[Self::ILVL_OFFSET],
         })
@@ -251,6 +263,82 @@ impl JobInfo {
         })
     }
 }
+
+pin_s2c_offset!(
+    CliStatus::HP_MAX_OFFSET,
+    lsb::STATUSDATA_HPMAX,
+    "CLISTATUS.hpmax"
+);
+pin_s2c_offset!(
+    CliStatus::MP_MAX_OFFSET,
+    lsb::STATUSDATA_MPMAX,
+    "CLISTATUS.mpmax"
+);
+pin_s2c_offset!(
+    CliStatus::MJOB_NO_OFFSET,
+    lsb::STATUSDATA_MJOB_NO,
+    "CLISTATUS.mjob_no"
+);
+pin_s2c_offset!(
+    CliStatus::MJOB_LV_OFFSET,
+    lsb::STATUSDATA_MJOB_LV,
+    "CLISTATUS.mjob_lv"
+);
+pin_s2c_offset!(
+    CliStatus::SJOB_NO_OFFSET,
+    lsb::STATUSDATA_SJOB_NO,
+    "CLISTATUS.sjob_no"
+);
+pin_s2c_offset!(
+    CliStatus::SJOB_LV_OFFSET,
+    lsb::STATUSDATA_SJOB_LV,
+    "CLISTATUS.sjob_lv"
+);
+pin_s2c_offset!(
+    CliStatus::BP_BASE_OFFSET,
+    lsb::STATUSDATA_BP_BASE,
+    "CLISTATUS.bp_base"
+);
+pin_s2c_offset!(
+    CliStatus::BP_COUNT,
+    lsb::STATUSDATA_BP_BASE_COUNT,
+    "CLISTATUS.bp_base length"
+);
+pin_s2c_offset!(
+    CliStatus::BP_ADJ_OFFSET,
+    lsb::STATUSDATA_BP_ADJ,
+    "CLISTATUS.bp_adj"
+);
+pin_s2c_offset!(
+    CliStatus::BP_COUNT,
+    lsb::STATUSDATA_BP_ADJ_COUNT,
+    "CLISTATUS.bp_adj length"
+);
+pin_s2c_offset!(
+    CliStatus::ATTACK_OFFSET,
+    lsb::STATUSDATA_ATK,
+    "CLISTATUS.atk"
+);
+pin_s2c_offset!(
+    CliStatus::DEFENSE_OFFSET,
+    lsb::STATUSDATA_DEF,
+    "CLISTATUS.def"
+);
+pin_s2c_offset!(
+    CliStatus::DEF_ELEM_OFFSET,
+    lsb::STATUSDATA_DEF_ELEM,
+    "CLISTATUS.def_elem"
+);
+pin_s2c_offset!(
+    CliStatus::DEF_ELEM_COUNT,
+    lsb::STATUSDATA_DEF_ELEM_COUNT,
+    "CLISTATUS.def_elem length"
+);
+pin_s2c_offset!(
+    CliStatus::ILVL_OFFSET,
+    lsb::STATUSDATA_ILVL,
+    "CLISTATUS.ilvl"
+);
 
 #[cfg(test)]
 mod cli_status_tests {

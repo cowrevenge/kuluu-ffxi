@@ -14,7 +14,7 @@ use ffxi_dat::item_dat::{
     ITEM_DAT_USABLE, ITEM_DAT_VOUCHERS_AND_SLIPS, ITEM_DAT_WEAPON,
 };
 use ffxi_dat::spell_info::SPELL_LIST_FILE_ID;
-use ffxi_dat::sysmes::SYS_MES_FILE_ID;
+use ffxi_dat::sysmes::{MES_BASIC_FILE_ID, SYS_MES_FILE_ID};
 use ffxi_dat::ui_element::UI_SHEET_FILE_ID;
 
 /// Measured identical on every install under `vendor/game-files/targets/`.
@@ -33,6 +33,7 @@ const PINS: &[(u32, &str)] = &[
     (ITEM_DAT_ITEMS_EXPANSION, "ROM/301/115.DAT"),
     (SPELL_LIST_FILE_ID, "ROM/118/114.DAT"),
     (EMOTE_TEXT_FILE_ID, "ROM/27/70.DAT"),
+    (MES_BASIC_FILE_ID, "ROM/27/72.DAT"),
     (SYS_MES_FILE_ID, "ROM/27/76.DAT"),
     (UI_SHEET_FILE_ID, "ROM/119/51.DAT"),
 ];

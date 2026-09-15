@@ -76,6 +76,10 @@ pub(crate) const INLINE_KIND_ITEM_ANY: u8 = 0x28;
 pub(crate) const INLINE_KIND_ITEM_COUNTED: u8 = 0x29;
 pub(crate) const INLINE_KIND_ITEM_COUNTED_PLURAL: u8 = 0x2a;
 pub(crate) const INLINE_KIND_KEY_ITEM: u8 = 0x33;
+/// Status-effect name. Observed in the basic-message table's effect lines,
+/// whose LSB counterpart names the slot `<status>`
+/// (vendor/server/src/map/enums/msg_basic.h MsgBasic UsesSkillGainsEffect).
+pub(crate) const INLINE_KIND_STATUS: u8 = 0x13;
 /// Zone name (system-message table entry 318 lists linkshell-concierge zones).
 pub(crate) const INLINE_KIND_ZONE: u8 = 0x37;
 
@@ -456,6 +460,9 @@ pub(crate) struct InlineTag {
     /// Marker name to emit, `None` for a recognized-but-unrenderable kind
     /// (the tag is still consumed whole so its data bytes never leak as text).
     pub(crate) marker: Option<&'static str>,
+    /// The raw kind byte, kept because several kinds share one marker (or
+    /// none) in the rendered text and a composer may need to tell them apart.
+    pub(crate) kind: u8,
     /// Message-parameter index from the tag's last `82 <0x80|n>` reference —
     /// for item kinds that also carry a count/plural reference, the id ref
     /// comes last (observed: `01 09 29 82 81 80 80 82 80` = count param 1,
@@ -495,7 +502,12 @@ pub(crate) fn parse_inline_tag(bytes: &[u8], at: usize) -> Option<InlineTag> {
         .find(|w| w[0] == INLINE_TAG_PARAM_REF)
         .map(|w| w[1] & !INLINE_TAG_PARAM_BASE)
         .unwrap_or(0);
-    Some(InlineTag { marker, param, len })
+    Some(InlineTag {
+        marker,
+        kind: bytes[at + 2],
+        param,
+        len,
+    })
 }
 
 /// Emit `{name}` for a control code with no parameter.

@@ -10,9 +10,11 @@ use crate::event_dialog::EventTrigger;
 use crate::lobby_client::LobbyClient;
 use crate::map_client::{self, BootstrapArgs, MapClient};
 use crate::state::{
-    AgentCommand, AgentEvent, BlowfishStatus, ChatChannel, ChatLine, Diagnostics, Entity,
-    EntityKind, HealMode, InventoryUpdate, ItemSlot, Position, ShopItem, ShopState, Stage, Vec3,
+    AgentCommand, AgentEvent, BlowfishStatus, ChatChannel, ChatLine, ChatSpan, ChatSpanKind,
+    Diagnostics, Entity, EntityKind, HealMode, InventoryUpdate, ItemSlot, Position, ShopItem,
+    ShopState, Stage, Vec3,
 };
+use ffxi_dat::sysmes::{self, MesBasicDat};
 
 mod codec;
 mod treasure;
@@ -390,6 +392,7 @@ async fn run_map_session(
         .map(ffxi_dat::autotranslate_names::InstalledNames::open_from_root)
         .unwrap_or_default();
     let mut sysmes_resolver = treasure::SysMesResolver::new(cfg.dat_root.clone());
+    let mut mes_basic_resolver = MesBasicResolver::new(cfg.dat_root.clone());
     let mut treasure_pool = treasure::TreasurePool::default();
 
     let mut name_miss_dedup: std::collections::HashMap<
@@ -433,6 +436,7 @@ async fn run_map_session(
         &mut emote_text_resolver,
         &autotranslate_names,
         &mut sysmes_resolver,
+        &mut mes_basic_resolver,
         &mut treasure_pool,
         &mut flood_in_mog_house,
         &mut mog,
@@ -487,6 +491,7 @@ async fn run_map_session(
                 &mut emote_text_resolver,
                 &autotranslate_names,
                 &mut sysmes_resolver,
+                &mut mes_basic_resolver,
                 &mut treasure_pool,
                 &mut flood_in_mog_house,
                 &mut mog,
@@ -600,6 +605,7 @@ async fn run_map_session(
         emote_text_resolver,
         autotranslate_names,
         sysmes_resolver,
+        mes_basic_resolver,
         treasure_pool,
         mog,
         flood_zone_messages,
@@ -663,6 +669,7 @@ async fn drain_zone_flood(
     emote_text: &mut EmoteTextResolver,
     autotranslate_names: &ffxi_dat::autotranslate_names::InstalledNames,
     sysmes: &mut treasure::SysMesResolver,
+    mes_basic: &mut MesBasicResolver,
     pool: &mut treasure::TreasurePool,
     was_in_mog_house: &mut bool,
     mog: &mut SelfMogState,
@@ -719,6 +726,7 @@ async fn drain_zone_flood(
                         emote_text,
                         autotranslate_names,
                         sysmes,
+                        mes_basic,
                         pool,
                         was_in_mog_house,
                         mog,
@@ -846,6 +854,8 @@ fn handle_sub_packet(
     autotranslate_names: &ffxi_dat::autotranslate_names::InstalledNames,
 
     sysmes: &mut treasure::SysMesResolver,
+
+    mes_basic: &mut MesBasicResolver,
 
     pool: &mut treasure::TreasurePool,
 
@@ -1369,13 +1379,17 @@ fn handle_sub_packet(
             }
         }
         s2c::BATTLE_MESSAGE => {
-            if let Some(line) = decode_battle_message(sub.data, name_cache, kind_cache, true) {
+            for line in
+                decode_battle_message(sub.data, name_cache, kind_cache, true, mes_basic.table())
+            {
                 let _ = event_tx.send(AgentEvent::ChatLine { line });
             }
             emit_battle_message_audio_event(sub.data, true, event_tx);
         }
         s2c::BATTLE_MESSAGE2 => {
-            if let Some(line) = decode_battle_message(sub.data, name_cache, kind_cache, false) {
+            for line in
+                decode_battle_message(sub.data, name_cache, kind_cache, false, mes_basic.table())
+            {
                 let _ = event_tx.send(AgentEvent::ChatLine { line });
             }
             emit_battle_message_audio_event(sub.data, false, event_tx);
@@ -1408,7 +1422,7 @@ fn handle_sub_packet(
                     outcome: h.first_outcome,
                 });
             }
-            for line in decode_battle2_action(sub.data, name_cache, kind_cache) {
+            for line in decode_battle2_action(sub.data, name_cache, kind_cache, mes_basic.table()) {
                 let _ = event_tx.send(AgentEvent::ChatLine { line });
             }
         }
@@ -2370,6 +2384,7 @@ async fn keepalive_loop(
     mut emote_text_resolver: EmoteTextResolver,
     autotranslate_names: ffxi_dat::autotranslate_names::InstalledNames,
     mut sysmes_resolver: treasure::SysMesResolver,
+    mut mes_basic_resolver: MesBasicResolver,
     mut treasure_pool: treasure::TreasurePool,
     mut mog: SelfMogState,
     flood_zone_messages: Vec<(u16, Vec<u8>)>,
@@ -4499,6 +4514,7 @@ async fn keepalive_loop(
                                 &mut emote_text_resolver,
                                 &autotranslate_names,
                                 &mut sysmes_resolver,
+                                &mut mes_basic_resolver,
                                 &mut treasure_pool,
                                 &mut self_in_mog_house,
                                 &mut mog,
@@ -4984,9 +5000,10 @@ fn decode_battle_message(
     name_cache: &std::collections::HashMap<u32, String>,
     kind_cache: &std::collections::HashMap<u32, crate::state::EntityKind>,
     is_029: bool,
-) -> Option<ChatLine> {
+    mes_basic: Option<&MesBasicDat>,
+) -> Vec<ChatLine> {
     if data.len() < 24 {
-        return None;
+        return Vec::new();
     }
     let cas_id = u32::from_le_bytes(data[0..4].try_into().unwrap());
     let tar_id = u32::from_le_bytes(data[4..8].try_into().unwrap());
@@ -5005,39 +5022,66 @@ fn decode_battle_message(
 
     let cas_name = name_for_id(cas_id, name_cache);
     let tar_name = name_for_id(tar_id, name_cache);
+    let cas_is_pc = is_pc(cas_id, kind_cache);
+    let tar_is_pc = is_pc(tar_id, kind_cache);
+    let sender = if subject_is_tar(message_num) {
+        tar_name.clone()
+    } else {
+        cas_name.clone()
+    };
     if let Some(text) = synth_check_line(message_num, data1, data2, &cas_name, &tar_name) {
-        return Some(ChatLine {
+        return vec![ChatLine {
             spans: Vec::new(),
             channel: ChatChannel::Battle,
             sender: cas_name,
             text,
             server_ts: 0,
-        });
+        }];
     }
-    let raw = template_for_id(message_num)?;
-    let text = substitute_battle_placeholders(
-        raw,
+
+    // Both message packets carry their two data words in the parameter slots the
+    // entry addresses as 0 and 1
+    // (vendor/server/src/map/packets/s2c/0x029_battle_message.h
+    // GP_SERV_COMMAND_BATTLE_MESSAGE Data,
+    // vendor/server/src/map/packets/s2c/0x02d_battle_message2.h
+    // GP_SERV_COMMAND_BATTLE_MESSAGE2 Data).
+    let mut numbers = [0i64; sysmes::PARAM_SLOTS];
+    numbers[MES_PARAM_ACTION_ID] = data1 as i64;
+    numbers[MES_PARAM_MAIN_VALUE] = data2 as i64;
+    if let Some(lines) = compose_mes_basic(
+        mes_basic,
+        message_num,
         &cas_name,
         &tar_name,
-        is_pc(cas_id, kind_cache),
-        is_pc(tar_id, kind_cache),
+        cas_is_pc,
+        tar_is_pc,
+        numbers,
+        &sender,
+    ) {
+        return lines;
+    }
+
+    let Some(raw) = fallback_template(message_num) else {
+        return Vec::new();
+    };
+    let text = substitute_battle_placeholders(
+        &raw,
+        &cas_name,
+        &tar_name,
+        cas_is_pc,
+        tar_is_pc,
         data1,
         data2,
         message_num,
         None,
     );
-    Some(ChatLine {
+    vec![ChatLine {
         spans: Vec::new(),
         channel: ChatChannel::Battle,
-
-        sender: if subject_is_tar(message_num) {
-            tar_name
-        } else {
-            cas_name
-        },
+        sender,
         text,
         server_ts: 0,
-    })
+    }]
 }
 
 struct BattleBitReader<'a> {
@@ -5166,6 +5210,7 @@ fn decode_battle2_action(
     data: &[u8],
     name_cache: &std::collections::HashMap<u32, String>,
     kind_cache: &std::collections::HashMap<u32, crate::state::EntityKind>,
+    mes_basic: Option<&MesBasicDat>,
 ) -> Vec<ChatLine> {
     let mut out: Vec<ChatLine> = Vec::new();
 
@@ -5226,49 +5271,27 @@ fn decode_battle2_action(
                 react_message = br.read(10).unwrap_or(0) as u16;
             }
 
-            if message_num != 0 {
-                if let Some(line) = build_battle2_line(
-                    message_num,
-                    &cas_name,
-                    &tar_name,
-                    cas_is_pc,
-                    tar_is_pc,
-                    value,
-                    cmd_arg,
-                    cmd_no,
-                ) {
-                    out.push(line);
-                }
-            }
+            // One parameter array per result, so an entry reads whichever
+            // block's value it names — the additional-effect and spikes lines
+            // address slots of their own.
+            let mut numbers = [0i64; sysmes::PARAM_SLOTS];
+            numbers[MES_PARAM_ACTION_ID] = cmd_arg as i64;
+            numbers[MES_PARAM_MAIN_VALUE] = value as i64;
+            numbers[MES_PARAM_ADDITIONAL_EFFECT_VALUE] = proc_value as i64;
+            numbers[MES_PARAM_SPIKES_VALUE] = react_value as i64;
 
-            if has_proc && proc_message != 0 {
-                if let Some(line) = build_battle2_line(
-                    proc_message,
-                    &cas_name,
-                    &tar_name,
-                    cas_is_pc,
-                    tar_is_pc,
-                    proc_value,
-                    cmd_arg,
-                    cmd_no,
-                ) {
-                    out.push(line);
+            for (num, amount) in [
+                (message_num, value),
+                (proc_message, proc_value),
+                (react_message, react_value),
+            ] {
+                if num == 0 {
+                    continue;
                 }
-            }
-
-            if has_react && react_message != 0 {
-                if let Some(line) = build_battle2_line(
-                    react_message,
-                    &cas_name,
-                    &tar_name,
-                    cas_is_pc,
-                    tar_is_pc,
-                    react_value,
-                    cmd_arg,
-                    cmd_no,
-                ) {
-                    out.push(line);
-                }
+                out.extend(build_battle2_line(
+                    mes_basic, num, &cas_name, &tar_name, cas_is_pc, tar_is_pc, amount, cmd_arg,
+                    cmd_no, numbers,
+                ));
             }
         }
     }
@@ -5281,6 +5304,7 @@ fn is_start_category(cmd_no: u8) -> bool {
 }
 
 fn build_battle2_line(
+    mes_basic: Option<&MesBasicDat>,
     message_num: u16,
     cas_name: &str,
     tar_name: &str,
@@ -5289,16 +5313,36 @@ fn build_battle2_line(
     amount: u32,
     action_id: u32,
     category: u8,
-) -> Option<ChatLine> {
-    let raw = template_for_id(message_num)?;
+    numbers: [i64; sysmes::PARAM_SLOTS],
+) -> Vec<ChatLine> {
+    let sender = if subject_is_tar(message_num) {
+        tar_name
+    } else {
+        cas_name
+    };
+    if let Some(lines) = compose_mes_basic(
+        mes_basic,
+        message_num,
+        cas_name,
+        tar_name,
+        cas_is_pc,
+        tar_is_pc,
+        numbers,
+        sender,
+    ) {
+        return lines;
+    }
 
+    let Some(raw) = fallback_template(message_num) else {
+        return Vec::new();
+    };
     let resource_id = if is_start_category(category) {
         amount
     } else {
         action_id
     };
     let text = substitute_battle_placeholders(
-        raw,
+        &raw,
         cas_name,
         tar_name,
         cas_is_pc,
@@ -5308,26 +5352,134 @@ fn build_battle2_line(
         message_num,
         Some(resource_id),
     );
-    Some(ChatLine {
+    vec![ChatLine {
         spans: Vec::new(),
         channel: ChatChannel::Battle,
-        sender: if subject_is_tar(message_num) {
-            tar_name.to_string()
-        } else {
-            cas_name.to_string()
-        },
+        sender: sender.to_string(),
         text,
         server_ts: 0,
-    })
+    }]
 }
 
-fn template_for_id(message_num: u16) -> Option<&'static str> {
-    for &(id, template) in TEMPLATE_OVERRIDES {
+/// Message-parameter slots a battle packet fills. The entry addresses them by
+/// index, so which one carries the action id and which the result's value is
+/// what makes `<entity> readies <skill>` (id in the value slot, action id zero)
+/// and `<entity> uses <skill>. ...` (id in the action slot) read from the same
+/// grammar.
+const MES_PARAM_ACTION_ID: usize = 0;
+const MES_PARAM_MAIN_VALUE: usize = 1;
+const MES_PARAM_ADDITIONAL_EFFECT_VALUE: usize = 2;
+const MES_PARAM_SPIKES_VALUE: usize = 3;
+
+/// The install's own wording for a battle message, or `None` when there is no
+/// readable table or the entry needs a control code the composer cannot render.
+fn compose_mes_basic(
+    mes_basic: Option<&MesBasicDat>,
+    message_num: u16,
+    cas_name: &str,
+    tar_name: &str,
+    cas_is_pc: bool,
+    tar_is_pc: bool,
+    numbers: [i64; sysmes::PARAM_SLOTS],
+    sender: &str,
+) -> Option<Vec<ChatLine>> {
+    let table = mes_basic?;
+    let index = message_num as usize;
+    let refs = table.resource_refs(index);
+    let resolved: Vec<String> = refs
+        .iter()
+        .map(|r| mes_basic_resource_name(r.kind, numbers[r.slot] as u32))
+        .collect();
+    let mut params = sysmes::SysMesParams {
+        numbers,
+        caster_name: Some(cas_name),
+        // Retail drops "the" for anything it refers to by name.
+        caster_article: !cas_is_pc,
+        target_name: Some(tar_name),
+        target_article: !tar_is_pc,
+        ..Default::default()
+    };
+    for (r, name) in refs.iter().zip(&resolved) {
+        params.names[r.slot] = Some(name);
+    }
+    let line = table.message(index, &params)?;
+    Some(
+        line.lines
+            .iter()
+            .map(|spans| ChatLine {
+                spans: spans
+                    .iter()
+                    .map(|s| ChatSpan {
+                        text: s.text.clone(),
+                        kind: match s.kind {
+                            sysmes::SpanKind::Text => ChatSpanKind::Text,
+                            sysmes::SpanKind::Item => ChatSpanKind::Item,
+                            sysmes::SpanKind::KeyItem => ChatSpanKind::KeyItem,
+                        },
+                    })
+                    .collect(),
+                channel: ChatChannel::Battle,
+                sender: sender.to_string(),
+                text: spans.iter().map(|s| s.text.as_str()).collect(),
+                server_ts: 0,
+            })
+            .collect(),
+    )
+}
+
+fn mes_basic_resource_name(kind: sysmes::MesBasicResource, id: u32) -> String {
+    match kind {
+        sysmes::MesBasicResource::CombatSkill => ffxi_vocab::skill_names::lookup(id as u8)
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("skill #{id}")),
+        sysmes::MesBasicResource::Spell => ffxi_vocab::spell_names::lookup(id as u16)
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("spell #{id}")),
+        sysmes::MesBasicResource::WeaponSkill => ffxi_vocab::tp_move_names::lookup(id as u16)
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("skill #{id}")),
+        sysmes::MesBasicResource::JobAbility => ability_name(id),
+        sysmes::MesBasicResource::StatusEffect => ffxi_vocab::status_names::lookup(id as u16)
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("status #{id}")),
+    }
+}
+
+/// Lazily opens the basic-message table, once, and remembers a miss so an
+/// install without one costs a single attempt rather than one per battle line.
+struct MesBasicResolver {
+    root: Option<std::sync::Arc<ffxi_dat::DatRoot>>,
+    table: Option<Option<MesBasicDat>>,
+}
+
+impl MesBasicResolver {
+    fn new(root: Option<std::sync::Arc<ffxi_dat::DatRoot>>) -> Self {
+        Self { root, table: None }
+    }
+
+    fn table(&mut self) -> Option<&MesBasicDat> {
+        let root = self.root.as_ref();
+        self.table
+            .get_or_insert_with(|| {
+                let loaded = root.and_then(|r| MesBasicDat::open(r));
+                if loaded.is_none() {
+                    tracing::info!(
+                        "basic-message DAT (ROM/27/72) unavailable - battle lines fall back to the scraped msg_basic wording"
+                    );
+                }
+                loaded
+            })
+            .as_ref()
+    }
+}
+
+fn fallback_template(message_num: u16) -> Option<std::borrow::Cow<'static, str>> {
+    for &(id, template) in FALLBACK_TEMPLATES {
         if id == message_num {
-            return Some(template);
+            return Some(std::borrow::Cow::Borrowed(template));
         }
     }
-    ffxi_vocab::msg_basic::lookup(message_num)
+    ffxi_vocab::msg_basic::lookup(message_num).map(std::borrow::Cow::Borrowed)
 }
 
 // vendor/server/src/map/enums/msg_std.h MsgStd Examine — "<name> examines you.", sent to
@@ -5447,18 +5599,25 @@ fn render_check_mob(message_num: u16, data1: u32, data2: u32, tar_name: &str) ->
     line
 }
 
-// ffxi_vocab::msg_basic is scraped from the trailing comment on each msg_basic.h enumerator,
-// which fails the client two ways. Id 116 (the generic "uses <ability>" line shared by
-// no-numeric buff JAs like Boost id39 / Warcry id32; abilities.sql message1=116) has no
-// enumerator at all, so lookup(116) is None and the self-JA battle line goes missing. And
-// wherever LSB's comment writes a bare ".." instead of a named token, the scrape has no way
-// to know which value belongs there — 100/101 are what an ability with message1=0 falls back
-// to (charentity.cpp CCharEntity::OnAbility), so every plain job ability logged "<player> uses ..".
-// Retail's full mesbasic table (ROM/27/72.DAT) carries the real strings; until that is
-// scraped, pin the wording here. vendor/server/src/map/enums/msg_basic.h MsgBasic CounterAbsByShadow.
-// The 420-427 Corsair roll family is deliberately absent: those need two numbers and a
-// status effect that data1/data2 alone cannot supply.
-const TEMPLATE_OVERRIDES: &[(u16, &str)] = &[
+// Wording of last resort, for a session with no readable install: the client's
+// own basic-message table (ffxi_dat::sysmes::MesBasicDat, ROM/27/72.DAT) is
+// what composes these lines when one is reachable, and it is the only source
+// that is right for both eras - the horizonxi-2023 and retail-2026-09 tables
+// hold 1024 index-stable entries that differ in wording at eleven of them.
+//
+// The scraped fallback under this one, ffxi_vocab::msg_basic, reads the
+// trailing comment on each msg_basic.h enumerator, which fails the client two
+// ways. Id 116 (the generic "uses <ability>" line shared by no-numeric buff JAs
+// like Boost id39 / Warcry id32; abilities.sql message1=116) has no enumerator
+// at all, so lookup(116) is None and the self-JA battle line goes missing. And
+// wherever LSB's comment writes a bare ".." instead of a named token, the
+// scrape has no way to know which value belongs there - 100/101 are what an
+// ability with message1=0 falls back to (charentity.cpp
+// CCharEntity::OnAbility), so every plain job ability logged "<player> uses ..".
+// vendor/server/src/map/enums/msg_basic.h MsgBasic CounterAbsByShadow.
+// The 420-427 Corsair roll family is deliberately absent: those need two
+// numbers and a status effect that data1/data2 alone cannot supply.
+const FALLBACK_TEMPLATES: &[(u16, &str)] = &[
     (
         14,
         "The <player>'s attack is countered by the <target>. <number> of <player>'s shadows absorbs the damage and disappears.",
@@ -5502,9 +5661,9 @@ const TEMPLATE_OVERRIDES: &[(u16, &str)] = &[
 
 // Ids above that intentionally shadow a scraped msg_basic entry: for all but
 // 565 the LSB enumerator comment elides tokens as a bare "..", so the scrape
-// carries an unusable template (see the WHY atop TEMPLATE_OVERRIDES); 565's
+// carries an unusable template (see the WHY atop FALLBACK_TEMPLATES); 565's
 // reason is on its entry. Guarded by
-// tests::template_overrides_only_shadow_msg_basic_deliberately.
+// tests::fallback_templates_only_shadow_msg_basic_deliberately.
 #[cfg(test)]
 const DELIBERATE_SHADOWS: &[u16] = &[14, 31, 100, 101, 102, 103, 136, 137, 317, 324, 565];
 

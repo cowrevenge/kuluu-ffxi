@@ -15,7 +15,7 @@ use ffxi_dat::event_locate::{event_dat_file_id, event_dat_zones};
 use ffxi_dat::ftable::FTABLE_BYTES_PER_FILE_ID;
 use ffxi_dat::item_dat::{ItemTable, ITEM_DAT_FILE_IDS};
 use ffxi_dat::main_dll::MainDll;
-use ffxi_dat::sysmes::SysMesDat;
+use ffxi_dat::sysmes::{MesBasicDat, SysMesDat};
 use ffxi_dat::ui_element::{find_ui_element_group, UI_SHEET_FILE_ID};
 use ffxi_dat::vtable::VTable;
 use ffxi_dat::zone_dat::{
@@ -540,6 +540,10 @@ fn dialog_tables_parse_and_the_fixed_tables_open() {
     }
 
     assert!(SysMesDat::open(&root).is_some(), "system-message table");
+    assert!(
+        MesBasicDat::open(&root).is_some(),
+        "basic-message table - without it every battle line falls back to the scraped msg_basic wording"
+    );
     assert!(EmoteTextDat::open(&root).is_some(), "emote text table");
     let sheet = read_file_id(&root, UI_SHEET_FILE_ID).expect("UI element sheet");
     assert!(

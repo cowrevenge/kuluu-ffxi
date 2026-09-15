@@ -1,5 +1,57 @@
 use super::*;
 
+/// Every battle-line expectation below is the no-install wording, so these
+/// shadow the real entry points with the basic-message table absent: what a
+/// session composes with one is pinned against a real install in
+/// `tests/install_conformance.rs`.
+fn decode_battle_message(
+    data: &[u8],
+    name_cache: &std::collections::HashMap<u32, String>,
+    kind_cache: &std::collections::HashMap<u32, crate::state::EntityKind>,
+    is_029: bool,
+) -> Option<ChatLine> {
+    super::decode_battle_message(data, name_cache, kind_cache, is_029, None)
+        .into_iter()
+        .next()
+}
+
+fn decode_battle2_action(
+    data: &[u8],
+    name_cache: &std::collections::HashMap<u32, String>,
+    kind_cache: &std::collections::HashMap<u32, crate::state::EntityKind>,
+) -> Vec<ChatLine> {
+    super::decode_battle2_action(data, name_cache, kind_cache, None)
+}
+
+fn build_battle2_line(
+    message_num: u16,
+    cas_name: &str,
+    tar_name: &str,
+    cas_is_pc: bool,
+    tar_is_pc: bool,
+    amount: u32,
+    action_id: u32,
+    category: u8,
+) -> Option<ChatLine> {
+    let mut numbers = [0i64; sysmes::PARAM_SLOTS];
+    numbers[MES_PARAM_ACTION_ID] = action_id as i64;
+    numbers[MES_PARAM_MAIN_VALUE] = amount as i64;
+    super::build_battle2_line(
+        None,
+        message_num,
+        cas_name,
+        tar_name,
+        cas_is_pc,
+        tar_is_pc,
+        amount,
+        action_id,
+        category,
+        numbers,
+    )
+    .into_iter()
+    .next()
+}
+
 /// Drives the real [`handle_sub_packet`] arm for `opcode` and returns the
 /// events it emitted, in emission order.
 fn sub_packet_events(opcode: u16, body: &[u8]) -> Vec<AgentEvent> {
@@ -39,6 +91,7 @@ fn sub_packet_events_with_names(
         &mut EmoteTextResolver::new(None),
         names,
         &mut treasure::SysMesResolver::new(None),
+        &mut MesBasicResolver::new(None),
         &mut treasure::TreasurePool::default(),
         &mut false,
         &mut SelfMogState::default(),
@@ -2278,7 +2331,7 @@ fn battle_message_565_obtains_gil_override_appends_unit() {
 #[test]
 fn battle2_self_ja_uses_ability_line_resolves_from_override() {
     // msg 116 (Boost/Warcry "uses" line) is absent from LSB's msg_basic.h; the
-    // TEMPLATE_OVERRIDES entry must fill it so a self JA-finish (category 6) still logs.
+    // FALLBACK_TEMPLATES entry must fill it so a self JA-finish (category 6) still logs.
     let line = build_battle2_line(116, "Nicotine", "Nicotine", true, true, 0, 39, 6)
         .expect("msg 116 must resolve via override");
     assert!(
@@ -2288,9 +2341,130 @@ fn battle2_self_ja_uses_ability_line_resolves_from_override() {
     );
 }
 
+/// The whole battle path against a real install: an id the scrape cannot serve
+/// ("The <player> uses .." in msg_basic.h) must come out of the client's own
+/// basic-message table instead, with the ability named and no elision left.
+/// Row-keyed wording is pinned in ffxi-dat tests/mesbasic.rs; this pins the
+/// wiring. Self-skips without game files.
 #[test]
-fn template_overrides_only_shadow_msg_basic_deliberately() {
-    for &(id, template) in TEMPLATE_OVERRIDES {
+fn a_job_ability_line_is_composed_from_the_installed_table() {
+    let Some(root) = test_dat_root() else {
+        eprintln!("skipping: no FFXI install");
+        return;
+    };
+    let Some(table) = MesBasicDat::open(&root) else {
+        eprintln!("skipping: install has no basic-message table");
+        return;
+    };
+    // Boost is ability 39 (vendor/server/sql/abilities.sql), whose message1 is
+    // the elided UsesJobAbility line.
+    const BOOST: u32 = 39;
+    let mut numbers = [0i64; sysmes::PARAM_SLOTS];
+    numbers[MES_PARAM_ACTION_ID] = BOOST as i64;
+    let lines = super::build_battle2_line(
+        Some(&table),
+        100,
+        "Daisy",
+        "Daisy",
+        true,
+        true,
+        0,
+        BOOST,
+        JOB_ABILITY_FINISH_CATEGORY,
+        numbers,
+    );
+    assert_eq!(lines.len(), 1, "got: {lines:?}");
+    assert_eq!(lines[0].text, "Daisy uses Boost.");
+    assert_eq!(lines[0].channel, ChatChannel::Battle);
+    assert_eq!(lines[0].sender, "Daisy");
+    assert_eq!(
+        lines[0]
+            .spans
+            .iter()
+            .map(|s| s.text.as_str())
+            .collect::<String>(),
+        lines[0].text,
+        "span text must reconstruct the line"
+    );
+}
+
+/// A two-clause entry is two retail log lines, not one wrapped one.
+/// Self-skips without game files.
+#[test]
+fn a_two_clause_entry_becomes_two_chat_lines() {
+    let Some(root) = test_dat_root() else {
+        eprintln!("skipping: no FFXI install");
+        return;
+    };
+    let Some(table) = MesBasicDat::open(&root) else {
+        eprintln!("skipping: install has no basic-message table");
+        return;
+    };
+    const BOOST: u32 = 39;
+    const DAMAGE: u32 = 42;
+    let mut numbers = [0i64; sysmes::PARAM_SLOTS];
+    numbers[MES_PARAM_ACTION_ID] = BOOST as i64;
+    numbers[MES_PARAM_MAIN_VALUE] = DAMAGE as i64;
+    let lines = super::build_battle2_line(
+        Some(&table),
+        317,
+        "Daisy",
+        "Rock Lizard",
+        true,
+        false,
+        DAMAGE,
+        BOOST,
+        JOB_ABILITY_FINISH_CATEGORY,
+        numbers,
+    );
+    assert_eq!(lines.len(), 2, "got: {lines:?}");
+    assert_eq!(lines[0].text, "Daisy uses Boost.");
+    assert_eq!(lines[1].text, "The Rock Lizard takes 42 points of damage.");
+}
+
+/// Msg 116 has no msg_basic.h enumerator at all, so without the installed table
+/// the line only exists because FALLBACK_TEMPLATES carries it. With one, both
+/// clauses come from the client's own wording. Self-skips without game files.
+#[test]
+fn an_id_the_scrape_does_not_know_still_composes_from_the_install() {
+    let Some(root) = test_dat_root() else {
+        eprintln!("skipping: no FFXI install");
+        return;
+    };
+    let Some(table) = MesBasicDat::open(&root) else {
+        eprintln!("skipping: install has no basic-message table");
+        return;
+    };
+    const BOOST: u32 = 39;
+    assert!(
+        ffxi_vocab::msg_basic::lookup(116).is_none(),
+        "the scrape gained an entry for 116; this test no longer proves what it says"
+    );
+    let mut numbers = [0i64; sysmes::PARAM_SLOTS];
+    numbers[MES_PARAM_ACTION_ID] = BOOST as i64;
+    let lines = super::build_battle2_line(
+        Some(&table),
+        116,
+        "Daisy",
+        "Daisy",
+        true,
+        true,
+        0,
+        BOOST,
+        JOB_ABILITY_FINISH_CATEGORY,
+        numbers,
+    );
+    assert_eq!(lines.len(), 2, "got: {lines:?}");
+    assert_eq!(lines[0].text, "Daisy uses Boost.");
+    assert_eq!(lines[1].text, "Daisy's attacks are enhanced.");
+}
+
+/// vendor/server/src/map/enums/action/category.h ActionCategory AbilityFinish.
+const JOB_ABILITY_FINISH_CATEGORY: u8 = 6;
+
+#[test]
+fn fallback_templates_only_shadow_msg_basic_deliberately() {
+    for &(id, template) in FALLBACK_TEMPLATES {
         match ffxi_vocab::msg_basic::lookup(id) {
             None => assert!(
                 !DELIBERATE_SHADOWS.contains(&id),

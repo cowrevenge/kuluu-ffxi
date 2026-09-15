@@ -418,7 +418,15 @@ impl EventVm {
     }
 
     /// True when `tag` is already queued or running on the actor's stack.
+    /// Tag 0 is retail's "no tag" sentinel: `XiEvent::ReqSet` walks all 16
+    /// ReqStack slots and returns 0 on any matching TagNum, including the
+    /// zeroed TagNum of unused and completed slots (research/XiEvents/Event VM
+    /// Functions.md ReqSet), so REQSET(tag=0) is a no-op at any actor whose
+    /// stack is not full; only a full stack defers to the yield path.
     fn request_queued(&self, actor: u32, tag: u8) -> bool {
+        if tag == 0 && !self.request_stack_full(actor) {
+            return true;
+        }
         self.scene.as_ref().is_some_and(|s| {
             s.stacks
                 .iter()
@@ -528,9 +536,11 @@ impl EventVm {
     /// XiEventInit sets only the event index and priority 16, the 0x0000
     /// reset writes `TagNum = 0` back on completion, and `XiEvent::ReqSet`
     /// dedupes on `TagNum` across all 16 slots — so a REQSET of tag 0 at this
-    /// actor is skipped in retail too, while (and after) the owner child runs
-    /// (research/XiEvents/Event VM Functions.md XiEventInit, XiEvent::ReqSet;
-    /// OpCodes/0x0000.md).
+    /// actor is skipped in retail too, while (and after) the owner child runs.
+    /// That skip is the tag-0 branch of [`Self::request_queued`] (an actor
+    /// whose stack is not full always has a zeroed slot to match), not a
+    /// property of this slot (research/XiEvents/Event VM Functions.md
+    /// XiEventInit, XiEvent::ReqSet; OpCodes/0x0000.md).
     pub fn spawn_owner(&mut self, block: &EventBlock, entry: usize) {
         let Some(scene) = &self.scene else { return };
         let actor = block.actor;

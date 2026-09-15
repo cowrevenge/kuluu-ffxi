@@ -4287,8 +4287,8 @@ mod tests {
         };
         dat.blocks.push(EventBlock {
             actor: NPC_SERVER_ID,
-            event_ids: vec![7],
-            event_offsets: vec![0],
+            event_ids: vec![7, 7],
+            event_offsets: vec![0, 0],
             references: npc_refs,
             event_data: npc_data,
         });
@@ -4327,10 +4327,10 @@ mod tests {
 
     #[test]
     fn reqset_spawns_child_on_target_block_at_tag_index() {
-        // Master: REQSET the NPC's tag 0 at priority 0, then END. The NPC block
+        // Master: REQSET the NPC's tag 1 at priority 0, then END. The NPC block
         // hides itself and ends.
         let mut master = vec![OP_REQSET];
-        master.extend_from_slice(&reqset_operands(0, NPC_SERVER_ID, 0));
+        master.extend_from_slice(&reqset_operands(0, NPC_SERVER_ID, 1));
         master.push(OP_END);
         let mut npc = vec![OP_EVENTHIDE, 1];
         npc.extend_from_slice(&NPC_SERVER_ID.to_le_bytes());
@@ -4356,9 +4356,9 @@ mod tests {
 
     #[test]
     fn reqwait_holds_until_target_stack_drains_at_or_below_priority() {
-        // Master: REQSET the NPC's tag 0 at priority 3, then REQWAIT priority 3.
+        // Master: REQSET the NPC's tag 1 at priority 3, then REQWAIT priority 3.
         let mut master = vec![OP_REQSET];
-        master.extend_from_slice(&reqset_operands(3, NPC_SERVER_ID, 0));
+        master.extend_from_slice(&reqset_operands(3, NPC_SERVER_ID, 1));
         master.push(OP_REQWAIT);
         master.extend_from_slice(&reqwait_operands(3, NPC_SERVER_ID));
         master.push(OP_END);
@@ -4390,7 +4390,7 @@ mod tests {
         // A numerically higher priority on the stack does not hold a lower
         // REQWAIT byte.
         let mut master = vec![OP_REQSET];
-        master.extend_from_slice(&reqset_operands(110, NPC_SERVER_ID, 0));
+        master.extend_from_slice(&reqset_operands(110, NPC_SERVER_ID, 1));
         master.push(OP_REQWAIT);
         master.extend_from_slice(&reqwait_operands(3, NPC_SERVER_ID));
         master.push(OP_END);
@@ -4403,10 +4403,10 @@ mod tests {
 
     #[test]
     fn reqew_pushes_then_waits_for_that_tag() {
-        // Master: REQEW the NPC's tag 0, then END. The NPC parks on a one-second
+        // Master: REQEW the NPC's tag 1, then END. The NPC parks on a one-second
         // timed wait.
         let mut master = vec![OP_REQSET_PRIORITY];
-        master.extend_from_slice(&reqset_operands(5, NPC_SERVER_ID, 0));
+        master.extend_from_slice(&reqset_operands(5, NPC_SERVER_ID, 1));
         master.push(OP_END);
         const ONE_SECOND: u32 = WAIT_UNITS_PER_SEC as u32;
         let npc = vec![OP_WAIT, REF0[0], REF0[1]];
@@ -4429,15 +4429,15 @@ mod tests {
 
     #[test]
     fn lower_priority_number_preempts_and_the_other_resumes() {
-        // One NPC block, two tags: tag 0 is a one-second wait, tag 1 hides and
-        // ends. The master REQSETs both; the lower number runs first, and the
-        // other starts only when it drains.
+        // One NPC block, four tags: tag 2 is a one-second wait, tag 3 hides
+        // and ends. The master REQSETs both; the lower number runs first, and
+        // the other starts only when it drains.
         let mut master = vec![OP_REQSET];
-        master.extend_from_slice(&reqset_operands(9, NPC_SERVER_ID, 0));
+        master.extend_from_slice(&reqset_operands(9, NPC_SERVER_ID, 2));
         master.push(OP_REQSET);
-        master.extend_from_slice(&reqset_operands(1, NPC_SERVER_ID, 1));
+        master.extend_from_slice(&reqset_operands(1, NPC_SERVER_ID, 3));
         master.push(OP_END);
-        // [0..3) tag 0: one-second wait; [3..10) tag 1: hide + END.
+        // [0..3) tag 2: one-second wait; [3..10) tag 3: hide + END.
         let mut npc = vec![OP_WAIT, REF0[0], REF0[1], OP_EVENTHIDE, 1];
         npc.extend_from_slice(&NPC_SERVER_ID.to_le_bytes());
         npc.push(OP_END);
@@ -4448,8 +4448,8 @@ mod tests {
         };
         dat.blocks.push(EventBlock {
             actor: NPC_SERVER_ID,
-            event_ids: vec![7; 2],
-            event_offsets: vec![0, 3],
+            event_ids: vec![7; 4],
+            event_offsets: vec![0, 0, 0, 3],
             references: vec![ONE_SECOND],
             event_data: npc,
         });
@@ -4497,8 +4497,9 @@ mod tests {
     #[test]
     fn stack_full_makes_reqset_yield() {
         // An NPC block with 17 placeholder entries, all starting at offset 0 of a
-        // one-second wait; the master REQSETs tag 0 sixteen times (each push is a
-        // no-op once queued) and then tag 16, which must yield on the full stack.
+        // one-second wait; the master REQSETs tags 1..16 (sixteen pushes fill
+        // the stack) and then tag 0, which must yield on the full stack — the
+        // tag-0 no-op only applies while some slot is still zeroed.
         let mut dat = ffxi_dat::event_dat::EventDat {
             blocks: vec![block(vec![], vec![])],
         };
@@ -4512,12 +4513,12 @@ mod tests {
         dat.blocks.push(npc_block);
 
         let mut master = Vec::new();
-        for tag in 0u8..16 {
+        for tag in 1u8..17 {
             master.push(OP_REQSET_CHECKED);
             master.extend_from_slice(&reqset_operands(0, NPC_SERVER_ID, tag));
         }
         master.push(OP_REQSET);
-        master.extend_from_slice(&reqset_operands(0, NPC_SERVER_ID, 16));
+        master.extend_from_slice(&reqset_operands(0, NPC_SERVER_ID, 0));
         master.push(OP_END);
 
         let mut e = vm(master, vec![]);
@@ -4529,24 +4530,55 @@ mod tests {
         assert_eq!(
             e.step(),
             StepResult::Waiting,
-            "the seventeenth push finds a full stack and yields"
+            "the tag-0 push finds a full stack and yields"
+        );
+    }
+
+    #[test]
+    fn reqset_tag_zero_is_always_a_noop_on_a_non_full_stack() {
+        // Retail's ReqSet walks all 16 ReqStack slots and returns 0 on any
+        // matching TagNum, including the zeroed TagNum of unused slots, so a
+        // REQSET of tag 0 spawns no child while the target's stack is not
+        // full. The master REQSETs tag 0 on an idle NPC and must run straight
+        // through to its END.
+        let mut master = vec![OP_REQSET];
+        master.extend_from_slice(&reqset_operands(0, NPC_SERVER_ID, 0));
+        master.push(OP_END);
+        let mut npc = vec![OP_EVENTHIDE, 1];
+        npc.extend_from_slice(&NPC_SERVER_ID.to_le_bytes());
+        npc.push(OP_END);
+
+        let mut e = scene_vm(master, npc);
+        assert_eq!(
+            e.step(),
+            StepResult::Done,
+            "the tag-0 REQSET is a no-op and the master's END finishes the event"
+        );
+        assert!(
+            !e.scene_waiting(),
+            "no child was queued, so no stack holds work"
+        );
+        assert!(
+            e.take_cues().is_empty(),
+            "no child ran, so no cue may surface"
         );
     }
 
     #[test]
     fn placeholder_tag_entries_are_reqset_entry_points() {
-        // The NPC block's only entry carries the placeholder event id; REQSET by
-        // tag index still reaches it, because ReqSet indexes TagOffset directly.
+        // The NPC block's second entry carries the placeholder event id; REQSET
+        // by tag index still reaches it, because ReqSet indexes TagOffset
+        // directly.
         let mut master = vec![OP_REQSET];
-        master.extend_from_slice(&reqset_operands(0, NPC_SERVER_ID, 0));
+        master.extend_from_slice(&reqset_operands(0, NPC_SERVER_ID, 1));
         master.push(OP_END);
         let mut npc_data = vec![OP_EVENTHIDE, 1];
         npc_data.extend_from_slice(&NPC_SERVER_ID.to_le_bytes());
         npc_data.push(OP_END);
         let npc_block = EventBlock {
             actor: NPC_SERVER_ID,
-            event_ids: vec![ffxi_dat::event_dat::EVENT_ID_PLACEHOLDER],
-            event_offsets: vec![0],
+            event_ids: vec![7, ffxi_dat::event_dat::EVENT_ID_PLACEHOLDER],
+            event_offsets: vec![0, 0],
             references: vec![],
             event_data: npc_data,
         };
@@ -4611,15 +4643,15 @@ mod tests {
         const GOAL_Z_REF: u32 = 40;
 
         let mut master = vec![OP_REQSET];
-        master.extend_from_slice(&reqset_operands(0, NPC_SERVER_ID, 0));
+        master.extend_from_slice(&reqset_operands(0, NPC_SERVER_ID, 1));
         master.push(OP_END);
         let mut dat = ffxi_dat::event_dat::EventDat {
             blocks: vec![block(master.clone(), vec![])],
         };
         dat.blocks.push(EventBlock {
             actor: NPC_SERVER_ID,
-            event_ids: vec![7],
-            event_offsets: vec![0],
+            event_ids: vec![7, 7],
+            event_offsets: vec![0, 0],
             references: vec![MOVE_SPEED_REF, NEG_FIVE_REF, GOAL_X_REF, GOAL_Z_REF],
             event_data: npc.clone(),
         });
@@ -4656,15 +4688,15 @@ mod tests {
         // With a host-armed move hold (copied into the child before its first
         // frame), case 1 parks until it expires.
         let mut master = vec![OP_REQSET];
-        master.extend_from_slice(&reqset_operands(0, NPC_SERVER_ID, 0));
+        master.extend_from_slice(&reqset_operands(0, NPC_SERVER_ID, 1));
         master.push(OP_END);
         let mut dat = ffxi_dat::event_dat::EventDat {
             blocks: vec![block(master.clone(), vec![])],
         };
         dat.blocks.push(EventBlock {
             actor: NPC_SERVER_ID,
-            event_ids: vec![7],
-            event_offsets: vec![0],
+            event_ids: vec![7, 7],
+            event_offsets: vec![0, 0],
             references: vec![MOVE_SPEED_REF, NEG_FIVE_REF, GOAL_X_REF, GOAL_Z_REF],
             event_data: npc,
         });
@@ -4707,7 +4739,7 @@ mod tests {
     #[test]
     fn child_dialog_frame_surfaces_and_dismissal_releases_the_reqwait() {
         let mut master = vec![OP_REQSET];
-        master.extend_from_slice(&reqset_operands(110, NPC_SERVER_ID, 0));
+        master.extend_from_slice(&reqset_operands(110, NPC_SERVER_ID, 1));
         master.push(OP_REQWAIT);
         master.extend_from_slice(&reqwait_operands(110, NPC_SERVER_ID));
         master.push(OP_END);
@@ -4749,9 +4781,9 @@ mod tests {
         let line = vec![OP_MESSAGE_UNNAMED, REF0[0], REF0[1], OP_MESWAIT, OP_END];
 
         let mut master = vec![OP_REQSET];
-        master.extend_from_slice(&reqset_operands(1, NPC_SERVER_ID, 0));
+        master.extend_from_slice(&reqset_operands(1, NPC_SERVER_ID, 1));
         master.push(OP_REQSET);
-        master.extend_from_slice(&reqset_operands(1, NPC2_SERVER_ID, 0));
+        master.extend_from_slice(&reqset_operands(1, NPC2_SERVER_ID, 1));
         master.push(OP_END);
 
         let mut dat = ffxi_dat::event_dat::EventDat {
@@ -4760,8 +4792,8 @@ mod tests {
         for actor in [NPC_SERVER_ID, NPC2_SERVER_ID] {
             dat.blocks.push(EventBlock {
                 actor,
-                event_ids: vec![7],
-                event_offsets: vec![0],
+                event_ids: vec![7, 7],
+                event_offsets: vec![0, 0],
                 references: vec![MSG_ID],
                 event_data: line.clone(),
             });
@@ -4794,7 +4826,7 @@ mod tests {
     #[test]
     fn child_stopped_on_unrunnable_opcode_is_dropped_and_releases_the_reqwait() {
         let mut master = vec![OP_REQSET];
-        master.extend_from_slice(&reqset_operands(3, NPC_SERVER_ID, 0));
+        master.extend_from_slice(&reqset_operands(3, NPC_SERVER_ID, 1));
         master.push(OP_REQWAIT);
         master.extend_from_slice(&reqwait_operands(3, NPC_SERVER_ID));
         master.push(OP_END);
@@ -4849,15 +4881,15 @@ mod tests {
         const GOAL_Z_REF: u32 = 40;
 
         let mut master = vec![OP_REQSET];
-        master.extend_from_slice(&reqset_operands(0, NPC_SERVER_ID, 0));
+        master.extend_from_slice(&reqset_operands(0, NPC_SERVER_ID, 1));
         master.push(OP_END);
         let mut dat = ffxi_dat::event_dat::EventDat {
             blocks: vec![block(master.clone(), vec![])],
         };
         dat.blocks.push(EventBlock {
             actor: NPC_SERVER_ID,
-            event_ids: vec![7],
-            event_offsets: vec![0],
+            event_ids: vec![7, 7],
+            event_offsets: vec![0, 0],
             references: vec![SPEED_REF, NEG_FIVE_REF, GOAL_X_REF, GOAL_Z_REF],
             event_data: npc.clone(),
         });

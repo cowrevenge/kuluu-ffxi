@@ -26,12 +26,16 @@ pub struct MmbOverlay;
 #[derive(Resource, Default)]
 pub struct MmbHandleCache {
     pub mesh: std::collections::HashMap<(u32, usize, usize), bevy::asset::Handle<Mesh>>,
-    /// Keyed by (file_id, chunk_idx, sub_index, mirrored). The mirror bit is
-    /// part of the pipeline key (front-face flip for negative-determinant
-    /// placements — xim GLDrawer.kt drawXim face), so the same submesh placed both
-    /// ways needs two material instances.
-    pub material:
-        std::collections::HashMap<(u32, usize, usize, bool), bevy::asset::Handle<FfxiZoneMaterial>>,
+    pub material: std::collections::HashMap<
+        (
+            u32,
+            usize,
+            usize,
+            bool,
+            crate::ffxi_zone_material::ZoneLightBindings,
+        ),
+        bevy::asset::Handle<FfxiZoneMaterial>,
+    >,
 }
 
 #[derive(Resource, Default)]
@@ -130,6 +134,7 @@ pub struct GenWater {
 
 #[derive(Message, Debug, Clone, Copy)]
 pub struct LoadMmbRequest {
+    pub light_bindings: crate::ffxi_zone_material::ZoneLightBindings,
     pub voyage_backdrop: bool,
     pub file_id: u32,
     pub chunk_idx: usize,
@@ -823,23 +828,32 @@ pub fn process_load_mmb_requests(
                     } else {
                         handle_cache
                             .material
-                            .entry((cache_key.0, cache_key.1, cache_key.2, mirrored))
+                            .entry((
+                                cache_key.0,
+                                cache_key.1,
+                                cache_key.2,
+                                mirrored,
+                                req.light_bindings,
+                            ))
                             .or_insert_with(|| {
-                                materials.add(FfxiZoneMaterial::new(
-                                    sub_texture,
-                                    crate::skinned_ffxi_material::FfxiMaterialFlags {
-                                        flags: Vec4::new(
-                                            has_texture,
-                                            blend_flag,
-                                            crate::ffxi_zone_material::ZONE_FLAG_FOGGED,
-                                            discard_threshold,
-                                        ),
-                                    },
-                                    Vec4::ONE,
-                                    Vec4::ZERO,
-                                    alpha_mode,
-                                    render_key,
-                                ))
+                                materials.add(
+                                    FfxiZoneMaterial::new(
+                                        sub_texture,
+                                        crate::skinned_ffxi_material::FfxiMaterialFlags {
+                                            flags: Vec4::new(
+                                                has_texture,
+                                                blend_flag,
+                                                crate::ffxi_zone_material::ZONE_FLAG_FOGGED,
+                                                discard_threshold,
+                                            ),
+                                        },
+                                        Vec4::ONE,
+                                        Vec4::ZERO,
+                                        alpha_mode,
+                                        render_key,
+                                    )
+                                    .with_light_bindings(req.light_bindings),
+                                )
                             })
                             .clone()
                     };
@@ -1099,6 +1113,7 @@ mod tests {
 
     fn zone_placement_at(pos: Vec3) -> LoadMmbRequest {
         LoadMmbRequest {
+            light_bindings: Default::default(),
             file_id: 0,
             chunk_idx: 0,
             world_pos: Vec3::ZERO,
@@ -1115,6 +1130,7 @@ mod tests {
 
     fn entity_spawn_at(pos: Vec3) -> LoadMmbRequest {
         LoadMmbRequest {
+            light_bindings: Default::default(),
             file_id: 0,
             chunk_idx: 0,
             world_pos: pos,

@@ -1184,17 +1184,14 @@ fn particle_draw(g: &LiveGenerator, p: &Particle, clock: &CelestialClock) -> Par
         .as_ref()
         .map(|t| t.sample_from(progress, Some(p.scale.y)))
         .unwrap_or(p.scale.y);
-    // Additive blend ignores alpha, so the alpha track drives brightness. With
-    // no track, a transient spray fades linearly to nothing over life; a
-    // continuous generator (one particle re-emitted on expiry — the steady
-    // crystal body) holds full opacity, or each re-emit cycle would fade the
-    // single particle out and strobe the whole model transparent.
+    // research/XIClient/src/XIClient/source/World/Generator/CYyGenerator.cpp HandleOne
+    // initializes field_F8 from opcode 0x16; persistent effects retain its authored alpha.
     let alpha = g
         .alpha
         .as_ref()
         .map(|t| t.sample_from(progress, Some(g.def.init_color[3])))
-        .unwrap_or(if g.def.continuous {
-            1.0
+        .unwrap_or(if g.def.continuous || g.def.is_singleton() {
+            g.def.init_color[3]
         } else {
             1.0 - progress
         });
@@ -3413,13 +3410,12 @@ mod tests {
     #[test]
     fn zone_210_lunar_halo_is_dark_except_near_full_moon() {
         const F_RO: u32 = 210;
-        const SPRITE_MIN_ALPHA: f32 = 0.5;
+        const SPRITE_MIN_ALPHA: f32 = 0.42;
         // `kasa`'s 0x4F alpha lane as shipped, dumped byte-for-byte from f_ro.
         const HALO_PHASE_ALPHA_BYTE: [u8; ffxi_dat::particle_gen::MOON_PHASES] =
             [0, 0, 0, 0, 0, 60, 128, 60, 0, 0, 0, 0];
-        // The rest of `kasa`'s modulate chain (its day-of-week lane and init colour, both
-        // phase-independent) is a constant gain on that lane: 160/255 as shipped.
-        const HALO_CHAIN_GAIN: f32 = 160.0 / u8::MAX as f32;
+        // DAT 210 kasa: initializer alpha 128/255 and weekday/phase modulation gain 160/255.
+        const HALO_CHAIN_GAIN: f32 = (128.0 / 255.0) * (160.0 / 255.0);
         const ALPHA_EPS: f32 = 1e-6;
 
         let Some(bytes) = zone_bytes(F_RO) else {
@@ -3427,7 +3423,9 @@ mod tests {
             return;
         };
         let halo = moon_attached_def(&bytes, b"kasa");
+        assert_eq!(halo.init_color[3], 128.0 / 255.0);
         let sprite = moon_attached_def(&bytes, b"moon");
+        assert_eq!(sprite.init_color[3], 128.0 / 255.0);
         let halo_table = halo
             .moon_phase_color
             .expect("the halo generator carries a moon-phase colour table");
@@ -3449,7 +3447,9 @@ mod tests {
             );
             assert!(
                 phase_alpha(&sprite, phase) > SPRITE_MIN_ALPHA,
-                "the moon disc itself stays visible at phase {phase}"
+                "moon phase {phase}: alpha {}, initializer {}",
+                phase_alpha(&sprite, phase),
+                sprite.init_color[3]
             );
         }
     }
@@ -3654,10 +3654,6 @@ mod tests {
 
     #[test]
     fn continuous_trackless_generator_holds_constant_alpha() {
-        // A continuous generator holds one particle re-emitted on expiry (the
-        // steady crystal body). Track-less, it must stay fully opaque — if it fell
-        // back to the 1.0-progress spray fade, the single particle would fade out
-        // each cycle and strobe the whole model transparent.
         use ffxi_dat::particle_gen::ParticleBlend;
         let mut base = def(4.0, 1.0, 1);
         base.blend = ParticleBlend::Blend;
@@ -3701,13 +3697,32 @@ mod tests {
 
         let expected = |curve: f32| VERT_ALPHA * curve * D3M_STAGE1_ALPHA_GAIN;
         assert!(
-            (alpha_of(&cont) - expected(1.0)).abs() < 1e-4,
-            "continuous body stays fully opaque, not the life fade"
+            (alpha_of(&cont) - expected(base.init_color[3])).abs() < 1e-4,
+            "continuous body keeps authored opacity"
         );
         assert!(
             (alpha_of(&spray) - expected(0.25)).abs() < 1e-4,
             "a transient spray still fades 1.0-progress over life"
         );
+    }
+
+    #[test]
+    fn real_dat_monument_shaft_retains_authored_alpha() {
+        const LOWER_JEUNO_DAT: u32 = 345;
+        const SHAFT_ALPHA: f32 = 50.0 / 255.0;
+        let Some(assets) = retail_assets(LOWER_JEUNO_DAT) else {
+            return;
+        };
+        let def = *assets.particle_defs.get(b"SPLT").expect("monument shaft");
+        assert!(def.is_singleton());
+        assert_eq!(def.init_color[3], SHAFT_ALPHA);
+        let mut g = celestial(def);
+        g.particles[0].life_frames = f32::INFINITY;
+        for age in [0.0, 300.0, 30_000.0] {
+            g.particles[0].age_frames = age;
+            let draw = particle_draw(&g, &g.particles[0], &CelestialClock::default());
+            assert_eq!(draw.factor_alpha, SHAFT_ALPHA);
+        }
     }
 
     #[test]

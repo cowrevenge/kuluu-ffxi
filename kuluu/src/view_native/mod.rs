@@ -1033,7 +1033,11 @@ fn drain_mmb_load_state(
 // Particle generators hold mesh-entity handles in a resource Vec; the entities are despawned by
 // despawn_ingame_entities (they carry InGameEntity), but the Vec itself must be cleared so it
 // doesn't leak stale generators across a zone change.
-fn drain_particle_simulator(mut sim: ResMut<kuluu_render::particle_sim::ParticleSimulator>) {
+fn drain_particle_simulator(
+    mut sim: ResMut<kuluu_render::particle_sim::ParticleSimulator>,
+    mut zone_particles: ResMut<kuluu_render::zone_particles::ZoneParticles>,
+) {
+    *zone_particles = default();
     let dropped = sim.drain_entities().len();
     if dropped > 0 {
         tracing::info!(dropped, "OnExit(InGame): drained live particle generators");
@@ -1251,6 +1255,8 @@ mod zone_teardown_tests {
         use kuluu_render::zone_point_lights::{ActiveSceneLights, ZonePointLight, ZonePointLights};
         let mut world = world_with_teardown_resources();
         let light = ZonePointLight {
+            theta_track: None,
+            theta_multiplier: 1.0,
             light_id: u32::from_le_bytes(*b"l_01"),
             world_pos: Vec3::ZERO,
             color: Vec3::ONE,
@@ -1260,7 +1266,7 @@ mod zone_teardown_tests {
         world.insert_resource(ZonePointLights {
             file_id: Some(348),
             sub_area_file_id: Some(585),
-            lights: vec![light],
+            lights: vec![light.clone()],
         });
         world.insert_resource(ActiveSceneLights {
             lights: vec![light],

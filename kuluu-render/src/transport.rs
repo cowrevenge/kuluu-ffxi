@@ -98,6 +98,7 @@ fn load_transport_models(
         {
             for &chunk_idx in &asset.meshes {
                 models.write(LoadMmbRequest {
+                    light_bindings: Default::default(),
                     file_id: pending.file_id,
                     chunk_idx,
                     world_pos: Vec3::ZERO,

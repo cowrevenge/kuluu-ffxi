@@ -193,11 +193,6 @@ pub struct ZoneDirectionalLighting {
     pub moon_k: f32,
     pub ambient_landscape: Vec3,
 
-    /// The ZONE record's landscape sun brightness, held apart from `sun_k` for
-    /// consumers whose decision is whole-zone rather than per-block: the lamp
-    /// day/night gate ([`crate::zone_point_lights::lamp_lit_factor`]) lights every
-    /// Generator light in the zone at once, so it must not flip because the player
-    /// stepped into one dark area.
     pub zone_sun_k: f32,
 }
 

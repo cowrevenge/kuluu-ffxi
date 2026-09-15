@@ -1171,6 +1171,7 @@ fn load_decrypted(
 
 #[derive(Debug, Clone, Copy)]
 pub struct ZoneMmbSpawn {
+    pub light_bindings: [Option<mzb::LightId>; mzb::LIGHT_REFERENCE_COUNT],
     pub voyage_backdrop: bool,
     pub chunk_idx: usize,
     pub bevy_transform: Mat4,
@@ -1443,6 +1444,51 @@ pub fn placement_bevy_transform(scale: Vec3, rot: Vec3, trans: Vec3) -> Mat4 {
         )
 }
 
+pub(crate) fn water_generator_model(body: &[u8]) -> Option<ffxi_dat::generator::ModelSpawnDef> {
+    let def = ffxi_dat::particle_gen::ParticleGeneratorDef::parse(body).ok()??;
+    if def.camera_relative || def.max_life_frames != 0.0 {
+        return None;
+    }
+    let model = ffxi_dat::generator::Generator::parse_model_spawn(body).ok()??;
+    (model.uv_scroll != [0.0, 0.0]).then_some(model)
+}
+
+pub(crate) fn water_generator_offsets(bytes: &[u8]) -> std::collections::HashSet<usize> {
+    let chunks: Vec<_> = walk(bytes).flatten().collect();
+    let mut ids = std::collections::HashSet::new();
+    let mut names = Vec::new();
+    for c in &chunks {
+        if c.kind != ChunkKind::Mmb as u8 {
+            continue;
+        }
+        ids.insert(
+            String::from_utf8_lossy(&c.name)
+                .trim_end_matches('\0')
+                .trim_end()
+                .to_owned(),
+        );
+        if let Some(name) = mmb::decrypt(c.data)
+            .ok()
+            .and_then(|d| MmbHeader::parse(&d).ok().map(|h| h.zone_mesh_name()))
+        {
+            names.push(name);
+        }
+    }
+    let prefix = mzb::infer_zone_prefix(&names);
+    chunks
+        .iter()
+        .filter_map(|c| {
+            if c.kind != ChunkKind::Generator as u8 {
+                return None;
+            }
+            let model = water_generator_model(c.data)?;
+            let name = model.model_name_str().trim_end();
+            (ids.contains(name) || mzb::resolve_mmb_index(name, &prefix, &names).is_some())
+                .then_some(c.offset)
+        })
+        .collect()
+}
+
 pub fn build_zone_mmb_spawns(
     file_id: u32,
     chunk_idx: Option<usize>,
@@ -1712,6 +1758,7 @@ pub fn build_zone_mmb_spawns(
             .map(|slot| crate::zone_doors::ZoneDoorLeaf::new(*slot, p));
         for local in variants {
             out.push(ZoneMmbSpawn {
+                light_bindings: chunk_lights,
                 chunk_idx: mmb_indices[local],
                 bevy_transform,
                 water: None,
@@ -1750,41 +1797,9 @@ pub fn build_zone_mmb_spawns(
         if c.kind != ChunkKind::Generator as u8 {
             continue;
         }
-        // research/xim EnvironmentManager.updateWeatherEffects + Particle.kt updateAssociatedPosition:
-        // the weat/<type>/ sky generators (cloud canopies cld1/cld2 and per-weather
-        // variants like ~4cl) set the follow_camera config bit (0x0004) — they are
-        // camera-relative sky registered through EffectManager, NOT world geometry.
-        // They share the water signature below (singleton + uv_scroll), so a
-        // name-based skip missed variants and spawned the cloud dome as a static
-        // sheet draped over the zone (kuluu-nfrp). Reject any camera-follow
-        // generator; real water (sea1/sea2, izu*) is world-anchored (follow=false).
-        let follows_camera = ffxi_dat::generator::Generator::parse_cloud_generator(c.name, c.data)
-            .ok()
-            .flatten()
-            .is_some_and(|d| d.follow_camera);
-        if follows_camera {
-            continue;
-        }
-        let Ok(Some(ms)) = ffxi_dat::generator::Generator::parse_model_spawn(c.data) else {
+        let Some(ms) = water_generator_model(c.data) else {
             continue;
         };
-        // Scrolling sheets are the water surfaces (sea1/sea2 scroll their UVs);
-        // static model-spawns (ships, floors, collision hulls) have zero scroll
-        // and are left to the normal geometry path — spawning them here would
-        // give them the translucent water material.
-        if ms.uv_scroll == [0.0, 0.0] {
-            continue;
-        }
-        // Singletons (max_life_frames == 0) are static sheets. life > 0 generators
-        // (e.g. Port Windurst "rivs", Bastok "tki*") emit particles over time and
-        // belong to the particle path; taking them here would double-render them.
-        let is_singleton = ffxi_dat::particle_gen::ParticleGeneratorDef::parse(c.data)
-            .ok()
-            .flatten()
-            .is_none_or(|d| d.max_life_frames == 0.0);
-        if !is_singleton {
-            continue;
-        }
         let name = ms.model_name_str().trim_end();
         // Resolve by the MMB DatId first (the generator's own linkage), then fall
         // back to the header zone_mesh_name path. Only names that resolve to an MMB
@@ -1825,6 +1840,7 @@ pub fn build_zone_mmb_spawns(
             .unwrap_or(([0.0; 3], [0.0; 3]));
         let (world_min, world_max) = world_bounds_from_local(bevy_transform, local_min, local_max);
         out.push(ZoneMmbSpawn {
+            light_bindings: [None; mzb::LIGHT_REFERENCE_COUNT],
             chunk_idx,
             bevy_transform,
             water: Some(crate::dat_mmb::GenWater {
@@ -2943,6 +2959,7 @@ fn spawn_mzb_overlay(
                     entity_id: None,
                     world_transform: Some(offset * s.bevy_transform),
                     water: s.water,
+                    light_bindings: s.light_bindings,
                     lod: s.lod,
                     door: s.door.map(|d| d.with_world_offset(req.world_pos)),
                     slot: req.slot,

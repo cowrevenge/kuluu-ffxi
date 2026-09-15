@@ -2512,22 +2512,33 @@ fn advance_actor_pose(
     // asks for that routine's first Motion stage clip; models without the routine (or without a
     // usable chunk for it) fall through to locomotion like any other miss. No per-mob
     // interpretation: what the sub value does on this model is defined by its DAT alone.
-    let special_clip_id = inputs.special.active_routine.and_then(|routine_name| {
-        let routine = DatId::from_name(&routine_name);
-        match routine_motion_lookup(routines, rejected_routines, routine, false) {
-            Ok(clip) => clip,
-            Err(miss) => {
-                routine_motion_miss(
-                    actor.world_id,
-                    name.unwrap_or("-"),
-                    model_dat,
-                    routine,
-                    &miss,
-                );
-                None
+    //
+    // The pose is held by whichever retail mechanism is active: the wire slot (a sub change on a
+    // live actor - the dig's buried pose, held until the sub clears or the resurface) or the
+    // routine's own AnimationLock (the resurface's 'init' on retail's slot-less fresh actor).
+    // Once both lapse the pose falls to idle even if the server keeps the sub set: the server
+    // never has to stop the animation.
+    let special_held = inputs.special.slot_held || animation_locked;
+    let special_clip_id = inputs
+        .special
+        .active_routine
+        .filter(|_| special_held)
+        .and_then(|routine_name| {
+            let routine = DatId::from_name(&routine_name);
+            match routine_motion_lookup(routines, rejected_routines, routine, false) {
+                Ok(clip) => clip,
+                Err(miss) => {
+                    routine_motion_miss(
+                        actor.world_id,
+                        name.unwrap_or("-"),
+                        model_dat,
+                        routine,
+                        &miss,
+                    );
+                    None
+                }
             }
-        }
-    });
+        });
 
     // Retail's `dead` routine outranks locomotion and any in-flight action, so the collapse
     // heads the selection chain; when its timer expires the held `cor?` takes over through the
@@ -4755,9 +4766,10 @@ mod pose_resolution_tests {
             }
             let actor = app.world().get::<FfxiRenderActor>(actor_entity).unwrap();
             // sub=1 keeps the ini1 override active (the model ships no clip for it); every other
-            // sub here settles to plain locomotion.
-            let healthy =
-                moved && (animationsub == 1 || actor.inputs.special.active_routine.is_none());
+            // sub here settles to plain locomotion. The wire slot is what holds a special pose
+            // between packets; the load routine's lock alone lapses on its own, so a non-selector
+            // sub must leave the slot clear for the model to keep idle-animating.
+            let healthy = moved && (animationsub == 1 || !actor.inputs.special.slot_held);
             results.push((
                 healthy,
                 format!(
@@ -4787,7 +4799,9 @@ mod pose_resolution_tests {
             load_npc(crate::look_resolver::npc_dat_id(0x01a8)).expect("installed worm DAT");
         let mut actor = make_render_actor(&loaded, 0, Vec::new(), 1, 0.0, 1.0);
         // sub=1 names the ini1 routine; its first Motion stage is the dig clip (the clip
-        // comes from the routine record, not a hard-coded mapping).
+        // comes from the routine record, not a hard-coded mapping). The wire slot is what
+        // holds the pose here: the standalone path has no schedulers, so no lock is in
+        // effect and only the slot keeps the override selected.
         let dig = routine_motion_clip(
             &actor.routines,
             &actor.rejected_routines,
@@ -4806,6 +4820,7 @@ mod pose_resolution_tests {
             .fold(0.0f32, f32::max);
         assert!(duration > 0.0, "worm has dedicated dig clips");
         actor.inputs.special.active_routine = Some(*b"ini1");
+        actor.inputs.special.slot_held = true;
         for _ in 0..(duration.ceil() as usize * 2 + 1) {
             advance_actor_pose_standalone(&mut actor, 1.0, None);
         }

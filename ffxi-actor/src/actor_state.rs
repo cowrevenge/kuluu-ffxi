@@ -79,9 +79,18 @@ pub struct SpecialPose {
     pub hidden: bool,
 
     /// The routine last triggered for this entity: table[sub] when a sub change landed while
-    /// visible, 'init' when the entity resurfaced (retail's create path). Drives the pose
-    /// override until settled or re-triggered; None = plain locomotion.
+    /// visible, 'init' when the entity resurfaced (retail's create path). The pose pass
+    /// resolves it against the model DAT. It persists after the wire sub clears so the pose
+    /// can stay held for the routine's AnimationLock before falling to idle; None = nothing
+    /// ever triggered.
     pub active_routine: Option<[u8; 4]>,
+
+    /// Whether the pose override is held by the wire slot (a sub change on a live actor) rather
+    /// than by the routine's own AnimationLock. True while the wire sub is set by a change -
+    /// the dig's buried pose, held until the sub clears or the resurface. False after a
+    /// resurface, where retail's fresh actor has no slot: the pose is held only for the load
+    /// routine's lock length, then falls to idle even if the server keeps the sub set.
+    pub slot_held: bool,
 }
 
 /// LSB `STATUS_TYPE::INVISIBLE` (vendor/server/src/map/entities/baseentity.h): the server hides
@@ -101,46 +110,62 @@ pub struct SpecialPoseStep {
 
 /// Advance one entity's special-pose state from last frame to this snapshot, mirroring retail's
 /// two triggers:
-///   * animationsub changing while the actor is visible plays table[sub] on that model;
-///   * a hidden->visible transition runs 'init' (the DAT's load routine).
-///     A sub change to zero settles back to locomotion. While hidden nothing triggers: retail has no
-///     live actor to run it on; the resurface replays 'init'.
+///   * animationsub changing to a named routine while the actor is visible plays that routine;
+///     the wire slot holds the pose until the sub clears.
+///   * a hidden->visible transition runs 'init' (the DAT's load routine) on retail's fresh
+///     actor, which has no slot: the pose is held only for the routine's AnimationLock length,
+///     then falls to idle even if the server keeps the sub set.
+/// A sub change to zero clears the slot but leaves the last-triggered routine selected, so the
+/// pose pass can hold it for the routine's lock before settling. While hidden nothing triggers:
+/// retail has no live actor to run it on; the resurface replays 'init'.
 ///
 /// The server (vendor/server/src/map/ai/controllers/mob_controller.cpp) drives the worm cycle:
 /// dig sets `animationsub = 1` while still visible, then flips `status -> INVISIBLE` ~3s later;
 /// pop-up sends an explicit position update (which carries the still-INVISIBLE status byte) and
 /// then flips `status` back to visible with `animationsub` still set for ~2s before it returns to
-/// 0. A sub-clear arriving mid-routine does nothing in retail: the routine finishes, there is no
-/// early-cancel path; only the pose override settles.
+/// 0. A sub-clear arriving mid-routine does nothing in retail: the routine's lock runs its
+/// natural length and only then does the pose settle - the server never has to stop the
+/// animation.
 ///
 /// Our port keeps one hidden actor instead of destroying/rebuilding it (retail destroys on
 /// INVISIBLE and constructs a fresh model on resurface), so `hidden` stands in for "actor
 /// destroyed" and the resurface's 'init' runs on our kept-hidden actor.
 pub fn next_special_pose(prev: &SpecialPose, status: u8, animationsub: u8) -> SpecialPoseStep {
     let hidden = status == INVISIBLE_STATUS;
-    let (active_routine, triggered) = if hidden {
-        (prev.active_routine, None)
+    let (active_routine, slot_held, triggered) = if hidden {
+        // Buried: nothing triggers; the resurface decides what plays.
+        (prev.active_routine, prev.slot_held, None)
     } else if prev.hidden {
-        // Resurfaced: retail constructs a fresh actor and runs its load routine. This wins over
-        // any sub change in the same frame: the create path is what retail runs, and the worm's
-        // settle window keeps the sub set without re-triggering its special.
-        (Some(LOAD_ROUTINE), Some(LOAD_ROUTINE))
+        // Resurfaced: retail constructs a fresh actor (no slot) and runs its load routine. The
+        // pose is held by the routine's lock, not the wire sub, so it falls to idle when the
+        // lock lapses even if the server keeps the sub set. This wins over any sub change in the
+        // same frame: the create path is what retail runs.
+        (Some(LOAD_ROUTINE), false, Some(LOAD_ROUTINE))
     } else if animationsub != prev.sub {
-        // Visible and the sub byte changed: retail's change detector plays table[sub]. A zero
-        // (or spawn-flagged zero) settles; anything else triggers that model's special routine.
-        let routine = special_routine(animationsub);
-        (routine, routine)
+        match special_routine(animationsub) {
+            Some(routine) => {
+                // Sub changed to a named routine while visible: the slot is active.
+                (Some(routine), true, Some(routine))
+            }
+            None => {
+                // Sub changed to zero: the slot clears, but the last-triggered routine stays
+                // selected so the pose pass can hold it for the duration of its lock.
+                (prev.active_routine, false, None)
+            }
+        }
     } else if special_routine(animationsub).is_none() {
-        // Visible with the sub settled to zero: back to locomotion.
-        (None, None)
+        // Sub already zero and still zero: nothing changes; the slot stays clear.
+        (prev.active_routine, false, None)
     } else {
-        (prev.active_routine, None)
+        // Sub unchanged and named: the slot holds as before.
+        (prev.active_routine, prev.slot_held, None)
     };
     SpecialPoseStep {
         pose: SpecialPose {
             sub: animationsub,
             hidden,
             active_routine,
+            slot_held,
         },
         triggered,
     }
@@ -939,9 +964,11 @@ mod tests {
             sub: 1,
             hidden: true,
             active_routine: Some(*b"ini1"),
+            slot_held: true,
         };
         let s = step(&buried, INVISIBLE_STATUS, 2);
         assert_eq!(s.triggered, None);
+        assert_eq!(s.pose.slot_held, true, "the buried dig keeps its slot");
     }
 
     #[test]
@@ -952,11 +979,16 @@ mod tests {
             sub: 1,
             hidden: true,
             active_routine: Some(*b"ini1"),
+            slot_held: true,
         };
         let s = step(&buried, 0, 1);
         assert!(!s.pose.hidden);
         assert_eq!(s.pose.active_routine, Some(*b"init"));
         assert_eq!(s.triggered, Some(*b"init"));
+        assert!(
+            !s.pose.slot_held,
+            "the resurface's fresh actor has no slot; the lock holds the pose"
+        );
 
         // Re-hidden mid-settle and resurfaced again: 'init' replays (retail rebuilds the
         // actor every time).
@@ -968,32 +1000,39 @@ mod tests {
 
     #[test]
     fn special_pose_settles_on_sub_clear() {
-        // The server cleared animationsub while visible (engaged mid-dig): the override
-        // settles back to locomotion; no routine fires on a clear.
+        // The server cleared animationsub while visible (engaged mid-dig): the slot releases,
+        // but the last-triggered routine stays selected so the pose pass can hold it for the
+        // duration of its lock; no routine fires on a clear.
         let digging = SpecialPose {
             sub: 1,
             hidden: false,
             active_routine: Some(*b"ini1"),
+            slot_held: true,
         };
         let s = step(&digging, 0, 0);
-        assert_eq!(s.pose.active_routine, None);
+        assert_eq!(s.pose.active_routine, Some(*b"ini1"));
+        assert!(!s.pose.slot_held);
         assert_eq!(s.triggered, None);
 
         // Same settle after a resurface's 'init': the settle window holds while the sub is
-        // still set, then releases when it clears.
+        // still set (no re-fire), then the slot clears when the sub drops - the routine stays
+        // selected for the lock.
         let settled = SpecialPose {
             sub: 1,
             hidden: false,
             active_routine: Some(*b"init"),
+            slot_held: false,
         };
         let held = step(&settled, 0, 1);
         assert_eq!(held.pose.active_routine, Some(*b"init"));
+        assert!(!held.pose.slot_held);
         assert_eq!(
             held.triggered, None,
             "the settle window must not re-fire the special"
         );
         let cleared = step(&held.pose, 0, 0);
-        assert_eq!(cleared.pose.active_routine, None);
+        assert_eq!(cleared.pose.active_routine, Some(*b"init"));
+        assert!(!cleared.pose.slot_held);
     }
 
     #[test]
@@ -1026,15 +1065,18 @@ mod tests {
         pose = s.pose;
 
         // It surfaces: visible again with the sub still set -> 'init' (the create path),
-        // not a re-fire of ini1.
+        // not a re-fire of ini1. The fresh actor has no slot: the lock holds the pose.
         let s = step(&pose, 0, 1);
         assert!(!s.pose.hidden);
         assert_eq!(s.triggered, Some(*b"init"));
+        assert!(!s.pose.slot_held);
         pose = s.pose;
 
-        // ~2s later the sub clears and it settles back to locomotion.
+        // ~2s later the sub clears: the slot releases, but the routine stays selected so the
+        // pose can hold for the lock before falling to idle.
         let s = step(&pose, 0, 0);
-        assert_eq!(s.pose.active_routine, None);
+        assert_eq!(s.pose.active_routine, Some(*b"init"));
+        assert!(!s.pose.slot_held);
         assert_eq!(s.triggered, None);
     }
 }

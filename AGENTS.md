@@ -8,11 +8,11 @@ Kuluu is a faithful, open-source FINAL FANTASY XI **client** rebuilt in Rust + B
 
 ## Build, test, lint
 
-`scripts/checks.sh` is the **single source of truth** for check commands — both the `pre-push` hook and CI call it, so they can't drift. Prefer it over spelling out cargo flags:
+`scripts/checks.sh` is the **single source of truth** for check *commands* — the `pre-push` hook and CI both call it, so a given stage runs byte-identical flags in each. They select **different stages**, though, so a green hook is not a green CI: `test` and `enhanced` are CI-only, and `wasm` runs in the hook only when the push touches its build graph. Prefer it over spelling out cargo flags:
 
 ```bash
-scripts/checks.sh harness comments fmt contracts install clippy # what the pre-push hook runs
-scripts/checks.sh fmt clippy test build         # the full CI gate
+scripts/checks.sh harness comments fmt contracts wasm install clippy # what the pre-push hook runs
+scripts/checks.sh harness comments fmt clippy test enhanced wasm # the full CI gate
 COMMENTS_DIFF=staged scripts/checks.sh comments # what pre-commit runs on the staged hunks
 cargo fmt --all                         # autofix formatting
 ```

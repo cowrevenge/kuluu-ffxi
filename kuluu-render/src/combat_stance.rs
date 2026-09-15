@@ -14,6 +14,7 @@ use kuluu_snapshot::EntityKind;
 /// files that follow it): the FFXiMain.dll battle-animation table
 /// (`MainDll::base_battle_animation_index`), else the shipped fallback when the
 /// dll is unreadable.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn motion_dat_for_race(dll: Option<&ffxi_dat::main_dll::MainDll>, race: u8) -> Option<u32> {
     dll.and_then(|dll| dll.base_battle_animation_index(race))
         .map(u32::from)
@@ -24,6 +25,7 @@ pub fn motion_dat_for_race(dll: Option<&ffxi_dat::main_dll::MainDll>, race: u8) 
 /// the animation caches below and the legacy VOS2 path carry instead of a race.
 /// The dll's race-config table inverts the id to its race; a non-PC id (an NPC
 /// model DAT) matches no row and, as before, has no battle DAT here.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn motion_dat_for_skel(skel_file_id: u32) -> Option<u32> {
     if let Some(dll) = crate::scheduler_runtime::main_dll_from_env() {
         let race = crate::look_resolver::PC_LOOK_RACES
@@ -31,6 +33,13 @@ pub fn motion_dat_for_skel(skel_file_id: u32) -> Option<u32> {
             .find(|&race| dll.base_race_config_index(race).map(u32::from) == Some(skel_file_id))?;
         return motion_dat_for_race(Some(&dll), race);
     }
+    motion_dat_fallback(skel_file_id)
+}
+
+/// The browser viewer renders from relayed snapshots and never resolves an
+/// install root, so there is no FFXiMain.dll to invert a skeleton id through.
+#[cfg(target_arch = "wasm32")]
+pub fn motion_dat_for_skel(skel_file_id: u32) -> Option<u32> {
     motion_dat_fallback(skel_file_id)
 }
 

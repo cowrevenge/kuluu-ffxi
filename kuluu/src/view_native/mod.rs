@@ -632,6 +632,7 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
         OnExit(AppPhase::InGame),
         (
             despawn_ingame_entities,
+            kuluu_render::hud::chat_panel::reset_chat_session,
             drain_entity_prediction,
             drain_entity_table,
             input::reset_local_movement,

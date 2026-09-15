@@ -18,6 +18,26 @@ use crate::camera::OperatorCamera;
 use crate::sun_moon::{IsMoon, IsSun};
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ChatLayout {
+    #[default]
+    Tabbed,
+    Vertical,
+    SideBySide,
+}
+
+impl ChatLayout {
+    pub const SLOTS: &[Self] = &[Self::Tabbed, Self::Vertical, Self::SideBySide];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Tabbed => "Tabbed",
+            Self::Vertical => "Vertical",
+            Self::SideBySide => "Side by side",
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum QualityPreset {
     Minimum,
     #[default]
@@ -259,6 +279,7 @@ pub enum GraphicsField {
     UiScale,
     CameraSpring,
     MenuScale,
+    ChatLayout,
     Fullscreen,
     Windowed,
 
@@ -333,6 +354,7 @@ impl GraphicsField {
             GraphicsField::UiScale => "UI Scale",
             GraphicsField::CameraSpring => "Camera Spring",
             GraphicsField::MenuScale => "Menu Scale",
+            GraphicsField::ChatLayout => "Chat Layout",
             GraphicsField::Fullscreen => "Fullscreen",
             GraphicsField::Windowed => "Windowed",
             GraphicsField::DynamicLights => "Dynamic Lights",
@@ -523,6 +545,8 @@ pub struct GraphicsSettings {
     /// the Graphics menu; persisted here.
     #[serde(default = "default_menu_scale_on")]
     pub menu_scale: bool,
+    #[serde(default)]
+    pub chat_layout: ChatLayout,
 
     #[serde(default)]
     pub dynamic_lights: DynamicLights,
@@ -779,6 +803,7 @@ impl GraphicsSettings {
                 ui_scale: 1.0,
                 camera_spring: false,
                 menu_scale: true,
+                chat_layout: ChatLayout::default(),
                 dynamic_lights: DynamicLights::Off,
                 shadowed_lights: 0,
                 light_flicker: false,
@@ -823,6 +848,7 @@ impl GraphicsSettings {
                 ui_scale: 1.0,
                 camera_spring: false,
                 menu_scale: true,
+                chat_layout: ChatLayout::default(),
                 dynamic_lights: DynamicLights::Vanilla,
                 shadowed_lights: DEFAULT_SHADOWED_LIGHTS,
                 light_flicker: DEFAULT_LIGHT_FLICKER,
@@ -867,6 +893,7 @@ impl GraphicsSettings {
                 ui_scale: 1.0,
                 camera_spring: false,
                 menu_scale: true,
+                chat_layout: ChatLayout::default(),
                 dynamic_lights: DynamicLights::Vanilla,
                 shadowed_lights: DEFAULT_SHADOWED_LIGHTS,
                 light_flicker: DEFAULT_LIGHT_FLICKER,
@@ -911,6 +938,7 @@ impl GraphicsSettings {
                 ui_scale: 1.0,
                 camera_spring: false,
                 menu_scale: true,
+                chat_layout: ChatLayout::default(),
                 dynamic_lights: DynamicLights::Vanilla,
                 shadowed_lights: DEFAULT_SHADOWED_LIGHTS,
                 light_flicker: DEFAULT_LIGHT_FLICKER,
@@ -959,6 +987,7 @@ impl GraphicsSettings {
                 ui_scale: 1.0,
                 camera_spring: false,
                 menu_scale: true,
+                chat_layout: ChatLayout::default(),
                 dynamic_lights: DynamicLights::Vanilla,
                 shadowed_lights: DEFAULT_SHADOWED_LIGHTS,
                 light_flicker: DEFAULT_LIGHT_FLICKER,
@@ -1032,6 +1061,7 @@ impl GraphicsSettings {
             GraphicsField::CameraSpring => {
                 (if self.camera_spring { "on" } else { "off" }).to_string()
             }
+            GraphicsField::ChatLayout => self.chat_layout.label().to_string(),
             GraphicsField::MenuScale => (if self.menu_scale { "on" } else { "off" }).to_string(),
 
             GraphicsField::DynamicLights => {
@@ -1146,6 +1176,7 @@ impl GraphicsSettings {
                 let zld = self.zone_line_display;
                 let arrival = self.enhanced_actor_arrival;
                 let minimap_radar = self.minimap_radar;
+                let chat_layout = self.chat_layout;
                 let (ui_scale, menu_scale) = (self.ui_scale, self.menu_scale);
                 let vsync = self.vsync;
                 let fps_cap = self.fps_cap;
@@ -1177,6 +1208,7 @@ impl GraphicsSettings {
                 self.minimap_radar = minimap_radar;
                 self.ui_scale = ui_scale;
                 self.menu_scale = menu_scale;
+                self.chat_layout = chat_layout;
                 self.vsync = vsync;
                 self.fps_cap = fps_cap;
                 self.dlss_quality = dlss_quality;
@@ -1263,6 +1295,10 @@ impl GraphicsSettings {
                 if delta != 0 {
                     self.camera_spring = !self.camera_spring;
                 }
+            }
+            GraphicsField::ChatLayout => {
+                self.chat_layout =
+                    cycle_slot(self.chat_layout, ChatLayout::SLOTS, delta).unwrap_or_default();
             }
             GraphicsField::MenuScale => {
                 if delta != 0 {
@@ -1419,9 +1455,19 @@ impl GraphicsSettings {
         let dlss_menu_enabled = self.dlss_menu_enabled;
         let job_display = self.job_display;
         let mob_hp_under = self.mob_hp_under;
-        let config = (self.minimap_radar, self.ui_scale, self.menu_scale);
+        let config = (
+            self.minimap_radar,
+            self.ui_scale,
+            self.menu_scale,
+            self.chat_layout,
+        );
         *self = Self::for_preset(QualityPreset::Minimum);
-        (self.minimap_radar, self.ui_scale, self.menu_scale) = config;
+        (
+            self.minimap_radar,
+            self.ui_scale,
+            self.menu_scale,
+            self.chat_layout,
+        ) = config;
         self.dlss_supported = dlss_supported;
         self.dlss_menu_enabled = dlss_menu_enabled;
         self.job_display = job_display;
@@ -1620,6 +1666,7 @@ pub const CONFIG_FIELDS: &[GraphicsField] = &[
     GraphicsField::MinimapRadar,
     GraphicsField::UiScale,
     GraphicsField::MenuScale,
+    GraphicsField::ChatLayout,
 ];
 
 /// The DLSS Config surface, top to bottom: the live quality knob first, then
@@ -2491,6 +2538,7 @@ mod tests {
             ui_scale: 1.0,
             camera_spring: false,
             menu_scale: true,
+            chat_layout: ChatLayout::default(),
             ..Default::default()
         };
         assert_eq!(s.value_label(GraphicsField::Preset), "Ultra");
@@ -2597,6 +2645,7 @@ mod tests {
             settings.minimap_radar,
             settings.ui_scale,
             settings.menu_scale,
+            settings.chat_layout,
         );
         assert_eq!(settings.preset, QualityPreset::Low);
         settings.cycle(GraphicsField::Preset, 1);
@@ -2604,7 +2653,8 @@ mod tests {
             (
                 settings.minimap_radar,
                 settings.ui_scale,
-                settings.menu_scale
+                settings.menu_scale,
+                settings.chat_layout
             ),
             preferences
         );
@@ -2614,9 +2664,38 @@ mod tests {
             (
                 settings.minimap_radar,
                 settings.ui_scale,
-                settings.menu_scale
+                settings.menu_scale,
+                settings.chat_layout
             ),
             preferences
+        );
+    }
+
+    #[test]
+    fn chat_layout_cycles_persists_and_defaults_for_old_settings() {
+        let mut settings = GraphicsSettings::default();
+        for expected in [
+            ChatLayout::Vertical,
+            ChatLayout::SideBySide,
+            ChatLayout::Tabbed,
+        ] {
+            settings.cycle(GraphicsField::ChatLayout, 1);
+            assert_eq!(settings.chat_layout, expected);
+            let json = serde_json::to_string(&settings).unwrap();
+            assert_eq!(
+                serde_json::from_str::<GraphicsSettings>(&json)
+                    .unwrap()
+                    .chat_layout,
+                expected
+            );
+        }
+        let mut old = serde_json::to_value(&settings).unwrap();
+        old.as_object_mut().unwrap().remove("chat_layout");
+        assert_eq!(
+            serde_json::from_value::<GraphicsSettings>(old)
+                .unwrap()
+                .chat_layout,
+            ChatLayout::Tabbed
         );
     }
 

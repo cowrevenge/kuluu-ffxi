@@ -115,6 +115,8 @@ pub struct DevHud;
 #[derive(Component)]
 pub struct BottomLeftStack;
 
+pub const BOTTOM_LEFT_INSET_PX: f32 = 54.0;
+
 pub fn spawn_bottom_left_stack(
     mut commands: Commands,
     mut images: ResMut<Assets<bevy::image::Image>>,
@@ -127,7 +129,7 @@ pub fn spawn_bottom_left_stack(
             Node {
                 position_type: PositionType::Absolute,
 
-                bottom: Val::Px(54.0),
+                bottom: Val::Px(BOTTOM_LEFT_INSET_PX),
                 left: Val::Px(0.0),
                 width: Val::Percent(50.0),
 
@@ -443,6 +445,7 @@ impl Plugin for HudPlugin {
                 .before(chat_panel::update_chat_tab_visuals_system),
         );
         app.add_systems(Update, chat_panel::update_chat_tab_visuals_system);
+        app.add_systems(Update, chat_panel::apply_chat_layout);
 
         app.add_systems(Update, weather_icon::update_weather_icon);
         app.add_systems(Update, entity_hover_card::update_entity_hover_card_system);

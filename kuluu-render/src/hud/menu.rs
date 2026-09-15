@@ -277,7 +277,13 @@ const STATUS_LABELS: &[&str] = &[
 ];
 
 pub const CONFIG_CONTROLS: &str = "Controls";
-const CONFIG_ENTRIES: &[&str] = &["Minimap", "UI Scale", "Menu Scale", CONFIG_CONTROLS];
+const CONFIG_ENTRIES: &[&str] = &[
+    "Minimap",
+    "UI Scale",
+    "Menu Scale",
+    "Chat Layout",
+    CONFIG_CONTROLS,
+];
 
 const CONTROLS_ENTRIES: &[&str] = &[
     "Standard",

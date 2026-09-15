@@ -79,8 +79,12 @@ pub struct ChatTabBar;
 #[derive(Component)]
 pub struct ChatPanelGroup;
 
-// Keep split logs readable on narrow screens without a user-managed width.
-const CHAT_READABLE_WIDTH_PX: f32 = 720.0;
+#[derive(Component, Default)]
+pub struct ChatArea {
+    pub horizontal: bool,
+    pub panel_height: f32,
+}
+
 const CHAT_SPLIT_MIN_WIDTH_PX: f32 = 960.0;
 const CHAT_WINDOW_GAP_PX: f32 = 4.0;
 const CHAT_TAB_HEIGHT_PX: f32 = 20.0;
@@ -190,16 +194,16 @@ impl ChatKind {
         }
     }
 
-    pub fn available(dev_hud: bool) -> &'static [Self] {
-        if dev_hud {
+    pub fn available(debug_chat: bool) -> &'static [Self] {
+        if debug_chat {
             &Self::TAB_ORDER
         } else {
             &Self::TAB_ORDER[..2]
         }
     }
 
-    pub fn step(self, forward: bool, dev_hud: bool) -> Self {
-        let kinds = Self::available(dev_hud);
+    pub fn step(self, forward: bool, debug_chat: bool) -> Self {
+        let kinds = Self::available(debug_chat);
         let pos = kinds.iter().position(|&kind| kind == self).unwrap_or(0);
         let offset = if forward { 1 } else { kinds.len() - 1 };
         kinds[(pos + offset) % kinds.len()]
@@ -211,11 +215,11 @@ pub struct ChatPanel {
     pub kind: ChatKind,
 }
 
-pub fn advance_split_focus(active: &mut ChatKind, layout: ChatLayout, dev_hud: bool) -> bool {
+pub fn advance_split_focus(active: &mut ChatKind, layout: ChatLayout, debug_chat: bool) -> bool {
     if layout == ChatLayout::Tabbed {
         return false;
     }
-    let kinds = ChatKind::available(dev_hud);
+    let kinds = ChatKind::available(debug_chat);
     if let Some(next) = kinds
         .iter()
         .position(|kind| kind == active)
@@ -249,6 +253,7 @@ const YELL_TEXT_COLOR: Color = Color::srgb(1.00, 0.50, 0.50);
 pub fn spawn_chat_panels_as_children(p: &mut ChildSpawnerCommands) {
     p.spawn((
         ChatPanelGroup,
+        ChatArea::default(),
         Node {
             width: Val::Percent(100.0),
             flex_direction: FlexDirection::Column,
@@ -414,42 +419,21 @@ pub fn update_chat_panel(
     rows: Query<(&ChatRow, &Children), Without<ChatPanel>>,
     body_q: Query<Option<&Children>, With<ChatRowBody>>,
     mut span_q: Query<(&mut TextSpan, &mut TextColor), With<ChatRowSpan>>,
-    verbosity: Res<super::HudVerbosity>,
     graphics: Res<GraphicsSettings>,
-    ui_scale: Res<UiScale>,
-    windows: Query<&Window, With<bevy::window::PrimaryWindow>>,
+    area: Query<&ChatArea>,
 ) {
     let now = time.elapsed_secs();
-    let height_limit = windows
+    let height_limit = area
         .single()
-        .map(|window| {
-            let viewport = Vec2::new(window.width(), window.height()) / ui_scale.0;
-            let stacked = graphics.chat_layout != ChatLayout::Tabbed
-                && !horizontal_chat_layout(graphics.chat_layout, viewport.x);
-            let count = if stacked {
-                ChatKind::available(verbosity.dev_hud).len()
-            } else {
-                1
-            };
-            let reserved = super::BOTTOM_LEFT_INSET_PX
-                + CHAT_TAB_HEIGHT_PX
-                + CHAT_TOP_CLEARANCE_PX
-                + CHAT_WINDOW_GAP_PX * (count + 1) as f32;
-            ((viewport.y - reserved) / count as f32).max(0.0)
-        })
-        .unwrap_or(PANEL_EXPANDED_HEIGHT_PX);
+        .map(|area| area.panel_height)
+        .unwrap_or(PANEL_MAX_HEIGHT_PX);
 
-    // Row text derives entirely from chat content + scroll/mode/verbosity, so
-    // the per-row format/segment pass only runs when one of those changed
-    // (SceneState ticks only on real content changes since ingest_system clears
-    // `dirty` via bypass). Border + height decay stay per-frame: hover and
-    // idle-fade are per-frame inputs.
     let refill = state.is_changed()
         || mode.is_changed()
         || scroll.is_changed()
         || battle_scroll.is_changed()
         || debug_scroll.is_changed()
-        || verbosity.is_changed();
+        || graphics.is_changed();
 
     let all = if refill {
         rendered_chat(&state)
@@ -463,7 +447,7 @@ pub fn update_chat_panel(
                 .copied()
                 .filter(|l| {
                     panel.kind.accepts(l.channel)
-                        && crate::snapshot::chat_line_visible(l.channel, verbosity.dev_hud)
+                        && crate::snapshot::chat_line_visible(l.channel, graphics.debug_chat)
                 })
                 .collect()
         });
@@ -755,7 +739,7 @@ pub fn chat_wheel_scroll_system(
     mut battle_accum: ResMut<BattleScrollAccum>,
     mut debug_accum: ResMut<DebugScrollAccum>,
     mut pointer: ResMut<MousePointer>,
-    verbosity: Res<super::HudVerbosity>,
+    graphics: Res<GraphicsSettings>,
 ) {
     let mut delta: f32 = 0.0;
     for ev in wheel.read() {
@@ -781,7 +765,7 @@ pub fn chat_wheel_scroll_system(
         .iter()
         .filter(|l| {
             kind.accepts(l.channel)
-                && crate::snapshot::chat_line_visible(l.channel, verbosity.dev_hud)
+                && crate::snapshot::chat_line_visible(l.channel, graphics.debug_chat)
         })
         .count();
     match kind {
@@ -821,31 +805,148 @@ pub fn chat_tab_click_system(
 pub fn apply_chat_layout(
     graphics: Res<GraphicsSettings>,
     ui_scale: Res<UiScale>,
+    mode: Res<InputMode>,
     windows: Query<&Window, With<bevy::window::PrimaryWindow>>,
-    mut stack: Query<&mut Node, (With<super::BottomLeftStack>, Without<ChatPanelGroup>)>,
-    mut groups: Query<&mut Node, (With<ChatPanelGroup>, Without<super::BottomLeftStack>)>,
+    obstacles: Query<
+        (
+            &Node,
+            &ComputedNode,
+            &UiGlobalTransform,
+            Option<&InheritedVisibility>,
+        ),
+        Or<(
+            With<super::panel_column::ColumnPanel>,
+            With<super::menu::MainMenu>,
+        )>,
+    >,
+    tools: Query<&ComputedNode, With<super::ChatTools>>,
+    mut nodes: Query<
+        (&mut Node, Option<&mut ChatArea>, Has<ChatTabBar>),
+        (
+            Or<(
+                With<super::BottomLeftStack>,
+                With<ChatPanelGroup>,
+                With<ChatTabBar>,
+            )>,
+            Without<super::panel_column::ColumnPanel>,
+            Without<super::menu::MainMenu>,
+        ),
+    >,
 ) {
-    let width = windows
-        .single()
-        .map(|w| w.width() / ui_scale.0)
-        .unwrap_or(CHAT_SPLIT_MIN_WIDTH_PX);
-    let horizontal = horizontal_chat_layout(graphics.chat_layout, width);
-    let max_width = if horizontal {
-        CHAT_READABLE_WIDTH_PX * 2.0 + CHAT_WINDOW_GAP_PX
-    } else {
-        CHAT_READABLE_WIDTH_PX
+    let Ok(window) = windows.single() else {
+        return;
     };
-    for mut node in &mut stack {
-        node.width = Val::Percent(100.0);
-        node.max_width = Val::Px(max_width);
-    }
-    for mut node in &mut groups {
-        node.flex_direction = if horizontal {
-            FlexDirection::Row
+    let viewport = Vec2::new(window.width(), window.height()) / ui_scale.0;
+    let obstacles: Vec<Rect> = obstacles
+        .iter()
+        .filter_map(|(node, computed, transform, visibility)| {
+            if node.display == Display::None
+                || visibility.is_some_and(|v| !v.get())
+                || computed.size().min_element() <= 0.0
+            {
+                return None;
+            }
+            let scale = computed.inverse_scale_factor();
+            Some(Rect::from_center_size(
+                transform.translation * scale,
+                computed.size() * scale,
+            ))
+        })
+        .collect();
+    let tools_height = tools
+        .iter()
+        .map(|node| node.size().y * node.inverse_scale_factor())
+        .fold(0.0_f32, f32::max);
+    let tabbed = graphics.chat_layout == ChatLayout::Tabbed;
+    let window_count = ChatKind::available(graphics.debug_chat).len();
+    let expanded = matches!(&*mode, InputMode::PassiveCursor(state) if state.chat_expanded);
+    let preferred_height = if expanded {
+        PANEL_EXPANDED_HEIGHT_PX
+    } else {
+        PANEL_MAX_HEIGHT_PX
+    };
+    let mut horizontal = horizontal_chat_layout(graphics.chat_layout, viewport.x);
+    let layout_region = |horizontal: bool| {
+        let rows = if tabbed || horizontal {
+            1
         } else {
-            FlexDirection::Column
+            window_count
         };
+        let reserved = tools_height
+            + if tabbed {
+                CHAT_TAB_HEIGHT_PX + CHAT_WINDOW_GAP_PX
+            } else {
+                0.0
+            }
+            + CHAT_WINDOW_GAP_PX * rows as f32;
+        let wanted = preferred_height * rows as f32 + reserved;
+        let region = available_chat_region(viewport, wanted, reserved, &obstacles);
+        (
+            region,
+            ((region.height() - reserved) / rows as f32).max(0.0),
+        )
+    };
+    let (mut region, mut panel_height) = layout_region(horizontal);
+    if horizontal && !horizontal_chat_layout(graphics.chat_layout, region.width()) {
+        horizontal = false;
+        (region, panel_height) = layout_region(horizontal);
     }
+    for (mut node, area, tab_bar) in &mut nodes {
+        if let Some(mut area) = area {
+            area.horizontal = horizontal;
+            area.panel_height = panel_height;
+            node.flex_direction = if horizontal {
+                FlexDirection::Row
+            } else {
+                FlexDirection::Column
+            };
+        } else if tab_bar {
+            node.display = if tabbed { Display::Flex } else { Display::None };
+        } else {
+            node.width = Val::Px(region.width());
+            node.max_width = Val::Auto;
+        }
+    }
+}
+
+fn available_chat_region(
+    viewport: Vec2,
+    wanted_height: f32,
+    reserved: f32,
+    obstacles: &[Rect],
+) -> Rect {
+    let bottom = (viewport.y - super::BOTTOM_LEFT_INSET_PX).max(0.0);
+    let top = (bottom - wanted_height)
+        .max(CHAT_TOP_CLEARANCE_PX)
+        .min(bottom);
+    let widths = std::iter::once(viewport.x).chain(
+        obstacles
+            .iter()
+            .map(|rect| (rect.min.x - CHAT_WINDOW_GAP_PX).clamp(0.0, viewport.x)),
+    );
+    widths
+        .map(|width| {
+            let mut candidate_top = top;
+            for obstacle in obstacles {
+                if obstacle.min.x < width
+                    && obstacle.max.x > 0.0
+                    && obstacle.min.y < bottom
+                    && obstacle.max.y > candidate_top
+                {
+                    candidate_top = candidate_top
+                        .max(obstacle.max.y + CHAT_WINDOW_GAP_PX)
+                        .min(bottom);
+                }
+            }
+            Rect::from_corners(Vec2::new(0.0, candidate_top), Vec2::new(width, bottom))
+        })
+        .max_by(|a, b| {
+            let usable = |rect: &Rect| rect.width() * (rect.height() - reserved).max(0.0);
+            usable(a)
+                .total_cmp(&usable(b))
+                .then_with(|| a.width().total_cmp(&b.width()))
+        })
+        .unwrap_or_default()
 }
 
 fn horizontal_chat_layout(layout: ChatLayout, width: f32) -> bool {
@@ -869,11 +970,10 @@ pub fn chat_auto_switch_and_unread_system(
     mut active: ResMut<ActiveChatTab>,
     mut unread: ResMut<ChatUnread>,
     mut tracker: ResMut<ChatActivityTracker>,
-    verbosity: Res<super::HudVerbosity>,
     graphics: Res<GraphicsSettings>,
     mode: Res<InputMode>,
 ) {
-    if !ChatKind::available(verbosity.dev_hud).contains(&active.0) {
+    if !ChatKind::available(graphics.debug_chat).contains(&active.0) {
         active.0 = ChatKind::Social;
     }
     let all = rendered_chat(&state);
@@ -881,7 +981,7 @@ pub fn chat_auto_switch_and_unread_system(
         all.iter()
             .filter(|l| {
                 kind.accepts(l.channel)
-                    && crate::snapshot::chat_line_visible(l.channel, verbosity.dev_hud)
+                    && crate::snapshot::chat_line_visible(l.channel, graphics.debug_chat)
             })
             .count()
     };
@@ -894,7 +994,7 @@ pub fn chat_auto_switch_and_unread_system(
     for (kind, now_count, prev_count) in kinds {
         if now_count > prev_count
             && kind != active.0
-            && ChatKind::available(verbosity.dev_hud).contains(&kind)
+            && ChatKind::available(graphics.debug_chat).contains(&kind)
         {
             if !unread.get(kind) {
                 unread.set(kind, true);
@@ -913,7 +1013,7 @@ pub fn chat_auto_switch_and_unread_system(
         }
     }
 
-    for &kind in ChatKind::available(verbosity.dev_hud) {
+    for &kind in ChatKind::available(graphics.debug_chat) {
         if (graphics.chat_layout != ChatLayout::Tabbed || kind == active.0) && unread.get(kind) {
             unread.set(kind, false);
         }
@@ -925,7 +1025,6 @@ pub fn update_chat_tab_visuals_system(
     unread: Res<ChatUnread>,
     auto: Res<ChatAutoSwitch>,
     graphics: Res<GraphicsSettings>,
-    verbosity: Res<super::HudVerbosity>,
     mut panel_q: Query<(&ChatPanel, &mut Node), Without<ChatTabButton>>,
     mut tab_q: Query<
         (&ChatTabButton, &mut BorderColor, &mut Node, &Children),
@@ -953,7 +1052,7 @@ pub fn update_chat_tab_visuals_system(
     >,
 ) {
     for (panel, mut node) in &mut panel_q {
-        let want = if ChatKind::available(verbosity.dev_hud).contains(&panel.kind)
+        let want = if ChatKind::available(graphics.debug_chat).contains(&panel.kind)
             && (graphics.chat_layout != ChatLayout::Tabbed || panel.kind == active.0)
         {
             Display::Flex
@@ -967,7 +1066,7 @@ pub fn update_chat_tab_visuals_system(
 
     let unread_color = Color::srgb(1.00, 0.85, 0.20);
     for (button, mut border, mut node, children) in &mut tab_q {
-        node.display = if ChatKind::available(verbosity.dev_hud).contains(&button.kind) {
+        node.display = if ChatKind::available(graphics.debug_chat).contains(&button.kind) {
             Display::Flex
         } else {
             Display::None
@@ -1020,6 +1119,39 @@ mod tests {
     use super::*;
 
     use kuluu_snapshot::ChatSpan;
+
+    #[test]
+    fn chat_fills_the_viewport_until_a_visible_hud_obstructs_it() {
+        let viewport = Vec2::new(1920.0, 1080.0);
+        let clear = available_chat_region(viewport, 220.0, 0.0, &[]);
+        assert_eq!(clear.width(), viewport.x);
+        let party = Rect::from_corners(Vec2::new(1600.0, 800.0), Vec2::new(1912.0, 1072.0));
+        let region = available_chat_region(viewport, 220.0, 0.0, &[party]);
+        assert!(region.max.x < party.min.x);
+        assert_eq!(region.height(), clear.height());
+        assert_eq!(region.min.x, 0.0);
+    }
+
+    #[test]
+    fn menus_only_reserve_space_when_they_reach_the_chat_stack() {
+        let viewport = Vec2::new(1920.0, 1080.0);
+        let menu = Rect::from_corners(Vec2::new(1200.0, 48.0), Vec2::new(1912.0, 700.0));
+        let compact = available_chat_region(viewport, 220.0, 0.0, &[menu]);
+        assert_eq!(compact.width(), viewport.x);
+        let expanded = available_chat_region(viewport, 700.0, 100.0, &[menu]);
+        assert!(expanded.max.x <= menu.min.x || expanded.min.y >= menu.max.y);
+        assert!(expanded.height() > 100.0);
+    }
+
+    #[test]
+    fn toolbar_space_is_preserved_when_choosing_between_free_regions() {
+        let viewport = Vec2::new(800.0, 450.0);
+        let menu = Rect::from_corners(Vec2::new(500.0, 48.0), Vec2::new(792.0, 350.0));
+        let region = available_chat_region(viewport, 400.0, 180.0, &[menu]);
+        assert!(region.max.x < menu.min.x);
+        assert!(region.height() > 180.0);
+        assert!(region.min.y >= CHAT_TOP_CLEARANCE_PX);
+    }
 
     fn drop_line() -> ChatLine {
         // What kuluu's treasure handler emits for s2c 0x0D2, composed

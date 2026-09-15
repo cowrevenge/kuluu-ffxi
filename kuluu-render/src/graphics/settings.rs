@@ -280,6 +280,7 @@ pub enum GraphicsField {
     CameraSpring,
     MenuScale,
     ChatLayout,
+    DebugChat,
     Fullscreen,
     Windowed,
 
@@ -355,6 +356,7 @@ impl GraphicsField {
             GraphicsField::CameraSpring => "Camera Spring",
             GraphicsField::MenuScale => "Menu Scale",
             GraphicsField::ChatLayout => "Chat Layout",
+            GraphicsField::DebugChat => "Debug Chat",
             GraphicsField::Fullscreen => "Fullscreen",
             GraphicsField::Windowed => "Windowed",
             GraphicsField::DynamicLights => "Dynamic Lights",
@@ -547,6 +549,8 @@ pub struct GraphicsSettings {
     pub menu_scale: bool,
     #[serde(default)]
     pub chat_layout: ChatLayout,
+    #[serde(default)]
+    pub debug_chat: bool,
 
     #[serde(default)]
     pub dynamic_lights: DynamicLights,
@@ -804,6 +808,7 @@ impl GraphicsSettings {
                 camera_spring: false,
                 menu_scale: true,
                 chat_layout: ChatLayout::default(),
+                debug_chat: false,
                 dynamic_lights: DynamicLights::Off,
                 shadowed_lights: 0,
                 light_flicker: false,
@@ -849,6 +854,7 @@ impl GraphicsSettings {
                 camera_spring: false,
                 menu_scale: true,
                 chat_layout: ChatLayout::default(),
+                debug_chat: false,
                 dynamic_lights: DynamicLights::Vanilla,
                 shadowed_lights: DEFAULT_SHADOWED_LIGHTS,
                 light_flicker: DEFAULT_LIGHT_FLICKER,
@@ -894,6 +900,7 @@ impl GraphicsSettings {
                 camera_spring: false,
                 menu_scale: true,
                 chat_layout: ChatLayout::default(),
+                debug_chat: false,
                 dynamic_lights: DynamicLights::Vanilla,
                 shadowed_lights: DEFAULT_SHADOWED_LIGHTS,
                 light_flicker: DEFAULT_LIGHT_FLICKER,
@@ -939,6 +946,7 @@ impl GraphicsSettings {
                 camera_spring: false,
                 menu_scale: true,
                 chat_layout: ChatLayout::default(),
+                debug_chat: false,
                 dynamic_lights: DynamicLights::Vanilla,
                 shadowed_lights: DEFAULT_SHADOWED_LIGHTS,
                 light_flicker: DEFAULT_LIGHT_FLICKER,
@@ -988,6 +996,7 @@ impl GraphicsSettings {
                 camera_spring: false,
                 menu_scale: true,
                 chat_layout: ChatLayout::default(),
+                debug_chat: false,
                 dynamic_lights: DynamicLights::Vanilla,
                 shadowed_lights: DEFAULT_SHADOWED_LIGHTS,
                 light_flicker: DEFAULT_LIGHT_FLICKER,
@@ -1062,6 +1071,7 @@ impl GraphicsSettings {
                 (if self.camera_spring { "on" } else { "off" }).to_string()
             }
             GraphicsField::ChatLayout => self.chat_layout.label().to_string(),
+            GraphicsField::DebugChat => bool_label(self.debug_chat).into(),
             GraphicsField::MenuScale => (if self.menu_scale { "on" } else { "off" }).to_string(),
 
             GraphicsField::DynamicLights => {
@@ -1177,6 +1187,7 @@ impl GraphicsSettings {
                 let arrival = self.enhanced_actor_arrival;
                 let minimap_radar = self.minimap_radar;
                 let chat_layout = self.chat_layout;
+                let debug_chat = self.debug_chat;
                 let (ui_scale, menu_scale) = (self.ui_scale, self.menu_scale);
                 let vsync = self.vsync;
                 let fps_cap = self.fps_cap;
@@ -1209,6 +1220,7 @@ impl GraphicsSettings {
                 self.ui_scale = ui_scale;
                 self.menu_scale = menu_scale;
                 self.chat_layout = chat_layout;
+                self.debug_chat = debug_chat;
                 self.vsync = vsync;
                 self.fps_cap = fps_cap;
                 self.dlss_quality = dlss_quality;
@@ -1294,6 +1306,11 @@ impl GraphicsSettings {
             GraphicsField::CameraSpring => {
                 if delta != 0 {
                     self.camera_spring = !self.camera_spring;
+                }
+            }
+            GraphicsField::DebugChat => {
+                if delta != 0 {
+                    self.debug_chat = !self.debug_chat;
                 }
             }
             GraphicsField::ChatLayout => {
@@ -1460,6 +1477,7 @@ impl GraphicsSettings {
             self.ui_scale,
             self.menu_scale,
             self.chat_layout,
+            self.debug_chat,
         );
         *self = Self::for_preset(QualityPreset::Minimum);
         (
@@ -1467,6 +1485,7 @@ impl GraphicsSettings {
             self.ui_scale,
             self.menu_scale,
             self.chat_layout,
+            self.debug_chat,
         ) = config;
         self.dlss_supported = dlss_supported;
         self.dlss_menu_enabled = dlss_menu_enabled;
@@ -1667,6 +1686,7 @@ pub const CONFIG_FIELDS: &[GraphicsField] = &[
     GraphicsField::UiScale,
     GraphicsField::MenuScale,
     GraphicsField::ChatLayout,
+    GraphicsField::DebugChat,
 ];
 
 /// The DLSS Config surface, top to bottom: the live quality knob first, then
@@ -2539,6 +2559,7 @@ mod tests {
             camera_spring: false,
             menu_scale: true,
             chat_layout: ChatLayout::default(),
+            debug_chat: false,
             ..Default::default()
         };
         assert_eq!(s.value_label(GraphicsField::Preset), "Ultra");
@@ -2646,6 +2667,7 @@ mod tests {
             settings.ui_scale,
             settings.menu_scale,
             settings.chat_layout,
+            settings.debug_chat,
         );
         assert_eq!(settings.preset, QualityPreset::Low);
         settings.cycle(GraphicsField::Preset, 1);
@@ -2654,7 +2676,8 @@ mod tests {
                 settings.minimap_radar,
                 settings.ui_scale,
                 settings.menu_scale,
-                settings.chat_layout
+                settings.chat_layout,
+                settings.debug_chat
             ),
             preferences
         );
@@ -2665,7 +2688,8 @@ mod tests {
                 settings.minimap_radar,
                 settings.ui_scale,
                 settings.menu_scale,
-                settings.chat_layout
+                settings.chat_layout,
+                settings.debug_chat
             ),
             preferences
         );
@@ -2696,6 +2720,26 @@ mod tests {
                 .unwrap()
                 .chat_layout,
             ChatLayout::Tabbed
+        );
+    }
+
+    #[test]
+    fn debug_chat_is_opt_in_and_persists_independently() {
+        let mut settings = GraphicsSettings::default();
+        assert!(!settings.debug_chat);
+        settings.cycle(GraphicsField::DebugChat, 1);
+        assert!(settings.debug_chat);
+        let mut saved = serde_json::to_value(&settings).unwrap();
+        assert!(
+            serde_json::from_value::<GraphicsSettings>(saved.clone())
+                .unwrap()
+                .debug_chat
+        );
+        saved.as_object_mut().unwrap().remove("debug_chat");
+        assert!(
+            !serde_json::from_value::<GraphicsSettings>(saved)
+                .unwrap()
+                .debug_chat
         );
     }
 

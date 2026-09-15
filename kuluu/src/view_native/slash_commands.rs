@@ -936,9 +936,15 @@ const COMMANDS: &[(&str, &[Command])] = &[
                 handler: |c| parse_weather(c.rest),
             },
             Command {
+                aliases: &["debugchat"],
+                usage: "[on|off|toggle]",
+                summary: "show or hide the debug chat window",
+                handler: |c| parse_debugchat(c.rest),
+            },
+            Command {
                 aliases: &["devhud"],
                 usage: "[on|off|toggle]",
-                summary: "stage + diagnostics bars (top/bottom telemetry) + [dbg] chat lines. Per-panel overlays (perf, target cycle, mesh, netstat) live in the in-game Debug menu",
+                summary: "stage + diagnostics bars (top/bottom telemetry). Per-panel overlays (perf, target cycle, mesh, netstat) live in the in-game Debug menu",
                 handler: |c| parse_devhud(c.rest),
             },
             Command {
@@ -1079,6 +1085,8 @@ pub enum SlashOutcome {
     SetCameraCollisionSource(Option<kuluu_render::dat_mzb::CameraCollisionSource>),
 
     SetDevHud(Option<bool>),
+
+    SetDebugChat(Option<bool>),
 
     SetNetStatus(Option<bool>),
 
@@ -2704,6 +2712,21 @@ fn parse_devhud(rest: &str) -> SlashOutcome {
     SlashOutcome::SetDevHud(setting)
 }
 
+fn parse_debugchat(rest: &str) -> SlashOutcome {
+    let arg = rest.trim().to_ascii_lowercase();
+    let setting = match arg.as_str() {
+        "" | "toggle" => None,
+        "on" | "true" | "1" => Some(true),
+        "off" | "false" | "0" => Some(false),
+        other => {
+            return SlashOutcome::SystemMessage(format!(
+                "/debugchat: bad arg `{other}` (use on|off|toggle)"
+            ));
+        }
+    };
+    SlashOutcome::SetDebugChat(setting)
+}
+
 fn parse_noclip(rest: &str) -> SlashOutcome {
     let arg = rest.trim().to_ascii_lowercase();
     let setting = match arg.as_str() {
@@ -3320,6 +3343,31 @@ mod tests {
 
     fn empty_entities() -> Vec<WireEntity> {
         Vec::new()
+    }
+
+    #[test]
+    fn debug_chat_command_controls_its_own_visibility() {
+        for (command, expected) in [
+            ("/debugchat", None),
+            ("/debugchat toggle", None),
+            ("/debugchat on", Some(true)),
+            ("/debugchat off", Some(false)),
+        ] {
+            assert!(matches!(
+                parse_slash_t(command, &empty_entities(), origin(), None, None),
+                SlashOutcome::SetDebugChat(value) if value == expected
+            ));
+        }
+        assert!(matches!(
+            parse_slash_t(
+                "/debugchat invalid",
+                &empty_entities(),
+                origin(),
+                None,
+                None
+            ),
+            SlashOutcome::SystemMessage(_)
+        ));
     }
 
     fn origin() -> WireVec3 {

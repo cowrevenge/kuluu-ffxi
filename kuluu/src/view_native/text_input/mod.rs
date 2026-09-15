@@ -400,7 +400,7 @@ pub(crate) fn text_input_system(
                     scroll_rows,
                     &mut slash_writers.active_chat_tab,
                     slash_writers.graphics.chat_layout,
-                    slash_writers.hud_verbosity.dev_hud,
+                    slash_writers.graphics.debug_chat,
                     &scene_state,
                     &cmd_tx.0,
                 ) {
@@ -1986,7 +1986,7 @@ fn handle_passive_cursor_key(
     scroll_rows: &mut usize,
     active_chat_tab: &mut ActiveChatTab,
     layout: kuluu_render::graphics_settings::ChatLayout,
-    dev_hud: bool,
+    debug_chat: bool,
     scene_state: &SceneState,
     cmd_tx: &Sender<AgentCommand>,
 ) -> Option<InputMode> {
@@ -1999,7 +1999,7 @@ fn handle_passive_cursor_key(
             && kuluu_render::hud::chat_panel::advance_split_focus(
                 &mut active_chat_tab.0,
                 layout,
-                dev_hud,
+                debug_chat,
             )
         {
             state.chat_expanded = false;
@@ -2019,7 +2019,7 @@ fn handle_passive_cursor_key(
                 .iter()
                 .filter(|line| {
                     active_chat_tab.0.accepts(line.channel)
-                        && kuluu_render::snapshot::chat_line_visible(line.channel, dev_hud)
+                        && kuluu_render::snapshot::chat_line_visible(line.channel, debug_chat)
                 })
                 .count();
             if bindings.matches_logical(Action::NavUp, key) {
@@ -2043,11 +2043,11 @@ fn handle_passive_cursor_key(
             }
             // Left/Right cycle which chat tab the focused log shows.
             if bindings.matches_logical(Action::NavLeft, key) {
-                active_chat_tab.0 = active_chat_tab.0.step(false, dev_hud);
+                active_chat_tab.0 = active_chat_tab.0.step(false, debug_chat);
                 return None;
             }
             if bindings.matches_logical(Action::NavRight, key) {
-                active_chat_tab.0 = active_chat_tab.0.step(true, dev_hud);
+                active_chat_tab.0 = active_chat_tab.0.step(true, debug_chat);
                 return None;
             }
             // Confirm expands the log to full-screen; cancel contracts it,

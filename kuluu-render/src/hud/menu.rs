@@ -282,6 +282,7 @@ const CONFIG_ENTRIES: &[&str] = &[
     "UI Scale",
     "Menu Scale",
     "Chat Layout",
+    "Debug Chat",
     CONFIG_CONTROLS,
 ];
 

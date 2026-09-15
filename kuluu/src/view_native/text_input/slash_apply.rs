@@ -321,6 +321,14 @@ pub(super) fn apply_slash_outcome(
             draw_distance.camera_collision_source = next;
             push_system_chat_line(scene_state, format!("/zonegeom source: {}", next.label()));
         }
+        SlashOutcome::SetDebugChat(setting) => {
+            let next = setting.unwrap_or(!slash_writers.graphics.debug_chat);
+            slash_writers.graphics.debug_chat = next;
+            push_system_chat_line(
+                scene_state,
+                format!("/debugchat: {}", if next { "on" } else { "off" }),
+            );
+        }
         SlashOutcome::SetDevHud(setting) => {
             let next = setting.unwrap_or(!slash_writers.hud_verbosity.dev_hud);
             slash_writers.hud_verbosity.dev_hud = next;

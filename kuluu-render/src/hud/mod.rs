@@ -115,6 +115,9 @@ pub struct DevHud;
 #[derive(Component)]
 pub struct BottomLeftStack;
 
+#[derive(Component)]
+pub struct ChatTools;
+
 pub const BOTTOM_LEFT_INSET_PX: f32 = 54.0;
 
 pub fn spawn_bottom_left_stack(
@@ -145,12 +148,15 @@ pub fn spawn_bottom_left_stack(
             chat_panel::spawn_chat_panels_as_children(p);
             chat_panel::spawn_chat_tab_bar_as_child(p);
 
-            p.spawn(Node {
-                flex_direction: FlexDirection::Row,
-                align_items: AlignItems::FlexStart,
-                column_gap: Val::Px(4.0),
-                ..default()
-            })
+            p.spawn((
+                ChatTools,
+                Node {
+                    flex_direction: FlexDirection::Row,
+                    align_items: AlignItems::FlexStart,
+                    column_gap: Val::Px(4.0),
+                    ..default()
+                },
+            ))
             .with_children(|row| {
                 row.spawn(Node {
                     flex_direction: FlexDirection::Column,
@@ -445,7 +451,12 @@ impl Plugin for HudPlugin {
                 .before(chat_panel::update_chat_tab_visuals_system),
         );
         app.add_systems(Update, chat_panel::update_chat_tab_visuals_system);
-        app.add_systems(Update, chat_panel::apply_chat_layout);
+        app.add_systems(
+            Update,
+            chat_panel::apply_chat_layout
+                .after(panel_column::layout_panel_column_system)
+                .before(chat_panel::update_chat_panel),
+        );
 
         app.add_systems(Update, weather_icon::update_weather_icon);
         app.add_systems(Update, entity_hover_card::update_entity_hover_card_system);

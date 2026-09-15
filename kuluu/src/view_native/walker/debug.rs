@@ -39,8 +39,10 @@ pub struct FieldDebug {
     pub enabled: bool,
     /// Last two ticks' vertical decisions, oldest first (panel header).
     decisions: [Option<VerticalDecision>; 2],
-    /// Last two ticks' horizontal outcomes, oldest first (panel header +
-    /// the blocking-contact gizmo).
+    /// Last two detected horizontal outcomes, oldest first (panel header +
+    /// the blocking-contact gizmo). A no-input tick overwrites only while the
+    /// newest slot is not already NoInput: idle holds the last stop reason
+    /// instead of erasing it, and the ring never shows two no-inputs.
     outcomes: [Option<HorizontalOutcome>; 2],
     ring: [Option<(Option<f32>, Option<f32>, f32)>; RING_LEN], // (h0, target, y)
 
@@ -164,9 +166,17 @@ pub fn record_tick(
     let prev = dbg.decisions[1];
     dbg.decisions[0] = prev;
     dbg.decisions[1] = Some(res.decision);
-    let prev_out = dbg.outcomes[1];
-    dbg.outcomes[0] = prev_out;
-    dbg.outcomes[1] = Some(res.outcome);
+    // Idle ticks are the only ones that don't overwrite: once the newest
+    // slot is NoInput, further idle ticks hold the last two detected states
+    // in place (the panel's value is the last stop reason; idle ticks carry
+    // no new information).
+    let idle_repeat = matches!(res.outcome, HorizontalOutcome::NoInput)
+        && matches!(dbg.outcomes[1], Some(HorizontalOutcome::NoInput));
+    if !idle_repeat {
+        let prev_out = dbg.outcomes[1];
+        dbg.outcomes[0] = prev_out;
+        dbg.outcomes[1] = Some(res.outcome);
+    }
 }
 
 pub fn sync_field_debug_enabled(

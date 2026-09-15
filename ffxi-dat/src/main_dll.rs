@@ -59,6 +59,90 @@ pub const ACTION_ANIM_MOUNT_OFFSET: u16 = 0x05;
 /// carrying `fsh*`. Pinned by `kuluu-render/tests/fishing_pose_clips.rs`.
 pub const ACTION_ANIM_FISHING_OFFSET: u16 = 0x01;
 
+/// The slash-command table: one 24-byte row per name the client accepts on the
+/// input line. `char name[20]` (leading `/`, NUL-padded) then the command id and
+/// a flag word. The run ends at the first row with an empty name, past which
+/// sits a 12-byte `(handler, zero, command_id)` array — so the id, not the name,
+/// is what the client dispatches on, and every row sharing an id is an alias.
+///
+/// KNOWN_CLIENTS retail-2026-09 RVA 0x0035_5408, horizonxi-2023 RVA
+/// 0x0035_12b8; both in `.data`, whose raw bytes ship unpacked, so reading it
+/// needs no POL1 decode. Located by the row pattern rather than by an address:
+/// the table is a property of whichever client the user installed.
+const COMMAND_STRIDE: usize = 24;
+const COMMAND_NAME_LEN: usize = 20;
+const COMMAND_ID_OFFSET: usize = 0x14;
+const COMMAND_FLAGS_OFFSET: usize = 0x16;
+const COMMAND_PREFIX: u8 = b'/';
+/// Consecutive well-formed rows that identify the table. A shorter run risks a
+/// stretch of unrelated `.data` that happens to hold one slash-led string.
+const COMMAND_TABLE_MIN_RUN: usize = 8;
+
+/// One row of the client's slash-command table.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClientCommand {
+    /// The word after the slash; the row stores it with the leading `/`.
+    pub name: String,
+    pub id: u16,
+    /// Undecoded. Commands that behave alike share a value — every emote
+    /// carries one, every chat channel another — so it is carried for a later
+    /// caller rather than interpreted here.
+    pub flags: u16,
+}
+
+/// The client's slash-command table in row order.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CommandTable {
+    entries: Vec<ClientCommand>,
+}
+
+impl CommandTable {
+    pub fn entries(&self) -> &[ClientCommand] {
+        &self.entries
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// Case-insensitive, matching how the client accepts `/Say`.
+    pub fn id_for(&self, name: &str) -> Option<u16> {
+        self.entries
+            .iter()
+            .find(|c| c.name.eq_ignore_ascii_case(name))
+            .map(|c| c.id)
+    }
+
+    /// The long form of a command: its first row. `/attack` precedes `/a`,
+    /// `/shoot` precedes `/range` `/ra` `/throw`.
+    pub fn canonical(&self, id: u16) -> Option<&str> {
+        self.entries
+            .iter()
+            .find(|c| c.id == id)
+            .map(|c| c.name.as_str())
+    }
+
+    /// Every name the client accepts for one command, long form first.
+    pub fn names_for(&self, id: u16) -> impl Iterator<Item = &str> {
+        self.entries
+            .iter()
+            .filter(move |c| c.id == id)
+            .map(|c| c.name.as_str())
+    }
+
+    pub fn ids(&self) -> impl Iterator<Item = u16> + '_ {
+        let mut seen = std::collections::BTreeSet::new();
+        self.entries
+            .iter()
+            .filter(move |c| seen.insert(c.id))
+            .map(|c| c.id)
+    }
+}
+
 // research/xim ZoneMapTable.kt
 const ZONE_MAP_HINT: u64 = 0x6400_0001_0001_0100;
 const ZONE_MAP_STRIDE: usize = 0x0E;
@@ -116,6 +200,7 @@ pub struct MainDll {
     action_anim_base: Option<usize>,
     battle_anim_base: Option<usize>,
     equipment_base: Option<usize>,
+    command_table_base: Option<usize>,
 }
 
 impl MainDll {
@@ -140,6 +225,7 @@ impl MainDll {
         let action_anim_base = find_offset(&bytes, &window, ACTION_ANIM_HINT);
         let battle_anim_base = find_offset(&bytes, &window, BATTLE_ANIM_HINT);
         let equipment_base = find_offset(&bytes, &window, EQUIPMENT_HINT);
+        let command_table_base = find_command_table(&bytes, &window);
         Ok(Self {
             bytes,
             weapon_skill_base,
@@ -150,7 +236,24 @@ impl MainDll {
             action_anim_base,
             battle_anim_base,
             equipment_base,
+            command_table_base,
         })
+    }
+
+    /// Every slash command this client accepts. Empty when the table could not
+    /// be located, which leaves a caller to fall back on the long forms it
+    /// registers itself rather than losing the surface outright.
+    pub fn commands(&self) -> CommandTable {
+        let mut entries = Vec::new();
+        let mut off = match self.command_table_base {
+            Some(base) => base,
+            None => return CommandTable::default(),
+        };
+        while let Some(entry) = command_record(&self.bytes, off) {
+            entries.push(entry);
+            off += COMMAND_STRIDE;
+        }
+        CommandTable { entries }
     }
 
     pub fn zone_map(&self, zone_id: u16, sub_zone_id: u8) -> Option<ZoneMapRecord> {
@@ -322,6 +425,51 @@ fn find_offset_u64(bytes: &[u8], window: &Range<usize>, hint: u64) -> Option<usi
             u64::from_be_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]) == hint
         })
     })
+}
+
+/// One `COMMAND_STRIDE`-byte row. `None` for anything that is not a command —
+/// the empty name that ends the run, and any unrelated `.data` the locator
+/// stepped over.
+fn command_record(bytes: &[u8], off: usize) -> Option<ClientCommand> {
+    let rec = bytes.get(off..off + COMMAND_STRIDE)?;
+    let name = rec.get(..COMMAND_NAME_LEN)?;
+    if name[0] != COMMAND_PREFIX {
+        return None;
+    }
+    let len = name
+        .iter()
+        .position(|&b| b == 0)
+        .unwrap_or(COMMAND_NAME_LEN);
+    let word = name.get(1..len)?;
+    if word.is_empty() || !word.iter().all(u8::is_ascii_graphic) {
+        return None;
+    }
+    if name[len..].iter().any(|&b| b != 0) {
+        return None;
+    }
+    Some(ClientCommand {
+        name: std::str::from_utf8(word).ok()?.to_owned(),
+        id: u16::from_le_bytes([rec[COMMAND_ID_OFFSET], rec[COMMAND_ID_OFFSET + 1]]),
+        flags: u16::from_le_bytes([rec[COMMAND_FLAGS_OFFSET], rec[COMMAND_FLAGS_OFFSET + 1]]),
+    })
+}
+
+/// First row of the command table, found by the only thing that survives a
+/// client patch: a long run of rows in its shape. Rows are 4-byte aligned in
+/// both known builds, and a position off by less than a stride lands mid-name,
+/// where the leading-slash test fails.
+fn find_command_table(bytes: &[u8], window: &Range<usize>) -> Option<usize> {
+    let run = window.clone().step_by(SCAN_STRIDE).find(|&pos| {
+        (0..COMMAND_TABLE_MIN_RUN)
+            .all(|i| command_record(bytes, pos + i * COMMAND_STRIDE).is_some())
+    })?;
+    let mut base = run;
+    while base >= window.start + COMMAND_STRIDE
+        && command_record(bytes, base - COMMAND_STRIDE).is_some()
+    {
+        base -= COMMAND_STRIDE;
+    }
+    Some(base)
 }
 
 /// One `ZONE_MAP_STRIDE`-byte row. `None` when the divisor is 0, which is how
@@ -540,7 +688,130 @@ mod tests {
             action_anim_base: None,
             battle_anim_base: None,
             equipment_base: None,
+            command_table_base: None,
         }
+    }
+
+    /// A synthetic command table: `rows` laid out exactly as the client stores
+    /// them, then the empty-name row that ends the run.
+    fn command_bytes(rows: &[(&str, u16, u16)]) -> Vec<u8> {
+        let mut bytes = vec![0u8; (rows.len() + 1) * COMMAND_STRIDE];
+        for (i, &(name, id, flags)) in rows.iter().enumerate() {
+            let at = i * COMMAND_STRIDE;
+            let slashed = format!("/{name}");
+            bytes[at..at + slashed.len()].copy_from_slice(slashed.as_bytes());
+            bytes[at + COMMAND_ID_OFFSET..at + COMMAND_ID_OFFSET + 2]
+                .copy_from_slice(&id.to_le_bytes());
+            bytes[at + COMMAND_FLAGS_OFFSET..at + COMMAND_FLAGS_OFFSET + 2]
+                .copy_from_slice(&flags.to_le_bytes());
+        }
+        bytes
+    }
+
+    fn command_dll(rows: &[(&str, u16, u16)]) -> MainDll {
+        MainDll {
+            command_table_base: Some(0),
+            ..blank(command_bytes(rows))
+        }
+    }
+
+    #[test]
+    fn command_rows_parse_and_stop_at_the_empty_name() {
+        let dll = command_dll(&[("attack", 0x1d, 0x0141), ("a", 0x1d, 0x0141)]);
+        let table = dll.commands();
+        assert_eq!(table.len(), 2);
+        assert_eq!(table.id_for("attack"), Some(0x1d));
+        assert_eq!(
+            table.id_for("ATTACK"),
+            Some(0x1d),
+            "the client accepts /Say"
+        );
+        assert_eq!(table.id_for("nosuchcommand"), None);
+        assert_eq!(table.canonical(0x1d), Some("attack"));
+        assert_eq!(
+            table.names_for(0x1d).collect::<Vec<_>>(),
+            vec!["attack", "a"],
+            "long form first, aliases after"
+        );
+        assert_eq!(table.entries()[0].flags, 0x0141);
+    }
+
+    #[test]
+    fn command_table_is_empty_when_it_was_not_located() {
+        assert!(blank(vec![0u8; 0x40]).commands().is_empty());
+    }
+
+    #[test]
+    fn a_name_filling_the_field_with_no_terminator_still_parses() {
+        let full = "x".repeat(COMMAND_NAME_LEN - 1);
+        let dll = command_dll(&[(full.as_str(), 0x8a, 0x0141)]);
+        assert_eq!(dll.commands().id_for(&full), Some(0x8a));
+    }
+
+    #[test]
+    fn a_row_is_rejected_unless_it_has_the_shape_of_a_command() {
+        let good = command_bytes(&[("attack", 0x1d, 0x0141)]);
+        assert!(command_record(&good, 0).is_some());
+
+        let mut no_slash = good.clone();
+        no_slash[0] = b'x';
+        assert_eq!(command_record(&no_slash, 0), None);
+
+        let mut trailing_junk = good.clone();
+        trailing_junk[COMMAND_NAME_LEN - 1] = b'x';
+        assert_eq!(
+            command_record(&trailing_junk, 0),
+            None,
+            "the pad after the name is NUL, not arbitrary bytes"
+        );
+
+        let mut non_ascii = good.clone();
+        non_ascii[2] = 0x80;
+        assert_eq!(command_record(&non_ascii, 0), None);
+
+        let bare_slash = command_bytes(&[("", 0x1d, 0)]);
+        assert_eq!(
+            command_record(&bare_slash, 0),
+            None,
+            "a slash is not a name"
+        );
+    }
+
+    #[test]
+    fn the_table_is_located_by_its_run_of_rows_and_walked_back_to_the_first() {
+        let rows: Vec<(String, u16, u16)> = (0..COMMAND_TABLE_MIN_RUN + 4)
+            .map(|i| (format!("cmd{i}"), i as u16, 0u16))
+            .collect();
+        let borrowed: Vec<(&str, u16, u16)> =
+            rows.iter().map(|(n, i, f)| (n.as_str(), *i, *f)).collect();
+        let table = command_bytes(&borrowed);
+
+        let lead = 0x40usize;
+        let mut bytes = vec![0u8; lead + table.len()];
+        bytes[lead..lead + table.len()].copy_from_slice(&table);
+        let window = 0..bytes.len();
+
+        assert_eq!(
+            find_command_table(&bytes, &window),
+            Some(lead),
+            "the walk-back reaches the first row, not the run it matched at"
+        );
+        let dll = MainDll {
+            command_table_base: find_command_table(&bytes, &window),
+            ..blank(bytes)
+        };
+        assert_eq!(dll.commands().len(), borrowed.len());
+    }
+
+    #[test]
+    fn a_lone_slash_led_string_is_not_mistaken_for_the_table() {
+        let short = command_bytes(&[("attack", 0x1d, 0), ("a", 0x1d, 0)]);
+        let window = 0..short.len();
+        assert_eq!(
+            find_command_table(&short, &window),
+            None,
+            "two rows are not a table"
+        );
     }
 
     #[test]
@@ -809,6 +1080,75 @@ mod tests {
                 .map(|b| b + ACTION_ANIM_FISHING_OFFSET),
             Some(38604),
             "the fishing DAT the pose-clip test opens"
+        );
+    }
+
+    /// Row and id totals of the slash-command table, identical on KNOWN_CLIENTS
+    /// horizonxi-2023 and retail-2026-09: HorizonXI ships the table unpatched
+    /// and puts its own commands elsewhere (server commands on `!` in chat
+    /// text, client commands in Ashita addons that intercept the input line
+    /// before the client sees it).
+    const COMMAND_ROWS: usize = 277;
+    const COMMAND_IDS: usize = 209;
+
+    /// Gated on an install (self-skips).
+    #[test]
+    fn real_dll_command_table_matches_both_known_clients() {
+        let Some((_, dll)) = open_test_dll() else {
+            return;
+        };
+        let table = dll.commands();
+        assert_eq!(table.len(), COMMAND_ROWS);
+        assert_eq!(table.ids().count(), COMMAND_IDS);
+
+        let mut names: Vec<&str> = table.entries().iter().map(|c| c.name.as_str()).collect();
+        names.sort_unstable();
+        let unique = names.len();
+        names.dedup();
+        assert_eq!(names.len(), unique, "no name is listed twice");
+        assert!(
+            table.entries().iter().all(|c| c
+                .name
+                .bytes()
+                .all(|b| b.is_ascii_graphic() && !b.is_ascii_uppercase())),
+            "every stored name is lowercase ASCII, so a lowercasing parser loses nothing"
+        );
+    }
+
+    /// Gated on an install (self-skips). Alias groupings a name-keyed table
+    /// gets wrong: LSB's emote enum has no Nod/Farewell/Upset at all, and
+    /// FFXIclopedia lists /range and /throw as separate commands.
+    #[test]
+    fn real_dll_command_aliases_share_one_id() {
+        let Some((_, dll)) = open_test_dll() else {
+            return;
+        };
+        let table = dll.commands();
+        for group in [
+            &["attack", "a"][..],
+            &["shoot", "range", "ra", "throw"],
+            &["nod", "yes"],
+            &["goodbye", "farewell"],
+            &["disgusted", "upset"],
+            &["makelinkshell", "makelinkpearl", "makeli"],
+            &["supportdesk", "sd", "helpdesk"],
+        ] {
+            let canonical = group[0];
+            let id = table
+                .id_for(canonical)
+                .unwrap_or_else(|| panic!("/{canonical} is a command"));
+            assert_eq!(table.canonical(id), Some(canonical));
+            assert_eq!(table.names_for(id).collect::<Vec<_>>(), group);
+        }
+        assert_eq!(
+            table.id_for("ls"),
+            None,
+            "/l and /linkshell are the linkshell names; /ls is not one"
+        );
+        assert_ne!(
+            table.id_for("help"),
+            table.id_for("?"),
+            "/help and /? are separate commands with separate handlers"
         );
     }
 

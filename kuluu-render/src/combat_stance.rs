@@ -10,6 +10,7 @@ use crate::components::{IsSelf, WorldEntity};
 use crate::snapshot::SceneState;
 use kuluu_snapshot::EntityKind;
 
+#[cfg(not(target_arch = "wasm32"))]
 /// The race's battle-motion DAT (engaged idle, run, the per-weapon-type stance
 /// files that follow it): the FFXiMain.dll battle-animation table
 /// (`MainDll::base_battle_animation_index`), else the shipped fallback when the
@@ -20,6 +21,7 @@ pub fn motion_dat_for_race(dll: Option<&ffxi_dat::main_dll::MainDll>, race: u8) 
         .or_else(|| motion_dat_fallback(crate::dat_vos2::skeleton_file_id_fallback(race)?))
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 /// [`motion_dat_for_race`] keyed on the race's skeleton file id, which is what
 /// the animation caches below and the legacy VOS2 path carry instead of a race.
 /// The dll's race-config table inverts the id to its race; a non-PC id (an NPC
@@ -51,6 +53,7 @@ pub fn motion_dat_fallback(skel_file_id: u32) -> Option<u32> {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 static BATTLE_IDLE_ANIMS: OnceLock<Mutex<HashMap<u32, Option<Arc<Mo2Animation>>>>> =
     OnceLock::new();
 
@@ -59,13 +62,16 @@ static RUN_ANIMS: OnceLock<Mutex<HashMap<u32, Option<Arc<Mo2Animation>>>>> = Onc
 static SIT_ANIMS: OnceLock<Mutex<HashMap<u32, Option<Arc<Mo2Animation>>>>> = OnceLock::new();
 static HEAL_ANIMS: OnceLock<Mutex<HashMap<u32, Option<Arc<Mo2Animation>>>>> = OnceLock::new();
 
+#[cfg(not(target_arch = "wasm32"))]
 static COMBAT_RUN_ANIMS: OnceLock<Mutex<HashMap<u32, Option<Arc<Mo2Animation>>>>> = OnceLock::new();
 
 static DIRECTIONAL_ANIMS: OnceLock<Mutex<HashMap<(u32, [u8; 3]), Option<Arc<Mo2Animation>>>>> =
     OnceLock::new();
 
+#[cfg(not(target_arch = "wasm32"))]
 const BATTLE_IDLE_PREFIX: &[u8; 3] = b"btl";
 
+#[cfg(not(target_arch = "wasm32"))]
 pub fn battle_idle_anim_for_skel(skel_file_id: u32) -> Option<Arc<Mo2Animation>> {
     let motion_dat = motion_dat_for_skel(skel_file_id)?;
     let map = BATTLE_IDLE_ANIMS.get_or_init(|| Mutex::new(HashMap::new()));
@@ -78,6 +84,7 @@ pub fn battle_idle_anim_for_skel(skel_file_id: u32) -> Option<Arc<Mo2Animation>>
     loaded
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn load_battle_idle(motion_dat_id: u32) -> Option<Mo2Animation> {
     load_anim_with_prefix(motion_dat_id, BATTLE_IDLE_PREFIX)
 }
@@ -93,6 +100,7 @@ pub fn run_anim_for_skel(skel_file_id: u32) -> Option<Arc<Mo2Animation>> {
     loaded
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub fn combat_run_anim_for_skel(skel_file_id: u32) -> Option<Arc<Mo2Animation>> {
     let motion_dat = motion_dat_for_skel(skel_file_id)?;
     let map = COMBAT_RUN_ANIMS.get_or_init(|| Mutex::new(HashMap::new()));
@@ -1430,6 +1438,7 @@ impl ModelViewerClipOverride {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub fn enumerate_clips_for_skel(skel_file_id: u32) -> Vec<(String, Arc<Mo2Animation>)> {
     let mut out = Vec::new();
     let mut sources: Vec<u32> = vec![skel_file_id];
@@ -1448,6 +1457,7 @@ pub fn enumerate_clips_for_skel(skel_file_id: u32) -> Vec<(String, Arc<Mo2Animat
     out
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub fn override_anim_for_skel(skel_file_id: u32, prefix: &[u8; 3]) -> Option<Arc<Mo2Animation>> {
     if let Some(a) = load_anim_with_prefix(skel_file_id, prefix) {
         return Some(Arc::new(a));
@@ -1456,6 +1466,7 @@ pub fn override_anim_for_skel(skel_file_id: u32, prefix: &[u8; 3]) -> Option<Arc
     load_anim_with_prefix(motion, prefix).map(Arc::new)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn for_each_anim_chunk_in_dat(file_id: u32, mut f: impl FnMut(String, Mo2Animation)) {
     let Ok(root) = DatRoot::from_env_or_default() else {
         return;

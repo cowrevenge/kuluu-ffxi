@@ -15,9 +15,11 @@ const WORDMARK_COLOR: Color = Color::srgb(0.0, 1.0, 1.0);
 
 const WORDMARK: &str = "KULUU";
 
-/// Uploaded once at startup rather than per screen: the login screen rebuilds
-/// itself on every form change, and the launcher can be re-entered after
-/// logout, so neither an `OnEnter` upload nor a per-spawn decode fits.
+/// Uploaded once when the plugin is built rather than per screen: the login
+/// screen rebuilds itself on every form change, and the launcher can be
+/// re-entered after logout, so neither an `OnEnter` upload nor a per-spawn
+/// decode fits. A `PreStartup` system is too late - `bevy_state` runs the
+/// initial `StateTransition` there too, so `OnEnter(Login)` can beat it.
 #[derive(Resource)]
 pub(super) struct BrandMark(Option<Handle<Image>>);
 
@@ -32,17 +34,20 @@ fn decode_emblem() -> Result<Image, TextureError> {
     )
 }
 
-fn upload_brand_mark(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
-    let emblem = match decode_emblem() {
-        Ok(image) => Some(images.add(image)),
+fn upload_brand_mark(app: &mut App) -> BrandMark {
+    let Some(mut images) = app.world_mut().get_resource_mut::<Assets<Image>>() else {
+        tracing::warn!("no image assets yet; launcher emblem omitted");
+        return BrandMark(None);
+    };
+    match decode_emblem() {
+        Ok(image) => BrandMark(Some(images.add(image))),
         // The wordmark still renders; a corrupt embedded asset must not brick
         // the launcher.
         Err(e) => {
             tracing::warn!(error = %e, "launcher emblem failed to decode");
-            None
+            BrandMark(None)
         }
-    };
-    commands.insert_resource(BrandMark(emblem));
+    }
 }
 
 /// The emblem plus wordmark retail shows above its world-selection screen.
@@ -85,5 +90,6 @@ pub(super) fn spawn_brand_mark(parent: &mut ChildSpawnerCommands, mark: &BrandMa
 }
 
 pub(super) fn register(app: &mut App) {
-    app.add_systems(PreStartup, upload_brand_mark);
+    let mark = upload_brand_mark(app);
+    app.insert_resource(mark);
 }

@@ -158,6 +158,16 @@ pub struct KeyEventStreams<'w, 's> {
     pub pad: MessageReader<'w, 's, super::gamepad_input::PadKeyEvent>,
 }
 
+/// The navmesh overlay's visibility latch and cached mesh as one parameter:
+/// bevy_ecs's `impl_system_function` tops out at 16 parameters and
+/// `text_input_system` sits at that cap on unix (its `AgentPaused` parameter
+/// is unix-only), so the two overlay resources ride in together.
+#[derive(SystemParam)]
+pub struct NavmeshOverlay<'w> {
+    pub visible: ResMut<'w, super::navmesh_overlay::NavmeshOverlayVisible>,
+    pub state: Res<'w, super::navmesh_overlay::NavmeshState>,
+}
+
 #[derive(SystemParam)]
 pub struct MenuConfirmWriters<'w> {
     pub graphics: ResMut<'w, kuluu_render::GraphicsSettings>,
@@ -189,8 +199,7 @@ pub(crate) fn text_input_system(
     mut target: ResMut<Target>,
     mut scene_state: ResMut<SceneState>,
     mut exit: MessageWriter<AppExit>,
-    mut navmesh_visible: ResMut<super::navmesh_overlay::NavmeshOverlayVisible>,
-    navmesh_state: Res<super::navmesh_overlay::NavmeshState>,
+    mut navmesh: NavmeshOverlay,
 
     #[cfg(unix)] agent_paused: Option<Res<super::AgentPaused>>,
     session_event_tx: Option<Res<super::SessionEventTx>>,
@@ -348,8 +357,8 @@ pub(crate) fn text_input_system(
                     &cmd_tx.0,
                     &mut scene_state,
                     &mut exit,
-                    &mut navmesh_visible,
-                    &navmesh_state,
+                    &mut navmesh.visible,
+                    &navmesh.state,
                     &mut bindings,
                     &mut keybinds_state,
                     #[cfg(unix)]

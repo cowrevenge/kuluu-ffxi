@@ -50,6 +50,9 @@ native-window = [
     "dep:rfd",
     "dep:kuluu-render",
     "dep:kuluu-snapshot",
+    "dep:objc2",
+    "dep:objc2-app-kit",
+    "dep:objc2-foundation",
 ]
 # Enhanced (non-retail) features are OPT-IN, never part of a default build:
 # vanilla parity is the project default (AGENTS.md). The `?` keeps these from
@@ -186,6 +189,25 @@ rfd = { version = "0.15", optional = true, default-features = false, features = 
 
 kuluu-snapshot = { path = "../kuluu-snapshot", optional = true }
 kuluu-render = { path = "../kuluu-render", optional = true }
+
+# macOS dock icon. winit's `set_window_icon` is documented as Windows/X11-only,
+# and an unbundled `cargo run` binary has no Info.plist CFBundleIconFile, so the
+# icon has to be pushed to the running NSApplication. Versions match the objc2
+# tree arboard/rfd already link.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = { version = "0.6", optional = true, default-features = false, features = [
+    "std",
+] }
+objc2-app-kit = { version = "0.3", optional = true, default-features = false, features = [
+    "std",
+    "NSApplication",
+    "NSImage",
+    "NSResponder",
+] }
+objc2-foundation = { version = "0.3", optional = true, default-features = false, features = [
+    "std",
+    "NSData",
+] }
 
 [dev-dependencies]
 tempfile = "3"

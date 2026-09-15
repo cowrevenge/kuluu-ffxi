@@ -39,8 +39,35 @@ fn set_window_icons(
                 window.set_window_icon(Some(icon.clone()));
             }
         });
+        set_dock_icon();
     }
 }
+
+// `Window::set_window_icon` is a documented no-op on macOS, and an unbundled
+// `cargo run` binary has no CFBundleIconFile, so the dock icon comes from
+// NSApplication at runtime.
+#[cfg(target_os = "macos")]
+fn set_dock_icon() {
+    use objc2::AnyThread;
+    use objc2_app_kit::{NSApplication, NSImage};
+    use objc2_foundation::{MainThreadMarker, NSData};
+
+    let Some(marker) = MainThreadMarker::new() else {
+        return;
+    };
+    let data = NSData::with_bytes(ICON_PNG);
+    let Some(image) = NSImage::initWithData(NSImage::alloc(), &data) else {
+        return;
+    };
+    // SAFETY: called on the main thread (proved by MainThreadMarker) with an
+    // NSImage we own; the setter retains it.
+    unsafe {
+        NSApplication::sharedApplication(marker).setApplicationIconImage(Some(&image));
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn set_dock_icon() {}
 
 #[cfg(test)]
 mod tests {

@@ -969,7 +969,7 @@ mod tests {
         };
         let s = step(&buried, INVISIBLE_STATUS, 2);
         assert_eq!(s.triggered, None);
-        assert_eq!(s.pose.slot_held, true, "the buried dig keeps its slot");
+        assert!(s.pose.slot_held, "the buried dig keeps its slot");
     }
 
     #[test]

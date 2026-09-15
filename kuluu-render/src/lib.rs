@@ -108,9 +108,9 @@ pub use cursor::{system_cursor_icon, CursorPlugin, CursorRequests, CursorStyle};
 pub use cutscene::{CutsceneMode, CutscenePlugin, ScreenFade};
 pub use entity_table::{EntityRecord, EntityTable};
 pub use graphics_settings::{
-    AaMode, CharacterRenderPath, DlssQuality, DynamicLights, GraphicsField, GraphicsSettings,
-    MinimapRadar, QualityPreset, TextureFiltering, ZoneLineDisplay, CONFIG_FIELDS,
-    DLSS_CONFIG_FIELDS, GRAPHICS_FIELDS,
+    config_fields, dlss_config_fields, graphics_fields, AaMode, CharacterRenderPath, DlssQuality,
+    DynamicLights, GraphicsField, GraphicsSettings, MinimapRadar, ParityValue, QualityPreset,
+    TextureFiltering, ZoneLineDisplay,
 };
 pub use hud::{add_hud_spawners, HudPlugin};
 pub use input_mode::{

@@ -17,6 +17,92 @@ use bevy::post_process::dof::{DepthOfField, DepthOfFieldMode};
 use crate::camera::OperatorCamera;
 use crate::sun_moon::{IsMoon, IsSun};
 
+/// The word every surface uses for "matches the original client". Menus, the
+/// launcher and slash-command replies import these instead of retyping them
+/// (pinned by ui_never_says_retail).
+pub const VANILLA: &str = "Vanilla";
+pub const ENHANCED: &str = "Enhanced";
+pub const REDUCED: &str = "Reduced";
+
+/// How one *value* of a setting relates to the original client. This is an
+/// attribute of each choice, not of the row: a row may offer several Vanilla
+/// choices (where the original client exposed the knob too) and several
+/// Enhanced ones (every anisotropic tier).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Parity {
+    /// Matches the original client.
+    Vanilla,
+    /// Goes beyond the original client.
+    Enhanced,
+    /// Drops below the original client to buy performance.
+    Reduced,
+    /// Host/platform knob the original client had no say over (window mode,
+    /// VSync, frame cap, UI scale). No parity claim either way.
+    #[default]
+    Neutral,
+}
+
+impl Parity {
+    pub const fn tag(self) -> Option<&'static str> {
+        match self {
+            Parity::Vanilla => Some(VANILLA),
+            Parity::Enhanced => Some(ENHANCED),
+            Parity::Reduced => Some(REDUCED),
+            Parity::Neutral => None,
+        }
+    }
+
+    /// `Enhanced` rows sort into their own menu group; everything else stays
+    /// in the parity-faithful body of the page.
+    pub const fn is_enhanced(self) -> bool {
+        matches!(self, Parity::Enhanced)
+    }
+}
+
+/// Which side of a two-state row matches the original client. `Off` being the
+/// faithful choice is as ordinary as `On` being it: the original client
+/// anti-aliases nothing and draws no zone shadow map, so those rows are
+/// `VanillaOff` and read "Off (Vanilla)" / "On (Enhanced)". Rows the original
+/// client always did (its per-model shadow decal) are `VanillaOn`, where
+/// turning them off reads "Off (Reduced)".
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum BoolParity {
+    VanillaOn,
+    VanillaOff,
+    #[default]
+    Neutral,
+}
+
+impl BoolParity {
+    pub const fn of(self, on: bool) -> Parity {
+        match (self, on) {
+            (BoolParity::VanillaOn, true) | (BoolParity::VanillaOff, false) => Parity::Vanilla,
+            (BoolParity::VanillaOn, false) => Parity::Reduced,
+            (BoolParity::VanillaOff, true) => Parity::Enhanced,
+            (BoolParity::Neutral, _) => Parity::Neutral,
+        }
+    }
+}
+
+/// The one place a value string and its parity are joined, so no call site
+/// spells its own "(Enhanced)" suffix.
+pub fn parity_label(name: &str, parity: Parity) -> String {
+    match parity.tag() {
+        Some(tag) => format!("{name} ({tag})"),
+        None => name.to_string(),
+    }
+}
+
+/// A menu value that carries a parity claim. Implemented by every settings
+/// enum so `value_label` can render them all through one path.
+pub trait ParityValue: Copy {
+    fn name(self) -> &'static str;
+    fn parity(self) -> Parity;
+    fn label(self) -> String {
+        parity_label(self.name(), self.parity())
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ChatLayout {
     #[default]
@@ -33,13 +119,24 @@ impl ChatLayout {
         Self::Vertical,
         Self::SideBySide,
     ];
+}
 
-    pub const fn label(self) -> &'static str {
+impl ParityValue for ChatLayout {
+    fn name(self) -> &'static str {
         match self {
             Self::Unified => "Unified",
             Self::Tabbed => "Tabbed",
             Self::Vertical => "Vertical",
             Self::SideBySide => "Side by side",
+        }
+    }
+
+    /// One unified log is the original client's layout (kuluu-gpbu); the split
+    /// and tabbed arrangements are this client's own.
+    fn parity(self) -> Parity {
+        match self {
+            Self::Unified => Parity::Vanilla,
+            Self::Tabbed | Self::Vertical | Self::SideBySide => Parity::Enhanced,
         }
     }
 }
@@ -52,20 +149,28 @@ pub enum QualityPreset {
     Medium,
     High,
     Ultra,
+    Maximum,
 
     Custom,
 }
 
-impl QualityPreset {
-    pub const fn label(self) -> &'static str {
+impl ParityValue for QualityPreset {
+    fn name(self) -> &'static str {
         match self {
             QualityPreset::Minimum => "Minimum",
             QualityPreset::Low => "Low",
             QualityPreset::Medium => "Medium",
             QualityPreset::High => "High",
             QualityPreset::Ultra => "Ultra",
+            QualityPreset::Maximum => "Maximum",
             QualityPreset::Custom => "Custom",
         }
+    }
+
+    /// A tier bundles levers that individually carry parity; the tier name
+    /// itself claims nothing.
+    fn parity(self) -> Parity {
+        Parity::Neutral
     }
 }
 
@@ -87,8 +192,8 @@ pub enum AaMode {
     Dlss,
 }
 
-impl AaMode {
-    pub const fn label(self) -> &'static str {
+impl ParityValue for AaMode {
+    fn name(self) -> &'static str {
         match self {
             AaMode::Off => "Off",
             AaMode::Msaa2 => "MSAA 2x",
@@ -96,6 +201,17 @@ impl AaMode {
             AaMode::Msaa8 => "MSAA 8x",
             AaMode::Taa => "TAA",
             AaMode::Dlss => "DLSS",
+        }
+    }
+
+    /// The original client anti-aliases nothing, so `Off` is the faithful
+    /// choice and every mode above it is this client's addition.
+    fn parity(self) -> Parity {
+        match self {
+            AaMode::Off => Parity::Vanilla,
+            AaMode::Msaa2 | AaMode::Msaa4 | AaMode::Msaa8 | AaMode::Taa | AaMode::Dlss => {
+                Parity::Enhanced
+            }
         }
     }
 }
@@ -118,8 +234,8 @@ pub enum DlssQuality {
     UltraPerformance,
 }
 
-impl DlssQuality {
-    pub const fn label(self) -> &'static str {
+impl ParityValue for DlssQuality {
+    fn name(self) -> &'static str {
         match self {
             DlssQuality::Auto => "Auto",
             DlssQuality::Dlaa => "DLAA",
@@ -128,6 +244,11 @@ impl DlssQuality {
             DlssQuality::Performance => "Performance",
             DlssQuality::UltraPerformance => "Ultra Perf",
         }
+    }
+
+    /// The row already sits in the Enhanced group, so its tiers stay unsuffixed.
+    fn parity(self) -> Parity {
+        Parity::Neutral
     }
 }
 
@@ -143,18 +264,28 @@ pub enum ZoneLineDisplay {
     Gate,
 }
 
-impl ZoneLineDisplay {
-    pub const fn label(self) -> &'static str {
+impl ParityValue for ZoneLineDisplay {
+    fn name(self) -> &'static str {
         match self {
             ZoneLineDisplay::Off => "Off",
             ZoneLineDisplay::Pillar => "Pillar",
             ZoneLineDisplay::Gate => "Gate",
         }
     }
+
+    fn parity(self) -> Parity {
+        match self {
+            ZoneLineDisplay::Off => Parity::Vanilla,
+            ZoneLineDisplay::Pillar | ZoneLineDisplay::Gate => Parity::Enhanced,
+        }
+    }
 }
 
-/// `Vanilla` renders only the faithful DAT Generator lights; `Enhanced` adds
-/// the heuristic over-bright-vertex emitters on top; `Off` disables both.
+/// The zone's DAT Generator point lights (braziers, lamps, lanterns). All
+/// three states drive the same light set: `Off` feeds the shaders none,
+/// `Vanilla` feeds them to the FFXI zone/actor materials only, and `Enhanced`
+/// additionally makes them real Bevy `PointLight`s so they cast cube shadow
+/// maps and flicker (`zone_point_lights.rs`).
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum DynamicLights {
     Off,
@@ -164,15 +295,25 @@ pub enum DynamicLights {
     Enhanced,
 }
 
-impl DynamicLights {
-    pub const fn label(self) -> &'static str {
+impl ParityValue for DynamicLights {
+    fn name(self) -> &'static str {
         match self {
             DynamicLights::Off => "Off",
-            DynamicLights::Vanilla => "Vanilla",
-            DynamicLights::Enhanced => "Enhanced",
+            DynamicLights::Vanilla => "Lamps",
+            DynamicLights::Enhanced => "Lamps + Shadows",
         }
     }
 
+    fn parity(self) -> Parity {
+        match self {
+            DynamicLights::Off => Parity::Reduced,
+            DynamicLights::Vanilla => Parity::Vanilla,
+            DynamicLights::Enhanced => Parity::Enhanced,
+        }
+    }
+}
+
+impl DynamicLights {
     pub const fn faithful_enabled(self) -> bool {
         !matches!(self, DynamicLights::Off)
     }
@@ -191,14 +332,23 @@ pub enum MinimapRadar {
     Enhanced,
 }
 
-impl MinimapRadar {
-    pub const fn label(self) -> &'static str {
+impl ParityValue for MinimapRadar {
+    fn name(self) -> &'static str {
         match self {
             MinimapRadar::Vanilla => "Compass",
             MinimapRadar::Enhanced => "Terrain Map",
         }
     }
 
+    fn parity(self) -> Parity {
+        match self {
+            MinimapRadar::Vanilla => Parity::Vanilla,
+            MinimapRadar::Enhanced => Parity::Enhanced,
+        }
+    }
+}
+
+impl MinimapRadar {
     pub const fn panel_visible(self) -> bool {
         matches!(self, MinimapRadar::Enhanced)
     }
@@ -216,19 +366,25 @@ pub enum CharacterRenderPath {
     FfxiFaithful,
 }
 
-impl CharacterRenderPath {
-    pub const fn label(self) -> &'static str {
+impl ParityValue for CharacterRenderPath {
+    fn name(self) -> &'static str {
         match self {
             CharacterRenderPath::BevyStandard => "Bevy",
             CharacterRenderPath::FfxiFaithful => "FFXI",
         }
     }
+
+    fn parity(self) -> Parity {
+        match self {
+            CharacterRenderPath::BevyStandard => Parity::Enhanced,
+            CharacterRenderPath::FfxiFaithful => Parity::Vanilla,
+        }
+    }
 }
 
 /// Texture magnification/minification filtering for zone & model textures.
-/// `Vanilla` is the retail-faithful look (bilinear + mipmaps, no anisotropy);
-/// the `Aniso*` levels add anisotropic filtering, an enhancement gated behind
-/// the quality preset.
+/// `Vanilla` is bilinear with no mip chain and no anisotropy; each `Aniso*`
+/// level adds both mips and anisotropic filtering (see `mipmaps`).
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum TextureFiltering {
     #[default]
@@ -239,10 +395,10 @@ pub enum TextureFiltering {
     Aniso16x,
 }
 
-impl TextureFiltering {
-    pub const fn label(self) -> &'static str {
+impl ParityValue for TextureFiltering {
+    fn name(self) -> &'static str {
         match self {
-            TextureFiltering::Vanilla => "Vanilla",
+            TextureFiltering::Vanilla => "Bilinear",
             TextureFiltering::Aniso2x => "Aniso 2x",
             TextureFiltering::Aniso4x => "Aniso 4x",
             TextureFiltering::Aniso8x => "Aniso 8x",
@@ -250,6 +406,18 @@ impl TextureFiltering {
         }
     }
 
+    fn parity(self) -> Parity {
+        match self {
+            TextureFiltering::Vanilla => Parity::Vanilla,
+            TextureFiltering::Aniso2x
+            | TextureFiltering::Aniso4x
+            | TextureFiltering::Aniso8x
+            | TextureFiltering::Aniso16x => Parity::Enhanced,
+        }
+    }
+}
+
+impl TextureFiltering {
     /// Sampler `anisotropy_clamp` (1 disables anisotropic filtering).
     pub const fn anisotropy(self) -> u16 {
         match self {
@@ -285,7 +453,6 @@ pub enum GraphicsField {
     Fov,
     UiScale,
     CameraSpring,
-    MenuScale,
     ChatLayout,
     DebugChat,
     Fullscreen,
@@ -319,14 +486,6 @@ pub enum GraphicsField {
     // --- DLSS Config submenu rows (DLSS_CONFIG_FIELDS, not GRAPHICS_FIELDS) ---
     /// SR performance/quality tier — the one live knob.
     DlssQuality,
-    /// Ray Reconstruction preset. Inert placeholder: bevy_anti_alias 0.19
-    /// exposes SR only, no RR plumbing. Always "N/A".
-    DlssRrPreset,
-    /// Super Resolution model preset (RenoDX-style J/K/L/M). Inert:
-    /// dlss_wgpu 4.0 doesn't surface preset selection. Always "N/A".
-    DlssSrPreset,
-    /// RR responsivity bias. Inert (RR itself unavailable). Always "N/A".
-    DlssRrResponsivity,
     /// DLSS 5 Neural Uplift (NR) master toggle. Live on dlss builds with an
     /// RTX GPU + `nvngx_dlssnr.dll` staged next to the exe; N/A otherwise.
     /// Drives the NR pipeline in `graphics/dlss_nr.rs`.
@@ -338,9 +497,6 @@ pub enum GraphicsField {
     DlssNrLocalTone,
     /// NR local structure (edge) strength. Live while supported.
     DlssNrStructure,
-    /// Post-upscale sharpening. Wireable later via bevy's
-    /// ContrastAdaptiveSharpening; shipped inert for now. Always "N/A".
-    DlssSharpness,
 }
 
 impl GraphicsField {
@@ -361,7 +517,6 @@ impl GraphicsField {
             GraphicsField::Fov => "FOV",
             GraphicsField::UiScale => "UI Scale",
             GraphicsField::CameraSpring => "Camera Spring",
-            GraphicsField::MenuScale => "Menu Scale",
             GraphicsField::ChatLayout => "Chat Layout",
             GraphicsField::DebugChat => "Debug Chat",
             GraphicsField::Fullscreen => "Fullscreen",
@@ -382,14 +537,10 @@ impl GraphicsField {
             GraphicsField::RenderScale => "Render Scale",
             GraphicsField::Dlss => "DLSS",
             GraphicsField::DlssQuality => "DLSS Quality",
-            GraphicsField::DlssRrPreset => "RR Preset",
-            GraphicsField::DlssSrPreset => "SR Preset",
-            GraphicsField::DlssRrResponsivity => "RR Responsivity",
             GraphicsField::DlssNeuralUplift => "Neural Uplift",
             GraphicsField::DlssNrIntensity => "NR Intensity",
             GraphicsField::DlssNrLocalTone => "Local Tone Strength",
             GraphicsField::DlssNrStructure => "Structure Strength",
-            GraphicsField::DlssSharpness => "Sharpness",
         }
     }
 
@@ -399,29 +550,32 @@ impl GraphicsField {
         matches!(
             self,
             GraphicsField::DlssQuality
-                | GraphicsField::DlssRrPreset
-                | GraphicsField::DlssSrPreset
-                | GraphicsField::DlssRrResponsivity
                 | GraphicsField::DlssNeuralUplift
                 | GraphicsField::DlssNrIntensity
                 | GraphicsField::DlssNrLocalTone
                 | GraphicsField::DlssNrStructure
-                | GraphicsField::DlssSharpness
         )
     }
 
-    /// The inert RenoDX-parity placeholders: visible so the config surface
-    /// shows what's planned, but nothing behind them until the SDK plumbing
-    /// (RR / presets / CAS) exists. value_label = "N/A", cycle = no-op, on
-    /// every build. Neural Uplift left this set when kuluu-dlss-nr landed.
-    pub const fn is_dlss_placeholder(self) -> bool {
-        matches!(
-            self,
-            GraphicsField::DlssRrPreset
-                | GraphicsField::DlssSrPreset
-                | GraphicsField::DlssRrResponsivity
-                | GraphicsField::DlssSharpness
-        )
+    /// Which way round a two-state row's parity runs. Rows that aren't
+    /// on/off, and host knobs the original client had no say over, are
+    /// `Neutral` and render an untagged value.
+    pub const fn bool_parity(self) -> BoolParity {
+        match self {
+            // research/XIClient/src/XIClient/include/World/Model/ModelInstance.h
+            // ModelInstance::shadowRenderer: the original client draws a
+            // per-model shadow decal, so shadowed models are faithful here.
+            GraphicsField::CharacterShadowReceive | GraphicsField::CharacterShadowCast => {
+                BoolParity::VanillaOn
+            }
+            GraphicsField::VolumetricFog
+            | GraphicsField::ZoneShadowCast
+            | GraphicsField::DepthOfField
+            | GraphicsField::CameraSpring
+            | GraphicsField::DebugChat
+            | GraphicsField::LightFlicker => BoolParity::VanillaOff,
+            _ => BoolParity::Neutral,
+        }
     }
 
     /// Fine-tuning knobs hidden behind the "Advanced" disclosure: the
@@ -439,9 +593,6 @@ impl GraphicsField {
 
 fn default_ui_scale() -> f32 {
     1.0
-}
-fn default_menu_scale_on() -> bool {
-    true
 }
 /// The RenoDX addon's NR Intensity default: 1.0 is the parser default and can
 /// read as "no visible effect", so kuluu starts one notch above it.
@@ -548,12 +699,6 @@ pub struct GraphicsSettings {
     /// the Debug menu; persisted here so the choice sticks.
     #[serde(default)]
     pub camera_spring: bool,
-    /// Menu-only UI scale multiplier. Applied on top of the resolution-relative
-    /// base and the global UI Scale, so "Menu Scale off" holds menu panels at
-    /// the 1080p baseline while HUD widgets still track the window. Toggled in
-    /// the Graphics menu; persisted here.
-    #[serde(default = "default_menu_scale_on")]
-    pub menu_scale: bool,
     #[serde(default)]
     pub chat_layout: ChatLayout,
     #[serde(default)]
@@ -659,6 +804,10 @@ pub const RETAIL_DEFAULT_FOCAL_LENGTH: f32 = 350.0;
 // pinned by the default_fov_derives_from_retail_focal_length guard test.
 pub const DEFAULT_FOV_DEG: f32 = 57.495_83;
 
+// The FOV row steps in whole degrees, so anything inside half a step of the
+// derived default is the default.
+const FOV_PARITY_EPSILON_DEG: f32 = 0.5;
+
 pub fn retail_default_fov_deg() -> f32 {
     (2.0 * (RETAIL_PROJECTION_HALF_HEIGHT / RETAIL_DEFAULT_FOCAL_LENGTH).atan()).to_degrees()
 }
@@ -742,6 +891,7 @@ const PRESET_CYCLE: &[QualityPreset] = &[
     QualityPreset::Medium,
     QualityPreset::High,
     QualityPreset::Ultra,
+    QualityPreset::Maximum,
 ];
 
 const TEXTURE_FILTERING_CYCLE: &[TextureFiltering] = &[
@@ -813,7 +963,6 @@ impl GraphicsSettings {
                 fov_deg: DEFAULT_FOV_DEG,
                 ui_scale: 1.0,
                 camera_spring: false,
-                menu_scale: true,
                 chat_layout: ChatLayout::default(),
                 debug_chat: false,
                 dynamic_lights: DynamicLights::Off,
@@ -859,7 +1008,6 @@ impl GraphicsSettings {
                 fov_deg: DEFAULT_FOV_DEG,
                 ui_scale: 1.0,
                 camera_spring: false,
-                menu_scale: true,
                 chat_layout: ChatLayout::default(),
                 debug_chat: false,
                 dynamic_lights: DynamicLights::Vanilla,
@@ -895,17 +1043,16 @@ impl GraphicsSettings {
                 dlss_menu_enabled: false,
                 job_display: false,
                 mob_hp_under: false,
-                texture_filtering: TextureFiltering::Vanilla,
-                bloom_intensity: 0.08,
+                texture_filtering: TextureFiltering::Aniso2x,
+                bloom_intensity: 0.04,
                 volumetric_fog: false,
                 fog_step_count: 64,
-                view_distance: 1100.0,
+                view_distance: 700.0,
                 vsync: true,
                 fps_cap: 0,
                 fov_deg: DEFAULT_FOV_DEG,
                 ui_scale: 1.0,
                 camera_spring: false,
-                menu_scale: true,
                 chat_layout: ChatLayout::default(),
                 debug_chat: false,
                 dynamic_lights: DynamicLights::Vanilla,
@@ -928,8 +1075,8 @@ impl GraphicsSettings {
             },
             QualityPreset::High => Self {
                 preset,
-                shadow_map_size: 4096,
-                shadow_cascade_count: 4,
+                shadow_map_size: 2048,
+                shadow_cascade_count: 3,
                 shadow_max_distance: 700.0,
                 anti_aliasing: aa_default,
                 dlss_quality: DlssQuality::Auto,
@@ -945,13 +1092,12 @@ impl GraphicsSettings {
                 bloom_intensity: 0.08,
                 volumetric_fog: false,
                 fog_step_count: 64,
-                view_distance: 6100.0,
+                view_distance: 1100.0,
                 vsync: true,
                 fps_cap: 0,
                 fov_deg: DEFAULT_FOV_DEG,
                 ui_scale: 1.0,
                 camera_spring: false,
-                menu_scale: true,
                 chat_layout: ChatLayout::default(),
                 debug_chat: false,
                 dynamic_lights: DynamicLights::Vanilla,
@@ -993,27 +1139,72 @@ impl GraphicsSettings {
                 mob_hp_under: false,
                 texture_filtering: TextureFiltering::Aniso8x,
                 bloom_intensity: 0.12,
-                volumetric_fog: false,
+                volumetric_fog: true,
                 fog_step_count: 96,
-                view_distance: 6100.0,
+                view_distance: 2300.0,
                 vsync: true,
                 fps_cap: 0,
                 fov_deg: DEFAULT_FOV_DEG,
                 ui_scale: 1.0,
                 camera_spring: false,
-                menu_scale: true,
                 chat_layout: ChatLayout::default(),
                 debug_chat: false,
-                dynamic_lights: DynamicLights::Vanilla,
-                shadowed_lights: DEFAULT_SHADOWED_LIGHTS,
+                dynamic_lights: DynamicLights::Enhanced,
+                shadowed_lights: 4,
                 light_flicker: DEFAULT_LIGHT_FLICKER,
-                model_light_count: DEFAULT_MODEL_LIGHT_COUNT,
+                model_light_count: 12,
                 character_render_path: CharacterRenderPath::FfxiFaithful,
                 realistic_character_lighting: false,
                 faithful_shadow_receive: true,
                 character_shadow_cast: true,
                 zone_shadow_cast: false,
                 depth_of_field: false,
+                dof_aperture_f_stops: DEFAULT_DOF_APERTURE,
+                zone_line_display: ZoneLineDisplay::Off,
+                enhanced_actor_arrival: false,
+                minimap_radar: MinimapRadar::Vanilla,
+                render_scale: DEFAULT_RENDER_SCALE,
+                fullscreen: false,
+                windowed_fullscreen: false,
+            },
+
+            QualityPreset::Maximum => Self {
+                preset,
+                shadow_map_size: 4096,
+                shadow_cascade_count: 4,
+                shadow_max_distance: 1100.0,
+                anti_aliasing: AaMode::Msaa8,
+                dlss_quality: DlssQuality::Auto,
+                neural_uplift: false,
+                nr_intensity: default_nr_intensity(),
+                nr_local_tone_strength: default_nr_local_tone(),
+                nr_structure_strength: default_nr_structure(),
+                dlss_supported: false,
+                dlss_menu_enabled: false,
+                job_display: false,
+                mob_hp_under: false,
+                texture_filtering: TextureFiltering::Aniso16x,
+                bloom_intensity: 0.16,
+                volumetric_fog: true,
+                fog_step_count: 128,
+                view_distance: 6100.0,
+                vsync: true,
+                fps_cap: 0,
+                fov_deg: DEFAULT_FOV_DEG,
+                ui_scale: 1.0,
+                camera_spring: false,
+                chat_layout: ChatLayout::default(),
+                debug_chat: false,
+                dynamic_lights: DynamicLights::Enhanced,
+                shadowed_lights: 4,
+                light_flicker: DEFAULT_LIGHT_FLICKER,
+                model_light_count: 16,
+                character_render_path: CharacterRenderPath::FfxiFaithful,
+                realistic_character_lighting: false,
+                faithful_shadow_receive: true,
+                character_shadow_cast: true,
+                zone_shadow_cast: true,
+                depth_of_field: true,
                 dof_aperture_f_stops: DEFAULT_DOF_APERTURE,
                 zone_line_display: ZoneLineDisplay::Off,
                 enhanced_actor_arrival: false,
@@ -1038,82 +1229,101 @@ impl GraphicsSettings {
         }
     }
 
+    /// A two-state row's value, tagged by which side is faithful
+    /// (`GraphicsField::bool_parity`).
+    fn toggle_label(&self, field: GraphicsField, on: bool) -> String {
+        parity_label(bool_label(on), field.bool_parity().of(on))
+    }
+
     pub fn value_label(&self, field: GraphicsField) -> String {
         match field {
-            GraphicsField::Preset => self.preset.label().to_string(),
+            GraphicsField::Preset => self.preset.label(),
             GraphicsField::ShadowMapSize => format!("{}px", self.shadow_map_size),
             GraphicsField::ShadowCascadeCount => format!("{}", self.shadow_cascade_count),
             GraphicsField::ShadowMaxDistance => format!("{:.0}m", self.shadow_max_distance),
             GraphicsField::AntiAliasing => {
                 // A json written with DLSS on can land us on Dlss while this
-                // machine/build can't run it — or the Retail+ gate is closed;
+                // machine/build can't run it — or the Vanilla+ gate is closed;
                 // say so instead of a bare "DLSS".
                 if matches!(self.anti_aliasing, AaMode::Dlss) && !self.dlss_selectable() {
                     "DLSS (N/A)".to_string()
                 } else {
-                    self.anti_aliasing.label().to_string()
+                    self.anti_aliasing.label()
                 }
             }
-            GraphicsField::TextureFiltering => self.texture_filtering.label().to_string(),
+            GraphicsField::TextureFiltering => self.texture_filtering.label(),
             GraphicsField::BloomIntensity => {
+                // The original client has no bloom, so the off end of the
+                // slider is the faithful one.
                 if self.bloom_intensity <= 1e-3 {
-                    "Off".into()
+                    parity_label("Off", Parity::Vanilla)
                 } else {
-                    format!("{:.2}", self.bloom_intensity)
+                    parity_label(&format!("{:.2}", self.bloom_intensity), Parity::Enhanced)
                 }
             }
-            GraphicsField::VolumetricFog => bool_label(self.volumetric_fog).into(),
+            GraphicsField::VolumetricFog => self.toggle_label(field, self.volumetric_fog),
             GraphicsField::FogStepCount => format!("{}", self.fog_step_count),
             GraphicsField::ViewDistance => format!("{:.0}m", self.view_distance),
-            GraphicsField::VSync => bool_label(self.vsync).into(),
-            GraphicsField::Fullscreen => bool_label(self.fullscreen).into(),
-            GraphicsField::Windowed => bool_label(self.windowed_fullscreen).into(),
+            GraphicsField::VSync => self.toggle_label(field, self.vsync),
+            GraphicsField::Fullscreen => self.toggle_label(field, self.fullscreen),
+            GraphicsField::Windowed => self.toggle_label(field, self.windowed_fullscreen),
             GraphicsField::FrameRateCap => match self.fps_cap {
                 0 => "Off".into(),
                 n => format!("{n} fps"),
             },
-            GraphicsField::Fov => format!("{:.0}°", self.fov_deg),
-            GraphicsField::UiScale => format!("{:.0}%", self.ui_scale * 100.0),
-            GraphicsField::CameraSpring => {
-                (if self.camera_spring { "on" } else { "off" }).to_string()
+            // "deg" rather than the degree sign: menu text renders with bevy's
+            // bundled font, which has no glyph for it.
+            GraphicsField::Fov => {
+                let name = format!("{:.0} deg", self.fov_deg);
+                let parity = if (self.fov_deg - DEFAULT_FOV_DEG).abs() < FOV_PARITY_EPSILON_DEG {
+                    Parity::Vanilla
+                } else {
+                    Parity::Enhanced
+                };
+                parity_label(&name, parity)
             }
-            GraphicsField::ChatLayout => self.chat_layout.label().to_string(),
-            GraphicsField::DebugChat => bool_label(self.debug_chat).into(),
-            GraphicsField::MenuScale => (if self.menu_scale { "on" } else { "off" }).to_string(),
+            GraphicsField::UiScale => format!("{:.0}%", self.ui_scale * 100.0),
+            GraphicsField::CameraSpring => self.toggle_label(field, self.camera_spring),
+            GraphicsField::ChatLayout => self.chat_layout.label(),
+            GraphicsField::DebugChat => self.toggle_label(field, self.debug_chat),
 
             GraphicsField::DynamicLights => {
                 if self.dynamic_lights == DynamicLights::Enhanced && !self.lights_fine_is_default()
                 {
-                    "Custom".to_string()
+                    parity_label("Custom", Parity::Enhanced)
                 } else {
-                    self.dynamic_lights.label().to_string()
+                    self.dynamic_lights.label()
                 }
             }
             GraphicsField::ShadowedLights => format!("{}", self.shadowed_lights),
-            GraphicsField::LightFlicker => bool_label(self.light_flicker).into(),
+            GraphicsField::LightFlicker => self.toggle_label(field, self.light_flicker),
             GraphicsField::ModelLightCount => format!("{}", self.model_light_count),
 
-            GraphicsField::CharacterLighting => if self.realistic_character_lighting {
-                "Realistic"
-            } else {
-                "FFXI"
+            GraphicsField::CharacterLighting => {
+                if self.realistic_character_lighting {
+                    parity_label("Realistic", Parity::Enhanced)
+                } else {
+                    parity_label("FFXI", Parity::Vanilla)
+                }
             }
-            .into(),
             GraphicsField::CharacterShadowReceive => {
-                bool_label(self.faithful_shadow_receive).into()
+                self.toggle_label(field, self.faithful_shadow_receive)
             }
-            GraphicsField::CharacterShadowCast => bool_label(self.character_shadow_cast).into(),
-            GraphicsField::ZoneShadowCast => bool_label(self.zone_shadow_cast).into(),
-            GraphicsField::DepthOfField => bool_label(self.depth_of_field).into(),
+            GraphicsField::CharacterShadowCast => {
+                self.toggle_label(field, self.character_shadow_cast)
+            }
+            GraphicsField::ZoneShadowCast => self.toggle_label(field, self.zone_shadow_cast),
+            GraphicsField::DepthOfField => self.toggle_label(field, self.depth_of_field),
             GraphicsField::DofAperture => format!("f/{:.1}", self.dof_aperture_f_stops),
-            GraphicsField::ZoneLineDisplay => self.zone_line_display.label().to_string(),
-            GraphicsField::ActorArrival => if self.enhanced_actor_arrival {
-                "Luminous (Enhanced)"
-            } else {
-                "Fade"
+            GraphicsField::ZoneLineDisplay => self.zone_line_display.label(),
+            GraphicsField::ActorArrival => {
+                if self.enhanced_actor_arrival {
+                    parity_label("Luminous", Parity::Enhanced)
+                } else {
+                    parity_label("Fade", Parity::Vanilla)
+                }
             }
-            .to_string(),
-            GraphicsField::MinimapRadar => self.minimap_radar.label().to_string(),
+            GraphicsField::MinimapRadar => self.minimap_radar.label(),
             GraphicsField::RenderScale => {
                 if self.dlss_active() {
                     // DLSS owns internal resolution (the quality tier picks
@@ -1136,7 +1346,7 @@ impl GraphicsSettings {
             }
             GraphicsField::DlssQuality => {
                 if self.dlss_selectable() {
-                    self.dlss_quality.label().to_string()
+                    self.dlss_quality.label()
                 } else {
                     "N/A".to_string()
                 }
@@ -1171,11 +1381,6 @@ impl GraphicsSettings {
                     "N/A".to_string()
                 }
             }
-            // Inert placeholders: grayed on every build (see is_dlss_placeholder).
-            GraphicsField::DlssRrPreset
-            | GraphicsField::DlssSrPreset
-            | GraphicsField::DlssRrResponsivity
-            | GraphicsField::DlssSharpness => "N/A".to_string(),
         }
     }
 
@@ -1195,7 +1400,7 @@ impl GraphicsSettings {
                 let minimap_radar = self.minimap_radar;
                 let chat_layout = self.chat_layout;
                 let debug_chat = self.debug_chat;
-                let (ui_scale, menu_scale) = (self.ui_scale, self.menu_scale);
+                let ui_scale = self.ui_scale;
                 let vsync = self.vsync;
                 let fps_cap = self.fps_cap;
                 // Presets never own DLSS (kuluu decision, 2026-09): no preset
@@ -1225,7 +1430,6 @@ impl GraphicsSettings {
                 self.enhanced_actor_arrival = arrival;
                 self.minimap_radar = minimap_radar;
                 self.ui_scale = ui_scale;
-                self.menu_scale = menu_scale;
                 self.chat_layout = chat_layout;
                 self.debug_chat = debug_chat;
                 self.vsync = vsync;
@@ -1323,11 +1527,6 @@ impl GraphicsSettings {
             GraphicsField::ChatLayout => {
                 self.chat_layout =
                     cycle_slot(self.chat_layout, ChatLayout::SLOTS, delta).unwrap_or_default();
-            }
-            GraphicsField::MenuScale => {
-                if delta != 0 {
-                    self.menu_scale = !self.menu_scale;
-                }
             }
             GraphicsField::UiScale => {
                 self.ui_scale = cycle_slot_f32(
@@ -1461,19 +1660,13 @@ impl GraphicsSettings {
                 self.nr_structure_strength =
                     cycle_slot_f32(self.nr_structure_strength, NR_TONE_STRUCTURE_SLOTS, delta);
             }
-            // Inert placeholders: nothing behind them yet, cycling is a no-op
-            // on every build (the row reads "N/A").
-            GraphicsField::DlssRrPreset
-            | GraphicsField::DlssSrPreset
-            | GraphicsField::DlssRrResponsivity
-            | GraphicsField::DlssSharpness => {}
         }
     }
 
     pub fn reset_to_minimum(&mut self) {
         // Capability is runtime-detected, not a preference: a menu reset must
         // not un-detect DLSS support (the availability system only writes it
-        // once at startup). The Retail+ gates are user choices too — a reset
+        // once at startup). The Vanilla+ gates are user choices too — a reset
         // returns quality knobs to Minimum but keeps the menu/Job/Mob-HP decisions.
         let dlss_supported = self.dlss_supported;
         let dlss_menu_enabled = self.dlss_menu_enabled;
@@ -1482,7 +1675,6 @@ impl GraphicsSettings {
         let config = (
             self.minimap_radar,
             self.ui_scale,
-            self.menu_scale,
             self.chat_layout,
             self.debug_chat,
         );
@@ -1490,7 +1682,6 @@ impl GraphicsSettings {
         (
             self.minimap_radar,
             self.ui_scale,
-            self.menu_scale,
             self.chat_layout,
             self.debug_chat,
         ) = config;
@@ -1654,62 +1845,230 @@ pub fn init_msaa_caps_system(
     }
 }
 
-// Grouped: display -> interface/camera -> quality -> lighting.
-pub const GRAPHICS_FIELDS: &[GraphicsField] = &[
-    GraphicsField::Preset,
-    GraphicsField::Fullscreen,
-    GraphicsField::Windowed,
-    GraphicsField::VSync,
-    GraphicsField::FrameRateCap,
-    GraphicsField::RenderScale,
-    GraphicsField::Fov,
-    GraphicsField::CameraSpring,
-    GraphicsField::AntiAliasing,
-    GraphicsField::Dlss,
-    GraphicsField::TextureFiltering,
-    GraphicsField::ShadowMapSize,
-    GraphicsField::ShadowCascadeCount,
-    GraphicsField::ShadowMaxDistance,
-    GraphicsField::BloomIntensity,
-    GraphicsField::VolumetricFog,
-    GraphicsField::FogStepCount,
-    GraphicsField::ViewDistance,
-    GraphicsField::DepthOfField,
-    GraphicsField::DofAperture,
-    GraphicsField::ZoneLineDisplay,
-    GraphicsField::ActorArrival,
-    GraphicsField::DynamicLights,
-    GraphicsField::ShadowedLights,
-    GraphicsField::LightFlicker,
-    GraphicsField::ModelLightCount,
-    GraphicsField::CharacterLighting,
-    GraphicsField::CharacterShadowReceive,
-    GraphicsField::CharacterShadowCast,
-    GraphicsField::ZoneShadowCast,
+/// Header for the trailing group of rows the original client has no
+/// equivalent for at all — not a knob it set differently, a knob it never had.
+pub const ENHANCED_SECTION: &str = "Enhanced (no Vanilla equivalent)";
+
+/// One titled run of rows on a settings page. The section list is the single
+/// source of both page order and grouping: rows are derived from it, so there
+/// is no second label array to keep in lockstep.
+pub struct GraphicsSection {
+    pub header: &'static str,
+    pub fields: &'static [GraphicsField],
+}
+
+pub const GRAPHICS_SECTIONS: &[GraphicsSection] = &[
+    GraphicsSection {
+        header: "Quality",
+        fields: &[GraphicsField::Preset],
+    },
+    GraphicsSection {
+        header: "Display",
+        fields: &[
+            GraphicsField::Fullscreen,
+            GraphicsField::Windowed,
+            GraphicsField::VSync,
+            GraphicsField::FrameRateCap,
+            GraphicsField::RenderScale,
+            GraphicsField::Fov,
+        ],
+    },
+    GraphicsSection {
+        header: "World",
+        fields: &[GraphicsField::ViewDistance, GraphicsField::TextureFiltering],
+    },
+    GraphicsSection {
+        header: "Lighting",
+        fields: &[
+            GraphicsField::DynamicLights,
+            GraphicsField::ShadowedLights,
+            GraphicsField::LightFlicker,
+            GraphicsField::ModelLightCount,
+        ],
+    },
+    GraphicsSection {
+        header: "Shadows & Shading",
+        fields: &[
+            GraphicsField::CharacterLighting,
+            GraphicsField::CharacterShadowReceive,
+            GraphicsField::CharacterShadowCast,
+            GraphicsField::ShadowMapSize,
+            GraphicsField::ShadowCascadeCount,
+            GraphicsField::ShadowMaxDistance,
+        ],
+    },
+    GraphicsSection {
+        header: ENHANCED_SECTION,
+        fields: &[
+            GraphicsField::AntiAliasing,
+            GraphicsField::Dlss,
+            GraphicsField::BloomIntensity,
+            GraphicsField::VolumetricFog,
+            GraphicsField::FogStepCount,
+            GraphicsField::DepthOfField,
+            GraphicsField::DofAperture,
+            GraphicsField::ZoneShadowCast,
+            GraphicsField::CameraSpring,
+            GraphicsField::ActorArrival,
+        ],
+    },
 ];
 
-pub const CONFIG_FIELDS: &[GraphicsField] = &[
-    GraphicsField::MinimapRadar,
-    GraphicsField::UiScale,
-    GraphicsField::MenuScale,
-    GraphicsField::ChatLayout,
-    GraphicsField::DebugChat,
+pub const CONFIG_SECTIONS: &[GraphicsSection] = &[
+    GraphicsSection {
+        header: "Interface",
+        fields: &[
+            GraphicsField::MinimapRadar,
+            GraphicsField::UiScale,
+            GraphicsField::ChatLayout,
+        ],
+    },
+    GraphicsSection {
+        header: ENHANCED_SECTION,
+        fields: &[GraphicsField::DebugChat, GraphicsField::ZoneLineDisplay],
+    },
 ];
 
-/// The DLSS Config surface, top to bottom: the live quality knob first, then
-/// the inert RenoDX-parity placeholders (see `is_dlss_placeholder`). Rendered
-/// as a pushed submenu in-game and a disclosure block in the launcher.
-pub const DLSS_CONFIG_FIELDS: &[GraphicsField] = &[
-    GraphicsField::DlssQuality,
-    GraphicsField::DlssRrPreset,
-    GraphicsField::DlssSrPreset,
-    GraphicsField::DlssRrResponsivity,
-    GraphicsField::DlssNeuralUplift,
-    GraphicsField::DlssNrIntensity,
-    GraphicsField::DlssNrLocalTone,
-    GraphicsField::DlssNrStructure,
-    GraphicsField::DlssSharpness,
+/// The DLSS Config surface: a pushed submenu in-game, a disclosure block in
+/// the launcher.
+pub const DLSS_CONFIG_SECTIONS: &[GraphicsSection] = &[
+    GraphicsSection {
+        header: "Super Resolution",
+        fields: &[GraphicsField::DlssQuality],
+    },
+    GraphicsSection {
+        header: "Neural Uplift",
+        fields: &[
+            GraphicsField::DlssNeuralUplift,
+            GraphicsField::DlssNrIntensity,
+            GraphicsField::DlssNrLocalTone,
+            GraphicsField::DlssNrStructure,
+        ],
+    },
 ];
+
+/// A row that runs something instead of cycling a value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MenuAction {
+    DlssConfig,
+    ResetToMinimum,
+    ResetDlssConfig,
+    Controls,
+}
+
+impl MenuAction {
+    pub const fn label(self) -> &'static str {
+        match self {
+            MenuAction::DlssConfig => "DLSS Config",
+            MenuAction::ResetToMinimum => "Reset to Minimum",
+            MenuAction::ResetDlssConfig => "Reset DLSS Config",
+            MenuAction::Controls => "Controls",
+        }
+    }
+}
+
+/// One rendered line of a settings page.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MenuRow {
+    Header(&'static str),
+    Field(GraphicsField),
+    Action(MenuAction),
+}
+
+impl MenuRow {
+    pub const fn label(self) -> &'static str {
+        match self {
+            MenuRow::Header(h) => h,
+            MenuRow::Field(f) => f.label(),
+            MenuRow::Action(a) => a.label(),
+        }
+    }
+
+    /// Headers are chrome: the cursor skips them and they render no value.
+    pub const fn is_selectable(self) -> bool {
+        !matches!(self, MenuRow::Header(_))
+    }
+
+    pub const fn field(self) -> Option<GraphicsField> {
+        match self {
+            MenuRow::Field(f) => Some(f),
+            _ => None,
+        }
+    }
+}
+
+fn section_rows(
+    sections: &'static [GraphicsSection],
+    keep: impl Fn(GraphicsField) -> bool,
+) -> Vec<MenuRow> {
+    let mut rows = Vec::new();
+    for section in sections {
+        let mut body: Vec<MenuRow> = section
+            .fields
+            .iter()
+            .copied()
+            .filter(|f| keep(*f))
+            .map(MenuRow::Field)
+            .collect();
+        if body.is_empty() {
+            continue;
+        }
+        rows.push(MenuRow::Header(section.header));
+        // The DLSS config surface belongs to the DLSS row, so it sits directly
+        // under it rather than at the foot of a long page.
+        if let Some(i) = body
+            .iter()
+            .position(|r| *r == MenuRow::Field(GraphicsField::Dlss))
+        {
+            body.insert(i + 1, MenuRow::Action(MenuAction::DlssConfig));
+        }
+        rows.append(&mut body);
+    }
+    rows
+}
+
+/// The Graphics page as it appears in this build: a build that can't run DLSS
+/// advertises neither the DLSS row nor its config row.
+pub fn graphics_rows(dlss_supported: bool) -> Vec<MenuRow> {
+    let mut rows = section_rows(GRAPHICS_SECTIONS, |f| {
+        dlss_supported || !matches!(f, GraphicsField::Dlss)
+    });
+    rows.push(MenuRow::Action(MenuAction::ResetToMinimum));
+    rows
+}
+
+pub fn config_rows() -> Vec<MenuRow> {
+    let mut rows = section_rows(CONFIG_SECTIONS, |_| true);
+    rows.push(MenuRow::Action(MenuAction::Controls));
+    rows
+}
+
+pub fn dlss_config_rows() -> Vec<MenuRow> {
+    let mut rows = section_rows(DLSS_CONFIG_SECTIONS, |_| true);
+    rows.push(MenuRow::Action(MenuAction::ResetDlssConfig));
+    rows
+}
+
+/// Every field of a page in section order, headers dropped. The launcher
+/// iterates these to spawn one value row per option.
+fn section_fields(sections: &'static [GraphicsSection]) -> Vec<GraphicsField> {
+    sections
+        .iter()
+        .flat_map(|s| s.fields.iter().copied())
+        .collect()
+}
+
+pub fn graphics_fields() -> Vec<GraphicsField> {
+    section_fields(GRAPHICS_SECTIONS)
+}
+
+pub fn config_fields() -> Vec<GraphicsField> {
+    section_fields(CONFIG_SECTIONS)
+}
+
+pub fn dlss_config_fields() -> Vec<GraphicsField> {
+    section_fields(DLSS_CONFIG_SECTIONS)
+}
 
 fn cycle_slot<T: PartialEq + Copy>(current: T, slots: &[T], delta: i32) -> Option<T> {
     if slots.is_empty() {
@@ -2169,6 +2528,9 @@ pub fn apply_ui_scale_system(
 mod tests {
     use super::*;
 
+    /// Enough cycles to visit every slot of the longest value list.
+    const CYCLE_SWEEP_STEPS: usize = 8;
+
     #[test]
     fn default_is_low_preset() {
         let s = GraphicsSettings::default();
@@ -2327,7 +2689,7 @@ mod tests {
     fn sky_and_water_have_no_style_fork() {
         // The Enhanced sky/water variants were removed: the retail-faithful path is
         // the only path, so no field may reintroduce a user-selectable fork.
-        assert!(!GRAPHICS_FIELDS
+        assert!(!graphics_fields()
             .iter()
             .any(|f| f.label().contains("Sky") || f.label().contains("Water")));
         assert_eq!(GraphicsSettings::default().tonemapping(), Tonemapping::None);
@@ -2347,11 +2709,14 @@ mod tests {
     #[test]
     fn tuning_a_light_knob_marks_custom_only_in_enhanced() {
         let mut s = GraphicsSettings::default();
-        assert_eq!(s.value_label(GraphicsField::DynamicLights), "Vanilla");
+        assert_eq!(
+            s.value_label(GraphicsField::DynamicLights),
+            "Lamps (Vanilla)"
+        );
         s.cycle(GraphicsField::ShadowedLights, 1);
         assert_eq!(
             s.value_label(GraphicsField::DynamicLights),
-            "Vanilla",
+            "Lamps (Vanilla)",
             "the shadow count is inert in Vanilla, so the mode label must not read Custom"
         );
         assert_eq!(s.preset, QualityPreset::Low, "light knob ⟂ quality tier");
@@ -2367,10 +2732,16 @@ mod tests {
             s.lights_fine_is_default(),
             "mode cycle reset the fine knobs"
         );
-        assert_eq!(s.value_label(GraphicsField::DynamicLights), "Enhanced");
+        assert_eq!(
+            s.value_label(GraphicsField::DynamicLights),
+            "Lamps + Shadows (Enhanced)"
+        );
 
         s.cycle(GraphicsField::ShadowedLights, 1);
-        assert_eq!(s.value_label(GraphicsField::DynamicLights), "Custom");
+        assert_eq!(
+            s.value_label(GraphicsField::DynamicLights),
+            "Custom (Enhanced)"
+        );
         assert_eq!(
             s.dynamic_lights,
             DynamicLights::Enhanced,
@@ -2451,15 +2822,19 @@ mod tests {
     }
 
     #[test]
-    fn presets_pin_dynamic_lights_vanilla_and_preset_cycle_drops_enhanced() {
+    fn presets_pin_dynamic_lights_per_tier_and_preset_cycle_drops_carry_over() {
         for &preset in PRESET_CYCLE {
-            if preset == QualityPreset::Minimum {
-                continue;
-            }
+            let want = match preset {
+                QualityPreset::Minimum => DynamicLights::Off,
+                // Lamp shadow maps are the expensive half, so only the two top
+                // tiers spend on them.
+                QualityPreset::Ultra | QualityPreset::Maximum => DynamicLights::Enhanced,
+                _ => DynamicLights::Vanilla,
+            };
             assert_eq!(
                 GraphicsSettings::for_preset(preset).dynamic_lights,
-                DynamicLights::Vanilla,
-                "preset {preset:?} must pin the faithful-only light mode"
+                want,
+                "preset {preset:?} light mode drifted"
             );
         }
         let mut s = GraphicsSettings::default();
@@ -2498,12 +2873,18 @@ mod tests {
     #[test]
     fn minimap_radar_cycles_vanilla_enhanced() {
         let mut s = GraphicsSettings::default();
-        assert_eq!(s.value_label(GraphicsField::MinimapRadar), "Compass");
+        assert_eq!(
+            s.value_label(GraphicsField::MinimapRadar),
+            "Compass (Vanilla)"
+        );
         assert!(!s.minimap_radar.panel_visible());
         assert!(!s.minimap_radar.entity_radar());
 
         s.cycle(GraphicsField::MinimapRadar, 1);
-        assert_eq!(s.value_label(GraphicsField::MinimapRadar), "Terrain Map");
+        assert_eq!(
+            s.value_label(GraphicsField::MinimapRadar),
+            "Terrain Map (Enhanced)"
+        );
         assert!(s.minimap_radar.panel_visible());
         assert!(s.minimap_radar.entity_radar());
 
@@ -2564,7 +2945,6 @@ mod tests {
             fov_deg: 90.0,
             ui_scale: 1.0,
             camera_spring: false,
-            menu_scale: true,
             chat_layout: ChatLayout::default(),
             debug_chat: false,
             ..Default::default()
@@ -2573,8 +2953,8 @@ mod tests {
         assert_eq!(s.value_label(GraphicsField::ShadowMapSize), "2048px");
         assert_eq!(s.value_label(GraphicsField::ShadowCascadeCount), "3");
         assert_eq!(s.value_label(GraphicsField::ShadowMaxDistance), "400m");
-        assert_eq!(s.value_label(GraphicsField::VolumetricFog), "On");
-        assert_eq!(s.value_label(GraphicsField::Fov), "90°");
+        assert_eq!(s.value_label(GraphicsField::VolumetricFog), "On (Enhanced)");
+        assert_eq!(s.value_label(GraphicsField::Fov), "90 deg (Enhanced)");
     }
 
     #[test]
@@ -2594,10 +2974,16 @@ mod tests {
     #[test]
     fn model_shadows_toggle_is_orthogonal() {
         let mut s = GraphicsSettings::default();
-        assert_eq!(s.value_label(GraphicsField::CharacterShadowReceive), "On");
+        assert_eq!(
+            s.value_label(GraphicsField::CharacterShadowReceive),
+            "On (Vanilla)"
+        );
         s.cycle(GraphicsField::CharacterShadowReceive, 1);
         assert!(!s.faithful_shadow_receive);
-        assert_eq!(s.value_label(GraphicsField::CharacterShadowReceive), "Off");
+        assert_eq!(
+            s.value_label(GraphicsField::CharacterShadowReceive),
+            "Off (Reduced)"
+        );
         assert_eq!(
             s.preset,
             QualityPreset::Low,
@@ -2615,41 +3001,58 @@ mod tests {
         assert!(!GraphicsSettings::for_preset(QualityPreset::Medium).character_shadow_cast);
         assert!(GraphicsSettings::for_preset(QualityPreset::High).character_shadow_cast);
         assert!(GraphicsSettings::for_preset(QualityPreset::Ultra).character_shadow_cast);
+        assert!(GraphicsSettings::for_preset(QualityPreset::Maximum).character_shadow_cast);
         assert!(!GraphicsSettings::default().character_shadow_cast);
     }
 
     #[test]
     fn model_shadow_casting_is_quality_lever_tied_to_tier() {
         let mut s = GraphicsSettings::for_preset(QualityPreset::High); // casting on
-        assert_eq!(s.value_label(GraphicsField::CharacterShadowCast), "On");
+        assert_eq!(
+            s.value_label(GraphicsField::CharacterShadowCast),
+            "On (Vanilla)"
+        );
         s.cycle(GraphicsField::CharacterShadowCast, 1);
         assert!(!s.character_shadow_cast);
-        assert_eq!(s.value_label(GraphicsField::CharacterShadowCast), "Off");
+        assert_eq!(
+            s.value_label(GraphicsField::CharacterShadowCast),
+            "Off (Reduced)"
+        );
         assert_eq!(s.preset, QualityPreset::Custom, "casting is a quality knob");
 
         // Unlike shadow receipt (orthogonal/sticky), casting tracks the tier: a
         // preset change resets it to that tier's default, not the toggled value.
-        s.cycle(GraphicsField::Preset, -1); // Custom -> Ultra (tier default On)
-        assert_eq!(s.preset, QualityPreset::Ultra);
+        s.cycle(GraphicsField::Preset, -1); // Custom -> Maximum (tier default On)
+        assert_eq!(s.preset, QualityPreset::Maximum);
         assert!(
             s.character_shadow_cast,
-            "preset cycle reset casting to the Ultra tier default, not the toggled-off value"
+            "preset cycle reset casting to the tier default, not the toggled-off value"
         );
     }
 
     #[test]
-    fn zone_shadow_casting_is_off_in_every_preset_and_preset_owned() {
+    fn zone_shadow_casting_is_off_below_maximum_and_preset_owned() {
+        // Re-drawing every visible placement per cascade is the dominant
+        // render-thread cost in a town, so only the explicit everything-on
+        // tier pays it.
         for preset in PRESET_CYCLE {
-            assert!(
-                !GraphicsSettings::for_preset(*preset).zone_shadow_cast,
-                "{preset:?} must not draw zone geometry into the shadow map"
+            assert_eq!(
+                GraphicsSettings::for_preset(*preset).zone_shadow_cast,
+                *preset == QualityPreset::Maximum,
+                "{preset:?} zone shadow casting drifted"
             );
         }
         let mut s = GraphicsSettings::default();
-        assert_eq!(s.value_label(GraphicsField::ZoneShadowCast), "Off");
+        assert_eq!(
+            s.value_label(GraphicsField::ZoneShadowCast),
+            "Off (Vanilla)"
+        );
         s.cycle(GraphicsField::ZoneShadowCast, 1);
         assert!(s.zone_shadow_cast);
-        assert_eq!(s.value_label(GraphicsField::ZoneShadowCast), "On");
+        assert_eq!(
+            s.value_label(GraphicsField::ZoneShadowCast),
+            "On (Enhanced)"
+        );
         assert_eq!(
             s.preset,
             QualityPreset::Custom,
@@ -2665,14 +3068,13 @@ mod tests {
     #[test]
     fn config_preferences_survive_graphics_presets_and_reset() {
         let mut settings = GraphicsSettings::default();
-        for &field in CONFIG_FIELDS {
-            assert!(!GRAPHICS_FIELDS.contains(&field));
+        for field in config_fields() {
+            assert!(!graphics_fields().contains(&field));
             settings.cycle(field, 1);
         }
         let preferences = (
             settings.minimap_radar,
             settings.ui_scale,
-            settings.menu_scale,
             settings.chat_layout,
             settings.debug_chat,
         );
@@ -2682,7 +3084,6 @@ mod tests {
             (
                 settings.minimap_radar,
                 settings.ui_scale,
-                settings.menu_scale,
                 settings.chat_layout,
                 settings.debug_chat
             ),
@@ -2694,7 +3095,6 @@ mod tests {
             (
                 settings.minimap_radar,
                 settings.ui_scale,
-                settings.menu_scale,
                 settings.chat_layout,
                 settings.debug_chat
             ),
@@ -2764,13 +3164,17 @@ mod tests {
     }
 
     #[test]
-    fn presets_are_dof_and_taa_free_by_default() {
+    fn presets_are_dof_and_taa_free_below_maximum() {
         // Depth of Field and TAA are the only prepass forcers (the Vanilla sun
-        // flare occludes via CPU raycast); no preset turns either on, so
-        // steady-state presets pay zero prepass.
+        // flare occludes via CPU raycast). Only Maximum, which the user picks
+        // explicitly, turns DoF on; TAA stays out of every tier.
         for &preset in PRESET_CYCLE {
             let s = GraphicsSettings::for_preset(preset);
-            assert!(!s.depth_of_field, "{preset:?} must not auto-enable DoF");
+            assert_eq!(
+                s.depth_of_field,
+                preset == QualityPreset::Maximum,
+                "{preset:?} DoF drifted"
+            );
             assert_ne!(
                 s.anti_aliasing,
                 AaMode::Taa,
@@ -2790,10 +3194,10 @@ mod tests {
     #[test]
     fn depth_of_field_toggles() {
         let mut s = GraphicsSettings::default();
-        assert_eq!(s.value_label(GraphicsField::DepthOfField), "Off");
+        assert_eq!(s.value_label(GraphicsField::DepthOfField), "Off (Vanilla)");
         s.cycle(GraphicsField::DepthOfField, 1);
         assert!(s.depth_of_field);
-        assert_eq!(s.value_label(GraphicsField::DepthOfField), "On");
+        assert_eq!(s.value_label(GraphicsField::DepthOfField), "On (Enhanced)");
     }
 
     #[test]
@@ -2827,7 +3231,7 @@ mod tests {
 
     #[test]
     fn advanced_fields_are_exactly_the_indented_knobs() {
-        let advanced: Vec<_> = GRAPHICS_FIELDS
+        let advanced: Vec<_> = graphics_fields()
             .iter()
             .copied()
             .filter(|f| f.is_advanced())
@@ -2835,7 +3239,7 @@ mod tests {
         // The 3 dynamic-light tuning knobs (shadowed count/flicker/lights per model).
         assert_eq!(advanced.len(), 3, "advanced set drifted: {advanced:?}");
         // Every advanced field is an indented child row ("  …"); no basic field is.
-        for &f in GRAPHICS_FIELDS {
+        for f in graphics_fields() {
             assert_eq!(
                 f.is_advanced(),
                 f.label().starts_with("  "),
@@ -2876,7 +3280,10 @@ mod tests {
     fn zone_line_display_cycles_three_modes_orthogonal_to_tier() {
         let mut s = GraphicsSettings::default();
         assert_eq!(s.zone_line_display, ZoneLineDisplay::Off);
-        assert_eq!(s.value_label(GraphicsField::ZoneLineDisplay), "Off");
+        assert_eq!(
+            s.value_label(GraphicsField::ZoneLineDisplay),
+            "Off (Vanilla)"
+        );
 
         s.cycle(GraphicsField::ZoneLineDisplay, 1);
         assert_eq!(s.zone_line_display, ZoneLineDisplay::Pillar);
@@ -3034,7 +3441,10 @@ mod tests {
         assert!(matches!(s.anti_aliasing, AaMode::Dlss));
         assert!(s.dlss_active());
         assert_eq!(s.value_label(GraphicsField::Dlss), "On");
-        assert_eq!(s.value_label(GraphicsField::AntiAliasing), "DLSS");
+        assert_eq!(
+            s.value_label(GraphicsField::AntiAliasing),
+            "DLSS (Enhanced)"
+        );
         assert_eq!(s.msaa(), Msaa::Off, "DLSS implies multisampling off");
         assert!(!s.wants_taa(), "DLSS implies TAA off");
 
@@ -3087,17 +3497,90 @@ mod tests {
     }
 
     #[test]
-    fn dlss_placeholders_stay_inert() {
+    fn ui_never_says_retail() {
+        // The user-facing word for "as the original client did" is VANILLA.
+        // "Retail" is a development word; it must not reach a menu row.
         let mut s = GraphicsSettings {
             dlss_supported: true,
+            dlss_menu_enabled: true,
             ..Default::default()
         };
-        for &f in DLSS_CONFIG_FIELDS {
-            if f.is_dlss_placeholder() {
-                assert_eq!(s.value_label(f), "N/A", "{f:?}");
-                let before = s.clone();
-                s.cycle(f, 1);
-                assert_eq!(s, before, "{f:?} cycled state");
+        let pages = [graphics_fields(), config_fields(), dlss_config_fields()];
+        for page in &pages {
+            for &f in page {
+                for _ in 0..CYCLE_SWEEP_STEPS {
+                    for text in [f.label().to_string(), s.value_label(f)] {
+                        assert!(
+                            !text.to_lowercase().contains("retail"),
+                            "{f:?} renders {text:?}"
+                        );
+                    }
+                    s.cycle(f, 1);
+                }
+            }
+        }
+        for section in GRAPHICS_SECTIONS
+            .iter()
+            .chain(CONFIG_SECTIONS)
+            .chain(DLSS_CONFIG_SECTIONS)
+        {
+            assert!(
+                !section.header.to_lowercase().contains("retail"),
+                "section header {:?}",
+                section.header
+            );
+        }
+    }
+
+    #[test]
+    fn parity_tags_come_from_the_shared_constants() {
+        assert_eq!(Parity::Vanilla.tag(), Some(VANILLA));
+        assert_eq!(Parity::Enhanced.tag(), Some(ENHANCED));
+        assert_eq!(Parity::Reduced.tag(), Some(REDUCED));
+        assert_eq!(Parity::Neutral.tag(), None);
+        // Off can be the faithful choice: the original client anti-aliases
+        // nothing and draws no zone shadow map.
+        assert_eq!(BoolParity::VanillaOff.of(false), Parity::Vanilla);
+        assert_eq!(BoolParity::VanillaOff.of(true), Parity::Enhanced);
+        assert_eq!(BoolParity::VanillaOn.of(false), Parity::Reduced);
+        assert_eq!(AaMode::Off.parity(), Parity::Vanilla);
+        assert_eq!(parity_label("Fade", Parity::Vanilla), "Fade (Vanilla)");
+        assert_eq!(parity_label("60 fps", Parity::Neutral), "60 fps");
+    }
+
+    #[test]
+    fn toggle_rows_read_on_or_off_in_title_case() {
+        let s = GraphicsSettings::default();
+        for &f in &[
+            GraphicsField::CameraSpring,
+            GraphicsField::VSync,
+            GraphicsField::Fullscreen,
+            GraphicsField::DebugChat,
+        ] {
+            let value = s.value_label(f);
+            let head = value.split(' ').next().unwrap_or_default();
+            assert!(
+                head == "On" || head == "Off",
+                "{f:?} reads {value:?}; toggle rows use On/Off, never on/off"
+            );
+        }
+    }
+
+    #[test]
+    fn every_dlss_config_row_is_live() {
+        // The inert RenoDX-parity placeholders were removed: a row that reads
+        // N/A on every build and cycles nothing is not an option, it is a
+        // promise. Anything on this page must respond once DLSS is selectable.
+        let mut s = GraphicsSettings {
+            dlss_supported: true,
+            dlss_menu_enabled: true,
+            ..Default::default()
+        };
+        for f in dlss_config_fields() {
+            let before = s.clone();
+            s.cycle(f, 1);
+            if s.nr_selectable() || f == GraphicsField::DlssQuality {
+                assert_ne!(s, before, "{f:?} is inert while selectable");
             }
         }
     }

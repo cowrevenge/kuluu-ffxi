@@ -1,7 +1,8 @@
 use bevy::prelude::*;
 
 use crate::graphics_settings::{
-    GraphicsField, GraphicsSettings, CONFIG_FIELDS, DLSS_CONFIG_FIELDS, GRAPHICS_FIELDS,
+    config_rows, dlss_config_rows, graphics_rows, GraphicsField, GraphicsSection, GraphicsSettings,
+    MenuRow, CONFIG_SECTIONS, DLSS_CONFIG_SECTIONS, GRAPHICS_SECTIONS,
 };
 use crate::hud::style::{self, theme};
 use crate::input_mode::{InputMode, MenuKind, MenuStack};
@@ -276,16 +277,6 @@ const STATUS_LABELS: &[&str] = &[
     "Job Points",
 ];
 
-pub const CONFIG_CONTROLS: &str = "Controls";
-const CONFIG_ENTRIES: &[&str] = &[
-    "Minimap",
-    "UI Scale",
-    "Menu Scale",
-    "Chat Layout",
-    "Debug Chat",
-    CONFIG_CONTROLS,
-];
-
 const CONTROLS_ENTRIES: &[&str] = &[
     "Standard",
     "Compact 1",
@@ -363,146 +354,73 @@ const DEBUG_ENTRIES: &[&str] = &[
     RETAIL_JOB_DISPLAY,
 ];
 
-// Grouped: display -> interface/camera -> quality -> lighting.
-const GRAPHICS_ENTRIES: &[&str] = &[
-    "Preset",
-    "Fullscreen",
-    "Windowed",
-    "VSync",
-    "Frame Rate Cap",
-    "Render Scale",
-    "FOV",
-    "Camera Spring",
-    "Anti-Aliasing",
-    "DLSS",
-    "DLSS Config",
-    "Texture Filtering",
-    "Shadow Quality",
-    "Shadow Cascades",
-    "Shadow Distance",
-    "Bloom",
-    "Volumetric Fog",
-    "Fog Quality",
-    "View Distance",
-    "Depth of Field",
-    "DoF Aperture",
-    "Zone Lines",
-    "Actor Arrival",
-    "Dynamic Lights",
-    "  Shadowed Lights",
-    "  Flicker",
-    "  Lights per Model",
-    "Shading",
-    "Model Shadow Receiving",
-    "Model Shadow Casting",
-    "Zone Shadow Casting",
-    "Reset to Minimum",
-];
+/// The settings pages whose rows are derived from `GraphicsSection` lists.
+/// `None` for every other menu, which uses `static_entries`.
+pub fn settings_rows(kind: MenuKind, dlss_supported: bool) -> Option<Vec<MenuRow>> {
+    Some(match kind {
+        MenuKind::Graphics => graphics_rows(dlss_supported),
+        MenuKind::Config => config_rows(),
+        MenuKind::GraphicsDlss => dlss_config_rows(),
+        _ => return None,
+    })
+}
 
-/// Slot of the "DLSS Config" row: directly under the DLSS on/off row — one
-/// feature, so the two stay adjacent instead of the config entry sitting at
-/// the bottom of a long page. Pushes `MenuKind::GraphicsDlss` instead of
-/// cycling (text_input::menu special-cases it).
-const fn dlss_config_slot() -> usize {
-    let mut i = 0;
-    while i < GRAPHICS_FIELDS.len() {
-        if matches!(GRAPHICS_FIELDS[i], GraphicsField::Dlss) {
-            return i + 1;
+pub fn settings_row_at(kind: MenuKind, slot: usize, dlss_supported: bool) -> Option<MenuRow> {
+    settings_rows(kind, dlss_supported)?.get(slot).copied()
+}
+
+/// The cyclable field at a cursor slot, or `None` on a header or action row.
+pub fn settings_field_at(
+    kind: MenuKind,
+    slot: usize,
+    dlss_supported: bool,
+) -> Option<GraphicsField> {
+    settings_row_at(kind, slot, dlss_supported)?.field()
+}
+
+/// Nudge a cursor off a header row in the direction it was already moving,
+/// wrapping. Headers are chrome, so the cursor never rests on one.
+pub fn settle_cursor(kind: MenuKind, dlss_supported: bool, cursor: usize, down: bool) -> usize {
+    let Some(rows) = settings_rows(kind, dlss_supported) else {
+        return cursor;
+    };
+    if rows.is_empty() {
+        return cursor;
+    }
+    let mut at = cursor.min(rows.len() - 1);
+    for _ in 0..rows.len() {
+        if rows[at].is_selectable() {
+            return at;
         }
+        at = if down {
+            (at + 1) % rows.len()
+        } else {
+            at.checked_sub(1).unwrap_or(rows.len() - 1)
+        };
+    }
+    cursor
+}
+
+/// Upper bound on a section page: one header per section plus its fields.
+/// Callers add their own action rows.
+const fn section_row_count(sections: &[GraphicsSection]) -> usize {
+    let mut total = 0;
+    let mut i = 0;
+    while i < sections.len() {
+        total += sections[i].fields.len() + 1;
         i += 1;
     }
-    panic!("GraphicsField::Dlss must be in GRAPHICS_FIELDS");
+    total
 }
-
-pub const GRAPHICS_DLSS_CONFIG_SLOT: usize = dlss_config_slot();
-
-/// Slot of "Reset to Minimum": the last row on the page.
-pub const GRAPHICS_RESET_SLOT: usize = GRAPHICS_FIELDS.len() + 1;
-
-/// The Graphics page rows as they appear in this build: when the build can't
-/// run DLSS (`dlss_supported == false`) the "DLSS" row and its "DLSS Config"
-/// action row are dropped entirely — a non-DLSS build doesn't advertise them.
-pub fn graphics_entries(dlss_supported: bool) -> Vec<&'static str> {
-    if dlss_supported {
-        return GRAPHICS_ENTRIES.to_vec();
-    }
-    // The DLSS on/off row sits directly above the config row (pinned by
-    // graphics_entries_match_field_labels); drop both slots.
-    let config_slot = GRAPHICS_DLSS_CONFIG_SLOT;
-    GRAPHICS_ENTRIES
-        .iter()
-        .enumerate()
-        .filter(|(i, _)| *i != config_slot - 1 && *i != config_slot)
-        .map(|(_, e)| *e)
-        .collect()
-}
-
-/// Slot of "Reset to Minimum" in the current layout: always the last row, one
-/// slot earlier when the DLSS rows are dropped.
-pub fn graphics_reset_slot(dlss_supported: bool) -> usize {
-    if dlss_supported {
-        GRAPHICS_RESET_SLOT
-    } else {
-        GRAPHICS_FIELDS.len() - 1
-    }
-}
-
-/// Maps a Graphics-page cursor slot onto its cyclable field, skipping the two
-/// action rows ("DLSS Config" under the DLSS on/off row, "Reset to Minimum" at
-/// the bottom). `None` for those slots. When the build can't run DLSS the page
-/// has no DLSS rows: every slot before the reset row is a field in order.
-pub fn graphics_field_at(slot: usize, dlss_supported: bool) -> Option<GraphicsField> {
-    if !dlss_supported {
-        // No action row before reset: slots 0..reset are the fields minus Dlss.
-        if slot >= GRAPHICS_FIELDS.len() - 1 {
-            return None;
-        }
-        return GRAPHICS_FIELDS
-            .iter()
-            .copied()
-            .filter(|f| !matches!(f, GraphicsField::Dlss))
-            .nth(slot);
-    }
-    if slot == GRAPHICS_DLSS_CONFIG_SLOT || slot == GRAPHICS_RESET_SLOT {
-        return None;
-    }
-    // Exactly one action row (the config row) sits before the reset row, so
-    // slots past it shift down by one against the field list.
-    let field_idx = if slot < GRAPHICS_DLSS_CONFIG_SLOT {
-        slot
-    } else {
-        slot - 1
-    };
-    GRAPHICS_FIELDS.get(field_idx).copied()
-}
-
-/// In-game DLSS Config submenu rows: the DLSS_CONFIG_FIELDS labels plus a
-/// reset row. Kept in lockstep by the graphics_dlss_entries_match_fields
-/// guard test.
-const GRAPHICS_DLSS_ENTRIES: &[&str] = &[
-    "DLSS Quality",
-    "RR Preset",
-    "SR Preset",
-    "RR Responsivity",
-    "Neural Uplift",
-    "NR Intensity",
-    "Local Tone Strength",
-    "Structure Strength",
-    "Sharpness",
-    "Reset DLSS to defaults",
-];
-
-/// Slot of "Reset DLSS to defaults": first row past the DLSS config fields.
-pub const GRAPHICS_DLSS_RESET_SLOT: usize = DLSS_CONFIG_FIELDS.len();
 
 const MAX_ENTRY_COUNT: usize = {
     let r = ROOT_ENTRIES.len();
-    let c = CONFIG_ENTRIES.len();
-    let g = GRAPHICS_ENTRIES.len();
+    let c = section_row_count(CONFIG_SECTIONS) + 1;
+    let g = section_row_count(GRAPHICS_SECTIONS) + 2;
     let e = EQUIPMENT_ENTRIES.len();
     let s = STATUS_LABELS.len();
 
-    let gd = GRAPHICS_DLSS_ENTRIES.len();
+    let gd = section_row_count(DLSS_CONFIG_SECTIONS) + 1;
 
     let d = DYNAMIC_VISIBLE_ROWS;
     let rc = if r >= c { r } else { c };
@@ -534,10 +452,8 @@ pub fn is_dynamic(kind: MenuKind) -> bool {
 pub fn entry_count(kind: MenuKind, dynamic: &DynamicMenu, dlss_supported: bool) -> usize {
     if is_dynamic(kind) {
         dynamic.rows.len().max(1)
-    } else if kind == MenuKind::Graphics {
-        graphics_entries(dlss_supported).len()
     } else {
-        static_entries(kind).len()
+        entries_for(kind, dlss_supported).len()
     }
 }
 
@@ -574,6 +490,8 @@ pub fn entry_label(kind: MenuKind, idx: usize, dynamic: &DynamicMenu) -> &str {
             .map(|r| r.label.as_str())
             .unwrap_or("<unknown>");
     }
+    // Section-derived pages need the build's DLSS support to resolve a row;
+    // callers that have it use entries_for directly.
     static_entries(kind)
         .get(idx)
         .copied()
@@ -630,13 +548,22 @@ fn empty_dynamic_hint(kind: MenuKind) -> &'static str {
     }
 }
 
+/// Every row label of a page, whichever model backs it.
+pub fn entries_for(kind: MenuKind, dlss_supported: bool) -> Vec<&'static str> {
+    match settings_rows(kind, dlss_supported) {
+        Some(rows) => rows.iter().map(|r| r.label()).collect(),
+        None => static_entries(kind).to_vec(),
+    }
+}
+
 fn static_entries(kind: MenuKind) -> &'static [&'static str] {
     match kind {
         MenuKind::Root => ROOT_ENTRIES,
-        MenuKind::Config => CONFIG_ENTRIES,
+        // Config/Graphics/GraphicsDlss are section-derived; see settings_rows.
+        MenuKind::Config => &[],
         MenuKind::Controls => CONTROLS_ENTRIES,
         MenuKind::Debug => DEBUG_ENTRIES,
-        MenuKind::Graphics => GRAPHICS_ENTRIES,
+        MenuKind::Graphics => &[],
 
         MenuKind::Magic => &["(Magic — data pending)"],
         MenuKind::Abilities => &["(Abilities — data pending)"],
@@ -654,7 +581,7 @@ fn static_entries(kind: MenuKind) -> &'static [&'static str] {
 
         MenuKind::Communication => COMMUNICATION_ENTRIES,
         MenuKind::EmoteList => &[],
-        MenuKind::GraphicsDlss => GRAPHICS_DLSS_ENTRIES,
+        MenuKind::GraphicsDlss => &[],
         // The Map screen renders its own bespoke panes; it has no generic list.
         MenuKind::Map => &[],
     }
@@ -1373,14 +1300,8 @@ pub fn update_main_menu(
 
         let label_owned: String = if is_dynamic(view.kind) {
             entry_label(view.kind, list_idx, &dynamic).to_string()
-        } else if view.kind == MenuKind::Graphics {
-            graphics_entries(settings.dlss_supported)
-                .get(list_idx)
-                .copied()
-                .unwrap_or("<unknown>")
-                .to_string()
         } else {
-            static_entries(view.kind)
+            entries_for(view.kind, settings.dlss_supported)
                 .get(list_idx)
                 .copied()
                 .unwrap_or("<unknown>")
@@ -1451,13 +1372,7 @@ fn resolve_viewport(
         let (start, end) = root_page_bounds(cursor);
         return (end, start);
     }
-    let total = if is_dynamic(kind) {
-        dynamic.rows.len().max(1)
-    } else if kind == MenuKind::Graphics {
-        graphics_entries(dlss_supported).len()
-    } else {
-        static_entries(kind).len()
-    };
+    let total = entry_count(kind, dynamic, dlss_supported);
     if total <= DYNAMIC_VISIBLE_ROWS {
         return (total, 0);
     }
@@ -1541,34 +1456,18 @@ fn format_row_body(
     snapshot: &kuluu_snapshot::SceneSnapshot,
 ) -> String {
     match kind {
-        MenuKind::Config => match CONFIG_FIELDS.get(slot).copied() {
-            Some(field) => format!(
-                "{:<16}[{}]",
-                format!("{}:", field.label()),
-                settings.value_label(field)
-            ),
-            None => label.to_string(),
-        },
-        MenuKind::Graphics => match graphics_field_at(slot, settings.dlss_supported) {
-            Some(field) => format!(
-                "{:<16}[{}]",
-                format!("{}:", field.label()),
-                settings.value_label(field)
-            ),
-
-            // The two action rows (DLSS Config, Reset to Minimum).
-            None => label.to_string(),
-        },
-        MenuKind::GraphicsDlss => match DLSS_CONFIG_FIELDS.get(slot).copied() {
-            Some(field) => format!(
-                "{:<16}[{}]",
-                format!("{}:", field.label()),
-                settings.value_label(field)
-            ),
-
-            // The trailing reset action row.
-            None => label.to_string(),
-        },
+        // Header and action rows render their label alone; only field rows
+        // carry a value column.
+        MenuKind::Config | MenuKind::Graphics | MenuKind::GraphicsDlss => {
+            match settings_field_at(kind, slot, settings.dlss_supported) {
+                Some(field) => format!(
+                    "{:<16}[{}]",
+                    format!("{}:", field.label()),
+                    settings.value_label(field)
+                ),
+                None => label.to_string(),
+            }
+        }
         MenuKind::Debug => {
             // Volume is a 0..=100 number row, not an on/off toggle.
             if label == DEBUG_VOLUME {
@@ -2187,7 +2086,7 @@ mod tests {
 
     #[test]
     fn graphics_menu_scrolls_bottom_rows_into_view() {
-        let total = GRAPHICS_ENTRIES.len();
+        let total = graphics_rows(true).len();
         assert!(
             total > DYNAMIC_VISIBLE_ROWS,
             "test presumes Graphics outgrows the viewport"
@@ -2338,108 +2237,130 @@ mod tests {
     }
 
     #[test]
-    fn config_entries_match_fields_and_keep_controls_reachable() {
-        assert_eq!(CONFIG_ENTRIES.len(), CONFIG_FIELDS.len() + 1);
-        for (entry, field) in CONFIG_ENTRIES.iter().zip(CONFIG_FIELDS) {
-            assert_eq!(*entry, field.label());
-            assert!(!GRAPHICS_ENTRIES.contains(entry));
-        }
-        assert_eq!(CONFIG_ENTRIES.last(), Some(&CONFIG_CONTROLS));
+    fn config_page_groups_fields_and_keeps_controls_reachable() {
+        use crate::graphics_settings::MenuAction;
+        let rows = config_rows();
+        assert_eq!(
+            rows.last(),
+            Some(&MenuRow::Action(MenuAction::Controls)),
+            "Controls must stay the last row of Config"
+        );
+        // Every field row is preceded, somewhere above it, by a header.
+        assert!(matches!(rows.first(), Some(MenuRow::Header(_))));
         assert_eq!(root_child_kind("Config"), Some(MenuKind::Config));
         assert!(static_entries(MenuKind::Controls).contains(&"Standard"));
         assert_eq!(pane_width_for(MenuKind::Config), GRAPHICS_PANE_WIDTH);
     }
 
     #[test]
-    fn graphics_entries_match_field_labels() {
-        assert_eq!(
-            GRAPHICS_ENTRIES.len(),
-            GRAPHICS_FIELDS.len() + 2,
-            "expected one row per field + the DLSS Config and Reset rows"
+    fn settings_pages_are_disjoint_and_have_no_duplicate_rows() {
+        let mut seen: Vec<GraphicsField> = Vec::new();
+        for page in [
+            crate::graphics_settings::graphics_fields(),
+            crate::graphics_settings::config_fields(),
+            crate::graphics_settings::dlss_config_fields(),
+        ] {
+            for f in page {
+                assert!(!seen.contains(&f), "{f:?} appears on more than one page");
+                seen.push(f);
+            }
+        }
+        assert!(
+            crate::graphics_settings::dlss_config_fields()
+                .iter()
+                .all(|f| f.is_dlss_config()),
+            "every DLSS submenu row must be flagged is_dlss_config"
         );
-        // Walk the page in order: cyclable rows carry their field's label, the
-        // two action rows sit at their pinned slots.
-        let mut field_i = 0;
-        for (slot, entry) in GRAPHICS_ENTRIES.iter().enumerate() {
-            match slot {
-                s if s == GRAPHICS_DLSS_CONFIG_SLOT => assert_eq!(*entry, "DLSS Config"),
-                s if s == GRAPHICS_RESET_SLOT => assert_eq!(*entry, "Reset to Minimum"),
-                _ => {
-                    let field = *GRAPHICS_FIELDS
-                        .get(field_i)
-                        .expect("field per cyclable row");
+        assert!(
+            !crate::graphics_settings::graphics_fields()
+                .iter()
+                .any(|f| f.is_dlss_config()),
+            "DLSS submenu rows must not also sit on the main Graphics page"
+        );
+    }
+
+    #[test]
+    fn field_rows_carry_their_field_label() {
+        for kind in [MenuKind::Graphics, MenuKind::Config, MenuKind::GraphicsDlss] {
+            for (slot, row) in settings_rows(kind, true).unwrap().iter().enumerate() {
+                if let MenuRow::Field(field) = row {
                     assert_eq!(
-                        *entry,
-                        field.label(),
-                        "row {slot} label drift: entry={:?}, field.label()={:?}",
-                        entry,
-                        field.label()
+                        settings_field_at(kind, slot, true),
+                        Some(*field),
+                        "{kind:?} slot {slot} resolves to the wrong field"
                     );
-                    field_i += 1;
+                    assert_eq!(row.label(), field.label());
                 }
             }
         }
-        // The config row must sit directly under the DLSS on/off row.
-        let dlss_slot = GRAPHICS_FIELDS
-            .iter()
-            .position(|f| matches!(f, GraphicsField::Dlss))
-            .expect("Dlss in GRAPHICS_FIELDS");
-        assert_eq!(GRAPHICS_DLSS_CONFIG_SLOT, dlss_slot + 1);
     }
 
     #[test]
-    fn graphics_entries_drop_dlss_rows_when_unsupported() {
-        // The supported layout must be exactly the static list — no drift.
-        assert_eq!(graphics_entries(true), GRAPHICS_ENTRIES.to_vec());
-
-        let bare = graphics_entries(false);
-        assert!(!bare.iter().any(|e| *e == "DLSS" || *e == "DLSS Config"));
-        // One row per field minus the DLSS on/off row, plus the reset row.
-        assert_eq!(bare.len(), GRAPHICS_FIELDS.len());
-        assert_eq!(*bare.last().unwrap(), "Reset to Minimum");
-
-        // Slot mapping: fields keep their order with the DLSS slot removed,
-        // and the reset row maps to no field.
-        let dlss_i = GRAPHICS_FIELDS
+    fn graphics_rows_drop_both_dlss_rows_when_unsupported() {
+        use crate::graphics_settings::MenuAction;
+        let bare = graphics_rows(false);
+        assert!(!bare
             .iter()
-            .position(|f| matches!(f, GraphicsField::Dlss))
-            .expect("Dlss in GRAPHICS_FIELDS");
-        assert_eq!(graphics_field_at(0, false), Some(GRAPHICS_FIELDS[0]));
-        // The slot that used to be the DLSS row now carries the next field.
+            .any(|r| *r == MenuRow::Field(GraphicsField::Dlss)
+                || *r == MenuRow::Action(MenuAction::DlssConfig)));
         assert_eq!(
-            graphics_field_at(dlss_i, false),
-            Some(GRAPHICS_FIELDS[dlss_i + 1])
+            bare.last(),
+            Some(&MenuRow::Action(MenuAction::ResetToMinimum))
         );
-        let reset = graphics_reset_slot(false);
-        assert_eq!(reset, GRAPHICS_FIELDS.len() - 1);
-        assert_eq!(graphics_field_at(reset, false), None);
-        // The supported layout is unchanged by the new parameter.
-        assert_eq!(graphics_field_at(GRAPHICS_DLSS_CONFIG_SLOT, true), None);
-        assert_eq!(graphics_reset_slot(true), GRAPHICS_RESET_SLOT);
+
+        let full = graphics_rows(true);
+        let dlss = full
+            .iter()
+            .position(|r| *r == MenuRow::Field(GraphicsField::Dlss))
+            .expect("DLSS row present when supported");
+        assert_eq!(
+            full[dlss + 1],
+            MenuRow::Action(MenuAction::DlssConfig),
+            "the config row must sit directly under the DLSS on/off row"
+        );
+        assert_eq!(bare.len(), full.len() - 2);
     }
 
     #[test]
-    fn graphics_dlss_entries_match_fields() {
+    fn the_cursor_never_rests_on_a_header() {
+        for kind in [MenuKind::Graphics, MenuKind::Config, MenuKind::GraphicsDlss] {
+            for dlss in [true, false] {
+                let rows = settings_rows(kind, dlss).unwrap();
+                for (slot, _) in rows.iter().enumerate() {
+                    for down in [true, false] {
+                        let settled = settle_cursor(kind, dlss, slot, down);
+                        assert!(
+                            rows[settled].is_selectable(),
+                            "{kind:?} slot {slot} settled onto header row {settled}"
+                        );
+                    }
+                }
+                // Opening a page puts the cursor at 0, which is a header.
+                assert!(rows[settle_cursor(kind, dlss, 0, true)].is_selectable());
+            }
+        }
+    }
+
+    #[test]
+    fn enhanced_only_rows_sit_in_the_trailing_group() {
+        use crate::graphics_settings::{ENHANCED_SECTION, GRAPHICS_SECTIONS};
+        let last = GRAPHICS_SECTIONS.last().expect("sections");
         assert_eq!(
-            GRAPHICS_DLSS_ENTRIES.len(),
-            DLSS_CONFIG_FIELDS.len() + 1,
-            "expected one row per DLSS config field + a trailing reset row"
+            last.header, ENHANCED_SECTION,
+            "the no-Vanilla-equivalent group must be the last section on the page"
         );
-        for (i, field) in DLSS_CONFIG_FIELDS.iter().enumerate() {
-            assert_eq!(
-                GRAPHICS_DLSS_ENTRIES[i],
-                field.label(),
-                "row {i} label drift"
+        for section in GRAPHICS_SECTIONS
+            .iter()
+            .filter(|s| s.header != ENHANCED_SECTION)
+        {
+            assert!(
+                !section.fields.contains(&GraphicsField::CameraSpring)
+                    && !section.fields.contains(&GraphicsField::DepthOfField)
+                    && !section.fields.contains(&GraphicsField::BloomIntensity),
+                "{} must not hold a row the original client never had",
+                section.header
             );
         }
-        assert_eq!(
-            GRAPHICS_DLSS_ENTRIES[GRAPHICS_DLSS_RESET_SLOT],
-            "Reset DLSS to defaults"
-        );
-        assert!(
-            DLSS_CONFIG_FIELDS.iter().all(|f| f.is_dlss_config()),
-            "every submenu row must be flagged is_dlss_config"
-        );
     }
 
     /// One-slot snapshot builder for the LSB 0x037 usability gate tests

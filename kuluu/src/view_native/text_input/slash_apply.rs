@@ -1,4 +1,5 @@
 use super::*;
+use kuluu_render::ParityValue;
 
 fn minimap_retail_desc(state: &kuluu_render::minimap::MinimapState, zone: Option<u16>) -> String {
     use kuluu_render::minimap::RetailStatus;

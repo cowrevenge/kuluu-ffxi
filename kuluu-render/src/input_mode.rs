@@ -209,9 +209,9 @@ pub enum MenuKind {
 
     Graphics,
 
-    /// DLSS Config submenu pushed from the Graphics list's "DLSS Config" row
-    /// (hud::menu::GRAPHICS_DLSS_CONFIG_SLOT): the quality tier plus the inert
-    /// RenoDX-parity placeholder rows.
+    /// DLSS Config submenu pushed from the Graphics list's "DLSS Config" row:
+    /// the quality tier plus the Neural Uplift block
+    /// (graphics_settings::DLSS_CONFIG_SECTIONS).
     GraphicsDlss,
 
     Magic,

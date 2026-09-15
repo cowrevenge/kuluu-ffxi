@@ -144,9 +144,6 @@ fn parse_graphics_settings(bytes: &[u8]) -> Result<GraphicsSettings> {
     if let Some(x) = take(&v, "camera_spring") {
         s.camera_spring = x;
     }
-    if let Some(x) = take(&v, "menu_scale") {
-        s.menu_scale = x;
-    }
     if let Some(x) = take::<DynamicLights>(&v, "dynamic_lights") {
         s.dynamic_lights = x;
     }

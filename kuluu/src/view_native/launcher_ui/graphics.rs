@@ -7,9 +7,10 @@ use bevy::prelude::*;
 use bevy::ui::{ComputedNode, Overflow, ScrollPosition};
 use bevy::ui_widgets::{Activate, ControlOrientation, Scrollbar, ScrollbarThumb};
 
-use kuluu_render::{
-    GraphicsField, GraphicsSettings, CONFIG_FIELDS, DLSS_CONFIG_FIELDS, GRAPHICS_FIELDS,
+use kuluu_render::graphics_settings::{
+    GraphicsSection, CONFIG_SECTIONS, DLSS_CONFIG_SECTIONS, GRAPHICS_SECTIONS,
 };
+use kuluu_render::{GraphicsField, GraphicsSettings};
 
 use super::common::{
     hint, panel_node_capped, row, screen_root, spawn_breadcrumb, title, Crumb, ScrollRegion,
@@ -24,6 +25,10 @@ const LABEL_WIDTH: f32 = 172.0;
 const VALUE_WIDTH: f32 = 110.0;
 const ROW_COLUMN_GAP: f32 = 6.0;
 const LIST_ROW_GAP: f32 = 4.0;
+// Section titles sit between the 12px hint text and the row labels, in the
+// same cyan family as the panel title so a group reads as structure.
+const SECTION_HEADER_FONT_SIZE: f32 = 14.0;
+const SECTION_HEADER_COLOR: Color = Color::srgb(0.45, 0.85, 0.9);
 const PANEL_WIDTH: f32 = 432.0;
 
 /// Cap the panel at a fraction of the viewport so a tall settings list scrolls
@@ -146,17 +151,23 @@ pub(super) fn spawn_ui(
                                     ScrollRegion,
                                 ))
                                 .with_children(|list| {
-                                    for &field in
-                                        GRAPHICS_FIELDS.iter().filter(|f| !f.is_advanced())
-                                    {
-                                        spawn_field_row(
-                                            list,
-                                            field,
-                                            &settings,
-                                            RowGroup::Main,
-                                            open,
-                                            dlss_open,
-                                        );
+                                    for section in GRAPHICS_SECTIONS {
+                                        if !section_has_visible_row(section, &settings) {
+                                            continue;
+                                        }
+                                        list.spawn(section_header(section.header));
+                                        for &field in
+                                            section.fields.iter().filter(|f| !f.is_advanced())
+                                        {
+                                            spawn_field_row(
+                                                list,
+                                                field,
+                                                &settings,
+                                                RowGroup::Main,
+                                                open,
+                                                dlss_open,
+                                            );
+                                        }
                                     }
 
                                     list.spawn(row()).with_children(|r| {
@@ -184,7 +195,10 @@ pub(super) fn spawn_ui(
                                         );
                                     });
 
-                                    for &field in GRAPHICS_FIELDS.iter().filter(|f| f.is_advanced())
+                                    for &field in GRAPHICS_SECTIONS
+                                        .iter()
+                                        .flat_map(|s| s.fields.iter())
+                                        .filter(|f| f.is_advanced())
                                     {
                                         spawn_field_row(
                                             list,
@@ -227,7 +241,9 @@ pub(super) fn spawn_ui(
                                         );
                                     });
 
-                                    for &field in DLSS_CONFIG_FIELDS.iter() {
+                                    for &field in
+                                        DLSS_CONFIG_SECTIONS.iter().flat_map(|s| s.fields.iter())
+                                    {
                                         spawn_field_row(
                                             list,
                                             field,
@@ -360,6 +376,29 @@ enum RowGroup {
     Main,
     Advanced,
     Dlss,
+}
+
+/// A section title above its rows. Styled like `hint` but brighter, so the
+/// grouping reads without competing with the row labels.
+fn section_header(text: &'static str) -> impl Bundle {
+    (
+        Text::new(text),
+        TextFont {
+            font_size: SECTION_HEADER_FONT_SIZE.into(),
+            ..default()
+        },
+        TextColor(SECTION_HEADER_COLOR),
+        ThemedText,
+    )
+}
+
+/// A section contributes nothing to the main list when every row it owns is
+/// hidden (an all-advanced section, or the DLSS row on a build without it).
+fn section_has_visible_row(section: &GraphicsSection, settings: &GraphicsSettings) -> bool {
+    section
+        .fields
+        .iter()
+        .any(|f| !f.is_advanced() && (settings.dlss_supported || *f != GraphicsField::Dlss))
 }
 
 fn spawn_field_row(
@@ -588,8 +627,11 @@ pub(super) fn spawn_config_ui(
                     panel.spawn(hint(
                         "Interface preferences. Changes are saved automatically.",
                     ));
-                    for &field in CONFIG_FIELDS {
-                        spawn_field_row(panel, field, &settings, RowGroup::Main, false, false);
+                    for section in CONFIG_SECTIONS {
+                        panel.spawn(section_header(section.header));
+                        for &field in section.fields {
+                            spawn_field_row(panel, field, &settings, RowGroup::Main, false, false);
+                        }
                     }
                     panel
                         .spawn(button_bundle(

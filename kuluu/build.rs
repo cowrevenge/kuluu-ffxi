@@ -1,5 +1,10 @@
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-changed=assets/branding/kuluu.rc");
+    println!("cargo:rerun-if-changed=assets/branding/kuluu.ico");
+    embed_resource::compile_for("assets/branding/kuluu.rc", ["kuluu"], embed_resource::NONE)
+        .manifest_required()
+        .expect("compile the Kuluu Windows icon resource");
 
     // The launcher footer stamps the build so a bug report identifies its
     // artifact. Cargo exposes the resolved target triple to build scripts only;

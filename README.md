@@ -1,3 +1,6 @@
+<p align="center">
+  <img src="kuluu/assets/branding/png/kuluu-512.png" alt="Kuluu: a moss-green curled tail bearing three stars and an amber lantern" width="192" height="192">
+</p>
 <h1 align="center">Kuluu</h1>
 
 <p align="center">
@@ -381,6 +384,32 @@ behavior and re-express it in our own code; don't copy source in. The most
 useful one is [XIM](https://xim.pages.dev/), a from-scratch browser FFXI client
 (GPL-3). See [`research/README.md`](research/README.md) for the full list and
 the reference-only policy.
+
+## Project icon
+
+The Southern Watcher mark combines a curled green tail, an amber lantern,
+and three stars. It is original AI-generated artwork inspired by FFXI's
+Tonberry lantern and constellation lore, not an official Kuluu crest or an
+extracted game asset. The star arrangement is an interpretation.
+
+The transparent source is [`kuluu-master.png`](kuluu/assets/branding/kuluu-master.png).
+Its generation prompt and provenance are in [`generation.json`](kuluu/assets/branding/generation.json).
+On macOS, regenerate the PNG sizes, Windows ICO, macOS ICNS, and browser
+copies with `bash scripts/export-icons.sh` (requires `sips` and Python 3).
+Generated files are committed so builds do not need image tools.
+
+Linux release archives include `install-local.sh`; run it after extracting
+to install the binary and desktop icon under `~/.local` (Python 3 required).
+macOS archives include `Kuluu.app`, which can be moved to Applications, plus
+the standalone command-line binary. Windows executables embed the icon.
+Native builds open the launcher when started without arguments.
+`kuluu steam-shortcut install` installs the default Steam shortcut icon
+while preserving a custom icon; close Steam before running it.
+
+The browser viewer uses the same mark for its favicon and web manifest.
+Android and iOS native packages do not exist yet; their adaptive/layered
+icons should derive from this master with platform-specific backgrounds
+and safe-area padding.
 
 ## License & legal
 

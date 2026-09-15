@@ -1,3 +1,4 @@
+mod app_icon;
 pub mod bridge;
 pub mod camera_collision;
 pub mod collision_bvh;
@@ -366,6 +367,7 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
     let mut plugins = DefaultPlugins.set(WindowPlugin {
         primary_window: Some(Window {
             title: format!("kuluu — {server}"),
+            name: Some(app_icon::APP_ID.into()),
             resolution: resolution.into(),
             mode: window_mode,
             // Lets gamescope surface the Steam Deck's on-screen keyboard when a
@@ -395,6 +397,7 @@ pub fn run(args: NativeRunArgs) -> Result<()> {
             plugin_group.disable::<bevy::render::pipelined_rendering::PipelinedRenderingPlugin>();
     }
     app.add_plugins(plugin_group);
+    app_icon::install(&mut app);
     app.add_plugins(walker::WalkerPlugin);
     app.add_systems(
         Update,

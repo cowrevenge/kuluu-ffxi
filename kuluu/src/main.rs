@@ -140,7 +140,14 @@ fn main() -> Result<()> {
         .install_default()
         .expect("failed to install rustls default crypto provider");
 
-    let args = Args::parse();
+    let cli_args = std::env::args_os().collect::<Vec<_>>();
+    #[cfg(feature = "native-window")]
+    let cli_args = if cli_args.len() == 1 {
+        cli_args.into_iter().chain(["play".into()]).collect()
+    } else {
+        cli_args
+    };
+    let args = Args::parse_from(cli_args);
 
     let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));

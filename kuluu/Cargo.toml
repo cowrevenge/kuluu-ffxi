@@ -6,7 +6,7 @@ license.workspace = true
 repository.workspace = true
 # dist's MSI (WiX) installer requires an authors field on the shipped package.
 authors.workspace = true
-description = "TUI/agent-driven client for LSB/Phoenix FFXI private servers."
+description = "An open-source FINAL FANTASY XI client for community-run private servers."
 
 [package.metadata.wix]
 upgrade-guid = "8A763252-3E78-40EC-892D-5F38AEBE713C"
@@ -43,6 +43,7 @@ default = ["native-window"]
 # main thread on macOS, so main.rs handles the dispatch specially when
 # this feature is active.
 native-window = [
+    "dep:winit",
     "dep:bevy",
     "dep:bevy_framepace",
     "dep:arboard",
@@ -109,6 +110,7 @@ enhanced-neural-uplift = ["dlss", "kuluu-render/enhanced-neural-uplift"]
 debug-menu = ["kuluu-render?/debug-menu"]
 
 [dependencies]
+winit = { version = "0.30", default-features = false, optional = true }
 kuluu-session = { path = "../kuluu-session" }
 ffxi-proto = { path = "../ffxi-proto" }
 ffxi-vocab = { path = "../ffxi-vocab" }
@@ -190,3 +192,6 @@ tempfile = "3"
 # bevy_ecs routes failed-command diagnostics through the `log` facade; tests
 # install a counting logger to assert zone teardown never reaches it.
 log = "0.4"
+
+[build-dependencies]
+embed-resource = "3.0"

@@ -85,7 +85,7 @@ jobs:
         run: |
           mkdir -p dist
           strip target/release/kuluu
-          tar -C target/release -czf "dist/kuluu-${TAG}-x86_64-linux.tar.gz" kuluu
+          bash scripts/package-linux.sh target/release/kuluu "dist/kuluu-${TAG}-x86_64-linux.tar.gz"
 
       - uses: actions/upload-artifact@v7
         with:
@@ -115,7 +115,7 @@ jobs:
         run: |
           mkdir -p dist
           strip target/release/kuluu
-          tar -C target/release -czf "dist/kuluu-${TAG}-aarch64-linux.tar.gz" kuluu
+          bash scripts/package-linux.sh target/release/kuluu "dist/kuluu-${TAG}-aarch64-linux.tar.gz"
 
       - uses: actions/upload-artifact@v7
         with:
@@ -160,7 +160,7 @@ jobs:
           # strip invalidates the linker's ad-hoc signature on arm64, which makes
           # the binary fail to launch ("killed: 9"); re-sign ad-hoc to restore it.
           codesign --force --sign - target/release/kuluu
-          tar -C target/release -czf "dist/kuluu-${TAG}-aarch64-macos.tar.gz" kuluu
+          bash scripts/package-macos.sh target/release/kuluu "dist/kuluu-${TAG}-aarch64-macos.tar.gz" "$TAG"
 
       - uses: actions/upload-artifact@v7
         with:

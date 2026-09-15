@@ -115,6 +115,7 @@ pub struct SpecialPoseStep {
 ///   * a hidden->visible transition runs 'init' (the DAT's load routine) on retail's fresh
 ///     actor, which has no slot: the pose is held only for the routine's AnimationLock length,
 ///     then falls to idle even if the server keeps the sub set.
+///
 /// A sub change to zero clears the slot but leaves the last-triggered routine selected, so the
 /// pose pass can hold it for the routine's lock before settling. While hidden nothing triggers:
 /// retail has no live actor to run it on; the resurface replays 'init'.

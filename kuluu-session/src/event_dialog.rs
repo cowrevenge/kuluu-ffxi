@@ -151,7 +151,7 @@ pub struct DialogSession {
     entity_positions: std::collections::HashMap<u32, ffxi_event::vm::scene::EventPosition>,
     /// The retail entity Type byte (ent+0xEE) of every 0x0E'd entity, keyed by
     /// the entity's server id and target index: the input the VM's 0x5B/0x66
-    /// load gate reads (Cow_doc/disassmembly_docs/event_vm.md §10). Fed from
+    /// load gate reads. Fed from
     /// [`crate::session::event_transport::receive`]; an absent entry is Type 0.
     entity_types: std::collections::HashMap<u32, u8>,
     /// Motion holds awaiting the renderer's finish report, keyed by the wire

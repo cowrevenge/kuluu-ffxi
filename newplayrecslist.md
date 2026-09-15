@@ -4,11 +4,8 @@ Source of truth: master block `0x7FFFFFF0`, zone-230 event DAT `ROM/21/39.DAT`, 
 Every line below is one or more instructions in execution order; offsets are absolute into the
 master block's data region (traceable in scratchpad `evt503_master_disasm.txt`).
 
-**Related docs:** how the retail event VM works end-to-end and how kuluu interprets it —
-`Cow_doc/cs_docs/cutscenes.md`; the authoritative retail binary dispatch table —
-`Cow_doc/disassmembly_docs/event_opcode_table.md` (219-entry `ExecProg` jump table from FFXiMain.dll);
-per-opcode semantics — `research/XiEvents/OpCodes/0xNNNN.md`. This file is the per-ask breakdown +
-phase history for event 503 specifically.
+**Related docs:** per-opcode semantics — `research/XiEvents/OpCodes/0xNNNN.md`.
+This file is the per-ask breakdown + phase history for event 503 specifically.
 
 ## Cast (server ids)
 
@@ -207,9 +204,9 @@ The WAIT* chain is correct and unit-tested, end to end:
 ## EndPara WZ[1]-vs-WZ[0] — resolved NOT-A-BUG (Fix #6, no code change)
 - Retail QUERYWAIT stores `selectedIndex - 1` into **WZ[0]** (research/XiEvents/OpCodes/0x0025.md); kuluu `select_choice` → `work_zone[0]` — matches.
 - Retail c2s 0x05B EndPara = **PTR_Work_Zone[1]** in BOTH Mode 0 and Mode 1 (research/XiPackets/world/client/0x005B/README.md; same for 0x005C); kuluu `end_para = work_zone(1)` (`runner.rs`) — matches.
-- Event 503's bytecode **never writes WZ[1]** (linear scan of the master block; only work-slot write is GET_STORE→WZ[2]=item 536). So retail's EndPara for this event is a stale zone-shared Work_Zone value (Work_Zone persists across events, research/XiEvents/Event VM Functions.md `getworkofs`); kuluu's per-event work zone sends 0 where retail might send stale data — pre-existing modeling decision that only affects events that never write WZ[1] themselves.
+- Event 503's bytecode **never writes WZ[1]** (linear scan of the master block; only work-slot write is GET_STORE→WZ[2]=item 536). So retail's EndPara for this event is a stale zone-shared Work_Zone value (Work_Zone persists across events, research/XiEvents/Event VM Functions.md `getworkofs`); kuluu's Work_Zone is fresh per event (retail's persists across events in the zone), so kuluu sends EndPara=0 where retail may send a zone-stale value — pre-existing modeling decision, no observable difference for this event.
 - Server side: LSB `vendor/server/src/map/packets/c2s/0x05b_eventend.cpp` uses the result for OnEventUpdate/OnEventFinish Lua + cutscene-option lock; `EventInfo::option` is never set non-zero in C++. **SSD zone handlers are EMPTY** (`vendor/server/scripts/zones/Southern_San_dOria/Zone.lua onEventUpdate/onEventFinish`) → EndPara has zero gameplay effect for event 503.
-- Known deviation (documented, not fixed): kuluu does not send a Mode=1 UpdatePending 0x05B on menu select (`session/mod.rs` sends EVENT_END only at end); even if it did, its EndPara would be the stale WZ[1] and SSD's handler is empty → no observable difference for event 503.
+- Known deviation (documented, not fixed): kuluu does not send a Mode=1 UpdatePending 0x05B on menu select (`session/mod.rs` sends EVENT_END only at end); even if it did, its EndPara would be 0 (event 503 never writes WZ[1]) and SSD's handler is empty → no observable difference for event 503.
 
 ## Phase 3 RESULTS (all fixes landed; test counts after this phase)
 - **Fix #4 MAP_TUTORIAL/MAP_MARKER/CLOSE_MAP (H1/H3)** — GREEN: cue arms in `ffxi-event` + session/snapshot plumbing, new `kuluu/src/view_native/text_input/event_map.rs` (5 tests), map-screen dialog routing.

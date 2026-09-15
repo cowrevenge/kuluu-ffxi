@@ -316,6 +316,13 @@ run_comments() {
     bad=1
   fi
 
+  hits=$(printf '%s\n' "$comments" | grep -E "//.*$CR_RE_COW_DOC" || true)
+  if [ -n "$hits" ]; then
+    echo "checks: comments - citation to a local-only Cow_doc path nobody else has. Restate the fact against a public anchor (research/, the code, a regression test) or delete the citation:" >&2
+    printf '%s\n' "$hits" | cut -c1-200 | sed 's/^/  /' >&2
+    bad=1
+  fi
+
   # Every cited in-tree path must exist. vendor/ and research/ roots are only
   # checked when that submodule (or local clone) is populated; docs/ never
   # exists (the tree was retired), so any docs/ citation is dangling.

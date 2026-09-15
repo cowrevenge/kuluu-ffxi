@@ -1,9 +1,9 @@
 //! Camera chunk census (B5): chunk-kind counts per file and the AttachmentInfo
 //! distribution of kind 0x06 chunks, on the retail 19-bit chunk walk and on the
 //! xim-style 20-bit walk, plus an install-wide recount of attached routes.
-//! Reconciles Fix 4's "zero camera chunks in ROM/0/23.DAT" (fixToDo/Fix4.md)
-//! with E18's "317 0x06 chunks" (Cow_doc/disassmembly_docs/event_vm.md
-//! section 8, evidence K).
+//! The two walks are run side by side so a file one walk reads as camera-free
+//! (an earlier pass found zero 0x06 chunks in ROM/0/23.DAT) can be checked
+//! against the install-wide 0x06 count.
 //!
 //! Usage: cargo run -p ffxi-event --example zz-camera-census -- <install root>
 //! where the install root is the folder containing ROM/.

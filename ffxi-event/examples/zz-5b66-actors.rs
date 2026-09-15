@@ -1,7 +1,7 @@
 //! B6: distribution of the 0x5B/0x66 actor operands across the retail event
 //! DAT corpus. The entity Type gate the two motion resource readers apply
-//! (Cow_doc/disassmembly_docs/event_vm.md §4.2–4.3, §10) runs on the entity
-//! the opcode names, so the host must know which kind of lookup the corpus
+//! runs on the entity the opcode names, so the host must know which kind of
+//! lookup the corpus
 //! actually authors: the event-entity selector, a local-player selector, a
 //! party/alliance selector, a literal server id, or a small default-handler
 //! fallback.

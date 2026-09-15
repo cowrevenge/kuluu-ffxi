@@ -585,11 +585,9 @@ impl LookData {
     }
 
     /// The retail entity Type byte (ent+0xEE) this 0x0E payload's SubKind
-    /// dispatch writes — the input the 0x5B/0x66 motion resource readers' load
-    /// gate reads (Cow_doc/disassmembly_docs/event_vm.md §10: the word at
-    /// [`Self::LOOK_BODY_OFFSET`] & 7 selects the eight-entry jump table; the
-    /// vendored XiClient's RecvCharNpc switch mirrors it,
-    /// research/XiClient/src/XIClient/source/Game/Net/Packets/s2c/0x00E.cpp).
+    /// dispatch writes — the input the 0x5B/0x66 motion resource readers'
+    /// load gate reads. The vendored XiClient's RecvCharNpc switch mirrors
+    /// the SubKind dispatch (research/XiClient/src/XIClient/source/Game/Net/Packets/s2c/0x00E.cpp).
     /// CHAR_PC sets Type 0.
     pub fn retail_type(opcode: u16, body: &[u8]) -> Option<u8> {
         use crate::map::s2c;

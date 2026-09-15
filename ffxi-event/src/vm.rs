@@ -403,9 +403,9 @@ pub struct EventVm {
     move_holds: Vec<MoveHold>,
     /// The retail entity Type byte (ent+0xEE) of the actors this VM's
     /// 0x5B/0x66 opcodes name, keyed by the actor's server id and target
-    /// index: the gate both motion resource readers apply before loading
-    /// (Cow_doc/disassmembly_docs/event_vm.md §4.2–4.3, §10). An absent
-    /// entry is Type 0 — retail's value when the entity has no back-ptr.
+    /// index: the gate both motion resource readers apply before loading.
+    /// An absent entry is Type 0 — retail's value when the entity has no
+    /// back-ptr.
     actor_types: std::collections::HashMap<u32, u8>,
     /// Actions this VM's own 0x45/0x5B opcodes started within the current step,
     /// before the host has drained the cues and armed their holds. They bridge a
@@ -756,8 +756,8 @@ impl EventVm {
     }
 
     /// The retail entity Type byte (ent+0xEE) the 0x5B/0x66 gate applies to
-    /// `actor` (Cow_doc/disassmembly_docs/event_vm.md §4.2–4.3, §10): 0x5B
-    /// loads only for Type {1,2,7,8}, 0x66 only for {0,1,6}. Resolution stays
+    /// `actor`: 0x5B loads only for Type {1,2,7,8}, 0x66 only for {0,1,6}.
+    /// Resolution stays
     /// in the hold-actor space: the local player is CHAR_PC (Type 0), the
     /// event-entity selector and the default-handler fallback resolve to the
     /// running scene's actor (falling back to the speaker's target index when
@@ -1322,9 +1322,8 @@ impl EventVm {
                     };
                     let key = self.fourcc_at(LOADEXTSCHEDULER_KEY_OFS);
                     let actor1 = ActorLookup(self.eventgetcode2(LOADEXTSCHEDULER_ACTOR1_OFS));
-                    // The gate runs before the key check, retail's order
-                    // (Cow_doc/disassmembly_docs/event_vm.md §4.1): a refused
-                    // load leaves no resource entry, so SetAction is a silent
+                    // The gate runs before the key check: a refused load
+                    // leaves no resource entry, so SetAction is a silent
                     // no-op — no cue, no hold, still the full advance.
                     let accepted = if tpc {
                         matches!(self.actor_type(actor1), 0 | 1 | 6)
@@ -2619,8 +2618,8 @@ mod tests {
         }
     }
 
-    /// The 0x5B gate (Cow_doc/disassmembly_docs/event_vm.md §4.2):
-    /// ReadEventMotionRes loads only for entity Type {1,2,7,8}. One accepted
+    /// The 0x5B gate: ReadEventMotionRes loads only for entity Type
+    /// {1,2,7,8}. One accepted
     /// and one refused Type, pinned on the cue and on the same-batch hold a
     /// following 0x53 parks on.
     #[test]
@@ -2661,8 +2660,8 @@ mod tests {
         );
     }
 
-    /// The 0x66 gate (Cow_doc/disassmembly_docs/event_vm.md §4.3):
-    /// ReadTpcEventMotionRes loads only for entity Type {0,1,6}.
+    /// The 0x66 gate: ReadTpcEventMotionRes loads only for entity Type
+    /// {0,1,6}.
     #[test]
     fn loadextscheduler2_gates_on_the_entity_type() {
         const PACKAGE: u32 = 20;

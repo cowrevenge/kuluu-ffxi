@@ -14,7 +14,7 @@ use kuluu_snapshot::Vec3 as WireVec3;
 
 use super::consts::{LATERAL_OFFSET, LOOKAHEAD, LOOKBEHIND};
 use super::field::{self, Field, SupportProbe};
-use super::{StepResult, VerticalDecision, WalkMode};
+use super::{HorizontalOutcome, StepResult, VerticalDecision, WalkMode};
 
 /// Ring length: 120 ticks = 2 s at the production 60 Hz.
 pub const RING_LEN: usize = 120;
@@ -39,6 +39,9 @@ pub struct FieldDebug {
     pub enabled: bool,
     /// Last two ticks' vertical decisions, oldest first (panel header).
     decisions: [Option<VerticalDecision>; 2],
+    /// Last two ticks' horizontal outcomes, oldest first (panel header +
+    /// the blocking-contact gizmo).
+    outcomes: [Option<HorizontalOutcome>; 2],
     ring: [Option<(Option<f32>, Option<f32>, f32)>; RING_LEN], // (h0, target, y)
 
     head: usize,
@@ -56,6 +59,7 @@ impl Default for FieldDebug {
             vy: 0.0,
             enabled: false,
             decisions: [None, None],
+            outcomes: [None, None],
             ring: std::array::from_fn(|_| None),
             head: 0,
             count: 0,
@@ -114,7 +118,7 @@ impl FieldDebug {
 /// Sample the field at a wire position and record it into the ring. Called from
 /// dispatch at both `walker::step` sites so panel and gizmos show the same
 /// tick's data that moved the player; `res` is that tick's StepResult (mode,
-/// vy, decision).
+/// vy, decision, outcome).
 pub fn record_tick(
     dbg: &mut FieldDebug,
     geom: &MzbCollisionGeometry,
@@ -160,6 +164,9 @@ pub fn record_tick(
     let prev = dbg.decisions[1];
     dbg.decisions[0] = prev;
     dbg.decisions[1] = Some(res.decision);
+    let prev_out = dbg.outcomes[1];
+    dbg.outcomes[0] = prev_out;
+    dbg.outcomes[1] = Some(res.outcome);
 }
 
 pub fn sync_field_debug_enabled(
@@ -338,6 +345,29 @@ pub fn draw_walker_field_gizmos(
         a + Vec3::new(field.m.x * 0.5, 0.0, field.m.y * 0.5),
         Color::srgb(0.2, 0.9, 1.0),
     );
+
+    // Last tick's blocking contact: where the wall or the mob withheld the
+    // move, so the cause is visible in-world, not just in the panel. Walls
+    // reuse the WallAhead magenta; an actor the reject red.
+    if let Some(outcome) = dbg.outcomes[1] {
+        if let Some(c) = outcome.contact_point() {
+            let color = match outcome {
+                HorizontalOutcome::ActorContact { .. } => Color::srgb(1.0, 0.2, 0.2),
+                _ => Color::srgb(1.0, 0.2, 1.0),
+            };
+            let pos = Vec3::new(c.x, 0.0, c.y);
+            gizmos.sphere(
+                Isometry3d::from_translation(pos + Vec3::Y * (dbg.feet_y + 0.05)),
+                0.08,
+                color,
+            );
+            gizmos.line(
+                pos + Vec3::Y * (dbg.feet_y - 0.15),
+                pos + Vec3::Y * (dbg.feet_y + 0.25),
+                color,
+            );
+        }
+    }
 }
 
 /// Zone/DAT header cache for the snapshot system: resolve on effective-zone-key
@@ -409,6 +439,10 @@ pub fn update_stair_debug_snapshot_system(
             dbg.decisions[0].map(|d| d.label()),
             dbg.decisions[1].map(|d| d.label()),
         ],
+        outcomes: [
+            dbg.outcomes[0].map(|o| o.label()),
+            dbg.outcomes[1].map(|o| o.label()),
+        ],
         h0: field.h0,
         target: field.target,
         g_along: field.g.x,
@@ -448,6 +482,7 @@ mod tests {
             feet_z: 0.0,
             mode: WalkMode::default(),
             decision: VerticalDecision::Flat,
+            outcome: HorizontalOutcome::NoInput,
         };
         let mut dbg = FieldDebug::default();
         record_tick(&mut dbg, &geom, 0.0, 0.0, 0.0, 0, 0.0, &res);

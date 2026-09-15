@@ -122,6 +122,9 @@ fn build_status_text(snap: &StairDebugSnapshot) -> String {
     let d0 = f.decisions[0].as_deref().unwrap_or("-");
     let d1 = f.decisions[1].as_deref().unwrap_or("-");
     out.push_str(&format!("decision: {} -> {}\n", d0, d1));
+    let o0 = f.outcomes[0].as_deref().unwrap_or("-");
+    let o1 = f.outcomes[1].as_deref().unwrap_or("-");
+    out.push_str(&format!("move    : {} -> {}\n", o0, o1));
     out.push_str(&format!(
         "y/h0/tgt: {:+.3} / {} / {}\n",
         snap.player_y,
@@ -246,6 +249,9 @@ pub struct FieldSnapshot {
     /// Last two ticks' vertical decisions, oldest first (`VerticalDecision`
     /// as strings; None before the second tick).
     pub decisions: [Option<String>; 2],
+    /// Last two ticks' horizontal outcomes, oldest first (`HorizontalOutcome`
+    /// as strings; None before the second tick).
+    pub outcomes: [Option<String>; 2],
     /// Floor under the footprint per the support-probe rule; None airborne.
     pub h0: Option<f32>,
     /// Walking target: envelope when a staircase is in view, else h0 direct.

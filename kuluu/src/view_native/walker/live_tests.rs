@@ -1812,10 +1812,10 @@ fn horizontal_outcome_wall_hold_at_inside_corner() {
     let mut state = Walker::default();
     let dt = 1.0 / 60.0;
     let m = RUN * dt / 2.0f32.sqrt(); // diagonal at run speed
-    // Walk diagonally into the corner's point from the open quadrant: the
-    // slide along the first wall dead-ends on the second, so the body stops
-    // at the corner's standoff. The tick displacement must never exceed the
-    // input.
+                                      // Walk diagonally into the corner's point from the open quadrant: the
+                                      // slide along the first wall dead-ends on the second, so the body stops
+                                      // at the corner's standoff. The tick displacement must never exceed the
+                                      // input.
     let mut x = 2.0f32;
     let mut y = -2.0f32;
     for _ in 0..60 {
